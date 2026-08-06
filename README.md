@@ -136,6 +136,7 @@ python launcher.py status                            # 状态
 {
   "llm": { "api_key": "...", "base_url": "...", "model": "..." },
   "planner": { "model": "...", "base_url": "...", "api_key": "..." },
+  "backup": { "api_key": "...", "base_url": "...", "model": "..." },
   "embedding": { "api_key": "...", "base_url": "...", "model": "BAAI/bge-large-zh-v1.5" },
   "redis": { "host": "localhost", "port": 6379 },
   "system": {
@@ -148,7 +149,15 @@ python launcher.py status                            # 状态
 ```
 
 模板见 `config.example.json`；Docker 方式用 `.env`（`LLM_API_KEY` 等）。
-`planner` 段可为规划器指定更稳的专用模型；`scheduler=true` 开启每日 3:00 自动进化。
+
+- **模型分级**：`llm` 为执行模型（Worker），`planner` 为规划器专用更稳模型；
+- **双源 failover**：`backup` 为主端点失败时自动切换的备用 LLM（搜索同样内置
+  DuckDuckGo → Bing → 兜底 三级回退）；
+- **规划自检**：计划缺少报告/总结步骤时自动补一步 `report_generator`（报告兜底）；
+- **任务模板**：控制台可选"数据分析流水线 / 行业调研报告 / 董事会汇报"模板，
+  确定性步骤、跳过规划直接执行（`templates.json`）；
+- **结果缓存**：提交相同目标可携带 `cache_ttl_min`（分钟），TTL 内命中成功结果直接返回；
+- `scheduler=true` 开启每日 3:00 自动进化。
 
 ## 架构
 
@@ -180,6 +189,7 @@ python launcher.py status                            # 状态
 python smoke_test.py             # 快速端到端冒烟（需服务已启动）
 python smoke_test.py --pipeline  # 完整数据流水线
 python test_common.py            # 基础库单测（fakeredis）
+python test_orchestrator_v2.py   # 编排器回归（调度/迭代/能力校验，fakes 模式）
 python verification_suite.py     # 边界条件验证套件
 ```
 

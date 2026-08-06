@@ -14,6 +14,11 @@
     "base_url": "https://api.siliconflow.cn/v1",
     "api_key": "YOUR_PLANNER_API_KEY"
   },
+  "backup": {
+    "api_key": "YOUR_BACKUP_API_KEY",
+    "base_url": "https://api.siliconflow.cn/v1",
+    "model": "deepseek-ai/DeepSeek-V3"
+  },
   "redis": {
     "host": "localhost",
     "port": 6379

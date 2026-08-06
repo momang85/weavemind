@@ -444,8 +444,36 @@ class BaseWorker(ABC):
 class SearchAgent(BaseWorker):
     """Real web search agent using DuckDuckGo (free, no API key)."""
 
+    def _search_bing(self, query: str) -> list[dict]:
+        """备用搜索源：Bing HTML 结果解析（无需 API Key）。"""
+        import re as _re
+        import urllib.parse
+        import urllib.request
+
+        url = "https://www.bing.com/search?q=" + urllib.parse.quote(query) + "&setlang=zh-hans"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/120 Safari/537.36",
+        })
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            html = resp.read().decode("utf-8", errors="replace")
+        results: list[dict] = []
+        for block in _re.findall(r'<li class="b_algo".*?</li>', html, _re.S)[:5]:
+            m_url = _re.search(r'<a[^>]+href="(https?://[^"]+)"', block)
+            if not m_url:
+                continue
+            m_title = _re.search(r'<h2[^>]*>(.*?)</h2>', block, _re.S)
+            m_snip = _re.search(r'<p[^>]*>(.*?)</p>', block, _re.S)
+            strip = lambda s: _re.sub(r"<[^>]+>", "", s or "").strip()
+            results.append({
+                "title": strip(m_title.group(1) if m_title else ""),
+                "url": m_url.group(1),
+                "snippet": strip(m_snip.group(1) if m_snip else ""),
+            })
+        return results
+
     def execute(self, instruction: str) -> str:
-        """Execute real web search via DuckDuckGo. Falls back to mock on failure."""
+        """多源搜索：DuckDuckGo → Bing → mock。"""
         logger.info("SearchAgent searching: %s", instruction)
         try:
             from ddgs import DDGS
@@ -459,8 +487,16 @@ class SearchAgent(BaseWorker):
                     })
             if results:
                 return json.dumps(results, ensure_ascii=False, indent=2)
+            logger.warning("DuckDuckGo returned no results, trying Bing")
         except Exception as e:
-            logger.warning("DuckDuckGo search failed: %s, falling back to mock", e)
+            logger.warning("DuckDuckGo search failed: %s, trying Bing", e)
+        # 备用源：Bing
+        try:
+            bing = self._search_bing(instruction)
+            if bing:
+                return json.dumps(bing, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.warning("Bing search failed: %s", e)
         # Fallback: mock result
         time.sleep(0.3)
         return json.dumps([

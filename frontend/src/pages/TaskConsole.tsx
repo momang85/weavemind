@@ -39,8 +39,15 @@ export default function TaskConsole() {
   const [editableSteps, setEditableSteps] = useState<any[]>([])
   const [newCap, setNewCap] = useState('content_summary')
   const [newInstr, setNewInstr] = useState('')
+  const [templates, setTemplates] = useState<any[]>([])
+  const [templateName, setTemplateName] = useState('')
 
   useTaskPoller(demoMode ? null : taskId)
+
+  // 加载任务模板（模板复用：确定性步骤，跳过 LLM 规划）
+  useEffect(() => {
+    fetch('/api/templates').then(r => r.json()).then(d => setTemplates(d.templates ?? [])).catch(() => {})
+  }, [])
 
   // 从 URL 恢复会话（历史页“继续对话”跳转）
   useEffect(() => {
@@ -97,6 +104,7 @@ export default function TaskConsole() {
       const body: any = { goal: g }
       if (activeConversationId) body.conversation_id = activeConversationId
       if (confirmMode) body.auto_run = false
+      if (templateName) body.template = templateName
       const res = await fetch('/task', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -123,7 +131,8 @@ export default function TaskConsole() {
       addLog({ timestamp: new Date().toISOString(), type: 'error', message: 'Failed to submit task' })
       startTask('failed')
     }
-  }, [goal, status, demoMode, activeConversationId, confirmMode, startTask, addLog, setActiveConversation])
+  }, [goal, status, demoMode, activeConversationId, confirmMode, templateName,
+      startTask, addLog, setActiveConversation])
 
   // 计划待确认时，把后端计划同步到本地可编辑数组
   useEffect(() => {
@@ -241,6 +250,17 @@ export default function TaskConsole() {
               <MessagesSquare className="w-3.5 h-3.5" /> 对话中
             </span>
           )}
+          <select value={templateName}
+            onChange={e => {
+              const name = e.target.value
+              setTemplateName(name)
+              const tpl = templates.find(t => t.name === name)
+              if (tpl && tpl.goal) setGoal(tpl.goal)
+            }}
+            className="hidden sm:block bg-slate-800 border border-slate-700 rounded-lg px-2 py-2 text-xs text-slate-300 shrink-0">
+            <option value="">自定义任务</option>
+            {templates.map(t => <option key={t.name} value={t.name}>{t.name}</option>)}
+          </select>
           <label className="flex items-center gap-1.5 px-2 py-2 text-xs text-slate-400 cursor-pointer shrink-0">
             <input type="checkbox" checked={confirmMode}
               onChange={e => setConfirmMode(e.target.checked)}

@@ -99,6 +99,19 @@ def _load_llm_config():
 
 _LLM_CFG = _load_llm_config()
 
+
+def _load_backup_config() -> dict:
+    """读取备用 LLM 端点/模型配置（config.json 顶层 backup 段）。"""
+    try:
+        cfg_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'config.json')
+        with open(cfg_path, 'r') as f:
+            return json.load(f).get('backup', {}) or {}
+    except Exception:
+        return {}
+
+
+_BACKUP_CFG = _load_backup_config()
+
 class LLMClient:
     """OpenAI 兼容的 LLM 调用客户端。
 
@@ -151,6 +164,11 @@ class LLMClient:
         )
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self._backup_cfg = (
+            dict(_BACKUP_CFG)
+            if _BACKUP_CFG.get("base_url") and _BACKUP_CFG.get("api_key")
+            else {}
+        )
 
         # 延迟导入，避免强依赖
         self._http_module: Any = None
@@ -212,6 +230,23 @@ class LLMClient:
                 if attempt < self._MAX_RETRIES:
                     time.sleep(self._RETRY_BASE * attempt)
 
+        # 主端点失败 → 自动切换备用端点/模型
+        if self._backup_cfg:
+            backup = LLMClient(
+                base_url=self._backup_cfg.get("base_url"),
+                api_key=self._backup_cfg.get("api_key"),
+                model=self._backup_cfg.get("model") or self.model,
+            )
+            try:
+                raw = backup._send_request(system, user, temp, max_tok)
+                logger.warning("Switched to backup LLM: %s", self._backup_cfg.get("base_url"))
+                if not expect_json:
+                    return {"content": raw}
+                return backup._parse_json(raw)
+            except LLMJSONParseError:
+                raise
+            except Exception as exc:
+                logger.error("Backup LLM also failed: %s", str(exc)[:200])
         raise LLMCallError(
             f"LLM call failed after {self._MAX_RETRIES} attempts",
             attempt=self._MAX_RETRIES,
@@ -492,6 +527,30 @@ async def call_llm_async(
             await asyncio.sleep(1)
             continue
 
+    # 主端点失败 → 备用端点/模型（单次尝试）
+    if _BACKUP_CFG and _BACKUP_CFG.get("base_url") and _BACKUP_CFG.get("api_key"):
+        try:
+            client = _get_async_client()
+            url = _BACKUP_CFG["base_url"].rstrip("/") + "/chat/completions"
+            b_headers = {
+                "Authorization": f"Bearer {_BACKUP_CFG.get('api_key', '')}",
+                "Content-Type": "application/json",
+            }
+            b_payload = dict(payload)
+            b_payload["model"] = _BACKUP_CFG.get("model") or model
+            response = await client.post(url, json=b_payload, headers=b_headers)
+            response.raise_for_status()
+            data = response.json()
+            usage = data.get("usage") or {}
+            _record_usage(usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0))
+            _publish_usage_snapshot()
+            content = data["choices"][0]["message"]["content"]
+            logger.warning("Switched to backup LLM (async): %s", _BACKUP_CFG.get("base_url"))
+            if expect_json:
+                return _parse_json_content(content)
+            return content
+        except Exception as exc:
+            logger.error("Backup LLM async also failed: %s", str(exc)[:150])
     raise LLMCallError(f'LLM async call failed after {max_attempts} attempts') from last_error
 
 

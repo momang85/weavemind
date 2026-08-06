@@ -63,6 +63,7 @@ class OrchestratorV2:
         self._max_parallel = 3
         self._max_iterations = 2
         self._plan_confirm_timeout = 300
+        self._stall_timeout = 60
         self._planner_model = None
         _cfg = {}
         try:
@@ -82,6 +83,7 @@ class OrchestratorV2:
             self._max_parallel = max(1, int(_sys.get('max_parallel', 3)))
             self._max_iterations = max(0, int(_sys.get('max_iterations', 2)))
             self._plan_confirm_timeout = max(30, int(_sys.get('plan_confirm_timeout', 300)))
+            self._stall_timeout = max(5, int(_sys.get('stall_timeout', 60)))
         except Exception:
             pass
         import redis as sync_redis
@@ -199,6 +201,7 @@ class OrchestratorV2:
             return fallback
 
         steps = self._normalize_steps(plan_data.get("steps", []))
+        steps = self._ensure_report_step(steps, task_id)
         if not steps:
             steps = [{
                 "step_id": "1",
@@ -212,6 +215,24 @@ class OrchestratorV2:
         push_progress(self._messaging, task_id, "log",
                       {"type": "plan", "agent": "orchestrator",
                        "message": f"Plan ready: {len(steps)} steps", "timestamp": self._now_iso()})
+        return steps
+
+    def _ensure_report_step(self, steps: list[dict], task_id: str) -> list[dict]:
+        """规划自检：计划中缺少报告/总结步骤时，自动补一步 report_generator（报告兜底）。"""
+        if not steps:
+            return steps
+        has_report = any(s.get("capability") in ("content_summary", "report_generator") for s in steps)
+        if not has_report:
+            steps = steps + [{
+                "step_id": f"report-{len(steps) + 1}",
+                "capability": "report_generator",
+                "instruction": "汇总以上所有步骤的结果，生成面向用户的最终交付报告（Markdown，含必要的表格、图表说明与结论）。",
+                "timeout": 120,
+            }]
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "plan", "agent": "orchestrator",
+                           "message": "Plan self-check: auto-added report step",
+                           "timestamp": self._now_iso()})
         return steps
 
     def _normalize_steps(self, steps: list) -> list[dict]:
@@ -554,13 +575,18 @@ class OrchestratorV2:
         return best
 
     # ── Main Loop ──
-    def run(self, task_id: str, goal: str, context: str = "", auto_run: bool = True) -> dict:
+    def run(self, task_id: str, goal: str, context: str = "",
+            auto_run: bool = True, template_steps: list | None = None) -> dict:
         """Execute a full task lifecycle. Returns final status dict."""
         started = time.time()
         logger.info("Task %s: %s", task_id, goal[:80])
 
-        # 1. Plan
-        steps = self._plan(goal, task_id, context)
+        # 1. Plan（模板步骤直接采用，否则 LLM 规划）
+        if template_steps:
+            steps = self._normalize_steps(template_steps)
+            steps = self._ensure_report_step(steps, task_id)
+        else:
+            steps = self._plan(goal, task_id, context)
         if not steps:
             push_progress(self._messaging, task_id, "task_complete",
                           {"status": "FAILED", "summary": "Planning failed"})
@@ -570,7 +596,7 @@ class OrchestratorV2:
                       {"steps": steps})
 
         # 计划确认阶段（auto_run=False 时等待用户编辑/确认）
-        if not auto_run:
+        if not auto_run and not template_steps:
             self._messaging.publish("orchestrator:response", {
                 "task_id": task_id,
                 "status": "AWAITING_CONFIRM",
@@ -794,7 +820,7 @@ class OrchestratorV2:
                 with lock:
                     if not pending:
                         return
-                    stalled = in_flight == 0 and time.time() - last_progress > 60
+                    stalled = in_flight == 0 and time.time() - last_progress > self._stall_timeout
                 if stalled:
                     with lock:
                         for k in list(pending):
@@ -978,15 +1004,19 @@ def main():
                 continue
 
             # Run task in background thread
-            def _run_task(tid, g, ctx, ar):
+            def _run_task(tid, g, ctx, ar, tpl_steps):
                 try:
-                    result = orch.run(tid, g, ctx, auto_run=ar)
+                    result = orch.run(tid, g, ctx, auto_run=ar, template_steps=tpl_steps)
                     orch._messaging.publish("orchestrator:response", result)
                 except Exception as e:
                     logger.error("Task %s failed: %s", tid, e)
                     orch._messaging.publish("orchestrator:response",
                                             {"task_id": tid, "status": "FAILED", "report": str(e)})
-            threading.Thread(target=_run_task, args=(task_id, goal, context, auto_run), daemon=True).start()
+            threading.Thread(
+                target=_run_task,
+                args=(task_id, goal, context, auto_run, data.get("template_steps")),
+                daemon=True,
+            ).start()
 
         except Exception as e:
             logger.error("Message error: %s", e)

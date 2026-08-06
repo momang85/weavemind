@@ -25,6 +25,7 @@ _EVOLUTION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "evol
 _evolution_results = []
 _evolution_lock = threading.Lock()
 _memory_summary_cache = {"text": "", "ts": 0.0, "signature": ""}
+_TEMPLATES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates.json")
 
 
 def _now_iso():
@@ -403,6 +404,28 @@ def _load_evolution_history():
     except Exception:
         pass
 
+def _load_templates() -> list:
+    try:
+        with open(_TEMPLATES_FILE, "r", encoding="utf-8") as f:
+            return (json.load(f) or {}).get("templates", [])
+    except Exception:
+        return []
+
+def _find_cached_task(goal: str, ttl_min: int):
+    """结果缓存：相同目标在 TTL 内有过 SUCCESS，直接返回旧结果。"""
+    try:
+        db = sqlite3.connect(DB_PATH, timeout=5); db.row_factory = sqlite3.Row
+        row = db.execute(
+            "SELECT task_id, report FROM task_history "
+            "WHERE goal=? AND status='SUCCESS' AND completed_at IS NOT NULL "
+            "AND completed_at >= datetime('now', ?) ORDER BY completed_at DESC LIMIT 1",
+            (goal, f"-{ttl_min} minutes"),
+        ).fetchone()
+        db.close()
+        return dict(row) if row else None
+    except Exception:
+        return None
+
 HTML = '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>WeaveMind</title></head><body><div id="root"></div><script type="module" src="http://localhost:5173/@vite/client"></script><script type="module" src="http://localhost:5173/src/main.tsx"></script></body></html>'
 DIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
 
@@ -478,6 +501,8 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/memory/summary":
             refresh = "refresh=1" in urlparse(self.path).query
             return self._json(_get_memory_summary(refresh))
+        if p == "/api/templates":
+            return self._json({"templates": _load_templates()})
         if p == "/api/evolution":
             with _evolution_lock:
                 return self._json({"rounds": list(reversed(_evolution_results))})
@@ -533,6 +558,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "invalid json"}, 400)
         if self.path == "/task":
             g = body.get("goal","").strip()
+            # 模板：允许不传 goal，自动取模板目标与确定性步骤
+            tpl_name = str(body.get("template") or "").strip()
+            template_steps = None
+            tpl_goal = ""
+            if tpl_name:
+                for tpl in _load_templates():
+                    if tpl.get("name") == tpl_name:
+                        template_steps = tpl.get("steps")
+                        tpl_goal = str(tpl.get("goal") or "")
+                        break
+            if not g:
+                g = tpl_goal
             if not g: return self._json({"error":"goal required"},400)
             conv_id = (body.get("conversation_id") or "").strip()
             parent_id = (body.get("parent_task_id") or "").strip()
@@ -553,9 +590,19 @@ class Handler(BaseHTTPRequestHandler):
                     pass
             tid = "ui-" + uuid.uuid4().hex[:10]
             auto_run = bool(body.get("auto_run", True))
+            # 结果缓存：相同目标在 TTL 内已成功
+            ttl = int(body.get("cache_ttl_min") or 0)
+            if ttl > 0:
+                cached = _find_cached_task(g, ttl)
+                if cached and cached.get("report"):
+                    return self._json({
+                        "task_id": cached["task_id"], "status": "SUCCESS",
+                        "cached": True, "report": cached["report"],
+                    })
             r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
             r.publish("orchestrator:main", json.dumps({
-                "task_id": tid, "goal": g, "context": context, "auto_run": auto_run,
+                "task_id": tid, "goal": g, "context": context,
+                "auto_run": auto_run, "template_steps": template_steps,
             }, ensure_ascii=False))
             with _task_lock: _task_results[tid] = {"task_id":tid,"status":"PENDING","goal":g,"steps":[],"report":"","conversation_id":conv_id,"auto_run":auto_run}
             # Write to SQLite so History shows immediately
