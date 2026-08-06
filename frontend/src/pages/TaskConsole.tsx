@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useMemo } from 'react'
-import { Loader2, Sparkles, RefreshCw, Plus, MessagesSquare, FolderOpen, Activity, Eye, Play } from 'lucide-react'
+import { Loader2, Sparkles, RefreshCw, Plus, MessagesSquare, FolderOpen, Activity, Eye, Play, FileText, ChevronDown } from 'lucide-react'
 import { useTaskStore } from '../stores/useTaskStore'
 import { useTaskPoller } from '../stores/useTaskPoller'
 import TaskTreeView from '../components/TaskTreeView'
@@ -41,6 +41,8 @@ export default function TaskConsole() {
   const [newInstr, setNewInstr] = useState('')
   const [templates, setTemplates] = useState<any[]>([])
   const [templateName, setTemplateName] = useState('')
+  const [showContext, setShowContext] = useState(false)
+  const [userContext, setUserContext] = useState('')
 
   useTaskPoller(demoMode ? null : taskId)
 
@@ -105,6 +107,7 @@ export default function TaskConsole() {
       if (activeConversationId) body.conversation_id = activeConversationId
       if (confirmMode) body.auto_run = false
       if (templateName) body.template = templateName
+      if (userContext.trim()) body.context = userContext.trim()
       const res = await fetch('/task', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -131,7 +134,7 @@ export default function TaskConsole() {
       addLog({ timestamp: new Date().toISOString(), type: 'error', message: 'Failed to submit task' })
       startTask('failed')
     }
-  }, [goal, status, demoMode, activeConversationId, confirmMode, templateName,
+  }, [goal, status, demoMode, activeConversationId, confirmMode, templateName, userContext,
       startTask, addLog, setActiveConversation])
 
   // 计划待确认时，把后端计划同步到本地可编辑数组
@@ -282,6 +285,23 @@ export default function TaskConsole() {
             <Plus className="w-4 h-4" /> 新对话
           </button>
         </div>
+      </div>
+
+      {/* 导入上下文（可选） */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-1.5">
+        <button onClick={() => setShowContext(!showContext)}
+          className="w-full flex items-center gap-2 px-3 py-2 text-xs text-slate-400 hover:text-slate-300 text-left">
+          <FileText className="w-3.5 h-3.5 text-cyan-400" />
+          导入上下文（需求背景 / 参考资料 / 约束条件）
+          <ChevronDown className={`w-3.5 h-3.5 ml-auto transition-transform ${showContext ? 'rotate-180' : ''}`} />
+        </button>
+        {showContext && (
+          <textarea value={userContext}
+            onChange={e => setUserContext(e.target.value)}
+            rows={4}
+            placeholder="粘贴需求背景、参考资料、URL、约束条件等（可选）。将随任务一起提供给 AI 团队，用于更准确地满足需求。"
+            className="w-full bg-slate-800/50 border border-slate-700 rounded-lg p-3 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500" />
+        )}
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 min-h-[400px]">

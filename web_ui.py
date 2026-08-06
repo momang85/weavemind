@@ -1,7 +1,7 @@
 """WeaveMind Web UI"""
 import json, os, sqlite3, threading, time, uuid
 from datetime import datetime, timezone
-from http.server import HTTPServer, BaseHTTPRequestHandler
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 import redis
 
@@ -50,6 +50,8 @@ def _init_db():
             db.execute("ALTER TABLE task_history ADD COLUMN conversation_id TEXT DEFAULT ''")
         if "parent_task_id" not in cols:
             db.execute("ALTER TABLE task_history ADD COLUMN parent_task_id TEXT DEFAULT ''")
+        if "context" not in cols:
+            db.execute("ALTER TABLE task_history ADD COLUMN context TEXT DEFAULT ''")
         db.commit(); db.close()
     except Exception: pass
 
@@ -74,7 +76,7 @@ def _build_conversation_context(conv_id, limit=4):
     try:
         db = sqlite3.connect(DB_PATH, timeout=5); db.row_factory = sqlite3.Row
         rows = db.execute(
-            "SELECT task_id, goal, status, report FROM task_history "
+            "SELECT task_id, goal, status, report, context FROM task_history "
             "WHERE conversation_id=? ORDER BY created_at DESC LIMIT ?",
             (conv_id, limit),
         ).fetchall()
@@ -91,6 +93,8 @@ def _build_conversation_context(conv_id, limit=4):
         elif status == "PENDING":
             snippet = "(未完成)"
         parts.append(f"- 用户要求: {goal} | 结果({status}): {snippet}")
+        if r["context"]:
+            parts.append(f"  用户补充背景: {str(r['context'])[:200]}")
     return "\n".join(parts)
 
 def _list_conversations(limit=50):
@@ -576,7 +580,9 @@ class Handler(BaseHTTPRequestHandler):
             is_new_conversation = not conv_id
             if is_new_conversation:
                 conv_id = "conv-" + uuid.uuid4().hex[:10]
-            context = _build_conversation_context(conv_id) if not is_new_conversation else ""
+            user_context = str(body.get("context") or "").strip()
+            conv_context = _build_conversation_context(conv_id) if not is_new_conversation else ""
+            context = "\n\n".join(x for x in (user_context, conv_context) if x)
             if not parent_id and not is_new_conversation:
                 try:
                     db = sqlite3.connect(DB_PATH, timeout=3); db.row_factory = sqlite3.Row
@@ -610,8 +616,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 db = sqlite3.connect(DB_PATH, timeout=3)
                 db.execute(
-                    "INSERT INTO task_history(task_id,goal,status,conversation_id,parent_task_id) VALUES(?,?,?,?,?)",
-                    (tid, g, "PENDING", conv_id, parent_id),
+                    "INSERT INTO task_history(task_id,goal,status,conversation_id,parent_task_id,context) VALUES(?,?,?,?,?,?)",
+                    (tid, g, "PENDING", conv_id, parent_id, user_context),
                 )
                 db.commit(); db.close()
             except Exception: pass
@@ -676,6 +682,8 @@ def main():
     _load_evolution_history()
     threading.Thread(target=_listen_results, daemon=True).start()
     threading.Thread(target=_listen_events, daemon=True).start()
+    # 预热记忆库（避免首个 /api/status 或 /api/memory 请求阻塞）
+    threading.Thread(target=_get_memory_manager, daemon=True).start()
 
     def _cleanup_stale_tasks():
         """把长时间卡在 PENDING 的任务标记为过期，避免永久悬挂。"""
@@ -693,7 +701,7 @@ def main():
                 pass
 
     threading.Thread(target=_cleanup_stale_tasks, daemon=True).start()
-    server = HTTPServer(("0.0.0.0", PORT), Handler)
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
     print(f"http://localhost:{PORT}")
     try: server.serve_forever()
     except KeyboardInterrupt: server.shutdown()
