@@ -21,6 +21,9 @@ _METRICS_SUMMARY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "met
 _STALE_AFTER_SECONDS = int(os.environ.get("STALE_TASK_TIMEOUT", "1800"))
 _memory_manager = None
 _memory_manager_lock = threading.Lock()
+_EVOLUTION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "evolution_history.json")
+_evolution_results = []
+_evolution_lock = threading.Lock()
 
 
 def _now_iso():
@@ -212,6 +215,8 @@ def _listen_events():
             continue
         try:
             data = json.loads(msg["data"])
+            if msg["channel"] == "orchestrator:evolution_result":
+                _append_evolution(data)
             etype = data.get("type", msg["channel"].split(":")[-1])
             with _events_lock:
                 _events.append({
@@ -298,8 +303,8 @@ def _get_llm_usage():
     except Exception:
         return {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
 
-def _get_memory_stats():
-    """缓存 MemoryManager 实例，避免每个 /api/status 请求重建 Chroma 客户端。"""
+def _get_memory_manager():
+    """缓存 MemoryManager 实例，避免每个请求重建 Chroma 客户端。"""
     global _memory_manager
     try:
         if _memory_manager is None:
@@ -307,9 +312,50 @@ def _get_memory_stats():
                 if _memory_manager is None:
                     from memory_manager import MemoryManager
                     _memory_manager = MemoryManager(os.environ.get("MEMORY_DIR", "./chroma_memory"))
-        return _memory_manager.stats()
+        return _memory_manager
+    except Exception:
+        return None
+
+def _get_memory_stats():
+    mem = _get_memory_manager()
+    if mem is None:
+        return {"conversations": 0, "strategies": 0}
+    try:
+        return mem.stats()
     except Exception:
         return {"conversations": 0, "strategies": 0}
+
+def _get_memory_data():
+    mem = _get_memory_manager()
+    return {
+        "stats": _get_memory_stats(),
+        "conversations": mem.list_conversations(50) if mem else [],
+        "strategies": mem.list_strategies(50) if mem else [],
+    }
+
+def _append_evolution(result: dict) -> None:
+    """记录一轮进化结果（内存 + 落盘），供锦标赛回放。"""
+    global _evolution_results
+    with _evolution_lock:
+        _evolution_results.append(result)
+        if len(_evolution_results) > 30:
+            _evolution_results = _evolution_results[-30:]
+        try:
+            with open(_EVOLUTION_FILE, "w", encoding="utf-8") as f:
+                json.dump(_evolution_results, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+
+def _load_evolution_history():
+    global _evolution_results
+    try:
+        if os.path.exists(_EVOLUTION_FILE):
+            with open(_EVOLUTION_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                _evolution_results = data[-30:]
+    except Exception:
+        pass
 
 HTML = '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>WeaveMind</title></head><body><div id="root"></div><script type="module" src="http://localhost:5173/@vite/client"></script><script type="module" src="http://localhost:5173/src/main.tsx"></script></body></html>'
 DIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
@@ -381,6 +427,11 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/events":
             with _events_lock:
                 return self._json({"events": list(reversed(_events[-100:]))})
+        if p == "/api/memory":
+            return self._json(_get_memory_data())
+        if p == "/api/evolution":
+            with _evolution_lock:
+                return self._json({"rounds": list(reversed(_evolution_results))})
         if p == "/api/metrics":
             try:
                 with open(_METRICS_SUMMARY, "r", encoding="utf-8") as f:
@@ -525,6 +576,7 @@ def main():
     from logging_setup import setup_logging
     setup_logging("webui")
     _init_db()
+    _load_evolution_history()
     threading.Thread(target=_listen_results, daemon=True).start()
     threading.Thread(target=_listen_events, daemon=True).start()
 

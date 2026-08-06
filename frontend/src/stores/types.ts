@@ -34,6 +34,22 @@ export interface ConversationMessage {
   report?: string
 }
 
+export interface MemoryDoc {
+  content: string
+  metadata: Record<string, any>
+}
+
+export interface EvolutionRound {
+  timestamp?: string
+  summary?: string
+  winner?: any
+  stable?: boolean
+  deployed?: boolean
+  scoreboard?: Record<string, number>
+  win_counts?: Record<string, number>
+  rankings?: { task?: string; winner?: string; ranking?: string[]; scores?: Record<string, number>; reason?: string }[]
+}
+
 export interface TaskNode {
   id: string
   step_id?: string

@@ -244,7 +244,11 @@ class EvolutionSandbox:
         )
         logger.info(summary)
 
-        return _make_result(winner, stable, deployed, rankings, summary)
+        return _make_result(
+            winner, stable, deployed, rankings, summary,
+            scoreboard=tournament_result.get("scoreboard"),
+            win_counts=tournament_result.get("win_counts"),
+        )
 
     # ==================================================================
     # 1. 变异工厂
@@ -566,6 +570,20 @@ class EvolutionSandbox:
         try:
             result = call_llm(self.JUDGE_SYSTEM, comparison, expect_json=True)
             result["task"] = task_desc[:50]
+            # 过滤评审虚构的 variant id，只保留真实变体（防止胜者匹配失败）
+            valid = set(outputs.keys())
+            ranking = [r for r in result.get("ranking", []) if r in valid]
+            if not ranking:
+                ranking = list(valid)
+            winner = result.get("winner")
+            if winner not in valid:
+                winner = ranking[0] if ranking else None
+            scores = result.get("scores") or {}
+            if isinstance(scores, dict):
+                scores = {k: v for k, v in scores.items() if k in valid}
+            result["ranking"] = ranking
+            result["winner"] = winner
+            result["scores"] = scores
             return result
         except Exception as exc:
             logger.warning("Judge LLM call failed: %s, using random ranking", exc)
@@ -739,12 +757,16 @@ def _make_result(
     deployed: bool,
     rankings: list,
     summary: str,
+    scoreboard: dict | None = None,
+    win_counts: dict | None = None,
 ) -> dict:
     return {
         "winner": winner.to_dict() if winner else None,
         "stable": stable,
         "deployed": deployed,
         "rankings": rankings,
+        "scoreboard": scoreboard or {},
+        "win_counts": win_counts or {},
         "summary": summary,
         "timestamp": _now_iso(),
     }

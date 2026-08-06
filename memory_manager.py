@@ -384,6 +384,26 @@ class MemoryManager:
             logger.warning("Failed to get memory stats: %s", exc)
             return {"conversations": -1, "strategies": -1}
 
+    def list_recent(self, collection, limit: int = 50) -> list[dict]:
+        """导出某集合最近的文档（内容 + 元数据），用于可视化。"""
+        try:
+            res = collection.get(include=["documents", "metadatas"], limit=limit)
+            docs = res.get("documents") or []
+            metas = res.get("metadatas") or []
+            out = []
+            for doc, meta in zip(docs, metas):
+                out.append({"content": doc, "metadata": meta or {}})
+            return out
+        except Exception as exc:
+            logger.warning("Failed to list memory docs: %s", exc)
+            return []
+
+    def list_conversations(self, limit: int = 50) -> list[dict]:
+        return self.list_recent(self._conversations, limit)
+
+    def list_strategies(self, limit: int = 50) -> list[dict]:
+        return self.list_recent(self._strategies, limit)
+
 
 # ============================================================================
 # 辅助函数

@@ -10,6 +10,7 @@ const navItems = [
   { to: '/agents', icon: Users, label: '智能体' },
   { to: '/history', icon: Clock, label: '历史' },
   { to: '/health', icon: Activity, label: '健康' },
+  { to: '/memory', icon: Brain, label: '记忆与进化' },
   { to: '/settings', icon: Settings, label: '设置' },
 ]
 
@@ -33,6 +34,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
     '/agents': '智能体团队',
     '/history': '历史任务',
     '/health': '系统健康',
+    '/memory': '记忆与进化',
   }
 
   return (
