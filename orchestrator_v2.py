@@ -32,12 +32,18 @@ Rules:
 Output ONLY this JSON with no extra text:
 {"steps":[{"step_id":"1","capability":"web_search","instruction":"search for house price dataset","depends_on":[],"timeout":60}]}"""
 
+KNOWN_CAPABILITIES = {
+    "web_search", "web_fetch", "data_loader", "data_analyzer", "model_trainer",
+    "report_generator", "content_summary", "code_execution", "file_io", "package",
+}
+
 ITERATOR_SYSTEM = """你是严格的交付验收评审。根据用户目标评估交付物是否达标。
 输出严格JSON：{"accepted": true|false, "gaps": ["缺口1","缺口2"], "next_steps":[{"step_id":"1","capability":"...","instruction":"...","timeout":120}]}
 规则：
 1. accepted=false 只用于明确缺失用户要求的内容；不要吹毛求疵
 2. next_steps 每次最多3个，必须具体可执行，指令用中文并严格围绕目标主题
-3. 可用能力：web_search, web_fetch, data_loader, data_analyzer, model_trainer, report_generator, content_summary, code_execution, file_io, package
+3. 每个 next_step 的 capability 只能是下列之一，且每步只能一个：
+   web_search, web_fetch, data_loader, data_analyzer, model_trainer, report_generator, content_summary, code_execution, file_io, package
 只输出JSON。"""
 
 # ─────────────────────────────────────────────
@@ -223,7 +229,13 @@ class OrchestratorV2:
             if not instruction:
                 continue
             s["step_id"] = sid
-            s.setdefault("capability", "content_summary")
+            # 校验能力字段：非法/多值拼接时回退到 content_summary
+            cap = str(s.get("capability") or "content_summary").strip()
+            if "," in cap:
+                cap = next((c.strip() for c in cap.split(",") if c.strip() in KNOWN_CAPABILITIES), "content_summary")
+            elif cap not in KNOWN_CAPABILITIES:
+                cap = "content_summary"
+            s["capability"] = cap
             s.setdefault("timeout", 120)
             out.append(s)
         if len(out) > self._max_steps:
@@ -391,6 +403,13 @@ class OrchestratorV2:
 
         agent_id = self._find_agent(capability)
         if not agent_id:
+            # Worker 可能瞬时掉线（如 Redis 超时重连），等待重查后再判失败
+            for _ in range(3):
+                time.sleep(5)
+                agent_id = self._find_agent(capability)
+                if agent_id:
+                    break
+        if not agent_id:
             push_progress(self._messaging, task_id, "log",
                           {"type": "error", "agent": "orchestrator",
                            "message": f"No agent for {capability}", "timestamp": self._now_iso()})
@@ -479,10 +498,11 @@ class OrchestratorV2:
     def _best_deliverable(self, steps: list[dict], results: list[dict]) -> str:
         """从步骤结果中挑选最实质的交付内容作为最终报告。
 
-        优先 content_summary / report_generator / code_execution 的长文本产出；
-        report_generator 只返回文件路径时读取落盘内容；都没有则返回空串（走汇总兜底）。
+        优先 content_summary / report_generator 的 Markdown 文档（含文件读取）；
+        code_execution 的长文本仅作兜底；都没有则返回空串（走汇总兜底）。
         """
-        candidates: list[str] = []
+        doc_candidates: list[str] = []
+        code_candidates: list[str] = []
         for s, r in zip(steps, results):
             if r.get("status") != "SUCCESS":
                 continue
@@ -497,21 +517,39 @@ class OrchestratorV2:
                         with open(path, "r", encoding="utf-8") as f:
                             content = f.read()
                         if content.strip():
-                            candidates.append(content)
+                            doc_candidates.append(content)
                     except Exception:
                         pass
                 continue
             if isinstance(text, str):
+                # report_generator 返回的是 JSON 字符串，需要解析出 report_path
+                if cap == "report_generator":
+                    try:
+                        parsed = json.loads(text)
+                        if isinstance(parsed, dict):
+                            path = parsed.get("report_path") or parsed.get("path")
+                            if path and os.path.exists(path):
+                                content = open(path, "r", encoding="utf-8").read()
+                                if content.strip():
+                                    doc_candidates.append(content)
+                                    continue
+                    except Exception:
+                        pass
                 stripped = text.strip()
                 if len(stripped) < 200:
                     continue
-                # 排除 JSON 输出（如 web_search / code 的序列化结果）
                 if stripped.startswith("{") or stripped.startswith("["):
                     continue
-                candidates.append(stripped)
-        if not candidates:
+                if cap in ("content_summary", "report_generator"):
+                    doc_candidates.append(stripped)
+                else:
+                    code_candidates.append(stripped)
+        pool = doc_candidates or code_candidates
+        if not pool:
             return ""
-        best = max(candidates, key=len)
+        # 优先含 Markdown 结构标记的文档
+        md = [c for c in pool if ("#" in c[:200] or "|" in c[:500] or "```" in c)]
+        best = max(md or pool, key=len)
         logger.info("Final report: deliverable from step content (%d chars)", len(best))
         return best
 
@@ -555,6 +593,7 @@ class OrchestratorV2:
         iteration = 0
         last_steps = steps
         last_results: list[dict] = []
+        best_report = ""
 
         while True:
             iter_results, iter_failed = self._execute_steps(steps, task_id, goal)
@@ -566,12 +605,14 @@ class OrchestratorV2:
                 s.setdefault("iteration", iteration)
             all_steps.extend(steps)
 
-            report = self._best_deliverable(last_steps, last_results) or self._finalize(goal, last_steps, last_results)
+            cand = self._best_deliverable(last_steps, last_results)
+            if len(cand) > len(best_report):
+                best_report = cand
             self._publish_full_state(task_id, goal, all_steps, completed_all)
 
             if has_failure or self._max_iterations <= 0 or iteration >= self._max_iterations:
                 break
-            verdict = self._reflect(goal, report, task_id)
+            verdict = self._reflect(goal, best_report, task_id)
             if not verdict or verdict.get("accepted"):
                 if verdict and verdict.get("accepted"):
                     push_progress(self._messaging, task_id, "log",
@@ -594,6 +635,10 @@ class OrchestratorV2:
                            "message": f"Iteration {iteration}: closing {len(gaps)} gaps with {len(steps)} steps",
                            "timestamp": self._now_iso()})
             push_progress(self._messaging, task_id, "plan_update", {"steps": steps})
+
+        report = best_report or self._finalize(goal, all_steps, [
+            completed_all.get(s["step_id"], {}) for s in all_steps
+        ])
 
         # 3. Report
         push_progress(self._messaging, task_id, "log",
