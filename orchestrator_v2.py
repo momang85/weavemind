@@ -78,7 +78,7 @@ class OrchestratorV2:
         self._max_parallel = 3
         self._max_iterations = 2
         self._plan_confirm_timeout = 300
-        self._stall_timeout = 60
+        self._stall_timeout = 300
         self._max_offtopic_regenerations = 1
         self._planner_model = None
         _cfg = {}
@@ -262,12 +262,52 @@ class OrchestratorV2:
                            "timestamp": self._now_iso()})
         return steps
 
+    _FILE_CAPABILITIES = (
+        "code_execution", "file_io", "web_fetch", "data_loader",
+        "data_analyzer", "model_trainer", "report_generator",
+    )
+
+    def _ensure_package_step(self, steps: list[dict]) -> list[dict]:
+        """交付兜底：计划包含文件类产物但没有 package 步骤时，自动补一步打包，
+        保证每个任务都能产出可下载的 ZIP 交付包。"""
+        if not steps:
+            return steps
+        if any(s.get("capability") == "package" for s in steps):
+            return steps
+        producers = [
+            s.get("step_id") for s in steps
+            if s.get("capability") in self._FILE_CAPABILITIES
+        ]
+        if not producers:
+            return steps
+        return steps + [{
+            "step_id": f"package-{len(steps) + 1}",
+            "capability": "package",
+            "instruction": "将本次任务产出的所有文件打包为一个 ZIP 交付包（包含代码、资源、报告等），并返回下载链接。",
+            "depends_on": producers,
+            "timeout": 180,
+        }]
+
     def _wire_report_deps(self, steps: list[dict]) -> list[dict]:
         """报告/总结步骤若无依赖，则自动依赖所有其它步骤（保证执行时带全量上下文）。"""
         ids = [s.get("step_id") for s in steps]
         for s in steps:
             if s.get("capability") in ("content_summary", "report_generator") and not s.get("depends_on"):
                 s["depends_on"] = [i for i in ids if i != s.get("step_id")]
+        return steps
+
+    def _wire_search_fetch_deps(self, steps: list[dict]) -> list[dict]:
+        """链式兜底：web_fetch 步骤若无依赖且计划中存在 web_search 步骤，
+        自动接上前置搜索步骤，保证抓取时有 URL 可用。"""
+        search_id = next(
+            (s.get("step_id") for s in steps if s.get("capability") == "web_search"),
+            None,
+        )
+        if not search_id:
+            return steps
+        for s in steps:
+            if s.get("capability") == "web_fetch" and not s.get("depends_on"):
+                s["depends_on"] = [search_id]
         return steps
 
     def _normalize_steps(self, steps: list) -> list[dict]:
@@ -663,6 +703,8 @@ class OrchestratorV2:
         else:
             steps = self._plan(goal, task_id, context)
         steps = self._wire_report_deps(steps)
+        steps = self._wire_search_fetch_deps(steps)
+        steps = self._ensure_package_step(steps)
         if not steps:
             push_progress(self._messaging, task_id, "task_complete",
                           {"status": "FAILED", "summary": "Planning failed"})
@@ -687,6 +729,8 @@ class OrchestratorV2:
                         "report": "Plan not confirmed"}
             steps = confirmed
             steps = self._wire_report_deps(steps)
+            steps = self._wire_search_fetch_deps(steps)
+            steps = self._ensure_package_step(steps)
             if not steps:
                 push_progress(self._messaging, task_id, "task_complete",
                               {"status": "FAILED", "summary": "Empty plan confirmed, task cancelled"})
@@ -738,6 +782,9 @@ class OrchestratorV2:
                 s["depends_on"] = []
                 s["step_id"] = f"i{iteration}-{s['step_id']}"
             steps = next_steps
+            steps = self._wire_report_deps(steps)
+            steps = self._wire_search_fetch_deps(steps)
+            steps = self._ensure_package_step(steps)
             push_progress(self._messaging, task_id, "log",
                           {"type": "iteration", "agent": "orchestrator",
                            "message": f"Iteration {iteration}: closing {len(gaps)} gaps with {len(steps)} steps",
@@ -946,7 +993,7 @@ class OrchestratorV2:
                 prev = completed.get(dep_id)
             return prev.get('result', '') if isinstance(prev, dict) else ''
 
-        if cap == 'data_loader':
+        if cap in ('data_loader', 'web_fetch'):
             for dep_id in deps:
                 prev_res = _prev(dep_id)
                 try:
@@ -981,6 +1028,13 @@ class OrchestratorV2:
                 tmps = re.findall(r'/tmp/\S+', prev_res if isinstance(prev_res, str) else '')
                 if tmps:
                     instr += f' [Path: {tmps[0]}]'
+
+        if cap == 'file_io':
+            for dep_id in deps:
+                prev_res = _prev(dep_id)
+                snippet = str(prev_res)[:12000] if prev_res else ''
+                if snippet:
+                    instr += f"\n[上一步结果 {dep_id}]:\n{snippet}"
 
         if cap in ('content_summary', 'report_generator'):
             for dep_id in deps:

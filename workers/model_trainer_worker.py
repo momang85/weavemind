@@ -1,5 +1,5 @@
 """Model Trainer Worker — train+eval, no LLM needed."""
-import asyncio, json, tempfile, tempfile
+import asyncio, json, tempfile, tempfile, time
 from pathlib import Path
 import pandas as pd
 from sklearn.model_selection import train_test_split
@@ -16,15 +16,26 @@ class ModelTrainerWorker(AsyncWorkerBase):
     async def execute(self, instruction: str) -> str:
         try:
             import re
-            paths = re.findall(r'/tmp/[^\s,]+\.(csv|xlsx|json)', instruction)
+            paths = re.findall(
+                r'[A-Za-z]:[\\/][^\s,]+\.(?:csv|xlsx|json)|/tmp/[^\s,]+\.(?:csv|xlsx|json)',
+                instruction,
+            )
             data_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "data"
             if paths:
                 fpath = Path(paths[0])
             else:
-                csvs = sorted(data_dir.glob("*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
-                if not csvs:
-                    return json.dumps({"status": "failed", "error": "No CSV found"})
-                fpath = csvs[0]
+                keywords = ("训练", "建模", "模型", "预测", "回归", "csv", "数据集", "数据")
+                instruction_l = instruction.lower()
+                if not any(k in instruction_l for k in keywords):
+                    return json.dumps({"status": "failed", "error": "No data path provided in instruction"}, ensure_ascii=False)
+                now = time.time()
+                fresh = [
+                    p for p in data_dir.glob("*.csv")
+                    if now - p.stat().st_mtime < 3600
+                ]
+                if not fresh:
+                    return json.dumps({"status": "failed", "error": "No fresh CSV found in workspace"}, ensure_ascii=False)
+                fpath = max(fresh, key=lambda p: p.stat().st_mtime)
 
             df = pd.read_csv(fpath)
             # Assume last column is target

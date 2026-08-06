@@ -1,5 +1,5 @@
 """Data Analyzer Worker — EDA with 3 charts, no LLM needed."""
-import asyncio, json, os, tempfile
+import asyncio, json, os, tempfile, time
 from pathlib import Path
 import pandas as pd
 import matplotlib
@@ -20,15 +20,28 @@ class DataAnalyzerWorker(AsyncWorkerBase):
         try:
             # Find data path from instruction or use latest CSV in workspace
             import re
-            paths = re.findall(r'/tmp/[^\s,]+\.(csv|xlsx|json)', instruction)
+            paths = re.findall(
+                r'[A-Za-z]:[\\/][^\s,]+\.(?:csv|xlsx|json)|/tmp/[^\s,]+\.(?:csv|xlsx|json)',
+                instruction,
+            )
             data_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "data"
             if paths:
                 fpath = Path(paths[0].replace("\\", "/"))
             else:
-                csvs = sorted(data_dir.glob("*.csv"), key=lambda p: p.stat().st_mtime, reverse=True)
-                if not csvs:
-                    return json.dumps({"status": "failed", "error": "No CSV found in workspace"})
-                fpath = csvs[0]
+                # 仅当指令明确涉及数据分析，且工作区存在 1 小时内的新 CSV 时才兜底，
+                # 避免把历史任务遗留的无关数据（如加州房价）拉进当前任务。
+                keywords = ("分析", "数据", "csv", "数据集", "eda", "统计", "建模", "训练", "房价", "预测", "回归")
+                instruction_l = instruction.lower()
+                if not any(k in instruction_l for k in keywords):
+                    return json.dumps({"status": "failed", "error": "No data path provided in instruction"}, ensure_ascii=False)
+                now = time.time()
+                fresh = [
+                    p for p in data_dir.glob("*.csv")
+                    if now - p.stat().st_mtime < 3600
+                ]
+                if not fresh:
+                    return json.dumps({"status": "failed", "error": "No fresh CSV found in workspace"}, ensure_ascii=False)
+                fpath = max(fresh, key=lambda p: p.stat().st_mtime)
 
             df = pd.read_csv(fpath)
             shape = list(df.shape)

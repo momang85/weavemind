@@ -24,7 +24,7 @@
     "port": 6379
   },
   "system": {
-    "task_timeout": 90,
+    "task_timeout": 300,
     "max_retry": 2,
     "replan_depth": 2,
     "guardian_heartbeat": 20,
@@ -33,6 +33,7 @@
     "max_steps": 8,
     "max_parallel": 3,
     "max_iterations": 2,
+    "stall_timeout": 300,
     "scheduler": false
   }
 }

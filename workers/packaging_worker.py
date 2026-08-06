@@ -1,106 +1,123 @@
-"""
-织光 (ZhiGuang) — PackagingWorker
+"""织光 (ZhiGuang) - Packaging Worker
 
-能力标签: [package]
-职责: 将项目文件夹打包成 ZIP 文件供下载。
+将本次任务的真实交付物打包为 ZIP：以共享 project 工作区（code_execution /
+file_io 的落盘目录）为基础，只打包时间窗口内的新文件，避免把历史任务
+的陈旧产物混入交付包。
 """
 
-import os, sys, shutil, logging
+import os
+import sys
+import tempfile
+import time
+import zipfile
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from async_worker_base import AsyncWorkerBase, AsyncRegistry, AsyncMessaging
 
-logger = logging.getLogger(__name__)
-
-OUTPUT_DIR = os.environ.get("PACKAGE_OUTPUT_DIR", "/tmp/agent_workspace")
-STATIC_DIR = os.environ.get("STATIC_DIR", "/tmp/agent_packages")
+PROJECT_DIR = Path(tempfile.gettempdir()) / "agent_workspace" / "project"
+REPORT_DIR = Path(tempfile.gettempdir()) / "agent_workspace" / "reports"
+STATIC_DIR = Path(os.environ.get("PACKAGE_OUTPUT_DIR", str(Path(tempfile.gettempdir()) / "agent_packages")))
+FRESH_MINUTES = int(os.environ.get("PACKAGE_FRESH_MINUTES", "120"))
 
 
 class PackagingWorker(AsyncWorkerBase):
-    """打包交付 Worker。将项目文件夹打成 ZIP。"""
+    """打包交付 Worker：将项目工作区中的新产物打成 ZIP。"""
 
-    def __init__(self, **kwargs):
-        super().__init__(
-            agent_id=kwargs.pop("agent_id", "packaging_worker"),
-            capabilities=["package"],
-            **kwargs,
-        )
-        os.makedirs(STATIC_DIR, exist_ok=True)
+    _class_capabilities = ["package"]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
     async def execute(self, instruction: str) -> str:
         import asyncio
         loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._sync_package, instruction)
 
-        def _sync():
-            from llm_client import call_llm
+    def _sync_package(self, instruction: str) -> str:
+        from llm_client import call_llm
 
-            # Parse project path from instruction
+        proj_path = None
+        try:
             system = (
                 "你是路径解析器。从指令中提取项目路径。"
-                '输出JSON: {"project_path": "/tmp/agent_workspace/project_name"}'
-                "如果指令未指定路径，默认使用 /tmp/agent_workspace。只输出JSON。"
+                '输出JSON: {"project_path": "/path/to/project"}。'
+                "如果指令未指定路径，输出空对象 {}。只输出JSON。"
             )
+            result = call_llm(system, instruction, expect_json=True)
+            p = str(result.get("project_path") or "").strip()
+            if p and os.path.isdir(p):
+                proj_path = Path(p)
+        except Exception:
+            pass
+        if proj_path is None:
+            proj_path = PROJECT_DIR
+        return self._package(proj_path)
+
+    def _fresh_files(self, root: Path) -> list[tuple[Path, str]]:
+        """返回 (绝对路径, 相对路径) 且修改时间在窗口内的文件。"""
+        cutoff = time.time() - FRESH_MINUTES * 60
+        files: list[tuple[Path, str]] = []
+        for p in sorted(root.rglob("*")):
+            if not p.is_file():
+                continue
             try:
-                result = call_llm(system, instruction, expect_json=True)
-                proj_path = result.get("project_path", OUTPUT_DIR)
-            except Exception:
-                proj_path = OUTPUT_DIR
+                if p.stat().st_mtime < cutoff:
+                    continue
+            except OSError:
+                continue
+            files.append((p, p.relative_to(root).as_posix()))
+        # 报告文件独立存放，若新鲜则一并纳入（放在 reports/ 前缀下）
+        if REPORT_DIR.exists():
+            for p in sorted(REPORT_DIR.glob("*.md")):
+                try:
+                    if p.stat().st_mtime >= cutoff:
+                        files.append((p, f"reports/{p.name}"))
+                except OSError:
+                    continue
+        return files
 
-            return self._package(proj_path)
-
-        return await loop.run_in_executor(None, _sync)
-
-    def _package(self, proj_path: str) -> str:
-        if not os.path.isdir(proj_path):
+    def _package(self, proj_path: Path) -> str:
+        if not proj_path.is_dir():
             raise RuntimeError(f"Project path not found: {proj_path}")
-
-        proj_name = os.path.basename(proj_path.rstrip("/\\"))
-        zip_name = f"{proj_name}.zip"
-        zip_path = os.path.join(STATIC_DIR, zip_name)
-
-        try:
-            shutil.make_archive(
-                os.path.join(STATIC_DIR, proj_name),
-                'zip',
-                proj_path,
+        files = self._fresh_files(proj_path)
+        if not files:
+            raise RuntimeError(
+                f"No fresh files found in {proj_path} (window={FRESH_MINUTES}min); "
+                "task did not produce persistent artifacts"
             )
-            size_kb = os.path.getsize(zip_path) / 1024
 
-            # Count files
-            file_count = sum(1 for _ in self._walk_files(proj_path))
+        ts = time.strftime("%Y%m%d_%H%M%S")
+        zip_path = STATIC_DIR / f"deliverables_{ts}.zip"
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for abs_path, arc_name in files:
+                zf.write(abs_path, arc_name)
 
-            return (
-                f"[PACKAGED] {zip_name} ({size_kb:.1f} KB, {file_count} files)\n"
-                f"Download: file://{zip_path}\n"
-                f"Project: {proj_path}"
-            )
-        except Exception as exc:
-            raise RuntimeError(f"Package failed: {exc}") from exc
-
-    def _walk_files(self, path):
-        for root, _, files in os.walk(path):
-            for f in files:
-                yield os.path.join(root, f)
+        names = [a for _, a in files]
+        return (
+            f"[PACKAGED] {zip_path.name} ({zip_path.stat().st_size / 1024:.1f} KB, {len(files)} files)\n"
+            f"Download: file://{zip_path}\n"
+            f"Files: {', '.join(names[:20])}{' ...' if len(names) > 20 else ''}"
+        )
 
 
 async def amain():
     from logging_setup import setup_logging
     setup_logging("worker-packaging")
-    redis_host = os.environ.get("REDIS_HOST", "localhost")
-    redis_port = int(os.environ.get("REDIS_PORT", "6379"))
-    db_path = os.environ.get("REGISTRY_DB", "agents.db")
-
-    registry = AsyncRegistry(db_path)
-    messaging = AsyncMessaging(redis_host, redis_port)
-
+    registry = AsyncRegistry(os.environ.get("REGISTRY_DB", "agents.db"))
+    messaging = AsyncMessaging(
+        os.environ.get("REDIS_HOST", "localhost"),
+        int(os.environ.get("REDIS_PORT", "6379")),
+    )
     worker = PackagingWorker(
         agent_id="packaging_worker",
+        capabilities=PackagingWorker._class_capabilities,
         registry=registry,
         messaging=messaging,
         max_concurrency=3,
     )
-
     try:
         await worker.run()
     except KeyboardInterrupt:

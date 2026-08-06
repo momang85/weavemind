@@ -43,7 +43,8 @@ class WebFetchWorker(AsyncWorkerBase):
     _class_capabilities = ["web_fetch"]
 
     async def execute(self, instruction: str) -> str:
-        urls = re.findall(r'https?://[^\s，,）)"\']+', instruction)
+        urls = re.findall(r'https?://[^\s<>"\']+', instruction)
+        urls = [re.sub(r"[),.;\]}>]+$", "", u) for u in urls]
         if not urls:
             return json.dumps({"status": "failed", "error": "No URL found in instruction"}, ensure_ascii=False)
         url = urls[0]
@@ -56,7 +57,7 @@ class WebFetchWorker(AsyncWorkerBase):
                 html = resp.read().decode("utf-8", errors="replace")
             parser = _TextExtractor()
             parser.feed(html)
-            text = "\n".join(line for line in parser.text().splitlines() if line.strip())[:6000]
+            text = "\n".join(line for line in parser.text().splitlines() if line.strip())[:30000]
             title = re.search(r"<title[^>]*>([^<]+)</title>", html, re.I)
             return json.dumps({
                 "status": "success",

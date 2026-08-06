@@ -445,14 +445,45 @@ class SearchAgent(BaseWorker):
     """Real web search agent using DuckDuckGo (free, no API key)."""
 
     _SPAM_DOMAINS = ("susmeat.com", "aydvjch.cc", "example.com")
+    _JUNK_TITLES = ("google", "bing", "microsoft", "登录", "403", "404")
+
+    def _extract_keywords(self, text: str) -> str:
+        """从冗长的中文指令中提取核心搜索词，显著提高搜索引擎召回质量。"""
+        import re as _re
+
+        zh_stop = {
+            "一个", "我们", "你们", "他们", "完成", "输出", "生成", "要求",
+            "进行", "需要", "可以", "是否", "如何", "什么", "请", "帮", "并",
+            "与", "和", "在", "用", "把", "将", "给", "让", "这", "那", "为",
+            "对", "其", "及", "或", "等", "做", "写", "的", "了", "是", "我",
+            "你", "他", "她", "它", "搜索", "获取", "项目", "文件", "内容",
+            "结果", "报告", "选择", "优先", "记录", "完整", "基于", "上一步",
+            "编写", "实现", "包含", "以及", "使用", "提供", "相关", "信息",
+            "资料", "地址", "链接", "来源", "开源", "同时", "需要", "并且",
+            "如果", "找到", "查看", "说明", "运行", "方式", "明确", "给出",
+        }
+        zh = [w for w in _re.findall(r"[\u4e00-\u9fff]{2,4}", text) if w not in zh_stop]
+        en_stop = {
+            "the", "and", "with", "from", "for", "that", "this", "not",
+            "are", "was", "were", "output", "only", "json", "using", "your",
+        }
+        en = [
+            w.lower()
+            for w in _re.findall(r"[a-zA-Z][a-zA-Z0-9-]{2,}", text)
+            if w.lower() not in en_stop
+        ]
+        merged = list(dict.fromkeys(zh + en))
+        return " ".join(merged)[:150]
 
     def _filter_results(self, query: str, results: list[dict]) -> list[dict]:
-        """按主题相关性过滤搜索结果：剔除垃圾域、无标题/URL、与查询主题无重叠的结果。"""
+        """按主题相关性过滤并排序搜索结果：
+        英文词按词边界匹配（避免 star 误中 Stars），中文按 2/3/4 字片段计分，
+        得分不足的结果剔除，最终按相关度降序返回。"""
         import re as _re
 
         tokens = set(_re.findall(r"[\u4e00-\u9fff]{2,}", query))
-        tokens |= set(w.lower() for w in _re.findall(r"[a-z][a-z0-9-]{2,}", query))
-        kept: list[dict] = []
+        en_tokens = {w.lower() for w in _re.findall(r"[a-zA-Z][a-zA-Z0-9-]{2,}", query)}
+        kept: list[tuple[int, dict]] = []
         for r in results:
             title = str(r.get("title") or "")
             url = str(r.get("url") or "")
@@ -461,11 +492,24 @@ class SearchAgent(BaseWorker):
                 continue
             if any(d in url for d in self._SPAM_DOMAINS):
                 continue
-            hay = (title + " " + snip).lower()
-            if tokens and not any(tok in hay for tok in tokens):
+            if title.lower().strip() in self._JUNK_TITLES:
                 continue
-            kept.append(r)
-        return kept
+            hay = title + " " + snip
+            hay_lower = hay.lower()
+            score = 0
+            for tok in tokens:
+                if tok in hay:
+                    score += 1 if len(tok) == 2 else 2
+            for tok in en_tokens:
+                if len(tok) >= 3 and _re.search(
+                    rf"(?<![a-z0-9]){_re.escape(tok)}(?![a-z0-9])", hay_lower
+                ):
+                    score += 2
+            if score < 2:
+                continue
+            kept.append((score, r))
+        kept.sort(key=lambda x: -x[0])
+        return [r for _, r in kept]
 
     def _search_bing(self, query: str) -> list[dict]:
         """备用搜索源：Bing HTML 结果解析（无需 API Key）。"""
@@ -482,15 +526,31 @@ class SearchAgent(BaseWorker):
             html = resp.read().decode("utf-8", errors="replace")
         results: list[dict] = []
         for block in _re.findall(r'<li class="b_algo".*?</li>', html, _re.S)[:5]:
-            m_url = _re.search(r'<a[^>]+href="(https?://[^"]+)"', block)
-            if not m_url:
-                continue
             m_title = _re.search(r'<h2[^>]*>(.*?)</h2>', block, _re.S)
+            m_url = _re.search(r'<h2[^>]*>.*?<a[^>]+href="(https?://[^"]+)"', block, _re.S)
+            if not m_title or not m_url:
+                m_url = _re.search(r'<a[^>]+href="(https?://[^"]+)"', block)
+                if not m_url:
+                    continue
             m_snip = _re.search(r'<p[^>]*>(.*?)</p>', block, _re.S)
             strip = lambda s: _re.sub(r"<[^>]+>", "", s or "").strip()
+            url = m_url.group(1)
+            # 解码 Bing 的 /ck/a 跳转链接
+            if "bing.com/ck/a" in url:
+                q = urllib.parse.urlparse(url).query
+                params = urllib.parse.parse_qs(q)
+                target = params.get("u", [""])[0]
+                if target:
+                    try:
+                        import base64
+                        target = base64.urlsafe_b64decode(target[2:].encode()).decode("utf-8", errors="replace")
+                    except Exception:
+                        target = urllib.parse.unquote(target)
+                if target.startswith("http"):
+                    url = target
             results.append({
                 "title": strip(m_title.group(1) if m_title else ""),
-                "url": m_url.group(1),
+                "url": url,
                 "snippet": strip(m_snip.group(1) if m_snip else ""),
             })
         return results
@@ -498,12 +558,14 @@ class SearchAgent(BaseWorker):
     def execute(self, instruction: str) -> str:
         """多源搜索：DuckDuckGo → Bing → mock。"""
         logger.info("SearchAgent searching: %s", instruction)
+        keywords = self._extract_keywords(instruction)
+        query = keywords if len(keywords) >= 4 else instruction
         source_ok = False
         try:
             from ddgs import DDGS
             results = []
             with DDGS() as ddgs:
-                for r in ddgs.text(instruction, max_results=5):
+                for r in ddgs.text(query, max_results=5):
                     results.append({
                         "title": r.get("title", ""),
                         "url": r.get("href", ""),
@@ -519,7 +581,7 @@ class SearchAgent(BaseWorker):
         # 备用源：Bing
         try:
             source_ok = True
-            bing = self._search_bing(instruction)
+            bing = self._search_bing(query)
             bing = self._filter_results(instruction, bing)
             if bing:
                 return json.dumps(bing, ensure_ascii=False, indent=2)
