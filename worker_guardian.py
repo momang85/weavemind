@@ -95,6 +95,7 @@ class WorkerGuardian:
         self._managed_scripts: dict[str, Path] = {
             "search_agent": _base / "worker_base.py",
             "critic": _base / "critic_agent.py",
+            "webfetchworker": _base / "workers" / "web_fetch_worker.py",
             "content_summarizer": _base / "workers" / "content_summary_worker.py",
             "codeexecworker": _base / "workers" / "code_execution_worker.py",
             "fileioworker": _base / "workers" / "file_io_worker.py",

@@ -269,10 +269,34 @@ def _system_status():
             "recent": recent,
             "uptime_sec": int(time.time() - _START_TIME),
             "survival_rate": survival,
+            "llm_usage": _get_llm_usage(),
         }
     except Exception:
         return {"agents":[],"queues":{},"tasks":{"total":0,"success":0,"today":0},
-                "memory":{"conversations":0,"strategies":0},"recent":[],"uptime_sec":0,"survival_rate":100}
+                "memory":{"conversations":0,"strategies":0},"recent":[],"uptime_sec":0,"survival_rate":100,
+                "llm_usage":{"calls":0,"prompt_tokens":0,"completion_tokens":0}}
+
+def _get_llm_usage():
+    total = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+    try:
+        r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        keys = r.keys("llm_usage*")
+        for k in keys:
+            raw = r.get(k)
+            if raw:
+                d = json.loads(raw)
+                total["calls"] += int(d.get("calls", 0))
+                total["prompt_tokens"] += int(d.get("prompt_tokens", 0))
+                total["completion_tokens"] += int(d.get("completion_tokens", 0))
+        if total["calls"]:
+            return total
+    except Exception:
+        pass
+    try:
+        from llm_client import get_usage_stats
+        return get_usage_stats()
+    except Exception:
+        return {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
 
 def _get_memory_stats():
     """缓存 MemoryManager 实例，避免每个 /api/status 请求重建 Chroma 客户端。"""

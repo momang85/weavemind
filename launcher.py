@@ -135,6 +135,7 @@ def build_services(cfg: dict) -> list[tuple[str, list[str], Path | None, Path | 
     py = sys.executable
     services = [
         ("worker-search", [py, str(BASE_DIR / "worker_base.py")], BASE_DIR, None),
+        ("worker-web-fetch", [py, str(BASE_DIR / "workers" / "web_fetch_worker.py")], BASE_DIR, None),
         ("worker-content-summary", [py, str(BASE_DIR / "workers" / "content_summary_worker.py")], BASE_DIR, None),
         ("worker-code-execution", [py, str(BASE_DIR / "workers" / "code_execution_worker.py")], BASE_DIR, None),
         ("worker-file-io", [py, str(BASE_DIR / "workers" / "file_io_worker.py")], BASE_DIR, None),

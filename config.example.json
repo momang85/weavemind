@@ -9,6 +9,11 @@
     "base_url": "https://api.siliconflow.cn/v1",
     "model": "BAAI/bge-large-zh-v1.5"
   },
+  "planner": {
+    "model": "deepseek-ai/DeepSeek-V3",
+    "base_url": "https://api.siliconflow.cn/v1",
+    "api_key": "YOUR_PLANNER_API_KEY"
+  },
   "redis": {
     "host": "localhost",
     "port": 6379
@@ -21,6 +26,7 @@
     "critic": true,
     "critic_timeout": 30,
     "max_steps": 8,
+    "max_parallel": 3,
     "scheduler": false
   }
 }

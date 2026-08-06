@@ -58,6 +58,9 @@ export default function HealthPage() {
   const survival = systemStatus?.survival_rate ?? (agents.length > 0 ? Math.round(online / agents.length * 100) : 100)
   const tasksToday = systemStatus?.tasks?.today ?? 0
   const uptime = systemStatus?.uptime_sec ?? 0
+  const usage = systemStatus?.llm_usage
+  const totalTokens = (usage?.prompt_tokens ?? 0) + (usage?.completion_tokens ?? 0)
+  const tokenLabel = totalTokens >= 1000 ? `${(totalTokens / 1000).toFixed(1)}k` : String(totalTokens)
 
   const triggerEvolution = async () => {
     const id = 'man-' + Date.now()
@@ -78,11 +81,12 @@ export default function HealthPage() {
 
   return (
     <div className="max-w-5xl mx-auto space-y-5">
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
           { icon: Clock, label: 'Uptime', value: formatUptime(uptime), color: 'text-cyan-400' },
           { icon: TrendingUp, label: 'Tasks Today', value: String(tasksToday), color: 'text-emerald-400' },
           { icon: Shield, label: 'Survival Rate', value: `${survival}%`, color: 'text-violet-400' },
+          { icon: Cpu, label: 'LLM Tokens', value: tokenLabel, color: 'text-amber-400' },
         ].map(m => (
           <div key={m.label} className="bg-slate-900 border border-slate-800 rounded-xl p-5">
             <div className="flex items-center gap-2 text-slate-500 text-xs mb-3"><m.icon className="w-4 h-4" />{m.label}</div>

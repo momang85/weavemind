@@ -10,10 +10,49 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Token 用量统计（可观测性）
+# ============================================================================
+
+_usage_lock = threading.Lock()
+_usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+_usage_pub_client = None
+
+
+def _record_usage(prompt_tokens: int, completion_tokens: int) -> None:
+    with _usage_lock:
+        _usage["calls"] += 1
+        _usage["prompt_tokens"] += int(prompt_tokens or 0)
+        _usage["completion_tokens"] += int(completion_tokens or 0)
+
+
+def get_usage_stats() -> dict:
+    """返回全局 LLM 用量统计（调用次数、输入/输出 token）。"""
+    with _usage_lock:
+        return dict(_usage)
+
+
+def _publish_usage_snapshot() -> None:
+    """把本进程的累计用量写入 Redis（带 TTL），供跨进程聚合。"""
+    global _usage_pub_client
+    try:
+        if _usage_pub_client is None:
+            import redis as _redis
+            _usage_pub_client = _redis.Redis(host="localhost", port=6379, decode_responses=True)
+        _usage_pub_client.set(
+            f"llm_usage:{os.getpid()}",
+            json.dumps(get_usage_stats()),
+            ex=3600,
+        )
+    except Exception:
+        pass
 
 
 # ============================================================================
@@ -256,6 +295,8 @@ class LLMClient:
         # 记录用量
         usage = response_data.get("usage", {})
         if usage:
+            _record_usage(usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0))
+            _publish_usage_snapshot()
             logger.debug(
                 "LLM usage: prompt=%d, completion=%d, total=%d",
                 usage.get("prompt_tokens", 0),
@@ -423,6 +464,9 @@ async def call_llm_async(
             response = await client.post(url, json=payload, headers=headers)
             response.raise_for_status()
             data = response.json()
+            usage = data.get("usage") or {}
+            _record_usage(usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0))
+            _publish_usage_snapshot()
 
             content = data['choices'][0]['message']['content']
             if expect_json:

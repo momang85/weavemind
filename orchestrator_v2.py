@@ -9,7 +9,7 @@ This is the active orchestrator (legacy orchestrator.py was removed in the archi
 import json, logging, os, re, threading, time, uuid
 
 from common import AgentRegistry, MessagingClient, RedisAgentRegistry
-from llm_client import LLMClient
+from llm_client import LLMClient, get_usage_stats
 from memory_manager import MemoryManager
 from ws_helpers import push_progress
 
@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 # ─────────────────────────────────────────────
 PLANNER_SYSTEM = """Break user goals into sequential execution steps.
 
-Available: web_search, data_loader, data_analyzer, model_trainer, report_generator, content_summary, code_execution, file_io, package
+Available: web_search, web_fetch, data_loader, data_analyzer, model_trainer, report_generator, content_summary, code_execution, file_io, package
 
 Rules:
 1. Each step uses EXACTLY one capability from the list above
@@ -46,6 +46,9 @@ class OrchestratorV2:
         self._critic_enabled = False
         self._critic_timeout = 30
         self._max_steps = 8
+        self._max_parallel = 3
+        self._planner_model = None
+        _cfg = {}
         try:
             with open(_cfg_path, 'r') as _f:
                 _cfg = json.loads(_f.read())
@@ -60,6 +63,7 @@ class OrchestratorV2:
             self._critic_enabled = bool(_sys.get('critic', False))
             self._critic_timeout = max(10, int(_sys.get('critic_timeout', 30)))
             self._max_steps = max(1, int(_sys.get('max_steps', 8)))
+            self._max_parallel = max(1, int(_sys.get('max_parallel', 3)))
         except Exception:
             pass
         import redis as sync_redis
@@ -70,6 +74,19 @@ class OrchestratorV2:
         # MessagingClient auto-connects
         self._memory = MemoryManager(os.environ.get("MEMORY_DIR", "./chroma_memory"))
         self._plan_llm = LLMClient()
+        # 可选：专用规划模型（更稳的模型负责拆解，执行仍用默认模型）
+        _planner_cfg = (_cfg.get("planner") or {}) if isinstance(_cfg, dict) else {}
+        if _planner_cfg.get("model"):
+            _llm_cfg = _cfg.get("llm", {}) if isinstance(_cfg, dict) else {}
+            self._planner_llm = LLMClient(
+                model=_planner_cfg.get("model"),
+                base_url=_planner_cfg.get("base_url") or _llm_cfg.get("base_url"),
+                api_key=_planner_cfg.get("api_key") or _llm_cfg.get("api_key"),
+            )
+            self._planner_model = _planner_cfg.get("model")
+            logger.info("Planner LLM: %s", self._planner_model)
+        else:
+            self._planner_llm = self._plan_llm
         logger.info("OrchestratorV2 initialized")
 
     def _find_agent(self, capability: str) -> str | None:
@@ -128,7 +145,7 @@ class OrchestratorV2:
                 "no explanation, and no line breaks inside instruction strings.\nGoal: " + goal
             )
             try:
-                raw = self._plan_llm.call(PLANNER_SYSTEM, attempt_prompt, expect_json=True)
+                raw = self._planner_llm.call(PLANNER_SYSTEM, attempt_prompt, expect_json=True)
                 if isinstance(raw, str):
                     clean = raw.strip()
                     if clean.startswith('```json'):
@@ -163,14 +180,7 @@ class OrchestratorV2:
                            "message": "Plan fallback: single content_summary step", "timestamp": self._now_iso()})
             return fallback
 
-        steps = plan_data.get("steps", [])
-        if len(steps) > self._max_steps:
-            logger.warning("Plan truncated from %d to %d steps (max_steps=%d)", len(steps), self._max_steps, self._max_steps)
-            push_progress(self._messaging, task_id, "log",
-                          {"type": "plan", "agent": "orchestrator",
-                           "message": f"Plan truncated to {self._max_steps} steps",
-                           "timestamp": self._now_iso()})
-            steps = steps[:self._max_steps]
+        steps = self._normalize_steps(plan_data.get("steps", []))
         if not steps:
             steps = [{
                 "step_id": "1",
@@ -185,6 +195,30 @@ class OrchestratorV2:
                       {"type": "plan", "agent": "orchestrator",
                        "message": f"Plan ready: {len(steps)} steps", "timestamp": self._now_iso()})
         return steps
+
+    def _normalize_steps(self, steps: list) -> list[dict]:
+        """规范化计划步骤：去重 ID、剔除空指令、补齐默认字段、限制步数。"""
+        out: list[dict] = []
+        seen: set[str] = set()
+        for i, s in enumerate(steps, 1):
+            if not isinstance(s, dict):
+                continue
+            sid = str(s.get("step_id") or i)
+            if sid in seen:
+                sid = f"{sid}-{i}"
+            seen.add(sid)
+            instruction = str(s.get("instruction") or "").strip()
+            if not instruction:
+                continue
+            s["step_id"] = sid
+            s.setdefault("capability", "content_summary")
+            s.setdefault("timeout", 120)
+            out.append(s)
+        if len(out) > self._max_steps:
+            logger.warning("Plan normalized from %d to %d steps (max_steps=%d)",
+                           len(out), self._max_steps, self._max_steps)
+            out = out[:self._max_steps]
+        return out
 
     def _replan_step(self, goal: str, step: dict, error: str, task_id: str) -> dict | None:
         """步骤失败后，让 LLM 提出一个替代步骤（保留原步骤 ID 的依赖关系）。"""
@@ -444,131 +478,128 @@ class OrchestratorV2:
         push_progress(self._messaging, task_id, "plan_update",
                       {"steps": steps})
 
-        # 2. Execute
-        results = []
+        # 2. Execute（并行 DAG 调度：依赖满足即并发执行）
         completed = {}
         has_failure = False
-        replan_used = 0
+        state = {"replan_used": 0}
+        step_ids = {s.get("step_id") for s in steps}
+        lock = threading.Lock()
 
-        for step in steps:
-            # Inject previous step output into instruction
-            instr = step.get('instruction', '')
-            cap = step.get('capability', '')
-            deps = step.get('depends_on', [])
-            
-            # Smart injection: for data_loader, inject URL from web_search result
-            if cap == 'data_loader':
-                for dep_id in deps:
-                    prev_res = ''
-                    if dep_id in completed:
-                        prev = completed[dep_id]
-                        prev_res = prev.get('result', '') if isinstance(prev, dict) else ''
-                        try:
-                            prev_json = json.loads(prev_res) if isinstance(prev_res, str) else prev_res
-                        except Exception:
-                            prev_json = prev_res
-                        if isinstance(prev_json, list):
-                            for item in prev_json:
-                                url = item.get('url') or item.get('href') or ''
-                                if url and url.startswith('http'):
-                                    instr += f' [URL: {url}]'
-                                    break
-                        elif isinstance(prev_json, dict):
-                            url = prev_json.get('url') or prev_json.get('href') or ''
-                            if url:
-                                instr += f' [URL: {url}]'
-                    # Also look at raw string for URLs
-                    urls = re.findall(r'https?://\S+', prev_res if isinstance(prev_res, str) else '')
-                    if urls:
-                        instr += f' [URL: {urls[0]}]'
-            
-            # For data_analyzer, inject file path from data_loader
-            if cap == 'data_analyzer' or cap == 'model_trainer':
-                for dep_id in deps:
-                    prev_res = ''
-                    if dep_id in completed:
-                        prev = completed[dep_id]
-                        prev_res = prev.get('result', '') if isinstance(prev, dict) else ''
-                        try:
-                            prev_json = json.loads(prev_res) if isinstance(prev_res, str) else prev_res
-                        except Exception:
-                            prev_json = prev_res
-                        if isinstance(prev_json, dict):
-                            path = prev_json.get('path') or prev_json.get('data_path') or prev_json.get('report_path') or ''
-                            if path:
-                                instr += f' [Data: {path}]'
-                        # Also scan for /tmp paths
-                        tmps = re.findall(r'/tmp/\S+', prev_res if isinstance(prev_res, str) else '')
-                        if tmps:
-                            instr += f' [Path: {tmps[0]}]'
+        def deps_ok(step):
+            return all(d in completed for d in step.get("depends_on", []))
 
-            # content_summary / report_generator: 注入前序步骤的实际结果，避免"无凭据"泛化
-            if cap in ('content_summary', 'report_generator'):
-                for dep_id in deps:
-                    prev_res = ''
-                    if dep_id in completed:
-                        prev = completed[dep_id]
-                        prev_res = prev.get('result', '') if isinstance(prev, dict) else ''
-                    snippet = str(prev_res)[:2500] if prev_res else ''
-                    if snippet:
-                        instr += f"\n[上一步结果 {dep_id}]:\n{snippet}"
+        def deps_failed(step):
+            return [d for d in step.get("depends_on", [])
+                    if d in completed and completed[d].get("status") == "FAILED"]
 
-            step['instruction'] = instr
-
-            # Check dependencies
-            deps = step.get("depends_on", [])
-            blocked = [d for d in deps if d in completed and completed[d].get("status") == "FAILED"]
+        def execute_step(step):
+            step_start = time.time()
+            step["instruction"] = self._inject_step_context(step, completed, lock)
+            blocked = deps_failed(step)
             if blocked:
                 push_progress(self._messaging, task_id, "log",
                               {"type": "replan", "agent": "orchestrator",
                                "message": f"Step {step['step_id']} blocked by failure: {blocked}",
                                "timestamp": self._now_iso()})
-                results.append({"task_id": step["step_id"], "status": "FAILED", "result": f"Blocked by: {blocked}"})
-                has_failure = True
-                continue
+                return {"task_id": step["step_id"], "status": "FAILED",
+                        "result": f"Blocked by: {blocked}",
+                        "elapsed_sec": round(time.time() - step_start, 1)}
+            result = self._dispatch_step_safe(goal, step, task_id, state)
+            result["elapsed_sec"] = round(time.time() - step_start, 1)
+            return result
 
-            result = self._dispatch(step, task_id)
-
-            # 失败重试
-            attempt = 0
-            while result.get("status") == "FAILED" and attempt < self._max_retry:
-                attempt += 1
-                push_progress(self._messaging, task_id, "log",
-                              {"type": "retry", "agent": step.get("capability", "?"),
-                               "message": f"Step {step.get('step_id')} retry {attempt}/{self._max_retry}",
-                               "timestamp": self._now_iso()})
-                time.sleep(2)
-                result = self._dispatch(step, task_id)
-
-            # 重试仍失败 -> 尝试单步重规划（替代方案）
-            if result.get("status") == "FAILED" and replan_used < self._replan_depth:
-                alt = self._replan_step(goal, step, result.get("result", ""), task_id)
-                if alt:
-                    replan_used += 1
-                    alt_result = self._dispatch(alt, task_id)
-                    if alt_result.get("status") == "SUCCESS":
-                        alt_result["replanned"] = True
-                        alt_result["replan_instruction"] = alt.get("instruction", "")
-                        result = alt_result
-
-            results.append(result)
-            completed[step["step_id"]] = result
-
-            if result.get("status") == "FAILED":
+        # 预检：悬空依赖（依赖不存在的步骤）直接失败
+        for s in steps:
+            dangling = [d for d in s.get("depends_on", []) if d not in step_ids]
+            if dangling:
+                completed[s["step_id"]] = {
+                    "task_id": s["step_id"], "status": "FAILED",
+                    "result": f"Dangling dependency: {dangling}",
+                }
                 has_failure = True
 
-            # REALTIME: push current state after each step
-            current_steps = []
-            for s in steps:
-                s_copy = dict(s)
-                s_copy["result"] = completed.get(s["step_id"], {})
-                current_steps.append(s_copy)
-            self._messaging.publish("orchestrator:response", {
-                "task_id": task_id,
-                "status": "RUNNING",
-                "steps": current_steps,
-                "goal": goal,
+        pending = {s["step_id"]: s for s in steps if s["step_id"] not in completed}
+        last_progress = time.time()
+        in_flight = 0
+
+        def worker():
+            nonlocal last_progress, has_failure, in_flight
+            while True:
+                with lock:
+                    if not pending:
+                        return
+                    ready = None
+                    for k, s in pending.items():
+                        if deps_ok(s) and not deps_failed(s):
+                            ready = (k, pending.pop(k))
+                            break
+                if ready is None:
+                    with lock:
+                        if pending and all(deps_failed(s) for s in pending.values()):
+                            for k in list(pending):
+                                completed[k] = {
+                                    "task_id": k, "status": "FAILED",
+                                    "result": "Blocked by failed dependency",
+                                }
+                            pending.clear()
+                            has_failure = True
+                            return
+                    time.sleep(0.5)
+                    continue
+                k, step = ready
+                with lock:
+                    in_flight += 1
+                try:
+                    result = execute_step(step)
+                except Exception as exc:
+                    logger.error("Step %s crashed: %s", k, str(exc)[:200])
+                    result = {"task_id": k, "status": "FAILED", "result": f"Step crashed: {exc}"}
+                finally:
+                    with lock:
+                        in_flight -= 1
+                with lock:
+                    completed[k] = result
+                    last_progress = time.time()
+                    if result.get("status") != "SUCCESS":
+                        has_failure = True
+                self._push_realtime_state(task_id, goal, steps, completed)
+
+        def watchdog():
+            nonlocal has_failure
+            while True:
+                with lock:
+                    if not pending:
+                        return
+                    stalled = in_flight == 0 and time.time() - last_progress > 60
+                if stalled:
+                    with lock:
+                        for k in list(pending):
+                            completed[k] = {
+                                "task_id": k, "status": "FAILED",
+                                "result": "Stalled: dependency never satisfied (cycle?)",
+                            }
+                        pending.clear()
+                        has_failure = True
+                    return
+                time.sleep(5)
+
+        threads = [threading.Thread(target=worker, daemon=True)
+                   for _ in range(max(1, self._max_parallel))]
+        for t in threads:
+            t.start()
+        wd = threading.Thread(target=watchdog, daemon=True)
+        wd.start()
+        for t in threads:
+            t.join()
+        wd.join(timeout=10)
+
+        results = [
+            completed.get(s["step_id"], {
+                "task_id": s["step_id"], "status": "FAILED", "result": "Not executed",
             })
+            for s in steps
+        ]
+        has_failure = has_failure or any(r.get("status") != "SUCCESS" for r in results)
 
         # 3. Report
         push_progress(self._messaging, task_id, "log",
@@ -578,6 +609,7 @@ class OrchestratorV2:
 
         report = self._best_deliverable(steps, results) or self._finalize(goal, steps, results)
         overall = "FAILED" if has_failure else "SUCCESS"
+        self._publish_usage()
 
         # 4. Memory（仅沉淀成功计划，避免污染 successful_strategies）
         if not has_failure:
@@ -599,6 +631,109 @@ class OrchestratorV2:
                       for s, r in zip(steps, results)],
             "final_report": report,
         }
+
+    def _inject_step_context(self, step: dict, completed: dict, lock: threading.Lock) -> str:
+        """按能力类型把前序步骤的输出注入指令（URL/路径/结果摘要）。"""
+        instr = step.get('instruction', '')
+        cap = step.get('capability', '')
+        deps = step.get('depends_on', [])
+
+        def _prev(dep_id):
+            with lock:
+                prev = completed.get(dep_id)
+            return prev.get('result', '') if isinstance(prev, dict) else ''
+
+        if cap == 'data_loader':
+            for dep_id in deps:
+                prev_res = _prev(dep_id)
+                try:
+                    prev_json = json.loads(prev_res) if isinstance(prev_res, str) else prev_res
+                except Exception:
+                    prev_json = prev_res
+                if isinstance(prev_json, list):
+                    for item in prev_json:
+                        url = item.get('url') or item.get('href') or ''
+                        if url and url.startswith('http'):
+                            instr += f' [URL: {url}]'
+                            break
+                elif isinstance(prev_json, dict):
+                    url = prev_json.get('url') or prev_json.get('href') or ''
+                    if url:
+                        instr += f' [URL: {url}]'
+                urls = re.findall(r'https?://\S+', prev_res if isinstance(prev_res, str) else '')
+                if urls:
+                    instr += f' [URL: {urls[0]}]'
+
+        if cap in ('data_analyzer', 'model_trainer'):
+            for dep_id in deps:
+                prev_res = _prev(dep_id)
+                try:
+                    prev_json = json.loads(prev_res) if isinstance(prev_res, str) else prev_res
+                except Exception:
+                    prev_json = prev_res
+                if isinstance(prev_json, dict):
+                    path = prev_json.get('path') or prev_json.get('data_path') or prev_json.get('report_path') or ''
+                    if path:
+                        instr += f' [Data: {path}]'
+                tmps = re.findall(r'/tmp/\S+', prev_res if isinstance(prev_res, str) else '')
+                if tmps:
+                    instr += f' [Path: {tmps[0]}]'
+
+        if cap in ('content_summary', 'report_generator'):
+            for dep_id in deps:
+                prev_res = _prev(dep_id)
+                snippet = str(prev_res)[:2500] if prev_res else ''
+                if snippet:
+                    instr += f"\n[上一步结果 {dep_id}]:\n{snippet}"
+        return instr
+
+    def _dispatch_step_safe(self, goal: str, step: dict, task_id: str, state: dict) -> dict:
+        """派发单步：失败自动重试，重试仍失败则尝试单步重规划。"""
+        result = self._dispatch(step, task_id)
+        attempt = 0
+        while result.get("status") == "FAILED" and attempt < self._max_retry:
+            attempt += 1
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "retry", "agent": step.get("capability", "?"),
+                           "message": f"Step {step.get('step_id')} retry {attempt}/{self._max_retry}",
+                           "timestamp": self._now_iso()})
+            time.sleep(2)
+            result = self._dispatch(step, task_id)
+        if result.get("status") == "FAILED" and state["replan_used"] < self._replan_depth:
+            alt = self._replan_step(goal, step, result.get("result", ""), task_id)
+            if alt:
+                state["replan_used"] += 1
+                alt_result = self._dispatch(alt, task_id)
+                if alt_result.get("status") == "SUCCESS":
+                    alt_result["replanned"] = True
+                    alt_result["replan_instruction"] = alt.get("instruction", "")
+                    result = alt_result
+        return result
+
+    def _push_realtime_state(self, task_id: str, goal: str, steps: list[dict], completed: dict) -> None:
+        """步骤完成后推送当前全量状态（前端实时展示）。"""
+        self._publish_usage()
+        current_steps = []
+        for s in steps:
+            s_copy = dict(s)
+            s_copy["result"] = completed.get(s["step_id"], {})
+            current_steps.append(s_copy)
+        try:
+            self._messaging.publish("orchestrator:response", {
+                "task_id": task_id,
+                "status": "RUNNING",
+                "steps": current_steps,
+                "goal": goal,
+            })
+        except Exception as exc:
+            logger.warning("Realtime push failed: %s", str(exc)[:120])
+
+    def _publish_usage(self) -> None:
+        """把编排器进程的 LLM 用量累计快照写入 Redis，供 web_ui 跨进程读取。"""
+        try:
+            self._redis.set("llm_usage", json.dumps(get_usage_stats()), ex=3600)
+        except Exception:
+            pass
 
     def shutdown(self):
         self._messaging.close()

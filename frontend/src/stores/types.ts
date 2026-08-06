@@ -76,6 +76,7 @@ export interface SystemStatus {
   recent: { task_id: string; goal: string; status: string; created_at: string; report?: string }[]
   survival_rate?: number
   uptime_sec?: number
+  llm_usage?: { calls: number; prompt_tokens: number; completion_tokens: number }
 }
 
 export interface WSMessage {

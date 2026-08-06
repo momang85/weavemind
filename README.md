@@ -7,7 +7,7 @@ Worker 执行，最终生成报告，并通过 Web 控制台实时展示进度�
 ## 功能特性
 
 - LLM 规划 → 多 Worker 并行/串行执行 → 最终交付文档（自动挑选最实质产出作为报告）
-- 9 个专职 Worker：搜索、内容摘要、代码沙箱、数据处理、EDA、模型训练、报告生成、打包、文件 IO
+- 10 个专职 Worker：搜索、网页抓取、内容摘要、代码沙箱、数据处理、EDA、模型训练、报告生成、打包、文件 IO
 - 长期记忆（ChromaDB）：任务前注入相关经验，任务后沉淀成功策略
 - 对话上下文：同一会话连续追问，规划器携带前序要求与结果
 - 计划评审（Critic）、失败自动重试 + 单步重规划、Worker 守护自愈、策略进化沙箱
@@ -83,6 +83,7 @@ python launcher.py status
     "critic": true,
     "critic_timeout": 30,
     "max_steps": 8,
+    "max_parallel": 3,
     "scheduler": false
   }
 }
@@ -90,7 +91,8 @@ python launcher.py status
 
 模板见 `config.example.json`。旧 `.env` 仅作环境变量参考（Docker 方式使用）。
 `system.scheduler=true` 开启每日 3:00 自动策略进化；`system.critic=true` 开启计划评审；
-`system.max_steps` 限制单任务最大步骤数（默认 8），防止病态长计划。
+`system.max_steps` 限制单任务最大步骤数（默认 8），`system.max_parallel` 控制并行执行
+并发度（默认 3，无依赖步骤并发执行）；可选 `planner` 段为规划器指定更稳的专用模型。
 
 ## 对话上下文
 
