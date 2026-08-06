@@ -1,5 +1,5 @@
-import { useState, useCallback, useEffect } from 'react'
-import { Loader2, Sparkles, RefreshCw, Plus, MessagesSquare, FolderOpen, Activity, Eye } from 'lucide-react'
+import { useState, useCallback, useEffect, useMemo } from 'react'
+import { Loader2, Sparkles, RefreshCw, Plus, MessagesSquare, FolderOpen, Activity, Eye, Play } from 'lucide-react'
 import { useTaskStore } from '../stores/useTaskStore'
 import { useTaskPoller } from '../stores/useTaskPoller'
 import TaskTreeView from '../components/TaskTreeView'
@@ -9,6 +9,9 @@ import StepInspector from '../components/StepInspector'
 import type { TaskNode, ConversationMessage, TaskReport } from '../stores/types'
 
 type Tab = 'live' | 'context' | 'results'
+
+const CAPABILITIES = ['web_search', 'web_fetch', 'content_summary', 'code_execution',
+  'data_loader', 'data_analyzer', 'model_trainer', 'report_generator', 'file_io', 'package']
 
 function statusBadge(status: string) {
   const base = 'px-2 py-0.5 rounded-full text-[10px] font-semibold'
@@ -22,6 +25,7 @@ export default function TaskConsole() {
     planTree, status, report,
     startTask, addLog, demoMode, activeConversationId,
     setActiveConversation, setReport, reset,
+    awaitingConfirm, setAwaitingConfirm,
   } = useTaskStore()
 
   const [goal, setGoal] = useState('')
@@ -31,6 +35,10 @@ export default function TaskConsole() {
   const [tab, setTab] = useState<Tab>('live')
   const [convMessages, setConvMessages] = useState<ConversationMessage[]>([])
   const [recentTasks, setRecentTasks] = useState<any[]>([])
+  const [confirmMode, setConfirmMode] = useState(false)
+  const [editableSteps, setEditableSteps] = useState<any[]>([])
+  const [newCap, setNewCap] = useState('content_summary')
+  const [newInstr, setNewInstr] = useState('')
 
   useTaskPoller(demoMode ? null : taskId)
 
@@ -88,6 +96,7 @@ export default function TaskConsole() {
     try {
       const body: any = { goal: g }
       if (activeConversationId) body.conversation_id = activeConversationId
+      if (confirmMode) body.auto_run = false
       const res = await fetch('/task', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -114,7 +123,70 @@ export default function TaskConsole() {
       addLog({ timestamp: new Date().toISOString(), type: 'error', message: 'Failed to submit task' })
       startTask('failed')
     }
-  }, [goal, status, demoMode, activeConversationId, startTask, addLog, setActiveConversation])
+  }, [goal, status, demoMode, activeConversationId, confirmMode, startTask, addLog, setActiveConversation])
+
+  // 计划待确认时，把后端计划同步到本地可编辑数组
+  useEffect(() => {
+    if (awaitingConfirm && planTree) {
+      const children = planTree.children && planTree.children.length ? planTree.children : [planTree]
+      setEditableSteps(children.map(c => ({
+        step_id: c.step_id || c.id || ('s' + Math.random().toString(36).slice(2, 6)),
+        capability: c.capability || 'content_summary',
+        instruction: c.instruction || c.name || '',
+        timeout: 120,
+      })))
+    }
+  }, [awaitingConfirm, planTree])
+
+  const moveStep = (id: string, dir: -1 | 1) => {
+    setEditableSteps(prev => {
+      const i = prev.findIndex(s => s.step_id === id)
+      const j = i + dir
+      if (i < 0 || j < 0 || j >= prev.length) return prev
+      const next = [...prev]
+      ;[next[i], next[j]] = [next[j], next[i]]
+      return next
+    })
+  }
+
+  const removeStep = (id: string) => setEditableSteps(prev => prev.filter(s => s.step_id !== id))
+
+  const addStep = () => {
+    const text = newInstr.trim()
+    if (!text) return
+    setEditableSteps(prev => [...prev, {
+      step_id: 'e' + Math.random().toString(36).slice(2, 6),
+      capability: newCap,
+      instruction: text,
+      timeout: 120,
+    }])
+    setNewInstr('')
+  }
+
+  const confirmPlan = async (action: 'confirm' | 'cancel') => {
+    if (!taskId) return
+    try {
+      await fetch('/api/plan/confirm', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(action === 'confirm'
+          ? { task_id: taskId, action, steps: editableSteps }
+          : { task_id: taskId, action }),
+      })
+      setAwaitingConfirm(false)
+    } catch { /* ignore */ }
+  }
+
+  const editTree = useMemo<TaskNode | null>(() => {
+    if (!awaitingConfirm || !planTree) return null
+    return {
+      id: 'root', step_id: 'root', capability: '', name: planTree.name || 'Plan',
+      status: 'running', children: editableSteps.map(s => ({
+        id: s.step_id, step_id: s.step_id, capability: s.capability,
+        name: s.instruction || 'Step', status: 'pending', children: [],
+      })),
+    }
+  }, [awaitingConfirm, editableSteps, planTree])
 
   const viewFullReport = useCallback(async (tid: string) => {
     try {
@@ -169,6 +241,12 @@ export default function TaskConsole() {
               <MessagesSquare className="w-3.5 h-3.5" /> 对话中
             </span>
           )}
+          <label className="flex items-center gap-1.5 px-2 py-2 text-xs text-slate-400 cursor-pointer shrink-0">
+            <input type="checkbox" checked={confirmMode}
+              onChange={e => setConfirmMode(e.target.checked)}
+              className="accent-cyan-500" />
+            先确认计划
+          </label>
           <button onClick={() => submit()} disabled={isRunning || (!goal.trim() && !demoMode)}
             className="flex items-center gap-2 bg-cyan-500 hover:bg-cyan-400 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 font-semibold px-5 py-2.5 rounded-lg transition-all text-sm shrink-0">
             {isRunning ? (<><Loader2 className="w-4 h-4 animate-spin" /> Running...</>) : (<><Sparkles className="w-4 h-4" /> Execute</>)}
@@ -189,15 +267,50 @@ export default function TaskConsole() {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 min-h-[400px]">
         <div className="col-span-1 lg:col-span-2 bg-slate-900 border border-slate-800 rounded-xl p-5">
           <h2 className="flex items-center gap-2 text-slate-200 font-semibold text-sm mb-4">
-            <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" /> Execution Plan
+            <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
+            {awaitingConfirm ? '计划待确认（可编辑）' : 'Execution Plan'}
           </h2>
+          {awaitingConfirm && (
+            <div className="mb-3 text-xs text-amber-400/90 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
+              可上下移动、删除步骤或添加新步骤；确认后按你的计划执行。
+            </div>
+          )}
           {planTree ? (
-            <TaskTreeView root={planTree} onSelect={setSelectedStep} />
+            <TaskTreeView root={editTree ?? planTree} onSelect={setSelectedStep}
+              editable={awaitingConfirm} onMove={moveStep} onDelete={removeStep} />
           ) : (
             <div className="flex flex-col items-center justify-center h-64 text-slate-600">
               <Sparkles className="w-8 h-8 mb-3 opacity-20" />
               <p className="text-sm">{isRunning ? 'Generating plan...' : 'Execution plan will appear here'}</p>
               <p className="text-xs mt-1 opacity-60">{isRunning ? 'Orchestrator working' : 'Submit a task to begin'}</p>
+            </div>
+          )}
+          {awaitingConfirm && (
+            <div className="mt-4 space-y-3">
+              <div className="flex gap-2">
+                <select value={newCap} onChange={e => setNewCap(e.target.value)}
+                  className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-slate-300 shrink-0">
+                  {CAPABILITIES.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+                <input value={newInstr} onChange={e => setNewInstr(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') addStep() }}
+                  placeholder="新步骤指令（回车添加）..."
+                  className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-slate-200 placeholder-slate-600 focus:outline-none" />
+                <button onClick={addStep}
+                  className="px-3 py-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs shrink-0">
+                  <Plus className="w-3.5 h-3.5 inline" /> 添加
+                </button>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={() => confirmPlan('confirm')}
+                  className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 rounded-lg text-sm border border-emerald-500/30 transition-colors">
+                  <Play className="w-4 h-4" /> 确认并执行（{editableSteps.length} 步）
+                </button>
+                <button onClick={() => confirmPlan('cancel')}
+                  className="px-4 py-2.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-lg text-sm border border-red-500/20 transition-colors">
+                  放弃
+                </button>
+              </div>
             </div>
           )}
         </div>

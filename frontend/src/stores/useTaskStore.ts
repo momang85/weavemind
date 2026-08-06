@@ -5,6 +5,7 @@ import { DEMO_PLAN, DEMO_AGENTS } from './demoData'
 export const useTaskStore = create<TaskState & {
   startTask: (id: string) => void
   setActiveConversation: (id: string | null) => void
+  setAwaitingConfirm: (v: boolean) => void
   updatePlan: (tree: TaskNode) => void
   addLog: (entry: LogEntry) => void
   setReport: (report: TaskReport) => void
@@ -16,6 +17,7 @@ export const useTaskStore = create<TaskState & {
 }>((set, get) => ({
   currentTaskId: null,
   activeConversationId: null,
+  awaitingConfirm: false,
   planTree: null,
   logs: [],
   status: 'idle',
@@ -34,6 +36,8 @@ export const useTaskStore = create<TaskState & {
   }),
 
   setActiveConversation: (id) => set({ activeConversationId: id }),
+
+  setAwaitingConfirm: (v) => set({ awaitingConfirm: v }),
 
   updatePlan: (tree) => { console.log("[Store] updatePlan:", tree.id, tree.children?.length, "steps"); set({ planTree: tree }) },
 
@@ -75,6 +79,7 @@ export const useTaskStore = create<TaskState & {
   reset: () => set({
     currentTaskId: null,
     activeConversationId: null,
+    awaitingConfirm: false,
     planTree: null,
     logs: [],
     status: 'idle',

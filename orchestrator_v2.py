@@ -56,6 +56,7 @@ class OrchestratorV2:
         self._max_steps = 8
         self._max_parallel = 3
         self._max_iterations = 2
+        self._plan_confirm_timeout = 300
         self._planner_model = None
         _cfg = {}
         try:
@@ -74,6 +75,7 @@ class OrchestratorV2:
             self._max_steps = max(1, int(_sys.get('max_steps', 8)))
             self._max_parallel = max(1, int(_sys.get('max_parallel', 3)))
             self._max_iterations = max(0, int(_sys.get('max_iterations', 2)))
+            self._plan_confirm_timeout = max(30, int(_sys.get('plan_confirm_timeout', 300)))
         except Exception:
             pass
         import redis as sync_redis
@@ -514,7 +516,7 @@ class OrchestratorV2:
         return best
 
     # ── Main Loop ──
-    def run(self, task_id: str, goal: str, context: str = "") -> dict:
+    def run(self, task_id: str, goal: str, context: str = "", auto_run: bool = True) -> dict:
         """Execute a full task lifecycle. Returns final status dict."""
         started = time.time()
         logger.info("Task %s: %s", task_id, goal[:80])
@@ -528,6 +530,23 @@ class OrchestratorV2:
 
         push_progress(self._messaging, task_id, "plan_update",
                       {"steps": steps})
+
+        # 计划确认阶段（auto_run=False 时等待用户编辑/确认）
+        if not auto_run:
+            self._messaging.publish("orchestrator:response", {
+                "task_id": task_id,
+                "status": "AWAITING_CONFIRM",
+                "steps": steps,
+                "goal": goal,
+            })
+            confirmed = self._wait_plan_confirm(task_id, steps)
+            if confirmed is None:
+                push_progress(self._messaging, task_id, "task_complete",
+                              {"status": "FAILED", "summary": "Plan not confirmed, task cancelled"})
+                return {"task_id": task_id, "status": "FAILED", "steps": [],
+                        "report": "Plan not confirmed"}
+            steps = confirmed
+            push_progress(self._messaging, task_id, "plan_update", {"steps": steps})
 
         # 2..N. 执行 + 自主迭代（执行 → 验收评审 → 追加步骤，直到通过或达到上限）
         all_steps: list[dict] = []
@@ -608,6 +627,35 @@ class OrchestratorV2:
                       for s in all_steps],
             "final_report": report,
         }
+
+    def _wait_plan_confirm(self, task_id: str, original_steps: list[dict]) -> list[dict] | None:
+        """等待用户确认/编辑计划；返回确认后的步骤，取消或超时返回 None。"""
+        try:
+            msg = self._redis.brpop([f"plan_confirm:{task_id}"], timeout=self._plan_confirm_timeout)
+            if not msg:
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "info", "agent": "orchestrator",
+                               "message": f"Plan confirm timeout ({self._plan_confirm_timeout}s), cancelling",
+                               "timestamp": self._now_iso()})
+                return None
+            data = json.loads(msg[1])
+            if data.get("action") == "cancel":
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "info", "agent": "orchestrator",
+                               "message": "Plan cancelled by user", "timestamp": self._now_iso()})
+                return None
+            new_steps = data.get("steps")
+            if not new_steps:
+                return original_steps
+            normalized = self._normalize_steps(new_steps)
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "plan", "agent": "orchestrator",
+                           "message": f"Plan confirmed with {len(normalized)} steps",
+                           "timestamp": self._now_iso()})
+            return normalized
+        except Exception as exc:
+            logger.warning("Plan confirm error for %s: %s", task_id, str(exc)[:120])
+            return original_steps
 
     def _execute_steps(self, steps: list[dict], task_id: str, goal: str) -> tuple[list[dict], bool]:
         """并行 DAG 执行一轮步骤，返回（按步骤顺序的结果列表, 是否有失败）。"""
@@ -863,6 +911,7 @@ def main():
             task_id = data.get("task_id", "")
             goal = data.get("goal", "")
             context = data.get("context", "")
+            auto_run = data.get("auto_run", True)
 
             if goal == "EVOLUTION_TRIGGER":
                 push_progress(orch._messaging, task_id, "log",
@@ -884,15 +933,15 @@ def main():
                 continue
 
             # Run task in background thread
-            def _run_task(tid, g, ctx):
+            def _run_task(tid, g, ctx, ar):
                 try:
-                    result = orch.run(tid, g, ctx)
+                    result = orch.run(tid, g, ctx, auto_run=ar)
                     orch._messaging.publish("orchestrator:response", result)
                 except Exception as e:
                     logger.error("Task %s failed: %s", tid, e)
                     orch._messaging.publish("orchestrator:response",
                                             {"task_id": tid, "status": "FAILED", "report": str(e)})
-            threading.Thread(target=_run_task, args=(task_id, goal, context), daemon=True).start()
+            threading.Thread(target=_run_task, args=(task_id, goal, context, auto_run), daemon=True).start()
 
         except Exception as e:
             logger.error("Message error: %s", e)

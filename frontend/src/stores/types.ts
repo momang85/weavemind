@@ -90,6 +90,7 @@ export type TaskStatus = 'idle' | 'running' | 'completed'
 export interface TaskState {
   currentTaskId: string | null
   activeConversationId: string | null
+  awaitingConfirm: boolean
   planTree: TaskNode | null
   logs: LogEntry[]
   status: TaskStatus

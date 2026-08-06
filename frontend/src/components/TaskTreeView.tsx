@@ -53,9 +53,10 @@ function ReplanPopover({ history }: { history: TaskNode[][] }) {
 }
 
 const TreeNode = memo(function TreeNode({
-  node, depth = 0, maxVisible = 2, onSelect
+  node, depth = 0, maxVisible = 2, onSelect, editable = false, onMove, onDelete
 }: {
   node: TaskNode; depth: number; maxVisible: number; onSelect?: (node: TaskNode) => void
+  editable?: boolean; onMove?: (id: string, dir: -1 | 1) => void; onDelete?: (id: string) => void
 }) {
   const [expanded, setExpanded] = useState(depth < maxVisible)
   const hasChildren = node.children.length > 0
@@ -102,6 +103,17 @@ const TreeNode = memo(function TreeNode({
           </span>
         )}
 
+        {editable && depth >= 1 && (
+          <span className="flex items-center gap-0.5 shrink-0">
+            <button onClick={e => { e.stopPropagation(); onMove?.(node.id, -1) }} title="上移"
+              className="w-5 h-5 text-[10px] text-slate-500 hover:text-cyan-400 hover:bg-slate-800 rounded transition-colors">↑</button>
+            <button onClick={e => { e.stopPropagation(); onMove?.(node.id, 1) }} title="下移"
+              className="w-5 h-5 text-[10px] text-slate-500 hover:text-cyan-400 hover:bg-slate-800 rounded transition-colors">↓</button>
+            <button onClick={e => { e.stopPropagation(); onDelete?.(node.id) }} title="删除"
+              className="w-5 h-5 text-[10px] text-slate-500 hover:text-red-400 hover:bg-red-500/10 rounded transition-colors">×</button>
+          </span>
+        )}
+
         {node.replanHistory && node.replanHistory.length > 0 && (
           <ReplanPopover history={node.replanHistory} />
         )}
@@ -123,7 +135,8 @@ const TreeNode = memo(function TreeNode({
                 <div className="absolute left-[3px] top-0 w-px bg-slate-900"
                      style={{ height: 'calc(1rem + 2px)' }} />
               )}
-              <TreeNode node={child} depth={depth + 1} maxVisible={maxVisible} onSelect={onSelect} />
+              <TreeNode node={child} depth={depth + 1} maxVisible={maxVisible} onSelect={onSelect}
+                editable={editable} onMove={onMove} onDelete={onDelete} />
             </div>
           ))}
         </div>
@@ -132,7 +145,12 @@ const TreeNode = memo(function TreeNode({
   )
 })
 
-export default memo(function TaskTreeView({ root, onSelect }: { root: TaskNode | null; onSelect?: (node: TaskNode) => void }) {
+export default memo(function TaskTreeView({
+  root, onSelect, editable = false, onMove, onDelete
+}: {
+  root: TaskNode | null; onSelect?: (node: TaskNode) => void
+  editable?: boolean; onMove?: (id: string, dir: -1 | 1) => void; onDelete?: (id: string) => void
+}) {
   if (!root) {
     return (
       <div className="flex flex-col items-center justify-center h-64 text-slate-600 text-sm">
@@ -174,7 +192,8 @@ export default memo(function TaskTreeView({ root, onSelect }: { root: TaskNode |
       </div>
 
       <div className="pl-1">
-        <TreeNode node={root} depth={0} maxVisible={2} onSelect={onSelect} />
+        <TreeNode node={root} depth={0} maxVisible={2} onSelect={onSelect}
+          editable={editable} onMove={onMove} onDelete={onDelete} />
       </div>
 
       <div className="flex flex-wrap gap-x-4 gap-y-1 pt-3 border-t border-slate-800 text-[11px]">

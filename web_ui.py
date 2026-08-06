@@ -452,9 +452,12 @@ class Handler(BaseHTTPRequestHandler):
                 except Exception:
                     pass
             tid = "ui-" + uuid.uuid4().hex[:10]
+            auto_run = bool(body.get("auto_run", True))
             r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
-            r.publish("orchestrator:main", json.dumps({"task_id":tid,"goal":g,"context":context}, ensure_ascii=False))
-            with _task_lock: _task_results[tid] = {"task_id":tid,"status":"PENDING","goal":g,"steps":[],"report":"","conversation_id":conv_id}
+            r.publish("orchestrator:main", json.dumps({
+                "task_id": tid, "goal": g, "context": context, "auto_run": auto_run,
+            }, ensure_ascii=False))
+            with _task_lock: _task_results[tid] = {"task_id":tid,"status":"PENDING","goal":g,"steps":[],"report":"","conversation_id":conv_id,"auto_run":auto_run}
             # Write to SQLite so History shows immediately
             try:
                 db = sqlite3.connect(DB_PATH, timeout=3)
@@ -465,6 +468,17 @@ class Handler(BaseHTTPRequestHandler):
                 db.commit(); db.close()
             except Exception: pass
             return self._json({"task_id":tid,"conversation_id":conv_id,"status":"PENDING"})
+        if self.path == "/api/plan/confirm":
+            tid = str(body.get("task_id", "")).strip()
+            if not tid:
+                return self._json({"error": "task_id required"}, 400)
+            action = body.get("action", "confirm")
+            r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+            r.rpush(f"plan_confirm:{tid}", json.dumps({
+                "action": action,
+                "steps": body.get("steps"),
+            }, ensure_ascii=False))
+            return self._json({"status": "ok"})
         if self.path == "/api/evolution/trigger":
             r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
             r.publish("orchestrator:main", json.dumps({"task_id":"evo-"+str(int(time.time())),"goal":"EVOLUTION_TRIGGER"}, ensure_ascii=False))

@@ -9,7 +9,7 @@ export function useTaskPoller(taskId: string | null) {
   const {
     demoMode,
     updatePlan, addLog, setReport,
-    fetchSystemStatus,
+    fetchSystemStatus, setAwaitingConfirm,
   } = useTaskStore()
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const seenLogs = useRef<Set<string>>(new Set())
@@ -28,6 +28,8 @@ export function useTaskPoller(taskId: string | null) {
         const res = await fetch('/task/' + taskId)
         const d = await res.json()
         if (d.error) return
+
+        setAwaitingConfirm(d.status === 'AWAITING_CONFIRM')
 
         // First poll: show "Task accepted" immediately
         if (first) { first = false; addLog({ id: 'accepted', timestamp: new Date().toLocaleTimeString(), type: 'plan', agent: 'orchestrator', message: 'Accepted: ' + (d.goal||'').slice(0,50) }) }
@@ -96,6 +98,7 @@ export function useTaskPoller(taskId: string | null) {
 
         // On complete
         if (d.status === 'SUCCESS' || d.status === 'FAILED') {
+          setAwaitingConfirm(false)
           setReport({
             summary: d.status,
             stats: { totalSteps: rawSteps.length,
