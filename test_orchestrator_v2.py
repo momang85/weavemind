@@ -12,6 +12,7 @@
 import json
 import os
 import tempfile
+import threading
 import time
 import unittest
 
@@ -51,6 +52,7 @@ def make_orch(**overrides):
     o._critic_enabled = False
     o._messaging = FakeMessaging()
     o._memory = FakeMemory()
+    o._memory_lock = threading.Lock()
     o._redis = FakeRedis()
     o._planner_llm = None
     for k, v in overrides.items():

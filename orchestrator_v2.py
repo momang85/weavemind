@@ -93,6 +93,7 @@ class OrchestratorV2:
         self._messaging = MessagingClient("localhost", 6379)
         # MessagingClient auto-connects
         self._memory = MemoryManager(os.environ.get("MEMORY_DIR", "./chroma_memory"))
+        self._memory_lock = threading.Lock()
         self._plan_llm = LLMClient()
         # 可选：专用规划模型（更稳的模型负责拆解，执行仍用默认模型）
         _planner_cfg = (_cfg.get("planner") or {}) if isinstance(_cfg, dict) else {}
@@ -132,7 +133,8 @@ class OrchestratorV2:
                            "message": f"Conversation context: {len(context)} chars",
                            "timestamp": self._now_iso()})
 
-        memory_context = self._memory.inject_context(goal)
+        with self._memory_lock:
+            memory_context = self._memory.inject_context(goal)
         if memory_context:
             push_progress(self._messaging, task_id, "log",
                           {"type": "memory", "agent": "orchestrator",
@@ -610,6 +612,11 @@ class OrchestratorV2:
                 return {"task_id": task_id, "status": "FAILED", "steps": [],
                         "report": "Plan not confirmed"}
             steps = confirmed
+            if not steps:
+                push_progress(self._messaging, task_id, "task_complete",
+                              {"status": "FAILED", "summary": "Empty plan confirmed, task cancelled"})
+                return {"task_id": task_id, "status": "FAILED", "steps": [],
+                        "report": "Empty plan confirmed"}
             push_progress(self._messaging, task_id, "plan_update", {"steps": steps})
 
         # 2..N. 执行 + 自主迭代（执行 → 验收评审 → 追加步骤，直到通过或达到上限）
@@ -677,7 +684,8 @@ class OrchestratorV2:
 
         # 4. Memory（仅沉淀成功计划，避免污染 successful_strategies）
         if not has_failure:
-            self._memory.consolidate_memory(goal, all_steps, report)
+            with self._memory_lock:
+                self._memory.consolidate_memory(goal, all_steps, report)
             push_progress(self._messaging, task_id, "log",
                           {"type": "memory", "agent": "orchestrator",
                            "message": "Strategy memory consolidated", "timestamp": self._now_iso()})

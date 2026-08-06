@@ -416,7 +416,7 @@ def _find_cached_task(goal: str, ttl_min: int):
     try:
         db = sqlite3.connect(DB_PATH, timeout=5); db.row_factory = sqlite3.Row
         row = db.execute(
-            "SELECT task_id, report FROM task_history "
+            "SELECT task_id, report, conversation_id FROM task_history "
             "WHERE goal=? AND status='SUCCESS' AND completed_at IS NOT NULL "
             "AND completed_at >= datetime('now', ?) ORDER BY completed_at DESC LIMIT 1",
             (goal, f"-{ttl_min} minutes"),
@@ -598,6 +598,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({
                         "task_id": cached["task_id"], "status": "SUCCESS",
                         "cached": True, "report": cached["report"],
+                        "conversation_id": cached.get("conversation_id") or "",
                     })
             r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
             r.publish("orchestrator:main", json.dumps({
