@@ -1,0 +1,36 @@
+name: zhiguan
+
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: zhiguan-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+
+  app:
+    build: .
+    container_name: zhiguan-app
+    depends_on:
+      - redis
+    environment:
+      # 密钥通过 .env（与 docker-compose.yml 同目录）注入，不写入镜像
+      - LLM_API_KEY=${LLM_API_KEY:?请在 .env 中设置 LLM_API_KEY}
+      - LLM_BASE_URL=${LLM_BASE_URL:-https://api.siliconflow.cn/v1}
+      - LLM_MODEL=${LLM_MODEL:-deepseek-ai/DeepSeek-V3}
+      - EMBEDDING_API_KEY=${EMBEDDING_API_KEY:-${LLM_API_KEY}}
+      - EMBEDDING_BASE_URL=${EMBEDDING_BASE_URL:-${LLM_BASE_URL}}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BAAI/bge-large-zh-v1.5}
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    ports:
+      - "8080:8080"
+    volumes:
+      - app_data:/data
+    restart: unless-stopped
+
+volumes:
+  redis_data:
+  app_data:

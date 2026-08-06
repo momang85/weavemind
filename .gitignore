@@ -1,0 +1,37 @@
+# 密钥与本地配置
+.env
+.env.local
+config.json
+config.local.json
+
+# 数据库、记忆与指标
+*.db
+*.db-shm
+*.db-wal
+chroma_memory/
+chroma_memory_test/
+chroma_memory_verify/
+metrics.csv
+metrics_summary.json
+
+# 日志
+logs/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+
+# 前端
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+
+# 运行状态
+.weavemind/
+poison_strategies.json
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+Thumbs.db

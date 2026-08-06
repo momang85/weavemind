@@ -1,0 +1,300 @@
+import { useState, useCallback, useEffect } from 'react'
+import { Loader2, Sparkles, RefreshCw, Plus, MessagesSquare, FolderOpen, Activity, Eye } from 'lucide-react'
+import { useTaskStore } from '../stores/useTaskStore'
+import { useTaskPoller } from '../stores/useTaskPoller'
+import TaskTreeView from '../components/TaskTreeView'
+import LiveActivity from '../components/LiveActivity'
+import ReportViewer from '../components/ReportViewer'
+import StepInspector from '../components/StepInspector'
+import type { TaskNode, ConversationMessage, TaskReport } from '../stores/types'
+
+type Tab = 'live' | 'context' | 'results'
+
+function statusBadge(status: string) {
+  const base = 'px-2 py-0.5 rounded-full text-[10px] font-semibold'
+  if (status === 'SUCCESS') return `${base} bg-emerald-500/20 text-emerald-400`
+  if (status === 'FAILED') return `${base} bg-red-500/20 text-red-400`
+  return `${base} bg-cyan-500/20 text-cyan-400`
+}
+
+export default function TaskConsole() {
+  const {
+    planTree, status, report,
+    startTask, addLog, demoMode, activeConversationId,
+    setActiveConversation, setReport, reset,
+  } = useTaskStore()
+
+  const [goal, setGoal] = useState('')
+  const [lastGoal, setLastGoal] = useState('')
+  const [taskId, setTaskId] = useState<string | null>(null)
+  const [selectedStep, setSelectedStep] = useState<TaskNode | null>(null)
+  const [tab, setTab] = useState<Tab>('live')
+  const [convMessages, setConvMessages] = useState<ConversationMessage[]>([])
+  const [recentTasks, setRecentTasks] = useState<any[]>([])
+
+  useTaskPoller(demoMode ? null : taskId)
+
+  // 从 URL 恢复会话（历史页“继续对话”跳转）
+  useEffect(() => {
+    const conv = new URLSearchParams(window.location.search).get('conv')
+    if (conv) {
+      setActiveConversation(conv)
+      setTab('context')
+      loadConversation(conv)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  const loadConversation = useCallback(async (convId: string) => {
+    try {
+      const res = await fetch('/api/conversations/' + convId)
+      const data = await res.json()
+      setConvMessages(data.messages ?? [])
+    } catch { /* ignore */ }
+  }, [])
+
+  const loadRecentTasks = useCallback(async () => {
+    try {
+      const res = await fetch('/tasks')
+      const data = await res.json()
+      setRecentTasks((data.tasks ?? []).slice(0, 8))
+    } catch { /* ignore */ }
+  }, [])
+
+  useEffect(() => { loadRecentTasks() }, [loadRecentTasks])
+
+  // 当前任务完成后刷新会话消息
+  useEffect(() => {
+    if (status === 'completed' && activeConversationId) {
+      loadConversation(activeConversationId)
+      loadRecentTasks()
+    }
+  }, [status, activeConversationId, loadConversation, loadRecentTasks])
+
+  const submit = useCallback(async (goalOverride?: string) => {
+    const g = (goalOverride ?? goal).trim()
+    if (!g || status === 'running') return
+
+    if (demoMode) {
+      startTask('demo-task-001')
+      setTaskId('demo-task-001')
+      return
+    }
+
+    setGoal('')
+    setLastGoal(g)
+    setTaskId(null)
+
+    try {
+      const body: any = { goal: g }
+      if (activeConversationId) body.conversation_id = activeConversationId
+      const res = await fetch('/task', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const data = await res.json()
+      const tid = data.task_id
+      setTaskId(tid)
+      startTask(tid)
+      addLog({ timestamp: new Date().toISOString(), type: 'plan', agent: 'orchestrator', message: 'Submitted: ' + g.slice(0, 50) })
+
+      // 进入/保持会话上下文
+      if (data.conversation_id) {
+        setActiveConversation(data.conversation_id)
+        setConvMessages(prev => {
+          const exists = prev.some(m => m.task_id === tid)
+          return exists ? prev : [...prev, {
+            task_id: tid, goal: g, status: 'PENDING',
+            created_at: new Date().toISOString(),
+          }]
+        })
+      }
+    } catch {
+      addLog({ timestamp: new Date().toISOString(), type: 'error', message: 'Failed to submit task' })
+      startTask('failed')
+    }
+  }, [goal, status, demoMode, activeConversationId, startTask, addLog, setActiveConversation])
+
+  const viewFullReport = useCallback(async (tid: string) => {
+    try {
+      const res = await fetch('/task/' + tid)
+      const d = await res.json()
+      const steps = d.steps ?? []
+      const reportObj: TaskReport = {
+        summary: d.status || 'SUCCESS',
+        stats: {
+          totalSteps: steps.length,
+          successSteps: steps.filter((s: any) => s.result?.status === 'SUCCESS').length,
+          failedSteps: steps.filter((s: any) => s.result?.status === 'FAILED').length,
+          duration: 0,
+        },
+        steps: steps.map((s: any) => ({
+          step_id: s.step_id || '', capability: s.capability || '',
+          name: s.instruction || 'Step', status: (s.result?.status || 'pending').toLowerCase(),
+        })),
+        final_report: d.report || d.final_report || '',
+      }
+      setReport(reportObj)
+    } catch { /* ignore */ }
+  }, [setReport])
+
+  const newConversation = useCallback(() => {
+    reset()
+    setConvMessages([])
+    setTaskId(null)
+    window.history.replaceState({}, '', window.location.pathname)
+  }, [reset])
+
+  const isRunning = status === 'running'
+
+  const resultItems = activeConversationId
+    ? convMessages.filter(m => m.status !== 'PENDING')
+    : recentTasks.filter(t => t.status !== 'PENDING')
+
+  return (
+    <div className="max-w-7xl mx-auto space-y-6">
+      {/* 输入区 */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-1.5 flex items-end gap-2">
+        <textarea value={goal}
+          onChange={e => setGoal(e.target.value)}
+          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit() } }}
+          placeholder={demoMode ? 'Demo mode' : 'Enter a task for your AI team...'}
+          disabled={isRunning || demoMode}
+          rows={2}
+          className="flex-1 bg-transparent border-none text-slate-200 placeholder-slate-600 resize-none p-3 text-sm focus:outline-none disabled:opacity-50" />
+        <div className="flex items-center gap-2 pb-1">
+          {activeConversationId && (
+            <span className="hidden sm:inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-violet-500/10 border border-violet-500/20 text-violet-400 text-xs">
+              <MessagesSquare className="w-3.5 h-3.5" /> 对话中
+            </span>
+          )}
+          <button onClick={() => submit()} disabled={isRunning || (!goal.trim() && !demoMode)}
+            className="flex items-center gap-2 bg-cyan-500 hover:bg-cyan-400 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 font-semibold px-5 py-2.5 rounded-lg transition-all text-sm shrink-0">
+            {isRunning ? (<><Loader2 className="w-4 h-4 animate-spin" /> Running...</>) : (<><Sparkles className="w-4 h-4" /> Execute</>)}
+          </button>
+          {status === 'completed' && report?.summary === 'FAILED' && lastGoal && (
+            <button onClick={() => submit(lastGoal)}
+              className="flex items-center gap-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 font-semibold px-5 py-2.5 rounded-lg transition-all text-sm border border-red-500/20 shrink-0">
+              <RefreshCw className="w-4 h-4" /> Retry
+            </button>
+          )}
+          <button onClick={newConversation} title="开始新对话"
+            className="flex items-center gap-2 px-3 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm transition-colors shrink-0">
+            <Plus className="w-4 h-4" /> 新对话
+          </button>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 min-h-[400px]">
+        <div className="col-span-1 lg:col-span-2 bg-slate-900 border border-slate-800 rounded-xl p-5">
+          <h2 className="flex items-center gap-2 text-slate-200 font-semibold text-sm mb-4">
+            <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" /> Execution Plan
+          </h2>
+          {planTree ? (
+            <TaskTreeView root={planTree} onSelect={setSelectedStep} />
+          ) : (
+            <div className="flex flex-col items-center justify-center h-64 text-slate-600">
+              <Sparkles className="w-8 h-8 mb-3 opacity-20" />
+              <p className="text-sm">{isRunning ? 'Generating plan...' : 'Execution plan will appear here'}</p>
+              <p className="text-xs mt-1 opacity-60">{isRunning ? 'Orchestrator working' : 'Submit a task to begin'}</p>
+            </div>
+          )}
+        </div>
+
+        <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden flex flex-col">
+          {/* 标签页：实时动态 / 对话上下文 / 项目结果 */}
+          <div className="flex border-b border-slate-800 shrink-0">
+            {([
+              { key: 'live', label: '实时动态', icon: Activity },
+              { key: 'context', label: '对话', icon: MessagesSquare },
+              { key: 'results', label: '项目结果', icon: FolderOpen },
+            ] as { key: Tab; label: string; icon: any }[]).map(t => (
+              <button key={t.key} onClick={() => setTab(t.key)}
+                className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs transition-colors ${
+                  tab === t.key ? 'text-cyan-400 bg-cyan-500/5 border-b-2 border-cyan-400' : 'text-slate-500 hover:text-slate-300'
+                }`}>
+                <t.icon className="w-3.5 h-3.5" /> {t.label}
+              </button>
+            ))}
+          </div>
+
+          <div className="flex-1 min-h-[360px] overflow-y-auto p-4">
+            {tab === 'live' && <LiveActivity />}
+
+            {tab === 'context' && (
+              <div className="space-y-3">
+                {convMessages.length === 0 && (
+                  <div className="text-center text-slate-600 text-xs py-10">
+                    尚无对话。提交任务后，后续输入将自动延续同一上下文；也可在“历史”页切换旧对话。
+                  </div>
+                )}
+                {convMessages.map(m => (
+                  <div key={m.task_id} className="space-y-2">
+                    <div className="ml-auto max-w-[85%] bg-cyan-500/10 border border-cyan-500/20 text-slate-200 text-xs rounded-lg rounded-tr-none px-3 py-2">
+                      {m.goal}
+                    </div>
+                    <div className="max-w-[95%] bg-slate-800/50 border border-slate-800 text-slate-400 text-xs rounded-lg rounded-tl-none px-3 py-2">
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className={statusBadge(m.status)}>{m.status}</span>
+                        <span className="text-slate-600">{new Date(m.created_at).toLocaleTimeString()}</span>
+                      </div>
+                      <pre className="whitespace-pre-wrap break-all max-h-32 overflow-y-auto font-sans">
+                        {m.report_preview || '（运行中...）'}
+                      </pre>
+                      {(m.status === 'SUCCESS' || m.status === 'FAILED') && (
+                        <div className="flex gap-2 mt-2">
+                          <button onClick={() => viewFullReport(m.task_id)}
+                            className="flex items-center gap-1 text-[10px] text-cyan-400 hover:text-cyan-300">
+                            <Eye className="w-3 h-3" /> 查看完整报告
+                          </button>
+                          <button onClick={() => submit(m.goal)}
+                            className="flex items-center gap-1 text-[10px] text-violet-400 hover:text-violet-300">
+                            <RefreshCw className="w-3 h-3" /> 重跑
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            {tab === 'results' && (
+              <div className="space-y-2">
+                <p className="text-[11px] text-slate-500 mb-3">
+                  {activeConversationId ? '当前对话的完成结果' : '最近完成的任务'}
+                </p>
+                {resultItems.length === 0 && (
+                  <div className="text-center text-slate-600 text-xs py-10">暂无完成结果</div>
+                )}
+                {resultItems.map(t => (
+                  <div key={t.task_id} className="bg-slate-800/40 border border-slate-800 rounded-lg px-3 py-2">
+                    <div className="flex items-center gap-2 mb-1">
+                      <span className={statusBadge(t.status)}>{t.status}</span>
+                      <span className="text-slate-300 text-xs truncate flex-1">{t.goal}</span>
+                    </div>
+                    <div className="flex gap-3">
+                      <button onClick={() => viewFullReport(t.task_id)}
+                        className="flex items-center gap-1 text-[10px] text-cyan-400 hover:text-cyan-300">
+                        <Eye className="w-3 h-3" /> 查看
+                      </button>
+                      <button onClick={() => submit(t.goal)}
+                        className="flex items-center gap-1 text-[10px] text-violet-400 hover:text-violet-300">
+                        <RefreshCw className="w-3 h-3" /> 重新运行
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+
+      <ReportViewer />
+
+      {selectedStep && <StepInspector node={selectedStep} onClose={() => setSelectedStep(null)} />}
+    </div>
+  )
+}

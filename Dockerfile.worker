@@ -1,0 +1,33 @@
+# 织光 Worker Docker 镜像
+# 用于 EvolutionSandbox 竞技场隔离运行
+
+FROM python:3.11-slim
+
+# 设置工作目录
+WORKDIR /app
+
+# 安装依赖
+RUN pip install --no-cache-dir redis chromadb
+
+# 复制公共库和 Worker 代码
+COPY common.py /app/
+COPY llm_client.py /app/
+COPY worker_base.py /app/
+
+# 策略配置文件（运行时挂载或环境变量注入）
+# 容器启动时通过环境变量 STREATEGY_CONFIG_JSON 加载策略
+
+# 资源限制在 docker run 时通过 --memory --cpus 等参数设置
+# 默认入口：启动 Worker
+ENV PYTHONUNBUFFERED=1
+
+# 默认以 search_agent 运行
+CMD ["python", "-u", "worker_base.py"]
+
+# 注意事项：
+# 1. 运行时通过 -e STRATEGY_CONFIG='{"temperature": 0.7, ...}' 注入策略
+# 2. 通过 -e LLM_API_KEY / LLM_BASE_URL / LLM_MODEL 注入 LLM 配置
+# 3. 通过 -e REDIS_HOST / REDIS_PORT 注入 Redis 连接
+# 4. 资源限制示例：
+#    docker run --memory=256m --cpus=1 --network=zhiguang-net \
+#      -e STRATEGY_CONFIG='{...}' zhiguang-worker:latest

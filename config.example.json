@@ -1,0 +1,26 @@
+{
+  "llm": {
+    "api_key": "YOUR_API_KEY",
+    "base_url": "https://api.siliconflow.cn/v1",
+    "model": "deepseek-ai/DeepSeek-V3"
+  },
+  "embedding": {
+    "api_key": "YOUR_EMBEDDING_API_KEY",
+    "base_url": "https://api.siliconflow.cn/v1",
+    "model": "BAAI/bge-large-zh-v1.5"
+  },
+  "redis": {
+    "host": "localhost",
+    "port": 6379
+  },
+  "system": {
+    "task_timeout": 90,
+    "max_retry": 2,
+    "replan_depth": 2,
+    "guardian_heartbeat": 20,
+    "critic": true,
+    "critic_timeout": 30,
+    "max_steps": 8,
+    "scheduler": false
+  }
+}
