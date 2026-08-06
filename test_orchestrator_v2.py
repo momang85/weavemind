@@ -165,6 +165,25 @@ class TestBestDeliverable(unittest.TestCase):
         results = [{"status": "SUCCESS", "result": '{"status": "success", "shape": [1, 2]}'}]
         self.assertEqual(self.o._best_deliverable(steps, results), "")
 
+    def test_report_file_preferred_over_longer_summary(self):
+        with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as f:
+            f.write("# 正式演讲稿\n\n各位评委好，以下是我的实训汇报……" + "内容" * 20)
+            path = f.name
+        try:
+            steps = [
+                {"capability": "content_summary", "instruction": "x"},
+                {"capability": "report_generator", "instruction": "y"},
+            ]
+            results = [
+                {"status": "SUCCESS", "result": "# 检查摘要" + "长" * 400},  # 更长但只是摘要
+                {"status": "SUCCESS",
+                 "result": json.dumps({"status": "success", "report_path": path})},
+            ]
+            best = self.o._best_deliverable(steps, results)
+            self.assertTrue(best.startswith("# 正式演讲稿"))
+        finally:
+            os.unlink(path)
+
 
 class TestExecuteStepsDag(unittest.TestCase):
     def setUp(self):

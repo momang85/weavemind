@@ -524,8 +524,9 @@ class OrchestratorV2:
         优先 content_summary / report_generator 的 Markdown 文档（含文件读取）；
         code_execution 的长文本仅作兜底；都没有则返回空串（走汇总兜底）。
         """
-        doc_candidates: list[str] = []
-        code_candidates: list[str] = []
+        report_files: list[str] = []
+        summary_docs: list[str] = []
+        code_texts: list[str] = []
         for s, r in zip(steps, results):
             if r.get("status") != "SUCCESS":
                 continue
@@ -540,7 +541,7 @@ class OrchestratorV2:
                         with open(path, "r", encoding="utf-8") as f:
                             content = f.read()
                         if content.strip():
-                            doc_candidates.append(content)
+                            (report_files if cap == "report_generator" else summary_docs).append(content)
                     except Exception:
                         pass
                 continue
@@ -554,7 +555,7 @@ class OrchestratorV2:
                             if path and os.path.exists(path):
                                 content = open(path, "r", encoding="utf-8").read()
                                 if content.strip():
-                                    doc_candidates.append(content)
+                                    report_files.append(content)
                                     continue
                     except Exception:
                         pass
@@ -564,17 +565,23 @@ class OrchestratorV2:
                 if stripped.startswith("{") or stripped.startswith("["):
                     continue
                 if cap in ("content_summary", "report_generator"):
-                    doc_candidates.append(stripped)
+                    summary_docs.append(stripped)
                 else:
-                    code_candidates.append(stripped)
-        pool = doc_candidates or code_candidates
-        if not pool:
-            return ""
-        # 优先含 Markdown 结构标记的文档
-        md = [c for c in pool if ("#" in c[:200] or "|" in c[:500] or "```" in c)]
-        best = max(md or pool, key=len)
-        logger.info("Final report: deliverable from step content (%d chars)", len(best))
-        return best
+                    code_texts.append(stripped)
+
+        def _pick(pool: list[str]) -> str:
+            if not pool:
+                return ""
+            md = [c for c in pool if ("#" in c[:200] or "|" in c[:500] or "```" in c)]
+            return max(md or pool, key=len)
+
+        # 优先级：report_generator 落盘正式文档 > 内容摘要 > 代码文本
+        for pool in (report_files, summary_docs, code_texts):
+            best = _pick(pool)
+            if best:
+                logger.info("Final report: deliverable from step content (%d chars)", len(best))
+                return best
+        return ""
 
     # ── Main Loop ──
     def run(self, task_id: str, goal: str, context: str = "",
@@ -913,6 +920,9 @@ class OrchestratorV2:
                 snippet = str(prev_res)[:2500] if prev_res else ''
                 if snippet:
                     instr += f"\n[上一步结果 {dep_id}]:\n{snippet}"
+            instr += ("\n[指令] 仅使用与任务目标主题直接相关的信息；"
+                      "若上一步结果中的来源与主题无关（如无关政策新闻、其他领域文档、垃圾站点或空结果），"
+                      "一律不要纳入输出，并注明已剔除无关内容。")
         return instr
 
     def _dispatch_step_safe(self, goal: str, step: dict, task_id: str, state: dict) -> dict:

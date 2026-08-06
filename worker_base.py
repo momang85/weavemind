@@ -444,6 +444,29 @@ class BaseWorker(ABC):
 class SearchAgent(BaseWorker):
     """Real web search agent using DuckDuckGo (free, no API key)."""
 
+    _SPAM_DOMAINS = ("susmeat.com", "aydvjch.cc", "example.com")
+
+    def _filter_results(self, query: str, results: list[dict]) -> list[dict]:
+        """按主题相关性过滤搜索结果：剔除垃圾域、无标题/URL、与查询主题无重叠的结果。"""
+        import re as _re
+
+        tokens = set(_re.findall(r"[\u4e00-\u9fff]{2,}", query))
+        tokens |= set(w.lower() for w in _re.findall(r"[a-z][a-z0-9-]{2,}", query))
+        kept: list[dict] = []
+        for r in results:
+            title = str(r.get("title") or "")
+            url = str(r.get("url") or "")
+            snip = str(r.get("snippet") or "")
+            if not title or not url or not url.startswith("http"):
+                continue
+            if any(d in url for d in self._SPAM_DOMAINS):
+                continue
+            hay = (title + " " + snip).lower()
+            if tokens and not any(tok in hay for tok in tokens):
+                continue
+            kept.append(r)
+        return kept
+
     def _search_bing(self, query: str) -> list[dict]:
         """备用搜索源：Bing HTML 结果解析（无需 API Key）。"""
         import re as _re
@@ -475,6 +498,7 @@ class SearchAgent(BaseWorker):
     def execute(self, instruction: str) -> str:
         """多源搜索：DuckDuckGo → Bing → mock。"""
         logger.info("SearchAgent searching: %s", instruction)
+        source_ok = False
         try:
             from ddgs import DDGS
             results = []
@@ -485,23 +509,29 @@ class SearchAgent(BaseWorker):
                         "url": r.get("href", ""),
                         "snippet": r.get("body", ""),
                     })
+            source_ok = True
+            results = self._filter_results(instruction, results)
             if results:
                 return json.dumps(results, ensure_ascii=False, indent=2)
-            logger.warning("DuckDuckGo returned no results, trying Bing")
+            logger.warning("DuckDuckGo results filtered/empty, trying Bing")
         except Exception as e:
             logger.warning("DuckDuckGo search failed: %s, trying Bing", e)
         # 备用源：Bing
         try:
+            source_ok = True
             bing = self._search_bing(instruction)
+            bing = self._filter_results(instruction, bing)
             if bing:
                 return json.dumps(bing, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.warning("Bing search failed: %s", e)
-        # Fallback: mock result
-        time.sleep(0.3)
-        return json.dumps([
-            {"title": f"Mock: {instruction}", "url": "https://example.com/mock", "snippet": "DuckDuckGo unavailable, mock result"}
-        ], ensure_ascii=False)
+        # 两个来源均失败：mock 兜底；有返回但全部被过滤：返回空列表（诚实说明未找到相关资料）
+        if not source_ok:
+            return json.dumps([
+                {"title": f"Mock: {instruction}", "url": "https://example.com/mock",
+                 "snippet": "搜索源不可用"}
+            ], ensure_ascii=False)
+        return json.dumps([])
 
 
 # ============================================================================
