@@ -34,17 +34,22 @@ echo "[3/5] Starting services..."
 python launcher.py
 
 # [4/5] Open browser
+if [ -f frontend/dist/index.html ]; then
+    FRONT_URL="http://localhost:8080"
+else
+    FRONT_URL="http://localhost:5173"
+fi
 echo ""
 echo "============================================"
 echo "  织光系统已启动！"
-echo "  Web 前端: http://localhost:5173"
+echo "  Web 前端: ${FRONT_URL}"
 echo "  停止: python launcher.py stop"
 echo "============================================"
 echo ""
 
 # [5/5] 可选：自动打开浏览器
 if command -v start &>/dev/null; then
-    start "http://localhost:5173" 2>/dev/null || true
+    start "${FRONT_URL}" 2>/dev/null || true
 elif command -v open &>/dev/null; then
-    open "http://localhost:5173" 2>/dev/null || true
+    open "${FRONT_URL}" 2>/dev/null || true
 fi

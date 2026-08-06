@@ -206,9 +206,12 @@ def start_services() -> dict:
             logger.error("[%s] failed to start: %s", name, exc)
 
     _write_pids(pids)
-    logger.info(
-        "All services started. WebUI: http://localhost:8080  Frontend: http://localhost:5173"
+    front_url = (
+        "http://localhost:8080"
+        if (BASE_DIR / "frontend" / "dist" / "index.html").exists()
+        else "http://localhost:5173"
     )
+    logger.info("All services started. WebUI: http://localhost:8080  Frontend: %s", front_url)
     return pids
 
 

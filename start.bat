@@ -38,10 +38,15 @@ python launcher.py
 
 :: ---- [5/6] Open browser ----
 echo.
+if exist frontend\dist\index.html (
+    set "FRONT_URL=http://localhost:8080"
+) else (
+    set "FRONT_URL=http://localhost:5173"
+)
 echo   ============================================
-echo     Ready. http://localhost:5173
+echo     Ready. %FRONT_URL%
 echo     Double-click stop.bat to shutdown
 echo   ============================================
 echo.
-start http://localhost:5173
+start "" "%FRONT_URL%"
 pause
