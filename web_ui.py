@@ -24,6 +24,7 @@ _memory_manager_lock = threading.Lock()
 _EVOLUTION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "evolution_history.json")
 _evolution_results = []
 _evolution_lock = threading.Lock()
+_memory_summary_cache = {"text": "", "ts": 0.0, "signature": ""}
 
 
 def _now_iso():
@@ -333,6 +334,51 @@ def _get_memory_data():
         "strategies": mem.list_strategies(50) if mem else [],
     }
 
+def _get_memory_summary(refresh: bool = False) -> dict:
+    """让 LLM 基于真实记忆生成一段"系统自述"（带缓存与兜底文案）。"""
+    global _memory_summary_cache
+    mem = _get_memory_manager()
+    stats = _get_memory_stats()
+    if mem is None:
+        return {"summary": "", "cached": False, "error": "memory unavailable"}
+    convs = mem.list_conversations(30)
+    strats = mem.list_strategies(30)
+    goals = [str(c.get("metadata", {}).get("goal", ""))[:100] for c in convs if c.get("metadata", {}).get("goal")]
+    topics = [str(s.get("metadata", {}).get("goal_keywords", ""))[:80] for s in strats if s.get("metadata", {}).get("goal_keywords")]
+    sig = f"{stats.get('conversations')}:{stats.get('strategies')}:{len(goals)}:{len(topics)}"
+    now = time.time()
+    if (not refresh and _memory_summary_cache["text"]
+            and sig == _memory_summary_cache["signature"]
+            and now - _memory_summary_cache["ts"] < 600):
+        return {"summary": _memory_summary_cache["text"], "cached": True}
+
+    fallback = (
+        f"我是织光——一支运行在你本地的 AI 团队。我已完成了 {stats.get('conversations', 0)} 项任务、"
+        f"沉淀了 {stats.get('strategies', 0)} 条成功策略"
+        + (f"，最近涉足：{'、'.join(topics[:4])}" if topics else "")
+        + "。我可以帮你调研、分析数据、写报告，还会在任务后自我复盘与进化。"
+    )
+    text = ""
+    if goals or topics:
+        prompt = (
+            "你是织光智能体系统。请基于以下真实记忆数据，用第一人称写一段 150-300 字的中文自述，"
+            "说明：1) 我服务过哪些类型的任务（挑 3-5 个代表性目标）；2) 我积累了多少经验"
+            f"（对话 {stats.get('conversations', 0)} 条、策略 {stats.get('strategies', 0)} 条）；"
+            "3) 我擅长什么、能怎么帮你。语气自信、有感染力，适合发布到社交媒体。直接输出正文，不要标题。\n\n"
+            f"最近任务目标：{json.dumps(goals[:8], ensure_ascii=False)}\n"
+            f"成功策略主题：{json.dumps(topics[:8], ensure_ascii=False)}"
+        )
+        try:
+            from llm_client import call_llm
+            result = call_llm("你是一个会自我介绍的多智能体系统。", prompt, expect_json=False)
+            text = str(result.get("content") or "").strip()
+        except Exception:
+            text = ""
+    if not text:
+        text = fallback
+    _memory_summary_cache = {"text": text, "ts": now, "signature": sig}
+    return {"summary": text, "cached": False}
+
 def _append_evolution(result: dict) -> None:
     """记录一轮进化结果（内存 + 落盘），供锦标赛回放。"""
     global _evolution_results
@@ -429,6 +475,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"events": list(reversed(_events[-100:]))})
         if p == "/api/memory":
             return self._json(_get_memory_data())
+        if p == "/api/memory/summary":
+            refresh = "refresh=1" in urlparse(self.path).query
+            return self._json(_get_memory_summary(refresh))
         if p == "/api/evolution":
             with _evolution_lock:
                 return self._json({"rounds": list(reversed(_evolution_results))})

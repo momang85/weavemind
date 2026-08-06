@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Brain, FlaskConical, ChevronDown, ChevronRight, Play, CheckCircle2, XCircle } from 'lucide-react'
+import { Brain, FlaskConical, ChevronDown, ChevronRight, Play, CheckCircle2, XCircle, Sparkles, Copy, RefreshCw } from 'lucide-react'
 import type { MemoryDoc, EvolutionRound } from '../stores/types'
 
 function chip(text: string, cls: string) {
@@ -13,6 +13,8 @@ export default function Memory() {
   const [rounds, setRounds] = useState<EvolutionRound[]>([])
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [loading, setLoading] = useState(true)
+  const [summary, setSummary] = useState('')
+  const [summaryLoading, setSummaryLoading] = useState(false)
 
   const load = useCallback(async () => {
     try {
@@ -30,6 +32,26 @@ export default function Memory() {
 
   useEffect(() => { load() }, [load])
 
+  const loadSummary = useCallback(async (refresh = false) => {
+    setSummaryLoading(true)
+    try {
+      const res = await fetch('/api/memory/summary' + (refresh ? '?refresh=1' : ''))
+      const d = await res.json()
+      setSummary(d.summary || '')
+    } catch {}
+    setSummaryLoading(false)
+  }, [])
+
+  useEffect(() => { loadSummary() }, [loadSummary])
+
+  const copySummary = async () => {
+    if (!summary) return
+    try {
+      await navigator.clipboard.writeText(summary)
+      alert('已复制')
+    } catch {}
+  }
+
   const toggle = (id: string) => setExpanded(prev => ({ ...prev, [id]: !prev[id] }))
 
   const triggerEvolution = async () => {
@@ -44,6 +66,28 @@ export default function Memory() {
       <div className="flex items-center justify-between">
         <h2 className="text-slate-200 font-semibold text-lg">记忆与进化</h2>
         <button onClick={load} className="text-xs text-cyan-400 hover:text-cyan-300">刷新</button>
+      </div>
+
+      {/* 系统自述 */}
+      <div className="bg-gradient-to-br from-violet-500/10 via-slate-900 to-cyan-500/10 border border-violet-500/20 rounded-xl p-5">
+        <div className="flex items-center gap-2 mb-3">
+          <Sparkles className="w-5 h-5 text-violet-400" />
+          <h3 className="text-slate-200 font-semibold text-sm">系统自述 · 它眼中的自己</h3>
+          <div className="ml-auto flex gap-2">
+            <button onClick={() => loadSummary(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-500/10 hover:bg-violet-500/20 text-violet-400 text-xs">
+              <RefreshCw className="w-3 h-3" /> {summaryLoading ? '生成中...' : '重新生成'}
+            </button>
+            <button onClick={copySummary}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs">
+              <Copy className="w-3 h-3" /> 复制
+            </button>
+          </div>
+        </div>
+        <p className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">
+          {summaryLoading && !summary ? '正在让 LLM 阅读记忆库并生成自述...' : (summary || '暂无自述，点击「重新生成」。')}
+        </p>
+        <p className="text-[11px] text-slate-600 mt-2">基于真实记忆数据生成，可直接用于发布到社交媒体。</p>
       </div>
 
       {/* 记忆库 */}
