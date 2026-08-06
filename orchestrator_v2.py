@@ -15,6 +15,14 @@ from ws_helpers import push_progress
 
 logger = logging.getLogger(__name__)
 
+
+def _loads_json_loose(text: str) -> dict:
+    """先严格解析，失败后允许字符串内未转义控制字符（LLM 常在长指令中插入字面换行）。"""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return json.loads(text, strict=False)
+
 # ─────────────────────────────────────────────
 # Planner prompt
 # ─────────────────────────────────────────────
@@ -35,6 +43,13 @@ Output ONLY this JSON with no extra text:
 KNOWN_CAPABILITIES = {
     "web_search", "web_fetch", "data_loader", "data_analyzer", "model_trainer",
     "report_generator", "content_summary", "code_execution", "file_io", "package",
+}
+
+_TOPIC_STOPWORDS = {
+    "一个", "我们", "你们", "他们", "它们", "完成", "输出", "生成", "要求",
+    "进行", "需要", "可以", "是否", "如何", "什么", "请", "帮", "并", "与",
+    "和", "在", "用", "把", "将", "给", "让", "这", "那", "为", "对", "其",
+    "及", "或", "等", "做", "写", "的", "了", "是", "我", "你", "他", "她", "它",
 }
 
 ITERATOR_SYSTEM = """你是严格的交付验收评审。根据用户目标评估交付物是否达标。
@@ -64,6 +79,7 @@ class OrchestratorV2:
         self._max_iterations = 2
         self._plan_confirm_timeout = 300
         self._stall_timeout = 60
+        self._max_offtopic_regenerations = 1
         self._planner_model = None
         _cfg = {}
         try:
@@ -168,19 +184,7 @@ class OrchestratorV2:
             )
             try:
                 raw = self._planner_llm.call(PLANNER_SYSTEM, attempt_prompt, expect_json=True)
-                if isinstance(raw, str):
-                    clean = raw.strip()
-                    if clean.startswith('```json'):
-                        clean = clean[7:]
-                    if clean.startswith('```'):
-                        clean = clean[3:]
-                    if clean.endswith('```'):
-                        clean = clean[:-3]
-                    plan_data = json.loads(clean.strip())
-                elif isinstance(raw, dict):
-                    plan_data = raw
-                else:
-                    plan_data = json.loads(str(raw))
+                plan_data = self._parse_plan_response(raw)
                 break
             except Exception as e:
                 last_error = e
@@ -204,6 +208,25 @@ class OrchestratorV2:
 
         steps = self._normalize_steps(plan_data.get("steps", []))
         steps = self._ensure_report_step(steps, task_id)
+        # 规划自检：计划主题与目标明显不符时，用强约束重生成一次
+        if steps and not self._plan_topic_ok(goal, steps):
+            logger.warning("Plan appears off-topic for goal: %s", goal[:50])
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "plan", "agent": "orchestrator",
+                           "message": "Plan off-topic, regenerating with strict topic prompt",
+                           "timestamp": self._now_iso()})
+            try:
+                strict_prompt = (
+                    "严格围绕用户目标主题重写计划，禁止偏离、泛化或替换到其他主题。"
+                    f"用户目标：\n{goal}\n\n重新输出严格JSON计划。"
+                )
+                raw2 = self._planner_llm.call(PLANNER_SYSTEM, strict_prompt, expect_json=True)
+                steps2 = self._normalize_steps(self._parse_plan_response(raw2))
+                steps2 = self._ensure_report_step(steps2, task_id)
+                if steps2 and self._plan_topic_ok(goal, steps2):
+                    steps = steps2
+            except Exception as exc:
+                logger.warning("Off-topic regeneration failed: %s", str(exc)[:150])
         if not steps:
             steps = [{
                 "step_id": "1",
@@ -277,6 +300,38 @@ class OrchestratorV2:
             out = out[:self._max_steps]
         return out
 
+    def _parse_plan_response(self, raw) -> dict:
+        """把规划器返回（dict 或带代码围栏的 JSON 字符串）解析为 dict。"""
+        if isinstance(raw, dict):
+            return raw
+        clean = str(raw).strip()
+        if clean.startswith("```json"):
+            clean = clean[7:]
+        if clean.startswith("```"):
+            clean = clean[3:]
+        if clean.endswith("```"):
+            clean = clean[:-3]
+        return _loads_json_loose(clean.strip())
+
+    def _topic_tokens(self, text: str) -> set[str]:
+        """从目标中提取主题词（中文 2-4 字片段 + 英文词，剔除停用词）。"""
+        import re as _re
+
+        tokens = set()
+        for w in _re.findall(r"[\u4e00-\u9fff]{2,4}", text):
+            if w not in _TOPIC_STOPWORDS:
+                tokens.add(w)
+        tokens |= {w.lower() for w in _re.findall(r"[a-z][a-z0-9-]{2,}", text)}
+        return tokens
+
+    def _plan_topic_ok(self, goal: str, steps: list[dict]) -> bool:
+        """计划是否明显围绕目标主题：至少一个步骤指令命中一个主题词。"""
+        tokens = self._topic_tokens(goal)
+        if not tokens:
+            return True
+        hay = " ".join(str(s.get("instruction", "")) for s in steps).lower()
+        return any(t in hay for t in tokens)
+
     def _reflect(self, goal: str, report: str, task_id: str) -> dict | None:
         """验收评审：判断交付物是否达标，不达标则给出缺口与下一步。"""
         push_progress(self._messaging, task_id, "log",
@@ -296,7 +351,7 @@ class OrchestratorV2:
                 clean = clean.strip("`")
                 if clean.startswith("json"):
                     clean = clean[4:]
-            return json.loads(clean.strip())
+            return _loads_json_loose(clean.strip())
         except Exception as exc:
             logger.warning("Reflection failed, stopping iteration: %s", str(exc)[:150])
             return None
@@ -339,7 +394,7 @@ class OrchestratorV2:
                     clean = clean[3:]
                 if clean.endswith("```"):
                     clean = clean[:-3]
-                plan_data = json.loads(clean.strip())
+                    plan_data = _loads_json_loose(clean.strip())
             steps = plan_data.get("steps", [])
             if steps:
                 alt = steps[0]
@@ -415,7 +470,7 @@ class OrchestratorV2:
                     clean = clean[3:]
                 if clean.endswith("```"):
                     clean = clean[:-3]
-                plan_data = _json.loads(clean.strip())
+                plan_data = _loads_json_loose(clean.strip())
             revised = plan_data.get("steps") or []
             if revised:
                 for i, s in enumerate(revised):
@@ -563,7 +618,8 @@ class OrchestratorV2:
                         if isinstance(parsed, dict):
                             path = parsed.get("report_path") or parsed.get("path")
                             if path and os.path.exists(path):
-                                content = open(path, "r", encoding="utf-8").read()
+                                with open(path, "r", encoding="utf-8") as f:
+                                    content = f.read()
                                 if content.strip():
                                     report_files.append(content)
                                     continue

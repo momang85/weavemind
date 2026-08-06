@@ -312,5 +312,22 @@ class TestRunIteration(unittest.TestCase):
         self.assertTrue(res["final_report"].startswith("#"))
 
 
+class TestPlanTopicGuard(unittest.TestCase):
+    def setUp(self):
+        self.o = make_orch()
+
+    def test_on_topic_plan_ok(self):
+        steps = [{"capability": "code_execution", "instruction": "用 pygame 实现愤怒的小鸟游戏"}]
+        self.assertTrue(self.o._plan_topic_ok("写一个愤怒的小鸟", steps))
+
+    def test_off_topic_plan_detected(self):
+        steps = [{"capability": "web_search", "instruction": "搜索 2026 AI 行业三大趋势"}]
+        self.assertFalse(self.o._plan_topic_ok("写一个愤怒的小鸟", steps))
+
+    def test_parse_plan_response_fences_and_loose(self):
+        out = self.o._parse_plan_response('```json\n{"steps": [{"a": "b"}]}\n```')
+        self.assertEqual(out["steps"][0]["a"], "b")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

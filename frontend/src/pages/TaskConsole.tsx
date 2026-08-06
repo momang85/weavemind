@@ -115,6 +115,11 @@ export default function TaskConsole() {
         body: JSON.stringify(body),
       })
       const data = await res.json()
+      if (!res.ok || !data.task_id) {
+        addLog({ timestamp: new Date().toISOString(), type: 'error', message: data.error || 'Failed to submit task' })
+        startTask('failed')
+        return
+      }
       const tid = data.task_id
       setTaskId(tid)
       startTask(tid)

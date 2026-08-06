@@ -1,5 +1,5 @@
 """WeaveMind Web UI"""
-import base64, io, json, os, sqlite3, threading, time, uuid
+import base64, io, json, logging, os, socket, sqlite3, threading, time, uuid
 from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
@@ -21,11 +21,29 @@ _METRICS_SUMMARY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "met
 _STALE_AFTER_SECONDS = int(os.environ.get("STALE_TASK_TIMEOUT", "1800"))
 _memory_manager = None
 _memory_manager_lock = threading.Lock()
+_mem_stats_cache = {"ts": 0.0, "data": {"conversations": 0, "strategies": 0}}
+_mem_stats_lock = threading.Lock()
 _EVOLUTION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "evolution_history.json")
 _evolution_results = []
 _evolution_lock = threading.Lock()
 _memory_summary_cache = {"text": "", "ts": 0.0, "signature": ""}
 _TEMPLATES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates.json")
+
+def _new_redis():
+    """带超时的 Redis 客户端：Redis 不可用时快速失败，避免请求挂死。"""
+    return redis.Redis(
+        host=REDIS_HOST, port=REDIS_PORT, decode_responses=True,
+        socket_connect_timeout=2, socket_timeout=3,
+    )
+
+def _redis_ready(timeout: float = 0.5) -> bool:
+    """快速 TCP 探测：Redis 不可用（如容器停止后 Docker 遗留的静默端口代理）时，
+    毫秒级失败，避免 redis-py 在连接超时后反复重试导致请求挂死。"""
+    try:
+        with socket.create_connection((REDIS_HOST, REDIS_PORT), timeout=timeout):
+            return True
+    except OSError:
+        return False
 
 
 def _now_iso():
@@ -165,7 +183,9 @@ def _save_config(cfg):
         json.dump(existing, f, ensure_ascii=False, indent=2)
 
 def _listen_results():
-    r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+    while not _redis_ready():
+        time.sleep(2)
+    r = _new_redis()
     ps = r.pubsub(); ps.subscribe("orchestrator:response")
     for msg in ps.listen():
         if msg["type"] == "message":
@@ -213,7 +233,9 @@ def _listen_results():
 
 def _listen_events():
     """订阅告警/进化/守护事件，供 Health 页真实展示。"""
-    r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+    while not _redis_ready():
+        time.sleep(2)
+    r = _new_redis()
     ps = r.pubsub()
     ps.subscribe("orchestrator:alert", "orchestrator:evolution_result", "guardian.heartbeat")
     for msg in ps.listen():
@@ -255,9 +277,11 @@ def _system_status():
         agents = [dict(row) for row in db.execute("SELECT * FROM agents").fetchall()]
         for a in agents:
             a["last_heartbeat"] = _iso_utc(a.get("last_heartbeat"))
-        r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
-        try: queues = {a["agent_id"]: r.llen(f"task_queue:{a['agent_id']}") for a in agents}
-        except Exception: queues = {}
+        queues = {}
+        if _redis_ready():
+            r = _new_redis()
+            try: queues = {a["agent_id"]: r.llen(f"task_queue:{a['agent_id']}") for a in agents}
+            except Exception: queues = {}
         total = db.execute("SELECT COUNT(*) as c FROM task_history").fetchone()["c"]
         success = db.execute("SELECT COUNT(*) as c FROM task_history WHERE status='SUCCESS'").fetchone()["c"]
         today = db.execute(
@@ -289,20 +313,21 @@ def _system_status():
 
 def _get_llm_usage():
     total = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
-    try:
-        r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
-        keys = r.keys("llm_usage*")
-        for k in keys:
-            raw = r.get(k)
-            if raw:
-                d = json.loads(raw)
-                total["calls"] += int(d.get("calls", 0))
-                total["prompt_tokens"] += int(d.get("prompt_tokens", 0))
-                total["completion_tokens"] += int(d.get("completion_tokens", 0))
-        if total["calls"]:
-            return total
-    except Exception:
-        pass
+    if _redis_ready():
+        try:
+            r = _new_redis()
+            keys = r.keys("llm_usage*")
+            for k in keys:
+                raw = r.get(k)
+                if raw:
+                    d = json.loads(raw)
+                    total["calls"] += int(d.get("calls", 0))
+                    total["prompt_tokens"] += int(d.get("prompt_tokens", 0))
+                    total["completion_tokens"] += int(d.get("completion_tokens", 0))
+            if total["calls"]:
+                return total
+        except Exception:
+            pass
     try:
         from llm_client import get_usage_stats
         return get_usage_stats()
@@ -314,22 +339,41 @@ def _get_memory_manager():
     global _memory_manager
     try:
         if _memory_manager is None:
-            with _memory_manager_lock:
+            # 非阻塞获取：若预热线程正在初始化，本请求直接返回 None（快速失败）
+            if not _memory_manager_lock.acquire(blocking=False):
+                return _memory_manager
+            try:
                 if _memory_manager is None:
                     from memory_manager import MemoryManager
                     _memory_manager = MemoryManager(os.environ.get("MEMORY_DIR", "./chroma_memory"))
+            finally:
+                _memory_manager_lock.release()
         return _memory_manager
     except Exception:
         return None
 
-def _get_memory_stats():
+def _refresh_memory_stats() -> dict:
+    global _mem_stats_cache
     mem = _get_memory_manager()
-    if mem is None:
-        return {"conversations": 0, "strategies": 0}
-    try:
-        return mem.stats()
-    except Exception:
-        return {"conversations": 0, "strategies": 0}
+    data = {"conversations": 0, "strategies": 0}
+    if mem is not None:
+        try:
+            data = mem.stats()
+        except Exception:
+            data = {"conversations": 0, "strategies": 0}
+    with _mem_stats_lock:
+        _mem_stats_cache["ts"] = time.time()
+        _mem_stats_cache["data"] = data
+    return data
+
+def _get_memory_stats() -> dict:
+    """TTL 缓存 + 后台刷新：Chroma 再慢也不阻塞 /api/status。"""
+    with _mem_stats_lock:
+        cached = _mem_stats_cache
+        if time.time() - cached["ts"] < 60:
+            return cached["data"]
+    threading.Thread(target=_refresh_memory_stats, daemon=True).start()
+    return cached["data"]
 
 def _get_memory_data():
     mem = _get_memory_manager()
@@ -646,11 +690,16 @@ class Handler(BaseHTTPRequestHandler):
                         "cached": True, "report": cached["report"],
                         "conversation_id": cached.get("conversation_id") or "",
                     })
-            r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
-            r.publish("orchestrator:main", json.dumps({
-                "task_id": tid, "goal": g, "context": context,
-                "auto_run": auto_run, "template_steps": template_steps,
-            }, ensure_ascii=False))
+            if not _redis_ready():
+                return self._json({"error": "Redis 未连接，任务无法派发。请先启动 Redis（start.bat 或 docker start zhiguan-redis）"}, 503)
+            r = _new_redis()
+            try:
+                r.publish("orchestrator:main", json.dumps({
+                    "task_id": tid, "goal": g, "context": context,
+                    "auto_run": auto_run, "template_steps": template_steps,
+                }, ensure_ascii=False))
+            except Exception:
+                return self._json({"error": "Redis 发布失败，任务未派发"}, 503)
             with _task_lock: _task_results[tid] = {"task_id":tid,"status":"PENDING","goal":g,"steps":[],"report":"","conversation_id":conv_id,"auto_run":auto_run}
             # Write to SQLite so History shows immediately
             try:
@@ -667,11 +716,16 @@ class Handler(BaseHTTPRequestHandler):
             if not tid:
                 return self._json({"error": "task_id required"}, 400)
             action = body.get("action", "confirm")
-            r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
-            r.rpush(f"plan_confirm:{tid}", json.dumps({
-                "action": action,
-                "steps": body.get("steps"),
-            }, ensure_ascii=False))
+            if not _redis_ready():
+                return self._json({"error": "Redis 未连接，无法确认计划"}, 503)
+            r = _new_redis()
+            try:
+                r.rpush(f"plan_confirm:{tid}", json.dumps({
+                    "action": action,
+                    "steps": body.get("steps"),
+                }, ensure_ascii=False))
+            except Exception:
+                return self._json({"error": "Redis 写入失败，无法确认计划"}, 503)
             return self._json({"status": "ok"})
         if self.path == "/api/context/extract":
             filename = str(body.get("filename") or "").strip()
@@ -692,8 +746,13 @@ class Handler(BaseHTTPRequestHandler):
                 "truncated": len(text) > 30000,
             })
         if self.path == "/api/evolution/trigger":
-            r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
-            r.publish("orchestrator:main", json.dumps({"task_id":"evo-"+str(int(time.time())),"goal":"EVOLUTION_TRIGGER"}, ensure_ascii=False))
+            if not _redis_ready():
+                return self._json({"error": "Redis 未连接，无法触发进化"}, 503)
+            r = _new_redis()
+            try:
+                r.publish("orchestrator:main", json.dumps({"task_id":"evo-"+str(int(time.time())),"goal":"EVOLUTION_TRIGGER"}, ensure_ascii=False))
+            except Exception:
+                return self._json({"error": "Redis 发布失败，无法触发进化"}, 503)
             return self._json({"status":"triggered"})
 
         if self.path == "/api/single-agent":
@@ -712,8 +771,13 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/kill-worker":
             agent_id = body.get("agent_id","")
             if not agent_id: return self._json({"error":"agent_id required"},400)
-            r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
-            r.publish(f"agent.kill.{agent_id}", json.dumps({"action":"die"}))
+            if not _redis_ready():
+                return self._json({"error": "Redis 未连接，无法停止 worker"}, 503)
+            r = _new_redis()
+            try:
+                r.publish(f"agent.kill.{agent_id}", json.dumps({"action":"die"}))
+            except Exception:
+                return self._json({"error": "Redis 发布失败，无法停止 worker"}, 503)
             return self._json({"status":"killed","agent_id":agent_id})
         if self.path == "/api/config":
             _save_config(body)
@@ -738,10 +802,21 @@ def main():
     setup_logging("webui")
     _init_db()
     _load_evolution_history()
-    threading.Thread(target=_listen_results, daemon=True).start()
-    threading.Thread(target=_listen_events, daemon=True).start()
+    def _supervise(fn):
+        while True:
+            try:
+                fn()
+            except Exception as exc:
+                logging.getLogger("web_ui").warning("Listener crashed, restarting: %s", str(exc)[:120])
+                time.sleep(3)
+
+    threading.Thread(target=_supervise, args=(_listen_results,), daemon=True).start()
+    threading.Thread(target=_supervise, args=(_listen_events,), daemon=True).start()
     # 预热记忆库（避免首个 /api/status 或 /api/memory 请求阻塞）
-    threading.Thread(target=_get_memory_manager, daemon=True).start()
+    def _prewarm_memory():
+        _get_memory_manager()
+        _refresh_memory_stats()
+    threading.Thread(target=_prewarm_memory, daemon=True).start()
 
     def _cleanup_stale_tasks():
         """把长时间卡在 PENDING 的任务标记为过期，避免永久悬挂。"""
