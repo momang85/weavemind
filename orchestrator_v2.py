@@ -225,16 +225,26 @@ class OrchestratorV2:
             return steps
         has_report = any(s.get("capability") in ("content_summary", "report_generator") for s in steps)
         if not has_report:
+            all_ids = [s.get("step_id") for s in steps]
             steps = steps + [{
                 "step_id": f"report-{len(steps) + 1}",
                 "capability": "report_generator",
                 "instruction": "汇总以上所有步骤的结果，生成面向用户的最终交付报告（Markdown，含必要的表格、图表说明与结论）。",
+                "depends_on": all_ids,
                 "timeout": 120,
             }]
             push_progress(self._messaging, task_id, "log",
                           {"type": "plan", "agent": "orchestrator",
                            "message": "Plan self-check: auto-added report step",
                            "timestamp": self._now_iso()})
+        return steps
+
+    def _wire_report_deps(self, steps: list[dict]) -> list[dict]:
+        """报告/总结步骤若无依赖，则自动依赖所有其它步骤（保证执行时带全量上下文）。"""
+        ids = [s.get("step_id") for s in steps]
+        for s in steps:
+            if s.get("capability") in ("content_summary", "report_generator") and not s.get("depends_on"):
+                s["depends_on"] = [i for i in ids if i != s.get("step_id")]
         return steps
 
     def _normalize_steps(self, steps: list) -> list[dict]:
@@ -596,6 +606,7 @@ class OrchestratorV2:
             steps = self._ensure_report_step(steps, task_id)
         else:
             steps = self._plan(goal, task_id, context)
+        steps = self._wire_report_deps(steps)
         if not steps:
             push_progress(self._messaging, task_id, "task_complete",
                           {"status": "FAILED", "summary": "Planning failed"})
@@ -619,6 +630,7 @@ class OrchestratorV2:
                 return {"task_id": task_id, "status": "FAILED", "steps": [],
                         "report": "Plan not confirmed"}
             steps = confirmed
+            steps = self._wire_report_deps(steps)
             if not steps:
                 push_progress(self._messaging, task_id, "task_complete",
                               {"status": "FAILED", "summary": "Empty plan confirmed, task cancelled"})

@@ -130,6 +130,35 @@ class TestEnsureReportStep(unittest.TestCase):
         self.assertEqual(len(steps), 1)
 
 
+class TestWireReportDeps(unittest.TestCase):
+    def setUp(self):
+        self.o = make_orch()
+
+    def test_report_step_without_deps_wired_to_all(self):
+        steps = [
+            {"step_id": "1", "capability": "web_search", "instruction": "a"},
+            {"step_id": "2", "capability": "report_generator", "instruction": "b"},
+        ]
+        out = self.o._wire_report_deps(steps)
+        self.assertEqual(out[1]["depends_on"], ["1"])
+
+    def test_summary_without_deps_wired(self):
+        steps = [
+            {"step_id": "1", "capability": "web_search", "instruction": "a"},
+            {"step_id": "2", "capability": "content_summary", "instruction": "b"},
+        ]
+        out = self.o._wire_report_deps(steps)
+        self.assertEqual(out[1]["depends_on"], ["1"])
+
+    def test_step_with_existing_deps_untouched(self):
+        steps = [
+            {"step_id": "1", "capability": "web_search", "instruction": "a"},
+            {"step_id": "2", "capability": "report_generator", "instruction": "b", "depends_on": ["1"]},
+        ]
+        out = self.o._wire_report_deps(steps)
+        self.assertEqual(out[1]["depends_on"], ["1"])
+
+
 class TestBestDeliverable(unittest.TestCase):
     def setUp(self):
         self.o = make_orch()
