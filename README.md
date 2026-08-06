@@ -84,6 +84,7 @@ python launcher.py status
     "critic_timeout": 30,
     "max_steps": 8,
     "max_parallel": 3,
+    "max_iterations": 2,
     "scheduler": false
   }
 }
@@ -92,7 +93,9 @@ python launcher.py status
 模板见 `config.example.json`。旧 `.env` 仅作环境变量参考（Docker 方式使用）。
 `system.scheduler=true` 开启每日 3:00 自动策略进化；`system.critic=true` 开启计划评审；
 `system.max_steps` 限制单任务最大步骤数（默认 8），`system.max_parallel` 控制并行执行
-并发度（默认 3，无依赖步骤并发执行）；可选 `planner` 段为规划器指定更稳的专用模型。
+并发度（默认 3，无依赖步骤并发执行）；`system.max_iterations` 开启**自主迭代模式**
+（默认 2 轮）：任务完成后自动验收评审，不达标则追加步骤继续执行直到通过（设 0 关闭）；
+可选 `planner` 段为规划器指定更稳的专用模型。
 
 ## 对话上下文
 

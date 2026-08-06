@@ -37,6 +37,7 @@ export interface ConversationMessage {
 export interface TaskNode {
   id: string
   step_id?: string
+  iteration?: number
   name: string
   instruction?: string
   capability: string

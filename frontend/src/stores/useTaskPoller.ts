@@ -39,6 +39,7 @@ export function useTaskPoller(taskId: string | null) {
         const buildChildren = () => rawSteps.map((s: any) => ({
           id: s.step_id || '',
           step_id: s.step_id || '',
+          iteration: s.iteration || 0,
           capability: s.capability || '',
           name: s.instruction || s.name || 'Step',
           status: (s.result?.status || 'pending').toLowerCase(),

@@ -32,6 +32,14 @@ Rules:
 Output ONLY this JSON with no extra text:
 {"steps":[{"step_id":"1","capability":"web_search","instruction":"search for house price dataset","depends_on":[],"timeout":60}]}"""
 
+ITERATOR_SYSTEM = """你是严格的交付验收评审。根据用户目标评估交付物是否达标。
+输出严格JSON：{"accepted": true|false, "gaps": ["缺口1","缺口2"], "next_steps":[{"step_id":"1","capability":"...","instruction":"...","timeout":120}]}
+规则：
+1. accepted=false 只用于明确缺失用户要求的内容；不要吹毛求疵
+2. next_steps 每次最多3个，必须具体可执行，指令用中文并严格围绕目标主题
+3. 可用能力：web_search, web_fetch, data_loader, data_analyzer, model_trainer, report_generator, content_summary, code_execution, file_io, package
+只输出JSON。"""
+
 # ─────────────────────────────────────────────
 # Orchestrator V2
 # ─────────────────────────────────────────────
@@ -47,6 +55,7 @@ class OrchestratorV2:
         self._critic_timeout = 30
         self._max_steps = 8
         self._max_parallel = 3
+        self._max_iterations = 2
         self._planner_model = None
         _cfg = {}
         try:
@@ -64,6 +73,7 @@ class OrchestratorV2:
             self._critic_timeout = max(10, int(_sys.get('critic_timeout', 30)))
             self._max_steps = max(1, int(_sys.get('max_steps', 8)))
             self._max_parallel = max(1, int(_sys.get('max_parallel', 3)))
+            self._max_iterations = max(0, int(_sys.get('max_iterations', 2)))
         except Exception:
             pass
         import redis as sync_redis
@@ -219,6 +229,47 @@ class OrchestratorV2:
                            len(out), self._max_steps, self._max_steps)
             out = out[:self._max_steps]
         return out
+
+    def _reflect(self, goal: str, report: str, task_id: str) -> dict | None:
+        """验收评审：判断交付物是否达标，不达标则给出缺口与下一步。"""
+        push_progress(self._messaging, task_id, "log",
+                      {"type": "iteration", "agent": "orchestrator",
+                       "message": "Reflecting: reviewing deliverable against goal",
+                       "timestamp": self._now_iso()})
+        prompt = (
+            f"Goal:\n{goal}\n\nDeliverable produced:\n{str(report)[:4000]}\n\n"
+            "Assess acceptance and propose next steps if needed."
+        )
+        try:
+            raw = self._planner_llm.call(ITERATOR_SYSTEM, prompt, expect_json=True)
+            if isinstance(raw, dict):
+                return raw
+            clean = str(raw).strip()
+            if clean.startswith("```"):
+                clean = clean.strip("`")
+                if clean.startswith("json"):
+                    clean = clean[4:]
+            return json.loads(clean.strip())
+        except Exception as exc:
+            logger.warning("Reflection failed, stopping iteration: %s", str(exc)[:150])
+            return None
+
+    def _publish_full_state(self, task_id: str, goal: str, all_steps: list[dict], completed_all: dict) -> None:
+        """跨迭代推送全量步骤状态（前端按轮次展示）。"""
+        current = []
+        for s in all_steps:
+            c = dict(s)
+            c["result"] = completed_all.get(s["step_id"], {})
+            current.append(c)
+        try:
+            self._messaging.publish("orchestrator:response", {
+                "task_id": task_id,
+                "status": "RUNNING",
+                "steps": current,
+                "goal": goal,
+            })
+        except Exception as exc:
+            logger.warning("Full state push failed: %s", str(exc)[:120])
 
     def _replan_step(self, goal: str, step: dict, error: str, task_id: str) -> dict | None:
         """步骤失败后，让 LLM 提出一个替代步骤（保留原步骤 ID 的依赖关系）。"""
@@ -478,8 +529,89 @@ class OrchestratorV2:
         push_progress(self._messaging, task_id, "plan_update",
                       {"steps": steps})
 
-        # 2. Execute（并行 DAG 调度：依赖满足即并发执行）
-        completed = {}
+        # 2..N. 执行 + 自主迭代（执行 → 验收评审 → 追加步骤，直到通过或达到上限）
+        all_steps: list[dict] = []
+        completed_all: dict = {}
+        has_failure = False
+        iteration = 0
+        last_steps = steps
+        last_results: list[dict] = []
+
+        while True:
+            iter_results, iter_failed = self._execute_steps(steps, task_id, goal)
+            has_failure = has_failure or iter_failed
+            last_steps = steps
+            last_results = iter_results
+            for s, r in zip(steps, iter_results):
+                completed_all[s["step_id"]] = r
+                s.setdefault("iteration", iteration)
+            all_steps.extend(steps)
+
+            report = self._best_deliverable(last_steps, last_results) or self._finalize(goal, last_steps, last_results)
+            self._publish_full_state(task_id, goal, all_steps, completed_all)
+
+            if has_failure or self._max_iterations <= 0 or iteration >= self._max_iterations:
+                break
+            verdict = self._reflect(goal, report, task_id)
+            if not verdict or verdict.get("accepted"):
+                if verdict and verdict.get("accepted"):
+                    push_progress(self._messaging, task_id, "log",
+                                  {"type": "info", "agent": "orchestrator",
+                                   "message": "Reflection: deliverable accepted",
+                                   "timestamp": self._now_iso()})
+                break
+            gaps = verdict.get("gaps") or []
+            next_steps = self._normalize_steps(verdict.get("next_steps") or [])
+            if not next_steps:
+                break
+            iteration += 1
+            for s in next_steps:
+                s["iteration"] = iteration
+                s["depends_on"] = []
+                s["step_id"] = f"i{iteration}-{s['step_id']}"
+            steps = next_steps
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "iteration", "agent": "orchestrator",
+                           "message": f"Iteration {iteration}: closing {len(gaps)} gaps with {len(steps)} steps",
+                           "timestamp": self._now_iso()})
+            push_progress(self._messaging, task_id, "plan_update", {"steps": steps})
+
+        # 3. Report
+        push_progress(self._messaging, task_id, "log",
+                      {"type": "info", "agent": "orchestrator",
+                       "message": f"Generating report ({len(all_steps)} steps, {iteration} iterations, {time.time()-started:.0f}s)",
+                       "timestamp": self._now_iso()})
+
+        overall = "FAILED" if has_failure else "SUCCESS"
+        self._publish_usage()
+
+        # 4. Memory（仅沉淀成功计划，避免污染 successful_strategies）
+        if not has_failure:
+            self._memory.consolidate_memory(goal, all_steps, report)
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "memory", "agent": "orchestrator",
+                           "message": "Strategy memory consolidated", "timestamp": self._now_iso()})
+
+        # 5. Complete
+        ok_count = sum(1 for r in completed_all.values() if r.get("status") == "SUCCESS")
+        push_progress(self._messaging, task_id, "task_complete",
+                      {"status": overall,
+                       "summary": f"{overall}: {ok_count}/{len(all_steps)} steps, {iteration} iterations",
+                       "report": report})
+
+        return {
+            "task_id": task_id,
+            "status": overall,
+            "steps": [{"step_id": s["step_id"], "capability": s["capability"],
+                        "instruction": s["instruction"], "iteration": s.get("iteration", 0),
+                        "result": completed_all.get(s["step_id"], {})}
+                      for s in all_steps],
+            "final_report": report,
+        }
+
+    def _execute_steps(self, steps: list[dict], task_id: str, goal: str) -> tuple[list[dict], bool]:
+        """并行 DAG 执行一轮步骤，返回（按步骤顺序的结果列表, 是否有失败）。"""
+        completed: dict = {}
         has_failure = False
         state = {"replan_used": 0}
         step_ids = {s.get("step_id") for s in steps}
@@ -508,7 +640,6 @@ class OrchestratorV2:
             result["elapsed_sec"] = round(time.time() - step_start, 1)
             return result
 
-        # 预检：悬空依赖（依赖不存在的步骤）直接失败
         for s in steps:
             dangling = [d for d in s.get("depends_on", []) if d not in step_ids]
             if dangling:
@@ -600,37 +731,7 @@ class OrchestratorV2:
             for s in steps
         ]
         has_failure = has_failure or any(r.get("status") != "SUCCESS" for r in results)
-
-        # 3. Report
-        push_progress(self._messaging, task_id, "log",
-                      {"type": "info", "agent": "orchestrator",
-                       "message": f"Generating report ({len(steps)} steps in {time.time()-started:.0f}s)",
-                       "timestamp": self._now_iso()})
-
-        report = self._best_deliverable(steps, results) or self._finalize(goal, steps, results)
-        overall = "FAILED" if has_failure else "SUCCESS"
-        self._publish_usage()
-
-        # 4. Memory（仅沉淀成功计划，避免污染 successful_strategies）
-        if not has_failure:
-            self._memory.consolidate_memory(goal, steps, report)
-            push_progress(self._messaging, task_id, "log",
-                          {"type": "memory", "agent": "orchestrator",
-                           "message": "Strategy memory consolidated", "timestamp": self._now_iso()})
-
-        # 5. Complete
-        push_progress(self._messaging, task_id, "task_complete",
-                      {"status": overall, "summary": f"{overall}: {sum(1 for r in results if r.get('status')=='SUCCESS')}/{len(steps)} steps OK",
-                       "report": report})
-
-        return {
-            "task_id": task_id,
-            "status": overall,
-            "steps": [{"step_id": s["step_id"], "capability": s["capability"],
-                        "instruction": s["instruction"], "result": r}
-                      for s, r in zip(steps, results)],
-            "final_report": report,
-        }
+        return results, has_failure
 
     def _inject_step_context(self, step: dict, completed: dict, lock: threading.Lock) -> str:
         """按能力类型把前序步骤的输出注入指令（URL/路径/结果摘要）。"""

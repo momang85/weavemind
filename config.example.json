@@ -27,6 +27,7 @@
     "critic_timeout": 30,
     "max_steps": 8,
     "max_parallel": 3,
+    "max_iterations": 2,
     "scheduler": false
   }
 }

@@ -86,6 +86,12 @@ const TreeNode = memo(function TreeNode({
           {node.capability || 'goal'}
         </span>
 
+        {!!node.iteration && (
+          <span className="text-[10px] font-mono text-violet-400 bg-violet-500/10 px-1.5 py-0.5 rounded shrink-0">
+            第{node.iteration}轮
+          </span>
+        )}
+
         <span className={`truncate text-sm ${isRoot ? 'text-slate-100 font-semibold' : cfg.text}`}>
           {node.name}
         </span>
