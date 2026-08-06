@@ -1,5 +1,5 @@
 """WeaveMind Web UI"""
-import json, os, sqlite3, threading, time, uuid
+import base64, io, json, os, sqlite3, threading, time, uuid
 from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
@@ -430,6 +430,46 @@ def _find_cached_task(goal: str, ttl_min: int):
     except Exception:
         return None
 
+def _extract_text_from_bytes(filename: str, data: bytes) -> str:
+    """从常见文件格式提取纯文本（txt/md/csv/json/pdf/docx/xlsx 等）。"""
+    ext = os.path.splitext(filename)[1].lower()
+    text = ""
+    if ext in (".txt", ".md", ".csv", ".json", ".log", ".py", ".yaml", ".yml",
+               ".xml", ".html", ".js", ".ts", ".ini", ".conf"):
+        for enc in ("utf-8-sig", "utf-8", "gb18030", "latin-1"):
+            try:
+                return data.decode(enc)
+            except (UnicodeDecodeError, ValueError):
+                continue
+        return data.decode("utf-8", errors="replace")
+    if ext == ".docx":
+        try:
+            from docx import Document
+            doc = Document(io.BytesIO(data))
+            return "\n".join(p.text for p in doc.paragraphs if p.text.strip())
+        except Exception as exc:
+            return f"(docx 解析失败: {exc})"
+    if ext == ".pdf":
+        try:
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(data))
+            pages = []
+            for page in reader.pages[:20]:
+                t = page.extract_text() or ""
+                if t.strip():
+                    pages.append(t)
+            return "\n".join(pages)
+        except Exception as exc:
+            return f"(pdf 解析失败: {exc})"
+    if ext in (".xlsx", ".xls"):
+        try:
+            import pandas as pd
+            df = pd.read_excel(io.BytesIO(data))
+            return df.head(300).to_string(index=False)
+        except Exception as exc:
+            return f"(excel 解析失败: {exc})"
+    return f"(暂不支持的文件格式: {ext or '未知'})"
+
 HTML = '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>WeaveMind</title></head><body><div id="root"></div><script type="module" src="http://localhost:5173/@vite/client"></script><script type="module" src="http://localhost:5173/src/main.tsx"></script></body></html>'
 DIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
 
@@ -633,6 +673,24 @@ class Handler(BaseHTTPRequestHandler):
                 "steps": body.get("steps"),
             }, ensure_ascii=False))
             return self._json({"status": "ok"})
+        if self.path == "/api/context/extract":
+            filename = str(body.get("filename") or "").strip()
+            b64 = str(body.get("data") or "")
+            if not filename or not b64:
+                return self._json({"error": "filename and data required"}, 400)
+            try:
+                raw = base64.b64decode(b64)
+            except Exception:
+                return self._json({"error": "invalid base64"}, 400)
+            if len(raw) > 3 * 1024 * 1024:
+                return self._json({"error": "file too large (max 3MB)"}, 413)
+            text = _extract_text_from_bytes(filename, raw)
+            return self._json({
+                "filename": filename,
+                "text": text[:30000],
+                "chars": len(text),
+                "truncated": len(text) > 30000,
+            })
         if self.path == "/api/evolution/trigger":
             r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
             r.publish("orchestrator:main", json.dumps({"task_id":"evo-"+str(int(time.time())),"goal":"EVOLUTION_TRIGGER"}, ensure_ascii=False))

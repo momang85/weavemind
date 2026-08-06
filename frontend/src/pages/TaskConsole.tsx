@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useMemo } from 'react'
-import { Loader2, Sparkles, RefreshCw, Plus, MessagesSquare, FolderOpen, Activity, Eye, Play, FileText, ChevronDown } from 'lucide-react'
+import { Loader2, Sparkles, RefreshCw, Plus, MessagesSquare, FolderOpen, Activity, Eye, Play, FileText, ChevronDown, Upload } from 'lucide-react'
 import { useTaskStore } from '../stores/useTaskStore'
 import { useTaskPoller } from '../stores/useTaskPoller'
 import TaskTreeView from '../components/TaskTreeView'
@@ -43,6 +43,7 @@ export default function TaskConsole() {
   const [templateName, setTemplateName] = useState('')
   const [showContext, setShowContext] = useState(false)
   const [userContext, setUserContext] = useState('')
+  const [importMsg, setImportMsg] = useState<{ name: string; status: string }[]>([])
 
   useTaskPoller(demoMode ? null : taskId)
 
@@ -189,6 +190,37 @@ export default function TaskConsole() {
     } catch { /* ignore */ }
   }
 
+  const readFileBase64 = (file: File) => new Promise<string>((resolve, reject) => {
+    const r = new FileReader()
+    r.onload = () => resolve(String(r.result).split(',')[1] || '')
+    r.onerror = () => reject(new Error('read error'))
+    r.readAsDataURL(file)
+  })
+
+  const importFiles = async (files: FileList | null) => {
+    if (!files) return
+    for (const f of Array.from(files)) {
+      setImportMsg(prev => [...prev, { name: f.name, status: '提取中...' }])
+      try {
+        const b64 = await readFileBase64(f)
+        const res = await fetch('/api/context/extract', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ filename: f.name, data: b64 }),
+        })
+        const d = await res.json()
+        if (d.text) {
+          setUserContext(prev => (prev ? `${prev}\n\n[文件 ${f.name}]\n${d.text}` : `[文件 ${f.name}]\n${d.text}`))
+          setImportMsg(prev => [...prev, { name: f.name, status: `成功 ${d.chars} 字${d.truncated ? '（已截断）' : ''}` }])
+        } else {
+          setImportMsg(prev => [...prev, { name: f.name, status: d.error || '无内容' }])
+        }
+      } catch {
+        setImportMsg(prev => [...prev, { name: f.name, status: '导入失败' }])
+      }
+    }
+  }
+
   const editTree = useMemo<TaskNode | null>(() => {
     if (!awaitingConfirm || !planTree) return null
     return {
@@ -296,11 +328,34 @@ export default function TaskConsole() {
           <ChevronDown className={`w-3.5 h-3.5 ml-auto transition-transform ${showContext ? 'rotate-180' : ''}`} />
         </button>
         {showContext && (
-          <textarea value={userContext}
-            onChange={e => setUserContext(e.target.value)}
-            rows={4}
-            placeholder="粘贴需求背景、参考资料、URL、约束条件等（可选）。将随任务一起提供给 AI 团队，用于更准确地满足需求。"
-            className="w-full bg-slate-800/50 border border-slate-700 rounded-lg p-3 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500" />
+          <div className="space-y-2">
+            <textarea value={userContext}
+              onChange={e => setUserContext(e.target.value)}
+              rows={4}
+              placeholder="粘贴需求背景、参考资料、URL、约束条件等（可选）。将随任务一起提供给 AI 团队，用于更准确地满足需求。"
+              className="w-full bg-slate-800/50 border border-slate-700 rounded-lg p-3 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500" />
+            <div className="flex flex-wrap items-center gap-2">
+              <input id="ctx-file-input" type="file" multiple
+                accept=".txt,.md,.csv,.json,.log,.py,.yaml,.yml,.pdf,.docx,.xlsx,.xls"
+                className="hidden"
+                onChange={e => { importFiles(e.target.files); e.target.value = '' }} />
+              <label htmlFor="ctx-file-input"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs cursor-pointer">
+                <Upload className="w-3.5 h-3.5" /> 导入文件（txt/md/csv/json/pdf/docx/xlsx...）
+              </label>
+              <span className="text-[11px] text-slate-600">文件内容将自动追加到上下文中</span>
+            </div>
+            {importMsg.length > 0 && (
+              <div className="space-y-1">
+                {importMsg.map((m, i) => (
+                  <div key={i} className="text-[11px] flex gap-2">
+                    <span className="text-slate-400 truncate max-w-[200px]">{m.name}</span>
+                    <span className={m.status.startsWith('成功') ? 'text-emerald-400' : 'text-amber-400'}>{m.status}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         )}
       </div>
 
