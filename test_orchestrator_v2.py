@@ -172,7 +172,7 @@ class TestBestDeliverable(unittest.TestCase):
             {"status": "SUCCESS", "result": "x" * 3000},          # 纯文本很长
             {"status": "SUCCESS", "result": "# 正式报告" + "y" * 500},  # 含 Markdown 标记但更短
         ]
-        best = self.o._best_deliverable(steps, results)
+        best = self.o._best_deliverable("", steps, results)
         self.assertTrue(best.startswith("# 正式报告"))
 
     def test_reads_report_file_from_json_string(self):
@@ -184,7 +184,7 @@ class TestBestDeliverable(unittest.TestCase):
             steps = [{"capability": "report_generator", "instruction": "x"}]
             results = [{"status": "SUCCESS",
                         "result": json.dumps({"status": "success", "report_path": path})}]
-            best = o._best_deliverable(steps, results)
+            best = o._best_deliverable("", steps, results)
             self.assertIn("# 文件报告", best)
         finally:
             os.unlink(path)
@@ -192,7 +192,7 @@ class TestBestDeliverable(unittest.TestCase):
     def test_json_output_excluded_returns_empty(self):
         steps = [{"capability": "code_execution", "instruction": "x"}]
         results = [{"status": "SUCCESS", "result": '{"status": "success", "shape": [1, 2]}'}]
-        self.assertEqual(self.o._best_deliverable(steps, results), "")
+        self.assertEqual(self.o._best_deliverable("", steps, results), "")
 
     def test_report_file_preferred_over_longer_summary(self):
         with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as f:
@@ -208,7 +208,7 @@ class TestBestDeliverable(unittest.TestCase):
                 {"status": "SUCCESS",
                  "result": json.dumps({"status": "success", "report_path": path})},
             ]
-            best = self.o._best_deliverable(steps, results)
+            best = self.o._best_deliverable("", steps, results)
             self.assertTrue(best.startswith("# 正式演讲稿"))
         finally:
             os.unlink(path)

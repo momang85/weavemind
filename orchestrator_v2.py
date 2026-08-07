@@ -38,6 +38,8 @@ Rules:
 5. All steps MUST strictly follow the user's goal topic; never generalize to other domains
 6. Search is NOT a mandatory information source: code, documents, summaries and reports can be produced directly by content_summary / code_execution from model knowledge. Use web_search ONLY when the goal explicitly requires up-to-date external facts (market data, news, current prices, real repos)
 7. NEVER chain repeated searches: at most one web_search/web_fetch pair per plan; if external info is unavailable, later steps must fall back to direct generation instead of searching again
+8. code_execution ONLY generates and runs Python scripts (or a single self-contained HTML file). JavaScript / multi-file frontend projects must be restructured into a single Python script or single HTML file; do NOT plan separate .js modules
+9. depends_on must NOT form cycles; each step may only depend on steps that come before it in execution order
 
 Output ONLY this JSON with no extra text:
 {"steps":[{"step_id":"1","capability":"web_search","instruction":"search for house price dataset","depends_on":[],"timeout":60}]}"""
@@ -139,6 +141,23 @@ class OrchestratorV2:
     def _now_iso(self):
         import datetime
         return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    @staticmethod
+    def _brpop_with_deadline(r, key: str, deadline: float):
+        """redis-py 8 的 brpop 大超时行为不可靠（超时抛异常/时间膨胀），
+        统一改用 2 秒小超时轮询直到总截止时间。返回 (key, payload) 或 None。"""
+        import redis as _redis
+        while time.time() < deadline:
+            try:
+                msg = r.brpop([key], timeout=2)
+                if msg:
+                    return msg
+            except _redis.exceptions.TimeoutError:
+                continue
+            except Exception as e:
+                logger.warning("BRPOP error for %s: %s", key, e)
+                return None
+        return None
 
     # ── Plan ──
     def _plan(self, goal: str, task_id: str, context: str = "") -> list[dict]:
@@ -313,6 +332,38 @@ class OrchestratorV2:
                 s["depends_on"] = [search_id]
         return steps
 
+    def _break_cycles(self, steps: list[dict]) -> list[dict]:
+        """检测并打破步骤依赖环：环上节点降级为并行（清空 depends_on），
+        避免 DAG 执行卡死被看门狗误判为 stalled。"""
+        ids = [s.get("step_id") for s in steps]
+        id_set = set(ids)
+        deps = {
+            s.get("step_id"): [d for d in s.get("depends_on", []) if d in id_set]
+            for s in steps
+        }
+        indeg = {i: len(deps[i]) for i in ids}
+        children = {i: [] for i in ids}
+        for i in ids:
+            for d in deps[i]:
+                children[d].append(i)
+        queue = [i for i in ids if indeg[i] == 0]
+        topo: list[str] = []
+        while queue:
+            i = queue.pop()
+            topo.append(i)
+            for c in children[i]:
+                indeg[c] -= 1
+                if indeg[c] == 0:
+                    queue.append(c)
+        in_cycle = set(ids) - set(topo)
+        if not in_cycle:
+            return steps
+        for s in steps:
+            if s.get("step_id") in in_cycle:
+                s["depends_on"] = []
+                logger.warning("Cycle detected, breaking deps of step %s", s.get("step_id"))
+        return steps
+
     def _normalize_steps(self, steps: list) -> list[dict]:
         """规范化计划步骤：去重 ID、剔除空指令、补齐默认字段、限制步数。"""
         out: list[dict] = []
@@ -334,6 +385,16 @@ class OrchestratorV2:
                 cap = next((c.strip() for c in cap.split(",") if c.strip() in KNOWN_CAPABILITIES), "content_summary")
             elif cap not in KNOWN_CAPABILITIES:
                 cap = "content_summary"
+            # 能力纠偏：安装依赖的"package"步骤实为环境准备，改派 code_execution 执行 pip
+            if cap == "package" and any(
+                k in instruction for k in ("安装", "install", "依赖", "pip")
+            ):
+                cap = "code_execution"
+                s["instruction"] = (
+                    "使用 pip 安装所需依赖（已安装则跳过），并验证 import 成功："
+                    f"{instruction}"
+                )
+                instruction = s["instruction"]
             s["capability"] = cap
             s.setdefault("timeout", 120)
             out.append(s)
@@ -402,6 +463,16 @@ class OrchestratorV2:
     def _generation_fallback_step(self, goal: str, step: dict) -> dict:
         """搜索/抓取无果时的降级步骤：由 LLM 直接生产，不依赖外部资料。"""
         ins = str(step.get("instruction") or "")
+        if any(k in ins.lower() for k in ("html", "网页", "web", "webpage")):
+            return {
+                "capability": "code_execution",
+                "instruction": (
+                    "不依赖任何外部资料，直接生成一个自包含的单文件 HTML 页面/游戏"
+                    "（内联 CSS/JS，保存为 index.html，不要用 Python 运行），实现："
+                    f"{ins[:500]}"
+                ),
+                "timeout": 180,
+            }
         if any(k in ins for k in (
             "代码", "实现", "生成", "编写", "开发", "脚本", "main.py", ".py", "游戏",
         )):
@@ -422,6 +493,110 @@ class OrchestratorV2:
             ),
             "timeout": 120,
         }
+
+    def _build_search_revision(self, pending: dict, goal: str) -> list[dict]:
+        """把仍待执行的 web_fetch 步骤替换为 LLM 直接生产步骤（保留 step_id 与依赖）。"""
+        revision = []
+        for k, s in pending.items():
+            if s.get("capability") == "web_fetch":
+                alt = self._generation_fallback_step(goal, s)
+                alt["step_id"] = k
+                alt["depends_on"] = s.get("depends_on", [])
+                revision.append(alt)
+        return revision
+
+    def _confirm_revision(
+        self, task_id: str, goal: str, steps: list[dict],
+        completed: dict, revision: list[dict],
+    ) -> list[dict] | None:
+        """搜索无果时把降级计划推给前端确认/编辑。
+        超时自动采用修订；用户取消则保持原计划；用户编辑则采用编辑后的步骤。"""
+        rev_map = {r.get("step_id"): r for r in revision}
+        view = []
+        for s in steps:
+            c = dict(s)
+            c["result"] = completed.get(s.get("step_id"), {})
+            r = rev_map.get(s.get("step_id"))
+            if r:
+                c["capability"] = r.get("capability", c.get("capability"))
+                c["instruction"] = r.get("instruction", c.get("instruction"))
+                c["timeout"] = r.get("timeout", c.get("timeout"))
+            view.append(c)
+        push_progress(
+            self._messaging, task_id, "log",
+            {"type": "info", "agent": "orchestrator",
+             "message": f"Search yielded no usable results; proposing {len(revision)} direct-generation step(s), awaiting confirmation",
+             "timestamp": self._now_iso()},
+        )
+        try:
+            self._messaging.publish("orchestrator:response", {
+                "task_id": task_id, "status": "AWAITING_CONFIRM",
+                "goal": goal, "steps": view, "revision": True,
+            })
+        except Exception as exc:
+            logger.warning("Revision confirm publish failed: %s", str(exc)[:120])
+            return revision
+        timeout = min(self._plan_confirm_timeout, 180)
+        try:
+            msg = self._brpop_with_deadline(
+                self._redis,
+                f"plan_confirm:{task_id}",
+                time.time() + timeout,
+            )
+        except Exception as exc:
+            logger.warning("Revision confirm wait failed: %s", str(exc)[:120])
+            return revision
+        if not msg:
+            push_progress(
+                self._messaging, task_id, "log",
+                {"type": "info", "agent": "orchestrator",
+                 "message": f"No confirmation within {timeout}s, auto-applying revised plan",
+                 "timestamp": self._now_iso()},
+            )
+            return revision
+        try:
+            data = json.loads(msg[1] if isinstance(msg[1], str) else msg[1].decode())
+        except Exception:
+            return revision
+        if data.get("action") == "cancel":
+            push_progress(
+                self._messaging, task_id, "log",
+                {"type": "info", "agent": "orchestrator",
+                 "message": "Revision declined by user; continuing with original plan",
+                 "timestamp": self._now_iso()},
+            )
+            return None
+        new_steps = data.get("steps")
+        if not new_steps:
+            return revision
+        normalized = self._normalize_steps(new_steps)
+        push_progress(
+            self._messaging, task_id, "log",
+            {"type": "plan", "agent": "orchestrator",
+             "message": f"Revised plan confirmed with {len(normalized)} steps",
+             "timestamp": self._now_iso()},
+        )
+        return normalized
+
+    def _apply_revision(
+        self, steps: list[dict], pending: dict, completed: dict,
+        confirmed: list[dict] | None,
+    ) -> None:
+        """把确认后的修订计划写回待执行集合；取消则保持原计划。"""
+        if confirmed is None:
+            return
+        by_id = {s.get("step_id"): s for s in confirmed}
+        for k in list(pending):
+            if k not in by_id:
+                del pending[k]
+        for s in confirmed:
+            sid = s.get("step_id")
+            if sid and sid not in completed:
+                pending[sid] = s
+        # 同步到 steps 列表，保证前端树与结果 zip 使用修订后的步骤
+        for i, st in enumerate(steps):
+            if st.get("step_id") in by_id:
+                steps[i] = by_id[st.get("step_id")]
 
     def _publish_full_state(self, task_id: str, goal: str, all_steps: list[dict], completed_all: dict) -> None:
         """跨迭代推送全量步骤状态（前端按轮次展示）。"""
@@ -448,8 +623,15 @@ class OrchestratorV2:
             "No URL", "no url", "empty", "filtered", "无结果", "没有找到",
             "未找到", "No relevant", "not found",
         )
-        if failed_cap in ("web_search", "web_fetch") or any(
-            sig in str(error) for sig in _SEARCH_FAILURE_SIGNALS
+        _CODE_FAILURE_SIGNALS = (
+            "No code generated", "Empty content", "代码生成失败",
+            "SyntaxError", "ModuleNotFoundError", "Script exited with code",
+            "Traceback", "No module named",
+        )
+        if (
+            failed_cap in ("web_search", "web_fetch")
+            or any(sig in str(error) for sig in _SEARCH_FAILURE_SIGNALS)
+            or (failed_cap == "code_execution" and any(sig in str(error) for sig in _CODE_FAILURE_SIGNALS))
         ):
             alt = self._generation_fallback_step(goal, step)
             alt["step_id"] = f"alt-{step.get('step_id', '?')}-{int(time.time())}"
@@ -622,14 +804,15 @@ class OrchestratorV2:
         """Block until worker result arrives via Redis BRPOP."""
         import redis
         r = redis.Redis(host="localhost", port=6379, decode_responses=True)
+        deadline = time.time() + max(timeout, 5)
+        msg = self._brpop_with_deadline(r, f"task_result:{task_id}", deadline)
+        if not msg:
+            return None
         try:
-            msg = r.brpop([f"task_result:{task_id}"], timeout)
-            if msg:
-                _, payload = msg
-                return json.loads(payload)
+            return json.loads(msg[1])
         except Exception as e:
-            logger.warning("BRPOP error for %s: %s", task_id, e)
-        return None
+            logger.warning("Result parse error for %s: %s", task_id, e)
+            return None
 
     def _normalize_result(self, result: dict) -> dict:
         """识别 Worker 返回中的显式失败标记，避免"假成功"污染结果。
@@ -669,11 +852,12 @@ class OrchestratorV2:
             report += "\\n"
         return report
 
-    def _best_deliverable(self, steps: list[dict], results: list[dict]) -> str:
+    def _best_deliverable(self, goal: str, steps: list[dict], results: list[dict]) -> str:
         """从步骤结果中挑选最实质的交付内容作为最终报告。
 
         优先 content_summary / report_generator 的 Markdown 文档（含文件读取）；
-        code_execution 的长文本仅作兜底；都没有则返回空串（走汇总兜底）。
+        code_execution 的长文本仅作兜底；命中目标主题的候选优先，
+        避免跑偏内容（如房价报告出现在游戏任务中）胜出；都没有则返回空串（走汇总兜底）。
         """
         report_files: list[str] = []
         summary_docs: list[str] = []
@@ -724,6 +908,13 @@ class OrchestratorV2:
         def _pick(pool: list[str]) -> str:
             if not pool:
                 return ""
+            goal_tokens = self._topic_tokens(goal)
+            if goal_tokens:
+                on_topic = [
+                    c for c in pool
+                    if any(t in c.lower() for t in goal_tokens)
+                ]
+                pool = on_topic or pool
             md = [c for c in pool if ("#" in c[:200] or "|" in c[:500] or "```" in c)]
             return max(md or pool, key=len)
 
@@ -751,6 +942,7 @@ class OrchestratorV2:
         steps = self._wire_report_deps(steps)
         steps = self._wire_search_fetch_deps(steps)
         steps = self._ensure_package_step(steps)
+        steps = self._break_cycles(steps)
         if not steps:
             push_progress(self._messaging, task_id, "task_complete",
                           {"status": "FAILED", "summary": "Planning failed"})
@@ -777,6 +969,7 @@ class OrchestratorV2:
             steps = self._wire_report_deps(steps)
             steps = self._wire_search_fetch_deps(steps)
             steps = self._ensure_package_step(steps)
+            steps = self._break_cycles(steps)
             if not steps:
                 push_progress(self._messaging, task_id, "task_complete",
                               {"status": "FAILED", "summary": "Empty plan confirmed, task cancelled"})
@@ -803,7 +996,7 @@ class OrchestratorV2:
                 s.setdefault("iteration", iteration)
             all_steps.extend(steps)
 
-            cand = self._best_deliverable(last_steps, last_results)
+            cand = self._best_deliverable(goal, last_steps, last_results)
             if len(cand) > len(best_report):
                 best_report = cand
             self._publish_full_state(task_id, goal, all_steps, completed_all)
@@ -831,6 +1024,7 @@ class OrchestratorV2:
             steps = self._wire_report_deps(steps)
             steps = self._wire_search_fetch_deps(steps)
             steps = self._ensure_package_step(steps)
+            steps = self._break_cycles(steps)
             push_progress(self._messaging, task_id, "log",
                           {"type": "iteration", "agent": "orchestrator",
                            "message": f"Iteration {iteration}: closing {len(gaps)} gaps with {len(steps)} steps",
@@ -878,14 +1072,18 @@ class OrchestratorV2:
     def _wait_plan_confirm(self, task_id: str, original_steps: list[dict]) -> list[dict] | None:
         """等待用户确认/编辑计划；返回确认后的步骤，取消或超时返回 None。"""
         try:
-            msg = self._redis.brpop([f"plan_confirm:{task_id}"], timeout=self._plan_confirm_timeout)
+            msg = self._brpop_with_deadline(
+                self._redis,
+                f"plan_confirm:{task_id}",
+                time.time() + self._plan_confirm_timeout,
+            )
             if not msg:
                 push_progress(self._messaging, task_id, "log",
                               {"type": "info", "agent": "orchestrator",
                                "message": f"Plan confirm timeout ({self._plan_confirm_timeout}s), cancelling",
                                "timestamp": self._now_iso()})
                 return None
-            data = json.loads(msg[1])
+            data = json.loads(msg[1] if isinstance(msg[1], str) else msg[1].decode())
             if data.get("action") == "cancel":
                 push_progress(self._messaging, task_id, "log",
                               {"type": "info", "agent": "orchestrator",
@@ -947,9 +1145,10 @@ class OrchestratorV2:
         pending = {s["step_id"]: s for s in steps if s["step_id"] not in completed}
         last_progress = time.time()
         in_flight = 0
+        revision_done = False
 
         def worker():
-            nonlocal last_progress, has_failure, in_flight
+            nonlocal last_progress, has_failure, in_flight, revision_done
             while True:
                 with lock:
                     if not pending:
@@ -961,6 +1160,27 @@ class OrchestratorV2:
                             break
                 if ready is None:
                     with lock:
+                        # 传递式阻塞传播：任何步骤一旦依赖失败/已阻塞步骤，
+                        # 立即标记为 Blocked，避免“报告依赖全部步骤”等链条卡死
+                        changed = True
+                        while changed:
+                            changed = False
+                            for k in list(pending):
+                                s = pending[k]
+                                failed_deps = [
+                                    d for d in s.get("depends_on", [])
+                                    if d in completed and completed[d].get("status") == "FAILED"
+                                ]
+                                if failed_deps:
+                                    completed[k] = {
+                                        "task_id": k, "status": "FAILED",
+                                        "result": f"Blocked by failed dependency: {failed_deps}",
+                                    }
+                                    del pending[k]
+                                    has_failure = True
+                                    changed = True
+                        if not pending:
+                            return
                         if pending and all(deps_failed(s) for s in pending.values()):
                             for k in list(pending):
                                 completed[k] = {
@@ -992,7 +1212,24 @@ class OrchestratorV2:
                     res_raw = result.get("result", "")
                     try:
                         parsed = json.loads(res_raw) if isinstance(res_raw, str) else res_raw
-                        if isinstance(parsed, list) and not parsed:
+                        if isinstance(parsed, list) and not parsed and not revision_done:
+                            with lock:
+                                revision = self._build_search_revision(pending, goal)
+                                revision_done = True
+                            if revision:
+                                confirmed = self._confirm_revision(task_id, goal, steps, completed, revision)
+                                with lock:
+                                    self._apply_revision(steps, pending, completed, confirmed)
+                                    last_progress = time.time()
+                                self._push_realtime_state(task_id, goal, steps, completed)
+                            else:
+                                push_progress(
+                                    self._messaging, task_id, "log",
+                                    {"type": "info", "agent": "orchestrator",
+                                     "message": "Search returned no relevant results; no dependent fetch steps to revise",
+                                     "timestamp": self._now_iso()},
+                                )
+                        elif isinstance(parsed, list) and not parsed:
                             push_progress(
                                 self._messaging, task_id, "log",
                                 {"type": "info", "agent": "orchestrator",

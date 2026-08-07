@@ -21,8 +21,17 @@ class ReportGeneratorWorker(AsyncWorkerBase):
     async def execute(self, instruction: str) -> str:
         charts_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "charts"
         data_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "data"
-        charts = sorted(charts_dir.glob("*.png")) if charts_dir.exists() else []
-        data_csvs = sorted(data_dir.glob("*.csv")) if data_dir.exists() else []
+        # 只考虑本次任务时间窗口内的产物，避免把历史任务遗留的无关数据（如房价）
+        # 拉进当前报告。
+        cutoff = time.time() - 120 * 60
+        charts = [
+            c for c in (charts_dir.glob("*.png") if charts_dir.exists() else [])
+            if c.stat().st_mtime >= cutoff
+        ]
+        data_csvs = [
+            d for d in (data_dir.glob("*.csv") if data_dir.exists() else [])
+            if d.stat().st_mtime >= cutoff
+        ]
 
         data_info = ""
         for d in data_csvs[:3]:
@@ -42,6 +51,8 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                 "你是专业报告撰写者。根据指令生成一份完整、具体、可直接交付的 Markdown 文档。"
                 "要求：结构清晰（使用标题/表格/列表），内容详实而非占位符，"
                 "严格围绕任务主题，语言流畅。直接输出 Markdown 正文，不要额外说明。"
+                "重要：工作区列出的图表/数据文件若与本任务主题无关（例如游戏任务中出现房价数据集），"
+                "一律不得使用，只能使用上一步结果中与任务主题直接相关的信息。"
             )
             user = f"{instruction}\n\n工作区产物：\n{artifacts}"
             report = await self._call_llm(system=system, prompt=user)

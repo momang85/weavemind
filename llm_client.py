@@ -76,6 +76,12 @@ class LLMJSONParseError(LLMCallError):
     pass
 
 
+class LLMEmptyResponseError(LLMCallError):
+    """LLM 返回 200 但内容为空（部分推理模型偶发）"""
+
+    pass
+
+
 def _loads_loose(text: str) -> dict | list:
     """先严格解析，失败后允许字符串内未转义控制字符（LLM 常在长指令中插入字面换行）。"""
     try:
@@ -504,9 +510,17 @@ async def call_llm_async(
             _publish_usage_snapshot()
 
             content = data['choices'][0]['message']['content']
+            if content is None or not str(content).strip():
+                raise LLMEmptyResponseError("Empty content in LLM response")
             if expect_json:
                 return _parse_json_content(content)
             return content
+
+        except LLMEmptyResponseError as exc:
+            last_error = exc
+            logger.warning('LLM async empty response, retry %d/%d', attempt, max_attempts)
+            await asyncio.sleep(1)
+            continue
 
         except httpx.HTTPStatusError as exc:
             last_error = exc
@@ -545,6 +559,8 @@ async def call_llm_async(
             _record_usage(usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0))
             _publish_usage_snapshot()
             content = data["choices"][0]["message"]["content"]
+            if content is None or not str(content).strip():
+                raise LLMEmptyResponseError("Backup LLM returned empty content")
             logger.warning("Switched to backup LLM (async): %s", _BACKUP_CFG.get("base_url"))
             if expect_json:
                 return _parse_json_content(content)
