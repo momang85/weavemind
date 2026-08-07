@@ -36,6 +36,8 @@ Rules:
 3. depends_on = list of step_ids this step needs to complete first
 4. For data pipelines: use data_loader (loads sklearn datasets automatically), then data_analyzer, then model_trainer, then report_generator
 5. All steps MUST strictly follow the user's goal topic; never generalize to other domains
+6. Search is NOT a mandatory information source: code, documents, summaries and reports can be produced directly by content_summary / code_execution from model knowledge. Use web_search ONLY when the goal explicitly requires up-to-date external facts (market data, news, current prices, real repos)
+7. NEVER chain repeated searches: at most one web_search/web_fetch pair per plan; if external info is unavailable, later steps must fall back to direct generation instead of searching again
 
 Output ONLY this JSON with no extra text:
 {"steps":[{"step_id":"1","capability":"web_search","instruction":"search for house price dataset","depends_on":[],"timeout":60}]}"""
@@ -59,6 +61,7 @@ ITERATOR_SYSTEM = """你是严格的交付验收评审。根据用户目标评�
 2. next_steps 每次最多3个，必须具体可执行，指令用中文并严格围绕目标主题
 3. 每个 next_step 的 capability 只能是下列之一，且每步只能一个：
    web_search, web_fetch, data_loader, data_analyzer, model_trainer, report_generator, content_summary, code_execution, file_io, package
+4. 若交付物缺失的原因是外部资料获取失败（搜索无结果、网页无内容、URL 无效），next_steps 必须改为直接生成（content_summary / code_execution），禁止再安排 web_search 或 web_fetch
 只输出JSON。"""
 
 # ─────────────────────────────────────────────
@@ -396,6 +399,30 @@ class OrchestratorV2:
             logger.warning("Reflection failed, stopping iteration: %s", str(exc)[:150])
             return None
 
+    def _generation_fallback_step(self, goal: str, step: dict) -> dict:
+        """搜索/抓取无果时的降级步骤：由 LLM 直接生产，不依赖外部资料。"""
+        ins = str(step.get("instruction") or "")
+        if any(k in ins for k in (
+            "代码", "实现", "生成", "编写", "开发", "脚本", "main.py", ".py", "游戏",
+        )):
+            return {
+                "capability": "code_execution",
+                "instruction": (
+                    "不依赖任何外部资料，直接编写可运行的 Python 代码实现以下要求："
+                    f"{ins[:500]}"
+                ),
+                "timeout": 180,
+            }
+        return {
+            "capability": "content_summary",
+            "instruction": (
+                "不依赖任何外部资料，基于已有知识直接完成并输出以下目标，"
+                "内容要具体、围绕主题，不要提及搜索或抓取失败："
+                f"{goal[:300]}"
+            ),
+            "timeout": 120,
+        }
+
     def _publish_full_state(self, task_id: str, goal: str, all_steps: list[dict], completed_all: dict) -> None:
         """跨迭代推送全量步骤状态（前端按轮次展示）。"""
         current = []
@@ -415,11 +442,30 @@ class OrchestratorV2:
 
     def _replan_step(self, goal: str, step: dict, error: str, task_id: str) -> dict | None:
         """步骤失败后，让 LLM 提出一个替代步骤（保留原步骤 ID 的依赖关系）。"""
+        # 搜索/抓取类失败直接降级为 LLM 生产，不再重复尝试外部获取
+        failed_cap = step.get("capability", "")
+        _SEARCH_FAILURE_SIGNALS = (
+            "No URL", "no url", "empty", "filtered", "无结果", "没有找到",
+            "未找到", "No relevant", "not found",
+        )
+        if failed_cap in ("web_search", "web_fetch") or any(
+            sig in str(error) for sig in _SEARCH_FAILURE_SIGNALS
+        ):
+            alt = self._generation_fallback_step(goal, step)
+            alt["step_id"] = f"alt-{step.get('step_id', '?')}-{int(time.time())}"
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "replan", "agent": "orchestrator",
+                           "message": f"Replan (search-fallback): {alt.get('capability')}: {str(alt.get('instruction'))[:60]}",
+                           "timestamp": self._now_iso()})
+            return alt
         prompt = (
             f"Goal: {goal}\n\n"
             f"Failed step: [{step.get('capability')}] {step.get('instruction')}\n"
             f"Error: {str(error)[:300]}\n\n"
             "Propose ONE alternative step that avoids this failure. "
+            "If the failure is caused by missing external information, the alternative MUST be "
+            "content_summary or code_execution that generates the deliverable directly from model knowledge; "
+            "do NOT propose web_search or web_fetch again. "
             'Output ONLY this JSON: {"steps":[{"step_id":"alt","capability":"...","instruction":"...","timeout":120}]}'
         )
         try:
@@ -942,6 +988,19 @@ class OrchestratorV2:
                     last_progress = time.time()
                     if result.get("status") != "SUCCESS":
                         has_failure = True
+                if step.get("capability") == "web_search":
+                    res_raw = result.get("result", "")
+                    try:
+                        parsed = json.loads(res_raw) if isinstance(res_raw, str) else res_raw
+                        if isinstance(parsed, list) and not parsed:
+                            push_progress(
+                                self._messaging, task_id, "log",
+                                {"type": "info", "agent": "orchestrator",
+                                 "message": "Search returned no relevant results; continuing with direct generation",
+                                 "timestamp": self._now_iso()},
+                            )
+                    except Exception:
+                        pass
                 self._push_realtime_state(task_id, goal, steps, completed)
 
         def watchdog():

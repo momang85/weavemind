@@ -155,5 +155,46 @@ class TestPackageFallback(unittest.TestCase):
         self.assertEqual(len(out), 2)
 
 
+class TestSearchFailureFallback(unittest.TestCase):
+    def test_generation_fallback_code_for_game_instruction(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        alt = o._generation_fallback_step(
+            "写一个愤怒的小鸟",
+            {"capability": "web_fetch", "instruction": "获取愤怒的小鸟游戏源代码并生成 main.py"},
+        )
+        self.assertEqual(alt["capability"], "code_execution")
+        self.assertIn("main.py", alt["instruction"])
+
+    def test_generation_fallback_summary_for_doc_instruction(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        alt = o._generation_fallback_step(
+            "调研市场现状",
+            {"capability": "web_search", "instruction": "搜索市场报告"},
+        )
+        self.assertEqual(alt["capability"], "content_summary")
+
+    def test_replan_fetch_failure_skips_llm(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        class _FakeMsg:
+            def publish(self, *a, **k):
+                pass
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._messaging = _FakeMsg()
+        alt = o._replan_step(
+            "写一个愤怒的小鸟",
+            {"step_id": "2", "capability": "web_fetch", "instruction": "获取愤怒的小鸟游戏源代码并生成 main.py"},
+            "No URL found in instruction",
+            "test-task",
+        )
+        self.assertIsNotNone(alt)
+        self.assertEqual(alt["capability"], "code_execution")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
