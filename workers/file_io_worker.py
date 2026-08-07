@@ -66,7 +66,10 @@ class FileIoWorker(AsyncWorkerBase):
     def _safe_path(self, filename: str) -> Path:
         """将文件名限定在工作区内，防止路径穿越。"""
         base = Path(self.WORKSPACE_DIR).resolve()
-        path = (base / filename).resolve()
+        # 统一把反斜杠当路径分隔符：Windows 原生支持；Linux/macOS 上
+        # 反斜杠是合法文件名字符，不归一化会导致 "..\\.." 绕过逃逸检测。
+        normalized = str(filename).replace("\\", "/")
+        path = (base / normalized).resolve()
         if not str(path).startswith(str(base)):
             raise ValueError(f"Path escapes workspace: {filename}")
         return path
