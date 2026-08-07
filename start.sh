@@ -14,8 +14,8 @@ cd "$(dirname "$0")"
 # 配置统一来自 config.json（与 start.bat 一致）
 export PYTHONIOENCODING=utf-8
 
-# [1/5] Redis
-echo "[1/5] Redis..."
+# [1/6] Redis
+echo "[1/6] Redis..."
 if docker ps --format '{{.Names}}' 2>/dev/null | grep -q zhiguan-redis; then
     echo "  Redis already running"
 else
@@ -25,15 +25,28 @@ else
 fi
 sleep 2
 
-# [2/5] Dependencies
-echo "[2/5] Dependencies..."
-pip install -q aiosqlite httpx ddgs scikit-learn || true
+# [2/6] Dependencies
+echo "[2/6] Dependencies..."
+pip install -q -r requirements.txt || echo "  WARNING: some dependencies failed, services may be limited"
 
-# [3/5] Start all services (PID-managed, 会先清理旧进程)
-echo "[3/5] Starting services..."
+# [3/6] Frontend (首次运行自动构建)
+echo "[3/6] Frontend..."
+if [ -f frontend/dist/index.html ]; then
+    echo "  dist exists, skip build"
+else
+    if command -v node >/dev/null 2>&1; then
+        echo "  Building frontend (first run)..."
+        (cd frontend && npm install --no-audit --no-fund && npm run build) || echo "  WARNING: frontend build failed, will use fallback page"
+    else
+        echo "  WARNING: Node.js not found; frontend will use built-in fallback page"
+    fi
+fi
+
+# [4/6] Start all services (PID-managed, 会先清理旧进程)
+echo "[4/6] Starting services..."
 python launcher.py
 
-# [4/5] Open browser
+# [5/6] Open browser
 if [ -f frontend/dist/index.html ]; then
     FRONT_URL="http://localhost:8080"
 else
@@ -47,7 +60,7 @@ echo "  停止: python launcher.py stop"
 echo "============================================"
 echo ""
 
-# [5/5] 可选：自动打开浏览器
+# [6/6] 可选：自动打开浏览器
 if command -v start &>/dev/null; then
     start "${FRONT_URL}" 2>/dev/null || true
 elif command -v open &>/dev/null; then

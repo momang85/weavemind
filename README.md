@@ -106,12 +106,24 @@ start.bat   :: 一键启动（Redis + 全部服务 + 前端，自动打开浏览
 stop.bat    :: 一键停止
 ```
 
+首次运行 `start.bat` 会自动 `pip install -r requirements.txt`，并在检测到
+`frontend/dist` 缺失时自动执行 `npm install && npm run build`（需已安装 Node.js 18+；
+没有 Node 也能启动，Web 界面将使用内置回退页，功能受限）。
+
 ### 方式 B：Linux / macOS 一键
 
 ```bash
 bash start.sh    # 需要 Python 3.10+、Docker（提供 Redis）
 bash stop.sh     # 一键停止
 ```
+
+与 Windows 一致：首次运行自动装依赖、自动构建前端。
+
+> **Python 版本**：推荐 3.10–3.13。Python 3.14 目前没有 `pygame` 的官方 wheel，
+> 如需让 `code_execution` 生成的 pygame 游戏可运行，建议使用 3.10–3.13 或运行
+> `pip install -r requirements-games.txt`（可选依赖）。
+> 系统会自动探测环境：有 pygame 就用 pygame；没有则引导生成 turtle / 单文件 HTML 方案，
+> 不影响其他功能。
 
 ### 方式 C：Docker Compose（推荐，无需本地 Python/Node）
 
@@ -147,10 +159,10 @@ python launcher.py status                            # 状态
   "embedding": { "api_key": "...", "base_url": "...", "model": "BAAI/bge-large-zh-v1.5" },
   "redis": { "host": "localhost", "port": 6379 },
   "system": {
-    "task_timeout": 90, "max_retry": 2, "replan_depth": 2,
+    "task_timeout": 300, "max_retry": 2, "replan_depth": 2,
     "critic": true, "critic_timeout": 30,
     "max_steps": 8, "max_parallel": 3, "max_iterations": 2,
-    "plan_confirm_timeout": 300, "scheduler": false
+    "stall_timeout": 300, "plan_confirm_timeout": 300, "scheduler": false
   }
 }
 ```

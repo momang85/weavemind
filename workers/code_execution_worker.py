@@ -18,13 +18,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from async_worker_base import AsyncWorkerBase, AsyncRegistry, AsyncMessaging
 
+_PROBE_MODULES = (
+    "pygame", "turtle", "tkinter", "math", "random", "json", "html",
+    "numpy", "pandas", "matplotlib", "requests",
+)
 _AVAILABLE_MODULES = sorted(
-    m for m in (
-        "turtle", "tkinter", "math", "random", "json", "html",
-        "numpy", "pandas", "matplotlib", "requests",
-    )
+    m for m in _PROBE_MODULES
     if importlib.util.find_spec(m)
 )
+_HAS_PYGAME = "pygame" in _AVAILABLE_MODULES
 
 _HTML_GAME_TEMPLATE = """<!DOCTYPE html>
 <html lang="zh">
@@ -141,11 +143,17 @@ class CodeExecutionWorker(AsyncWorkerBase):
 
     async def execute(self, instruction: str) -> str:
         try:
-            env_note = (
-                f"环境可用模块：{', '.join(_AVAILABLE_MODULES) or '仅标准库'}。"
-                "pygame 未安装且无法安装，禁止使用 pygame；"
-                "需要图形界面时使用 turtle/tkinter，或生成单文件 HTML 游戏。"
-            )
+            if _HAS_PYGAME:
+                env_note = (
+                    f"环境可用模块：{', '.join(_AVAILABLE_MODULES)}。"
+                    "pygame 已安装，游戏类任务可直接使用 pygame 实现并运行。"
+                )
+            else:
+                env_note = (
+                    f"环境可用模块：{', '.join(_AVAILABLE_MODULES) or '仅标准库'}。"
+                    "pygame 未安装；需要图形界面时使用 turtle/tkinter，"
+                    "或生成单文件 HTML 游戏（保存为 .html，不需要运行）。"
+                )
             html_mode = any(k in instruction.lower() for k in ("html", "网页", "webpage"))
             llm_response = ""
             for _gen in range(4):

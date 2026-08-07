@@ -45,7 +45,11 @@ def _publish_usage_snapshot() -> None:
     try:
         if _usage_pub_client is None:
             import redis as _redis
-            _usage_pub_client = _redis.Redis(host="localhost", port=6379, decode_responses=True)
+            _usage_pub_client = _redis.Redis(
+                host=os.environ.get("REDIS_HOST", "localhost"),
+                port=int(os.environ.get("REDIS_PORT", "6379")),
+                decode_responses=True,
+            )
         _usage_pub_client.set(
             f"llm_usage:{os.getpid()}",
             json.dumps(get_usage_stats()),

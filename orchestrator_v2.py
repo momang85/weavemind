@@ -107,11 +107,13 @@ class OrchestratorV2:
             self._stall_timeout = max(5, int(_sys.get('stall_timeout', 60)))
         except Exception:
             pass
-        import redis as sync_redis
-        self._redis = sync_redis.Redis(host="localhost", port=6379, decode_responses=True)
+        self._redis = self._new_redis_sync()
         self._redis_reg = RedisAgentRegistry(self._redis)
-        self._sqlite_reg = AgentRegistry("agents.db")
-        self._messaging = MessagingClient("localhost", 6379)
+        self._sqlite_reg = AgentRegistry(os.environ.get("REGISTRY_DB", "agents.db"))
+        self._messaging = MessagingClient(
+            os.environ.get("REDIS_HOST", "localhost"),
+            int(os.environ.get("REDIS_PORT", "6379")),
+        )
         # MessagingClient auto-connects
         self._memory = MemoryManager(os.environ.get("MEMORY_DIR", "./chroma_memory"))
         self._memory_lock = threading.Lock()
@@ -141,6 +143,16 @@ class OrchestratorV2:
     def _now_iso(self):
         import datetime
         return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+    @staticmethod
+    def _new_redis_sync():
+        """环境变量感知的同步 Redis 客户端（Docker 中 REDIS_HOST=redis）。"""
+        import redis as _redis
+        return _redis.Redis(
+            host=os.environ.get("REDIS_HOST", "localhost"),
+            port=int(os.environ.get("REDIS_PORT", "6379")),
+            decode_responses=True,
+        )
 
     @staticmethod
     def _brpop_with_deadline(r, key: str, deadline: float):
@@ -680,8 +692,7 @@ class OrchestratorV2:
         """把计划草案交给 Critic 评审；FAIL 则修订一次；超时/异常兜底放行。"""
         plan_id = f"plan-{task_id}-{int(time.time())}"
         try:
-            import redis as _redis
-            r = _redis.Redis(host="localhost", port=6379, decode_responses=True)
+            r = self._new_redis_sync()
             self._messaging.publish("orchestrator:plan_draft", {
                 "plan_id": plan_id,
                 "goal": goal,
@@ -778,8 +789,7 @@ class OrchestratorV2:
                       {"agent_id": agent_id, "status": "busy"})
 
         # Push task to worker queue
-        import redis
-        r = redis.Redis(host="localhost", port=6379, decode_responses=True)
+        r = self._new_redis_sync()
         r.lpush(f"task_queue:{agent_id}", json.dumps({"task_id": step_id, "instruction": instruction}))
 
         # Wait for result
@@ -802,8 +812,7 @@ class OrchestratorV2:
 
     def _wait_for_result(self, task_id: str, timeout: int) -> dict | None:
         """Block until worker result arrives via Redis BRPOP."""
-        import redis
-        r = redis.Redis(host="localhost", port=6379, decode_responses=True)
+        r = self._new_redis_sync()
         deadline = time.time() + max(timeout, 5)
         msg = self._brpop_with_deadline(r, f"task_result:{task_id}", deadline)
         if not msg:
@@ -1402,8 +1411,7 @@ class OrchestratorV2:
 def main():
     from logging_setup import setup_logging
     setup_logging("orchestrator")
-    import redis as sync_redis
-    r = sync_redis.Redis(host="localhost", port=6379, decode_responses=True)
+    r = OrchestratorV2._new_redis_sync()
     orch = OrchestratorV2()
 
     logger.info("OrchestratorV2 listening on orchestrator:main")
