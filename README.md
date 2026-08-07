@@ -119,9 +119,10 @@ bash stop.sh     # 一键停止
 
 与 Windows 一致：首次运行自动装依赖、自动构建前端。
 
-> **Python 版本**：推荐 3.10–3.13。Python 3.14 目前没有 `pygame` 的官方 wheel，
-> 如需让 `code_execution` 生成的 pygame 游戏可运行，建议使用 3.10–3.13 或运行
-> `pip install -r requirements-games.txt`（可选依赖）。
+> **Python 版本**：支持 3.10–3.14。官方 `pygame` 在 3.14 暂无 wheel，
+> 但 **pygame-ce 2.5.6+ 完整支持 3.10–3.14**（drop-in 替代，导入名仍是 `pygame`）。
+> 想让 `code_execution` 生成的 pygame 游戏可运行，执行
+> `pip install -r requirements-games.txt`（可选依赖）即可。
 > 系统会自动探测环境：有 pygame 就用 pygame；没有则引导生成 turtle / 单文件 HTML 方案，
 > 不影响其他功能。
 

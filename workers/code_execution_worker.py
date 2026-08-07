@@ -141,6 +141,40 @@ class CodeExecutionWorker(AsyncWorkerBase):
                 return "index.html"
         return f"generated_{int(time.time() * 1000)}.py"
 
+    async def _generate_code(
+        self, instruction: str, env_note: str, html_mode: bool,
+        compile_err: str, minimal: bool,
+    ) -> str:
+        """调 LLM 生成代码；compile_err 非空时携带语法错误反馈要求修复。"""
+        feedback = (
+            f"\n上一次生成的代码编译失败，请修复后重新输出完整代码：\n{compile_err}"
+            if compile_err else ""
+        )
+        if minimal:
+            system = "You are a web developer. Write minimal runnable code. Output ONLY raw code."
+            prompt = (
+                "Write minimal runnable Python code (<=200 lines) that satisfies: "
+                f"{instruction[:800]}\n{env_note}{feedback}"
+                if not html_mode else
+                "Write a self-contained single-file HTML page (inline CSS/JS) that satisfies: "
+                f"{instruction[:800]}\nOutput ONLY raw HTML, no Python wrapper.{feedback}"
+            )
+        else:
+            system = (
+                "You are a senior Python developer. Generate complete, runnable, "
+                "self-contained code. Output ONLY the code, no explanations."
+            )
+            prompt = (
+                "请生成满足以下要求的完整可运行 Python 代码（自包含、可直接执行，"
+                "必要依赖仅在注释中说明）：\n"
+                f"{instruction}\n{env_note}{feedback}"
+                if not html_mode else
+                "请生成满足以下要求的自包含单文件 HTML 页面（内联 CSS/JS，"
+                "直接可保存并在浏览器打开）：\n"
+                f"{instruction}\n{env_note}\n只输出原始 HTML，不要用 Python 包装。{feedback}"
+            )
+        return await self._call_llm(system=system, prompt=prompt)
+
     async def execute(self, instruction: str) -> str:
         try:
             if _HAS_PYGAME:
@@ -155,46 +189,56 @@ class CodeExecutionWorker(AsyncWorkerBase):
                     "或生成单文件 HTML 游戏（保存为 .html，不需要运行）。"
                 )
             html_mode = any(k in instruction.lower() for k in ("html", "网页", "webpage"))
-            llm_response = ""
-            for _gen in range(4):
-                try:
-                    if _gen >= 2:
-                        # 前两次失败后改用极简提示，规避模型空响应/拒绝
-                        llm_response = await self._call_llm(
-                            system=(
-                                "You are a web developer. Write minimal runnable code. "
-                                "Output ONLY raw code."
-                            ),
-                            prompt=(
-                                "Write minimal runnable Python code (<=200 lines) that satisfies: "
-                                f"{instruction[:800]}\n{env_note}"
-                                if not html_mode else
-                                "Write a self-contained single-file HTML page (inline CSS/JS) that satisfies: "
-                                f"{instruction[:800]}\nOutput ONLY raw HTML, no Python wrapper."
-                            ),
+            code = None
+            compile_err = ""
+            for _round in range(2):
+                llm_response = ""
+                for _gen in range(2):
+                    try:
+                        llm_response = await self._generate_code(
+                            instruction, env_note, html_mode,
+                            compile_err, minimal=(_gen == 1),
                         )
-                    else:
-                        llm_response = await self._call_llm(
-                            system=(
-                                "You are a senior Python developer. Generate complete, runnable, "
-                                "self-contained Python code. Output ONLY the code, no explanations."
-                            ),
-                            prompt=(
-                                "请生成满足以下要求的完整可运行 Python 代码（自包含、可直接执行，"
-                                "必要依赖仅在注释中说明）：\n"
-                                f"{instruction}\n{env_note}"
-                                if not html_mode else
-                                "请生成满足以下要求的自包含单文件 HTML 页面（内联 CSS/JS，"
-                                "直接可保存并在浏览器打开）：\n"
-                                f"{instruction}\n{env_note}\n只输出原始 HTML，不要用 Python 包装。"
-                            ),
-                        )
-                except Exception:
-                    llm_response = ""
+                    except Exception:
+                        llm_response = ""
+                        continue
+                    if llm_response and llm_response.strip():
+                        break
+                if not llm_response or not llm_response.strip():
                     continue
-                if llm_response and llm_response.strip():
+                candidate = llm_response.strip()
+                if candidate.startswith("```"):
+                    lines = candidate.splitlines()
+                    if lines and lines[0].startswith("```"):
+                        lines = lines[1:]
+                    if lines and lines[-1].strip() == "```":
+                        lines = lines[:-1]
+                    candidate = "\n".join(lines)
+                if candidate.lstrip().lower().startswith(("<html", "<!doctype")) or html_mode:
+                    code = candidate
                     break
-            if not llm_response or not llm_response.strip():
+                # 编译自检（仅 Python 目标）：语法错误立即让 LLM 修复，避免运行期才炸
+                check_path = self.workspace / f"_check_{int(time.time() * 1000)}.py"
+                check_path.write_text(candidate, encoding="utf-8")
+                try:
+                    proc = await asyncio.create_subprocess_exec(
+                        sys.executable, "-m", "py_compile", str(check_path),
+                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+                        cwd=str(self.workspace), env=self._clean_env(),
+                    )
+                    _out, _err = await asyncio.wait_for(proc.communicate(), timeout=30)
+                    if proc.returncode == 0:
+                        code = candidate
+                        break
+                    compile_err = (_err or _out).decode("utf-8", errors="replace")[:800]
+                except asyncio.TimeoutError:
+                    pass
+                finally:
+                    try:
+                        check_path.unlink()
+                    except Exception:
+                        pass
+            if code is None:
                 # 内置模板兜底：游戏类指令直接交付可运行的 HTML 演示，避免因
                 # LLM 空响应（提供商偶发）导致整任务失败。
                 low = instruction.lower()
@@ -211,17 +255,9 @@ class CodeExecutionWorker(AsyncWorkerBase):
                         "fallback": "template",
                         "returncode": 0,
                     }, ensure_ascii=False)
-                raise RuntimeError("No code generated by LLM")
-
-            # 去掉可能的 markdown 代码块包装
-            code = llm_response.strip()
-            if code.startswith("```"):
-                lines = code.splitlines()
-                if lines and lines[0].startswith("```"):
-                    lines = lines[1:]
-                if lines and lines[-1].strip() == "```":
-                    lines = lines[:-1]
-                code = "\n".join(lines)
+                raise RuntimeError(
+                    f"No valid code generated after retries{': ' + compile_err if compile_err else ''}"
+                )
 
             # 持久化：主文件用目标名，测试脚本用唯一名；避免覆盖已存在的交付物
             filename = self._target_filename(instruction)

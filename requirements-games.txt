@@ -1,4 +1,5 @@
 # 可选依赖：让 code_execution 生成的 pygame 游戏可以真正运行。
-# 注意：Python 3.14 目前没有 pygame 官方 wheel，装不上属于正常现象；
-# 系统会自动探测——有 pygame 就用 pygame，没有则引导生成 turtle/HTML 方案。
-pygame>=2.5
+# 推荐 pygame-ce（社区版，drop-in 替代官方 pygame，导入名仍是 pygame）：
+# - 支持 Python 3.10–3.14（官方 pygame 在 3.14 无 wheel）
+# - 安装后系统自动探测，直接用 pygame 实现游戏
+pygame-ce>=2.5.6

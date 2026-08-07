@@ -790,12 +790,17 @@ class OrchestratorV2:
 
         # Push task to worker queue
         r = self._new_redis_sync()
-        r.lpush(f"task_queue:{agent_id}", json.dumps({"task_id": step_id, "instruction": instruction}))
+        # 唯一派发 ID：避免 task_result:{step_id} 与其它任务/历史残留键碰撞
+        # （步骤 ID 如 "1"/"2" 在所有任务中通用，曾导致跨任务误取结果）
+        dispatch_id = f"{step_id}-{uuid.uuid4().hex[:8]}"
+        r.lpush(f"task_queue:{agent_id}", json.dumps({"task_id": dispatch_id, "instruction": instruction}))
 
         # Wait for result
-        result = self._wait_for_result(step_id, timeout)
+        result = self._wait_for_result(dispatch_id, timeout)
         if result:
             result = self._normalize_result(result)
+            # 展示层保留原步骤 ID（任务结果仅用于完成状态与内容）
+            result["task_id"] = step_id
             push_progress(self._messaging, task_id, "agent_status",
                           {"agent_id": agent_id, "status": "idle"})
             push_progress(self._messaging, task_id, "log",
@@ -952,6 +957,7 @@ class OrchestratorV2:
         steps = self._wire_search_fetch_deps(steps)
         steps = self._ensure_package_step(steps)
         steps = self._break_cycles(steps)
+        steps = self._inject_goal_into_steps(steps, goal)
         if not steps:
             push_progress(self._messaging, task_id, "task_complete",
                           {"status": "FAILED", "summary": "Planning failed"})
@@ -979,6 +985,7 @@ class OrchestratorV2:
             steps = self._wire_search_fetch_deps(steps)
             steps = self._ensure_package_step(steps)
             steps = self._break_cycles(steps)
+            steps = self._inject_goal_into_steps(steps, goal)
             if not steps:
                 push_progress(self._messaging, task_id, "task_complete",
                               {"status": "FAILED", "summary": "Empty plan confirmed, task cancelled"})
@@ -1034,6 +1041,7 @@ class OrchestratorV2:
             steps = self._wire_search_fetch_deps(steps)
             steps = self._ensure_package_step(steps)
             steps = self._break_cycles(steps)
+            steps = self._inject_goal_into_steps(steps, goal)
             push_progress(self._messaging, task_id, "log",
                           {"type": "iteration", "agent": "orchestrator",
                            "message": f"Iteration {iteration}: closing {len(gaps)} gaps with {len(steps)} steps",
@@ -1347,10 +1355,37 @@ class OrchestratorV2:
                 snippet = str(prev_res)[:2500] if prev_res else ''
                 if snippet:
                     instr += f"\n[上一步结果 {dep_id}]:\n{snippet}"
+                # 读取产物文件（如 code_execution 落盘的 HTML/代码），给报告真实素材
+                try:
+                    parsed = json.loads(prev_res) if isinstance(prev_res, str) else prev_res
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    fpath = parsed.get("path") or parsed.get("report_path") or parsed.get("data_path") or ""
+                    if fpath and os.path.exists(fpath):
+                        try:
+                            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                                content = f.read(4000)
+                            if content.strip():
+                                instr += f"\n[产物文件 {dep_id} ({os.path.basename(fpath)})]:\n{content[:3000]}"
+                        except Exception:
+                            pass
             instr += ("\n[指令] 仅使用与任务目标主题直接相关的信息；"
                       "若上一步结果中的来源与主题无关（如无关政策新闻、其他领域文档、垃圾站点或空结果），"
                       "一律不要纳入输出，并注明已剔除无关内容。")
         return instr
+
+    def _inject_goal_into_steps(self, steps: list[dict], goal: str) -> list[dict]:
+        """把用户目标注入报告/摘要步骤，避免报告生成器无主题可写。"""
+        if not goal:
+            return steps
+        for s in steps:
+            if s.get("capability") in ("content_summary", "report_generator"):
+                s["instruction"] = (
+                    f"用户目标：{goal[:300]}\n"
+                    f"原始指令：{s.get('instruction', '')}"
+                )
+        return steps
 
     def _dispatch_step_safe(self, goal: str, step: dict, task_id: str, state: dict) -> dict:
         """派发单步：失败自动重试，重试仍失败则尝试单步重规划。"""
@@ -1412,6 +1447,14 @@ def main():
     from logging_setup import setup_logging
     setup_logging("orchestrator")
     r = OrchestratorV2._new_redis_sync()
+    # 清理历史残留的结果键，避免与本次运行的新派发 ID 混淆（防御性清理）
+    try:
+        stale = r.keys("task_result:*")
+        if stale:
+            r.delete(*stale)
+            logger.info("Cleaned %d stale task_result keys", len(stale))
+    except Exception:
+        pass
     orch = OrchestratorV2()
 
     logger.info("OrchestratorV2 listening on orchestrator:main")
