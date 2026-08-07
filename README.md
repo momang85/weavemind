@@ -1,15 +1,28 @@
+<div align="center">
+
 # 织光 ZhiGuang · WeaveMind
 
-> **一支看得见、会记忆、会自我进化的 AI 团队，跑在你自己的电脑上。**
+**一支看得见、会记忆、会自我进化的 AI 团队，跑在你自己的电脑上。**
 
 [![CI](https://github.com/momang85/weavemind/actions/workflows/ci.yml/badge.svg)](https://github.com/momang85/weavemind/actions)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 [![Docker](https://img.shields.io/badge/docker-ready-2496ED.svg)](docker-compose.yml)
+[![Open Source](https://img.shields.io/badge/Open%20Source-Yes-brightgreen)](LICENSE)
 
-织光（WeaveMind）是一个**开箱即用的多智能体 AI 任务编排系统**：输入一句目标，
-系统自动用 LLM 拆解计划、分派给一组专职 Worker 并行执行、产出交付文档——
-而且它能**记住经验、对话式追问、计划可编辑、自主迭代、甚至自我进化**，全程可视化。
+🌏 [English](README.en.md) · 中文
+
+</div>
+
+![织光 hero 演示](docs/hero-demo.gif)
+
+输入一句目标 → **一支 10 人 AI 团队并行干活** → 交付完整报告。
+它不是又一个聊天窗口，而是一台**可视化的多智能体车间**：计划可编辑、
+记忆可复用、策略会进化——每一步都看得见，每一个交付都真实落盘。
+
+**核心差异一句话**：别的 Agent 用完就忘，织光 **看得见、记得住、会进化**。
+
+> ⭐ 如果织光对你有帮助，欢迎点个 **Star**，让更多人看见这支 AI 团队。
 
 ---
 
@@ -24,6 +37,20 @@
 - ✏️ **听指挥**：生成计划后可上移/下移/删除/添加步骤，确认后执行
 - 🔁 **会自我完善**：任务后自动验收评审，不达标就追加步骤继续迭代
 - 🧬 **会自我进化**：策略变异 → 锦标赛 → 安全红线 → 人工审批部署
+
+## 🆚 与常见方案对比
+
+| 能力 | **织光 WeaveMind** | 单 Agent 对话 | AutoGPT / Manus | 自建框架（CrewAI 等） |
+|---|---|---|---|---|
+| 多 Worker 并行 DAG 执行 | ✅ 内置 | ❌ 单线程 | ⚠️ 部分 | 要自己写 |
+| 全程可视化（任务树/拓扑/实时） | ✅ 内置 | ❌ | ❌ | 要自己写 |
+| 长期记忆 + 成功策略复用 | ✅ ChromaDB | ❌ 会话内 | ⚠️ 弱 | 自己接 |
+| 计划可编辑、确认后执行 | ✅ 内置 | ❌ | ❌ | 自己写 |
+| 自主迭代（验收评审 → 追加步骤） | ✅ 内置 | ❌ | ⚠️ 部分 | 自己写 |
+| **策略自我进化（锦标赛）** | ✅ 独有 | ❌ | ❌ | ❌ |
+| 一键启动（Windows/macOS/Linux/Docker） | ✅ | — | ⚠️ | ❌ |
+| 本地运行、数据私有 | ✅ | ❌ 云端 | ❌ 云端 | ✅ |
+| 代码执行沙箱（密钥剥离/超时/隔离） | ✅ 内置 | ❌ | ⚠️ | 自己写 |
 
 ## 🚀 30 秒快速体验
 
