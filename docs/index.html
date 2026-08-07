@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>织光 WeaveMind — 看得见、会记忆、会自我进化的 AI 团队</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; margin: 0; }
+  body { font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+         background: #0f172a; color: #e2e8f0; line-height: 1.6; }
+  header { text-align: center; padding: 72px 20px 40px; }
+  h1 { font-size: 40px; background: linear-gradient(90deg,#60a5fa,#34d399);
+       -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .tagline { margin-top: 12px; font-size: 18px; color: #94a3b8; }
+  .cta { margin-top: 24px; }
+  .cta a { display: inline-block; margin: 6px; padding: 12px 24px; border-radius: 8px;
+           text-decoration: none; font-weight: 600; }
+  .primary { background: #34d399; color: #0f172a; }
+  .ghost { border: 1px solid #475569; color: #e2e8f0; }
+  img.hero { display: block; margin: 40px auto 0; max-width: 880px; width: 92%;
+             border-radius: 12px; border: 1px solid #1e293b; }
+  section { max-width: 880px; margin: 0 auto; padding: 40px 20px; }
+  h2 { font-size: 24px; margin-bottom: 16px; color: #f1f5f9; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 16px; }
+  .card { background: #1e293b; border-radius: 12px; padding: 20px; }
+  .card h3 { color: #60a5fa; margin-bottom: 8px; }
+  pre { background: #1e293b; border-radius: 10px; padding: 16px; overflow-x: auto;
+        font-size: 14px; margin-top: 12px; }
+  footer { text-align: center; padding: 32px; color: #64748b; font-size: 14px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>织光 WeaveMind</h1>
+  <p class="tagline">一支看得见、会记忆、会自我进化的 AI 团队，跑在你自己的电脑上。</p>
+  <div class="cta">
+    <a class="primary" href="https://github.com/momang85/weavemind">GitHub 仓库</a>
+    <a class="ghost" href="https://github.com/momang85/weavemind/releases">下载 Release</a>
+    <a class="ghost" href="README.en.md">English</a>
+  </div>
+  <img class="hero" src="hero-demo.gif" alt="织光任务执行演示">
+</header>
+
+<section>
+  <h2>输入一句目标，一支 AI 团队并行干活</h2>
+  <div class="cards">
+    <div class="card"><h3>👀 看得见</h3>实时任务树、Agent 拓扑、每一步的结果——不再是黑箱。</div>
+    <div class="card"><h3>🧠 会记忆</h3>ChromaDB 长期记忆，同类任务自动复用成功经验。</div>
+    <div class="card"><h3>🧬 会进化</h3>策略变异 → 锦标赛 → 安全红线 → 人工审批部署。</div>
+    <div class="card"><h3>✏️ 听指挥</h3>计划可编辑、确认后执行；同一会话可连续追问。</div>
+    <div class="card"><h3>🔁 会自我完善</h3>任务后自动验收评审，不达标就追加步骤继续迭代。</div>
+    <div class="card"><h3>🧑‍💼 开箱即用</h3>Windows / macOS / Linux / Docker 一键启动。</div>
+  </div>
+</section>
+
+<section>
+  <h2>30 秒快速体验</h2>
+  <pre>git clone https://github.com/momang85/weavemind.git && cd weavemind
+cp config.example.json config.json   # 填入你的 LLM API Key
+bash start.sh                        # 或 start.bat / docker compose up --build -d</pre>
+</section>
+
+<footer>MIT License · 由社区共同打磨 · <a href="https://github.com/momang85/weavemind" style="color:#60a5fa">Star us ⭐</a></footer>
+</body>
+</html>
