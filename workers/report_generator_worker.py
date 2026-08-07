@@ -73,6 +73,7 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             }, ensure_ascii=False)
         except Exception as exc:
             # 回退：LLM 不可用时输出结构化模板
+            chart_md = "".join(f"![{c.stem}]({c})" + "\n\n" for c in charts)
             report = f"""# Data Science Pipeline Report
 
 ## Summary
@@ -84,7 +85,7 @@ class ReportGeneratorWorker(AsyncWorkerBase):
 {data_info}
 
 ## Exploratory Data Analysis
-{''.join(f"![{c.stem}]({c})\n\n" for c in charts)}
+{chart_md}
 
 ## Model Training Results
 The model training results are embedded above. See the feature importance chart for key predictors.
