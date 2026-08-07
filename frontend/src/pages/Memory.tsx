@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Brain, FlaskConical, ChevronDown, ChevronRight, Play, CheckCircle2, XCircle, Sparkles, Copy, RefreshCw } from 'lucide-react'
+import { Brain, FlaskConical, ChevronDown, ChevronRight, Play, CheckCircle2, XCircle, ShieldCheck, Sparkles, Copy, RefreshCw } from 'lucide-react'
 import type { MemoryDoc, EvolutionRound } from '../stores/types'
 
 function chip(text: string, cls: string) {
@@ -11,6 +11,7 @@ export default function Memory() {
   const [strats, setStrats] = useState<MemoryDoc[]>([])
   const [stats, setStats] = useState({ conversations: 0, strategies: 0 })
   const [rounds, setRounds] = useState<EvolutionRound[]>([])
+  const [pendingList, setPendingList] = useState<any[]>([])
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [loading, setLoading] = useState(true)
   const [summary, setSummary] = useState('')
@@ -26,6 +27,10 @@ export default function Memory() {
     try {
       const evo = await (await fetch('/api/evolution')).json()
       setRounds(evo.rounds ?? [])
+    } catch {}
+    try {
+      const pend = await (await fetch('/api/evolution/pending')).json()
+      setPendingList(pend.pending ?? [])
     } catch {}
     setLoading(false)
   }, [])
@@ -58,6 +63,17 @@ export default function Memory() {
     try {
       await fetch('/api/evolution/trigger', { method: 'POST' })
       alert('进化已触发，约需数分钟完成，稍后刷新查看回放。')
+    } catch {}
+  }
+
+  const approveStrategy = async (id: string, approve: boolean) => {
+    try {
+      await fetch('/api/evolution/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ strategy_id: id, approve }),
+      })
+      await load()
     } catch {}
   }
 
@@ -140,6 +156,52 @@ export default function Memory() {
                 ))}
               </div>
             </div>
+          </div>
+        )}
+      </div>
+
+      {/* 进化部署审批 */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+        <div className="flex items-center gap-2 mb-4">
+          <ShieldCheck className="w-5 h-5 text-cyan-400" />
+          <h3 className="text-slate-200 font-semibold text-sm">进化部署审批</h3>
+          <span className="text-slate-500 text-[10px]">人工确认后，胜出策略将实际作用于对应 Worker</span>
+        </div>
+        {pendingList.length === 0 ? (
+          <div className="text-slate-600 text-xs py-4 text-center">
+            暂无待审批的策略部署请求。触发进化并产生稳定胜者后，会出现在这里等你审批。
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {pendingList.map((p, i) => (
+              <div key={i} className="bg-slate-800/40 border border-slate-800 rounded-lg p-4">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-cyan-400 text-xs font-semibold">{p.strategy_id}</span>
+                  {chip(p.agent_type || 'search_agent', 'bg-slate-700/50 text-slate-400')}
+                  {p.temperature != null && chip('温度 ' + p.temperature, 'bg-slate-700/50 text-slate-400')}
+                  {p.max_sources != null && chip('源数 ' + p.max_sources, 'bg-slate-700/50 text-slate-400')}
+                  {p.timestamp && <span className="text-slate-600 text-[10px] ml-auto">{new Date(p.timestamp).toLocaleString()}</span>}
+                </div>
+                <div className="mt-2 text-xs text-slate-400">
+                  摘要提示：<span className="text-slate-300">{p.summarization_prompt || '—'}</span>
+                </div>
+                {(p.filter_rules || []).length > 0 && (
+                  <div className="mt-1 text-xs text-slate-400">
+                    过滤规则：<span className="text-slate-300">{String(p.filter_rules.join('；'))}</span>
+                  </div>
+                )}
+                <div className="mt-3 flex gap-2">
+                  <button onClick={() => approveStrategy(p.strategy_id, true)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 text-xs">
+                    <CheckCircle2 className="w-3.5 h-3.5" /> 批准部署
+                  </button>
+                  <button onClick={() => approveStrategy(p.strategy_id, false)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs">
+                    <XCircle className="w-3.5 h-3.5" /> 驳回
+                  </button>
+                </div>
+              </div>
+            ))}
           </div>
         )}
       </div>

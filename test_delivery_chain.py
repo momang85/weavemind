@@ -452,5 +452,89 @@ class TestPlanNormalization(unittest.TestCase):
         self.assertEqual(out[1]["depends_on"], ["1"])
 
 
+class TestStrategyDeployment(unittest.TestCase):
+    def test_search_worker_applies_filter_blocks(self):
+        from worker_base import SearchAgent
+
+        sa = SearchAgent.__new__(SearchAgent)
+        sa._strategy_blocks = ["pinterest"]
+        sa._strategy_boosts = []
+        results = [
+            {"title": "Pinterest pin", "url": "https://www.pinterest.com/pin/1", "snippet": "python code"},
+            {"title": "GitHub repo", "url": "https://github.com/foo/bar", "snippet": "python code"},
+        ]
+        kept = sa._filter_results("python code github", results)
+        self.assertTrue(all("pinterest" not in r["url"] for r in kept))
+        self.assertEqual(len(kept), 1)
+
+    def test_search_worker_applies_boosts(self):
+        from worker_base import SearchAgent
+
+        sa = SearchAgent.__new__(SearchAgent)
+        sa._strategy_blocks = []
+        sa._strategy_boosts = ["github"]
+        results = [
+            {"title": "普通文章", "url": "https://example.com/a", "snippet": "python code"},
+            {"title": "GitHub repo", "url": "https://github.com/foo/bar", "snippet": "python code"},
+        ]
+        kept = sa._filter_results("python code", results)
+        self.assertEqual(kept[0]["url"], "https://github.com/foo/bar")
+
+    def test_load_active_strategy_parses_rules(self):
+        import json as _json
+        from worker_base import SearchAgent
+
+        class FakeRedis:
+            def get(self, key):
+                return _json.dumps({
+                    "strategy_id": "s1", "agent_type": "search_agent",
+                    "max_sources": 8,
+                    "filter_rules": ["排除:pinterest", "优先:github"],
+                })
+
+        class FakeMsg:
+            def __init__(self):
+                self.redis = FakeRedis()
+
+        sa = SearchAgent.__new__(SearchAgent)
+        sa._messaging = FakeMsg()
+        sa._load_active_strategy()
+        self.assertEqual(sa._strategy_max_sources, 8)
+        self.assertIn("pinterest", sa._strategy_blocks)
+        self.assertIn("github", sa._strategy_boosts)
+
+    def test_safety_gate_persists_pending_request(self):
+        import json as _json
+        from evolution_sandbox import EvolutionSandbox, StrategyConfig
+
+        pushed = []
+
+        class FakeRedis:
+            def rpush(self, key, val):
+                pushed.append((key, val))
+
+        class FakeMsg:
+            def __init__(self):
+                self.redis = FakeRedis()
+
+            def publish(self, *a, **k):
+                pass
+
+        sb = EvolutionSandbox.__new__(EvolutionSandbox)
+        sb._messaging = FakeMsg()
+        sb._poison_list = set()
+        winner = StrategyConfig(
+            strategy_id="s-win", agent_type="search_agent",
+            temperature=0.5, max_sources=7, filter_rules=["排除:x"],
+        )
+        ok = sb._safety_gate_and_deploy(winner)
+        self.assertTrue(ok)
+        self.assertEqual(len(pushed), 1)
+        self.assertEqual(pushed[0][0], "evolution:pending")
+        data = _json.loads(pushed[0][1])
+        self.assertEqual(data["status"], "pending")
+        self.assertEqual(data["strategy_id"], "s-win")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

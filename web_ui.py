@@ -594,6 +594,13 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/evolution":
             with _evolution_lock:
                 return self._json({"rounds": list(reversed(_evolution_results))})
+        if p == "/api/evolution/pending":
+            r = _new_redis()
+            try:
+                items = [json.loads(x) for x in r.lrange("evolution:pending", 0, -1)]
+            except Exception:
+                items = []
+            return self._json({"pending": items})
         if p == "/api/metrics":
             try:
                 with open(_METRICS_SUMMARY, "r", encoding="utf-8") as f:
@@ -754,6 +761,44 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 return self._json({"error": "Redis 发布失败，无法触发进化"}, 503)
             return self._json({"status":"triggered"})
+        if self.path == "/api/evolution/approve":
+            sid = str(body.get("strategy_id") or "").strip()
+            approve = bool(body.get("approve", True))
+            if not sid:
+                return self._json({"error": "strategy_id required"}, 400)
+            if not _redis_ready():
+                return self._json({"error": "Redis 未连接，无法审批"}, 503)
+            r = _new_redis()
+            try:
+                entries = r.lrange("evolution:pending", 0, -1)
+                matched = None
+                for raw in entries:
+                    try:
+                        item = json.loads(raw)
+                    except Exception:
+                        continue
+                    if item.get("strategy_id") == sid:
+                        matched = (raw, item)
+                        break
+                if not matched:
+                    return self._json({"error": "pending strategy not found"}, 404)
+                raw, item = matched
+                r.lrem("evolution:pending", 0, raw)
+                deployed = False
+                if approve:
+                    item["status"] = "deployed"
+                    r.set(
+                        f"strategy:active:{item.get('agent_type', 'search_agent')}",
+                        json.dumps(item, ensure_ascii=False),
+                    )
+                    deployed = True
+                return self._json({
+                    "status": "ok",
+                    "deployed": deployed,
+                    "agent_type": item.get("agent_type"),
+                })
+            except Exception as exc:
+                return self._json({"error": f"approve failed: {exc}"}, 500)
 
         if self.path == "/api/single-agent":
             g = body.get("goal","").strip()

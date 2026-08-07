@@ -446,6 +446,45 @@ class SearchAgent(BaseWorker):
 
     _SPAM_DOMAINS = ("susmeat.com", "aydvjch.cc", "example.com")
     _JUNK_TITLES = ("google", "bing", "microsoft", "登录", "403", "404")
+    # 已部署策略（人工审批后写入 strategy:active:search_agent，每次执行时刷新）
+    _strategy_max_sources = 5
+    _strategy_blocks: list[str] = []
+    _strategy_boosts: list[str] = []
+
+    def _load_active_strategy(self) -> None:
+        """读取已部署策略并解析为过滤规则：排除词（黑名单）与优先词（排序加分）。"""
+        self._strategy_max_sources = 5
+        self._strategy_blocks = []
+        self._strategy_boosts = []
+        try:
+            raw = self._messaging.redis.get("strategy:active:search_agent")
+            if not raw:
+                return
+            data = json.loads(raw)
+            self._strategy_max_sources = max(1, int(data.get("max_sources", 5)))
+            for rule in (data.get("filter_rules") or []):
+                rule = str(rule)
+                low = rule.lower()
+                if ":" in rule:
+                    word = rule.split(":", 1)[1].strip()
+                elif rule.startswith("排除"):
+                    word = rule[2:].strip()
+                elif rule.startswith("优先"):
+                    word = rule[2:].strip()
+                else:
+                    word = rule
+                if not word:
+                    continue
+                if "排除" in rule or low.startswith("exclude"):
+                    self._strategy_blocks.append(word.lower())
+                elif "优先" in rule or low.startswith("prefer"):
+                    self._strategy_boosts.append(word.lower())
+            logger.info(
+                "Active strategy applied: max_sources=%d blocks=%s boosts=%s",
+                self._strategy_max_sources, self._strategy_blocks, self._strategy_boosts,
+            )
+        except Exception as exc:
+            logger.warning("Failed to load active strategy: %s", exc)
 
     def _extract_keywords(self, text: str) -> str:
         """从冗长的中文指令中提取核心搜索词，显著提高搜索引擎召回质量。"""
@@ -494,6 +533,9 @@ class SearchAgent(BaseWorker):
                 continue
             if title.lower().strip() in self._JUNK_TITLES:
                 continue
+            url_title = (url + " " + title).lower()
+            if any(b in url_title for b in self._strategy_blocks):
+                continue
             hay = title + " " + snip
             hay_lower = hay.lower()
             score = 0
@@ -505,6 +547,8 @@ class SearchAgent(BaseWorker):
                     rf"(?<![a-z0-9]){_re.escape(tok)}(?![a-z0-9])", hay_lower
                 ):
                     score += 2
+            if any(b in url_title for b in self._strategy_boosts):
+                score += 3
             if score < 2:
                 continue
             kept.append((score, r))
@@ -558,6 +602,7 @@ class SearchAgent(BaseWorker):
     def execute(self, instruction: str) -> str:
         """多源搜索：DuckDuckGo → Bing → mock。"""
         logger.info("SearchAgent searching: %s", instruction)
+        self._load_active_strategy()
         keywords = self._extract_keywords(instruction)
         query = keywords if len(keywords) >= 4 else instruction
         source_ok = False
@@ -565,7 +610,7 @@ class SearchAgent(BaseWorker):
             from ddgs import DDGS
             results = []
             with DDGS() as ddgs:
-                for r in ddgs.text(query, max_results=5):
+                for r in ddgs.text(query, max_results=self._strategy_max_sources):
                     results.append({
                         "title": r.get("title", ""),
                         "url": r.get("href", ""),

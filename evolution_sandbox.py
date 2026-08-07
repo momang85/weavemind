@@ -31,6 +31,10 @@ from llm_client import call_llm, LLMCallError
 
 logger = logging.getLogger(__name__)
 
+# 待人工审批的部署请求（Redis List）；批准后写入 active 策略键
+PENDING_KEY = "evolution:pending"
+ACTIVE_KEY_PREFIX = "strategy:active:"
+
 # ---------------------------------------------------------------------------
 # 策略数据结构
 # ---------------------------------------------------------------------------
@@ -661,16 +665,21 @@ class EvolutionSandbox:
             )
             winner.temperature = 0.9
 
-        # 发布部署请求（需要人工审核）
-        deploy_msg = {
-            "type": "strategy_deploy_request",
-            "strategy": winner.to_dict(),
-            "timestamp": _now_iso(),
-            "requires_approval": True,
-        }
-
         try:
-            self._messaging.publish("registry.capability.update", deploy_msg)
+            payload = winner.to_dict()
+            payload["timestamp"] = _now_iso()
+            payload["status"] = "pending"
+            # 持久化到待审批列表（web 控制台读取并展示审批按钮）
+            self._messaging.redis.rpush(
+                PENDING_KEY, json.dumps(payload, ensure_ascii=False)
+            )
+            # 兼容通知：仍发布到能力更新频道
+            self._messaging.publish("registry.capability.update", {
+                "type": "strategy_deploy_request",
+                "strategy": payload,
+                "timestamp": payload["timestamp"],
+                "requires_approval": True,
+            })
             logger.info(
                 "Strategy '%s' deployment REQUEST published (awaiting approval). "
                 "Strategy: temp=%.2f, prompt='%s', rules=%s",

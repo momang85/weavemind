@@ -77,6 +77,11 @@ class MessagingClient:
         self._redis_host = redis_host
         self._redis_port = redis_port
         self._redis: redis.Redis = _redis_client or self._connect()
+
+    @property
+    def redis(self) -> redis.Redis:
+        """暴露底层 Redis 客户端（供策略部署/读取等直接操作）。"""
+        return self._redis
         if not _redis_client:
             logger.info("MessagingClient connected to %s:%d", redis_host, redis_port)
 
