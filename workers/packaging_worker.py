@@ -85,6 +85,7 @@ class PackagingWorker(AsyncWorkerBase):
                 rel.startswith("__pycache__/")
                 or "/__pycache__/" in rel
                 or "_check_" in rel
+                or rel.startswith(".test_")
                 or rel.startswith("screenshots/")
                 or "/screenshots/" in rel
             ):

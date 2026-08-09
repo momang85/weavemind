@@ -146,7 +146,7 @@ class CodeExecutionWorker(AsyncWorkerBase):
 
     async def _generate_code(
         self, instruction: str, env_note: str, html_mode: bool,
-        compile_err: str, minimal: bool,
+        compile_err: str, minimal: bool, test_context: str = "",
     ) -> str:
         """调 LLM 生成代码；compile_err 非空时携带语法错误反馈要求修复。"""
         feedback = (
@@ -159,11 +159,16 @@ class CodeExecutionWorker(AsyncWorkerBase):
             "修改后的完整文件，保持原文件名）：\n" + ws
             if ws else ""
         )
+        tdd_note = (
+            "\n\n[TDD] 以下测试断言已先行编写，你的实现必须满足这些测试"
+            "（保持模块名与导出名一致，运行测试应全部通过）：\n" + test_context
+            if test_context else ""
+        )
         if minimal:
             system = "You are a web developer. Write minimal runnable code. Output ONLY raw code."
             prompt = (
                 "Write minimal runnable Python code (<=200 lines) that satisfies: "
-                f"{instruction[:800]}\n{env_note}{ws_note}{feedback}"
+                f"{instruction[:800]}\n{env_note}{ws_note}{tdd_note}{feedback}"
                 if not html_mode else
                 "Write a self-contained single-file HTML page (inline CSS/JS) that satisfies: "
                 f"{instruction[:800]}\nOutput ONLY raw HTML, no Python wrapper.{ws_note}{feedback}"
@@ -176,7 +181,7 @@ class CodeExecutionWorker(AsyncWorkerBase):
             prompt = (
                 "请生成满足以下要求的完整可运行 Python 代码（自包含、可直接执行，"
                 "必要依赖仅在注释中说明）：\n"
-                f"{instruction}\n{env_note}{ws_note}{feedback}"
+                f"{instruction}\n{env_note}{ws_note}{tdd_note}{feedback}"
                 if not html_mode else
                 "请生成满足以下要求的自包含单文件 HTML 页面（内联 CSS/JS，"
                 "直接可保存并在浏览器打开）：\n"
@@ -334,7 +339,36 @@ class CodeExecutionWorker(AsyncWorkerBase):
             # 审查失败不阻塞执行（保守放行）
             return True, ""
 
+    async def _tdd_pilot(self, instruction: str, filename: str) -> tuple[bool, str]:
+        """严格 TDD：先让 LLM 判断需求是否适合测试驱动，若适合则生成测试文件。
+        返回 (是否启用 TDD, 测试代码)。"""
+        try:
+            resp = await self._call_llm(
+                system=(
+                    "你是 TDD 工程师。判断需求是否适合测试驱动开发："
+                    "（可自动验证、有明确的输入输出或行为断言）若适合则编写测试。"
+                    f"实现模块将保存为 {filename}（不含 .py 后缀，如文件名是 sum.py 则 import sum）。"
+                    '输出严格JSON：{"tdd": true|false, "test": "完整测试代码"}。'
+                    "测试要 import 实现模块并对核心行为做断言（失败时打印 FAILED 并 exit(1)）。只输出JSON。"
+                ),
+                prompt=(
+                    f"需求：{instruction[:500]}\n"
+                    f"实现将保存为 {filename}，测试 import 它并断言行为。"
+                ),
+            )
+            clean = str(resp).strip()
+            if clean.startswith("```"):
+                clean = re.sub(r"^```[a-zA-Z]*\s*", "", clean).rstrip("`").strip()
+            data = json.loads(clean)
+            if isinstance(data, dict) and data.get("tdd") and str(data.get("test") or "").strip():
+                return True, str(data["test"])
+            return False, ""
+        except Exception as exc:
+            logger.info("TDD pilot skipped: %s", exc)
+            return False, ""
+
     async def execute(self, instruction: str) -> str:
+        test_path = None
         try:
             if _HAS_PYGAME:
                 env_note = (
@@ -348,6 +382,17 @@ class CodeExecutionWorker(AsyncWorkerBase):
                     "或生成单文件 HTML 游戏（保存为 .html，不需要运行）。"
                 )
             html_mode = self._html_intent(instruction)
+            # 严格 TDD：先让 LLM 判断是否适合测试驱动；适合则先生成测试文件
+            target_name = self._target_filename(instruction)
+            use_tdd, test_code = False, ""
+            if not html_mode:
+                use_tdd, test_code = await self._tdd_pilot(instruction, Path(target_name).stem)
+                if use_tdd and test_code.strip():
+                    # 测试文件放在 workspace 根目录：python test.py 的 sys.path[0]=workspace，
+                    # 实现模块才能被 import（放子目录会 ModuleNotFoundError）
+                    test_path = self.workspace / f".test_{int(time.time() * 1000)}.py"
+                    test_path.write_text(test_code, encoding="utf-8")
+                    logger.info("TDD: generated test file %s", test_path.name)
             code = None
             feedback = ""
             # 小步快跑：生成 → 编译 → 冒烟运行 → 代码审查 → 带反馈修复（最多 3 轮）
@@ -358,6 +403,7 @@ class CodeExecutionWorker(AsyncWorkerBase):
                         llm_response = await self._generate_code(
                             instruction, env_note, html_mode,
                             feedback, minimal=(_gen == 1),
+                            test_context=(test_code if use_tdd else ""),
                         )
                     except Exception:
                         llm_response = ""
@@ -381,6 +427,34 @@ class CodeExecutionWorker(AsyncWorkerBase):
                     feedback = f"编译失败，请修复后重新输出完整代码：\n{compile_err}"
                     logger.info("Round %d: compile error, regenerating", _round + 1)
                     continue
+                # 阶段2(TDD)：有测试文件时，先写实现到目标文件并运行测试验证
+                if test_path is not None:
+                    impl_path = self.workspace / target_name
+                    impl_path.write_text(candidate, encoding="utf-8")
+                    try:
+                        proc = await asyncio.create_subprocess_exec(
+                            sys.executable, str(test_path),
+                            stdout=asyncio.subprocess.PIPE,
+                            stderr=asyncio.subprocess.PIPE,
+                            cwd=str(self.workspace),
+                            env=self._clean_env(),
+                        )
+                        out, err = await asyncio.wait_for(proc.communicate(), timeout=60)
+                    except asyncio.TimeoutError:
+                        proc.kill()
+                        feedback = "测试运行超时（60s），请修复实现"
+                        continue
+                    tdd_out = (out or err).decode("utf-8", errors="replace")
+                    if proc.returncode != 0 or re.search(
+                        r"(FAILED|Traceback|AssertionError|Error)", tdd_out,
+                    ):
+                        feedback = f"测试未通过，请修复实现以通过测试：\n{tdd_out[-1200:]}"
+                        logger.info("TDD round %d: tests failed:\n%s",
+                                    _round + 1, tdd_out[-1500:])
+                        continue
+                    logger.info("TDD round %d: tests passed", _round + 1)
+                    code = candidate
+                    break
                 # 阶段2：冒烟运行验证（小步快跑：运行不过就带错误反馈重来）
                 smoke_err = await self._run_smoke(candidate)
                 if smoke_err:
@@ -427,7 +501,7 @@ class CodeExecutionWorker(AsyncWorkerBase):
             _edit_hint = any(k in instruction for k in (
                 "修改", "更新", "完善", "调整", "修复", "改进", "改写",
             ))
-            if path.exists() and not _edit_hint:
+            if path.exists() and not _edit_hint and not use_tdd:
                 stem, ext = path.stem, path.suffix
                 path = self.workspace / f"{stem}_{int(time.time())}{ext}"
             # 内容类型兜底：目标 .html 但实际是 Python 代码 → 存为 .py，避免假 HTML
@@ -496,6 +570,14 @@ class CodeExecutionWorker(AsyncWorkerBase):
                 raise RuntimeError("Code execution timed out after 120s")
         except Exception as exc:
             raise RuntimeError(f"Code execution failed: {exc}") from exc
+        finally:
+            # TDD 测试文件是验证资产而非交付物：执行结束后删除
+            if test_path is not None:
+                try:
+                    test_path.unlink()
+                    logger.info("TDD: removed test file %s", test_path.name)
+                except Exception:
+                    pass
 
 
 async def amain():
