@@ -175,6 +175,16 @@ class CodeExecutionWorker(AsyncWorkerBase):
             )
         return await self._call_llm(system=system, prompt=prompt)
 
+    @staticmethod
+    def _html_intent(instruction: str) -> bool:
+        """判定指令是否要"生成 HTML 页面"。
+        验证/检查/测试类指令即使提到 .html 文件名，也应生成可运行的 Python 脚本。"""
+        low = instruction.lower()
+        _verify_hint = any(k in instruction for k in (
+            "验证", "检查", "测试", "冒烟", "静态", "确认",
+        ))
+        return any(k in low for k in ("html", "网页", "webpage")) and not _verify_hint
+
     async def execute(self, instruction: str) -> str:
         try:
             if _HAS_PYGAME:
@@ -188,7 +198,7 @@ class CodeExecutionWorker(AsyncWorkerBase):
                     "pygame 未安装；需要图形界面时使用 turtle/tkinter，"
                     "或生成单文件 HTML 游戏（保存为 .html，不需要运行）。"
                 )
-            html_mode = any(k in instruction.lower() for k in ("html", "网页", "webpage"))
+            html_mode = self._html_intent(instruction)
             code = None
             compile_err = ""
             for _round in range(2):

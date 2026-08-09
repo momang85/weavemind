@@ -109,6 +109,18 @@ class TestCodeExecutionNaming(unittest.TestCase):
         name = w._target_filename("生成一个自包含的单HTML文件游戏")
         self.assertEqual(name, "index.html")
 
+    def test_html_intent_detection(self):
+        from workers.code_execution_worker import CodeExecutionWorker
+
+        self.assertTrue(CodeExecutionWorker._html_intent("生成一个愤怒的小鸟 HTML 游戏"))
+        self.assertTrue(CodeExecutionWorker._html_intent("编写网页版游戏"))
+        self.assertFalse(CodeExecutionWorker._html_intent(
+            "运行Python验证脚本对 angry_birds.html 做静态检查与测试确认"
+        ))
+        self.assertFalse(CodeExecutionWorker._html_intent(
+            "编写冒烟测试验证 index.html 可访问"
+        ))
+
     def test_template_fallback_delivers_html_when_llm_empty(self):
         import asyncio
         import json

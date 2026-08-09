@@ -934,6 +934,20 @@ class OrchestratorV2:
             lines.extend(run_lines)
             lines.append("")
 
+        # 2.5) 贯通测试：把最终交付物当作整体验证能否运行
+        if files:
+            import tempfile as _tempfile
+            project_dir = os.path.join(_tempfile.gettempdir(), "agent_workspace", "project")
+            e2e = self._run_e2e_verification(files, project_dir)
+            if e2e:
+                lines.append("## 贯通测试（整体可运行性）")
+                passed = sum(1 for r in e2e if r.get("ok"))
+                lines.append(f"**结果**：{passed}/{len(e2e)} 项通过")
+                for r in e2e:
+                    mark = "✅" if r.get("ok") else "❌"
+                    lines.append(f"- {mark} `{r['name']}`（{r['type']}）：{r.get('detail', '')}")
+                lines.append("")
+
         # 3) 如何启动
         htmls = [f for f in files if f["kind"] == "html"]
         pys = [f for f in files if f["kind"] == "py"]
@@ -946,6 +960,157 @@ class OrchestratorV2:
             lines.append("")
         lines.append("> 以下为任务执行过程中的详细内容（设计文档 / 过程记录）。")
         return "\n".join(lines)
+
+    def _run_e2e_verification(
+        self, files: list[dict], project_dir: str,
+    ) -> list[dict]:
+        """对最终交付物做贯通验证（确定性，不依赖 LLM）：
+        HTML → 文档结构 + 内联 JS 语法（node --check）+ 本地 HTTP 可访问；
+        PY → 编译 + 无头冒烟运行（超时视为启动成功）。"""
+        import http.server
+        import socketserver
+        import subprocess
+        import tempfile
+        import urllib.request
+
+        results: list[dict] = []
+        htmls = [f for f in files if f["kind"] == "html"]
+        pys = [f for f in files if f["kind"] == "py"]
+
+        # Node 是否可用（用于 JS 语法校验）
+        js_checker = None
+        try:
+            p = subprocess.run(["node", "--version"], capture_output=True, timeout=10)
+            if p.returncode == 0:
+                js_checker = "node"
+        except Exception:
+            js_checker = None
+
+        for f in htmls:
+            fp = os.path.join(project_dir, f["name"])
+            notes: list[str] = []
+            ok = True
+            if not os.path.isfile(fp):
+                results.append({"name": f["name"], "type": "html", "ok": False, "detail": "文件不存在"})
+                continue
+            try:
+                with open(fp, "r", encoding="utf-8", errors="replace") as fh:
+                    content = fh.read()
+            except Exception as exc:
+                results.append({"name": f["name"], "type": "html", "ok": False, "detail": f"读取失败: {exc}"})
+                continue
+            if "<!doctype html" not in content.lower() and "<html" not in content.lower():
+                ok = False
+                notes.append("缺少 HTML 文档结构")
+            if "<canvas" not in content.lower():
+                notes.append("无 <canvas>")
+            if "<script" not in content.lower():
+                ok = False
+                notes.append("无 <script>（页面没有交互逻辑）")
+            scripts = re.findall(r"<script[^>]*>(.*?)</script>", content, re.S)
+            if js_checker and scripts:
+                tmp_js = ""
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        "w", suffix=".js", delete=False, encoding="utf-8",
+                    ) as tf:
+                        tf.write("\n".join(scripts))
+                        tmp_js = tf.name
+                    p = subprocess.run(
+                        [js_checker, "--check", tmp_js],
+                        capture_output=True, timeout=15,
+                    )
+                    if p.returncode != 0:
+                        ok = False
+                        notes.append(
+                            "JS 语法错误: " + p.stderr.decode("utf-8", errors="replace")[:120]
+                        )
+                except Exception as exc:
+                    notes.append(f"JS 校验异常: {exc}")
+                finally:
+                    try:
+                        if tmp_js:
+                            os.unlink(tmp_js)
+                    except Exception:
+                        pass
+            # 本地 HTTP 可访问性（模拟在浏览器中打开）
+            try:
+                class _H(http.server.SimpleHTTPRequestHandler):
+                    def __init__(self, *a, **k):
+                        super().__init__(*a, directory=project_dir, **k)
+
+                    def log_message(self, *a):
+                        pass
+
+                srv = socketserver.TCPServer(("127.0.0.1", 0), _H)
+                port = srv.server_address[1]
+                threading.Thread(target=srv.serve_forever, daemon=True).start()
+                try:
+                    with urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/{f['name']}", timeout=10,
+                    ) as resp:
+                        body = resp.read(256)
+                        if resp.status != 200 or not body:
+                            ok = False
+                            notes.append("HTTP 无法访问")
+                        else:
+                            notes.append("HTTP 200 可访问")
+                finally:
+                    srv.shutdown()
+            except Exception as exc:
+                ok = False
+                notes.append(f"HTTP 失败: {exc}")
+            results.append({
+                "name": f["name"], "type": "html",
+                "ok": ok, "detail": "；".join(notes) or "通过",
+            })
+
+        for f in pys:
+            fp = os.path.join(project_dir, f["name"])
+            if not os.path.isfile(fp):
+                results.append({"name": f["name"], "type": "py", "ok": False, "detail": "文件不存在"})
+                continue
+            try:
+                p = subprocess.run(
+                    [sys.executable, "-m", "py_compile", fp],
+                    capture_output=True, timeout=20,
+                )
+                if p.returncode != 0:
+                    results.append({
+                        "name": f["name"], "type": "py", "ok": False,
+                        "detail": "编译失败: " + p.stderr.decode("utf-8", errors="replace")[:150],
+                    })
+                    continue
+            except Exception as exc:
+                results.append({"name": f["name"], "type": "py", "ok": False, "detail": f"编译异常: {exc}"})
+                continue
+            env = dict(os.environ)
+            env["SDL_VIDEODRIVER"] = "dummy"
+            try:
+                proc = subprocess.Popen(
+                    [sys.executable, fp],
+                    cwd=os.path.dirname(fp),
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                )
+                try:
+                    out, _ = proc.communicate(timeout=15)
+                    rc = proc.returncode
+                    ok = rc == 0
+                    detail = out.decode("utf-8", errors="replace")[:120] if ok else f"退出码 {rc}"
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.communicate()
+                    ok = True
+                    detail = "启动成功（15s 超时未崩溃）"
+                results.append({
+                    "name": f["name"], "type": "py",
+                    "ok": ok, "detail": detail,
+                })
+            except Exception as exc:
+                results.append({"name": f["name"], "type": "py", "ok": False, "detail": f"运行异常: {exc}"})
+        return results
 
     def _best_deliverable(self, goal: str, steps: list[dict], results: list[dict]) -> str:
         """从步骤结果中挑选最实质的交付内容作为最终报告。
