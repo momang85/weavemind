@@ -8,13 +8,31 @@ import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { useTaskStore } from '../stores/useTaskStore'
 import {
   FileDown, Package, ScrollText, Clock, CheckCircle2,
-  ChevronDown, ChevronRight, Award, Zap
+  ChevronDown, ChevronRight, Award, Zap, Download, ExternalLink, Play
 } from 'lucide-react'
 
 export default memo(function ReportViewer() {
   const { report, logs } = useTaskStore()
   const [showLogs, setShowLogs] = useState(false)
   const [expandedFiles, setExpandedFiles] = useState(false)
+  const [runOutput, setRunOutput] = useState<Record<string, string>>({})
+  const [running, setRunning] = useState<string | null>(null)
+
+  const runFile = async (name: string) => {
+    setRunning(name)
+    try {
+      const res = await fetch('/api/deliverable/run', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: name }),
+      })
+      const d = await res.json()
+      setRunOutput(prev => ({ ...prev, [name]: d.output || d.error || '(no output)' }))
+    } catch (e: any) {
+      setRunOutput(prev => ({ ...prev, [name]: '运行失败: ' + (e?.message || e) }))
+    }
+    setRunning(null)
+  }
 
   if (!report) return null
 
@@ -121,8 +139,38 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
           {expandedFiles && (
             <div className="px-5 pb-4 space-y-1">
               {report.files.map((f, i) => (
-                <div key={i} className="flex items-center gap-2 px-3 py-1.5 text-xs font-mono text-slate-400 bg-slate-800/40 rounded">
-                  <FileDown className="w-3 h-3 text-slate-500" /> {f}
+                <div key={i} className="px-3 py-2 space-y-1.5">
+                  <div className="flex items-center gap-2 text-xs font-mono text-slate-300 bg-slate-800/40 rounded px-3 py-2">
+                    <FileDown className="w-3 h-3 text-slate-500 shrink-0" />
+                    <span className="truncate">{f.name}</span>
+                    {f.size != null && <span className="text-slate-600 shrink-0">{(f.size / 1024).toFixed(1)} KB</span>}
+                    {f.kind && <span className="px-1.5 py-0.5 rounded bg-slate-700/60 text-slate-400 text-[10px] shrink-0">{f.kind}</span>}
+                    <div className="ml-auto flex items-center gap-1.5 shrink-0">
+                      {f.kind === 'html' && (
+                        <button onClick={() => window.open('/files/' + encodeURIComponent(f.name), '_blank')}
+                          className="flex items-center gap-1 px-2 py-1 rounded bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 text-[10px]">
+                          <ExternalLink className="w-3 h-3" /> 打开
+                        </button>
+                      )}
+                      {f.kind === 'py' && (
+                        <button onClick={() => runFile(f.name)} disabled={running === f.name}
+                          className="flex items-center gap-1 px-2 py-1 rounded bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 text-[10px] disabled:opacity-50">
+                          <Play className="w-3 h-3" /> {running === f.name ? '运行中...' : '运行'}
+                        </button>
+                      )}
+                      {f.kind !== 'html' && (
+                        <a href={'/files/' + encodeURIComponent(f.name)} download
+                          className="flex items-center gap-1 px-2 py-1 rounded bg-slate-700/50 hover:bg-slate-700 text-slate-300 text-[10px]">
+                          <Download className="w-3 h-3" /> 下载
+                        </a>
+                      )}
+                    </div>
+                  </div>
+                  {runOutput[f.name] && (
+                    <pre className="px-3 py-2 text-[11px] text-emerald-300/90 bg-slate-950 rounded whitespace-pre-wrap max-h-48 overflow-y-auto">
+                      {runOutput[f.name]}
+                    </pre>
+                  )}
                 </div>
               ))}
             </div>

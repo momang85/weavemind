@@ -256,6 +256,12 @@ export default function TaskConsole() {
         })),
         final_report: d.report || d.final_report || '',
       }
+      try {
+        const dl = await (await fetch('/api/task/' + tid + '/deliverables')).json()
+        reportObj.files = (dl.files ?? []).map((f: any) => ({
+          name: f.name, size: f.size, kind: f.kind,
+        }))
+      } catch { /* ignore */ }
       setReport(reportObj)
     } catch { /* ignore */ }
   }, [setReport])

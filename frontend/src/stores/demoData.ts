@@ -60,7 +60,12 @@ export const DEMO_REPORT: TaskReport = {
     { step_id: 's9', capability: 'code_execution', name: '性能优化与代码压缩', status: 'SUCCESS' },
     { step_id: 's10', capability: 'file_io', name: 'Generate README', status: 'SUCCESS' },
   ],
-  files: ['/tmp/agent_workspace/frontend/index.html', '/tmp/agent_workspace/frontend/src/App.tsx', '/tmp/agent_workspace/backend/server.js', '/tmp/agent_workspace/README.md'],
+  files: [
+    { name: 'frontend/index.html', size: 2048, kind: 'html' },
+    { name: 'frontend/src/App.tsx', size: 5120, kind: 'tsx' },
+    { name: 'backend/server.js', size: 4096, kind: 'js' },
+    { name: 'README.md', size: 1024, kind: 'md' },
+  ],
   final_report: `# AI Industry Analysis Dashboard
 
 ## Overview

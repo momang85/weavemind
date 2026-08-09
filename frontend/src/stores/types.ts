@@ -82,7 +82,7 @@ export interface TaskReport {
   total_time?: number
   steps: { step_id: string; capability: string; name: string; status: string; result?: string }[]
   final_report: string
-  files?: string[]
+  files?: { name: string; size?: number; kind?: string }[]
 }
 
 export interface SystemStatus {

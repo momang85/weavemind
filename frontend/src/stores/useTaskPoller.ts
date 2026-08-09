@@ -99,7 +99,7 @@ export function useTaskPoller(taskId: string | null) {
         // On complete
         if (d.status === 'SUCCESS' || d.status === 'FAILED') {
           setAwaitingConfirm(false)
-          setReport({
+          const reportObj: any = {
             summary: d.status,
             stats: { totalSteps: rawSteps.length,
               successSteps: rawSteps.filter((s: any) => (s.result?.status||'').toLowerCase() === 'success').length,
@@ -107,7 +107,12 @@ export function useTaskPoller(taskId: string | null) {
               duration: 0 },
             steps: rawSteps.map((s: any) => ({ id: s.step_id||'', step_id: s.step_id||'', capability: s.capability||'', name: s.instruction||'Step', status: (s.result?.status||'pending').toLowerCase(), children: [] })),
             final_report: d.report || d.final_report || '',
-          })
+          }
+          try {
+            const dl = await (await fetch('/api/task/' + taskId + '/deliverables')).json()
+            reportObj.files = (dl.files ?? []).map((f: any) => ({ name: f.name, size: f.size, kind: f.kind }))
+          } catch { /* ignore */ }
+          setReport(reportObj)
           fetchSystemStatus()
           if (timerRef.current) clearInterval(timerRef.current)
         }

@@ -1,5 +1,5 @@
 """WeaveMind Web UI"""
-import base64, io, json, logging, os, socket, sqlite3, threading, time, uuid
+import base64, io, json, logging, mimetypes, os, re, socket, sqlite3, subprocess, sys, tempfile, threading, time, uuid, zipfile
 from datetime import datetime, timezone
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
@@ -10,6 +10,7 @@ REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 DB_PATH = os.environ.get("REGISTRY_DB", "agents.db")
 PORT = int(os.environ.get("WEB_PORT", "8080"))
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+PROJECT_DIR = os.path.join(tempfile.gettempdir(), "agent_workspace", "project")
 
 _task_results = {}
 _task_lock = threading.Lock()
@@ -459,6 +460,99 @@ def _load_templates() -> list:
     except Exception:
         return []
 
+def _safe_project_path(rel: str) -> str | None:
+    """把相对路径限定在 project 工作区内，防止路径穿越。"""
+    base = os.path.abspath(PROJECT_DIR)
+    p = os.path.abspath(os.path.join(base, rel))
+    if p != base and not p.startswith(base + os.sep):
+        return None
+    return p
+
+def _task_deliverables(tid: str) -> list[dict]:
+    """从该任务 package 步骤的 zip 产物列出交付文件（名称/大小/类型）。"""
+    def _zip_entries(zip_path: str) -> list[dict]:
+        out: list[dict] = []
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                for info in zf.infolist():
+                    if info.is_dir():
+                        continue
+                    name = info.filename
+                    if "_check_" in name or name.startswith("__pycache__"):
+                        continue
+                    ext = os.path.splitext(name)[1].lower().lstrip(".")
+                    if ext == "html":
+                        kind = "html"
+                    elif ext == "py":
+                        kind = "py"
+                    elif ext in ("md", "markdown"):
+                        kind = "md"
+                    elif ext:
+                        kind = ext
+                    else:
+                        kind = "file"
+                    out.append({"name": name, "size": info.file_size, "kind": kind})
+        except Exception:
+            pass
+        return out
+
+    files: list[dict] = []
+    zip_path = None
+    with _task_lock:
+        data = _task_results.get(tid)
+    steps = (data or {}).get("steps") or []
+    for s in steps:
+        res = s.get("result") or {}
+        text = str(res.get("result") or "")
+        m = re.search(r"Download: file://([^\s]+)", text)
+        if m:
+            zp = m.group(1).strip()
+            if os.path.exists(zp):
+                zip_path = zp
+                break
+    if zip_path:
+        files = _zip_entries(zip_path)
+    if not files:
+        # 兜底 1：任务步骤不在内存时（服务重启后），取最新打包产物
+        pkg_dir = os.path.join(tempfile.gettempdir(), "agent_packages")
+        try:
+            zips = [
+                os.path.join(pkg_dir, n) for n in os.listdir(pkg_dir)
+                if n.endswith(".zip")
+            ]
+            if zips:
+                files = _zip_entries(max(zips, key=os.path.getmtime))
+        except Exception:
+            pass
+    if not files and os.path.isdir(PROJECT_DIR):
+        # 兜底 2：工作区最近窗口内的产物
+        cutoff = time.time() - 120 * 60
+        for root, _, names in os.walk(PROJECT_DIR):
+            for n in names:
+                p = os.path.join(root, n)
+                try:
+                    if os.path.getmtime(p) < cutoff:
+                        continue
+                except OSError:
+                    continue
+                rel = os.path.relpath(p, PROJECT_DIR).replace("\\", "/")
+                if "_check_" in rel or rel.startswith("__pycache__"):
+                    continue
+                ext = os.path.splitext(n)[1].lower().lstrip(".")
+                if ext == "html":
+                    kind = "html"
+                elif ext == "py":
+                    kind = "py"
+                elif ext in ("md", "markdown"):
+                    kind = "md"
+                elif ext:
+                    kind = ext
+                else:
+                    kind = "file"
+                files.append({"name": rel, "size": os.path.getsize(p), "kind": kind})
+        files.sort(key=lambda x: x["name"])
+    return files
+
 def _find_cached_task(goal: str, ttl_min: int):
     """结果缓存：相同目标在 TTL 内有过 SUCCESS，直接返回旧结果。"""
     try:
@@ -580,6 +674,26 @@ class Handler(BaseHTTPRequestHandler):
                 return
             return self._html(HTML)
         if p == "/api/status": return self._json(_system_status())
+        if p.startswith("/files/"):
+            rel = p[len("/files/"):]
+            fp = _safe_project_path(rel)
+            if not fp or not os.path.isfile(fp):
+                return self._json({"error": "not found"}, 404)
+            try:
+                with open(fp, "rb") as f:
+                    body = f.read()
+            except Exception:
+                return self._json({"error": "read failed"}, 500)
+            ctype = mimetypes.guess_type(fp)[0] or "application/octet-stream"
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if p.startswith("/api/task/") and p.endswith("/deliverables"):
+            tid = p.split("/api/task/")[-1].rsplit("/deliverables", 1)[0]
+            return self._json({"files": _task_deliverables(tid)})
         if p == "/api/config": return self._json(_load_config())
         if p == "/api/events":
             with _events_lock:
@@ -651,6 +765,46 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(raw) if raw else {}
         except Exception:
             return self._json({"error": "invalid json"}, 400)
+        if self.path == "/api/deliverable/run":
+            name = str(body.get("path") or "").strip()
+            if not name:
+                return self._json({"error": "path required"}, 400)
+            fp = _safe_project_path(name)
+            if not fp or not os.path.isfile(fp):
+                return self._json({"error": "file not found"}, 404)
+            ext = os.path.splitext(fp)[1].lower()
+            if ext == ".html":
+                return self._json({"status": "ok", "open_url": "/files/" + name.replace("\\", "/")})
+            if ext != ".py":
+                return self._json({"error": "only .py files can be run"}, 400)
+            env = {
+                k: v for k, v in os.environ.items()
+                if not any(s in k.upper() for s in (
+                    "LLM_", "API_KEY", "TOKEN", "SECRET", "OPENAI_", "EMBEDDING_", "SERPAPI",
+                ))
+            }
+            try:
+                proc = subprocess.Popen(
+                    [sys.executable, fp],
+                    cwd=os.path.dirname(fp),
+                    env=env,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                )
+                try:
+                    out, _ = proc.communicate(timeout=60)
+                    output = out.decode("utf-8", errors="replace")[-4000:]
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.communicate()
+                    output = "TIMEOUT after 60s"
+                return self._json({
+                    "status": "ok",
+                    "returncode": proc.returncode,
+                    "output": output or "(no output)",
+                })
+            except Exception as exc:
+                return self._json({"error": f"run failed: {exc}"}, 500)
         if self.path == "/task":
             g = body.get("goal","").strip()
             # 模板：允许不传 goal，自动取模板目标与确定性步骤
