@@ -420,7 +420,7 @@ class OrchestratorV2:
                 )
                 instruction = s["instruction"]
             s["capability"] = cap
-            s.setdefault("timeout", 120)
+            s.setdefault("timeout", 300)
             out.append(s)
         if len(out) > self._max_steps:
             logger.warning("Plan normalized from %d to %d steps (max_steps=%d)",
@@ -778,7 +778,8 @@ class OrchestratorV2:
         capability = step.get("capability", "")
         instruction = step.get("instruction", "")
         step_id = step.get("step_id", uuid.uuid4().hex[:8])
-        timeout = max(step.get("timeout", 300), 90)
+        # LLM 生成/运行较慢，超时下限放宽到 300s，避免误杀正常步骤
+        timeout = max(int(step.get("timeout", 300) or 300), 300)
 
         agent_id = self._find_agent(capability)
         if not agent_id:

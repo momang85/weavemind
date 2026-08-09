@@ -513,17 +513,29 @@ def _task_deliverables(tid: str) -> list[dict]:
     if zip_path:
         files = _zip_entries(zip_path)
     if not files:
-        # 兜底 1：任务步骤不在内存时（服务重启后），取最新打包产物
-        pkg_dir = os.path.join(tempfile.gettempdir(), "agent_packages")
+        # 兜底 1：仅对成功任务，步骤不在内存时（服务重启后）取最新打包产物；
+        # 失败任务显示"最新 zip"会把别的任务的旧文件误挂到本任务上。
         try:
-            zips = [
-                os.path.join(pkg_dir, n) for n in os.listdir(pkg_dir)
-                if n.endswith(".zip")
-            ]
-            if zips:
-                files = _zip_entries(max(zips, key=os.path.getmtime))
+            db = sqlite3.connect(DB_PATH, timeout=5)
+            db.row_factory = sqlite3.Row
+            row = db.execute(
+                "SELECT status FROM task_history WHERE task_id=?", (tid,),
+            ).fetchone()
+            db.close()
+            ok_status = bool(row and row["status"] == "SUCCESS")
         except Exception:
-            pass
+            ok_status = False
+        if ok_status:
+            pkg_dir = os.path.join(tempfile.gettempdir(), "agent_packages")
+            try:
+                zips = [
+                    os.path.join(pkg_dir, n) for n in os.listdir(pkg_dir)
+                    if n.endswith(".zip")
+                ]
+                if zips:
+                    files = _zip_entries(max(zips, key=os.path.getmtime))
+            except Exception:
+                pass
     if not files and os.path.isdir(PROJECT_DIR):
         # 兜底 2：工作区最近窗口内的产物
         cutoff = time.time() - 120 * 60
