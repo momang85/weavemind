@@ -945,7 +945,11 @@ class OrchestratorV2:
                 lines.append(f"**结果**：{passed}/{len(e2e)} 项通过")
                 for r in e2e:
                     mark = "✅" if r.get("ok") else "❌"
-                    lines.append(f"- {mark} `{r['name']}`（{r['type']}）：{r.get('detail', '')}")
+                    line = f"- {mark} `{r['name']}`（{r['type']}）：{r.get('detail', '')}"
+                    if r.get("screenshot") and os.path.exists(str(r["screenshot"])):
+                        rel_shot = os.path.relpath(r["screenshot"], project_dir).replace("\\", "/")
+                        line += f"（[可玩性截图](/files/{rel_shot})）"
+                    lines.append(line)
                 lines.append("")
 
         # 3) 如何启动
@@ -988,6 +992,24 @@ class OrchestratorV2:
 
         for f in htmls:
             fp = os.path.join(project_dir, f["name"])
+            # 优先浏览器级"可玩"验证（Playwright 缺失时自动安装）
+            try:
+                pw_ok, pw_detail, shot = self._playwright_verify(project_dir, f["name"], fp)
+            except Exception as exc:
+                pw_ok, pw_detail, shot = False, f"Playwright 验证异常: {exc}", ""
+            if pw_ok:
+                results.append({
+                    "name": f["name"], "type": "html", "ok": True,
+                    "detail": pw_detail, "screenshot": shot,
+                })
+                continue
+            if "降级" not in pw_detail and "不可用" not in pw_detail:
+                results.append({
+                    "name": f["name"], "type": "html", "ok": False,
+                    "detail": pw_detail, "screenshot": shot,
+                })
+                continue
+            # Playwright 不可用 → 降级为静态检查
             notes: list[str] = []
             ok = True
             if not os.path.isfile(fp):
@@ -1111,6 +1133,97 @@ class OrchestratorV2:
             except Exception as exc:
                 results.append({"name": f["name"], "type": "py", "ok": False, "detail": f"运行异常: {exc}"})
         return results
+
+    def _playwright_verify(
+        self, project_dir: str, rel_name: str, fp: str,
+    ) -> tuple[bool, str, str]:
+        """用无头 Chromium 真实打开页面并模拟拖拽交互（"能玩"级验证）。
+        返回 (是否通过, 详情, 截图路径)；Playwright 缺失时自动安装。"""
+        import http.server
+        import socketserver
+        import urllib.request
+
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            from env_setup import ensure_playwright
+            ok, msg = ensure_playwright(install_browser=True)
+            if not ok:
+                return False, f"Playwright 不可用（{msg}），降级为静态检查", ""
+            from playwright.sync_api import sync_playwright
+
+        screenshot_dir = os.path.join(project_dir, "screenshots")
+        os.makedirs(screenshot_dir, exist_ok=True)
+        shot = os.path.join(screenshot_dir, rel_name.replace("/", "_").replace(".html", ".png"))
+        srv = None
+        try:
+            class _H(http.server.SimpleHTTPRequestHandler):
+                def __init__(self, *a, **k):
+                    super().__init__(*a, directory=project_dir, **k)
+
+                def log_message(self, *a):
+                    pass
+
+            srv = socketserver.TCPServer(("127.0.0.1", 0), _H)
+            port = srv.server_address[1]
+            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            url = f"http://127.0.0.1:{port}/{rel_name}"
+            with sync_playwright() as p:
+                browser = p.chromium.launch(headless=True)
+                page = browser.new_page(viewport={"width": 960, "height": 640})
+                js_errors: list[str] = []
+                page.on("pageerror", lambda e: js_errors.append(str(e)))
+                page.on("console", lambda m: js_errors.append(m.text) if m.type == "error" else None)
+                page.goto(url, timeout=15000)
+                page.wait_for_timeout(800)
+                canvas = page.query_selector("canvas")
+                if not canvas:
+                    browser.close()
+                    return False, "页面无 <canvas>（不是可视化游戏）", shot
+                box = canvas.bounding_box()
+                if not box or box["width"] < 50 or box["height"] < 50:
+                    browser.close()
+                    return False, f"canvas 尺寸异常 {box}", shot
+                # 模拟拖拽发射（弹弓游戏典型交互：按下→拖动→松手）
+                cx = box["x"] + box["width"] / 2
+                cy = box["y"] + box["height"] / 2
+                page.mouse.move(cx * 0.75, cy * 0.9)
+                page.mouse.down()
+                page.mouse.move(cx * 0.35, cy * 0.4, steps=8)
+                page.mouse.up()
+                page.wait_for_timeout(1200)
+                state = page.evaluate(
+                    """() => {
+                        const s = document.querySelector(
+                            '#score, .score, [class*="score"], [id*="score"], .ui-text'
+                        );
+                        const cv = document.querySelector('canvas');
+                        return {
+                            scoreText: s ? (s.textContent || '') : '',
+                            canvasDataLen: cv ? cv.toDataURL().length : 0,
+                        };
+                    }"""
+                )
+                try:
+                    page.screenshot(path=shot)
+                except Exception:
+                    pass
+                browser.close()
+            if js_errors:
+                return False, "JS 错误: " + " | ".join(js_errors[:2]), shot
+            score = str(state.get("scoreText") or "")[:30]
+            detail = "浏览器加载并模拟拖拽 OK（无 JS 错误）"
+            if score:
+                detail += f"；分数/状态='{score}'"
+            return True, detail, shot
+        except Exception as exc:
+            return False, f"浏览器验证异常: {exc}", ""
+        finally:
+            if srv is not None:
+                try:
+                    srv.shutdown()
+                except Exception:
+                    pass
 
     def _best_deliverable(self, goal: str, steps: list[dict], results: list[dict]) -> str:
         """从步骤结果中挑选最实质的交付内容作为最终报告。

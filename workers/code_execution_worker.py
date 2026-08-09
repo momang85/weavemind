@@ -7,6 +7,7 @@
 import asyncio
 import importlib.util
 import json
+import logging
 import os
 import re
 import sys
@@ -17,6 +18,8 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from async_worker_base import AsyncWorkerBase, AsyncRegistry, AsyncMessaging
+
+logger = logging.getLogger(__name__)
 
 _PROBE_MODULES = (
     "pygame", "turtle", "tkinter", "math", "random", "json", "html",
@@ -292,30 +295,50 @@ class CodeExecutionWorker(AsyncWorkerBase):
                 }, ensure_ascii=False)
 
             try:
-                proc = await asyncio.create_subprocess_exec(
-                    sys.executable,
-                    str(path),
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    cwd=str(self.workspace),
-                    env=self._clean_env(),
-                )
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
-                out = stdout.decode("utf-8", errors="replace")
-                err = stderr.decode("utf-8", errors="replace")
-                if proc.returncode != 0:
-                    # 脚本崩溃必须如实失败，避免把 traceback 当成功输出
-                    raise RuntimeError(
-                        f"Script exited with code {proc.returncode}: {err[:2000] or out[:2000]}"
+                # 运行失败若是缺模块，自动 pip 安装后重跑一次（最多 2 次运行）
+                last_err = ""
+                for _run_attempt in range(2):
+                    proc = await asyncio.create_subprocess_exec(
+                        sys.executable,
+                        str(path),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                        cwd=str(self.workspace),
+                        env=self._clean_env(),
                     )
-                output = out if out else err
-                return json.dumps({
-                    "status": "success",
-                    "path": str(path),
-                    "filename": path.name,
-                    "output": output[:3000] if output else "No output",
-                    "returncode": proc.returncode,
-                }, ensure_ascii=False)
+                    try:
+                        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)
+                    except asyncio.TimeoutError:
+                        proc.kill()
+                        raise RuntimeError("Code execution timed out after 120s")
+                    out = stdout.decode("utf-8", errors="replace")
+                    err = stderr.decode("utf-8", errors="replace")
+                    if proc.returncode == 0:
+                        output = out if out else err
+                        return json.dumps({
+                            "status": "success",
+                            "path": str(path),
+                            "filename": path.name,
+                            "output": output[:3000] if output else "No output",
+                            "returncode": proc.returncode,
+                        }, ensure_ascii=False)
+                    last_err = err or out
+                    m = re.search(r"No module named ['\"]([^'\"]+)['\"]", last_err)
+                    if m and _run_attempt == 0:
+                        mod = m.group(1).split(".")[0]
+                        try:
+                            from env_setup import ensure_module
+                            ok, note = await asyncio.get_running_loop().run_in_executor(
+                                None, ensure_module, mod,
+                            )
+                            logger.info("Auto-install %s -> %s", mod, note)
+                            if ok:
+                                continue  # 依赖装好后重跑
+                        except Exception as exc:
+                            logger.warning("Auto-install failed for %s: %s", mod, exc)
+                    raise RuntimeError(
+                        f"Script exited with code {proc.returncode}: {last_err[:2000]}"
+                    )
             except asyncio.TimeoutError:
                 proc.kill()
                 raise RuntimeError("Code execution timed out after 120s")
