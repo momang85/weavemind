@@ -79,7 +79,17 @@ class PackagingWorker(AsyncWorkerBase):
                     continue
             except OSError:
                 continue
-            files.append((p, p.relative_to(root).as_posix()))
+            rel = p.relative_to(root).as_posix()
+            # 排除编译缓存、临时校验文件与截图证据（截图在前端/报告中展示，不入交付包）
+            if (
+                rel.startswith("__pycache__/")
+                or "/__pycache__/" in rel
+                or "_check_" in rel
+                or rel.startswith("screenshots/")
+                or "/screenshots/" in rel
+            ):
+                continue
+            files.append((p, rel))
         # 报告文件独立存放，若新鲜则一并纳入（放在 reports/ 前缀下）
         if REPORT_DIR.exists():
             for p in sorted(REPORT_DIR.glob("*.md")):

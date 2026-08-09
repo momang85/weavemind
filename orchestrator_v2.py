@@ -994,6 +994,7 @@ class OrchestratorV2:
         import http.server
         import socketserver
         import subprocess
+        import sys
         import tempfile
         import urllib.request
 

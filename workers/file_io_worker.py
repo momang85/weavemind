@@ -136,6 +136,16 @@ class FileIoWorker(AsyncWorkerBase):
             m2 = re.search(r"\[上一步结果\s*\S*\]:\s*(.+)", instruction, re.S)
             if m and m2:
                 files = [{"filename": m.group(1), "content": m2.group(1).strip()}]
+            else:
+                # 兜底 2：上一步结果是 JSON 且含 path，直接读取该文件内容保存
+                m_path = re.search(r'"path"\s*:\s*"([^"]+)"', instruction)
+                if m_path:
+                    src = Path(m_path.group(1))
+                    if src.is_file():
+                        content = src.read_text(encoding="utf-8", errors="replace")
+                        m_name = re.search(r"([\w\-.]+\.\w{1,8})", instruction)
+                        if m_name and content.strip():
+                            files = [{"filename": m_name.group(1), "content": content}]
         if not files:
             return json.dumps({"status": "failed", "error": "无法从指令中提取文件名与内容"}, ensure_ascii=False)
 
@@ -145,13 +155,19 @@ class FileIoWorker(AsyncWorkerBase):
             content = f.get("content")
             if not filename or content is None:
                 continue
+            content_str = str(content)
+            if not content_str.strip():
+                return json.dumps({
+                    "status": "failed",
+                    "error": f"内容为空，拒绝写入空文件 {filename}",
+                }, ensure_ascii=False)
             try:
                 path = self._safe_path(filename)
             except ValueError as exc:
                 return json.dumps({"status": "failed", "error": str(exc)}, ensure_ascii=False)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(str(content), encoding="utf-8")
-            written.append({"filename": filename, "path": str(path), "chars": len(str(content))})
+            path.write_text(content_str, encoding="utf-8")
+            written.append({"filename": filename, "path": str(path), "chars": len(content_str)})
         if not written:
             return json.dumps({"status": "failed", "error": "没有可写的文件"}, ensure_ascii=False)
         return json.dumps({"status": "success", "files": written}, ensure_ascii=False)

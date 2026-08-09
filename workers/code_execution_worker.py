@@ -150,7 +150,7 @@ class CodeExecutionWorker(AsyncWorkerBase):
     ) -> str:
         """调 LLM 生成代码；compile_err 非空时携带语法错误反馈要求修复。"""
         feedback = (
-            f"\n上一次生成的代码编译失败，请修复后重新输出完整代码：\n{compile_err}"
+            f"\n上一次生成的代码未通过验证（编译/运行/审查），请修复后重新输出完整代码：\n{compile_err}"
             if compile_err else ""
         )
         ws = self._workspace_snapshot()
@@ -236,6 +236,104 @@ class CodeExecutionWorker(AsyncWorkerBase):
             pass
         return "\n".join(lines)
 
+    @staticmethod
+    def _strip_fences(candidate: str) -> str:
+        candidate = candidate.strip()
+        if candidate.startswith("```"):
+            lines = candidate.splitlines()
+            if lines and lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            candidate = "\n".join(lines)
+        return candidate
+
+    def _py_compile(self, candidate: str) -> str:
+        """编译自检；返回错误文本（空串表示通过）。"""
+        import subprocess
+        check = self.workspace / f"_check_{int(time.time() * 1000)}.py"
+        check.write_text(candidate, encoding="utf-8")
+        try:
+            p = subprocess.run(
+                [sys.executable, "-m", "py_compile", str(check)],
+                capture_output=True, timeout=30,
+            )
+            if p.returncode == 0:
+                return ""
+            return (p.stderr or p.stdout or b"").decode("utf-8", errors="replace")[:800]
+        except Exception as exc:
+            return f"编译异常: {exc}"
+        finally:
+            try:
+                check.unlink()
+            except Exception:
+                pass
+
+    async def _run_smoke(self, candidate: str) -> str:
+        """小步快跑：运行候选代码做冒烟验证；
+        返回错误文本（空串表示通过）。"""
+        tmp = self.workspace / f"_smoke_{int(time.time() * 1000)}.py"
+        tmp.write_text(candidate, encoding="utf-8")
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, str(tmp),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=str(self.workspace),
+                env=self._clean_env(),
+            )
+            try:
+                out, err = await asyncio.wait_for(proc.communicate(), timeout=30)
+            except asyncio.TimeoutError:
+                proc.kill()
+                return "冒烟运行超时（30s）"
+            text = (out or err).decode("utf-8", errors="replace")
+            if proc.returncode != 0:
+                return text[-1200:]
+            bad = re.search(
+                r"(Traceback|AssertionError|NameError|TypeError|AttributeError|"
+                r"SyntaxError|IndentationError|ImportError|FAILED)",
+                text,
+            )
+            if bad:
+                return text[-800:]
+            return ""
+        except Exception as exc:
+            return f"冒烟异常: {exc}"
+        finally:
+            try:
+                tmp.unlink()
+            except Exception:
+                pass
+
+    async def _review_code(self, code: str, instruction: str) -> tuple[bool, str]:
+        """Codex 式自动代码审查：依赖影响、性能、安全、逻辑漏洞。
+        返回 (是否通过, 意见文本)。"""
+        try:
+            resp = await self._call_llm(
+                system=(
+                    "你是资深代码审查员。审查代码，输出严格JSON："
+                    '{"pass": true|false, "issues": ["问题1", "问题2"]}。'
+                    "检查维度：依赖是否可用、性能风险、安全风险（注入/危险调用/密钥泄露）、"
+                    "逻辑漏洞、是否满足需求。只输出JSON。"
+                ),
+                prompt=(
+                    f"需求：{instruction[:400]}\n\n代码：\n{code[:3000]}"
+                ),
+            )
+            clean = str(resp).strip()
+            if clean.startswith("```"):
+                clean = re.sub(r"^```[a-zA-Z]*\s*", "", clean).rstrip("`").strip()
+            data = json.loads(clean)
+            if isinstance(data, dict):
+                issues = data.get("issues") or []
+                if not data.get("pass") and issues:
+                    return False, "；".join(str(i)[:200] for i in issues[:5])
+            return True, ""
+        except Exception:
+            # 审查失败不阻塞执行（保守放行）
+            return True, ""
+
     async def execute(self, instruction: str) -> str:
         try:
             if _HAS_PYGAME:
@@ -251,14 +349,15 @@ class CodeExecutionWorker(AsyncWorkerBase):
                 )
             html_mode = self._html_intent(instruction)
             code = None
-            compile_err = ""
-            for _round in range(2):
+            feedback = ""
+            # 小步快跑：生成 → 编译 → 冒烟运行 → 代码审查 → 带反馈修复（最多 3 轮）
+            for _round in range(3):
                 llm_response = ""
                 for _gen in range(2):
                     try:
                         llm_response = await self._generate_code(
                             instruction, env_note, html_mode,
-                            compile_err, minimal=(_gen == 1),
+                            feedback, minimal=(_gen == 1),
                         )
                     except Exception:
                         llm_response = ""
@@ -267,14 +366,7 @@ class CodeExecutionWorker(AsyncWorkerBase):
                         break
                 if not llm_response or not llm_response.strip():
                     continue
-                candidate = llm_response.strip()
-                if candidate.startswith("```"):
-                    lines = candidate.splitlines()
-                    if lines and lines[0].startswith("```"):
-                        lines = lines[1:]
-                    if lines and lines[-1].strip() == "```":
-                        lines = lines[:-1]
-                    candidate = "\n".join(lines)
+                candidate = self._strip_fences(llm_response)
                 if html_mode:
                     # 提取 LLM 可能包在 Python 写入脚本里的 HTML
                     extracted = self._extract_embedded_html(candidate)
@@ -283,27 +375,26 @@ class CodeExecutionWorker(AsyncWorkerBase):
                 if candidate.lstrip().lower().startswith(("<html", "<!doctype")):
                     code = candidate
                     break
-                # 编译自检（仅 Python 目标）：语法错误立即让 LLM 修复，避免运行期才炸
-                check_path = self.workspace / f"_check_{int(time.time() * 1000)}.py"
-                check_path.write_text(candidate, encoding="utf-8")
-                try:
-                    proc = await asyncio.create_subprocess_exec(
-                        sys.executable, "-m", "py_compile", str(check_path),
-                        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                        cwd=str(self.workspace), env=self._clean_env(),
-                    )
-                    _out, _err = await asyncio.wait_for(proc.communicate(), timeout=30)
-                    if proc.returncode == 0:
-                        code = candidate
-                        break
-                    compile_err = (_err or _out).decode("utf-8", errors="replace")[:800]
-                except asyncio.TimeoutError:
-                    pass
-                finally:
-                    try:
-                        check_path.unlink()
-                    except Exception:
-                        pass
+                # 阶段1：编译自检
+                compile_err = self._py_compile(candidate)
+                if compile_err:
+                    feedback = f"编译失败，请修复后重新输出完整代码：\n{compile_err}"
+                    logger.info("Round %d: compile error, regenerating", _round + 1)
+                    continue
+                # 阶段2：冒烟运行验证（小步快跑：运行不过就带错误反馈重来）
+                smoke_err = await self._run_smoke(candidate)
+                if smoke_err:
+                    feedback = f"运行验证失败，请修复后重新输出完整代码：\n{smoke_err}"
+                    logger.info("Round %d: smoke test failed, regenerating", _round + 1)
+                    continue
+                # 阶段3：自动代码审查（依赖/性能/安全/逻辑）
+                review_ok, review_notes = await self._review_code(candidate, instruction)
+                if not review_ok:
+                    feedback = f"代码审查发现必须修复的问题，请修复后重新输出完整代码：\n{review_notes}"
+                    logger.info("Round %d: code review failed, regenerating", _round + 1)
+                    continue
+                code = candidate
+                break
             if code is None:
                 # 内置模板兜底：游戏类指令直接交付可运行的 HTML 演示，避免因
                 # LLM 空响应（提供商偶发）导致整任务失败。
@@ -322,7 +413,7 @@ class CodeExecutionWorker(AsyncWorkerBase):
                         "returncode": 0,
                     }, ensure_ascii=False)
                 raise RuntimeError(
-                    f"No valid code generated after retries{': ' + compile_err if compile_err else ''}"
+                    f"No valid code after generation/verify/review loop"
                 )
 
             # 持久化：主文件用目标名，测试脚本用唯一名；避免覆盖已存在的交付物
