@@ -590,5 +590,35 @@ class TestDeliverySummary(unittest.TestCase):
                 pass
 
 
+class TestPackageTaskIsolation(unittest.TestCase):
+    def test_fresh_files_excludes_pre_task_files(self):
+        import os
+        import tempfile
+        import time
+        from pathlib import Path
+        from workers.packaging_worker import PackagingWorker
+
+        root = Path(tempfile.mkdtemp(prefix="weavemind_pkg_"))
+        old_f = root / "old.html"
+        new_f = root / "new.html"
+        old_f.write_text("old", encoding="utf-8")
+        new_f.write_text("new", encoding="utf-8")
+        # 旧文件时间戳设为任务开始前 10 分钟
+        os.utime(old_f, (time.time() - 600, time.time() - 600))
+        try:
+            w = PackagingWorker.__new__(PackagingWorker)
+            files = w._fresh_files(root, {"task_start_ts": time.time() - 120})
+            names = [f[1] for f in files]
+            self.assertIn("new.html", names)
+            self.assertNotIn("old.html", names)
+        finally:
+            try:
+                old_f.unlink()
+                new_f.unlink()
+                root.rmdir()
+            except Exception:
+                pass
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

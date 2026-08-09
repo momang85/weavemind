@@ -26,17 +26,20 @@ class PackagingWorker(AsyncWorkerBase):
     """打包交付 Worker：将项目工作区中的新产物打成 ZIP。"""
 
     _class_capabilities = ["package"]
+    _needs_task = True
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
-    async def execute(self, instruction: str) -> str:
+    async def execute(self, instruction: str, task: dict | None = None) -> str:
         import asyncio
         loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(None, self._sync_package, instruction)
+        return await loop.run_in_executor(
+            None, self._sync_package, instruction, task or {},
+        )
 
-    def _sync_package(self, instruction: str) -> str:
+    def _sync_package(self, instruction: str, task: dict | None = None) -> str:
         from llm_client import call_llm
 
         proj_path = None
@@ -54,17 +57,25 @@ class PackagingWorker(AsyncWorkerBase):
             pass
         if proj_path is None:
             proj_path = PROJECT_DIR
-        return self._package(proj_path)
+        return self._package(proj_path, task or {})
 
-    def _fresh_files(self, root: Path) -> list[tuple[Path, str]]:
-        """返回 (绝对路径, 相对路径) 且修改时间在窗口内的文件。"""
+    def _fresh_files(self, root: Path, task: dict) -> list[tuple[Path, str]]:
+        """返回 (绝对路径, 相对路径) 且属于本次任务的文件：
+        mtime 在任务开始之后（或窗口内），避免把历史任务/并行任务的产物混进交付包。"""
         cutoff = time.time() - FRESH_MINUTES * 60
+        try:
+            task_start = float(task.get("task_start_ts") or 0)
+            lower_bound = task_start - 60  # 允许 60s 缓冲
+        except (TypeError, ValueError):
+            lower_bound = cutoff
+        lower_bound = max(lower_bound, cutoff)
         files: list[tuple[Path, str]] = []
         for p in sorted(root.rglob("*")):
             if not p.is_file():
                 continue
             try:
-                if p.stat().st_mtime < cutoff:
+                mt = p.stat().st_mtime
+                if mt < lower_bound:
                     continue
             except OSError:
                 continue
@@ -73,16 +84,16 @@ class PackagingWorker(AsyncWorkerBase):
         if REPORT_DIR.exists():
             for p in sorted(REPORT_DIR.glob("*.md")):
                 try:
-                    if p.stat().st_mtime >= cutoff:
+                    if p.stat().st_mtime >= lower_bound:
                         files.append((p, f"reports/{p.name}"))
                 except OSError:
                     continue
         return files
 
-    def _package(self, proj_path: Path) -> str:
+    def _package(self, proj_path: Path, task: dict) -> str:
         if not proj_path.is_dir():
             raise RuntimeError(f"Project path not found: {proj_path}")
-        files = self._fresh_files(proj_path)
+        files = self._fresh_files(proj_path, task)
         if not files:
             raise RuntimeError(
                 f"No fresh files found in {proj_path} (window={FRESH_MINUTES}min); "

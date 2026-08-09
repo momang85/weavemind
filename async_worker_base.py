@@ -57,6 +57,7 @@ class AsyncRegistry:
 
 class AsyncWorkerBase(ABC):
     _HEARTBEAT_INTERVAL = 10.0
+    _needs_task = False
 
     @classmethod
     def get_capabilities(cls):
@@ -144,7 +145,10 @@ class AsyncWorkerBase(ABC):
         tid = task.get("task_id","?"); instr = task.get("instruction","")
         ok = False; res = ""
         try:
-            res = await self.execute(instr); self._failures = 0; ok = True
+            if self._needs_task:
+                res = await self.execute(instr, task); self._failures = 0; ok = True
+            else:
+                res = await self.execute(instr); self._failures = 0; ok = True
         except Exception as e:
             res = str(e); self._failures += 1
             if self._failures >= self._max_failures:

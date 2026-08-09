@@ -55,6 +55,8 @@ def make_orch(**overrides):
     o._memory_lock = threading.Lock()
     o._redis = FakeRedis()
     o._planner_llm = None
+    o._task_starts = {}
+    o._task_starts_lock = threading.Lock()
     for k, v in overrides.items():
         setattr(o, k, v)
     return o
@@ -323,6 +325,14 @@ class TestPlanTopicGuard(unittest.TestCase):
     def test_off_topic_plan_detected(self):
         steps = [{"capability": "web_search", "instruction": "搜索 2026 AI 行业三大趋势"}]
         self.assertFalse(self.o._plan_topic_ok("写一个愤怒的小鸟", steps))
+
+    def test_generic_word_bypass_blocked(self):
+        # 漂移计划含"文件/html"等通用词，不得被误判为对题
+        goal = "做一个极简的贪吃蛇游戏（单文件HTML，含画布、键盘控制和得分）"
+        todo_steps = [{"capability": "code_execution", "instruction": "生成一个交互式待办事项列表应用 HTML 文件（todo.html）"}]
+        self.assertFalse(self.o._plan_topic_ok(goal, todo_steps))
+        snake_steps = [{"capability": "code_execution", "instruction": "生成贪吃蛇游戏，含画布和键盘控制"}]
+        self.assertTrue(self.o._plan_topic_ok(goal, snake_steps))
 
     def test_parse_plan_response_fences_and_loose(self):
         out = self.o._parse_plan_response('```json\n{"steps": [{"a": "b"}]}\n```')

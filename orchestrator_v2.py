@@ -54,6 +54,9 @@ _TOPIC_STOPWORDS = {
     "进行", "需要", "可以", "是否", "如何", "什么", "请", "帮", "并", "与",
     "和", "在", "用", "把", "将", "给", "让", "这", "那", "为", "对", "其",
     "及", "或", "等", "做", "写", "的", "了", "是", "我", "你", "他", "她", "它",
+    # 通用词：出现在几乎任何计划指令里，不能作为"对题"证据
+    "文件", "游戏", "页面", "程序", "应用", "系统", "内容", "结果", "报告",
+    "html", "HTML", "功能", "实现", "进行", "生成", "编写",
 }
 
 ITERATOR_SYSTEM = """你是严格的交付验收评审。根据用户目标评估交付物是否达标。
@@ -84,8 +87,10 @@ class OrchestratorV2:
         self._max_iterations = 2
         self._plan_confirm_timeout = 300
         self._stall_timeout = 300
-        self._max_offtopic_regenerations = 1
+        self._max_offtopic_regenerations = 2
         self._planner_model = None
+        self._task_starts: dict[str, float] = {}
+        self._task_starts_lock = threading.Lock()
         _cfg = {}
         try:
             with open(_cfg_path, 'r') as _f:
@@ -242,25 +247,32 @@ class OrchestratorV2:
 
         steps = self._normalize_steps(plan_data.get("steps", []))
         steps = self._ensure_report_step(steps, task_id)
-        # 规划自检：计划主题与目标明显不符时，用强约束重生成一次
-        if steps and not self._plan_topic_ok(goal, steps):
+        # 规划自检：计划主题与目标明显不符时，用强约束重生成（最多 N 次）
+        _topic_ok = self._plan_topic_ok(goal, steps) if steps else True
+        logger.info("Topic guard: goal_esc=%s tokens=%s ok=%s steps=%d",
+                    goal.encode("unicode_escape")[:120], sorted(self._topic_tokens(goal))[:10],
+                    _topic_ok, len(steps))
+        if steps and not _topic_ok:
             logger.warning("Plan appears off-topic for goal: %s", goal[:50])
             push_progress(self._messaging, task_id, "log",
                           {"type": "plan", "agent": "orchestrator",
                            "message": "Plan off-topic, regenerating with strict topic prompt",
                            "timestamp": self._now_iso()})
-            try:
-                strict_prompt = (
-                    "严格围绕用户目标主题重写计划，禁止偏离、泛化或替换到其他主题。"
-                    f"用户目标：\n{goal}\n\n重新输出严格JSON计划。"
-                )
-                raw2 = self._planner_llm.call(PLANNER_SYSTEM, strict_prompt, expect_json=True)
-                steps2 = self._normalize_steps(self._parse_plan_response(raw2))
-                steps2 = self._ensure_report_step(steps2, task_id)
-                if steps2 and self._plan_topic_ok(goal, steps2):
-                    steps = steps2
-            except Exception as exc:
-                logger.warning("Off-topic regeneration failed: %s", str(exc)[:150])
+            for _regen in range(self._max_offtopic_regenerations):
+                try:
+                    strict_prompt = (
+                        "严格围绕用户目标主题重写计划，禁止偏离、泛化或替换到其他主题；"
+                        "计划步骤必须明确包含目标的核心对象（如游戏类型、题材等）。"
+                        f"用户目标：\n{goal}\n\n重新输出严格JSON计划。"
+                    )
+                    raw2 = self._planner_llm.call(PLANNER_SYSTEM, strict_prompt, expect_json=True)
+                    steps2 = self._normalize_steps(self._parse_plan_response(raw2))
+                    steps2 = self._ensure_report_step(steps2, task_id)
+                    if steps2 and self._plan_topic_ok(goal, steps2):
+                        steps = steps2
+                        break
+                except Exception as exc:
+                    logger.warning("Off-topic regeneration failed: %s", str(exc)[:150])
         if not steps:
             steps = [{
                 "step_id": "1",
@@ -793,7 +805,13 @@ class OrchestratorV2:
         # 唯一派发 ID：避免 task_result:{step_id} 与其它任务/历史残留键碰撞
         # （步骤 ID 如 "1"/"2" 在所有任务中通用，曾导致跨任务误取结果）
         dispatch_id = f"{step_id}-{uuid.uuid4().hex[:8]}"
-        r.lpush(f"task_queue:{agent_id}", json.dumps({"task_id": dispatch_id, "instruction": instruction}))
+        with self._task_starts_lock:
+            task_start_ts = self._task_starts.get(task_id, time.time())
+        r.lpush(f"task_queue:{agent_id}", json.dumps({
+            "task_id": dispatch_id,
+            "instruction": instruction,
+            "task_start_ts": task_start_ts,
+        }, ensure_ascii=False))
 
         # Wait for result
         result = self._wait_for_result(dispatch_id, timeout)
@@ -1304,6 +1322,8 @@ class OrchestratorV2:
             auto_run: bool = True, template_steps: list | None = None) -> dict:
         """Execute a full task lifecycle. Returns final status dict."""
         started = time.time()
+        with self._task_starts_lock:
+            self._task_starts[task_id] = started
         logger.info("Task %s: %s", task_id, goal[:80])
 
         # 1. Plan（模板步骤直接采用，否则 LLM 规划）
