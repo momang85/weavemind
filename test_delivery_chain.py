@@ -536,5 +536,47 @@ class TestStrategyDeployment(unittest.TestCase):
         self.assertEqual(data["strategy_id"], "s-win")
 
 
+class TestDeliverySummary(unittest.TestCase):
+    def test_summary_includes_files_run_and_launch(self):
+        import json as _json
+        import os
+        import tempfile
+        import zipfile
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = tempfile.mkdtemp(prefix="weavemind_sum_")
+        zip_path = os.path.join(tmp, "deliverables.zip")
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            zf.writestr("index.html", "<html>game</html>")
+            zf.writestr("main.py", "print('ok')")
+        try:
+            steps = [
+                {"step_id": "1", "capability": "code_execution", "instruction": "生成并运行游戏"},
+                {"step_id": "2", "capability": "package", "instruction": "打包交付"},
+            ]
+            completed = {
+                "1": {"status": "SUCCESS", "result": _json.dumps({
+                    "status": "success", "output": "pygame ok", "returncode": 0,
+                })},
+                "2": {"status": "SUCCESS", "result": f"[PACKAGED] x.zip\nDownload: file://{zip_path}"},
+            }
+            summary = o._build_delivery_summary("写一个愤怒的小鸟", steps, completed)
+            self.assertIn("项目交付结果", summary)
+            self.assertIn("index.html", summary)
+            self.assertIn("main.py", summary)
+            self.assertIn("运行验证", summary)
+            self.assertIn("如何启动", summary)
+        finally:
+            try:
+                os.unlink(zip_path)
+            except Exception:
+                pass
+            try:
+                os.rmdir(tmp)
+            except Exception:
+                pass
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

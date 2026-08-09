@@ -866,6 +866,87 @@ class OrchestratorV2:
             report += "\\n"
         return report
 
+    def _build_delivery_summary(
+        self, goal: str, all_steps: list[dict], completed_all: dict,
+    ) -> str:
+        """任务收尾：用代码生成"交付结果说明"，回答"项目结果如何"——
+        交付了哪些文件、运行验证是否成功、如何启动。不依赖 LLM，保证一定包含。"""
+        import tempfile, zipfile
+
+        results = [completed_all.get(s["step_id"], {}) for s in all_steps]
+        ok = sum(1 for r in results if r.get("status") == "SUCCESS")
+        fail = len(results) - ok
+        status = "SUCCESS" if fail == 0 else "PARTIAL" if ok > 0 else "FAILED"
+
+        # 1) 交付文件：从 package 步骤结果解析 zip 条目
+        files: list[dict] = []
+        zip_path = None
+        for s, r in zip(all_steps, results):
+            if s.get("capability") == "package":
+                text = str(r.get("result") or "")
+                m = re.search(r"Download: file://([^\s]+)", text)
+                if m and os.path.exists(m.group(1).strip()):
+                    zip_path = m.group(1).strip()
+                    break
+        if zip_path:
+            try:
+                with zipfile.ZipFile(zip_path) as zf:
+                    for info in zf.infolist():
+                        if info.is_dir() or "_check_" in info.filename or info.filename.startswith("__pycache__"):
+                            continue
+                        ext = os.path.splitext(info.filename)[1].lower().lstrip(".")
+                        kind = (
+                            "html" if ext == "html"
+                            else "py" if ext == "py"
+                            else "md" if ext in ("md", "markdown")
+                            else ext or "file"
+                        )
+                        files.append({"name": info.filename, "size": info.file_size, "kind": kind})
+            except Exception:
+                pass
+        files.sort(key=lambda x: x["name"])
+
+        lines = ["# 项目交付结果", "", f"**目标**：{goal[:200]}",
+                 f"**状态**：{status}（{ok}/{len(results)} 个步骤成功）", ""]
+        if files:
+            lines.append("## 交付文件")
+            for f in files:
+                size_kb = (f["size"] or 0) / 1024
+                lines.append(f"- `{f['name']}`（{f['kind']}，{size_kb:.1f} KB）")
+            lines.append("")
+
+        # 2) 运行验证：code_execution 步骤的真实运行结果
+        run_lines = []
+        for s, r in zip(all_steps, results):
+            if s.get("capability") == "code_execution" and r.get("status") == "SUCCESS":
+                try:
+                    parsed = json.loads(str(r.get("result") or ""))
+                    out = str(parsed.get("output") or "")[:160]
+                    rc = parsed.get("returncode")
+                except Exception:
+                    out, rc = "", None
+                run_lines.append(
+                    f"- {str(s.get('instruction'))[:50]}：运行{'成功' if rc == 0 or rc is None else '异常'}"
+                    + (f"（{out}）" if out else "")
+                )
+        if run_lines:
+            lines.append("## 运行验证")
+            lines.extend(run_lines)
+            lines.append("")
+
+        # 3) 如何启动
+        htmls = [f for f in files if f["kind"] == "html"]
+        pys = [f for f in files if f["kind"] == "py"]
+        if htmls or pys:
+            lines.append("## 如何启动")
+            if htmls:
+                lines.append(f"- 网页版：在任务控制台交付文件区点击「打开」按钮，或访问 `/files/{htmls[0]['name']}` 在浏览器中游玩")
+            if pys:
+                lines.append(f"- 脚本版：在交付文件区点击「运行」按钮执行 `{pys[0]['name']}`")
+            lines.append("")
+        lines.append("> 以下为任务执行过程中的详细内容（设计文档 / 过程记录）。")
+        return "\n".join(lines)
+
     def _best_deliverable(self, goal: str, steps: list[dict], results: list[dict]) -> str:
         """从步骤结果中挑选最实质的交付内容作为最终报告。
 
@@ -1048,9 +1129,11 @@ class OrchestratorV2:
                            "timestamp": self._now_iso()})
             push_progress(self._messaging, task_id, "plan_update", {"steps": steps})
 
-        report = best_report or self._finalize(goal, all_steps, [
+        delivery = self._build_delivery_summary(goal, all_steps, completed_all)
+        detail = best_report or self._finalize(goal, all_steps, [
             completed_all.get(s["step_id"], {}) for s in all_steps
         ])
+        report = delivery + "\n\n---\n\n" + detail
 
         # 3. Report
         push_progress(self._messaging, task_id, "log",
