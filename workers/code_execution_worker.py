@@ -153,14 +153,20 @@ class CodeExecutionWorker(AsyncWorkerBase):
             f"\n上一次生成的代码编译失败，请修复后重新输出完整代码：\n{compile_err}"
             if compile_err else ""
         )
+        ws = self._workspace_snapshot()
+        ws_note = (
+            "\n\n工作区现有文件（若指令要求基于/修改某个文件，请读取其内容并输出"
+            "修改后的完整文件，保持原文件名）：\n" + ws
+            if ws else ""
+        )
         if minimal:
             system = "You are a web developer. Write minimal runnable code. Output ONLY raw code."
             prompt = (
                 "Write minimal runnable Python code (<=200 lines) that satisfies: "
-                f"{instruction[:800]}\n{env_note}{feedback}"
+                f"{instruction[:800]}\n{env_note}{ws_note}{feedback}"
                 if not html_mode else
                 "Write a self-contained single-file HTML page (inline CSS/JS) that satisfies: "
-                f"{instruction[:800]}\nOutput ONLY raw HTML, no Python wrapper.{feedback}"
+                f"{instruction[:800]}\nOutput ONLY raw HTML, no Python wrapper.{ws_note}{feedback}"
             )
         else:
             system = (
@@ -170,11 +176,11 @@ class CodeExecutionWorker(AsyncWorkerBase):
             prompt = (
                 "请生成满足以下要求的完整可运行 Python 代码（自包含、可直接执行，"
                 "必要依赖仅在注释中说明）：\n"
-                f"{instruction}\n{env_note}{feedback}"
+                f"{instruction}\n{env_note}{ws_note}{feedback}"
                 if not html_mode else
                 "请生成满足以下要求的自包含单文件 HTML 页面（内联 CSS/JS，"
                 "直接可保存并在浏览器打开）：\n"
-                f"{instruction}\n{env_note}\n只输出原始 HTML，不要用 Python 包装。{feedback}"
+                f"{instruction}\n{env_note}{ws_note}\n只输出原始 HTML，不要用 Python 包装。{feedback}"
             )
         return await self._call_llm(system=system, prompt=prompt)
 
@@ -187,6 +193,48 @@ class CodeExecutionWorker(AsyncWorkerBase):
             "验证", "检查", "测试", "冒烟", "静态", "确认",
         ))
         return any(k in low for k in ("html", "网页", "webpage")) and not _verify_hint
+
+    @staticmethod
+    def _extract_embedded_html(code: str) -> str | None:
+        """LLM 有时把 HTML 包进 Python 写入脚本（with open('x.html','w') / f.write('''...''')），
+        从中提取真正的 HTML 内容。"""
+        m = re.search(
+            r"(?:write|print|f\.write)\(\s*(?:['\"]{1,3})(.*?)(?:['\"]{1,3})\s*\)",
+            code, re.S,
+        )
+        if m:
+            inner = m.group(1)
+            if "<!doctype html" in inner.lower() or "<html" in inner.lower():
+                return inner.strip()
+        # 兜底：任意三引号内的 HTML
+        m2 = re.search(r"('''|\"\"\")(.*?)\1", code, re.S)
+        if m2 and ("<!doctype html" in m2.group(2).lower() or "<html" in m2.group(2).lower()):
+            return m2.group(2).strip()
+        return None
+
+    def _workspace_snapshot(self, max_files: int = 5, max_chars: int = 700) -> str:
+        """列出工作区已有文件及内容片段，让 LLM 知道"自己在做什么、已有什么"。"""
+        lines: list[str] = []
+        try:
+            files = sorted(
+                p for p in self.workspace.iterdir()
+                if p.is_file() and "_check_" not in p.name and "screenshots" not in p.name
+            )
+            for p in files[:max_files]:
+                try:
+                    size = p.stat().st_size
+                except OSError:
+                    continue
+                lines.append(f"[文件] {p.name}（{size} 字节）")
+                if size > 0:
+                    try:
+                        snippet = p.read_text(encoding="utf-8", errors="replace")[:max_chars]
+                        lines.append(f"[内容] {snippet}")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        return "\n".join(lines)
 
     async def execute(self, instruction: str) -> str:
         try:
@@ -227,7 +275,12 @@ class CodeExecutionWorker(AsyncWorkerBase):
                     if lines and lines[-1].strip() == "```":
                         lines = lines[:-1]
                     candidate = "\n".join(lines)
-                if candidate.lstrip().lower().startswith(("<html", "<!doctype")) or html_mode:
+                if html_mode:
+                    # 提取 LLM 可能包在 Python 写入脚本里的 HTML
+                    extracted = self._extract_embedded_html(candidate)
+                    code = extracted if extracted else candidate
+                    break
+                if candidate.lstrip().lower().startswith(("<html", "<!doctype")):
                     code = candidate
                     break
                 # 编译自检（仅 Python 目标）：语法错误立即让 LLM 修复，避免运行期才炸
@@ -279,9 +332,17 @@ class CodeExecutionWorker(AsyncWorkerBase):
             if code.lstrip().lower().startswith(("<html", "<!doctype")):
                 if path.suffix.lower() != ".html":
                     path = path.with_suffix(".html")
-            if path.exists():
+            # 修改/更新/修复类指令：写回原文件；否则新文件加时间戳避免覆盖
+            _edit_hint = any(k in instruction for k in (
+                "修改", "更新", "完善", "调整", "修复", "改进", "改写",
+            ))
+            if path.exists() and not _edit_hint:
                 stem, ext = path.stem, path.suffix
                 path = self.workspace / f"{stem}_{int(time.time())}{ext}"
+            # 内容类型兜底：目标 .html 但实际是 Python 代码 → 存为 .py，避免假 HTML
+            looks_py = code.lstrip().startswith(("import ", "from ", "print(", "#!", "with open", "def "))
+            if path.suffix.lower() == ".html" and looks_py:
+                path = path.with_suffix(".py")
             path.write_text(code, encoding="utf-8")
 
             if path.suffix.lower() == ".html":

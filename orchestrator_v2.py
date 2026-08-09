@@ -887,7 +887,7 @@ class OrchestratorV2:
 
     def _build_delivery_summary(
         self, goal: str, all_steps: list[dict], completed_all: dict,
-    ) -> str:
+    ) -> tuple[str, list[dict]]:
         """任务收尾：用代码生成"交付结果说明"，回答"项目结果如何"——
         交付了哪些文件、运行验证是否成功、如何启动。不依赖 LLM，保证一定包含。"""
         import tempfile, zipfile
@@ -954,6 +954,7 @@ class OrchestratorV2:
             lines.append("")
 
         # 2.5) 贯通测试：把最终交付物当作整体验证能否运行
+        e2e: list[dict] = []
         if files:
             import tempfile as _tempfile
             project_dir = os.path.join(_tempfile.gettempdir(), "agent_workspace", "project")
@@ -982,7 +983,7 @@ class OrchestratorV2:
                 lines.append(f"- 脚本版：在交付文件区点击「运行」按钮执行 `{pys[0]['name']}`")
             lines.append("")
         lines.append("> 以下为任务执行过程中的详细内容（设计文档 / 过程记录）。")
-        return "\n".join(lines)
+        return "\n".join(lines), e2e
 
     def _run_e2e_verification(
         self, files: list[dict], project_dir: str,
@@ -1203,23 +1204,43 @@ class OrchestratorV2:
                 if not box or box["width"] < 50 or box["height"] < 50:
                     browser.close()
                     return False, f"canvas 尺寸异常 {box}", shot
-                # 模拟拖拽发射（弹弓游戏典型交互：按下→拖动→松手）
+                # 模拟拖拽（弹弓类）与键盘方向键（贪吃蛇类）交互
                 cx = box["x"] + box["width"] / 2
                 cy = box["y"] + box["height"] / 2
                 page.mouse.move(cx * 0.75, cy * 0.9)
                 page.mouse.down()
                 page.mouse.move(cx * 0.35, cy * 0.4, steps=8)
                 page.mouse.up()
-                page.wait_for_timeout(1200)
+                for _k in ("ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"):
+                    page.keyboard.press(_k)
+                    page.wait_for_timeout(120)
+                page.wait_for_timeout(800)
                 state = page.evaluate(
                     """() => {
                         const s = document.querySelector(
                             '#score, .score, [class*="score"], [id*="score"], .ui-text'
                         );
                         const cv = document.querySelector('canvas');
+                        let nonBlank = false;
+                        if (cv && cv.width > 0 && cv.height > 0) {
+                            try {
+                                const ctx = cv.getContext('2d');
+                                const img = ctx.getImageData(0, 0, cv.width, cv.height).data;
+                                const r0 = img[0], g0 = img[1], b0 = img[2];
+                                let varied = 0;
+                                for (let i = 0; i < img.length; i += 4) {
+                                    if (Math.abs(img[i]-r0) > 12 || Math.abs(img[i+1]-g0) > 12 || Math.abs(img[i+2]-b0) > 12) {
+                                        varied++;
+                                        if (varied > 300) break;
+                                    }
+                                }
+                                nonBlank = varied > 300;
+                            } catch (e) { nonBlank = false; }
+                        }
                         return {
                             scoreText: s ? (s.textContent || '') : '',
                             canvasDataLen: cv ? cv.toDataURL().length : 0,
+                            nonBlank,
                         };
                     }"""
                 )
@@ -1230,8 +1251,10 @@ class OrchestratorV2:
                 browser.close()
             if js_errors:
                 return False, "JS 错误: " + " | ".join(js_errors[:2]), shot
+            if not state.get("nonBlank"):
+                return False, "canvas 渲染为空白（游戏没有实际绘制内容）", shot
             score = str(state.get("scoreText") or "")[:30]
-            detail = "浏览器加载并模拟拖拽 OK（无 JS 错误）"
+            detail = "浏览器加载 + 拖拽/方向键模拟 OK，canvas 有渲染内容（无 JS 错误）"
             if score:
                 detail += f"；分数/状态='{score}'"
             return True, detail, shot
@@ -1428,11 +1451,18 @@ class OrchestratorV2:
                            "timestamp": self._now_iso()})
             push_progress(self._messaging, task_id, "plan_update", {"steps": steps})
 
-        delivery = self._build_delivery_summary(goal, all_steps, completed_all)
+        delivery, e2e_results = self._build_delivery_summary(goal, all_steps, completed_all)
         detail = best_report or self._finalize(goal, all_steps, [
             completed_all.get(s["step_id"], {}) for s in all_steps
         ])
         report = delivery + "\n\n---\n\n" + detail
+        # 贯通测试守门：有交付物但全部未通过可玩/可运行验证 → 如实标记失败
+        if e2e_results and not any(r.get("ok") for r in e2e_results):
+            has_failure = True
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "error", "agent": "orchestrator",
+                           "message": "贯通测试：全部交付物未通过可运行性验证，任务标记为失败",
+                           "timestamp": self._now_iso()})
 
         # 3. Report
         push_progress(self._messaging, task_id, "log",
@@ -1518,7 +1548,12 @@ class OrchestratorV2:
 
         def execute_step(step):
             step_start = time.time()
-            step["instruction"] = self._inject_step_context(step, completed, lock)
+            base_instr = self._inject_step_context(step, completed, lock)
+            # 注入全局任务目标，让 Worker 知道自己正在为哪个目标工作（Codex 式上下文感知）
+            if goal and "任务目标" not in base_instr[:60]:
+                step["instruction"] = f"任务目标：{goal[:300]}\n\n{base_instr}"
+            else:
+                step["instruction"] = base_instr
             blocked = deps_failed(step)
             if blocked:
                 push_progress(self._messaging, task_id, "log",

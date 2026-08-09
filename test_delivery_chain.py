@@ -573,12 +573,13 @@ class TestDeliverySummary(unittest.TestCase):
                 })},
                 "2": {"status": "SUCCESS", "result": f"[PACKAGED] x.zip\nDownload: file://{zip_path}"},
             }
-            summary = o._build_delivery_summary("写一个愤怒的小鸟", steps, completed)
+            summary, e2e = o._build_delivery_summary("写一个愤怒的小鸟", steps, completed)
             self.assertIn("项目交付结果", summary)
             self.assertIn("index.html", summary)
             self.assertIn("main.py", summary)
             self.assertIn("运行验证", summary)
             self.assertIn("如何启动", summary)
+            self.assertIsInstance(e2e, list)
         finally:
             try:
                 os.unlink(zip_path)
