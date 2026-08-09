@@ -65,17 +65,19 @@ echo        OK
 echo   [4/7] Frontend
 if exist frontend\dist\index.html (
     echo        dist exists, skip build
-) else (
-    where node >nul 2>nul && (
-        echo        Building frontend (first run)...
-        pushd frontend
-        call npm install --no-audit --no-fund
-        call npm run build
-        popd
-    ) || (
-        echo   WARNING: Node.js not found; frontend will use built-in fallback page
-    )
+    goto frontend_done
 )
+where node >nul 2>nul
+if errorlevel 1 (
+    echo   WARNING: Node.js not found; frontend will use built-in fallback page
+    goto frontend_done
+)
+echo        Building frontend (first run)...
+pushd frontend
+call npm install --no-audit --no-fund
+call npm run build
+popd
+:frontend_done
 
 :: ---- [5/7] Start services (PID-managed) ----
 echo   [5/7] Starting services...
