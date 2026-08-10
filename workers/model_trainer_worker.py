@@ -12,8 +12,9 @@ from async_worker_base import AsyncWorkerBase
 
 class ModelTrainerWorker(AsyncWorkerBase):
     _class_capabilities = ["model_trainer"]
+    _needs_task = True
 
-    async def execute(self, instruction: str) -> str:
+    async def execute(self, instruction: str, task: dict | None = None) -> str:
         try:
             import re
             paths = re.findall(
@@ -21,6 +22,9 @@ class ModelTrainerWorker(AsyncWorkerBase):
                 instruction,
             )
             data_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "data"
+            if task and task.get("workspace"):
+                data_dir = Path(str(task["workspace"])) / "data"
+                data_dir.mkdir(parents=True, exist_ok=True)
             if paths:
                 fpath = Path(paths[0])
             else:

@@ -244,6 +244,7 @@ export default function TaskConsole() {
       const steps = d.steps ?? []
       const reportObj: TaskReport = {
         summary: d.status || 'SUCCESS',
+        taskId: tid,
         stats: {
           totalSteps: steps.length,
           successSteps: steps.filter((s: any) => s.result?.status === 'SUCCESS').length,

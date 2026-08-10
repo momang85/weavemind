@@ -122,6 +122,7 @@ resetGame(); loop();
 
 class CodeExecutionWorker(AsyncWorkerBase):
     _class_capabilities = ["code_execution"]
+    _needs_task = True
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -411,7 +412,11 @@ class CodeExecutionWorker(AsyncWorkerBase):
             logger.info("TDD pilot skipped: %s", exc)
             return False, ""
 
-    async def execute(self, instruction: str) -> str:
+    async def execute(self, instruction: str, task: dict | None = None) -> str:
+        if task and task.get("workspace"):
+            # 每任务独立成果目录：本任务文件只落在自己的 project 文件夹
+            self.workspace = Path(str(task["workspace"])) / "project"
+            self.workspace.mkdir(parents=True, exist_ok=True)
         test_path = None
         try:
             if _HAS_PYGAME:

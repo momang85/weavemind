@@ -78,6 +78,7 @@ export interface LogEntry {
 
 export interface TaskReport {
   summary: string
+  taskId?: string
   stats: { totalSteps: number; successSteps: number; failedSteps: number; duration: number }
   total_time?: number
   steps: { step_id: string; capability: string; name: string; status: string; result?: string }[]

@@ -19,6 +19,7 @@ import unittest
 import zipfile
 
 from orchestrator_v2 import OrchestratorV2
+import workspace as ws_mod
 
 
 class FakeMessaging:
@@ -346,7 +347,7 @@ class TestPruneSuperseded(unittest.TestCase):
 
     def _make_workspace(self):
         base = tempfile.mkdtemp(prefix="zhiguang_prune_")
-        project = os.path.join(base, "agent_workspace", "project")
+        project = os.path.join(base, "t1", "project")
         os.makedirs(project)
         bad = os.path.join(project, "index.html")
         good = os.path.join(project, "index_1786354743.html")
@@ -374,8 +375,8 @@ class TestPruneSuperseded(unittest.TestCase):
 
     def test_prunes_failed_when_superseded_sibling_passes(self):
         base, project, bad, good = self._make_workspace()
-        old = tempfile.tempdir
-        tempfile.tempdir = base
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(base)
         try:
             with open(bad, encoding="utf-8") as f:
                 bad_content = f.read()
@@ -406,13 +407,13 @@ class TestPruneSuperseded(unittest.TestCase):
                       if m.get("payload", {}).get("message", "").startswith("清理")]
             self.assertTrue(pushed, "应推送清理进度到前端")
         finally:
-            tempfile.tempdir = old
+            ws_mod.WORKSPACE_ROOT = old_root
             shutil.rmtree(base, ignore_errors=True)
 
     def test_keeps_failed_when_no_passing_sibling(self):
         base, project, bad, _good = self._make_workspace()
-        old = tempfile.tempdir
-        tempfile.tempdir = base
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(base)
         try:
             with open(bad, encoding="utf-8") as f:
                 bad_content = f.read()
@@ -424,13 +425,13 @@ class TestPruneSuperseded(unittest.TestCase):
             self.assertFalse(o._prune_superseded_files("t1", steps, completed, e2e))
             self.assertTrue(os.path.exists(bad), "没有通过兄弟文件时不得删除")
         finally:
-            tempfile.tempdir = old
+            ws_mod.WORKSPACE_ROOT = old_root
             shutil.rmtree(base, ignore_errors=True)
 
     def test_keeps_failed_with_distinct_stem(self):
         base, project, bad, good = self._make_workspace()
-        old = tempfile.tempdir
-        tempfile.tempdir = base
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(base)
         try:
             about = os.path.join(project, "about.html")
             with open(about, "w", encoding="utf-8") as f:
@@ -458,7 +459,7 @@ class TestPruneSuperseded(unittest.TestCase):
             self.assertFalse(o._prune_superseded_files("t1", steps, completed, e2e))
             self.assertTrue(os.path.exists(bad))
         finally:
-            tempfile.tempdir = old
+            ws_mod.WORKSPACE_ROOT = old_root
             shutil.rmtree(base, ignore_errors=True)
 
 

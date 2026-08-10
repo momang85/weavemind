@@ -5,6 +5,8 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 import redis
 
+from workspace import task_workspace
+
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 DB_PATH = os.environ.get("REGISTRY_DB", "agents.db")
@@ -460,9 +462,11 @@ def _load_templates() -> list:
     except Exception:
         return []
 
-def _safe_project_path(rel: str) -> str | None:
-    """把相对路径限定在 project 工作区内，防止路径穿越。"""
-    base = os.path.abspath(PROJECT_DIR)
+def _safe_project_path(rel: str, tid: str | None = None) -> str | None:
+    """把相对路径限定在（任务的）project 工作区内，防止路径穿越。"""
+    base = os.path.abspath(
+        str((task_workspace(tid) / "project") if tid else PROJECT_DIR)
+    )
     p = os.path.abspath(os.path.join(base, rel))
     if p != base and not p.startswith(base + os.sep):
         return None
@@ -525,20 +529,31 @@ def _task_deliverables(tid: str) -> list[dict]:
         except Exception:
             ok_status = False
         if ok_status:
-            pkg_dir = os.path.join(tempfile.gettempdir(), "agent_packages")
+            # 优先该任务自己的成果文件夹，其次旧版共享打包目录
+            candidates: list[str] = []
+            task_ws = task_workspace(tid)
             try:
-                zips = [
-                    os.path.join(pkg_dir, n) for n in os.listdir(pkg_dir)
-                    if n.endswith(".zip")
+                candidates += [
+                    str(p) for p in task_ws.glob("*.zip")
                 ]
-                if zips:
-                    files = _zip_entries(max(zips, key=os.path.getmtime))
             except Exception:
                 pass
-    if not files and os.path.isdir(PROJECT_DIR):
-        # 兜底 2：工作区最近窗口内的产物
+            if not candidates:
+                pkg_dir = os.path.join(tempfile.gettempdir(), "agent_packages")
+                try:
+                    candidates = [
+                        os.path.join(pkg_dir, n) for n in os.listdir(pkg_dir)
+                        if n.endswith(".zip")
+                    ]
+                except Exception:
+                    pass
+            if candidates:
+                files = _zip_entries(max(candidates, key=os.path.getmtime))
+    if not files:
+        # 兜底 2：该任务 project 目录最近窗口内的产物
         cutoff = time.time() - 120 * 60
-        for root, _, names in os.walk(PROJECT_DIR):
+        proj_dir = str(task_workspace(tid) / "project")
+        for root, _, names in os.walk(proj_dir):
             for n in names:
                 p = os.path.join(root, n)
                 try:
@@ -546,7 +561,7 @@ def _task_deliverables(tid: str) -> list[dict]:
                         continue
                 except OSError:
                     continue
-                rel = os.path.relpath(p, PROJECT_DIR).replace("\\", "/")
+                rel = os.path.relpath(p, proj_dir).replace("\\", "/")
                 if "_check_" in rel or rel.startswith("__pycache__"):
                     continue
                 ext = os.path.splitext(n)[1].lower().lstrip(".")
@@ -687,7 +702,12 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/status": return self._json(_system_status())
         if p.startswith("/files/"):
             rel = p[len("/files/"):]
-            fp = _safe_project_path(rel)
+            tid = None
+            seg = rel.split("/", 1)
+            if len(seg) == 2 and (task_workspace(seg[0]) / "project").is_dir():
+                # 新格式 /files/<task_id>/<rel>；否则回退旧格式 /files/<rel>
+                tid, rel = seg[0], seg[1]
+            fp = _safe_project_path(rel, tid)
             if not fp or not os.path.isfile(fp):
                 return self._json({"error": "not found"}, 404)
             try:
@@ -778,14 +798,16 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "invalid json"}, 400)
         if self.path == "/api/deliverable/run":
             name = str(body.get("path") or "").strip()
+            tid = str(body.get("task_id") or "").strip() or None
             if not name:
                 return self._json({"error": "path required"}, 400)
-            fp = _safe_project_path(name)
+            fp = _safe_project_path(name, tid)
             if not fp or not os.path.isfile(fp):
                 return self._json({"error": "file not found"}, 404)
             ext = os.path.splitext(fp)[1].lower()
             if ext == ".html":
-                return self._json({"status": "ok", "open_url": "/files/" + name.replace("\\", "/")})
+                prefix = f"/files/{tid}/" if tid else "/files/"
+                return self._json({"status": "ok", "open_url": prefix + name.replace("\\", "/")})
             if ext != ".py":
                 return self._json({"error": "only .py files can be run"}, 400)
             env = {

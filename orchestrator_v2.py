@@ -8,6 +8,15 @@ This is the active orchestrator (legacy orchestrator.py was removed in the archi
 
 import json, logging, os, re, threading, time, uuid
 
+from workspace import (
+    ensure_task_workspace,
+    task_charts_dir,
+    task_data_dir,
+    task_project_dir,
+    task_reports_dir,
+    task_workspace,
+)
+
 from common import AgentRegistry, MessagingClient, RedisAgentRegistry
 from llm_client import LLMClient, get_usage_stats
 from memory_manager import MemoryManager
@@ -986,6 +995,7 @@ class OrchestratorV2:
             "task_id": dispatch_id,
             "instruction": instruction,
             "task_start_ts": task_start_ts,
+            "workspace": str(task_workspace(task_id)),
         }, ensure_ascii=False))
 
         # Wait for result
@@ -1060,7 +1070,7 @@ class OrchestratorV2:
         return report
 
     def _build_delivery_summary(
-        self, goal: str, all_steps: list[dict], completed_all: dict,
+        self, task_id: str, goal: str, all_steps: list[dict], completed_all: dict,
     ) -> tuple[str, list[dict]]:
         """任务收尾：用代码生成"交付结果说明"，回答"项目结果如何"——
         交付了哪些文件、运行验证是否成功、如何启动。不依赖 LLM，保证一定包含。"""
@@ -1106,6 +1116,8 @@ class OrchestratorV2:
                 size_kb = (f["size"] or 0) / 1024
                 lines.append(f"- `{f['name']}`（{f['kind']}，{size_kb:.1f} KB）")
             lines.append("")
+            lines.append(f"**成果文件夹**：`{task_workspace(task_id)}`（每个任务独立目录，可整体移动/备份）")
+            lines.append("")
 
         # 2) 运行验证：code_execution 步骤的真实运行结果
         run_lines = []
@@ -1130,8 +1142,10 @@ class OrchestratorV2:
         e2e: list[dict] = []
         if files:
             import tempfile as _tempfile
-            project_dir = os.path.join(_tempfile.gettempdir(), "agent_workspace", "project")
-            e2e = self._run_e2e_verification(files, project_dir)
+            project_dir = str(task_project_dir(task_id))
+            e2e = self._run_e2e_verification(
+                files, project_dir, game_goal=self._is_game_goal(goal),
+            )
             if e2e:
                 lines.append("## 贯通测试（整体可运行性）")
                 passed = sum(1 for r in e2e if r.get("ok"))
@@ -1141,7 +1155,7 @@ class OrchestratorV2:
                     line = f"- {mark} `{r['name']}`（{r['type']}）：{r.get('detail', '')}"
                     if r.get("screenshot") and os.path.exists(str(r["screenshot"])):
                         rel_shot = os.path.relpath(r["screenshot"], project_dir).replace("\\", "/")
-                        line += f"（[可玩性截图](/files/{rel_shot})）"
+                        line += f"（[可玩性截图](/files/{task_id}/{rel_shot})）"
                     lines.append(line)
                 lines.append("")
 
@@ -1151,7 +1165,10 @@ class OrchestratorV2:
         if htmls or pys:
             lines.append("## 如何启动")
             if htmls:
-                lines.append(f"- 网页版：在任务控制台交付文件区点击「打开」按钮，或访问 `/files/{htmls[0]['name']}` 在浏览器中游玩")
+                lines.append(
+                    f"- 网页版：在任务控制台交付文件区点击「打开」按钮，"
+                    f"或访问 `/files/{task_id}/{htmls[0]['name']}` 在浏览器中游玩"
+                )
             if pys:
                 lines.append(f"- 脚本版：在交付文件区点击「运行」按钮执行 `{pys[0]['name']}`")
             lines.append("")
@@ -1159,27 +1176,23 @@ class OrchestratorV2:
         return "\n".join(lines), e2e
 
     def _cleanup_project_workspace(self, task_id: str) -> None:
-        """任务开始时清空 project 工作区（无并发任务时），
-        避免历史任务的文件堆积、文件名混乱与 __pycache__ 残留进入交付包。"""
+        """任务开始时清空本任务的成果目录（project/reports/data/charts），
+        保证"一次运行 = 一个干净文件夹"；每任务独立，不影响其他任务。"""
         import shutil
-        import tempfile as _tf
-        with self._task_starts_lock:
-            others = [k for k in self._task_starts if k != task_id]
-        if others:
-            return  # 有并发任务时跳过，避免互相破坏
-        project = os.path.join(_tf.gettempdir(), "agent_workspace", "project")
-        if not os.path.isdir(project):
-            return
-        try:
-            for name in os.listdir(project):
-                fp = os.path.join(project, name)
-                if os.path.isfile(fp) or os.path.islink(fp):
-                    os.remove(fp)
-                elif os.path.isdir(fp):
-                    shutil.rmtree(fp, ignore_errors=True)
-            logger.info("Project workspace cleaned for task %s", task_id)
-        except Exception as exc:
-            logger.warning("Workspace cleanup failed for %s: %s", task_id, exc)
+        for sub in ("project", "reports", "data", "charts"):
+            d = task_workspace(task_id) / sub
+            if not d.is_dir():
+                continue
+            try:
+                for name in os.listdir(d):
+                    fp = os.path.join(str(d), name)
+                    if os.path.isfile(fp) or os.path.islink(fp):
+                        os.remove(fp)
+                    elif os.path.isdir(fp):
+                        shutil.rmtree(fp, ignore_errors=True)
+            except Exception as exc:
+                logger.warning("Workspace cleanup failed for %s/%s: %s", task_id, sub, exc)
+        logger.info("Task workspace cleaned for %s", task_id)
 
     @staticmethod
     def _supersede_key(name: str) -> str:
@@ -1187,6 +1200,16 @@ class OrchestratorV2:
         stem = os.path.splitext(os.path.basename(str(name)))[0]
         m = re.match(r"^(.*)_\d{9,11}$", stem)
         return m.group(1) if m else stem
+
+    @staticmethod
+    def _is_game_goal(goal: str) -> bool:
+        """判断目标是否"可玩"类（游戏/交互），决定贯通测试走哪种验证。"""
+        g = str(goal or "").lower()
+        return any(k in g for k in (
+            "游戏", "玩", "playable", "game", "canvas", "pygame",
+            "贪吃蛇", "打砖块", "弹弓", "小鸟", "棋盘", "2048", "扫雷",
+            "五子棋", "射击", "闯关", "体感", "可玩",
+        ))
 
     def _prune_superseded_files(
         self, task_id: str, all_steps: list[dict],
@@ -1208,9 +1231,7 @@ class OrchestratorV2:
         if not pruned:
             return False
         import tempfile as _tf
-        project_dir = os.path.abspath(
-            os.path.join(_tf.gettempdir(), "agent_workspace", "project")
-        )
+        project_dir = os.path.abspath(str(task_project_dir(task_id)))
         removed: list[str] = []
         for name in pruned:
             fp = os.path.abspath(os.path.join(project_dir, name))
@@ -1256,8 +1277,28 @@ class OrchestratorV2:
                        "timestamp": self._now_iso()})
         return True
 
+    def _sweep_workspace_artifacts(self, task_id: str) -> None:
+        """收尾清扫：删除 __pycache__ 目录与临时校验/测试文件，让成果文件夹干净可移动。"""
+        import shutil
+        ws = task_workspace(task_id)
+        try:
+            for p in ws.rglob("*"):
+                try:
+                    if p.name == "__pycache__" and p.is_dir():
+                        shutil.rmtree(p, ignore_errors=True)
+                    elif p.is_file() and (
+                        p.name.startswith("_check_")
+                        or p.name.startswith(".test_")
+                        or p.suffix in (".pyc", ".pyo")
+                    ):
+                        p.unlink(missing_ok=True)
+                except Exception:
+                    continue
+        except Exception as exc:
+            logger.warning("Workspace sweep failed for %s: %s", task_id, exc)
+
     def _run_e2e_verification(
-        self, files: list[dict], project_dir: str,
+        self, files: list[dict], project_dir: str, game_goal: bool = True,
     ) -> list[dict]:
         """对最终交付物做贯通验证（确定性，不依赖 LLM）：
         HTML → 文档结构 + 内联 JS 语法（node --check）+ 本地 HTTP 可访问；
@@ -1286,7 +1327,9 @@ class OrchestratorV2:
             fp = os.path.join(project_dir, f["name"])
             # 优先浏览器级"可玩"验证（Playwright 缺失时自动安装）
             try:
-                pw_ok, pw_detail, shot = self._playwright_verify(project_dir, f["name"], fp)
+                pw_ok, pw_detail, shot = self._playwright_verify(
+                    project_dir, f["name"], fp, require_game=game_goal,
+                )
             except Exception as exc:
                 pw_ok, pw_detail, shot = False, f"Playwright 验证异常: {exc}", ""
             if pw_ok:
@@ -1431,8 +1474,11 @@ class OrchestratorV2:
 
     def _playwright_verify(
         self, project_dir: str, rel_name: str, fp: str,
+        require_game: bool = True,
     ) -> tuple[bool, str, str]:
-        """用无头 Chromium 真实打开页面并模拟拖拽交互（"能玩"级验证）。
+        """用无头 Chromium 真实打开页面验证：
+        require_game=True → 模拟拖拽/键盘交互（"能玩"级，canvas 有绘制）；
+        require_game=False → 普通页面正常渲染（有内容、无 JS 错误）。
         返回 (是否通过, 详情, 截图路径)；Playwright 缺失时自动安装。"""
         import http.server
         import socketserver
@@ -1471,6 +1517,29 @@ class OrchestratorV2:
                 page.on("console", lambda m: js_errors.append(m.text) if m.type == "error" else None)
                 page.goto(url, timeout=15000)
                 page.wait_for_timeout(800)
+                if not require_game:
+                    # 普通页面：不要求 canvas，只需内容可见、无 JS 错误
+                    visible = page.evaluate(
+                        """() => {
+                            const t = (document.body && document.body.innerText || '').trim();
+                            const hasMedia = !!document.querySelector('img,canvas,video,iframe');
+                            return { len: t.length, hasMedia, text: t.slice(0, 80) };
+                        }"""
+                    )
+                    try:
+                        page.screenshot(path=shot)
+                    except Exception:
+                        pass
+                    if js_errors:
+                        browser.close()
+                        return False, "JS 错误: " + " | ".join(js_errors[:2]), shot
+                    if not visible["len"] and not visible["hasMedia"]:
+                        browser.close()
+                        return False, "页面内容为空（没有可见文字或媒体元素）", shot
+                    browser.close()
+                    return True, (
+                        f"浏览器加载 OK，页面有内容（{visible['len']} 字符，无 JS 错误）"
+                    ), shot
                 canvas = page.query_selector("canvas")
                 if not canvas:
                     browser.close()
@@ -1539,6 +1608,7 @@ class OrchestratorV2:
             if srv is not None:
                 try:
                     srv.shutdown()
+                    srv.server_close()
                 except Exception:
                     pass
 
@@ -1623,8 +1693,15 @@ class OrchestratorV2:
         started = time.time()
         with self._task_starts_lock:
             self._task_starts[task_id] = started
-        # 串行任务时清空共享工作区，保证交付包只含本次产物
+        # 每任务独立成果文件夹：清空本项目目录与旧交付包，保证只含本次产物
+        ensure_task_workspace(task_id)
         self._cleanup_project_workspace(task_id)
+        ws_dir = task_workspace(task_id)
+        try:
+            for p in ws_dir.glob("*.zip"):
+                p.unlink(missing_ok=True)
+        except Exception as exc:
+            logger.warning("Old zip cleanup failed for %s: %s", task_id, exc)
         logger.info("Task %s: %s", task_id, goal[:80])
 
         # 1. Plan（模板步骤直接采用，否则 LLM 规划）
@@ -1740,7 +1817,7 @@ class OrchestratorV2:
                            "timestamp": self._now_iso()})
             push_progress(self._messaging, task_id, "plan_update", {"steps": steps})
 
-        delivery, e2e_results = self._build_delivery_summary(goal, all_steps, completed_all)
+        delivery, e2e_results = self._build_delivery_summary(task_id, goal, all_steps, completed_all)
         # 任务级失败修复循环：交付物全部未通过可运行性验证时，带失败原因自动重做（最多 2 轮）
         _max_repair = 2
         _repair = 0
@@ -1769,8 +1846,7 @@ class OrchestratorV2:
             all_steps.append(repair_step)
             if fix_result.get("status") == "SUCCESS":
                 # 修复成功后才删除旧的未通过文件，并重新打包（交付包只含可用产物）
-                import tempfile as _tf
-                _project_dir = os.path.join(_tf.gettempdir(), "agent_workspace", "project")
+                _project_dir = str(task_project_dir(task_id))
                 for r in e2e_results:
                     if r.get("ok") or not r.get("name"):
                         continue
@@ -1789,12 +1865,14 @@ class OrchestratorV2:
                 pkg_result = self._dispatch_step_safe(goal, pkg_step, task_id, {"replan_used": 0})
                 completed_all[pkg_step["step_id"]] = pkg_result
                 all_steps.append(pkg_step)
-            delivery, e2e_results = self._build_delivery_summary(goal, all_steps, completed_all)
+            delivery, e2e_results = self._build_delivery_summary(task_id, goal, all_steps, completed_all)
         # 迭代补洞残留清理：同一目标文件可能同时存在旧失败版与带时间戳的新版
         # （如 index.html 空白 + index_<ts>.html 可玩）。当失败文件存在同基础名
         # 且已通过的兄弟文件时，把它从磁盘与交付包中移除，保证交付只含可用产物。
         if self._prune_superseded_files(task_id, all_steps, completed_all, e2e_results):
-            delivery, e2e_results = self._build_delivery_summary(goal, all_steps, completed_all)
+            delivery, e2e_results = self._build_delivery_summary(task_id, goal, all_steps, completed_all)
+        # 收尾清扫：移除 __pycache__ 与临时校验文件，成果文件夹保持干净
+        self._sweep_workspace_artifacts(task_id)
         detail = best_report or self._finalize(goal, all_steps, [
             completed_all.get(s["step_id"], {}) for s in all_steps
         ])

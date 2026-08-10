@@ -10,9 +10,14 @@ WORKSPACE.mkdir(parents=True, exist_ok=True)
 
 class DataLoaderWorker(AsyncWorkerBase):
     _class_capabilities = ["data_loader"]
+    _needs_task = True
 
-    async def execute(self, instruction: str) -> str:
+    async def execute(self, instruction: str, task: dict | None = None) -> str:
         try:
+            ws = WORKSPACE
+            if task and task.get("workspace"):
+                ws = Path(str(task["workspace"])) / "data"
+                ws.mkdir(parents=True, exist_ok=True)
             # Extract URL from instruction
             import re
             urls = re.findall(r'https?://[^\s,]+', instruction)
@@ -21,7 +26,7 @@ class DataLoaderWorker(AsyncWorkerBase):
                 url = urls[0]
                 import requests
                 fname = url.split("/")[-1].split("?")[0] or "dataset.csv"
-                fpath = WORKSPACE / fname
+                fpath = ws / fname
                 r = requests.get(url, stream=True, timeout=120)
                 r.raise_for_status()
                 with open(fpath, "wb") as f:
@@ -44,7 +49,7 @@ class DataLoaderWorker(AsyncWorkerBase):
                         df = pd.DataFrame(data.data, columns=cols)
                         if hasattr(data, "target"):
                             df["target"] = data.target
-                        fpath = WORKSPACE / f"{name}_data.csv"
+                        fpath = ws / f"{name}_data.csv"
                         df.to_csv(fpath, index=False)
                         return json.dumps({"status": "loaded_sklearn", "dataset": name, "path": str(fpath), "rows": len(df), "cols": len(df.columns)}, ensure_ascii=False)
                     except Exception as _e:

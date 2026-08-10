@@ -15,16 +15,24 @@ pass
 
 class DataAnalyzerWorker(AsyncWorkerBase):
     _class_capabilities = ["data_analyzer"]
+    _needs_task = True
 
-    async def execute(self, instruction: str) -> str:
+    async def execute(self, instruction: str, task: dict | None = None) -> str:
         try:
+            chart_dir = CHART_DIR
+            data_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "data"
+            if task and task.get("workspace"):
+                ws = Path(str(task["workspace"]))
+                chart_dir = ws / "charts"
+                data_dir = ws / "data"
+                chart_dir.mkdir(parents=True, exist_ok=True)
+                data_dir.mkdir(parents=True, exist_ok=True)
             # Find data path from instruction or use latest CSV in workspace
             import re
             paths = re.findall(
                 r'[A-Za-z]:[\\/][^\s,]+\.(?:csv|xlsx|json)|/tmp/[^\s,]+\.(?:csv|xlsx|json)',
                 instruction,
             )
-            data_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "data"
             if paths:
                 fpath = Path(paths[0].replace("\\", "/"))
             else:
@@ -58,7 +66,7 @@ class DataAnalyzerWorker(AsyncWorkerBase):
                 df[col].hist(ax=ax, bins=30, alpha=0.7)
                 ax.set_title(col)
             plt.tight_layout()
-            chart1 = str(CHART_DIR / "histograms.png")
+            chart1 = str(chart_dir / "histograms.png")
             fig1.savefig(chart1, dpi=100)
             plt.close(fig1)
 
@@ -67,7 +75,7 @@ class DataAnalyzerWorker(AsyncWorkerBase):
             corr = df[numeric_cols].corr()
             sns.heatmap(corr, annot=True, fmt=".2f", cmap="coolwarm", ax=ax2)
             plt.tight_layout()
-            chart2 = str(CHART_DIR / "heatmap.png")
+            chart2 = str(chart_dir / "heatmap.png")
             fig2.savefig(chart2, dpi=100)
             plt.close(fig2)
 
@@ -79,7 +87,7 @@ class DataAnalyzerWorker(AsyncWorkerBase):
                 ax3.set_xlabel(top_feat); ax3.set_ylabel(target_col)
                 ax3.set_title(f"{target_col} vs {top_feat}")
                 plt.tight_layout()
-                chart3 = str(CHART_DIR / "scatter.png")
+                chart3 = str(chart_dir / "scatter.png")
                 fig3.savefig(chart3, dpi=100)
                 plt.close(fig3)
             else:

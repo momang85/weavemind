@@ -101,6 +101,7 @@ export function useTaskPoller(taskId: string | null) {
           setAwaitingConfirm(false)
           const reportObj: any = {
             summary: d.status,
+            taskId,
             stats: { totalSteps: rawSteps.length,
               successSteps: rawSteps.filter((s: any) => (s.result?.status||'').toLowerCase() === 'success').length,
               failedSteps: rawSteps.filter((s: any) => (s.result?.status||'').toLowerCase() === 'failed').length,

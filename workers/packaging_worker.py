@@ -56,7 +56,11 @@ class PackagingWorker(AsyncWorkerBase):
         except Exception:
             pass
         if proj_path is None:
-            proj_path = PROJECT_DIR
+            proj_path = (
+                Path(str(task["workspace"])) / "project"
+                if task and task.get("workspace")
+                else PROJECT_DIR
+            )
         return self._package(proj_path, task or {})
 
     def _fresh_files(self, root: Path, task: dict) -> list[tuple[Path, str]]:
@@ -92,8 +96,11 @@ class PackagingWorker(AsyncWorkerBase):
                 continue
             files.append((p, rel))
         # 报告文件独立存放，若新鲜则一并纳入（放在 reports/ 前缀下）
-        if REPORT_DIR.exists():
-            for p in sorted(REPORT_DIR.glob("*.md")):
+        report_dir = REPORT_DIR
+        if task and task.get("workspace"):
+            report_dir = Path(str(task["workspace"])) / "reports"
+        if report_dir.exists():
+            for p in sorted(report_dir.glob("*.md")):
                 try:
                     if p.stat().st_mtime >= lower_bound:
                         files.append((p, f"reports/{p.name}"))
@@ -112,7 +119,11 @@ class PackagingWorker(AsyncWorkerBase):
             )
 
         ts = time.strftime("%Y%m%d_%H%M%S")
-        zip_path = STATIC_DIR / f"deliverables_{ts}.zip"
+        out_dir = STATIC_DIR
+        if task and task.get("workspace"):
+            # 交付包放进任务自己的成果文件夹，方便整体移动
+            out_dir = Path(str(task["workspace"]))
+        zip_path = out_dir / f"deliverables_{ts}.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for abs_path, arc_name in files:
                 zf.write(abs_path, arc_name)

@@ -57,6 +57,7 @@ class FileIoWorker(AsyncWorkerBase):
     """在受限工作区内执行文件读写操作（中文/英文指令均可）。"""
 
     _class_capabilities = ["file_io"]
+    _needs_task = True
     WORKSPACE_DIR = os.path.join(tempfile.gettempdir(), "agent_workspace", "project")
 
     def __init__(self, *args, **kwargs):
@@ -65,7 +66,7 @@ class FileIoWorker(AsyncWorkerBase):
 
     def _safe_path(self, filename: str) -> Path:
         """将文件名限定在工作区内，防止路径穿越。"""
-        base = Path(self.WORKSPACE_DIR).resolve()
+        base = Path(getattr(self, "_workspace_dir", self.WORKSPACE_DIR)).resolve()
         # 统一把反斜杠当路径分隔符：Windows 原生支持；Linux/macOS 上
         # 反斜杠是合法文件名字符，不归一化会导致 "..\\.." 绕过逃逸检测。
         normalized = str(filename).replace("\\", "/")
@@ -74,8 +75,12 @@ class FileIoWorker(AsyncWorkerBase):
             raise ValueError(f"Path escapes workspace: {filename}")
         return path
 
-    async def execute(self, instruction: str) -> str:
+    async def execute(self, instruction: str, task: dict | None = None) -> str:
         try:
+            if task and task.get("workspace"):
+                # 每任务独立成果目录
+                self._workspace_dir = os.path.join(str(task["workspace"]), "project")
+                os.makedirs(self._workspace_dir, exist_ok=True)
             lower = instruction.lower()
             if "read" in lower and "log" in lower:
                 return await self._handle_read_logs(instruction)

@@ -555,14 +555,18 @@ class TestDeliverySummary(unittest.TestCase):
         import tempfile
         import zipfile
         from orchestrator_v2 import OrchestratorV2
+        import workspace as ws_mod
 
         o = OrchestratorV2.__new__(OrchestratorV2)
         tmp = tempfile.mkdtemp(prefix="weavemind_sum_")
-        zip_path = os.path.join(tmp, "deliverables.zip")
-        with zipfile.ZipFile(zip_path, "w") as zf:
-            zf.writestr("index.html", "<html>game</html>")
-            zf.writestr("main.py", "print('ok')")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
         try:
+            ws_mod.task_project_dir("t-sum-1")
+            zip_path = os.path.join(tmp, "deliverables.zip")
+            with zipfile.ZipFile(zip_path, "w") as zf:
+                zf.writestr("index.html", "<html>game</html>")
+                zf.writestr("main.py", "print('ok')")
             steps = [
                 {"step_id": "1", "capability": "code_execution", "instruction": "生成并运行游戏"},
                 {"step_id": "2", "capability": "package", "instruction": "打包交付"},
@@ -573,22 +577,100 @@ class TestDeliverySummary(unittest.TestCase):
                 })},
                 "2": {"status": "SUCCESS", "result": f"[PACKAGED] x.zip\nDownload: file://{zip_path}"},
             }
-            summary, e2e = o._build_delivery_summary("写一个愤怒的小鸟", steps, completed)
+            summary, e2e = o._build_delivery_summary("t-sum-1", "写一个愤怒的小鸟", steps, completed)
             self.assertIn("项目交付结果", summary)
             self.assertIn("index.html", summary)
             self.assertIn("main.py", summary)
             self.assertIn("运行验证", summary)
             self.assertIn("如何启动", summary)
+            self.assertIn("成果文件夹", summary)
             self.assertIsInstance(e2e, list)
         finally:
+            ws_mod.WORKSPACE_ROOT = old_root
             try:
-                os.unlink(zip_path)
+                import shutil
+                shutil.rmtree(tmp, ignore_errors=True)
             except Exception:
                 pass
-            try:
-                os.rmdir(tmp)
-            except Exception:
-                pass
+
+
+class TestTaskWorkspaceIsolation(unittest.TestCase):
+    """每任务独立成果文件夹：互不污染、可整体移动。"""
+
+    def test_distinct_task_dirs(self):
+        import tempfile
+        import workspace as ws_mod
+
+        tmp = tempfile.mkdtemp(prefix="weavemind_ws_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            a = ws_mod.task_project_dir("ui-task-a")
+            b = ws_mod.task_project_dir("ui-task-b")
+            self.assertNotEqual(a, b)
+            self.assertTrue(a.parent.name.startswith("ui-task-a"))
+            self.assertTrue(b.parent.name.startswith("ui-task-b"))
+            # 写入 A 的文件不应出现在 B
+            (a / "index.html").write_text("<html>a</html>", encoding="utf-8")
+            self.assertTrue((a / "index.html").exists())
+            self.assertFalse((b / "index.html").exists())
+            # 同名但不同任务的工作区互不影响
+            self.assertTrue(str(a).startswith(str(tmp)))
+            self.assertTrue(str(b).startswith(str(tmp)))
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_task_id_sanitized(self):
+        import workspace as ws_mod
+
+        ws = ws_mod.task_workspace("../../etc/passwd")
+        self.assertNotIn("..", ws.name)
+        self.assertNotIn("/", ws.name)
+
+
+class TestE2EGoalTyping(unittest.TestCase):
+    """贯通测试按目标类型选择验证强度：游戏走"可玩性"，普通页面走"渲染"。"""
+
+    def test_game_goal_detected(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        self.assertTrue(o._is_game_goal("做一个极简的贪吃蛇游戏，确保能在浏览器里玩"))
+        self.assertTrue(o._is_game_goal("用 pygame 实现愤怒的小鸟"))
+        self.assertTrue(o._is_game_goal("写一个可玩的打砖块 HTML 游戏"))
+
+    def test_plain_page_not_game(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        self.assertFalse(o._is_game_goal("生成一个单文件 HTML 欢迎页（含标题和按钮）"))
+        self.assertFalse(o._is_game_goal("调研工业AI视觉市场并输出报告"))
+        self.assertFalse(o._is_game_goal("整理数据科学实训汇报条目"))
+
+    def test_plain_page_passes_render_verify(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        d = tempfile.mkdtemp(prefix="weavemind_e2e_")
+        try:
+            fp = os.path.join(d, "welcome.html")
+            Path(fp).write_text(
+                "<!DOCTYPE html><html><body><h1>Hello</h1><p>内容</p></body></html>",
+                encoding="utf-8",
+            )
+            ok, detail, _shot = o._playwright_verify(d, "welcome.html", fp, require_game=False)
+            self.assertTrue(ok, detail)
+            # 同页面走"游戏级"验证必须失败（无 canvas），证明两种模式确实分流
+            ok2, detail2, _ = o._playwright_verify(d, "welcome.html", fp, require_game=True)
+            self.assertFalse(ok2, detail2)
+        finally:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
 
 
 class TestPackageTaskIsolation(unittest.TestCase):

@@ -17,10 +17,19 @@ REPORT_DIR = Path(tempfile.gettempdir()) / "agent_workspace" / "reports"
 
 class ReportGeneratorWorker(AsyncWorkerBase):
     _class_capabilities = ["report_generator"]
+    _needs_task = True
 
-    async def execute(self, instruction: str) -> str:
+    async def execute(self, instruction: str, task: dict | None = None) -> str:
         charts_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "charts"
         data_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "data"
+        report_dir = REPORT_DIR
+        if task and task.get("workspace"):
+            ws = Path(str(task["workspace"]))
+            charts_dir = ws / "charts"
+            data_dir = ws / "data"
+            report_dir = ws / "reports"
+            for d in (charts_dir, data_dir, report_dir):
+                d.mkdir(parents=True, exist_ok=True)
         # 只考虑本次任务时间窗口内的产物，避免把历史任务遗留的无关数据（如房价）
         # 拉进当前报告。
         cutoff = time.time() - 120 * 60
@@ -62,7 +71,7 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             if not report.startswith("#"):
                 report = "# 报告\n\n" + report
 
-            rpath = REPORT_DIR / "report.md"
+            rpath = report_dir / "report.md"
             rpath.write_text(report, encoding="utf-8")
             return json.dumps({
                 "status": "success",
@@ -95,7 +104,7 @@ This report was generated automatically by the WeaveMind multi-agent system.
 All data, code, and visualizations are available in the project workspace.
 """
             try:
-                rpath = REPORT_DIR / "report.md"
+                rpath = report_dir / "report.md"
                 rpath.write_text(report, encoding="utf-8")
                 return json.dumps({
                     "status": "success",

@@ -12,7 +12,8 @@ import {
 } from 'lucide-react'
 
 export default memo(function ReportViewer() {
-  const { report, logs } = useTaskStore()
+  const { report, logs, currentTaskId } = useTaskStore()
+  const taskIdForFiles = currentTaskId || report?.taskId || null
   const [showLogs, setShowLogs] = useState(false)
   const [expandedFiles, setExpandedFiles] = useState(false)
   const [runOutput, setRunOutput] = useState<Record<string, string>>({})
@@ -24,7 +25,7 @@ export default memo(function ReportViewer() {
       const res = await fetch('/api/deliverable/run', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: name }),
+        body: JSON.stringify({ path: name, task_id: taskIdForFiles || undefined }),
       })
       const d = await res.json()
       setRunOutput(prev => ({ ...prev, [name]: d.output || d.error || '(no output)' }))
@@ -45,6 +46,10 @@ export default memo(function ReportViewer() {
     const a = document.createElement('a'); a.href = url; a.download = 'report.md'; a.click()
     URL.revokeObjectURL(url)
   }
+
+  const fileUrl = (name: string) =>
+    taskIdForFiles ? '/files/' + encodeURIComponent(taskIdForFiles) + '/' + encodeURIComponent(name)
+                   : '/files/' + encodeURIComponent(name)
 
   const downloadPDF = () => {
     const w = window.open('', '_blank')
@@ -147,7 +152,7 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
                     {f.kind && <span className="px-1.5 py-0.5 rounded bg-slate-700/60 text-slate-400 text-[10px] shrink-0">{f.kind}</span>}
                     <div className="ml-auto flex items-center gap-1.5 shrink-0">
                       {f.kind === 'html' && (
-                        <button onClick={() => window.open('/files/' + encodeURIComponent(f.name), '_blank')}
+                        <button onClick={() => window.open(fileUrl(f.name), '_blank')}
                           className="flex items-center gap-1 px-2 py-1 rounded bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 text-[10px]">
                           <ExternalLink className="w-3 h-3" /> 打开
                         </button>
@@ -159,7 +164,7 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
                         </button>
                       )}
                       {f.kind !== 'html' && (
-                        <a href={'/files/' + encodeURIComponent(f.name)} download
+                        <a href={fileUrl(f.name)} download
                           className="flex items-center gap-1 px-2 py-1 rounded bg-slate-700/50 hover:bg-slate-700 text-slate-300 text-[10px]">
                           <Download className="w-3 h-3" /> 下载
                         </a>
