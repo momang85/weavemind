@@ -148,6 +148,7 @@ class CodeExecutionWorker(AsyncWorkerBase):
     async def _generate_code(
         self, instruction: str, env_note: str, html_mode: bool,
         compile_err: str, minimal: bool, test_context: str = "",
+        max_attempts: int = 3,
     ) -> str:
         """调 LLM 生成代码；compile_err 非空时携带语法错误反馈要求修复。"""
         feedback = (
@@ -188,13 +189,19 @@ class CodeExecutionWorker(AsyncWorkerBase):
                 "直接可保存并在浏览器打开）：\n"
                 f"{instruction}\n{env_note}{ws_note}\n只输出原始 HTML，不要用 Python 包装。{feedback}"
             )
-        return await self._call_llm(system=system, prompt=prompt)
+        return await self._call_llm(system=system, prompt=prompt, max_attempts=max_attempts)
 
     @staticmethod
     def _html_intent(instruction: str) -> bool:
         """判定指令是否要"生成 HTML 页面"。
-        验证/检查/测试类指令即使提到 .html 文件名，也应生成可运行的 Python 脚本。"""
-        low = instruction.lower()
+        验证/检查/测试类指令即使提到 .html 文件名，也应生成可运行的 Python 脚本。
+        优先看"用户目标"（规划器通用后缀里的"并验证通过"不应改判 HTML 任务）。"""
+        m = re.search(r"用户目标：([^\n]+)", str(instruction))
+        if m:
+            user_goal = m.group(1).strip()
+            if any(k in user_goal.lower() for k in ("html", "网页", "webpage")):
+                return True
+        low = str(instruction).lower()
         _verify_hint = any(k in instruction for k in (
             "验证", "检查", "测试", "冒烟", "静态", "确认",
         ))
@@ -417,6 +424,7 @@ class CodeExecutionWorker(AsyncWorkerBase):
             # 每任务独立成果目录：本任务文件只落在自己的 project 文件夹
             self.workspace = Path(str(task["workspace"])) / "project"
             self.workspace.mkdir(parents=True, exist_ok=True)
+        simple = bool(task and task.get("simple"))
         test_path = None
         try:
             if _HAS_PYGAME:
@@ -434,7 +442,8 @@ class CodeExecutionWorker(AsyncWorkerBase):
             # 严格 TDD：先让 LLM 判断是否适合测试驱动；适合则先生成测试文件
             target_name = self._target_filename(instruction)
             use_tdd, test_code = False, ""
-            if not html_mode:
+            # 简单任务快速路径：跳过 TDD 判断（静态 HTML/小脚本无需测试驱动）
+            if not html_mode and not simple:
                 use_tdd, test_code = await self._tdd_pilot(instruction, Path(target_name).stem)
                 if use_tdd and test_code.strip():
                     # 测试文件放在 workspace 根目录：python test.py 的 sys.path[0]=workspace，
@@ -444,6 +453,8 @@ class CodeExecutionWorker(AsyncWorkerBase):
                     logger.info("TDD: generated test file %s", test_path.name)
             code = None
             feedback = ""
+            # 简单任务：主端点连试 2 次即切备用，减少慢端点无效等待
+            llm_attempts = 2 if simple else 3
             # 小步快跑：生成 → 编译 → 冒烟运行 → 代码审查 → 带反馈修复（最多 3 轮）
             for _round in range(3):
                 llm_response = ""
@@ -453,6 +464,7 @@ class CodeExecutionWorker(AsyncWorkerBase):
                             instruction, env_note, html_mode,
                             feedback, minimal=(_gen == 1),
                             test_context=(test_code if use_tdd else ""),
+                            max_attempts=llm_attempts,
                         )
                     except Exception:
                         llm_response = ""
@@ -535,7 +547,11 @@ class CodeExecutionWorker(AsyncWorkerBase):
                     logger.info("Round %d: smoke test failed, regenerating", _round + 1)
                     continue
                 # 阶段3：自动代码审查（依赖/性能/安全/逻辑）
-                review_ok, review_notes = await self._review_code(candidate, instruction)
+                if simple:
+                    # 简单任务：交付物由贯通测试兜底验证，跳过审查 LLM 调用
+                    review_ok, review_notes = True, ""
+                else:
+                    review_ok, review_notes = await self._review_code(candidate, instruction)
                 if not review_ok:
                     feedback = f"代码审查发现必须修复的问题，请修复后重新输出完整代码：\n{review_notes}"
                     logger.info("Round %d: code review failed, regenerating", _round + 1)

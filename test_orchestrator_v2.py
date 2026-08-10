@@ -59,6 +59,7 @@ def make_orch(**overrides):
     o._redis = FakeRedis()
     o._planner_llm = None
     o._task_starts = {"test-other-task": 0.0}  # 模拟并发，避免单测触发真实工作区清理
+    o._task_simple = {}
     o._task_starts_lock = threading.Lock()
     for k, v in overrides.items():
         setattr(o, k, v)

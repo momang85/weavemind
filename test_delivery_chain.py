@@ -769,5 +769,177 @@ class TestTemplateConsolidation(unittest.TestCase):
                 pass
 
 
+class TestSimpleTaskFastPath(unittest.TestCase):
+    """简单任务快速路径：只影响直达型任务，复杂任务逻辑保持不变。"""
+
+    def test_simple_plan_detected(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        simple = [
+            {"capability": "code_execution", "instruction": "生成 index.html"},
+            {"capability": "report_generator", "instruction": "写报告"},
+            {"capability": "package", "instruction": "打包"},
+        ]
+        self.assertTrue(o._is_simple_task(simple))
+
+    def test_complex_plan_not_simple(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        with_search = [
+            {"capability": "web_search", "instruction": "搜索"},
+            {"capability": "code_execution", "instruction": "写代码"},
+        ]
+        self.assertFalse(o._is_simple_task(with_search))
+        two_code = [
+            {"capability": "code_execution", "instruction": "a"},
+            {"capability": "code_execution", "instruction": "b"},
+        ]
+        self.assertFalse(o._is_simple_task(two_code))
+        data_pipeline = [
+            {"capability": "data_loader", "instruction": "加载数据"},
+            {"capability": "model_trainer", "instruction": "训练"},
+        ]
+        self.assertFalse(o._is_simple_task(data_pipeline))
+        self.assertFalse(o._is_simple_task([]))
+
+    def test_html_intent_prefers_user_goal(self):
+        from workers.code_execution_worker import CodeExecutionWorker
+
+        # 规划器通用后缀"并验证通过"不得把 HTML 任务改判为 Python 任务
+        instr = (
+            "用户目标：生成一个简单的单文件HTML欢迎页（index.html，包含标题、段落和一个按钮），保存为index.html，确保浏览器能打开\n"
+            "原始指令：根据目标生成完整可运行的自包含交付物（单文件 HTML 或 Python 脚本），确保能直接在浏览器/命令行运行并验证通过"
+        )
+        self.assertTrue(CodeExecutionWorker._html_intent(instr))
+        # 纯验证类指令（无用户目标）仍判为 Python 验证任务
+        self.assertFalse(CodeExecutionWorker._html_intent(
+            "运行Python验证脚本对 angry_birds.html 做静态检查与测试确认"
+        ))
+        self.assertFalse(CodeExecutionWorker._html_intent(
+            "编写冒烟测试验证 index.html 可访问"
+        ))
+
+    def test_packaging_skips_llm_for_simple(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        from workers.packaging_worker import PackagingWorker
+
+        ws = Path(tempfile.mkdtemp(prefix="weavemind_pkgfast_"))
+        (ws / "project").mkdir(parents=True, exist_ok=True)
+        (ws / "project" / "index.html").write_text("<html>hi</html>", encoding="utf-8")
+        w = PackagingWorker.__new__(PackagingWorker)
+        calls = {"n": 0}
+
+        def boom(*a, **k):
+            calls["n"] += 1
+            raise RuntimeError("LLM should not be called for simple task")
+
+        with mock.patch("llm_client.call_llm", side_effect=boom):
+            res = w._sync_package("打包", {"workspace": str(ws), "simple": True})
+        self.assertEqual(calls["n"], 0, "简单任务不应调用 LLM 解析路径")
+        self.assertIn("Download: file://", res)
+        self.assertIn(str(ws), res)
+        self.assertTrue(list(ws.glob("*.zip")))
+
+    def test_packaging_complex_keeps_llm(self):
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        from workers.packaging_worker import PackagingWorker
+
+        ws = Path(tempfile.mkdtemp(prefix="weavemind_pkgfast_"))
+        (ws / "project").mkdir(parents=True, exist_ok=True)
+        (ws / "project" / "index.html").write_text("<html>hi</html>", encoding="utf-8")
+        w = PackagingWorker.__new__(PackagingWorker)
+        calls = {"n": 0}
+
+        def fail_llm(*a, **k):
+            calls["n"] += 1
+            raise RuntimeError("simulated LLM failure")
+
+        with mock.patch("llm_client.call_llm", side_effect=fail_llm):
+            res = w._sync_package("打包", {"workspace": str(ws), "simple": False})
+        self.assertEqual(calls["n"], 1, "复杂任务仍走 LLM 路径解析（失败回退工作区）")
+        self.assertIn("Download: file://", res)
+
+    def test_code_execution_simple_skips_tdd_and_review(self):
+        import asyncio
+        import json
+        import tempfile
+        from pathlib import Path
+        from workers.code_execution_worker import CodeExecutionWorker
+
+        w = CodeExecutionWorker.__new__(CodeExecutionWorker)
+        ws = Path(tempfile.mkdtemp(prefix="weavemind_cfast_"))
+        w.workspace = ws
+        calls = {"tdd": 0, "review": 0}
+
+        async def fake_llm(system="", prompt="", instruction="", max_attempts=3):
+            self.assertEqual(max_attempts, 2, "简单任务应减少主端点尝试次数")
+            return "print('hello from simple task')"
+
+        async def fake_tdd(*a, **k):
+            calls["tdd"] += 1
+            return False, ""
+
+        async def fake_review(*a, **k):
+            calls["review"] += 1
+            return True, ""
+
+        w._call_llm = fake_llm
+        w._tdd_pilot = fake_tdd
+        w._review_code = fake_review
+        res = json.loads(asyncio.run(w.execute(
+            "用户目标：写一个 Python 脚本输出 hello\n原始指令：生成脚本",
+            {"workspace": str(ws), "simple": True},
+        )))
+        self.assertEqual(res["status"], "success")
+        self.assertEqual(calls["tdd"], 0, "简单任务跳过 TDD pilot")
+        self.assertEqual(calls["review"], 0, "简单任务跳过代码审查")
+
+    def test_orchestrator_simple_skips_reflection(self):
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+        from test_orchestrator_v2 import make_orch
+
+        tmp = tempfile.mkdtemp(prefix="weavemind_reflect_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        o = make_orch()
+        o._plan = lambda goal, task_id, context="": [
+            {"step_id": "1", "capability": "code_execution", "instruction": "x", "timeout": 120},
+            {"step_id": "2", "capability": "report_generator", "instruction": "r", "timeout": 120},
+            {"step_id": "3", "capability": "package", "instruction": "p", "timeout": 120},
+        ]
+        reflected = {"n": 0}
+
+        def fake_reflect(goal, report, task_id):
+            reflected["n"] += 1
+            return {"accepted": False, "gaps": ["more"],
+                    "next_steps": [{"step_id": "x", "capability": "code_execution", "instruction": "补", "timeout": 120}]}
+
+        o._reflect = fake_reflect
+
+        def fake_execute(steps, task_id, goal):
+            return [{"task_id": s["step_id"], "status": "SUCCESS", "result": f"ok-{s['step_id']}"} for s in steps], False
+
+        o._execute_steps = fake_execute
+        o._now_iso = lambda: "t"
+        try:
+            res = o.run("t-simple-1", "生成一个 HTML 欢迎页", auto_run=True)
+            self.assertEqual(res["status"], "SUCCESS")
+            self.assertEqual(reflected["n"], 0, "简单任务跳过反射评审")
+            self.assertTrue(o._task_simple.get("t-simple-1"))
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

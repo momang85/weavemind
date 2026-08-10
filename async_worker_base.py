@@ -74,9 +74,14 @@ class AsyncWorkerBase(ABC):
         self._lock = asyncio.Lock(); self._hb = None
         self._running = False; self._shutting = False
 
-    async def _call_llm(self, system="", prompt="", instruction="") -> str:
+    async def _call_llm(self, system="", prompt="", instruction="", max_attempts=3) -> str:
         from llm_client import call_llm_async
-        result = await call_llm_async(system or "You are a helpful assistant.", prompt or instruction or "", expect_json=False)
+        result = await call_llm_async(
+            system or "You are a helpful assistant.",
+            prompt or instruction or "",
+            expect_json=False,
+            max_attempts=max_attempts,
+        )
         return result if isinstance(result, str) else str(result)
 
     @property

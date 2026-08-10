@@ -470,6 +470,7 @@ async def call_llm_async(
     expect_json: bool = True,
     temperature: float = 0.1,
     max_tokens: int = 2000,
+    max_attempts: int = 3,
 ) -> dict[str, Any] | str:
     """Async LLM call using httpx.AsyncClient with connection pooling.
     
@@ -498,7 +499,6 @@ async def call_llm_async(
     # Disabled: response_format not supported by all providers
     # Let the prompt ask for JSON instead
 
-    max_attempts = 3
     last_error = None
 
     for attempt in range(1, max_attempts + 1):

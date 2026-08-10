@@ -43,18 +43,20 @@ class PackagingWorker(AsyncWorkerBase):
         from llm_client import call_llm
 
         proj_path = None
-        try:
-            system = (
-                "你是路径解析器。从指令中提取项目路径。"
-                '输出JSON: {"project_path": "/path/to/project"}。'
-                "如果指令未指定路径，输出空对象 {}。只输出JSON。"
-            )
-            result = call_llm(system, instruction, expect_json=True)
-            p = str(result.get("project_path") or "").strip()
-            if p and os.path.isdir(p):
-                proj_path = Path(p)
-        except Exception:
-            pass
+        # 简单任务快速路径：每任务独立工作区已是权威路径，跳过 LLM 路径解析
+        if not (task and task.get("workspace") and task.get("simple")):
+            try:
+                system = (
+                    "你是路径解析器。从指令中提取项目路径。"
+                    '输出JSON: {"project_path": "/path/to/project"}。'
+                    "如果指令未指定路径，输出空对象 {}。只输出JSON。"
+                )
+                result = call_llm(system, instruction, expect_json=True)
+                p = str(result.get("project_path") or "").strip()
+                if p and os.path.isdir(p):
+                    proj_path = Path(p)
+            except Exception:
+                pass
         if proj_path is None:
             proj_path = (
                 Path(str(task["workspace"])) / "project"

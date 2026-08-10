@@ -99,6 +99,7 @@ class OrchestratorV2:
         self._max_offtopic_regenerations = 2
         self._planner_model = None
         self._task_starts: dict[str, float] = {}
+        self._task_simple: dict[str, bool] = {}
         self._task_starts_lock = threading.Lock()
         _cfg = {}
         try:
@@ -996,6 +997,7 @@ class OrchestratorV2:
             "instruction": instruction,
             "task_start_ts": task_start_ts,
             "workspace": str(task_workspace(task_id)),
+            "simple": bool(self._task_simple.get(task_id, False)),
         }, ensure_ascii=False))
 
         # Wait for result
@@ -1762,6 +1764,17 @@ class OrchestratorV2:
                         "report": "Empty plan confirmed"}
             push_progress(self._messaging, task_id, "plan_update", {"steps": steps})
 
+        # 简单任务判定：只含"生成+报告+打包"的直达型任务启用快速路径，
+        # 复杂任务（搜索/数据管道/多轮代码等）保持原逻辑不变。
+        simple = self._is_simple_task(steps)
+        with self._task_starts_lock:
+            self._task_simple[task_id] = simple
+        if simple:
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "info", "agent": "orchestrator",
+                           "message": "Simple task: fast path enabled (skip TDD/review/reflection, early LLM failover)",
+                           "timestamp": self._now_iso()})
+
         # 2..N. 执行 + 自主迭代（执行 → 验收评审 → 追加步骤，直到通过或达到上限）
         all_steps: list[dict] = []
         completed_all: dict = {}
@@ -1787,6 +1800,9 @@ class OrchestratorV2:
             self._publish_full_state(task_id, goal, all_steps, completed_all)
 
             if has_failure or self._max_iterations <= 0 or iteration >= self._max_iterations:
+                break
+            if simple:
+                # 简单任务：一轮执行即交付，由贯通测试守门，不做反射式追加迭代
                 break
             verdict = self._reflect(goal, best_report, task_id)
             if not verdict or verdict.get("accepted"):
@@ -2228,6 +2244,20 @@ class OrchestratorV2:
                     f"原始指令：{ins}"
                 )
         return steps
+
+    @staticmethod
+    def _is_simple_task(steps: list[dict]) -> bool:
+        """判定是否为"简单任务"（启用快速路径）：
+        只含 code_execution / report_generator / package / content_summary，
+        且至多一次代码生成；不含搜索、抓取、数据管道、模型训练等复杂编排。"""
+        caps = [str(s.get("capability", "")) for s in steps]
+        allowed = {"code_execution", "report_generator", "package", "content_summary"}
+        return (
+            bool(caps)
+            and all(c in allowed for c in caps)
+            and caps.count("code_execution") <= 1
+            and "code_execution" in caps
+        )
 
     def _dispatch_step_safe(self, goal: str, step: dict, task_id: str, state: dict) -> dict:
         """派发单步：失败自动重试，重试仍失败则尝试单步重规划。"""
