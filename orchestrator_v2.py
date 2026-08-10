@@ -1181,6 +1181,81 @@ class OrchestratorV2:
         except Exception as exc:
             logger.warning("Workspace cleanup failed for %s: %s", task_id, exc)
 
+    @staticmethod
+    def _supersede_key(name: str) -> str:
+        """归一化交付物名：index_1786354743.html -> index（去掉时间戳后缀）。"""
+        stem = os.path.splitext(os.path.basename(str(name)))[0]
+        m = re.match(r"^(.*)_\d{9,11}$", stem)
+        return m.group(1) if m else stem
+
+    def _prune_superseded_files(
+        self, task_id: str, all_steps: list[dict],
+        completed_all: dict, e2e_results: list[dict],
+    ) -> bool:
+        """同基础名的失败交付物若有已通过的兄弟版本（迭代补洞产生的双份文件），
+        删除失败版（磁盘 + 交付 zip），保证交付包只含可用产物。"""
+        if not e2e_results:
+            return False
+        passed_keys = {
+            self._supersede_key(r["name"])
+            for r in e2e_results if r.get("ok") and r.get("name")
+        }
+        pruned = [
+            r["name"] for r in e2e_results
+            if not r.get("ok") and r.get("name")
+            and self._supersede_key(r["name"]) in passed_keys
+        ]
+        if not pruned:
+            return False
+        import tempfile as _tf
+        project_dir = os.path.abspath(
+            os.path.join(_tf.gettempdir(), "agent_workspace", "project")
+        )
+        removed: list[str] = []
+        for name in pruned:
+            fp = os.path.abspath(os.path.join(project_dir, name))
+            if not fp.startswith(project_dir + os.sep) or not os.path.isfile(fp):
+                continue  # 路径穿越防护 / 文件已不存在
+            try:
+                os.remove(fp)
+                removed.append(name)
+                logger.info("Pruned superseded broken deliverable: %s", name)
+            except Exception as exc:
+                logger.warning("Prune failed for %s: %s", name, exc)
+        if not removed:
+            return False
+        # 同步从最后一个交付 zip 中剔除，保持前端交付列表一致
+        try:
+            zip_path = None
+            for s in all_steps:
+                r = completed_all.get(s["step_id"], {})
+                if s.get("capability") != "package":
+                    continue
+                text = str(r.get("result") or "")
+                m = re.search(r"Download: file://([^\s]+)", text)
+                if m and os.path.exists(m.group(1).strip()):
+                    zip_path = m.group(1).strip()
+            if zip_path:
+                _fd, _tmp = _tf.mkstemp(
+                    suffix=".zip", dir=os.path.dirname(zip_path)
+                )
+                os.close(_fd)
+                import zipfile
+                with zipfile.ZipFile(zip_path) as zin, \
+                        zipfile.ZipFile(_tmp, "w", zipfile.ZIP_DEFLATED) as zout:
+                    for info in zin.infolist():
+                        if info.is_dir() or info.filename in removed:
+                            continue
+                        zout.writestr(info, zin.read(info.filename))
+                os.replace(_tmp, zip_path)
+        except Exception as exc:
+            logger.warning("Delivery zip prune failed: %s", exc)
+        push_progress(self._messaging, task_id, "log",
+                      {"type": "info", "agent": "orchestrator",
+                       "message": f"清理 {len(removed)} 个被新版替换的失败交付物",
+                       "timestamp": self._now_iso()})
+        return True
+
     def _run_e2e_verification(
         self, files: list[dict], project_dir: str,
     ) -> list[dict]:
@@ -1675,18 +1750,6 @@ class OrchestratorV2:
                 f"{r.get('name')}（{r.get('type')}）：{r.get('detail', '')}"
                 for r in e2e_results if not r.get("ok")
             ]
-            # 清理上一轮未通过的交付文件，避免修复后旧坏文件仍被打包
-            import tempfile as _tf
-            _project_dir = os.path.join(_tf.gettempdir(), "agent_workspace", "project")
-            for r in e2e_results:
-                if r.get("ok") or not r.get("name"):
-                    continue
-                _bad = os.path.abspath(os.path.join(_project_dir, r["name"]))
-                if _bad.startswith(os.path.abspath(_project_dir) + os.sep) and os.path.isfile(_bad):
-                    try:
-                        os.remove(_bad)
-                    except Exception:
-                        pass
             push_progress(self._messaging, task_id, "log",
                           {"type": "iteration", "agent": "orchestrator",
                            "message": f"贯通测试失败，进入修复轮 {_repair}/{_max_repair}",
@@ -1704,16 +1767,33 @@ class OrchestratorV2:
             fix_result = self._dispatch_step_safe(goal, repair_step, task_id, {"replan_used": 0})
             completed_all[repair_step["step_id"]] = fix_result
             all_steps.append(repair_step)
-            # 重新打包（让交付文件包含修复产物）并重新验证
-            pkg_step = {
-                "step_id": f"fix-pkg-{_repair}",
-                "capability": "package",
-                "instruction": "将本次任务产出的所有文件打包为一个 ZIP 交付包，并返回下载链接。",
-                "timeout": 120,
-            }
-            pkg_result = self._dispatch_step_safe(goal, pkg_step, task_id, {"replan_used": 0})
-            completed_all[pkg_step["step_id"]] = pkg_result
-            all_steps.append(pkg_step)
+            if fix_result.get("status") == "SUCCESS":
+                # 修复成功后才删除旧的未通过文件，并重新打包（交付包只含可用产物）
+                import tempfile as _tf
+                _project_dir = os.path.join(_tf.gettempdir(), "agent_workspace", "project")
+                for r in e2e_results:
+                    if r.get("ok") or not r.get("name"):
+                        continue
+                    _bad = os.path.abspath(os.path.join(_project_dir, r["name"]))
+                    if _bad.startswith(os.path.abspath(_project_dir) + os.sep) and os.path.isfile(_bad):
+                        try:
+                            os.remove(_bad)
+                        except Exception:
+                            pass
+                pkg_step = {
+                    "step_id": f"fix-pkg-{_repair}",
+                    "capability": "package",
+                    "instruction": "将本次任务产出的所有文件打包为一个 ZIP 交付包，并返回下载链接。",
+                    "timeout": 120,
+                }
+                pkg_result = self._dispatch_step_safe(goal, pkg_step, task_id, {"replan_used": 0})
+                completed_all[pkg_step["step_id"]] = pkg_result
+                all_steps.append(pkg_step)
+            delivery, e2e_results = self._build_delivery_summary(goal, all_steps, completed_all)
+        # 迭代补洞残留清理：同一目标文件可能同时存在旧失败版与带时间戳的新版
+        # （如 index.html 空白 + index_<ts>.html 可玩）。当失败文件存在同基础名
+        # 且已通过的兄弟文件时，把它从磁盘与交付包中移除，保证交付只含可用产物。
+        if self._prune_superseded_files(task_id, all_steps, completed_all, e2e_results):
             delivery, e2e_results = self._build_delivery_summary(goal, all_steps, completed_all)
         detail = best_report or self._finalize(goal, all_steps, [
             completed_all.get(s["step_id"], {}) for s in all_steps

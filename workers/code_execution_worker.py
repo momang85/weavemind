@@ -538,10 +538,11 @@ class CodeExecutionWorker(AsyncWorkerBase):
                 code = candidate
                 break
             if code is None:
-                # 内置模板兜底：游戏类指令直接交付可运行的 HTML 演示，避免因
-                # LLM 空响应（提供商偶发）导致整任务失败。
+                # 内置模板兜底：仅当指令明确要求"愤怒的小鸟"时才用专属模板；
+                # 其他游戏生成失败时如实报错（贯通测试会拦截错误产物），
+                # 避免把错误游戏（如打砖块任务交付愤怒小鸟）当作成功。
                 low = instruction.lower()
-                if any(k in low for k in ("游戏", "angry", "bird", "小鸟", "playable")):
+                if any(k in low for k in ("angry", "bird", "小鸟", "愤怒")):
                     path = self.workspace / "index.html"
                     if path.exists():
                         path = self.workspace / f"index_{int(time.time())}.html"

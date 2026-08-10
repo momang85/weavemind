@@ -11,10 +11,12 @@
 
 import json
 import os
+import shutil
 import tempfile
 import threading
 import time
 import unittest
+import zipfile
 
 from orchestrator_v2 import OrchestratorV2
 
@@ -337,6 +339,127 @@ class TestPlanTopicGuard(unittest.TestCase):
     def test_parse_plan_response_fences_and_loose(self):
         out = self.o._parse_plan_response('```json\n{"steps": [{"a": "b"}]}\n```')
         self.assertEqual(out["steps"][0]["a"], "b")
+
+
+class TestPruneSuperseded(unittest.TestCase):
+    """迭代补洞残留清理：同基础名失败交付物有已通过兄弟文件时移除失败版。"""
+
+    def _make_workspace(self):
+        base = tempfile.mkdtemp(prefix="zhiguang_prune_")
+        project = os.path.join(base, "agent_workspace", "project")
+        os.makedirs(project)
+        bad = os.path.join(project, "index.html")
+        good = os.path.join(project, "index_1786354743.html")
+        with open(bad, "w", encoding="utf-8") as f:
+            f.write("<html><body>blank canvas</body></html>")
+        with open(good, "w", encoding="utf-8") as f:
+            f.write("<html><canvas></canvas><script>ok()</script></html>")
+        return base, project, bad, good
+
+    def _zip_with(self, base, entries):
+        zip_path = os.path.join(base, "delivery.zip")
+        with zipfile.ZipFile(zip_path, "w") as zf:
+            for name, content in entries:
+                if isinstance(content, bytes):
+                    zf.writestr(name, content)
+                else:
+                    zf.writestr(name, content)
+        return zip_path
+
+    def _pkg(self, zip_path):
+        steps = [{"step_id": "pkg", "capability": "package", "instruction": "pack"}]
+        completed = {"pkg": {"task_id": "pkg", "status": "SUCCESS",
+                             "result": f"Download: file://{zip_path}"}}
+        return steps, completed
+
+    def test_prunes_failed_when_superseded_sibling_passes(self):
+        base, project, bad, good = self._make_workspace()
+        old = tempfile.tempdir
+        tempfile.tempdir = base
+        try:
+            with open(bad, encoding="utf-8") as f:
+                bad_content = f.read()
+            with open(good, encoding="utf-8") as f:
+                good_content = f.read()
+            zip_path = self._zip_with(base, [
+                ("index.html", bad_content),
+                ("index_1786354743.html", good_content),
+                ("reports/report.md", "# report"),
+            ])
+            o = make_orch()
+            o._now_iso = lambda: "t"
+            steps, completed = self._pkg(zip_path)
+            e2e = [
+                {"name": "index.html", "type": "html", "ok": False, "detail": "canvas 空白"},
+                {"name": "index_1786354743.html", "type": "html", "ok": True, "detail": "ok"},
+            ]
+            changed = o._prune_superseded_files("t1", steps, completed, e2e)
+            self.assertTrue(changed)
+            self.assertFalse(os.path.exists(bad), "失败旧文件应从磁盘删除")
+            self.assertTrue(os.path.exists(good), "通过的新文件应保留")
+            with zipfile.ZipFile(zip_path) as zf:
+                names = zf.namelist()
+            self.assertNotIn("index.html", names, "失败旧文件应从交付 zip 剔除")
+            self.assertIn("index_1786354743.html", names)
+            self.assertIn("reports/report.md", names)
+            pushed = [m for _, m in o._messaging.published
+                      if m.get("payload", {}).get("message", "").startswith("清理")]
+            self.assertTrue(pushed, "应推送清理进度到前端")
+        finally:
+            tempfile.tempdir = old
+            shutil.rmtree(base, ignore_errors=True)
+
+    def test_keeps_failed_when_no_passing_sibling(self):
+        base, project, bad, _good = self._make_workspace()
+        old = tempfile.tempdir
+        tempfile.tempdir = base
+        try:
+            with open(bad, encoding="utf-8") as f:
+                bad_content = f.read()
+            zip_path = self._zip_with(base, [("index.html", bad_content)])
+            o = make_orch()
+            o._now_iso = lambda: "t"
+            steps, completed = self._pkg(zip_path)
+            e2e = [{"name": "index.html", "type": "html", "ok": False, "detail": "canvas 空白"}]
+            self.assertFalse(o._prune_superseded_files("t1", steps, completed, e2e))
+            self.assertTrue(os.path.exists(bad), "没有通过兄弟文件时不得删除")
+        finally:
+            tempfile.tempdir = old
+            shutil.rmtree(base, ignore_errors=True)
+
+    def test_keeps_failed_with_distinct_stem(self):
+        base, project, bad, good = self._make_workspace()
+        old = tempfile.tempdir
+        tempfile.tempdir = base
+        try:
+            about = os.path.join(project, "about.html")
+            with open(about, "w", encoding="utf-8") as f:
+                f.write("<html>about</html>")
+            with open(bad, encoding="utf-8") as f:
+                bad_content = f.read()
+            with open(good, encoding="utf-8") as f:
+                good_content = f.read()
+            with open(about, encoding="utf-8") as f:
+                about_content = f.read()
+            zip_path = self._zip_with(base, [
+                ("index.html", bad_content),
+                ("index_1786354743.html", good_content),
+                ("about.html", about_content),
+            ])
+            o = make_orch()
+            o._now_iso = lambda: "t"
+            steps, completed = self._pkg(zip_path)
+            # about.html 通过、index 系列全失败：基础名不同，不得误删
+            e2e = [
+                {"name": "index.html", "type": "html", "ok": False, "detail": "空白"},
+                {"name": "index_1786354743.html", "type": "html", "ok": False, "detail": "空白"},
+                {"name": "about.html", "type": "html", "ok": True, "detail": "ok"},
+            ]
+            self.assertFalse(o._prune_superseded_files("t1", steps, completed, e2e))
+            self.assertTrue(os.path.exists(bad))
+        finally:
+            tempfile.tempdir = old
+            shutil.rmtree(base, ignore_errors=True)
 
 
 if __name__ == "__main__":
