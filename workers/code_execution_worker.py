@@ -273,6 +273,17 @@ class CodeExecutionWorker(AsyncWorkerBase):
                 check.unlink()
             except Exception:
                 pass
+            # 清理编译自检产生的 __pycache__ 残留
+            try:
+                pycache = self.workspace / "__pycache__"
+                if pycache.is_dir():
+                    for f in pycache.glob("_check_*.pyc"):
+                        try:
+                            f.unlink()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
     def _html_js_check(self, content: str) -> str:
         """提取内联 JS 用 node --check 校验语法；返回错误文本（空串表示通过/跳过）。"""

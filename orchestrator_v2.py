@@ -157,6 +157,10 @@ class OrchestratorV2:
             host=os.environ.get("REDIS_HOST", "localhost"),
             port=int(os.environ.get("REDIS_PORT", "6379")),
             decode_responses=True,
+            # pubsub 长连接不能有读超时：默认 5s 会导致阻塞读偶发超时重连，
+            # 消息处理被延迟数分钟；连接超时保留 5s 快速失败
+            socket_timeout=None,
+            socket_connect_timeout=5,
         )
 
     @staticmethod
@@ -1154,6 +1158,29 @@ class OrchestratorV2:
         lines.append("> 以下为任务执行过程中的详细内容（设计文档 / 过程记录）。")
         return "\n".join(lines), e2e
 
+    def _cleanup_project_workspace(self, task_id: str) -> None:
+        """任务开始时清空 project 工作区（无并发任务时），
+        避免历史任务的文件堆积、文件名混乱与 __pycache__ 残留进入交付包。"""
+        import shutil
+        import tempfile as _tf
+        with self._task_starts_lock:
+            others = [k for k in self._task_starts if k != task_id]
+        if others:
+            return  # 有并发任务时跳过，避免互相破坏
+        project = os.path.join(_tf.gettempdir(), "agent_workspace", "project")
+        if not os.path.isdir(project):
+            return
+        try:
+            for name in os.listdir(project):
+                fp = os.path.join(project, name)
+                if os.path.isfile(fp) or os.path.islink(fp):
+                    os.remove(fp)
+                elif os.path.isdir(fp):
+                    shutil.rmtree(fp, ignore_errors=True)
+            logger.info("Project workspace cleaned for task %s", task_id)
+        except Exception as exc:
+            logger.warning("Workspace cleanup failed for %s: %s", task_id, exc)
+
     def _run_e2e_verification(
         self, files: list[dict], project_dir: str,
     ) -> list[dict]:
@@ -1521,6 +1548,8 @@ class OrchestratorV2:
         started = time.time()
         with self._task_starts_lock:
             self._task_starts[task_id] = started
+        # 串行任务时清空共享工作区，保证交付包只含本次产物
+        self._cleanup_project_workspace(task_id)
         logger.info("Task %s: %s", task_id, goal[:80])
 
         # 1. Plan（模板步骤直接采用，否则 LLM 规划）
