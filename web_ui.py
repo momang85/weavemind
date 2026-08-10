@@ -472,6 +472,15 @@ def _safe_project_path(rel: str, tid: str | None = None) -> str | None:
         return None
     return p
 
+
+def _safe_workspace_path(rel: str, tid: str) -> str | None:
+    """把相对路径限定在任务工作区根目录（charts/data/reports 等），防路径穿越。"""
+    base = os.path.abspath(str(task_workspace(tid)))
+    p = os.path.abspath(os.path.join(base, rel))
+    if p != base and not p.startswith(base + os.sep):
+        return None
+    return p
+
 def _task_deliverables(tid: str) -> list[dict]:
     """从该任务 package 步骤的 zip 产物列出交付文件（名称/大小/类型）。"""
     def _zip_entries(zip_path: str) -> list[dict]:
@@ -708,6 +717,9 @@ class Handler(BaseHTTPRequestHandler):
                 # 新格式 /files/<task_id>/<rel>；否则回退旧格式 /files/<rel>
                 tid, rel = seg[0], seg[1]
             fp = _safe_project_path(rel, tid)
+            if (not fp or not os.path.isfile(fp)) and tid:
+                # 回退：任务工作区根（charts/data/reports 等，供报告图片链接使用）
+                fp = _safe_workspace_path(rel, tid)
             if not fp or not os.path.isfile(fp):
                 return self._json({"error": "not found"}, 404)
             try:

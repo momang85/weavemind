@@ -108,6 +108,19 @@ class PackagingWorker(AsyncWorkerBase):
                         files.append((p, f"reports/{p.name}"))
                 except OSError:
                     continue
+        # 任务工作区的图表/数据也纳入交付包（charts/、data/ 前缀），成果自包含
+        if task and task.get("workspace"):
+            ws_root = Path(str(task["workspace"]))
+            for sub, glob_pat in (("charts", "*.png"), ("data", "*.csv")):
+                sub_dir = ws_root / sub
+                if not sub_dir.is_dir():
+                    continue
+                for p in sorted(sub_dir.glob(glob_pat)):
+                    try:
+                        if p.stat().st_mtime >= lower_bound:
+                            files.append((p, f"{sub}/{p.name}"))
+                    except OSError:
+                        continue
         return files
 
     def _package(self, proj_path: Path, task: dict) -> str:

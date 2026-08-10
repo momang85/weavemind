@@ -902,6 +902,7 @@ class TestSimpleTaskFastPath(unittest.TestCase):
         self.assertEqual(calls["review"], 0, "简单任务跳过代码审查")
 
     def test_orchestrator_simple_skips_reflection(self):
+        import os
         import tempfile
         import workspace as ws_mod
         from orchestrator_v2 import OrchestratorV2
@@ -934,7 +935,110 @@ class TestSimpleTaskFastPath(unittest.TestCase):
             res = o.run("t-simple-1", "生成一个 HTML 欢迎页", auto_run=True)
             self.assertEqual(res["status"], "SUCCESS")
             self.assertEqual(reflected["n"], 0, "简单任务跳过反射评审")
-            self.assertTrue(o._task_simple.get("t-simple-1"))
+            fast_logs = [
+                m for _, m in o._messaging.published
+                if "fast path enabled" in str(m.get("payload", {}).get("message", ""))
+            ]
+            self.assertTrue(fast_logs, "应推送 fast path 进度消息")
+            self.assertNotIn("t-simple-1", o._task_simple, "任务结束后标志应被清理")
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_report_links_rewritten(self):
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = tempfile.mkdtemp(prefix="weavemind_links_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            ws = str(ws_mod.task_workspace("t-link-1"))
+            report = (
+                f"![heatmap]({ws}\\charts\\heatmap.png)\n\n"
+                f"![散点]({ws}/data/scatter.png)\n\n"
+                f"**成果文件夹**：`{ws}`\n\n"
+                "引用 [报告](https://example.com/a) 不应改动"
+            )
+            out = o._rewrite_report_links(report, "t-link-1")
+            self.assertIn("](/files/t-link-1/charts/heatmap.png)", out)
+            self.assertIn("](/files/t-link-1/data/scatter.png)", out)
+            self.assertIn(f"**成果文件夹**：`{ws}`", out, "正文绝对路径保持不变")
+            self.assertIn("https://example.com/a", out)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_sweep_keeps_only_newest_zip(self):
+        import os
+        import tempfile
+        import time
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = tempfile.mkdtemp(prefix="weavemind_sweep_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            ws = ws_mod.task_workspace("t-sweep-1")
+            ws.mkdir(parents=True, exist_ok=True)
+            for i, name in enumerate(("a.zip", "b.zip", "c.zip")):
+                p = ws / name
+                p.write_text(f"zip-{i}", encoding="utf-8")
+                os.utime(p, (time.time() + i, time.time() + i))
+            o._sweep_workspace_artifacts("t-sweep-1")
+            zips = sorted(p.name for p in ws.glob("*.zip"))
+            self.assertEqual(zips, ["c.zip"], "只保留最新交付包")
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_packaging_includes_charts_and_data(self):
+        import os
+        import tempfile
+        import time
+        from pathlib import Path
+        from workers.packaging_worker import PackagingWorker
+
+        ws = Path(tempfile.mkdtemp(prefix="weavemind_chartpkg_"))
+        (ws / "project").mkdir(parents=True)
+        (ws / "charts").mkdir(parents=True)
+        (ws / "data").mkdir(parents=True)
+        now = time.time()
+        (ws / "project" / "index.html").write_text("<html>hi</html>", encoding="utf-8")
+        (ws / "charts" / "heatmap.png").write_bytes(b"png")
+        (ws / "data" / "x.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+        for p in ws.rglob("*"):
+            if p.is_file():
+                os.utime(p, (now, now))
+        w = PackagingWorker.__new__(PackagingWorker)
+        files = w._fresh_files(ws / "project", {"workspace": str(ws), "task_start_ts": now - 60})
+        names = [rel for _, rel in files]
+        self.assertIn("index.html", names)
+        self.assertIn("charts/heatmap.png", names, "图表应进入交付包")
+        self.assertIn("data/x.csv", names, "数据应进入交付包")
+
+    def test_workspace_path_safe_helper(self):
+        import tempfile
+        import workspace as ws_mod
+        import web_ui
+
+        tmp = tempfile.mkdtemp(prefix="weavemind_wsafe_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            ws = ws_mod.task_workspace("t-safe-1")
+            (ws / "charts").mkdir(parents=True)
+            (ws / "charts" / "a.png").write_bytes(b"x")
+            self.assertIsNotNone(web_ui._safe_workspace_path("charts/a.png", "t-safe-1"))
+            self.assertIsNone(web_ui._safe_workspace_path("../escape.txt", "t-safe-1"))
+            self.assertIsNone(web_ui._safe_workspace_path("..\\escape.txt", "t-safe-1"))
         finally:
             ws_mod.WORKSPACE_ROOT = old_root
             import shutil

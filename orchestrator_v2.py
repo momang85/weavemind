@@ -1280,7 +1280,8 @@ class OrchestratorV2:
         return True
 
     def _sweep_workspace_artifacts(self, task_id: str) -> None:
-        """收尾清扫：删除 __pycache__ 目录与临时校验/测试文件，让成果文件夹干净可移动。"""
+        """收尾清扫：删除 __pycache__ 与临时校验文件，只保留最新交付包，
+        让成果文件夹干净可移动。"""
         import shutil
         ws = task_workspace(task_id)
         try:
@@ -1296,8 +1297,33 @@ class OrchestratorV2:
                         p.unlink(missing_ok=True)
                 except Exception:
                     continue
+            # 多轮迭代会产生多个 zip（每轮打包一次）：只保留最新一份
+            zips = sorted(
+                (p for p in ws.glob("*.zip") if p.is_file()),
+                key=lambda p: p.stat().st_mtime,
+            )
+            for z in zips[:-1]:
+                try:
+                    z.unlink(missing_ok=True)
+                except Exception:
+                    continue
         except Exception as exc:
             logger.warning("Workspace sweep failed for %s: %s", task_id, exc)
+
+    @staticmethod
+    def _rewrite_report_links(report: str, task_id: str) -> str:
+        """把报告 Markdown 链接目标里的任务工作区绝对路径改写成
+        /files/<task_id>/ URL（图表/数据图片在浏览器里才能显示）；
+        正文里的绝对路径（如"成果文件夹"）保持不变。"""
+        ws = str(task_workspace(task_id))
+        ws_bs = ws.replace("/", "\\")
+        seg = f"/files/{task_id}"
+
+        def _fix_target(m):
+            t = m.group(2).replace(ws_bs, seg).replace(ws, seg).replace("\\", "/")
+            return m.group(1) + t + m.group(3)
+
+        return re.sub(r"(\]\()([^)\s]+)(\))", _fix_target, report)
 
     def _run_e2e_verification(
         self, files: list[dict], project_dir: str, game_goal: bool = True,
@@ -1893,6 +1919,8 @@ class OrchestratorV2:
             completed_all.get(s["step_id"], {}) for s in all_steps
         ])
         report = delivery + "\n\n---\n\n" + detail
+        # 报告内任务工作区绝对路径 → 前端可访问 URL（图表/数据图片链接可显示）
+        report = self._rewrite_report_links(report, task_id)
         # 贯通测试守门：修复后仍全部未通过 → 如实标记失败
         if e2e_results and not any(r.get("ok") for r in e2e_results):
             has_failure = True
@@ -1928,6 +1956,8 @@ class OrchestratorV2:
                        "summary": f"{overall}: {ok_count}/{len(all_steps)} steps, {iteration} iterations",
                        "report": report})
 
+        # 快速路径标志仅任务运行期间需要，用完即清，避免字典无限增长
+        self._task_simple.pop(task_id, None)
         return {
             "task_id": task_id,
             "status": overall,
