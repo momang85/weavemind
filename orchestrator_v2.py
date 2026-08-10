@@ -179,6 +179,13 @@ class OrchestratorV2:
     # ── Plan ──
     def _plan(self, goal: str, task_id: str, context: str = "") -> list[dict]:
         """Ask LLM to decompose goal into steps."""
+        direct = self._direct_deliverable_plan(goal)
+        if direct:
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "plan", "agent": "orchestrator",
+                           "message": "Plan: deterministic direct-delivery template (LLM planning skipped)",
+                           "timestamp": self._now_iso()})
+            return self._normalize_steps(direct)
         push_progress(self._messaging, task_id, "log",
                       {"type": "plan", "agent": "orchestrator", "message": f"Planning: {goal[:60]}", "timestamp": self._now_iso()})
         if context:
@@ -287,6 +294,54 @@ class OrchestratorV2:
                       {"type": "plan", "agent": "orchestrator",
                        "message": f"Plan ready: {len(steps)} steps", "timestamp": self._now_iso()})
         return steps
+
+    def _direct_deliverable_plan(self, goal: str) -> list[dict] | None:
+        """明确产物型任务：跳过 LLM 规划，用确定性模板（生成→报告→打包），
+        消除规划漂移并减少延迟。需要外部信息（调研/数据/分析）的任务不走此路径。"""
+        g = goal.lower()
+        deliver_markers = (
+            "游戏", "脚本", "工具", "单文件", "html", ".py", "页面",
+            "小应用", "贪吃蛇", "愤怒的小鸟", "计算器", "待办", "打砖块",
+            "俄罗斯方块",
+        )
+        research_markers = (
+            "调研", "市场", "分析", "数据", "roi", "对比", "现状",
+            "预测", "方案", "报告", "趋势", "评估",
+        )
+        if any(m in g for m in deliver_markers) and not any(m in g for m in research_markers):
+            return [
+                {
+                    "step_id": "1",
+                    "capability": "code_execution",
+                    "instruction": (
+                        f"根据目标生成完整可运行的自包含交付物（单文件 HTML 或 Python 脚本），"
+                        f"确保能直接在浏览器/命令行运行并验证通过：{goal[:500]}"
+                    ),
+                    "timeout": 300,
+                    "depends_on": [],
+                },
+                {
+                    "step_id": "2",
+                    "capability": "report_generator",
+                    "instruction": (
+                        f"汇总交付结果，生成面向用户的最终交付报告（Markdown，"
+                        f"包含功能清单与运行方式）：{goal[:300]}"
+                    ),
+                    "timeout": 120,
+                    "depends_on": ["1"],
+                },
+                {
+                    "step_id": "3",
+                    "capability": "package",
+                    "instruction": (
+                        "将本次任务产出的所有文件打包为一个 ZIP 交付包"
+                        "（包含代码、资源、报告等），并返回下载链接。"
+                    ),
+                    "timeout": 120,
+                    "depends_on": ["1", "2"],
+                },
+            ]
+        return None
 
     def _ensure_report_step(self, steps: list[dict], task_id: str) -> list[dict]:
         """规划自检：计划中缺少报告/总结步骤时，自动补一步 report_generator（报告兜底）。"""
@@ -905,8 +960,7 @@ class OrchestratorV2:
                 text = str(r.get("result") or "")
                 m = re.search(r"Download: file://([^\s]+)", text)
                 if m and os.path.exists(m.group(1).strip()):
-                    zip_path = m.group(1).strip()
-                    break
+                    zip_path = m.group(1).strip()  # 取最后一个（修复轮的最终交付包）
         if zip_path:
             try:
                 with zipfile.ZipFile(zip_path) as zf:
@@ -1050,6 +1104,9 @@ class OrchestratorV2:
             if "<script" not in content.lower():
                 ok = False
                 notes.append("无 <script>（页面没有交互逻辑）")
+            if content.lower().count("<script") != content.lower().count("</script>"):
+                ok = False
+                notes.append("<script>/</script> 标签不配平（JS 不会执行）")
             scripts = re.findall(r"<script[^>]*>(.*?)</script>", content, re.S)
             if js_checker and scripts:
                 tmp_js = ""
@@ -1453,16 +1510,65 @@ class OrchestratorV2:
             push_progress(self._messaging, task_id, "plan_update", {"steps": steps})
 
         delivery, e2e_results = self._build_delivery_summary(goal, all_steps, completed_all)
+        # 任务级失败修复循环：交付物全部未通过可运行性验证时，带失败原因自动重做（最多 2 轮）
+        _max_repair = 2
+        _repair = 0
+        while e2e_results and not any(r.get("ok") for r in e2e_results) and _repair < _max_repair:
+            _repair += 1
+            failures = [
+                f"{r.get('name')}（{r.get('type')}）：{r.get('detail', '')}"
+                for r in e2e_results if not r.get("ok")
+            ]
+            # 清理上一轮未通过的交付文件，避免修复后旧坏文件仍被打包
+            import tempfile as _tf
+            _project_dir = os.path.join(_tf.gettempdir(), "agent_workspace", "project")
+            for r in e2e_results:
+                if r.get("ok") or not r.get("name"):
+                    continue
+                _bad = os.path.abspath(os.path.join(_project_dir, r["name"]))
+                if _bad.startswith(os.path.abspath(_project_dir) + os.sep) and os.path.isfile(_bad):
+                    try:
+                        os.remove(_bad)
+                    except Exception:
+                        pass
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "iteration", "agent": "orchestrator",
+                           "message": f"贯通测试失败，进入修复轮 {_repair}/{_max_repair}",
+                           "timestamp": self._now_iso()})
+            repair_step = {
+                "step_id": f"fix-{_repair}",
+                "capability": "code_execution",
+                "instruction": (
+                    f"任务目标：{goal[:300]}\n\n"
+                    "以下交付物未通过可运行性验证，请针对失败原因修复并重新生成完整文件"
+                    "（保持单文件、自包含、可直接运行）：\n" + "\n".join(failures)
+                ),
+                "timeout": 300,
+            }
+            fix_result = self._dispatch_step_safe(goal, repair_step, task_id, {"replan_used": 0})
+            completed_all[repair_step["step_id"]] = fix_result
+            all_steps.append(repair_step)
+            # 重新打包（让交付文件包含修复产物）并重新验证
+            pkg_step = {
+                "step_id": f"fix-pkg-{_repair}",
+                "capability": "package",
+                "instruction": "将本次任务产出的所有文件打包为一个 ZIP 交付包，并返回下载链接。",
+                "timeout": 120,
+            }
+            pkg_result = self._dispatch_step_safe(goal, pkg_step, task_id, {"replan_used": 0})
+            completed_all[pkg_step["step_id"]] = pkg_result
+            all_steps.append(pkg_step)
+            delivery, e2e_results = self._build_delivery_summary(goal, all_steps, completed_all)
         detail = best_report or self._finalize(goal, all_steps, [
             completed_all.get(s["step_id"], {}) for s in all_steps
         ])
         report = delivery + "\n\n---\n\n" + detail
-        # 贯通测试守门：有交付物但全部未通过可玩/可运行验证 → 如实标记失败
+        # 贯通测试守门：修复后仍全部未通过 → 如实标记失败
         if e2e_results and not any(r.get("ok") for r in e2e_results):
             has_failure = True
             push_progress(self._messaging, task_id, "log",
                           {"type": "error", "agent": "orchestrator",
-                           "message": "贯通测试：全部交付物未通过可运行性验证，任务标记为失败",
+                           "message": "贯通测试：修复后仍全部未通过可运行性验证，任务标记为失败",
                            "timestamp": self._now_iso()})
 
         # 3. Report

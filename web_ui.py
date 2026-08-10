@@ -508,8 +508,7 @@ def _task_deliverables(tid: str) -> list[dict]:
         if m:
             zp = m.group(1).strip()
             if os.path.exists(zp):
-                zip_path = zp
-                break
+                zip_path = zp  # 取最后一个（修复轮的最终交付包）
     if zip_path:
         files = _zip_entries(zip_path)
     if not files:

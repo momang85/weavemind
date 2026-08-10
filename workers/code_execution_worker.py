@@ -274,6 +274,39 @@ class CodeExecutionWorker(AsyncWorkerBase):
             except Exception:
                 pass
 
+    def _html_js_check(self, content: str) -> str:
+        """提取内联 JS 用 node --check 校验语法；返回错误文本（空串表示通过/跳过）。"""
+        import subprocess
+        import tempfile
+        try:
+            p = subprocess.run(["node", "--version"], capture_output=True, timeout=10)
+            if p.returncode != 0:
+                return ""
+        except Exception:
+            return ""
+        scripts = re.findall(r"<script[^>]*>(.*?)</script>", content, re.S)
+        if not scripts:
+            return ""
+        tmp = ""
+        try:
+            with tempfile.NamedTemporaryFile(
+                "w", suffix=".js", delete=False, encoding="utf-8",
+            ) as tf:
+                tf.write("\n".join(scripts))
+                tmp = tf.name
+            p = subprocess.run(["node", "--check", tmp], capture_output=True, timeout=15)
+            if p.returncode == 0:
+                return ""
+            return (p.stderr or p.stdout or b"").decode("utf-8", errors="replace")[:800]
+        except Exception as exc:
+            return f"JS 校验异常: {exc}"
+        finally:
+            try:
+                if tmp:
+                    os.unlink(tmp)
+            except Exception:
+                pass
+
     async def _run_smoke(self, candidate: str) -> str:
         """小步快跑：运行候选代码做冒烟验证；
         返回错误文本（空串表示通过）。"""
@@ -416,7 +449,31 @@ class CodeExecutionWorker(AsyncWorkerBase):
                 if html_mode:
                     # 提取 LLM 可能包在 Python 写入脚本里的 HTML
                     extracted = self._extract_embedded_html(candidate)
-                    code = extracted if extracted else candidate
+                    candidate = extracted if extracted else candidate
+                    # HTML 结构自检：标签必须闭合，否则浏览器不执行 JS（canvas 空白）
+                    missing = []
+                    low = candidate.lower()
+                    if "<script" in low and "</script>" not in low:
+                        missing.append("</script>")
+                    if "</html>" not in low:
+                        missing.append("</html>")
+                    if missing:
+                        feedback = (
+                            "生成的 HTML 缺少闭合标签：" + "、".join(missing)
+                            + "，请补全后重新输出完整 HTML（保持单文件、内联 JS）。"
+                        )
+                        logger.info("Round %d: HTML incomplete (%s), regenerating",
+                                    _round + 1, ",".join(missing))
+                        continue
+                    # HTML 内联 JS 语法校验（node --check）：语法错 → 带错误重生成
+                    js_err = self._html_js_check(candidate)
+                    if js_err:
+                        feedback = (
+                            "HTML 内联 JS 存在语法错误，请修复后重新输出完整 HTML：\n" + js_err
+                        )
+                        logger.info("Round %d: JS syntax error, regenerating", _round + 1)
+                        continue
+                    code = candidate
                     break
                 if candidate.lstrip().lower().startswith(("<html", "<!doctype")):
                     code = candidate
