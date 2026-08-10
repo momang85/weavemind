@@ -19,6 +19,21 @@ from workspace import (
 
 from common import AgentRegistry, MessagingClient, RedisAgentRegistry
 from llm_client import LLMClient, get_usage_stats
+
+# 贯通测试用：canvas 像素指纹（采样哈希），用于判断游戏画面是否仍在变化
+_FINGERPRINT_JS = """() => {
+    const cv = document.querySelector('canvas');
+    if (!cv || !cv.width || !cv.height) return 'no-canvas';
+    try {
+        const ctx = cv.getContext('2d');
+        const img = ctx.getImageData(0, 0, cv.width, cv.height).data;
+        let h = 7;
+        for (let i = 0; i < img.length; i += 977) {
+            h = ((h << 5) - h + img[i] * 3 + (img[i + 1] || 0) * 5 + (img[i + 2] || 0) * 7) | 0;
+        }
+        return 'h' + h;
+    } catch (e) { return 'err'; }
+}"""
 from memory_manager import MemoryManager
 from ws_helpers import push_progress
 
@@ -833,6 +848,9 @@ class OrchestratorV2:
             "No code generated", "Empty content", "代码生成失败",
             "SyntaxError", "ModuleNotFoundError", "Script exited with code",
             "Traceback", "No module named",
+            # 生成-验证-审查循环耗尽（如 HTML 反复截断）也必须回到代码生成，
+            # 不得被降级成 content_summary 之类只产出文本的步骤
+            "No valid code", "generation/verify/review", "HTML incomplete",
         )
         if (
             failed_cap in ("web_search", "web_fetch")
@@ -1541,10 +1559,20 @@ class OrchestratorV2:
                 browser = p.chromium.launch(headless=True)
                 page = browser.new_page(viewport={"width": 960, "height": 640})
                 js_errors: list[str] = []
+                game_over_seen = {"v": False}
+                page.on("dialog", lambda d: (game_over_seen.__setitem__("v", True), d.dismiss()))
                 page.on("pageerror", lambda e: js_errors.append(str(e)))
                 page.on("console", lambda m: js_errors.append(m.text) if m.type == "error" else None)
                 page.goto(url, timeout=15000)
                 page.wait_for_timeout(800)
+                # 编码检查：页面必须是 UTF-8（否则中文界面/得分会显示为乱码）
+                try:
+                    enc = str(page.evaluate("document.characterSet") or "")
+                except Exception:
+                    enc = ""
+                if enc and "utf-8" not in enc.lower():
+                    browser.close()
+                    return False, f"页面编码 {enc} 非 UTF-8（中文会显示为乱码）", shot
                 if not require_game:
                     # 普通页面：不要求 canvas，只需内容可见、无 JS 错误
                     visible = page.evaluate(
@@ -1620,6 +1648,39 @@ class OrchestratorV2:
                     page.screenshot(path=shot)
                 except Exception:
                     pass
+                # 撞墙重启验证：持续朝一个方向走直到出界/失败，随后尝试
+                # 换方向键、Enter/Space、点击画布，确认游戏循环仍在运行。
+                # "第一次撞墙就永久卡死"的伪可玩游戏在这里被拦下。
+                for _ in range(45):
+                    page.keyboard.press("ArrowUp")
+                    page.wait_for_timeout(130)
+                restart_ok = False
+                if game_over_seen["v"]:
+                    # 出现游戏结束弹窗才算"撞墙失败"；无该机制的拖拽型游戏
+                    # （弹弓类，结束后画面静止属正常）自动跳过此项断言
+                    for _ in range(2):
+                        fp_wall = page.evaluate(_FINGERPRINT_JS)
+                        page.keyboard.press("ArrowRight")
+                        page.wait_for_timeout(700)
+                        if page.evaluate(_FINGERPRINT_JS) != fp_wall:
+                            restart_ok = True
+                            break
+                        for extra in ("Enter", "Space"):
+                            page.keyboard.press(extra)
+                            page.wait_for_timeout(400)
+                            if page.evaluate(_FINGERPRINT_JS) != fp_wall:
+                                restart_ok = True
+                                break
+                        if restart_ok:
+                            break
+                        page.mouse.click(cx, cy)
+                        page.wait_for_timeout(400)
+                        if page.evaluate(_FINGERPRINT_JS) != fp_wall:
+                            restart_ok = True
+                            break
+                    if not restart_ok:
+                        browser.close()
+                        return False, "撞墙/失败后游戏未重启（游戏循环卡死，不可玩）", shot
                 browser.close()
             if js_errors:
                 return False, "JS 错误: " + " | ".join(js_errors[:2]), shot
@@ -1713,6 +1774,26 @@ class OrchestratorV2:
                 logger.info("Final report: deliverable from step content (%d chars)", len(best))
                 return best
         return ""
+
+    @staticmethod
+    def _delivery_has_code_files(all_steps: list[dict], completed_all: dict) -> bool:
+        """检查最终交付包里是否有可运行的代码文件（HTML/PY/JS）。"""
+        import zipfile
+        for s in all_steps:
+            if s.get("capability") != "package":
+                continue
+            text = str(completed_all.get(s["step_id"], {}).get("result") or "")
+            m = re.search(r"Download: file://([^\s]+)", text)
+            if not m or not os.path.exists(m.group(1).strip()):
+                continue
+            try:
+                with zipfile.ZipFile(m.group(1).strip()) as zf:
+                    for info in zf.infolist():
+                        if info.filename.endswith((".html", ".py", ".js")):
+                            return True
+            except Exception:
+                continue
+        return False
 
     # ── Main Loop ──
     def run(self, task_id: str, goal: str, context: str = "",
@@ -1860,6 +1941,17 @@ class OrchestratorV2:
             push_progress(self._messaging, task_id, "plan_update", {"steps": steps})
 
         delivery, e2e_results = self._build_delivery_summary(task_id, goal, all_steps, completed_all)
+        # 代码交付守门：任务要求生成代码，但最终交付包没有 HTML/PY/JS 文件
+        # （例如步骤被降级成文本摘要）→ 视为贯通测试失败，进入修复轮；
+        # 修复仍无代码交付物时任务如实标记失败，避免"只剩报告"的假成功。
+        has_code_steps = any(
+            s.get("capability") == "code_execution" for s in all_steps
+        )
+        if has_code_steps and not self._delivery_has_code_files(all_steps, completed_all):
+            e2e_results = [{
+                "name": "(无代码交付物)", "type": "file", "ok": False,
+                "detail": "任务要求生成代码，但交付包中没有 HTML/PY/JS 文件",
+            }]
         # 任务级失败修复循环：交付物全部未通过可运行性验证时，带失败原因自动重做（最多 2 轮）
         _max_repair = 2
         _repair = 0

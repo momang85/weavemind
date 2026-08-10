@@ -148,7 +148,7 @@ class CodeExecutionWorker(AsyncWorkerBase):
     async def _generate_code(
         self, instruction: str, env_note: str, html_mode: bool,
         compile_err: str, minimal: bool, test_context: str = "",
-        max_attempts: int = 3,
+        max_attempts: int = 3, max_tokens: int = 2000,
     ) -> str:
         """调 LLM 生成代码；compile_err 非空时携带语法错误反馈要求修复。"""
         feedback = (
@@ -189,7 +189,10 @@ class CodeExecutionWorker(AsyncWorkerBase):
                 "直接可保存并在浏览器打开）：\n"
                 f"{instruction}\n{env_note}{ws_note}\n只输出原始 HTML，不要用 Python 包装。{feedback}"
             )
-        return await self._call_llm(system=system, prompt=prompt, max_attempts=max_attempts)
+        return await self._call_llm(
+            system=system, prompt=prompt,
+            max_attempts=max_attempts, max_tokens=max_tokens,
+        )
 
     @staticmethod
     def _html_intent(instruction: str) -> bool:
@@ -224,6 +227,23 @@ class CodeExecutionWorker(AsyncWorkerBase):
         if m2 and ("<!doctype html" in m2.group(2).lower() or "<html" in m2.group(2).lower()):
             return m2.group(2).strip()
         return None
+
+    @staticmethod
+    def _ensure_charset_meta(html: str) -> str:
+        """确定性补丁：HTML 交付物必须声明 UTF-8，否则中文界面在浏览器里会乱码。"""
+        if not html or ("<meta" in html.lower() and "charset" in html.lower()):
+            return html
+        meta = '<meta charset="utf-8">'
+        m = re.search(r"<head[^>]*>", html, re.I)
+        if m:
+            return html[:m.end()] + "\n    " + meta + html[m.end():]
+        m = re.match(r"<!doctype[^>]*>", html, re.I)
+        if m:
+            return html[:m.end()] + "\n" + meta + html[m.end():]
+        m = re.match(r"<html[^>]*>", html, re.I)
+        if m:
+            return html[:m.end()] + "\n" + meta + html[m.end():]
+        return meta + "\n" + html
 
     def _workspace_snapshot(self, max_files: int = 5, max_chars: int = 700) -> str:
         """列出工作区已有文件及内容片段，让 LLM 知道"自己在做什么、已有什么"。"""
@@ -455,6 +475,8 @@ class CodeExecutionWorker(AsyncWorkerBase):
             feedback = ""
             # 简单任务：主端点连试 2 次即切备用，减少慢端点无效等待
             llm_attempts = 2 if simple else 3
+            # HTML 单文件游戏/页面常超 2000 token，提高上限避免响应被截断
+            llm_tokens = 4000 if html_mode else 2000
             # 小步快跑：生成 → 编译 → 冒烟运行 → 代码审查 → 带反馈修复（最多 3 轮）
             for _round in range(3):
                 llm_response = ""
@@ -465,6 +487,7 @@ class CodeExecutionWorker(AsyncWorkerBase):
                             feedback, minimal=(_gen == 1),
                             test_context=(test_code if use_tdd else ""),
                             max_attempts=llm_attempts,
+                            max_tokens=llm_tokens,
                         )
                     except Exception:
                         llm_response = ""
@@ -598,6 +621,9 @@ class CodeExecutionWorker(AsyncWorkerBase):
             looks_py = code.lstrip().startswith(("import ", "from ", "print(", "#!", "with open", "def "))
             if path.suffix.lower() == ".html" and looks_py:
                 path = path.with_suffix(".py")
+            if path.suffix.lower() == ".html":
+                # 确定性补丁：补 <meta charset="utf-8">，杜绝中文乱码
+                code = self._ensure_charset_meta(code)
             path.write_text(code, encoding="utf-8")
 
             if path.suffix.lower() == ".html":

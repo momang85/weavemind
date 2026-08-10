@@ -88,6 +88,22 @@ class TestFileIoWorker(unittest.TestCase):
 
 
 class TestCodeExecutionNaming(unittest.TestCase):
+    def test_charset_meta_injected_once(self):
+        from workers.code_execution_worker import CodeExecutionWorker
+
+        with_head = "<!DOCTYPE html><html><head><title>t</title></head><body>x</body></html>"
+        out = CodeExecutionWorker._ensure_charset_meta(with_head)
+        self.assertIn('<meta charset="utf-8">', out)
+        self.assertLess(out.index('<meta charset="utf-8">'), out.index("<title>"))
+        # 已有 charset 不再重复注入
+        has_meta = '<!DOCTYPE html><html><head><meta charset="gbk"></head></html>'
+        self.assertEqual(CodeExecutionWorker._ensure_charset_meta(has_meta), has_meta)
+        # 无 head 时插到 doctype 之后
+        no_head = "<!DOCTYPE html><html><body>x</body></html>"
+        out2 = CodeExecutionWorker._ensure_charset_meta(no_head)
+        self.assertIn('<meta charset="utf-8">', out2)
+        self.assertLess(out2.index("<!DOCTYPE"), out2.index('<meta charset="utf-8">'))
+
     def test_write_marker_uses_target_name(self):
         from workers.code_execution_worker import CodeExecutionWorker
 
@@ -263,6 +279,27 @@ class TestSearchFailureFallback(unittest.TestCase):
         )
         self.assertIsNotNone(alt)
         self.assertEqual(alt["capability"], "code_execution")
+
+    def test_replan_generation_exhausted_stays_code(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        class _FakeMsg:
+            def publish(self, *a, **k):
+                pass
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._messaging = _FakeMsg()
+        alt = o._replan_step(
+            "做一个贪吃蛇游戏",
+            {"step_id": "3", "capability": "code_execution",
+             "instruction": "实现游戏并生成 index.html"},
+            "No valid code after generation/verify/review loop",
+            "test-task",
+        )
+        # 代码生成循环耗尽必须回到代码生成，不得降级成文本摘要步骤
+        self.assertIsNotNone(alt)
+        self.assertEqual(alt["capability"], "code_execution")
+        self.assertIn("index.html", alt["instruction"])
 
     def test_generation_fallback_html_keeps_html(self):
         from orchestrator_v2 import OrchestratorV2
@@ -660,7 +697,8 @@ class TestE2EGoalTyping(unittest.TestCase):
         try:
             fp = os.path.join(d, "welcome.html")
             Path(fp).write_text(
-                "<!DOCTYPE html><html><body><h1>Hello</h1><p>内容</p></body></html>",
+                "<!DOCTYPE html><html><head><meta charset=\"utf-8\"></head>"
+                "<body><h1>Hello</h1><p>内容</p></body></html>",
                 encoding="utf-8",
             )
             ok, detail, _shot = o._playwright_verify(d, "welcome.html", fp, require_game=False)
@@ -671,6 +709,73 @@ class TestE2EGoalTyping(unittest.TestCase):
         finally:
             import shutil
             shutil.rmtree(d, ignore_errors=True)
+
+    def test_non_utf8_page_rejected(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        d = tempfile.mkdtemp(prefix="weavemind_e2e_")
+        try:
+            fp = os.path.join(d, "no_charset.html")
+            Path(fp).write_text(
+                "<!DOCTYPE html><html><body><h1>中文标题</h1></body></html>",
+                encoding="utf-8",
+            )
+            ok, detail, _ = o._playwright_verify(d, "no_charset.html", fp, require_game=False)
+            self.assertFalse(ok, detail)
+            self.assertIn("UTF-8", detail)
+        finally:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+
+    def test_game_that_freezes_on_game_over_rejected(self):
+        import os
+        import tempfile
+        from pathlib import Path
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        d = tempfile.mkdtemp(prefix="weavemind_e2e_")
+        broken = """<!DOCTYPE html><html><head><meta charset="utf-8"></head>
+<body><canvas id="c" width="400" height="400"></canvas><script>
+const cv=document.getElementById('c'),ctx=cv.getContext('2d');
+let x=10,y=10,dx=0,dy=0;
+document.addEventListener('keydown',e=>{
+  if(e.key==='ArrowUp'){dx=0;dy=-1;}
+  if(e.key==='ArrowRight'){dx=1;dy=0;}
+});
+function loop(){
+  x+=dx;y+=dy;
+  ctx.fillStyle='#fff';ctx.fillRect(0,0,400,400);
+  ctx.fillStyle='#0a0';ctx.fillRect(x*20,y*20,18,18);
+  if(y<0||y>19||x<0||x>19){ alert('over'); reset(); return; }
+  setTimeout(loop,100);
+}
+function reset(){x=10;y=10;dx=0;dy=0;}
+loop();
+</script></body></html>"""
+        fp = os.path.join(d, "broken.html")
+        Path(fp).write_text(broken, encoding="utf-8")
+        ok, detail, _ = o._playwright_verify(d, "broken.html", fp, require_game=True)
+        self.assertFalse(ok, detail)
+        self.assertIn("未重启", detail)
+
+        working = broken.replace(
+            "if(y<0||y>19||x<0||x>19){ alert('over'); reset(); return; }",
+            "if(y<0||y>19||x<0||x>19){ alert('over'); reset(); }",
+        )
+        fp2 = os.path.join(d, "working.html")
+        Path(fp2).write_text(working, encoding="utf-8")
+        ok2, detail2, _ = o._playwright_verify(d, "working.html", fp2, require_game=True)
+        self.assertTrue(ok2, detail2)
+        try:
+            import shutil
+            shutil.rmtree(d, ignore_errors=True)
+        except Exception:
+            pass
 
 
 class TestPackageTaskIsolation(unittest.TestCase):
@@ -878,8 +983,9 @@ class TestSimpleTaskFastPath(unittest.TestCase):
         w.workspace = ws
         calls = {"tdd": 0, "review": 0}
 
-        async def fake_llm(system="", prompt="", instruction="", max_attempts=3):
+        async def fake_llm(system="", prompt="", instruction="", max_attempts=3, max_tokens=2000):
             self.assertEqual(max_attempts, 2, "简单任务应减少主端点尝试次数")
+            self.assertEqual(max_tokens, 2000)
             return "print('hello from simple task')"
 
         async def fake_tdd(*a, **k):
@@ -904,6 +1010,7 @@ class TestSimpleTaskFastPath(unittest.TestCase):
     def test_orchestrator_simple_skips_reflection(self):
         import os
         import tempfile
+        import zipfile
         import workspace as ws_mod
         from orchestrator_v2 import OrchestratorV2
         from test_orchestrator_v2 import make_orch
@@ -911,6 +1018,8 @@ class TestSimpleTaskFastPath(unittest.TestCase):
         tmp = tempfile.mkdtemp(prefix="weavemind_reflect_")
         old_root = ws_mod.WORKSPACE_ROOT
         ws_mod.configure_workspace_root(tmp)
+        html = ('<!DOCTYPE html><html><head><meta charset="utf-8"></head>'
+                "<body><h1>hi</h1></body></html>")
         o = make_orch()
         o._plan = lambda goal, task_id, context="": [
             {"step_id": "1", "capability": "code_execution", "instruction": "x", "timeout": 120},
@@ -927,7 +1036,22 @@ class TestSimpleTaskFastPath(unittest.TestCase):
         o._reflect = fake_reflect
 
         def fake_execute(steps, task_id, goal):
-            return [{"task_id": s["step_id"], "status": "SUCCESS", "result": f"ok-{s['step_id']}"} for s in steps], False
+            # 模拟真实落盘：code 步骤写文件、package 步骤打包（run() 开头会清空工作区，
+            # 所以文件必须在执行阶段创建）
+            proj = ws_mod.task_project_dir("t-simple-1")
+            (proj / "index.html").write_text(html, encoding="utf-8")
+            zip_path = os.path.join(tmp, "deliverables.zip")
+            with zipfile.ZipFile(zip_path, "w") as zf:
+                zf.writestr("index.html", html)
+            out = []
+            for s in steps:
+                if s.get("capability") == "package":
+                    out.append({"task_id": s["step_id"], "status": "SUCCESS",
+                                "result": f"[PACKAGED]\nDownload: file://{zip_path}"})
+                else:
+                    out.append({"task_id": s["step_id"], "status": "SUCCESS",
+                                "result": f"ok-{s['step_id']}"})
+            return out, False
 
         o._execute_steps = fake_execute
         o._now_iso = lambda: "t"
@@ -1041,6 +1165,33 @@ class TestSimpleTaskFastPath(unittest.TestCase):
             self.assertIsNone(web_ui._safe_workspace_path("..\\escape.txt", "t-safe-1"))
         finally:
             ws_mod.WORKSPACE_ROOT = old_root
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_delivery_must_contain_code_files(self):
+        import os
+        import tempfile
+        import zipfile
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = tempfile.mkdtemp(prefix="weavemind_dlv_")
+        try:
+            # 只有报告 → 判定为无代码交付物
+            z1 = os.path.join(tmp, "only_report.zip")
+            with zipfile.ZipFile(z1, "w") as zf:
+                zf.writestr("reports/report.md", "# 报告")
+            steps = [{"step_id": "p", "capability": "package", "instruction": "x"}]
+            done = {"p": {"status": "SUCCESS", "result": f"Download: file://{z1}"}}
+            self.assertFalse(o._delivery_has_code_files(steps, done))
+            # 含 index.html → 有代码交付物
+            z2 = os.path.join(tmp, "with_html.zip")
+            with zipfile.ZipFile(z2, "w") as zf:
+                zf.writestr("index.html", "<html></html>")
+                zf.writestr("reports/report.md", "# 报告")
+            done2 = {"p": {"status": "SUCCESS", "result": f"Download: file://{z2}"}}
+            self.assertTrue(o._delivery_has_code_files(steps, done2))
+        finally:
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
 
