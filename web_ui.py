@@ -467,7 +467,10 @@ def _safe_project_path(rel: str, tid: str | None = None) -> str | None:
     base = os.path.abspath(
         str((task_workspace(tid) / "project") if tid else PROJECT_DIR)
     )
-    p = os.path.abspath(os.path.join(base, rel))
+    # 反斜杠统一为正斜杠：Windows 上防 "..\\" 穿越，Linux/macOS 上反斜杠
+    # 是合法文件名字符，不归一化会绕过逃逸检测
+    normalized = str(rel).replace("\\", "/")
+    p = os.path.abspath(os.path.join(base, normalized))
     if p != base and not p.startswith(base + os.sep):
         return None
     return p
@@ -476,7 +479,8 @@ def _safe_project_path(rel: str, tid: str | None = None) -> str | None:
 def _safe_workspace_path(rel: str, tid: str) -> str | None:
     """把相对路径限定在任务工作区根目录（charts/data/reports 等），防路径穿越。"""
     base = os.path.abspath(str(task_workspace(tid)))
-    p = os.path.abspath(os.path.join(base, rel))
+    normalized = str(rel).replace("\\", "/")
+    p = os.path.abspath(os.path.join(base, normalized))
     if p != base and not p.startswith(base + os.sep):
         return None
     return p
