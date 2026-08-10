@@ -4,29 +4,108 @@
       "name": "数据分析流水线",
       "goal": "对房价数据集做完整数据科学分析：加载数据、EDA、训练模型、生成报告",
       "steps": [
-        { "step_id": "1", "capability": "data_loader", "instruction": "加载 sklearn 房价数据集并输出数据概览", "timeout": 90 },
-        { "step_id": "2", "capability": "data_analyzer", "instruction": "对数据集做EDA：分布直方图、相关性热力图、散点图", "timeout": 120, "depends_on": ["1"] },
-        { "step_id": "3", "capability": "model_trainer", "instruction": "训练线性回归与随机森林并输出评估指标", "timeout": 180, "depends_on": ["2"] },
-        { "step_id": "4", "capability": "report_generator", "instruction": "生成数据科学流水线报告（Markdown，含图表说明与结论）", "timeout": 90, "depends_on": ["3"] }
+        {
+          "step_id": "1",
+          "capability": "data_loader",
+          "instruction": "加载 sklearn 房价数据集并输出数据概览",
+          "timeout": 90
+        },
+        {
+          "step_id": "2",
+          "capability": "data_analyzer",
+          "instruction": "对数据集做EDA：分布直方图、相关性热力图、散点图",
+          "timeout": 120,
+          "depends_on": [
+            "1"
+          ]
+        },
+        {
+          "step_id": "3",
+          "capability": "model_trainer",
+          "instruction": "训练线性回归与随机森林并输出评估指标",
+          "timeout": 180,
+          "depends_on": [
+            "2"
+          ]
+        },
+        {
+          "step_id": "4",
+          "capability": "report_generator",
+          "instruction": "生成数据科学流水线报告（Markdown，含图表说明与结论）",
+          "timeout": 90,
+          "depends_on": [
+            "3"
+          ]
+        }
       ]
     },
     {
       "name": "行业调研报告",
       "goal": "调研行业现状并输出结构化报告：市场规模、主要玩家、技术路线、趋势",
       "steps": [
-        { "step_id": "1", "capability": "web_search", "instruction": "搜索行业市场规模、主要玩家、技术路线与趋势", "timeout": 90 },
-        { "step_id": "2", "capability": "content_summary", "instruction": "整合搜索结果输出结构化中文摘要（含表格）", "timeout": 120, "depends_on": ["1"] },
-        { "step_id": "3", "capability": "report_generator", "instruction": "生成行业调研报告（Markdown，含表格与结论）", "timeout": 90, "depends_on": ["2"] }
+        {
+          "step_id": "1",
+          "capability": "web_search",
+          "instruction": "搜索行业市场规模、主要玩家、技术路线与趋势",
+          "timeout": 90
+        },
+        {
+          "step_id": "2",
+          "capability": "content_summary",
+          "instruction": "整合搜索结果输出结构化中文摘要（含表格）",
+          "timeout": 120,
+          "depends_on": [
+            "1"
+          ]
+        },
+        {
+          "step_id": "3",
+          "capability": "report_generator",
+          "instruction": "生成行业调研报告（Markdown，含表格与结论）",
+          "timeout": 90,
+          "depends_on": [
+            "2"
+          ]
+        }
       ]
     },
     {
       "name": "董事会汇报",
       "goal": "生成面向董事会的可行性汇报：方案、成本ROI、风险与路线图",
       "steps": [
-        { "step_id": "1", "capability": "web_search", "instruction": "搜索方案背景、落地案例与成本数据", "timeout": 90 },
-        { "step_id": "2", "capability": "code_execution", "instruction": "编写Python代码计算3年总成本与ROI并输出表格", "timeout": 180, "depends_on": ["1"] },
-        { "step_id": "3", "capability": "content_summary", "instruction": "整合方案、成本、风险与实施路线图", "timeout": 120, "depends_on": ["2"] },
-        { "step_id": "4", "capability": "report_generator", "instruction": "生成董事会级Markdown报告（含架构图、成本表、路线图）", "timeout": 120, "depends_on": ["3"] }
+        {
+          "step_id": "1",
+          "capability": "web_search",
+          "instruction": "搜索方案背景、落地案例与成本数据",
+          "timeout": 90
+        },
+        {
+          "step_id": "2",
+          "capability": "code_execution",
+          "instruction": "编写Python代码计算3年总成本与ROI并输出表格",
+          "timeout": 180,
+          "depends_on": [
+            "1"
+          ]
+        },
+        {
+          "step_id": "3",
+          "capability": "content_summary",
+          "instruction": "整合方案、成本、风险与实施路线图",
+          "timeout": 120,
+          "depends_on": [
+            "2"
+          ]
+        },
+        {
+          "step_id": "4",
+          "capability": "report_generator",
+          "instruction": "生成董事会级Markdown报告（含架构图、成本表、路线图）",
+          "timeout": 120,
+          "depends_on": [
+            "3"
+          ]
+        }
       ]
     }
   ]

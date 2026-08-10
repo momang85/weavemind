@@ -364,7 +364,9 @@ class OrchestratorV2:
                 "判断以下用户目标是否适合使用现成的确定性执行模板。\n"
                 f"可用模板：\n{tpl_list or '（无）'}\n\n"
                 "规则：\n"
-                '1. 若目标与某个模板高度匹配（核心任务一致）→ {"template": "模板名"}\n'
+                '1. 仅当目标与某个模板的【核心任务】基本一致时才选择该模板'
+                '（例如目标是"房价预测/数据科学流水线"才能选"数据分析流水线"；'
+                '目标是"用户评论情感分析"而模板是房价预测 → 不匹配）→ {"template": "模板名"}\n'
                 '2. 若目标适合"直接交付"（单产物如游戏/脚本/工具/单文件页面，'
                 '无需外部调研或多技能协作）→ {"template": "direct_deliverable"}\n'
                 '3. 否则（需要规划拆解/多技能协作/外部资料）→ {"template": null}\n'
@@ -406,9 +408,11 @@ class OrchestratorV2:
             steps: list[dict] = []
             for s in all_steps[:8]:
                 cap = s.get("capability")
-                if cap in ("report_generator", "package", "content_summary"):
-                    continue  # 收尾/设计类步骤不进模板，保留核心能力链
+                if cap in ("report_generator", "package"):
+                    continue  # 收尾打包类步骤不进模板，保留核心能力链（含内容摘要）
                 ins = str(s.get("instruction") or "")
+                if "用户目标：" in ins:
+                    ins = ins.split("用户目标：", 1)[-1]
                 if "任务目标：" in ins:
                     ins = ins.split("任务目标：", 1)[-1]
                 if "原始指令：" in ins:
@@ -422,6 +426,16 @@ class OrchestratorV2:
                     "timeout": 180,
                 })
             if len(steps) < 2:
+                return
+            # 主题一致性校验：步骤指令必须包含目标主题词，否则可能是跑偏任务（不沉淀）
+            hay = " ".join(str(s.get("instruction", "")) for s in steps)
+            tokens = self._topic_tokens(goal)
+            if not tokens:
+                # 目标无法提取主题词（可能中文损坏/过短）：保守不沉淀，避免污染模板库
+                logger.info("Template not consolidated (no topic tokens): %s", goal[:40])
+                return
+            if not any(t in hay for t in tokens):
+                logger.info("Template not consolidated (off-topic execution): %s", goal[:40])
                 return
             name = f"auto-{goal[:10]}"
             path = tpl_path or os.path.join(
@@ -486,10 +500,13 @@ class OrchestratorV2:
         }]
 
     def _wire_report_deps(self, steps: list[dict]) -> list[dict]:
-        """报告/总结步骤若无依赖，则自动依赖所有其它步骤（保证执行时带全量上下文）。"""
+        """报告/打包步骤若无依赖，则自动依赖所有其它步骤：
+        报告需要全量上下文，打包必须在所有产物（含报告）生成之后执行。"""
         ids = [s.get("step_id") for s in steps]
         for s in steps:
-            if s.get("capability") in ("content_summary", "report_generator") and not s.get("depends_on"):
+            if s.get("capability") in (
+                "content_summary", "report_generator", "package",
+            ) and not s.get("depends_on"):
                 s["depends_on"] = [i for i in ids if i != s.get("step_id")]
         return steps
 
@@ -929,8 +946,10 @@ class OrchestratorV2:
         capability = step.get("capability", "")
         instruction = step.get("instruction", "")
         step_id = step.get("step_id", uuid.uuid4().hex[:8])
-        # LLM 生成/运行较慢，超时下限放宽到 300s，避免误杀正常步骤
+        # LLM 生成/运行较慢：普通步骤下限 300s，code_execution（含生成-修复循环）下限 600s
         timeout = max(int(step.get("timeout", 300) or 300), 300)
+        if capability == "code_execution":
+            timeout = max(timeout, 600)
 
         agent_id = self._find_agent(capability)
         if not agent_id:
@@ -2011,14 +2030,15 @@ class OrchestratorV2:
         return instr
 
     def _inject_goal_into_steps(self, steps: list[dict], goal: str) -> list[dict]:
-        """把用户目标注入报告/摘要步骤，避免报告生成器无主题可写。"""
+        """把用户目标注入所有步骤（尤其模板步骤），防止模板指令与目标跑偏。"""
         if not goal:
             return steps
         for s in steps:
-            if s.get("capability") in ("content_summary", "report_generator"):
+            ins = str(s.get("instruction", ""))
+            if "用户目标：" not in ins[:80]:
                 s["instruction"] = (
                     f"用户目标：{goal[:300]}\n"
-                    f"原始指令：{s.get('instruction', '')}"
+                    f"原始指令：{ins}"
                 )
         return steps
 

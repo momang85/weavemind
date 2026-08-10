@@ -647,8 +647,39 @@ class TestTemplateConsolidation(unittest.TestCase):
             caps = [s["capability"] for s in tpl["steps"]]
             self.assertIn("web_search", caps)
             self.assertIn("code_execution", caps)
-            self.assertNotIn("content_summary", caps)
+            self.assertIn("content_summary", caps)
             self.assertNotIn("report_generator", caps)
+            self.assertNotIn("package", caps)
+        finally:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+
+    def test_off_topic_task_not_consolidated(self):
+        import json
+        import os
+        import tempfile
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = os.path.join(tempfile.mkdtemp(prefix="weavemind_tpl_"), "templates.json")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({"templates": []}, f)
+        # 目标是新能源车调研，但步骤全是房价——跑偏任务不应沉淀
+        goal = "调研2026年国内新能源汽车市场"
+        steps = [
+            {"step_id": "1", "capability": "data_loader",
+             "instruction": f"用户目标：{goal}\n原始指令：加载加州房价数据集"},
+            {"step_id": "2", "capability": "model_trainer",
+             "instruction": f"用户目标：{goal}\n原始指令：训练房价预测模型"},
+        ]
+        try:
+            o._consolidate_template(
+                goal, steps, tpl_path=tmp,
+            )
+            data = json.load(open(tmp, encoding="utf-8"))
+            self.assertEqual(len(data.get("templates", [])), 0)
         finally:
             try:
                 os.unlink(tmp)
