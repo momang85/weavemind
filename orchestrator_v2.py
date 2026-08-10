@@ -343,6 +343,102 @@ class OrchestratorV2:
             ]
         return None
 
+    def _load_templates(self) -> list[dict]:
+        """读取确定性模板库（含手动模板与进化沉淀的 auto 模板）。"""
+        try:
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates.json")
+            with open(path, "r", encoding="utf-8") as f:
+                return (json.load(f) or {}).get("templates", [])
+        except Exception:
+            return []
+
+    def _route_template(self, goal: str) -> list[dict] | None:
+        """由 LLM 判断目标是否适合确定性模板（含直接交付模板）；
+        失败时回退到关键词判断。返回模板 steps 或 None（走完整规划）。"""
+        templates = self._load_templates()
+        try:
+            tpl_list = "\n".join(
+                f"- {t.get('name')}: {str(t.get('goal'))[:120]}" for t in templates
+            )
+            prompt = (
+                "判断以下用户目标是否适合使用现成的确定性执行模板。\n"
+                f"可用模板：\n{tpl_list or '（无）'}\n\n"
+                "规则：\n"
+                '1. 若目标与某个模板高度匹配（核心任务一致）→ {"template": "模板名"}\n'
+                '2. 若目标适合"直接交付"（单产物如游戏/脚本/工具/单文件页面，'
+                '无需外部调研或多技能协作）→ {"template": "direct_deliverable"}\n'
+                '3. 否则（需要规划拆解/多技能协作/外部资料）→ {"template": null}\n'
+                f"目标：{goal[:400]}\n只输出JSON。"
+            )
+            raw = self._plan_llm.call(
+                "你是任务路由专家，判断任务类型并选择模板，只输出JSON。",
+                prompt,
+                expect_json=True,
+            )
+            if isinstance(raw, dict):
+                name = raw.get("template")
+            else:
+                clean = str(raw).strip()
+                if clean.startswith("```"):
+                    clean = re.sub(r"^```[a-zA-Z]*\s*", "", clean).rstrip("`").strip()
+                name = json.loads(clean).get("template")
+            if name == "direct_deliverable":
+                direct = self._direct_deliverable_plan(goal)
+                if direct:
+                    return direct
+            elif name:
+                for t in templates:
+                    if t.get("name") == name:
+                        return t.get("steps") or None
+        except Exception as exc:
+            logger.info("Template routing via LLM skipped: %s", exc)
+        # 关键词回退
+        return self._direct_deliverable_plan(goal)
+
+    def _consolidate_template(
+        self, goal: str, all_steps: list[dict], tpl_path: str | None = None,
+    ) -> None:
+        """成功的复杂任务沉淀为确定性模板：提炼能力序列与指令骨架，
+        供后续 LLM 路由选择。"""
+        try:
+            if not all_steps:
+                return
+            steps: list[dict] = []
+            for s in all_steps[:8]:
+                cap = s.get("capability")
+                if cap in ("report_generator", "package", "content_summary"):
+                    continue  # 收尾/设计类步骤不进模板，保留核心能力链
+                ins = str(s.get("instruction") or "")
+                if "任务目标：" in ins:
+                    ins = ins.split("任务目标：", 1)[-1]
+                if "原始指令：" in ins:
+                    ins = ins.split("原始指令：", 1)[-1]
+                if not ins.strip():
+                    continue
+                steps.append({
+                    "step_id": str(len(steps) + 1),
+                    "capability": cap,
+                    "instruction": ins.strip()[:120],
+                    "timeout": 180,
+                })
+            if len(steps) < 2:
+                return
+            name = f"auto-{goal[:10]}"
+            path = tpl_path or os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "templates.json",
+            )
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            tpls = data.get("templates", [])
+            tpls = [t for t in tpls if t.get("name") != name]
+            tpls.append({"name": name, "goal": goal[:200], "steps": steps})
+            data["templates"] = tpls[-30:]
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            logger.info("Template consolidated: %s (%d steps)", name, len(steps))
+        except Exception as exc:
+            logger.warning("Template consolidation failed: %s", exc)
+
     def _ensure_report_step(self, steps: list[dict], task_id: str) -> list[dict]:
         """规划自检：计划中缺少报告/总结步骤时，自动补一步 report_generator（报告兜底）。"""
         if not steps:
@@ -1409,11 +1505,23 @@ class OrchestratorV2:
         logger.info("Task %s: %s", task_id, goal[:80])
 
         # 1. Plan（模板步骤直接采用，否则 LLM 规划）
+        used_template = False
         if template_steps:
             steps = self._normalize_steps(template_steps)
             steps = self._ensure_report_step(steps, task_id)
+            used_template = True
         else:
-            steps = self._plan(goal, task_id, context)
+            routed = self._route_template(goal)
+            if routed:
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "plan", "agent": "orchestrator",
+                               "message": "Plan: routed to deterministic template (LLM routing)",
+                               "timestamp": self._now_iso()})
+                steps = self._normalize_steps(routed)
+                steps = self._ensure_report_step(steps, task_id)
+                used_template = True
+            else:
+                steps = self._plan(goal, task_id, context)
         steps = self._wire_report_deps(steps)
         steps = self._wire_search_fetch_deps(steps)
         steps = self._ensure_package_step(steps)
@@ -1587,6 +1695,9 @@ class OrchestratorV2:
             push_progress(self._messaging, task_id, "log",
                           {"type": "memory", "agent": "orchestrator",
                            "message": "Strategy memory consolidated", "timestamp": self._now_iso()})
+            # 进化沉淀：复杂任务（未走模板）成功后提炼为确定性模板，供后续 LLM 路由选择
+            if not used_template:
+                self._consolidate_template(goal, all_steps)
 
         # 5. Complete
         ok_count = sum(1 for r in completed_all.values() if r.get("status") == "SUCCESS")
