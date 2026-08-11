@@ -37,12 +37,11 @@ export function useTaskPoller(taskId: string | null) {
 
         // 流式思考日志：合并服务端进度（按 id 去重）
         const serverLogs: any[] = d.logs || []
-        const known = new Set(seenLogs.current)
         serverLogs.forEach((lg: any) => {
           if (!lg || lg.id === undefined) return
           const lid = 'srv-' + lg.id
-          if (known.has(lid)) return
-          known.add(lid)
+          if (seenLogs.current.has(lid)) return
+          seenLogs.current.add(lid)
           addLog({
             id: lid,
             timestamp: lg.timestamp || new Date().toLocaleTimeString(),

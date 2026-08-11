@@ -164,6 +164,26 @@ class TestWireReportDeps(unittest.TestCase):
         out = self.o._wire_report_deps(steps)
         self.assertEqual(out[1]["depends_on"], ["1"])
 
+    def test_research_chain_no_cycle_after_break(self):
+        # 搜索→摘要→报告→打包：接线后不得成环（成环会被 break_cycles 清空依赖，
+        # 导致 package 提前执行、无文件可打包而失败）
+        steps = [
+            {"step_id": "1", "capability": "web_search", "instruction": "s"},
+            {"step_id": "2", "capability": "content_summary", "instruction": "c"},
+            {"step_id": "3", "capability": "report_generator", "instruction": "r"},
+        ]
+        out = self.o._wire_report_deps(steps)
+        out = self.o._ensure_package_step(out)
+        out = self.o._break_cycles(out)
+        by_id = {s["step_id"]: s for s in out}
+        self.assertEqual(by_id["2"]["depends_on"], ["1"], "摘要依赖搜索")
+        self.assertEqual(set(by_id["3"]["depends_on"]), {"1", "2"}, "报告依赖搜索+摘要")
+        self.assertEqual(by_id["package-4"]["depends_on"], ["3"], "打包依赖报告")
+        # 依赖不得被 break_cycles 清空（无环）
+        for s in out:
+            if s.get("capability") != "web_search":
+                self.assertTrue(s.get("depends_on"), f"{s['step_id']} 依赖不应被清空")
+
 
 class TestBestDeliverable(unittest.TestCase):
     def setUp(self):

@@ -587,14 +587,31 @@ class OrchestratorV2:
         }]
 
     def _wire_report_deps(self, steps: list[dict]) -> list[dict]:
-        """报告/打包步骤若无依赖，则自动依赖所有其它步骤：
-        报告需要全量上下文，打包必须在所有产物（含报告）生成之后执行。"""
+        """报告/摘要/打包步骤若无依赖，按信息流向接线：
+        摘要依赖信息源步骤；报告依赖信息源+摘要；打包依赖所有产物步骤。
+        避免"互相依赖所有步骤"形成环，被 break_cycles 清空后变成全并行。"""
         ids = [s.get("step_id") for s in steps]
+        cap = {s.get("step_id"): s.get("capability") for s in steps}
         for s in steps:
-            if s.get("capability") in (
-                "content_summary", "report_generator", "package",
-            ) and not s.get("depends_on"):
-                s["depends_on"] = [i for i in ids if i != s.get("step_id")]
+            c = s.get("capability")
+            if c == "content_summary" and not s.get("depends_on"):
+                s["depends_on"] = [
+                    i for i in ids
+                    if i != s.get("step_id") and cap.get(i) not in (
+                        "content_summary", "report_generator", "package",
+                    )
+                ]
+            elif c == "report_generator" and not s.get("depends_on"):
+                s["depends_on"] = [
+                    i for i in ids
+                    if i != s.get("step_id") and cap.get(i) not in (
+                        "report_generator", "package",
+                    )
+                ]
+            elif c == "package" and not s.get("depends_on"):
+                s["depends_on"] = [
+                    i for i in ids if i != s.get("step_id") and cap.get(i) != "package"
+                ]
         return steps
 
     def _wire_search_fetch_deps(self, steps: list[dict]) -> list[dict]:
@@ -2122,6 +2139,7 @@ class OrchestratorV2:
             "status": overall,
             "steps": [{"step_id": s["step_id"], "capability": s["capability"],
                         "instruction": s["instruction"], "iteration": s.get("iteration", 0),
+                        "depends_on": s.get("depends_on", []),
                         "result": completed_all.get(s["step_id"], {})}
                       for s in all_steps],
             "final_report": report,

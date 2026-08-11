@@ -10,6 +10,7 @@ export const useTaskStore = create<TaskState & {
   markPlanConfirmed: () => void
   updatePlan: (tree: TaskNode) => void
   addLog: (entry: LogEntry) => void
+  setLogs: (entries: LogEntry[]) => void
   setReport: (report: TaskReport) => void
   updateAgents: (list: AgentInfo[]) => void
   setConnected: (v: boolean) => void
@@ -50,6 +51,8 @@ export const useTaskStore = create<TaskState & {
   updatePlan: (tree) => { console.log("[Store] updatePlan:", tree.id, tree.children?.length, "steps"); set({ planTree: tree }) },
 
   addLog: (entry) => { console.log("[Store] addLog:", entry.type, entry.message?.slice(0,40)); set(s => ({ logs: [...s.logs, entry] })) },
+
+  setLogs: (entries) => set({ logs: entries }),
 
   setReport: (report) => set({ report, status: 'completed' }),
 

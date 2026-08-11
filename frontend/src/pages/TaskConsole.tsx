@@ -25,7 +25,7 @@ export default function TaskConsole() {
     planTree, status, report,
     startTask, addLog, demoMode, activeConversationId,
     setActiveConversation, setReport, reset,
-    awaitingConfirm, revision, markPlanConfirmed,
+    awaitingConfirm, revision, markPlanConfirmed, setLogs,
   } = useTaskStore()
 
   const [goal, setGoal] = useState('')
@@ -263,9 +263,20 @@ export default function TaskConsole() {
           name: f.name, size: f.size, kind: f.kind,
         }))
       } catch { /* ignore */ }
+      // 历史任务也载入思考日志，让"实时动态"页可回看该任务的完整过程
+      try {
+        const lg = (d.logs ?? []).map((l: any, i: number) => ({
+          id: 'srv-' + i,
+          timestamp: l.timestamp || '',
+          type: l.type || 'info',
+          agent: l.agent || 'orchestrator',
+          message: l.message || '',
+        }))
+        setLogs(lg)
+      } catch { /* ignore */ }
       setReport(reportObj)
     } catch { /* ignore */ }
-  }, [setReport])
+  }, [setReport, setLogs])
 
   const newConversation = useCallback(() => {
     reset()
