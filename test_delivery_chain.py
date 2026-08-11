@@ -59,6 +59,65 @@ class TestSearchQuality(unittest.TestCase):
         # "star" 不应误中 "Stars"
         self.assertFalse(any("youtube.com" in r["url"] for r in kept))
 
+    def test_clean_search_text_strips_wrappers(self):
+        from worker_base import SearchAgent
+
+        raw = (
+            "任务目标：调研2026年国内新能源汽车市场现状\n"
+            "用户目标：调研2026年国内新能源汽车市场现状，输出结构化报告\n"
+            "原始指令：搜索行业市场规模与主要玩家"
+        )
+        clean = SearchAgent._clean_search_text(raw)
+        self.assertIn("新能源汽车", clean)
+        self.assertNotIn("任务目标", clean)
+        self.assertNotIn("原始指令", clean)
+
+    def test_extract_keywords_keeps_year_and_terms(self):
+        from worker_base import SearchAgent
+
+        sa = SearchAgent.__new__(SearchAgent)
+        kw = sa._extract_keywords(
+            "任务目标：调研2026年国内新能源汽车市场现状，输出结构化报告\n"
+            "用户目标：调研2026年国内新能源汽车市场现状，输出结构化报告\n"
+            "原始指令：搜索市场规模与主要玩家、技术路线与趋势"
+        )
+        self.assertIn("2026", kw)
+        self.assertIn("新能源汽车", kw)
+        self.assertIn("市场", kw)
+        # 指令包装词不得混入查询
+        for junk in ("任务目标", "用户目标", "原始指令", "调研", "输出"):
+            self.assertNotIn(junk, kw)
+
+    def test_query_variants_multiple(self):
+        from worker_base import SearchAgent
+
+        sa = SearchAgent.__new__(SearchAgent)
+        vs = sa._query_variants(
+            "用户目标：调研2026年国内新能源汽车市场现状，输出结构化报告\n原始指令：搜索"
+        )
+        self.assertGreaterEqual(len(vs), 3, "应生成多个查询变体")
+        self.assertTrue(any("2026" in v for v in vs))
+        self.assertTrue(any("新能源汽车" in v for v in vs))
+        # 去重
+        self.assertEqual(len(vs), len(set(vs)))
+
+    def test_filter_min_score_and_year(self):
+        from worker_base import SearchAgent
+
+        sa = SearchAgent.__new__(SearchAgent)
+        results = [
+            {"title": "2026年新能源汽车市场报告", "url": "https://ev-report.org/a",
+             "snippet": "2026 新能源汽车 市场规模"},
+            {"title": "无关内容", "url": "https://weather-info.org/b", "snippet": "天气"},
+        ]
+        kept = sa._filter_results("2026年新能源汽车市场", results)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(kept[0]["url"], "https://ev-report.org/a")
+        # 严格过滤为空时，min_score=1 可保留弱相关结果
+        weak = [{"title": "市场", "url": "https://ev-report.org/c", "snippet": "市场行情"}]
+        self.assertEqual(sa._filter_results("新能源汽车市场", weak), [])
+        self.assertEqual(len(sa._filter_results("新能源汽车市场", weak, min_score=1)), 1)
+
 
 class TestFileIoWorker(unittest.TestCase):
     def test_loads_json_loose(self):

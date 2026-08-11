@@ -446,6 +446,24 @@ class SearchAgent(BaseWorker):
 
     _SPAM_DOMAINS = ("susmeat.com", "aydvjch.cc", "example.com")
     _JUNK_TITLES = ("google", "bing", "microsoft", "登录", "403", "404")
+    _ZH_STOP = {
+        "一个", "我们", "你们", "他们", "完成", "输出", "生成", "要求",
+        "进行", "需要", "可以", "是否", "如何", "什么", "请", "帮", "并",
+        "与", "和", "在", "用", "把", "将", "给", "让", "这", "那", "为",
+        "对", "其", "及", "或", "等", "做", "写", "的", "了", "是", "我",
+        "你", "他", "她", "它", "搜索", "获取", "项目", "文件", "内容",
+        "结果", "报告", "选择", "优先", "记录", "完整", "基于", "上一步",
+        "编写", "实现", "包含", "以及", "使用", "提供", "相关", "信息",
+        "资料", "地址", "链接", "来源", "开源", "同时", "需要", "并且",
+        "如果", "找到", "查看", "说明", "运行", "方式", "明确", "给出",
+        # 指令包装词与动词，避免污染查询
+        "任务", "目标", "原始", "指令", "调研", "现状", "国内", "国外",
+        "关于", "针对", "请根据", "确保", "然后", "随后", "接下来",
+    }
+    _EN_STOP = {
+        "the", "and", "with", "from", "for", "that", "this", "not",
+        "are", "was", "were", "output", "only", "json", "using", "your",
+    }
     # 已部署策略（人工审批后写入 strategy:active:search_agent，每次执行时刷新）
     _strategy_max_sources = 5
     _strategy_blocks: list[str] = []
@@ -486,42 +504,88 @@ class SearchAgent(BaseWorker):
         except Exception as exc:
             logger.warning("Failed to load active strategy: %s", exc)
 
+    @staticmethod
+    def _clean_search_text(text: str) -> str:
+        """去掉指令包装，取"用户目标"作为查询基础（否则"任务目标/用户目标/原始指令"
+        等包装词会混进查询词，导致搜索结果与主题无关）。"""
+        import re as _re
+        m = _re.search(r"用户目标：([^\n]+)", str(text))
+        if m:
+            return m.group(1).strip()
+        return _re.sub(r"^(任务目标|原始指令|用户目标)[：:]\s*", "", str(text).strip())
+
     def _extract_keywords(self, text: str) -> str:
-        """从冗长的中文指令中提取核心搜索词，显著提高搜索引擎召回质量。"""
+        """从用户目标中提取核心搜索词：去指令包装与停用词、保留年份、
+        按停用词切分出完整词段（避免 2-4 字滑窗把"新能源汽车"拆成碎片）。"""
         import re as _re
 
-        zh_stop = {
-            "一个", "我们", "你们", "他们", "完成", "输出", "生成", "要求",
-            "进行", "需要", "可以", "是否", "如何", "什么", "请", "帮", "并",
-            "与", "和", "在", "用", "把", "将", "给", "让", "这", "那", "为",
-            "对", "其", "及", "或", "等", "做", "写", "的", "了", "是", "我",
-            "你", "他", "她", "它", "搜索", "获取", "项目", "文件", "内容",
-            "结果", "报告", "选择", "优先", "记录", "完整", "基于", "上一步",
-            "编写", "实现", "包含", "以及", "使用", "提供", "相关", "信息",
-            "资料", "地址", "链接", "来源", "开源", "同时", "需要", "并且",
-            "如果", "找到", "查看", "说明", "运行", "方式", "明确", "给出",
-        }
-        zh = [w for w in _re.findall(r"[\u4e00-\u9fff]{2,4}", text) if w not in zh_stop]
-        en_stop = {
-            "the", "and", "with", "from", "for", "that", "this", "not",
-            "are", "was", "were", "output", "only", "json", "using", "your",
-        }
+        text = self._clean_search_text(text)
+        # 年份单独保留："2026年" → "2026"
+        text = _re.sub(r"(\d{4})年", r"\1 ", text)
+        for w in self._ZH_STOP:
+            text = text.replace(w, " ")
+        zh = [
+            s for s in _re.split(
+                r"[\s\u3000，。、；：！？（）()【】《》\"'“”‘’,.…]+", text,
+            )
+            if _re.search(r"[\u4e00-\u9fff]", s) and len(s) >= 2
+        ]
         en = [
             w.lower()
             for w in _re.findall(r"[a-zA-Z][a-zA-Z0-9-]{2,}", text)
-            if w.lower() not in en_stop
+            if w.lower() not in self._EN_STOP
         ]
-        merged = list(dict.fromkeys(zh + en))
+        years = _re.findall(r"\d{4}", text)
+        merged = list(dict.fromkeys(years + zh + en))
         return " ".join(merged)[:150]
 
-    def _filter_results(self, query: str, results: list[dict]) -> list[dict]:
+    def _query_variants(self, instruction: str) -> list[str]:
+        """生成多个查询变体（整句 + 关键词组合 + 中英混合），显著提升召回。"""
+        import re as _re
+
+        goal = self._clean_search_text(instruction)
+        kws = [k for k in self._extract_keywords(instruction).split() if k]
+        variants: list[str] = []
+        if goal and len(goal) >= 4:
+            variants.append(goal[:120])
+        if kws:
+            variants.append(" ".join(kws)[:120])
+            for i in range(1, min(len(kws), 5)):
+                sub = " ".join(kws[: i + 1])
+                if sub:
+                    variants.append(sub[:120])
+        en = [
+            w.lower()
+            for w in _re.findall(r"[a-zA-Z][a-zA-Z0-9-]{2,}", instruction)
+            if w.lower() not in self._EN_STOP
+        ]
+        if en and kws:
+            mix = " ".join(kws[:2] + en[:2])
+            variants.append(mix[:120])
+        seen: set[str] = set()
+        out: list[str] = []
+        for v in variants:
+            if v and v not in seen:
+                seen.add(v)
+                out.append(v)
+        return out[:6]
+
+    def _filter_results(self, query: str, results: list[dict], min_score: int = 2) -> list[dict]:
         """按主题相关性过滤并排序搜索结果：
         英文词按词边界匹配（避免 star 误中 Stars），中文按 2/3/4 字片段计分，
         得分不足的结果剔除，最终按相关度降序返回。"""
         import re as _re
 
-        tokens = set(_re.findall(r"[\u4e00-\u9fff]{2,}", query))
-        en_tokens = {w.lower() for w in _re.findall(r"[a-zA-Z][a-zA-Z0-9-]{2,}", query)}
+        clean = self._clean_search_text(query)
+        # 中文按 2/3/4 字滑窗生成匹配 token（findall 不会滑窗，长词串
+        # 会变成单一巨型 token，导致真实结果几乎无法命中而被误过滤）
+        tokens: set[str] = set()
+        for run in _re.findall(r"[\u4e00-\u9fff]+", clean):
+            for size in (4, 3, 2):
+                if len(run) >= size:
+                    tokens.update(run[i : i + size] for i in range(len(run) - size + 1))
+        year_tokens = {y for y in _re.findall(r"\d{4}", clean)}
+        en_tokens = {w.lower() for w in _re.findall(r"[a-zA-Z][a-zA-Z0-9-]{2,}", clean)}
         kept: list[tuple[int, dict]] = []
         for r in results:
             title = str(r.get("title") or "")
@@ -542,6 +606,9 @@ class SearchAgent(BaseWorker):
             for tok in tokens:
                 if tok in hay:
                     score += 1 if len(tok) == 2 else 2
+            for y in year_tokens:
+                if y in hay:
+                    score += 1
             for tok in en_tokens:
                 if len(tok) >= 3 and _re.search(
                     rf"(?<![a-z0-9]){_re.escape(tok)}(?![a-z0-9])", hay_lower
@@ -549,7 +616,7 @@ class SearchAgent(BaseWorker):
                     score += 2
             if any(b in url_title for b in self._strategy_boosts):
                 score += 3
-            if score < 2:
+            if score < min_score:
                 continue
             kept.append((score, r))
         kept.sort(key=lambda x: -x[0])
@@ -600,38 +667,78 @@ class SearchAgent(BaseWorker):
         return results
 
     def execute(self, instruction: str) -> str:
-        """多源搜索：DuckDuckGo → Bing → mock。"""
+        """多查询变体 × 多源搜索：DuckDuckGo → Bing，合并去重，
+        严格过滤为空时放宽阈值再试，全部源不可用才 mock。"""
         logger.info("SearchAgent searching: %s", instruction)
         self._load_active_strategy()
-        keywords = self._extract_keywords(instruction)
-        query = keywords if len(keywords) >= 4 else instruction
-        source_ok = False
-        try:
-            from ddgs import DDGS
-            results = []
-            with DDGS() as ddgs:
-                for r in ddgs.text(query, max_results=self._strategy_max_sources):
-                    results.append({
-                        "title": r.get("title", ""),
-                        "url": r.get("href", ""),
-                        "snippet": r.get("body", ""),
-                    })
+        variants = self._query_variants(instruction) or [instruction[:120]]
+        collected: list[dict] = []
+        seen_urls: set[str] = set()
+
+        def _add(results) -> None:
+            items = results if isinstance(results, list) else [results]
+            for r in items:
+                if not isinstance(r, dict):
+                    continue
+                u = str(r.get("url") or "")
+                if u and u not in seen_urls:
+                    seen_urls.add(u)
+                    collected.append(r)
+
+        def _collect_ddg() -> bool:
+            try:
+                from ddgs import DDGS
+                with DDGS() as ddgs:
+                    for q in variants:
+                        try:
+                            for r in ddgs.text(q, max_results=self._strategy_max_sources):
+                                if isinstance(r, dict):
+                                    _add({
+                                        "title": r.get("title", ""),
+                                        "url": r.get("href", ""),
+                                        "snippet": r.get("body", ""),
+                                    })
+                                else:
+                                    logger.warning("DDG returned non-dict item: %r", str(r)[:80])
+                        except Exception as e:
+                            logger.warning("DDG query '%s' failed: %s", q[:40], e)
+                return True
+            except Exception as e:
+                logger.warning("DuckDuckGo unavailable: %s", e)
+                return False
+
+        def _collect_bing() -> bool:
+            ok = False
+            for q in variants:
+                try:
+                    _add(self._search_bing(q))
+                    ok = True
+                except Exception as e:
+                    logger.warning("Bing query '%s' failed: %s", q[:40], e)
+            return ok
+
+        def _emit() -> str | None:
+            strict = self._filter_results(instruction, collected)
+            if strict:
+                return json.dumps(strict[:10], ensure_ascii=False, indent=2)
+            relaxed = self._filter_results(instruction, collected, min_score=1)
+            if relaxed:
+                logger.warning(
+                    "Strict filter empty; %d results kept with relaxed threshold",
+                    len(relaxed),
+                )
+                return json.dumps(relaxed[:10], ensure_ascii=False, indent=2)
+            return None
+
+        source_ok = _collect_ddg()
+        out = _emit()
+        if out:
+            return out
+        if _collect_bing():
             source_ok = True
-            results = self._filter_results(instruction, results)
-            if results:
-                return json.dumps(results, ensure_ascii=False, indent=2)
-            logger.warning("DuckDuckGo results filtered/empty, trying Bing")
-        except Exception as e:
-            logger.warning("DuckDuckGo search failed: %s, trying Bing", e)
-        # 备用源：Bing
-        try:
-            source_ok = True
-            bing = self._search_bing(query)
-            bing = self._filter_results(instruction, bing)
-            if bing:
-                return json.dumps(bing, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logger.warning("Bing search failed: %s", e)
+        out = _emit()
+        if out:
+            return out
         # 两个来源均失败：mock 兜底；有返回但全部被过滤：返回空列表（诚实说明未找到相关资料）
         if not source_ok:
             return json.dumps([
