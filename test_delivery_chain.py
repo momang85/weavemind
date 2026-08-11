@@ -1195,6 +1195,65 @@ class TestSimpleTaskFastPath(unittest.TestCase):
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_template_keyword_match_conservative(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        templates = [
+            {"name": "数据分析流水线", "goal": "房价数据科学分析"},
+            {"name": "行业调研报告", "goal": "调研行业现状"},
+            {"name": "董事会汇报", "goal": "可行性方案"},
+        ]
+        self.assertEqual(
+            o._template_keyword_match("调研2026年国内新能源汽车市场现状", templates)["name"],
+            "行业调研报告",
+        )
+        self.assertEqual(
+            o._template_keyword_match("对加州房价数据集做回归建模", templates)["name"],
+            "数据分析流水线",
+        )
+        self.assertEqual(
+            o._template_keyword_match("评估引入AI视觉检测方案的可行性", templates)["name"],
+            "董事会汇报",
+        )
+        self.assertIsNone(o._template_keyword_match("做一个贪吃蛇游戏", templates))
+        self.assertIsNone(o._template_keyword_match("帮我写一个倒计时工具", templates))
+
+    def test_route_template_skips_llm_on_keyword_match(self):
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        class _FakeMsg:
+            def publish(self, *a, **k):
+                pass
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._messaging = _FakeMsg()
+        o._now_iso = lambda: "t"
+        o._plan_llm = None  # 关键词命中时不应触碰 LLM
+        tmp = tempfile.mkdtemp(prefix="weavemind_route_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            # 模板命中：直接返回模板步骤，不调 LLM
+            o._load_templates = lambda: [
+                {"name": "行业调研报告", "goal": "调研行业现状", "steps": [
+                    {"step_id": "1", "capability": "web_search", "instruction": "搜索"},
+                ]},
+            ]
+            routed = o._route_template("调研2026年新能源汽车市场现状", "t-route-1")
+            self.assertIsNotNone(routed)
+            self.assertEqual(routed[0]["capability"], "web_search")
+            # 直接交付命中：跳过 LLM
+            routed2 = o._route_template("做一个极简的贪吃蛇游戏", "t-route-1")
+            self.assertIsNotNone(routed2)
+            self.assertEqual(routed2[0]["capability"], "code_execution")
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

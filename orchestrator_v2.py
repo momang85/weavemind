@@ -257,6 +257,10 @@ class OrchestratorV2:
                 "STRICT JSON ONLY. Output ONLY a JSON object {\"steps\":[...]}, no markdown, "
                 "no explanation, and no line breaks inside instruction strings.\nGoal: " + goal
             )
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "plan", "agent": "orchestrator",
+                           "message": f"正在规划（LLM 第 {attempt + 1}/2 次尝试）...",
+                           "timestamp": self._now_iso()})
             try:
                 raw = self._planner_llm.call(PLANNER_SYSTEM, attempt_prompt, expect_json=True)
                 plan_data = self._parse_plan_response(raw)
@@ -264,6 +268,10 @@ class OrchestratorV2:
             except Exception as e:
                 last_error = e
                 logger.warning("Plan attempt %d failed: %s", attempt + 1, str(e)[:200])
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "error", "agent": "orchestrator",
+                               "message": f"规划第 {attempt + 1} 次尝试失败：{str(e)[:80]}，重试中",
+                               "timestamp": self._now_iso()})
         if plan_data is None:
             logger.error("Plan failed: %s", str(last_error)[:300])
             push_progress(self._messaging, task_id, "log",
@@ -381,10 +389,31 @@ class OrchestratorV2:
         except Exception:
             return []
 
-    def _route_template(self, goal: str) -> list[dict] | None:
+    def _route_template(self, goal: str, task_id: str = "") -> list[dict] | None:
         """由 LLM 判断目标是否适合确定性模板（含直接交付模板）；
         失败时回退到关键词判断。返回模板 steps 或 None（走完整规划）。"""
         templates = self._load_templates()
+        # 关键词快速路由：明确命中的任务直接走确定性模板，省掉 LLM 路由调用
+        direct = self._direct_deliverable_plan(goal)
+        if direct:
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "plan", "agent": "orchestrator",
+                           "message": "模板路由：直接交付（关键词命中，跳过 LLM）",
+                           "timestamp": self._now_iso()})
+            return direct
+        tpl = self._template_keyword_match(goal, templates)
+        if tpl:
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "plan", "agent": "orchestrator",
+                           "message": f"模板命中（关键词）：{tpl.get('name')}",
+                           "timestamp": self._now_iso()})
+            return tpl.get("steps") or None
+        if not templates:
+            return self._direct_deliverable_plan(goal)
+        push_progress(self._messaging, task_id, "log",
+                      {"type": "plan", "agent": "orchestrator",
+                       "message": f"模板路由（LLM）：{len(templates)} 个模板待匹配",
+                       "timestamp": self._now_iso()})
         try:
             tpl_list = "\n".join(
                 f"- {t.get('name')}: {str(t.get('goal'))[:120]}" for t in templates
@@ -423,8 +452,37 @@ class OrchestratorV2:
                         return t.get("steps") or None
         except Exception as exc:
             logger.info("Template routing via LLM skipped: %s", exc)
+        push_progress(self._messaging, task_id, "log",
+                      {"type": "plan", "agent": "orchestrator",
+                       "message": "模板路由结束：未命中模板，进入 LLM 规划",
+                       "timestamp": self._now_iso()})
         # 关键词回退
         return self._direct_deliverable_plan(goal)
+
+    @staticmethod
+    def _template_keyword_match(goal: str, templates: list[dict]) -> dict | None:
+        """模板关键词快速匹配（保守：只在强信号时命中，避免误路由）。"""
+        g = str(goal or "").lower()
+        conds = {
+            "数据分析流水线": (
+                ("房价",), ("数据集",), ("数据科学",), ("回归",),
+                ("模型训练",), ("机器学习",), ("eda",),
+            ),
+            "行业调研报告": (
+                ("调研", "行业"), ("调研", "市场"), ("市场规模",), ("行业现状",),
+            ),
+            "董事会汇报": (
+                ("可行性", "方案"), ("roi",), ("董事会",), ("可行性", "评估"),
+            ),
+        }
+        for t in templates:
+            groups = conds.get(str(t.get("name") or ""))
+            if not groups:
+                continue
+            for grp in groups:
+                if all(k in g for k in grp):
+                    return t
+        return None
 
     def _consolidate_template(
         self, goal: str, all_steps: list[dict], tpl_path: str | None = None,
@@ -1820,7 +1878,7 @@ class OrchestratorV2:
             steps = self._ensure_report_step(steps, task_id)
             used_template = True
         else:
-            routed = self._route_template(goal)
+            routed = self._route_template(goal, task_id)
             if routed:
                 push_progress(self._messaging, task_id, "log",
                               {"type": "plan", "agent": "orchestrator",
@@ -1851,6 +1909,7 @@ class OrchestratorV2:
                 "status": "AWAITING_CONFIRM",
                 "steps": steps,
                 "goal": goal,
+                "revision": False,
             })
             confirmed = self._wait_plan_confirm(task_id, steps)
             if confirmed is None:
@@ -1869,6 +1928,14 @@ class OrchestratorV2:
                               {"status": "FAILED", "summary": "Empty plan confirmed, task cancelled"})
                 return {"task_id": task_id, "status": "FAILED", "steps": [],
                         "report": "Empty plan confirmed"}
+            # 确认后立即把状态从 AWAITING_CONFIRM 切到 RUNNING：
+            # 否则前端会一直读到 AWAITING_CONFIRM，确认模块反复弹出
+            self._messaging.publish("orchestrator:response", {
+                "task_id": task_id,
+                "status": "RUNNING",
+                "steps": steps,
+                "goal": goal,
+            })
             push_progress(self._messaging, task_id, "plan_update", {"steps": steps})
 
         # 简单任务判定：只含"生成+报告+打包"的直达型任务启用快速路径，

@@ -9,7 +9,7 @@ export function useTaskPoller(taskId: string | null) {
   const {
     demoMode,
     updatePlan, addLog, setReport,
-    fetchSystemStatus, setAwaitingConfirm,
+    fetchSystemStatus, setAwaitingConfirm, setRevision, lastConfirmAt,
   } = useTaskStore()
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const seenLogs = useRef<Set<string>>(new Set())
@@ -29,7 +29,28 @@ export function useTaskPoller(taskId: string | null) {
         const d = await res.json()
         if (d.error) return
 
-        setAwaitingConfirm(d.status === 'AWAITING_CONFIRM')
+        // 防抖：用户刚点过"确认"后 8s 内忽略 AWAITING_CONFIRM，
+        // 避免后端状态回写延迟导致确认模块反复弹出
+        const justConfirmed = lastConfirmAt > 0 && Date.now() - lastConfirmAt < 8000
+        setAwaitingConfirm(d.status === 'AWAITING_CONFIRM' && !justConfirmed)
+        setRevision(d.status === 'AWAITING_CONFIRM' && !!d.revision)
+
+        // 流式思考日志：合并服务端进度（按 id 去重）
+        const serverLogs: any[] = d.logs || []
+        const known = new Set(seenLogs.current)
+        serverLogs.forEach((lg: any) => {
+          if (!lg || lg.id === undefined) return
+          const lid = 'srv-' + lg.id
+          if (known.has(lid)) return
+          known.add(lid)
+          addLog({
+            id: lid,
+            timestamp: lg.timestamp || new Date().toLocaleTimeString(),
+            type: lg.type || 'info',
+            agent: lg.agent || 'orchestrator',
+            message: lg.message || '',
+          })
+        })
 
         // First poll: show "Task accepted" immediately
         if (first) { first = false; addLog({ id: 'accepted', timestamp: new Date().toLocaleTimeString(), type: 'plan', agent: 'orchestrator', message: 'Accepted: ' + (d.goal||'').slice(0,50) }) }
@@ -60,7 +81,7 @@ export function useTaskPoller(taskId: string | null) {
               children: buildChildren(),
             })
           }
-        } else if (d.status === 'PENDING') {
+        } else if (d.status === 'PENDING' || d.status === 'RUNNING') {
           // Show planning placeholder on first poll
           if (lastHash.current !== 'planning') {
             lastHash.current = 'planning'

@@ -25,7 +25,7 @@ export default function TaskConsole() {
     planTree, status, report,
     startTask, addLog, demoMode, activeConversationId,
     setActiveConversation, setReport, reset,
-    awaitingConfirm, setAwaitingConfirm,
+    awaitingConfirm, revision, markPlanConfirmed,
   } = useTaskStore()
 
   const [goal, setGoal] = useState('')
@@ -191,7 +191,7 @@ export default function TaskConsole() {
           ? { task_id: taskId, action, steps: editableSteps }
           : { task_id: taskId, action }),
       })
-      setAwaitingConfirm(false)
+      markPlanConfirmed()
     } catch { /* ignore */ }
   }
 
@@ -394,6 +394,12 @@ export default function TaskConsole() {
           )}
           {awaitingConfirm && (
             <div className="mt-4 space-y-3">
+              {revision && (
+                <div className="flex items-center gap-2 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
+                  <RefreshCw className="w-3.5 h-3.5 shrink-0" />
+                  搜索未获得可用结果，已建议改为直接生成。确认后按修订计划执行。
+                </div>
+              )}
               <div className="flex gap-2">
                 <select value={newCap} onChange={e => setNewCap(e.target.value)}
                   className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-slate-300 shrink-0">

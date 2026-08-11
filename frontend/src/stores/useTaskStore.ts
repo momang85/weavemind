@@ -6,6 +6,8 @@ export const useTaskStore = create<TaskState & {
   startTask: (id: string) => void
   setActiveConversation: (id: string | null) => void
   setAwaitingConfirm: (v: boolean) => void
+  setRevision: (v: boolean) => void
+  markPlanConfirmed: () => void
   updatePlan: (tree: TaskNode) => void
   addLog: (entry: LogEntry) => void
   setReport: (report: TaskReport) => void
@@ -18,6 +20,8 @@ export const useTaskStore = create<TaskState & {
   currentTaskId: null,
   activeConversationId: null,
   awaitingConfirm: false,
+  revision: false,
+  lastConfirmAt: 0,
   planTree: null,
   logs: [],
   status: 'idle',
@@ -38,6 +42,10 @@ export const useTaskStore = create<TaskState & {
   setActiveConversation: (id) => set({ activeConversationId: id }),
 
   setAwaitingConfirm: (v) => set({ awaitingConfirm: v }),
+
+  setRevision: (v) => set({ revision: v }),
+
+  markPlanConfirmed: () => set({ awaitingConfirm: false, lastConfirmAt: Date.now() }),
 
   updatePlan: (tree) => { console.log("[Store] updatePlan:", tree.id, tree.children?.length, "steps"); set({ planTree: tree }) },
 

@@ -108,6 +108,8 @@ export interface TaskState {
   currentTaskId: string | null
   activeConversationId: string | null
   awaitingConfirm: boolean
+  revision: boolean
+  lastConfirmAt: number
   planTree: TaskNode | null
   logs: LogEntry[]
   status: TaskStatus

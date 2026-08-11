@@ -92,6 +92,16 @@ const TreeNode = memo(function TreeNode({
             第{node.iteration}轮
           </span>
         )}
+        {(node.step_id?.startsWith('fix-')) && (
+          <span className="text-[10px] font-mono text-orange-400 bg-orange-500/10 px-1.5 py-0.5 rounded shrink-0">
+            修复
+          </span>
+        )}
+        {(node.step_id?.startsWith('alt-')) && (
+          <span className="text-[10px] font-mono text-cyan-400 bg-cyan-500/10 px-1.5 py-0.5 rounded shrink-0">
+            备选
+          </span>
+        )}
 
         <span className={`truncate text-sm ${isRoot ? 'text-slate-100 font-semibold' : cfg.text}`}>
           {node.name}

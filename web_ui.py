@@ -213,10 +213,23 @@ def _listen_results():
                                     db.commit(); db.close()
                                 except Exception: pass
                             elif ptype == "plan_update":
-                                existing["steps"] = payload.get("steps", existing.get("steps", []))
+                                # 合并而非替换：迭代/修复轮的步骤只带当轮，
+                                # 直接替换会让前端计划树"缩水"，看起来不按顺序
+                                new_steps = payload.get("steps", [])
+                                merged = {s.get("step_id"): s for s in existing.get("steps", [])}
+                                for s in new_steps:
+                                    if s.get("step_id"):
+                                        merged[s["step_id"]] = s
+                                existing["steps"] = list(merged.values())
                             elif ptype == "log":
                                 logs = existing.get("logs", [])
-                                logs.append(payload)
+                                logs.append({
+                                    "id": len(logs),
+                                    "timestamp": payload.get("timestamp") or time.strftime("%H:%M:%S"),
+                                    "agent": payload.get("agent", ""),
+                                    "type": payload.get("type", "info"),
+                                    "message": payload.get("message", ""),
+                                })
                                 existing["logs"] = logs
                             elif ptype == "agent_status":
                                 existing["agent_status"] = payload
@@ -791,6 +804,8 @@ class Handler(BaseHTTPRequestHandler):
                 "goal": data.get("goal", ""),
                 "steps": data.get("steps", []),
                 "report": data.get("final_report") or data.get("report", ""),
+                "logs": data.get("logs", []),
+                "revision": bool(data.get("revision")),
             })
             return self._json({"error":"not found"},404)
         if p.startswith("/task/") and p.endswith("/report"):
