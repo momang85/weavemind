@@ -22,44 +22,83 @@ class ReportGeneratorWorker(AsyncWorkerBase):
 
     @staticmethod
     def _embed_charts_inline(report: str, charts) -> str:
-        """把图表按主题关键词内联插入到对应标题小节之后，
-        让图表紧贴需要可视化的文字段落；未匹配的图表插到首个二级小节后。"""
+        """把图表按主题关键词插入到对应【子小节内容之后】（最深匹配标题的
+        段落末尾），让图表紧贴需要可视化的文字；未匹配的图表插到数据来源前。"""
         chart_topics = {
             "market_trend.png": ("规模", "增长", "趋势", "年份", "预测", "展望"),
             "player_share.png": ("玩家", "份额", "竞争", "厂商", "格局", "对比"),
-            "key_numbers.png": ("数据", "规模", "关键", "核心", "指标", "业绩", "概览"),
+            "key_numbers.png": ("规模", "数据", "关键", "核心", "指标", "业绩"),
             "source_distribution.png": ("来源", "参考", "检索"),
-            "topic_terms.png": ("技术", "趋势", "分析", "焦点", "热词"),
+            "topic_terms.png": ("技术", "趋势", "焦点", "热词"),
         }
         inserted: set[str] = set()
+        # 解析标题行（级别 + 文本）
+        headings: list[tuple[int, int, str]] = []  # (index, level, text)
+        for i, line in enumerate(report.split("\n")):
+            m = re.match(r"^(#{1,6})\s+(.+)$", line)
+            if m:
+                headings.append((i, len(m.group(1)), m.group(2).strip()))
+
+        def subsection_end(idx: int, level: int) -> int:
+            """返回从标题 idx 开始的小节内容结束行（下一个同级/更高级标题前）。"""
+            for jidx, jlvl, _jtext in headings:
+                if jidx <= idx:
+                    continue
+                if jlvl <= level:
+                    return jidx
+            return len(report.split("\n"))
+
+        def best_heading(keywords) -> int | None:
+            """返回匹配到的【最深】标题行号。"""
+            best = None
+            for idx, lvl, text in headings:
+                if any(k and k in text for k in keywords):
+                    if best is None or lvl > headings[best][1]:
+                        best = idx
+            return best
+
         lines = report.split("\n")
         out: list[str] = []
-        for line in lines:
-            out.append(line)
-            if not line.startswith("#"):
-                continue
-            heading = line.lstrip("#").strip()
-            for c in charts:
-                if c.name in inserted:
-                    continue
-                keywords = chart_topics.get(c.name) or [
-                    k for k in c.stem.replace("-", "_").split("_") if k
-                ]
-                if any(k and k in heading for k in keywords):
-                    out.append("")
-                    out.append(f"![{c.stem}]({c})")
-                    out.append("")
-                    inserted.add(c.name)
-        # 未匹配到小节：插入首个二级标题之后（若存在），否则文末
+        # 按行推进：遇到匹配子小节的结束位置时插入对应图表
+        heading_map = {idx: (lvl, text) for idx, lvl, text in headings}
+        planned: list[tuple[int, str, str]] = []  # (插入行号, 图表名, markdown)
         for c in charts:
-            if c.name in inserted:
-                continue
-            anchor = next((i for i, l in enumerate(out) if l.startswith("## ") and i > 0), -1)
-            if anchor >= 0:
-                out.insert(anchor + 1, f"\n![{c.stem}]({c})")
+            keywords = chart_topics.get(c.name) or [
+                k for k in c.stem.replace("-", "_").split("_") if k
+            ]
+            hidx = best_heading(keywords)
+            if hidx is not None:
+                end = subsection_end(hidx, heading_map[hidx][0])
+                planned.append((end, c.name, f"![{c.stem}]({c})"))
             else:
-                out.append(f"\n![{c.stem}]({c})")
-        return "\n".join(out)
+                planned.append((-1, c.name, f"![{c.stem}]({c})"))
+        # 未匹配 → 数据来源附录前（若无则文末）
+        src_idx = next((i for i, l in enumerate(lines) if l.startswith("## ") and "来源" in l), None)
+        fallback_line = src_idx if src_idx is not None else len(lines)
+        for name, md in [(n, m) for _, n, m in planned if _ == -1]:
+            planned.append((fallback_line, name, md))
+        planned = [(line_no, name, md) for line_no, name, md in planned if line_no >= 0]
+        planned.sort(key=lambda x: (x[0], x[1]))
+        # 按行号分组，每组末尾统一追加（多图落在同小节时按顺序排列）
+        by_line: dict[int, list[str]] = {}
+        for line_no, name, md in planned:
+            if name in inserted:
+                continue
+            inserted.add(name)
+            by_line.setdefault(line_no, []).append(md)
+        result: list[str] = []
+        for i, line in enumerate(lines):
+            if i in by_line:
+                result.append("")
+                result.extend(by_line[i])
+                result.append("")
+            result.append(line)
+        # 落在文末（无数据来源小节）的图表
+        if len(lines) in by_line:
+            result.append("")
+            result.extend(by_line[len(lines)])
+            result.append("")
+        return "\n".join(result)
 
     async def execute(self, instruction: str, task: dict | None = None) -> str:
         charts_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "charts"
@@ -156,28 +195,30 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                 "chars": len(report),
             }, ensure_ascii=False)
         except Exception as exc:
-            # 回退：LLM 不可用时输出结构化模板
-            chart_md = "".join(f"![{c.stem}]({c})" + "\n\n" for c in charts)
-            report = f"""# Data Science Pipeline Report
-
-## Summary
-- Generated: {time.strftime('%Y-%m-%d %H:%M:%S')}
-- Task: {instruction[:200]}
-- Pipeline executed by WeaveMind AI Team
-
-## Data Overview
-{data_info}
-
-## Exploratory Data Analysis
-{chart_md}
-
-## Model Training Results
-The model training results are embedded above. See the feature importance chart for key predictors.
-
-## Conclusion
-This report was generated automatically by the WeaveMind multi-agent system.
-All data, code, and visualizations are available in the project workspace.
-"""
+            # 回退：LLM 不可用时，输出以任务主题为标题的结构化报告（不套数据管道模板）
+            theme = re.sub(r"^(任务目标|用户目标|原始指令)[：:]\s*", "", str(instruction)).strip()[:150]
+            if not theme:
+                theme = "任务报告"
+            src_urls2: list[str] = []
+            m2 = re.search(r"\[数据来源\](.*)", str(instruction), re.S)
+            if m2:
+                for u in re.findall(r"https?://[^\s\)\]]+", m2.group(1)):
+                    if u not in src_urls2:
+                        src_urls2.append(u)
+            src_md = "\n".join(f"- {u}" for u in src_urls2[:15]) or "（检索未返回可用来源）"
+            chart_md = "".join(f"![{c.stem}]({c})\n\n" for c in charts)
+            report = (
+                f"# {theme} 报告\n\n"
+                "## 摘要\n\n"
+                f"本报告由织光多智能体系统自动生成，围绕「{theme}」汇总真实检索资料与工作区分析结果。\n\n"
+                "## 关键发现\n\n"
+                f"- 检索到 {len(src_urls2)} 个数据来源（详见文末「数据来源」）。\n"
+                "- 相关图表见下，数据均来自搜索结果，未编造。\n\n"
+                "## 图表\n\n"
+                f"{chart_md}"
+                "## 数据来源\n\n"
+                f"{src_md}\n"
+            )
             try:
                 rpath = report_dir / "report.md"
                 rpath.write_text(report, encoding="utf-8")

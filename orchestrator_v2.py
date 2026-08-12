@@ -1938,19 +1938,36 @@ def to_usd(v, mult, unit):
     return v * s
 
 # 1) 年份-规模趋势（X=年份, Y=市场规模/亿美元）
+# 只采用"同一语句内出现 ≥2 个年份-数值对"的连贯序列（如"2019年…110亿美元
+# 增长至2025年…726亿美元"），避免把不同来源、不同口径的散点混成一条假趋势。
 YEAR_PAT = re.compile(
     r"(\d{4})\s*年?[^。；;]{0,45}?(\d+(?:\.\d+)?)\s*(万亿|千亿|百亿|亿|万)?\s*(亿美元|亿元|万美元|万元|美元)"
 )
-year_vals = {}
-for t in texts:
-    for m in YEAR_PAT.finditer(t):
-        y = int(m.group(1))
-        if not (2018 <= y <= 2032):
-            continue
-        v = to_usd(float(m.group(2)), m.group(3) or "", m.group(4) or "")
-        if v <= 0 or v > 1000000:
-            continue
-        year_vals.setdefault(y, []).append(v)
+
+
+def coherent_year_points():
+    points = {}
+    for t in texts:
+        for sent in re.split(r"[。；;\n]", t):
+            # 句子级判断：整句围绕"规模/市场/营收"才认可（如"市场规模从110亿增长至726亿"）
+            if not any(k in sent for k in ("规模", "市场", "营收", "收入", "销售额")):
+                continue
+            found = []
+            for m in YEAR_PAT.finditer(sent):
+                y = int(m.group(1))
+                if not (2018 <= y <= 2032):
+                    continue
+                v = to_usd(float(m.group(2)), m.group(3) or "", m.group(4) or "")
+                if not (50 <= v <= 10000):
+                    continue  # 排除 8.58/36.2 这类噪声小值与异常大值
+                found.append((y, v))
+            if len({y for y, _ in found}) >= 2:
+                for y, v in found:
+                    points.setdefault(y, []).append(v)
+    return points
+
+
+year_vals = coherent_year_points()
 if len(year_vals) >= 2:
     years = sorted(year_vals)
     vals = [statistics.median(year_vals[y]) for y in years]
@@ -2004,21 +2021,41 @@ METRIC_KW = (
 )
 
 def metric_label(text, pos):
-    pre = text[max(0, pos - 15):pos]
+    pre = text[max(0, pos - 8):pos]
     for kw in METRIC_KW:
         if kw in pre:
             return kw
-    return pre[-4:].strip()
+    return ""
+
+
+def plausible(v, unit):
+    if unit in ("亿美元", "美元"):
+        return 1 <= v <= 50000
+    if unit == "亿元":
+        return 1 <= v <= 100000
+    if unit == "%":
+        return 0 <= v <= 100
+    if unit in ("万辆", "万台"):
+        return 0.1 <= v <= 5000
+    if unit in ("TOPS", "Gbps"):
+        return 1 <= v <= 10000
+    return True
 
 seen, picked = set(), []
 for t in texts:
     for m in KEY_PAT.finditer(t):
         label = metric_label(t, m.start())
+        if not label:
+            continue  # 数值前没有明确指标词 → 跳过（避免 8.58 误标）
+        v = float(m.group(1))
+        unit = m.group(3) or ""
+        if not plausible(v, unit):
+            continue
         key = (label, m.group(1), m.group(2) or "", m.group(3) or "")
         if key in seen:
             continue
         seen.add(key)
-        picked.append((label, float(m.group(1)), m.group(2) or "", m.group(3) or ""))
+        picked.append((label, v, m.group(2) or "", unit))
         if len(picked) >= 8:
             break
     if len(picked) >= 8:
