@@ -110,36 +110,42 @@
     },
     {
       "name": "auto-搜索特斯拉最新财报并",
-      "goal": "搜索特斯拉最新财报并总结要点",
+      "goal": "搜索特斯拉最新财报并总结要点。",
       "steps": [
         {
           "step_id": "1",
           "capability": "web_search",
-          "instruction": "搜索特斯拉最新财报",
+          "instruction": "搜索特斯拉最新财报，获取最近一个季度的财报发布链接、发布日期和核心财务信息摘要；若没有结果，记录提示信息供后续步骤判断",
           "timeout": 180
         },
         {
           "step_id": "2",
           "capability": "web_fetch",
-          "instruction": "获取特斯拉最新财报的详细内容 [URL: https://www.163.com/dy/article/K58O3S3G05198NMR.html] [URL: https://www.163.com/dy/article/K58O3S3G",
+          "instruction": "从步骤1的搜索结果中选取与特斯拉最新财报最相关的一个链接，抓取其详细财报内容页面；若步骤1无有效搜索结果，则提示用户更换关键词或查询历史财报，并跳过后续步骤 [URL: https://www.163.com/dy/article/K58O",
           "timeout": 180
         },
         {
           "step_id": "3",
-          "capability": "content_summary",
-          "instruction": "总结特斯拉最新财报的要点\n[上一步结果 2]:\n{\"status\": \"success\", \"url\": \"https://www.163.com/dy/article/K58O3S3G05198NMR.html\", \"title\": \"特",
+          "capability": "data_analyzer",
+          "instruction": "校验步骤2抓取的内容是否为特斯拉最新财报：确认是否包含财报日期、总营收、净利润、毛利率、交付量等关键指标；若内容与财报无关或缺少核心字段，则输出提示“抓取内容与财报不符，请更换来源或查询历史财报”并终止后续总结；若通过校验，则提取结构化财报",
           "timeout": 180
         },
         {
           "step_id": "4",
-          "capability": "web_search",
-          "instruction": "搜索特斯拉2025年第二季度财报的关键财务指标，如营收、每股收益、净利润、汽车交付量、毛利率等",
+          "capability": "content_summary",
+          "instruction": "基于步骤3校验通过的财报数据，总结特斯拉最新财报要点，包括总营收、净利润、同比/环比变化、汽车交付量、能源与储能业务、利润率以及市场预期对比等；若步骤3未通过校验，则直接输出相应提示信息\n[上一步结果 3]:\n{\"status\": \"fai",
           "timeout": 180
         },
         {
           "step_id": "5",
+          "capability": "web_search",
+          "instruction": "搜索特斯拉最新发布的季度财报（如2025年Q1或最近一期）的关键信息，涵盖营收、净利润、汽车交付量、毛利率等核心指标。",
+          "timeout": 180
+        },
+        {
+          "step_id": "6",
           "capability": "content_summary",
-          "instruction": "将搜索到的财务数据整合到现有总结中，生成一份包含财务和业务进展的完整财报要点总结\n[上一步结果 i1-1]:\n[\n  {\n    \"title\": \"特斯拉25Q2财报会，核心要点总结！|汽车|中证|机器人|自动驾驶|知名企...\",\n  ",
+          "instruction": "基于上一步的搜索结果，提取并总结特斯拉最新财报的要点，包括财务表现、业务亮点和风险因素。\n[上一步结果 i1-1]:\n[\n  {\n    \"title\": \"特斯拉25Q2财报会，核心要点总结！|汽车|中证|机器人|自动驾驶|知名企...\"",
           "timeout": 180
         }
       ]

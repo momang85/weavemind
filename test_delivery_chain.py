@@ -296,7 +296,47 @@ class TestPackageFallback(unittest.TestCase):
         self.assertEqual(sorted(out[-1]["depends_on"]), ["1", "2", "3"])
 
 
+class TestImageStepInjection(unittest.TestCase):
+    def test_report_goal_gets_image_step(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        steps = [
+            {"step_id": "1", "capability": "web_search", "instruction": "s"},
+            {"step_id": "2", "capability": "content_summary", "instruction": "c"},
+            {"step_id": "3", "capability": "report_generator", "instruction": "r"},
+        ]
+        out = o._ensure_image_step(steps, "搜索特斯拉最新财报并总结要点")
+        caps = [s.get("capability") for s in out]
+        self.assertIn("image_generator", caps)
+        img = next(s for s in out if s.get("capability") == "image_generator")
+        report = next(s for s in out if s.get("capability") == "report_generator")
+        self.assertIn(img["step_id"], report["depends_on"], "报告应等待配图完成")
+        self.assertEqual(set(img["depends_on"]), {"1", "2"}, "配图依赖搜索+摘要")
+
+    def test_game_goal_no_image_step(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        steps = [
+            {"step_id": "1", "capability": "code_execution", "instruction": "贪吃蛇"},
+            {"step_id": "2", "capability": "report_generator", "instruction": "r"},
+        ]
+        out = o._ensure_image_step(steps, "做一个极简的贪吃蛇游戏")
+        self.assertEqual(len(out), 2)
+
+
 class TestSearchCharts(unittest.TestCase):
+    def test_wants_visualization_gate(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        self.assertTrue(o._wants_visualization("生成可视化报告并嵌入图表"))
+        self.assertTrue(o._wants_visualization("分析市场趋势图"))
+        self.assertFalse(o._wants_visualization("搜索特斯拉最新财报并总结要点"))
+        self.assertFalse(o._wants_visualization("写一份行业报告"))
+        self.assertFalse(o._wants_visualization("展示产品图片"))
+
     def test_generates_charts_from_search_results(self):
         import json
         import tempfile

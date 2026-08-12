@@ -19,6 +19,13 @@
     "base_url": "https://api.siliconflow.cn/v1",
     "model": "deepseek-ai/DeepSeek-V3"
   },
+  "image": {
+    "api_key": "YOUR_OPENAI_API_KEY",
+    "base_url": "https://api.siliconflow.cn/v1",
+    "model": "gpt-image-2",
+    "size": "1536x1024",
+    "quality": "low"
+  },
   "redis": {
     "host": "localhost",
     "port": 6379

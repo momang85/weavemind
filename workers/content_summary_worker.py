@@ -5,7 +5,7 @@
 职责: 总结、提炼、生成报告——调用 LLM 处理文本内容。
 """
 
-import os, sys, logging
+import os, sys, logging, re, time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -16,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 class ContentSummaryWorker(AsyncWorkerBase):
     """LLM 驱动的文本总结 Worker。"""
+    _needs_task = True
 
     def __init__(self, **kwargs):
         super().__init__(
@@ -24,7 +25,7 @@ class ContentSummaryWorker(AsyncWorkerBase):
             **kwargs,
         )
 
-    async def execute(self, instruction: str) -> str:
+    async def execute(self, instruction: str, task: dict | None = None) -> str:
         import asyncio
         loop = asyncio.get_running_loop()
 
@@ -42,10 +43,40 @@ class ContentSummaryWorker(AsyncWorkerBase):
 
             try:
                 result = call_llm(system, user, expect_json=False)
-                return result.get("content", f"总结: {instruction}")
+                text = result.get("content", f"总结: {instruction}")
             except Exception as exc:
                 logger.warning("Content summary failed: %s", exc)
                 raise
+
+            from pathlib import Path
+            # 确定性图表嵌入：与 report_generator 一致，保证图文搭配
+            if task and task.get("workspace"):
+                proj = Path(str(task["workspace"])) / "project"
+                charts = []
+                if proj.exists():
+                    cutoff = time.time() - 120 * 60
+                    for c in proj.rglob("*.png"):
+                        if "screenshots" in c.parts:
+                            continue
+                        try:
+                            if c.stat().st_mtime >= cutoff:
+                                charts.append(c)
+                        except OSError:
+                            continue
+                if charts:
+                    text += "\n\n## 图表\n\n"
+                    text += "".join(f"![{c.stem}]({c})\n\n" for c in charts[:6])
+            # 来源附录：从指令中的 [数据来源] 块提取 URL
+            src_urls: list[str] = []
+            m = re.search(r"\[数据来源\](.*)", str(instruction), re.S)
+            if m:
+                for u in re.findall(r"https?://[^\s\)\]]+", m.group(1)):
+                    if u not in src_urls:
+                        src_urls.append(u)
+            if src_urls:
+                text += "\n\n## 数据来源\n\n"
+                text += "\n".join(f"- [{u}]({u})" for u in src_urls[:15])
+            return text
 
         return await loop.run_in_executor(None, _sync)
 
