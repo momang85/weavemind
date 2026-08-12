@@ -52,7 +52,7 @@ def _loads_json_loose(text: str) -> dict:
 # ─────────────────────────────────────────────
 PLANNER_SYSTEM = """Break user goals into sequential execution steps.
 
-Available: web_search, web_fetch, data_loader, data_analyzer, model_trainer, report_generator, content_summary, code_execution, file_io, package, image_generator
+Available: web_search, web_fetch, data_loader, data_analyzer, model_trainer, report_generator, content_summary, code_execution, file_io, package
 
 Rules:
 1. Each step uses EXACTLY one capability from the list above
@@ -74,7 +74,6 @@ Output ONLY this JSON with no extra text:
 KNOWN_CAPABILITIES = {
     "web_search", "web_fetch", "data_loader", "data_analyzer", "model_trainer",
     "report_generator", "content_summary", "code_execution", "file_io", "package",
-    "image_generator",
 }
 
 _TOPIC_STOPWORDS = {
@@ -95,7 +94,7 @@ ITERATOR_SYSTEM = """你是严格的交付验收评审。根据用户目标评�
 2. accepted=false 只用于明确缺失用户要求的内容；不要吹毛求疵，不要"锦上添花"
 3. next_steps 每次最多3个，必须具体可执行，指令用中文并严格围绕目标主题
 4. 每个 next_step 的 capability 只能是下列之一，且每步只能一个：
-   web_search, web_fetch, data_loader, data_analyzer, model_trainer, report_generator, content_summary, code_execution, file_io, package, image_generator
+   web_search, web_fetch, data_loader, data_analyzer, model_trainer, report_generator, content_summary, code_execution, file_io, package
 5. 若交付物缺失的原因是外部资料获取失败（搜索无结果、网页无内容、URL 无效），next_steps 必须改为直接生成（content_summary / code_execution），禁止再安排 web_search 或 web_fetch
 6. 若目标明确要求"可视化/图表/趋势图"且交付物没有生成任何图表（无 PNG），
    next_steps 必须包含一个 code_execution 图表生成步骤（用 matplotlib 基于已有检索数据/摘要作图），禁止只追加报告步骤
@@ -583,52 +582,6 @@ class OrchestratorV2:
                            "message": "Plan self-check: auto-added report step",
                            "timestamp": self._now_iso()})
         return steps
-
-    @staticmethod
-    def _ensure_image_step(steps: list[dict], goal: str) -> list[dict]:
-        """报告/调研类任务注入 AI 制图步骤（image_generator）：
-        目标含报告/调研/总结等关键词时，在摘要后、报告前追加一步生成信息图，
-        报告生成器会把图片嵌入正文，让"图文搭配"。"""
-        g = str(goal or "").lower()
-        img_hint = any(k in g for k in (
-            "报告", "调研", "研报", "可视化", "图表", "总结", "分析",
-            "illustration", "infographic", "图片", "插图",
-        ))
-        if not img_hint or not steps:
-            return steps
-        if any(s.get("capability") == "image_generator" for s in steps):
-            return steps
-        # 依赖：优先内容摘要（有文字可搭配），其次搜索
-        dep_ids = [
-            s.get("step_id") for s in steps
-            if s.get("capability") in ("content_summary", "web_search")
-        ]
-        img_step = {
-            "step_id": f"img-{len(steps) + 1}",
-            "capability": "image_generator",
-            "instruction": (
-                "为以下主题生成一张现代商务信息图插画（与报告文字搭配，帮助读者直观理解）：\n"
-                f"主题：{goal[:300]}\n"
-                "要求：现代扁平商务风格、专业配色、构图清晰；可包含少量简洁英文标签；"
-                "不要包含中文文字（避免渲染错误）；不要出现品牌商标或真实人物肖像。"
-            ),
-            "timeout": 180,
-            "depends_on": dep_ids or [],
-        }
-        insert_at = len(steps)
-        for i, s in enumerate(steps):
-            if s.get("capability") in ("report_generator", "content_summary"):
-                insert_at = i
-                break
-        out = steps[:insert_at] + [img_step] + steps[insert_at:]
-        img_id = img_step["step_id"]
-        for s in out:
-            if s.get("capability") == "report_generator":
-                deps = list(s.get("depends_on") or [])
-                if img_id not in deps:
-                    deps.append(img_id)
-                s["depends_on"] = deps
-        return out
 
     _FILE_CAPABILITIES = (
         "code_execution", "file_io", "web_fetch", "data_loader",
@@ -1209,14 +1162,6 @@ class OrchestratorV2:
         if status in ("FAILED", "ERROR"):
             return result
         payload = result.get("result")
-        if isinstance(payload, str):
-            # Worker 返回的可能是 JSON 字符串（如 image_generator / data_loader）
-            try:
-                parsed = json.loads(payload)
-                if isinstance(parsed, dict):
-                    payload = parsed
-            except Exception:
-                pass
         if isinstance(payload, dict):
             inner = str(payload.get("status", "")).lower()
             if inner in ("failed", "failure", "error"):
@@ -1232,7 +1177,7 @@ class OrchestratorV2:
     def _finalize(self, goal: str, steps: list[dict], results: list[dict]) -> str:
         """Generate final report."""
         ok = sum(1 for r in results if r.get("status") == "SUCCESS")
-        fail = sum(1 for r in results if r.get("status") == "FAILED")
+        fail = len(results) - ok
         status = "SUCCESS" if fail == 0 else "PARTIAL" if ok > 0 else "FAILED"
 
         report = f"## Task Report\\n\\nGoal: {goal}\\nStatus: {status}\\nSteps: {len(steps)} ({ok} OK, {fail} failed)\\n\\n"
@@ -1252,7 +1197,7 @@ class OrchestratorV2:
 
         results = [completed_all.get(s["step_id"], {}) for s in all_steps]
         ok = sum(1 for r in results if r.get("status") == "SUCCESS")
-        fail = sum(1 for r in results if r.get("status") == "FAILED")
+        fail = len(results) - ok
         status = "SUCCESS" if fail == 0 else "PARTIAL" if ok > 0 else "FAILED"
 
         # 1) 交付文件：从 package 步骤结果解析 zip 条目
@@ -1958,11 +1903,14 @@ class OrchestratorV2:
                 continue
         return False
 
-    def _generate_search_charts(self, task_id: str) -> None:
-        """确定性图表生成：基于真实检索结果（search_results.json）绘制
-        来源分布与关键数值点两张 PNG。不调用 LLM，端点波动也不影响。"""
+    def _generate_search_charts(self, task_id: str, goal: str) -> None:
+        """确定性图表生成：仅当目标明确要求可视化时，基于真实检索结果
+        （search_results.json）绘制多张直观图表（来源分布、关键数值点、
+        主题热词）。不调用 LLM，端点波动也不影响。"""
         import subprocess
         import sys
+        if not self._wants_visualization(goal):
+            return
         project = task_project_dir(task_id)
         src = project / "search_results.json"
         if not src.exists():
@@ -1989,15 +1937,20 @@ for d in items:
 top = domains.most_common(8)
 if top:
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    ax.barh([d for d, _ in top][::-1], [c for _, c in top][::-1], color="#3b82f6")
+    ax.barh([d for d, _ in top][::-1], [c for _, c in top][::-1],
+            color="#3b82f6", edgecolor="white")
     ax.set_title("数据来源分布（检索结果）")
     ax.set_xlabel("结果数")
+    for i, (_, c) in enumerate(top):
+        ax.text(c + 0.05, i, str(c), va="center", fontsize=9)
     plt.tight_layout()
-    plt.savefig("source_distribution.png", dpi=100)
+    plt.savefig("source_distribution.png", dpi=110)
     plt.close()
 
-# 2) 检索摘要中的关键数值点
-pat = re.compile(r"(\d+(?:\.\d+)?)\s*(万亿|千亿|百亿|亿|万)?\s*(美元|元|人民币|万辆|万台|TOPS|Gbps|%|亿美元)")
+# 2) 检索摘要中的关键数值点（真实数据）
+pat = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(万亿|千亿|百亿|亿|万)?\s*(美元|元|人民币|万辆|万台|TOPS|Gbps|%|亿美元)"
+)
 seen, picked = set(), []
 for d in items:
     text = str(d.get("title") or "") + " " + str(d.get("snippet") or "")
@@ -2014,11 +1967,38 @@ for d in items:
 if picked:
     fig, ax = plt.subplots(figsize=(10, 5))
     labels = [f"{v:g}{u}{unit}" for v, u, unit in picked]
-    ax.bar(labels, [v for v, _, _ in picked], color="#10b981")
-    ax.set_title("检索资料中的关键数值点（来源：搜索结果摘要）")
+    ax.bar(labels, [v for v, _, _ in picked], color="#10b981", edgecolor="white")
+    ax.set_title("检索资料中的关键数值点（真实数据，来源：搜索结果摘要）")
     ax.tick_params(axis="x", rotation=30)
+    for i, v in enumerate([v for v, _, _ in picked]):
+        ax.text(i, v, f"{v:g}", ha="center", va="bottom", fontsize=9)
     plt.tight_layout()
-    plt.savefig("key_numbers.png", dpi=100)
+    plt.savefig("key_numbers.png", dpi=110)
+    plt.close()
+
+# 3) 主题热词分布（检索结果高频词，反映讨论焦点）
+words = Counter()
+stop = {
+    "一个", "我们", "以及", "可以", "没有", "已经", "进行", "通过", "对于",
+    "不是", "就是", "同时", "如果", "因为", "所以", "但是", "这些", "那些",
+    "其中", "以及", "主要", "相关", "关于", "根据", "报告", "分析",
+}
+for d in items:
+    text = (str(d.get("title") or "") + " " + str(d.get("snippet") or "")).lower()
+    for m in re.finditer(r"[\u4e00-\u9fff]{2,4}", text):
+        w = m.group(0)
+        if w in stop:
+            continue
+        words[w] += 1
+top_w = words.most_common(10)
+if top_w:
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.barh([w for w, _ in top_w][::-1], [c for _, c in top_w][::-1],
+            color="#f59e0b", edgecolor="white")
+    ax.set_title("检索资料主题热词（高频词）")
+    ax.set_xlabel("出现次数")
+    plt.tight_layout()
+    plt.savefig("topic_terms.png", dpi=110)
     plt.close()
 print("charts generated")
 '''
@@ -2079,8 +2059,6 @@ print("charts generated")
                 f"历史经验（来自相似任务，可复用框架/数据/结论）：\n"
                 f"{memory_context[:1000]}\n\n原始指令：{steps[0]['instruction']}"
             )
-        # 报告/调研类任务：注入 AI 制图步骤，生成与主题搭配的信息图嵌入报告
-        steps = self._ensure_image_step(steps, goal)
         steps = self._wire_report_deps(steps)
         steps = self._wire_search_fetch_deps(steps)
         steps = self._ensure_package_step(steps)
@@ -2429,31 +2407,6 @@ print("charts generated")
                         "\n\n[数据来源]\n"
                         + "\n".join(f"- {u}" for u in urls[:12])
                     )
-            if step.get("capability") == "image_generator":
-                # 注入摘要/前序长文本作为配图要点，让信息图与报告文字搭配
-                with lock:
-                    ctx = ""
-                    for k, r in completed.items():
-                        if r.get("status") != "SUCCESS":
-                            continue
-                        t = str(r.get("result") or "")
-                        if t.startswith("{"):
-                            try:
-                                parsed = json.loads(t)
-                                if isinstance(parsed, dict) and parsed.get("status") == "failed":
-                                    continue
-                                t = str(parsed.get("result") or parsed.get("report_path") or t)
-                            except Exception:
-                                pass
-                        if len(t) > len(ctx):
-                            ctx = t
-                if ctx:
-                    base_instr += (
-                        "\n\n[配图要点]\n"
-                        "以下为本任务前序步骤的内容摘要，供你理解主题与关键数据，"
-                        "据此设计信息图的构图与视觉元素（不要照抄文字，避免在图中渲染中文）：\n"
-                        + ctx[:600]
-                    )
             # 注入全局任务目标，让 Worker 知道自己正在为哪个目标工作（Codex 式上下文感知）
             if goal and "任务目标" not in base_instr[:60]:
                 step["instruction"] = f"任务目标：{goal[:300]}\n\n{base_instr}"
@@ -2469,14 +2422,6 @@ print("charts generated")
                         "result": f"Blocked by: {blocked}",
                         "elapsed_sec": round(time.time() - step_start, 1)}
             result = self._dispatch_step_safe(goal, step, task_id, state)
-            if step.get("capability") == "image_generator" and result.get("status") == "FAILED":
-                # 配图是锦上添花：生成失败不拖垮报告任务，降级为 SKIPPED
-                logger.warning("Image generation skipped (non-fatal): %s",
-                               str(result.get("result"))[:120])
-                result = {
-                    "task_id": step["step_id"], "status": "SKIPPED",
-                    "result": f"image skipped: {str(result.get('result'))[:200]}",
-                }
             if step.get("capability") == "web_search" and result.get("status") == "SUCCESS":
                 # 搜索结果 URL 累计到任务级，供后续（含反射轮）报告步骤引用来源
                 try:
@@ -2499,7 +2444,7 @@ print("charts generated")
                                 json.dumps(parsed, ensure_ascii=False, indent=1),
                                 encoding="utf-8",
                             )
-                            self._generate_search_charts(task_id)
+                            self._generate_search_charts(task_id, goal)
                         except Exception as exc:
                             logger.warning("search_results.json write failed: %s", exc)
             result["elapsed_sec"] = round(time.time() - step_start, 1)
@@ -2647,7 +2592,7 @@ print("charts generated")
             })
             for s in steps
         ]
-        has_failure = has_failure or any(r.get("status") == "FAILED" for r in results)
+        has_failure = has_failure or any(r.get("status") != "SUCCESS" for r in results)
         return results, has_failure
 
     def _inject_step_context(self, step: dict, completed: dict, lock: threading.Lock) -> str:

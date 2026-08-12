@@ -296,36 +296,6 @@ class TestPackageFallback(unittest.TestCase):
         self.assertEqual(sorted(out[-1]["depends_on"]), ["1", "2", "3"])
 
 
-class TestImageStepInjection(unittest.TestCase):
-    def test_report_goal_gets_image_step(self):
-        from orchestrator_v2 import OrchestratorV2
-
-        o = OrchestratorV2.__new__(OrchestratorV2)
-        steps = [
-            {"step_id": "1", "capability": "web_search", "instruction": "s"},
-            {"step_id": "2", "capability": "content_summary", "instruction": "c"},
-            {"step_id": "3", "capability": "report_generator", "instruction": "r"},
-        ]
-        out = o._ensure_image_step(steps, "搜索特斯拉最新财报并总结要点")
-        caps = [s.get("capability") for s in out]
-        self.assertIn("image_generator", caps)
-        img = next(s for s in out if s.get("capability") == "image_generator")
-        report = next(s for s in out if s.get("capability") == "report_generator")
-        self.assertIn(img["step_id"], report["depends_on"], "报告应等待配图完成")
-        self.assertEqual(set(img["depends_on"]), {"1", "2"}, "配图依赖搜索+摘要")
-
-    def test_game_goal_no_image_step(self):
-        from orchestrator_v2 import OrchestratorV2
-
-        o = OrchestratorV2.__new__(OrchestratorV2)
-        steps = [
-            {"step_id": "1", "capability": "code_execution", "instruction": "贪吃蛇"},
-            {"step_id": "2", "capability": "report_generator", "instruction": "r"},
-        ]
-        out = o._ensure_image_step(steps, "做一个极简的贪吃蛇游戏")
-        self.assertEqual(len(out), 2)
-
-
 class TestSearchCharts(unittest.TestCase):
     def test_wants_visualization_gate(self):
         from orchestrator_v2 import OrchestratorV2
@@ -355,14 +325,59 @@ class TestSearchCharts(unittest.TestCase):
                 {"title": "英伟达营收620亿美元", "url": "https://b.com/r2",
                  "snippet": "市场份额49%"},
             ], ensure_ascii=False), encoding="utf-8")
-            o._generate_search_charts("t-chart-1")
+            o._generate_search_charts("t-chart-1", "请分析AI芯片市场并生成可视化报告")
             pngs = [p.name for p in proj.glob("*.png")]
             self.assertIn("source_distribution.png", pngs)
             self.assertIn("key_numbers.png", pngs)
+            self.assertIn("topic_terms.png", pngs)
         finally:
             ws_mod.WORKSPACE_ROOT = old_root
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_no_charts_for_summary_goal(self):
+        import json
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = tempfile.mkdtemp(prefix="weavemind_chart_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            proj = ws_mod.task_project_dir("t-chart-2")
+            (proj / "search_results.json").write_text(json.dumps([
+                {"title": "特斯拉营收620亿美元", "url": "https://a.com/r1", "snippet": "净利润50亿"},
+            ], ensure_ascii=False), encoding="utf-8")
+            o._generate_search_charts("t-chart-2", "搜索特斯拉最新财报并总结要点")
+            self.assertEqual([p.name for p in proj.glob("*.png")], [])
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_embed_charts_inline_after_matching_heading(self):
+        from pathlib import Path
+        from workers.report_generator_worker import ReportGeneratorWorker
+
+        charts = [
+            Path("project/key_numbers.png"),
+            Path("project/source_distribution.png"),
+            Path("project/topic_terms.png"),
+        ]
+        report = (
+            "# 报告\n\n## 市场规模\n\n2025年全球AI芯片市场约1200亿美元。\n\n"
+            "## 技术趋势\n\n深度学习与边缘计算融合。\n\n"
+            "## 数据来源\n\n- https://a.com\n"
+        )
+        out = ReportGeneratorWorker._embed_charts_inline(report, charts)
+        self.assertGreater(out.find("![key_numbers]"), out.find("## 市场规模"))
+        self.assertLess(out.find("![key_numbers]"), out.find("## 技术趋势"))
+        self.assertGreater(out.find("![topic_terms]"), out.find("## 技术趋势"))
+        self.assertGreater(out.find("![source_distribution]"), out.find("## 数据来源"))
+
+
 
 
 

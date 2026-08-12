@@ -56,17 +56,6 @@ def _apply_env(cfg: dict) -> None:
         os.environ["EMBEDDING_BASE_URL"] = emb["base_url"]
     if emb.get("model"):
         os.environ["EMBEDDING_MODEL"] = emb["model"]
-    img = cfg.get("image", {})
-    if img.get("api_key"):
-        os.environ["IMAGE_API_KEY"] = img["api_key"]
-    if img.get("base_url"):
-        os.environ["IMAGE_API_BASE_URL"] = img["base_url"]
-    if img.get("model"):
-        os.environ["IMAGE_MODEL"] = img["model"]
-    if img.get("size"):
-        os.environ["IMAGE_SIZE"] = img["size"]
-    if img.get("quality"):
-        os.environ["IMAGE_QUALITY"] = img["quality"]
     os.environ["PYTHONIOENCODING"] = "utf-8"
 
 
@@ -155,7 +144,6 @@ def build_services(cfg: dict) -> list[tuple[str, list[str], Path | None, Path | 
         ("worker-data-analyzer", [py, str(BASE_DIR / "workers" / "data_analyzer_worker.py")], BASE_DIR, None),
         ("worker-model-trainer", [py, str(BASE_DIR / "workers" / "model_trainer_worker.py")], BASE_DIR, None),
         ("worker-report-generator", [py, str(BASE_DIR / "workers" / "report_generator_worker.py")], BASE_DIR, None),
-        ("worker-image-generator", [py, str(BASE_DIR / "workers" / "image_generator_worker.py")], BASE_DIR, None),
         ("critic", [py, str(BASE_DIR / "critic_agent.py")], BASE_DIR, None),
         ("orchestrator", [py, str(BASE_DIR / "orchestrator_v2.py")], BASE_DIR, None),
         ("webui", [py, str(BASE_DIR / "web_ui.py")], BASE_DIR, None),

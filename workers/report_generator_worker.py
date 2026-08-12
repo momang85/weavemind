@@ -20,6 +20,45 @@ class ReportGeneratorWorker(AsyncWorkerBase):
     _class_capabilities = ["report_generator"]
     _needs_task = True
 
+    @staticmethod
+    def _embed_charts_inline(report: str, charts) -> str:
+        """把图表按主题关键词内联插入到对应标题小节之后，
+        让图表紧贴需要可视化的文字段落；未匹配的图表插到首个二级小节后。"""
+        chart_topics = {
+            "key_numbers.png": ("数据", "规模", "关键", "核心", "业绩", "营收", "指标", "概览"),
+            "source_distribution.png": ("来源", "参考", "检索"),
+            "topic_terms.png": ("趋势", "技术", "分析", "焦点", "热词"),
+        }
+        inserted: set[str] = set()
+        lines = report.split("\n")
+        out: list[str] = []
+        for line in lines:
+            out.append(line)
+            if not line.startswith("#"):
+                continue
+            heading = line.lstrip("#").strip()
+            for c in charts:
+                if c.name in inserted:
+                    continue
+                keywords = chart_topics.get(c.name) or [
+                    k for k in c.stem.replace("-", "_").split("_") if k
+                ]
+                if any(k and k in heading for k in keywords):
+                    out.append("")
+                    out.append(f"![{c.stem}]({c})")
+                    out.append("")
+                    inserted.add(c.name)
+        # 未匹配到小节：插入首个二级标题之后（若存在），否则文末
+        for c in charts:
+            if c.name in inserted:
+                continue
+            anchor = next((i for i, l in enumerate(out) if l.startswith("## ") and i > 0), -1)
+            if anchor >= 0:
+                out.insert(anchor + 1, f"\n![{c.stem}]({c})")
+            else:
+                out.append(f"\n![{c.stem}]({c})")
+        return "\n".join(out)
+
     async def execute(self, instruction: str, task: dict | None = None) -> str:
         charts_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "charts"
         data_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "data"
@@ -38,6 +77,7 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             c for c in (charts_dir.glob("*.png") if charts_dir.exists() else [])
             if c.stat().st_mtime >= cutoff
         ]
+        proj_dir = None
         # 代码执行生成的图表（project/*.png）同样纳入，供报告嵌入
         if task and task.get("workspace"):
             proj_dir = Path(str(task["workspace"])) / "project"
@@ -75,8 +115,9 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                 "严格围绕任务主题，语言流畅。直接输出 Markdown 正文，不要额外说明。"
                 "重要：工作区列出的图表/数据文件若与本任务主题无关（例如游戏任务中出现房价数据集），"
                 "一律不得使用，只能使用上一步结果中与任务主题直接相关的信息。"
-                "若工作区存在与任务主题相关的图表文件（PNG），必须在报告中以"
-                "![图表说明](图表的绝对路径) 形式嵌入，并标注数据来源。"
+                "不要自行嵌入图表文件（系统会按章节自动嵌入图表）；"
+                "在需要图表辅助理解的段落后用文字提及对应图表名称即可（如"
+                "『如图 key_numbers 所示』）。"
             )
             user = f"{instruction}\n\n工作区产物：\n{artifacts}"
             # 主端点连试 2 次即切备用，减少慢端点对报告环节的拖累
@@ -99,11 +140,9 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                     "\n\n## 数据来源\n\n"
                     + "\n".join(f"- [{u}]({u})" for u in src_urls[:15])
                 )
-            # 确定性图表嵌入：不依赖 LLM 自觉，直接追加"## 图表"段落
+            # 图表内联嵌入：按主题把图表插到对应小节之后（紧贴需要可视化的文字）
             if charts:
-                report += "\n\n## 图表\n\n"
-                for c in charts[:6]:
-                    report += f"![{c.stem}]({c})\n\n"
+                report = self._embed_charts_inline(report, charts)
 
             rpath = report_dir / "report.md"
             rpath.write_text(report, encoding="utf-8")
