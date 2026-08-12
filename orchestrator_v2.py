@@ -1,4 +1,4 @@
-"""Orchestrator V2 — clean, linear, push-progress-enabled.
+﻿"""Orchestrator V2 — clean, linear, push-progress-enabled.
 
 Reuses all existing components: llm_client, common, async_worker_base, memory_manager,
 critic_agent, ws_helpers. No complex state machine — just: plan → dispatch → collect → report.
@@ -2010,71 +2010,7 @@ if len(share) >= 2:
     plt.savefig("player_share.png", dpi=110)
     plt.close()
 
-# 3) 指标-数值对比（X=指标/数据点标签, Y=数值）——回退/补充
-KEY_PAT = re.compile(
-    r"(\d+(?:\.\d+)?)\s*(万亿|千亿|百亿|亿|万)?\s*(亿美元|亿元|美元|%|万辆|万台|TOPS|Gbps)"
-)
-METRIC_KW = (
-    "市场规模", "规模", "营收", "收入", "净利润", "利润", "出货", "销量",
-    "增速", "增长", "份额", "占比", "渗透率", "资本开支", "预测", "同比",
-    "累计", "突破", "达", "超", "约",
-)
-
-def metric_label(text, pos):
-    pre = text[max(0, pos - 8):pos]
-    for kw in METRIC_KW:
-        if kw in pre:
-            return kw
-    return ""
-
-
-def plausible(v, unit):
-    if unit in ("亿美元", "美元"):
-        return 1 <= v <= 50000
-    if unit == "亿元":
-        return 1 <= v <= 100000
-    if unit == "%":
-        return 0 <= v <= 100
-    if unit in ("万辆", "万台"):
-        return 0.1 <= v <= 5000
-    if unit in ("TOPS", "Gbps"):
-        return 1 <= v <= 10000
-    return True
-
-seen, picked = set(), []
-for t in texts:
-    for m in KEY_PAT.finditer(t):
-        label = metric_label(t, m.start())
-        if not label:
-            continue  # 数值前没有明确指标词 → 跳过（避免 8.58 误标）
-        v = float(m.group(1))
-        unit = m.group(3) or ""
-        if not plausible(v, unit):
-            continue
-        key = (label, m.group(1), m.group(2) or "", m.group(3) or "")
-        if key in seen:
-            continue
-        seen.add(key)
-        picked.append((label, v, m.group(2) or "", unit))
-        if len(picked) >= 8:
-            break
-    if len(picked) >= 8:
-        break
-if picked:
-    fig, ax = plt.subplots(figsize=(10, 5))
-    labels = [f"{l} {v:g}{mult}{u}" for l, v, mult, u in picked]
-    ax.bar(labels, [v for _, v, _, _ in picked], color="#10b981", edgecolor="white")
-    ax.set_xlabel("指标/数据点")
-    ax.set_ylabel("数值（按各指标单位）")
-    ax.set_title("检索资料关键指标对比（真实数据，来自搜索结果）")
-    ax.tick_params(axis="x", rotation=30)
-    for i, v in enumerate([v for _, v, _, _ in picked]):
-        ax.text(i, v, f"{v:g}", ha="center", va="bottom", fontsize=9)
-    plt.tight_layout()
-    plt.savefig("key_numbers.png", dpi=110)
-    plt.close()
-
-# 4) 数据来源分布（X=来源域名, Y=结果数）
+# 3) 数据来源分布（X=来源域名, Y=结果数）
 domains = Counter()
 for d in items:
     m = re.match(r"https?://([^/]+)", str(d.get("url") or ""))
@@ -2091,7 +2027,7 @@ if top:
     plt.savefig("source_distribution.png", dpi=110)
     plt.close()
 
-# 5) 主题热词（X=热词, Y=出现次数）
+# 4\) 主题热词（X=热词, Y=出现次数）
 words = Counter()
 stop = {
     "一个", "我们", "以及", "可以", "没有", "已经", "进行", "通过", "对于",
@@ -2120,7 +2056,7 @@ print("charts generated")
         try:
             script_path.write_text(script, encoding="utf-8")
             proc = subprocess.run(
-                [sys.executable, str(script_path)],
+                [sys.executable, str(script_path), str(goal or "")],
                 cwd=str(project), capture_output=True, timeout=120,
             )
             if proc.returncode != 0:

@@ -27,7 +27,6 @@ class ReportGeneratorWorker(AsyncWorkerBase):
         chart_topics = {
             "market_trend.png": ("规模", "增长", "趋势", "年份", "预测", "展望"),
             "player_share.png": ("玩家", "份额", "竞争", "厂商", "格局", "对比"),
-            "key_numbers.png": ("规模", "数据", "关键", "核心", "指标", "业绩"),
             "source_distribution.png": ("来源", "参考", "检索"),
             "topic_terms.png": ("技术", "趋势", "焦点", "热词"),
         }
@@ -159,6 +158,9 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                 "不要自行嵌入图表文件（系统会按章节自动嵌入图表）；"
                 "在需要图表辅助理解的段落后用文字提及对应图表名称即可（如"
                 "『如图 key_numbers 所示』）。"
+                "报告正文必须包含一个「关键数据一览」表格（列：指标 | 数值 | "
+                "口径/年份 | 来源），只收录与本任务主题直接相关的数值；"
+                "不同来源/口径的数字分开列出并注明差异，不要把不可比的数据混为一谈。"
             )
             user = f"{instruction}\n\n工作区产物：\n{artifacts}"
             # 主端点连试 2 次即切备用，减少慢端点对报告环节的拖累
@@ -207,13 +209,24 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                         src_urls2.append(u)
             src_md = "\n".join(f"- {u}" for u in src_urls2[:15]) or "（检索未返回可用来源）"
             chart_md = "".join(f"![{c.stem}]({c})\n\n" for c in charts)
+            # 兜底也要保留真实研究内容（上一步摘要/检索结果），避免"报告只有模板"
+            prev_parts = re.findall(
+                r"\[上一步结果 \d+\]:\s*(.*?)(?=\n\[上一步结果 |\n用户目标：|\Z)",
+                str(instruction), re.S,
+            )
+            prev_content = "\n\n".join(p.strip() for p in prev_parts)
+            prev_md = (
+                "\n\n## 研究内容（检索/摘要）\n\n" + prev_content
+                if prev_content else ""
+            )
             report = (
                 f"# {theme} 报告\n\n"
                 "## 摘要\n\n"
                 f"本报告由织光多智能体系统自动生成，围绕「{theme}」汇总真实检索资料与工作区分析结果。\n\n"
                 "## 关键发现\n\n"
                 f"- 检索到 {len(src_urls2)} 个数据来源（详见文末「数据来源」）。\n"
-                "- 相关图表见下，数据均来自搜索结果，未编造。\n\n"
+                "- 关键数据见「研究内容」中的表格与图表，均来自搜索结果，未编造。\n\n"
+                f"{prev_md}\n\n"
                 "## 图表\n\n"
                 f"{chart_md}"
                 "## 数据来源\n\n"

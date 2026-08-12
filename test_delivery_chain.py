@@ -328,7 +328,6 @@ class TestSearchCharts(unittest.TestCase):
             o._generate_search_charts("t-chart-1", "请分析AI芯片市场并生成可视化报告")
             pngs = [p.name for p in proj.glob("*.png")]
             self.assertIn("source_distribution.png", pngs)
-            self.assertIn("key_numbers.png", pngs)
             self.assertIn("topic_terms.png", pngs)
             # 结构化序列：≥3 个年份 → 趋势图；≥3 个厂商份额 → 对比图
             self.assertIn("market_trend.png", pngs, "应有年份-规模趋势图")
@@ -365,7 +364,7 @@ class TestSearchCharts(unittest.TestCase):
         from workers.report_generator_worker import ReportGeneratorWorker
 
         charts = [
-            Path("project/key_numbers.png"),
+            Path("project/market_trend.png"),
             Path("project/source_distribution.png"),
             Path("project/topic_terms.png"),
         ]
@@ -375,8 +374,8 @@ class TestSearchCharts(unittest.TestCase):
             "## 数据来源\n\n- https://a.com\n"
         )
         out = ReportGeneratorWorker._embed_charts_inline(report, charts)
-        self.assertGreater(out.find("![key_numbers]"), out.find("## 市场规模"))
-        self.assertLess(out.find("![key_numbers]"), out.find("## 技术趋势"))
+        self.assertGreater(out.find("![market_trend]"), out.find("## 市场规模"))
+        self.assertLess(out.find("![market_trend]"), out.find("## 技术趋势"))
         self.assertGreater(out.find("![topic_terms]"), out.find("## 技术趋势"))
         self.assertGreater(out.find("![source_distribution]"), out.find("## 数据来源"))
 
