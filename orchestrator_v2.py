@@ -1916,7 +1916,9 @@ class OrchestratorV2:
         if not src.exists():
             return
         script = r'''# -*- coding: utf-8 -*-
-import json, re
+"""从真实检索结果提取结构化序列，生成有明确 X/Y 轴的语义图表。
+优先：年份-规模趋势、厂商-份额对比；回退：指标-数值对比、来源分布、主题热词。"""
+import json, re, statistics
 from collections import Counter
 import matplotlib
 matplotlib.use("Agg")
@@ -1927,8 +1929,115 @@ plt.rcParams["axes.unicode_minus"] = False
 
 data = json.load(open("search_results.json", encoding="utf-8"))
 items = [d for d in data if isinstance(d, dict)]
+texts = [str(d.get("title") or "") + " " + str(d.get("snippet") or "") for d in items]
 
-# 1) 数据来源分布
+def to_usd(v, mult, unit):
+    """统一折算到亿美元（仅美元/亿元人民币口径，供趋势示意）。"""
+    scale = {"万亿": 10000.0, "千亿": 1000.0, "百亿": 100.0, "亿": 1.0, "万": 0.0001}
+    s = scale.get(mult, 1.0)
+    return v * s
+
+# 1) 年份-规模趋势（X=年份, Y=市场规模/亿美元）
+YEAR_PAT = re.compile(
+    r"(\d{4})\s*年?[^。；;]{0,45}?(\d+(?:\.\d+)?)\s*(万亿|千亿|百亿|亿|万)?\s*(亿美元|亿元|万美元|万元|美元)"
+)
+year_vals = {}
+for t in texts:
+    for m in YEAR_PAT.finditer(t):
+        y = int(m.group(1))
+        if not (2018 <= y <= 2032):
+            continue
+        v = to_usd(float(m.group(2)), m.group(3) or "", m.group(4) or "")
+        if v <= 0 or v > 1000000:
+            continue
+        year_vals.setdefault(y, []).append(v)
+if len(year_vals) >= 2:
+    years = sorted(year_vals)
+    vals = [statistics.median(year_vals[y]) for y in years]
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.plot(years, vals, marker="o", color="#3b82f6", linewidth=2)
+    for x, v in zip(years, vals):
+        ax.text(x, v, f"{v:,.0f}", ha="center", va="bottom", fontsize=9)
+    ax.set_xlabel("年份")
+    ax.set_ylabel("市场规模（亿美元，据检索资料折算）")
+    ax.set_title("市场规模年份趋势（真实数据，来自搜索结果）")
+    ax.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig("market_trend.png", dpi=110)
+    plt.close()
+
+# 2) 厂商-份额对比（X=厂商, Y=市场份额/%）
+ENTITIES = [
+    "英伟达", "NVIDIA", "AMD", "英特尔", "Intel", "谷歌", "Google", "华为", "昇腾",
+    "高通", "Qualcomm", "寒武纪", "海光", "亚马逊", "AWS", "微软", "Microsoft",
+    "Meta", "台积电", "Cerebras", "Graphcore",
+    "美国", "中国", "欧洲", "亚太", "日本",
+]
+share = {}
+for t in texts:
+    for ent in ENTITIES:
+        pat = re.compile(re.escape(ent) + r"[^。；;]{0,20}?(\d+(?:\.\d+)?)\s*%")
+        for m in pat.finditer(t):
+            share.setdefault(ent, []).append(float(m.group(1)))
+if len(share) >= 2:
+    ents = sorted(share, key=lambda e: -statistics.median(share[e]))[:8]
+    vals = [statistics.median(share[e]) for e in ents]
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.bar(ents, vals, color="#f59e0b", edgecolor="white")
+    for i, v in enumerate(vals):
+        ax.text(i, v, f"{v:g}%", ha="center", va="bottom", fontsize=9)
+    ax.set_xlabel("主要厂商/玩家")
+    ax.set_ylabel("市场份额（%）")
+    ax.set_title("主要玩家/区域份额对比（真实数据，来自搜索结果）")
+    plt.tight_layout()
+    plt.savefig("player_share.png", dpi=110)
+    plt.close()
+
+# 3) 指标-数值对比（X=指标/数据点标签, Y=数值）——回退/补充
+KEY_PAT = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(万亿|千亿|百亿|亿|万)?\s*(亿美元|亿元|美元|%|万辆|万台|TOPS|Gbps)"
+)
+METRIC_KW = (
+    "市场规模", "规模", "营收", "收入", "净利润", "利润", "出货", "销量",
+    "增速", "增长", "份额", "占比", "渗透率", "资本开支", "预测", "同比",
+    "累计", "突破", "达", "超", "约",
+)
+
+def metric_label(text, pos):
+    pre = text[max(0, pos - 15):pos]
+    for kw in METRIC_KW:
+        if kw in pre:
+            return kw
+    return pre[-4:].strip()
+
+seen, picked = set(), []
+for t in texts:
+    for m in KEY_PAT.finditer(t):
+        label = metric_label(t, m.start())
+        key = (label, m.group(1), m.group(2) or "", m.group(3) or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        picked.append((label, float(m.group(1)), m.group(2) or "", m.group(3) or ""))
+        if len(picked) >= 8:
+            break
+    if len(picked) >= 8:
+        break
+if picked:
+    fig, ax = plt.subplots(figsize=(10, 5))
+    labels = [f"{l} {v:g}{mult}{u}" for l, v, mult, u in picked]
+    ax.bar(labels, [v for _, v, _, _ in picked], color="#10b981", edgecolor="white")
+    ax.set_xlabel("指标/数据点")
+    ax.set_ylabel("数值（按各指标单位）")
+    ax.set_title("检索资料关键指标对比（真实数据，来自搜索结果）")
+    ax.tick_params(axis="x", rotation=30)
+    for i, v in enumerate([v for _, v, _, _ in picked]):
+        ax.text(i, v, f"{v:g}", ha="center", va="bottom", fontsize=9)
+    plt.tight_layout()
+    plt.savefig("key_numbers.png", dpi=110)
+    plt.close()
+
+# 4) 数据来源分布（X=来源域名, Y=结果数）
 domains = Counter()
 for d in items:
     m = re.match(r"https?://([^/]+)", str(d.get("url") or ""))
@@ -1938,54 +2047,22 @@ top = domains.most_common(8)
 if top:
     fig, ax = plt.subplots(figsize=(8, 4.5))
     ax.barh([d for d, _ in top][::-1], [c for _, c in top][::-1],
-            color="#3b82f6", edgecolor="white")
-    ax.set_title("数据来源分布（检索结果）")
+            color="#8b5cf6", edgecolor="white")
     ax.set_xlabel("结果数")
-    for i, (_, c) in enumerate(top):
-        ax.text(c + 0.05, i, str(c), va="center", fontsize=9)
+    ax.set_title("数据来源分布（检索结果）")
     plt.tight_layout()
     plt.savefig("source_distribution.png", dpi=110)
     plt.close()
 
-# 2) 检索摘要中的关键数值点（真实数据）
-pat = re.compile(
-    r"(\d+(?:\.\d+)?)\s*(万亿|千亿|百亿|亿|万)?\s*(美元|元|人民币|万辆|万台|TOPS|Gbps|%|亿美元)"
-)
-seen, picked = set(), []
-for d in items:
-    text = str(d.get("title") or "") + " " + str(d.get("snippet") or "")
-    for m in pat.finditer(text):
-        key = (m.group(1), m.group(2) or "", m.group(3) or "")
-        if key in seen:
-            continue
-        seen.add(key)
-        picked.append((float(m.group(1)), m.group(2) or "", m.group(3) or ""))
-        if len(picked) >= 8:
-            break
-    if len(picked) >= 8:
-        break
-if picked:
-    fig, ax = plt.subplots(figsize=(10, 5))
-    labels = [f"{v:g}{u}{unit}" for v, u, unit in picked]
-    ax.bar(labels, [v for v, _, _ in picked], color="#10b981", edgecolor="white")
-    ax.set_title("检索资料中的关键数值点（真实数据，来源：搜索结果摘要）")
-    ax.tick_params(axis="x", rotation=30)
-    for i, v in enumerate([v for v, _, _ in picked]):
-        ax.text(i, v, f"{v:g}", ha="center", va="bottom", fontsize=9)
-    plt.tight_layout()
-    plt.savefig("key_numbers.png", dpi=110)
-    plt.close()
-
-# 3) 主题热词分布（检索结果高频词，反映讨论焦点）
+# 5) 主题热词（X=热词, Y=出现次数）
 words = Counter()
 stop = {
     "一个", "我们", "以及", "可以", "没有", "已经", "进行", "通过", "对于",
     "不是", "就是", "同时", "如果", "因为", "所以", "但是", "这些", "那些",
     "其中", "以及", "主要", "相关", "关于", "根据", "报告", "分析",
 }
-for d in items:
-    text = (str(d.get("title") or "") + " " + str(d.get("snippet") or "")).lower()
-    for m in re.finditer(r"[\u4e00-\u9fff]{2,4}", text):
+for t in texts:
+    for m in re.finditer(r"[\u4e00-\u9fff]{2,4}", t.lower()):
         w = m.group(0)
         if w in stop:
             continue
@@ -1994,9 +2071,9 @@ top_w = words.most_common(10)
 if top_w:
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.barh([w for w, _ in top_w][::-1], [c for _, c in top_w][::-1],
-            color="#f59e0b", edgecolor="white")
-    ax.set_title("检索资料主题热词（高频词）")
+            color="#06b6d4", edgecolor="white")
     ax.set_xlabel("出现次数")
+    ax.set_title("检索资料主题热词")
     plt.tight_layout()
     plt.savefig("topic_terms.png", dpi=110)
     plt.close()

@@ -320,16 +320,19 @@ class TestSearchCharts(unittest.TestCase):
         try:
             proj = ws_mod.task_project_dir("t-chart-1")
             (proj / "search_results.json").write_text(json.dumps([
-                {"title": "2025年AI芯片市场规模1200亿美元", "url": "https://a.com/r1",
-                 "snippet": "增长32%"},
-                {"title": "英伟达营收620亿美元", "url": "https://b.com/r2",
-                 "snippet": "市场份额49%"},
+                {"title": "2023年AI芯片市场规模800亿美元，2024年1000亿美元，2025年1200亿美元",
+                 "url": "https://a.com/r1", "snippet": "英伟达份额49%，AMD份额12%"},
+                {"title": "2026年全球AI芯片市场规模预计1500亿美元",
+                 "url": "https://b.com/r2", "snippet": "英特尔份额8%，谷歌份额7%，华为份额6%"},
             ], ensure_ascii=False), encoding="utf-8")
             o._generate_search_charts("t-chart-1", "请分析AI芯片市场并生成可视化报告")
             pngs = [p.name for p in proj.glob("*.png")]
             self.assertIn("source_distribution.png", pngs)
             self.assertIn("key_numbers.png", pngs)
             self.assertIn("topic_terms.png", pngs)
+            # 结构化序列：≥3 个年份 → 趋势图；≥3 个厂商份额 → 对比图
+            self.assertIn("market_trend.png", pngs, "应有年份-规模趋势图")
+            self.assertIn("player_share.png", pngs, "应有厂商-份额对比图")
         finally:
             ws_mod.WORKSPACE_ROOT = old_root
             import shutil

@@ -25,9 +25,11 @@ class ReportGeneratorWorker(AsyncWorkerBase):
         """把图表按主题关键词内联插入到对应标题小节之后，
         让图表紧贴需要可视化的文字段落；未匹配的图表插到首个二级小节后。"""
         chart_topics = {
-            "key_numbers.png": ("数据", "规模", "关键", "核心", "业绩", "营收", "指标", "概览"),
+            "market_trend.png": ("规模", "增长", "趋势", "年份", "预测", "展望"),
+            "player_share.png": ("玩家", "份额", "竞争", "厂商", "格局", "对比"),
+            "key_numbers.png": ("数据", "规模", "关键", "核心", "指标", "业绩", "概览"),
             "source_distribution.png": ("来源", "参考", "检索"),
-            "topic_terms.png": ("趋势", "技术", "分析", "焦点", "热词"),
+            "topic_terms.png": ("技术", "趋势", "分析", "焦点", "热词"),
         }
         inserted: set[str] = set()
         lines = report.split("\n")
