@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -70,6 +71,19 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                 raise RuntimeError("Generated report too short")
             if not report.startswith("#"):
                 report = "# 报告\n\n" + report
+
+            # 数据来源附录：从指令中的 [数据来源] 块提取 URL 并去重
+            src_urls: list[str] = []
+            m = re.search(r"\[数据来源\](.*)", str(instruction), re.S)
+            if m:
+                for u in re.findall(r"https?://[^\s\)\]]+", m.group(1)):
+                    if u not in src_urls:
+                        src_urls.append(u)
+            if src_urls:
+                report += (
+                    "\n\n## 数据来源\n\n"
+                    + "\n".join(f"- [{u}]({u})" for u in src_urls[:15])
+                )
 
             rpath = report_dir / "report.md"
             rpath.write_text(report, encoding="utf-8")

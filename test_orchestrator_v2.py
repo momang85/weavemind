@@ -37,6 +37,9 @@ class FakeMemory:
     def consolidate_memory(self, *args, **kwargs):
         pass
 
+    def inject_context(self, goal):
+        return ""
+
 
 class FakeRedis:
     def set(self, *args, **kwargs):
@@ -50,6 +53,8 @@ def make_orch(**overrides):
     o._max_steps = 8
     o._max_parallel = 3
     o._max_iterations = 2
+    o._max_reflection_steps = 3
+    o._reflection_accept_score = 6.0
     o._plan_confirm_timeout = 300
     o._stall_timeout = 60
     o._critic_enabled = False
@@ -60,6 +65,8 @@ def make_orch(**overrides):
     o._planner_llm = None
     o._task_starts = {"test-other-task": 0.0}  # 模拟并发，避免单测触发真实工作区清理
     o._task_simple = {}
+    o._task_sources = {}
+    o._task_sources_lock = threading.Lock()
     o._task_starts_lock = threading.Lock()
     for k, v in overrides.items():
         setattr(o, k, v)
@@ -307,7 +314,7 @@ class TestExecuteStepsDag(unittest.TestCase):
 class TestRunIteration(unittest.TestCase):
     def test_iteration_accumulates_steps_and_uses_best_report(self):
         o = make_orch()
-        o._plan = lambda goal, task_id, context="": [
+        o._plan = lambda goal, task_id, context="", memory_context="": [
             {"step_id": "1", "capability": "content_summary", "instruction": "x", "timeout": 120}
         ]
         rounds = [
@@ -336,6 +343,82 @@ class TestRunIteration(unittest.TestCase):
         self.assertEqual(res["status"], "SUCCESS")
         self.assertEqual(len(res["steps"]), 2)
         self.assertTrue(res["final_report"].startswith("#"))
+
+    def test_reflection_score_gate_accepts_high_score(self):
+        o = make_orch()
+        o._plan = lambda goal, task_id, context="", memory_context="": [
+            {"step_id": "1", "capability": "content_summary", "instruction": "x", "timeout": 120}
+        ]
+        o._execute_steps = lambda steps, task_id, goal: (
+            [{"task_id": s["step_id"], "status": "SUCCESS", "result": "# 报告" + "A" * 300} for s in steps],
+            False,
+        )
+        reflected = {"n": 0}
+
+        def fake_reflect(goal, report, task_id):
+            reflected["n"] += 1
+            return {"accepted": False, "score": 8.0, "gaps": ["可优化"],
+                    "next_steps": [{"step_id": "x", "capability": "content_summary",
+                                    "instruction": "润色", "timeout": 120}]}
+
+        o._reflect = fake_reflect
+        o._now_iso = lambda: "t"
+        res = o.run("t-gate-1", "目标", auto_run=True)
+        self.assertEqual(reflected["n"], 1, "评分≥6 应只评审一次")
+        self.assertEqual(len(res["steps"]), 1, "高评分不应追加步骤")
+
+    def test_reflection_steps_capped(self):
+        o = make_orch()
+        o._plan = lambda goal, task_id, context="", memory_context="": [
+            {"step_id": "1", "capability": "content_summary", "instruction": "x", "timeout": 120}
+        ]
+
+        def fake_execute(steps, task_id, goal):
+            return [{"task_id": s["step_id"], "status": "SUCCESS", "result": "# 报告" + "A" * 300} for s in steps], False
+
+        o._execute_steps = fake_execute
+        reflected = {"n": 0}
+
+        def fake_reflect(goal, report, task_id):
+            reflected["n"] += 1
+            if reflected["n"] <= 2:
+                return {"accepted": False, "score": 4.0, "gaps": ["缺图"],
+                        "next_steps": [
+                            {"step_id": f"n{i}", "capability": "content_summary",
+                             "instruction": f"补{i}", "timeout": 120}
+                            for i in range(5)
+                        ]}
+            return {"accepted": True, "score": 9.0}
+
+        o._reflect = fake_reflect
+        o._now_iso = lambda: "t"
+        res = o.run("t-cap-1", "目标", auto_run=True)
+        # 每轮最多追加 3 个步骤；2 轮迭代 + 初始 = 1 + 3 + 3 = 7 步
+        self.assertEqual(len(res["steps"]), 7, "反思每轮最多追加 3 步")
+
+    def test_inject_memory_context_logs(self):
+        o = make_orch()
+        o._now_iso = lambda: "t"
+
+        class _Mem:
+            def inject_context(self, goal):
+                return "历史经验" * 40
+
+            def consolidate_memory(self, *a, **k):
+                pass
+
+        o._memory = _Mem()
+        ctx = o._inject_memory_context("目标", "t-mem")
+        self.assertIn("历史经验", ctx)
+        msgs = [m.get("payload", {}).get("message", "") for _, m in o._messaging.published]
+        self.assertTrue(any("注入历史经验" in s for s in msgs))
+
+        # 无经验时也推送提示日志
+        o._messaging = FakeMessaging()
+        o._memory = FakeMemory()
+        o._inject_memory_context("目标", "t-mem2")
+        msgs2 = [m.get("payload", {}).get("message", "") for _, m in o._messaging.published]
+        self.assertTrue(any("未找到相关历史经验" in s for s in msgs2))
 
 
 class TestPlanTopicGuard(unittest.TestCase):

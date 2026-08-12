@@ -64,6 +64,9 @@ Rules:
 7. NEVER chain repeated searches: at most one web_search/web_fetch pair per plan; if external info is unavailable, later steps must fall back to direct generation instead of searching again
 8. code_execution ONLY generates and runs Python scripts (or a single self-contained HTML file). JavaScript / multi-file frontend projects must be restructured into a single Python script or single HTML file; do NOT plan separate .js modules
 9. depends_on must NOT form cycles; each step may only depend on steps that come before it in execution order
+10. 当任务涉及"报告/分析/研报/调研"时：必须保留所有搜索结果的原始 URL，并把 URL 列表传给 report_generator；
+    报告步骤的指令必须包含"将图表嵌入报告"和"在报告末尾标注每条数据的来源链接"
+11. 若目标明确要求"图表/可视化/趋势图/plot/chart"，计划必须包含 data_analyzer 或 code_execution 图表生成步骤
 
 Output ONLY this JSON with no extra text:
 {"steps":[{"step_id":"1","capability":"web_search","instruction":"search for house price dataset","depends_on":[],"timeout":60}]}"""
@@ -84,13 +87,15 @@ _TOPIC_STOPWORDS = {
 }
 
 ITERATOR_SYSTEM = """你是严格的交付验收评审。根据用户目标评估交付物是否达标。
-输出严格JSON：{"accepted": true|false, "gaps": ["缺口1","缺口2"], "next_steps":[{"step_id":"1","capability":"...","instruction":"...","timeout":120}]}
+输出严格JSON：{"accepted": true|false, "score": 0-10, "gaps": ["缺口1","缺口2"], "next_steps":[{"step_id":"1","capability":"...","instruction":"...","timeout":120}]}
 规则：
-1. accepted=false 只用于明确缺失用户要求的内容；不要吹毛求疵
-2. next_steps 每次最多3个，必须具体可执行，指令用中文并严格围绕目标主题
-3. 每个 next_step 的 capability 只能是下列之一，且每步只能一个：
+1. score 是交付物与目标的吻合度（0-10）。只有 score < 6 且存在明确缺失时才 accepted=false；
+   核心内容已完成、只是缺少可选的润色项时，score 应给 6 分以上并 accepted=true
+2. accepted=false 只用于明确缺失用户要求的内容；不要吹毛求疵，不要"锦上添花"
+3. next_steps 每次最多3个，必须具体可执行，指令用中文并严格围绕目标主题
+4. 每个 next_step 的 capability 只能是下列之一，且每步只能一个：
    web_search, web_fetch, data_loader, data_analyzer, model_trainer, report_generator, content_summary, code_execution, file_io, package
-4. 若交付物缺失的原因是外部资料获取失败（搜索无结果、网页无内容、URL 无效），next_steps 必须改为直接生成（content_summary / code_execution），禁止再安排 web_search 或 web_fetch
+5. 若交付物缺失的原因是外部资料获取失败（搜索无结果、网页无内容、URL 无效），next_steps 必须改为直接生成（content_summary / code_execution），禁止再安排 web_search 或 web_fetch
 只输出JSON。"""
 
 # ─────────────────────────────────────────────
@@ -109,12 +114,16 @@ class OrchestratorV2:
         self._max_steps = 8
         self._max_parallel = 3
         self._max_iterations = 2
+        self._max_reflection_steps = 3
+        self._reflection_accept_score = 6.0
         self._plan_confirm_timeout = 300
         self._stall_timeout = 300
         self._max_offtopic_regenerations = 2
         self._planner_model = None
         self._task_starts: dict[str, float] = {}
         self._task_simple: dict[str, bool] = {}
+        self._task_sources: dict[str, list[str]] = {}
+        self._task_sources_lock = threading.Lock()
         self._task_starts_lock = threading.Lock()
         _cfg = {}
         try:
@@ -133,6 +142,8 @@ class OrchestratorV2:
             self._max_steps = max(1, int(_sys.get('max_steps', 8)))
             self._max_parallel = max(1, int(_sys.get('max_parallel', 3)))
             self._max_iterations = max(0, int(_sys.get('max_iterations', 2)))
+            self._max_reflection_steps = max(1, int(_sys.get('max_reflection_steps', 3)))
+            self._reflection_accept_score = max(0.0, float(_sys.get('reflection_accept_score', 6.0)))
             self._plan_confirm_timeout = max(30, int(_sys.get('plan_confirm_timeout', 300)))
             self._stall_timeout = max(5, int(_sys.get('stall_timeout', 60)))
         except Exception:
@@ -206,7 +217,25 @@ class OrchestratorV2:
         return None
 
     # ── Plan ──
-    def _plan(self, goal: str, task_id: str, context: str = "") -> list[dict]:
+    def _inject_memory_context(self, goal: str, task_id: str) -> str:
+        """查历史经验并推送 memory 日志（无经验时也明确提示），
+        模板路径与 LLM 规划路径统一从这里拿上下文。"""
+        with self._memory_lock:
+            memory_context = self._memory.inject_context(goal)
+        if memory_context:
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "memory", "agent": "orchestrator",
+                           "message": f"Memory: 注入历史经验（{len(memory_context)} chars）",
+                           "timestamp": self._now_iso()})
+        else:
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "memory", "agent": "orchestrator",
+                           "message": "Memory: 未找到相关历史经验",
+                           "timestamp": self._now_iso()})
+        return memory_context
+
+    def _plan(self, goal: str, task_id: str, context: str = "",
+              memory_context: str = "") -> list[dict]:
         """Ask LLM to decompose goal into steps."""
         direct = self._direct_deliverable_plan(goal)
         if direct:
@@ -222,14 +251,6 @@ class OrchestratorV2:
             push_progress(self._messaging, task_id, "log",
                           {"type": "context", "agent": "orchestrator",
                            "message": f"Conversation context: {len(context)} chars",
-                           "timestamp": self._now_iso()})
-
-        with self._memory_lock:
-            memory_context = self._memory.inject_context(goal)
-        if memory_context:
-            push_progress(self._messaging, task_id, "log",
-                          {"type": "memory", "agent": "orchestrator",
-                           "message": f"Memory: {len(memory_context)} chars of relevant experience",
                            "timestamp": self._now_iso()})
 
         topic_hint = (
@@ -1889,6 +1910,9 @@ class OrchestratorV2:
             logger.warning("Old zip cleanup failed for %s: %s", task_id, exc)
         logger.info("Task %s: %s", task_id, goal[:80])
 
+        # 记忆注入：模板路由与 LLM 规划都先查历史经验（观众可见 memory 日志）
+        memory_context = self._inject_memory_context(goal, task_id)
+
         # 1. Plan（模板步骤直接采用，否则 LLM 规划）
         used_template = False
         if template_steps:
@@ -1906,7 +1930,13 @@ class OrchestratorV2:
                 steps = self._ensure_report_step(steps, task_id)
                 used_template = True
             else:
-                steps = self._plan(goal, task_id, context)
+                steps = self._plan(goal, task_id, context, memory_context)
+        # 模板路径：把历史经验作为额外上下文注入首步骤，让框架可复用
+        if memory_context and used_template and steps:
+            steps[0]["instruction"] = (
+                f"历史经验（来自相似任务，可复用框架/数据/结论）：\n"
+                f"{memory_context[:1000]}\n\n原始指令：{steps[0]['instruction']}"
+            )
         steps = self._wire_report_deps(steps)
         steps = self._wire_search_fetch_deps(steps)
         steps = self._ensure_package_step(steps)
@@ -1997,15 +2027,28 @@ class OrchestratorV2:
                 # 简单任务：一轮执行即交付，由贯通测试守门，不做反射式追加迭代
                 break
             verdict = self._reflect(goal, best_report, task_id)
-            if not verdict or verdict.get("accepted"):
-                if verdict and verdict.get("accepted"):
-                    push_progress(self._messaging, task_id, "log",
-                                  {"type": "info", "agent": "orchestrator",
-                                   "message": "Reflection: deliverable accepted",
-                                   "timestamp": self._now_iso()})
+            if not verdict:
+                break
+            # 评分门控：score ≥ 阈值直接接受；LLM 未给 score 时回退到 accepted 判断
+            score_raw = verdict.get("score")
+            if score_raw is None:
+                score = 5.0 if not verdict.get("accepted") else 10.0
+            else:
+                try:
+                    score = float(score_raw)
+                except (TypeError, ValueError):
+                    score = 5.0 if not verdict.get("accepted") else 10.0
+            if verdict.get("accepted") or score >= self._reflection_accept_score:
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "info", "agent": "orchestrator",
+                               "message": f"Reflection: deliverable accepted (score={score:.1f})",
+                               "timestamp": self._now_iso()})
                 break
             gaps = verdict.get("gaps") or []
-            next_steps = self._normalize_steps(verdict.get("next_steps") or [])
+            # 反思预算：每次最多追加 max_reflection_steps 个步骤，防止任务膨胀
+            next_steps = self._normalize_steps(
+                (verdict.get("next_steps") or [])[: self._max_reflection_steps]
+            )
             if not next_steps:
                 break
             iteration += 1
@@ -2135,6 +2178,7 @@ class OrchestratorV2:
 
         # 快速路径标志仅任务运行期间需要，用完即清，避免字典无限增长
         self._task_simple.pop(task_id, None)
+        self._task_sources.pop(task_id, None)
         return {
             "task_id": task_id,
             "status": overall,
@@ -2181,6 +2225,10 @@ class OrchestratorV2:
 
     def _execute_steps(self, steps: list[dict], task_id: str, goal: str) -> tuple[list[dict], bool]:
         """并行 DAG 执行一轮步骤，返回（按步骤顺序的结果列表, 是否有失败）。"""
+        # 惰性初始化（兼容直接 __new__ 构造的实例/测试）
+        if not hasattr(self, "_task_sources"):
+            self._task_sources = {}
+            self._task_sources_lock = threading.Lock()
         completed: dict = {}
         has_failure = False
         state = {"replan_used": 0}
@@ -2197,6 +2245,31 @@ class OrchestratorV2:
         def execute_step(step):
             step_start = time.time()
             base_instr = self._inject_step_context(step, completed, lock)
+            if step.get("capability") in ("report_generator", "content_summary"):
+                # 注入前序搜索的数据来源 URL（任务级累计，跨迭代生效），
+                # 报告末尾自动生成"数据来源"附录
+                with self._task_sources_lock:
+                    urls: list[str] = list(self._task_sources.get(task_id, []))
+                # 补充本迭代 completed 中的搜索结果（双保险）
+                with lock:
+                    for k, r in completed.items():
+                        if r.get("status") != "SUCCESS":
+                            continue
+                        try:
+                            parsed = json.loads(str(r.get("result") or ""))
+                        except Exception:
+                            continue
+                        if not isinstance(parsed, list):
+                            continue
+                        for it in parsed:
+                            u = str((it or {}).get("url") or "").strip()
+                            if u.startswith("http") and u not in urls:
+                                urls.append(u)
+                if urls:
+                    base_instr += (
+                        "\n\n[数据来源]\n"
+                        + "\n".join(f"- {u}" for u in urls[:12])
+                    )
             # 注入全局任务目标，让 Worker 知道自己正在为哪个目标工作（Codex 式上下文感知）
             if goal and "任务目标" not in base_instr[:60]:
                 step["instruction"] = f"任务目标：{goal[:300]}\n\n{base_instr}"
@@ -2212,6 +2285,19 @@ class OrchestratorV2:
                         "result": f"Blocked by: {blocked}",
                         "elapsed_sec": round(time.time() - step_start, 1)}
             result = self._dispatch_step_safe(goal, step, task_id, state)
+            if step.get("capability") == "web_search" and result.get("status") == "SUCCESS":
+                # 搜索结果 URL 累计到任务级，供后续（含反射轮）报告步骤引用来源
+                try:
+                    parsed = json.loads(str(result.get("result") or ""))
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, list):
+                    with self._task_sources_lock:
+                        bucket = self._task_sources.setdefault(task_id, [])
+                        for it in parsed:
+                            u = str((it or {}).get("url") or "").strip()
+                            if u.startswith("http") and u not in bucket:
+                                bucket.append(u)
             result["elapsed_sec"] = round(time.time() - step_start, 1)
             return result
 
