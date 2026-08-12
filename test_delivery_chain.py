@@ -303,6 +303,8 @@ class TestSearchCharts(unittest.TestCase):
         o = OrchestratorV2.__new__(OrchestratorV2)
         self.assertTrue(o._wants_visualization("生成可视化报告并嵌入图表"))
         self.assertTrue(o._wants_visualization("分析市场趋势图"))
+        self.assertTrue(o._wants_visualization("储能产业链调研"))
+        self.assertTrue(o._wants_visualization("调研2026年国内新能源汽车市场现状"))
         self.assertFalse(o._wants_visualization("搜索特斯拉最新财报并总结要点"))
         self.assertFalse(o._wants_visualization("写一份行业报告"))
         self.assertFalse(o._wants_visualization("展示产品图片"))
@@ -332,6 +334,7 @@ class TestSearchCharts(unittest.TestCase):
             # 结构化序列：≥3 个年份 → 趋势图；≥3 个厂商份额 → 对比图
             self.assertIn("market_trend.png", pngs, "应有年份-规模趋势图")
             self.assertIn("player_share.png", pngs, "应有厂商-份额对比图")
+            self.assertIn("entity_frequency.png", pngs, "应有主体提及频率图")
         finally:
             ws_mod.WORKSPACE_ROOT = old_root
             import shutil

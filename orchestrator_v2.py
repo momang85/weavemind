@@ -1325,7 +1325,7 @@ class OrchestratorV2:
         """目标是否明确要求可视化/图表（只有此时才生成检索数据图表）。"""
         g = str(goal or "").lower()
         return any(k in g for k in (
-            "可视化", "图表", "趋势图", "柱状", "饼图", "折线",
+            "可视化", "图表", "趋势图", "柱状", "饼图", "折线", "调研",
             "plot", "chart", "graph",
         ))
 
@@ -2010,7 +2010,26 @@ if len(share) >= 2:
     plt.savefig("player_share.png", dpi=110)
     plt.close()
 
-# 3) 数据来源分布（X=来源域名, Y=结果数）
+# 3) 主要主体提及频率（信息量大且稳定：只要有检索结果即可画）
+entity_freq = Counter()
+for t in texts:
+    for ent in ENTITIES:
+        if ent in t:
+            entity_freq[ent] += t.count(ent)
+top_e = entity_freq.most_common(10)
+if len(top_e) >= 3:
+    fig, ax = plt.subplots(figsize=(10, 5))
+    ax.barh([e for e, _ in top_e][::-1], [c for _, c in top_e][::-1],
+            color="#0ea5e9", edgecolor="white")
+    ax.set_xlabel("提及次数")
+    ax.set_title("检索资料中的主要主体提及频率（厂商/区域）")
+    for i, (_, c) in enumerate(top_e):
+        ax.text(c + 0.1, i, str(c), va="center", fontsize=9)
+    plt.tight_layout()
+    plt.savefig("entity_frequency.png", dpi=110)
+    plt.close()
+
+# 4) 数据来源分布（X=来源域名, Y=结果数）
 domains = Counter()
 for d in items:
     m = re.match(r"https?://([^/]+)", str(d.get("url") or ""))
@@ -2027,12 +2046,15 @@ if top:
     plt.savefig("source_distribution.png", dpi=110)
     plt.close()
 
-# 4\) 主题热词（X=热词, Y=出现次数）
+# 5) 主题热词（X=热词, Y=出现次数）
 words = Counter()
 stop = {
     "一个", "我们", "以及", "可以", "没有", "已经", "进行", "通过", "对于",
     "不是", "就是", "同时", "如果", "因为", "所以", "但是", "这些", "那些",
     "其中", "以及", "主要", "相关", "关于", "根据", "报告", "分析",
+    "全球", "中国", "市场", "行业", "产业", "发展", "增长", "技术",
+    "应用", "领域", "数据", "信息", "公司", "企业", "方面", "预计",
+    "成为", "带来", "推动", "驱动", "规模", "目前", "未来", "有望",
 }
 for t in texts:
     for m in re.finditer(r"[\u4e00-\u9fff]{2,4}", t.lower()):
@@ -2040,11 +2062,13 @@ for t in texts:
         if w in stop:
             continue
         words[w] += 1
-top_w = words.most_common(10)
+top_w = words.most_common(12)
 if top_w:
     fig, ax = plt.subplots(figsize=(10, 5))
     ax.barh([w for w, _ in top_w][::-1], [c for _, c in top_w][::-1],
             color="#06b6d4", edgecolor="white")
+    for i, (_, c) in enumerate(top_w):
+        ax.text(c + 0.1, i, str(c), va="center", fontsize=9)
     ax.set_xlabel("出现次数")
     ax.set_title("检索资料主题热词")
     plt.tight_layout()

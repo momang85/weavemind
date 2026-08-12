@@ -27,6 +27,7 @@ class ReportGeneratorWorker(AsyncWorkerBase):
         chart_topics = {
             "market_trend.png": ("规模", "增长", "趋势", "年份", "预测", "展望"),
             "player_share.png": ("玩家", "份额", "竞争", "厂商", "格局", "对比"),
+            "entity_frequency.png": ("玩家", "厂商", "机构", "格局", "竞争", "主体"),
             "source_distribution.png": ("来源", "参考", "检索"),
             "topic_terms.png": ("技术", "趋势", "焦点", "热词"),
         }
