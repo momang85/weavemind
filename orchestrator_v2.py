@@ -2104,6 +2104,21 @@ print("charts generated")
             if simple:
                 # 简单任务：一轮执行即交付，由贯通测试守门，不做反射式追加迭代
                 break
+            # 报告/调研类任务：核心管道已产出报告（图表+来源已确定性嵌入）后直接交付，
+            # 反射轮只会追加"锦上添花"步骤拖慢任务（演示目标：时间可控）
+            _goal_low = str(goal or "").lower()
+            _research_hint = any(k in _goal_low for k in ("报告", "调研", "研报"))
+            _report_done = any(
+                s.get("capability") == "report_generator"
+                and completed_all.get(s["step_id"], {}).get("status") == "SUCCESS"
+                for s in all_steps
+            )
+            if _research_hint and _report_done:
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "info", "agent": "orchestrator",
+                               "message": "Reflection: 报告类任务核心交付已完成，跳过反射轮",
+                               "timestamp": self._now_iso()})
+                break
             verdict = self._reflect(goal, best_report, task_id)
             if not verdict:
                 break

@@ -79,7 +79,8 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                 "![图表说明](图表的绝对路径) 形式嵌入，并标注数据来源。"
             )
             user = f"{instruction}\n\n工作区产物：\n{artifacts}"
-            report = await self._call_llm(system=system, prompt=user)
+            # 主端点连试 2 次即切备用，减少慢端点对报告环节的拖累
+            report = await self._call_llm(system=system, prompt=user, max_attempts=2)
             report = report.strip()
             if len(report) < 100:
                 raise RuntimeError("Generated report too short")
