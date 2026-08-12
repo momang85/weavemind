@@ -107,6 +107,42 @@
           ]
         }
       ]
+    },
+    {
+      "name": "auto-搜索特斯拉最新财报并",
+      "goal": "搜索特斯拉最新财报并总结要点",
+      "steps": [
+        {
+          "step_id": "1",
+          "capability": "web_search",
+          "instruction": "搜索特斯拉最新财报",
+          "timeout": 180
+        },
+        {
+          "step_id": "2",
+          "capability": "web_fetch",
+          "instruction": "获取特斯拉最新财报的详细内容 [URL: https://www.163.com/dy/article/K58O3S3G05198NMR.html] [URL: https://www.163.com/dy/article/K58O3S3G",
+          "timeout": 180
+        },
+        {
+          "step_id": "3",
+          "capability": "content_summary",
+          "instruction": "总结特斯拉最新财报的要点\n[上一步结果 2]:\n{\"status\": \"success\", \"url\": \"https://www.163.com/dy/article/K58O3S3G05198NMR.html\", \"title\": \"特",
+          "timeout": 180
+        },
+        {
+          "step_id": "4",
+          "capability": "web_search",
+          "instruction": "搜索特斯拉2025年第二季度财报的关键财务指标，如营收、每股收益、净利润、汽车交付量、毛利率等",
+          "timeout": 180
+        },
+        {
+          "step_id": "5",
+          "capability": "content_summary",
+          "instruction": "将搜索到的财务数据整合到现有总结中，生成一份包含财务和业务进展的完整财报要点总结\n[上一步结果 i1-1]:\n[\n  {\n    \"title\": \"特斯拉25Q2财报会，核心要点总结！|汽车|中证|机器人|自动驾驶|知名企...\",\n  ",
+          "timeout": 180
+        }
+      ]
     }
   ]
 }

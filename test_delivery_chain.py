@@ -280,6 +280,21 @@ class TestPackageFallback(unittest.TestCase):
         out = o._ensure_package_step(steps)
         self.assertEqual(len(out), 2)
 
+    def test_package_step_waits_all_steps(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        # 计划含非文件生产步骤（web_search/web_fetch/content_summary）时，
+        # package 必须等所有步骤完成，否则工作区还没有新文件可打包
+        steps = [
+            {"step_id": "1", "capability": "web_search", "instruction": "s"},
+            {"step_id": "2", "capability": "web_fetch", "instruction": "f"},
+            {"step_id": "3", "capability": "content_summary", "instruction": "c"},
+        ]
+        out = o._ensure_package_step(steps)
+        self.assertEqual(len(out), 4)
+        self.assertEqual(sorted(out[-1]["depends_on"]), ["1", "2", "3"])
+
 
 class TestSearchFailureFallback(unittest.TestCase):
     def test_generation_fallback_code_for_game_instruction(self):

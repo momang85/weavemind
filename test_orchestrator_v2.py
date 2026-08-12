@@ -178,7 +178,7 @@ class TestWireReportDeps(unittest.TestCase):
         by_id = {s["step_id"]: s for s in out}
         self.assertEqual(by_id["2"]["depends_on"], ["1"], "摘要依赖搜索")
         self.assertEqual(set(by_id["3"]["depends_on"]), {"1", "2"}, "报告依赖搜索+摘要")
-        self.assertEqual(by_id["package-4"]["depends_on"], ["3"], "打包依赖报告")
+        self.assertEqual(by_id["package-4"]["depends_on"], ["1", "2", "3"], "打包依赖所有步骤")
         # 依赖不得被 break_cycles 清空（无环）
         for s in out:
             if s.get("capability") != "web_search":

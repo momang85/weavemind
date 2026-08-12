@@ -582,7 +582,8 @@ class OrchestratorV2:
             "step_id": f"package-{len(steps) + 1}",
             "capability": "package",
             "instruction": "将本次任务产出的所有文件打包为一个 ZIP 交付包（包含代码、资源、报告等），并返回下载链接。",
-            "depends_on": producers,
+            # 打包必须等所有步骤（含摘要/报告）完成，否则工作区还没有新文件可打包
+            "depends_on": [s.get("step_id") for s in steps],
             "timeout": 180,
         }]
 
