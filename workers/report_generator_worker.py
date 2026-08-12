@@ -38,6 +38,18 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             c for c in (charts_dir.glob("*.png") if charts_dir.exists() else [])
             if c.stat().st_mtime >= cutoff
         ]
+        # 代码执行生成的图表（project/*.png）同样纳入，供报告嵌入
+        if task and task.get("workspace"):
+            proj_dir = Path(str(task["workspace"])) / "project"
+            if proj_dir.exists():
+                charts += [
+                    c for c in proj_dir.rglob("*.png")
+                    if "screenshots" not in c.parts
+                    if c.stat().st_mtime >= cutoff
+                ]
+        # 去重（同名文件可能同时出现在 charts/ 与 project/）
+        seen_charts: set[str] = set()
+        charts = [c for c in charts if not (str(c) in seen_charts or seen_charts.add(str(c)))]
         data_csvs = [
             d for d in (data_dir.glob("*.csv") if data_dir.exists() else [])
             if d.stat().st_mtime >= cutoff
@@ -63,6 +75,8 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                 "严格围绕任务主题，语言流畅。直接输出 Markdown 正文，不要额外说明。"
                 "重要：工作区列出的图表/数据文件若与本任务主题无关（例如游戏任务中出现房价数据集），"
                 "一律不得使用，只能使用上一步结果中与任务主题直接相关的信息。"
+                "若工作区存在与任务主题相关的图表文件（PNG），必须在报告中以"
+                "![图表说明](图表的绝对路径) 形式嵌入，并标注数据来源。"
             )
             user = f"{instruction}\n\n工作区产物：\n{artifacts}"
             report = await self._call_llm(system=system, prompt=user)
@@ -84,6 +98,11 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                     "\n\n## 数据来源\n\n"
                     + "\n".join(f"- [{u}]({u})" for u in src_urls[:15])
                 )
+            # 确定性图表嵌入：不依赖 LLM 自觉，直接追加"## 图表"段落
+            if charts:
+                report += "\n\n## 图表\n\n"
+                for c in charts[:6]:
+                    report += f"![{c.stem}]({c})\n\n"
 
             rpath = report_dir / "report.md"
             rpath.write_text(report, encoding="utf-8")

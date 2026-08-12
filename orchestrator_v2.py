@@ -96,6 +96,8 @@ ITERATOR_SYSTEM = """你是严格的交付验收评审。根据用户目标评�
 4. 每个 next_step 的 capability 只能是下列之一，且每步只能一个：
    web_search, web_fetch, data_loader, data_analyzer, model_trainer, report_generator, content_summary, code_execution, file_io, package
 5. 若交付物缺失的原因是外部资料获取失败（搜索无结果、网页无内容、URL 无效），next_steps 必须改为直接生成（content_summary / code_execution），禁止再安排 web_search 或 web_fetch
+6. 若目标明确要求"可视化/图表/趋势图"且交付物没有生成任何图表（无 PNG），
+   next_steps 必须包含一个 code_execution 图表生成步骤（用 matplotlib 基于已有检索数据/摘要作图），禁止只追加报告步骤
 只输出JSON。"""
 
 # ─────────────────────────────────────────────
@@ -1892,6 +1894,82 @@ class OrchestratorV2:
                 continue
         return False
 
+    def _generate_search_charts(self, task_id: str) -> None:
+        """确定性图表生成：基于真实检索结果（search_results.json）绘制
+        来源分布与关键数值点两张 PNG。不调用 LLM，端点波动也不影响。"""
+        import subprocess
+        import sys
+        project = task_project_dir(task_id)
+        src = project / "search_results.json"
+        if not src.exists():
+            return
+        script = r'''# -*- coding: utf-8 -*-
+import json, re
+from collections import Counter
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
+plt.rcParams["axes.unicode_minus"] = False
+
+data = json.load(open("search_results.json", encoding="utf-8"))
+items = [d for d in data if isinstance(d, dict)]
+
+# 1) 数据来源分布
+domains = Counter()
+for d in items:
+    m = re.match(r"https?://([^/]+)", str(d.get("url") or ""))
+    if m:
+        domains[m.group(1).replace("www.", "")] += 1
+top = domains.most_common(8)
+if top:
+    fig, ax = plt.subplots(figsize=(8, 4.5))
+    ax.barh([d for d, _ in top][::-1], [c for _, c in top][::-1], color="#3b82f6")
+    ax.set_title("数据来源分布（检索结果）")
+    ax.set_xlabel("结果数")
+    plt.tight_layout()
+    plt.savefig("source_distribution.png", dpi=100)
+    plt.close()
+
+# 2) 检索摘要中的关键数值点
+pat = re.compile(r"(\d+(?:\.\d+)?)\s*(万亿|千亿|百亿|亿|万)?\s*(美元|元|人民币|万辆|万台|TOPS|Gbps|%|亿美元)")
+seen, picked = set(), []
+for d in items:
+    text = str(d.get("title") or "") + " " + str(d.get("snippet") or "")
+    for m in pat.finditer(text):
+        key = (m.group(1), m.group(2) or "", m.group(3) or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        picked.append((float(m.group(1)), m.group(2) or "", m.group(3) or ""))
+        if len(picked) >= 8:
+            break
+    if len(picked) >= 8:
+        break
+if picked:
+    fig, ax = plt.subplots(figsize=(10, 5))
+    labels = [f"{v:g}{u}{unit}" for v, u, unit in picked]
+    ax.bar(labels, [v for v, _, _ in picked], color="#10b981")
+    ax.set_title("检索资料中的关键数值点（来源：搜索结果摘要）")
+    ax.tick_params(axis="x", rotation=30)
+    plt.tight_layout()
+    plt.savefig("key_numbers.png", dpi=100)
+    plt.close()
+print("charts generated")
+'''
+        script_path = project / "make_charts.py"
+        try:
+            script_path.write_text(script, encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, str(script_path)],
+                cwd=str(project), capture_output=True, timeout=120,
+            )
+            if proc.returncode != 0:
+                logger.warning("make_charts failed: %s", proc.stderr.decode("utf-8", errors="replace")[:200])
+        except Exception as exc:
+            logger.warning("make_charts error: %s", exc)
+
     # ── Main Loop ──
     def run(self, task_id: str, goal: str, context: str = "",
             auto_run: bool = True, template_steps: list | None = None) -> dict:
@@ -2298,6 +2376,17 @@ class OrchestratorV2:
                             u = str((it or {}).get("url") or "").strip()
                             if u.startswith("http") and u not in bucket:
                                 bucket.append(u)
+                    # 把检索结果持久化到工作区，供图表生成步骤读取真实数据
+                    try:
+                        _json_path = task_project_dir(task_id) / "search_results.json"
+                        _json_path.write_text(
+                            json.dumps(parsed, ensure_ascii=False, indent=1),
+                            encoding="utf-8",
+                        )
+                        # 确定性图表：从真实检索结果生成 PNG（不依赖 LLM，端点波动也不卡）
+                        self._generate_search_charts(task_id)
+                    except Exception as exc:
+                        logger.warning("search_results.json write failed: %s", exc)
             result["elapsed_sec"] = round(time.time() - step_start, 1)
             return result
 

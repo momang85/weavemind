@@ -296,6 +296,36 @@ class TestPackageFallback(unittest.TestCase):
         self.assertEqual(sorted(out[-1]["depends_on"]), ["1", "2", "3"])
 
 
+class TestSearchCharts(unittest.TestCase):
+    def test_generates_charts_from_search_results(self):
+        import json
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = tempfile.mkdtemp(prefix="weavemind_chart_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            proj = ws_mod.task_project_dir("t-chart-1")
+            (proj / "search_results.json").write_text(json.dumps([
+                {"title": "2025年AI芯片市场规模1200亿美元", "url": "https://a.com/r1",
+                 "snippet": "增长32%"},
+                {"title": "英伟达营收620亿美元", "url": "https://b.com/r2",
+                 "snippet": "市场份额49%"},
+            ], ensure_ascii=False), encoding="utf-8")
+            o._generate_search_charts("t-chart-1")
+            pngs = [p.name for p in proj.glob("*.png")]
+            self.assertIn("source_distribution.png", pngs)
+            self.assertIn("key_numbers.png", pngs)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+
 class TestSearchFailureFallback(unittest.TestCase):
     def test_generation_fallback_code_for_game_instruction(self):
         from orchestrator_v2 import OrchestratorV2
