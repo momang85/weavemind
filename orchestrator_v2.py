@@ -86,18 +86,21 @@ _TOPIC_STOPWORDS = {
     "html", "HTML", "功能", "实现", "进行", "生成", "编写",
 }
 
-ITERATOR_SYSTEM = """你是严格的交付验收评审。根据用户目标评估交付物是否达标。
-输出严格JSON：{"accepted": true|false, "score": 0-10, "gaps": ["缺口1","缺口2"], "next_steps":[{"step_id":"1","capability":"...","instruction":"...","timeout":120}]}
+ITERATOR_SYSTEM = """你是严格的交付验收评审。你会获得【完整上下文】：用户目标、任务的全部步骤及结果摘要、交付文件、贯通测试结果、当前报告。请基于完整上下文判断交付物是否达标，而不是只看报告文本。
+输出严格JSON：
+{"score": 0-10, "verdict": "accept"|"stop"|"retry_step"|"add_steps",
+ "retry_step_id": "步骤ID", "retry_reason": "缺陷原因与修复要求",
+ "gaps": ["缺口"], "next_steps": [{"step_id":"1","capability":"...","instruction":"...","timeout":120}]}
 规则：
-1. score 是交付物与目标的吻合度（0-10）。只有 score < 6 且存在明确缺失时才 accepted=false；
-   核心内容已完成、只是缺少可选的润色项时，score 应给 6 分以上并 accepted=true
-2. accepted=false 只用于明确缺失用户要求的内容；不要吹毛求疵，不要"锦上添花"
-3. next_steps 每次最多3个，必须具体可执行，指令用中文并严格围绕目标主题
-4. 每个 next_step 的 capability 只能是下列之一，且每步只能一个：
+1. score 是交付物与目标的吻合度（0-10）。score>=6 → verdict="accept"
+2. 可随时 verdict="stop" 停止反思（当前交付已足够好，或继续修改边际收益很低）
+3. 明确不达标时优先 verdict="retry_step"：某一步骤结果有明显缺陷（搜索与主题无关、内容过时/不足、代码运行失败、报告遗漏关键内容），
+   指定 retry_step_id 并给出 retry_reason（具体修复要求）；只重试该步骤及其下游，不要整轮任务重来
+4. 若缺陷无法归因于某一步骤，用 verdict="add_steps"，next_steps 最多3个，具体可执行，指令中文且严格围绕主题
+5. 若判断已有知识过时/不足、需要更新信息，可在 next_steps 或重试步骤中安排一次 web_search（整轮反思最多补1次检索）
+6. next_step 的 capability 只能是下列之一，且每步只能一个：
    web_search, web_fetch, data_loader, data_analyzer, model_trainer, report_generator, content_summary, code_execution, file_io, package
-5. 若交付物缺失的原因是外部资料获取失败（搜索无结果、网页无内容、URL 无效），next_steps 必须改为直接生成（content_summary / code_execution），禁止再安排 web_search 或 web_fetch
-6. 若目标明确要求"可视化/图表/趋势图"且交付物没有生成任何图表（无 PNG），
-   next_steps 必须包含一个 code_execution 图表生成步骤（用 matplotlib 基于已有检索数据/摘要作图），禁止只追加报告步骤
+7. 不要吹毛求疵、不要"锦上添花"；只有明确缺失用户要求的内容才继续反思
 只输出JSON。"""
 
 # ─────────────────────────────────────────────
@@ -118,6 +121,7 @@ class OrchestratorV2:
         self._max_iterations = 2
         self._max_reflection_steps = 3
         self._reflection_accept_score = 6.0
+        self._max_redo_rounds = 2
         self._plan_confirm_timeout = 300
         self._stall_timeout = 300
         self._max_offtopic_regenerations = 2
@@ -146,6 +150,7 @@ class OrchestratorV2:
             self._max_iterations = max(0, int(_sys.get('max_iterations', 2)))
             self._max_reflection_steps = max(1, int(_sys.get('max_reflection_steps', 3)))
             self._reflection_accept_score = max(0.0, float(_sys.get('reflection_accept_score', 6.0)))
+            self._max_redo_rounds = max(1, int(_sys.get('max_redo_rounds', 2)))
             self._plan_confirm_timeout = max(30, int(_sys.get('plan_confirm_timeout', 300)))
             self._stall_timeout = max(5, int(_sys.get('stall_timeout', 60)))
         except Exception:
@@ -756,16 +761,31 @@ class OrchestratorV2:
         hay = " ".join(str(s.get("instruction", "")) for s in steps).lower()
         return any(t in hay for t in tokens)
 
-    def _reflect(self, goal: str, report: str, task_id: str) -> dict | None:
-        """验收评审：判断交付物是否达标，不达标则给出缺口与下一步。"""
+    def _reflect(
+        self, goal: str, report: str, task_id: str,
+        all_steps: list[dict], completed_all: dict,
+        memory_context: str = "",
+    ) -> dict | None:
+        """验收评审：基于【完整上下文】判断交付物是否达标。
+        上下文含用户目标、检索到的私有知识、全部步骤及结果摘要、当前报告；
+        LLM 可返回 accept / stop / retry_step（单步重做）/ add_steps。"""
         push_progress(self._messaging, task_id, "log",
                       {"type": "iteration", "agent": "orchestrator",
                        "message": "Reflecting: reviewing deliverable against goal",
                        "timestamp": self._now_iso()})
-        prompt = (
-            f"Goal:\n{goal}\n\nDeliverable produced:\n{str(report)[:4000]}\n\n"
-            "Assess acceptance and propose next steps if needed."
-        )
+        ctx_parts = [f"Goal:\n{goal}"]
+        if memory_context:
+            ctx_parts.append(f"Retrieved private knowledge:\n{memory_context[:2000]}")
+        if all_steps:
+            brief = []
+            for s in all_steps[-15:]:
+                r = completed_all.get(s["step_id"], {})
+                st = r.get("status") if isinstance(r, dict) else "?"
+                res = str(r.get("result") or "")[:180] if isinstance(r, dict) else ""
+                brief.append(f"- [{st}] {s['step_id']} ({s.get('capability')}): {res[:150]}")
+            ctx_parts.append("Execution steps & results:\n" + "\n".join(brief))
+        ctx_parts.append(f"Deliverable (report):\n{str(report)[:3000]}")
+        prompt = "\n\n".join(ctx_parts)
         try:
             raw = self._planner_llm.call(ITERATOR_SYSTEM, prompt, expect_json=True)
             if isinstance(raw, dict):
@@ -779,6 +799,45 @@ class OrchestratorV2:
         except Exception as exc:
             logger.warning("Reflection failed, stopping iteration: %s", str(exc)[:150])
             return None
+
+    def _redo_step_and_dependents(
+        self, task_id: str, goal: str,
+        all_steps: list[dict], completed_all: dict,
+        step_id: str, feedback: str,
+    ) -> bool:
+        """反思要求"单步重做"：重做指定步骤及其传递依赖它的下游步骤
+        （报告/摘要会基于重做后的结果重新生成），不整轮任务重来。"""
+        target = next((s for s in all_steps if s.get("step_id") == step_id), None)
+        if not target:
+            return False
+        dependents: set[str] = set()
+        changed = True
+        while changed:
+            changed = False
+            for s in all_steps:
+                if s["step_id"] in dependents or s["step_id"] == step_id:
+                    continue
+                if any(d in dependents or d == step_id for d in s.get("depends_on", [])):
+                    dependents.add(s["step_id"])
+                    changed = True
+        order = [
+            s for s in all_steps
+            if s["step_id"] == step_id or s["step_id"] in dependents
+        ]
+        for s in order:
+            s2 = dict(s)
+            s2["depends_on"] = []  # 依赖步骤已完成，单步独立重做
+            if s["step_id"] == step_id and feedback:
+                s2["instruction"] = (
+                    f"{s['instruction']}\n\n【反思要求重做】{feedback}"
+                )
+            result = self._dispatch_step_safe(goal, s2, task_id, {"replan_used": 0})
+            completed_all[s["step_id"]] = result
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "iteration", "agent": "orchestrator",
+                           "message": f"反思单步重做: step {s['step_id']} ({s.get('capability')}) -> {result.get('status')}",
+                           "timestamp": self._now_iso()})
+        return True
 
     def _generation_fallback_step(self, goal: str, step: dict) -> dict:
         """搜索/抓取无果时的降级步骤：由 LLM 直接生产，不依赖外部资料。"""
@@ -2198,24 +2257,28 @@ print("charts generated")
         completed_all: dict = {}
         has_failure = False
         iteration = 0
+        redo_rounds = 0
+        skip_execute = False
         last_steps = steps
         last_results: list[dict] = []
         best_report = ""
 
         while True:
-            iter_results, iter_failed = self._execute_steps(steps, task_id, goal)
-            has_failure = has_failure or iter_failed
-            last_steps = steps
-            last_results = iter_results
-            for s, r in zip(steps, iter_results):
-                completed_all[s["step_id"]] = r
-                s.setdefault("iteration", iteration)
-            all_steps.extend(steps)
+            if not skip_execute:
+                iter_results, iter_failed = self._execute_steps(steps, task_id, goal)
+                has_failure = has_failure or iter_failed
+                last_steps = steps
+                last_results = iter_results
+                for s, r in zip(steps, iter_results):
+                    completed_all[s["step_id"]] = r
+                    s.setdefault("iteration", iteration)
+                all_steps.extend(steps)
 
-            cand = self._best_deliverable(goal, last_steps, last_results)
-            if len(cand) > len(best_report):
-                best_report = cand
-            self._publish_full_state(task_id, goal, all_steps, completed_all)
+                cand = self._best_deliverable(goal, last_steps, last_results)
+                if len(cand) > len(best_report):
+                    best_report = cand
+                self._publish_full_state(task_id, goal, all_steps, completed_all)
+            skip_execute = False
 
             if has_failure or self._max_iterations <= 0 or iteration >= self._max_iterations:
                 break
@@ -2226,18 +2289,23 @@ print("charts generated")
             # 反射轮只会追加"锦上添花"步骤拖慢任务（演示目标：时间可控）
             _goal_low = str(goal or "").lower()
             _research_hint = any(k in _goal_low for k in ("报告", "调研", "研报"))
+            _has_search = any(
+                s.get("capability") == "web_search" for s in all_steps
+            )
             _report_done = any(
                 s.get("capability") == "report_generator"
                 and completed_all.get(s["step_id"], {}).get("status") == "SUCCESS"
                 for s in all_steps
             )
-            if _research_hint and _report_done:
+            # 仅"搜索型调研/报告"任务跳过反射轮（时间控制）；
+            # 数据管道等复杂任务仍走全上下文反思
+            if _research_hint and _report_done and _has_search:
                 push_progress(self._messaging, task_id, "log",
                               {"type": "info", "agent": "orchestrator",
                                "message": "Reflection: 报告类任务核心交付已完成，跳过反射轮",
                                "timestamp": self._now_iso()})
                 break
-            verdict = self._reflect(goal, best_report, task_id)
+            verdict = self._reflect(goal, best_report, task_id, all_steps, completed_all, memory_context)
             if not verdict:
                 break
             # 评分门控：score ≥ 阈值直接接受；LLM 未给 score 时回退到 accepted 判断
@@ -2249,10 +2317,38 @@ print("charts generated")
                     score = float(score_raw)
                 except (TypeError, ValueError):
                     score = 5.0 if not verdict.get("accepted") else 10.0
-            if verdict.get("accepted") or score >= self._reflection_accept_score:
+            action = str(
+                verdict.get("verdict")
+                or ("accept" if verdict.get("accepted") else "add_steps")
+            ).lower()
+            if action in ("accept", "stop") or score >= self._reflection_accept_score:
                 push_progress(self._messaging, task_id, "log",
                               {"type": "info", "agent": "orchestrator",
-                               "message": f"Reflection: deliverable accepted (score={score:.1f})",
+                               "message": f"Reflection: {action}（score={score:.1f}）",
+                               "timestamp": self._now_iso()})
+                break
+            if action == "retry_step" and verdict.get("retry_step_id"):
+                if redo_rounds < self._max_redo_rounds:
+                    redo_rounds += 1
+                    ok = self._redo_step_and_dependents(
+                        task_id, goal, all_steps, completed_all,
+                        str(verdict.get("retry_step_id")),
+                        str(verdict.get("retry_reason") or ""),
+                    )
+                    if ok:
+                        # 重做后基于新结果重建 best_report，继续反思确认
+                        cand = self._best_deliverable(
+                            goal, all_steps,
+                            [completed_all.get(s["step_id"], {}) for s in all_steps],
+                        )
+                        if len(cand) > len(best_report):
+                            best_report = cand
+                        self._publish_full_state(task_id, goal, all_steps, completed_all)
+                        skip_execute = True  # 跳过整轮重跑，直接进入下一轮反思
+                        continue
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "info", "agent": "orchestrator",
+                               "message": "单步重做预算耗尽或步骤不存在，停止反思",
                                "timestamp": self._now_iso()})
                 break
             gaps = verdict.get("gaps") or []

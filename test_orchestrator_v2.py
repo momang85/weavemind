@@ -55,6 +55,7 @@ def make_orch(**overrides):
     o._max_iterations = 2
     o._max_reflection_steps = 3
     o._reflection_accept_score = 6.0
+    o._max_redo_rounds = 2
     o._plan_confirm_timeout = 300
     o._stall_timeout = 60
     o._critic_enabled = False
@@ -330,7 +331,7 @@ class TestRunIteration(unittest.TestCase):
 
         o._execute_steps = fake_execute
 
-        def fake_reflect(goal, report, task_id):
+        def fake_reflect(goal, report, task_id, all_steps=None, completed_all=None, memory_context=""):
             if calls["n"] <= 1:
                 return {"accepted": False, "gaps": ["g"],
                         "next_steps": [{"step_id": "x", "capability": "content_summary",
@@ -355,7 +356,7 @@ class TestRunIteration(unittest.TestCase):
         )
         reflected = {"n": 0}
 
-        def fake_reflect(goal, report, task_id):
+        def fake_reflect(goal, report, task_id, all_steps=None, completed_all=None, memory_context=""):
             reflected["n"] += 1
             return {"accepted": False, "score": 8.0, "gaps": ["可优化"],
                     "next_steps": [{"step_id": "x", "capability": "content_summary",
@@ -379,7 +380,7 @@ class TestRunIteration(unittest.TestCase):
         o._execute_steps = fake_execute
         reflected = {"n": 0}
 
-        def fake_reflect(goal, report, task_id):
+        def fake_reflect(goal, report, task_id, all_steps=None, completed_all=None, memory_context=""):
             reflected["n"] += 1
             if reflected["n"] <= 2:
                 return {"accepted": False, "score": 4.0, "gaps": ["缺图"],
@@ -395,6 +396,52 @@ class TestRunIteration(unittest.TestCase):
         res = o.run("t-cap-1", "目标", auto_run=True)
         # 每轮最多追加 3 个步骤；2 轮迭代 + 初始 = 1 + 3 + 3 = 7 步
         self.assertEqual(len(res["steps"]), 7, "反思每轮最多追加 3 步")
+
+    def test_reflection_retry_step_redoes_single_step(self):
+        o = make_orch()
+        o._plan = lambda goal, task_id, context="", memory_context="": [
+            {"step_id": "1", "capability": "web_search", "instruction": "搜索", "timeout": 60},
+            {"step_id": "2", "capability": "content_summary", "instruction": "总结",
+             "depends_on": ["1"], "timeout": 60},
+            {"step_id": "3", "capability": "report_generator", "instruction": "报告",
+             "depends_on": ["1", "2"], "timeout": 60},
+        ]
+        dispatch_calls = {"1": 0, "2": 0, "3": 0}
+
+        def fake_dispatch(goal, step, tid, state):
+            dispatch_calls[step["step_id"]] = dispatch_calls.get(step["step_id"], 0) + 1
+            return {"task_id": step["step_id"], "status": "SUCCESS",
+                    "result": f"ok-{step['step_id']}-#{dispatch_calls[step['step_id']]}"}
+
+        o._dispatch_step_safe = fake_dispatch
+        o._execute_steps = None  # 单步重做走 _dispatch_step_safe，不走整轮执行
+        reflected = {"n": 0}
+
+        def fake_reflect(goal, report, task_id, all_steps, completed_all, memory_context=""):
+            reflected["n"] += 1
+            if reflected["n"] == 1:
+                return {"score": 4.0, "verdict": "retry_step",
+                        "retry_step_id": "1", "retry_reason": "搜索结果过时，需要最新数据"}
+            return {"score": 9.0, "verdict": "accept"}
+
+        o._reflect = fake_reflect
+        o._now_iso = lambda: "t"
+
+        # 拦截整轮执行：用自定义实现把初始 3 步直接完成
+        def fake_execute(steps, task_id, goal):
+            out = []
+            for s in steps:
+                dispatch_calls[s["step_id"]] = dispatch_calls.get(s["step_id"], 0) + 1
+                out.append({"task_id": s["step_id"], "status": "SUCCESS",
+                            "result": f"ok-{s['step_id']}-#{dispatch_calls[s['step_id']]}"})
+            return out, False
+
+        o._execute_steps = fake_execute
+        res = o.run("t-redo-1", "目标", auto_run=True)
+        self.assertEqual(reflected["n"], 2, "重做后应再次反思")
+        self.assertGreaterEqual(dispatch_calls["1"], 2, "步骤1应被重做（至少2次派发）")
+        # 单步重做不应整轮重跑：步骤2/3在初始轮各执行1次，重做后因依赖1被重做 → 也会重跑
+        self.assertEqual(res["status"], "SUCCESS")
 
     def test_inject_memory_context_logs(self):
         o = make_orch()
