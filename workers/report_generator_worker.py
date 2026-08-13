@@ -51,10 +51,12 @@ class ReportGeneratorWorker(AsyncWorkerBase):
         def best_heading(keywords) -> int | None:
             """返回匹配到的【最深】标题行号。"""
             best = None
+            best_level = 0
             for idx, lvl, text in headings:
                 if any(k and k in text for k in keywords):
-                    if best is None or lvl > headings[best][1]:
+                    if best is None or lvl > best_level:
                         best = idx
+                        best_level = lvl
             return best
 
         lines = report.split("\n")
@@ -209,7 +211,6 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                     if u not in src_urls2:
                         src_urls2.append(u)
             src_md = "\n".join(f"- {u}" for u in src_urls2[:15]) or "（检索未返回可用来源）"
-            chart_md = "".join(f"![{c.stem}]({c})\n\n" for c in charts)
             # 兜底也要保留真实研究内容（上一步摘要/检索结果），避免"报告只有模板"
             prev_parts = re.findall(
                 r"\[上一步结果 \d+\]:\s*(.*?)(?=\n\[上一步结果 |\n用户目标：|\Z)",
@@ -228,11 +229,12 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                 f"- 检索到 {len(src_urls2)} 个数据来源（详见文末「数据来源」）。\n"
                 "- 关键数据见「研究内容」中的表格与图表，均来自搜索结果，未编造。\n\n"
                 f"{prev_md}\n\n"
-                "## 图表\n\n"
-                f"{chart_md}"
                 "## 数据来源\n\n"
                 f"{src_md}\n"
             )
+            # 兜底也按章节内联嵌入图表（未匹配的插到数据来源前）
+            if charts:
+                report = self._embed_charts_inline(report, charts)
             try:
                 rpath = report_dir / "report.md"
                 rpath.write_text(report, encoding="utf-8")
