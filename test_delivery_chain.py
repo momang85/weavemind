@@ -331,10 +331,105 @@ class TestSearchCharts(unittest.TestCase):
             pngs = [p.name for p in proj.glob("*.png")]
             self.assertIn("source_distribution.png", pngs)
             self.assertIn("topic_terms.png", pngs)
-            # 结构化序列：≥3 个年份 → 趋势图；≥3 个厂商份额 → 对比图
-            self.assertIn("market_trend.png", pngs, "应有年份-规模趋势图")
-            self.assertIn("player_share.png", pngs, "应有厂商-份额对比图")
             self.assertIn("entity_frequency.png", pngs, "应有主体提及频率图")
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_extract_chart_data_parses_llm_block(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        text = (
+            "## 总结\n\n市场要点。\n\n"
+            "[CHART_DATA]\n"
+            '{"data":[{"指标":"市场规模","年份":2025,"数值":1500,"单位":"亿美元",'
+            '"口径":"德勤预测","来源":"https://a.com"},'
+            '{"指标":"市场份额","年份":2025,"数值":49,"单位":"%","口径":"英伟达","来源":"https://a.com"}]}'
+        )
+        rows = o._extract_chart_data(text)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["指标"], "市场规模")
+        # 无 [CHART_DATA] 时返回空
+        self.assertEqual(o._extract_chart_data("纯文本总结"), [])
+
+    def test_extract_chart_rows_from_markdown_table(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        text = (
+            "## 数据要点\n\n"
+            "| 数据来源 | 2025年市场规模 | 备注 |\n"
+            "|---|---|---|\n"
+            "| 德勤 | 突破1500亿美元 | 增长25% | [链接](https://a.com/r1) |\n"
+            "| 艾媒 | 726亿美元 | CAGR 36.9% | [链接](https://b.com/r2) |\n"
+        )
+        rows = o._extract_chart_rows_from_table(text)
+        self.assertGreaterEqual(len(rows), 2)
+        self.assertEqual(rows[0]["指标"], "市场规模")
+        self.assertIn("亿美元", rows[0]["单位"])
+        self.assertTrue(rows[0]["来源"].startswith("http"))
+
+    def test_render_chart_data_from_llm_rows(self):
+        import json
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = tempfile.mkdtemp(prefix="weavemind_llmchart_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            proj = ws_mod.task_project_dir("t-lc-1")
+            (proj / "chart_data.json").write_text(json.dumps({"data": [
+                {"指标": "市场规模", "年份": 2023, "数值": 110, "单位": "亿美元",
+                 "口径": "艾媒", "来源": "https://a.com"},
+                {"指标": "市场规模", "年份": 2025, "数值": 726, "单位": "亿美元",
+                 "口径": "艾媒", "来源": "https://a.com"},
+                {"指标": "市场份额", "年份": 2025, "数值": 49, "单位": "%",
+                 "口径": "英伟达", "来源": "https://a.com"},
+                {"指标": "市场份额", "年份": 2025, "数值": 12, "单位": "%",
+                 "口径": "AMD", "来源": "https://a.com"},
+                {"指标": "营收", "年份": 2025, "数值": 620, "单位": "亿美元",
+                 "口径": "英伟达", "来源": "https://a.com"},
+            ]}, ensure_ascii=False), encoding="utf-8")
+            o._render_chart_data("t-lc-1", "请分析AI芯片市场并生成可视化报告")
+            pngs = {p.name for p in proj.glob("*.png")}
+            self.assertIn("market_trend.png", pngs, "市场规模趋势图")
+            self.assertIn("player_share.png", pngs, "份额对比图")
+            self.assertIn("key_numbers.png", pngs, "其它指标对比图")
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_render_single_year_multiple_calibers_as_bar(self):
+        import json
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = tempfile.mkdtemp(prefix="weavemind_llmchart_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            proj = ws_mod.task_project_dir("t-lc-2")
+            (proj / "chart_data.json").write_text(json.dumps({"data": [
+                {"指标": "市场规模", "年份": 2025, "数值": 726, "单位": "亿美元",
+                 "口径": "艾媒", "来源": "https://a.com"},
+                {"指标": "市场规模", "年份": 2025, "数值": 1800, "单位": "亿美元",
+                 "口径": "IIM", "来源": "https://b.com"},
+                {"指标": "市场规模", "年份": 2025, "数值": 3500, "单位": "亿美元",
+                 "口径": "IIM宽口径", "来源": "https://b.com"},
+            ]}, ensure_ascii=False), encoding="utf-8")
+            o._render_chart_data("t-lc-2", "请分析AI芯片市场并生成可视化报告")
+            self.assertTrue((proj / "market_trend.png").exists(),
+                            "单年份多口径应生成口径对比图")
+            # 无多年份 → 不产生"趋势线"误读（文件存在且为柱状图即可）
+            self.assertFalse((proj / "player_share.png").exists())
         finally:
             ws_mod.WORKSPACE_ROOT = old_root
             import shutil

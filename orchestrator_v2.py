@@ -1389,6 +1389,255 @@ class OrchestratorV2:
         ))
 
     @staticmethod
+    def _extract_chart_data(text: str) -> list[dict]:
+        """从 content_summary 结果中解析 [CHART_DATA] JSON 数据行。"""
+        if not text:
+            return []
+        idx = text.find("[CHART_DATA]")
+        if idx < 0:
+            return []
+        seg = text[idx + len("[CHART_DATA]"):]
+        i = seg.find("{")
+        if i < 0:
+            return []
+        depth = 0
+        for j in range(i, len(seg)):
+            if seg[j] == "{":
+                depth += 1
+            elif seg[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        data = json.loads(seg[i:j + 1])
+                        rows = data.get("data") or []
+                        return [r for r in rows if isinstance(r, dict)]
+                    except Exception:
+                        break
+        return []
+
+    @staticmethod
+    def _extract_chart_rows_from_table(text: str) -> list[dict]:
+        """兜底：LLM 未输出 [CHART_DATA] 时，从摘要中的 Markdown 表格
+        （机构|数值|备注|链接 类）解析图表数据行。"""
+        if not text:
+            return []
+        rows: list[dict] = []
+        for tbl in re.findall(r"(\|.+\|(?:\n\|.+\|)+)", text):
+            lines = tbl.strip().split("\n")
+            if len(lines) < 3:
+                continue
+            headers = [c.strip() for c in lines[0].strip("|").split("|")]
+            header_joined = " ".join(headers)
+            if any(k in header_joined for k in ("数值", "规模", "份额", "增速")):
+                metric = (
+                    "市场份额" if any(k in header_joined for k in ("份额", "占比"))
+                    else "市场规模" if any(k in header_joined for k in ("规模", "市场"))
+                    else "增速" if any(k in header_joined for k in ("增速", "复合"))
+                    else "指标"
+                )
+            else:
+                metric = "指标"
+            for line in lines[2:]:
+                if "---" in line:
+                    continue
+                cells = [c.strip() for c in line.strip("|").split("|")]
+                joined = " ".join(cells)
+                num_m = re.search(
+                    r"(\d+(?:\.\d+)?)\s*(万亿|千亿|百亿|亿|万)?\s*(亿美元|亿元|%|万辆|万台|美元)",
+                    joined,
+                )
+                if not num_m:
+                    continue
+                year = None
+                ym = re.search(r"(20\d{2})\b", joined)
+                if ym:
+                    year = int(ym.group(1))
+                src = ""
+                for c in cells:
+                    u = re.search(r"https?://[^\s\)\]]+", c)
+                    if u:
+                        src = u.group(0)
+                        break
+                caliber = ""
+                for c in cells:
+                    if not c or c in ("—", "-", headers[0] if headers else ""):
+                        continue
+                    if re.match(r"^[\d.]+$", c):
+                        continue
+                    if src and c == src:
+                        continue
+                    caliber = c[:20]
+                    break
+                row_metric = metric
+                if row_metric == "指标" and caliber:
+                    if any(k in caliber for k in ("规模", "市场")):
+                        row_metric = "市场规模"
+                    elif any(k in caliber for k in ("份额", "占比")):
+                        row_metric = "市场份额"
+                    elif any(k in caliber for k in ("增速", "增长", "复合")):
+                        row_metric = "增速"
+                    elif any(k in caliber for k in ("营收", "收入")):
+                        row_metric = "营收"
+                rows.append({
+                    "指标": row_metric,
+                    "年份": year,
+                    "数值": float(num_m.group(1)),
+                    "单位": (
+                        (num_m.group(2) or "") + (num_m.group(3) or "")
+                        if num_m.group(2) and num_m.group(3) in ("美元", "元", "人民币")
+                        else (num_m.group(3) or "")
+                    ),
+                    "口径": caliber or "表格",
+                    "来源": src,
+                })
+        return rows
+
+    def _render_chart_data(self, task_id: str, goal: str) -> None:
+        """确定性渲染 LLM 结构化图表数据（chart_data.json）：
+        只做绘图，语义与口径由 LLM 负责；不调用 LLM。"""
+        import subprocess
+        import sys
+        if not self._wants_visualization(goal):
+            return
+        project = task_project_dir(task_id)
+        src = project / "chart_data.json"
+        if not src.exists():
+            return
+        script = r'''# -*- coding: utf-8 -*-
+"""确定性渲染：读取 LLM 输出的 chart_data.json，按语义生成图表。"""
+import json
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
+plt.rcParams["axes.unicode_minus"] = False
+
+rows = json.load(open("chart_data.json", encoding="utf-8")).get("data", [])
+
+def norm(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+# 1) 市场规模/规模 → 年份趋势线（不同口径分系列）
+trend_rows = [
+    r for r in rows
+    if "规模" in str(r.get("指标", "")) and norm(r.get("年份")) is not None
+]
+if trend_rows:
+    years_all = {norm(r.get("年份")) for r in trend_rows if norm(r.get("年份")) is not None}
+    if len(years_all) <= 1:
+        # 同一年份的多口径 → 柱状对比（口径 × 数值），避免单点散线误导
+        year = next(iter(years_all)) if years_all else ""
+        labels = [str(r.get("口径") or r.get("来源") or "?")[:18].replace("_", " ") for r in trend_rows]
+        vals = [norm(r.get("数值")) for r in trend_rows]
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.bar(labels, vals, color="#3b82f6", edgecolor="white")
+        for i, v in enumerate(vals):
+            if v is not None:
+                ax.text(i, v, f"{v:g}", ha="center", va="bottom", fontsize=8)
+        ax.set_xlabel("口径 / 来源")
+        ax.set_ylabel("数值（按各指标单位）")
+        ax.set_title(f"{year} 年市场规模口径对比（LLM 结构化数据）")
+        ax.tick_params(axis="x", rotation=30)
+        plt.tight_layout()
+        plt.savefig("market_trend.png", dpi=110)
+        plt.close()
+    else:
+        # 多年份 → 折线（不同口径分系列）
+        by_caliber = {}
+        for r in trend_rows:
+            key = str(r.get("口径") or r.get("来源") or "综合")[:20]
+            by_caliber.setdefault(key, []).append((norm(r["年份"]), norm(r["数值"]), r))
+        fig, ax = plt.subplots(figsize=(9, 5))
+        plotted = 0
+        for name, pts in by_caliber.items():
+            pts = sorted(p for p in pts if p[1] is not None)
+            if not pts:
+                continue
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            ax.plot(xs, ys, marker="o", label=name, linewidth=2)
+            for x, y in zip(xs, ys):
+                ax.text(x, y, f"{y:g}", ha="center", va="bottom", fontsize=8)
+            plotted += 1
+        if plotted:
+            ax.set_xlabel("年份")
+            ax.set_ylabel("数值（按各指标单位）")
+            ax.set_title("市场规模年份趋势（LLM 结构化数据）")
+            ax.legend(fontsize=8)
+            ax.grid(alpha=0.3)
+            plt.tight_layout()
+            plt.savefig("market_trend.png", dpi=110)
+            plt.close()
+
+# 2) 份额/占比 → 柱状图
+share_rows = [
+    r for r in rows
+    if any(k in str(r.get("指标", "")) for k in ("份额", "占比"))
+]
+if len(share_rows) >= 2:
+    labels = [
+        str(r.get("口径") or r.get("来源") or "?")[:18].replace("_", " ")
+        for r in share_rows
+    ]
+    vals = [norm(r.get("数值")) for r in share_rows]
+    fig, ax = plt.subplots(figsize=(9, 5))
+    ax.bar(labels, vals, color="#f59e0b", edgecolor="white")
+    for i, v in enumerate(vals):
+        if v is not None:
+            ax.text(i, v, f"{v:g}%", ha="center", va="bottom", fontsize=9)
+    ax.set_xlabel("厂商/区域/口径")
+    ax.set_ylabel("份额（%）")
+    ax.set_title("份额/占比对比（LLM 结构化数据）")
+    ax.tick_params(axis="x", rotation=25)
+    plt.tight_layout()
+    plt.savefig("player_share.png", dpi=110)
+    plt.close()
+
+# 3) 其它指标 → 指标对比柱状图
+other = [
+    r for r in rows
+    if "规模" not in str(r.get("指标", ""))
+    and not any(k in str(r.get("指标", "")) for k in ("份额", "占比"))
+]
+if other:
+    labels, vals = [], []
+    for r in other:
+        v = norm(r.get("数值"))
+        if v is None:
+            continue
+        labels.append(f"{r.get('指标', '')} {r.get('年份', '')} {str(r.get('口径', ''))[:8]}".strip())
+        vals.append(v)
+    if vals:
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.bar(labels, vals, color="#10b981", edgecolor="white")
+        ax.set_xlabel("指标 / 口径")
+        ax.set_ylabel("数值（按各指标单位）")
+        ax.set_title("关键指标对比（LLM 结构化数据）")
+        ax.tick_params(axis="x", rotation=30)
+        for i, v in enumerate(vals):
+            ax.text(i, v, f"{v:g}", ha="center", va="bottom", fontsize=8)
+        plt.tight_layout()
+        plt.savefig("key_numbers.png", dpi=110)
+        plt.close()
+print("rendered from LLM chart data")
+'''
+        script_path = project / "render_charts.py"
+        try:
+            script_path.write_text(script, encoding="utf-8")
+            proc = subprocess.run(
+                [sys.executable, str(script_path)],
+                cwd=str(project), capture_output=True, timeout=120,
+            )
+            if proc.returncode != 0:
+                logger.warning("render_charts failed: %s", proc.stderr.decode("utf-8", errors="replace")[:300])
+        except Exception as exc:
+            logger.warning("render_charts error: %s", exc)
+
+    @staticmethod
     def _is_game_goal(goal: str) -> bool:
         """判断目标是否"可玩"类（游戏/交互），决定贯通测试走哪种验证。"""
         g = str(goal or "").lower()
@@ -1963,9 +2212,8 @@ class OrchestratorV2:
         return False
 
     def _generate_search_charts(self, task_id: str, goal: str) -> None:
-        """确定性图表生成：仅当目标明确要求可视化时，基于真实检索结果
-        （search_results.json）绘制多张直观图表（来源分布、关键数值点、
-        主题热词）。不调用 LLM，端点波动也不影响。"""
+        """确定性基线图表：来源分布、主要主体提及频率、主题热词。
+        语义类图表（趋势/份额/指标）由 LLM 结构化数据渲染（_render_chart_data）。"""
         import subprocess
         import sys
         if not self._wants_visualization(goal):
@@ -1976,8 +2224,8 @@ class OrchestratorV2:
             return
         script = r'''# -*- coding: utf-8 -*-
 """从真实检索结果提取结构化序列，生成有明确 X/Y 轴的语义图表。
-优先：年份-规模趋势、厂商-份额对比；回退：指标-数值对比、来源分布、主题热词。"""
-import json, re, statistics
+基线：主体提及频率、来源分布、主题热词（语义类图表由 LLM 数据渲染）。"""
+import json, re
 from collections import Counter
 import matplotlib
 matplotlib.use("Agg")
@@ -1990,86 +2238,13 @@ data = json.load(open("search_results.json", encoding="utf-8"))
 items = [d for d in data if isinstance(d, dict)]
 texts = [str(d.get("title") or "") + " " + str(d.get("snippet") or "") for d in items]
 
-def to_usd(v, mult, unit):
-    """统一折算到亿美元（仅美元/亿元人民币口径，供趋势示意）。"""
-    scale = {"万亿": 10000.0, "千亿": 1000.0, "百亿": 100.0, "亿": 1.0, "万": 0.0001}
-    s = scale.get(mult, 1.0)
-    return v * s
-
-# 1) 年份-规模趋势（X=年份, Y=市场规模/亿美元）
-# 只采用"同一语句内出现 ≥2 个年份-数值对"的连贯序列（如"2019年…110亿美元
-# 增长至2025年…726亿美元"），避免把不同来源、不同口径的散点混成一条假趋势。
-YEAR_PAT = re.compile(
-    r"(\d{4})\s*年?[^。；;]{0,45}?(\d+(?:\.\d+)?)\s*(万亿|千亿|百亿|亿|万)?\s*(亿美元|亿元|万美元|万元|美元)"
-)
-
-
-def coherent_year_points():
-    points = {}
-    for t in texts:
-        for sent in re.split(r"[。；;\n]", t):
-            # 句子级判断：整句围绕"规模/市场/营收"才认可（如"市场规模从110亿增长至726亿"）
-            if not any(k in sent for k in ("规模", "市场", "营收", "收入", "销售额")):
-                continue
-            found = []
-            for m in YEAR_PAT.finditer(sent):
-                y = int(m.group(1))
-                if not (2018 <= y <= 2032):
-                    continue
-                v = to_usd(float(m.group(2)), m.group(3) or "", m.group(4) or "")
-                if not (50 <= v <= 10000):
-                    continue  # 排除 8.58/36.2 这类噪声小值与异常大值
-                found.append((y, v))
-            if len({y for y, _ in found}) >= 2:
-                for y, v in found:
-                    points.setdefault(y, []).append(v)
-    return points
-
-
-year_vals = coherent_year_points()
-if len(year_vals) >= 2:
-    years = sorted(year_vals)
-    vals = [statistics.median(year_vals[y]) for y in years]
-    fig, ax = plt.subplots(figsize=(9, 5))
-    ax.plot(years, vals, marker="o", color="#3b82f6", linewidth=2)
-    for x, v in zip(years, vals):
-        ax.text(x, v, f"{v:,.0f}", ha="center", va="bottom", fontsize=9)
-    ax.set_xlabel("年份")
-    ax.set_ylabel("市场规模（亿美元，据检索资料折算）")
-    ax.set_title("市场规模年份趋势（真实数据，来自搜索结果）")
-    ax.grid(alpha=0.3)
-    plt.tight_layout()
-    plt.savefig("market_trend.png", dpi=110)
-    plt.close()
-
-# 2) 厂商-份额对比（X=厂商, Y=市场份额/%）
+# 1) 主要主体提及频率（信息量大且稳定：只要有检索结果即可画）
 ENTITIES = [
     "英伟达", "NVIDIA", "AMD", "英特尔", "Intel", "谷歌", "Google", "华为", "昇腾",
     "高通", "Qualcomm", "寒武纪", "海光", "亚马逊", "AWS", "微软", "Microsoft",
     "Meta", "台积电", "Cerebras", "Graphcore",
     "美国", "中国", "欧洲", "亚太", "日本",
 ]
-share = {}
-for t in texts:
-    for ent in ENTITIES:
-        pat = re.compile(re.escape(ent) + r"[^。；;]{0,20}?(\d+(?:\.\d+)?)\s*%")
-        for m in pat.finditer(t):
-            share.setdefault(ent, []).append(float(m.group(1)))
-if len(share) >= 2:
-    ents = sorted(share, key=lambda e: -statistics.median(share[e]))[:8]
-    vals = [statistics.median(share[e]) for e in ents]
-    fig, ax = plt.subplots(figsize=(9, 5))
-    ax.bar(ents, vals, color="#f59e0b", edgecolor="white")
-    for i, v in enumerate(vals):
-        ax.text(i, v, f"{v:g}%", ha="center", va="bottom", fontsize=9)
-    ax.set_xlabel("主要厂商/玩家")
-    ax.set_ylabel("市场份额（%）")
-    ax.set_title("主要玩家/区域份额对比（真实数据，来自搜索结果）")
-    plt.tight_layout()
-    plt.savefig("player_share.png", dpi=110)
-    plt.close()
-
-# 3) 主要主体提及频率（信息量大且稳定：只要有检索结果即可画）
 entity_freq = Counter()
 for t in texts:
     for ent in ENTITIES:
@@ -2088,7 +2263,7 @@ if len(top_e) >= 3:
     plt.savefig("entity_frequency.png", dpi=110)
     plt.close()
 
-# 4) 数据来源分布（X=来源域名, Y=结果数）
+# 2) 数据来源分布（X=来源域名, Y=结果数）
 domains = Counter()
 for d in items:
     m = re.match(r"https?://([^/]+)", str(d.get("url") or ""))
@@ -2105,7 +2280,7 @@ if top:
     plt.savefig("source_distribution.png", dpi=110)
     plt.close()
 
-# 5) 主题热词（X=热词, Y=出现次数）
+# 3) 主题热词（X=热词, Y=出现次数）
 words = Counter()
 stop = {
     "一个", "我们", "以及", "可以", "没有", "已经", "进行", "通过", "对于",
@@ -2617,6 +2792,26 @@ print("charts generated")
                             self._generate_search_charts(task_id, goal)
                         except Exception as exc:
                             logger.warning("search_results.json write failed: %s", exc)
+            if (step.get("capability") == "content_summary"
+                    and result.get("status") == "SUCCESS"
+                    and self._wants_visualization(goal)):
+                # LLM 结构化图表数据 → 确定性渲染（语义由 LLM 负责，数字由脚本保证）
+                chart_rows = self._extract_chart_data(str(result.get("result") or ""))
+                if not chart_rows:
+                    # 兜底：从摘要的 Markdown 表格解析（LLM 未输出 JSON 块时）
+                    chart_rows = self._extract_chart_rows_from_table(
+                        str(result.get("result") or "")
+                    )
+                if chart_rows:
+                    try:
+                        _cd_path = task_project_dir(task_id) / "chart_data.json"
+                        _cd_path.write_text(
+                            json.dumps({"data": chart_rows}, ensure_ascii=False, indent=1),
+                            encoding="utf-8",
+                        )
+                        self._render_chart_data(task_id, goal)
+                    except Exception as exc:
+                        logger.warning("chart_data render failed: %s", exc)
             result["elapsed_sec"] = round(time.time() - step_start, 1)
             return result
 
