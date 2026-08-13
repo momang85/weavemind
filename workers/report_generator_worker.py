@@ -21,9 +21,11 @@ class ReportGeneratorWorker(AsyncWorkerBase):
     _needs_task = True
 
     @staticmethod
-    def _embed_charts_inline(report: str, charts) -> str:
+    def _embed_charts_inline(report: str, charts, manifests: dict | None = None) -> str:
         """把图表按主题关键词插入到对应【子小节内容之后】（最深匹配标题的
-        段落末尾），让图表紧贴需要可视化的文字；未匹配的图表插到数据来源前。"""
+        段落末尾），让图表紧贴需要可视化的文字；未匹配的图表插到数据来源前。
+        manifests: {文件名: [关键词]}，由确定性渲染器写出的 chart_manifest.json
+        提供（优先于按文件名的旧式关键词表）。"""
         chart_topics = {
             "market_trend.png": ("规模", "增长", "趋势", "年份", "预测", "展望"),
             "player_share.png": ("玩家", "份额", "竞争", "厂商", "格局", "对比"),
@@ -65,9 +67,11 @@ class ReportGeneratorWorker(AsyncWorkerBase):
         heading_map = {idx: (lvl, text) for idx, lvl, text in headings}
         planned: list[tuple[int, str, str]] = []  # (插入行号, 图表名, markdown)
         for c in charts:
-            keywords = chart_topics.get(c.name) or [
-                k for k in c.stem.replace("-", "_").split("_") if k
-            ]
+            keywords = (manifests or {}).get(c.name)
+            if not keywords:
+                keywords = chart_topics.get(c.name) or [
+                    k for k in c.stem.replace("-", "_").split("_") if k
+                ]
             hidx = best_heading(keywords)
             if hidx is not None:
                 end = subsection_end(hidx, heading_map[hidx][0])
@@ -116,6 +120,7 @@ class ReportGeneratorWorker(AsyncWorkerBase):
         # 只考虑本次任务时间窗口内的产物，避免把历史任务遗留的无关数据（如房价）
         # 拉进当前报告。
         cutoff = time.time() - 120 * 60
+        manifests: dict[str, list[str]] = {}
         charts = [
             c for c in (charts_dir.glob("*.png") if charts_dir.exists() else [])
             if c.stat().st_mtime >= cutoff
@@ -130,6 +135,15 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                     if "screenshots" not in c.parts
                     if c.stat().st_mtime >= cutoff
                 ]
+            # LLM 结构化图表规格渲染器写出的关键词清单，用于按主题内嵌
+            mf = proj_dir / "chart_manifest.json"
+            if mf.exists():
+                try:
+                    for item in json.loads(mf.read_text(encoding="utf-8")).get("charts", []):
+                        if item.get("file") and item.get("keywords"):
+                            manifests[str(item["file"])] = list(item["keywords"])
+                except Exception:
+                    pass
         # 去重（同名文件可能同时出现在 charts/ 与 project/）
         seen_charts: set[str] = set()
         charts = [c for c in charts if not (str(c) in seen_charts or seen_charts.add(str(c)))]
@@ -204,7 +218,7 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                 )
             # 图表内联嵌入：按主题把图表插到对应小节之后（紧贴需要可视化的文字）
             if charts:
-                report = self._embed_charts_inline(report, charts)
+                report = self._embed_charts_inline(report, charts, manifests)
 
             rpath = report_dir / "report.md"
             rpath.write_text(report, encoding="utf-8")

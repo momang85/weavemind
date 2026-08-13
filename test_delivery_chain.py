@@ -338,21 +338,50 @@ class TestSearchCharts(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_extract_chart_data_parses_llm_block(self):
+        import json
         from orchestrator_v2 import OrchestratorV2
 
         o = OrchestratorV2.__new__(OrchestratorV2)
         text = (
             "## 总结\n\n市场要点。\n\n"
             "[CHART_DATA]\n"
-            '{"data":[{"指标":"市场规模","年份":2025,"数值":1500,"单位":"亿美元",'
-            '"口径":"德勤预测","来源":"https://a.com"},'
-            '{"指标":"市场份额","年份":2025,"数值":49,"单位":"%","口径":"英伟达","来源":"https://a.com"}]}'
+            '{"charts":[{"question":"2025年全球AI芯片市场规模多大？",'
+            '"conclusion":"德勤预测1500亿美元，艾媒726亿美元，口径差异明显。",'
+            '"type":"bar","title":"2025年全球AI芯片市场规模（亿美元）",'
+            '"x_axis_title":"口径/来源","y_axis_title":"市场规模（亿美元）","unit":"亿美元",'
+            '"time_range":"2025年","region":"全球","source":"https://a.com","sample_size":"2",'
+            '"annotation":"不同机构口径不同","missing":"无","outliers":"无",'
+            '"data":[{"label":"德勤","value":1500,"year":2025,"caliber":"德勤预测",'
+            '"source":"https://a.com"},{"label":"艾媒","value":726,"year":2025,'
+            '"caliber":"艾媒统计","source":"https://a.com"}]}]}'
         )
-        rows = o._extract_chart_data(text)
-        self.assertEqual(len(rows), 2)
-        self.assertEqual(rows[0]["指标"], "市场规模")
+        specs = o._extract_chart_data(text)
+        self.assertEqual(len(specs), 1)
+        self.assertEqual(specs[0]["type"], "bar")
+        self.assertEqual(len(specs[0]["data"]), 2)
+        self.assertEqual(specs[0]["data"][0]["value"], 1500)
         # 无 [CHART_DATA] 时返回空
         self.assertEqual(o._extract_chart_data("纯文本总结"), [])
+        # 兼容旧扁平 data 行 → 自动打包为规格
+        legacy = o._extract_chart_data(
+            "[CHART_DATA]\n" + json.dumps({"data": [
+                {"指标": "市场规模", "年份": 2025, "数值": 1500, "单位": "亿美元",
+                 "口径": "德勤预测", "来源": "https://a.com"},
+                {"指标": "市场规模", "年份": 2027, "数值": 4000, "单位": "亿美元",
+                 "口径": "德勤预测", "来源": "https://b.com"},
+            ]}, ensure_ascii=False)
+        )
+        self.assertEqual(len(legacy), 1)
+        self.assertEqual(len(legacy[0]["data"]), 2)
+        self.assertTrue(legacy[0]["conclusion"])
+        # 单一数据点无法支撑结论 → 按规范跳过（无意义图不画）
+        single = o._extract_chart_data(
+            "[CHART_DATA]\n" + json.dumps({"data": [
+                {"指标": "市场规模", "年份": 2025, "数值": 1500, "单位": "亿美元",
+                 "口径": "德勤预测", "来源": "https://a.com"},
+            ]}, ensure_ascii=False)
+        )
+        self.assertEqual(single, [])
 
     def test_extract_chart_rows_from_markdown_table(self):
         from orchestrator_v2 import OrchestratorV2
@@ -395,7 +424,77 @@ class TestSearchCharts(unittest.TestCase):
         self.assertNotIn("SoC芯片CAGR", names)
         self.assertNotIn("白宫AI投资", names)
 
-    def test_render_chart_data_from_llm_rows(self):
+    def test_filter_chart_specs_keeps_core_topic(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        specs = [
+            {
+                "title": "2025年全球AI芯片市场规模（亿美元）",
+                "question": "各口径规模差异如何？",
+                "conclusion": "IIM预测1800亿，艾媒726亿，口径差异大。",
+                "type": "bar", "unit": "亿美元",
+                "x_axis_title": "口径", "y_axis_title": "规模（亿美元）",
+                "source": "https://a.com", "time_range": "2025年", "region": "全球",
+                "data": [
+                    {"label": "IIM", "value": 1800, "caliber": "IIM预测", "source": "https://a.com"},
+                    {"label": "艾媒", "value": 726, "caliber": "艾媒统计", "source": "https://e.com"},
+                ],
+            },
+            {
+                "title": "2025年AI芯片市场规模（亿美元）",
+                "question": "专用芯片规模？",
+                "conclusion": "人形机器人专用芯片8.58亿美元。",
+                "type": "bar", "unit": "亿美元",
+                "x_axis_title": "领域", "y_axis_title": "规模（亿美元）",
+                "source": "https://b.com", "time_range": "2025年", "region": "全球",
+                "data": [
+                    {"label": "人形机器人", "value": 8.58, "caliber": "人形机器人专用芯片", "source": "https://b.com"},
+                    {"label": "SoC", "value": 51.4, "caliber": "SoC芯片CAGR", "source": "https://c.com"},
+                ],
+            },
+            {
+                "title": "白宫AI投资规模（亿美元）",
+                "question": "投资规模？",
+                "conclusion": "白宫AI投资110亿美元。",
+                "type": "bar", "unit": "亿美元",
+                "x_axis_title": "口径", "y_axis_title": "规模（亿美元）",
+                "source": "https://d.com", "time_range": "2025年", "region": "美国",
+                "data": [
+                    {"label": "白宫", "value": 110, "caliber": "白宫AI投资", "source": "https://d.com"},
+                ],
+            },
+            {
+                "title": "2025年全球AI芯片厂商份额（%）",
+                "question": "2025年AI芯片厂商份额排名？",
+                "conclusion": "英伟达49%领先。",
+                "type": "bar", "unit": "%",
+                "x_axis_title": "厂商", "y_axis_title": "份额（%）",
+                "source": "https://a.com", "time_range": "2025年", "region": "全球",
+                "data": [
+                    {"label": "英伟达", "value": 49, "caliber": "英伟达", "source": "https://a.com"},
+                ],
+            },
+        ]
+        kept = o._filter_chart_specs(specs, "请分析2025年全球AI芯片市场并生成可视化报告")
+        self.assertEqual(len(kept), 2, "应保留芯片市场规格与厂商份额规格")
+        self.assertEqual(len(kept[0]["data"]), 2)
+        self.assertEqual(kept[1]["title"], "2025年全球AI芯片厂商份额（%）")
+
+    def test_goal_core_deterministic_and_keeps_topic(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        goal = "请分析2025年全球AI芯片市场并生成可视化报告"
+        first = o._goal_core(goal)
+        self.assertEqual(first, o._goal_core(goal),
+                         "核心词提取必须跨进程确定（回归：set 迭代顺序曾导致主题词被截断）")
+        self.assertIn("芯片", first)
+        self.assertIn("ai", first)
+        # 与目标主题无关的领域词不得混入核心词
+        self.assertNotIn("soc", o._goal_core(goal))
+
+    def test_render_chart_data_from_llm_specs(self):
         import json
         import tempfile
         import workspace as ws_mod
@@ -407,23 +506,40 @@ class TestSearchCharts(unittest.TestCase):
         ws_mod.configure_workspace_root(tmp)
         try:
             proj = ws_mod.task_project_dir("t-lc-1")
-            (proj / "chart_data.json").write_text(json.dumps({"data": [
-                {"指标": "市场规模", "年份": 2023, "数值": 110, "单位": "亿美元",
-                 "口径": "艾媒", "来源": "https://a.com"},
-                {"指标": "市场规模", "年份": 2025, "数值": 726, "单位": "亿美元",
-                 "口径": "艾媒", "来源": "https://a.com"},
-                {"指标": "市场份额", "年份": 2025, "数值": 49, "单位": "%",
-                 "口径": "英伟达", "来源": "https://a.com"},
-                {"指标": "市场份额", "年份": 2025, "数值": 12, "单位": "%",
-                 "口径": "AMD", "来源": "https://a.com"},
-                {"指标": "营收", "年份": 2025, "数值": 620, "单位": "亿美元",
-                 "口径": "英伟达", "来源": "https://a.com"},
+            (proj / "chart_data.json").write_text(json.dumps({"charts": [
+                {
+                    "question": "2023-2025年全球AI芯片市场规模趋势？",
+                    "conclusion": "市场规模从2023年110亿美元增至2025年726亿美元。",
+                    "type": "line", "title": "2023-2025年全球AI芯片市场规模（亿美元）",
+                    "x_axis_title": "年份", "y_axis_title": "市场规模（亿美元）",
+                    "unit": "亿美元", "time_range": "2023-2025年", "region": "全球",
+                    "source": "艾媒统计", "sample_size": "2",
+                    "annotation": "按年份趋势", "missing": "2024年数据暂缺", "outliers": "无",
+                    "data": [
+                        {"label": "艾媒", "value": 110, "year": 2023, "caliber": "艾媒", "source": "https://a.com"},
+                        {"label": "艾媒", "value": 726, "year": 2025, "caliber": "艾媒", "source": "https://a.com"},
+                    ],
+                },
+                {
+                    "question": "2025年全球AI芯片厂商份额排名？",
+                    "conclusion": "英伟达49%领先，AMD 12%居次。",
+                    "type": "bar", "title": "2025年全球AI芯片厂商份额（%）",
+                    "x_axis_title": "厂商", "y_axis_title": "份额（%）",
+                    "unit": "%", "time_range": "2025年", "region": "全球",
+                    "source": "https://a.com", "sample_size": "2",
+                    "annotation": "英伟达领先", "missing": "无", "outliers": "无",
+                    "data": [
+                        {"label": "英伟达", "value": 49, "year": 2025, "caliber": "英伟达", "source": "https://a.com"},
+                        {"label": "AMD", "value": 12, "year": 2025, "caliber": "AMD", "source": "https://a.com"},
+                    ],
+                },
             ]}, ensure_ascii=False), encoding="utf-8")
             o._render_chart_data("t-lc-1", "请分析AI芯片市场并生成可视化报告")
-            pngs = {p.name for p in proj.glob("*.png")}
-            self.assertIn("market_trend.png", pngs, "市场规模趋势图")
-            self.assertIn("player_share.png", pngs, "份额对比图")
-            self.assertIn("key_numbers.png", pngs, "其它指标对比图")
+            pngs = {p.name for p in proj.glob("chart_*.png")}
+            self.assertEqual(pngs, {"chart_1.png", "chart_2.png"}, "应按规格渲染两张图")
+            manifest = json.loads((proj / "chart_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(manifest["charts"]), 2)
+            self.assertTrue(all(m["title"] and m["conclusion"] and m["keywords"] for m in manifest["charts"]))
         finally:
             ws_mod.WORKSPACE_ROOT = old_root
             import shutil
@@ -441,23 +557,117 @@ class TestSearchCharts(unittest.TestCase):
         ws_mod.configure_workspace_root(tmp)
         try:
             proj = ws_mod.task_project_dir("t-lc-2")
-            (proj / "chart_data.json").write_text(json.dumps({"data": [
-                {"指标": "市场规模", "年份": 2025, "数值": 726, "单位": "亿美元",
-                 "口径": "艾媒", "来源": "https://a.com"},
-                {"指标": "市场规模", "年份": 2025, "数值": 1800, "单位": "亿美元",
-                 "口径": "IIM", "来源": "https://b.com"},
-                {"指标": "市场规模", "年份": 2025, "数值": 3500, "单位": "亿美元",
-                 "口径": "IIM宽口径", "来源": "https://b.com"},
+            (proj / "chart_data.json").write_text(json.dumps({"charts": [
+                {
+                    "question": "2025年各口径市场规模对比？",
+                    "conclusion": "IIM宽口径3500亿，IIM 1800亿，艾媒726亿，口径差异显著。",
+                    "type": "bar", "title": "2025年全球AI芯片市场规模口径对比（亿美元）",
+                    "x_axis_title": "口径/来源", "y_axis_title": "市场规模（亿美元）",
+                    "unit": "亿美元", "time_range": "2025年", "region": "全球",
+                    "source": "https://b.com", "sample_size": "3",
+                    "annotation": "不同机构口径不同", "missing": "无", "outliers": "无",
+                    "data": [
+                        {"label": "艾媒", "value": 726, "year": 2025, "caliber": "艾媒", "source": "https://a.com"},
+                        {"label": "IIM", "value": 1800, "year": 2025, "caliber": "IIM", "source": "https://b.com"},
+                        {"label": "IIM宽口径", "value": 3500, "year": 2025, "caliber": "IIM宽口径", "source": "https://b.com"},
+                    ],
+                },
             ]}, ensure_ascii=False), encoding="utf-8")
             o._render_chart_data("t-lc-2", "请分析AI芯片市场并生成可视化报告")
-            self.assertTrue((proj / "market_trend.png").exists(),
-                            "单年份多口径应生成口径对比图")
-            # 无多年份 → 不产生"趋势线"误读（文件存在且为柱状图即可）
-            self.assertFalse((proj / "player_share.png").exists())
+            pngs = {p.name for p in proj.glob("chart_*.png")}
+            self.assertEqual(pngs, {"chart_1.png"}, "单年份多口径应生成一张柱状图")
+            manifest = json.loads((proj / "chart_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["charts"][0]["title"],
+                             "2025年全球AI芯片市场规模口径对比（亿美元）")
         finally:
             ws_mod.WORKSPACE_ROOT = old_root
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_render_skips_invalid_spec_and_keeps_valid(self):
+        import json
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = tempfile.mkdtemp(prefix="weavemind_llmchart_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            proj = ws_mod.task_project_dir("t-lc-3")
+            (proj / "chart_data.json").write_text(json.dumps({"charts": [
+                {
+                    "question": "2025年厂商份额？",
+                    "conclusion": "英伟达49%领先。",
+                    "type": "bar", "title": "2025年全球AI芯片厂商份额（%）",
+                    "x_axis_title": "厂商", "y_axis_title": "份额（%）",
+                    "unit": "%", "time_range": "2025年", "region": "全球",
+                    "source": "https://a.com", "sample_size": "1",
+                    "annotation": "领先厂商", "missing": "无", "outliers": "无",
+                    "data": [
+                        {"label": "英伟达", "value": 49, "year": 2025, "caliber": "英伟达", "source": "https://a.com"},
+                    ],
+                },
+                {
+                    "question": "无标注图",
+                    "type": "bar", "unit": "亿美元",
+                    "data": [
+                        {"label": "A", "value": 1, "year": 2025, "caliber": "A", "source": "https://b.com"},
+                    ],
+                },
+            ]}, ensure_ascii=False), encoding="utf-8")
+            o._render_chart_data("t-lc-3", "请分析AI芯片市场并生成可视化报告")
+            pngs = {p.name for p in proj.glob("chart_*.png")}
+            self.assertEqual(pngs, {"chart_1.png"}, "缺标注的规格应被跳过")
+            manifest = json.loads((proj / "chart_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(manifest["charts"]), 1)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_chart_spec_validator_and_type_rules(self):
+        from chart_specs import pick_type, validate_spec, wrap_rows_to_specs
+
+        good = {
+            "question": "q", "conclusion": "c", "type": "bar",
+            "title": "2025年全球AI芯片市场规模（亿美元）",
+            "x_axis_title": "口径", "y_axis_title": "规模（亿美元）",
+            "unit": "亿美元", "source": "https://a.com", "time_range": "2025年",
+            "region": "全球", "sample_size": "1", "annotation": "a",
+            "missing": "无", "outliers": "无",
+            "data": [{"label": "A", "value": 1, "year": 2025, "caliber": "A", "source": "https://a.com"}],
+        }
+        self.assertEqual(validate_spec(good), [])
+        self.assertIn("缺少 title", validate_spec({**good, "title": ""}))
+        self.assertIn("缺少 source", validate_spec({**good, "source": ""}))
+        self.assertIn("缺少 conclusion", validate_spec({**good, "conclusion": "  "}))
+        self.assertIn("data 为空", validate_spec({**good, "data": []}))
+        self.assertTrue(any("type 非法" in x for x in validate_spec({**good, "type": "3d_bar"})))
+
+        rows_ts = [
+            {"指标": "市场规模", "年份": 2023, "数值": 110, "单位": "亿美元", "口径": "艾媒", "来源": "https://a.com"},
+            {"指标": "市场规模", "年份": 2025, "数值": 726, "单位": "亿美元", "口径": "艾媒", "来源": "https://a.com"},
+        ]
+        self.assertEqual(pick_type(rows_ts), "line", "时间序列应推荐折线图")
+        rows_many = [
+            {"指标": "市场规模", "年份": None, "数值": i, "单位": "亿美元",
+             "口径": f"机构{i}", "来源": "https://a.com"} for i in range(12)
+        ]
+        self.assertEqual(pick_type(rows_many), "horizontal_bar", "类别>10 应推荐水平条形")
+
+        wrapped = wrap_rows_to_specs(rows_ts)
+        self.assertEqual(len(wrapped), 1)
+        self.assertEqual(wrapped[0]["type"], "line")
+        self.assertTrue(wrapped[0]["conclusion"])
+        # 单点组跳过（无结论不画图）
+        self.assertEqual(
+            wrap_rows_to_specs([
+                {"指标": "市场规模", "年份": 2025, "数值": 1500, "单位": "亿美元",
+                 "口径": "德勤", "来源": "https://a.com"},
+            ]), [],
+        )
 
     def test_no_charts_for_summary_goal(self):
         import json

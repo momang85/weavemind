@@ -1390,7 +1390,8 @@ class OrchestratorV2:
 
     @staticmethod
     def _extract_chart_data(text: str) -> list[dict]:
-        """从 content_summary 结果中解析 [CHART_DATA] JSON 数据行。"""
+        """从 content_summary 结果中解析 [CHART_DATA] JSON 图表规格；
+        兼容旧格式扁平 data 行（自动打包为规格）。"""
         if not text:
             return []
         idx = text.find("[CHART_DATA]")
@@ -1409,8 +1410,12 @@ class OrchestratorV2:
                 if depth == 0:
                     try:
                         data = json.loads(seg[i:j + 1])
-                        rows = data.get("data") or []
-                        return [r for r in rows if isinstance(r, dict)]
+                        specs = data.get("charts")
+                        if specs is None:
+                            rows = data.get("data") or []
+                            from chart_specs import wrap_rows_to_specs
+                            specs = wrap_rows_to_specs([r for r in rows if isinstance(r, dict)])
+                        return [s for s in specs if isinstance(s, dict)] if specs else []
                     except Exception:
                         break
         return []
@@ -1514,9 +1519,96 @@ class OrchestratorV2:
             kept.append(r)
         return kept
 
+    @staticmethod
+    def _excluded_for(goal: str) -> tuple[str, ...]:
+        """与目标主题无关的领域词；若目标本身就在讨论该领域（如"新能源汽车"、
+        "特斯拉财报"），则对应词不排除，避免误杀。"""
+        excluded = (
+            "人形机器人", "机器人", "soc", "汽车", "手机", "白宫",
+            "dram", "pcb", "oled", "投资", "财报", "具身智能", "蓝牙",
+            "显示器", "面板",
+        )
+        g = str(goal or "").lower()
+        return tuple(k for k in excluded if k not in g)
+
+    @staticmethod
+    def _goal_core(goal: str) -> list[str]:
+        """从目标中提取核心主题词（2 字中文双字组/英文技术词），用于正向
+        相关性校验：规格文本（标题/问题/结论/数据行）至少命中一个核心词。"""
+        g = str(goal or "").lower()
+        generic = (
+            "市场", "报告", "调研", "分析", "全球", "中国", "国内", "国际",
+            "可视化", "生成", "最新", "现状", "趋势", "规模", "份额", "数据",
+            "行业", "情况", "请分", "进行", "梳理", "汇总", "总结", "要点",
+            "评估", "方案", "项目", "产品", "技术", "领域", "相关", "以及",
+            "我们", "可以", "需要", "完成", "输出", "一份", "文档", "内容",
+            "2025", "2026", "20", "25", "26",
+        )
+        cands: set[str] = set()
+        for m in re.findall(r"[\u4e00-\u9fff]{2,4}", g):
+            for i in range(len(m) - 1):
+                bg = m[i:i + 2]
+                if bg not in generic:
+                    cands.add(bg)
+        for m in re.findall(r"[a-z]{2,8}", g):
+            if m in ("ai", "gpu", "soc", "ev", "llm", "iot", "saas", "b2b", "b2c", "erp", "crm", "cpu"):
+                cands.add(m)
+        excluded = set(OrchestratorV2._excluded_for(goal))
+        # 排序保证跨进程确定性（集合迭代顺序受 hash 随机化影响）；
+        # 全量返回而非截断——真正的主题词可能被截掉导致整图误删。
+        # 噪声双字组（如"请分"）不会命中规格文本，保留无害。
+        core = sorted(
+            (c for c in cands if c not in excluded and not any(e in c for e in excluded)),
+            key=lambda c: (-len(c), c),
+        )
+        return core
+
+    @classmethod
+    def _filter_chart_specs(cls, specs: list[dict], goal: str) -> list[dict]:
+        """主题过滤（图表规格版）：剔除与核心主题无关的图；
+        规格中混入无关领域的数据行（人形机器人/SoC/投资等）逐行剔除，
+        整图无关（标题/问题/结论即偏离主题）或数据行被清空则整图丢弃。"""
+        if not specs:
+            return specs
+        excluded = cls._excluded_for(goal)
+        core = cls._goal_core(goal)
+        kept: list[dict] = []
+        for s in specs:
+            if not isinstance(s, dict):
+                continue
+            title_q = (
+                str(s.get("title", "")) + " " + str(s.get("question", ""))
+                + " " + str(s.get("conclusion", ""))
+            ).lower()
+            if any(k in title_q for k in excluded):
+                continue
+            rows = [r for r in s.get("data") or [] if isinstance(r, dict)]
+            rows_kept = []
+            for r in rows:
+                text = (
+                    str(r.get("label", "")) + " " + str(r.get("caliber", ""))
+                    + " " + str(r.get("source", ""))
+                ).lower()
+                if any(k in text for k in excluded):
+                    continue
+                rows_kept.append(r)
+            if not rows_kept:
+                continue
+            whole_text = title_q + " " + " ".join(
+                str(r.get("label", "")) + " " + str(r.get("caliber", ""))
+                for r in rows_kept
+            ).lower()
+            if core and not any(k in whole_text for k in core):
+                continue
+            s = dict(s)
+            s["data"] = rows_kept
+            kept.append(s)
+        return kept
+
     def _render_chart_data(self, task_id: str, goal: str) -> None:
-        """确定性渲染 LLM 结构化图表数据（chart_data.json）：
-        只做绘图，语义与口径由 LLM 负责；不调用 LLM。"""
+        """确定性渲染 LLM 结构化图表规格（chart_data.json → {"charts": [...]}）：
+        语义（问题/结论/口径）由 LLM 负责；数字、标注、视觉编码由脚本保证。
+        无效规格跳过并记录原因；有效图输出 chart_N.png + chart_manifest.json。"""
         import subprocess
         import sys
         if not self._wants_visualization(goal):
@@ -1525,9 +1617,18 @@ class OrchestratorV2:
         src = project / "chart_data.json"
         if not src.exists():
             return
+        repo_root = os.path.dirname(os.path.abspath(__file__))
         script = r'''# -*- coding: utf-8 -*-
-"""确定性渲染：读取 LLM 输出的 chart_data.json，按语义生成图表。"""
+"""确定性渲染：读取 chart_data.json（{"charts": [规格]}），按 5 类图表规范绘制。
+语义（问题/结论/口径）由 LLM 负责；数字、标注、视觉编码由本脚本保证。
+无效规格跳过并打印原因；有效图输出 chart_N.png 并写 chart_manifest.json。"""
 import json
+import re
+import sys
+
+sys.path.insert(0, r"__REPO_ROOT__")
+from chart_specs import COLOR_BLIND_PALETTE, validate_spec, wrap_rows_to_specs
+
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -1535,7 +1636,12 @@ import matplotlib.pyplot as plt
 plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
 plt.rcParams["axes.unicode_minus"] = False
 
-rows = json.load(open("chart_data.json", encoding="utf-8")).get("data", [])
+CURATED = (
+    "规模", "趋势", "份额", "占比", "营收", "收入", "增速", "增长",
+    "成本", "价格", "预测", "玩家", "厂商", "格局", "对比", "分布",
+    "技术", "市场", "出货", "渗透", "渗透率", "出货量",
+)
+
 
 def norm(v):
     try:
@@ -1543,119 +1649,232 @@ def norm(v):
     except (TypeError, ValueError):
         return None
 
-# 1) 市场规模/规模 → 年份趋势线（不同口径分系列）
-trend_rows = [
-    r for r in rows
-    if "规模" in str(r.get("指标", "")) and norm(r.get("年份")) is not None
-]
-if trend_rows:
-    years_all = {norm(r.get("年份")) for r in trend_rows if norm(r.get("年份")) is not None}
-    if len(years_all) <= 1:
-        # 同一年份的多口径 → 柱状对比（口径 × 数值），避免单点散线误导
-        year = next(iter(years_all)) if years_all else ""
-        labels = [str(r.get("口径") or r.get("来源") or "?")[:18].replace("_", " ") for r in trend_rows]
-        vals = [norm(r.get("数值")) for r in trend_rows]
-        fig, ax = plt.subplots(figsize=(10, 5))
-        ax.bar(labels, vals, color="#3b82f6", edgecolor="white")
-        for i, v in enumerate(vals):
-            if v is not None:
-                ax.text(i, v, f"{v:g}", ha="center", va="bottom", fontsize=8)
-        ax.set_xlabel("口径 / 来源")
-        ax.set_ylabel("数值（按各指标单位）")
-        ax.set_title(f"{year} 年市场规模口径对比（LLM 结构化数据）")
-        ax.tick_params(axis="x", rotation=30)
-        plt.tight_layout()
-        plt.savefig("market_trend.png", dpi=110)
-        plt.close()
+
+def is_natural_order(rows):
+    """类别标签全部为年份/纯数字 → 保持自然顺序，不做降序。"""
+    labels = [str(r.get("label") or "").strip() for r in rows]
+    if not labels:
+        return False
+    return all(re.fullmatch(r"\d{4}|\d+(\.\d+)?", l) for l in labels)
+
+
+def series_key(r, i):
+    return str(r.get("caliber") or r.get("source") or f"系列{i + 1}")[:20]
+
+
+def footer_lines(spec, rows, conclusion):
+    source = str(spec.get("source") or "").strip()
+    if not source:
+        srcs = [str(r.get("source") or "") for r in rows if r.get("source")]
+        source = "；".join(dict.fromkeys(srcs))[:260]
+    tr = str(spec.get("time_range") or "时间未标注")
+    rg = str(spec.get("region") or "地域未标注")
+    n = str(spec.get("sample_size") or len(rows))
+    miss = str(spec.get("missing") or "无").strip() or "无"
+    out = str(spec.get("outliers") or "无").strip() or "无"
+    lines = []
+    if conclusion:
+        lines.append("结论：" + conclusion[:140])
+    lines.append(f"数据来源：{source or '未标注'}　时间：{tr}　地域：{rg}　样本量：n={n}")
+    if miss not in ("无", ""):
+        lines.append("缺失：" + miss[:80])
+    if out not in ("无", ""):
+        lines.append("异常：" + out[:80])
+    lines.append("数据未经审计，仅供参考；不同口径数据未合并。")
+    return "\n".join(lines)
+
+
+def add_footer(fig, spec, rows, conclusion):
+    fig.text(0.01, 0.004, footer_lines(spec, rows, conclusion),
+             fontsize=7.5, color="#444444", va="bottom", ha="left",
+             wrap=True)
+
+
+def keywords_for(spec):
+    text = " ".join(str(spec.get(k) or "") for k in ("title", "question", "conclusion"))
+    kw = [k for k in CURATED if k in text]
+    for chunk in re.findall(r"[\u4e00-\u9fff]+", str(spec.get("title") or "")):
+        for i in range(len(chunk) - 1):
+            kw.append(chunk[i:i + 2])
+    return list(dict.fromkeys(kw))[:14]
+
+
+def render_bar(ax, spec, rows, horizontal):
+    items = [(str(r.get("label") or "?")[:24], norm(r.get("value"))) for r in rows]
+    items = [(l, v) for l, v in items if v is not None]
+    if not items:
+        return False
+    if not is_natural_order(rows):
+        items.sort(key=lambda t: t[1], reverse=True)
+    labels = [l for l, _ in items]
+    vals = [v for _, v in items]
+    colors = [COLOR_BLIND_PALETTE[i % len(COLOR_BLIND_PALETTE)] for i in range(len(labels))]
+    if horizontal:
+        ax.barh(labels, vals, color=colors, edgecolor="white")
+        ax.set_xlim(left=0)
     else:
-        # 多年份 → 折线（不同口径分系列）
-        by_caliber = {}
-        for r in trend_rows:
-            key = str(r.get("口径") or r.get("来源") or "综合")[:20]
-            by_caliber.setdefault(key, []).append((norm(r["年份"]), norm(r["数值"]), r))
-        fig, ax = plt.subplots(figsize=(9, 5))
+        ax.bar(labels, vals, color=colors, edgecolor="white")
+        ax.set_ylim(bottom=0)
+    ax.set_xlabel(str(spec.get("x_axis_title") or "类别"))
+    ax.set_ylabel(str(spec.get("y_axis_title") or "数值"))
+    top5 = set(sorted(vals, reverse=True)[:5]) if len(vals) > 12 else set()
+    for i, v in enumerate(vals):
+        if len(vals) <= 12 or v in top5:
+            if horizontal:
+                ax.text(v, i, f"{v:g}", va="center", ha="left", fontsize=8)
+            else:
+                ax.text(i, v, f"{v:g}", ha="center", va="bottom", fontsize=8)
+    ax.tick_params(axis="x", rotation=28 if not horizontal else 0)
+    return True
+
+
+def render_line(ax, spec, rows):
+    years = [norm(r.get("year")) for r in rows]
+    has_years = (len(years) >= 2 and all(y is not None for y in years)
+                 and len({y for y in years}) >= 2)
+    if has_years:
+        by = {}
+        for i, r in enumerate(rows):
+            by.setdefault(series_key(r, i), []).append((norm(r.get("year")), norm(r.get("value"))))
         plotted = 0
-        for name, pts in by_caliber.items():
+        for ci, (name, pts) in enumerate(by.items()):
             pts = sorted(p for p in pts if p[1] is not None)
             if not pts:
                 continue
             xs = [p[0] for p in pts]
             ys = [p[1] for p in pts]
-            ax.plot(xs, ys, marker="o", label=name, linewidth=2)
-            for x, y in zip(xs, ys):
-                ax.text(x, y, f"{y:g}", ha="center", va="bottom", fontsize=8)
+            ax.plot(xs, ys, marker="o", linewidth=2,
+                    color=COLOR_BLIND_PALETTE[ci % len(COLOR_BLIND_PALETTE)], label=name)
+            if len(ys) <= 12:
+                for x, y in zip(xs, ys):
+                    ax.text(x, y, f"{y:g}", ha="center", va="bottom", fontsize=7.5)
             plotted += 1
-        if plotted:
-            ax.set_xlabel("年份")
-            ax.set_ylabel("数值（按各指标单位）")
-            ax.set_title("市场规模年份趋势（LLM 结构化数据）")
-            ax.legend(fontsize=8)
-            ax.grid(alpha=0.3)
-            plt.tight_layout()
-            plt.savefig("market_trend.png", dpi=110)
-            plt.close()
+        if plotted > 1:
+            ax.legend(fontsize=8, frameon=False)
+        ax.set_xlabel(str(spec.get("x_axis_title") or "年份"))
+    else:
+        labels = [str(r.get("label") or "?")[:18] for r in rows]
+        vals = [norm(r.get("value")) for r in rows]
+        xs = list(range(len(vals)))
+        ax.plot(xs, vals, marker="o", linewidth=2, color=COLOR_BLIND_PALETTE[0])
+        ax.set_xticks(xs)
+        ax.set_xticklabels(labels, rotation=25, fontsize=8)
+        ax.set_xlabel(str(spec.get("x_axis_title") or "类别/年份"))
+    ax.set_ylabel(str(spec.get("y_axis_title") or "数值"))
+    ax.grid(alpha=0.25)
+    return True
 
-# 2) 份额/占比 → 柱状图
-share_rows = [
-    r for r in rows
-    if any(k in str(r.get("指标", "")) for k in ("份额", "占比"))
-]
-if len(share_rows) >= 2:
-    labels = [
-        str(r.get("口径") or r.get("来源") or "?")[:18].replace("_", " ")
-        for r in share_rows
-    ]
-    vals = [norm(r.get("数值")) for r in share_rows]
-    fig, ax = plt.subplots(figsize=(9, 5))
-    ax.bar(labels, vals, color="#f59e0b", edgecolor="white")
-    for i, v in enumerate(vals):
-        if v is not None:
-            ax.text(i, v, f"{v:g}%", ha="center", va="bottom", fontsize=9)
-    ax.set_xlabel("厂商/区域/口径")
-    ax.set_ylabel("份额（%）")
-    ax.set_title("份额/占比对比（LLM 结构化数据）")
-    ax.tick_params(axis="x", rotation=25)
-    plt.tight_layout()
-    plt.savefig("player_share.png", dpi=110)
-    plt.close()
 
-# 3) 其它指标 → 指标对比柱状图
-other = [
-    r for r in rows
-    if "规模" not in str(r.get("指标", ""))
-    and not any(k in str(r.get("指标", "")) for k in ("份额", "占比"))
-]
-if other:
-    labels, vals = [], []
-    for r in other:
-        v = norm(r.get("数值"))
-        if v is None:
+def render_pie(ax, spec, rows):
+    items = [(str(r.get("label") or "?")[:18], norm(r.get("value"))) for r in rows]
+    items = [(l, v) for l, v in items if v is not None]
+    if not items or len(items) > 5:
+        return False
+    labels = [l for l, _ in items]
+    vals = [v for _, v in items]
+    total = sum(vals)
+    if total <= 0:
+        return False
+    ax.pie(vals, labels=labels, colors=COLOR_BLIND_PALETTE[:len(labels)],
+           autopct=lambda p: f"{p:.1f}%", startangle=90, counterclock=False,
+           wedgeprops={"edgecolor": "white", "linewidth": 1})
+    ax.axis("equal")
+    return True
+
+
+def render_scatter(ax, spec, rows):
+    xs = [norm(r.get("year")) for r in rows]
+    ys = [norm(r.get("value")) for r in rows]
+    if not any(x is not None and y is not None for x, y in zip(xs, ys)):
+        # 无年份 → 以序号为横轴，标签做刻度
+        labels = [str(r.get("label") or "?")[:16] for r in rows]
+        xs = list(range(len(rows)))
+        ax.scatter(xs, ys, s=48, color=COLOR_BLIND_PALETTE[0], edgecolor="white")
+        ax.set_xticks(xs)
+        ax.set_xticklabels(labels, rotation=25, fontsize=8)
+        ax.set_xlabel(str(spec.get("x_axis_title") or "类别/序号"))
+    else:
+        ax.scatter(xs, ys, s=48, color=COLOR_BLIND_PALETTE[0], edgecolor="white")
+        ax.set_xlabel(str(spec.get("x_axis_title") or "年份/序号"))
+    ax.set_ylabel(str(spec.get("y_axis_title") or "数值"))
+    ax.grid(alpha=0.25)
+    return True
+
+
+def main():
+    with open("chart_data.json", encoding="utf-8") as f:
+        payload = json.load(f)
+    specs = payload.get("charts")
+    if specs is None:
+        rows = payload.get("data") or []
+        specs = wrap_rows_to_specs([r for r in rows if isinstance(r, dict)])
+    specs = [s for s in specs if isinstance(s, dict)]
+    manifest = []
+    idx = 0
+    for i, spec in enumerate(specs):
+        issues = validate_spec(spec)
+        if issues:
+            print(f"SKIP chart#{i}: {'; '.join(issues)}", flush=True)
             continue
-        labels.append(f"{r.get('指标', '')} {r.get('年份', '')} {str(r.get('口径', ''))[:8]}".strip())
-        vals.append(v)
-    if vals:
-        fig, ax = plt.subplots(figsize=(10, 5))
-        ax.bar(labels, vals, color="#10b981", edgecolor="white")
-        ax.set_xlabel("指标 / 口径")
-        ax.set_ylabel("数值（按各指标单位）")
-        ax.set_title("关键指标对比（LLM 结构化数据）")
-        ax.tick_params(axis="x", rotation=30)
-        for i, v in enumerate(vals):
-            ax.text(i, v, f"{v:g}", ha="center", va="bottom", fontsize=8)
-        plt.tight_layout()
-        plt.savefig("key_numbers.png", dpi=110)
-        plt.close()
-print("rendered from LLM chart data")
+        rows = [r for r in spec.get("data") or [] if isinstance(r, dict)]
+        ctype = str(spec.get("type") or "bar")
+        conclusion = str(spec.get("conclusion") or "").strip()
+        title = str(spec.get("title") or "").strip()
+        fig, ax = plt.subplots(figsize=(9.5, 5.6))
+        fig.subplots_adjust(bottom=0.34)
+        ok = False
+        if ctype == "pie":
+            ok = render_pie(ax, spec, rows)
+        elif ctype == "horizontal_bar":
+            ok = render_bar(ax, spec, rows, horizontal=True)
+        elif ctype == "line":
+            ok = render_line(ax, spec, rows)
+        elif ctype == "scatter":
+            ok = render_scatter(ax, spec, rows)
+        else:
+            ok = render_bar(ax, spec, rows, horizontal=False)
+        if not ok:
+            print(f"SKIP chart#{i}: 数据无法支撑 {ctype} 图（{title}）", flush=True)
+            plt.close(fig)
+            continue
+        ax.set_title(title or "图表", fontsize=12, pad=10)
+        add_footer(fig, spec, rows, conclusion)
+        idx += 1
+        fname = f"chart_{idx}.png"
+        plt.savefig(fname, dpi=120, bbox_inches="tight")
+        plt.close(fig)
+        manifest.append({
+            "file": fname,
+            "title": title,
+            "question": str(spec.get("question") or ""),
+            "conclusion": conclusion,
+            "keywords": keywords_for(spec),
+        })
+        print(f"RENDERED {fname}: {title}", flush=True)
+    with open("chart_manifest.json", "w", encoding="utf-8") as f:
+        json.dump({"charts": manifest}, f, ensure_ascii=False, indent=1)
+    print(f"total={len(manifest)} skipped={len(specs) - len(manifest)}", flush=True)
+
+
+if __name__ == "__main__":
+    main()
 '''
+        script = script.replace("__REPO_ROOT__", repo_root)
         script_path = project / "render_charts.py"
         try:
             script_path.write_text(script, encoding="utf-8")
             proc = subprocess.run(
                 [sys.executable, str(script_path)],
-                cwd=str(project), capture_output=True, timeout=120,
+                cwd=str(project), capture_output=True, timeout=180,
             )
+            out = proc.stdout.decode("utf-8", errors="replace")
+            err = proc.stderr.decode("utf-8", errors="replace")
             if proc.returncode != 0:
-                logger.warning("render_charts failed: %s", proc.stderr.decode("utf-8", errors="replace")[:300])
+                logger.warning("render_charts failed: %s", (out + "\n" + err)[:400])
+            else:
+                for line in out.splitlines():
+                    if line.startswith("SKIP "):
+                        logger.info("chart skipped: %s", line)
         except Exception as exc:
             logger.warning("render_charts error: %s", exc)
 
@@ -2817,19 +3036,27 @@ print("charts generated")
             if (step.get("capability") == "content_summary"
                     and result.get("status") == "SUCCESS"
                     and self._wants_visualization(goal)):
-                # LLM 结构化图表数据 → 确定性渲染（语义由 LLM 负责，数字由脚本保证）
-                chart_rows = self._extract_chart_data(str(result.get("result") or ""))
-                if not chart_rows:
-                    # 兜底：从摘要的 Markdown 表格解析（LLM 未输出 JSON 块时）
-                    chart_rows = self._extract_chart_rows_from_table(
-                        str(result.get("result") or "")
-                    )
-                chart_rows = self._filter_chart_rows(chart_rows, goal)
-                if chart_rows:
+                # LLM 结构化图表规格 → 主题过滤 → 确定性渲染
+                # （语义/结论由 LLM 负责，数字与标注由脚本保证）
+                from chart_specs import wrap_rows_to_specs
+                _summary_text = str(result.get("result") or "")
+                _llm_specs = self._extract_chart_data(_summary_text)
+                _table_rows = self._extract_chart_rows_from_table(_summary_text)
+                # 兜底：从摘要的 Markdown 表格解析（LLM 未输出 JSON 块时）
+                chart_specs = _llm_specs or wrap_rows_to_specs(_table_rows)
+                chart_specs = self._filter_chart_specs(chart_specs, goal)
+                logger.info(
+                    "chart pipeline %s: llm_specs=%d table_rows=%d kept=%d",
+                    task_id,
+                    len(_llm_specs),
+                    len(_table_rows),
+                    len(chart_specs),
+                )
+                if chart_specs:
                     try:
                         _cd_path = task_project_dir(task_id) / "chart_data.json"
                         _cd_path.write_text(
-                            json.dumps({"data": chart_rows}, ensure_ascii=False, indent=1),
+                            json.dumps({"charts": chart_specs}, ensure_ascii=False, indent=1),
                             encoding="utf-8",
                         )
                         self._render_chart_data(task_id, goal)
