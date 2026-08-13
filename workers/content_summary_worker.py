@@ -102,6 +102,12 @@ class ContentSummaryWorker(AsyncWorkerBase):
                         "否则跳过该图。同一指标的不同年份/机构数据合并到一张图"
                         "（时间序列折线或对比柱状），不得拆成多张单点图。"
                         "⑤ 饼图必须 2~5 类且数值加和有意义；单类饼图禁止。"
+                        "⑥ label 必须是简短类别名（机构/年份/地区/厂商，≤12字），"
+                        "禁止把指标描述或整句当作 label"
+                        "（如\"AI芯片占全球芯片市场11%…\"不允许）。"
+                        "⑦ 数值必须与来源完全一致，保留小数"
+                        "（1059.8 不能写成 1060）；饼图（pie）仅用于加和≈100% 的占比，"
+                        "非占比数据用 bar/line。"
                         "规则：只提取与主题直接相关的数值（市场规模/份额/增速/营收等）；"
                         "口径必须区分不同来源与定义；数值必须来自总结中真实出现的内容，"
                         "严禁编造；不同来源的同一指标分成多行；"
@@ -134,8 +140,14 @@ class ContentSummaryWorker(AsyncWorkerBase):
                     if specs:
                         # 同指标跨年份的单点图先合并为时间序列，避免 2025/2026
                         # 被拆成两张无意义单点图
-                        from chart_specs import merge_year_series, validate_spec
+                        from chart_specs import (
+                            merge_year_series, validate_spec, verify_specs_against_text,
+                        )
                         specs = merge_year_series(specs)
+                        # 数据溯源：数值必须能在总结文本中找到，防 LLM 编造/转写错误
+                        specs, dropped = verify_specs_against_text(specs, clean_summary)
+                        if dropped:
+                            logger.info("Chart data verification dropped %d rows", dropped)
                         # 标注完整性校验：数据点不足/类型非法不可修复（防 LLM 编造
                         # 数字），直接丢弃；仅对"标注缺失"类问题让 LLM 一次性补全。
                         final_specs: list[dict] = []

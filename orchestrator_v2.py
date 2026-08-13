@@ -1687,6 +1687,7 @@ from chart_specs import COLOR_BLIND_PALETTE, validate_spec, wrap_rows_to_specs
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import numpy as np
 
 plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
 plt.rcParams["axes.unicode_minus"] = False
@@ -1715,6 +1716,27 @@ def is_natural_order(rows):
 
 def series_key(r, i):
     return str(r.get("caliber") or r.get("source") or f"系列{i + 1}")[:20]
+
+
+def short_label(r):
+    """类别标签清洗：LLM 有时把指标描述/整句当作 label（如
+    "AI芯片占全球芯片市场11%，全球芯片市场5760亿美元"），导致 x 轴标签错乱。
+    优先取 口径 或 label 中首个短片段（机构/年份/地区），否则取来源域名。"""
+    label = str(r.get("label") or "").strip() or "?"
+    if len(label) <= 12:
+        return label
+    for cand in (str(r.get("caliber") or "").strip(), label):
+        for sep in ("，", ",", "；", ";", "：", ":", "（", "("):
+            head = cand.split(sep)[0].strip()
+            if head and len(head) <= 12:
+                return head
+        if len(cand) <= 12 and cand:
+            return cand
+    src = str(r.get("source") or "")
+    m = re.search(r"https?://([^/]+)", src)
+    if m:
+        return m.group(1).replace("www.", "")[:12]
+    return label[:12]
 
 
 def footer_lines(spec, rows, conclusion):
@@ -1755,7 +1777,7 @@ def keywords_for(spec):
 
 
 def render_bar(ax, spec, rows, horizontal):
-    items = [(str(r.get("label") or "?")[:24], norm(r.get("value"))) for r in rows]
+    items = [(short_label(r), norm(r.get("value"))) for r in rows]
     items = [(l, v) for l, v in items if v is not None]
     if not items:
         return False
@@ -1808,7 +1830,7 @@ def render_line(ax, spec, rows):
             ax.legend(fontsize=8, frameon=False)
         ax.set_xlabel(str(spec.get("x_axis_title") or "年份"))
     else:
-        labels = [str(r.get("label") or "?")[:18] for r in rows]
+        labels = [short_label(r) for r in rows]
         vals = [norm(r.get("value")) for r in rows]
         xs = list(range(len(vals)))
         ax.plot(xs, vals, marker="o", linewidth=2, color=COLOR_BLIND_PALETTE[0])
@@ -1821,7 +1843,7 @@ def render_line(ax, spec, rows):
 
 
 def render_pie(ax, spec, rows):
-    items = [(str(r.get("label") or "?")[:18], norm(r.get("value"))) for r in rows]
+    items = [(short_label(r), norm(r.get("value"))) for r in rows]
     items = [(l, v) for l, v in items if v is not None]
     if not items or len(items) > 5:
         return False
@@ -1830,10 +1852,29 @@ def render_pie(ax, spec, rows):
     total = sum(vals)
     if total <= 0:
         return False
-    ax.pie(vals, labels=labels, colors=COLOR_BLIND_PALETTE[:len(labels)],
-           autopct=lambda p: f"{p:.1f}%", startangle=90, counterclock=False,
-           wedgeprops={"edgecolor": "white", "linewidth": 1})
+    unit = str(spec.get("unit") or "")
+    is_pct = unit == "%" or all(v <= 100 for v in vals)
+    if is_pct and not (95 <= total <= 105):
+        print(f"SKIP pie: 占比数据加和 {total:.1f}% 不为 100%，饼图会误导", flush=True)
+        return False
+    wedges, _ = ax.pie(
+        vals, labels=labels, colors=COLOR_BLIND_PALETTE[:len(labels)],
+        startangle=90, counterclock=False,
+        wedgeprops={"edgecolor": "white", "linewidth": 1},
+    )
     ax.axis("equal")
+    # 数据标注：直接用原值（占比数据即原百分比，禁止重算占比导致图与数据不符）
+    for w, v in zip(wedges, vals):
+        ang = (w.theta2 - w.theta1) / 2.0 + w.theta1
+        x = 0.70 * np.cos(np.deg2rad(ang))
+        y = 0.70 * np.sin(np.deg2rad(ang))
+        if is_pct:
+            ax.text(x, y, f"{v:g}%", ha="center", va="center",
+                    fontsize=9, color="white", weight="bold")
+        else:
+            share = 100.0 * v / total
+            ax.text(x, y, f"{v:g}{unit}\n{share:.1f}%", ha="center", va="center",
+                    fontsize=8, color="white", weight="bold")
     return True
 
 
@@ -1842,7 +1883,7 @@ def render_scatter(ax, spec, rows):
     ys = [norm(r.get("value")) for r in rows]
     if not any(x is not None and y is not None for x, y in zip(xs, ys)):
         # 无年份 → 以序号为横轴，标签做刻度
-        labels = [str(r.get("label") or "?")[:16] for r in rows]
+        labels = [short_label(r) for r in rows]
         xs = list(range(len(rows)))
         ax.scatter(xs, ys, s=48, color=COLOR_BLIND_PALETTE[0], edgecolor="white")
         ax.set_xticks(xs)
@@ -3096,7 +3137,9 @@ print("charts generated")
                     and self._wants_visualization(goal)):
                 # LLM 结构化图表规格 → 主题过滤 → 确定性渲染
                 # （语义/结论由 LLM 负责，数字与标注由脚本保证）
-                from chart_specs import merge_year_series, wrap_rows_to_specs
+                from chart_specs import (
+                    merge_year_series, verify_specs_against_text, wrap_rows_to_specs,
+                )
                 _summary_text = str(result.get("result") or "")
                 _llm_specs = self._extract_chart_data(_summary_text)
                 _table_rows = self._extract_chart_rows_from_table(_summary_text)
@@ -3104,12 +3147,17 @@ print("charts generated")
                 chart_specs = _llm_specs or wrap_rows_to_specs(_table_rows)
                 # 同指标跨年份的单点图合并为时间序列（防 2025/2026 拆成两张单点图）
                 chart_specs = merge_year_series(chart_specs)
+                # 数据溯源：数值必须能在摘要文本中找到（防 LLM 编造/转写错误）
+                chart_specs, _dropped_rows = verify_specs_against_text(
+                    chart_specs, _summary_text
+                )
                 chart_specs = self._filter_chart_specs(chart_specs, goal)
                 logger.info(
-                    "chart pipeline %s: llm_specs=%d table_rows=%d kept=%d",
+                    "chart pipeline %s: llm_specs=%d table_rows=%d dropped_rows=%d kept=%d",
                     task_id,
                     len(_llm_specs),
                     len(_table_rows),
+                    _dropped_rows,
                     len(chart_specs),
                 )
                 if chart_specs:

@@ -169,6 +169,45 @@ def merge_year_series(specs: list[dict]) -> list[dict]:
     return merged_specs + out
 
 
+def verify_specs_against_text(specs: list[dict], text: str) -> tuple[list[dict], int]:
+    """数据溯源校验：规格中每个数据行的数值必须能在来源文本中找到对应表述
+    （防 LLM 编造/转写错误，如 1059.8 误写成 1060）。
+    找不到数值的行丢弃；行数不足 2 的整图丢弃。
+    返回 (保留规格, 丢弃行数)。"""
+    nt = re.sub(r"[\s,，。；;：:·\u3000]+", "", text or "")
+    kept_specs: list[dict] = []
+    dropped_rows = 0
+    for s in specs:
+        if not isinstance(s, dict):
+            continue
+        rows_kept: list[dict] = []
+        for r in s.get("data") or []:
+            if not isinstance(r, dict):
+                continue
+            v = r.get("value")
+            cands: set[str] = set()
+            if isinstance(v, (int, float)):
+                f = float(v)
+                cands.add(f"{f:g}")
+                cands.add(str(f))
+                if f == int(f):
+                    cands.add(str(int(f)))
+            else:
+                cands.add(str(v))
+            if any(c and c in nt for c in cands):
+                rows_kept.append(r)
+            else:
+                dropped_rows += 1
+        if len(rows_kept) >= 2:
+            s = dict(s)
+            s["data"] = rows_kept
+            s["sample_size"] = str(len(rows_kept))
+            kept_specs.append(s)
+        elif rows_kept and len(rows_kept) < 2:
+            dropped_rows += 0  # 行数已计入
+    return kept_specs, dropped_rows
+
+
 def wrap_rows_to_specs(rows: list[dict]) -> list[dict]:
     """兜底：把扁平数据行（指标/年份/数值/单位/口径/来源）打包成图表规格。
     结论由数据形态推导（对比/差异），供无 LLM 规格时使用。

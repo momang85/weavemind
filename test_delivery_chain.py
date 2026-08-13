@@ -778,6 +778,119 @@ class TestSearchCharts(unittest.TestCase):
             next(s for s in merged if s["type"] == "pie")
         )))
 
+    def test_verify_specs_against_text_drops_fabricated_values(self):
+        from chart_specs import verify_specs_against_text
+
+        specs = [{
+            "title": "2025年全球AI芯片市场规模（亿美元）",
+            "question": "各口径差异？",
+            "conclusion": "德勤1500亿，艾媒726亿。",
+            "type": "bar", "unit": "亿美元",
+            "x_axis_title": "口径", "y_axis_title": "规模（亿美元）",
+            "source": "https://a.com", "time_range": "2025年", "region": "全球",
+            "data": [
+                {"label": "德勤", "value": 1500, "year": 2025, "caliber": "德勤", "source": "https://a.com"},
+                {"label": "艾媒", "value": 726, "year": 2025, "caliber": "艾媒", "source": "https://b.com"},
+                {"label": "编造机构", "value": 9999, "year": 2025, "caliber": "编造", "source": "https://c.com"},
+            ],
+        }]
+        text = "2025年全球AI芯片市场规模：德勤预测1500亿美元，艾媒统计726亿美元。"
+        kept, dropped = verify_specs_against_text(specs, text)
+        self.assertEqual(dropped, 1, "编造的 9999 应被溯源校验丢弃")
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(len(kept[0]["data"]), 2)
+        self.assertEqual(kept[0]["sample_size"], "2")
+
+    def test_render_skips_pie_with_non_100_percent(self):
+        import json
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = tempfile.mkdtemp(prefix="weavemind_llmchart_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            proj = ws_mod.task_project_dir("t-pie-1")
+            (proj / "chart_data.json").write_text(json.dumps({"charts": [
+                {
+                    "question": "2025年全球AI芯片厂商份额？",
+                    "conclusion": "英伟达49%，AMD 12%。",
+                    "type": "pie", "title": "2025年全球AI芯片厂商份额（%）",
+                    "x_axis_title": "厂商", "y_axis_title": "份额（%）",
+                    "unit": "%", "time_range": "2025年", "region": "全球",
+                    "source": "https://a.com", "sample_size": "2",
+                    "annotation": "前两大厂商", "missing": "无", "outliers": "无",
+                    "data": [
+                        {"label": "英伟达", "value": 49, "year": 2025, "caliber": "英伟达", "source": "https://a.com"},
+                        {"label": "AMD", "value": 12, "year": 2025, "caliber": "AMD", "source": "https://a.com"},
+                    ],
+                },
+            ]}, ensure_ascii=False), encoding="utf-8")
+            o._render_chart_data("t-pie-1", "请分析AI芯片市场并生成可视化报告")
+            pngs = {p.name for p in proj.glob("chart_*.png")}
+            self.assertEqual(pngs, set(), "占比加和 61% != 100% 的饼图应跳过（重算占比会与数据不符）")
+            manifest = json.loads((proj / "chart_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["charts"], [])
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_render_pie_with_100_percent_and_long_labels(self):
+        import json
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = tempfile.mkdtemp(prefix="weavemind_llmchart_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            proj = ws_mod.task_project_dir("t-pie-2")
+            (proj / "chart_data.json").write_text(json.dumps({"charts": [
+                {
+                    "question": "2025年中国占全球AI算力市场比重？",
+                    "conclusion": "中国40%，其他60%。",
+                    "type": "pie", "title": "2025年全球AI算力市场区域构成（%）",
+                    "x_axis_title": "区域", "y_axis_title": "占比（%）",
+                    "unit": "%", "time_range": "2025年", "region": "全球",
+                    "source": "https://a.com", "sample_size": "2",
+                    "annotation": "区域构成", "missing": "无", "outliers": "无",
+                    "data": [
+                        {"label": "中国", "value": 40, "year": 2025, "caliber": "中国", "source": "https://a.com"},
+                        {"label": "全球其他地区", "value": 60, "year": 2025, "caliber": "全球其他地区", "source": "https://a.com"},
+                    ],
+                },
+                {
+                    "question": "2025年各口径市场规模？",
+                    "conclusion": "各口径差异大。",
+                    "type": "bar", "title": "2025年全球AI芯片市场规模（亿美元）",
+                    "x_axis_title": "口径", "y_axis_title": "规模（亿美元）",
+                    "unit": "亿美元", "time_range": "2025年", "region": "全球",
+                    "source": "https://b.com", "sample_size": "2",
+                    "annotation": "口径对比", "missing": "无", "outliers": "无",
+                    "data": [
+                        {"label": "AI芯片占全球芯片市场11%，全球芯片市场5760亿美元", "value": 570,
+                         "year": 2025, "caliber": "德勤统计", "source": "https://b.com"},
+                        {"label": "艾媒咨询统计", "value": 726, "year": 2025,
+                         "caliber": "艾媒咨询统计", "source": "https://c.com"},
+                    ],
+                },
+            ]}, ensure_ascii=False), encoding="utf-8")
+            o._render_chart_data("t-pie-2", "请分析AI算力市场并生成可视化报告")
+            pngs = {p.name for p in proj.glob("chart_*.png")}
+            self.assertEqual(pngs, {"chart_1.png", "chart_2.png"},
+                             "占比加和=100% 的饼图与长标签柱状图都应正常渲染")
+            manifest = json.loads((proj / "chart_manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(manifest["charts"]), 2)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_no_charts_for_summary_goal(self):
         import json
         import tempfile
