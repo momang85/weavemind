@@ -9,6 +9,8 @@
 5. 标注完整性（标题含指标+时间+地域+单位，轴标题+单位，来源，结论）。
 """
 
+import re
+
 CHART_TYPES = ("line", "bar", "horizontal_bar", "pie", "scatter")
 
 # 关键字段缺失即视为无效图（跳过）
@@ -43,6 +45,8 @@ def validate_spec(spec) -> list[str]:
     data = spec.get("data") or []
     if not data:
         issues.append("data 为空")
+    elif len(data) < 2:
+        issues.append("data 少于 2 个数据点（单点图无结论，按规范跳过）")
     for it in data:
         if not isinstance(it, dict) or "label" not in it or "value" not in it:
             issues.append("data 行缺少 label/value")
@@ -82,19 +86,103 @@ def pick_type(rows: list[dict]) -> str:
     return "bar"
 
 
+_METRIC_STOP = ("预测", "预计", "测算", "展望", "统计", "口径", "对比")
+
+
+def _metric_key(title: str) -> str:
+    """归一化标题为指标键：去掉括号（年份/单位）、修饰词与标点，
+    用于识别"同一指标的不同年份"单点图。"""
+    t = re.sub(r"[（(][^）)]*[）)]", "", str(title or ""))
+    for w in _METRIC_STOP:
+        t = t.replace(w, "")
+    t = re.sub(r"[年月日：:，,。．\-·\s]+", "", t)
+    return t.lower()
+
+
+def merge_year_series(specs: list[dict]) -> list[dict]:
+    """把同一指标、不同年份的独立单点规格合并为一张时间序列折线图。
+    例如 2025 年 890 亿美元 + 2026 年 1120 亿美元 → 一张折线。
+    仅合并：type=bar、单数据行、带数值年份、指标键相同的规格。"""
+    specs = [s for s in specs if isinstance(s, dict)]
+    groups: dict[tuple, list[int]] = {}
+    for idx, s in enumerate(specs):
+        rows = [r for r in (s.get("data") or []) if isinstance(r, dict)]
+        if s.get("type") != "bar" or len(rows) != 1:
+            continue
+        yr = rows[0].get("year")
+        if yr is None:
+            continue
+        key = (str(s.get("unit") or ""), _metric_key(str(s.get("title") or "")))
+        groups.setdefault(key, []).append(idx)
+
+    consumed: set[int] = set()
+    merged_specs: list[dict] = []
+    for key, idxs in groups.items():
+        if len(idxs) < 2:
+            continue
+        items = [(specs[i], specs[i]["data"][0].get("year")) for i in idxs]
+        years = sorted({y for _, y in items})
+        if len(years) < 2:
+            continue
+        consumed.update(idxs)
+        items = sorted(items, key=lambda t: t[1])
+        rows: list[dict] = []
+        srcs: list[str] = []
+        for s, _ in items:
+            for r in s.get("data") or []:
+                rows.append(r)
+                u = str(r.get("source") or "").strip()
+                if u and u not in srcs:
+                    srcs.append(u)
+        base = items[0][0]
+        unit = str(base.get("unit") or "")
+        title = re.sub(r"[（(][^）)]*[）)]", "", str(base.get("title") or "")).strip()
+
+        def _fmt(v):
+            try:
+                return f"{float(v):g}"
+            except (TypeError, ValueError):
+                return str(v)
+
+        merged_specs.append({
+            "question": f"{title}在 {years[0]}-{years[-1]} 年间的变化趋势？",
+            "conclusion": (
+                f"{title}从 {years[0]} 年 {_fmt(rows[0].get('value'))}{unit} "
+                f"变化到 {years[-1]} 年 {_fmt(rows[-1].get('value'))}{unit}。"
+            ),
+            "type": "line",
+            "title": f"{title}（{years[0]}-{years[-1]}年，单位：{unit}）",
+            "x_axis_title": "年份",
+            "y_axis_title": f"{title}（{unit}）",
+            "unit": unit,
+            "time_range": f"{years[0]}-{years[-1]}年",
+            "region": str(base.get("region") or "未标注"),
+            "source": "；".join(srcs) or str(base.get("source") or ""),
+            "sample_size": str(len(rows)),
+            "annotation": "同指标不同年份数据合并为时间序列；口径差异见各数据行。",
+            "missing": str(base.get("missing") or "无"),
+            "outliers": str(base.get("outliers") or "无"),
+            "data": rows,
+        })
+
+    out = [s for i, s in enumerate(specs) if i not in consumed]
+    return merged_specs + out
+
+
 def wrap_rows_to_specs(rows: list[dict]) -> list[dict]:
     """兜底：把扁平数据行（指标/年份/数值/单位/口径/来源）打包成图表规格。
     结论由数据形态推导（对比/差异），供无 LLM 规格时使用。
     单一数据点无法支撑对比/趋势结论 → 跳过（图表规范：无结论不画图）。"""
-    groups: dict[str, list[dict]] = {}
+    groups: dict[tuple, list[dict]] = {}
     for r in rows:
         metric = str(r.get("指标") or "指标")
-        groups.setdefault(metric, []).append(r)
+        unit = str(r.get("单位") or "")
+        # 同指标不同单位（% vs 万亿美元）不得合并，按规范分开
+        groups.setdefault((metric, unit), []).append(r)
     specs = []
-    for metric, group in groups.items():
+    for (metric, unit), group in groups.items():
         if len(group) < 2:
             continue  # 单点图无意义，按规范跳过
-        unit = str(group[0].get("单位") or "")
         years = sorted({r.get("年份") for r in group if r.get("年份") is not None})
         if len(years) >= 2 and all(r.get("年份") is not None for r in group):
             ctype = "line"

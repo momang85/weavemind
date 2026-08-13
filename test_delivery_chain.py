@@ -494,6 +494,58 @@ class TestSearchCharts(unittest.TestCase):
         # 与目标主题无关的领域词不得混入核心词
         self.assertNotIn("soc", o._goal_core(goal))
 
+    def test_filter_drops_offtopic_growth_debt_specs(self):
+        """回归：兜底解析曾把"全球经济增长率/债务"混入"AI算力投资"任务的图，
+        且结论模板词"差异显著"误中目标里的"技术路线差异"导致离题图被放行。"""
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        goal = ("请调研并总结2025年至2026年间，全球主要经济体在人工智能算力基础设施"
+                "方面的投资规模、核心技术路线差异及相关的政策法规。要求数据必须附带"
+                "明确的官方或权威机构出处，并按时间线整理。")
+        specs = [
+            {
+                "title": "全球经济增长率对比（%）",
+                "question": "各机构预测差异？",
+                "conclusion": "各口径间差异显著（3.2~3.3%）",
+                "type": "bar", "unit": "%",
+                "x_axis_title": "口径", "y_axis_title": "增长率（%）",
+                "source": "https://a.com", "time_range": "2025年", "region": "全球",
+                "data": [
+                    {"label": "社科院", "value": 3.2, "year": 2025, "caliber": "社科院", "source": "https://a.com"},
+                    {"label": "IMF", "value": 3.3, "year": 2025, "caliber": "IMF", "source": "https://b.com"},
+                ],
+            },
+            {
+                "title": "全球债务规模对比（万亿美元）",
+                "question": "各口径差异？",
+                "conclusion": "债务338万亿美元。",
+                "type": "bar", "unit": "万亿美元",
+                "x_axis_title": "口径", "y_axis_title": "规模（万亿美元）",
+                "source": "https://c.com", "time_range": "2025年", "region": "全球",
+                "data": [
+                    {"label": "社科院", "value": 338, "year": 2025, "caliber": "社科院", "source": "https://c.com"},
+                    {"label": "社科院2", "value": 338, "year": 2025, "caliber": "社科院2", "source": "https://c.com"},
+                ],
+            },
+            {
+                "title": "2025年全球AI算力基础设施投资规模（亿美元）",
+                "question": "各国投资规模？",
+                "conclusion": "美国领先。",
+                "type": "bar", "unit": "亿美元",
+                "x_axis_title": "国家", "y_axis_title": "投资（亿美元）",
+                "source": "https://d.com", "time_range": "2025年", "region": "全球",
+                "data": [
+                    {"label": "美国", "value": 500, "year": 2025, "caliber": "美国", "source": "https://d.com"},
+                    {"label": "中国", "value": 300, "year": 2025, "caliber": "中国", "source": "https://d.com"},
+                ],
+            },
+        ]
+        kept = o._filter_chart_specs(specs, goal)
+        self.assertEqual(len(kept), 1, "离题的经济增长/债务图应被丢弃，只保留算力投资图")
+        self.assertIn("AI算力基础设施投资规模", kept[0]["title"])
+        self.assertIn("算力", o._goal_core(goal))
+
     def test_render_chart_data_from_llm_specs(self):
         import json
         import tempfile
@@ -607,6 +659,7 @@ class TestSearchCharts(unittest.TestCase):
                     "annotation": "领先厂商", "missing": "无", "outliers": "无",
                     "data": [
                         {"label": "英伟达", "value": 49, "year": 2025, "caliber": "英伟达", "source": "https://a.com"},
+                        {"label": "AMD", "value": 12, "year": 2025, "caliber": "AMD", "source": "https://a.com"},
                     ],
                 },
                 {
@@ -628,7 +681,7 @@ class TestSearchCharts(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
     def test_chart_spec_validator_and_type_rules(self):
-        from chart_specs import pick_type, validate_spec, wrap_rows_to_specs
+        from chart_specs import merge_year_series, pick_type, validate_spec, wrap_rows_to_specs
 
         good = {
             "question": "q", "conclusion": "c", "type": "bar",
@@ -637,13 +690,19 @@ class TestSearchCharts(unittest.TestCase):
             "unit": "亿美元", "source": "https://a.com", "time_range": "2025年",
             "region": "全球", "sample_size": "1", "annotation": "a",
             "missing": "无", "outliers": "无",
-            "data": [{"label": "A", "value": 1, "year": 2025, "caliber": "A", "source": "https://a.com"}],
+            "data": [
+                {"label": "A", "value": 1, "year": 2025, "caliber": "A", "source": "https://a.com"},
+                {"label": "B", "value": 2, "year": 2025, "caliber": "B", "source": "https://b.com"},
+            ],
         }
         self.assertEqual(validate_spec(good), [])
         self.assertIn("缺少 title", validate_spec({**good, "title": ""}))
         self.assertIn("缺少 source", validate_spec({**good, "source": ""}))
         self.assertIn("缺少 conclusion", validate_spec({**good, "conclusion": "  "}))
         self.assertIn("data 为空", validate_spec({**good, "data": []}))
+        self.assertTrue(any("单点" in x for x in validate_spec({
+            **good, "data": [good["data"][0]],
+        })), "单数据点图应被判为非法（无结论不画图）")
         self.assertTrue(any("type 非法" in x for x in validate_spec({**good, "type": "3d_bar"})))
 
         rows_ts = [
@@ -668,6 +727,56 @@ class TestSearchCharts(unittest.TestCase):
                  "口径": "德勤", "来源": "https://a.com"},
             ]), [],
         )
+
+    def test_merge_year_series_combines_single_point_bars(self):
+        from chart_specs import merge_year_series, validate_spec
+
+        specs = [
+            {
+                "question": "2025年全球AI算力基础设施市场规模？",
+                "conclusion": "2025年突破890亿美元。",
+                "type": "bar", "title": "全球AI算力基础设施市场规模（2025年，单位：亿美元）",
+                "x_axis_title": "年份", "y_axis_title": "市场规模（亿美元）",
+                "unit": "亿美元", "time_range": "2025年", "region": "全球",
+                "source": "https://a.com", "sample_size": "1",
+                "annotation": "全球市场总量", "missing": "无", "outliers": "无",
+                "data": [{"label": "全球规模", "value": 890, "year": 2025,
+                          "caliber": "全球市场总量", "source": "https://a.com"}],
+            },
+            {
+                "question": "2026年全球AI算力基础设施市场规模预计？",
+                "conclusion": "2026年预计达1120亿美元。",
+                "type": "bar", "title": "全球AI算力基础设施市场规模预测（2026年，单位：亿美元）",
+                "x_axis_title": "年份", "y_axis_title": "市场规模（亿美元）",
+                "unit": "亿美元", "time_range": "2026年", "region": "全球",
+                "source": "https://b.com", "sample_size": "1",
+                "annotation": "预计总规模", "missing": "无", "outliers": "无",
+                "data": [{"label": "全球规模预测", "value": 1120, "year": 2026,
+                          "caliber": "预计总规模", "source": "https://b.com"}],
+            },
+            {
+                "question": "中国占全球比重？",
+                "conclusion": "中国占32.7%。",
+                "type": "pie", "title": "中国占全球AI算力基础设施市场比重（2025年，单位：%）",
+                "x_axis_title": "无", "y_axis_title": "占比（%）",
+                "unit": "%", "time_range": "2025年", "region": "全球",
+                "source": "https://a.com", "sample_size": "1",
+                "annotation": "占比", "missing": "无", "outliers": "无",
+                "data": [{"label": "中国", "value": 32.7, "year": 2025,
+                          "caliber": "占比", "source": "https://a.com"}],
+            },
+        ]
+        merged = merge_year_series(specs)
+        line = [s for s in merged if s["type"] == "line"]
+        self.assertEqual(len(line), 1, "同指标跨年份单点应合并为一张折线")
+        self.assertEqual(len(line[0]["data"]), 2)
+        self.assertEqual(validate_spec(line[0]), [])
+        self.assertIn("2025", line[0]["time_range"])
+        # 单点饼图不可合并，仍应单独存在且后续被校验拒绝
+        self.assertTrue(any(s["type"] == "pie" for s in merged))
+        self.assertTrue(any("单点" in x for x in validate_spec(
+            next(s for s in merged if s["type"] == "pie")
+        )))
 
     def test_no_charts_for_summary_goal(self):
         import json

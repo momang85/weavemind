@@ -98,6 +98,10 @@ class ContentSummaryWorker(AsyncWorkerBase):
                         "占比且≤5类→pie；关系→scatter。"
                         "③ 标注必须完整：title 含指标+时间+地域+单位，x/y 轴标题带单位，"
                         "source/time_range/region/unit/sample_size/annotation 不能为空。"
+                        "④ 禁止为单个数据点生成图表：至少需要 2 个可对比的数据点，"
+                        "否则跳过该图。同一指标的不同年份/机构数据合并到一张图"
+                        "（时间序列折线或对比柱状），不得拆成多张单点图。"
+                        "⑤ 饼图必须 2~5 类且数值加和有意义；单类饼图禁止。"
                         "规则：只提取与主题直接相关的数值（市场规模/份额/增速/营收等）；"
                         "口径必须区分不同来源与定义；数值必须来自总结中真实出现的内容，"
                         "严禁编造；不同来源的同一指标分成多行；"
@@ -128,27 +132,52 @@ class ContentSummaryWorker(AsyncWorkerBase):
                             from chart_specs import wrap_rows_to_specs
                             specs = wrap_rows_to_specs([r for r in rows if isinstance(r, dict)])
                     if specs:
-                        # 标注完整性校验：缺失关键字段时，让 LLM 一次性补全
-                        from chart_specs import validate_specs
-                        valid, issues = validate_specs(specs)
-                        if issues:
-                            fix_prompt = (
-                                "以下图表规格缺少关键标注，请补齐后输出完整严格JSON"
-                                "（保持原数据与结论不变）：\n"
-                                + str(issues) + "\n规格：\n" + str(specs)[:4000]
+                        # 同指标跨年份的单点图先合并为时间序列，避免 2025/2026
+                        # 被拆成两张无意义单点图
+                        from chart_specs import merge_year_series, validate_spec
+                        specs = merge_year_series(specs)
+                        # 标注完整性校验：数据点不足/类型非法不可修复（防 LLM 编造
+                        # 数字），直接丢弃；仅对"标注缺失"类问题让 LLM 一次性补全。
+                        final_specs: list[dict] = []
+                        for s in specs:
+                            issues = validate_spec(s)
+                            if not issues:
+                                final_specs.append(s)
+                                continue
+                            data_bad = any(
+                                ("data" in x) or ("单点" in x) or ("type 非法" in x)
+                                for x in issues
                             )
+                            if data_bad:
+                                logger.info(
+                                    "Chart spec dropped (unfixable): %s",
+                                    "; ".join(issues),
+                                )
+                                continue
                             try:
-                                fixed = call_llm(
+                                fix_prompt = (
+                                    "以下图表规格缺少关键标注，请补齐后输出完整严格JSON"
+                                    "（保持原数据与结论不变）：\n"
+                                    + "; ".join(issues) + "\n规格：\n"
+                                    + _json.dumps(s, ensure_ascii=False)[:4000]
+                                )
+                                fixed_raw = call_llm(
                                     "你是图表标注完善器。补齐缺失字段，只输出严格JSON"
                                     "{\"charts\":[...]}，不得改动数值。",
-                                    fix_prompt, expect_json=True,
+                                    fix_prompt, expect_json=False,
+                                )
+                                fixed = _load_json_loose(
+                                    str((fixed_raw or {}).get("content") or "")
+                                    if isinstance(fixed_raw, dict) else str(fixed_raw or "")
                                 )
                                 fixed_specs = (fixed or {}).get("charts") or []
-                                fixed_valid, _ = validate_specs(fixed_specs)
-                                if fixed_valid:
-                                    specs = fixed_valid
+                                if fixed_specs and not validate_spec(fixed_specs[0]):
+                                    final_specs.append(fixed_specs[0])
+                                else:
+                                    final_specs.append(s)
                             except Exception:
-                                pass
+                                final_specs.append(s)
+                        specs = final_specs
                         summary = (
                             summary
                             + "\n\n[CHART_DATA]\n"

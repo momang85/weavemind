@@ -1422,8 +1422,9 @@ class OrchestratorV2:
 
     @staticmethod
     def _extract_chart_rows_from_table(text: str) -> list[dict]:
-        """兜底：LLM 未输出 [CHART_DATA] 时，从摘要中的 Markdown 表格
-        （机构|数值|备注|链接 类）解析图表数据行。"""
+        """兜底：LLM 未输出 [CHART_DATA] 时，从摘要中的 Markdown 表格解析图表数据行。
+        按列语义提取：数值列必须有单位；"指标"列逐行取值；年份/口径/来源按表头定位；
+        无具体数值（如"数千亿"）、无单位的行直接丢弃。"""
         if not text:
             return []
         rows: list[dict] = []
@@ -1432,66 +1433,109 @@ class OrchestratorV2:
             if len(lines) < 3:
                 continue
             headers = [c.strip() for c in lines[0].strip("|").split("|")]
-            header_joined = " ".join(headers)
-            if any(k in header_joined for k in ("数值", "规模", "份额", "增速")):
-                metric = (
-                    "市场份额" if any(k in header_joined for k in ("份额", "占比"))
-                    else "市场规模" if any(k in header_joined for k in ("规模", "市场"))
-                    else "增速" if any(k in header_joined for k in ("增速", "复合"))
-                    else "指标"
-                )
-            else:
-                metric = "指标"
+            hmap = {h: i for i, h in enumerate(headers)}
+            # 数值列定位：精确表头优先，其次按含 数值/规模/份额/增速/金额/营收 的表头
+            val_idx = next(
+                (hmap[k] for k in ("数值", "规模", "金额", "份额", "增速", "营收")
+                 if k in hmap),
+                None,
+            )
+            if val_idx is None:
+                for i, h in enumerate(headers):
+                    if any(k in h for k in ("数值", "规模", "份额", "增速", "金额", "营收")):
+                        val_idx = i
+                        break
+            if val_idx is None:
+                continue  # 无数值列 → 时间线/政策类表格不画图
+            metric_idx = next(
+                (hmap[k] for k in ("指标", "指标/年份", "指标名称") if k in hmap),
+                None,
+            )
+            year_idx = next(
+                (hmap[k] for k in ("年份", "时间", "年度") if k in hmap),
+                None,
+            )
+            src_idx = next(
+                (hmap[k] for k in ("来源", "来源链接", "出处", "链接") if k in hmap),
+                None,
+            )
+            cal_idx = next(
+                (hmap[k] for k in ("口径", "口径说明", "口径/年份", "备注") if k in hmap),
+                None,
+            )
             for line in lines[2:]:
                 if "---" in line:
                     continue
                 cells = [c.strip() for c in line.strip("|").split("|")]
+                if val_idx >= len(cells):
+                    continue
                 joined = " ".join(cells)
                 num_m = re.search(
                     r"(\d+(?:\.\d+)?)\s*(万亿|千亿|百亿|亿|万)?\s*(亿美元|亿元|%|万辆|万台|美元)",
-                    joined,
+                    cells[val_idx] + " " + joined,
                 )
                 if not num_m:
                     continue
+                # "数千亿/数百亿" 这类无具体数字的值不画图
+                if not num_m.group(1):
+                    continue
                 year = None
-                ym = re.search(r"(20\d{2})\b", joined)
-                if ym:
-                    year = int(ym.group(1))
+                if year_idx is not None and year_idx < len(cells):
+                    ym = re.search(r"(20\d{2})", cells[year_idx])
+                    if ym:
+                        year = int(ym.group(1))
+                if year is None:
+                    ym = re.search(r"(20\d{2})", joined)
+                    if ym:
+                        year = int(ym.group(1))
                 src = ""
-                for c in cells:
-                    u = re.search(r"https?://[^\s\)\]]+", c)
-                    if u:
-                        src = u.group(0)
-                        break
+                if src_idx is not None and src_idx < len(cells):
+                    u = re.search(r"https?://[^\s\)\]]+", cells[src_idx])
+                    src = u.group(0) if u else cells[src_idx][:40]
+                if not src:
+                    for c in cells:
+                        u = re.search(r"https?://[^\s\)\]]+", c)
+                        if u:
+                            src = u.group(0)
+                            break
+                unit = (
+                    (num_m.group(2) or "") + (num_m.group(3) or "")
+                    if num_m.group(2) and num_m.group(3) in ("美元", "元", "人民币")
+                    else (num_m.group(3) or "")
+                )
+                if not unit:
+                    continue  # 无单位 → 规范要求必须有单位，不画图
+                metric = "指标"
+                if metric_idx is not None and metric_idx < len(cells):
+                    m = cells[metric_idx].strip()
+                    if m and m not in ("—", "-"):
+                        metric = m[:30]
+                else:
+                    metric = headers[val_idx] if val_idx < len(headers) else "指标"
+                    if any(k in metric for k in ("规模", "市场")):
+                        metric = "市场规模"
+                    elif any(k in metric for k in ("份额", "占比")):
+                        metric = "市场份额"
+                    elif any(k in metric for k in ("增速", "增长", "复合")):
+                        metric = "增速"
                 caliber = ""
-                for c in cells:
-                    if not c or c in ("—", "-", headers[0] if headers else ""):
-                        continue
-                    if re.match(r"^[\d.]+$", c):
-                        continue
-                    if src and c == src:
-                        continue
-                    caliber = c[:20]
-                    break
-                row_metric = metric
-                if row_metric == "指标" and caliber:
-                    if any(k in caliber for k in ("规模", "市场")):
-                        row_metric = "市场规模"
-                    elif any(k in caliber for k in ("份额", "占比")):
-                        row_metric = "市场份额"
-                    elif any(k in caliber for k in ("增速", "增长", "复合")):
-                        row_metric = "增速"
-                    elif any(k in caliber for k in ("营收", "收入")):
-                        row_metric = "营收"
+                if cal_idx is not None and cal_idx < len(cells):
+                    caliber = cells[cal_idx][:30]
+                if not caliber:
+                    for c in cells:
+                        if not c or c in ("—", "-") or c == metric or c == cells[val_idx]:
+                            continue
+                        if re.fullmatch(r"[\d.]+(?:万亿|千亿|百亿|亿|万)?(?:美元|元|%|辆|台)?", c):
+                            continue
+                        if src and c == src:
+                            continue
+                        caliber = c[:30]
+                        break
                 rows.append({
-                    "指标": row_metric,
+                    "指标": metric,
                     "年份": year,
                     "数值": float(num_m.group(1)),
-                    "单位": (
-                        (num_m.group(2) or "") + (num_m.group(3) or "")
-                        if num_m.group(2) and num_m.group(3) in ("美元", "元", "人民币")
-                        else (num_m.group(3) or "")
-                    ),
+                    "单位": unit,
                     "口径": caliber or "表格",
                     "来源": src,
                 })
@@ -1542,7 +1586,13 @@ class OrchestratorV2:
             "行业", "情况", "请分", "进行", "梳理", "汇总", "总结", "要点",
             "评估", "方案", "项目", "产品", "技术", "领域", "相关", "以及",
             "我们", "可以", "需要", "完成", "输出", "一份", "文档", "内容",
-            "2025", "2026", "20", "25", "26",
+            "差异", "明确", "要求", "必须", "时间", "方面", "主要", "官方",
+            "权威", "机构", "经济", "整理", "以及", "以及", "请调", "研并",
+            "并总", "年至", "年间", "球主", "要经", "济体", "体在", "工智",
+            "能算", "力基", "础设", "施方", "资规", "心技", "术路", "线差",
+            "异及", "及相", "关的", "策法", "求数", "据必", "须附", "附带",
+            "带明", "确的", "的官", "方或", "或权", "威机", "构出", "并按",
+            "按时", "间线", "线整", "整理", "2025", "2026", "20", "25", "26",
         )
         cands: set[str] = set()
         for m in re.findall(r"[\u4e00-\u9fff]{2,4}", g):
@@ -1594,11 +1644,16 @@ class OrchestratorV2:
                 rows_kept.append(r)
             if not rows_kept:
                 continue
-            whole_text = title_q + " " + " ".join(
+            core_text = (
+                str(s.get("title", "")) + " " + str(s.get("question", ""))
+                + " " + " ".join(
                 str(r.get("label", "")) + " " + str(r.get("caliber", ""))
                 for r in rows_kept
+                )
             ).lower()
-            if core and not any(k in whole_text for k in core):
+            # 结论字段不参与主题匹配：兜底规格的结论模板词（如"差异显著"）
+            # 可能误中目标里的通用词（如"技术路线差异"），导致离题图被放行
+            if core and not any(k in core_text for k in core):
                 continue
             s = dict(s)
             s["data"] = rows_kept
@@ -1820,6 +1875,9 @@ def main():
         ctype = str(spec.get("type") or "bar")
         conclusion = str(spec.get("conclusion") or "").strip()
         title = str(spec.get("title") or "").strip()
+        if len(rows) < 2:
+            print(f"SKIP chart#{i}: 数据点少于 2 个，单点图无结论（{title}）", flush=True)
+            continue
         fig, ax = plt.subplots(figsize=(9.5, 5.6))
         fig.subplots_adjust(bottom=0.34)
         ok = False
@@ -3038,12 +3096,14 @@ print("charts generated")
                     and self._wants_visualization(goal)):
                 # LLM 结构化图表规格 → 主题过滤 → 确定性渲染
                 # （语义/结论由 LLM 负责，数字与标注由脚本保证）
-                from chart_specs import wrap_rows_to_specs
+                from chart_specs import merge_year_series, wrap_rows_to_specs
                 _summary_text = str(result.get("result") or "")
                 _llm_specs = self._extract_chart_data(_summary_text)
                 _table_rows = self._extract_chart_rows_from_table(_summary_text)
                 # 兜底：从摘要的 Markdown 表格解析（LLM 未输出 JSON 块时）
                 chart_specs = _llm_specs or wrap_rows_to_specs(_table_rows)
+                # 同指标跨年份的单点图合并为时间序列（防 2025/2026 拆成两张单点图）
+                chart_specs = merge_year_series(chart_specs)
                 chart_specs = self._filter_chart_specs(chart_specs, goal)
                 logger.info(
                     "chart pipeline %s: llm_specs=%d table_rows=%d kept=%d",
