@@ -174,6 +174,22 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             if not report.startswith("#"):
                 report = "# 报告\n\n" + report
 
+            # 报告完整性守门：研究/调研类报告必须有正文骨架（规模/玩家/趋势），
+            # 若 LLM 输出过薄或被截断（只剩摘要），自动补上检索摘要的完整研究内容
+            if any(k in str(instruction) for k in ("报告", "调研", "研报")):
+                missing = [k for k in ("规模", "玩家", "趋势") if k not in report]
+                if missing:
+                    prev_parts = re.findall(
+                        r"\[上一步结果 \d+\]:\s*(.*?)(?=\n\[上一步结果 |\n用户目标：|\Z)",
+                        str(instruction), re.S,
+                    )
+                    prev_content = "\n\n".join(p.strip() for p in prev_parts)
+                    if prev_content:
+                        report += (
+                            "\n\n## 研究内容（检索/摘要）\n\n"
+                            + prev_content[:6000]
+                        )
+
             # 数据来源附录：从指令中的 [数据来源] 块提取 URL 并去重
             src_urls: list[str] = []
             m = re.search(r"\[数据来源\](.*)", str(instruction), re.S)

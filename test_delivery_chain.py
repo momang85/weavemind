@@ -371,6 +371,30 @@ class TestSearchCharts(unittest.TestCase):
         self.assertIn("亿美元", rows[0]["单位"])
         self.assertTrue(rows[0]["来源"].startswith("http"))
 
+    def test_filter_chart_rows_keeps_core_topic(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        rows = [
+            {"指标": "市场规模", "年份": 2025, "数值": 1800, "单位": "亿美元",
+             "口径": "IIM预测", "来源": "https://a.com"},
+            {"指标": "市场规模", "年份": 2025, "数值": 8.58, "单位": "亿美元",
+             "口径": "人形机器人专用芯片", "来源": "https://b.com"},
+            {"指标": "复合增长率", "年份": 2031, "数值": 51.4, "单位": "%",
+             "口径": "SoC芯片CAGR", "来源": "https://c.com"},
+            {"指标": "投资规模", "年份": 2025, "数值": 110, "单位": "亿美元",
+             "口径": "白宫AI投资", "来源": "https://d.com"},
+            {"指标": "市场规模", "年份": 2025, "数值": 726, "单位": "亿美元",
+             "口径": "艾媒统计", "来源": "https://e.com"},
+        ]
+        kept = o._filter_chart_rows(rows, "请分析2025年全球AI芯片市场并生成可视化报告")
+        names = [r["口径"] for r in kept]
+        self.assertIn("IIM预测", names)
+        self.assertIn("艾媒统计", names)
+        self.assertNotIn("人形机器人专用芯片", names)
+        self.assertNotIn("SoC芯片CAGR", names)
+        self.assertNotIn("白宫AI投资", names)
+
     def test_render_chart_data_from_llm_rows(self):
         import json
         import tempfile

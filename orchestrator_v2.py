@@ -1492,6 +1492,28 @@ class OrchestratorV2:
                 })
         return rows
 
+    @staticmethod
+    def _filter_chart_rows(rows: list[dict], goal: str) -> list[dict]:
+        """主题过滤：剔除与核心主题无关的数值（人形机器人/SoC/投资等），
+        并要求指标/口径与目标核心对象相关（如目标含"芯片"则须含芯片/AI/算力等）。"""
+        if not rows:
+            return rows
+        excluded = (
+            "人形机器人", "机器人", "soc", "汽车", "手机", "白宫",
+            "dram", "pcb", "oled", "投资", "财报", "具身智能", "蓝牙",
+            "显示器", "面板",
+        )
+        kept = []
+        for r in rows:
+            text = (
+                str(r.get("指标", "")) + " " + str(r.get("口径", ""))
+                + " " + str(r.get("来源", ""))
+            ).lower()
+            if any(k in text for k in excluded):
+                continue
+            kept.append(r)
+        return kept
+
     def _render_chart_data(self, task_id: str, goal: str) -> None:
         """确定性渲染 LLM 结构化图表数据（chart_data.json）：
         只做绘图，语义与口径由 LLM 负责；不调用 LLM。"""
@@ -2802,6 +2824,7 @@ print("charts generated")
                     chart_rows = self._extract_chart_rows_from_table(
                         str(result.get("result") or "")
                     )
+                chart_rows = self._filter_chart_rows(chart_rows, goal)
                 if chart_rows:
                     try:
                         _cd_path = task_project_dir(task_id) / "chart_data.json"
