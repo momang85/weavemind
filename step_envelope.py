@@ -94,27 +94,41 @@ _ENVELOPES: dict[str, dict] = {
 }
 
 
-def build_envelope(capability: str, goal: str) -> str:
-    """生成步骤信封文本；优先使用注册表覆盖（prompt_registry 自迭代的产物）。"""
+def build_envelope(capability: str, goal: str, hints: list[str] | None = None) -> str:
+    """生成步骤信封文本；优先使用注册表覆盖（prompt_registry 自迭代的产物），
+    并追加 RAG 检索到的历史提示词改进经验（进化系统反哺）。"""
     ov = load_overrides().get(f"step:{capability}")
     if ov and str(ov.get("prompt") or "").strip():
-        return "\n\n" + str(ov["prompt"]).strip()
-    env = _ENVELOPES.get(capability or "")
-    if not env:
-        # 未知能力：最小信封，保证目标与主题纪律不丢
-        return (
-            "\n\n【任务目标】{goal}\n"
-            "【要求】严格围绕任务目标执行，只输出与主题直接相关的结果；"
-            "不确定的数据标注来源与口径。"
-        ).format(goal=(goal or "")[:300])
-    return (
-        "\n\n【角色】{role}。\n"
-        "【受众】{audience}。\n"
-        "【输出要求】{output}。\n"
-        "【质量标准】{criteria}。"
-    ).format(
-        role=env["role"],
-        audience=env["audience"],
-        output=env["output"],
-        criteria=env["criteria"],
-    )
+        base = "\n\n" + str(ov["prompt"]).strip()
+    else:
+        env = _ENVELOPES.get(capability or "")
+        if not env:
+            base = (
+                "\n\n【任务目标】{goal}\n"
+                "【要求】严格围绕任务目标执行，只输出与主题直接相关的结果；"
+                "不确定的数据标注来源与口径。"
+            ).format(goal=(goal or "")[:300])
+        else:
+            base = (
+                "\n\n【角色】{role}。\n"
+                "【受众】{audience}。\n"
+                "【输出要求】{output}。\n"
+                "【质量标准】{criteria}。"
+            ).format(
+                role=env["role"],
+                audience=env["audience"],
+                output=env["output"],
+                criteria=env["criteria"],
+            )
+    # RAG 历史改进经验：只取与本能力相关的记录，追加为执行注意点
+    related = [
+        h for h in (hints or [])
+        if f"step:{capability}" in h or f"（{capability}" in h
+    ]
+    if related:
+        base += (
+            "\n【历史改进经验（RAG）】以下来自此前同类任务的反思/自迭代，"
+            "本次执行必须避免重蹈覆辙：\n"
+            + "\n".join(f"- {h[:300]}" for h in related[:2])
+        )
+    return base

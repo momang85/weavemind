@@ -231,5 +231,110 @@ class TestSearchKeywordsIgnoreEnvelope(unittest.TestCase):
         self.assertTrue(any("芯片" in w for w in words), f"关键词应含主题词: {words}")
 
 
+class _FakeMemory:
+    """带提示词 RAG 方法的假记忆，记录调用。"""
+
+    def __init__(self):
+        self.queries = []
+        self.records = []
+
+    def query_prompt_refinements(self, goal, n=3, threshold=None):
+        self.queries.append(goal)
+        return ["[step:code_execution] 提示词进化记录（step:code_execution v2） 改进：必须可运行"]
+
+    def add_prompt_refinement(self, **kwargs):
+        self.records.append(kwargs)
+
+
+class TestPromptRagWiring(unittest.TestCase):
+    def setUp(self):
+        self._old = os.environ.get("WEAVEMIND_PROMPTS_DIR")
+        self._tmp = tempfile.mkdtemp(prefix="wmrag_")
+        os.environ["WEAVEMIND_PROMPTS_DIR"] = self._tmp
+
+    def tearDown(self):
+        if self._old:
+            os.environ["WEAVEMIND_PROMPTS_DIR"] = self._old
+        else:
+            os.environ.pop("WEAVEMIND_PROMPTS_DIR", None)
+
+    def test_query_prompt_hints_uses_memory(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        mem = _FakeMemory()
+        o._memory = mem
+        o._messaging = _FakeMessaging()
+        hints = o._query_prompt_hints("请分析AI芯片市场", "t1")
+        self.assertEqual(len(hints), 1)
+        self.assertIn("step:code_execution", hints[0])
+        self.assertEqual(mem.queries, ["请分析AI芯片市场"])
+
+    def test_record_reflection_refinement(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        mem = _FakeMemory()
+        o._memory = mem
+        o._record_reflection_refinement(
+            "目标", "t1", "step:code_execution",
+            "代码不可运行", "优化后指令…",
+        )
+        self.assertEqual(len(mem.records), 1)
+        self.assertEqual(mem.records[0]["key"], "step:code_execution")
+        self.assertEqual(mem.records[0]["outcome"], "reflection")
+
+    def test_envelope_carries_rag_hints(self):
+        from step_envelope import build_envelope
+
+        hints = [
+            "[step:code_execution] 提示词进化记录（step:code_execution v2） 改进：必须可直接运行",
+            "[reflect] 提示词进化记录（reflect v2） 改进：指令要带验收标准",
+        ]
+        env = build_envelope("code_execution", "目标", hints)
+        self.assertIn("【角色】", env)
+        self.assertIn("【历史改进经验（RAG）】", env)
+        self.assertIn("必须可直接运行", env)
+        # 无关能力的提示不进本步骤信封
+        env2 = build_envelope("web_search", "目标", hints)
+        self.assertNotIn("必须可直接运行", env2)
+
+    def test_refinery_records_into_rag_when_memory_given(self):
+        import json
+        import llm_client
+        from prompt_refinery import refine_after_task
+
+        mem = _FakeMemory()
+        orig = llm_client.call_llm
+
+        def fake_call(system, user, expect_json=True):
+            return {"content": json.dumps({
+                "findings": [{
+                    "target": "step:web_search",
+                    "issue": "关键词被信封词污染",
+                    "evidence": "查询含角色/受众",
+                    "fix_prompt": (
+                        "补充要求：搜索关键词必须只从用户目标中提取，"
+                        "剔除角色、受众、质量标准、输出要求等信封词，"
+                        "避免查询被指令包装污染。"
+                    ),
+                    "rationale": "避免查询污染",
+                }],
+                "apply": True,
+            }, ensure_ascii=False)}
+
+        llm_client.call_llm = fake_call
+        try:
+            res = refine_after_task(
+                _FakeMessaging(), "ui-t1", "目标", [], {}, "报告",
+                {}, memory=mem,
+            )
+            self.assertEqual(res["applied"], 1)
+            self.assertEqual(len(mem.records), 1)
+            self.assertEqual(mem.records[0]["key"], "step:web_search")
+        finally:
+            llm_client.call_llm = orig
+
+
 if __name__ == "__main__":
     unittest.main()

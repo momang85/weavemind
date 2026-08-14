@@ -136,6 +136,7 @@ class OrchestratorV2:
         self._task_simple: dict[str, bool] = {}
         self._task_sources: dict[str, list[str]] = {}
         self._task_goals: dict[str, str] = {}
+        self._task_prompt_hints: dict[str, list[str]] = {}
         self._task_sources_lock = threading.Lock()
         self._task_starts_lock = threading.Lock()
         _cfg = {}
@@ -247,6 +248,23 @@ class OrchestratorV2:
                            "message": "Memory: 未找到相关历史经验",
                            "timestamp": self._now_iso()})
         return memory_context
+
+    def _query_prompt_hints(self, goal: str, task_id: str) -> list[str]:
+        """检索进化系统 RAG 中与本目标相关的提示词改进经验，
+        用于改写/丰富本次任务的规划与步骤提示词。"""
+        q = getattr(self._memory, "query_prompt_refinements", None)
+        if not callable(q):
+            return []
+        try:
+            hints = q(goal)
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "memory", "agent": "orchestrator",
+                           "message": f"Prompt RAG: 注入提示词改进经验 {len(hints)} 条",
+                           "timestamp": self._now_iso()})
+            return hints
+        except Exception as exc:
+            logger.warning("Prompt RAG query failed: %s", str(exc)[:120])
+            return []
 
     def _plan(self, goal: str, task_id: str, context: str = "",
               memory_context: str = "") -> list[dict]:
@@ -846,13 +864,40 @@ class OrchestratorV2:
                 s2["instruction"] = (
                     f"{s['instruction']}\n\n【反思要求重做】{feedback}"
                 )
+            orig_instr = s2.get("instruction", "")
             result = self._dispatch_step_safe(goal, s2, task_id, {"replan_used": 0})
             completed_all[s["step_id"]] = result
+            if s["step_id"] == step_id and result.get("status") == "SUCCESS":
+                # 反思改变提示词并成功 → 沉淀进进化系统 RAG，供后续任务检索
+                self._record_reflection_refinement(
+                    goal, task_id,
+                    key=f"step:{s.get('capability')}",
+                    issue=f"反思要求重做：{feedback}",
+                    fix_prompt=f"优化前：{orig_instr[:250]}\n优化后：{s2.get('instruction', '')[:250]}",
+                )
             push_progress(self._messaging, task_id, "log",
                           {"type": "iteration", "agent": "orchestrator",
                            "message": f"反思单步重做: step {s['step_id']} ({s.get('capability')}) -> {result.get('status')}",
                            "timestamp": self._now_iso()})
         return True
+
+    def _record_reflection_refinement(
+        self, goal: str, task_id: str, key: str, issue: str, fix_prompt: str,
+    ) -> None:
+        """把反思对提示词的改动沉淀进进化系统 RAG。失败不影响任务主线。"""
+        rec = getattr(self._memory, "add_prompt_refinement", None)
+        if not callable(rec):
+            return
+        try:
+            rec(
+                goal=goal, key=key,
+                issue=str(issue)[:300],
+                fix_prompt=str(fix_prompt)[:800],
+                rationale="反思轮发现缺陷后对步骤提示词的修改",
+                task_id=task_id, version=1, outcome="reflection",
+            )
+        except Exception as exc:
+            logger.warning("Reflection refinement RAG record failed: %s", str(exc)[:120])
 
     def _generation_fallback_step(self, goal: str, step: dict) -> dict:
         """搜索/抓取无果时的降级步骤：由 LLM 直接生产，不依赖外部资料。"""
@@ -1161,7 +1206,9 @@ class OrchestratorV2:
         try:
             from step_envelope import build_envelope
             instruction = str(instruction) + build_envelope(
-                capability, (getattr(self, "_task_goals", {}) or {}).get(task_id, "")
+                capability,
+                (getattr(self, "_task_goals", {}) or {}).get(task_id, ""),
+                (getattr(self, "_task_prompt_hints", {}) or {}).get(task_id),
             )
         except Exception as exc:
             logger.warning("step envelope failed: %s", str(exc)[:100])
@@ -2715,6 +2762,18 @@ print("charts generated")
 
         # 记忆注入：模板路由与 LLM 规划都先查历史经验（观众可见 memory 日志）
         memory_context = self._inject_memory_context(goal, task_id)
+        # 提示词改进经验（进化系统 RAG）：检索相关反思/自迭代记录，
+        # 注入规划上下文并用于改写步骤提示词（历史经验反哺）
+        prompt_hints = self._query_prompt_hints(goal, task_id)
+        if prompt_hints:
+            memory_context = (
+                f"{memory_context}\n\n"
+                "## 历史提示词改进经验（RAG，来自反思/自迭代）\n"
+                + "\n".join(f"- {h[:400]}" for h in prompt_hints)
+            ).strip()
+        if not hasattr(self, "_task_prompt_hints"):
+            self._task_prompt_hints = {}
+        self._task_prompt_hints[task_id] = prompt_hints
 
         # 1. Plan（模板步骤直接采用，否则 LLM 规划）
         used_template = False
@@ -2906,6 +2965,16 @@ print("charts generated")
             )
             if not next_steps:
                 break
+            # 反思新增步骤（即对反思提示词的落地改动）→ 沉淀进进化系统 RAG
+            self._record_reflection_refinement(
+                goal, task_id,
+                key="reflect",
+                issue="；".join(str(x) for x in (gaps or []))[:300],
+                fix_prompt="\n".join(
+                    f"- [{s.get('capability')}] {str(s.get('instruction') or '')[:200]}"
+                    for s in next_steps
+                )[:800],
+            )
             iteration += 1
             for s in next_steps:
                 s["iteration"] = iteration
@@ -3039,7 +3108,7 @@ print("charts generated")
                 maybe_refine(
                     self._messaging, task_id, goal, all_steps, completed_all, report,
                     {"has_failure": has_failure, "reflection_used": iteration > 0,
-                     "iterations": iteration},
+                     "iterations": iteration, "memory": getattr(self, "_memory", None)},
                 )
             except Exception as exc:
                 logger.warning("prompt refinery async failed: %s", str(exc)[:150])

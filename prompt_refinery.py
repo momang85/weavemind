@@ -94,12 +94,15 @@ def _maybe_run(messaging, task_id: str, goal: str, all_steps, completed_all, rep
     )
     if not trigger and not os.environ.get("WEAVEMIND_REFINE_ALWAYS"):
         return {"ran": False, "reason": "no_trigger"}
-    return refine_after_task(messaging, task_id, goal, all_steps, completed_all, report, flags)
+    return refine_after_task(
+        messaging, task_id, goal, all_steps, completed_all, report, flags,
+        memory=flags.get("memory") if isinstance(flags, dict) else None,
+    )
 
 
 def refine_after_task(
     messaging, task_id: str, goal: str, all_steps, completed_all,
-    report: str, flags: dict | None = None,
+    report: str, flags: dict | None = None, memory=None,
 ) -> dict:
     """执行一轮自迭代：LLM 分析证据 → 产出改进 → 校验并写入注册表。"""
     try:
@@ -128,6 +131,21 @@ def refine_after_task(
             )
             if ok:
                 applied += 1
+                # 沉淀进进化系统 RAG，供后续任务检索反哺
+                if memory is not None and hasattr(memory, "add_prompt_refinement"):
+                    try:
+                        memory.add_prompt_refinement(
+                            goal=goal,
+                            key=str(f.get("target") or ""),
+                            issue=str(f.get("issue") or ""),
+                            fix_prompt=str(f.get("fix_prompt") or ""),
+                            rationale=str(f.get("rationale") or ""),
+                            task_id=task_id,
+                            version=2,
+                            outcome="applied",
+                        )
+                    except Exception as exc:
+                        logger.warning("Refinement RAG record failed: %s", str(exc)[:120])
             else:
                 rejected.append({"target": f.get("target"), "issues": issues})
         with _LOCK:

@@ -113,10 +113,12 @@ class MemoryManager:
     # 集合名称
     COLLECTION_CONVERSATIONS = "conversations"
     COLLECTION_STRATEGIES = "successful_strategies"
+    COLLECTION_PROMPT_REFINEMENTS = "prompt_refinements"
 
     # 检索数量
     N_CONVERSATIONS = 3
     N_STRATEGIES = 1
+    N_REFINEMENTS = 3
 
     SIMILARITY_THRESHOLD = 0.6
 
@@ -152,6 +154,11 @@ class MemoryManager:
             embedding_function=self._embedding_fn,
             metadata={"description": "成功任务的完整规划路径"},
         )
+        self._prompt_refinements = self._client.get_or_create_collection(
+            name=self.COLLECTION_PROMPT_REFINEMENTS,
+            embedding_function=self._embedding_fn,
+            metadata={"description": "反思/自迭代产生的提示词改进记录（进化系统）"},
+        )
 
         logger.info(
             "MemoryManager initialized at '%s'. "
@@ -159,6 +166,7 @@ class MemoryManager:
             persist_directory,
             self._conversations.count(),
             self._strategies.count(),
+            self._prompt_refinements.count(),
         )
 
     # ------------------------------------------------------------------
@@ -218,6 +226,14 @@ class MemoryManager:
         except Exception as exc:
             logger.warning("Failed to query strategies: %s", exc)
 
+        # 查询历史提示词改进经验（进化系统产物）
+        refinements = self.query_prompt_refinements(current_goal)
+        if refinements:
+            parts.append(
+                "## 历史提示词改进经验（RAG，来自反思/自迭代）\n"
+                + "\n".join(f"- {r}" for r in refinements)
+            )
+
         if not parts:
             logger.info("No relevant memories found for goal: %s", current_goal[:60])
             return ""
@@ -243,6 +259,73 @@ class MemoryManager:
             len(context),
         )
         return context
+
+    # ------------------------------------------------------------------
+    # 提示词改进记忆（反思 / 自迭代 → RAG → 反哺后续提示词）
+    # ------------------------------------------------------------------
+
+    def add_prompt_refinement(
+        self,
+        goal: str,
+        key: str,
+        issue: str,
+        fix_prompt: str,
+        rationale: str = "",
+        task_id: str = "",
+        version: int = 1,
+        outcome: str = "applied",
+    ) -> None:
+        """沉淀一条提示词改进记录（反思结论或自迭代覆盖），供后续任务 RAG 检索。
+        任何异常都不抛出（进化系统不能拖垮任务主线）。"""
+        import uuid
+        try:
+            doc = (
+                f"提示词进化记录（{key} v{version}）\n"
+                f"任务目标：{goal[:300]}\n"
+                f"问题/反思结论：{issue}\n"
+                f"改进后的提示词（追加/覆盖）：{fix_prompt}\n"
+                f"改进理由：{rationale}\n"
+                f"结果：{outcome}"
+            )
+            self._prompt_refinements.add(
+                ids=[f"prf-{task_id or 'x'}-{uuid.uuid4().hex[:8]}"],
+                documents=[doc],
+                metadatas=[{
+                    "key": key,
+                    "version": int(version or 1),
+                    "outcome": outcome,
+                    "task_id": str(task_id)[:40],
+                    "created_at": _now_iso(),
+                }],
+            )
+            logger.info("Prompt refinement recorded: %s v%s (task %s)", key, version, task_id)
+        except Exception as exc:
+            logger.warning("Failed to record prompt refinement: %s", str(exc)[:150])
+
+    def query_prompt_refinements(
+        self, current_goal: str, n: int = 3, threshold: float | None = None
+    ) -> list[str]:
+        """按目标检索相关提示词改进经验；返回格式化文本列表（已按相似度过滤）。"""
+        try:
+            thr = self._similarity_threshold if threshold is None else threshold
+            res = self._prompt_refinements.query(
+                query_texts=[current_goal],
+                n_results=max(1, n),
+                include=["documents", "metadatas", "distances"],
+            )
+            docs = res.get("documents", [[]])[0]
+            dists = res.get("distances", [[]])[0]
+            metas = res.get("metadatas", [[]])[0]
+            out: list[str] = []
+            for doc, dist, meta in zip(docs, dists, metas):
+                if not doc or not doc.strip() or dist > thr:
+                    continue
+                key = (meta or {}).get("key", "?")
+                out.append(f"[{key}] {doc[:500]}")
+            return out
+        except Exception as exc:
+            logger.warning("Failed to query prompt refinements: %s", str(exc)[:120])
+            return []
 
     # ------------------------------------------------------------------
     # 记忆沉淀
