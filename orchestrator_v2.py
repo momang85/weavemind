@@ -87,10 +87,15 @@ _TOPIC_STOPWORDS = {
 }
 
 ITERATOR_SYSTEM = """你是严格的交付验收评审。你会获得【完整上下文】：用户目标、任务的全部步骤及结果摘要、交付文件、贯通测试结果、当前报告。请基于完整上下文判断交付物是否达标，而不是只看报告文本。
+受众：你的评审结论将直接生成下一轮步骤指令，必须具体到可执行，禁止空泛意见。
 输出严格JSON：
 {"score": 0-10, "verdict": "accept"|"stop"|"retry_step"|"add_steps",
  "retry_step_id": "步骤ID", "retry_reason": "缺陷原因与修复要求",
  "gaps": ["缺口"], "next_steps": [{"step_id":"1","capability":"...","instruction":"...","timeout":120}]}
+next_steps 示例（instruction 必须自带 角色/受众/输出要求/验收标准 四要素）：
+{"step_id":"3","capability":"code_execution",
+ "instruction":"【角色】资深全栈工程师。【受众】最终用户（需可玩）。【输出要求】自包含单文件 HTML，内联 CSS/JS。【质量标准】浏览器直接可玩、键盘可操控、有得分显示。实现：xxx",
+ "timeout":180}
 规则：
 1. score 是交付物与目标的吻合度（0-10）。score>=6 → verdict="accept"
 2. 可随时 verdict="stop" 停止反思（当前交付已足够好，或继续修改边际收益很低）
@@ -100,7 +105,8 @@ ITERATOR_SYSTEM = """你是严格的交付验收评审。你会获得【完整�
 5. 若判断已有知识过时/不足、需要更新信息，可在 next_steps 或重试步骤中安排一次 web_search（整轮反思最多补1次检索）
 6. next_step 的 capability 只能是下列之一，且每步只能一个：
    web_search, web_fetch, data_loader, data_analyzer, model_trainer, report_generator, content_summary, code_execution, file_io, package
-7. 不要吹毛求疵、不要"锦上添花"；只有明确缺失用户要求的内容才继续反思
+7. retry_reason 与 next_steps 的 instruction 必须包含：角色、受众（按目标推断）、输出要求（结构化格式）、质量标准（可验证的验收点）
+8. 不要吹毛求疵、不要"锦上添花"；只有明确缺失用户要求的内容才继续反思
 只输出JSON。"""
 
 # ─────────────────────────────────────────────
@@ -129,6 +135,7 @@ class OrchestratorV2:
         self._task_starts: dict[str, float] = {}
         self._task_simple: dict[str, bool] = {}
         self._task_sources: dict[str, list[str]] = {}
+        self._task_goals: dict[str, str] = {}
         self._task_sources_lock = threading.Lock()
         self._task_starts_lock = threading.Lock()
         _cfg = {}
@@ -290,7 +297,10 @@ class OrchestratorV2:
                            "message": f"正在规划（LLM 第 {attempt + 1}/2 次尝试）...",
                            "timestamp": self._now_iso()})
             try:
-                raw = self._planner_llm.call(PLANNER_SYSTEM, attempt_prompt, expect_json=True)
+                from prompt_registry import get_prompt
+                raw = self._planner_llm.call(
+                    get_prompt("planner", PLANNER_SYSTEM), attempt_prompt, expect_json=True
+                )
                 plan_data = self._parse_plan_response(raw)
                 break
             except Exception as e:
@@ -337,7 +347,9 @@ class OrchestratorV2:
                         "计划步骤必须明确包含目标的核心对象（如游戏类型、题材等）。"
                         f"用户目标：\n{goal}\n\n重新输出严格JSON计划。"
                     )
-                    raw2 = self._planner_llm.call(PLANNER_SYSTEM, strict_prompt, expect_json=True)
+                    raw2 = self._planner_llm.call(
+                        get_prompt("planner", PLANNER_SYSTEM), strict_prompt, expect_json=True
+                    )
                     steps2 = self._normalize_steps(self._parse_plan_response(raw2))
                     steps2 = self._ensure_report_step(steps2, task_id)
                     if steps2 and self._plan_topic_ok(goal, steps2):
@@ -787,7 +799,10 @@ class OrchestratorV2:
         ctx_parts.append(f"Deliverable (report):\n{str(report)[:3000]}")
         prompt = "\n\n".join(ctx_parts)
         try:
-            raw = self._planner_llm.call(ITERATOR_SYSTEM, prompt, expect_json=True)
+            from prompt_registry import get_prompt
+            raw = self._planner_llm.call(
+                get_prompt("reflect", ITERATOR_SYSTEM), prompt, expect_json=True
+            )
             if isinstance(raw, dict):
                 return raw
             clean = str(raw).strip()
@@ -1033,7 +1048,10 @@ class OrchestratorV2:
             'Output ONLY this JSON: {"steps":[{"step_id":"alt","capability":"...","instruction":"...","timeout":120}]}'
         )
         try:
-            raw = self._plan_llm.call(PLANNER_SYSTEM, prompt, expect_json=True)
+            from prompt_registry import get_prompt
+            raw = self._plan_llm.call(
+                get_prompt("planner", PLANNER_SYSTEM), prompt, expect_json=True
+            )
             if isinstance(raw, dict):
                 plan_data = raw
             else:
@@ -1108,7 +1126,10 @@ class OrchestratorV2:
             'Output ONLY this JSON: {"steps":[{"step_id":"1","capability":"...","instruction":"...","depends_on":[],"timeout":120}]}'
         )
         try:
-            raw = self._plan_llm.call(PLANNER_SYSTEM, prompt, expect_json=True)
+            from prompt_registry import get_prompt
+            raw = self._plan_llm.call(
+                get_prompt("planner", PLANNER_SYSTEM), prompt, expect_json=True
+            )
             if isinstance(raw, dict):
                 plan_data = raw
             else:
@@ -1135,6 +1156,15 @@ class OrchestratorV2:
         """Send one step to a worker and wait for result."""
         capability = step.get("capability", "")
         instruction = step.get("instruction", "")
+        # 步骤信封：为每个 Worker 补齐 角色/受众/输出要求/质量标准
+        # （反思重做、重规划步骤同样经过本单点，保证提示词一致性）
+        try:
+            from step_envelope import build_envelope
+            instruction = str(instruction) + build_envelope(
+                capability, (getattr(self, "_task_goals", {}) or {}).get(task_id, "")
+            )
+        except Exception as exc:
+            logger.warning("step envelope failed: %s", str(exc)[:100])
         step_id = step.get("step_id", uuid.uuid4().hex[:8])
         # LLM 生成/运行较慢：普通步骤下限 300s，code_execution（含生成-修复循环）下限 600s
         timeout = max(int(step.get("timeout", 300) or 300), 300)
@@ -2669,6 +2699,9 @@ print("charts generated")
         started = time.time()
         with self._task_starts_lock:
             self._task_starts[task_id] = started
+        if not hasattr(self, "_task_goals"):
+            self._task_goals = {}
+        self._task_goals[task_id] = goal
         # 每任务独立成果文件夹：清空本项目目录与旧交付包，保证只含本次产物
         ensure_task_workspace(task_id)
         self._cleanup_project_workspace(task_id)
@@ -2997,6 +3030,21 @@ print("charts generated")
                       {"status": overall,
                        "summary": f"{overall}: {ok_count}/{len(all_steps)} steps, {iteration} iterations",
                        "report": report})
+
+        # 6. 提示词自迭代（后台线程，不阻塞交付）：LLM 分析本次输出与预期的差距，
+        #    总结问题并产出改进版提示词写入注册表，下一轮任务自动生效
+        def _refine_async() -> None:
+            try:
+                from prompt_refinery import maybe_refine
+                maybe_refine(
+                    self._messaging, task_id, goal, all_steps, completed_all, report,
+                    {"has_failure": has_failure, "reflection_used": iteration > 0,
+                     "iterations": iteration},
+                )
+            except Exception as exc:
+                logger.warning("prompt refinery async failed: %s", str(exc)[:150])
+
+        threading.Thread(target=_refine_async, daemon=True).start()
 
         # 快速路径标志仅任务运行期间需要，用完即清，避免字典无限增长
         self._task_simple.pop(task_id, None)

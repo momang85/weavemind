@@ -188,7 +188,10 @@ class CriticAgent:
         user_prompt = f"请审查以下任务计划：\n\n{plan_text}"
 
         try:
-            result = call_llm(CRITIC_SYSTEM, user_prompt, expect_json=True)
+            from prompt_registry import get_prompt
+            result = call_llm(
+                get_prompt("critic", CRITIC_SYSTEM), user_prompt, expect_json=True
+            )
         except LLMJSONParseError as exc:
             logger.error("Critic LLM JSON parse error: %s", exc)
             return self._fallback_review(plan_id, f"评审解析失败: {exc}")

@@ -167,7 +167,11 @@ class CodeExecutionWorker(AsyncWorkerBase):
             if test_context else ""
         )
         if minimal:
-            system = "You are a web developer. Write minimal runnable code. Output ONLY raw code."
+            from prompt_registry import get_prompt
+            system = get_prompt(
+                "code_execution",
+                "You are a web developer. Write minimal runnable code. Output ONLY raw code.",
+            )
             prompt = (
                 "Write minimal runnable Python code (<=200 lines) that satisfies: "
                 f"{instruction[:800]}\n{env_note}{ws_note}{tdd_note}{feedback}"
@@ -176,10 +180,11 @@ class CodeExecutionWorker(AsyncWorkerBase):
                 f"{instruction[:800]}\nOutput ONLY raw HTML, no Python wrapper.{ws_note}{feedback}"
             )
         else:
-            system = (
+            from prompt_registry import get_prompt
+            system = get_prompt("code_execution", (
                 "You are a senior Python developer. Generate complete, runnable, "
                 "self-contained code. Output ONLY the code, no explanations."
-            )
+            ))
             prompt = (
                 "请生成满足以下要求的完整可运行 Python 代码（自包含、可直接执行，"
                 "必要依赖仅在注释中说明）：\n"

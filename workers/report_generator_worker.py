@@ -162,11 +162,12 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                 data_info += f"- **{d.name}**: file exists ({d.stat().st_size} bytes)\n"
 
         try:
+            from prompt_registry import get_prompt
             artifacts = (
                 f"可用图表：{', '.join(c.name for c in charts) or '无'}\n"
                 f"可用数据：\n{data_info or '无'}"
             )
-            system = (
+            system = get_prompt("report_generator", (
                 "你是专业报告撰写者。根据指令生成一份完整、具体、可直接交付的 Markdown 文档。"
                 "要求：结构清晰（使用标题/表格/列表），内容详实而非占位符，"
                 "严格围绕任务主题，语言流畅。直接输出 Markdown 正文，不要额外说明。"
@@ -178,7 +179,7 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                 "报告正文必须包含一个「关键数据一览」表格（列：指标 | 数值 | "
                 "口径/年份 | 来源），只收录与本任务主题直接相关的数值；"
                 "不同来源/口径的数字分开列出并注明差异，不要把不可比的数据混为一谈。"
-            )
+            ))
             user = f"{instruction}\n\n工作区产物：\n{artifacts}"
             # 主端点连试 2 次即切备用，减少慢端点对报告环节的拖累
             report = await self._call_llm(system=system, prompt=user, max_attempts=2)

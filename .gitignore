@@ -31,6 +31,7 @@ frontend/tsconfig.tsbuildinfo
 # 运行状态
 .weavemind/
 poison_strategies.json
+prompts/overrides.json
 
 # 编辑器 / 系统
 .vscode/

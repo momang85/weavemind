@@ -61,8 +61,9 @@ class ContentSummaryWorker(AsyncWorkerBase):
         def _sync():
             import json as _json
             from llm_client import call_llm
+            from prompt_registry import get_prompt
 
-            system = (
+            system = get_prompt("content_summary", (
                 "你是专业内容总结师。根据指令对内容进行总结、提炼或生成报告。"
                 "输出高质量的 Markdown 格式。如果是生成最终报告，要包含："
                 "总体摘要、关键发现、数据要点、建议。"
@@ -72,7 +73,7 @@ class ContentSummaryWorker(AsyncWorkerBase):
                 "列为：机构/来源 | 指标 | 数值 | 年份 | 口径说明 | 来源链接。"
                 "只收录与任务主题直接相关的数值；不同机构/口径分开列行；"
                 "数值必须来自检索资料真实出现的内容，严禁编造。"
-            )
+            ))
 
             user = f"指令: {instruction}\n\n请根据指令生成总结内容。"
 

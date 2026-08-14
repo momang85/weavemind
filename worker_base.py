@@ -459,6 +459,9 @@ class SearchAgent(BaseWorker):
         # 指令包装词与动词，避免污染查询
         "任务", "目标", "原始", "指令", "调研", "现状", "国内", "国外",
         "关于", "针对", "请根据", "确保", "然后", "随后", "接下来",
+        # 步骤信封词（中枢追加的角色/受众/质量标准），避免污染查询
+        "角色", "受众", "质量标准", "输出要求", "任务目标", "用户目标",
+        "自迭代改进",
     }
     _EN_STOP = {
         "the", "and", "with", "from", "for", "that", "this", "not",
@@ -512,7 +515,12 @@ class SearchAgent(BaseWorker):
         m = _re.search(r"用户目标：([^\n]+)", str(text))
         if m:
             return m.group(1).strip()
-        return _re.sub(r"^(任务目标|原始指令|用户目标)[：:]\s*", "", str(text).strip())
+        t = _re.sub(r"^(任务目标|原始指令|用户目标)[：:]\s*", "", str(text).strip())
+        # 信封（【角色】…）对搜索无意义，截断到信封之前
+        idx = t.find("\n【角色】")
+        if idx > 0:
+            t = t[:idx]
+        return t.strip()
 
     def _extract_keywords(self, text: str) -> str:
         """从用户目标中提取核心搜索词：去指令包装与停用词、保留年份、
