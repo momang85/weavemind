@@ -550,12 +550,16 @@ class SearchAgent(BaseWorker):
     def _query_variants(self, instruction: str) -> list[str]:
         """生成多个查询变体（整句 + 关键词组合 + 中英混合），显著提升召回。"""
         import re as _re
+        import time
 
         goal = self._clean_search_text(instruction)
         kws = [k for k in self._extract_keywords(instruction).split() if k]
         variants: list[str] = []
         if goal and len(goal) >= 4:
             variants.append(goal[:120])
+            # 时效性（修复"最新财报"返回旧年份）：目标要求最新时补当前年份
+            if any(k in instruction for k in ("最新", "最近", "latest", "current")):
+                variants.append(f"{goal[:110]} {time.localtime().tm_year}")
         if kws:
             variants.append(" ".join(kws)[:120])
             for i in range(1, min(len(kws), 5)):

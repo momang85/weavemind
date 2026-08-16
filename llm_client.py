@@ -490,7 +490,7 @@ class LLMClient:
         )
 
         try:
-            timeout = float(os.environ.get("LLM_REQUEST_TIMEOUT", "180") or 180)
+            timeout = float(os.environ.get("LLM_REQUEST_TIMEOUT", "60") or 60)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 response_data = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
@@ -661,7 +661,7 @@ def call_llm_stream(
         headers=headers, method="POST",
     )
     try:
-        timeout = float(os.environ.get("LLM_REQUEST_TIMEOUT", "300") or 300)
+        timeout = float(os.environ.get("LLM_REQUEST_TIMEOUT", "180") or 180)
         resp = urllib.request.urlopen(req, timeout=timeout)
     except urllib.error.HTTPError as exc:
         raise LLMCallError(

@@ -97,10 +97,44 @@ def _init_defaults() -> None:
         except Exception as exc:
             return (False, f"图表规格解析失败: {exc}")
 
+    def _recency_check(project: Path, task_id: str, goal: str):
+        """时效性审查（修复"最新财报返回旧年份"）：
+        目标要求"最新/最近"时，检索结果与报告必须含近期年份（当前年-1 起），
+        否则判定未通过并作为反思证据。"""
+        import re
+        import time
+        g = str(goal or "")
+        if not any(k in g for k in ("最新", "最近", "最新季度", "最新一期", "latest", "current")):
+            return (True, "目标未要求最新，跳过")
+        years: set[int] = set()
+        sr = project / "search_results.json"
+        if sr.exists():
+            try:
+                for it in json.loads(sr.read_text(encoding="utf-8")):
+                    t = f"{it.get('title', '')} {it.get('snippet', '')}"
+                    years.update(int(m) for m in re.findall(r"(20\d{2})", t))
+            except Exception:
+                pass
+        report = project.parent / "reports" / "report.md"
+        if report.exists():
+            try:
+                txt = report.read_text(encoding="utf-8", errors="replace")
+                years.update(int(m) for m in re.findall(r"(20\d{2})", txt))
+            except Exception:
+                pass
+        if not years:
+            return (False, "检索结果与报告未识别到任何年份，时效性无法确认")
+        cur = time.localtime().tm_year
+        recent = sorted(y for y in years if y >= cur - 1)
+        if not recent:
+            return (False, f"数据均为陈旧年份（{sorted(years)}，无 {cur - 1}~{cur} 年信息），必须重检索最新资料")
+        return (True, f"识别到近期年份 {recent}")
+
     register("code_deliverable", {"code_execution", "file_io"}, _code_deliverable)
     register("py_compile_all", {"code_execution", "file_io"}, _py_compile_all)
     register("html_playable", {"code_execution"}, _html_playable)
     register("chart_spec_valid", {"content_summary", "report_generator"}, _chart_spec_valid)
+    register("recency_check", {"web_search", "content_summary", "report_generator"}, _recency_check)
 
 
 _init_defaults()

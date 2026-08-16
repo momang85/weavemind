@@ -543,5 +543,48 @@ class TestP1MemoryGovernance(unittest.TestCase):
         self.assertEqual([d["id"] for d in col._docs], ["b"])
 
 
+class TestP2FinanceRecency(unittest.TestCase):
+    def test_financial_skill_matches(self):
+        from skill_registry import match_skills
+
+        hits = match_skills("搜索特斯拉最新财报并总结要点", "content_summary")
+        self.assertEqual(hits[0]["name"], "financial-research")
+
+    def test_recency_validator(self):
+        import json
+        import tempfile
+        import workspace as ws_mod
+        from validators.registry import run_for_task
+
+        tmp = tempfile.mkdtemp(prefix="weavemind_rec_")
+        old = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            proj = ws_mod.task_project_dir("t-rec-1")
+            goal = "搜索特斯拉最新财报并总结要点。"
+            (proj / "search_results.json").write_text(json.dumps([
+                {"title": "特斯拉2023年财报", "url": "https://a.com", "snippet": "营收 967 亿美元"},
+            ], ensure_ascii=False), encoding="utf-8")
+            res = run_for_task("t-rec-1", goal, ["web_search"])
+            rec = next(r for r in res if r["name"] == "recency_check")
+            self.assertFalse(rec["ok"], rec["detail"])
+            self.assertIn("陈旧", rec["detail"])
+
+            (proj / "search_results.json").write_text(json.dumps([
+                {"title": "特斯拉2026年Q1财报", "url": "https://a.com", "snippet": "营收 250 亿美元"},
+            ], ensure_ascii=False), encoding="utf-8")
+            res2 = run_for_task("t-rec-1", goal, ["web_search"])
+            rec2 = next(r for r in res2 if r["name"] == "recency_check")
+            self.assertTrue(rec2["ok"], rec2["detail"])
+
+            res3 = run_for_task("t-rec-1", "分析某公司财务", ["web_search"])
+            rec3 = next(r for r in res3 if r["name"] == "recency_check")
+            self.assertTrue(rec3["ok"])
+        finally:
+            ws_mod.WORKSPACE_ROOT = old
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main()

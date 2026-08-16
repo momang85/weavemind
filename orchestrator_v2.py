@@ -2982,6 +2982,17 @@ print("charts generated")
                         _gate_failed = True
                 except Exception as exc:
                     logger.info("Eval gate skipped: %s", str(exc)[:120])
+            # 验证器（含时效性审查）先于"跳过反思"决策计算：
+            # 时效性未通过 → 强制进入反思重检索，避免"最新财报返回旧年份"
+            try:
+                from validators.registry import run_for_task, summary_text
+                _caps = [str(s.get("capability")) for s in all_steps]
+                _vres = run_for_task(task_id, goal, _caps)
+                _vsum = summary_text(_vres)
+                if "recency_check" in _vsum and "未通过" in _vsum:
+                    _gate_failed = True
+            except Exception:
+                _vsum = ""
             # 报告/调研类任务：核心管道已产出报告（图表+来源已确定性嵌入）后直接交付，
             # 反射轮只会追加"锦上添花"步骤拖慢任务；评测未达标时例外
             _goal_low = str(goal or "").lower()
@@ -3000,13 +3011,6 @@ print("charts generated")
                                "message": "Reflection: 报告类任务核心交付已完成，跳过反射轮",
                                "timestamp": self._now_iso()})
                 break
-            try:
-                from validators.registry import run_for_task, summary_text
-                _caps = [str(s.get("capability")) for s in all_steps]
-                _vres = run_for_task(task_id, goal, _caps)
-                _vsum = summary_text(_vres)
-            except Exception:
-                _vsum = ""
             verdict = self._reflect(
                 goal, best_report, task_id, all_steps, completed_all,
                 memory_context, _vsum, _eval_scores,
@@ -3413,8 +3417,15 @@ print("charts generated")
                 _summary_text = str(result.get("result") or "")
                 _llm_specs = self._extract_chart_data(_summary_text)
                 _table_rows = self._extract_chart_rows_from_table(_summary_text)
-                # 兜底：从摘要的 Markdown 表格解析（LLM 未输出 JSON 块时）
-                chart_specs = _llm_specs or wrap_rows_to_specs(_table_rows)
+                # LLM 规格 + 表格兜底合并（不再二选一），保证结果更可能有图
+                chart_specs = list(_llm_specs) + wrap_rows_to_specs(_table_rows)
+                # 去重：同标题优先保留 LLM 版
+                _seen_titles = {}
+                for _s in chart_specs:
+                    _t = str(_s.get("title") or "")
+                    if _t not in _seen_titles:
+                        _seen_titles[_t] = _s
+                chart_specs = list(_seen_titles.values())
                 # 同指标跨年份的单点图合并为时间序列（防 2025/2026 拆成两张单点图）
                 chart_specs = merge_year_series(chart_specs)
                 # 数据溯源：数值必须能在摘要文本中找到（防 LLM 编造/转写错误）
