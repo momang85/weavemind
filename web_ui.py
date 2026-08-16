@@ -33,12 +33,12 @@ _evolution_lock = threading.Lock()
 
 
 def _get_rate_limiter():
-    """惰性初始化限流器（默认每 IP 10 次/分钟，可用环境变量调整）。"""
+    """惰性初始化限流器（默认每 IP 30 次/分钟，可用环境变量调整）。"""
     global _rate_limiter
     if _rate_limiter is None:
         from security import RateLimiter
         _rate_limiter = RateLimiter(
-            limit=int(os.environ.get("RATE_LIMIT_PER_MIN", "10")),
+            limit=int(os.environ.get("RATE_LIMIT_PER_MIN", "30")),
             window=60.0,
         )
     return _rate_limiter
@@ -895,7 +895,8 @@ class Handler(BaseHTTPRequestHandler):
             if bad:
                 return self._json({"error": f"输入疑似包含恶意注入（{reason}），已拦截"}, 400)
             client_ip = self.client_address[0] if self.client_address else "?"
-            if not _get_rate_limiter().allow(client_ip):
+            # 本机/回环地址不限流（本地开发与演示不被误伤）
+            if client_ip not in ("127.0.0.1", "::1") and not _get_rate_limiter().allow(client_ip):
                 return self._json({"error": "请求过于频繁，请稍后再试"}, 429)
             g = sanitize_goal(g)
             # 模板：允许不传 goal，自动取模板目标与确定性步骤

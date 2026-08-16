@@ -2866,6 +2866,7 @@ print("charts generated")
             steps = self._ensure_package_step(steps)
             steps = self._break_cycles(steps)
             steps = self._inject_goal_into_steps(steps, goal)
+            steps = self._inject_skills(steps, goal)
             if not steps:
                 push_progress(self._messaging, task_id, "task_complete",
                               {"status": "FAILED", "summary": "Empty plan confirmed, task cancelled"})
@@ -3071,6 +3072,7 @@ print("charts generated")
             steps = self._ensure_package_step(steps)
             steps = self._break_cycles(steps)
             steps = self._inject_goal_into_steps(steps, goal)
+            steps = self._inject_skills(steps, goal)
             push_progress(self._messaging, task_id, "log",
                           {"type": "iteration", "agent": "orchestrator",
                            "message": f"Iteration {iteration}: closing {len(gaps)} gaps with {len(steps)} steps",
