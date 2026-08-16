@@ -144,6 +144,7 @@ def build_services(cfg: dict) -> list[tuple[str, list[str], Path | None, Path | 
         ("worker-data-analyzer", [py, str(BASE_DIR / "workers" / "data_analyzer_worker.py")], BASE_DIR, None),
         ("worker-model-trainer", [py, str(BASE_DIR / "workers" / "model_trainer_worker.py")], BASE_DIR, None),
         ("worker-report-generator", [py, str(BASE_DIR / "workers" / "report_generator_worker.py")], BASE_DIR, None),
+        ("worker-react-agent", [py, str(BASE_DIR / "workers" / "react_agent.py")], BASE_DIR, None),
         ("critic", [py, str(BASE_DIR / "critic_agent.py")], BASE_DIR, None),
         ("orchestrator", [py, str(BASE_DIR / "orchestrator_v2.py")], BASE_DIR, None),
         ("webui", [py, str(BASE_DIR / "web_ui.py")], BASE_DIR, None),

@@ -52,7 +52,7 @@ def _loads_json_loose(text: str) -> dict:
 # ─────────────────────────────────────────────
 PLANNER_SYSTEM = """Break user goals into sequential execution steps.
 
-Available: web_search, web_fetch, data_loader, data_analyzer, model_trainer, report_generator, content_summary, code_execution, file_io, package
+Available: web_search, web_fetch, data_loader, data_analyzer, model_trainer, report_generator, content_summary, code_execution, file_io, package, react_agent
 
 Rules:
 1. Each step uses EXACTLY one capability from the list above
@@ -73,6 +73,8 @@ Rules:
     - pipeline：该步骤必须串行执行（与其他步骤不并发；用于强顺序/成本控制）
     - parallel（默认）：无依赖的步骤并行执行
     - human_in_loop：执行前需用户确认（用于高风险/不可逆操作，如删除、发布、付费调用）
+14. 需要"根据中间结果反复搜索/迭代工具"的任务（多轮调研、需要多次抓取核对）：
+    使用 react_agent（运行时 ReAct：决策→调用工具→观察→再决策），而不是堆叠多个搜索步骤
 
 Output ONLY this JSON with no extra text:
 {"steps":[{"step_id":"1","capability":"web_search","instruction":"search for house price dataset","depends_on":[],"timeout":60}]}"""
@@ -80,6 +82,7 @@ Output ONLY this JSON with no extra text:
 KNOWN_CAPABILITIES = {
     "web_search", "web_fetch", "data_loader", "data_analyzer", "model_trainer",
     "report_generator", "content_summary", "code_execution", "file_io", "package",
+    "react_agent",
 }
 
 _TOPIC_STOPWORDS = {

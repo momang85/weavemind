@@ -83,6 +83,14 @@ TOOL_REGISTRY = [
         "required": [],
         "must_contain": "Download: file://",
     },
+    {
+        "name": "react_agent",
+        "description": "运行时 ReAct Agent：根据中间结果反复调用工具（搜索/抓取/总结/代码）直到完成任务。用于多轮调研、需要迭代核对的任务。",
+        "parameters": {"instruction": "任务目标与要求"},
+        "returns": "最终答案文本",
+        "required": [],
+        "min_len": 1,
+    },
 ]
 
 

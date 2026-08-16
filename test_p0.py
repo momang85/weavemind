@@ -778,6 +778,94 @@ class TestP2EngineHealth(unittest.TestCase):
             else:
                 sys.modules["ddgs"] = old
 
+
+class TestP2McpLite(unittest.TestCase):
+    def test_handlers(self):
+        import mcp_lite
+
+        server = mcp_lite.MCPServer()
+        r1 = server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+        self.assertEqual(r1["result"]["serverInfo"]["name"], "weavemind-mcp-lite")
+        r2 = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+        names = {t["name"] for t in r2["result"]["tools"]}
+        self.assertIn("web_search", names)
+        self.assertIn("react_agent", names)
+
+        orig = mcp_lite.dispatch_tool
+        mcp_lite.dispatch_tool = lambda *a, **k: {"status": "SUCCESS", "result": "ok"}
+        try:
+            r3 = server.handle({
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": {"name": "web_search", "arguments": {"instruction": "x"}},
+            })
+            self.assertFalse(r3["result"]["isError"])
+            self.assertIn("ok", r3["result"]["content"][0]["text"])
+        finally:
+            mcp_lite.dispatch_tool = orig
+
+        r4 = server.handle({
+            "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": {"name": "web_search", "arguments": {}},
+        })
+        self.assertIn("error", r4)
+        r5 = server.handle({"jsonrpc": "2.0", "id": 5, "method": "nope"})
+        self.assertIn("error", r5)
+
+
+class TestP2ReactAgent(unittest.TestCase):
+    def test_loop_decides_tool_then_final(self):
+        import asyncio
+        import json
+        import tool_dispatch as td
+        import workers.react_agent as ra
+
+        w = ra.ReactAgent.__new__(ra.ReactAgent)
+        decisions = iter([
+            {"tool": "web_search", "arguments": {"instruction": "搜索特斯拉最新财报"}},
+            {"final": "特斯拉 2026 Q2 财报：营收 250 亿美元"},
+        ])
+
+        async def fake_llm(system="", prompt="", instruction="", max_attempts=3, max_tokens=2000):
+            return json.dumps(next(decisions))
+
+        w._call_llm = fake_llm
+        calls = []
+
+        def fake_dispatch(tool, instruction, task_id="", timeout=300, workspace=""):
+            calls.append((tool, instruction))
+            return {"status": "SUCCESS", "result": "检索结果"}
+
+        orig = td.dispatch_tool
+        td.dispatch_tool = fake_dispatch
+        try:
+            out = asyncio.run(w.execute("搜索特斯拉最新财报", {"task_id": "t1", "workspace": ""}))
+            self.assertEqual(out, "特斯拉 2026 Q2 财报：营收 250 亿美元")
+            self.assertEqual(len(calls), 1)
+            self.assertEqual(calls[0][0], "web_search")
+        finally:
+            td.dispatch_tool = orig
+
+
+class TestP2ToolAudit(unittest.TestCase):
+    def test_audit_write_and_read(self):
+        import tempfile
+        from pathlib import Path
+        import tool_dispatch as td
+
+        old = td.AUDIT_FILE
+        td.AUDIT_FILE = Path(tempfile.mkdtemp(prefix="audit_")) / "tool_audit.jsonl"
+        try:
+            td._audit("web_search", "搜索", {"status": "SUCCESS", "result": "r"}, 0.123, "t1")
+            entries = td.recent_audit()
+            self.assertEqual(len(entries), 1)
+            self.assertEqual(entries[0]["capability"], "web_search")
+            self.assertEqual(entries[0]["status"], "SUCCESS")
+            self.assertEqual(entries[0]["task_id"], "t1")
+            self.assertGreater(entries[0]["duration_ms"], 100)
+            self.assertEqual(len(entries[0]["instr_hash"]), 12)
+        finally:
+            td.AUDIT_FILE = old
+
     def test_execute_returns_results_via_bing(self):
         import json
         import sys

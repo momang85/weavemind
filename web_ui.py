@@ -854,6 +854,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"skills": skills})
             except Exception as exc:
                 return self._json({"error": str(exc)}, 500)
+        if p == "/api/tool-audit":
+            # 工具审计日志（MCP/ReAct/编排器派发的工具调用记录）
+            try:
+                from tool_dispatch import recent_audit
+                return self._json({"entries": recent_audit(100)})
+            except Exception as exc:
+                return self._json({"error": str(exc)}, 500)
         if p == "/api/evolution":
             with _evolution_lock:
                 return self._json({"rounds": list(reversed(_evolution_results))})
