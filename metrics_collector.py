@@ -53,6 +53,7 @@ class MetricsCollector:
         self._success_tasks = 0
         self._failed_tasks = 0
         self._total_latency = 0.0
+        self._total_cost = 0.0
         self._replan_count = 0
         self._replan_success = 0
         self._memory_injections = 0
@@ -206,6 +207,28 @@ class MetricsCollector:
                 if "历史背景" in res or "成功解决路径" in res:
                     memory_chars += len(res)
 
+        # 每任务成本（O-19 台账 → O-22 汇总）
+        cost_usd = 0.0
+        try:
+            r = redis.Redis(
+                host=os.environ.get("REDIS_HOST", "localhost"),
+                port=int(os.environ.get("REDIS_PORT", "6379")),
+                decode_responses=True,
+            )
+            ledger = r.hgetall(f"llm_usage_task:{tid}") or {}
+            from costs import ledger_cost
+            cost_usd = ledger_cost(ledger)
+        except Exception:
+            pass
+        self._total_cost += cost_usd
+        if self._recent_tasks:
+            for t in self._recent_tasks:
+                if t.get("task_id") == tid:
+                    t["cost_usd"] = cost_usd
+                    break
+            else:
+                self._recent_tasks.append({"task_id": tid, "status": status, "cost_usd": cost_usd})
+
         self._csv.writerow([
             now, tid, status, 0, replan_triggered,
             memory_chars, 0, len(steps), ""
@@ -221,10 +244,20 @@ class MetricsCollector:
                 return
 
             success_rate = self._success_tasks / self._total_tasks * 100
+            latencies = [t.get("latency", 0) for t in self._recent_tasks
+                         if isinstance(t.get("latency"), (int, float))]
+            p95 = sorted(latencies)[int(len(latencies) * 0.95) - 1] if latencies else 0.0
             summary = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "total_tasks": self._total_tasks,
+                "failed_tasks": self._failed_tasks,
                 "success_rate": round(success_rate, 1),
+                "failure_rate": round(100 - success_rate, 1),
+                "avg_latency_sec": round(
+                    sum(latencies) / len(latencies), 2
+                ) if latencies else 0.0,
+                "p95_latency_sec": round(float(p95), 2),
+                "cost_usd_total": round(self._total_cost, 4),
                 "critic": {
                     "pass": self._critic_pass,
                     "fail": self._critic_fail,

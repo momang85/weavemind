@@ -35,6 +35,7 @@ export interface ConversationMessage {
 }
 
 export interface MemoryDoc {
+  id?: string
   content: string
   metadata: Record<string, any>
 }

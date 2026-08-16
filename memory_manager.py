@@ -487,12 +487,13 @@ class MemoryManager:
     def list_recent(self, collection, limit: int = 50) -> list[dict]:
         """导出某集合最近的文档（内容 + 元数据），用于可视化。"""
         try:
-            res = collection.get(include=["documents", "metadatas"], limit=limit)
+            res = collection.get(include=["documents", "metadatas", "ids"], limit=limit)
             docs = res.get("documents") or []
             metas = res.get("metadatas") or []
+            ids = res.get("ids") or []
             out = []
-            for doc, meta in zip(docs, metas):
-                out.append({"content": doc, "metadata": meta or {}})
+            for doc, meta, doc_id in zip(docs, metas, ids):
+                out.append({"id": doc_id, "content": doc, "metadata": meta or {}})
             return out
         except Exception as exc:
             logger.warning("Failed to list memory docs: %s", exc)

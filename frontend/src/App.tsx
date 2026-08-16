@@ -8,6 +8,8 @@ import History from './pages/History'
 import HealthPage from './pages/Health'
 import SettingsPage from './pages/Settings'
 import MemoryPage from './pages/Memory'
+import EvalsPage from './pages/Evals'
+import SkillsPage from './pages/Skills'
 import { useTaskStore } from './stores/useTaskStore'
 
 // ── Error Boundary ──
@@ -68,6 +70,8 @@ export default function App() {
           <Route path="/history" element={<History />} />
           <Route path="/health" element={<HealthPage />} />
           <Route path="/memory" element={<MemoryPage />} />
+          <Route path="/evals" element={<EvalsPage />} />
+          <Route path="/skills" element={<SkillsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>
       </AppLayout>

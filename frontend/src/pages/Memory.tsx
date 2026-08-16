@@ -77,6 +77,18 @@ export default function Memory() {
     } catch {}
   }
 
+  const del = async (type: 'conversations' | 'strategies', ids: string[]) => {
+    if (!ids.length) return
+    try {
+      await fetch('/api/memory/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type, ids }),
+      })
+      await load()
+    } catch {}
+  }
+
   return (
     <div className="max-w-6xl mx-auto space-y-6">
       <div className="flex items-center justify-between">
@@ -129,6 +141,10 @@ export default function Memory() {
                       <span className="text-amber-400/80 text-[10px]">目标</span>
                       <span className="text-slate-300 text-xs truncate flex-1">{c.metadata.goal || (c.content || '').slice(0, 60)}</span>
                       {c.metadata.timestamp && <span className="text-slate-600 text-[10px]">{String(c.metadata.timestamp).slice(0, 16)}</span>}
+                      {c.id && (
+                        <button onClick={() => del('conversations', [c.id!])}
+                          className="text-slate-600 hover:text-red-400 text-[10px] px-1">删除</button>
+                      )}
                     </div>
                   </div>
                 ))}
@@ -146,6 +162,10 @@ export default function Memory() {
                       {expanded['s' + i] ? <ChevronDown className="w-3.5 h-3.5 text-slate-500" /> : <ChevronRight className="w-3.5 h-3.5 text-slate-500" />}
                       <span className="text-violet-300 text-xs truncate flex-1">{String(s.metadata.goal_keywords || '').slice(0, 60) || '策略'}</span>
                       {s.metadata.step_count && chip(`${s.metadata.step_count} 步`, 'bg-slate-700/50 text-slate-400')}
+                      {s.id && (
+                        <button onClick={() => del('strategies', [s.id!])}
+                          className="text-slate-600 hover:text-red-400 text-[10px] px-1">删除</button>
+                      )}
                     </button>
                     {expanded['s' + i] && (
                       <pre className="px-3 pb-3 text-slate-400 text-xs whitespace-pre-wrap font-sans max-h-48 overflow-y-auto">

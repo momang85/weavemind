@@ -408,6 +408,47 @@ class TestP1JudgeCalibration(unittest.TestCase):
             llm_client.call_llm = orig
 
 
+class TestP2CostLedger(unittest.TestCase):
+    def test_task_usage_ledger(self):
+        import llm_client
+
+        calls = {}
+
+        class FakeRedis:
+            def hincrby(self, key, field, n):
+                calls[(key, field)] = calls.get((key, field), 0) + int(n or 0)
+
+            def expire(self, key, t):
+                pass
+
+        llm_client._task_usage_client = FakeRedis()
+        llm_client.set_task_context("ui-x")
+        try:
+            llm_client._record_usage(100, 50, "deepseek-v4-flash")
+        finally:
+            llm_client.clear_task_context()
+        self.assertEqual(calls[("llm_usage_task:ui-x", "calls")], 1)
+        self.assertEqual(calls[("llm_usage_task:ui-x", "pt:deepseek-v4-flash")], 100)
+        self.assertEqual(calls[("llm_usage_task:ui-x", "ct:deepseek-v4-flash")], 50)
+        # 无任务上下文时不写台账
+        llm_client._record_usage(10, 10, "deepseek-v4-flash")
+        self.assertEqual(calls.get(("llm_usage_task:", "calls"), 0), 0)
+
+    def test_cost_estimate(self):
+        from costs import estimate_cost, ledger_cost
+
+        self.assertGreater(estimate_cost("deepseek-v4-flash", 1_000_000, 1_000_000), 0.0)
+        self.assertEqual(
+            ledger_cost({"pt:deepseek-v4-flash": 1_000_000, "ct:deepseek-v4-flash": 1_000_000}),
+            round(0.30 + 0.60, 4),
+        )
+
+    def test_gate_ci(self):
+        from evals.gate_ci import main
+
+        self.assertEqual(main(), 0)
+
+
 class TestP1Validators(unittest.TestCase):
     def test_builtin_validators_registered(self):
         from validators.registry import list_validators

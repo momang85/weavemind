@@ -1,7 +1,7 @@
 import { ReactNode, useState, useEffect } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
 import { Settings } from 'lucide-react'
-import { Play, Users, Clock, Activity, PanelLeftClose, PanelLeft, Brain, FlaskConical } from 'lucide-react'
+import { Play, Users, Clock, Activity, PanelLeftClose, PanelLeft, Brain, FlaskConical, Layers } from 'lucide-react'
 import { useTaskStore } from '../stores/useTaskStore'
 import { useDemoRunner } from '../stores/useDemoRunner'
 
@@ -11,6 +11,8 @@ const navItems = [
   { to: '/history', icon: Clock, label: '历史' },
   { to: '/health', icon: Activity, label: '健康' },
   { to: '/memory', icon: Brain, label: '记忆与进化' },
+  { to: '/evals', icon: FlaskConical, label: '评测' },
+  { to: '/skills', icon: Layers, label: 'Skill' },
   { to: '/settings', icon: Settings, label: '设置' },
 ]
 
@@ -35,6 +37,8 @@ export default function AppLayout({ children }: { children: ReactNode }) {
     '/history': '历史任务',
     '/health': '系统健康',
     '/memory': '记忆与进化',
+    '/evals': '评测看板',
+    '/skills': 'Skill 管理',
   }
 
   return (

@@ -24,13 +24,58 @@ logger = logging.getLogger(__name__)
 _usage_lock = threading.Lock()
 _usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
 _usage_pub_client = None
+_task_usage_client = None
+_task_ctx = None
 
 
-def _record_usage(prompt_tokens: int, completion_tokens: int) -> None:
+def _task_context_var():
+    global _task_ctx
+    if _task_ctx is None:
+        import contextvars
+        _task_ctx = contextvars.ContextVar("weavemind_task_id", default="")
+    return _task_ctx
+
+
+def set_task_context(task_id: str) -> None:
+    """设置当前调用所属任务（Worker 处理任务时调用），用于每任务 token 台账。"""
+    try:
+        _task_context_var().set(str(task_id or ""))
+    except Exception:
+        pass
+
+
+def clear_task_context() -> None:
+    try:
+        _task_context_var().set("")
+    except Exception:
+        pass
+
+
+def _record_usage(prompt_tokens: int, completion_tokens: int, model: str = "") -> None:
     with _usage_lock:
         _usage["calls"] += 1
         _usage["prompt_tokens"] += int(prompt_tokens or 0)
         _usage["completion_tokens"] += int(completion_tokens or 0)
+    # 每任务台账（Redis Hash）：llm_usage_task:{task_id}
+    tid = _task_context_var().get()
+    if not tid:
+        return
+    global _task_usage_client
+    try:
+        if _task_usage_client is None:
+            import redis as _redis
+            _task_usage_client = _redis.Redis(
+                host=os.environ.get("REDIS_HOST", "localhost"),
+                port=int(os.environ.get("REDIS_PORT", "6379")),
+                decode_responses=True,
+            )
+        key = f"llm_usage_task:{tid}"
+        _task_usage_client.hincrby(key, "calls", 1)
+        _task_usage_client.hincrby(key, f"pt:{model or 'unknown'}", int(prompt_tokens or 0))
+        _task_usage_client.hincrby(key, f"ct:{model or 'unknown'}", int(completion_tokens or 0))
+        _task_usage_client.expire(key, 7200)
+    except Exception:
+        pass
 
 
 def get_usage_stats() -> dict:
@@ -340,7 +385,10 @@ class LLMClient:
         # 记录用量
         usage = response_data.get("usage", {})
         if usage:
-            _record_usage(usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0))
+            _record_usage(
+                usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
+                model=self.model,
+            )
             _publish_usage_snapshot()
             logger.debug(
                 "LLM usage: prompt=%d, completion=%d, total=%d",
@@ -510,7 +558,10 @@ async def call_llm_async(
             response.raise_for_status()
             data = response.json()
             usage = data.get("usage") or {}
-            _record_usage(usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0))
+            _record_usage(
+                usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
+                model=self.model,
+            )
             _publish_usage_snapshot()
 
             content = data['choices'][0]['message']['content']
@@ -560,7 +611,10 @@ async def call_llm_async(
             response.raise_for_status()
             data = response.json()
             usage = data.get("usage") or {}
-            _record_usage(usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0))
+            _record_usage(
+                usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
+                model=self.model,
+            )
             _publish_usage_snapshot()
             content = data["choices"][0]["message"]["content"]
             if content is None or not str(content).strip():

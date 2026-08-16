@@ -2780,6 +2780,11 @@ print("charts generated")
             auto_run: bool = True, template_steps: list | None = None,
             user_id: str = "") -> dict:
         """Execute a full task lifecycle. Returns final status dict."""
+        try:
+            from llm_client import set_task_context
+            set_task_context(task_id)
+        except Exception:
+            pass
         started = time.time()
         with self._task_starts_lock:
             self._task_starts[task_id] = started
@@ -2947,6 +2952,16 @@ print("charts generated")
                         task_id, goal, best_report, completed_all
                     )
                     if _matched and _scores:
+                        # 持久化评测分数，供前端评测看板（O-24）
+                        try:
+                            r = self._new_redis_sync()
+                            r.set(
+                                f"eval_score:{task_id}",
+                                json.dumps(_scores, ensure_ascii=False),
+                                ex=86400,
+                            )
+                        except Exception:
+                            pass
                         _eval_scores = "；".join(
                             f"{k}={v:.2f}" for k, v in _scores.items()
                         )
@@ -3660,7 +3675,12 @@ print("charts generated")
         if cap in ('content_summary', 'report_generator'):
             for dep_id in deps:
                 prev_res = _prev(dep_id)
-                snippet = str(prev_res)[:2500] if prev_res else ''
+                _raw = str(prev_res or "")
+                if len(_raw) > 6000 and os.environ.get("ROLLING_SUMMARY", "1") != "0":
+                    # 滚动摘要（对标标准 3.4）：长前序先压缩成要点，防中间迷失
+                    snippet = self._rolling_summarize(_raw)
+                else:
+                    snippet = _raw[:2500]
                 if snippet:
                     instr += f"\n[上一步结果 {dep_id}]:\n{_filter_role(_safe(snippet))}"
                 # 读取产物文件（如 code_execution 落盘的 HTML/代码），给报告真实素材
@@ -3682,6 +3702,24 @@ print("charts generated")
                       "若上一步结果中的来源与主题无关（如无关政策新闻、其他领域文档、垃圾站点或空结果），"
                       "一律不要纳入输出，并注明已剔除无关内容。")
         return instr
+
+    def _rolling_summarize(self, text: str) -> str:
+        """滚动摘要：LLM 压缩长上下文；失败回退硬截断。"""
+        try:
+            from llm_client import call_llm
+            raw = call_llm(
+                "你是上下文压缩器。把长文本压缩为不超过 800 字的要点列表，"
+                "必须保留关键事实、数值、机构与来源信息，不得编造。"
+                "只输出 Markdown 要点。",
+                str(text)[:12000],
+                expect_json=False,
+            )
+            out = str((raw or {}).get("content") or "") if isinstance(raw, dict) else str(raw or "")
+            if len(out.strip()) >= 100:
+                return out.strip()
+        except Exception:
+            pass
+        return str(text)[:2500]
 
     def _inject_goal_into_steps(self, steps: list[dict], goal: str) -> list[dict]:
         """把用户目标注入所有步骤（尤其模板步骤），防止模板指令与目标跑偏。"""

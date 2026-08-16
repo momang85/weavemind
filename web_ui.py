@@ -770,6 +770,27 @@ class Handler(BaseHTTPRequestHandler):
         if p.startswith("/api/task/") and p.endswith("/deliverables"):
             tid = p.split("/api/task/")[-1].rsplit("/deliverables", 1)[0]
             return self._json({"files": _task_deliverables(tid)})
+        if p.startswith("/api/task/") and p.endswith("/usage"):
+            # 每任务 token/成本台账（O-19）
+            tid = p.split("/api/task/")[-1].rsplit("/usage", 1)[0]
+            try:
+                r = _new_redis()
+                ledger = r.hgetall(f"llm_usage_task:{tid}") or {}
+            except Exception:
+                ledger = {}
+            from costs import ledger_cost
+            return self._json({
+                "task_id": tid,
+                "ledger": ledger,
+                "calls": int(ledger.get("calls", 0) or 0),
+                "prompt_tokens": sum(
+                    int(v) for k, v in ledger.items() if str(k).startswith("pt:")
+                ),
+                "completion_tokens": sum(
+                    int(v) for k, v in ledger.items() if str(k).startswith("ct:")
+                ),
+                "cost_usd": ledger_cost(ledger),
+            })
         if p == "/api/config": return self._json(_load_config())
         if p == "/api/events":
             with _events_lock:
@@ -781,6 +802,40 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(_get_memory_summary(refresh))
         if p == "/api/templates":
             return self._json({"templates": _load_templates()})
+        if p == "/api/evals":
+            # 评测看板数据（O-24）：校准报告 + 近期任务评测分数
+            calib = {}
+            calib_path = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "evals", "calibration_report.json"
+            )
+            try:
+                if os.path.exists(calib_path):
+                    calib = json.loads(open(calib_path, encoding="utf-8").read())
+            except Exception:
+                pass
+            recent = []
+            try:
+                r = _new_redis()
+                for k in r.scan_iter("eval_score:*", count=100):
+                    tid = str(k).split(":", 1)[-1]
+                    try:
+                        recent.append({"task_id": tid, "scores": json.loads(r.get(k))})
+                    except Exception:
+                        pass
+                recent.sort(key=lambda x: x["task_id"], reverse=True)
+            except Exception:
+                pass
+            return self._json({"calibration": calib, "recent": recent[:30]})
+        if p == "/api/skills":
+            # Skill 管理数据（O-25）
+            try:
+                from skill_registry import get_lessons, list_skills
+                skills = list_skills()
+                for s in skills:
+                    s["lessons"] = get_lessons(s["name"], limit=3)
+                return self._json({"skills": skills})
+            except Exception as exc:
+                return self._json({"error": str(exc)}, 500)
         if p == "/api/evolution":
             with _evolution_lock:
                 return self._json({"rounds": list(reversed(_evolution_results))})

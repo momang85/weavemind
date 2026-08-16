@@ -32,6 +32,8 @@ jobs:
         run: python -c "from skill_registry import list_skills; assert len(list_skills())>=3; from validators.registry import list_validators; assert len(list_validators())>=4"
       - name: Eval cases schema check
         run: python -m evals.run --dry-run
+      - name: Deterministic eval gate
+        run: python -m evals.gate_ci
 
   frontend:
     runs-on: ubuntu-latest

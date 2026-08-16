@@ -154,6 +154,8 @@ class AsyncWorkerBase(ABC):
         tid = task.get("task_id","?"); instr = task.get("instruction","")
         ok = False; res = ""
         try:
+            from llm_client import clear_task_context, set_task_context
+            set_task_context(tid)
             if self._needs_task:
                 res = await self.execute(instr, task); self._failures = 0; ok = True
             else:
@@ -163,6 +165,11 @@ class AsyncWorkerBase(ABC):
             if self._failures >= self._max_failures:
                 await self._registry.register(self.agent_id, self.capabilities, "offline")
         finally:
+            try:
+                from llm_client import clear_task_context
+                clear_task_context()
+            except Exception:
+                pass
             self._active -= 1; await self._update()
             await self._messaging._redis.rpush(
                 f"task_result:{tid}",
