@@ -19,6 +19,47 @@ from typing import Any
 
 from common import AgentRegistry, MessagingClient
 
+# ---------------------------------------------------------------------------
+# 搜索引擎健康状态（对标 O-29：多引擎熔断 + 冷却 + 失败重试）
+# ---------------------------------------------------------------------------
+_ENGINE_HEALTH: dict[str, dict] = {}
+_ENGINE_LOCK = threading.Lock()
+_ENGINE_FAIL_THRESHOLD = 2
+_ENGINE_COOLDOWN = float(os.environ.get("SEARCH_ENGINE_COOLDOWN", "120") or 120)
+_SEARCH_RETRY_BACKOFF = float(os.environ.get("SEARCH_RETRY_BACKOFF", "3") or 3)
+
+
+def _engine_healthy(name: str) -> bool:
+    """引擎是否可用：连续失败达阈值后进入冷却，冷却期内跳过。"""
+    with _ENGINE_LOCK:
+        h = _ENGINE_HEALTH.get(name)
+        if not h:
+            return True
+        if not h["healthy"] and time.time() < h["cooldown_until"]:
+            return False
+        return True
+
+
+def _mark_engine(name: str, ok: bool) -> None:
+    """记录引擎结果；连续失败达阈值 → 熔断进入冷却，冷却到期自动恢复。"""
+    with _ENGINE_LOCK:
+        h = _ENGINE_HEALTH.setdefault(
+            name, {"healthy": True, "fails": 0, "cooldown_until": 0.0}
+        )
+        if ok:
+            h["healthy"] = True
+            h["fails"] = 0
+        else:
+            h["fails"] += 1
+            if h["fails"] >= _ENGINE_FAIL_THRESHOLD:
+                h["healthy"] = False
+                h["cooldown_until"] = time.time() + _ENGINE_COOLDOWN
+
+
+def get_engine_health() -> dict:
+    with _ENGINE_LOCK:
+        return {k: dict(v) for k, v in _ENGINE_HEALTH.items()}
+
 logger = logging.getLogger(__name__)
 
 
@@ -704,7 +745,10 @@ class SearchAgent(BaseWorker):
                     seen_urls.add(u)
                     collected.append(r)
 
-        def _collect_ddg() -> bool:
+        def _collect_ddg() -> tuple[bool, bool]:
+            """返回 (是否新增结果, 是否出错)。"""
+            added = False
+            error = False
             try:
                 from ddgs import DDGS
                 with DDGS() as ddgs:
@@ -717,24 +761,37 @@ class SearchAgent(BaseWorker):
                                         "url": r.get("href", ""),
                                         "snippet": r.get("body", ""),
                                     })
+                                    added = True
                                 else:
                                     logger.warning("DDG returned non-dict item: %r", str(r)[:80])
                         except Exception as e:
                             logger.warning("DDG query '%s' failed: %s", q[:40], e)
-                return True
+                            error = True
+                return added, error
             except Exception as e:
                 logger.warning("DuckDuckGo unavailable: %s", e)
-                return False
+                return added, True
 
-        def _collect_bing() -> bool:
-            ok = False
+        def _collect_bing() -> tuple[bool, bool]:
+            added = False
+            error = False
             for q in variants:
                 try:
                     _add(self._search_bing(q))
-                    ok = True
+                    added = True
                 except Exception as e:
                     logger.warning("Bing query '%s' failed: %s", q[:40], e)
-            return ok
+                    error = True
+            return added, error
+
+        def _run_pass() -> None:
+            """跑一轮健康引擎（跳过冷却中引擎），并按结果更新健康状态。"""
+            if _engine_healthy("ddg"):
+                added, err = _collect_ddg()
+                _mark_engine("ddg", added or not err)
+            if _engine_healthy("bing"):
+                added, err = _collect_bing()
+                _mark_engine("bing", added or not err)
 
         def _emit() -> str | None:
             strict = self._filter_results(instruction, collected)
@@ -749,21 +806,23 @@ class SearchAgent(BaseWorker):
                 return json.dumps(relaxed[:10], ensure_ascii=False, indent=2)
             return None
 
-        source_ok = _collect_ddg()
+        _run_pass()
         out = _emit()
         if out:
             return out
-        if _collect_bing():
-            source_ok = True
+        # 失败重试（对标 ReAct）：短暂退避后对健康引擎再跑一轮
+        logger.warning(
+            "Search first pass yielded nothing; retrying after %.0fs",
+            _SEARCH_RETRY_BACKOFF,
+        )
+        time.sleep(_SEARCH_RETRY_BACKOFF)
+        _run_pass()
         out = _emit()
         if out:
             return out
-        # 两个来源均失败：mock 兜底；有返回但全部被过滤：返回空列表（诚实说明未找到相关资料）
-        if not source_ok:
-            return json.dumps([
-                {"title": f"Mock: {instruction}", "url": "https://example.com/mock",
-                 "snippet": "搜索源不可用"}
-            ], ensure_ascii=False)
+        # 全部失败/无结果：诚实返回空列表（不再用 Mock 假数据）。
+        # 空列表会被输出契约标记 → 编排器带错误重试 → 反思驱动重检索。
+        logger.warning("Search empty after retry; engine health: %s", get_engine_health())
         return json.dumps([])
 
 

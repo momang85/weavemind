@@ -733,5 +733,84 @@ class TestP2ToolContracts(unittest.TestCase):
         self.assertIn("返回空列表", attempts[1])
 
 
+class TestP2EngineHealth(unittest.TestCase):
+    def test_engine_health_cooldown(self):
+        import time
+        import worker_base as wb
+
+        wb._ENGINE_HEALTH.clear()
+        wb._mark_engine("ddg", True)
+        self.assertTrue(wb._engine_healthy("ddg"))
+        wb._mark_engine("ddg", False)
+        self.assertTrue(wb._engine_healthy("ddg"))  # 1 次失败仍健康
+        wb._mark_engine("ddg", False)
+        self.assertFalse(wb._engine_healthy("ddg"))  # 2 次失败熔断
+        # 冷却到期自动恢复
+        wb._ENGINE_HEALTH["ddg"]["cooldown_until"] = time.time() - 1
+        self.assertTrue(wb._engine_healthy("ddg"))
+        wb._mark_engine("ddg", True)
+        self.assertEqual(wb._ENGINE_HEALTH["ddg"]["fails"], 0)
+
+    def test_execute_returns_empty_when_sources_down(self):
+        import json
+        import sys
+        import worker_base as wb
+        from worker_base import SearchAgent
+
+        sa = SearchAgent.__new__(SearchAgent)
+        sa._strategy_max_sources = 5
+        sa._strategy_blocks = []
+        sa._strategy_boosts = []
+        sa._load_active_strategy = lambda: None
+        sa._search_bing = lambda q: (_ for _ in ()).throw(RuntimeError("bing down"))
+        wb._ENGINE_HEALTH.clear()
+        old_backoff = wb._SEARCH_RETRY_BACKOFF
+        wb._SEARCH_RETRY_BACKOFF = 0
+        old = sys.modules.get("ddgs")
+        sys.modules["ddgs"] = None  # ddgs 库不可用
+        try:
+            out = sa.execute("搜索特斯拉最新财报")
+            self.assertEqual(json.loads(out), [])
+        finally:
+            wb._SEARCH_RETRY_BACKOFF = old_backoff
+            if old is None:
+                sys.modules.pop("ddgs", None)
+            else:
+                sys.modules["ddgs"] = old
+
+    def test_execute_returns_results_via_bing(self):
+        import json
+        import sys
+        import worker_base as wb
+        from worker_base import SearchAgent
+
+        sa = SearchAgent.__new__(SearchAgent)
+        sa._strategy_max_sources = 5
+        sa._strategy_blocks = []
+        sa._strategy_boosts = []
+        sa._load_active_strategy = lambda: None
+        sa._search_bing = lambda q: [{
+            "title": "特斯拉 2026 年财报",
+            "url": "https://ir.tesla.com/q2-2026",
+            "snippet": "总营收 250 亿美元，净利润 30 亿美元",
+        }]
+        wb._ENGINE_HEALTH.clear()
+        old_backoff = wb._SEARCH_RETRY_BACKOFF
+        wb._SEARCH_RETRY_BACKOFF = 0
+        old = sys.modules.get("ddgs")
+        sys.modules["ddgs"] = None
+        try:
+            out = sa.execute("搜索特斯拉最新财报")
+            data = json.loads(out)
+            self.assertTrue(data)
+            self.assertTrue(any("ir.tesla.com" in r.get("url", "") for r in data))
+        finally:
+            wb._SEARCH_RETRY_BACKOFF = old_backoff
+            if old is None:
+                sys.modules.pop("ddgs", None)
+            else:
+                sys.modules["ddgs"] = old
+
+
 if __name__ == "__main__":
     unittest.main()
