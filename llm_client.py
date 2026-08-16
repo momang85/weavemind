@@ -32,6 +32,9 @@ _endpoint_health = {
 }
 _endpoint_health_lock = threading.Lock()
 _health_monitor_started = False
+_CFG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+_cfg_mtime: float | None = None
+_cfg_lock = threading.Lock()
 
 
 def _task_context_var():
@@ -62,6 +65,60 @@ def get_task_context() -> str:
         return _task_context_var().get()
     except Exception:
         return ""
+
+
+def _apply_cfg_to_env() -> None:
+    """把 config.json 的 llm/embedding/backup 段重新应用到 os.environ。
+    修复"前端改端点，后端进程仍用旧端点"：各进程在调用前按 mtime 热重载。"""
+    global _BACKUP_CFG
+    try:
+        with open(_CFG_PATH, encoding="utf-8") as f:
+            cfg = json.load(f)
+    except Exception:
+        return
+    llm = cfg.get("llm") or {}
+    if llm.get("api_key"):
+        os.environ["LLM_API_KEY"] = str(llm["api_key"])
+    if llm.get("base_url"):
+        os.environ["LLM_BASE_URL"] = str(llm["base_url"])
+    if llm.get("model"):
+        os.environ["LLM_MODEL"] = str(llm["model"])
+    emb = cfg.get("embedding") or {}
+    if emb.get("api_key"):
+        os.environ["EMBEDDING_API_KEY"] = str(emb["api_key"])
+    if emb.get("base_url"):
+        os.environ["EMBEDDING_BASE_URL"] = str(emb["base_url"])
+    if emb.get("model"):
+        os.environ["EMBEDDING_MODEL"] = str(emb["model"])
+    b = cfg.get("backup") or {}
+    _BACKUP_CFG = dict(b) if b.get("base_url") and b.get("api_key") else {}
+    pl = cfg.get("planner") or {}
+    if pl.get("base_url"):
+        os.environ["PLANNER_LLM_BASE_URL"] = str(pl["base_url"])
+    if pl.get("api_key"):
+        os.environ["PLANNER_LLM_API_KEY"] = str(pl["api_key"])
+    if pl.get("model"):
+        os.environ["PLANNER_LLM_MODEL"] = str(pl["model"])
+
+
+def _ensure_cfg_fresh() -> None:
+    """config.json 变更热重载（mtime 检测，进程内生效，无需重启）。"""
+    global _cfg_mtime, _default_client
+    try:
+        m = os.path.getmtime(_CFG_PATH)
+    except Exception:
+        return
+    with _cfg_lock:
+        if _cfg_mtime is None:
+            _cfg_mtime = m
+            _apply_cfg_to_env()  # 首次调用即同步（自愈已运行进程）
+            return
+        if m == _cfg_mtime:
+            return
+        _cfg_mtime = m
+    _apply_cfg_to_env()
+    _default_client = None  # 让 get_default_client() 用新 env 重建
+    logger.info("LLM config hot-reloaded from config.json")
 
 
 # ---------------------------------------------------------------------------
@@ -297,6 +354,7 @@ class LLMClient:
         model: str | None = None,
         temperature: float = 0.3,
         max_tokens: int = 4096,
+        is_planner: bool = False,
     ) -> None:
         """初始化 LLM 客户端。
 
@@ -327,6 +385,7 @@ class LLMClient:
         )
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self._is_planner = is_planner
         self._backup_cfg = (
             dict(_BACKUP_CFG)
             if _BACKUP_CFG.get("base_url") and _BACKUP_CFG.get("api_key")
@@ -371,6 +430,22 @@ class LLMClient:
         """
         temp = temperature if temperature is not None else self.temperature
         max_tok = max_tokens if max_tokens is not None else self.max_tokens
+
+        # 配置热重载：前端保存新端点后，本进程无需重启即可生效
+        _ensure_cfg_fresh()
+        if self._is_planner:
+            self.base_url = os.environ.get("PLANNER_LLM_BASE_URL") or self.base_url
+            self.api_key = os.environ.get("PLANNER_LLM_API_KEY") or self.api_key
+            self.model = os.environ.get("PLANNER_LLM_MODEL") or self.model
+        else:
+            self.base_url = os.environ.get("LLM_BASE_URL") or self.base_url
+            self.api_key = os.environ.get("LLM_API_KEY") or self.api_key
+            self.model = os.environ.get("LLM_MODEL") or self.model
+        self._backup_cfg = (
+            dict(_BACKUP_CFG)
+            if _BACKUP_CFG.get("base_url") and _BACKUP_CFG.get("api_key")
+            else {}
+        )
 
         last_error: Exception | None = None
         # 健康路由（O-29）：主端点已被判定不健康 → 优先走备用，避免每次白白等待超时
@@ -621,6 +696,7 @@ def call_llm(system: str, user: str, expect_json: bool = True) -> dict[str, Any]
     Returns:
         解析后的字典。
     """
+    _ensure_cfg_fresh()
     return get_default_client().call(system, user, expect_json=expect_json)
 
 
@@ -636,6 +712,7 @@ def call_llm_stream(
     import urllib.error
     import urllib.request
 
+    _ensure_cfg_fresh()
     client = get_default_client()
     temp = temperature if temperature is not None else client.temperature
     max_tok = max_tokens or client.max_tokens
@@ -746,6 +823,7 @@ async def call_llm_async(
     This enables true concurrency in async workers — multiple tasks
     can call the LLM simultaneously without blocking each other.
     """
+    _ensure_cfg_fresh()
     api_key = os.environ.get('LLM_API_KEY', '')
     base_url = os.environ.get('LLM_BASE_URL', 'https://api.openai.com/v1')
     model = os.environ.get('LLM_MODEL', 'gpt-4')

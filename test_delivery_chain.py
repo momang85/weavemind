@@ -305,7 +305,9 @@ class TestSearchCharts(unittest.TestCase):
         self.assertTrue(o._wants_visualization("分析市场趋势图"))
         self.assertTrue(o._wants_visualization("储能产业链调研"))
         self.assertTrue(o._wants_visualization("调研2026年国内新能源汽车市场现状"))
-        self.assertFalse(o._wants_visualization("搜索特斯拉最新财报并总结要点"))
+        # 金融类目标（财报/营收/财务）自动配图
+        self.assertTrue(o._wants_visualization("搜索特斯拉最新财报并总结要点"))
+        self.assertTrue(o._wants_visualization("分析某公司2026年财报营收与净利润"))
         self.assertFalse(o._wants_visualization("写一份行业报告"))
         self.assertFalse(o._wants_visualization("展示产品图片"))
 
@@ -904,9 +906,9 @@ class TestSearchCharts(unittest.TestCase):
         try:
             proj = ws_mod.task_project_dir("t-chart-2")
             (proj / "search_results.json").write_text(json.dumps([
-                {"title": "特斯拉营收620亿美元", "url": "https://a.com/r1", "snippet": "净利润50亿"},
+                {"title": "公司新闻动态", "url": "https://a.com/r1", "snippet": "业务进展"},
             ], ensure_ascii=False), encoding="utf-8")
-            o._generate_search_charts("t-chart-2", "搜索特斯拉最新财报并总结要点")
+            o._generate_search_charts("t-chart-2", "搜索公司最新新闻动态并总结要点")
             self.assertEqual([p.name for p in proj.glob("*.png")], [])
         finally:
             ws_mod.WORKSPACE_ROOT = old_root

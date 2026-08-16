@@ -577,6 +577,16 @@ class TestP2FinanceRecency(unittest.TestCase):
             rec2 = next(r for r in res2 if r["name"] == "recency_check")
             self.assertTrue(rec2["ok"], rec2["detail"])
 
+            # 当年 3 月起，"最新"必须含当年数据（上一年也算陈旧）
+            import time as _t
+            if _t.localtime().tm_mon >= 3:
+                (proj / "search_results.json").write_text(json.dumps([
+                    {"title": "特斯拉2025年Q4财报", "url": "https://a.com", "snippet": "营收 250 亿美元"},
+                ], ensure_ascii=False), encoding="utf-8")
+                res4 = run_for_task("t-rec-1", goal, ["web_search"])
+                rec4 = next(r for r in res4 if r["name"] == "recency_check")
+                self.assertFalse(rec4["ok"], rec4["detail"])
+
             res3 = run_for_task("t-rec-1", "分析某公司财务", ["web_search"])
             rec3 = next(r for r in res3 if r["name"] == "recency_check")
             self.assertTrue(rec3["ok"])
@@ -584,6 +594,49 @@ class TestP2FinanceRecency(unittest.TestCase):
             ws_mod.WORKSPACE_ROOT = old
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestP2ConfigHotReload(unittest.TestCase):
+    def test_config_change_reapplies_env(self):
+        import json
+        import os
+        import tempfile
+        import time
+        import llm_client
+
+        tmp = tempfile.mktemp(suffix=".json")
+        old_path = llm_client._CFG_PATH
+        old_mtime = llm_client._cfg_mtime
+        old_env = {
+            k: os.environ.get(k) for k in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL")
+        }
+        llm_client._CFG_PATH = tmp
+        llm_client._cfg_mtime = None
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"llm": {"api_key": "old-key", "base_url": "https://old.example/v1",
+                                   "model": "old-model"}}, f)
+            llm_client._ensure_cfg_fresh()  # 首次仅记录 mtime
+            time.sleep(0.02)
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"llm": {"api_key": "new-key", "base_url": "https://new.example/v1",
+                                   "model": "new-model"}}, f)
+            llm_client._ensure_cfg_fresh()  # 检测到变更 → 热重载 env
+            self.assertEqual(os.environ.get("LLM_BASE_URL"), "https://new.example/v1")
+            self.assertEqual(os.environ.get("LLM_API_KEY"), "new-key")
+            self.assertEqual(os.environ.get("LLM_MODEL"), "new-model")
+        finally:
+            llm_client._CFG_PATH = old_path
+            llm_client._cfg_mtime = old_mtime
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+            try:
+                os.remove(tmp)
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

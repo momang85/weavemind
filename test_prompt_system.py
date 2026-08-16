@@ -15,6 +15,17 @@ class _FakeMessaging:
 
 
 class TestStepEnvelope(unittest.TestCase):
+    def setUp(self):
+        self._old = os.environ.get("WEAVEMIND_PROMPTS_DIR")
+        self._tmp = tempfile.mkdtemp(prefix="wmenv_")
+        os.environ["WEAVEMIND_PROMPTS_DIR"] = self._tmp
+
+    def tearDown(self):
+        if self._old:
+            os.environ["WEAVEMIND_PROMPTS_DIR"] = self._old
+        else:
+            os.environ.pop("WEAVEMIND_PROMPTS_DIR", None)
+
     def test_envelope_contains_six_elements(self):
         from step_envelope import build_envelope
 

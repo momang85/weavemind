@@ -125,9 +125,13 @@ def _init_defaults() -> None:
         if not years:
             return (False, "检索结果与报告未识别到任何年份，时效性无法确认")
         cur = time.localtime().tm_year
-        recent = sorted(y for y in years if y >= cur - 1)
+        month = time.localtime().tm_mon
+        # 当年 3 月起，"最新"必须含当年数据（如 2026-08 → 要求 2026）；
+        # 1-2 月允许上一年（最新财报可能尚未发布当年）
+        required = cur if month >= 3 else cur - 1
+        recent = sorted(y for y in years if y >= required)
         if not recent:
-            return (False, f"数据均为陈旧年份（{sorted(years)}，无 {cur - 1}~{cur} 年信息），必须重检索最新资料")
+            return (False, f"数据均为陈旧年份（{sorted(years)}，要求 ≥{required} 年信息），必须重检索最新资料")
         return (True, f"识别到近期年份 {recent}")
 
     register("code_deliverable", {"code_execution", "file_io"}, _code_deliverable)

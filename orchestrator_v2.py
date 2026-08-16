@@ -199,6 +199,7 @@ class OrchestratorV2:
                 model=_planner_cfg.get("model"),
                 base_url=_planner_cfg.get("base_url") or _llm_cfg.get("base_url"),
                 api_key=_planner_cfg.get("api_key") or _llm_cfg.get("api_key"),
+                is_planner=True,
             )
             self._planner_model = _planner_cfg.get("model")
             logger.info("Planner LLM: %s", self._planner_model)
@@ -1508,6 +1509,8 @@ class OrchestratorV2:
         return any(k in g for k in (
             "可视化", "图表", "趋势图", "柱状", "饼图", "折线", "调研",
             "plot", "chart", "graph",
+            # 金融类目标也自动配图（财报要点 → 指标表 → 图表）
+            "财报", "营收", "净利润", "财务", "季报", "年报", "业绩",
         ))
 
     @staticmethod
