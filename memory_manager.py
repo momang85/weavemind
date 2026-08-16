@@ -487,6 +487,56 @@ class MemoryManager:
     def list_strategies(self, limit: int = 50) -> list[dict]:
         return self.list_recent(self._strategies, limit)
 
+    # ------------------------------------------------------------------
+    # 记忆治理（对标标准 3.4：持续治理）
+    # ------------------------------------------------------------------
+
+    def delete_by_ids(self, collection, ids: list[str]) -> int:
+        """按 id 删除记忆条目。返回删除数量。"""
+        try:
+            if not ids:
+                return 0
+            collection.delete(ids=ids)
+            return len(ids)
+        except Exception as exc:
+            logger.warning("Memory delete failed: %s", str(exc)[:120])
+            return 0
+
+    def delete_where(self, collection, where: dict) -> int:
+        """按元数据条件删除（如 {"key": "step:code_execution"}）。"""
+        try:
+            res = collection.get(where=where, include=["ids"])
+            ids = (res or {}).get("ids") or []
+            return self.delete_by_ids(collection, ids)
+        except Exception as exc:
+            logger.warning("Memory delete_where failed: %s", str(exc)[:120])
+            return 0
+
+    def delete_all(self, collection) -> int:
+        try:
+            res = collection.get(include=["ids"])
+            ids = (res or {}).get("ids") or []
+            return self.delete_by_ids(collection, ids)
+        except Exception as exc:
+            logger.warning("Memory delete_all failed: %s", str(exc)[:120])
+            return 0
+
+    def delete_conversations(self, ids: list[str]) -> int:
+        return self.delete_by_ids(self._conversations, ids)
+
+    def delete_strategies(self, ids: list[str]) -> int:
+        return self.delete_by_ids(self._strategies, ids)
+
+    def delete_prompt_refinements(self, where: dict | None = None) -> int:
+        if where:
+            return self.delete_where(self._prompt_refinements, where)
+        try:
+            res = self._prompt_refinements.get(include=["ids"])
+            return self.delete_by_ids(self._prompt_refinements, (res or {}).get("ids") or [])
+        except Exception as exc:
+            logger.warning("Prompt refinement purge failed: %s", str(exc)[:120])
+            return 0
+
 
 # ============================================================================
 # 辅助函数

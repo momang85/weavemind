@@ -67,6 +67,8 @@ Rules:
 10. 当任务涉及"报告/分析/研报/调研"时：必须保留所有搜索结果的原始 URL，并把 URL 列表传给 report_generator；
     报告步骤的指令必须包含"将图表嵌入报告"和"在报告末尾标注每条数据的来源链接"
 11. 若目标明确要求"图表/可视化/趋势图/plot/chart"，计划必须包含 data_analyzer 或 code_execution 图表生成步骤
+12. 每个步骤的 instruction 必须以"验收：..."结尾，写明可验证的完成标准
+    （如"验收：生成 main.py 且能运行并输出结果"），禁止无验收点的空泛指令
 
 Output ONLY this JSON with no extra text:
 {"steps":[{"step_id":"1","capability":"web_search","instruction":"search for house price dataset","depends_on":[],"timeout":60}]}"""
@@ -734,6 +736,10 @@ class OrchestratorV2:
             instruction = str(s.get("instruction") or "").strip()
             if not instruction:
                 continue
+            # 验收点兜底（对标标准 3.2 Plan & Execute）：planner 漏写时自动补
+            if "验收：" not in instruction:
+                instruction = instruction + "\n验收：步骤完成后输出可验证的结果（文件/数据/文本均可）。"
+            s["instruction"] = instruction
             s["step_id"] = sid
             # 校验能力字段：非法/多值拼接时回退到 content_summary
             cap = str(s.get("capability") or "content_summary").strip()
@@ -795,7 +801,7 @@ class OrchestratorV2:
     def _reflect(
         self, goal: str, report: str, task_id: str,
         all_steps: list[dict], completed_all: dict,
-        memory_context: str = "",
+        memory_context: str = "", validator_summary: str = "",
     ) -> dict | None:
         """验收评审：基于【完整上下文】判断交付物是否达标。
         上下文含用户目标、检索到的私有知识、全部步骤及结果摘要、当前报告；
@@ -816,6 +822,8 @@ class OrchestratorV2:
                 brief.append(f"- [{st}] {s['step_id']} ({s.get('capability')}): {res[:150]}")
             ctx_parts.append("Execution steps & results:\n" + "\n".join(brief))
         ctx_parts.append(f"Deliverable (report):\n{str(report)[:3000]}")
+        if validator_summary:
+            ctx_parts.append(validator_summary)
         prompt = "\n\n".join(ctx_parts)
         try:
             from prompt_registry import get_prompt
@@ -2809,6 +2817,7 @@ print("charts generated")
         steps = self._ensure_package_step(steps)
         steps = self._break_cycles(steps)
         steps = self._inject_goal_into_steps(steps, goal)
+        steps = self._inject_skills(steps, goal)
         if not steps:
             push_progress(self._messaging, task_id, "task_complete",
                           {"status": "FAILED", "summary": "Planning failed"})
@@ -2917,7 +2926,17 @@ print("charts generated")
                                "message": "Reflection: 报告类任务核心交付已完成，跳过反射轮",
                                "timestamp": self._now_iso()})
                 break
-            verdict = self._reflect(goal, best_report, task_id, all_steps, completed_all, memory_context)
+            try:
+                from validators.registry import run_for_task, summary_text
+                _caps = [str(s.get("capability")) for s in all_steps]
+                _vres = run_for_task(task_id, goal, _caps)
+                _vsum = summary_text(_vres)
+            except Exception:
+                _vsum = ""
+            verdict = self._reflect(
+                goal, best_report, task_id, all_steps, completed_all,
+                memory_context, _vsum,
+            )
             if not verdict:
                 break
             # 评分门控：score ≥ 阈值直接接受；LLM 未给 score 时回退到 accepted 判断
@@ -3558,6 +3577,35 @@ print("charts generated")
                     f"用户目标：{goal[:300]}\n"
                     f"原始指令：{ins}"
                 )
+        return steps
+
+    def _inject_skills(self, steps: list[dict], goal: str) -> list[dict]:
+        """Skill 渐进式披露：按目标/能力命中 skill，注入 description+质量标准+反模式
+        （对标标准 3.5，只给标准不给全文工作流）。"""
+        try:
+            from skill_registry import get_skill_standards, match_skills, skill_applies
+        except Exception:
+            return steps
+        for s in steps:
+            hits = match_skills(goal, s.get("capability"))
+            if not hits:
+                continue
+            # 能力门控：skill 只注入其适用范围内的步骤
+            hit = next(
+                (h for h in hits if skill_applies(h["name"], s.get("capability"))),
+                None,
+            )
+            if not hit:
+                continue
+            std = get_skill_standards(hit["name"])
+            if not std:
+                continue
+            block = f"[Skill: {std['name']}] {std['description']}"
+            if std.get("standards"):
+                block += f"\n【质量标准】{std['standards']}"
+            if std.get("antipatterns"):
+                block += f"\n【反模式】{std['antipatterns']}"
+            s["instruction"] = f"{s['instruction']}\n\n{block}"
         return steps
 
     @staticmethod

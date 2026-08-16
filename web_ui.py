@@ -968,6 +968,27 @@ class Handler(BaseHTTPRequestHandler):
                 db.commit(); db.close()
             except Exception: pass
             return self._json({"task_id":tid,"conversation_id":conv_id,"status":"PENDING"})
+        if self.path == "/api/memory/delete":
+            # 记忆治理（对标标准 3.4）：按类型+ids 删除，或 {all: true} 清空
+            mtype = str(body.get("type") or "").strip()
+            ids = [str(x) for x in (body.get("ids") or []) if str(x).strip()]
+            purge_all = bool(body.get("all"))
+            if mtype not in ("conversations", "strategies", "prompt_refinements"):
+                return self._json({"error": "type 必须是 conversations/strategies/prompt_refinements"}, 400)
+            if not ids and not purge_all and not (
+                mtype == "prompt_refinements" and body.get("key")
+            ):
+                return self._json({"error": "需要 ids 或 all=true"}, 400)
+            mem = _get_memory_manager()
+            if mtype == "conversations":
+                deleted = mem.delete_conversations(ids) if ids else mem.delete_all(mem._conversations)
+            elif mtype == "strategies":
+                deleted = mem.delete_strategies(ids) if ids else mem.delete_all(mem._strategies)
+            else:
+                deleted = mem.delete_prompt_refinements(
+                    {"key": str(body.get("key") or "")} if body.get("key") else None
+                ) if not ids else mem.delete_by_ids(mem._prompt_refinements, ids)
+            return self._json({"status": "ok", "deleted": int(deleted or 0)})
         if self.path == "/api/plan/confirm":
             tid = str(body.get("task_id", "")).strip()
             if not tid:

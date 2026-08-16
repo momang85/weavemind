@@ -158,5 +158,124 @@ class TestJudge(unittest.TestCase):
             llm_client.call_llm = orig
 
 
+class _FakeCollection:
+    def __init__(self, docs):
+        self._docs = docs
+
+    def get(self, include=None):
+        return {"ids": [d["id"] for d in self._docs]}
+
+    def delete(self, ids=None):
+        self._docs = [d for d in self._docs if d["id"] not in (ids or [])]
+
+
+class TestP1AcceptancePoints(unittest.TestCase):
+    def test_normalize_appends_acceptance_point(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._max_steps = 8
+        steps = o._normalize_steps([
+            {"step_id": "1", "capability": "web_search", "instruction": "搜索市场规模数据"},
+            {"step_id": "2", "capability": "content_summary", "instruction": "总结结果\n验收：输出包含数据表格的 Markdown"},
+        ])
+        self.assertIn("验收：", steps[0]["instruction"])
+        self.assertIn("验收：输出包含数据表格的 Markdown", steps[1]["instruction"])
+
+
+class TestP1Skills(unittest.TestCase):
+    def test_skills_registered(self):
+        from skill_registry import list_skills
+
+        names = {s["name"] for s in list_skills()}
+        self.assertIn("research-report", names)
+        self.assertIn("game-delivery", names)
+        self.assertIn("data-pipeline", names)
+
+    def test_match_skills(self):
+        from skill_registry import match_skills
+
+        hits = match_skills("请分析2025年全球AI芯片市场并生成可视化报告", "report_generator")
+        self.assertEqual(hits[0]["name"], "research-report")
+        hits2 = match_skills("做一个贪吃蛇游戏，能在浏览器里玩", "code_execution")
+        self.assertEqual(hits2[0]["name"], "game-delivery")
+        hits3 = match_skills("用California Housing数据集训练随机森林预测房价", "data_loader")
+        self.assertEqual(hits3[0]["name"], "data-pipeline")
+
+    def test_skill_standards_sections(self):
+        from skill_registry import get_skill_standards
+
+        std = get_skill_standards("research-report")
+        self.assertIn("standards", std)
+        self.assertIn("antipatterns", std)
+        self.assertIn("来源", std["standards"])
+
+    def test_inject_skills_into_steps(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        steps = [
+            {"step_id": "1", "capability": "code_execution", "instruction": "生成贪吃蛇HTML"},
+            {"step_id": "2", "capability": "report_generator", "instruction": "写报告"},
+        ]
+        o._inject_skills(steps, "做一个贪吃蛇游戏并在浏览器里玩")
+        self.assertIn("[Skill: game-delivery]", steps[0]["instruction"])
+        self.assertNotIn("[Skill: game-delivery]", steps[1]["instruction"])
+        self.assertIn("[Skill: research-report]", steps[1]["instruction"])
+
+
+class TestP1Validators(unittest.TestCase):
+    def test_builtin_validators_registered(self):
+        from validators.registry import list_validators
+
+        names = set(list_validators())
+        self.assertIn("code_deliverable", names)
+        self.assertIn("py_compile_all", names)
+        self.assertIn("html_playable", names)
+        self.assertIn("chart_spec_valid", names)
+
+    def test_chart_spec_validator(self):
+        import tempfile
+        import workspace as ws_mod
+        from validators.registry import run_for_task
+
+        tmp = tempfile.mkdtemp(prefix="weavemind_val_")
+        old = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            proj = ws_mod.task_project_dir("t-val-1")
+            (proj / "chart_data.json").write_text(
+                '{"charts": [{"type": "bar", "title": "t（亿美元）", "unit": "亿美元", '
+                '"source": "s", "x_axis_title": "x", "y_axis_title": "y", '
+                '"conclusion": "c", "data": [{"label": "A", "value": 1}, {"label": "B", "value": 2}]}]}',
+                encoding="utf-8",
+            )
+            res = run_for_task("t-val-1", "目标", ["content_summary"])
+            chart = next(r for r in res if r["name"] == "chart_spec_valid")
+            self.assertTrue(chart["ok"], chart["detail"])
+        finally:
+            ws_mod.WORKSPACE_ROOT = old
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestP1MemoryGovernance(unittest.TestCase):
+    def test_delete_all(self):
+        from memory_manager import MemoryManager
+
+        m = MemoryManager.__new__(MemoryManager)
+        col = _FakeCollection([{"id": "a"}, {"id": "b"}])
+        self.assertEqual(m.delete_all(col), 2)
+        self.assertEqual(col._docs, [])
+
+    def test_delete_by_ids(self):
+        from memory_manager import MemoryManager
+
+        m = MemoryManager.__new__(MemoryManager)
+        col = _FakeCollection([{"id": "a"}, {"id": "b"}, {"id": "c"}])
+        self.assertEqual(m.delete_by_ids(col, ["a", "c"]), 2)
+        self.assertEqual([d["id"] for d in col._docs], ["b"])
+
+
 if __name__ == "__main__":
     unittest.main()
