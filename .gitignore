@@ -33,6 +33,7 @@ frontend/tsconfig.tsbuildinfo
 poison_strategies.json
 prompts/overrides.json
 skills/lessons.jsonl
+evals/calibration_report.json
 
 # 编辑器 / 系统
 .vscode/

@@ -69,6 +69,10 @@ Rules:
 11. 若目标明确要求"图表/可视化/趋势图/plot/chart"，计划必须包含 data_analyzer 或 code_execution 图表生成步骤
 12. 每个步骤的 instruction 必须以"验收：..."结尾，写明可验证的完成标准
     （如"验收：生成 main.py 且能运行并输出结果"），禁止无验收点的空泛指令
+13. 步骤可带 "mode": "pipeline"|"parallel"|"human_in_loop"：
+    - pipeline：该步骤必须串行执行（与其他步骤不并发；用于强顺序/成本控制）
+    - parallel（默认）：无依赖的步骤并行执行
+    - human_in_loop：执行前需用户确认（用于高风险/不可逆操作，如删除、发布、付费调用）
 
 Output ONLY this JSON with no extra text:
 {"steps":[{"step_id":"1","capability":"web_search","instruction":"search for house price dataset","depends_on":[],"timeout":60}]}"""
@@ -761,6 +765,10 @@ class OrchestratorV2:
                 )
                 instruction = s["instruction"]
             s["capability"] = cap
+            mode = str(s.get("mode") or "parallel").strip().lower()
+            if mode not in ("pipeline", "parallel", "human_in_loop"):
+                mode = "parallel"
+            s["mode"] = mode
             s.setdefault("timeout", 300)
             out.append(s)
         if len(out) > self._max_steps:
@@ -3249,6 +3257,36 @@ print("charts generated")
             logger.warning("Plan confirm error for %s: %s", task_id, str(exc)[:120])
             return original_steps
 
+    def _wait_step_confirm(self, task_id: str, step: dict) -> bool:
+        """人工确认单步（mode=human_in_loop）：确认放行，取消拒绝，超时自动放行。"""
+        try:
+            key = f"step_confirm:{task_id}:{step.get('step_id')}"
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "step_confirm", "agent": step.get("capability", "?"),
+                           "message": f"等待人工确认步骤 {step.get('step_id')}（{step.get('capability')}）",
+                           "timestamp": self._now_iso()})
+            msg = self._brpop_with_deadline(
+                self._redis, key, time.time() + self._plan_confirm_timeout,
+            )
+            if not msg:
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "info", "agent": "orchestrator",
+                               "message": f"步骤 {step.get('step_id')} 确认超时，自动继续",
+                               "timestamp": self._now_iso()})
+                return True
+            data = json.loads(msg[1] if isinstance(msg[1], str) else msg[1].decode())
+            if data.get("action") == "cancel":
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "info", "agent": "orchestrator",
+                               "message": f"步骤 {step.get('step_id')} 被用户取消",
+                               "timestamp": self._now_iso()})
+                return False
+            return True
+        except Exception as exc:
+            # Redis 不可用/测试环境 → 自动放行，不阻塞任务
+            logger.info("Step confirm skipped (auto-proceed): %s", str(exc)[:100])
+            return True
+
     def _execute_steps(self, steps: list[dict], task_id: str, goal: str) -> tuple[list[dict], bool]:
         """并行 DAG 执行一轮步骤，返回（按步骤顺序的结果列表, 是否有失败）。"""
         # 惰性初始化（兼容直接 __new__ 构造的实例/测试）
@@ -3310,6 +3348,12 @@ print("charts generated")
                 return {"task_id": step["step_id"], "status": "FAILED",
                         "result": f"Blocked by: {blocked}",
                         "elapsed_sec": round(time.time() - step_start, 1)}
+            # 人机协作（对标标准 3.2 human_in_loop）：高风险步骤执行前等人工确认
+            if str(step.get("mode")) == "human_in_loop":
+                if not self._wait_step_confirm(task_id, step):
+                    return {"task_id": step["step_id"], "status": "FAILED",
+                            "result": "步骤被用户取消",
+                            "elapsed_sec": round(time.time() - step_start, 1)}
             result = self._dispatch_step_safe(goal, step, task_id, state)
             if step.get("capability") == "web_search" and result.get("status") == "SUCCESS":
                 # 搜索结果 URL 累计到任务级，供后续（含反射轮）报告步骤引用来源
@@ -3387,6 +3431,8 @@ print("charts generated")
                 has_failure = True
 
         pending = {s["step_id"]: s for s in steps if s["step_id"] not in completed}
+        # 工作流模式（对标标准 3.2）：任一 pipeline 步骤 → 整轮串行执行
+        serial = any(str(s.get("mode")) == "pipeline" for s in steps)
         last_progress = time.time()
         in_flight = 0
         revision_done = False
@@ -3394,14 +3440,22 @@ print("charts generated")
         def worker():
             nonlocal last_progress, has_failure, in_flight, revision_done
             while True:
+                wait_serial = False
+                ready = None
                 with lock:
                     if not pending:
                         return
-                    ready = None
-                    for k, s in pending.items():
-                        if deps_ok(s) and not deps_failed(s):
-                            ready = (k, pending.pop(k))
-                            break
+                    if serial and in_flight > 0:
+                        # 串行模式：等当前步骤完成再取下一个
+                        wait_serial = True
+                    else:
+                        for k, s in pending.items():
+                            if deps_ok(s) and not deps_failed(s):
+                                ready = (k, pending.pop(k))
+                                break
+                if wait_serial:
+                    time.sleep(0.5)
+                    continue
                 if ready is None:
                     with lock:
                         # 传递式阻塞传播：任何步骤一旦依赖失败/已阻塞步骤，

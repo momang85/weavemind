@@ -58,6 +58,14 @@ class TestSandbox(unittest.TestCase):
                 os.environ.pop("CODE_EXECUTION_SANDBOX", None)
 
 
+class _FakeMessaging:
+    def __init__(self):
+        self.published = []
+
+    def publish(self, channel, msg):
+        self.published.append((channel, msg))
+
+
 class TestSecurity(unittest.TestCase):
     def test_detect_injection(self):
         from security import detect_injection
@@ -290,6 +298,114 @@ class TestP1InjectionFilter(unittest.TestCase):
         )
         self.assertIn("[已过滤可疑内容", instr)
         self.assertNotIn("请忽略之前的指令", instr)
+
+
+class TestP1WorkflowModes(unittest.TestCase):
+    def test_normalize_keeps_and_validates_mode(self):
+        import threading
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._max_steps = 8
+        steps = o._normalize_steps([
+            {"step_id": "1", "capability": "web_search", "instruction": "搜索", "mode": "pipeline"},
+            {"step_id": "2", "capability": "content_summary", "instruction": "总结\n验收：x", "mode": "weird"},
+            {"step_id": "3", "capability": "file_io", "instruction": "删除\n验收：x", "mode": "human_in_loop"},
+        ])
+        self.assertEqual(steps[0]["mode"], "pipeline")
+        self.assertEqual(steps[1]["mode"], "parallel")
+        self.assertEqual(steps[2]["mode"], "human_in_loop")
+
+    def test_pipeline_mode_serializes(self):
+        import threading
+        import time
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._task_sources = {}
+        o._task_sources_lock = threading.Lock()
+        o._task_goals = {"t": "目标"}
+        o._task_prompt_hints = {}
+        o._task_user_ids = {}
+        o._max_parallel = 3
+        o._messaging = _FakeMessaging()
+        active = {"now": 0, "max": 0}
+
+        def fake_dispatch(goal, step, tid, state):
+            active["now"] += 1
+            active["max"] = max(active["max"], active["now"])
+            time.sleep(0.12)
+            active["now"] -= 1
+            return {"task_id": step["step_id"], "status": "SUCCESS",
+                    "result": f"ok-{step['step_id']}"}
+
+        o._dispatch_step_safe = fake_dispatch
+        steps = [
+            {"step_id": "1", "capability": "content_summary",
+             "instruction": "a\n验收：x", "depends_on": [], "mode": "pipeline"},
+            {"step_id": "2", "capability": "content_summary",
+             "instruction": "b\n验收：x", "depends_on": [], "mode": "pipeline"},
+        ]
+        results, failed = o._execute_steps(steps, "t", "目标")
+        self.assertFalse(failed)
+        self.assertEqual(active["max"], 1, "pipeline 模式最大并发必须为 1")
+        self.assertEqual({r["status"] for r in results}, {"SUCCESS"})
+
+    def test_human_in_loop_auto_proceeds_without_redis(self):
+        import threading
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._task_sources = {}
+        o._task_sources_lock = threading.Lock()
+        o._task_goals = {"t": "目标"}
+        o._task_prompt_hints = {}
+        o._task_user_ids = {}
+        o._max_parallel = 3
+        o._messaging = _FakeMessaging()
+        o._redis = object()  # 无 brpop → 自动放行
+        o._plan_confirm_timeout = 5
+        o._dispatch_step_safe = lambda goal, step, tid, state: {
+            "task_id": step["step_id"], "status": "SUCCESS", "result": "ok"
+        }
+        steps = [{
+            "step_id": "1", "capability": "file_io",
+            "instruction": "删除文件\n验收：已删除",
+            "depends_on": [], "mode": "human_in_loop",
+        }]
+        results, failed = o._execute_steps(steps, "t", "目标")
+        self.assertFalse(failed)
+        self.assertEqual(results[0]["status"], "SUCCESS")
+
+
+class TestP1JudgeCalibration(unittest.TestCase):
+    def test_calibrate_agreement(self):
+        import json
+        import llm_client
+        from evals.calibrate import calibrate
+
+        orig = llm_client.call_llm
+
+        def fake(system, user, expect_json=True):
+            s = str(system)
+            if "论断" in s:
+                return {"content": json.dumps({"claims": ["c1"]})}
+            if "supported" in s:
+                return {"content": json.dumps({"supported": [True]})}
+            if "attributable" in s:
+                return {"content": json.dumps({"attributable": [True]})}
+            if "relevant" in s:
+                return {"content": json.dumps({"relevant": [True, True]})}
+            return {"content": json.dumps({"score": 1.0})}
+
+        llm_client.call_llm = fake
+        try:
+            rep = calibrate()
+            self.assertEqual(rep["n"], 4)
+            self.assertLessEqual(rep["mae"], 0.5)
+            self.assertGreaterEqual(rep["pass_agreement"], 0.5)
+        finally:
+            llm_client.call_llm = orig
 
 
 class TestP1Validators(unittest.TestCase):

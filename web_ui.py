@@ -1006,6 +1006,22 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 return self._json({"error": "Redis 写入失败，无法确认计划"}, 503)
             return self._json({"status": "ok"})
+        if self.path == "/api/step/confirm":
+            # 人机协作：确认/取消单个步骤（mode=human_in_loop）
+            tid = str(body.get("task_id", "")).strip()
+            sid = str(body.get("step_id", "")).strip()
+            if not tid or not sid:
+                return self._json({"error": "task_id 和 step_id 必填"}, 400)
+            if not _redis_ready():
+                return self._json({"error": "Redis 未连接，无法确认步骤"}, 503)
+            r = _new_redis()
+            try:
+                r.rpush(f"step_confirm:{tid}:{sid}", json.dumps({
+                    "action": str(body.get("action") or "confirm"),
+                }, ensure_ascii=False))
+            except Exception:
+                return self._json({"error": "Redis 写入失败，无法确认步骤"}, 503)
+            return self._json({"status": "ok"})
         if self.path == "/api/context/extract":
             filename = str(body.get("filename") or "").strip()
             b64 = str(body.get("data") or "")

@@ -1,0 +1,45 @@
+[
+  {
+    "id": "gold-01",
+    "question": "2025年全球AI芯片市场规模预计是多少？",
+    "answer": "不同机构口径差异大：德勤预计超1500亿美元，艾媒统计726亿美元。",
+    "contexts": [
+      "德勤预测2025年全球AI芯片市场规模将超过1500亿美元",
+      "艾媒咨询统计2025年全球AI芯片市场规模726亿美元"
+    ],
+    "ground_truth": "2025年全球AI芯片市场规模不同机构预测差异大，约726亿至1500亿美元之间",
+    "human_scores": {"answer_correctness": 1.0, "faithfulness": 1.0, "context_recall": 1.0, "context_precision": 1.0}
+  },
+  {
+    "id": "gold-02",
+    "question": "2025年全球AI芯片市场规模预计是多少？",
+    "answer": "全球AI芯片市场2025年预计达1万亿美元。",
+    "contexts": [
+      "德勤预测2025年全球AI芯片市场规模将超过1500亿美元"
+    ],
+    "ground_truth": "2025年全球AI芯片市场规模不同机构预测差异大，约726亿至1500亿美元之间",
+    "human_scores": {"answer_correctness": 0.0, "faithfulness": 0.0, "context_recall": 1.0, "context_precision": 0.5}
+  },
+  {
+    "id": "gold-03",
+    "question": "主要AI芯片厂商有哪些？",
+    "answer": "英伟达在AI训练市场占主导，AMD和英特尔也在追赶。",
+    "contexts": [
+      "英伟达凭借CUDA生态在AI训练市场占据统治地位",
+      "AMD和英特尔在通用计算领域有积累，正追赶AI加速"
+    ],
+    "ground_truth": "英伟达占主导，AMD与英特尔为主要竞争者",
+    "human_scores": {"answer_correctness": 1.0, "faithfulness": 1.0, "context_recall": 1.0, "context_precision": 1.0}
+  },
+  {
+    "id": "gold-04",
+    "question": "AI芯片的技术趋势是什么？",
+    "answer": "AI芯片正在从云端训练向边缘推理下沉，ASIC定制化需求上升。",
+    "contexts": [
+      "AI芯片从云端训练向边缘推理下沉，边缘智能设备普及成为增长新动能",
+      "ASIC定制化需求上升，细分场景对专用芯片依赖增强"
+    ],
+    "ground_truth": "边缘推理与ASIC定制化是两大趋势",
+    "human_scores": {"answer_correctness": 1.0, "faithfulness": 1.0, "context_recall": 1.0, "context_precision": 1.0}
+  }
+]
