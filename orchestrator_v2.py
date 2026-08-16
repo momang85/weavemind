@@ -345,6 +345,8 @@ class OrchestratorV2:
                               {"type": "error", "agent": "orchestrator",
                                "message": f"规划第 {attempt + 1} 次尝试失败：{str(e)[:80]}，重试中",
                                "timestamp": self._now_iso()})
+                if attempt == 0:
+                    time.sleep(3)  # 瞬断退避：给双端点恢复留出窗口
         if plan_data is None:
             logger.error("Plan failed: %s", str(last_error)[:300])
             push_progress(self._messaging, task_id, "log",
