@@ -595,6 +595,47 @@ class TestP2FinanceRecency(unittest.TestCase):
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_completeness_validator(self):
+        import tempfile
+        import workspace as ws_mod
+        from validators.registry import run_for_task
+
+        tmp = tempfile.mkdtemp(prefix="weavemind_comp_")
+        old = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            proj = ws_mod.task_project_dir("t-comp-1")
+            rep = proj.parent / "reports"
+            rep.mkdir(parents=True, exist_ok=True)
+            goal = "搜索特斯拉最新财报并总结要点。"
+            (rep / "report.md").write_text(
+                "# 特斯拉财报\n\n总营收：❌ 待获取", encoding="utf-8")
+            res = run_for_task("t-comp-1", goal, ["report_generator"])
+            comp = next(r for r in res if r["name"] == "completeness_check")
+            self.assertFalse(comp["ok"], comp["detail"])
+            self.assertIn("缺口", comp["detail"])
+
+            (rep / "report.md").write_text(
+                "# 特斯拉财报\n\n总营收 250 亿美元，净利润 30 亿美元", encoding="utf-8")
+            res2 = run_for_task("t-comp-1", goal, ["report_generator"])
+            comp2 = next(r for r in res2 if r["name"] == "completeness_check")
+            self.assertTrue(comp2["ok"], comp2["detail"])
+        finally:
+            ws_mod.WORKSPACE_ROOT = old
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_search_site_variant(self):
+        from worker_base import SearchAgent
+
+        sa = SearchAgent.__new__(SearchAgent)
+        vs = sa._query_variants(
+            "搜索特斯拉最新财报并总结要点\n"
+            "追加要求：查询限定官方来源 site:ir.tesla.com 或 site:sec.gov"
+        )
+        self.assertTrue(any("site:ir.tesla.com" in v for v in vs))
+        self.assertTrue(any("site:sec.gov" in v for v in vs))
+
 
 class TestP2ConfigHotReload(unittest.TestCase):
     def test_config_change_reapplies_env(self):

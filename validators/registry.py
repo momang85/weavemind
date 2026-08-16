@@ -134,11 +134,28 @@ def _init_defaults() -> None:
             return (False, f"数据均为陈旧年份（{sorted(years)}，要求 ≥{required} 年信息），必须重检索最新资料")
         return (True, f"识别到近期年份 {recent}")
 
+    def _completeness_check(project: Path, task_id: str, goal: str):
+        """完整性审查（ReAct 兜底）：报告出现"待获取/数据未获取/缺失字段"等
+        明确缺口标记时判定未通过，强制反思触发定向重检索，而不是交付缺数据报告。"""
+        report = project.parent / "reports" / "report.md"
+        if not report.exists():
+            return (True, "无报告文件（不适用）")
+        try:
+            txt = report.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return (True, "报告读取失败（跳过）")
+        markers = ("待获取", "数据未获取", "缺失字段清单", "需重新定向搜索", "需重跑搜索")
+        hits = [m for m in markers if m in txt]
+        if hits:
+            return (False, f"报告存在核心数据缺口（{ '、'.join(hits) }），必须定向重检索后再交付")
+        return (True, "报告无明确缺口标记")
+
     register("code_deliverable", {"code_execution", "file_io"}, _code_deliverable)
     register("py_compile_all", {"code_execution", "file_io"}, _py_compile_all)
     register("html_playable", {"code_execution"}, _html_playable)
     register("chart_spec_valid", {"content_summary", "report_generator"}, _chart_spec_valid)
     register("recency_check", {"web_search", "content_summary", "report_generator"}, _recency_check)
+    register("completeness_check", {"content_summary", "report_generator"}, _completeness_check)
 
 
 _init_defaults()

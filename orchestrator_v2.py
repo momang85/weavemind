@@ -2994,7 +2994,10 @@ print("charts generated")
                 _caps = [str(s.get("capability")) for s in all_steps]
                 _vres = run_for_task(task_id, goal, _caps)
                 _vsum = summary_text(_vres)
-                if "recency_check" in _vsum and "未通过" in _vsum:
+                if ("recency_check" in _vsum and "未通过" in _vsum) or (
+                    "completeness_check" in _vsum and "未通过" in _vsum
+                ):
+                    # 时效性或完整性审查失败 → 强制进入反思重检索（ReAct 模式）
                     _gate_failed = True
             except Exception:
                 _vsum = ""
