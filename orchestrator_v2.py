@@ -1554,6 +1554,9 @@ class OrchestratorV2:
             "plot", "chart", "graph",
             # 金融类目标也自动配图（财报要点 → 指标表 → 图表）
             "财报", "营收", "净利润", "财务", "季报", "年报", "业绩",
+            # 市场数据类目标（规模/份额/占比/销量/渗透率/增长率）
+            "市场规模", "市场份额", "占比", "销售", "销量", "出货",
+            "渗透率", "增长率", "cagr", "预测", "规模",
         ))
 
     @staticmethod
@@ -1596,7 +1599,7 @@ class OrchestratorV2:
         if not text:
             return []
         rows: list[dict] = []
-        for tbl in re.findall(r"(\|.+\|(?:\n\|.+\|)+)", text):
+        for tbl_no, tbl in enumerate(re.findall(r"(\|.+\|(?:\n\|.+\|)+)", text)):
             lines = tbl.strip().split("\n")
             if len(lines) < 3:
                 continue
@@ -1628,7 +1631,24 @@ class OrchestratorV2:
                 None,
             )
             cal_idx = next(
-                (hmap[k] for k in ("口径", "口径说明", "口径/年份", "备注") if k in hmap),
+                (hmap[k] for k in ("口径", "口径说明", "口径/年份", "统计口径", "口径范围", "备注")
+                 if k in hmap),
+                None,
+            )
+            # 单位可能在表头括号里（如"市场规模（亿美元）"）
+            header_unit = ""
+            if val_idx is not None and val_idx < len(headers):
+                mu = re.search(r"[（(]([^）)]*)[）)]", headers[val_idx])
+                if mu:
+                    cand = mu.group(1).strip()
+                    if any(k in cand for k in (
+                        "美元", "亿元", "万亿", "亿元", "%", "万辆", "万台", "元", "欧元", "人民币"
+                    )):
+                        header_unit = cand
+            # 占比/份额列 → 额外生成市场份额行（适合饼图）
+            share_idx = next(
+                (i for i, h in enumerate(headers)
+                 if i != val_idx and any(k in h for k in ("占比", "份额"))),
                 None,
             )
             for line in lines[2:]:
@@ -1638,9 +1658,10 @@ class OrchestratorV2:
                 if val_idx >= len(cells):
                     continue
                 joined = " ".join(cells)
+                val_cell_clean = cells[val_idx].replace(",", "").replace("，", "")
                 num_m = re.search(
                     r"(\d+(?:\.\d+)?)\s*(万亿|千亿|百亿|亿|万)?\s*(亿美元|亿元|%|万辆|万台|美元)",
-                    cells[val_idx] + " " + joined,
+                    val_cell_clean + " " + joined,
                 )
                 if not num_m:
                     continue
@@ -1671,6 +1692,8 @@ class OrchestratorV2:
                     if num_m.group(2) and num_m.group(3) in ("美元", "元", "人民币")
                     else (num_m.group(3) or "")
                 )
+                if not unit and header_unit:
+                    unit = header_unit
                 if not unit:
                     continue  # 无单位 → 规范要求必须有单位，不画图
                 metric = "指标"
@@ -1706,7 +1729,22 @@ class OrchestratorV2:
                     "单位": unit,
                     "口径": caliber or "表格",
                     "来源": src,
+                    "_tbl": f"t{tbl_no}",
                 })
+                # 占比/份额列：提取为市场份额行（单位 %，适合饼图）
+                if share_idx is not None and share_idx < len(cells):
+                    sm = re.search(r"(\d+(?:\.\d+)?)\s*(%)?", cells[share_idx])
+                    if sm:
+                        rows.append({
+                            "指标": "市场份额",
+                            "年份": year,
+                            "数值": float(sm.group(1)),
+                            "单位": "%",
+                            "口径": (cells[0] if cells and cells[0] and cells[0] not in headers
+                                     else (metric[:20] or "占比")),
+                            "来源": src,
+                            "_tbl": f"t{tbl_no}",
+                        })
         return rows
 
     @staticmethod
@@ -3458,9 +3496,9 @@ print("charts generated")
                         except Exception as exc:
                             logger.warning("search_results.json write failed: %s", exc)
             if (step.get("capability") == "content_summary"
-                    and result.get("status") == "SUCCESS"
-                    and self._wants_visualization(goal)):
-                # LLM 结构化图表规格 → 主题过滤 → 确定性渲染
+                    and result.get("status") == "SUCCESS"):
+                # LLM 结构化图表规格 → 主题过滤 → 确定性渲染（数据驱动：
+                # 只要总结含 ≥2 个可作图数据点就渲染，不依赖目标措辞）
                 # （语义/结论由 LLM 负责，数字与标注由脚本保证）
                 from chart_specs import (
                     merge_year_series, verify_specs_against_text, wrap_rows_to_specs,

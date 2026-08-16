@@ -88,6 +88,32 @@ def pick_type(rows: list[dict]) -> str:
 
 _METRIC_STOP = ("预测", "预计", "测算", "展望", "统计", "口径", "对比")
 
+_CORE_METRICS = ("市场规模", "市场销售额", "销售额", "份额", "占比", "营收", "出货量", "增速", "增长率")
+_SEGMENT_WORDS = (
+    "推理", "训练", "边缘", "数据中心", "云端", "端侧", "汽车", "消费",
+    "工业", "医疗", "手机", "服务器", "存储", "通用", "专用", "中国",
+    "美国", "欧洲", "日本", "车载", "云", "端",
+)
+_TOTAL_WORDS = ("全口径", "合计", "总计", "总体", "总共", "全部", "整体")
+
+
+def _normalize_series(metric: str, caliber: str = "") -> str:
+    """把分项指标归一为同一系列（如"推理芯片市场规模"→"市场规模"），
+    使同一指标的分项（训练/推理/边缘）能合成一张对比图；
+    "全口径/合计/总计"等总量行保持独立，避免与分项混图。"""
+    if any(w in str(caliber) for w in _TOTAL_WORDS):
+        return str(metric)
+    core = next((c for c in _CORE_METRICS if c in str(metric)), None)
+    if not core:
+        return str(metric)
+    rest = str(metric).replace(core, "")
+    stripped = re.sub(r"^(全球|中国|美国|欧洲|日本|其中|AI|芯片|半导体)+", "", rest)
+    if not stripped:
+        return str(metric)  # 无领域前缀 → 普通/总指标行，不合并
+    if any(w in stripped for w in _SEGMENT_WORDS):
+        return core
+    return str(metric)
+
 
 def _metric_key(title: str) -> str:
     """归一化标题为指标键：去掉括号（年份/单位）、修饰词与标点，
@@ -217,9 +243,12 @@ def wrap_rows_to_specs(rows: list[dict]) -> list[dict]:
         metric = str(r.get("指标") or "指标")
         unit = str(r.get("单位") or "")
         # 同指标不同单位（% vs 万亿美元）不得合并，按规范分开
-        groups.setdefault((metric, unit), []).append(r)
+        # 不同表格的同名指标（机构规模 vs 区域规模）不得合并：表作用域参与分组
+        key = (_normalize_series(metric, str(r.get("口径") or "")), unit,
+               str(r.get("_tbl") or ""))
+        groups.setdefault(key, []).append(r)
     specs = []
-    for (metric, unit), group in groups.items():
+    for (metric, unit, _tbl), group in groups.items():
         if len(group) < 2:
             continue  # 单点图无意义，按规范跳过
         years = sorted({r.get("年份") for r in group if r.get("年份") is not None})
@@ -229,6 +258,9 @@ def wrap_rows_to_specs(rows: list[dict]) -> list[dict]:
             conclusion = f"{metric}随年份变化（{years[0]}→{years[-1]}），见数据标注"
         else:
             ctype = pick_type(group)
+            # 占比/份额数据（单位 % 或指标含份额/占比）→ ≤5 类用饼图
+            if unit == "%" or any(k in metric for k in ("份额", "占比")):
+                ctype = "pie" if len(group) <= 5 else "bar"
             x = "口径/来源"
             vals = [r.get("数值") for r in group]
             hi = max(vals) if vals else 0

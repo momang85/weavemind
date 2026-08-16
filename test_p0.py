@@ -928,6 +928,76 @@ class TestP2ReactRouting(unittest.TestCase):
         plan2 = o._direct_deliverable_plan("做一个贪吃蛇游戏")
         self.assertEqual(plan2[0]["capability"], "code_execution")
 
+
+class TestP2ChartFallback(unittest.TestCase):
+    def test_parse_header_unit_and_share_column(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        text = (
+            "| 细分市场 | 市场规模（亿美元） | 占比 | 增速特征 |\n"
+            "|---------|-------------------|------|----------|\n"
+            "| 推理芯片 | 约1450 | 52% | 年复合增速超50% |\n"
+            "| 训练芯片 | 约950 | 34% | — |\n"
+            "| 边缘AI芯片 | 约400 | 14% | — |\n"
+        )
+        rows = o._extract_chart_rows_from_table(text)
+        sizes = [r for r in rows if r["单位"] == "亿美元"]
+        shares = [r for r in rows if r["单位"] == "%"]
+        self.assertEqual(len(sizes), 3)
+        self.assertEqual(len(shares), 3)
+        self.assertEqual([r["数值"] for r in sizes], [1450, 950, 400])
+        self.assertEqual([r["数值"] for r in shares], [52, 34, 14])
+
+    def test_parse_comma_thousands(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        text = (
+            "| 机构 | 2026年预测规模 | 统计口径 |\n"
+            "|------|--------------|----------|\n"
+            "| Gartner | 约1,200亿美元 | 全球AI半导体 |\n"
+            "| IDC | 约1,100亿美元 | 全球AI计算芯片 |\n"
+            "| Yole | 约980亿美元 | 全球AI加速芯片 |\n"
+        )
+        rows = o._extract_chart_rows_from_table(text)
+        self.assertEqual(len(rows), 3)
+        self.assertEqual([r["数值"] for r in rows], [1200, 1100, 980])
+        self.assertEqual({r["单位"] for r in rows}, {"亿美元"})
+
+    def test_wrap_share_group_as_pie(self):
+        from chart_specs import wrap_rows_to_specs
+
+        rows = [
+            {"指标": "市场份额", "年份": None, "数值": 52, "单位": "%", "口径": "推理芯片", "来源": "a"},
+            {"指标": "市场份额", "年份": None, "数值": 34, "单位": "%", "口径": "训练芯片", "来源": "a"},
+            {"指标": "市场份额", "年份": None, "数值": 14, "单位": "%", "口径": "边缘AI芯片", "来源": "a"},
+        ]
+        specs = wrap_rows_to_specs(rows)
+        self.assertEqual(len(specs), 1)
+        self.assertEqual(specs[0]["type"], "pie")
+        self.assertEqual(len(specs[0]["data"]), 3)
+
+    def test_normalize_series_groups_segments(self):
+        from chart_specs import wrap_rows_to_specs
+
+        rows = [
+            {"指标": "训练芯片市场规模", "年份": None, "数值": 950, "单位": "亿美元",
+             "口径": "AI芯片细分口径", "来源": "a"},
+            {"指标": "推理芯片市场规模", "年份": None, "数值": 1450, "单位": "亿美元",
+             "口径": "AI芯片细分口径", "来源": "a"},
+            {"指标": "边缘AI芯片市场规模", "年份": None, "数值": 400, "单位": "亿美元",
+             "口径": "AI芯片细分口径", "来源": "a"},
+            {"指标": "全球AI芯片市场规模", "年份": None, "数值": 2800, "单位": "亿美元",
+             "口径": "含训练/推理/边缘AI芯片全口径", "来源": "a"},
+        ]
+        specs = wrap_rows_to_specs(rows)
+        # 分项合成 1 张柱状图；总量行（全口径）保持独立、单点被跳过
+        self.assertEqual(len(specs), 1)
+        self.assertEqual(specs[0]["type"], "bar")
+        self.assertEqual(len(specs[0]["data"]), 3)
+        self.assertEqual([d["value"] for d in specs[0]["data"]], [950, 1450, 400])
+
     def test_execute_returns_results_via_bing(self):
         import json
         import sys
