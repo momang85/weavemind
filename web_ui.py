@@ -325,8 +325,14 @@ def _system_status():
         survival = round(online / len(agents) * 100, 1) if agents else 100
         # 真实记忆统计（ChromaDB）
         memory = _get_memory_stats()
+        try:
+            from llm_client import get_endpoint_health
+            llm_health = get_endpoint_health()
+        except Exception:
+            llm_health = {}
         return {
             "agents": agents,
+            "llm_health": llm_health,
             "queues": queues,
             "tasks": {"total": total, "success": success, "today": today},
             "memory": memory,
@@ -791,6 +797,18 @@ class Handler(BaseHTTPRequestHandler):
                 ),
                 "cost_usd": ledger_cost(ledger),
             })
+        if p.startswith("/api/task/") and p.endswith("/stream"):
+            # 步骤级流式输出（O-21）：worker 生成过程中按块发布到 Redis
+            tid = p.split("/api/task/")[-1].rsplit("/stream", 1)[0]
+            text = ""
+            try:
+                r = _new_redis()
+                chunks = r.lrange(f"stream:{tid}", 0, -1) or []
+                r.expire(f"stream:{tid}", 600)
+                text = "".join(chunks)
+            except Exception:
+                pass
+            return self._json({"task_id": tid, "text": text[-20000:]})
         if p == "/api/config": return self._json(_load_config())
         if p == "/api/events":
             with _events_lock:

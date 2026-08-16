@@ -449,6 +449,47 @@ class TestP2CostLedger(unittest.TestCase):
         self.assertEqual(main(), 0)
 
 
+class TestP2StreamHealth(unittest.TestCase):
+    def test_publish_stream_chunk(self):
+        import llm_client
+
+        calls = []
+
+        class FakeRedis:
+            def rpush(self, k, v):
+                calls.append((k, v))
+
+            def ltrim(self, k, s, e):
+                pass
+
+            def expire(self, k, t):
+                pass
+
+        llm_client._task_usage_client = FakeRedis()
+        llm_client.set_task_context("ui-s1")
+        try:
+            llm_client._publish_stream_chunk("hello")
+        finally:
+            llm_client.clear_task_context()
+        self.assertIn(("stream:ui-s1", "hello"), calls)
+        # 无任务上下文不发布
+        llm_client._publish_stream_chunk("x")
+        self.assertEqual(len(calls), 1)
+
+    def test_endpoint_health(self):
+        import llm_client
+
+        llm_client._mark_endpoint("primary", False)
+        llm_client._mark_endpoint("primary", False)
+        self.assertFalse(llm_client._primary_healthy())
+        h = llm_client.get_endpoint_health()
+        self.assertIn("primary", h)
+        self.assertFalse(h["primary"]["healthy"])
+        llm_client._mark_endpoint("primary", True)
+        self.assertTrue(llm_client._primary_healthy())
+        llm_client._mark_endpoint("primary", True)  # 还原
+
+
 class TestP1Validators(unittest.TestCase):
     def test_builtin_validators_registered(self):
         from validators.registry import list_validators

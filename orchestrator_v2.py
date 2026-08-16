@@ -141,6 +141,13 @@ class OrchestratorV2:
         self._stall_timeout = 300
         self._max_offtopic_regenerations = 2
         self._planner_model = None
+        try:
+            from llm_client import start_health_monitor
+            start_health_monitor(interval=float(
+                os.environ.get("LLM_HEALTH_INTERVAL", "60") or 60
+            ))
+        except Exception:
+            pass
         self._task_starts: dict[str, float] = {}
         self._task_simple: dict[str, bool] = {}
         self._task_sources: dict[str, list[str]] = {}

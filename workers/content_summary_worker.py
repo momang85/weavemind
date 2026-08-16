@@ -78,8 +78,12 @@ class ContentSummaryWorker(AsyncWorkerBase):
             user = f"指令: {instruction}\n\n请根据指令生成总结内容。"
 
             try:
-                result = call_llm(system, user, expect_json=False)
-                summary = result.get("content", f"总结: {instruction}")
+                from llm_client import call_llm_stream
+                try:
+                    summary = call_llm_stream(system, user)
+                except Exception:
+                    result = call_llm(system, user, expect_json=False)
+                    summary = result.get("content", f"总结: {instruction}")
                 # 第二次调用：从总结中提取结构化图表数据（严格 JSON，保证结构可靠）
                 try:
                     ext_sys = (

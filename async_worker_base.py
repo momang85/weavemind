@@ -78,6 +78,22 @@ class AsyncWorkerBase(ABC):
         self, system="", prompt="", instruction="",
         max_attempts=3, max_tokens=2000,
     ) -> str:
+        # 步骤级流式输出（O-21）：长生成过程逐块发布到 Redis，前端实时显示
+        if os.environ.get("STREAM_OUTPUT", "1") != "0":
+            try:
+                import asyncio
+                from llm_client import call_llm_stream
+                loop = asyncio.get_running_loop()
+                return await loop.run_in_executor(
+                    None,
+                    lambda: call_llm_stream(
+                        system or "You are a helpful assistant.",
+                        prompt or instruction or "",
+                        max_tokens=max_tokens,
+                    ),
+                )
+            except Exception:
+                pass  # 流式失败 → 回退普通异步调用
         from llm_client import call_llm_async
         result = await call_llm_async(
             system or "You are a helpful assistant.",

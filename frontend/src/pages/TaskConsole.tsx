@@ -286,6 +286,21 @@ export default function TaskConsole() {
   }, [reset])
 
   const isRunning = status === 'running'
+  // 步骤级流式输出（O-21）：运行中轮询 /api/task/<id>/stream 实时显示生成内容
+  const [streamText, setStreamText] = useState('')
+  useEffect(() => {
+    if (!taskId || !isRunning) { setStreamText(''); return }
+    let cancelled = false
+    const poll = async () => {
+      try {
+        const d = await (await fetch('/api/task/' + taskId + '/stream')).json()
+        if (!cancelled) setStreamText(d.text || '')
+      } catch {}
+    }
+    poll()
+    const t = setInterval(poll, 1500)
+    return () => { cancelled = true; clearInterval(t) }
+  }, [taskId, isRunning])
 
   const resultItems = activeConversationId
     ? convMessages.filter(m => m.status !== 'PENDING')
@@ -457,7 +472,21 @@ export default function TaskConsole() {
           </div>
 
           <div className="flex-1 min-h-[360px] overflow-y-auto p-4">
-            {tab === 'live' && <LiveActivity />}
+            {tab === 'live' && (
+              <>
+                {streamText && (
+                  <div className="mb-4 bg-slate-900/80 border border-cyan-500/20 rounded-xl p-3">
+                    <div className="text-[10px] text-cyan-400 font-semibold mb-1">
+                      生成内容（流式）· 实时
+                    </div>
+                    <pre className="whitespace-pre-wrap break-all text-slate-300 text-xs font-sans max-h-48 overflow-y-auto">
+                      {streamText}
+                    </pre>
+                  </div>
+                )}
+                <LiveActivity />
+              </>
+            )}
 
             {tab === 'context' && (
               <div className="space-y-3">

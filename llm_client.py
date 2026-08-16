@@ -26,6 +26,12 @@ _usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
 _usage_pub_client = None
 _task_usage_client = None
 _task_ctx = None
+_endpoint_health = {
+    "primary": {"healthy": True, "fails": 0},
+    "backup": {"healthy": True, "fails": 0},
+}
+_endpoint_health_lock = threading.Lock()
+_health_monitor_started = False
 
 
 def _task_context_var():
@@ -47,6 +53,108 @@ def set_task_context(task_id: str) -> None:
 def clear_task_context() -> None:
     try:
         _task_context_var().set("")
+    except Exception:
+        pass
+
+
+def get_task_context() -> str:
+    try:
+        return _task_context_var().get()
+    except Exception:
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# LLM 端点健康检查与自动切流（O-29，对标标准 C4-4.3 稳定性）
+# ---------------------------------------------------------------------------
+
+_ENDPOINT_FAIL_THRESHOLD = 2
+
+
+def _mark_endpoint(endpoint: str, ok: bool) -> None:
+    with _endpoint_health_lock:
+        st = _endpoint_health.setdefault(endpoint, {"healthy": True, "fails": 0})
+        if ok:
+            st["healthy"] = True
+            st["fails"] = 0
+        else:
+            st["fails"] += 1
+            st["healthy"] = st["fails"] < _ENDPOINT_FAIL_THRESHOLD
+
+
+def _primary_healthy() -> bool:
+    with _endpoint_health_lock:
+        return _endpoint_health.get("primary", {}).get("healthy", True)
+
+
+def get_endpoint_health() -> dict:
+    with _endpoint_health_lock:
+        return {
+            k: dict(v) for k, v in _endpoint_health.items()
+        }
+
+
+def _probe_endpoint(base_url: str, api_key: str, model: str) -> bool:
+    """健康探测：极短请求（4 token）验证端点可用。"""
+    try:
+        client = LLMClient(base_url=base_url, api_key=api_key, model=model)
+        raw = client._send_request("你是连通性探测器，只回复：ok", "ping", 0.0, 8)
+        return bool(raw and str(raw).strip())
+    except Exception:
+        return False
+
+
+def _health_monitor_loop(interval: float = 60.0) -> None:
+    """后台守护：主端点不健康时持续探测，恢复后自动切回。"""
+    while True:
+        time.sleep(interval)
+        try:
+            if _primary_healthy():
+                continue
+            base_url = os.environ.get("LLM_BASE_URL") or ""
+            api_key = os.environ.get("LLM_API_KEY") or ""
+            model = os.environ.get("LLM_MODEL") or "gpt-4o"
+            ok = bool(base_url) and _probe_endpoint(base_url, api_key, model)
+            _mark_endpoint("primary", ok)
+            if ok:
+                logger.info("LLM primary endpoint recovered, traffic switched back")
+        except Exception:
+            pass
+
+
+def start_health_monitor(interval: float = 60.0) -> None:
+    """幂等启动健康探测守护线程。"""
+    global _health_monitor_started
+    if _health_monitor_started:
+        return
+    _health_monitor_started = True
+    threading.Thread(
+        target=_health_monitor_loop, args=(interval,), daemon=True
+    ).start()
+
+
+# ---------------------------------------------------------------------------
+# 步骤级流式输出（O-21）
+# ---------------------------------------------------------------------------
+
+
+def _publish_stream_chunk(text: str) -> None:
+    tid = get_task_context()
+    if not tid or os.environ.get("STREAM_OUTPUT", "1") == "0":
+        return
+    global _task_usage_client
+    try:
+        if _task_usage_client is None:
+            import redis as _redis
+            _task_usage_client = _redis.Redis(
+                host=os.environ.get("REDIS_HOST", "localhost"),
+                port=int(os.environ.get("REDIS_PORT", "6379")),
+                decode_responses=True,
+            )
+        key = f"stream:{tid}"
+        _task_usage_client.rpush(key, text)
+        _task_usage_client.ltrim(key, -4000, -1)
+        _task_usage_client.expire(key, 600)
     except Exception:
         pass
 
@@ -265,9 +373,18 @@ class LLMClient:
         max_tok = max_tokens if max_tokens is not None else self.max_tokens
 
         last_error: Exception | None = None
+        # 健康路由（O-29）：主端点已被判定不健康 → 优先走备用，避免每次白白等待超时
+        if not _primary_healthy():
+            try:
+                return self._call_backup(system, user, temp, max_tok, expect_json)
+            except LLMJSONParseError:
+                raise
+            except Exception as exc:
+                logger.warning("Health-routed backup failed: %s", str(exc)[:150])
         for attempt in range(1, self._MAX_RETRIES + 1):
             try:
                 raw = self._send_request(system, user, temp, max_tok)
+                _mark_endpoint("primary", True)
                 if not expect_json:
                     return {"content": raw}
                 return self._parse_json(raw)
@@ -275,6 +392,7 @@ class LLMClient:
                 # JSON 解析失败不重试（格式问题重试没用）
                 raise
             except Exception as exc:
+                _mark_endpoint("primary", False)
                 last_error = exc
                 logger.warning(
                     "LLM call attempt %d/%d failed: %s",
@@ -287,25 +405,36 @@ class LLMClient:
 
         # 主端点失败 → 自动切换备用端点/模型
         if self._backup_cfg:
-            backup = LLMClient(
-                base_url=self._backup_cfg.get("base_url"),
-                api_key=self._backup_cfg.get("api_key"),
-                model=self._backup_cfg.get("model") or self.model,
-            )
             try:
-                raw = backup._send_request(system, user, temp, max_tok)
-                logger.warning("Switched to backup LLM: %s", self._backup_cfg.get("base_url"))
-                if not expect_json:
-                    return {"content": raw}
-                return backup._parse_json(raw)
+                return self._call_backup(system, user, temp, max_tok, expect_json)
             except LLMJSONParseError:
                 raise
             except Exception as exc:
+                _mark_endpoint("backup", False)
                 logger.error("Backup LLM also failed: %s", str(exc)[:200])
         raise LLMCallError(
             f"LLM call failed after {self._MAX_RETRIES} attempts",
             attempt=self._MAX_RETRIES,
         ) from last_error
+
+    def _call_backup(
+        self, system: str, user: str, temperature: float, max_tokens: int,
+        expect_json: bool,
+    ) -> dict[str, Any]:
+        """调用备用端点并标记健康状态。"""
+        if not self._backup_cfg:
+            raise LLMCallError("No backup endpoint configured")
+        backup = LLMClient(
+            base_url=self._backup_cfg.get("base_url"),
+            api_key=self._backup_cfg.get("api_key"),
+            model=self._backup_cfg.get("model") or self.model,
+        )
+        raw = backup._send_request(system, user, temperature, max_tokens)
+        _mark_endpoint("backup", True)
+        logger.warning("Switched to backup LLM: %s", self._backup_cfg.get("base_url"))
+        if not expect_json:
+            return {"content": raw}
+        return backup._parse_json(raw)
 
     # ------------------------------------------------------------------
     # 内部方法
@@ -361,7 +490,8 @@ class LLMClient:
         )
 
         try:
-            with urllib.request.urlopen(req, timeout=180) as resp:
+            timeout = float(os.environ.get("LLM_REQUEST_TIMEOUT", "180") or 180)
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 response_data = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
@@ -492,6 +622,97 @@ def call_llm(system: str, user: str, expect_json: bool = True) -> dict[str, Any]
         解析后的字典。
     """
     return get_default_client().call(system, user, expect_json=expect_json)
+
+
+def call_llm_stream(
+    system: str,
+    user: str,
+    on_chunk=None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+) -> str:
+    """SSE 流式调用（同步，urllib）：逐块回调 on_chunk，并按任务上下文自动发布
+    到 Redis stream:{task_id}（O-21 步骤级流式输出）。非流式端点回退整段输出。"""
+    import urllib.error
+    import urllib.request
+
+    client = get_default_client()
+    temp = temperature if temperature is not None else client.temperature
+    max_tok = max_tokens or client.max_tokens
+    url = f"{client.base_url.rstrip('/')}/chat/completions"
+    headers: dict[str, str] = {
+        "Content-Type": "application/json",
+        "User-Agent": "WeaveMind/1.0",
+    }
+    if client.api_key:
+        headers["Authorization"] = f"Bearer {client.api_key}"
+    body = {
+        "model": client.model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "temperature": temp,
+        "max_tokens": max_tok,
+        "stream": True,
+    }
+    req = urllib.request.Request(
+        url, data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        headers=headers, method="POST",
+    )
+    try:
+        timeout = float(os.environ.get("LLM_REQUEST_TIMEOUT", "300") or 300)
+        resp = urllib.request.urlopen(req, timeout=timeout)
+    except urllib.error.HTTPError as exc:
+        raise LLMCallError(
+            f"HTTP {exc.code}: {exc.read().decode('utf-8', errors='replace')[:300]}"
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise LLMCallError(f"Network error: {exc}") from exc
+
+    chunks: list[str] = []
+    first = resp.readline()
+    head = first.decode("utf-8", errors="replace")
+    if head.strip().startswith("data:"):
+        lines = [head] + [
+            l.decode("utf-8", errors="replace") for l in resp
+        ]
+        for line in lines:
+            t = line.strip()
+            if not t.startswith("data:"):
+                continue
+            payload = t[5:].strip()
+            if payload == "[DONE]":
+                break
+            try:
+                obj = json.loads(payload)
+                delta = obj.get("choices", [{}])[0].get("delta", {}).get("content", "")
+            except Exception:
+                delta = ""
+            if delta:
+                chunks.append(delta)
+                _publish_stream_chunk(delta)
+                if on_chunk is not None:
+                    try:
+                        on_chunk(delta)
+                    except Exception:
+                        pass
+    else:
+        # 非流式端点：整段读取返回
+        body_text = head + resp.read().decode("utf-8", errors="replace")
+        try:
+            data = json.loads(body_text)
+            content = data["choices"][0]["message"]["content"]
+            chunks.append(str(content))
+            _publish_stream_chunk(str(content))
+            if on_chunk is not None:
+                try:
+                    on_chunk(str(content))
+                except Exception:
+                    pass
+        except Exception:
+            chunks.append(body_text)
+    return "".join(chunks)
 
 
 # ============================================================================
