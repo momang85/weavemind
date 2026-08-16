@@ -53,6 +53,16 @@ def dispatch_tool(
 ) -> dict:
     """派发单工具调用并等待结果；无论成败都写审计日志。"""
     t0 = time.time()
+    # 第三方 MCP 工具优先路由（即插即用）
+    try:
+        from mcp_client import call_external_tool
+        ext = call_external_tool(capability, {"instruction": str(instruction),
+                                              "task_id": task_id, "timeout": timeout})
+        if ext is not None:
+            _audit(capability, instruction, ext, time.time() - t0, task_id)
+            return ext
+    except Exception:
+        pass
     agent = find_agent(capability)
     if not agent:
         return {"task_id": "?", "status": "FAILED", "result": f"No worker for {capability}"}

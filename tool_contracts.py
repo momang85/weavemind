@@ -99,6 +99,14 @@ def tool_catalog_text() -> str:
     lines = ["## 工具目录（能力定义）"]
     for t in TOOL_REGISTRY:
         lines.append(f"- {t['name']}: {t['description']} 返回: {t['returns']}")
+    try:
+        import mcp_client
+        with mcp_client._LOCK:
+            ext = [(k, v["tool"]) for k, v in list(mcp_client.EXTERNAL_TOOLS.items())]
+    except Exception:
+        ext = []
+    for name, tool in ext:
+        lines.append(f"- {name}（MCP 第三方）: {tool.get('description', '')}")
     return "\n".join(lines)
 
 

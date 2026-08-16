@@ -151,6 +151,15 @@ class OrchestratorV2:
             ))
         except Exception:
             pass
+        # MCP 第三方工具发现（config.json mcp_servers；空配置则跳过）
+        try:
+            from mcp_client import discover_external_tools
+            _ext = discover_external_tools()
+            if _ext:
+                logger.info("MCP external tools discovered: %s",
+                            ", ".join(t["name"] for t in _ext))
+        except Exception:
+            pass
         self._task_starts: dict[str, float] = {}
         self._task_simple: dict[str, bool] = {}
         self._task_sources: dict[str, list[str]] = {}
@@ -423,6 +432,31 @@ class OrchestratorV2:
         """明确产物型任务：跳过 LLM 规划，用确定性模板（生成→报告→打包），
         消除规划漂移并减少延迟。需要外部信息（调研/数据/分析）的任务不走此路径。"""
         g = goal.lower()
+        react_markers = ("多轮", "反复搜索", "迭代核对", "多次搜索", "需要反复", "react")
+        if any(m in g for m in react_markers):
+            # 多轮/反复搜索类任务 → 确定性路由到 react_agent（运行时 ReAct）
+            return [
+                {
+                    "step_id": "1",
+                    "capability": "react_agent",
+                    "instruction": (
+                        "多轮 ReAct 调研：根据中间结果反复调用工具（搜索/抓取/总结）"
+                        "核对不同来源，最终输出对比总结。目标："
+                        f"{goal[:500]}"
+                    ),
+                    "timeout": 600,
+                    "depends_on": [],
+                },
+                {
+                    "step_id": "2",
+                    "capability": "report_generator",
+                    "instruction": (
+                        f"汇总 ReAct 调研结果，生成最终交付报告（Markdown）。{goal[:300]}"
+                    ),
+                    "timeout": 180,
+                    "depends_on": ["1"],
+                },
+            ]
         deliver_markers = (
             "游戏", "脚本", "工具", "单文件", "html", ".py", "页面",
             "小应用", "贪吃蛇", "愤怒的小鸟", "计算器", "待办", "打砖块",

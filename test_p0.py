@@ -866,6 +866,68 @@ class TestP2ToolAudit(unittest.TestCase):
         finally:
             td.AUDIT_FILE = old
 
+
+class TestP2McpClient(unittest.TestCase):
+    def test_stdio_real_discovery(self):
+        import sys
+        import mcp_client
+
+        client = mcp_client.MCPClient(
+            name="test", command=sys.executable,
+            args=["mcp_lite.py", "--stdio"], timeout=20,
+        )
+        try:
+            client.initialize()
+            tools = client.list_tools()
+            names = {t["name"] for t in tools}
+            self.assertIn("web_search", names)
+            self.assertIn("react_agent", names)
+            self.assertGreaterEqual(len(tools), 11)
+        finally:
+            client.close()
+
+    def test_external_tool_routing(self):
+        import tempfile
+        from pathlib import Path
+        import mcp_client
+        import tool_dispatch as td
+
+        old_audit = td.AUDIT_FILE
+        td.AUDIT_FILE = Path(tempfile.mkdtemp(prefix="audit2_")) / "tool_audit.jsonl"
+
+        class FakeClient:
+            def call_tool(self, name, arguments):
+                return {"status": "SUCCESS", "result": "外部工具结果"}
+
+        mcp_client.EXTERNAL_TOOLS.clear()
+        mcp_client.EXTERNAL_TOOLS["third_party_api"] = {
+            "client": FakeClient(), "tool": {"description": "外部API"},
+        }
+        try:
+            res = td.dispatch_tool("third_party_api", "调用", task_id="t1")
+            self.assertEqual(res["status"], "SUCCESS")
+            self.assertIn("外部工具结果", str(res["result"]))
+            entries = td.recent_audit()
+            self.assertTrue(any(e["capability"] == "third_party_api" for e in entries))
+        finally:
+            td.AUDIT_FILE = old_audit
+            mcp_client.EXTERNAL_TOOLS.clear()
+
+
+class TestP2ReactRouting(unittest.TestCase):
+    def test_react_marker_routes_deterministic(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        plan = o._direct_deliverable_plan(
+            "多轮调研2026年AI芯片格局，需要反复搜索核对不同机构数据"
+        )
+        self.assertIsNotNone(plan)
+        self.assertEqual(plan[0]["capability"], "react_agent")
+        # 普通游戏任务不受影响
+        plan2 = o._direct_deliverable_plan("做一个贪吃蛇游戏")
+        self.assertEqual(plan2[0]["capability"], "code_execution")
+
     def test_execute_returns_results_via_bing(self):
         import json
         import sys
