@@ -331,7 +331,7 @@ class TestRunIteration(unittest.TestCase):
 
         o._execute_steps = fake_execute
 
-        def fake_reflect(goal, report, task_id, all_steps=None, completed_all=None, memory_context="", validator_summary=""):
+        def fake_reflect(goal, report, task_id, all_steps=None, completed_all=None, memory_context="", validator_summary="", eval_scores=""):
             if calls["n"] <= 1:
                 return {"accepted": False, "gaps": ["g"],
                         "next_steps": [{"step_id": "x", "capability": "content_summary",
@@ -356,7 +356,7 @@ class TestRunIteration(unittest.TestCase):
         )
         reflected = {"n": 0}
 
-        def fake_reflect(goal, report, task_id, all_steps=None, completed_all=None, memory_context="", validator_summary=""):
+        def fake_reflect(goal, report, task_id, all_steps=None, completed_all=None, memory_context="", validator_summary="", eval_scores=""):
             reflected["n"] += 1
             return {"accepted": False, "score": 8.0, "gaps": ["可优化"],
                     "next_steps": [{"step_id": "x", "capability": "content_summary",
@@ -380,7 +380,7 @@ class TestRunIteration(unittest.TestCase):
         o._execute_steps = fake_execute
         reflected = {"n": 0}
 
-        def fake_reflect(goal, report, task_id, all_steps=None, completed_all=None, memory_context="", validator_summary=""):
+        def fake_reflect(goal, report, task_id, all_steps=None, completed_all=None, memory_context="", validator_summary="", eval_scores=""):
             reflected["n"] += 1
             if reflected["n"] <= 2:
                 return {"accepted": False, "score": 4.0, "gaps": ["缺图"],
@@ -417,7 +417,7 @@ class TestRunIteration(unittest.TestCase):
         o._execute_steps = None  # 单步重做走 _dispatch_step_safe，不走整轮执行
         reflected = {"n": 0}
 
-        def fake_reflect(goal, report, task_id, all_steps, completed_all, memory_context="", validator_summary=""):
+        def fake_reflect(goal, report, task_id, all_steps, completed_all, memory_context="", validator_summary="", eval_scores=""):
             reflected["n"] += 1
             if reflected["n"] == 1:
                 return {"score": 4.0, "verdict": "retry_step",

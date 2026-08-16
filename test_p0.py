@@ -223,6 +223,54 @@ class TestP1Skills(unittest.TestCase):
         self.assertNotIn("[Skill: game-delivery]", steps[1]["instruction"])
         self.assertIn("[Skill: research-report]", steps[1]["instruction"])
 
+    def test_no_skill_for_unrelated_goal(self):
+        from skill_registry import match_skills
+
+        hits = match_skills("帮我整理桌面的临时文件", "file_io")
+        self.assertEqual(hits, [])
+
+    def test_lessons_record_and_read(self):
+        import tempfile
+        from pathlib import Path
+        import skill_registry
+
+        old = skill_registry.LESSONS_FILE
+        tmp = Path(tempfile.mkdtemp(prefix="wmskills_")) / "lessons.jsonl"
+        skill_registry.LESSONS_FILE = tmp
+        try:
+            skill_registry.record_lesson(
+                "t1", "做一个贪吃蛇游戏", "code_execution",
+                "HTML 无法打开", "必须内联 CSS/JS 并保存为 index.html",
+                skill_name="game-delivery",
+            )
+            lessons = skill_registry.get_lessons("game-delivery")
+            self.assertEqual(len(lessons), 1)
+            self.assertIn("HTML 无法打开", lessons[0]["issue"])
+            # 其他 skill 过滤不到
+            self.assertEqual(skill_registry.get_lessons("research-report"), [])
+        finally:
+            skill_registry.LESSONS_FILE = old
+
+
+class TestP1EvalGate(unittest.TestCase):
+    def test_match_case_and_gate(self):
+        from evals.drive import build_record, gate_passed, match_case
+
+        c = match_case("请分析2025年全球AI芯片市场并生成可视化报告")
+        self.assertIsNotNone(c)
+        self.assertEqual(c["id"], "rr-01")
+        rec = build_record(
+            "t1", "请分析2025年全球AI芯片市场并生成可视化报告", "报告文本",
+            {"s1": {"status": "SUCCESS", "result": json.dumps([
+                {"title": "AI芯片市场", "url": "https://a.com", "snippet": "1500亿美元"},
+            ])}},
+        )
+        self.assertEqual(rec["question"], "请分析2025年全球AI芯片市场并生成可视化报告")
+        self.assertTrue(rec["contexts"])
+        self.assertIn("来源", rec["ground_truth"])
+        self.assertTrue(gate_passed({"a": 0.9, "b": 0.8, "c": 0.7, "d": 0.6}))
+        self.assertFalse(gate_passed({"a": 0.5, "b": 0.5}))
+
 
 class TestP1Validators(unittest.TestCase):
     def test_builtin_validators_registered(self):

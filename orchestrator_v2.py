@@ -93,7 +93,8 @@ ITERATOR_SYSTEM = """你是严格的交付验收评审。你会获得【完整�
 输出严格JSON：
 {"score": 0-10, "verdict": "accept"|"stop"|"retry_step"|"add_steps",
  "retry_step_id": "步骤ID", "retry_reason": "缺陷原因与修复要求",
- "gaps": ["缺口"], "next_steps": [{"step_id":"1","capability":"...","instruction":"...","timeout":120}]}
+ "gaps": ["缺口"], "next_steps": [{"step_id":"1","capability":"...","instruction":"...","timeout":120}],
+ "memory_ops": [{"action": "remember"|"forget", "summary": "一句话经验", "key": "经验标识/目标"}]}
 next_steps 示例（instruction 必须自带 角色/受众/输出要求/验收标准 四要素）：
 {"step_id":"3","capability":"code_execution",
  "instruction":"【角色】资深全栈工程师。【受众】最终用户（需可玩）。【输出要求】自包含单文件 HTML，内联 CSS/JS。【质量标准】浏览器直接可玩、键盘可操控、有得分显示。实现：xxx",
@@ -108,7 +109,9 @@ next_steps 示例（instruction 必须自带 角色/受众/输出要求/验收�
 6. next_step 的 capability 只能是下列之一，且每步只能一个：
    web_search, web_fetch, data_loader, data_analyzer, model_trainer, report_generator, content_summary, code_execution, file_io, package
 7. retry_reason 与 next_steps 的 instruction 必须包含：角色、受众（按目标推断）、输出要求（结构化格式）、质量标准（可验证的验收点）
-8. 不要吹毛求疵、不要"锦上添花"；只有明确缺失用户要求的内容才继续反思
+8. memory_ops（主动记忆）：发现值得长期记住的有效方法/用户偏好时输出 remember（summary 一句话）；
+   发现已过时/错误经验时输出 forget（key 填该经验的标识或目标）。无则省略。
+9. 不要吹毛求疵、不要"锦上添花"；只有明确缺失用户要求的内容才继续反思
 只输出JSON。"""
 
 # ─────────────────────────────────────────────
@@ -802,6 +805,7 @@ class OrchestratorV2:
         self, goal: str, report: str, task_id: str,
         all_steps: list[dict], completed_all: dict,
         memory_context: str = "", validator_summary: str = "",
+        eval_scores: str = "",
     ) -> dict | None:
         """验收评审：基于【完整上下文】判断交付物是否达标。
         上下文含用户目标、检索到的私有知识、全部步骤及结果摘要、当前报告；
@@ -824,6 +828,8 @@ class OrchestratorV2:
         ctx_parts.append(f"Deliverable (report):\n{str(report)[:3000]}")
         if validator_summary:
             ctx_parts.append(validator_summary)
+        if eval_scores:
+            ctx_parts.append(f"自动评测分数（供参考）：\n{eval_scores}")
         prompt = "\n\n".join(ctx_parts)
         try:
             from prompt_registry import get_prompt
@@ -894,6 +900,19 @@ class OrchestratorV2:
         self, goal: str, task_id: str, key: str, issue: str, fix_prompt: str,
     ) -> None:
         """把反思对提示词的改动沉淀进进化系统 RAG。失败不影响任务主线。"""
+        # 失败教训写回 Skill（对标标准 3.8）：自动沉淀，供后续任务注入
+        if str(task_id or "").startswith("ui-"):
+            try:
+                from skill_registry import match_skills, record_lesson
+                _hits = match_skills(goal, key.replace("step:", ""))
+                record_lesson(
+                    task_id=task_id, goal=goal,
+                    capability=key.replace("step:", ""),
+                    issue=issue, fix=fix_prompt,
+                    skill_name=_hits[0]["name"] if _hits else "",
+                )
+            except Exception:
+                pass
         rec = getattr(self._memory, "add_prompt_refinement", None)
         if not callable(rec):
             return
@@ -2880,6 +2899,7 @@ print("charts generated")
         iteration = 0
         redo_rounds = 0
         skip_execute = False
+        gate_checked = False
         last_steps = steps
         last_results: list[dict] = []
         best_report = ""
@@ -2906,8 +2926,33 @@ print("charts generated")
             if simple:
                 # 简单任务：一轮执行即交付，由贯通测试守门，不做反射式追加迭代
                 break
+            # 评测驱动反思（对标标准 3.6）：先过评测闸门（每任务一次），
+            # 达标直接交付；未达标则覆盖"研究类跳过反思"，继续修正
+            _eval_scores = ""
+            _gate_failed = False
+            if not gate_checked:
+                gate_checked = True
+                try:
+                    from evals.drive import eval_gate, gate_passed
+                    _matched, _scores = eval_gate(
+                        task_id, goal, best_report, completed_all
+                    )
+                    if _matched and _scores:
+                        _eval_scores = "；".join(
+                            f"{k}={v:.2f}" for k, v in _scores.items()
+                        )
+                        if gate_passed(_scores):
+                            _avg = sum(_scores.values()) / max(1, len(_scores))
+                            push_progress(self._messaging, task_id, "log",
+                                          {"type": "iteration", "agent": "orchestrator",
+                                           "message": f"评测达标（avg={_avg:.2f}），直接交付",
+                                           "timestamp": self._now_iso()})
+                            break
+                        _gate_failed = True
+                except Exception as exc:
+                    logger.info("Eval gate skipped: %s", str(exc)[:120])
             # 报告/调研类任务：核心管道已产出报告（图表+来源已确定性嵌入）后直接交付，
-            # 反射轮只会追加"锦上添花"步骤拖慢任务（演示目标：时间可控）
+            # 反射轮只会追加"锦上添花"步骤拖慢任务；评测未达标时例外
             _goal_low = str(goal or "").lower()
             _research_hint = any(k in _goal_low for k in ("报告", "调研", "研报"))
             _has_search = any(
@@ -2918,9 +2963,7 @@ print("charts generated")
                 and completed_all.get(s["step_id"], {}).get("status") == "SUCCESS"
                 for s in all_steps
             )
-            # 仅"搜索型调研/报告"任务跳过反射轮（时间控制）；
-            # 数据管道等复杂任务仍走全上下文反思
-            if _research_hint and _report_done and _has_search:
+            if _research_hint and _report_done and _has_search and not _gate_failed:
                 push_progress(self._messaging, task_id, "log",
                               {"type": "info", "agent": "orchestrator",
                                "message": "Reflection: 报告类任务核心交付已完成，跳过反射轮",
@@ -2935,7 +2978,7 @@ print("charts generated")
                 _vsum = ""
             verdict = self._reflect(
                 goal, best_report, task_id, all_steps, completed_all,
-                memory_context, _vsum,
+                memory_context, _vsum, _eval_scores,
             )
             if not verdict:
                 break
@@ -2952,6 +2995,24 @@ print("charts generated")
                 verdict.get("verdict")
                 or ("accept" if verdict.get("accepted") else "add_steps")
             ).lower()
+            # 主动记忆（对标标准 3.4 agent_control）：执行反思输出的记/忘操作
+            for _op in (verdict.get("memory_ops") or [])[:3]:
+                try:
+                    _act = str(_op.get("action") or "")
+                    _mem = getattr(self, "_memory", None)
+                    if _act == "remember" and _op.get("summary") and _mem is not None:
+                        if hasattr(_mem, "add_note"):
+                            _mem.add_note(
+                                goal, str(_op["summary"])[:400],
+                                str(_op.get("key") or "")[:80],
+                            )
+                    elif _act == "forget" and _op.get("key") and _mem is not None:
+                        if hasattr(_mem, "delete_where") and hasattr(_mem, "_conversations"):
+                            _mem.delete_where(
+                                _mem._conversations, {"goal": str(_op["key"])[:200]}
+                            )
+                except Exception:
+                    pass
             if action in ("accept", "stop") or score >= self._reflection_accept_score:
                 push_progress(self._messaging, task_id, "log",
                               {"type": "info", "agent": "orchestrator",
@@ -3583,7 +3644,9 @@ print("charts generated")
         """Skill 渐进式披露：按目标/能力命中 skill，注入 description+质量标准+反模式
         （对标标准 3.5，只给标准不给全文工作流）。"""
         try:
-            from skill_registry import get_skill_standards, match_skills, skill_applies
+            from skill_registry import (
+                get_lessons, get_skill_standards, match_skills, skill_applies,
+            )
         except Exception:
             return steps
         for s in steps:
@@ -3605,6 +3668,12 @@ print("charts generated")
                 block += f"\n【质量标准】{std['standards']}"
             if std.get("antipatterns"):
                 block += f"\n【反模式】{std['antipatterns']}"
+            lessons = get_lessons(std["name"], limit=2)
+            if lessons:
+                block += "\n【历史教训（自动沉淀）】" + "；".join(
+                    f"{x.get('issue', '')}→{x.get('fix', '')[:120]}"
+                    for x in lessons
+                )
             s["instruction"] = f"{s['instruction']}\n\n{block}"
         return steps
 

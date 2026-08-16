@@ -32,6 +32,7 @@ frontend/tsconfig.tsbuildinfo
 .weavemind/
 poison_strategies.json
 prompts/overrides.json
+skills/lessons.jsonl
 
 # 编辑器 / 系统
 .vscode/

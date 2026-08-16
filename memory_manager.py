@@ -405,6 +405,23 @@ class MemoryManager:
         except Exception as exc:
             logger.warning("Failed to store strategy: %s", exc)
 
+    def add_note(self, goal: str, note: str, key: str = "") -> None:
+        """主动记忆（对标标准 3.4 agent_control）：反思/规划器决定记录的经验。"""
+        import uuid
+        try:
+            self._conversations.add(
+                documents=[f"主动经验：{note}"],
+                metadatas=[{
+                    "timestamp": _now_iso(),
+                    "goal": str(key or goal)[:200],
+                    "note": True,
+                }],
+                ids=[f"note-{_now_epoch()}-{uuid.uuid4().hex[:6]}"],
+            )
+            logger.info("Active memory note stored: %s", str(note)[:60])
+        except Exception as exc:
+            logger.warning("Failed to store active memory note: %s", str(exc)[:120])
+
     # ------------------------------------------------------------------
     # 内部
     # ------------------------------------------------------------------

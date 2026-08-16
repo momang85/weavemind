@@ -5,10 +5,14 @@
 - match_skills(goal) 按触发关键词命中，供 planner/步骤注入。
 """
 
+import json
 import re
+import time
+import uuid
 from pathlib import Path
 
 SKILLS_DIR = Path(__file__).resolve().parent / "skills"
+LESSONS_FILE = SKILLS_DIR / "lessons.jsonl"
 
 
 def _parse_frontmatter(text: str) -> tuple[dict, str]:
@@ -123,3 +127,48 @@ def skill_applies(name: str, capability: str) -> bool:
         return bool(s)
     applies = s.get("applies") or []
     return not applies or capability in applies
+
+
+def record_lesson(
+    task_id: str, goal: str, capability: str,
+    issue: str, fix: str, skill_name: str = "",
+) -> None:
+    """记录一条失败教训（对标标准 3.8 写回规则），失败不影响主线。"""
+    try:
+        LESSONS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        with open(LESSONS_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "id": uuid.uuid4().hex[:8],
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+                "task_id": str(task_id)[:40],
+                "goal": str(goal)[:300],
+                "capability": capability,
+                "skill": skill_name,
+                "issue": str(issue)[:300],
+                "fix": str(fix)[:500],
+            }, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def get_lessons(skill_name: str = "", limit: int = 3) -> list[dict]:
+    """读取最近的教训（可按 skill 过滤），供步骤注入。"""
+    if not LESSONS_FILE.exists():
+        return []
+    out = []
+    try:
+        for line in reversed(LESSONS_FILE.read_text(encoding="utf-8").splitlines()):
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if skill_name and rec.get("skill") and rec.get("skill") != skill_name:
+                continue
+            out.append(rec)
+            if len(out) >= limit:
+                break
+    except Exception:
+        return []
+    return out
