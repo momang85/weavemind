@@ -247,12 +247,26 @@ class MetricsCollector:
             latencies = [t.get("latency", 0) for t in self._recent_tasks
                          if isinstance(t.get("latency"), (int, float))]
             p95 = sorted(latencies)[int(len(latencies) * 0.95) - 1] if latencies else 0.0
+            search_health = {}
+            try:
+                r = redis.Redis(
+                    host=os.environ.get("REDIS_HOST", "localhost"),
+                    port=int(os.environ.get("REDIS_PORT", "6379")),
+                    decode_responses=True,
+                )
+                raw = r.get("search_engine_health")
+                if raw:
+                    import json as _json
+                    search_health = _json.loads(raw)
+            except Exception:
+                pass
             summary = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "total_tasks": self._total_tasks,
                 "failed_tasks": self._failed_tasks,
                 "success_rate": round(success_rate, 1),
                 "failure_rate": round(100 - success_rate, 1),
+                "search_health": search_health,
                 "avg_latency_sec": round(
                     sum(latencies) / len(latencies), 2
                 ) if latencies else 0.0,

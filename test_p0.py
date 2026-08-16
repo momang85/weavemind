@@ -899,6 +899,30 @@ class TestP2ToolAudit(unittest.TestCase):
             else:
                 sys.modules["ddgs"] = old
 
+    def test_health_snapshot_publish(self):
+        import json
+        import worker_base as wb
+
+        writes = {}
+
+        class FakeRedis:
+            def set(self, k, v, ex=None):
+                writes[k] = (v, ex)
+
+        class FakeMessaging:
+            redis = FakeRedis()
+
+        wb._ENGINE_HEALTH.clear()
+        wb._mark_engine("ddg", True)
+        wb._mark_engine("bing", False)
+        wb._publish_health_snapshot(FakeMessaging())
+        self.assertIn("search_engine_health", writes)
+        v, ex = writes["search_engine_health"]
+        self.assertEqual(ex, 120)
+        snap = json.loads(v)
+        self.assertIn("ddg", snap)
+        self.assertIn("bing", snap)
+
 
 if __name__ == "__main__":
     unittest.main()

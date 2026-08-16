@@ -330,9 +330,18 @@ def _system_status():
             llm_health = get_endpoint_health()
         except Exception:
             llm_health = {}
+        search_health = {}
+        if _redis_ready():
+            try:
+                raw = _new_redis().get("search_engine_health")
+                if raw:
+                    search_health = json.loads(raw)
+            except Exception:
+                pass
         return {
             "agents": agents,
             "llm_health": llm_health,
+            "search_health": search_health,
             "queues": queues,
             "tasks": {"total": total, "success": success, "today": today},
             "memory": memory,

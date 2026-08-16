@@ -27,6 +27,11 @@ _ENGINE_LOCK = threading.Lock()
 _ENGINE_FAIL_THRESHOLD = 2
 _ENGINE_COOLDOWN = float(os.environ.get("SEARCH_ENGINE_COOLDOWN", "120") or 120)
 _SEARCH_RETRY_BACKOFF = float(os.environ.get("SEARCH_RETRY_BACKOFF", "3") or 3)
+_SEARCH_HEALTH_PUB_INTERVAL = float(
+    os.environ.get("SEARCH_HEALTH_PUB_INTERVAL", "30") or 30
+)
+_SEARCH_HEALTH_PUB_STARTED = False
+_SEARCH_HEALTH_PUB_LOCK = threading.Lock()
 
 
 def _engine_healthy(name: str) -> bool:
@@ -59,6 +64,39 @@ def _mark_engine(name: str, ok: bool) -> None:
 def get_engine_health() -> dict:
     with _ENGINE_LOCK:
         return {k: dict(v) for k, v in _ENGINE_HEALTH.items()}
+
+
+def _publish_health_snapshot(messaging) -> None:
+    """把引擎健康快照写入 Redis（TTL 120s），供 web_ui / metrics 跨进程读取。"""
+    try:
+        r = getattr(messaging, "redis", None) or getattr(messaging, "_redis", None)
+        if r is None:
+            return
+        r.set(
+            "search_engine_health",
+            json.dumps(get_engine_health(), ensure_ascii=False),
+            ex=120,
+        )
+    except Exception:
+        pass
+
+
+def _publish_health_loop(messaging) -> None:
+    while True:
+        _publish_health_snapshot(messaging)
+        time.sleep(_SEARCH_HEALTH_PUB_INTERVAL)
+
+
+def ensure_health_publisher(messaging) -> None:
+    """幂等启动健康快照发布线程。"""
+    global _SEARCH_HEALTH_PUB_STARTED
+    with _SEARCH_HEALTH_PUB_LOCK:
+        if _SEARCH_HEALTH_PUB_STARTED:
+            return
+        _SEARCH_HEALTH_PUB_STARTED = True
+    threading.Thread(
+        target=_publish_health_loop, args=(messaging,), daemon=True
+    ).start()
 
 logger = logging.getLogger(__name__)
 
@@ -515,6 +553,7 @@ class SearchAgent(BaseWorker):
 
     def _load_active_strategy(self) -> None:
         """读取已部署策略并解析为过滤规则：排除词（黑名单）与优先词（排序加分）。"""
+        ensure_health_publisher(self._messaging)  # 幂等：启动健康快照发布线程
         self._strategy_max_sources = 5
         self._strategy_blocks = []
         self._strategy_boosts = []
