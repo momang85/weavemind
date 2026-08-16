@@ -19,6 +19,7 @@ _task_lock = threading.Lock()
 
 _events = []
 _events_lock = threading.Lock()
+_rate_limiter = None
 _START_TIME = time.time()
 _METRICS_SUMMARY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "metrics_summary.json")
 _STALE_AFTER_SECONDS = int(os.environ.get("STALE_TASK_TIMEOUT", "1800"))
@@ -29,6 +30,18 @@ _mem_stats_lock = threading.Lock()
 _EVOLUTION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "evolution_history.json")
 _evolution_results = []
 _evolution_lock = threading.Lock()
+
+
+def _get_rate_limiter():
+    """惰性初始化限流器（默认每 IP 10 次/分钟，可用环境变量调整）。"""
+    global _rate_limiter
+    if _rate_limiter is None:
+        from security import RateLimiter
+        _rate_limiter = RateLimiter(
+            limit=int(os.environ.get("RATE_LIMIT_PER_MIN", "10")),
+            window=60.0,
+        )
+    return _rate_limiter
 _memory_summary_cache = {"text": "", "ts": 0.0, "signature": ""}
 _TEMPLATES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates.json")
 
@@ -874,6 +887,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": f"run failed: {exc}"}, 500)
         if self.path == "/task":
             g = body.get("goal","").strip()
+            # 输入安全（对标 C4-4.4）：长度限制 + 注入检测 + 简单限流
+            from security import MAX_GOAL_LEN, RateLimiter, detect_injection, sanitize_goal
+            if len(g) > MAX_GOAL_LEN:
+                return self._json({"error": f"目标过长（>{MAX_GOAL_LEN} 字符），已拦截"}, 400)
+            bad, reason = detect_injection(g)
+            if bad:
+                return self._json({"error": f"输入疑似包含恶意注入（{reason}），已拦截"}, 400)
+            client_ip = self.client_address[0] if self.client_address else "?"
+            if not _get_rate_limiter().allow(client_ip):
+                return self._json({"error": "请求过于频繁，请稍后再试"}, 429)
+            g = sanitize_goal(g)
             # 模板：允许不传 goal，自动取模板目标与确定性步骤
             tpl_name = str(body.get("template") or "").strip()
             template_steps = None
@@ -893,6 +917,10 @@ class Handler(BaseHTTPRequestHandler):
             if is_new_conversation:
                 conv_id = "conv-" + uuid.uuid4().hex[:10]
             user_context = str(body.get("context") or "").strip()
+            if user_context:
+                bad, reason = detect_injection(user_context)
+                if bad:
+                    return self._json({"error": f"上下文疑似包含恶意注入（{reason}），已拦截"}, 400)
             conv_context = _build_conversation_context(conv_id) if not is_new_conversation else ""
             context = "\n\n".join(x for x in (user_context, conv_context) if x)
             if not parent_id and not is_new_conversation:
@@ -925,6 +953,7 @@ class Handler(BaseHTTPRequestHandler):
                 r.publish("orchestrator:main", json.dumps({
                     "task_id": tid, "goal": g, "context": context,
                     "auto_run": auto_run, "template_steps": template_steps,
+                    "user_id": str(body.get("user_id") or ""),
                 }, ensure_ascii=False))
             except Exception:
                 return self._json({"error": "Redis 发布失败，任务未派发"}, 503)

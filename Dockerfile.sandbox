@@ -1,0 +1,16 @@
+FROM python:3.12-slim
+
+# 沙箱镜像：仅用于 code_execution 隔离运行，禁止网络（docker run --network none）
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+
+# 复制依赖并预装（代码生成任务常用库；按需增删）
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt || true
+
+# 沙箱内不保留任何密钥
+ENV PYTHONDONTWRITEBYTECODE=1
+CMD ["python"]

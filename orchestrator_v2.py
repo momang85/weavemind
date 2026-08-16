@@ -137,6 +137,7 @@ class OrchestratorV2:
         self._task_sources: dict[str, list[str]] = {}
         self._task_goals: dict[str, str] = {}
         self._task_prompt_hints: dict[str, list[str]] = {}
+        self._task_user_ids: dict[str, str] = {}
         self._task_sources_lock = threading.Lock()
         self._task_starts_lock = threading.Lock()
         _cfg = {}
@@ -2741,7 +2742,8 @@ print("charts generated")
 
     # ── Main Loop ──
     def run(self, task_id: str, goal: str, context: str = "",
-            auto_run: bool = True, template_steps: list | None = None) -> dict:
+            auto_run: bool = True, template_steps: list | None = None,
+            user_id: str = "") -> dict:
         """Execute a full task lifecycle. Returns final status dict."""
         started = time.time()
         with self._task_starts_lock:
@@ -2749,6 +2751,9 @@ print("charts generated")
         if not hasattr(self, "_task_goals"):
             self._task_goals = {}
         self._task_goals[task_id] = goal
+        if not hasattr(self, "_task_user_ids"):
+            self._task_user_ids = {}
+        self._task_user_ids[task_id] = str(user_id or "")
         # 每任务独立成果文件夹：清空本项目目录与旧交付包，保证只含本次产物
         ensure_task_workspace(task_id)
         self._cleanup_project_workspace(task_id)
@@ -3183,7 +3188,7 @@ print("charts generated")
 
         def execute_step(step):
             step_start = time.time()
-            base_instr = self._inject_step_context(step, completed, lock)
+            base_instr = self._inject_step_context(step, completed, lock, task_id)
             if step.get("capability") in ("report_generator", "content_summary"):
                 # 注入前序搜索的数据来源 URL（任务级累计，跨迭代生效），
                 # 报告末尾自动生成"数据来源"附录
@@ -3435,7 +3440,9 @@ print("charts generated")
         has_failure = has_failure or any(r.get("status") != "SUCCESS" for r in results)
         return results, has_failure
 
-    def _inject_step_context(self, step: dict, completed: dict, lock: threading.Lock) -> str:
+    def _inject_step_context(
+        self, step: dict, completed: dict, lock: threading.Lock, task_id: str = "",
+    ) -> str:
         """按能力类型把前序步骤的输出注入指令（URL/路径/结果摘要）。"""
         instr = step.get('instruction', '')
         cap = step.get('capability', '')
@@ -3445,6 +3452,31 @@ print("charts generated")
             with lock:
                 prev = completed.get(dep_id)
             return prev.get('result', '') if isinstance(prev, dict) else ''
+
+        def _safe(text: str) -> str:
+            """上一步结果可能来自外部网页，进指令前做注入检测（对标 C4-4.4）。"""
+            try:
+                from security import detect_injection
+                bad, reason = detect_injection(text)
+                if bad:
+                    return f"[已过滤可疑内容：{reason}]"
+            except Exception:
+                pass
+            return text
+
+        def _filter_role(text: str) -> str:
+            """按任务用户职位过滤注入片段（仅过滤带 [kb:...] 标记的受控内容）。"""
+            uid = (getattr(self, "_task_user_ids", {}) or {}).get(task_id, "")
+            if not uid:
+                return text
+            try:
+                if not hasattr(self, "_kb_ctrl"):
+                    from kb_access_control import KbAccessControl
+                    self._kb_ctrl = KbAccessControl()
+                kept = self._kb_ctrl.filter_contents(uid, [text])
+                return kept[0] if kept else "[无权限访问该知识片段，已过滤]"
+            except Exception:
+                return text
 
         if cap in ('data_loader', 'web_fetch'):
             for dep_id in deps:
@@ -3487,14 +3519,14 @@ print("charts generated")
                 prev_res = _prev(dep_id)
                 snippet = str(prev_res)[:12000] if prev_res else ''
                 if snippet:
-                    instr += f"\n[上一步结果 {dep_id}]:\n{snippet}"
+                    instr += f"\n[上一步结果 {dep_id}]:\n{_filter_role(_safe(snippet))}"
 
         if cap in ('content_summary', 'report_generator'):
             for dep_id in deps:
                 prev_res = _prev(dep_id)
                 snippet = str(prev_res)[:2500] if prev_res else ''
                 if snippet:
-                    instr += f"\n[上一步结果 {dep_id}]:\n{snippet}"
+                    instr += f"\n[上一步结果 {dep_id}]:\n{_filter_role(_safe(snippet))}"
                 # 读取产物文件（如 code_execution 落盘的 HTML/代码），给报告真实素材
                 try:
                     parsed = json.loads(prev_res) if isinstance(prev_res, str) else prev_res
@@ -3646,9 +3678,11 @@ def main():
                 continue
 
             # Run task in background thread
-            def _run_task(tid, g, ctx, ar, tpl_steps):
+            def _run_task(tid, g, ctx, ar, tpl_steps, uid):
                 try:
-                    result = orch.run(tid, g, ctx, auto_run=ar, template_steps=tpl_steps)
+                    result = orch.run(
+                        tid, g, ctx, auto_run=ar, template_steps=tpl_steps, user_id=uid
+                    )
                     orch._messaging.publish("orchestrator:response", result)
                 except Exception as e:
                     logger.error("Task %s failed: %s", tid, e)
@@ -3656,7 +3690,10 @@ def main():
                                             {"task_id": tid, "status": "FAILED", "report": str(e)})
             threading.Thread(
                 target=_run_task,
-                args=(task_id, goal, context, auto_run, data.get("template_steps")),
+                args=(
+                    task_id, goal, context, auto_run,
+                    data.get("template_steps"), data.get("user_id", ""),
+                ),
                 daemon=True,
             ).start()
 

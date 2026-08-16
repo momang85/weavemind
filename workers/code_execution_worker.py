@@ -357,12 +357,9 @@ class CodeExecutionWorker(AsyncWorkerBase):
         tmp = self.workspace / f"_smoke_{int(time.time() * 1000)}.py"
         tmp.write_text(candidate, encoding="utf-8")
         try:
-            proc = await asyncio.create_subprocess_exec(
-                sys.executable, str(tmp),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=str(self.workspace),
-                env=self._clean_env(),
+            from code_sandbox import run_script_async
+            proc, _ = await run_script_async(
+                str(tmp), str(self.workspace), env=self._clean_env()
             )
             try:
                 out, err = await asyncio.wait_for(proc.communicate(), timeout=30)
@@ -545,12 +542,9 @@ class CodeExecutionWorker(AsyncWorkerBase):
                     impl_path = self.workspace / target_name
                     impl_path.write_text(candidate, encoding="utf-8")
                     try:
-                        proc = await asyncio.create_subprocess_exec(
-                            sys.executable, str(test_path),
-                            stdout=asyncio.subprocess.PIPE,
-                            stderr=asyncio.subprocess.PIPE,
-                            cwd=str(self.workspace),
-                            env=self._clean_env(),
+                        from code_sandbox import run_script_async
+                        proc, _ = await run_script_async(
+                            str(test_path), str(self.workspace), env=self._clean_env()
                         )
                         out, err = await asyncio.wait_for(proc.communicate(), timeout=60)
                     except asyncio.TimeoutError:
@@ -645,13 +639,9 @@ class CodeExecutionWorker(AsyncWorkerBase):
                 # 运行失败若是缺模块，自动 pip 安装后重跑一次（最多 2 次运行）
                 last_err = ""
                 for _run_attempt in range(2):
-                    proc = await asyncio.create_subprocess_exec(
-                        sys.executable,
-                        str(path),
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                        cwd=str(self.workspace),
-                        env=self._clean_env(),
+                    from code_sandbox import run_script_async
+                    proc, _ = await run_script_async(
+                        str(path), str(self.workspace), env=self._clean_env()
                     )
                     try:
                         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=120)

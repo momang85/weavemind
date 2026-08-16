@@ -1,0 +1,21 @@
+{
+  "type": "file_operation",
+  "description": "文件操作类：读写/整理成果，路径正确、内容完整",
+  "cases": [
+    {
+      "id": "fo-01",
+      "goal": "把项目成果整理为一个可交付文件夹：README.md 说明、代码文件、报告，并打包为zip",
+      "expected_deliverable": "zip 交付包，含 README + 代码 + 报告",
+      "ground_truth_points": [
+        "zip 内包含 README.md",
+        "zip 内包含代码文件（.py/.html）",
+        "zip 内包含报告（.md）",
+        "文件均属于本次任务，不混入历史产物"
+      ],
+      "rubric": {
+        "完整性": "三类文件齐全",
+        "隔离性": "不含其他任务遗留文件"
+      }
+    }
+  ]
+}
