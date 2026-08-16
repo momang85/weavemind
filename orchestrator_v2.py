@@ -320,6 +320,12 @@ class OrchestratorV2:
             )
         if memory_context:
             prompt = f"{prompt}\n\nRelevant past experience:\n{memory_context}\n\nGenerate a plan."
+        # 工具目录（对标 3.1 FC 工具定义）：让规划器基于能力描述选择工具
+        try:
+            from tool_contracts import tool_catalog_text
+            prompt = f"{prompt}\n\n{tool_catalog_text()}"
+        except Exception:
+            pass
 
         plan_data = None
         last_error = None
@@ -3815,14 +3821,24 @@ print("charts generated")
         """派发单步：失败自动重试，重试仍失败则尝试单步重规划。"""
         result = self._dispatch(step, task_id)
         attempt = 0
-        while result.get("status") == "FAILED" and attempt < self._max_retry:
+        # 输出契约校验（对标 3.1 引导-校验-重试）：契约不通过视为失败，
+        # 并把校验错误喂回指令重试，而不是盲目重发
+        issue = self._contract_issue(step, result)
+        while (result.get("status") == "FAILED" or issue) and attempt < self._max_retry:
             attempt += 1
             push_progress(self._messaging, task_id, "log",
                           {"type": "retry", "agent": step.get("capability", "?"),
                            "message": f"Step {step.get('step_id')} retry {attempt}/{self._max_retry}",
                            "timestamp": self._now_iso()})
             time.sleep(2)
-            result = self._dispatch(step, task_id)
+            amended = dict(step)
+            if issue:
+                amended["instruction"] = (
+                    f"{step.get('instruction', '')}\n\n"
+                    f"【输出契约校验失败】{issue}，请修正输出格式后重新执行。"
+                )
+            result = self._dispatch(amended, task_id)
+            issue = self._contract_issue(amended, result)
         if result.get("status") == "FAILED" and state["replan_used"] < self._replan_depth:
             alt = self._replan_step(goal, step, result.get("result", ""), task_id)
             if alt:
@@ -3831,8 +3847,19 @@ print("charts generated")
                 if alt_result.get("status") == "SUCCESS":
                     alt_result["replanned"] = True
                     alt_result["replan_instruction"] = alt.get("instruction", "")
-                    result = alt_result
+                result = alt_result
         return result
+
+    def _contract_issue(self, step: dict, result: dict) -> str:
+        """按能力返回契约校验步骤结果；返回问题文本（空串=通过）。"""
+        try:
+            from tool_contracts import validate_result
+            ok, issues = validate_result(
+                step.get("capability"), result.get("result")
+            )
+            return "；".join(issues) if not ok else ""
+        except Exception:
+            return ""
 
     def _push_realtime_state(self, task_id: str, goal: str, steps: list[dict], completed: dict) -> None:
         """步骤完成后推送当前全量状态（前端实时展示）。"""

@@ -680,5 +680,58 @@ class TestP2ConfigHotReload(unittest.TestCase):
                 pass
 
 
+class TestP2ToolContracts(unittest.TestCase):
+    def test_validate_web_search(self):
+        from tool_contracts import validate_result
+
+        ok, issues = validate_result("web_search", '[{"title": "t", "url": "https://a.com", "snippet": "s"}]')
+        self.assertTrue(ok, issues)
+        ok2, _ = validate_result("web_search", "[]")
+        self.assertFalse(ok2)
+        ok3, issues3 = validate_result("web_search", '[{"title": "t", "snippet": "s"}]')
+        self.assertFalse(ok3)
+        self.assertTrue(any("url" in i for i in issues3))
+
+    def test_validate_others(self):
+        from tool_contracts import validate_result
+
+        self.assertFalse(validate_result("model_trainer", '{"status": "success"}')[0])
+        self.assertTrue(validate_result(
+            "model_trainer", '{"status": "success", "models": {"RF": {"RMSE": 1, "R2": 0.9}}}'
+        )[0])
+        self.assertFalse(validate_result("content_summary", "短")[0])
+        self.assertFalse(validate_result("package", "打包完成")[0])
+        self.assertTrue(validate_result("package", "Download: file:///tmp/x.zip")[0])
+
+    def test_tool_catalog_text(self):
+        from tool_contracts import tool_catalog_text
+
+        txt = tool_catalog_text()
+        for name in ("web_search", "web_fetch", "code_execution", "report_generator"):
+            self.assertIn(name, txt)
+
+    def test_contract_retry_amends_instruction(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._max_retry = 1
+        o._replan_depth = 0
+        o._messaging = _FakeMessaging()
+        attempts = []
+
+        def fake(step, tid):
+            attempts.append(str(step.get("instruction", "")))
+            return {"task_id": "1", "status": "SUCCESS", "result": "[]"}
+
+        o._dispatch = fake
+        res = o._dispatch_step_safe(
+            "目标", {"step_id": "1", "capability": "web_search", "instruction": "搜索"},
+            "t1", {"replan_used": 0},
+        )
+        self.assertEqual(len(attempts), 2)
+        self.assertIn("【输出契约校验失败】", attempts[1])
+        self.assertIn("返回空列表", attempts[1])
+
+
 if __name__ == "__main__":
     unittest.main()
