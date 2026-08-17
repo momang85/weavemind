@@ -78,6 +78,24 @@ _CHIP_TERMS = (
     "芯片", "半导体", "gpu", "asic", "fpga", "加速器", "处理器",
     "npu", "tpu", "算力", "晶圆",
 )
+
+# 通用垃圾源识别（博彩/娱乐导航/下载站/假页；纵深防御，不只针对恒大）
+_SPAM_DOMAINS = (
+    "susmeat.com", "aydvjch.cc", "example.com", "imty-web.com",
+    "zhxsg.com", "mmzx2.cn", "ng28gaming.com", "online-28quan.com",
+    "28quan.com", "365qp", "88qp",
+)
+_JUNK_URL_PATTERNS = (
+    r"/works/\d+\.html",
+    r"/tiyu-toutiao/",
+    r"/login|/register|/agent",
+)
+_GAMBLING_KEYWORDS = (
+    "博彩", "六合彩", "彩票", "投注", "下注", "返水", "棋牌", "电玩",
+    "真人视讯", "娱乐城", "时时彩", "开户送", "注册送", "秒到账",
+    "提现", "抢庄", "龙虎", "牛牛", "百家乐", "老虎机", "赌场",
+    "casino", "lottery", "bet365", "betting", "gambling",
+)
 _SHARE_PATTERNS = (
     re.compile(
         r"(?P<subject>[\w\u4e00-\u9fff]{1,12}?)(?:占据|占有|占)"
@@ -413,9 +431,21 @@ def _doc_text(d: dict) -> str:
     return str(d.get("title") or "") + " " + str(d.get("snippet") or "")
 
 
+def _is_garbage_doc(d: dict) -> bool:
+    url = str(d.get("url") or "").lower()
+    text = _doc_text(d).lower()
+    if any(dom in url for dom in _SPAM_DOMAINS):
+        return True
+    if any(re.search(p, url) for p in _JUNK_URL_PATTERNS):
+        return True
+    if any(k in text for k in _GAMBLING_KEYWORDS):
+        return True
+    return False
+
+
 def clean_and_structure(items: list[dict]) -> dict:
     """把原始检索结果清洗为结构化图表数据（广谱扫描四类规则 + 截断记录）。"""
-    docs = _docs(items)
+    docs = [d for d in _docs(items) if not _is_garbage_doc(d)]
     entity_freq = Counter()
     market: list[dict] = []
     shares: list[dict] = []
@@ -471,9 +501,7 @@ def clean_and_structure(items: list[dict]) -> dict:
     trends = _dedupe_rows(trends)
     notes = _dedupe_notes(notes)
     domains = Counter()
-    for d in items:
-        if not isinstance(d, dict):
-            continue
+    for d in docs:
         m = re.match(r"https?://([^/]+)", str(d.get("url") or ""))
         if m:
             domains[m.group(1).replace("www.", "")] += 1

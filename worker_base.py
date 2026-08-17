@@ -523,7 +523,23 @@ class BaseWorker(ABC):
 class SearchAgent(BaseWorker):
     """Real web search agent using DuckDuckGo (free, no API key)."""
 
-    _SPAM_DOMAINS = ("susmeat.com", "aydvjch.cc", "example.com")
+    # 通用垃圾域名/URL 特征（博彩、娱乐导航、下载站、爬虫假页等，不只针对恒大）
+    _SPAM_DOMAINS = (
+        "susmeat.com", "aydvjch.cc", "example.com", "imty-web.com",
+        "zhxsg.com", "mmzx2.cn", "ng28gaming.com", "online-28quan.com",
+        "28quan.com", "365qp", "88qp", "h888", "ky777", "lywl",
+    )
+    _JUNK_URL_PATTERNS = (
+        r"/works/\d+\.html",      # 博彩/短视频垃圾站的典型路径
+        r"/tiyu-toutiao/",        # 借"体育头条"外衣的博彩页
+        r"/login|/register|/agent",  # 博彩代理/注册页
+    )
+    _GAMBLING_KEYWORDS = (
+        "博彩", "六合彩", "彩票", "投注", "下注", "返水", "棋牌", "电玩",
+        "真人视讯", "娱乐城", "时时彩", "开户送", "注册送", "秒到账",
+        "提现", "抢庄", "龙虎", "牛牛", "百家乐", "老虎机", "赌场",
+        "casino", "lottery", "bet365", "betting", "gambling",
+    )
     _JUNK_TITLES = ("google", "bing", "microsoft", "登录", "403", "404")
     _ZH_STOP = {
         "一个", "我们", "你们", "他们", "完成", "输出", "生成", "要求",
@@ -692,6 +708,9 @@ class SearchAgent(BaseWorker):
             snip = str(r.get("snippet") or "")
             if not title or not url or not url.startswith("http"):
                 continue
+            if self._is_garbage_result(title, url, snip):
+                logger.info("Search result filtered as garbage: %s | %s", title[:40], url[:60])
+                continue
             if any(d in url for d in self._SPAM_DOMAINS):
                 continue
             if title.lower().strip() in self._JUNK_TITLES:
@@ -720,6 +739,29 @@ class SearchAgent(BaseWorker):
             kept.append((score, r))
         kept.sort(key=lambda x: -x[0])
         return [r for _, r in kept]
+
+    @staticmethod
+    def _is_garbage_result(title: str, url: str, snip: str = "") -> bool:
+        """通用垃圾识别：博彩/娱乐导航/下载站/假页。
+        域名特征 + URL 路径特征 + 标题/摘要博彩词，任一命中即剔除。"""
+        import re as _re
+
+        u = str(url or "").lower()
+        t = str(title or "").lower()
+        s = str(snip or "").lower()
+        for pat in SearchAgent._JUNK_URL_PATTERNS:
+            if _re.search(pat, u):
+                return True
+        if any(d in u for d in SearchAgent._SPAM_DOMAINS):
+            return True
+        hay = t + " " + s
+        if any(k in hay for k in SearchAgent._GAMBLING_KEYWORDS):
+            return True
+        # 假页/空页
+        if any(m in hay for m in ("404 not found", "page not found", "无法访问该页面",
+                                  "页面不存在", "您访问的页面不存在")):
+            return True
+        return False
 
     def _search_bing(self, query: str) -> list[dict]:
         """备用搜索源：Bing HTML 结果解析（无需 API Key）。"""

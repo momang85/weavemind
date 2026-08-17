@@ -161,6 +161,35 @@ def _probe_endpoint(base_url: str, api_key: str, model: str) -> bool:
         return False
 
 
+def endpoints_available() -> tuple[bool, str]:
+    """返回 (是否可用, 消息)。仅当主/备用都已被判定不健康时才做一次真实探测。
+    供编排器在任务开始前做 LLM 健康预检：不可用 → 终止任务并向前端弹警告。"""
+    _ensure_cfg_fresh()
+    with _endpoint_health_lock:
+        ph = _endpoint_health.get("primary", {}).get("healthy", True)
+        bh = (
+            _endpoint_health.get("backup", {}).get("healthy", True)
+            if _BACKUP_CFG.get("base_url") else False
+        )
+    if ph or bh:
+        return True, ""
+    # 双端点标记不健康 → 真实探测备用端点（极短请求）
+    if _BACKUP_CFG.get("base_url"):
+        ok = _probe_endpoint(
+            _BACKUP_CFG.get("base_url", ""),
+            _BACKUP_CFG.get("api_key", ""),
+            _BACKUP_CFG.get("model") or "gpt-4o",
+        )
+        _mark_endpoint("backup", ok)
+        if ok:
+            return True, ""
+        return False, (
+            "LLM 端点不可用：主端点和备用端点均调用失败"
+            "（可能余额不足/密钥失效或无响应）。请检查前端 API 设置后重试。"
+        )
+    return False, "LLM 主端点不可用且未配置备用端点，请检查前端 API 设置后重试。"
+
+
 def _health_monitor_loop(interval: float = 60.0) -> None:
     """后台守护：主端点不健康时持续探测，恢复后自动切回。"""
     while True:
@@ -296,12 +325,60 @@ class LLMEmptyResponseError(LLMCallError):
     pass
 
 
+class LLMUnavailableError(LLMCallError):
+    """主/备用端点均不可用（余额不足、鉴权失败或无响应）——任务应终止并弹警告，
+    而不是带着死端点空转十几分钟。"""
+
+    pass
+
+
 def _loads_loose(text: str) -> dict | list:
     """先严格解析，失败后允许字符串内未转义控制字符（LLM 常在长指令中插入字面换行）。"""
     try:
         return json.loads(text)
     except json.JSONDecodeError:
         return json.loads(text, strict=False)
+
+
+def _parse_json_content(raw: str) -> dict[str, Any]:
+    """模块级 JSON 解析（async 路径使用）：兼容 markdown 代码块与前后缀文本。"""
+    try:
+        result = _loads_loose(raw)
+        if isinstance(result, dict):
+            return result
+        if isinstance(result, list):
+            return {"items": result}
+    except json.JSONDecodeError:
+        pass
+    m = re.search(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", raw, re.DOTALL)
+    if m:
+        try:
+            result = _loads_loose(m.group(1))
+            if isinstance(result, dict):
+                return result
+            if isinstance(result, list):
+                return {"items": result}
+        except json.JSONDecodeError:
+            pass
+    start = raw.find("{")
+    end = raw.rfind("}")
+    if start != -1 and end > start:
+        try:
+            return _loads_loose(raw[start:end + 1])
+        except json.JSONDecodeError:
+            pass
+    start = raw.find("[")
+    end = raw.rfind("]")
+    if start != -1 and end > start:
+        try:
+            result = _loads_loose(raw[start:end + 1])
+            if isinstance(result, list):
+                return {"items": result}
+        except json.JSONDecodeError:
+            pass
+    raise LLMJSONParseError(
+        f"Failed to parse LLM response as JSON. Raw: {raw[:500]}..."
+    )
 
 
 # ============================================================================
@@ -847,6 +924,14 @@ async def call_llm_async(
     # Let the prompt ask for JSON instead
 
     last_error = None
+    # 健康路由（O-29 同 sync 路径）：主端点已被判定不健康 → 优先走备用
+    if not _primary_healthy():
+        try:
+            return await _async_call_backup(payload, model, expect_json)
+        except LLMJSONParseError:
+            raise
+        except Exception as exc:
+            logger.warning("Health-routed async backup failed: %s", str(exc)[:150])
 
     for attempt in range(1, max_attempts + 1):
         try:
@@ -865,7 +950,9 @@ async def call_llm_async(
 
             content = data['choices'][0]['message']['content']
             if content is None or not str(content).strip():
+                _mark_endpoint("primary", False)  # 空响应视为端点故障信号
                 raise LLMEmptyResponseError("Empty content in LLM response")
+            _mark_endpoint("primary", True)
             if expect_json:
                 return _parse_json_content(content)
             return content
@@ -878,6 +965,7 @@ async def call_llm_async(
 
         except httpx.HTTPStatusError as exc:
             last_error = exc
+            _mark_endpoint("primary", False)
             if exc.response.status_code == 429:
                 backoff = min(2 ** attempt, 30)
                 logger.warning('LLM async rate limited (429), retry %d/%d in %ds', attempt, max_attempts, backoff)
@@ -887,10 +975,17 @@ async def call_llm_async(
                 logger.warning('LLM async server error, retry %d/%d', attempt, max_attempts)
                 await asyncio.sleep(1)
                 continue
+            if exc.response.status_code in (401, 402, 403):
+                # 鉴权/余额错误：重试无意义，直接切备用端点
+                last_error = LLMCallError(
+                    f"主端点鉴权/余额错误 HTTP {exc.response.status_code}"
+                )
+                break
             raise LLMCallError(f'LLM HTTP {exc.response.status_code}')
 
         except (httpx.TimeoutException, httpx.ConnectError) as exc:
             last_error = exc
+            _mark_endpoint("primary", False)
             logger.warning('LLM async timeout/connect, retry %d/%d', attempt, max_attempts)
             await asyncio.sleep(1)
             continue
@@ -898,33 +993,53 @@ async def call_llm_async(
     # 主端点失败 → 备用端点/模型（单次尝试）
     if _BACKUP_CFG and _BACKUP_CFG.get("base_url") and _BACKUP_CFG.get("api_key"):
         try:
-            client = _get_async_client()
-            url = _BACKUP_CFG["base_url"].rstrip("/") + "/chat/completions"
-            b_headers = {
-                "Authorization": f"Bearer {_BACKUP_CFG.get('api_key', '')}",
-                "Content-Type": "application/json",
-            }
-            b_payload = dict(payload)
-            b_payload["model"] = _BACKUP_CFG.get("model") or model
-            response = await client.post(url, json=b_payload, headers=b_headers)
-            response.raise_for_status()
-            data = response.json()
-            usage = data.get("usage") or {}
-            _record_usage(
-                usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
-                model=self.model,
-            )
-            _publish_usage_snapshot()
-            content = data["choices"][0]["message"]["content"]
-            if content is None or not str(content).strip():
-                raise LLMEmptyResponseError("Backup LLM returned empty content")
-            logger.warning("Switched to backup LLM (async): %s", _BACKUP_CFG.get("base_url"))
-            if expect_json:
-                return _parse_json_content(content)
-            return content
+            return await _async_call_backup(payload, model, expect_json)
         except Exception as exc:
             logger.error("Backup LLM async also failed: %s", str(exc)[:150])
     raise LLMCallError(f'LLM async call failed after {max_attempts} attempts') from last_error
+
+
+async def _async_call_backup(payload: dict, fallback_model: str, expect_json: bool):
+    """调用备用端点（async），标记健康状态，带清晰日志。"""
+    client = _get_async_client()
+    url = _BACKUP_CFG["base_url"].rstrip("/") + "/chat/completions"
+    b_headers = {
+        "Authorization": f"Bearer {_BACKUP_CFG.get('api_key', '')}",
+        "Content-Type": "application/json",
+    }
+    b_payload = dict(payload)
+    b_payload["model"] = _BACKUP_CFG.get("model") or fallback_model
+    try:
+        response = await client.post(url, json=b_payload, headers=b_headers)
+    except Exception as exc:
+        _mark_endpoint("backup", False)
+        raise
+    if response.status_code in (401, 402, 403):
+        _mark_endpoint("backup", False)
+        raise LLMCallError(
+            f"备用端点鉴权/余额错误 HTTP {response.status_code}"
+        )
+    try:
+        response.raise_for_status()
+        data = response.json()
+    except Exception as exc:
+        _mark_endpoint("backup", False)
+        raise
+    usage = data.get("usage") or {}
+    _record_usage(
+        usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
+        model=b_payload["model"],
+    )
+    _publish_usage_snapshot()
+    content = data["choices"][0]["message"]["content"]
+    if content is None or not str(content).strip():
+        _mark_endpoint("backup", False)
+        raise LLMEmptyResponseError("Backup LLM returned empty content")
+    _mark_endpoint("backup", True)
+    logger.warning("Switched to backup LLM (async): %s", _BACKUP_CFG.get("base_url"))
+    if expect_json:
+        return _parse_json_content(content)
+    return content
 
 
 async def close_async_client():

@@ -1237,6 +1237,125 @@ class TestReportCleanup(unittest.TestCase):
         self.assertNotIn("德勤", out)
         self.assertIn("Gartner", out)
 
+    def test_clean_fallback_content_strips_remnants(self):
+        """fallback 内容应剥离角色/指令残留与过程噪音。"""
+        from workers.report_generator_worker import ReportGeneratorWorker
+
+        w = ReportGeneratorWorker.__new__(ReportGeneratorWorker)
+        dirty = (
+            "ReAct 达到最大轮数仍未收敛；请重试或细化目标。\n"
+            "[指令] 仅使用与任务目标主题直接相关的信息\n"
+            "【角色】专业报告撰写者。\n【受众】决策层。\n"
+            "[数据来源]\n- https://garbage.example/1\n"
+            "用户目标：xxx\n\n真实研究内容：恒大集团2021年陷入债务危机。"
+        )
+        out = w._clean_fallback_content(dirty)
+        self.assertNotIn("ReAct", out)
+        self.assertNotIn("【角色】", out)
+        self.assertNotIn("[指令]", out)
+        self.assertNotIn("garbage.example", out)
+        self.assertIn("真实研究内容", out)
+
+
+class TestP0Robustness(unittest.TestCase):
+    def test_endpoints_available_aborts_when_both_down(self):
+        """双端点均不可用时 endpoints_available 返回 (False, 警告消息)。"""
+        import llm_client
+
+        old_health = dict(llm_client._endpoint_health)
+        old_backup = dict(llm_client._BACKUP_CFG)
+        old_probe = llm_client._probe_endpoint
+        llm_client._BACKUP_CFG = {"base_url": "https://fake/v1", "api_key": "k", "model": "m"}
+        llm_client._endpoint_health = {
+            "primary": {"healthy": False, "fails": 2},
+            "backup": {"healthy": False, "fails": 2},
+        }
+        llm_client._probe_endpoint = lambda *a, **k: False
+        try:
+            ok, msg = llm_client.endpoints_available()
+            self.assertFalse(ok)
+            self.assertIn("端点不可用", msg)
+            self.assertIn("API 设置", msg)
+        finally:
+            llm_client._endpoint_health = old_health
+            llm_client._BACKUP_CFG = old_backup
+            llm_client._probe_endpoint = old_probe
+
+    def test_endpoints_available_ok_when_primary_healthy(self):
+        import llm_client
+
+        old_health = dict(llm_client._endpoint_health)
+        llm_client._endpoint_health = {
+            "primary": {"healthy": True, "fails": 0},
+            "backup": {"healthy": True, "fails": 0},
+        }
+        try:
+            ok, msg = llm_client.endpoints_available()
+            self.assertTrue(ok)
+            self.assertEqual(msg, "")
+        finally:
+            llm_client._endpoint_health = old_health
+
+    def test_search_garbage_filter(self):
+        """通用垃圾识别：博彩域名/URL 路径/标题关键词命中即剔除。"""
+        from worker_base import SearchAgent
+
+        self.assertTrue(SearchAgent._is_garbage_result(
+            "博彩开户", "https://imty-web.com/works/206.html", "注册送"))
+        self.assertTrue(SearchAgent._is_garbage_result(
+            "六合彩", "https://zh-han-ng28gaming.com/works/76.html", ""))
+        self.assertTrue(SearchAgent._is_garbage_result(
+            "平台", "https://online-28quan.com/works/820.html", "秒到账"))
+        self.assertFalse(SearchAgent._is_garbage_result(
+            "恒大集团发展史", "https://www.sohu.com/a/733071008_121687419",
+            "2021年恒大陷入财务危机"))
+        self.assertFalse(SearchAgent._is_garbage_result(
+            "2026全球AI芯片市场", "https://www.toutiao.com/article/7598856172654428687/",
+            "市场规模预计达2800亿美元"))
+
+    def test_clean_data_filters_garbage_docs(self):
+        """search_results 里的博彩垃圾文档不应进入实体/来源统计。"""
+        from clean_data import clean_and_structure
+
+        items = [
+            {"title": "平台开户", "url": "https://zh-han-ng28gaming.com/works/76.html",
+             "snippet": "注册送体验金秒到账，真人视讯棋牌娱乐"},
+            {"title": "恒大集团的发展史", "url": "https://www.sohu.com/a/733071008_121687419",
+             "snippet": "2021年恒大集团陷入财务危机，面临巨大的债务压力"},
+        ]
+        clean = clean_and_structure(items)
+        self.assertNotIn("zh-han-ng28gaming.com", clean["source_distribution"])
+        # 垃圾文档内容不得泄漏进热词/笔记/市场数据
+        self.assertFalse(any("真人视讯" in str(v) for v in clean["topic_terms"]))
+        self.assertFalse(any("真人视讯" in str(n) for n in clean["notes"]))
+        self.assertTrue(all("gaming.com" not in str(m.get("source")) for m in clean["market_data"]))
+
+    def test_planner_no_web_scrape_code(self):
+        """财报/研报类任务的 code_execution 抓网页步骤应被改写。"""
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._messaging = None  # push_progress 会安全吞掉异常
+        steps = [
+            {"step_id": "1", "capability": "web_search", "instruction": "搜索恒大财报"},
+            {"step_id": "2", "capability": "code_execution",
+             "instruction": "用 requests 抓取 https://www.sohu.com/a/733071008_121687419 并解析财报"},
+            {"step_id": "3", "capability": "code_execution",
+             "instruction": "用 pandas 计算本地 CSV 的营收同比"},
+        ]
+        out = o._enforce_no_web_scrape_code(
+            steps, "搜索并总结恒大集团的发展历程和现状，解析当年财报", "t-x")
+        caps = {s.get("step_id"): s.get("capability") for s in out}
+        self.assertEqual(caps["2"], "web_fetch")   # 含 URL → web_fetch
+        self.assertEqual(caps["3"], "code_execution")  # 本地计算不误伤
+        # 非财报类任务不受影响
+        game = [
+            {"step_id": "1", "capability": "code_execution",
+             "instruction": "生成贪吃蛇游戏 HTML"},
+        ]
+        out2 = o._enforce_no_web_scrape_code(game, "做一个贪吃蛇游戏", "t-y")
+        self.assertEqual(out2[0]["capability"], "code_execution")
+
 
 class TestP2ChartFallback(unittest.TestCase):
     def test_parse_header_unit_and_share_column(self):

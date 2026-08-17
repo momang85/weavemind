@@ -980,6 +980,15 @@ class Handler(BaseHTTPRequestHandler):
             from security import MAX_GOAL_LEN, RateLimiter, detect_injection, sanitize_goal
             if len(g) > MAX_GOAL_LEN:
                 return self._json({"error": f"目标过长（>{MAX_GOAL_LEN} 字符），已拦截"}, 400)
+            # 空/损坏目标拦截：全为 "?"/乱码替换符等无法识别字符时拒绝创建
+            # （修复 "????????????????" 这类 PENDING 悬挂任务）
+            _meaningful = re.sub(r"[?？\uFFFD\s\u3000]+", "", g)
+            if len(_meaningful) < 2 or not re.search(
+                r"[\u4e00-\u9fffA-Za-z0-9]", _meaningful,
+            ):
+                return self._json({
+                    "error": "目标内容无效（为空或包含无法识别的字符），请重新输入",
+                }, 400)
             bad, reason = detect_injection(g)
             if bad:
                 return self._json({"error": f"输入疑似包含恶意注入（{reason}），已拦截"}, 400)

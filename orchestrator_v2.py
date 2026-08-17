@@ -75,6 +75,9 @@ Rules:
     - human_in_loop：执行前需用户确认（用于高风险/不可逆操作，如删除、发布、付费调用）
 14. 需要"根据中间结果反复搜索/迭代工具"的任务（多轮调研、需要多次抓取核对）：
     使用 react_agent（运行时 ReAct：决策→调用工具→观察→再决策），而不是堆叠多个搜索步骤
+15. 财报/研报/调研/金融/行业分析类任务：禁止 code_execution 去抓取/爬取/解析网页或
+    在线财报数据。网页数据获取只能用 web_fetch，内容整理用 content_summary，
+    code_execution 只用于本地数据处理/计算（如对已抓取的 CSV 做分析）
 
 Output ONLY this JSON with no extra text:
 {"steps":[{"step_id":"1","capability":"web_search","instruction":"search for house price dataset","depends_on":[],"timeout":60}]}"""
@@ -121,6 +124,8 @@ next_steps 示例（instruction 必须自带 角色/受众/输出要求/验收�
 8. memory_ops（主动记忆）：发现值得长期记住的有效方法/用户偏好时输出 remember（summary 一句话）；
    发现已过时/错误经验时输出 forget（key 填该经验的标识或目标）。无则省略。
 9. 不要吹毛求疵、不要"锦上添花"；只有明确缺失用户要求的内容才继续反思
+10. 财报/研报/调研类任务禁止追加 code_execution 抓网页/解析 URL 的步骤；
+    需要补数据时用 web_fetch/web_search，整理用 content_summary
 只输出JSON。"""
 
 # ─────────────────────────────────────────────
@@ -373,6 +378,17 @@ class OrchestratorV2:
             push_progress(self._messaging, task_id, "log",
                           {"type": "error", "agent": "orchestrator",
                            "message": f"Plan failed: {last_error}", "timestamp": self._now_iso()})
+            # P0-1：双端点均不可用（余额不足/无响应）→ 抛异常让任务终止并弹警告，
+            # 不再回退到 content_summary 单步（那个 worker 同样会因 LLM 死掉而失败）
+            try:
+                from llm_client import endpoints_available, LLMUnavailableError
+                _ok, _msg = endpoints_available()
+                if not _ok:
+                    raise LLMUnavailableError(_msg)
+            except LLMUnavailableError:
+                raise
+            except Exception:
+                pass
             # 兜底：目标无法拆解时，作为单个 content_summary 步骤交给 LLM Worker
             fallback = [{
                 "step_id": "1",
@@ -689,6 +705,52 @@ class OrchestratorV2:
             push_progress(self._messaging, task_id, "log",
                           {"type": "plan", "agent": "orchestrator",
                            "message": "Plan self-check: auto-added report step",
+                           "timestamp": self._now_iso()})
+        return steps
+
+    def _enforce_no_web_scrape_code(
+        self, steps: list[dict], goal: str, task_id: str,
+    ) -> list[dict]:
+        """财报/研报/调研/金融类任务：禁止 code_execution 抓网页/解析在线数据。
+        命中后改写为 web_fetch（含 URL）或 content_summary，防止"代码抓财报"连环失败。"""
+        g = str(goal or "").lower()
+        if not any(k in g for k in (
+            "财报", "研报", "调研", "报告", "金融", "行情", "股票", "上市公司",
+            "industry", "report", "financial",
+        )):
+            return steps
+        changed = False
+        for s in steps:
+            if s.get("capability") != "code_execution":
+                continue
+            ins = str(s.get("instruction") or "")
+            if not re.search(
+                r"(https?://|抓取|爬取|爬虫|解析网页|网页内容|网页数据|financial|财报|财报数据)",
+                ins, re.I,
+            ):
+                continue
+            urls = re.findall(r"https?://[^\s\]\)]+", ins)
+            if urls:
+                s["capability"] = "web_fetch"
+                s["instruction"] = (
+                    "抓取以下网页的完整正文内容并保留原始URL，输出可读文本：\n"
+                    + "\n".join(urls[:5])
+                )
+                s["timeout"] = 180
+            else:
+                s["capability"] = "content_summary"
+                s["instruction"] = (
+                    "基于本任务已有的搜索/抓取结果，用中文输出结构化的内容总结"
+                    "（含关键数据、时间与来源）；数据不足时如实列出缺失项，禁止编造。"
+                )
+                s["timeout"] = 120
+            s["_rewritten"] = True
+            changed = True
+        if changed:
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "replan", "agent": "orchestrator",
+                           "message": "规划器约束：财报/研报类任务禁用 code_execution 抓网页，"
+                                      "已改写为 web_fetch/content_summary",
                            "timestamp": self._now_iso()})
         return steps
 
@@ -3042,6 +3104,23 @@ print("charts generated")
             self._task_prompt_hints = {}
         self._task_prompt_hints[task_id] = prompt_hints
 
+        # LLM 健康预检（P0-1）：主/备用端点均不可用 → 立即终止并向前端弹警告，
+        # 避免带着死端点空转 30 分钟（余额不足/密钥失效/无响应）。
+        try:
+            from llm_client import endpoints_available
+            _llm_ok, _llm_msg = endpoints_available()
+            if not _llm_ok:
+                push_progress(self._messaging, task_id, "warning",
+                              {"type": "llm", "agent": "orchestrator",
+                               "message": _llm_msg, "timestamp": self._now_iso()})
+                push_progress(self._messaging, task_id, "task_complete",
+                              {"status": "FAILED", "summary": _llm_msg})
+                logger.error("Task %s aborted: %s", task_id, _llm_msg)
+                return {"task_id": task_id, "status": "FAILED",
+                        "steps": [], "report": _llm_msg}
+        except Exception:
+            pass
+
         # 1. Plan（模板步骤直接采用，否则 LLM 规划）
         used_template = False
         if template_steps:
@@ -3059,7 +3138,18 @@ print("charts generated")
                 steps = self._ensure_report_step(steps, task_id)
                 used_template = True
             else:
-                steps = self._plan(goal, task_id, context, memory_context)
+                try:
+                    from llm_client import LLMUnavailableError
+                    steps = self._plan(goal, task_id, context, memory_context)
+                except LLMUnavailableError as exc:
+                    push_progress(self._messaging, task_id, "warning",
+                                  {"type": "llm", "agent": "orchestrator",
+                                   "message": str(exc), "timestamp": self._now_iso()})
+                    push_progress(self._messaging, task_id, "task_complete",
+                                  {"status": "FAILED", "summary": str(exc)})
+                    logger.error("Task %s aborted: %s", task_id, exc)
+                    return {"task_id": task_id, "status": "FAILED",
+                            "steps": [], "report": str(exc)}
         # 模板路径：把历史经验作为额外上下文注入首步骤，让框架可复用
         if memory_context and used_template and steps:
             steps[0]["instruction"] = (
@@ -3072,6 +3162,7 @@ print("charts generated")
         steps = self._break_cycles(steps)
         steps = self._inject_goal_into_steps(steps, goal)
         steps = self._inject_skills(steps, goal)
+        steps = self._enforce_no_web_scrape_code(steps, goal, task_id)
         if not steps:
             push_progress(self._messaging, task_id, "task_complete",
                           {"status": "FAILED", "summary": "Planning failed"})
@@ -3102,6 +3193,7 @@ print("charts generated")
             steps = self._break_cycles(steps)
             steps = self._inject_goal_into_steps(steps, goal)
             steps = self._inject_skills(steps, goal)
+            steps = self._enforce_no_web_scrape_code(steps, goal, task_id)
             if not steps:
                 push_progress(self._messaging, task_id, "task_complete",
                               {"status": "FAILED", "summary": "Empty plan confirmed, task cancelled"})
@@ -3599,6 +3691,35 @@ print("charts generated")
                             "result": "步骤被用户取消",
                             "elapsed_sec": round(time.time() - step_start, 1)}
             result = self._dispatch_step_safe(goal, step, task_id, state)
+            # P1-1：react_agent 未收敛/失败 → 自动降级为 content_summary，
+            # 不把"ReAct 达到最大轮数仍未收敛"这类过程文本传给报告
+            if (
+                step.get("capability") == "react_agent"
+                and (
+                    result.get("status") == "FAILED"
+                    or "未收敛" in str(result.get("result") or "")
+                    or "最大轮数" in str(result.get("result") or "")
+                )
+            ):
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "replan", "agent": "orchestrator",
+                               "message": "react_agent 未收敛，自动降级为 content_summary",
+                               "timestamp": self._now_iso()})
+                fb_step = {
+                    "step_id": step["step_id"],
+                    "capability": "content_summary",
+                    "instruction": (
+                        "基于本任务已有的搜索结果/抓取内容，用中文输出结构化要点总结；"
+                        "若上游数据不足，如实列出缺失项，禁止编造。"
+                    ),
+                    "timeout": 120,
+                }
+                fb_instr = self._inject_step_context(fb_step, completed, lock, task_id)
+                fb_step["instruction"] = f"任务目标：{goal[:300]}\n\n{fb_instr}"
+                fb_result = self._dispatch_step_safe(goal, fb_step, task_id, state)
+                if fb_result.get("status") == "SUCCESS":
+                    fb_result["degraded_from_react"] = True
+                    result = fb_result
             if step.get("capability") == "web_search" and result.get("status") == "SUCCESS":
                 # 搜索结果 URL 累计到任务级，供后续（含反射轮）报告步骤引用来源
                 try:

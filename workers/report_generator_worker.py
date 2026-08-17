@@ -160,6 +160,26 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                 i += 1
         return "\n".join(out)
 
+    @staticmethod
+    def _clean_fallback_content(text: str) -> str:
+        """剥离 fallback 内容里的角色/指令残留与过程噪音（【角色】、【输出要求】、
+        [指令]/[数据来源] 标记、ReAct 未收敛提示、原始 JSON），只保留可交付信息。"""
+        out: list[str] = []
+        for ln in str(text or "").split("\n"):
+            line = ln.strip()
+            if line.startswith((
+                "【角色】", "【受众】", "【输出要求】", "【质量标准】",
+                "[指令]", "[数据来源]", "[上一步结果]",
+                "ReAct 达到最大轮数", "用户目标：", "原始指令：", "任务目标：",
+            )):
+                continue
+            if re.match(r"^\{\"|^\[\{", line):
+                continue
+            if re.fullmatch(r"- https?://\S+", line):
+                continue  # 数据来源 URL 由附录统一呈现
+            out.append(ln)
+        return "\n".join(out).strip()
+
     async def execute(self, instruction: str, task: dict | None = None) -> str:
         charts_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "charts"
         data_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "data"
@@ -257,6 +277,7 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                         str(instruction), re.S,
                     )
                     prev_content = "\n\n".join(p.strip() for p in prev_parts)
+                    prev_content = self._clean_fallback_content(prev_content)
                     if prev_content:
                         report += (
                             "\n\n## 研究内容（检索/摘要）\n\n"
