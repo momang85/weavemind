@@ -13,3 +13,4 @@ fakeredis>=2.20
 pypdf>=4.0
 python-docx>=1.0
 openpyxl>=3.1
+jieba>=0.42

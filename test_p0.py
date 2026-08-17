@@ -973,6 +973,62 @@ class TestP2CleanData(unittest.TestCase):
         self.assertEqual(clean["source_distribution"].get("a.com"), 2)
         self.assertEqual(clean["source_distribution"].get("b.com"), 1)
 
+    def test_topic_terms_no_fragments(self):
+        """滑动窗口碎片（辑芯片市/伟达和/市场被英/演示文稿）不得进入热词。"""
+        from clean_data import clean_and_structure
+
+        items = [
+            {
+                "title": "PowerPoint 演示文稿",
+                "url": "https://pdf.dfcfw.com/pdf/1.pdf",
+                "snippet": (
+                    "CPU市场呈现英特尔和AMD寡头垄断格局，GPU市场被英伟达和AMD占据，"
+                    "FPGA市场由Xilinx赛灵思被AMD收购。预计2027年中国逻辑芯片市场规模"
+                    "将达到5,757.5亿元。"
+                ),
+            },
+            {
+                "title": "AI GPU 市场规模",
+                "url": "https://doccdn.yicai.com/2.pdf",
+                "snippet": "GPU是目前商用最广泛的AI芯片，IDC数据显示在中国AI芯片市场"
+                            "GPU占有超过80%的市场份额。",
+            },
+        ]
+        clean = clean_and_structure(items)
+        terms = " ".join(clean["topic_terms"])
+        for junk in ("辑芯片市", "伟达和", "市场被英", "市场由", "演示文稿", "文稿",
+                     "英特尔和", "赛灵思被"):
+            self.assertNotIn(junk, terms)
+        self.assertIn("逻辑", terms)  # 有意义的词应保留
+        self.assertIn("AMD", terms)
+
+    def test_entity_alias_merged(self):
+        """NVIDIA/NV 等别名应合并到规范名，且不被大小写重复计数。"""
+        from clean_data import clean_and_structure
+
+        items = [
+            {"title": "t", "url": "https://a.com/1",
+             "snippet": "NVIDIA 与英伟达都在训练中使用 NVIDIA GPU，NV 是简称。"},
+        ]
+        clean = clean_and_structure(items)
+        self.assertEqual(clean["entity_frequency"].get("英伟达"), 4)
+        self.assertNotIn("NVIDIA", clean["entity_frequency"])
+        self.assertNotIn("Nvidia", clean["entity_frequency"])
+
+    def test_market_data_yi_yuan(self):
+        """逻辑芯片市场规模…亿元 应被提取（单位保留 亿元）。"""
+        from clean_data import clean_and_structure
+
+        items = [
+            {"title": "t", "url": "https://a.com/1",
+             "snippet": "预计2027年中国逻辑芯片市场规模将达到5,757.5亿元。"},
+        ]
+        clean = clean_and_structure(items)
+        m = [x for x in clean["market_data"] if x["label"] == "逻辑芯片市场规模"]
+        self.assertEqual(len(m), 1)
+        self.assertEqual(m[0]["value"], 5757.5)
+        self.assertEqual(m[0]["unit"], "亿元")
+
     def test_clean_data_schema_in_system_prompt(self):
         import tempfile
         from pathlib import Path

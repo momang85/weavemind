@@ -1910,8 +1910,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
-plt.rcParams["axes.unicode_minus"] = False
+from chart_fonts import configure_zh_font
+configure_zh_font()
 
 CURATED = (
     "规模", "趋势", "份额", "占比", "营收", "收入", "增速", "增长",
@@ -2777,9 +2777,11 @@ if __name__ == "__main__":
         语义类图表（趋势/份额/指标）由 LLM 结构化数据渲染（_render_chart_data）。"""
         import subprocess
         import sys
+        import os
         if not self._wants_visualization(goal):
             return
         project = task_project_dir(task_id)
+        repo_root = os.path.dirname(os.path.abspath(__file__))
         src = project / "search_results.json"
         clean_src = project / "clean_chart_data.json"
         if not src.exists():
@@ -2794,17 +2796,26 @@ if __name__ == "__main__":
                 return
         script = r'''# -*- coding: utf-8 -*-
 """从清洗后的 clean_chart_data.json 绘制探索性图表（搜索→清洗→绘图）。
-绘图只接收结构化数据，不直接解析 search_results.json 原始文本。"""
+绘图只接收结构化数据，不直接解析 search_results.json 原始文本。
+被跳过的图会打印原因（SKIP），便于用户/日志了解发生了什么。"""
 import json
+import sys
 from collections import Counter
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
-plt.rcParams["axes.unicode_minus"] = False
+sys.path.insert(0, r"__REPO_ROOT__")
+from chart_fonts import configure_zh_font
+configure_zh_font()
 
 clean = json.load(open("clean_chart_data.json", encoding="utf-8"))
+
+
+def short_label(s, n=14):
+    s = str(s)
+    return s if len(s) <= n else s[: n - 1] + "…"
+
 
 # 1) 主要主体提及频率（信息量大且稳定：只要有检索结果即可画）
 entity_freq = Counter({k: v for k, v in clean.get("entity_frequency", {}).items()})
@@ -2812,7 +2823,7 @@ top_e = entity_freq.most_common(10)
 if len(top_e) >= 3 and len(set(c for _, c in top_e)) > 1:
     fig, ax = plt.subplots(figsize=(10, 5))
     pairs_e = top_e[::-1]  # 条形与标签共用同一反转顺序，防止索引错位
-    ax.barh([e for e, _ in pairs_e], [c for _, c in pairs_e],
+    ax.barh([short_label(e) for e, _ in pairs_e], [c for _, c in pairs_e],
             color="#0ea5e9", edgecolor="white")
     ax.set_xlabel("提及次数")
     ax.set_title("检索资料中的主要主体提及频率（厂商/区域）")
@@ -2821,6 +2832,8 @@ if len(top_e) >= 3 and len(set(c for _, c in top_e)) > 1:
     plt.tight_layout()
     plt.savefig("entity_frequency.png", dpi=110)
     plt.close()
+else:
+    print(f"SKIP 主体提及频率图：有效实体不足或无区分度（{len(top_e)} 条）")
 
 # 2) 数据来源分布（X=来源域名, Y=结果数）
 domains = Counter({k: v for k, v in clean.get("source_distribution", {}).items()})
@@ -2835,6 +2848,8 @@ if top and len(set(c for _, c in top)) > 1:
     plt.tight_layout()
     plt.savefig("source_distribution.png", dpi=110)
     plt.close()
+else:
+    print(f"SKIP 数据来源分布图：来源计数全部相同或为空（{len(top)} 个来源），无信息增量。")
 
 # 3) 主题热词（X=热词, Y=出现次数）
 words = Counter({k: v for k, v in clean.get("topic_terms", {}).items()})
@@ -2842,7 +2857,7 @@ top_w = words.most_common(12)
 if top_w and len(set(c for _, c in top_w)) > 1:
     fig, ax = plt.subplots(figsize=(10, 5))
     pairs_w = top_w[::-1]  # 条形与标签共用同一反转顺序
-    ax.barh([w for w, _ in pairs_w], [c for _, c in pairs_w],
+    ax.barh([short_label(w) for w, _ in pairs_w], [c for _, c in pairs_w],
             color="#06b6d4", edgecolor="white")
     for i, (_, c) in enumerate(pairs_w):
         ax.text(c + 0.1, i, str(c), va="center", fontsize=9)
@@ -2851,6 +2866,8 @@ if top_w and len(set(c for _, c in top_w)) > 1:
     plt.tight_layout()
     plt.savefig("topic_terms.png", dpi=110)
     plt.close()
+else:
+    print(f"SKIP 主题热词图：热词不足或无区分度（{len(top_w)} 条）")
 
 # 4) 结构化市场数据（来自清洗环节的精确提取）
 market = clean.get("market_data") or []
@@ -2870,8 +2887,11 @@ if len(market) >= 2:
     plt.tight_layout()
     plt.savefig("market_data.png", dpi=110)
     plt.close()
+else:
+    print(f"SKIP 市场规模图：有效结构化数据不足（当前 {len(market)} 条），无法生成对比图。")
 print("charts generated")
 '''
+        script = script.replace("__REPO_ROOT__", repo_root.replace("\\", "/"))
         script_path = project / "make_charts.py"
         try:
             script_path.write_text(script, encoding="utf-8")
@@ -2879,6 +2899,10 @@ print("charts generated")
                 [sys.executable, str(script_path), str(goal or "")],
                 cwd=str(project), capture_output=True, timeout=120,
             )
+            if proc.stdout:
+                out = proc.stdout.decode("utf-8", errors="replace").strip()
+                if out:
+                    logger.info("make_charts(%s): %s", task_id, out[:500])
             if proc.returncode != 0:
                 logger.warning("make_charts failed: %s", proc.stderr.decode("utf-8", errors="replace")[:200])
         except Exception as exc:
