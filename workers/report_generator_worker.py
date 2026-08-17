@@ -85,12 +85,27 @@ class ReportGeneratorWorker(AsyncWorkerBase):
         heading_map = {idx: (lvl, text) for idx, lvl, text in headings}
         planned: list[tuple[int, str, str]] = []  # (插入行号, 图表名, markdown)
         for c in charts:
-            keywords = (manifests or {}).get(c.name)
+            entry = (manifests or {}).get(c.name) or {}
+            keywords = entry.get("keywords") if isinstance(entry, dict) else entry
             if not keywords:
                 keywords = chart_topics.get(c.name) or [
                     k for k in c.stem.replace("-", "_").split("_") if k
                 ]
-            hidx = best_heading(keywords)
+            section_hint = (
+                str(entry.get("section_hint") or "")
+                if isinstance(entry, dict) else ""
+            )
+            hidx = None
+            if section_hint:
+                # 精确章节提示优先（chart_data 的 section_hint → 报告章节）
+                cands = [
+                    (idx, lvl) for idx, lvl, text in headings
+                    if section_hint in text
+                ]
+                if cands:
+                    hidx = max(cands, key=lambda x: x[1])[0]
+            if hidx is None:
+                hidx = best_heading(keywords)
             if hidx is not None:
                 end = subsection_end(hidx, heading_map[hidx][0])
                 planned.append((end, c.name, f"![{c.stem}]({c})"))
@@ -200,15 +215,18 @@ class ReportGeneratorWorker(AsyncWorkerBase):
 
     @staticmethod
     def _flag_conflicting_figures(report: str) -> str:
-        """数据一致性检查：同一财务指标出现多个不同数值时，在报告末尾追加分歧提示
-        （如"总负债 2.39万亿 vs 2.44万亿"，可能来自不同来源/口径）。"""
+        """数据一致性检查 + 同指标多源数值自动仲裁：
+        同一指标出现多个不同数值时，取"出现次数最多"的值作为主值，
+        在其首次出现处行内标注"另有来源称 X"，并在报告末尾追加一致性提示。"""
         pat = re.compile(
             r"(总负债|负债总额|债务规模|债务|总营收|营收|净利润|净亏损|亏损|总资产|净资产|"
             r"总收入|收入|销售额|市值)"
             r"\s*(?:约|达|为|达到|约为|合计|高达|录得|亏损|净亏|同比)?\s*"
             r"(\d[\d,]*(?:\.\d+)?)\s*(万亿|亿|万)?元"
         )
-        groups: dict[str, set[str]] = {}
+        from collections import Counter
+
+        groups: dict[str, list[tuple[str, int, int]]] = {}
         norm = {
             "负债总额": "总负债", "债务规模": "总负债", "债务": "总负债",
             "净亏损": "净利润", "亏损": "净利润", "总收入": "营收", "收入": "营收",
@@ -217,19 +235,36 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             metric = norm.get(m.group(1), m.group(1))
             sign = "-" if m.group(0).find("亏损") >= 0 or m.group(0).find("净亏") >= 0 else ""
             val = sign + m.group(2).replace(",", "") + (m.group(3) or "")
-            groups.setdefault(metric, set()).add(val)
-        conflicts = [
-            f"{k}：{'、'.join(sorted(v, key=lambda x: (len(x), x)))}"
-            for k, v in groups.items() if len(v) > 1
-        ]
+            groups.setdefault(metric, []).append((val, m.start(), m.end()))
+        text = str(report or "")
+        conflicts: list[str] = []
+        inserts: list[tuple[int, str]] = []
+        for metric, items in groups.items():
+            values = [v for v, _, _ in items]
+            distinct = sorted(set(values), key=lambda x: (len(x), x))
+            if len(distinct) < 2:
+                continue
+            canonical = Counter(values).most_common(1)[0][0]
+            others = [v for v in distinct if v != canonical]
+            first = next((e for v, s, e in items if v == canonical), None)
+            if first is not None:
+                inserts.append((first, f"（另有来源称 {'、'.join(others)}）"))
+            conflicts.append(
+                f"{metric}：主值 {canonical}（另有来源：{'、'.join(others)}）"
+            )
         if not conflicts:
             return report
+        # 从后往前插入行内标注，保持偏移有效
+        inserts.sort(key=lambda x: x[0], reverse=True)
+        for pos, note in inserts:
+            text = text[:pos] + note + text[pos:]
         note = (
             "\n\n> ⚠️ **数据一致性提示**：以下指标在本报告中出现了多个不同数值，"
-            "可能来自不同来源或统计口径（如含/不含合同负债），请以官方公告为准：\n\n"
+            "已按出现次数最多者作为主值并在文中标注（另有来源称 X），"
+            "不同口径（如含/不含合同负债）请以官方公告为准：\n\n"
             + "\n".join(f"> - {c}" for c in conflicts[:8])
         )
-        return str(report) + note
+        return text + note
 
     async def execute(self, instruction: str, task: dict | None = None) -> str:
         charts_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "charts"
@@ -266,7 +301,7 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                 try:
                     for item in json.loads(mf.read_text(encoding="utf-8")).get("charts", []):
                         if item.get("file") and item.get("keywords"):
-                            manifests[str(item["file"])] = list(item["keywords"])
+                            manifests[str(item["file"])] = item
                 except Exception:
                     pass
         # 去重（同名文件可能同时出现在 charts/ 与 project/）

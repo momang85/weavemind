@@ -2226,6 +2226,7 @@ def main():
         manifest.append({
             "file": fname,
             "keywords": keywords_for(spec),
+            "section_hint": str(spec.get("section_hint") or ""),
         })
         print(f"RENDERED {fname}: {title}", flush=True)
     with open("chart_manifest.json", "w", encoding="utf-8") as f:

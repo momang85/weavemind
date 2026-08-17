@@ -661,6 +661,14 @@ class SearchAgent(BaseWorker):
             # 时效性（修复"最新财报"返回旧年份）：目标要求最新时补当前年份
             if any(k in instruction for k in ("最新", "最近", "latest", "current")):
                 variants.append(f"{goal[:110]} {time.localtime().tm_year}")
+            # 财报/财务类目标：引导结果页含具体数字（营收/净利润/亿元），
+            # 否则 snippet 常只有叙事没有数值，清洗层无数据可洗
+            if any(k in instruction for k in (
+                "财报", "年报", "季报", "营收", "净利润", "负债", "财务", "业绩",
+                "financial", "revenue", "earnings",
+            )):
+                variants.append(f"{goal[:100]} 年报 营收 净利润 亿元")
+                variants.append(f"{goal[:100]} 财务数据 亿元")
         # 域名定向（ReAct 兜底）：指令含 site:xxx 时追加定向查询变体，
         # 让"官方 IR / SEC"类重检索指令真正落地
         for m in _re.finditer(r"site:\s*([a-zA-Z0-9.\-]+)", str(instruction)):

@@ -1422,19 +1422,63 @@ class TestP0Robustness(unittest.TestCase):
         self.assertIn(2021, years)
 
     def test_flag_conflicting_figures(self):
-        """同一指标多个数值 → 报告末尾追加一致性提示。"""
+        """同一指标多个数值 → 取众数为主值 + 行内标注 + 末尾一致性提示。"""
         from workers.report_generator_worker import ReportGeneratorWorker
 
         w = ReportGeneratorWorker.__new__(ReportGeneratorWorker)
         report = (
             "执行摘要：截至2023年末总负债约2.39万亿元。\n"
             "关键发现：债务规模约2.44万亿元。\n"
+            "财务分析：总负债约2.39万亿元。\n"
             "营收为5072亿元。"
         )
         out = w._flag_conflicting_figures(report)
         self.assertIn("数据一致性提示", out)
         self.assertIn("总负债", out)
+        # 众数 2.39 万亿为主值，行内标注另一来源 2.44
+        self.assertIn("另有来源称 2.44万亿", out)
+        self.assertIn("主值 2.39万亿", out)
+        # 营收只有单一数值，不进入一致性提示
         self.assertNotIn("营收为5072亿元", out.split("数据一致性提示")[1] or "")
+        self.assertNotIn("营收：", out)
+
+    def test_embed_charts_uses_section_hint(self):
+        """section_hint 精确命中章节时优先于关键词模糊匹配。"""
+        import pathlib
+        from workers.report_generator_worker import ReportGeneratorWorker
+
+        w = ReportGeneratorWorker.__new__(ReportGeneratorWorker)
+        report = (
+            "# 恒大集团发展历程\n\n内容一\n\n"
+            "## 财务分析\n\n营收与负债数据\n\n"
+            "## 数据来源\n\n附录"
+        )
+        charts = [pathlib.Path("C:/tmp/charts/chart_1.png")]
+        manifests = {
+            "chart_1.png": {
+                "file": "chart_1.png",
+                "keywords": ["趋势"],
+                "section_hint": "财务分析",
+            },
+        }
+        out = w._embed_charts_inline(report, charts, manifests)
+        # 图表应插到"财务分析"小节末尾（数据来源小节之前）
+        fin_pos = out.find("财务分析")
+        img_pos = out.find("![chart_1]")
+        src_pos = out.find("数据来源")
+        self.assertTrue(0 <= fin_pos < img_pos < src_pos)
+
+    def test_search_finance_query_boost(self):
+        """财报类目标应生成含财务关键词的查询变体。"""
+        from worker_base import SearchAgent
+
+        sa = SearchAgent.__new__(SearchAgent)
+        variants = sa._query_variants("搜索恒大集团财报并解析净利润")
+        self.assertTrue(any("营收" in v and "净利润" in v for v in variants))
+        self.assertTrue(any("亿元" in v for v in variants))
+        # 非财务目标不加引导词
+        v2 = sa._query_variants("做一个贪吃蛇游戏")
+        self.assertFalse(any("净利润" in v for v in v2))
 
     def test_low_authority_filter(self):
         """百度文库/原创力文档等低权威来源应被搜索过滤。"""
