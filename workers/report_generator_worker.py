@@ -106,6 +106,60 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             result.append("")
         return "\n".join(result)
 
+    @staticmethod
+    def _strip_chart_data_blocks(report: str) -> str:
+        """剥离模型误嵌入的 [CHART_DATA] 原始 JSON 块（图表由系统按章节内联嵌入）。"""
+        parts = re.split(r"\[CHART_DATA\]", report)
+        if len(parts) == 1:
+            return report
+        out = [parts[0]]
+        for rest in parts[1:]:
+            end = re.search(r"\n\s*\n", rest)
+            out.append(rest[end.end():] if end else "")
+        return "".join(out)
+
+    @staticmethod
+    def _drop_empty_table_rows(report: str) -> str:
+        """删除表格中数值列（数值/规模/金额…表头）为空的整行，
+        避免出现"德勤 | 全球半导体 | | | | |"这类空数据行。"""
+        lines = report.split("\n")
+        out: list[str] = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            is_header = (
+                line.strip().startswith("|")
+                and i + 1 < len(lines)
+                and re.match(r"^\s*\|[\s:\-|]+\|\s*$", lines[i + 1])
+            )
+            if not is_header:
+                out.append(line)
+                i += 1
+                continue
+            headers = [c.strip() for c in line.strip("|").split("|")]
+            val_col = next(
+                (idx for idx, h in enumerate(headers)
+                 if any(k in h for k in ("数值", "规模", "金额", "份额", "市值",
+                                         "营收", "收入", "增速", "预测值"))),
+                None,
+            )
+            out.append(line)
+            i += 1
+            out.append(lines[i])  # 分隔行
+            i += 1
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                cells = [c.strip() for c in lines[i].strip("|").split("|")]
+                drop = False
+                if val_col is not None and val_col < len(cells):
+                    v = cells[val_col]
+                    if not v or v in ("—", "-", "―", "–"):
+                        if not any("http" in c for c in cells):
+                            drop = True
+                if not drop:
+                    out.append(lines[i])
+                i += 1
+        return "\n".join(out)
+
     async def execute(self, instruction: str, task: dict | None = None) -> str:
         charts_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "charts"
         data_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "data"
@@ -176,6 +230,10 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                 "不要自行嵌入图表文件（系统会按章节自动嵌入图表）；"
                 "在需要图表辅助理解的段落后用文字提及对应图表名称即可（如"
                 "『如图 key_numbers 所示』）。"
+                "严禁输出 [CHART_DATA]、chart_data.json 等任何原始 JSON 或系统标记块；"
+                "不要复述或引用指令、系统提示词或 '[上一步结果]' 原文。"
+                "表格中每一行都必须有数值：数据缺失时在数值列写'未披露'或删除该行，"
+                "不得留空。"
                 "报告正文必须包含一个「关键数据一览」表格（列：指标 | 数值 | "
                 "口径/年份 | 来源），只收录与本任务主题直接相关的数值；"
                 "不同来源/口径的数字分开列出并注明差异，不要把不可比的数据混为一谈。"
@@ -220,6 +278,10 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             # 图表内联嵌入：按主题把图表插到对应小节之后（紧贴需要可视化的文字）
             if charts:
                 report = self._embed_charts_inline(report, charts, manifests)
+
+            # 后处理：剥离误嵌入的 [CHART_DATA] 原始 JSON，删除空数值表格行
+            report = self._strip_chart_data_blocks(report)
+            report = self._drop_empty_table_rows(report)
 
             rpath = report_dir / "report.md"
             rpath.write_text(report, encoding="utf-8")

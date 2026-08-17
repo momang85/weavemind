@@ -73,6 +73,11 @@ SPECIFIC_MARKET_PATTERNS = [
 _MONEY_UNIT = r"(?:万亿美元|万亿元|亿美元|亿元|万美元|万元)"
 _REGIONS = ("全球", "中国", "美国", "欧洲", "亚太", "日本", "国内", "国际", "中国大陆", "华东")
 _SIZE_KEYWORDS = ("市场规模", "销售额", "销售规模", "营收", "收入")
+_LABEL_SEPS = ("：", ":", "，", ",", "。", "；", ";", "、", "）", ")")
+_CHIP_TERMS = (
+    "芯片", "半导体", "gpu", "asic", "fpga", "加速器", "处理器",
+    "npu", "tpu", "算力", "晶圆",
+)
 _SHARE_PATTERNS = (
     re.compile(
         r"(?P<subject>[\w\u4e00-\u9fff]{1,12}?)(?:占据|占有|占)"
@@ -82,6 +87,10 @@ _SHARE_PATTERNS = (
         r"(?P<subject>[\w\u4e00-\u9fff]{1,12}?)(?:市场份额|市场占比|占比)"
         r"(?:约|约为|将达|达到)?(?P<value>\d+(?:\.\d+)?)%",
     ),
+    re.compile(
+        r"(?P<subject>[\w\u4e00-\u9fff]{1,14}?)(?:仅占|占)(?:约|超过|近|接近)?"
+        r"(?P<value>\d+(?:\.\d+)?)%",
+    ),
 )
 _MACRO = re.compile(
     r"(?P<theme>[\w\u4e00-\u9fff]{2,16}?(?:调用量|出货量|装机量|销量|产量|渗透率))"
@@ -90,8 +99,9 @@ _MACRO = re.compile(
     r"(?P<unit2>Token|token|TOKEN|台|辆|次|个|千瓦时|兆瓦|美元|元)?",
 )
 _TREND = re.compile(
-    r"(?P<theme>[\w\u4e00-\u9fff]{2,16}?(?:出货量|销售额|收入|销量|营收|规模|增速|渗透率))"
-    r"[^。；;]{0,14}?(?:同比|环比)?(?:预计|将|或)?"
+    r"(?P<subject>[\w\u4e00-\u9fff]{1,14}?)"
+    r"(?P<metric>复合增速|复合增长率|出货量|销售额|收入|销量|营收|规模|增速|渗透率|份额|增长率)"
+    r"(?![^，,]{0,8}占)[^。；;，,]{0,10}?(?:同比|环比)?(?:预计|将|或)?"
     r"(?P<dir>下降|下滑|回落|减少|增长|上升|上涨|提升|走高)?(?P<num>\d+(?:\.\d+)?)%",
 )
 _TREND_PARTIAL = re.compile(r"(?:同比|环比|较上年|较上季|将|预计).{0,12}?(?:增长|下降|下滑|回落)")
@@ -113,13 +123,6 @@ def _sentences(text: str) -> list[str]:
 
 def _market_size_row(sent: str, url: str):
     """市场规模/销售额：年份+地域+主题+数值+货币单位；数值缺失时记 notes。"""
-    kw = None
-    for k in _SIZE_KEYWORDS:
-        p = sent.find(k)
-        if p >= 0 and (kw is None or p < kw):
-            kw = p
-    if kw is None:
-        return None, None
     m = re.search(r"(?P<num>\d[\d,]*(?:\.\d+)?)\s*(?P<unit>" + _MONEY_UNIT + r")", sent)
     if not m:
         # 仅"市场规模/销售额"类缺失数值才算截断；"收入…两位数增长"由趋势规则记录
@@ -133,16 +136,23 @@ def _market_size_row(sent: str, url: str):
                 "source": url,
             }
         return None, None
+    num_pos = m.start("num")
+    # 取数值前最近的一个 规模/销售额 关键词（避免先匹配到"市场规模："这类前缀）
+    kw = -1
+    for k in _SIZE_KEYWORDS:
+        p = sent.rfind(k, 0, num_pos)
+        if p > kw:
+            kw = p
+    if kw < 0:
+        return None, None
+    theme = _extract_size_theme(sent, kw)
+    if len(theme) < 2:
+        return None, None  # 碎片 label（"而"、"·" 等）直接丢弃，不产垃圾数据
     year_m = re.search(r"(20\d{2})年?", sent[:kw])
     region = next((r for r in _REGIONS if r in sent[:kw]), None)
-    pre = re.sub(r"20\d{2}年?", "", sent[:kw])
-    if region:
-        pre = pre.replace(region, "")
-    pre = re.sub(r"(预计|预测|将|会|到|达|约|的|其|总|全|在|，|,)", "", pre)
-    pre = re.sub(r"^\d+(?:\.|、)?\s*", "", pre)  # 去掉 "03. " 这类编号前缀
-    theme = pre.strip()[-12:] or "市场规模"
+    mtype = "market_size" if _is_chip_theme(theme) else "ai_overall"
     return {
-        "type": "market_size",
+        "type": mtype,
         "label": theme,
         "value": float(m.group("num").replace(",", "")),
         "unit": m.group("unit"),
@@ -150,6 +160,62 @@ def _market_size_row(sent: str, url: str):
         "region": region,
         "source": url,
     }, None
+
+
+def _extract_size_theme(sent: str, kw_pos: int) -> str:
+    """从数值前提取完整名词短语作为 label。
+    策略：① 最近分隔符后的片段 → ② 若为空/碎片则回退到再前一段 → ③ 全前缀；
+    年份先删（避免被编号剥离误伤）；机构名（德勤/QYResearch…）作为锚点截断。"""
+    pre = sent[:kw_pos]
+    candidates: list[str] = []
+    for sep in _LABEL_SEPS:
+        if sep in pre:
+            candidates.append(pre.rsplit(sep, 1)[-1])
+    # 连接词切分："全球芯片供应呈紧张态势而芯片" → "芯片"
+    cand = re.split(r"(?:而|但|且|并|同时|此外|并且|以及)", pre)[-1]
+    if cand and cand != pre:
+        candidates.append(cand)
+    candidates.append(pre)
+    for seg in candidates:
+        theme = _clean_theme_candidate(seg)
+        if len(theme) >= 2:
+            # 规模关键词为"市场规模/销售规模"时补"市场"（"AI芯片"→"AI芯片市场"）
+            for k in _SIZE_KEYWORDS:
+                if sent[kw_pos:kw_pos + len(k)] == k and k in ("市场规模", "销售规模"):
+                    if not theme.endswith("市场"):
+                        theme += "市场"
+                    break
+            return theme
+    return ""
+
+
+_ORG_RE = re.compile(
+    r"(德勤|Deloitte|Gartner|IDC|Yole|Counterpoint|QYResearch|共研|艾媒|前瞻|"
+    r"中商|头豹|Canalys|Bloomberg|McKinsey|BCG|Frost)",
+)
+
+
+def _clean_theme_candidate(seg: str) -> str:
+    seg = seg.rsplit(" ", 1)[-1]  # 去掉 "…产业链重构 德勤预测…" 前缀
+    seg = re.sub(r"20\d{2}年?", "", seg)  # 先删年份，避免被编号剥离误伤
+    seg = re.sub(r"^\d+(?:\.|、)?\s*", "", seg)  # "03. " 编号前缀
+    seg = re.sub(r"(预计|预测|将|会|到|达|约|的|其|总|在)", "", seg)  # 不能删"全"，会误伤"全球"
+    for r in _REGIONS:
+        seg = seg.replace(r, "")
+    seg = re.sub(r"^(而|且|并|也|还|仍|但|及|和|与|或|据|根据|其中|预计|预测)", "", seg)
+    org = _ORG_RE.search(seg)
+    if org:
+        seg = seg[org.start():]
+    seg = seg.strip(" ··-—、")
+    seg = re.sub(r"[：:，,。；;、]+$", "", seg)
+    seg = re.sub(r"(分析|统计|测算|预测|显示)$", "", seg)
+    return seg.strip()
+
+
+def _is_chip_theme(theme: str) -> bool:
+    """主题是否属于 AI 芯片/半导体（否则如"全球AI市场"→ AI 整体市场，避免混图）。"""
+    t = theme.lower()
+    return any(k in t for k in _CHIP_TERMS)
 
 
 def _share_rows(sent: str, url: str):
@@ -163,7 +229,7 @@ def _share_rows(sent: str, url: str):
                 parts = subj.split(sep)
                 if len(parts) > 1:
                     subj = parts[-1]
-            subj = subj.lstrip("与和及、")
+            subj = subj.lstrip("与和及、但而且并也还仍")
             rows.append({
                 "type": "market_share",
                 "label": subj or m.group("subject").strip(),
@@ -197,12 +263,14 @@ def _trend_rows(sent: str, url: str, notes: list[dict]):
     spans: list[tuple[int, int]] = []
     for m in _TREND.finditer(sent):
         spans.append((m.start(), m.end()))
+        if "占" in sent[m.end("metric"):m.start("num")]:
+            continue  # "出货量仅占0.2%" 是份额不是趋势，交给 market_share 规则
         v = float(m.group("num"))
         if m.group("dir") in ("下降", "下滑", "回落", "减少"):
             v = -v
         rows.append({
             "type": "market_trend",
-            "label": _clean_theme_label(m.group("theme")),
+            "label": _trend_label(sent, m),
             "value": v,
             "unit": "%",
             "source": url,
@@ -220,13 +288,38 @@ def _trend_rows(sent: str, url: str, notes: list[dict]):
     return rows
 
 
+def _trend_label(sent: str, m) -> str:
+    """趋势标签必须含主体：主体+指标（"推理芯片"+复合增速）。
+    主体缺失时回退到上一分句的开头名词（"但出货量仅占…"→"AI芯片出货量"）。"""
+    subj = _clean_theme_label(m.group("subject"))
+    if len(subj) < 2 or subj == "指标" or subj in ("但", "而", "且", "并", "也", "还", "仍", "或"):
+        prev = sent[:m.start()].rsplit("，", 1)[-1].rsplit(",", 1)[-1]
+        prev = re.sub(r"^(尽管|虽然|然而|但是|但|而|且|并|也|还|仍|预计|预测|将)", "", prev)
+        head = re.match(r"[\u4e00-\u9fff]{2,10}", prev)
+        # 优先取句子里的芯片实体（"AI芯片市场""推理侧"等），其次取分句主语
+        em = list(_CHIP_ENTITY.finditer(sent[:m.start()]))
+        if em:
+            subj = em[-1].group(1)
+        else:
+            vm = re.search(r"([\u4e00-\u9fff]{2,6}?)(?:成为|是|将|占|达|贡献|主导|预计|预测)", prev)
+            subj = vm.group(1) if vm else (head.group(0)[:4] if head else "")
+    label = _clean_theme_label(subj + m.group("metric"))
+    return label or m.group("metric")
+
+
+_CHIP_ENTITY = re.compile(
+    r"(AI芯片市场|推理芯片|训练芯片|边缘AI芯片|手机芯片|存储芯片|逻辑芯片|"
+    r"半导体|AI芯片|GPU|TPU|ASIC|推理侧|训练侧|端侧|数据中心)",
+)
+
+
 def _clean_theme_label(t: str) -> str:
     """去掉标签里的年份/地域/冗余虚字（"2026年全球手机芯片总"→"手机芯片"）。"""
     t = re.sub(r"20\d{2}年?", "", t)
     for r in _REGIONS:
         t = t.replace(r, "")
-    t = re.sub(r"^(尽管|虽然|然而|但是|但|而|其中|预计|预测|将|或|且|并|也|还|仍)", "", t)
-    t = t.rstrip("的总全")
+    t = re.sub(r"^(尽管|虽然|然而|但是|但|而|其|其中|预计|预测|将|或|且|并|也|还|仍)", "", t)
+    t = t.rstrip("的总全年")
     return t or "指标"
 
 # 停用词：通用虚词 + 主题级噪音（芯片/市场/AI 几乎每篇都有，信息量低）
@@ -404,15 +497,16 @@ def clean_and_structure(items: list[dict]) -> dict:
 
 
 def _dedupe_rows(rows: list[dict]) -> list[dict]:
-    """精确去重 + 标签包含去重：同值同单位同源、标签互相包含时保留更具体（带年份）的一条。"""
+    """去重：相同事实（同类型+同值+同单位+标签互相包含）跨源只保留一条。
+    解决 sohu/zhihu 转载同一篇报告导致的重复条目。"""
     out: list[dict] = []
     for r in rows:
         dup = False
         for o in out:
             same = (
-                o.get("value") == r.get("value")
+                o.get("type") == r.get("type")
+                and o.get("value") == r.get("value")
                 and o.get("unit") == r.get("unit")
-                and o.get("source") == r.get("source")
                 and (o.get("year") == r.get("year")
                      or o.get("year") is None or r.get("year") is None)
             )
@@ -427,6 +521,8 @@ def _dedupe_rows(rows: list[dict]) -> list[dict]:
                     o["year"] = r.get("year")
                 if r.get("region") and not o.get("region"):
                     o["region"] = r.get("region")
+                if not o.get("source"):
+                    o["source"] = r.get("source")
                 dup = True
                 break
         if not dup:

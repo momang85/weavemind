@@ -1085,6 +1085,63 @@ class TestP2CleanData(unittest.TestCase):
                             for n in clean["notes"]))
         self.assertFalse(any("2022" in str(r.get("label")) for r in clean["market_data"]))
 
+    def test_messy_labels_fixed(self):
+        """'· 报告核心摘要 -'/'及中国AI芯片市场分析：'/'险与产业链重构德勤半导体'等
+        碎片 label 应被完整短语替换；AI整体市场单独分类；转载去重。"""
+        from clean_data import clean_and_structure
+
+        items = [
+            {"title": "2026全球AI芯片市场格局变革研究报告 - 今日头条",
+             "url": "https://toutiao.example/1",
+             "snippet": "报告核心摘要 - 市场规模：2026年全球AI芯片市场规模预计达2800亿美元"},
+            {"title": "全球芯片供应呈紧张态势",
+             "url": "https://stcn.example/2",
+             "snippet": "而芯片市场规模将比原先预期的更快达到1万亿美元"},
+            {"title": "2026年人工智能（AI）产业深度分析报告",
+             "url": "https://csdn.example/3",
+             "snippet": "IDC数据显示，2026年全球AI市场规模（含软件、硬件及服务）为3010亿美元"},
+            {"title": "2026年全球及中国AI芯片市场分析：销售额约9580亿元 GPU主导地位受挑",
+             "url": "https://sohu.example/4",
+             "snippet": "共研产业研究院团队通过上市公司年报开展数据采集工作"},
+            {"title": "2026年全球及中国AI芯片市场分析：销售额约9580亿元 GPU主导地位受挑",
+             "url": "https://zhihu.example/5",
+             "snippet": "共研产业研究院通过公开信息分析撰写相关报告"},
+            {"title": "2026-2032全球与中国AI芯片市场现状及未来发展趋势--QYResearch",
+             "url": "https://qy.example/6",
+             "snippet": "根据QYResearch的统计及预测，2025年全球AI芯片市场销售额达到了1059.8亿美元"},
+            {"title": "2026全球半导体市场展望：AI芯片驱动万亿美元产业",
+             "url": "https://semicon.example/7",
+             "snippet": "德勤预测2026年全球半导体销售额将达9750亿美元"},
+        ]
+        clean = clean_and_structure(items)
+        ms = [r for r in clean["market_data"] if r.get("type") == "market_size"]
+        labels = [str(r["label"]) for r in ms]
+        self.assertIn("AI芯片市场", labels)   # 2800
+        self.assertIn("芯片市场", labels)      # 1万亿美元
+        self.assertIn("德勤半导体", labels)    # 9750
+        # sohu/zhihu 转载同一报告 → 9580 只保留一条
+        self.assertEqual(len([r for r in ms if r.get("value") == 9580.0]), 1)
+        # AI 整体市场（含软件/服务）单独分类，不混入芯片数据
+        overall = [r for r in clean["market_data"] if r.get("type") == "ai_overall"]
+        self.assertEqual(len(overall), 1)
+        self.assertEqual(overall[0]["value"], 3010.0)
+        # 碎片 label 不得出现
+        for junk in ("报告核心摘要", "及中国AI芯片市场分析", "公司）统计", "产业链重构", "·"):
+            self.assertFalse(any(junk in l for l in labels))
+
+    def test_trend_label_has_subject(self):
+        """'年复合增速超50%' 的 label 必须带上主体（推理侧）。"""
+        from clean_data import clean_and_structure
+
+        items = [
+            {"title": "t", "url": "https://a.com/1",
+             "snippet": "推理侧成为最大增量来源，年复合增速超50%。"},
+        ]
+        clean = clean_and_structure(items)
+        rows = [r for r in clean["market_trends"] if r["value"] == 50.0]
+        self.assertEqual(len(rows), 1)
+        self.assertIn("推理侧", rows[0]["label"])
+
     def test_clean_data_schema_in_system_prompt(self):
         import tempfile
         from pathlib import Path
@@ -1147,6 +1204,38 @@ class TestTemplateGuard(unittest.TestCase):
         self.assertEqual(len(steps), 2)
         self.assertFalse(any("历史经验" in s["instruction"] for s in steps))
         self.assertFalse(any("反思要求重做" in s["instruction"] for s in steps))
+
+
+class TestReportCleanup(unittest.TestCase):
+    def test_strip_chart_data_blocks(self):
+        """模型误嵌入的 [CHART_DATA] 原始 JSON 应从报告中剥离。"""
+        from workers.report_generator_worker import ReportGeneratorWorker
+
+        w = ReportGeneratorWorker.__new__(ReportGeneratorWorker)
+        report = (
+            "# 标题\n\n正文内容\n\n"
+            "[CHART_DATA]\n{\"charts\": [{\"question\": \"xxx\"}]}\n\n"
+            "## 结论\n\n正常内容"
+        )
+        out = w._strip_chart_data_blocks(report)
+        self.assertNotIn("[CHART_DATA]", out)
+        self.assertNotIn('"charts"', out)
+        self.assertIn("## 结论", out)
+
+    def test_drop_empty_table_rows(self):
+        """数值列留空的表格行（德勤）应被删除，有效行保留。"""
+        from workers.report_generator_worker import ReportGeneratorWorker
+
+        w = ReportGeneratorWorker.__new__(ReportGeneratorWorker)
+        report = (
+            "| 机构 | 指标 | 数值 | 年份 | 来源 |\n"
+            "|------|------|------|------|------|\n"
+            "| 德勤 | 全球半导体 | | 2026 | |\n"
+            "| Gartner | AI芯片 | 2100亿美元 | 2026 | [G](http://x) |\n"
+        )
+        out = w._drop_empty_table_rows(report)
+        self.assertNotIn("德勤", out)
+        self.assertIn("Gartner", out)
 
 
 class TestP2ChartFallback(unittest.TestCase):

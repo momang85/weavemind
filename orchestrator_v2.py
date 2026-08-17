@@ -1991,9 +1991,7 @@ def add_footer(fig, spec, rows, conclusion):
 def keywords_for(spec):
     text = " ".join(str(spec.get(k) or "") for k in ("title", "question", "conclusion"))
     kw = [k for k in CURATED if k in text]
-    for chunk in re.findall(r"[\u4e00-\u9fff]+", str(spec.get("title") or "")):
-        for i in range(len(chunk) - 1):
-            kw.append(chunk[i:i + 2])
+    # 2-gram 滑动切片已移除（曾产生 "年全/片市/场规" 式碎片关键词）
     return list(dict.fromkeys(kw))[:14]
 
 
@@ -2817,6 +2815,27 @@ def short_label(s, n=14):
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+NOISE_LABELS = ("·", "报告", "摘要", "分析", "统计及", " -", "—", "–")
+SUBJECT_HINTS = ("芯片", "GPU", "TPU", "ASIC", "半导体", "出货量",
+                 "收入", "规模", "增速", "侧", "端", "市场")
+
+
+def is_noise_label(s):
+    return any(p in str(s) for p in NOISE_LABELS)
+
+
+def clean_rows(rows, require_type=None):
+    """过滤噪音 label；market_data 只保留 type=market_size（排除 AI 整体市场）。"""
+    out = []
+    for r in rows or []:
+        if is_noise_label(r.get("label")):
+            continue
+        if require_type and r.get("type") != require_type:
+            continue
+        out.append(r)
+    return out
+
+
 # 1) 主要主体提及频率（信息量大且稳定：只要有检索结果即可画）
 entity_freq = Counter({k: v for k, v in clean.get("entity_frequency", {}).items()})
 top_e = entity_freq.most_common(10)
@@ -2869,8 +2888,8 @@ if top_w and len(set(c for _, c in top_w)) > 1:
 else:
     print(f"SKIP 主题热词图：热词不足或无区分度（{len(top_w)} 条）")
 
-# 4) 市场规模（广谱扫描结果）：按单位分组渲染，避免混口径
-market = clean.get("market_data") or []
+# 4) 市场规模（广谱扫描结果）：先过滤噪音/排除 AI 整体市场，再按单位分组渲染
+market = clean_rows(clean.get("market_data"), require_type="market_size")
 if len(market) >= 2:
     by_unit = {}
     for m in market:
@@ -2898,7 +2917,7 @@ else:
     print(f"SKIP 市场规模图：有效结构化数据不足（当前 {len(market)} 条），无法生成对比图。")
 
 # 5) 市场份额（%）
-shares = clean.get("market_share") or []
+shares = clean_rows(clean.get("market_share"))
 if len(shares) >= 2 and len(set(c.get("value") for c in shares)) > 1:
     fig, ax = plt.subplots(figsize=(9, 5))
     pairs_s = sorted(shares, key=lambda x: x.get("value", 0), reverse=True)
@@ -2936,8 +2955,11 @@ if len(macros) >= 2 and len(set(c.get("value") for c in macros)) > 1:
 else:
     print(f"SKIP 宏观指标图：有效数据不足或无区分度（{len(macros)} 条）")
 
-# 7) 市场趋势（同比/环比 ±%，下降为负）
-trends = clean.get("market_trends") or []
+# 7) 市场趋势（同比/环比 ±%，下降为负）；label 过短且无主体词的条目跳过
+trends = [
+    t for t in clean_rows(clean.get("market_trends"))
+    if len(str(t.get("label") or "")) > 4 or any(h in str(t.get("label")) for h in SUBJECT_HINTS)
+]
 if len(trends) >= 2 and len(set(c.get("value") for c in trends)) > 1:
     fig, ax = plt.subplots(figsize=(9, 5))
     pairs_t = sorted(trends, key=lambda x: x.get("value", 0), reverse=True)
