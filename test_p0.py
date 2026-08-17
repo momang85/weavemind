@@ -1376,11 +1376,25 @@ class TestP0Robustness(unittest.TestCase):
 
     def test_clean_data_goal_adaptive_non_chip(self):
         """非芯片目标：实体/热词不再为空（修复"清洗脚本只认芯片"）。"""
-        import json
         from clean_data import clean_and_structure
 
-        src = r"C:\Users\ding0\AppData\Local\Temp\agent_workspace\tasks\ui-ab206d21dc\project\search_results.json"
-        items = json.load(open(src, encoding="utf-8"))
+        items = [
+            {"title": "恒大集团简介与多元化发展现状 - 百度文库",
+             "url": "https://wenku.baidu.com/view/9391b30780d049649b6648d7c1c708a1294a0a53.html",
+             "snippet": "本文剖析了恒大集团的发展历程、多元化发展战略"},
+            {"title": "恒大集团的发展历程与当前困境 - 搜狐",
+             "url": "https://www.sohu.com/a/817272004_121687419",
+             "snippet": "恒大集团，作为中国房地产行业的巨头，曾经以其快速扩张和高额负债名噪一时"},
+            {"title": "恒大集团的辉煌与没落 - 搜狐",
+             "url": "https://www.sohu.com/a/716357534_121687419",
+             "snippet": "恒大集团成立于1996年，最初是一个区域性的房地产开发商"},
+            {"title": "2024年恒大集团领导客史记录总.pptx - 原创力文档",
+             "url": "https://max.book118.com/html/2024/0528/5233343241011214.shtm",
+             "snippet": "2024年恒大集团领导客史记录总，全面总结恒大集团发展历程"},
+            {"title": "恒大集团的发展历程 - 今日头条",
+             "url": "https://www.toutiao.com/article/7348086943735087651/",
+             "snippet": "恒大集团的发展历程：1996年恒大集团在广州成立"},
+        ]
         clean = clean_and_structure(items, goal="搜索并总结恒大集团的发展历程和现状，解析当年财报")
         self.assertTrue(clean["entity_frequency"])
         self.assertTrue(clean["topic_terms"])
