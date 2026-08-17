@@ -2797,13 +2797,14 @@ for t in texts:
         if ent in t:
             entity_freq[ent] += t.count(ent)
 top_e = entity_freq.most_common(10)
-if len(top_e) >= 3:
+if len(top_e) >= 3 and len(set(c for _, c in top_e)) > 1:
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.barh([e for e, _ in top_e][::-1], [c for _, c in top_e][::-1],
+    pairs_e = top_e[::-1]  # 条形与标签共用同一反转顺序，防止索引错位
+    ax.barh([e for e, _ in pairs_e], [c for _, c in pairs_e],
             color="#0ea5e9", edgecolor="white")
     ax.set_xlabel("提及次数")
     ax.set_title("检索资料中的主要主体提及频率（厂商/区域）")
-    for i, (_, c) in enumerate(top_e):
+    for i, (_, c) in enumerate(pairs_e):
         ax.text(c + 0.1, i, str(c), va="center", fontsize=9)
     plt.tight_layout()
     plt.savefig("entity_frequency.png", dpi=110)
@@ -2816,7 +2817,8 @@ for d in items:
     if m:
         domains[m.group(1).replace("www.", "")] += 1
 top = domains.most_common(8)
-if top:
+# 若所有来源计数相同（如每源仅 1 条）→ 无信息增量，跳过该图
+if top and len(set(c for _, c in top)) > 1:
     fig, ax = plt.subplots(figsize=(8, 4.5))
     ax.barh([d for d, _ in top][::-1], [c for _, c in top][::-1],
             color="#8b5cf6", edgecolor="white")
@@ -2835,19 +2837,29 @@ stop = {
     "全球", "中国", "市场", "行业", "产业", "发展", "增长", "技术",
     "应用", "领域", "数据", "信息", "公司", "企业", "方面", "预计",
     "成为", "带来", "推动", "驱动", "规模", "目前", "未来", "有望",
+    # 单位与过宽/离题词（图4 噪声根因）
+    "万亿美元", "亿美元", "万亿元", "万亿", "亿美元", "存储", "存储芯片",
+    "半导体", "全球", "市场", "行业", "产业", "规模", "技术",
 }
-for t in texts:
+THEME_ANCHOR = re.compile(
+    r"芯片|AI|算力|推理|训练|NVIDIA|英伟达|GPU|ASIC|FPGA|加速卡", re.I,
+)
+for d in items:
+    t = str(d.get("title") or "") + " " + str(d.get("snippet") or "")
+    if not THEME_ANCHOR.search(t):
+        continue  # 非 AI 芯片主题文档不进热词统计（剔除 GDP/Token/存储等噪声）
     for m in re.finditer(r"[\u4e00-\u9fff]{2,4}", t.lower()):
         w = m.group(0)
         if w in stop:
             continue
         words[w] += 1
 top_w = words.most_common(12)
-if top_w:
+if top_w and len(set(c for _, c in top_w)) > 1:
     fig, ax = plt.subplots(figsize=(10, 5))
-    ax.barh([w for w, _ in top_w][::-1], [c for _, c in top_w][::-1],
+    pairs_w = top_w[::-1]  # 条形与标签共用同一反转顺序
+    ax.barh([w for w, _ in pairs_w], [c for _, c in pairs_w],
             color="#06b6d4", edgecolor="white")
-    for i, (_, c) in enumerate(top_w):
+    for i, (_, c) in enumerate(pairs_w):
         ax.text(c + 0.1, i, str(c), va="center", fontsize=9)
     ax.set_xlabel("出现次数")
     ax.set_title("检索资料主题热词")

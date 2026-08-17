@@ -325,9 +325,11 @@ class TestSearchCharts(unittest.TestCase):
             proj = ws_mod.task_project_dir("t-chart-1")
             (proj / "search_results.json").write_text(json.dumps([
                 {"title": "2023年AI芯片市场规模800亿美元，2024年1000亿美元，2025年1200亿美元",
-                 "url": "https://a.com/r1", "snippet": "英伟达份额49%，AMD份额12%"},
+                 "url": "https://a.com/r1", "snippet": "英伟达份额49%，AMD份额12%，英伟达主导训练"},
                 {"title": "2026年全球AI芯片市场规模预计1500亿美元",
-                 "url": "https://b.com/r2", "snippet": "英特尔份额8%，谷歌份额7%，华为份额6%"},
+                 "url": "https://a.com/r2", "snippet": "英特尔份额8%，谷歌份额7%，华为份额6%，AMD追赶"},
+                {"title": "2027年AI芯片出货量展望",
+                 "url": "https://b.com/r3", "snippet": "英伟达继续主导，出货量增长"},
             ], ensure_ascii=False), encoding="utf-8")
             o._generate_search_charts("t-chart-1", "请分析AI芯片市场并生成可视化报告")
             pngs = [p.name for p in proj.glob("*.png")]
@@ -336,6 +338,33 @@ class TestSearchCharts(unittest.TestCase):
             self.assertIn("entity_frequency.png", pngs, "应有主体提及频率图")
         finally:
             ws_mod.WORKSPACE_ROOT = old_root
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_exploratory_charts_skip_uniform(self):
+        import json
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = tempfile.mkdtemp(prefix="weavemind_chart_")
+        old = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            proj = ws_mod.task_project_dir("t-chart-u")
+            (proj / "search_results.json").write_text(json.dumps([
+                {"title": "AI芯片", "url": "https://x.com/1", "snippet": "英伟达"},
+                {"title": "AI芯片", "url": "https://y.com/2", "snippet": "AMD"},
+                {"title": "AI芯片", "url": "https://z.com/3", "snippet": "英特尔"},
+            ]), encoding="utf-8")
+            o._generate_search_charts("t-chart-u", "请分析AI芯片市场并生成可视化报告")
+            pngs = {p.name for p in proj.glob("*.png")}
+            # 实体/来源计数全为 1 → 无信息增量 → 应跳过，不生成垃圾图
+            self.assertNotIn("entity_frequency.png", pngs)
+            self.assertNotIn("source_distribution.png", pngs)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
 
