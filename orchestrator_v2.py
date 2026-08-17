@@ -2869,26 +2869,93 @@ if top_w and len(set(c for _, c in top_w)) > 1:
 else:
     print(f"SKIP 主题热词图：热词不足或无区分度（{len(top_w)} 条）")
 
-# 4) 结构化市场数据（来自清洗环节的精确提取）
+# 4) 市场规模（广谱扫描结果）：按单位分组渲染，避免混口径
 market = clean.get("market_data") or []
 if len(market) >= 2:
-    fig, ax = plt.subplots(figsize=(9, 5))
-    items_m = list(market)
-    # 与 bar 标签共用同一顺序，杜绝错位
-    labels = [str(m.get("label") or "?")[:16] for m in items_m]
-    vals = [float(m.get("value") or 0) for m in items_m]
-    ax.bar(labels, vals, color="#f59e0b", edgecolor="white")
-    ax.set_ylim(bottom=0)
-    ax.set_xlabel("细分市场")
-    ax.set_ylabel("市场规模（亿美元）")
-    ax.set_title("AI芯片细分市场规模（清洗后结构化数据）")
-    for i, v in enumerate(vals):
-        ax.text(i, v, f"{v:g}", ha="center", va="bottom", fontsize=9)
-    plt.tight_layout()
-    plt.savefig("market_data.png", dpi=110)
-    plt.close()
+    by_unit = {}
+    for m in market:
+        by_unit.setdefault(str(m.get("unit") or "?"), []).append(m)
+    best = max(by_unit.values(), key=len)
+    if len(best) >= 2:
+        items_m = best
+        # 与 bar 标签共用同一顺序，杜绝错位
+        labels = [short_label(m.get("label") or "?") for m in items_m]
+        vals = [float(m.get("value") or 0) for m in items_m]
+        fig, ax = plt.subplots(figsize=(9, 5))
+        ax.bar(labels, vals, color="#f59e0b", edgecolor="white")
+        ax.set_ylim(bottom=0)
+        ax.set_xlabel("细分市场/区域")
+        ax.set_ylabel(f"规模（{best[0].get('unit')}）")
+        ax.set_title("市场规模（清洗后结构化数据）")
+        for i, v in enumerate(vals):
+            ax.text(i, v, f"{v:g}", ha="center", va="bottom", fontsize=9)
+        plt.tight_layout()
+        plt.savefig("market_data.png", dpi=110)
+        plt.close()
+    else:
+        print(f"SKIP 市场规模图：按单位分组后最多的仅 {len(best)} 条（{len(market)} 条总数据）")
 else:
     print(f"SKIP 市场规模图：有效结构化数据不足（当前 {len(market)} 条），无法生成对比图。")
+
+# 5) 市场份额（%）
+shares = clean.get("market_share") or []
+if len(shares) >= 2 and len(set(c.get("value") for c in shares)) > 1:
+    fig, ax = plt.subplots(figsize=(9, 5))
+    pairs_s = sorted(shares, key=lambda x: x.get("value", 0), reverse=True)
+    labels_s = [short_label(x.get("label") or "?") for x in pairs_s]
+    vals_s = [float(x.get("value") or 0) for x in pairs_s]
+    ax.bar(labels_s, vals_s, color="#10b981", edgecolor="white")
+    ax.set_ylim(bottom=0)
+    ax.set_xlabel("主体")
+    ax.set_ylabel("份额（%）")
+    ax.set_title("市场份额/占比（清洗后结构化数据）")
+    for i, v in enumerate(vals_s):
+        ax.text(i, v, f"{v:g}%", ha="center", va="bottom", fontsize=9)
+    plt.tight_layout()
+    plt.savefig("market_share.png", dpi=110)
+    plt.close()
+else:
+    print(f"SKIP 市场份额图：有效数据不足或无区分度（{len(shares)} 条）")
+
+# 6) 宏观指标（Token/台/辆/次 等非货币单位）
+macros = clean.get("macro_indicators") or []
+if len(macros) >= 2 and len(set(c.get("value") for c in macros)) > 1:
+    fig, ax = plt.subplots(figsize=(9, 5))
+    pairs_m = sorted(macros, key=lambda x: x.get("value", 0), reverse=True)
+    labels_m = [f"{short_label(x.get('label') or '?')}（{x.get('unit')}）" for x in pairs_m]
+    vals_m = [float(x.get("value") or 0) for x in pairs_m]
+    ax.bar(labels_m, vals_m, color="#6366f1", edgecolor="white")
+    ax.set_ylim(bottom=0)
+    ax.set_ylabel("数值")
+    ax.set_title("宏观指标（调用量/出货量/渗透率等）")
+    for i, v in enumerate(vals_m):
+        ax.text(i, v, f"{v:g}", ha="center", va="bottom", fontsize=9)
+    plt.tight_layout()
+    plt.savefig("macro_indicators.png", dpi=110)
+    plt.close()
+else:
+    print(f"SKIP 宏观指标图：有效数据不足或无区分度（{len(macros)} 条）")
+
+# 7) 市场趋势（同比/环比 ±%，下降为负）
+trends = clean.get("market_trends") or []
+if len(trends) >= 2 and len(set(c.get("value") for c in trends)) > 1:
+    fig, ax = plt.subplots(figsize=(9, 5))
+    pairs_t = sorted(trends, key=lambda x: x.get("value", 0), reverse=True)
+    labels_t = [short_label(x.get("label") or "?") for x in pairs_t]
+    vals_t = [float(x.get("value") or 0) for x in pairs_t]
+    colors_t = ["#ef4444" if v < 0 else "#10b981" for v in vals_t]
+    ax.bar(labels_t, vals_t, color=colors_t, edgecolor="white")
+    ax.axhline(0, color="#888888", linewidth=0.8)
+    ax.set_ylabel("同比/环比变化（%）")
+    ax.set_title("市场趋势（同比增长/下降）")
+    for i, v in enumerate(vals_t):
+        ax.text(i, v, f"{v:g}%", ha="center", va="bottom" if v >= 0 else "top", fontsize=9)
+    plt.tight_layout()
+    plt.savefig("market_trends.png", dpi=110)
+    plt.close()
+else:
+    print(f"SKIP 市场趋势图：有效数据不足或无区分度（{len(trends)} 条）")
+
 print("charts generated")
 '''
         script = script.replace("__REPO_ROOT__", repo_root.replace("\\", "/"))

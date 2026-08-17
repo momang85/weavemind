@@ -1029,6 +1029,62 @@ class TestP2CleanData(unittest.TestCase):
         self.assertEqual(m[0]["value"], 5757.5)
         self.assertEqual(m[0]["unit"], "亿元")
 
+    def test_market_share_extraction(self):
+        """'GPU占有超过80%的市场份额' 应提取为份额数据。"""
+        from clean_data import clean_and_structure
+
+        items = [
+            {"title": "t", "url": "https://a.com/1",
+             "snippet": "IDC数据显示在中国AI芯片市场GPU占有超过80%的市场份额。"},
+        ]
+        clean = clean_and_structure(items)
+        shares = [x for x in clean["market_share"] if x["label"] == "GPU"]
+        self.assertEqual(len(shares), 1)
+        self.assertEqual(shares[0]["value"], 80.0)
+        self.assertEqual(shares[0]["unit"], "%")
+
+    def test_macro_indicator_extraction(self):
+        """'总调用量为46.7万亿Token' 应提取为宏观指标（非货币单位）。"""
+        from clean_data import clean_and_structure
+
+        items = [
+            {"title": "t", "url": "https://a.com/1",
+             "snippet": "报告数据显示，全球AI大模型总调用量为46.7万亿Token。"},
+        ]
+        clean = clean_and_structure(items)
+        rows = [x for x in clean["macro_indicators"] if x["label"] == "AI大模型总调用量"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["value"], 46.7)
+        self.assertEqual(rows[0]["unit"], "万亿Token")
+
+    def test_market_trend_extraction(self):
+        """'出货量预计同比下降7%' 应提取为负值趋势。"""
+        from clean_data import clean_and_structure
+
+        items = [
+            {"title": "t", "url": "https://a.com/1",
+             "snippet": "2026年全球手机芯片总出货量预计同比下降7%，但市场总收入却将实现两位数的强劲增长。"},
+        ]
+        clean = clean_and_structure(items)
+        rows = [x for x in clean["market_trends"] if "手机芯片" in x["label"]]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["value"], -7.0)
+        # "两位数增长"无数值 → 记入 notes，不产生假数据
+        self.assertTrue(any("两位数" in n.get("text", "") for n in clean["notes"]))
+
+    def test_truncated_market_size_goes_to_notes(self):
+        """'2022年…市场规模约为'（数字截断）→ 记 notes，不进 market_data。"""
+        from clean_data import clean_and_structure
+
+        items = [
+            {"title": "t", "url": "https://a.com/1",
+             "snippet": "2022年全球逻辑芯片市场规模约为。2027年将达到5,757.5亿元。"},
+        ]
+        clean = clean_and_structure(items)
+        self.assertTrue(any(n["type"] == "market_size" and "2022" in n["text"]
+                            for n in clean["notes"]))
+        self.assertFalse(any("2022" in str(r.get("label")) for r in clean["market_data"]))
+
     def test_clean_data_schema_in_system_prompt(self):
         import tempfile
         from pathlib import Path

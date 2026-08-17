@@ -217,13 +217,19 @@ class CodeExecutionWorker(AsyncWorkerBase):
             "（禁止解析 search_results.json 的原始文本）。其结构：\n"
             '{"entity_frequency": {"英伟达": 4, "中国": 3}, '
             '"market_data": [{"label": "推理芯片", "value": 1450, '
-            '"unit": "亿美元", "source": "URL"}], '
+            '"unit": "亿美元", "year": 2026, "region": "全球", "source": "URL"}], '
+            '"market_share": [{"label": "GPU", "value": 80, "unit": "%", "source": "URL"}], '
+            '"macro_indicators": [{"label": "AI大模型总调用量", "value": 46.7, '
+            '"unit": "万亿Token", "source": "URL"}], '
+            '"market_trends": [{"label": "手机芯片总出货量", "value": -7, '
+            '"unit": "%", "source": "URL"}], '
+            '"notes": [{"type": "market_size", "text": "...", "reason": "数值截断", "source": "URL"}], '
             '"source_distribution": {"a.com": 2, "b.com": 1}, '
             '"topic_terms": {"芯片": 3, "市场": 2}}\n'
             "作图规则：① 优先使用上述结构化字段；"
             "② bar/barh 的 labels 与 values 必须取自同一份数据对象，"
             "禁止分开排序导致错位；③ 某类计数全部相同（无区分度）时跳过该图；"
-            "④ 数值与单位不得臆造，缺失即不画。"
+            "④ 数值与单位不得臆造，缺失即不画；⑤ 不同单位（亿元/亿美元）不得混入同一张图。"
         )
 
     @staticmethod
