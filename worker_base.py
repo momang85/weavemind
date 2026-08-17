@@ -529,6 +529,11 @@ class SearchAgent(BaseWorker):
         "zhxsg.com", "mmzx2.cn", "ng28gaming.com", "online-28quan.com",
         "28quan.com", "365qp", "88qp", "h888", "ky777", "lywl",
     )
+    # 低权威文档站：个人上传/文库类，对调研任务无权威性，直接排除
+    _LOW_AUTHORITY_DOMAINS = (
+        "wenku.baidu.com", "book118.com", "max.book118.com", "doc88.com",
+        "docin.com", "jz.docin.com", "mbd.baidu.com", "wenku.so.com",
+    )
     _JUNK_URL_PATTERNS = (
         r"/works/\d+\.html",      # 博彩/短视频垃圾站的典型路径
         r"/tiyu-toutiao/",        # 借"体育头条"外衣的博彩页
@@ -749,6 +754,8 @@ class SearchAgent(BaseWorker):
         u = str(url or "").lower()
         t = str(title or "").lower()
         s = str(snip or "").lower()
+        if any(d in u for d in SearchAgent._LOW_AUTHORITY_DOMAINS):
+            return True
         for pat in SearchAgent._JUNK_URL_PATTERNS:
             if _re.search(pat, u):
                 return True

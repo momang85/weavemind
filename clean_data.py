@@ -61,7 +61,7 @@ THEME_ANCHOR = re.compile(
 
 # 已知分项的精确市场数据规则：<分项>…<数字>亿元/亿美元（支持千分位逗号与"约"前缀）。
 # 保留它们以稳定输出 推理/训练/边缘/逻辑芯片 等细分市场的柱状图。
-_NUM = r"(\d[\d,]*(?:\.\d+)?)"
+_NUM = r"(-?\d[\d,]*(?:\.\d+)?)"
 SPECIFIC_MARKET_PATTERNS = [
     ("推理芯片", re.compile(r"推理芯片[^。；;]*?" + _NUM + r"\s*(?:亿|万)美元", re.I)),
     ("训练芯片", re.compile(r"训练芯片[^。；;]*?" + _NUM + r"\s*(?:亿|万)美元", re.I)),
@@ -72,7 +72,10 @@ SPECIFIC_MARKET_PATTERNS = [
 # ── 广谱扫描规则（按句子逐条匹配，覆盖 市场规模/份额/宏观指标/趋势 四类）──
 _MONEY_UNIT = r"(?:万亿美元|万亿元|亿美元|亿元|万美元|万元)"
 _REGIONS = ("全球", "中国", "美国", "欧洲", "亚太", "日本", "国内", "国际", "中国大陆", "华东")
-_SIZE_KEYWORDS = ("市场规模", "销售额", "销售规模", "营收", "收入")
+_SIZE_KEYWORDS = (
+    "市场规模", "销售额", "销售规模", "总营收", "营收", "总收入", "收入",
+    "净利润", "净亏损", "亏损", "总负债", "负债", "总资产", "净资产",
+)
 _LABEL_SEPS = ("：", ":", "，", ",", "。", "；", ";", "、", "）", ")")
 _CHIP_TERMS = (
     "芯片", "半导体", "gpu", "asic", "fpga", "加速器", "处理器",
@@ -84,6 +87,9 @@ _SPAM_DOMAINS = (
     "susmeat.com", "aydvjch.cc", "example.com", "imty-web.com",
     "zhxsg.com", "mmzx2.cn", "ng28gaming.com", "online-28quan.com",
     "28quan.com", "365qp", "88qp",
+    # 低权威文档站（百度文库/原创力/道客巴巴/豆丁）
+    "wenku.baidu.com", "book118.com", "doc88.com", "docin.com",
+    "mbd.baidu.com", "wenku.so.com",
 )
 _JUNK_URL_PATTERNS = (
     r"/works/\d+\.html",
@@ -139,45 +145,68 @@ def _sentences(text: str) -> list[str]:
     return [s.strip() for s in parts if s.strip()]
 
 
-def _market_size_row(sent: str, url: str):
-    """市场规模/销售额：年份+地域+主题+数值+货币单位；数值缺失时记 notes。"""
-    m = re.search(r"(?P<num>\d[\d,]*(?:\.\d+)?)\s*(?P<unit>" + _MONEY_UNIT + r")", sent)
-    if not m:
-        # 仅"市场规模/销售额"类缺失数值才算截断；"收入…两位数增长"由趋势规则记录
-        if re.search(r"(市场规模|销售额|销售规模)", sent) and re.search(
-            r"(约为|约|达|达到|有望|接近)", sent,
-        ):
-            return None, {
-                "type": "market_size",
-                "text": sent[:160],
-                "reason": "结构完整但数值缺失/在摘要中被截断",
-                "source": url,
-            }
-        return None, None
-    num_pos = m.start("num")
-    # 取数值前最近的一个 规模/销售额 关键词（避免先匹配到"市场规模："这类前缀）
-    kw = -1
-    for k in _SIZE_KEYWORDS:
-        p = sent.rfind(k, 0, num_pos)
-        if p > kw:
-            kw = p
-    if kw < 0:
-        return None, None
-    theme = _extract_size_theme(sent, kw)
-    if len(theme) < 2:
-        return None, None  # 碎片 label（"而"、"·" 等）直接丢弃，不产垃圾数据
-    year_m = re.search(r"(20\d{2})年?", sent[:kw])
-    region = next((r for r in _REGIONS if r in sent[:kw]), None)
-    mtype = "market_size" if _is_chip_theme(theme) else "ai_overall"
-    return {
-        "type": mtype,
-        "label": theme,
-        "value": float(m.group("num").replace(",", "")),
-        "unit": m.group("unit"),
-        "year": int(year_m.group(1)) if year_m else None,
-        "region": region,
-        "source": url,
-    }, None
+def _market_size_rows(sent: str, url: str) -> tuple[list[dict], list[dict]]:
+    """市场规模/销售额/财务指标：逐数字提取（营收/净利润/负债…），
+    年份+地域+主题+数值+单位；数值缺失时记 notes。"""
+    rows: list[dict] = []
+    notes: list[dict] = []
+    for m in re.finditer(
+        r"(?P<num>-?\d[\d,]*(?:\.\d+)?)\s*(?P<unit>" + _MONEY_UNIT + r")",
+        sent,
+    ):
+        num_pos = m.start("num")
+        # 取数值前最近的一个规模/财务关键词（避免先匹配到"市场规模："这类前缀）
+        kw = -1
+        for k in _SIZE_KEYWORDS:
+            p = sent.rfind(k, 0, num_pos)
+            if p > kw:
+                kw = p
+        if kw < 0:
+            continue
+        kw_word = next(
+            (k for k in _SIZE_KEYWORDS if sent[kw:kw + len(k)] == k),
+            "指标",
+        )
+        if kw_word in ("市场规模", "销售额", "销售规模"):
+            theme = _extract_size_theme(sent, kw)
+        else:
+            # 财务指标类（营收/净利润/负债/资产…）：关键词本身就是主题，
+            # 不做短语提取，避免把前一个数字子句混进标签
+            if kw_word in ("亏损", "净亏损") and "净利润" in sent[max(0, kw - 4):kw]:
+                kw_word = "净利润"
+            theme = (
+                "总" + kw_word
+                if (kw > 0 and sent[kw - 1] == "总" and not kw_word.startswith("总"))
+                else kw_word
+            )
+        if len(theme) < 2:
+            theme = kw_word
+        val = float(m.group("num").replace(",", ""))
+        # "净利润亏损6862亿元" 这类亏损表述 → 数值取负
+        if "亏损" in sent[kw:num_pos] or "净亏" in sent[kw:num_pos]:
+            val = -abs(val)
+        year_m = re.search(r"(20\d{2})年?", sent[:kw])
+        region = next((r for r in _REGIONS if r in sent[:kw]), None)
+        mtype = "market_size" if _is_chip_theme(theme) else "ai_overall"
+        rows.append({
+            "type": mtype,
+            "label": theme,
+            "value": val,
+            "unit": m.group("unit"),
+            "year": int(year_m.group(1)) if year_m else None,
+            "region": region,
+            "source": url,
+        })
+    if not rows and re.search(r"(市场规模|销售额|销售规模)", sent) and re.search(
+        r"(约为|约|达|达到|有望|接近)", sent,
+    ):
+        notes.append({
+            "type": "market_size",
+            "text": sent[:160],
+            "reason": "结构完整但数值缺失/在摘要中被截断",
+            "source": url,
+        })
+    return rows, notes
 
 
 def _extract_size_theme(sent: str, kw_pos: int) -> str:
@@ -431,6 +460,17 @@ def _doc_text(d: dict) -> str:
     return str(d.get("title") or "") + " " + str(d.get("snippet") or "")
 
 
+def _doc_sentences(d: dict) -> list[str]:
+    """标题与摘要分开切句并归一化，避免标题字（"年报"的"报"）混入数值短语。"""
+    out: list[str] = []
+    for part in (str(d.get("title") or ""), str(d.get("snippet") or "")):
+        for s in _sentences(part):
+            ns = _norm_sentence(s)
+            if ns:
+                out.append(ns)
+    return out
+
+
 def _is_garbage_doc(d: dict) -> bool:
     url = str(d.get("url") or "").lower()
     text = _doc_text(d).lower()
@@ -443,9 +483,74 @@ def _is_garbage_doc(d: dict) -> bool:
     return False
 
 
-def clean_and_structure(items: list[dict]) -> dict:
-    """把原始检索结果清洗为结构化图表数据（广谱扫描四类规则 + 截断记录）。"""
+def _goal_anchors(goal: str) -> tuple[str, ...]:
+    """目标自适应锚点：从目标中提取核心词作为主题门控。
+    非芯片/财经类目标也能匹配（解决"清洗脚本只认芯片+亿美元"问题）。"""
+    g = str(goal or "").strip().lower()
+    if not g:
+        return ("芯片", "ai", "gpu", "算力", "推理", "训练", "nvidia", "英伟达",
+                "asic", "fpga", "加速卡", "半导体", "token", "大模型", "数据中心")
+    toks: set[str] = set()
+    for run in re.findall(r"[\u4e00-\u9fff]{2,6}", g):
+        for i in range(len(run) - 1):
+            bg = run[i:i + 2]
+            if bg not in STOPWORDS:
+                toks.add(bg)
+    if any(k in g for k in ("财报", "财务", "营收", "利润", "负债", "年报", "季报", "业绩")):
+        toks.update(("营收", "净利润", "负债", "总资产", "销售额", "利润", "亏损", "财报", "收入"))
+    if any(k in g for k in ("芯片", "ai", "gpu", "算力", "半导体", "英伟达")):
+        toks.update(("芯片", "ai", "gpu", "算力", "半导体", "nvidia", "英伟达"))
+    return tuple(toks) or ("芯片",)
+
+
+def _anchor_in(text: str, anchor: str) -> bool:
+    """锚点匹配：纯英文按词边界（避免 ai 误中 said），中文子串即可。"""
+    if re.fullmatch(r"[a-z]{2,}", anchor):
+        return re.search(
+            r"(?<![a-z0-9])" + re.escape(anchor) + r"(?![a-z0-9])",
+            text,
+        ) is not None
+    return anchor in text
+
+
+def _entity_names(goal: str) -> tuple[str, ...]:
+    """目标实体：芯片类用别名表；其他主题用目标核心词（≥2 字、非停用词）。"""
+    g = str(goal or "").lower()
+    if not g or any(k in g for k in ("芯片", "ai", "gpu", "半导体", "算力")):
+        return tuple(ENTITY_ALIASES)
+    toks: list[str] = []
+    if HAVE_JIEBA:
+        import jieba.posseg as _pseg
+        for w, flag in _pseg.cut(str(goal or "")):
+            w = w.strip()
+            if (
+                len(w) >= 2
+                and flag.startswith(("n", "nr", "ns", "nt", "nz", "j", "eng"))
+                and w.lower() not in STOPWORDS
+                and not any(c in _FRAGMENT_CHARS for c in w)
+            ):
+                toks.append(w)
+    if not toks:
+        # 回退：2 字 bigram，过滤含功能字片段（避免"大集/的发/团的"）
+        for run in re.findall(r"[\u4e00-\u9fff]{2,6}", str(goal or "")):
+            for i in range(len(run) - 1):
+                bg = run[i:i + 2]
+                if bg not in STOPWORDS and not any(c in _FRAGMENT_CHARS for c in bg):
+                    toks.append(bg)
+    out: list[str] = []
+    for t in toks:
+        if t not in out:
+            out.append(t)
+    return tuple(out[:12]) or ("主题",)
+
+
+def clean_and_structure(items: list[dict], goal: str = "") -> dict:
+    """把原始检索结果清洗为结构化图表数据（广谱扫描四类规则 + 截断记录）。
+    goal 用于目标自适应主题门控（非芯片/财经任务同样有效）。"""
     docs = [d for d in _docs(items) if not _is_garbage_doc(d)]
+    anchors = _goal_anchors(goal)
+    names = _entity_names(goal)
+    use_aliases = names and names[0] in ENTITY_ALIASES
     entity_freq = Counter()
     market: list[dict] = []
     shares: list[dict] = []
@@ -454,21 +559,28 @@ def clean_and_structure(items: list[dict]) -> dict:
     notes: list[dict] = []
     for d in docs:
         text = _doc_text(d)
-        if not THEME_ANCHOR.search(text):
+        tl = text.lower()
+        if not any(_anchor_in(tl, a) for a in anchors):
             continue
         url = str(d.get("url") or "")
-        for ent, aliases in ENTITY_ALIASES.items():
-            # 别名按小写去重：避免 "AMD"+"amd" 在同一条文本里被计两次
-            seen: set[str] = set()
-            n = 0
-            for a in aliases:
-                key = a.lower()
-                if key in seen:
-                    continue
-                seen.add(key)
-                n += _count_alias(text, a)
-            if n:
-                entity_freq[ent] += n
+        if use_aliases:
+            for ent, aliases in ENTITY_ALIASES.items():
+                # 别名按小写去重：避免 "AMD"+"amd" 在同一条文本里被计两次
+                seen: set[str] = set()
+                n = 0
+                for a in aliases:
+                    key = a.lower()
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    n += _count_alias(text, a)
+                if n:
+                    entity_freq[ent] += n
+        else:
+            for ent in names:
+                n = text.count(ent)
+                if n:
+                    entity_freq[ent] += n
         # 已知分项的精确规则（推理/训练/边缘/逻辑芯片…亿美元/亿元）
         for label, pat in SPECIFIC_MARKET_PATTERNS:
             m = pat.search(text)
@@ -482,16 +594,14 @@ def clean_and_structure(items: list[dict]) -> dict:
                     })
                 except (ValueError, TypeError):
                     pass
-        # 广谱扫描：按句子逐条规则
-        for sent in _sentences(text):
-            ns = _norm_sentence(sent)
-            if not THEME_ANCHOR.search(ns):
+        # 广谱扫描：按句子逐条规则（标题/摘要分开切句）
+        for ns in _doc_sentences(d):
+            nsl = ns.lower()
+            if not any(_anchor_in(nsl, a) for a in anchors):
                 continue
-            row, note = _market_size_row(ns, url)
-            if row:
-                market.append(row)
-            if note:
-                notes.append(note)
+            rows_m, notes_m = _market_size_rows(ns, url)
+            market.extend(rows_m)
+            notes.extend(notes_m)
             shares.extend(_share_rows(ns, url))
             macros.extend(_macro_rows(ns, url))
             trends.extend(_trend_rows(ns, url, notes))
@@ -508,7 +618,8 @@ def clean_and_structure(items: list[dict]) -> dict:
     topic_terms = Counter()
     for d in docs:
         text = _doc_text(d)
-        if not THEME_ANCHOR.search(text):
+        tl = text.lower()
+        if not any(_anchor_in(tl, a) for a in anchors):
             continue
         for w in _tokenize(text):
             topic_terms[w] += 1
@@ -570,7 +681,7 @@ def _dedupe_notes(notes: list[dict]) -> list[dict]:
     return out
 
 
-def clean_file(search_path, out_path=None) -> Path:
+def clean_file(search_path, out_path=None, goal: str = "") -> Path:
     """读取 search_results.json，写出 clean_chart_data.json，返回输出路径。"""
     sp = Path(search_path)
     op = Path(out_path) if out_path else sp.parent / "clean_chart_data.json"
@@ -579,7 +690,8 @@ def clean_file(search_path, out_path=None) -> Path:
     except Exception:
         items = []
     op.write_text(
-        json.dumps(clean_and_structure(items if isinstance(items, list) else []),
+        json.dumps(
+            clean_and_structure(items if isinstance(items, list) else [], goal=goal),
                     ensure_ascii=False, indent=1),
         encoding="utf-8",
     )

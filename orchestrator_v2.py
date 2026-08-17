@@ -6,7 +6,7 @@ critic_agent, ws_helpers. No complex state machine — just: plan → dispatch �
 This is the active orchestrator (legacy orchestrator.py was removed in the architecture cleanup).
 """
 
-import json, logging, os, re, threading, time, uuid
+import json, logging, os, re, shutil, threading, time, uuid
 
 from workspace import (
     ensure_task_workspace,
@@ -2225,9 +2225,6 @@ def main():
         plt.close(fig)
         manifest.append({
             "file": fname,
-            "title": title,
-            "question": str(spec.get("question") or ""),
-            "conclusion": conclusion,
             "keywords": keywords_for(spec),
         })
         print(f"RENDERED {fname}: {title}", flush=True)
@@ -2255,6 +2252,17 @@ if __name__ == "__main__":
                 for line in out.splitlines():
                     if line.startswith("SKIP "):
                         logger.info("chart skipped: %s", line)
+            # 图表同步到 workspace/charts/（report_generator 从该目录发现图表并嵌入报告）
+            try:
+                from workspace import task_charts_dir
+                cdir = task_charts_dir(task_id)
+                for png in project.glob("*.png"):
+                    shutil.copy2(png, cdir / png.name)
+                mf = project / "chart_manifest.json"
+                if mf.exists():
+                    shutil.copy2(mf, cdir / mf.name)
+            except Exception as exc:
+                logger.warning("chart sync failed: %s", str(exc)[:120])
         except Exception as exc:
             logger.warning("render_charts error: %s", exc)
 
@@ -2850,7 +2858,7 @@ if __name__ == "__main__":
         if not clean_src.exists():
             try:
                 from clean_data import clean_file
-                clean_file(src, clean_src)
+                clean_file(src, clean_src, goal=goal)
             except Exception as exc:
                 logger.warning("clean_data failed: %s", str(exc)[:100])
                 return
@@ -3056,6 +3064,15 @@ print("charts generated")
                     logger.info("make_charts(%s): %s", task_id, out[:500])
             if proc.returncode != 0:
                 logger.warning("make_charts failed: %s", proc.stderr.decode("utf-8", errors="replace")[:200])
+            else:
+                # 探索性图表同步到 workspace/charts/，供报告内联嵌入
+                try:
+                    from workspace import task_charts_dir
+                    cdir = task_charts_dir(task_id)
+                    for png in project.glob("*.png"):
+                        shutil.copy2(png, cdir / png.name)
+                except Exception as exc:
+                    logger.warning("search-chart sync failed: %s", str(exc)[:120])
         except Exception as exc:
             logger.warning("make_charts error: %s", exc)
 
@@ -3745,7 +3762,7 @@ print("charts generated")
                             # 数据清洗/结构化（搜索 → 清洗 → 绘图）：
                             # 先生成 clean_chart_data.json，绘图只读清洗后数据
                             from clean_data import clean_file
-                            clean_file(_json_path)
+                            clean_file(_json_path, goal=goal)
                             self._generate_search_charts(task_id, goal)
                         except Exception as exc:
                             logger.warning("search_results.json write failed: %s", exc)

@@ -218,6 +218,11 @@ def verify_specs_against_text(specs: list[dict], text: str) -> tuple[list[dict],
                 cands.add(str(f))
                 if f == int(f):
                     cands.add(str(int(f)))
+                if f < 0:
+                    # 亏损/负值在正文常以正数表述（"亏损6862亿元"），补绝对值候选，
+                    # 避免 2021 年 -6862 这类极端值被溯源校验误删
+                    cands.add(f"{abs(f):g}")
+                    cands.add(str(int(abs(f))))
             else:
                 cands.add(str(v))
             if any(c and c in nt for c in cands):

@@ -336,6 +336,9 @@ class TestSearchCharts(unittest.TestCase):
             self.assertIn("source_distribution.png", pngs)
             self.assertIn("topic_terms.png", pngs)
             self.assertIn("entity_frequency.png", pngs, "应有主体提及频率图")
+            # 图表同步到 workspace/charts/，供 report_generator 内联嵌入
+            chart_dir = ws_mod.task_charts_dir("t-chart-1")
+            self.assertIn("entity_frequency.png", {p.name for p in chart_dir.glob("*.png")})
         finally:
             ws_mod.WORKSPACE_ROOT = old_root
             import shutil
@@ -622,7 +625,10 @@ class TestSearchCharts(unittest.TestCase):
             self.assertEqual(pngs, {"chart_1.png", "chart_2.png"}, "应按规格渲染两张图")
             manifest = json.loads((proj / "chart_manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(len(manifest["charts"]), 2)
-            self.assertTrue(all(m["title"] and m["conclusion"] and m["keywords"] for m in manifest["charts"]))
+            # manifest 只保留 file+keywords（与 chart_data.json 去冗余）
+            self.assertTrue(all(m["file"] and m["keywords"] for m in manifest["charts"]))
+            self.assertTrue(all("title" not in m and "conclusion" not in m
+                                for m in manifest["charts"]))
         finally:
             ws_mod.WORKSPACE_ROOT = old_root
             import shutil
@@ -660,8 +666,8 @@ class TestSearchCharts(unittest.TestCase):
             pngs = {p.name for p in proj.glob("chart_*.png")}
             self.assertEqual(pngs, {"chart_1.png"}, "单年份多口径应生成一张柱状图")
             manifest = json.loads((proj / "chart_manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(manifest["charts"][0]["title"],
-                             "2025年全球AI芯片市场规模口径对比（亿美元）")
+            self.assertEqual(manifest["charts"][0]["file"], "chart_1.png")
+            self.assertTrue(manifest["charts"][0]["keywords"])
         finally:
             ws_mod.WORKSPACE_ROOT = old_root
             import shutil

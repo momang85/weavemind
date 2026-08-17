@@ -1356,6 +1356,86 @@ class TestP0Robustness(unittest.TestCase):
         out2 = o._enforce_no_web_scrape_code(game, "做一个贪吃蛇游戏", "t-y")
         self.assertEqual(out2[0]["capability"], "code_execution")
 
+    def test_clean_data_financial_extraction(self):
+        """非芯片主题（恒大财报）也能提取 营收/净利润/负债/资产，亏损转负、支持万亿。"""
+        from clean_data import clean_and_structure
+
+        items = [
+            {"title": "恒大2021年报", "url": "https://sohu.example/1",
+             "snippet": "2021年恒大总营收2500亿元，净利润亏损6862.2亿元，总负债约2.39万亿元，总资产1.8万亿元。"},
+            {"title": "恒大2020年报", "url": "https://sohu.example/2",
+             "snippet": "2020年恒大总营收5072.5亿元，净利润314亿元。"},
+        ]
+        clean = clean_and_structure(items, goal="搜索并总结恒大集团的发展历程和现状，解析当年财报")
+        md = {(r["label"], r["year"]): r for r in clean["market_data"]}
+        self.assertEqual(md[("总营收", 2021)]["value"], 2500.0)
+        self.assertEqual(md[("净利润", 2021)]["value"], -6862.2)   # 亏损 → 负值
+        self.assertEqual(md[("总负债", 2021)]["unit"], "万亿元")
+        self.assertEqual(md[("总负债", 2021)]["value"], 2.39)
+        self.assertEqual(md[("总营收", 2020)]["value"], 5072.5)
+
+    def test_clean_data_goal_adaptive_non_chip(self):
+        """非芯片目标：实体/热词不再为空（修复"清洗脚本只认芯片"）。"""
+        import json
+        from clean_data import clean_and_structure
+
+        src = r"C:\Users\ding0\AppData\Local\Temp\agent_workspace\tasks\ui-ab206d21dc\project\search_results.json"
+        items = json.load(open(src, encoding="utf-8"))
+        clean = clean_and_structure(items, goal="搜索并总结恒大集团的发展历程和现状，解析当年财报")
+        self.assertTrue(clean["entity_frequency"])
+        self.assertTrue(clean["topic_terms"])
+        self.assertIn("sohu.com", clean["source_distribution"])
+        # 低权威来源（百度文库/原创力文档）被过滤
+        self.assertNotIn("wenku.baidu.com", clean["source_distribution"])
+        self.assertNotIn("book118.com", clean["source_distribution"])
+
+    def test_verify_specs_keeps_negative_outlier(self):
+        """正文以正数表述亏损（"亏损6862.2亿元"）时，-6862 数据点不应被溯源校验误删。"""
+        from chart_specs import verify_specs_against_text
+
+        specs = [{
+            "question": "q", "conclusion": "2021年-6862亿元历史巨亏",
+            "type": "line", "title": "净利润趋势", "data": [
+                {"label": "2020", "value": 314, "year": 2020},
+                {"label": "2021", "value": -6862, "year": 2021},
+                {"label": "2022", "value": -1258, "year": 2022},
+            ],
+        }]
+        text = "2020年净利润314亿元，2021年亏损高达6,862.2亿元，2022年亏损1258亿元。"
+        kept, dropped = verify_specs_against_text(specs, text)
+        self.assertEqual(dropped, 0)
+        years = {r["year"] for r in kept[0]["data"]}
+        self.assertIn(2021, years)
+
+    def test_flag_conflicting_figures(self):
+        """同一指标多个数值 → 报告末尾追加一致性提示。"""
+        from workers.report_generator_worker import ReportGeneratorWorker
+
+        w = ReportGeneratorWorker.__new__(ReportGeneratorWorker)
+        report = (
+            "执行摘要：截至2023年末总负债约2.39万亿元。\n"
+            "关键发现：债务规模约2.44万亿元。\n"
+            "营收为5072亿元。"
+        )
+        out = w._flag_conflicting_figures(report)
+        self.assertIn("数据一致性提示", out)
+        self.assertIn("总负债", out)
+        self.assertNotIn("营收为5072亿元", out.split("数据一致性提示")[1] or "")
+
+    def test_low_authority_filter(self):
+        """百度文库/原创力文档等低权威来源应被搜索过滤。"""
+        from worker_base import SearchAgent
+
+        self.assertTrue(SearchAgent._is_garbage_result(
+            "恒大集团简介", "https://wenku.baidu.com/view/9391b30780d049649b6648d7c1c708a1294a0a53.html",
+            "分析"))
+        self.assertTrue(SearchAgent._is_garbage_result(
+            "客史记录", "https://max.book118.com/html/2024/0528/5233343241011214.shtm",
+            "报告"))
+        self.assertFalse(SearchAgent._is_garbage_result(
+            "恒大集团的发展历程与当前困境", "https://www.sohu.com/a/817272004_121687419",
+            "房地产巨头"))
+
 
 class TestP2ChartFallback(unittest.TestCase):
     def test_parse_header_unit_and_share_column(self):

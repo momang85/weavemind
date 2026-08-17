@@ -52,10 +52,28 @@ class ReportGeneratorWorker(AsyncWorkerBase):
 
         def best_heading(keywords) -> int | None:
             """返回匹配到的【最深】标题行号。"""
+            # 同义词扩展：chart keywords（营收/趋势/份额…）→ 常见章节标题词
+            syn = {
+                "营收": ("财务", "营收", "收入", "利润", "数据", "指标"),
+                "收入": ("财务", "营收", "收入", "利润", "数据"),
+                "利润": ("财务", "利润", "亏损", "数据", "指标"),
+                "负债": ("负债", "债务", "财务"),
+                "规模": ("规模", "财务", "数据", "指标"),
+                "趋势": ("趋势", "变化", "财务", "分析", "数据"),
+                "份额": ("份额", "占比", "竞争", "格局"),
+                "占比": ("份额", "占比", "竞争", "格局"),
+                "财务": ("财务", "数据", "指标", "分析"),
+                "时间": ("时间", "历程", "发展", "时间线", "大事记"),
+                "历程": ("历程", "发展", "时间线", "阶段"),
+            }
+            expanded: list[str] = []
+            for k in keywords or []:
+                expanded.append(k)
+                expanded.extend(syn.get(k, ()))
             best = None
             best_level = 0
             for idx, lvl, text in headings:
-                if any(k and k in text for k in keywords):
+                if any(k and k in text for k in expanded):
                     if best is None or lvl > best_level:
                         best = idx
                         best_level = lvl
@@ -180,6 +198,39 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             out.append(ln)
         return "\n".join(out).strip()
 
+    @staticmethod
+    def _flag_conflicting_figures(report: str) -> str:
+        """数据一致性检查：同一财务指标出现多个不同数值时，在报告末尾追加分歧提示
+        （如"总负债 2.39万亿 vs 2.44万亿"，可能来自不同来源/口径）。"""
+        pat = re.compile(
+            r"(总负债|负债总额|债务规模|债务|总营收|营收|净利润|净亏损|亏损|总资产|净资产|"
+            r"总收入|收入|销售额|市值)"
+            r"\s*(?:约|达|为|达到|约为|合计|高达|录得|亏损|净亏|同比)?\s*"
+            r"(\d[\d,]*(?:\.\d+)?)\s*(万亿|亿|万)?元"
+        )
+        groups: dict[str, set[str]] = {}
+        norm = {
+            "负债总额": "总负债", "债务规模": "总负债", "债务": "总负债",
+            "净亏损": "净利润", "亏损": "净利润", "总收入": "营收", "收入": "营收",
+        }
+        for m in pat.finditer(str(report or "")):
+            metric = norm.get(m.group(1), m.group(1))
+            sign = "-" if m.group(0).find("亏损") >= 0 or m.group(0).find("净亏") >= 0 else ""
+            val = sign + m.group(2).replace(",", "") + (m.group(3) or "")
+            groups.setdefault(metric, set()).add(val)
+        conflicts = [
+            f"{k}：{'、'.join(sorted(v, key=lambda x: (len(x), x)))}"
+            for k, v in groups.items() if len(v) > 1
+        ]
+        if not conflicts:
+            return report
+        note = (
+            "\n\n> ⚠️ **数据一致性提示**：以下指标在本报告中出现了多个不同数值，"
+            "可能来自不同来源或统计口径（如含/不含合同负债），请以官方公告为准：\n\n"
+            + "\n".join(f"> - {c}" for c in conflicts[:8])
+        )
+        return str(report) + note
+
     async def execute(self, instruction: str, task: dict | None = None) -> str:
         charts_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "charts"
         data_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "data"
@@ -279,10 +330,15 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                     prev_content = "\n\n".join(p.strip() for p in prev_parts)
                     prev_content = self._clean_fallback_content(prev_content)
                     if prev_content:
-                        report += (
-                            "\n\n## 研究内容（检索/摘要）\n\n"
-                            + prev_content[:6000]
-                        )
+                        # 若前序结果已是完整文档（含顶层标题），不重复拼接（避免
+                        # 两份报告叠在一起、同一指标出现两个数值的"双报告"问题）
+                        if not re.search(r"^# ", prev_content, re.M):
+                            report += (
+                                "\n\n## 研究内容（检索/摘要）\n\n"
+                                + prev_content[:6000]
+                            )
+                        else:
+                            logger.info("Fallback content skipped: already a full document")
 
             # 数据来源附录：从指令中的 [数据来源] 块提取 URL 并去重
             src_urls: list[str] = []
@@ -303,6 +359,8 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             # 后处理：剥离误嵌入的 [CHART_DATA] 原始 JSON，删除空数值表格行
             report = self._strip_chart_data_blocks(report)
             report = self._drop_empty_table_rows(report)
+            # 数据一致性检查：同一指标多个数值 → 追加分歧提示
+            report = self._flag_conflicting_figures(report)
 
             rpath = report_dir / "report.md"
             rpath.write_text(report, encoding="utf-8")
