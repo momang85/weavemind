@@ -330,6 +330,11 @@ def _system_status():
             llm_health = get_endpoint_health()
         except Exception:
             llm_health = {}
+        try:
+            from llm_client import get_endpoint_warning
+            llm_warning = get_endpoint_warning()
+        except Exception:
+            llm_warning = ""
         search_health = {}
         if _redis_ready():
             try:
@@ -341,6 +346,7 @@ def _system_status():
         return {
             "agents": agents,
             "llm_health": llm_health,
+            "llm_warning": llm_warning,
             "search_health": search_health,
             "queues": queues,
             "tasks": {"total": total, "success": success, "today": today},

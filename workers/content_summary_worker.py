@@ -73,7 +73,7 @@ class ContentSummaryWorker(AsyncWorkerBase):
                 "列为：机构/来源 | 指标 | 数值 | 年份 | 口径说明 | 来源链接。"
                 "只收录与任务主题直接相关的数值；不同机构/口径分开列行；"
                 "数值必须来自检索资料真实出现的内容，严禁编造。"
-            ))
+            ), goal=instruction)
 
             user = f"指令: {instruction}\n\n请根据指令生成总结内容。"
 

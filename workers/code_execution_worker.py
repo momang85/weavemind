@@ -172,6 +172,7 @@ class CodeExecutionWorker(AsyncWorkerBase):
             system = get_prompt(
                 "code_execution",
                 "You are a web developer. Write minimal runnable code. Output ONLY raw code.",
+                goal=instruction,
             )
             system += clean_note
             prompt = (
@@ -186,7 +187,7 @@ class CodeExecutionWorker(AsyncWorkerBase):
             system = get_prompt("code_execution", (
                 "You are a senior Python developer. Generate complete, runnable, "
                 "self-contained code. Output ONLY the code, no explanations."
-            ))
+            ), goal=instruction)
             system += clean_note
             prompt = (
                 "请生成满足以下要求的完整可运行 Python 代码（自包含、可直接执行，"

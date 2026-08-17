@@ -190,7 +190,8 @@ class CriticAgent:
         try:
             from prompt_registry import get_prompt
             result = call_llm(
-                get_prompt("critic", CRITIC_SYSTEM), user_prompt, expect_json=True
+                get_prompt("critic", CRITIC_SYSTEM, goal=goal),
+                user_prompt, expect_json=True,
             )
         except LLMJSONParseError as exc:
             logger.error("Critic LLM JSON parse error: %s", exc)

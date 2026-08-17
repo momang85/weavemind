@@ -1480,6 +1480,94 @@ class TestP0Robustness(unittest.TestCase):
         v2 = sa._query_variants("做一个贪吃蛇游戏")
         self.assertFalse(any("净利润" in v for v in v2))
 
+    def test_override_goal_matching(self):
+        """prompt override 只对同类目标生效（特斯拉字段不泄漏到腾讯）。"""
+        import json
+        import os
+        import tempfile
+        from pathlib import Path
+        import prompt_registry as pr
+
+        tmp = Path(tempfile.mkdtemp(prefix="ovr_"))
+        (tmp / "overrides.json").write_text(json.dumps({
+            "content_summary": {
+                "prompt": "追加要求：必须输出汽车交付量字段。",
+                "version": 2,
+                "trigger_task": "ui-tesla-1",
+                "match_goal": ["特斯拉", "tesla", "tsla"],
+            },
+            "report_generator": {
+                "prompt": "追加要求：报告必须包含执行摘要与来源附录。",
+                "version": 2,
+            },
+        }, ensure_ascii=False), encoding="utf-8")
+        old_env = os.environ.get("WEAVEMIND_PROMPTS_DIR")
+        old_cache = dict(pr._TRIGGER_GOAL_CACHE)
+        os.environ["WEAVEMIND_PROMPTS_DIR"] = str(tmp)
+        try:
+            # 腾讯目标：content_summary 覆盖（特斯拉专用）不应用
+            sys_out = pr.get_prompt("content_summary", "默认", goal="搜索并总结腾讯集团的发展历程和现状")
+            self.assertNotIn("汽车交付量", sys_out)
+            self.assertNotIn("自迭代改进", sys_out)
+            # 特斯拉目标：应用
+            tsla_out = pr.get_prompt("content_summary", "默认", goal="搜索特斯拉最新财报并总结要点")
+            self.assertIn("汽车交付量", tsla_out)
+            # 手动覆盖（无 match_goal/trigger_task）：全局应用
+            manual = pr.get_prompt("report_generator", "默认", goal="腾讯财报")
+            self.assertIn("自迭代改进", manual)
+        finally:
+            if old_env is None:
+                os.environ.pop("WEAVEMIND_PROMPTS_DIR", None)
+            else:
+                os.environ["WEAVEMIND_PROMPTS_DIR"] = old_env
+            pr._TRIGGER_GOAL_CACHE.clear()
+            pr._TRIGGER_GOAL_CACHE.update(old_cache)
+
+    def test_workspace_inventory(self):
+        """工作区文件清单应列出数据文件、排除图片/压缩包。"""
+        import tempfile
+        from pathlib import Path
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = Path(tempfile.mkdtemp(prefix="inv_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            proj = ws_mod.task_project_dir("t-inv")
+            (proj / "data.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+            (proj / "chart.png").write_bytes(b"png")
+            (proj / "out.zip").write_bytes(b"zip")
+            inv = o._workspace_inventory("t-inv")
+            self.assertIn("data.csv", inv)
+            self.assertNotIn("chart.png", inv)
+            self.assertNotIn("out.zip", inv)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+
+    def test_section_hint_semantic_score(self):
+        """章节提示语义匹配：精确子串最高，归一化/2-gram 也能命中。"""
+        from workers.report_generator_worker import ReportGeneratorWorker
+
+        w = ReportGeneratorWorker.__new__(ReportGeneratorWorker)
+        self.assertEqual(w._heading_score("财务分析", "三、财务分析"), 3.0)
+        self.assertGreaterEqual(w._heading_score("财务分析", "财务与经营数据"), 1.0)
+        # "财务数据分析" 无连续子串，但共享 财务/分析 两个 2-gram → 语义命中
+        self.assertGreaterEqual(w._heading_score("财务分析", "2.1 财务数据分析"), 1.0)
+        self.assertEqual(w._heading_score("财务分析", "发展历程"), 0.0)
+
+    def test_endpoint_warning_after_auth_error(self):
+        """记录鉴权/余额错误后 get_endpoint_warning 应返回消息。"""
+        import llm_client
+
+        old = dict(llm_client._last_auth_error)
+        llm_client._last_auth_error = {"ts": __import__("time").time(), "message": "HTTP 402 余额不足"}
+        try:
+            self.assertIn("402", llm_client.get_endpoint_warning())
+        finally:
+            llm_client._last_auth_error = old
+
     def test_low_authority_filter(self):
         """百度文库/原创力文档等低权威来源应被搜索过滤。"""
         from worker_base import SearchAgent

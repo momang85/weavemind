@@ -97,13 +97,15 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             )
             hidx = None
             if section_hint:
-                # 精确章节提示优先（chart_data 的 section_hint → 报告章节）
-                cands = [
-                    (idx, lvl) for idx, lvl, text in headings
-                    if section_hint in text
+                # 章节提示语义匹配：精确子串 → 归一化子串 → 2-gram 交集，
+                # 报告结构变化（如"财务与经营数据"）也能命中"财务分析"
+                scored = [
+                    (ReportGeneratorWorker._heading_score(section_hint, text), lvl, idx)
+                    for idx, lvl, text in headings
                 ]
-                if cands:
-                    hidx = max(cands, key=lambda x: x[1])[0]
+                best = max(scored, default=(0.0, 0, -1))
+                if best[0] >= 1.0 and best[2] >= 0:
+                    hidx = best[2]
             if hidx is None:
                 hidx = best_heading(keywords)
             if hidx is not None:
@@ -138,6 +140,25 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             result.extend(by_line[len(lines)])
             result.append("")
         return "\n".join(result)
+
+    @staticmethod
+    def _heading_score(section_hint: str, heading: str) -> float:
+        """章节提示与标题的匹配分：精确子串 3；归一化（去序号/标点）子串 2~2.5；
+        共享 2-gram 1+（语义级，如"财务分析"↔"财务与经营数据"）。"""
+        norm = lambda s: re.sub(
+            r"[\s\u3000·、，。：:；;（）()【】0-9]+", "", str(s or "")
+        )
+        sh, h = norm(section_hint), norm(heading)
+        if not sh or not h:
+            return 0.0
+        if sh in h:
+            return 3.0
+        if h in sh:
+            return 2.5
+        sh_grams = {sh[i:i + 2] for i in range(len(sh) - 1) if len(sh[i:i + 2]) == 2}
+        h_grams = {h[i:i + 2] for i in range(len(h) - 1) if len(h[i:i + 2]) == 2}
+        shared = sh_grams & h_grams
+        return 1.0 + 0.15 * len(shared) if shared else 0.0
 
     @staticmethod
     def _strip_chart_data_blocks(report: str) -> str:
@@ -343,7 +364,7 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                 "报告正文必须包含一个「关键数据一览」表格（列：指标 | 数值 | "
                 "口径/年份 | 来源），只收录与本任务主题直接相关的数值；"
                 "不同来源/口径的数字分开列出并注明差异，不要把不可比的数据混为一谈。"
-            ))
+            ), goal=instruction)
             user = f"{instruction}\n\n工作区产物：\n{artifacts}"
             # 主端点连试 2 次即切备用，减少慢端点对报告环节的拖累
             report = await self._call_llm(system=system, prompt=user, max_attempts=2)
@@ -424,6 +445,11 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                 str(instruction), re.S,
             )
             prev_content = "\n\n".join(p.strip() for p in prev_parts)
+            # 与主路径一致：剥离角色/指令残留、失败 JSON、URL 列表、ReAct 未收敛提示
+            prev_content = self._clean_fallback_content(prev_content)
+            # 若上一步结果已是完整文档（含顶层标题），不再整篇拼进兜底报告
+            if re.search(r"^# ", prev_content, re.M):
+                prev_content = ""
             prev_md = (
                 "\n\n## 研究内容（检索/摘要）\n\n" + prev_content
                 if prev_content else ""

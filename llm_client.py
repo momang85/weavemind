@@ -31,6 +31,8 @@ _endpoint_health = {
     "backup": {"healthy": True, "fails": 0},
 }
 _endpoint_health_lock = threading.Lock()
+_auth_error_lock = threading.Lock()
+_last_auth_error = {"ts": 0.0, "message": ""}
 _health_monitor_started = False
 _CFG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 _cfg_mtime: float | None = None
@@ -137,6 +139,23 @@ def _mark_endpoint(endpoint: str, ok: bool) -> None:
         else:
             st["fails"] += 1
             st["healthy"] = st["fails"] < _ENDPOINT_FAIL_THRESHOLD
+
+
+def _mark_auth_error(code: int, body: str) -> None:
+    """记录鉴权/余额错误（401/402/403），供编排器/前端提醒用户检查 API 配置。"""
+    with _auth_error_lock:
+        _last_auth_error["ts"] = time.time()
+        _last_auth_error["message"] = (
+            f"LLM 端点鉴权/余额错误 HTTP {code}：{body[:150]}"
+        )
+
+
+def get_endpoint_warning() -> str:
+    """返回 10 分钟内最近一次鉴权/余额错误消息（空串=无）。"""
+    with _auth_error_lock:
+        if _last_auth_error["ts"] and time.time() - _last_auth_error["ts"] < 600:
+            return _last_auth_error["message"]
+        return ""
 
 
 def _primary_healthy() -> bool:
@@ -647,6 +666,8 @@ class LLMClient:
                 response_data = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
+            if exc.code in (401, 402, 403):
+                _mark_auth_error(exc.code, error_body)
             raise LLMCallError(
                 f"HTTP {exc.code}: {error_body[:500]}"
             ) from exc
@@ -977,6 +998,10 @@ async def call_llm_async(
                 continue
             if exc.response.status_code in (401, 402, 403):
                 # 鉴权/余额错误：重试无意义，直接切备用端点
+                _mark_auth_error(
+                    exc.response.status_code,
+                    str(exc.response.text)[:150],
+                )
                 last_error = LLMCallError(
                     f"主端点鉴权/余额错误 HTTP {exc.response.status_code}"
                 )
@@ -1016,6 +1041,10 @@ async def _async_call_backup(payload: dict, fallback_model: str, expect_json: bo
         raise
     if response.status_code in (401, 402, 403):
         _mark_endpoint("backup", False)
+        _mark_auth_error(
+            response.status_code,
+            str(response.text)[:150],
+        )
         raise LLMCallError(
             f"备用端点鉴权/余额错误 HTTP {response.status_code}"
         )

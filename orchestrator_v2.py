@@ -78,6 +78,9 @@ Rules:
 15. 财报/研报/调研/金融/行业分析类任务：禁止 code_execution 去抓取/爬取/解析网页或
     在线财报数据。网页数据获取只能用 web_fetch，内容整理用 content_summary，
     code_execution 只用于本地数据处理/计算（如对已抓取的 CSV 做分析）
+16. 只能引用工作区实际存在的文件：data_loader/model_trainer 需要数据集时，
+    先确认"工作区文件清单"里有对应文件；没有对应文件时禁止规划读取本地数据集，
+    应改用 web_search/web_fetch 获取外部数据
 
 Output ONLY this JSON with no extra text:
 {"steps":[{"step_id":"1","capability":"web_search","instruction":"search for house price dataset","depends_on":[],"timeout":60}]}"""
@@ -126,6 +129,8 @@ next_steps 示例（instruction 必须自带 角色/受众/输出要求/验收�
 9. 不要吹毛求疵、不要"锦上添花"；只有明确缺失用户要求的内容才继续反思
 10. 财报/研报/调研类任务禁止追加 code_execution 抓网页/解析 URL 的步骤；
     需要补数据时用 web_fetch/web_search，整理用 content_summary
+11. 追加 data_loader/model_trainer 步骤前，确认工作区文件清单里存在对应数据集；
+    不存在时不要追加，改用 web_search/web_fetch
 只输出JSON。"""
 
 # ─────────────────────────────────────────────
@@ -327,6 +332,16 @@ class OrchestratorV2:
             "所有步骤必须严格围绕该主题，禁止泛化、替换或扩大到其他领域。"
         )
         prompt = f"{topic_hint}\n\n{goal}"
+        # 工作区文件清单：让规划器知道实际有哪些文件，避免规划 data_loader
+        # 加载不存在的 CSV（"No fresh CSV found in workspace" 之类失败）
+        ws_inv = self._workspace_inventory(task_id)
+        if ws_inv:
+            prompt = (
+                f"{prompt}\n\n工作区现有文件（规划时只能引用这些文件；"
+                "若任务所需数据文件不存在，禁止规划 data_loader/model_trainer "
+                "读取本地数据集，应改用 web_search/web_fetch 获取外部数据）：\n"
+                f"{ws_inv}"
+            )
         if context:
             prompt = (
                 "Conversation context (previous requests and results):\n"
@@ -360,7 +375,8 @@ class OrchestratorV2:
             try:
                 from prompt_registry import get_prompt
                 raw = self._planner_llm.call(
-                    get_prompt("planner", PLANNER_SYSTEM), attempt_prompt, expect_json=True
+                    get_prompt("planner", PLANNER_SYSTEM, goal=goal),
+                    attempt_prompt, expect_json=True,
                 )
                 plan_data = self._parse_plan_response(raw)
                 break
@@ -422,7 +438,8 @@ class OrchestratorV2:
                         f"用户目标：\n{goal}\n\n重新输出严格JSON计划。"
                     )
                     raw2 = self._planner_llm.call(
-                        get_prompt("planner", PLANNER_SYSTEM), strict_prompt, expect_json=True
+                        get_prompt("planner", PLANNER_SYSTEM, goal=goal),
+                        strict_prompt, expect_json=True,
                     )
                     steps2 = self._normalize_steps(self._parse_plan_response(raw2))
                     steps2 = self._ensure_report_step(steps2, task_id)
@@ -708,6 +725,31 @@ class OrchestratorV2:
                            "timestamp": self._now_iso()})
         return steps
 
+    def _workspace_inventory(self, task_id: str) -> str:
+        """列出任务工作区现有文件（≤30 个，含大小），供规划器决策。"""
+        try:
+            from workspace import task_workspace
+            ws = task_workspace(task_id)
+            if not ws.exists():
+                return ""
+            files: list[str] = []
+            for p in sorted(ws.rglob("*")):
+                if not p.is_file():
+                    continue
+                if "screenshots" in p.parts:
+                    continue
+                if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".zip"):
+                    continue
+                try:
+                    files.append(f"- {p.relative_to(ws)} ({p.stat().st_size} B)")
+                except Exception:
+                    continue
+                if len(files) >= 30:
+                    break
+            return "\n".join(files) if files else "（工作区暂无文件）"
+        except Exception:
+            return ""
+
     def _enforce_no_web_scrape_code(
         self, steps: list[dict], goal: str, task_id: str,
     ) -> list[dict]:
@@ -968,7 +1010,8 @@ class OrchestratorV2:
         try:
             from prompt_registry import get_prompt
             raw = self._planner_llm.call(
-                get_prompt("reflect", ITERATOR_SYSTEM), prompt, expect_json=True
+                get_prompt("reflect", ITERATOR_SYSTEM, goal=goal),
+                prompt, expect_json=True,
             )
             if isinstance(raw, dict):
                 return raw
@@ -1010,8 +1053,15 @@ class OrchestratorV2:
             s2 = dict(s)
             s2["depends_on"] = []  # 依赖步骤已完成，单步独立重做
             if s["step_id"] == step_id and feedback:
+                extra = ""
+                if s.get("capability") == "web_search":
+                    extra = (
+                        "；本次重做必须更换查询词/增加限定条件"
+                        "（site: 官方域名、年份、具体指标词），"
+                        "禁止原样重复上次查询，否则只会得到相同结果"
+                    )
                 s2["instruction"] = (
-                    f"{s['instruction']}\n\n【反思要求重做】{feedback}"
+                    f"{s['instruction']}\n\n【反思要求重做】{feedback}{extra}"
                 )
             orig_instr = s2.get("instruction", "")
             result = self._dispatch_step_safe(goal, s2, task_id, {"replan_used": 0})
@@ -1257,7 +1307,8 @@ class OrchestratorV2:
         try:
             from prompt_registry import get_prompt
             raw = self._plan_llm.call(
-                get_prompt("planner", PLANNER_SYSTEM), prompt, expect_json=True
+                get_prompt("planner", PLANNER_SYSTEM, goal=goal),
+                prompt, expect_json=True,
             )
             if isinstance(raw, dict):
                 plan_data = raw
@@ -1335,7 +1386,8 @@ class OrchestratorV2:
         try:
             from prompt_registry import get_prompt
             raw = self._plan_llm.call(
-                get_prompt("planner", PLANNER_SYSTEM), prompt, expect_json=True
+                get_prompt("planner", PLANNER_SYSTEM, goal=goal),
+                prompt, expect_json=True,
             )
             if isinstance(raw, dict):
                 plan_data = raw
@@ -3136,6 +3188,15 @@ print("charts generated")
                 logger.error("Task %s aborted: %s", task_id, _llm_msg)
                 return {"task_id": task_id, "status": "FAILED",
                         "steps": [], "report": _llm_msg}
+            # 主端点近期有鉴权/余额错误（已切备用）→ 弹警告，让用户知道质量下降原因
+            from llm_client import get_endpoint_warning
+            _llm_warn = get_endpoint_warning()
+            if _llm_warn:
+                push_progress(self._messaging, task_id, "warning",
+                              {"type": "llm", "agent": "orchestrator",
+                               "message": _llm_warn
+                               + "（已自动切换备用端点；若任务质量下降，请检查前端 API 设置）",
+                               "timestamp": self._now_iso()})
         except Exception:
             pass
 
@@ -4194,7 +4255,20 @@ print("charts generated")
                            "timestamp": self._now_iso()})
             time.sleep(2)
             amended = dict(step)
-            if issue:
+            if step.get("capability") == "web_search":
+                # 搜索重试必须更换策略：同一关键词重复搜只会得到同样结果
+                amended["instruction"] = (
+                    f"{step.get('instruction', '')}\n\n"
+                    f"【搜索重试 {attempt}】上次查询未获得有效结果；"
+                    "本次必须更换查询词组合/增加限定条件"
+                    "（如 site: 官方域名、具体年份、具体指标词），"
+                    "禁止原样重复上次查询。"
+                    + (
+                        f"\n【输出契约校验失败】{issue}，请修正输出格式后重新执行。"
+                        if issue else ""
+                    )
+                )
+            elif issue:
                 amended["instruction"] = (
                     f"{step.get('instruction', '')}\n\n"
                     f"【输出契约校验失败】{issue}，请修正输出格式后重新执行。"
