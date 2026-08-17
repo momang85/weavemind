@@ -93,6 +93,13 @@ class MCPServer:
 
 def serve_stdio() -> None:
     """逐行读取 stdin 的 JSON-RPC 消息，逐条应答到 stdout。"""
+    # Windows 控制台默认 GBK 编码，无法编码部分中文/上标字符（如 ²），
+    # 会导致 tools/list 等含非 ASCII 的响应崩溃。强制 UTF-8 保证跨平台一致。
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
     server = MCPServer()
     for line in sys.stdin:
         line = line.strip()

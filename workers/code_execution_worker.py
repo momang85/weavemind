@@ -166,12 +166,14 @@ class CodeExecutionWorker(AsyncWorkerBase):
             "（保持模块名与导出名一致，运行测试应全部通过）：\n" + test_context
             if test_context else ""
         )
+        clean_note = self._clean_data_schema_note()
         if minimal:
             from prompt_registry import get_prompt
             system = get_prompt(
                 "code_execution",
                 "You are a web developer. Write minimal runnable code. Output ONLY raw code.",
             )
+            system += clean_note
             prompt = (
                 "Write minimal runnable Python code (<=200 lines) that satisfies: "
                 f"{instruction[:800]}\n{env_note}{ws_note}{tdd_note}{feedback}"
@@ -185,6 +187,7 @@ class CodeExecutionWorker(AsyncWorkerBase):
                 "You are a senior Python developer. Generate complete, runnable, "
                 "self-contained code. Output ONLY the code, no explanations."
             ))
+            system += clean_note
             prompt = (
                 "请生成满足以下要求的完整可运行 Python 代码（自包含、可直接执行，"
                 "必要依赖仅在注释中说明）：\n"
@@ -197,6 +200,30 @@ class CodeExecutionWorker(AsyncWorkerBase):
         return await self._call_llm(
             system=system, prompt=prompt,
             max_attempts=max_attempts, max_tokens=max_tokens,
+        )
+
+    def _clean_data_schema_note(self) -> str:
+        """工作区存在 clean_chart_data.json 时，把其结构写进系统提示词，
+        强制作图任务使用结构化清洗数据而非原始文本。"""
+        cd = None
+        try:
+            cd = self.workspace / "clean_chart_data.json"
+        except Exception:
+            cd = None
+        if not cd or not cd.exists():
+            return ""
+        return (
+            "\n\n工作区已提供清洗后的结构化图表数据 clean_chart_data.json"
+            "（禁止解析 search_results.json 的原始文本）。其结构：\n"
+            '{"entity_frequency": {"英伟达": 4, "中国": 3}, '
+            '"market_data": [{"label": "推理芯片", "value": 1450, '
+            '"unit": "亿美元", "source": "URL"}], '
+            '"source_distribution": {"a.com": 2, "b.com": 1}, '
+            '"topic_terms": {"芯片": 3, "市场": 2}}\n'
+            "作图规则：① 优先使用上述结构化字段；"
+            "② bar/barh 的 labels 与 values 必须取自同一份数据对象，"
+            "禁止分开排序导致错位；③ 某类计数全部相同（无区分度）时跳过该图；"
+            "④ 数值与单位不得臆造，缺失即不画。"
         )
 
     @staticmethod

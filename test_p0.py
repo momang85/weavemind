@@ -973,6 +973,69 @@ class TestP2CleanData(unittest.TestCase):
         self.assertEqual(clean["source_distribution"].get("a.com"), 2)
         self.assertEqual(clean["source_distribution"].get("b.com"), 1)
 
+    def test_clean_data_schema_in_system_prompt(self):
+        import tempfile
+        from pathlib import Path
+        from workers.code_execution_worker import CodeExecutionWorker
+
+        w = CodeExecutionWorker.__new__(CodeExecutionWorker)
+        ws = Path(tempfile.mkdtemp(prefix="weavemind_cd_"))
+        w.workspace = ws
+        self.assertEqual(w._clean_data_schema_note(), "")
+        (ws / "clean_chart_data.json").write_text(
+            '{"entity_frequency": {"中国": 1}}', encoding="utf-8")
+        note = w._clean_data_schema_note()
+        self.assertIn("entity_frequency", note)
+        self.assertIn("禁止解析 search_results.json", note)
+        self.assertIn("错位", note)
+
+
+class TestTemplateGuard(unittest.TestCase):
+    def test_corrupt_goal_not_consolidated(self):
+        import tempfile
+        from pathlib import Path
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tpl = Path(tempfile.mkdtemp(prefix="tpl_guard_")) / "templates.json"
+        tpl.write_text(
+            '{"templates": [{"name": "auto-目标", "goal": "目标", "steps": []}]}',
+            encoding="utf-8",
+        )
+        before = tpl.read_text(encoding="utf-8")
+        # 损坏目标（占位词"目标"）：无主题词 → 不沉淀，文件保持原样
+        o._consolidate_template(
+            "目标",
+            [{"capability": "web_search", "instruction": "目标: 搜；反思要求重做"}],
+            tpl_path=str(tpl),
+        )
+        self.assertEqual(tpl.read_text(encoding="utf-8"), before)
+
+    def test_memory_artifact_steps_skipped(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tpl = Path(tempfile.mkdtemp(prefix="tpl_guard2_")) / "templates.json"
+        tpl.write_text('{"templates": []}', encoding="utf-8")
+        o._consolidate_template(
+            "调研新能源汽车市场趋势",
+            [
+                {"capability": "content_summary",
+                 "instruction": "历史经验（来自相似任务）：\n- 目标: 搜；反思要求重做"},
+                {"capability": "web_search", "instruction": "搜索新能源汽车2026年销量"},
+                {"capability": "content_summary", "instruction": "汇总新能源汽车市场要点"},
+            ],
+            tpl_path=str(tpl),
+        )
+        data = json.loads(tpl.read_text(encoding="utf-8"))
+        steps = data["templates"][0]["steps"]
+        self.assertEqual(len(steps), 2)
+        self.assertFalse(any("历史经验" in s["instruction"] for s in steps))
+        self.assertFalse(any("反思要求重做" in s["instruction"] for s in steps))
+
 
 class TestP2ChartFallback(unittest.TestCase):
     def test_parse_header_unit_and_share_column(self):

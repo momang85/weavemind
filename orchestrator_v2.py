@@ -93,6 +93,8 @@ _TOPIC_STOPWORDS = {
     # 通用词：出现在几乎任何计划指令里，不能作为"对题"证据
     "文件", "游戏", "页面", "程序", "应用", "系统", "内容", "结果", "报告",
     "html", "HTML", "功能", "实现", "进行", "生成", "编写",
+    # 占位/空泛词：损坏的短期目标（如"目标"）不得作为沉淀模板的主题证据
+    "目标", "任务", "调研", "分析", "搜索", "查询", "工作",
 }
 
 ITERATOR_SYSTEM = """你是严格的交付验收评审。你会获得【完整上下文】：用户目标、任务的全部步骤及结果摘要、交付文件、贯通测试结果、当前报告。请基于完整上下文判断交付物是否达标，而不是只看报告文本。
@@ -619,18 +621,27 @@ class OrchestratorV2:
                 if cap in ("report_generator", "package"):
                     continue  # 收尾打包类步骤不进模板，保留核心能力链（含内容摘要）
                 ins = str(s.get("instruction") or "")
+                # 记忆注入/反思残渣不是可执行指令，不得沉淀进模板
+                if ins.startswith("历史经验") or "反思要求重做" in ins:
+                    continue
                 if "用户目标：" in ins:
                     ins = ins.split("用户目标：", 1)[-1]
                 if "任务目标：" in ins:
                     ins = ins.split("任务目标：", 1)[-1]
                 if "原始指令：" in ins:
                     ins = ins.split("原始指令：", 1)[-1]
-                if not ins.strip():
+                ins = ins.strip()
+                if not ins:
                     continue
+                # 截断时尽量在句子边界，避免沉淀出半句指令
+                if len(ins) > 200:
+                    head = ins[:200]
+                    cut = max(head.rfind("。"), head.rfind("！"), head.rfind("？"))
+                    ins = head if cut <= 120 else head[:cut + 1]
                 steps.append({
                     "step_id": str(len(steps) + 1),
                     "capability": cap,
-                    "instruction": ins.strip()[:120],
+                    "instruction": ins,
                     "timeout": 180,
                 })
             if len(steps) < 2:
@@ -1659,15 +1670,23 @@ class OrchestratorV2:
                     continue
                 joined = " ".join(cells)
                 val_cell_clean = cells[val_idx].replace(",", "").replace("，", "")
+                # 只从数值单元格解析"数字+单位"，禁止从整行拼接文本里抓其他数字
+                # （如占比列的 52%），否则 labels 与 values 会错位。单元格可能只含
+                # 数字（单位在表头括号里），此时回退 header_unit。
                 num_m = re.search(
-                    r"(\d+(?:\.\d+)?)\s*(万亿|千亿|百亿|亿|万)?\s*(亿美元|亿元|%|万辆|万台|美元)",
-                    val_cell_clean + " " + joined,
+                    r"(\d[\d]*(?:\.\d+)?)\s*(万亿|千亿|百亿|亿|万)?\s*(亿美元|亿元|%|万辆|万台|美元)?",
+                    val_cell_clean,
                 )
                 if not num_m:
                     continue
                 # "数千亿/数百亿" 这类无具体数字的值不画图
                 if not num_m.group(1):
                     continue
+                cell_unit = (
+                    (num_m.group(2) or "") + (num_m.group(3) or "")
+                    if num_m.group(2) and num_m.group(3) in ("美元", "元", "人民币")
+                    else (num_m.group(3) or "")
+                )
                 year = None
                 if year_idx is not None and year_idx < len(cells):
                     ym = re.search(r"(20\d{2})", cells[year_idx])
@@ -1687,11 +1706,7 @@ class OrchestratorV2:
                         if u:
                             src = u.group(0)
                             break
-                unit = (
-                    (num_m.group(2) or "") + (num_m.group(3) or "")
-                    if num_m.group(2) and num_m.group(3) in ("美元", "元", "人民币")
-                    else (num_m.group(3) or "")
-                )
+                unit = cell_unit
                 if not unit and header_unit:
                     unit = header_unit
                 if not unit:
