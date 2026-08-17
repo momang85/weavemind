@@ -929,6 +929,51 @@ class TestP2ReactRouting(unittest.TestCase):
         self.assertEqual(plan2[0]["capability"], "code_execution")
 
 
+class TestP2CleanData(unittest.TestCase):
+    def test_entity_frequency_topic_gated(self):
+        from clean_data import clean_and_structure
+
+        items = [
+            {"title": "AI芯片市场", "url": "https://a.com/1",
+             "snippet": "中国AI芯片市场规模增长，英伟达主导训练"},
+            {"title": "中国经济半年报", "url": "https://b.com/2",
+             "snippet": "中国GDP增长，万亿美元规模"},
+        ]
+        clean = clean_and_structure(items)
+        # 只有提到芯片/AI 的文档中的实体被统计（离题的"中国经济半年报"不贡献）
+        self.assertEqual(clean["entity_frequency"].get("中国"), 1)
+        self.assertEqual(clean["entity_frequency"].get("英伟达"), 1)
+        self.assertNotIn("万亿美元", clean["topic_terms"])
+
+    def test_market_data_precise_extraction(self):
+        from clean_data import clean_and_structure
+
+        items = [
+            {"title": "行业报告", "url": "https://a.com/1",
+             "snippet": "推理芯片约1,450亿美元，训练芯片约950亿美元，边缘AI芯片约400亿美元"},
+            {"title": "存储芯片", "url": "https://b.com/2",
+             "snippet": "存储芯片市场将达1.4万亿美元"},
+        ]
+        clean = clean_and_structure(items)
+        vals = {m["label"]: m["value"] for m in clean["market_data"]}
+        self.assertEqual(vals.get("推理芯片"), 1450.0)
+        self.assertEqual(vals.get("训练芯片"), 950.0)
+        self.assertEqual(vals.get("边缘AI芯片"), 400.0)
+        self.assertNotIn("市场规模", vals)
+
+    def test_source_distribution_aggregates(self):
+        from clean_data import clean_and_structure
+
+        items = [
+            {"title": "a", "url": "https://a.com/r1", "snippet": "AI芯片"},
+            {"title": "b", "url": "https://a.com/r2", "snippet": "AI芯片"},
+            {"title": "c", "url": "https://b.com/r3", "snippet": "AI芯片"},
+        ]
+        clean = clean_and_structure(items)
+        self.assertEqual(clean["source_distribution"].get("a.com"), 2)
+        self.assertEqual(clean["source_distribution"].get("b.com"), 1)
+
+
 class TestP2ChartFallback(unittest.TestCase):
     def test_parse_header_unit_and_share_column(self):
         from orchestrator_v2 import OrchestratorV2

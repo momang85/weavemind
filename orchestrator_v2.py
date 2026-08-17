@@ -2766,12 +2766,21 @@ if __name__ == "__main__":
             return
         project = task_project_dir(task_id)
         src = project / "search_results.json"
+        clean_src = project / "clean_chart_data.json"
         if not src.exists():
             return
+        # 数据清洗兜底：绘图只读清洗后数据（搜索→清洗→绘图）
+        if not clean_src.exists():
+            try:
+                from clean_data import clean_file
+                clean_file(src, clean_src)
+            except Exception as exc:
+                logger.warning("clean_data failed: %s", str(exc)[:100])
+                return
         script = r'''# -*- coding: utf-8 -*-
-"""从真实检索结果提取结构化序列，生成有明确 X/Y 轴的语义图表。
-基线：主体提及频率、来源分布、主题热词（语义类图表由 LLM 数据渲染）。"""
-import json, re
+"""从清洗后的 clean_chart_data.json 绘制探索性图表（搜索→清洗→绘图）。
+绘图只接收结构化数据，不直接解析 search_results.json 原始文本。"""
+import json
 from collections import Counter
 import matplotlib
 matplotlib.use("Agg")
@@ -2780,22 +2789,10 @@ import matplotlib.pyplot as plt
 plt.rcParams["font.sans-serif"] = ["Microsoft YaHei", "SimHei", "DejaVu Sans"]
 plt.rcParams["axes.unicode_minus"] = False
 
-data = json.load(open("search_results.json", encoding="utf-8"))
-items = [d for d in data if isinstance(d, dict)]
-texts = [str(d.get("title") or "") + " " + str(d.get("snippet") or "") for d in items]
+clean = json.load(open("clean_chart_data.json", encoding="utf-8"))
 
 # 1) 主要主体提及频率（信息量大且稳定：只要有检索结果即可画）
-ENTITIES = [
-    "英伟达", "NVIDIA", "AMD", "英特尔", "Intel", "谷歌", "Google", "华为", "昇腾",
-    "高通", "Qualcomm", "寒武纪", "海光", "亚马逊", "AWS", "微软", "Microsoft",
-    "Meta", "台积电", "Cerebras", "Graphcore",
-    "美国", "中国", "欧洲", "亚太", "日本",
-]
-entity_freq = Counter()
-for t in texts:
-    for ent in ENTITIES:
-        if ent in t:
-            entity_freq[ent] += t.count(ent)
+entity_freq = Counter({k: v for k, v in clean.get("entity_frequency", {}).items()})
 top_e = entity_freq.most_common(10)
 if len(top_e) >= 3 and len(set(c for _, c in top_e)) > 1:
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -2811,11 +2808,7 @@ if len(top_e) >= 3 and len(set(c for _, c in top_e)) > 1:
     plt.close()
 
 # 2) 数据来源分布（X=来源域名, Y=结果数）
-domains = Counter()
-for d in items:
-    m = re.match(r"https?://([^/]+)", str(d.get("url") or ""))
-    if m:
-        domains[m.group(1).replace("www.", "")] += 1
+domains = Counter({k: v for k, v in clean.get("source_distribution", {}).items()})
 top = domains.most_common(8)
 # 若所有来源计数相同（如每源仅 1 条）→ 无信息增量，跳过该图
 if top and len(set(c for _, c in top)) > 1:
@@ -2829,30 +2822,7 @@ if top and len(set(c for _, c in top)) > 1:
     plt.close()
 
 # 3) 主题热词（X=热词, Y=出现次数）
-words = Counter()
-stop = {
-    "一个", "我们", "以及", "可以", "没有", "已经", "进行", "通过", "对于",
-    "不是", "就是", "同时", "如果", "因为", "所以", "但是", "这些", "那些",
-    "其中", "以及", "主要", "相关", "关于", "根据", "报告", "分析",
-    "全球", "中国", "市场", "行业", "产业", "发展", "增长", "技术",
-    "应用", "领域", "数据", "信息", "公司", "企业", "方面", "预计",
-    "成为", "带来", "推动", "驱动", "规模", "目前", "未来", "有望",
-    # 单位与过宽/离题词（图4 噪声根因）
-    "万亿美元", "亿美元", "万亿元", "万亿", "亿美元", "存储", "存储芯片",
-    "半导体", "全球", "市场", "行业", "产业", "规模", "技术",
-}
-THEME_ANCHOR = re.compile(
-    r"芯片|AI|算力|推理|训练|NVIDIA|英伟达|GPU|ASIC|FPGA|加速卡", re.I,
-)
-for d in items:
-    t = str(d.get("title") or "") + " " + str(d.get("snippet") or "")
-    if not THEME_ANCHOR.search(t):
-        continue  # 非 AI 芯片主题文档不进热词统计（剔除 GDP/Token/存储等噪声）
-    for m in re.finditer(r"[\u4e00-\u9fff]{2,4}", t.lower()):
-        w = m.group(0)
-        if w in stop:
-            continue
-        words[w] += 1
+words = Counter({k: v for k, v in clean.get("topic_terms", {}).items()})
 top_w = words.most_common(12)
 if top_w and len(set(c for _, c in top_w)) > 1:
     fig, ax = plt.subplots(figsize=(10, 5))
@@ -2865,6 +2835,25 @@ if top_w and len(set(c for _, c in top_w)) > 1:
     ax.set_title("检索资料主题热词")
     plt.tight_layout()
     plt.savefig("topic_terms.png", dpi=110)
+    plt.close()
+
+# 4) 结构化市场数据（来自清洗环节的精确提取）
+market = clean.get("market_data") or []
+if len(market) >= 2:
+    fig, ax = plt.subplots(figsize=(9, 5))
+    items_m = list(market)
+    # 与 bar 标签共用同一顺序，杜绝错位
+    labels = [str(m.get("label") or "?")[:16] for m in items_m]
+    vals = [float(m.get("value") or 0) for m in items_m]
+    ax.bar(labels, vals, color="#f59e0b", edgecolor="white")
+    ax.set_ylim(bottom=0)
+    ax.set_xlabel("细分市场")
+    ax.set_ylabel("市场规模（亿美元）")
+    ax.set_title("AI芯片细分市场规模（清洗后结构化数据）")
+    for i, v in enumerate(vals):
+        ax.text(i, v, f"{v:g}", ha="center", va="bottom", fontsize=9)
+    plt.tight_layout()
+    plt.savefig("market_data.png", dpi=110)
     plt.close()
 print("charts generated")
 '''
@@ -3504,6 +3493,10 @@ print("charts generated")
                                 json.dumps(parsed, ensure_ascii=False, indent=1),
                                 encoding="utf-8",
                             )
+                            # 数据清洗/结构化（搜索 → 清洗 → 绘图）：
+                            # 先生成 clean_chart_data.json，绘图只读清洗后数据
+                            from clean_data import clean_file
+                            clean_file(_json_path)
                             self._generate_search_charts(task_id, goal)
                         except Exception as exc:
                             logger.warning("search_results.json write failed: %s", exc)
@@ -3790,6 +3783,21 @@ print("charts generated")
                 snippet = str(prev_res)[:12000] if prev_res else ''
                 if snippet:
                     instr += f"\n[上一步结果 {dep_id}]:\n{_filter_role(_safe(snippet))}"
+
+        if cap == 'code_execution':
+            # 数据清洗提示：作图任务优先读取结构化清洗数据，避免直接解析原始文本
+            try:
+                from workspace import task_project_dir as _tpd
+                _cd = _tpd(task_id) / "clean_chart_data.json"
+                if _cd.exists():
+                    instr += (
+                        "\n[数据] 工作区已提供清洗后的结构化图表数据 clean_chart_data.json"
+                        "（含 entity_frequency / market_data / source_distribution / topic_terms）。"
+                        "如任务需要作图，请优先读取该文件并按其中的 Label-Value 结构绘图，"
+                        "不要直接解析 search_results.json 的原始文本。"
+                    )
+            except Exception:
+                pass
 
         if cap in ('content_summary', 'report_generator'):
             for dep_id in deps:
