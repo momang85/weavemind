@@ -965,7 +965,7 @@ async def call_llm_async(
             usage = data.get("usage") or {}
             _record_usage(
                 usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
-                model=self.model,
+                model=model,
             )
             _publish_usage_snapshot()
 
