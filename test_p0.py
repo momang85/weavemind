@@ -1491,6 +1491,55 @@ class TestP0Robustness(unittest.TestCase):
         self.assertNotIn("营收为5072亿元", out.split("数据一致性提示")[1] or "")
         self.assertNotIn("营收：", out)
 
+    def test_flag_conflicting_figures_period_aware(self):
+        """半年报 1141.15 亿 与 Q1 581 亿 是不同报告期，不判冲突。"""
+        from workers.report_generator_worker import ReportGeneratorWorker
+
+        w = ReportGeneratorWorker.__new__(ReportGeneratorWorker)
+        report = (
+            "2026年上半年归母净利润1141.15亿元，同比增长10%；"
+            "2026年Q1净利润581亿元。"
+        )
+        out = w._flag_conflicting_figures(report)
+        self.assertNotIn("数据一致性提示", out)
+        self.assertNotIn("另有来源称", out)
+
+    def test_structured_financials_injected_for_report(self):
+        """content_summary/report_generator 步骤应收到结构化年报表格（不只文件提及）。"""
+        import tempfile
+        from pathlib import Path
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._task_goals = {"t-f": "分析腾讯历年财报"}
+        o._task_user_ids = {}
+        tmp = Path(tempfile.mkdtemp(prefix="fininj_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            proj = ws_mod.task_project_dir("t-f")
+            (proj / "financials.json").write_text(json.dumps({
+                "financials": [
+                    {"year": 2024, "revenue": 6602.57, "net_profit": 1940.73,
+                     "gross_margin": 52.9, "total_liabilities": 7270.99,
+                     "operating_cashflow": 2000.0},
+                    {"year": 2025, "revenue": 7517.66, "net_profit": 2248.42,
+                     "gross_margin": 56.21, "total_liabilities": 7979.21,
+                     "operating_cashflow": 2300.0},
+                ],
+                "metadata": {"source": "eastmoney_datacenter", "unit": "亿元"},
+            }, ensure_ascii=False), encoding="utf-8")
+            step = {"step_id": "3", "capability": "content_summary",
+                    "instruction": "总结财报", "depends_on": []}
+            import threading
+            instr = o._inject_step_context(step, {}, threading.Lock(), "t-f")
+            self.assertIn("[结构化财务数据]", instr)
+            self.assertIn("| 2025 | 7517.66", instr)
+            self.assertIn("东方财富数据中心", instr)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+
     def test_embed_charts_uses_section_hint(self):
         """section_hint 精确命中章节时优先于关键词模糊匹配。"""
         import pathlib

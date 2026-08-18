@@ -268,6 +268,33 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             distinct = sorted(set(values), key=lambda x: (len(x), x))
             if len(distinct) < 2:
                 continue
+            # 不同报告期（Q1/中报/年报…）的数值不构成冲突：
+            # 如"2026年上半年净利润1141.15亿" vs "2026年Q1净利润581亿"
+            period_sets = []
+            for v, s, e in items:
+                if v not in distinct:
+                    continue
+                # 取包含该数字的句子（窗口会跨到邻近数字的期标记）
+                ctx = next(
+                    (seg for seg in re.split(r"[。；;\n]+", text)
+                     if seg.find(text[s:e]) >= 0),
+                    text[max(0, s - 50):e + 30],
+                )
+                ps = frozenset(
+                    p for p in (
+                        "Q1", "Q2", "Q3", "Q4", "一季度", "二季度", "三季度",
+                        "四季度", "中报", "半年报", "上半年", "下半年", "年报",
+                        "季度", "H1", "H2",
+                    ) if p in ctx
+                )
+                period_sets.append((v, ps))
+            by_period: dict[frozenset, set] = {}
+            for v, ps in period_sets:
+                by_period.setdefault(ps, set()).add(v)
+            # 若不同数值落在不同的期标记集合 → 非同一报告期，跳过
+            period_keys = list(by_period.keys())
+            if len(period_keys) > 1:
+                continue
             canonical = Counter(values).most_common(1)[0][0]
             others = [v for v in distinct if v != canonical]
             first = next((e for v, s, e in items if v == canonical), None)

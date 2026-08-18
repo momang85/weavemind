@@ -4465,6 +4465,41 @@ print("charts generated")
                 pass
 
         if cap in ('content_summary', 'report_generator'):
+            # 结构化财务数据【内容】注入（不只文件提及）：让报告/总结 LLM 真正看到
+            # 权威年报序列，否则模型只会用搜索片段（如 IT之家）并宣称历史年份缺失
+            try:
+                from workspace import task_project_dir as _tpd
+                fin_path = _tpd(task_id) / "financials.json"
+                if fin_path.exists():
+                    fin = json.loads(fin_path.read_text(encoding="utf-8"))
+                    fs = (fin.get("financials") or [])[-12:]
+                    m = fin.get("metadata") or {}
+                    if fs:
+                        unit = m.get("unit") or "亿元"
+                        src_name = {
+                            "eastmoney_datacenter": "东方财富数据中心（港交所披露）",
+                            "eastmoney_ashare": "东方财富数据中心（A股财报）",
+                            "sec_edgar": "SEC EDGAR（10-K 年报）",
+                        }.get(str(m.get("source")), str(m.get("source")))
+                        rows = [
+                            "| 年份 | 营收 | 归母净利润 | 毛利率% | 总负债 | 经营现金流 |",
+                            "|---|---|---|---|---|---|",
+                        ]
+                        for f in fs:
+                            rows.append(
+                                f"| {f.get('year')} | {f.get('revenue')} | "
+                                f"{f.get('net_profit')} | {f.get('gross_margin')} | "
+                                f"{f.get('total_liabilities')} | {f.get('operating_cashflow')} |"
+                            )
+                        instr += (
+                            "\n\n[结构化财务数据]（来自 " + src_name + "，单位：" + unit
+                            + "，权威数据源，优先引用）\n" + "\n".join(rows)
+                            + "\n规则：报告/总结中的财务数字优先引用本表，并在来源处标注"
+                            + src_name + "；本表未覆盖的数字若无溯源，标注"
+                            "'基于模型知识，未在本次检索中验证'；禁止编造年份。"
+                        )
+            except Exception:
+                pass
             for dep_id in deps:
                 prev_res = _prev(dep_id)
                 _raw = str(prev_res or "")
