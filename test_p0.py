@@ -2088,6 +2088,42 @@ class TestMultiMarketResolver(unittest.TestCase):
         finally:
             em._get = old_get
 
+
+class TestChartQA(unittest.TestCase):
+    def test_overlap_detected_and_fixed(self):
+        """拥挤柱状图：重叠被检出，render_with_qa 自动修复后残留为空。"""
+        import tempfile
+        from pathlib import Path
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from chart_qa import check_figure, render_with_qa
+
+        fig, ax = plt.subplots(figsize=(4, 3))
+        ax.bar([f"类别-{i}名称很长很长" for i in range(20)], list(range(20)))
+        fig.canvas.draw()
+        issues0 = check_figure(fig, ax, fig.canvas.get_renderer())
+        self.assertTrue(any(i["type"] == "tick_overlap" for i in issues0))
+        path = Path(tempfile.mkdtemp(prefix="qa_")) / "t.png"
+        residual = render_with_qa(fig, ax, str(path), max_rounds=3)
+        self.assertEqual(residual, [])
+        self.assertTrue(path.exists())
+        plt.close(fig)
+
+    def test_small_font_detected(self):
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        from chart_qa import check_figure
+
+        fig, ax = plt.subplots()
+        ax.set_xlabel("X", fontsize=6)
+        ax.plot([1, 2, 3], [1, 2, 3])
+        fig.canvas.draw()
+        issues = check_figure(fig, ax, fig.canvas.get_renderer())
+        self.assertTrue(any(i["type"] == "font_too_small" for i in issues))
+        plt.close(fig)
+
     def test_low_authority_filter(self):
         """百度文库/原创力文档等低权威来源应被搜索过滤。"""
         from worker_base import SearchAgent

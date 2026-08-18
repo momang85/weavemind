@@ -2576,7 +2576,12 @@ def main():
         add_footer(fig, spec, rows, conclusion)
         idx += 1
         fname = f"chart_{idx}.png"
-        plt.savefig(fname, dpi=120, bbox_inches="tight")
+        # 图表视觉质量 QA + 自动修复（无视觉 LLM 的确定性替代）：
+        # 标签重叠/图例遮挡/字号过小 → 自动调整并重渲染
+        from chart_qa import render_with_qa
+        residual = render_with_qa(fig, ax, fname, dpi=120)
+        if residual:
+            print(f"QA issue {fname}: {'; '.join(r['detail'] for r in residual[:3])}", flush=True)
         plt.close(fig)
         manifest.append({
             "file": fname,
@@ -3241,6 +3246,14 @@ def short_label(s, n=14):
     return s if len(s) <= n else s[: n - 1] + "…"
 
 
+def save_qa(fig, ax, name):
+    """渲染 + 视觉质量 QA + 自动修复（标签重叠/图例遮挡/字号过小）。"""
+    from chart_qa import render_with_qa
+    residual = render_with_qa(fig, ax, name, dpi=110)
+    if residual:
+        print(f"QA {name}: {'; '.join(r['detail'] for r in residual[:2])}", flush=True)
+
+
 NOISE_LABELS = ("·", "报告", "摘要", "分析", "统计及", " -", "—", "–")
 SUBJECT_HINTS = ("芯片", "GPU", "TPU", "ASIC", "半导体", "出货量",
                  "收入", "规模", "增速", "侧", "端", "市场")
@@ -3274,8 +3287,7 @@ if len(top_e) >= 3 and len(set(c for _, c in top_e)) > 1:
     ax.set_title("检索资料中的主要主体提及频率（厂商/区域）")
     for i, (_, c) in enumerate(pairs_e):
         ax.text(c + 0.1, i, str(c), va="center", fontsize=9)
-    plt.tight_layout()
-    plt.savefig("entity_frequency.png", dpi=110)
+    save_qa(fig, ax, "entity_frequency.png")
     plt.close()
 else:
     print(f"SKIP 主体提及频率图：有效实体不足或无区分度（{len(top_e)} 条）")
@@ -3290,8 +3302,7 @@ if top and len(set(c for _, c in top)) > 1:
             color="#8b5cf6", edgecolor="white")
     ax.set_xlabel("结果数")
     ax.set_title("数据来源分布（检索结果）")
-    plt.tight_layout()
-    plt.savefig("source_distribution.png", dpi=110)
+    save_qa(fig, ax, "source_distribution.png")
     plt.close()
 else:
     print(f"SKIP 数据来源分布图：来源计数全部相同或为空（{len(top)} 个来源），无信息增量。")
@@ -3308,8 +3319,7 @@ if top_w and len(set(c for _, c in top_w)) > 1:
         ax.text(c + 0.1, i, str(c), va="center", fontsize=9)
     ax.set_xlabel("出现次数")
     ax.set_title("检索资料主题热词")
-    plt.tight_layout()
-    plt.savefig("topic_terms.png", dpi=110)
+    save_qa(fig, ax, "topic_terms.png")
     plt.close()
 else:
     print(f"SKIP 主题热词图：热词不足或无区分度（{len(top_w)} 条）")
@@ -3334,8 +3344,7 @@ if len(market) >= 2:
         ax.set_title("市场规模（清洗后结构化数据）")
         for i, v in enumerate(vals):
             ax.text(i, v, f"{v:g}", ha="center", va="bottom", fontsize=9)
-        plt.tight_layout()
-        plt.savefig("market_data.png", dpi=110)
+        save_qa(fig, ax, "market_data.png")
         plt.close()
     else:
         print(f"SKIP 市场规模图：按单位分组后最多的仅 {len(best)} 条（{len(market)} 条总数据）")
@@ -3356,8 +3365,7 @@ if len(shares) >= 2 and len(set(c.get("value") for c in shares)) > 1:
     ax.set_title("市场份额/占比（清洗后结构化数据）")
     for i, v in enumerate(vals_s):
         ax.text(i, v, f"{v:g}%", ha="center", va="bottom", fontsize=9)
-    plt.tight_layout()
-    plt.savefig("market_share.png", dpi=110)
+    save_qa(fig, ax, "market_share.png")
     plt.close()
 else:
     print(f"SKIP 市场份额图：有效数据不足或无区分度（{len(shares)} 条）")
@@ -3375,8 +3383,7 @@ if len(macros) >= 2 and len(set(c.get("value") for c in macros)) > 1:
     ax.set_title("宏观指标（调用量/出货量/渗透率等）")
     for i, v in enumerate(vals_m):
         ax.text(i, v, f"{v:g}", ha="center", va="bottom", fontsize=9)
-    plt.tight_layout()
-    plt.savefig("macro_indicators.png", dpi=110)
+    save_qa(fig, ax, "macro_indicators.png")
     plt.close()
 else:
     print(f"SKIP 宏观指标图：有效数据不足或无区分度（{len(macros)} 条）")
@@ -3398,8 +3405,7 @@ if len(trends) >= 2 and len(set(c.get("value") for c in trends)) > 1:
     ax.set_title("市场趋势（同比增长/下降）")
     for i, v in enumerate(vals_t):
         ax.text(i, v, f"{v:g}%", ha="center", va="bottom" if v >= 0 else "top", fontsize=9)
-    plt.tight_layout()
-    plt.savefig("market_trends.png", dpi=110)
+    save_qa(fig, ax, "market_trends.png")
     plt.close()
 else:
     print(f"SKIP 市场趋势图：有效数据不足或无区分度（{len(trends)} 条）")
