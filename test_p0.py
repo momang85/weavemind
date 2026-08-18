@@ -1968,6 +1968,64 @@ class TestPhase2ClassifierRouter(unittest.TestCase):
             router.route_structured = old_route
             ws_mod.WORKSPACE_ROOT = old_root
 
+
+class TestSecAdapter(unittest.TestCase):
+    def _canned_facts(self):
+        return {
+            "facts": {"us-gaap": {
+                "Revenues": {"units": {"USD": [
+                    {"form": "10-K", "start": "2022-09-25", "end": "2023-09-30",
+                     "val": 383285000000},
+                    {"form": "10-K", "start": "2023-10-01", "end": "2024-09-28",
+                     "val": 391035000000},
+                ]}},
+                "NetIncomeLoss": {"units": {"USD": [
+                    {"form": "10-K", "start": "2023-10-01", "end": "2024-09-28",
+                     "val": 93736000000},
+                ]}},
+                "GrossProfit": {"units": {"USD": [
+                    {"form": "10-K", "start": "2023-10-01", "end": "2024-09-28",
+                     "val": 180742000000},
+                ]}},
+                "Assets": {"units": {"USD": [
+                    {"form": "10-K", "start": None, "end": "2024-09-28",
+                     "val": 364980000000},
+                ]}},
+                "Liabilities": {"units": {"USD": [
+                    {"form": "10-K", "start": None, "end": "2024-09-28",
+                     "val": 308030000000},
+                ]}},
+            }},
+        }
+
+    def test_sec_fetch_apple(self):
+        """SEC companyfacts → 财年序列（含时点项 Assets/Liabilities）。"""
+        import json
+        import adapters.sec_edgar as sec
+
+        tickers = {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple Inc."}}
+        facts = self._canned_facts()
+        old_get = sec._get
+        sec._get = lambda url, timeout=30: (
+            json.dumps(tickers, ensure_ascii=False)
+            if "company_tickers" in url
+            else json.dumps(facts, ensure_ascii=False)
+        )
+        try:
+            res = sec.fetch("Apple Inc.", "AAPL")
+            self.assertEqual(res["metadata"]["cik"], "0000320193")
+            by_year = {f["year"]: f for f in res["financials"]}
+            f24 = by_year[2024]
+            self.assertEqual(f24["revenue"], 3910.35)
+            self.assertEqual(f24["net_profit"], 937.36)
+            self.assertEqual(f24["gross_margin"], 46.22)  # 180742/391035
+            self.assertEqual(f24["total_assets"], 3649.8)
+            self.assertEqual(f24["total_liabilities"], 3080.3)
+            self.assertIn(2023, by_year)  # 12 年内多财年
+        finally:
+            sec._get = old_get
+            sec._CIK_CACHE.clear()
+
     def test_low_authority_filter(self):
         """百度文库/原创力文档等低权威来源应被搜索过滤。"""
         from worker_base import SearchAgent

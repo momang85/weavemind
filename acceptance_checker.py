@@ -27,6 +27,8 @@ _NUM_UNIT_RE = re.compile(
     r"(美元|港元|元|人民币|%|％)?"
 )
 
+_DISCLOSED_MARKERS = ("基于模型知识", "未在本次检索中验证", "未验证", "模型估算", "模型知识")
+
 
 def _norm(s: str) -> str:
     """去掉逗号/全角逗号/空白，保留小数点，便于模糊匹配。"""
@@ -184,6 +186,7 @@ def check_number_traceability(report: str, sources: dict, threshold: float = 0.7
     clean_text = sources.get("clean_chart_data") or ""
     traceable: list[dict] = []
     untraceable: list[dict] = []
+    disclosed: list[dict] = []
     for n in nums:
         hit = None
         if clean_text and _traceable_in_clean(n, clean_text):
@@ -204,8 +207,15 @@ def check_number_traceability(report: str, sources: dict, threshold: float = 0.7
             item["source"] = hit
             traceable.append(item)
         else:
-            untraceable.append(item)
+            # 数字后紧跟"基于模型知识/未验证"标注 → 已披露，不算缺口
+            after = report[n["pos"]:n["pos"] + 60]
+            if any(m in after for m in _DISCLOSED_MARKERS):
+                item["disclosed"] = True
+                disclosed.append(item)
+            else:
+                untraceable.append(item)
     rate = traceable.__len__() / total
+    disclosed_rate = len(disclosed) / total
     # 细分：财务金额（亿/万/元/美元单位）与 其他数字（%等）分开统计
     amounts = [n for n in nums if any(u in n["unit"] for u in ("亿", "万", "元", "美元"))]
     traceable_keys = {(t.get("value"), t.get("unit")) for t in traceable}
@@ -215,6 +225,7 @@ def check_number_traceability(report: str, sources: dict, threshold: float = 0.7
     details = (
         f"数字溯源率 {rate:.0%}（{len(traceable)}/{total}）"
         + f"；财务金额溯源率 {amount_rate:.0%}（{amount_ok}/{len(amounts)}）"
+        + (f"；已披露（模型知识标注）{disclosed_rate:.0%}（{len(disclosed)}）" if disclosed else "")
         + ("" if passed else f"，低于阈值 {threshold:.0%}")
         + (f"；不可溯源示例：{'、'.join(u['raw'][:20] for u in untraceable[:5])}" if untraceable else "")
     )
@@ -227,6 +238,7 @@ def check_number_traceability(report: str, sources: dict, threshold: float = 0.7
         "amount_rate": round(amount_rate, 3),
         "amount_traceable": amount_ok,
         "amount_total": len(amounts),
+        "disclosed_count": len(disclosed),
         "traceable": traceable,
         "untraceable": untraceable[:10],
     }

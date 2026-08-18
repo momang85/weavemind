@@ -7,6 +7,7 @@ Phase 2 范围：financial + 港股 → 东方财富（主）；其余走搜索�
 from task_classifier import classify_task
 from adapters.resolver import resolve_company
 from adapters.eastmoney import fetch as fetch_eastmoney
+from adapters.sec_edgar import fetch as fetch_sec
 
 
 def route_structured(goal: str) -> dict | None:
@@ -15,12 +16,17 @@ def route_structured(goal: str) -> dict | None:
     if cls["domain"] != "financial" or not cls["company"]:
         return None
     res = resolve_company(cls["company"])
-    if not res or res["market"] not in ("HK",):
+    if not res or res["market"] not in ("HK", "US"):
         return None
     try:
-        data = fetch_eastmoney(
-            res["name"], res["stock_code"], year_range=cls["year_range"],
-        )
+        if res["market"] == "HK":
+            data = fetch_eastmoney(
+                res["name"], res["stock_code"], year_range=cls["year_range"],
+            )
+        else:
+            data = fetch_sec(
+                res["name"], res["stock_code"], year_range=cls["year_range"],
+            )
         data["classification"] = cls
         data["resolution"] = res
         return data
