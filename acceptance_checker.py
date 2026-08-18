@@ -255,6 +255,14 @@ _OTHER_ENTITIES = (
     "日本通讯", "国民银行", "大和证券",
 )
 
+# 归属校验的语境词：核心财务声明词（营收/利润/资产…）触发判定；
+# 投资/收购等关系动词（钱属于投资方）不算污染
+_CORE_FIN_WORDS = (
+    "营收", "收入", "净利润", "净利", "利润", "毛利率", "总资产", "总负债",
+    "负债", "资产", "现金流", "销售额", "占比", "经营利润", "市值",
+)
+_RELATION_VERBS = ("投资", "入股", "收购", "融资", "获得", "出资", "补贴", "捐赠", "认购")
+
 
 def _target_entity(goal: str) -> str:
     """从目标提取公司主体（腾讯/恒大/特斯拉…）；取"集团/公司/控股"前的最长 2-4 字。"""
@@ -314,7 +322,9 @@ def check_entity_attribution(
                 others = [e for e in _OTHER_ENTITIES
                           if e in ctx and e.lower() != target.lower()]
                 target_here = target in ctx
-                if others and not target_here:
+                has_rel = any(v in ctx for v in _RELATION_VERBS)
+                has_core = any(w in ctx for w in _CORE_FIN_WORDS)
+                if others and not target_here and has_core and not has_rel:
                     contaminated.append({
                         "value": f"{n['raw']}",
                         "entity": "、".join(others[:2]),
@@ -346,7 +356,9 @@ def check_entity_attribution(
                             others = [e for e in _OTHER_ENTITIES
                                       if e in ctx and e.lower() != target.lower()]
                             target_here = target in ctx
-                            if others and not target_here:
+                            has_rel = any(v in ctx for v in _RELATION_VERBS)
+                            has_core = any(w in ctx for w in _CORE_FIN_WORDS)
+                            if others and not target_here and has_core and not has_rel:
                                 contaminated.append({
                                     "value": f"{r.get('label')} = {val}{unit}",
                                     "entity": "、".join(others[:2]),
