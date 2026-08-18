@@ -1256,6 +1256,55 @@ class TestReportCleanup(unittest.TestCase):
         self.assertNotIn("garbage.example", out)
         self.assertIn("真实研究内容", out)
 
+    def test_report_too_short_detection(self):
+        """过短/错误 JSON/纯标题判定；正常报告不误判。"""
+        from workers.report_generator_worker import ReportGeneratorWorker
+
+        w = ReportGeneratorWorker.__new__(ReportGeneratorWorker)
+        self.assertTrue(w._report_too_short(""))
+        self.assertTrue(w._report_too_short("报告"))
+        self.assertTrue(w._report_too_short('{"error": "balance"}'))
+        self.assertTrue(w._report_too_short("# 腾讯报告"))
+        self.assertFalse(w._report_too_short("# 腾讯报告\n\n这是正文内容，" * 20))
+
+    def test_trim_prompt_for_report(self):
+        """[上一步结果] 大块内容应被截断，指令头保留。"""
+        from workers.report_generator_worker import ReportGeneratorWorker
+
+        w = ReportGeneratorWorker.__new__(ReportGeneratorWorker)
+        user = "用户目标：腾讯财报\n[上一步结果 1]:\n" + "长" * 2000 + "\n[上一步结果 2]:\n" + "短"
+        out = w._trim_prompt_for_report(user, per_step=500)
+        self.assertIn("用户目标：腾讯财报", out)
+        self.assertIn("[上一步结果 1]:", out)
+        self.assertNotIn("长" * 800, out)
+        self.assertIn("[上一步结果 2]:", out)
+
+    def test_research_content_extracts_core_paragraphs(self):
+        """上游产物：去顶层标题提取正文；同类型完整报告跳过。"""
+        from workers.report_generator_worker import ReportGeneratorWorker
+
+        w = ReportGeneratorWorker.__new__(ReportGeneratorWorker)
+        analysis = "# 腾讯内容总结报告\n\n这是有用的分析段落\n\n## 二、业务结构\n\n内容"
+        out = w._research_content(analysis)
+        self.assertIn("这是有用的分析段落", out)
+        self.assertNotIn("# 腾讯内容总结报告", out)
+        # 同类型完整报告（标题含"报告"且有数据来源/多章节）→ 跳过
+        full = (
+            "# 腾讯集团发展历程与财报分析报告\n\n## 一、摘要\n\nx\n\n## 二、财务\n\ny\n\n"
+            "## 三、数据来源\n\nurl"
+        )
+        self.assertEqual(w._research_content(full), "")
+
+    def test_redo_result_worse(self):
+        """重做劣化判定：fallback 标记或长度缩水超 60%。"""
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        self.assertTrue(o._redo_result_worse(
+            "正常报告" * 100, '{"status":"success","fallback":true}'))
+        self.assertTrue(o._redo_result_worse("正常报告" * 100, "很短"))
+        self.assertFalse(o._redo_result_worse("正常报告" * 100, "正常报告" * 60))
+
 
 class TestP0Robustness(unittest.TestCase):
     def test_endpoints_available_aborts_when_both_down(self):

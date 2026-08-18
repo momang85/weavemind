@@ -1035,6 +1035,9 @@ class OrchestratorV2:
         target = next((s for s in all_steps if s.get("step_id") == step_id), None)
         if not target:
             return False
+        # 保存原结果：若重做后质量明显劣化则恢复并停止（防止 fallback 覆盖好报告）
+        old_result = completed_all.get(step_id, {})
+        old_text = str(old_result.get("result") or "")
         dependents: set[str] = set()
         changed = True
         while changed:
@@ -1065,6 +1068,23 @@ class OrchestratorV2:
                 )
             orig_instr = s2.get("instruction", "")
             result = self._dispatch_step_safe(goal, s2, task_id, {"replan_used": 0})
+            if (
+                s["step_id"] == step_id
+                and target.get("capability") in ("report_generator", "content_summary")
+                and self._redo_result_worse(old_text, result.get("result", ""))
+            ):
+                # 重做劣化（fallback 空壳 / 长度大幅缩水）→ 恢复原结果并停止重做
+                logger.warning(
+                    "Redo of step %s made result worse (%d -> %d chars); "
+                    "keeping original and stopping",
+                    step_id, len(old_text), len(str(result.get("result") or "")),
+                )
+                completed_all[step_id] = old_result
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "iteration", "agent": "orchestrator",
+                               "message": "反思重做结果劣化，保留原结果并停止该步骤重做",
+                               "timestamp": self._now_iso()})
+                return False
             completed_all[s["step_id"]] = result
             if s["step_id"] == step_id and result.get("status") == "SUCCESS":
                 # 反思改变提示词并成功 → 沉淀进进化系统 RAG，供后续任务检索
@@ -1079,6 +1099,18 @@ class OrchestratorV2:
                            "message": f"反思单步重做: step {s['step_id']} ({s.get('capability')}) -> {result.get('status')}",
                            "timestamp": self._now_iso()})
         return True
+
+    @staticmethod
+    def _redo_result_worse(old: str, new: str) -> bool:
+        """重做结果是否明显劣化：新结果是 fallback 标记，或长度不足原结果 40%。"""
+        o, n = str(old or ""), str(new or "")
+        if len(o) < 300:
+            return False
+        if "fallback" in n.lower() and "fallback" not in o.lower():
+            return True
+        if len(n) < len(o) * 0.4:
+            return True
+        return False
 
     def _record_reflection_refinement(
         self, goal: str, task_id: str, key: str, issue: str, fix_prompt: str,

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import re
 import sys
@@ -12,6 +13,8 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from async_worker_base import AsyncWorkerBase
+
+logger = logging.getLogger(__name__)
 
 REPORT_DIR = Path(tempfile.gettempdir()) / "agent_workspace" / "reports"
 
@@ -287,6 +290,68 @@ class ReportGeneratorWorker(AsyncWorkerBase):
         )
         return text + note
 
+    @staticmethod
+    def _report_too_short(report: str) -> bool:
+        """报告是否过短/无效：<50 字符、纯错误 JSON、或只有标题没有正文。"""
+        t = str(report or "").strip()
+        if len(t) < 50:
+            return True
+        low = t.lower()
+        if t.startswith("{") and any(
+            k in low for k in ('"error"', '"status"', '"detail"', '"message"')
+        ):
+            return True
+        body = re.sub(r"^#.*$", "", t, flags=re.M).strip()
+        if len(t) < 300 and len(body) < 50:
+            return True
+        return False
+
+    @staticmethod
+    def _trim_prompt_for_report(user: str, max_chars: int = 16000, per_step: int = 800) -> str:
+        """裁剪报告生成提示词：每个 [上一步结果] 只保留前 per_step 字，总量上限 max_chars。"""
+        parts = re.split(r"(\[上一步结果 \d+\]:)", user)
+        out: list[str] = []
+        i = 0
+        while i < len(parts):
+            p = parts[i]
+            if p.startswith("[上一步结果") and i + 1 < len(parts):
+                out.append(p)
+                body = parts[i + 1]
+                if len(body) > per_step:
+                    out.append(body[:per_step] + f"\n…（已截断，原 {len(body)} 字）")
+                else:
+                    out.append(body)
+                i += 2
+            else:
+                out.append(p)
+                i += 1
+        joined = "".join(out)
+        if len(joined) > max_chars:
+            joined = joined[:max_chars] + "\n…（提示词过长，已截断）"
+        return joined
+
+    @staticmethod
+    def _research_content(prev_content: str, max_chars: int = 6000) -> str:
+        """从上游产物提取核心段落：去掉顶层标题、正文限长。
+        仅当它是与当前主题同类型的完整报告（标题含"报告"且正文有 数据来源/
+        来源链接 或 ≥3 个二级章节）时跳过，避免两份报告叠印。"""
+        c = str(prev_content or "").strip()
+        if not c:
+            return ""
+        title = ""
+        m = re.search(r"^#\s+(.+)$", c, re.M)
+        if m:
+            title = m.group(1).strip()
+        body = re.sub(r"^#\s+.*$", "", c, flags=re.M).strip()
+        if ("报告" in title or "Report" in title) and (
+            "数据来源" in body or "来源链接" in body
+            or len(re.findall(r"^#{2,3}\s+[一二三四五六七八九十]", body, re.M)) >= 3
+        ):
+            return ""
+        if not body:
+            return c[:max_chars]
+        return body[:max_chars]
+
     async def execute(self, instruction: str, task: dict | None = None) -> str:
         charts_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "charts"
         data_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "data"
@@ -367,10 +432,33 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             ), goal=instruction)
             user = f"{instruction}\n\n工作区产物：\n{artifacts}"
             # 主端点连试 2 次即切备用，减少慢端点对报告环节的拖累
-            report = await self._call_llm(system=system, prompt=user, max_attempts=2)
+            report = await self._call_llm(
+                system=system, prompt=user, max_attempts=2, max_tokens=8192,
+            )
             report = report.strip()
-            if len(report) < 100:
-                raise RuntimeError("Generated report too short")
+            if self._report_too_short(report):
+                # 记录原始输出，裁剪提示词后重试一次（max_tokens 保持/增大，不缩小）
+                logger.warning(
+                    "Report LLM output too short (%d chars): %r",
+                    len(report), report[:200],
+                )
+                trimmed = self._trim_prompt_for_report(user)
+                logger.info(
+                    "Report prompt trimmed for retry: %d -> %d chars",
+                    len(user), len(trimmed),
+                )
+                report2 = await self._call_llm(
+                    system=system, prompt=trimmed, max_attempts=2, max_tokens=8192,
+                )
+                report2 = str(report2 or "").strip()
+                if not self._report_too_short(report2):
+                    report = report2
+                else:
+                    logger.warning(
+                        "Report LLM output still too short after trim retry: %r",
+                        report2[:200],
+                    )
+                    raise RuntimeError("Generated report too short after retry")
             if not report.startswith("#"):
                 report = "# 报告\n\n" + report
 
@@ -385,16 +473,13 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                     )
                     prev_content = "\n\n".join(p.strip() for p in prev_parts)
                     prev_content = self._clean_fallback_content(prev_content)
-                    if prev_content:
-                        # 若前序结果已是完整文档（含顶层标题），不重复拼接（避免
-                        # 两份报告叠在一起、同一指标出现两个数值的"双报告"问题）
-                        if not re.search(r"^# ", prev_content, re.M):
-                            report += (
-                                "\n\n## 研究内容（检索/摘要）\n\n"
-                                + prev_content[:6000]
-                            )
-                        else:
-                            logger.info("Fallback content skipped: already a full document")
+                    research = self._research_content(prev_content)
+                    if research:
+                        report += (
+                            "\n\n## 研究内容（检索/摘要）\n\n" + research
+                        )
+                    elif prev_content:
+                        logger.info("Research content skipped: same-type full report")
 
             # 数据来源附录：从指令中的 [数据来源] 块提取 URL 并去重
             src_urls: list[str] = []
@@ -429,6 +514,7 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             }, ensure_ascii=False)
         except Exception as exc:
             # 回退：LLM 不可用时，输出以任务主题为标题的结构化报告（不套数据管道模板）
+            logger.error("Report generator fallback triggered: %s", exc)
             theme = re.sub(r"^(任务目标|用户目标|原始指令)[：:]\s*", "", str(instruction)).strip()[:150]
             if not theme:
                 theme = "任务报告"
@@ -447,9 +533,8 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             prev_content = "\n\n".join(p.strip() for p in prev_parts)
             # 与主路径一致：剥离角色/指令残留、失败 JSON、URL 列表、ReAct 未收敛提示
             prev_content = self._clean_fallback_content(prev_content)
-            # 若上一步结果已是完整文档（含顶层标题），不再整篇拼进兜底报告
-            if re.search(r"^# ", prev_content, re.M):
-                prev_content = ""
+            # 上游产物提取核心段落；同类型完整报告跳过
+            prev_content = self._research_content(prev_content)
             prev_md = (
                 "\n\n## 研究内容（检索/摘要）\n\n" + prev_content
                 if prev_content else ""
@@ -470,6 +555,23 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                 report = self._embed_charts_inline(report, charts)
             try:
                 rpath = report_dir / "report.md"
+                old_size = rpath.stat().st_size if rpath.exists() else 0
+                new_size = len(report.encode("utf-8"))
+                # 止损：已有报告更完整（更长）时不覆盖（反思重做的 fallback
+                # 不得用空壳替换第一份 LLM 生成的好报告）
+                if old_size > new_size:
+                    logger.warning(
+                        "Keeping existing report.md (%d bytes > fallback %d bytes)",
+                        old_size, new_size,
+                    )
+                    return json.dumps({
+                        "status": "success",
+                        "report_path": str(rpath),
+                        "charts": len(charts),
+                        "datasets": len(data_csvs),
+                        "fallback": True,
+                        "kept_existing": True,
+                    }, ensure_ascii=False)
                 rpath.write_text(report, encoding="utf-8")
                 return json.dumps({
                     "status": "success",
