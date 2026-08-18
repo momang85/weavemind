@@ -1830,6 +1830,58 @@ class TestAcceptanceChecker(unittest.TestCase):
         self.assertFalse(r2["pass"])
         self.assertIn("腾讯官方年报", r2["mislabeled"][0])
 
+
+class TestEastMoneyAdapter(unittest.TestCase):
+    def test_to_yi(self):
+        from adapters.eastmoney import _to_yi
+
+        self.assertEqual(_to_yi(401243000000), 4012.43)
+        self.assertEqual(_to_yi(114115000000), 1141.15)
+        self.assertIsNone(_to_yi(None))
+
+    def test_fetch_parses_annuals(self):
+        """canned JSON → 年报序列解析（不打网络）。"""
+        import json
+        import adapters.eastmoney as em
+
+        canned = {
+            "result": {"data": [
+                {
+                    "SECURITY_CODE": "00700", "SECURITY_NAME_ABBR": "腾讯控股",
+                    "REPORT_DATE": "2024-12-31", "REPORT_TYPE": "2024年年报",
+                    "OPERATE_INCOME": 660257000000, "HOLDER_PROFIT": 194073000000,
+                    "GROSS_PROFIT": 349000000000, "GROSS_PROFIT_RATIO": 52.9,
+                    "OPERATE_PROFIT": 208099000000, "TOTAL_ASSETS": 1890000000000,
+                    "TOTAL_LIABILITIES": 727099000000, "NETCASH_OPERATE": 230000000000,
+                    "BASIC_EPS": 20.9, "ROE_AVG": 18.5, "CURRENCY": "HKD",
+                },
+                {
+                    "SECURITY_CODE": "00700", "SECURITY_NAME_ABBR": "腾讯控股",
+                    "REPORT_DATE": "2023-12-31", "REPORT_TYPE": "2023年年报",
+                    "OPERATE_INCOME": 609015000000, "HOLDER_PROFIT": 115216000000,
+                    "GROSS_PROFIT_RATIO": 48.13, "TOTAL_LIABILITIES": 703565000000,
+                    "BASIC_EPS": 12.2, "ROE_AVG": 11.1, "CURRENCY": "HKD",
+                },
+            ]},
+        }
+        old_get = em._get
+        em._get = lambda url, timeout=25: json.dumps(canned, ensure_ascii=False)
+        try:
+            res = em.fetch("腾讯控股", "00700")
+            fs = res["financials"]
+            self.assertEqual(len(fs), 2)
+            self.assertEqual(fs[0]["year"], 2024)
+            self.assertEqual(fs[0]["revenue"], 6602.57)
+            self.assertEqual(fs[0]["net_profit"], 1940.73)
+            self.assertEqual(fs[0]["gross_margin"], 52.9)
+            self.assertEqual(fs[0]["total_liabilities"], 7270.99)
+            self.assertEqual(fs[1]["revenue"], 6090.15)
+            self.assertEqual(res["metadata"]["annual_count"], 2)
+            self.assertIn("raw", res)
+            self.assertIn("text", res["raw"])
+        finally:
+            em._get = old_get
+
     def test_low_authority_filter(self):
         """百度文库/原创力文档等低权威来源应被搜索过滤。"""
         from worker_base import SearchAgent
