@@ -1504,6 +1504,35 @@ class TestP0Robustness(unittest.TestCase):
         self.assertNotIn("数据一致性提示", out)
         self.assertNotIn("另有来源称", out)
 
+    def test_flag_conflicting_figures_year_aware(self):
+        """2024 营收 6602.57 与 2025 营收 7517.66 是不同年份，不判冲突。"""
+        from workers.report_generator_worker import ReportGeneratorWorker
+
+        w = ReportGeneratorWorker.__new__(ReportGeneratorWorker)
+        report = (
+            "2024年营收6602.57亿元，归母净利润1940.73亿元。"
+            "2025年营收7517.66亿元，归母净利润2248.42亿元。"
+        )
+        out = w._flag_conflicting_figures(report)
+        self.assertNotIn("数据一致性提示", out)
+        self.assertNotIn("另有来源称", out)
+
+    def test_extract_structured_block(self):
+        """图表规格 LLM 应从指令中提取 [结构化财务数据] 块。"""
+        from workers.content_summary_worker import extract_structured_block
+
+        instr = (
+            "任务目标：分析腾讯财报\n"
+            "[结构化财务数据]（来自 东方财富数据中心，单位：亿元）\n"
+            "| 年份 | 营收 |\n|---|---|\n| 2025 | 7517.66 |\n"
+            "[上一步结果 1]:\n搜索片段内容"
+        )
+        block = extract_structured_block(instr)
+        self.assertIn("[结构化财务数据]", block)
+        self.assertIn("7517.66", block)
+        self.assertNotIn("[上一步结果 1]", block)
+        self.assertEqual(extract_structured_block("无结构化数据"), "")
+
     def test_structured_financials_injected_for_report(self):
         """content_summary/report_generator 步骤应收到结构化年报表格（不只文件提及）。"""
         import tempfile

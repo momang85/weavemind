@@ -271,6 +271,7 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             # 不同报告期（Q1/中报/年报…）的数值不构成冲突：
             # 如"2026年上半年净利润1141.15亿" vs "2026年Q1净利润581亿"
             period_sets = []
+            year_sets = []
             for v, s, e in items:
                 if v not in distinct:
                     continue
@@ -288,12 +289,23 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                     ) if p in ctx
                 )
                 period_sets.append((v, ps))
+                ys = frozenset(
+                    int(y) for y in re.findall(r"(20\d{2})", ctx)
+                )
+                year_sets.append((v, ys))
             by_period: dict[frozenset, set] = {}
             for v, ps in period_sets:
                 by_period.setdefault(ps, set()).add(v)
             # 若不同数值落在不同的期标记集合 → 非同一报告期，跳过
             period_keys = list(by_period.keys())
             if len(period_keys) > 1:
+                continue
+            # 不同年份：两侧都有明确年份且不同 → 非同一报告期（6602.57=2024 vs 7517.66=2025）
+            year_groups: dict[frozenset, set] = {}
+            for v, ys in year_sets:
+                if ys:
+                    year_groups.setdefault(ys, set()).add(v)
+            if len(year_groups) >= 2:
                 continue
             canonical = Counter(values).most_common(1)[0][0]
             others = [v for v in distinct if v != canonical]

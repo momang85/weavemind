@@ -14,6 +14,16 @@ from async_worker_base import AsyncWorkerBase, AsyncRegistry, AsyncMessaging
 logger = logging.getLogger(__name__)
 
 
+def extract_structured_block(instruction: str, max_chars: int = 4000) -> str:
+    """从指令中提取 [结构化财务数据] 块（供图表规格 LLM 使用）。"""
+    import re as _re
+    m = _re.search(
+        r"\[结构化财务数据\].*?(?=\n\[上一步结果|\n\[数据\]|$)",
+        str(instruction or ""), _re.S,
+    )
+    return m.group(0)[:max_chars] if m else ""
+
+
 def _load_json_loose(text: str) -> dict | list | None:
     """宽松 JSON 解析：容忍 markdown 围栏、前后多余文字，
     从首个 '{' 起按花括号配平截取 JSON 对象。"""
@@ -119,6 +129,8 @@ class ContentSummaryWorker(AsyncWorkerBase):
                         "（如\"2021年-6862亿元为极端值，主要受减值拨备影响\"）。"
                         "⑨ section_hint 必须填报告中最适合放这张图的章节名（如 财务分析/"
                         "发展历程/竞争格局/数据要点），禁止留空。"
+                        "⑩ 若提供[权威结构化财务数据]，时间序列图必须尽量使用其中的全部年份"
+                        "（如 2014-2025），不得只取两年；缺失年份以该表为准，禁止声称数据缺失。"
                         "规则：只提取与主题直接相关的数值（市场规模/份额/增速/营收等）；"
                         "口径必须区分不同来源与定义；数值必须来自总结中真实出现的内容，"
                         "严禁编造；不同来源的同一指标分成多行；"
@@ -130,9 +142,17 @@ class ContentSummaryWorker(AsyncWorkerBase):
                     clean_summary = _re.sub(
                         r"\[CHART_DATA\].*?(\n\n|$)", "", summary, flags=_re.S
                     )[:6000]
+                    # 图表规格 LLM 也要收到权威结构化财务数据（不只依赖可能被压缩的总结）
+                    structured_block = extract_structured_block(instruction)
+                    ext_prompt = f"总结：\n{clean_summary}"
+                    if structured_block:
+                        ext_prompt += (
+                            "\n\n权威结构化财务数据（优先用于作图，年份完整、来源可信）：\n"
+                            + structured_block
+                        )
                     # 宽松解析：LLM 可能带 markdown 围栏或多余文字，expect_json=False
                     # 后手动截取首个平衡 JSON 对象，避免格式问题直接丢数据。
-                    ext_raw = call_llm(ext_sys, f"总结：\n{clean_summary}", expect_json=False)
+                    ext_raw = call_llm(ext_sys, ext_prompt, expect_json=False)
                     ext = _load_json_loose(
                         str((ext_raw or {}).get("content") or "")
                         if isinstance(ext_raw, dict) else str(ext_raw or "")
