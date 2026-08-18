@@ -6,6 +6,7 @@
 """
 
 import json
+import re
 import urllib.parse
 import urllib.request
 
@@ -16,6 +17,29 @@ _EXCHANGE_TO_MARKET = {
     "NASDAQ": "US", "NYSE": "US", "AMEX": "US", "OTC": "US", "US": "US",
     "SH": "CN", "SZ": "CN", "BJ": "CN",
 }
+
+# 衍生品/ETF 产品名特征：窝轮、期权、收益策略 ETF 等不是正股
+_DERIVATIVE_RE = re.compile(
+    r"(沽|购|权证|法兴|摩通|瑞银|麦格理|高盛|德银|花旗|汇丰|中银|大和|野村|"
+    r"法巴|渣打|ETF|收益|周收益|期权|溢价|杠杆|做多|做空|债券|优先)",
+)
+
+_NON_EQUITY_TYPES = ("债券", "期货", "板块", "基金", "指数", "权证", "港股通", "Reits")
+
+
+def _market_of(m: dict) -> str:
+    """按 SecurityTypeName 分类市场（JYS 对 A股不统一：沪A=2/深A=6或80）。"""
+    tn = str(m.get("type_name") or "")
+    if tn in ("港股",):
+        return "HK"
+    if tn in ("美股", "粉单", "OTC"):
+        return "US"
+    if tn in ("沪A", "深A", "创业板", "科创板", "北交所"):
+        return "CN"
+    if tn == "日股":
+        return "JP"
+    jys = str(m.get("jys") or "").upper()
+    return _EXCHANGE_TO_MARKET.get(jys, jys)
 
 
 def _get(url: str, timeout: int = 20) -> str:
@@ -47,19 +71,40 @@ def suggest(company: str, count: int = 10) -> list[dict]:
 
 def resolve_company(company: str) -> dict | None:
     """公司名 → {market, stock_code, name, quote_id}；失败返回 None。
-    优先名字精确匹配且为港股的条目（Phase 2 只支持港股结构化源）。"""
+    过滤衍生品/ETF；优先正股：港股的"股份/控股/集团"母体 > 其他正股。"""
     if not company:
         return None
     matches = suggest(company)
     if not matches:
         return None
-    exact = [m for m in matches if company in m["name"] or m["name"] in company]
+    exact = [
+        m for m in matches
+        if str(m.get("type_name") or "") not in _NON_EQUITY_TYPES
+        and (company in m["name"] or m["name"] in company)
+        and not _DERIVATIVE_RE.search(m["name"])
+    ]
     pool = exact or matches
-    best = next((m for m in pool if m["jys"] == "HK"), pool[0])
+    # 优先港股正股（双市场公司的港股母体），其中"股份/控股/集团"更优先
+    def rank(m):
+        r = 0
+        mk = _market_of(m)
+        if mk == "HK":
+            r += 10
+        elif mk == "US":
+            r += 6
+        elif mk == "CN":
+            r += 4
+        if any(k in m["name"] for k in ("股份", "控股", "集团")):
+            r += 3
+        if m["name"] == company:
+            r += 2
+        if "-" in m["name"]:
+            r -= 8  # "微软-T/-R" 等信托/人民币柜台/变体产品，非正股主代码
+        return -r  # 分数高者优先
+
+    best = sorted(pool, key=rank)[0]
     return {
-        "market": _EXCHANGE_TO_MARKET.get(
-            str(best["jys"] or "").upper(), str(best["jys"] or "").upper(),
-        ),
+        "market": _market_of(best),
         "stock_code": best["code"],
         "name": best["name"],
         "quote_id": best["quote_id"],

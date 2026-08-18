@@ -2026,6 +2026,68 @@ class TestSecAdapter(unittest.TestCase):
             sec._get = old_get
             sec._CIK_CACHE.clear()
 
+
+class TestMultiMarketResolver(unittest.TestCase):
+    def _canned_suggest(self):
+        return {"QuotationCodeTable": {"Data": [
+            {"Code": "002594", "Name": "比亚迪", "JYS": "6",
+             "SecurityTypeName": "深A", "QuoteID": "0.002594"},
+            {"Code": "01211", "Name": "比亚迪股份", "JYS": "HK",
+             "SecurityTypeName": "港股", "QuoteID": "116.01211"},
+            {"Code": "00285", "Name": "比亚迪电子", "JYS": "HK",
+             "SecurityTypeName": "港股", "QuoteID": "116.00285"},
+            {"Code": "04338", "Name": "微软-T", "JYS": "HK",
+             "SecurityTypeName": "港股", "QuoteID": "116.04338"},
+            {"Code": "MSFT", "Name": "微软", "JYS": "NASDAQ",
+             "SecurityTypeName": "美股", "QuoteID": "105.MSFT"},
+            {"Code": "600519", "Name": "贵州茅台", "JYS": "2",
+             "SecurityTypeName": "沪A", "QuoteID": "1.600519"},
+        ]}}
+
+    def test_resolve_multi_market(self):
+        """比亚迪→HK 01211（母体股份优先）；微软→US MSFT（-T 变体降权）；茅台→CN。"""
+        import json
+        import adapters.resolver as rv
+
+        old_get = rv._get
+        rv._get = lambda url, timeout=20: json.dumps(self._canned_suggest(), ensure_ascii=False)
+        try:
+            byd = rv.resolve_company("比亚迪")
+            self.assertEqual((byd["market"], byd["stock_code"], byd["name"]),
+                             ("HK", "01211", "比亚迪股份"))
+            msft = rv.resolve_company("微软")
+            self.assertEqual((msft["market"], msft["stock_code"]), ("US", "MSFT"))
+            mt = rv.resolve_company("贵州茅台")
+            self.assertEqual((mt["market"], mt["stock_code"]), ("CN", "600519"))
+        finally:
+            rv._get = old_get
+
+    def test_fetch_ashare(self):
+        """A股 RPT_F10_FINANCE_MAINFINADATA → 年报序列。"""
+        import json
+        import adapters.eastmoney as em
+
+        canned = {"result": {"data": [
+            {"SECURITY_CODE": "002594", "SECURITY_NAME_ABBR": "比亚迪",
+             "REPORT_DATE": "2024-12-31", "REPORT_TYPE": "2024年年报",
+             "TOTALOPERATEREVE": 777102000000, "PARENTNETPROFIT": 40254200000,
+             "MLR": 154000000000, "XSMLL": 19.8, "OPERATE_PROFIT_PK": 40600000000,
+             "TOTAL_ASSETS_PK": 940000000000, "LIABILITY": 660000000000,
+             "NETCASH_OPERATE_PK": 88000000000, "EPSJB": 13.8, "ROEJQ": 20.1,
+             "CURRENCY": "CNY"},
+        ]}}
+        old_get = em._get
+        em._get = lambda url, timeout=25: json.dumps(canned, ensure_ascii=False)
+        try:
+            res = em.fetch_ashare("比亚迪", "002594")
+            f = res["financials"][0]
+            self.assertEqual(f["year"], 2024)
+            self.assertEqual(f["revenue"], 7771.02)
+            self.assertEqual(f["net_profit"], 402.54)
+            self.assertEqual(res["metadata"]["source"], "eastmoney_ashare")
+        finally:
+            em._get = old_get
+
     def test_low_authority_filter(self):
         """百度文库/原创力文档等低权威来源应被搜索过滤。"""
         from worker_base import SearchAgent

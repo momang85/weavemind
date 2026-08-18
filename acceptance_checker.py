@@ -262,11 +262,31 @@ _CORE_FIN_WORDS = (
     "负债", "资产", "现金流", "销售额", "占比", "经营利润", "市值",
 )
 _RELATION_VERBS = ("投资", "入股", "收购", "融资", "获得", "出资", "补贴", "捐赠", "认购")
+_NON_CORP_COMPOUNDS = (
+    "百度百科", "百度知道", "百度贴吧", "百度文库", "谷歌学术",
+    "维基百科", "微软百科", "阿里云盘",
+)
+
+
+def _entity_in(ctx: str, e: str) -> bool:
+    """实体是否出现在上下文（剔除百科/文库等平台名里的公司字）。"""
+    c = str(ctx or "")
+    for comp in _NON_CORP_COMPOUNDS:
+        if e in comp:
+            c = c.replace(comp, "")
+    return e in c
 
 
 def _target_entity(goal: str) -> str:
     """从目标提取公司主体（腾讯/恒大/特斯拉…）；取"集团/公司/控股"前的最长 2-4 字。"""
     g = str(goal or "")
+    try:
+        from task_classifier import _extract_company
+        c = _extract_company(g)
+        if c:
+            return c
+    except Exception:
+        pass
     m = re.search(r"([\u4e00-\u9fff]{2,6}?)(?:集团|控股|公司)", g)
     if m:
         return m.group(1)
@@ -275,22 +295,20 @@ def _target_entity(goal: str) -> str:
 
 
 def _locate_and_context(source_text: str, value: str, unit: str, radius: int = 80):
-    """在源文本中定位数字，返回上下文窗口列表。"""
+    """在源文本中定位数字，返回【包含该数字的句子】。
+    句子级归属：标题/相邻句出现目标公司不算归属证据（如"官宣与腾讯合作"的
+    Line 新闻里，4% 是 Line 的，不是腾讯的）。"""
     st = _norm(source_text)
     cands = _candidates({"value": value, "unit": unit})
     if not cands:
         cands = [value]
-    hits = []
+    sentences = re.split(r"[。！？；;\n]+", st)
+    hits: list[tuple[str, str]] = []
     for c in cands:
-        start = 0
-        while True:
-            i = st.find(c, start)
-            if i < 0:
-                break
-            lo = max(0, i - radius)
-            hi = min(len(st), i + len(c) + radius)
-            hits.append(st[lo:hi])
-            start = i + len(c)
+        for i, s in enumerate(sentences):
+            if c in s:
+                prev = sentences[i - 1] if i > 0 else ""
+                hits.append((s, prev))
         if hits:
             break
     return hits
@@ -317,10 +335,15 @@ def check_entity_attribution(
             continue
         for n in trace.get("traceable", []):
             ctxs = _locate_and_context(src_text, n["value"], n["unit"])
-            for ctx in ctxs:
+            for ctx, prev in ctxs:
                 checked += 1
-                others = [e for e in _OTHER_ENTITIES
-                          if e in ctx and e.lower() != target.lower()]
+                # 其他公司实体可来自当前句或前一句（跨句指代："这些业务"=Line）；
+                # 目标公司必须出现在当前句才算归属
+                others = [
+                    e for e in _OTHER_ENTITIES
+                    if (_entity_in(ctx, e) or _entity_in(prev, e))
+                    and e.lower() != target.lower()
+                ]
                 target_here = target in ctx
                 has_rel = any(v in ctx for v in _RELATION_VERBS)
                 has_core = any(w in ctx for w in _CORE_FIN_WORDS)
@@ -351,10 +374,13 @@ def check_entity_attribution(
                         if src_url and src_url not in src_text:
                             continue
                         ctxs = _locate_and_context(src_text, val, unit)
-                        for ctx in ctxs:
+                        for ctx, prev in ctxs:
                             checked += 1
-                            others = [e for e in _OTHER_ENTITIES
-                                      if e in ctx and e.lower() != target.lower()]
+                            others = [
+                                e for e in _OTHER_ENTITIES
+                                if (_entity_in(ctx, e) or _entity_in(prev, e))
+                                and e.lower() != target.lower()
+                            ]
                             target_here = target in ctx
                             has_rel = any(v in ctx for v in _RELATION_VERBS)
                             has_core = any(w in ctx for w in _CORE_FIN_WORDS)
