@@ -169,6 +169,53 @@ def _traceable_in_clean(num: dict, clean_text: str) -> bool:
     return False
 
 
+def _derived_traceable(num: dict, clean_text: str) -> bool:
+    """派生值溯源：报告里的同比增速 / 约数金额可追溯到结构化数据。
+    - % 值：与同指标相邻年份 (b/a-1)*100 一致（容差 0.05 个百分点）；
+    - 金额：与结构化值在 2% 容差内（"突破3000亿"≈3030.52 亿）。"""
+    try:
+        data = json.loads(clean_text)
+    except Exception:
+        return False
+    md = data.get("market_data") or []
+    try:
+        v = float(num["value"])
+    except (TypeError, ValueError):
+        return False
+    if num["unit"].endswith("%"):
+        by_metric: dict[str, list] = {}
+        for r in md:
+            if not isinstance(r, dict):
+                continue
+            if r.get("year") is None or r.get("value") is None:
+                continue
+            try:
+                lbl = re.sub(r"^\d{4}年", "", str(r.get("label") or ""))
+                by_metric.setdefault(lbl, []).append(
+                    (int(r["year"]), float(r["value"]))
+                )
+            except (TypeError, ValueError):
+                continue
+        for pts in by_metric.values():
+            pts.sort()
+            for i in range(1, len(pts)):
+                _y0, a = pts[i - 1]
+                _y1, b = pts[i]
+                if a and abs(abs(b / a - 1) * 100 - v) < 0.05:
+                    return True
+        return False
+    for r in md:
+        if not isinstance(r, dict):
+            continue
+        try:
+            rv = float(r.get("value"))
+        except (TypeError, ValueError):
+            continue
+        if rv and abs(rv - v) / rv <= 0.02:
+            return True
+    return False
+
+
 def check_number_traceability(report: str, sources: dict, threshold: float = 0.7) -> dict:
     """数字溯源校验：报告中的财务数字能否在检索/快照/清洗数据中找到。
     返回 {pass, details, total_count, traceable_count, unverifiable_count, ...}。"""
@@ -191,6 +238,8 @@ def check_number_traceability(report: str, sources: dict, threshold: float = 0.7
         hit = None
         if clean_text and _traceable_in_clean(n, clean_text):
             hit = "clean_chart_data"
+        elif clean_text and _derived_traceable(n, clean_text):
+            hit = "derived_from_clean"
         else:
             if n["unit"]:
                 for k, st in src_norm.items():
@@ -205,6 +254,7 @@ def check_number_traceability(report: str, sources: dict, threshold: float = 0.7
         item = {"raw": n["raw"], "value": n["value"], "unit": n["unit"]}
         if hit:
             item["source"] = hit
+            item["derived"] = hit == "derived_from_clean"
             traceable.append(item)
         else:
             # 数字后紧跟"基于模型知识/未验证"标注 → 已披露，不算缺口

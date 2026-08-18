@@ -1843,6 +1843,21 @@ class TestAcceptanceChecker(unittest.TestCase):
         self.assertGreaterEqual(r["traceable_count"], 2)  # 6090/1152 可溯源（千分位/小数模糊）
         self.assertGreaterEqual(r["unverifiable_count"], 1)  # 8% 无来源
 
+    def test_derived_traceable(self):
+        """派生值溯源：同比增速与结构化相邻年份一致、约数金额在容差内 → 可溯源。"""
+        import json
+        from acceptance_checker import _derived_traceable
+
+        clean = json.dumps({"market_data": [
+            {"label": "2024年营收", "value": 6602.57, "unit": "亿元", "year": 2024},
+            {"label": "2025年营收", "value": 7517.66, "unit": "亿元", "year": 2025},
+            {"label": "2025年经营现金流", "value": 3030.52, "unit": "亿元", "year": 2025},
+        ]}, ensure_ascii=False)
+        self.assertTrue(_derived_traceable({"value": "13.9", "unit": "%"}, clean))
+        self.assertTrue(_derived_traceable({"value": "3000", "unit": "亿元"}, clean))
+        self.assertFalse(_derived_traceable({"value": "55.0", "unit": "%"}, clean))
+        self.assertFalse(_derived_traceable({"value": "2800", "unit": "亿元"}, clean))
+
     def test_acceptance_gap_report(self):
         """缺口报告结构：checks/gaps/overall。"""
         import tempfile
