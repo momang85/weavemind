@@ -131,6 +131,42 @@
           "timeout": 180
         }
       ]
+    },
+    {
+      "name": "公司调研与财报分析",
+      "goal": "调研公司/集团的发展历程和现状，并分析历年财报",
+      "steps": [
+        {
+          "step_id": "1",
+          "capability": "web_search",
+          "instruction": "搜索目标公司/集团的发展历程、现状及历年财报（营收、净利润、负债等关键指标）的权威来源，返回含原始URL的结果列表，优先官方公告或财经媒体。",
+          "timeout": 120
+        },
+        {
+          "step_id": "2",
+          "capability": "web_fetch",
+          "instruction": "从步骤1搜索结果中选取与财报/财务数据最相关的1-2个链接，抓取完整正文并保留原始URL与全部数字（年份、金额、口径）；若主链接失败则换备用链接。",
+          "timeout": 180
+        },
+        {
+          "step_id": "3",
+          "capability": "content_summary",
+          "instruction": "基于步骤1-2内容，总结目标公司的发展历程与现状：关键时间线、业务结构、面临的挑战，输出结构化Markdown。",
+          "timeout": 180
+        },
+        {
+          "step_id": "4",
+          "capability": "content_summary",
+          "instruction": "基于步骤1-2内容，整理历年财务数据表格（营收/净利润/毛利率/负债等，标注年份、口径、来源），并输出[CHART_DATA]图表规格供渲染。",
+          "timeout": 180
+        },
+        {
+          "step_id": "5",
+          "capability": "report_generator",
+          "instruction": "整合步骤3-4内容生成最终报告：发展历程+现状+财务分析+数据来源附录，将图表嵌入报告。",
+          "timeout": 300
+        }
+      ]
     }
   ]
 }

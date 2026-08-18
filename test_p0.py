@@ -1617,6 +1617,87 @@ class TestP0Robustness(unittest.TestCase):
         finally:
             llm_client._last_auth_error = old
 
+    def test_pick_fetch_url_prefers_finance(self):
+        """快照抓取应优先选中财经相关 URL，降权内容社区。"""
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        items = [
+            {"title": "腾讯的发展历程 - CSDN博客", "url": "https://blog.csdn.net/x/article/1",
+             "snippet": "历程"},
+            {"title": "腾讯2023年报：营收6090亿 净利润1152亿", "url": "https://www.21jingji.com/a/2023",
+             "snippet": "财报数据"},
+            {"title": "腾讯概况", "url": "https://www.toutiao.com/article/2", "snippet": "概况"},
+        ]
+        best = o._pick_fetch_url(items)
+        self.assertIn("21jingji", best)
+
+    def test_wants_financial_data(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        self.assertTrue(o._wants_financial_data("分析腾讯历年财报"))
+        self.assertFalse(o._wants_financial_data("做一个贪吃蛇游戏"))
+
+    def test_snapshot_recycle_into_clean(self):
+        """抓取正文应回灌清洗：市场数据进入 clean_chart_data.json。"""
+        import json
+        import tempfile
+        from pathlib import Path
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = Path(tempfile.mkdtemp(prefix="snap_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            proj = ws_mod.task_project_dir("t-snap")
+            (proj / "search_results.json").write_text(
+                json.dumps([{"title": "腾讯历程", "url": "https://sohu.example/1",
+                             "snippet": "腾讯集团发展历程概述"}], ensure_ascii=False),
+                encoding="utf-8",
+            )
+            result = {"status": "SUCCESS", "result": json.dumps({
+                "status": "success", "url": "https://21jingji.example/2023",
+                "title": "腾讯2023年报",
+                "text": (
+                    "2023年腾讯总营收6090亿元，净利润1152亿元；2022年总营收5546亿元，净利润1882亿元；"
+                    "2021年总营收5601亿元，净利润2248亿元；2020年总营收4821亿元，净利润1598亿元；"
+                    "2019年总营收3772亿元，净利润933亿元；2018年总营收3127亿元，净利润787亿元；"
+                    "2017年总营收2378亿元，净利润715亿元；2016年总营收1519亿元，净利润411亿元；"
+                    "2015年总营收1029亿元，净利润288亿元；2014年总营收789亿元，净利润238亿元。"
+                    "以上数据均来自腾讯控股历年年度报告，口径为IFRS，金额单位为人民币亿元。"
+                    "此外，腾讯2023年全年Non-IFRS净利润为1577亿元，同比增长36%；"
+                    "2024年第一季度总营收1595亿元，Non-IFRS净利润503亿元，同比增长54%。"
+                    "毛利率方面，2023年整体毛利率约48%，增值服务板块毛利率约57%，"
+                    "金融科技及企业服务板块毛利率约40%，营销服务板块毛利率约55%。"
+                ),
+            }, ensure_ascii=False)}
+            o._recycle_fetch_into_clean(
+                "t-snap", "搜索并总结腾讯集团的发展历程和现状，分析历年财报", result)
+            clean = json.loads(
+                (proj / "clean_chart_data.json").read_text(encoding="utf-8"))
+            md = clean.get("market_data") or []
+            self.assertTrue(any(r.get("label") == "总营收" and r.get("value") == 6090.0 for r in md))
+            self.assertTrue((proj / "fetch_snapshot.json").exists())
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+
+    def test_company_report_template_match(self):
+        """腾讯调研任务应命中'公司调研与财报分析'模板。"""
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        templates = [{"name": "公司调研与财报分析"}, {"name": "数据分析流水线"}]
+        hit = o._template_keyword_match(
+            "搜索并总结腾讯集团的发展历程和现状，与之相配合，分析腾讯集团历年财报",
+            templates)
+        self.assertEqual(hit["name"], "公司调研与财报分析")
+        # 非财报类公司任务不误命中
+        miss = o._template_keyword_match("做一个贪吃蛇游戏", templates)
+        self.assertIsNone(miss)
+
     def test_low_authority_filter(self):
         """百度文库/原创力文档等低权威来源应被搜索过滤。"""
         from worker_base import SearchAgent

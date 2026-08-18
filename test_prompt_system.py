@@ -139,7 +139,7 @@ class TestReflectionUsesRegistry(unittest.TestCase):
         captured = {}
 
         class FakeLLM:
-            def call(self, system, prompt, expect_json=True):
+            def call(self, system, prompt, expect_json=True, **kwargs):
                 captured["system"] = system
                 return {"score": 10, "verdict": "accept", "gaps": [], "next_steps": []}
 

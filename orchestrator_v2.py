@@ -376,7 +376,7 @@ class OrchestratorV2:
                 from prompt_registry import get_prompt
                 raw = self._planner_llm.call(
                     get_prompt("planner", PLANNER_SYSTEM, goal=goal),
-                    attempt_prompt, expect_json=True,
+                    attempt_prompt, expect_json=True, max_tokens=8192,
                 )
                 plan_data = self._parse_plan_response(raw)
                 break
@@ -439,7 +439,7 @@ class OrchestratorV2:
                     )
                     raw2 = self._planner_llm.call(
                         get_prompt("planner", PLANNER_SYSTEM, goal=goal),
-                        strict_prompt, expect_json=True,
+                        strict_prompt, expect_json=True, max_tokens=8192,
                     )
                     steps2 = self._normalize_steps(self._parse_plan_response(raw2))
                     steps2 = self._ensure_report_step(steps2, task_id)
@@ -630,6 +630,12 @@ class OrchestratorV2:
             "董事会汇报": (
                 ("可行性", "方案"), ("roi",), ("董事会",), ("可行性", "评估"),
             ),
+            "公司调研与财报分析": (
+                ("集团", "发展", "财报"), ("公司", "发展", "财报"),
+                ("集团", "现状", "财报"), ("公司", "现状", "财报"),
+                ("集团", "发展", "年报"), ("公司", "发展", "年报"),
+                ("集团", "财报", "分析"), ("公司", "财报", "分析"),
+            ),
         }
         for t in templates:
             groups = conds.get(str(t.get("name") or ""))
@@ -749,6 +755,116 @@ class OrchestratorV2:
             return "\n".join(files) if files else "（工作区暂无文件）"
         except Exception:
             return ""
+
+    @staticmethod
+    def _wants_financial_data(goal: str) -> bool:
+        """目标是否要求财务/财报类数据（触发快照页抓取与回灌清洗）。"""
+        g = str(goal or "").lower()
+        return any(k in g for k in (
+            "财报", "年报", "季报", "营收", "净利润", "负债", "财务", "业绩",
+            "financial", "revenue", "earnings", "annual report",
+        ))
+
+    @staticmethod
+    def _pick_fetch_url(items: list) -> str | None:
+        """从搜索结果中挑选财务相关度最高的 URL：
+        标题/URL 含财报关键词加分、财经媒体域名加分、内容社区降权。"""
+        finance_kw = (
+            "财报", "年报", "季报", "营收", "净利润", "业绩", "财务", "公告",
+            "financial", "earnings", "annual", "revenue",
+        )
+        good_domains = (
+            "ir.", "hkex", "eastmoney", "10jqka", "sina", "163.com",
+            "21jingji", "yicai", "cls.cn", "finance", "stock",
+            "xueqiu", "snowball", "pedaily", "baijing",
+        )
+        junk_domains = ("blog.csdn", "zhihu.com", "zhengxianling",
+                        "cp.baidu", "toutiao", "csdn")
+        best: str | None = None
+        best_score = 0
+        for it in items or []:
+            if not isinstance(it, dict):
+                continue
+            title = str(it.get("title") or "")
+            url = str(it.get("url") or it.get("href") or "")
+            if not url.startswith("http"):
+                continue
+            low_t = title.lower()
+            low_u = url.lower()
+            score = 0
+            for k in finance_kw:
+                if k in low_t or k in low_u:
+                    score += 2
+            for d in good_domains:
+                if d in low_u:
+                    score += 1
+            for j in junk_domains:
+                if j in low_u:
+                    score -= 2
+            if score > best_score:
+                best_score = score
+                best = url
+        return best
+
+    def _recycle_fetch_into_clean(self, task_id: str, goal: str, result: dict) -> None:
+        """快照页回灌清洗闭环：把 web_fetch 抓到的完整正文并入清洗输入，
+        重新生成 clean_chart_data.json 并重跑探索图，让财务数字进入图表与摘要。"""
+        if not self._wants_financial_data(goal):
+            return
+        try:
+            parsed = json.loads(str(result.get("result") or ""))
+        except Exception:
+            parsed = None
+        if not isinstance(parsed, dict):
+            return
+        text = str(parsed.get("text") or "").strip()
+        if len(text) < 300:
+            logger.info("Snapshot fetch too short, skip recycle (%d chars)", len(text))
+            return
+        try:
+            proj = task_project_dir(task_id)
+            snap = proj / "fetch_snapshot.json"
+            snaps: list[dict] = []
+            if snap.exists():
+                try:
+                    snaps = json.loads(snap.read_text(encoding="utf-8"))
+                except Exception:
+                    snaps = []
+            entry = {
+                "title": str(parsed.get("title") or ""),
+                "url": str(parsed.get("url") or ""),
+                "text": text,
+            }
+            if not any(s.get("url") == entry["url"] for s in snaps):
+                snaps.append(entry)
+            snap.write_text(
+                json.dumps(snaps, ensure_ascii=False, indent=1), encoding="utf-8",
+            )
+            src = proj / "search_results.json"
+            items = json.loads(src.read_text(encoding="utf-8")) if src.exists() else []
+            docs = list(items) + [
+                {
+                    "title": s.get("title") or "",
+                    "url": s.get("url") or "",
+                    "snippet": s.get("text") or "",
+                }
+                for s in snaps
+            ]
+            from clean_data import clean_and_structure
+            clean = clean_and_structure(docs, goal=goal)
+            (proj / "clean_chart_data.json").write_text(
+                json.dumps(clean, ensure_ascii=False, indent=1), encoding="utf-8",
+            )
+            logger.info(
+                "Snapshot recycle: %d docs, market_data=%d, shares=%d, trends=%d",
+                len(docs),
+                len(clean.get("market_data") or []),
+                len(clean.get("market_share") or []),
+                len(clean.get("market_trends") or []),
+            )
+            self._generate_search_charts(task_id, goal)
+        except Exception as exc:
+            logger.warning("snapshot recycle failed: %s", str(exc)[:150])
 
     def _enforce_no_web_scrape_code(
         self, steps: list[dict], goal: str, task_id: str,
@@ -1011,7 +1127,7 @@ class OrchestratorV2:
             from prompt_registry import get_prompt
             raw = self._planner_llm.call(
                 get_prompt("reflect", ITERATOR_SYSTEM, goal=goal),
-                prompt, expect_json=True,
+                prompt, expect_json=True, max_tokens=8192,
             )
             if isinstance(raw, dict):
                 return raw
@@ -1340,7 +1456,7 @@ class OrchestratorV2:
             from prompt_registry import get_prompt
             raw = self._plan_llm.call(
                 get_prompt("planner", PLANNER_SYSTEM, goal=goal),
-                prompt, expect_json=True,
+                prompt, expect_json=True, max_tokens=8192,
             )
             if isinstance(raw, dict):
                 plan_data = raw
@@ -1419,7 +1535,7 @@ class OrchestratorV2:
             from prompt_registry import get_prompt
             raw = self._plan_llm.call(
                 get_prompt("planner", PLANNER_SYSTEM, goal=goal),
-                prompt, expect_json=True,
+                prompt, expect_json=True, max_tokens=8192,
             )
             if isinstance(raw, dict):
                 plan_data = raw
@@ -3831,6 +3947,9 @@ print("charts generated")
                 if fb_result.get("status") == "SUCCESS":
                     fb_result["degraded_from_react"] = True
                     result = fb_result
+            if step.get("capability") == "web_fetch" and result.get("status") == "SUCCESS":
+                # 快照页回灌清洗：抓到的正文并入清洗输入，财务数字进入图表/摘要
+                self._recycle_fetch_into_clean(task_id, goal, result)
             if step.get("capability") == "web_search" and result.get("status") == "SUCCESS":
                 # 搜索结果 URL 累计到任务级，供后续（含反射轮）报告步骤引用来源
                 try:
@@ -4102,6 +4221,14 @@ print("charts generated")
                 return text
 
         if cap in ('data_loader', 'web_fetch'):
+            goal_low = str((getattr(self, "_task_goals", {}) or {}).get(task_id, "") or "").lower()
+            finance_fetch = (
+                cap == "web_fetch"
+                and any(k in goal_low for k in (
+                    "财报", "年报", "季报", "营收", "净利润", "负债", "财务", "业绩",
+                    "financial", "revenue", "earnings",
+                ))
+            )
             for dep_id in deps:
                 prev_res = _prev(dep_id)
                 try:
@@ -4109,11 +4236,16 @@ print("charts generated")
                 except Exception:
                     prev_json = prev_res
                 if isinstance(prev_json, list):
-                    for item in prev_json:
-                        url = item.get('url') or item.get('href') or ''
-                        if url and url.startswith('http'):
-                            instr += f' [URL: {url}]'
-                            break
+                    if finance_fetch:
+                        best = self._pick_fetch_url(prev_json)
+                        if best:
+                            instr = f"[URL: {best}] " + instr
+                    else:
+                        for item in prev_json:
+                            url = item.get('url') or item.get('href') or ''
+                            if url and url.startswith('http'):
+                                instr += f' [URL: {url}]'
+                                break
                 elif isinstance(prev_json, dict):
                     url = prev_json.get('url') or prev_json.get('href') or ''
                     if url:
@@ -4121,6 +4253,11 @@ print("charts generated")
                 urls = re.findall(r'https?://\S+', prev_res if isinstance(prev_res, str) else '')
                 if urls:
                     instr += f' [URL: {urls[0]}]'
+            if finance_fetch:
+                instr += (
+                    " 优先抓取与财报/财务数据直接相关的页面，"
+                    "抓取完整正文（保留所有数字、年份、口径），不要只抓摘要。"
+                )
 
         if cap in ('data_analyzer', 'model_trainer'):
             for dep_id in deps:
