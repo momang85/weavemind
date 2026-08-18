@@ -11,6 +11,12 @@ import urllib.request
 
 _SUGGEST_URL = "https://searchapi.eastmoney.com/api/suggest/get"
 
+_EXCHANGE_TO_MARKET = {
+    "HK": "HK",
+    "NASDAQ": "US", "NYSE": "US", "AMEX": "US", "OTC": "US", "US": "US",
+    "SH": "CN", "SZ": "CN", "BJ": "CN",
+}
+
 
 def _get(url: str, timeout: int = 20) -> str:
     req = urllib.request.Request(
@@ -51,7 +57,9 @@ def resolve_company(company: str) -> dict | None:
     pool = exact or matches
     best = next((m for m in pool if m["jys"] == "HK"), pool[0])
     return {
-        "market": best["jys"],
+        "market": _EXCHANGE_TO_MARKET.get(
+            str(best["jys"] or "").upper(), str(best["jys"] or "").upper(),
+        ),
         "stock_code": best["code"],
         "name": best["name"],
         "quote_id": best["quote_id"],
