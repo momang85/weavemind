@@ -3228,6 +3228,7 @@ if __name__ == "__main__":
 绘图只接收结构化数据，不直接解析 search_results.json 原始文本。
 被跳过的图会打印原因（SKIP），便于用户/日志了解发生了什么。"""
 import json
+import re
 import sys
 from collections import Counter
 import matplotlib
@@ -3324,11 +3325,46 @@ if top_w and len(set(c for _, c in top_w)) > 1:
 else:
     print(f"SKIP 主题热词图：热词不足或无区分度（{len(top_w)} 条）")
 
-# 4) 市场规模（广谱扫描结果）：先过滤噪音/排除 AI 整体市场，再按单位分组渲染
-market = clean_rows(clean.get("market_data"), require_type="market_size")
-if len(market) >= 2:
+# 4) 财务/市场规模（结构化源）：优先"年份 × 指标"面板数据 → 每指标一张折线子图，
+#    避免把 12 年 × 6-8 个指标塞进单张柱状图（70+ 柱子不可读）。
+#    财务行（营收/净利…）可能被标为 ai_overall，按"带年份"识别，不再按 type 过滤。
+market = clean_rows(clean.get("market_data"))
+rows_by_metric = {}
+for m in market:
+    yr = m.get("year")
+    label = str(m.get("label") or "")
+    metric = re.sub(r"^\d{4}年", "", label)
+    if yr and metric and len(metric) >= 2:
+        rows_by_metric.setdefault(metric, []).append((int(yr), float(m.get("value") or 0)))
+metric_groups = {
+    k: sorted(set(v)) for k, v in rows_by_metric.items()
+    if len(set(p[0] for p in v)) >= 3
+}
+if len(metric_groups) >= 2:
+    names = sorted(metric_groups, key=lambda k: -len(metric_groups[k]))
+    fig, axes = plt.subplots(len(names), 1, figsize=(11, 3.0 * len(names)))
+    if hasattr(axes, "ravel"):
+        axes = axes.ravel()
+    elif not isinstance(axes, (list, tuple)):
+        axes = [axes]
+    for ax, mname in zip(axes, names):
+        pts = metric_groups[mname]
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        ax.plot(xs, ys, marker="o", linewidth=2, color="#0ea5e9")
+        ax.set_title(f"{mname}（亿元）", fontsize=10)
+        ax.set_xlabel("年份")
+        ax.grid(alpha=0.3)
+        for x, y in zip(xs, ys):
+            ax.text(x, y, f"{y:g}", ha="center", va="bottom", fontsize=7)
+    fig.suptitle("财务指标趋势（结构化数据，亿元）", fontsize=12)
+    save_qa(fig, axes[0], "financial_trends.png")
+    plt.close()
+elif len(market) >= 2:
+    # 非年份类市场规模数据（AI 芯片市场等）→ 按单位分组柱状图；排除 AI 整体市场
+    bar_market = [m for m in market if m.get("type") == "market_size"]
     by_unit = {}
-    for m in market:
+    for m in bar_market:
         by_unit.setdefault(str(m.get("unit") or "?"), []).append(m)
     best = max(by_unit.values(), key=len)
     if len(best) >= 2:

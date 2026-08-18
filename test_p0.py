@@ -1776,6 +1776,36 @@ class TestP0Robustness(unittest.TestCase):
         miss = o._template_keyword_match("做一个贪吃蛇游戏", templates)
         self.assertIsNone(miss)
 
+    def test_financial_trends_subplot_chart(self):
+        """年份×指标面板数据 → 生成 financial_trends.png（指标级折线子图），
+        不再把 12 年 × 多指标塞进单张柱状图。"""
+        import tempfile
+        from pathlib import Path
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = Path(tempfile.mkdtemp(prefix="fintrend_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            proj = ws_mod.task_project_dir("t-ft")
+            (proj / "search_results.json").write_text(json.dumps([
+                {"title": "腾讯年报", "url": "https://em.example/1",
+                 "snippet": (
+                     "2023年营收6090.15亿元，净利润1152.16亿元；"
+                     "2024年营收6602.57亿元，净利润1940.73亿元；"
+                     "2025年营收7517.66亿元，净利润2248.42亿元。")},
+            ], ensure_ascii=False), encoding="utf-8")
+            o._generate_search_charts("t-ft", "分析腾讯历年财报并生成可视化报告")
+            pngs = {p.name for p in proj.glob("*.png")}
+            self.assertIn("financial_trends.png", pngs)
+            self.assertNotIn("market_data.png", pngs)
+            chart_dir = ws_mod.task_charts_dir("t-ft")
+            self.assertIn("financial_trends.png", {p.name for p in chart_dir.glob("*.png")})
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+
 
 class TestAcceptanceChecker(unittest.TestCase):
     def test_extract_financial_numbers(self):

@@ -35,6 +35,8 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             "entity_frequency.png": ("玩家", "厂商", "机构", "格局", "竞争", "主体"),
             "source_distribution.png": ("来源", "参考", "检索"),
             "topic_terms.png": ("技术", "趋势", "焦点", "热词"),
+            "financial_trends.png": ("财务", "营收", "利润", "负债", "资产", "趋势", "分析", "现金流"),
+            "market_data.png": ("财务", "营收", "利润", "负债", "资产", "规模", "分析"),
         }
         inserted: set[str] = set()
         # 解析标题行（级别 + 文本）
