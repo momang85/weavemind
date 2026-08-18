@@ -1122,6 +1122,20 @@ class OrchestratorV2:
             ctx_parts.append(validator_summary)
         if eval_scores:
             ctx_parts.append(f"自动评测分数（供参考）：\n{eval_scores}")
+        # 确定性验收器缺口报告：让反思基于硬检查精准补缺口，而不是"感觉不够好"
+        try:
+            from workspace import task_workspace
+            acc_path = task_workspace(task_id) / "acceptance_report.json"
+            if acc_path.exists():
+                acc = json.loads(acc_path.read_text(encoding="utf-8"))
+                if acc.get("gaps"):
+                    ctx_parts.append(
+                        "验收器缺口报告（确定性检查结果；请优先修复以下缺口，"
+                        "只重做能补齐缺口的步骤，不要整轮重来）：\n"
+                        + "\n".join(f"- {g}" for g in acc["gaps"])
+                    )
+        except Exception:
+            pass
         prompt = "\n\n".join(ctx_parts)
         try:
             from prompt_registry import get_prompt
@@ -1227,6 +1241,34 @@ class OrchestratorV2:
         if len(n) < len(o) * 0.4:
             return True
         return False
+
+    def _run_acceptance_check(self, task_id: str, goal: str) -> dict | None:
+        """报告生成后跑确定性验收器：数字溯源等 checklist → 缺口报告。
+        结果写入任务工作区 acceptance_report.json 并推前端，供反思精准补缺口。"""
+        try:
+            from acceptance_checker import run_acceptance
+            from workspace import task_reports_dir, task_workspace
+            rpath = task_reports_dir(task_id) / "report.md"
+            if not rpath.exists():
+                return None
+            report = rpath.read_text(encoding="utf-8")
+            result = run_acceptance(task_id, goal, report, task_workspace(task_id))
+            try:
+                (task_workspace(task_id) / "acceptance_report.json").write_text(
+                    json.dumps(result, ensure_ascii=False, indent=1),
+                    encoding="utf-8",
+                )
+            except Exception:
+                pass
+            summary = "；".join(result.get("gaps") or []) or "验收通过"
+            push_progress(self._messaging, task_id, "acceptance",
+                          {"message": summary, "timestamp": self._now_iso()})
+            logger.info("Acceptance(%s): overall=%s %s",
+                        task_id, result.get("overall"), summary)
+            return result
+        except Exception as exc:
+            logger.warning("Acceptance check failed: %s", str(exc)[:150])
+            return None
 
     def _record_reflection_refinement(
         self, goal: str, task_id: str, key: str, issue: str, fix_prompt: str,
@@ -3950,6 +3992,9 @@ print("charts generated")
             if step.get("capability") == "web_fetch" and result.get("status") == "SUCCESS":
                 # 快照页回灌清洗：抓到的正文并入清洗输入，财务数字进入图表/摘要
                 self._recycle_fetch_into_clean(task_id, goal, result)
+            if step.get("capability") == "report_generator" and result.get("status") == "SUCCESS":
+                # 确定性验收器：数字溯源等 checklist → 缺口报告（供反思/前端/人工）
+                self._run_acceptance_check(task_id, goal)
             if step.get("capability") == "web_search" and result.get("status") == "SUCCESS":
                 # 搜索结果 URL 累计到任务级，供后续（含反射轮）报告步骤引用来源
                 try:

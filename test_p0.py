@@ -1698,6 +1698,86 @@ class TestP0Robustness(unittest.TestCase):
         miss = o._template_keyword_match("做一个贪吃蛇游戏", templates)
         self.assertIsNone(miss)
 
+
+class TestAcceptanceChecker(unittest.TestCase):
+    def test_extract_financial_numbers(self):
+        """数字提取：带单位/大数保留，年份/URL/短数排除。"""
+        from acceptance_checker import extract_financial_numbers
+
+        text = (
+            "2023年总营收6090亿元，净利润1152亿元；增速8%，占比4%。"
+            "数据来源 https://example.com/2023?q=1383 参见 2014—2024 年。"
+        )
+        nums = extract_financial_numbers(text)
+        vals = [(n["value"], n["unit"]) for n in nums]
+        self.assertIn(("6090", "亿元"), vals)
+        self.assertIn(("1152", "亿元"), vals)
+        self.assertIn(("8", "%"), vals)
+        self.assertIn(("4", "%"), vals)
+        self.assertNotIn(("2023", ""), vals)   # 年份排除
+        self.assertNotIn(("2014", ""), vals)
+        self.assertNotIn(("1383", ""), vals)   # URL 内排除
+
+    def test_number_traceability(self):
+        """数字溯源：模糊匹配（千分位/小数），不可溯源计数准确。"""
+        from acceptance_checker import check_number_traceability
+
+        report = "2023年总营收6090亿元，净利润1152亿元；增速8%。"
+        sources = {
+            "search_results": "腾讯2023年报：总营收6,090亿元，净利润1152.0亿元",
+            "fetch_snapshot": "",
+            "clean_chart_data": "",
+        }
+        r = check_number_traceability(report, sources)
+        self.assertEqual(r["total_count"], 3)
+        self.assertGreaterEqual(r["traceable_count"], 2)  # 6090/1152 可溯源（千分位/小数模糊）
+        self.assertGreaterEqual(r["unverifiable_count"], 1)  # 8% 无来源
+
+    def test_acceptance_gap_report(self):
+        """缺口报告结构：checks/gaps/overall。"""
+        import tempfile
+        from pathlib import Path
+        from acceptance_checker import run_acceptance
+
+        tmp = Path(tempfile.mkdtemp(prefix="acc_"))
+        proj = tmp / "project"
+        proj.mkdir(parents=True)
+        (proj / "search_results.json").write_text(
+            json.dumps([{"title": "t", "url": "https://a.com",
+                         "snippet": "2023年营收6090亿元"}]), encoding="utf-8")
+        report = "2023年总营收6090亿元，净利润1152亿元。"
+        out = run_acceptance("t-acc", "分析腾讯财报", report, tmp)
+        self.assertEqual(out["report_id"], "t-acc")
+        self.assertIn("number_traceability", out["checks"])
+        self.assertIsInstance(out["gaps"], list)
+        self.assertIn(out["overall"], ("pass", "fail"))
+
+    def test_orchestrator_acceptance_hook(self):
+        """报告生成后验收：acceptance_report.json 写入工作区。"""
+        import tempfile
+        from pathlib import Path
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._messaging = None  # push_progress 安全吞异常
+        tmp = Path(tempfile.mkdtemp(prefix="acc_hook_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            rep = ws_mod.task_reports_dir("t-hook")
+            (rep / "report.md").write_text("2023年总营收6090亿元。", encoding="utf-8")
+            proj = ws_mod.task_project_dir("t-hook")
+            (proj / "search_results.json").write_text(
+                json.dumps([{"title": "t", "url": "https://a.com",
+                             "snippet": "营收6090亿元"}]), encoding="utf-8")
+            o._run_acceptance_check("t-hook", "分析腾讯财报")
+            acc = json.loads(
+                (ws_mod.task_workspace("t-hook") / "acceptance_report.json").read_text(encoding="utf-8"))
+            self.assertIn("number_traceability", acc["checks"])
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+
     def test_low_authority_filter(self):
         """百度文库/原创力文档等低权威来源应被搜索过滤。"""
         from worker_base import SearchAgent
