@@ -1882,6 +1882,92 @@ class TestEastMoneyAdapter(unittest.TestCase):
         finally:
             em._get = old_get
 
+
+class TestPhase2ClassifierRouter(unittest.TestCase):
+    def test_classify_financial_task(self):
+        from task_classifier import classify_task
+
+        cls = classify_task("搜索并总结腾讯集团的发展历程和现状，与之相配合，分析腾讯集团历年财报")
+        self.assertEqual(cls["domain"], "financial")
+        self.assertEqual(cls["company"], "腾讯")
+        self.assertIsNone(cls["market"])
+        g = classify_task("做一个贪吃蛇游戏")
+        self.assertEqual(g["domain"], "general")
+
+    def test_resolve_company_hk(self):
+        """东方财富 suggest 结果 → 港股代码解析。"""
+        import json
+        import adapters.resolver as rv
+
+        canned = {"QuotationCodeTable": {"Data": [
+            {"Code": "00700", "Name": "腾讯控股", "JYS": "HK",
+             "SecurityTypeName": "港股", "QuoteID": "116.00700", "MktNum": "116"},
+            {"Code": "0700", "Name": "腾讯控股ADR", "JYS": "US",
+             "SecurityTypeName": "美股", "QuoteID": "105.0700", "MktNum": "105"},
+        ]}}
+        old_get = rv._get
+        rv._get = lambda url, timeout=20: json.dumps(canned, ensure_ascii=False)
+        try:
+            res = rv.resolve_company("腾讯")
+            self.assertEqual(res["market"], "HK")
+            self.assertEqual(res["stock_code"], "00700")
+        finally:
+            rv._get = old_get
+
+    def test_merge_structured_financials(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        clean = {"market_data": [
+            {"label": "2024年营收", "value": 6602.57, "unit": "亿元", "source": "search"},
+        ]}
+        fin = [
+            {"year": 2024, "revenue": 6602.57, "net_profit": 1940.73,
+             "gross_margin": 52.9, "report_type": "2024年年报"},
+            {"year": 2023, "revenue": 6090.15, "net_profit": 1152.16,
+             "gross_margin": 48.13, "report_type": "2023年年报"},
+        ]
+        out = o._merge_structured_financials(clean, fin, "https://em.example")
+        labels = {r["label"] for r in out["market_data"]}
+        self.assertIn("2024年营收", labels)       # 已有行不重复
+        self.assertIn("2024年归母净利润", labels)
+        self.assertIn("2024年毛利率", labels)
+        self.assertIn("2023年营收", labels)
+        self.assertEqual(len([r for r in out["market_data"] if r["label"] == "2024年营收"]), 1)
+
+    def test_structured_preload_writes_workspace(self):
+        """financial 任务预载：financials.json + fetch_snapshot + clean_chart_data 合并。"""
+        import tempfile
+        from pathlib import Path
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+        import adapters.router as router
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._messaging = None
+        tmp = Path(tempfile.mkdtemp(prefix="preload_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        old_route = router.route_structured
+        router.route_structured = lambda goal: {
+            "financials": [{"year": 2024, "revenue": 6602.57, "net_profit": 1940.73,
+                            "gross_margin": 52.9, "report_type": "2024年年报"}],
+            "metadata": {"company": "腾讯控股", "annual_count": 1},
+            "raw": {"url": "https://em.example/api", "text": '{"raw": true}'},
+            "resolution": {"market": "HK", "stock_code": "00700"},
+        }
+        try:
+            o._structured_financial_preload("t-p2", "分析腾讯集团历年财报")
+            proj = ws_mod.task_project_dir("t-p2")
+            self.assertTrue((proj / "financials.json").exists())
+            snap = json.loads((proj / "fetch_snapshot.json").read_text(encoding="utf-8"))
+            self.assertEqual(snap[0]["url"], "https://em.example/api")
+            clean = json.loads((proj / "clean_chart_data.json").read_text(encoding="utf-8"))
+            self.assertTrue(any(r["label"] == "2024年营收" for r in clean["market_data"]))
+        finally:
+            router.route_structured = old_route
+            ws_mod.WORKSPACE_ROOT = old_root
+
     def test_low_authority_filter(self):
         """百度文库/原创力文档等低权威来源应被搜索过滤。"""
         from worker_base import SearchAgent

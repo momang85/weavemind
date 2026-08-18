@@ -855,6 +855,8 @@ class OrchestratorV2:
             (proj / "clean_chart_data.json").write_text(
                 json.dumps(clean, ensure_ascii=False, indent=1), encoding="utf-8",
             )
+            # 结构化源（东方财富）数据重新并入，避免被搜索清洗覆盖
+            self._remerge_structured_financials(task_id)
             logger.info(
                 "Snapshot recycle: %d docs, market_data=%d, shares=%d, trends=%d",
                 len(docs),
@@ -865,6 +867,117 @@ class OrchestratorV2:
             self._generate_search_charts(task_id, goal)
         except Exception as exc:
             logger.warning("snapshot recycle failed: %s", str(exc)[:150])
+
+    def _structured_financial_preload(self, task_id: str, goal: str) -> dict | None:
+        """financial 任务：尝试结构化数据源（东方财富），写入工作区，
+        供搜索清洗合并、报告引用与验收溯源。失败静默回退搜索链路。"""
+        try:
+            from adapters.router import route_structured
+            data = route_structured(goal)
+            if not data:
+                return None
+            proj = task_project_dir(task_id)
+            (proj / "financials.json").write_text(
+                json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8",
+            )
+            snap = proj / "fetch_snapshot.json"
+            snaps: list[dict] = []
+            if snap.exists():
+                try:
+                    snaps = json.loads(snap.read_text(encoding="utf-8"))
+                except Exception:
+                    snaps = []
+            entry = {
+                "title": f"{data['metadata'].get('company')} 主要财务指标（东方财富数据中心）",
+                "url": (data.get("raw") or {}).get("url", ""),
+                "text": (data.get("raw") or {}).get("text", ""),
+            }
+            if entry["url"] and not any(s.get("url") == entry["url"] for s in snaps):
+                snaps.append(entry)
+                snap.write_text(
+                    json.dumps(snaps, ensure_ascii=False, indent=1), encoding="utf-8",
+                )
+            clean_path = proj / "clean_chart_data.json"
+            clean = {}
+            if clean_path.exists():
+                try:
+                    clean = json.loads(clean_path.read_text(encoding="utf-8"))
+                except Exception:
+                    clean = {}
+            clean = self._merge_structured_financials(
+                clean, data.get("financials") or [],
+                (data.get("raw") or {}).get("url", ""),
+            )
+            clean_path.write_text(
+                json.dumps(clean, ensure_ascii=False, indent=1), encoding="utf-8",
+            )
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "data", "agent": "orchestrator",
+                           "message": (
+                               f"结构化数据源命中：{data['metadata'].get('company')} "
+                               f"{data['metadata'].get('annual_count')} 份年报"
+                           ),
+                           "timestamp": self._now_iso()})
+            logger.info("Structured financials loaded for %s: %d annuals",
+                        task_id, data["metadata"].get("annual_count"))
+            return data
+        except Exception as exc:
+            logger.warning("Structured financial preload failed: %s", str(exc)[:150])
+            return None
+
+    @staticmethod
+    def _merge_structured_financials(clean: dict, financials: list, source_url: str) -> dict:
+        """把适配器结构化财务行并入 clean_chart_data 的 market_data（去重）。"""
+        clean = dict(clean or {})
+        md = list(clean.get("market_data") or [])
+        seen = {(r.get("label"), r.get("value"), r.get("unit")) for r in md}
+        for f in financials or []:
+            if not isinstance(f, dict):
+                continue
+            for key, label, unit in (
+                ("revenue", "营收", "亿元"), ("net_profit", "归母净利润", "亿元"),
+                ("gross_profit", "毛利润", "亿元"), ("gross_margin", "毛利率", "%"),
+                ("operating_profit", "经营利润", "亿元"),
+                ("total_assets", "总资产", "亿元"), ("total_liabilities", "总负债", "亿元"),
+                ("operating_cashflow", "经营现金流", "亿元"),
+            ):
+                v = f.get(key)
+                if v is None:
+                    continue
+                row = {
+                    "type": "market_size",
+                    "label": f"{f.get('year')}年{label}",
+                    "value": v, "unit": unit,
+                    "year": f.get("year"),
+                    "source": source_url,
+                    "caliber": f"年报口径（{f.get('report_type') or ''}）",
+                }
+                k = (row["label"], row["value"], row["unit"])
+                if k not in seen:
+                    seen.add(k)
+                    md.append(row)
+        clean["market_data"] = md
+        return clean
+
+    def _remerge_structured_financials(self, task_id: str) -> None:
+        """搜索清洗/快照回灌后，把结构化源数据重新并入 clean_chart_data.json。"""
+        try:
+            proj = task_project_dir(task_id)
+            fin_path = proj / "financials.json"
+            clean_path = proj / "clean_chart_data.json"
+            if not fin_path.exists() or not clean_path.exists():
+                return
+            fin = json.loads(fin_path.read_text(encoding="utf-8"))
+            clean = json.loads(clean_path.read_text(encoding="utf-8"))
+            clean = self._merge_structured_financials(
+                clean, fin.get("financials") or [],
+                (fin.get("raw") or {}).get("url", ""),
+            )
+            clean_path.write_text(
+                json.dumps(clean, ensure_ascii=False, indent=1), encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.warning("remerge structured financials failed: %s", str(exc)[:120])
 
     def _enforce_no_web_scrape_code(
         self, steps: list[dict], goal: str, task_id: str,
@@ -3489,6 +3602,9 @@ print("charts generated")
                            "message": "Simple task: fast path enabled (skip TDD/review/reflection, early LLM failover)",
                            "timestamp": self._now_iso()})
 
+        # 结构化数据源预载：financial 任务先尝试东方财富（若命中，搜索仅作补充）
+        self._structured_financial_preload(task_id, goal)
+
         # 2..N. 执行 + 自主迭代（执行 → 验收评审 → 追加步骤，直到通过或达到上限）
         all_steps: list[dict] = []
         completed_all: dict = {}
@@ -4021,6 +4137,7 @@ print("charts generated")
                             # 先生成 clean_chart_data.json，绘图只读清洗后数据
                             from clean_data import clean_file
                             clean_file(_json_path, goal=goal)
+                            self._remerge_structured_financials(task_id)
                             self._generate_search_charts(task_id, goal)
                         except Exception as exc:
                             logger.warning("search_results.json write failed: %s", exc)

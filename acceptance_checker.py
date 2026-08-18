@@ -206,9 +206,15 @@ def check_number_traceability(report: str, sources: dict, threshold: float = 0.7
         else:
             untraceable.append(item)
     rate = traceable.__len__() / total
+    # 细分：财务金额（亿/万/元/美元单位）与 其他数字（%等）分开统计
+    amounts = [n for n in nums if any(u in n["unit"] for u in ("亿", "万", "元", "美元"))]
+    traceable_keys = {(t.get("value"), t.get("unit")) for t in traceable}
+    amount_ok = sum(1 for n in amounts if (n["value"], n["unit"]) in traceable_keys)
+    amount_rate = (amount_ok / len(amounts)) if amounts else 1.0
     passed = rate >= threshold or total < 3
     details = (
         f"数字溯源率 {rate:.0%}（{len(traceable)}/{total}）"
+        + f"；财务金额溯源率 {amount_rate:.0%}（{amount_ok}/{len(amounts)}）"
         + ("" if passed else f"，低于阈值 {threshold:.0%}")
         + (f"；不可溯源示例：{'、'.join(u['raw'][:20] for u in untraceable[:5])}" if untraceable else "")
     )
@@ -218,6 +224,9 @@ def check_number_traceability(report: str, sources: dict, threshold: float = 0.7
         "total_count": total,
         "traceable_count": len(traceable),
         "unverifiable_count": len(untraceable),
+        "amount_rate": round(amount_rate, 3),
+        "amount_traceable": amount_ok,
+        "amount_total": len(amounts),
         "traceable": traceable,
         "untraceable": untraceable[:10],
     }
