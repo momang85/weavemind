@@ -59,6 +59,12 @@ def extract_financial_numbers(text: str) -> list[dict]:
         unit_small = m.group(3) or ""
         digits = value_raw.replace(",", "")
         if not unit_big and not unit_small:
+            # 股票代码/代码后缀（00700、0700.HK、0700.T）→ 跳过
+            tail = t[m.end():m.end() + 6]
+            if re.match(r"\.(HK|T|O|N|US|L|A|B|SS|SZ)\b", tail):
+                continue
+            if re.fullmatch(r"0\d{3,}", digits):
+                continue  # 前导零代码（00700）
             if re.fullmatch(r"(19|20)\d{2}", digits):
                 continue  # 纯年份
             if len(digits.replace(".", "")) < 4:
@@ -171,6 +177,7 @@ def check_number_traceability(report: str, sources: dict, threshold: float = 0.7
             "pass": True,
             "details": "报告未检出需要溯源的财务数字",
             "total_count": 0, "traceable_count": 0, "unverifiable_count": 0,
+            "traceable": [],
             "untraceable": [],
         }
     src_norm = {k: _norm(v) for k, v in sources.items() if v}
@@ -211,7 +218,247 @@ def check_number_traceability(report: str, sources: dict, threshold: float = 0.7
         "total_count": total,
         "traceable_count": len(traceable),
         "unverifiable_count": len(untraceable),
+        "traceable": traceable,
         "untraceable": untraceable[:10],
+    }
+
+
+# ─────────────────────────────────────────────
+# 主体归属检查：数字是否属于目标公司
+# ─────────────────────────────────────────────
+
+_OTHER_ENTITIES = (
+    "Line", "line", "阿里巴巴", "阿里", "字节跳动", "字节", "百度", "京东",
+    "美团", "小米", "华为", "苹果", "微软", "谷歌", "网易", "快手", "拼多多",
+    "滴滴", "联想", "中兴", "三星", "索尼", "亚马逊", "奈飞", "软银",
+    "日本通讯", "国民银行", "大和证券",
+)
+
+
+def _target_entity(goal: str) -> str:
+    """从目标提取公司主体（腾讯/恒大/特斯拉…）；取"集团/公司/控股"前的最长 2-4 字。"""
+    g = str(goal or "")
+    m = re.search(r"([\u4e00-\u9fff]{2,6}?)(?:集团|控股|公司)", g)
+    if m:
+        return m.group(1)
+    m = re.search(r"([A-Za-z][A-Za-z0-9\-]{1,10})", g)
+    return m.group(1) if m else ""
+
+
+def _locate_and_context(source_text: str, value: str, unit: str, radius: int = 80):
+    """在源文本中定位数字，返回上下文窗口列表。"""
+    st = _norm(source_text)
+    cands = _candidates({"value": value, "unit": unit})
+    if not cands:
+        cands = [value]
+    hits = []
+    for c in cands:
+        start = 0
+        while True:
+            i = st.find(c, start)
+            if i < 0:
+                break
+            lo = max(0, i - radius)
+            hi = min(len(st), i + len(c) + radius)
+            hits.append(st[lo:hi])
+            start = i + len(c)
+        if hits:
+            break
+    return hits
+
+
+def check_entity_attribution(
+    report: str, sources: dict, goal: str,
+) -> dict:
+    """主体归属检查：报告/清洗数据中的数字应属于目标公司。
+    对每个可溯源数字，取源文本上下文窗口；窗口含其他公司实体且不含目标主体
+    → 标记为归属污染（如 Line 的 4% 被归入腾讯）。"""
+    target = _target_entity(goal)
+    contaminated: list[dict] = []
+    ambiguous: list[dict] = []
+    checked = 0
+    if not target:
+        return {"pass": True, "details": "无法从目标提取主体，跳过", "checked_count": 0,
+                "contaminated_count": 0, "contaminated": []}
+
+    # 1) 报告中的数字（可溯源部分）
+    trace = check_number_traceability(report, sources)
+    for src_key, src_text in sources.items():
+        if not src_text:
+            continue
+        for n in trace.get("traceable", []):
+            ctxs = _locate_and_context(src_text, n["value"], n["unit"])
+            for ctx in ctxs:
+                checked += 1
+                others = [e for e in _OTHER_ENTITIES
+                          if e in ctx and e.lower() != target.lower()]
+                target_here = target in ctx
+                if others and not target_here:
+                    contaminated.append({
+                        "value": f"{n['raw']}",
+                        "entity": "、".join(others[:2]),
+                        "context": ctx[:90],
+                    })
+                elif not target_here and not others:
+                    ambiguous.append({"value": n["raw"], "context": ctx[:70]})
+
+    # 2) 清洗数据行（含来源 URL 的数值行）
+    clean_text = sources.get("clean_chart_data") or ""
+    if clean_text:
+        try:
+            data = json.loads(clean_text)
+            for key in ("market_data", "market_share", "macro_indicators", "market_trends"):
+                for r in data.get(key) or []:
+                    if not isinstance(r, dict):
+                        continue
+                    val = str(r.get("value") or "")
+                    unit = str(r.get("unit") or "")
+                    src_url = str(r.get("source") or "")
+                    for src_key, src_text in sources.items():
+                        if not src_text:
+                            continue
+                        if src_url and src_url not in src_text:
+                            continue
+                        ctxs = _locate_and_context(src_text, val, unit)
+                        for ctx in ctxs:
+                            checked += 1
+                            others = [e for e in _OTHER_ENTITIES
+                                      if e in ctx and e.lower() != target.lower()]
+                            target_here = target in ctx
+                            if others and not target_here:
+                                contaminated.append({
+                                    "value": f"{r.get('label')} = {val}{unit}",
+                                    "entity": "、".join(others[:2]),
+                                    "context": ctx[:90],
+                                })
+        except Exception:
+            pass
+    # 去重
+    seen = set()
+    uniq = []
+    for c in contaminated:
+        k = (c["value"], c["entity"])
+        if k not in seen:
+            seen.add(k)
+            uniq.append(c)
+    passed = len(uniq) == 0
+    details = (
+        f"主体归属校验 {checked} 处上下文，污染 {len(uniq)} 处"
+        + (f"（{uniq[0]['value']} 属 {uniq[0]['entity']}）" if uniq else "，无不属于目标公司的数字")
+        + (f"；归属模糊 {len(ambiguous)} 处" if ambiguous else "")
+    )
+    return {
+        "pass": passed,
+        "details": details,
+        "checked_count": checked,
+        "contaminated_count": len(uniq),
+        "contaminated": uniq[:10],
+        "ambiguous_count": len(ambiguous),
+    }
+
+
+# ─────────────────────────────────────────────
+# 来源标注诚实性检查
+# ─────────────────────────────────────────────
+
+_DOMAIN_MEDIA = {
+    "sina.com.cn": "新浪", "ofweek.com": "OFweek", "21jingji.com": "21财经",
+    "yicai.com": "第一财经", "xueqiu.com": "雪球", "qianzhan.com": "前瞻",
+    "jiemian.com": "界面", "zhihu.com": "知乎", "toutiao.com": "今日头条",
+    "163.com": "网易", "eastmoney.com": "东方财富", "10jqka.com.cn": "同花顺",
+    "pedaily.cn": "投资界", "baijing.cn": "白鲸出海", "cls.cn": "财联社",
+    "infoq.cn": "InfoQ", "gov.cn": "中国政府网", "hkex.com.hk": "港交所",
+    "tencent.com": "腾讯官网", "ir.tencent.com": "腾讯投资者关系",
+}
+
+
+def _known_sources(sources: dict) -> dict:
+    """从检索/快照/清洗数据构建已知来源集合：URL、域名、媒体名、标题。"""
+    urls: set[str] = set()
+    domains: set[str] = set()
+    media: set[str] = set()
+    titles: list[str] = []
+    for key, text in sources.items():
+        if key == "clean_chart_data":
+            try:
+                for r in json.loads(text).get("market_data", []):
+                    u = str(r.get("source") or "")
+                    if u.startswith("http"):
+                        urls.add(u)
+            except Exception:
+                pass
+            continue
+        for u in re.findall(r"https?://[^\s\)\]\"]+", text):
+            urls.add(u)
+        for m in re.finditer(r"https?://([^/\s]+)", text):
+            dom = m.group(1).lower().replace("www.", "")
+            domains.add(dom)
+            for k, name in _DOMAIN_MEDIA.items():
+                if k in dom:
+                    media.add(name)
+        for t in re.findall(r"(?:title|标题)[：:]\s*([^\n]{4,60})", text):
+            titles.append(t)
+    return {"urls": urls, "domains": domains, "media": media, "titles": titles}
+
+
+def _extract_source_claims(report: str) -> list[str]:
+    """提取报告中的来源声明（文本声明 + 表格来源单元格）。"""
+    claims: list[str] = []
+    for m in re.finditer(
+        r"(?:数据来源|来源|引自|出自|来自|根据)\s*[：:]?\s*([^。；\n，,|]{2,60})",
+        report,
+    ):
+        c = m.group(1).strip()
+        if c and c not in claims:
+            claims.append(c)
+    # 表格"来源"列单元格（非 URL 部分）
+    for line in report.splitlines():
+        if line.strip().startswith("|") and "来源" in line:
+            cells = [c.strip() for c in line.strip("|").split("|")]
+            for c in cells:
+                c2 = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", c)
+                if c2 and len(c2) >= 2 and "http" not in c2 and c2 not in claims:
+                    claims.append(c2)
+    return claims
+
+
+def check_source_labeling(report: str, sources: dict) -> dict:
+    """来源标注诚实性：报告中"数据来源：X"的 X 是否真的在检索/快照中出现。
+    - 含 URL / 命中已知媒体名 / 命中源标题 → 诚实
+    - 标注'模型知识/未验证' → 诚实（已明示）
+    - 声明具体权威文档（年报/公告/官网/招股书）但源中无 → 虚假标注
+    - '建议以X为准' 类建议句不判虚假。"""
+    known = _known_sources(sources)
+    claims = _extract_source_claims(report)
+    mislabeled: list[str] = []
+    checked = 0
+    for c in claims:
+        if any(k in c for k in ("建议以", "仅供参考", "说明", "清单", "名称", "序号")):
+            continue
+        if "模型知识" in c or "未验证" in c or "未在本次检索" in c:
+            continue
+        checked += 1
+        if any(u in c for u in known["urls"]):
+            continue
+        if any(d and d in c for d in known["domains"]):
+            continue
+        if any(m and m in c for m in known["media"]):
+            continue
+        if any(t and t in c for t in known["titles"] if len(t) >= 4):
+            continue
+        if re.search(r"(年报|财报|公告|官网|投资者关系|招股书|报表|审计)", c):
+            mislabeled.append(c)
+    passed = len(mislabeled) == 0
+    details = (
+        f"来源声明检查 {checked} 条，虚假标注 {len(mislabeled)} 条"
+        + (f"（{'、'.join(mislabeled[:5])}）" if mislabeled else "，全部可溯源或已明示")
+    )
+    return {
+        "pass": passed,
+        "details": details,
+        "checked_count": checked,
+        "mislabeled_count": len(mislabeled),
+        "mislabeled": mislabeled[:10],
     }
 
 
@@ -224,6 +471,10 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace) -> dict
     sources = _collect_sources(workspace)
     checks: dict = {}
     checks["number_traceability"] = check_number_traceability(report_text, sources)
+    checks["entity_attribution"] = check_entity_attribution(
+        report_text, sources, goal,
+    )
+    checks["source_labeling"] = check_source_labeling(report_text, sources)
     gaps = [c["details"] for c in checks.values() if not c["pass"]]
     overall = "pass" if not gaps else "fail"
     return {

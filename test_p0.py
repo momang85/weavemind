@@ -1717,6 +1717,8 @@ class TestAcceptanceChecker(unittest.TestCase):
         self.assertNotIn(("2023", ""), vals)   # 年份排除
         self.assertNotIn(("2014", ""), vals)
         self.assertNotIn(("1383", ""), vals)   # URL 内排除
+        self.assertNotIn(("00700", ""), vals)  # 股票代码排除
+        self.assertNotIn(("0700", ""), vals)   # 0700.HK 排除
 
     def test_number_traceability(self):
         """数字溯源：模糊匹配（千分位/小数），不可溯源计数准确。"""
@@ -1777,6 +1779,56 @@ class TestAcceptanceChecker(unittest.TestCase):
             self.assertIn("number_traceability", acc["checks"])
         finally:
             ws_mod.WORKSPACE_ROOT = old_root
+
+    def test_entity_attribution_detects_line_contamination(self):
+        """Line 的 4% 不应被归入腾讯（历史上真实发生过的污染）。"""
+        from acceptance_checker import check_entity_attribution
+
+        sources = {
+            "search_results": "腾讯集团发展历程概述",
+            "fetch_snapshot": (
+                "刚刚官宣与腾讯达成合作，日本通讯App Line就被爆料用户流失严重。"
+                "但在今年第三季度，这些业务仅实现了20.3亿日元的营收，占比不足全部营收的4%。"
+            ),
+            "clean_chart_data": "",
+        }
+        report = "腾讯营收占比不足全部营收的4%。"
+        r = check_entity_attribution(report, sources, "搜索并总结腾讯集团的发展历程和现状，分析历年财报")
+        self.assertFalse(r["pass"])
+        self.assertGreaterEqual(r["contaminated_count"], 1)
+
+    def test_entity_attribution_passes_clean(self):
+        """腾讯自己的数字（上下文含腾讯）不判污染。"""
+        from acceptance_checker import check_entity_attribution
+
+        sources = {
+            "search_results": "腾讯2023年报：总营收6090亿元，净利润1152亿元",
+            "fetch_snapshot": "",
+            "clean_chart_data": "",
+        }
+        report = "2023年腾讯总营收6090亿元，净利润1152亿元。"
+        r = check_entity_attribution(report, sources, "分析腾讯财报")
+        self.assertTrue(r["pass"])
+
+    def test_source_labeling_honesty(self):
+        """媒体声明可溯源 → 诚实；声明年报但源中无 → 虚假标注。"""
+        from acceptance_checker import check_source_labeling
+
+        sources = {
+            "search_results": (
+                "title: 腾讯控股第一季度营收1800亿元 净利613亿元_新浪财经_新浪网 "
+                "https://finance.sina.com.cn/tech/2025-05-14/doc-inewpmqy1031"
+            ),
+            "fetch_snapshot": "",
+            "clean_chart_data": "",
+        }
+        honest_report = "2025Q1营收1800亿元（数据来源：新浪财经）。"
+        r1 = check_source_labeling(honest_report, sources)
+        self.assertTrue(r1["pass"])
+        fake_report = "2023年净利润1152亿元（数据来源：腾讯官方年报）。"
+        r2 = check_source_labeling(fake_report, sources)
+        self.assertFalse(r2["pass"])
+        self.assertIn("腾讯官方年报", r2["mislabeled"][0])
 
     def test_low_authority_filter(self):
         """百度文库/原创力文档等低权威来源应被搜索过滤。"""
