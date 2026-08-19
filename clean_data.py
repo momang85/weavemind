@@ -623,7 +623,7 @@ def clean_and_structure(items: list[dict], goal: str = "") -> dict:
             continue
         for w in _tokenize(text):
             topic_terms[w] += 1
-    return {
+    clean = {
         "entity_frequency": dict(entity_freq.most_common(12)),
         "market_data": market,
         "market_share": shares,
@@ -633,6 +633,28 @@ def clean_and_structure(items: list[dict], goal: str = "") -> dict:
         "source_distribution": dict(domains.most_common(12)),
         "topic_terms": dict(topic_terms.most_common(12)),
     }
+    # 他司过滤：目标公司明确时，label/口径含其他已知公司且不含目标公司的行
+    # 是搜索串味（如腾讯任务捞到 LululemonQ3营收），直接丢弃
+    if names:
+        try:
+            from acceptance_checker import _OTHER_ENTITIES
+            _foreign = tuple(e for e in _OTHER_ENTITIES if e not in names)
+        except Exception:
+            _foreign = ()
+        if _foreign:
+            for key in ("market_data", "market_share", "macro_indicators", "market_trends"):
+                kept = []
+                for r in clean.get(key) or []:
+                    if not isinstance(r, dict):
+                        kept.append(r)
+                        continue
+                    text_l = str(r.get("label") or "") + " " + str(r.get("caliber") or "")
+                    if any(n in text_l for n in names):
+                        kept.append(r)
+                    elif not any(f in text_l for f in _foreign):
+                        kept.append(r)
+                clean[key] = kept
+    return clean
 
 
 def _dedupe_rows(rows: list[dict]) -> list[dict]:

@@ -945,6 +945,22 @@ class TestP2CleanData(unittest.TestCase):
         self.assertEqual(clean["entity_frequency"].get("英伟达"), 1)
         self.assertNotIn("万亿美元", clean["topic_terms"])
 
+    def test_foreign_company_rows_dropped(self):
+        """目标公司明确时，label 含其他公司（Lululemon）的行必须被清洗丢弃，
+        否则验收主体归属会把搜索串味当成污染。"""
+        from clean_data import clean_and_structure
+
+        items = [
+            {"title": "腾讯财报分析", "url": "https://a.com/1",
+             "snippet": "腾讯2025年营收同比增长14%，净利润增长18%。"},
+            {"title": "Lululemon业绩", "url": "https://sina.com/2",
+             "snippet": "LululemonQ3营收同比增长28%。"},
+        ]
+        clean = clean_and_structure(items, goal="搜索并分析腾讯年度财务报告中的核心指标")
+        labels = [r.get("label") for r in clean["market_trends"]]
+        self.assertIn("腾讯营收", labels)
+        self.assertFalse(any("Lululemon" in str(l) for l in labels))
+
     def test_market_data_precise_extraction(self):
         from clean_data import clean_and_structure
 
