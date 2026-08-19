@@ -220,6 +220,28 @@ class ReportGeneratorWorker(AsyncWorkerBase):
         return "\n".join(out)
 
     @staticmethod
+    def _strip_reflection_residue(report: str) -> str:
+        """剥离报告中被模型误抄的反思反馈/历史教训块：
+        "【反思要求重做】…"、"【历史教训（自动沉淀）】…" 整块删除，
+        再删除仍含"反思要求重做"的残留行（模型可能改写格式）。
+        否则验收器会把反馈里的示例数字（如时间戳 1787150053）当成报告数字，
+        溯源率被严重拉低。"""
+        if not report:
+            return report
+        import re as _re
+        for marker in ("【反思要求重做】", "【历史教训"):
+            idx = report.find(marker)
+            while idx >= 0:
+                end = len(report)
+                m = _re.search(r"\n#{1,6} ", report[idx + len(marker):])
+                if m:
+                    end = idx + len(marker) + m.start()
+                report = report[:idx] + report[end:]
+                idx = report.find(marker)
+        lines = [ln for ln in report.splitlines() if "反思要求重做" not in ln]
+        return "\n".join(lines)
+
+    @staticmethod
     def _clean_fallback_content(text: str) -> str:
         """剥离 fallback 内容里的角色/指令残留与过程噪音（【角色】、【输出要求】、
         [指令]/[数据来源] 标记、ReAct 未收敛提示、原始 JSON），只保留可交付信息。"""
@@ -552,6 +574,9 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             # 后处理：剥离误嵌入的 [CHART_DATA] 原始 JSON，删除空数值表格行
             report = self._strip_chart_data_blocks(report)
             report = self._drop_empty_table_rows(report)
+            # 剥离模型误抄的反思反馈块（"【反思要求重做】…"），否则验收器会把
+            # 反馈里的示例数字（如时间戳）当成报告数字，溯源率被拉低
+            report = self._strip_reflection_residue(report)
             # 数据一致性检查：同一指标多个数值 → 追加分歧提示
             report = self._flag_conflicting_figures(report)
 
@@ -605,6 +630,7 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             # 兜底也按章节内联嵌入图表（未匹配的插到数据来源前）
             if charts:
                 report = self._embed_charts_inline(report, charts)
+            report = self._strip_reflection_residue(report)
             try:
                 rpath = report_dir / "report.md"
                 old_size = rpath.stat().st_size if rpath.exists() else 0

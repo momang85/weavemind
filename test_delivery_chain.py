@@ -975,6 +975,30 @@ class TestSearchCharts(unittest.TestCase):
 
 
 class TestSearchFailureFallback(unittest.TestCase):
+    def test_strip_reflection_residue(self):
+        """报告正文中误抄的反思反馈块必须被剥离：
+        否则验收器会把反馈里的示例数字（时间戳）当成报告数字，溯源率被拉低。"""
+        from workers.report_generator_worker import ReportGeneratorWorker
+
+        report = (
+            "# 腾讯财务报告\n\n"
+            "2025年营收7517亿元。\n\n"
+            "【反思要求重做】报告生成步骤存在严重缺陷：财务金额溯源率仅40%（19/48），"
+            "如1787150053等。需修复报告，确保所有数字可追溯。\n\n"
+            "## 数据来源\n\n- https://x.com/a\n"
+        )
+        out = ReportGeneratorWorker._strip_reflection_residue(report)
+        self.assertNotIn("反思要求重做", out)
+        self.assertNotIn("1787150053", out)
+        self.assertIn("2025年营收7517亿元", out)
+        self.assertIn("## 数据来源", out)
+
+        # 模型改写格式（无方括号）的残留行也要删
+        report2 = "反思要求重做：请补充最新季度数据\n\n## 摘要\n\n内容。"
+        out2 = ReportGeneratorWorker._strip_reflection_residue(report2)
+        self.assertNotIn("反思要求重做", out2)
+        self.assertIn("## 摘要", out2)
+
     def test_generation_fallback_code_for_game_instruction(self):
         from orchestrator_v2 import OrchestratorV2
 
