@@ -1864,6 +1864,11 @@ class TestP0Robustness(unittest.TestCase):
             "搜索并总结腾讯集团的发展历程和现状，与之相配合，分析腾讯集团历年财报",
             templates)
         self.assertEqual(hit["name"], "公司调研与财报分析")
+        # 纯财务指标分析（不含发展历程/现状调研）不命中该模板
+        pure = o._template_keyword_match(
+            "搜索并分析腾讯年度财务报告中的营收、净利润、毛利率与现金流等核心指标，评估盈利质量与财务健康度",
+            templates)
+        self.assertIsNone(pure)
         # 非财报类公司任务不误命中
         miss = o._template_keyword_match("做一个贪吃蛇游戏", templates)
         self.assertIsNone(miss)
