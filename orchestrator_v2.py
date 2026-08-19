@@ -738,6 +738,24 @@ class OrchestratorV2:
                 data = json.load(f)
             tpls = data.get("templates", [])
             tpls = [t for t in tpls if t.get("name") != name]
+            # 模板必须公司无关：把具体公司名替换为"目标公司"，避免固化出
+            # "搜索腾讯控股…"这类只对单一公司有效的指令（goal 已是类型级）
+            try:
+                from task_classifier import _extract_company
+                company = _extract_company(goal)
+                if company:
+                    for s in steps:
+                        ins = str(s.get("instruction") or "")
+                        for pat, rep in (
+                            (company + "控股", "目标公司/集团"),
+                            (company + "集团", "目标公司/集团"),
+                            (company + "官网", "目标公司官网"),
+                            (company, "目标公司"),
+                        ):
+                            ins = ins.replace(pat, rep)
+                        s["instruction"] = ins
+            except Exception:
+                pass
             tpls.append({"name": name, "goal": type_goal, "steps": steps})
             data["templates"] = tpls[-30:]
             with open(path, "w", encoding="utf-8") as f:

@@ -1603,6 +1603,48 @@ class TestTemplateConsolidation(unittest.TestCase):
             else:
                 os.environ["WEAVEMIND_CONSOLIDATE_THRESHOLD"] = old_env
 
+    def test_consolidate_template_genericizes_company(self):
+        """固化模板必须公司无关：步骤指令中的具体公司名替换为"目标公司"。"""
+        import json
+        import os
+        import tempfile
+        from orchestrator_v2 import OrchestratorV2
+
+        old_env = os.environ.get("WEAVEMIND_CONSOLIDATE_THRESHOLD")
+        os.environ["WEAVEMIND_CONSOLIDATE_THRESHOLD"] = "1"
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        try:
+            tmp = os.path.join(tempfile.mkdtemp(prefix="weavemind_tpl_"), "templates.json")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"templates": []}, f)
+            steps = [
+                {"step_id": "1", "capability": "web_search",
+                 "instruction": "任务目标：搜索并分析腾讯年度财务报告\n搜索腾讯控股最新年报的营收、净利润、毛利率"},
+                {"step_id": "2", "capability": "web_fetch",
+                 "instruction": "抓取腾讯官网投资者关系页"},
+                {"step_id": "3", "capability": "content_summary",
+                 "instruction": "整合腾讯财务数据"},
+            ]
+            try:
+                o._consolidate_template(
+                    "搜索并分析腾讯年度财务报告中的核心指标", steps, tpl_path=tmp)
+                data = json.load(open(tmp, encoding="utf-8"))
+                tpl = data["templates"][0]
+                joined = " ".join(str(s.get("instruction")) for s in tpl["steps"])
+                self.assertNotIn("腾讯", joined)
+                self.assertIn("目标公司", joined)
+                self.assertEqual(tpl["goal"], "公司/集团的发展历程与现状，并分析历年财报")
+            finally:
+                try:
+                    os.unlink(tmp)
+                except Exception:
+                    pass
+        finally:
+            if old_env is None:
+                os.environ.pop("WEAVEMIND_CONSOLIDATE_THRESHOLD", None)
+            else:
+                os.environ["WEAVEMIND_CONSOLIDATE_THRESHOLD"] = old_env
+
     def test_off_topic_task_not_consolidated(self):
         import json
         import os
