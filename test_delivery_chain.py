@@ -1643,7 +1643,8 @@ class TestTemplateConsolidation(unittest.TestCase):
                 json.dump({"templates": []}, f)
             steps = [
                 {"step_id": "1", "capability": "web_search",
-                 "instruction": "任务目标：搜索并分析腾讯年度财务报告\n搜索腾讯控股最新年报的营收、净利润、毛利率"},
+                 "instruction": "任务目标：搜索并分析腾讯年度财务报告\n"
+                                "搜索腾讯控股（Tencent Holdings Ltd）最新年报的营收、净利润、毛利率"},
                 {"step_id": "2", "capability": "web_fetch",
                  "instruction": "抓取腾讯官网投资者关系页"},
                 {"step_id": "3", "capability": "content_summary",
@@ -1656,6 +1657,7 @@ class TestTemplateConsolidation(unittest.TestCase):
                 tpl = data["templates"][0]
                 joined = " ".join(str(s.get("instruction")) for s in tpl["steps"])
                 self.assertNotIn("腾讯", joined)
+                self.assertNotIn("Tencent", joined)
                 self.assertIn("目标公司", joined)
                 self.assertEqual(tpl["goal"], "公司/集团的发展历程与现状，并分析历年财报")
             finally:
@@ -1704,6 +1706,7 @@ class TestTemplateConsolidation(unittest.TestCase):
                 self.assertNotIn("反思要求重做", joined)
                 self.assertIn("目标公司/集团最新年报", joined)
                 self.assertNotIn("腾讯", joined)
+                self.assertNotIn("Tencent", joined)
             finally:
                 try:
                     os.unlink(tmp)

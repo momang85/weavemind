@@ -766,6 +766,16 @@ class OrchestratorV2:
                 if company:
                     for s in steps:
                         ins = str(s.get("instruction") or "")
+                        # 英文公司名括号（如"（Tencent Holdings Ltd）"）也剥离，
+                        # 避免模板残留单一公司英文名
+                        try:
+                            import re as _re
+                            ins = _re.sub(
+                                r"[（(][A-Za-z][A-Za-z0-9 .&'-]*(?:Ltd|Inc|Corp|Holdings|Group|Limited|Co)[^）)]*[）)]",
+                                "", ins,
+                            )
+                        except Exception:
+                            pass
                         for pat, rep in (
                             (company + "控股", "目标公司/集团"),
                             (company + "集团", "目标公司/集团"),
