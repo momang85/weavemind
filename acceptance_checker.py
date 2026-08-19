@@ -541,8 +541,15 @@ def check_source_labeling(report: str, sources: dict) -> dict:
     claims = _extract_source_claims(report)
     mislabeled: list[str] = []
     checked = 0
+    # 来源列里的状态/免责说明不是来源声明（"无直接关联/已剔除/待获取/不适用"）
+    _STATUS_MARKERS = (
+        "无直接关联", "已剔除", "不适用", "待获取", "未获取", "暂缺",
+        "未披露", "无此字段", "说明", "备注", "数据完整性", "口径说明",
+    )
     for c in claims:
         if any(k in c for k in ("建议以", "仅供参考", "说明", "清单", "名称", "序号")):
+            continue
+        if any(k in c for k in _STATUS_MARKERS):
             continue
         if "模型知识" in c or "未验证" in c or "未在本次检索" in c:
             continue
