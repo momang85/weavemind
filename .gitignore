@@ -14,6 +14,7 @@ chroma_memory_verify/
 metrics.csv
 metrics_summary.json
 evolution_history.json
+consolidation_stats.json
 
 # 日志
 logs/

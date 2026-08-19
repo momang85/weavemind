@@ -1182,28 +1182,37 @@ class TestTemplateGuard(unittest.TestCase):
 
     def test_memory_artifact_steps_skipped(self):
         import json
+        import os
         import tempfile
         from pathlib import Path
         from orchestrator_v2 import OrchestratorV2
 
+        old_env = os.environ.get("WEAVEMIND_CONSOLIDATE_THRESHOLD")
+        os.environ["WEAVEMIND_CONSOLIDATE_THRESHOLD"] = "1"
         o = OrchestratorV2.__new__(OrchestratorV2)
-        tpl = Path(tempfile.mkdtemp(prefix="tpl_guard2_")) / "templates.json"
-        tpl.write_text('{"templates": []}', encoding="utf-8")
-        o._consolidate_template(
-            "调研新能源汽车市场趋势",
-            [
-                {"capability": "content_summary",
-                 "instruction": "历史经验（来自相似任务）：\n- 目标: 搜；反思要求重做"},
-                {"capability": "web_search", "instruction": "搜索新能源汽车2026年销量"},
-                {"capability": "content_summary", "instruction": "汇总新能源汽车市场要点"},
-            ],
-            tpl_path=str(tpl),
-        )
-        data = json.loads(tpl.read_text(encoding="utf-8"))
-        steps = data["templates"][0]["steps"]
-        self.assertEqual(len(steps), 2)
-        self.assertFalse(any("历史经验" in s["instruction"] for s in steps))
-        self.assertFalse(any("反思要求重做" in s["instruction"] for s in steps))
+        try:
+            tpl = Path(tempfile.mkdtemp(prefix="tpl_guard2_")) / "templates.json"
+            tpl.write_text('{"templates": []}', encoding="utf-8")
+            o._consolidate_template(
+                "调研新能源汽车市场趋势",
+                [
+                    {"capability": "content_summary",
+                     "instruction": "历史经验（来自相似任务）：\n- 目标: 搜；反思要求重做"},
+                    {"capability": "web_search", "instruction": "搜索新能源汽车2026年销量"},
+                    {"capability": "content_summary", "instruction": "汇总新能源汽车市场要点"},
+                ],
+                tpl_path=str(tpl),
+            )
+            data = json.loads(tpl.read_text(encoding="utf-8"))
+            steps = data["templates"][0]["steps"]
+            self.assertEqual(len(steps), 2)
+            self.assertFalse(any("历史经验" in s["instruction"] for s in steps))
+            self.assertFalse(any("反思要求重做" in s["instruction"] for s in steps))
+        finally:
+            if old_env is None:
+                os.environ.pop("WEAVEMIND_CONSOLIDATE_THRESHOLD", None)
+            else:
+                os.environ["WEAVEMIND_CONSOLIDATE_THRESHOLD"] = old_env
 
 
 class TestReportCleanup(unittest.TestCase):
@@ -1567,6 +1576,89 @@ class TestP0Robustness(unittest.TestCase):
             self.assertIn("| 2025 | 7517.66", instr)
             self.assertIn("东方财富数据中心", instr)
         finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+
+    def test_replan_structured_fallback(self):
+        """金融任务搜索/抓取失败 → 替换步骤优先引用结构化财务数据，而非模型知识。"""
+        import tempfile
+        from pathlib import Path
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._messaging = None
+        tmp = Path(tempfile.mkdtemp(prefix="replan_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            proj = ws_mod.task_project_dir("t-rp")
+            (proj / "financials.json").write_text(json.dumps({
+                "financials": [{"year": 2024, "revenue": 6602.57}],
+                "metadata": {"source": "eastmoney_datacenter",
+                             "annual_count": 12, "unit": "亿元"},
+            }, ensure_ascii=False), encoding="utf-8")
+            step = {"step_id": "2", "capability": "web_fetch",
+                    "instruction": "抓取财报页面", "depends_on": ["1"]}
+            alt = o._replan_step("分析腾讯历年财报", step, "HTTP 403", "t-rp")
+            self.assertIsNotNone(alt)
+            self.assertEqual(alt["capability"], "content_summary")
+            self.assertIn("结构化财务数据", alt["instruction"])
+            self.assertNotIn("基于已有知识直接完成", alt["instruction"])
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+
+    def test_consolidation_key(self):
+        """固化分组：financial + 能力链（去收尾/去重复）。"""
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        steps = [
+            {"capability": "web_search"}, {"capability": "web_fetch"},
+            {"capability": "content_summary"}, {"capability": "content_summary"},
+            {"capability": "report_generator"}, {"capability": "package"},
+        ]
+        d, c = o._consolidation_key("分析腾讯历年财报", steps)
+        self.assertEqual(d, "financial")
+        self.assertEqual(c, ("web_search", "web_fetch", "content_summary"))
+
+    def test_consolidation_stats_threshold(self):
+        """同 domain×能力链 验收 pass ≥ 阈值后才允许固化。"""
+        import os
+        import tempfile
+        from pathlib import Path
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = Path(tempfile.mkdtemp(prefix="stat_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        old_env = os.environ.get("WEAVEMIND_CONSOLIDATION_STATS")
+        stats_path = tmp / "stats.json"
+        os.environ["WEAVEMIND_CONSOLIDATION_STATS"] = str(stats_path)
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            goal = "分析腾讯历年财报"
+            steps = [
+                {"capability": "web_search"}, {"capability": "web_fetch"},
+                {"capability": "content_summary"},
+            ]
+            domain, chain = o._consolidation_key(goal, steps)
+            self.assertEqual(o._count_verified_chain(domain, chain, "t-now"), 0)
+            # 记录 2 次验收 pass + 1 次 fail
+            for i in range(3):
+                tid = f"hist-{i}"
+                ws_dir = ws_mod.task_workspace(tid)
+                ws_dir.mkdir(parents=True, exist_ok=True)
+                (ws_dir / "acceptance_report.json").write_text(
+                    json.dumps({"overall": "pass" if i < 2 else "fail"}),
+                    encoding="utf-8")
+                o._record_consolidation_stat(tid, goal, steps)
+            self.assertEqual(o._count_verified_chain(domain, chain, "t-now"), 2)
+        finally:
+            if old_env is None:
+                os.environ.pop("WEAVEMIND_CONSOLIDATION_STATS", None)
+            else:
+                os.environ["WEAVEMIND_CONSOLIDATION_STATS"] = old_env
             ws_mod.WORKSPACE_ROOT = old_root
 
     def test_embed_charts_uses_section_hint(self):

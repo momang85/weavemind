@@ -1567,33 +1567,41 @@ class TestTemplateConsolidation(unittest.TestCase):
         import tempfile
         from orchestrator_v2 import OrchestratorV2
 
+        old_env = os.environ.get("WEAVEMIND_CONSOLIDATE_THRESHOLD")
+        os.environ["WEAVEMIND_CONSOLIDATE_THRESHOLD"] = "1"
         o = OrchestratorV2.__new__(OrchestratorV2)
-        tmp = os.path.join(tempfile.mkdtemp(prefix="weavemind_tpl_"), "templates.json")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump({"templates": []}, f)
-        steps = [
-            {"step_id": "1", "capability": "web_search", "instruction": "任务目标：调研市场\n搜索市场规模与玩家"},
-            {"step_id": "2", "capability": "code_execution", "instruction": "计算成本与ROI"},
-            {"step_id": "3", "capability": "content_summary", "instruction": "整合摘要"},
-            {"step_id": "4", "capability": "report_generator", "instruction": "写报告"},
-        ]
         try:
-            o._consolidate_template("调研市场规模并测算ROI", steps, tpl_path=tmp)
-            data = json.load(open(tmp, encoding="utf-8"))
-            self.assertEqual(len(data["templates"]), 1)
-            tpl = data["templates"][0]
-            self.assertTrue(tpl["name"].startswith("auto-"))
-            caps = [s["capability"] for s in tpl["steps"]]
-            self.assertIn("web_search", caps)
-            self.assertIn("code_execution", caps)
-            self.assertIn("content_summary", caps)
-            self.assertNotIn("report_generator", caps)
-            self.assertNotIn("package", caps)
-        finally:
+            tmp = os.path.join(tempfile.mkdtemp(prefix="weavemind_tpl_"), "templates.json")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({"templates": []}, f)
+            steps = [
+                {"step_id": "1", "capability": "web_search", "instruction": "任务目标：调研市场\n搜索市场规模与玩家"},
+                {"step_id": "2", "capability": "code_execution", "instruction": "计算成本与ROI"},
+                {"step_id": "3", "capability": "content_summary", "instruction": "整合摘要"},
+                {"step_id": "4", "capability": "report_generator", "instruction": "写报告"},
+            ]
             try:
-                os.unlink(tmp)
-            except Exception:
-                pass
+                o._consolidate_template("调研市场规模并测算ROI", steps, tpl_path=tmp)
+                data = json.load(open(tmp, encoding="utf-8"))
+                self.assertEqual(len(data["templates"]), 1)
+                tpl = data["templates"][0]
+                self.assertTrue(tpl["name"].startswith("auto-"))
+                caps = [s["capability"] for s in tpl["steps"]]
+                self.assertIn("web_search", caps)
+                self.assertIn("code_execution", caps)
+                self.assertIn("content_summary", caps)
+                self.assertNotIn("report_generator", caps)
+                self.assertNotIn("package", caps)
+            finally:
+                try:
+                    os.unlink(tmp)
+                except Exception:
+                    pass
+        finally:
+            if old_env is None:
+                os.environ.pop("WEAVEMIND_CONSOLIDATE_THRESHOLD", None)
+            else:
+                os.environ["WEAVEMIND_CONSOLIDATE_THRESHOLD"] = old_env
 
     def test_off_topic_task_not_consolidated(self):
         import json

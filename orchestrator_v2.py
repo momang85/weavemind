@@ -646,11 +646,21 @@ class OrchestratorV2:
                     return t
         return None
 
+    _CONSOLIDATE_THRESHOLD = 3  # 同 domain×能力链 且验收通过 ≥ N 次才固化
+
+    def _consolidate_threshold(self) -> int:
+        try:
+            return max(1, int(os.environ.get("WEAVEMIND_CONSOLIDATE_THRESHOLD", "3") or 3))
+        except (TypeError, ValueError):
+            return 3
+
     def _consolidate_template(
         self, goal: str, all_steps: list[dict], tpl_path: str | None = None,
+        task_id: str = "",
     ) -> None:
-        """成功的复杂任务沉淀为确定性模板：提炼能力序列与指令骨架，
-        供后续 LLM 路由选择。"""
+        """成功的复杂任务沉淀为确定性模板（探索→固化）：
+        按 domain×能力链 分组，要求本次验收 pass 且历史同链 pass ≥ 阈值；
+        模板使用类型级 goal（不含具体公司名），避免模板库爆炸。"""
         try:
             if not all_steps:
                 return
@@ -695,7 +705,28 @@ class OrchestratorV2:
             if not any(t in hay for t in tokens):
                 logger.info("Template not consolidated (off-topic execution): %s", goal[:40])
                 return
-            name = f"auto-{goal[:10]}"
+            # ── 探索→固化：domain×能力链 验收驱动 ──
+            domain, chain = self._consolidation_key(goal, all_steps)
+            # 本次任务验收：存在验收报告时必须 pass
+            if task_id:
+                acc = self._acceptance_passed(task_id)
+                if acc is False:
+                    logger.info("Template not consolidated (acceptance fail): %s", goal[:40])
+                    return
+            # 历史同链验收 pass 计数（不含本次）
+            verified = self._count_verified_chain(domain, chain, task_id)
+            if verified + 1 < self._consolidate_threshold():
+                logger.info(
+                    "Template not consolidated yet (%s/%d verified): %s",
+                    verified + 1, self._consolidate_threshold(), goal[:40],
+                )
+                return
+            type_goal = {
+                "financial": "公司/集团的发展历程与现状，并分析历年财报",
+                "code": "生成可运行的代码/程序并验证交付",
+                "general": "搜索并总结目标主题的现状，输出结构化报告",
+            }.get(domain, "通用任务调研与报告")
+            name = f"auto-{domain}-{'-'.join(chain[:3]) or 'pipeline'}"
             path = tpl_path or os.path.join(
                 os.path.dirname(os.path.abspath(__file__)), "templates.json",
             )
@@ -703,13 +734,94 @@ class OrchestratorV2:
                 data = json.load(f)
             tpls = data.get("templates", [])
             tpls = [t for t in tpls if t.get("name") != name]
-            tpls.append({"name": name, "goal": goal[:200], "steps": steps})
+            tpls.append({"name": name, "goal": type_goal, "steps": steps})
             data["templates"] = tpls[-30:]
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-            logger.info("Template consolidated: %s (%d steps)", name, len(steps))
+            logger.info("Template consolidated: %s (%d steps, domain=%s)", name, len(steps), domain)
         except Exception as exc:
             logger.warning("Template consolidation failed: %s", exc)
+
+    @staticmethod
+    def _consolidation_key(goal: str, all_steps: list) -> tuple[str, tuple]:
+        """固化分组的 key：domain × 归一化能力序列（去掉收尾步骤与重复）。"""
+        try:
+            from task_classifier import classify_task
+            domain = classify_task(goal).get("domain", "general")
+        except Exception:
+            domain = "general"
+        chain: list[str] = []
+        for s in all_steps or []:
+            cap = str(s.get("capability") or "")
+            if cap in ("report_generator", "package", "file_io"):
+                continue
+            if not chain or chain[-1] != cap:
+                chain.append(cap)
+        return domain, tuple(chain[:5])
+
+    @staticmethod
+    def _acceptance_passed(task_id: str) -> bool | None:
+        """任务验收是否通过（无验收报告返回 None）。"""
+        try:
+            from workspace import task_workspace
+            acc_path = task_workspace(task_id) / "acceptance_report.json"
+            if not acc_path.exists():
+                return None
+            acc = json.loads(acc_path.read_text(encoding="utf-8"))
+            return acc.get("overall") == "pass"
+        except Exception:
+            return None
+
+    def _record_consolidation_stat(self, task_id: str, goal: str, all_steps: list) -> None:
+        """任务完成时记录 domain×能力链 与验收结果，供探索-固化阈值判定。"""
+        try:
+            path = os.environ.get("WEAVEMIND_CONSOLIDATION_STATS") or os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "consolidation_stats.json",
+            )
+            stats = []
+            if os.path.exists(path):
+                try:
+                    with open(path, encoding="utf-8") as f:
+                        stats = json.loads(f.read())
+                except Exception:
+                    stats = []
+            domain, chain = self._consolidation_key(goal, all_steps)
+            stats = [s for s in stats if s.get("task_id") != task_id]
+            stats.append({
+                "task_id": str(task_id),
+                "domain": domain,
+                "chain": list(chain),
+                "acceptance": self._acceptance_passed(task_id),
+                "ts": self._now_iso(),
+            })
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(stats[-300:], f, ensure_ascii=False, indent=1)
+        except Exception:
+            pass
+
+    def _count_verified_chain(self, domain: str, chain: tuple, current_task: str = "") -> int:
+        """统计历史上同 domain×能力链 且验收 pass 的任务数（不含当前任务）。"""
+        try:
+            path = os.environ.get("WEAVEMIND_CONSOLIDATION_STATS") or os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "consolidation_stats.json",
+            )
+            if not os.path.exists(path):
+                return 0
+            with open(path, encoding="utf-8") as f:
+                stats = json.loads(f.read())
+            count = 0
+            for s in stats:
+                if str(s.get("task_id")) == str(current_task):
+                    continue
+                if s.get("domain") != domain:
+                    continue
+                if tuple(s.get("chain") or []) != chain:
+                    continue
+                if s.get("acceptance") is True:
+                    count += 1
+            return count
+        except Exception:
+            return 0
 
     def _ensure_report_step(self, steps: list[dict], task_id: str) -> list[dict]:
         """规划自检：计划中缺少报告/总结步骤时，自动补一步 report_generator（报告兜底）。"""
@@ -1414,8 +1526,8 @@ class OrchestratorV2:
         except Exception as exc:
             logger.warning("Reflection refinement RAG record failed: %s", str(exc)[:120])
 
-    def _generation_fallback_step(self, goal: str, step: dict) -> dict:
-        """搜索/抓取无果时的降级步骤：由 LLM 直接生产，不依赖外部资料。"""
+    def _generation_fallback_step(self, goal: str, step: dict, structured_hint: str = "") -> dict:
+        """搜索/抓取无果时的降级步骤：优先用结构化数据，其次模型知识（须标注）。"""
         ins = str(step.get("instruction") or "")
         if any(k in ins.lower() for k in ("html", "网页", "web", "webpage")):
             return {
@@ -1441,8 +1553,11 @@ class OrchestratorV2:
         return {
             "capability": "content_summary",
             "instruction": (
-                "不依赖任何外部资料，基于已有知识直接完成并输出以下目标，"
-                "内容要具体、围绕主题，不要提及搜索或抓取失败："
+                "外部检索/抓取失败。"
+                + (f"优先使用任务上下文中已提供的结构化财务数据{structured_hint}；"
+                   if structured_hint else "")
+                + "其余内容基于已有知识直接完成，数值若无法溯源标注"
+                "'基于模型知识，未在本次检索中验证'，不要提及搜索或抓取失败："
                 f"{goal[:300]}"
             ),
             "timeout": 120,
@@ -1570,9 +1685,45 @@ class OrchestratorV2:
             logger.warning("Full state push failed: %s", str(exc)[:120])
 
     def _replan_step(self, goal: str, step: dict, error: str, task_id: str) -> dict | None:
-        """步骤失败后，让 LLM 提出一个替代步骤（保留原步骤 ID 的依赖关系）。"""
-        # 搜索/抓取类失败直接降级为 LLM 生产，不再重复尝试外部获取
+        """步骤失败后，让 LLM 提出一个替代步骤（方案 A：同目标换实现）。
+        失败诊断 + 结构化源优先：金融任务搜索/抓取失败 → 先转向已注入的
+        [结构化财务数据]，而不是直接退化为模型知识（避免 IT之家/幻觉来源）。"""
         failed_cap = step.get("capability", "")
+        # 失败诊断：结构化数据源是否可用
+        structured_hint = ""
+        try:
+            fin_path = task_project_dir(task_id) / "financials.json"
+            if fin_path.exists():
+                fin = json.loads(fin_path.read_text(encoding="utf-8"))
+                m = fin.get("metadata") or {}
+                if m.get("annual_count"):
+                    structured_hint = (
+                        f"（工作区已有结构化财务数据：{m.get('source')}，"
+                        f"{m.get('annual_count')} 份年报，单位 {m.get('unit')}）"
+                    )
+        except Exception:
+            pass
+        # 金融任务：搜索/抓取失败 → 优先用结构化数据完成分析（不是模型知识）
+        if failed_cap in ("web_search", "web_fetch") and structured_hint:
+            alt = {
+                "capability": "content_summary",
+                "instruction": (
+                    "本步骤的外部检索/抓取失败。改用任务上下文中已提供的结构化财务数据"
+                    f"{structured_hint} 完成分析：优先引用 [结构化财务数据] 表格中的数值"
+                    "（来源标注为该结构化源）；表中没有的数据若无法溯源，标注"
+                    "'基于模型知识，未在本次检索中验证'，禁止编造。"
+                    f"目标：{goal[:300]}"
+                ),
+                "timeout": 120,
+            }
+            alt["step_id"] = f"alt-{step.get('step_id', '?')}-{int(time.time())}"
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "replan", "agent": "orchestrator",
+                           "message": "Replan (structured-source fallback): 外部检索失败，"
+                                      "改用结构化财务数据",
+                           "timestamp": self._now_iso()})
+            return alt
+        # 搜索/抓取类失败降级为 LLM 生产（保留，但内容优先用结构化数据）
         _SEARCH_FAILURE_SIGNALS = (
             "No URL", "no url", "empty", "filtered", "无结果", "没有找到",
             "未找到", "No relevant", "not found",
@@ -1590,7 +1741,7 @@ class OrchestratorV2:
             or any(sig in str(error) for sig in _SEARCH_FAILURE_SIGNALS)
             or (failed_cap == "code_execution" and any(sig in str(error) for sig in _CODE_FAILURE_SIGNALS))
         ):
-            alt = self._generation_fallback_step(goal, step)
+            alt = self._generation_fallback_step(goal, step, structured_hint)
             alt["step_id"] = f"alt-{step.get('step_id', '?')}-{int(time.time())}"
             push_progress(self._messaging, task_id, "log",
                           {"type": "replan", "agent": "orchestrator",
@@ -1600,11 +1751,12 @@ class OrchestratorV2:
         prompt = (
             f"Goal: {goal}\n\n"
             f"Failed step: [{step.get('capability')}] {step.get('instruction')}\n"
-            f"Error: {str(error)[:300]}\n\n"
-            "Propose ONE alternative step that avoids this failure. "
-            "If the failure is caused by missing external information, the alternative MUST be "
-            "content_summary or code_execution that generates the deliverable directly from model knowledge; "
-            "do NOT propose web_search or web_fetch again. "
+            f"Error: {str(error)[:300]}\n"
+            f"Available structured data: {structured_hint or '（无）'}\n\n"
+            "Propose ONE replacement step that avoids this failure. Priority: "
+            "① 若存在结构化数据源，优先 content_summary 引用 [结构化财务数据]；"
+            "② 换 URL/换查询词/换实现（仅当失败属瞬时可恢复）；"
+            "③ 最后才从模型知识直接生成，且指令必须注明'基于模型知识，未在本次检索中验证'。"
             'Output ONLY this JSON: {"steps":[{"step_id":"alt","capability":"...","instruction":"...","timeout":120}]}'
         )
         try:
@@ -3942,6 +4094,8 @@ print("charts generated")
 
         # 4. Memory（仅沉淀成功计划，避免污染 successful_strategies）
         if not has_failure:
+            # 记录探索-固化统计（domain×能力链 × 验收），供模板固化阈值判定
+            self._record_consolidation_stat(task_id, goal, all_steps)
             with self._memory_lock:
                 self._memory.consolidate_memory(goal, all_steps, report)
             push_progress(self._messaging, task_id, "log",
@@ -3949,7 +4103,7 @@ print("charts generated")
                            "message": "Strategy memory consolidated", "timestamp": self._now_iso()})
             # 进化沉淀：复杂任务（未走模板）成功后提炼为确定性模板，供后续 LLM 路由选择
             if not used_template:
-                self._consolidate_template(goal, all_steps)
+                self._consolidate_template(goal, all_steps, task_id=task_id)
 
         # 5. Complete
         ok_count = sum(1 for r in completed_all.values() if r.get("status") == "SUCCESS")
