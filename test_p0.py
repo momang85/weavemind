@@ -2045,6 +2045,35 @@ class TestAcceptanceChecker(unittest.TestCase):
         self.assertFalse(r2["pass"])
         self.assertIn("腾讯官方年报", r2["mislabeled"][0])
 
+    def test_source_labeling_real_collect_path(self):
+        """真实 _collect_sources 路径：search_results 的 url 字段必须参与来源集合，
+        平台名声明（CSDN/雪球/人人都是产品经理/美团官网）不得被误报为虚假标注。"""
+        import json
+        import tempfile
+        from pathlib import Path
+        from acceptance_checker import check_source_labeling, _collect_sources
+
+        tmp = Path(tempfile.mkdtemp(prefix="srclab_"))
+        proj = tmp / "project"
+        proj.mkdir(parents=True)
+        (proj / "search_results.json").write_text(json.dumps([
+            {"title": "美团的发展历程-CSDN博客", "url": "https://blog.csdn.net/x/article/1",
+             "snippet": "2010年美团成立"},
+            {"title": "拆解美团", "url": "https://www.woshipm.com/it/2", "snippet": "千团大战"},
+            {"title": "美团估值", "url": "https://xueqiu.com/2/3", "snippet": "营收"},
+            {"title": "新闻中心-财务报告",
+             "url": "https://www.meituan.com/news?category=financial-reports",
+             "snippet": "2025年营收3649亿元"},
+        ], ensure_ascii=False), encoding="utf-8")
+        sources = _collect_sources(tmp)
+        honest = "2025年营收3649亿元（来源：CSDN博客、今日头条、雪球、人人都是产品经理、美团官网新闻中心）"
+        r = check_source_labeling(honest, sources)
+        self.assertTrue(r["pass"], r["details"])
+        fake = "2023年净利润1152亿元（数据来源：腾讯官方年报）。"
+        r2 = check_source_labeling(fake, sources)
+        self.assertFalse(r2["pass"])
+        self.assertIn("腾讯官方年报", r2["mislabeled"][0])
+
 
 class TestEastMoneyAdapter(unittest.TestCase):
     def test_to_yi(self):

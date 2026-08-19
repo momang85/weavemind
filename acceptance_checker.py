@@ -118,7 +118,10 @@ def _collect_sources(workspace) -> dict[str, str]:
             parts = []
             for it in items or []:
                 if isinstance(it, dict):
-                    parts.append(f"{it.get('title') or ''} {it.get('snippet') or ''}")
+                    parts.append(
+                        f"{it.get('title') or ''} {it.get('url') or ''} "
+                        f"{it.get('snippet') or ''}"
+                    )
             src["search_results"] = "\n".join(parts)
     except Exception:
         pass
@@ -127,7 +130,8 @@ def _collect_sources(workspace) -> dict[str, str]:
         if fs.exists():
             snaps = json.loads(fs.read_text(encoding="utf-8"))
             src["fetch_snapshot"] = "\n".join(
-                f"{s.get('title') or ''} {s.get('text') or ''}" for s in snaps or []
+                f"{s.get('title') or ''} {s.get('url') or ''} {s.get('text') or ''}"
+                for s in snaps or []
             )
     except Exception:
         pass
@@ -478,6 +482,9 @@ _DOMAIN_MEDIA = {
     "pedaily.cn": "投资界", "baijing.cn": "白鲸出海", "cls.cn": "财联社",
     "infoq.cn": "InfoQ", "gov.cn": "中国政府网", "hkex.com.hk": "港交所",
     "tencent.com": "腾讯官网", "ir.tencent.com": "腾讯投资者关系",
+    "csdn.net": "CSDN博客", "woshipm.com": "人人都是产品经理",
+    "meituan.com": "美团官网", "weiyangx.com": "未央网",
+    "sgpjbg.com": "三个皮匠报告", "alishui.com": "满银", "baidu.com": "百度",
 }
 
 
