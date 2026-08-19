@@ -30,8 +30,8 @@ def _extract_company(g: str) -> str:
     for pat in (
         rf"(?:{_GENERIC_WORDS})*([\u4e00-\u9fff]{{2,6}})(?:集团|控股)",
         rf"(?:{_GENERIC_WORDS})*([\u4e00-\u9fff]{{2,6}})公司",
-        rf"(?:{_GENERIC_WORDS})*([\u4e00-\u9fff]{{2,6}})(?:的)?"
-        r"(?:历年|年度|最新)?(?:财报|年报|季报|财务)",
+        rf"(?:{_GENERIC_WORDS})*([\u4e00-\u9fff]{{2,6}}?)(?:的)?"
+        r"(?:历年年度|历年|年度|最新)?(?:财报|年报|季报|财务)",
     ):
         m = re.search(pat, g)
         if not m:

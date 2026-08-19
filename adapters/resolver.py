@@ -98,8 +98,10 @@ def resolve_company(company: str) -> dict | None:
             r += 3
         if m["name"] == company:
             r += 2
-        if "-" in m["name"]:
-            r -= 8  # "微软-T/-R" 等信托/人民币柜台/变体产品，非正股主代码
+        if re.search(r"-(?:T|W?R)$", m["name"]):
+            # "微软-T" 信托、"美团-WR/小米集团-WR" 人民币柜台等变体，非正股主代码；
+            # 不罚 "-W/-SW"（同股不同权/二次上市正股主代码，如 美团-W、阿里巴巴-SW）
+            r -= 8
         return -r  # 分数高者优先
 
     best = sorted(pool, key=rank)[0]

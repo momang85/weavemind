@@ -2106,6 +2106,11 @@ class TestPhase2ClassifierRouter(unittest.TestCase):
         self.assertEqual(cls["domain"], "financial")
         self.assertEqual(cls["company"], "腾讯")
         self.assertIsNone(cls["market"])
+        # 财报前的"历年年度"不得被贪婪捕获进公司名（修复：非贪婪 + 历年年度前缀）
+        mt = classify_task("搜索并总结美团集团的发展历程和现状，与之相配合，评估美团历年年度财务报告中的核心指标与财务健康度")
+        self.assertEqual(mt["company"], "美团")
+        xm = classify_task("搜索并总结小米集团的发展历程和现状，与之相配合，评估小米历年年度财务报告中的核心指标与财务健康度")
+        self.assertEqual(xm["company"], "小米")
         g = classify_task("做一个贪吃蛇游戏")
         self.assertEqual(g["domain"], "general")
 
@@ -2257,6 +2262,22 @@ class TestMultiMarketResolver(unittest.TestCase):
              "SecurityTypeName": "美股", "QuoteID": "105.MSFT"},
             {"Code": "600519", "Name": "贵州茅台", "JYS": "2",
              "SecurityTypeName": "沪A", "QuoteID": "1.600519"},
+            {"Code": "83690", "Name": "美团-WR", "JYS": "HK",
+             "SecurityTypeName": "港股", "QuoteID": "116.83690"},
+            {"Code": "03690", "Name": "美团-W", "JYS": "HK",
+             "SecurityTypeName": "港股", "QuoteID": "116.03690"},
+            {"Code": "MPNGY", "Name": "美团(ADR)", "JYS": "OTCBB",
+             "SecurityTypeName": "粉单", "QuoteID": "153.MPNGY"},
+            {"Code": "81810", "Name": "小米集团-WR", "JYS": "HK",
+             "SecurityTypeName": "港股", "QuoteID": "116.81810"},
+            {"Code": "01810", "Name": "小米集团-W", "JYS": "HK",
+             "SecurityTypeName": "港股", "QuoteID": "116.01810"},
+            {"Code": "XIACY", "Name": "小米集团(ADR)", "JYS": "OTCBB",
+             "SecurityTypeName": "粉单", "QuoteID": "153.XIACY"},
+            {"Code": "09988", "Name": "阿里巴巴-SW", "JYS": "HK",
+             "SecurityTypeName": "港股", "QuoteID": "116.09988"},
+            {"Code": "BABA", "Name": "阿里巴巴", "JYS": "NYSE",
+             "SecurityTypeName": "美股", "QuoteID": "105.BABA"},
         ]}}
 
     def test_resolve_multi_market(self):
@@ -2274,6 +2295,26 @@ class TestMultiMarketResolver(unittest.TestCase):
             self.assertEqual((msft["market"], msft["stock_code"]), ("US", "MSFT"))
             mt = rv.resolve_company("贵州茅台")
             self.assertEqual((mt["market"], mt["stock_code"]), ("CN", "600519"))
+        finally:
+            rv._get = old_get
+
+    def test_resolve_wvr_hk_primary(self):
+        """同股不同权港股主代码（-W/-SW）优先于美股 ADR/粉单；-WR 人民币柜台降权。"""
+        import json
+        import adapters.resolver as rv
+
+        old_get = rv._get
+        rv._get = lambda url, timeout=20: json.dumps(self._canned_suggest(), ensure_ascii=False)
+        try:
+            mt = rv.resolve_company("美团")
+            self.assertEqual((mt["market"], mt["stock_code"], mt["name"]),
+                             ("HK", "03690", "美团-W"))
+            xm = rv.resolve_company("小米集团")
+            self.assertEqual((xm["market"], xm["stock_code"], xm["name"]),
+                             ("HK", "01810", "小米集团-W"))
+            ali = rv.resolve_company("阿里巴巴")
+            self.assertEqual((ali["market"], ali["stock_code"], ali["name"]),
+                             ("HK", "09988", "阿里巴巴-SW"))
         finally:
             rv._get = old_get
 
