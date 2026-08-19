@@ -669,16 +669,24 @@ class OrchestratorV2:
             if not all_steps:
                 return
             steps: list[dict] = []
+            # 目标主题词：用于单步指令清洗后的主题一致性校验
+            tokens = self._topic_tokens(goal)
+            if not tokens:
+                # 目标无法提取主题词（可能中文损坏/过短）：保守不沉淀，避免污染模板库
+                logger.info("Template not consolidated (no topic tokens): %s", goal[:40])
+                return
             for s in all_steps[:8]:
                 cap = s.get("capability")
                 if cap in ("report_generator", "package"):
                     continue  # 收尾打包类步骤不进模板，保留核心能力链（含内容摘要）
                 ins = str(s.get("instruction") or "")
-                # 反思重做在指令尾部追加"【反思要求重做】…"反馈：
-                # 剥离反馈后保留原可执行指令，而不是整步跳过
-                # （否则经反思重做的任务永远无法固化模板）
-                if "【反思要求重做】" in ins:
-                    ins = ins.split("【反思要求重做】", 1)[0].strip()
+                # 剥离追加的反思反馈与自动沉淀的历史教训块
+                # （"【历史教训（自动沉淀）】反思要求重做：…"、"【反思要求重做】…"），
+                # 保留原可执行指令；经反思重做的任务同样可固化
+                for marker in ("【历史教训", "【反思要求重做】", "反思要求重做"):
+                    if marker in ins:
+                        ins = ins.split(marker, 1)[0].strip()
+                        break
                 # 纯记忆注入（指令整体是历史经验上下文）才跳过
                 if ins.startswith("历史经验"):
                     continue
@@ -691,6 +699,18 @@ class OrchestratorV2:
                 ins = ins.strip()
                 if not ins:
                     continue
+                # 单步主体一致性：步骤指令混入其他公司且不含目标公司
+                # （如跨公司教训串味后的"搜索美团；…"）→ 记忆残渣，丢弃
+                try:
+                    from acceptance_checker import _OTHER_ENTITIES
+                    from task_classifier import _extract_company
+                    _tgt_comp = _extract_company(goal)
+                    if _tgt_comp and _tgt_comp not in ins and any(
+                        e != _tgt_comp and e in ins for e in _OTHER_ENTITIES
+                    ):
+                        continue
+                except Exception:
+                    pass
                 # 截断时尽量在句子边界，避免沉淀出半句指令
                 if len(ins) > 200:
                     head = ins[:200]
@@ -706,11 +726,6 @@ class OrchestratorV2:
                 return
             # 主题一致性校验：步骤指令必须包含目标主题词，否则可能是跑偏任务（不沉淀）
             hay = " ".join(str(s.get("instruction", "")) for s in steps)
-            tokens = self._topic_tokens(goal)
-            if not tokens:
-                # 目标无法提取主题词（可能中文损坏/过短）：保守不沉淀，避免污染模板库
-                logger.info("Template not consolidated (no topic tokens): %s", goal[:40])
-                return
             if not any(t in hay for t in tokens):
                 logger.info("Template not consolidated (off-topic execution): %s", goal[:40])
                 return
