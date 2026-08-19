@@ -303,7 +303,7 @@ def check_number_traceability(report: str, sources: dict, threshold: float = 0.7
 # ─────────────────────────────────────────────
 
 _OTHER_ENTITIES = (
-    "Line", "line", "阿里巴巴", "阿里", "字节跳动", "字节", "百度", "京东",
+    "Line", "阿里巴巴", "阿里", "字节跳动", "字节", "百度", "京东",
     "美团", "小米", "华为", "苹果", "微软", "谷歌", "网易", "快手", "拼多多",
     "滴滴", "联想", "中兴", "三星", "索尼", "亚马逊", "奈飞", "软银",
     "日本通讯", "国民银行", "大和证券",
@@ -372,8 +372,10 @@ def check_entity_attribution(
     report: str, sources: dict, goal: str,
 ) -> dict:
     """主体归属检查：报告/清洗数据中的数字应属于目标公司。
-    对每个可溯源数字，取源文本上下文窗口；窗口含其他公司实体且不含目标主体
-    → 标记为归属污染（如 Line 的 4% 被归入腾讯）。"""
+    对每个可溯源数字，以【报告句子】判定归属：报告句子含其他公司实体且不含目标主体
+    → 标记为归属污染（如把 Line 的 4% 当腾讯的写进句子）。
+    不再按源文本上下文判定——报告里腾讯"营收增速30%"与源文本里 AWS"运营利润率约30%"
+    是不同指标的同名数值，源上下文含其他实体不代表报告引用错误。"""
     target = _target_entity(goal)
     contaminated: list[dict] = []
     ambiguous: list[dict] = []
@@ -382,33 +384,61 @@ def check_entity_attribution(
         return {"pass": True, "details": "无法从目标提取主体，跳过", "checked_count": 0,
                 "contaminated_count": 0, "contaminated": []}
 
-    # 1) 报告中的数字（可溯源部分）
-    trace = check_number_traceability(report, sources)
-    for src_key, src_text in sources.items():
-        if not src_text:
-            continue
-        for n in trace.get("traceable", []):
-            ctxs = _locate_and_context(src_text, n["value"], n["unit"])
-            for ctx, prev in ctxs:
-                checked += 1
-                # 其他公司实体可来自当前句或前一句（跨句指代："这些业务"=Line）；
-                # 目标公司必须出现在当前句才算归属
-                others = [
+    def _web_other_only(num: dict, target: str) -> bool:
+        """数字在所有网络源（search/fetch）上下文里只归其他公司、从未出现在目标
+        上下文 → True（如 Line 的 4% 被写进腾讯报告）。结构化数据不参与本判定。"""
+        other_found = False
+        for src_key, src_text in sources.items():
+            if src_key == "clean_chart_data" or not src_text:
+                continue
+            for sctx, sprev in _locate_and_context(src_text, num["value"], num["unit"]):
+                if target in sctx:
+                    return False
+                s_others = [
                     e for e in _OTHER_ENTITIES
-                    if (_entity_in(ctx, e) or _entity_in(prev, e))
+                    if (_entity_in(sctx, e) or _entity_in(sprev, e))
                     and e.lower() != target.lower()
                 ]
-                target_here = target in ctx
-                has_rel = any(v in ctx for v in _RELATION_VERBS)
-                has_core = any(w in ctx for w in _CORE_FIN_WORDS)
-                if others and not target_here and has_core and not has_rel:
+                if s_others and any(w in sctx for w in _CORE_FIN_WORDS):
+                    other_found = True
+        return other_found
+
+    # 1) 报告中的数字（可溯源部分）：以报告句子判定归属
+    trace = check_number_traceability(report, sources)
+    for n in trace.get("traceable", []):
+        ctxs = _locate_and_context(report, n["value"], n["unit"])
+        for ctx, prev in ctxs:
+            checked += 1
+            others = [
+                e for e in _OTHER_ENTITIES
+                if _entity_in(ctx, e)
+                and e.lower() != target.lower()
+            ]
+            target_here = target in ctx
+            has_rel = any(v in ctx for v in _RELATION_VERBS)
+            has_core = any(w in ctx for w in _CORE_FIN_WORDS)
+            if has_rel:
+                # 投资/收购等关系句（"腾讯投资X亿元"）不算污染
+                continue
+            if others and not target_here and has_core:
+                contaminated.append({
+                    "value": f"{n['raw']}",
+                    "entity": "、".join(others[:2]),
+                    "context": ctx[:90],
+                })
+            elif target_here and not others and n.get("source") != "clean_chart_data":
+                # 报告声明数字属于目标：若它只出现在其他公司的网络源上下文
+                # （从未出现在目标上下文）→ 污染（Line 的 4% 被归入腾讯案例）
+                if _web_other_only(n, target):
                     contaminated.append({
                         "value": f"{n['raw']}",
-                        "entity": "、".join(others[:2]),
+                        "entity": "网络源证据指向其他公司",
                         "context": ctx[:90],
                     })
-                elif not target_here and not others:
-                    ambiguous.append({"value": n["raw"], "context": ctx[:70]})
+            elif not target_here and not others:
+                # 中性句子（无任何公司实体）：信任报告归属，避免
+                # 源文本碰巧出现同名数值（如 AWS"运营利润率约30%"）误报
+                ambiguous.append({"value": n["raw"], "context": ctx[:70]})
 
     # 2) 清洗数据行（含来源 URL 的数值行）
     clean_text = sources.get("clean_chart_data") or ""
@@ -422,28 +452,31 @@ def check_entity_attribution(
                     val = str(r.get("value") or "")
                     unit = str(r.get("unit") or "")
                     src_url = str(r.get("source") or "")
-                    for src_key, src_text in sources.items():
-                        if not src_text:
-                            continue
-                        if src_url and src_url not in src_text:
-                            continue
-                        ctxs = _locate_and_context(src_text, val, unit)
-                        for ctx, prev in ctxs:
-                            checked += 1
-                            others = [
-                                e for e in _OTHER_ENTITIES
-                                if (_entity_in(ctx, e) or _entity_in(prev, e))
-                                and e.lower() != target.lower()
-                            ]
-                            target_here = target in ctx
-                            has_rel = any(v in ctx for v in _RELATION_VERBS)
-                            has_core = any(w in ctx for w in _CORE_FIN_WORDS)
-                            if others and not target_here and has_core and not has_rel:
-                                contaminated.append({
-                                    "value": f"{r.get('label')} = {val}{unit}",
-                                    "entity": "、".join(others[:2]),
-                                    "context": ctx[:90],
-                                })
+                    label = str(r.get("label") or "")
+                    # 行 label 已明确归属目标主体（如"腾讯营收"）→ 归属正确，不查源上下文
+                    if target and target in label:
+                        continue
+                    # label 把行归给其他公司 → 直接污染（如"Line占比"行）
+                    label_others = [
+                        e for e in _OTHER_ENTITIES
+                        if e in label and e.lower() != target.lower()
+                    ]
+                    if label_others:
+                        contaminated.append({
+                            "value": f"{label} = {val}{unit}",
+                            "entity": "、".join(label_others[:2]),
+                            "context": f"label: {label[:90]}",
+                        })
+                        continue
+                    # 中性 label 行：值只出现在其他公司的网络源上下文 → 污染
+                    if _web_other_only({"value": val, "unit": unit}, target):
+                        contaminated.append({
+                            "value": f"{label} = {val}{unit}",
+                            "entity": "网络源证据指向其他公司",
+                            "context": f"label: {label[:60]} / source: {src_url[:60]}",
+                        })
+                        continue
+                    checked += 1
         except Exception:
             pass
     # 去重

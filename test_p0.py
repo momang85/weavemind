@@ -2030,6 +2030,58 @@ class TestAcceptanceChecker(unittest.TestCase):
         r = check_entity_attribution(report, sources, "分析腾讯财报")
         self.assertTrue(r["pass"])
 
+    def test_entity_neutral_sentence_trusted(self):
+        """中性报告句子（无公司实体）不被源文本同名数值误伤：
+        腾讯"营收增速30%"不应因源文本 AWS"运营利润率约30%"被判污染。"""
+        from acceptance_checker import check_entity_attribution
+
+        sources = {
+            "search_results": "腾讯 2025 全年营收 7518 亿元，Non-IFRS 经营利润 2807 亿",
+            "fetch_snapshot": (
+                "相比之下阿里云在2024年开始单独披露利润（EBITA利润率约9-10%）"
+                "AWS的运营利润率约30%"
+            ),
+            "clean_chart_data": "",
+        }
+        report = "受益于移动互联网红利，营收增速常年保持在30%以上。"
+        r = check_entity_attribution(report, sources, "搜索并分析腾讯年度财务报告")
+        self.assertTrue(r["pass"], r["details"])
+
+    def test_entity_clean_row_label_target_ok(self):
+        """清洗行 label 含目标主体（腾讯营收）→ 归属正确；中性 label 行在
+        源文本存在目标上下文时（腾讯+18%）也不被对比文章前一句的阿里误伤。"""
+        import json
+        from acceptance_checker import check_entity_attribution
+
+        sources = {
+            "search_results": (
+                "腾讯 (0700) 2025 年报深度复盘：腾讯 2025 全年营收 7518 亿元（+14%），"
+                "Non-IFRS 经营利润 2807 亿（+18%）。| https://momoview.com/a"
+            ),
+            "fetch_snapshot": (
+                "阿里也在加速投入。考虑到：14%营收增速+18%利润增速毛利率持续扩张，"
+                "国际游戏增速拐点，经营利润在同业中不算高估"
+            ),
+            "clean_chart_data": json.dumps({"market_trends": [
+                {"label": "腾讯营收", "value": 14.0, "unit": "%",
+                 "source": "https://momoview.com/a"},
+                {"label": "利润增速", "value": 18.0, "unit": "%",
+                 "source": "https://momoview.com/a"},
+            ]}, ensure_ascii=False),
+        }
+        report = "2025年营收7518亿元，增速14%。"
+        r = check_entity_attribution(report, sources, "搜索并分析腾讯年度财务报告")
+        self.assertTrue(r["pass"], r["details"])
+
+    def test_entity_headline_does_not_match_line(self):
+        """英文 headline 里的小写 line 不参与主体判定（已从实体表移除）；
+        Line 公司实体（大写）仍可识别。"""
+        from acceptance_checker import _OTHER_ENTITIES, _entity_in
+
+        self.assertNotIn("line", _OTHER_ENTITIES)
+        self.assertIn("Line", _OTHER_ENTITIES)
+        self.assertTrue(_entity_in("日本通讯App Line就被爆料用户流失严重", "Line"))
+
     def test_source_labeling_honesty(self):
         """媒体声明可溯源 → 诚实；声明年报但源中无 → 虚假标注。"""
         from acceptance_checker import check_source_labeling
