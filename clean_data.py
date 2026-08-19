@@ -634,11 +634,17 @@ def clean_and_structure(items: list[dict], goal: str = "") -> dict:
         "topic_terms": dict(topic_terms.most_common(12)),
     }
     # 他司过滤：目标公司明确时，label/口径含其他已知公司且不含目标公司的行
-    # 是搜索串味（如腾讯任务捞到 LululemonQ3营收），直接丢弃
-    if names:
+    # 是搜索串味（如腾讯任务捞到 LululemonQ3营收），直接丢弃。
+    # 注意只用公司名（_extract_company），不能混入"营收/净利润"等通用指标词。
+    try:
+        from task_classifier import _extract_company
+        target_comp = _extract_company(goal)
+    except Exception:
+        target_comp = ""
+    if target_comp:
         try:
             from acceptance_checker import _OTHER_ENTITIES
-            _foreign = tuple(e for e in _OTHER_ENTITIES if e not in names)
+            _foreign = tuple(e for e in _OTHER_ENTITIES if e != target_comp)
         except Exception:
             _foreign = ()
         if _foreign:
@@ -649,7 +655,7 @@ def clean_and_structure(items: list[dict], goal: str = "") -> dict:
                         kept.append(r)
                         continue
                     text_l = str(r.get("label") or "") + " " + str(r.get("caliber") or "")
-                    if any(n in text_l for n in names):
+                    if target_comp in text_l:
                         kept.append(r)
                     elif not any(f in text_l for f in _foreign):
                         kept.append(r)
