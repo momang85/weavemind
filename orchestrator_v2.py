@@ -674,8 +674,13 @@ class OrchestratorV2:
                 if cap in ("report_generator", "package"):
                     continue  # 收尾打包类步骤不进模板，保留核心能力链（含内容摘要）
                 ins = str(s.get("instruction") or "")
-                # 记忆注入/反思残渣不是可执行指令，不得沉淀进模板
-                if ins.startswith("历史经验") or "反思要求重做" in ins:
+                # 反思重做在指令尾部追加"【反思要求重做】…"反馈：
+                # 剥离反馈后保留原可执行指令，而不是整步跳过
+                # （否则经反思重做的任务永远无法固化模板）
+                if "【反思要求重做】" in ins:
+                    ins = ins.split("【反思要求重做】", 1)[0].strip()
+                # 纯记忆注入（指令整体是历史经验上下文）才跳过
+                if ins.startswith("历史经验"):
                     continue
                 if "用户目标：" in ins:
                     ins = ins.split("用户目标：", 1)[-1]
