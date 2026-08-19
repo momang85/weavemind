@@ -2073,6 +2073,19 @@ class TestAcceptanceChecker(unittest.TestCase):
         r = check_entity_attribution(report, sources, "搜索并分析腾讯年度财务报告")
         self.assertTrue(r["pass"], r["details"])
 
+    def test_entity_peer_comparison_not_flagged(self):
+        """诚实标注的同行对比句（"低于苹果（约25%）"）不是主体污染。"""
+        from acceptance_checker import check_entity_attribution
+
+        sources = {
+            "search_results": "小米集团2025年报：营收3659亿，净利率9.1%",
+            "fetch_snapshot": "",
+            "clean_chart_data": "",
+        }
+        report = "但9.1%的净利率仍低于苹果（约25%）等国际同业，反映硬件业务利润率天然偏低的行业属性。"
+        r = check_entity_attribution(report, sources, "搜索并分析小米年度财务报告")
+        self.assertTrue(r["pass"], r["details"])
+
     def test_entity_headline_does_not_match_line(self):
         """英文 headline 里的小写 line 不参与主体判定（已从实体表移除）；
         Line 公司实体（大写）仍可识别。"""

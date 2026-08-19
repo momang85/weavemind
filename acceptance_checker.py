@@ -420,13 +420,9 @@ def check_entity_attribution(
             if has_rel:
                 # 投资/收购等关系句（"腾讯投资X亿元"）不算污染
                 continue
-            if others and not target_here and has_core:
-                contaminated.append({
-                    "value": f"{n['raw']}",
-                    "entity": "、".join(others[:2]),
-                    "context": ctx[:90],
-                })
-            elif target_here and not others and n.get("source") != "clean_chart_data":
+            # 报告句子明确提到其他公司（如"低于苹果（约25%）"）是诚实的同行对比，
+            # 不是污染；真污染由下方"目标句子 + 源证据"分支捕获（Line 的 4% 案例）
+            if target_here and not others and n.get("source") != "clean_chart_data":
                 # 报告声明数字属于目标：若它只出现在其他公司的网络源上下文
                 # （从未出现在目标上下文）→ 污染（Line 的 4% 被归入腾讯案例）
                 if _web_other_only(n, target):
