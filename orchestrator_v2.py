@@ -1413,6 +1413,25 @@ class OrchestratorV2:
                     )
         except Exception:
             pass
+        # P1-4：结构化失败诊断进入反思 prompt（不包含原始错误文本/自然语言反馈）
+        try:
+            from step_diagnosis import read_step_failures
+            _diags = read_step_failures(task_id)
+            if _diags:
+                _lines = []
+                for _d in _diags[-10:]:
+                    _lines.append(
+                        f"- step_id={_d.step_id} capability={_d.capability} "
+                        f"error_type={_d.error_type} tried={_d.tried_alternatives} "
+                        f"suggestion={_d.suggestion} replacement={_d.replacement_step_id} "
+                        f"outcome={_d.replacement_outcome}"
+                    )
+                ctx_parts.append(
+                    "步骤失败诊断（结构化；只重做能修复失败/缺口的步骤，"
+                    "优先采用 suggestion）：\n" + "\n".join(_lines)
+                )
+        except Exception:
+            pass
         prompt = "\n\n".join(ctx_parts)
         try:
             from prompt_registry import get_prompt
@@ -1462,7 +1481,7 @@ class OrchestratorV2:
         for s in order:
             s2 = dict(s)
             s2["depends_on"] = []  # 依赖步骤已完成，单步独立重做
-            if s["step_id"] == step_id and feedback:
+            if s["step_id"] == step_id:
                 extra = ""
                 if s.get("capability") == "web_search":
                     extra = (
@@ -1470,9 +1489,20 @@ class OrchestratorV2:
                         "（site: 官方域名、年份、具体指标词），"
                         "禁止原样重复上次查询，否则只会得到相同结果"
                     )
-                s2["instruction"] = (
-                    f"{s['instruction']}\n\n【反思要求重做】{feedback}{extra}"
-                )
+                # P1-4：优先使用结构化失败诊断（suggestion 为修复方向），
+                # 不再把自然语言反馈文本拼进 worker 指令（防"报告抄反馈"泄漏）
+                diag = self._diagnosis_for_step(task_id, step_id)
+                if diag and diag.suggestion:
+                    s2["instruction"] = (
+                        f"{s['instruction']}\n\n"
+                        f"【失败诊断】capability={diag.capability} "
+                        f"error_type={diag.error_type} 已尝试={diag.tried_alternatives} "
+                        f"建议修复={diag.suggestion}{extra}"
+                    )
+                elif feedback:
+                    s2["instruction"] = (
+                        f"{s['instruction']}\n\n【反思要求重做】{feedback}{extra}"
+                    )
             orig_instr = s2.get("instruction", "")
             result = self._dispatch_step_safe(goal, s2, task_id, {"replan_used": 0})
             if (
@@ -4855,14 +4885,21 @@ print("charts generated")
         )
 
     def _dispatch_step_safe(self, goal: str, step: dict, task_id: str, state: dict) -> dict:
-        """派发单步：失败自动重试，重试仍失败则尝试单步重规划。"""
+        """派发单步：失败自动重试，重试仍失败则尝试单步重规划。
+        P1-4：重试/重规划结束后写结构化失败诊断（step_failure.json），
+        替换步骤结果已知后再落盘，供反思精准补缺口。"""
         result = self._dispatch(step, task_id)
         attempt = 0
         # 输出契约校验（对标 3.1 引导-校验-重试）：契约不通过视为失败，
         # 并把校验错误喂回指令重试，而不是盲目重发
         issue = self._contract_issue(step, result)
+        tried: list[str] = []
         while (result.get("status") == "FAILED" or issue) and attempt < self._max_retry:
             attempt += 1
+            tried.append(
+                f"重试#{attempt}"
+                + ("（输出契约校验失败）" if issue else "")
+            )
             push_progress(self._messaging, task_id, "log",
                           {"type": "retry", "agent": step.get("capability", "?"),
                            "message": f"Step {step.get('step_id')} retry {attempt}/{self._max_retry}",
@@ -4889,15 +4926,30 @@ print("charts generated")
                 )
             result = self._dispatch(amended, task_id)
             issue = self._contract_issue(amended, result)
+        alt = None
+        alt_result = None
+        fail_result = None
         if result.get("status") == "FAILED" and state["replan_used"] < self._replan_depth:
+            fail_result = result
             alt = self._replan_step(goal, step, result.get("result", ""), task_id)
             if alt:
                 state["replan_used"] += 1
+                tried.append(f"重规划为 {alt.get('capability')}")
                 alt_result = self._dispatch(alt, task_id)
                 if alt_result.get("status") == "SUCCESS":
                     alt_result["replanned"] = True
                     alt_result["replan_instruction"] = alt.get("instruction", "")
                 result = alt_result
+        # P1-4：发生过失败（重试或重规划）就落盘结构化诊断
+        if attempt > 0 or alt is not None:
+            try:
+                from step_diagnosis import write_step_failure
+                diag = self._build_step_diagnosis(
+                    step, fail_result or result, issue, tried, alt, alt_result, task_id,
+                )
+                write_step_failure(task_id, diag)
+            except Exception as exc:
+                logger.warning("step failure diagnosis write failed: %s", str(exc)[:120])
         return result
 
     def _contract_issue(self, step: dict, result: dict) -> str:
@@ -4910,6 +4962,96 @@ print("charts generated")
             return "；".join(issues) if not ok else ""
         except Exception:
             return ""
+
+    @staticmethod
+    def _classify_step_error(capability: str, result: dict, issue: str = "") -> str:
+        """把步骤失败归类为稳定 error_type（供结构化诊断/反思消费）。"""
+        text = str(result.get("result") or "")
+        low = text.lower()
+        if issue:
+            return "CONTRACT_VIOLATION"
+        if "timeout" in low or "超时" in text:
+            return "TIMEOUT"
+        m = re.search(r"HTTP[ _-]?(\d{3})", text, re.I)
+        if m:
+            return f"HTTP_{m.group(1)}"
+        if any(sig in text for sig in (
+            "No URL", "no url", "empty", "filtered", "无结果", "没有找到",
+            "未找到", "No relevant", "not found",
+        )):
+            return "SEARCH_EMPTY"
+        if capability == "code_execution" and any(sig in text for sig in (
+            "SyntaxError", "ModuleNotFoundError", "Traceback", "No module named",
+            "Script exited with code", "No valid code", "HTML incomplete",
+        )):
+            return "CODE_RUNTIME_ERROR"
+        if capability == "report_generator" and "too short" in low:
+            return "OUTPUT_TOO_SHORT"
+        return "GENERIC_FAILURE"
+
+    @staticmethod
+    def _failure_suggestion(capability: str, error_type: str, alt: dict | None) -> str:
+        """确定性修复建议：反思重做时作为优先修复方向（suggestion 字段）。"""
+        if alt is not None:
+            hint = (
+                "（优先结构化数据源）"
+                if "结构化" in str(alt.get("instruction") or "")
+                else ""
+            )
+            return f"改用 {alt.get('capability')} 替代 {capability}{hint}"
+        if error_type.startswith("HTTP_"):
+            return (
+                "检查 URL 可达性，换备用 URL/镜像源；"
+                "金融数据优先改用结构化数据源（东方财富/SEC/巨潮）"
+            )
+        if error_type == "SEARCH_EMPTY":
+            return (
+                "更换查询词并增加限定（site: 官方域名、年份、具体指标词）；"
+                "禁止原样重复上次查询"
+            )
+        if error_type == "CODE_RUNTIME_ERROR":
+            return "修复语法/依赖错误，简化实现，避免不可用的外部库"
+        if error_type == "OUTPUT_TOO_SHORT":
+            return "裁剪输入提示词后重试（保留摘要，去掉原文引用），max_tokens 不缩小"
+        if error_type == "CONTRACT_VIOLATION":
+            return "按输出契约格式重新生成结果"
+        if error_type == "TIMEOUT":
+            return "减少单步工作量或拆分步骤，避免超时"
+        return "按失败原因修正实现；若无法恢复，改用已有结构化数据源或模型知识（标注来源）"
+
+    def _build_step_diagnosis(
+        self, step: dict, result: dict, issue: str,
+        tried: list[str], alt: dict | None, alt_result: dict | None,
+        task_id: str,
+    ):
+        """组装 StepDiagnosis：替换结果已知后才落盘。"""
+        from step_diagnosis import StepDiagnosis
+        capability = str(step.get("capability") or "")
+        error_type = self._classify_step_error(capability, result, issue)
+        return StepDiagnosis(
+            step_id=str(step.get("step_id") or "?"),
+            capability=capability,
+            error_type=error_type,
+            tried_alternatives=tried or ["重试"],
+            suggestion=self._failure_suggestion(capability, error_type, alt),
+            timestamp=self._now_iso(),
+            replacement_step_id=str(alt.get("step_id") or "") if alt else "",
+            replacement_outcome=str((alt_result or {}).get("status") or "") if alt else "",
+            error_snippet=str(result.get("result") or "")[:200],
+        )
+
+    @staticmethod
+    def _diagnosis_for_step(task_id: str, step_id: str):
+        """取某步骤最新失败诊断（无则 None）。"""
+        try:
+            from step_diagnosis import read_step_failures
+            diags = read_step_failures(task_id)
+            for d in reversed(diags):
+                if d.step_id == step_id:
+                    return d
+        except Exception:
+            pass
+        return None
 
     def _push_realtime_state(self, task_id: str, goal: str, steps: list[dict], completed: dict) -> None:
         """步骤完成后推送当前全量状态（前端实时展示）。"""

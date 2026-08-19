@@ -2637,5 +2637,137 @@ class TestP2ChartFallback(unittest.TestCase):
         self.assertIn("bing", snap)
 
 
+class TestP14StepDiagnosis(unittest.TestCase):
+    """P1-4 失败诊断结构化：step_failure.json 落盘 + 反思/重做消费。"""
+
+    def _o(self, tmp: str):
+        from orchestrator_v2 import OrchestratorV2
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._messaging = None
+        o._max_retry = 0
+        o._replan_depth = 1
+        return o
+
+    def test_step_failure_written_after_replan(self):
+        """web_fetch 403 → 重规划为 content_summary → step_failure.json 落盘，
+        replacement_outcome 已知（替换步骤执行完成后才写）。"""
+        import json
+        import tempfile
+        from pathlib import Path
+        import workspace as ws_mod
+
+        tmp = Path(tempfile.mkdtemp(prefix="sf_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            o = self._o(str(tmp))
+
+            def fake_dispatch(step, task_id):
+                if step.get("capability") == "web_fetch":
+                    return {"task_id": step.get("step_id"), "status": "FAILED",
+                            "result": "HTTP 403 Forbidden"}
+                return {"task_id": step.get("step_id"), "status": "SUCCESS",
+                        "result": "ok"}
+            o._dispatch = fake_dispatch
+            o._replan_step = lambda *a, **k: {
+                "step_id": "alt-2-1", "capability": "content_summary",
+                "instruction": "改用结构化财务数据完成分析", "timeout": 120}
+            state = {"replan_used": 0}
+            res = o._dispatch_step_safe(
+                "目标", {"step_id": "2", "capability": "web_fetch",
+                         "instruction": "抓取"}, "t-sf", state)
+            self.assertEqual(res["status"], "SUCCESS")
+            p = ws_mod.task_workspace("t-sf") / "step_failure.json"
+            self.assertTrue(p.exists())
+            data = json.loads(p.read_text(encoding="utf-8"))
+            self.assertEqual(len(data), 1)
+            d = data[0]
+            self.assertEqual(d["step_id"], "2")
+            self.assertEqual(d["capability"], "web_fetch")
+            self.assertEqual(d["error_type"], "HTTP_403")
+            self.assertIn("重规划为 content_summary", d["tried_alternatives"])
+            self.assertEqual(d["replacement_step_id"], "alt-2-1")
+            self.assertEqual(d["replacement_outcome"], "SUCCESS")
+            self.assertTrue(d["suggestion"])
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+
+    def test_reflect_consumes_structured_failure(self):
+        """反思 prompt 消费 step_failure.json 的结构化字段，
+        不包含原始错误文本/自然语言反馈。"""
+        import tempfile
+        from pathlib import Path
+        import workspace as ws_mod
+        from step_diagnosis import StepDiagnosis, write_step_failure
+
+        tmp = Path(tempfile.mkdtemp(prefix="sfr_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            write_step_failure("t-rf", StepDiagnosis(
+                step_id="2", capability="web_fetch", error_type="HTTP_403",
+                tried_alternatives=["重试#1"], suggestion="改用结构化数据源",
+                timestamp="t", replacement_step_id="alt",
+                replacement_outcome="SUCCESS",
+                error_snippet="HTTP 403 Forbidden 原始错误文本"))
+            o = self._o(str(tmp))
+            captured = {}
+
+            class FakeLLM:
+                def call(self, system, prompt, **kw):
+                    captured["prompt"] = prompt
+                    return {"verdict": "accept", "score": 10.0}
+            o._planner_llm = FakeLLM()
+            o._reflect("目标", "报告", "t-rf", [], {}, "")
+            prompt = captured["prompt"]
+            self.assertIn("步骤失败诊断", prompt)
+            self.assertIn("error_type=HTTP_403", prompt)
+            self.assertIn("suggestion=改用结构化数据源", prompt)
+            self.assertNotIn("HTTP 403 Forbidden 原始错误文本", prompt)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+
+    def test_redo_uses_structured_diagnosis(self):
+        """重做指令优先使用结构化诊断（suggestion 为修复方向），
+        不再拼自然语言反馈（防"报告抄反馈"泄漏）。"""
+        import tempfile
+        from pathlib import Path
+        import workspace as ws_mod
+        from step_diagnosis import StepDiagnosis, write_step_failure
+
+        tmp = Path(tempfile.mkdtemp(prefix="sfrd_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            write_step_failure("t-rd", StepDiagnosis(
+                step_id="2", capability="web_fetch", error_type="HTTP_403",
+                tried_alternatives=["重试#1"],
+                suggestion="改用结构化数据源替代直接抓取",
+                timestamp="t", replacement_step_id="alt",
+                replacement_outcome="SUCCESS"))
+            o = self._o(str(tmp))
+            o._memory = None
+            captured = {}
+
+            def fake_dispatch_safe(goal, s2, task_id, state):
+                captured["instruction"] = s2["instruction"]
+                return {"task_id": s2["step_id"], "status": "SUCCESS",
+                        "result": "ok"}
+            o._dispatch_step_safe = fake_dispatch_safe
+            all_steps = [{"step_id": "2", "capability": "web_fetch",
+                          "instruction": "抓取URL"}]
+            o._redo_step_and_dependents(
+                "t-rd", "目标", all_steps, {}, "2",
+                "报告生成步骤存在严重缺陷：财务金额溯源率仅40%（19/48）")
+            ins = captured["instruction"]
+            self.assertIn("【失败诊断】", ins)
+            self.assertIn("error_type=HTTP_403", ins)
+            self.assertIn("改用结构化数据源替代直接抓取", ins)
+            self.assertNotIn("【反思要求重做】", ins)
+            self.assertNotIn("财务金额溯源率仅40%", ins)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+
+
 if __name__ == "__main__":
     unittest.main()
