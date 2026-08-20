@@ -9,6 +9,7 @@ export default defineConfig({
       '/api': 'http://localhost:8080',
       '/task': 'http://localhost:8080',
       '/tasks': 'http://localhost:8080',
+      '/share': 'http://localhost:8080',
     }
   }
 })

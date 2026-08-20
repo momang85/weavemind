@@ -1,6 +1,6 @@
 """WeaveMind Web UI"""
-import base64, io, json, logging, mimetypes, os, re, socket, sqlite3, subprocess, sys, tempfile, threading, time, uuid, zipfile
-from datetime import datetime, timezone
+import base64, html, io, json, logging, mimetypes, os, re, secrets, socket, sqlite3, subprocess, sys, tempfile, threading, time, uuid, zipfile
+from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 import redis
@@ -16,6 +16,17 @@ PROJECT_DIR = os.path.join(tempfile.gettempdir(), "agent_workspace", "project")
 
 _task_results = {}
 _task_lock = threading.Lock()
+
+# ---- 报告分享（公开只读链接）----
+# token → task_id 映射持久化到磁盘 JSON。选择理由：
+# 当前 Redis 承担消息总线职责且未确认开启持久化，重启后分享链接不应失效，
+# 磁盘文件 + 原子替换更稳，也不依赖外部服务可用性。
+SHARE_FILE = os.environ.get(
+    "SHARE_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "share_links.json"),
+)
+SHARE_TTL_SECONDS = int(os.environ.get("SHARE_TTL_SECONDS", str(7 * 24 * 3600)))
+_share_lock = threading.Lock()
 
 _events = []
 _events_lock = threading.Lock()
@@ -73,6 +84,90 @@ def _iso_utc(s):
     if "T" in s or s.endswith("Z"):
         return s
     return s.replace(" ", "T") + "Z"
+
+def _load_shares() -> dict:
+    """读取分享映射，并顺带清理过期 token；文件缺失/损坏时返回空映射。"""
+    try:
+        with open(SHARE_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, dict):
+            data = {}
+    except Exception:
+        data = {}
+    now = time.time()
+    changed = False
+    for token, info in list(data.items()):
+        exp = info.get("expires_at") if isinstance(info, dict) else None
+        if exp:
+            try:
+                if datetime.fromisoformat(str(exp).replace("Z", "+00:00")).timestamp() <= now:
+                    data.pop(token, None)
+                    changed = True
+            except Exception:
+                pass
+    if changed:
+        _save_shares(data)
+    return data
+
+def _save_shares(data: dict) -> None:
+    """原子写分享映射：先写临时文件再 os.replace，避免服务中断损坏映射文件。"""
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(SHARE_FILE)), exist_ok=True)
+        tmp = SHARE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+        os.replace(tmp, SHARE_FILE)
+    except Exception:
+        pass
+
+def _generate_share_token(task_id: str) -> str:
+    """生成/复用任务的分享 token。
+    选择“幂等复用”：同一任务重复生成保持同一链接，撤销后再生成才换新 token，
+    避免同一报告产生多个失控链接。"""
+    with _share_lock:
+        data = _load_shares()
+        for token, info in data.items():
+            if isinstance(info, dict) and info.get("task_id") == task_id:
+                return token
+        token = secrets.token_urlsafe(16)
+        data[token] = {
+            "task_id": task_id,
+            "created_at": _now_iso(),
+            "expires_at": (
+                datetime.now(timezone.utc) + timedelta(seconds=SHARE_TTL_SECONDS)
+            ).isoformat(),
+        }
+        _save_shares(data)
+        return token
+
+def _find_share_token(task_id: str) -> str | None:
+    """查询某任务当前的分享 token；未分享返回 None。"""
+    with _share_lock:
+        data = _load_shares()
+        for token, info in data.items():
+            if isinstance(info, dict) and info.get("task_id") == task_id:
+                return token
+    return None
+
+def _resolve_share_token(token: str) -> str | None:
+    """按 token 解析 task_id；非法/过期 token 返回 None。"""
+    with _share_lock:
+        info = _load_shares().get(token)
+        return info.get("task_id") if isinstance(info, dict) else None
+
+def _revoke_share_token(task_id: str) -> int:
+    """撤销某任务的全部分享 token，返回撤销数量。"""
+    with _share_lock:
+        data = _load_shares()
+        removed = [
+            t for t, info in data.items()
+            if isinstance(info, dict) and info.get("task_id") == task_id
+        ]
+        for t in removed:
+            data.pop(t, None)
+        if removed:
+            _save_shares(data)
+        return len(removed)
 
 def _init_db():
     try:
@@ -639,6 +734,277 @@ def _task_deliverables(tid: str) -> list[dict]:
         files.sort(key=lambda x: x["name"])
     return files
 
+def _get_task_report_data(tid: str) -> dict | None:
+    """取任务的分享数据（报告正文/目标/状态/时间）：优先内存结果，其次 SQLite。
+    服务重启后 _task_results 为空，仍可从 agents.db 的 task_history.report 恢复。"""
+    with _task_lock:
+        data = _task_results.get(tid)
+    if data:
+        report = str(data.get("final_report") or data.get("report") or "")
+        if report.strip():
+            return {
+                "task_id": tid,
+                "goal": str(data.get("goal") or ""),
+                "status": str(data.get("status") or ""),
+                "report": report,
+                "created_at": str(data.get("created_at") or ""),
+            }
+    try:
+        db = sqlite3.connect(DB_PATH, timeout=5)
+        db.row_factory = sqlite3.Row
+        row = db.execute(
+            "SELECT task_id, goal, status, report, created_at, completed_at "
+            "FROM task_history WHERE task_id=?", (tid,),
+        ).fetchone()
+        db.close()
+        if row and str(row["report"] or "").strip():
+            return dict(row)
+    except Exception:
+        pass
+    return None
+
+def _share_image_src(src: str, tid: str) -> str:
+    """把报告图片链接指向可复用的 /files/<task_id>/ 静态路由（无需复制图片）。
+    报告链接通常已被 _rewrite_report_links 改写成 /files/<task_id>/...，
+    这里再兜底处理相对路径与旧版绝对工作区路径。"""
+    src = str(src).strip()
+    low = src.lower()
+    if low.startswith(("/files/", "http://", "https://", "data:image/")):
+        return src
+    if tid:
+        try:
+            ws = str(task_workspace(tid)).replace("\\", "/")
+            if src.replace("\\", "/").startswith(ws):
+                rel = src.replace("\\", "/")[len(ws):].lstrip("/")
+                return f"/files/{tid}/{rel}"
+        except Exception:
+            pass
+        rel = src.lstrip("./").replace("\\", "/")
+        return f"/files/{tid}/{rel}"
+    return src
+
+def _safe_href(url: str, image: bool = False) -> str:
+    """只放行 http(s)/mailto/相对路径/data 图片等安全协议，杜绝 javascript: 等注入。"""
+    url = str(url).strip()
+    low = url.lower()
+    allowed = ("http://", "https://", "mailto:", "#", "/")
+    if image:
+        allowed += ("data:image/",)
+    if low.startswith(allowed) or url.startswith(("./", "../")):
+        return url
+    return "#"
+
+def _markdown_to_html(md: str, task_id: str) -> str:
+    """极简 Markdown → 安全 HTML（用于公开分享页）。
+    先整体转义再构建标签，报告内容无法注入脚本；
+    支持标题/列表/表格/代码块/图片/链接/引用/分割线等报告常用语法。"""
+    def _inline(text: str) -> str:
+        text = html.escape(str(text), quote=False)
+        text = re.sub(r"`([^`]+)`", r"<code>\1</code>", text)
+        def _img(m):
+            alt = m.group(1)
+            src = _safe_href(_share_image_src(m.group(2), task_id), image=True)
+            return (
+                f'<img src="{html.escape(src, quote=True)}" '
+                f'alt="{html.escape(alt, quote=True)}" loading="lazy" />'
+            )
+        text = re.sub(
+            r"!\[([^\]]*)\]\(([^)\s]+)(?:\s+[\"'][^\"']*[\"'])?\)", _img, text,
+        )
+        def _link(m):
+            href = _safe_href(m.group(2))
+            label = m.group(1)
+            return f'<a href="{html.escape(href, quote=True)}" rel="noopener noreferrer">{label}</a>'
+        text = re.sub(
+            r"\[([^\]]+)\]\(([^)\s]+)(?:\s+[\"'][^\"']*[\"'])?\)", _link, text,
+        )
+        text = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", text)
+        text = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"<em>\1</em>", text)
+        text = re.sub(r"~~([^~]+)~~", r"<del>\1</del>", text)
+        return text
+
+    if not md:
+        return "<p>（暂无报告内容）</p>"
+    lines = str(md).replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    out: list[str] = []
+    i = 0
+    n = len(lines)
+
+    def _is_table_sep(line: str) -> bool:
+        s = line.strip()
+        if not s.startswith("|"):
+            return False
+        return bool(re.fullmatch(r"\|?[\s:\-|]+\|?", s)) and "-" in s
+
+    while i < n:
+        line = lines[i]
+        stripped = line.strip()
+        # 围栏代码块
+        if stripped.startswith("```"):
+            lang = stripped[3:].strip()
+            buf: list[str] = []
+            i += 1
+            while i < n and not lines[i].strip().startswith("```"):
+                buf.append(lines[i])
+                i += 1
+            i += 1  # 跳过结束围栏
+            code = html.escape("\n".join(buf))
+            cls = f' class="language-{html.escape(lang, quote=True)}"' if lang else ""
+            out.append(f"<pre><code{cls}>{code}</code></pre>")
+            continue
+        # GFM 表格
+        if stripped.startswith("|") and i + 1 < n and _is_table_sep(lines[i + 1]):
+            rows = [lines[i]]
+            i += 1
+            while i < n and lines[i].strip().startswith("|"):
+                rows.append(lines[i])
+                i += 1
+            def _cells(row: str) -> list[str]:
+                return [c.strip() for c in row.strip().strip("|").split("|")]
+            thead = "".join(f"<th>{_inline(c)}</th>" for c in _cells(rows[0]))
+            tbody = "".join(
+                "<tr>" + "".join(f"<td>{_inline(c)}</td>" for c in _cells(r)) + "</tr>"
+                for r in rows[2:]
+            )
+            out.append(f"<table><thead><tr>{thead}</tr></thead><tbody>{tbody}</tbody></table>")
+            continue
+        # 标题
+        hm = re.match(r"^(#{1,6})\s+(.+)$", stripped)
+        if hm:
+            level = len(hm.group(1))
+            out.append(f"<h{level}>{_inline(hm.group(2))}</h{level}>")
+            i += 1
+            continue
+        # 分割线
+        if re.fullmatch(r"(\*\*\*|---|___)\s*", stripped):
+            out.append("<hr />")
+            i += 1
+            continue
+        # 引用块
+        if stripped.startswith(">"):
+            buf = []
+            while i < n and lines[i].strip().startswith(">"):
+                buf.append(re.sub(r"^>\s?", "", lines[i]))
+                i += 1
+            out.append("<blockquote>" + "<br/>".join(_inline(x) for x in buf) + "</blockquote>")
+            continue
+        # 无序/有序列表（连续行合并成一个 <ul>/<ol>）
+        ul_m = re.match(r"^\s*[-*+]\s+(.*)$", line)
+        ol_m = re.match(r"^\s*\d+[.)]\s+(.*)$", line)
+        if ul_m or ol_m:
+            ordered = bool(ol_m)
+            pat = r"^\s*\d+[.)]\s+(.*)$" if ordered else r"^\s*[-*+]\s+(.*)$"
+            buf = []
+            while i < n:
+                m = re.match(pat, lines[i])
+                if not m:
+                    break
+                buf.append(f"<li>{_inline(m.group(1))}</li>")
+                i += 1
+            out.append(f"<{'ol' if ordered else 'ul'}>{''.join(buf)}</{'ol' if ordered else 'ul'}>")
+            continue
+        # 空行跳过
+        if not stripped:
+            i += 1
+            continue
+        # 普通段落
+        buf = []
+        while i < n:
+            s = lines[i].strip()
+            if not s:
+                break
+            if (
+                s.startswith(("```", "#", ">", "- ", "* ", "+ "))
+                or re.match(r"^\s*\d+[.)]\s+", lines[i])
+                or re.fullmatch(r"(\*\*\*|---|___)\s*", s)
+                or (s.startswith("|") and i + 1 < n and _is_table_sep(lines[i + 1]))
+            ):
+                break
+            buf.append(lines[i].strip())
+            i += 1
+        out.append("<p>" + "<br/>".join(_inline(x) for x in buf) + "</p>")
+    return "\n".join(out)
+
+_SHARE_NOT_FOUND_HTML = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>分享不存在</title>
+<style>
+  body { margin: 0; font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: #f4f5f7; color: #1f2430; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  .card { background: #fff; border: 1px solid #e6e8ee; border-radius: 12px; padding: 44px 56px; text-align: center; }
+  h1 { font-size: 20px; margin: 0 0 8px; color: #16213e; }
+  p { color: #7a8291; font-size: 14px; margin: 0; }
+</style>
+</head>
+<body>
+<div class="card"><h1>分享链接不存在</h1><p>该链接可能已失效或被撤销。</p></div>
+</body>
+</html>"""
+
+def _share_page_html(title: str, created_at: str, body_html: str) -> str:
+    """生成公开只读分享页：自包含 HTML，无系统导航/管理功能。"""
+    time_text = ""
+    if created_at:
+        try:
+            dt = datetime.fromisoformat(
+                _iso_utc(str(created_at)).replace("Z", "+00:00"),
+            )
+            time_text = dt.astimezone().strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            time_text = str(created_at)[:16]
+    meta_html = (
+        f'<div class="meta">生成时间：{html.escape(time_text)}</div>'
+        if time_text else ""
+    )
+    return f"""<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>{html.escape(title)}</title>
+<style>
+  :root {{ color-scheme: light; }}
+  * {{ box-sizing: border-box; }}
+  body {{ margin: 0; font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: #f4f5f7; color: #1f2430; line-height: 1.75; }}
+  .wrap {{ max-width: 860px; margin: 0 auto; padding: 40px 20px 64px; }}
+  header {{ border-bottom: 1px solid #e3e6eb; padding-bottom: 18px; margin-bottom: 26px; }}
+  h1.title {{ font-size: 24px; margin: 0 0 8px; color: #16213e; line-height: 1.4; }}
+  .meta {{ font-size: 13px; color: #7a8291; }}
+  main {{ background: #fff; border: 1px solid #e6e8ee; border-radius: 12px; padding: 28px 32px; }}
+  h1, h2, h3, h4 {{ color: #16213e; line-height: 1.4; }}
+  h1 {{ font-size: 22px; }} h2 {{ font-size: 19px; border-bottom: 1px solid #eef0f4; padding-bottom: 6px; }}
+  h3 {{ font-size: 16px; }} h4 {{ font-size: 15px; }}
+  img {{ max-width: 100%; height: auto; border-radius: 8px; margin: 12px 0; }}
+  a {{ color: #1f6feb; text-decoration: none; }}
+  a:hover {{ text-decoration: underline; }}
+  code {{ background: #f0f2f5; padding: 2px 6px; border-radius: 4px; font-size: 90%; }}
+  pre {{ background: #0f172a; color: #e2e8f0; padding: 16px; border-radius: 8px; overflow-x: auto; }}
+  pre code {{ background: transparent; padding: 0; color: inherit; }}
+  blockquote {{ margin: 12px 0; padding: 4px 16px; border-left: 3px solid #c9d4e5; color: #5a6270; }}
+  table {{ border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; }}
+  th, td {{ border: 1px solid #dfe3ea; padding: 8px 10px; text-align: left; }}
+  th {{ background: #f0f2f5; font-weight: 600; }}
+  hr {{ border: none; border-top: 1px solid #e3e6eb; margin: 20px 0; }}
+  ul, ol {{ padding-left: 24px; }}
+  footer {{ text-align: center; color: #9aa2b1; font-size: 12px; margin-top: 24px; }}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1 class="title">{html.escape(title)}</h1>
+    {meta_html}
+  </header>
+  <main>{body_html}</main>
+  <footer>由织光 WeaveMind 生成的公开只读报告</footer>
+</div>
+</body>
+</html>"""
+
 def _find_cached_task(goal: str, ttl_min: int):
     """结果缓存：相同目标在 TTL 内有过 SUCCESS，直接返回旧结果。"""
     try:
@@ -712,6 +1078,12 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type","text/html; charset=utf-8")
         self.send_header("Content-Length",str(len(body)))
         self.end_headers(); self.wfile.write(body)
+
+    def _share_link(self, token: str) -> str:
+        """构造分享页绝对链接（优先请求 Host，支持反向代理透传协议头）。"""
+        host = self.headers.get("Host") or f"localhost:{PORT}"
+        proto = self.headers.get("X-Forwarded-Proto") or "http"
+        return f"{proto}://{host}/share/{token}"
 
     def _serve_dist(self, path: str) -> bool:
         """生产模式：伺服前端构建产物（frontend/dist），含 SPA 回退。"""
@@ -900,6 +1272,30 @@ class Handler(BaseHTTPRequestHandler):
             if not msgs:
                 return self._json({"error": "conversation not found"}, 404)
             return self._json({"conversation_id": conv_id, "messages": msgs})
+        if p.startswith("/api/share/"):
+            # 查询任务当前分享状态（前端刷新后可恢复“已分享/撤销分享”按钮态）
+            tid = p.split("/api/share/", 1)[-1].strip()
+            token = _find_share_token(tid)
+            if token:
+                return self._json({
+                    "shared": True,
+                    "task_id": tid,
+                    "token": token,
+                    "path": f"/share/{token}",
+                    "url": self._share_link(token),
+                })
+            return self._json({"shared": False, "task_id": tid})
+        if p.startswith("/share/"):
+            # 公开只读分享页：token → task_id → 自包含 HTML 报告（无需登录）
+            token = p.split("/share/", 1)[-1].strip()
+            tid = _resolve_share_token(token)
+            data = _get_task_report_data(tid) if tid else None
+            if not tid or not data:
+                return self._html(_SHARE_NOT_FOUND_HTML, 404)
+            body_html = _markdown_to_html(data.get("report") or "", tid)
+            title = str(data.get("goal") or "任务报告")
+            created = data.get("created_at") or data.get("completed_at") or ""
+            return self._html(_share_page_html(title, created, body_html))
         if p.startswith("/task/"):
             tid = p.split("/task/")[-1]
             with _task_lock: data = _task_results.get(tid)
@@ -938,6 +1334,25 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(raw) if raw else {}
         except Exception:
             return self._json({"error": "invalid json"}, 400)
+        p = urlparse(self.path).path
+        # 报告分享：POST /api/share（body: task_id）或 POST /api/share/<task_id>
+        share_tid = ""
+        if p == "/api/share":
+            share_tid = str(body.get("task_id") or "").strip()
+        elif p.startswith("/api/share/"):
+            share_tid = p.split("/api/share/", 1)[-1].strip()
+        if share_tid:
+            if not _get_task_report_data(share_tid):
+                return self._json({"error": "任务不存在或没有可分享的报告"}, 404)
+            token = _generate_share_token(share_tid)
+            return self._json({
+                "status": "ok",
+                "task_id": share_tid,
+                "token": token,
+                "path": f"/share/{token}",
+                "url": self._share_link(token),
+                "expires_in_days": max(1, round(SHARE_TTL_SECONDS / 86400)),
+            })
         if self.path == "/api/deliverable/run":
             name = str(body.get("path") or "").strip()
             tid = str(body.get("task_id") or "").strip() or None
@@ -1225,10 +1640,29 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"status":"saved"})
         return self._json({"error":"not found"},404)
 
+    def do_DELETE(self):
+        """撤销分享：DELETE /api/share/<task_id>（兼容 /api/share/revoke + body）。"""
+        p = urlparse(self.path).path
+        if p.startswith("/api/share/"):
+            tid = p.split("/api/share/", 1)[-1].strip()
+            if tid == "revoke":
+                tid = ""
+                try:
+                    length = int(self.headers.get("Content-Length", 0) or 0)
+                    raw = self.rfile.read(length) if length > 0 else b""
+                    tid = str((json.loads(raw) if raw else {}).get("task_id") or "").strip()
+                except Exception:
+                    tid = ""
+            if not tid:
+                return self._json({"error": "task_id required"}, 400)
+            revoked = _revoke_share_token(tid)
+            return self._json({"status": "ok", "task_id": tid, "revoked": revoked})
+        return self._json({"error": "not found"}, 404)
+
     def do_OPTIONS(self):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin","*")
-        self.send_header("Access-Control-Allow-Methods","GET,POST,OPTIONS")
+        self.send_header("Access-Control-Allow-Methods","GET,POST,DELETE,OPTIONS")
         self.send_header("Access-Control-Allow-Headers","Content-Type")
         self.end_headers()
 

@@ -1,4 +1,4 @@
-import { useState, memo } from 'react'
+import { useState, useEffect, memo } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
@@ -8,16 +8,97 @@ import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 import { useTaskStore } from '../stores/useTaskStore'
 import {
   FileDown, Package, ScrollText, Clock, CheckCircle2,
-  ChevronDown, ChevronRight, Award, Zap, Download, ExternalLink, Play
+  ChevronDown, ChevronRight, Award, Zap, Download, ExternalLink, Play,
+  Share2, Link2, Copy, Check, X, Trash2,
 } from 'lucide-react'
 
 export default memo(function ReportViewer() {
-  const { report, logs, currentTaskId } = useTaskStore()
+  const { report, logs, currentTaskId, demoMode } = useTaskStore()
   const taskIdForFiles = currentTaskId || report?.taskId || null
   const [showLogs, setShowLogs] = useState(false)
   const [expandedFiles, setExpandedFiles] = useState(false)
   const [runOutput, setRunOutput] = useState<Record<string, string>>({})
   const [running, setRunning] = useState<string | null>(null)
+  // 报告分享：shareUrl 非空表示该任务已生成分享链接
+  const [shareUrl, setShareUrl] = useState<string | null>(null)
+  const [shareLoading, setShareLoading] = useState(false)
+  const [shareDialogOpen, setShareDialogOpen] = useState(false)
+  const [shareCopied, setShareCopied] = useState(false)
+  const [shareError, setShareError] = useState('')
+  const shareTaskId = currentTaskId || report?.taskId || null
+
+  // 刷新/切换任务后恢复“已分享”状态（GET /api/share/<task_id>）
+  useEffect(() => {
+    if (!shareTaskId) {
+      setShareUrl(null)
+      return
+    }
+    let cancelled = false
+    fetch('/api/share/' + encodeURIComponent(shareTaskId))
+      .then(r => r.json())
+      .then(d => {
+        if (!cancelled && d?.shared && (d.url || d.path)) {
+          setShareUrl(d.url || window.location.origin + d.path)
+        } else if (!cancelled) {
+          setShareUrl(null)
+        }
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [shareTaskId])
+
+  const createShare = async () => {
+    if (!shareTaskId || shareLoading) return
+    setShareLoading(true)
+    setShareError('')
+    try {
+      const res = await fetch('/api/share', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ task_id: shareTaskId }),
+      })
+      const d = await res.json()
+      if (!res.ok || !d.token) throw new Error(d.error || '分享失败，请稍后重试')
+      const url = d.url || window.location.origin + d.path
+      setShareUrl(url)
+      setShareDialogOpen(true)
+    } catch (e: any) {
+      setShareError(e?.message || '分享失败，请稍后重试')
+      setShareDialogOpen(true)
+    } finally {
+      setShareLoading(false)
+    }
+  }
+
+  const revokeShare = async () => {
+    if (!shareTaskId) return
+    try {
+      await fetch('/api/share/' + encodeURIComponent(shareTaskId), { method: 'DELETE' })
+    } catch { /* 即使请求失败也清理本地状态 */ }
+    setShareUrl(null)
+    setShareDialogOpen(false)
+  }
+
+  const copyShare = async () => {
+    if (!shareUrl) return
+    const done = () => {
+      setShareCopied(true)
+      setTimeout(() => setShareCopied(false), 2000)
+    }
+    try {
+      await navigator.clipboard.writeText(shareUrl)
+      done()
+    } catch {
+      // 剪贴板 API 不可用时回退到选中复制
+      const ta = document.createElement('textarea')
+      ta.value = shareUrl
+      document.body.appendChild(ta)
+      ta.select()
+      document.execCommand('copy')
+      document.body.removeChild(ta)
+      done()
+    }
+  }
 
   const runFile = async (name: string) => {
     setRunning(name)
@@ -199,7 +280,75 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
           }`}>
           <ScrollText className="w-4 h-4" /> {showLogs ? 'Hide' : 'View'} 完整日志 ({logs.length})
         </button>
+        {shareTaskId && !demoMode && (
+          shareUrl ? (
+            <>
+              <button onClick={() => setShareDialogOpen(true)}
+                className="flex items-center gap-2 px-4 py-2.5 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 rounded-lg text-sm border border-emerald-500/30 transition-colors">
+                <Link2 className="w-4 h-4" /> 分享链接已开启
+              </button>
+              <button onClick={revokeShare}
+                className="flex items-center gap-2 px-4 py-2.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-lg text-sm border border-red-500/20 transition-colors">
+                <Trash2 className="w-4 h-4" /> 撤销分享
+              </button>
+            </>
+          ) : (
+            <button onClick={createShare} disabled={shareLoading}
+              className="flex items-center gap-2 px-4 py-2.5 bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 rounded-lg text-sm border border-cyan-500/30 transition-colors disabled:opacity-50">
+              <Share2 className="w-4 h-4" /> {shareLoading ? '生成中...' : '分享链接'}
+            </button>
+          )
+        )}
       </div>
+
+      {/* 分享链接复制对话框 */}
+      {shareDialogOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          onClick={() => setShareDialogOpen(false)}>
+          <div className="w-full max-w-md bg-slate-900 border border-slate-700 rounded-xl p-5 shadow-xl"
+            onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-1">
+              <div className="flex items-center gap-2 text-sm text-emerald-400 font-semibold">
+                <Link2 className="w-4 h-4" /> 报告分享链接
+              </div>
+              <button onClick={() => setShareDialogOpen(false)}
+                className="text-slate-500 hover:text-slate-300">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            {shareUrl ? (
+              <>
+                <p className="text-xs text-slate-500 mb-3">
+                  复制链接发给别人，对方无需登录即可在浏览器查看该报告（7 天内有效）。
+                </p>
+                <div className="flex gap-2">
+                  <input readOnly value={shareUrl} onFocus={e => e.currentTarget.select()}
+                    className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-xs text-cyan-300 font-mono focus:outline-none" />
+                  <button onClick={copyShare}
+                    className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-cyan-500 text-slate-950 text-xs font-semibold hover:bg-cyan-400 shrink-0">
+                    {shareCopied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                    {shareCopied ? '已复制' : '复制'}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <p className="text-xs text-red-400 mt-2">{shareError || '分享失败'}</p>
+            )}
+            {shareUrl && (
+              <div className="mt-4 flex gap-2">
+                <button onClick={() => setShareDialogOpen(false)}
+                  className="flex-1 px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs">
+                  完成
+                </button>
+                <button onClick={revokeShare}
+                  className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs border border-red-500/20">
+                  <Trash2 className="w-3.5 h-3.5" /> 撤销分享
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Inline logs */}
       {showLogs && (

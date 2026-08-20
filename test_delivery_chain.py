@@ -2129,6 +2129,197 @@ class TestSimpleTaskFastPath(unittest.TestCase):
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
 
+def _make_share_fake():
+    """构造继承自 web_ui.Handler 的最小替身，可直接驱动路由方法。"""
+    import web_ui
+
+    class _FakeShareHandler(web_ui.Handler):
+        def __init__(self, path: str, body: dict | None = None):
+            import io
+            import json
+            self.path = path
+            self.command = "GET"
+            self.request_version = "HTTP/1.1"
+            self.client_address = ("127.0.0.1", 0)
+            self.headers = {"Host": "localhost:8080"}
+            raw = b""
+            if body is not None:
+                raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
+                self.headers["Content-Length"] = str(len(raw))
+            self.rfile = io.BytesIO(raw)
+            self.wfile = io.BytesIO()
+            self._status = 200
+            self._headers = {}
+
+        def send_response(self, code: int):
+            self._status = code
+
+        def send_header(self, key: str, value: str):
+            self._headers[key] = value
+
+        def end_headers(self):
+            pass
+
+        def json_body(self) -> dict:
+            import json
+            return json.loads(self.wfile.getvalue().decode("utf-8"))
+
+        def html_body(self) -> str:
+            return self.wfile.getvalue().decode("utf-8")
+
+    return _FakeShareHandler
+
+
+class TestReportShare(unittest.TestCase):
+    """报告一键分享：token 生成/幂等/落盘/分享页/撤销 回归测试。"""
+    def setUp(self):
+        import os
+        import shutil
+        import tempfile
+        import workspace as ws_mod
+        import web_ui
+
+        self.web_ui = web_ui
+        self._tmp = tempfile.mkdtemp(prefix="weavemind_share_")
+        self._old_share_file = web_ui.SHARE_FILE
+        self._old_db_path = web_ui.DB_PATH
+        self._old_root = ws_mod.WORKSPACE_ROOT
+        self._saved_results = dict(web_ui._task_results)
+        self._FakeHandler = _make_share_fake()
+        web_ui.SHARE_FILE = os.path.join(self._tmp, "share_links.json")
+        web_ui.DB_PATH = os.path.join(self._tmp, "test_share.db")
+        ws_mod.configure_workspace_root(self._tmp)
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        import shutil
+        import workspace as ws_mod
+        web_ui = self.web_ui
+        web_ui.SHARE_FILE = self._old_share_file
+        web_ui.DB_PATH = self._old_db_path
+        ws_mod.WORKSPACE_ROOT = self._old_root
+        with web_ui._task_lock:
+            web_ui._task_results.clear()
+            web_ui._task_results.update(self._saved_results)
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _handler(self, path: str, method: str = "GET", body: dict | None = None):
+        h = self._FakeHandler(path, body)
+        h.command = method
+        return h
+
+    def test_share_lifecycle_and_idempotent(self):
+        import workspace as ws_mod
+        tid = "t-share-1"
+        ws = ws_mod.task_workspace(tid)
+        (ws / "charts").mkdir(parents=True)
+        (ws / "charts" / "heatmap.png").write_bytes(b"png")
+        with self.web_ui._task_lock:
+            self.web_ui._task_results[tid] = {
+                "task_id": tid,
+                "status": "SUCCESS",
+                "goal": "新能源汽车市场调研",
+                "report": (
+                    "# 市场调研\n\n"
+                    "![热力图](charts/heatmap.png)\n\n"
+                    "|指标|数值|\n|---|---|\n|市场规模|100亿|"
+                ),
+            }
+        try:
+            # 生成分享链接
+            h = self._handler("/api/share", "POST", {"task_id": tid})
+            self.web_ui.Handler.do_POST(h)
+            self.assertEqual(h._status, 200)
+            d = h.json_body()
+            self.assertEqual(d["status"], "ok")
+            self.assertEqual(d["task_id"], tid)
+            token = d["token"]
+            self.assertGreaterEqual(len(token), 16)
+            self.assertIn(f"/share/{token}", d["url"])
+            # 同一任务重复生成：幂等复用同一 token
+            h2 = self._handler("/api/share", "POST", {"task_id": tid})
+            self.web_ui.Handler.do_POST(h2)
+            self.assertEqual(h2.json_body()["token"], token)
+            # 分享页 200 且含报告正文与图表路由
+            h3 = self._handler(f"/share/{token}")
+            self.web_ui.Handler.do_GET(h3)
+            html_body = h3.html_body()
+            self.assertEqual(h3._status, 200)
+            self.assertIn("市场调研", html_body)
+            self.assertIn("/files/t-share-1/charts/heatmap.png", html_body)
+            self.assertIn("市场规模", html_body)
+            # 状态查询接口返回已分享
+            h4 = self._handler(f"/api/share/{tid}")
+            self.web_ui.Handler.do_GET(h4)
+            self.assertTrue(h4.json_body()["shared"])
+            # 撤销后分享页 404
+            h5 = self._handler(f"/api/share/{tid}", "DELETE")
+            self.web_ui.Handler.do_DELETE(h5)
+            self.assertEqual(h5._status, 200)
+            self.assertGreaterEqual(h5.json_body()["revoked"], 1)
+            h6 = self._handler(f"/share/{token}")
+            self.web_ui.Handler.do_GET(h6)
+            self.assertEqual(h6._status, 404)
+            self.assertIn("不存在", h6.html_body())
+        finally:
+            with self.web_ui._task_lock:
+                self.web_ui._task_results.pop(tid, None)
+
+    def test_share_persists_after_restart(self):
+        import sqlite3
+        tid = "t-share-restart"
+        # 模拟服务重启：内存结果为空，报告与分享映射都从持久化恢复
+        db = sqlite3.connect(self.web_ui.DB_PATH, timeout=5)
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS task_history("
+            "task_id TEXT PRIMARY KEY, goal TEXT, status TEXT, report TEXT,"
+            "created_at TIMESTAMP, completed_at TIMESTAMP,"
+            "conversation_id TEXT, parent_task_id TEXT, context TEXT)"
+        )
+        db.execute(
+            "INSERT INTO task_history(task_id, goal, status, report, created_at) "
+            "VALUES(?, ?, ?, ?, datetime('now')) "
+            "ON CONFLICT(task_id) DO UPDATE SET "
+            "goal=excluded.goal, status=excluded.status, report=excluded.report",
+            (tid, "重启后仍可访问的报告", "SUCCESS", "# 重启存活报告"),
+        )
+        db.commit()
+        db.close()
+        token = self.web_ui._generate_share_token(tid)
+        # 映射确实落盘为 JSON
+        import json as _json
+        with open(self.web_ui.SHARE_FILE, "r", encoding="utf-8") as f:
+            saved = _json.load(f)
+        self.assertEqual(saved[token]["task_id"], tid)
+        self.assertIn("expires_at", saved[token])
+        # 模拟重启后按 token 解析并渲染分享页
+        self.assertEqual(self.web_ui._resolve_share_token(token), tid)
+        h = self._handler(f"/share/{token}")
+        self.web_ui.Handler.do_GET(h)
+        self.assertEqual(h._status, 200)
+        self.assertIn("重启存活报告", h.html_body())
+
+    def test_invalid_token_and_missing_task_404(self):
+        h = self._handler("/share/not-a-real-token")
+        self.web_ui.Handler.do_GET(h)
+        self.assertEqual(h._status, 404)
+        h2 = self._handler("/api/share", "POST", {"task_id": "t-nonexistent"})
+        self.web_ui.Handler.do_POST(h2)
+        self.assertEqual(h2._status, 404)
+
+    def test_markdown_renderer_sanitizes_html(self):
+        md = (
+            "# 标题\n\n"
+            "<script>alert('x')</script>\n\n"
+            "[恶意链接](javascript:alert(1))\n\n"
+            "![图](charts/a.png)"
+        )
+        out = self.web_ui._markdown_to_html(md, "t-safe-share")
+        self.assertNotIn("<script>", out)
+        self.assertIn("&lt;script&gt;", out)
+        self.assertIn('href="#"', out, "javascript: 协议应被拦截")
+        self.assertIn("/files/t-safe-share/charts/a.png", out)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
