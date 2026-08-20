@@ -260,8 +260,9 @@ Web 控制台（8080）默认要求登录，未登录只能访问公开只读分
 ## 测试
 
 ```bash
-python smoke_test.py             # 快速端到端冒烟（需服务已启动）
+python smoke_test.py             # 快速端到端冒烟（需服务已启动；V1.0 起自动登录）
 python smoke_test.py --pipeline  # 完整数据流水线
+# 冒烟账号默认 admin/admin，可用 WEAVEMIND_SMOKE_USER / WEAVEMIND_SMOKE_PASSWORD 覆盖
 python test_common.py            # 基础库单测（fakeredis）
 python test_orchestrator_v2.py   # 编排器回归（调度/迭代/能力校验，fakes 模式）
 python test_auth_audit.py        # 多用户鉴权与审计日志回归
