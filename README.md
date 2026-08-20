@@ -206,6 +206,33 @@ python launcher.py status                            # 状态
 - **结果缓存**：提交相同目标可携带 `cache_ttl_min`（分钟），TTL 内命中成功结果直接返回；
 - `scheduler=true` 开启每日 3:00 自动进化。
 
+### 多用户鉴权与审计（V1.0）
+
+Web 控制台（8080）默认要求登录，未登录只能访问公开只读分享页（`/share/<token>`）、
+`/api/health` 与前端静态资源；其余 `/api/*`、`/task/*`、`/tasks` 一律需要会话。
+
+- **用户存储**：`config.json` 的 `users` 段，密码用 `pbkdf2_hmac(sha256) + 随机盐`
+  存储（格式 `pbkdf2_sha256$迭代次数$盐$哈希`），绝不明文；前端读取配置时也会剥离该段。
+- **首次初始化（二选一）**：
+  1. 启动前设置 `WEAVEMIND_ADMIN_PASSWORD=你的密码`（可选 `WEAVEMIND_ADMIN_USERNAME`，
+     默认 `admin`），服务启动时自动创建 admin；
+  2. 什么都不设，首次打开登录页会引导创建初始管理员（`POST /api/setup-admin`，仅一次）。
+  手工配置示例：
+  ```json
+  "users": {
+    "admin": { "password_hash": "pbkdf2_sha256$200000$<BASE64_SALT>$<BASE64_HASH>", "role": "admin" }
+  }
+  ```
+  可用 `python scripts/hash_password.py admin 你的密码` 生成真实哈希。
+- **会话**：登录返回 `secrets.token_urlsafe(32)` token，服务端内存保存
+  `{user, role, expires}`，TTL 默认 24h（`SESSION_TTL_SECONDS` 可调）；前端用
+  `Authorization: Bearer <token>`，后端同时兼容 `Cookie: session=<token>`。
+- **角色矩阵**：`admin` 可提交/删除任务、生成/撤销分享、保存配置、查看审计；
+  `viewer` 只读（历史、状态、报告、记忆等），写操作与配置/审计接口返回 403。
+- **审计日志**：追加写入 `logs/audit.jsonl`（JSON Lines），记录登录成败、登出、
+  任务提交/删除、分享生成/撤销、配置保存，含 `timestamp/user/ip/action/target/result`；
+  管理员可用 `GET /api/audit?limit=200` 查询。
+
 ## 架构
 
 | 组件 | 说明 |
@@ -237,6 +264,7 @@ python smoke_test.py             # 快速端到端冒烟（需服务已启动）
 python smoke_test.py --pipeline  # 完整数据流水线
 python test_common.py            # 基础库单测（fakeredis）
 python test_orchestrator_v2.py   # 编排器回归（调度/迭代/能力校验，fakes 模式）
+python test_auth_audit.py        # 多用户鉴权与审计日志回归
 python verification_suite.py     # 边界条件验证套件
 ```
 

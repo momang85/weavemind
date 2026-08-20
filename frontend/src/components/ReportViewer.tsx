@@ -116,6 +116,31 @@ export default memo(function ReportViewer() {
     setRunning(null)
   }
 
+  // 文件可能受鉴权保护（未分享任务）：走带 Authorization 头的 fetch + Blob 打开/下载，
+  // 避免 window.open 新标签页不带 token 而 401。
+  const openFile = async (name: string) => {
+    try {
+      const res = await fetch(fileUrl(name))
+      if (!res.ok) return
+      const blob = await res.blob()
+      window.open(URL.createObjectURL(blob), '_blank')
+    } catch { /* 打开失败静默 */ }
+  }
+
+  const downloadFile = async (name: string) => {
+    try {
+      const res = await fetch(fileUrl(name))
+      if (!res.ok) return
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = name.split('/').pop() || name
+      a.click()
+      URL.revokeObjectURL(url)
+    } catch { /* 下载失败静默 */ }
+  }
+
   if (!report) return null
 
   const s = report.stats || { totalSteps: report.steps.length, successSteps: 0, failedSteps: 0, duration: 0 }
@@ -233,7 +258,7 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
                     {f.kind && <span className="px-1.5 py-0.5 rounded bg-slate-700/60 text-slate-400 text-[10px] shrink-0">{f.kind}</span>}
                     <div className="ml-auto flex items-center gap-1.5 shrink-0">
                       {f.kind === 'html' && (
-                        <button onClick={() => window.open(fileUrl(f.name), '_blank')}
+                        <button onClick={() => openFile(f.name)}
                           className="flex items-center gap-1 px-2 py-1 rounded bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 text-[10px]">
                           <ExternalLink className="w-3 h-3" /> 打开
                         </button>
@@ -245,10 +270,10 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
                         </button>
                       )}
                       {f.kind !== 'html' && (
-                        <a href={fileUrl(f.name)} download
+                        <button onClick={() => downloadFile(f.name)}
                           className="flex items-center gap-1 px-2 py-1 rounded bg-slate-700/50 hover:bg-slate-700 text-slate-300 text-[10px]">
                           <Download className="w-3 h-3" /> 下载
-                        </a>
+                        </button>
                       )}
                     </div>
                   </div>

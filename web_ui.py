@@ -1,10 +1,11 @@
 """WeaveMind Web UI"""
-import base64, html, io, json, logging, mimetypes, os, re, secrets, socket, sqlite3, subprocess, sys, tempfile, threading, time, uuid, zipfile
+import base64, hashlib, hmac, html, io, json, logging, mimetypes, os, re, secrets, socket, sqlite3, subprocess, sys, tempfile, threading, time, uuid, zipfile
 from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
 import redis
 
+from audit_logger import audit_log, read_audit
 from workspace import task_workspace
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
@@ -41,6 +42,13 @@ _mem_stats_lock = threading.Lock()
 _EVOLUTION_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "evolution_history.json")
 _evolution_results = []
 _evolution_lock = threading.Lock()
+
+# ---- 多用户鉴权（轻量方案） ----
+# 会话只存内存：重启后需重新登录；token 用 secrets.token_urlsafe(32) 生成。
+SESSION_TTL_SECONDS = int(os.environ.get("SESSION_TTL_SECONDS", "86400"))
+_PBKDF2_ITERATIONS = int(os.environ.get("PBKDF2_ITERATIONS", "200000"))
+_sessions: dict[str, dict] = {}
+_sessions_lock = threading.Lock()
 
 
 def _get_rate_limiter():
@@ -169,6 +177,36 @@ def _revoke_share_token(task_id: str) -> int:
             _save_shares(data)
         return len(removed)
 
+
+def _task_exists(task_id: str) -> bool:
+    """任务是否存在于内存结果或 SQLite 历史中。"""
+    with _task_lock:
+        if task_id in _task_results:
+            return True
+    try:
+        db = sqlite3.connect(DB_PATH, timeout=5)
+        row = db.execute("SELECT 1 FROM task_history WHERE task_id=?", (task_id,)).fetchone()
+        db.close()
+        return bool(row)
+    except Exception:
+        return False
+
+
+def _delete_task(task_id: str) -> bool:
+    """删除任务：撤销分享 → 移除内存结果 → 删除 SQLite 历史。
+    工作区落盘文件保留（避免误删交付物，属可恢复设计）。"""
+    _revoke_share_token(task_id)
+    with _task_lock:
+        _task_results.pop(task_id, None)
+    try:
+        db = sqlite3.connect(DB_PATH, timeout=5)
+        db.execute("DELETE FROM task_history WHERE task_id=?", (task_id,))
+        db.commit()
+        db.close()
+        return True
+    except Exception:
+        return False
+
 def _init_db():
     try:
         db = sqlite3.connect(DB_PATH, timeout=10)
@@ -287,11 +325,173 @@ def _save_config(cfg):
     # 与现有配置合并，避免前端表单未携带的段（如 embedding）被覆盖丢失
     existing = _load_config() or {}
     if isinstance(existing, dict):
-        existing.update({k: v for k, v in cfg.items() if v is not None})
+        incoming = {k: v for k, v in cfg.items() if v is not None}
+        # users 段（含密码哈希）只允许服务端通过初始管理员/环境变量流程管理，
+        # 前端保存配置时不得覆盖或注入用户。
+        incoming.pop("users", None)
+        existing.update(incoming)
     else:
         existing = cfg
     with open(CONFIG_PATH,"w",encoding="utf-8") as f:
         json.dump(existing, f, ensure_ascii=False, indent=2)
+
+
+def _public_config(cfg: dict | None) -> dict:
+    """返回给前端的配置副本：剥离 users 段，避免密码哈希被回显。"""
+    out = dict(cfg or {})
+    out.pop("users", None)
+    return out
+
+
+# ---- 用户与密码（pbkdf2_hmac + 随机盐，绝不明文） ----
+
+def _hash_password(password: str) -> str:
+    """生成自描述哈希：pbkdf2_sha256$迭代次数$盐$哈希（均 base64）。"""
+    salt = secrets.token_bytes(16)
+    dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, _PBKDF2_ITERATIONS)
+    return (
+        f"pbkdf2_sha256${_PBKDF2_ITERATIONS}"
+        f"${base64.b64encode(salt).decode('ascii')}"
+        f"${base64.b64encode(dk).decode('ascii')}"
+    )
+
+
+def _verify_password(password: str, stored: str | None) -> bool:
+    """常量时间比较；格式非法一律失败。"""
+    if not stored:
+        return False
+    try:
+        algo, iterations, salt_b64, hash_b64 = str(stored).split("$")
+        if algo != "pbkdf2_sha256":
+            return False
+        salt = base64.b64decode(salt_b64)
+        expected = base64.b64decode(hash_b64)
+        dk = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, int(iterations))
+        return hmac.compare_digest(dk, expected)
+    except Exception:
+        return False
+
+
+def _user_hash_valid(stored: str | None) -> bool:
+    """判断哈希是否可解析（pbkdf2_sha256 + 合法 base64）。
+    config.example.json 里的 <BASE64_SALT>/<BASE64_HASH> 占位符不可解析，
+    因此被视作“未初始化”，首次访问仍可创建管理员，避免示例配置被照抄后锁死。"""
+    if not stored:
+        return False
+    try:
+        algo, iterations, salt_b64, hash_b64 = str(stored).split("$")
+        base64.b64decode(salt_b64)
+        base64.b64decode(hash_b64)
+        return algo == "pbkdf2_sha256" and int(iterations) > 0
+    except Exception:
+        return False
+
+
+def _load_users() -> dict:
+    """读取 config.json 的 users 段；缺失或损坏返回空字典。"""
+    cfg = _load_config()
+    users = cfg.get("users") if isinstance(cfg, dict) else None
+    return users if isinstance(users, dict) else {}
+
+
+def _users_initialized() -> bool:
+    """是否存在至少一个可用的密码哈希（占位哈希不算初始化）。"""
+    return any(
+        isinstance(user, dict) and _user_hash_valid(user.get("password_hash"))
+        for user in _load_users().values()
+    )
+
+
+def _save_users(users: dict) -> bool:
+    """把 users 段合并写回 config.json。"""
+    cfg = _load_config()
+    if not isinstance(cfg, dict):
+        cfg = {}
+    cfg["users"] = users
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception:
+        return False
+
+
+def _ensure_users_on_startup():
+    """首次启动引导：
+    1) config.json 已有 users 段 → 不做任何事；
+    2) 设置了 WEAVEMIND_ADMIN_PASSWORD → 自动创建 admin（用户名可用
+       WEAVEMIND_ADMIN_USERNAME 覆盖，默认 admin）；
+    3) 都没有 → 打日志提示，首次访问登录页时走 /api/setup-admin 创建初始管理员。
+    """
+    users = _load_users()
+    if _users_initialized():
+        return
+    password = os.environ.get("WEAVEMIND_ADMIN_PASSWORD", "")
+    if password:
+        username = (os.environ.get("WEAVEMIND_ADMIN_USERNAME", "admin") or "admin").strip() or "admin"
+        # 丢弃占位/损坏哈希（如 config.example.json 的 <BASE64_*>），避免污染用户表
+        users = {
+            name: info for name, info in users.items()
+            if isinstance(info, dict) and _user_hash_valid(info.get("password_hash"))
+        }
+        users[username] = {
+            "password_hash": _hash_password(password),
+            "role": "admin",
+            "created_at": _now_iso(),
+        }
+        if _save_users(users):
+            logging.getLogger("web_ui").info(
+                "已通过 WEAVEMIND_ADMIN_PASSWORD 自动创建初始管理员：%s", username
+            )
+            audit_log(username, "startup", "user.bootstrap", target=username, result="ok",
+                      detail="自动创建于启动时（环境变量）")
+        else:
+            logging.getLogger("web_ui").warning("无法写入 config.json，初始管理员创建失败")
+    else:
+        logging.getLogger("web_ui").warning(
+            "config.json 无 users 段且未设置 WEAVEMIND_ADMIN_PASSWORD；"
+            "首次访问登录页时可创建初始管理员（仅一次）。"
+        )
+
+
+# ---- 会话（内存 token → 用户/角色/过期时间） ----
+
+def _create_session(username: str, role: str) -> str:
+    """创建会话并返回 token；顺带清理已过期会话，防止内存无限增长。"""
+    _cleanup_sessions()
+    token = secrets.token_urlsafe(32)
+    with _sessions_lock:
+        _sessions[token] = {
+            "user": username,
+            "role": role,
+            "expires": time.time() + SESSION_TTL_SECONDS,
+        }
+    return token
+
+
+def _get_session(token: str | None) -> dict | None:
+    if not token:
+        return None
+    with _sessions_lock:
+        session = _sessions.get(token)
+        if not session:
+            return None
+        if time.time() > session.get("expires", 0):
+            _sessions.pop(token, None)
+            return None
+        return session
+
+
+def _delete_session(token: str) -> None:
+    with _sessions_lock:
+        _sessions.pop(token, None)
+
+
+def _cleanup_sessions() -> None:
+    now = time.time()
+    with _sessions_lock:
+        for token in [t for t, s in _sessions.items() if now > s.get("expires", 0)]:
+            _sessions.pop(token, None)
 
 def _listen_results():
     while not _redis_ready():
@@ -1064,11 +1264,13 @@ HTML = '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>WeaveM
 DIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
 
 class Handler(BaseHTTPRequestHandler):
-    def _json(self, data, code=200):
+    def _json(self, data, code=200, extra_headers=None):
         body = json.dumps(data, ensure_ascii=False).encode()
         self.send_response(code)
         self.send_header("Content-Type","application/json; charset=utf-8")
         self.send_header("Access-Control-Allow-Origin","*")
+        for key, value in (extra_headers or {}).items():
+            self.send_header(key, value)
         self.send_header("Content-Length",str(len(body)))
         self.end_headers(); self.wfile.write(body)
 
@@ -1084,6 +1286,157 @@ class Handler(BaseHTTPRequestHandler):
         host = self.headers.get("Host") or f"localhost:{PORT}"
         proto = self.headers.get("X-Forwarded-Proto") or "http"
         return f"{proto}://{host}/share/{token}"
+
+    def _client_ip(self) -> str:
+        """取客户端 IP：优先 X-Forwarded-For 第一段（配合反向代理）。"""
+        xff = self.headers.get("X-Forwarded-For", "")
+        if xff:
+            return str(xff).split(",")[0].strip()
+        return self.client_address[0] if self.client_address else "?"
+
+    def _request_token(self) -> str | None:
+        """从 Authorization: Bearer <token> 或 Cookie: session=<token> 取 token。"""
+        auth = self.headers.get("Authorization", "")
+        if str(auth).lower().startswith("bearer "):
+            return str(auth)[7:].strip()
+        cookie = self.headers.get("Cookie", "")
+        for part in str(cookie).split(";"):
+            key, _, value = part.strip().partition("=")
+            if key == "session":
+                return value.strip()
+        return None
+
+    def _auth_session(self) -> dict | None:
+        """解析并校验当前请求的会话；失效返回 None。"""
+        return _get_session(self._request_token())
+
+    def _require_auth(self) -> dict | None:
+        """任意登录用户（admin/viewer）。未登录统一返回 401 JSON。"""
+        session = self._auth_session()
+        if session is None:
+            self._json({"error": "未登录或登录已过期"}, 401)
+            return None
+        return session
+
+    def _require_admin(self) -> dict | None:
+        """仅管理员；viewer 返回 403。"""
+        session = self._require_auth()
+        if session is None:
+            return None
+        if session.get("role") != "admin":
+            self._json({"error": "权限不足：仅管理员可执行此操作"}, 403)
+            return None
+        return session
+
+    def _is_public_get(self, path: str) -> bool:
+        """GET 白名单：公开分享页、健康检查、引导状态、前端静态资源。
+        /files/<task_id>/... 仅在任务已生成分享链接时公开（供分享页图片/附件使用）。"""
+        if path in ("", "/", "/api/health", "/api/auth/bootstrap"):
+            return True
+        if path.startswith("/share/"):
+            return True
+        if path.startswith("/files/"):
+            rel = path[len("/files/"):]
+            seg = rel.split("/", 1)
+            if len(seg) == 2:
+                try:
+                    if _find_share_token(seg[0]) is not None:
+                        return True
+                except Exception:
+                    pass
+            return False
+        if path.startswith("/api/") or path.startswith("/task/") or path == "/tasks":
+            return False
+        # 其余路径视为前端静态资源（dist），放行进入；数据接口仍按上述规则鉴权
+        return True
+
+    def _role_allowed_get(self, path: str, session: dict) -> bool:
+        """viewer 只读：历史/状态/报告可看；配置、审计、工具审计仅 admin。"""
+        if session.get("role") == "admin":
+            return True
+        if (
+            path == "/api/config"
+            or path == "/api/audit"
+            or path.startswith("/api/audit")
+            or path == "/api/tool-audit"
+        ):
+            self._json({"error": "权限不足：仅管理员可访问"}, 403)
+            return False
+        return True
+
+    def _handle_login(self):
+        """POST /api/login：用户名+密码 → 会话 token（统一 401 提示，不暴露用户是否存在）。"""
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            raw = self.rfile.read(length) if length > 0 else b""
+            body = json.loads(raw) if raw else {}
+        except Exception:
+            return self._json({"error": "invalid json"}, 400)
+        username = str(body.get("username") or "").strip()
+        password = str(body.get("password") or "")
+        ip = self._client_ip()
+        if not _users_initialized():
+            audit_log(username or "?", ip, "login.failed", target=username,
+                      result="fail", detail="系统尚未初始化管理员")
+            return self._json(
+                {"error": "系统尚未初始化管理员，请先创建初始管理员", "setup_required": True},
+                401,
+            )
+        users = _load_users()
+        user = users.get(username)
+        if not user or not _verify_password(password, user.get("password_hash")):
+            audit_log(username or "?", ip, "login.failed", target=username,
+                      result="fail", detail="用户名或密码错误")
+            return self._json({"error": "用户名或密码错误"}, 401)
+        role = str(user.get("role") or "viewer")
+        token = _create_session(username, role)
+        audit_log(username, ip, "login.success", target=username, result="ok")
+        return self._json({
+            "status": "ok",
+            "token": token,
+            "user": username,
+            "role": role,
+            "expires_in": SESSION_TTL_SECONDS,
+        }, extra_headers={
+            "Set-Cookie": f"session={token}; HttpOnly; Path=/; Max-Age={SESSION_TTL_SECONDS}",
+        })
+
+    def _handle_setup_admin(self):
+        """POST /api/setup-admin：仅当系统尚无任何用户时允许创建初始管理员（一次）。"""
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            raw = self.rfile.read(length) if length > 0 else b""
+            body = json.loads(raw) if raw else {}
+        except Exception:
+            return self._json({"error": "invalid json"}, 400)
+        if _users_initialized():
+            return self._json({"error": "系统已存在用户，不能重复初始化"}, 409)
+        username = str(body.get("username") or "admin").strip() or "admin"
+        password = str(body.get("password") or "")
+        if len(password) < 8:
+            return self._json({"error": "密码至少 8 位"}, 400)
+        users = {
+            username: {
+                "password_hash": _hash_password(password),
+                "role": "admin",
+                "created_at": _now_iso(),
+            }
+        }
+        if not _save_users(users):
+            return self._json({"error": "无法写入 config.json，初始化失败"}, 500)
+        ip = self._client_ip()
+        audit_log(username, ip, "user.bootstrap", target=username, result="ok",
+                  detail="首次访问时创建初始管理员")
+        token = _create_session(username, "admin")
+        return self._json({
+            "status": "ok",
+            "token": token,
+            "user": username,
+            "role": "admin",
+            "expires_in": SESSION_TTL_SECONDS,
+        }, extra_headers={
+            "Set-Cookie": f"session={token}; HttpOnly; Path=/; Max-Age={SESSION_TTL_SECONDS}",
+        })
 
     def _serve_dist(self, path: str) -> bool:
         """生产模式：伺服前端构建产物（frontend/dist），含 SPA 回退。"""
@@ -1127,6 +1480,32 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         p = urlparse(self.path).path
+        # 鉴权门：公开路径放行，其余数据接口需要登录；config/audit 等仅 admin
+        if not self._is_public_get(p):
+            session = self._require_auth()
+            if session is None:
+                return
+            if not self._role_allowed_get(p, session):
+                return
+        if p == "/api/health":
+            # 公开健康检查：无需登录，供探活/负载均衡使用
+            return self._json({"status": "ok", "service": "weavemind-web", "time": _now_iso()})
+        if p == "/api/auth/bootstrap":
+            # 公开引导状态：前端据此判断显示“创建初始管理员”还是登录表单
+            return self._json({"setup_required": not _users_initialized()})
+        if p == "/api/audit":
+            # 审计查询（仅 admin，由 _role_allowed_get 兜底）
+            query = urlparse(self.path).query
+            limit = 200
+            try:
+                limit = int([
+                    pair.split("=", 1)[1] for pair in query.split("&")
+                    if pair.startswith("limit=")
+                ][0])
+            except Exception:
+                pass
+            entries = read_audit(limit)
+            return self._json({"entries": entries, "count": len(entries)})
         if p == "/":
             if self._serve_dist("/"):
                 return
@@ -1196,7 +1575,7 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             return self._json({"task_id": tid, "text": text[-20000:]})
-        if p == "/api/config": return self._json(_load_config())
+        if p == "/api/config": return self._json(_public_config(_load_config()))
         if p == "/api/events":
             with _events_lock:
                 return self._json({"events": list(reversed(_events[-100:]))})
@@ -1328,13 +1707,33 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"error":"not found"},404)
 
     def do_POST(self):
+        p = urlparse(self.path).path
+        if p == "/api/login":
+            return self._handle_login()
+        if p == "/api/setup-admin":
+            return self._handle_setup_admin()
+        if p == "/api/logout":
+            # 登出对 admin/viewer 都开放，但必须携带有效会话
+            session = self._require_auth()
+            if session is None:
+                return
+            _delete_session(self._request_token() or "")
+            audit_log(session.get("user", ""), self._client_ip(), "logout",
+                      target=session.get("user", ""), result="ok")
+            return self._json(
+                {"status": "ok"},
+                extra_headers={"Set-Cookie": "session=; HttpOnly; Path=/; Max-Age=0"},
+            )
+        # 其余 POST 均为写操作：仅管理员可执行（viewer 403）
+        admin = self._require_admin()
+        if admin is None:
+            return
         try:
             length = int(self.headers.get("Content-Length", 0) or 0)
             raw = self.rfile.read(length) if length > 0 else b""
             body = json.loads(raw) if raw else {}
         except Exception:
             return self._json({"error": "invalid json"}, 400)
-        p = urlparse(self.path).path
         # 报告分享：POST /api/share（body: task_id）或 POST /api/share/<task_id>
         share_tid = ""
         if p == "/api/share":
@@ -1343,8 +1742,12 @@ class Handler(BaseHTTPRequestHandler):
             share_tid = p.split("/api/share/", 1)[-1].strip()
         if share_tid:
             if not _get_task_report_data(share_tid):
+                audit_log(admin.get("user", ""), self._client_ip(), "share.generate",
+                          target=share_tid, result="fail", detail="任务不存在或没有可分享的报告")
                 return self._json({"error": "任务不存在或没有可分享的报告"}, 404)
             token = _generate_share_token(share_tid)
+            audit_log(admin.get("user", ""), self._client_ip(), "share.generate",
+                      target=share_tid, result="ok")
             return self._json({
                 "status": "ok",
                 "task_id": share_tid,
@@ -1461,12 +1864,16 @@ class Handler(BaseHTTPRequestHandler):
             if ttl > 0:
                 cached = _find_cached_task(g, ttl)
                 if cached and cached.get("report"):
+                    audit_log(admin.get("user", ""), self._client_ip(), "task.submit",
+                              target=cached["task_id"], result="ok", detail=f"缓存命中: {g[:120]}")
                     return self._json({
                         "task_id": cached["task_id"], "status": "SUCCESS",
                         "cached": True, "report": cached["report"],
                         "conversation_id": cached.get("conversation_id") or "",
                     })
             if not _redis_ready():
+                audit_log(admin.get("user", ""), self._client_ip(), "task.submit",
+                          target=tid, result="fail", detail=f"Redis 未连接: {g[:120]}")
                 return self._json({"error": "Redis 未连接，任务无法派发。请先启动 Redis（start.bat 或 docker start zhiguan-redis）"}, 503)
             r = _new_redis()
             try:
@@ -1476,6 +1883,8 @@ class Handler(BaseHTTPRequestHandler):
                     "user_id": str(body.get("user_id") or ""),
                 }, ensure_ascii=False))
             except Exception:
+                audit_log(admin.get("user", ""), self._client_ip(), "task.submit",
+                          target=tid, result="fail", detail=f"Redis 发布失败: {g[:120]}")
                 return self._json({"error": "Redis 发布失败，任务未派发"}, 503)
             with _task_lock: _task_results[tid] = {"task_id":tid,"status":"PENDING","goal":g,"steps":[],"report":"","conversation_id":conv_id,"auto_run":auto_run}
             # Write to SQLite so History shows immediately
@@ -1487,6 +1896,8 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 db.commit(); db.close()
             except Exception: pass
+            audit_log(admin.get("user", ""), self._client_ip(), "task.submit",
+                      target=tid, result="ok", detail=f"goal: {g[:120]}")
             return self._json({"task_id":tid,"conversation_id":conv_id,"status":"PENDING"})
         if self.path == "/api/memory/delete":
             # 记忆治理（对标标准 3.4）：按类型+ids 删除，或 {all: true} 清空
@@ -1637,12 +2048,29 @@ class Handler(BaseHTTPRequestHandler):
             if llm.get("api_key"): os.environ["LLM_API_KEY"] = llm["api_key"]
             if llm.get("base_url"): os.environ["LLM_BASE_URL"] = llm["base_url"]
             if llm.get("model"): os.environ["LLM_MODEL"] = llm["model"]
+            audit_log(admin.get("user", ""), self._client_ip(), "config.save", result="ok")
             return self._json({"status":"saved"})
         return self._json({"error":"not found"},404)
 
     def do_DELETE(self):
-        """撤销分享：DELETE /api/share/<task_id>（兼容 /api/share/revoke + body）。"""
+        """删除任务或撤销分享（均仅 admin）：
+        DELETE /api/task/<task_id>
+        DELETE /api/share/<task_id>（兼容 /api/share/revoke + body）"""
         p = urlparse(self.path).path
+        admin = self._require_admin()
+        if admin is None:
+            return
+        ip = self._client_ip()
+        if p.startswith("/api/task/"):
+            tid = p.split("/api/task/", 1)[-1].strip()
+            if not tid:
+                return self._json({"error": "task_id required"}, 400)
+            if not _task_exists(tid):
+                return self._json({"error": "task not found"}, 404)
+            if not _delete_task(tid):
+                return self._json({"error": "删除失败"}, 500)
+            audit_log(admin.get("user", ""), ip, "task.delete", target=tid, result="ok")
+            return self._json({"status": "ok", "task_id": tid})
         if p.startswith("/api/share/"):
             tid = p.split("/api/share/", 1)[-1].strip()
             if tid == "revoke":
@@ -1656,6 +2084,8 @@ class Handler(BaseHTTPRequestHandler):
             if not tid:
                 return self._json({"error": "task_id required"}, 400)
             revoked = _revoke_share_token(tid)
+            audit_log(admin.get("user", ""), ip, "share.revoke", target=tid,
+                      result="ok", detail=f"revoked={revoked}")
             return self._json({"status": "ok", "task_id": tid, "revoked": revoked})
         return self._json({"error": "not found"}, 404)
 
@@ -1663,7 +2093,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin","*")
         self.send_header("Access-Control-Allow-Methods","GET,POST,DELETE,OPTIONS")
-        self.send_header("Access-Control-Allow-Headers","Content-Type")
+        self.send_header("Access-Control-Allow-Headers","Content-Type, Authorization")
         self.end_headers()
 
     def log_message(self, fmt, *args): pass
@@ -1672,6 +2102,7 @@ def main():
     from logging_setup import setup_logging
     setup_logging("webui")
     _init_db()
+    _ensure_users_on_startup()
     _load_evolution_history()
     def _supervise(fn):
         while True:

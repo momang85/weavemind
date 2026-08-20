@@ -19,6 +19,12 @@
     "base_url": "https://api.siliconflow.cn/v1",
     "model": "deepseek-ai/DeepSeek-V3"
   },
+  "users": {
+    "admin": {
+      "password_hash": "pbkdf2_sha256$200000$<BASE64_SALT>$<BASE64_HASH>",
+      "role": "admin"
+    }
+  },
   "redis": {
     "host": "localhost",
     "port": 6379

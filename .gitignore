@@ -40,3 +40,7 @@ evals/calibration_report.json
 .vscode/
 .idea/
 Thumbs.db
+
+# 运行时产物
+share_links.json
+logs/audit.jsonl

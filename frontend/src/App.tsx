@@ -1,7 +1,8 @@
-import { Component, useEffect, type ReactNode } from 'react'
+import { Component, useEffect, useState, type ReactNode } from 'react'
 import { Routes, Route } from 'react-router-dom'
 import { AlertTriangle, RefreshCw } from 'lucide-react'
 import AppLayout from './components/AppLayout'
+import Login from './components/Login'
 import TaskConsole from './pages/TaskConsole'
 import AgentsPage from './pages/Agents'
 import History from './pages/History'
@@ -11,6 +12,10 @@ import MemoryPage from './pages/Memory'
 import EvalsPage from './pages/Evals'
 import SkillsPage from './pages/Skills'
 import { useTaskStore } from './stores/useTaskStore'
+import { installAuthFetch, isAuthed } from './auth'
+
+// 全局 fetch 包装：自动附加 Authorization 头；数据接口 401 时回到登录页
+installAuthFetch()
 
 // ── Error Boundary ──
 class ErrorBoundary extends Component<
@@ -52,14 +57,26 @@ class ErrorBoundary extends Component<
 // ── App Root ──
 export default function App() {
   const { toggleDemo, fetchSystemStatus } = useTaskStore()
+  const isDemo = () => new URLSearchParams(window.location.search).has('demo')
+  const [authed, setAuthed] = useState(() => isAuthed() || isDemo())
+
+  // 登录/登出/会话失效后同步登录态
+  useEffect(() => {
+    const sync = () => setAuthed(isAuthed() || isDemo())
+    window.addEventListener('weavemind:auth-changed', sync)
+    return () => window.removeEventListener('weavemind:auth-changed', sync)
+  }, [])
 
   // Initialize: check URL for demo mode, start polling
   useEffect(() => {
-    const isDemo = new URLSearchParams(window.location.search).has('demo')
-    if (isDemo) toggleDemo(true)
-
+    if (!authed) return
+    if (isDemo()) toggleDemo(true)
     fetchSystemStatus()
-  }, [])
+  }, [authed])
+
+  if (!authed) {
+    return <Login />
+  }
 
   return (
     <ErrorBoundary>

@@ -2134,7 +2134,7 @@ def _make_share_fake():
     import web_ui
 
     class _FakeShareHandler(web_ui.Handler):
-        def __init__(self, path: str, body: dict | None = None):
+        def __init__(self, path: str, body: dict | None = None, headers: dict | None = None):
             import io
             import json
             self.path = path
@@ -2142,6 +2142,8 @@ def _make_share_fake():
             self.request_version = "HTTP/1.1"
             self.client_address = ("127.0.0.1", 0)
             self.headers = {"Host": "localhost:8080"}
+            if headers:
+                self.headers.update(headers)
             raw = b""
             if body is not None:
                 raw = json.dumps(body, ensure_ascii=False).encode("utf-8")
@@ -2176,35 +2178,60 @@ class TestReportShare(unittest.TestCase):
         import os
         import shutil
         import tempfile
+        import json as _json
         import workspace as ws_mod
+        import audit_logger
         import web_ui
 
         self.web_ui = web_ui
         self._tmp = tempfile.mkdtemp(prefix="weavemind_share_")
         self._old_share_file = web_ui.SHARE_FILE
         self._old_db_path = web_ui.DB_PATH
+        self._old_config_path = web_ui.CONFIG_PATH
+        self._old_audit_file = audit_logger.AUDIT_FILE
         self._old_root = ws_mod.WORKSPACE_ROOT
         self._saved_results = dict(web_ui._task_results)
+        self._saved_sessions = dict(web_ui._sessions)
         self._FakeHandler = _make_share_fake()
         web_ui.SHARE_FILE = os.path.join(self._tmp, "share_links.json")
         web_ui.DB_PATH = os.path.join(self._tmp, "test_share.db")
+        web_ui.CONFIG_PATH = os.path.join(self._tmp, "config.json")
+        audit_logger.AUDIT_FILE = os.path.join(self._tmp, "audit.jsonl")
+        with open(web_ui.CONFIG_PATH, "w", encoding="utf-8") as f:
+            _json.dump({
+                "users": {
+                    "admin": {
+                        "password_hash": web_ui._hash_password("admin123"),
+                        "role": "admin",
+                    }
+                }
+            }, f, ensure_ascii=False, indent=2)
+        with web_ui._sessions_lock:
+            web_ui._sessions.clear()
+        self._admin_token = web_ui._create_session("admin", "admin")
         ws_mod.configure_workspace_root(self._tmp)
         self.addCleanup(self._restore)
 
     def _restore(self):
         import shutil
         import workspace as ws_mod
+        import audit_logger
         web_ui = self.web_ui
         web_ui.SHARE_FILE = self._old_share_file
         web_ui.DB_PATH = self._old_db_path
+        web_ui.CONFIG_PATH = self._old_config_path
+        audit_logger.AUDIT_FILE = self._old_audit_file
         ws_mod.WORKSPACE_ROOT = self._old_root
         with web_ui._task_lock:
             web_ui._task_results.clear()
             web_ui._task_results.update(self._saved_results)
+        with web_ui._sessions_lock:
+            web_ui._sessions.clear()
+            web_ui._sessions.update(self._saved_sessions)
         shutil.rmtree(self._tmp, ignore_errors=True)
 
     def _handler(self, path: str, method: str = "GET", body: dict | None = None):
-        h = self._FakeHandler(path, body)
+        h = self._FakeHandler(path, body, {"Authorization": "Bearer " + self._admin_token})
         h.command = method
         return h
 

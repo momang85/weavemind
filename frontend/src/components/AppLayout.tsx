@@ -1,9 +1,10 @@
 import { ReactNode, useState, useEffect } from 'react'
 import { NavLink, useLocation } from 'react-router-dom'
 import { Settings } from 'lucide-react'
-import { Play, Users, Clock, Activity, PanelLeftClose, PanelLeft, Brain, FlaskConical, Layers } from 'lucide-react'
+import { Play, Users, Clock, Activity, PanelLeftClose, PanelLeft, Brain, FlaskConical, Layers, LogOut } from 'lucide-react'
 import { useTaskStore } from '../stores/useTaskStore'
 import { useDemoRunner } from '../stores/useDemoRunner'
+import { clearAuth, getAuthUser } from '../auth'
 
 const navItems = [
   { to: '/', icon: Play, label: '任务控制台' },
@@ -19,8 +20,16 @@ const navItems = [
 export default function AppLayout({ children }: { children: ReactNode }) {
   const [collapsed, setCollapsed] = useState(window.innerWidth < 768)
   const { demoMode, connected, toggleDemo, fetchSystemStatus, agents, currentTaskId, planTree, logs, report, status } = useTaskStore()
+  const user = getAuthUser()
   const location = useLocation()
   useDemoRunner()
+
+  const logout = async () => {
+    try {
+      await fetch('/api/logout', { method: 'POST' })
+    } catch { /* 服务不可达时也允许本地退出 */ }
+    clearAuth()
+  }
 
   useEffect(() => {
     fetchSystemStatus()
@@ -103,6 +112,20 @@ export default function AppLayout({ children }: { children: ReactNode }) {
             <div className="hidden sm:block text-slate-400">
               智能体: <span className="text-slate-200 font-mono">{agents.length}</span>
             </div>
+            {user && (
+              <div className="hidden sm:flex items-center gap-2 text-xs text-slate-400">
+                <span className="px-2 py-0.5 rounded-full bg-cyan-500/10 text-cyan-400 border border-cyan-500/20">
+                  {user.username} · {user.role === 'admin' ? '管理员' : '只读'}
+                </span>
+                <button
+                  onClick={logout}
+                  className="flex items-center gap-1 px-2 py-1 rounded-lg hover:bg-slate-800 text-slate-400 hover:text-slate-200 transition-colors"
+                  title="退出登录"
+                >
+                  <LogOut className="w-3.5 h-3.5" /> 退出
+                </button>
+              </div>
+            )}
           </div>
         </header>
         <main className="flex-1 overflow-auto p-4 md:p-6 mobile-scroll">

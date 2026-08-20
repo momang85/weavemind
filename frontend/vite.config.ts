@@ -10,6 +10,7 @@ export default defineConfig({
       '/task': 'http://localhost:8080',
       '/tasks': 'http://localhost:8080',
       '/share': 'http://localhost:8080',
+      '/files': 'http://localhost:8080',
     }
   }
 })
