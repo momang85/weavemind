@@ -1,16 +1,23 @@
 FROM python:3.12-slim
 
 # 沙箱镜像：仅用于 code_execution 隔离运行，禁止网络（docker run --network none）
+# fonts-noto-cjk：matplotlib/seaborn 中文图表渲染必需；nodejs：代码生成任务 JS 校验
 RUN apt-get update && apt-get install -y --no-install-recommends \
         nodejs \
+        fonts-noto-cjk \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /work
 
-# 复制依赖并预装（代码生成任务常用库；按需增删）
+# 复制依赖并预装（代码生成任务常用库：matplotlib/jieba/pandas/scikit-learn/seaborn 等）
 COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt || true
 
 # 沙箱内不保留任何密钥
-ENV PYTHONDONTWRITEBYTECODE=1
+# 只读根文件系统下，可写的家目录与 matplotlib 字体缓存必须落到 tmpfs /tmp
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONIOENCODING=utf-8 \
+    HOME=/tmp \
+    MPLCONFIGDIR=/tmp/.matplotlib
 CMD ["python"]

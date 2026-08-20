@@ -646,6 +646,7 @@ def _system_status():
             "queues": queues,
             "tasks": {"total": total, "success": success, "today": today},
             "memory": memory,
+            "code_sandbox": _code_sandbox_status(),
             "recent": recent,
             "uptime_sec": int(time.time() - _START_TIME),
             "survival_rate": survival,
@@ -655,6 +656,23 @@ def _system_status():
         return {"agents":[],"queues":{},"tasks":{"total":0,"success":0,"today":0},
                 "memory":{"conversations":0,"strategies":0},"recent":[],"uptime_sec":0,"survival_rate":100,
                 "llm_usage":{"calls":0,"prompt_tokens":0,"completion_tokens":0}}
+
+def _code_sandbox_status() -> dict:
+    """沙箱状态快照（实际模式/判定来源/docker 可用性/镜像是否存在）。
+    状态接口与健康检查共用，供部署者确认容器级隔离是否生效。"""
+    try:
+        from code_sandbox import sandbox_status
+        return sandbox_status()
+    except Exception:
+        return {
+            "mode": "restricted",
+            "mode_explicit": None,
+            "mode_env_raw": os.environ.get("CODE_EXECUTION_SANDBOX"),
+            "mode_source": "unknown",
+            "docker_available": False,
+            "sandbox_image": None,
+            "sandbox_image_exists": False,
+        }
 
 def _get_llm_usage():
     total = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
@@ -1488,8 +1506,13 @@ class Handler(BaseHTTPRequestHandler):
             if not self._role_allowed_get(p, session):
                 return
         if p == "/api/health":
-            # 公开健康检查：无需登录，供探活/负载均衡使用
-            return self._json({"status": "ok", "service": "weavemind-web", "time": _now_iso()})
+            # 公开健康检查：无需登录，供探活/负载均衡使用；附带沙箱状态供部署确认
+            return self._json({
+                "status": "ok",
+                "service": "weavemind-web",
+                "time": _now_iso(),
+                "code_sandbox": _code_sandbox_status(),
+            })
         if p == "/api/auth/bootstrap":
             # 公开引导状态：前端据此判断显示“创建初始管理员”还是登录表单
             return self._json({"setup_required": not _users_initialized()})

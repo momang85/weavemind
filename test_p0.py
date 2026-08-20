@@ -2,11 +2,13 @@
 """V0.5 P0 优化回归测试：沙箱、安全、访问控制、评测集、Judge。"""
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 class TestSandbox(unittest.TestCase):
@@ -56,6 +58,211 @@ class TestSandbox(unittest.TestCase):
                 os.environ["CODE_EXECUTION_SANDBOX"] = old
             else:
                 os.environ.pop("CODE_EXECUTION_SANDBOX", None)
+
+
+class TestSandboxDockerDefault(unittest.TestCase):
+    """V1.0 沙箱默认化：docker-first 自动探测 + 显式覆盖 + 执行层失败降级（全部 mock）。"""
+
+    def setUp(self):
+        import code_sandbox
+        self.cs = code_sandbox
+        self._old_sandbox_env = os.environ.get("CODE_EXECUTION_SANDBOX")
+        os.environ.pop("CODE_EXECUTION_SANDBOX", None)
+        self.cs.clear_sandbox_caches()
+        self._tmp_dirs = []
+
+    def tearDown(self):
+        if self._old_sandbox_env is None:
+            os.environ.pop("CODE_EXECUTION_SANDBOX", None)
+        else:
+            os.environ["CODE_EXECUTION_SANDBOX"] = self._old_sandbox_env
+        self.cs.clear_sandbox_caches()
+        for d in self._tmp_dirs:
+            shutil.rmtree(d, ignore_errors=True)
+
+    def _make_script(self, code: str = "print('ok-42')"):
+        d = tempfile.mkdtemp(prefix="wm_sbx_")
+        self._tmp_dirs.append(d)
+        p = Path(d) / "t.py"
+        p.write_text(code, encoding="utf-8")
+        return str(p), d
+
+    def test_auto_detect_docker_when_available(self):
+        with mock.patch.object(self.cs, "docker_available", return_value=True):
+            self.assertEqual(self.cs.sandbox_mode(), "docker")
+            self.assertIsNone(self.cs.sandbox_mode_explicit())
+
+    def test_auto_detect_falls_back_restricted(self):
+        with mock.patch.object(self.cs, "docker_available", return_value=False):
+            self.assertEqual(self.cs.sandbox_mode(), "restricted")
+
+    def test_explicit_mode_overrides_auto_detect(self):
+        os.environ["CODE_EXECUTION_SANDBOX"] = "restricted"
+        with mock.patch.object(self.cs, "docker_available", return_value=True):
+            self.assertEqual(self.cs.sandbox_mode(), "restricted")
+            self.assertEqual(self.cs.sandbox_mode_explicit(), "restricted")
+        os.environ["CODE_EXECUTION_SANDBOX"] = "docker"
+        with mock.patch.object(self.cs, "docker_available", return_value=False):
+            self.assertEqual(self.cs.sandbox_mode(), "docker")
+            self.assertEqual(self.cs.sandbox_mode_explicit(), "docker")
+
+    def test_invalid_explicit_falls_back_to_auto(self):
+        os.environ["CODE_EXECUTION_SANDBOX"] = "banana"
+        with mock.patch.object(self.cs, "docker_available", return_value=False):
+            self.assertEqual(self.cs.sandbox_mode(), "restricted")
+            self.assertIsNone(self.cs.sandbox_mode_explicit())
+
+    def test_run_script_docker_spawn_failure_falls_back_and_succeeds(self):
+        """docker 执行层启动失败 → 降级 restricted 重跑，脚本仍成功且带降级标记。"""
+        script, cwd = self._make_script()
+        real_run = self.cs.subprocess.run
+        calls = []
+
+        def fake_run(*args, **kwargs):
+            calls.append(args[0][0])
+            if len(calls) == 1:
+                raise FileNotFoundError("docker 不存在")
+            return real_run(*args, **kwargs)
+
+        with mock.patch.object(self.cs, "docker_available", return_value=True), \
+                mock.patch.object(self.cs, "ensure_sandbox_image", return_value=True), \
+                mock.patch.object(self.cs.subprocess, "run", side_effect=fake_run):
+            r = self.cs.run_script(script, cwd, timeout=30)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn(b"ok-42", r.stdout)
+        self.assertTrue(r.sandbox_degraded)
+        self.assertEqual(r.sandbox_mode, "restricted")
+        self.assertIn("docker", r.sandbox_degrade_reason)
+        self.assertEqual(calls, ["docker", sys.executable])
+
+    def test_run_script_image_missing_falls_back(self):
+        """镜像缺失 → 本次执行降级 restricted，不自动构建，脚本仍成功。"""
+        script, cwd = self._make_script()
+        with mock.patch.object(self.cs, "docker_available", return_value=True), \
+                mock.patch.object(self.cs, "ensure_sandbox_image", return_value=False):
+            r = self.cs.run_script(script, cwd, timeout=30)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn(b"ok-42", r.stdout)
+        self.assertTrue(r.sandbox_degraded)
+        self.assertIn("镜像", r.sandbox_degrade_reason)
+
+    def test_run_script_docker_ok_not_degraded(self):
+        script, cwd = self._make_script()
+        with mock.patch.object(self.cs, "docker_available", return_value=True), \
+                mock.patch.object(self.cs, "ensure_sandbox_image", return_value=True), \
+                mock.patch.object(self.cs.subprocess, "run", return_value=self.cs.SandboxResult(
+                    ["docker", "run"], 0, b"docker-ok", b"", sandbox_mode="docker")):
+            r = self.cs.run_script(script, cwd, timeout=30)
+        self.assertEqual(r.returncode, 0)
+        self.assertEqual(r.sandbox_mode, "docker")
+        self.assertFalse(r.sandbox_degraded)
+
+    def test_script_failure_not_mistaken_for_docker_failure(self):
+        self.assertFalse(self.cs._docker_layer_failure(1, b"Traceback (most recent call last)"))
+        self.assertTrue(self.cs._docker_layer_failure(
+            125, b"Cannot connect to the Docker daemon at npipe:////./pipe/docker_engine"))
+        self.assertFalse(self.cs._docker_layer_failure(125, "普通脚本输出".encode("utf-8")))
+
+    def test_ensure_sandbox_image_missing_prints_build_hint(self):
+        import io
+        from contextlib import redirect_stdout
+        with mock.patch.object(self.cs, "image_exists", return_value=False), \
+                mock.patch.object(self.cs, "_image_hint_printed", set()), \
+                redirect_stdout(io.StringIO()) as buf:
+            self.assertFalse(self.cs.ensure_sandbox_image())
+        self.assertIn(
+            "docker build -f Dockerfile.sandbox -t weavemind-code-sandbox:latest .",
+            buf.getvalue(),
+        )
+
+    def test_sandbox_status_fields(self):
+        with mock.patch.object(self.cs, "docker_available", return_value=True), \
+                mock.patch.object(self.cs, "image_exists", return_value=True):
+            s = self.cs.sandbox_status()
+        self.assertEqual(s["mode"], "docker")
+        self.assertEqual(s["mode_source"], "auto")
+        self.assertTrue(s["docker_available"])
+        self.assertTrue(s["sandbox_image_exists"])
+        self.assertEqual(s["sandbox_image"], "weavemind-code-sandbox:latest")
+
+    def test_run_script_async_spawn_failure_falls_back(self):
+        """异步 docker 启动失败 → 降级 restricted 重跑，meta 带降级标记。"""
+        import asyncio
+
+        class FakeProc:
+            returncode = 0
+
+            async def communicate(self, input=None):
+                return b"ok-async", b""
+
+            def kill(self):
+                pass
+
+        script, cwd = self._make_script()
+
+        def fake_create(*args, **kwargs):
+            if args and args[0] == "docker":
+                raise FileNotFoundError("docker 不存在")
+            return FakeProc()
+
+        async def run_all():
+            proc, meta = await self.cs.run_script_async(script, cwd)
+            out, _ = await proc.communicate()
+            return proc, meta, out
+
+        with mock.patch.object(self.cs, "docker_available", return_value=True), \
+                mock.patch.object(self.cs, "ensure_sandbox_image", return_value=True), \
+                mock.patch("asyncio.create_subprocess_exec", side_effect=fake_create):
+            proc, meta, out = asyncio.run(run_all())
+        self.assertEqual(proc.returncode, 0)
+        self.assertIn(b"ok-async", out)
+        self.assertTrue(meta["sandbox_degraded"])
+        self.assertEqual(meta["sandbox_mode"], "restricted")
+        self.assertIn("docker", meta["sandbox_degrade_reason"])
+
+    def test_run_script_async_docker_layer_failure_retries_restricted(self):
+        """docker 进程返回 125（守护进程不可达）→ 包装进程自动 restricted 重跑。"""
+        import asyncio
+
+        class DockerFailProc:
+            returncode = 125
+            stdout = b""
+            stderr = b"Cannot connect to the Docker daemon at npipe:////./pipe/docker_engine"
+
+            async def communicate(self, input=None):
+                return self.stdout, self.stderr
+
+            def kill(self):
+                pass
+
+        class FakeRestrictedProc:
+            returncode = 0
+
+            async def communicate(self, input=None):
+                return b"ok-after-fallback", b""
+
+        procs = iter([DockerFailProc(), FakeRestrictedProc()])
+
+        def fake_create(*args, **kwargs):
+            return next(procs)
+
+        script, cwd = self._make_script()
+
+        async def run_all():
+            proc, meta = await self.cs.run_script_async(script, cwd)
+            out, _ = await proc.communicate()
+            return proc, meta, out
+
+        with mock.patch.object(self.cs, "docker_available", return_value=True), \
+                mock.patch.object(self.cs, "ensure_sandbox_image", return_value=True), \
+                mock.patch("asyncio.create_subprocess_exec", side_effect=fake_create):
+            proc, meta, out = asyncio.run(run_all())
+        self.assertIn(b"ok-after-fallback", out)
+        self.assertTrue(proc.sandbox_degraded)
+        self.assertEqual(proc.sandbox_mode, "restricted")
+        self.assertTrue(meta["sandbox_degraded"])
+        self.assertEqual(meta["sandbox_mode"], "restricted")
+        self.assertIn("docker 执行层失败", meta["sandbox_degrade_reason"])
 
 
 class _FakeMessaging:
