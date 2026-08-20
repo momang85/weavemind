@@ -930,22 +930,45 @@ class OrchestratorV2:
         ))
 
     @staticmethod
-    def _pick_fetch_url(items: list) -> str | None:
-        """从搜索结果中挑选财务相关度最高的 URL：
-        标题/URL 含财报关键词加分、财经媒体域名加分、内容社区降权。"""
+    def _pick_fetch_url(items: list, goal: str = "") -> str | None:
+        """从搜索结果中挑选财务相关度最高的 URL（搜索根因缩小版）。
+
+        评分维度：
+        1) 标题-目标相关性：标题真正关于目标公司财报/研报/IR 才高分；
+           仅"提到"目标（合作新闻）或标题是其他公司（Line/Lululemon）→ 强降权；
+        2) 来源分级：官方 IR/交易所披露 > 权威财经 > 内容社区/杂页；
+        3) 财务关键词：标题命中 > URL 命中。"""
         finance_kw = (
             "财报", "年报", "季报", "营收", "净利润", "业绩", "财务", "公告",
-            "financial", "earnings", "annual", "revenue",
+            "研报", "复盘", "深度", "投资者关系",
+            "financial", "earnings", "annual", "revenue", "results",
+            "quarterly", "investor",
+        )
+        official_domains = (
+            "ir.", "investor.", "hkex", "eastmoney", "10jqka",
+            "cninfo", "sse.com.cn", "szse.cn",
         )
         good_domains = (
-            "ir.", "hkex", "eastmoney", "10jqka", "sina", "163.com",
-            "21jingji", "yicai", "cls.cn", "finance", "stock",
-            "xueqiu", "snowball", "pedaily", "baijing",
+            "sina", "163.com", "21jingji", "yicai", "cls.cn",
+            "finance", "stock", "xueqiu", "snowball", "pedaily",
         )
         junk_domains = ("blog.csdn", "zhihu.com", "zhengxianling",
-                        "cp.baidu", "toutiao", "csdn")
+                        "cp.baidu", "toutiao", "csdn", "alishui", "sgpjbg")
+        target = ""
+        try:
+            from task_classifier import _extract_company
+            target = _extract_company(goal)
+        except Exception:
+            pass
+        other_entities: tuple = ()
+        try:
+            from acceptance_checker import _OTHER_ENTITIES
+            other_entities = tuple(_OTHER_ENTITIES)
+        except Exception:
+            pass
         best: str | None = None
-        best_score = 0
+        best_score = -10**9
+        best_is_official = False
         for it in items or []:
             if not isinstance(it, dict):
                 continue
@@ -956,18 +979,57 @@ class OrchestratorV2:
             low_t = title.lower()
             low_u = url.lower()
             score = 0
+            is_official = any(o in low_u for o in official_domains)
+            # 财务关键词：标题命中 +2，URL 命中 +1
             for k in finance_kw:
-                if k in low_t or k in low_u:
+                if k in low_t:
                     score += 2
-            for d in good_domains:
-                if d in low_u:
+                elif k in low_u:
                     score += 1
+            # 来源分级：官方 > 权威财经 > 杂页
+            if is_official:
+                score += 4
+            elif any(g in low_u for g in good_domains):
+                score += 2
             for j in junk_domains:
                 if j in low_u:
                     score -= 2
-            if score > best_score:
+            # 标题-目标相关性
+            if target:
+                target_in_title = target in title
+                target_in_url = target in url
+                has_fin_topic = any(k in title for k in finance_kw)
+                others_in_title = [
+                    e for e in other_entities
+                    if e and e != target and e in title
+                ]
+                if target_in_title:
+                    score += 3
+                    if has_fin_topic:
+                        score += 2
+                    # 标题同时出现他司且无财务主题
+                    # （"官宣与腾讯合作，Line 用户流失"类）→ 合作/八卦新闻降权
+                    if others_in_title and not has_fin_topic:
+                        score -= 6
+                elif target_in_url:
+                    score += 1
+                    if has_fin_topic and not others_in_title:
+                        score += 1
+                elif re.search(r"[\u4e00-\u9fff]", title):
+                    # 中文标题不含目标：他司财报（Lululemon）强降权，
+                    # 无他司的泛内容降权；英文标题不判定（避免误伤
+                    # Apple 等英文官方 IR 页）
+                    if others_in_title:
+                        score -= 8
+                    else:
+                        score -= 4
+            # 平局时官方源优先（如标题关键词得分相同，港交所/IR 页胜出）
+            if score > best_score or (
+                score == best_score and is_official and not best_is_official
+            ):
                 best_score = score
                 best = url
+                best_is_official = is_official
         return best
 
     def _recycle_fetch_into_clean(self, task_id: str, goal: str, result: dict) -> None:
@@ -4677,7 +4739,10 @@ print("charts generated")
                     prev_json = prev_res
                 if isinstance(prev_json, list):
                     if finance_fetch:
-                        best = self._pick_fetch_url(prev_json)
+                        best = self._pick_fetch_url(
+                            prev_json,
+                            str((getattr(self, "_task_goals", {}) or {}).get(task_id, "") or ""),
+                        )
                         if best:
                             instr = f"[URL: {best}] " + instr
                     else:

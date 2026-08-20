@@ -1818,6 +1818,60 @@ class TestP0Robustness(unittest.TestCase):
         best = o._pick_fetch_url(items)
         self.assertIn("21jingji", best)
 
+    def test_pick_fetch_url_target_relevance(self):
+        """标题-目标相关性：他司财报/合作新闻不得压过目标公司财报页。"""
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        goal = "搜索并分析腾讯年度财务报告中的营收、净利润、毛利率与现金流等核心指标，评估其盈利能力"
+        items = [
+            {"title": "LululemonQ3营收同比增长28%",
+             "url": "https://finance.sina.com.cn/tech/roll/2025-08-13/doc-x.shtml",
+             "snippet": "Lululemon"},
+            {"title": "刚刚官宣与腾讯达成合作，日本通讯App Line就被爆料用户流失严重",
+             "url": "https://www.baijing.cn/article/20133",
+             "snippet": "Line 支付合作"},
+            {"title": "腾讯2025年报：营收7517亿 净利润2248亿",
+             "url": "https://www.21jingji.com/a/2026",
+             "snippet": "年报数据"},
+        ]
+        best = o._pick_fetch_url(items, goal)
+        self.assertIn("21jingji", best)
+
+    def test_pick_fetch_url_official_priority(self):
+        """官方 IR/港交所披露优先于权威财经。"""
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        goal = "搜索并分析腾讯年度财务报告中的核心指标"
+        items = [
+            {"title": "腾讯2025年报业绩解读",
+             "url": "https://www.21jingji.com/a/2026",
+             "snippet": "年报"},
+            {"title": "腾讯控股2025年年报",
+             "url": "https://www1.hkexnews.hk/listedco/listconews/sehk/2026/0610/2026061000123_c.pdf",
+             "snippet": "年报"},
+        ]
+        best = o._pick_fetch_url(items, goal)
+        self.assertIn("hkexnews", best)
+
+    def test_pick_fetch_url_english_ir_not_penalized(self):
+        """英文官方 IR 页不被中文目标名缺失误伤（Apple 类美股）。"""
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        goal = "分析苹果公司财务状况"
+        items = [
+            {"title": "Apple Reports Fourth Quarter Results",
+             "url": "https://investor.apple.com/news/default.aspx",
+             "snippet": "results"},
+            {"title": "Apple 新机发布汇总",
+             "url": "https://www.toutiao.com/article/3",
+             "snippet": "iPhone"},
+        ]
+        best = o._pick_fetch_url(items, goal)
+        self.assertIn("investor.apple.com", best)
+
     def test_wants_financial_data(self):
         from orchestrator_v2 import OrchestratorV2
 
