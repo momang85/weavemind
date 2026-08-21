@@ -24,10 +24,20 @@ _NUM_UNIT_RE = re.compile(
     r"(?<![A-Za-z0-9])"
     r"(\d[\d,]*(?:\.\d+)?)\s*"
     r"(万亿|千亿|百亿|亿|万)?\s*"
-    r"(美元|港元|元|人民币|%|％)?"
+    r"(美元|港元|元|人民币|USD|US\$|%|％)?"
 )
 
 _DISCLOSED_MARKERS = ("基于模型知识", "未在本次检索中验证", "未验证", "模型估算", "模型知识")
+
+# 货币单位归组（F7）：crypto 适配器用 USD，报告常用“美元/$”，需等价匹配
+_CURRENCY_UNIT_GROUPS = (
+    ("usd", "美元", "$"),
+    ("hkd", "港元", "港币", "hk$"),
+    ("cny", "人民币", "元"),
+)
+
+# 中文数量级：万亿=1e12、千亿=1e11、百亿=1e10、亿=1e8、万=1e4
+_SCALE_MAP = {"万亿": 1e12, "千亿": 1e11, "百亿": 1e10, "亿": 1e8, "万": 1e4}
 
 
 def _norm(s: str) -> str:
@@ -106,8 +116,36 @@ def _bare_match(value: str, text: str) -> bool:
     ) is not None
 
 
+def _value_scale(unit: str) -> float:
+    """单位中文数量级换算系数：'万亿美元' → 1e12，'亿元' → 1e8。"""
+    u = str(unit or "")
+    for key in ("万亿", "千亿", "百亿", "亿", "万"):
+        if key in u:
+            return _SCALE_MAP[key]
+    return 1.0
+
+
+def _units_equivalent(a: str, b: str) -> bool:
+    """单位等价判断：USD/美元/$、HKD/港元、CNY/人民币/元 视为同一单位；
+    无单位任意匹配；其余保持包含关系匹配（兼容既有口径）。"""
+    a = str(a or "").strip().lower()
+    b = str(b or "").strip().lower()
+    if not a or not b:
+        return True
+    if a == b or a in b or b in a:
+        return True
+    if a in ("%", "％") and b in ("%", "％"):
+        return True
+
+    def _in_group(x: str, grp: tuple[str, ...]) -> bool:
+        return any((x == g) or (len(g) >= 2 and g in x) for g in grp)
+
+    return any(_in_group(a, grp) and _in_group(b, grp) for grp in _CURRENCY_UNIT_GROUPS)
+
+
 def _collect_sources(workspace) -> dict[str, str]:
-    """收集可溯源数据源文本：search_results / fetch_snapshot / clean_chart_data。"""
+    """收集可溯源数据源文本：search_results / fetch_snapshot / clean_chart_data /
+    structured_data（F7：crypto/macro/news 适配器数据必须参与数字溯源）。"""
     ws = Path(workspace)
     proj = ws / "project"
     src: dict[str, str] = {}
@@ -141,6 +179,12 @@ def _collect_sources(workspace) -> dict[str, str]:
             src["clean_chart_data"] = cd.read_text(encoding="utf-8")
     except Exception:
         pass
+    try:
+        sd = proj / "structured_data.json"
+        if sd.exists():
+            src["structured_data"] = sd.read_text(encoding="utf-8")
+    except Exception:
+        pass
     return src
 
 
@@ -157,6 +201,7 @@ def _traceable_in_clean(num: dict, clean_text: str) -> bool:
     if v is None:
         return False
     unit = num["unit"]
+    scaled_v = v * _value_scale(unit)
     for key in ("market_data", "market_share", "macro_indicators", "market_trends"):
         for r in data.get(key) or []:
             if not isinstance(r, dict):
@@ -166,8 +211,9 @@ def _traceable_in_clean(num: dict, clean_text: str) -> bool:
             except (TypeError, ValueError):
                 continue
             ru = str(r.get("unit") or "")
-            if abs(rv - v) < max(0.5, abs(v) * 0.005) and (
-                not unit or not ru or unit == ru or unit in ru or ru in unit
+            scaled_rv = rv * _value_scale(ru)
+            if abs(scaled_rv - scaled_v) < max(0.5, abs(scaled_v) * 0.005) and (
+                _units_equivalent(unit, ru)
             ):
                 return True
     return False
@@ -208,6 +254,7 @@ def _derived_traceable(num: dict, clean_text: str) -> bool:
                 if a and abs(abs(b / a - 1) * 100 - v) < 0.05:
                     return True
         return False
+    scaled_v = v * _value_scale(num["unit"])
     for r in md:
         if not isinstance(r, dict):
             continue
@@ -215,14 +262,62 @@ def _derived_traceable(num: dict, clean_text: str) -> bool:
             rv = float(r.get("value"))
         except (TypeError, ValueError):
             continue
-        if rv and abs(rv - v) / rv <= 0.02:
+        scaled_rv = rv * _value_scale(str(r.get("unit") or ""))
+        if scaled_rv and abs(scaled_rv - scaled_v) / scaled_rv <= 0.02:
             return True
     return False
 
 
-def check_number_traceability(report: str, sources: dict, threshold: float = 0.7) -> dict:
-    """数字溯源校验：报告中的财务数字能否在检索/快照/清洗数据中找到。
+# 溯源率阈值按任务域区分（F7）：
+# crypto/macro 依赖结构化适配器数据（CoinGecko/FRED），数字应优先出自
+# [结构化数据] 表，因此阈值按 0.7 从严；news 以标题/摘要数字为主，0.6 即达标；
+# financial 保持既有 0.7。调用方可显式传 threshold 覆盖。
+_TRACEABILITY_THRESHOLDS = {
+    "financial": 0.7,
+    "crypto": 0.7,
+    "macro": 0.7,
+    "news": 0.6,
+}
+
+
+def traceability_domain(goal: str) -> str:
+    """从任务目标判定数字溯源域：crypto/macro/news/financial。"""
+    g = str(goal or "").lower()
+    if any(
+        k in g for k in (
+            "加密货币", "比特币", "以太坊", "币价", "虚拟货币", "数字货币",
+            "btc", "eth", "bitcoin", "ethereum", "crypto", "coin",
+        )
+    ):
+        return "crypto"
+    if any(
+        k in g for k in (
+            "gdp", "cpi", "通胀", "通货膨胀", "失业率", "宏观", "宏观经济",
+            "pmi", "消费者物价",
+        )
+    ):
+        return "macro"
+    if any(
+        k in g for k in (
+            "最新新闻", "头条", "要闻", "今日新闻", "实时新闻", "新闻资讯",
+            "news", "headline",
+        )
+    ):
+        return "news"
+    return "financial"
+
+
+def check_number_traceability(
+    report: str,
+    sources: dict,
+    threshold: float | None = None,
+    domain: str | None = None,
+) -> dict:
+    """数字溯源校验：报告中的数字能否在检索/快照/清洗/结构化数据中找到。
+    threshold 默认按 domain 取 _TRACEABILITY_THRESHOLDS；未给 domain 时用 0.7。
     返回 {pass, details, total_count, traceable_count, unverifiable_count, ...}。"""
+    if threshold is None:
+        threshold = _TRACEABILITY_THRESHOLDS.get(domain or "", 0.7)
     nums = extract_financial_numbers(report)
     total = len(nums)
     if total == 0:
@@ -279,6 +374,8 @@ def check_number_traceability(report: str, sources: dict, threshold: float = 0.7
     details = (
         f"数字溯源率 {rate:.0%}（{len(traceable)}/{total}）"
         + f"；财务金额溯源率 {amount_rate:.0%}（{amount_ok}/{len(amounts)}）"
+        + (f"；域={domain}" if domain else "")
+        + (f"；结构化数据覆盖 {len(traceable)}/{total}" if "structured_data" in src_norm else "")
         + (f"；已披露（模型知识标注）{disclosed_rate:.0%}（{len(disclosed)}）" if disclosed else "")
         + ("" if passed else f"，低于阈值 {threshold:.0%}")
         + (f"；不可溯源示例：{'、'.join(u['raw'][:20] for u in untraceable[:5])}" if untraceable else "")
@@ -286,6 +383,8 @@ def check_number_traceability(report: str, sources: dict, threshold: float = 0.7
     return {
         "pass": passed,
         "details": details,
+        "domain": domain or "",
+        "threshold": round(float(threshold), 3),
         "total_count": total,
         "traceable_count": len(traceable),
         "unverifiable_count": len(untraceable),
@@ -376,8 +475,10 @@ def _is_trusted_number(n: dict) -> bool:
     if n.get("derived") is True:
         return True
     src = str(n.get("source") or "")
-    return src in ("clean_chart_data", "derived_from_clean",
-                   "structured", "structured_financials")
+    return src in (
+        "clean_chart_data", "derived_from_clean",
+        "structured", "structured_financials", "structured_data",
+    )
 
 
 def _nearby_entity(src_text: str, num: dict, entity: str, radius: int = 80) -> bool:
@@ -776,7 +877,9 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace) -> dict
     """运行验收 checklist，输出缺口报告。"""
     sources = _collect_sources(workspace)
     checks: dict = {}
-    checks["number_traceability"] = check_number_traceability(report_text, sources)
+    checks["number_traceability"] = check_number_traceability(
+        report_text, sources, domain=traceability_domain(goal),
+    )
     checks["entity_attribution"] = check_entity_attribution(
         report_text, sources, goal,
     )

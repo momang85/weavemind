@@ -31,6 +31,7 @@ SHARE_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "share_links.json"),
 )
 SHARE_TTL_SECONDS = int(os.environ.get("SHARE_TTL_SECONDS", str(7 * 24 * 3600)))
+SHARE_AUTH_COOKIE_TTL = 7 * 24 * 3600  # 密码验证通过的 Cookie 有效期 7 天
 _share_lock = threading.Lock()
 
 _events = []
@@ -132,23 +133,48 @@ def _save_shares(data: dict) -> None:
     except Exception:
         pass
 
-def _generate_share_token(task_id: str) -> str:
-    """生成/复用任务的分享 token。
+def _generate_share_token(
+    task_id: str,
+    password: str | None = None,
+    ttl_hours: float | None = None,
+) -> str:
+    """生成/复用任务的分享 token（F6：支持密码与自定义有效期）。
     选择“幂等复用”：同一任务重复生成保持同一链接，撤销后再生成才换新 token，
-    避免同一报告产生多个失控链接。"""
+    避免同一报告产生多个失控链接。
+    - password：None 表示复用已有记录不改动；空串表示清除密码；非空则存 pbkdf2 哈希；
+    - ttl_hours：None 表示沿用默认（SHARE_TTL_SECONDS）；否则按小时重算 expires_at。"""
     with _share_lock:
         data = _load_shares()
         for token, info in data.items():
             if isinstance(info, dict) and info.get("task_id") == task_id:
+                if password is not None:
+                    if password:
+                        info["password_hash"] = _hash_password(password)
+                    else:
+                        info.pop("password_hash", None)
+                if ttl_hours is not None:
+                    info["expires_at"] = (
+                        datetime.now(timezone.utc)
+                        + timedelta(hours=float(ttl_hours))
+                    ).isoformat()
+                _save_shares(data)
                 return token
         token = secrets.token_urlsafe(16)
-        data[token] = {
+        record = {
             "task_id": task_id,
             "created_at": _now_iso(),
             "expires_at": (
-                datetime.now(timezone.utc) + timedelta(seconds=SHARE_TTL_SECONDS)
+                datetime.now(timezone.utc)
+                + timedelta(
+                    hours=float(ttl_hours)
+                    if ttl_hours is not None
+                    else SHARE_TTL_SECONDS / 3600
+                )
             ).isoformat(),
         }
+        if password:
+            record["password_hash"] = _hash_password(password)
+        data[token] = record
         _save_shares(data)
         return token
 
@@ -1177,6 +1203,78 @@ _SHARE_NOT_FOUND_HTML = """<!DOCTYPE html>
 </body>
 </html>"""
 
+_SHARE_PASSWORD_PAGE_HTML = """<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>分享访问验证</title>
+<style>
+  body {{ margin: 0; font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+         background: #f4f5f7; color: #1f2430; display: flex; align-items: center; justify-content: center; min-height: 100vh; }}
+  .card {{ background: #fff; border: 1px solid #e6e8ee; border-radius: 12px; padding: 36px 44px; width: 360px;
+          box-shadow: 0 8px 24px rgba(15, 23, 42, 0.06); }}
+  h1 {{ font-size: 19px; margin: 0 0 8px; color: #16213e; }}
+  p {{ color: #7a8291; font-size: 13px; margin: 0 0 18px; line-height: 1.7; }}
+  input {{ width: 100%; box-sizing: border-box; border: 1px solid #d8dce4; border-radius: 8px;
+          padding: 10px 12px; font-size: 14px; outline: none; }}
+  input:focus {{ border-color: #1f6feb; box-shadow: 0 0 0 3px rgba(31,111,235,0.12); }}
+  button {{ width: 100%; margin-top: 14px; border: none; border-radius: 8px; background: #1f6feb; color: #fff;
+           font-size: 14px; padding: 10px 0; cursor: pointer; }}
+  button:hover {{ background: #1857c0; }}
+  .error {{ background: #fef2f2; border: 1px solid #fecaca; color: #b91c1c; border-radius: 8px;
+           padding: 8px 12px; font-size: 13px; margin-bottom: 12px; }}
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>该分享需要密码</h1>
+  <p>此报告已开启访问密码保护，请输入分享者提供的密码后查看。</p>
+  {error_html}
+  <form method="post" action="/share/{token}/auth">
+    <input type="password" name="password" placeholder="请输入访问密码" autofocus required />
+    <button type="submit">验证并查看</button>
+  </form>
+</div>
+</body>
+</html>"""
+
+
+def _share_cookie_name(token: str) -> str:
+    """分享访问放行 Cookie 名：share_<token>（token 只含 URL 安全字符）。"""
+    return f"share_{token}"
+
+
+def _share_cookie_ok(headers, token: str) -> bool:
+    """请求头 Cookie 中是否已有该分享的放行标记。"""
+    cookie = headers.get("Cookie") if hasattr(headers, "get") else None
+    parts = [x.strip() for x in str(cookie or "").split(";")]
+    return _share_cookie_name(token) + "=ok" in parts
+
+
+def _share_access_ok(headers, token: str) -> bool:
+    """分享是否允许当前请求访问：
+    - 无密码 → 直接放行（兼容旧行为）；
+    - 有密码 → 必须有对应 Cookie（验证通过后由服务端下发）。"""
+    try:
+        info = _load_shares().get(token)
+    except Exception:
+        return False
+    if not isinstance(info, dict):
+        return False
+    if not info.get("password_hash"):
+        return True
+    return _share_cookie_ok(headers, token)
+
+
+def _share_password_page(token: str, error: str = "") -> str:
+    """密码输入页：简单 HTML 表单，POST 到 /share/<token>/auth。"""
+    error_html = (
+        f'<div class="error">{html.escape(error)}</div>' if error else ""
+    )
+    return _SHARE_PASSWORD_PAGE_HTML.format(token=token, error_html=error_html)
+
+
 def _share_page_html(title: str, created_at: str, body_html: str) -> str:
     """生成公开只读分享页：自包含 HTML，无系统导航/管理功能。"""
     time_text = ""
@@ -1442,7 +1540,8 @@ class Handler(BaseHTTPRequestHandler):
             seg = rel.split("/", 1)
             if len(seg) == 2:
                 try:
-                    if _find_share_token(seg[0]) is not None:
+                    token = _find_share_token(seg[0])
+                    if token is not None and _share_access_ok(self.headers, token):
                         return True
                 except Exception:
                     pass
@@ -1458,6 +1557,7 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if (
             path == "/api/config"
+            or path == "/api/notifications"
             or path == "/api/audit"
             or path.startswith("/api/audit")
             or path == "/api/tool-audit"
@@ -1540,6 +1640,59 @@ class Handler(BaseHTTPRequestHandler):
         }, extra_headers={
             "Set-Cookie": f"session={token}; HttpOnly; Path=/; Max-Age={SESSION_TTL_SECONDS}",
         })
+
+    def _handle_share_auth(self):
+        """POST /share/<token>/auth：校验分享密码。
+        成功 → Set-Cookie share_<token>=ok（7 天）+ 302 回分享页；
+        失败 → 403 密码输入页（带错误提示）；非法 token → 404。"""
+        p = urlparse(self.path).path
+        token = p.split("/share/", 1)[-1].rsplit("/auth", 1)[0].strip()
+        share_info = _load_shares().get(token)
+        tid = share_info.get("task_id") if isinstance(share_info, dict) else None
+        if not tid:
+            return self._html(_SHARE_NOT_FOUND_HTML, 404)
+        if not share_info.get("password_hash"):
+            # 无密码分享：直接放行（兼容旧链接，不需要进入认证流程）
+            return self._redirect(f"/share/{token}")
+        password = ""
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            raw = self.rfile.read(length) if length > 0 else b""
+            if raw:
+                try:
+                    body = json.loads(raw)
+                except Exception:
+                    # HTML 表单默认 application/x-www-form-urlencoded
+                    form = {}
+                    for pair in raw.decode("utf-8", errors="replace").split("&"):
+                        if "=" in pair:
+                            k, _, v = pair.partition("=")
+                            form[unquote(k)] = unquote(v)
+                    body = form
+                if isinstance(body, dict):
+                    password = str(body.get("password") or "")
+        except Exception:
+            pass
+        if not password or not _verify_password(password, share_info.get("password_hash")):
+            return self._html(_share_password_page(token, "密码错误，请重新输入"), 403)
+        return self._redirect(
+            f"/share/{token}",
+            extra_headers={
+                "Set-Cookie": (
+                    f"{_share_cookie_name(token)}=ok; HttpOnly; Path=/; "
+                    f"Max-Age={SHARE_AUTH_COOKIE_TTL}"
+                ),
+            },
+        )
+
+    def _redirect(self, location: str, extra_headers: dict | None = None):
+        """302 跳转：用于分享密码验证成功后的放行。"""
+        self.send_response(302)
+        self.send_header("Location", location)
+        for key, value in (extra_headers or {}).items():
+            self.send_header(key, value)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def _serve_dist(self, path: str) -> bool:
         """生产模式：伺服前端构建产物（frontend/dist），含 SPA 回退。"""
@@ -1708,6 +1861,17 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if p == "/api/config": return self._json(_public_config(_load_config()))
+        if p == "/api/notifications":
+            # F5：通知配置读取（仅 admin，见 _role_allowed_get）；密码/密钥不回显
+            from notifications import (
+                load_notifications_config,
+                public_notifications_config,
+            )
+            return self._json({
+                "notifications": public_notifications_config(
+                    load_notifications_config(CONFIG_PATH)
+                ),
+            })
         if p == "/api/events":
             with _events_lock:
                 return self._json({"events": list(reversed(_events[-100:]))})
@@ -1810,18 +1974,25 @@ class Handler(BaseHTTPRequestHandler):
             tid = p.split("/api/share/", 1)[-1].strip()
             token = _find_share_token(tid)
             if token:
+                info = _load_shares().get(token) or {}
                 return self._json({
                     "shared": True,
                     "task_id": tid,
                     "token": token,
                     "path": f"/share/{token}",
                     "url": self._share_link(token),
+                    "protected": bool(info.get("password_hash")),
+                    "expires_at": info.get("expires_at"),
                 })
             return self._json({"shared": False, "task_id": tid})
         if p.startswith("/share/"):
-            # 公开只读分享页：token → task_id → 自包含 HTML 报告（无需登录）
+            # 公开只读分享页：token → task_id → 自包含 HTML 报告（无需登录）。
+            # F6：记录带密码时先验证 Cookie，未验证返回 401 密码输入页。
             token = p.split("/share/", 1)[-1].strip()
-            tid = _resolve_share_token(token)
+            share_info = _load_shares().get(token)
+            tid = share_info.get("task_id") if isinstance(share_info, dict) else None
+            if tid and not _share_access_ok(self.headers, token):
+                return self._html(_share_password_page(token), 401)
             data = _get_task_report_data(tid) if tid else None
             if not tid or not data:
                 return self._html(_SHARE_NOT_FOUND_HTML, 404)
@@ -1881,6 +2052,9 @@ class Handler(BaseHTTPRequestHandler):
                 {"status": "ok"},
                 extra_headers={"Set-Cookie": "session=; HttpOnly; Path=/; Max-Age=0"},
             )
+        if p.startswith("/share/") and p.endswith("/auth"):
+            # F6：公开分享密码验证（无需登录，凭 token 本身访问）
+            return self._handle_share_auth()
         # 其余 POST 均为写操作：仅管理员可执行（viewer 403）
         admin = self._require_admin()
         if admin is None:
@@ -1902,16 +2076,43 @@ class Handler(BaseHTTPRequestHandler):
                 audit_log(admin.get("user", ""), self._client_ip(), "share.generate",
                           target=share_tid, result="fail", detail="任务不存在或没有可分享的报告")
                 return self._json({"error": "任务不存在或没有可分享的报告"}, 404)
-            token = _generate_share_token(share_tid)
+            # F6：可选密码（body 含 password 字段才处理；空串=清除密码）与
+            # 自定义有效期 ttl_hours（默认 168=7 天，上限 720=30 天）
+            password = body["password"] if "password" in body else None
+            ttl_hours = None
+            if "ttl_hours" in body:
+                try:
+                    ttl_hours = float(body["ttl_hours"])
+                except (TypeError, ValueError):
+                    return self._json({"error": "ttl_hours 必须是数字（小时）"}, 400)
+                if ttl_hours < 1 or ttl_hours > 720:
+                    return self._json({"error": "ttl_hours 须在 1~720 小时之间（最长 30 天）"}, 400)
+            if isinstance(password, str):
+                password = password.strip()
+                if len(password) > 128:
+                    return self._json({"error": "分享密码过长（上限 128 字符）"}, 400)
+            token = _generate_share_token(share_tid, password=password, ttl_hours=ttl_hours)
             audit_log(admin.get("user", ""), self._client_ip(), "share.generate",
                       target=share_tid, result="ok")
+            share_info = _load_shares().get(token) or {}
+            expires_at = share_info.get("expires_at") or ""
+            expires_in_days = 7
+            try:
+                exp_ts = datetime.fromisoformat(
+                    str(expires_at).replace("Z", "+00:00")
+                ).timestamp()
+                expires_in_days = max(1, round((exp_ts - time.time()) / 86400))
+            except Exception:
+                pass
             return self._json({
                 "status": "ok",
                 "task_id": share_tid,
                 "token": token,
                 "path": f"/share/{token}",
                 "url": self._share_link(token),
-                "expires_in_days": max(1, round(SHARE_TTL_SECONDS / 86400)),
+                "protected": bool(share_info.get("password_hash")),
+                "expires_at": expires_at,
+                "expires_in_days": expires_in_days,
             })
         if self.path == "/api/deliverable/run":
             name = str(body.get("path") or "").strip()
@@ -2202,6 +2403,29 @@ class Handler(BaseHTTPRequestHandler):
             if llm.get("model"): os.environ["LLM_MODEL"] = llm["model"]
             audit_log(admin.get("user", ""), self._client_ip(), "config.save", result="ok")
             return self._json({"status":"saved"})
+        if self.path == "/api/notifications":
+            # F5：通知配置保存（仅 admin）：body 可直接是 notifications 段，
+            # 也可包裹在 {"notifications": {...}} 中（与 GET 响应一致）
+            from notifications import (
+                load_notifications_config,
+                public_notifications_config,
+                save_notifications_config,
+            )
+            ncfg = body.get("notifications") if isinstance(
+                body.get("notifications"), dict
+            ) else body
+            if not isinstance(ncfg, dict):
+                return self._json({"error": "notifications 必须是对象"}, 400)
+            if not save_notifications_config(ncfg, CONFIG_PATH):
+                return self._json({"error": "保存配置失败"}, 500)
+            audit_log(admin.get("user", ""), self._client_ip(),
+                      "notifications.save", result="ok")
+            return self._json({
+                "status": "saved",
+                "notifications": public_notifications_config(
+                    load_notifications_config(CONFIG_PATH)
+                ),
+            })
         if self.path == "/api/scheduled-jobs":
             # F2：定时任务增删改（仅 admin）。body:
             #   {"action": "add"|"update"|"delete", "job": {...}, "name": "..."}

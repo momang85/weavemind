@@ -25,7 +25,17 @@ export default memo(function ReportViewer() {
   const [shareDialogOpen, setShareDialogOpen] = useState(false)
   const [shareCopied, setShareCopied] = useState(false)
   const [shareError, setShareError] = useState('')
+  const [sharePassword, setSharePassword] = useState('')
+  const [shareTtlHours, setShareTtlHours] = useState('168') // 默认 7 天，上限 30 天
+  const [shareProtected, setShareProtected] = useState(false)
   const shareTaskId = currentTaskId || report?.taskId || null
+
+  const applyExpiry = (expiresAt?: string) => {
+    if (!expiresAt) return
+    const days = Math.round((new Date(expiresAt).getTime() - Date.now()) / 86400000)
+    const hours = Math.min(720, Math.max(24, (days || 7) * 24))
+    setShareTtlHours(String(hours))
+  }
 
   // 刷新/切换任务后恢复“已分享”状态（GET /api/share/<task_id>）
   useEffect(() => {
@@ -39,15 +49,18 @@ export default memo(function ReportViewer() {
       .then(d => {
         if (!cancelled && d?.shared && (d.url || d.path)) {
           setShareUrl(d.url || window.location.origin + d.path)
+          setShareProtected(Boolean(d.protected))
+          applyExpiry(d.expires_at)
         } else if (!cancelled) {
           setShareUrl(null)
+          setShareProtected(false)
         }
       })
       .catch(() => {})
     return () => { cancelled = true }
   }, [shareTaskId])
 
-  const createShare = async () => {
+  const generateShare = async () => {
     if (!shareTaskId || shareLoading) return
     setShareLoading(true)
     setShareError('')
@@ -55,19 +68,29 @@ export default memo(function ReportViewer() {
       const res = await fetch('/api/share', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ task_id: shareTaskId }),
+        body: JSON.stringify({
+          task_id: shareTaskId,
+          password: sharePassword,
+          ttl_hours: Number(shareTtlHours) || 168,
+        }),
       })
       const d = await res.json()
       if (!res.ok || !d.token) throw new Error(d.error || '分享失败，请稍后重试')
       const url = d.url || window.location.origin + d.path
       setShareUrl(url)
-      setShareDialogOpen(true)
+      setShareProtected(Boolean(d.protected))
+      applyExpiry(d.expires_at)
     } catch (e: any) {
       setShareError(e?.message || '分享失败，请稍后重试')
-      setShareDialogOpen(true)
     } finally {
       setShareLoading(false)
     }
+  }
+
+  const createShare = () => {
+    if (!shareTaskId || shareLoading) return
+    setShareError('')
+    setShareDialogOpen(true)
   }
 
   const revokeShare = async () => {
@@ -77,6 +100,8 @@ export default memo(function ReportViewer() {
     } catch { /* 即使请求失败也清理本地状态 */ }
     setShareUrl(null)
     setShareDialogOpen(false)
+    setSharePassword('')
+    setShareProtected(false)
   }
 
   const copyShare = async () => {
@@ -358,7 +383,9 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
             {shareUrl ? (
               <>
                 <p className="text-xs text-slate-500 mb-3">
-                  复制链接发给别人，对方无需登录即可在浏览器查看该报告（7 天内有效）。
+                  复制链接发给别人，对方无需登录即可在浏览器查看该报告
+                  （{Math.round(Number(shareTtlHours) / 24) || 7} 天内有效
+                  {shareProtected ? '，已开启访问密码' : ''}）。
                 </p>
                 <div className="flex gap-2">
                   <input readOnly value={shareUrl} onFocus={e => e.currentTarget.select()}
@@ -371,7 +398,33 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
                 </div>
               </>
             ) : (
-              <p className="text-xs text-red-400 mt-2">{shareError || '分享失败'}</p>
+              <>
+                <p className="text-xs text-slate-500 mb-3">
+                  可设置访问密码与有效期后生成分享链接；密码留空表示公开链接。
+                </p>
+                <label className="block text-xs text-slate-400 mb-1">
+                  访问密码（可选）
+                  <input type="password" value={sharePassword}
+                    onChange={e => setSharePassword(e.target.value)}
+                    placeholder="留空则不设密码"
+                    className="w-full mt-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none" />
+                </label>
+                <label className="block text-xs text-slate-400 mt-3 mb-1">
+                  有效期
+                  <select value={shareTtlHours}
+                    onChange={e => setShareTtlHours(e.target.value)}
+                    className="w-full mt-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none">
+                    <option value="168">7 天</option>
+                    <option value="336">14 天</option>
+                    <option value="720">30 天（上限）</option>
+                  </select>
+                </label>
+                <button onClick={generateShare} disabled={shareLoading}
+                  className="w-full mt-4 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg bg-cyan-500 text-slate-950 text-xs font-semibold hover:bg-cyan-400 disabled:opacity-50">
+                  {shareLoading ? '生成中...' : '生成分享链接'}
+                </button>
+                <p className="text-xs text-red-400 mt-2">{shareError || ''}</p>
+              </>
             )}
             {shareUrl && (
               <div className="mt-4 flex gap-2">

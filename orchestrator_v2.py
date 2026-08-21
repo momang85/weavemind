@@ -973,6 +973,30 @@ class OrchestratorV2:
         except Exception:
             return None
 
+    def _notify_done_async(
+        self, task_id: str, goal: str, status: str, report: str = "",
+    ) -> None:
+        """F5：任务终态外部通知（后台线程，不阻塞完成流程）。
+        链接复用已生成的分享路径（share_links.json）；任务未分享则不附链接，只附摘要。"""
+        def _notify_done() -> None:
+            try:
+                from notifications import (
+                    find_share_link,
+                    make_summary,
+                    notify_task_done,
+                )
+                notify_task_done(
+                    task_id,
+                    goal=goal,
+                    status=status,
+                    report_link=find_share_link(task_id),
+                    summary=make_summary(report),
+                )
+            except Exception as exc:
+                logger.warning("notify task done failed: %s", str(exc)[:150])
+
+        threading.Thread(target=_notify_done, daemon=True).start()
+
     @staticmethod
     def _read_acceptance_summary(task_id: str) -> dict | None:
         """读取验收摘要：{overall, gaps}（无验收报告返回 None）。"""
@@ -4323,6 +4347,7 @@ print("charts generated")
                 push_progress(self._messaging, task_id, "task_complete",
                               {"status": "FAILED", "summary": _llm_msg})
                 logger.error("Task %s aborted: %s", task_id, _llm_msg)
+                self._notify_done_async(task_id, goal, "FAILED", _llm_msg)
                 return {"task_id": task_id, "status": "FAILED",
                         "steps": [], "report": _llm_msg}
             # 主端点近期有鉴权/余额错误（已切备用）→ 弹警告，让用户知道质量下降原因
@@ -4338,6 +4363,7 @@ print("charts generated")
             # 单端点不足照常运行并在 llm_degraded 预置余额警告
             _balance_ok, _balance_msg = self._precheck_llm_balance(task_id)
             if not _balance_ok:
+                self._notify_done_async(task_id, goal, "FAILED", _balance_msg)
                 return {"task_id": task_id, "status": "FAILED",
                         "steps": [], "report": _balance_msg, "reason": _balance_msg}
         except Exception:
@@ -4370,6 +4396,7 @@ print("charts generated")
                     push_progress(self._messaging, task_id, "task_complete",
                                   {"status": "FAILED", "summary": str(exc)})
                     logger.error("Task %s aborted: %s", task_id, exc)
+                    self._notify_done_async(task_id, goal, "FAILED", str(exc))
                     return {"task_id": task_id, "status": "FAILED",
                             "steps": [], "report": str(exc)}
         # 模板路径：把历史经验作为额外上下文注入首步骤，让框架可复用
@@ -4388,6 +4415,7 @@ print("charts generated")
         if not steps:
             push_progress(self._messaging, task_id, "task_complete",
                           {"status": "FAILED", "summary": "Planning failed"})
+            self._notify_done_async(task_id, goal, "FAILED", "Planning failed")
             return {"task_id": task_id, "status": "FAILED", "steps": [], "report": "No plan generated"}
 
         push_progress(self._messaging, task_id, "plan_update",
@@ -4406,6 +4434,9 @@ print("charts generated")
             if confirmed is None:
                 push_progress(self._messaging, task_id, "task_complete",
                               {"status": "FAILED", "summary": "Plan not confirmed, task cancelled"})
+                self._notify_done_async(
+                    task_id, goal, "FAILED", "Plan not confirmed, task cancelled",
+                )
                 return {"task_id": task_id, "status": "FAILED", "steps": [],
                         "report": "Plan not confirmed"}
             steps = confirmed
@@ -4419,6 +4450,9 @@ print("charts generated")
             if not steps:
                 push_progress(self._messaging, task_id, "task_complete",
                               {"status": "FAILED", "summary": "Empty plan confirmed, task cancelled"})
+                self._notify_done_async(
+                    task_id, goal, "FAILED", "Empty plan confirmed, task cancelled",
+                )
                 return {"task_id": task_id, "status": "FAILED", "steps": [],
                         "report": "Empty plan confirmed"}
             # 确认后立即把状态从 AWAITING_CONFIRM 切到 RUNNING：
@@ -4796,6 +4830,9 @@ print("charts generated")
                 logger.warning("prompt refinery async failed: %s", str(exc)[:150])
 
         threading.Thread(target=_refine_async, daemon=True).start()
+
+        # F5：任务完成外部通知（后台线程，不阻塞完成流程）
+        self._notify_done_async(task_id, goal, overall, report)
 
         # 快速路径标志仅任务运行期间需要，用完即清，避免字典无限增长
         self._task_simple.pop(task_id, None)

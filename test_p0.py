@@ -2391,6 +2391,156 @@ class TestAcceptanceChecker(unittest.TestCase):
         self.assertIsInstance(out["gaps"], list)
         self.assertIn(out["overall"], ("pass", "fail"))
 
+    def test_structured_data_collected_as_known_source(self):
+        """F7：crypto/macro/news 的 structured_data.json 必须进入验收溯源源。"""
+        import json
+        import tempfile
+        from pathlib import Path
+        from acceptance_checker import _collect_sources
+
+        tmp = Path(tempfile.mkdtemp(prefix="acc_sd_"))
+        proj = tmp / "project"
+        proj.mkdir(parents=True)
+        (proj / "structured_data.json").write_text(json.dumps({
+            "source": "coingecko",
+            "data": {
+                "price": 67450,
+                "market_cap": 1320000000000,
+                "volume_24h": 42000000000,
+                "change_24h": 2.4,
+            },
+            "metadata": {"coin": "bitcoin", "last_updated": 1787150053},
+        }), encoding="utf-8")
+        sources = _collect_sources(str(tmp))
+        self.assertIn("structured_data", sources)
+        self.assertIn("67450", sources["structured_data"])
+        self.assertIn("1787150053", sources["structured_data"])
+
+    def test_crypto_traceability_with_structured_data(self):
+        """F7 回归：crypto 报告数字优先来自结构化数据，溯源率应达 100%；
+        USD/美元、万亿数量级归一可正确匹配；结构化数据源作为兜底参与溯源。"""
+        import json
+        import tempfile
+        from pathlib import Path
+        from acceptance_checker import (
+            check_number_traceability,
+            run_acceptance,
+        )
+
+        tmp = Path(tempfile.mkdtemp(prefix="acc_crypto_"))
+        proj = tmp / "project"
+        proj.mkdir(parents=True)
+        sd = {
+            "source": "coingecko",
+            "data": {
+                "price": 67450,
+                "market_cap": 1320000000000,
+                "volume_24h": 42000000000,
+                "change_24h": 2.4,
+            },
+            "metadata": {"coin": "bitcoin", "last_updated": 1787150053},
+        }
+        (proj / "structured_data.json").write_text(
+            json.dumps(sd), encoding="utf-8",
+        )
+        (proj / "clean_chart_data.json").write_text(json.dumps({
+            "market_data": [
+                {"type": "market_size", "label": "当前价格",
+                 "value": 67450, "unit": "USD", "source": "coingecko"},
+                {"type": "market_size", "label": "市值",
+                 "value": 1320000000000, "unit": "USD", "source": "coingecko"},
+                {"type": "market_size", "label": "24小时成交量",
+                 "value": 42000000000, "unit": "USD", "source": "coingecko"},
+                {"type": "market_size", "label": "24小时涨跌幅",
+                 "value": 2.4, "unit": "%", "source": "coingecko"},
+            ],
+        }), encoding="utf-8")
+        report = (
+            "比特币现价 67450 美元，市值 1.32 万亿美元，"
+            "24 小时成交额 420 亿美元，24 小时涨跌幅 2.4%；"
+            "数据更新时间戳 1787150053。"
+        )
+        # 域感知阈值：crypto 任务按 0.7 判定且结构化数据覆盖计入溯源
+        clean = {
+            "market_data": [
+                {"type": "market_size", "label": "当前价格",
+                 "value": 67450, "unit": "USD", "source": "coingecko"},
+                {"type": "market_size", "label": "市值",
+                 "value": 1320000000000, "unit": "USD", "source": "coingecko"},
+                {"type": "market_size", "label": "24小时成交量",
+                 "value": 42000000000, "unit": "USD", "source": "coingecko"},
+                {"type": "market_size", "label": "24小时涨跌幅",
+                 "value": 2.4, "unit": "%", "source": "coingecko"},
+            ],
+        }
+        r = check_number_traceability(
+            report,
+            {
+                "structured_data": json.dumps(sd),
+                "clean_chart_data": json.dumps(clean),
+            },
+            domain="crypto",
+        )
+        self.assertEqual(r["domain"], "crypto")
+        self.assertEqual(r["threshold"], 0.7)
+        self.assertTrue(r["pass"])
+        self.assertEqual(r["traceable_count"], r["total_count"])
+        self.assertEqual(r["amount_traceable"], r["amount_total"])
+        # 完整链路：run_acceptance 从工作区收集 structured_data.json
+        out = run_acceptance("t-crypto", "比特币最新价格与24小时行情", report, str(tmp))
+        trace = out["checks"]["number_traceability"]
+        self.assertTrue(trace["pass"])
+        self.assertGreaterEqual(trace["traceable_count"], 4)
+        # 只在 structured_data.json 中的数字（更新时间戳）也计入溯源
+        srcs = {t.get("source") for t in trace["traceable"]}
+        self.assertTrue(
+            srcs & {"clean_chart_data", "structured_data", "derived_from_clean"},
+            f"溯源来源缺失结构化数据：{srcs}",
+        )
+
+    def test_structured_injection_block_for_crypto(self):
+        """F7：crypto 的 structured_data.json 必须注入 [结构化数据] 报告块。"""
+        import json
+        import tempfile
+        from pathlib import Path
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        tmp = Path(tempfile.mkdtemp(prefix="acc_inj_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            proj = ws_mod.task_project_dir("t-inj")
+            proj.mkdir(parents=True, exist_ok=True)
+            (proj / "structured_data.json").write_text(json.dumps({
+                "source": "coingecko",
+                "data": {
+                    "price": 67450,
+                    "market_cap": 1320000000000,
+                    "volume_24h": 42000000000,
+                    "change_24h": 2.4,
+                },
+                "metadata": {"coin": "bitcoin", "vs_currency": "usd"},
+            }), encoding="utf-8")
+            block = OrchestratorV2._structured_injection("t-inj")
+            self.assertIn("[结构化数据]", block)
+            self.assertIn("CoinGecko", block)
+            self.assertIn("当前价格", block)
+            self.assertIn("67450", block)
+            self.assertIn("优先引用", block)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+
+    def test_report_prompt_has_structured_data_rules(self):
+        """F7：report_generator 提示词必须含 [结构化数据] 引用与禁止编造规则。"""
+        from pathlib import Path
+
+        src = Path("workers/report_generator_worker.py").read_text(encoding="utf-8")
+        self.assertIn("[结构化数据]", src)
+        self.assertIn("CoinGecko 行情", src)
+        self.assertIn("禁止编造", src)
+        self.assertIn("基于模型知识，未在本次检索中验证", src)
+
     def test_orchestrator_acceptance_hook(self):
         """报告生成后验收：acceptance_report.json 写入工作区。"""
         import tempfile

@@ -54,6 +54,26 @@
     "_comment": "F4 数据源扩展：CoinGecko 免费公开接口无需 key；FRED CSV 与 Google News RSS 亦为公开接口。crypto_api_key 仅作未来付费额度预留。",
     "crypto_api_key": ""
   },
+  "notifications": {
+    "_comment": "F5 任务完成通知：每项 enabled=true 才发送；发送失败仅记日志，不阻塞任务完成流程。密码/密钥仅可写不可回显。",
+    "webhook": {
+      "enabled": false,
+      "url": "https://example.com/weavemind-hook"
+    },
+    "serverchan": {
+      "enabled": false,
+      "sendkey": ""
+    },
+    "email": {
+      "enabled": false,
+      "host": "smtp.example.com",
+      "port": 465,
+      "user": "notify@example.com",
+      "password": "",
+      "from": "notify@example.com",
+      "to": ["you@example.com"]
+    }
+  },
   "scheduled_jobs": [
     {
       "_comment": "F2 定时任务：interval_minutes（整数分钟）与 cron（每日 HH:MM）二选一；project 默认 default；enabled=false 可暂停。",

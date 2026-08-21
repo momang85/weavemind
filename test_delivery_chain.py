@@ -2353,8 +2353,22 @@ class TestReportShare(unittest.TestCase):
             web_ui._sessions.update(self._saved_sessions)
         shutil.rmtree(self._tmp, ignore_errors=True)
 
-    def _handler(self, path: str, method: str = "GET", body: dict | None = None):
-        h = self._FakeHandler(path, body, {"Authorization": "Bearer " + self._admin_token})
+    def _handler(
+        self,
+        path: str,
+        method: str = "GET",
+        body: dict | None = None,
+        headers: dict | None = None,
+        auth: bool = True,
+    ):
+        """构造假 Handler；auth=False 模拟未登录访客（公开分享页/密码验证）。"""
+        h = self._FakeHandler(
+            path,
+            body,
+            ({"Authorization": "Bearer " + self._admin_token} if auth else {}),
+        )
+        if headers:
+            h.headers.update(headers)
         h.command = method
         return h
 
@@ -2448,6 +2462,153 @@ class TestReportShare(unittest.TestCase):
         self.web_ui.Handler.do_GET(h)
         self.assertEqual(h._status, 200)
         self.assertIn("重启存活报告", h.html_body())
+
+    def test_password_share_flow(self):
+        """F6：密码分享 401→错误密码 403→正确密码放行（Cookie 7 天），
+        且受保护任务的 /files 附件同样需要放行 Cookie。"""
+        import workspace as ws_mod
+        from datetime import datetime, timezone
+
+        tid = "t-share-pwd"
+        ws = ws_mod.task_workspace(tid)
+        (ws / "project" / "charts").mkdir(parents=True)
+        (ws / "project" / "charts" / "a.png").write_bytes(b"png")
+        (ws / "charts").mkdir(parents=True)
+        (ws / "charts" / "a.png").write_bytes(b"png")
+        with self.web_ui._task_lock:
+            self.web_ui._task_results[tid] = {
+                "task_id": tid,
+                "status": "SUCCESS",
+                "goal": "密码保护报告",
+                "report": (
+                    "# 密码保护报告\n\n"
+                    "![图](charts/a.png)\n\n"
+                    "比特币现价 67450 美元。"
+                ),
+            }
+        try:
+            # 带密码 + 24 小时有效期创建分享
+            h = self._handler("/api/share", "POST", {
+                "task_id": tid,
+                "password": "secret123",
+                "ttl_hours": 24,
+            })
+            self.web_ui.Handler.do_POST(h)
+            self.assertEqual(h._status, 200)
+            d = h.json_body()
+            token = d["token"]
+            self.assertTrue(d["protected"])
+            self.assertEqual(d["expires_in_days"], 1)
+            self.assertIn("expires_at", d)
+            # 状态查询接口返回保护与过期信息
+            hs = self._handler(f"/api/share/{tid}")
+            self.web_ui.Handler.do_GET(hs)
+            sd = hs.json_body()
+            self.assertTrue(sd["protected"])
+            self.assertEqual(sd["expires_at"], d["expires_at"])
+            # 未验证：分享页 401（密码输入页），附件 401
+            h2 = self._handler(f"/share/{token}", auth=False)
+            self.web_ui.Handler.do_GET(h2)
+            self.assertEqual(h2._status, 401)
+            self.assertIn("需要密码", h2.html_body())
+            hf = self._handler(f"/files/{tid}/charts/a.png", auth=False)
+            self.web_ui.Handler.do_GET(hf)
+            self.assertEqual(hf._status, 401)
+            # 错误密码 → 403
+            h3 = self._handler(
+                f"/share/{token}/auth", "POST", {"password": "wrong"}, auth=False,
+            )
+            self.web_ui.Handler.do_POST(h3)
+            self.assertEqual(h3._status, 403)
+            self.assertIn("密码错误", h3.html_body())
+            # 正确密码 → 302 + Set-Cookie share_<token>=ok
+            h4 = self._handler(
+                f"/share/{token}/auth", "POST", {"password": "secret123"}, auth=False,
+            )
+            self.web_ui.Handler.do_POST(h4)
+            self.assertEqual(h4._status, 302)
+            self.assertEqual(h4._headers.get("Location"), f"/share/{token}")
+            set_cookie = h4._headers.get("Set-Cookie", "")
+            self.assertIn(f"share_{token}=ok", set_cookie)
+            self.assertIn("Max-Age=604800", set_cookie)
+            # 带 Cookie：分享页 200，附件 200
+            h5 = self._handler(
+                f"/share/{token}",
+                headers={"Cookie": f"share_{token}=ok"},
+                auth=False,
+            )
+            self.web_ui.Handler.do_GET(h5)
+            self.assertEqual(h5._status, 200)
+            self.assertIn("密码保护报告", h5.html_body())
+            self.assertIn("67450", h5.html_body())
+            hf2 = self._handler(
+                f"/files/{tid}/charts/a.png",
+                headers={"Cookie": f"share_{token}=ok"},
+                auth=False,
+            )
+            self.web_ui.Handler.do_GET(hf2)
+            self.assertEqual(hf2._status, 200)
+            self.assertEqual(hf2.wfile.getvalue(), b"png")
+            # 撤销后 404（不受密码影响）
+            hr = self._handler(f"/api/share/{tid}", "DELETE")
+            self.web_ui.Handler.do_DELETE(hr)
+            h6 = self._handler(
+                f"/share/{token}",
+                headers={"Cookie": f"share_{token}=ok"},
+                auth=False,
+            )
+            self.web_ui.Handler.do_GET(h6)
+            self.assertEqual(h6._status, 404)
+        finally:
+            with self.web_ui._task_lock:
+                self.web_ui._task_results.pop(tid, None)
+
+    def test_share_ttl_custom_expiry(self):
+        """F6：ttl_hours 自定义过期写入 expires_at；mock 时间越过过期点后失效。"""
+        import json as _json
+        from datetime import datetime, timezone
+
+        tid = "t-share-ttl"
+        with self.web_ui._task_lock:
+            self.web_ui._task_results[tid] = {
+                "task_id": tid,
+                "status": "SUCCESS",
+                "goal": "TTL 测试报告",
+                "report": "# TTL 测试报告\n\n市场数据见正文。",
+            }
+        try:
+            h = self._handler("/api/share", "POST", {
+                "task_id": tid,
+                "ttl_hours": 1,
+            })
+            self.web_ui.Handler.do_POST(h)
+            self.assertEqual(h._status, 200)
+            token = h.json_body()["token"]
+            with open(self.web_ui.SHARE_FILE, "r", encoding="utf-8") as f:
+                saved = _json.load(f)
+            rec = saved[token]
+            exp = datetime.fromisoformat(rec["expires_at"].replace("Z", "+00:00"))
+            now = datetime.now(timezone.utc)
+            self.assertGreater(exp, now)
+            self.assertLess((exp - now).total_seconds(), 3600)
+            self.assertGreater((exp - now).total_seconds(), 3500)
+            # 上限校验：超过 30 天拒绝
+            h2 = self._handler("/api/share", "POST", {
+                "task_id": tid,
+                "ttl_hours": 721,
+            })
+            self.web_ui.Handler.do_POST(h2)
+            self.assertEqual(h2._status, 400)
+            # mock 时间越过过期点 → token 立即失效
+            old_time = self.web_ui.time.time
+            self.web_ui.time.time = lambda: exp.timestamp() + 1
+            try:
+                self.assertIsNone(self.web_ui._resolve_share_token(token))
+            finally:
+                self.web_ui.time.time = old_time
+        finally:
+            with self.web_ui._task_lock:
+                self.web_ui._task_results.pop(tid, None)
 
     def test_invalid_token_and_missing_task_404(self):
         h = self._handler("/share/not-a-real-token")
