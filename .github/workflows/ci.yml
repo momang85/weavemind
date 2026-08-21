@@ -15,7 +15,8 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
       - name: Install CJK fonts (PDF tests)
-        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
+        # wqy-microhei 是 TrueType 轮廓（report_pdf 支持）；Noto CJK 是 CFF 轮廓会被跳过
+        run: sudo apt-get update && sudo apt-get install -y fonts-wqy-microhei
       - name: Secret scan
         run: python scripts/check_secrets.py
       - name: Compile all Python files

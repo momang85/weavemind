@@ -73,6 +73,11 @@ class TTFont:
             tag: data[off:off + length]
             for tag, (off, length) in tables.items()
         }
+        # OpenType/CFF 字体（如 NotoSansCJK.ttc、部分思源字体）只有 CFF 轮廓，
+        # 本解析器按 TrueType(glyf) 嵌入（CIDFontType2），CFF 字体会产生乱码。
+        # 加载时直接判为不支持，调用方回退 Helvetica（无中文）或换字体。
+        if "CFF " in tables and "glyf" not in tables:
+            raise ValueError(f"OpenType/CFF font not supported: {path}")
         head = self._table_data["head"]
         self.units_per_em = _u16(head, 18)
         self.x_min, self.y_min = _i16(head, 36), _i16(head, 38)
