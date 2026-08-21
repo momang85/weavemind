@@ -110,11 +110,25 @@ bash start.sh                        # 或 start.bat / docker compose up --build
 ## 功能特性
 
 - LLM 规划 → 多 Worker **并行 DAG** 执行 → 自动挑选最实质产出作为最终报告
-- 10 个专职 Worker：搜索、网页抓取、内容摘要、代码沙箱（密钥剥离）、数据处理、
-  EDA、模型训练、报告生成、打包、文件 IO
+- 11 个专职 Worker：搜索、网页抓取、内容摘要、代码沙箱、数据处理、
+  EDA、模型训练、报告生成、打包、文件 IO、ReAct 迭代式调研
+- **结构化数据适配器**：东方财富（港股）、SEC EDGAR（美股）、A 股、CoinGecko（加密货币）、
+  FRED（宏观指标）、Google News（新闻）——金融/加密/宏观任务自动预载权威数据
 - 长期记忆（ChromaDB）：任务前注入相关经验（相关性阈值过滤）、任务后沉淀策略
 - 对话上下文：同一会话连续追问，规划器携带前序要求与结果
 - Critic 计划评审、失败自动重试 + 单步重规划、Worker 守护自愈、进化沙箱
+- **验收器**（数字溯源/主体归属/来源标注诚实性）→ 带缺口任务标记 `SUCCESS_WITH_ISSUES`，
+  反思按失败诊断（step_failure.json）精准补缺口
+- **多用户鉴权 + 审计日志**：登录/角色（admin/viewer）、操作审计、初始管理员引导
+- **报告分享**：一键生成公开只读链接（可选密码 + 自定义有效期 1–30 天）
+- **任务完成通知**：Webhook / Server酱 / Email 三通道
+- **报告 PDF 导出**：服务端生成（嵌入中文字体），或浏览器打印
+- **多项目工作区**：任务按项目隔离组织，成果互不干扰
+- **定时任务**：按间隔或每日时间自动执行目标
+- **MCP 兼容**：自研 MCP Server（mcp_lite）+ 第三方 MCP Client 即插即用
+- **代码沙箱三模式**：docker（容器隔离）/ restricted（密钥剥离）/ none，自动探测降级
+- **模型分级路由**：规划/执行/评测按用途选模型；相同目标规划缓存命中零成本
+- **成本与可观测**：任务级 token/成本台账、SLO 看板、LLM 端点健康与自动切流
 - Web 控制台：实时进度、任务树、Agent 拓扑、健康监控、历史会话、在线配置、LLM 用量
 
 ## 安装与运行（支持多种方式）
@@ -237,16 +251,22 @@ Web 控制台（8080）默认要求登录，未登录只能访问公开只读分
 
 | 组件 | 说明 |
 | --- | --- |
-| `orchestrator_v2.py` | 编排器：规划 → 并行 DAG 执行 → 自主迭代；失败重试/重规划；计划确认 |
+| `orchestrator_v2.py` | 编排器：规划 → 并行 DAG 执行 → 自主迭代；失败重试/重规划；计划确认；验收状态诚实化 |
 | `common.py` | Redis 消息/队列、SQLite/Redis 双注册表（线程安全） |
-| `llm_client.py` | LLM 调用（同步/异步、JSON 容错、用量统计） |
+| `llm_client.py` | LLM 调用（同步/异步、JSON 容错、用量统计、模型分级路由、调用缓存、余额感知） |
 | `memory_manager.py` | ChromaDB 长期记忆（注入 + 沉淀 + 可视化导出） |
 | `worker_base.py` / `async_worker_base.py` | 同步/异步 Worker 基类（心跳、kill 监听） |
-| `workers/` | 10 个专职 Worker（含 web_fetch、代码沙箱） |
-| `web_ui.py` | 后端 API：任务/会话/记忆/进化/指标；生产模式伺服前端 |
-| `worker_guardian.py` | Worker 守护：心跳监控、进程级复活、隔离 |
+| `workers/` | 11 个专职 Worker（含 web_fetch、代码沙箱、ReAct） |
+| `adapters/` | 结构化数据适配器：eastmoney（港股）/ sec_edgar（美股）/ A股 / coingecko / macro（FRED）/ news（RSS）+ resolver/router |
+| `acceptance_checker.py` | 验收器：数字溯源、主体归属、来源标注诚实性（含媒体别名归组、补录建议） |
+| `web_ui.py` | 后端 API：任务/会话/记忆/进化/指标/鉴权/审计/分享/通知/PDF/定时任务；生产模式伺服前端 |
+| `worker_guardian.py` | Worker 守护：心跳监控、进程级复活、启动宽限期、隔离 |
 | `evolution_sandbox.py` | 策略进化：变异 → 锦标赛 → 红线 → 部署请求 |
-| `frontend/` | React + Vite + Tailwind 控制台（任务、对话、拓扑、健康、记忆与进化、历史、设置） |
+| `notifications.py` | 任务完成通知：Webhook / Server酱 / Email |
+| `report_pdf.py` | 纯 Python PDF 生成（嵌入中文字体，跨平台） |
+| `scheduled_jobs.py` | 定时任务调度（interval / 每日 cron） |
+| `launcher.py` | 服务启动/停止/状态 + supervise 守护模式（崩溃自愈） |
+| `frontend/` | React + Vite + Tailwind 控制台（任务、对话、拓扑、健康、记忆与进化、历史、设置、登录） |
 
 ## 数据流
 
@@ -273,16 +293,31 @@ GitHub Actions CI 自动执行后端编译/单测与前端构建。
 
 ## 路线图
 
-- [x] 并行 DAG 执行、失败重试/重规划、Worker 守护
+**V1.0 已完成 ✅**
+
+- [x] 并行 DAG 执行、失败重试/重规划、Worker 守护（含启动宽限期与残留清理）
 - [x] 对话上下文、历史会话切换、快捷查看/重跑
 - [x] 自主迭代模式、计划可编辑
 - [x] 记忆与进化可视化（含系统自述、锦标赛回放）
-- [x] 工具插件化 + MCP 兼容（让用户 3 行代码注册自定义工具）— 落地：`mcp_lite.py`（自研 MCP server）、`mcp_client.py`（对接第三方 MCP）、`tool_dispatch.py`（路由 + 审计）、`react_agent`（确定性路由）
-- [ ] 场景模板库（数据分析 / 行业调研 / 董事会报告 / 公司调研与财报分析…）— 已具备基础模板：`templates.json` 内置 4 个模板，并支持 `auto-*` 自动固化模板
-- [ ] 多用户鉴权与审计日志
-- [x] 私有化部署文档（[docs/部署指南.md](docs/部署指南.md)）
-- [ ] 代码执行容器级隔离
-- [ ] 报告一键分享链接
+- [x] 工具插件化 + MCP 兼容（`mcp_lite.py` 自研 MCP server / `mcp_client.py` 第三方 MCP / `tool_dispatch.py` 路由+审计）
+- [x] 多用户鉴权与审计日志（admin/viewer 角色、操作审计、初始管理员引导）
+- [x] 报告一键分享链接（公开只读 + 可选密码 + 自定义有效期）
+- [x] 代码执行容器级沙箱（docker-first 自动降级：容器隔离 → restricted → none）
+- [x] 私有化部署文档（[docs/部署指南.md](docs/部署指南.md)）+ Docker Compose / Windows / Linux 一键
+- [x] 验收器（数字溯源/主体归属/来源标注诚实性）→ SUCCESS_WITH_ISSUES 状态诚实化
+- [x] 结构化数据适配器：港股/美股/A股/加密货币/宏观/新闻 六类数据源
+- [x] 任务完成通知（Webhook / Server酱 / Email）、报告 PDF 导出、多项目工作区、定时任务
+- [x] 模型分级路由（plan/exec/judge 分层）+ LLM 调用缓存 + 反思收敛（成本优化）
+- [x] 编排器/WebUI/配置韧性：launcher 守护自愈、Redis AOF、system 配置热重载
+- [x] 场景模板库基础（4 个手工模板 + auto-* 自动固化，手工模板优先路由）
+
+**下一步（规划中）**
+
+- [ ] 评测集随真实任务自动生长（验收 fail 自动沉淀为新评测案例）
+- [ ] 策略灰度与回滚（进化锦标赛胜者先灰度，效果回退自动回滚）
+- [ ] 错误模式库（step_failure 结构化诊断按 error_type 聚合为修复模板）
+- [ ] 成本预算机制（任务/月度预算，超限自动降级模型）
+- [ ] 多语言报告、报告 HTML 模板定制
 
 ## 贡献
 
