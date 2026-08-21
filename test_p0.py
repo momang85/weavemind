@@ -4077,9 +4077,12 @@ class TestReportPdf(unittest.TestCase):
         from pypdf import PdfReader
         reader = PdfReader(io.BytesIO(data))
         self.assertGreaterEqual(len(reader.pages), 1)
-        text = reader.pages[0].extract_text()
-        self.assertIn("测试标题", text)
-        self.assertIn("加粗结论", text)
+        # 中文文本提取断言仅在环境中文字体可用时执行
+        # （CI/无字体容器回退 Helvetica 时中文会变占位符，但 PDF 头与结构仍正确）
+        if report_pdf._load_font() is not None:
+            text = reader.pages[0].extract_text()
+            self.assertIn("测试标题", text)
+            self.assertIn("加粗结论", text)
 
     def test_pdf_route_404_without_report(self):
         import web_ui

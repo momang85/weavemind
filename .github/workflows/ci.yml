@@ -14,6 +14,8 @@ jobs:
           python-version: "3.11"
       - name: Install dependencies
         run: pip install -r requirements.txt
+      - name: Install CJK fonts (PDF tests)
+        run: sudo apt-get update && sudo apt-get install -y fonts-noto-cjk
       - name: Secret scan
         run: python scripts/check_secrets.py
       - name: Compile all Python files
