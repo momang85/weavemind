@@ -138,6 +138,22 @@ next_steps 示例（instruction 必须自带 角色/受众/输出要求/验收�
 # Orchestrator V2
 # ─────────────────────────────────────────────
 
+# C3：system 段热重载字段表（实例属性, 配置键, 类型转换, 缺省值, 取值钳制）
+# 与 __init__ 的解析逻辑保持一致；只覆盖本次要求的旋钮（含 task_timeout）。
+_SYSTEM_HOT_RELOAD_FIELDS = (
+    ("_max_steps", "max_steps", int, 8, lambda v: max(1, v)),
+    ("_max_parallel", "max_parallel", int, 3, lambda v: max(1, v)),
+    ("_max_iterations", "max_iterations", int, 2, lambda v: max(0, v)),
+    ("_critic_enabled", "critic", bool, False, lambda v: bool(v)),
+    ("_critic_timeout", "critic_timeout", int, 30, lambda v: max(10, v)),
+    ("_max_retry", "max_retry", int, 2, lambda v: max(0, v)),
+    ("_replan_depth", "replan_depth", int, 2, lambda v: max(0, v)),
+    ("_task_timeout", "task_timeout", int, 300, lambda v: max(1, v)),
+    ("_stall_timeout", "stall_timeout", int, 60, lambda v: max(5, v)),
+    ("_plan_confirm_timeout", "plan_confirm_timeout", int, 300, lambda v: max(30, v)),
+)
+
+
 class OrchestratorV2:
     def __init__(self):
         # Load config.json for LLM settings (if env not set)
@@ -162,6 +178,7 @@ class OrchestratorV2:
         )
         self._plan_confirm_timeout = 300
         self._stall_timeout = 300
+        self._task_timeout = 300
         self._max_offtopic_regenerations = 2
         self._planner_model = None
         try:
@@ -191,6 +208,11 @@ class OrchestratorV2:
         self._task_user_ids: dict[str, str] = {}
         self._task_sources_lock = threading.Lock()
         self._task_starts_lock = threading.Lock()
+        # C3：system 段热重载的 mtime 缓存（机制与 llm_client 一致）
+        self._system_cfg_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "config.json"
+        )
+        self._system_cfg_mtime: float | None = None
         _cfg = {}
         try:
             with open(_cfg_path, 'r') as _f:
@@ -218,10 +240,13 @@ class OrchestratorV2:
             self._max_redo_steps = max(
                 1, int(os.environ.get("REFLECT_MAX_REDO_STEPS", self._max_redo_steps))
             )
+            self._task_timeout = max(1, int(_sys.get('task_timeout', 300)))
             self._plan_confirm_timeout = max(30, int(_sys.get('plan_confirm_timeout', 300)))
             self._stall_timeout = max(5, int(_sys.get('stall_timeout', 60)))
         except Exception:
             pass
+        # 首次加载即缓存 mtime，后续仅 mtime 变化时热重载
+        self._reload_system_config()
         self._redis = self._new_redis_sync()
         self._redis_reg = RedisAgentRegistry(self._redis)
         self._sqlite_reg = AgentRegistry(os.environ.get("REGISTRY_DB", "agents.db"))
@@ -248,6 +273,42 @@ class OrchestratorV2:
         else:
             self._planner_llm = self._plan_llm
         logger.info("OrchestratorV2 initialized")
+
+    def _reload_system_config(self) -> list[str]:
+        """system 段配置热重载（mtime 检测，机制与 llm_client 一致）。
+
+        仅在 mtime 变化时读取并逐个赋值；返回本次变化的配置键。
+        边界：执行中的任务继续用已读取的属性，热重载对下一任务生效。
+        """
+        path = getattr(self, "_system_cfg_path", None)
+        if not path:
+            return []
+        try:
+            m = os.path.getmtime(path)
+        except Exception:
+            return []
+        old_mtime = getattr(self, "_system_cfg_mtime", None)
+        if old_mtime is not None and m == old_mtime:
+            return []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            _sys = cfg.get("system") or {}
+        except Exception:
+            return []
+        changed: list[str] = []
+        for attr, key, caster, default, clamp in _SYSTEM_HOT_RELOAD_FIELDS:
+            try:
+                value = clamp(caster(_sys.get(key, default)))
+            except Exception:
+                continue
+            if getattr(self, attr, None) != value:
+                setattr(self, attr, value)
+                changed.append(key)
+        self._system_cfg_mtime = m
+        if changed and old_mtime is not None:
+            logger.info("system 配置热重载：%s", ", ".join(changed))
+        return changed
 
     def _find_agent(self, capability: str) -> str | None:
         """Try Redis first, fall back to SQLite."""
@@ -329,6 +390,9 @@ class OrchestratorV2:
     def _plan(self, goal: str, task_id: str, context: str = "",
               memory_context: str = "") -> list[dict]:
         """Ask LLM to decompose goal into steps."""
+        # C3：计划生成前热重载 system 段配置（低频 mtime 检测，无变化直接返回；
+        # 执行中任务不受影响，下一任务生效）
+        self._reload_system_config()
         direct = self._direct_deliverable_plan(goal)
         if direct:
             push_progress(self._messaging, task_id, "log",
@@ -2254,8 +2318,10 @@ class OrchestratorV2:
         except Exception as exc:
             logger.warning("step envelope failed: %s", str(exc)[:100])
         step_id = step.get("step_id", uuid.uuid4().hex[:8])
-        # LLM 生成/运行较慢：普通步骤下限 300s，code_execution（含生成-修复循环）下限 600s
-        timeout = max(int(step.get("timeout", 300) or 300), 300)
+        # LLM 生成/运行较慢：普通步骤下限 300s，code_execution（含生成-修复循环）下限 600s；
+        # 默认超时取 system.task_timeout（C3 热重载后对下一任务生效）
+        task_timeout = int(getattr(self, "_task_timeout", 300) or 300)
+        timeout = max(int(step.get("timeout", task_timeout) or task_timeout), 300)
         if capability == "code_execution":
             timeout = max(timeout, 600)
 
@@ -4008,6 +4074,8 @@ print("charts generated")
             set_task_context(task_id)
         except Exception:
             pass
+        # C3：任务开始前热重载 system 段配置（下一任务生效；执行中任务不受影响）
+        self._reload_system_config()
         started = time.time()
         with self._task_starts_lock:
             self._task_starts[task_id] = started

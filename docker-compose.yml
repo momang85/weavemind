@@ -4,6 +4,8 @@ services:
   redis:
     image: redis:7-alpine
     container_name: zhiguan-redis
+    # C2：开启 AOF（appendonly yes），保留默认 RDB 的同时容器重启不丢队列数据
+    command: ["redis-server", "--appendonly", "yes"]
     ports:
       - "6379:6379"
     volumes:

@@ -17,7 +17,10 @@ import threading
 import time
 import unittest
 import zipfile
+from pathlib import Path
+from unittest import mock
 
+import orchestrator_v2
 from orchestrator_v2 import OrchestratorV2
 import workspace as ws_mod
 
@@ -728,6 +731,114 @@ class TestReflectionFailureStopsIteration(unittest.TestCase):
         res = o.run("t-stop-fail", "目标", auto_run=True)
         self.assertEqual(reflected["n"], 1, "反思失败后不应再进入下一轮")
         self.assertEqual(len(res["steps"]), 1)
+
+
+class TestSystemConfigHotReload(unittest.TestCase):
+    """C3 system 段热重载回归：mtime 变化才重新赋值，未变化不重复加载。"""
+
+    def _make(self, cfg_path):
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._system_cfg_path = str(cfg_path)
+        o._system_cfg_mtime = None
+        o._max_retry = 2
+        o._replan_depth = 2
+        o._critic_enabled = False
+        o._critic_timeout = 30
+        o._max_steps = 8
+        o._max_parallel = 3
+        o._max_iterations = 2
+        o._task_timeout = 300
+        o._stall_timeout = 60
+        o._plan_confirm_timeout = 300
+        return o
+
+    @staticmethod
+    def _write(path, **system):
+        path.write_text(json.dumps({"system": system}), encoding="utf-8")
+
+    def test_reload_applies_system_section(self):
+        """system 段 mtime 变化：全部旋钮逐个热更新，并打一条变化日志。"""
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "config.json"
+            # 首次写入与实例默认一致的值：只缓存 mtime，不产生变化
+            self._write(p, max_steps=8, max_parallel=3, max_iterations=2,
+                        critic=False, critic_timeout=30, max_retry=2,
+                        replan_depth=2, task_timeout=300, stall_timeout=60,
+                        plan_confirm_timeout=300)
+            o = self._make(p)
+            mt = {"v": 100.0}
+            with mock.patch("orchestrator_v2.os.path.getmtime",
+                            side_effect=lambda *a, **k: mt["v"]), \
+                    mock.patch.object(orchestrator_v2.logger, "info") as info:
+                o._reload_system_config()  # 首次：缓存 mtime，无变化
+                self._write(p, max_steps=5, max_parallel=2, max_iterations=1,
+                            critic=True, critic_timeout=45, max_retry=1,
+                            replan_depth=3, task_timeout=120, stall_timeout=90,
+                            plan_confirm_timeout=180)
+                mt["v"] = 200.0
+                o._reload_system_config()  # mtime 变化：热重载并打日志
+            self.assertEqual(o._max_steps, 5)
+            self.assertEqual(o._max_parallel, 2)
+            self.assertEqual(o._max_iterations, 1)
+            self.assertTrue(o._critic_enabled)
+            self.assertEqual(o._critic_timeout, 45)
+            self.assertEqual(o._max_retry, 1)
+            self.assertEqual(o._replan_depth, 3)
+            self.assertEqual(o._task_timeout, 120)
+            self.assertEqual(o._stall_timeout, 90)
+            self.assertEqual(o._plan_confirm_timeout, 180)
+            hot = [c for c in info.call_args_list
+                   if c.args and "system 配置热重载" in c.args[0]]
+            self.assertEqual(len(hot), 1, "仅 mtime 变化时应打一次热重载日志")
+            self.assertIn("max_steps", str(hot[0]))
+            self.assertIn("task_timeout", str(hot[0]))
+
+    def test_mtime_unchanged_skips_reassignment(self):
+        """mtime 未变：即使文件内容已改也不重复赋值、不打热重载日志。"""
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "config.json"
+            self._write(p, max_steps=5, max_parallel=2)
+            o = self._make(p)
+            mt = {"v": 100.0}
+            with mock.patch("orchestrator_v2.os.path.getmtime",
+                            side_effect=lambda *a, **k: mt["v"]), \
+                    mock.patch.object(orchestrator_v2.logger, "info") as info:
+                o._reload_system_config()
+                self.assertEqual(o._max_steps, 5)
+                # 内容变化但 mtime 相同（粗粒度文件系统场景）→ 应跳过
+                self._write(p, max_steps=12, max_parallel=2)
+                o._reload_system_config()
+            self.assertEqual(o._max_steps, 5, "mtime 未变不应重新赋值")
+            self.assertFalse(
+                any(c.args and "system 配置热重载" in c.args[0]
+                    for c in info.call_args_list),
+                "mtime 未变时不应触发热重载日志",
+            )
+
+    def test_missing_config_is_safe(self):
+        """config.json 不存在：热重载静默跳过，实例属性保持默认。"""
+        with tempfile.TemporaryDirectory() as d:
+            o = self._make(Path(d) / "no-config.json")
+            o._reload_system_config()
+            self.assertEqual(o._max_steps, 8)
+            self.assertEqual(o._task_timeout, 300)
+
+    def test_plan_entry_triggers_reload(self):
+        """计划生成入口（_plan）会调用一次热重载。"""
+        o = make_orch()
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "config.json"
+            self._write(p, max_steps=4, max_parallel=2)
+            o._system_cfg_path = str(p)
+            o._system_cfg_mtime = None
+            with mock.patch("orchestrator_v2.os.path.getmtime", return_value=100.0), \
+                    mock.patch.object(
+                        o, "_reload_system_config",
+                        wraps=o._reload_system_config) as reload_spy:
+                steps = o._plan("做一个贪吃蛇游戏", "t-hot-plan", "", "")
+        reload_spy.assert_called_once()
+        self.assertEqual(o._max_steps, 4, "热重载应在计划生成前生效")
+        self.assertTrue(steps)
 
 
 if __name__ == "__main__":

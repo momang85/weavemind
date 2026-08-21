@@ -3630,6 +3630,110 @@ class TestLauncherStopFallback(unittest.TestCase):
             launcher._is_residual_command("python -m pytest tests", 6))
 
 
+class TestLauncherSupervise(unittest.TestCase):
+    """C1 launcher 守护模式回归：存活不动作、崩溃自动重启、连续 3 次失败隔离。
+    全部 mock（_is_alive/_spawn_service），不起真实进程。"""
+
+    def _setup(self):
+        import launcher
+
+        tmp = Path(tempfile.mkdtemp(prefix="wm_supv_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        return launcher, tmp
+
+    @staticmethod
+    def _services(launcher, names=("webui", "orchestrator")):
+        """构造与 build_services 同构的少量服务列表（守护只监督该列表）。"""
+        return [
+            (name, [sys.executable, str(launcher.BASE_DIR / f"{name}.py")],
+             launcher.BASE_DIR, None)
+            for name in names
+        ]
+
+    def test_alive_services_not_restarted(self):
+        """正常存活的服务：巡检不重启、pids 不变。"""
+        launcher, tmp = self._setup()
+        pids = {"services": {"webui": 111, "orchestrator": 222}}
+        with mock.patch.object(launcher, "_is_alive", return_value=True) as alive, \
+                mock.patch.object(launcher, "_spawn_service", return_value=999) as spawn:
+            out, changed = launcher._supervise_once(
+                pids, self._services(launcher), {})
+        self.assertFalse(changed)
+        self.assertEqual(out["services"], {"webui": 111, "orchestrator": 222})
+        self.assertEqual(alive.call_count, 2)
+        spawn.assert_not_called()
+
+    def test_dead_service_restarted_and_pids_updated(self):
+        """orchestrator 崩溃：自动重启并更新 pids.json 内容。"""
+        launcher, tmp = self._setup()
+        pids = {"services": {"webui": 111, "orchestrator": 222}}
+        state: dict = {}
+        with mock.patch.object(
+                launcher, "_is_alive", side_effect=lambda pid: pid == 111) as alive, \
+                mock.patch.object(launcher, "_spawn_service", return_value=333) as spawn, \
+                self.assertLogs("launcher", level="INFO") as cm:
+            out, changed = launcher._supervise_once(
+                pids, self._services(launcher), state)
+        self.assertTrue(changed)
+        self.assertEqual(out["services"]["orchestrator"], 333)
+        self.assertEqual(spawn.call_count, 1)
+        self.assertEqual(spawn.call_args.args[0], "orchestrator")
+        self.assertEqual(alive.call_args_list, [mock.call(111), mock.call(222)])
+        self.assertTrue(
+            any("supervise: 重启服务 orchestrator" in line for line in cm.output),
+            "应打印重启日志",
+        )
+        self.assertEqual(state["restart_counts"]["orchestrator"], 1)
+
+    def test_three_failed_restarts_quarantine(self):
+        """连续 3 次重启仍失败：第 4 轮进入 5 分钟隔离，隔离期内不再 spawn。"""
+        launcher, tmp = self._setup()
+        pids = {"services": {"webui": 111}}
+        state: dict = {}
+        next_pid = iter([201, 202, 203])  # 模拟每次重启后立刻再次崩溃
+        with mock.patch.object(launcher, "_is_alive", return_value=False), \
+                mock.patch.object(
+                    launcher, "_spawn_service", side_effect=lambda *a: next(next_pid)) as spawn, \
+                self.assertLogs("launcher", level="WARNING") as cm:
+            for _ in range(3):
+                pids, _ = launcher._supervise_once(
+                    pids, self._services(launcher, names=("webui",)), state)
+            # 第 4 轮：连续 3 次仍失败 → 隔离，不再重启
+            pids, _ = launcher._supervise_once(
+                pids, self._services(launcher, names=("webui",)), state)
+            # 隔离期内继续巡检：仍不 spawn
+            pids, _ = launcher._supervise_once(
+                pids, self._services(launcher, names=("webui",)), state)
+        self.assertEqual(spawn.call_count, 3)
+        self.assertIn("webui", state["quarantine_until"])
+        self.assertGreater(state["quarantine_until"]["webui"], time.time())
+        self.assertTrue(
+            any("连续重启 3 次仍失败" in line for line in cm.output),
+            "应打印隔离警告",
+        )
+
+    def test_start_respects_supervise_env(self):
+        """WEAVEMIND_SUPERVISE=1 时 start 进入守护模式，否则保持原状。"""
+        launcher, tmp = self._setup()
+        with mock.patch.object(launcher, "supervise_services") as sup, \
+                mock.patch.object(launcher, "start_services") as start, \
+                mock.patch.object(sys, "argv", ["launcher.py", "start"]), \
+                mock.patch.dict(os.environ, {"WEAVEMIND_SUPERVISE": "1"}, clear=False):
+            launcher.main()
+        sup.assert_called_once()
+        start.assert_not_called()
+
+        env = dict(os.environ)
+        env.pop("WEAVEMIND_SUPERVISE", None)
+        with mock.patch.object(launcher, "supervise_services") as sup2, \
+                mock.patch.object(launcher, "start_services") as start2, \
+                mock.patch.object(sys, "argv", ["launcher.py", "start"]), \
+                mock.patch.dict(os.environ, env, clear=True):
+            launcher.main()
+        start2.assert_called_once()
+        sup2.assert_not_called()
+
+
 class TestP0StatusHonesty(unittest.TestCase):
     """P0-1/A1 任务状态诚实化：以最终验收报告判定，反思是否执行不再影响状态。"""
 
