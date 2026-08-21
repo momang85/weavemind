@@ -2845,6 +2845,80 @@ class TestMultiMarketResolver(unittest.TestCase):
             em._get = old_get
 
 
+class TestMarketPreferenceResolver(unittest.TestCase):
+    """P2-5 双市场公司市场偏好显式化：
+    WEAVEMIND_MARKET_PREFERENCE 改变 resolver 选择的市场，并返回候选正股列表。"""
+
+    def _canned_byd(self):
+        return {"QuotationCodeTable": {"Data": [
+            {"Code": "002594", "Name": "比亚迪", "JYS": "6",
+             "SecurityTypeName": "深A", "QuoteID": "0.002594"},
+            {"Code": "01211", "Name": "比亚迪股份", "JYS": "HK",
+             "SecurityTypeName": "港股", "QuoteID": "116.01211"},
+            {"Code": "BYDDY", "Name": "比亚迪(ADR)", "JYS": "OTCBB",
+             "SecurityTypeName": "粉单", "QuoteID": "153.BYDDY"},
+        ]}}
+
+    def _resolve_with_pref(self, pref: str) -> dict:
+        """在指定市场偏好下解析比亚迪（mock suggest，用完恢复环境变量）。"""
+        import adapters.resolver as rv
+
+        old_env = os.environ.get("WEAVEMIND_MARKET_PREFERENCE")
+        old_get = rv._get
+        os.environ["WEAVEMIND_MARKET_PREFERENCE"] = pref
+        rv._get = lambda url, timeout=20: json.dumps(
+            self._canned_byd(), ensure_ascii=False,
+        )
+        try:
+            return rv.resolve_company("比亚迪")
+        finally:
+            rv._get = old_get
+            if old_env is None:
+                os.environ.pop("WEAVEMIND_MARKET_PREFERENCE", None)
+            else:
+                os.environ["WEAVEMIND_MARKET_PREFERENCE"] = old_env
+
+    def test_hk_preference_selects_hk(self):
+        """默认/显式 hk 偏好 → 比亚迪港股 01211。"""
+        res = self._resolve_with_pref("hk")
+        self.assertEqual((res["market"], res["stock_code"]),
+                         ("HK", "01211"))
+
+    def test_cn_preference_selects_cn(self):
+        """cn 偏好 → 比亚迪 A股 002594（与 hk 偏好选择不同市场）。"""
+        res = self._resolve_with_pref("cn")
+        self.assertEqual((res["market"], res["stock_code"]),
+                         ("CN", "002594"))
+
+    def test_us_preference_selects_us(self):
+        """us 偏好 → 比亚迪 ADR（粉单→US）。"""
+        res = self._resolve_with_pref("us")
+        self.assertEqual((res["market"], res["stock_code"]),
+                         ("US", "BYDDY"))
+
+    def test_auto_keeps_default_hk(self):
+        """auto 偏好保持现状：与默认 hk 加分一致。"""
+        res = self._resolve_with_pref("auto")
+        self.assertEqual((res["market"], res["stock_code"]),
+                         ("HK", "01211"))
+
+    def test_resolved_alternatives_returned(self):
+        """resolve_company 返回 resolved_alternatives：前 5 个候选正股
+        （market/name/code），首选与最终选择一致。"""
+        res = self._resolve_with_pref("hk")
+        alts = res["resolved_alternatives"]
+        self.assertGreaterEqual(len(alts), 1)
+        self.assertLessEqual(len(alts), 5)
+        self.assertEqual(alts[0]["market"], res["market"])
+        self.assertEqual(alts[0]["code"], res["stock_code"])
+        self.assertEqual(alts[0]["name"], res["name"])
+        self.assertEqual(set(alts[0]), {"market", "name", "code"})
+        # 候选应同时包含 A股与港股条目，供上层标注选择依据
+        markets = {a["market"] for a in alts}
+        self.assertIn("HK", markets)
+        self.assertIn("CN", markets)
+
+
 class TestChartQA(unittest.TestCase):
     def test_overlap_detected_and_fixed(self):
         """拥挤柱状图：重叠被检出，render_with_qa 自动修复后残留为空。"""

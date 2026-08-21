@@ -2129,6 +2129,129 @@ class TestSimpleTaskFastPath(unittest.TestCase):
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_load_templates_sorts_manual_before_auto(self):
+        """P2-6 模板优先级：_load_templates 手工模板在前，auto-* 沉淀模板在后。"""
+        import json
+        import os
+        import tempfile
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = tempfile.mkdtemp(prefix="weavemind_tpl_sort_")
+        try:
+            path = os.path.join(tmp, "templates.json")
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump({"templates": [
+                    {"name": "auto-code-x", "goal": "g", "steps": []},
+                    {"name": "公司调研与财报分析", "goal": "g", "steps": []},
+                    {"name": "auto-financial-y", "goal": "g", "steps": []},
+                    {"name": "行业调研报告", "goal": "g", "steps": []},
+                ]}, f, ensure_ascii=False)
+            names = [t["name"] for t in o._load_templates(path)]
+            self.assertEqual(names[0], "公司调研与财报分析")
+            self.assertEqual(names[1], "行业调研报告")
+            self.assertTrue(all(str(n).startswith("auto-") for n in names[2:]))
+        finally:
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_route_prompt_manual_first_and_placeholder_replaced(self):
+        """P2-6：LLM 路由 prompt 中手工模板在前、auto 在后；
+        auto-* goal 的"目标公司/集团"占位符替换为具体公司名。"""
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        class _FakeMsg:
+            def publish(self, *a, **k):
+                pass
+
+        class _FakeLLM:
+            def __init__(self):
+                self.prompt = ""
+
+            def call(self, system, prompt, **kw):
+                self.prompt = prompt
+                return {"template": None}
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._messaging = _FakeMsg()
+        o._now_iso = lambda: "t"
+        llm = _FakeLLM()
+        o._plan_llm = llm
+        tmp = tempfile.mkdtemp(prefix="weavemind_route_p26_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            # mock 返回未排序列表，验证 _route_template 内部仍按手工在前排序
+            o._load_templates = lambda: [
+                {"name": "auto-financial-x",
+                 "goal": "目标公司/集团的发展历程与现状，并分析历年财报",
+                 "steps": [{"step_id": "1", "capability": "web_search",
+                            "instruction": "x"}]},
+                {"name": "手工模板A", "goal": "手工整理交付物",
+                 "steps": [{"step_id": "1", "capability": "package",
+                            "instruction": "x"}]},
+            ]
+            routed = o._route_template(
+                "搜索并总结比亚迪集团的发展历程和现状，分析历年财报", "t-p26",
+            )
+            self.assertIsNone(routed)
+            prompt = llm.prompt
+            self.assertLess(prompt.index("手工模板A"),
+                            prompt.index("auto-financial-x"))
+            self.assertIn("auto- 前缀模板仅在无手工模板匹配时选用", prompt)
+            self.assertIn("比亚迪的发展历程与现状", prompt)
+            self.assertNotIn("目标公司/集团", prompt)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_route_llm_auto_only_when_no_manual_template(self):
+        """P2-6：LLM 选中 auto-* 的两种情形——
+        存在手工模板时拒绝（回退规划）；仅剩 auto 模板时放行。"""
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        class _FakeMsg:
+            def publish(self, *a, **k):
+                pass
+
+        class _AutoLLM:
+            def call(self, system, prompt, **kw):
+                return {"template": "auto-financial-x"}
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._messaging = _FakeMsg()
+        o._now_iso = lambda: "t"
+        o._plan_llm = _AutoLLM()
+        tmp = tempfile.mkdtemp(prefix="weavemind_auto_only_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            auto_steps = [{"step_id": "1", "capability": "web_search",
+                           "instruction": "auto"}]
+            manual_steps = [{"step_id": "1", "capability": "web_search",
+                             "instruction": "manual"}]
+            # 情形一：手工模板存在 → auto-* 被拒，进入完整规划（None）
+            o._load_templates = lambda: [
+                {"name": "手工模板A", "goal": "手工目标", "steps": manual_steps},
+                {"name": "auto-financial-x", "goal": "auto 目标", "steps": auto_steps},
+            ]
+            self.assertIsNone(o._route_template("分析腾讯集团历年财报", "t-auto-1"))
+            # 情形二：库中只有 auto 模板 → 允许选中
+            o._load_templates = lambda: [
+                {"name": "auto-financial-x", "goal": "auto 目标", "steps": auto_steps},
+            ]
+            routed = o._route_template("分析腾讯集团历年财报", "t-auto-2")
+            self.assertEqual(routed, auto_steps)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
 def _make_share_fake():
     """构造继承自 web_ui.Handler 的最小替身，可直接驱动路由方法。"""
     import web_ui

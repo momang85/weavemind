@@ -178,6 +178,9 @@ class OrchestratorV2:
         self._task_simple: dict[str, bool] = {}
         self._task_sources: dict[str, list[str]] = {}
         self._task_goals: dict[str, str] = {}
+        # P2-5 结构化预载命中时记录 resolver 的 market/name/code 与候选列表，
+        # 报告生成时在 [结构化财务数据] 段标注数据源选择依据
+        self._task_market_resolution: dict[str, dict] = {}
         self._task_prompt_hints: dict[str, list[str]] = {}
         self._task_user_ids: dict[str, str] = {}
         self._task_sources_lock = threading.Lock()
@@ -538,43 +541,72 @@ class OrchestratorV2:
             ]
         return None
 
-    def _load_templates(self) -> list[dict]:
-        """读取确定性模板库（含手动模板与进化沉淀的 auto 模板）。"""
+    def _load_templates(self, path: str | None = None) -> list[dict]:
+        """读取确定性模板库（手工模板在前，auto-* 沉淀模板在后）。"""
         try:
-            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates.json")
+            path = path or os.path.join(
+                os.path.dirname(os.path.abspath(__file__)), "templates.json",
+            )
             with open(path, "r", encoding="utf-8") as f:
-                return (json.load(f) or {}).get("templates", [])
+                tpls = (json.load(f) or {}).get("templates", [])
+            # P2-6 模板优先级：手工模板（不以 auto- 开头）在前，auto-* 排后
+            return sorted(
+                tpls,
+                key=lambda t: str(t.get("name") or "").startswith("auto-"),
+            )
         except Exception:
             return []
 
     def _route_template(self, goal: str, task_id: str = "") -> list[dict] | None:
         """由 LLM 判断目标是否适合确定性模板（含直接交付模板）；
         失败时回退到关键词判断。返回模板 steps 或 None（走完整规划）。"""
-        templates = self._load_templates()
+        # P2-6 手工模板优先于 auto-*：再排一次，防御 _load_templates 被覆盖/顺序变化
+        templates = sorted(
+            self._load_templates(),
+            key=lambda t: str(t.get("name") or "").startswith("auto-"),
+        )
         # 关键词快速路由：明确命中的任务直接走确定性模板，省掉 LLM 路由调用
         direct = self._direct_deliverable_plan(goal)
         if direct:
             push_progress(self._messaging, task_id, "log",
                           {"type": "plan", "agent": "orchestrator",
-                           "message": "模板路由：直接交付（关键词命中，跳过 LLM）",
+                           "message": "模板路由：直接交付（关键词命中，跳过 LLM；模板来源：manual）",
                            "timestamp": self._now_iso()})
             return direct
         tpl = self._template_keyword_match(goal, templates)
         if tpl:
+            src = "auto" if str(tpl.get("name") or "").startswith("auto-") else "manual"
             push_progress(self._messaging, task_id, "log",
                           {"type": "plan", "agent": "orchestrator",
-                           "message": f"模板命中（关键词）：{tpl.get('name')}",
+                           "message": f"模板命中（关键词）：{tpl.get('name')}（模板来源：{src}）",
                            "timestamp": self._now_iso()})
             return tpl.get("steps") or None
         if not templates:
             return self._direct_deliverable_plan(goal)
         push_progress(self._messaging, task_id, "log",
                       {"type": "plan", "agent": "orchestrator",
-                       "message": f"模板路由（LLM）：{len(templates)} 个模板待匹配",
+                       "message": f"模板路由（LLM）：{len(templates)} 个模板待匹配（手工模板优先）",
                        "timestamp": self._now_iso()})
+        # P2-6 auto-* 模板描述增强：goal 中的"目标公司/集团"等占位符
+        # 用具体公司名替换后再展示，便于 LLM 判断是否匹配
+        company = ""
+        try:
+            from task_classifier import _extract_company
+            company = _extract_company(goal)
+        except Exception:
+            pass
+
+        def _display_goal(t: dict) -> str:
+            """展示模板描述；auto-* 模板含公司占位符时替换为具体公司名。"""
+            desc = str(t.get("goal") or "")[:120]
+            if company and str(t.get("name") or "").startswith("auto-"):
+                for pat in ("目标公司/集团", "目标公司官网", "目标公司", "公司/集团"):
+                    desc = desc.replace(pat, company)
+            return desc
+
         try:
             tpl_list = "\n".join(
-                f"- {t.get('name')}: {str(t.get('goal'))[:120]}" for t in templates
+                f"- {t.get('name')}: {_display_goal(t)}" for t in templates
             )
             prompt = (
                 "判断以下用户目标是否适合使用现成的确定性执行模板。\n"
@@ -589,6 +621,8 @@ class OrchestratorV2:
                 '财务健康度等，不含发展历程/现状调研）→ 不选该模板 → {"template": null}\n'
                 '2. 若目标适合"直接交付"（单产物如游戏/脚本/工具/单文件页面，'
                 '无需外部调研或多技能协作）→ {"template": "direct_deliverable"}\n'
+                '2a. auto- 前缀模板仅在无手工模板匹配时选用；'
+                '手工模板（名称不以 auto- 开头）优先\n'
                 '3. 否则（需要规划拆解/多技能协作/外部资料）→ {"template": null}\n'
                 f"目标：{goal[:400]}\n只输出JSON。"
             )
@@ -609,9 +643,34 @@ class OrchestratorV2:
                 if direct:
                     return direct
             elif name:
-                for t in templates:
-                    if t.get("name") == name:
-                        return t.get("steps") or None
+                tpl = next((t for t in templates if t.get("name") == name), None)
+                if tpl:
+                    is_auto = str(name).startswith("auto-")
+                    has_manual = any(
+                        not str(t.get("name") or "").startswith("auto-")
+                        for t in templates
+                    )
+                    if is_auto and has_manual:
+                        # 手工模板优先：库中存在手工模板时 auto-* 不可选，
+                        # 直接交给完整规划，避免 auto-financial 抢占手工模板
+                        push_progress(
+                            self._messaging, task_id, "log",
+                            {"type": "plan", "agent": "orchestrator",
+                             "message": (
+                                 f"模板命中被拒（LLM 选了 auto-* {name}，"
+                                 "但库中存在手工模板，auto-* 仅在无手工模板时选用）"
+                             ),
+                             "timestamp": self._now_iso()},
+                        )
+                    else:
+                        src = "auto" if is_auto else "manual"
+                        push_progress(
+                            self._messaging, task_id, "log",
+                            {"type": "plan", "agent": "orchestrator",
+                             "message": f"模板命中（LLM）：{name}（模板来源：{src}）",
+                             "timestamp": self._now_iso()},
+                        )
+                        return tpl.get("steps") or None
         except Exception as exc:
             logger.info("Template routing via LLM skipped: %s", exc)
         push_progress(self._messaging, task_id, "log",
@@ -1150,6 +1209,26 @@ class OrchestratorV2:
             data = route_structured(goal)
             if not data:
                 return None
+            # P2-5 把 resolver 返回的 market/name/code 与候选列表写入任务上下文，
+            # 报告生成时在 [结构化财务数据] 段标注数据源选择依据
+            resolution = data.get("resolution") or {}
+            if resolution:
+                prefs = getattr(self, "_task_market_resolution", None)
+                if prefs is None:
+                    prefs = {}
+                    self._task_market_resolution = prefs
+                try:
+                    from adapters.resolver import market_preference
+                    pref = market_preference()
+                except Exception:
+                    pref = "hk"
+                prefs[task_id] = {
+                    "name": str(resolution.get("name") or ""),
+                    "market": str(resolution.get("market") or ""),
+                    "code": str(resolution.get("stock_code") or ""),
+                    "preference": pref,
+                    "alternatives": resolution.get("resolved_alternatives") or [],
+                }
             proj = task_project_dir(task_id)
             (proj / "financials.json").write_text(
                 json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8",
@@ -4918,6 +4997,22 @@ print("charts generated")
                             + src_name + "；本表未覆盖的数字若无溯源，标注"
                             "'基于模型知识，未在本次检索中验证'；禁止编造年份。"
                         )
+                        # P2-5 追加数据源选择依据：市场偏好与候选列表（前 3）
+                        prefs = (
+                            getattr(self, "_task_market_resolution", {}) or {}
+                        ).get(task_id)
+                        if prefs and prefs.get("name") and prefs.get("market"):
+                            alts = "、".join(
+                                f"{a.get('market')}:{a.get('name')}"
+                                for a in (prefs.get("alternatives") or [])[:3]
+                                if a.get("market") and a.get("name")
+                            )
+                            instr += (
+                                f"\n数据源：{prefs['name']}"
+                                f"（{prefs['market']} 市场 {prefs['code']}），"
+                                f"系统按市场偏好 {prefs['preference']} 选择；"
+                                f"候选：{alts}。"
+                            )
             except Exception:
                 pass
             for dep_id in deps:
