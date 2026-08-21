@@ -4,6 +4,7 @@ import json
 import os
 import tempfile
 import unittest
+from unittest import mock
 
 
 class _FakeMessaging:
@@ -409,6 +410,278 @@ class TestLLMHealthDegradation(unittest.TestCase):
             self.assertFalse(empty["both_failed"])
         finally:
             llm_client._task_usage_client = old_client
+
+
+class TestModelRoleRouting(unittest.TestCase):
+    """B1：llm.model_roles 模型分级路由（planner/exec/judge，缺省回退默认模型）。"""
+
+    def setUp(self):
+        import llm_client
+        self.llm = llm_client
+        self._old_roles = llm_client._MODEL_ROLES_CFG
+        self._old_model = os.environ.get("LLM_MODEL")
+        os.environ["LLM_MODEL"] = "default-model"
+        llm_client._MODEL_ROLES_CFG = {
+            "planner": "deepseek-chat",
+            "exec": "deepseek-v4-flash",
+            "judge": "deepseek-chat",
+        }
+        self._patchers = [
+            mock.patch.object(llm_client, "_ensure_cfg_fresh", lambda: None),
+            mock.patch.object(llm_client, "_primary_healthy", lambda: True),
+        ]
+        for p in self._patchers:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patchers:
+            p.stop()
+        self.llm._MODEL_ROLES_CFG = self._old_roles
+        if self._old_model is None:
+            os.environ.pop("LLM_MODEL", None)
+        else:
+            os.environ["LLM_MODEL"] = self._old_model
+
+    def test_usage_mapping_table(self):
+        from llm_client import MODEL_ROLES, get_model_for_usage
+        self.assertEqual(MODEL_ROLES["plan"], "planner")
+        self.assertEqual(MODEL_ROLES["reflect"], "planner")
+        self.assertEqual(MODEL_ROLES["review"], "planner")
+        self.assertEqual(MODEL_ROLES["exec"], "exec")
+        self.assertEqual(MODEL_ROLES["judge"], "judge")
+        self.assertEqual(get_model_for_usage("plan"), "deepseek-chat")
+        self.assertEqual(get_model_for_usage("exec"), "deepseek-v4-flash")
+        self.assertEqual(get_model_for_usage("judge"), "deepseek-chat")
+
+    def test_fallback_to_default_model(self):
+        from llm_client import get_model_for_usage
+        self.assertEqual(get_model_for_usage("unknown-usage"), "default-model")
+
+    def test_client_call_selects_role_model(self):
+        from llm_client import LLMClient
+        client = LLMClient(model="default-model")
+        captured = {}
+
+        def fake_send(system, user, temperature, max_tokens, model=None):
+            captured["model"] = model
+            return '{"steps": []}'
+
+        client._send_request = fake_send
+        client.call("s", "u", usage="plan")
+        self.assertEqual(captured["model"], "deepseek-chat")
+        client.call("s", "u", usage="exec")
+        self.assertEqual(captured["model"], "deepseek-v4-flash")
+
+    def test_exec_falls_back_to_default_when_role_unset(self):
+        from llm_client import LLMClient
+        self.llm._MODEL_ROLES_CFG = {"planner": "deepseek-chat"}
+        client = LLMClient(model="default-model")
+        captured = {}
+        client._send_request = (
+            lambda system, user, temperature, max_tokens, model=None:
+            captured.update(model=model) or '{"ok": true}'
+        )
+        client.call("s", "u", usage="exec")
+        self.assertEqual(captured["model"], "default-model")
+
+    def test_model_override_wins(self):
+        from llm_client import LLMClient
+        client = LLMClient(model="default-model")
+        captured = {}
+        client._send_request = (
+            lambda system, user, temperature, max_tokens, model=None:
+            captured.update(model=model) or '{"ok": true}'
+        )
+        client.call("s", "u", usage="plan", model_override="custom-model")
+        self.assertEqual(captured["model"], "custom-model")
+
+    def test_async_call_selects_role_model(self):
+        import asyncio
+        from llm_client import call_llm_async
+
+        posts = []
+
+        class FakeResp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {
+                    "choices": [{"message": {"content": '{"ok": true}'}}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 5},
+                }
+
+        class FakeHTTPX:
+            async def post(self, url, json=None, headers=None):
+                posts.append((url, dict(json or {})))
+                return FakeResp()
+
+        with mock.patch.object(self.llm, "_get_async_client", lambda: FakeHTTPX()), \
+             mock.patch.object(self.llm, "_publish_usage_snapshot", lambda: None):
+            asyncio.run(call_llm_async("s", "u", usage="exec"))
+        self.assertEqual(posts[0][1]["model"], "deepseek-v4-flash")
+
+
+class TestLLMCache(unittest.TestCase):
+    """B2：LLM_CACHE_TTL 开启后同键调用命中缓存，不触发网络，不计 token 成本。"""
+
+    class _FakeRedis:
+        def __init__(self, now=0.0):
+            self.store = {}
+            self.expires = {}
+            self.now = now
+            self.ex_values = []
+
+        def get(self, key):
+            exp = self.expires.get(key)
+            if exp is not None and self.now >= exp:
+                return None
+            return self.store.get(key)
+
+        def set(self, key, value, ex=None):
+            self.store[key] = value
+            self.expires[key] = self.now + (ex or 0)
+            self.ex_values.append(ex)
+
+    def setUp(self):
+        import llm_client
+        self.llm = llm_client
+        self._old_ttl = os.environ.get("LLM_CACHE_TTL")
+        self._old_client = llm_client._llm_cache_client
+        self._old_roles = llm_client._MODEL_ROLES_CFG
+        self._old_model = os.environ.get("LLM_MODEL")
+        llm_client._MODEL_ROLES_CFG = {}
+        os.environ["LLM_CACHE_TTL"] = "60"
+        # call() 每次会用 LLM_MODEL 刷新客户端默认模型（热重载设计），
+        # 测试里让环境变量与构造模型保持一致
+        os.environ["LLM_MODEL"] = "m"
+        self.fake = self._FakeRedis()
+        llm_client._llm_cache_client = self.fake
+        self._patchers = [
+            mock.patch.object(llm_client, "_ensure_cfg_fresh", lambda: None),
+            mock.patch.object(llm_client, "_primary_healthy", lambda: True),
+        ]
+        for p in self._patchers:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patchers:
+            p.stop()
+        self.llm._llm_cache_client = self._old_client
+        self.llm._MODEL_ROLES_CFG = self._old_roles
+        if self._old_model is None:
+            os.environ.pop("LLM_MODEL", None)
+        else:
+            os.environ["LLM_MODEL"] = self._old_model
+        if self._old_ttl is None:
+            os.environ.pop("LLM_CACHE_TTL", None)
+        else:
+            os.environ["LLM_CACHE_TTL"] = self._old_ttl
+
+    def test_hit_returns_same_without_network(self):
+        from llm_client import LLMClient
+        client = LLMClient(model="m")
+        calls = {"n": 0}
+
+        def fake_send(system, user, temperature, max_tokens, model=None):
+            calls["n"] += 1
+            return '{"ok": true, "n": %d}' % calls["n"]
+
+        client._send_request = fake_send
+        r1 = client.call("s", "u", cache_key="plan:g1")
+        r2 = client.call("s", "u", cache_key="plan:g1")
+        self.assertEqual(r1, {"ok": True, "n": 1})
+        self.assertEqual(r2, r1)
+        self.assertEqual(calls["n"], 1, "第二次调用应命中缓存，不触发网络")
+
+    def test_hit_marks_cached_usage_without_tokens(self):
+        from llm_client import LLMClient
+        client = LLMClient(model="m")
+        client._send_request = lambda *a, **k: '{"ok": true}'
+        client.call("s", "u", cache_key="k1")
+        with mock.patch.object(self.llm, "_record_usage") as rec:
+            client.call("s", "u", cache_key="k1")
+        rec.assert_called_once_with(0, 0, model="m", cached=True)
+
+    def test_ttl_expiry_refetches(self):
+        from llm_client import LLMClient
+        client = LLMClient(model="m")
+        calls = {"n": 0}
+
+        def fake_send(system, user, temperature, max_tokens, model=None):
+            calls["n"] += 1
+            return '{"ok": true, "n": %d}' % calls["n"]
+
+        client._send_request = fake_send
+        client.call("s", "u", cache_key="k")
+        self.assertEqual(calls["n"], 1)
+        self.assertEqual(self.fake.ex_values, [60])
+        self.fake.now += 61  # TTL 过期
+        client.call("s", "u", cache_key="k")
+        self.assertEqual(calls["n"], 2, "TTL 过期后应重新走网络")
+
+    def test_disabled_no_cache(self):
+        os.environ["LLM_CACHE_TTL"] = "0"
+        from llm_client import LLMClient
+        client = LLMClient(model="m")
+        calls = {"n": 0}
+
+        def fake_send(system, user, temperature, max_tokens, model=None):
+            calls["n"] += 1
+            return '{"ok": true}'
+
+        client._send_request = fake_send
+        client.call("s", "u", cache_key="k")
+        client.call("s", "u", cache_key="k")
+        self.assertEqual(calls["n"], 2, "缓存关闭时行为保持不变")
+        self.assertEqual(self.fake.store, {})
+
+    def test_different_prompt_not_hit(self):
+        from llm_client import LLMClient
+        client = LLMClient(model="m")
+        calls = {"n": 0}
+
+        def fake_send(system, user, temperature, max_tokens, model=None):
+            calls["n"] += 1
+            return '{"ok": true}'
+
+        client._send_request = fake_send
+        client.call("s", "u1", cache_key="k")
+        client.call("s", "u2", cache_key="k")
+        self.assertEqual(calls["n"], 2, "prompt 不同不应命中缓存")
+
+    def test_async_cache_hit_skips_network(self):
+        import asyncio
+        from llm_client import call_llm_async
+
+        posts = {"n": 0}
+
+        class FakeResp:
+            def raise_for_status(self):
+                pass
+
+            def json(self):
+                return {
+                    "choices": [{"message": {"content": "cached-async"}}],
+                    "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+                }
+
+        class FakeHTTPX:
+            async def post(self, url, json=None, headers=None):
+                posts["n"] += 1
+                return FakeResp()
+
+        with mock.patch.object(self.llm, "_get_async_client", lambda: FakeHTTPX()), \
+             mock.patch.object(self.llm, "_publish_usage_snapshot", lambda: None):
+            r1 = asyncio.run(
+                call_llm_async("s", "u", expect_json=False, cache_key="ak")
+            )
+            r2 = asyncio.run(
+                call_llm_async("s", "u", expect_json=False, cache_key="ak")
+            )
+        self.assertEqual(r1, "cached-async")
+        self.assertEqual(r2, r1)
+        self.assertEqual(posts["n"], 1, "异步缓存命中也不应触发网络")
 
 
 if __name__ == "__main__":

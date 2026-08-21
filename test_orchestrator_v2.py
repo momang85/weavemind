@@ -56,6 +56,7 @@ def make_orch(**overrides):
     o._max_reflection_steps = 3
     o._reflection_accept_score = 6.0
     o._max_redo_rounds = 2
+    o._max_redo_steps = 2
     o._plan_confirm_timeout = 300
     o._stall_timeout = 60
     o._critic_enabled = False
@@ -612,6 +613,121 @@ class TestPruneSuperseded(unittest.TestCase):
         finally:
             ws_mod.WORKSPACE_ROOT = old_root
             shutil.rmtree(base, ignore_errors=True)
+
+
+class TestRedoStepLimit(unittest.TestCase):
+    """B3：单轮反思重做最多 N 步（默认 2，REFLECT_MAX_REDO_STEPS 可配）。"""
+
+    def _make(self, max_redo_steps=2):
+        o = make_orch(_max_redo_steps=max_redo_steps)
+        o._now_iso = lambda: "t"
+        o._diagnosis_for_step = lambda *a, **k: None
+        o._record_reflection_refinement = lambda *a, **k: None
+        return o
+
+    def test_redo_caps_dependents_to_n_steps(self):
+        o = self._make(max_redo_steps=2)
+        all_steps = [
+            {"step_id": "1", "capability": "web_search",
+             "instruction": "s1", "depends_on": []},
+            {"step_id": "2", "capability": "content_summary",
+             "instruction": "s2", "depends_on": ["1"]},
+            {"step_id": "3", "capability": "report_generator",
+             "instruction": "s3", "depends_on": ["1", "2"]},
+        ]
+        completed_all = {
+            s["step_id"]: {"status": "SUCCESS", "result": f"old-{s['step_id']}"}
+            for s in all_steps
+        }
+        dispatched = []
+
+        def fake_dispatch(goal, step, tid, state):
+            dispatched.append(step["step_id"])
+            return {"task_id": step["step_id"], "status": "SUCCESS",
+                    "result": f"new-{step['step_id']}"}
+
+        o._dispatch_step_safe = fake_dispatch
+        ok = o._redo_step_and_dependents(
+            "t-redo-cap", "目标", all_steps, completed_all, "1", "修复",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(dispatched, ["1", "2"],
+                         "单轮重做最多 2 步：目标步骤 + 最近的 1 个下游")
+        self.assertEqual(completed_all["1"]["result"], "new-1")
+        self.assertEqual(completed_all["2"]["result"], "new-2")
+        self.assertEqual(completed_all["3"]["result"], "old-3",
+                         "超出上限的下游步骤不应被重做")
+
+    def test_max_redo_steps_one_caps_to_single_step(self):
+        o = self._make(max_redo_steps=1)
+        all_steps = [
+            {"step_id": "1", "capability": "web_search",
+             "instruction": "s1", "depends_on": []},
+            {"step_id": "2", "capability": "content_summary",
+             "instruction": "s2", "depends_on": ["1"]},
+        ]
+        completed_all = {
+            s["step_id"]: {"status": "SUCCESS", "result": f"old-{s['step_id']}"}
+            for s in all_steps
+        }
+        dispatched = []
+
+        def fake_dispatch(goal, step, tid, state):
+            dispatched.append(step["step_id"])
+            return {"task_id": step["step_id"], "status": "SUCCESS",
+                    "result": f"new-{step['step_id']}"}
+
+        o._dispatch_step_safe = fake_dispatch
+        o._redo_step_and_dependents(
+            "t-redo-cap1", "目标", all_steps, completed_all, "1", "修复",
+        )
+        self.assertEqual(dispatched, ["1"])
+        self.assertEqual(completed_all["2"]["result"], "old-2")
+
+
+class TestReflectionFailureStopsIteration(unittest.TestCase):
+    """B3：反思 LLM 调用失败（空内容/超时）不再重试整轮，停止迭代并记录日志。"""
+
+    def test_reflect_llm_failure_returns_none_and_logs(self):
+        o = make_orch()
+
+        class FailingLLM:
+            def call(self, *args, **kwargs):
+                raise RuntimeError("simulated empty/timeout")
+
+        o._planner_llm = FailingLLM()
+        with self.assertLogs("orchestrator_v2", level="WARNING") as cm:
+            res = o._reflect("目标", "报告", "t-fail", [], {})
+        self.assertIsNone(res, "反思失败应返回 None，外层循环据此停止迭代")
+        self.assertTrue(
+            any("反思 LLM 失败，停止迭代" in line for line in cm.output),
+            f"应有停止迭代日志: {cm.output}",
+        )
+
+    def test_run_stops_after_one_reflection_failure(self):
+        o = make_orch()
+        o._plan = lambda goal, task_id, context="", memory_context="": [
+            {"step_id": "1", "capability": "content_summary",
+             "instruction": "x", "timeout": 120}
+        ]
+        o._execute_steps = lambda steps, task_id, goal: (
+            [{"task_id": s["step_id"], "status": "SUCCESS",
+              "result": "# 报告" + "A" * 300} for s in steps],
+            False,
+        )
+        reflected = {"n": 0}
+
+        def fake_reflect(goal, report, task_id, all_steps=None,
+                         completed_all=None, memory_context="",
+                         validator_summary="", eval_scores=""):
+            reflected["n"] += 1
+            return None  # 模拟反思 LLM 失败后的行为
+
+        o._reflect = fake_reflect
+        o._now_iso = lambda: "t"
+        res = o.run("t-stop-fail", "目标", auto_run=True)
+        self.assertEqual(reflected["n"], 1, "反思失败后不应再进入下一轮")
+        self.assertEqual(len(res["steps"]), 1)
 
 
 if __name__ == "__main__":

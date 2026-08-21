@@ -90,6 +90,8 @@ class AsyncWorkerBase(ABC):
                         system or "You are a helpful assistant.",
                         prompt or instruction or "",
                         max_tokens=max_tokens,
+                        # B1：步骤执行为 exec 用途，按 llm.model_roles.exec 选模型
+                        usage="exec",
                     ),
                 )
             except Exception:
@@ -101,6 +103,8 @@ class AsyncWorkerBase(ABC):
             expect_json=False,
             max_attempts=max_attempts,
             max_tokens=max_tokens,
+            # B1：步骤执行为 exec 用途
+            usage="exec",
         )
         return result if isinstance(result, str) else str(result)
 

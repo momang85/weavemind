@@ -41,6 +41,24 @@ _cfg_mtime: float | None = None
 _cfg_lock = threading.Lock()
 
 
+# ---------------------------------------------------------------------------
+# B1 模型分级路由：调用用途 -> llm.model_roles 配置键
+# planner = 规划/反思/评审；exec = 步骤执行；judge = 评测
+# ---------------------------------------------------------------------------
+MODEL_ROLES: dict[str, str] = {
+    "plan": "planner",
+    "reflect": "planner",
+    "review": "planner",
+    "exec": "exec",
+    "judge": "judge",
+}
+# llm.model_roles 配置（config.json 热重载时刷新），如 {"planner": "deepseek-chat", ...}
+_MODEL_ROLES_CFG: dict[str, str] = {}
+
+# B2 LLM 调用缓存：Redis 客户端（测试可替换为假客户端）
+_llm_cache_client = None
+
+
 def _task_context_var():
     global _task_ctx
     if _task_ctx is None:
@@ -74,7 +92,7 @@ def get_task_context() -> str:
 def _apply_cfg_to_env() -> None:
     """把 config.json 的 llm/embedding/backup 段重新应用到 os.environ。
     修复"前端改端点，后端进程仍用旧端点"：各进程在调用前按 mtime 热重载。"""
-    global _BACKUP_CFG
+    global _BACKUP_CFG, _MODEL_ROLES_CFG
     try:
         with open(_CFG_PATH, encoding="utf-8") as f:
             cfg = json.load(f)
@@ -87,6 +105,12 @@ def _apply_cfg_to_env() -> None:
         os.environ["LLM_BASE_URL"] = str(llm["base_url"])
     if llm.get("model"):
         os.environ["LLM_MODEL"] = str(llm["model"])
+    # B1：模型分级路由表（缺省回退 llm.model）
+    _MODEL_ROLES_CFG = {
+        str(k): str(v)
+        for k, v in (llm.get("model_roles") or {}).items()
+        if v
+    }
     emb = cfg.get("embedding") or {}
     if emb.get("api_key"):
         os.environ["EMBEDDING_API_KEY"] = str(emb["api_key"])
@@ -442,11 +466,18 @@ def _publish_stream_chunk(text: str) -> None:
         pass
 
 
-def _record_usage(prompt_tokens: int, completion_tokens: int, model: str = "") -> None:
+def _record_usage(
+    prompt_tokens: int, completion_tokens: int,
+    model: str = "", cached: bool = False,
+) -> None:
+    """记录一次 LLM 调用用量。
+    cached=True 表示缓存命中：只记调用次数与 cached 标记，不计 token 成本。"""
     with _usage_lock:
         _usage["calls"] += 1
         _usage["prompt_tokens"] += int(prompt_tokens or 0)
         _usage["completion_tokens"] += int(completion_tokens or 0)
+        if cached:
+            _usage["cached"] = _usage.get("cached", 0) + 1
     # 每任务台账（Redis Hash）：llm_usage_task:{task_id}
     tid = _task_context_var().get()
     if not tid:
@@ -462,9 +493,92 @@ def _record_usage(prompt_tokens: int, completion_tokens: int, model: str = "") -
             )
         key = f"llm_usage_task:{tid}"
         _task_usage_client.hincrby(key, "calls", 1)
-        _task_usage_client.hincrby(key, f"pt:{model or 'unknown'}", int(prompt_tokens or 0))
-        _task_usage_client.hincrby(key, f"ct:{model or 'unknown'}", int(completion_tokens or 0))
+        if cached:
+            # 缓存命中不计 token 成本，仅标记命中次数
+            _task_usage_client.hincrby(key, "cached", 1)
+        else:
+            _task_usage_client.hincrby(key, f"pt:{model or 'unknown'}", int(prompt_tokens or 0))
+            _task_usage_client.hincrby(key, f"ct:{model or 'unknown'}", int(completion_tokens or 0))
         _task_usage_client.expire(key, 7200)
+    except Exception:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# B1 模型解析 + B2 缓存工具
+# ---------------------------------------------------------------------------
+
+
+def get_model_for_usage(usage: str = "", default_model: str = "") -> str:
+    """按调用用途解析模型名：llm.model_roles[用途] > default_model > LLM_MODEL。
+    未配置用途或缺省回退到默认模型，保证老调用行为不变。"""
+    _ensure_cfg_fresh()
+    role = MODEL_ROLES.get(str(usage or "").lower(), "")
+    if role:
+        m = _MODEL_ROLES_CFG.get(role)
+        if m:
+            return str(m)
+    return default_model or os.environ.get("LLM_MODEL") or ""
+
+
+def _get_cache_ttl() -> int:
+    """LLM_CACHE_TTL 环境变量：默认 0 表示缓存关闭；开启后按秒设置 TTL。"""
+    try:
+        return max(0, int(os.environ.get("LLM_CACHE_TTL", "0") or 0))
+    except Exception:
+        return 0
+
+
+def _get_llm_cache_client():
+    """获取同步 Redis 缓存客户端（本地延迟小；测试可整体替换 _llm_cache_client）。"""
+    global _llm_cache_client
+    if _llm_cache_client is None:
+        import redis as _redis
+        _llm_cache_client = _redis.Redis(
+            host=os.environ.get("REDIS_HOST", "localhost"),
+            port=int(os.environ.get("REDIS_PORT", "6379")),
+            decode_responses=True,
+        )
+    return _llm_cache_client
+
+
+def _cache_redis_key(cache_key: str, user: str) -> str:
+    """缓存键：调用方 cache_key 命名空间 + prompt 前 500 字符的哈希。"""
+    import hashlib
+    digest = hashlib.sha256(
+        str(user or "")[:500].encode("utf-8")
+    ).hexdigest()
+    return f"llm_cache:{str(cache_key or 'default')}:{digest}"
+
+
+def _cache_get(cache_key: str, user: str):
+    """命中返回缓存结果（dict/str），未命中或缓存不可用返回 None。"""
+    if _get_cache_ttl() <= 0 or not cache_key:
+        return None
+    key = _cache_redis_key(cache_key, user)
+    try:
+        raw = _get_llm_cache_client().get(key)
+        if raw is None:
+            return None
+        logger.info("LLM cache hit: %s", key)
+        try:
+            return json.loads(raw)
+        except Exception:
+            return {"content": raw}
+    except Exception:
+        return None
+
+
+def _cache_set(cache_key: str, user: str, result) -> None:
+    """把调用结果写入缓存（失败静默降级为不缓存）。"""
+    ttl = _get_cache_ttl()
+    if ttl <= 0 or not cache_key:
+        return
+    key = _cache_redis_key(cache_key, user)
+    try:
+        _get_llm_cache_client().set(
+            key, json.dumps(result, ensure_ascii=False), ex=ttl,
+        )
     except Exception:
         pass
 
@@ -592,6 +706,11 @@ def _load_llm_config():
     except Exception: return {}
 
 _LLM_CFG = _load_llm_config()
+_MODEL_ROLES_CFG = {
+    str(k): str(v)
+    for k, v in (_LLM_CFG.get("model_roles") or {}).items()
+    if v
+}
 
 
 def _load_backup_config() -> dict:
@@ -677,6 +796,15 @@ class LLMClient:
     # 公共方法
     # ------------------------------------------------------------------
 
+    def _resolve_model(self, usage: str = "", model_override: str | None = None) -> str:
+        """解析本次调用的模型：显式 model_override > llm.model_roles[用途] > 客户端默认模型。"""
+        if model_override:
+            return str(model_override)
+        role_model = get_model_for_usage(usage, self.model)
+        if role_model:
+            return role_model
+        return self.model
+
     def call(
         self,
         system: str,
@@ -685,6 +813,9 @@ class LLMClient:
         expect_json: bool = True,
         temperature: float | None = None,
         max_tokens: int | None = None,
+        usage: str = "",
+        model_override: str | None = None,
+        cache_key: str | None = None,
     ) -> dict[str, Any]:
         """调用 LLM 并返回解析结果。
 
@@ -704,8 +835,8 @@ class LLMClient:
         """
         temp = temperature if temperature is not None else self.temperature
         max_tok = max_tokens if max_tokens is not None else self.max_tokens
+        model = self._resolve_model(usage, model_override)
 
-        # 配置热重载：前端保存新端点后，本进程无需重启即可生效
         _ensure_cfg_fresh()
         if self._is_planner:
             self.base_url = os.environ.get("PLANNER_LLM_BASE_URL") or self.base_url
@@ -715,11 +846,19 @@ class LLMClient:
             self.base_url = os.environ.get("LLM_BASE_URL") or self.base_url
             self.api_key = os.environ.get("LLM_API_KEY") or self.api_key
             self.model = os.environ.get("LLM_MODEL") or self.model
+        # 配置热重载后模型可能变化，重新解析一次（优先级：override > model_roles > 默认）
+        model = self._resolve_model(usage, model_override)
         self._backup_cfg = (
             dict(_BACKUP_CFG)
             if _BACKUP_CFG.get("base_url") and _BACKUP_CFG.get("api_key")
             else {}
         )
+
+        # B2：缓存命中直接返回，不触发网络调用，也不计 token 成本
+        cached = _cache_get(cache_key, user) if cache_key else None
+        if cached is not None:
+            _record_usage(0, 0, model=model, cached=True)
+            return cached
 
         last_error: Exception | None = None
         # 健康路由（O-29）：主端点已被判定不健康 → 优先走备用，避免每次白白等待超时
@@ -736,11 +875,14 @@ class LLMClient:
                 logger.warning("Health-routed backup failed: %s", str(exc)[:150])
         for attempt in range(1, self._MAX_RETRIES + 1):
             try:
-                raw = self._send_request(system, user, temp, max_tok)
+                raw = self._send_request(system, user, temp, max_tok, model=model)
                 _mark_endpoint("primary", True)
                 if not expect_json:
-                    return {"content": raw}
-                return self._parse_json(raw)
+                    result: dict[str, Any] = {"content": raw}
+                else:
+                    result = self._parse_json(raw)
+                _cache_set(cache_key, user, result)
+                return result
             except LLMJSONParseError:
                 # JSON 解析失败不重试（格式问题重试没用）
                 raise
@@ -804,6 +946,7 @@ class LLMClient:
         user: str,
         temperature: float,
         max_tokens: int,
+        model: str | None = None,
     ) -> str:
         """发送 HTTP 请求到 LLM 服务。
 
@@ -829,7 +972,7 @@ class LLMClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
         body: dict[str, Any] = {
-            "model": self.model,
+            "model": model or self.model,
             "messages": [
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -877,7 +1020,7 @@ class LLMClient:
         if usage:
             _record_usage(
                 usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
-                model=self.model,
+                model=model or self.model,
             )
             _publish_usage_snapshot()
             logger.debug(
@@ -970,19 +1113,29 @@ def get_default_client() -> LLMClient:
     return _default_client
 
 
-def call_llm(system: str, user: str, expect_json: bool = True) -> dict[str, Any]:
+def call_llm(
+    system: str, user: str, expect_json: bool = True, *,
+    usage: str = "", model_override: str | None = None,
+    cache_key: str | None = None,
+) -> dict[str, Any]:
     """便捷函数：调用 LLM 并返回解析结果。
 
     Args:
         system: 系统提示词。
         user: 用户提示词。
         expect_json: 是否期望 JSON 响应。
+        usage: 调用用途（plan/exec/judge），用于模型分级路由。
+        model_override: 调用级模型覆盖。
+        cache_key: 可选缓存键（配合 LLM_CACHE_TTL 使用）。
 
     Returns:
         解析后的字典。
     """
     _ensure_cfg_fresh()
-    return get_default_client().call(system, user, expect_json=expect_json)
+    return get_default_client().call(
+        system, user, expect_json=expect_json,
+        usage=usage, model_override=model_override, cache_key=cache_key,
+    )
 
 
 def call_llm_stream(
@@ -991,6 +1144,8 @@ def call_llm_stream(
     on_chunk=None,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    usage: str = "",
+    model_override: str | None = None,
 ) -> str:
     """SSE 流式调用（同步，urllib）：逐块回调 on_chunk，并按任务上下文自动发布
     到 Redis stream:{task_id}（O-21 步骤级流式输出）。非流式端点回退整段输出。"""
@@ -1001,6 +1156,8 @@ def call_llm_stream(
     client = get_default_client()
     temp = temperature if temperature is not None else client.temperature
     max_tok = max_tokens or client.max_tokens
+    # B1：流式执行调用也按用途选择模型（如 exec）
+    model = model_override or get_model_for_usage(usage, client.model)
     url = f"{client.base_url.rstrip('/')}/chat/completions"
     headers: dict[str, str] = {
         "Content-Type": "application/json",
@@ -1009,7 +1166,7 @@ def call_llm_stream(
     if client.api_key:
         headers["Authorization"] = f"Bearer {client.api_key}"
     body = {
-        "model": client.model,
+        "model": model,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -1102,6 +1259,9 @@ async def call_llm_async(
     temperature: float = 0.1,
     max_tokens: int = 2000,
     max_attempts: int = 3,
+    usage: str = "",
+    model_override: str | None = None,
+    cache_key: str | None = None,
 ) -> dict[str, Any] | str:
     """Async LLM call using httpx.AsyncClient with connection pooling.
     
@@ -1111,7 +1271,16 @@ async def call_llm_async(
     _ensure_cfg_fresh()
     api_key = os.environ.get('LLM_API_KEY', '')
     base_url = os.environ.get('LLM_BASE_URL', 'https://api.openai.com/v1')
-    model = os.environ.get('LLM_MODEL', 'gpt-4')
+    # B1：按调用用途选择模型（exec/judge/plan），缺省回退 LLM_MODEL
+    model = model_override or get_model_for_usage(
+        usage, os.environ.get('LLM_MODEL', 'gpt-4'),
+    )
+
+    # B2：缓存命中直接返回，不触发网络调用，也不计 token 成本
+    cached = _cache_get(cache_key, user_prompt) if cache_key else None
+    if cached is not None:
+        _record_usage(0, 0, model=model, cached=True)
+        return cached
 
     headers = {
         'Authorization': f'Bearer {api_key}',
@@ -1162,8 +1331,11 @@ async def call_llm_async(
                 raise LLMEmptyResponseError("Empty content in LLM response")
             _mark_endpoint("primary", True)
             if expect_json:
-                return _parse_json_content(content)
-            return content
+                result = _parse_json_content(content)
+            else:
+                result = content
+            _cache_set(cache_key, user_prompt, result)
+            return result
 
         except LLMEmptyResponseError as exc:
             last_error = exc

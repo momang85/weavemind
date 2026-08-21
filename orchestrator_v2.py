@@ -6,6 +6,7 @@ critic_agent, ws_helpers. No complex state machine — just: plan → dispatch �
 This is the active orchestrator (legacy orchestrator.py was removed in the architecture cleanup).
 """
 
+import hashlib
 import json, logging, os, re, shutil, threading, time, uuid
 
 from workspace import (
@@ -154,6 +155,11 @@ class OrchestratorV2:
         # P0-1：反思 LLM 不可用标记（每次任务运行前重置）
         self._reflection_llm_unavailable = ""
         self._max_redo_rounds = 2
+        # B3：单轮反思重做步数上限（默认 2，可用 REFLECT_MAX_REDO_STEPS 或
+        # config.json system.reflect_max_redo_steps 覆盖）
+        self._max_redo_steps = max(
+            1, int(os.environ.get("REFLECT_MAX_REDO_STEPS", "2") or 2)
+        )
         self._plan_confirm_timeout = 300
         self._stall_timeout = 300
         self._max_offtopic_regenerations = 2
@@ -205,6 +211,13 @@ class OrchestratorV2:
             self._max_reflection_steps = max(1, int(_sys.get('max_reflection_steps', 3)))
             self._reflection_accept_score = max(0.0, float(_sys.get('reflection_accept_score', 6.0)))
             self._max_redo_rounds = max(1, int(_sys.get('max_redo_rounds', 2)))
+            self._max_redo_steps = max(
+                1, int(_sys.get('reflect_max_redo_steps', self._max_redo_steps))
+            )
+            # 环境变量优先于配置文件
+            self._max_redo_steps = max(
+                1, int(os.environ.get("REFLECT_MAX_REDO_STEPS", self._max_redo_steps))
+            )
             self._plan_confirm_timeout = max(30, int(_sys.get('plan_confirm_timeout', 300)))
             self._stall_timeout = max(5, int(_sys.get('stall_timeout', 60)))
         except Exception:
@@ -379,9 +392,17 @@ class OrchestratorV2:
                            "timestamp": self._now_iso()})
             try:
                 from prompt_registry import get_prompt
+                # B2：同目标重复规划直接命中缓存（LLM_CACHE_TTL 开启时生效），
+                # 键含目标哈希，同一会话追问重复提交不会重复花规划 token
+                plan_cache_key = (
+                    "plan:"
+                    + hashlib.sha256(str(goal).encode("utf-8")).hexdigest()
+                )
                 raw = self._planner_llm.call(
                     get_prompt("planner", PLANNER_SYSTEM, goal=goal),
                     attempt_prompt, expect_json=True, max_tokens=8192,
+                    # B1：规划/反思/评审统一走 planner 用途模型
+                    usage="plan", cache_key=plan_cache_key,
                 )
                 plan_data = self._parse_plan_response(raw)
                 break
@@ -445,6 +466,7 @@ class OrchestratorV2:
                     raw2 = self._planner_llm.call(
                         get_prompt("planner", PLANNER_SYSTEM, goal=goal),
                         strict_prompt, expect_json=True, max_tokens=8192,
+                        usage="plan",
                     )
                     steps2 = self._normalize_steps(self._parse_plan_response(raw2))
                     steps2 = self._ensure_report_step(steps2, task_id)
@@ -630,6 +652,7 @@ class OrchestratorV2:
                 "你是任务路由专家，判断任务类型并选择模板，只输出JSON。",
                 prompt,
                 expect_json=True,
+                usage="plan",
             )
             if isinstance(raw, dict):
                 name = raw.get("template")
@@ -1663,6 +1686,7 @@ class OrchestratorV2:
             raw = self._planner_llm.call(
                 get_prompt("reflect", ITERATOR_SYSTEM, goal=goal),
                 prompt, expect_json=True, max_tokens=8192,
+                usage="plan",
             )
             if isinstance(raw, dict):
                 return raw
@@ -1682,13 +1706,15 @@ class OrchestratorV2:
                     self._reflection_llm_unavailable = _reason
                     _record_task_degradation(task_id, _reason, both_failed=False)
                     logger.warning(
-                        "Reflection LLM unavailable (%s), stopping iteration: %s",
+                        "反思 LLM 失败（%s），停止迭代（节省成本）: %s",
                         _reason, str(exc)[:150],
                     )
                     return None
             except Exception:
                 pass
-            logger.warning("Reflection failed, stopping iteration: %s", str(exc)[:150])
+            logger.warning(
+                "反思 LLM 失败，停止迭代（节省成本）: %s", str(exc)[:150],
+            )
             return None
 
     def _redo_step_and_dependents(
@@ -1718,6 +1744,28 @@ class OrchestratorV2:
             s for s in all_steps
             if s["step_id"] == step_id or s["step_id"] in dependents
         ]
+        # B3：单轮反思重做最多 N 步（默认 2），避免缺口多时把整条依赖链全部重做。
+        # 排序保证目标步骤优先，其余按依赖距离（依赖越少越靠前）截断。
+        order.sort(key=lambda s: (
+            s["step_id"] != step_id,
+            len(s.get("depends_on", []) or []),
+        ))
+        max_redo_steps = max(
+            1, int(getattr(self, "_max_redo_steps", 2) or 2)
+        )
+        if len(order) > max_redo_steps:
+            logger.warning(
+                "单轮反思重做步数上限 %d，本次从 %d 步中仅重做前 %d 步",
+                max_redo_steps, len(order), max_redo_steps,
+            )
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "iteration", "agent": "orchestrator",
+                           "message": (
+                               f"单轮反思重做步数上限 {max_redo_steps}，"
+                               f"仅重做前 {max_redo_steps} 步"
+                           ),
+                           "timestamp": self._now_iso()})
+            order = order[:max_redo_steps]
         for s in order:
             s2 = dict(s)
             s2["depends_on"] = []  # 依赖步骤已完成，单步独立重做
@@ -2086,6 +2134,7 @@ class OrchestratorV2:
             raw = self._plan_llm.call(
                 get_prompt("planner", PLANNER_SYSTEM, goal=goal),
                 prompt, expect_json=True, max_tokens=8192,
+                usage="plan",
             )
             if isinstance(raw, dict):
                 plan_data = raw
@@ -2165,6 +2214,7 @@ class OrchestratorV2:
             raw = self._plan_llm.call(
                 get_prompt("planner", PLANNER_SYSTEM, goal=goal),
                 prompt, expect_json=True, max_tokens=8192,
+                usage="plan",
             )
             if isinstance(raw, dict):
                 plan_data = raw
@@ -4164,7 +4214,9 @@ print("charts generated")
                 # 简单任务：一轮执行即交付，由贯通测试守门，不做反射式追加迭代
                 break
             # 评测驱动反思（对标标准 3.6）：先过评测闸门（每任务一次），
-            # 达标直接交付；未达标则覆盖"研究类跳过反思"，继续修正
+            # 达标直接交付；未达标则覆盖"研究类跳过反思"，继续修正。
+            # B3：gate_checked 标志保证 judge 调用只在评测闸门命中时执行一次
+            # （evals/drive.py 内部才调用 evals.judge），每轮反思不会重复触发。
             _eval_scores = ""
             _gate_failed = False
             if not gate_checked:
