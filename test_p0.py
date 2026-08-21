@@ -3030,5 +3030,49 @@ class TestP14StepDiagnosis(unittest.TestCase):
             ws_mod.WORKSPACE_ROOT = old_root
 
 
+class TestSecretScan(unittest.TestCase):
+    """check_secrets.py 密钥扫描回归：真实密钥必须命中，正常代码不得误报。"""
+
+    def _scan_line(self, line: str) -> bool:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "check_secrets", "scripts/check_secrets.py"
+        )
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        for pat in mod.PATTERNS:
+            m = pat.search(line)
+            if not m:
+                continue
+            candidate = line.split("=", 1)[-1].strip().strip("\"'") if "=" in line else line
+            if re_fullmatch_upper(candidate):
+                continue
+            key_part = m.group(1) if m.groups() else ""
+            if key_part.endswith(("'", '"')) and not key_part.startswith(("'", '"')):
+                continue
+            return True
+        return False
+
+    def test_real_secrets_must_hit(self):
+        self.assertTrue(self._scan_line('api_key = "sk-abcdefghijklmnopqrstuvwxyz123456"'))
+        self.assertTrue(self._scan_line('token = "ghp_abcdefghijklmnopqrstuvwxyz1234567890"'))
+        self.assertTrue(self._scan_line('"password": "supersecretpassword12345"'))
+        self.assertTrue(self._scan_line('EMBEDDING_API_KEY = "sk-abcdefghijklmnopqrstuvwxyz123456"'))
+
+    def test_code_assignments_must_not_hit(self):
+        # 分享功能的 token 变量赋值（CI 曾因误报连续失败）
+        self.assertFalse(self._scan_line("token = _find_share_token(tid)"))
+        self.assertFalse(self._scan_line("token = _generate_share_token(tid)"))
+        # JS 三元表达式（Login.tsx autoComplete）
+        self.assertFalse(self._scan_line("autoComplete={isSetup ? 'new-password' : 'current-password'}"))
+        # 环境变量引用
+        self.assertFalse(self._scan_line("password = os.environ.get('X')"))
+
+
+def re_fullmatch_upper(candidate: str) -> bool:
+    import re
+    return bool(re.fullmatch(r"[A-Z][A-Z0-9_]{5,}", candidate))
+
+
 if __name__ == "__main__":
     unittest.main()

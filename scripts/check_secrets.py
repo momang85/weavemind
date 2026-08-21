@@ -19,8 +19,11 @@ PATTERNS = [
     re.compile(r"\bghp_[A-Za-z0-9]{30,}\b"),         # GitHub PAT
     re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),             # AWS
-    re.compile(r"(?i)api[_-]?key\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{16,}"),
-    re.compile(r"(?i)(secret|token|password)\s*[:=]\s*['\"]?[A-Za-z0-9_\-]{16,}"),
+    # 赋值类规则要求值必须是引号包裹的字符串字面量：
+    # "api_key": "sk-..." / token = "abc..." 才算命中；
+    # token = _find_share_token(...) 这类函数调用/标识符赋值不是密钥（scan 中另有二次过滤）。
+    re.compile(r"(?i)api[_-]?key\s*[:=]\s*['\"][A-Za-z0-9_\-]{16,}['\"]"),
+    re.compile(r"(?i)(['\"]?(?:secret|token|password)['\"]?)\s*[:=]\s*['\"][A-Za-z0-9_\-]{16,}['\"]"),
 ]
 
 SKIP_SUFFIXES = (".ipynb", ".jsonl", ".lock", ".min.js", ".map")
@@ -44,6 +47,18 @@ def scan() -> list[tuple[str, str]]:
                             # 跳过环境变量引用（全大写标识符，如 EMBEDDING_API_KEY）
                             candidate = val.split("=", 1)[-1].strip().strip("\"'")
                             if re.fullmatch(r"[A-Z][A-Z0-9_]{5,}", candidate):
+                                continue
+                            # 二次过滤：排除函数调用/成员访问/标识符形态
+                            # （token = _find_share_token(...)），防止误报分享 token 变量。
+                            if re.search(r"[(_]|\s", candidate) and "=" in val:
+                                continue
+                            # 三元表达式过滤：key 片段引号不完整（'new-password' : 'current-password'
+                            # 从 password' 开始匹配，以引号结尾但非引号开头）→ 跳过。
+                            key_part = m.group(1) if m.groups() else ""
+                            if (
+                                key_part.endswith(("'", '"'))
+                                and not key_part.startswith(("'", '"'))
+                            ):
                                 continue
                             hits.append((f, f"line {lineno}: {val[:24]}..."))
                             break
