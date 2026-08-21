@@ -55,11 +55,21 @@ class TTFont:
     def __init__(self, path: str) -> None:
         with open(path, "rb") as f:
             data = f.read()
-        # TTC 容器：取第一个字体
+        # TTC 容器：依次尝试每个子字体，取第一个可解析的
+        # （部分 TTC 的第一个子字体可能是特殊字重/变体，表内容异常）
         if data[:4] == b"ttcf":
-            n = _u32(data, 8)
-            off = _u32(data, 12) if n > 0 else 0
-            data = data[off:]
+            n_fonts = _u32(data, 8)
+            for i in range(max(0, min(n_fonts, 64))):
+                off = _u32(data, 12 + 4 * i)
+                try:
+                    self._init_ttf(data[off:])
+                    return
+                except Exception:
+                    continue
+            raise ValueError(f"no usable subfont in TTC: {path}")
+        self._init_ttf(data)
+
+    def _init_ttf(self, data: bytes) -> None:
         self.data = data
         num_tables = _u16(data, 4)
         tables: dict[str, tuple[int, int]] = {}
@@ -77,7 +87,7 @@ class TTFont:
         # 本解析器按 TrueType(glyf) 嵌入（CIDFontType2），CFF 字体会产生乱码。
         # 加载时直接判为不支持，调用方回退 Helvetica（无中文）或换字体。
         if "CFF " in tables and "glyf" not in tables:
-            raise ValueError(f"OpenType/CFF font not supported: {path}")
+            raise ValueError("OpenType/CFF font not supported")
         head = self._table_data["head"]
         self.units_per_em = _u16(head, 18)
         self.x_min, self.y_min = _i16(head, 36), _i16(head, 38)
@@ -90,6 +100,10 @@ class TTFont:
         self.num_glyphs = _u16(maxp, 4)
         self._advances = self._parse_hmtx()
         self._cmap = self._parse_cmap()
+        # 有效性校验：异常子字体（如部分 TTC 的首个子字体表内容为空）
+        # 会得到 num_glyphs=0 / 空 cmap，渲染全乱码，视为不可用。
+        if self.num_glyphs <= 0 or not self._cmap:
+            raise ValueError(f"unusable font (glyphs={self.num_glyphs}, cmap={len(self._cmap)}): {path}")
 
     def _parse_hmtx(self) -> list[int]:
         hmtx = self._table_data["hmtx"]
@@ -201,15 +215,15 @@ def _candidate_fonts() -> list[str]:
     if env:
         candidates.append(env)
     candidates += [
+        # 只用 .ttf 真 TrueType（TTC 集合的部分 Windows 打包存在非标准偏移，
+        # 解析不可靠；CFF 轮廓也不支持），保证跨平台一致。
         r"C:\Windows\Fonts\simhei.ttf",
         r"C:\Windows\Fonts\Deng.ttf",
-        r"C:\Windows\Fonts\msyh.ttc",
-        r"C:\Windows\Fonts\simsun.ttc",
         r"C:\Windows\Fonts\STSONG.TTF",
-        r"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        r"/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-        r"/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-        r"/System/Library/Fonts/PingFang.ttc",
+        r"/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
+        r"/usr/share/fonts/truetype/wqy/wqy-microhei.ttf",
+        r"/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttf",
+        r"/System/Library/Fonts/Supplemental/Songti.ttc",
     ]
     return candidates
 
