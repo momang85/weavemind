@@ -2373,6 +2373,129 @@ class TestAcceptanceChecker(unittest.TestCase):
         self.assertIn("Line", _OTHER_ENTITIES)
         self.assertTrue(_entity_in("日本通讯App Line就被爆料用户流失严重", "Line"))
 
+    def test_entity_derived_value_trusted(self):
+        """派生值（derived_from_clean）直接信任：网络源上下文里其他公司实体
+        紧邻同名数值也不判污染（比亚迪 80.72% 场景，东财 HOLDER_PROFIT_YOY 派生）。"""
+        import json
+        from acceptance_checker import check_entity_attribution
+
+        sources = {
+            "search_results": "快手净利率同比增长80.72%，盈利能力改善。",
+            "fetch_snapshot": (
+                "A股上市公司比亚迪（002594）发布2023年全年业绩报告。"
+                "其中，净利润300.41亿元，同比增长80.72%。"
+            ),
+            "clean_chart_data": json.dumps({"market_data": [
+                {"label": "2022年净利润", "year": 2022, "value": 166.2, "unit": "亿元"},
+                {"label": "2023年净利润", "year": 2023, "value": 300.41, "unit": "亿元"},
+            ]}, ensure_ascii=False),
+        }
+        report = "比亚迪2023年净利润同比增长80.72%。"
+        r = check_entity_attribution(
+            report, sources,
+            "搜索并总结比亚迪公司的发展历程和现状，解析历年财报")
+        self.assertTrue(r["pass"], r["details"])
+
+    def test_entity_derived_not_trusted_without_clean(self):
+        """对照：去掉结构化数据后，他司实体紧邻数值 → 仍判污染，
+        证明"派生信任"机制确实在起作用而非误放行。"""
+        from acceptance_checker import check_entity_attribution
+
+        sources = {
+            "search_results": "快手净利率同比增长80.72%，盈利能力改善。",
+            "fetch_snapshot": "新浪新闻快手账号矩阵 财报速递：净利润300.41亿元，同比增长80.72%。",
+            "clean_chart_data": "",
+        }
+        report = "比亚迪2023年净利润同比增长80.72%。"
+        r = check_entity_attribution(
+            report, sources,
+            "搜索并总结比亚迪公司的发展历程和现状，解析历年财报")
+        self.assertFalse(r["pass"])
+        self.assertGreaterEqual(r["contaminated_count"], 1)
+
+    def test_entity_prev_sentence_target_and_noise(self):
+        """前句含目标（无他司）→ 归属成立不判污染；页面噪音"快手"（账号矩阵
+        文案，远离数值）不构成他司证据；真实他司（Line 在句尾）仍判污染。"""
+        from acceptance_checker import check_entity_attribution
+
+        # 场景 A：前句 = 比亚迪（无他司）→ 放行
+        sources_a = {
+            "search_results": "",
+            "fetch_snapshot": (
+                "A股上市公司比亚迪（002594）发布2023年全年业绩报告。"
+                "其中，净利润300.41亿元，同比增长80.72%。"
+            ),
+            "clean_chart_data": "",
+        }
+        r_a = check_entity_attribution(
+            "比亚迪2023年净利润同比增长80.72%。", sources_a,
+            "搜索并总结比亚迪公司的发展历程和现状，解析历年财报")
+        self.assertTrue(r_a["pass"], r_a["details"])
+
+        # 场景 B：前句很长、开头是导航噪音"快手"、句尾是真实他司 Line →
+        # 快手被过滤，Line 仍命中 → 污染
+        sources_b = {
+            "search_results": "",
+            "fetch_snapshot": (
+                "新浪首页 新闻 体育 财经 娱乐 科技 博客 图片 专栏 更多 汽车 教育 时尚 女性 "
+                "星座 健康 房产 历史 视频 收藏 育儿 读书 佛学 游戏 旅游 邮箱 导航 移动客户端 "
+                "新浪新闻公众号 新浪新闻视频号 新浪新闻快手 新浪新闻小红书 新浪新闻B站 热搜 "
+                "刚刚官宣与腾讯达成合作，日本通讯App Line就被爆料用户流失严重。"
+                "但在今年第三季度，这些业务仅实现了20.3亿日元的营收，占比不足全部营收的4%。"
+            ),
+            "clean_chart_data": "",
+        }
+        r_b = check_entity_attribution(
+            "腾讯营收占比不足全部营收的4%。", sources_b,
+            "搜索并总结腾讯集团的发展历程和现状，分析历年财报")
+        self.assertFalse(r_b["pass"])
+        self.assertGreaterEqual(r_b["contaminated_count"], 1)
+
+        # 场景 C：前句只有页面噪音"快手"（无真实他司）→ 放行
+        sources_c = {
+            "search_results": "",
+            "fetch_snapshot": (
+                "A股上市公司比亚迪（002594）发布2023年全年业绩报告。"
+                "其中，净利润300.41亿元，同比增长80.72%"
+                "新浪首页 新闻 体育 财经 娱乐 科技 博客 图片 专栏 更多 汽车 教育 时尚 女性 "
+                "星座 健康 房产 历史 视频 收藏 育儿 读书 佛学 游戏 旅游 邮箱 导航 移动客户端 "
+                "新浪新闻公众号 新浪新闻视频号 新浪新闻快手 新浪新闻小红书 新浪新闻B站 热搜"
+            ),
+            "clean_chart_data": "",
+        }
+        r_c = check_entity_attribution(
+            "比亚迪2023年净利润同比增长80.72%。", sources_c,
+            "搜索并总结比亚迪公司的发展历程和现状，解析历年财报")
+        self.assertTrue(r_c["pass"], r_c["details"])
+
+    def test_source_labeling_syndicated_media(self):
+        """转引署名媒体（同花顺_新浪新闻）应被识别为已知来源：
+        声明"同花顺财务诊断"但内容真实存在于新浪转引文章 → 诚实。"""
+        from acceptance_checker import check_source_labeling
+
+        sources = {
+            "search_results": "",
+            "fetch_snapshot": (
+                "财报速递:比亚迪2023年全年净利润300.41亿元，近五年总体财务状况良好"
+                "|同花顺_新浪新闻\n"
+                "正文：根据同花顺财务诊断大模型对比亚迪最近5年财务数据的综合运算，"
+                "速动比率为0.44，短期偿债能力很弱。"
+            ),
+            "clean_chart_data": "",
+        }
+        report = (
+            "根据同花顺财务诊断大模型对比亚迪最近 5 年（截至 2023 年报）"
+            "财务数据的综合运算结果，速动比率为0.44。"
+        )
+        r = check_source_labeling(report, sources)
+        self.assertTrue(r["pass"], r["details"])
+
+        # 对照：声明"腾讯官方年报"但源中无 → 仍判虚假标注
+        fake = "2023年净利润1152亿元（数据来源：腾讯官方年报）。"
+        r2 = check_source_labeling(fake, sources)
+        self.assertFalse(r2["pass"])
+        self.assertIn("腾讯官方年报", r2["mislabeled"][0])
+
     def test_source_labeling_honesty(self):
         """媒体声明可溯源 → 诚实；声明年报但源中无 → 虚假标注。"""
         from acceptance_checker import check_source_labeling

@@ -369,6 +369,45 @@ def _locate_and_context(source_text: str, value: str, unit: str, radius: int = 8
     return hits
 
 
+def _is_trusted_number(n: dict) -> bool:
+    """结构化/清洗/派生值直接信任：不再进入网络源证据检查。
+    （P1-1：比亚迪 80.72% 是东财 HOLDER_PROFIT_YOY 派生值，不应因网络源
+    上下文里出现页面噪音实体而被判污染。）"""
+    if n.get("derived") is True:
+        return True
+    src = str(n.get("source") or "")
+    return src in ("clean_chart_data", "derived_from_clean",
+                   "structured", "structured_financials")
+
+
+def _nearby_entity(src_text: str, num: dict, entity: str, radius: int = 80) -> bool:
+    """实体是否出现在数值 ±radius 字符窗口内。
+    用于过滤导航/分享按钮等页面噪音（如"新浪新闻快手"账号矩阵里的"快手"），
+    只有真正与数值相邻的他司实体才构成归属证据。"""
+    if entity not in src_text:
+        return False
+    cands = _candidates(num) or [str(num.get("value") or "")]
+    for c in cands:
+        idx = src_text.find(c)
+        while idx >= 0:
+            start = max(0, idx - radius)
+            end = min(len(src_text), idx + len(c) + radius)
+            if entity in src_text[start:end]:
+                return True
+            idx = src_text.find(c, idx + 1)
+    return False
+
+
+def _prev_near_entity(sprev: str, entity: str, radius: int = 80) -> bool:
+    """前一句的实体是否靠近数值（数值紧接前句之后，取前句尾部 ±radius 字符）。
+    Line 案例的"日本通讯App Line"在句尾 → 命中；页面导航的"快手"在长句开头
+    → 不命中。"""
+    if entity not in sprev:
+        return False
+    tail = sprev[-radius:] if len(sprev) > radius else sprev
+    return entity in tail
+
+
 def check_entity_attribution(
     report: str, sources: dict, goal: str,
 ) -> dict:
@@ -395,10 +434,22 @@ def check_entity_attribution(
             for sctx, sprev in _locate_and_context(src_text, num["value"], num["unit"]):
                 if target in sctx:
                     return False
+                # P1-1：目标允许出现在前一句（对称于他司检查），
+                # 但前句若同时混入他司（"官宣与腾讯合作，Line 用户流失"类合作新闻）
+                # 不算归属证据——保护 Line 4% 真污染检测
+                prev_others = [
+                    e for e in _OTHER_ENTITIES
+                    if _entity_in(sprev, e) and e.lower() != target.lower()
+                ]
+                if target in sprev and not prev_others:
+                    return False
                 s_others = [
                     e for e in _OTHER_ENTITIES
-                    if (_entity_in(sctx, e) or _entity_in(sprev, e))
-                    and e.lower() != target.lower()
+                    if e.lower() != target.lower()
+                    and (
+                        _nearby_entity(sctx, num, e)
+                        or _prev_near_entity(sprev, e)
+                    )
                 ]
                 if s_others and any(w in sctx for w in _CORE_FIN_WORDS):
                     other_found = True
@@ -423,7 +474,7 @@ def check_entity_attribution(
                 continue
             # 报告句子明确提到其他公司（如"低于苹果（约25%）"）是诚实的同行对比，
             # 不是污染；真污染由下方"目标句子 + 源证据"分支捕获（Line 的 4% 案例）
-            if target_here and not others and n.get("source") != "clean_chart_data":
+            if target_here and not others and not _is_trusted_number(n):
                 # 报告声明数字属于目标：若它只出现在其他公司的网络源上下文
                 # （从未出现在目标上下文）→ 污染（Line 的 4% 被归入腾讯案例）
                 if _web_other_only(n, target):
@@ -544,6 +595,20 @@ def _known_sources(sources: dict) -> dict:
                     media.add(name)
         for t in re.findall(r"(?:title|标题)[：:]\s*([^\n]{4,60})", text):
             titles.append(t)
+        # P1-2：署名/转引媒体识别——如"同花顺_新浪新闻"、"来源：同花顺"、
+        # "XX转载"等，把署名媒体名并入已知媒体集合（内容真实存在于抓取正文时，
+        # 声明"同花顺财务诊断"不应因域名是 k.sina.com.cn 而误判虚假标注）
+        for m in re.finditer(
+            r"([\u4e00-\u9fffA-Za-z0-9]{2,12})[_\s]*(?:新浪新闻|新浪财经|网易|搜狐|"
+            r"腾讯新闻|凤凰网|界面|第一财经|21世纪经济报道|东方财富)",
+            text,
+        ):
+            media.add(m.group(1).strip())
+        for m in re.finditer(
+            r"(?:来源|转自|转载自|原文来自)[：:]\s*([\u4e00-\u9fffA-Za-z0-9]{2,12})",
+            text,
+        ):
+            media.add(m.group(1).strip())
     return {"urls": urls, "domains": domains, "media": media, "titles": titles}
 
 
