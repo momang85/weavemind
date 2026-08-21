@@ -50,6 +50,11 @@ GUARDIAN_HEARTBEAT_INTERVAL = 30
 # Worker 镜像
 WORKER_IMAGE = os.environ.get("WORKER_IMAGE", "zhiguang-worker:latest")
 
+# Guardian 启动宽限期（秒）：启动后此时间内只观察不复活，
+# 避免启动瞬间读到上一轮运行/刚启动 worker 的旧心跳而误判复活。
+# 环境变量 GUARDIAN_GRACE_SECONDS 可覆盖（默认 60）。
+GRACE_SECONDS_DEFAULT = 60
+
 
 # ============================================================================
 # Worker 状态记录
@@ -107,6 +112,18 @@ class WorkerGuardian:
         }
         self._mode = os.environ.get("GUARDIAN_MODE", "process").lower()
 
+        # 启动宽限期：以 guardian 自身启动时刻起算（比 pids.json 的 started_at 更稳，
+        # 不依赖文件是否被覆盖/缺失，且能覆盖“服务刚启动、worker 尚未注册心跳”的窗口）
+        self._started_at = time.monotonic()
+        try:
+            self._grace_seconds = max(
+                0.0,
+                float(os.environ.get("GUARDIAN_GRACE_SECONDS", GRACE_SECONDS_DEFAULT)),
+            )
+        except (TypeError, ValueError):
+            self._grace_seconds = float(GRACE_SECONDS_DEFAULT)
+        self._grace_logged = False
+
         # Worker 追踪
         self._workers: dict[str, WorkerRecord] = {}
 
@@ -125,11 +142,12 @@ class WorkerGuardian:
 
         logger.info(
             "WorkerGuardian ready (mode=%s). "
-            "Heartbeat timeout=%ds, quarantine=%d restarts / %ds",
+            "Heartbeat timeout=%ds, quarantine=%d restarts / %ds, grace period=%.0fs",
             "simulate" if self._simulate else ("process" if self._mode == "process" else "docker"),
             HEARTBEAT_TIMEOUT,
             QUARANTINE_MAX_RESTARTS,
             QUARANTINE_WINDOW,
+            self._grace_seconds,
         )
 
     # ------------------------------------------------------------------
@@ -144,7 +162,11 @@ class WorkerGuardian:
         # 注册 Guardian 自己的心跳
         self._publish_guardian_heartbeat()
 
-        logger.info("WorkerGuardian started (check every %ds)", CHECK_INTERVAL)
+        logger.info(
+            "WorkerGuardian started (check every %ds, grace period %.0fs)",
+            CHECK_INTERVAL,
+            self._grace_seconds,
+        )
 
         last_guardian_hb = time.time()
 
@@ -174,6 +196,10 @@ class WorkerGuardian:
         self._running = False
         logger.info("WorkerGuardian shutting down...")
 
+    def _grace_remaining(self) -> float:
+        """返回剩余启动宽限时间（秒），<=0 表示宽限期已结束。"""
+        return self._grace_seconds - (time.monotonic() - self._started_at)
+
     # ------------------------------------------------------------------
     # 健康检查
     # ------------------------------------------------------------------
@@ -181,6 +207,15 @@ class WorkerGuardian:
     def _health_check(self) -> None:
         """扫描所有 Worker，检测死亡并复活。"""
         now = datetime.now(timezone.utc)
+
+        # 启动宽限期：只观察不复活，最多打一次日志便于观察
+        grace_left = self._grace_remaining()
+        if grace_left > 0 and not self._grace_logged:
+            logger.info(
+                "启动宽限期中，跳过复活检查（剩余 %ds）",
+                int(grace_left) + 1,
+            )
+            self._grace_logged = True
 
         # 从注册表获取所有活跃 Worker（排除已标记 offline/terminated/quarantined 的）
         agents = self._registry.list_agents()
@@ -232,6 +267,9 @@ class WorkerGuardian:
 
             # 检查心跳超时
             age = (now - record.last_heartbeat).total_seconds()
+            # 心跳恢复新鲜时回到健康状态（例如宽限期内 worker 刚补上首次心跳）
+            if age <= HEARTBEAT_TIMEOUT and record.status == "dead":
+                record.status = "healthy"
             if age > HEARTBEAT_TIMEOUT:
                 # 确认在注册表中确实不可见（双重确认）
                 still_alive = any(
@@ -247,6 +285,10 @@ class WorkerGuardian:
                             aid, age
                         )
                         record.status = "dead"
+
+                    # 宽限期内只观察不复活，避免启动瞬间误判复活导致双进程
+                    if grace_left > 0:
+                        continue
 
                     # 尝试复活
                     self._try_revive(record)

@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -3072,6 +3073,166 @@ class TestSecretScan(unittest.TestCase):
 def re_fullmatch_upper(candidate: str) -> bool:
     import re
     return bool(re.fullmatch(r"[A-Z][A-Z0-9_]{5,}", candidate))
+
+
+class _FakeRegistry:
+    """记录 register 调用的假注册表（guardian 测试用）。"""
+
+    def __init__(self, agents):
+        self.agents = agents
+        self.calls = []
+
+    def list_agents(self):
+        return self.agents
+
+    def register(self, agent_id, capabilities, status="idle"):
+        self.calls.append((agent_id, capabilities, status))
+
+
+class _FakeMessaging:
+    """guardian 测试用的假消息客户端。"""
+
+    def publish(self, channel, message):
+        self.published = message
+
+
+class TestGuardianGracePeriod(unittest.TestCase):
+    """guardian 启动宽限期回归：宽限期内判死不复活，宽限期结束后才复活。"""
+
+    def _make_guardian(self):
+        from worker_guardian import WorkerGuardian
+
+        agents = [{
+            "agent_id": "dataanalyzerworker",
+            "capabilities": ["data_analysis"],
+            "status": "idle:0/10",
+            # 模拟上一轮运行（8/20）的旧心跳：worker 刚启动尚未注册新心跳
+            "last_heartbeat": "2026-08-20T12:00:00",
+        }]
+        registry = _FakeRegistry(agents)
+        guardian = WorkerGuardian(_FakeMessaging(), registry, simulate=True)
+        guardian._grace_seconds = 60  # 固定宽限期，避免受环境变量影响
+        return guardian, registry
+
+    def test_grace_period_marks_dead_but_skips_revive(self):
+        """宽限期内：判定 DEAD，但不复活，且打一次宽限期日志。"""
+        guardian, registry = self._make_guardian()
+        with self.assertLogs("worker_guardian", level="INFO") as cm:
+            guardian._health_check()
+        self.assertEqual(guardian._workers["dataanalyzerworker"].status, "dead")
+        self.assertEqual(registry.calls, [], "宽限期内不应触发 register/复活")
+        self.assertTrue(
+            any("启动宽限期" in line for line in cm.output),
+            "宽限期应打一次跳过复活检查的日志",
+        )
+
+    def test_after_grace_period_revives(self):
+        """宽限期结束后：心跳仍超时则正常复活。"""
+        guardian, registry = self._make_guardian()
+        # 把启动时刻拨回 120s 前，模拟宽限期（60s）已结束
+        guardian._started_at = time.monotonic() - 120
+        with self.assertLogs("worker_guardian", level="INFO"):
+            guardian._health_check()
+        self.assertEqual(registry.calls, [
+            ("dataanalyzerworker", ["data_analysis"], "terminated"),
+            ("dataanalyzerworker", ["data_analysis"], "idle:0/10"),
+        ])
+        self.assertEqual(guardian._workers["dataanalyzerworker"].status, "healthy")
+
+
+class TestLauncherStopFallback(unittest.TestCase):
+    """launcher stop 兜底清理回归：pids.json 缺失时仍能发现并清理残留进程。"""
+
+    def _patch_launcher(self):
+        import launcher
+
+        tmp = Path(tempfile.mkdtemp(prefix="wm_stop_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        return launcher, tmp
+
+    def test_stop_cleans_unregistered_residuals_without_pids_file(self):
+        """pids.json 无服务记录时，兜底扫描仍能找到并清理残留进程。"""
+        launcher, tmp = self._patch_launcher()
+        pids_file = Path(tmp) / "pids.json"
+        pids_file.write_text("{}", encoding="utf-8")
+        with mock.patch.object(launcher, "_read_pids", return_value={}), \
+                mock.patch.object(launcher, "PID_FILE", pids_file), \
+                mock.patch.object(launcher, "_scan_residual_processes", return_value=[
+                    (1001, f"python {launcher.BASE_DIR}/orchestrator_v2.py"),
+                    (1002, f"python {launcher.BASE_DIR}/workers/data_analyzer_worker.py"),
+                ]), \
+                mock.patch.object(launcher, "_kill_pid", return_value=True) as kill, \
+                self.assertLogs("launcher", level="INFO") as cm:
+            stopped = launcher.stop_services()
+        self.assertEqual(stopped, [])
+        self.assertEqual(kill.call_args_list, [mock.call(1001), mock.call(1002)])
+        self.assertTrue(
+            any("清理 2 个未登记残留进程" in line for line in cm.output),
+            "应打印清理未登记残留进程的数量",
+        )
+
+    def test_stop_kills_recorded_services_and_zero_residuals(self):
+        """正常 stop：按 pids.json 全杀，且兜底扫描到 0 个残留。"""
+        launcher, tmp = self._patch_launcher()
+        pids_file = Path(tmp) / "pids.json"
+        pids_file.write_text("{}", encoding="utf-8")
+        with mock.patch.object(launcher, "_read_pids", return_value={
+                "services": {"orchestrator": 111, "guardian": 222}}), \
+                mock.patch.object(launcher, "PID_FILE", pids_file), \
+                mock.patch.object(launcher, "_scan_residual_processes", return_value=[]), \
+                mock.patch.object(launcher, "_kill_pid", return_value=True) as kill, \
+                self.assertLogs("launcher", level="INFO") as cm:
+            stopped = launcher.stop_services()
+        self.assertEqual(stopped, ["orchestrator", "guardian"])
+        self.assertEqual(kill.call_args_list, [mock.call(111), mock.call(222)])
+        self.assertTrue(
+            any("清理 0 个未登记残留进程" in line for line in cm.output),
+            "正常 stop 也应打印兜底扫描结果",
+        )
+
+    def test_stop_does_not_count_just_killed_pids_as_residuals(self):
+        """已按 pids.json 处理过的 PID（可能尚未从进程表消失）不应算作未登记残留。"""
+        launcher, tmp = self._patch_launcher()
+        pids_file = Path(tmp) / "pids.json"
+        pids_file.write_text("{}", encoding="utf-8")
+        with mock.patch.object(launcher, "_read_pids", return_value={
+                "services": {"worker-search": 111}}), \
+                mock.patch.object(launcher, "PID_FILE", pids_file), \
+                mock.patch.object(launcher, "_scan_residual_processes", return_value=[
+                    (111, f"python {launcher.BASE_DIR}/worker_base.py"),
+                    (1001, f"python {launcher.BASE_DIR}/orchestrator_v2.py"),
+                ]), \
+                mock.patch.object(launcher, "_kill_pid", return_value=True) as kill, \
+                self.assertLogs("launcher", level="INFO") as cm:
+            launcher.stop_services()
+        self.assertEqual(kill.call_args_list, [mock.call(111), mock.call(1001)])
+        self.assertTrue(
+            any("清理 1 个未登记残留进程" in line for line in cm.output),
+            "仅统计真正未登记的残留进程",
+        )
+
+    def test_is_residual_command_matches_project_only(self):
+        """匹配逻辑：只认 BASE_DIR 下的织光脚本，不误杀其他项目。"""
+        import launcher
+
+        base = str(launcher.BASE_DIR).replace("\\", "/")
+        self.assertTrue(
+            launcher._is_residual_command(
+                f"python {base}/orchestrator_v2.py --port 8080", 1))
+        self.assertTrue(
+            launcher._is_residual_command(
+                f"python {base}/workers/data_analyzer_worker.py", 2))
+        self.assertTrue(
+            launcher._is_residual_command(
+                f"python {base}/worker_base.py", 3))
+        self.assertFalse(
+            launcher._is_residual_command(
+                "python C:/other/weavemind/orchestrator_v2.py", 4))
+        self.assertFalse(
+            launcher._is_residual_command(
+                f"python {base}_backup/orchestrator_v2.py", 5))
+        self.assertFalse(
+            launcher._is_residual_command("python -m pytest tests", 6))
 
 
 if __name__ == "__main__":

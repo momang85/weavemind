@@ -32,6 +32,19 @@ LOG_DIR = BASE_DIR / "logs"
 
 _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
 
+logger = logging.getLogger(__name__)
+
+# 织光服务已知脚本名（兜底清理时仅匹配本项目 BASE_DIR 下的这些脚本，避免误杀其他 Python 项目）
+_RESIDUAL_SCRIPT_NAMES = {
+    "orchestrator_v2.py",
+    "web_ui.py",
+    "critic_agent.py",
+    "worker_guardian.py",
+    "metrics_collector.py",
+    "worker_base.py",
+    "scheduler.py",
+}
+
 
 def _load_config() -> dict:
     try:
@@ -79,18 +92,25 @@ def _kill_pid(pid: int) -> bool:
         return False
     if os.name == "nt":
         try:
-            subprocess.run(
+            r = subprocess.run(
                 ["taskkill", "/F", "/T", "/PID", str(pid)],
                 capture_output=True,
                 timeout=10,
             )
-            return True
+            if r.returncode == 0:
+                return True
         except Exception:
+            pass
+        # taskkill 无权限/不可用时，兜底直接终止（同用户进程通常可成功）
+        try:
+            os.kill(pid, signal.SIGTERM)
+            return True
+        except OSError:
             return False
     try:
         os.kill(pid, signal.SIGTERM)
         return True
-    except (ProcessLookupError, PermissionError):
+    except OSError:
         return False
 
 
@@ -114,14 +134,151 @@ def _is_alive(pid: int) -> bool:
         return False
 
 
+def _is_residual_command(cmd: str, pid: int) -> bool:
+    """判断命令行是否为本项目（BASE_DIR）内的织光服务进程。"""
+    if not cmd or pid == os.getpid():
+        return False
+    cmd_norm = cmd.replace("\\", "/").strip()
+    base_norm = str(BASE_DIR).replace("\\", "/")
+    if os.name == "nt":
+        cmd_norm = cmd_norm.lower()
+        base_norm = base_norm.lower()
+    # 必须命中 BASE_DIR 路径（后跟分隔符），避免误杀其他 Python 项目
+    if f"{base_norm}/" not in cmd_norm:
+        return False
+    # 已知脚本名（orchestrator/webui/critic/guardian/metrics/worker_base 等）
+    if any(name in cmd_norm for name in _RESIDUAL_SCRIPT_NAMES):
+        return True
+    # workers 目录下的任意 worker 脚本（workers/*.py）
+    return f"{base_norm}/workers/" in cmd_norm
+
+
+def _scan_residual_processes() -> list[tuple[int, str]]:
+    """扫描未登记但仍在运行的织光服务进程（排除当前 launcher 自身）。
+
+    优先使用 psutil（若环境已安装）；不可用时：
+      Windows -> wmic 解析 python.exe 的 CommandLine/ProcessId
+      其他平台 -> pgrep -af python 后按命令行过滤
+    """
+    try:
+        import psutil
+    except Exception:
+        psutil = None
+
+    if psutil is not None:
+        found: list[tuple[int, str]] = []
+        for proc in psutil.process_iter(["pid", "cmdline"]):
+            try:
+                cmd = " ".join(proc.info["cmdline"] or [])
+            except Exception:
+                continue
+            if _is_residual_command(cmd, proc.info["pid"]):
+                found.append((proc.info["pid"], cmd))
+        return found
+
+    if os.name == "nt":
+        return _scan_windows_wmic()
+    return _scan_posix_pgrep()
+
+
+def _scan_windows_wmic() -> list[tuple[int, str]]:
+    """Windows 兜底：wmic 获取 python.exe 的 ProcessId 与 CommandLine。"""
+    found: list[tuple[int, str]] = []
+    try:
+        out = subprocess.check_output(
+            ["wmic", "process", "where", "name='python.exe'",
+             "get", "ProcessId,CommandLine", "/VALUE"],
+            text=True,
+            timeout=15,
+            errors="replace",
+        )
+    except Exception:
+        return found
+
+    current: dict[str, str] = {}
+    for raw in out.splitlines():
+        line = raw.strip()
+        if not line:
+            if current:
+                _append_residual(current, found)
+                current = {}
+            continue
+        if line.startswith("CommandLine="):
+            current["cmd"] = line[len("CommandLine="):]
+        elif line.startswith("ProcessId="):
+            current["pid"] = line[len("ProcessId="):]
+    if current:
+        _append_residual(current, found)
+    return found
+
+
+def _append_residual(current: dict[str, str], found: list[tuple[int, str]]) -> None:
+    """从 wmic 单条进程记录中解析 PID/命令行，并过滤出织光残留进程。"""
+    cmd = current.get("cmd", "")
+    try:
+        pid = int((current.get("pid") or "").strip())
+    except ValueError:
+        return
+    if _is_residual_command(cmd, pid):
+        found.append((pid, cmd))
+
+
+def _scan_posix_pgrep() -> list[tuple[int, str]]:
+    """非 Windows 兜底：pgrep -af python 后按命令行过滤织光服务进程。"""
+    found: list[tuple[int, str]] = []
+    try:
+        out = subprocess.check_output(
+            ["pgrep", "-af", "python"],
+            text=True,
+            timeout=15,
+            errors="replace",
+        )
+    except Exception:
+        return found
+    for raw in out.splitlines():
+        parts = raw.split(" ", 1)
+        if len(parts) != 2:
+            continue
+        try:
+            pid = int(parts[0].strip())
+        except ValueError:
+            continue
+        cmd = parts[1].strip()
+        if _is_residual_command(cmd, pid):
+            found.append((pid, cmd))
+    return found
+
+
 def stop_services() -> list[str]:
     """按 PID 文件停止全部服务，返回已停止的服务名列表。"""
     pids = _read_pids()
     services = pids.get("services", {})
+    known_pids = set(p for p in services.values() if p)
     stopped: list[str] = []
     for name, pid in services.items():
         if _kill_pid(pid):
             stopped.append(name)
+
+    # 兜底清理：pids.json 可能被后续启动覆盖或缺失，
+    # 扫描并清理仍在运行的织光服务进程
+    # （排除当前 launcher 自身，以及刚按 pids.json 处理过、可能尚未从进程表消失的 PID）
+    residuals = [
+        item for item in _scan_residual_processes()
+        if item[0] not in known_pids
+    ]
+    cleaned = 0
+    for pid, _cmd in residuals:
+        if _kill_pid(pid):
+            cleaned += 1
+    if residuals:
+        logger.info(
+            "清理 %d 个未登记残留进程: %s",
+            cleaned,
+            ", ".join(str(pid) for pid, _ in residuals),
+        )
+    else:
+        logger.info("清理 0 个未登记残留进程")
+
     if PID_FILE.exists():
         try:
             PID_FILE.unlink()
