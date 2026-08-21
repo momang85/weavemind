@@ -16,6 +16,7 @@ from workspace import (
     task_project_dir,
     task_reports_dir,
     task_workspace,
+    _safe_project,
 )
 
 from common import AgentRegistry, MessagingClient, RedisAgentRegistry
@@ -1324,82 +1325,268 @@ class OrchestratorV2:
         except Exception as exc:
             logger.warning("snapshot recycle failed: %s", str(exc)[:150])
 
-    def _structured_financial_preload(self, task_id: str, goal: str) -> dict | None:
-        """financial 任务：尝试结构化数据源（东方财富），写入工作区，
-        供搜索清洗合并、报告引用与验收溯源。失败静默回退搜索链路。"""
+    def _structured_data_preload(
+        self, task_id: str, goal: str, project: str | None = None,
+    ) -> dict | None:
+        """结构化数据源预载：按目标路由到 financial（东方财富/SEC）或
+        新增的 crypto/macro/news 适配器；命中后写入工作区并合并到
+        clean_chart_data.json，供搜索清洗、图表与报告引用。失败静默回退搜索链路。"""
         try:
             from adapters.router import route_structured
             data = route_structured(goal)
             if not data:
                 return None
-            # P2-5 把 resolver 返回的 market/name/code 与候选列表写入任务上下文，
-            # 报告生成时在 [结构化财务数据] 段标注数据源选择依据
-            resolution = data.get("resolution") or {}
-            if resolution:
-                prefs = getattr(self, "_task_market_resolution", None)
-                if prefs is None:
-                    prefs = {}
-                    self._task_market_resolution = prefs
-                try:
-                    from adapters.resolver import market_preference
-                    pref = market_preference()
-                except Exception:
-                    pref = "hk"
-                prefs[task_id] = {
-                    "name": str(resolution.get("name") or ""),
-                    "market": str(resolution.get("market") or ""),
-                    "code": str(resolution.get("stock_code") or ""),
-                    "preference": pref,
-                    "alternatives": resolution.get("resolved_alternatives") or [],
+            source = str(data.get("source") or "")
+            metadata = data.get("metadata") or {}
+            is_financial = source in (
+                "eastmoney_datacenter", "eastmoney_ashare", "sec_edgar",
+            ) or (not source and isinstance(data.get("financials"), list))
+            proj = task_project_dir(task_id, project)
+            if not hasattr(self, "_task_structured_data"):
+                self._task_structured_data = {}
+            self._task_structured_data[task_id] = data
+            # 财务数据：沿用既有 financials.json 通道（报告注入/失败回退/验收溯源）
+            if is_financial:
+                # P2-5 把 resolver 返回的 market/name/code 与候选列表写入任务上下文，
+                # 报告生成时在 [结构化财务数据] 段标注数据源选择依据
+                resolution = data.get("resolution") or {}
+                if resolution:
+                    prefs = getattr(self, "_task_market_resolution", None)
+                    if prefs is None:
+                        prefs = {}
+                        self._task_market_resolution = prefs
+                    try:
+                        from adapters.resolver import market_preference
+                        pref = market_preference()
+                    except Exception:
+                        pref = "hk"
+                    prefs[task_id] = {
+                        "name": str(resolution.get("name") or ""),
+                        "market": str(resolution.get("market") or ""),
+                        "code": str(resolution.get("stock_code") or ""),
+                        "preference": pref,
+                        "alternatives": resolution.get("resolved_alternatives") or [],
+                    }
+                (proj / "financials.json").write_text(
+                    json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8",
+                )
+                snap = proj / "fetch_snapshot.json"
+                snaps: list[dict] = []
+                if snap.exists():
+                    try:
+                        snaps = json.loads(snap.read_text(encoding="utf-8"))
+                    except Exception:
+                        snaps = []
+                entry = {
+                    "title": (
+                        f"{metadata.get('company')} 主要财务指标（东方财富数据中心）"
+                    ),
+                    "url": (data.get("raw") or {}).get("url", ""),
+                    "text": (data.get("raw") or {}).get("text", ""),
                 }
-            proj = task_project_dir(task_id)
-            (proj / "financials.json").write_text(
+                if entry["url"] and not any(
+                    s.get("url") == entry["url"] for s in snaps
+                ):
+                    snaps.append(entry)
+                    snap.write_text(
+                        json.dumps(snaps, ensure_ascii=False, indent=1),
+                        encoding="utf-8",
+                    )
+                clean_path = proj / "clean_chart_data.json"
+                clean = {}
+                if clean_path.exists():
+                    try:
+                        clean = json.loads(clean_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        clean = {}
+                clean = self._merge_structured_financials(
+                    clean, data.get("financials") or [],
+                    (data.get("raw") or {}).get("url", ""),
+                )
+                clean_path.write_text(
+                    json.dumps(clean, ensure_ascii=False, indent=1), encoding="utf-8",
+                )
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "data", "agent": "orchestrator",
+                               "message": (
+                                   f"结构化数据源命中：{metadata.get('company')} "
+                                   f"{metadata.get('annual_count')} 份年报"
+                               ),
+                               "timestamp": self._now_iso()})
+                logger.info("Structured financials loaded for %s: %d annuals",
+                            task_id, metadata.get("annual_count"))
+                return data
+            # 新数据源（crypto/macro/news）：统一写 structured_data.json，
+            # 可数值化的点序列并入 clean_chart_data 的 market_trends 供绘图
+            (proj / "structured_data.json").write_text(
                 json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8",
             )
-            snap = proj / "fetch_snapshot.json"
-            snaps: list[dict] = []
-            if snap.exists():
-                try:
-                    snaps = json.loads(snap.read_text(encoding="utf-8"))
-                except Exception:
-                    snaps = []
-            entry = {
-                "title": f"{data['metadata'].get('company')} 主要财务指标（东方财富数据中心）",
-                "url": (data.get("raw") or {}).get("url", ""),
-                "text": (data.get("raw") or {}).get("text", ""),
-            }
-            if entry["url"] and not any(s.get("url") == entry["url"] for s in snaps):
-                snaps.append(entry)
-                snap.write_text(
-                    json.dumps(snaps, ensure_ascii=False, indent=1), encoding="utf-8",
-                )
-            clean_path = proj / "clean_chart_data.json"
-            clean = {}
-            if clean_path.exists():
-                try:
-                    clean = json.loads(clean_path.read_text(encoding="utf-8"))
-                except Exception:
-                    clean = {}
-            clean = self._merge_structured_financials(
-                clean, data.get("financials") or [],
-                (data.get("raw") or {}).get("url", ""),
-            )
-            clean_path.write_text(
-                json.dumps(clean, ensure_ascii=False, indent=1), encoding="utf-8",
-            )
+            self._merge_structured_points(task_id, data, project)
+            label = metadata.get("label") or source
             push_progress(self._messaging, task_id, "log",
                           {"type": "data", "agent": "orchestrator",
-                           "message": (
-                               f"结构化数据源命中：{data['metadata'].get('company')} "
-                               f"{data['metadata'].get('annual_count')} 份年报"
-                           ),
+                           "message": f"结构化数据源命中：{label}",
                            "timestamp": self._now_iso()})
-            logger.info("Structured financials loaded for %s: %d annuals",
-                        task_id, data["metadata"].get("annual_count"))
+            logger.info("Structured data loaded for %s: %s", task_id, source)
             return data
         except Exception as exc:
-            logger.warning("Structured financial preload failed: %s", str(exc)[:150])
+            logger.warning("Structured data preload failed: %s", str(exc)[:150])
             return None
+
+    def _structured_financial_preload(
+        self, task_id: str, goal: str,
+    ) -> dict | None:
+        """兼容旧名：F4 后统一走 _structured_data_preload（financial 走原通道）。"""
+        return self._structured_data_preload(task_id, goal)
+
+    @staticmethod
+    def _merge_structured_points(
+        task_id: str, data: dict, project: str | None = None,
+    ) -> None:
+        """把 crypto/macro 的点序列并入 clean_chart_data 的 market_trends，
+        让新适配器的数据能走既有"清洗 → 绘图 → 报告"通道。"""
+        try:
+            source = str(data.get("source") or "")
+            payload = data.get("data") or {}
+            rows: list[dict] = []
+            if source == "coingecko":
+                for key, label, unit in (
+                    ("price", "当前价格", "USD"),
+                    ("market_cap", "市值", "USD"),
+                    ("volume_24h", "24小时成交量", "USD"),
+                    ("change_24h", "24小时涨跌幅", "%"),
+                ):
+                    if payload.get(key) is not None:
+                        rows.append({
+                            "type": "market_size",
+                            "label": label,
+                            "value": float(payload[key]),
+                            "unit": unit,
+                            "source": "coingecko",
+                            "caliber": "CoinGecko 实时行情",
+                        })
+            elif source == "macro":
+                series = str(payload.get("series") or "")
+                for pt in (payload.get("points") or [])[-40:]:
+                    try:
+                        rows.append({
+                            "type": "market_trends",
+                            "label": f"{series} {pt.get('date')}",
+                            "value": float(pt.get("value")),
+                            "unit": "",
+                            "year": None,
+                            "source": "fred",
+                        })
+                    except (TypeError, ValueError):
+                        continue
+            if rows:
+                proj = task_project_dir(task_id, project)
+                clean_path = proj / "clean_chart_data.json"
+                clean = {}
+                if clean_path.exists():
+                    try:
+                        clean = json.loads(clean_path.read_text(encoding="utf-8"))
+                    except Exception:
+                        clean = {}
+                md = list(clean.get("market_data") or [])
+                seen = {(r.get("label"), r.get("value"), r.get("unit")) for r in md}
+                for r in rows:
+                    k = (r.get("label"), r.get("value"), r.get("unit"))
+                    if k not in seen:
+                        seen.add(k)
+                        md.append(r)
+                clean["market_data"] = md
+                clean_path.write_text(
+                    json.dumps(clean, ensure_ascii=False, indent=1),
+                    encoding="utf-8",
+                )
+        except Exception as exc:
+            logger.warning("merge structured points failed: %s", str(exc)[:120])
+
+    @staticmethod
+    def _structured_injection(task_id: str) -> str:
+        """构造报告/总结步骤的 [结构化数据] 内容块：
+        财务 → financials.json（沿用既有表格）；crypto/macro/news →
+        structured_data.json（新通道）。返回空串表示无结构化数据。"""
+        try:
+            proj = task_project_dir(task_id)
+            fin_path = proj / "financials.json"
+            if fin_path.exists():
+                fin = json.loads(fin_path.read_text(encoding="utf-8"))
+                fs = (fin.get("financials") or [])[-12:]
+                m = fin.get("metadata") or {}
+                if fs:
+                    unit = m.get("unit") or "亿元"
+                    src_name = {
+                        "eastmoney_datacenter": "东方财富数据中心（港交所披露）",
+                        "eastmoney_ashare": "东方财富数据中心（A股财报）",
+                        "sec_edgar": "SEC EDGAR（10-K 年报）",
+                    }.get(str(m.get("source")), str(m.get("source")))
+                    rows = [
+                        "| 年份 | 营收 | 归母净利润 | 毛利率% | 总负债 | 经营现金流 |",
+                        "|---|---|---|---|---|---|",
+                    ]
+                    for f in fs:
+                        rows.append(
+                            f"| {f.get('year')} | {f.get('revenue')} | "
+                            f"{f.get('net_profit')} | {f.get('gross_margin')} | "
+                            f"{f.get('total_liabilities')} | "
+                            f"{f.get('operating_cashflow')} |"
+                        )
+                    return (
+                        "\n\n[结构化财务数据]（来自 " + src_name + "，单位：" + unit
+                        + "，权威数据源，优先引用）\n" + "\n".join(rows)
+                        + "\n规则：报告/总结中的财务数字优先引用本表，并在来源处标注"
+                        + src_name + "；本表未覆盖的数字若无溯源，标注"
+                        "'基于模型知识，未在本次检索中验证'；禁止编造年份。"
+                    )
+            sd_path = proj / "structured_data.json"
+            if sd_path.exists():
+                sd = json.loads(sd_path.read_text(encoding="utf-8"))
+                source = str(sd.get("source") or "")
+                payload = sd.get("data") or {}
+                meta = sd.get("metadata") or {}
+                lines: list[str] = []
+                if source == "coingecko":
+                    name = meta.get("coin") or "加密货币"
+                    vs = str(meta.get("vs_currency") or "usd").upper()
+                    lines = [
+                        "| 指标 | 数值 |",
+                        "|---|---|",
+                        f"| 当前价格 | {payload.get('price')} {vs} |",
+                        f"| 市值 | {payload.get('market_cap')} {vs} |",
+                        f"| 24小时成交量 | {payload.get('volume_24h')} {vs} |",
+                        f"| 24小时涨跌幅 | {payload.get('change_24h')}% |",
+                    ]
+                    block_title = f"[结构化数据]（{name} 实时行情，CoinGecko）"
+                elif source == "macro":
+                    series = str(payload.get("series") or "")
+                    label = str(payload.get("indicator") or series)
+                    lines = ["| 日期 | 数值 |", "|---|---|"]
+                    for pt in (payload.get("points") or [])[-24:]:
+                        lines.append(f"| {pt.get('date')} | {pt.get('value')} |")
+                    block_title = f"[结构化数据]（{label}，FRED 宏观指标）"
+                elif source == "news":
+                    query = str(payload.get("query") or "")
+                    lines = ["| 标题 | 来源时间 | 链接 |", "|---|---|---|"]
+                    for it in (payload.get("items") or [])[:15]:
+                        title = str(it.get("title") or "").replace("|", "｜")
+                        pub = str(it.get("published") or "")
+                        link = str(it.get("link") or "")
+                        lines.append(f"| {title} | {pub} | {link} |")
+                    block_title = (
+                        f"[结构化数据]（新闻列表，Google News RSS，"
+                        f"查询：{query or '默认'}）"
+                    )
+                if lines:
+                    return (
+                        f"\n\n{block_title}\n" + "\n".join(lines)
+                        + "\n规则：报告/总结优先引用本表内容，并在来源处标注数据源；"
+                        "表中没有的信息若无溯源，标注'基于模型知识，未在本次检索中验证'。"
+                    )
+        except Exception:
+            pass
+        return ""
 
     @staticmethod
     def _merge_structured_financials(clean: dict, financials: list, source_url: str) -> dict:
@@ -2135,6 +2322,15 @@ class OrchestratorV2:
                         f"（工作区已有结构化财务数据：{m.get('source')}，"
                         f"{m.get('annual_count')} 份年报，单位 {m.get('unit')}）"
                     )
+            else:
+                sd_path = task_project_dir(task_id) / "structured_data.json"
+                if sd_path.exists():
+                    sd = json.loads(sd_path.read_text(encoding="utf-8"))
+                    m = sd.get("metadata") or {}
+                    structured_hint = (
+                        "（工作区已有结构化数据："
+                        f"{m.get('label') or sd.get('source')}）"
+                    )
         except Exception:
             pass
         # 金融任务：搜索/抓取失败 → 优先用结构化数据完成分析（不是模型知识）
@@ -2537,12 +2733,12 @@ class OrchestratorV2:
         lines.append("> 以下为任务执行过程中的详细内容（设计文档 / 过程记录）。")
         return "\n".join(lines), e2e
 
-    def _cleanup_project_workspace(self, task_id: str) -> None:
+    def _cleanup_project_workspace(self, task_id: str, project: str | None = None) -> None:
         """任务开始时清空本任务的成果目录（project/reports/data/charts），
         保证"一次运行 = 一个干净文件夹"；每任务独立，不影响其他任务。"""
         import shutil
         for sub in ("project", "reports", "data", "charts"):
-            d = task_workspace(task_id) / sub
+            d = task_workspace(task_id, project) / sub
             if not d.is_dir():
                 continue
             try:
@@ -4067,13 +4263,17 @@ print("charts generated")
     # ── Main Loop ──
     def run(self, task_id: str, goal: str, context: str = "",
             auto_run: bool = True, template_steps: list | None = None,
-            user_id: str = "") -> dict:
+            user_id: str = "", project: str | None = None) -> dict:
         """Execute a full task lifecycle. Returns final status dict."""
         try:
             from llm_client import set_task_context
             set_task_context(task_id)
         except Exception:
             pass
+        project = _safe_project(project)
+        if not hasattr(self, "_task_projects"):
+            self._task_projects = {}
+        self._task_projects[task_id] = project
         # C3：任务开始前热重载 system 段配置（下一任务生效；执行中任务不受影响）
         self._reload_system_config()
         started = time.time()
@@ -4086,9 +4286,9 @@ print("charts generated")
             self._task_user_ids = {}
         self._task_user_ids[task_id] = str(user_id or "")
         # 每任务独立成果文件夹：清空本项目目录与旧交付包，保证只含本次产物
-        ensure_task_workspace(task_id)
-        self._cleanup_project_workspace(task_id)
-        ws_dir = task_workspace(task_id)
+        ensure_task_workspace(task_id, project)
+        self._cleanup_project_workspace(task_id, project)
+        ws_dir = task_workspace(task_id, project)
         try:
             for p in ws_dir.glob("*.zip"):
                 p.unlink(missing_ok=True)
@@ -4242,8 +4442,9 @@ print("charts generated")
                            "message": "Simple task: fast path enabled (skip TDD/review/reflection, early LLM failover)",
                            "timestamp": self._now_iso()})
 
-        # 结构化数据源预载：financial 任务先尝试东方财富（若命中，搜索仅作补充）
-        self._structured_financial_preload(task_id, goal)
+        # 结构化数据源预载：financial → 东方财富/SEC；crypto/macro/news →
+        # 对应新适配器（若命中，搜索仅作补充）
+        self._structured_data_preload(task_id, goal, project)
 
         # 2..N. 执行 + 自主迭代（执行 → 验收评审 → 追加步骤，直到通过或达到上限）
         all_steps: list[dict] = []
@@ -5128,54 +5329,28 @@ print("charts generated")
 
         if cap in ('content_summary', 'report_generator'):
             # 结构化财务数据【内容】注入（不只文件提及）：让报告/总结 LLM 真正看到
-            # 权威年报序列，否则模型只会用搜索片段（如 IT之家）并宣称历史年份缺失
+            # 权威年报序列，否则模型只会用搜索片段（如 IT之家）并宣称历史年份缺失；
+            # 新数据源（crypto/macro/news）经 structured_data.json 走同一通道。
             try:
-                from workspace import task_project_dir as _tpd
-                fin_path = _tpd(task_id) / "financials.json"
-                if fin_path.exists():
-                    fin = json.loads(fin_path.read_text(encoding="utf-8"))
-                    fs = (fin.get("financials") or [])[-12:]
-                    m = fin.get("metadata") or {}
-                    if fs:
-                        unit = m.get("unit") or "亿元"
-                        src_name = {
-                            "eastmoney_datacenter": "东方财富数据中心（港交所披露）",
-                            "eastmoney_ashare": "东方财富数据中心（A股财报）",
-                            "sec_edgar": "SEC EDGAR（10-K 年报）",
-                        }.get(str(m.get("source")), str(m.get("source")))
-                        rows = [
-                            "| 年份 | 营收 | 归母净利润 | 毛利率% | 总负债 | 经营现金流 |",
-                            "|---|---|---|---|---|---|",
-                        ]
-                        for f in fs:
-                            rows.append(
-                                f"| {f.get('year')} | {f.get('revenue')} | "
-                                f"{f.get('net_profit')} | {f.get('gross_margin')} | "
-                                f"{f.get('total_liabilities')} | {f.get('operating_cashflow')} |"
-                            )
-                        instr += (
-                            "\n\n[结构化财务数据]（来自 " + src_name + "，单位：" + unit
-                            + "，权威数据源，优先引用）\n" + "\n".join(rows)
-                            + "\n规则：报告/总结中的财务数字优先引用本表，并在来源处标注"
-                            + src_name + "；本表未覆盖的数字若无溯源，标注"
-                            "'基于模型知识，未在本次检索中验证'；禁止编造年份。"
-                        )
-                        # P2-5 追加数据源选择依据：市场偏好与候选列表（前 3）
-                        prefs = (
-                            getattr(self, "_task_market_resolution", {}) or {}
-                        ).get(task_id)
-                        if prefs and prefs.get("name") and prefs.get("market"):
-                            alts = "、".join(
-                                f"{a.get('market')}:{a.get('name')}"
-                                for a in (prefs.get("alternatives") or [])[:3]
-                                if a.get("market") and a.get("name")
-                            )
-                            instr += (
-                                f"\n数据源：{prefs['name']}"
-                                f"（{prefs['market']} 市场 {prefs['code']}），"
-                                f"系统按市场偏好 {prefs['preference']} 选择；"
-                                f"候选：{alts}。"
-                            )
+                block = self._structured_injection(task_id)
+                if block:
+                    instr += block
+                # P2-5 追加数据源选择依据：市场偏好与候选列表（前 3）
+                prefs = (
+                    getattr(self, "_task_market_resolution", {}) or {}
+                ).get(task_id)
+                if prefs and prefs.get("name") and prefs.get("market"):
+                    alts = "、".join(
+                        f"{a.get('market')}:{a.get('name')}"
+                        for a in (prefs.get("alternatives") or [])[:3]
+                        if a.get("market") and a.get("name")
+                    )
+                    instr += (
+                        f"\n数据源：{prefs['name']}"
+                        f"（{prefs['market']} 市场 {prefs['code']}），"
+                        f"系统按市场偏好 {prefs['preference']} 选择；"
+                        f"候选：{alts}。"
+                    )
             except Exception:
                 pass
             for dep_id in deps:
@@ -5519,6 +5694,7 @@ def main():
             goal = data.get("goal", "")
             context = data.get("context", "")
             auto_run = data.get("auto_run", True)
+            project = data.get("project") or "default"
 
             if goal == "EVOLUTION_TRIGGER":
                 push_progress(orch._messaging, task_id, "log",
@@ -5540,21 +5716,25 @@ def main():
                 continue
 
             # Run task in background thread
-            def _run_task(tid, g, ctx, ar, tpl_steps, uid):
+            def _run_task(tid, g, ctx, ar, tpl_steps, uid, proj):
                 try:
                     result = orch.run(
-                        tid, g, ctx, auto_run=ar, template_steps=tpl_steps, user_id=uid
+                        tid, g, ctx, auto_run=ar, template_steps=tpl_steps,
+                        user_id=uid, project=proj,
                     )
+                    result["project"] = proj
                     orch._messaging.publish("orchestrator:response", result)
                 except Exception as e:
                     logger.error("Task %s failed: %s", tid, e)
                     orch._messaging.publish("orchestrator:response",
-                                            {"task_id": tid, "status": "FAILED", "report": str(e)})
+                                            {"task_id": tid, "status": "FAILED",
+                                             "report": str(e), "project": proj})
             threading.Thread(
                 target=_run_task,
                 args=(
                     task_id, goal, context, auto_run,
                     data.get("template_steps"), data.get("user_id", ""),
+                    project,
                 ),
                 daemon=True,
             ).start()

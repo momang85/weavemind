@@ -157,7 +157,21 @@ export default memo(function ReportViewer() {
     taskIdForFiles ? '/files/' + encodeURIComponent(taskIdForFiles) + '/' + encodeURIComponent(name)
                    : '/files/' + encodeURIComponent(name)
 
-  const downloadPDF = () => {
+  const downloadPDF = async () => {
+    if (taskIdForFiles) {
+      try {
+        const res = await fetch('/api/task/' + encodeURIComponent(taskIdForFiles) + '/pdf')
+        if (!res.ok) throw new Error('PDF unavailable')
+        const blob = await res.blob()
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = taskIdForFiles + '.pdf'
+        a.click()
+        URL.revokeObjectURL(url)
+        return
+      } catch { /* 退回浏览器打印方案 */ }
+    }
     const w = window.open('', '_blank')
     if (!w) return
     w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Report</title>
@@ -297,7 +311,7 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
         </button>
         <button onClick={downloadPDF}
           className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm transition-colors">
-          <FileDown className="w-4 h-4" /> 打印/PDF
+          <FileDown className="w-4 h-4" /> 下载PDF
         </button>
         <button onClick={() => setShowLogs(!showLogs)}
           className={`flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm transition-colors ${

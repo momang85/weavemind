@@ -6,7 +6,11 @@ from urllib.parse import urlparse, unquote
 import redis
 
 from audit_logger import audit_log, read_audit
-from workspace import task_workspace
+from workspace import (
+    _safe_project,
+    list_projects,
+    task_workspace,
+)
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
@@ -219,6 +223,8 @@ def _init_db():
             db.execute("ALTER TABLE task_history ADD COLUMN parent_task_id TEXT DEFAULT ''")
         if "context" not in cols:
             db.execute("ALTER TABLE task_history ADD COLUMN context TEXT DEFAULT ''")
+        if "project" not in cols:
+            db.execute("ALTER TABLE task_history ADD COLUMN project TEXT DEFAULT 'default'")
         db.commit(); db.close()
     except Exception: pass
 
@@ -1287,6 +1293,75 @@ def _extract_text_from_bytes(filename: str, data: bytes) -> str:
             return f"(excel 解析失败: {exc})"
     return f"(暂不支持的文件格式: {ext or '未知'})"
 
+
+def _publish_task(
+    goal: str,
+    project: str = "default",
+    conversation_id: str = "",
+    parent_task_id: str = "",
+    context: str = "",
+    auto_run: bool = True,
+    template_steps: list | None = None,
+    user_id: str = "",
+    prefix: str = "ui",
+) -> dict:
+    """核心提交通道：发布到 Redis orchestrator:main 并登记内存/SQLite。
+    供 POST /task 与定时任务调度器共用；失败抛异常由调用方处理。"""
+    if not _redis_ready():
+        raise RuntimeError("Redis 未连接，任务无法派发")
+    project = _safe_project(project)
+    tid = f"{prefix}-" + uuid.uuid4().hex[:10]
+    r = _new_redis()
+    r.publish("orchestrator:main", json.dumps({
+        "task_id": tid,
+        "goal": goal,
+        "project": project,
+        "context": context,
+        "auto_run": auto_run,
+        "template_steps": template_steps,
+        "user_id": user_id,
+    }, ensure_ascii=False))
+    with _task_lock:
+        _task_results[tid] = {
+            "task_id": tid,
+            "status": "PENDING",
+            "goal": goal,
+            "project": project,
+            "steps": [],
+            "report": "",
+            "conversation_id": conversation_id,
+            "auto_run": auto_run,
+        }
+    try:
+        db = sqlite3.connect(DB_PATH, timeout=3)
+        db.execute(
+            "INSERT INTO task_history"
+            "(task_id,goal,status,project,conversation_id,parent_task_id,context)"
+            " VALUES(?,?,?,?,?,?,?)",
+            (tid, goal, "PENDING", project, conversation_id,
+             parent_task_id, context),
+        )
+        db.commit()
+        db.close()
+    except Exception:
+        pass
+    return {"task_id": tid, "conversation_id": conversation_id,
+            "status": "PENDING", "project": project}
+
+
+def _task_pdf_bytes(tid: str) -> bytes:
+    """生成任务报告 PDF；无报告/生成失败抛异常（路由转 404）。"""
+    data = _get_task_report_data(tid)
+    if not data or not str(data.get("report") or "").strip():
+        raise LookupError("report not found")
+    from report_pdf import markdown_to_pdf
+    return markdown_to_pdf(
+        str(data["report"]),
+        title=str(data.get("goal") or "任务报告"),
+        workspace=task_workspace(tid),
+    )
+
+
 HTML = '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>WeaveMind</title></head><body><div id="root"></div><script type="module" src="http://localhost:5173/@vite/client"></script><script type="module" src="http://localhost:5173/src/main.tsx"></script></body></html>'
 DIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
 
@@ -1386,6 +1461,7 @@ class Handler(BaseHTTPRequestHandler):
             or path == "/api/audit"
             or path.startswith("/api/audit")
             or path == "/api/tool-audit"
+            or path == "/api/scheduled-jobs"
         ):
             self._json({"error": "权限不足：仅管理员可访问"}, 403)
             return False
@@ -1543,6 +1619,13 @@ class Handler(BaseHTTPRequestHandler):
                 return
             return self._html(HTML)
         if p == "/api/status": return self._json(_system_status())
+        if p == "/api/projects":
+            # F1：项目列表（扫描 projects/ 目录；旧版平铺任务归入 legacy）
+            return self._json({"projects": list_projects()})
+        if p == "/api/scheduled-jobs":
+            # F2：定时任务列表（GET 仅 admin，见 _role_allowed_get）
+            from scheduled_jobs import load_jobs
+            return self._json({"jobs": load_jobs(CONFIG_PATH)})
         if p.startswith("/files/"):
             rel = p[len("/files/"):]
             tid = None
@@ -1607,6 +1690,23 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             return self._json({"task_id": tid, "text": text[-20000:]})
+        if p.startswith("/api/task/") and p.endswith("/pdf"):
+            # F3：报告服务端 PDF 导出（Content-Disposition attachment）
+            tid = p.split("/api/task/")[-1].rsplit("/pdf", 1)[0]
+            try:
+                body = _task_pdf_bytes(tid)
+            except Exception:
+                return self._json({"error": "report not found"}, 404)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/pdf")
+            self.send_header(
+                "Content-Disposition",
+                f'attachment; filename="{tid}.pdf"',
+            )
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if p == "/api/config": return self._json(_public_config(_load_config()))
         if p == "/api/events":
             with _events_lock:
@@ -1742,6 +1842,7 @@ class Handler(BaseHTTPRequestHandler):
                 "steps": data.get("steps", []),
                 "report": data.get("final_report") or data.get("report", ""),
                 "logs": data.get("logs", []),
+                "project": data.get("project", ""),
                 "revision": bool(data.get("revision")),
                 "acceptance": data.get("acceptance"),
                 "llm_degraded": data.get("llm_degraded"),
@@ -1913,7 +2014,7 @@ class Handler(BaseHTTPRequestHandler):
                     db.close()
                 except Exception:
                     pass
-            tid = "ui-" + uuid.uuid4().hex[:10]
+            project = _safe_project(str(body.get("project") or "default"))
             auto_run = bool(body.get("auto_run", True))
             # 结果缓存：相同目标在 TTL 内已成功
             ttl = int(body.get("cache_ttl_min") or 0)
@@ -1927,34 +2028,29 @@ class Handler(BaseHTTPRequestHandler):
                         "cached": True, "report": cached["report"],
                         "conversation_id": cached.get("conversation_id") or "",
                     })
-            if not _redis_ready():
-                audit_log(admin.get("user", ""), self._client_ip(), "task.submit",
-                          target=tid, result="fail", detail=f"Redis 未连接: {g[:120]}")
-                return self._json({"error": "Redis 未连接，任务无法派发。请先启动 Redis（start.bat 或 docker start zhiguan-redis）"}, 503)
-            r = _new_redis()
             try:
-                r.publish("orchestrator:main", json.dumps({
-                    "task_id": tid, "goal": g, "context": context,
-                    "auto_run": auto_run, "template_steps": template_steps,
-                    "user_id": str(body.get("user_id") or ""),
-                }, ensure_ascii=False))
+                submitted = _publish_task(
+                    goal=g,
+                    project=project,
+                    conversation_id=conv_id,
+                    parent_task_id=parent_id,
+                    context=context,
+                    auto_run=auto_run,
+                    template_steps=template_steps,
+                    user_id=str(body.get("user_id") or ""),
+                )
+                tid = submitted["task_id"]
+            except RuntimeError as exc:
+                audit_log(admin.get("user", ""), self._client_ip(), "task.submit",
+                          target="?", result="fail", detail=f"Redis 发布失败: {g[:120]}")
+                return self._json({"error": str(exc)}, 503)
             except Exception:
                 audit_log(admin.get("user", ""), self._client_ip(), "task.submit",
-                          target=tid, result="fail", detail=f"Redis 发布失败: {g[:120]}")
-                return self._json({"error": "Redis 发布失败，任务未派发"}, 503)
-            with _task_lock: _task_results[tid] = {"task_id":tid,"status":"PENDING","goal":g,"steps":[],"report":"","conversation_id":conv_id,"auto_run":auto_run}
-            # Write to SQLite so History shows immediately
-            try:
-                db = sqlite3.connect(DB_PATH, timeout=3)
-                db.execute(
-                    "INSERT INTO task_history(task_id,goal,status,conversation_id,parent_task_id,context) VALUES(?,?,?,?,?,?)",
-                    (tid, g, "PENDING", conv_id, parent_id, user_context),
-                )
-                db.commit(); db.close()
-            except Exception: pass
+                          target="?", result="fail", detail=f"任务派发异常: {g[:120]}")
+                return self._json({"error": "任务派发失败"}, 500)
             audit_log(admin.get("user", ""), self._client_ip(), "task.submit",
                       target=tid, result="ok", detail=f"goal: {g[:120]}")
-            return self._json({"task_id":tid,"conversation_id":conv_id,"status":"PENDING"})
+            return self._json(submitted)
         if self.path == "/api/memory/delete":
             # 记忆治理（对标标准 3.4）：按类型+ids 删除，或 {all: true} 清空
             mtype = str(body.get("type") or "").strip()
@@ -2106,6 +2202,33 @@ class Handler(BaseHTTPRequestHandler):
             if llm.get("model"): os.environ["LLM_MODEL"] = llm["model"]
             audit_log(admin.get("user", ""), self._client_ip(), "config.save", result="ok")
             return self._json({"status":"saved"})
+        if self.path == "/api/scheduled-jobs":
+            # F2：定时任务增删改（仅 admin）。body:
+            #   {"action": "add"|"update"|"delete", "job": {...}, "name": "..."}
+            from scheduled_jobs import load_jobs, normalize_job, save_jobs
+            jobs = load_jobs(CONFIG_PATH)
+            action = str(body.get("action") or "add").lower()
+            name = str(body.get("name") or "").strip()
+            if action == "delete":
+                if not name:
+                    return self._json({"error": "name required"}, 400)
+                jobs = [j for j in jobs if j.get("name") != name]
+            else:
+                job = normalize_job(body.get("job") if isinstance(
+                    body.get("job"), dict
+                ) else body)
+                if not job:
+                    return self._json({
+                        "error": "job 需要 name/goal，且 interval_minutes 或 "
+                                 "cron(每日 HH:MM) 至少一项",
+                    }, 400)
+                jobs = [j for j in jobs if j.get("name") != job["name"]]
+                jobs.append(job)
+            if not save_jobs(jobs, CONFIG_PATH):
+                return self._json({"error": "保存配置失败"}, 500)
+            audit_log(admin.get("user", ""), self._client_ip(),
+                      "scheduled_jobs.save", target=name or "?", result="ok")
+            return self._json({"status": "ok", "jobs": jobs})
         return self._json({"error":"not found"},404)
 
     def do_DELETE(self):
@@ -2170,6 +2293,26 @@ def main():
 
     threading.Thread(target=_supervise, args=(_listen_results,), daemon=True).start()
     threading.Thread(target=_supervise, args=(_listen_events,), daemon=True).start()
+    # F2：定时任务调度线程（读 config.json 的 scheduled_jobs，进程内提交）
+    def _run_scheduled_jobs():
+        from scheduled_jobs import ScheduledJobsRunner
+
+        def _submit(job: dict) -> str:
+            submitted = _publish_task(
+                goal=str(job.get("goal") or ""),
+                project=str(job.get("project") or "default"),
+                auto_run=True,
+                user_id="scheduler",
+                prefix="sched",
+            )
+            return submitted.get("task_id", "")
+
+        runner = ScheduledJobsRunner(submit_fn=_submit, config_path=CONFIG_PATH)
+        runner.run()
+
+    threading.Thread(
+        target=_supervise, args=(_run_scheduled_jobs,), daemon=True,
+    ).start()
     # 预热记忆库（避免首个 /api/status 或 /api/memory 请求阻塞）
     def _prewarm_memory():
         _get_memory_manager()

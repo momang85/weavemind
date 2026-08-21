@@ -194,6 +194,11 @@ export default function History() {
                     : <ChevronRight className="w-4 h-4 text-slate-500" />}
                   <FileText className="w-4 h-4 text-cyan-400" />
                   <span className="flex-1 text-slate-300 text-sm truncate">{t.goal}</span>
+                  {t.project && (
+                    <span className="text-[10px] px-2 py-0.5 rounded bg-slate-700/60 text-slate-400 shrink-0">
+                      {t.project}
+                    </span>
+                  )}
                   <span className={statusBadge(t.status)}>{t.status}</span>
                   <span className="text-slate-600 text-xs">{new Date(t.created_at).toLocaleDateString()}</span>
                 </button>

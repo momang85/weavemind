@@ -3886,5 +3886,337 @@ class TestP0StatusHonesty(unittest.TestCase):
             ws_mod.WORKSPACE_ROOT = old_root
 
 
+class TestMultiProjectWorkspace(unittest.TestCase):
+    """F1：多项目工作区（新路径路由 / 旧路径回退 / 项目名 sanitize）。"""
+
+    def setUp(self):
+        import workspace as ws_mod
+        self.ws_mod = ws_mod
+        self._old_root = ws_mod.WORKSPACE_ROOT
+        self._tmp = Path(tempfile.mkdtemp(prefix="wm_proj_"))
+        ws_mod.configure_workspace_root(str(self._tmp))
+
+    def tearDown(self):
+        self.ws_mod.WORKSPACE_ROOT = self._old_root
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_project_parameter_routes_to_new_path(self):
+        ws = self.ws_mod.ensure_task_workspace("t-f1-1", "alpha")
+        expected = self._tmp / "projects" / "alpha" / "t-f1-1"
+        self.assertEqual(ws, expected)
+        self.assertTrue((expected / "project").is_dir())
+        self.assertTrue((expected / "reports").is_dir())
+        self.assertTrue((expected / "data").is_dir())
+        self.assertTrue((expected / "charts").is_dir())
+        # 显式 project 定位（不扫描）
+        self.assertEqual(
+            self.ws_mod.task_workspace("t-f1-1", "alpha"), expected,
+        )
+
+    def test_old_flat_path_fallback(self):
+        legacy = self._tmp / "t-f1-old"
+        legacy.mkdir(parents=True)
+        (legacy / "project").mkdir()
+        self.assertEqual(
+            self.ws_mod.task_workspace("t-f1-old"), legacy,
+        )
+        self.assertFalse((self._tmp / "projects").exists())
+
+    def test_task_workspace_scans_projects_when_project_unknown(self):
+        # 模拟"另一个进程"（orchestrator）只建了目录，本进程无内存索引
+        pdir = self._tmp / "projects" / "beta" / "t-f1-2"
+        pdir.mkdir(parents=True)
+        found = self.ws_mod.task_workspace("t-f1-2")
+        self.assertEqual(found, pdir)
+
+    def test_project_name_sanitize_blocks_traversal(self):
+        safe = self.ws_mod._safe_project("../evil/..\\x")
+        self.assertNotIn("/", safe)
+        self.assertNotIn("\\", safe)
+        self.assertEqual(safe, "evil_.._x")
+        self.assertEqual(self.ws_mod._safe_project(""), "default")
+        self.assertEqual(self.ws_mod._safe_project(None), "default")
+
+    def test_list_projects_groups_and_legacy(self):
+        self.ws_mod.ensure_task_workspace("t-a", "crypto")
+        self.ws_mod.ensure_task_workspace("t-b", "crypto")
+        legacy = self._tmp / "t-old"
+        legacy.mkdir()
+        projects = self.ws_mod.list_projects()
+        names = {p["name"] for p in projects}
+        self.assertIn("crypto", names)
+        self.assertIn("legacy", names)
+        crypto = next(p for p in projects if p["name"] == "crypto")
+        self.assertEqual(crypto["task_count"], 2)
+
+
+class TestScheduledJobs(unittest.TestCase):
+    """F2：interval 触发（mock 时钟）、每日 HH:MM、提交调用与日志。"""
+
+    def _write_config(self, jobs):
+        cfg_path = os.path.join(self._tmp, "config.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"scheduled_jobs": jobs}, f, ensure_ascii=False, indent=2)
+        return cfg_path
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="wm_sched_")
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_interval_trigger_with_mock_clock(self):
+        from datetime import datetime
+        from scheduled_jobs import ScheduledJobsRunner
+        cfg = self._write_config([{
+            "name": "job-int", "goal": "每小时行情", "project": "crypto",
+            "interval_minutes": 60, "enabled": True,
+        }])
+        calls: list[dict] = []
+        runner = ScheduledJobsRunner(
+            submit_fn=lambda job: calls.append(job) or "sched-1",
+            config_path=cfg,
+            log_path=os.path.join(self._tmp, "sched.log"),
+        )
+        t0 = datetime(2026, 8, 21, 9, 0, 0)
+        self.assertEqual(runner.tick(t0), [])             # 启动基线，不立即触发
+        self.assertEqual(runner.tick(t0), [])
+        fired = runner.tick(t0.replace(minute=59))         # 不足 60 分钟
+        self.assertEqual(fired, [])
+        fired = runner.tick(t0.replace(hour=10, minute=0))  # 满 60 分钟
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(fired[0]["task_id"], "sched-1")
+        self.assertEqual(fired[0]["result"], "submitted")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["goal"], "每小时行情")
+        self.assertEqual(calls[0]["project"], "crypto")
+        # 同周期内不重复触发
+        self.assertEqual(runner.tick(t0.replace(hour=10, minute=1)), [])
+        # 再满一个周期
+        fired = runner.tick(t0.replace(hour=11, minute=0))
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(len(calls), 2)
+        # 日志落盘
+        with open(os.path.join(self._tmp, "sched.log"),
+                  encoding="utf-8") as f:
+            log = f.read()
+        self.assertIn("job-int", log)
+        self.assertIn("sched-1", log)
+
+    def test_daily_cron_parse_and_next_run(self):
+        from datetime import datetime
+        from scheduled_jobs import next_run_time, normalize_job
+        job = normalize_job({
+            "name": "daily", "goal": "每日宏观", "cron": "09:30", "enabled": True,
+        })
+        self.assertIsNotNone(job)
+        self.assertEqual(job["cron"], "09:30")
+        self.assertIsNone(normalize_job({
+            "name": "bad", "goal": "x", "cron": "25:99",
+        }))
+        self.assertIsNone(normalize_job({"name": "no-schedule", "goal": "x"}))
+        now = datetime(2026, 8, 21, 8, 0)
+        self.assertEqual(
+            next_run_time(job, now), datetime(2026, 8, 21, 9, 30),
+        )
+        now2 = datetime(2026, 8, 21, 10, 0)
+        self.assertEqual(
+            next_run_time(job, now2), datetime(2026, 8, 22, 9, 30),
+        )
+
+    def test_daily_cron_fires_once_per_day(self):
+        from datetime import datetime
+        from scheduled_jobs import ScheduledJobsRunner
+        cfg = self._write_config([{
+            "name": "daily", "goal": "宏观简报", "cron": "09:30",
+            "enabled": True,
+        }])
+        calls = []
+        runner = ScheduledJobsRunner(
+            submit_fn=lambda job: calls.append(job) or "sched-d1",
+            config_path=cfg,
+            log_path=os.path.join(self._tmp, "sched.log"),
+        )
+        t = datetime(2026, 8, 21, 9, 29)
+        self.assertEqual(runner.tick(t), [])
+        fired = runner.tick(t.replace(minute=30))
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(runner.tick(t.replace(minute=31)), [])  # 同日不重复
+        fired = runner.tick(datetime(2026, 8, 22, 9, 30))        # 次日再触发
+        self.assertEqual(len(fired), 1)
+        self.assertEqual(len(calls), 2)
+
+    def test_disabled_job_never_fires(self):
+        from datetime import datetime
+        from scheduled_jobs import ScheduledJobsRunner
+        cfg = self._write_config([{
+            "name": "off", "goal": "x", "interval_minutes": 1,
+            "enabled": False,
+        }])
+        runner = ScheduledJobsRunner(submit_fn=lambda job: "never",
+                                     config_path=cfg)
+        runner.tick(datetime(2026, 8, 21, 8, 0))
+        self.assertEqual(
+            runner.tick(datetime(2026, 8, 21, 10, 0)), [],
+        )
+
+
+class TestReportPdf(unittest.TestCase):
+    """F3：PDF 生成（%PDF 头）、无报告 404、PNG 图表嵌入。"""
+
+    def test_pdf_generation_byte_header(self):
+        import report_pdf
+        import io
+        md = (
+            "# 测试标题\n\n## 小节\n\n"
+            "| 指标 | 数值 |\n|---|---|\n| 价格 | 100 |\n\n"
+            "- 要点一\n- 要点二\n\n**加粗结论**"
+        )
+        data = report_pdf.markdown_to_pdf(md, title="标题", workspace=None)
+        self.assertTrue(data.startswith(b"%PDF"))
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(data))
+        self.assertGreaterEqual(len(reader.pages), 1)
+        text = reader.pages[0].extract_text()
+        self.assertIn("测试标题", text)
+        self.assertIn("加粗结论", text)
+
+    def test_pdf_route_404_without_report(self):
+        import web_ui
+        with mock.patch.object(web_ui, "_get_task_report_data",
+                               return_value=None):
+            with self.assertRaises(LookupError):
+                web_ui._task_pdf_bytes("no-such-task")
+
+    def test_png_image_embedding_supported(self):
+        """构造 2x1 RGB PNG，验证 _png_to_rgb 解析与 PDF 嵌入不报错。"""
+        import report_pdf
+        import io
+        import struct
+        import zlib
+        w, h = 2, 1
+        raw = bytes([255, 0, 0, 0, 255, 0])
+
+        def _chunk(tag, payload):
+            return (struct.pack(">I", len(payload)) + tag + payload
+                    + struct.pack(">I", zlib.crc32(tag + payload)))
+
+        ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+        png = (b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr)
+               + _chunk(b"IDAT", zlib.compress(b"\x00" + raw))
+               + _chunk(b"IEND", b""))
+        parsed = report_pdf._png_to_rgb(png)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed[0], 2)
+        self.assertEqual(parsed[1], 1)
+        self.assertEqual(parsed[2], raw)
+        # 嵌入图片的完整 PDF（workspace 指向含 png 的临时目录）
+        tmp = Path(tempfile.mkdtemp(prefix="wm_pdfimg_"))
+        try:
+            (tmp / "chart.png").write_bytes(png)
+            md = "![chart](chart.png)"
+            data = report_pdf.markdown_to_pdf(md, workspace=tmp)
+            self.assertTrue(data.startswith(b"%PDF"))
+            from pypdf import PdfReader
+            reader = PdfReader(io.BytesIO(data))
+            self.assertGreaterEqual(len(reader.pages), 1)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestNewDataAdapters(unittest.TestCase):
+    """F4：canned 数据解析（不联网）+ router 关键词路由。"""
+
+    def test_coingecko_parse_canned(self):
+        from adapters.coingecko import parse_market
+        payload = {
+            "bitcoin": {
+                "usd": 68000.5,
+                "usd_market_cap": 1.3e12,
+                "usd_24h_vol": 3.1e10,
+                "usd_24h_change": 3.25,
+            }
+        }
+        out = parse_market(payload, "比特币")
+        self.assertIsNotNone(out)
+        self.assertEqual(out["price"], 68000.5)
+        self.assertEqual(out["market_cap"], 1.3e12)
+        self.assertEqual(out["change_24h"], 3.25)
+        self.assertEqual(out["metadata"]["coin"], "bitcoin")
+        self.assertIsNone(parse_market({}, "btc"))
+
+    def test_macro_csv_parse_canned(self):
+        from adapters.macro import parse_macro_csv
+        csv_text = (
+            "DATE,GDP\n"
+            "2024-01-01,27763.4\n"
+            "2024-04-01,28269.5\n"
+            "bad-row,NA\n"
+        )
+        out = parse_macro_csv(csv_text, "GDP")
+        self.assertIsNotNone(out)
+        self.assertEqual(out["series"], "GDP")
+        self.assertEqual(len(out["points"]), 2)
+        self.assertEqual(out["points"][-1]["date"], "2024-04-01")
+        self.assertEqual(out["points"][-1]["value"], 28269.5)
+        self.assertIsNone(parse_macro_csv("DATE,GDP\n", "GDP"))
+
+    def test_news_rss_parse_canned(self):
+        from adapters.news import parse_news_rss
+        xml = (
+            '<?xml version="1.0" encoding="UTF-8"?><rss><channel><item>'
+            "<title>头条一</title><link>https://a.example/1</link>"
+            "<pubDate>Fri, 21 Aug 2026 09:00:00 GMT</pubDate></item>"
+            "<item><title>头条二</title><link>https://a.example/2</link>"
+            "<pubDate>Fri, 21 Aug 2026 08:00:00 GMT</pubDate></item>"
+            "</channel></rss>"
+        )
+        out = parse_news_rss(xml, "头条")
+        self.assertIsNotNone(out)
+        self.assertEqual(len(out["items"]), 2)
+        self.assertEqual(out["items"][0]["title"], "头条一")
+        self.assertEqual(out["items"][1]["link"], "https://a.example/2")
+        self.assertIsNone(parse_news_rss("<rss></rss>"))
+
+    def test_router_keyword_routing(self):
+        import adapters.router as router
+        with mock.patch.object(router, "fetch_market",
+                               return_value={
+                                   "price": 68000, "market_cap": 1.3e12,
+                                   "volume_24h": 3.1e10, "change_24h": 3.2,
+                                   "metadata": {"coin": "bitcoin",
+                                                "label": "bitcoin 行情"},
+                               }), \
+                mock.patch.object(router, "fetch_macro",
+                                  return_value={
+                                      "indicator": "GDP", "series": "GDP",
+                                      "points": [{"date": "2024-01-01",
+                                                  "value": 27763.4}],
+                                      "metadata": {"label": "美国 GDP"},
+                                  }), \
+                mock.patch.object(router, "fetch_news",
+                                  return_value={
+                                      "query": "头条", "items": [
+                                          {"title": "新闻一", "link": "https://a",
+                                           "published": "now"},
+                                      ],
+                                      "metadata": {"label": "新闻列表"},
+                                  }):
+            crypto = router.route_structured("比特币最新价格")
+            self.assertEqual(crypto["source"], "coingecko")
+            self.assertEqual(crypto["data"]["price"], 68000)
+            self.assertEqual(crypto["metadata"]["coin"], "bitcoin")
+            macro = router.route_structured("美国 CPI 通胀与失业率宏观分析")
+            self.assertEqual(macro["source"], "macro")
+            self.assertEqual(macro["data"]["series"], "GDP")
+            news = router.route_structured("最新新闻头条要闻")
+            self.assertEqual(news["source"], "news")
+            self.assertEqual(news["data"]["items"][0]["title"], "新闻一")
+            # crypto 关键词优先于 news（"加密货币新闻"走行情）
+            self.assertEqual(
+                router.route_structured("加密货币新闻")["source"], "coingecko",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

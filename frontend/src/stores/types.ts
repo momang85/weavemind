@@ -11,6 +11,7 @@ export interface TaskSummary {
   status: string
   created_at: string
   completed_at?: string
+  project?: string
   report?: string
   conversation_id?: string
   parent_task_id?: string

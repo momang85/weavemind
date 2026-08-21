@@ -30,6 +30,7 @@ export default function TaskConsole() {
   } = useTaskStore()
 
   const [goal, setGoal] = useState('')
+  const [project, setProject] = useState('default')
   const [lastGoal, setLastGoal] = useState('')
   const [taskId, setTaskId] = useState<string | null>(null)
   const [selectedStep, setSelectedStep] = useState<TaskNode | null>(null)
@@ -108,6 +109,7 @@ export default function TaskConsole() {
 
     try {
       const body: any = { goal: g }
+      if (project.trim()) body.project = project.trim()
       if (activeConversationId) body.conversation_id = activeConversationId
       if (confirmMode) body.auto_run = false
       if (templateName) body.template = templateName
@@ -143,7 +145,7 @@ export default function TaskConsole() {
       addLog({ timestamp: new Date().toISOString(), type: 'error', message: 'Failed to submit task' })
       startTask('failed')
     }
-  }, [goal, status, demoMode, activeConversationId, confirmMode, templateName, userContext,
+  }, [goal, project, status, demoMode, activeConversationId, confirmMode, templateName, userContext,
       startTask, addLog, setActiveConversation])
 
   // 计划待确认时，把后端计划同步到本地可编辑数组
@@ -363,6 +365,11 @@ export default function TaskConsole() {
             <option value="">自定义任务</option>
             {templates.map(t => <option key={t.name} value={t.name}>{t.name}</option>)}
           </select>
+          <input value={project}
+            onChange={e => setProject(e.target.value)}
+            placeholder="项目 (default)"
+            title="任务所属项目（F1 多项目工作区）"
+            className="hidden sm:block w-28 bg-slate-800 border border-slate-700 rounded-lg px-2 py-2 text-xs text-slate-300 placeholder-slate-600 shrink-0 focus:outline-none focus:border-cyan-500" />
           <label className="flex items-center gap-1.5 px-2 py-2 text-xs text-slate-400 cursor-pointer shrink-0">
             <input type="checkbox" checked={confirmMode}
               onChange={e => setConfirmMode(e.target.checked)}
