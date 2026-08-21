@@ -3055,10 +3055,14 @@ class TestSecretScan(unittest.TestCase):
         return False
 
     def test_real_secrets_must_hit(self):
-        self.assertTrue(self._scan_line('api_key = "sk-abcdefghijklmnopqrstuvwxyz123456"'))
-        self.assertTrue(self._scan_line('token = "ghp_abcdefghijklmnopqrstuvwxyz1234567890"'))
-        self.assertTrue(self._scan_line('"password": "supersecretpassword12345"'))
-        self.assertTrue(self._scan_line('EMBEDDING_API_KEY = "sk-abcdefghijklmnopqrstuvwxyz123456"'))
+        # 测试夹具用拼接构造假密钥，避免被 check_secrets 全库扫描误判为真实泄漏
+        sk = "sk-" + "abcdefghijklmnopqrstuvwxyz123456"
+        ghp = "ghp_" + "abcdefghijklmnopqrstuvwxyz1234567890"
+        pw = "supersecret" + "password12345"
+        self.assertTrue(self._scan_line('api_key = "%s"' % sk))
+        self.assertTrue(self._scan_line('token = "%s"' % ghp))
+        self.assertTrue(self._scan_line('"password": "%s"' % pw))
+        self.assertTrue(self._scan_line('EMBEDDING_API_KEY = "%s"' % sk))
 
     def test_code_assignments_must_not_hit(self):
         # 分享功能的 token 变量赋值（CI 曾因误报连续失败）
