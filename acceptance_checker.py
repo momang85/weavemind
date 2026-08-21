@@ -582,6 +582,61 @@ _MEDIA_ALIAS_GROUPS = (
     ("财联社", "财联社电报"),
 )
 
+# A2：已登记的媒体名/别名集合——已登记的词不再重复建议补录
+_KNOWN_MEDIA_NAMES = frozenset(_DOMAIN_MEDIA.values()) | frozenset(
+    name for grp in _MEDIA_ALIAS_GROUPS for name in grp
+)
+
+# 形如「XX网/XX报/XX财经/XX新闻」的媒体词；
+# 尾随否定避免把「XX财经网」拆成「XX财经」+「网」两个候选
+_MEDIA_WORD_RE = re.compile(
+    r"([\u4e00-\u9fff]{2,8}?)(网|新闻|财经|报)(?!网|新闻|财经|报)"
+)
+
+# 域名线索（可选提取，不强求）：http(s) URL 主机名或裸二级域名
+_DOMAIN_CLUE_RE = re.compile(
+    r"https?://([^/\s，。；、]+)"
+    r"|([a-z0-9][a-z0-9-]*\.(?:com|cn|net|org|info|io|cc|com\.cn|co\.uk|gov\.cn))",
+    re.IGNORECASE,
+)
+
+
+def _normalize_domain_clue(raw: str) -> str:
+    """归一化域名线索：去 www. 前缀与路径，仅保留主机名。"""
+    d = str(raw or "").strip().lower()
+    if d.startswith("www."):
+        d = d[4:]
+    return d
+
+
+def suggest_domain_media(claim: str) -> list[str]:
+    """从来源声明文本中提取疑似媒体词（形如「XX网/XX报/XX财经/XX新闻」），
+    供测试与未来人工确认流程使用，作为 _DOMAIN_MEDIA 静态表的补录建议。
+    若声明同时含域名线索则附带提示；只建议、不自动改表。"""
+    if not claim:
+        return []
+    suggestions: list[str] = []
+    seen: set[str] = set()
+    domain_hint = ""
+    for m in _DOMAIN_CLUE_RE.finditer(claim):
+        raw = (m.group(1) or m.group(2) or "").strip()
+        if raw:
+            domain_hint = _normalize_domain_clue(raw.split("/", 1)[0])
+            break
+    for m in _MEDIA_WORD_RE.finditer(claim):
+        prefix, suffix = m.group(1), m.group(2)
+        # 排除「年报/财报/月报/周报/公报/报表/报道」等非媒体词
+        if suffix == "报" and prefix[-1:] in ("年", "财", "月", "周", "公", "表", "道"):
+            continue
+        word = m.group(0)
+        if word in _KNOWN_MEDIA_NAMES or word in seen:
+            continue
+        seen.add(word)
+        suggestions.append(
+            word + (f"（域名线索：{domain_hint}）" if domain_hint else "")
+        )
+    return suggestions
+
 
 def _known_sources(sources: dict) -> dict:
     """从检索/快照/清洗数据构建已知来源集合：URL、域名、媒体名、标题。"""
@@ -688,16 +743,28 @@ def check_source_labeling(report: str, sources: dict) -> dict:
         if re.search(r"(年报|财报|公告|官网|投资者关系|招股书|报表|审计)", c):
             mislabeled.append(c)
     passed = len(mislabeled) == 0
+    # A2：虚假标注声明若含「XX网/XX报/XX财经/XX新闻」媒体词，
+    # 追加补录建议（供人工确认 _DOMAIN_MEDIA，不自动改表）
+    suggestions: list[str] = []
+    for c in mislabeled:
+        for s in suggest_domain_media(c):
+            if s not in suggestions:
+                suggestions.append(s)
     details = (
         f"来源声明检查 {checked} 条，虚假标注 {len(mislabeled)} 条"
         + (f"（{'、'.join(mislabeled[:5])}）" if mislabeled else "，全部可溯源或已明示")
     )
+    if suggestions:
+        details += "；" + "；".join(
+            f"建议补录域名媒体映射：{s}" for s in suggestions[:5]
+        )
     return {
         "pass": passed,
         "details": details,
         "checked_count": checked,
         "mislabeled_count": len(mislabeled),
         "mislabeled": mislabeled[:10],
+        "suggestions": suggestions[:10],
     }
 
 
@@ -716,10 +783,17 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace) -> dict
     checks["source_labeling"] = check_source_labeling(report_text, sources)
     gaps = [c["details"] for c in checks.values() if not c["pass"]]
     overall = "pass" if not gaps else "fail"
+    # A2：汇总各检查项的域名媒体补录建议，供 GET /api/acceptance/suggestions 读取
+    suggestions: list[str] = []
+    for c in checks.values():
+        for s in (c.get("suggestions") or []):
+            if s not in suggestions:
+                suggestions.append(s)
     return {
         "report_id": str(task_id),
         "goal": str(goal or "")[:120],
         "checks": checks,
         "overall": overall,
         "gaps": gaps,
+        "suggestions": suggestions,
     }

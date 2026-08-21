@@ -1546,13 +1546,15 @@ class TestP0Robustness(unittest.TestCase):
 
         old_health = dict(llm_client._endpoint_health)
         old_backup = dict(llm_client._BACKUP_CFG)
-        old_probe = llm_client._probe_endpoint
+        old_probe = llm_client._probe_endpoint_status
         llm_client._BACKUP_CFG = {"base_url": "https://fake/v1", "api_key": "k", "model": "m"}
         llm_client._endpoint_health = {
             "primary": {"healthy": False, "fails": 2},
             "backup": {"healthy": False, "fails": 2},
         }
-        llm_client._probe_endpoint = lambda *a, **k: False
+        llm_client._probe_endpoint_status = lambda *a, **k: {
+            "ok": False, "reason": "unreachable",
+        }
         try:
             ok, msg = llm_client.endpoints_available()
             self.assertFalse(ok)
@@ -1561,7 +1563,7 @@ class TestP0Robustness(unittest.TestCase):
         finally:
             llm_client._endpoint_health = old_health
             llm_client._BACKUP_CFG = old_backup
-            llm_client._probe_endpoint = old_probe
+            llm_client._probe_endpoint_status = old_probe
 
     def test_endpoints_available_ok_when_primary_healthy(self):
         import llm_client
@@ -1577,6 +1579,143 @@ class TestP0Robustness(unittest.TestCase):
             self.assertEqual(msg, "")
         finally:
             llm_client._endpoint_health = old_health
+
+    def test_endpoints_available_balance_aware_message(self):
+        """A3：双端点均余额不足时给出充值提示，而非笼统"不可用"。"""
+        import llm_client
+
+        old_health = dict(llm_client._endpoint_health)
+        old_backup = dict(llm_client._BACKUP_CFG)
+        old_probe = llm_client._probe_endpoint_status
+        llm_client._BACKUP_CFG = {"base_url": "https://fake/v1", "api_key": "k", "model": "m"}
+        llm_client._endpoint_health = {
+            "primary": {"healthy": False, "fails": 2},
+            "backup": {"healthy": False, "fails": 2},
+        }
+        llm_client._probe_endpoint_status = lambda *a, **k: {
+            "ok": False, "reason": "insufficient_balance",
+        }
+        try:
+            ok, msg = llm_client.endpoints_available()
+            self.assertFalse(ok)
+            self.assertIn("余额不足", msg)
+        finally:
+            llm_client._endpoint_health = old_health
+            llm_client._BACKUP_CFG = old_backup
+            llm_client._probe_endpoint_status = old_probe
+
+    def test_get_balance_status_classifies_reasons(self):
+        """A3：get_balance_status 主/备逐项返回余额感知原因。"""
+        import os
+        import llm_client
+
+        old_probe = llm_client._probe_endpoint_status
+        old_backup = dict(llm_client._BACKUP_CFG)
+        old_health = dict(llm_client._endpoint_health)
+        old_env = {
+            k: os.environ.get(k) for k in ("LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL")
+        }
+        os.environ["LLM_BASE_URL"] = "https://primary.example/v1"
+        os.environ["LLM_API_KEY"] = "k"
+        os.environ["LLM_MODEL"] = "m"
+        llm_client._BACKUP_CFG = {
+            "base_url": "https://backup.example/v1", "api_key": "k", "model": "m",
+        }
+        calls = []
+        llm_client._probe_endpoint_status = lambda base, key, model: (
+            calls.append(base)
+            or ({"ok": False, "reason": "insufficient_balance"}
+                if len(calls) == 2 else {"ok": True, "reason": "ok"})
+        )
+        llm_client._clear_balance_cache()
+        try:
+            st = llm_client.get_balance_status(use_cache=False)
+            self.assertEqual(st["primary"]["ok"], True)
+            self.assertEqual(st["primary"]["reason"], "ok")
+            self.assertEqual(st["backup"]["ok"], False)
+            self.assertEqual(st["backup"]["reason"], "insufficient_balance")
+        finally:
+            llm_client._probe_endpoint_status = old_probe
+            llm_client._BACKUP_CFG = old_backup
+            llm_client._endpoint_health = old_health
+            llm_client._clear_balance_cache()
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
+
+
+class _BalanceFakeMessaging:
+    """A3 测试专用假消息客户端（避开模块内同名 _FakeMessaging 覆盖）。"""
+
+    def __init__(self):
+        self.published = []
+
+    def publish(self, channel, msg):
+        self.published.append((channel, msg))
+
+
+class TestP0BalancePrecheck(unittest.TestCase):
+    """A3：LLM 端点余额预检——双端余额不足拒绝任务，单端不足仍运行。"""
+
+    def test_both_insufficient_rejects_task(self):
+        """主/备均余额不足 → 任务直接拒绝（FAILED + 充值提示，前端可见）。"""
+        import llm_client
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._messaging = _BalanceFakeMessaging()
+        orig_get = llm_client.get_balance_status
+        llm_client.get_balance_status = lambda *a, **k: {
+            "primary": {"ok": False, "reason": "insufficient_balance"},
+            "backup": {"ok": False, "reason": "insufficient_balance"},
+        }
+        try:
+            ok, msg = o._precheck_llm_balance("t-bal-reject")
+            self.assertFalse(ok)
+            self.assertIn("余额不足", msg)
+            completed = [
+                p for ch, p in o._messaging.published
+                if ch == "orchestrator:response" and p.get("type") == "task_complete"
+            ]
+            self.assertTrue(completed)
+            self.assertEqual(completed[-1]["payload"].get("status"), "FAILED")
+            self.assertEqual(completed[-1]["payload"].get("summary"), msg)
+        finally:
+            llm_client.get_balance_status = orig_get
+
+    def test_single_insufficient_continues_with_warning(self):
+        """单端点余额不足 → 任务照常运行，并在 llm_degraded 预置余额警告。"""
+        import llm_client
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._messaging = _BalanceFakeMessaging()
+        orig_get = llm_client.get_balance_status
+        orig_record = llm_client._record_task_degradation
+        recorded = []
+        llm_client.get_balance_status = lambda *a, **k: {
+            "primary": {"ok": True, "reason": "ok"},
+            "backup": {"ok": False, "reason": "insufficient_balance"},
+        }
+        llm_client._record_task_degradation = lambda *a, **k: recorded.append((a, k))
+        try:
+            ok, msg = o._precheck_llm_balance("t-bal-warn")
+            self.assertTrue(ok)
+            self.assertEqual(msg, "")
+            self.assertTrue(recorded, "单端余额不足应预置 llm_degraded 警告")
+            self.assertEqual(recorded[0][0][0], "t-bal-warn")
+            self.assertEqual(recorded[0][0][1], "insufficient_balance")
+            self.assertFalse(recorded[0][1].get("both_failed"))
+            warnings = [
+                p for ch, p in o._messaging.published
+                if ch == "orchestrator:response" and p.get("type") == "warning"
+            ]
+            self.assertTrue(warnings)
+        finally:
+            llm_client.get_balance_status = orig_get
+            llm_client._record_task_degradation = orig_record
 
     def test_search_garbage_filter(self):
         """通用垃圾识别：博彩域名/URL 路径/标题关键词命中即剔除。"""
@@ -2569,6 +2708,37 @@ class TestAcceptanceChecker(unittest.TestCase):
         self.assertFalse(r2["pass"])
         self.assertIn("腾讯官方年报", r2["mislabeled"][0])
 
+    def test_source_labeling_suggests_domain_media(self):
+        """A2：虚假标注声明含媒体词 → details 追加补录建议；
+        诚实声明无建议；已登记媒体词不重复建议。"""
+        from acceptance_checker import check_source_labeling, suggest_domain_media
+
+        sources = {"search_results": "", "fetch_snapshot": "", "clean_chart_data": ""}
+        fake = "2023年净利润1152亿元（数据来源：某某财经网年报）。"
+        r = check_source_labeling(fake, sources)
+        self.assertFalse(r["pass"])
+        self.assertIn("建议补录域名媒体映射：", r["details"])
+        self.assertIn("某某财经网", r["details"])
+        self.assertTrue(r["suggestions"])
+        # 独立函数可直接提取媒体词（含域名线索时附带提示）
+        sug = suggest_domain_media("数据来源：某某财经网（www.moumou.com）")
+        self.assertTrue(any("某某财经网" in s for s in sug))
+        self.assertTrue(any("moumou.com" in s for s in sug))
+        # 已登记媒体词（新浪/新浪财经）不再建议补录
+        self.assertEqual(suggest_domain_media("数据来源：新浪财经年报"), [])
+        # 诚实声明：可溯源 → 无建议
+        honest_sources = {
+            "search_results": "https://finance.sina.com.cn/tech/2025-05-14/doc-x",
+            "fetch_snapshot": "",
+            "clean_chart_data": "",
+        }
+        r2 = check_source_labeling(
+            "2025Q1营收1800亿元（数据来源：新浪财经）。", honest_sources,
+        )
+        self.assertTrue(r2["pass"])
+        self.assertNotIn("建议补录域名媒体映射", r2["details"])
+        self.assertEqual(r2["suggestions"], [])
+
 
 class TestEastMoneyAdapter(unittest.TestCase):
     def test_to_yi(self):
@@ -3461,7 +3631,7 @@ class TestLauncherStopFallback(unittest.TestCase):
 
 
 class TestP0StatusHonesty(unittest.TestCase):
-    """P0-1 任务状态诚实化：验收 fail + 反思 LLM 不可用 → SUCCESS_WITH_ISSUES。"""
+    """P0-1/A1 任务状态诚实化：以最终验收报告判定，反思是否执行不再影响状态。"""
 
     def test_resolve_final_status_cases(self):
         from orchestrator_v2 import OrchestratorV2
@@ -3469,15 +3639,15 @@ class TestP0StatusHonesty(unittest.TestCase):
         o = OrchestratorV2.__new__(OrchestratorV2)
         acc_fail = {"overall": "fail", "gaps": ["数字溯源率低于阈值"]}
         acc_pass = {"overall": "pass", "gaps": []}
-        # 验收 fail + 反思 LLM 不可用 → SUCCESS_WITH_ISSUES
+        # 验收 fail（无论反思是否执行）→ SUCCESS_WITH_ISSUES
         self.assertEqual(
             o._resolve_final_status(False, acc_fail, "HTTP_401", {}),
             "SUCCESS_WITH_ISSUES",
         )
-        # 验收 fail + 反思正常（未标记不可用）→ 维持 SUCCESS
+        # A1：验收 fail + 反思执行后仍 fail（reflection_unavailable 为空）→ SUCCESS_WITH_ISSUES
         self.assertEqual(
             o._resolve_final_status(False, acc_fail, "", {}),
-            "SUCCESS",
+            "SUCCESS_WITH_ISSUES",
         )
         # 验收 pass → SUCCESS
         self.assertEqual(
@@ -3497,6 +3667,62 @@ class TestP0StatusHonesty(unittest.TestCase):
             o._resolve_final_status(True, acc_fail, "HTTP_401", {"both_failed": True}),
             "FAILED",
         )
+
+    def test_final_acceptance_fail_after_reflection_still_issues(self):
+        """A1：验收 fail + 反思成功执行（LLM 恢复）但重做后仍 fail
+        → SUCCESS_WITH_ISSUES（读最终 acceptance_report.json 判定）。"""
+        import json
+        import tempfile
+        from pathlib import Path
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = Path(tempfile.mkdtemp(prefix="accfail_redo_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            ws = ws_mod.task_workspace("t-a1-fail")
+            ws.mkdir(parents=True, exist_ok=True)
+            # 最终验收报告仍为 fail（反思执行过，reflection_unavailable 为空）
+            (ws / "acceptance_report.json").write_text(
+                json.dumps({"overall": "fail", "gaps": ["缺口重做后仍未补齐"]}),
+                encoding="utf-8",
+            )
+            summary = OrchestratorV2._read_acceptance_summary("t-a1-fail")
+            self.assertEqual(
+                o._resolve_final_status(False, summary, "", {}),
+                "SUCCESS_WITH_ISSUES",
+            )
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+
+    def test_final_acceptance_pass_after_redo_success(self):
+        """A1：验收 fail + 反思执行后重做，最终验收报告 pass → SUCCESS。"""
+        import json
+        import tempfile
+        from pathlib import Path
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = Path(tempfile.mkdtemp(prefix="accpass_redo_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            ws = ws_mod.task_workspace("t-a1-pass")
+            ws.mkdir(parents=True, exist_ok=True)
+            (ws / "acceptance_report.json").write_text(
+                json.dumps({"overall": "pass", "gaps": []}),
+                encoding="utf-8",
+            )
+            summary = OrchestratorV2._read_acceptance_summary("t-a1-pass")
+            self.assertEqual(
+                o._resolve_final_status(False, summary, "", {}),
+                "SUCCESS",
+            )
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
 
     def test_read_acceptance_summary(self):
         import json

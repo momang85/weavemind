@@ -914,22 +914,58 @@ class OrchestratorV2:
         reflection_unavailable: str,
         llm_degraded: dict,
     ) -> str:
-        """任务最终状态：
+        """任务最终状态（A1：以最终验收报告判定，而非反思是否执行）：
         - 有步骤失败 → FAILED；
-        - 验收 fail 且反思因 LLM 不可用未重做 → SUCCESS_WITH_ISSUES；
+        - 最终验收 fail（无论反思是否执行/重做）→ SUCCESS_WITH_ISSUES；
         - LLM 双端点均失败 → SUCCESS_WITH_ISSUES；
-        - 其余成功 → SUCCESS。"""
+        - 其余成功 → SUCCESS。
+        reflection_unavailable 保留入参仅用于调用方日志追溯，不再参与判定：
+        只要最终 acceptance_report.json 仍为 fail，就如实降级，避免
+        "反思执行过但重做后仍失败"被误报为 SUCCESS。"""
         if has_failure:
             return "FAILED"
-        accept_fail_no_redo = bool(
-            acceptance_summary
-            and acceptance_summary.get("overall") != "pass"
-            and reflection_unavailable
+        # A1：读最终验收报告——overall != pass 即视为验收未通过，
+        # 不区分"反思未执行/反思执行后仍失败"两条路径
+        accept_fail = bool(
+            acceptance_summary and acceptance_summary.get("overall") != "pass"
         )
         both_failed = bool(llm_degraded and llm_degraded.get("both_failed"))
-        if accept_fail_no_redo or both_failed:
+        if accept_fail or both_failed:
             return "SUCCESS_WITH_ISSUES"
         return "SUCCESS"
+
+    def _precheck_llm_balance(self, task_id: str) -> tuple[bool, str]:
+        """A3：LLM 端点余额预检（任务开始前调用）。
+        - 主/备均 insufficient_balance → 拒绝任务（FAILED，reason=余额不足），前端可见；
+        - 单个不足 → 照常走降级逻辑，并在 llm_degraded 预置余额警告。
+        返回 (是否继续, 拒绝原因/空串)。"""
+        try:
+            from llm_client import get_balance_status, _record_task_degradation
+            balance = get_balance_status()
+            reasons = [str(v.get("reason") or "") for v in balance.values()]
+            if reasons and all(r == "insufficient_balance" for r in reasons):
+                msg = "LLM 端点余额不足，请充值后重试"
+                push_progress(self._messaging, task_id, "warning",
+                              {"type": "llm", "agent": "orchestrator",
+                               "message": msg, "timestamp": self._now_iso()})
+                push_progress(self._messaging, task_id, "task_complete",
+                              {"status": "FAILED", "summary": msg})
+                logger.error("Task %s rejected: %s", task_id, msg)
+                return False, msg
+            if "insufficient_balance" in reasons:
+                # 单端点不足：写入任务级降级（完成阶段 llm_degraded 带出余额警告），
+                # 健康路由切到可用端点，任务照常运行
+                _record_task_degradation(
+                    task_id, "insufficient_balance", both_failed=False
+                )
+                push_progress(self._messaging, task_id, "warning",
+                              {"type": "llm", "agent": "orchestrator",
+                               "message": "LLM 单端点余额不足，已自动降级；"
+                                          "请充值后重试以恢复完整质量",
+                               "timestamp": self._now_iso()})
+        except Exception:
+            pass
+        return True, ""
 
     def _record_consolidation_stat(self, task_id: str, goal: str, all_steps: list) -> None:
         """任务完成时记录 domain×能力链 与验收结果，供探索-固化阈值判定。"""
@@ -3980,6 +4016,12 @@ print("charts generated")
                                "message": _llm_warn
                                + "（已自动切换备用端点；若任务质量下降，请检查前端 API 设置）",
                                "timestamp": self._now_iso()})
+            # A3：LLM 端点余额预检——主/备均余额不足直接拒绝任务；
+            # 单端点不足照常运行并在 llm_degraded 预置余额警告
+            _balance_ok, _balance_msg = self._precheck_llm_balance(task_id)
+            if not _balance_ok:
+                return {"task_id": task_id, "status": "FAILED",
+                        "steps": [], "report": _balance_msg, "reason": _balance_msg}
         except Exception:
             pass
 
@@ -4377,8 +4419,9 @@ print("charts generated")
                        "message": f"Generating report ({len(all_steps)} steps, {iteration} iterations, {time.time()-started:.0f}s)",
                        "timestamp": self._now_iso()})
 
-        # P0-1/P0-2：验收 fail 且反思因 LLM 不可用未重做，或 LLM 双端点均失败
-        # → 任务如实降级为 SUCCESS_WITH_ISSUES，不再"带缺口报成功"
+        # P0-1/P0-2 + A1：以最终 acceptance_report.json 判定——验收 fail
+        # 无论反思是否执行/重做后仍 fail 都如实降级为 SUCCESS_WITH_ISSUES；
+        # 反思重做后验收 pass 则 SUCCESS；LLM 双端点均失败同样降级
         acceptance_summary = self._read_acceptance_summary(task_id)
         llm_degraded = self._read_llm_degraded(task_id)
         overall = self._resolve_final_status(

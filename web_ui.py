@@ -2,7 +2,7 @@
 import base64, hashlib, hmac, html, io, json, logging, mimetypes, os, re, secrets, socket, sqlite3, subprocess, sys, tempfile, threading, time, uuid, zipfile
 from datetime import datetime, timedelta, timezone
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
-from urllib.parse import urlparse
+from urllib.parse import urlparse, unquote
 import redis
 
 from audit_logger import audit_log, read_audit
@@ -628,6 +628,12 @@ def _system_status():
             llm_health = get_endpoint_health()
         except Exception:
             llm_health = {}
+        try:
+            # A3：余额感知预检（30s TTL 缓存），llm_health.balance 供前端直接展示
+            from llm_client import get_balance_status
+            llm_health["balance"] = get_balance_status()
+        except Exception:
+            pass
         try:
             from llm_client import get_endpoint_warning
             llm_warning = get_endpoint_warning()
@@ -1636,6 +1642,28 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 pass
             return self._json({"calibration": calib, "recent": recent[:30]})
+        if p == "/api/acceptance/suggestions":
+            # A2：返回该任务验收中的域名媒体补录建议（供人工确认流程；
+            # 前端暂不展示亦可，数据已就绪）
+            query = urlparse(self.path).query
+            tid = ""
+            for pair in query.split("&"):
+                if pair.startswith("task_id="):
+                    tid = unquote(pair.split("=", 1)[1]).strip()
+            if not tid:
+                return self._json({"error": "task_id 参数必填"}, 400)
+            suggestions: list[str] = []
+            try:
+                acc_path = task_workspace(tid) / "acceptance_report.json"
+                if acc_path.exists():
+                    acc = json.loads(acc_path.read_text(encoding="utf-8"))
+                    suggestions = acc.get("suggestions") or []
+                    if not suggestions:
+                        src = (acc.get("checks") or {}).get("source_labeling") or {}
+                        suggestions = src.get("suggestions") or []
+            except Exception:
+                pass
+            return self._json({"task_id": tid, "suggestions": suggestions})
         if p == "/api/skills":
             # Skill 管理数据（O-25）
             try:

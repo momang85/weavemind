@@ -259,19 +259,102 @@ def get_endpoint_health() -> dict:
         }
 
 
-def _probe_endpoint(base_url: str, api_key: str, model: str) -> bool:
-    """健康探测：极短请求（4 token）验证端点可用。"""
+def _classify_probe_error(exc: Exception) -> str:
+    """把探测异常归类为余额感知原因。
+    reason ∈ ok / insufficient_balance / unauthorized / unreachable。
+    401/403 响应体含 insufficient/balance/credits → 余额不足；
+    402 Payment Required 语义即计费/额度问题 → 余额不足。"""
+    text = str(exc or "")
+    m = re.search(r"HTTP[ _-]?(\d{3})", text)
+    if m and m.group(1) in ("401", "402", "403"):
+        low = text.lower()
+        if any(k in low for k in ("insufficient", "balance", "credit")):
+            return "insufficient_balance"
+        if m.group(1) == "402":
+            return "insufficient_balance"
+        return "unauthorized"
+    return "unreachable"
+
+
+def _probe_endpoint_status(base_url: str, api_key: str, model: str) -> dict:
+    """余额感知探测：极短请求（max_tokens=1）验证端点可用，
+    返回 {ok, reason}；reason ∈ ok/insufficient_balance/unauthorized/unreachable。"""
     try:
         client = LLMClient(base_url=base_url, api_key=api_key, model=model)
-        raw = client._send_request("你是连通性探测器，只回复：ok", "ping", 0.0, 8)
-        return bool(raw and str(raw).strip())
-    except Exception:
-        return False
+        raw = client._send_request("你是连通性探测器，只回复：ok", "ping", 0.0, 1)
+        if bool(raw and str(raw).strip()):
+            return {"ok": True, "reason": "ok"}
+        return {"ok": False, "reason": "unreachable"}
+    except Exception as exc:
+        return {"ok": False, "reason": _classify_probe_error(exc)}
+
+
+def _probe_endpoint(base_url: str, api_key: str, model: str) -> bool:
+    """健康探测布尔包装（后台守护线程/旧调用兼容）。"""
+    return _probe_endpoint_status(base_url, api_key, model)["ok"]
+
+
+_BALANCE_CACHE_TTL = 30.0
+_balance_cache_lock = threading.Lock()
+_balance_cache = {"ts": 0.0, "data": None}
+
+
+def _clear_balance_cache() -> None:
+    """清空余额预检缓存（配置热更新/测试后调用）。"""
+    with _balance_cache_lock:
+        _balance_cache["ts"] = 0.0
+        _balance_cache["data"] = None
+
+
+def get_balance_status(use_cache: bool = True) -> dict:
+    """主/备端点余额预检：{primary: {ok, reason}, backup: {ok, reason}}，
+    reason ∈ ok/insufficient_balance/unauthorized/unreachable。
+    探测结果同步到端点健康状态（余额不足/鉴权失败即视为不健康，走降级路由）；
+    结果带 30s TTL 缓存，避免 /api/status 高频轮询反复打端点。"""
+    _ensure_cfg_fresh()
+    now = time.time()
+    with _balance_cache_lock:
+        if (
+            use_cache
+            and _balance_cache["data"] is not None
+            and now - _balance_cache["ts"] < _BALANCE_CACHE_TTL
+        ):
+            return {
+                k: dict(v) for k, v in _balance_cache["data"].items()
+            }
+    result: dict = {}
+    primary_base = os.environ.get("LLM_BASE_URL") or ""
+    if primary_base:
+        st = _probe_endpoint_status(
+            primary_base,
+            os.environ.get("LLM_API_KEY") or "",
+            os.environ.get("LLM_MODEL") or "gpt-4o",
+        )
+        _mark_endpoint("primary", st["ok"], st["reason"])
+        result["primary"] = st
+    else:
+        result["primary"] = {"ok": False, "reason": "unreachable"}
+    if _BACKUP_CFG.get("base_url"):
+        st = _probe_endpoint_status(
+            _BACKUP_CFG.get("base_url", ""),
+            _BACKUP_CFG.get("api_key", ""),
+            _BACKUP_CFG.get("model") or "gpt-4o",
+        )
+        _mark_endpoint("backup", st["ok"], st["reason"])
+        result["backup"] = st
+    else:
+        result["backup"] = {"ok": False, "reason": "unreachable"}
+    with _balance_cache_lock:
+        _balance_cache["ts"] = time.time()
+        _balance_cache["data"] = result
+    return {k: dict(v) for k, v in result.items()}
 
 
 def endpoints_available() -> tuple[bool, str]:
     """返回 (是否可用, 消息)。仅当主/备用都已被判定不健康时才做一次真实探测。
-    供编排器在任务开始前做 LLM 健康预检：不可用 → 终止任务并向前端弹警告。"""
+    供编排器在任务开始前做 LLM 健康预检：不可用 → 终止任务并向前端弹警告。
+    探测对 401/402/403 做余额感知：401/403 响应体含 insufficient/balance/credits
+    或 402 均识别为余额不足，给出明确的充值提示而非笼统的"端点不可用"。"""
     _ensure_cfg_fresh()
     with _endpoint_health_lock:
         ph = _endpoint_health.get("primary", {}).get("healthy", True)
@@ -281,16 +364,22 @@ def endpoints_available() -> tuple[bool, str]:
         )
     if ph or bh:
         return True, ""
-    # 双端点标记不健康 → 真实探测备用端点（极短请求）
+    # 双端点标记不健康 → 真实探测备用端点（余额感知极短请求）
     if _BACKUP_CFG.get("base_url"):
-        ok = _probe_endpoint(
+        st = _probe_endpoint_status(
             _BACKUP_CFG.get("base_url", ""),
             _BACKUP_CFG.get("api_key", ""),
             _BACKUP_CFG.get("model") or "gpt-4o",
         )
-        _mark_endpoint("backup", ok)
+        ok = st["ok"]
+        _mark_endpoint("backup", ok, st["reason"])
         if ok:
             return True, ""
+        if st["reason"] == "insufficient_balance":
+            return False, (
+                "LLM 端点不可用：主端点和备用端点均余额不足，"
+                "请充值或检查 API 设置后重试。"
+            )
         return False, (
             "LLM 端点不可用：主端点和备用端点均调用失败"
             "（可能余额不足/密钥失效或无响应）。请检查前端 API 设置后重试。"
