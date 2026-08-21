@@ -2545,6 +2545,30 @@ class TestAcceptanceChecker(unittest.TestCase):
         self.assertFalse(r2["pass"])
         self.assertIn("腾讯官方年报", r2["mislabeled"][0])
 
+    def test_source_labeling_media_alias_group(self):
+        """媒体别名归组：声明"21经济网"而源中域名映射为"21财经"→ 同源诚实；
+        声明"腾讯官方年报"仍判虚假（无任何腾讯源）。"""
+        import json as _json
+        import tempfile, pathlib
+        from acceptance_checker import check_source_labeling, _collect_sources
+
+        tmp = pathlib.Path(tempfile.mkdtemp(prefix="wm_alias_"))
+        (tmp / "project").mkdir(exist_ok=True)
+        (tmp / "project" / "fetch_snapshot.json").write_text(_json.dumps(
+            [{"url": "https://www.21jingji.com/article/2022/nianbao.html",
+              "title": "宁德时代2022年年报",
+              "text": "21世纪经济报道：宁德时代2022年营收3285.94亿元"}],
+            ensure_ascii=False), encoding="utf-8")
+        sources = _collect_sources(tmp)
+        honest = "2022年营收3285.94亿元（数据来源：21经济网2022年年报）。"
+        r = check_source_labeling(honest, sources)
+        self.assertTrue(r["pass"], r["details"])
+        # 对照组：源中无任何腾讯相关 URL/媒体 → 仍判虚假
+        fake = "2022年营收3285.94亿元（数据来源：腾讯官方年报）。"
+        r2 = check_source_labeling(fake, sources)
+        self.assertFalse(r2["pass"])
+        self.assertIn("腾讯官方年报", r2["mislabeled"][0])
+
 
 class TestEastMoneyAdapter(unittest.TestCase):
     def test_to_yi(self):

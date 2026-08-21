@@ -556,7 +556,8 @@ def check_entity_attribution(
 # ─────────────────────────────────────────────
 
 _DOMAIN_MEDIA = {
-    "sina.com.cn": "新浪", "ofweek.com": "OFweek", "21jingji.com": "21财经",
+    "sina.com.cn": "新浪", "ofweek.com": "OFweek",
+    "21jingji.com": "21财经", "21cn.com": "21财经",
     "yicai.com": "第一财经", "xueqiu.com": "雪球", "qianzhan.com": "前瞻",
     "jiemian.com": "界面", "zhihu.com": "知乎", "toutiao.com": "今日头条",
     "163.com": "网易", "eastmoney.com": "东方财富", "10jqka.com.cn": "同花顺",
@@ -567,6 +568,19 @@ _DOMAIN_MEDIA = {
     "meituan.com": "美团官网", "weiyangx.com": "未央网",
     "sgpjbg.com": "三个皮匠报告", "alishui.com": "满银", "baidu.com": "百度",
 }
+
+# 媒体别名组：声明中出现的别名与已知媒体名归组匹配。
+# 例：报告写"21经济网"而域名映射为"21财经"、转载署名"21世纪经济报道"，
+# 三者应视为同一来源；"新浪财经/新浪新闻"与"新浪"同理。
+_MEDIA_ALIAS_GROUPS = (
+    ("21财经", "21经济网", "21世纪经济报道"),
+    ("新浪", "新浪财经", "新浪新闻"),
+    ("网易", "网易财经", "网易新闻"),
+    ("腾讯", "腾讯新闻", "腾讯财经"),
+    ("凤凰", "凤凰网", "凤凰财经"),
+    ("第一财经", "第一财经日报"),
+    ("财联社", "财联社电报"),
+)
 
 
 def _known_sources(sources: dict) -> dict:
@@ -661,6 +675,13 @@ def check_source_labeling(report: str, sources: dict) -> dict:
         if any(d and d in c for d in known["domains"]):
             continue
         if any(m and m in c for m in known["media"]):
+            continue
+        # 媒体别名归组：声明含组内别名 X，而已知媒体含同组别名 Y（X≠Y）→ 同源诚实
+        if any(
+            any(a in c for a in grp if a)
+            and any(b in known["media"] for b in grp if b)
+            for grp in _MEDIA_ALIAS_GROUPS
+        ):
             continue
         if any(t and t in c for t in known["titles"] if len(t) >= 4):
             continue
