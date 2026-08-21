@@ -7,6 +7,7 @@ function statusBadge(s: string) {
   const base = 'px-2.5 py-0.5 rounded-full text-xs font-semibold'
   if (s === 'SUCCESS') return `${base} bg-emerald-500/20 text-emerald-400`
   if (s === 'FAILED') return `${base} bg-red-500/20 text-red-400`
+  if (s === 'SUCCESS_WITH_ISSUES') return `${base} bg-amber-500/20 text-amber-400`
   return `${base} bg-cyan-500/20 text-cyan-400`
 }
 
@@ -17,6 +18,8 @@ export default function History() {
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [convMessages, setConvMessages] = useState<Record<string, ConversationMessage[]>>({})
   const [fullReports, setFullReports] = useState<Record<string, string>>({})
+  // P0-1：SUCCESS_WITH_ISSUES 任务的验收缺口明细（展开时按需加载）
+  const [taskGaps, setTaskGaps] = useState<Record<string, string[]>>({})
   const { fetchSystemStatus } = useTaskStore()
 
   const loadConversations = useCallback(async () => {
@@ -40,6 +43,22 @@ export default function History() {
     loadTasks()
     fetchSystemStatus()
   }, [loadConversations, loadTasks, fetchSystemStatus])
+
+  // P0-1：展开 SUCCESS_WITH_ISSUES 任务时加载验收缺口
+  useEffect(() => {
+    tasks.filter(t => t.status === 'SUCCESS_WITH_ISSUES' && expanded.has('task-' + t.task_id))
+      .forEach(async t => {
+        if (taskGaps[t.task_id]) return
+        try {
+          const d = await (await fetch('/task/' + t.task_id)).json()
+          setTaskGaps(prev => ({
+            ...prev,
+            [t.task_id]: (d.acceptance && Array.isArray(d.acceptance.gaps))
+              ? d.acceptance.gaps : [],
+          }))
+        } catch { /* ignore */ }
+      })
+  }, [tasks, expanded, taskGaps])
 
   const toggle = (id: string) => {
     setExpanded(prev => {
@@ -183,6 +202,13 @@ export default function History() {
                     <pre className="mt-3 text-slate-400 text-xs whitespace-pre-wrap font-sans leading-relaxed max-h-96 overflow-y-auto">
                       {t.report}
                     </pre>
+                  </div>
+                )}
+                {expanded.has('task-' + t.task_id) && t.status === 'SUCCESS_WITH_ISSUES' && (
+                  <div className="px-5 pb-4 border-t border-slate-800 text-amber-300/90 text-xs space-y-1">
+                    <div className="mt-2 font-semibold">已完成但有验收缺口：</div>
+                    {(taskGaps[t.task_id] || []).length === 0 && <div>（无缺口明细）</div>}
+                    {(taskGaps[t.task_id] || []).map((g, i) => <div key={i}>- {g}</div>)}
                   </div>
                 )}
               </div>

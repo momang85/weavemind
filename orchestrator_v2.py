@@ -151,6 +151,8 @@ class OrchestratorV2:
         self._max_iterations = 2
         self._max_reflection_steps = 3
         self._reflection_accept_score = 6.0
+        # P0-1：反思 LLM 不可用标记（每次任务运行前重置）
+        self._reflection_llm_unavailable = ""
         self._max_redo_rounds = 2
         self._plan_confirm_timeout = 300
         self._stall_timeout = 300
@@ -823,6 +825,52 @@ class OrchestratorV2:
             return acc.get("overall") == "pass"
         except Exception:
             return None
+
+    @staticmethod
+    def _read_acceptance_summary(task_id: str) -> dict | None:
+        """读取验收摘要：{overall, gaps}（无验收报告返回 None）。"""
+        try:
+            from workspace import task_workspace
+            acc_path = task_workspace(task_id) / "acceptance_report.json"
+            if not acc_path.exists():
+                return None
+            acc = json.loads(acc_path.read_text(encoding="utf-8"))
+            return {"overall": acc.get("overall"), "gaps": acc.get("gaps") or []}
+        except Exception:
+            return None
+
+    @staticmethod
+    def _read_llm_degraded(task_id: str) -> dict:
+        """读取任务级 LLM 降级汇总（Redis 写入，跨 worker/编排器进程）。"""
+        try:
+            from llm_client import get_task_llm_degradation
+            return get_task_llm_degradation(task_id)
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _resolve_final_status(
+        has_failure: bool,
+        acceptance_summary: dict | None,
+        reflection_unavailable: str,
+        llm_degraded: dict,
+    ) -> str:
+        """任务最终状态：
+        - 有步骤失败 → FAILED；
+        - 验收 fail 且反思因 LLM 不可用未重做 → SUCCESS_WITH_ISSUES；
+        - LLM 双端点均失败 → SUCCESS_WITH_ISSUES；
+        - 其余成功 → SUCCESS。"""
+        if has_failure:
+            return "FAILED"
+        accept_fail_no_redo = bool(
+            acceptance_summary
+            and acceptance_summary.get("overall") != "pass"
+            and reflection_unavailable
+        )
+        both_failed = bool(llm_degraded and llm_degraded.get("both_failed"))
+        if accept_fail_no_redo or both_failed:
+            return "SUCCESS_WITH_ISSUES"
+        return "SUCCESS"
 
     def _record_consolidation_stat(self, task_id: str, goal: str, all_steps: list) -> None:
         """任务完成时记录 domain×能力链 与验收结果，供探索-固化阈值判定。"""
@@ -1510,6 +1558,21 @@ class OrchestratorV2:
                     clean = clean[4:]
             return _loads_json_loose(clean.strip())
         except Exception as exc:
+            # P0-1：反思 LLM 不可用（空内容/401/402/403/超时/网络）时记录降级，
+            # 完成阶段据此把状态降为 SUCCESS_WITH_ISSUES，避免"验收失败仍报 SUCCESS"
+            try:
+                from llm_client import _degradation_reason, _record_task_degradation
+                _reason = _degradation_reason(exc)
+                if _reason not in ("generic", ""):
+                    self._reflection_llm_unavailable = _reason
+                    _record_task_degradation(task_id, _reason, both_failed=False)
+                    logger.warning(
+                        "Reflection LLM unavailable (%s), stopping iteration: %s",
+                        _reason, str(exc)[:150],
+                    )
+                    return None
+            except Exception:
+                pass
             logger.warning("Reflection failed, stopping iteration: %s", str(exc)[:150])
             return None
 
@@ -3951,6 +4014,8 @@ print("charts generated")
         redo_rounds = 0
         skip_execute = False
         gate_checked = False
+        # P0-1：反思 LLM 不可用标记（每次任务重置）
+        self._reflection_llm_unavailable = ""
         last_steps = steps
         last_results: list[dict] = []
         best_report = ""
@@ -4233,7 +4298,23 @@ print("charts generated")
                        "message": f"Generating report ({len(all_steps)} steps, {iteration} iterations, {time.time()-started:.0f}s)",
                        "timestamp": self._now_iso()})
 
-        overall = "FAILED" if has_failure else "SUCCESS"
+        # P0-1/P0-2：验收 fail 且反思因 LLM 不可用未重做，或 LLM 双端点均失败
+        # → 任务如实降级为 SUCCESS_WITH_ISSUES，不再"带缺口报成功"
+        acceptance_summary = self._read_acceptance_summary(task_id)
+        llm_degraded = self._read_llm_degraded(task_id)
+        overall = self._resolve_final_status(
+            has_failure, acceptance_summary,
+            getattr(self, "_reflection_llm_unavailable", ""), llm_degraded,
+        )
+        if overall == "SUCCESS_WITH_ISSUES":
+            logger.error(
+                "Task %s completed with issues: acceptance=%s "
+                "reflection_unavailable=%s llm_degraded=%s",
+                task_id,
+                (acceptance_summary or {}).get("overall"),
+                getattr(self, "_reflection_llm_unavailable", ""),
+                json.dumps(llm_degraded, ensure_ascii=False),
+            )
         self._publish_usage()
 
         # 4. Memory（仅沉淀成功计划，避免污染 successful_strategies）
@@ -4254,7 +4335,9 @@ print("charts generated")
         push_progress(self._messaging, task_id, "task_complete",
                       {"status": overall,
                        "summary": f"{overall}: {ok_count}/{len(all_steps)} steps, {iteration} iterations",
-                       "report": report})
+                       "report": report,
+                       "acceptance": acceptance_summary,
+                       "llm_degraded": llm_degraded})
 
         # 6. 提示词自迭代（后台线程，不阻塞交付）：LLM 分析本次输出与预期的差距，
         #    总结问题并产出改进版提示词写入注册表，下一轮任务自动生效

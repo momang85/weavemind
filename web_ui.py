@@ -513,6 +513,9 @@ def _listen_results():
                                 existing["status"] = payload.get("status", existing.get("status", "PENDING"))
                                 existing["report"] = payload.get("report", existing.get("report", ""))
                                 existing["steps"] = payload.get("steps", existing.get("steps", []))
+                                # P0-1/P0-2：验收缺口摘要 + LLM 降级汇总随任务结果暴露
+                                existing["acceptance"] = payload.get("acceptance")
+                                existing["llm_degraded"] = payload.get("llm_degraded")
                                 # Persist to SQLite so History page updates
                                 try:
                                     db = sqlite3.connect(DB_PATH, timeout=5)
@@ -1712,6 +1715,8 @@ class Handler(BaseHTTPRequestHandler):
                 "report": data.get("final_report") or data.get("report", ""),
                 "logs": data.get("logs", []),
                 "revision": bool(data.get("revision")),
+                "acceptance": data.get("acceptance"),
+                "llm_degraded": data.get("llm_degraded"),
             })
             return self._json({"error":"not found"},404)
         if p.startswith("/task/") and p.endswith("/report"):

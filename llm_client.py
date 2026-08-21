@@ -27,8 +27,10 @@ _usage_pub_client = None
 _task_usage_client = None
 _task_ctx = None
 _endpoint_health = {
-    "primary": {"healthy": True, "fails": 0},
-    "backup": {"healthy": True, "fails": 0},
+    "primary": {"healthy": True, "fails": 0,
+                "last_degradation_reason": "", "last_degradation_ts": 0},
+    "backup": {"healthy": True, "fails": 0,
+               "last_degradation_reason": "", "last_degradation_ts": 0},
 }
 _endpoint_health_lock = threading.Lock()
 _auth_error_lock = threading.Lock()
@@ -130,15 +132,102 @@ def _ensure_cfg_fresh() -> None:
 _ENDPOINT_FAIL_THRESHOLD = 2
 
 
-def _mark_endpoint(endpoint: str, ok: bool) -> None:
+def _mark_endpoint(endpoint: str, ok: bool, reason: str = "") -> None:
     with _endpoint_health_lock:
-        st = _endpoint_health.setdefault(endpoint, {"healthy": True, "fails": 0})
+        st = _endpoint_health.setdefault(
+            endpoint,
+            {"healthy": True, "fails": 0,
+             "last_degradation_reason": "", "last_degradation_ts": 0},
+        )
         if ok:
             st["healthy"] = True
             st["fails"] = 0
         else:
             st["fails"] += 1
             st["healthy"] = st["fails"] < _ENDPOINT_FAIL_THRESHOLD
+            if reason:
+                st["last_degradation_reason"] = reason
+                st["last_degradation_ts"] = time.time()
+
+
+def _degradation_reason(exc: Exception) -> str:
+    """把 LLM 调用异常归类为稳定降级原因（供健康路由与任务汇总）。"""
+    text = str(exc or "")
+    if "Empty content" in text or "Empty choices" in text:
+        return "empty_content"
+    m = re.search(r"HTTP[ _-]?(\d{3})", text)
+    if m and m.group(1) in ("401", "402", "403"):
+        return f"HTTP_{m.group(1)}"
+    low = text.lower()
+    if "network error" in low:
+        return "timeout" if ("timeout" in low or "timed out" in low) else "network_error"
+    return "generic"
+
+
+def _record_task_degradation(task_id: str, reason: str, both_failed: bool = False) -> None:
+    """把降级事件写入 Redis（llm_degradation:{task_id}），供任务完成汇总。"""
+    if not task_id:
+        return
+    global _task_usage_client
+    try:
+        if _task_usage_client is None:
+            import redis as _redis
+            _task_usage_client = _redis.Redis(
+                host=os.environ.get("REDIS_HOST", "localhost"),
+                port=int(os.environ.get("REDIS_PORT", "6379")),
+                decode_responses=True,
+            )
+        key = f"llm_degradation:{task_id}"
+        _task_usage_client.rpush(key, json.dumps({
+            "ts": time.time(),
+            "reason": reason,
+            "both_failed": both_failed,
+        }, ensure_ascii=False))
+        _task_usage_client.ltrim(key, -50, -1)
+        _task_usage_client.expire(key, 7200)
+    except Exception:
+        pass
+
+
+def get_task_llm_degradation(task_id: str) -> dict:
+    """读取任务的 LLM 降级汇总：{switches, reasons, both_failed, events}。"""
+    if not task_id:
+        return {}
+    global _task_usage_client
+    try:
+        if _task_usage_client is None:
+            import redis as _redis
+            _task_usage_client = _redis.Redis(
+                host=os.environ.get("REDIS_HOST", "localhost"),
+                port=int(os.environ.get("REDIS_PORT", "6379")),
+                decode_responses=True,
+            )
+        raw = _task_usage_client.lrange(f"llm_degradation:{task_id}", 0, -1) or []
+        events: list[dict] = []
+        for item in raw:
+            try:
+                events.append(json.loads(item))
+            except Exception:
+                continue
+        reasons: list[str] = []
+        switches = 0
+        both_failed = False
+        for ev in events:
+            r = str(ev.get("reason") or "")
+            if r == "switch_to_backup":
+                switches += 1
+            elif r and r not in reasons:
+                reasons.append(r)
+            if ev.get("both_failed"):
+                both_failed = True
+        return {
+            "switches": switches,
+            "reasons": reasons,
+            "both_failed": both_failed,
+            "events": events[-10:],
+        }
+    except Exception:
+        return {}
 
 
 def _mark_auth_error(code: int, body: str) -> None:
@@ -551,6 +640,10 @@ class LLMClient:
             except LLMJSONParseError:
                 raise
             except Exception as exc:
+                _mark_endpoint("backup", False, _degradation_reason(exc))
+                _record_task_degradation(
+                    get_task_context(), _degradation_reason(exc), both_failed=True,
+                )
                 logger.warning("Health-routed backup failed: %s", str(exc)[:150])
         for attempt in range(1, self._MAX_RETRIES + 1):
             try:
@@ -563,7 +656,9 @@ class LLMClient:
                 # JSON 解析失败不重试（格式问题重试没用）
                 raise
             except Exception as exc:
-                _mark_endpoint("primary", False)
+                _reason = _degradation_reason(exc)
+                _mark_endpoint("primary", False, _reason)
+                _record_task_degradation(get_task_context(), _reason, both_failed=False)
                 last_error = exc
                 logger.warning(
                     "LLM call attempt %d/%d failed: %s",
@@ -581,7 +676,9 @@ class LLMClient:
             except LLMJSONParseError:
                 raise
             except Exception as exc:
-                _mark_endpoint("backup", False)
+                _reason = _degradation_reason(exc)
+                _mark_endpoint("backup", False, _reason)
+                _record_task_degradation(get_task_context(), _reason, both_failed=True)
                 logger.error("Backup LLM also failed: %s", str(exc)[:200])
         raise LLMCallError(
             f"LLM call failed after {self._MAX_RETRIES} attempts",
@@ -602,6 +699,7 @@ class LLMClient:
         )
         raw = backup._send_request(system, user, temperature, max_tokens)
         _mark_endpoint("backup", True)
+        _record_task_degradation(get_task_context(), "switch_to_backup", both_failed=False)
         logger.warning("Switched to backup LLM: %s", self._backup_cfg.get("base_url"))
         if not expect_json:
             return {"content": raw}

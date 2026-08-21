@@ -347,5 +347,69 @@ class TestPromptRagWiring(unittest.TestCase):
             llm_client.call_llm = orig
 
 
+class TestLLMHealthDegradation(unittest.TestCase):
+    """P0-2 LLM 端点降级可见化：健康原因记录 + 任务级降级汇总。"""
+
+    def test_degradation_reason_classification(self):
+        import llm_client
+
+        self.assertEqual(llm_client._degradation_reason(
+            Exception("Empty content in LLM response")), "empty_content")
+        self.assertEqual(llm_client._degradation_reason(
+            Exception("HTTP 401: Insufficient balance")), "HTTP_401")
+        self.assertEqual(llm_client._degradation_reason(
+            Exception("HTTP 402: Payment Required")), "HTTP_402")
+        self.assertEqual(llm_client._degradation_reason(
+            Exception("HTTP 403: Forbidden")), "HTTP_403")
+        self.assertEqual(llm_client._degradation_reason(
+            Exception("Network error: timed out")), "timeout")
+        self.assertEqual(llm_client._degradation_reason(
+            Exception("Network error: refused")), "network_error")
+        self.assertEqual(llm_client._degradation_reason(
+            Exception("JSON parse error")), "generic")
+
+    def test_mark_endpoint_records_last_reason(self):
+        import llm_client
+
+        with llm_client._endpoint_health_lock:
+            old = {k: dict(v) for k, v in llm_client._endpoint_health.items()}
+        try:
+            llm_client._mark_endpoint("primary", False, "HTTP_401")
+            h = llm_client.get_endpoint_health()
+            self.assertEqual(h["primary"]["last_degradation_reason"], "HTTP_401")
+            self.assertGreater(h["primary"]["last_degradation_ts"], 0)
+            # 恢复健康后保留最近一次降级原因（"最近一次"语义）
+            llm_client._mark_endpoint("primary", True)
+            h2 = llm_client.get_endpoint_health()
+            self.assertEqual(h2["primary"]["last_degradation_reason"], "HTTP_401")
+        finally:
+            with llm_client._endpoint_health_lock:
+                llm_client._endpoint_health.clear()
+                llm_client._endpoint_health.update(old)
+
+    def test_task_degradation_summary(self):
+        import fakeredis
+        import llm_client
+
+        fake = fakeredis.FakeStrictRedis(decode_responses=True)
+        old_client = llm_client._task_usage_client
+        llm_client._task_usage_client = fake
+        try:
+            llm_client._record_task_degradation("t-dg", "HTTP_401", both_failed=False)
+            llm_client._record_task_degradation("t-dg", "switch_to_backup", both_failed=False)
+            llm_client._record_task_degradation("t-dg", "HTTP_402", both_failed=True)
+            s = llm_client.get_task_llm_degradation("t-dg")
+            self.assertEqual(s["switches"], 1)
+            self.assertIn("HTTP_401", s["reasons"])
+            self.assertIn("HTTP_402", s["reasons"])
+            self.assertTrue(s["both_failed"])
+            self.assertEqual(len(s["events"]), 3)
+            empty = llm_client.get_task_llm_degradation("t-none")
+            self.assertEqual(empty["switches"], 0)
+            self.assertFalse(empty["both_failed"])
+        finally:
+            llm_client._task_usage_client = old_client
+
+
 if __name__ == "__main__":
     unittest.main()

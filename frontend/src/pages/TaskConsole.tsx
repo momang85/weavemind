@@ -17,6 +17,7 @@ function statusBadge(status: string) {
   const base = 'px-2 py-0.5 rounded-full text-[10px] font-semibold'
   if (status === 'SUCCESS') return `${base} bg-emerald-500/20 text-emerald-400`
   if (status === 'FAILED') return `${base} bg-red-500/20 text-red-400`
+  if (status === 'SUCCESS_WITH_ISSUES') return `${base} bg-amber-500/20 text-amber-400`
   return `${base} bg-cyan-500/20 text-cyan-400`
 }
 
@@ -44,6 +45,8 @@ export default function TaskConsole() {
   const [showContext, setShowContext] = useState(false)
   const [userContext, setUserContext] = useState('')
   const [importMsg, setImportMsg] = useState<{ name: string; status: string }[]>([])
+  // P0-1：SUCCESS_WITH_ISSUES 的验收缺口明细（按任务缓存，点击展开）
+  const [gapsFor, setGapsFor] = useState<Record<string, string[]>>({})
 
   useTaskPoller(demoMode ? null : taskId)
 
@@ -274,9 +277,35 @@ export default function TaskConsole() {
         }))
         setLogs(lg)
       } catch { /* ignore */ }
+      // P0-1：随任务详情缓存验收缺口摘要
+      const acc = d.acceptance
+      if (acc && Array.isArray(acc.gaps)) {
+        setGapsFor(prev => ({ ...prev, [tid]: acc.gaps }))
+      }
       setReport(reportObj)
     } catch { /* ignore */ }
   }, [setReport, setLogs])
+
+  // P0-1：点击展开/收起 SUCCESS_WITH_ISSUES 任务的验收缺口明细
+  const toggleGaps = useCallback(async (tid: string) => {
+    if (gapsFor[tid]) {
+      setGapsFor(prev => {
+        const next = { ...prev }
+        delete next[tid]
+        return next
+      })
+      return
+    }
+    try {
+      const res = await fetch('/task/' + tid)
+      const d = await res.json()
+      const gaps = (d.acceptance && Array.isArray(d.acceptance.gaps))
+        ? d.acceptance.gaps : []
+      setGapsFor(prev => ({ ...prev, [tid]: gaps }))
+    } catch {
+      setGapsFor(prev => ({ ...prev, [tid]: ['（无法加载验收缺口）'] }))
+    }
+  }, [gapsFor])
 
   const newConversation = useCallback(() => {
     reset()
@@ -508,8 +537,8 @@ export default function TaskConsole() {
                       <pre className="whitespace-pre-wrap break-all max-h-32 overflow-y-auto font-sans">
                         {m.report_preview || '（运行中...）'}
                       </pre>
-                      {(m.status === 'SUCCESS' || m.status === 'FAILED') && (
-                        <div className="flex gap-2 mt-2">
+                      {(m.status === 'SUCCESS' || m.status === 'FAILED' || m.status === 'SUCCESS_WITH_ISSUES') && (
+                        <div className="flex gap-2 mt-2 flex-wrap">
                           <button onClick={() => viewFullReport(m.task_id)}
                             className="flex items-center gap-1 text-[10px] text-cyan-400 hover:text-cyan-300">
                             <Eye className="w-3 h-3" /> 查看完整报告
@@ -518,6 +547,19 @@ export default function TaskConsole() {
                             className="flex items-center gap-1 text-[10px] text-violet-400 hover:text-violet-300">
                             <RefreshCw className="w-3 h-3" /> 重跑
                           </button>
+                          {m.status === 'SUCCESS_WITH_ISSUES' && (
+                            <button onClick={() => toggleGaps(m.task_id)}
+                              className="flex items-center gap-1 text-[10px] text-amber-400 hover:text-amber-300">
+                              {gapsFor[m.task_id] ? '收起' : '验收缺口'}
+                            </button>
+                          )}
+                        </div>
+                      )}
+                      {m.status === 'SUCCESS_WITH_ISSUES' && gapsFor[m.task_id] && (
+                        <div className="mt-2 text-amber-300/90 bg-amber-500/10 border border-amber-500/20 rounded p-2 text-[10px] space-y-1">
+                          <div className="font-semibold">已完成但有验收缺口：</div>
+                          {gapsFor[m.task_id].length === 0 && <div>（无缺口明细）</div>}
+                          {gapsFor[m.task_id].map((g, i) => <div key={i}>- {g}</div>)}
                         </div>
                       )}
                     </div>
@@ -540,7 +582,7 @@ export default function TaskConsole() {
                       <span className={statusBadge(t.status)}>{t.status}</span>
                       <span className="text-slate-300 text-xs truncate flex-1">{t.goal}</span>
                     </div>
-                    <div className="flex gap-3">
+                    <div className="flex gap-3 flex-wrap">
                       <button onClick={() => viewFullReport(t.task_id)}
                         className="flex items-center gap-1 text-[10px] text-cyan-400 hover:text-cyan-300">
                         <Eye className="w-3 h-3" /> 查看
@@ -549,7 +591,20 @@ export default function TaskConsole() {
                         className="flex items-center gap-1 text-[10px] text-violet-400 hover:text-violet-300">
                         <RefreshCw className="w-3 h-3" /> 重新运行
                       </button>
+                      {t.status === 'SUCCESS_WITH_ISSUES' && (
+                        <button onClick={() => toggleGaps(t.task_id)}
+                          className="flex items-center gap-1 text-[10px] text-amber-400 hover:text-amber-300">
+                          {gapsFor[t.task_id] ? '收起' : '验收缺口'}
+                        </button>
+                      )}
                     </div>
+                    {t.status === 'SUCCESS_WITH_ISSUES' && gapsFor[t.task_id] && (
+                      <div className="mt-2 text-amber-300/90 bg-amber-500/10 border border-amber-500/20 rounded p-2 text-[10px] space-y-1">
+                        <div className="font-semibold">已完成但有验收缺口：</div>
+                        {gapsFor[t.task_id].length === 0 && <div>（无缺口明细）</div>}
+                        {gapsFor[t.task_id].map((g, i) => <div key={i}>- {g}</div>)}
+                      </div>
+                    )}
                   </div>
                 ))}
               </div>

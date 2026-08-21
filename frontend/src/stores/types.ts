@@ -14,6 +14,8 @@ export interface TaskSummary {
   report?: string
   conversation_id?: string
   parent_task_id?: string
+  acceptance?: { overall?: string; gaps?: string[] }
+  llm_degraded?: { switches?: number; reasons?: string[]; both_failed?: boolean }
 }
 
 export interface ConversationSummary {
@@ -32,6 +34,8 @@ export interface ConversationMessage {
   completed_at?: string
   report_preview?: string
   report?: string
+  acceptance?: { overall?: string; gaps?: string[] }
+  llm_degraded?: { switches?: number; reasons?: string[]; both_failed?: boolean }
 }
 
 export interface MemoryDoc {

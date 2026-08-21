@@ -3239,5 +3239,101 @@ class TestLauncherStopFallback(unittest.TestCase):
             launcher._is_residual_command("python -m pytest tests", 6))
 
 
+class TestP0StatusHonesty(unittest.TestCase):
+    """P0-1 任务状态诚实化：验收 fail + 反思 LLM 不可用 → SUCCESS_WITH_ISSUES。"""
+
+    def test_resolve_final_status_cases(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        acc_fail = {"overall": "fail", "gaps": ["数字溯源率低于阈值"]}
+        acc_pass = {"overall": "pass", "gaps": []}
+        # 验收 fail + 反思 LLM 不可用 → SUCCESS_WITH_ISSUES
+        self.assertEqual(
+            o._resolve_final_status(False, acc_fail, "HTTP_401", {}),
+            "SUCCESS_WITH_ISSUES",
+        )
+        # 验收 fail + 反思正常（未标记不可用）→ 维持 SUCCESS
+        self.assertEqual(
+            o._resolve_final_status(False, acc_fail, "", {}),
+            "SUCCESS",
+        )
+        # 验收 pass → SUCCESS
+        self.assertEqual(
+            o._resolve_final_status(False, acc_pass, "", {}),
+            "SUCCESS",
+        )
+        # LLM 双端点均失败 → SUCCESS_WITH_ISSUES（即使验收 pass）
+        self.assertEqual(
+            o._resolve_final_status(
+                False, acc_pass, "",
+                {"switches": 1, "reasons": ["HTTP_401"], "both_failed": True},
+            ),
+            "SUCCESS_WITH_ISSUES",
+        )
+        # 有步骤失败 → FAILED 优先
+        self.assertEqual(
+            o._resolve_final_status(True, acc_fail, "HTTP_401", {"both_failed": True}),
+            "FAILED",
+        )
+
+    def test_read_acceptance_summary(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        tmp = Path(tempfile.mkdtemp(prefix="accsum_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            ws = ws_mod.task_workspace("t-as")
+            ws.mkdir(parents=True, exist_ok=True)
+            (ws / "acceptance_report.json").write_text(
+                json.dumps({"overall": "fail", "gaps": ["g1", "g2"]}),
+                encoding="utf-8",
+            )
+            s = OrchestratorV2._read_acceptance_summary("t-as")
+            self.assertEqual(s["overall"], "fail")
+            self.assertEqual(s["gaps"], ["g1", "g2"])
+            self.assertIsNone(OrchestratorV2._read_acceptance_summary("t-none"))
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+
+    def test_reflect_marks_llm_unavailable(self):
+        """反思 LLM 401/空内容等不可用时设置 _reflection_llm_unavailable。"""
+        import tempfile
+        from pathlib import Path
+        import workspace as ws_mod
+        from llm_client import LLMCallError
+
+        tmp = Path(tempfile.mkdtemp(prefix="reflunav_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            from orchestrator_v2 import OrchestratorV2
+            o = OrchestratorV2.__new__(OrchestratorV2)
+            o._messaging = None
+            o._reflection_llm_unavailable = ""
+
+            class FakeLLM:
+                def call(self, *a, **k):
+                    raise LLMCallError("HTTP 401: Insufficient balance")
+            o._planner_llm = FakeLLM()
+            # 屏蔽 Redis 降级写入（单测环境不依赖真实 Redis）
+            import llm_client
+            orig_record = llm_client._record_task_degradation
+            llm_client._record_task_degradation = lambda *a, **k: None
+            try:
+                verdict = o._reflect("目标", "报告", "t-ru", [], {}, "")
+            finally:
+                llm_client._record_task_degradation = orig_record
+            self.assertIsNone(verdict)
+            self.assertEqual(o._reflection_llm_unavailable, "HTTP_401")
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+
+
 if __name__ == "__main__":
     unittest.main()
