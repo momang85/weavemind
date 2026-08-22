@@ -47,6 +47,18 @@ COIN_ALIASES = {
     "狗狗币": "dogecoin",
 }
 
+# CoinGecko coin id → 常用中文名（供图表/报告展示与主题过滤）
+COIN_ZH = {
+    "bitcoin": "比特币",
+    "ethereum": "以太坊",
+    "solana": "索拉纳",
+    "binancecoin": "币安币",
+    "tether": "泰达币",
+    "usd-coin": "USDC",
+    "ripple": "瑞波币",
+    "dogecoin": "狗狗币",
+}
+
 
 def coin_id(coin: str) -> str:
     """把用户输入归一化为 CoinGecko coin id；无法识别时取首个小写 token。"""
@@ -57,6 +69,11 @@ def coin_id(coin: str) -> str:
         s = re.sub(r"[^a-z0-9-]", "", raw)
         return s or "bitcoin"
     return "bitcoin"
+
+
+def coin_zh(coin: str) -> str:
+    """CoinGecko coin id → 中文显示名；未收录时回退原 id。"""
+    return COIN_ZH.get(str(coin or "").strip().lower(), str(coin or ""))
 
 
 def parse_market(payload: dict, coin: str, vs_currency: str = "usd") -> dict | None:

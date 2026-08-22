@@ -97,14 +97,89 @@ def _init_defaults() -> None:
         except Exception as exc:
             return (False, f"图表规格解析失败: {exc}")
 
+    def _recency_retrieved_at_check(project: Path) -> tuple[bool, str]:
+        """P1-1：报告日期 vs 结构化数据 retrieved_at 矛盾检查。
+        报告明确标注"数据截至/报告日期"且比 retrieved_at 早 >7 天 → FAIL，
+        触发反思重做（修复模型回忆日期与结构化数据时间矛盾）。"""
+        import re
+        from datetime import date
+
+        sd = project / "structured_data.json"
+        if not sd.exists():
+            return (True, "无结构化数据（跳过 retrieved_at 矛盾检查）")
+        try:
+            sd_data = json.loads(sd.read_text(encoding="utf-8"))
+            retrieved_at = str(
+                (sd_data.get("metadata") or {}).get("retrieved_at") or ""
+            )
+        except Exception:
+            return (True, "结构化数据解析失败（跳过 retrieved_at 矛盾检查）")
+        m = re.match(r"(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})", retrieved_at)
+        if not m:
+            return (True, "结构化数据无 retrieved_at 日期（跳过矛盾检查）")
+        try:
+            retrieved = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return (True, "retrieved_at 日期无法解析（跳过矛盾检查）")
+        report = project.parent / "reports" / "report.md"
+        if not report.exists():
+            return (True, "无报告文件（跳过报告日期矛盾检查）")
+        try:
+            txt = report.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            return (True, "报告读取失败（跳过报告日期矛盾检查）")
+        # 只认"数据截至/报告日期/更新日期/生成日期"等标签后的日期，
+        # 避免把数据表里的历史序列日期误当成报告日期
+        pat = re.compile(
+            r"(?:数据截至|数据截止|报告日期|报告时间|更新日期|更新时间|"
+            r"生成日期|检索时间|截至)"
+            r"[^0-9年/.\-]{0,12}?"
+            r"(20\d{2})\s*[年./\-]\s*(\d{1,2})\s*(?:月|[./\-])?\s*(\d{1,2})?\s*日?"
+        )
+        hit = pat.search(txt)
+        if not hit:
+            return (True, "报告未标注数据截至/报告日期（无法核对 retrieved_at 矛盾）")
+        try:
+            report_date = date(
+                int(hit.group(1)), int(hit.group(2)), int(hit.group(3) or 1)
+            )
+        except ValueError:
+            return (True, "报告日期无法解析（跳过矛盾检查）")
+        gap = (retrieved - report_date).days
+        if gap > 7:
+            return (
+                False,
+                f"报告日期 {report_date.isoformat()} 明显早于数据获取时间 "
+                f"{retrieved.isoformat()}（差 {gap} 天 >7 天），"
+                "必须按结构化数据 retrieved_at 重写报告日期",
+            )
+        return (
+            True,
+            f"报告日期 {report_date.isoformat()} 与数据获取时间 "
+            f"{retrieved.isoformat()} 一致（差 {gap} 天）",
+        )
+
     def _recency_check(project: Path, task_id: str, goal: str):
-        """时效性审查（修复"最新财报返回旧年份"）：
-        目标要求"最新/最近"时，检索结果与报告必须含近期年份（当前年-1 起），
-        否则判定未通过并作为反思证据。"""
+        """时效性审查（修复"最新财报返回旧年份" + P1-1"报告日期早于 retrieved_at"）：
+        目标含"最新/最近/当前/现在"时，报告日期不得明显早于结构化数据
+        retrieved_at（>7 天 → FAIL 触发反思）；"最新/最近"类目标另要求
+        检索结果与报告含近期年份（当前年-1 起）。"""
         import re
         import time
         g = str(goal or "")
-        if not any(k in g for k in ("最新", "最近", "最新季度", "最新一期", "latest", "current")):
+        freshness_requested = any(
+            k in g for k in ("最新", "最近", "最新季度", "最新一期",
+                             "current", "当前", "现在")
+        )
+        if freshness_requested:
+            ok, detail = _recency_retrieved_at_check(project)
+            if not ok:
+                return (False, detail)
+        if not any(k in g for k in (
+            "最新", "最近", "最新季度", "最新一期", "latest", "current",
+        )):
+            if freshness_requested:
+                return (True, "目标含当前/现在：已核对数据获取时间与报告日期")
             return (True, "目标未要求最新，跳过")
         years: set[int] = set()
         sr = project / "search_results.json"

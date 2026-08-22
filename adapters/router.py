@@ -21,6 +21,8 @@ _CRYPTO_KEYWORDS = (
 _MACRO_KEYWORDS = (
     "gdp", "cpi", "通胀", "通货膨胀", "失业率", "宏观", "宏观经济",
     "unrate", "pmi", "消费者物价",
+    # P1-1：利率/降息/美联储类关键词必须路由到 macro（FRED）
+    "利率", "降息", "加息", "美联储", "联邦基金",
 )
 _NEWS_KEYWORDS = (
     "最新新闻", "头条", "要闻", "今日新闻", "实时新闻", "新闻资讯",
@@ -58,6 +60,9 @@ def _extract_indicator(goal: str) -> str:
         return "CPIAUCSL"
     if "gdp" in g or "国内生产总值" in g:
         return "GDP"
+    # P1-1：利率/降息/美联储类目标 → 联邦基金有效利率（DFF）
+    if any(k in g for k in ("利率", "降息", "加息", "美联储", "联邦基金")):
+        return "DFF"
     return "GDP"
 
 

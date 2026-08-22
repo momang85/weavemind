@@ -130,6 +130,28 @@ class TestNormalizeSteps(unittest.TestCase):
         ])
         self.assertEqual(len(steps), 8)
 
+    def test_low_risk_human_in_loop_forced_to_pipeline(self):
+        """P1-2：package/file_io/data_loader 等低风险步骤被规划器标
+        human_in_loop 时强制改为 pipeline；web_fetch 等允许保留。"""
+        steps = self.o._normalize_steps([
+            {"step_id": "1", "capability": "package",
+             "instruction": "打包\n验收：x", "mode": "human_in_loop"},
+            {"step_id": "2", "capability": "file_io",
+             "instruction": "删除\n验收：x", "mode": "human_in_loop"},
+            {"step_id": "3", "capability": "data_loader",
+             "instruction": "加载\n验收：x", "mode": "human_in_loop"},
+            {"step_id": "4", "capability": "web_fetch",
+             "instruction": "抓取\n验收：x", "mode": "human_in_loop"},
+            {"step_id": "5", "capability": "report_generator",
+             "instruction": "报告\n验收：x", "mode": "human_in_loop"},
+        ])
+        by_cap = {s["capability"]: s["mode"] for s in steps}
+        self.assertEqual(by_cap["package"], "pipeline")
+        self.assertEqual(by_cap["file_io"], "pipeline")
+        self.assertEqual(by_cap["data_loader"], "pipeline")
+        self.assertEqual(by_cap["web_fetch"], "human_in_loop")
+        self.assertEqual(by_cap["report_generator"], "human_in_loop")
+
 
 class TestEnsureReportStep(unittest.TestCase):
     def setUp(self):

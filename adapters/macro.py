@@ -32,6 +32,13 @@ INDICATOR_ALIASES = {
     "unrate": "UNRATE",
     "失业率": "UNRATE",
     "失业": "UNRATE",
+    # P1-1：利率/降息/美联储类目标路由到联邦基金有效利率
+    "dff": "DFF",
+    "利率": "DFF",
+    "降息": "DFF",
+    "加息": "DFF",
+    "美联储": "DFF",
+    "联邦基金利率": "DFF",
 }
 
 
@@ -80,6 +87,7 @@ def parse_macro_csv(text: str, indicator: str = "GDP") -> dict | None:
                 "GDP": "美国国内生产总值 GDP",
                 "CPIAUCSL": "美国 CPI 消费者物价指数",
                 "UNRATE": "美国失业率",
+                "DFF": "美国联邦基金有效利率 DFF",
             }.get(sid, sid),
         },
     }

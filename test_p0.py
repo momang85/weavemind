@@ -518,11 +518,17 @@ class TestP1WorkflowModes(unittest.TestCase):
         steps = o._normalize_steps([
             {"step_id": "1", "capability": "web_search", "instruction": "搜索", "mode": "pipeline"},
             {"step_id": "2", "capability": "content_summary", "instruction": "总结\n验收：x", "mode": "weird"},
-            {"step_id": "3", "capability": "file_io", "instruction": "删除\n验收：x", "mode": "human_in_loop"},
+            {"step_id": "3", "capability": "web_fetch", "instruction": "抓取\n验收：x", "mode": "human_in_loop"},
+            {"step_id": "4", "capability": "package", "instruction": "打包\n验收：x", "mode": "human_in_loop"},
+            {"step_id": "5", "capability": "file_io", "instruction": "删除\n验收：x", "mode": "human_in_loop"},
+            {"step_id": "6", "capability": "data_loader", "instruction": "加载\n验收：x", "mode": "human_in_loop"},
         ])
         self.assertEqual(steps[0]["mode"], "pipeline")
         self.assertEqual(steps[1]["mode"], "parallel")
         self.assertEqual(steps[2]["mode"], "human_in_loop")
+        self.assertEqual(steps[3]["mode"], "pipeline")
+        self.assertEqual(steps[4]["mode"], "pipeline")
+        self.assertEqual(steps[5]["mode"], "pipeline")
 
     def test_pipeline_mode_serializes(self):
         import threading
@@ -577,8 +583,8 @@ class TestP1WorkflowModes(unittest.TestCase):
             "task_id": step["step_id"], "status": "SUCCESS", "result": "ok"
         }
         steps = [{
-            "step_id": "1", "capability": "file_io",
-            "instruction": "删除文件\n验收：已删除",
+            "step_id": "1", "capability": "web_fetch",
+            "instruction": "抓取页面\n验收：已抓取",
             "depends_on": [], "mode": "human_in_loop",
         }]
         results, failed = o._execute_steps(steps, "t", "目标")
@@ -798,6 +804,48 @@ class TestP2FinanceRecency(unittest.TestCase):
             res3 = run_for_task("t-rec-1", "分析某公司财务", ["web_search"])
             rec3 = next(r for r in res3 if r["name"] == "recency_check")
             self.assertTrue(rec3["ok"])
+        finally:
+            ws_mod.WORKSPACE_ROOT = old
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_recency_retrieved_at_contradiction(self):
+        """P1-1：目标含当前/最新/现在，报告日期明显早于 retrieved_at（>7 天）→ FAIL，
+        触发反思重做；相差 ≤7 天 → 通过。"""
+        import json
+        import tempfile
+        import workspace as ws_mod
+        from validators.registry import run_for_task
+
+        tmp = tempfile.mkdtemp(prefix="weavemind_rec2_")
+        old = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            proj = ws_mod.task_project_dir("t-rec-2")
+            (proj / "structured_data.json").write_text(json.dumps({
+                "source": "coingecko",
+                "data": {"price": 67450},
+                "metadata": {"retrieved_at": "2026-08-21T09:00:00Z"},
+            }), encoding="utf-8")
+            rep = proj.parent / "reports"
+            rep.mkdir(parents=True, exist_ok=True)
+            (rep / "report.md").write_text(
+                "# 比特币行情报告\n\n报告日期：2026年5月14日",
+                encoding="utf-8",
+            )
+            res = run_for_task("t-rec-2", "比特币当前行情报告", ["report_generator"])
+            rec = next(r for r in res if r["name"] == "recency_check")
+            self.assertFalse(rec["ok"], rec["detail"])
+            self.assertIn("明显早于", rec["detail"])
+            self.assertIn("retrieved_at", rec["detail"])
+
+            (rep / "report.md").write_text(
+                "# 比特币行情报告\n\n数据截至日期：2026-08-20",
+                encoding="utf-8",
+            )
+            res2 = run_for_task("t-rec-2", "比特币最新行情报告", ["report_generator"])
+            rec2 = next(r for r in res2 if r["name"] == "recency_check")
+            self.assertTrue(rec2["ok"], rec2["detail"])
         finally:
             ws_mod.WORKSPACE_ROOT = old
             import shutil
@@ -2540,6 +2588,11 @@ class TestAcceptanceChecker(unittest.TestCase):
         self.assertIn("CoinGecko 行情", src)
         self.assertIn("禁止编造", src)
         self.assertIn("基于模型知识，未在本次检索中验证", src)
+        # P1-1：报告时效纪律——数据截至/报告日期必须引用 retrieved_at，
+        # 结构化数据缺失时标注"数据截至日期：未获取"
+        self.assertIn("retrieved_at", src)
+        self.assertIn("禁止使用模型回忆的日期", src)
+        self.assertIn("数据截至日期：未获取", src)
 
     def test_orchestrator_acceptance_hook(self):
         """报告生成后验收：acceptance_report.json 写入工作区。"""
@@ -4369,6 +4422,106 @@ class TestNewDataAdapters(unittest.TestCase):
             self.assertEqual(
                 router.route_structured("加密货币新闻")["source"], "coingecko",
             )
+
+    def test_router_routes_rate_keywords_to_macro(self):
+        """P1-1：利率/降息/美联储等关键词必须路由到 macro，并取 DFF 指标。"""
+        import adapters.router as router
+        with mock.patch.object(router, "fetch_macro", return_value={
+            "indicator": "DFF", "series": "DFF",
+            "points": [{"date": "2026-07-01", "value": 5.5}],
+            "metadata": {"label": "美国联邦基金有效利率"},
+        }) as fm:
+            for goal in (
+                "美联储降息与利率走势分析",
+                "美国宏观利率分析",
+                "降息周期怎么看",
+            ):
+                out = router.route_structured(goal)
+                self.assertEqual(out["source"], "macro", goal)
+                self.assertEqual(out["data"]["series"], "DFF", goal)
+            self.assertEqual(fm.call_count, 3)
+
+    def test_structured_injection_includes_retrieved_at(self):
+        """P1-1：结构化注入块必须带 retrieved_at，供报告引用数据获取时间。"""
+        import json
+        import tempfile
+        from pathlib import Path
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        tmp = Path(tempfile.mkdtemp(prefix="acc_inj_ts_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            proj = ws_mod.task_project_dir("t-inj-ts")
+            proj.mkdir(parents=True, exist_ok=True)
+            (proj / "structured_data.json").write_text(json.dumps({
+                "source": "coingecko",
+                "data": {
+                    "price": 67450,
+                    "market_cap": 1320000000000,
+                    "volume_24h": 42000000000,
+                    "change_24h": 2.4,
+                },
+                "metadata": {
+                    "coin": "bitcoin", "vs_currency": "usd",
+                    "retrieved_at": "2026-08-21T09:00:00Z",
+                },
+            }), encoding="utf-8")
+            block = OrchestratorV2._structured_injection("t-inj-ts")
+            self.assertIn("2026-08-21T09:00:00Z", block)
+            self.assertIn("retrieved_at", block)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_crypto_structured_points_trigger_chart_fallback(self):
+        """P1-3：crypto 行情点（价格/市值/24h量/涨跌幅）≥2 即触发图表渲染，
+        即使 LLM 未产出图表规格。"""
+        import json
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = tempfile.mkdtemp(prefix="weavemind_cc_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            proj = ws_mod.task_project_dir("t-cc-1")
+            (proj / "clean_chart_data.json").write_text(json.dumps({
+                "market_data": [
+                    {"type": "market_size", "label": "当前价格",
+                     "value": 67450, "unit": "USD", "source": "coingecko",
+                     "series": "比特币行情"},
+                    {"type": "market_size", "label": "市值",
+                     "value": 1.32e12, "unit": "USD", "source": "coingecko",
+                     "series": "比特币行情"},
+                    {"type": "market_size", "label": "24小时成交量",
+                     "value": 4.2e10, "unit": "USD", "source": "coingecko",
+                     "series": "比特币行情"},
+                    {"type": "market_size", "label": "24小时涨跌幅",
+                     "value": 2.4, "unit": "%", "source": "coingecko",
+                     "series": "比特币行情"},
+                ],
+            }), encoding="utf-8")
+            o._render_clean_chart_data("t-cc-1", "评估比特币短期趋势与风险")
+            specs = json.loads(
+                (proj / "chart_data.json").read_text(encoding="utf-8")
+            )["charts"]
+            self.assertGreaterEqual(len(specs), 1, "crypto 行情点应触发数据驱动图表")
+            self.assertIn("比特币行情", specs[0]["title"])
+            pngs = {p.name for p in proj.glob("chart_*.png")}
+            self.assertTrue(pngs, "应实际渲染图表 PNG")
+            manifest = json.loads(
+                (proj / "chart_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(manifest["charts"])
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":

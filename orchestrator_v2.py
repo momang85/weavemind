@@ -93,6 +93,13 @@ KNOWN_CAPABILITIES = {
     "react_agent",
 }
 
+# P1-2：仅外部检索/报告等步骤允许 human_in_loop（执行前需用户确认）；
+# package/file_io/data_loader 等低风险内部步骤若被规划器误标，强制改为 pipeline，
+# 避免"打包被误标 human_in_loop → 300 秒确认超时"这类问题。
+_HUMAN_IN_LOOP_ALLOWED = {
+    "web_search", "web_fetch", "report_generator", "react_agent",
+}
+
 _TOPIC_STOPWORDS = {
     "一个", "我们", "你们", "他们", "它们", "完成", "输出", "生成", "要求",
     "进行", "需要", "可以", "是否", "如何", "什么", "请", "帮", "并", "与",
@@ -1338,6 +1345,8 @@ class OrchestratorV2:
             )
             # 结构化源（东方财富）数据重新并入，避免被搜索清洗覆盖
             self._remerge_structured_financials(task_id)
+            # P1-3：crypto/macro 结构化行情行同样重新并入（供数据驱动图表兜底）
+            self._remerge_structured_points(task_id)
             logger.info(
                 "Snapshot recycle: %d docs, market_data=%d, shares=%d, trends=%d",
                 len(docs),
@@ -1346,6 +1355,7 @@ class OrchestratorV2:
                 len(clean.get("market_trends") or []),
             )
             self._generate_search_charts(task_id, goal)
+            self._render_clean_chart_data(task_id, goal)
         except Exception as exc:
             logger.warning("snapshot recycle failed: %s", str(exc)[:150])
 
@@ -1446,6 +1456,9 @@ class OrchestratorV2:
                 json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8",
             )
             self._merge_structured_points(task_id, data, project)
+            # P1-3：预载即尝试数据驱动图表（crypto/macro 行情点 ≥2 即可渲染），
+            # 保证只有"预载 → 报告"两步的加密任务也能出图
+            self._render_clean_chart_data(task_id, goal)
             label = metadata.get("label") or source
             push_progress(self._messaging, task_id, "log",
                           {"type": "data", "agent": "orchestrator",
@@ -1472,8 +1485,14 @@ class OrchestratorV2:
         try:
             source = str(data.get("source") or "")
             payload = data.get("data") or {}
+            meta = data.get("metadata") or {}
             rows: list[dict] = []
             if source == "coingecko":
+                try:
+                    from adapters.coingecko import coin_zh
+                    series = f"{coin_zh(meta.get('coin'))}行情"
+                except Exception:
+                    series = "加密货币行情"
                 for key, label, unit in (
                     ("price", "当前价格", "USD"),
                     ("market_cap", "市值", "USD"),
@@ -1488,6 +1507,7 @@ class OrchestratorV2:
                             "unit": unit,
                             "source": "coingecko",
                             "caliber": "CoinGecko 实时行情",
+                            "series": series,
                         })
             elif source == "macro":
                 series = str(payload.get("series") or "")
@@ -1500,6 +1520,7 @@ class OrchestratorV2:
                             "unit": "",
                             "year": None,
                             "source": "fred",
+                            "series": series,
                         })
                     except (TypeError, ValueError):
                         continue
@@ -1527,6 +1548,19 @@ class OrchestratorV2:
         except Exception as exc:
             logger.warning("merge structured points failed: %s", str(exc)[:120])
 
+    def _remerge_structured_points(self, task_id: str) -> None:
+        """搜索清洗/快照回灌后，把 crypto/macro 结构化行重新并入
+        clean_chart_data.json，避免被 clean_file 重写覆盖（数据驱动兜底依赖）。"""
+        try:
+            proj = task_project_dir(task_id)
+            sd_path = proj / "structured_data.json"
+            if not sd_path.exists():
+                return
+            sd = json.loads(sd_path.read_text(encoding="utf-8"))
+            self._merge_structured_points(task_id, sd)
+        except Exception as exc:
+            logger.warning("remerge structured points failed: %s", str(exc)[:120])
+
     @staticmethod
     def _structured_injection(task_id: str) -> str:
         """构造报告/总结步骤的 [结构化数据] 内容块：
@@ -1541,6 +1575,7 @@ class OrchestratorV2:
                 m = fin.get("metadata") or {}
                 if fs:
                     unit = m.get("unit") or "亿元"
+                    retrieved_at = str(m.get("retrieved_at") or "")
                     src_name = {
                         "eastmoney_datacenter": "东方财富数据中心（港交所披露）",
                         "eastmoney_ashare": "东方财富数据中心（A股财报）",
@@ -1559,10 +1594,13 @@ class OrchestratorV2:
                         )
                     return (
                         "\n\n[结构化财务数据]（来自 " + src_name + "，单位：" + unit
+                        + (f"，数据获取时间 {retrieved_at}" if retrieved_at else "")
                         + "，权威数据源，优先引用）\n" + "\n".join(rows)
                         + "\n规则：报告/总结中的财务数字优先引用本表，并在来源处标注"
                         + src_name + "；本表未覆盖的数字若无溯源，标注"
-                        "'基于模型知识，未在本次检索中验证'；禁止编造年份。"
+                        "'基于模型知识，未在本次检索中验证'；禁止编造年份；"
+                        "报告的数据截至/报告日期必须引用本表标注的数据获取时间，"
+                        "禁止使用模型回忆的日期。"
                     )
             sd_path = proj / "structured_data.json"
             if sd_path.exists():
@@ -1570,9 +1608,15 @@ class OrchestratorV2:
                 source = str(sd.get("source") or "")
                 payload = sd.get("data") or {}
                 meta = sd.get("metadata") or {}
+                retrieved_at = str(meta.get("retrieved_at") or "")
+                time_hint = f"，数据获取时间 {retrieved_at}" if retrieved_at else ""
                 lines: list[str] = []
                 if source == "coingecko":
-                    name = meta.get("coin") or "加密货币"
+                    try:
+                        from adapters.coingecko import coin_zh
+                        name = coin_zh(meta.get("coin")) or "加密货币"
+                    except Exception:
+                        name = meta.get("coin") or "加密货币"
                     vs = str(meta.get("vs_currency") or "usd").upper()
                     lines = [
                         "| 指标 | 数值 |",
@@ -1582,14 +1626,18 @@ class OrchestratorV2:
                         f"| 24小时成交量 | {payload.get('volume_24h')} {vs} |",
                         f"| 24小时涨跌幅 | {payload.get('change_24h')}% |",
                     ]
-                    block_title = f"[结构化数据]（{name} 实时行情，CoinGecko）"
+                    block_title = (
+                        f"[结构化数据]（{name} 实时行情，CoinGecko{time_hint}）"
+                    )
                 elif source == "macro":
                     series = str(payload.get("series") or "")
                     label = str(payload.get("indicator") or series)
                     lines = ["| 日期 | 数值 |", "|---|---|"]
                     for pt in (payload.get("points") or [])[-24:]:
                         lines.append(f"| {pt.get('date')} | {pt.get('value')} |")
-                    block_title = f"[结构化数据]（{label}，FRED 宏观指标）"
+                    block_title = (
+                        f"[结构化数据]（{label}，FRED 宏观指标{time_hint}）"
+                    )
                 elif source == "news":
                     query = str(payload.get("query") or "")
                     lines = ["| 标题 | 来源时间 | 链接 |", "|---|---|---|"]
@@ -1600,13 +1648,17 @@ class OrchestratorV2:
                         lines.append(f"| {title} | {pub} | {link} |")
                     block_title = (
                         f"[结构化数据]（新闻列表，Google News RSS，"
-                        f"查询：{query or '默认'}）"
+                        f"查询：{query or '默认'}{time_hint}）"
                     )
                 if lines:
                     return (
                         f"\n\n{block_title}\n" + "\n".join(lines)
                         + "\n规则：报告/总结优先引用本表内容，并在来源处标注数据源；"
-                        "表中没有的信息若无溯源，标注'基于模型知识，未在本次检索中验证'。"
+                        "表中没有的信息若无溯源，标注'基于模型知识，未在本次检索中验证'；"
+                        "报告的数据截至/报告日期必须引用本表标注的数据获取时间"
+                        "（retrieved_at），禁止使用模型回忆的日期；"
+                        "若上下文中没有任何结构化数据块，须在报告末尾标注"
+                        "'数据截至日期：未获取（本次任务未提供结构化数据）'。"
                     )
         except Exception:
             pass
@@ -1852,6 +1904,11 @@ class OrchestratorV2:
             mode = str(s.get("mode") or "parallel").strip().lower()
             if mode not in ("pipeline", "parallel", "human_in_loop"):
                 mode = "parallel"
+            # P1-2：低风险内部能力步骤不允许 human_in_loop，强制串行 pipeline，
+            # 避免执行前等人工确认导致整轮超时（如 package 被规划器误标）。
+            if mode == "human_in_loop" and cap not in _HUMAN_IN_LOOP_ALLOWED:
+                logger.info("低风险步骤强制 pipeline：%s（step %s）", cap, sid)
+                mode = "pipeline"
             s["mode"] = mode
             s.setdefault("timeout", 300)
             out.append(s)
@@ -2785,7 +2842,9 @@ class OrchestratorV2:
 
     @staticmethod
     def _wants_visualization(goal: str) -> bool:
-        """目标是否明确要求可视化/图表（只有此时才生成检索数据图表）。"""
+        """目标是否明确要求可视化/图表（只有此时才生成检索数据图表）。
+        P1-3：加密/宏观类目标（币价/行情/走势/宏观/利率/涨跌幅/市值/竞争格局/排名）
+        自动配图，避免"评估比特币短期趋势与风险"不命中可视化而 0 张图。"""
         g = str(goal or "").lower()
         return any(k in g for k in (
             "可视化", "图表", "趋势图", "柱状", "饼图", "折线", "调研",
@@ -2795,6 +2854,10 @@ class OrchestratorV2:
             # 市场数据类目标（规模/份额/占比/销量/渗透率/增长率）
             "市场规模", "市场份额", "占比", "销售", "销量", "出货",
             "渗透率", "增长率", "cagr", "预测", "规模",
+            # P1-3：加密/宏观类目标（行情/走势/趋势与风险/宏观指标/排名格局）
+            "币价", "比特币", "以太坊", "加密货币", "行情", "走势", "趋势",
+            "宏观", "通胀", "利率", "涨跌幅", "市值", "份额", "竞争格局",
+            "排名", "美联储", "cpi", "gdp",
         ))
 
     @staticmethod
@@ -3107,6 +3170,119 @@ class OrchestratorV2:
             s["data"] = rows_kept
             kept.append(s)
         return kept
+
+    @staticmethod
+    def _clean_rows_to_specs(clean: dict) -> list[dict]:
+        """数据驱动兜底：把 clean_chart_data 的扁平行（英文键）转换为
+        wrap_rows_to_specs 可消费行；crypto 行情点（价格/市值/24h量/涨跌幅）
+        归入同一指标组，≥2 个可作图数据点即可成图。"""
+        from chart_specs import wrap_rows_to_specs
+
+        type_metric = {
+            "market_size": "市场规模",
+            "market_share": "市场份额",
+            "market_trends": "市场趋势",
+            "macro_indicators": "宏观指标",
+            "entity_frequency": "主体提及频率",
+            "source_distribution": "来源分布",
+        }
+        # P1-3：FRED series → 中文指标名，保证"利率/CPI/失业率"目标能命中主题过滤
+        fred_metric = {
+            "GDP": "美国GDP",
+            "CPIAUCSL": "美国CPI",
+            "UNRATE": "美国失业率",
+            "DFF": "联邦基金利率",
+        }
+        rows: list[dict] = []
+        for key in ("market_data", "market_trends", "macro_indicators", "market_share"):
+            for r in clean.get(key) or []:
+                if not isinstance(r, dict):
+                    continue
+                try:
+                    value = float(r.get("value"))
+                except (TypeError, ValueError):
+                    continue
+                label = str(r.get("label") or "?")
+                source = str(r.get("source") or "")
+                series = str(r.get("series") or "")
+                if series:
+                    metric = series
+                elif source == "coingecko":
+                    metric = "加密货币行情"
+                elif source == "fred":
+                    tok = label.split(" ", 1)[0] if " " in label else label
+                    metric = fred_metric.get(tok, tok)
+                else:
+                    metric = type_metric.get(str(r.get("type") or ""), label)
+                year = r.get("year")
+                if year is None:
+                    m = re.search(r"(20\d{2})", label)
+                    if m:
+                        year = int(m.group(1))
+                rows.append({
+                    "指标": metric,
+                    "数值": value,
+                    "单位": str(r.get("unit") or ""),
+                    "年份": year,
+                    "口径": label,
+                    "来源": source or "检索资料",
+                })
+        return wrap_rows_to_specs(rows)
+
+    def _render_clean_chart_data(self, task_id: str, goal: str) -> None:
+        """数据驱动兜底（P1-3）：clean_chart_data 中 ≥2 个可作图数据点即渲染；
+        若 market_data 行不足 2 条，先从 structured_data.json 补齐 crypto/macro
+        行情点再转可作图行。LLM 规格缺失时保证加密/宏观任务仍有图表。"""
+        if not self._wants_visualization(goal):
+            return
+        project = task_project_dir(task_id)
+        clean_path = project / "clean_chart_data.json"
+        if not clean_path.exists():
+            return
+        try:
+            clean = json.loads(clean_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        row_count = sum(
+            len(clean.get(key) or []) for key in (
+                "market_data", "market_trends", "macro_indicators", "market_share",
+            )
+        )
+        if row_count < 2:
+            # 清洗/回灌可能覆盖了结构化行 → 从 structured_data.json 补齐
+            self._remerge_structured_points(task_id)
+            try:
+                clean = json.loads(clean_path.read_text(encoding="utf-8"))
+            except Exception:
+                return
+        specs = self._filter_chart_specs(self._clean_rows_to_specs(clean), goal)
+        if not specs:
+            return
+        try:
+            from chart_specs import validate_specs
+            valid, _issues = validate_specs(specs)
+        except Exception:
+            return
+        if not valid:
+            return
+        chart_path = project / "chart_data.json"
+        existing: list[dict] = []
+        if chart_path.exists():
+            try:
+                existing = json.loads(
+                    chart_path.read_text(encoding="utf-8")
+                ).get("charts") or []
+            except Exception:
+                existing = []
+        seen_titles = {str(s.get("title") or "") for s in existing}
+        merged = list(existing) + [
+            s for s in valid if str(s.get("title") or "") not in seen_titles
+        ]
+        chart_path.write_text(
+            json.dumps({"charts": merged}, ensure_ascii=False, indent=1),
+            encoding="utf-8",
+        )
+        self._render_chart_data(task_id, goal)
 
     def _render_chart_data(self, task_id: str, goal: str) -> None:
         """确定性渲染 LLM 结构化图表规格（chart_data.json → {"charts": [...]}）：
@@ -5041,7 +5217,9 @@ print("charts generated")
                             from clean_data import clean_file
                             clean_file(_json_path, goal=goal)
                             self._remerge_structured_financials(task_id)
+                            self._remerge_structured_points(task_id)
                             self._generate_search_charts(task_id, goal)
+                            self._render_clean_chart_data(task_id, goal)
                         except Exception as exc:
                             logger.warning("search_results.json write failed: %s", exc)
             if (step.get("capability") == "content_summary"
@@ -5089,6 +5267,9 @@ print("charts generated")
                         self._render_chart_data(task_id, goal)
                     except Exception as exc:
                         logger.warning("chart_data render failed: %s", exc)
+                else:
+                    # P1-3：LLM 未产出图表规格时，数据驱动兜底（≥2 个可作图点即渲染）
+                    self._render_clean_chart_data(task_id, goal)
             result["elapsed_sec"] = round(time.time() - step_start, 1)
             return result
 

@@ -308,6 +308,12 @@ class TestSearchCharts(unittest.TestCase):
         # 金融类目标（财报/营收/财务）自动配图
         self.assertTrue(o._wants_visualization("搜索特斯拉最新财报并总结要点"))
         self.assertTrue(o._wants_visualization("分析某公司2026年财报营收与净利润"))
+        # P1-3：加密/宏观类目标自动配图（行情/走势/宏观/利率/涨跌幅/格局排名）
+        self.assertTrue(o._wants_visualization("评估比特币短期趋势与风险"))
+        self.assertTrue(o._wants_visualization("加密货币行情与涨跌幅走势"))
+        self.assertTrue(o._wants_visualization("美国 CPI 通胀与利率宏观分析"))
+        self.assertTrue(o._wants_visualization("美联储降息后的宏观走势"))
+        self.assertTrue(o._wants_visualization("头部交易所竞争格局与排名"))
         self.assertFalse(o._wants_visualization("写一份行业报告"))
         self.assertFalse(o._wants_visualization("展示产品图片"))
 
