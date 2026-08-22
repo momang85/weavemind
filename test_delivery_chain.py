@@ -3,6 +3,7 @@
 import json
 import shutil
 import unittest
+from http.client import RemoteDisconnected
 from pathlib import Path
 from unittest import mock
 
@@ -2980,6 +2981,112 @@ class TestRankingAdapter(unittest.TestCase):
         self.assertEqual(
             router._ranking_metric("今日A股总成交量前十股"), "volume",
         )
+
+
+class TestRankingAdapterResilience(unittest.TestCase):
+    """东方财富排行 API 反爬韧性：双通道 + 指数退避（全部 canned，不真连网）。"""
+
+    def _sample_text(self) -> str:
+        return json.dumps({"data": {"diff": [
+            {"f12": "600519", "f14": "贵州茅台", "f2": 1500.0, "f3": 2.5,
+             "f5": 30000, "f6": 4500000000, "f8": 0.8,
+             "f20": 1800000000000},
+        ]}}, ensure_ascii=False)
+
+    def test_fetch_ranking_retries_after_transient_failure(self):
+        """首次 RemoteDisconnected → 指数退避 2s → 第二次成功。"""
+        import os
+
+        import adapters.ashare_ranking as ar
+
+        with mock.patch.dict(
+            os.environ, {"EASTMONEY_RETRY_BASE": "2"}, clear=False,
+        ), mock.patch.object(
+            ar, "_get",
+            side_effect=[
+                RemoteDisconnected("Remote end closed connection without response"),
+                self._sample_text(),
+            ],
+        ) as get_mock, mock.patch.object(ar.time, "sleep") as sleep_mock, \
+                self.assertLogs("adapters.ashare_ranking", level="WARNING") as cm:
+            out = ar.fetch_ranking("amount", 1)
+        self.assertEqual(out["rows"][0]["name"], "贵州茅台")
+        self.assertEqual(get_mock.call_count, 2)
+        sleep_mock.assert_called_once_with(2.0)
+        self.assertTrue(
+            any("eastmoney fetch attempt 1 failed: urllib:" in m for m in cm.output),
+            cm.output,
+        )
+
+    def test_get_falls_back_to_socket_channel(self):
+        """urllib 被断开 → 降级 raw socket HTTP/1.0 通道成功。"""
+        import adapters.ashare_ranking as ar
+
+        with mock.patch.object(
+            ar, "_get_via_urllib",
+            side_effect=RemoteDisconnected(
+                "Remote end closed connection without response",
+            ),
+        ), mock.patch.object(
+            ar, "_get_via_socket", return_value=self._sample_text(),
+        ) as sock_mock, self.assertLogs(
+            "adapters.ashare_ranking", level="WARNING",
+        ) as cm:
+            text = ar._get("https://push2.eastmoney.com/api/qt/clist/get?pn=1")
+        self.assertEqual(json.loads(text)["data"]["diff"][0]["f14"], "贵州茅台")
+        sock_mock.assert_called_once()
+        self.assertTrue(
+            any("eastmoney fetch attempt 1 failed: urllib:" in m for m in cm.output),
+            cm.output,
+        )
+
+    def test_get_raises_when_both_channels_fail(self):
+        """两通道都失败 → 抛异常且带两通道原因。"""
+        import adapters.ashare_ranking as ar
+
+        with mock.patch.object(
+            ar, "_get_via_urllib",
+            side_effect=RemoteDisconnected(
+                "Remote end closed connection without response",
+            ),
+        ), mock.patch.object(
+            ar, "_get_via_socket", side_effect=OSError("socket reset"),
+        ):
+            with self.assertRaises(RuntimeError) as ctx:
+                ar._get("https://push2.eastmoney.com/api/qt/clist/get?pn=1")
+        self.assertIn("urllib", str(ctx.exception))
+        self.assertIn("socket", str(ctx.exception))
+
+    def test_fetch_ranking_raises_after_all_retries_fail(self):
+        """3 次重试全失败（共 4 次尝试）→ 抛异常，退避 2/4/8s。"""
+        import os
+
+        import adapters.ashare_ranking as ar
+
+        with mock.patch.dict(
+            os.environ, {"EASTMONEY_RETRY_BASE": "2"}, clear=False,
+        ), mock.patch.object(
+            ar, "_get",
+            side_effect=RemoteDisconnected(
+                "Remote end closed connection without response",
+            ),
+        ) as get_mock, mock.patch.object(ar.time, "sleep") as sleep_mock, \
+                self.assertLogs("adapters.ashare_ranking", level="WARNING") as cm:
+            with self.assertRaises(RemoteDisconnected):
+                ar.fetch_ranking("amount", 1)
+        self.assertEqual(get_mock.call_count, 4)
+        self.assertEqual(
+            [call.args[0] for call in sleep_mock.call_args_list],
+            [2.0, 4.0, 8.0],
+        )
+        for n in range(1, 5):
+            self.assertTrue(
+                any(
+                    f"eastmoney fetch attempt {n} failed: urllib:" in m
+                    for m in cm.output
+                ),
+                cm.output,
+            )
 
 
 def _ranking_sample(n: int = 10, metric: str = "volume") -> dict:
