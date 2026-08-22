@@ -172,6 +172,10 @@ def _mark_endpoint(endpoint: str, ok: bool, reason: str = "") -> None:
             if reason:
                 st["last_degradation_reason"] = reason
                 st["last_degradation_ts"] = time.time()
+                # P2-3：记录 last_degradation_reason 时同步写入 Redis 任务级
+                # 降级记录，保证"主端点由他处标记不健康"也有根因可查
+                # （_record_task_degradation 对同因短窗口去重，避免调用点重复记）
+                _record_task_degradation(get_task_context(), reason, both_failed=False)
 
 
 def _degradation_reason(exc: Exception) -> str:
@@ -202,6 +206,20 @@ def _record_task_degradation(task_id: str, reason: str, both_failed: bool = Fals
                 decode_responses=True,
             )
         key = f"llm_degradation:{task_id}"
+        # P2-3：同根因 2 秒内去重（_mark_endpoint 与调用点各记一次），
+        # 避免同一失败被计成两条事件
+        try:
+            _last = _task_usage_client.lindex(key, -1)
+            if _last:
+                _prev = json.loads(_last)
+                if (
+                    str(_prev.get("reason") or "") == str(reason or "")
+                    and bool(_prev.get("both_failed")) == bool(both_failed)
+                    and time.time() - float(_prev.get("ts") or 0) < 2.0
+                ):
+                    return
+        except Exception:
+            pass
         _task_usage_client.rpush(key, json.dumps({
             "ts": time.time(),
             "reason": reason,
@@ -213,8 +231,21 @@ def _record_task_degradation(task_id: str, reason: str, both_failed: bool = Fals
         pass
 
 
+def _primary_degradation_root() -> str:
+    """返回主端点当前降级根因；无具体失败时回填 inherited_unhealthy。"""
+    with _endpoint_health_lock:
+        reason = str(
+            _endpoint_health.get("primary", {}).get("last_degradation_reason") or ""
+        )
+    return reason or "inherited_unhealthy"
+
+
 def get_task_llm_degradation(task_id: str) -> dict:
-    """读取任务的 LLM 降级汇总：{switches, reasons, both_failed, events}。"""
+    """读取任务的 LLM 降级汇总：{switches, reasons, both_failed, events}。
+
+    P2-3：切换发生但无具体失败事件时，reasons 至少回填一条
+    inherited_unhealthy（携带最近失败时间）；events 截断上限与 switches
+    对齐，保证补记的根因事件不会把 switch 事件挤出。"""
     if not task_id:
         return {}
     global _task_usage_client
@@ -236,6 +267,7 @@ def get_task_llm_degradation(task_id: str) -> dict:
         reasons: list[str] = []
         switches = 0
         both_failed = False
+        last_degradation_ts = 0.0
         for ev in events:
             r = str(ev.get("reason") or "")
             if r == "switch_to_backup":
@@ -244,11 +276,23 @@ def get_task_llm_degradation(task_id: str) -> dict:
                 reasons.append(r)
             if ev.get("both_failed"):
                 both_failed = True
+            try:
+                ts = float(ev.get("ts") or 0)
+                if ts > last_degradation_ts:
+                    last_degradation_ts = ts
+            except (TypeError, ValueError):
+                pass
+        # P2-3：只有 switch 事件（主端点由他处标记不健康）→ 回填根因
+        if not reasons and events:
+            reasons.append("inherited_unhealthy")
+        # events 上限对齐 switches 计数：每切换最多补记 1 条根因 + 1 条 switch
+        events_cap = max(10, switches * 3 + 2)
         return {
             "switches": switches,
             "reasons": reasons,
             "both_failed": both_failed,
-            "events": events[-10:],
+            "last_degradation_ts": round(last_degradation_ts, 3),
+            "events": events[-events_cap:],
         }
     except Exception:
         return {}
@@ -930,6 +974,11 @@ class LLMClient:
         )
         raw = backup._send_request(system, user, temperature, max_tokens)
         _mark_endpoint("backup", True)
+        # P2-3：切换发生时把主端点 last_degradation_reason（为空则记
+        # inherited_unhealthy）作为根因，避免 llm_degraded 只有 switch 事件
+        _record_task_degradation(
+            get_task_context(), _primary_degradation_root(), both_failed=False,
+        )
         _record_task_degradation(get_task_context(), "switch_to_backup", both_failed=False)
         logger.warning("Switched to backup LLM: %s", self._backup_cfg.get("base_url"))
         if not expect_json:
@@ -1424,6 +1473,11 @@ async def _async_call_backup(payload: dict, fallback_model: str, expect_json: bo
         _mark_endpoint("backup", False)
         raise LLMEmptyResponseError("Backup LLM returned empty content")
     _mark_endpoint("backup", True)
+    # P2-3：async 切换同样回填主端点根因（inherited_unhealthy 兜底）
+    _record_task_degradation(
+        get_task_context(), _primary_degradation_root(), both_failed=False,
+    )
+    _record_task_degradation(get_task_context(), "switch_to_backup", both_failed=False)
     logger.warning("Switched to backup LLM (async): %s", _BACKUP_CFG.get("base_url"))
     if expect_json:
         return _parse_json_content(content)

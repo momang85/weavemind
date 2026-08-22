@@ -1575,6 +1575,20 @@ class OrchestratorV2:
                 m = fin.get("metadata") or {}
                 if fs:
                     unit = m.get("unit") or "亿元"
+                    # P2-4：metadata.currency 存在时标注币种；非人民币口径要求
+                    # 报告换算或注明口径差异，避免 HKD 数值被直接当人民币陈述
+                    currency = str(m.get("currency") or "").strip()
+                    currency_note = ""
+                    if currency:
+                        currency_note = f"，币种：{currency}"
+                        low_c = currency.lower()
+                        if not any(
+                            k in low_c for k in ("cny", "rmb", "人民币", "元")
+                        ):
+                            currency_note += (
+                                "（非人民币口径：若报告以人民币呈现，须换算并"
+                                "注明换算说明，或明确标注原币种与口径差异）"
+                            )
                     retrieved_at = str(m.get("retrieved_at") or "")
                     src_name = {
                         "eastmoney_datacenter": "东方财富数据中心（港交所披露）",
@@ -1594,6 +1608,7 @@ class OrchestratorV2:
                         )
                     return (
                         "\n\n[结构化财务数据]（来自 " + src_name + "，单位：" + unit
+                        + currency_note
                         + (f"，数据获取时间 {retrieved_at}" if retrieved_at else "")
                         + "，权威数据源，优先引用）\n" + "\n".join(rows)
                         + "\n规则：报告/总结中的财务数字优先引用本表，并在来源处标注"
@@ -1601,6 +1616,12 @@ class OrchestratorV2:
                         "'基于模型知识，未在本次检索中验证'；禁止编造年份；"
                         "报告的数据截至/报告日期必须引用本表标注的数据获取时间，"
                         "禁止使用模型回忆的日期。"
+                        + (
+                            "币种口径：本表币种为 " + currency + "，报告必须注明币种；"
+                            "以人民币口径呈现时必须换算并注明换算说明，或明确标注"
+                            "原币种与口径差异，禁止把本表数值直接当作人民币陈述。"
+                            if currency else ""
+                        )
                     )
             sd_path = proj / "structured_data.json"
             if sd_path.exists():
@@ -3599,6 +3620,9 @@ if __name__ == "__main__":
                 for line in out.splitlines():
                     if line.startswith("SKIP "):
                         logger.info("chart skipped: %s", line)
+            # P2-4：渲染后回填 manifest——保证每张已渲染 PNG 都有 file+keywords
+            # 条目（修复"实际 4 图但 chart_manifest.json 空数组"的交付缺口）
+            self._backfill_chart_manifest(project)
             # 图表同步到 workspace/charts/（report_generator 从该目录发现图表并嵌入报告）
             try:
                 from workspace import task_charts_dir
@@ -3612,6 +3636,96 @@ if __name__ == "__main__":
                 logger.warning("chart sync failed: %s", str(exc)[:120])
         except Exception as exc:
             logger.warning("render_charts error: %s", exc)
+
+    @staticmethod
+    def _backfill_chart_manifest(project) -> None:
+        """P2-4：图表渲染后回填 chart_manifest.json。
+
+        只补充缺失条目（file+keywords+section_hint），不覆盖渲染器已写出的
+        正确条目；manifest 与磁盘上已渲染 PNG 一一对应。
+        """
+        mf = project / "chart_manifest.json"
+        try:
+            charts = (
+                json.loads(mf.read_text(encoding="utf-8")).get("charts") or []
+                if mf.exists() else []
+            )
+            charts = [c for c in charts if isinstance(c, dict)]
+        except Exception:
+            charts = []
+        existing = {str(c.get("file") or "") for c in charts}
+        pngs = sorted(p.name for p in project.glob("chart_*.png"))
+        missing = [n for n in pngs if n not in existing]
+        if not missing:
+            return
+        # 按渲染脚本的校验顺序重建 chart_N.png → 规格映射
+        try:
+            payload = json.loads(
+                (project / "chart_data.json").read_text(encoding="utf-8")
+            )
+            specs = [s for s in (payload.get("charts") or []) if isinstance(s, dict)]
+        except Exception:
+            specs = []
+        try:
+            from chart_specs import validate_spec
+        except Exception:
+            validate_spec = None
+        seq: dict[str, dict] = {}
+        idx = 0
+        for spec in specs:
+            if validate_spec is not None and validate_spec(spec):
+                continue
+            rows = [r for r in (spec.get("data") or []) if isinstance(r, dict)]
+            if len(rows) < 2:
+                continue
+            ctype = str(spec.get("type") or "bar")
+            if ctype == "pie":
+                vals = []
+                for r in rows:
+                    try:
+                        vals.append(float(r.get("value")))
+                    except (TypeError, ValueError):
+                        pass
+                unit = str(spec.get("unit") or "")
+                is_pct = unit == "%" or (bool(vals) and all(v <= 100 for v in vals))
+                if vals and is_pct and not (95 <= sum(vals) <= 105):
+                    continue
+            idx += 1
+            seq[f"chart_{idx}.png"] = spec
+        curated = (
+            "规模", "趋势", "份额", "占比", "营收", "收入", "增速", "增长",
+            "成本", "价格", "预测", "玩家", "厂商", "格局", "对比", "分布",
+            "技术", "市场", "出货", "渗透", "渗透率", "出货量",
+        )
+        added = False
+        for name in missing:
+            spec = seq.get(name)
+            if not spec:
+                continue
+            text = " ".join(
+                str(spec.get(k) or "") for k in ("title", "question", "conclusion")
+            )
+            keywords = list(dict.fromkeys(k for k in curated if k in text))[:14]
+            if not keywords:
+                continue
+            charts.append({
+                "file": name,
+                "keywords": keywords,
+                "section_hint": str(spec.get("section_hint") or ""),
+            })
+            added = True
+        if added:
+            try:
+                mf.write_text(
+                    json.dumps({"charts": charts}, ensure_ascii=False, indent=1),
+                    encoding="utf-8",
+                )
+                logger.info(
+                    "chart_manifest backfilled: %d missing entries added for %s",
+                    len(missing), project,
+                )
+            except Exception as exc:
+                logger.warning("chart_manifest backfill failed: %s", str(exc)[:120])
 
     @staticmethod
     def _is_game_goal(goal: str) -> bool:
@@ -3724,7 +3838,11 @@ if __name__ == "__main__":
     def _rewrite_report_links(report: str, task_id: str) -> str:
         """把报告 Markdown 链接目标里的任务工作区绝对路径改写成
         /files/<task_id>/ URL（图表/数据图片在浏览器里才能显示）；
-        正文里的绝对路径（如"成果文件夹"）保持不变。"""
+        正文里的绝对路径（如"成果文件夹"）保持不变。
+
+        P2-4：工作区改写后，剩余的图片链接若仍为 Windows 盘符绝对路径
+        （如 ![](C:\\...\\charts\\xxx.png)），进一步重写为相对路径
+        charts/xxx.png，避免交付报告残留本机绝对路径。"""
         ws = str(task_workspace(task_id))
         ws_bs = ws.replace("/", "\\")
         seg = f"/files/{task_id}"
@@ -3733,7 +3851,21 @@ if __name__ == "__main__":
             t = m.group(2).replace(ws_bs, seg).replace(ws, seg).replace("\\", "/")
             return m.group(1) + t + m.group(3)
 
-        return re.sub(r"(\]\()([^)\s]+)(\))", _fix_target, report)
+        report = re.sub(r"(\]\()([^)\s]+)(\))", _fix_target, report)
+
+        def _fix_windows_image(m):
+            target = m.group(2)
+            if not re.match(r"^[A-Za-z]:[\\/]", target):
+                return m.group(0)
+            rel = re.sub(r"^[A-Za-z]:[\\/]", "", target).replace("\\", "/")
+            parts = rel.split("/")
+            if len(parts) >= 2 and parts[-2] in ("charts", "data", "reports", "project"):
+                rel = f"{parts[-2]}/{parts[-1]}"
+            else:
+                rel = parts[-1]
+            return f"{m.group(1)}{rel}{m.group(3)}"
+
+        return re.sub(r"(!\[[^\]]*\]\()([^)\s]+)(\))", _fix_windows_image, report)
 
     def _run_e2e_verification(
         self, files: list[dict], project_dir: str, game_goal: bool = True,
@@ -4755,16 +4887,52 @@ print("charts generated")
                 and completed_all.get(s["step_id"], {}).get("status") == "SUCCESS"
                 for s in all_steps
             )
-            if _research_hint and _report_done and _has_search and not _gate_failed:
+            # P3：确定性验收 fail 时不得跳过反射轮（验收为准，不因"核心交付
+            # 已完成"放行）；无验收报告（None）保持原有跳过行为
+            _acceptance_ok = self._acceptance_passed(task_id)
+            if (
+                _research_hint and _report_done and _has_search
+                and not _gate_failed and _acceptance_ok is not False
+            ):
                 push_progress(self._messaging, task_id, "log",
                               {"type": "info", "agent": "orchestrator",
                                "message": "Reflection: 报告类任务核心交付已完成，跳过反射轮",
                                "timestamp": self._now_iso()})
                 break
+            if _research_hint and _report_done and _has_search and _acceptance_ok is False:
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "iteration", "agent": "orchestrator",
+                               "message": "确定性验收未通过，覆盖'报告类跳过反射轮'，进入修复迭代",
+                               "timestamp": self._now_iso()})
             verdict = self._reflect(
                 goal, best_report, task_id, all_steps, completed_all,
                 memory_context, _vsum, _eval_scores,
             )
+            # P3：验收 fail 存在时，反思判定以验收为准（accept/高评分不得放行）
+            _acc_summary = self._read_acceptance_summary(task_id)
+            _acc_fail = bool(_acc_summary and _acc_summary.get("overall") != "pass")
+            if not verdict and _acc_fail:
+                # 反思 LLM 不可用同样不放行：按验收缺口合成重做步骤
+                logger.warning(
+                    "验收 fail 且反思不可用，按验收缺口强制进入重做（task=%s）",
+                    task_id,
+                )
+                _gap_text = "\n".join(
+                    f"- {g}" for g in (_acc_summary.get("gaps") or [])
+                ) or "确定性验收未通过，请重新生成报告并修复全部缺口"
+                verdict = {
+                    "score": 0.0,
+                    "verdict": "add_steps",
+                    "gaps": _acc_summary.get("gaps") or [],
+                    "next_steps": [{
+                        "step_id": "acc-redo",
+                        "capability": "report_generator",
+                        "instruction": (
+                            "按确定性验收缺口重做报告：\n" + _gap_text
+                        ),
+                        "timeout": 180,
+                    }],
+                }
             if not verdict:
                 break
             # 评分门控：score ≥ 阈值直接接受；LLM 未给 score 时回退到 accepted 判断
@@ -4798,7 +4966,43 @@ print("charts generated")
                             )
                 except Exception:
                     pass
-            if action in ("accept", "stop") or score >= self._reflection_accept_score:
+            score_gate = (
+                action in ("accept", "stop")
+                or score >= self._reflection_accept_score
+            )
+            if _acc_fail and score_gate:
+                # P3：确定性验收 fail 覆盖反思评分——accept/高评分必须转为重做
+                logger.warning(
+                    "验收 fail 覆盖反思评分（action=%s score=%.1f，task=%s），"
+                    "强制进入重做",
+                    action, score, task_id,
+                )
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "iteration", "agent": "orchestrator",
+                               "message": (
+                                   f"确定性验收未通过，覆盖反思评分 {action}"
+                                   f"（score={score:.1f}），强制进入重做"
+                               ),
+                               "timestamp": self._now_iso()})
+                if not (action == "retry_step" and verdict.get("retry_step_id")):
+                    if not verdict.get("next_steps"):
+                        _gap_text = "\n".join(
+                            f"- {g}"
+                            for g in (_acc_summary.get("gaps")
+                                      or verdict.get("gaps") or [])
+                        ) or "确定性验收未通过，请重新生成报告并修复全部缺口"
+                        verdict = dict(verdict)
+                        verdict["next_steps"] = [{
+                            "step_id": "acc-redo",
+                            "capability": "report_generator",
+                            "instruction": (
+                                "按确定性验收缺口重做报告：\n" + _gap_text
+                            ),
+                            "timeout": 180,
+                        }]
+                        verdict["verdict"] = "add_steps"
+                    action = "add_steps"
+            elif score_gate:
                 push_progress(self._messaging, task_id, "log",
                               {"type": "info", "agent": "orchestrator",
                                "message": f"Reflection: {action}（score={score:.1f}）",

@@ -1989,6 +1989,37 @@ class TestP0BalancePrecheck(unittest.TestCase):
         finally:
             ws_mod.WORKSPACE_ROOT = old_root
 
+    def test_structured_financials_currency_annotated(self):
+        """P2-4：financials metadata 带 currency 时注入块必须标注币种，
+        非人民币口径需注明换算/口径差异规则。"""
+        import tempfile
+        from pathlib import Path
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        tmp = Path(tempfile.mkdtemp(prefix="fincur_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            proj = ws_mod.task_project_dir("t-cur")
+            proj.mkdir(parents=True, exist_ok=True)
+            (proj / "financials.json").write_text(json.dumps({
+                "financials": [
+                    {"year": 2025, "revenue": 7517.66, "net_profit": 2248.42,
+                     "gross_margin": 56.21, "total_liabilities": 7979.21,
+                     "operating_cashflow": 2300.0},
+                ],
+                "metadata": {"source": "eastmoney_datacenter",
+                             "unit": "百万港元", "currency": "HKD"},
+            }, ensure_ascii=False), encoding="utf-8")
+            block = OrchestratorV2._structured_injection("t-cur")
+            self.assertIn("单位：百万港元", block)
+            self.assertIn("币种：HKD", block)
+            self.assertIn("换算", block)
+            self.assertIn("口径差异", block)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+
     def test_replan_structured_fallback(self):
         """金融任务搜索/抓取失败 → 替换步骤优先引用结构化财务数据，而非模型知识。"""
         import tempfile
@@ -2405,6 +2436,37 @@ class TestAcceptanceChecker(unittest.TestCase):
         self.assertGreaterEqual(r["traceable_count"], 2)  # 6090/1152 可溯源（千分位/小数模糊）
         self.assertGreaterEqual(r["unverifiable_count"], 1)  # 8% 无来源
 
+    def test_research_traceability_low_coverage_fails(self):
+        """P2-1：research/general 报告 ≥5 个数字但可溯源 <20% → FAIL。"""
+        from acceptance_checker import check_number_traceability
+
+        report = "调研发现：" + "、".join(f"{i}亿元" for i in range(1, 11)) + "。"
+        sources = {"search_results": "检索结果仅含 1亿元"}
+        r = check_number_traceability(report, sources, domain="research")
+        self.assertFalse(r["pass"])
+        self.assertIn("调研报告数字覆盖率过低", r["details"])
+        self.assertIn("1/10", r["details"])
+        self.assertEqual(r["covered_ratio"], 0.1)
+
+    def test_research_small_sample_passes_with_note(self):
+        """P2-1：research/general 报告数字 <5 → 通过但注明样本过少。"""
+        from acceptance_checker import check_number_traceability
+
+        report = "报告包含 5亿元 和 6亿元 两个数字。"
+        r = check_number_traceability(report, {}, domain="research")
+        self.assertTrue(r["pass"])
+        self.assertIn("数字样本过少（2 个）", r["details"])
+
+    def test_financial_threshold_unchanged_70(self):
+        """P2-1：financial 域 70% 阈值不变（3 数字仅 1 可溯源 → FAIL）。"""
+        from acceptance_checker import check_number_traceability
+
+        report = "2023年总营收6090亿元，净利润1152亿元，增速8%。"
+        sources = {"search_results": "腾讯2023年报：总营收6,090亿元"}
+        r = check_number_traceability(report, sources, domain="financial")
+        self.assertEqual(r["threshold"], 0.7)
+        self.assertFalse(r["pass"])
+
     def test_derived_traceable(self):
         """派生值溯源：同比增速与结构化相邻年份一致、约数金额在容差内 → 可溯源。"""
         import json
@@ -2508,7 +2570,7 @@ class TestAcceptanceChecker(unittest.TestCase):
             "24 小时成交额 420 亿美元，24 小时涨跌幅 2.4%；"
             "数据更新时间戳 1787150053。"
         )
-        # 域感知阈值：crypto 任务按 0.7 判定且结构化数据覆盖计入溯源
+        # 域感知阈值（P2-1）：crypto 任务按 0.5 判定且结构化数据覆盖计入溯源
         clean = {
             "market_data": [
                 {"type": "market_size", "label": "当前价格",
@@ -2530,7 +2592,8 @@ class TestAcceptanceChecker(unittest.TestCase):
             domain="crypto",
         )
         self.assertEqual(r["domain"], "crypto")
-        self.assertEqual(r["threshold"], 0.7)
+        self.assertEqual(r["threshold"], 0.5)
+        self.assertEqual(r["covered_ratio"], 1.0)
         self.assertTrue(r["pass"])
         self.assertEqual(r["traceable_count"], r["total_count"])
         self.assertEqual(r["amount_traceable"], r["amount_total"])

@@ -268,20 +268,43 @@ def _derived_traceable(num: dict, clean_text: str) -> bool:
     return False
 
 
-# 溯源率阈值按任务域区分（F7）：
-# crypto/macro 依赖结构化适配器数据（CoinGecko/FRED），数字应优先出自
-# [结构化数据] 表，因此阈值按 0.7 从严；news 以标题/摘要数字为主，0.6 即达标；
-# financial 保持既有 0.7。调用方可显式传 threshold 覆盖。
+# 溯源率阈值按任务域区分（F7 + P2-1）：
+# - financial：0.7（财报数字必须高度可溯源）；
+# - crypto/macro：0.5——依赖结构化适配器数据（CoinGecko/FRED），结构化覆盖
+#   不足时如实降为 SUCCESS_WITH_ISSUES（不算虚假，不误判为模型编造）；
+# - news：0.6（标题/摘要数字为主）；
+# - research/general：0.2——≥5 个数字但可溯源 <20% 判 FAIL（疑似模型知识
+#   未标注）；<5 个数字样本过少 → 通过但 details 注明。调用方可显式传
+#   threshold 覆盖。
 _TRACEABILITY_THRESHOLDS = {
     "financial": 0.7,
-    "crypto": 0.7,
-    "macro": 0.7,
+    "crypto": 0.5,
+    "macro": 0.5,
     "news": 0.6,
+    "research": 0.2,
 }
+
+# 财务域特征词（优先于 research/general，避免"分析腾讯财报"被归入调研域）
+_FINANCIAL_MARKERS = (
+    "财报", "年报", "季报", "营收", "净利润", "净利", "利润", "负债", "财务",
+    "市值", "股票", "股价", "港交所", "港股", "a股", "美股", "上市公司",
+    "业绩", "毛利率", "现金流", "financial", "revenue", "earnings",
+)
+
+# 调研/通用域特征词：报告、调研、研报、盘点、综述、文章、分析、研究等
+_RESEARCH_MARKERS = (
+    "报告", "调研", "研报", "盘点", "综述", "文章", "分析", "研究",
+    "report", "research", "analysis", "survey",
+)
 
 
 def traceability_domain(goal: str) -> str:
-    """从任务目标判定数字溯源域：crypto/macro/news/financial。"""
+    """从任务目标判定数字溯源域：crypto/macro/news/financial/research。
+
+    P2-1：未命中专业域（crypto/macro/news/financial）的目标一律归入
+    research/general 兜底域，按调研报告覆盖率规则验收；"分析腾讯财报"
+    这类目标因含财报/营收等财务特征词仍按 financial 从严判定。
+    """
     g = str(goal or "").lower()
     if any(
         k in g for k in (
@@ -304,7 +327,11 @@ def traceability_domain(goal: str) -> str:
         )
     ):
         return "news"
-    return "financial"
+    if any(k in g for k in _FINANCIAL_MARKERS):
+        return "financial"
+    if any(k in g for k in _RESEARCH_MARKERS):
+        return "research"
+    return "research"
 
 
 def check_number_traceability(
@@ -315,7 +342,9 @@ def check_number_traceability(
 ) -> dict:
     """数字溯源校验：报告中的数字能否在检索/快照/清洗/结构化数据中找到。
     threshold 默认按 domain 取 _TRACEABILITY_THRESHOLDS；未给 domain 时用 0.7。
-    返回 {pass, details, total_count, traceable_count, unverifiable_count, ...}。"""
+    返回 {pass, details, total_count, covered_ratio, traceable_count,
+    unverifiable_count, ...}。P2-1 按域区分：research/general 若数字 ≥5 且
+    可溯源 <20% 判 FAIL，<5 个数字通过但注明样本过少。"""
     if threshold is None:
         threshold = _TRACEABILITY_THRESHOLDS.get(domain or "", 0.7)
     nums = extract_financial_numbers(report)
@@ -325,6 +354,7 @@ def check_number_traceability(
             "pass": True,
             "details": "报告未检出需要溯源的财务数字",
             "total_count": 0, "traceable_count": 0, "unverifiable_count": 0,
+            "covered_ratio": 0.0,
             "traceable": [],
             "untraceable": [],
         }
@@ -364,15 +394,34 @@ def check_number_traceability(
             else:
                 untraceable.append(item)
     rate = traceable.__len__() / total
+    covered_ratio = round(rate, 3)
     disclosed_rate = len(disclosed) / total
     # 细分：财务金额（亿/万/元/美元单位）与 其他数字（%等）分开统计
     amounts = [n for n in nums if any(u in n["unit"] for u in ("亿", "万", "元", "美元"))]
     traceable_keys = {(t.get("value"), t.get("unit")) for t in traceable}
     amount_ok = sum(1 for n in amounts if (n["value"], n["unit"]) in traceable_keys)
     amount_rate = (amount_ok / len(amounts)) if amounts else 1.0
-    passed = rate >= threshold or total < 3
+    # P2-1：按域区分判定强度
+    # - research/general：≥5 个数字但可溯源 <20% → FAIL（疑似模型知识未标注）；
+    #   <5 个数字 → 通过但注明样本过少。
+    # - 其他域：rate ≥ threshold 或总数 <3 时通过（financial 70% 阈值不变）。
+    research_note = ""
+    if domain == "research":
+        if total >= 5 and rate < threshold:
+            passed = False
+            research_note = (
+                f"调研报告数字覆盖率过低：{len(traceable)}/{total}"
+                "，疑似模型知识未标注"
+            )
+        else:
+            passed = True
+            if total < 5:
+                research_note = f"数字样本过少（{total} 个）"
+    else:
+        passed = rate >= threshold or total < 3
     details = (
-        f"数字溯源率 {rate:.0%}（{len(traceable)}/{total}）"
+        (research_note + "；" if research_note else "")
+        + f"数字溯源率 {rate:.0%}（{len(traceable)}/{total}）"
         + f"；财务金额溯源率 {amount_rate:.0%}（{amount_ok}/{len(amounts)}）"
         + (f"；域={domain}" if domain else "")
         + (f"；结构化数据覆盖 {len(traceable)}/{total}" if "structured_data" in src_norm else "")
@@ -387,6 +436,7 @@ def check_number_traceability(
         "threshold": round(float(threshold), 3),
         "total_count": total,
         "traceable_count": len(traceable),
+        "covered_ratio": covered_ratio,
         "unverifiable_count": len(untraceable),
         "amount_rate": round(amount_rate, 3),
         "amount_traceable": amount_ok,

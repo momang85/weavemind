@@ -18,6 +18,21 @@ logger = logging.getLogger(__name__)
 
 REPORT_DIR = Path(tempfile.gettempdir()) / "agent_workspace" / "reports"
 
+# P2-2：来源卫生——正文"已剔除/剔除/排除"声明中的域名/URL 识别
+_REJECT_DECL_RE = re.compile(
+    r"(?:已剔除|剔除|排除|不采用|弃用|过滤掉)"
+    r"\s*[：:，,、\s]*([^\n。；;]{2,180})"
+)
+_DOMAIN_RE = re.compile(
+    r"https?://([^/\s，。；;)\]\"']+)"
+    r"|([a-z0-9][a-z0-9-]*\.(?:com|cn|net|org|info|io|cc|com\.cn|co\.uk|gov\.cn|"
+    r"online|xyz|top|vip|biz|me|tv))",
+    re.IGNORECASE,
+)
+_APPENDIX_HEADING_RE = re.compile(
+    r"(数据来源|参考文献|来源附录|来源链接|参考资料|来源)"
+)
+
 
 class ReportGeneratorWorker(AsyncWorkerBase):
     _class_capabilities = ["report_generator"]
@@ -260,6 +275,60 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                 continue  # 数据来源 URL 由附录统一呈现
             out.append(ln)
         return "\n".join(out).strip()
+
+    @staticmethod
+    def _strip_rejected_sources(report: str) -> str:
+        """P2-2 来源卫生：正文声明已剔除/排除的域名/URL 不得再出现在来源附录。
+
+        解析正文"已剔除/剔除/排除/不采用"声明中的域名与 URL，从
+        数据来源/参考文献/来源附录段落删除对应条目；无剔除声明或无可匹配
+        条目时保持报告原样。
+        """
+        if not report:
+            return report
+        rejected: set[str] = set()
+        for m in _REJECT_DECL_RE.finditer(str(report)):
+            seg = m.group(1)
+            for dm in _DOMAIN_RE.finditer(seg):
+                raw = (dm.group(1) or dm.group(2) or "").split("/", 1)[0].strip().lower()
+                if raw.startswith("www."):
+                    raw = raw[4:]
+                if raw:
+                    rejected.add(raw)
+            for u in re.findall(r"https?://[^\s，。；;)\]\"']+", seg):
+                rejected.add(u.rstrip(").,;:！？。；"))
+        if not rejected:
+            return report
+        lines = str(report).split("\n")
+        out: list[str] = []
+        in_appendix = False
+        removed = 0
+        for line in lines:
+            hm = re.match(r"^(#{1,6})\s+(.+)$", line)
+            if hm:
+                in_appendix = bool(_APPENDIX_HEADING_RE.search(hm.group(2)))
+                out.append(line)
+                continue
+            if not in_appendix:
+                out.append(line)
+                continue
+            stripped = line.strip()
+            if not stripped:
+                out.append(line)
+                continue
+            # 只处理列表项/表格行/含 URL 的条目，避免误删附录内的正文句子
+            is_entry = stripped.startswith(("-", "*", "+", "|")) or "http" in stripped.lower()
+            if not is_entry:
+                out.append(line)
+                continue
+            low = line.lower()
+            if any(r in low for r in rejected):
+                removed += 1
+                continue
+            out.append(line)
+        if removed:
+            logger.info("strip_rejected_sources removed %d appendix entries", removed)
+        return "\n".join(out)
 
     @staticmethod
     def _flag_conflicting_figures(report: str) -> str:
@@ -515,6 +584,12 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                 "（例如凭记忆写 5 月 14 日）；若上下文中不存在任何结构化数据块，"
                 "必须在报告末尾标注'数据截至日期：未获取（本次任务未提供结构化数据）'，"
                 "禁止虚构数据截至时间。"
+                "来源附录一致性：正文若声明已剔除/排除某来源（域名或 URL），"
+                "数据来源/参考文献/来源附录必须同步删除该来源条目，"
+                "被剔除的来源不得出现在任何附录中。"
+                "财务币种口径：若 [结构化财务数据] 标注了币种（如 HKD），"
+                "报告必须注明币种；以人民币口径呈现时必须换算并注明换算说明，"
+                "或明确标注原币种与口径差异，禁止把外币数值直接当作人民币陈述。"
             ), goal=instruction)
             user = f"{instruction}\n\n工作区产物：\n{artifacts}"
             # 主端点连试 2 次即切备用，减少慢端点对报告环节的拖累
@@ -591,6 +666,8 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             report = self._strip_reflection_residue(report)
             # 数据一致性检查：同一指标多个数值 → 追加分歧提示
             report = self._flag_conflicting_figures(report)
+            # P2-2 来源卫生：正文剔除声明与来源附录强一致（删除附录中被剔除条目）
+            report = self._strip_rejected_sources(report)
 
             rpath = report_dir / "report.md"
             rpath.write_text(report, encoding="utf-8")
@@ -643,6 +720,8 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             if charts:
                 report = self._embed_charts_inline(report, charts)
             report = self._strip_reflection_residue(report)
+            # P2-2 来源卫生：兜底报告同样保证剔除声明与附录一致
+            report = self._strip_rejected_sources(report)
             try:
                 rpath = report_dir / "report.md"
                 old_size = rpath.stat().st_size if rpath.exists() else 0

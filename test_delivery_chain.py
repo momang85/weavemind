@@ -881,6 +881,54 @@ class TestSearchCharts(unittest.TestCase):
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_chart_manifest_backfilled_for_rendered_pngs(self):
+        """P2-4：图表已渲染但 manifest 为空数组时，按已渲染 PNG 回填
+        file+keywords 条目（实际 4 图不得对应空 manifest）。"""
+        import json
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = tempfile.mkdtemp(prefix="weavemind_mf_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            proj = ws_mod.task_project_dir("t-mf-1")
+            proj.mkdir(parents=True, exist_ok=True)
+            (proj / "chart_data.json").write_text(json.dumps({"charts": [
+                {
+                    "title": "2023-2025年全球AI芯片市场规模（亿美元）",
+                    "question": "市场规模趋势？",
+                    "conclusion": "市场规模持续增长。",
+                    "type": "line", "unit": "亿美元",
+                    "x_axis_title": "年份", "y_axis_title": "规模（亿美元）",
+                    "source": "https://a.com", "section_hint": "市场规模",
+                    "data": [
+                        {"label": "A", "value": 110, "year": 2023,
+                         "source": "https://a.com"},
+                        {"label": "B", "value": 726, "year": 2025,
+                         "source": "https://a.com"},
+                    ],
+                },
+            ]}, ensure_ascii=False), encoding="utf-8")
+            # 复现缺陷现场：PNG 已渲染但 manifest 仍是空数组
+            (proj / "chart_1.png").write_bytes(b"PNG")
+            (proj / "chart_manifest.json").write_text(
+                json.dumps({"charts": []}), encoding="utf-8",
+            )
+            o._backfill_chart_manifest(proj)
+            manifest = json.loads(
+                (proj / "chart_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(len(manifest["charts"]), 1)
+            self.assertEqual(manifest["charts"][0]["file"], "chart_1.png")
+            self.assertTrue(manifest["charts"][0]["keywords"])
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_render_pie_with_100_percent_and_long_labels(self):
         import json
         import tempfile
@@ -1004,6 +1052,41 @@ class TestSearchFailureFallback(unittest.TestCase):
         out2 = ReportGeneratorWorker._strip_reflection_residue(report2)
         self.assertNotIn("反思要求重做", out2)
         self.assertIn("## 摘要", out2)
+
+    def test_strip_rejected_sources_removes_appendix_entries(self):
+        """P2-2：正文声明已剔除/排除的域名与 URL 必须从来源附录删除。"""
+        from workers.report_generator_worker import ReportGeneratorWorker
+
+        report = (
+            "# 加密市场调研\n\n"
+            "本次分析已剔除 suhbaonline.net、https://spam.example/1 等无关来源，"
+            "仅采用可验证的行情数据。\n\n"
+            "## 数据来源\n\n"
+            "- [suhbaonline](https://suhbaonline.net/abc)\n"
+            "- [spam](https://spam.example/1)\n"
+            "- [可靠来源](https://good.example.com/data)\n\n"
+            "## 参考文献\n\n"
+            "- suhbaonline.net\n"
+        )
+        out = ReportGeneratorWorker._strip_rejected_sources(report)
+        # 正文剔除声明保留；仅附录中的被剔除来源条目删除
+        self.assertIn("已剔除 suhbaonline.net", out)
+        self.assertNotIn("https://suhbaonline.net/abc", out)
+        self.assertNotIn("- suhbaonline.net", out)
+        self.assertNotIn("- [spam](https://spam.example/1)", out)
+        self.assertIn("good.example.com", out)
+        self.assertIn("## 数据来源", out)
+
+    def test_strip_rejected_sources_keeps_appendix_without_declaration(self):
+        """P2-2：无剔除声明时附录原样保留。"""
+        from workers.report_generator_worker import ReportGeneratorWorker
+
+        report = (
+            "# 报告\n\n## 数据来源\n\n"
+            "- https://suhbaonline.net/x\n"
+        )
+        out = ReportGeneratorWorker._strip_rejected_sources(report)
+        self.assertEqual(out, report)
 
     def test_generation_fallback_code_for_game_instruction(self):
         from orchestrator_v2 import OrchestratorV2
@@ -1973,6 +2056,34 @@ class TestSimpleTaskFastPath(unittest.TestCase):
             self.assertIn("](/files/t-link-1/data/scatter.png)", out)
             self.assertIn(f"**成果文件夹**：`{ws}`", out, "正文绝对路径保持不变")
             self.assertIn("https://example.com/a", out)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_report_links_windows_drive_rewritten_to_relative(self):
+        """P2-4：工作区外残留的 Windows 盘符绝对路径图片链接 →
+        相对路径 charts/xxx.png（不在 /files/ 映射内的本机路径）。"""
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = tempfile.mkdtemp(prefix="weavemind_winlinks_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            report = (
+                "![chart](C:\\Users\\x\\AppData\\Local\\Temp\\agent_workspace"
+                "\\charts\\abc.png)\n\n"
+                "![data](D:/tmp/agent_workspace/data/points.csv)\n\n"
+                "正文路径 C:\\Users\\x\\app 不应被改写"
+            )
+            out = o._rewrite_report_links(report, "t-win-1")
+            self.assertIn("](charts/abc.png)", out)
+            self.assertIn("](data/points.csv)", out)
+            self.assertNotIn("C:\\Users\\x\\AppData", out)
+            self.assertIn("正文路径 C:\\Users\\x\\app", out)
         finally:
             ws_mod.WORKSPACE_ROOT = old_root
             import shutil

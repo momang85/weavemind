@@ -394,6 +394,55 @@ class TestRunIteration(unittest.TestCase):
         self.assertEqual(reflected["n"], 1, "评分≥6 应只评审一次")
         self.assertEqual(len(res["steps"]), 1, "高评分不应追加步骤")
 
+    def test_acceptance_fail_overrides_reflection_accept(self):
+        """P3：确定性验收 fail + 反思评分 accept → 不直接放行，强制产出重做步骤；
+        无验收报告时评分 accept → 直接放行（见 test_reflection_score_gate_accepts_high_score）。"""
+        import tempfile
+        import workspace as ws_mod
+
+        o = make_orch(_max_iterations=3)
+        o._plan = lambda goal, task_id, context="", memory_context="": [
+            {"step_id": "1", "capability": "report_generator",
+             "instruction": "生成报告", "timeout": 120}
+        ]
+        o._execute_steps = lambda steps, task_id, goal: (
+            [{"task_id": s["step_id"], "status": "SUCCESS",
+              "result": "# 报告" + "A" * 300} for s in steps],
+            False,
+        )
+        reflected = {"n": 0}
+
+        def fake_reflect(goal, report, task_id, all_steps=None, completed_all=None,
+                         memory_context="", validator_summary="", eval_scores=""):
+            reflected["n"] += 1
+            return {"accepted": True, "score": 9.0, "verdict": "accept",
+                    "gaps": [], "next_steps": []}
+
+        o._reflect = fake_reflect
+        o._now_iso = lambda: "t"
+        tmp = tempfile.mkdtemp(prefix="wm_accfail_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            ws = ws_mod.task_workspace("t-acc-fail", "default")
+            ws.mkdir(parents=True, exist_ok=True)
+            (ws / "acceptance_report.json").write_text(json.dumps({
+                "overall": "fail",
+                "gaps": ["数字溯源率不足：疑似模型知识未标注"],
+            }, ensure_ascii=False), encoding="utf-8")
+            res = o.run("t-acc-fail", "目标", auto_run=True)
+            self.assertGreaterEqual(
+                reflected["n"], 2,
+                "验收 fail 时反思 accept 评分不得放行，应继续反思/重做",
+            )
+            self.assertGreaterEqual(
+                len(res["steps"]), 2,
+                "验收 fail 必须产出重做步骤",
+            )
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_reflection_steps_capped(self):
         o = make_orch()
         o._plan = lambda goal, task_id, context="", memory_context="": [

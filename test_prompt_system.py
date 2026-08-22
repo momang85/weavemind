@@ -411,6 +411,73 @@ class TestLLMHealthDegradation(unittest.TestCase):
         finally:
             llm_client._task_usage_client = old_client
 
+    def test_task_degradation_inherited_root_cause(self):
+        """P2-3：主端点由他处标记不健康（无具体失败原因）时切换 →
+        reasons 回填 inherited_unhealthy；补记根因事件不丢 switch 事件。"""
+        import fakeredis
+        import llm_client
+
+        fake = fakeredis.FakeStrictRedis(decode_responses=True)
+        old_client = llm_client._task_usage_client
+        old_backup = dict(llm_client._BACKUP_CFG)
+        llm_client._task_usage_client = fake
+        with llm_client._endpoint_health_lock:
+            old_health = {k: dict(v) for k, v in llm_client._endpoint_health.items()}
+        llm_client.set_task_context("")
+        try:
+            # 模拟"主端点由他处标记不健康"：探测标记但未留具体失败原因
+            llm_client._endpoint_health.clear()
+            llm_client._mark_endpoint("primary", False)
+            self.assertEqual(
+                llm_client._primary_degradation_root(), "inherited_unhealthy",
+            )
+            llm_client.set_task_context("t-inh-1")
+            llm_client._BACKUP_CFG = {
+                "base_url": "http://backup.example/v1",
+                "api_key": "k",
+                "model": "m",
+            }
+            client = llm_client.LLMClient.__new__(llm_client.LLMClient)
+            client._backup_cfg = dict(llm_client._BACKUP_CFG)
+            with mock.patch.object(
+                llm_client.LLMClient, "_send_request", return_value="ok",
+            ):
+                res = client._call_backup("s", "u", 0.1, 100, False)
+            self.assertEqual(res, {"content": "ok"})
+            s = llm_client.get_task_llm_degradation("t-inh-1")
+            self.assertIn("inherited_unhealthy", s["reasons"])
+            self.assertEqual(s["switches"], 1)
+            switch_events = [
+                e for e in s["events"] if e.get("reason") == "switch_to_backup"
+            ]
+            self.assertEqual(len(switch_events), 1, "switch 事件不应被根因事件挤出")
+            self.assertGreaterEqual(len(s["events"]), 2)
+            # 多次切换：events 截断上限与 switches 对齐（补记事件不丢）
+            for _ in range(12):
+                llm_client._record_task_degradation(
+                    "t-inh-1", "inherited_unhealthy", both_failed=False,
+                )
+                llm_client._record_task_degradation(
+                    "t-inh-1", "switch_to_backup", both_failed=False,
+                )
+            s2 = llm_client.get_task_llm_degradation("t-inh-1")
+            self.assertEqual(s2["switches"], 13)
+            switch_events2 = [
+                e for e in s2["events"] if e.get("reason") == "switch_to_backup"
+            ]
+            self.assertEqual(
+                len(switch_events2), 13,
+                "events 上限应对齐 switches 计数，所有 switch 事件必须保留",
+            )
+        finally:
+            llm_client.clear_task_context()
+            llm_client._task_usage_client = old_client
+            llm_client._BACKUP_CFG.clear()
+            llm_client._BACKUP_CFG.update(old_backup)
+            with llm_client._endpoint_health_lock:
+                llm_client._endpoint_health.clear()
+                llm_client._endpoint_health.update(old_health)
+
 
 class TestModelRoleRouting(unittest.TestCase):
     """B1：llm.model_roles 模型分级路由（planner/exec/judge，缺省回退默认模型）。"""
