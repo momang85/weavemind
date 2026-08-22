@@ -15,6 +15,14 @@ from adapters.coingecko import fetch_market, coin_id
 from adapters.macro import fetch_macro
 from adapters.news import fetch_news
 from adapters.ashare_ranking import fetch_ranking
+from adapters.tencent_quotes import (
+    fetch_ranking as fetch_tencent_ranking,
+    fetch_us_ranking as fetch_tencent_us_ranking,
+)
+from adapters.quote_cache import (
+    get_ranking as cache_get_ranking,
+    set_ranking as cache_set_ranking,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -24,6 +32,11 @@ _RANKING_KEYWORDS = (
     "成交量排行", "成交额排行", "成交量前十", "成交额前十",
     "涨停", "跌幅榜", "a股今日", "今日a股", "前十股", "排名榜",
     "股票排行", "a股排行", "股票排名", "成交量榜", "成交额榜",
+)
+# 美股目标关键词：命中后排行优先走腾讯美股候选池（eastmoney 无美股排行）。
+_US_RANKING_KEYWORDS = (
+    "美股", "纳斯达克", "nasdaq", "nyse", "纽交所", "美国股市",
+    "美国股票", "us股", "美股排行",
 )
 _CRYPTO_KEYWORDS = (
     "加密货币", "比特币", "以太坊", "币价", "虚拟货币", "数字货币",
@@ -90,28 +103,68 @@ def _ranking_metric(goal: str) -> str:
     return "amount"
 
 
+def _ranking_market(goal: str) -> str:
+    """按目标措辞选排行市场：美股目标 → "us"，否则 A股 → "a"。"""
+    return "us" if _keyword_hit(goal, _US_RANKING_KEYWORDS) else "a"
+
+
+def _ranking_meta(payload: dict, metric: str, market: str, cache_hit: bool = False) -> dict:
+    """构造排行 metadata；tencent payload 自带 source，eastmoney 由路由补充。"""
+    source = str(payload.get("source") or "")
+    if not source:
+        source = "tencent_us_ranking" if market == "us" else "eastmoney_ranking"
+    return {
+        "source": source,
+        "market": "美股" if market == "us" else "A股",
+        "metric": payload.get("metric") or metric,
+        "top_n": payload.get("top_n") or 0,
+        "unit": "亿元",
+        "retrieved_at": payload.get("retrieved_at") or "",
+        "cache_hit": cache_hit,
+    }
+
+
+def _fetch_ranking_with_fallback(market: str, metric: str) -> dict:
+    """排行降级链：
+    A股：eastmoney_ranking（现逻辑）→ 失败 tencent_ranking（腾讯候选池）；
+    美股：优先 tencent_us_ranking。
+    腾讯结果回填缓存（任务间复用）；eastmoney 结果不回填，保持原有语义。"""
+    if market == "us":
+        payload = fetch_tencent_us_ranking(metric, top_n=10)
+        cache_set_ranking(market, metric, payload)
+        return payload
+    try:
+        return fetch_ranking(metric, top_n=10)
+    except Exception as exc:
+        logger.warning("eastmoney ranking fetch failed, try tencent: %s", exc)
+        payload = fetch_tencent_ranking(metric, top_n=10)
+        cache_set_ranking(market, metric, payload)
+        return payload
+
+
 def route_structured(goal: str) -> dict | None:
     """按目标关键词路由到结构化数据源；成功返回 {source, data, metadata}，
     失败返回 None（调用方回退搜索链路）。
     顺序：A股行情排行 → crypto → macro → news → financial。"""
     if _keyword_hit(goal, _RANKING_KEYWORDS):
         metric = _ranking_metric(goal)
+        market = _ranking_market(goal)
+        cached = cache_get_ranking(market, metric)
+        if cached:
+            logger.info("ranking cache hit: market=%s metric=%s", market, metric)
+            meta = _ranking_meta(cached, metric, market, cache_hit=True)
+            source = str(cached.get("source") or meta["source"])
+            return _wrap(source, cached, meta)
         try:
-            payload = fetch_ranking(metric, top_n=10)
+            payload = _fetch_ranking_with_fallback(market, metric)
         except Exception as exc:
             # P2-6 预载失败可见化：瞬时接口异常不再静默吞掉，
             # 记录 warning 后由调用方（orchestrator）重试或回退搜索链路
             logger.warning("ranking fetch failed: %s", exc)
             return None
-        meta = {
-            "source": "eastmoney_ranking",
-            "market": "A股",
-            "metric": payload.get("metric") or metric,
-            "top_n": payload.get("top_n") or 0,
-            "unit": "亿元",
-            "retrieved_at": payload.get("retrieved_at") or "",
-        }
-        return _wrap("eastmoney_ranking", payload, meta)
+        meta = _ranking_meta(payload, metric, market)
+        source = str(payload.get("source") or meta["source"])
+        return _wrap(source, payload, meta)
     if _keyword_hit(goal, _CRYPTO_KEYWORDS):
         coin = _extract_coin(goal)
         try:

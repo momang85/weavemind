@@ -67,15 +67,32 @@ def _retry_base() -> float:
         return _RETRY_BASE_DEFAULT
 
 
-def _get_via_urllib(url: str, timeout: int = 25) -> str:
-    """通道 1：urllib + 完整浏览器头 + Connection: close。"""
-    req = urllib.request.Request(url, headers=_BROWSER_HEADERS)
+def _get_via_urllib(
+    url: str,
+    timeout: int = 25,
+    encoding: str = "utf-8",
+    headers: dict | None = None,
+) -> str:
+    """通道 1：urllib + 完整浏览器头 + Connection: close。
+
+    腾讯行情等外部适配器复用本函数（GBK 响应传 encoding="gbk"），
+    避免各自重复实现 urllib/socket 双通道。
+    """
+    req = urllib.request.Request(url, headers=headers or _BROWSER_HEADERS)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8", errors="replace")
+        return resp.read().decode(encoding, errors="replace")
 
 
-def _get_via_socket(url: str, timeout: int = 25) -> str:
-    """通道 2：raw socket + TLS，HTTP/1.0 请求，解析响应头与 body 直到连接关闭。"""
+def _get_via_socket(
+    url: str,
+    timeout: int = 25,
+    encoding: str = "utf-8",
+    headers: dict | None = None,
+) -> str:
+    """通道 2：raw socket + TLS，HTTP/1.0 请求，解析响应头与 body 直到连接关闭。
+
+    与 _get_via_urllib 一样可被腾讯行情适配器复用；encoding 决定响应解码。
+    """
     parsed = urllib.parse.urlsplit(url)
     host = parsed.hostname or ""
     port = parsed.port or 443
@@ -83,7 +100,7 @@ def _get_via_socket(url: str, timeout: int = 25) -> str:
     if parsed.query:
         path = f"{path}?{parsed.query}"
     request_lines = [f"GET {path} HTTP/1.0", f"Host: {host}"]
-    request_lines.extend(f"{k}: {v}" for k, v in _BROWSER_HEADERS.items())
+    request_lines.extend(f"{k}: {v}" for k, v in (headers or _BROWSER_HEADERS).items())
     request = "\r\n".join(request_lines) + "\r\n\r\n"
     with socket.create_connection((host, port), timeout=timeout) as raw:
         context = ssl.create_default_context()
@@ -106,7 +123,7 @@ def _get_via_socket(url: str, timeout: int = 25) -> str:
         raise RuntimeError(f"socket HTTP/1.0 响应状态行异常：{status_line!r}") from exc
     if status_code != 200:
         raise RuntimeError(f"socket HTTP/1.0 返回 HTTP {status_code}")
-    return body.decode("utf-8", errors="replace")
+    return body.decode(encoding, errors="replace")
 
 
 def _get(url: str, timeout: int = 25, attempt: int = 1) -> str:

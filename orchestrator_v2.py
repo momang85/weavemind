@@ -59,6 +59,9 @@ _MARKET_SEARCH_SUFFIX = (
     "（成交额口径用：今日 A股 成交额 排行 前十 东方财富）。"
 )
 
+# 排行类结构化来源：东方财富（原）+ 腾讯 A股/美股候选池（韧性降级新增）。
+_RANKING_SOURCES = ("eastmoney_ranking", "tencent_ranking", "tencent_us_ranking")
+
 
 def _loads_json_loose(text: str) -> dict:
     """先严格解析，失败后允许字符串内未转义控制字符（LLM 常在长指令中插入字面换行）。"""
@@ -1514,7 +1517,7 @@ class OrchestratorV2:
     def _export_ranking_csv(
         task_id: str, data: dict, project: str | None = None,
     ) -> Path | None:
-        """把 eastmoney_ranking 的 rows 转写为 data/ranking.csv。
+        """把排行来源（eastmoney/tencent）的 rows 转写为 data/ranking.csv。
 
         列与适配器 payload 保持一致（rank/code/name/price/change_pct/
         volume_hand/volume_wan_hand/amount_yuan/amount_yi/turnover_pct/
@@ -1523,7 +1526,7 @@ class OrchestratorV2:
         """
         try:
             source = str(data.get("source") or "")
-            if source != "eastmoney_ranking":
+            if source not in _RANKING_SOURCES:
                 return None
             rows = (data.get("data") or {}).get("rows") or []
             if not rows:
@@ -1558,10 +1561,15 @@ class OrchestratorV2:
         if not steps or not data:
             return steps
         source = str(data.get("source") or "")
-        if source not in ("eastmoney_ranking", "coingecko", "macro", "news"):
+        if source not in (
+            "eastmoney_ranking", "tencent_ranking", "tencent_us_ranking",
+            "coingecko", "macro", "news",
+        ):
             return steps
         label = {
             "eastmoney_ranking": "A股行情排行",
+            "tencent_ranking": "A股行情排行（腾讯）",
+            "tencent_us_ranking": "美股行情排行（腾讯）",
             "coingecko": "加密货币行情",
             "macro": "宏观指标",
             "news": "新闻列表",
@@ -1645,9 +1653,18 @@ class OrchestratorV2:
                         })
                     except (TypeError, ValueError):
                         continue
-            elif source == "eastmoney_ranking":
+            elif source in _RANKING_SOURCES:
                 metric = str(payload.get("metric") or "amount")
-                series = "A股成交额排行" if metric != "volume" else "A股成交量排行"
+                market_label = "美股" if source == "tencent_us_ranking" else "A股"
+                series = (
+                    f"{market_label}成交额排行"
+                    if metric != "volume" else f"{market_label}成交量排行"
+                )
+                caliber = (
+                    "腾讯行情实时排行"
+                    if source.startswith("tencent")
+                    else "东方财富行情中心实时排行"
+                )
                 for row in (payload.get("rows") or [])[:20]:
                     label = f"{row.get('rank')}.{row.get('name')}"
                     if metric == "volume":
@@ -1662,8 +1679,8 @@ class OrchestratorV2:
                             "label": label,
                             "value": float(v),
                             "unit": unit,
-                            "source": "eastmoney_ranking",
-                            "caliber": "东方财富行情中心实时排行",
+                            "source": source,
+                            "caliber": caliber,
                             "series": series,
                         })
                     if row.get("change_pct") is not None:
@@ -1672,8 +1689,8 @@ class OrchestratorV2:
                             "label": f"{label}涨跌幅",
                             "value": float(row["change_pct"]),
                             "unit": "%",
-                            "source": "eastmoney_ranking",
-                            "caliber": "东方财富行情中心实时排行",
+                            "source": source,
+                            "caliber": caliber,
                             "series": f"{series}涨跌幅",
                         })
                     # 最新价行：供"量价散点"（价格 × 成交量/成交额）成图
@@ -1683,8 +1700,8 @@ class OrchestratorV2:
                             "label": f"{label}最新价",
                             "value": float(row["price"]),
                             "unit": "元",
-                            "source": "eastmoney_ranking",
-                            "caliber": "东方财富行情中心实时排行",
+                            "source": source,
+                            "caliber": caliber,
                             "series": f"{series}最新价",
                         })
             if rows:
@@ -1835,11 +1852,17 @@ class OrchestratorV2:
                         f"[结构化数据]（新闻列表，Google News RSS，"
                         f"查询：{query or '默认'}{time_hint}）"
                     )
-                elif source == "eastmoney_ranking":
+                elif source in _RANKING_SOURCES:
                     metric = str(payload.get("metric") or "amount")
+                    market_label = "美股" if source == "tencent_us_ranking" else "A股"
+                    source_label = (
+                        "腾讯行情"
+                        if source.startswith("tencent")
+                        else "东方财富行情中心"
+                    )
                     title = (
-                        "A股成交量排行（前十）"
-                        if metric == "volume" else "A股成交额排行（前十）"
+                        f"{market_label}成交量排行（前十）"
+                        if metric == "volume" else f"{market_label}成交额排行（前十）"
                     )
                     lines = [
                         "| 排名 | 代码 | 名称 | 最新价 | 涨跌幅% | "
@@ -1855,7 +1878,7 @@ class OrchestratorV2:
                             f"{row.get('amount_yi')} | {row.get('turnover_pct')} |"
                         )
                     block_title = (
-                        f"[结构化数据]（{title}，东方财富行情中心{time_hint}）"
+                        f"[结构化数据]（{title}，{source_label}{time_hint}）"
                     )
                 if lines:
                     return (
@@ -3443,7 +3466,7 @@ class OrchestratorV2:
 
     @staticmethod
     def _ranking_volume_price_scatter(clean: dict) -> list[dict]:
-        """eastmoney_ranking 量价散点规格（≥5 只股票才成图）。
+        """排行来源量价散点规格（≥5 只股票才成图，兼容 eastmoney/tencent）。
 
         从 market_data 行按 label 还原同一股票的 最新价/成交量/成交额：
         成交量口径取 万手，成交额口径取 亿元；x=最新价，y=量或额。
@@ -3454,9 +3477,17 @@ class OrchestratorV2:
             series = ""
             has_volume = False
             has_amount = False
+            src_label = "东方财富行情中心实时排行"
+            region = "A股"
             for r in clean.get("market_data") or []:
-                if str(r.get("source") or "") != "eastmoney_ranking":
+                row_source = str(r.get("source") or "")
+                if row_source not in _RANKING_SOURCES:
                     continue
+                if row_source == "tencent_us_ranking":
+                    src_label = "腾讯行情实时排行（美股）"
+                    region = "美股"
+                elif row_source == "tencent_ranking":
+                    src_label = "腾讯行情实时排行"
                 label = str(r.get("label") or "")
                 unit = str(r.get("unit") or "")
                 if not series:
@@ -3480,7 +3511,7 @@ class OrchestratorV2:
             ]
             if len(pts) < 5:
                 return []
-            title_series = str(series or "A股行情排行")
+            title_series = str(series or f"{region}行情排行")
             for suffix in ("最新价", "涨跌幅"):
                 title_series = title_series.replace(suffix, "")
             return [{
@@ -3494,10 +3525,10 @@ class OrchestratorV2:
                 "y_axis_title": y_label,
                 "unit": "元/万手" if not use_amount else "元/亿元",
                 "time_range": "实时",
-                "region": "A股",
-                "source": "东方财富行情中心实时排行",
+                "region": region,
+                "source": src_label,
                 "sample_size": str(len(pts)),
-                "annotation": "数据来自东方财富行情中心实时排行，口径见各数据行",
+                "annotation": f"数据来自{src_label}，口径见各数据行",
                 "missing": "无",
                 "outliers": "极端值已在图内保留",
                 "data": [
@@ -3506,7 +3537,7 @@ class OrchestratorV2:
                         "value": p["y"],
                         "year": p["price"],  # render_scatter 用 year 作为数值 x 轴
                         "caliber": p["name"],
-                        "source": "eastmoney_ranking",
+                        "source": src_label,
                     }
                     for p in pts
                 ],
@@ -6002,7 +6033,7 @@ print("charts generated")
                 if _rk_csv.exists():
                     instr += f' [Data: {_rk_csv}]'
                     instr += (
-                        "\n[数据] 工作区已预载 A股行情排行数据 data/ranking.csv"
+                        "\n[数据] 工作区已预载行情排行数据 data/ranking.csv"
                         "（列：rank/code/name/price/change_pct/volume_wan_hand/"
                         "amount_yi/turnover_pct），请优先读取该文件做 EDA/图表，"
                         "无需再找 CSV。"
@@ -6013,7 +6044,10 @@ print("charts generated")
                         _src = str(_sd.get("source") or "")
                     except Exception:
                         _src = ""
-                    if _src in ("eastmoney_ranking", "macro"):
+                    if _src in (
+                        "eastmoney_ranking", "tencent_ranking",
+                        "tencent_us_ranking", "macro",
+                    ):
                         # 排行/宏观 JSON 含 rows/points 数组，worker 可直接转 DataFrame
                         instr += f' [Data: {_sd_json}]'
                     instr += (

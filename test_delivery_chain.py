@@ -2943,6 +2943,9 @@ class TestRankingAdapter(unittest.TestCase):
         with mock.patch(
             "adapters.router.fetch_ranking",
             side_effect=RuntimeError("eastmoney timeout"),
+        ), mock.patch(
+            "adapters.router.fetch_tencent_ranking",
+            side_effect=RuntimeError("tencent timeout"),
         ):
             with self.assertLogs("adapters.router", level="WARNING") as cm:
                 out = router.route_structured("今日A股总成交量前十股")
@@ -3156,7 +3159,10 @@ class TestRankingStructuredChain(unittest.TestCase):
             with mock.patch(
                 "adapters.router.fetch_ranking",
                 side_effect=[RuntimeError("eastmoney timeout"), payload],
-            ) as fr, mock.patch("orchestrator_v2.time.sleep") as sl:
+            ) as fr, mock.patch(
+                "adapters.router.fetch_tencent_ranking",
+                side_effect=RuntimeError("tencent timeout"),
+            ), mock.patch("orchestrator_v2.time.sleep") as sl:
                 data = o._structured_data_preload(
                     "t-rk-retry", "今日A股总成交量前十股",
                 )
@@ -3184,7 +3190,10 @@ class TestRankingStructuredChain(unittest.TestCase):
             with mock.patch(
                 "adapters.router.fetch_ranking",
                 side_effect=RuntimeError("eastmoney timeout"),
-            ) as fr, mock.patch("orchestrator_v2.time.sleep") as sl, \
+            ) as fr, mock.patch(
+                "adapters.router.fetch_tencent_ranking",
+                side_effect=RuntimeError("tencent timeout"),
+            ), mock.patch("orchestrator_v2.time.sleep") as sl, \
                     self.assertLogs(
                         "orchestrator_v2", level="WARNING",
                     ) as cm:
@@ -3400,6 +3409,348 @@ class TestSearchMarketQueryVariants(unittest.TestCase):
         self.assertIn("-site:youtube.com", joined)
         self.assertIn("-site:baike.baidu.com", joined)
         self.assertIn("site:eastmoney.com", joined)
+
+
+class TestTencentQuotesRankingAndCache(unittest.TestCase):
+    """腾讯行情适配器 + 排行缓存层（全部 canned，不真连网）。"""
+
+    @staticmethod
+    def _tencent_line(
+        code: str, name: str, price: float, change_pct: float,
+        volume: int, amount_wan: float, turnover: float = "1.2",
+        market_cap_yi: float = "1000",
+    ) -> str:
+        """构造 qt.gtimg.cn 返回行：46 字段、~ 分隔、尾带引号分号。"""
+        fields = [""] * 46
+        fields[0] = "1"
+        fields[1] = name
+        fields[2] = code[-6:]
+        fields[3] = str(price)
+        fields[4] = str(price)          # 昨收
+        fields[5] = str(price)          # 今开（验证不会误当涨跌幅）
+        fields[6] = str(volume)
+        fields[31] = "0"                # 涨跌
+        fields[32] = str(change_pct)    # 涨跌幅%
+        fields[37] = str(amount_wan)    # 成交额（万元）
+        fields[38] = str(turnover)      # 换手率%
+        fields[45] = str(market_cap_yi)  # 总市值（亿）
+        return f'v_{code}="' + "~".join(fields) + '";'
+
+    def test_fetch_quotes_parses_gbk_and_correct_indices(self):
+        """GBK 解码 + 字段索引：价=3、涨跌%=32、量=6、额=37(万元)、换手=38。"""
+        import adapters.tencent_quotes as tq
+
+        raw = "\n".join([
+            self._tencent_line(
+                "sh600519", "贵州茅台", 1500.0, 2.5, 30000, 187040.0,
+                turnover=0.8, market_cap_yi=18000.0,
+            ),
+            self._tencent_line(
+                "sz000001", "平安银行", 11.0, -1.2, 500000, 550000.0,
+                turnover=1.1, market_cap_yi=2100.0,
+            ),
+        ]).encode("gbk")
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self):
+                return raw
+
+        with mock.patch("urllib.request.urlopen", return_value=_Resp()):
+            out = tq.fetch_quotes(["600519", "sz000001"])
+        q = out["600519"]
+        self.assertEqual(q["name"], "贵州茅台")
+        self.assertEqual(q["price"], 1500.0)
+        self.assertEqual(q["change_pct"], 2.5)          # index 32，不是 index 5
+        self.assertEqual(q["volume"], 30000)            # 手
+        self.assertEqual(q["amount"], 187040.0 * 1e4)   # 万元 → 元
+        self.assertEqual(q["turnover_pct"], 0.8)
+        self.assertEqual(q["market_cap_yi"], 18000.0)
+        self.assertEqual(out["sz000001"]["change_pct"], -1.2)
+        self.assertEqual(out["sz000001"]["amount"], 550000.0 * 1e4)
+
+    def test_fetch_ranking_sorts_by_volume_and_amount(self):
+        """候选池排序：volume/amount 两口径、缺失值不参与、结构兼容 eastmoney。"""
+        import adapters.tencent_quotes as tq
+
+        quotes = {
+            "sh600519": {
+                "name": "贵州茅台", "price": 1500.0, "change_pct": 2.5,
+                "volume": 30000, "amount": 1.87e9, "turnover_pct": 0.8,
+                "market_cap_yi": 18000.0,
+            },
+            "sz000001": {
+                "name": "平安银行", "price": 11.0, "change_pct": -1.2,
+                "volume": 500000, "amount": 5.5e9, "turnover_pct": 1.1,
+                "market_cap_yi": 2100.0,
+            },
+            "sh601318": {
+                "name": "中国平安", "price": 45.0, "change_pct": 0.5,
+                "volume": 100000, "amount": 9.9e9, "turnover_pct": 0.4,
+                "market_cap_yi": 8200.0,
+            },
+            "sz300750": {  # 缺失值：不参与排序
+                "name": "宁德时代", "price": 180.0, "change_pct": 1.0,
+                "volume": None, "amount": None, "turnover_pct": None,
+                "market_cap_yi": None,
+            },
+        }
+        with mock.patch.object(tq, "fetch_quotes", return_value=quotes):
+            by_vol = tq.fetch_ranking("volume", 2)
+            by_amt = tq.fetch_ranking("amount", 2)
+        self.assertEqual(by_vol["source"], "tencent_ranking")
+        self.assertEqual(by_vol["market"], "A股")
+        self.assertEqual([r["code"] for r in by_vol["rows"]], ["000001", "601318"])
+        self.assertEqual(by_vol["rows"][0]["volume_wan_hand"], 50.0)
+        self.assertEqual([r["code"] for r in by_amt["rows"]], ["601318", "000001"])
+        self.assertEqual(by_amt["rows"][0]["amount_yi"], 99.0)
+        self.assertEqual(by_amt["rows"][0]["rank"], 1)
+        self.assertNotIn("300750", [r["code"] for r in by_vol["rows"]])
+
+    def test_fetch_us_ranking_uses_us_candidate_pool(self):
+        """美股候选池规模与排序、source=tencent_us_ranking。"""
+        import adapters.tencent_quotes as tq
+
+        self.assertTrue(40 <= len(tq.US_CANDIDATES) <= 60)
+        self.assertTrue(80 <= len(tq.A_SHARE_CANDIDATES) <= 120)
+        quotes = {
+            "usAAPL": {
+                "name": "苹果", "price": 233.0, "change_pct": 1.2,
+                "volume": 1000, "amount": 2.3e8, "turnover_pct": 0.5,
+                "market_cap_yi": 35000.0,
+            },
+            "usNVDA": {
+                "name": "英伟达", "price": 188.0, "change_pct": -0.8,
+                "volume": 3000, "amount": 5.6e8, "turnover_pct": 1.8,
+                "market_cap_yi": 46000.0,
+            },
+            "usTSLA": {
+                "name": "特斯拉", "price": 320.0, "change_pct": 2.1,
+                "volume": 2000, "amount": 6.4e8, "turnover_pct": 1.2,
+                "market_cap_yi": 10000.0,
+            },
+        }
+        with mock.patch.object(tq, "fetch_quotes", return_value=quotes):
+            out = tq.fetch_us_ranking("volume", 2)
+        self.assertEqual(out["source"], "tencent_us_ranking")
+        self.assertEqual(out["market"], "美股")
+        self.assertEqual([r["code"] for r in out["rows"]], ["NVDA", "TSLA"])
+
+    def test_route_structured_degrades_to_tencent_and_backfills_cache(self):
+        """降级链：eastmoney 失败 → tencent_ranking 成功，结果回填缓存。"""
+        import adapters.router as router
+
+        payload = {
+            "rows": [{
+                "rank": 1, "code": "600519", "name": "贵州茅台",
+                "price": 1500.0, "change_pct": 2.5, "volume_hand": 30000,
+                "volume_wan_hand": 3.0, "amount_yuan": 1.87e9,
+                "amount_yi": 18.7, "turnover_pct": 0.8, "market_cap_yi": 18000.0,
+            }],
+            "metric": "amount", "top_n": 1, "source": "tencent_ranking",
+            "market": "A股", "source_url": "http://qt.test",
+            "retrieved_at": "2026-08-22 10:00:00",
+        }
+        with mock.patch(
+            "adapters.router.fetch_ranking",
+            side_effect=RuntimeError("eastmoney down"),
+        ), mock.patch(
+            "adapters.router.fetch_tencent_ranking", return_value=payload,
+        ) as tfr, mock.patch(
+            "adapters.router.cache_get_ranking", return_value=None,
+        ), mock.patch(
+            "adapters.router.cache_set_ranking",
+        ) as cs:
+            out = router.route_structured("今日A股成交额排行前十")
+        self.assertEqual(out["source"], "tencent_ranking")
+        self.assertEqual(out["metadata"]["market"], "A股")
+        self.assertEqual(out["metadata"]["cache_hit"], False)
+        tfr.assert_called_once_with("amount", top_n=10)
+        cs.assert_called_once_with("a", "amount", payload)
+
+    def test_route_structured_cache_hit_skips_network(self):
+        """缓存命中：直接返回并记录 cache hit，不再请求任何行情源。"""
+        import adapters.router as router
+
+        payload = {
+            "rows": [{
+                "rank": 1, "code": "600519", "name": "贵州茅台",
+                "price": 1500.0, "change_pct": 2.5, "volume_hand": 30000,
+                "volume_wan_hand": 3.0, "amount_yuan": 1.87e9,
+                "amount_yi": 18.7, "turnover_pct": 0.8, "market_cap_yi": 18000.0,
+            }],
+            "metric": "volume", "top_n": 1, "source": "tencent_ranking",
+            "market": "A股", "source_url": "http://qt.test",
+            "retrieved_at": "2026-08-22 10:00:00",
+        }
+        with mock.patch(
+            "adapters.router.cache_get_ranking", return_value=payload,
+        ) as cg, mock.patch(
+            "adapters.router.fetch_ranking",
+        ) as fr, mock.patch(
+            "adapters.router.fetch_tencent_ranking",
+        ) as tfr, mock.patch(
+            "adapters.router.fetch_tencent_us_ranking",
+        ) as usfr:
+            out = router.route_structured("今日A股总成交量前十股")
+        self.assertEqual(out["source"], "tencent_ranking")
+        self.assertEqual(out["metadata"]["cache_hit"], True)
+        cg.assert_called_once_with("a", "volume")
+        fr.assert_not_called()
+        tfr.assert_not_called()
+        usfr.assert_not_called()
+
+    def test_route_structured_us_prefers_tencent_us(self):
+        """美股目标：优先 tencent_us_ranking，且不走 eastmoney/A股链。"""
+        import adapters.router as router
+
+        payload = {
+            "rows": [{
+                "rank": 1, "code": "NVDA", "name": "英伟达",
+                "price": 188.0, "change_pct": -0.8, "volume_hand": 3000,
+                "volume_wan_hand": 0.3, "amount_yuan": 5.6e8,
+                "amount_yi": 5.6, "turnover_pct": 1.8, "market_cap_yi": 46000.0,
+            }],
+            "metric": "volume", "top_n": 1, "source": "tencent_us_ranking",
+            "market": "美股", "source_url": "http://qt.test",
+            "retrieved_at": "2026-08-22 10:00:00",
+        }
+        with mock.patch(
+            "adapters.router.cache_get_ranking", return_value=None,
+        ), mock.patch(
+            "adapters.router.fetch_tencent_us_ranking", return_value=payload,
+        ) as usfr, mock.patch(
+            "adapters.router.fetch_ranking",
+        ) as fr, mock.patch(
+            "adapters.router.fetch_tencent_ranking",
+        ) as tfr, mock.patch(
+            "adapters.router.cache_set_ranking",
+        ) as cs:
+            out = router.route_structured("今日美股成交量前十（纳斯达克）")
+        self.assertEqual(out["source"], "tencent_us_ranking")
+        self.assertEqual(out["metadata"]["market"], "美股")
+        usfr.assert_called_once_with("volume", top_n=10)
+        fr.assert_not_called()
+        tfr.assert_not_called()
+        cs.assert_called_once_with("us", "volume", payload)
+
+    def test_route_structured_eastmoney_success_keeps_original_semantics(self):
+        """eastmoney 成功：仍返回 eastmoney_ranking，且不回填缓存（既有语义）。"""
+        import adapters.router as router
+
+        payload = {
+            "rows": [{"rank": 1, "code": "600519", "name": "贵州茅台"}],
+            "metric": "amount", "top_n": 1,
+            "source_url": "http://eastmoney.test",
+            "retrieved_at": "2026-08-22 10:00:00",
+        }
+        with mock.patch(
+            "adapters.router.cache_get_ranking", return_value=None,
+        ), mock.patch(
+            "adapters.router.fetch_ranking", return_value=payload,
+        ), mock.patch(
+            "adapters.router.fetch_tencent_ranking",
+        ) as tfr, mock.patch(
+            "adapters.router.cache_set_ranking",
+        ) as cs:
+            out = router.route_structured("今日A股成交额排行前十")
+        self.assertEqual(out["source"], "eastmoney_ranking")
+        tfr.assert_not_called()
+        cs.assert_not_called()
+
+    def test_quote_cache_redis_hit_delete_and_memory_fallback(self):
+        """缓存：Redis 读写/TTL、Redis 不可用时内存兜底。"""
+        import time as _time
+
+        from adapters.quote_cache import QuoteCache
+
+        payload = {
+            "rows": [{"rank": 1, "code": "600519", "name": "贵州茅台"}],
+            "metric": "volume", "top_n": 1, "source": "tencent_ranking",
+            "retrieved_at": "2026-08-22 10:00:00",
+        }
+        try:
+            import fakeredis
+        except ImportError:
+            fakeredis = None
+        if fakeredis is not None:
+            fake = fakeredis.FakeStrictRedis(decode_responses=True)
+            cache = QuoteCache(redis_client=fake, ttl=600)
+            self.assertTrue(cache.set("a", "volume", payload))
+            self.assertEqual(cache.get("a", "volume"), payload)
+            self.assertTrue(fake.ttl(cache._key("a", "volume")) > 0)
+            cache.delete("a", "volume")
+            self.assertIsNone(cache.get("a", "volume"))
+
+        # 内存兜底 + 过期清理
+        mem = QuoteCache(redis_client=None, ttl=600)
+        mem._redis = None  # 强制纯内存路径，避免命中本机真实 Redis
+        mem.set("us", "amount", payload)
+        self.assertEqual(mem.get("us", "amount"), payload)
+        key = mem._key("us", "amount")
+        mem._memory[key] = (_time.time() - 1, payload)
+        self.assertIsNone(mem.get("us", "amount"))
+
+        # Redis 异常 → 自动降级内存，不抛异常
+        class _BrokenRedis:
+            def get(self, key):
+                raise ConnectionError("redis down")
+
+            def set(self, key, value, ex=None):
+                raise ConnectionError("redis down")
+
+        fb = QuoteCache(redis_client=_BrokenRedis(), ttl=600)
+        fb.set("a", "amount", payload)
+        self.assertEqual(fb.get("a", "amount"), payload)
+
+    def test_orchestrator_tencent_ranking_export_and_injection(self):
+        """编排器兼容：tencent_ranking 也能导出 ranking.csv 并注入报告块。"""
+        import tempfile
+
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = Path(tempfile.mkdtemp(prefix="rk_tencent_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        data = {
+            "source": "tencent_ranking",
+            "metadata": {
+                "market": "A股", "metric": "volume",
+                "retrieved_at": "2026-08-22 10:00:00",
+            },
+            "data": {
+                "rows": [{
+                    "rank": 1, "code": "600519", "name": "贵州茅台",
+                    "price": 1500.0, "change_pct": 2.5,
+                    "volume_hand": 30000, "volume_wan_hand": 3.0,
+                    "amount_yuan": 1.87e9, "amount_yi": 18.7,
+                    "turnover_pct": 0.8, "market_cap_yi": 18000.0,
+                }],
+                "metric": "volume", "top_n": 1, "source": "tencent_ranking",
+                "retrieved_at": "2026-08-22 10:00:00",
+            },
+        }
+        try:
+            csv_path = o._export_ranking_csv("t-tencent", data)
+            self.assertIsNotNone(csv_path)
+            self.assertTrue(csv_path.exists())
+            proj = ws_mod.task_project_dir("t-tencent")
+            (proj / "structured_data.json").write_text(
+                json.dumps(data, ensure_ascii=False), encoding="utf-8",
+            )
+            block = o._structured_injection("t-tencent")
+            self.assertIn("腾讯行情", block)
+            self.assertIn("贵州茅台", block)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":
