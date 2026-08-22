@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
 """真实交付链回归测试：搜索相关性过滤、file_io 落盘逻辑、code_execution 命名。"""
+import json
+import shutil
 import unittest
+from pathlib import Path
+from unittest import mock
 
 
 class TestSearchQuality(unittest.TestCase):
@@ -2940,6 +2944,231 @@ class TestRankingAdapter(unittest.TestCase):
         self.assertEqual(
             router._ranking_metric("今日A股总成交量前十股"), "volume",
         )
+
+
+def _ranking_sample(n: int = 10, metric: str = "volume") -> dict:
+    """构造 eastmoney_ranking canned 数据（与适配器 payload 同构）。"""
+    names = [
+        "京东方A", "贵州茅台", "宁德时代", "比亚迪", "中国平安",
+        "招商银行", "中信证券", "五粮液", "隆基绿能", "东方财富",
+    ]
+    rows = []
+    for i in range(n):
+        rows.append({
+            "rank": i + 1,
+            "code": f"00000{i}",
+            "name": names[i % len(names)],
+            "price": round(10 + i * 3.7, 2),
+            "change_pct": round((i % 7) - 2.5, 2),
+            "volume_hand": (i + 1) * 200000,
+            "volume_wan_hand": round((i + 1) * 20.0, 2),
+            "amount_yuan": (i + 1) * 1_000_000_000,
+            "amount_yi": round((i + 1) * 10.0, 2),
+            "turnover_pct": round(0.5 + i * 0.3, 2),
+            "market_cap_yi": round(500 + i * 33.0, 2),
+        })
+    return {
+        "source": "eastmoney_ranking",
+        "data": {
+            "rows": rows,
+            "metric": metric,
+            "top_n": len(rows),
+            "source_url": "http://eastmoney.test/clist",
+            "retrieved_at": "2026-08-22 10:00:00",
+        },
+        "metadata": {
+            "source": "eastmoney_ranking",
+            "market": "A股",
+            "metric": metric,
+            "top_n": len(rows),
+            "unit": "亿元",
+            "label": "A股成交量排行" if metric == "volume" else "A股成交额排行",
+            "retrieved_at": "2026-08-22 10:00:00",
+        },
+    }
+
+
+class TestRankingStructuredChain(unittest.TestCase):
+    """断链修复（ui-1954f66cb0 复测暴露）：
+    预载 structured_data.json 后，data_analyzer/报告/图表能直接消费排行数据。"""
+
+    def test_preload_ranking_writes_ranking_csv(self):
+        """A 方案：预载 eastmoney_ranking 后 data/ranking.csv 生成（canned）。"""
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._messaging = None
+        tmp = Path(tempfile.mkdtemp(prefix="rk_preload_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            with mock.patch(
+                "adapters.router.route_structured",
+                return_value=_ranking_sample(),
+            ):
+                data = o._structured_data_preload(
+                    "t-rk-pre", "今日A股总成交量前十股",
+                )
+            self.assertEqual(data["source"], "eastmoney_ranking")
+            csv_path = ws_mod.task_data_dir("t-rk-pre") / "ranking.csv"
+            self.assertTrue(csv_path.exists(), "应生成 data/ranking.csv")
+            import pandas as pd
+            df = pd.read_csv(csv_path)
+            self.assertEqual(len(df), 10)
+            self.assertEqual(df.iloc[0]["name"], "京东方A")
+            self.assertEqual(df.iloc[0]["volume_wan_hand"], 20.0)
+            self.assertIn("amount_yi", df.columns)
+            sd_path = ws_mod.task_project_dir("t-rk-pre") / "structured_data.json"
+            self.assertTrue(sd_path.exists())
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_data_analyzer_instruction_prefers_preloaded_ranking(self):
+        """指令注入：工作区有 structured_data.json / ranking.csv 时，
+        data_analyzer 步骤追加 [Data: 路径] 与优先使用提示。"""
+        import tempfile
+        import threading
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._task_user_ids = {}
+        tmp = Path(tempfile.mkdtemp(prefix="rk_instr_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            proj = ws_mod.task_project_dir("t-da")
+            (proj / "structured_data.json").write_text(
+                json.dumps(_ranking_sample(), ensure_ascii=False),
+                encoding="utf-8",
+            )
+            OrchestratorV2._export_ranking_csv("t-da", _ranking_sample())
+            step = {
+                "step_id": "2", "capability": "data_analyzer",
+                "instruction": "分析排行数据", "depends_on": [],
+            }
+            instr = o._inject_step_context(step, {}, threading.Lock(), "t-da")
+            self.assertIn("[Data:", instr)
+            self.assertIn("ranking.csv", instr)
+            self.assertIn("无需再找 CSV", instr)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_plan_replaces_data_analyzer_when_structured_preloaded(self):
+        """B 方案：已预载结构化行情数据时 data_analyzer → content_summary。"""
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._messaging = None
+        steps = [
+            {"step_id": "1", "capability": "data_analyzer",
+             "instruction": "EDA", "depends_on": []},
+            {"step_id": "2", "capability": "report_generator",
+             "instruction": "报告", "depends_on": ["1"]},
+        ]
+        out = o._reduce_steps_for_structured("t-rk-b", steps, _ranking_sample())
+        self.assertEqual(out[0]["capability"], "content_summary")
+        self.assertEqual(out[0]["step_id"], "1")
+        self.assertIn("structured_data.json", out[0]["instruction"])
+        self.assertEqual(out[1]["depends_on"], ["1"], "依赖关系应保持不变")
+        # 非结构化来源不替换
+        out2 = o._reduce_steps_for_structured(
+            "t-rk-b", steps, {"source": "other", "data": {}},
+        )
+        self.assertEqual(out2[0]["capability"], "data_analyzer")
+
+    def test_structured_injection_includes_ranking_rows(self):
+        """报告注入：eastmoney_ranking 的 [结构化数据] 块必须含排行 rows。"""
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        tmp = Path(tempfile.mkdtemp(prefix="rk_inj_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            proj = ws_mod.task_project_dir("t-rk-inj")
+            (proj / "structured_data.json").write_text(
+                json.dumps(_ranking_sample(2), ensure_ascii=False),
+                encoding="utf-8",
+            )
+            block = OrchestratorV2._structured_injection("t-rk-inj")
+            self.assertIn("[结构化数据]", block)
+            self.assertIn("A股成交量排行（前十）", block)
+            self.assertIn("京东方A", block)
+            self.assertIn("000000", block)
+            self.assertIn("20.0", block)
+            self.assertIn("东方财富行情中心", block)
+            self.assertIn("优先引用", block)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_ranking_data_triggers_bar_and_scatter_charts(self):
+        """排行数据 canned → clean_chart_data 并入 → 自动渲染 top10 条形图
+        与量价散点（无需 LLM 规格）。"""
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = Path(tempfile.mkdtemp(prefix="rk_chart_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            proj = ws_mod.task_project_dir("t-rk-chart")
+            OrchestratorV2._merge_structured_points(
+                "t-rk-chart", _ranking_sample(10),
+            )
+            clean = json.loads(
+                (proj / "clean_chart_data.json").read_text(encoding="utf-8")
+            )
+            self.assertGreaterEqual(len(clean["market_data"]), 20)
+            o._render_clean_chart_data("t-rk-chart", "今日A股总成交量前十股")
+            specs = json.loads(
+                (proj / "chart_data.json").read_text(encoding="utf-8")
+            )["charts"]
+            titles = [str(s.get("title") or "") for s in specs]
+            self.assertTrue(
+                any("成交量" in t and "对比" in t for t in titles),
+                f"应生成成交量 top10 条形图：{titles}",
+            )
+            self.assertTrue(
+                any("量价散点" in t for t in titles),
+                f"应生成量价散点：{titles}",
+            )
+            pngs = {p.name for p in proj.glob("chart_*.png")}
+            self.assertTrue(pngs, "应实际渲染排行图表 PNG")
+            manifest = json.loads(
+                (proj / "chart_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertTrue(manifest["charts"])
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_analyzer_worker_loads_structured_json(self):
+        """data_analyzer worker 可直接把 structured_data.json 转 DataFrame。"""
+        import tempfile
+        from workers.data_analyzer_worker import DataAnalyzerWorker
+
+        tmp = Path(tempfile.mkdtemp(prefix="rk_json_"))
+        try:
+            p = tmp / "structured_data.json"
+            p.write_text(
+                json.dumps(_ranking_sample(3), ensure_ascii=False),
+                encoding="utf-8",
+            )
+            df = DataAnalyzerWorker._load_frame(p)
+            self.assertEqual(len(df), 3)
+            self.assertIn("name", df.columns)
+            self.assertIn("volume_wan_hand", df.columns)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 class TestSearchMarketQueryVariants(unittest.TestCase):

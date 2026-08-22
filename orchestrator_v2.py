@@ -6,8 +6,10 @@ critic_agent, ws_helpers. No complex state machine — just: plan → dispatch �
 This is the active orchestrator (legacy orchestrator.py was removed in the architecture cleanup).
 """
 
+import csv
 import hashlib
 import json, logging, os, re, shutil, threading, time, uuid
+from pathlib import Path
 
 from workspace import (
     ensure_task_workspace,
@@ -1471,6 +1473,9 @@ class OrchestratorV2:
             (proj / "structured_data.json").write_text(
                 json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8",
             )
+            # A 方案：排行数据转写为 data/ranking.csv，让 data_analyzer
+            # （只认 CSV/JSON）无需再找"新 CSV"即可直接消费
+            self._export_ranking_csv(task_id, data, project)
             self._merge_structured_points(task_id, data, project)
             # P1-3：预载即尝试数据驱动图表（crypto/macro 行情点 ≥2 即可渲染），
             # 保证只有"预载 → 报告"两步的加密任务也能出图
@@ -1491,6 +1496,93 @@ class OrchestratorV2:
     ) -> dict | None:
         """兼容旧名：F4 后统一走 _structured_data_preload（financial 走原通道）。"""
         return self._structured_data_preload(task_id, goal)
+
+    @staticmethod
+    def _export_ranking_csv(
+        task_id: str, data: dict, project: str | None = None,
+    ) -> Path | None:
+        """把 eastmoney_ranking 的 rows 转写为 data/ranking.csv。
+
+        列与适配器 payload 保持一致（rank/code/name/price/change_pct/
+        volume_hand/volume_wan_hand/amount_yuan/amount_yi/turnover_pct/
+        market_cap_yi），data_analyzer 步骤可直接 pd.read_csv 消费；
+        非排行来源返回 None（不产生无关文件）。
+        """
+        try:
+            source = str(data.get("source") or "")
+            if source != "eastmoney_ranking":
+                return None
+            rows = (data.get("data") or {}).get("rows") or []
+            if not rows:
+                return None
+            csv_path = task_data_dir(task_id, project) / "ranking.csv"
+            columns = [
+                "rank", "code", "name", "price", "change_pct",
+                "volume_hand", "volume_wan_hand",
+                "amount_yuan", "amount_yi",
+                "turnover_pct", "market_cap_yi",
+            ]
+            with csv_path.open("w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow(columns)
+                for row in rows:
+                    if not isinstance(row, dict):
+                        continue
+                    writer.writerow([row.get(c, "") for c in columns])
+            logger.info("ranking.csv exported for %s: %d rows", task_id, len(rows))
+            return csv_path
+        except Exception as exc:
+            logger.warning("ranking csv export failed: %s", str(exc)[:120])
+            return None
+
+    def _reduce_steps_for_structured(
+        self, task_id: str, steps: list[dict], data: dict | None,
+    ) -> list[dict]:
+        """B 方案：已预载结构化行情数据（排行/crypto/macro/news）的任务，
+        把 data_analyzer 步骤替换为 content_summary 直接消费 structured_data.json，
+        避免 EDA 步骤只认 CSV 造成断链；图表仍由数据驱动兜底渲染提供。
+        保持 step_id 与依赖不变，报告/打包步骤无需重连。"""
+        if not steps or not data:
+            return steps
+        source = str(data.get("source") or "")
+        if source not in ("eastmoney_ranking", "coingecko", "macro", "news"):
+            return steps
+        label = {
+            "eastmoney_ranking": "A股行情排行",
+            "coingecko": "加密货币行情",
+            "macro": "宏观指标",
+            "news": "新闻列表",
+        }.get(source, source)
+        out: list[dict] = []
+        changed = False
+        for s in steps:
+            if str(s.get("capability")) == "data_analyzer":
+                changed = True
+                out.append({
+                    "step_id": s.get("step_id"),
+                    "capability": "content_summary",
+                    "instruction": (
+                        f"基于已预载的 structured_data.json（{label}）"
+                        "直接输出结构化要点与结论；无需寻找 CSV，无需重新抓取数据；"
+                        "如目标需要图表，请按 [CHART_DATA] 规格输出图表数据"
+                        "或引用工作区已生成的图表。"
+                        f"原始指令：{s.get('instruction', '')}"
+                    ),
+                    "depends_on": list(s.get("depends_on") or []),
+                    "timeout": 120,
+                })
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "plan", "agent": "orchestrator",
+                               "message": (
+                                   "Plan B: 结构化数据已预载，data_analyzer "
+                                   "替换为 content_summary 直接消费"
+                               ),
+                               "timestamp": self._now_iso()})
+            else:
+                out.append(s)
+        if changed:
+            logger.info("Task %s: data_analyzer -> content_summary (%s)", task_id, source)
+        return out
 
     @staticmethod
     def _merge_structured_points(
@@ -1571,6 +1663,17 @@ class OrchestratorV2:
                             "caliber": "东方财富行情中心实时排行",
                             "series": f"{series}涨跌幅",
                         })
+                    # 最新价行：供"量价散点"（价格 × 成交量/成交额）成图
+                    if row.get("price") is not None:
+                        rows.append({
+                            "type": "market_size",
+                            "label": f"{label}最新价",
+                            "value": float(row["price"]),
+                            "unit": "元",
+                            "source": "eastmoney_ranking",
+                            "caliber": "东方财富行情中心实时排行",
+                            "series": f"{series}最新价",
+                        })
             if rows:
                 proj = task_project_dir(task_id, project)
                 clean_path = proj / "clean_chart_data.json"
@@ -1605,6 +1708,7 @@ class OrchestratorV2:
                 return
             sd = json.loads(sd_path.read_text(encoding="utf-8"))
             self._merge_structured_points(task_id, sd)
+            self._export_ranking_csv(task_id, sd)
         except Exception as exc:
             logger.warning("remerge structured points failed: %s", str(exc)[:120])
 
@@ -2947,7 +3051,8 @@ class OrchestratorV2:
             # P1-3：加密/宏观类目标（行情/走势/趋势与风险/宏观指标/排名格局）
             "币价", "比特币", "以太坊", "加密货币", "行情", "走势", "趋势",
             "宏观", "通胀", "利率", "涨跌幅", "市值", "份额", "竞争格局",
-            "排名", "美联储", "cpi", "gdp",
+            "排名", "排行", "前十", "榜单", "成交量", "成交额", "涨停",
+            "跌幅", "美联储", "cpi", "gdp",
         ))
 
     @staticmethod
@@ -3317,7 +3422,85 @@ class OrchestratorV2:
                     "口径": label,
                     "来源": source or "检索资料",
                 })
-        return wrap_rows_to_specs(rows)
+        specs = wrap_rows_to_specs(rows)
+        # 排行量价散点：最新价(x) × 成交量/成交额(y)，让"排行前十"任务
+        # 除了 top10 条形图还有量价关系图
+        specs.extend(OrchestratorV2._ranking_volume_price_scatter(clean))
+        return specs
+
+    @staticmethod
+    def _ranking_volume_price_scatter(clean: dict) -> list[dict]:
+        """eastmoney_ranking 量价散点规格（≥5 只股票才成图）。
+
+        从 market_data 行按 label 还原同一股票的 最新价/成交量/成交额：
+        成交量口径取 万手，成交额口径取 亿元；x=最新价，y=量或额。
+        返回 [] 表示数据不足或非排行来源。
+        """
+        try:
+            points: dict[str, dict] = {}
+            series = ""
+            has_volume = False
+            has_amount = False
+            for r in clean.get("market_data") or []:
+                if str(r.get("source") or "") != "eastmoney_ranking":
+                    continue
+                label = str(r.get("label") or "")
+                unit = str(r.get("unit") or "")
+                if not series:
+                    series = str(r.get("series") or "")
+                if unit == "元" and label.endswith("最新价"):
+                    name = label[:-3]
+                    points.setdefault(name, {})["price"] = r.get("value")
+                elif unit == "万手":
+                    points.setdefault(label, {})["volume"] = r.get("value")
+                    has_volume = True
+                elif unit == "亿元":
+                    points.setdefault(label, {})["amount"] = r.get("value")
+                    has_amount = True
+            use_amount = has_amount and not has_volume
+            y_key = "amount" if use_amount else "volume"
+            y_label = "成交额（亿元）" if use_amount else "成交量（万手）"
+            pts = [
+                {"name": name, "price": p.get("price"), "y": p.get(y_key)}
+                for name, p in points.items()
+                if p.get("price") is not None and p.get(y_key) is not None
+            ]
+            if len(pts) < 5:
+                return []
+            title_series = str(series or "A股行情排行")
+            for suffix in ("最新价", "涨跌幅"):
+                title_series = title_series.replace(suffix, "")
+            return [{
+                "question": f"{title_series}中最新价与成交量/成交额的关系如何？",
+                "conclusion": (
+                    f"{len(pts)} 只个股的量价分布见散点，极端值已在图内保留"
+                ),
+                "type": "scatter",
+                "title": f"{title_series}量价散点（{y_label} vs 最新价）",
+                "x_axis_title": "最新价（元）",
+                "y_axis_title": y_label,
+                "unit": "元/万手" if not use_amount else "元/亿元",
+                "time_range": "实时",
+                "region": "A股",
+                "source": "东方财富行情中心实时排行",
+                "sample_size": str(len(pts)),
+                "annotation": "数据来自东方财富行情中心实时排行，口径见各数据行",
+                "missing": "无",
+                "outliers": "极端值已在图内保留",
+                "data": [
+                    {
+                        "label": p["name"],
+                        "value": p["y"],
+                        "year": p["price"],  # render_scatter 用 year 作为数值 x 轴
+                        "caliber": p["name"],
+                        "source": "eastmoney_ranking",
+                    }
+                    for p in pts
+                ],
+            }]
+        except Exception as exc:
+            logger.warning("ranking scatter spec failed: %s", str(exc)[:120])
+            return []
 
     def _render_clean_chart_data(self, task_id: str, goal: str) -> None:
         """数据驱动兜底（P1-3）：clean_chart_data 中 ≥2 个可作图数据点即渲染；
@@ -4855,7 +5038,10 @@ print("charts generated")
 
         # 结构化数据源预载：financial → 东方财富/SEC；crypto/macro/news →
         # 对应新适配器（若命中，搜索仅作补充）
-        self._structured_data_preload(task_id, goal, project)
+        preloaded = self._structured_data_preload(task_id, goal, project)
+        # B 方案：已预载结构化行情数据时，data_analyzer 替换为 content_summary，
+        # 让下游步骤直接消费 structured_data.json（图表仍由数据驱动兜底渲染）
+        steps = self._reduce_steps_for_structured(task_id, steps, preloaded)
 
         # 2..N. 执行 + 自主迭代（执行 → 验收评审 → 追加步骤，直到通过或达到上限）
         all_steps: list[dict] = []
@@ -5795,6 +5981,34 @@ print("charts generated")
                 tmps = re.findall(r'/tmp/\S+', prev_res if isinstance(prev_res, str) else '')
                 if tmps:
                     instr += f' [Path: {tmps[0]}]'
+            # 断链修复：工作区已预载结构化数据（eastmoney_ranking 等非财务类）时，
+            # 直接指向 data/ranking.csv / structured_data.json，无需再找"新 CSV"
+            try:
+                _rk_csv = task_data_dir(task_id) / "ranking.csv"
+                _sd_json = task_project_dir(task_id) / "structured_data.json"
+                if _rk_csv.exists():
+                    instr += f' [Data: {_rk_csv}]'
+                    instr += (
+                        "\n[数据] 工作区已预载 A股行情排行数据 data/ranking.csv"
+                        "（列：rank/code/name/price/change_pct/volume_wan_hand/"
+                        "amount_yi/turnover_pct），请优先读取该文件做 EDA/图表，"
+                        "无需再找 CSV。"
+                    )
+                elif _sd_json.exists():
+                    try:
+                        _sd = json.loads(_sd_json.read_text(encoding="utf-8"))
+                        _src = str(_sd.get("source") or "")
+                    except Exception:
+                        _src = ""
+                    if _src in ("eastmoney_ranking", "macro"):
+                        # 排行/宏观 JSON 含 rows/points 数组，worker 可直接转 DataFrame
+                        instr += f' [Data: {_sd_json}]'
+                    instr += (
+                        "\n[数据] 工作区已预载结构化数据 structured_data.json"
+                        f"（来源：{_src or '未知'}），请优先读取该文件，无需再找 CSV。"
+                    )
+            except Exception:
+                pass
 
         if cap == 'file_io':
             for dep_id in deps:

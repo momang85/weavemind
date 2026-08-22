@@ -17,10 +17,37 @@ class DataAnalyzerWorker(AsyncWorkerBase):
     _class_capabilities = ["data_analyzer"]
     _needs_task = True
 
+    @staticmethod
+    def _load_frame(fpath: Path) -> pd.DataFrame:
+        """读取数据文件：CSV 直读；JSON（structured_data.json）按
+        rows/items/points 数组转 DataFrame，让预载的排行/宏观数据
+        无需 CSV 也能做 EDA。"""
+        if fpath.suffix.lower() != ".json":
+            return pd.read_csv(fpath)
+        with fpath.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            payload = data.get("data") or {}
+            for key in ("rows", "items", "points"):
+                rows = payload.get(key)
+                if isinstance(rows, list) and rows:
+                    return pd.DataFrame(rows)
+            flat = {
+                k: v for k, v in payload.items()
+                if not isinstance(v, (list, dict)) and v is not None
+            }
+            if flat:
+                return pd.DataFrame([flat])
+            raise ValueError(f"{fpath.name} 中没有可消费的行数据")
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            return pd.DataFrame(data)
+        raise ValueError(f"{fpath.name} 不是结构化数据（无法转为 DataFrame）")
+
     async def execute(self, instruction: str, task: dict | None = None) -> str:
         try:
             chart_dir = CHART_DIR
             data_dir = Path(tempfile.gettempdir()) / "agent_workspace" / "data"
+            ws = Path(tempfile.gettempdir()) / "agent_workspace"
             if task and task.get("workspace"):
                 ws = Path(str(task["workspace"]))
                 chart_dir = ws / "charts"
@@ -36,27 +63,49 @@ class DataAnalyzerWorker(AsyncWorkerBase):
             if paths:
                 fpath = Path(paths[0].replace("\\", "/"))
             else:
-                # 仅当指令明确涉及数据分析，且工作区存在 1 小时内的新 CSV 时才兜底，
-                # 避免把历史任务遗留的无关数据（如加州房价）拉进当前任务。
-                keywords = ("分析", "数据", "csv", "数据集", "eda", "统计", "建模", "训练", "房价", "预测", "回归")
-                instruction_l = instruction.lower()
-                if not any(k in instruction_l for k in keywords):
-                    return json.dumps({"status": "failed", "error": "No data path provided in instruction"}, ensure_ascii=False)
-                now = time.time()
-                fresh = [
-                    p for p in data_dir.glob("*.csv")
-                    if now - p.stat().st_mtime < 3600
-                ]
-                if not fresh:
+                # 预载结构化数据优先：ranking.csv / structured_data.json 是本次任务
+                # 刚预载的真实数据，即使指令未显式给路径也可直接消费（断链修复）
+                candidates: list[Path] = []
+                ranking_csv = data_dir / "ranking.csv"
+                structured_json = ws / "project" / "structured_data.json"
+                if ranking_csv.exists():
+                    candidates.append(ranking_csv)
+                if structured_json.exists():
+                    candidates.append(structured_json)
+                if not candidates:
+                    # 仅当指令明确涉及数据分析，且工作区存在 1 小时内的新 CSV 时才兜底，
+                    # 避免把历史任务遗留的无关数据（如加州房价）拉进当前任务。
+                    keywords = ("分析", "数据", "csv", "数据集", "eda", "统计", "建模", "训练", "房价", "预测", "回归")
+                    instruction_l = instruction.lower()
+                    if not any(k in instruction_l for k in keywords):
+                        return json.dumps({"status": "failed", "error": "No data path provided in instruction"}, ensure_ascii=False)
+                    now = time.time()
+                    candidates = [
+                        p for p in data_dir.glob("*.csv")
+                        if now - p.stat().st_mtime < 3600
+                    ]
+                if not candidates:
                     return json.dumps({"status": "failed", "error": "No fresh CSV found in workspace"}, ensure_ascii=False)
-                fpath = max(fresh, key=lambda p: p.stat().st_mtime)
+                fpath = candidates[0]
 
-            df = pd.read_csv(fpath)
+            df = self._load_frame(fpath)
             shape = list(df.shape)
             cols = list(df.columns)
             missing = df.isnull().sum().to_dict()
             numeric_cols = df.select_dtypes(include=["number"]).columns.tolist()
             target_col = df.columns[-1]  # assume last column is target
+            if len(df) < 2 or len(numeric_cols) < 2:
+                # 单行/无数值列（如单点行情快照）：无法做相关性/散点，
+                # 如实返回成功但无图，避免 worker 内部异常
+                return json.dumps({
+                    "status": "success",
+                    "shape": shape,
+                    "columns": cols,
+                    "missing": missing,
+                    "target": target_col,
+                    "charts": [],
+                    "data_path": str(fpath),
+                }, ensure_ascii=False)
 
             # Chart 1: Numeric columns distribution histogram
             fig1, axes = plt.subplots(1, min(3, len(numeric_cols)), figsize=(12, 4))
