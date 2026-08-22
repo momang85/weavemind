@@ -1387,7 +1387,20 @@ class OrchestratorV2:
             from adapters.router import route_structured
             data = route_structured(goal)
             if not data:
-                return None
+                # P2-6 预载失败可见化：首次未命中（如瞬时接口异常）等待 2s
+                # 重试一次，第二次仍返回 None 才放弃并告警，避免静默占位
+                logger.warning(
+                    "Structured preload miss for %s, retry once after 2s",
+                    task_id,
+                )
+                time.sleep(2)
+                data = route_structured(goal)
+                if not data:
+                    logger.warning(
+                        "Structured preload retry failed for %s: "
+                        "route_structured returned None", task_id,
+                    )
+                    return None
             source = str(data.get("source") or "")
             metadata = data.get("metadata") or {}
             is_financial = source in (

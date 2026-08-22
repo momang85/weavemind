@@ -2935,6 +2935,42 @@ class TestRankingAdapter(unittest.TestCase):
         self.assertEqual(out["metadata"]["market"], "A股")
         fr.assert_called_once_with("volume", top_n=10)
 
+    def test_route_structured_ranking_fetch_failure_logs_warning(self):
+        """P2-6：fetch_ranking 抛异常不再静默——warning 日志 + 返回 None。"""
+        import adapters.router as router
+
+        with mock.patch(
+            "adapters.router.fetch_ranking",
+            side_effect=RuntimeError("eastmoney timeout"),
+        ):
+            with self.assertLogs("adapters.router", level="WARNING") as cm:
+                out = router.route_structured("今日A股总成交量前十股")
+        self.assertIsNone(out)
+        self.assertTrue(
+            any("ranking fetch failed" in m for m in cm.output), cm.output,
+        )
+
+    def test_route_structured_other_branches_failure_logs_warning(self):
+        """P2-6：crypto/macro/news fetch 失败同样 warning + 返回 None。"""
+        import adapters.router as router
+
+        cases = [
+            ("比特币最新价格", "fetch_market", "crypto fetch failed"),
+            ("美国 CPI 宏观分析", "fetch_macro", "macro fetch failed"),
+            ("最新新闻头条", "fetch_news", "news fetch failed"),
+        ]
+        for goal, fn, msg in cases:
+            with self.subTest(goal=goal), \
+                    mock.patch.object(
+                        router, fn, side_effect=RuntimeError("boom"),
+                    ), \
+                    self.assertLogs(
+                        "adapters.router", level="WARNING",
+                    ) as cm:
+                out = router.route_structured(goal)
+            self.assertIsNone(out)
+            self.assertTrue(any(msg in m for m in cm.output), cm.output)
+
     def test_ranking_metric_amount_for_amount_goal(self):
         import adapters.router as router
 
@@ -2991,6 +3027,74 @@ def _ranking_sample(n: int = 10, metric: str = "volume") -> dict:
 class TestRankingStructuredChain(unittest.TestCase):
     """断链修复（ui-1954f66cb0 复测暴露）：
     预载 structured_data.json 后，data_analyzer/报告/图表能直接消费排行数据。"""
+
+    def test_preload_ranking_retries_after_transient_failure(self):
+        """P2-6：fetch_ranking 首次抛异常、第二次成功 → 预载重试生效。"""
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._messaging = None
+        tmp = Path(tempfile.mkdtemp(prefix="rk_retry_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        payload = {
+            "rows": [{"rank": 1, "name": "贵州茅台"}],
+            "metric": "volume", "top_n": 1,
+            "source_url": "http://eastmoney.test",
+            "retrieved_at": "2026-08-22 10:00:00",
+        }
+        try:
+            with mock.patch(
+                "adapters.router.fetch_ranking",
+                side_effect=[RuntimeError("eastmoney timeout"), payload],
+            ) as fr, mock.patch("orchestrator_v2.time.sleep") as sl:
+                data = o._structured_data_preload(
+                    "t-rk-retry", "今日A股总成交量前十股",
+                )
+            self.assertEqual(data["source"], "eastmoney_ranking")
+            self.assertEqual(fr.call_count, 2)
+            sl.assert_called_once_with(2)
+            sd = ws_mod.task_project_dir("t-rk-retry") / "structured_data.json"
+            self.assertTrue(sd.exists(), "重试成功应写入 structured_data.json")
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_preload_ranking_gives_up_after_retry_failure(self):
+        """P2-6：两次都失败 → warning 日志且返回 None，不留空壳文件。"""
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._messaging = None
+        tmp = Path(tempfile.mkdtemp(prefix="rk_giveup_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            with mock.patch(
+                "adapters.router.fetch_ranking",
+                side_effect=RuntimeError("eastmoney timeout"),
+            ) as fr, mock.patch("orchestrator_v2.time.sleep") as sl, \
+                    self.assertLogs(
+                        "orchestrator_v2", level="WARNING",
+                    ) as cm:
+                data = o._structured_data_preload(
+                    "t-rk-giveup", "今日A股总成交量前十股",
+                )
+            self.assertIsNone(data)
+            self.assertEqual(fr.call_count, 2)
+            sl.assert_called_once_with(2)
+            self.assertTrue(
+                any("retry" in m.lower() for m in cm.output), cm.output,
+            )
+            proj = ws_mod.task_project_dir("t-rk-giveup")
+            self.assertFalse((proj / "structured_data.json").exists())
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def test_preload_ranking_writes_ranking_csv(self):
         """A 方案：预载 eastmoney_ranking 后 data/ranking.csv 生成（canned）。"""

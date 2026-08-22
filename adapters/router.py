@@ -4,6 +4,7 @@ crypto → CoinGecko；macro → FRED；news → Google News RSS。
 统一输出 {source, data, metadata}。
 """
 
+import logging
 import re
 
 from task_classifier import classify_task
@@ -14,6 +15,9 @@ from adapters.coingecko import fetch_market, coin_id
 from adapters.macro import fetch_macro
 from adapters.news import fetch_news
 from adapters.ashare_ranking import fetch_ranking
+
+
+logger = logging.getLogger(__name__)
 
 
 _RANKING_KEYWORDS = (
@@ -94,7 +98,10 @@ def route_structured(goal: str) -> dict | None:
         metric = _ranking_metric(goal)
         try:
             payload = fetch_ranking(metric, top_n=10)
-        except Exception:
+        except Exception as exc:
+            # P2-6 预载失败可见化：瞬时接口异常不再静默吞掉，
+            # 记录 warning 后由调用方（orchestrator）重试或回退搜索链路
+            logger.warning("ranking fetch failed: %s", exc)
             return None
         meta = {
             "source": "eastmoney_ranking",
@@ -107,7 +114,11 @@ def route_structured(goal: str) -> dict | None:
         return _wrap("eastmoney_ranking", payload, meta)
     if _keyword_hit(goal, _CRYPTO_KEYWORDS):
         coin = _extract_coin(goal)
-        out = fetch_market(coin, "usd")
+        try:
+            out = fetch_market(coin, "usd")
+        except Exception as exc:
+            logger.warning("crypto fetch failed: %s", exc)
+            return None
         if out:
             meta = dict(out.get("metadata") or {})
             data = {
@@ -117,7 +128,11 @@ def route_structured(goal: str) -> dict | None:
         return None
     if _keyword_hit(goal, _MACRO_KEYWORDS):
         indicator = _extract_indicator(goal)
-        out = fetch_macro(indicator)
+        try:
+            out = fetch_macro(indicator)
+        except Exception as exc:
+            logger.warning("macro fetch failed: %s", exc)
+            return None
         if out:
             meta = dict(out.get("metadata") or {})
             data = {
@@ -126,7 +141,11 @@ def route_structured(goal: str) -> dict | None:
             return _wrap("macro", data, meta)
         return None
     if _keyword_hit(goal, _NEWS_KEYWORDS):
-        out = fetch_news(str(goal or "")[:80])
+        try:
+            out = fetch_news(str(goal or "")[:80])
+        except Exception as exc:
+            logger.warning("news fetch failed: %s", exc)
+            return None
         if out:
             meta = dict(out.get("metadata") or {})
             data = {
