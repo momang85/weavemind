@@ -2749,5 +2749,218 @@ class TestReportShare(unittest.TestCase):
         self.assertIn("/files/t-safe-share/charts/a.png", out)
 
 
+class TestContractFailureSemantics(unittest.TestCase):
+    """Bug1：data_analyzer/data_loader 等返回 status=failed 必须判契约不通过，
+    错误信息携带原始 error 字段；status=success 正常通过。"""
+
+    def test_data_analyzer_failed_status_fails_contract(self):
+        from tool_contracts import validate_result
+
+        ok, issues = validate_result(
+            "data_analyzer", {"status": "failed", "error": "no data found"},
+        )
+        self.assertFalse(ok)
+        joined = "；".join(issues)
+        self.assertIn("failed", joined)
+        self.assertIn("no data found", joined)
+
+    def test_data_analyzer_success_passes(self):
+        from tool_contracts import validate_result
+
+        ok, issues = validate_result(
+            "data_analyzer", {"status": "success", "charts": ["/tmp/a.png"]},
+        )
+        self.assertTrue(ok, issues)
+
+    def test_loader_fetch_fileio_failed_flagged(self):
+        from tool_contracts import validate_result
+
+        for cap in ("data_loader", "web_fetch", "file_io"):
+            ok, issues = validate_result(
+                cap, {"status": "failed", "error": "boom"},
+            )
+            self.assertFalse(ok, cap)
+            self.assertIn("boom", "；".join(issues), cap)
+
+    def test_model_trainer_failed_flagged(self):
+        from tool_contracts import validate_result
+
+        ok, _ = validate_result(
+            "model_trainer", {"status": "failed", "error": "train err"},
+        )
+        self.assertFalse(ok)
+
+    def test_web_search_empty_still_fails(self):
+        from tool_contracts import validate_result
+
+        ok, issues = validate_result("web_search", [])
+        self.assertFalse(ok)
+        self.assertIn("返回空列表", "；".join(issues))
+
+
+class TestDeliverableCompleteness(unittest.TestCase):
+    """Bug2：验收器必须检出空壳报告（数据缺失占位/无有效表格）。"""
+
+    def test_empty_shell_report_fails(self):
+        from acceptance_checker import check_deliverable_completeness
+
+        report = (
+            "# 今日A股总成交量前十股\n\n"
+            "| 排名 | 名称 | 成交量 |\n|---|---|---|\n"
+            "| 1 | 未披露 | 未披露 |\n"
+            "| 2 | 未披露 | 未披露 |\n"
+            "| 3 | 未披露 | 未披露 |\n"
+        )
+        res = check_deliverable_completeness(report, "今日A股总成交量前十股")
+        self.assertFalse(res["pass"])
+        self.assertGreaterEqual(res["placeholder_count"], 3)
+        self.assertIn("交付物不完整", res["details"])
+        self.assertIn("数据缺失占位", res["details"])
+
+    def test_real_top10_table_passes(self):
+        from acceptance_checker import check_deliverable_completeness
+
+        report = (
+            "# 今日A股成交额前十股\n\n"
+            "| 排名 | 代码 | 名称 | 成交额(亿元) |\n"
+            "|---|---|---|---|\n"
+            "| 1 | 600519 | 贵州茅台 | 45.0 |\n"
+            "| 2 | 300750 | 宁德时代 | 42.5 |\n"
+        )
+        res = check_deliverable_completeness(report, "今日A股成交额前十股")
+        self.assertTrue(res["pass"], res["details"])
+        self.assertTrue(res["has_table"])
+
+    def test_normal_report_without_list_requirement_passes(self):
+        from acceptance_checker import check_deliverable_completeness
+
+        res = check_deliverable_completeness(
+            "调研报告：新能源汽车市场保持增长，正文如下。",
+            "总结新能源汽车市场现状",
+        )
+        self.assertTrue(res["pass"])
+
+    def test_list_goal_without_table_fails(self):
+        from acceptance_checker import check_deliverable_completeness
+
+        res = check_deliverable_completeness(
+            "前十股为：1 贵州茅台 2 平安银行 3 宁德时代",
+            "今日A股总成交量前十股",
+        )
+        self.assertFalse(res["pass"])
+        self.assertIn("没有可用的数据表格", res["details"])
+
+    def test_table_all_placeholder_fails(self):
+        from acceptance_checker import check_deliverable_completeness
+
+        report = "| 名称 | 数据 |\n|---|---|\n| 未披露 | 未获取 |"
+        res = check_deliverable_completeness(report, "今日A股总成交量前十股")
+        self.assertFalse(res["pass"])
+        self.assertTrue(res["table_all_placeholder"])
+
+    def test_run_acceptance_detects_shell_report(self):
+        import shutil as _shutil
+        import tempfile as _tempfile
+
+        import workspace as ws_mod
+        from acceptance_checker import run_acceptance
+
+        tmp = _tempfile.mkdtemp(prefix="wm_acc_comp_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            ws = ws_mod.task_workspace("t-comp-1")
+            ws.mkdir(parents=True, exist_ok=True)
+            report = "# 今日A股总成交量前十股\n\n" + "未披露" * 10
+            result = run_acceptance(
+                "t-comp-1", "今日A股总成交量前十股", report, ws,
+            )
+            self.assertIn("deliverable_completeness", result["checks"])
+            self.assertEqual(result["overall"], "fail")
+            self.assertTrue(
+                any("交付物不完整" in g for g in result["gaps"]),
+                result["gaps"],
+            )
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            _shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestRankingAdapter(unittest.TestCase):
+    """Bug3（可选增强）：东方财富行情排行适配器 canned 解析 + 路由分支。"""
+
+    def test_fetch_ranking_parses_canned(self):
+        import json as _json
+        from unittest import mock
+
+        import adapters.ashare_ranking as ar
+
+        sample = {"data": {"diff": [
+            {"f12": "600519", "f14": "贵州茅台", "f2": 1500.0, "f3": 2.5,
+             "f5": 30000, "f6": 4500000000, "f8": 0.8,
+             "f20": 1800000000000},
+            {"f12": "000001", "f14": "平安银行", "f2": 11.0, "f3": -1.2,
+             "f5": 500000, "f6": 5500000000, "f8": 1.1,
+             "f20": 210000000000},
+        ]}}
+        with mock.patch.object(
+            ar, "_get", return_value=_json.dumps(sample, ensure_ascii=False),
+        ):
+            out = ar.fetch_ranking("amount", 2)
+        self.assertEqual(out["metric"], "amount")
+        self.assertEqual(out["rows"][0]["name"], "贵州茅台")
+        self.assertEqual(out["rows"][0]["amount_yi"], 45.0)
+        self.assertEqual(out["rows"][1]["rank"], 2)
+        self.assertEqual(out["rows"][1]["volume_wan_hand"], 50.0)
+
+    def test_route_structured_ranking_branch(self):
+        from unittest import mock
+
+        import adapters.router as router
+
+        with mock.patch("adapters.router.fetch_ranking") as fr:
+            fr.return_value = {
+                "rows": [{"rank": 1, "name": "贵州茅台"}],
+                "metric": "volume", "top_n": 1,
+                "source_url": "http://eastmoney.test",
+                "retrieved_at": "2026-08-22 10:00:00",
+            }
+            out = router.route_structured("今日A股总成交量前十股")
+        self.assertEqual(out["source"], "eastmoney_ranking")
+        self.assertEqual(out["metadata"]["metric"], "volume")
+        self.assertEqual(out["metadata"]["market"], "A股")
+        fr.assert_called_once_with("volume", top_n=10)
+
+    def test_ranking_metric_amount_for_amount_goal(self):
+        import adapters.router as router
+
+        self.assertEqual(
+            router._ranking_metric("今日A股成交额排行前十"), "amount",
+        )
+        self.assertEqual(
+            router._ranking_metric("今日A股总成交量前十股"), "volume",
+        )
+
+
+class TestSearchMarketQueryVariants(unittest.TestCase):
+    """Bug3：行情类目标搜索自动补东方财富定向查询模板并排除无关平台。"""
+
+    def test_market_ranking_query_variants(self):
+        from worker_base import SearchAgent
+
+        sa = SearchAgent.__new__(SearchAgent)
+        vs = sa._query_variants(
+            "用户目标：今日A股总成交量前十股\n原始指令：搜索"
+        )
+        joined = "\n".join(vs)
+        self.assertIn("东方财富", joined)
+        self.assertIn("成交量", joined)
+        self.assertIn("排行", joined)
+        self.assertIn("前十", joined)
+        self.assertIn("-site:youtube.com", joined)
+        self.assertIn("-site:baike.baidu.com", joined)
+        self.assertIn("site:eastmoney.com", joined)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

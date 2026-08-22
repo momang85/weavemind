@@ -669,6 +669,28 @@ class SearchAgent(BaseWorker):
             )):
                 variants.append(f"{goal[:100]} 年报 营收 净利润 亿元")
                 variants.append(f"{goal[:100]} 财务数据 亿元")
+            # A股行情排行类目标：追加财经站点定向查询模板，并排除无关平台
+            # （YouTube/百度百科/美股平台），避免通用搜索返回无关来源。
+            if any(k in instruction for k in (
+                "成交量排行", "成交额排行", "成交量前十", "成交额前十",
+                "涨停", "跌幅榜", "a股今日", "今日a股", "前十股", "排名榜",
+                "股票排行", "a股排行", "股票排名",
+            )):
+                metric = (
+                    "成交额"
+                    if "成交额" in instruction and "成交量" not in instruction
+                    else "成交量"
+                )
+                variants.append(
+                    f"今日 A股 {metric} 排行 前十 东方财富 "
+                    "-site:youtube.com -site:baike.baidu.com"
+                )
+                variants.append(
+                    f"{goal[:90]} {metric} 排行 site:eastmoney.com"
+                )
+                variants.append(
+                    f"{goal[:90]} 东方财富 同花顺 新浪财经 雪球"
+                )
         # 域名定向（ReAct 兜底）：指令含 site:xxx 时追加定向查询变体，
         # 让"官方 IR / SEC"类重检索指令真正落地
         for m in _re.finditer(r"site:\s*([a-zA-Z0-9.\-]+)", str(instruction)):

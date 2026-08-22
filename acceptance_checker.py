@@ -920,6 +920,101 @@ def check_source_labeling(report: str, sources: dict) -> dict:
 
 
 # ─────────────────────────────────────────────
+# 交付物完整性检查（Bug2：验收无数字=pass 空转 → 空壳报告也判 FAIL）
+# ─────────────────────────────────────────────
+
+# 数据缺失占位标记：报告出现这些字样说明关键数据未披露
+_PLACEHOLDER_MARKERS = (
+    "未披露", "未获取", "待补充", "数据缺失", "待获取", "暂缺", "暂无", "无数据",
+)
+
+# 列表/排名类交付要求关键词（命中后必须提供数据表格）
+_LIST_REQUIREMENT_KEYWORDS = (
+    "列表", "前十", "排名", "排行", "明细", "清单", "top", "表格", "榜单",
+)
+
+# 数字型交付要求关键词（用于 details 标注，辅助人工判断）
+_NUMERIC_REQUIREMENT_KEYWORDS = (
+    "成交量", "成交额", "金额", "市值", "营收", "净利润", "数据", "数字",
+)
+
+
+def check_deliverable_completeness(report: str, goal: str) -> dict:
+    """交付物完整性检查：从 goal 提取关键交付要求（列表/前十/排名/表格类
+    与数字要求），检查报告是否被数据缺失占位标记填满、是否缺少必需表格。
+
+    规则：
+    - 报告含未披露/未获取/待补充/数据缺失等占位标记 ≥3 处 → FAIL；
+    - goal 要求列表/前十/排名且报告无任何表格，或表格内容全为占位 → FAIL；
+    - 正常完整报告（含真实数据表格/无列表要求）→ pass。
+    """
+    r = str(report or "")
+    g = str(goal or "").lower()
+    placeholder_count = sum(r.count(m) for m in _PLACEHOLDER_MARKERS)
+    list_required = any(k in g for k in _LIST_REQUIREMENT_KEYWORDS)
+    numeric_required = any(k in g for k in _NUMERIC_REQUIREMENT_KEYWORDS)
+
+    table_lines = [
+        ln for ln in r.splitlines()
+        if ln.strip().startswith("|") and ln.count("|") >= 2
+    ]
+    has_table = bool(table_lines)
+    table_all_placeholder = False
+    if has_table:
+        # 定位 Markdown 分隔行，其前一行视为表头（不参与占位判定）
+        sep_idx = -1
+        for i, ln in enumerate(table_lines):
+            cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+            if all(not c or set(c) <= {"-", ":", "—"} for c in cells):
+                sep_idx = i
+                break
+        data_rows: list[list[str]] = []
+        for i, ln in enumerate(table_lines):
+            if i in (sep_idx, sep_idx - 1) and sep_idx > 0:
+                continue
+            cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+            # 跳过 Markdown 表头/分隔行（---/:--: 等）
+            if all(not c or set(c) <= {"-", ":", "—"} for c in cells):
+                continue
+            data_rows.append(cells)
+        filled = [c for row in data_rows for c in row if c]
+        if filled:
+            table_all_placeholder = all(
+                any(m in c for m in _PLACEHOLDER_MARKERS) for c in filled
+            )
+
+    if placeholder_count >= 3:
+        passed = False
+        detail = (
+            f"交付物不完整：报告含 {placeholder_count} 处数据缺失占位"
+            "（未披露/未获取/待补充/数据缺失）"
+        )
+    elif list_required and (not has_table or table_all_placeholder):
+        passed = False
+        detail = (
+            "交付物不完整：目标要求列表/前十/排名，但报告"
+            + ("没有可用的数据表格" if not has_table else "表格内容全部为占位/未披露")
+        )
+    else:
+        passed = True
+        detail = (
+            f"交付物完整性：占位标记 {placeholder_count} 处"
+            + ("，含数据表格" if has_table else "，无表格要求或表格非必需")
+            + ("，目标要求列表/前十" if list_required else "")
+            + ("，目标含数字要求" if numeric_required else "")
+        )
+    return {
+        "pass": passed,
+        "details": detail,
+        "placeholder_count": placeholder_count,
+        "has_table": has_table,
+        "table_all_placeholder": table_all_placeholder,
+        "list_required": list_required,
+        "numeric_required": numeric_required,
+    }
+
+
+# ─────────────────────────────────────────────
 # Checklist runner
 # ─────────────────────────────────────────────
 
@@ -934,6 +1029,9 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace) -> dict
         report_text, sources, goal,
     )
     checks["source_labeling"] = check_source_labeling(report_text, sources)
+    checks["deliverable_completeness"] = check_deliverable_completeness(
+        report_text, goal,
+    )
     gaps = [c["details"] for c in checks.values() if not c["pass"]]
     overall = "pass" if not gaps else "fail"
     # A2：汇总各检查项的域名媒体补录建议，供 GET /api/acceptance/suggestions 读取

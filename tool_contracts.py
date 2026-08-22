@@ -23,6 +23,7 @@ TOOL_REGISTRY = [
         "parameters": {"instruction": "含 [URL: ...]"},
         "returns": "JSON：{\"status\": \"success|failed\", \"url\": \"\", \"title\": \"\", \"text\": \"正文\"}",
         "required": ["status"],
+        "status_failure_values": ["failed"],
     },
     {
         "name": "data_loader",
@@ -30,6 +31,7 @@ TOOL_REGISTRY = [
         "parameters": {"instruction": "数据 URL 或数据集名"},
         "returns": "JSON：{\"status\": \"downloaded|loaded_sklearn|failed\", \"path\": \"\", \"rows\": 0, \"cols\": 0}",
         "required": ["status"],
+        "status_failure_values": ["failed"],
     },
     {
         "name": "data_analyzer",
@@ -37,6 +39,7 @@ TOOL_REGISTRY = [
         "parameters": {"instruction": "含 [Data: 路径]"},
         "returns": "JSON：{\"status\": \"success|failed\", \"charts\": [\"路径\"]}",
         "required": ["status"],
+        "status_failure_values": ["failed"],
     },
     {
         "name": "model_trainer",
@@ -44,6 +47,7 @@ TOOL_REGISTRY = [
         "parameters": {"instruction": "含 [Data: 路径]"},
         "returns": "JSON：{\"status\": \"success|failed\", \"models\": {\"模型\": {\"RMSE\": 0, \"R2\": 0}}}",
         "required": ["status", "models"],
+        "status_failure_values": ["failed"],
     },
     {
         "name": "content_summary",
@@ -67,6 +71,7 @@ TOOL_REGISTRY = [
         "parameters": {"instruction": "代码要求与验收标准"},
         "returns": "可运行代码文件（.py/.html）或 JSON {\"status\": \"success\", \"path\": \"\"}",
         "required": [],
+        "status_failure_values": ["failed"],
     },
     {
         "name": "file_io",
@@ -74,6 +79,7 @@ TOOL_REGISTRY = [
         "parameters": {"instruction": "读写要求与文件名"},
         "returns": "JSON：{\"status\": \"success|failed\", \"path\": \"\", \"content\": \"\"}",
         "required": ["status"],
+        "status_failure_values": ["failed"],
     },
     {
         "name": "package",
@@ -111,12 +117,13 @@ def tool_catalog_text() -> str:
 
 
 def _parse(raw) -> object:
-    if isinstance(raw, dict):
+    if isinstance(raw, (dict, list)):
         return raw
+    text = str(raw if raw is not None else "")
     try:
-        return json.loads(str(raw or ""))
+        return json.loads(text)
     except Exception:
-        return str(raw or "")
+        return text
 
 
 def validate_result(capability: str, raw) -> tuple[bool, list[str]]:
@@ -138,6 +145,24 @@ def validate_result(capability: str, raw) -> tuple[bool, list[str]]:
                     issues.append(f"列表元素缺少 {f}")
                     break
     elif isinstance(data, dict):
+        # 失败语义：返回 status 的能力（data_analyzer/data_loader/model_trainer
+        # 等）若 status ∈ status_failure_values，即使字段齐全也判契约不通过，
+        # 错误信息必须携带 worker 原始 error 字段，供编排器喂回指令重试。
+        status = str(data.get("status") or "").strip().lower()
+        fail_values = [
+            str(v).strip().lower()
+            for v in (tool.get("status_failure_values") or [])
+        ]
+        if status and fail_values and status in fail_values:
+            err = (
+                data.get("error")
+                or data.get("message")
+                or data.get("detail")
+                or ""
+            )
+            issues.append(
+                f"能力执行失败（status={status}）：{str(err)[:200] or '无错误详情'}"
+            )
         for f in tool.get("required", []):
             if f == "models":
                 if not isinstance(data.get(f), dict) or not data[f]:

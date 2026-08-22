@@ -41,6 +41,22 @@ from ws_helpers import push_progress
 
 logger = logging.getLogger(__name__)
 
+# 行情类目标关键词：命中后 web_search 指令追加财经行情站点限定，
+# 并允许搜索代理把"今日 A股 成交量 排行 前十 东方财富"加入查询变体。
+_MARKET_SEARCH_KEYWORDS = (
+    "成交量排行", "成交额排行", "成交量前十", "成交额前十",
+    "涨停", "跌幅榜", "a股今日", "今日a股", "前十股", "排名榜",
+    "股票排行", "a股排行", "股票排名", "成交量榜", "成交额榜",
+)
+
+_MARKET_SEARCH_SUFFIX = (
+    "\n[行情数据源限定] 本任务为 A股 行情排行类目标："
+    "仅检索东方财富、同花顺、新浪财经、雪球等财经行情站点；"
+    "禁止 YouTube、直播/短视频平台、百度百科及美股平台来源。"
+    "查询词模板：今日 A股 成交量 排行 前十 东方财富"
+    "（成交额口径用：今日 A股 成交额 排行 前十 东方财富）。"
+)
+
 
 def _loads_json_loose(text: str) -> dict:
     """先严格解析，失败后允许字符串内未转义控制字符（LLM 常在长指令中插入字面换行）。"""
@@ -1524,6 +1540,37 @@ class OrchestratorV2:
                         })
                     except (TypeError, ValueError):
                         continue
+            elif source == "eastmoney_ranking":
+                metric = str(payload.get("metric") or "amount")
+                series = "A股成交额排行" if metric != "volume" else "A股成交量排行"
+                for row in (payload.get("rows") or [])[:20]:
+                    label = f"{row.get('rank')}.{row.get('name')}"
+                    if metric == "volume":
+                        v = row.get("volume_wan_hand")
+                        unit = "万手"
+                    else:
+                        v = row.get("amount_yi")
+                        unit = "亿元"
+                    if v is not None:
+                        rows.append({
+                            "type": "market_size",
+                            "label": label,
+                            "value": float(v),
+                            "unit": unit,
+                            "source": "eastmoney_ranking",
+                            "caliber": "东方财富行情中心实时排行",
+                            "series": series,
+                        })
+                    if row.get("change_pct") is not None:
+                        rows.append({
+                            "type": "market_size",
+                            "label": f"{label}涨跌幅",
+                            "value": float(row["change_pct"]),
+                            "unit": "%",
+                            "source": "eastmoney_ranking",
+                            "caliber": "东方财富行情中心实时排行",
+                            "series": f"{series}涨跌幅",
+                        })
             if rows:
                 proj = task_project_dir(task_id, project)
                 clean_path = proj / "clean_chart_data.json"
@@ -1564,7 +1611,7 @@ class OrchestratorV2:
     @staticmethod
     def _structured_injection(task_id: str) -> str:
         """构造报告/总结步骤的 [结构化数据] 内容块：
-        财务 → financials.json（沿用既有表格）；crypto/macro/news →
+        财务 → financials.json（沿用既有表格）；crypto/macro/news/行情排行 →
         structured_data.json（新通道）。返回空串表示无结构化数据。"""
         try:
             proj = task_project_dir(task_id)
@@ -1670,6 +1717,28 @@ class OrchestratorV2:
                     block_title = (
                         f"[结构化数据]（新闻列表，Google News RSS，"
                         f"查询：{query or '默认'}{time_hint}）"
+                    )
+                elif source == "eastmoney_ranking":
+                    metric = str(payload.get("metric") or "amount")
+                    title = (
+                        "A股成交量排行（前十）"
+                        if metric == "volume" else "A股成交额排行（前十）"
+                    )
+                    lines = [
+                        "| 排名 | 代码 | 名称 | 最新价 | 涨跌幅% | "
+                        "成交量(万手) | 成交额(亿元) | 换手率% |",
+                        "|---|---|---|---|---|---|---|---|",
+                    ]
+                    for row in (payload.get("rows") or [])[:10]:
+                        lines.append(
+                            f"| {row.get('rank')} | {row.get('code')} | "
+                            f"{row.get('name')} | {row.get('price')} | "
+                            f"{row.get('change_pct')} | "
+                            f"{row.get('volume_wan_hand')} | "
+                            f"{row.get('amount_yi')} | {row.get('turnover_pct')} |"
+                        )
+                    block_title = (
+                        f"[结构化数据]（{title}，东方财富行情中心{time_hint}）"
                     )
                 if lines:
                     return (
@@ -5827,6 +5896,7 @@ print("charts generated")
         """把用户目标注入所有步骤（尤其模板步骤），防止模板指令与目标跑偏。"""
         if not goal:
             return steps
+        market_suffix = _MARKET_SEARCH_SUFFIX if self._is_market_goal(goal) else ""
         for s in steps:
             ins = str(s.get("instruction", ""))
             if "用户目标：" not in ins[:80]:
@@ -5834,6 +5904,12 @@ print("charts generated")
                     f"用户目标：{goal[:300]}\n"
                     f"原始指令：{ins}"
                 )
+            if (
+                s.get("capability") == "web_search"
+                and market_suffix
+                and "行情数据源限定" not in s["instruction"]
+            ):
+                s["instruction"] += market_suffix
         return steps
 
     def _inject_skills(self, steps: list[dict], goal: str) -> list[dict]:
@@ -5895,7 +5971,7 @@ print("charts generated")
         attempt = 0
         # 输出契约校验（对标 3.1 引导-校验-重试）：契约不通过视为失败，
         # 并把校验错误喂回指令重试，而不是盲目重发
-        issue = self._contract_issue(step, result)
+        issue = self._contract_issue(goal, step, result)
         tried: list[str] = []
         while (result.get("status") == "FAILED" or issue) and attempt < self._max_retry:
             attempt += 1
@@ -5918,6 +5994,10 @@ print("charts generated")
                     "（如 site: 官方域名、具体年份、具体指标词），"
                     "禁止原样重复上次查询。"
                     + (
+                        f"\n【行情目标换词】{_MARKET_SEARCH_SUFFIX.strip()}"
+                        if self._is_market_goal(goal) else ""
+                    )
+                    + (
                         f"\n【输出契约校验失败】{issue}，请修正输出格式后重新执行。"
                         if issue else ""
                     )
@@ -5928,7 +6008,16 @@ print("charts generated")
                     f"【输出契约校验失败】{issue}，请修正输出格式后重新执行。"
                 )
             result = self._dispatch(amended, task_id)
-            issue = self._contract_issue(amended, result)
+            issue = self._contract_issue(goal, amended, result)
+        # 契约在重试耗尽后仍不通过：不得把 SUCCESS 空转当成功，
+        # 标记为失败让下方重规划路径接管（或如实返回 FAILED）。
+        if issue and result.get("status") != "FAILED":
+            result = dict(result)
+            result["status"] = "FAILED"
+            result["contract_violation"] = True
+            result["result"] = (
+                str(result.get("result") or "") + f"\n\n[CONTRACT_VIOLATION] {issue}"
+            ).strip()
         alt = None
         alt_result = None
         fail_result = None
@@ -5955,16 +6044,96 @@ print("charts generated")
                 logger.warning("step failure diagnosis write failed: %s", str(exc)[:120])
         return result
 
-    def _contract_issue(self, step: dict, result: dict) -> str:
-        """按能力返回契约校验步骤结果；返回问题文本（空串=通过）。"""
+    def _contract_issue(self, goal: str, step: dict, result: dict) -> str:
+        """按能力返回契约校验步骤结果；返回问题文本（空串=通过）。
+        web_search 额外做相关性校验：返回结果全部与目标无关时也判为失败，
+        触发换查询词重试（复用 _dispatch_step_safe 的搜索重试分支）。"""
         try:
             from tool_contracts import validate_result
             ok, issues = validate_result(
                 step.get("capability"), result.get("result")
             )
-            return "；".join(issues) if not ok else ""
+            if not ok:
+                return "；".join(issues)
+            if step.get("capability") == "web_search":
+                try:
+                    data = json.loads(str(result.get("result") or ""))
+                except Exception:
+                    data = None
+                if isinstance(data, list):
+                    irr = self._search_results_irrelevant(goal, data)
+                    if irr:
+                        return irr
+            return ""
         except Exception:
             return ""
+
+    @staticmethod
+    def _is_market_goal(goal: str) -> bool:
+        """是否行情排行类目标：命中专用关键词，或"排行/前十/榜单"与
+        A股/股票/沪深/今日 语境同时出现。"""
+        g = str(goal or "").lower()
+        if any(k in g for k in _MARKET_SEARCH_KEYWORDS):
+            return True
+        if any(k in g for k in ("排行", "排名", "前十", "榜单")):
+            return any(
+                k in g for k in ("a股", "股票", "沪深", "股市", "今日")
+            )
+        return False
+
+    @staticmethod
+    def _goal_search_tokens(goal: str) -> list[str]:
+        """从目标提取通用相关性 token：中文 3/4 字滑窗 + 英文词（≥4 字符），
+        剔除包装词片段，用于"搜索返回全部无关来源"判定。"""
+        g = str(goal or "").lower()
+        out: set[str] = set()
+        for run in re.findall(r"[\u4e00-\u9fff]+", g):
+            for size in (4, 3):
+                for i in range(len(run) - size + 1):
+                    tok = run[i:i + size]
+                    if not any(w in tok for w in (
+                        "任务目标", "用户目标", "原始指令", "验收", "输出",
+                        "生成", "完成", "要求",
+                    )):
+                        out.add(tok)
+        out.update(
+            w.lower()
+            for w in re.findall(r"[a-z][a-z0-9-]{3,}", g)
+            if w.lower() not in ("the", "and", "with", "from", "that")
+        )
+        return sorted(out)[:20]
+
+    @staticmethod
+    def _search_results_irrelevant(goal: str, results: list) -> str:
+        """搜索结果相关性判定：返回问题文本（空串=有有效结果）。
+        行情类目标要求标题/摘要命中 A股/成交/排行 等关键词；
+        通用目标要求至少一个结果命中目标关键词片段。"""
+        if not results:
+            return ""
+        hay = " ".join(
+            f"{it.get('title') or ''} {it.get('snippet') or ''} {it.get('url') or ''}"
+            for it in results if isinstance(it, dict)
+        ).lower()
+        if OrchestratorV2._is_market_goal(goal):
+            hits = [
+                k for k in ("a股", "成交", "排行", "排名", "涨停", "跌幅", "前十", "股票")
+                if k in hay
+            ]
+            if hits:
+                return ""
+            return (
+                "搜索结果均为无关来源（标题/摘要未命中 A股/成交/排行 等行情关键词），"
+                "请更换查询词并限定财经行情站点（东方财富/同花顺/新浪财经/雪球）"
+            )
+        tokens = OrchestratorV2._goal_search_tokens(goal)
+        if not tokens:
+            return ""
+        if any(t in hay for t in tokens):
+            return ""
+        return (
+            "搜索结果均为无关来源（标题/摘要未命中目标关键词），"
+            "请更换查询词组合/增加限定条件"
+        )
 
     @staticmethod
     def _classify_step_error(capability: str, result: dict, issue: str = "") -> str:

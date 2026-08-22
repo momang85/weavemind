@@ -912,5 +912,183 @@ class TestSystemConfigHotReload(unittest.TestCase):
         self.assertTrue(steps)
 
 
+class TestDispatchContractRetry(unittest.TestCase):
+    """Bug1+Bug3：契约失败语义接入编排器重试；搜索无关结果触发换词重试。"""
+
+    def _make_o(self):
+        o = make_orch(_max_retry=1, _replan_depth=1)
+        o._now_iso = lambda: "t"
+        return o
+
+    def test_status_success_no_retry(self):
+        o = self._make_o()
+        calls = {"n": 0}
+
+        def dispatch(step, task_id):
+            calls["n"] += 1
+            return {
+                "task_id": step["step_id"], "status": "SUCCESS",
+                "result": json.dumps({"status": "success", "charts": ["a.png"]}),
+            }
+
+        o._dispatch = dispatch
+        step = {"step_id": "1", "capability": "data_analyzer",
+                "instruction": "分析", "timeout": 60}
+        res = o._dispatch_step_safe(
+            "目标", step, "t-ok-1", {"replan_used": 0},
+        )
+        self.assertEqual(res["status"], "SUCCESS")
+        self.assertEqual(calls["n"], 1)
+
+    def test_status_failed_triggers_retry_and_succeeds(self):
+        import orchestrator_v2 as ov2
+
+        o = self._make_o()
+        calls = {"n": 0}
+
+        def dispatch(step, task_id):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return {
+                    "task_id": step["step_id"], "status": "SUCCESS",
+                    "result": json.dumps(
+                        {"status": "failed", "error": "no data"},
+                    ),
+                }
+            return {
+                "task_id": step["step_id"], "status": "SUCCESS",
+                "result": json.dumps(
+                    {"status": "success", "charts": ["a.png"]},
+                ),
+            }
+
+        o._dispatch = dispatch
+        step = {"step_id": "1", "capability": "data_analyzer",
+                "instruction": "分析", "timeout": 60}
+        with mock.patch.object(ov2.time, "sleep"):
+            res = o._dispatch_step_safe(
+                "目标", step, "t-retry-1", {"replan_used": 0},
+            )
+        self.assertEqual(res["status"], "SUCCESS")
+        self.assertEqual(calls["n"], 2, "status=failed 必须触发契约重试")
+
+    def test_status_failed_after_retries_not_treated_as_success(self):
+        import orchestrator_v2 as ov2
+
+        o = self._make_o()
+
+        def dispatch(step, task_id):
+            return {
+                "task_id": step["step_id"], "status": "SUCCESS",
+                "result": json.dumps(
+                    {"status": "failed", "error": "still bad"},
+                ),
+            }
+
+        o._dispatch = dispatch
+        o._replan_step = lambda goal, step, error, task_id: None
+        step = {"step_id": "1", "capability": "data_analyzer",
+                "instruction": "分析", "timeout": 60}
+        with mock.patch.object(ov2.time, "sleep"):
+            res = o._dispatch_step_safe(
+                "目标", step, "t-bad-1", {"replan_used": 0},
+            )
+        self.assertEqual(res["status"], "FAILED")
+        self.assertTrue(res.get("contract_violation"))
+
+    def test_search_irrelevant_triggers_retry_with_market_query(self):
+        import orchestrator_v2 as ov2
+
+        o = self._make_o()
+        calls = {"n": 0, "instructions": []}
+        irrelevant = [
+            {"title": "《演唱会》- YouTube",
+             "url": "https://youtube.com/watch?v=1", "snippet": "视频"},
+            {"title": "moomoo 开户",
+             "url": "https://moomoo.com/a", "snippet": "美股"},
+            {"title": "百度百科_白酒",
+             "url": "https://baike.baidu.com/item/x", "snippet": "词条"},
+        ]
+        relevant = [
+            {"title": "东方财富：今日A股成交额排名前十",
+             "url": "https://eastmoney.com/a", "snippet": "A股 成交 排行"},
+        ]
+
+        def dispatch(step, task_id):
+            calls["n"] += 1
+            calls["instructions"].append(step.get("instruction", ""))
+            return {
+                "task_id": step["step_id"], "status": "SUCCESS",
+                "result": json.dumps(
+                    irrelevant if calls["n"] == 1 else relevant,
+                    ensure_ascii=False,
+                ),
+            }
+
+        o._dispatch = dispatch
+        step = {"step_id": "1", "capability": "web_search",
+                "instruction": "搜索", "timeout": 60}
+        with mock.patch.object(ov2.time, "sleep"):
+            res = o._dispatch_step_safe(
+                "今日A股总成交量前十股", step, "t-search-1",
+                {"replan_used": 0},
+            )
+        self.assertEqual(res["status"], "SUCCESS")
+        self.assertEqual(calls["n"], 2, "无关结果必须触发换词重试")
+        self.assertIn("搜索重试", calls["instructions"][1])
+        self.assertIn("行情目标换词", calls["instructions"][1])
+        self.assertIn("东方财富", calls["instructions"][1])
+
+
+class TestMarketSearchInstruction(unittest.TestCase):
+    """Bug3：行情类目标给 web_search 步骤追加财经站点限定。"""
+
+    def test_market_goal_adds_site_restriction_to_search_steps(self):
+        o = make_orch()
+        steps = [
+            {"step_id": "1", "capability": "web_search",
+             "instruction": "搜索排行"},
+            {"step_id": "2", "capability": "content_summary",
+             "instruction": "总结"},
+        ]
+        out = o._inject_goal_into_steps(steps, "今日A股总成交量前十股")
+        self.assertIn("东方财富", out[0]["instruction"])
+        self.assertIn("同花顺", out[0]["instruction"])
+        self.assertIn("新浪财经", out[0]["instruction"])
+        self.assertIn("雪球", out[0]["instruction"])
+        self.assertIn("禁止 YouTube", out[0]["instruction"])
+        self.assertIn("查询词模板", out[0]["instruction"])
+        self.assertNotIn("行情数据源限定", out[1]["instruction"])
+
+    def test_non_market_goal_unchanged(self):
+        o = make_orch()
+        steps = [{"step_id": "1", "capability": "web_search",
+                  "instruction": "搜索"}]
+        out = o._inject_goal_into_steps(steps, "调研新能源汽车市场现状")
+        self.assertNotIn("行情数据源限定", out[0]["instruction"])
+
+    def test_search_results_irrelevant_detection(self):
+        o = make_orch()
+        irrelevant = [
+            {"title": "《演唱会》- YouTube",
+             "url": "https://youtube.com/watch?v=1", "snippet": "视频"},
+            {"title": "moomoo 开户",
+             "url": "https://moomoo.com/a", "snippet": "美股"},
+            {"title": "百度百科_白酒",
+             "url": "https://baike.baidu.com/item/x", "snippet": "词条"},
+        ]
+        relevant = [
+            {"title": "东方财富：今日A股成交额排名前十",
+             "url": "https://eastmoney.com/a", "snippet": "A股 成交 排行"},
+        ]
+        self.assertTrue(
+            o._search_results_irrelevant("今日A股总成交量前十股", irrelevant),
+        )
+        self.assertEqual(
+            o._search_results_irrelevant("今日A股总成交量前十股", relevant),
+            "",
+        )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
