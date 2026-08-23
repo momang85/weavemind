@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import urllib.request
 import urllib.error
 from typing import Any
@@ -37,6 +38,33 @@ EMBEDDING_API_KEY = (
     or os.environ.get("LLM_API_KEY")
     or os.environ.get("OPENAI_API_KEY")
     or ""
+)
+
+
+def _env_int(name: str, default: int) -> int:
+    """安全读取整型环境变量（非法值回退默认）。"""
+    try:
+        return int(os.environ.get(name, ""))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    """安全读取浮点环境变量（非法值回退默认）。"""
+    try:
+        return float(os.environ.get(name, ""))
+    except (TypeError, ValueError):
+        return default
+
+
+# 记忆治理可配置项（均可被环境变量覆盖）
+MEMORY_STRATEGY_TTL_DAYS = _env_int("MEMORY_STRATEGY_TTL_DAYS", 90)
+MEMORY_CONVERSATIONS_MAX = _env_int("MEMORY_CONVERSATIONS_MAX", 2000)
+MEMORY_STRATEGY_DEDUP_THRESHOLD = _env_float(
+    "MEMORY_STRATEGY_DEDUP_THRESHOLD", 0.95
+)
+MEMORY_CONVERSATION_DEDUP_HOURS = _env_float(
+    "MEMORY_CONVERSATION_DEDUP_HOURS", 24.0
 )
 
 
@@ -152,13 +180,27 @@ class MemoryManager:
         self._strategies = self._client.get_or_create_collection(
             name=self.COLLECTION_STRATEGIES,
             embedding_function=self._embedding_fn,
-            metadata={"description": "成功任务的完整规划路径"},
+            # 显式声明 HNSW 距离空间为 L2（Chroma 默认），
+            # 去重/注入的距离阈值语义据此保持一致
+            metadata={"description": "成功任务的完整规划路径", "hnsw:space": "l2"},
         )
         self._prompt_refinements = self._client.get_or_create_collection(
             name=self.COLLECTION_PROMPT_REFINEMENTS,
             embedding_function=self._embedding_fn,
             metadata={"description": "反思/自迭代产生的提示词改进记录（进化系统）"},
         )
+
+        # 进程内观测计数器（命中率统计；Redis 持久化留待后续）
+        self._injections = 0
+        self._inject_hits = 0
+        self._expired_purged = 0
+
+        # 启动时惰性治理：清理过期策略 + 收敛对话上限（失败仅记日志，不影响启动）
+        try:
+            self.purge_expired()
+            self.enforce_conversation_cap()
+        except Exception as exc:
+            logger.warning("Lazy memory cleanup at startup failed: %s", str(exc)[:120])
 
         logger.info(
             "MemoryManager initialized at '%s'. "
@@ -186,6 +228,7 @@ class MemoryManager:
             格式化的上下文文本，可直接追加到 LLM 的 user_prompt 前面。
             如果无相关记忆，返回空字符串。
         """
+        self._injections += 1
         parts: list[str] = []
 
         # 查询历史对话
@@ -216,10 +259,14 @@ class MemoryManager:
             )
             strat_docs = strat_results.get("documents", [[]])[0]
             strat_dist = strat_results.get("distances", [[]])[0]
-            relevant = [
-                doc for doc, dist in zip(strat_docs, strat_dist)
-                if doc and doc.strip() and dist <= self._similarity_threshold
-            ]
+            strat_metas = strat_results.get("metadatas", [[]])[0]
+            relevant = []
+            for doc, dist, meta in zip(strat_docs, strat_dist, strat_metas):
+                if not doc or not doc.strip() or dist > self._similarity_threshold:
+                    continue
+                if _is_expired(meta):
+                    continue  # 过期策略不注入（惰性过滤）
+                relevant.append(doc)
             if relevant:
                 strategy = relevant[0].strip()
                 parts.append(f"## 类似任务的成功解决路径，可供参考\n{strategy}")
@@ -253,6 +300,7 @@ class MemoryManager:
                 return ""
 
         context = "\n\n".join(parts)
+        self._inject_hits += 1
         logger.info(
             "Injected context for goal '%s': %d chars",
             current_goal[:40],
@@ -362,6 +410,8 @@ class MemoryManager:
         goal: str,
         plan_steps: list[dict[str, Any]],
         final_summary: str,
+        acceptance_summary: dict | None = None,
+        task_id: str = "",
     ) -> None:
         """任务成功执行后，将经验沉淀到记忆中。
 
@@ -369,39 +419,75 @@ class MemoryManager:
             goal: 用户原始目标。
             plan_steps: 各步骤的信息列表，每项含 capability, instruction, status。
             final_summary: 最终报告文本。
+            acceptance_summary: 验收摘要（{overall, gaps}）。验收 fail 时只沉淀
+                对话（追溯用），跳过策略沉淀，避免空壳报告污染 successful_strategies。
+            task_id: 任务 ID（写入策略元数据，便于追溯）。
         """
         # 生成策略模式描述
         strategy_pattern = self._extract_strategy_pattern(goal, plan_steps, final_summary)
 
-        # 存入 conversations 集合
+        # 存入 conversations 集合（验收 fail 也记录对话；24h 内同目标去重）
         conversation_entry = f"目标: {goal}"
-        try:
-            self._conversations.add(
-                documents=[conversation_entry],
-                metadatas=[{
-                    "timestamp": _now_iso(),
-                    "goal": goal[:200],
-                }],
-                ids=[f"conv-{_now_epoch()}"],
+        if self._find_recent_conversation(goal):
+            logger.info(
+                "Conversation duplicate within %.0fh, skipped: %s",
+                MEMORY_CONVERSATION_DEDUP_HOURS, goal[:60],
             )
-            logger.info("Conversation memory stored: %s", goal[:60])
-        except Exception as exc:
-            logger.warning("Failed to store conversation: %s", exc)
+        else:
+            try:
+                self._conversations.add(
+                    documents=[conversation_entry],
+                    metadatas=[{
+                        "timestamp": _now_iso(),
+                        "goal": goal[:200],
+                    }],
+                    ids=[f"conv-{_now_epoch()}"],
+                )
+                logger.info("Conversation memory stored: %s", goal[:60])
+            except Exception as exc:
+                logger.warning("Failed to store conversation: %s", exc)
 
-        # 存入 strategies 集合
+        # 对话上限治理（超出后删最旧 10%）
+        self.enforce_conversation_cap()
+
+        # P0 验收准入：存在验收报告且 overall != pass → 跳过策略沉淀
+        if acceptance_summary is not None and (
+            acceptance_summary.get("overall") or ""
+        ) != "pass":
+            logger.warning(
+                "Acceptance failed (overall=%s), skip strategy consolidation: %s",
+                (acceptance_summary or {}).get("overall"), goal[:60],
+            )
+            return
+
+        # 存入 strategies 集合（P1 去重：相似策略更新而非新增）
         try:
             # 提取目标关键词（简单规则：取 goal 前100字符作为关键词）
             keywords = goal[:100]
-            self._strategies.add(
-                documents=[strategy_pattern],
-                metadatas=[{
-                    "goal_keywords": keywords,
-                    "timestamp": _now_iso(),
-                    "step_count": len(plan_steps),
-                }],
-                ids=[f"strat-{_now_epoch()}"],
+            now_iso = _now_iso()
+            new_meta = {
+                "goal_keywords": keywords,
+                "timestamp": now_iso,
+                "step_count": len(plan_steps),
+                "task_id": str(task_id)[:40],
+                "expires_at": _expires_at_iso(),
+            }
+            existing_id = self._find_similar_strategy(
+                strategy_pattern, threshold=MEMORY_STRATEGY_DEDUP_THRESHOLD
             )
-            logger.info("Strategy memory stored (%d chars)", len(strategy_pattern))
+            if existing_id:
+                self._update_strategy_metadata(existing_id, new_meta)
+                logger.info(
+                    "Similar strategy %s found, refreshed instead of inserting: %s",
+                    existing_id, goal[:60],
+                )
+            else:
+                self._strategies.add(
+                    documents=[strategy_pattern],
+                    metadatas=[new_meta],
+                    ids=[f"strat-{_now_epoch()}"],
+                )
+                logger.info("Strategy memory stored (%d chars)", len(strategy_pattern))
         except Exception as exc:
             logger.warning("Failed to store strategy: %s", exc)
 
@@ -469,6 +555,114 @@ class MemoryManager:
 
         return pattern
 
+    def _find_recent_conversation(self, goal: str, hours: float | None = None) -> bool:
+        """对话去重：同 goal 在最近 N 小时内已存在则返回 True（防连跑污染）。"""
+        hours = MEMORY_CONVERSATION_DEDUP_HOURS if hours is None else hours
+        try:
+            res = self._conversations.get(
+                where={"goal": goal[:200]}, include=["metadatas"],
+            )
+            metas = res.get("metadatas") or []
+            now_ts = time.time()
+            for m in metas:
+                ts = _parse_iso((m or {}).get("timestamp", ""))
+                if ts is not None and now_ts - ts <= hours * 3600:
+                    return True
+        except Exception as exc:
+            logger.warning("Conversation dedup check failed: %s", str(exc)[:120])
+        return False
+
+    def _find_similar_strategy(
+        self, pattern: str, threshold: float = 0.95,
+    ) -> str | None:
+        """策略向量去重：查询最相似策略，L2 距离 ≤ threshold 视为重复。
+
+        距离语义说明：Chroma 默认 HNSW 距离空间为 L2（完全一致≈0，越小越相似），
+        因此直接用「距离 ≤ 阈值」判定稳定可测，无需再归一化。
+        空库或查询异常返回 None（降级为新增）。
+        """
+        try:
+            res = self._strategies.query(
+                query_texts=[pattern],
+                n_results=1,
+                include=["distances"],
+            )
+            dists = res.get("distances", [[]])[0] or []
+            ids = res.get("ids", [[]])[0] or []
+            if not dists or not ids:
+                return None
+            distance = float(dists[0])
+            if distance <= threshold:
+                return str(ids[0])
+            return None
+        except Exception as exc:
+            logger.warning("Strategy similarity check failed: %s", str(exc)[:120])
+            return None
+
+    def _update_strategy_metadata(self, strategy_id: str, new_meta: dict) -> bool:
+        """合并更新既有策略元数据（保留旧字段，刷新 timestamp/expires_at 等）。"""
+        try:
+            res = self._strategies.get(ids=[strategy_id], include=["metadatas"])
+            old = ((res or {}).get("metadatas") or [{}])[0] or {}
+            merged = dict(old or {})
+            merged.update(new_meta)
+            self._strategies.update(ids=[strategy_id], metadatas=[merged])
+            return True
+        except Exception as exc:
+            logger.warning("Strategy metadata update failed: %s", str(exc)[:120])
+            return False
+
+    def purge_expired(self) -> int:
+        """批量清理过期策略；返回删除条数并累计到 expired_purged 观测计数。"""
+        try:
+            res = self._strategies.get(include=["metadatas"])
+            ids = res.get("ids") or []
+            metas = res.get("metadatas") or []
+            expired = [
+                doc_id for doc_id, meta in zip(ids, metas) if _is_expired(meta)
+            ]
+            if not expired:
+                return 0
+            deleted = self.delete_by_ids(self._strategies, expired)
+            self._expired_purged += deleted
+            if deleted:
+                logger.info("Purged %d expired strategies", deleted)
+            return deleted
+        except Exception as exc:
+            logger.warning("Expired strategy purge failed: %s", str(exc)[:120])
+            return 0
+
+    def enforce_conversation_cap(self, max_count: int | None = None) -> int:
+        """对话超上限治理：按 timestamp 升序删除最旧 10%（至少 1 条）。"""
+        try:
+            limit = MEMORY_CONVERSATIONS_MAX if max_count is None else max_count
+            total = self._conversations.count()
+            if total <= limit:
+                return 0
+            res = self._conversations.get(include=["metadatas"])
+            ids = res.get("ids") or []
+            metas = res.get("metadatas") or []
+            items = list(zip(ids, metas))
+
+            def _sort_key(item: tuple) -> float:
+                ts = _parse_iso((item[1] or {}).get("timestamp", ""))
+                # 无时间戳视为最旧，优先清理
+                return ts if ts is not None else -1.0
+
+            items.sort(key=_sort_key)
+            n_delete = max(1, int((len(items) or total) * 0.1))
+            oldest_ids = [item[0] for item in items[:n_delete]]
+            deleted = self.delete_by_ids(self._conversations, oldest_ids)
+            if deleted:
+                logger.info(
+                    "Conversation cap: %d > %d, deleted %d oldest",
+                    total, limit, deleted,
+                )
+            return deleted
+        except Exception as exc:
+            logger.warning("Conversation cap enforcement failed: %s", str(exc)[:120])
+            return 0
+
     # ------------------------------------------------------------------
     # 统计信息
     # ------------------------------------------------------------------
@@ -484,10 +678,29 @@ class MemoryManager:
             logger.warning("Failed to get memory stats: %s", exc)
             return {"conversations": -1, "strategies": -1}
 
+    def memory_health(self) -> dict[str, Any]:
+        """返回记忆健康度观测：注入/命中计数、命中率、集合规模、过期清理累计。
+
+        命中定义：inject_context 返回非空上下文（检索到至少一条相关记忆）。
+        计数为进程内累计，随服务重启归零（Redis 持久化留待后续）。
+        """
+        stats = self.stats()
+        injections = max(0, self._injections)
+        hits = max(0, self._inject_hits)
+        return {
+            "injections": injections,
+            "hits": hits,
+            "hit_rate": round(hits / injections, 4) if injections else 0.0,
+            "strategy_count": int(stats.get("strategies", 0) or 0),
+            "conversation_count": int(stats.get("conversations", 0) or 0),
+            "expired_purged": max(0, self._expired_purged),
+        }
+
     def list_recent(self, collection, limit: int = 50) -> list[dict]:
         """导出某集合最近的文档（内容 + 元数据），用于可视化。"""
         try:
-            res = collection.get(include=["documents", "metadatas", "ids"], limit=limit)
+            # Chroma 的 get 恒返回 ids，include 只允许 documents/metadatas 等
+            res = collection.get(include=["documents", "metadatas"], limit=limit)
             docs = res.get("documents") or []
             metas = res.get("metadatas") or []
             ids = res.get("ids") or []
@@ -523,7 +736,7 @@ class MemoryManager:
     def delete_where(self, collection, where: dict) -> int:
         """按元数据条件删除（如 {"key": "step:code_execution"}）。"""
         try:
-            res = collection.get(where=where, include=["ids"])
+            res = collection.get(where=where)
             ids = (res or {}).get("ids") or []
             return self.delete_by_ids(collection, ids)
         except Exception as exc:
@@ -532,7 +745,7 @@ class MemoryManager:
 
     def delete_all(self, collection) -> int:
         try:
-            res = collection.get(include=["ids"])
+            res = collection.get()
             ids = (res or {}).get("ids") or []
             return self.delete_by_ids(collection, ids)
         except Exception as exc:
@@ -549,7 +762,7 @@ class MemoryManager:
         if where:
             return self.delete_where(self._prompt_refinements, where)
         try:
-            res = self._prompt_refinements.get(include=["ids"])
+            res = self._prompt_refinements.get()
             return self.delete_by_ids(self._prompt_refinements, (res or {}).get("ids") or [])
         except Exception as exc:
             logger.warning("Prompt refinement purge failed: %s", str(exc)[:120])
@@ -571,3 +784,34 @@ def _now_epoch() -> str:
     """返回当前时间戳（秒），作为唯一 ID 后缀。"""
     import time
     return str(int(time.time() * 1000))
+
+
+def _expires_at_iso(days: int | None = None) -> str:
+    """返回策略过期时间（默认 MEMORY_STRATEGY_TTL_DAYS 天后的 UTC ISO）。"""
+    from datetime import datetime, timedelta, timezone
+    days = MEMORY_STRATEGY_TTL_DAYS if days is None else int(days)
+    return (datetime.now(timezone.utc) + timedelta(days=days)).isoformat()
+
+
+def _parse_iso(value: Any) -> float | None:
+    """解析 ISO 时间戳为 epoch 秒；解析失败返回 None。"""
+    if not value:
+        return None
+    try:
+        from datetime import datetime
+        return datetime.fromisoformat(str(value)).timestamp()
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _is_expired(meta: dict | None, now_ts: float | None = None) -> bool:
+    """判断元数据是否已过期（无 expires_at 字段视为未过期，兼容旧数据）。"""
+    expires_at = (meta or {}).get("expires_at")
+    if not expires_at:
+        return False
+    ts = _parse_iso(expires_at)
+    if ts is None:
+        return False
+    if now_ts is None:
+        now_ts = time.time()
+    return ts <= now_ts

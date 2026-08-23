@@ -792,6 +792,10 @@ def _get_memory_data():
         "stats": _get_memory_stats(),
         "conversations": mem.list_conversations(50) if mem else [],
         "strategies": mem.list_strategies(50) if mem else [],
+        "memory_health": mem.memory_health() if mem else {
+            "injections": 0, "hits": 0, "hit_rate": 0.0,
+            "strategy_count": 0, "conversation_count": 0, "expired_purged": 0,
+        },
     }
 
 def _get_memory_summary(refresh: bool = False) -> dict:
@@ -799,8 +803,13 @@ def _get_memory_summary(refresh: bool = False) -> dict:
     global _memory_summary_cache
     mem = _get_memory_manager()
     stats = _get_memory_stats()
+    health = mem.memory_health() if mem is not None else {
+        "injections": 0, "hits": 0, "hit_rate": 0.0,
+        "strategy_count": 0, "conversation_count": 0, "expired_purged": 0,
+    }
     if mem is None:
-        return {"summary": "", "cached": False, "error": "memory unavailable"}
+        return {"summary": "", "cached": False, "error": "memory unavailable",
+                "memory_health": health}
     convs = mem.list_conversations(30)
     strats = mem.list_strategies(30)
     goals = [str(c.get("metadata", {}).get("goal", ""))[:100] for c in convs if c.get("metadata", {}).get("goal")]
@@ -810,7 +819,8 @@ def _get_memory_summary(refresh: bool = False) -> dict:
     if (not refresh and _memory_summary_cache["text"]
             and sig == _memory_summary_cache["signature"]
             and now - _memory_summary_cache["ts"] < 600):
-        return {"summary": _memory_summary_cache["text"], "cached": True}
+        return {"summary": _memory_summary_cache["text"], "cached": True,
+                "memory_health": health}
 
     fallback = (
         f"我是织光——一支运行在你本地的 AI 团队。我已完成了 {stats.get('conversations', 0)} 项任务、"
@@ -837,7 +847,7 @@ def _get_memory_summary(refresh: bool = False) -> dict:
     if not text:
         text = fallback
     _memory_summary_cache = {"text": text, "ts": now, "signature": sig}
-    return {"summary": text, "cached": False}
+    return {"summary": text, "cached": False, "memory_health": health}
 
 def _append_evolution(result: dict) -> None:
     """记录一轮进化结果（内存 + 落盘），供锦标赛回放。"""
@@ -2264,6 +2274,15 @@ class Handler(BaseHTTPRequestHandler):
             mtype = str(body.get("type") or "").strip()
             ids = [str(x) for x in (body.get("ids") or []) if str(x).strip()]
             purge_all = bool(body.get("all"))
+            purge_expired = bool(body.get("purge_expired"))
+            if purge_expired:
+                mem = _get_memory_manager()
+                deleted = 0
+                if mem is not None:
+                    deleted += mem.purge_expired()
+                    deleted += mem.enforce_conversation_cap()
+                return self._json({"status": "ok", "deleted": int(deleted or 0),
+                                   "purge_expired": True})
             if mtype not in ("conversations", "strategies", "prompt_refinements"):
                 return self._json({"error": "type 必须是 conversations/strategies/prompt_refinements"}, 400)
             if not ids and not purge_all and not (
@@ -2546,7 +2565,14 @@ def main():
     ).start()
     # 预热记忆库（避免首个 /api/status 或 /api/memory 请求阻塞）
     def _prewarm_memory():
-        _get_memory_manager()
+        mem = _get_memory_manager()
+        if mem is not None:
+            try:
+                # 启动惰性治理：过期策略清理 + 对话上限收敛
+                mem.purge_expired()
+                mem.enforce_conversation_cap()
+            except Exception:
+                pass
         _refresh_memory_stats()
     threading.Thread(target=_prewarm_memory, daemon=True).start()
 

@@ -1,6 +1,24 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Brain, FlaskConical, ChevronDown, ChevronRight, Play, CheckCircle2, XCircle, ShieldCheck, Sparkles, Copy, RefreshCw } from 'lucide-react'
+import { Brain, FlaskConical, ChevronDown, ChevronRight, Play, CheckCircle2, XCircle, ShieldCheck, Sparkles, Copy, RefreshCw, Activity } from 'lucide-react'
 import type { MemoryDoc, EvolutionRound } from '../stores/types'
+
+interface MemoryHealth {
+  injections: number
+  hits: number
+  hit_rate: number
+  strategy_count: number
+  conversation_count: number
+  expired_purged: number
+}
+
+const EMPTY_HEALTH: MemoryHealth = {
+  injections: 0,
+  hits: 0,
+  hit_rate: 0,
+  strategy_count: 0,
+  conversation_count: 0,
+  expired_purged: 0,
+}
 
 function chip(text: string, cls: string) {
   return <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${cls}`}>{text}</span>
@@ -10,6 +28,7 @@ export default function Memory() {
   const [convs, setConvs] = useState<MemoryDoc[]>([])
   const [strats, setStrats] = useState<MemoryDoc[]>([])
   const [stats, setStats] = useState({ conversations: 0, strategies: 0 })
+  const [health, setHealth] = useState<MemoryHealth>(EMPTY_HEALTH)
   const [rounds, setRounds] = useState<EvolutionRound[]>([])
   const [pendingList, setPendingList] = useState<any[]>([])
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
@@ -23,6 +42,7 @@ export default function Memory() {
       setConvs(mem.conversations ?? [])
       setStrats(mem.strategies ?? [])
       setStats(mem.stats ?? { conversations: 0, strategies: 0 })
+      setHealth(mem.memory_health ?? EMPTY_HEALTH)
     } catch {}
     try {
       const evo = await (await fetch('/api/evolution')).json()
@@ -43,6 +63,7 @@ export default function Memory() {
       const res = await fetch('/api/memory/summary' + (refresh ? '?refresh=1' : ''))
       const d = await res.json()
       setSummary(d.summary || '')
+      if (d.memory_health) setHealth(d.memory_health)
     } catch {}
     setSummaryLoading(false)
   }, [])
@@ -94,6 +115,37 @@ export default function Memory() {
       <div className="flex items-center justify-between">
         <h2 className="text-slate-200 font-semibold text-lg">记忆与进化</h2>
         <button onClick={load} className="text-xs text-cyan-400 hover:text-cyan-300">刷新</button>
+      </div>
+
+      {/* 记忆健康度（P2 可观测：命中率 / 集合规模 / 过期清理） */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
+        <div className="flex items-center gap-2 mb-4">
+          <Activity className="w-5 h-5 text-emerald-400" />
+          <h3 className="text-slate-200 font-semibold text-sm">记忆健康度</h3>
+          <span className="text-slate-600 text-[10px]">命中率 = 检索到相关记忆的注入次数 / 注入总次数（进程内统计）</span>
+        </div>
+        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+          <div className="bg-slate-800/40 border border-slate-800 rounded-lg p-3">
+            <div className="text-emerald-400 font-bold text-lg">{(health.hit_rate * 100).toFixed(1)}%</div>
+            <div className="text-slate-500 text-[10px] mt-0.5">记忆命中率</div>
+          </div>
+          <div className="bg-slate-800/40 border border-slate-800 rounded-lg p-3">
+            <div className="text-cyan-400 font-bold text-lg">{health.injections}</div>
+            <div className="text-slate-500 text-[10px] mt-0.5">注入次数（命中 {health.hits}）</div>
+          </div>
+          <div className="bg-slate-800/40 border border-slate-800 rounded-lg p-3">
+            <div className="text-violet-400 font-bold text-lg">{health.strategy_count}</div>
+            <div className="text-slate-500 text-[10px] mt-0.5">策略条数</div>
+          </div>
+          <div className="bg-slate-800/40 border border-slate-800 rounded-lg p-3">
+            <div className="text-amber-400 font-bold text-lg">{health.conversation_count}</div>
+            <div className="text-slate-500 text-[10px] mt-0.5">对话条数</div>
+          </div>
+          <div className="bg-slate-800/40 border border-slate-800 rounded-lg p-3">
+            <div className="text-slate-200 font-bold text-lg">{health.expired_purged}</div>
+            <div className="text-slate-500 text-[10px] mt-0.5">过期策略已清理</div>
+          </div>
+        </div>
       </div>
 
       {/* 系统自述 */}

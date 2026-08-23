@@ -5605,15 +5605,33 @@ print("charts generated")
             )
         self._publish_usage()
 
-        # 4. Memory（仅沉淀成功计划，避免污染 successful_strategies）
+        # 4. Memory（P0 验收准入：验收 fail 只沉淀对话，不沉淀策略；
+        #    判定逻辑在 MemoryManager.consolidate_memory 内，这里传入验收摘要）
         if not has_failure:
             # 记录探索-固化统计（domain×能力链 × 验收），供模板固化阈值判定
             self._record_consolidation_stat(task_id, goal, all_steps)
             with self._memory_lock:
-                self._memory.consolidate_memory(goal, all_steps, report)
-            push_progress(self._messaging, task_id, "log",
-                          {"type": "memory", "agent": "orchestrator",
-                           "message": "Strategy memory consolidated", "timestamp": self._now_iso()})
+                self._memory.consolidate_memory(
+                    goal, all_steps, report,
+                    acceptance_summary=acceptance_summary,
+                    task_id=task_id,
+                )
+            if acceptance_summary is not None and (
+                acceptance_summary.get("overall") or ""
+            ) != "pass":
+                logger.warning(
+                    "Task %s acceptance failed, skipped strategy consolidation",
+                    task_id,
+                )
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "memory", "agent": "orchestrator",
+                               "message": "验收未通过，仅记录对话，跳过策略沉淀",
+                               "timestamp": self._now_iso()})
+            else:
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "memory", "agent": "orchestrator",
+                               "message": "Strategy memory consolidated",
+                               "timestamp": self._now_iso()})
             # 进化沉淀：复杂任务（未走模板）成功后提炼为确定性模板，供后续 LLM 路由选择
             if not used_template:
                 self._consolidate_template(goal, all_steps, task_id=task_id)

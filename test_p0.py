@@ -757,6 +757,245 @@ class TestP1MemoryGovernance(unittest.TestCase):
         self.assertEqual([d["id"] for d in col._docs], ["b"])
 
 
+class _FakeChromaMemoryCollection:
+    """内存版 Chroma 集合：支持 add/update/query/get/delete/count。
+
+    距离语义与真实 Chroma 对齐：相同文本距离 0，不同文本距离 1（L2 越小越相似）。
+    """
+
+    def __init__(self, docs=None):
+        self._docs = docs or []
+
+    def count(self):
+        return len(self._docs)
+
+    def add(self, ids=None, documents=None, metadatas=None):
+        for doc_id, doc, meta in zip(ids or [], documents or [], metadatas or []):
+            self._docs.append({
+                "id": doc_id,
+                "document": doc,
+                "metadata": dict(meta or {}),
+            })
+
+    def update(self, ids=None, metadatas=None):
+        by_id = {d["id"]: d for d in self._docs}
+        for doc_id, meta in zip(ids or [], metadatas or []):
+            if doc_id in by_id:
+                by_id[doc_id]["metadata"].update(dict(meta or {}))
+
+    def query(self, query_texts=None, n_results=1, include=None):
+        q = (query_texts or [""])[0]
+        scored = sorted(
+            self._docs,
+            key=lambda d: 0.0 if d.get("document") == q else 1.0,
+        )[:n_results]
+        return {
+            "ids": [[d["id"] for d in scored]],
+            "documents": [[d["document"] for d in scored]],
+            "metadatas": [[d["metadata"] for d in scored]],
+            "distances": [
+                [0.0 if d.get("document") == q else 1.0 for d in scored]
+            ],
+        }
+
+    def get(self, include=None, where=None, ids=None, limit=None):
+        docs = self._docs
+        if ids is not None:
+            docs = [d for d in docs if d["id"] in set(ids)]
+        if where:
+            docs = [
+                d for d in docs
+                if all((d.get("metadata") or {}).get(k) == v
+                       for k, v in where.items())
+            ]
+        if limit is not None:
+            docs = docs[:limit]
+        return {
+            "ids": [d["id"] for d in docs],
+            "documents": [d["document"] for d in docs],
+            "metadatas": [d["metadata"] for d in docs],
+        }
+
+    def delete(self, ids=None):
+        if ids is not None:
+            drop = set(ids)
+            self._docs = [d for d in self._docs if d["id"] not in drop]
+
+
+class TestMemoryGovernanceV2(unittest.TestCase):
+    """记忆治理优化：P0 验收准入 / P1 去重与过期 / P2 命中率可观测。"""
+
+    STEPS = [{"capability": "web_search", "instruction": "搜索", "status": "SUCCESS"}]
+
+    def _make_mem(self):
+        from memory_manager import MemoryManager
+
+        m = MemoryManager.__new__(MemoryManager)
+        m._conversations = _FakeChromaMemoryCollection()
+        m._strategies = _FakeChromaMemoryCollection()
+        m._prompt_refinements = _FakeChromaMemoryCollection()
+        m._injections = 0
+        m._inject_hits = 0
+        m._expired_purged = 0
+        m._similarity_threshold = 0.6
+        return m
+
+    def test_acceptance_fail_skips_strategy_keeps_conversation(self):
+        """P0：验收 fail → strategies 不增加、conversations 增加。"""
+        m = self._make_mem()
+        m.consolidate_memory(
+            "验收失败目标", self.STEPS, "空壳报告",
+            acceptance_summary={"overall": "fail", "gaps": ["缺来源"]},
+        )
+        self.assertEqual(m._strategies.count(), 0)
+        self.assertEqual(m._conversations.count(), 1)
+
+    def test_acceptance_pass_consolidates_both(self):
+        """P0：验收 pass → strategies 与 conversations 都增加。"""
+        m = self._make_mem()
+        m.consolidate_memory(
+            "验收通过目标", self.STEPS, "完整报告",
+            acceptance_summary={"overall": "pass", "gaps": []},
+        )
+        self.assertEqual(m._strategies.count(), 1)
+        self.assertEqual(m._conversations.count(), 1)
+
+    def test_no_acceptance_report_keeps_current_behavior(self):
+        """P0：无验收报告 → 维持现状（两者都沉淀）。"""
+        m = self._make_mem()
+        m.consolidate_memory("无验收目标", self.STEPS, "报告")
+        self.assertEqual(m._strategies.count(), 1)
+        self.assertEqual(m._conversations.count(), 1)
+
+    def test_same_goal_strategy_dedup_updates_not_inserts(self):
+        """P1：同 goal 二次沉淀 → 策略数不增（更新刷新 timestamp/expires_at）。"""
+        m = self._make_mem()
+        m.consolidate_memory("重复目标", self.STEPS, "报告1",
+                             acceptance_summary={"overall": "pass"})
+        first_id = m._strategies._docs[0]["id"]
+        m.consolidate_memory("重复目标", self.STEPS, "报告1",
+                             acceptance_summary={"overall": "pass"})
+        self.assertEqual(m._strategies.count(), 1)
+        self.assertEqual(m._strategies._docs[0]["id"], first_id)
+        self.assertIn("expires_at", m._strategies._docs[0]["metadata"])
+        self.assertIn("task_id", m._strategies._docs[0]["metadata"])
+
+    def test_different_goal_adds_new_strategy(self):
+        """P1：不同 goal → 新增策略。"""
+        m = self._make_mem()
+        m.consolidate_memory("目标甲", self.STEPS, "报告",
+                             acceptance_summary={"overall": "pass"})
+        m.consolidate_memory("目标乙", self.STEPS, "报告",
+                             acceptance_summary={"overall": "pass"})
+        self.assertEqual(m._strategies.count(), 2)
+        self.assertEqual(m._conversations.count(), 2)
+
+    def test_conversation_dedup_within_24h(self):
+        """P1：同 goal 24h 内重复 → 对话不新增；超过 24h → 新增。"""
+        from datetime import datetime, timedelta, timezone
+
+        m = self._make_mem()
+        m.consolidate_memory("连跑目标", self.STEPS, "r1",
+                             acceptance_summary={"overall": "pass"})
+        m.consolidate_memory("连跑目标", self.STEPS, "r2",
+                             acceptance_summary={"overall": "pass"})
+        self.assertEqual(m._conversations.count(), 1)
+
+        # 把已有对话时间拨回 25 小时前 → 再次沉淀应新增
+        old = datetime.now(timezone.utc) - timedelta(hours=25)
+        m._conversations._docs[0]["metadata"]["timestamp"] = old.isoformat()
+        m.consolidate_memory("连跑目标", self.STEPS, "r3",
+                             acceptance_summary={"overall": "pass"})
+        self.assertEqual(m._conversations.count(), 2)
+
+    def test_expired_strategy_not_injected(self):
+        """P1：过期策略不注入。"""
+        from datetime import datetime, timedelta, timezone
+
+        m = self._make_mem()
+        past = datetime.now(timezone.utc) - timedelta(days=1)
+        future = datetime.now(timezone.utc) + timedelta(days=1)
+        m._strategies.add(
+            ids=["old", "fresh"],
+            documents=["过期策略", "新鲜策略"],
+            metadatas=[
+                {"expires_at": past.isoformat(), "goal_keywords": "旧"},
+                {"expires_at": future.isoformat(), "goal_keywords": "新"},
+            ],
+        )
+        self.assertEqual(m.inject_context("过期策略"), "")
+        self.assertIn("新鲜策略", m.inject_context("新鲜策略"))
+
+    def test_purge_expired_deletes_expired_and_counts(self):
+        """P1：purge_expired 只删过期策略，并累计 expired_purged。"""
+        from datetime import datetime, timedelta, timezone
+
+        m = self._make_mem()
+        past = datetime.now(timezone.utc) - timedelta(days=1)
+        future = datetime.now(timezone.utc) + timedelta(days=1)
+        m._strategies.add(
+            ids=["old", "fresh"],
+            documents=["a", "b"],
+            metadatas=[
+                {"expires_at": past.isoformat()},
+                {"expires_at": future.isoformat()},
+            ],
+        )
+        self.assertEqual(m.purge_expired(), 1)
+        self.assertEqual(m._strategies.count(), 1)
+        self.assertEqual(m.memory_health()["expired_purged"], 1)
+
+    def test_conversation_cap_deletes_oldest_10pct(self):
+        """P1：对话超上限按 timestamp 排序删最旧 10%。"""
+        from datetime import datetime, timedelta, timezone
+
+        m = self._make_mem()
+        base = datetime.now(timezone.utc)
+        for i in range(100):
+            m._conversations.add(
+                ids=[f"c{i:03d}"],
+                documents=[f"doc{i}"],
+                metadatas=[{
+                    "timestamp": (base + timedelta(seconds=i)).isoformat(),
+                    "goal": f"g{i}",
+                }],
+            )
+        self.assertEqual(m.enforce_conversation_cap(max_count=50), 10)
+        self.assertEqual(m._conversations.count(), 90)
+        remaining = {d["id"] for d in m._conversations._docs}
+        self.assertNotIn("c000", remaining)
+        self.assertIn("c099", remaining)
+
+    def test_hit_rate_counters(self):
+        """P2：命中率计数与 memory_health 扩展字段。"""
+        from datetime import datetime, timedelta, timezone
+
+        m = self._make_mem()
+        m.inject_context("无关目标")  # 无记忆 → 注入但未命中
+        future = datetime.now(timezone.utc) + timedelta(days=1)
+        m._strategies.add(
+            ids=["s1"],
+            documents=["相关策略"],
+            metadatas=[{"expires_at": future.isoformat(), "goal_keywords": "相关"}],
+        )
+        self.assertIn("相关策略", m.inject_context("相关策略"))
+        h = m.memory_health()
+        self.assertEqual(h["injections"], 2)
+        self.assertEqual(h["hits"], 1)
+        self.assertEqual(h["hit_rate"], 0.5)
+        self.assertEqual(h["strategy_count"], 1)
+        self.assertEqual(h["conversation_count"], 0)
+        self.assertIn("expired_purged", h)
+
+    def test_find_similar_strategy_distance_semantics(self):
+        """P1：L2 距离 ≤ 阈值视为重复（相同文本距离 0），否则 None。"""
+        m = self._make_mem()
+        m._strategies.add(ids=["s1"], documents=["模式文本"], metadatas=[{}])
+        self.assertEqual(m._find_similar_strategy("模式文本", threshold=0.95), "s1")
+        self.assertIsNone(m._find_similar_strategy("完全不同的文本", threshold=0.1))
+        self.assertIsNone(m._find_similar_strategy("不存在的文本"))
+
+
 class TestP2FinanceRecency(unittest.TestCase):
     def test_financial_skill_matches(self):
         from skill_registry import match_skills

@@ -14,6 +14,13 @@
     "base_url": "https://api.siliconflow.cn/v1",
     "model": "BAAI/bge-large-zh-v1.5"
   },
+  "memory": {
+    "_comment": "记忆治理（对标课程 3.4）：策略去重相似度阈值（Chroma L2 距离，越小越相似；完全一致≈0）、策略过期天数、对话上限（超出后按 timestamp 删最旧 10%）。可用环境变量 MEMORY_STRATEGY_DEDUP_THRESHOLD / MEMORY_STRATEGY_TTL_DAYS / MEMORY_CONVERSATIONS_MAX / MEMORY_CONVERSATION_DEDUP_HOURS 覆盖。",
+    "strategy_dedup_threshold": 0.95,
+    "strategy_ttl_days": 90,
+    "conversations_max": 2000,
+    "conversation_dedup_hours": 24
+  },
   "planner": {
     "model": "deepseek-ai/DeepSeek-V3",
     "base_url": "https://api.siliconflow.cn/v1",

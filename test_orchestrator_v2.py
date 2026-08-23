@@ -543,6 +543,61 @@ class TestRunIteration(unittest.TestCase):
         self.assertTrue(any("未找到相关历史经验" in s for s in msgs2))
 
 
+class TestMemoryAcceptanceWiring(unittest.TestCase):
+    """P0 沉淀准入：验收 fail 时 consolidate_memory 收到验收摘要并提示跳过策略。"""
+
+    def test_acceptance_fail_passes_summary_and_skips_message(self):
+        import tempfile
+        import workspace as ws_mod
+
+        o = make_orch()
+        calls = []
+
+        class RecorderMemory:
+            def inject_context(self, goal):
+                return ""
+
+            def consolidate_memory(self, *args, **kwargs):
+                calls.append((args, kwargs))
+
+        o._memory = RecorderMemory()
+        o._plan = lambda goal, task_id, context="", memory_context="": [
+            {"step_id": "1", "capability": "content_summary",
+             "instruction": "x", "timeout": 120}
+        ]
+        o._execute_steps = lambda steps, task_id, goal: (
+            [{"task_id": s["step_id"], "status": "SUCCESS",
+              "result": "# 报告" + "A" * 300} for s in steps],
+            False,
+        )
+        o._reflect = lambda *a, **k: {"accepted": True}
+        o._now_iso = lambda: "t"
+
+        tmp = tempfile.mkdtemp(prefix="wm_acc_mem_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            ws = ws_mod.task_workspace("t-mem-gate", "default")
+            ws.mkdir(parents=True, exist_ok=True)
+            (ws / "acceptance_report.json").write_text(json.dumps({
+                "overall": "fail",
+                "gaps": ["缺来源"],
+            }, ensure_ascii=False), encoding="utf-8")
+            res = o.run("t-mem-gate", "目标", auto_run=True)
+            self.assertEqual(res["status"], "SUCCESS_WITH_ISSUES")
+            self.assertTrue(calls, "验收 fail 仍应调用 consolidate_memory（对话沉淀）")
+            _, kwargs = calls[0]
+            self.assertEqual(
+                kwargs.get("acceptance_summary", {}).get("overall"), "fail",
+            )
+            msgs = [m.get("payload", {}).get("message", "")
+                    for _, m in o._messaging.published]
+            self.assertTrue(any("验收未通过" in s for s in msgs), msgs)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 class TestPlanTopicGuard(unittest.TestCase):
     def setUp(self):
         self.o = make_orch()

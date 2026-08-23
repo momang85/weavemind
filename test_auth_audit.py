@@ -12,6 +12,7 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 
 import audit_logger
 import web_ui
@@ -371,6 +372,54 @@ class TestAuthAudit(unittest.TestCase):
         self.assertTrue(web_ui._verify_password("env-pass-123", users["admin"]["password_hash"]))
         token = self._login("admin", "env-pass-123")
         self.assertEqual(self._req("/api/status", token=token)._status, 200)
+
+    def test_memory_summary_health_and_purge_expired(self):
+        """P2：/api/memory/summary 返回 memory_health；
+        /api/memory/delete 支持 purge_expired 触发过期清理 + 对话上限收敛。"""
+
+        class FakeMem:
+            def memory_health(self):
+                return {
+                    "injections": 3, "hits": 1, "hit_rate": 0.3333,
+                    "strategy_count": 4, "conversation_count": 5,
+                    "expired_purged": 2,
+                }
+
+            def stats(self):
+                return {"conversations": 5, "strategies": 4}
+
+            def list_conversations(self, limit=30):
+                return []
+
+            def list_strategies(self, limit=30):
+                return []
+
+            def purge_expired(self):
+                return 2
+
+            def enforce_conversation_cap(self):
+                return 1
+
+        self._seed_users()
+        token = self._login("admin", "admin123")
+        with mock.patch.object(web_ui, "_get_memory_manager", return_value=FakeMem()), \
+                mock.patch.object(
+                    web_ui, "_get_memory_stats",
+                    return_value={"conversations": 5, "strategies": 4},
+                ):
+            h = self._req("/api/memory/summary?refresh=1", token=token)
+            self.assertEqual(h._status, 200)
+            d = h.json_body()
+            self.assertEqual(d["memory_health"]["hit_rate"], 0.3333)
+            self.assertEqual(d["memory_health"]["expired_purged"], 2)
+
+            h2 = self._req(
+                "/api/memory/delete", "POST", {"purge_expired": True},
+                token=token,
+            )
+            self.assertEqual(h2._status, 200, h2.json_body())
+            self.assertEqual(h2.json_body()["deleted"], 3)
+            self.assertTrue(h2.json_body()["purge_expired"])
 
 
 if __name__ == "__main__":
