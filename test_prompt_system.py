@@ -479,6 +479,143 @@ class TestLLMHealthDegradation(unittest.TestCase):
                 llm_client._endpoint_health.update(old_health)
 
 
+class TestLLMStreamHealthRouting(unittest.TestCase):
+    """流式路径健康路由：空响应检测、主失败切备用、主不健康直走备用。"""
+
+    class _StubClient:
+        base_url = "https://primary.test/v1"
+        api_key = "k1"
+        model = "m1"
+        temperature = 0.1
+        max_tokens = 100
+
+    class _FakeResp:
+        """模拟 urllib SSE 响应：支持 readline() 与逐行迭代。"""
+
+        def __init__(self, lines):
+            self._lines = list(lines)
+            self._i = 0
+
+        def readline(self):
+            if self._i >= len(self._lines):
+                return b""
+            line = self._lines[self._i]
+            self._i += 1
+            return line
+
+        def __iter__(self):
+            return iter(self._lines[self._i:])
+
+    def setUp(self):
+        import llm_client
+        self.llm = llm_client
+        self._old_backup = dict(llm_client._BACKUP_CFG)
+        with llm_client._endpoint_health_lock:
+            self._old_health = {
+                k: dict(v) for k, v in llm_client._endpoint_health.items()
+            }
+            llm_client._endpoint_health.clear()
+        # 注意：_mark_endpoint 内部会再次加锁，不能在上面的 with 块内调用
+        llm_client._mark_endpoint("primary", True)
+        llm_client._mark_endpoint("backup", True)
+        llm_client.clear_task_context()
+        self._patchers = [
+            mock.patch.object(llm_client, "_ensure_cfg_fresh", lambda: None),
+            mock.patch.object(
+                llm_client, "get_default_client", return_value=self._StubClient(),
+            ),
+            mock.patch.object(
+                llm_client, "get_model_for_usage",
+                lambda usage, default_model: default_model,
+            ),
+        ]
+        for p in self._patchers:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patchers:
+            p.stop()
+        self.llm._BACKUP_CFG.clear()
+        self.llm._BACKUP_CFG.update(self._old_backup)
+        with self.llm._endpoint_health_lock:
+            self.llm._endpoint_health.clear()
+            self.llm._endpoint_health.update(self._old_health)
+
+    def test_empty_sse_response_raises_and_marks_endpoint(self):
+        """SSE 返回空内容 → 抛 LLMCallError 且主端点标记 empty_content。"""
+        from llm_client import LLMCallError, call_llm_stream
+
+        self.llm._BACKUP_CFG.clear()
+        resp = self._FakeResp([b"data: [DONE]\n"])
+        with mock.patch("urllib.request.urlopen", return_value=resp):
+            with self.assertRaises(LLMCallError) as cm:
+                call_llm_stream("s", "u")
+        self.assertIn("Empty content in LLM stream response", str(cm.exception))
+        h = self.llm.get_endpoint_health()
+        self.assertEqual(h["primary"]["last_degradation_reason"], "empty_content")
+        self.assertGreaterEqual(h["primary"]["fails"], 1)
+
+    def test_primary_failure_switches_to_backup_once(self):
+        """主端点失败 → 用 backup 端点重发一次并成功。"""
+        import urllib.error
+        from llm_client import call_llm_stream
+
+        self.llm._BACKUP_CFG = {
+            "base_url": "https://backup.test/v1",
+            "api_key": "k2",
+            "model": "m2",
+        }
+        calls = []
+
+        def fake_urlopen(req, timeout=None):
+            calls.append(req.full_url)
+            if len(calls) == 1:
+                raise urllib.error.URLError("connection refused")
+            return self._FakeResp([
+                b'data: {"choices":[{"delta":{"content":"ok"}}]}\n',
+                b"data: [DONE]\n",
+            ])
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            text = call_llm_stream("s", "u")
+        self.assertEqual(text, "ok")
+        self.assertEqual(len(calls), 2, "主端点失败后应重发到备用端点")
+        self.assertIn("backup.test", calls[1])
+        h = self.llm.get_endpoint_health()
+        self.assertEqual(h["primary"]["last_degradation_reason"], "network_error")
+        self.assertTrue(h["backup"]["healthy"])
+
+    def test_unhealthy_primary_goes_directly_to_backup(self):
+        """主端点不健康且 backup 健康 → 直接走 backup，不再打主端点。"""
+        from llm_client import call_llm_stream
+
+        self.llm._BACKUP_CFG = {
+            "base_url": "https://backup.test/v1",
+            "api_key": "k2",
+            "model": "m2",
+        }
+        # 主端点连续失败两次 → 不健康；备用保持健康
+        self.llm._mark_endpoint("primary", False, "HTTP_500")
+        self.llm._mark_endpoint("primary", False, "HTTP_500")
+        self.assertFalse(self.llm._primary_healthy())
+        calls = []
+
+        def fake_urlopen(req, timeout=None):
+            calls.append(req.full_url)
+            return self._FakeResp([
+                b'data: {"choices":[{"delta":{"content":"from-backup"}}]}\n',
+                b"data: [DONE]\n",
+            ])
+
+        with mock.patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            text = call_llm_stream("s", "u")
+        self.assertEqual(text, "from-backup")
+        self.assertEqual(len(calls), 1, "主端点不健康时应直接走备用")
+        self.assertIn("backup.test", calls[0])
+        h = self.llm.get_endpoint_health()
+        self.assertTrue(h["backup"]["healthy"])
+
+
 class TestModelRoleRouting(unittest.TestCase):
     """B1：llm.model_roles 模型分级路由（planner/exec/judge，缺省回退默认模型）。"""
 

@@ -320,6 +320,14 @@ def _primary_healthy() -> bool:
         return _endpoint_health.get("primary", {}).get("healthy", True)
 
 
+def _backup_healthy() -> bool:
+    """备用端点健康状态：未配置 backup 或已标记不健康时返回 False。"""
+    if not (_BACKUP_CFG.get("base_url") and _BACKUP_CFG.get("api_key")):
+        return False
+    with _endpoint_health_lock:
+        return _endpoint_health.get("backup", {}).get("healthy", True)
+
+
 def get_endpoint_health() -> dict:
     with _endpoint_health_lock:
         return {
@@ -1187,41 +1195,37 @@ def call_llm(
     )
 
 
-def call_llm_stream(
+def _call_llm_stream_once(
+    base_url: str,
+    api_key: str,
+    model: str,
     system: str,
     user: str,
     on_chunk=None,
-    temperature: float | None = None,
-    max_tokens: int | None = None,
-    usage: str = "",
-    model_override: str | None = None,
+    temperature: float = 0.1,
+    max_tokens: int = 2000,
 ) -> str:
-    """SSE 流式调用（同步，urllib）：逐块回调 on_chunk，并按任务上下文自动发布
-    到 Redis stream:{task_id}（O-21 步骤级流式输出）。非流式端点回退整段输出。"""
+    """单次 SSE 流式请求（同步，urllib）：逐块回调 on_chunk，返回累计文本。
+    空响应/网络错误在此层统一抛 LLMCallError；端点健康标记与备用切换由
+    call_llm_stream 负责（与 call()/call_llm_async 语义对齐）。"""
     import urllib.error
     import urllib.request
 
-    _ensure_cfg_fresh()
-    client = get_default_client()
-    temp = temperature if temperature is not None else client.temperature
-    max_tok = max_tokens or client.max_tokens
-    # B1：流式执行调用也按用途选择模型（如 exec）
-    model = model_override or get_model_for_usage(usage, client.model)
-    url = f"{client.base_url.rstrip('/')}/chat/completions"
+    url = f"{base_url.rstrip('/')}/chat/completions"
     headers: dict[str, str] = {
         "Content-Type": "application/json",
         "User-Agent": "WeaveMind/1.0",
     }
-    if client.api_key:
-        headers["Authorization"] = f"Bearer {client.api_key}"
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
     body = {
         "model": model,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        "temperature": temp,
-        "max_tokens": max_tok,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
         "stream": True,
     }
     req = urllib.request.Request(
@@ -1281,6 +1285,108 @@ def call_llm_stream(
         except Exception:
             chunks.append(body_text)
     return "".join(chunks)
+
+
+def call_llm_stream(
+    system: str,
+    user: str,
+    on_chunk=None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
+    usage: str = "",
+    model_override: str | None = None,
+) -> str:
+    """SSE 流式调用（同步，urllib）：逐块回调 on_chunk，并按任务上下文自动发布
+    到 Redis stream:{task_id}（O-21 步骤级流式输出）。非流式端点回退整段输出。
+    与 call()/call_llm_async 一致：空响应抛 LLMCallError 并标记端点、
+    主端点失败（含空响应/超时/连接错误）自动切备用端点重发一次。"""
+    _ensure_cfg_fresh()
+    client = get_default_client()
+    temp = temperature if temperature is not None else client.temperature
+    max_tok = max_tokens or client.max_tokens
+    # B1：流式执行调用也按用途选择模型（如 exec）
+    model = model_override or get_model_for_usage(usage, client.model)
+    # 备用端点配置：与 call()/_call_backup 同源 _BACKUP_CFG（最简复用路径）
+    backup_cfg = (
+        dict(_BACKUP_CFG)
+        if _BACKUP_CFG.get("base_url") and _BACKUP_CFG.get("api_key")
+        else {}
+    )
+
+    def _attempt(
+        base_url: str, api_key: str, request_model: str, endpoint: str,
+    ) -> str:
+        """单次流式请求：空响应抛 LLMCallError；成功/失败同步端点健康标记。"""
+        try:
+            text = _call_llm_stream_once(
+                base_url, api_key, request_model,
+                system, user, on_chunk, temp, max_tok,
+            )
+        except Exception as exc:
+            reason = _degradation_reason(exc)
+            _mark_endpoint(endpoint, False, reason)
+            if isinstance(exc, LLMCallError):
+                raise
+            # urllib 超时/连接错误等统一转为 LLMCallError，便于调用方重试
+            raise LLMCallError(f"Network error: {exc}") from exc
+        if not text.strip():
+            # 空响应检测：与 call() 一致，空内容视为端点故障信号
+            _mark_endpoint(endpoint, False, "empty_content")
+            raise LLMCallError("Empty content in LLM stream response")
+        _mark_endpoint(endpoint, True)
+        return text
+
+    # 健康路由（O-29 同 sync 路径）：主端点已不健康且备用健康 → 直接走备用
+    if not _primary_healthy() and _backup_healthy():
+        try:
+            text = _attempt(
+                backup_cfg["base_url"], backup_cfg.get("api_key", ""),
+                backup_cfg.get("model") or model, "backup",
+            )
+            _record_task_degradation(
+                get_task_context(), _primary_degradation_root(), both_failed=False,
+            )
+            _record_task_degradation(
+                get_task_context(), "switch_to_backup", both_failed=False,
+            )
+            logger.warning(
+                "Switched to backup LLM (stream): %s", backup_cfg.get("base_url")
+            )
+            return text
+        except Exception as exc:
+            # 健康路由下备用也失败：调用方已有重试逻辑，直接抛出
+            _record_task_degradation(
+                get_task_context(), _degradation_reason(exc), both_failed=True,
+            )
+            raise
+
+    # 主端点请求：失败后切备用重发一次
+    try:
+        return _attempt(client.base_url, client.api_key, model, "primary")
+    except LLMCallError:
+        if not backup_cfg:
+            raise
+        try:
+            text = _attempt(
+                backup_cfg["base_url"], backup_cfg.get("api_key", ""),
+                backup_cfg.get("model") or model, "backup",
+            )
+            _record_task_degradation(
+                get_task_context(), _primary_degradation_root(), both_failed=False,
+            )
+            _record_task_degradation(
+                get_task_context(), "switch_to_backup", both_failed=False,
+            )
+            logger.warning(
+                "Switched to backup LLM (stream): %s", backup_cfg.get("base_url")
+            )
+            return text
+        except Exception as exc:
+            # 备用也失败：调用方重试逻辑已有，这里直接抛错
+            _record_task_degradation(
+                get_task_context(), _degradation_reason(exc), both_failed=True,
+            )
+            raise
 
 
 # ============================================================================
