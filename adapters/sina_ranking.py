@@ -12,7 +12,7 @@
 
 本适配器支持任意 top_n（10 / 250 / 全市场）：top_n=0 时翻页拉全市场
 （每页 50 只，约 100 页），并按 amount/volume 排序后返回前 N。
-失败重试 2 次（退避 1/3 秒），页间节流 0.3 秒；urllib → socket HTTP/1.0
+失败重试 2 次（退避 1/3 秒），页间节流 0.8 秒；urllib → socket HTTP/1.0
 双通道复用 ashare_ranking 的实现，避免各自重复实现。
 """
 
@@ -25,6 +25,11 @@ import time
 import urllib.error
 
 from adapters.ashare_ranking import _get_via_socket, _get_via_urllib
+from adapters.source_health import (
+    ensure_available,
+    mark_failure,
+    mark_success,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -32,7 +37,8 @@ _BASE = "https://vip.stock.finance.sina.com.cn"
 _PAGE_SIZE = 50
 # 全市场安全上限：5000+ 只 ≈ 100 页 × 50；留足余量防止异常死循环
 _MAX_PAGES = 200
-_PAGE_INTERVAL = 0.3
+# 全市场约 100 页 × 0.8s ≈ 80s（可接受）；降低高频翻页触发 456 的概率
+_PAGE_INTERVAL = 0.8
 # 初始 1 次 + 重试 2 次，共 3 次尝试；退避 1/3 秒
 _MAX_ATTEMPTS = 3
 _RETRY_BACKOFFS = (1.0, 3.0)
@@ -219,12 +225,15 @@ def fetch_ranking(
 
     Returns:
         {rows, metric, top_n, total, fetched_count, source, market,
-         source_url, retrieved_at}
+         source_url, retrieved_at, partial}
         rows 与 eastmoney_ranking 同构（rank/code/name/price/change_pct/
         volume_hand/volume_wan_hand/amount_yuan/amount_yi/turnover_pct/
-        market_cap_yi，另含 mktcap_yi 别名）。
-        失败抛异常（调用方回退搜索链路）。
+        market_cap_yi，另含 mktcap_yi 别名）；partial=True 表示分页中途
+        失败但已获取 ≥1 页（total=None，统计类任务可用部分数据并标注覆盖率）。
+        首页即失败抛异常（调用方回退搜索链路 / 预载重试）；源处于冷却期时
+        快失败，不浪费请求。成功/失败同步维护源健康注册表。
     """
+    ensure_available("sina_ranking")
     metric = "volume" if metric == "volume" else "amount"
     node = _node_for_market(market)
     top_n = int(top_n or 0)
@@ -234,11 +243,18 @@ def fetch_ranking(
     raw_rows: list[dict] = []
     first_url = ""
     fetched_pages = 0
+    partial = False
+    interrupted: Exception | None = None
     for page in range(1, max_pages + 1):
         url = _hq_url(node, metric, page)
         if not first_url:
             first_url = url
-        text = _fetch_page(url, page)
+        try:
+            text = _fetch_page(url, page)
+        except Exception as exc:
+            interrupted = exc
+            mark_failure("sina_ranking", exc)
+            break
         batch = parse_hq_nodes(text)
         raw_rows.extend(batch)
         fetched_pages = page
@@ -250,8 +266,20 @@ def fetch_ranking(
             # 页间节流：避免高频翻页触发限流
             time.sleep(_PAGE_INTERVAL)
     if not raw_rows:
-        raise RuntimeError(
+        if interrupted is not None:
+            raise interrupted
+        exc = RuntimeError(
             f"新浪行情排行无数据（node={node}, pages={fetched_pages}）"
+        )
+        mark_failure("sina_ranking", exc)
+        raise exc
+    if interrupted is not None:
+        # 部分数据降级：已获取 ≥1 页不抛错，统计类任务仍可用并标注覆盖率
+        partial = True
+        _logger.warning(
+            "sina ranking partial data after %d pages "
+            "(fetched %d rows): %s",
+            fetched_pages, len(raw_rows), str(interrupted)[:160],
         )
     sort_key = "volume" if metric == "volume" else "amount"
     valid = [
@@ -261,13 +289,17 @@ def fetch_ranking(
     valid.sort(key=lambda r: float(_num(r.get(sort_key))), reverse=True)
     selected = valid[:top_n] if top_n > 0 else valid
     rows = [_to_row(r, i) for i, r in enumerate(selected, 1)]
-    total = _fetch_total(node)
+    # 部分数据时总数未知（未翻完全市场），由调用方按 fetched_count 标注覆盖率
+    total = None if partial else _fetch_total(node)
+    if not partial:
+        mark_success("sina_ranking")
     return {
         "rows": rows,
         "metric": metric,
         "top_n": len(rows),
-        "total": total if total is not None else len(raw_rows),
+        "total": total if total is not None else None,
         "fetched_count": len(raw_rows),
+        "partial": partial,
         "source": "sina_ranking",
         "market": _market_label(node),
         "market_node": node,

@@ -27,6 +27,7 @@ from adapters.tencent_quotes import (
     fetch_ranking as fetch_tencent_ranking,
     fetch_us_ranking as fetch_tencent_us_ranking,
 )
+from adapters.source_health import is_available
 from adapters.quote_cache import (
     get_ranking as cache_get_ranking,
     set_ranking as cache_set_ranking,
@@ -34,6 +35,14 @@ from adapters.quote_cache import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _source_available(name: str) -> bool:
+    """健康感知过滤：冷却中的源直接跳过（快失败，不浪费请求）。"""
+    ok, reason = is_available(name)
+    if not ok:
+        logger.info("ranking source %s skipped: %s", name, reason)
+    return ok
 
 # 快路径规模上限：≤50 走现有 eastmoney→tencent 链，>50 必须分页全市场
 _FAST_PATH_MAX_TOP_N = 50
@@ -272,7 +281,7 @@ def _ranking_meta(payload: dict, metric: str, market: str, cache_hit: bool = Fal
         "cache_hit": cache_hit,
     }
     # 全市场规模信息透传（统计任务计算前 N% 需要）
-    for key in ("total", "fetched_count", "target_top_n"):
+    for key in ("total", "fetched_count", "target_top_n", "partial"):
         if payload.get(key) is not None:
             meta[key] = payload.get(key)
     return meta
@@ -280,13 +289,16 @@ def _ranking_meta(payload: dict, metric: str, market: str, cache_hit: bool = Fal
 
 def _fetch_sina_ranking_payload(
     goal: str, market: str, metric: str,
-) -> dict:
+) -> dict | None:
     """统计/大规模排行：新浪分页全市场。
 
     scale=full_market 时拉取全市场（top_n=0），并按目标百分比补 target_top_n，
     供编排器生成"计算前 X% 占比"的 code_execution 指令；显式前 N（>50）
-    同样拉全市场后由 target_top_n 标注精确前 N。
+    同样拉全市场后由 target_top_n 标注精确前 N。新浪冷却中返回 None
+    （全冷却 → 返回 None，由预载层重试与可见化兜底）。
     """
+    if not _source_available("sina_ranking"):
+        return None
     node = "us" if market == "us" else "hs_a"
     payload = fetch_sina_ranking(metric, top_n=0, market=node)
     total = payload.get("total") or len(payload.get("rows") or [])
@@ -296,14 +308,17 @@ def _fetch_sina_ranking_payload(
     return payload
 
 
-def _route_ranking(goal: str, market: str, metric: str) -> dict:
+def _route_ranking(goal: str, market: str, metric: str) -> dict | None:
     """排行路由：按规模选择 sina 分页全市场或 eastmoney→tencent 快路径。
 
-    缓存读取由调用方（route_structured）负责，这里只负责取数。"""
+    缓存读取由调用方（route_structured）负责，这里只负责取数；
+    候选源全部冷却时返回 None。"""
     top_n = _parse_top_n(goal, None)
     scale = _parse_scale(goal)
     if scale == "full_market":
         payload = _fetch_sina_ranking_payload(goal, market, metric)
+        if payload is None:
+            return None
         # 全市场规模按 target_top_n（或 0）隔离缓存，避免百分比/规模串键
         key_top_n = int(payload.get("target_top_n") or 0)
         cache_set_ranking(market, metric, payload, top_n=key_top_n)
@@ -325,24 +340,46 @@ def _route_ranking_by_source(
 
 def _fetch_ranking_with_fallback(
     market: str, metric: str, top_n: int = 10,
-) -> dict:
+) -> dict | None:
     """排行降级链（快路径，N≤50）：
     A股：eastmoney_ranking → 失败 tencent_ranking（腾讯候选池）；
     美股：优先 tencent_us_ranking。
     腾讯结果回填缓存（任务间复用，键含 top_n）；eastmoney 结果不回填，
-    保持原有语义。"""
+    保持原有语义。候选源按健康状态过滤：冷却中的直接跳过；
+    全部冷却 → 返回 None（预载层已有重试与可见化，恢复后自动可用）。"""
     top_n = int(top_n or 10)
     if market == "us":
-        payload = fetch_tencent_us_ranking(metric, top_n=top_n)
+        if not _source_available("tencent_us_ranking"):
+            logger.warning(
+                "ranking fetch failed: tencent_us_ranking in cooldown"
+            )
+            return None
+        try:
+            payload = fetch_tencent_us_ranking(metric, top_n=top_n)
+        except Exception as exc:
+            logger.warning("tencent_us ranking fetch failed: %s", exc)
+            return None
         cache_set_ranking(market, metric, payload, top_n=top_n)
         return payload
-    try:
-        return fetch_ranking(metric, top_n=top_n)
-    except Exception as exc:
-        logger.warning("eastmoney ranking fetch failed, try tencent: %s", exc)
-        payload = fetch_tencent_ranking(metric, top_n=top_n)
+    if _source_available("eastmoney_ranking"):
+        try:
+            return fetch_ranking(metric, top_n=top_n)
+        except Exception as exc:
+            logger.warning(
+                "eastmoney ranking fetch failed, try tencent: %s", exc,
+            )
+    if _source_available("tencent_ranking"):
+        try:
+            payload = fetch_tencent_ranking(metric, top_n=top_n)
+        except Exception as exc:
+            logger.warning("tencent ranking fetch failed: %s", exc)
+            return None
         cache_set_ranking(market, metric, payload, top_n=top_n)
         return payload
+    logger.warning(
+        "ranking fetch failed: all ranking sources unavailable or in cooldown"
+    )
+    return None
 
 
 def route_structured(goal: str) -> dict | None:
@@ -381,6 +418,13 @@ def route_structured(goal: str) -> dict | None:
             # P2-6 预载失败可见化：瞬时接口异常不再静默吞掉，
             # 记录 warning 后由调用方（orchestrator）重试或回退搜索链路
             logger.warning("ranking fetch failed: %s", exc)
+            return None
+        if payload is None:
+            # 健康感知降级：候选源全部冷却/不可用 → 快速失败
+            logger.warning(
+                "ranking fetch failed: all ranking sources unavailable "
+                "or in cooldown"
+            )
             return None
         meta = _ranking_meta(payload, metric, market, cache_hit=cache_hit)
         source = str(payload.get("source") or meta["source"])

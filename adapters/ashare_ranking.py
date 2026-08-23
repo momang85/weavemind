@@ -24,6 +24,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from adapters.source_health import ensure_available, mark_failure, mark_success
+
 _logger = logging.getLogger(__name__)
 
 _BASE = "https://push2.eastmoney.com/api/qt/clist/get"
@@ -191,60 +193,70 @@ def fetch_ranking(metric: str = "amount", top_n: int = 10) -> dict:
         {rows, metric, top_n, source_url, retrieved_at}
         rows 元素：rank/code/name/price/change_pct/volume_hand/
         volume_wan_hand/amount_yuan/amount_yi/turnover_pct/market_cap_yi。
-        失败抛异常（调用方回退搜索链路）。
+        失败抛异常（调用方回退搜索链路）；源处于冷却期时快失败，
+        不浪费请求。成功/失败同步维护源健康注册表。
     """
-    url = _api_url(metric, top_n)
-    last_error: Exception | None = None
-    for attempt in range(1, _MAX_ATTEMPTS + 1):
-        try:
-            text = _get(url, timeout=25, attempt=attempt)
-            break
-        except EastMoneyFetchError as exc:
-            # 两通道失败的具体原因已由 _get 按通道记录，这里只保留最终异常。
-            last_error = exc
-        except Exception as exc:
-            _logger.warning(
-                "eastmoney fetch attempt %d failed: urllib: %s",
-                attempt, f"{type(exc).__name__}: {exc}",
-            )
-            last_error = exc
-        if attempt < _MAX_ATTEMPTS:
-            # 指数退避：2/4/8 秒（基数可被 EASTMONEY_RETRY_BASE 覆盖）。
-            time.sleep(_retry_base() * (2 ** (attempt - 1)))
-    else:
-        raise last_error
-    data = json.loads(text)
-    rows_raw = ((data.get("data") or {}).get("diff")) or []
-    if not rows_raw:
-        raise RuntimeError("EastMoney 行情排行无数据")
-    rows: list[dict] = []
-    for i, r in enumerate(rows_raw[:top_n], 1):
-        amount_yuan = _num(r.get("f6"))
-        volume_hand = _num(r.get("f5"))
-        rows.append({
-            "rank": i,
-            "code": str(r.get("f12") or ""),
-            "name": str(r.get("f14") or ""),
-            "price": _num(r.get("f2")),
-            "change_pct": _num(r.get("f3")),
-            "volume_hand": volume_hand,
-            "volume_wan_hand": (
-                round(volume_hand / 1e4, 2) if volume_hand is not None else None
-            ),
-            "amount_yuan": amount_yuan,
-            "amount_yi": (
-                round(amount_yuan / 1e8, 2) if amount_yuan is not None else None
-            ),
-            "turnover_pct": _num(r.get("f8")),
-            "market_cap_yi": _num(r.get("f20"), 1e-8),
-        })
-    return {
-        "rows": rows,
-        "metric": metric,
-        "top_n": len(rows),
-        "source_url": url,
-        "retrieved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-    }
+    ensure_available("eastmoney_ranking")
+    try:
+        url = _api_url(metric, top_n)
+        last_error: Exception | None = None
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            try:
+                text = _get(url, timeout=25, attempt=attempt)
+                break
+            except EastMoneyFetchError as exc:
+                # 两通道失败的具体原因已由 _get 按通道记录，这里只保留最终异常。
+                last_error = exc
+            except Exception as exc:
+                _logger.warning(
+                    "eastmoney fetch attempt %d failed: urllib: %s",
+                    attempt, f"{type(exc).__name__}: {exc}",
+                )
+                last_error = exc
+            if attempt < _MAX_ATTEMPTS:
+                # 指数退避：2/4/8 秒（基数可被 EASTMONEY_RETRY_BASE 覆盖）。
+                time.sleep(_retry_base() * (2 ** (attempt - 1)))
+        else:
+            raise last_error
+        data = json.loads(text)
+        rows_raw = ((data.get("data") or {}).get("diff")) or []
+        if not rows_raw:
+            raise RuntimeError("EastMoney 行情排行无数据")
+        rows: list[dict] = []
+        for i, r in enumerate(rows_raw[:top_n], 1):
+            amount_yuan = _num(r.get("f6"))
+            volume_hand = _num(r.get("f5"))
+            rows.append({
+                "rank": i,
+                "code": str(r.get("f12") or ""),
+                "name": str(r.get("f14") or ""),
+                "price": _num(r.get("f2")),
+                "change_pct": _num(r.get("f3")),
+                "volume_hand": volume_hand,
+                "volume_wan_hand": (
+                    round(volume_hand / 1e4, 2)
+                    if volume_hand is not None else None
+                ),
+                "amount_yuan": amount_yuan,
+                "amount_yi": (
+                    round(amount_yuan / 1e8, 2)
+                    if amount_yuan is not None else None
+                ),
+                "turnover_pct": _num(r.get("f8")),
+                "market_cap_yi": _num(r.get("f20"), 1e-8),
+            })
+        result = {
+            "rows": rows,
+            "metric": metric,
+            "top_n": len(rows),
+            "source_url": url,
+            "retrieved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    except Exception as exc:
+        mark_failure("eastmoney_ranking", exc)
+        raise
+    mark_success("eastmoney_ranking")
+    return result
 
 
 if __name__ == "__main__":

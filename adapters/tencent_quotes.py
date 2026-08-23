@@ -23,6 +23,7 @@ import time
 import urllib.error
 
 from adapters.ashare_ranking import _get_via_socket, _get_via_urllib
+from adapters.source_health import ensure_available, mark_failure, mark_success
 
 _logger = logging.getLogger(__name__)
 
@@ -291,49 +292,64 @@ def _rank_candidate_pool(
     source: str,
     market: str,
 ) -> dict:
-    """候选池拉行情 → 按 metric 排序 → eastmoney_ranking 兼容 payload。"""
+    """候选池拉行情 → 按 metric 排序 → eastmoney_ranking 兼容 payload。
+
+    source 决定健康注册表键（tencent_ranking / tencent_us_ranking）：
+    冷却期内快失败，成功/失败同步维护源健康状态。
+    """
     top_n = max(1, min(int(top_n), 50))
-    codes = [code for code, _name in pool]
-    quotes = fetch_quotes(codes)
-    sort_key = "volume" if metric == "volume" else "amount"
-    valid = [
-        (code, q) for code, q in quotes.items() if q.get(sort_key) is not None
-    ]
-    valid.sort(key=lambda kv: kv[1][sort_key], reverse=True)
-    rows: list[dict] = []
-    for i, (code, q) in enumerate(valid[:top_n], 1):
-        volume = q.get("volume")
-        amount = q.get("amount")
-        rows.append({
-            "rank": i,
-            "code": _bare_code(code),
-            "name": q.get("name") or "",
-            "price": q.get("price"),
-            "change_pct": q.get("change_pct"),
-            "volume_hand": volume,
-            "volume_wan_hand": (
-                round(volume / 1e4, 2) if volume is not None else None
+    ensure_available(source)
+    try:
+        codes = [code for code, _name in pool]
+        quotes = fetch_quotes(codes)
+        sort_key = "volume" if metric == "volume" else "amount"
+        valid = [
+            (code, q) for code, q in quotes.items()
+            if q.get(sort_key) is not None
+        ]
+        valid.sort(key=lambda kv: kv[1][sort_key], reverse=True)
+        rows: list[dict] = []
+        for i, (code, q) in enumerate(valid[:top_n], 1):
+            volume = q.get("volume")
+            amount = q.get("amount")
+            rows.append({
+                "rank": i,
+                "code": _bare_code(code),
+                "name": q.get("name") or "",
+                "price": q.get("price"),
+                "change_pct": q.get("change_pct"),
+                "volume_hand": volume,
+                "volume_wan_hand": (
+                    round(volume / 1e4, 2) if volume is not None else None
+                ),
+                "amount_yuan": amount,
+                "amount_yi": (
+                    round(amount / 1e8, 2) if amount is not None else None
+                ),
+                "turnover_pct": q.get("turnover_pct"),
+                "market_cap_yi": q.get("market_cap_yi"),
+            })
+        if not rows:
+            raise TencentQuotesError("empty", "腾讯候选池无有效行情数据")
+        result = {
+            "rows": rows,
+            "metric": metric,
+            "top_n": len(rows),
+            "source": source,
+            "market": market,
+            "source_url": (
+                f"{_BASE}/q="
+                + ",".join(
+                    [_tencent_code(c) for c, _ in pool[:_BATCH_SIZE]]
+                )
             ),
-            "amount_yuan": amount,
-            "amount_yi": (
-                round(amount / 1e8, 2) if amount is not None else None
-            ),
-            "turnover_pct": q.get("turnover_pct"),
-            "market_cap_yi": q.get("market_cap_yi"),
-        })
-    if not rows:
-        raise TencentQuotesError("empty", "腾讯候选池无有效行情数据")
-    return {
-        "rows": rows,
-        "metric": metric,
-        "top_n": len(rows),
-        "source": source,
-        "market": market,
-        "source_url": (
-            f"{_BASE}/q=" + ",".join([_tencent_code(c) for c, _ in pool[:_BATCH_SIZE]])
-        ),
-        "retrieved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
-    }
+            "retrieved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    except Exception as exc:
+        mark_failure(source, exc)
+        raise
+    mark_success(source)
+    return result
 
 
 def fetch_ranking(metric: str = "amount", top_n: int = 10) -> dict:

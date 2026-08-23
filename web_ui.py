@@ -679,11 +679,18 @@ def _system_status():
                     search_health = json.loads(raw)
             except Exception:
                 pass
+        try:
+            # 行情数据源健康（eastmoney/tencent/sina 熔断 + 冷却），进程内快照
+            from adapters.source_health import get_health as get_source_health
+            source_health = get_source_health()
+        except Exception:
+            source_health = {}
         return {
             "agents": agents,
             "llm_health": llm_health,
             "llm_warning": llm_warning,
             "search_health": search_health,
+            "source_health": source_health,
             "queues": queues,
             "tasks": {"total": total, "success": success, "today": today},
             "memory": memory,

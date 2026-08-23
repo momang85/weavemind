@@ -3844,10 +3844,10 @@ class TestSinaRankingAdapter(unittest.TestCase):
         # 成交额降序
         amounts = [r["amount_yuan"] for r in out["rows"]]
         self.assertEqual(amounts, sorted(amounts, reverse=True))
-        # 页间节流：5 页之间 4 次，每次 0.3s
+        # 页间节流：5 页之间 4 次，每次 0.8s（降低触发 456 概率）
         self.assertEqual(len(sleep_mock.call_args_list), 4)
         for call in sleep_mock.call_args_list:
-            self.assertEqual(call.args[0], 0.3)
+            self.assertEqual(call.args[0], 0.8)
 
     def test_fetch_ranking_retry_and_throttle(self):
         import re
@@ -3871,9 +3871,9 @@ class TestSinaRankingAdapter(unittest.TestCase):
             out = sr.fetch_ranking("amount", top_n=250, market="hs_a")
         self.assertEqual(len(out["rows"]), 250)
         sleeps = [c.args[0] for c in sleep_mock.call_args_list]
-        # 重试退避 1s + 页间节流 0.3s × 4
+        # 重试退避 1s + 页间节流 0.8s × 4
         self.assertEqual(sleeps[0], 1.0)
-        self.assertEqual(sleeps[1:], [0.3, 0.3, 0.3, 0.3])
+        self.assertEqual(sleeps[1:], [0.8, 0.8, 0.8, 0.8])
 
 
 class TestStatisticalRankingRouting(unittest.TestCase):
@@ -4169,6 +4169,239 @@ class TestStatisticalRankingOrchestration(unittest.TestCase):
             self.assertIn("A股成交额排行（全市场）", block)
             self.assertIn("新浪行情中心", block)
             self.assertIn("样例股001", block)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestSourceHealthRouting(unittest.TestCase):
+    """最终泛化层：行情源健康注册表（熔断/冷却/清零）+ 部分数据降级
+    + 健康感知降级链（全部 canned，不真连网）。"""
+
+    def setUp(self):
+        import adapters.source_health as sh
+
+        sh.reset()
+
+    def tearDown(self):
+        import adapters.source_health as sh
+
+        sh.reset()
+
+    def test_consecutive_failures_enter_cooldown(self):
+        import time
+
+        from adapters.source_health import (
+            get_health,
+            is_available,
+            mark_failure,
+        )
+
+        mark_failure("eastmoney_ranking", RuntimeError("HTTP 456"))
+        ok, reason = is_available("eastmoney_ranking")
+        self.assertTrue(ok, "1 次失败仍健康")
+        mark_failure("eastmoney_ranking", RuntimeError("HTTP 456"))
+        ok, reason = is_available("eastmoney_ranking")
+        self.assertFalse(ok)
+        self.assertIn("cooldown", reason)
+        self.assertIn("eastmoney_ranking", reason)
+        h = get_health()["eastmoney_ranking"]
+        self.assertEqual(h["fails"], 2)
+        self.assertGreater(h["cooldown_until"], time.time())
+        self.assertFalse(h["healthy"])
+
+    def test_cooldown_expiry_auto_recovers(self):
+        import time
+
+        import adapters.source_health as sh
+        from adapters.source_health import is_available, mark_failure
+
+        mark_failure("sina_ranking", "RemoteDisconnected")
+        mark_failure("sina_ranking", "RemoteDisconnected")
+        self.assertFalse(is_available("sina_ranking")[0])
+        # 冷却到期自动恢复，无需显式 mark_success
+        with sh._LOCK:
+            sh._HEALTH["sina_ranking"]["cooldown_until"] = time.time() - 1
+        ok, reason = is_available("sina_ranking")
+        self.assertTrue(ok, reason)
+
+    def test_success_clears_failure_and_cooldown(self):
+        import time
+
+        from adapters.source_health import (
+            get_health,
+            is_available,
+            mark_failure,
+            mark_success,
+        )
+
+        mark_failure("tencent_ranking", "timeout")
+        mark_failure("tencent_ranking", "timeout")
+        self.assertFalse(is_available("tencent_ranking")[0])
+        mark_success("tencent_ranking")
+        self.assertTrue(is_available("tencent_ranking")[0])
+        h = get_health()["tencent_ranking"]
+        self.assertEqual(h["fails"], 0)
+        self.assertLessEqual(h["cooldown_until"], time.time())
+
+    def test_ensure_available_raises_fast_fail_without_requests(self):
+        import adapters.sina_ranking as sr
+        from adapters.source_health import (
+            SourceInCooldownError,
+            ensure_available,
+            mark_failure,
+        )
+
+        mark_failure("sina_ranking", "HTTP 456")
+        mark_failure("sina_ranking", "HTTP 456")
+        with self.assertRaises(SourceInCooldownError):
+            ensure_available("sina_ranking")
+        # 适配器层快失败：冷却期不发出任何请求
+        with mock.patch.object(
+            sr, "_get", side_effect=AssertionError("冷却期不应发请求"),
+        ) as get_mock:
+            with self.assertRaises(SourceInCooldownError):
+                sr.fetch_ranking("amount", top_n=0, market="hs_a")
+        get_mock.assert_not_called()
+
+    def test_sina_partial_data_degrades_with_coverage(self):
+        import re
+
+        import adapters.sina_ranking as sr
+        from adapters.source_health import is_available
+
+        def fake_get(url, timeout=25, attempt=1):
+            if "getHQNodeStockCount" in url:
+                return '"5000";'
+            m = re.search(r"page=(\d+)", url)
+            page = int(m.group(1)) if m else 1
+            if page == 2:
+                # 第 2 页持续失败（重试 3 次都失败）→ 触发部分数据降级
+                raise RemoteDisconnected("456 after page 1")
+            return TestSinaRankingAdapter._page_text(
+                10000 - (page - 1) * 50, 50,
+            )
+
+        with mock.patch.object(sr, "_get", side_effect=fake_get), \
+                mock.patch.object(sr.time, "sleep"):
+            out = sr.fetch_ranking("amount", top_n=0, market="hs_a")
+        self.assertTrue(out["partial"])
+        self.assertEqual(len(out["rows"]), 50)
+        self.assertEqual(out["fetched_count"], 50)
+        self.assertIsNone(out["total"], "部分数据总数未知")
+        # 部分失败计入失败计数（1 次不熔断），下一次成功会清零
+        ok, _ = is_available("sina_ranking")
+        self.assertTrue(ok)
+
+    def test_sina_first_page_failure_raises_and_marks(self):
+        import adapters.sina_ranking as sr
+        from adapters.source_health import get_health, is_available
+
+        with mock.patch.object(
+            sr, "_get",
+            side_effect=RemoteDisconnected("Remote end closed connection"),
+        ), mock.patch.object(sr.time, "sleep"):
+            with self.assertRaises(RemoteDisconnected):
+                sr.fetch_ranking("amount", top_n=0, market="hs_a")
+        ok, _ = is_available("sina_ranking")
+        self.assertTrue(ok, "首页 1 次失败仍未熔断")
+        self.assertEqual(get_health()["sina_ranking"]["fails"], 1)
+
+    def test_health_aware_fallback_skips_cooldown_source(self):
+        import adapters.router as router
+        from adapters.source_health import mark_failure
+
+        payload = {
+            "rows": [{
+                "rank": 1, "code": "600519", "name": "贵州茅台",
+                "price": 1500.0, "change_pct": 2.5, "volume_hand": 30000,
+                "volume_wan_hand": 3.0, "amount_yuan": 1.87e9,
+                "amount_yi": 18.7, "turnover_pct": 0.8,
+                "market_cap_yi": 18000.0,
+            }],
+            "metric": "amount", "top_n": 1, "source": "tencent_ranking",
+            "market": "A股", "source_url": "http://qt.test",
+            "retrieved_at": "2026-08-22 10:00:00",
+        }
+        mark_failure("eastmoney_ranking", "HTTP 456")
+        mark_failure("eastmoney_ranking", "HTTP 456")
+        with mock.patch("adapters.router.fetch_ranking") as fr, \
+                mock.patch(
+                    "adapters.router.fetch_tencent_ranking",
+                    return_value=payload,
+                ) as tfr, mock.patch(
+                    "adapters.router.cache_get_ranking", return_value=None,
+                ), mock.patch(
+                    "adapters.router.cache_set_ranking",
+                ) as cs:
+            out = router.route_structured("今日A股成交额排行前十")
+        self.assertEqual(out["source"], "tencent_ranking")
+        fr.assert_not_called()
+        tfr.assert_called_once_with("amount", top_n=10)
+        cs.assert_called_once_with("a", "amount", payload, top_n=10)
+
+    def test_health_aware_fallback_all_cooldown_returns_none(self):
+        import adapters.router as router
+        from adapters.source_health import mark_failure
+
+        mark_failure("eastmoney_ranking", "HTTP 456")
+        mark_failure("eastmoney_ranking", "HTTP 456")
+        mark_failure("tencent_ranking", "HTTP 456")
+        mark_failure("tencent_ranking", "HTTP 456")
+        with mock.patch("adapters.router.fetch_ranking") as fr, \
+                mock.patch("adapters.router.fetch_tencent_ranking") as tfr, \
+                mock.patch(
+                    "adapters.router.cache_get_ranking", return_value=None,
+                ), self.assertLogs(
+                    "adapters.router", level="WARNING",
+                ) as cm:
+            out = router.route_structured("今日A股成交额排行前十")
+        self.assertIsNone(out)
+        fr.assert_not_called()
+        tfr.assert_not_called()
+        self.assertTrue(
+            any("ranking fetch failed" in m for m in cm.output), cm.output,
+        )
+
+    def test_full_market_sina_cooldown_returns_none(self):
+        import adapters.router as router
+        from adapters.source_health import mark_failure
+
+        mark_failure("sina_ranking", "HTTP 456")
+        mark_failure("sina_ranking", "HTTP 456")
+        with mock.patch("adapters.router.fetch_sina_ranking") as fsr, \
+                self.assertLogs(
+                    "adapters.router", level="WARNING",
+                ) as cm:
+            out = router.route_structured("A股前5%成交额占比")
+        self.assertIsNone(out)
+        fsr.assert_not_called()
+        self.assertTrue(
+            any("ranking fetch failed" in m for m in cm.output), cm.output,
+        )
+
+    def test_structured_injection_annotates_partial_data(self):
+        import tempfile
+
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        tmp = Path(tempfile.mkdtemp(prefix="sina_partial_inj_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            sample = _sina_ranking_sample(50)
+            sample["data"]["partial"] = True
+            sample["data"]["total"] = None
+            sample["data"]["fetched_count"] = 50
+            proj = ws_mod.task_project_dir("t-sina-partial")
+            (proj / "structured_data.json").write_text(
+                json.dumps(sample, ensure_ascii=False), encoding="utf-8",
+            )
+            block = OrchestratorV2._structured_injection("t-sina-partial")
+            self.assertIn("部分数据", block)
+            self.assertIn("已获取 50 只", block)
+            self.assertIn("全市场总数未知", block)
         finally:
             ws_mod.WORKSPACE_ROOT = old_root
             shutil.rmtree(tmp, ignore_errors=True)

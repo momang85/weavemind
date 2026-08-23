@@ -1600,6 +1600,7 @@ class OrchestratorV2:
                 )
                 if str(payload.get("metric") or "amount") == "volume":
                     metric_label = "成交量"
+                partial = bool(payload.get("partial"))
             if not target:
                 # 兜底：从目标里的百分比现场计算前 N
                 m = re.search(r"(\d+(?:\.\d+)?)\s*%", str(goal or ""))
@@ -1611,10 +1612,21 @@ class OrchestratorV2:
             scope = (
                 f"（前 {target} 只，全市场约 {total} 只）" if target else ""
             )
+            partial_note = ""
+            if partial:
+                fetched = payload.get("fetched_count") or len(
+                    payload.get("rows") or []
+                )
+                partial_note = (
+                    f"，部分数据：仅获取 {fetched} 只"
+                    f"（全市场总数 {payload.get('total') or '未知'}，"
+                    "统计结果须标注覆盖率）"
+                )
             return (
                 f"\n[Data: {csv_path}]"
                 f"\n[统计任务] 工作区已预载全市场行情数据 {csv_path}"
-                f"（已按{metric_label}降序，含全市场{metric_label}）{scope}。"
+                f"（已按{metric_label}降序，含全市场{metric_label}）"
+                f"{scope}{partial_note}。"
                 f"请读取该 CSV，计算前 {target or 'X%'} 的{metric_label}合计"
                 f"与占全市场{metric_label}的比例，输出 JSON："
                 '{"top_n": ..., "top_amount": ..., "total_amount": ..., '
@@ -1977,8 +1989,24 @@ class OrchestratorV2:
                             f"{row.get('volume_wan_hand')} | "
                             f"{row.get('amount_yi')} | {row.get('turnover_pct')} |"
                         )
+                    # 部分数据降级：报告块必须标注覆盖率（fetched_count/total），
+                    # 避免把不完整全市场数据当作全量口径陈述
+                    coverage_note = ""
+                    if payload.get("partial"):
+                        fetched = payload.get("fetched_count")
+                        total = payload.get("total")
+                        if total:
+                            coverage_note = (
+                                f"，部分数据：已获取 {fetched}/{total} 只"
+                            )
+                        else:
+                            coverage_note = (
+                                f"，部分数据：已获取 {fetched} 只"
+                                "（全市场总数未知）"
+                            )
                     block_title = (
-                        f"[结构化数据]（{title}，{source_label}{time_hint}）"
+                        f"[结构化数据]（{title}，{source_label}"
+                        f"{coverage_note}{time_hint}）"
                     )
                 if lines:
                     return (
