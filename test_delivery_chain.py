@@ -3571,7 +3571,7 @@ class TestTencentQuotesRankingAndCache(unittest.TestCase):
         self.assertEqual(out["metadata"]["market"], "A股")
         self.assertEqual(out["metadata"]["cache_hit"], False)
         tfr.assert_called_once_with("amount", top_n=10)
-        cs.assert_called_once_with("a", "amount", payload)
+        cs.assert_called_once_with("a", "amount", payload, top_n=10)
 
     def test_route_structured_cache_hit_skips_network(self):
         """缓存命中：直接返回并记录 cache hit，不再请求任何行情源。"""
@@ -3600,7 +3600,7 @@ class TestTencentQuotesRankingAndCache(unittest.TestCase):
             out = router.route_structured("今日A股总成交量前十股")
         self.assertEqual(out["source"], "tencent_ranking")
         self.assertEqual(out["metadata"]["cache_hit"], True)
-        cg.assert_called_once_with("a", "volume")
+        cg.assert_called_once_with("a", "volume", 10)
         fr.assert_not_called()
         tfr.assert_not_called()
         usfr.assert_not_called()
@@ -3637,7 +3637,7 @@ class TestTencentQuotesRankingAndCache(unittest.TestCase):
         usfr.assert_called_once_with("volume", top_n=10)
         fr.assert_not_called()
         tfr.assert_not_called()
-        cs.assert_called_once_with("us", "volume", payload)
+        cs.assert_called_once_with("us", "volume", payload, top_n=10)
 
     def test_route_structured_eastmoney_success_keeps_original_semantics(self):
         """eastmoney 成功：仍返回 eastmoney_ranking，且不回填缓存（既有语义）。"""
@@ -3748,6 +3748,427 @@ class TestTencentQuotesRankingAndCache(unittest.TestCase):
             block = o._structured_injection("t-tencent")
             self.assertIn("腾讯行情", block)
             self.assertIn("贵州茅台", block)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestSinaRankingAdapter(unittest.TestCase):
+    """P0-1：新浪排行适配器 canned（不联网）：GBK/裸键 JSON 解析、
+    分页合并、top_n=250 排序、节流与重试。"""
+
+    @staticmethod
+    def _hq_line(
+        code: str, name: str, trade: str, changepercent: str,
+        volume: int, amount: int, turnoverratio: str, mktcap: str,
+    ) -> str:
+        """构造新浪 getHQNodeData 原始行（键名不加引号）。"""
+        symbol = f"sh{code}" if code.startswith("6") else f"sz{code}"
+        return (
+            f'{{symbol:"{symbol}",code:"{code}",name:"{name}",'
+            f'trade:"{trade}",changepercent:"{changepercent}",'
+            f"volume:{volume},amount:{amount},"
+            f'turnoverratio:"{turnoverratio}",mktcap:"{mktcap}"}}'
+        )
+
+    @staticmethod
+    def _page_text(start_amount: int, count: int = 50) -> str:
+        """构造一页 50 只、成交额递减的响应文本。"""
+        rows = []
+        for i in range(count):
+            amount = start_amount - i
+            rows.append(
+                TestSinaRankingAdapter._hq_line(
+                    f"{600000 + i:06d}"[-6:],
+                    f"测试股{i:03d}",
+                    "10.00",
+                    "1.00",
+                    1_000_000 + i,
+                    amount * 100_000_000,
+                    "0.80",
+                    "100000000000",
+                )
+            )
+        return "[" + ",".join(rows) + "]"
+
+    def test_parse_hq_nodes_gbk_unquoted_json(self):
+        from adapters.sina_ranking import parse_hq_nodes
+
+        text = (
+            "["
+            + self._hq_line(
+                "600519", "贵州茅台", "1500.00", "2.50",
+                30000, 4500000000, "0.80", "1800000000000",
+            )
+            + ","
+            + self._hq_line(
+                "000001", "平安银行", "11.00", "-1.20",
+                500000, 5500000000, "1.10", "210000000000",
+            )
+            + "]"
+        )
+        rows = parse_hq_nodes(text)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["name"], "贵州茅台")
+        self.assertEqual(rows[0]["amount"], 4500000000)
+        self.assertEqual(rows[1]["code"], "000001")
+        # GBK 解码路径后的文本同样可解析
+        rows2 = parse_hq_nodes(text.encode("gbk").decode("gbk"))
+        self.assertEqual(rows2[1]["name"], "平安银行")
+        self.assertEqual(parse_hq_nodes("not-json"), [])
+        self.assertEqual(parse_hq_nodes(""), [])
+
+    def test_fetch_ranking_merges_pages_sorts_top250(self):
+        import re
+
+        import adapters.sina_ranking as sr
+
+        def fake_get(url, timeout=25, attempt=1):
+            if "getHQNodeStockCount" in url:
+                return '"5000";'
+            m = re.search(r"page=(\d+)", url)
+            page = int(m.group(1)) if m else 1
+            return self._page_text(10000 - (page - 1) * 50, 50)
+
+        with mock.patch.object(sr, "_get", side_effect=fake_get), \
+                mock.patch.object(sr.time, "sleep") as sleep_mock:
+            out = sr.fetch_ranking("amount", top_n=250, market="hs_a")
+        self.assertEqual(out["source"], "sina_ranking")
+        self.assertEqual(out["market"], "A股")
+        self.assertEqual(len(out["rows"]), 250)
+        self.assertEqual(out["total"], 5000)
+        self.assertEqual(out["fetched_count"], 250)
+        self.assertEqual(out["rows"][0]["rank"], 1)
+        self.assertEqual(out["rows"][0]["amount_yi"], 10000.0)
+        self.assertEqual(out["rows"][-1]["rank"], 250)
+        # 成交额降序
+        amounts = [r["amount_yuan"] for r in out["rows"]]
+        self.assertEqual(amounts, sorted(amounts, reverse=True))
+        # 页间节流：5 页之间 4 次，每次 0.3s
+        self.assertEqual(len(sleep_mock.call_args_list), 4)
+        for call in sleep_mock.call_args_list:
+            self.assertEqual(call.args[0], 0.3)
+
+    def test_fetch_ranking_retry_and_throttle(self):
+        import re
+
+        import adapters.sina_ranking as sr
+
+        calls = {"n": 0}
+
+        def fake_get(url, timeout=25, attempt=1):
+            if "getHQNodeStockCount" in url:
+                return '"5000";'
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("transient")
+            m = re.search(r"page=(\d+)", url)
+            page = int(m.group(1)) if m else 1
+            return self._page_text(10000 - (page - 1) * 50, 50)
+
+        with mock.patch.object(sr, "_get", side_effect=fake_get), \
+                mock.patch.object(sr.time, "sleep") as sleep_mock:
+            out = sr.fetch_ranking("amount", top_n=250, market="hs_a")
+        self.assertEqual(len(out["rows"]), 250)
+        sleeps = [c.args[0] for c in sleep_mock.call_args_list]
+        # 重试退避 1s + 页间节流 0.3s × 4
+        self.assertEqual(sleeps[0], 1.0)
+        self.assertEqual(sleeps[1:], [0.3, 0.3, 0.3, 0.3])
+
+
+class TestStatisticalRankingRouting(unittest.TestCase):
+    """P0-2/P1：规模感知路由、top_n 解析、能力注册表匹配。"""
+
+    def test_parse_top_n_variants(self):
+        import adapters.router as router
+
+        self.assertEqual(
+            router._parse_top_n("A股前5%成交额占比", 5000), 250,
+        )
+        self.assertEqual(
+            router._parse_top_n("前5%", 5000), 250,
+        )
+        self.assertIsNone(router._parse_top_n("A股前5%成交额占比"))
+        self.assertEqual(
+            router._parse_top_n("A股成交额排行前250只", 5000), 250,
+        )
+        self.assertEqual(
+            router._parse_top_n("top250美股", 5000), 250,
+        )
+        self.assertEqual(
+            router._parse_top_n("今日A股总成交量前十股", 5000), 10,
+        )
+        self.assertEqual(router._parse_top_n("今日A股成交额排行", 5000), 10)
+
+    def test_scale_parsing(self):
+        import adapters.router as router
+
+        self.assertEqual(
+            router._parse_scale("A股前5%成交额占比"), "full_market",
+        )
+        self.assertEqual(router._parse_scale("A股成交额分布分析"), "full_market")
+        self.assertEqual(
+            router._parse_scale("A股成交额排行前250"), "full_market",
+        )
+        self.assertEqual(
+            router._parse_scale("今日A股总成交量前十股"), "topN",
+        )
+        self.assertEqual(router._parse_scale("今日A股成交额排行"), "topN")
+
+    def test_capability_registry_matching(self):
+        import adapters.router as router
+
+        self.assertEqual(
+            router._match_data_source("a", "amount", "topN", 10),
+            "eastmoney_ranking",
+        )
+        self.assertEqual(
+            router._match_data_source("a", "volume", "full_market", 0),
+            "sina_ranking",
+        )
+        self.assertEqual(
+            router._match_data_source("a", "amount", "topN", 250),
+            "sina_ranking",
+        )
+        self.assertEqual(
+            router._match_data_source("us", "volume", "topN", 10),
+            "tencent_us_ranking",
+        )
+        self.assertEqual(
+            router._match_data_source("us", "amount", "full_market", 0),
+            "sina_ranking",
+        )
+        self.assertIsNone(
+            router._match_data_source("hk", "amount", "topN", 10),
+        )
+
+    def test_route_structured_statistical_goal_uses_sina_full_market(self):
+        import adapters.router as router
+
+        payload = {
+            "rows": [{"rank": 1, "name": "贵州茅台"}],
+            "metric": "amount", "top_n": 1, "total": 5000,
+            "fetched_count": 5000, "source": "sina_ranking",
+            "market": "A股", "source_url": "http://sina.test",
+            "retrieved_at": "2026-08-22 10:00:00",
+        }
+        with mock.patch.object(
+            router, "fetch_sina_ranking", return_value=payload,
+        ) as fsr, mock.patch.object(router, "cache_set_ranking") as cs:
+            out = router.route_structured("A股前5%成交额占比")
+        self.assertEqual(out["source"], "sina_ranking")
+        self.assertEqual(out["data"]["target_top_n"], 250)
+        self.assertEqual(out["metadata"]["target_top_n"], 250)
+        self.assertEqual(out["metadata"]["total"], 5000)
+        fsr.assert_called_once_with("amount", top_n=0, market="hs_a")
+        cs.assert_called_once_with("a", "amount", payload, top_n=250)
+
+    def test_route_structured_top250_uses_sina_pagination(self):
+        import adapters.router as router
+
+        payload = {
+            "rows": [{"rank": 1, "name": "贵州茅台"}],
+            "metric": "amount", "top_n": 1, "total": 5000,
+            "fetched_count": 5000, "source": "sina_ranking",
+            "market": "A股", "source_url": "http://sina.test",
+            "retrieved_at": "2026-08-22 10:00:00",
+        }
+        with mock.patch.object(
+            router, "fetch_sina_ranking", return_value=payload,
+        ) as fsr:
+            out = router.route_structured("A股成交额排行前250")
+        self.assertEqual(out["source"], "sina_ranking")
+        self.assertEqual(out["data"]["target_top_n"], 250)
+        fsr.assert_called_once_with("amount", top_n=0, market="hs_a")
+
+    def test_quote_cache_key_includes_top_n(self):
+        from adapters.quote_cache import QuoteCache
+
+        mem = QuoteCache(redis_client=None, ttl=600)
+        mem._redis = None
+        mem.set("a", "amount", {"top_n": 10}, top_n=10)
+        mem.set("a", "amount", {"top_n": 0}, top_n=0)
+        self.assertEqual(mem.get("a", "amount", 10)["top_n"], 10)
+        self.assertEqual(mem.get("a", "amount", 0)["top_n"], 0)
+        self.assertIsNone(mem.get("a", "amount", 20))
+
+
+def _sina_ranking_sample(n: int = 60, total: int = 5000) -> dict:
+    """构造 sina_ranking canned 数据（全市场 >50 行）。"""
+    rows = []
+    for i in range(n):
+        amount_yuan = (n - i) * 100_000_000
+        volume = (n - i) * 200_000
+        rows.append({
+            "rank": i + 1,
+            "code": f"600{i:03d}" if i < 900 else f"000{i:03d}",
+            "name": f"样例股{i + 1:03d}",
+            "price": 10.0 + i,
+            "change_pct": round((i % 7) - 2.5, 2),
+            "volume_hand": volume / 100.0,
+            "volume_wan_hand": round(volume / 1e6, 2),
+            "amount_yuan": amount_yuan,
+            "amount_yi": round(amount_yuan / 1e8, 2),
+            "turnover_pct": 1.0,
+            "market_cap_yi": 500.0,
+            "mktcap_yi": 500.0,
+        })
+    return {
+        "source": "sina_ranking",
+        "data": {
+            "rows": rows,
+            "metric": "amount",
+            "top_n": n,
+            "total": total,
+            "fetched_count": n,
+            "source": "sina_ranking",
+            "market": "A股",
+            "source_url": "http://sina.test/hq",
+            "retrieved_at": "2026-08-22 10:00:00",
+        },
+        "metadata": {
+            "source": "sina_ranking",
+            "market": "A股",
+            "metric": "amount",
+            "top_n": n,
+            "total": total,
+            "fetched_count": n,
+            "unit": "亿元",
+            "retrieved_at": "2026-08-22 10:00:00",
+        },
+    }
+
+
+class TestStatisticalRankingOrchestration(unittest.TestCase):
+    """P0-3：统计类目标识别、sina 全量 CSV 导出、code_execution 统计指令。"""
+
+    def test_is_statistical_goal(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        for goal in (
+            "A股前5%成交额占比",
+            "计算A股前5%的成交额占比",
+            "A股成交额分布分析",
+            "全市场成交额合计与汇总",
+            "A股前10%成交额比例",
+        ):
+            self.assertTrue(OrchestratorV2._is_statistical_goal(goal), goal)
+        for goal in (
+            "今日A股总成交量前十股",
+            "A股成交额排行前10",
+        ):
+            self.assertFalse(OrchestratorV2._is_statistical_goal(goal), goal)
+
+    def test_export_ranking_csv_exports_all_rows_for_sina(self):
+        import tempfile
+
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = Path(tempfile.mkdtemp(prefix="sina_csv_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            csv_path = o._export_ranking_csv("t-sina-csv", _sina_ranking_sample(60))
+            self.assertIsNotNone(csv_path)
+            import pandas as pd
+            df = pd.read_csv(csv_path)
+            self.assertEqual(len(df), 60, "sina 全市场数据应全量导出")
+            self.assertEqual(df.iloc[0]["name"], "样例股001")
+            self.assertIn("amount_yi", df.columns)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_statistical_code_execution_instruction(self):
+        import tempfile
+        import threading
+
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._task_goals = {"t-st": "A股前5%成交额占比"}
+        tmp = Path(tempfile.mkdtemp(prefix="stat_instr_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            sample = _sina_ranking_sample(60)
+            sample["data"]["target_top_n"] = 250
+            proj = ws_mod.task_project_dir("t-st")
+            (proj / "structured_data.json").write_text(
+                json.dumps(sample, ensure_ascii=False), encoding="utf-8",
+            )
+            OrchestratorV2._export_ranking_csv("t-st", sample)
+            step = {
+                "step_id": "3", "capability": "code_execution",
+                "instruction": "计算前5%成交额占比", "depends_on": [],
+            }
+            instr = o._inject_step_context(
+                step, {}, threading.Lock(), "t-st",
+            )
+            self.assertIn("统计任务", instr)
+            self.assertIn("ranking.csv", instr)
+            self.assertIn("前 250", instr)
+            self.assertIn("share_pct", instr)
+            self.assertIn("禁止只取前 10 只", instr)
+            self.assertIn("全市场", instr)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_top10_goal_gets_no_statistical_instruction(self):
+        import tempfile
+        import threading
+
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._task_goals = {"t-top10": "今日A股总成交量前十股"}
+        tmp = Path(tempfile.mkdtemp(prefix="stat_top10_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            sample = _sina_ranking_sample(10)
+            proj = ws_mod.task_project_dir("t-top10")
+            (proj / "structured_data.json").write_text(
+                json.dumps(sample, ensure_ascii=False), encoding="utf-8",
+            )
+            OrchestratorV2._export_ranking_csv("t-top10", sample)
+            step = {
+                "step_id": "2", "capability": "code_execution",
+                "instruction": "分析排行", "depends_on": [],
+            }
+            instr = o._inject_step_context(
+                step, {}, threading.Lock(), "t-top10",
+            )
+            self.assertNotIn("统计任务", instr)
+            self.assertNotIn("share_pct", instr)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_structured_injection_sina_full_market_title(self):
+        import tempfile
+
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        tmp = Path(tempfile.mkdtemp(prefix="sina_inj_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            proj = ws_mod.task_project_dir("t-sina-inj")
+            (proj / "structured_data.json").write_text(
+                json.dumps(_sina_ranking_sample(5), ensure_ascii=False),
+                encoding="utf-8",
+            )
+            block = OrchestratorV2._structured_injection("t-sina-inj")
+            self.assertIn("A股成交额排行（全市场）", block)
+            self.assertIn("新浪行情中心", block)
+            self.assertIn("样例股001", block)
         finally:
             ws_mod.WORKSPACE_ROOT = old_root
             shutil.rmtree(tmp, ignore_errors=True)

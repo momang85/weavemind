@@ -173,6 +173,30 @@
           "timeout": 180
         }
       ]
+    },
+    {
+      "name": "auto-general-web_search-content_summary",
+      "goal": "搜索并总结目标主题的现状，输出结构化报告",
+      "steps": [
+        {
+          "step_id": "1",
+          "capability": "web_search",
+          "instruction": "搜索今日A股总成交量排名前十的股票列表，获取股票代码、名称、成交量、涨跌幅等关键数据。验收：返回包含前十股票数据的搜索结果列表，每条数据需有来源URL\n[行情数据源限定] 本任务为 A股 行情排行类目标：仅检索东方财富、同花顺、新浪财经、雪球等财经行情站点；禁止 YouTube、直播/短视频平台、百度百科及美股平台来源。",
+          "timeout": 180
+        },
+        {
+          "step_id": "2",
+          "capability": "content_summary",
+          "instruction": "从第一步的搜索结果中提取今日A股成交量前十的股票数据，整理为结构化表格（包含股票代码、名称、成交量、涨跌幅）。验收：生成Markdown表格，数据完整且标注来源URL\n\n[Skill: research-report] 调研/研报类任务的标准工作流与质量标准。当目标涉及市场规模调研、行业研报、可视化报告、技术趋势分析时触发。",
+          "timeout": 180
+        },
+        {
+          "step_id": "3",
+          "capability": "content_summary",
+          "instruction": "对前十股票的关键指标进行可视化分析，生成成交量分布柱状图和涨跌幅热力图。验收：输出2张图表文件（.png）并标注数据来源\n\n[Skill: data-pipeline] 数据管道标准工作流：加载→EDA→建模→报告。当目标涉及数据集、csv、EDA、训练模型、回归/预测、评分指标时触发。",
+          "timeout": 180
+        }
+      ]
     }
   ]
 }

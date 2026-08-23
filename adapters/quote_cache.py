@@ -1,7 +1,9 @@
 # -*- coding: utf-8 -*-
 """行情排行缓存：Redis 优先，进程内内存 dict 兜底。
 
-key 规则：ranking:{market}:{metric}（如 ranking:a:amount / ranking:us:volume）；
+key 规则：ranking:{market}:{metric}:{top_n}
+（如 ranking:a:amount:10 / ranking:us:volume:0），
+top_n=0 表示全市场分页规模，避免不同规模排行串缓存。
 TTL 默认 600 秒，可用环境变量 QUOTE_CACHE_TTL 覆盖（秒）。
 Redis 不可用/读写异常时自动降级内存缓存（带过期时间），
 保证任务间复用排行结果、减少上游行情接口请求量。
@@ -64,8 +66,9 @@ class QuoteCache:
         self._lock = threading.Lock()
 
     @staticmethod
-    def _key(market: str, metric: str) -> str:
-        return f"{_KEY_PREFIX}:{market}:{metric}"
+    def _key(market: str, metric: str, top_n: int = 0) -> str:
+        """排行缓存键：market + metric + top_n（0=全市场规模）。"""
+        return f"{_KEY_PREFIX}:{market}:{metric}:{int(top_n or 0)}"
 
     def _memory_get(self, key: str) -> dict | None:
         with self._lock:
@@ -92,9 +95,9 @@ class QuoteCache:
                     )
                     del self._memory[oldest]
 
-    def get(self, market: str, metric: str) -> dict | None:
+    def get(self, market: str, metric: str, top_n: int = 0) -> dict | None:
         """命中返回 payload，未命中/过期返回 None。"""
-        key = self._key(market, metric)
+        key = self._key(market, metric, top_n)
         if self._redis is not None:
             try:
                 raw = self._redis.get(key)
@@ -105,9 +108,12 @@ class QuoteCache:
                 self._redis = None
         return self._memory_get(key)
 
-    def set(self, market: str, metric: str, payload: dict, ttl: int | None = None) -> bool:
+    def set(
+        self, market: str, metric: str, payload: dict,
+        top_n: int = 0, ttl: int | None = None,
+    ) -> bool:
         """回填缓存；返回是否成功写入 Redis（内存兜底失败不算失败）。"""
-        key = self._key(market, metric)
+        key = self._key(market, metric, top_n)
         ttl = ttl if ttl is not None else self._ttl
         redis_ok = False
         if self._redis is not None:
@@ -122,9 +128,9 @@ class QuoteCache:
         self._memory_set(key, payload, ttl)
         return redis_ok
 
-    def delete(self, market: str, metric: str) -> None:
+    def delete(self, market: str, metric: str, top_n: int = 0) -> None:
         """删除指定缓存（测试/运维清理用）。"""
-        key = self._key(market, metric)
+        key = self._key(market, metric, top_n)
         if self._redis is not None:
             try:
                 self._redis.delete(key)
@@ -149,16 +155,19 @@ class QuoteCache:
 quote_cache = QuoteCache()
 
 
-def get_ranking(market: str, metric: str) -> dict | None:
-    """快捷入口：读取排行缓存。"""
-    return quote_cache.get(market, metric)
+def get_ranking(market: str, metric: str, top_n: int = 0) -> dict | None:
+    """快捷入口：读取排行缓存（top_n 参与键）。"""
+    return quote_cache.get(market, metric, top_n)
 
 
-def set_ranking(market: str, metric: str, payload: dict, ttl: int | None = None) -> bool:
-    """快捷入口：回填排行缓存。"""
-    return quote_cache.set(market, metric, payload, ttl=ttl)
+def set_ranking(
+    market: str, metric: str, payload: dict,
+    top_n: int = 0, ttl: int | None = None,
+) -> bool:
+    """快捷入口：回填排行缓存（top_n 参与键）。"""
+    return quote_cache.set(market, metric, payload, top_n=top_n, ttl=ttl)
 
 
-def delete_ranking(market: str, metric: str) -> None:
+def delete_ranking(market: str, metric: str, top_n: int = 0) -> None:
     """快捷入口：删除排行缓存。"""
-    quote_cache.delete(market, metric)
+    quote_cache.delete(market, metric, top_n)

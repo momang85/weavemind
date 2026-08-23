@@ -8,7 +8,15 @@ This is the active orchestrator (legacy orchestrator.py was removed in the archi
 
 import csv
 import hashlib
-import json, logging, os, re, shutil, threading, time, uuid
+import json
+import logging
+import math
+import os
+import re
+import shutil
+import threading
+import time
+import uuid
 from pathlib import Path
 
 from workspace import (
@@ -59,8 +67,18 @@ _MARKET_SEARCH_SUFFIX = (
     "（成交额口径用：今日 A股 成交额 排行 前十 东方财富）。"
 )
 
-# 排行类结构化来源：东方财富（原）+ 腾讯 A股/美股候选池（韧性降级新增）。
-_RANKING_SOURCES = ("eastmoney_ranking", "tencent_ranking", "tencent_us_ranking")
+# 排行类结构化来源：东方财富（原）+ 腾讯 A股/美股候选池（韧性降级新增）
+# + 新浪分页全市场（统计类/前 N% 任务，P0-2）。
+_RANKING_SOURCES = (
+    "eastmoney_ranking", "tencent_ranking",
+    "tencent_us_ranking", "sina_ranking",
+)
+
+# 统计类目标关键词：命中后在 code_execution 步骤注入全市场占比计算指令
+_STATISTICAL_GOAL_KEYWORDS = (
+    "占比", "比例", "百分位", "分布", "合计", "汇总",
+    "份额", "集中度", "全市场",
+)
 
 
 def _loads_json_loose(text: str) -> dict:
@@ -1517,11 +1535,13 @@ class OrchestratorV2:
     def _export_ranking_csv(
         task_id: str, data: dict, project: str | None = None,
     ) -> Path | None:
-        """把排行来源（eastmoney/tencent）的 rows 转写为 data/ranking.csv。
+        """把排行来源（eastmoney/tencent/sina）的 rows 转写为 data/ranking.csv。
 
         列与适配器 payload 保持一致（rank/code/name/price/change_pct/
         volume_hand/volume_wan_hand/amount_yuan/amount_yi/turnover_pct/
-        market_cap_yi），data_analyzer 步骤可直接 pd.read_csv 消费；
+        market_cap_yi），data_analyzer/code_execution 可直接 pd.read_csv 消费；
+        sina_ranking 全市场数据（fetched_count 可 >50）整表导出，不做截断，
+        供统计类任务计算前 N% 成交额占比（分母=全市场合计）；
         非排行来源返回 None（不产生无关文件）。
         """
         try:
@@ -1531,6 +1551,9 @@ class OrchestratorV2:
             rows = (data.get("data") or {}).get("rows") or []
             if not rows:
                 return None
+            fetched_count = int(
+                (data.get("data") or {}).get("fetched_count") or len(rows)
+            )
             csv_path = task_data_dir(task_id, project) / "ranking.csv"
             columns = [
                 "rank", "code", "name", "price", "change_pct",
@@ -1545,11 +1568,63 @@ class OrchestratorV2:
                     if not isinstance(row, dict):
                         continue
                     writer.writerow([row.get(c, "") for c in columns])
-            logger.info("ranking.csv exported for %s: %d rows", task_id, len(rows))
+            logger.info(
+                "ranking.csv exported for %s: %d rows (fetched %d)",
+                task_id, len(rows), fetched_count,
+            )
             return csv_path
         except Exception as exc:
             logger.warning("ranking csv export failed: %s", str(exc)[:120])
             return None
+
+    @staticmethod
+    def _statistical_ranking_instruction(
+        task_id: str, goal: str, csv_path,
+    ) -> str:
+        """统计类排行任务：为 code_execution 生成全市场占比计算指令。
+
+        明确告诉代码步骤读取 data/ranking.csv（已按成交额/成交量降序、
+        含全市场数据），计算前 X%（前 target_top_n 只）的合计与占全市场
+        比例并输出 JSON，禁止只取前 10 只。"""
+        try:
+            target = 0
+            total = 0
+            metric_label = "成交额"
+            sd_path = task_project_dir(task_id) / "structured_data.json"
+            if sd_path.exists():
+                sd = json.loads(sd_path.read_text(encoding="utf-8"))
+                payload = sd.get("data") or {}
+                target = int(payload.get("target_top_n") or 0)
+                total = int(payload.get("total") or 0) or len(
+                    payload.get("rows") or []
+                )
+                if str(payload.get("metric") or "amount") == "volume":
+                    metric_label = "成交量"
+            if not target:
+                # 兜底：从目标里的百分比现场计算前 N
+                m = re.search(r"(\d+(?:\.\d+)?)\s*%", str(goal or ""))
+                if m and total:
+                    target = max(
+                        1,
+                        int(math.ceil(total * float(m.group(1)) / 100.0)),
+                    )
+            scope = (
+                f"（前 {target} 只，全市场约 {total} 只）" if target else ""
+            )
+            return (
+                f"\n[Data: {csv_path}]"
+                f"\n[统计任务] 工作区已预载全市场行情数据 {csv_path}"
+                f"（已按{metric_label}降序，含全市场{metric_label}）{scope}。"
+                f"请读取该 CSV，计算前 {target or 'X%'} 的{metric_label}合计"
+                f"与占全市场{metric_label}的比例，输出 JSON："
+                '{"top_n": ..., "top_amount": ..., "total_amount": ..., '
+                '"share_pct": ...}；禁止只取前 10 只，分母必须为全市场合计。'
+            )
+        except Exception as exc:
+            logger.warning(
+                "statistical ranking instruction failed: %s", str(exc)[:120],
+            )
+            return ""
 
     def _reduce_steps_for_structured(
         self, task_id: str, steps: list[dict], data: dict | None,
@@ -1570,6 +1645,7 @@ class OrchestratorV2:
             "eastmoney_ranking": "A股行情排行",
             "tencent_ranking": "A股行情排行（腾讯）",
             "tencent_us_ranking": "美股行情排行（腾讯）",
+            "sina_ranking": "行情排行（新浪全市场）",
             "coingecko": "加密货币行情",
             "macro": "宏观指标",
             "news": "新闻列表",
@@ -1655,15 +1731,23 @@ class OrchestratorV2:
                         continue
             elif source in _RANKING_SOURCES:
                 metric = str(payload.get("metric") or "amount")
-                market_label = "美股" if source == "tencent_us_ranking" else "A股"
+                market_label = str(payload.get("market") or "")
+                if not market_label:
+                    market_label = (
+                        "美股" if source == "tencent_us_ranking" else "A股"
+                    )
                 series = (
                     f"{market_label}成交额排行"
                     if metric != "volume" else f"{market_label}成交量排行"
                 )
                 caliber = (
-                    "腾讯行情实时排行"
-                    if source.startswith("tencent")
-                    else "东方财富行情中心实时排行"
+                    "新浪行情中心全市场排行"
+                    if source == "sina_ranking"
+                    else (
+                        "腾讯行情实时排行"
+                        if source.startswith("tencent")
+                        else "东方财富行情中心实时排行"
+                    )
                 )
                 for row in (payload.get("rows") or [])[:20]:
                     label = f"{row.get('rank')}.{row.get('name')}"
@@ -1854,22 +1938,38 @@ class OrchestratorV2:
                     )
                 elif source in _RANKING_SOURCES:
                     metric = str(payload.get("metric") or "amount")
-                    market_label = "美股" if source == "tencent_us_ranking" else "A股"
-                    source_label = (
-                        "腾讯行情"
-                        if source.startswith("tencent")
-                        else "东方财富行情中心"
-                    )
-                    title = (
-                        f"{market_label}成交量排行（前十）"
-                        if metric == "volume" else f"{market_label}成交额排行（前十）"
-                    )
+                    market_label = str(payload.get("market") or "")
+                    if not market_label:
+                        market_label = (
+                            "美股" if source == "tencent_us_ranking" else "A股"
+                        )
+                    if source == "sina_ranking":
+                        # 新浪全市场：报告块给前 20 行摘要即可，全量在 ranking.csv
+                        source_label = "新浪行情中心"
+                        row_limit = 20
+                        title = (
+                            f"{market_label}成交量排行（全市场）"
+                            if metric == "volume"
+                            else f"{market_label}成交额排行（全市场）"
+                        )
+                    else:
+                        source_label = (
+                            "腾讯行情"
+                            if source.startswith("tencent")
+                            else "东方财富行情中心"
+                        )
+                        row_limit = 10
+                        title = (
+                            f"{market_label}成交量排行（前十）"
+                            if metric == "volume"
+                            else f"{market_label}成交额排行（前十）"
+                        )
                     lines = [
                         "| 排名 | 代码 | 名称 | 最新价 | 涨跌幅% | "
                         "成交量(万手) | 成交额(亿元) | 换手率% |",
                         "|---|---|---|---|---|---|---|---|",
                     ]
-                    for row in (payload.get("rows") or [])[:10]:
+                    for row in (payload.get("rows") or [])[:row_limit]:
                         lines.append(
                             f"| {row.get('rank')} | {row.get('code')} | "
                             f"{row.get('name')} | {row.get('price')} | "
@@ -3488,6 +3588,10 @@ class OrchestratorV2:
                     region = "美股"
                 elif row_source == "tencent_ranking":
                     src_label = "腾讯行情实时排行"
+                elif row_source == "sina_ranking":
+                    src_label = "新浪行情中心实时排行（全市场）"
+                if "美股" in str(r.get("series") or ""):
+                    region = "美股"
                 label = str(r.get("label") or "")
                 unit = str(r.get("unit") or "")
                 if not series:
@@ -6046,7 +6150,7 @@ print("charts generated")
                         _src = ""
                     if _src in (
                         "eastmoney_ranking", "tencent_ranking",
-                        "tencent_us_ranking", "macro",
+                        "tencent_us_ranking", "sina_ranking", "macro",
                     ):
                         # 排行/宏观 JSON 含 rows/points 数组，worker 可直接转 DataFrame
                         instr += f' [Data: {_sd_json}]'
@@ -6076,6 +6180,23 @@ print("charts generated")
                         "如任务需要作图，请优先读取该文件并按其中的 Label-Value 结构绘图，"
                         "不要直接解析 search_results.json 的原始文本。"
                     )
+            except Exception:
+                pass
+            # 统计类排行（前 N% 占比等）：明确指向全市场 ranking.csv，
+            # 防止代码步骤只取前十（历史 code_execution 反复失败的根因）
+            try:
+                _rk_csv = task_data_dir(task_id) / "ranking.csv"
+                if _rk_csv.exists():
+                    _goal = str(
+                        (getattr(self, "_task_goals", {}) or {}).get(task_id, "")
+                        or ""
+                    )
+                    if self._is_statistical_goal(_goal):
+                        block = self._statistical_ranking_instruction(
+                            task_id, _goal, _rk_csv,
+                        )
+                        if block:
+                            instr += block
             except Exception:
                 pass
 
@@ -6336,11 +6457,27 @@ print("charts generated")
         g = str(goal or "").lower()
         if any(k in g for k in _MARKET_SEARCH_KEYWORDS):
             return True
+        # 统计类排行（如"前5%成交额占比"）没有"排行/前十"字样，
+        # 但含成交额/成交量 + 市场语境，仍按行情目标处理搜索补充
+        if any(k in g for k in ("成交额", "成交量")) and any(
+            k in g for k in ("a股", "股票", "沪深", "股市", "今日")
+        ):
+            return True
         if any(k in g for k in ("排行", "排名", "前十", "榜单")):
             return any(
                 k in g for k in ("a股", "股票", "沪深", "股市", "今日")
             )
         return False
+
+    @staticmethod
+    def _is_statistical_goal(goal: str) -> bool:
+        """是否统计类排行目标：占比/比例/百分位/前N%/分布/合计/汇总等。
+
+        这类任务必须拿到全市场数据（含分母），不能只取前十。"""
+        g = str(goal or "").lower()
+        if any(k in g for k in _STATISTICAL_GOAL_KEYWORDS):
+            return True
+        return bool(re.search(r"前\s*\d+(?:\.\d+)?\s*%", g))
 
     @staticmethod
     def _goal_search_tokens(goal: str) -> list[str]:
