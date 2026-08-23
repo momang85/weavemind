@@ -11,6 +11,7 @@ import os
 import shutil
 import sqlite3
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -420,6 +421,70 @@ class TestAuthAudit(unittest.TestCase):
             self.assertEqual(h2._status, 200, h2.json_body())
             self.assertEqual(h2.json_body()["deleted"], 3)
             self.assertTrue(h2.json_body()["purge_expired"])
+
+    def test_memory_summary_fast_path_skips_chroma_list(self):
+        """回归：summary 缓存命中/冷启动兜底都不再同步调 Chroma 列表。
+
+        慢操作（list/get、LLM 生成）只允许进后台线程，接口本身必须秒回。
+        """
+
+        class FakeMem:
+            list_calls = 0
+
+            def memory_health(self, counts=None):
+                return {
+                    "injections": 1, "hits": 1, "hit_rate": 1.0,
+                    "strategy_count": 2, "conversation_count": 3,
+                    "expired_purged": 0,
+                }
+
+            def list_conversations(self, limit=30):
+                self.list_calls += 1
+                return []
+
+            def list_strategies(self, limit=30):
+                self.list_calls += 1
+                return []
+
+        fake = FakeMem()
+        self._seed_users()
+        token = self._login("admin", "admin123")
+        saved_cache = dict(web_ui._memory_summary_cache)
+        saved_generating = web_ui._memory_summary_generating
+        web_ui._memory_summary_generating = False
+        try:
+            with mock.patch.object(web_ui, "_get_memory_manager", return_value=fake), \
+                    mock.patch.object(
+                        web_ui, "_get_memory_stats",
+                        return_value={"conversations": 3, "strategies": 2},
+                    ), \
+                    mock.patch.object(
+                        web_ui, "_start_memory_summary_refresh",
+                        return_value=True,
+                    ):
+                # 缓存命中：不触碰任何 Chroma 列表接口
+                web_ui._memory_summary_cache = {
+                    "text": "缓存自述", "ts": time.time(), "signature": "3:2",
+                }
+                h = self._req("/api/memory/summary", token=token)
+                self.assertEqual(h._status, 200)
+                d = h.json_body()
+                self.assertTrue(d["cached"])
+                self.assertEqual(d["summary"], "缓存自述")
+                self.assertEqual(fake.list_calls, 0)
+
+                # 默认冷启动：立即返回兜底，列表交给后台线程
+                web_ui._memory_summary_cache = {"text": "", "ts": 0.0, "signature": ""}
+                h2 = self._req("/api/memory/summary", token=token)
+                self.assertEqual(h2._status, 200)
+                d2 = h2.json_body()
+                self.assertFalse(d2["cached"])
+                self.assertTrue(d2["generating"])
+                self.assertIn("织光", d2["summary"])
+                self.assertEqual(fake.list_calls, 0)
+        finally:
+            web_ui._memory_summary_cache = saved_cache
+            web_ui._memory_summary_generating = saved_generating
 
 
 if __name__ == "__main__":

@@ -67,6 +67,11 @@ def _get_rate_limiter():
         )
     return _rate_limiter
 _memory_summary_cache = {"text": "", "ts": 0.0, "signature": ""}
+_memory_summary_lock = threading.Lock()
+_memory_summary_generating = False
+_memory_data_cache = {"ts": 0.0, "data": None}
+_memory_data_lock = threading.Lock()
+_memory_data_refreshing = False
 _TEMPLATES_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "templates.json")
 
 def _new_redis():
@@ -786,48 +791,98 @@ def _get_memory_stats() -> dict:
     threading.Thread(target=_refresh_memory_stats, daemon=True).start()
     return cached["data"]
 
-def _get_memory_data():
-    mem = _get_memory_manager()
-    return {
-        "stats": _get_memory_stats(),
-        "conversations": mem.list_conversations(50) if mem else [],
-        "strategies": mem.list_strategies(50) if mem else [],
-        "memory_health": mem.memory_health() if mem else {
-            "injections": 0, "hits": 0, "hit_rate": 0.0,
-            "strategy_count": 0, "conversation_count": 0, "expired_purged": 0,
-        },
-    }
+def _memory_health(mem, stats: dict) -> dict:
+    """用已缓存的 stats 组装健康度，避免请求路径再次 count Chroma。
 
-def _get_memory_summary(refresh: bool = False) -> dict:
-    """让 LLM 基于真实记忆生成一段"系统自述"（带缓存与兜底文案）。"""
-    global _memory_summary_cache
-    mem = _get_memory_manager()
-    stats = _get_memory_stats()
-    health = mem.memory_health() if mem is not None else {
+    兼容只接受无参 memory_health() 的测试桩（TypeError 时降级为无参调用）。
+    """
+    default = {
         "injections": 0, "hits": 0, "hit_rate": 0.0,
         "strategy_count": 0, "conversation_count": 0, "expired_purged": 0,
     }
     if mem is None:
-        return {"summary": "", "cached": False, "error": "memory unavailable",
-                "memory_health": health}
-    convs = mem.list_conversations(30)
-    strats = mem.list_strategies(30)
+        return default
+    try:
+        health = mem.memory_health(stats)
+    except TypeError:
+        health = mem.memory_health()
+    if not isinstance(health, dict):
+        return default
+    return health
+
+def _refresh_memory_data(mem) -> dict:
+    """后台刷新 /api/memory 的列表数据（列表 get 不进请求路径）。"""
+    global _memory_data_cache, _memory_data_refreshing
+    try:
+        stats = _get_memory_stats()
+        data = {
+            "stats": stats,
+            "conversations": mem.list_conversations(50) if mem is not None else [],
+            "strategies": mem.list_strategies(50) if mem is not None else [],
+            "memory_health": _memory_health(mem, stats),
+        }
+        with _memory_data_lock:
+            _memory_data_cache = {"ts": time.time(), "data": data}
+        return data
+    finally:
+        with _memory_data_lock:
+            _memory_data_refreshing = False
+
+def _get_memory_data():
+    """记忆列表：60s 缓存 + 后台刷新，避免 Chroma 慢操作阻塞页面。"""
+    global _memory_data_cache, _memory_data_refreshing
+    mem = _get_memory_manager()
+    stats = _get_memory_stats()
+    health = _memory_health(mem, stats)
+    if mem is None:
+        return {
+            "stats": stats,
+            "conversations": [],
+            "strategies": [],
+            "memory_health": health,
+        }
+    with _memory_data_lock:
+        cached = _memory_data_cache
+        if cached["data"] is not None and time.time() - cached["ts"] < 60:
+            return cached["data"]
+        if _memory_data_refreshing:
+            # 已有后台刷新在跑：直接返回现有数据，避免重复全量 get
+            return cached["data"] if cached["data"] is not None else {
+                "stats": stats,
+                "conversations": [],
+                "strategies": [],
+                "memory_health": health,
+            }
+        _memory_data_refreshing = True
+    # 首次无缓存/缓存过期：返回现有数据，列表由后台线程补全（不阻塞请求）
+    threading.Thread(target=_refresh_memory_data, args=(mem,), daemon=True).start()
+    if cached["data"] is not None:
+        return cached["data"]
+    return {
+        "stats": stats,
+        "conversations": [],
+        "strategies": [],
+        "memory_health": health,
+    }
+
+def _build_summary_fallback(stats: dict) -> str:
+    """纯本地兜底自述：不访问 Chroma/LLM，保证接口秒回。"""
+    return (
+        f"我是织光——一支运行在你本地的 AI 团队。我已完成了 {stats.get('conversations', 0)} 项任务、"
+        f"沉淀了 {stats.get('strategies', 0)} 条成功策略。"
+        "我可以帮你调研、分析数据、写报告，还会在任务后自我复盘与进化。"
+    )
+
+def _build_memory_summary(mem, stats: dict) -> tuple[str, str]:
+    """读取真实记忆并生成自述（仅供后台线程调用，可接受慢操作）。"""
+    try:
+        convs = mem.list_conversations(30) or []
+        strats = mem.list_strategies(30) or []
+    except Exception:
+        convs, strats = [], []
     goals = [str(c.get("metadata", {}).get("goal", ""))[:100] for c in convs if c.get("metadata", {}).get("goal")]
     topics = [str(s.get("metadata", {}).get("goal_keywords", ""))[:80] for s in strats if s.get("metadata", {}).get("goal_keywords")]
-    sig = f"{stats.get('conversations')}:{stats.get('strategies')}:{len(goals)}:{len(topics)}"
-    now = time.time()
-    if (not refresh and _memory_summary_cache["text"]
-            and sig == _memory_summary_cache["signature"]
-            and now - _memory_summary_cache["ts"] < 600):
-        return {"summary": _memory_summary_cache["text"], "cached": True,
-                "memory_health": health}
-
-    fallback = (
-        f"我是织光——一支运行在你本地的 AI 团队。我已完成了 {stats.get('conversations', 0)} 项任务、"
-        f"沉淀了 {stats.get('strategies', 0)} 条成功策略"
-        + (f"，最近涉足：{'、'.join(topics[:4])}" if topics else "")
-        + "。我可以帮你调研、分析数据、写报告，还会在任务后自我复盘与进化。"
-    )
+    sig = f"{stats.get('conversations')}:{stats.get('strategies')}"
     text = ""
     if goals or topics:
         prompt = (
@@ -845,9 +900,73 @@ def _get_memory_summary(refresh: bool = False) -> dict:
         except Exception:
             text = ""
     if not text:
-        text = fallback
-    _memory_summary_cache = {"text": text, "ts": now, "signature": sig}
-    return {"summary": text, "cached": False, "memory_health": health}
+        text = _build_summary_fallback(stats)
+    return text, sig
+
+def _start_memory_summary_refresh(mem, stats: dict) -> bool:
+    """后台重新生成系统自述；已有一轮生成时不重复启动。"""
+    global _memory_summary_generating
+    with _memory_summary_lock:
+        if _memory_summary_generating:
+            return False
+        _memory_summary_generating = True
+
+    def _run():
+        try:
+            text, sig = _build_memory_summary(mem, stats)
+            if text:
+                with _memory_summary_lock:
+                    global _memory_summary_cache
+                    _memory_summary_cache = {
+                        "text": text, "ts": time.time(), "signature": sig,
+                    }
+        finally:
+            global _memory_summary_generating
+            with _memory_summary_lock:
+                _memory_summary_generating = False
+
+    threading.Thread(target=_run, daemon=True).start()
+    return True
+
+def _get_memory_summary(refresh: bool = False) -> dict:
+    """系统自述：默认请求优先返回 600s 缓存；无缓存时立即回兜底并后台生成。
+
+    显式 ?refresh=1 才同步重新生成（用户主动要求新文案，可接受等待）；
+    默认请求的 Chroma list/LLM 只出现在后台线程，接口本身不等待慢操作。
+    """
+    global _memory_summary_cache
+    mem = _get_memory_manager()
+    stats = _get_memory_stats()
+    health = _memory_health(mem, stats)
+    if mem is None:
+        return {"summary": "", "cached": False, "error": "memory unavailable",
+                "memory_health": health}
+    sig = f"{stats.get('conversations')}:{stats.get('strategies')}"
+    now = time.time()
+    with _memory_summary_lock:
+        cached = dict(_memory_summary_cache)
+        cache_fresh = (
+            bool(cached.get("text"))
+            and sig == cached.get("signature")
+            and now - cached.get("ts", 0) < 600
+        )
+        if not refresh and cache_fresh:
+            return {"summary": cached["text"], "cached": True,
+                    "memory_health": health}
+    if refresh:
+        # 显式刷新：同步生成，成功后写回缓存（允许慢）
+        text, sig = _build_memory_summary(mem, stats)
+        with _memory_summary_lock:
+            _memory_summary_cache = {
+                "text": text, "ts": time.time(), "signature": sig,
+            }
+        return {"summary": text, "cached": False, "memory_health": health}
+    # 默认冷启动：立即返回兜底，后台生成新文案
+    _start_memory_summary_refresh(mem, stats)
+    return {
+        "summary": _build_summary_fallback(stats), "cached": False,
+        "memory_health": health, "generating": True,
+    }
 
 def _append_evolution(result: dict) -> None:
     """记录一轮进化结果（内存 + 落盘），供锦标赛回放。"""
@@ -2566,14 +2685,13 @@ def main():
     # 预热记忆库（避免首个 /api/status 或 /api/memory 请求阻塞）
     def _prewarm_memory():
         mem = _get_memory_manager()
+        _refresh_memory_stats()
         if mem is not None:
             try:
-                # 启动惰性治理：过期策略清理 + 对话上限收敛
-                mem.purge_expired()
-                mem.enforce_conversation_cap()
+                # 预热 /api/memory 列表缓存（MemoryManager 内部已后台做治理）
+                _refresh_memory_data(mem)
             except Exception:
                 pass
-        _refresh_memory_stats()
     threading.Thread(target=_prewarm_memory, daemon=True).start()
 
     def _cleanup_stale_tasks():

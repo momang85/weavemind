@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 import urllib.request
 import urllib.error
@@ -195,21 +196,15 @@ class MemoryManager:
         self._inject_hits = 0
         self._expired_purged = 0
 
-        # 启动时惰性治理：清理过期策略 + 收敛对话上限（失败仅记日志，不影响启动）
-        try:
-            self.purge_expired()
-            self.enforce_conversation_cap()
-        except Exception as exc:
-            logger.warning("Lazy memory cleanup at startup failed: %s", str(exc)[:120])
-
-        logger.info(
-            "MemoryManager initialized at '%s'. "
-            "conversations: %d docs, strategies: %d docs",
-            persist_directory,
-            self._conversations.count(),
-            self._strategies.count(),
-            self._prompt_refinements.count(),
-        )
+        # 启动时惰性治理：清理过期策略 + 收敛对话上限（失败仅记日志，不影响启动）。
+        # 改为后台线程执行：构造/请求路径绝不做全量 ChromaDB 遍历。
+        self._stats_cache: dict[str, Any] = {
+            "ts": 0.0,
+            "data": {"conversations": 0, "strategies": 0},
+        }
+        self._stats_lock = threading.Lock()
+        threading.Thread(target=self._startup_maintenance, daemon=True).start()
+        logger.info("MemoryManager initialized at '%s'.", persist_directory)
 
     # ------------------------------------------------------------------
     # 记忆注入
@@ -669,22 +664,35 @@ class MemoryManager:
 
     def stats(self) -> dict[str, int]:
         """返回记忆库统计信息。"""
+        cached = getattr(self, "_stats_cache", None)
+        now = time.time()
+        if cached is not None and now - cached.get("ts", 0) < 60:
+            return dict(cached.get("data", {"conversations": 0, "strategies": 0}))
         try:
-            return {
+            data = {
                 "conversations": self._conversations.count(),
                 "strategies": self._strategies.count(),
             }
         except Exception as exc:
             logger.warning("Failed to get memory stats: %s", exc)
-            return {"conversations": -1, "strategies": -1}
+            data = {"conversations": -1, "strategies": -1}
+        if cached is None:
+            self._stats_cache = {"ts": now, "data": data}
+        else:
+            with getattr(self, "_stats_lock", threading.Lock()):
+                cached["ts"] = now
+                cached["data"] = data
+        return data
 
-    def memory_health(self) -> dict[str, Any]:
+    def memory_health(self, counts: dict[str, int] | None = None) -> dict[str, Any]:
         """返回记忆健康度观测：注入/命中计数、命中率、集合规模、过期清理累计。
 
         命中定义：inject_context 返回非空上下文（检索到至少一条相关记忆）。
         计数为进程内累计，随服务重启归零（Redis 持久化留待后续）。
+        counts 可由上层传入已缓存的 stats（如 web_ui 的 60s 统计缓存），
+        避免 memory_health 每次都在请求路径重新 count Chroma。
         """
-        stats = self.stats()
+        stats = self.stats() if counts is None else counts
         injections = max(0, self._injections)
         hits = max(0, self._inject_hits)
         return {
@@ -695,6 +703,24 @@ class MemoryManager:
             "conversation_count": int(stats.get("conversations", 0) or 0),
             "expired_purged": max(0, self._expired_purged),
         }
+
+    def _startup_maintenance(self) -> None:
+        """后台执行启动维护：过期清理 + 对话上限收敛 + 预热统计缓存。"""
+        try:
+            self.purge_expired()
+            self.enforce_conversation_cap()
+            stats = {
+                "conversations": self._conversations.count(),
+                "strategies": self._strategies.count(),
+            }
+            with self._stats_lock:
+                self._stats_cache = {"ts": time.time(), "data": stats}
+            logger.info(
+                "Memory maintenance done: conversations: %d docs, strategies: %d docs",
+                stats["conversations"], stats["strategies"],
+            )
+        except Exception as exc:
+            logger.warning("Lazy memory cleanup at startup failed: %s", str(exc)[:120])
 
     def list_recent(self, collection, limit: int = 50) -> list[dict]:
         """导出某集合最近的文档（内容 + 元数据），用于可视化。"""
