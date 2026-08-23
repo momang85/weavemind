@@ -235,6 +235,119 @@ class TestCodeExecutionNaming(unittest.TestCase):
         self.assertTrue(name.startswith("generated_"))
 
 
+class TestCodeExecutionTokenTruncation(unittest.TestCase):
+    """修复：code_execution 响应被 token 上限截断，导致统计任务反复编译失败。"""
+
+    def test_estimate_token_need_stats_and_html(self):
+        from workers.code_execution_worker import CodeExecutionWorker
+
+        # 统计/数据分析类关键词 → 4000
+        self.assertEqual(
+            CodeExecutionWorker._estimate_token_need("计算A股前5%成交额占比"), 4000)
+        self.assertEqual(
+            CodeExecutionWorker._estimate_token_need("读取 ranking.csv 并统计汇总"), 4000)
+        self.assertEqual(
+            CodeExecutionWorker._estimate_token_need("分析成交额分布，计算平均值与比例"), 4000)
+        self.assertEqual(
+            CodeExecutionWorker._estimate_token_need("前10% 成交额"), 4000)
+        # HTML 保持 4000
+        self.assertEqual(
+            CodeExecutionWorker._estimate_token_need("生成一个 HTML 游戏页面"), 4000)
+        # 其余任务保持 2000
+        self.assertEqual(
+            CodeExecutionWorker._estimate_token_need("输出 hello world"), 2000)
+
+    def test_estimate_token_need_env_override(self):
+        import os
+        from workers.code_execution_worker import CodeExecutionWorker
+
+        old = os.environ.get("CODE_EXECUTION_MAX_TOKENS")
+        os.environ["CODE_EXECUTION_MAX_TOKENS"] = "8000"
+        try:
+            self.assertEqual(
+                CodeExecutionWorker._estimate_token_need("输出 hello world"), 8000)
+        finally:
+            if old is None:
+                os.environ.pop("CODE_EXECUTION_MAX_TOKENS", None)
+            else:
+                os.environ["CODE_EXECUTION_MAX_TOKENS"] = old
+
+    def test_looks_truncated_incomplete_tail(self):
+        from workers.code_execution_worker import CodeExecutionWorker
+
+        # 空响应 / 缺结尾语法 → True
+        self.assertTrue(CodeExecutionWorker._looks_truncated(""))
+        self.assertTrue(CodeExecutionWorker._looks_truncated("import"))
+        self.assertTrue(CodeExecutionWorker._looks_truncated("def compute_share():\n"))
+        self.assertTrue(CodeExecutionWorker._looks_truncated(
+            "df['share'] = (df['amount'] / total"))
+        self.assertTrue(CodeExecutionWorker._looks_truncated("x = 'abc\n"))
+        self.assertTrue(CodeExecutionWorker._looks_truncated("print('hi')"))
+        # 完整代码（带换行、括号/引号闭合）→ False
+        self.assertFalse(CodeExecutionWorker._looks_truncated("print('hi')\n"))
+        self.assertFalse(CodeExecutionWorker._looks_truncated(
+            "df['share'] = df['amount'] / total\nprint(df)\n"))
+        self.assertFalse(CodeExecutionWorker._looks_truncated(
+            "def f():\n    return {'a': 1}\n"))
+
+    def test_empty_response_sets_feedback_and_retries(self):
+        import asyncio
+        import json
+        import tempfile
+        from pathlib import Path
+        from workers.code_execution_worker import CodeExecutionWorker
+
+        w = CodeExecutionWorker.__new__(CodeExecutionWorker)
+        ws = Path(tempfile.mkdtemp(prefix="weavemind_empty_"))
+        w.workspace = ws
+        calls = []
+
+        async def fake_llm(system="", prompt="", instruction="", max_attempts=3, max_tokens=2000):
+            calls.append({"prompt": prompt, "max_tokens": max_tokens})
+            if len(calls) < 3:
+                return ""
+            return "print('ok')\n"
+
+        w._call_llm = fake_llm
+        res = json.loads(asyncio.run(w.execute(
+            "生成一个 Python 脚本输出 ok",
+            {"workspace": str(ws), "simple": True},
+        )))
+        self.assertEqual(res["status"], "success")
+        self.assertEqual(len(calls), 3, "空响应应重试而非静默跳过")
+        self.assertEqual(calls[0]["max_tokens"], 2000)
+        self.assertEqual(calls[2]["max_tokens"], 3000, "空响应后应提升 token 上限")
+        self.assertIn("模型返回空", calls[2]["prompt"], "重试应携带空响应反馈")
+
+    def test_truncated_response_sets_feedback_and_retries(self):
+        import asyncio
+        import json
+        import tempfile
+        from pathlib import Path
+        from workers.code_execution_worker import CodeExecutionWorker
+
+        w = CodeExecutionWorker.__new__(CodeExecutionWorker)
+        ws = Path(tempfile.mkdtemp(prefix="weavemind_trunc_"))
+        w.workspace = ws
+        calls = []
+
+        async def fake_llm(system="", prompt="", instruction="", max_attempts=3, max_tokens=2000):
+            calls.append({"prompt": prompt, "max_tokens": max_tokens})
+            if len(calls) == 1:
+                return "import pandas as pd\nimport os"
+            return "print('ok')\n"
+
+        w._call_llm = fake_llm
+        res = json.loads(asyncio.run(w.execute(
+            "生成一个 Python 脚本输出 ok",
+            {"workspace": str(ws), "simple": True},
+        )))
+        self.assertEqual(res["status"], "success")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1]["max_tokens"], 3000, "疑似截断后应提升 token 上限")
+        self.assertIn("疑似被截断", calls[1]["prompt"], "重试应携带截断反馈")
+
+
 class TestSearchFetchWiring(unittest.TestCase):
     def test_fetch_without_deps_wired_to_search(self):
         from orchestrator_v2 import OrchestratorV2
@@ -1955,7 +2068,7 @@ class TestSimpleTaskFastPath(unittest.TestCase):
         async def fake_llm(system="", prompt="", instruction="", max_attempts=3, max_tokens=2000):
             self.assertEqual(max_attempts, 2, "简单任务应减少主端点尝试次数")
             self.assertEqual(max_tokens, 2000)
-            return "print('hello from simple task')"
+            return "print('hello from simple task')\n"
 
         async def fake_tdd(*a, **k):
             calls["tdd"] += 1

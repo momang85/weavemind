@@ -31,6 +31,13 @@ _AVAILABLE_MODULES = sorted(
 )
 _HAS_PYGAME = "pygame" in _AVAILABLE_MODULES
 
+# 统计/数据分析类关键词：命中即按长代码任务分配更大的 token 上限，
+# 避免 CSV 处理+计算+JSON 输出的代码被 max_tokens 截断
+_STATS_KEYWORDS = (
+    "占比", "比例", "统计", "汇总", "CSV", "计算", "平均值", "百分位",
+    "分布", "回归", "模型", "训练",
+)
+
 _HTML_GAME_TEMPLATE = """<!DOCTYPE html>
 <html lang="zh">
 <head>
@@ -144,6 +151,42 @@ class CodeExecutionWorker(AsyncWorkerBase):
             if any(k in instruction.lower() for k in ("html", "网页", "web", "webpage")):
                 return "index.html"
         return f"generated_{int(time.time() * 1000)}.py"
+
+    @staticmethod
+    def _estimate_token_need(instruction: str) -> int:
+        """根据指令类型估算生成代码所需的 max_tokens：
+        - 统计/数据分析类（占比/比例/统计/汇总/CSV/计算/平均值/百分位/前N%/分布/回归/模型/训练）→ 4000；
+        - HTML 页面类 → 4000（保持原有上限）；
+        - 其余任务 → 2000；
+        - 环境变量 CODE_EXECUTION_MAX_TOKENS（正整数）可整体覆盖。"""
+        raw = os.environ.get("CODE_EXECUTION_MAX_TOKENS", "").strip()
+        if raw:
+            try:
+                override = int(raw)
+                if override > 0:
+                    return override
+            except ValueError:
+                pass
+        text = str(instruction)
+        low = text.lower()
+        if any(k in low for k in ("html", "网页", "webpage", "web page")):
+            return 4000
+        # 前N% 模式（如 前5%、前10%）
+        if re.search(r"前\s*\d+(?:\.\d+)?\s*%|前\s*N\s*%", text):
+            return 4000
+        if any(k in text for k in _STATS_KEYWORDS):
+            return 4000
+        return 2000
+
+    @staticmethod
+    def _next_token_budget(current: int) -> int:
+        """token 上限不足时逐档提升：2000 → 3000 → 4000；
+        环境变量覆盖出的更高值保持不变。"""
+        if current <= 2000:
+            return 3000
+        if current <= 3000:
+            return 4000
+        return current
 
     async def _generate_code(
         self, instruction: str, env_note: str, html_mode: bool,
@@ -319,6 +362,76 @@ class CodeExecutionWorker(AsyncWorkerBase):
                 lines = lines[:-1]
             candidate = "\n".join(lines)
         return candidate
+
+    @staticmethod
+    def _strip_strings_and_comments(code: str) -> tuple[str, str | None]:
+        """去掉 Python 字符串内容与行注释，返回（代码骨架, 未闭合的字符串分隔符）。
+        保留字符串分隔符本身，用于粗略判断括号/引号是否闭合，
+        避免把字符串/注释里的符号误判成截断。"""
+        out: list[str] = []
+        i, n = 0, len(code)
+        quote: str | None = None  # 当前字符串分隔符（'、"、'''、"""）
+        while i < n:
+            ch = code[i]
+            if quote is None:
+                if ch == "#":
+                    while i < n and code[i] not in "\r\n":
+                        i += 1
+                    continue
+                if ch in ("'", '"'):
+                    if code.startswith(ch * 3, i):
+                        quote = ch * 3
+                        out.append(quote)
+                        i += 3
+                    else:
+                        quote = ch
+                        out.append(quote)
+                        i += 1
+                    continue
+                out.append(ch)
+                i += 1
+                continue
+            # 字符串内部：等待非转义闭合符
+            if quote in ("'''", '"""'):
+                if code.startswith(quote, i) and (i == 0 or code[i - 1] != "\\"):
+                    out.append(quote)
+                    quote = None
+                    i += 3
+                    continue
+            elif ch == quote and (i == 0 or code[i - 1] != "\\"):
+                out.append(quote)
+                quote = None
+                i += 1
+                continue
+            i += 1
+        return "".join(out), quote
+
+    @staticmethod
+    def _looks_truncated(response: str) -> bool:
+        """判断 LLM 返回的代码是否可能因 token 上限被截断：
+        空响应、无换行结尾、以语句头（def/import 等）或冒号结束、
+        括号/引号未闭合，都视为疑似截断。"""
+        if not response or not response.strip():
+            return True
+        # 完整输出通常以换行结尾；被截断的响应往往在行中断开
+        if not response.endswith(("\n", "\r")):
+            return True
+        tail = response.rstrip("\r\n")
+        # 以语句/代码块头结束，说明后面还应有函数体或 import 目标
+        if re.search(
+            r"\b(?:def|class|import|from|if|elif|else|for|while|with|try|except|finally)\s*$",
+            tail, re.I,
+        ):
+            return True
+        if tail.endswith(":"):
+            return True
+        structure, unclosed = CodeExecutionWorker._strip_strings_and_comments(tail)
+        if unclosed:
+            return True
+        for pair in (("(", ")"), ("[", "]"), ("{", "}")):
+            if structure.count(pair[0]) > structure.count(pair[1]):
+                return True
+        return False
 
     def _py_compile(self, candidate: str) -> str:
         """编译自检；返回错误文本（空串表示通过）。"""
@@ -511,8 +624,9 @@ class CodeExecutionWorker(AsyncWorkerBase):
             feedback = ""
             # 简单任务：主端点连试 2 次即切备用，减少慢端点无效等待
             llm_attempts = 2 if simple else 3
-            # HTML 单文件游戏/页面常超 2000 token，提高上限避免响应被截断
-            llm_tokens = 4000 if html_mode else 2000
+            # 动态 token：统计/数据分析类与 HTML 类任务代码较长，用 4000；
+            # 其余 2000；环境变量 CODE_EXECUTION_MAX_TOKENS 可覆盖
+            llm_tokens = self._estimate_token_need(instruction)
             # 小步快跑：生成 → 编译 → 冒烟运行 → 代码审查 → 带反馈修复（最多 3 轮）
             for _round in range(3):
                 llm_response = ""
@@ -531,6 +645,24 @@ class CodeExecutionWorker(AsyncWorkerBase):
                     if llm_response and llm_response.strip():
                         break
                 if not llm_response or not llm_response.strip():
+                    # 空响应不再静默 continue：明确反馈模型返回空，并提升 token 上限
+                    feedback = (
+                        "模型返回空，请重新生成（可能是 token 上限导致输出被截断；"
+                        "请精简实现，只输出必要代码）。"
+                    )
+                    llm_tokens = self._next_token_budget(llm_tokens)
+                    logger.info("Round %d: empty LLM response, regenerating", _round + 1)
+                    continue
+                # 疑似截断：尾部不完整（缺括号/引号/冒号、以 def/import 结束、
+                # 无换行结尾）时，反馈要求精简实现并提升 token 上限后重试
+                if not html_mode and self._looks_truncated(llm_response):
+                    feedback = (
+                        "输出疑似被截断（token 上限），请生成更精简的实现"
+                        "（避免长注释/长字符串），只输出必要代码。"
+                    )
+                    llm_tokens = self._next_token_budget(llm_tokens)
+                    logger.info("Round %d: LLM response possibly truncated, regenerating",
+                                _round + 1)
                     continue
                 candidate = self._strip_fences(llm_response)
                 if html_mode:
