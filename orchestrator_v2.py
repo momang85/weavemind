@@ -1,4 +1,4 @@
-﻿"""Orchestrator V2 — clean, linear, push-progress-enabled.
+"""Orchestrator V2 — clean, linear, push-progress-enabled.
 
 Reuses all existing components: llm_client, common, async_worker_base, memory_manager,
 critic_agent, ws_helpers. No complex state machine — just: plan → dispatch → collect → report.
@@ -2370,6 +2370,14 @@ class OrchestratorV2:
                 )
         except Exception:
             pass
+        # Roadmap 余项③：错误模式库（跨任务聚合的修复模板）注入反思
+        try:
+            from error_patterns import build_reflection_context
+            _ptn = build_reflection_context(limit=5)
+            if _ptn:
+                ctx_parts.append(_ptn)
+        except Exception:
+            pass
         prompt = "\n\n".join(ctx_parts)
         try:
             from prompt_registry import get_prompt
@@ -2550,6 +2558,13 @@ class OrchestratorV2:
                           {"message": summary, "timestamp": self._now_iso()})
             logger.info("Acceptance(%s): overall=%s %s",
                         task_id, result.get("overall"), summary)
+            # 评测集自动生长：验收 fail 的真实任务沉淀为新评测案例（静默，不干扰主线）
+            try:
+                if result.get("overall") == "fail":
+                    from evals.auto_grow import harvest_failure
+                    harvest_failure(task_id, goal, result, report)
+            except Exception as _exc:
+                logger.warning("评测集自动沉淀异常（已忽略）: %s", str(_exc)[:100])
             return result
         except Exception as exc:
             logger.warning("Acceptance check failed: %s", str(exc)[:150])

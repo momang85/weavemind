@@ -690,12 +690,19 @@ def _system_status():
             source_health = get_source_health()
         except Exception:
             source_health = {}
+        try:
+            # Roadmap 余项④：月度预算状态（超限降级可观测）
+            from costs import get_budget_status
+            budget = get_budget_status()
+        except Exception:
+            budget = {}
         return {
             "agents": agents,
             "llm_health": llm_health,
             "llm_warning": llm_warning,
             "search_health": search_health,
             "source_health": source_health,
+            "budget": budget,
             "queues": queues,
             "tasks": {"total": total, "success": success, "today": today},
             "memory": memory,
@@ -1411,8 +1418,27 @@ def _share_password_page(token: str, error: str = "") -> str:
     return _SHARE_PASSWORD_PAGE_HTML.format(token=token, error_html=error_html)
 
 
-def _share_page_html(title: str, created_at: str, body_html: str) -> str:
-    """生成公开只读分享页：自包含 HTML，无系统导航/管理功能。"""
+def _build_lang_context(report_lang: str, user_context: str) -> str:
+    """Roadmap 余项⑤：报告语言要求上下文。
+    zh/空 → 原样返回；其他语言 → 头部注入语言指令（数据保持原样）。"""
+    lang = str(report_lang or "").strip()[:10]
+    if not lang or lang.lower() == "zh":
+        return str(user_context or "")
+    lang_ctx = (
+        f"【报告语言要求】请用 {lang} 撰写最终报告（标题、正文、"
+        f"表格、图表标题与结论全部使用该语言；数据与数字保持原样）。"
+    )
+    base = str(user_context or "").strip()
+    return (lang_ctx + "\n\n" + base).strip() if base else lang_ctx
+
+
+def _share_page_html(title: str, created_at: str, body_html: str,
+                     theme: str = "light") -> str:
+    """生成公开只读分享页：自包含 HTML，无系统导航/管理功能。
+    theme 支持 light / dark / paper（Roadmap 余项⑤：HTML 模板定制）。"""
+    theme = str(theme or "light").strip().lower()
+    if theme not in ("light", "dark", "paper"):
+        theme = "light"
     time_text = ""
     if created_at:
         try:
@@ -1426,6 +1452,44 @@ def _share_page_html(title: str, created_at: str, body_html: str) -> str:
         f'<div class="meta">生成时间：{html.escape(time_text)}</div>'
         if time_text else ""
     )
+    theme_css = {
+        "light": """
+  :root {{ color-scheme: light; }}
+  body {{ background: #f4f5f7; color: #1f2430; }}
+  h1.title {{ color: #16213e; }}
+  main {{ background: #fff; border: 1px solid #e6e8ee; }}
+  h1, h2, h3, h4 {{ color: #16213e; }}
+  a {{ color: #1f6feb; }}
+  code {{ background: #f0f2f5; }}
+  th {{ background: #f0f2f5; }}
+  th, td {{ border-color: #dfe3ea; }}""",
+        "dark": """
+  :root {{ color-scheme: dark; }}
+  body {{ background: #10151f; color: #d5dbe6; }}
+  h1.title {{ color: #eef2f8; }}
+  .meta {{ color: #8b93a3; }}
+  main {{ background: #1a2230; border: 1px solid #2a3345; }}
+  h1, h2, h3, h4 {{ color: #eef2f8; }}
+  h2 {{ border-bottom-color: #2a3345; }}
+  a {{ color: #6ea8ff; }}
+  code {{ background: #232d3f; }}
+  pre {{ background: #0b0f16; color: #c9d4e5; }}
+  blockquote {{ border-left-color: #3a465c; color: #9aa4b6; }}
+  th {{ background: #232d3f; }}
+  th, td {{ border-color: #2e394e; }}
+  hr {{ border-top-color: #2a3345; }}""",
+        "paper": """
+  :root {{ color-scheme: light; }}
+  body {{ background: #ece7dc; color: #3a342b; font-family: Georgia, "Noto Serif SC", "Songti SC", serif; }}
+  h1.title {{ color: #2c2620; font-family: Georgia, "Noto Serif SC", "Songti SC", serif; }}
+  main {{ background: #fbf8f1; border: 1px solid #d8d0bd; box-shadow: 0 2px 14px rgba(60, 50, 30, .08); }}
+  h1, h2, h3, h4 {{ color: #2c2620; }}
+  a {{ color: #8a5a2b; }}
+  code {{ background: #efe9db; }}
+  th {{ background: #efe9db; }}
+  th, td {{ border-color: #d8d0bd; }}
+  hr {{ border-top-color: #d8d0bd; }}""",
+    }[theme]
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -1433,31 +1497,31 @@ def _share_page_html(title: str, created_at: str, body_html: str) -> str:
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>{html.escape(title)}</title>
 <style>
-  :root {{ color-scheme: light; }}
   * {{ box-sizing: border-box; }}
   body {{ margin: 0; font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
-         background: #f4f5f7; color: #1f2430; line-height: 1.75; }}
+         line-height: 1.75; }}
   .wrap {{ max-width: 860px; margin: 0 auto; padding: 40px 20px 64px; }}
   header {{ border-bottom: 1px solid #e3e6eb; padding-bottom: 18px; margin-bottom: 26px; }}
-  h1.title {{ font-size: 24px; margin: 0 0 8px; color: #16213e; line-height: 1.4; }}
+  h1.title {{ font-size: 24px; margin: 0 0 8px; line-height: 1.4; }}
   .meta {{ font-size: 13px; color: #7a8291; }}
-  main {{ background: #fff; border: 1px solid #e6e8ee; border-radius: 12px; padding: 28px 32px; }}
-  h1, h2, h3, h4 {{ color: #16213e; line-height: 1.4; }}
+  main {{ border-radius: 12px; padding: 28px 32px; }}
+  h1, h2, h3, h4 {{ line-height: 1.4; }}
   h1 {{ font-size: 22px; }} h2 {{ font-size: 19px; border-bottom: 1px solid #eef0f4; padding-bottom: 6px; }}
   h3 {{ font-size: 16px; }} h4 {{ font-size: 15px; }}
   img {{ max-width: 100%; height: auto; border-radius: 8px; margin: 12px 0; }}
-  a {{ color: #1f6feb; text-decoration: none; }}
+  a {{ text-decoration: none; }}
   a:hover {{ text-decoration: underline; }}
-  code {{ background: #f0f2f5; padding: 2px 6px; border-radius: 4px; font-size: 90%; }}
-  pre {{ background: #0f172a; color: #e2e8f0; padding: 16px; border-radius: 8px; overflow-x: auto; }}
+  code {{ padding: 2px 6px; border-radius: 4px; font-size: 90%; }}
+  pre {{ padding: 16px; border-radius: 8px; overflow-x: auto; }}
   pre code {{ background: transparent; padding: 0; color: inherit; }}
-  blockquote {{ margin: 12px 0; padding: 4px 16px; border-left: 3px solid #c9d4e5; color: #5a6270; }}
+  blockquote {{ margin: 12px 0; padding: 4px 16px; border-left: 3px solid #c9d4e5; }}
   table {{ border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 14px; }}
   th, td {{ border: 1px solid #dfe3ea; padding: 8px 10px; text-align: left; }}
-  th {{ background: #f0f2f5; font-weight: 600; }}
+  th {{ font-weight: 600; }}
   hr {{ border: none; border-top: 1px solid #e3e6eb; margin: 20px 0; }}
   ul, ol {{ padding-left: 24px; }}
   footer {{ text-align: center; color: #9aa2b1; font-size: 12px; margin-top: 24px; }}
+{theme_css}
 </style>
 </head>
 <body>
@@ -2135,7 +2199,13 @@ class Handler(BaseHTTPRequestHandler):
             body_html = _markdown_to_html(data.get("report") or "", tid)
             title = str(data.get("goal") or "任务报告")
             created = data.get("created_at") or data.get("completed_at") or ""
-            return self._html(_share_page_html(title, created, body_html))
+            # Roadmap 余项⑤：分享页主题模板 ?theme=light|dark|paper
+            try:
+                from urllib.parse import parse_qs
+                theme = (parse_qs(urlparse(self.path).query).get("theme") or ["light"])[0]
+            except Exception:
+                theme = "light"
+            return self._html(_share_page_html(title, created, body_html, theme=theme))
         if p.startswith("/task/"):
             tid = p.split("/task/")[-1]
             with _task_lock: data = _task_results.get(tid)
@@ -2338,6 +2408,9 @@ class Handler(BaseHTTPRequestHandler):
                 bad, reason = detect_injection(user_context)
                 if bad:
                     return self._json({"error": f"上下文疑似包含恶意注入（{reason}），已拦截"}, 400)
+            # Roadmap 余项⑤：报告语言（zh/en/ja…），默认中文；注入上下文头部
+            report_lang = str(body.get("language") or "zh").strip()[:10]
+            user_context = _build_lang_context(report_lang, user_context)
             conv_context = _build_conversation_context(conv_id) if not is_new_conversation else ""
             context = "\n\n".join(x for x in (user_context, conv_context) if x)
             if not parent_id and not is_new_conversation:
@@ -2503,6 +2576,12 @@ class Handler(BaseHTTPRequestHandler):
                 deployed = False
                 if approve:
                     item["status"] = "deployed"
+                    # Roadmap 余项②：灰度比例（0-1，默认 1.0 全量；<1 时按任务哈希分流）
+                    try:
+                        rollout = min(1.0, max(0.0, float(body.get("rollout", 1.0) or 1.0)))
+                    except (TypeError, ValueError):
+                        rollout = 1.0
+                    item["rollout"] = rollout
                     r.set(
                         f"strategy:active:{item.get('agent_type', 'search_agent')}",
                         json.dumps(item, ensure_ascii=False),
@@ -2511,6 +2590,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({
                     "status": "ok",
                     "deployed": deployed,
+                    "rollout": item.get("rollout", 1.0),
                     "agent_type": item.get("agent_type"),
                 })
             except Exception as exc:

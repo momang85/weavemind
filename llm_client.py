@@ -554,6 +554,13 @@ def _record_usage(
         _task_usage_client.expire(key, 7200)
     except Exception:
         pass
+    # Roadmap 余项④：月度预算累计（与任务台账并行，静默降级）
+    if not cached:
+        try:
+            from costs import record_monthly_usage
+            record_monthly_usage(model, prompt_tokens, completion_tokens)
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -563,14 +570,21 @@ def _record_usage(
 
 def get_model_for_usage(usage: str = "", default_model: str = "") -> str:
     """按调用用途解析模型名：llm.model_roles[用途] > default_model > LLM_MODEL。
-    未配置用途或缺省回退到默认模型，保证老调用行为不变。"""
+    未配置用途或缺省回退到默认模型，保证老调用行为不变。
+    月度预算超限时高价角色自动降级（Roadmap 余项④）。"""
     _ensure_cfg_fresh()
     role = MODEL_ROLES.get(str(usage or "").lower(), "")
+    model = ""
     if role:
-        m = _MODEL_ROLES_CFG.get(role)
-        if m:
-            return str(m)
-    return default_model or os.environ.get("LLM_MODEL") or ""
+        model = str(_MODEL_ROLES_CFG.get(role) or "")
+    if not model:
+        model = default_model or os.environ.get("LLM_MODEL") or ""
+    try:
+        from costs import resolve_model_with_budget
+        model = resolve_model_with_budget(usage, model)
+    except Exception:
+        pass
+    return model
 
 
 def _get_cache_ttl() -> int:

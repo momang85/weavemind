@@ -1567,6 +1567,116 @@ class TestStrategyDeployment(unittest.TestCase):
         self.assertEqual(data["status"], "pending")
         self.assertEqual(data["strategy_id"], "s-win")
 
+    def test_rollout_split_and_record(self):
+        """Roadmap 余项②：灰度分流 + 结果记录。"""
+        from worker_base import SearchAgent
+
+        sa = SearchAgent.__new__(SearchAgent)
+        sa._messaging = None
+        sa._strategy_id = "s-gray"
+        sa._strategy_rollout = 1.0
+        self.assertTrue(sa._strategy_applies("any-task"))  # 全量
+        sa._strategy_rollout = 0.0
+        self.assertFalse(sa._strategy_applies("any-task"))  # 0 不应用
+        sa._strategy_rollout = 0.5
+        # 哈希分流：约一半任务进灰度桶，且同一任务结果稳定
+        hits = sum(1 for i in range(200) if sa._strategy_applies(f"t-{i}"))
+        self.assertGreater(hits, 30)
+        self.assertLess(hits, 170)
+        self.assertEqual(sa._strategy_applies("t-42"), sa._strategy_applies("t-42"))
+
+    def test_rollout_monitor_rolls_back_on_low_success(self):
+        """Roadmap 余项②：灰度成功率 <50% 且样本≥5 → 自动回滚。"""
+        import json as _json
+        from worker_base import SearchAgent
+
+        ops = {"deleted": [], "published": []}
+
+        class FakeRedis:
+            def get(self, key):
+                return _json.dumps({
+                    "strategy_id": "s-bad", "agent_type": "search_agent",
+                    "rollout": 0.3, "filter_rules": [],
+                })
+
+            def hgetall(self, key):
+                # 6 个样本，2 成功 4 失败 → 33% < 50%
+                return {"t1": "SUCCESS", "t2": "FAILED", "t3": "FAILED",
+                        "t4": "SUCCESS", "t5": "FAILED", "t6": "FAILED"}
+
+            def hset(self, *a, **k):
+                pass
+
+            def expire(self, *a, **k):
+                pass
+
+            def set(self, key, val, nx=False, ex=0):
+                ops["lock"] = True
+                return True
+
+            def delete(self, key):
+                ops["deleted"].append(key)
+
+        class FakeMsg:
+            def __init__(self):
+                self.redis = FakeRedis()
+
+            def publish(self, channel, data):
+                ops["published"].append((channel, data))
+
+        sa = SearchAgent.__new__(SearchAgent)
+        sa._messaging = FakeMsg()
+        sa._rollout_checked_at = 0.0
+        sa._load_active_strategy()
+        self.assertIn("strategy:active:search_agent", ops["deleted"])
+        self.assertEqual(ops["published"][0][0], "registry.capability.update")
+        ev = ops["published"][0][1]
+        self.assertEqual(ev["type"], "strategy_rollback")
+        self.assertEqual(ev["strategy_id"], "s-bad")
+        # 回滚后策略清空
+        self.assertEqual(sa._strategy_blocks, [])
+
+    def test_rollout_monitor_keeps_good_strategy(self):
+        """Roadmap 余项②：灰度成功率达标不回滚。"""
+        import json as _json
+        from worker_base import SearchAgent
+
+        class FakeRedis:
+            def get(self, key):
+                return _json.dumps({
+                    "strategy_id": "s-good", "agent_type": "search_agent",
+                    "rollout": 0.3, "filter_rules": [],
+                })
+
+            def hgetall(self, key):
+                return {"t1": "SUCCESS", "t2": "SUCCESS", "t3": "SUCCESS",
+                        "t4": "FAILED", "t5": "SUCCESS", "t6": "SUCCESS"}
+
+            def hset(self, *a, **k):
+                pass
+
+            def expire(self, *a, **k):
+                pass
+
+            def set(self, *a, **k):
+                return True
+
+            def delete(self, key):
+                raise AssertionError("不应回滚")
+
+        class FakeMsg:
+            def __init__(self):
+                self.redis = FakeRedis()
+
+            def publish(self, channel, data):
+                pass
+
+        sa = SearchAgent.__new__(SearchAgent)
+        sa._messaging = FakeMsg()
+        sa._rollout_checked_at = 0.0
+        sa._load_active_strategy()
+        self.assertEqual(sa._strategy_id, "s-good")  # 策略保留
+
 
 class TestDeliverySummary(unittest.TestCase):
     def test_summary_includes_files_run_and_launch(self):

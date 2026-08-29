@@ -274,6 +274,50 @@ class TestAuthAudit(unittest.TestCase):
         self.assertEqual(h5._status, 200)
         self.assertEqual(h5.wfile.getvalue(), b"png2")
 
+    def test_share_page_theme_variants(self):
+        """Roadmap 余项⑤：分享页 ?theme=light|dark|paper 三款模板。"""
+        self._seed_users()
+        token = self._login("admin", "admin123")
+        shared_tid = "t-theme"
+        with web_ui._task_lock:
+            web_ui._task_results[shared_tid] = {
+                "task_id": shared_tid,
+                "status": "SUCCESS",
+                "goal": "主题测试报告",
+                "report": "# 主题报告\n\n正文内容",
+            }
+        h = self._req("/api/share", "POST", {"task_id": shared_tid}, token=token)
+        share_token = h.json_body()["token"]
+        for theme, marker in (
+            ("light", "background: #f4f5f7"),
+            ("dark", "background: #10151f"),
+            ("paper", "background: #ece7dc"),
+        ):
+            h2 = self._req(f"/share/{share_token}?theme={theme}")
+            self.assertEqual(h2._status, 200)
+            body = h2.html_body()
+            self.assertIn(marker, body, f"theme={theme} 未生效")
+            self.assertIn("主题报告", body)
+        # 非法主题回退 light
+        h3 = self._req(f"/share/{share_token}?theme=hack")
+        self.assertEqual(h3._status, 200)
+        self.assertIn("background: #f4f5f7", h3.html_body())
+
+    def test_task_language_injection(self):
+        """Roadmap 余项⑤：language 字段注入报告语言要求上下文（非 zh 时）。"""
+        from web_ui import _build_lang_context
+        # 非 zh：生成语言要求指令
+        ctx = _build_lang_context("en", "原始上下文")
+        self.assertIn("【报告语言要求】", ctx)
+        self.assertIn("请用 en 撰写最终报告", ctx)
+        self.assertIn("原始上下文", ctx)
+        # zh（默认）：原样返回，行为不变
+        self.assertEqual(_build_lang_context("zh", "上下文"), "上下文")
+        self.assertEqual(_build_lang_context("", "上下文"), "上下文")
+        # 超长语言截断
+        c2 = _build_lang_context("x" * 50, "")
+        self.assertLessEqual(len(c2.split("请用 ")[1].split(" 撰写")[0]), 10)
+
     def test_audit_write_query_limit(self):
         self._seed_users()
         token = self._login("admin", "admin123")

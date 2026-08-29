@@ -450,6 +450,11 @@ class BaseWorker(ABC):
                 task_id,
                 exc,
             )
+        # Roadmap 余项②：灰度策略任务结果记录（回滚监控数据）
+        try:
+            self._record_rollout_result(task_id, status)
+        except Exception:
+            pass
 
     def _publish_failure(self, task_id: str, error_msg: str) -> None:
         """发布失败结果的便捷方法。"""
@@ -571,18 +576,31 @@ class SearchAgent(BaseWorker):
     _strategy_max_sources = 5
     _strategy_blocks: list[str] = []
     _strategy_boosts: list[str] = []
+    # Roadmap 余项②：策略灰度（rollout 0-1）+ 自动回滚监控
+    _strategy_id = ""
+    _strategy_rollout = 1.0
+    _rollout_checked_at = 0.0
 
     def _load_active_strategy(self) -> None:
-        """读取已部署策略并解析为过滤规则：排除词（黑名单）与优先词（排序加分）。"""
+        """读取已部署策略并解析为过滤规则：排除词（黑名单）与优先词（排序加分）。
+        支持灰度：rollout<1 时按任务 id 哈希分流，仅部分任务应用新策略；
+        灰度期间记录任务结果，成功率过低自动回滚（Roadmap 余项②）。"""
         ensure_health_publisher(self._messaging)  # 幂等：启动健康快照发布线程
         self._strategy_max_sources = 5
         self._strategy_blocks = []
         self._strategy_boosts = []
+        self._strategy_id = ""
+        self._strategy_rollout = 1.0
         try:
             raw = self._messaging.redis.get("strategy:active:search_agent")
             if not raw:
                 return
             data = json.loads(raw)
+            self._strategy_id = str(data.get("strategy_id") or "")
+            try:
+                self._strategy_rollout = min(1.0, max(0.0, float(data.get("rollout", 1.0) or 1.0)))
+            except (TypeError, ValueError):
+                self._strategy_rollout = 1.0
             self._strategy_max_sources = max(1, int(data.get("max_sources", 5)))
             for rule in (data.get("filter_rules") or []):
                 rule = str(rule)
@@ -602,11 +620,90 @@ class SearchAgent(BaseWorker):
                 elif "优先" in rule or low.startswith("prefer"):
                     self._strategy_boosts.append(word.lower())
             logger.info(
-                "Active strategy applied: max_sources=%d blocks=%s boosts=%s",
-                self._strategy_max_sources, self._strategy_blocks, self._strategy_boosts,
+                "Active strategy applied: id=%s rollout=%.2f max_sources=%d blocks=%s boosts=%s",
+                self._strategy_id, self._strategy_rollout, self._strategy_max_sources,
+                self._strategy_blocks, self._strategy_boosts,
             )
+            # 灰度期间顺带检查回滚（节流 60s，多进程安全）
+            self._maybe_rollback_strategy()
         except Exception as exc:
             logger.warning("Failed to load active strategy: %s", exc)
+
+    def _strategy_applies(self, task_id: str) -> bool:
+        """灰度分流：rollout=1 全量应用；否则按 task_id 哈希进入灰度桶。"""
+        if self._strategy_rollout >= 1.0:
+            return True
+        if self._strategy_rollout <= 0.0:
+            return False
+        try:
+            import hashlib
+            h = int(hashlib.md5(str(task_id).encode("utf-8")).hexdigest()[:8], 16)
+            return (h % 1000) < int(self._strategy_rollout * 1000)
+        except Exception:
+            return False
+
+    def _record_rollout_result(self, task_id: str, status: str) -> None:
+        """灰度期间记录任务结果到 Redis：strategy:rollout:{sid} (task_id -> status)。
+        仅当当前任务实际应用了灰度策略时记录。"""
+        if not self._strategy_id or self._strategy_rollout >= 1.0:
+            return
+        if not self._strategy_applies(task_id):
+            return
+        try:
+            key = f"strategy:rollout:{self._strategy_id}"
+            self._messaging.redis.hset(key, str(task_id), str(status or "SUCCESS"))
+            self._messaging.redis.expire(key, 7 * 24 * 3600)
+        except Exception as exc:
+            logger.warning("rollout result record failed: %s", str(exc)[:100])
+
+    def _maybe_rollback_strategy(self) -> None:
+        """灰度回滚检查：样本 ≥5 且成功率 <50% → 自动回滚（删除 active + 发布事件）。
+        60s 节流 + Redis 锁防止多 worker 并发回滚。"""
+        if not self._strategy_id or self._strategy_rollout >= 1.0:
+            return
+        now = time.time()
+        if now - self._rollout_checked_at < 60:
+            return
+        self._rollout_checked_at = now
+        try:
+            key = f"strategy:rollout:{self._strategy_id}"
+            data = self._messaging.redis.hgetall(key)
+            if not data or len(data) < 5:
+                return
+            total = len(data)
+            ok = sum(1 for s in data.values() if str(s or "").upper() == "SUCCESS")
+            rate = ok / total
+            logger.info("Rollout monitor: strategy=%s sample=%d success_rate=%.0f%%",
+                        self._strategy_id, total, rate * 100)
+            if rate >= 0.5:
+                return
+            # 自动回滚：加锁防止并发
+            lock = self._messaging.redis.set(
+                "strategy:rollback_lock", "1", nx=True, ex=300,
+            )
+            if not lock:
+                return
+            self._messaging.redis.delete("strategy:active:search_agent")
+            self._messaging.redis.delete(key)
+            try:
+                self._messaging.publish("registry.capability.update", {
+                    "type": "strategy_rollback",
+                    "strategy_id": self._strategy_id,
+                    "reason": f"灰度成功率 {rate * 100:.0f}% 低于 50%（样本 {total}）",
+                    "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                })
+            except Exception:
+                pass
+            logger.warning(
+                "AUTO-ROLLBACK strategy=%s success_rate=%.0f%% sample=%d",
+                self._strategy_id, rate * 100, total,
+            )
+            self._strategy_id = ""
+            self._strategy_blocks = []
+            self._strategy_boosts = []
+            self._strategy_max_sources = 5
+        except Exception as exc:
+            logger.warning("rollback check failed: %s", str(exc)[:100])
 
     @staticmethod
     def _clean_search_text(text: str) -> str:

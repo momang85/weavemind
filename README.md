@@ -310,14 +310,11 @@ GitHub Actions CI 自动执行后端编译/单测与前端构建。
 - [x] 模型分级路由（plan/exec/judge 分层）+ LLM 调用缓存 + 反思收敛（成本优化）
 - [x] 编排器/WebUI/配置韧性：launcher 守护自愈、Redis AOF、system 配置热重载
 - [x] 场景模板库基础（4 个手工模板 + auto-* 自动固化，手工模板优先路由）
-
-**下一步（规划中）**
-
-- [ ] 评测集随真实任务自动生长（验收 fail 自动沉淀为新评测案例）
-- [ ] 策略灰度与回滚（进化锦标赛胜者先灰度，效果回退自动回滚）
-- [ ] 错误模式库（step_failure 结构化诊断按 error_type 聚合为修复模板）
-- [ ] 成本预算机制（任务/月度预算，超限自动降级模型）
-- [ ] 多语言报告、报告 HTML 模板定制
+- [x] 评测集随真实任务自动生长（验收 fail 自动沉淀为新评测案例 `evals/auto_grow.py`）
+- [x] 策略灰度与回滚（进化胜者 rollout 灰度分流，灰度成功率低于阈值自动回滚）
+- [x] 错误模式库（step_failure 按 error_type 跨任务聚合为修复模板，注入反思 prompt）
+- [x] 成本预算机制（月度预算超限自动降级高价角色模型，`/api/health` budget 可观测）
+- [x] 多语言报告（提交 `language` 字段）+ 分享页 HTML 主题模板（light/dark/paper）
 
 ## 贡献
 

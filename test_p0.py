@@ -344,6 +344,66 @@ class TestEvals(unittest.TestCase):
         self.assertTrue(evals.run.validate_case({"id": "x"}))
 
 
+class TestAutoGrow(unittest.TestCase):
+    """评测集自动生长：验收 fail → 沉淀为评测案例（Roadmap 余项①）。"""
+
+    def _tmp_file(self, tmpdir):
+        return os.path.join(tmpdir, "evals", "cases", "auto_grown.json")
+
+    def test_fail_harvests_case(self):
+        import tempfile
+        from evals.auto_grow import harvest_failure
+
+        with tempfile.TemporaryDirectory() as td:
+            out = self._tmp_file(td)
+            r = harvest_failure(
+                "ui-test-001", "搜索特斯拉最新财报并总结要点",
+                {"overall": "fail", "gaps": ["数字溯源率低于阈值", "来源标注模糊"]},
+                "报告正文...", output_path=out,
+            )
+            self.assertTrue(r["harvested"], r)
+            self.assertTrue(r["case_id"].startswith("ag-"))
+            import json
+            with open(out, encoding="utf-8") as f:
+                data = json.loads(f.read())
+            self.assertEqual(len(data["cases"]), 1)
+            c = data["cases"][0]
+            # 缺口被改写为正向评测要点
+            self.assertTrue(any("溯源" in p for p in c["ground_truth_points"]))
+            self.assertTrue(any("来源" in p for p in c["ground_truth_points"]))
+            self.assertEqual(c["source_task"], "ui-test-001")
+            # schema 合法
+            import evals.run
+            self.assertEqual(evals.run.validate_case(c), [])
+
+    def test_duplicate_goal_skipped(self):
+        import tempfile
+        from evals.auto_grow import harvest_failure
+
+        with tempfile.TemporaryDirectory() as td:
+            out = self._tmp_file(td)
+            acc = {"overall": "fail", "gaps": ["缺来源"]}
+            r1 = harvest_failure("ui-a", "统计A股前5%成交额占比", acc, output_path=out)
+            r2 = harvest_failure("ui-b", "统计A股前5%成交额占比", acc, output_path=out)
+            self.assertTrue(r1["harvested"])
+            self.assertFalse(r2["harvested"])
+            self.assertEqual(r2["reason"], "已存在同目标案例")
+
+    def test_pass_or_non_ui_not_harvested(self):
+        import tempfile
+        from evals.auto_grow import harvest_failure
+
+        with tempfile.TemporaryDirectory() as td:
+            out = self._tmp_file(td)
+            r1 = harvest_failure("ui-x", "目标目标目标目标目标目标目标",
+                                 {"overall": "pass", "gaps": []}, output_path=out)
+            r2 = harvest_failure("t-abc", "目标目标目标目标目标目标目标",
+                                 {"overall": "fail", "gaps": ["缺"]}, output_path=out)
+            self.assertFalse(r1["harvested"])
+            self.assertFalse(r2["harvested"])
+            self.assertFalse(os.path.exists(out))
+
+
 class TestJudge(unittest.TestCase):
     def test_score_record_with_mock_llm(self):
         import llm_client
@@ -656,6 +716,61 @@ class TestP2CostLedger(unittest.TestCase):
             ledger_cost({"pt:deepseek-v4-flash": 1_000_000, "ct:deepseek-v4-flash": 1_000_000}),
             round(0.30 + 0.60, 4),
         )
+
+    def test_budget_limit_and_degrade(self):
+        """月度预算：超限后非 exec 角色降级为执行级模型（Roadmap 余项④）。"""
+        import os
+        import costs
+
+        old = os.environ.get("BUDGET_MONTHLY_USD")
+        old_spend = costs.get_monthly_spend
+        try:
+            os.environ["BUDGET_MONTHLY_USD"] = "1"  # 1 美元上限
+            # 模拟本月已花费 2 美元 → 超限
+            costs.get_monthly_spend = lambda: 2.0
+            self.assertTrue(costs.budget_exceeded())
+            # 高价角色降级
+            m = costs.resolve_model_with_budget("plan", "deepseek-v4-pro")
+            self.assertEqual(m, os.environ.get("LLM_MODEL") or "deepseek-v4-pro")
+            # exec 角色不降级（保持执行模型）
+            m2 = costs.resolve_model_with_budget("exec", "deepseek-v4-flash")
+            self.assertEqual(m2, "deepseek-v4-flash")
+            # 预算状态可观测
+            st = costs.get_budget_status()
+            self.assertTrue(st["exceeded"])
+            self.assertEqual(st["spend_usd"], 2.0)
+            self.assertEqual(st["limit_usd"], 1.0)
+            # 恢复：未超限原样返回
+            costs.get_monthly_spend = lambda: 0.1
+            self.assertFalse(costs.budget_exceeded())
+            self.assertEqual(costs.resolve_model_with_budget("plan", "deepseek-v4-pro"),
+                             "deepseek-v4-pro")
+        finally:
+            costs.get_monthly_spend = old_spend
+            if old is None:
+                os.environ.pop("BUDGET_MONTHLY_USD", None)
+            else:
+                os.environ["BUDGET_MONTHLY_USD"] = old
+
+    def test_budget_disabled_when_zero(self):
+        """预算=0（未启用）时永不超限、不降级。"""
+        import os
+        import costs
+
+        old = os.environ.get("BUDGET_MONTHLY_USD")
+        old_spend = costs.get_monthly_spend
+        try:
+            os.environ["BUDGET_MONTHLY_USD"] = "0"
+            costs.get_monthly_spend = lambda: 999.0
+            self.assertFalse(costs.budget_exceeded())
+            self.assertEqual(costs.resolve_model_with_budget("plan", "deepseek-v4-pro"),
+                             "deepseek-v4-pro")
+        finally:
+            costs.get_monthly_spend = old_spend
+            if old is None:
+                os.environ.pop("BUDGET_MONTHLY_USD", None)
+            else:
+                os.environ["BUDGET_MONTHLY_USD"] = old
 
     def test_gate_ci(self):
         from evals.gate_ci import main
@@ -3923,6 +4038,81 @@ class TestP14StepDiagnosis(unittest.TestCase):
             self.assertIn("改用结构化数据源替代直接抓取", ins)
             self.assertNotIn("【反思要求重做】", ins)
             self.assertNotIn("财务金额溯源率仅40%", ins)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+
+
+class TestErrorPatternLibrary(unittest.TestCase):
+    """错误模式库：跨任务聚合 step_failure → 修复模板（Roadmap 余项③）。"""
+
+    def _seed_failures(self, root):
+        """在临时工作区种 3 个任务的失败诊断：web_fetch/HTTP_403 ×2 + timeout ×1。"""
+        import workspace as ws_mod
+        from step_diagnosis import StepDiagnosis, write_step_failure
+
+        ws_mod.configure_workspace_root(str(root))
+        for tid in ("t-1", "t-2"):
+            write_step_failure(tid, StepDiagnosis(
+                step_id="2", capability="web_fetch", error_type="HTTP_403",
+                tried_alternatives=["重试#1", "换源"], suggestion="改用结构化数据源",
+                timestamp="2026-01-01T00:00:00", replacement_step_id="alt",
+                replacement_outcome="SUCCESS"))
+        write_step_failure("t-3", StepDiagnosis(
+            step_id="3", capability="web_fetch", error_type="TIMEOUT",
+            tried_alternatives=["加大超时"], suggestion="缩短目标URL清单分批抓取",
+            timestamp="2026-01-02T00:00:00", replacement_step_id="alt2",
+            replacement_outcome="FAILED"))
+
+    def test_aggregate_and_persist(self):
+        import tempfile
+        from pathlib import Path
+        import workspace as ws_mod
+        from error_patterns import aggregate_patterns, save_pattern_library, load_pattern_library
+
+        tmp = Path(tempfile.mkdtemp(prefix="ep_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        try:
+            self._seed_failures(tmp)
+            patterns = aggregate_patterns(tmp)
+            self.assertEqual(len(patterns), 2)  # HTTP_403 ×2 + TIMEOUT ×1
+            p403 = next(p for p in patterns if p["error_type"] == "HTTP_403")
+            self.assertEqual(p403["count"], 2)
+            self.assertEqual(p403["capability"], "web_fetch")
+            self.assertIn("改用结构化数据源", p403["suggestions"])
+            self.assertIn("重试#1", p403["tried_alternatives"])
+            self.assertEqual(p403["success_rate"], 1.0)  # 2/2 SUCCESS
+
+            save_pattern_library(patterns)
+            loaded = load_pattern_library()
+            self.assertEqual(len(loaded), 2)
+            # 反射上下文文本包含高频模板
+            from error_patterns import build_reflection_context
+            ctx = build_reflection_context(limit=5)
+            self.assertIn("已知失败模式库", ctx)
+            self.assertIn("HTTP_403", ctx)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+
+    def test_suggest_fix_exact_and_fallback(self):
+        import tempfile
+        from pathlib import Path
+        import workspace as ws_mod
+        from error_patterns import suggest_fix
+
+        tmp = Path(tempfile.mkdtemp(prefix="eps_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        try:
+            self._seed_failures(tmp)
+            hit = suggest_fix("web_fetch", "HTTP_403")
+            self.assertIsNotNone(hit)
+            self.assertEqual(hit["error_type"], "HTTP_403")
+            # 回退：未知 capability 但同类 error_type
+            fb = suggest_fix("web_search", "HTTP_403")
+            self.assertIsNotNone(fb)
+            self.assertEqual(fb["error_type"], "HTTP_403")
+            # 未知错误类型回退到最高频
+            fb2 = suggest_fix("web_fetch", "CONN_RESET")
+            self.assertIsNotNone(fb2)
         finally:
             ws_mod.WORKSPACE_ROOT = old_root
 
