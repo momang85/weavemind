@@ -241,10 +241,10 @@ GitHub Actions CI runs backend compile/unit tests and the frontend build automat
 - [x] Conversation context, historical sessions, quick view/re-run
 - [x] Self-iteration mode, editable plans
 - [x] Memory & evolution visualization (self-description, tournament replay)
-- [ ] Plugin / MCP compatibility (register custom tools in 3 lines)
-- [ ] Scenario template library (data analysis / industry research / board reports / weekly reports…)
-- [ ] Multi-user auth & audit logs, private deployment docs
-- [ ] Container-level code-execution isolation, one-click report sharing
+- [x] Plugin / MCP compatibility (mcp_lite built-in MCP server + mcp_client third-party MCP + tool_dispatch routing)
+- [x] Scenario template library (4 handcrafted templates + auto-* consolidation from acceptance passes)
+- [x] Multi-user auth & audit logs (admin/viewer roles, operation audit, initial admin bootstrap, deployment docs)
+- [x] Container-level code-execution isolation (docker-first with automatic fallback) + one-click report sharing (read-only public links with optional password & expiry)
 
 ## Contributing
 
