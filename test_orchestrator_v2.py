@@ -1145,5 +1145,202 @@ class TestMarketSearchInstruction(unittest.TestCase):
         )
 
 
+class TestV12ReportFormatAndUrlHealth(unittest.TestCase):
+    """V1.2 竞品启示：报告格式强制要求注入 + 来源 URL 存活校验。"""
+
+    def test_report_and_summary_prompts_include_v12_requirements(self):
+        """report_generator / content_summary 指令必须注入三级溯源链、
+        数据时效与免责声明要求。"""
+        o = make_orch()
+        o._task_goals = {}
+        o._task_user_ids = {}
+        for cap in ("report_generator", "content_summary"):
+            instr = o._inject_step_context(
+                {"step_id": "1", "capability": cap,
+                 "instruction": "生成报告", "depends_on": []},
+                {}, threading.Lock(), "t-v12",
+            )
+            self.assertIn("三级溯源链", instr, cap)
+            self.assertIn("[n]", instr, cap)
+            self.assertIn("## 参考来源", instr, cap)
+            self.assertIn("数据时效", instr, cap)
+            self.assertIn("免责声明", instr, cap)
+            self.assertIn("不构成任何投资建议", instr, cap)
+
+    def _make_acceptance_workspace(self, report_text):
+        tmp = tempfile.mkdtemp(prefix="wm_v12_acc_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        rep = ws_mod.task_reports_dir("t-v12-url")
+        rep.mkdir(parents=True, exist_ok=True)
+        (rep / "report.md").write_text(report_text, encoding="utf-8")
+        return tmp, old_root
+
+    def test_dead_source_urls_hint_in_gaps_without_failing(self):
+        """dead URL 只在 gaps 提示，不改变 overall（避免网络抖动误伤）。"""
+        from adapters import url_health
+
+        report = (
+            "## 数据时效\n\n行情数据截至 2026-08-30 15:00 收盘；"
+            "腾讯行情接口，日终刷新。\n\n"
+            "正文引用[1]。\n\n"
+            "## 参考来源\n\n1. [来源](https://dead.example/a)\n\n"
+            "## 免责声明\n\n本报告由织光 WeaveMind AI 自动生成，仅供参考，"
+            "不构成任何投资建议；数据来源于公开渠道，可能存在延迟或误差；"
+            "据此操作风险自担。"
+        )
+        tmp, old_root = self._make_acceptance_workspace(report)
+        try:
+            o = make_orch()
+            o._now_iso = lambda: "t"
+            with mock.patch.object(
+                url_health, "check_urls",
+                return_value={"https://dead.example/a": "dead"},
+            ):
+                result = o._run_acceptance_check("t-v12-url", "分析腾讯股票行情")
+            self.assertIsNotNone(result)
+            self.assertEqual(result["overall"], "pass")
+            self.assertIn("来源链接失效: 1 条", result["gaps"])
+            self.assertTrue(result["checks"]["url_health"]["hint"])
+            self.assertEqual(
+                result["checks"]["url_health"]["dead_count"], 1,
+            )
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_url_health_disabled_by_env(self):
+        """URL_HEALTH_CHECK=0 时跳过存活校验。"""
+        from adapters import url_health
+
+        report = (
+            "## 数据时效\n\n行情数据截至 2026-08-30 15:00 收盘。\n\n"
+            "正文引用[1]。\n\n"
+            "## 参考来源\n\n1. [来源](https://example.com/a)\n\n"
+            "## 免责声明\n\n本报告由织光 WeaveMind AI 自动生成，仅供参考，"
+            "不构成任何投资建议。"
+        )
+        tmp, old_root = self._make_acceptance_workspace(report)
+        try:
+            o = make_orch()
+            o._now_iso = lambda: "t"
+            with mock.patch.dict(os.environ, {"URL_HEALTH_CHECK": "0"}), \
+                    mock.patch.object(url_health, "check_urls") as chk:
+                result = o._run_acceptance_check("t-v12-url", "分析腾讯股票行情")
+            self.assertIsNotNone(result)
+            chk.assert_not_called()
+            self.assertNotIn("url_health", result["checks"])
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_alive_urls_no_gap_hint(self):
+        """全部 URL 存活 → 无失效提示、overall 不受影响。"""
+        from adapters import url_health
+
+        report = (
+            "## 数据时效\n\n行情数据截至 2026-08-30 15:00 收盘。\n\n"
+            "正文引用[1]。\n\n"
+            "## 参考来源\n\n1. [来源](https://alive.example/a)\n\n"
+            "## 免责声明\n\n本报告由织光 WeaveMind AI 自动生成，仅供参考，"
+            "不构成任何投资建议。"
+        )
+        tmp, old_root = self._make_acceptance_workspace(report)
+        try:
+            o = make_orch()
+            o._now_iso = lambda: "t"
+            with mock.patch.object(
+                url_health, "check_urls",
+                return_value={"https://alive.example/a": "alive"},
+            ):
+                result = o._run_acceptance_check("t-v12-url", "分析腾讯股票行情")
+            self.assertEqual(result["overall"], "pass")
+            self.assertNotIn("来源链接失效", result["gaps"])
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestArtifactWhitelistInjection(unittest.TestCase):
+    """P0：报告"抄产物"泄漏修复——产物文件注入白名单。
+
+    仅 .md/.txt/.csv/.json 数据类素材读取正文注入；
+    HTML/JS/CSS/PY/图片等源码或二进制只保留"存在 + 路径"提示，禁止原文入指令。
+    """
+
+    def _inject_with_artifact(self, fname: str, body: str) -> str:
+        tmp = Path(tempfile.mkdtemp(prefix="wm_art_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        fpath = tmp / fname
+        fpath.write_text(body, encoding="utf-8")
+        o = make_orch()
+        o._task_goals = {}
+        o._task_user_ids = {}
+        completed = {
+            "s-code": {
+                "status": "SUCCESS",
+                "result": json.dumps({"path": str(fpath)}, ensure_ascii=False),
+            },
+        }
+        return o._inject_step_context(
+            {"step_id": "s-report", "capability": "report_generator",
+             "instruction": "生成报告", "depends_on": ["s-code"]},
+            completed, threading.Lock(), "t-art",
+        )
+
+    def test_html_artifact_skipped_with_path_hint(self):
+        """index.html 产物只给跳过提示，不注入 HTML 源码/占位数据。"""
+        html = (
+            "<html><body><h1>模板占位 2023-11-15</h1>"
+            "<script>var secret = 'x';</script></body></html>"
+        )
+        instr = self._inject_with_artifact("index.html", html)
+        self.assertNotIn("<html>", instr)
+        self.assertNotIn("<script>", instr)
+        self.assertNotIn("2023-11-15", instr)
+        self.assertIn(
+            "[产物文件 s-code (index.html)]"
+            "（源码/二进制，跳过正文注入，仅保留路径）",
+            instr,
+        )
+
+    def test_markdown_artifact_content_injected(self):
+        """.md 数据类素材正常注入正文。"""
+        instr = self._inject_with_artifact("notes.md", "# 标题\n\n真实素材正文")
+        self.assertIn("[产物文件 s-code (notes.md)]:", instr)
+        self.assertIn("# 标题", instr)
+        self.assertIn("真实素材正文", instr)
+        self.assertNotIn("跳过正文注入", instr)
+
+    def test_csv_artifact_content_injected(self):
+        """.csv 数据类素材正常注入正文。"""
+        instr = self._inject_with_artifact("data.csv", "rank,name\n1,贵州茅台")
+        self.assertIn("[产物文件 s-code (data.csv)]:", instr)
+        self.assertIn("rank,name", instr)
+        self.assertIn("贵州茅台", instr)
+        self.assertNotIn("跳过正文注入", instr)
+
+    def test_missing_artifact_path_silently_skipped(self):
+        """路径不存在时静默跳过，无异常、无产物说明。"""
+        tmp = Path(tempfile.mkdtemp(prefix="wm_art_miss_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        missing = tmp / "nope.html"
+        o = make_orch()
+        o._task_goals = {}
+        o._task_user_ids = {}
+        completed = {
+            "s-code": {
+                "status": "SUCCESS",
+                "result": json.dumps({"path": str(missing)}, ensure_ascii=False),
+            },
+        }
+        instr = o._inject_step_context(
+            {"step_id": "s-report", "capability": "report_generator",
+             "instruction": "生成报告", "depends_on": ["s-code"]},
+            completed, threading.Lock(), "t-art-miss",
+        )
+        self.assertNotIn("产物文件", instr)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

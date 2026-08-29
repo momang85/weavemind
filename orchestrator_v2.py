@@ -80,6 +80,29 @@ _STATISTICAL_GOAL_KEYWORDS = (
     "份额", "集中度", "全市场",
 )
 
+# V1.2 竞品启示：报告格式强制要求（三级溯源链 / 数据时效 / 免责声明）。
+# 注入 content_summary / report_generator 步骤指令；验收器负责硬检查。
+_REPORT_FORMAT_REQUIREMENTS = (
+    "\n\n[报告格式要求]（强制，报告/总结步骤必须遵守）\n"
+    "1. 三级溯源链：报告正文引用外部信息（网页/数据源内容）处，"
+    "必须紧跟 [n] 编号上标引用（n 从 1 递增，可并列如 [1][2]）；"
+    "文末必须提供 '## 参考来源' 清单，逐条列出全部编号对应的 URL 与标题"
+    "（格式：1. [标题](URL)）。没有引用任何外部信息时可不编号，"
+    "但一旦引用必须编号并全部登记到清单。\n"
+    "2. 数据时效：报告开头（摘要之前）必须包含 '数据时效' 小节，写明"
+    "数据截止时间/行情快照时间（如 '行情数据截至 2026-08-30 15:00 收盘'）、"
+    "数据源与更新频次（如 '腾讯行情接口，日终刷新'）；"
+    "排行类任务必须标注 '盘中/盘后/日终' 状态。\n"
+    "3. 免责声明：报告结尾必须包含 '免责声明' 小节："
+    "'本报告由织光 WeaveMind AI 自动生成，仅供参考，不构成任何投资建议；"
+    "数据来源于公开渠道，可能存在延迟或误差；据此操作风险自担。'"
+)
+
+# P0：产物文件注入白名单——仅数据类文本素材（.md/.txt/.csv/.json）读取正文注入；
+# HTML/JS/CSS/PY/图片等源码或二进制一律跳过正文，只保留"文件存在 + 路径"提示，
+# 防止报告"抄产物"把落盘的 index.html 等源码原文混入报告 prompt。
+_ARTIFACT_TEXT_EXTENSIONS = {".md", ".txt", ".csv", ".json"}
+
 
 def _loads_json_loose(text: str) -> dict:
     """先严格解析，失败后允许字符串内未转义控制字符（LLM 常在长指令中插入字面换行）。"""
@@ -2546,6 +2569,34 @@ class OrchestratorV2:
                 return None
             report = rpath.read_text(encoding="utf-8")
             result = run_acceptance(task_id, goal, report, task_workspace(task_id))
+            # V1.2 竞品启示：文末来源清单 URL 存活校验（仅提示，不判 fail）。
+            # 支持 URL_HEALTH_CHECK=0 关闭，避免网络抖动误伤验收结果。
+            try:
+                if os.environ.get("URL_HEALTH_CHECK", "1") != "0":
+                    from acceptance_checker import extract_source_list
+                    from adapters.url_health import check_urls
+                    src_urls = [
+                        e.get("url") for e in extract_source_list(report)
+                        if e.get("url")
+                    ]
+                    if src_urls:
+                        health = check_urls(src_urls)
+                        dead = [
+                            u for u, st in health.items() if st == "dead"
+                        ]
+                        if dead:
+                            hint = f"来源链接失效: {len(dead)} 条"
+                            result.setdefault("checks", {})["url_health"] = {
+                                "pass": True,  # 仅提示：不改变 overall
+                                "hint": True,
+                                "details": hint + "（仅提示，不影响验收结论）",
+                                "dead_count": len(dead),
+                                "dead_urls": dead[:10],
+                            }
+                            if hint not in result.get("gaps", []):
+                                result.setdefault("gaps", []).append(hint)
+            except Exception:
+                pass
             try:
                 (task_workspace(task_id) / "acceptance_report.json").write_text(
                     json.dumps(result, ensure_ascii=False, indent=1),
@@ -6262,6 +6313,11 @@ print("charts generated")
                 pass
 
         if cap in ('content_summary', 'report_generator'):
+            # V1.2 竞品启示：注入三级溯源链/数据时效/免责声明强制要求
+            try:
+                instr += _REPORT_FORMAT_REQUIREMENTS
+            except Exception:
+                pass
             # 结构化财务数据【内容】注入（不只文件提及）：让报告/总结 LLM 真正看到
             # 权威年报序列，否则模型只会用搜索片段（如 IT之家）并宣称历史年份缺失；
             # 新数据源（crypto/macro/news）经 structured_data.json 走同一通道。
@@ -6297,7 +6353,9 @@ print("charts generated")
                     snippet = _raw[:2500]
                 if snippet:
                     instr += f"\n[上一步结果 {dep_id}]:\n{_filter_role(_safe(snippet))}"
-                # 读取产物文件（如 code_execution 落盘的 HTML/代码），给报告真实素材
+                # 读取产物文件（如 code_execution 落盘的 HTML/代码），给报告真实素材；
+                # 仅白名单数据类文本注入正文，源码/二进制（HTML/JS/CSS/PY/图片等）
+                # 只提示文件存在与路径，禁止把文件原文抄进报告指令
                 try:
                     parsed = json.loads(prev_res) if isinstance(prev_res, str) else prev_res
                 except Exception:
@@ -6306,10 +6364,17 @@ print("charts generated")
                     fpath = parsed.get("path") or parsed.get("report_path") or parsed.get("data_path") or ""
                     if fpath and os.path.exists(fpath):
                         try:
-                            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
-                                content = f.read(4000)
-                            if content.strip():
-                                instr += f"\n[产物文件 {dep_id} ({os.path.basename(fpath)})]:\n{content[:3000]}"
+                            fname = os.path.basename(fpath)
+                            if os.path.splitext(fpath)[1].lower() in _ARTIFACT_TEXT_EXTENSIONS:
+                                with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                                    content = f.read(4000)
+                                if content.strip():
+                                    instr += f"\n[产物文件 {dep_id} ({fname})]:\n{content[:3000]}"
+                            else:
+                                instr += (
+                                    f"\n[产物文件 {dep_id} ({fname})]"
+                                    "（源码/二进制，跳过正文注入，仅保留路径）"
+                                )
                         except Exception:
                             pass
             instr += ("\n[指令] 仅使用与任务目标主题直接相关的信息；"
