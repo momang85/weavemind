@@ -1015,15 +1015,225 @@ def check_deliverable_completeness(report: str, goal: str) -> dict:
 
 
 # ─────────────────────────────────────────────
+# V1.2 竞品启示：三级溯源链 / 数据时效 / 免责声明
+# ─────────────────────────────────────────────
+
+# 文末来源清单小节标题（兼容既有"数据来源"附录与 V1.2 强制"参考来源"）
+_SOURCE_LIST_HEADING_RE = re.compile(
+    r"^#{1,6}\s*(?:参考来源|来源清单|参考资料|参考文献|数据来源|来源附录)\s*$",
+    re.M,
+)
+# 正文上标引用 [1] [2]（排除 Markdown 链接 [n](url) 与图片语法）
+_INLINE_REF_RE = re.compile(r"\[(\d{1,3})\](?!\()")
+
+
+def _body_without_source_list(report: str) -> str:
+    """去掉文末来源清单小节后的正文（引用编号只统计正文）。"""
+    t = str(report or "")
+    m = _SOURCE_LIST_HEADING_RE.search(t)
+    return t[:m.start()] if m else t
+
+
+def extract_source_list(report: str) -> list[dict]:
+    """提取文末来源清单条目：[{num, title, url}]。
+
+    支持编号列表（1. / 1、 / 1)）、Markdown 链接 [标题](URL)、表格行与裸 URL；
+    找不到来源清单小节返回空列表。"""
+    t = str(report or "")
+    m = _SOURCE_LIST_HEADING_RE.search(t)
+    if not m:
+        return []
+    entries: list[dict] = []
+    for line in t[m.end():].splitlines():
+        if re.match(r"^#{1,6}\s+", line):
+            break  # 来源清单结束（遇到新的小节）
+        stripped = line.strip()
+        if not stripped or set(stripped) <= {"-", ":", "—", "|", " "}:
+            continue
+        num = None
+        body = stripped
+        nm = re.match(r"^(\d{1,3})[.、)．]\s*(.*)$", stripped)
+        if nm:
+            num = int(nm.group(1))
+            body = nm.group(2).strip()
+        if not body:
+            continue
+        # Markdown 链接 [标题](URL)（任意 scheme，URL 格式检查兜底）
+        lm = re.match(r"^\[([^\]]*)\]\(([^)\s]+)\)$", body)
+        if lm:
+            entries.append({
+                "num": num,
+                "title": lm.group(1).strip(),
+                "url": lm.group(2),
+            })
+            continue
+        # 表格行（任意单元格含 http(s) URL）
+        cells = [c.strip() for c in stripped.strip("|").split("|")]
+        url = next((c for c in cells if re.match(r"^https?://", c)), None)
+        if url and len(cells) >= 2:
+            title = next((c for c in cells if c and c != url), "") or ""
+            entries.append({"num": num, "title": title, "url": url})
+            continue
+        # 裸 URL（任意 scheme，非 http(s) 由格式检查兜底）
+        um = re.search(r"[a-z][a-z0-9+.-]*://[^\s)\]\"']+", body)
+        if um:
+            raw = um.group(0).rstrip(".,;:，。；：")
+            title = body.replace(um.group(0), "").strip(" -–—()（）")
+            entries.append({"num": num, "title": title, "url": raw})
+            continue
+        # 无 URL 的编号条目（标题条目，URL 格式检查会兜底）
+        entries.append({"num": num, "title": body, "url": None})
+    return entries
+
+
+def check_source_list_completeness(report: str) -> dict:
+    """三级溯源链完整性：正文 [n] 编号引用 ↔ 文末来源清单。
+
+    - 正文每个 [n] 都必须在清单中有对应条目；
+    - 清单条目数 ≥ 正文最大引用编号；
+    - 清单内 URL 必须为 http(s) 格式。
+    报告既无 [n] 引用也无来源清单时跳过（不误伤纯统计任务）。"""
+    t = str(report or "")
+    refs = {
+        int(m.group(1))
+        for m in _INLINE_REF_RE.finditer(_body_without_source_list(t))
+    }
+    entries = extract_source_list(t)
+    if not refs and not entries:
+        return {
+            "pass": True,
+            "details": "报告无 [n] 引用与来源清单，跳过三级溯源链检查",
+            "refs": [], "missing_refs": [], "list_entries": [],
+            "gaps": [], "enabled": False,
+        }
+    list_nums = {e["num"] for e in entries if e["num"] is not None}
+    missing_refs = sorted(r for r in refs if r not in list_nums)
+    max_ref = max(refs) if refs else 0
+    gaps: list[str] = []
+    for r in missing_refs:
+        gaps.append(f"正文引用 [n={r}] 在文末来源清单中无对应条目")
+    if max_ref and not entries:
+        gaps.append("正文含 [n] 引用但文末缺少 '## 参考来源' 清单")
+    elif max_ref and len(entries) < max_ref:
+        gaps.append(
+            f"来源清单条目数 {len(entries)} 小于正文最大引用编号 {max_ref}"
+        )
+    bad_urls = [
+        e for e in entries
+        if e["url"] and not re.match(r"^https?://", e["url"])
+    ]
+    for e in bad_urls:
+        gaps.append(f"来源条目 URL 非 http(s) 格式：{e['title'] or e['url']}")
+    passed = not gaps
+    details = (
+        f"三级溯源链：正文引用 {len(refs)} 个编号，来源清单 {len(entries)} 条"
+        + (f"；缺失引用条目 {len(missing_refs)} 个" if missing_refs else "")
+        + (
+            "；清单条目不足"
+            if max_ref and entries and len(entries) < max_ref
+            else ""
+        )
+        + (f"；非法 URL {len(bad_urls)} 条" if bad_urls else "")
+        + ("，完整" if passed else "")
+    )
+    return {
+        "pass": passed,
+        "details": details,
+        "refs": sorted(refs),
+        "missing_refs": missing_refs,
+        "list_entries": [
+            {"num": e["num"], "title": e["title"], "url": e["url"]}
+            for e in entries
+        ],
+        "gaps": gaps,
+        "enabled": True,
+    }
+
+
+# 数据时效区块特征词：命中即要求"数据时效/数据截止 + 具体时间/日期"
+_FRESHNESS_BLOCK_MARKERS = ("数据时效", "数据截止", "数据截至", "更新时间", "行情快照")
+# 时效语义特征词：任务/报告完全不涉及这些内容时自动跳过（纯代码任务等）
+_TIME_SENSITIVE_MARKERS = (
+    "行情", "价格", "股价", "涨跌幅", "成交", "财报", "年报", "营收", "净利润",
+    "业绩", "市值", "数据", "新闻", "快照", "排行", "榜单", "截至", "时效",
+    "日终", "盘中", "盘后", "收盘", "更新",
+)
+_FRESHNESS_DATE_RE = re.compile(r"\d{4}[-/年]\d{1,2}")
+
+
+def check_freshness_block(report: str, goal: str = "") -> dict:
+    """数据时效区块检查：报告须含'数据时效/数据截止'字样 + 具体时间/日期。
+
+    无时效语义的任务（如纯代码任务，报告与目标都不含行情/财报/数据等词）
+    自动跳过，不误伤。"""
+    t = str(report or "")
+    hay = t + "\n" + str(goal or "")
+    if not any(m in hay for m in _TIME_SENSITIVE_MARKERS):
+        return {
+            "pass": True,
+            "details": "任务无数据时效语义，跳过",
+            "has_freshness_block": False,
+            "has_date": False,
+            "gaps": [],
+            "enabled": False,
+        }
+    has_block = any(m in t for m in _FRESHNESS_BLOCK_MARKERS)
+    has_date = bool(_FRESHNESS_DATE_RE.search(t))
+    passed = has_block and has_date
+    gaps: list[str] = []
+    if not has_block:
+        gaps.append("报告缺少'数据时效'区块（需含数据截止时间/行情快照时间）")
+    elif not has_date:
+        gaps.append("报告含'数据时效'字样但无具体时间/日期（如 2026-08-30）")
+    return {
+        "pass": passed,
+        "details": (
+            f"数据时效区块：{'包含' if has_block else '缺失'}，"
+            f"具体时间/日期：{'包含' if has_date else '缺失'}"
+        ),
+        "has_freshness_block": has_block,
+        "has_date": has_date,
+        "gaps": gaps,
+        "enabled": True,
+    }
+
+
+def check_disclaimer(report: str) -> dict:
+    """免责声明 + AI 标识检查：financial 域报告必须含'免责声明'与'不构成投资建议'。"""
+    t = str(report or "")
+    has_disclaimer = "免责声明" in t
+    # 兼容官方模板"不构成任何投资建议"与简写"不构成投资建议"
+    has_advice_note = re.search(r"不构成(?:任何)?投资建议", t) is not None
+    passed = has_disclaimer and has_advice_note
+    return {
+        "pass": passed,
+        "details": (
+            f"免责声明/AI 标识：{'包含' if has_disclaimer else '缺失'}，"
+            f"'不构成投资建议'：{'包含' if has_advice_note else '缺失'}"
+            + ("，通过" if passed else "，缺失")
+        ),
+        "has_disclaimer": has_disclaimer,
+        "has_advice_note": has_advice_note,
+        "gaps": (
+            []
+            if passed
+            else ["报告缺少'免责声明'与'不构成投资建议'（AI 生成标识）"]
+        ),
+        "enabled": True,
+    }
+
+
+# ─────────────────────────────────────────────
 # Checklist runner
 # ─────────────────────────────────────────────
 
 def run_acceptance(task_id: str, goal: str, report_text: str, workspace) -> dict:
     """运行验收 checklist，输出缺口报告。"""
     sources = _collect_sources(workspace)
+    domain = traceability_domain(goal)
     checks: dict = {}
     checks["number_traceability"] = check_number_traceability(
-        report_text, sources, domain=traceability_domain(goal),
+        report_text, sources, domain=domain,
     )
     checks["entity_attribution"] = check_entity_attribution(
         report_text, sources, goal,
@@ -1032,7 +1242,22 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace) -> dict
     checks["deliverable_completeness"] = check_deliverable_completeness(
         report_text, goal,
     )
-    gaps = [c["details"] for c in checks.values() if not c["pass"]]
+    # V1.2 竞品启示：三级溯源链 / 数据时效 / 免责声明。
+    # financial 域计入 overall；无来源清单特征/无时效语义时检查自身跳过；
+    # 非金融域只展示检查结果，不追加 gaps（避免误伤代码/通用任务）。
+    checks["source_list_completeness"] = check_source_list_completeness(report_text)
+    checks["freshness_block"] = check_freshness_block(report_text, goal)
+    checks["disclaimer"] = check_disclaimer(report_text)
+    _V12_FINANCIAL_ONLY = (
+        "source_list_completeness", "freshness_block", "disclaimer",
+    )
+    gaps = []
+    for _key, _c in checks.items():
+        if _c["pass"]:
+            continue
+        if _key in _V12_FINANCIAL_ONLY and domain != "financial":
+            continue
+        gaps.append(_c["details"])
     overall = "pass" if not gaps else "fail"
     # A2：汇总各检查项的域名媒体补录建议，供 GET /api/acceptance/suggestions 读取
     suggestions: list[str] = []

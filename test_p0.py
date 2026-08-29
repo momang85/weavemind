@@ -3359,6 +3359,210 @@ class TestAcceptanceChecker(unittest.TestCase):
         self.assertNotIn("建议补录域名媒体映射", r2["details"])
         self.assertEqual(r2["suggestions"], [])
 
+    # ── V1.2 竞品启示：三级溯源链 / 数据时效 / 免责声明 ──
+
+    def test_source_list_completeness_complete(self):
+        """三级溯源链：正文 [1][2] 引用 ↔ 文末来源清单编号齐全 → pass。"""
+        from acceptance_checker import check_source_list_completeness
+
+        report = (
+            "本报告正文引用外部信息[1][2]。\n\n"
+            "## 参考来源\n\n"
+            "1. [来源一](https://example.com/a)\n"
+            "2. [来源二](https://example.com/b)\n"
+        )
+        r = check_source_list_completeness(report)
+        self.assertTrue(r["pass"])
+        self.assertEqual(r["refs"], [1, 2])
+        self.assertEqual(r["missing_refs"], [])
+        self.assertEqual(len(r["list_entries"]), 2)
+        self.assertTrue(r["enabled"])
+        self.assertEqual(r["gaps"], [])
+
+    def test_source_list_completeness_missing_ref_and_short_list(self):
+        """正文 [3] 无清单条目 + 清单条数 < 最大编号 → gap。"""
+        from acceptance_checker import check_source_list_completeness
+
+        report = (
+            "正文引用[1][3]。\n\n"
+            "## 参考来源\n\n"
+            "1. [来源一](https://example.com/a)\n"
+            "2. [来源二](https://example.com/b)\n"
+        )
+        r = check_source_list_completeness(report)
+        self.assertFalse(r["pass"])
+        self.assertEqual(r["missing_refs"], [3])
+        self.assertGreaterEqual(len(r["gaps"]), 1)
+        self.assertTrue(
+            any("无对应条目" in g for g in r["gaps"]),
+            r["gaps"],
+        )
+        self.assertTrue(
+            any("小于正文最大引用编号" in g for g in r["gaps"]),
+            r["gaps"],
+        )
+
+    def test_source_list_completeness_bad_url(self):
+        """清单条目 URL 非 http(s) 格式 → gap。"""
+        from acceptance_checker import check_source_list_completeness
+
+        report = (
+            "正文引用[1]。\n\n"
+            "## 参考来源\n\n"
+            "1. [来源一](ftp://example.com/a)\n"
+        )
+        r = check_source_list_completeness(report)
+        self.assertFalse(r["pass"])
+        self.assertTrue(
+            any("非 http(s)" in g for g in r["gaps"]),
+            r["gaps"],
+        )
+
+    def test_source_list_completeness_skipped_without_features(self):
+        """无 [n] 引用且无来源清单 → 跳过，不误伤纯统计任务。"""
+        from acceptance_checker import check_source_list_completeness
+
+        r = check_source_list_completeness("今日A股成交额占比前5%统计结果如下：42.7%。")
+        self.assertTrue(r["pass"])
+        self.assertFalse(r["enabled"])
+        self.assertEqual(r["gaps"], [])
+
+    def test_freshness_block_present_passes(self):
+        """含'数据时效'区块 + 具体日期 → pass。"""
+        from acceptance_checker import check_freshness_block
+
+        report = (
+            "## 数据时效\n\n"
+            "行情数据截至 2026-08-30 15:00 收盘；腾讯行情接口，日终刷新。\n\n"
+            "2023年总营收6090亿元。"
+        )
+        r = check_freshness_block(report)
+        self.assertTrue(r["pass"])
+        self.assertTrue(r["has_freshness_block"])
+        self.assertTrue(r["has_date"])
+        self.assertTrue(r["enabled"])
+
+    def test_freshness_block_missing_reports_gap(self):
+        """financial 语义报告缺失'数据时效'或日期 → gap。"""
+        from acceptance_checker import check_freshness_block
+
+        r = check_freshness_block("2023年总营收6090亿元，净利润1152亿元。")
+        self.assertFalse(r["pass"])
+        self.assertTrue(r["gaps"])
+        self.assertTrue(
+            any("数据时效" in g for g in r["gaps"]),
+            r["gaps"],
+        )
+
+    def test_freshness_block_missing_date_reports_gap(self):
+        """有'数据时效'字样但无具体时间/日期 → gap。"""
+        from acceptance_checker import check_freshness_block
+
+        r = check_freshness_block(
+            "## 数据时效\n\n行情数据来自腾讯接口。\n\n2023年总营收6090亿元。"
+        )
+        self.assertFalse(r["pass"])
+        self.assertTrue(r["has_freshness_block"])
+        self.assertFalse(r["has_date"])
+        self.assertTrue(r["gaps"])
+
+    def test_freshness_block_skips_code_task(self):
+        """纯代码任务（无行情/财报/数据等时效语义）→ 自动跳过。"""
+        from acceptance_checker import check_freshness_block
+
+        r = check_freshness_block(
+            "已生成 index.html，可直接在浏览器运行。",
+            "写一个贪吃蛇游戏",
+        )
+        self.assertTrue(r["pass"])
+        self.assertFalse(r["enabled"])
+        self.assertEqual(r["gaps"], [])
+
+    def test_disclaimer_present_passes(self):
+        """免责声明 + 不构成投资建议 → pass。"""
+        from acceptance_checker import check_disclaimer
+
+        report = (
+            "## 免责声明\n\n"
+            "本报告由织光 WeaveMind AI 自动生成，仅供参考，不构成任何投资建议；"
+            "数据来源于公开渠道，可能存在延迟或误差；据此操作风险自担。"
+        )
+        r = check_disclaimer(report)
+        self.assertTrue(r["pass"])
+        self.assertTrue(r["has_disclaimer"])
+        self.assertTrue(r["has_advice_note"])
+
+    def test_disclaimer_missing_reports_gap(self):
+        """financial 域报告缺失免责声明 → gap。"""
+        from acceptance_checker import check_disclaimer
+
+        r = check_disclaimer("2023年总营收6090亿元。")
+        self.assertFalse(r["pass"])
+        self.assertTrue(r["gaps"])
+        self.assertTrue(
+            any("免责声明" in g for g in r["gaps"]),
+            r["gaps"],
+        )
+
+    def test_run_acceptance_financial_enforces_v12_checks(self):
+        """financial 域：缺失时效/免责 → overall fail；合规报告 → pass。
+        域阈值不变（本用例报告无数字，数字溯源天然通过）。"""
+        import tempfile
+        from pathlib import Path
+        from acceptance_checker import run_acceptance
+
+        tmp = Path(tempfile.mkdtemp(prefix="acc_v12_"))
+        try:
+            bad = run_acceptance(
+                "t-v12-bad", "分析腾讯股票行情",
+                "腾讯行情分析完成。", tmp,
+            )
+            self.assertIn("source_list_completeness", bad["checks"])
+            self.assertIn("freshness_block", bad["checks"])
+            self.assertIn("disclaimer", bad["checks"])
+            self.assertEqual(bad["overall"], "fail")
+            self.assertTrue(
+                any("数据时效" in g for g in bad["gaps"]),
+                bad["gaps"],
+            )
+            self.assertTrue(
+                any("免责声明" in g for g in bad["gaps"]),
+                bad["gaps"],
+            )
+            good_report = (
+                "## 数据时效\n\n行情数据截至 2026-08-30 15:00 收盘；"
+                "腾讯行情接口，日终刷新。\n\n"
+                "正文引用[1]。\n\n"
+                "## 参考来源\n\n1. [来源](https://example.com/a)\n\n"
+                "## 免责声明\n\n"
+                "本报告由织光 WeaveMind AI 自动生成，仅供参考，"
+                "不构成任何投资建议；数据来源于公开渠道，"
+                "可能存在延迟或误差；据此操作风险自担。"
+            )
+            good = run_acceptance(
+                "t-v12-good", "分析腾讯股票行情", good_report, tmp,
+            )
+            self.assertEqual(good["overall"], "pass", good["gaps"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_run_acceptance_v12_not_enforced_outside_financial(self):
+        """非 financial 域：即使缺时效/免责也不判 fail（代码任务不误伤）。"""
+        import tempfile
+        from pathlib import Path
+        from acceptance_checker import run_acceptance
+
+        tmp = Path(tempfile.mkdtemp(prefix="acc_v12_research_"))
+        try:
+            out = run_acceptance(
+                "t-v12-code", "写一个贪吃蛇游戏",
+                "游戏已完成，可直接运行 index.html。", tmp,
+            )
+            self.assertEqual(out["overall"], "pass", out["gaps"])
+            self.assertFalse(out["checks"]["freshness_block"]["enabled"])
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 class TestEastMoneyAdapter(unittest.TestCase):
     def test_to_yi(self):
@@ -5014,6 +5218,101 @@ class TestNewDataAdapters(unittest.TestCase):
             ws_mod.WORKSPACE_ROOT = old_root
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
+
+    # ── V1.2 竞品启示：URL 存活校验（全部 mock，不联网）──
+
+    def test_url_health_200_alive(self):
+        from adapters import url_health
+
+        class FakeResp:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        with mock.patch.object(
+            url_health.urllib.request, "urlopen",
+            return_value=FakeResp(),
+        ):
+            out = url_health.check_urls(["https://example.com/ok"])
+        self.assertEqual(out, {"https://example.com/ok": "alive"})
+
+    def test_url_health_404_dead_with_retry(self):
+        import urllib.error
+        from adapters import url_health
+
+        calls = {"n": 0}
+
+        def boom(*a, **k):
+            calls["n"] += 1
+            raise urllib.error.HTTPError(
+                "https://example.com/404", 404, "Not Found", {}, None,
+            )
+
+        with mock.patch.object(
+            url_health.urllib.request, "urlopen", side_effect=boom,
+        ):
+            out = url_health.check_urls(["https://example.com/404"])
+        self.assertEqual(out, {"https://example.com/404": "dead"})
+        self.assertEqual(calls["n"], 2, "失败应重试 1 次")
+
+    def test_url_health_timeout_dead(self):
+        import socket
+        from adapters import url_health
+
+        def boom(*a, **k):
+            raise socket.timeout("timed out")
+
+        with mock.patch.object(
+            url_health.urllib.request, "urlopen", side_effect=boom,
+        ):
+            out = url_health.check_urls(["https://example.com/slow"])
+        self.assertEqual(out, {"https://example.com/slow": "dead"})
+
+    def test_url_health_head_405_falls_back_to_get(self):
+        import urllib.error
+        from adapters import url_health
+
+        methods = []
+
+        class FakeResp:
+            status = 200
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        def fake_urlopen(req, timeout=5):
+            methods.append(req.get_method())
+            if req.get_method() == "HEAD":
+                raise urllib.error.HTTPError(
+                    req.full_url, 405, "Method Not Allowed", {}, None,
+                )
+            return FakeResp()
+
+        with mock.patch.object(
+            url_health.urllib.request, "urlopen", side_effect=fake_urlopen,
+        ):
+            out = url_health.check_urls(["https://example.com/get"])
+        self.assertEqual(out, {"https://example.com/get": "alive"})
+        self.assertEqual(methods, ["HEAD", "GET"])
+
+    def test_url_health_skips_non_http_and_dedupes(self):
+        from adapters import url_health
+
+        with mock.patch.object(
+            url_health.urllib.request, "urlopen",
+            side_effect=AssertionError("不应发起请求"),
+        ):
+            out = url_health.check_urls(
+                ["ftp://example.com/a", "not-a-url", "", "https://example.com/a", "https://example.com/a"],
+            )
+        self.assertEqual(out, {"https://example.com/a": "dead"})
 
 
 if __name__ == "__main__":
