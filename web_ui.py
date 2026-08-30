@@ -1207,6 +1207,177 @@ def _safe_href(url: str, image: bool = False) -> str:
         return url
     return "#"
 
+
+# ---------------------------------------------------------------------------
+# 分享页结构化渲染（与前端 ReportViewer 解析逻辑等价的服务端实现）：
+# 数据时效卡 / 目录大纲 / 参考来源卡片 / 免责声明弱化
+# ---------------------------------------------------------------------------
+
+def _report_fence_mask(lines: list) -> list[bool]:
+    """标记围栏代码块内的行（避免把代码内容误当标题/来源解析）。"""
+    mask: list[bool] = []
+    in_fence = False
+    for ln in lines:
+        if re.match(r"^\s*(```|~~~)", ln):
+            in_fence = not in_fence
+            mask.append(True)
+        else:
+            mask.append(in_fence)
+    return mask
+
+
+def _plain_heading(text: str) -> str:
+    return re.sub(r"\[([^\]]+)\]\([^)\s]+\)", r"\1", str(text)).replace("*", "").replace("_", "").strip()
+
+
+def _report_parse_toc(md: str) -> list[dict]:
+    """提取 #/##/### 目录大纲（跳过代码块内伪标题）。"""
+    lines = str(md).split("\n")
+    mask = _report_fence_mask(lines)
+    toc: list[dict] = []
+    for i, ln in enumerate(lines):
+        if mask[i]:
+            continue
+        m = re.match(r"^(#{1,3})\s+(.+?)\s*#*\s*$", ln)
+        if not m:
+            continue
+        text = _plain_heading(m.group(2))
+        if text:
+            toc.append({"text": text[:60], "level": len(m.group(1))})
+    return toc
+
+
+def _report_parse_freshness(md: str) -> str | None:
+    """提取"数据时效"区块内容（标题区块或含数据截止/快照时间的段落）。"""
+    lines = str(md).split("\n")
+    mask = _report_fence_mask(lines)
+    for i, ln in enumerate(lines):
+        if mask[i]:
+            continue
+        m = re.match(r"^(#{1,6})\s*(.+)$", ln.strip())
+        if m and re.search(r"数据时效|数据截止时间", m.group(2)):
+            section = []
+            for j in range(i + 1, len(lines)):
+                if not mask[j] and re.match(r"^#{1,6}\s+", lines[j]):
+                    break
+                t = lines[j].strip()
+                if t and not re.match(r"^\s*(```|~~~)", t):
+                    section.append(re.sub(r"^[-*•]\s+", "", t))
+            text = re.sub(r"\s+", " ", " ".join(section)).replace("*", "").replace("_", "").strip()
+            return text or None
+    for i, ln in enumerate(lines):
+        if mask[i]:
+            continue
+        if re.search(r"数据截至|数据截止|快照时间", ln):
+            text = re.sub(r"^#{1,6}\s*", "", ln)
+            text = re.sub(r"^[-*•]\s+", "", text).replace("*", "").replace("_", "").strip()
+            if text:
+                return text
+    return None
+
+
+_SOURCE_HEADING_WORDS = ("参考来源", "数据来源", "参考资料", "引用来源", "参考文献")
+
+
+def _report_is_source_heading(text: str) -> bool:
+    t = str(text).strip()
+    return any(w in t for w in _SOURCE_HEADING_WORDS) or bool(re.match(r"^(来源|References?|Sources?)$", t, re.I))
+
+
+def _report_parse_sources(md: str) -> tuple[str, list[dict], str | None]:
+    """提取文末参考来源区块：[标题](URL) 列表。返回 (剔除来源区块后的正文, 来源列表, 原区块文本)。
+    无法结构化时原样保留（来源列表为空、原区块文本非空）。"""
+    lines = str(md).split("\n")
+    mask = _report_fence_mask(lines)
+    start = -1
+    for i, ln in enumerate(lines):
+        if mask[i]:
+            continue
+        m = re.match(r"^(#{1,6})\s*(.+)$", ln.strip())
+        if m and _report_is_source_heading(m.group(2)):
+            start = i
+            break
+    if start < 0:
+        return str(md), [], None
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if not mask[j] and re.match(r"^#{1,6}\s+", lines[j]):
+            end = j
+            break
+    raw_section = "\n".join(lines[start + 1:end])
+    items: list[dict] = []
+    for k in range(start + 1, end):
+        if mask[k]:
+            continue
+        trimmed = lines[k].strip()
+        if not trimmed or trimmed.startswith("!["):
+            continue
+        m = re.search(r"\[([^\]]+)\]\(([^)\s]+)\)", trimmed)
+        if not m:
+            continue
+        prefix = trimmed[:m.start()].strip()
+        if prefix and not re.match(r"^(?:[-*•]\s*|\[\d{1,2}\]\s*|\d{1,3}[.、.)]\s*)+$", prefix):
+            continue
+        title = m.group(1).replace("*", "").replace("_", "").strip()
+        url = m.group(2).strip()
+        if not title or not url:
+            continue
+        try:
+            domain = re.sub(r"^www\.", "", (url.split("//", 1)[-1] if "//" in url else url).split("/")[0])
+        except Exception:
+            domain = url
+        items.append({"title": title[:80], "url": url, "domain": domain[:60]})
+    if not items:
+        return str(md), [], raw_section
+    rest = "\n".join(lines[:start] + lines[end:]).strip()
+    return rest, items, None
+
+
+def _report_parse_disclaimer(md: str) -> tuple[str, str | None]:
+    """提取免责声明区块文本。返回 (剔除后的正文, 免责文本)。"""
+    lines = str(md).split("\n")
+    mask = _report_fence_mask(lines)
+    start = -1
+    for i, ln in enumerate(lines):
+        if mask[i]:
+            continue
+        m = re.match(r"^(#{1,6})\s*(.+)$", ln.strip())
+        if m and "免责声明" in m.group(2):
+            start = i
+            break
+    if start < 0:
+        return str(md), None
+    end = len(lines)
+    for j in range(start + 1, len(lines)):
+        if not mask[j] and re.match(r"^#{1,6}\s+", lines[j]):
+            end = j
+            break
+    text = re.sub(r"\[([^\]]+)\]\([^)\s]+\)", r"\1", " ".join(lines[start + 1:end]))
+    text = re.sub(r"\s+", " ", text).replace("*", "").replace("_", "").strip()
+    if not text:
+        return str(md), None
+    rest = "\n".join(lines[:start] + lines[end:]).strip()
+    return rest, text
+
+
+def _share_page_structured(md: str) -> dict:
+    """解析报告结构化元素，供分享页渲染（与前端 ReportViewer 等价）。"""
+    try:
+        from common import strip_outer_markdown_fence
+        md = strip_outer_markdown_fence(str(md or ""))
+    except Exception:
+        md = str(md or "")
+    body, sources, _sec = _report_parse_sources(md)
+    body, disclaimer = _report_parse_disclaimer(body)
+    return {
+        "freshness": _report_parse_freshness(md),
+        "toc": _report_parse_toc(body),
+        "sources": sources,
+        "disclaimer": disclaimer,
+        "body": body,
+    }
+
+
 def _markdown_to_html(md: str, task_id: str) -> str:
     """极简 Markdown → 安全 HTML（用于公开分享页）。
     先整体转义再构建标签，报告内容无法注入脚本；
@@ -1444,12 +1615,14 @@ def _build_lang_context(report_lang: str, user_context: str) -> str:
 
 
 def _share_page_html(title: str, created_at: str, body_html: str,
-                     theme: str = "light") -> str:
+                     theme: str = "light", structured: dict | None = None) -> str:
     """生成公开只读分享页：自包含 HTML，无系统导航/管理功能。
-    theme 支持 light / dark / paper（Roadmap 余项⑤：HTML 模板定制）。"""
+    theme 支持 light / dark / paper（Roadmap 余项⑤：HTML 模板定制）；
+    structured 传入 _share_page_structured() 结果，渲染数据时效卡/目录/来源卡片/免责声明。"""
     theme = str(theme or "light").strip().lower()
     if theme not in ("light", "dark", "paper"):
         theme = "light"
+    st = structured or {}
     time_text = ""
     if created_at:
         try:
@@ -1501,6 +1674,44 @@ def _share_page_html(title: str, created_at: str, body_html: str,
   th, td {{ border-color: #d8d0bd; }}
   hr {{ border-top-color: #d8d0bd; }}""",
     }[theme]
+    # 结构化区块（数据时效卡 / 目录 / 来源卡片 / 免责声明）
+    structured_html = ""
+    parts: list[str] = []
+    freshness = st.get("freshness")
+    if freshness:
+        parts.append(
+            '<div class="freshness-card">'
+            '<div class="freshness-title">数据时效</div>'
+            f'<div class="freshness-text">{html.escape(str(freshness))}</div>'
+            "</div>"
+        )
+    toc = st.get("toc") or []
+    if len(toc) >= 2:
+        items = "".join(
+            f'<a class="toc-item toc-lv{int(e.get("level", 2))}" href="#sec-{i}">'
+            f"{html.escape(str(e.get('text', '')))}</a>"
+            for i, e in enumerate(toc[:30])
+        )
+        parts.append(f'<div class="toc-card"><div class="toc-title">目录</div><div class="toc-body">{items}</div></div>')
+    sources = st.get("sources") or []
+    if sources:
+        items = "".join(
+            f'<a class="src-item" href="{html.escape(_safe_href(str(s.get("url", ""))), quote=True)}" '
+            f'target="_blank" rel="noopener noreferrer">'
+            f'<span class="src-idx">{i + 1}</span>'
+            f'<span class="src-main"><span class="src-title">{html.escape(str(s.get("title", "")))}</span>'
+            f'<span class="src-domain">{html.escape(str(s.get("domain", "")))}</span></span>'
+            f'<span class="src-ext">↗</span></a>'
+            for i, s in enumerate(sources[:50])
+        )
+        parts.append(f'<div class="src-card"><div class="src-title">参考来源</div><div class="src-body">{items}</div></div>')
+    disclaimer = st.get("disclaimer")
+    if disclaimer:
+        parts.append(
+            f'<div class="disc-card">{html.escape(str(disclaimer))}</div>'
+        )
+    if parts:
+        structured_html = '<div class="structured">' + "".join(parts) + "</div>"
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -1532,6 +1743,27 @@ def _share_page_html(title: str, created_at: str, body_html: str,
   hr {{ border: none; border-top: 1px solid #e3e6eb; margin: 20px 0; }}
   ul, ol {{ padding-left: 24px; }}
   footer {{ text-align: center; color: #9aa2b1; font-size: 12px; margin-top: 24px; }}
+  /* 结构化区块样式 */
+  .structured {{ display: flex; flex-direction: column; gap: 12px; margin-bottom: 18px; }}
+  .freshness-card {{ border: 1px solid #e2b93b44; background: #f6edda66; border-radius: 10px; padding: 12px 16px; }}
+  .freshness-title {{ font-weight: 600; font-size: 12px; color: #9a7b1e; margin-bottom: 4px; }}
+  .freshness-text {{ font-size: 13px; color: #5a5340; }}
+  .toc-card {{ border: 1px solid #c9d4e5; border-radius: 10px; padding: 12px 16px; background: #f8fafc; }}
+  .toc-title {{ font-weight: 600; font-size: 12px; color: #64748b; margin-bottom: 6px; }}
+  .toc-body {{ display: flex; flex-wrap: wrap; gap: 6px; }}
+  .toc-item {{ font-size: 12px; color: #475569; background: #eef2f7; border-radius: 6px; padding: 3px 8px; text-decoration: none; }}
+  .toc-item:hover {{ background: #dbeafe; color: #1d4ed8; }}
+  .src-card {{ border: 1px solid #c9d4e5; border-radius: 10px; padding: 12px 16px; background: #f8fafc; }}
+  .src-card > .src-title {{ font-weight: 600; font-size: 12px; color: #64748b; margin-bottom: 8px; }}
+  .src-body {{ display: flex; flex-direction: column; gap: 6px; }}
+  .src-item {{ display: flex; align-items: center; gap: 10px; border: 1px solid #e2e8f0; border-radius: 8px; padding: 8px 10px; text-decoration: none; background: #fff; }}
+  .src-item:hover {{ border-color: #93c5fd; }}
+  .src-idx {{ flex: none; width: 20px; height: 20px; border-radius: 6px; background: #dbeafe; color: #1d4ed8; font-size: 11px; font-weight: 600; display: flex; align-items: center; justify-content: center; }}
+  .src-main {{ flex: 1; min-width: 0; }}
+  .src-title {{ display: block; font-size: 13px; color: #1e293b; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }}
+  .src-domain {{ display: block; font-size: 11px; color: #94a3b8; }}
+  .src-ext {{ flex: none; color: #94a3b8; }}
+  .disc-card {{ border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px 14px; font-size: 12px; color: #94a3b8; background: #f8fafc; }}
 {theme_css}
 </style>
 </head>
@@ -1541,6 +1773,7 @@ def _share_page_html(title: str, created_at: str, body_html: str,
     <h1 class="title">{html.escape(title)}</h1>
     {meta_html}
   </header>
+  {structured_html}
   <main>{body_html}</main>
   <footer>由织光 WeaveMind 生成的公开只读报告</footer>
 </div>
@@ -1941,6 +2174,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        # 缓存策略：HTML 不缓存（防止浏览器用旧 bundle 引用），
+        # 带内容 hash 的静态资源（assets/ 下）允许长缓存
+        if ctype == "text/html; charset=utf-8":
+            self.send_header("Cache-Control", "no-cache, no-store, must-revalidate")
+        elif "/assets/" in path:
+            self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        else:
+            self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(body)
         return True
@@ -2207,7 +2448,12 @@ class Handler(BaseHTTPRequestHandler):
             data = _get_task_report_data(tid) if tid else None
             if not tid or not data:
                 return self._html(_SHARE_NOT_FOUND_HTML, 404)
-            body_html = _markdown_to_html(data.get("report") or "", tid)
+            # 结构化解析：数据时效卡/目录/来源卡片/免责声明（与前端 ReportViewer 等价）
+            try:
+                structured = _share_page_structured(data.get("report") or "")
+            except Exception:
+                structured = {}
+            body_html = _markdown_to_html(structured.get("body") or data.get("report") or "", tid)
             title = str(data.get("goal") or "任务报告")
             created = data.get("created_at") or data.get("completed_at") or ""
             # Roadmap 余项⑤：分享页主题模板 ?theme=light|dark|paper
@@ -2216,7 +2462,8 @@ class Handler(BaseHTTPRequestHandler):
                 theme = (parse_qs(urlparse(self.path).query).get("theme") or ["light"])[0]
             except Exception:
                 theme = "light"
-            return self._html(_share_page_html(title, created, body_html, theme=theme))
+            return self._html(_share_page_html(title, created, body_html, theme=theme,
+                                               structured=structured))
         if p.startswith("/task/"):
             tid = p.split("/task/")[-1]
             with _task_lock: data = _task_results.get(tid)
