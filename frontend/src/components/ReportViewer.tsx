@@ -1,5 +1,6 @@
 import { useState, useEffect, memo } from 'react'
-import ReactMarkdown from 'react-markdown'
+import type { ReactNode } from 'react'
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
@@ -9,8 +10,351 @@ import { useTaskStore } from '../stores/useTaskStore'
 import {
   FileDown, Package, ScrollText, Clock, CheckCircle2,
   ChevronDown, ChevronRight, Award, Zap, Download, ExternalLink, Play,
-  Share2, Link2, Copy, Check, X, Trash2,
+  Share2, Link2, Copy, Check, X, Trash2, CalendarClock, ListTree, Quote,
 } from 'lucide-react'
+
+/* ===================== 报告结构化解析（纯函数，无新增依赖） ===================== */
+
+interface TocEntry { id: string; text: string; level: 1 | 2 | 3 }
+interface FreshnessInfo { text: string }
+interface SourceItem { title: string; url: string; domain: string }
+interface SourcesInfo { heading: string; items: SourceItem[] }
+interface SourcesResult { rest: string; sources: SourcesInfo | null; sectionText: string | null }
+interface DisclaimerResult { rest: string; disclaimer: string | null }
+
+/** 剥离最外层 ```markdown ... ``` / ``` ... ``` / ~~~ ... ~~~ 围栏（仅整体包裹时） */
+export function stripOuterFence(md: string): string {
+  const trimmed = md.trim()
+  const m = /^```[a-zA-Z]*[ \t]*\r?\n([\s\S]*?)\r?\n```[a-zA-Z]*[ \t]*$/.exec(trimmed)
+    || /^~~~[a-zA-Z]*[ \t]*\r?\n([\s\S]*?)\r?\n~~~[a-zA-Z]*[ \t]*$/.exec(trimmed)
+  return m ? m[1] : md
+}
+
+/** 标记围栏代码块内的行，避免把代码内容误当标题/来源解析 */
+function fenceMask(lines: string[]): boolean[] {
+  const mask = new Array<boolean>(lines.length).fill(false)
+  let inFence = false
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*(```|~~~)/.test(lines[i])) {
+      inFence = !inFence
+      mask[i] = true
+    } else {
+      mask[i] = inFence
+    }
+  }
+  return mask
+}
+
+/** 从 React 节点提取纯文本（用于标题锚点） */
+function nodeToText(node: ReactNode): string {
+  if (node == null || typeof node === 'boolean') return ''
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (Array.isArray(node)) return node.map(nodeToText).join('')
+  if (typeof node === 'object' && 'props' in node && node.props) {
+    return nodeToText((node as { props: { children?: ReactNode } }).props.children)
+  }
+  return ''
+}
+
+/** 标题纯文本：去掉内联链接与加粗等 markdown 标记 */
+function plainHeading(text: string): string {
+  return text
+    .replace(/\[([^\]]+)\]\([^)\s]+\)/g, '$1')
+    .replace(/[*_`~]/g, '')
+    .trim()
+}
+
+/** 生成稳定的标题锚点 id（中文友好） */
+function slugify(text: string): string {
+  const slug = plainHeading(text).toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80)
+  return slug || 'section'
+}
+
+/** 重复标题追加 -2/-3 保证 id 唯一 */
+function assignHeadingIds(texts: string[]): string[] {
+  const seen: Record<string, number> = {}
+  return texts.map(text => {
+    const slug = slugify(text)
+    const n = (seen[slug] = (seen[slug] || 0) + 1)
+    return n > 1 ? `${slug}-${n}` : slug
+  })
+}
+
+/** 从 markdown 提取 #/##/### 目录大纲 */
+function parseToc(md: string): TocEntry[] {
+  const raw: Array<{ text: string; level: 1 | 2 | 3 }> = []
+  const mask = fenceMask(md.split('\n'))
+  md.split('\n').forEach((line, i) => {
+    if (mask[i]) return
+    const m = /^(#{1,3})\s+(.+?)\s*#*\s*$/.exec(line)
+    if (!m) return
+    const text = plainHeading(m[2])
+    if (text) raw.push({ text, level: m[1].length as 1 | 2 | 3 })
+  })
+  const ids = assignHeadingIds(raw.map(r => r.text))
+  return raw.map((r, i) => ({ ...r, id: ids[i] }))
+}
+
+/** 提取“数据时效”信息（标题区块或含数据截止/快照时间的段落） */
+function parseFreshness(md: string): FreshnessInfo | null {
+  const lines = md.split('\n')
+  const mask = fenceMask(lines)
+  for (let i = 0; i < lines.length; i++) {
+    if (mask[i]) continue
+    const m = /^(#{1,6})\s*(.+)$/.exec(lines[i].trim())
+    if (m && /数据时效|数据截止时间/.test(m[2])) {
+      const section: string[] = []
+      for (let j = i + 1; j < lines.length; j++) {
+        if (!mask[j] && /^#{1,6}\s+/.test(lines[j])) break
+        const t = lines[j].trim()
+        if (t && !/^\s*(```|~~~)/.test(t)) section.push(t.replace(/^[-*•]\s+/, ''))
+      }
+      const text = section.join(' ').replace(/[*_`]/g, '').replace(/\s+/g, ' ').trim()
+      return text ? { text } : null
+    }
+  }
+  for (let i = 0; i < lines.length; i++) {
+    if (mask[i]) continue
+    if (/数据截至|数据截止|快照时间/.test(lines[i])) {
+      const text = lines[i]
+        .replace(/^#{1,6}\s*/, '')
+        .replace(/^[-*•]\s+/, '')
+        .replace(/[*_`]/g, '')
+        .trim()
+      if (text) return { text }
+    }
+  }
+  return null
+}
+
+const SOURCE_HEADING_WORDS = ['参考来源', '数据来源', '参考资料', '引用来源', '参考文献']
+
+function isSourceHeading(text: string): boolean {
+  const t = text.trim()
+  return SOURCE_HEADING_WORDS.some(w => t.includes(w)) || /^(来源|References?|Sources?)$/i.test(t)
+}
+
+function hostnameOf(url: string): string {
+  const candidates = [url, /^https?:\/\//i.test(url) ? '' : 'https://' + url]
+  for (const c of candidates) {
+    if (!c) continue
+    try {
+      return new URL(c).hostname.replace(/^www\./, '')
+    } catch { /* 尝试下一种形态 */ }
+  }
+  const slash = url.indexOf('/')
+  return slash > 0 ? url.slice(0, slash) : url
+}
+
+function isListPrefix(prefix: string): boolean {
+  return /^(?:[-*•]\s*|\[\d{1,2}\]\s*|\d{1,3}[.、.)]\s*)+$/.test(prefix)
+}
+
+/** 解析来源清单行：[标题](URL)，支持 - / 1. / [1] 等前缀 */
+function parseSourceItems(raw: string, mask: boolean[]): SourceItem[] {
+  const items: SourceItem[] = []
+  const lines = raw.split('\n')
+  for (let k = 0; k < lines.length; k++) {
+    if (mask[k]) continue
+    const trimmed = lines[k].trim()
+    if (!trimmed || /^!\[/.test(trimmed)) continue
+    const m = trimmed.match(/\[([^\]]+)\]\(([^)\s]+)\)/)
+    if (!m || m.index == null) continue
+    const prefix = trimmed.slice(0, m.index).trim()
+    if (prefix && !isListPrefix(prefix)) continue
+    const title = m[1].replace(/[*_`]/g, '').trim()
+    const url = m[2].trim()
+    if (!title || !url) continue
+    items.push({ title, url, domain: hostnameOf(url) })
+  }
+  return items
+}
+
+/** 提取文末参考来源/数据来源区块；无法结构化时原样保留 */
+function parseSources(md: string): SourcesResult {
+  const lines = md.split('\n')
+  const mask = fenceMask(lines)
+  let start = -1
+  for (let i = 0; i < lines.length; i++) {
+    if (mask[i]) continue
+    const m = /^(#{1,6})\s*(.+)$/.exec(lines[i].trim())
+    if (m && isSourceHeading(m[2])) { start = i; break }
+  }
+  if (start < 0) return { rest: md, sources: null, sectionText: null }
+
+  let end = lines.length
+  for (let j = start + 1; j < lines.length; j++) {
+    if (!mask[j] && /^#{1,6}\s+/.test(lines[j])) { end = j; break }
+  }
+  const rawSection = lines.slice(start + 1, end).join('\n')
+  const sectionMask = mask.slice(start + 1, end)
+  const items = parseSourceItems(rawSection, sectionMask)
+  const heading = lines[start].trim().replace(/^#{1,6}\s*/, '').trim()
+
+  if (items.length === 0) {
+    // 有来源区块但无法结构化 → 原样渲染，且不再把其中的 [1] 转成引用上标
+    return { rest: md, sources: null, sectionText: rawSection }
+  }
+  const rest = [...lines.slice(0, start), ...lines.slice(end)].join('\n').trim()
+  return { rest, sources: { heading, items }, sectionText: null }
+}
+
+/** 提取免责声明区块 */
+function parseDisclaimer(md: string): DisclaimerResult {
+  const lines = md.split('\n')
+  const mask = fenceMask(lines)
+  let start = -1
+  for (let i = 0; i < lines.length; i++) {
+    if (mask[i]) continue
+    const m = /^(#{1,6})\s*(.+)$/.exec(lines[i].trim())
+    if (m && /免责声明/.test(m[2])) { start = i; break }
+  }
+  if (start < 0) return { rest: md, disclaimer: null }
+
+  let end = lines.length
+  for (let j = start + 1; j < lines.length; j++) {
+    if (!mask[j] && /^#{1,6}\s+/.test(lines[j])) { end = j; break }
+  }
+  const text = lines.slice(start + 1, end).join(' ')
+    .replace(/\[([^\]]+)\]\([^)\s]+\)/g, '$1')
+    .replace(/[*_`]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (!text) return { rest: md, disclaimer: null }
+  const rest = [...lines.slice(0, start), ...lines.slice(end)].join('\n').trim()
+  return { rest, disclaimer: text }
+}
+
+const CITATION_SEQ_RE = /(^|[^\[!\]\w])(\[\d{1,2}\](?:\s*\[\d{1,2}\])*)(?![(:\d])/gm
+
+/** 将 [1]、[1][2] 编号引用转换为 cite: 链接（由 a 组件渲染上标徽章） */
+function addCitationLinks(md: string, protectedSection?: string | null): string {
+  const stash: string[] = []
+  let protectedMd = md
+  if (protectedSection) {
+    protectedMd = protectedMd.replace(protectedSection, raw => `\u0000${stash.push(raw) - 1}\u0000`)
+  }
+  protectedMd = protectedMd
+    .replace(/```[\s\S]*?```/g, raw => `\u0000${stash.push(raw) - 1}\u0000`)
+    .replace(/`[^`\n]+`/g, raw => `\u0000${stash.push(raw) - 1}\u0000`)
+  const withCites = protectedMd.replace(CITATION_SEQ_RE, (_match, before, seq) => {
+    const nums = seq.match(/\d{1,2}/g) || []
+    return `${before}[${nums.join(',')}](cite:${nums.join(',')})`
+  })
+  return withCites.replace(/\u0000(\d+)\u0000/g, (_match, i) => stash[Number(i)] ?? '')
+}
+
+/* ===================== 报告渲染子组件 ===================== */
+
+// 模块级渲染期状态：ReactMarkdown 同步渲染、页面单实例，可避免每次渲染重建组件身份导致整棵树重挂载
+let citationSources: SourceItem[] = []
+let headingSeen: Record<string, number> = {}
+
+function nextHeadingId(text: string): string {
+  const slug = slugify(text)
+  const n = (headingSeen[slug] = (headingSeen[slug] || 0) + 1)
+  return n > 1 ? `${slug}-${n}` : slug
+}
+
+interface MarkdownComponentProps {
+  className?: string
+  children?: ReactNode
+  href?: string
+  node?: unknown
+}
+
+function CitationBadges({ nums, sources }: { nums: number[]; sources: SourceItem[] }) {
+  const scrollToSources = () => {
+    document.getElementById('sources')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+  return (
+    <span className="mx-0.5 inline-flex items-center gap-0.5 align-super">
+      {nums.map(n => {
+        const src = sources[n - 1]
+        const tip = src ? `${src.title} — ${src.domain}` : `未找到对应来源 ${n}`
+        return (
+          <button key={n} type="button" title={tip}
+            onClick={src ? scrollToSources : undefined}
+            className={`rounded px-1 py-px text-[10px] font-semibold leading-none transition-colors ${
+              src
+                ? 'border border-cyan-500/25 bg-cyan-500/15 text-cyan-400 hover:bg-cyan-500/30 hover:text-cyan-300'
+                : 'border border-slate-700 bg-slate-800/60 text-slate-500'
+            }`}>
+            {n}
+          </button>
+        )
+      })}
+    </span>
+  )
+}
+
+function HeadingComponent({ level, children }: { level: 1 | 2 | 3 | 4 | 5 | 6; children?: ReactNode }) {
+  const id = nextHeadingId(nodeToText(children))
+  const Tag = `h${level}` as 'h1' | 'h2' | 'h3' | 'h4' | 'h5' | 'h6'
+  return <Tag id={id} className="scroll-mt-20">{children}</Tag>
+}
+
+function H1(props: { children?: ReactNode }) { return <HeadingComponent level={1} {...props} /> }
+function H2(props: { children?: ReactNode }) { return <HeadingComponent level={2} {...props} /> }
+function H3(props: { children?: ReactNode }) { return <HeadingComponent level={3} {...props} /> }
+function H4(props: { children?: ReactNode }) { return <HeadingComponent level={4} {...props} /> }
+function H5(props: { children?: ReactNode }) { return <HeadingComponent level={5} {...props} /> }
+function H6(props: { children?: ReactNode }) { return <HeadingComponent level={6} {...props} /> }
+
+function AComponent({ href, children }: MarkdownComponentProps) {
+  if (href && href.startsWith('cite:')) {
+    const nums = href.slice(5).split(',').map(Number).filter(n => Number.isInteger(n) && n > 0)
+    return <CitationBadges nums={nums} sources={citationSources} />
+  }
+  return (
+    <a href={href} target="_blank" rel="noopener noreferrer"
+      className="text-cyan-400 underline decoration-cyan-500/40 underline-offset-2 transition-colors hover:text-cyan-300">
+      {children}
+    </a>
+  )
+}
+
+function CodeComponent({ className, children }: MarkdownComponentProps) {
+  const match = /language-(\w+)/.exec(className || '')
+  const inline = !match
+  return !inline && match ? (
+    <SyntaxHighlighter style={oneDark} language={match[1]} PreTag="div"
+      customStyle={{ background: '#0f172a', borderRadius: '8px', padding: '16px', fontSize: '12px', margin: '8px 0' }}>
+      {String(children).replace(/\n$/, '')}
+    </SyntaxHighlighter>
+  ) : (
+    <code className={className}>{children}</code>
+  )
+}
+
+const markdownComponents = {
+  h1: H1,
+  h2: H2,
+  h3: H3,
+  h4: H4,
+  h5: H5,
+  h6: H6,
+  a: AComponent,
+  code: CodeComponent,
+}
+
+function ReportMarkdown({ md, sources }: { md: string; sources: SourceItem[] }) {
+  citationSources = sources
+  headingSeen = {}
+
+  return (
+    <ReactMarkdown
+      remarkPlugins={[remarkGfm]}
+      urlTransform={(url) => (url.startsWith('cite:') ? url : defaultUrlTransform(url))}
+      components={markdownComponents}
+    >
+      {md}
+    </ReactMarkdown>
+  )
+}
 
 export default memo(function ReportViewer() {
   const { report, logs, currentTaskId, demoMode } = useTaskStore()
@@ -171,6 +515,19 @@ export default memo(function ReportViewer() {
   const s = report.stats || { totalSteps: report.steps.length, successSteps: 0, failedSteps: 0, duration: 0 }
   const rate = s.totalSteps > 0 ? Math.round((s.successSteps / s.totalSteps) * 100) : 100
 
+  // 结构化解析流水线：围栏兜底 → 数据时效 → 来源清单 → 免责声明 → 引用上标 → 目录
+  const rawMd = stripOuterFence(report.final_report || '')
+  const freshness = parseFreshness(rawMd)
+  const sourcesResult = parseSources(rawMd)
+  const disclaimerResult = parseDisclaimer(sourcesResult.rest)
+  const bodyMd = addCitationLinks(disclaimerResult.rest, sourcesResult.sectionText)
+  const toc = parseToc(disclaimerResult.rest)
+  const sourceItems = sourcesResult.sources?.items ?? []
+
+  const scrollToHeading = (id: string) => {
+    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }
+
   const downloadMarkdown = () => {
     const blob = new Blob([report.final_report], { type: 'text/markdown' })
     const url = URL.createObjectURL(blob)
@@ -237,41 +594,113 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
       </div>
 
       {/* Report card */}
-      <div className="bg-slate-900 border border-emerald-500/20 rounded-xl overflow-hidden">
-        <div className="flex items-center justify-between px-5 py-3 bg-emerald-500/5 border-b border-emerald-500/20">
+      <div className="bg-slate-900 border border-emerald-500/20 rounded-xl">
+        <div className="flex items-center justify-between px-5 py-3 bg-emerald-500/5 border-b border-emerald-500/20 rounded-t-xl">
           <div className="flex items-center gap-2.5">
             <CheckCircle2 className="w-5 h-5 text-emerald-400" />
             <span className="text-emerald-400 font-semibold text-sm">任务完成</span>
             <span className="text-slate-600 text-xs ml-1">— {report.summary}</span>
           </div>
         </div>
-        <div className="p-6 text-sm leading-relaxed text-slate-300 max-w-none
-          [&_h1]:text-xl [&_h1]:font-bold [&_h1]:text-slate-100 [&_h1]:mb-3
-          [&_h2]:text-lg [&_h2]:font-semibold [&_h2]:text-cyan-400 [&_h2]:mt-6 [&_h2]:mb-3
-          [&_h3]:text-base [&_h3]:font-medium [&_h3]:text-slate-200 [&_h3]:mb-2
-          [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:space-y-1 [&_li]:text-slate-400
-          [&_strong]:text-slate-200 [&_code]:text-cyan-400 [&_code]:bg-slate-800 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded [&_code]:text-xs
-          [&_table]:w-full [&_table]:text-xs [&_th]:text-left [&_th]:text-slate-400 [&_th]:font-medium [&_th]:px-2 [&_th]:py-1 [&_th]:border-b [&_th]:border-slate-800
-          [&_td]:px-2 [&_td]:py-1 [&_td]:border-b [&_td]:border-slate-800/50">
-          <ReactMarkdown
-            remarkPlugins={[remarkGfm]}
-            components={{
-              code({ className, children, ...props }) {
-                const match = /language-(\w+)/.exec(className || '')
-                const inline = !match
-                return !inline && match ? (
-                  <SyntaxHighlighter style={oneDark} language={match[1]} PreTag="div"
-                    customStyle={{ background: '#0f172a', borderRadius: '8px', padding: '16px', fontSize: '12px', margin: '8px 0' }}>
-                    {String(children).replace(/\n$/, '')}
-                  </SyntaxHighlighter>
-                ) : (
-                  <code className={className} {...props}>{children}</code>
-                )
-              }
-            }}
-          >
-            {report.final_report}
-          </ReactMarkdown>
+
+        {/* 数据时效信息卡 */}
+        {freshness && (
+          <div className="mx-4 mt-4 flex items-start gap-3 rounded-xl border border-amber-400/20 bg-amber-400/5 px-4 py-3">
+            <CalendarClock className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+            <div className="min-w-0">
+              <div className="text-xs font-semibold text-amber-300/90">数据时效</div>
+              <div className="mt-0.5 text-sm leading-relaxed text-slate-300">{freshness.text}</div>
+            </div>
+          </div>
+        )}
+
+        {/* 窄屏：顶部粘性目录 */}
+        {toc.length >= 2 && (
+          <div className="lg:hidden sticky top-4 z-20 mt-4 border-y border-slate-800/80 bg-slate-900/95 px-4 py-2.5 backdrop-blur">
+            <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-slate-500">
+              <ListTree className="h-3 w-3" /> 目录
+            </div>
+            <div className="flex gap-1.5 overflow-x-auto pb-0.5">
+              {toc.map(e => (
+                <button key={e.id} onClick={() => scrollToHeading(e.id)}
+                  className="shrink-0 rounded-md border border-slate-800 bg-slate-800/40 px-2 py-1 text-xs text-slate-400 transition-colors hover:border-cyan-500/30 hover:text-cyan-300">
+                  {e.text}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className={toc.length >= 2 ? 'grid lg:grid-cols-[14rem_1fr]' : ''}>
+          {/* 宽屏：左侧粘性目录 */}
+          {toc.length >= 2 && (
+            <aside className="sticky top-6 hidden max-h-[calc(100vh-6rem)] self-start overflow-y-auto border-r border-slate-800/70 px-4 py-4 lg:block">
+              <div className="mb-3 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-slate-500">
+                <ListTree className="h-3.5 w-3.5" /> 目录
+              </div>
+              <nav className="space-y-0.5">
+                {toc.map(e => (
+                  <button key={e.id} onClick={() => scrollToHeading(e.id)}
+                    className={`block w-full rounded-md px-2 py-1.5 text-left transition-colors hover:bg-slate-800/70 hover:text-cyan-300 ${
+                      e.level === 1
+                        ? 'text-[13px] font-medium text-slate-200'
+                        : e.level === 2
+                          ? 'pl-4 text-[13px] text-slate-400'
+                          : 'pl-7 text-xs text-slate-500'
+                    }`}>
+                    {e.text}
+                  </button>
+                ))}
+              </nav>
+            </aside>
+          )}
+
+          <div className="min-w-0 p-6 text-sm leading-relaxed text-slate-300 max-w-none
+            [&_h1]:text-xl [&_h1]:font-bold [&_h1]:text-slate-100 [&_h1]:mb-3
+            [&_h2]:text-lg [&_h2]:font-semibold [&_h2]:text-cyan-400 [&_h2]:mt-6 [&_h2]:mb-3
+            [&_h3]:text-base [&_h3]:font-medium [&_h3]:text-slate-200 [&_h3]:mb-2
+            [&_ul]:list-disc [&_ul]:pl-5 [&_ul]:space-y-1 [&_li]:text-slate-400
+            [&_strong]:text-slate-200 [&_code]:text-cyan-400 [&_code]:bg-slate-800 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded [&_code]:text-xs
+            [&_table]:w-full [&_table]:text-xs [&_th]:text-left [&_th]:text-slate-400 [&_th]:font-medium [&_th]:px-2 [&_th]:py-1 [&_th]:border-b [&_th]:border-slate-800
+            [&_td]:px-2 [&_td]:py-1 [&_td]:border-b [&_td]:border-slate-800/50">
+            <ReportMarkdown md={bodyMd} sources={sourceItems} />
+
+            {/* 参考来源结构化卡片 */}
+            {sourcesResult.sources && (
+              <section id="sources" className="mt-8 scroll-mt-20">
+                <h2 className="flex items-center gap-2 text-lg font-semibold text-cyan-400">
+                  <Quote className="h-4 w-4" /> {sourcesResult.sources.heading}
+                </h2>
+                <ol className="mt-3 space-y-2">
+                  {sourcesResult.sources.items.map((s, i) => (
+                    <li key={`${s.url}-${i}`}>
+                      <a href={s.url} target="_blank" rel="noopener noreferrer"
+                        className="group flex items-center gap-3 rounded-lg border border-slate-800 bg-slate-800/30 px-3.5 py-2.5 transition-colors hover:border-cyan-500/30 hover:bg-slate-800/60">
+                        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-cyan-500/15 text-[11px] font-semibold text-cyan-400">
+                          {i + 1}
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block truncate text-sm text-slate-200 transition-colors group-hover:text-cyan-300">{s.title}</span>
+                          <span className="mt-0.5 block truncate text-xs text-slate-500">{s.domain}</span>
+                        </span>
+                        <ExternalLink className="h-3.5 w-3.5 shrink-0 text-slate-600 transition-colors group-hover:text-cyan-400" />
+                      </a>
+                    </li>
+                  ))}
+                </ol>
+              </section>
+            )}
+
+            {/* 免责声明弱化卡片 */}
+            {disclaimerResult.disclaimer && (
+              <section className="mt-6 rounded-lg border border-slate-800/60 bg-slate-900/40 px-4 py-3">
+                <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-slate-600">
+                  <Quote className="h-3 w-3" /> 免责声明
+                </div>
+                <p className="mt-1 text-xs leading-relaxed text-slate-600">{disclaimerResult.disclaimer}</p>
+              </section>
+            )}
+          </div>
         </div>
       </div>
 

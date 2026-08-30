@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -18,6 +19,94 @@ import redis
 import redis.exceptions
 
 logger = logging.getLogger(__name__)
+
+
+# ============================================================================
+# Markdown 报告清洗（前端结构化显示前置处理）
+# ============================================================================
+
+
+def strip_outer_markdown_fence(text: str) -> str:
+    """剥离报告最外层的 Markdown 围栏（```markdown ... ``` / ``` ... ```）。
+
+    LLM 生成报告时经常把整份 Markdown 包进代码围栏，导致前端 ReactMarkdown
+    把整篇报告渲染成一个代码块（用户看到"乱码"式源码）。本函数只剥离
+    【整体包裹】的围栏：正文内部出现的代码块围栏一律保留。
+
+    支持两种形态：
+    - 全文就是围栏：```markdown\\n...\\n```；
+    - 前导标题 + 围栏主体：'# 报告\\n\\n```markdown\\n...\\n```'（LLM 常见输出），
+      前导标题（至多 3 行）原样保留。
+    仅当围栏内容占据文本绝大部分（>=70%）时才判定为整体包裹；
+    多重包裹（``` 内再套 ```）递归剥离一次。
+    """
+    t = str(text or "")
+    stripped = t.strip()
+    if not stripped:
+        return t
+
+    def _try_strip(s: str):
+        m = re.match(r"^```(?:markdown|md|text)?\s*\n(.*?)\n?```\s*$", s, re.S)
+        if not m:
+            return None
+        inner = m.group(1)
+        if not inner.strip():
+            return None
+        return inner.strip()
+
+    # 形态一：全文即围栏
+    inner = _try_strip(stripped)
+    if inner is not None:
+        return _strip_nested(inner)
+
+    # 形态二：前导标题（至多 3 行，如 '# 报告' 或 '# 报告\\n\\n'）+ 围栏主体
+    lines = stripped.split("\n")
+    for lead in (0, 1, 2, 3):
+        # 取前 lead 行作为前导，其余作为候选围栏
+        if lead == 0:
+            continue
+        body = "\n".join(lines[lead:]).strip()
+        inner2 = _try_strip(body)
+        if inner2 is not None:
+            # 围栏内容须占全文主体（防误剥短围栏）
+            if len(inner2) >= len(stripped) * 0.7:
+                head = "\n".join(lines[:lead]).strip()
+                return (head + "\n\n" if head else "") + _strip_nested(inner2)
+
+    # 形态三：LLM 输出未闭合的外层围栏（```markdown 开头但全文无闭合 ```）。
+    # 表现为全文第一个围栏标记在前 3 行内、语言为 markdown/md/空，且全文
+    # 围栏计数为奇数（未闭合）——剥掉起始围栏行，其余原样保留。
+    fence_lines = [i for i, ln in enumerate(lines) if re.match(r"^\s*```\w*\s*$", ln)]
+    if fence_lines and fence_lines[0] <= 3:
+        first = lines[fence_lines[0]].strip()
+        lang = first[3:].strip().lower()
+        if lang in ("", "markdown", "md", "text") and len(fence_lines) % 2 == 1:
+            head = "\n".join(lines[:fence_lines[0]]).strip()
+            tail = "\n".join(lines[fence_lines[0] + 1:]).strip()
+            return (head + "\n\n" if head else "") + tail
+
+    # 形态四：报告【开头】被 markdown 围栏包裹，闭合围栏出现在文中较前位置，
+    # 其后还有正文（LLM 常见：```markdown 开头 + 中部 ``` 闭合 + 后续正常正文）。
+    # 只移除这一对围栏标记行，围栏内内容与后续正文全部原样保留。
+    if fence_lines and fence_lines[0] <= 3:
+        first = lines[fence_lines[0]].strip()
+        lang = first[3:].strip().lower()
+        if lang in ("", "markdown", "md", "text") and len(fence_lines) >= 2:
+            f0 = fence_lines[0]
+            f1 = fence_lines[1]
+            if f1 - f0 >= 3 and f1 < len(lines) * 0.9:
+                kept = lines[:f0] + lines[f0 + 1:f1] + lines[f1 + 1:]
+                return "\n".join(kept).strip()
+    return t
+
+
+def _strip_nested(s: str) -> str:
+    """围栏内再套围栏时递归剥离一次。"""
+    m = re.match(r"^```(?:markdown|md|text)?\s*\n(.*?)\n?```\s*$", s, re.S)
+    if not m:
+        return s
+    inner = m.group(1).strip()
+    return inner if inner else s
 
 
 # ============================================================================

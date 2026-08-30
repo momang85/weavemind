@@ -1136,6 +1136,15 @@ def _task_deliverables(tid: str) -> list[dict]:
         files.sort(key=lambda x: x["name"])
     return files
 
+def _clean_report_text(report: str) -> str:
+    """报告文本清洗：剥离 LLM 常见的整体 Markdown 围栏（前端/分享页结构化显示）。"""
+    try:
+        from common import strip_outer_markdown_fence
+        return strip_outer_markdown_fence(str(report or ""))
+    except Exception:
+        return str(report or "")
+
+
 def _get_task_report_data(tid: str) -> dict | None:
     """取任务的分享数据（报告正文/目标/状态/时间）：优先内存结果，其次 SQLite。
     服务重启后 _task_results 为空，仍可从 agents.db 的 task_history.report 恢复。"""
@@ -1148,7 +1157,7 @@ def _get_task_report_data(tid: str) -> dict | None:
                 "task_id": tid,
                 "goal": str(data.get("goal") or ""),
                 "status": str(data.get("status") or ""),
-                "report": report,
+                "report": _clean_report_text(report),
                 "created_at": str(data.get("created_at") or ""),
             }
     try:
@@ -1160,7 +1169,9 @@ def _get_task_report_data(tid: str) -> dict | None:
         ).fetchone()
         db.close()
         if row and str(row["report"] or "").strip():
-            return dict(row)
+            out = dict(row)
+            out["report"] = _clean_report_text(out.get("report") or "")
+            return out
     except Exception:
         pass
     return None

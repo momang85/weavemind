@@ -4790,6 +4790,16 @@ if __name__ == "__main__":
             best = _pick(pool)
             if best:
                 logger.info("Final report: deliverable from step content (%d chars)", len(best))
+                # 剥离 LLM 常见的整体 Markdown 围栏（前端结构化显示前置处理）
+                try:
+                    from common import strip_outer_markdown_fence
+                    cleaned = strip_outer_markdown_fence(best)
+                    if cleaned != best:
+                        logger.info("Report outer markdown fence stripped (%d -> %d chars)",
+                                    len(best), len(cleaned))
+                    best = cleaned
+                except Exception:
+                    pass
                 return best
         return ""
 

@@ -48,6 +48,65 @@ def make_fake_client() -> MessagingClient:
 
 
 # ============================================================================
+# Test 0: Markdown 围栏剥离（报告前端结构化显示前置处理）
+# ============================================================================
+
+
+def test_strip_outer_markdown_fence() -> None:
+    from common import strip_outer_markdown_fence
+
+    # 整体 markdown 围栏 → 剥离
+    src = "```markdown\n# 标题\n\n正文内容\n```"
+    out = strip_outer_markdown_fence(src)
+    assert out == "# 标题\n\n正文内容"
+    # 无语言标记的围栏 → 剥离
+    out2 = strip_outer_markdown_fence("```\n# 标题2\n```")
+    assert out2 == "# 标题2"
+    # 正文内部代码块 → 保留
+    body = "# 标题\n\n```python\nprint(1)\n```\n\n结尾"
+    assert strip_outer_markdown_fence(body) == body
+    # 无围栏 → 原样
+    plain = "# 普通报告\n没有围栏"
+    assert strip_outer_markdown_fence(plain) == plain
+    # 多重包裹 → 递归剥离一次
+    multi = "```markdown\n```markdown\n# 内层\n```\n```"
+    out3 = strip_outer_markdown_fence(multi)
+    assert out3 == "# 内层"
+    # 前导标题 + 围栏主体（LLM 常见输出：# 报告\n\n```markdown...```）
+    lead = "# 报告\n\n```markdown\n# 标题\n\n正文\n```"
+    out4 = strip_outer_markdown_fence(lead)
+    assert out4 == "# 报告\n\n# 标题\n\n正文", repr(out4)
+    # 短围栏（内容 <70% 全文）不剥离，防误剥
+    mixed = "# 报告\n\n```markdown\n很短\n```\n\n# 后续内容\n长文长文长文长文长文长文长文长文"
+    assert strip_outer_markdown_fence(mixed) == mixed
+    # 形态三：未闭合的外层围栏（LLM 常见：```markdown 开头但全文无闭合）
+    unclosed = "# 报告\n\n```markdown\n# 标题\n\n正文内容\n表格\n"
+    out5 = strip_outer_markdown_fence(unclosed)
+    assert out5 == "# 报告\n\n# 标题\n\n正文内容\n表格", repr(out5)
+    # 形态三：前导标题 + 未闭合围栏（无前导）
+    out6 = strip_outer_markdown_fence("```markdown\n# 标题\n正文\n")
+    assert out6 == "# 标题\n正文", repr(out6)
+    # 形态四：开头包裹围栏对（```markdown 开 + 中部 ``` 闭 + 后续正文）
+    wrapped = ("# 报告\n\n```markdown\n# 标题\n\n正文段落\n\n```\n\n"
+               "## 后续章节\n正常内容\n")
+    out7 = strip_outer_markdown_fence(wrapped)
+    assert "# 标题" in out7 and "正文段落" in out7 and "后续章节" in out7, repr(out7)
+    assert "```" not in out7, repr(out7)
+    assert out7.startswith("# 报告"), repr(out7)
+    # 形态四：围栏内内容必须保留（防误删正文）
+    wrapped2 = "# 报告\n\n```markdown\n## 数据时效\n- 数据截至 2026-08-30\n```\n\n## 末尾\n"
+    out8 = strip_outer_markdown_fence(wrapped2)
+    assert "数据时效" in out8 and "2026-08-30" in out8 and "末尾" in out8, repr(out8)
+    # 正文内有配对的内部代码块（偶数围栏）→ 不触发形态三
+    inner_code = "# 报告\n\n```python\nprint(1)\n```\n\n结尾"
+    assert strip_outer_markdown_fence(inner_code) == inner_code
+    # 空/异常 → 原样
+    assert strip_outer_markdown_fence("") == ""
+    assert strip_outer_markdown_fence("```markdown") == "```markdown"
+    assert strip_outer_markdown_fence("```markdown\n```") == "```markdown\n```"
+
+
+# ============================================================================
 # Test 1: 数据结构
 # ============================================================================
 
