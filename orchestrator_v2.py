@@ -7,6 +7,7 @@ This is the active orchestrator (legacy orchestrator.py was removed in the archi
 """
 
 import csv
+import errno
 import hashlib
 import json
 import logging
@@ -31,6 +32,13 @@ from workspace import (
 
 from common import AgentRegistry, MessagingClient, RedisAgentRegistry
 from llm_client import LLMClient, get_usage_stats
+from checkpointer import (
+    clear_checkpoint,
+    goal_hash as _checkpoint_goal_hash,
+    is_task_completed,
+    load_checkpoint,
+    save_checkpoint,
+)
 
 # 贯通测试用：canvas 像素指纹（采样哈希），用于判断游戏画面是否仍在变化
 _FINGERPRINT_JS = """() => {
@@ -2977,6 +2985,194 @@ class OrchestratorV2:
         except Exception as exc:
             logger.warning("Full state push failed: %s", str(exc)[:120])
 
+    # ------------------------------------------------------------------
+    # V1.2 checkpointer：断点续跑（对标 LangGraph checkpointer）
+    # ------------------------------------------------------------------
+    def _mark_task_running(self, task_id: str) -> None:
+        """Redis 进行中标记（含 pid，供崩溃后判断旧标记是否存活）。"""
+        try:
+            self._redis.set(
+                f"task_running:{task_id}",
+                json.dumps(
+                    {"pid": os.getpid(), "started": self._now_iso()},
+                    ensure_ascii=False,
+                ),
+                ex=86400,
+            )
+        except Exception:
+            pass
+
+    def _clear_task_running(self, task_id: str) -> None:
+        try:
+            self._redis.delete(f"task_running:{task_id}")
+        except Exception:
+            pass
+
+    def _task_is_running(self, task_id: str) -> bool:
+        """进行中标记存在且其 pid 仍存活 → True；否则 False（允许恢复）。"""
+        try:
+            raw = self._redis.get(f"task_running:{task_id}")
+        except Exception:
+            return False
+        if not raw:
+            return False
+        try:
+            pid = int((json.loads(raw) or {}).get("pid") or 0)
+        except Exception:
+            return True
+        if pid <= 0:
+            return True
+        try:
+            os.kill(pid, 0)
+        except OSError as exc:
+            # Windows 上进程不存在抛 WinError 87（ERROR_INVALID_PARAMETER），
+            # POSIX 上是 ESRCH；两者都视为"旧标记已死"，允许恢复
+            if exc.errno == errno.ESRCH or getattr(exc, "winerror", None) == 87:
+                return False  # 进程已不存在 → 旧标记失效，允许恢复
+            return True  # EPERM 等：进程存活但无权限探测
+        except Exception:
+            return True
+        return True
+
+    def _checkpoint_payload(
+        self, task_id: str, goal: str, project: str,
+        all_steps: list[dict], completed_all: dict,
+        current_steps: list[dict] | None = None,
+        pending_steps: list[dict] | None = None,
+        phase: str = "executing", iteration: int = 0,
+        has_failure: bool = False, redo_rounds: int = 0,
+        best_report: str = "", gate_checked: bool = False,
+        simple: bool = False, used_template: bool = False,
+    ) -> dict:
+        """组装 checkpoint 内容（steps 为全部步骤，含 result/status）。"""
+        completed_all = completed_all or {}
+
+        def _with_result(step: dict) -> dict:
+            s = dict(step)
+            r = dict(completed_all.get(s.get("step_id"), {}) or {})
+            s["result"] = r
+            s["status"] = r.get("status", "")
+            return s
+
+        return {
+            "task_id": task_id,
+            "goal": goal,
+            "goal_hash": _checkpoint_goal_hash(goal),
+            "project": project,
+            "steps": [_with_result(s) for s in (all_steps or [])],
+            "completed_all": {
+                str(k): dict(v) for k, v in completed_all.items()
+            },
+            "current_steps": [_with_result(s) for s in (current_steps or [])],
+            "pending_steps": [_with_result(s) for s in (pending_steps or [])],
+            "phase": phase,
+            "iteration": int(iteration or 0),
+            "has_failure": bool(has_failure),
+            "redo_rounds": int(redo_rounds or 0),
+            "best_report": str(best_report or ""),
+            "gate_checked": bool(gate_checked),
+            "simple": bool(simple),
+            "used_template": bool(used_template),
+            "status": "RUNNING",
+            "saved_at": self._now_iso(),
+        }
+
+    def _save_checkpoint(self, task_id: str, payload: dict) -> None:
+        """保存 checkpoint（内部已静默降级；此处再兜一层）。"""
+        try:
+            save_checkpoint(task_id, payload)
+        except Exception as exc:
+            logger.debug("checkpoint save failed for %s: %s", task_id, str(exc)[:100])
+
+    def _resume_from_checkpoint(
+        self, task_id: str, goal: str, project: str | None = None,
+    ) -> dict | None:
+        """从 checkpoint 恢复初始状态；不适用（无 checkpoint/已完成/目标不一致）返回 None。
+
+        返回状态：steps=待执行步骤（SUCCESS 直接复用，失败/未完成保留重试），
+        all_steps=已累积步骤（待重试步骤先摘出，执行后以新结果追加，避免重复），
+        completed_all/phase/iteration 等供 run() 直接初始化。
+        """
+        try:
+            cp = load_checkpoint(task_id)
+        except Exception as exc:
+            logger.warning("checkpoint load failed for %s: %s", task_id, str(exc)[:100])
+            return None
+        if not isinstance(cp, dict):
+            return None
+        # 目标一致性：goal 哈希不同 → 忽略（防复用旧任务计划）
+        cp_hash = cp.get("goal_hash")
+        if cp_hash:
+            if str(cp_hash) != _checkpoint_goal_hash(goal):
+                logger.warning(
+                    "Checkpoint goal mismatch for %s, ignoring", task_id,
+                )
+                return None
+        elif str(cp.get("goal") or "") != str(goal or ""):
+            logger.warning(
+                "Checkpoint goal mismatch for %s, ignoring", task_id,
+            )
+            return None
+        # 已完成任务不恢复
+        if is_task_completed(task_id, cp):
+            logger.info("Checkpoint for %s already completed, ignoring", task_id)
+            return None
+
+        phase = str(cp.get("phase") or "executing")
+        if phase not in ("executing", "reflecting", "finalizing"):
+            phase = "executing"
+
+        def _pending(candidate) -> list[dict]:
+            if not isinstance(candidate, list):
+                return []
+            return [
+                s for s in candidate
+                if (s.get("result") or {}).get("status") != "SUCCESS"
+            ]
+
+        raw_pending = cp.get("pending_steps")
+        if isinstance(raw_pending, list):
+            # 显式 pending_steps（可为空）以 checkpoint 为准
+            pending = _pending(raw_pending)
+        else:
+            # 兜底：旧格式 checkpoint 无 pending_steps 时，过滤当前轮（或全部）步骤
+            active = cp.get("current_steps")
+            if not isinstance(active, list) or not active:
+                active = cp.get("steps") or []
+            pending = _pending(active)
+
+        all_steps = cp.get("steps")
+        if not isinstance(all_steps, list):
+            all_steps = []
+        completed_all = cp.get("completed_all")
+        if not isinstance(completed_all, dict):
+            completed_all = {
+                str(s.get("step_id")): dict(s.get("result") or {})
+                for s in all_steps if s.get("step_id")
+            }
+        pending_ids = {
+            str(s.get("step_id")) for s in pending if s.get("step_id")
+        }
+        # 待重试步骤从累积列表摘出：执行后以新结果追加，避免 all_steps 重复
+        prior = [
+            s for s in all_steps
+            if str(s.get("step_id")) not in pending_ids
+        ]
+        return {
+            "steps": pending,
+            "all_steps": prior,
+            "completed_all": completed_all,
+            "phase": phase,
+            "iteration": int(cp.get("iteration") or 0),
+            "has_failure": bool(cp.get("has_failure") or False),
+            "redo_rounds": int(cp.get("redo_rounds") or 0),
+            "best_report": str(cp.get("best_report") or ""),
+            "gate_checked": bool(cp.get("gate_checked") or False),
+            "simple": bool(cp.get("simple") or False),
+            "used_template": bool(cp.get("used_template") or False),
+            "skip_execute": not pending,
+        }
+
     def _replan_step(self, goal: str, step: dict, error: str, task_id: str) -> dict | None:
         """步骤失败后，让 LLM 提出一个替代步骤（方案 A：同目标换实现）。
         失败诊断 + 结构化源优先：金融任务搜索/抓取失败 → 先转向已注入的
@@ -5333,16 +5529,36 @@ print("charts generated")
         if not hasattr(self, "_task_user_ids"):
             self._task_user_ids = {}
         self._task_user_ids[task_id] = str(user_id or "")
-        # 每任务独立成果文件夹：清空本项目目录与旧交付包，保证只含本次产物
-        ensure_task_workspace(task_id, project)
-        self._cleanup_project_workspace(task_id, project)
-        ws_dir = task_workspace(task_id, project)
+        # V1.2 checkpointer：进程崩溃后从最后完成步骤续跑。
+        # 仅当无进行中标记（或旧标记 pid 已死）且 goal 哈希/终态校验通过时恢复；
+        # 恢复时跳过工作区清理，保护已有成果文件。
+        resumed = None
         try:
-            for p in ws_dir.glob("*.zip"):
-                p.unlink(missing_ok=True)
+            if not self._task_is_running(task_id):
+                resumed = self._resume_from_checkpoint(task_id, goal, project)
         except Exception as exc:
-            logger.warning("Old zip cleanup failed for %s: %s", task_id, exc)
-        logger.info("Task %s: %s", task_id, goal[:80])
+            logger.warning(
+                "Checkpoint resume check failed for %s: %s",
+                task_id, str(exc)[:120],
+            )
+            resumed = None
+        self._mark_task_running(task_id)
+        if resumed is None:
+            # 每任务独立成果文件夹：清空本项目目录与旧交付包，保证只含本次产物
+            ensure_task_workspace(task_id, project)
+            self._cleanup_project_workspace(task_id, project)
+            ws_dir = task_workspace(task_id, project)
+            try:
+                for p in ws_dir.glob("*.zip"):
+                    p.unlink(missing_ok=True)
+            except Exception as exc:
+                logger.warning("Old zip cleanup failed for %s: %s", task_id, exc)
+            logger.info("Task %s: %s", task_id, goal[:80])
+        else:
+            logger.info(
+                "Task %s resumed from checkpoint: phase=%s pending_steps=%d",
+                task_id, resumed.get("phase"), len(resumed.get("steps") or []),
+            )
 
         # 记忆注入：模板路由与 LLM 规划都先查历史经验（观众可见 memory 日志）
         memory_context = self._inject_memory_context(goal, task_id)
@@ -5371,6 +5587,7 @@ print("charts generated")
                 push_progress(self._messaging, task_id, "task_complete",
                               {"status": "FAILED", "summary": _llm_msg})
                 logger.error("Task %s aborted: %s", task_id, _llm_msg)
+                self._clear_task_running(task_id)
                 self._notify_done_async(task_id, goal, "FAILED", _llm_msg)
                 return {"task_id": task_id, "status": "FAILED",
                         "steps": [], "report": _llm_msg}
@@ -5387,83 +5604,51 @@ print("charts generated")
             # 单端点不足照常运行并在 llm_degraded 预置余额警告
             _balance_ok, _balance_msg = self._precheck_llm_balance(task_id)
             if not _balance_ok:
+                self._clear_task_running(task_id)
                 self._notify_done_async(task_id, goal, "FAILED", _balance_msg)
                 return {"task_id": task_id, "status": "FAILED",
                         "steps": [], "report": _balance_msg, "reason": _balance_msg}
         except Exception:
             pass
 
-        # 1. Plan（模板步骤直接采用，否则 LLM 规划）
+        # 1. Plan（模板步骤直接采用，否则 LLM 规划）——恢复路径跳过规划
         used_template = False
-        if template_steps:
-            steps = self._normalize_steps(template_steps)
-            steps = self._ensure_report_step(steps, task_id)
-            used_template = True
-        else:
-            routed = self._route_template(goal, task_id)
-            if routed:
-                push_progress(self._messaging, task_id, "log",
-                              {"type": "plan", "agent": "orchestrator",
-                               "message": "Plan: routed to deterministic template (LLM routing)",
-                               "timestamp": self._now_iso()})
-                steps = self._normalize_steps(routed)
+        if resumed is None:
+            if template_steps:
+                steps = self._normalize_steps(template_steps)
                 steps = self._ensure_report_step(steps, task_id)
                 used_template = True
             else:
-                try:
-                    from llm_client import LLMUnavailableError
-                    steps = self._plan(goal, task_id, context, memory_context)
-                except LLMUnavailableError as exc:
-                    push_progress(self._messaging, task_id, "warning",
-                                  {"type": "llm", "agent": "orchestrator",
-                                   "message": str(exc), "timestamp": self._now_iso()})
-                    push_progress(self._messaging, task_id, "task_complete",
-                                  {"status": "FAILED", "summary": str(exc)})
-                    logger.error("Task %s aborted: %s", task_id, exc)
-                    self._notify_done_async(task_id, goal, "FAILED", str(exc))
-                    return {"task_id": task_id, "status": "FAILED",
-                            "steps": [], "report": str(exc)}
-        # 模板路径：把历史经验作为额外上下文注入首步骤，让框架可复用
-        if memory_context and used_template and steps:
-            steps[0]["instruction"] = (
-                f"历史经验（来自相似任务，可复用框架/数据/结论）：\n"
-                f"{memory_context[:1000]}\n\n原始指令：{steps[0]['instruction']}"
-            )
-        steps = self._wire_report_deps(steps)
-        steps = self._wire_search_fetch_deps(steps)
-        steps = self._ensure_package_step(steps)
-        steps = self._break_cycles(steps)
-        steps = self._inject_goal_into_steps(steps, goal)
-        steps = self._inject_skills(steps, goal)
-        steps = self._enforce_no_web_scrape_code(steps, goal, task_id)
-        if not steps:
-            push_progress(self._messaging, task_id, "task_complete",
-                          {"status": "FAILED", "summary": "Planning failed"})
-            self._notify_done_async(task_id, goal, "FAILED", "Planning failed")
-            return {"task_id": task_id, "status": "FAILED", "steps": [], "report": "No plan generated"}
-
-        push_progress(self._messaging, task_id, "plan_update",
-                      {"steps": steps})
-
-        # 计划确认阶段（auto_run=False 时等待用户编辑/确认）
-        if not auto_run and not template_steps:
-            self._messaging.publish("orchestrator:response", {
-                "task_id": task_id,
-                "status": "AWAITING_CONFIRM",
-                "steps": steps,
-                "goal": goal,
-                "revision": False,
-            })
-            confirmed = self._wait_plan_confirm(task_id, steps)
-            if confirmed is None:
-                push_progress(self._messaging, task_id, "task_complete",
-                              {"status": "FAILED", "summary": "Plan not confirmed, task cancelled"})
-                self._notify_done_async(
-                    task_id, goal, "FAILED", "Plan not confirmed, task cancelled",
+                routed = self._route_template(goal, task_id)
+                if routed:
+                    push_progress(self._messaging, task_id, "log",
+                                  {"type": "plan", "agent": "orchestrator",
+                                   "message": "Plan: routed to deterministic template (LLM routing)",
+                                   "timestamp": self._now_iso()})
+                    steps = self._normalize_steps(routed)
+                    steps = self._ensure_report_step(steps, task_id)
+                    used_template = True
+                else:
+                    try:
+                        from llm_client import LLMUnavailableError
+                        steps = self._plan(goal, task_id, context, memory_context)
+                    except LLMUnavailableError as exc:
+                        push_progress(self._messaging, task_id, "warning",
+                                      {"type": "llm", "agent": "orchestrator",
+                                       "message": str(exc), "timestamp": self._now_iso()})
+                        push_progress(self._messaging, task_id, "task_complete",
+                                      {"status": "FAILED", "summary": str(exc)})
+                        logger.error("Task %s aborted: %s", task_id, exc)
+                        self._clear_task_running(task_id)
+                        self._notify_done_async(task_id, goal, "FAILED", str(exc))
+                        return {"task_id": task_id, "status": "FAILED",
+                                "steps": [], "report": str(exc)}
+            # 模板路径：把历史经验作为额外上下文注入首步骤，让框架可复用
+            if memory_context and used_template and steps:
+                steps[0]["instruction"] = (
+                    f"历史经验（来自相似任务，可复用框架/数据/结论）：\n"
+                    f"{memory_context[:1000]}\n\n原始指令：{steps[0]['instruction']}"
                 )
-                return {"task_id": task_id, "status": "FAILED", "steps": [],
-                        "report": "Plan not confirmed"}
-            steps = confirmed
             steps = self._wire_report_deps(steps)
             steps = self._wire_search_fetch_deps(steps)
             steps = self._ensure_package_step(steps)
@@ -5473,55 +5658,119 @@ print("charts generated")
             steps = self._enforce_no_web_scrape_code(steps, goal, task_id)
             if not steps:
                 push_progress(self._messaging, task_id, "task_complete",
-                              {"status": "FAILED", "summary": "Empty plan confirmed, task cancelled"})
-                self._notify_done_async(
-                    task_id, goal, "FAILED", "Empty plan confirmed, task cancelled",
-                )
-                return {"task_id": task_id, "status": "FAILED", "steps": [],
-                        "report": "Empty plan confirmed"}
-            # 确认后立即把状态从 AWAITING_CONFIRM 切到 RUNNING：
-            # 否则前端会一直读到 AWAITING_CONFIRM，确认模块反复弹出
-            self._messaging.publish("orchestrator:response", {
-                "task_id": task_id,
-                "status": "RUNNING",
-                "steps": steps,
-                "goal": goal,
-            })
-            push_progress(self._messaging, task_id, "plan_update", {"steps": steps})
+                              {"status": "FAILED", "summary": "Planning failed"})
+                self._clear_task_running(task_id)
+                self._notify_done_async(task_id, goal, "FAILED", "Planning failed")
+                return {"task_id": task_id, "status": "FAILED", "steps": [], "report": "No plan generated"}
 
-        # 简单任务判定：只含"生成+报告+打包"的直达型任务启用快速路径，
-        # 复杂任务（搜索/数据管道/多轮代码等）保持原逻辑不变。
-        simple = self._is_simple_task(steps)
-        with self._task_starts_lock:
-            self._task_simple[task_id] = simple
-        if simple:
-            push_progress(self._messaging, task_id, "log",
-                          {"type": "info", "agent": "orchestrator",
-                           "message": "Simple task: fast path enabled (skip TDD/review/reflection, early LLM failover)",
-                           "timestamp": self._now_iso()})
+            push_progress(self._messaging, task_id, "plan_update",
+                          {"steps": steps})
 
-        # 结构化数据源预载：financial → 东方财富/SEC；crypto/macro/news →
-        # 对应新适配器（若命中，搜索仅作补充）
-        preloaded = self._structured_data_preload(task_id, goal, project)
-        # B 方案：已预载结构化行情数据时，data_analyzer 替换为 content_summary，
-        # 让下游步骤直接消费 structured_data.json（图表仍由数据驱动兜底渲染）
-        steps = self._reduce_steps_for_structured(task_id, steps, preloaded)
+            # 计划确认阶段（auto_run=False 时等待用户编辑/确认）
+            if not auto_run and not template_steps:
+                self._messaging.publish("orchestrator:response", {
+                    "task_id": task_id,
+                    "status": "AWAITING_CONFIRM",
+                    "steps": steps,
+                    "goal": goal,
+                    "revision": False,
+                })
+                confirmed = self._wait_plan_confirm(task_id, steps)
+                if confirmed is None:
+                    push_progress(self._messaging, task_id, "task_complete",
+                                  {"status": "FAILED", "summary": "Plan not confirmed, task cancelled"})
+                    self._clear_task_running(task_id)
+                    self._notify_done_async(
+                        task_id, goal, "FAILED", "Plan not confirmed, task cancelled",
+                    )
+                    return {"task_id": task_id, "status": "FAILED", "steps": [],
+                            "report": "Plan not confirmed"}
+                steps = confirmed
+                steps = self._wire_report_deps(steps)
+                steps = self._wire_search_fetch_deps(steps)
+                steps = self._ensure_package_step(steps)
+                steps = self._break_cycles(steps)
+                steps = self._inject_goal_into_steps(steps, goal)
+                steps = self._inject_skills(steps, goal)
+                steps = self._enforce_no_web_scrape_code(steps, goal, task_id)
+                if not steps:
+                    push_progress(self._messaging, task_id, "task_complete",
+                                  {"status": "FAILED", "summary": "Empty plan confirmed, task cancelled"})
+                    self._clear_task_running(task_id)
+                    self._notify_done_async(
+                        task_id, goal, "FAILED", "Empty plan confirmed, task cancelled",
+                    )
+                    return {"task_id": task_id, "status": "FAILED", "steps": [],
+                            "report": "Empty plan confirmed"}
+                # 确认后立即把状态从 AWAITING_CONFIRM 切到 RUNNING：
+                # 否则前端会一直读到 AWAITING_CONFIRM，确认模块反复弹出
+                self._messaging.publish("orchestrator:response", {
+                    "task_id": task_id,
+                    "status": "RUNNING",
+                    "steps": steps,
+                    "goal": goal,
+                })
+                push_progress(self._messaging, task_id, "plan_update", {"steps": steps})
+
+            # 简单任务判定：只含"生成+报告+打包"的直达型任务启用快速路径，
+            # 复杂任务（搜索/数据管道/多轮代码等）保持原逻辑不变。
+            simple = self._is_simple_task(steps)
+            with self._task_starts_lock:
+                self._task_simple[task_id] = simple
+            if simple:
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "info", "agent": "orchestrator",
+                               "message": "Simple task: fast path enabled (skip TDD/review/reflection, early LLM failover)",
+                               "timestamp": self._now_iso()})
+
+            # 结构化数据源预载：financial → 东方财富/SEC；crypto/macro/news →
+            # 对应新适配器（若命中，搜索仅作补充）
+            preloaded = self._structured_data_preload(task_id, goal, project)
+            # B 方案：已预载结构化行情数据时，data_analyzer 替换为 content_summary，
+            # 让下游步骤直接消费 structured_data.json（图表仍由数据驱动兜底渲染）
+            steps = self._reduce_steps_for_structured(task_id, steps, preloaded)
+        else:
+            # 恢复路径：直接用 checkpoint 中的待执行步骤与历史标记
+            steps = list(resumed.get("steps") or [])
+            used_template = bool(resumed.get("used_template"))
+            simple = bool(resumed.get("simple"))
+            with self._task_starts_lock:
+                self._task_simple[task_id] = simple
 
         # 2..N. 执行 + 自主迭代（执行 → 验收评审 → 追加步骤，直到通过或达到上限）
-        all_steps: list[dict] = []
-        completed_all: dict = {}
-        has_failure = False
-        iteration = 0
-        redo_rounds = 0
-        skip_execute = False
-        gate_checked = False
+        if resumed is not None:
+            all_steps = list(resumed.get("all_steps") or [])
+            completed_all = dict(resumed.get("completed_all") or {})
+            has_failure = bool(resumed.get("has_failure"))
+            iteration = int(resumed.get("iteration") or 0)
+            redo_rounds = int(resumed.get("redo_rounds") or 0)
+            skip_execute = bool(resumed.get("skip_execute"))
+            gate_checked = bool(resumed.get("gate_checked"))
+            best_report = str(resumed.get("best_report") or "")
+            last_steps = []
+            last_results: list[dict] = []
+            # 恢复后把全量状态推给前端（web_ui 内存态在进程重启后已丢失）
+            try:
+                self._publish_full_state(task_id, goal, all_steps, completed_all)
+            except Exception:
+                pass
+        else:
+            all_steps: list[dict] = []
+            completed_all: dict = {}
+            has_failure = False
+            iteration = 0
+            redo_rounds = 0
+            skip_execute = False
+            gate_checked = False
+            last_steps = steps
+            last_results: list[dict] = []
+            best_report = ""
         # P0-1：反思 LLM 不可用标记（每次任务重置）
         self._reflection_llm_unavailable = ""
-        last_steps = steps
-        last_results: list[dict] = []
-        best_report = ""
 
         while True:
+            if resumed is not None and resumed.get("phase") == "finalizing":
+                break
             if not skip_execute:
                 iter_results, iter_failed = self._execute_steps(steps, task_id, goal)
                 has_failure = has_failure or iter_failed
@@ -5536,6 +5785,19 @@ print("charts generated")
                 if len(cand) > len(best_report):
                     best_report = cand
                 self._publish_full_state(task_id, goal, all_steps, completed_all)
+                # V1.2 checkpoint：每轮执行完成后保存（含全部步骤/结果/迭代轮次）
+                self._save_checkpoint(task_id, self._checkpoint_payload(
+                    task_id, goal, project, all_steps, completed_all,
+                    current_steps=steps,
+                    pending_steps=[
+                        s for s in steps
+                        if completed_all.get(s["step_id"], {}).get("status") != "SUCCESS"
+                    ],
+                    phase="executing", iteration=iteration,
+                    has_failure=has_failure, redo_rounds=redo_rounds,
+                    best_report=best_report, gate_checked=gate_checked,
+                    simple=simple, used_template=used_template,
+                ))
             skip_execute = False
 
             if has_failure or self._max_iterations <= 0 or iteration >= self._max_iterations:
@@ -5744,6 +6006,15 @@ print("charts generated")
                         if len(cand) > len(best_report):
                             best_report = cand
                         self._publish_full_state(task_id, goal, all_steps, completed_all)
+                        # V1.2 checkpoint：反思单步重做后保存（继续反思轮）
+                        self._save_checkpoint(task_id, self._checkpoint_payload(
+                            task_id, goal, project, all_steps, completed_all,
+                            current_steps=[], pending_steps=[], phase="reflecting",
+                            iteration=iteration, has_failure=has_failure,
+                            redo_rounds=redo_rounds, best_report=best_report,
+                            gate_checked=gate_checked, simple=simple,
+                            used_template=used_template,
+                        ))
                         skip_execute = True  # 跳过整轮重跑，直接进入下一轮反思
                         continue
                 push_progress(self._messaging, task_id, "log",
@@ -5780,12 +6051,30 @@ print("charts generated")
             steps = self._break_cycles(steps)
             steps = self._inject_goal_into_steps(steps, goal)
             steps = self._inject_skills(steps, goal)
+            # V1.2 checkpoint：反思产出下一轮步骤后保存（崩溃后从新轮开始）
+            self._save_checkpoint(task_id, self._checkpoint_payload(
+                task_id, goal, project, all_steps, completed_all,
+                current_steps=steps, pending_steps=steps, phase="reflecting",
+                iteration=iteration, has_failure=has_failure,
+                redo_rounds=redo_rounds, best_report=best_report,
+                gate_checked=gate_checked, simple=simple,
+                used_template=used_template,
+            ))
             push_progress(self._messaging, task_id, "log",
                           {"type": "iteration", "agent": "orchestrator",
                            "message": f"Iteration {iteration}: closing {len(gaps)} gaps with {len(steps)} steps",
                            "timestamp": self._now_iso()})
             push_progress(self._messaging, task_id, "plan_update", {"steps": steps})
 
+        # V1.2 checkpoint：收尾前保存 finalizing 阶段（崩溃后直接跳到交付）
+        self._save_checkpoint(task_id, self._checkpoint_payload(
+            task_id, goal, project, all_steps, completed_all,
+            current_steps=[], pending_steps=[], phase="finalizing",
+            iteration=iteration, has_failure=has_failure,
+            redo_rounds=redo_rounds, best_report=best_report,
+            gate_checked=gate_checked, simple=simple,
+            used_template=used_template,
+        ))
         delivery, e2e_results = self._build_delivery_summary(task_id, goal, all_steps, completed_all)
         # 代码交付守门：任务要求生成代码，但最终交付包没有 HTML/PY/JS 文件
         # （例如步骤被降级成文本摘要）→ 视为贯通测试失败，进入修复轮；
@@ -5925,6 +6214,10 @@ print("charts generated")
                 self._consolidate_template(goal, all_steps, task_id=task_id)
 
         # 5. Complete
+        # V1.2 checkpointer：最终交付前清理断点与进行中标记，
+        # 避免已完成任务被启动扫描误恢复
+        clear_checkpoint(task_id)
+        self._clear_task_running(task_id)
         ok_count = sum(1 for r in completed_all.values() if r.get("status") == "SUCCESS")
         push_progress(self._messaging, task_id, "task_complete",
                       {"status": overall,
