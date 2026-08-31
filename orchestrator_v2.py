@@ -110,6 +110,19 @@ _REPORT_FORMAT_REQUIREMENTS = (
 # 防止报告"抄产物"把落盘的 index.html 等源码原文混入报告 prompt。
 _ARTIFACT_TEXT_EXTENSIONS = {".md", ".txt", ".csv", ".json"}
 
+# make_charts 语义图 → chart_manifest.json 回填时的文件名推断关键词
+# （中文语义 + 英文 token；无 chart_data.json 规格，section_hint 保持为空）
+_SEMANTIC_CHART_KEYWORDS = {
+    "entity_frequency.png": ["主体提及频率", "entity"],
+    "financial_trends.png": ["财务指标趋势", "financial"],
+    "market_trends.png": ["市场趋势", "market"],
+    "source_distribution.png": ["数据来源分布", "source"],
+    "topic_terms.png": ["主题热词", "topic"],
+    "market_data.png": ["市场规模", "market"],
+    "market_share.png": ["市场份额", "share"],
+    "macro_indicators.png": ["宏观指标", "macro"],
+}
+
 
 def _loads_json_loose(text: str) -> dict:
     """先严格解析，失败后允许字符串内未转义控制字符（LLM 常在长指令中插入字面换行）。"""
@@ -3999,7 +4012,6 @@ CURATED = (
     "技术", "市场", "出货", "渗透", "渗透率", "出货量",
 )
 
-
 def norm(v):
     try:
         return float(v)
@@ -4299,6 +4311,8 @@ if __name__ == "__main__":
 
         只补充缺失条目（file+keywords+section_hint），不覆盖渲染器已写出的
         正确条目；manifest 与磁盘上已渲染 PNG 一一对应。
+        chart_N.png 沿用 chart_data.json 规格映射 + curated 关键词逻辑；
+        make_charts 语义图按文件名推断关键词；不认识的 PNG 跳过（防误纳）。
         """
         mf = project / "chart_manifest.json"
         try:
@@ -4310,7 +4324,7 @@ if __name__ == "__main__":
         except Exception:
             charts = []
         existing = {str(c.get("file") or "") for c in charts}
-        pngs = sorted(p.name for p in project.glob("chart_*.png"))
+        pngs = sorted(p.name for p in project.glob("*.png"))
         missing = [n for n in pngs if n not in existing]
         if not missing:
             return
@@ -4356,19 +4370,29 @@ if __name__ == "__main__":
         added = False
         for name in missing:
             spec = seq.get(name)
-            if not spec:
-                continue
-            text = " ".join(
-                str(spec.get(k) or "") for k in ("title", "question", "conclusion")
-            )
-            keywords = list(dict.fromkeys(k for k in curated if k in text))[:14]
-            if not keywords:
-                continue
-            charts.append({
-                "file": name,
-                "keywords": keywords,
-                "section_hint": str(spec.get("section_hint") or ""),
-            })
+            if spec:
+                text = " ".join(
+                    str(spec.get(k) or "")
+                    for k in ("title", "question", "conclusion")
+                )
+                keywords = list(dict.fromkeys(k for k in curated if k in text))[:14]
+                if not keywords:
+                    continue
+                charts.append({
+                    "file": name,
+                    "keywords": keywords,
+                    "section_hint": str(spec.get("section_hint") or ""),
+                })
+            else:
+                semantic_keywords = _SEMANTIC_CHART_KEYWORDS.get(name)
+                if not semantic_keywords:
+                    # 非图表 PNG（旧文件/临时图/不认识的命名）不纳入 manifest
+                    continue
+                charts.append({
+                    "file": name,
+                    "keywords": list(semantic_keywords),
+                    "section_hint": "",
+                })
             added = True
         if added:
             try:

@@ -1342,5 +1342,90 @@ class TestArtifactWhitelistInjection(unittest.TestCase):
         self.assertNotIn("产物文件", instr)
 
 
+class TestBackfillChartManifest(unittest.TestCase):
+    """多实体任务交付缺口回归：make_charts 语义图也必须进入 chart_manifest.json。"""
+
+    def test_semantic_pngs_backfilled_and_idempotent(self):
+        """chart_1 保持原条目；语义图新增中文关键词；other.png 跳过；重复调用幂等。"""
+        import json
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = tempfile.mkdtemp(prefix="wm_mf_sem_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            proj = ws_mod.task_project_dir("t-mf-sem")
+            proj.mkdir(parents=True, exist_ok=True)
+            (proj / "chart_1.png").write_bytes(b"PNG")
+            (proj / "entity_frequency.png").write_bytes(b"PNG")
+            (proj / "financial_trends.png").write_bytes(b"PNG")
+            (proj / "other.png").write_bytes(b"PNG")
+            (proj / "chart_manifest.json").write_text(json.dumps({
+                "charts": [
+                    {"file": "chart_1.png", "keywords": ["规模", "市场"],
+                     "section_hint": "市场规模"},
+                ],
+            }, ensure_ascii=False), encoding="utf-8")
+            (proj / "chart_data.json").write_text(json.dumps({"charts": [
+                {
+                    "title": "2023-2025年全球AI芯片市场规模（亿美元）",
+                    "question": "市场规模趋势？",
+                    "conclusion": "市场规模持续增长。",
+                    "type": "line", "unit": "亿美元",
+                    "x_axis_title": "年份", "y_axis_title": "规模（亿美元）",
+                    "source": "https://a.com", "section_hint": "市场规模",
+                    "data": [
+                        {"label": "A", "value": 110, "year": 2023,
+                         "source": "https://a.com"},
+                        {"label": "B", "value": 726, "year": 2025,
+                         "source": "https://a.com"},
+                    ],
+                },
+            ]}, ensure_ascii=False), encoding="utf-8")
+
+            o._backfill_chart_manifest(proj)
+            manifest = json.loads(
+                (proj / "chart_manifest.json").read_text(encoding="utf-8")
+            )
+            files = [c["file"] for c in manifest["charts"]]
+            self.assertEqual(
+                files,
+                ["chart_1.png", "entity_frequency.png", "financial_trends.png"],
+            )
+            by_name = {c["file"]: c for c in manifest["charts"]}
+            self.assertEqual(
+                by_name["chart_1.png"],
+                {"file": "chart_1.png", "keywords": ["规模", "市场"],
+                 "section_hint": "市场规模"},
+                "已存在条目不得被覆盖或改写",
+            )
+            self.assertIn(
+                "主体提及频率",
+                by_name["entity_frequency.png"]["keywords"],
+            )
+            self.assertEqual(by_name["entity_frequency.png"]["section_hint"], "")
+            self.assertIn(
+                "财务指标趋势",
+                by_name["financial_trends.png"]["keywords"],
+            )
+            self.assertNotIn("other.png", files, "不认识的 PNG 不得纳入 manifest")
+
+            o._backfill_chart_manifest(proj)
+            manifest2 = json.loads(
+                (proj / "chart_manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                [c["file"] for c in manifest2["charts"]],
+                files,
+                "重复回填不得重复添加条目",
+            )
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
