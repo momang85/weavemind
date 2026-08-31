@@ -61,6 +61,15 @@
     "_comment": "F4 数据源扩展：CoinGecko 免费公开接口无需 key；FRED CSV 与 Google News RSS 亦为公开接口。crypto_api_key 仅作未来付费额度预留。",
     "crypto_api_key": ""
   },
+  "mcp_servers": [
+    {
+      "_comment": "MCP 即插即用（mcp_client.py 启动时发现并注册为外部工具，tool_dispatch 优先路由）——当前置空示例。",
+      "_comment_wind": "万得 Wind：商业授权（机构合同或个人版订阅，不对个人免费自助开放）。需要 Wind 终端 + WindPy 授权；官方已提供 wind-skills Agent 技能。接入：command 指向官方 MCP/技能桥接脚本。",
+      "_comment_ifind": "同花顺 iFinD：官方 2026-03 上线 iFinD 金融 MCP（iFinD 账号授权，付费）。接入：url 填官方 MCP 端点，或 command 填官方 CLI。",
+      "_comment_sec": "SEC EDGAR：免费公开（10 req/s 限速，需声明 User-Agent）；本项目已内置 sec_edgar 适配器，无需 MCP。",
+      "_comment_ptrade": "恒生 PTrade：通过券商免费开通（含回测/模拟），仅限本人实名账户；行情可脚本化接入，交易需合规报备。"
+    }
+  ],
   "notifications": {
     "_comment": "F5 任务完成通知：每项 enabled=true 才发送；发送失败仅记日志，不阻塞任务完成流程。密码/密钥仅可写不可回显。",
     "webhook": {
