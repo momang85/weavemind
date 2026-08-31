@@ -4067,6 +4067,60 @@ class TestMultiEntityPreload(unittest.TestCase):
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_financial_metric_normalization(self):
+        """make_charts 财务标签归一化：先剥实体前缀再剥年份前缀。"""
+        from orchestrator_v2 import _normalize_financial_metric
+
+        self.assertEqual(_normalize_financial_metric("宁德时代2025年营收"), "营收")
+        self.assertEqual(
+            _normalize_financial_metric("比亚迪股份2024年归母净利润"), "归母净利润"
+        )
+        self.assertEqual(_normalize_financial_metric("2025年营收"), "营收")
+        self.assertEqual(_normalize_financial_metric("2024年毛利率"), "毛利率")
+        # 无年份无实体：普通中文标签不误剥
+        self.assertEqual(_normalize_financial_metric("总市场份额"), "总市场份额")
+        self.assertEqual(_normalize_financial_metric(""), "")
+
+    def test_financial_grouping_multi_entity(self):
+        """双实体同指标：metric_groups['营收'] 含 2 个实体且年份序列完整。"""
+        from orchestrator_v2 import _group_financial_rows
+
+        clean_chart_data = {
+            "market_data": [
+                {"year": 2025, "label": "宁德时代2025年营收", "value": 4000.0},
+                {"year": 2024, "label": "宁德时代2024年营收", "value": 3600.0},
+                {"year": 2025, "label": "比亚迪2025年营收", "value": 6000.0},
+                {"year": 2024, "label": "比亚迪2024年营收", "value": 5000.0},
+            ]
+        }
+        metric_groups = _group_financial_rows(clean_chart_data["market_data"])
+        self.assertEqual(set(metric_groups["营收"]), {"宁德时代", "比亚迪"})
+        self.assertEqual(
+            metric_groups["营收"]["宁德时代"], [(2024, 3600.0), (2025, 4000.0)]
+        )
+        self.assertEqual(
+            metric_groups["营收"]["比亚迪"], [(2024, 5000.0), (2025, 6000.0)]
+        )
+        # year 保留数字（int）
+        self.assertIsInstance(metric_groups["营收"]["宁德时代"][0][0], int)
+
+    def test_financial_grouping_single_entity_unchanged(self):
+        """单实体（无前缀）：实体名为空，序列与旧逻辑一致（含 (年份, 值) 去重）。"""
+        from orchestrator_v2 import _group_financial_rows
+
+        rows = [
+            {"year": 2025, "label": "2025年营收", "value": 100.0},
+            {"year": 2024, "label": "2024年营收", "value": 90.0},
+            {"year": 2023, "label": "2023年营收", "value": 80.0},
+            {"year": 2025, "label": "2025年营收", "value": 100.0},  # 重复行去重
+        ]
+        metric_groups = _group_financial_rows(rows)
+        self.assertEqual(list(metric_groups["营收"]), [""])
+        self.assertEqual(
+            metric_groups["营收"][""],
+            [(2023, 80.0), (2024, 90.0), (2025, 100.0)],
+        )
+
 
 class TestSecAdapter(unittest.TestCase):
     def _canned_facts(self):

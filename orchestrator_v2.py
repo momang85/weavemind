@@ -5021,6 +5021,7 @@ import matplotlib.pyplot as plt
 
 sys.path.insert(0, r"__REPO_ROOT__")
 from chart_fonts import configure_zh_font
+from orchestrator_v2 import _group_financial_rows
 configure_zh_font()
 
 clean = json.load(open("clean_chart_data.json", encoding="utf-8"))
@@ -5112,35 +5113,41 @@ else:
 # 4) 财务/市场规模（结构化源）：优先"年份 × 指标"面板数据 → 每指标一张折线子图，
 #    避免把 12 年 × 6-8 个指标塞进单张柱状图（70+ 柱子不可读）。
 #    财务行（营收/净利…）可能被标为 ai_overall，按"带年份"识别，不再按 type 过滤。
+#    多实体标签（"宁德时代2024年营收"）先归一化出指标名，再按 (实体, 指标) 分组，
+#    同指标不同实体各画一条折线，避免双实体同年份互相覆盖。
 market = clean_rows(clean.get("market_data"))
-rows_by_metric = {}
-for m in market:
-    yr = m.get("year")
-    label = str(m.get("label") or "")
-    metric = re.sub(r"^\d{4}年", "", label)
-    if yr and metric and len(metric) >= 2:
-        rows_by_metric.setdefault(metric, []).append((int(yr), float(m.get("value") or 0)))
 metric_groups = {
-    k: sorted(set(v)) for k, v in rows_by_metric.items()
-    if len(set(p[0] for p in v)) >= 3
+    mname: by_entity
+    for mname, by_entity in _group_financial_rows(market).items()
+    if len({p[0] for pts in by_entity.values() for p in pts}) >= 3
 }
 if len(metric_groups) >= 2:
-    names = sorted(metric_groups, key=lambda k: -len(metric_groups[k]))
+    names = sorted(
+        metric_groups,
+        key=lambda k: -sum(len(pts) for pts in metric_groups[k].values()),
+    )
     fig, axes = plt.subplots(len(names), 1, figsize=(11, 3.0 * len(names)))
     if hasattr(axes, "ravel"):
         axes = axes.ravel()
     elif not isinstance(axes, (list, tuple)):
         axes = [axes]
     for ax, mname in zip(axes, names):
-        pts = metric_groups[mname]
-        xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
-        ax.plot(xs, ys, marker="o", linewidth=2, color="#0ea5e9")
+        by_entity = metric_groups[mname]
+        colors = ("#0ea5e9", "#f59e0b", "#10b981", "#8b5cf6", "#ef4444")
+        for idx, (ent, pts) in enumerate(sorted(by_entity.items())):
+            xs = [p[0] for p in pts]
+            ys = [p[1] for p in pts]
+            ax.plot(
+                xs, ys, marker="o", linewidth=2,
+                color=colors[idx % len(colors)], label=ent or None,
+            )
+            for x, y in zip(xs, ys):
+                ax.text(x, y, f"{y:g}", ha="center", va="bottom", fontsize=7)
         ax.set_title(f"{mname}（亿元）", fontsize=10)
         ax.set_xlabel("年份")
         ax.grid(alpha=0.3)
-        for x, y in zip(xs, ys):
-            ax.text(x, y, f"{y:g}", ha="center", va="bottom", fontsize=7)
+        if len(by_entity) >= 2:
+            ax.legend()
     fig.suptitle("财务指标趋势（结构化数据，亿元）", fontsize=12)
     save_qa(fig, axes[0], "financial_trends.png")
     plt.close()
@@ -6948,6 +6955,52 @@ print("charts generated")
 
     def shutdown(self):
         self._messaging.close()
+
+
+# ─────────────────────────────────────────────
+# 财务图表归一化/分组纯函数
+# make_charts 模板脚本经 __REPO_ROOT__ sys.path 引入；回归测试直接调用。
+# ─────────────────────────────────────────────
+
+_FINANCIAL_ENTITY_PREFIX_RE = re.compile(r"^([\u4e00-\u9fff]{2,8}?)(?=\d{4}年)")
+_FINANCIAL_YEAR_PREFIX_RE = re.compile(r"^\d{4}年")
+
+
+def _normalize_financial_metric(label: str) -> str:
+    """从财务标签提取指标名，供图表按指标分组。
+
+    多实体标签形如"宁德时代2025年营收"：先剥离实体前缀（仅当后面紧跟
+    "YYYY年"时剥离），再剥离"YYYY年"；普通中文标签（无年份无实体）原样返回。
+    """
+    s = str(label or "")
+    s = _FINANCIAL_ENTITY_PREFIX_RE.sub("", s)
+    s = _FINANCIAL_YEAR_PREFIX_RE.sub("", s)
+    return s
+
+
+def _group_financial_rows(rows) -> dict:
+    """把 clean_chart_data 的 market_data 行按 (实体, 指标) 分组。
+
+    返回 {指标名: {实体名: [(年份, 值), ...]}}；实体名从标签前缀提取，
+    单实体/无实体标签实体名为空字符串；各序列按年份排序并去重 (年份, 值)。
+    """
+    groups: dict[str, dict[str, list[tuple[int, float]]]] = {}
+    for m in rows or []:
+        yr = m.get("year")
+        label = str(m.get("label") or "")
+        metric = _normalize_financial_metric(label)
+        if not yr or not metric or len(metric) < 2:
+            continue
+        em = _FINANCIAL_ENTITY_PREFIX_RE.match(label)
+        entity = em.group(1) if em else ""
+        pts = groups.setdefault(metric, {}).setdefault(entity, [])
+        pt = (int(yr), float(m.get("value") or 0))
+        if pt not in pts:
+            pts.append(pt)
+    return {
+        metric: {ent: sorted(pts) for ent, pts in by_entity.items()}
+        for metric, by_entity in groups.items()
+    }
 
 
 # ─────────────────────────────────────────────
