@@ -4264,8 +4264,21 @@ def main():
             "section_hint": str(spec.get("section_hint") or ""),
         })
         print(f"RENDERED {fname}: {title}", flush=True)
+    # 合并写入：保留既有条目（含 make_charts 语义图回填），仅更新/追加 chart_N
+    try:
+        with open("chart_manifest.json", "r", encoding="utf-8") as f:
+            prev = json.load(f).get("charts") or []
+    except Exception:
+        prev = []
+    prev = [c for c in prev if isinstance(c, dict)]
+    prev_files = {str(c.get("file") or "") for c in prev}
+    for c in manifest:
+        if str(c.get("file") or "") in prev_files:
+            prev = [c if str(x.get("file") or "") == str(c.get("file") or "") else x for x in prev]
+        else:
+            prev.append(c)
     with open("chart_manifest.json", "w", encoding="utf-8") as f:
-        json.dump({"charts": manifest}, f, ensure_ascii=False, indent=1)
+        json.dump({"charts": prev}, f, ensure_ascii=False, indent=1)
     print(f"total={len(manifest)} skipped={len(specs) - len(manifest)}", flush=True)
 
 

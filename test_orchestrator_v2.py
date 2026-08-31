@@ -12,6 +12,7 @@
 import json
 import os
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -1472,6 +1473,52 @@ class TestBackfillChartManifest(unittest.TestCase):
             )
         finally:
             ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_render_charts_merge_keeps_semantic_entries(self):
+        """render_charts.py 重跑时合并写入：语义图条目不得被覆盖（反思重做场景）。"""
+        import re as _re
+        import subprocess as _subprocess
+        from pathlib import Path as _Path
+        import orchestrator_v2 as ov_mod
+
+        tmp = _Path(tempfile.mkdtemp(prefix="wm_mf_merge_"))
+        try:
+            # 提取 render_charts 模板脚本
+            src = _Path("orchestrator_v2.py").read_text(encoding="utf-8")
+            start = src.find("script = r'''# -*- coding: utf-8 -*-")
+            end = src.find("'''", src.find("if __name__ == \"__main__\":", start))
+            script = src[start + len("script = r"):end].strip()
+            if script.startswith("'''"):
+                script = script[3:]
+            if script.endswith("'''"):
+                script = script[:-3]
+            script = script.replace(
+                "__REPO_ROOT__", str(_Path(".").resolve()).replace("\\", "/"))
+
+            (tmp / "chart_manifest.json").write_text(json.dumps({"charts": [
+                {"file": "chart_1.png", "keywords": ["营收"], "section_hint": ""},
+                {"file": "financial_trends.png", "keywords": ["财务指标趋势", "financial"],
+                 "section_hint": ""},
+            ]}, ensure_ascii=False), encoding="utf-8")
+            (tmp / "chart_data.json").write_text(json.dumps({"charts": [
+                {"type": "bar", "title": "营收对比",
+                 "data": [{"label": "A", "value": 1}, {"label": "B", "value": 2}],
+                 "unit": "亿元", "source": "test", "x_axis_title": "年份",
+                 "y_axis_title": "亿元", "conclusion": "对比明显"},
+            ]}, ensure_ascii=False), encoding="utf-8")
+            (tmp / "render_charts.py").write_text(script, encoding="utf-8")
+            proc = _subprocess.run(
+                [sys.executable, "render_charts.py"], cwd=str(tmp),
+                capture_output=True, timeout=120,
+            )
+            self.assertEqual(proc.returncode, 0, proc.stderr.decode("utf-8", errors="replace")[:300])
+            manifest = json.loads(
+                (tmp / "chart_manifest.json").read_text(encoding="utf-8"))
+            files = [c["file"] for c in manifest["charts"]]
+            self.assertIn("financial_trends.png", files, "语义图被 render_charts 覆盖")
+            self.assertTrue(any(f.startswith("chart_") for f in files), "chart_N 应存在")
+        finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
 
