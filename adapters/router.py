@@ -115,6 +115,9 @@ _NEWS_KEYWORDS = (
 )
 _COIN_STOPWORDS = {"usd", "cny", "eur", "price", "行情", "价格"}
 
+# 财务结构化链路支持的市场
+_FINANCIAL_MARKETS = ("HK", "US", "CN")
+
 
 def _keyword_hit(goal: str, keywords: tuple[str, ...]) -> bool:
     g = str(goal or "").lower()
@@ -388,6 +391,88 @@ def _fetch_ranking_with_fallback(
     return None
 
 
+def _fetch_financial_entity(company: str, cls: dict) -> tuple[dict | None, str]:
+    """单个实体的财务抓取：resolve_company + 按市场分发
+    （HK→fetch_eastmoney / US→fetch_sec / CN→fetch_ashare），
+    参照单实体分支的写法；返回 (entry, error)，失败时 entry 为 None。
+    """
+    try:
+        res = resolve_company(company)
+    except Exception as exc:
+        return None, f"resolve 失败: {exc}"
+    if not res or res["market"] not in _FINANCIAL_MARKETS:
+        return None, f"未解析到支持市场（{company}）"
+    try:
+        if res["market"] == "HK":
+            data = fetch_eastmoney(
+                res["name"], res["stock_code"],
+                year_range=cls.get("year_range"),
+            )
+        elif res["market"] == "US":
+            data = fetch_sec(
+                res["name"], res["stock_code"],
+                year_range=cls.get("year_range"),
+            )
+        else:
+            data = fetch_ashare(
+                res["name"], res["stock_code"],
+                year_range=cls.get("year_range"),
+            )
+    except Exception as exc:
+        return None, f"财务抓取失败: {exc}"
+    data["classification"] = cls
+    data["resolution"] = res
+    return {
+        "name": res["name"],
+        "market": res["market"],
+        "code": res["stock_code"],
+        "stock_code": res["stock_code"],
+        "financials": data.get("financials") or [],
+        "metadata": data.get("metadata") or {},
+        "raw": data.get("raw") or {},
+        "resolution": res,
+        "classification": cls,
+    }, ""
+
+
+def _route_multi_entity_financial(
+    companies: list[str], cls: dict,
+) -> dict | None:
+    """多实体对比目标：逐个 resolve + 抓取，成功实体照常返回，
+    失败实体记入 warnings；全部失败返回 None（回退搜索链路）。"""
+    entities: list[dict] = []
+    warnings: list[dict] = []
+    seen: set[str] = set()
+    for company in companies:
+        company = str(company or "").strip()
+        if not company or company in seen:
+            continue
+        seen.add(company)
+        entry, error = _fetch_financial_entity(company, cls)
+        if entry is None:
+            warnings.append({
+                "name": company,
+                "error": error or "解析或抓取失败",
+            })
+        else:
+            entities.append(entry)
+    if not entities:
+        return None
+    metadata = {
+        "entities": len(entities),
+        "requested_entities": len(companies),
+        "failed_entities": len(warnings),
+        "warnings": warnings,
+        "year_range": cls.get("year_range"),
+        "market": cls.get("market"),
+    }
+    return {
+        "source": "multi_entity",
+        "companies": entities,
+        "metadata": metadata,
+    }
+
+
 def route_structured(goal: str) -> dict | None:
     """按目标关键词路由到结构化数据源；成功返回 {source, data, metadata}，
     失败返回 None（调用方回退搜索链路）。
@@ -476,10 +561,23 @@ def route_structured(goal: str) -> dict | None:
             }
             return _wrap("news", data, meta)
         return None
-    # 原有 financial 链路
+    # 原有 financial 链路（含多实体对比目标）
     cls = classify_task(goal)
-    if cls["domain"] != "financial" or not cls["company"]:
+    if cls["domain"] != "financial":
         return None
+    companies = [
+        str(c) for c in (cls.get("companies") or []) if str(c).strip()
+    ]
+    companies = list(dict.fromkeys(companies))
+    if len(companies) >= 2:
+        return _route_multi_entity_financial(companies, cls)
+    if not cls["company"]:
+        # 多实体拆分只拆出一个实体时，也走单实体链路（如“对比苹果的营收”）
+        if len(companies) == 1:
+            cls = dict(cls)
+            cls["company"] = companies[0]
+        else:
+            return None
     res = resolve_company(cls["company"])
     if not res or res["market"] not in ("HK", "US", "CN"):
         return None

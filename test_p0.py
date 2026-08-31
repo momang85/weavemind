@@ -3803,6 +3803,270 @@ class TestPhase2ClassifierRouter(unittest.TestCase):
         for g in ("贵州茅台最新股价", "腾讯2025年报分析", "写一篇关于AI的报告"):
             self.assertFalse(_is_ranking_goal(g), g)
 
+    def test_multi_entity_edge_cases(self):
+        """多实体边界审查补丁：'给出'不得混入；时间词不吞入；普通'与'不误拆。"""
+        from task_classifier import classify_task
+        c = classify_task("对比宁德时代与比亚迪近三年营收和净利润趋势，给出数据来源")
+        self.assertEqual(c["companies"], ["宁德时代", "比亚迪"])
+        c2 = classify_task("比较苹果和微软的营收")
+        self.assertEqual(c2["companies"], ["苹果", "微软"])
+        c3 = classify_task("比亚迪近三年年报营收分析")
+        self.assertEqual(c3["company"], "比亚迪")
+        self.assertEqual(c3["companies"], [])
+        c4 = classify_task("腾讯控股2025年报分析")
+        self.assertEqual(c4["company"], "腾讯")
+        c5 = classify_task("与比亚迪合作开发电池项目")
+        self.assertEqual(c5["companies"], [])
+
+
+class TestMultiEntityPreload(unittest.TestCase):
+    """多实体对比目标：classifier 提取 + router 合并降级 + 预载消费（全部 mock）。"""
+
+    def test_classify_multi_entity_extraction(self):
+        from task_classifier import classify_task
+
+        a = classify_task("对比宁德时代与比亚迪近三年营收和净利润趋势")
+        self.assertEqual(a["domain"], "financial")
+        self.assertIn("宁德时代", a["companies"])
+        self.assertIn("比亚迪", a["companies"])
+        self.assertEqual(len(a["companies"]), 2)
+
+        b = classify_task("比较苹果和微软的营收")
+        self.assertIn("苹果", b["companies"])
+        self.assertIn("微软", b["companies"])
+
+        c = classify_task("苹果vs微软的营收")
+        self.assertIn("苹果", c["companies"])
+        self.assertIn("微软", c["companies"])
+
+        d = classify_task("分别分析腾讯控股和阿里巴巴集团的近三年营收")
+        self.assertIn("腾讯控股", d["companies"])
+        self.assertIn("阿里巴巴集团", d["companies"])
+
+        # 非对比语境：'与' 不是分隔符，不启用多实体拆分
+        e = classify_task("与比亚迪合作开发电池项目")
+        self.assertEqual(e["companies"], [])
+
+        # 单实体行为完全不变：companies 为空，company 仍为原提取结果
+        f = classify_task("腾讯控股2025年报分析")
+        self.assertEqual(f["companies"], [])
+        self.assertEqual(f["company"], "腾讯")
+        g = classify_task(
+            "搜索并总结腾讯集团的发展历程和现状，与之相配合，分析腾讯集团历年财报"
+        )
+        self.assertEqual(g["companies"], [])
+        self.assertEqual(g["company"], "腾讯")
+
+    @staticmethod
+    def _financial_payload(revenue=100.0):
+        return {
+            "financials": [
+                {"year": 2024, "revenue": revenue, "net_profit": 10.0,
+                 "gross_margin": 20.0, "report_type": "2024年年报"},
+            ],
+            "metadata": {
+                "source": "eastmoney_ashare", "company": "x",
+                "annual_count": 1, "retrieved_at": "2026-08-31T00:00:00Z",
+            },
+            "raw": {"url": "https://em.example/api", "text": "{}"},
+        }
+
+    def test_route_multi_entity_merge(self):
+        import adapters.router as router
+
+        res_cat = {
+            "market": "CN", "stock_code": "300750", "name": "宁德时代",
+            "quote_id": "0.300750", "resolved_alternatives": [],
+        }
+        res_byd = {
+            "market": "HK", "stock_code": "01211", "name": "比亚迪股份",
+            "quote_id": "116.01211", "resolved_alternatives": [],
+        }
+        with mock.patch.object(
+            router, "resolve_company", side_effect=[res_cat, res_byd],
+        ), mock.patch.object(
+            router, "fetch_ashare", return_value=self._financial_payload(3000.0),
+        ), mock.patch.object(
+            router, "fetch_eastmoney", return_value=self._financial_payload(6000.0),
+        ):
+            out = router.route_structured(
+                "对比宁德时代与比亚迪近三年营收和净利润趋势"
+            )
+        self.assertEqual(out["source"], "multi_entity")
+        self.assertEqual(out["metadata"]["entities"], 2)
+        self.assertEqual(out["metadata"]["requested_entities"], 2)
+        self.assertEqual(out["metadata"]["failed_entities"], 0)
+        self.assertEqual(out["metadata"]["warnings"], [])
+        c0, c1 = out["companies"]
+        self.assertEqual((c0["name"], c0["market"], c0["code"]),
+                         ("宁德时代", "CN", "300750"))
+        self.assertEqual(c0["financials"][0]["revenue"], 3000.0)
+        self.assertEqual(c1["name"], "比亚迪股份")
+        self.assertEqual(c1["market"], "HK")
+        self.assertEqual(c1["code"], "01211")
+        self.assertEqual(c1["financials"][0]["revenue"], 6000.0)
+
+    def test_route_multi_entity_partial_failure(self):
+        """任一实体失败不整体失败：成功实体照常返回，失败记 warning。"""
+        import adapters.router as router
+
+        res_msft = {
+            "market": "US", "stock_code": "MSFT", "name": "微软",
+            "quote_id": "105.MSFT", "resolved_alternatives": [],
+        }
+        res_aapl = {
+            "market": "US", "stock_code": "AAPL", "name": "苹果",
+            "quote_id": "105.AAPL", "resolved_alternatives": [],
+        }
+        # resolve 失败（苹果）
+        with mock.patch.object(
+            router, "resolve_company", side_effect=[None, res_msft],
+        ), mock.patch.object(
+            router, "fetch_sec", return_value=self._financial_payload(2451.0),
+        ):
+            out = router.route_structured("比较苹果和微软的营收")
+        self.assertEqual(out["source"], "multi_entity")
+        self.assertEqual(len(out["companies"]), 1)
+        self.assertEqual(out["companies"][0]["name"], "微软")
+        self.assertEqual(out["metadata"]["entities"], 1)
+        self.assertEqual(out["metadata"]["failed_entities"], 1)
+        self.assertEqual(out["metadata"]["warnings"][0]["name"], "苹果")
+        self.assertIn("未解析", out["metadata"]["warnings"][0]["error"])
+
+        # fetch 失败（苹果），微软照常返回
+        with mock.patch.object(
+            router, "resolve_company", side_effect=[res_aapl, res_msft],
+        ), mock.patch.object(
+            router, "fetch_sec",
+            side_effect=[RuntimeError("boom"), self._financial_payload(2451.0)],
+        ):
+            out = router.route_structured("比较苹果和微软的营收")
+        self.assertEqual(len(out["companies"]), 1)
+        self.assertEqual(out["companies"][0]["name"], "微软")
+        self.assertEqual(out["metadata"]["failed_entities"], 1)
+        self.assertIn("抓取失败", out["metadata"]["warnings"][0]["error"])
+
+        # 全部失败 → None（回退搜索链路）
+        with mock.patch.object(router, "resolve_company", return_value=None):
+            out = router.route_structured("比较苹果和微软的营收")
+        self.assertIsNone(out)
+
+    def test_route_single_entity_unchanged(self):
+        """单实体 financial 分支保持原返回结构（顶层 financials，无 companies）。"""
+        import adapters.router as router
+
+        res_tx = {
+            "market": "HK", "stock_code": "00700", "name": "腾讯控股",
+            "quote_id": "116.00700", "resolved_alternatives": [],
+        }
+        with mock.patch.object(
+            router, "resolve_company", return_value=res_tx,
+        ), mock.patch.object(
+            router, "fetch_eastmoney", return_value=self._financial_payload(),
+        ):
+            out = router.route_structured("腾讯控股2025年报分析")
+        self.assertIn("financials", out)
+        self.assertEqual(out["resolution"]["stock_code"], "00700")
+        self.assertEqual(out["classification"]["company"], "腾讯")
+        self.assertNotIn("companies", out)
+        self.assertNotIn("source", out)
+
+    def test_structured_preload_multi_entity_writes_workspace(self):
+        """orchestrator 预载消费 multi_entity：financials.json + 快照 +
+        clean_chart_data 实体前缀 + 报告注入块。"""
+        import tempfile
+        from pathlib import Path
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+        import adapters.router as router
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        class _FakePub:
+            def __init__(self):
+                self.events = []
+
+            def publish(self, channel, msg):
+                self.events.append((channel, msg))
+
+            def close(self):
+                pass
+
+        o._messaging = _FakePub()
+        tmp = Path(tempfile.mkdtemp(prefix="multi_preload_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        data = {
+            "source": "multi_entity",
+            "companies": [
+                {
+                    "name": "宁德时代", "market": "CN", "code": "300750",
+                    "financials": [
+                        {"year": 2024, "revenue": 3000.0, "net_profit": 400.0,
+                         "gross_margin": 24.0, "report_type": "2024年年报"},
+                    ],
+                    "metadata": {
+                        "source": "eastmoney_ashare", "currency": "CNY",
+                        "unit": "亿元", "annual_count": 1,
+                        "retrieved_at": "2026-08-31T00:00:00Z",
+                    },
+                    "raw": {"url": "https://em.example/ashare", "text": "{}"},
+                },
+                {
+                    "name": "比亚迪股份", "market": "HK", "code": "01211",
+                    "financials": [
+                        {"year": 2024, "revenue": 6000.0, "net_profit": 300.0,
+                         "gross_margin": 20.0, "report_type": "2024年年报"},
+                    ],
+                    "metadata": {
+                        "source": "eastmoney_datacenter", "currency": "HKD",
+                        "unit": "亿元", "annual_count": 1,
+                        "retrieved_at": "2026-08-31T00:00:00Z",
+                    },
+                    "raw": {"url": "https://em.example/hk", "text": "{}"},
+                },
+            ],
+            "metadata": {
+                "entities": 2, "requested_entities": 2, "warnings": [],
+                "year_range": (2022, 2024),
+            },
+        }
+        old_route = router.route_structured
+        router.route_structured = lambda goal: data
+        try:
+            preloaded = o._structured_data_preload(
+                "t-multi", "对比宁德时代与比亚迪近三年营收和净利润趋势",
+            )
+            self.assertIsNotNone(preloaded)
+            proj = ws_mod.task_project_dir("t-multi")
+            fin = json.loads(
+                (proj / "financials.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(fin["source"], "multi_entity")
+            self.assertEqual(len(fin["companies"]), 2)
+            snap = json.loads(
+                (proj / "fetch_snapshot.json").read_text(encoding="utf-8")
+            )
+            urls = {s["url"] for s in snap}
+            self.assertEqual(
+                urls, {"https://em.example/ashare", "https://em.example/hk"},
+            )
+            clean = json.loads(
+                (proj / "clean_chart_data.json").read_text(encoding="utf-8")
+            )
+            labels = {r["label"] for r in clean["market_data"]}
+            self.assertIn("宁德时代2024年营收", labels)
+            self.assertIn("比亚迪股份2024年营收", labels)
+            block = OrchestratorV2._structured_injection("t-multi")
+            self.assertIn("宁德时代", block)
+            self.assertIn("比亚迪股份", block)
+            self.assertIn("HKD", block)
+            self.assertIn("数据获取时间 2026-08-31T00:00:00Z", block)
+        finally:
+            router.route_structured = old_route
+            ws_mod.WORKSPACE_ROOT = old_root
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 class TestSecAdapter(unittest.TestCase):
     def _canned_facts(self):

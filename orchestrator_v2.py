@@ -74,6 +74,13 @@ _RANKING_SOURCES = (
     "tencent_us_ranking", "sina_ranking",
 )
 
+# 结构化财务数据源显示名（单实体与 multi_entity 快照/报告块共用）
+_STRUCTURED_SOURCE_LABELS = {
+    "eastmoney_datacenter": "东方财富数据中心（港股）",
+    "eastmoney_ashare": "东方财富数据中心（A股）",
+    "sec_edgar": "SEC EDGAR（10-K 年报）",
+}
+
 # 统计类目标关键词：命中后在 code_execution 步骤注入全市场占比计算指令
 _STATISTICAL_GOAL_KEYWORDS = (
     "占比", "比例", "百分位", "分布", "合计", "汇总",
@@ -1450,6 +1457,7 @@ class OrchestratorV2:
             is_financial = source in (
                 "eastmoney_datacenter", "eastmoney_ashare", "sec_edgar",
             ) or (not source and isinstance(data.get("financials"), list))
+            is_financial = is_financial or source == "multi_entity"
             proj = task_project_dir(task_id, project)
             if not hasattr(self, "_task_structured_data"):
                 self._task_structured_data = {}
@@ -1458,24 +1466,49 @@ class OrchestratorV2:
             if is_financial:
                 # P2-5 把 resolver 返回的 market/name/code 与候选列表写入任务上下文，
                 # 报告生成时在 [结构化财务数据] 段标注数据源选择依据
-                resolution = data.get("resolution") or {}
-                if resolution:
-                    prefs = getattr(self, "_task_market_resolution", None)
-                    if prefs is None:
-                        prefs = {}
-                        self._task_market_resolution = prefs
-                    try:
-                        from adapters.resolver import market_preference
-                        pref = market_preference()
-                    except Exception:
-                        pref = "hk"
+                prefs = getattr(self, "_task_market_resolution", None)
+                if prefs is None:
+                    prefs = {}
+                    self._task_market_resolution = prefs
+                try:
+                    from adapters.resolver import market_preference
+                    pref = market_preference()
+                except Exception:
+                    pref = "hk"
+                if source == "multi_entity":
                     prefs[task_id] = {
-                        "name": str(resolution.get("name") or ""),
-                        "market": str(resolution.get("market") or ""),
-                        "code": str(resolution.get("stock_code") or ""),
-                        "preference": pref,
-                        "alternatives": resolution.get("resolved_alternatives") or [],
+                        "entities": [
+                            {
+                                "name": str(
+                                    (ent.get("resolution") or {}).get("name")
+                                    or ent.get("name") or ""
+                                ),
+                                "market": str(ent.get("market") or ""),
+                                "code": str(
+                                    ent.get("code")
+                                    or ent.get("stock_code") or ""
+                                ),
+                                "preference": pref,
+                                "alternatives": (
+                                    (ent.get("resolution") or {})
+                                    .get("resolved_alternatives") or []
+                                ),
+                            }
+                            for ent in data.get("companies") or []
+                        ],
                     }
+                else:
+                    resolution = data.get("resolution") or {}
+                    if resolution:
+                        prefs[task_id] = {
+                            "name": str(resolution.get("name") or ""),
+                            "market": str(resolution.get("market") or ""),
+                            "code": str(resolution.get("stock_code") or ""),
+                            "preference": pref,
+                            "alternatives": resolution.get(
+                                "resolved_alternatives"
+                            ) or [],
+                        }
                 (proj / "financials.json").write_text(
                     json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8",
                 )
@@ -1486,17 +1519,40 @@ class OrchestratorV2:
                         snaps = json.loads(snap.read_text(encoding="utf-8"))
                     except Exception:
                         snaps = []
-                entry = {
-                    "title": (
-                        f"{metadata.get('company')} 主要财务指标（东方财富数据中心）"
-                    ),
-                    "url": (data.get("raw") or {}).get("url", ""),
-                    "text": (data.get("raw") or {}).get("text", ""),
-                }
-                if entry["url"] and not any(
-                    s.get("url") == entry["url"] for s in snaps
-                ):
-                    snaps.append(entry)
+                entries: list[dict] = []
+                if source == "multi_entity":
+                    for ent in data.get("companies") or []:
+                        ent_source = str(
+                            (ent.get("metadata") or {}).get("source") or ""
+                        )
+                        source_label = _STRUCTURED_SOURCE_LABELS.get(
+                            ent_source, ent_source or "结构化数据源",
+                        )
+                        entries.append({
+                            "title": (
+                                f"{ent.get('name')} 主要财务指标"
+                                f"（{source_label}）"
+                            ),
+                            "url": (ent.get("raw") or {}).get("url", ""),
+                            "text": (ent.get("raw") or {}).get("text", ""),
+                        })
+                else:
+                    entries.append({
+                        "title": (
+                            f"{metadata.get('company')} 主要财务指标"
+                            "（东方财富数据中心）"
+                        ),
+                        "url": (data.get("raw") or {}).get("url", ""),
+                        "text": (data.get("raw") or {}).get("text", ""),
+                    })
+                snapshot_changed = False
+                for entry in entries:
+                    if entry["url"] and not any(
+                        s.get("url") == entry["url"] for s in snaps
+                    ):
+                        snaps.append(entry)
+                        snapshot_changed = True
+                if snapshot_changed:
                     snap.write_text(
                         json.dumps(snaps, ensure_ascii=False, indent=1),
                         encoding="utf-8",
@@ -1508,22 +1564,43 @@ class OrchestratorV2:
                         clean = json.loads(clean_path.read_text(encoding="utf-8"))
                     except Exception:
                         clean = {}
-                clean = self._merge_structured_financials(
-                    clean, data.get("financials") or [],
-                    (data.get("raw") or {}).get("url", ""),
-                )
+                if source == "multi_entity":
+                    for ent in data.get("companies") or []:
+                        clean = self._merge_structured_financials(
+                            clean, ent.get("financials") or [],
+                            (ent.get("raw") or {}).get("url", ""),
+                            entity=ent.get("name"),
+                        )
+                else:
+                    clean = self._merge_structured_financials(
+                        clean, data.get("financials") or [],
+                        (data.get("raw") or {}).get("url", ""),
+                    )
                 clean_path.write_text(
                     json.dumps(clean, ensure_ascii=False, indent=1), encoding="utf-8",
                 )
+                if source == "multi_entity":
+                    hit_msg = (
+                        f"结构化数据源命中：{metadata.get('entities')} 个实体"
+                        "（多实体对比）"
+                    )
+                    log_msg = (
+                        "Structured multi-entity financials loaded for %s: "
+                        "%s entities"
+                    )
+                    log_args = (task_id, metadata.get("entities"))
+                else:
+                    hit_msg = (
+                        f"结构化数据源命中：{metadata.get('company')} "
+                        f"{metadata.get('annual_count')} 份年报"
+                    )
+                    log_msg = "Structured financials loaded for %s: %s annuals"
+                    log_args = (task_id, metadata.get("annual_count"))
                 push_progress(self._messaging, task_id, "log",
                               {"type": "data", "agent": "orchestrator",
-                               "message": (
-                                   f"结构化数据源命中：{metadata.get('company')} "
-                                   f"{metadata.get('annual_count')} 份年报"
-                               ),
+                               "message": hit_msg,
                                "timestamp": self._now_iso()})
-                logger.info("Structured financials loaded for %s: %d annuals",
-                            task_id, metadata.get("annual_count"))
+                logger.info(log_msg, *log_args)
                 return data
             # 新数据源（crypto/macro/news）：统一写 structured_data.json，
             # 可数值化的点序列并入 clean_chart_data 的 market_trends 供绘图
@@ -1871,6 +1948,65 @@ class OrchestratorV2:
             fin_path = proj / "financials.json"
             if fin_path.exists():
                 fin = json.loads(fin_path.read_text(encoding="utf-8"))
+                if str(fin.get("source") or "") == "multi_entity":
+                    blocks: list[str] = []
+                    for ent in fin.get("companies") or []:
+                        fs = (ent.get("financials") or [])[-12:]
+                        m = ent.get("metadata") or {}
+                        if not fs:
+                            continue
+                        unit = m.get("unit") or "亿元"
+                        currency = str(m.get("currency") or "").strip()
+                        currency_note = ""
+                        if currency:
+                            currency_note = f"，币种：{currency}"
+                            low_c = currency.lower()
+                            if not any(
+                                k in low_c
+                                for k in ("cny", "rmb", "人民币", "元")
+                            ):
+                                currency_note += (
+                                    "（非人民币口径：若报告以人民币呈现，须换算并"
+                                    "注明换算说明，或明确标注原币种与口径差异）"
+                                )
+                        retrieved_at = str(m.get("retrieved_at") or "")
+                        src_name = _STRUCTURED_SOURCE_LABELS.get(
+                            str(m.get("source") or ""),
+                            str(m.get("source") or "结构化数据源"),
+                        )
+                        rows = [
+                            "| 年份 | 营收 | 归母净利润 | 毛利率% | 总负债 | 经营现金流 |",
+                            "|---|---|---|---|---|---|",
+                        ]
+                        for f in fs:
+                            rows.append(
+                                f"| {f.get('year')} | {f.get('revenue')} | "
+                                f"{f.get('net_profit')} | "
+                                f"{f.get('gross_margin')} | "
+                                f"{f.get('total_liabilities')} | "
+                                f"{f.get('operating_cashflow')} |"
+                            )
+                        blocks.append(
+                            "\n[结构化财务数据]（"
+                            f"{ent.get('name')}，来自 {src_name}，单位：{unit}"
+                            + currency_note
+                            + (
+                                f"，数据获取时间 {retrieved_at}"
+                                if retrieved_at else ""
+                            )
+                            + "，权威数据源，优先引用）\n"
+                            + "\n".join(rows)
+                        )
+                    if blocks:
+                        return (
+                            "\n\n" + "\n\n".join(blocks)
+                            + "\n规则：报告/总结中的财务数字优先引用以上各实体表格，"
+                            "并在来源处标注实体与数据源；对比结论必须基于表中数值；"
+                            "本表未覆盖的数字若无溯源，标注"
+                            "'基于模型知识，未在本次检索中验证'；禁止编造年份；"
+                            "报告的数据截至/报告日期必须引用各表标注的数据获取时间，"
+                            "禁止使用模型回忆的日期。"
+                        )
                 fs = (fin.get("financials") or [])[-12:]
                 m = fin.get("metadata") or {}
                 if fs:
@@ -2046,8 +2182,15 @@ class OrchestratorV2:
         return ""
 
     @staticmethod
-    def _merge_structured_financials(clean: dict, financials: list, source_url: str) -> dict:
-        """把适配器结构化财务行并入 clean_chart_data 的 market_data（去重）。"""
+    def _merge_structured_financials(
+        clean: dict, financials: list, source_url: str,
+        entity: str | None = None,
+    ) -> dict:
+        """把适配器结构化财务行并入 clean_chart_data 的 market_data（去重）。
+
+        entity 非空时标签带实体前缀（多实体对比，如“宁德时代2024年营收”），
+        避免不同公司同年指标互相覆盖。
+        """
         clean = dict(clean or {})
         md = list(clean.get("market_data") or [])
         seen = {(r.get("label"), r.get("value"), r.get("unit")) for r in md}
@@ -2064,9 +2207,12 @@ class OrchestratorV2:
                 v = f.get(key)
                 if v is None:
                     continue
+                label = f"{entity}{f.get('year')}年{label}" if entity else (
+                    f"{f.get('year')}年{label}"
+                )
                 row = {
                     "type": "market_size",
-                    "label": f"{f.get('year')}年{label}",
+                    "label": label,
                     "value": v, "unit": unit,
                     "year": f.get("year"),
                     "source": source_url,
@@ -2089,10 +2235,18 @@ class OrchestratorV2:
                 return
             fin = json.loads(fin_path.read_text(encoding="utf-8"))
             clean = json.loads(clean_path.read_text(encoding="utf-8"))
-            clean = self._merge_structured_financials(
-                clean, fin.get("financials") or [],
-                (fin.get("raw") or {}).get("url", ""),
-            )
+            if str(fin.get("source") or "") == "multi_entity":
+                for ent in fin.get("companies") or []:
+                    clean = self._merge_structured_financials(
+                        clean, ent.get("financials") or [],
+                        (ent.get("raw") or {}).get("url", ""),
+                        entity=ent.get("name"),
+                    )
+            else:
+                clean = self._merge_structured_financials(
+                    clean, fin.get("financials") or [],
+                    (fin.get("raw") or {}).get("url", ""),
+                )
             clean_path.write_text(
                 json.dumps(clean, ensure_ascii=False, indent=1), encoding="utf-8",
             )
@@ -2822,7 +2976,15 @@ class OrchestratorV2:
             if fin_path.exists():
                 fin = json.loads(fin_path.read_text(encoding="utf-8"))
                 m = fin.get("metadata") or {}
-                if m.get("annual_count"):
+                if str(fin.get("source") or "") == "multi_entity":
+                    n_entities = m.get("entities") or len(
+                        fin.get("companies") or []
+                    )
+                    structured_hint = (
+                        "（工作区已有结构化财务数据：multi_entity，"
+                        f"{n_entities} 个实体）"
+                    )
+                elif m.get("annual_count"):
                     structured_hint = (
                         f"（工作区已有结构化财务数据：{m.get('source')}，"
                         f"{m.get('annual_count')} 份年报，单位 {m.get('unit')}）"
