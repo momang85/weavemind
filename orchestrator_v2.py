@@ -5286,6 +5286,12 @@ print("charts generated")
                         shutil.copy2(png, cdir / png.name)
                 except Exception as exc:
                     logger.warning("search-chart sync failed: %s", str(exc)[:120])
+                # 语义图已同步到 charts/，回填 chart_manifest.json（chart pipeline
+                # 先行回填 chart_N，make_charts 生成的语义图必须在此补齐）
+                try:
+                    self._backfill_chart_manifest(project)
+                except Exception as exc:
+                    logger.warning("search-chart manifest backfill failed: %s", str(exc)[:120])
         except Exception as exc:
             logger.warning("make_charts error: %s", exc)
 

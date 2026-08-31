@@ -1426,6 +1426,54 @@ class TestBackfillChartManifest(unittest.TestCase):
             ws_mod.WORKSPACE_ROOT = old_root
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_generate_search_charts_backfills_manifest_after_sync(self):
+        """调用点回归：make_charts 成功后同步 PNG 并回填 manifest。
+
+        时序 bug 复现：chart pipeline 先回填 chart_N，make_charts 语义图
+        后生成；若同步后不触发 _backfill_chart_manifest，语义图永远缺失。
+        这里 mock subprocess.run 返回成功，验证 _generate_search_charts
+        执行后 manifest 已包含语义图条目。
+        """
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        tmp = tempfile.mkdtemp(prefix="wm_mf_sync_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            proj = ws_mod.task_project_dir("t-mf-sync")
+            proj.mkdir(parents=True, exist_ok=True)
+            (proj / "search_results.json").write_text(
+                json.dumps({"results": []}), encoding="utf-8")
+            (proj / "clean_chart_data.json").write_text(
+                json.dumps({}), encoding="utf-8")
+            (proj / "chart_data.json").write_text(
+                json.dumps({"charts": []}), encoding="utf-8")
+            (proj / "chart_manifest.json").write_text(
+                json.dumps({"charts": []}), encoding="utf-8")
+            for name in ("entity_frequency.png", "financial_trends.png",
+                         "source_distribution.png", "topic_terms.png"):
+                (proj / name).write_bytes(b"PNG")
+
+            fake_proc = mock.Mock(
+                returncode=0, stdout=b"charts generated", stderr=b"")
+            with mock.patch("subprocess.run", return_value=fake_proc):
+                o._generate_search_charts("t-mf-sync", "市场规模趋势")
+
+            manifest = json.loads(
+                (proj / "chart_manifest.json").read_text(encoding="utf-8"))
+            files = [c["file"] for c in manifest["charts"]]
+            self.assertEqual(
+                sorted(files),
+                ["entity_frequency.png", "financial_trends.png",
+                 "source_distribution.png", "topic_terms.png"],
+                "make_charts 同步后语义图必须回填 chart_manifest.json",
+            )
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
