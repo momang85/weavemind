@@ -7,10 +7,33 @@ import re
 import sys
 import urllib.request
 from html.parser import HTMLParser
+from urllib.parse import quote, urlsplit, urlunsplit
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from async_worker_base import AsyncWorkerBase, AsyncRegistry, AsyncMessaging
+
+
+def _encode_iri(url: str) -> str:
+    """把含中文等非 ASCII 字符的 IRI 编码为合法 URL（百分号编码）。
+
+    搜索类指令中的 URL 常带未编码中文（query/path），urllib 直接构造
+    Request 会抛 'ascii' codec can't encode。只编码非 ASCII 字节，
+    ASCII 保留字符（:/?#[]@!$&'()*+,;=）不动。
+    """
+    try:
+        url.encode("ascii")
+        return url  # 纯 ASCII 无需处理
+    except UnicodeEncodeError:
+        pass
+    try:
+        parts = urlsplit(url)
+        safe = "/%:@&=+$,;~*'()!-._"
+        path = quote(parts.path, safe=safe)
+        query = quote(parts.query, safe=safe + "?")
+        return urlunsplit((parts.scheme, parts.netloc, path, query, parts.fragment))
+    except Exception:
+        return url
 
 
 class _TextExtractor(HTMLParser):
@@ -49,8 +72,9 @@ class WebFetchWorker(AsyncWorkerBase):
             return json.dumps({"status": "failed", "error": "No URL found in instruction"}, ensure_ascii=False)
         url = urls[0]
         try:
+            # 中文等非 ASCII 字符的 IRI → 百分号编码（否则 urllib 抛 ascii 编码错误）
             req = urllib.request.Request(
-                url,
+                _encode_iri(url),
                 headers={"User-Agent": "Mozilla/5.0 (compatible; WeaveMind/1.0)"},
             )
             with urllib.request.urlopen(req, timeout=30) as resp:

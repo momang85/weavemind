@@ -4630,5 +4630,65 @@ class TestSourceHealthRouting(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestWebFetchIriEncoding(unittest.TestCase):
+    """中文 IRI 百分号编码（修复 'ascii' codec 真实任务失败）。"""
+
+    def test_ascii_url_unchanged(self):
+        from workers.web_fetch_worker import _encode_iri
+        u = "https://example.com/path?a=1&b=2"
+        self.assertEqual(_encode_iri(u), u)
+
+    def test_chinese_query_encoded(self):
+        from workers.web_fetch_worker import _encode_iri
+        u = "https://example.com/search?q=宁德时代"
+        out = _encode_iri(u)
+        self.assertNotIn("宁德时代", out)
+        self.assertIn("%", out)
+        self.assertTrue(out.startswith("https://example.com/search?q="))
+
+    def test_chinese_path_encoded(self):
+        from workers.web_fetch_worker import _encode_iri
+        u = "https://example.com/财经/新闻"
+        out = _encode_iri(u)
+        self.assertNotIn("财经", out)
+        self.assertIn("%", out)
+
+    def test_reserved_chars_preserved(self):
+        from workers.web_fetch_worker import _encode_iri
+        u = "https://example.com/a/b?x=1&y=%20#frag"
+        self.assertEqual(_encode_iri(u), u)
+
+    def test_execute_fetches_chinese_url(self):
+        """execute 对含中文 URL 的指令不再抛 ascii 编码错误（mock urlopen）。"""
+        import asyncio
+        import json
+        from unittest import mock
+        import workers.web_fetch_worker as wf
+
+        class FakeResp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return "<html><title>测试</title><body>正文内容</body></html>".encode("utf-8")
+
+        w = wf.WebFetchWorker.__new__(wf.WebFetchWorker)
+        captured = {}
+
+        def fake_urlopen(req, timeout=30):
+            captured["url"] = req.full_url
+            return FakeResp()
+
+        with mock.patch.object(wf.urllib.request, "urlopen", side_effect=fake_urlopen):
+            out = asyncio.run(w.execute("抓取 https://example.com/搜索?q=宁德时代 的页面"))
+        d = json.loads(out)
+        self.assertEqual(d["status"], "success")
+        self.assertNotIn("宁德时代", captured["url"])  # 已百分号编码
+        self.assertIn("正文内容", d["text"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
