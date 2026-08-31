@@ -53,7 +53,8 @@ def series_id(indicator: str) -> str:
 
 
 def parse_macro_csv(text: str, indicator: str = "GDP") -> dict | None:
-    """解析 FRED CSV：DATE,<series>[,...]；返回最近至多 240 个点。"""
+    """解析 FRED CSV：DATE,<series>[,...]（响应头可能是 DATE 或 observation_date）；
+    返回最近至多 240 个点。"""
     sid = series_id(indicator)
     try:
         rows = list(csv.DictReader(io.StringIO(text)))
@@ -61,9 +62,14 @@ def parse_macro_csv(text: str, indicator: str = "GDP") -> dict | None:
         return None
     if not rows:
         return None
+    # 响应头兼容：FRED 老接口用 DATE，部分端点用 observation_date
+    first = rows[0] if rows else {}
+    date_col = "DATE" if "DATE" in first else ("observation_date" if "observation_date" in first else "")
+    if not date_col:
+        return None
     points: list[dict] = []
     for r in rows:
-        date = str(r.get("DATE") or "").strip()
+        date = str(r.get(date_col) or "").strip()
         raw = str(r.get(sid) or "").strip()
         if not date or not raw or raw in (".", "NA", ""):
             continue

@@ -106,6 +106,13 @@ def tool_catalog_text() -> str:
     for t in TOOL_REGISTRY:
         lines.append(f"- {t['name']}: {t['description']} 返回: {t['returns']}")
     try:
+        from finance_plugin import FINANCE_TOOL_REGISTRY
+        lines.append("## 金融数据插件（免费公开源，无需账号）")
+        for t in FINANCE_TOOL_REGISTRY:
+            lines.append(f"- {t['name']}: {t['description']} 返回: {t['returns']}")
+    except Exception:
+        pass
+    try:
         import mcp_client
         with mcp_client._LOCK:
             ext = [(k, v["tool"]) for k, v in list(mcp_client.EXTERNAL_TOOLS.items())]

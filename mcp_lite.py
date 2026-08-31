@@ -18,6 +18,15 @@ from tool_contracts import TOOL_REGISTRY
 from tool_dispatch import dispatch_tool
 
 
+def _all_tools() -> list[dict]:
+    """本地工具 + 金融数据插件工具（免费合规源，无需账号）。"""
+    try:
+        from finance_plugin import FINANCE_TOOL_REGISTRY
+        return list(TOOL_REGISTRY) + list(FINANCE_TOOL_REGISTRY)
+    except Exception:
+        return list(TOOL_REGISTRY)
+
+
 def _input_schema(tool: dict) -> dict:
     return {
         "type": "object",
@@ -58,7 +67,7 @@ class MCPServer:
                     "tools": [
                         {"name": t["name"], "description": t["description"],
                          "inputSchema": _input_schema(t)}
-                        for t in TOOL_REGISTRY
+                        for t in _all_tools()
                     ]
                 },
             }
@@ -70,6 +79,27 @@ class MCPServer:
             if not args.get("instruction"):
                 return {"jsonrpc": "2.0", "id": mid, "error": {"code": -32602, "message": "arguments.instruction required"}}
             try:
+                # 金融数据插件优先（本地直连免费源，无需账号/worker）
+                try:
+                    from finance_plugin import call_finance_tool, is_finance_tool
+                    if is_finance_tool(name):
+                        result = call_finance_tool(
+                            name, str(args["instruction"]),
+                            timeout=int(args.get("timeout") or 120),
+                        )
+                        if result is not None:
+                            return {
+                                "jsonrpc": "2.0", "id": mid,
+                                "result": {
+                                    "content": [{
+                                        "type": "text",
+                                        "text": json.dumps(result.get("result", result), ensure_ascii=False),
+                                    }],
+                                    "isError": result.get("status") != "SUCCESS",
+                                },
+                            }
+                except Exception:
+                    pass
                 result = dispatch_tool(
                     name,
                     str(args["instruction"]),
@@ -120,7 +150,7 @@ def main() -> int:
     ap.add_argument("--list", action="store_true")
     args = ap.parse_args()
     if args.list:
-        for t in TOOL_REGISTRY:
+        for t in _all_tools():
             print(f"- {t['name']}: {t['description']}")
         return 0
     serve_stdio()

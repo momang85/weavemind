@@ -1422,6 +1422,93 @@ class TestP2McpLite(unittest.TestCase):
         self.assertIn("error", r5)
 
 
+class TestFinancePlugin(unittest.TestCase):
+    """免费合规金融数据插件（无需账号，本地直连公开源）。"""
+
+    def test_registry_has_six_tools(self):
+        from finance_plugin import FINANCE_TOOL_REGISTRY
+        names = [t["name"] for t in FINANCE_TOOL_REGISTRY]
+        self.assertEqual(names, [
+            "finance_quotes", "finance_ranking", "finance_filings",
+            "finance_macro", "finance_crypto", "finance_news",
+        ])
+        for t in FINANCE_TOOL_REGISTRY:
+            self.assertTrue(t["description"])
+            self.assertIn("无需账号", t["description"])  # 全部免费源
+
+    def test_is_finance_tool(self):
+        from finance_plugin import is_finance_tool
+        self.assertTrue(is_finance_tool("finance_quotes"))
+        self.assertFalse(is_finance_tool("web_search"))
+
+    def test_normalize_code(self):
+        from finance_plugin import _normalize_code
+        cases = {
+            "600519": "sh600519", "000001": "sz000001", "688825": "sh688825",
+            "aapl.us": "usAAPL", "AAPL": "usAAPL", "00700.hk": "hk00700",
+            "hk00700": "hk00700", "sh600519": "sh600519",
+        }
+        for raw, want in cases.items():
+            self.assertEqual(_normalize_code(raw), want, raw)
+        self.assertIsNone(_normalize_code("abc-def"))
+        self.assertIsNone(_normalize_code(""))
+
+    def test_unknown_tool_returns_none(self):
+        from finance_plugin import call_finance_tool
+        self.assertIsNone(call_finance_tool("web_search", "x"))
+
+    def test_mcp_tools_list_includes_finance(self):
+        """MCP tools/list 应包含 6 个金融插件工具。"""
+        import mcp_lite
+        server = mcp_lite.MCPServer()
+        r = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        names = {t["name"] for t in r["result"]["tools"]}
+        for n in ("finance_quotes", "finance_ranking", "finance_filings",
+                  "finance_macro", "finance_crypto", "finance_news"):
+            self.assertIn(n, names)
+
+    def test_mcp_call_finance_tool_mock(self):
+        """MCP tools/call 优先走插件本地执行（mock 适配器验证路由）。"""
+        import mcp_lite
+        import finance_plugin as fp
+        orig = fp.call_finance_tool
+        fp.call_finance_tool = lambda name, instr, timeout=120: {
+            "status": "SUCCESS", "result": '{"status": "success", "mock": true}'}
+        try:
+            server = mcp_lite.MCPServer()
+            r = server.handle({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": {"name": "finance_quotes", "arguments": {"instruction": "600519"}},
+            })
+            self.assertFalse(r["result"]["isError"])
+            self.assertIn("mock", r["result"]["content"][0]["text"])
+        finally:
+            fp.call_finance_tool = orig
+
+    def test_failure_returns_iserror(self):
+        """插件调用失败 → MCP 层 isError=True（不崩溃）。"""
+        import mcp_lite
+        import finance_plugin as fp
+        orig = fp.call_finance_tool
+        fp.call_finance_tool = lambda name, instr, timeout=120: {
+            "status": "FAILED", "result": "金融插件调用失败: 测试失败"}
+        try:
+            server = mcp_lite.MCPServer()
+            r = server.handle({
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": {"name": "finance_macro", "arguments": {"instruction": "x"}},
+            })
+            self.assertTrue(r["result"]["isError"])
+        finally:
+            fp.call_finance_tool = orig
+
+    def test_tool_catalog_includes_plugins(self):
+        from tool_contracts import tool_catalog_text
+        cat = tool_catalog_text()
+        self.assertIn("金融数据插件", cat)
+        self.assertIn("finance_quotes", cat)
+
+
 class TestP2ReactAgent(unittest.TestCase):
     def test_loop_decides_tool_then_final(self):
         import asyncio
@@ -3706,6 +3793,16 @@ class TestPhase2ClassifierRouter(unittest.TestCase):
             router.route_structured = old_route
             ws_mod.WORKSPACE_ROOT = old_root
 
+    def test_is_ranking_goal_front_n(self):
+        """'前 N'/'前十'/'TOP N' 明确排行规模 → 判为排行类（修复 finance_ranking 路由）。"""
+        from adapters.router import _is_ranking_goal
+        for g in ("A股成交额前10", "成交量前十", "A股前20名成交额", "TOP 30 涨幅榜",
+                  "美股成交额前5", "A股今日成交额排行"):
+            self.assertTrue(_is_ranking_goal(g), g)
+        # 非排行目标不误判
+        for g in ("贵州茅台最新股价", "腾讯2025年报分析", "写一篇关于AI的报告"):
+            self.assertFalse(_is_ranking_goal(g), g)
+
 
 class TestSecAdapter(unittest.TestCase):
     def _canned_facts(self):
@@ -5062,6 +5159,28 @@ class TestNewDataAdapters(unittest.TestCase):
         self.assertEqual(out["points"][-1]["date"], "2024-04-01")
         self.assertEqual(out["points"][-1]["value"], 28269.5)
         self.assertIsNone(parse_macro_csv("DATE,GDP\n", "GDP"))
+
+    def test_macro_csv_observation_date_header(self):
+        """FRED 部分端点返回 observation_date 头（实测 DFF），必须兼容。"""
+        from adapters.macro import parse_macro_csv
+        csv_text = (
+            "observation_date,DFF\n"
+            "2026-01-01,3.64\n"
+            "2026-01-02,3.64\n"
+            "2026-01-03,3.65\n"
+        )
+        out = parse_macro_csv(csv_text, "DFF")
+        self.assertIsNotNone(out)
+        self.assertEqual(out["series"], "DFF")
+        self.assertEqual(len(out["points"]), 3)
+        self.assertEqual(out["points"][0]["date"], "2026-01-01")
+        self.assertEqual(out["points"][0]["value"], 3.64)
+
+    def test_macro_series_id_aliases(self):
+        from adapters.macro import series_id
+        self.assertEqual(series_id("联邦基金利率"), "DFF")
+        self.assertEqual(series_id("美国CPI同比"), "GDP")  # 未收录别名回落 GDP
+        self.assertEqual(series_id("失业率"), "UNRATE")
 
     def test_news_rss_parse_canned(self):
         from adapters.news import parse_news_rss

@@ -252,13 +252,19 @@ def _match_data_source(
 
 
 def _is_ranking_goal(goal: str) -> bool:
-    """是否排行类目标：命中排行关键词，或规模需求为全市场（统计/前 N>50）。
+    """是否排行类目标：命中排行关键词，或规模需求为全市场（统计/前 N>50），
+    或含'前 N'/'前十'/'TOP N' 明确排行规模（如'A股成交额前10'）。
 
     仅关键词命中不够——"前5%占比"不含"排行"字样，必须靠 scale 兜住；
     同时避免把普通 A股目标（如个股行情）误判为排行。"""
     if _keyword_hit(goal, _RANKING_KEYWORDS):
         return True
-    return _parse_scale(goal) == "full_market"
+    if _parse_scale(goal) == "full_market":
+        return True
+    # 明确的排行规模表达：前N / 前十 / TOP N / 前N名
+    if re.search(r"前\s*\d+\s*(名|位|只|支)?|前十|前二十|top\s*\d+|排行|排名|榜", str(goal or ""), re.I):
+        return True
+    return False
 
 
 def _ranking_meta(payload: dict, metric: str, market: str, cache_hit: bool = False) -> dict:
