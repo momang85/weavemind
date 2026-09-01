@@ -840,9 +840,43 @@ def _extract_source_claims(report: str) -> list[str]:
         report,
     ):
         c = m.group(1).strip()
-        if c and c not in claims:
+        if not c:
+            continue
+        # 参考来源清单条目（如 '1. [来源](https://example.com/a)'）：链接本身
+        # 即来源引用，不属于"数据来源：X"声明，交给 source_list_completeness 检查
+        if "](http" in c:
+            rest = re.sub(
+                r"\[[^\]]+\]\([^)]*\)", "", c
+            ).strip(" .。；）)")
+            if not rest or rest.isdigit():
+                continue
+        if c not in claims:
             claims.append(c)
-    # 表格"来源"列单元格（非 URL 部分）
+    # 表格"来源"列单元格（非 URL 部分）：定位表头中的"来源"列，
+    # 仅取数据行该列单元格，避免把"指标/数值/来源"等表头标签当成声明
+    table_lines = [ln for ln in report.splitlines() if ln.strip().startswith("|")]
+    sep_idx = -1
+    for i, ln in enumerate(table_lines):
+        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+        if cells and all(not c or set(c) <= {"-", ":", "—"} for c in cells):
+            sep_idx = i
+            break
+    if sep_idx > 0:
+        header_cells = [
+            c.strip() for c in table_lines[sep_idx - 1].strip().strip("|").split("|")
+        ]
+        src_cols = [i for i, h in enumerate(header_cells) if "来源" in h]
+        if src_cols:
+            for ln in table_lines[sep_idx + 1:]:
+                cells = [c.strip() for c in ln.strip().strip("|").split("|")]
+                for i in src_cols:
+                    if i >= len(cells):
+                        continue
+                    c2 = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", cells[i])
+                    if c2 and len(c2) >= 2 and "http" not in c2 and c2 not in claims:
+                        claims.append(c2)
+            return claims
+    # 兜底：无表头/分隔符的松散表格行，保留旧行为
     for line in report.splitlines():
         if line.strip().startswith("|") and "来源" in line:
             cells = [c.strip() for c in line.strip("|").split("|")]
@@ -853,11 +887,37 @@ def _extract_source_claims(report: str) -> list[str]:
     return claims
 
 
+# 括号披露注释：括号内是对来源构成的自愿披露/免责说明，
+# 不参与主体匹配（可在 details/mislabeled 中保留原声明文本）
+_PAREN_DISCLOSURE_RE = re.compile(r"（[^（）]*）|\([^()]*\)")
+
+# 否定/谨慎语境：命中即视为如实披露，不判虚假标注
+_NEGATION_MARKERS = (
+    "非财报类", "非官方", "非权威", "未经证实", "不构成", "不代表",
+    "仅供参考", "网络传言", "市场传闻", "未经核实", "待核实",
+    "并非", "非正式", "未经确认", "未能核实", "无法核实",
+    "无法确认", "不保证", "疑似", "传闻", "据传", "网传", "小道消息",
+)
+
+# 泛化诚实表述：不指向可核验的具体来源，检索缺失不判虚假
+_GENERIC_HONEST_MARKERS = (
+    "公开渠道", "公开资料", "公开信息", "公开数据", "公开报道",
+    "公开披露", "公开来源", "公开平台", "公开新闻",
+    "网络公开", "互联网公开", "公司披露", "企业披露",
+)
+
+# 权威文档词：命中且无否定/谨慎语境、检索中无 → 虚假标注
+_AUTHORITY_DOC_RE = re.compile(r"(年报|财报|公告|官网|投资者关系|招股书|报表|审计)")
+
+
 def check_source_labeling(report: str, sources: dict) -> dict:
     """来源标注诚实性：报告中"数据来源：X"的 X 是否真的在检索/快照中出现。
     - 含 URL / 命中已知媒体名 / 命中源标题 → 诚实
+    - 括号披露注释（如"（含特定新闻门户单篇报道、非财报类资讯链接）"）
+      是自愿披露，不参与主体匹配；纯披露无主体则跳过
     - 标注'模型知识/未验证' → 诚实（已明示）
-    - 声明具体权威文档（年报/公告/官网/招股书）但源中无 → 虚假标注
+    - 否定/谨慎语境（非财报类/非官方/网络传言/未经核实/仅供参考…）→ 诚实
+    - 声明具体来源/权威文档（年报/公告/官网/招股书…）但源中无 → 虚假标注
     - '建议以X为准' 类建议句不判虚假。"""
     known = _known_sources(sources)
     claims = _extract_source_claims(report)
@@ -875,24 +935,42 @@ def check_source_labeling(report: str, sources: dict) -> dict:
             continue
         if "模型知识" in c or "未验证" in c or "未在本次检索" in c:
             continue
+        # 剥离括号披露注释：括号内容是对来源构成的自愿披露，不作为声明主体
+        body = _PAREN_DISCLOSURE_RE.sub("", c).strip()
+        if not body:
+            continue  # 纯披露注释，无声明主体
         checked += 1
-        if any(u in c for u in known["urls"]):
+        if any(u in body for u in known["urls"]):
             continue
-        if any(d and d in c for d in known["domains"]):
+        if any(d and d in body for d in known["domains"]):
             continue
-        if any(m and m in c for m in known["media"]):
+        if any(m and m in body for m in known["media"]):
             continue
         # 媒体别名归组：声明含组内别名 X，而已知媒体含同组别名 Y（X≠Y）→ 同源诚实
         if any(
-            any(a in c for a in grp if a)
+            any(a in body for a in grp if a)
             and any(b in known["media"] for b in grp if b)
             for grp in _MEDIA_ALIAS_GROUPS
         ):
             continue
-        if any(t and t in c for t in known["titles"] if len(t) >= 4):
+        if any(t and t in body for t in known["titles"] if len(t) >= 4):
             continue
-        if re.search(r"(年报|财报|公告|官网|投资者关系|招股书|报表|审计)", c):
+        # 否定/谨慎语境：'非财报类/非官方/未经证实/网络传言/仅供参考' 等
+        # 为如实披露，不判虚假标注（含括号披露注释中的否定词）
+        if any(k in c for k in _NEGATION_MARKERS):
+            continue
+        # 权威文档判定（否定感知）：仅当不含否定词且命中权威文档词，
+        # 且检索中无对应文档 → 虚假标注
+        if _AUTHORITY_DOC_RE.search(body):
             mislabeled.append(c)
+            continue
+        # 泛化诚实表述（公开渠道/公开资料等）：无可核验的具体主体，
+        # 检索缺失不判虚假
+        if any(k in c for k in _GENERIC_HONEST_MARKERS):
+            continue
+        # 其他具体来源声明（如"东方财富数据中心"）：无括号披露、无否定词、
+        # 无泛化诚实表述，且检索中无 → 虚假标注
+        mislabeled.append(c)
     passed = len(mislabeled) == 0
     # A2：虚假标注声明若含「XX网/XX报/XX财经/XX新闻」媒体词，
     # 追加补录建议（供人工确认 _DOMAIN_MEDIA，不自动改表）

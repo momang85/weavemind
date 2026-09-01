@@ -3446,6 +3446,42 @@ class TestAcceptanceChecker(unittest.TestCase):
         self.assertNotIn("建议补录域名媒体映射", r2["details"])
         self.assertEqual(r2["suggestions"], [])
 
+    def test_source_labeling_disclosure_and_negation_aware(self):
+        """括号披露剥离 + 否定感知：
+        '东方财富数据中心（含…非财报类资讯链接）' 如实披露 → pass；
+        无括号、无否定的具体来源声明（检索中无）→ 仍判虚假；
+        网络传言/公开渠道等谨慎泛化表述不判虚假。"""
+        from acceptance_checker import check_source_labeling
+
+        sources = {"search_results": "", "fetch_snapshot": "", "clean_chart_data": ""}
+        # a) 括号披露 + 非财报类 → 剥离括号 + 否定感知，不判虚假
+        r_a = check_source_labeling(
+            "数据来源：东方财富数据中心（含特定新闻门户单篇报道、非财报类资讯链接）",
+            sources,
+        )
+        self.assertTrue(r_a["pass"], r_a["details"])
+        self.assertEqual(r_a["mislabeled"], [])
+        # b) 无括号、无否定、检索无此源 → 仍判虚假
+        r_b = check_source_labeling("来源：东方财富数据中心", sources)
+        self.assertFalse(r_b["pass"])
+        self.assertIn("东方财富数据中心", r_b["mislabeled"][0])
+        # c) 年报声明（无否定词）且检索无年报 → 仍判虚假
+        r_c = check_source_labeling("来源：XX公司年报", sources)
+        self.assertFalse(r_c["pass"])
+        self.assertIn("XX公司年报", r_c["mislabeled"][0])
+        # d) 否定/谨慎词 → 不判虚假
+        r_d = check_source_labeling("来源：网络传言", sources)
+        self.assertTrue(r_d["pass"], r_d["details"])
+        self.assertEqual(r_d["mislabeled"], [])
+        # 否定词与权威文档词同现 → 如实披露，不判虚假
+        r_d2 = check_source_labeling("来源：非官方年报解读", sources)
+        self.assertTrue(r_d2["pass"], r_d2["details"])
+        self.assertEqual(r_d2["mislabeled"], [])
+        # e) 括号内纯披露 → 不产生虚假标注
+        r_e = check_source_labeling("（数据来源于公开渠道）", sources)
+        self.assertTrue(r_e["pass"], r_e["details"])
+        self.assertEqual(r_e["mislabeled"], [])
+
     # ── V1.2 竞品启示：三级溯源链 / 数据时效 / 免责声明 ──
 
     def test_source_list_completeness_complete(self):
