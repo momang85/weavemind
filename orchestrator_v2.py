@@ -5507,7 +5507,8 @@ print("charts generated")
     # ── Main Loop ──
     def run(self, task_id: str, goal: str, context: str = "",
             auto_run: bool = True, template_steps: list | None = None,
-            user_id: str = "", project: str | None = None) -> dict:
+            user_id: str = "", project: str | None = None,
+            report_confirm: bool = False) -> dict:
         """Execute a full task lifecycle. Returns final status dict."""
         try:
             from llm_client import set_task_context
@@ -6182,6 +6183,21 @@ print("charts generated")
             )
         self._publish_usage()
 
+        # V1.2 关键节点 HITL：报告终稿审批（report_confirm=True 时，在最终交付前
+        # 等待用户确认）。只在此处（反思循环退出、报告最终确定后）触发一次；
+        # 超时自动放行（与单步确认语义一致），用户取消则任务标记为 FAILED，
+        # 并在报告中注明"用户取消终稿审批"。
+        if report_confirm and overall != "FAILED":
+            approved = self._wait_report_confirm(task_id, goal, report)
+            if not approved:
+                overall = "FAILED"
+                has_failure = True
+                report = str(report or "") + "\n\n---\n\n> 用户取消终稿审批"
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "error", "agent": "orchestrator",
+                               "message": "终稿审批被用户取消，任务标记为失败",
+                               "timestamp": self._now_iso()})
+
         # 4. Memory（P0 验收准入：验收 fail 只沉淀对话，不沉淀策略；
         #    判定逻辑在 MemoryManager.consolidate_memory 内，这里传入验收摘要）
         if not has_failure:
@@ -6320,6 +6336,78 @@ print("charts generated")
             # Redis 不可用/测试环境 → 自动放行，不阻塞任务
             logger.info("Step confirm skipped (auto-proceed): %s", str(exc)[:100])
             return True
+
+    def _wait_report_confirm(self, task_id: str, goal: str, report: str) -> bool:
+        """报告终稿审批（关键节点 HITL）：确认放行，取消拒绝，超时自动放行。
+
+        复用 plan_confirm 通道：发布 AWAITING_CONFIRM 状态（stage='final_report'
+        并附报告前 3000 字符预览），等待 plan_confirm:{task_id} 上的确认/取消；
+        超时（_plan_confirm_timeout 封顶 180s）自动放行返回 True。
+        """
+        preview = str(report or "")[:3000]
+        # 状态消息：直接发布到 orchestrator:response，web_ui 会合并进
+        # _task_results，前端 useTaskPoller 据此弹出 AWAITING_CONFIRM 确认框
+        try:
+            self._messaging.publish("orchestrator:response", {
+                "task_id": task_id,
+                "status": "AWAITING_CONFIRM",
+                "revision": False,
+                "stage": "final_report",
+                "report_preview": preview,
+                "goal": goal,
+            })
+        except Exception as exc:
+            logger.warning(
+                "Final report confirm publish failed for %s: %s",
+                task_id, str(exc)[:120],
+            )
+            return True
+        # 进度消息：push_progress 类型 'plan'（前端已处理）；不带 steps 键，
+        # 避免覆盖 web_ui 已合并的计划树
+        push_progress(self._messaging, task_id, "plan",
+                      {"status": "AWAITING_CONFIRM", "stage": "final_report",
+                       "report_preview": preview,
+                       "message": "报告终稿已生成，等待用户审批"})
+        push_progress(self._messaging, task_id, "log",
+                      {"type": "plan", "agent": "orchestrator",
+                       "message": "报告终稿已生成，等待用户审批（超时自动放行）",
+                       "timestamp": self._now_iso()})
+        timeout = min(self._plan_confirm_timeout, 180)
+        try:
+            msg = self._brpop_with_deadline(
+                self._redis,
+                f"plan_confirm:{task_id}",
+                time.time() + timeout,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Final report confirm wait failed for %s: %s",
+                task_id, str(exc)[:120],
+            )
+            return True
+        if not msg:
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "info", "agent": "orchestrator",
+                           "message": f"终稿审批 {timeout}s 超时，自动放行",
+                           "timestamp": self._now_iso()})
+            return True
+        try:
+            data = json.loads(
+                msg[1] if isinstance(msg[1], str) else msg[1].decode()
+            )
+        except Exception:
+            return True
+        if data.get("action") == "cancel":
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "info", "agent": "orchestrator",
+                           "message": "终稿审批被用户取消",
+                           "timestamp": self._now_iso()})
+            return False
+        push_progress(self._messaging, task_id, "log",
+                      {"type": "plan", "agent": "orchestrator",
+                       "message": "终稿审批通过，交付",
+                       "timestamp": self._now_iso()})
+        return True
 
     def _execute_steps(self, steps: list[dict], task_id: str, goal: str) -> tuple[list[dict], bool]:
         """并行 DAG 执行一轮步骤，返回（按步骤顺序的结果列表, 是否有失败）。"""
@@ -7370,6 +7458,7 @@ def main():
             goal = data.get("goal", "")
             context = data.get("context", "")
             auto_run = data.get("auto_run", True)
+            report_confirm = bool(data.get("report_confirm", False))
             project = data.get("project") or "default"
 
             if goal == "EVOLUTION_TRIGGER":
@@ -7392,11 +7481,11 @@ def main():
                 continue
 
             # Run task in background thread
-            def _run_task(tid, g, ctx, ar, tpl_steps, uid, proj):
+            def _run_task(tid, g, ctx, ar, tpl_steps, uid, proj, rc):
                 try:
                     result = orch.run(
                         tid, g, ctx, auto_run=ar, template_steps=tpl_steps,
-                        user_id=uid, project=proj,
+                        user_id=uid, project=proj, report_confirm=rc,
                     )
                     result["project"] = proj
                     orch._messaging.publish("orchestrator:response", result)
@@ -7410,7 +7499,7 @@ def main():
                 args=(
                     task_id, goal, context, auto_run,
                     data.get("template_steps"), data.get("user_id", ""),
-                    project,
+                    project, report_confirm,
                 ),
                 daemon=True,
             ).start()

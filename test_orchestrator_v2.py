@@ -544,6 +544,142 @@ class TestRunIteration(unittest.TestCase):
         self.assertTrue(any("未找到相关历史经验" in s for s in msgs2))
 
 
+class TestFinalReportConfirm(unittest.TestCase):
+    """V1.2 关键节点 HITL：报告终稿审批（report_confirm）。"""
+
+    def _orch(self, **overrides):
+        o = make_orch(**overrides)
+        o._plan = lambda goal, task_id, context="", memory_context="": [
+            {"step_id": "1", "capability": "content_summary",
+             "instruction": "x", "timeout": 120}
+        ]
+        o._execute_steps = lambda steps, task_id, goal: (
+            [{"task_id": s["step_id"], "status": "SUCCESS",
+              "result": "# 报告终稿" + "A" * 5000} for s in steps],
+            False,
+        )
+        o._reflect = lambda *a, **k: {
+            "accepted": True, "score": 9.0, "verdict": "accept",
+            "gaps": [], "next_steps": [],
+        }
+        # 跳过结构化预载的真实重试（会 sleep 2s），测试保持轻量
+        o._structured_data_preload = lambda *a, **k: None
+        o._now_iso = lambda: "t"
+        return o
+
+    @staticmethod
+    def _awaiting_messages(o):
+        return [
+            m for _, m in o._messaging.published
+            if isinstance(m, dict) and m.get("status") == "AWAITING_CONFIRM"
+        ]
+
+    def test_default_report_confirm_skips_approval(self):
+        """关键回归：report_confirm=False（默认）不发布 AWAITING_CONFIRM、
+        不等待确认，行为与现在完全一致。"""
+        o = self._orch()
+        o._wait_report_confirm = mock.MagicMock(return_value=True)
+        res = o.run("t-rc-default", "目标", auto_run=True)
+        self.assertEqual(res["status"], "SUCCESS")
+        o._wait_report_confirm.assert_not_called()
+        self.assertEqual(self._awaiting_messages(o), [])
+
+    def test_user_confirm_releases_task(self):
+        """report_confirm=True + 用户确认 → SUCCESS，审批等待被满足，
+        AWAITING_CONFIRM 消息携带 final_report 阶段与 3000 字预览。"""
+        o = self._orch()
+        keys = []
+
+        def fake_brpop(r, key, deadline):
+            keys.append(key)
+            return (key, json.dumps({"action": "confirm"}))
+
+        o._brpop_with_deadline = fake_brpop
+        res = o.run("t-rc-ok", "目标", auto_run=True, report_confirm=True)
+        self.assertEqual(res["status"], "SUCCESS")
+        self.assertIn("plan_confirm:t-rc-ok", keys)
+        awaits = self._awaiting_messages(o)
+        self.assertEqual(len(awaits), 1, "终稿审批只发布一次 AWAITING_CONFIRM")
+        self.assertEqual(awaits[0]["revision"], False)
+        self.assertEqual(awaits[0]["stage"], "final_report")
+        self.assertEqual(len(awaits[0]["report_preview"]), 3000)
+        # 确认后最终报告不带取消注记
+        self.assertNotIn("用户取消终稿审批", res["final_report"])
+
+    def test_user_cancel_marks_failed_with_note(self):
+        """report_confirm=True + 用户取消 → FAILED，报告中注明用户取消终稿审批。"""
+        o = self._orch()
+        o._brpop_with_deadline = lambda r, key, deadline: (
+            key, json.dumps({"action": "cancel"})
+        )
+        res = o.run("t-rc-cancel", "目标", auto_run=True, report_confirm=True)
+        self.assertEqual(res["status"], "FAILED")
+        self.assertIn("用户取消终稿审批", res["final_report"])
+        completes = [
+            m.get("payload", {}).get("status")
+            for _, m in o._messaging.published
+            if isinstance(m, dict) and m.get("type") == "task_complete"
+        ]
+        self.assertEqual(completes[-1], "FAILED", "任务完成消息应如实标记失败")
+
+    def test_timeout_auto_releases_task(self):
+        """report_confirm=True + 超时 → 自动放行 SUCCESS，不卡死。"""
+        o = self._orch()
+        o._brpop_with_deadline = lambda r, key, deadline: None
+        res = o.run("t-rc-timeout", "目标", auto_run=True, report_confirm=True)
+        self.assertEqual(res["status"], "SUCCESS")
+        msgs = [
+            m.get("payload", {}).get("message", "")
+            for _, m in o._messaging.published
+            if isinstance(m, dict) and m.get("type") == "log"
+        ]
+        self.assertTrue(any("超时" in s for s in msgs), "超时应有自动放行日志")
+
+    def test_approval_triggered_once_after_final_round(self):
+        """反思多轮只触发一次审批：放在反思循环退出、最终报告确定后。"""
+        o = make_orch()
+        o._plan = lambda goal, task_id, context="", memory_context="": [
+            {"step_id": "1", "capability": "content_summary",
+             "instruction": "x", "timeout": 120}
+        ]
+        rounds = [
+            [{"task_id": "1", "status": "SUCCESS",
+              "result": "# 第一轮报告" + "A" * 300}],
+            [{"task_id": "i1-1", "status": "SUCCESS",
+              "result": "# 第二轮报告" + "B" * 300}],
+        ]
+        calls = {"n": 0}
+
+        def fake_execute(steps, task_id, goal):
+            i = calls["n"]
+            calls["n"] += 1
+            return (rounds[i] if i < len(rounds) else []), False
+
+        o._execute_steps = fake_execute
+
+        def fake_reflect(goal, report, task_id, all_steps=None,
+                         completed_all=None, memory_context="",
+                         validator_summary="", eval_scores=""):
+            if calls["n"] <= 1:
+                return {"accepted": False, "gaps": ["g"],
+                        "next_steps": [
+                            {"step_id": "x", "capability": "content_summary",
+                             "instruction": "补充", "timeout": 120}
+                        ]}
+            return {"accepted": True, "score": 9.0, "verdict": "accept"}
+
+        o._reflect = fake_reflect
+        o._structured_data_preload = lambda *a, **k: None
+        o._now_iso = lambda: "t"
+        wait = mock.MagicMock(return_value=True)
+        o._wait_report_confirm = wait
+        res = o.run("t-rc-once", "目标", auto_run=True, report_confirm=True)
+        self.assertEqual(wait.call_count, 1, "多轮反思也只应审批一次")
+        self.assertEqual(len(self._awaiting_messages(o)), 0,
+                         "审批方法被 mock 时不发布状态消息")
+        self.assertEqual(res["status"], "SUCCESS")
+
+
 class TestMemoryAcceptanceWiring(unittest.TestCase):
     """P0 沉淀准入：验收 fail 时 consolidate_memory 收到验收摘要并提示跳过策略。"""
 

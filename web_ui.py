@@ -1846,6 +1846,7 @@ def _publish_task(
     template_steps: list | None = None,
     user_id: str = "",
     prefix: str = "ui",
+    report_confirm: bool = False,
 ) -> dict:
     """核心提交通道：发布到 Redis orchestrator:main 并登记内存/SQLite。
     供 POST /task 与定时任务调度器共用；失败抛异常由调用方处理。"""
@@ -1862,6 +1863,7 @@ def _publish_task(
         "auto_run": auto_run,
         "template_steps": template_steps,
         "user_id": user_id,
+        "report_confirm": bool(report_confirm),
     }, ensure_ascii=False))
     with _task_lock:
         _task_results[tid] = {
@@ -2684,6 +2686,7 @@ class Handler(BaseHTTPRequestHandler):
                     pass
             project = _safe_project(str(body.get("project") or "default"))
             auto_run = bool(body.get("auto_run", True))
+            report_confirm = bool(body.get("report_confirm", False))
             # 结果缓存：相同目标在 TTL 内已成功
             ttl = int(body.get("cache_ttl_min") or 0)
             if ttl > 0:
@@ -2706,6 +2709,7 @@ class Handler(BaseHTTPRequestHandler):
                     auto_run=auto_run,
                     template_steps=template_steps,
                     user_id=str(body.get("user_id") or ""),
+                    report_confirm=report_confirm,
                 )
                 tid = submitted["task_id"]
             except RuntimeError as exc:
