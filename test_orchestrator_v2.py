@@ -444,7 +444,7 @@ class TestRunIteration(unittest.TestCase):
             ws_mod.WORKSPACE_ROOT = old_root
             shutil.rmtree(tmp, ignore_errors=True)
 
-    def test_reflection_steps_capped(self):
+    def test_reflection_steps_capped_and_converges(self):
         o = make_orch()
         o._plan = lambda goal, task_id, context="", memory_context="": [
             {"step_id": "1", "capability": "content_summary", "instruction": "x", "timeout": 120}
@@ -470,8 +470,10 @@ class TestRunIteration(unittest.TestCase):
         o._reflect = fake_reflect
         o._now_iso = lambda: "t"
         res = o.run("t-cap-1", "目标", auto_run=True)
-        # 每轮最多追加 3 个步骤；2 轮迭代 + 初始 = 1 + 3 + 3 = 7 步
-        self.assertEqual(len(res["steps"]), 7, "反思每轮最多追加 3 步")
+        # 每轮最多追加 3 个步骤；追加轮产出与上一轮相同长度的 best_report
+        # → 反思收敛提前终止，不再进入第二轮追加。
+        self.assertEqual(reflected["n"], 1, "best_report 无改善时应提前终止反思")
+        self.assertEqual(len(res["steps"]), 4, "初始 1 步 + 反思轮最多追加 3 步")
 
     def test_reflection_retry_step_redoes_single_step(self):
         o = make_orch()

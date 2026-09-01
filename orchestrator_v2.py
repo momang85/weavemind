@@ -5783,7 +5783,8 @@ print("charts generated")
                 all_steps.extend(steps)
 
                 cand = self._best_deliverable(goal, last_steps, last_results)
-                if len(cand) > len(best_report):
+                _cand_improved = len(cand) > len(best_report)
+                if _cand_improved:
                     best_report = cand
                 self._publish_full_state(task_id, goal, all_steps, completed_all)
                 # V1.2 checkpoint：每轮执行完成后保存（含全部步骤/结果/迭代轮次）
@@ -5799,6 +5800,30 @@ print("charts generated")
                     best_report=best_report, gate_checked=gate_checked,
                     simple=simple, used_template=used_template,
                 ))
+                # 反思收敛优化：反思产出的本轮执行后 best_report 与上一轮相同
+                # 或更短 → 提前终止循环，避免无意义多轮；验收 fail 时除外
+                # （验收为准，仍强制重做，长度不能作为放行依据）。
+                if (
+                    best_report
+                    and iteration > 0
+                    and not _cand_improved
+                ):
+                    _acc_now = self._read_acceptance_summary(task_id)
+                    if not (_acc_now and _acc_now.get("overall") != "pass"):
+                        logger.info(
+                            "Reflection convergence: best_report 未改善"
+                            "（上一轮 %d -> 本轮 %d 字符），提前终止反思（task=%s）",
+                            len(best_report), len(cand), task_id,
+                        )
+                        push_progress(self._messaging, task_id, "log",
+                                      {"type": "iteration", "agent": "orchestrator",
+                                       "message": (
+                                           "Reflection: best_report 未改善"
+                                           f"（{len(best_report)} -> {len(cand)} 字符），"
+                                           "提前终止反思"
+                                       ),
+                                       "timestamp": self._now_iso()})
+                        break
             skip_execute = False
 
             if has_failure or self._max_iterations <= 0 or iteration >= self._max_iterations:
@@ -6004,7 +6029,8 @@ print("charts generated")
                             goal, all_steps,
                             [completed_all.get(s["step_id"], {}) for s in all_steps],
                         )
-                        if len(cand) > len(best_report):
+                        _cand_improved = len(cand) > len(best_report)
+                        if _cand_improved:
                             best_report = cand
                         self._publish_full_state(task_id, goal, all_steps, completed_all)
                         # V1.2 checkpoint：反思单步重做后保存（继续反思轮）
@@ -6016,6 +6042,23 @@ print("charts generated")
                             gate_checked=gate_checked, simple=simple,
                             used_template=used_template,
                         ))
+                        # 反思收敛优化：单步重做后 best_report 无改善（相同或
+                        # 更短）→ 提前终止反思；验收 fail 时仍继续重做。
+                        if best_report and not _cand_improved and not _acc_fail:
+                            logger.info(
+                                "Reflection convergence: 重做后 best_report 未改善"
+                                "（上一轮 %d -> 本轮 %d 字符），提前终止反思（task=%s）",
+                                len(best_report), len(cand), task_id,
+                            )
+                            push_progress(self._messaging, task_id, "log",
+                                          {"type": "iteration", "agent": "orchestrator",
+                                           "message": (
+                                               "Reflection: 重做后 best_report 未改善"
+                                               f"（{len(best_report)} -> {len(cand)} 字符），"
+                                               "提前终止反思"
+                                           ),
+                                           "timestamp": self._now_iso()})
+                            break
                         skip_execute = True  # 跳过整轮重跑，直接进入下一轮反思
                         continue
                 push_progress(self._messaging, task_id, "log",
