@@ -8,6 +8,7 @@
 """
 
 import json
+import os
 import shutil
 import tempfile
 import unittest
@@ -47,6 +48,18 @@ SUMMARY_TEXT = (
 
 
 class TestContentSummaryMergedCall(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        # 禁用本地 LoRA 优先路径：worker 测试走 mock 的云端调用链
+        self._old_lora = os.environ.get("WM_USE_LOCAL_LORA")
+        os.environ["WM_USE_LOCAL_LORA"] = "0"
+        self.addCleanup(self._restore)
+
+    def _restore(self):
+        if self._old_lora is None:
+            os.environ.pop("WM_USE_LOCAL_LORA", None)
+        else:
+            os.environ["WM_USE_LOCAL_LORA"] = self._old_lora
+
     async def _run_worker(self, instruction="分析腾讯财报并生成总结"):
         from workers.content_summary_worker import ContentSummaryWorker
         w = ContentSummaryWorker.__new__(ContentSummaryWorker)
@@ -244,6 +257,88 @@ class TestReflectionConvergence(unittest.TestCase):
         finally:
             ws_mod.WORKSPACE_ROOT = old_root
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestLocalLoraClient(unittest.TestCase):
+    """本地 QLoRA 推理客户端：探活/生成/回退语义。"""
+
+    def test_disabled_returns_none(self):
+        import lora_client as lc
+        old = lc._ENABLED
+        try:
+            lc._ENABLED = False
+            self.assertFalse(lc._service_alive())
+            self.assertIsNone(lc.local_generate("测试", timeout=1))
+        finally:
+            lc._ENABLED = old
+
+    def test_alive_check_short_circuit(self):
+        """服务不可达 → 快速返回 None（不等待 HTTP 超时）。"""
+        import lora_client as lc
+        old_url, old_en = lc.LOCAL_URL, lc._ENABLED
+        try:
+            lc.LOCAL_URL = "http://127.0.0.1:1"  # 必然不可达
+            lc._ENABLED = True
+            self.assertIsNone(lc.local_generate("测试", timeout=1))
+        finally:
+            lc.LOCAL_URL, lc._ENABLED = old_url, old_en
+
+    def test_generate_mock_success(self):
+        import lora_client as lc
+        from unittest import mock
+
+        with mock.patch.object(lc, "_service_alive", return_value=True), \
+                mock.patch.object(lc.urllib.request, "urlopen") as m_urlopen:
+            class FakeResp:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+                def read(self):
+                    return json.dumps({
+                        "status": "success",
+                        "summary": "# 测试总结\n\n这是一段足够长的正文内容，用于通过最短长度校验。",
+                        "charts": [{"type": "bar"}],
+                    }, ensure_ascii=False).encode("utf-8")
+            m_urlopen.return_value = FakeResp()
+            r = lc.local_generate("测试指令", timeout=5)
+            self.assertIsNotNone(r)
+            self.assertIn("测试总结", r["summary"])
+            self.assertEqual(len(r["charts"]), 1)
+
+    def test_generate_mock_failure_falls_back(self):
+        """服务异常 → 返回 None（调用方回退云端）。"""
+        import lora_client as lc
+        from unittest import mock
+
+        with mock.patch.object(lc, "_service_alive", return_value=True), \
+                mock.patch.object(lc.urllib.request, "urlopen", side_effect=OSError("conn refused")):
+            self.assertIsNone(lc.local_generate("测试", timeout=1))
+
+    def test_short_summary_rejected(self):
+        """输出过短（<20 字符）→ 拒绝并回退云端。"""
+        import lora_client as lc
+        from unittest import mock
+
+        with mock.patch.object(lc, "_service_alive", return_value=True), \
+                mock.patch.object(lc.urllib.request, "urlopen") as m_urlopen:
+            class FakeResp:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *a):
+                    return False
+
+                def read(self):
+                    return json.dumps({
+                        "status": "success",
+                        "summary": "太短",
+                        "charts": [],
+                    }, ensure_ascii=False).encode("utf-8")
+            m_urlopen.return_value = FakeResp()
+            self.assertIsNone(lc.local_generate("测试", timeout=5))
 
 
 if __name__ == "__main__":

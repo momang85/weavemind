@@ -199,6 +199,18 @@ def _try_merged_summary(system: str, user: str, instruction: str) -> str | None:
             "\n\n权威结构化财务数据（优先用于作图，年份完整、来源可信）：\n"
             + structured_block
         )
+    # 本地 QLoRA 微调优先：快、零 API 成本；失败/超时/输出不合格回退云端
+    try:
+        from lora_client import local_generate
+        local = local_generate(merged_user, max_tokens=8192)
+        if local:
+            logger.info(
+                "Local LoRA content_summary succeeded: summary_len=%d charts=%d",
+                len(local["summary"]), len(local["charts"]),
+            )
+            return _attach_chart_specs(local["summary"], local["charts"])
+    except Exception as exc:
+        logger.info("Local LoRA path failed (%s), fallback cloud", str(exc)[:80])
     try:
         try:
             raw = call_llm_stream(merged_sys, merged_user, max_tokens=8192)
