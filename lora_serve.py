@@ -76,8 +76,39 @@ def generate(instruction: str, max_tokens: int = 4096) -> dict:
 
 
 def _parse_output(raw: str) -> dict:
-    """解析模型输出：summary + [CHART_DATA]...JSON。"""
+    """解析模型输出：优先 {summary, charts} JSON；否则 summary + [CHART_DATA] 块。"""
     raw = str(raw or "").strip()
+    # 剥 markdown 围栏
+    t = raw
+    if t.startswith("```"):
+        parts = t.split("```")
+        t = parts[1] if len(parts) >= 2 else t
+        t = t.strip().lstrip("json").strip()
+    # 递归找 JSON 对象：模型可能输出 {summary, charts} 结构
+    i = t.find("{")
+    if i >= 0:
+        depth = 0
+        for j in range(i, len(t)):
+            if t[j] == "{":
+                depth += 1
+            elif t[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        data = json.loads(t[i:j + 1])
+                        if isinstance(data, dict):
+                            s = data.get("summary")
+                            c = data.get("charts")
+                            if isinstance(s, str) and s.strip():
+                                return {
+                                    "summary": s.strip(),
+                                    "charts": c if isinstance(c, list) else [],
+                                    "raw": raw[:200],
+                                }
+                    except Exception:
+                        pass
+                    break
+    # 兜底：summary 全文 + [CHART_DATA] 块
     summary = raw
     charts: list = []
     marker = "[CHART_DATA]"
