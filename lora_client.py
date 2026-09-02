@@ -4,6 +4,9 @@
 设计：优先本地 QLoRA 微调模型（快、零 API 成本、离线可用），
 本地服务不可达/超时/输出不合格时返回 None，由调用方回退云端 API。
 
+多 Worker 支持：server_url(name) 从 lora_servers.json 按名查端口，
+各 Worker 用不同 WM_LOCAL_URL 指向自己的 LoRA 服务。
+
 开关：WM_USE_LOCAL_LORA=1（默认开）；WM_LOCAL_URL 覆盖服务地址。
 """
 import json
@@ -14,16 +17,42 @@ import urllib.request
 
 logger = logging.getLogger(__name__)
 
+CONFIG_FILE = os.environ.get("WM_LORA_CONFIG", "lora_servers.json")
 LOCAL_URL = os.environ.get("WM_LOCAL_URL", "http://127.0.0.1:8765")
 _ENABLED = os.environ.get("WM_USE_LOCAL_LORA", "1") != "0"
+
+_cache = {"url": LOCAL_URL}
+
+
+def server_url(name: str) -> str:
+    """按 Worker 名查 LoRA 服务地址（从 lora_servers.json）。"""
+    name = str(name or "")
+    try:
+        with open(CONFIG_FILE, encoding="utf-8") as f:
+            cfg = json.load(f)
+        servers = cfg.get("servers") or {}
+        s = servers.get(name) if isinstance(servers, dict) else None
+        if s and s.get("enabled", True):
+            port = int(s.get("port") or 0)
+            if port > 0:
+                return f"http://127.0.0.1:{port}"
+    except Exception:
+        pass
+    return LOCAL_URL
+
+
+def set_server(name: str) -> None:
+    """当前客户端指向指定 Worker 的 LoRA 服务。"""
+    _cache["url"] = server_url(name)
 
 
 def _service_alive(timeout: float = 0.8) -> bool:
     """快速探活：TCP 连接检查（避免每次调用都等 HTTP 超时）。"""
     if not _ENABLED:
         return False
+    url = _cache["url"]
     try:
-        host, _, port = LOCAL_URL.replace("http://", "").partition(":")
+        host, _, port = url.replace("http://", "").partition(":")
         with socket.create_connection((host, int(port or 8765)), timeout=timeout):
             return True
     except Exception:
@@ -32,7 +61,7 @@ def _service_alive(timeout: float = 0.8) -> bool:
 
 def local_generate(instruction: str, max_tokens: int = 4096,
                    timeout: float = 180) -> dict | None:
-    """本地 LoRA 生成 {summary, charts}；失败/超时/输出不合格返回 None。"""
+    """本地 LoRA 生成 {summary, charts, sources}；失败/超时/输出不合格返回 None。"""
     if not _service_alive():
         return None
     payload = json.dumps({
@@ -41,7 +70,7 @@ def local_generate(instruction: str, max_tokens: int = 4096,
     }, ensure_ascii=False).encode("utf-8")
     try:
         req = urllib.request.Request(
-            f"{LOCAL_URL}/generate", data=payload,
+            f"{_cache['url']}/generate", data=payload,
             headers={"Content-Type": "application/json; charset=utf-8"},
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -62,5 +91,8 @@ def local_generate(instruction: str, max_tokens: int = 4096,
 
 if __name__ == "__main__":
     import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "--server":
+        print(server_url(sys.argv[2] if len(sys.argv) > 2 else "content_summary"))
+        sys.exit(0)
     r = local_generate(sys.argv[1] if len(sys.argv) > 1 else "分析贵州茅台近五年营收趋势")
     print(json.dumps(r, ensure_ascii=False, indent=1) if r else "None (回退云端)")

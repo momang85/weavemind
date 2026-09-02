@@ -1,0 +1,19 @@
+{
+  "base_model": "models/models/Qwen--Qwen2.5-7B-Instruct/snapshots/master",
+  "servers": {
+    "content_summary": {
+      "port": 8765,
+      "lora_path": "models/lora_content_summary_v2_final",
+      "description": "content_summary Worker：Markdown 总结 + 图表 + 来源声明",
+      "system_prompt": "你是织光 WeaveMind 的内容总结 Worker。根据指令生成 Markdown 总结与图表数据。",
+      "enabled": true
+    },
+    "content_summary_lite": {
+      "port": 8766,
+      "lora_path": "models/lora_content_summary",
+      "description": "演示第二实例：同任务不同 LoRA 版本（规模化时替换为独立 Worker LoRA）",
+      "system_prompt": "你是织光 WeaveMind 的内容总结 Worker。根据指令生成 Markdown 总结。",
+      "enabled": true
+    }
+  }
+}

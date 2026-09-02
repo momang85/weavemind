@@ -49,9 +49,16 @@ SUMMARY_TEXT = (
 
 class TestContentSummaryMergedCall(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        # 禁用本地 LoRA 优先路径：worker 测试走 mock 的云端调用链
+        # 禁用本地 LoRA 优先路径：worker 测试走 mock 的云端调用链。
+        # 同时设环境变量与模块属性（防 lora_client 被其他测试 reload 后失效）
         self._old_lora = os.environ.get("WM_USE_LOCAL_LORA")
         os.environ["WM_USE_LOCAL_LORA"] = "0"
+        try:
+            import lora_client as _lc
+            self._old_lora_enabled = _lc._ENABLED
+            _lc._ENABLED = False
+        except Exception:
+            self._old_lora_enabled = None
         self.addCleanup(self._restore)
 
     def _restore(self):
@@ -59,6 +66,12 @@ class TestContentSummaryMergedCall(unittest.IsolatedAsyncioTestCase):
             os.environ.pop("WM_USE_LOCAL_LORA", None)
         else:
             os.environ["WM_USE_LOCAL_LORA"] = self._old_lora
+        try:
+            import lora_client as _lc
+            if self._old_lora_enabled is not None:
+                _lc._ENABLED = self._old_lora_enabled
+        except Exception:
+            pass
 
     async def _run_worker(self, instruction="分析腾讯财报并生成总结"):
         from workers.content_summary_worker import ContentSummaryWorker
@@ -275,13 +288,13 @@ class TestLocalLoraClient(unittest.TestCase):
     def test_alive_check_short_circuit(self):
         """服务不可达 → 快速返回 None（不等待 HTTP 超时）。"""
         import lora_client as lc
-        old_url, old_en = lc.LOCAL_URL, lc._ENABLED
+        old_url, old_en = lc._cache["url"], lc._ENABLED
         try:
-            lc.LOCAL_URL = "http://127.0.0.1:1"  # 必然不可达
+            lc._cache["url"] = "http://127.0.0.1:1"  # 必然不可达
             lc._ENABLED = True
             self.assertIsNone(lc.local_generate("测试", timeout=1))
         finally:
-            lc.LOCAL_URL, lc._ENABLED = old_url, old_en
+            lc._cache["url"], lc._ENABLED = old_url, old_en
 
     def test_generate_mock_success(self):
         import lora_client as lc
