@@ -50,10 +50,11 @@ def local_generate(instruction: str, max_tokens: int = 4096,
             return None
         summary = str(data.get("summary") or "").strip()
         charts = data.get("charts") if isinstance(data.get("charts"), list) else []
+        sources = data.get("sources") if isinstance(data.get("sources"), list) else []
         if len(summary) < 20:
             logger.info("Local LoRA output too short (%d chars), fallback cloud", len(summary))
             return None
-        return {"summary": summary, "charts": charts}
+        return {"summary": summary, "charts": charts, "sources": sources}
     except Exception as exc:
         logger.info("Local LoRA unavailable (%s), fallback cloud", str(exc)[:80])
         return None

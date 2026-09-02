@@ -27,12 +27,17 @@ def build_dataset(path: str):
             instruction = str(rec.get("instruction") or "")
             summary = str(rec.get("summary") or "")
             charts = rec.get("charts") or []
+            sources = rec.get("sources") or []
             if not instruction or not summary:
                 continue
             charts_text = json.dumps(charts, ensure_ascii=False) if charts else "[]"
+            # v2：含 sources（来源声明）字段 → 追加到输出，训练模型学会来源纪律
+            sources_text = ""
+            if sources:
+                sources_text = "\n\n[SOURCES]" + json.dumps(sources, ensure_ascii=False)
             samples.append({
                 "instruction": instruction,
-                "output": f"{summary}\n\n[CHART_DATA]{charts_text}",
+                "output": f"{summary}\n\n[CHART_DATA]{charts_text}{sources_text}",
             })
     return samples
 

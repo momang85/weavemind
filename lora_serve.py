@@ -65,14 +65,27 @@ def generate(instruction: str, max_tokens: int = 4096) -> dict:
         ]
         text = _tokenizer.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
         inputs = _tokenizer(text, return_tensors="pt").to(_model.device)
-        with torch.no_grad():
-            out = _model.generate(
-                **inputs, max_new_tokens=max_tokens,
-                do_sample=True, temperature=0.3, top_p=0.9,
-                pad_token_id=_tokenizer.pad_token_id,
-            )
-        raw = _tokenizer.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
-    return _parse_output(raw)
+        # 重试机制：代码跑偏输出（R/Python 代码）自动重试一次
+        for attempt in range(2):
+            with torch.no_grad():
+                out = _model.generate(
+                    **inputs, max_new_tokens=max_tokens,
+                    do_sample=True, temperature=0.2, top_p=0.85,
+                    pad_token_id=_tokenizer.pad_token_id,
+                )
+            raw = _tokenizer.decode(out[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+            parsed = _parse_output(raw)
+            # 代码污染检测：输出主体是 R/Python 代码 → 重试
+            head = str(raw or "")[:200].strip()
+            if not (
+                head.startswith("library(") or head.startswith("import ")
+                or head.startswith("def ") or head.startswith("```r")
+                or head.startswith("```python") or head.startswith("# ")
+            ):
+                return parsed
+            if attempt == 0:
+                print(f"检测到代码跑偏输出，重试 (len={len(raw)})", flush=True)
+        return parsed
 
 
 def _parse_output(raw: str) -> dict:
@@ -108,19 +121,38 @@ def _parse_output(raw: str) -> dict:
                     except Exception:
                         pass
                     break
-    # 兜底：summary 全文 + [CHART_DATA] 块
+    # 兜底：summary 全文 + [CHART_DATA] 块 + [SOURCES] 块
     summary = raw
     charts: list = []
+    sources: list = []
     marker = "[CHART_DATA]"
     if marker in raw:
-        summary, _, charts_part = raw.partition(marker)
+        summary, _, rest = raw.partition(marker)
+        charts_part, _, sources_part = rest.partition("[SOURCES]")
         try:
             charts = json.loads(charts_part.strip())
             if not isinstance(charts, list):
                 charts = []
         except Exception:
             charts = []
-    return {"summary": summary.strip(), "charts": charts, "raw": raw[:200]}
+        if sources_part:
+            try:
+                sources = json.loads(sources_part.strip())
+                if not isinstance(sources, list):
+                    sources = []
+            except Exception:
+                sources = []
+    else:
+        smarker = "[SOURCES]"
+        if smarker in raw:
+            summary, _, sources_part = raw.partition(smarker)
+            try:
+                sources = json.loads(sources_part.strip())
+                if not isinstance(sources, list):
+                    sources = []
+            except Exception:
+                sources = []
+    return {"summary": summary.strip(), "charts": charts, "sources": sources, "raw": raw[:200]}
 
 
 def main():

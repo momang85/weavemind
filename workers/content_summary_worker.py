@@ -208,7 +208,16 @@ def _try_merged_summary(system: str, user: str, instruction: str) -> str | None:
                 "Local LoRA content_summary succeeded: summary_len=%d charts=%d",
                 len(local["summary"]), len(local["charts"]),
             )
-            return _attach_chart_specs(local["summary"], local["charts"])
+            out = _attach_chart_specs(local["summary"], local["charts"])
+            # 来源声明（v2 蒸馏训练学会的纪律）：附加 [SOURCES] 块
+            try:
+                import json as _json
+                srcs = local.get("sources") or []
+                if isinstance(srcs, list) and srcs:
+                    out = out + "\n\n[SOURCES]" + _json.dumps(srcs, ensure_ascii=False)
+            except Exception:
+                pass
+            return out
     except Exception as exc:
         logger.info("Local LoRA path failed (%s), fallback cloud", str(exc)[:80])
     try:

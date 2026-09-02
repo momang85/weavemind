@@ -23,6 +23,16 @@ logs/
 # Python
 __pycache__/
 *.py[cod]
+.venv*/
+venv/
+
+# 本地训练产物（模型权重/LoRA）
+models/
+lora_out/
+distill_v2_raw.jsonl
+distill_data_v2.jsonl
+distill_test_v2.jsonl
+distill_data_merged.jsonl
 
 # 前端
 frontend/node_modules/
