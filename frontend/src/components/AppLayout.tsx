@@ -5,6 +5,7 @@ import { Play, Users, Clock, Activity, PanelLeftClose, PanelLeft, Brain, FlaskCo
 import { useTaskStore } from '../stores/useTaskStore'
 import { useDemoRunner } from '../stores/useDemoRunner'
 import { clearAuth, getAuthUser } from '../auth'
+import ModeToggle from './ModeToggle'
 
 const navItems = [
   { to: '/', icon: Play, label: '任务控制台' },
@@ -102,6 +103,8 @@ export default function AppLayout({ children }: { children: ReactNode }) {
             {titles[location.pathname] || location.pathname.slice(1)}
           </h1>
           <div className="flex items-center gap-5 text-sm">
+            {/* LLM 运行模式切换：全商业 API / 本地 LoRA 混合 */}
+            <ModeToggle compact />
             {demoMode && (
               <span className="hidden sm:inline px-2.5 py-0.5 rounded-full text-xs font-semibold bg-purple-500/20 text-purple-400">演示</span>
             )}

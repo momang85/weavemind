@@ -1,19 +1,38 @@
 {
+  "_comment": "LoRA 推理服务配置。所有 LoRA 必须基于同一基座训练（Qwen2.5-7B-Instruct），单 base 加载一次 + 多 adapter 池共享。目录规范：loras/<worker>/（见 docs/LLM模式与LoRA管理.md）。",
   "base_model": "models/models/Qwen--Qwen2.5-7B-Instruct/snapshots/master",
   "servers": {
     "content_summary": {
       "port": 8765,
-      "lora_path": "models/lora_content_summary_v2_final",
-      "description": "content_summary Worker：Markdown 总结 + 图表 + 来源声明",
+      "lora_path": "loras/summarizer",
+      "description": "content_summary Worker：Markdown 总结 + 图表 + 来源声明（已蒸馏，loss 0.74）",
       "system_prompt": "你是织光 WeaveMind 的内容总结 Worker。根据指令生成 Markdown 总结与图表数据。",
       "enabled": true
     },
     "content_summary_lite": {
       "port": 8766,
       "lora_path": "models/lora_content_summary",
-      "description": "演示第二实例：同任务不同 LoRA 版本（规模化时替换为独立 Worker LoRA）",
+      "description": "演示第二实例（规模化时替换为独立 Worker LoRA，如 loras/ranking/）",
       "system_prompt": "你是织光 WeaveMind 的内容总结 Worker。根据指令生成 Markdown 总结。",
-      "enabled": true
+      "enabled": false
+    },
+    "_future_ranking": {
+      "port": 8766,
+      "lora_path": "loras/ranking",
+      "description": "未来：finance_ranking Worker（排行统计蒸馏）——训练完成后改 enabled 并删除本注释条目",
+      "enabled": false
+    },
+    "_future_code_gen": {
+      "port": 8767,
+      "lora_path": "loras/code_gen",
+      "description": "未来：code_execution Worker（代码生成蒸馏）",
+      "enabled": false
+    },
+    "_future_relevance": {
+      "port": 8768,
+      "lora_path": "loras/relevance_judge",
+      "description": "未来：相关性判定 Worker（检索质量蒸馏）",
+      "enabled": false
     }
   }
 }

@@ -2315,6 +2315,22 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(body)
             return
         if p == "/api/config": return self._json(_public_config(_load_config()))
+        if p == "/api/llm-mode":
+            # 当前 LLM 模式（cloud/hybrid）；Redis 优先，config.json 兜底
+            mode = "hybrid"
+            try:
+                if _redis_ready():
+                    rmode = _new_redis().get("llm_mode")
+                    if rmode:
+                        mode = rmode
+            except Exception:
+                pass
+            if mode not in ("cloud", "hybrid"):
+                try:
+                    mode = str((_load_config().get("system") or {}).get("llm_mode") or "hybrid")
+                except Exception:
+                    mode = "hybrid"
+            return self._json({"mode": mode})
         if p == "/api/notifications":
             # F5：通知配置读取（仅 admin，见 _role_allowed_get）；密码/密钥不回显
             from notifications import (
@@ -2890,6 +2906,23 @@ class Handler(BaseHTTPRequestHandler):
             if llm.get("model"): os.environ["LLM_MODEL"] = llm["model"]
             audit_log(admin.get("user", ""), self._client_ip(), "config.save", result="ok")
             return self._json({"status":"saved"})
+        if self.path == "/api/llm-mode":
+            # LLM 运行模式切换：cloud=全商业 API；hybrid=本地 LoRA 参与部分 Worker。
+            # 写 Redis（worker 实时读）+ config.json（持久化重启后生效）。
+            mode = str(body.get("mode") or "").strip().lower()
+            if mode not in ("cloud", "hybrid"):
+                return self._json({"error": "mode must be cloud|hybrid"}, 400)
+            try:
+                if _redis_ready():
+                    _new_redis().set("llm_mode", mode)
+            except Exception:
+                pass
+            cfg = _load_config() or {}
+            cfg.setdefault("system", {})["llm_mode"] = mode
+            _save_config(cfg)
+            audit_log(admin.get("user", ""), self._client_ip(), "llm.mode",
+                      result="ok", detail=mode)
+            return self._json({"status": "ok", "mode": mode})
         if self.path == "/api/notifications":
             # F5：通知配置保存（仅 admin）：body 可直接是 notifications 段，
             # 也可包裹在 {"notifications": {...}} 中（与 GET 响应一致）

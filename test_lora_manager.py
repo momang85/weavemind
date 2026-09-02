@@ -133,5 +133,66 @@ class TestLoraClientMultiServer(unittest.TestCase):
             lc._ENABLED = old_enabled
 
 
+class TestLlmModeSwitch(unittest.TestCase):
+    """LLM 运行模式切换（cloud=全商业 API / hybrid=本地 LoRA 混合）。"""
+
+    def test_mode_env_override(self):
+        """环境变量 WM_LLM_MODE=cloud → 模式 cloud（不走本地）。"""
+        old = os.environ.get("WM_LLM_MODE")
+        old_cache = dict(lc._mode_cache)
+        try:
+            os.environ["WM_LLM_MODE"] = "cloud"
+            lc._mode_cache.update({"mode": None, "ts": 0.0})
+            self.assertEqual(lc.llm_mode(), "cloud")
+            self.assertFalse(lc._service_alive(), "cloud 模式不应探活本地")
+        finally:
+            if old is None:
+                os.environ.pop("WM_LLM_MODE", None)
+            else:
+                os.environ["WM_LLM_MODE"] = old
+            lc._mode_cache.update(old_cache)
+
+    def test_mode_default_hybrid(self):
+        """无任何配置 → 默认 hybrid（本地可用）。"""
+        old_env = os.environ.get("WM_LLM_MODE")
+        old_cache = dict(lc._mode_cache)
+        old_enabled = lc._ENABLED
+        try:
+            os.environ.pop("WM_LLM_MODE", None)
+            lc._ENABLED = True
+            lc._mode_cache.update({"mode": None, "ts": 0.0})
+            # 模拟 config.json 无 llm_mode + Redis 不可达（测试环境无 Redis）
+            import lora_client as _lc
+            orig = _lc._mode
+            _lc._mode = lambda: "hybrid"
+            try:
+                self.assertEqual(_lc.llm_mode(), "hybrid")
+            finally:
+                _lc._mode = orig
+        finally:
+            if old_env is not None:
+                os.environ["WM_LLM_MODE"] = old_env
+            lc._mode_cache.update(old_cache)
+            lc._ENABLED = old_enabled
+
+    def test_webui_mode_api_auth_gate(self):
+        """web_ui POST/GET /api/llm-mode 无 token → 401（受鉴权保护），不泄露模式。"""
+        import web_ui
+        from test_auth_audit import _make_handler
+
+        old_redis_ready = web_ui._redis_ready
+        web_ui._redis_ready = lambda: False
+        FH = _make_handler()
+        try:
+            handler = FH("/api/llm-mode", "POST", {"mode": "cloud"})
+            web_ui.Handler.do_POST(handler)
+            self.assertEqual(handler._status, 401)
+            handler2 = FH("/api/llm-mode")
+            web_ui.Handler.do_GET(handler2)
+            self.assertEqual(handler2._status, 401)
+        finally:
+            web_ui._redis_ready = old_redis_ready
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
