@@ -162,6 +162,9 @@ def generate(instruction: str, max_tokens: int = 4096, port: int = 0) -> dict:
         return parsed
 
 
+_FENCE_LANGS = ("json", "markdown", "md", "text", "txt", "plain", "yaml", "python", "r", "javascript", "js")
+
+
 def _parse_output(raw: str) -> dict:
     """解析模型输出：优先 {summary, charts} JSON；否则 summary + [CHART_DATA]/[SOURCES] 块。"""
     raw = str(raw or "").strip()
@@ -169,7 +172,14 @@ def _parse_output(raw: str) -> dict:
     if t.startswith("```"):
         parts = t.split("```")
         t = parts[1] if len(parts) >= 2 else t
-        t = t.strip().lstrip("json").strip()
+        # 剥掉围栏首行的语言标识（json/markdown/text 等），避免围栏混入 summary
+        lines = t.split("\n", 1)
+        lang = lines[0].strip().lower().lstrip("`").strip()
+        if len(lines) == 2 and lang in _FENCE_LANGS:
+            t = lines[1]
+        elif len(lines) == 1 and lang in _FENCE_LANGS:
+            t = ""
+        t = t.strip()
     i = t.find("{")
     if i >= 0:
         depth = 0
@@ -193,12 +203,12 @@ def _parse_output(raw: str) -> dict:
                     except Exception:
                         pass
                     break
-    summary = raw
+    summary = t
     charts: list = []
     sources: list = []
     marker = "[CHART_DATA]"
-    if marker in raw:
-        summary, _, rest = raw.partition(marker)
+    if marker in t:
+        summary, _, rest = t.partition(marker)
         charts_part, _, sources_part = rest.partition("[SOURCES]")
         try:
             charts = json.loads(charts_part.strip())
@@ -215,8 +225,8 @@ def _parse_output(raw: str) -> dict:
                 sources = []
     else:
         smarker = "[SOURCES]"
-        if smarker in raw:
-            summary, _, sources_part = raw.partition(smarker)
+        if smarker in t:
+            summary, _, sources_part = t.partition(smarker)
             try:
                 sources = json.loads(sources_part.strip())
                 if not isinstance(sources, list):
