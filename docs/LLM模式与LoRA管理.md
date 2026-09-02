@@ -69,3 +69,19 @@ python eval_distill.py            # 本地 LoRA 评测（JSON 合规/来源纪�
 | code_execution | - | - | - | 8767(预留) | 待蒸馏 |
 | relevance_judge | - | - | - | 8768(预留) | 待蒸馏 |
 | orchestrator/critic | **永不 LoRA** | - | - | - | 商业 API |
+
+## 5. 质量基线与已知短板（2026-09 实测，eval_distill.py 同批对比）
+
+| 指标 | 云端教师(glm-4-flash) | 本地 summarizer(v2) | 判定 |
+|---|---|---|---|
+| JSON 合规 | 待补 | 100% (3/3) | ✅ |
+| 来源标注 | 待补 | 67% (2/3) | ⚠️ 短板 |
+| 耗时 | ~28s | 86s (max_tokens 2500) | ⚠️ 慢 3 倍 |
+
+已知短板（v2 蒸馏 23 条数据的自然限制，v3 优化方向）：
+- **图表格式漂移**：有时输出 mermaid 代码块而非 [CHART_DATA] JSON（数据正确但需解析层转 charts）
+- **来源标注纪律**：约 1/3 输出缺显式来源声明（v2 教师已强制，样本不足）
+- **开放式指令**：倾向追问细节而非直接作答（结构化指令正常）
+
+回退门（约束④）：任一关键指标低于云端 >10 个百分点 → QUALITY_REGRESSION，回退 cloud。
+每次新 LoRA 训练后跑 `python eval_distill.py --compare`（cloud 同批）留档。
