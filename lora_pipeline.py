@@ -183,11 +183,11 @@ def register_server(worker: str, enabled: bool = False) -> dict:
 # 阶段 6：评测门（eval_distill --compare --gate）
 # ─────────────────────────────────────────────
 
-def run_eval_gate(limit: int = 5, dry_run: bool = False) -> int:
+def run_eval_gate(worker: str, limit: int = 5, dry_run: bool = False) -> int:
     """质量门禁：同批对比 + 回退判定。返回 eval_distill 退出码（0=达标）。"""
     return _run([
         sys.executable, "eval_distill.py", "--compare", "--gate",
-        "--limit", str(limit),
+        "--limit", str(limit), "--worker", worker,
     ], dry_run=dry_run)
 
 
@@ -215,25 +215,31 @@ def main() -> int:
     dry = args.dry_run
     print(f"═══ LoRA 管线: {worker}（dry-run={dry}）═══")
 
-    # ── 1. 蒸馏 ──
-    train_data = os.path.join(REPO_ROOT, "distill_data_v2.jsonl")
+    # ── 1. 蒸馏（distill_v2 按 worker 参数化输出文件） ──
     if not args.skip_distill:
-        rc = _run([sys.executable, "distill_v2.py"], dry_run=dry)
+        rc = _run([sys.executable, "distill_v2.py", "--worker", worker], dry_run=dry)
         if rc != 0:
             print("❌ 蒸馏失败，中止", flush=True)
             return rc
+    from distill_v2 import _data_files
+    raw_data, train_data, test_data = _data_files(worker)
     if not os.path.exists(train_data) or os.path.getsize(train_data) == 0:
-        print(f"❌ 训练数据缺失: {train_data}（--skip-distill 需已有数据）", flush=True)
-        return 1
-    n = sum(1 for _ in open(train_data, encoding="utf-8") if _.strip())
-    print(f"训练数据: {n} 条", flush=True)
+        if dry:
+            print(f"⚠️ 训练数据 {train_data} 尚不存在（dry-run 不实际执行蒸馏），按计划继续", flush=True)
+            n = 0
+        else:
+            print(f"❌ 训练数据缺失: {train_data}（--skip-distill 需已有数据）", flush=True)
+            return 1
+    else:
+        n = sum(1 for _ in open(train_data, encoding="utf-8") if _.strip())
+    print(f"训练数据: {n} 条（{train_data}）", flush=True)
 
     # ── 2. 训练 ──
     lora_out = os.path.join("loras", worker)
     if not args.skip_train:
         rc = _run([
             sys.executable, "finetune_qlora.py",
-            "--data", "distill_data_v2.jsonl",
+            "--data", os.path.basename(train_data),
             "--out", lora_out,
             "--epochs", str(args.epochs),
         ], dry_run=dry)
@@ -279,7 +285,7 @@ def main() -> int:
 
     # ── 6. 评测门 ──
     if not args.skip_eval and not dry:
-        rc = run_eval_gate(limit=args.limit, dry_run=False)
+        rc = run_eval_gate(worker, limit=args.limit, dry_run=False)
         if rc != 0:
             print(f"\n❌ 质量回退（exit={rc}）：建议回退 cloud 模式", flush=True)
             return rc
@@ -288,7 +294,7 @@ def main() -> int:
         else:
             print("\n✅ 质量达标。确认无误后请手工把该 worker 的 enabled 改为 true", flush=True)
     elif not args.skip_eval:
-        print("评测门: [dry-run] 将运行 eval_distill.py --compare --gate", flush=True)
+        print(f"评测门: [dry-run] 将运行 eval_distill.py --compare --gate --worker {worker}", flush=True)
 
     print(f"\n═══ 管线完成: {worker} ═══", flush=True)
     return 0

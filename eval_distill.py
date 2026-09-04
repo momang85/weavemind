@@ -32,10 +32,20 @@ TEACHER_MODEL = "glm-4-flash"
 REGRESSION_THRESHOLD = 0.10  # 10 个百分点
 
 
-def load_test() -> list[dict]:
+def test_file_for(worker: str) -> str:
+    """按 Worker 选择测试集文件（与 distill_v2 的文件命名一致）。
+
+    content_summary 使用历史固定名（兼容既有评测集），其余按 distill_{worker}_test.jsonl。
+    """
+    if worker and worker != "content_summary":
+        return f"distill_{worker}_test.jsonl"
+    return TEST_FILE
+
+
+def load_test(path: str = TEST_FILE) -> list[dict]:
     out = []
     try:
-        with open(TEST_FILE, encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line:
@@ -161,9 +171,11 @@ def main():
     ap.add_argument("--gate", action="store_true",
                     help="质量回退时以退出码 1 结束（CI/管线门禁用）")
     ap.add_argument("--limit", type=int, default=5, help="评测样本上限")
+    ap.add_argument("--worker", default="content_summary",
+                    help="目标 Worker 名（决定测试集文件，默认 content_summary）")
     args = ap.parse_args()
 
-    samples = load_test()
+    samples = load_test(test_file_for(args.worker))
     print(f"测试集: {len(samples)} 条（评测 {min(args.limit, len(samples))} 条）")
     if not samples:
         print("无测试数据，跳过评测")

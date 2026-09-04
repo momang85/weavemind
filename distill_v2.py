@@ -29,9 +29,30 @@ ZHIPU_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 TEACHER_MODEL = "glm-4-flash"
 
 OUT_DIR = os.path.dirname(os.path.abspath(__file__))
-RAW_FILE = os.path.join(OUT_DIR, "distill_v2_raw.jsonl")
-TRAIN_FILE = os.path.join(OUT_DIR, "distill_data_v2.jsonl")
-TEST_FILE = os.path.join(OUT_DIR, "distill_test_v2.jsonl")
+# 参数化 Worker 类型：文件按 worker 区分，多 Worker 蒸馏互不覆盖。
+# content_summary 是首个 Worker，历史上使用固定文件名（distill_v2_raw.jsonl 等），
+# 为兼容既有数据/评测集，content_summary 继续使用旧文件名。
+DEFAULT_WORKER = "content_summary"
+_LEGACY_FILES = {  # worker -> (raw, train, test)
+    "content_summary": ("distill_v2_raw.jsonl", "distill_data_v2.jsonl", "distill_test_v2.jsonl"),
+}
+
+
+def _data_files(worker: str) -> tuple[str, str, str]:
+    """返回 (raw, train, test) 文件路径。"""
+    if worker in _LEGACY_FILES:
+        raw, train, test = _LEGACY_FILES[worker]
+    else:
+        raw, train, test = (
+            f"distill_{worker}_raw.jsonl",
+            f"distill_{worker}_data.jsonl",
+            f"distill_{worker}_test.jsonl",
+        )
+    return (
+        os.path.join(OUT_DIR, raw),
+        os.path.join(OUT_DIR, train),
+        os.path.join(OUT_DIR, test),
+    )
 
 TARGET_TOTAL = int(os.environ.get("DISTILL_TARGET", "120"))
 TEST_SIZE = 20
@@ -185,7 +206,8 @@ def validate_label(label: dict) -> bool:
     return True
 
 
-def label_one(query: str, stats: dict, print_lock: threading.Lock) -> bool:
+def label_one(query: str, stats: dict, print_lock: threading.Lock,
+              worker: str = DEFAULT_WORKER) -> bool:
     if not _relevant_to_finance(query):
         with print_lock:
             stats["off_topic"] += 1
@@ -207,7 +229,8 @@ def label_one(query: str, stats: dict, print_lock: threading.Lock) -> bool:
             "sources": parsed["sources"],
         }
         with _write_lock:
-            with open(RAW_FILE, "a", encoding="utf-8") as f:
+            raw_file, _, _ = _data_files(worker)
+            with open(raw_file, "a", encoding="utf-8") as f:
                 f.write(json.dumps(sample, ensure_ascii=False) + "\n")
         with print_lock:
             stats["ok"] += 1
@@ -219,12 +242,13 @@ def label_one(query: str, stats: dict, print_lock: threading.Lock) -> bool:
         return False
 
 
-def finalize():
-    """去重、拆分 train/test。"""
+def finalize(worker: str = DEFAULT_WORKER):
+    """去重、拆分 train/test（按 worker 分开存储）。"""
+    raw_file, train_file, test_file = _data_files(worker)
     samples = []
     seen = set()
-    if os.path.exists(RAW_FILE):
-        with open(RAW_FILE, encoding="utf-8") as f:
+    if os.path.exists(raw_file):
+        with open(raw_file, encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if not line:
@@ -241,10 +265,10 @@ def finalize():
     random.shuffle(samples)
     test_size = min(TEST_SIZE, max(int(len(samples) * 0.15), 10))
     train, test = samples[test_size:], samples[:test_size]
-    with open(TRAIN_FILE, "w", encoding="utf-8") as f:
+    with open(train_file, "w", encoding="utf-8") as f:
         for s in train:
             f.write(json.dumps(s, ensure_ascii=False) + "\n")
-    with open(TEST_FILE, "w", encoding="utf-8") as f:
+    with open(test_file, "w", encoding="utf-8") as f:
         for s in test:
             f.write(json.dumps(s, ensure_ascii=False) + "\n")
     # 统计来源类型分布
@@ -262,12 +286,20 @@ def finalize():
 
 
 def main():
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--worker", default=DEFAULT_WORKER,
+                    help="目标 Worker 名（默认 content_summary，按 worker 分文件）")
+    args = ap.parse_args()
+    worker = args.worker
+    raw_file, _, _ = _data_files(worker)
+
     stats = {"ok": 0, "schema_fail": 0, "off_topic": 0, "err": 0}
     print_lock = threading.Lock()
     existing = 0
-    if os.path.exists(RAW_FILE):
-        existing = sum(1 for l in open(RAW_FILE, encoding="utf-8") if l.strip())
-    print(f"已有: {existing} | 目标: {TARGET_TOTAL}")
+    if os.path.exists(raw_file):
+        existing = sum(1 for l in open(raw_file, encoding="utf-8") if l.strip())
+    print(f"Worker: {worker} | 已有: {existing} | 目标: {TARGET_TOTAL}")
 
     for rnd in range(NUM_ROUNDS):
         if existing >= TARGET_TOTAL:
@@ -286,13 +318,14 @@ def main():
         random.shuffle(all_queries)
         print(f"  待标注: {len(all_queries)}")
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as pool:
-            futs = [pool.submit(label_one, q, stats, print_lock) for q in all_queries]
+            futs = [pool.submit(label_one, q, stats, print_lock, worker)
+                    for q in all_queries]
             for fut in as_completed(futs):
                 fut.result()
-        existing = sum(1 for l in open(RAW_FILE, encoding="utf-8") if l.strip())
+        existing = sum(1 for l in open(raw_file, encoding="utf-8") if l.strip())
         print(f"Round {rnd + 1} 结束 | 有效: {stats['ok']} | schema 过滤: {stats['schema_fail']}")
 
-    finalize()
+    finalize(worker)
     print(f"\n完成: ok={stats['ok']} schema_fail={stats['schema_fail']} off_topic={stats['off_topic']} err={stats['err']}")
 
 
