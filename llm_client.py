@@ -300,13 +300,42 @@ def get_task_llm_degradation(task_id: str) -> dict:
         return {}
 
 
-def _mark_auth_error(code: int, body: str) -> None:
-    """记录鉴权/余额错误（401/402/403），供编排器/前端提醒用户检查 API 配置。"""
+def _is_balance_error(body: str) -> bool:
+    """401/402/403 响应体是否余额/额度类错误（Insufficient balance/CreditsError 等）。
+
+    余额不足是确定性故障，不会因重试自愈——命中后应把该端点标记为不健康，
+    避免每次调用都先撞一次 401 再切换，白耗一次请求。
+    """
+    low = str(body or "").lower()
+    return any(k in low for k in (
+        "insufficient", "balance", "credit", "quota", "额度", "余额",
+    ))
+
+
+def _mark_auth_error(code: int, body: str, endpoint: str = "") -> None:
+    """记录鉴权/余额错误（401/402/403），供编排器/前端提醒用户检查 API 配置。
+
+    endpoint 非空且为余额类错误时，同步把该端点标记为不健康（确定性故障，
+    避免留在重试/轮换链里每次白耗一次请求）。
+    """
     with _auth_error_lock:
         _last_auth_error["ts"] = time.time()
         _last_auth_error["message"] = (
             f"LLM 端点鉴权/余额错误 HTTP {code}：{body[:150]}"
         )
+    if endpoint and _is_balance_error(body):
+        # 余额不足是确定性故障：立即标记不健康（不走 2 次失败阈值），
+        # 后续调用直接跳过该端点，避免每次白耗一次请求
+        with _endpoint_health_lock:
+            st = _endpoint_health.setdefault(
+                endpoint,
+                {"healthy": True, "fails": 0,
+                 "last_degradation_reason": "", "last_degradation_ts": 0},
+            )
+            st["healthy"] = False
+            st["fails"] = _ENDPOINT_FAIL_THRESHOLD
+            st["last_degradation_reason"] = f"HTTP_{code}_insufficient_balance"
+            st["last_degradation_ts"] = time.time()
 
 
 def get_endpoint_warning() -> str:
@@ -354,12 +383,14 @@ def _classify_probe_error(exc: Exception) -> str:
     return "unreachable"
 
 
-def _probe_endpoint_status(base_url: str, api_key: str, model: str) -> dict:
+def _probe_endpoint_status(
+    base_url: str, api_key: str, model: str, endpoint: str = "primary",
+) -> dict:
     """余额感知探测：极短请求（max_tokens=1）验证端点可用，
     返回 {ok, reason}；reason ∈ ok/insufficient_balance/unauthorized/unreachable。"""
     try:
         client = LLMClient(base_url=base_url, api_key=api_key, model=model)
-        raw = client._send_request("你是连通性探测器，只回复：ok", "ping", 0.0, 1)
+        raw = client._send_request("你是连通性探测器，只回复：ok", "ping", 0.0, 1, endpoint=endpoint)
         if bool(raw and str(raw).strip()):
             return {"ok": True, "reason": "ok"}
         return {"ok": False, "reason": "unreachable"}
@@ -407,6 +438,7 @@ def get_balance_status(use_cache: bool = True) -> dict:
             primary_base,
             os.environ.get("LLM_API_KEY") or "",
             os.environ.get("LLM_MODEL") or "gpt-4o",
+            endpoint="primary",
         )
         _mark_endpoint("primary", st["ok"], st["reason"])
         result["primary"] = st
@@ -417,6 +449,7 @@ def get_balance_status(use_cache: bool = True) -> dict:
             _BACKUP_CFG.get("base_url", ""),
             _BACKUP_CFG.get("api_key", ""),
             _BACKUP_CFG.get("model") or "gpt-4o",
+            endpoint="backup",
         )
         _mark_endpoint("backup", st["ok"], st["reason"])
         result["backup"] = st
@@ -448,6 +481,7 @@ def endpoints_available() -> tuple[bool, str]:
             _BACKUP_CFG.get("base_url", ""),
             _BACKUP_CFG.get("api_key", ""),
             _BACKUP_CFG.get("model") or "gpt-4o",
+            endpoint="backup",
         )
         ok = st["ok"]
         _mark_endpoint("backup", ok, st["reason"])
@@ -959,7 +993,7 @@ class LLMClient:
             api_key=self._backup_cfg.get("api_key"),
             model=self._backup_cfg.get("model") or self.model,
         )
-        raw = backup._send_request(system, user, temperature, max_tokens)
+        raw = backup._send_request(system, user, temperature, max_tokens, endpoint="backup")
         _mark_endpoint("backup", True)
         # P2-3：切换发生时把主端点 last_degradation_reason（为空则记
         # inherited_unhealthy）作为根因，避免 llm_degraded 只有 switch 事件
@@ -983,6 +1017,7 @@ class LLMClient:
         temperature: float,
         max_tokens: int,
         model: str | None = None,
+        endpoint: str = "primary",
     ) -> str:
         """发送 HTTP 请求到 LLM 服务。
 
@@ -1033,7 +1068,10 @@ class LLMClient:
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
             if exc.code in (401, 402, 403):
-                _mark_auth_error(exc.code, error_body)
+                # 余额类 401/402/403 → 该端点标记不健康，后续调用直接走切换
+                _mark_auth_error(exc.code, error_body, endpoint=endpoint)
+                if _is_balance_error(error_body):
+                    _mark_endpoint(endpoint, False, f"HTTP_{exc.code}_insufficient_balance")
             raise LLMCallError(
                 f"HTTP {exc.code}: {error_body[:500]}"
             ) from exc
@@ -1449,6 +1487,7 @@ async def call_llm_async(
                 _mark_auth_error(
                     exc.response.status_code,
                     str(exc.response.text)[:150],
+                    endpoint="primary",
                 )
                 last_error = LLMCallError(
                     f"主端点鉴权/余额错误 HTTP {exc.response.status_code}"
@@ -1492,6 +1531,7 @@ async def _async_call_backup(payload: dict, fallback_model: str, expect_json: bo
         _mark_auth_error(
             response.status_code,
             str(response.text)[:150],
+            endpoint="backup",
         )
         raise LLMCallError(
             f"备用端点鉴权/余额错误 HTTP {response.status_code}"

@@ -566,7 +566,8 @@ class SearchAgent(BaseWorker):
         "关于", "针对", "请根据", "确保", "然后", "随后", "接下来",
         # 步骤信封词（中枢追加的角色/受众/质量标准），避免污染查询
         "角色", "受众", "质量标准", "输出要求", "任务目标", "用户目标",
-        "自迭代改进",
+        "自迭代改进", "一份", "董事会", "汇报", "注明", "预测", "建议",
+        "需包含", "风险分析", "对比", "数据", "图表", "指标",
     }
     _EN_STOP = {
         "the", "and", "with", "from", "for", "that", "this", "not",
@@ -746,26 +747,42 @@ class SearchAgent(BaseWorker):
         return " ".join(merged)[:150]
 
     def _query_variants(self, instruction: str) -> list[str]:
-        """生成多个查询变体（整句 + 关键词组合 + 中英混合），显著提升召回。"""
+        """生成多个查询变体（关键词组合优先 + 整句 + 中英混合），显著提升召回。
+
+        关键词组合排首位：完整目标文本常含"生成一份董事会汇报：需包含…"等
+        指令性文字，整句直发搜索引擎会被拒/超时（wikipedia 超时、mojeek 403
+        的实测根因）。整句变体截断到 60 字符，并剥离指令尾段。
+        """
         import re as _re
         import time
 
         goal = self._clean_search_text(instruction)
         kws = [k for k in self._extract_keywords(instruction).split() if k]
         variants: list[str] = []
+        # 关键词组合优先（高召回、搜索引擎友好）；无关键词才回退整句
+        if kws:
+            variants.append(" ".join(kws)[:120])
+        # 整句变体：截断 + 剥离"生成…汇报/需包含/请"等指令尾段
         if goal and len(goal) >= 4:
-            variants.append(goal[:120])
+            # 在指令性标记处截断（生成/汇报/需包含/列出/注明/撰写/给出等）
+            cut = _re.split(
+                r"(生成|撰写|输出|需包含|请给出|列出|注明|要求|必须|包含[^，。]{0,10}图表|汇报[：:])",
+                goal, maxsplit=1,
+            )[0].strip()
+            trimmed = (cut or goal)[:60]
+            if trimmed not in variants:
+                variants.append(trimmed)
             # 时效性（修复"最新财报"返回旧年份）：目标要求最新时补当前年份
             if any(k in instruction for k in ("最新", "最近", "latest", "current")):
-                variants.append(f"{goal[:110]} {time.localtime().tm_year}")
+                variants.append(f"{trimmed[:50]} {time.localtime().tm_year}")
             # 财报/财务类目标：引导结果页含具体数字（营收/净利润/亿元），
             # 否则 snippet 常只有叙事没有数值，清洗层无数据可洗
             if any(k in instruction for k in (
                 "财报", "年报", "季报", "营收", "净利润", "负债", "财务", "业绩",
                 "financial", "revenue", "earnings",
             )):
-                variants.append(f"{goal[:100]} 年报 营收 净利润 亿元")
-                variants.append(f"{goal[:100]} 财务数据 亿元")
+                variants.append(f"{trimmed[:50]} 年报 营收 净利润 亿元")
+                variants.append(f"{trimmed[:50]} 财务数据 亿元")
             # A股行情排行类目标：追加财经站点定向查询模板，并排除无关平台
             # （YouTube/百度百科/美股平台），避免通用搜索返回无关来源。
             if any(k in instruction for k in (
@@ -783,10 +800,10 @@ class SearchAgent(BaseWorker):
                     "-site:youtube.com -site:baike.baidu.com"
                 )
                 variants.append(
-                    f"{goal[:90]} {metric} 排行 site:eastmoney.com"
+                    f"{trimmed[:50]} {metric} 排行 site:eastmoney.com"
                 )
                 variants.append(
-                    f"{goal[:90]} 东方财富 同花顺 新浪财经 雪球"
+                    f"{trimmed[:50]} 东方财富 同花顺 新浪财经 雪球"
                 )
         # 域名定向（ReAct 兜底）：指令含 site:xxx 时追加定向查询变体，
         # 让"官方 IR / SEC"类重检索指令真正落地
@@ -796,7 +813,6 @@ class SearchAgent(BaseWorker):
             if kws:
                 variants.append(f"{' '.join(kws[:3])} site:{dom}")
         if kws:
-            variants.append(" ".join(kws)[:120])
             for i in range(1, min(len(kws), 5)):
                 sub = " ".join(kws[: i + 1])
                 if sub:

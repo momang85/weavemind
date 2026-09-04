@@ -21,10 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from common import extract_json_object
 
-ZHIPU_KEY = os.environ.get(
-    "ZHIPU_API_KEY",
-    "debebbe5fcab4ff89e3ca04b3d6be6b0.haVMzLiyS6S1twvY",
-)
+ZHIPU_KEY = os.environ.get("ZHIPU_API_KEY", "")
 ZHIPU_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 TEACHER_MODEL = "glm-4-flash"
 
