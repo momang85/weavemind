@@ -3248,16 +3248,17 @@ class TestRankingAdapterResilience(unittest.TestCase):
     def test_get_falls_back_to_socket_channel(self):
         """urllib 被断开 → 降级 raw socket HTTP/1.0 通道成功。"""
         import adapters.ashare_ranking as ar
+        import adapters.transport as tr
 
         with mock.patch.object(
-            ar, "_get_via_urllib",
+            tr, "get_via_urllib",
             side_effect=RemoteDisconnected(
                 "Remote end closed connection without response",
             ),
         ), mock.patch.object(
-            ar, "_get_via_socket", return_value=self._sample_text(),
+            tr, "get_via_socket", return_value=self._sample_text(),
         ) as sock_mock, self.assertLogs(
-            "adapters.ashare_ranking", level="WARNING",
+            "adapters.transport", level="WARNING",
         ) as cm:
             text = ar._get("https://push2.eastmoney.com/api/qt/clist/get?pn=1")
         self.assertEqual(json.loads(text)["data"]["diff"][0]["f14"], "贵州茅台")
@@ -3270,14 +3271,15 @@ class TestRankingAdapterResilience(unittest.TestCase):
     def test_get_raises_when_both_channels_fail(self):
         """两通道都失败 → 抛异常且带两通道原因。"""
         import adapters.ashare_ranking as ar
+        import adapters.transport as tr
 
         with mock.patch.object(
-            ar, "_get_via_urllib",
+            tr, "get_via_urllib",
             side_effect=RemoteDisconnected(
                 "Remote end closed connection without response",
             ),
         ), mock.patch.object(
-            ar, "_get_via_socket", side_effect=OSError("socket reset"),
+            tr, "get_via_socket", side_effect=OSError("socket reset"),
         ):
             with self.assertRaises(RuntimeError) as ctx:
                 ar._get("https://push2.eastmoney.com/api/qt/clist/get?pn=1")

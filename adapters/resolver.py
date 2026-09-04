@@ -9,7 +9,6 @@ import json
 import os
 import re
 import urllib.parse
-import urllib.request
 
 _SUGGEST_URL = "https://searchapi.eastmoney.com/api/suggest/get"
 
@@ -62,11 +61,12 @@ def _market_of(m: dict) -> str:
 
 
 def _get(url: str, timeout: int = 20) -> str:
-    req = urllib.request.Request(
-        url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+    """GET 文本（统一走 transport.get_via_urllib）。"""
+    from adapters.transport import get_via_urllib
+    return get_via_urllib(
+        url, timeout=timeout,
+        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8", errors="replace")
 
 
 def suggest(company: str, count: int = 10) -> list[dict]:

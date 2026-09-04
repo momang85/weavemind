@@ -16,7 +16,6 @@
 import json
 import time
 import urllib.parse
-import urllib.request
 
 _BASE = "https://datacenter-web.eastmoney.com/api/data/v1/get"
 _REPORT = "RPT_HKF10_FN_MAININDICATOR"
@@ -24,11 +23,12 @@ _REPORT_A = "RPT_F10_FINANCE_MAINFINADATA"
 
 
 def _get(url: str, timeout: int = 25) -> str:
-    req = urllib.request.Request(
-        url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
+    """GET 文本（统一走 transport.get_via_urllib）。"""
+    from adapters.transport import get_via_urllib
+    return get_via_urllib(
+        url, timeout=timeout,
+        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"},
     )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode("utf-8", errors="replace")
 
 
 def _api_url(stock_code: str, page_size: int = 200) -> str:

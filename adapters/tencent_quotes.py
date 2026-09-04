@@ -16,14 +16,12 @@
 涨跌幅按 index 32 解析；index 5 仅作为个别接口变体的缺失兜底。
 """
 
-import http.client
 import logging
 import re
 import time
-import urllib.error
 
-from adapters.ashare_ranking import _get_via_socket, _get_via_urllib
 from adapters.source_health import ensure_available, mark_failure, mark_success
+from adapters.transport import dual_channel_get, to_num
 
 _logger = logging.getLogger(__name__)
 
@@ -145,43 +143,16 @@ class TencentQuotesError(RuntimeError):
 
 
 def _num(raw, scale: float = 1.0) -> float | None:
-    """原始值 → 数值；'-' / 空串等缺失标记返回 None。"""
-    try:
-        v = float(raw)
-    except (TypeError, ValueError):
-        return None
-    return round(v * scale, 2) if scale != 1.0 else v
+    """原始值 → 数值（统一走 transport.to_num）。"""
+    return to_num(raw, scale)
 
 
 def _get(url: str, timeout: int = 15, attempt: int = 1) -> str:
-    """GET 文本：复用东方财富适配器的 urllib → socket HTTP/1.0 双通道。
-
-    腾讯响应为 GBK，双通道均按 gbk 解码；两通道都失败抛异常并带原因。
-    """
-    try:
-        return _get_via_urllib(
-            url, timeout=timeout, encoding="gbk", headers=_TENCENT_HEADERS,
-        )
-    except (urllib.error.URLError, ConnectionError, http.client.HTTPException) as exc:
-        urllib_reason = f"{type(exc).__name__}: {exc}"
-        _logger.warning(
-            "tencent fetch attempt %d failed: urllib: %s",
-            attempt, urllib_reason,
-        )
-    try:
-        return _get_via_socket(
-            url, timeout=timeout, encoding="gbk", headers=_TENCENT_HEADERS,
-        )
-    except Exception as exc:
-        socket_reason = f"{type(exc).__name__}: {exc}"
-        _logger.warning(
-            "tencent fetch attempt %d failed: socket: %s",
-            attempt, socket_reason,
-        )
-        raise TencentQuotesError(
-            "urllib+socket",
-            f"urllib: {urllib_reason}; socket: {socket_reason}",
-        ) from exc
+    """GET 文本：双通道防反爬（统一走 adapters.transport.dual_channel_get）。"""
+    return dual_channel_get(
+        url, timeout=timeout, encoding="gbk", headers=_TENCENT_HEADERS,
+        attempt=attempt, error_cls=TencentQuotesError, source="tencent",
+    )
 
 
 def _tencent_code(code: str) -> str:

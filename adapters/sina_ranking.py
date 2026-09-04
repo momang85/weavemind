@@ -16,20 +16,18 @@
 双通道复用 ashare_ranking 的实现，避免各自重复实现。
 """
 
-import http.client
 import json
 import logging
 import math
 import re
 import time
-import urllib.error
 
-from adapters.ashare_ranking import _get_via_socket, _get_via_urllib
 from adapters.source_health import (
     ensure_available,
     mark_failure,
     mark_success,
 )
+from adapters.transport import dual_channel_get, to_num
 
 _logger = logging.getLogger(__name__)
 
@@ -79,12 +77,8 @@ def _market_label(market: str) -> str:
 
 
 def _num(raw, scale: float = 1.0) -> float | None:
-    """原始值 → 数值；'-' 等缺失标记返回 None。"""
-    try:
-        v = float(raw)
-    except (TypeError, ValueError):
-        return None
-    return round(v * scale, 2) if scale != 1.0 else v
+    """原始值 → 数值（统一走 transport.to_num）。"""
+    return to_num(raw, scale)
 
 
 def parse_hq_nodes(text: str) -> list[dict]:
@@ -112,34 +106,11 @@ def parse_hq_nodes(text: str) -> list[dict]:
 
 
 def _get(url: str, timeout: int = 25, attempt: int = 1) -> str:
-    """GET 文本：复用 ashare_ranking 的 urllib → socket HTTP/1.0 双通道。
-
-    新浪响应为 GBK，双通道均按 gbk 解码；两通道都失败抛异常并带原因。
-    """
-    try:
-        return _get_via_urllib(
-            url, timeout=timeout, encoding="gbk", headers=_SINA_HEADERS,
-        )
-    except (urllib.error.URLError, ConnectionError, http.client.HTTPException) as exc:
-        urllib_reason = f"{type(exc).__name__}: {exc}"
-        _logger.warning(
-            "sina fetch attempt %d failed: urllib: %s",
-            attempt, urllib_reason,
-        )
-    try:
-        return _get_via_socket(
-            url, timeout=timeout, encoding="gbk", headers=_SINA_HEADERS,
-        )
-    except Exception as exc:
-        socket_reason = f"{type(exc).__name__}: {exc}"
-        _logger.warning(
-            "sina fetch attempt %d failed: socket: %s",
-            attempt, socket_reason,
-        )
-        raise SinaRankingError(
-            "urllib+socket",
-            f"urllib: {urllib_reason}; socket: {socket_reason}",
-        ) from exc
+    """GET 文本：双通道防反爬（统一走 adapters.transport.dual_channel_get）。"""
+    return dual_channel_get(
+        url, timeout=timeout, encoding="gbk", headers=_SINA_HEADERS,
+        attempt=attempt, error_cls=SinaRankingError, source="sina",
+    )
 
 
 def _hq_url(node: str, metric: str, page: int, num: int = _PAGE_SIZE) -> str:
