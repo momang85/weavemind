@@ -1618,20 +1618,12 @@ class TestBackfillChartManifest(unittest.TestCase):
         import re as _re
         import subprocess as _subprocess
         from pathlib import Path as _Path
-        import orchestrator_v2 as ov_mod
+        import chart_assembly as _ca
 
         tmp = _Path(tempfile.mkdtemp(prefix="wm_mf_merge_"))
         try:
-            # 提取 render_charts 模板脚本
-            src = _Path("orchestrator_v2.py").read_text(encoding="utf-8")
-            start = src.find("script = r'''# -*- coding: utf-8 -*-")
-            end = src.find("'''", src.find("if __name__ == \"__main__\":", start))
-            script = src[start + len("script = r"):end].strip()
-            if script.startswith("'''"):
-                script = script[3:]
-            if script.endswith("'''"):
-                script = script[:-3]
-            script = script.replace(
+            # 渲染模板脚本统一来自 chart_assembly（深化拆分后不再内嵌于 orchestrator）
+            script = _ca.RENDER_CHART_SCRIPT.replace(
                 "__REPO_ROOT__", str(_Path(".").resolve()).replace("\\", "/"))
 
             (tmp / "chart_manifest.json").write_text(json.dumps({"charts": [
