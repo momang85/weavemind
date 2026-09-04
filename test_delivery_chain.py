@@ -2281,7 +2281,8 @@ class TestSimpleTaskFastPath(unittest.TestCase):
             )
             out = o._rewrite_report_links(report, "t-link-1")
             self.assertIn("](/files/t-link-1/charts/heatmap.png)", out)
-            self.assertIn("](/files/t-link-1/data/scatter.png)", out)
+            # P0-1 同步：/files/ 仅提供 reports/ 与 charts/（web_ui），data/ 不再改写为 /files/ URL
+            self.assertIn("](data/scatter.png)", out)
             self.assertIn(f"**成果文件夹**：`{ws}`", out, "正文绝对路径保持不变")
             self.assertIn("https://example.com/a", out)
         finally:

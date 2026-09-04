@@ -6,8 +6,11 @@ services:
     container_name: zhiguan-redis
     # C2：开启 AOF（appendonly yes），保留默认 RDB 的同时容器重启不丢队列数据
     command: ["redis-server", "--appendonly", "yes"]
-    ports:
-      - "6379:6379"
+    # P1-2：不对外映射 host 端口。Redis 仅对 compose 内部网络可达（app 通过
+    # REDIS_HOST=redis 连接），避免可到达部署主机的攻击者直连 Redis 读写队列。
+    # 如需从宿主机调试，可临时用 `docker exec -it zhiguan-redis redis-cli`。
+    expose:
+      - "6379"
     volumes:
       - redis_data:/data
     restart: unless-stopped

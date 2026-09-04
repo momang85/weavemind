@@ -14,6 +14,8 @@ import threading
 import time
 from typing import Any
 
+from common import extract_json_object, loads_loose
+
 logger = logging.getLogger(__name__)
 
 
@@ -709,50 +711,13 @@ class LLMUnavailableError(LLMCallError):
     pass
 
 
-def _loads_loose(text: str) -> dict | list:
-    """先严格解析，失败后允许字符串内未转义控制字符（LLM 常在长指令中插入字面换行）。"""
-    try:
-        return json.loads(text)
-    except json.JSONDecodeError:
-        return json.loads(text, strict=False)
-
-
 def _parse_json_content(raw: str) -> dict[str, Any]:
-    """模块级 JSON 解析（async 路径使用）：兼容 markdown 代码块与前后缀文本。"""
-    try:
-        result = _loads_loose(raw)
-        if isinstance(result, dict):
-            return result
-        if isinstance(result, list):
-            return {"items": result}
-    except json.JSONDecodeError:
-        pass
-    m = re.search(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", raw, re.DOTALL)
-    if m:
-        try:
-            result = _loads_loose(m.group(1))
-            if isinstance(result, dict):
-                return result
-            if isinstance(result, list):
-                return {"items": result}
-        except json.JSONDecodeError:
-            pass
-    start = raw.find("{")
-    end = raw.rfind("}")
-    if start != -1 and end > start:
-        try:
-            return _loads_loose(raw[start:end + 1])
-        except json.JSONDecodeError:
-            pass
-    start = raw.find("[")
-    end = raw.rfind("]")
-    if start != -1 and end > start:
-        try:
-            result = _loads_loose(raw[start:end + 1])
-            if isinstance(result, list):
-                return {"items": result}
-        except json.JSONDecodeError:
-            pass
+    """模块级 JSON 解析（async 路径使用）：统一走 common.extract_json_object。"""
+    result = extract_json_object(raw)
+    if isinstance(result, dict):
+        return result
+    if isinstance(result, list):
+        return {"items": result}
     raise LLMJSONParseError(
         f"Failed to parse LLM response as JSON. Raw: {raw[:500]}..."
     )
@@ -1104,7 +1069,7 @@ class LLMClient:
         return content.strip()
 
     def _parse_json(self, raw: str) -> dict[str, Any]:
-        """从 LLM 响应中提取 JSON。
+        """从 LLM 响应中提取 JSON（sync 路径）：统一走 common.extract_json_object。
 
         支持：
         - 纯 JSON 字符串
@@ -1120,52 +1085,7 @@ class LLMClient:
         Raises:
             LLMJSONParseError: 无法解析为 JSON。
         """
-        # 尝试1: 直接解析
-        try:
-            result = _loads_loose(raw)
-            if isinstance(result, dict):
-                return result
-            # 如果是列表，包装
-            if isinstance(result, list):
-                return {"items": result}
-        except json.JSONDecodeError:
-            pass
-
-        # 尝试2: 提取 ```json ... ``` 代码块
-        m = re.search(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", raw, re.DOTALL)
-        if m:
-            try:
-                result = _loads_loose(m.group(1))
-                if isinstance(result, dict):
-                    return result
-                if isinstance(result, list):
-                    return {"items": result}
-            except json.JSONDecodeError:
-                pass
-
-        # 尝试3: 查找第一个 { 和最后一个 }
-        start = raw.find("{")
-        end = raw.rfind("}")
-        if start != -1 and end != -1 and end > start:
-            try:
-                return _loads_loose(raw[start : end + 1])
-            except json.JSONDecodeError:
-                pass
-
-        # 尝试4: 查找第一个 [ 和最后一个 ]
-        start = raw.find("[")
-        end = raw.rfind("]")
-        if start != -1 and end != -1 and end > start:
-            try:
-                result = _loads_loose(raw[start : end + 1])
-                if isinstance(result, list):
-                    return {"items": result}
-            except json.JSONDecodeError:
-                pass
-
-        raise LLMJSONParseError(
-            f"Failed to parse LLM response as JSON. Raw: {raw[:500]}..."
-        )
+        return _parse_json_content(raw)
 
 
 # ============================================================================

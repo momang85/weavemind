@@ -6,13 +6,13 @@
 4. 校验后写入 prompt_registry 覆盖，下一轮任务自动生效 → 回到第 1 步。
 """
 
-import json
 import logging
 import os
 import threading
 import time
 
 from prompt_registry import record_override
+from common import extract_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -163,30 +163,8 @@ def refine_after_task(
 
 
 def _loads_loose(text: str) -> dict | None:
-    import re
-    if not text:
-        return None
-    t = text.strip()
-    m = re.search(r"```(?:json)?\s*(.*?)```", t, re.S)
-    if m:
-        t = m.group(1).strip()
-    i = t.find("{")
-    if i >= 0:
-        depth = 0
-        for j in range(i, len(t)):
-            if t[j] == "{":
-                depth += 1
-            elif t[j] == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(t[i:j + 1])
-                    except Exception:
-                        break
-    try:
-        return json.loads(t, strict=False)
-    except Exception:
-        return None
+    """宽松 JSON 解析：统一走 common.extract_json_object（容忍围栏/前后缀文字）。"""
+    return extract_json_object(text)
 
 
 def maybe_refine(messaging, task_id: str, goal: str, all_steps, completed_all, report, flags=None) -> dict:

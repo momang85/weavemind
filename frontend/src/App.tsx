@@ -12,9 +12,10 @@ import MemoryPage from './pages/Memory'
 import EvalsPage from './pages/Evals'
 import SkillsPage from './pages/Skills'
 import { useTaskStore } from './stores/useTaskStore'
-import { installAuthFetch, isAuthed } from './auth'
+import { installAuthFetch, isAuthed, verifySession } from './auth'
 
-// 全局 fetch 包装：自动附加 Authorization 头；数据接口 401 时回到登录页
+// 全局 fetch 包装：会话凭据由浏览器自动携带的 session Cookie 完成，无需前端注入。
+// 数据接口 401 时回到登录页。
 installAuthFetch()
 
 // ── Error Boundary ──
@@ -65,6 +66,14 @@ export default function App() {
     const sync = () => setAuthed(isAuthed() || isDemo())
     window.addEventListener('weavemind:auth-changed', sync)
     return () => window.removeEventListener('weavemind:auth-changed', sync)
+  }, [])
+
+  // 刷新后与服务端核对会话 Cookie 是否仍有效：本地缓存存在但会话已过期/清空时退回登录页。
+  useEffect(() => {
+    if (isDemo()) return
+    verifySession().then(valid => {
+      if (!valid) setAuthed(false)
+    })
   }, [])
 
   // Initialize: check URL for demo mode, start polling

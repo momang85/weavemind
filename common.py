@@ -110,6 +110,111 @@ def _strip_nested(s: str) -> str:
 
 
 # ============================================================================
+# LLM 输出解析统一实现（围栏剥离 + 宽松 JSON 提取）
+# 全库此前有 12 份拷贝此逻辑（llm_client/lora_serve/worker/refinery/judge/distill），
+# 已统一收敛到此。修改解析行为时只改这里，勿再复制。
+# ============================================================================
+
+_LLM_FENCE_LANGS = ("json", "markdown", "md", "text", "txt", "plain", "yaml", "python", "r", "javascript", "js")
+
+
+def strip_llm_fence(text: str) -> str:
+    """剥离 LLM 输出的 markdown 围栏与首行语言标识（json/markdown/text 等）。
+
+    - "```json\\n{...}\\n```" → "{...}"
+    - "```markdown\\n报告\\n```" → "报告"
+    - 无围栏则原样返回
+    """
+    t = str(text or "").strip()
+    if not t.startswith("```"):
+        return t
+    parts = t.split("```")
+    t = parts[1] if len(parts) >= 2 else t
+    lines = t.split("\n", 1)
+    lang = lines[0].strip().lower().lstrip("`").strip()
+    if len(lines) == 2 and lang in _LLM_FENCE_LANGS:
+        return lines[1].strip()
+    if len(lines) == 1 and lang in _LLM_FENCE_LANGS:
+        return ""
+    return t.strip()
+
+
+def loads_loose(text: str) -> dict | list:
+    """先严格解析，失败后允许字符串内未转义控制字符（LLM 常在长指令中插入字面换行）。"""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return json.loads(text, strict=False)
+
+
+def extract_json_object(raw) -> dict | list | None:
+    """宽松 JSON 提取：剥围栏 → 花括号配平 → 方括号配平 → strict=False 兜底。
+
+    返回 dict/list；无法解析返回 None（不抛异常，由调用方决定语义）。
+    """
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, list):
+        return raw
+    t = str(raw or "").strip()
+    if not t:
+        return None
+    # 1) 纯 JSON（含 strict=False 容忍未转义控制字符）
+    try:
+        result = loads_loose(t)
+        if isinstance(result, (dict, list)):
+            return result
+    except Exception:
+        pass
+    # 2) 剥围栏后再试（```json ... ``` 或 ``` ... ```）
+    m = re.search(r"```(?:json)?\s*(.*?)```", t, re.S)
+    if m:
+        inner = m.group(1).strip()
+        try:
+            result = loads_loose(inner)
+            if isinstance(result, (dict, list)):
+                return result
+        except Exception:
+            pass
+        t = inner
+    # 3) 花括号配平截取首个完整对象
+    i = t.find("{")
+    if i >= 0:
+        depth = 0
+        for j in range(i, len(t)):
+            if t[j] == "{":
+                depth += 1
+            elif t[j] == "}":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(t[i:j + 1])
+                    except Exception:
+                        break
+    # 4) 方括号配平截取首个完整数组
+    i = t.find("[")
+    if i >= 0:
+        depth = 0
+        for j in range(i, len(t)):
+            if t[j] == "[":
+                depth += 1
+            elif t[j] == "]":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        result = json.loads(t[i:j + 1])
+                        if isinstance(result, list):
+                            return result
+                    except Exception:
+                        break
+    # 5) strict=False 全量兜底
+    try:
+        return json.loads(t, strict=False)
+    except Exception:
+        return None
+
+
+# ============================================================================
 # 数据结构定义
 # ============================================================================
 

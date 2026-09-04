@@ -50,7 +50,7 @@ export default function Login() {
         return
       }
       const user: AuthUser = { username: d.user, role: d.role === 'viewer' ? 'viewer' : 'admin' }
-      setAuth(d.token, user)
+      setAuth(user) // 会话由后端 session Cookie 承载，前端仅保存展示用用户名/角色
     } catch {
       setError('网络异常，请确认服务已启动')
     } finally {

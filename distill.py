@@ -14,6 +14,8 @@ import sys
 import time
 import urllib.request
 
+from common import extract_json_object
+
 ZHIPU_KEY = "debebbe5fcab4ff89e3ca04b3d6be6b0.haVMzLiyS6S1twvY"
 ZHIPU_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 MODEL = "glm-4-flash"
@@ -74,26 +76,9 @@ def call_zhipu(system: str, user: str, max_tokens: int = 4096) -> str:
 
 
 def _extract_json(text: str) -> dict | None:
-    """容错解析：剥离 markdown 围栏，找首个 JSON 对象。"""
-    t = str(text or "").strip()
-    if t.startswith("```"):
-        t = t.split("```", 2)[1] if t.count("```") >= 2 else t
-        t = t.strip().lstrip("json").strip()
-    i = t.find("{")
-    if i < 0:
-        return None
-    depth = 0
-    for j in range(i, len(t)):
-        if t[j] == "{":
-            depth += 1
-        elif t[j] == "}":
-            depth -= 1
-            if depth == 0:
-                try:
-                    return json.loads(t[i:j + 1])
-                except Exception:
-                    return None
-    return None
+    """容错解析：统一走 common.extract_json_object，仅接受对象形态。"""
+    result = extract_json_object(text)
+    return result if isinstance(result, dict) else None
 
 
 def distill(out_path: str = "distill_data.jsonl", limit: int = None) -> int:

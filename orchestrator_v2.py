@@ -59,6 +59,18 @@ from ws_helpers import push_progress
 
 logger = logging.getLogger(__name__)
 
+# P0-2：派生/生成的 Python 以 subprocess 执行时，不得把含密钥的环境变量交给子进程。
+# 与 code_sandbox.SECRET_PREFIXES 保持一致，并显式纳入 planner 密钥段。
+_SECRET_ENV_PREFIXES = ("LLM_", "OPENAI_", "EMBEDDING_", "PLANNER_LLM_",
+                        "API_KEY", "SERPAPI", "TOKEN", "SECRET")
+
+
+def _sanitized_process_env(base: dict | None = None) -> dict:
+    """返回一份剥离密钥变量的子进程环境（保留 PATH/PYTHON* 等必需运行时变量）。"""
+    src = base if base is not None else os.environ
+    return {k: v for k, v in src.items()
+            if not any(p in k.upper() for p in _SECRET_ENV_PREFIXES)}
+
 # 行情类目标关键词：命中后 web_search 指令追加财经行情站点限定，
 # 并允许搜索代理把"今日 A股 成交量 排行 前十 东方财富"加入查询变体。
 _MARKET_SEARCH_KEYWORDS = (
@@ -4488,6 +4500,7 @@ if __name__ == "__main__":
             proc = subprocess.run(
                 [sys.executable, str(script_path)],
                 cwd=str(project), capture_output=True, timeout=180,
+                env=_sanitized_process_env(),
             )
             out = proc.stdout.decode("utf-8", errors="replace")
             err = proc.stderr.decode("utf-8", errors="replace")
@@ -4735,10 +4748,22 @@ if __name__ == "__main__":
         ws = str(task_workspace(task_id))
         ws_bs = ws.replace("/", "\\")
         seg = f"/files/{task_id}"
+        # P0-1 同步：/files/ 只提供 reports/ 与 charts/ 两子目录（web_ui._files）
+        # 只有这两种目标改写为 /files/<tid>/ URL；其余子目录（data/project 等）
+        # 改写为工作区相对路径，避免交付报告出现 404 死链。
+        def _rewrite_to(url: str, old: str, new: str) -> str:
+            rel = url.replace(old, new).replace("\\", "/").lstrip("/")
+            if rel.startswith(("reports/", "charts/")):
+                return f"{seg}/{rel}"
+            return rel
 
         def _fix_target(m):
-            t = m.group(2).replace(ws_bs, seg).replace(ws, seg).replace("\\", "/")
-            return m.group(1) + t + m.group(3)
+            t = m.group(2)
+            if t.startswith(ws_bs):
+                t = _rewrite_to(t, ws_bs, "")
+            elif t.startswith(ws):
+                t = _rewrite_to(t, ws, "")
+            return m.group(1) + t.replace("\\", "/") + m.group(3)
 
         report = re.sub(r"(\]\()([^)\s]+)(\))", _fix_target, report)
 
@@ -4893,6 +4918,7 @@ if __name__ == "__main__":
                 p = subprocess.run(
                     [sys.executable, "-m", "py_compile", fp],
                     capture_output=True, timeout=20,
+                    env=_sanitized_process_env(),
                 )
                 if p.returncode != 0:
                     results.append({
@@ -4903,7 +4929,7 @@ if __name__ == "__main__":
             except Exception as exc:
                 results.append({"name": f["name"], "type": "py", "ok": False, "detail": f"编译异常: {exc}"})
                 continue
-            env = dict(os.environ)
+            env = _sanitized_process_env()
             env["SDL_VIDEODRIVER"] = "dummy"
             try:
                 proc = subprocess.Popen(
@@ -5479,6 +5505,7 @@ print("charts generated")
             proc = subprocess.run(
                 [sys.executable, str(script_path), str(goal or "")],
                 cwd=str(project), capture_output=True, timeout=120,
+                env=_sanitized_process_env(),
             )
             if proc.stdout:
                 out = proc.stdout.decode("utf-8", errors="replace").strip()

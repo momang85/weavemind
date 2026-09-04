@@ -12,6 +12,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from async_worker_base import AsyncWorkerBase, AsyncRegistry, AsyncMessaging
+from common import extract_json_object
 
 
 REACT_SYSTEM = """你是 ReAct Agent（运行时工具调用）。【受众】任务执行系统（机器可读）。
@@ -77,28 +78,8 @@ class ReactAgent(AsyncWorkerBase):
 
 
 def _loads_loose(text) -> dict | None:
-    import re
-    t = str(text or "").strip()
-    m = re.search(r"```(?:json)?\s*(.*?)```", t, re.S)
-    if m:
-        t = m.group(1).strip()
-    i = t.find("{")
-    if i >= 0:
-        depth = 0
-        for j in range(i, len(t)):
-            if t[j] == "{":
-                depth += 1
-            elif t[j] == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(t[i:j + 1])
-                    except Exception:
-                        break
-    try:
-        return json.loads(t, strict=False)
-    except Exception:
-        return None
+    """宽松 JSON 解析：统一走 common.extract_json_object（容忍围栏/前后缀文字）。"""
+    return extract_json_object(text)
 
 
 async def amain():

@@ -21,10 +21,13 @@
   POST /generate  {"instruction": "...", "max_tokens": 4096}
   → {"status": "success", "summary": "...", "charts": [...], "sources": [...], "server": "name"}
 """
+import hmac
 import json
 import os
 import sys
 import threading
+
+from common import extract_json_object, strip_llm_fence
 
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 
@@ -34,6 +37,9 @@ CONFIG_FILE = os.environ.get("WM_LORA_CONFIG", "lora_servers.json")
 _DEFAULT_MODEL = os.environ.get("WM_LOCAL_MODEL", "models/Qwen2.5-7B-Instruct")
 _DEFAULT_LORA = os.environ.get("WM_LORA_PATH", "models/lora_content_summary")
 _DEFAULT_PORT = int(os.environ.get("WM_LOCAL_PORT", "8765"))
+# P2-3：可选共享 token。设置后 /generate 需在请求体 `token` 或请求头
+# `Authorization: Bearer <token>` 携带，否则 401。默认未设置时保持旧行为（仅绑回环）。
+TOKEN = os.environ.get("WM_LORA_TOKEN") or os.environ.get("LORA_SERVE_TOKEN") or ""
 
 _model = None
 _tokenizer = None
@@ -41,6 +47,18 @@ _adapter_names: dict[int, str] = {}   # port -> adapter name
 _server_names: dict[int, str] = {}    # port -> server name
 _server_prompts: dict[int, str] = {}  # port -> system prompt
 _gpu_lock = threading.Lock()
+
+
+def _token_ok(body: dict, headers) -> bool:
+    """P2-3：请求是否携带有效共享 token。未配置 token（TOKEN 为空）则视为关闭鉴权。"""
+    if not TOKEN:
+        return True
+    cand = str(body.get("token") or "").strip()
+    if not cand:
+        auth = str(headers.get("Authorization") or "")
+        if auth.lower().startswith("bearer "):
+            cand = auth[7:].strip()
+    return bool(cand) and hmac.compare_digest(cand, TOKEN)
 
 
 def _load_config() -> dict:
@@ -125,11 +143,15 @@ def load():
 
 
 def generate(instruction: str, max_tokens: int = 4096, port: int = 0) -> dict:
-    """按端口选择 adapter 生成；失败抛异常由调用方回退。"""
+    """按端口选择 adapter 生成；失败抛异常由调用方回退。
+
+    P2-4：adapter 选择与返回的 server 名保持同一来源，避免 fallback 时二者漂移。
+    """
     load()
     with _gpu_lock:
         import torch
         name = _adapter_names.get(port) or _adapter_names.get(_DEFAULT_PORT) or next(iter(_adapter_names.values()))
+        used_port = _port_for_adapter(name)
         _model.set_adapter(name)
         prompt = _server_prompts.get(port) or (
             "你是织光 WeaveMind 的内容总结 Worker。根据指令生成 Markdown 总结与图表数据。"
@@ -156,53 +178,37 @@ def generate(instruction: str, max_tokens: int = 4096, port: int = 0) -> dict:
                 or head.startswith("def ") or head.startswith("```r")
                 or head.startswith("```python") or head.startswith("# ")
             ):
-                return parsed
+                return {**parsed, "server": _server_names.get(used_port, name or "default")}
             if attempt == 0:
                 print(f"检测到代码跑偏输出，重试 (len={len(raw)})", flush=True)
-        return parsed
+        return {**parsed, "server": _server_names.get(used_port, name or "default")}
 
 
-_FENCE_LANGS = ("json", "markdown", "md", "text", "txt", "plain", "yaml", "python", "r", "javascript", "js")
+def _port_for_adapter(name: str) -> int:
+    """P2-4：adapter 名 → 端口（首个匹配）。用于让返回的 server 名与所用 adapter 一致。"""
+    for p, n in _adapter_names.items():
+        if n == name:
+            return p
+    return _DEFAULT_PORT
 
 
 def _parse_output(raw: str) -> dict:
-    """解析模型输出：优先 {summary, charts} JSON；否则 summary + [CHART_DATA]/[SOURCES] 块。"""
+    """解析模型输出：优先 {summary, charts} JSON；否则 summary + [CHART_DATA]/[SOURCES] 块。
+
+    围栏剥离与 JSON 提取统一走 common（strip_llm_fence / extract_json_object）。
+    """
     raw = str(raw or "").strip()
-    t = raw
-    if t.startswith("```"):
-        parts = t.split("```")
-        t = parts[1] if len(parts) >= 2 else t
-        # 剥掉围栏首行的语言标识（json/markdown/text 等），避免围栏混入 summary
-        lines = t.split("\n", 1)
-        lang = lines[0].strip().lower().lstrip("`").strip()
-        if len(lines) == 2 and lang in _FENCE_LANGS:
-            t = lines[1]
-        elif len(lines) == 1 and lang in _FENCE_LANGS:
-            t = ""
-        t = t.strip()
-    i = t.find("{")
-    if i >= 0:
-        depth = 0
-        for j in range(i, len(t)):
-            if t[j] == "{":
-                depth += 1
-            elif t[j] == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        data = json.loads(t[i:j + 1])
-                        if isinstance(data, dict):
-                            s = data.get("summary")
-                            c = data.get("charts")
-                            if isinstance(s, str) and s.strip():
-                                return {
-                                    "summary": s.strip(),
-                                    "charts": c if isinstance(c, list) else [],
-                                    "raw": raw[:200],
-                                }
-                    except Exception:
-                        pass
-                    break
+    t = strip_llm_fence(raw)
+    data = extract_json_object(t)
+    if isinstance(data, dict):
+        s = data.get("summary")
+        c = data.get("charts")
+        if isinstance(s, str) and s.strip():
+            return {
+                "summary": s.strip(),
+                "charts": c if isinstance(c, list) else [],
+                "raw": raw[:200],
+            }
     summary = t
     charts: list = []
     sources: list = []
@@ -251,11 +257,23 @@ def main():
                 body = json.loads(self.rfile.read(length).decode("utf-8"))
             except Exception:
                 body = {}
+            # P2-3：可选共享 token 校验（未配置则放行）。校验失败返回 401，且不进推理。
+            if not _token_ok(body, self.headers):
+                data = json.dumps(
+                    {"status": "failed", "error": "unauthorized: 缺少或错误的访问 token"},
+                    ensure_ascii=False,
+                ).encode("utf-8")
+                self.send_response(401)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             # 请求所属端口 = 本 server 的端口（每端口一个实例，按端口选 adapter）
             port = self.server.server_address[1]
             try:
+                # P2-4：server 名由 generate 依据实际选用的 adapter 解析，不再在此猜测。
                 result = generate(body.get("instruction", ""), int(body.get("max_tokens") or 4096), port=port)
-                result["server"] = _server_names.get(port, "default")
                 payload = {"status": "success", **result}
             except Exception as exc:
                 payload = {"status": "failed", "error": str(exc)[:300]}

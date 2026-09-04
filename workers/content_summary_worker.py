@@ -10,6 +10,7 @@ import os, sys, logging
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from async_worker_base import AsyncWorkerBase, AsyncRegistry, AsyncMessaging
+from common import extract_json_object
 
 logger = logging.getLogger(__name__)
 
@@ -25,33 +26,8 @@ def extract_structured_block(instruction: str, max_chars: int = 4000) -> str:
 
 
 def _load_json_loose(text: str) -> dict | list | None:
-    """宽松 JSON 解析：容忍 markdown 围栏、前后多余文字，
-    从首个 '{' 起按花括号配平截取 JSON 对象。"""
-    if not text:
-        return None
-    import json as _json
-    import re as _re
-    t = text.strip()
-    m = _re.search(r"```(?:json)?\s*(.*?)```", t, _re.S)
-    if m:
-        t = m.group(1).strip()
-    i = t.find("{")
-    if i >= 0:
-        depth = 0
-        for j in range(i, len(t)):
-            if t[j] == "{":
-                depth += 1
-            elif t[j] == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return _json.loads(t[i:j + 1])
-                    except Exception:
-                        break
-    try:
-        return _json.loads(t, strict=False)
-    except Exception:
-        return None
+    """宽松 JSON 解析：统一走 common.extract_json_object（容忍围栏/前后缀文字）。"""
+    return extract_json_object(text)
 
 
 _CHART_EXTRACTION_SYSTEM = (

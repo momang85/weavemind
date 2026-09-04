@@ -66,6 +66,40 @@ def _get_rate_limiter():
             window=60.0,
         )
     return _rate_limiter
+
+# ---- 登录 / 分享密码 暴力破解防护（进程内滑动窗口 + 临时锁定） ----
+_LOGIN_MAX_FAILS = int(os.environ.get("LOGIN_MAX_FAILS", "5"))
+_LOGIN_LOCKOUT_SECONDS = int(os.environ.get("LOGIN_LOCKOUT_SECONDS", "900"))
+_bruteforce: dict[str, list[float]] = {}   # key -> 失败时间戳列表
+_bruteforce_lock = threading.Lock()
+
+
+def _bf_check(key: str):
+    """返回当前 key 是否在锁定中（True=锁定）以及剩余秒数（0 表示未锁定）。"""
+    now = time.time()
+    with _bruteforce_lock:
+        bucket = [t for t in _bruteforce.get(key, []) if now - t < _LOGIN_LOCKOUT_SECONDS]
+        if len(bucket) >= _LOGIN_MAX_FAILS:
+            _bruteforce[key] = bucket
+            return True, int(_LOGIN_LOCKOUT_SECONDS - (now - bucket[-1]))
+        _bruteforce[key] = bucket
+        return False, 0
+
+
+def _bf_record(key: str):
+    """记录一次失败尝试（用于登录与分享密码）。"""
+    now = time.time()
+    with _bruteforce_lock:
+        bucket = [t for t in _bruteforce.get(key, []) if now - t < _LOGIN_LOCKOUT_SECONDS]
+        bucket.append(now)
+        _bruteforce[key] = bucket
+
+
+def _bf_reset(key: str):
+    """登录/分享验证成功后清除失败记录。"""
+    with _bruteforce_lock:
+        _bruteforce.pop(key, None)
+
 _memory_summary_cache = {"text": "", "ts": 0.0, "signature": ""}
 _memory_summary_lock = threading.Lock()
 _memory_summary_generating = False
@@ -256,6 +290,9 @@ def _init_db():
             db.execute("ALTER TABLE task_history ADD COLUMN context TEXT DEFAULT ''")
         if "project" not in cols:
             db.execute("ALTER TABLE task_history ADD COLUMN project TEXT DEFAULT 'default'")
+        if "user" not in cols:
+            # P1-3：结果缓存需按提交者隔离，避免不同用户/项目/上下文互相命中缓存
+            db.execute("ALTER TABLE task_history ADD COLUMN user TEXT DEFAULT ''")
         db.commit(); db.close()
     except Exception: pass
 
@@ -1780,15 +1817,18 @@ def _share_page_html(title: str, created_at: str, body_html: str,
 </body>
 </html>"""
 
-def _find_cached_task(goal: str, ttl_min: int):
-    """结果缓存：相同目标在 TTL 内有过 SUCCESS，直接返回旧结果。"""
+def _find_cached_task(goal: str, ttl_min: int, project: str = "", user: str = "", context: str = ""):
+    """结果缓存：相同目标+项目+提交者+上下文在 TTL 内有过 SUCCESS，直接返回旧结果。
+    P1-3：缓存键必须包含 project/user/context，否则不同项目或不同用户会互相命中缓存。"""
     try:
         db = sqlite3.connect(DB_PATH, timeout=5); db.row_factory = sqlite3.Row
         row = db.execute(
             "SELECT task_id, report, conversation_id FROM task_history "
             "WHERE goal=? AND status='SUCCESS' AND completed_at IS NOT NULL "
-            "AND completed_at >= datetime('now', ?) ORDER BY completed_at DESC LIMIT 1",
-            (goal, f"-{ttl_min} minutes"),
+            "AND completed_at >= datetime('now', ?)"
+            " AND COALESCE(project,'')=? AND COALESCE(user,'')=? AND COALESCE(context,'')=?"
+            " ORDER BY completed_at DESC LIMIT 1",
+            (goal, f"-{ttl_min} minutes", project, user, context),
         ).fetchone()
         db.close()
         return dict(row) if row else None
@@ -1880,10 +1920,10 @@ def _publish_task(
         db = sqlite3.connect(DB_PATH, timeout=3)
         db.execute(
             "INSERT INTO task_history"
-            "(task_id,goal,status,project,conversation_id,parent_task_id,context)"
-            " VALUES(?,?,?,?,?,?,?)",
+            "(task_id,goal,status,project,conversation_id,parent_task_id,context,user)"
+            " VALUES(?,?,?,?,?,?,?,?)",
             (tid, goal, "PENDING", project, conversation_id,
-             parent_task_id, context),
+             parent_task_id, context, user_id),
         )
         db.commit()
         db.close()
@@ -1928,10 +1968,24 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers(); self.wfile.write(body)
 
     def _share_link(self, token: str) -> str:
-        """构造分享页绝对链接（优先请求 Host，支持反向代理透传协议头）。"""
+        """构造分享页绝对链接。
+
+        合成链接的基址优先取环境变量 PUBLIC_BASE_URL（不信任请求的 Host /
+        X-Forwarded-Proto，避免 Host/Proto 头污染导致的分享链接投毒，
+        防止投毒链接进入通知/邮件）；未配置时回退到请求 Host 以兼容旧行为。
+        """
+        base = os.environ.get("PUBLIC_BASE_URL", "").strip().rstrip("/")
+        if base:
+            return f"{base}/share/{token}"
         host = self.headers.get("Host") or f"localhost:{PORT}"
         proto = self.headers.get("X-Forwarded-Proto") or "http"
         return f"{proto}://{host}/share/{token}"
+
+    def _cookie_secure_flag(self) -> str:
+        """HTTPS 部署下给 Cookie 追加 Secure：依据反向代理透传的 X-Forwarded-Proto。
+        （本地直连 HTTP 不加 Secure，避免纯 HTTP 部署下 Cookie 反而无法生效。）"""
+        proto = (self.headers.get("X-Forwarded-Proto") or "http").strip().lower()
+        return "; Secure" if proto == "https" else ""
 
     def _client_ip(self) -> str:
         """取客户端 IP：优先 X-Forwarded-For 第一段（配合反向代理）。"""
@@ -2024,6 +2078,14 @@ class Handler(BaseHTTPRequestHandler):
         username = str(body.get("username") or "").strip()
         password = str(body.get("password") or "")
         ip = self._client_ip()
+        # 暴力破解防护：per-IP + per-username 双重计数，命中阈值后临时锁定。
+        locked, wait = _bf_check(f"login:ip:{ip}")
+        if not locked:
+            locked, wait = _bf_check(f"login:user:{username or '?'}")
+        if locked:
+            audit_log(username or "?", ip, "login.failed", target=username,
+                      result="fail", detail=f"尝试过多，已临时锁定 {wait}s")
+            return self._json({"error": f"尝试次数过多，请 {wait} 秒后重试"}, 429)
         if not _users_initialized():
             audit_log(username or "?", ip, "login.failed", target=username,
                       result="fail", detail="系统尚未初始化管理员")
@@ -2034,9 +2096,13 @@ class Handler(BaseHTTPRequestHandler):
         users = _load_users()
         user = users.get(username)
         if not user or not _verify_password(password, user.get("password_hash")):
+            _bf_record(f"login:ip:{ip}")
+            _bf_record(f"login:user:{username or '?'}")
             audit_log(username or "?", ip, "login.failed", target=username,
                       result="fail", detail="用户名或密码错误")
             return self._json({"error": "用户名或密码错误"}, 401)
+        _bf_reset(f"login:ip:{ip}")
+        _bf_reset(f"login:user:{username or '?'}")
         role = str(user.get("role") or "viewer")
         token = _create_session(username, role)
         audit_log(username, ip, "login.success", target=username, result="ok")
@@ -2047,7 +2113,7 @@ class Handler(BaseHTTPRequestHandler):
             "role": role,
             "expires_in": SESSION_TTL_SECONDS,
         }, extra_headers={
-            "Set-Cookie": f"session={token}; HttpOnly; Path=/; Max-Age={SESSION_TTL_SECONDS}",
+            "Set-Cookie": f"session={token}; HttpOnly; Path=/; SameSite=Lax; Max-Age={SESSION_TTL_SECONDS}{self._cookie_secure_flag()}",
         })
 
     def _handle_setup_admin(self):
@@ -2084,7 +2150,7 @@ class Handler(BaseHTTPRequestHandler):
             "role": "admin",
             "expires_in": SESSION_TTL_SECONDS,
         }, extra_headers={
-            "Set-Cookie": f"session={token}; HttpOnly; Path=/; Max-Age={SESSION_TTL_SECONDS}",
+            "Set-Cookie": f"session={token}; HttpOnly; Path=/; SameSite=Lax; Max-Age={SESSION_TTL_SECONDS}{self._cookie_secure_flag()}",
         })
 
     def _handle_share_auth(self):
@@ -2119,14 +2185,27 @@ class Handler(BaseHTTPRequestHandler):
                     password = str(body.get("password") or "")
         except Exception:
             pass
+        _bip = self._client_ip()
+        locked, wait = _bf_check(f"share:ip:{_bip}")
+        if not locked:
+            locked, wait = _bf_check(f"share:token:{token}")
+        if locked:
+            return self._html(
+                _share_password_page(token, f"尝试过多，请 {wait} 秒后重试"), 429
+            )
         if not password or not _verify_password(password, share_info.get("password_hash")):
+            # 密码错误：记录暴力破解计数（per-IP + per-token 双重）。
+            _bf_record(f"share:ip:{_bip}")
+            _bf_record(f"share:token:{token}")
             return self._html(_share_password_page(token, "密码错误，请重新输入"), 403)
+        _bf_reset(f"share:ip:{_bip}")
+        _bf_reset(f"share:token:{token}")
         return self._redirect(
             f"/share/{token}",
             extra_headers={
                 "Set-Cookie": (
-                    f"{_share_cookie_name(token)}=ok; HttpOnly; Path=/; "
-                    f"Max-Age={SHARE_AUTH_COOKIE_TTL}"
+                    f"{_share_cookie_name(token)}=ok; HttpOnly; SameSite=Lax; "
+                    f"Path=/share/{token}; Max-Age={SHARE_AUTH_COOKIE_TTL}{self._cookie_secure_flag()}"
                 ),
             },
         )
@@ -2235,16 +2314,18 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"jobs": load_jobs(CONFIG_PATH)})
         if p.startswith("/files/"):
             rel = p[len("/files/"):]
-            tid = None
             seg = rel.split("/", 1)
-            if len(seg) == 2 and (task_workspace(seg[0]) / "project").is_dir():
-                # 新格式 /files/<task_id>/<rel>；否则回退旧格式 /files/<rel>
-                tid, rel = seg[0], seg[1]
-            fp = _safe_project_path(rel, tid)
-            if (not fp or not os.path.isfile(fp)) and tid:
-                # 回退：任务工作区根（charts/data/reports 等，供报告图片链接使用）
-                fp = _safe_workspace_path(rel, tid)
-            if not fp or not os.path.isfile(fp):
+            if len(seg) != 2 or not seg[0]:
+                return self._json({"error": "not found"}, 404)
+            tid, rel = seg[0], seg[1]
+            fp = _safe_workspace_path(rel, tid)
+            if fp:
+                relative = os.path.relpath(fp, task_workspace(tid)).replace("\\", "/")
+                if not relative.startswith(("reports/", "charts/")):
+                    fp = None
+            if not fp:
+                return self._json({"error": "not found"}, 404)
+            if not os.path.isfile(fp):
                 return self._json({"error": "not found"}, 404)
             try:
                 with open(fp, "rb") as f:
@@ -2252,9 +2333,6 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 return self._json({"error": "read failed"}, 500)
             ctype = mimetypes.guess_type(fp)[0] or "application/octet-stream"
-            if ctype == "text/html":
-                # 确定性补丁：HTML 统一按 UTF-8 返回，避免中文乱码
-                ctype = "text/html; charset=utf-8"
             self.send_response(200)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(body)))
@@ -2532,7 +2610,7 @@ class Handler(BaseHTTPRequestHandler):
                       target=session.get("user", ""), result="ok")
             return self._json(
                 {"status": "ok"},
-                extra_headers={"Set-Cookie": "session=; HttpOnly; Path=/; Max-Age=0"},
+                extra_headers={"Set-Cookie": "session=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0"},
             )
         if p.startswith("/share/") and p.endswith("/auth"):
             # F6：公开分享密码验证（无需登录，凭 token 本身访问）
@@ -2610,32 +2688,32 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"status": "ok", "open_url": prefix + name.replace("\\", "/")})
             if ext != ".py":
                 return self._json({"error": "only .py files can be run"}, 400)
-            env = {
-                k: v for k, v in os.environ.items()
-                if not any(s in k.upper() for s in (
-                    "LLM_", "API_KEY", "TOKEN", "SECRET", "OPENAI_", "EMBEDDING_", "SERPAPI",
-                ))
-            }
+            # P2-5：复用统一沙箱（code_sandbox）运行交付物，而非裸 subprocess。
+            # run_script 会经 sanitize_env 剥离密钥，并按沙箱模式（docker/restricted/none）
+            # 执行，与 orchestrator/worker 的代码运行路径保持一致。
             try:
-                proc = subprocess.Popen(
-                    [sys.executable, fp],
+                from code_sandbox import run_script
+            except Exception:
+                run_script = None
+            if run_script is None:
+                return self._json({"error": "代码沙箱不可用"}, 500)
+            try:
+                res = run_script(
+                    fp,
                     cwd=os.path.dirname(fp),
-                    env=env,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
+                    timeout=60,
                 )
-                try:
-                    out, _ = proc.communicate(timeout=60)
-                    output = out.decode("utf-8", errors="replace")[-4000:]
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.communicate()
-                    output = "TIMEOUT after 60s"
+                stdout = (res.stdout or b"").decode("utf-8", errors="replace")
+                stderr = (res.stderr or b"").decode("utf-8", errors="replace")
+                output = (stderr + stdout)[-4000:] or "(no output)"
                 return self._json({
                     "status": "ok",
-                    "returncode": proc.returncode,
-                    "output": output or "(no output)",
+                    "returncode": res.returncode,
+                    "output": output,
+                    "sandbox_mode": getattr(res, "sandbox_mode", None),
                 })
+            except subprocess.TimeoutExpired:
+                return self._json({"error": "执行超时（60s）"}, 500)
             except Exception as exc:
                 return self._json({"error": f"run failed: {exc}"}, 500)
         if self.path == "/task":
@@ -2706,7 +2784,7 @@ class Handler(BaseHTTPRequestHandler):
             # 结果缓存：相同目标在 TTL 内已成功
             ttl = int(body.get("cache_ttl_min") or 0)
             if ttl > 0:
-                cached = _find_cached_task(g, ttl)
+                cached = _find_cached_task(g, ttl, project, admin.get("user", ""), context)
                 if cached and cached.get("report"):
                     audit_log(admin.get("user", ""), self._client_ip(), "task.submit",
                               target=cached["task_id"], result="ok", detail=f"缓存命中: {g[:120]}")
@@ -3085,7 +3163,9 @@ def main():
                 pass
 
     threading.Thread(target=_cleanup_stale_tasks, daemon=True).start()
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    # 默认只绑定回环地址，避免未加鉴权时暴露到局域网/公网；需要对外服务时用 BIND_HOST=0.0.0.0 显式开启。
+    bind_host = os.environ.get("BIND_HOST", "127.0.0.1")
+    server = ThreadingHTTPServer((bind_host, PORT), Handler)
     print(f"http://localhost:{PORT}")
     try: server.serve_forever()
     except KeyboardInterrupt: server.shutdown()

@@ -11,35 +11,14 @@
 """
 
 import json
-import re
 
+from common import extract_json_object
 from evals import zh_prompts
 
 
 def _loads_loose(text) -> dict | None:
-    if isinstance(text, dict):
-        return text
-    t = str(text or "").strip()
-    m = re.search(r"```(?:json)?\s*(.*?)```", t, re.S)
-    if m:
-        t = m.group(1).strip()
-    i = t.find("{")
-    if i >= 0:
-        depth = 0
-        for j in range(i, len(t)):
-            if t[j] == "{":
-                depth += 1
-            elif t[j] == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        return json.loads(t[i:j + 1])
-                    except Exception:
-                        break
-    try:
-        return json.loads(t, strict=False)
-    except Exception:
-        return None
+    """宽松 JSON 解析：统一走 common.extract_json_object（容忍围栏/前后缀文字）。"""
+    return extract_json_object(text)
 
 
 def _call(system: str, user: str) -> dict | None:
