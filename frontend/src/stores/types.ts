@@ -90,6 +90,8 @@ export interface TaskReport {
   steps: { step_id: string; capability: string; name: string; status: string; result?: string }[]
   final_report: string
   files?: { name: string; size?: number; kind?: string }[]
+  // 验收缺口摘要：SUCCESS_WITH_ISSUES 任务在报告视图顶部展示
+  acceptance?: { overall?: string; gaps?: string[] }
 }
 
 export interface SystemStatus {

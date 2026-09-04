@@ -262,6 +262,12 @@ export default function TaskConsole() {
         })),
         final_report: d.report || d.final_report || '',
       }
+      // P0-1：随任务详情缓存验收缺口摘要（报告视图顶部横幅也用）
+      const acc = d.acceptance
+      if (acc && Array.isArray(acc.gaps)) {
+        reportObj.acceptance = { overall: acc.overall || d.status, gaps: acc.gaps }
+        setGapsFor(prev => ({ ...prev, [tid]: acc.gaps }))
+      }
       try {
         const dl = await (await fetch('/api/task/' + tid + '/deliverables')).json()
         reportObj.files = (dl.files ?? []).map((f: any) => ({
@@ -279,11 +285,6 @@ export default function TaskConsole() {
         }))
         setLogs(lg)
       } catch { /* ignore */ }
-      // P0-1：随任务详情缓存验收缺口摘要
-      const acc = d.acceptance
-      if (acc && Array.isArray(acc.gaps)) {
-        setGapsFor(prev => ({ ...prev, [tid]: acc.gaps }))
-      }
       setReport(reportObj)
     } catch { /* ignore */ }
   }, [setReport, setLogs])
@@ -347,10 +348,10 @@ export default function TaskConsole() {
           placeholder={demoMode ? 'Demo mode' : 'Enter a task for your AI team...'}
           disabled={isRunning || demoMode}
           rows={2}
-          className="flex-1 bg-transparent border-none text-slate-200 placeholder-slate-600 resize-none p-3 text-sm focus:outline-none disabled:opacity-50" />
-        <div className="flex items-center gap-2 pb-1">
+          className="flex-1 min-w-0 bg-transparent border-none text-slate-200 placeholder-slate-600 resize-none p-3 text-sm focus:outline-none disabled:opacity-50" />
+        <div className="flex items-center gap-2 pb-1 shrink-0">
           {activeConversationId && (
-            <span className="hidden sm:inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-violet-500/10 border border-violet-500/20 text-violet-400 text-xs">
+            <span className="hidden sm:inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-violet-500/10 border border-violet-500/20 text-violet-400 text-xs whitespace-nowrap">
               <MessagesSquare className="w-3.5 h-3.5" /> 对话中
             </span>
           )}

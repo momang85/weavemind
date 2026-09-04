@@ -8,7 +8,7 @@ import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 
 import { useTaskStore } from '../stores/useTaskStore'
 import {
-  FileDown, Package, ScrollText, Clock, CheckCircle2,
+  FileDown, Package, ScrollText, Clock, CheckCircle2, AlertTriangle,
   ChevronDown, ChevronRight, Award, Zap, Download, ExternalLink, Play,
   Share2, Link2, Copy, Check, X, Trash2, CalendarClock, ListTree, Quote,
 } from 'lucide-react'
@@ -602,6 +602,21 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
             <span className="text-slate-600 text-xs ml-1">— {report.summary}</span>
           </div>
         </div>
+
+        {/* 验收缺口横幅：SUCCESS_WITH_ISSUES 任务的报告顶部展示缺口明细 */}
+        {report.summary === 'SUCCESS_WITH_ISSUES' && report.acceptance?.gaps && report.acceptance.gaps.length > 0 && (
+          <div className="mx-4 mt-4 flex items-start gap-3 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3">
+            <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-400" />
+            <div className="min-w-0">
+              <div className="text-xs font-semibold text-amber-300/90">验收未完全通过（SUCCESS_WITH_ISSUES）</div>
+              <ul className="mt-1 space-y-1">
+                {report.acceptance.gaps.map((g, i) => (
+                  <li key={i} className="text-sm leading-relaxed text-amber-200/80">- {g}</li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        )}
 
         {/* 数据时效信息卡 */}
         {freshness && (

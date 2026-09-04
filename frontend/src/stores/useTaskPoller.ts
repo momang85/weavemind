@@ -76,7 +76,9 @@ export function useTaskPoller(taskId: string | null) {
             updatePlan({
               id: 'root', capability: '',
               name: d.goal || 'Task',
-              status: d.status === 'SUCCESS' ? 'success' : d.status === 'FAILED' ? 'failed' : 'running',
+              status: d.status === 'SUCCESS' ? 'success'
+                : d.status === 'SUCCESS_WITH_ISSUES' ? 'success'
+                : d.status === 'FAILED' ? 'failed' : 'running',
               children: buildChildren(),
             })
           }
@@ -116,8 +118,9 @@ export function useTaskPoller(taskId: string | null) {
           })
         })
 
-        // On complete
-        if (d.status === 'SUCCESS' || d.status === 'FAILED') {
+        // On complete（含 SUCCESS_WITH_ISSUES：带缺口交付也是终态，
+        // 此前漏判导致前端一直显示 Running、需手动刷新才恢复）
+        if (d.status === 'SUCCESS' || d.status === 'FAILED' || d.status === 'SUCCESS_WITH_ISSUES') {
           setAwaitingConfirm(false)
           const reportObj: any = {
             summary: d.status,
@@ -128,6 +131,10 @@ export function useTaskPoller(taskId: string | null) {
               duration: 0 },
             steps: rawSteps.map((s: any) => ({ id: s.step_id||'', step_id: s.step_id||'', capability: s.capability||'', name: s.instruction||'Step', status: (s.result?.status||'pending').toLowerCase(), children: [] })),
             final_report: d.report || d.final_report || '',
+            // 验收缺口：SUCCESS_WITH_ISSUES 任务的报告顶部展示
+            acceptance: (d.acceptance && Array.isArray(d.acceptance.gaps))
+              ? { overall: d.acceptance.overall || d.status, gaps: d.acceptance.gaps }
+              : undefined,
           }
           try {
             const dl = await (await fetch('/api/task/' + taskId + '/deliverables')).json()
