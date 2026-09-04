@@ -60,6 +60,18 @@ from ws_helpers import push_progress
 
 logger = logging.getLogger(__name__)
 
+# 来源纪律红线（#6 幻觉来源闭环）：追加到验收缺口文本后，让反思/重做指令
+# 直接约束来源纪律。实测根因：报告编造 Gartner/TrendForce 等检索结果中
+# 不存在的来源，参考来源清单用 [n] 引用标记代替真实 URL。
+_SOURCE_DISCIPLINE_REDLINES = (
+    "\n来源纪律红线（必须遵守）："
+    "1) 只引用【上一步检索结果】中真实存在的来源 URL，"
+    "检索结果中没有的来源（如 Gartner/IDC/TrendForce 原文）一律不得引用；"
+    "2) 参考来源清单逐条给出真实 URL 与标题，不得用 [n] 引用标记代替链接；"
+    "3) 检索无法核实的数据明确标注『基于模型知识，未经核实』，"
+    "并在数据要点中剔除该行。"
+)
+
 # P0-2：派生/生成的 Python 以 subprocess 执行时，不得把含密钥的环境变量交给子进程。
 # 与 code_sandbox.SECRET_PREFIXES 保持一致，并显式纳入 planner 密钥段。
 _SECRET_ENV_PREFIXES = ("LLM_", "OPENAI_", "EMBEDDING_", "PLANNER_LLM_",
@@ -2545,10 +2557,14 @@ class OrchestratorV2:
             if acc_path.exists():
                 acc = json.loads(acc_path.read_text(encoding="utf-8"))
                 if acc.get("gaps"):
+                    _acc_gap_text = "\n".join(f"- {g}" for g in acc["gaps"])
+                    # 防幻觉来源指引（#6）：实测重做后仍复现"编造 Gartner/
+                    # TrendForce""引用标记被当来源名"——追加确定性红线约束
+                    _acc_gap_text += _SOURCE_DISCIPLINE_REDLINES
                     ctx_parts.append(
                         "验收器缺口报告（确定性检查结果；请优先修复以下缺口，"
                         "只重做能补齐缺口的步骤，不要整轮重来）：\n"
-                        + "\n".join(f"- {g}" for g in acc["gaps"])
+                        + _acc_gap_text
                     )
         except Exception:
             pass
@@ -4885,6 +4901,7 @@ class OrchestratorV2:
                 _gap_text = "\n".join(
                     f"- {g}" for g in (_acc_summary.get("gaps") or [])
                 ) or "确定性验收未通过，请重新生成报告并修复全部缺口"
+                _gap_text += _SOURCE_DISCIPLINE_REDLINES
                 verdict = {
                     "score": 0.0,
                     "verdict": "add_steps",
@@ -4956,6 +4973,7 @@ class OrchestratorV2:
                             for g in (_acc_summary.get("gaps")
                                       or verdict.get("gaps") or [])
                         ) or "确定性验收未通过，请重新生成报告并修复全部缺口"
+                        _gap_text += _SOURCE_DISCIPLINE_REDLINES
                         verdict = dict(verdict)
                         verdict["next_steps"] = [{
                             "step_id": "acc-redo",

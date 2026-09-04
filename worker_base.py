@@ -783,6 +783,25 @@ class SearchAgent(BaseWorker):
             )):
                 variants.append(f"{trimmed[:50]} 年报 营收 净利润 亿元")
                 variants.append(f"{trimmed[:50]} 财务数据 亿元")
+            # 调研/研报类目标（市场规模/竞争格局/预测/份额/趋势）：追加权威
+            # 机构定向查询（Gartner/IDC/TrendForce 等）。实测发现报告大量引用
+            # 权威机构但搜索结果从未命中——源头是查询未定向，LLM 只能编造来源。
+            # 机构白名单命中后按域名追加变体，让搜索引擎直接返回机构页面。
+            if any(k in instruction for k in (
+                "调研", "市场规模", "竞争格局", "预测", "趋势", "行业报告",
+                "市场份额", "占比", "研报", "analysis", "forecast", "market size",
+            )):
+                for dom in ("gartner.com", "idc.com", "trendforce.com",
+                            "statista.com", "counterpointresearch.com",
+                            "canalys.com", "macrotrends.net"):
+                    variants.append(f"{trimmed[:40]} site:{dom}")
+                # 公司维度：追加官方财报/IR 页定向（营收/净利/出货量）
+                # 公司关键词用完整指令判断（可能落在截断位置之后）
+                if any(k in str(instruction).lower() for k in (
+                    "英伟达", "nvidia", "amd", "英特尔", "intel",
+                    "台积电", "tsmc", "苹果", "apple", "微软", "microsoft",
+                )):
+                    variants.append(f"{trimmed[:40]} 财报 营收 净利润 site:ir.nvidia.com site:investor.amd.com")
             # A股行情排行类目标：追加财经站点定向查询模板，并排除无关平台
             # （YouTube/百度百科/美股平台），避免通用搜索返回无关来源。
             if any(k in instruction for k in (
@@ -831,7 +850,9 @@ class SearchAgent(BaseWorker):
             if v and v not in seen:
                 seen.add(v)
                 out.append(v)
-        return out[:6]
+        # 上限 10：关键词 + 整句 + 7 个机构定向 + 公司 IR 定向
+        # （旧上限 6 会挤掉 trendforce/公司 IR 等新增定向，白名单形同虚设）
+        return out[:10]
 
     def _filter_results(self, query: str, results: list[dict], min_score: int = 2) -> list[dict]:
         """按主题相关性过滤并排序搜索结果：
