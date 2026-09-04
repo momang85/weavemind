@@ -4740,6 +4740,9 @@ class OrchestratorV2:
             last_steps = steps
             last_results: list[dict] = []
             best_report = ""
+            # 反思早期收敛：记录上一轮验收 gaps 签名，重做后 gaps 无变化
+            # → 不再空转重做（实测两轮重做后缺口仍相同，浪费 6+ 分钟）
+            last_gap_signature = ""
         # P0-1：反思 LLM 不可用标记（每次任务重置）
         self._reflection_llm_unavailable = ""
 
@@ -4917,6 +4920,29 @@ class OrchestratorV2:
                 }
             if not verdict:
                 break
+            # 反思早期收敛：验收 gaps 与上一轮完全相同 → 重做无改善，
+            # 继续迭代只会重复耗时（实测两轮重做后缺口不变仍继续）。
+            # iteration 每次 while 循环末尾递增，iteration>0 表示已过首轮。
+            _cur_sig = "|".join(
+                str(g).strip() for g in (_acc_summary.get("gaps") or [])
+                if str(g).strip()
+            )
+            if (
+                iteration > 0
+                and _cur_sig
+                and _cur_sig == last_gap_signature
+            ):
+                logger.warning(
+                    "Reflection early-stop: 验收 gaps 与上一轮相同，重做无改善"
+                    "（task=%s），提前终止反思",
+                    task_id,
+                )
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "iteration", "agent": "orchestrator",
+                               "message": "验收缺口与上一轮相同，重做无改善，提前终止反思",
+                               "timestamp": self._now_iso()})
+                break
+            last_gap_signature = _cur_sig
             # 评分门控：score ≥ 阈值直接接受；LLM 未给 score 时回退到 accepted 判断
             score_raw = verdict.get("score")
             if score_raw is None:

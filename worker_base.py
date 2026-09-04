@@ -26,6 +26,33 @@ _ENGINE_HEALTH: dict[str, dict] = {}
 _ENGINE_LOCK = threading.Lock()
 _ENGINE_FAIL_THRESHOLD = 2
 _ENGINE_COOLDOWN = float(os.environ.get("SEARCH_ENGINE_COOLDOWN", "120") or 120)
+# ddgs 支持的 text 引擎全集（backend 参数按名过滤）。
+# auto 模式每次查询都尝试全部引擎——环境内 wikipedia/google 等 100% 超时，
+# 每次白等 5s×N。任务级健康缓存只查询存活引擎，显著缩短搜索耗时。
+_DDG_ENGINES = (
+    "brave", "duckduckgo", "google", "grokipedia", "mojeek",
+    "startpage", "wikipedia", "yahoo", "yandex",
+)
+# 异常消息里的 URL → 引擎名（ddgs 异常含失败引擎的 URL）
+_DDG_URL_HINTS = (
+    ("wikipedia.org", "wikipedia"),
+    ("grokipedia.com", "grokipedia"),
+    ("google.com", "google"),
+    ("search.brave.com", "brave"),
+    ("startpage.com", "startpage"),
+    ("search.yahoo.com", "yahoo"),
+    ("duckduckgo.com", "duckduckgo"),
+    ("mojeek.com", "mojeek"),
+    ("yandex.com", "yandex"),
+)
+
+
+def _ddg_engine_from_error(text: str) -> set[str]:
+    """从 ddgs 异常文本提取失败引擎名（URL host → 引擎名）。"""
+    low = str(text or "").lower()
+    return {name for host, name in _DDG_URL_HINTS if host in low}
+
+
 _SEARCH_RETRY_BACKOFF = float(os.environ.get("SEARCH_RETRY_BACKOFF", "3") or 3)
 _SEARCH_HEALTH_PUB_INTERVAL = float(
     os.environ.get("SEARCH_HEALTH_PUB_INTERVAL", "30") or 30
@@ -998,15 +1025,51 @@ class SearchAgent(BaseWorker):
                     collected.append(r)
 
         def _collect_ddg() -> tuple[bool, bool]:
-            """返回 (是否新增结果, 是否出错)。"""
+            """返回 (是否新增结果, 是否出错)。
+
+            任务级引擎健康缓存：ddgs auto 后端每次查询都尝试全部 9 个引擎，
+            环境内 wikipedia/google 等 100% 超时（每个白等 timeout 秒）。
+            用首个变体对各引擎单独探测，收集存活引擎；后续变体通过
+            backend 参数只走存活引擎，同一任务不再重复白等已知死引擎。
+            """
             added = False
             error = False
             try:
                 from ddgs import DDGS
-                with DDGS() as ddgs:
-                    for q in variants:
+                with DDGS(timeout=4) as ddgs:
+                    qs = list(variants)
+                    alive: list[str] | None = None
+                    if qs:
+                        # 探测：首个变体逐引擎查询，记录存活引擎与结果
+                        q0 = qs.pop(0)
+                        alive = []
+                        for eng in _DDG_ENGINES:
+                            try:
+                                results = ddgs.text(
+                                    q0, backend=eng,
+                                    max_results=self._strategy_max_sources,
+                                )
+                                for r in results:
+                                    if isinstance(r, dict):
+                                        _add({
+                                            "title": r.get("title", ""),
+                                            "url": r.get("href", ""),
+                                            "snippet": r.get("body", ""),
+                                        })
+                                        added = True
+                                if results:
+                                    alive.append(eng)
+                            except Exception as e:
+                                logger.warning("DDG probe %s failed: %s", eng, str(e)[:60])
+                        if not alive:
+                            alive = None  # 全部失败 → 回退 auto 行为
+                    # 其余变体：只走存活引擎
+                    for q in qs:
                         try:
-                            for r in ddgs.text(q, max_results=self._strategy_max_sources):
+                            kwargs: dict = {"max_results": self._strategy_max_sources}
+                            if alive is not None:
+                                kwargs["backend"] = ",".join(alive)
+                            for r in ddgs.text(q, **kwargs):
                                 if isinstance(r, dict):
                                     _add({
                                         "title": r.get("title", ""),
@@ -1017,7 +1080,15 @@ class SearchAgent(BaseWorker):
                                 else:
                                     logger.warning("DDG returned non-dict item: %r", str(r)[:80])
                         except Exception as e:
-                            logger.warning("DDG query '%s' failed: %s", q[:40], e)
+                            dead = _ddg_engine_from_error(str(e))
+                            if dead and alive is not None:
+                                alive = [e for e in alive if e not in dead]
+                                logger.warning(
+                                    "DDG query '%s' failed; alive engines: %s",
+                                    q[:40], alive,
+                                )
+                            else:
+                                logger.warning("DDG query '%s' failed: %s", q[:40], e)
                             error = True
                 return added, error
             except Exception as e:

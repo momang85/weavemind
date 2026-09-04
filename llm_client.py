@@ -155,7 +155,10 @@ def _ensure_cfg_fresh() -> None:
 # LLM 端点健康检查与自动切流（O-29，对标标准 C4-4.3 稳定性）
 # ---------------------------------------------------------------------------
 
-_ENDPOINT_FAIL_THRESHOLD = 2
+# 端点失败阈值：1 次失败即标记不健康，让健康路由在下一次调用直接切备用。
+# （原为 2：导致每次调用都在已失败的主端点上白等一轮超时才切换。
+# 监控线程 _health_monitor_loop 会周期性探测并恢复健康端点，不会永久禁用。）
+_ENDPOINT_FAIL_THRESHOLD = int(os.environ.get("LLM_ENDPOINT_FAIL_THRESHOLD", "1") or 1)
 
 
 def _mark_endpoint(endpoint: str, ok: bool, reason: str = "") -> None:
