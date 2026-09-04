@@ -44,7 +44,7 @@ def build_dataset(path: str):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--data", default="distill_data.jsonl")
+    ap.add_argument("--data", default="distill_data_v2.jsonl")
     ap.add_argument("--model", default="Qwen/Qwen2.5-7B-Instruct")
     ap.add_argument("--epochs", type=int, default=3)
     ap.add_argument("--out", default="lora_out")

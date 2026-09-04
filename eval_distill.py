@@ -17,6 +17,7 @@
 """
 import argparse
 import json
+import os
 import sys
 import time
 import urllib.request
@@ -24,7 +25,8 @@ import urllib.request
 sys.path.insert(0, ".")
 
 TEST_FILE = "distill_test_v2.jsonl"
-ZHIPU_KEY = "debebbe5fcab4ff89e3ca04b3d6be6b0.haVMzLiyS6S1twvY"
+ZHIPU_KEY = os.environ.get("ZHIPU_API_KEY",
+                           "debebbe5fcab4ff89e3ca04b3d6be6b0.haVMzLiyS6S1twvY")
 ZHIPU_URL = "https://open.bigmodel.cn/api/paas/v4/chat/completions"
 TEACHER_MODEL = "glm-4-flash"
 REGRESSION_THRESHOLD = 0.10  # 10 个百分点
@@ -131,8 +133,8 @@ def evaluate_cloud(samples: list[dict], limit: int = 5) -> dict:
     }
 
 
-def compare(local: dict, cloud: dict) -> None:
-    """质量回退判定（约束④）。"""
+def compare(local: dict, cloud: dict) -> list[str]:
+    """质量回退判定（约束④）。返回回退指标名列表（空 = 达标）。"""
     print("\n=== 同批对比（cloud vs hybrid/本地）===")
     print(f"{'指标':<16}{'云端':>10}{'本地':>10}{'差距':>10}")
     regression = []
@@ -149,12 +151,15 @@ def compare(local: dict, cloud: dict) -> None:
         print(f"\n⚠️ QUALITY_REGRESSION: {', '.join(regression)} 低于云端 >10pp —— 应回退 cloud 模式")
     else:
         print("\n✅ 质量达标：本地 LoRA 无显著回退，可保持 hybrid")
+    return regression
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cloud", action="store_true", help="同批跑云端教师对比")
     ap.add_argument("--compare", action="store_true", help="对比 + 质量回退判定")
+    ap.add_argument("--gate", action="store_true",
+                    help="质量回退时以退出码 1 结束（CI/管线门禁用）")
     ap.add_argument("--limit", type=int, default=5, help="评测样本上限")
     args = ap.parse_args()
 
@@ -162,7 +167,7 @@ def main():
     print(f"测试集: {len(samples)} 条（评测 {min(args.limit, len(samples))} 条）")
     if not samples:
         print("无测试数据，跳过评测")
-        return
+        return 2 if args.gate else None
 
     local = evaluate_local(samples, limit=args.limit)
     print("\n=== 本地蒸馏模型评测（标准 4.1 指标）===")
@@ -174,7 +179,14 @@ def main():
         cloud = evaluate_cloud(samples, limit=args.limit)
         for k, v in cloud.items():
             print(f"  {k}: {v}")
-        compare(local, cloud)
+        regression = compare(local, cloud)
+        if args.gate and regression:
+            print("GATE: FAIL（质量回退）", flush=True)
+            return 1
+        if args.gate:
+            print("GATE: PASS", flush=True)
+    if args.gate:
+        return 0
 
 
 if __name__ == "__main__":
