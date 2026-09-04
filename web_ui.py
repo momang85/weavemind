@@ -2440,8 +2440,6 @@ def main():
     try: server.serve_forever()
     except KeyboardInterrupt: server.shutdown()
 
-if __name__ == "__main__":
-    main()
 
 def _get_health(self, p):
     if p == "/api/health":
@@ -3334,3 +3332,6 @@ _POST_ROUTES = [
     (lambda self, p: self.path == "/api/scheduled-jobs", _post_scheduled_jobs),
 ]
 
+
+if __name__ == "__main__":
+    main()
