@@ -82,17 +82,22 @@ class AsyncWorkerBase(ABC):
         if os.environ.get("STREAM_OUTPUT", "1") != "0":
             try:
                 import asyncio
+                import contextvars
                 from llm_client import call_llm_stream
                 loop = asyncio.get_running_loop()
+                # contextvars 不跨线程：run_in_executor 前捕获当前上下文
+                # （含 set_task_context 的任务 id），否则 _publish_stream_chunk
+                # 在线程中 get_task_context() 为空，流式内容被静默丢弃。
+                ctx = contextvars.copy_context()
                 return await loop.run_in_executor(
                     None,
-                    lambda: call_llm_stream(
+                    lambda: ctx.run(lambda: call_llm_stream(
                         system or "You are a helpful assistant.",
                         prompt or instruction or "",
                         max_tokens=max_tokens,
                         # B1：步骤执行为 exec 用途，按 llm.model_roles.exec 选模型
                         usage="exec",
-                    ),
+                    )),
                 )
             except Exception:
                 pass  # 流式失败 → 回退普通异步调用

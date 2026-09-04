@@ -6162,8 +6162,13 @@ class OrchestratorV2:
                     alt_result["replanned"] = True
                     alt_result["replan_instruction"] = alt.get("instruction", "")
                 result = alt_result
-        # P1-4：发生过失败（重试或重规划）就落盘结构化诊断
-        if attempt > 0 or alt is not None:
+        # P1-4：发生过失败（重试或重规划）就落盘结构化诊断。
+        # 搜索相关性失败（_contract_issue 判"结果与目标无关"）即使无重试/换步
+        # 也要落盘——否则反思只看到"报告溯源率低"却不知根因在搜索质量（#6 传导）。
+        if attempt > 0 or alt is not None or (
+            issue and step.get("capability") == "web_search"
+            and ("相关" in issue or "无关" in issue or "未命中" in issue)
+        ):
             try:
                 from step_diagnosis import write_step_failure
                 diag = self._build_step_diagnosis(
@@ -6287,6 +6292,11 @@ class OrchestratorV2:
         text = str(result.get("result") or "")
         low = text.lower()
         if issue:
+            # 搜索结果与目标无关（_contract_issue 的相关性校验失败）→
+            # 归为 SEARCH_IRRELEVANT 而非笼统 CONTRACT_VIOLATION，让反思
+            # 能识别"搜索质量差"这一根因并指导换查询词（#6 根因传导）。
+            if capability == "web_search" and ("相关" in issue or "无关" in issue or "未命中" in issue):
+                return "SEARCH_IRRELEVANT"
             return "CONTRACT_VIOLATION"
         if "timeout" in low or "超时" in text:
             return "TIMEOUT"
@@ -6326,6 +6336,12 @@ class OrchestratorV2:
             return (
                 "更换查询词并增加限定（site: 官方域名、年份、具体指标词）；"
                 "禁止原样重复上次查询"
+            )
+        if error_type == "SEARCH_IRRELEVANT":
+            return (
+                "搜索结果与目标无关：必须更换查询词组合并追加权威机构定向"
+                "（Gartner/IDC/TrendForce 等 site: 域名或公司财报 IR 页），"
+                "禁止沿用上次查询词；后续步骤只采用与目标直接相关的结果"
             )
         if error_type == "CODE_RUNTIME_ERROR":
             return "修复语法/依赖错误，简化实现，避免不可用的外部库"

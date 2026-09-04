@@ -1,5 +1,6 @@
+import { useState } from 'react'
 import type { TaskNode } from '../stores/types'
-import { X } from 'lucide-react'
+import { X, ChevronDown, ChevronUp } from 'lucide-react'
 
 const roleColors: Record<string, string> = {
   planner: '#38bdf8', critic: '#c084fc', worker: '#6ee7b7',
@@ -22,6 +23,26 @@ function formatResult(result: any): string {
   } catch {
     return String(result)
   }
+}
+
+/** 长文本折叠：超过阈值默认收起，点击展开/收起。 */
+function CollapsibleText({ text, limit = 200, className = '' }: { text: string; limit?: number; className?: string }) {
+  const [open, setOpen] = useState(false)
+  const long = text.length > limit
+  return (
+    <div>
+      <div className={`whitespace-pre-wrap break-all ${className}`}>
+        {long && !open ? text.slice(0, limit) + '…' : text}
+      </div>
+      {long && (
+        <button onClick={() => setOpen(!open)}
+          className="mt-1 flex items-center gap-1 text-[10px] text-cyan-400 hover:text-cyan-300">
+          {open ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+          {open ? '收起' : `展开（${text.length} 字符）`}
+        </button>
+      )}
+    </div>
+  )
 }
 
 export default function StepInspector({ node, onClose }: { node: TaskNode | null; onClose: () => void }) {
@@ -68,7 +89,8 @@ export default function StepInspector({ node, onClose }: { node: TaskNode | null
         {(node.instruction || (node.name && node.id !== 'root')) && (
           <div>
             <div className="text-gray-400">Instruction</div>
-            <div className="text-gray-200 text-xs leading-relaxed">{node.instruction || node.name}</div>
+            <CollapsibleText text={node.instruction || node.name || ''}
+              limit={200} className="text-gray-200 text-xs leading-relaxed" />
           </div>
         )}
       </div>
@@ -85,6 +107,9 @@ export default function StepInspector({ node, onClose }: { node: TaskNode | null
           <pre className="text-xs text-emerald-300 bg-gray-800 rounded-lg p-3 max-h-72 overflow-y-auto whitespace-pre-wrap break-all">
             {resultText.slice(0, 2000)}
           </pre>
+          {resultText.length > 2000 && (
+            <div className="text-[10px] text-slate-500 mt-1">结果过长，已截断前 2000 字符（完整结果见日志）</div>
+          )}
         </div>
       )}
 
