@@ -554,6 +554,97 @@ def _publish_stream_chunk(text: str) -> None:
         pass
 
 
+# ============================================================================
+# 任务级 LLM 预算熔断（#3：防止失控任务无限烧 API 配额）
+# 实测发现：code_execution 等步骤在 LLM 端点连续失败时，以 60s 为周期无限
+# 重试，任务长时间 PENDING 且持续消耗配额。本熔断按任务维度限制
+# 调用次数/总时长/成本，超限抛 LLMUnavailableError（编排器已对该异常做
+# 任务终止处理），把"无限重试"变成"确定性终止"。
+# ============================================================================
+
+_task_budget_lock = threading.Lock()
+_task_budget_state: dict[str, dict] = {}  # task_id -> {"start_ts", "calls", "cost_usd"}
+
+# 默认预算：60 次调用 / 30 分钟 / 无成本上限（成本需配置价格表后才准确）。
+# 可用 config.json llm.task_budget 或环境变量覆盖：
+#   LLM_TASK_BUDGET_CALLS / LLM_TASK_BUDGET_SECONDS / LLM_TASK_BUDGET_USD
+# 任一维度为 0 表示不限制该维度。
+_DEFAULT_TASK_BUDGET = {"max_calls": 60, "max_seconds": 1800, "max_cost_usd": 0.0}
+
+
+def _task_budget_limits() -> dict:
+    try:
+        cfg = (_LLM_CFG or {}).get("task_budget") or {}
+    except Exception:
+        cfg = {}
+    out = {}
+    for key, env, dflt in (
+        ("max_calls", "LLM_TASK_BUDGET_CALLS", _DEFAULT_TASK_BUDGET["max_calls"]),
+        ("max_seconds", "LLM_TASK_BUDGET_SECONDS", _DEFAULT_TASK_BUDGET["max_seconds"]),
+        ("max_cost_usd", "LLM_TASK_BUDGET_USD", _DEFAULT_TASK_BUDGET["max_cost_usd"]),
+    ):
+        try:
+            v = os.environ.get(env)
+            if v is None or v == "":
+                v = cfg.get(key, dflt)
+            out[key] = max(0.0, float(v))
+        except (TypeError, ValueError):
+            out[key] = dflt
+    return out
+
+
+def _check_task_budget() -> None:
+    """LLM 调用前检查当前任务预算；超限抛 LLMUnavailableError（任务终止）。"""
+    tid = _task_context_var().get()
+    if not tid:
+        return
+    limits = _task_budget_limits()
+    now = time.time()
+    with _task_budget_lock:
+        st = _task_budget_state.setdefault(
+            tid, {"start_ts": now, "calls": 0, "cost_usd": 0.0},
+        )
+        if limits["max_calls"] > 0 and st["calls"] >= limits["max_calls"]:
+            raise LLMUnavailableError(
+                f"任务 LLM 预算熔断：调用次数 {st['calls']} 已达上限 {limits['max_calls']:.0f}"
+            )
+        if limits["max_seconds"] > 0 and now - st["start_ts"] >= limits["max_seconds"]:
+            raise LLMUnavailableError(
+                f"任务 LLM 预算熔断：运行时长 {now - st['start_ts']:.0f}s 已达上限 {limits['max_seconds']:.0f}s"
+            )
+        if limits["max_cost_usd"] > 0 and st["cost_usd"] >= limits["max_cost_usd"]:
+            raise LLMUnavailableError(
+                f"任务 LLM 预算熔断：成本 ${st['cost_usd']:.2f} 已达上限 ${limits['max_cost_usd']:.2f}"
+            )
+
+
+def _bump_task_budget(prompt_tokens: int, completion_tokens: int, model: str = "") -> None:
+    """LLM 调用成功后累计任务预算状态（调用次数 + 成本）。"""
+    tid = _task_context_var().get()
+    if not tid:
+        return
+    try:
+        from costs import estimate_cost
+        cost = estimate_cost(model, int(prompt_tokens or 0), int(completion_tokens or 0))
+    except Exception:
+        cost = 0.0
+    with _task_budget_lock:
+        st = _task_budget_state.setdefault(
+            tid, {"start_ts": time.time(), "calls": 0, "cost_usd": 0.0},
+        )
+        st["calls"] += 1
+        st["cost_usd"] += float(cost or 0.0)
+
+
+def reset_task_budget(task_id: str = "") -> None:
+    """清除任务预算状态（任务开始/结束或测试时调用）。"""
+    with _task_budget_lock:
+        if task_id:
+            _task_budget_state.pop(task_id, None)
+        else:
+            _task_budget_state.clear()
+
+
 def _record_usage(
     prompt_tokens: int, completion_tokens: int,
     model: str = "", cached: bool = False,
@@ -1096,6 +1187,10 @@ class LLMClient:
                 usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
                 model=model or self.model,
             )
+            _bump_task_budget(
+                usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
+                model or self.model,
+            )
             _publish_usage_snapshot()
             logger.debug(
                 "LLM usage: prompt=%d, completion=%d, total=%d",
@@ -1161,6 +1256,7 @@ def call_llm(
         解析后的字典。
     """
     _ensure_cfg_fresh()
+    _check_task_budget()
     return get_default_client().call(
         system, user, expect_json=expect_json,
         usage=usage, model_override=model_override, cache_key=cache_key,
@@ -1273,6 +1369,7 @@ def call_llm_stream(
     与 call()/call_llm_async 一致：空响应抛 LLMCallError 并标记端点、
     主端点失败（含空响应/超时/连接错误）自动切备用端点重发一次。"""
     _ensure_cfg_fresh()
+    _check_task_budget()
     client = get_default_client()
     temp = temperature if temperature is not None else client.temperature
     max_tok = max_tokens or client.max_tokens
@@ -1396,6 +1493,7 @@ async def call_llm_async(
     can call the LLM simultaneously without blocking each other.
     """
     _ensure_cfg_fresh()
+    _check_task_budget()
     api_key = os.environ.get('LLM_API_KEY', '')
     base_url = os.environ.get('LLM_BASE_URL', 'https://api.openai.com/v1')
     # B1：按调用用途选择模型（exec/judge/plan），缺省回退 LLM_MODEL
@@ -1449,6 +1547,10 @@ async def call_llm_async(
             _record_usage(
                 usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
                 model=model,
+            )
+            _bump_task_budget(
+                usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
+                model,
             )
             _publish_usage_snapshot()
 
@@ -1546,6 +1648,10 @@ async def _async_call_backup(payload: dict, fallback_model: str, expect_json: bo
     _record_usage(
         usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
         model=b_payload["model"],
+    )
+    _bump_task_budget(
+        usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
+        b_payload["model"],
     )
     _publish_usage_snapshot()
     content = data["choices"][0]["message"]["content"]

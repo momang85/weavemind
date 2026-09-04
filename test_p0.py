@@ -2111,7 +2111,7 @@ class TestP0Robustness(unittest.TestCase):
             "base_url": "https://backup.example/v1", "api_key": "k", "model": "m",
         }
         calls = []
-        llm_client._probe_endpoint_status = lambda base, key, model: (
+        llm_client._probe_endpoint_status = lambda base, key, model, **kwargs: (
             calls.append(base)
             or ({"ok": False, "reason": "insufficient_balance"}
                 if len(calls) == 2 else {"ok": True, "reason": "ok"})

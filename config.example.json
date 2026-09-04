@@ -7,6 +7,12 @@
       "planner": "deepseek-chat",
       "exec": "deepseek-v4-flash",
       "judge": "deepseek-chat"
+    },
+    "task_budget": {
+      "_comment": "任务级 LLM 预算熔断：任一维度为 0 表示不限制。超限后该任务 LLM 调用抛错终止，防止失控任务无限烧配额。可用环境变量 LLM_TASK_BUDGET_CALLS / LLM_TASK_BUDGET_SECONDS / LLM_TASK_BUDGET_USD 覆盖。",
+      "max_calls": 60,
+      "max_seconds": 1800,
+      "max_cost_usd": 0
     }
   },
   "embedding": {
