@@ -2276,323 +2276,14 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if not self._role_allowed_get(p, session):
                 return
-        if p == "/api/health":
-            # 公开健康检查：无需登录，供探活/负载均衡使用；附带沙箱状态供部署确认
-            return self._json({
-                "status": "ok",
-                "service": "weavemind-web",
-                "time": _now_iso(),
-                "code_sandbox": _code_sandbox_status(),
-            })
-        if p == "/api/auth/bootstrap":
-            # 公开引导状态：前端据此判断显示“创建初始管理员”还是登录表单
-            return self._json({"setup_required": not _users_initialized()})
-        if p == "/api/audit":
-            # 审计查询（仅 admin，由 _role_allowed_get 兜底）
-            query = urlparse(self.path).query
-            limit = 200
-            try:
-                limit = int([
-                    pair.split("=", 1)[1] for pair in query.split("&")
-                    if pair.startswith("limit=")
-                ][0])
-            except Exception:
-                pass
-            entries = read_audit(limit)
-            return self._json({"entries": entries, "count": len(entries)})
-        if p == "/":
-            if self._serve_dist("/"):
-                return
-            return self._html(HTML)
-        if p == "/api/status": return self._json(_system_status())
-        if p == "/api/projects":
-            # F1：项目列表（扫描 projects/ 目录；旧版平铺任务归入 legacy）
-            return self._json({"projects": list_projects()})
-        if p == "/api/scheduled-jobs":
-            # F2：定时任务列表（GET 仅 admin，见 _role_allowed_get）
-            from scheduled_jobs import load_jobs
-            return self._json({"jobs": load_jobs(CONFIG_PATH)})
-        if p.startswith("/files/"):
-            rel = p[len("/files/"):]
-            seg = rel.split("/", 1)
-            if len(seg) != 2 or not seg[0]:
-                return self._json({"error": "not found"}, 404)
-            tid, rel = seg[0], seg[1]
-            fp = _safe_workspace_path(rel, tid)
-            if fp:
-                relative = os.path.relpath(fp, task_workspace(tid)).replace("\\", "/")
-                if not relative.startswith(("reports/", "charts/")):
-                    fp = None
-            if not fp:
-                return self._json({"error": "not found"}, 404)
-            if not os.path.isfile(fp):
-                return self._json({"error": "not found"}, 404)
-            try:
-                with open(fp, "rb") as f:
-                    body = f.read()
-            except Exception:
-                return self._json({"error": "read failed"}, 500)
-            ctype = mimetypes.guess_type(fp)[0] or "application/octet-stream"
-            self.send_response(200)
-            self.send_header("Content-Type", ctype)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        if p.startswith("/api/task/") and p.endswith("/deliverables"):
-            tid = p.split("/api/task/")[-1].rsplit("/deliverables", 1)[0]
-            return self._json({"files": _task_deliverables(tid)})
-        if p.startswith("/api/task/") and p.endswith("/usage"):
-            # 每任务 token/成本台账（O-19）
-            tid = p.split("/api/task/")[-1].rsplit("/usage", 1)[0]
-            try:
-                r = _new_redis()
-                ledger = r.hgetall(f"llm_usage_task:{tid}") or {}
-            except Exception:
-                ledger = {}
-            from costs import ledger_cost
-            return self._json({
-                "task_id": tid,
-                "ledger": ledger,
-                "calls": int(ledger.get("calls", 0) or 0),
-                "prompt_tokens": sum(
-                    int(v) for k, v in ledger.items() if str(k).startswith("pt:")
-                ),
-                "completion_tokens": sum(
-                    int(v) for k, v in ledger.items() if str(k).startswith("ct:")
-                ),
-                "cost_usd": ledger_cost(ledger),
-            })
-        if p.startswith("/api/task/") and p.endswith("/stream"):
-            # 步骤级流式输出（O-21）：worker 生成过程中按块发布到 Redis
-            tid = p.split("/api/task/")[-1].rsplit("/stream", 1)[0]
-            text = ""
-            try:
-                r = _new_redis()
-                chunks = r.lrange(f"stream:{tid}", 0, -1) or []
-                r.expire(f"stream:{tid}", 600)
-                text = "".join(chunks)
-            except Exception:
-                pass
-            return self._json({"task_id": tid, "text": text[-20000:]})
-        if p.startswith("/api/task/") and p.endswith("/pdf"):
-            # F3：报告服务端 PDF 导出（Content-Disposition attachment）
-            tid = p.split("/api/task/")[-1].rsplit("/pdf", 1)[0]
-            try:
-                body = _task_pdf_bytes(tid)
-            except Exception:
-                return self._json({"error": "report not found"}, 404)
-            self.send_response(200)
-            self.send_header("Content-Type", "application/pdf")
-            self.send_header(
-                "Content-Disposition",
-                f'attachment; filename="{tid}.pdf"',
-            )
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        if p == "/api/config": return self._json(_public_config(_load_config()))
-        if p == "/api/llm-mode":
-            # 当前 LLM 模式（cloud/hybrid）；Redis 优先，config.json 兜底
-            mode = "hybrid"
-            try:
-                if _redis_ready():
-                    rmode = _new_redis().get("llm_mode")
-                    if rmode:
-                        mode = rmode
-            except Exception:
-                pass
-            if mode not in ("cloud", "hybrid"):
-                try:
-                    mode = str((_load_config().get("system") or {}).get("llm_mode") or "hybrid")
-                except Exception:
-                    mode = "hybrid"
-            return self._json({"mode": mode})
-        if p == "/api/notifications":
-            # F5：通知配置读取（仅 admin，见 _role_allowed_get）；密码/密钥不回显
-            from notifications import (
-                load_notifications_config,
-                public_notifications_config,
-            )
-            return self._json({
-                "notifications": public_notifications_config(
-                    load_notifications_config(CONFIG_PATH)
-                ),
-            })
-        if p == "/api/events":
-            with _events_lock:
-                return self._json({"events": list(reversed(_events[-100:]))})
-        if p == "/api/memory":
-            return self._json(_get_memory_data())
-        if p == "/api/memory/summary":
-            refresh = "refresh=1" in urlparse(self.path).query
-            return self._json(_get_memory_summary(refresh))
-        if p == "/api/templates":
-            return self._json({"templates": _load_templates()})
-        if p == "/api/evals":
-            # 评测看板数据（O-24）：校准报告 + 近期任务评测分数
-            calib = {}
-            calib_path = os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "evals", "calibration_report.json"
-            )
-            try:
-                if os.path.exists(calib_path):
-                    calib = json.loads(open(calib_path, encoding="utf-8").read())
-            except Exception:
-                pass
-            recent = []
-            try:
-                r = _new_redis()
-                for k in r.scan_iter("eval_score:*", count=100):
-                    tid = str(k).split(":", 1)[-1]
-                    try:
-                        recent.append({"task_id": tid, "scores": json.loads(r.get(k))})
-                    except Exception:
-                        pass
-                recent.sort(key=lambda x: x["task_id"], reverse=True)
-            except Exception:
-                pass
-            return self._json({"calibration": calib, "recent": recent[:30]})
-        if p == "/api/acceptance/suggestions":
-            # A2：返回该任务验收中的域名媒体补录建议（供人工确认流程；
-            # 前端暂不展示亦可，数据已就绪）
-            query = urlparse(self.path).query
-            tid = ""
-            for pair in query.split("&"):
-                if pair.startswith("task_id="):
-                    tid = unquote(pair.split("=", 1)[1]).strip()
-            if not tid:
-                return self._json({"error": "task_id 参数必填"}, 400)
-            suggestions: list[str] = []
-            try:
-                acc_path = task_workspace(tid) / "acceptance_report.json"
-                if acc_path.exists():
-                    acc = json.loads(acc_path.read_text(encoding="utf-8"))
-                    suggestions = acc.get("suggestions") or []
-                    if not suggestions:
-                        src = (acc.get("checks") or {}).get("source_labeling") or {}
-                        suggestions = src.get("suggestions") or []
-            except Exception:
-                pass
-            return self._json({"task_id": tid, "suggestions": suggestions})
-        if p == "/api/skills":
-            # Skill 管理数据（O-25）
-            try:
-                from skill_registry import get_lessons, list_skills
-                skills = list_skills()
-                for s in skills:
-                    s["lessons"] = get_lessons(s["name"], limit=3)
-                return self._json({"skills": skills})
-            except Exception as exc:
-                return self._json({"error": str(exc)}, 500)
-        if p == "/api/tool-audit":
-            # 工具审计日志（MCP/ReAct/编排器派发的工具调用记录）
-            try:
-                from tool_dispatch import recent_audit
-                return self._json({"entries": recent_audit(100)})
-            except Exception as exc:
-                return self._json({"error": str(exc)}, 500)
-        if p == "/api/evolution":
-            with _evolution_lock:
-                return self._json({"rounds": list(reversed(_evolution_results))})
-        if p == "/api/evolution/pending":
-            r = _new_redis()
-            try:
-                items = [json.loads(x) for x in r.lrange("evolution:pending", 0, -1)]
-            except Exception:
-                items = []
-            return self._json({"pending": items})
-        if p == "/api/metrics":
-            try:
-                with open(_METRICS_SUMMARY, "r", encoding="utf-8") as f:
-                    return self._json(json.load(f))
-            except Exception:
-                return self._json({"error": "no metrics yet"}, 404)
-        if p == "/tasks": return self._json({"tasks": _list_tasks(50)})
-        if p == "/api/conversations": return self._json({"conversations": _list_conversations(50)})
-        if p.startswith("/api/conversations/"):
-            conv_id = p.split("/api/conversations/")[-1]
-            msgs = _get_conversation(conv_id)
-            if not msgs:
-                return self._json({"error": "conversation not found"}, 404)
-            return self._json({"conversation_id": conv_id, "messages": msgs})
-        if p.startswith("/api/share/"):
-            # 查询任务当前分享状态（前端刷新后可恢复“已分享/撤销分享”按钮态）
-            tid = p.split("/api/share/", 1)[-1].strip()
-            token = _find_share_token(tid)
-            if token:
-                info = _load_shares().get(token) or {}
-                return self._json({
-                    "shared": True,
-                    "task_id": tid,
-                    "token": token,
-                    "path": f"/share/{token}",
-                    "url": self._share_link(token),
-                    "protected": bool(info.get("password_hash")),
-                    "expires_at": info.get("expires_at"),
-                })
-            return self._json({"shared": False, "task_id": tid})
-        if p.startswith("/share/"):
-            # 公开只读分享页：token → task_id → 自包含 HTML 报告（无需登录）。
-            # F6：记录带密码时先验证 Cookie，未验证返回 401 密码输入页。
-            token = p.split("/share/", 1)[-1].strip()
-            share_info = _load_shares().get(token)
-            tid = share_info.get("task_id") if isinstance(share_info, dict) else None
-            if tid and not _share_access_ok(self.headers, token):
-                return self._html(_share_password_page(token), 401)
-            data = _get_task_report_data(tid) if tid else None
-            if not tid or not data:
-                return self._html(_SHARE_NOT_FOUND_HTML, 404)
-            # 结构化解析：数据时效卡/目录/来源卡片/免责声明（与前端 ReportViewer 等价）
-            try:
-                structured = _share_page_structured(data.get("report") or "")
-            except Exception:
-                structured = {}
-            body_html = _markdown_to_html(structured.get("body") or data.get("report") or "", tid)
-            title = str(data.get("goal") or "任务报告")
-            created = data.get("created_at") or data.get("completed_at") or ""
-            # Roadmap 余项⑤：分享页主题模板 ?theme=light|dark|paper
-            try:
-                from urllib.parse import parse_qs
-                theme = (parse_qs(urlparse(self.path).query).get("theme") or ["light"])[0]
-            except Exception:
-                theme = "light"
-            return self._html(_share_page_html(title, created, body_html, theme=theme,
-                                               structured=structured))
-        if p.startswith("/task/"):
-            tid = p.split("/task/")[-1]
-            with _task_lock: data = _task_results.get(tid)
-            if not data:
-                for t in _list_tasks(100):
-                    if t.get("task_id") == tid: data = t; break
-            if data: return self._json({
-                "task_id": tid,
-                "status": data.get("status", "PENDING"),
-                "goal": data.get("goal", ""),
-                "steps": data.get("steps", []),
-                "report": data.get("final_report") or data.get("report", ""),
-                "logs": data.get("logs", []),
-                "project": data.get("project", ""),
-                "revision": bool(data.get("revision")),
-                "acceptance": data.get("acceptance"),
-                "llm_degraded": data.get("llm_degraded"),
-            })
-            return self._json({"error":"not found"},404)
-        if p.startswith("/task/") and p.endswith("/report"):
-            tid = p.split("/task/")[-1].rsplit("/report", 1)[0]
-            with _task_lock: data = _task_results.get(tid)
-            if not data:
-                for t in _list_tasks(100):
-                    if t.get("task_id") == tid:
-                        data = t
-                        break
-            if data and data.get("report"):
-                return self._html(data["report"])
-            return self._json({"error": "report not found"}, 404)
+        # E 重构：业务分支表化（保持原 if 顺序，先匹配先处理）
+        for _pred, _h in _GET_ROUTES:
+            if _pred(self, p):
+                return _h(self, p)
         if self._serve_dist(p):
             return
-        return self._json({"error":"not found"},404)
+        return self._json({"error": "not found"}, 404)
+
 
     def do_POST(self):
         p = urlparse(self.path).path
@@ -2625,433 +2316,12 @@ class Handler(BaseHTTPRequestHandler):
             body = json.loads(raw) if raw else {}
         except Exception:
             return self._json({"error": "invalid json"}, 400)
-        # 报告分享：POST /api/share（body: task_id）或 POST /api/share/<task_id>
-        share_tid = ""
-        if p == "/api/share":
-            share_tid = str(body.get("task_id") or "").strip()
-        elif p.startswith("/api/share/"):
-            share_tid = p.split("/api/share/", 1)[-1].strip()
-        if share_tid:
-            if not _get_task_report_data(share_tid):
-                audit_log(admin.get("user", ""), self._client_ip(), "share.generate",
-                          target=share_tid, result="fail", detail="任务不存在或没有可分享的报告")
-                return self._json({"error": "任务不存在或没有可分享的报告"}, 404)
-            # F6：可选密码（body 含 password 字段才处理；空串=清除密码）与
-            # 自定义有效期 ttl_hours（默认 168=7 天，上限 720=30 天）
-            password = body["password"] if "password" in body else None
-            ttl_hours = None
-            if "ttl_hours" in body:
-                try:
-                    ttl_hours = float(body["ttl_hours"])
-                except (TypeError, ValueError):
-                    return self._json({"error": "ttl_hours 必须是数字（小时）"}, 400)
-                if ttl_hours < 1 or ttl_hours > 720:
-                    return self._json({"error": "ttl_hours 须在 1~720 小时之间（最长 30 天）"}, 400)
-            if isinstance(password, str):
-                password = password.strip()
-                if len(password) > 128:
-                    return self._json({"error": "分享密码过长（上限 128 字符）"}, 400)
-            token = _generate_share_token(share_tid, password=password, ttl_hours=ttl_hours)
-            audit_log(admin.get("user", ""), self._client_ip(), "share.generate",
-                      target=share_tid, result="ok")
-            share_info = _load_shares().get(token) or {}
-            expires_at = share_info.get("expires_at") or ""
-            expires_in_days = 7
-            try:
-                exp_ts = datetime.fromisoformat(
-                    str(expires_at).replace("Z", "+00:00")
-                ).timestamp()
-                expires_in_days = max(1, round((exp_ts - time.time()) / 86400))
-            except Exception:
-                pass
-            return self._json({
-                "status": "ok",
-                "task_id": share_tid,
-                "token": token,
-                "path": f"/share/{token}",
-                "url": self._share_link(token),
-                "protected": bool(share_info.get("password_hash")),
-                "expires_at": expires_at,
-                "expires_in_days": expires_in_days,
-            })
-        if self.path == "/api/deliverable/run":
-            name = str(body.get("path") or "").strip()
-            tid = str(body.get("task_id") or "").strip() or None
-            if not name:
-                return self._json({"error": "path required"}, 400)
-            fp = _safe_project_path(name, tid)
-            if not fp or not os.path.isfile(fp):
-                return self._json({"error": "file not found"}, 404)
-            ext = os.path.splitext(fp)[1].lower()
-            if ext == ".html":
-                prefix = f"/files/{tid}/" if tid else "/files/"
-                return self._json({"status": "ok", "open_url": prefix + name.replace("\\", "/")})
-            if ext != ".py":
-                return self._json({"error": "only .py files can be run"}, 400)
-            # P2-5：复用统一沙箱（code_sandbox）运行交付物，而非裸 subprocess。
-            # run_script 会经 sanitize_env 剥离密钥，并按沙箱模式（docker/restricted/none）
-            # 执行，与 orchestrator/worker 的代码运行路径保持一致。
-            try:
-                from code_sandbox import run_script
-            except Exception:
-                run_script = None
-            if run_script is None:
-                return self._json({"error": "代码沙箱不可用"}, 500)
-            try:
-                res = run_script(
-                    fp,
-                    cwd=os.path.dirname(fp),
-                    timeout=60,
-                )
-                stdout = (res.stdout or b"").decode("utf-8", errors="replace")
-                stderr = (res.stderr or b"").decode("utf-8", errors="replace")
-                output = (stderr + stdout)[-4000:] or "(no output)"
-                return self._json({
-                    "status": "ok",
-                    "returncode": res.returncode,
-                    "output": output,
-                    "sandbox_mode": getattr(res, "sandbox_mode", None),
-                })
-            except subprocess.TimeoutExpired:
-                return self._json({"error": "执行超时（60s）"}, 500)
-            except Exception as exc:
-                return self._json({"error": f"run failed: {exc}"}, 500)
-        if self.path == "/task":
-            g = body.get("goal","").strip()
-            # 输入安全（对标 C4-4.4）：长度限制 + 注入检测 + 简单限流
-            from security import MAX_GOAL_LEN, RateLimiter, detect_injection, sanitize_goal
-            if len(g) > MAX_GOAL_LEN:
-                return self._json({"error": f"目标过长（>{MAX_GOAL_LEN} 字符），已拦截"}, 400)
-            # 空/损坏目标拦截：全为 "?"/乱码替换符等无法识别字符时拒绝创建
-            # （修复 "????????????????" 这类 PENDING 悬挂任务）
-            _meaningful = re.sub(r"[?？\uFFFD\s\u3000]+", "", g)
-            if len(_meaningful) < 2 or not re.search(
-                r"[\u4e00-\u9fffA-Za-z0-9]", _meaningful,
-            ):
-                return self._json({
-                    "error": "目标内容无效（为空或包含无法识别的字符），请重新输入",
-                }, 400)
-            bad, reason = detect_injection(g)
-            if bad:
-                return self._json({"error": f"输入疑似包含恶意注入（{reason}），已拦截"}, 400)
-            client_ip = self.client_address[0] if self.client_address else "?"
-            # 本机/回环地址不限流（本地开发与演示不被误伤）
-            if client_ip not in ("127.0.0.1", "::1") and not _get_rate_limiter().allow(client_ip):
-                return self._json({"error": "请求过于频繁，请稍后再试"}, 429)
-            g = sanitize_goal(g)
-            # 模板：允许不传 goal，自动取模板目标与确定性步骤
-            tpl_name = str(body.get("template") or "").strip()
-            template_steps = None
-            tpl_goal = ""
-            if tpl_name:
-                for tpl in _load_templates():
-                    if tpl.get("name") == tpl_name:
-                        template_steps = tpl.get("steps")
-                        tpl_goal = str(tpl.get("goal") or "")
-                        break
-            if not g:
-                g = tpl_goal
-            if not g: return self._json({"error":"goal required"},400)
-            conv_id = (body.get("conversation_id") or "").strip()
-            parent_id = (body.get("parent_task_id") or "").strip()
-            is_new_conversation = not conv_id
-            if is_new_conversation:
-                conv_id = "conv-" + uuid.uuid4().hex[:10]
-            user_context = str(body.get("context") or "").strip()
-            if user_context:
-                bad, reason = detect_injection(user_context)
-                if bad:
-                    return self._json({"error": f"上下文疑似包含恶意注入（{reason}），已拦截"}, 400)
-            # Roadmap 余项⑤：报告语言（zh/en/ja…），默认中文；注入上下文头部
-            report_lang = str(body.get("language") or "zh").strip()[:10]
-            user_context = _build_lang_context(report_lang, user_context)
-            conv_context = _build_conversation_context(conv_id) if not is_new_conversation else ""
-            context = "\n\n".join(x for x in (user_context, conv_context) if x)
-            if not parent_id and not is_new_conversation:
-                try:
-                    db = sqlite3.connect(DB_PATH, timeout=3); db.row_factory = sqlite3.Row
-                    row = db.execute(
-                        "SELECT task_id FROM task_history WHERE conversation_id=? ORDER BY created_at DESC LIMIT 1",
-                        (conv_id,),
-                    ).fetchone()
-                    parent_id = row["task_id"] if row else ""
-                    db.close()
-                except Exception:
-                    pass
-            project = _safe_project(str(body.get("project") or "default"))
-            auto_run = bool(body.get("auto_run", True))
-            report_confirm = bool(body.get("report_confirm", False))
-            # 结果缓存：相同目标在 TTL 内已成功
-            ttl = int(body.get("cache_ttl_min") or 0)
-            if ttl > 0:
-                cached = _find_cached_task(g, ttl, project, admin.get("user", ""), context)
-                if cached and cached.get("report"):
-                    audit_log(admin.get("user", ""), self._client_ip(), "task.submit",
-                              target=cached["task_id"], result="ok", detail=f"缓存命中: {g[:120]}")
-                    return self._json({
-                        "task_id": cached["task_id"], "status": "SUCCESS",
-                        "cached": True, "report": cached["report"],
-                        "conversation_id": cached.get("conversation_id") or "",
-                    })
-            try:
-                submitted = _publish_task(
-                    goal=g,
-                    project=project,
-                    conversation_id=conv_id,
-                    parent_task_id=parent_id,
-                    context=context,
-                    auto_run=auto_run,
-                    template_steps=template_steps,
-                    user_id=str(body.get("user_id") or ""),
-                    report_confirm=report_confirm,
-                )
-                tid = submitted["task_id"]
-            except RuntimeError as exc:
-                audit_log(admin.get("user", ""), self._client_ip(), "task.submit",
-                          target="?", result="fail", detail=f"Redis 发布失败: {g[:120]}")
-                return self._json({"error": str(exc)}, 503)
-            except Exception:
-                audit_log(admin.get("user", ""), self._client_ip(), "task.submit",
-                          target="?", result="fail", detail=f"任务派发异常: {g[:120]}")
-                return self._json({"error": "任务派发失败"}, 500)
-            audit_log(admin.get("user", ""), self._client_ip(), "task.submit",
-                      target=tid, result="ok", detail=f"goal: {g[:120]}")
-            return self._json(submitted)
-        if self.path == "/api/memory/delete":
-            # 记忆治理（对标标准 3.4）：按类型+ids 删除，或 {all: true} 清空
-            mtype = str(body.get("type") or "").strip()
-            ids = [str(x) for x in (body.get("ids") or []) if str(x).strip()]
-            purge_all = bool(body.get("all"))
-            purge_expired = bool(body.get("purge_expired"))
-            if purge_expired:
-                mem = _get_memory_manager()
-                deleted = 0
-                if mem is not None:
-                    deleted += mem.purge_expired()
-                    deleted += mem.enforce_conversation_cap()
-                return self._json({"status": "ok", "deleted": int(deleted or 0),
-                                   "purge_expired": True})
-            if mtype not in ("conversations", "strategies", "prompt_refinements"):
-                return self._json({"error": "type 必须是 conversations/strategies/prompt_refinements"}, 400)
-            if not ids and not purge_all and not (
-                mtype == "prompt_refinements" and body.get("key")
-            ):
-                return self._json({"error": "需要 ids 或 all=true"}, 400)
-            mem = _get_memory_manager()
-            if mtype == "conversations":
-                deleted = mem.delete_conversations(ids) if ids else mem.delete_all(mem._conversations)
-            elif mtype == "strategies":
-                deleted = mem.delete_strategies(ids) if ids else mem.delete_all(mem._strategies)
-            else:
-                deleted = mem.delete_prompt_refinements(
-                    {"key": str(body.get("key") or "")} if body.get("key") else None
-                ) if not ids else mem.delete_by_ids(mem._prompt_refinements, ids)
-            return self._json({"status": "ok", "deleted": int(deleted or 0)})
-        if self.path == "/api/plan/confirm":
-            tid = str(body.get("task_id", "")).strip()
-            if not tid:
-                return self._json({"error": "task_id required"}, 400)
-            action = body.get("action", "confirm")
-            if not _redis_ready():
-                return self._json({"error": "Redis 未连接，无法确认计划"}, 503)
-            r = _new_redis()
-            try:
-                r.rpush(f"plan_confirm:{tid}", json.dumps({
-                    "action": action,
-                    "steps": body.get("steps"),
-                }, ensure_ascii=False))
-            except Exception:
-                return self._json({"error": "Redis 写入失败，无法确认计划"}, 503)
-            return self._json({"status": "ok"})
-        if self.path == "/api/step/confirm":
-            # 人机协作：确认/取消单个步骤（mode=human_in_loop）
-            tid = str(body.get("task_id", "")).strip()
-            sid = str(body.get("step_id", "")).strip()
-            if not tid or not sid:
-                return self._json({"error": "task_id 和 step_id 必填"}, 400)
-            if not _redis_ready():
-                return self._json({"error": "Redis 未连接，无法确认步骤"}, 503)
-            r = _new_redis()
-            try:
-                r.rpush(f"step_confirm:{tid}:{sid}", json.dumps({
-                    "action": str(body.get("action") or "confirm"),
-                }, ensure_ascii=False))
-            except Exception:
-                return self._json({"error": "Redis 写入失败，无法确认步骤"}, 503)
-            return self._json({"status": "ok"})
-        if self.path == "/api/context/extract":
-            filename = str(body.get("filename") or "").strip()
-            b64 = str(body.get("data") or "")
-            if not filename or not b64:
-                return self._json({"error": "filename and data required"}, 400)
-            try:
-                raw = base64.b64decode(b64)
-            except Exception:
-                return self._json({"error": "invalid base64"}, 400)
-            if len(raw) > 3 * 1024 * 1024:
-                return self._json({"error": "file too large (max 3MB)"}, 413)
-            text = _extract_text_from_bytes(filename, raw)
-            return self._json({
-                "filename": filename,
-                "text": text[:30000],
-                "chars": len(text),
-                "truncated": len(text) > 30000,
-            })
-        if self.path == "/api/evolution/trigger":
-            if not _redis_ready():
-                return self._json({"error": "Redis 未连接，无法触发进化"}, 503)
-            r = _new_redis()
-            try:
-                r.publish("orchestrator:main", json.dumps({"task_id":"evo-"+str(int(time.time())),"goal":"EVOLUTION_TRIGGER"}, ensure_ascii=False))
-            except Exception:
-                return self._json({"error": "Redis 发布失败，无法触发进化"}, 503)
-            return self._json({"status":"triggered"})
-        if self.path == "/api/evolution/approve":
-            sid = str(body.get("strategy_id") or "").strip()
-            approve = bool(body.get("approve", True))
-            if not sid:
-                return self._json({"error": "strategy_id required"}, 400)
-            if not _redis_ready():
-                return self._json({"error": "Redis 未连接，无法审批"}, 503)
-            r = _new_redis()
-            try:
-                entries = r.lrange("evolution:pending", 0, -1)
-                matched = None
-                for raw in entries:
-                    try:
-                        item = json.loads(raw)
-                    except Exception:
-                        continue
-                    if item.get("strategy_id") == sid:
-                        matched = (raw, item)
-                        break
-                if not matched:
-                    return self._json({"error": "pending strategy not found"}, 404)
-                raw, item = matched
-                r.lrem("evolution:pending", 0, raw)
-                deployed = False
-                if approve:
-                    item["status"] = "deployed"
-                    # Roadmap 余项②：灰度比例（0-1，默认 1.0 全量；<1 时按任务哈希分流）
-                    try:
-                        rollout = min(1.0, max(0.0, float(body.get("rollout", 1.0) or 1.0)))
-                    except (TypeError, ValueError):
-                        rollout = 1.0
-                    item["rollout"] = rollout
-                    r.set(
-                        f"strategy:active:{item.get('agent_type', 'search_agent')}",
-                        json.dumps(item, ensure_ascii=False),
-                    )
-                    deployed = True
-                return self._json({
-                    "status": "ok",
-                    "deployed": deployed,
-                    "rollout": item.get("rollout", 1.0),
-                    "agent_type": item.get("agent_type"),
-                })
-            except Exception as exc:
-                return self._json({"error": f"approve failed: {exc}"}, 500)
+        # E 重构：业务分支表化（保持原 if 顺序，先匹配先处理）
+        for _pred, _h in _POST_ROUTES:
+            if _pred(self, p):
+                return _h(self, p, body, admin)
+        return self._json({"error": "not found"}, 404)
 
-        if self.path == "/api/single-agent":
-            g = body.get("goal","").strip()
-            if not g: return self._json({"error":"goal required"},400)
-            import time as _t
-            start = _t.time()
-            try:
-                from llm_client import LLMClient
-                llm = LLMClient()
-                result = llm.call("Answer directly.", g, expect_json=False)
-                return self._json({"result": result, "duration": round(_t.time()-start,1)})
-            except Exception as e:
-                return self._json({"result": f"Error: {e}", "duration": _t.time()-start})
-
-        if self.path == "/api/kill-worker":
-            agent_id = body.get("agent_id","")
-            if not agent_id: return self._json({"error":"agent_id required"},400)
-            if not _redis_ready():
-                return self._json({"error": "Redis 未连接，无法停止 worker"}, 503)
-            r = _new_redis()
-            try:
-                r.publish(f"agent.kill.{agent_id}", json.dumps({"action":"die"}))
-            except Exception:
-                return self._json({"error": "Redis 发布失败，无法停止 worker"}, 503)
-            return self._json({"status":"killed","agent_id":agent_id})
-        if self.path == "/api/config":
-            _save_config(body)
-            llm = body.get("llm",{})
-            if llm.get("api_key"): os.environ["LLM_API_KEY"] = llm["api_key"]
-            if llm.get("base_url"): os.environ["LLM_BASE_URL"] = llm["base_url"]
-            if llm.get("model"): os.environ["LLM_MODEL"] = llm["model"]
-            audit_log(admin.get("user", ""), self._client_ip(), "config.save", result="ok")
-            return self._json({"status":"saved"})
-        if self.path == "/api/llm-mode":
-            # LLM 运行模式切换：cloud=全商业 API；hybrid=本地 LoRA 参与部分 Worker。
-            # 写 Redis（worker 实时读）+ config.json（持久化重启后生效）。
-            mode = str(body.get("mode") or "").strip().lower()
-            if mode not in ("cloud", "hybrid"):
-                return self._json({"error": "mode must be cloud|hybrid"}, 400)
-            try:
-                if _redis_ready():
-                    _new_redis().set("llm_mode", mode)
-            except Exception:
-                pass
-            cfg = _load_config() or {}
-            cfg.setdefault("system", {})["llm_mode"] = mode
-            _save_config(cfg)
-            audit_log(admin.get("user", ""), self._client_ip(), "llm.mode",
-                      result="ok", detail=mode)
-            return self._json({"status": "ok", "mode": mode})
-        if self.path == "/api/notifications":
-            # F5：通知配置保存（仅 admin）：body 可直接是 notifications 段，
-            # 也可包裹在 {"notifications": {...}} 中（与 GET 响应一致）
-            from notifications import (
-                load_notifications_config,
-                public_notifications_config,
-                save_notifications_config,
-            )
-            ncfg = body.get("notifications") if isinstance(
-                body.get("notifications"), dict
-            ) else body
-            if not isinstance(ncfg, dict):
-                return self._json({"error": "notifications 必须是对象"}, 400)
-            if not save_notifications_config(ncfg, CONFIG_PATH):
-                return self._json({"error": "保存配置失败"}, 500)
-            audit_log(admin.get("user", ""), self._client_ip(),
-                      "notifications.save", result="ok")
-            return self._json({
-                "status": "saved",
-                "notifications": public_notifications_config(
-                    load_notifications_config(CONFIG_PATH)
-                ),
-            })
-        if self.path == "/api/scheduled-jobs":
-            # F2：定时任务增删改（仅 admin）。body:
-            #   {"action": "add"|"update"|"delete", "job": {...}, "name": "..."}
-            from scheduled_jobs import load_jobs, normalize_job, save_jobs
-            jobs = load_jobs(CONFIG_PATH)
-            action = str(body.get("action") or "add").lower()
-            name = str(body.get("name") or "").strip()
-            if action == "delete":
-                if not name:
-                    return self._json({"error": "name required"}, 400)
-                jobs = [j for j in jobs if j.get("name") != name]
-            else:
-                job = normalize_job(body.get("job") if isinstance(
-                    body.get("job"), dict
-                ) else body)
-                if not job:
-                    return self._json({
-                        "error": "job 需要 name/goal，且 interval_minutes 或 "
-                                 "cron(每日 HH:MM) 至少一项",
-                    }, 400)
-                jobs = [j for j in jobs if j.get("name") != job["name"]]
-                jobs.append(job)
-            if not save_jobs(jobs, CONFIG_PATH):
-                return self._json({"error": "保存配置失败"}, 500)
-            audit_log(admin.get("user", ""), self._client_ip(),
-                      "scheduled_jobs.save", target=name or "?", result="ok")
-            return self._json({"status": "ok", "jobs": jobs})
-        return self._json({"error":"not found"},404)
 
     def do_DELETE(self):
         """删除任务或撤销分享（均仅 admin）：
@@ -3172,3 +2442,895 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+def _get_health(self, p):
+    if p == "/api/health":
+        # 公开健康检查：无需登录，供探活/负载均衡使用；附带沙箱状态供部署确认
+        return self._json({
+            "status": "ok",
+            "service": "weavemind-web",
+            "time": _now_iso(),
+            "code_sandbox": _code_sandbox_status(),
+        })
+
+def _get_bootstrap(self, p):
+    if p == "/api/auth/bootstrap":
+        # 公开引导状态：前端据此判断显示“创建初始管理员”还是登录表单
+        return self._json({"setup_required": not _users_initialized()})
+
+def _get_audit(self, p):
+    if p == "/api/audit":
+        # 审计查询（仅 admin，由 _role_allowed_get 兜底）
+        query = urlparse(self.path).query
+        limit = 200
+        try:
+            limit = int([
+                pair.split("=", 1)[1] for pair in query.split("&")
+                if pair.startswith("limit=")
+            ][0])
+        except Exception:
+            pass
+        entries = read_audit(limit)
+        return self._json({"entries": entries, "count": len(entries)})
+
+def _get_root(self, p):
+    if p == "/":
+        if self._serve_dist("/"):
+            return
+        return self._html(HTML)
+
+def _get_status(self, p):
+    if p == "/api/status": return self._json(_system_status())
+
+def _get_projects(self, p):
+    if p == "/api/projects":
+        # F1：项目列表（扫描 projects/ 目录；旧版平铺任务归入 legacy）
+        return self._json({"projects": list_projects()})
+
+def _get_scheduled_jobs(self, p):
+    if p == "/api/scheduled-jobs":
+        # F2：定时任务列表（GET 仅 admin，见 _role_allowed_get）
+        from scheduled_jobs import load_jobs
+        return self._json({"jobs": load_jobs(CONFIG_PATH)})
+
+def _get_files(self, p):
+    if p.startswith("/files/"):
+        rel = p[len("/files/"):]
+        seg = rel.split("/", 1)
+        if len(seg) != 2 or not seg[0]:
+            return self._json({"error": "not found"}, 404)
+        tid, rel = seg[0], seg[1]
+        fp = _safe_workspace_path(rel, tid)
+        if fp:
+            relative = os.path.relpath(fp, task_workspace(tid)).replace("\\", "/")
+            if not relative.startswith(("reports/", "charts/")):
+                fp = None
+        if not fp:
+            return self._json({"error": "not found"}, 404)
+        if not os.path.isfile(fp):
+            return self._json({"error": "not found"}, 404)
+        try:
+            with open(fp, "rb") as f:
+                body = f.read()
+        except Exception:
+            return self._json({"error": "read failed"}, 500)
+        ctype = mimetypes.guess_type(fp)[0] or "application/octet-stream"
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return
+
+def _get_task_deliverables(self, p):
+    if p.startswith("/api/task/") and p.endswith("/deliverables"):
+        tid = p.split("/api/task/")[-1].rsplit("/deliverables", 1)[0]
+        return self._json({"files": _task_deliverables(tid)})
+
+def _get_task_usage(self, p):
+    if p.startswith("/api/task/") and p.endswith("/usage"):
+        # 每任务 token/成本台账（O-19）
+        tid = p.split("/api/task/")[-1].rsplit("/usage", 1)[0]
+        try:
+            r = _new_redis()
+            ledger = r.hgetall(f"llm_usage_task:{tid}") or {}
+        except Exception:
+            ledger = {}
+        from costs import ledger_cost
+        return self._json({
+            "task_id": tid,
+            "ledger": ledger,
+            "calls": int(ledger.get("calls", 0) or 0),
+            "prompt_tokens": sum(
+                int(v) for k, v in ledger.items() if str(k).startswith("pt:")
+            ),
+            "completion_tokens": sum(
+                int(v) for k, v in ledger.items() if str(k).startswith("ct:")
+            ),
+            "cost_usd": ledger_cost(ledger),
+        })
+
+def _get_task_stream(self, p):
+    if p.startswith("/api/task/") and p.endswith("/stream"):
+        # 步骤级流式输出（O-21）：worker 生成过程中按块发布到 Redis
+        tid = p.split("/api/task/")[-1].rsplit("/stream", 1)[0]
+        text = ""
+        try:
+            r = _new_redis()
+            chunks = r.lrange(f"stream:{tid}", 0, -1) or []
+            r.expire(f"stream:{tid}", 600)
+            text = "".join(chunks)
+        except Exception:
+            pass
+        return self._json({"task_id": tid, "text": text[-20000:]})
+
+def _get_task_pdf(self, p):
+    if p.startswith("/api/task/") and p.endswith("/pdf"):
+        # F3：报告服务端 PDF 导出（Content-Disposition attachment）
+        tid = p.split("/api/task/")[-1].rsplit("/pdf", 1)[0]
+        try:
+            body = _task_pdf_bytes(tid)
+        except Exception:
+            return self._json({"error": "report not found"}, 404)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/pdf")
+        self.send_header(
+            "Content-Disposition",
+            f'attachment; filename="{tid}.pdf"',
+        )
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+        return
+
+def _get_config(self, p):
+    if p == "/api/config": return self._json(_public_config(_load_config()))
+
+def _get_llm_mode(self, p):
+    if p == "/api/llm-mode":
+        # 当前 LLM 模式（cloud/hybrid）；Redis 优先，config.json 兜底
+        mode = "hybrid"
+        try:
+            if _redis_ready():
+                rmode = _new_redis().get("llm_mode")
+                if rmode:
+                    mode = rmode
+        except Exception:
+            pass
+        if mode not in ("cloud", "hybrid"):
+            try:
+                mode = str((_load_config().get("system") or {}).get("llm_mode") or "hybrid")
+            except Exception:
+                mode = "hybrid"
+        return self._json({"mode": mode})
+
+def _get_notifications(self, p):
+    if p == "/api/notifications":
+        # F5：通知配置读取（仅 admin，见 _role_allowed_get）；密码/密钥不回显
+        from notifications import (
+            load_notifications_config,
+            public_notifications_config,
+        )
+        return self._json({
+            "notifications": public_notifications_config(
+                load_notifications_config(CONFIG_PATH)
+            ),
+        })
+
+def _get_events(self, p):
+    if p == "/api/events":
+        with _events_lock:
+            return self._json({"events": list(reversed(_events[-100:]))})
+
+def _get_memory(self, p):
+    if p == "/api/memory":
+        return self._json(_get_memory_data())
+
+def _get_memory_summary_route(self, p):
+    if p == "/api/memory/summary":
+        refresh = "refresh=1" in urlparse(self.path).query
+        return self._json(_get_memory_summary(refresh))
+
+def _get_templates(self, p):
+    if p == "/api/templates":
+        return self._json({"templates": _load_templates()})
+
+def _get_evals(self, p):
+    if p == "/api/evals":
+        # 评测看板数据（O-24）：校准报告 + 近期任务评测分数
+        calib = {}
+        calib_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "evals", "calibration_report.json"
+        )
+        try:
+            if os.path.exists(calib_path):
+                calib = json.loads(open(calib_path, encoding="utf-8").read())
+        except Exception:
+            pass
+        recent = []
+        try:
+            r = _new_redis()
+            for k in r.scan_iter("eval_score:*", count=100):
+                tid = str(k).split(":", 1)[-1]
+                try:
+                    recent.append({"task_id": tid, "scores": json.loads(r.get(k))})
+                except Exception:
+                    pass
+            recent.sort(key=lambda x: x["task_id"], reverse=True)
+        except Exception:
+            pass
+        return self._json({"calibration": calib, "recent": recent[:30]})
+
+def _get_acceptance_suggestions(self, p):
+    if p == "/api/acceptance/suggestions":
+        # A2：返回该任务验收中的域名媒体补录建议（供人工确认流程；
+        # 前端暂不展示亦可，数据已就绪）
+        query = urlparse(self.path).query
+        tid = ""
+        for pair in query.split("&"):
+            if pair.startswith("task_id="):
+                tid = unquote(pair.split("=", 1)[1]).strip()
+        if not tid:
+            return self._json({"error": "task_id 参数必填"}, 400)
+        suggestions: list[str] = []
+        try:
+            acc_path = task_workspace(tid) / "acceptance_report.json"
+            if acc_path.exists():
+                acc = json.loads(acc_path.read_text(encoding="utf-8"))
+                suggestions = acc.get("suggestions") or []
+                if not suggestions:
+                    src = (acc.get("checks") or {}).get("source_labeling") or {}
+                    suggestions = src.get("suggestions") or []
+        except Exception:
+            pass
+        return self._json({"task_id": tid, "suggestions": suggestions})
+
+def _get_skills(self, p):
+    if p == "/api/skills":
+        # Skill 管理数据（O-25）
+        try:
+            from skill_registry import get_lessons, list_skills
+            skills = list_skills()
+            for s in skills:
+                s["lessons"] = get_lessons(s["name"], limit=3)
+            return self._json({"skills": skills})
+        except Exception as exc:
+            return self._json({"error": str(exc)}, 500)
+
+def _get_tool_audit(self, p):
+    if p == "/api/tool-audit":
+        # 工具审计日志（MCP/ReAct/编排器派发的工具调用记录）
+        try:
+            from tool_dispatch import recent_audit
+            return self._json({"entries": recent_audit(100)})
+        except Exception as exc:
+            return self._json({"error": str(exc)}, 500)
+
+def _get_evolution(self, p):
+    if p == "/api/evolution":
+        with _evolution_lock:
+            return self._json({"rounds": list(reversed(_evolution_results))})
+
+def _get_evolution_pending(self, p):
+    if p == "/api/evolution/pending":
+        r = _new_redis()
+        try:
+            items = [json.loads(x) for x in r.lrange("evolution:pending", 0, -1)]
+        except Exception:
+            items = []
+        return self._json({"pending": items})
+
+def _get_metrics(self, p):
+    if p == "/api/metrics":
+        try:
+            with open(_METRICS_SUMMARY, "r", encoding="utf-8") as f:
+                return self._json(json.load(f))
+        except Exception:
+            return self._json({"error": "no metrics yet"}, 404)
+
+def _get_tasks(self, p):
+    if p == "/tasks": return self._json({"tasks": _list_tasks(50)})
+
+def _get_conversations(self, p):
+    if p == "/api/conversations": return self._json({"conversations": _list_conversations(50)})
+
+def _get_conversation_detail(self, p):
+    if p.startswith("/api/conversations/"):
+        conv_id = p.split("/api/conversations/")[-1]
+        msgs = _get_conversation(conv_id)
+        if not msgs:
+            return self._json({"error": "conversation not found"}, 404)
+        return self._json({"conversation_id": conv_id, "messages": msgs})
+
+def _get_share_data(self, p):
+    if p.startswith("/api/share/"):
+        # 查询任务当前分享状态（前端刷新后可恢复“已分享/撤销分享”按钮态）
+        tid = p.split("/api/share/", 1)[-1].strip()
+        token = _find_share_token(tid)
+        if token:
+            info = _load_shares().get(token) or {}
+            return self._json({
+                "shared": True,
+                "task_id": tid,
+                "token": token,
+                "path": f"/share/{token}",
+                "url": self._share_link(token),
+                "protected": bool(info.get("password_hash")),
+                "expires_at": info.get("expires_at"),
+            })
+        return self._json({"shared": False, "task_id": tid})
+
+def _get_share_page(self, p):
+    if p.startswith("/share/"):
+        # 公开只读分享页：token → task_id → 自包含 HTML 报告（无需登录）。
+        # F6：记录带密码时先验证 Cookie，未验证返回 401 密码输入页。
+        token = p.split("/share/", 1)[-1].strip()
+        share_info = _load_shares().get(token)
+        tid = share_info.get("task_id") if isinstance(share_info, dict) else None
+        if tid and not _share_access_ok(self.headers, token):
+            return self._html(_share_password_page(token), 401)
+        data = _get_task_report_data(tid) if tid else None
+        if not tid or not data:
+            return self._html(_SHARE_NOT_FOUND_HTML, 404)
+        # 结构化解析：数据时效卡/目录/来源卡片/免责声明（与前端 ReportViewer 等价）
+        try:
+            structured = _share_page_structured(data.get("report") or "")
+        except Exception:
+            structured = {}
+        body_html = _markdown_to_html(structured.get("body") or data.get("report") or "", tid)
+        title = str(data.get("goal") or "任务报告")
+        created = data.get("created_at") or data.get("completed_at") or ""
+        # Roadmap 余项⑤：分享页主题模板 ?theme=light|dark|paper
+        try:
+            from urllib.parse import parse_qs
+            theme = (parse_qs(urlparse(self.path).query).get("theme") or ["light"])[0]
+        except Exception:
+            theme = "light"
+        return self._html(_share_page_html(title, created, body_html, theme=theme,
+                                           structured=structured))
+
+def _get_task_report(self, p):
+    if p.startswith("/task/") and p.endswith("/report"):
+        tid = p.split("/task/")[-1].rsplit("/report", 1)[0]
+        with _task_lock: data = _task_results.get(tid)
+        if not data:
+            for t in _list_tasks(100):
+                if t.get("task_id") == tid:
+                    data = t
+                    break
+        if data and data.get("report"):
+            return self._html(data["report"])
+        return self._json({"error": "report not found"}, 404)
+
+def _get_task_page(self, p):
+    if p.startswith("/task/"):
+        tid = p.split("/task/")[-1]
+        with _task_lock: data = _task_results.get(tid)
+        if not data:
+            for t in _list_tasks(100):
+                if t.get("task_id") == tid: data = t; break
+        if data: return self._json({
+            "task_id": tid,
+            "status": data.get("status", "PENDING"),
+            "goal": data.get("goal", ""),
+            "steps": data.get("steps", []),
+            "report": data.get("final_report") or data.get("report", ""),
+            "logs": data.get("logs", []),
+            "project": data.get("project", ""),
+            "revision": bool(data.get("revision")),
+            "acceptance": data.get("acceptance"),
+            "llm_degraded": data.get("llm_degraded"),
+        })
+        return self._json({"error":"not found"},404)
+
+def _post_share(self, p, body, admin):
+    share_tid = ""
+    if p == "/api/share":
+        share_tid = str(body.get("task_id") or "").strip()
+    elif p.startswith("/api/share/"):
+        share_tid = p.split("/api/share/", 1)[-1].strip()
+    if share_tid:
+        if not _get_task_report_data(share_tid):
+            audit_log(admin.get("user", ""), self._client_ip(), "share.generate",
+                      target=share_tid, result="fail", detail="任务不存在或没有可分享的报告")
+            return self._json({"error": "任务不存在或没有可分享的报告"}, 404)
+        # F6：可选密码（body 含 password 字段才处理；空串=清除密码）与
+        # 自定义有效期 ttl_hours（默认 168=7 天，上限 720=30 天）
+        password = body["password"] if "password" in body else None
+        ttl_hours = None
+        if "ttl_hours" in body:
+            try:
+                ttl_hours = float(body["ttl_hours"])
+            except (TypeError, ValueError):
+                return self._json({"error": "ttl_hours 必须是数字（小时）"}, 400)
+            if ttl_hours < 1 or ttl_hours > 720:
+                return self._json({"error": "ttl_hours 须在 1~720 小时之间（最长 30 天）"}, 400)
+        if isinstance(password, str):
+            password = password.strip()
+            if len(password) > 128:
+                return self._json({"error": "分享密码过长（上限 128 字符）"}, 400)
+        token = _generate_share_token(share_tid, password=password, ttl_hours=ttl_hours)
+        audit_log(admin.get("user", ""), self._client_ip(), "share.generate",
+                  target=share_tid, result="ok")
+        share_info = _load_shares().get(token) or {}
+        expires_at = share_info.get("expires_at") or ""
+        expires_in_days = 7
+        try:
+            exp_ts = datetime.fromisoformat(
+                str(expires_at).replace("Z", "+00:00")
+            ).timestamp()
+            expires_in_days = max(1, round((exp_ts - time.time()) / 86400))
+        except Exception:
+            pass
+        return self._json({
+            "status": "ok",
+            "task_id": share_tid,
+            "token": token,
+            "path": f"/share/{token}",
+            "url": self._share_link(token),
+            "protected": bool(share_info.get("password_hash")),
+            "expires_at": expires_at,
+            "expires_in_days": expires_in_days,
+        })
+
+def _post_deliverable_run(self, p, body, admin):
+    if self.path == "/api/deliverable/run":
+        name = str(body.get("path") or "").strip()
+        tid = str(body.get("task_id") or "").strip() or None
+        if not name:
+            return self._json({"error": "path required"}, 400)
+        fp = _safe_project_path(name, tid)
+        if not fp or not os.path.isfile(fp):
+            return self._json({"error": "file not found"}, 404)
+        ext = os.path.splitext(fp)[1].lower()
+        if ext == ".html":
+            prefix = f"/files/{tid}/" if tid else "/files/"
+            return self._json({"status": "ok", "open_url": prefix + name.replace("\\", "/")})
+        if ext != ".py":
+            return self._json({"error": "only .py files can be run"}, 400)
+        # P2-5：复用统一沙箱（code_sandbox）运行交付物，而非裸 subprocess。
+        # run_script 会经 sanitize_env 剥离密钥，并按沙箱模式（docker/restricted/none）
+        # 执行，与 orchestrator/worker 的代码运行路径保持一致。
+        try:
+            from code_sandbox import run_script
+        except Exception:
+            run_script = None
+        if run_script is None:
+            return self._json({"error": "代码沙箱不可用"}, 500)
+        try:
+            res = run_script(
+                fp,
+                cwd=os.path.dirname(fp),
+                timeout=60,
+            )
+            stdout = (res.stdout or b"").decode("utf-8", errors="replace")
+            stderr = (res.stderr or b"").decode("utf-8", errors="replace")
+            output = (stderr + stdout)[-4000:] or "(no output)"
+            return self._json({
+                "status": "ok",
+                "returncode": res.returncode,
+                "output": output,
+                "sandbox_mode": getattr(res, "sandbox_mode", None),
+            })
+        except subprocess.TimeoutExpired:
+            return self._json({"error": "执行超时（60s）"}, 500)
+        except Exception as exc:
+            return self._json({"error": f"run failed: {exc}"}, 500)
+
+def _post_task(self, p, body, admin):
+    if self.path == "/task":
+        g = body.get("goal","").strip()
+        # 输入安全（对标 C4-4.4）：长度限制 + 注入检测 + 简单限流
+        from security import MAX_GOAL_LEN, RateLimiter, detect_injection, sanitize_goal
+        if len(g) > MAX_GOAL_LEN:
+            return self._json({"error": f"目标过长（>{MAX_GOAL_LEN} 字符），已拦截"}, 400)
+        # 空/损坏目标拦截：全为 "?"/乱码替换符等无法识别字符时拒绝创建
+        # （修复 "????????????????" 这类 PENDING 悬挂任务）
+        _meaningful = re.sub(r"[?？\uFFFD\s\u3000]+", "", g)
+        if len(_meaningful) < 2 or not re.search(
+            r"[\u4e00-\u9fffA-Za-z0-9]", _meaningful,
+        ):
+            return self._json({
+                "error": "目标内容无效（为空或包含无法识别的字符），请重新输入",
+            }, 400)
+        bad, reason = detect_injection(g)
+        if bad:
+            return self._json({"error": f"输入疑似包含恶意注入（{reason}），已拦截"}, 400)
+        client_ip = self.client_address[0] if self.client_address else "?"
+        # 本机/回环地址不限流（本地开发与演示不被误伤）
+        if client_ip not in ("127.0.0.1", "::1") and not _get_rate_limiter().allow(client_ip):
+            return self._json({"error": "请求过于频繁，请稍后再试"}, 429)
+        g = sanitize_goal(g)
+        # 模板：允许不传 goal，自动取模板目标与确定性步骤
+        tpl_name = str(body.get("template") or "").strip()
+        template_steps = None
+        tpl_goal = ""
+        if tpl_name:
+            for tpl in _load_templates():
+                if tpl.get("name") == tpl_name:
+                    template_steps = tpl.get("steps")
+                    tpl_goal = str(tpl.get("goal") or "")
+                    break
+        if not g:
+            g = tpl_goal
+        if not g: return self._json({"error":"goal required"},400)
+        conv_id = (body.get("conversation_id") or "").strip()
+        parent_id = (body.get("parent_task_id") or "").strip()
+        is_new_conversation = not conv_id
+        if is_new_conversation:
+            conv_id = "conv-" + uuid.uuid4().hex[:10]
+        user_context = str(body.get("context") or "").strip()
+        if user_context:
+            bad, reason = detect_injection(user_context)
+            if bad:
+                return self._json({"error": f"上下文疑似包含恶意注入（{reason}），已拦截"}, 400)
+        # Roadmap 余项⑤：报告语言（zh/en/ja…），默认中文；注入上下文头部
+        report_lang = str(body.get("language") or "zh").strip()[:10]
+        user_context = _build_lang_context(report_lang, user_context)
+        conv_context = _build_conversation_context(conv_id) if not is_new_conversation else ""
+        context = "\n\n".join(x for x in (user_context, conv_context) if x)
+        if not parent_id and not is_new_conversation:
+            try:
+                db = sqlite3.connect(DB_PATH, timeout=3); db.row_factory = sqlite3.Row
+                row = db.execute(
+                    "SELECT task_id FROM task_history WHERE conversation_id=? ORDER BY created_at DESC LIMIT 1",
+                    (conv_id,),
+                ).fetchone()
+                parent_id = row["task_id"] if row else ""
+                db.close()
+            except Exception:
+                pass
+        project = _safe_project(str(body.get("project") or "default"))
+        auto_run = bool(body.get("auto_run", True))
+        report_confirm = bool(body.get("report_confirm", False))
+        # 结果缓存：相同目标在 TTL 内已成功
+        ttl = int(body.get("cache_ttl_min") or 0)
+        if ttl > 0:
+            cached = _find_cached_task(g, ttl, project, admin.get("user", ""), context)
+            if cached and cached.get("report"):
+                audit_log(admin.get("user", ""), self._client_ip(), "task.submit",
+                          target=cached["task_id"], result="ok", detail=f"缓存命中: {g[:120]}")
+                return self._json({
+                    "task_id": cached["task_id"], "status": "SUCCESS",
+                    "cached": True, "report": cached["report"],
+                    "conversation_id": cached.get("conversation_id") or "",
+                })
+        try:
+            submitted = _publish_task(
+                goal=g,
+                project=project,
+                conversation_id=conv_id,
+                parent_task_id=parent_id,
+                context=context,
+                auto_run=auto_run,
+                template_steps=template_steps,
+                user_id=str(body.get("user_id") or ""),
+                report_confirm=report_confirm,
+            )
+            tid = submitted["task_id"]
+        except RuntimeError as exc:
+            audit_log(admin.get("user", ""), self._client_ip(), "task.submit",
+                      target="?", result="fail", detail=f"Redis 发布失败: {g[:120]}")
+            return self._json({"error": str(exc)}, 503)
+        except Exception:
+            audit_log(admin.get("user", ""), self._client_ip(), "task.submit",
+                      target="?", result="fail", detail=f"任务派发异常: {g[:120]}")
+            return self._json({"error": "任务派发失败"}, 500)
+        audit_log(admin.get("user", ""), self._client_ip(), "task.submit",
+                  target=tid, result="ok", detail=f"goal: {g[:120]}")
+        return self._json(submitted)
+
+def _post_memory_delete(self, p, body, admin):
+    if self.path == "/api/memory/delete":
+        # 记忆治理（对标标准 3.4）：按类型+ids 删除，或 {all: true} 清空
+        mtype = str(body.get("type") or "").strip()
+        ids = [str(x) for x in (body.get("ids") or []) if str(x).strip()]
+        purge_all = bool(body.get("all"))
+        purge_expired = bool(body.get("purge_expired"))
+        if purge_expired:
+            mem = _get_memory_manager()
+            deleted = 0
+            if mem is not None:
+                deleted += mem.purge_expired()
+                deleted += mem.enforce_conversation_cap()
+            return self._json({"status": "ok", "deleted": int(deleted or 0),
+                               "purge_expired": True})
+        if mtype not in ("conversations", "strategies", "prompt_refinements"):
+            return self._json({"error": "type 必须是 conversations/strategies/prompt_refinements"}, 400)
+        if not ids and not purge_all and not (
+            mtype == "prompt_refinements" and body.get("key")
+        ):
+            return self._json({"error": "需要 ids 或 all=true"}, 400)
+        mem = _get_memory_manager()
+        if mtype == "conversations":
+            deleted = mem.delete_conversations(ids) if ids else mem.delete_all(mem._conversations)
+        elif mtype == "strategies":
+            deleted = mem.delete_strategies(ids) if ids else mem.delete_all(mem._strategies)
+        else:
+            deleted = mem.delete_prompt_refinements(
+                {"key": str(body.get("key") or "")} if body.get("key") else None
+            ) if not ids else mem.delete_by_ids(mem._prompt_refinements, ids)
+        return self._json({"status": "ok", "deleted": int(deleted or 0)})
+
+def _post_plan_confirm(self, p, body, admin):
+    if self.path == "/api/plan/confirm":
+        tid = str(body.get("task_id", "")).strip()
+        if not tid:
+            return self._json({"error": "task_id required"}, 400)
+        action = body.get("action", "confirm")
+        if not _redis_ready():
+            return self._json({"error": "Redis 未连接，无法确认计划"}, 503)
+        r = _new_redis()
+        try:
+            r.rpush(f"plan_confirm:{tid}", json.dumps({
+                "action": action,
+                "steps": body.get("steps"),
+            }, ensure_ascii=False))
+        except Exception:
+            return self._json({"error": "Redis 写入失败，无法确认计划"}, 503)
+        return self._json({"status": "ok"})
+
+def _post_step_confirm(self, p, body, admin):
+    if self.path == "/api/step/confirm":
+        # 人机协作：确认/取消单个步骤（mode=human_in_loop）
+        tid = str(body.get("task_id", "")).strip()
+        sid = str(body.get("step_id", "")).strip()
+        if not tid or not sid:
+            return self._json({"error": "task_id 和 step_id 必填"}, 400)
+        if not _redis_ready():
+            return self._json({"error": "Redis 未连接，无法确认步骤"}, 503)
+        r = _new_redis()
+        try:
+            r.rpush(f"step_confirm:{tid}:{sid}", json.dumps({
+                "action": str(body.get("action") or "confirm"),
+            }, ensure_ascii=False))
+        except Exception:
+            return self._json({"error": "Redis 写入失败，无法确认步骤"}, 503)
+        return self._json({"status": "ok"})
+
+def _post_context_extract(self, p, body, admin):
+    if self.path == "/api/context/extract":
+        filename = str(body.get("filename") or "").strip()
+        b64 = str(body.get("data") or "")
+        if not filename or not b64:
+            return self._json({"error": "filename and data required"}, 400)
+        try:
+            raw = base64.b64decode(b64)
+        except Exception:
+            return self._json({"error": "invalid base64"}, 400)
+        if len(raw) > 3 * 1024 * 1024:
+            return self._json({"error": "file too large (max 3MB)"}, 413)
+        text = _extract_text_from_bytes(filename, raw)
+        return self._json({
+            "filename": filename,
+            "text": text[:30000],
+            "chars": len(text),
+            "truncated": len(text) > 30000,
+        })
+
+def _post_evolution_trigger(self, p, body, admin):
+    if self.path == "/api/evolution/trigger":
+        if not _redis_ready():
+            return self._json({"error": "Redis 未连接，无法触发进化"}, 503)
+        r = _new_redis()
+        try:
+            r.publish("orchestrator:main", json.dumps({"task_id":"evo-"+str(int(time.time())),"goal":"EVOLUTION_TRIGGER"}, ensure_ascii=False))
+        except Exception:
+            return self._json({"error": "Redis 发布失败，无法触发进化"}, 503)
+        return self._json({"status":"triggered"})
+
+def _post_evolution_approve(self, p, body, admin):
+    if self.path == "/api/evolution/approve":
+        sid = str(body.get("strategy_id") or "").strip()
+        approve = bool(body.get("approve", True))
+        if not sid:
+            return self._json({"error": "strategy_id required"}, 400)
+        if not _redis_ready():
+            return self._json({"error": "Redis 未连接，无法审批"}, 503)
+        r = _new_redis()
+        try:
+            entries = r.lrange("evolution:pending", 0, -1)
+            matched = None
+            for raw in entries:
+                try:
+                    item = json.loads(raw)
+                except Exception:
+                    continue
+                if item.get("strategy_id") == sid:
+                    matched = (raw, item)
+                    break
+            if not matched:
+                return self._json({"error": "pending strategy not found"}, 404)
+            raw, item = matched
+            r.lrem("evolution:pending", 0, raw)
+            deployed = False
+            if approve:
+                item["status"] = "deployed"
+                # Roadmap 余项②：灰度比例（0-1，默认 1.0 全量；<1 时按任务哈希分流）
+                try:
+                    rollout = min(1.0, max(0.0, float(body.get("rollout", 1.0) or 1.0)))
+                except (TypeError, ValueError):
+                    rollout = 1.0
+                item["rollout"] = rollout
+                r.set(
+                    f"strategy:active:{item.get('agent_type', 'search_agent')}",
+                    json.dumps(item, ensure_ascii=False),
+                )
+                deployed = True
+            return self._json({
+                "status": "ok",
+                "deployed": deployed,
+                "rollout": item.get("rollout", 1.0),
+                "agent_type": item.get("agent_type"),
+            })
+        except Exception as exc:
+            return self._json({"error": f"approve failed: {exc}"}, 500)
+
+def _post_single_agent(self, p, body, admin):
+    if self.path == "/api/single-agent":
+        g = body.get("goal","").strip()
+        if not g: return self._json({"error":"goal required"},400)
+        import time as _t
+        start = _t.time()
+        try:
+            from llm_client import LLMClient
+            llm = LLMClient()
+            result = llm.call("Answer directly.", g, expect_json=False)
+            return self._json({"result": result, "duration": round(_t.time()-start,1)})
+        except Exception as e:
+            return self._json({"result": f"Error: {e}", "duration": _t.time()-start})
+
+def _post_kill_worker(self, p, body, admin):
+    if self.path == "/api/kill-worker":
+        agent_id = body.get("agent_id","")
+        if not agent_id: return self._json({"error":"agent_id required"},400)
+        if not _redis_ready():
+            return self._json({"error": "Redis 未连接，无法停止 worker"}, 503)
+        r = _new_redis()
+        try:
+            r.publish(f"agent.kill.{agent_id}", json.dumps({"action":"die"}))
+        except Exception:
+            return self._json({"error": "Redis 发布失败，无法停止 worker"}, 503)
+        return self._json({"status":"killed","agent_id":agent_id})
+
+def _post_config(self, p, body, admin):
+    if self.path == "/api/config":
+        _save_config(body)
+        llm = body.get("llm",{})
+        if llm.get("api_key"): os.environ["LLM_API_KEY"] = llm["api_key"]
+        if llm.get("base_url"): os.environ["LLM_BASE_URL"] = llm["base_url"]
+        if llm.get("model"): os.environ["LLM_MODEL"] = llm["model"]
+        audit_log(admin.get("user", ""), self._client_ip(), "config.save", result="ok")
+        return self._json({"status":"saved"})
+
+def _post_llm_mode(self, p, body, admin):
+    if self.path == "/api/llm-mode":
+        # LLM 运行模式切换：cloud=全商业 API；hybrid=本地 LoRA 参与部分 Worker。
+        # 写 Redis（worker 实时读）+ config.json（持久化重启后生效）。
+        mode = str(body.get("mode") or "").strip().lower()
+        if mode not in ("cloud", "hybrid"):
+            return self._json({"error": "mode must be cloud|hybrid"}, 400)
+        try:
+            if _redis_ready():
+                _new_redis().set("llm_mode", mode)
+        except Exception:
+            pass
+        cfg = _load_config() or {}
+        cfg.setdefault("system", {})["llm_mode"] = mode
+        _save_config(cfg)
+        audit_log(admin.get("user", ""), self._client_ip(), "llm.mode",
+                  result="ok", detail=mode)
+        return self._json({"status": "ok", "mode": mode})
+
+def _post_notifications(self, p, body, admin):
+    if self.path == "/api/notifications":
+        # F5：通知配置保存（仅 admin）：body 可直接是 notifications 段，
+        # 也可包裹在 {"notifications": {...}} 中（与 GET 响应一致）
+        from notifications import (
+            load_notifications_config,
+            public_notifications_config,
+            save_notifications_config,
+        )
+        ncfg = body.get("notifications") if isinstance(
+            body.get("notifications"), dict
+        ) else body
+        if not isinstance(ncfg, dict):
+            return self._json({"error": "notifications 必须是对象"}, 400)
+        if not save_notifications_config(ncfg, CONFIG_PATH):
+            return self._json({"error": "保存配置失败"}, 500)
+        audit_log(admin.get("user", ""), self._client_ip(),
+                  "notifications.save", result="ok")
+        return self._json({
+            "status": "saved",
+            "notifications": public_notifications_config(
+                load_notifications_config(CONFIG_PATH)
+            ),
+        })
+
+def _post_scheduled_jobs(self, p, body, admin):
+    if self.path == "/api/scheduled-jobs":
+        # F2：定时任务增删改（仅 admin）。body:
+        #   {"action": "add"|"update"|"delete", "job": {...}, "name": "..."}
+        from scheduled_jobs import load_jobs, normalize_job, save_jobs
+        jobs = load_jobs(CONFIG_PATH)
+        action = str(body.get("action") or "add").lower()
+        name = str(body.get("name") or "").strip()
+        if action == "delete":
+            if not name:
+                return self._json({"error": "name required"}, 400)
+            jobs = [j for j in jobs if j.get("name") != name]
+        else:
+            job = normalize_job(body.get("job") if isinstance(
+                body.get("job"), dict
+            ) else body)
+            if not job:
+                return self._json({
+                    "error": "job 需要 name/goal，且 interval_minutes 或 "
+                             "cron(每日 HH:MM) 至少一项",
+                }, 400)
+            jobs = [j for j in jobs if j.get("name") != job["name"]]
+            jobs.append(job)
+        if not save_jobs(jobs, CONFIG_PATH):
+            return self._json({"error": "保存配置失败"}, 500)
+        audit_log(admin.get("user", ""), self._client_ip(),
+                  "scheduled_jobs.save", target=name or "?", result="ok")
+        return self._json({"status": "ok", "jobs": jobs})
+
+
+# ============================================================
+# 路由表（E 重构：do_GET/do_POST 业务分支表化，保持原 if 顺序）
+# ============================================================
+_GET_ROUTES = [
+    (lambda self, p: p == "/api/health", _get_health),
+    (lambda self, p: p == "/api/auth/bootstrap", _get_bootstrap),
+    (lambda self, p: p == "/api/audit", _get_audit),
+    (lambda self, p: p == "/", _get_root),
+    (lambda self, p: p == "/api/status", _get_status),
+    (lambda self, p: p == "/api/projects", _get_projects),
+    (lambda self, p: p == "/api/scheduled-jobs", _get_scheduled_jobs),
+    (lambda self, p: p.startswith("/files/"), _get_files),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/deliverables"), _get_task_deliverables),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/usage"), _get_task_usage),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/stream"), _get_task_stream),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/pdf"), _get_task_pdf),
+    (lambda self, p: p == "/api/config", _get_config),
+    (lambda self, p: p == "/api/llm-mode", _get_llm_mode),
+    (lambda self, p: p == "/api/notifications", _get_notifications),
+    (lambda self, p: p == "/api/events", _get_events),
+    (lambda self, p: p == "/api/memory", _get_memory),
+    (lambda self, p: p == "/api/memory/summary", _get_memory_summary_route),
+    (lambda self, p: p == "/api/templates", _get_templates),
+    (lambda self, p: p == "/api/evals", _get_evals),
+    (lambda self, p: p == "/api/acceptance/suggestions", _get_acceptance_suggestions),
+    (lambda self, p: p == "/api/skills", _get_skills),
+    (lambda self, p: p == "/api/tool-audit", _get_tool_audit),
+    (lambda self, p: p == "/api/evolution", _get_evolution),
+    (lambda self, p: p == "/api/evolution/pending", _get_evolution_pending),
+    (lambda self, p: p == "/api/metrics", _get_metrics),
+    (lambda self, p: p == "/tasks", _get_tasks),
+    (lambda self, p: p == "/api/conversations", _get_conversations),
+    (lambda self, p: p.startswith("/api/conversations/"), _get_conversation_detail),
+    (lambda self, p: p.startswith("/api/share/"), _get_share_data),
+    (lambda self, p: p.startswith("/share/"), _get_share_page),
+    (lambda self, p: p.startswith("/task/"), _get_task_page),
+    (lambda self, p: p.startswith("/task/") and p.endswith("/report"), _get_task_report),
+]
+
+_POST_ROUTES = [
+    (lambda self, p: self.path == "/api/share" or self.path.startswith("/api/share/"), _post_share),
+    (lambda self, p: self.path == "/api/deliverable/run", _post_deliverable_run),
+    (lambda self, p: self.path == "/task", _post_task),
+    (lambda self, p: self.path == "/api/memory/delete", _post_memory_delete),
+    (lambda self, p: self.path == "/api/plan/confirm", _post_plan_confirm),
+    (lambda self, p: self.path == "/api/step/confirm", _post_step_confirm),
+    (lambda self, p: self.path == "/api/context/extract", _post_context_extract),
+    (lambda self, p: self.path == "/api/evolution/trigger", _post_evolution_trigger),
+    (lambda self, p: self.path == "/api/evolution/approve", _post_evolution_approve),
+    (lambda self, p: self.path == "/api/single-agent", _post_single_agent),
+    (lambda self, p: self.path == "/api/kill-worker", _post_kill_worker),
+    (lambda self, p: self.path == "/api/config", _post_config),
+    (lambda self, p: self.path == "/api/llm-mode", _post_llm_mode),
+    (lambda self, p: self.path == "/api/notifications", _post_notifications),
+    (lambda self, p: self.path == "/api/scheduled-jobs", _post_scheduled_jobs),
+]
+
