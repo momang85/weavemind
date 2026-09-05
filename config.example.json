@@ -61,7 +61,12 @@
     "reflect_max_redo_steps": 2,
     "scheduler": false,
     "market_preference": "hk",
-    "_comment_market_preference": "双市场公司代码解析偏好：hk/us/cn/auto（默认 hk；auto 保持既有加分规则），可用环境变量 WEAVEMIND_MARKET_PREFERENCE 覆盖"
+    "_comment_market_preference": "双市场公司代码解析偏好：hk/us/cn/auto（默认 hk；auto 保持既有加分规则），可用环境变量 WEAVEMIND_MARKET_PREFERENCE 覆盖",
+    "reflection_budget": {
+      "ranking": 2,
+      "financial": 3,
+      "general": 3
+    }
   },
   "data_sources": {
     "_comment": "F4 数据源扩展：CoinGecko 免费公开接口无需 key；FRED CSV 与 Google News RSS 亦为公开接口。crypto_api_key 仅作未来付费额度预留。",
@@ -93,7 +98,9 @@
       "user": "notify@example.com",
       "password": "",
       "from": "notify@example.com",
-      "to": ["you@example.com"]
+      "to": [
+        "you@example.com"
+      ]
     }
   },
   "scheduled_jobs": [

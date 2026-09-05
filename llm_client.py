@@ -24,7 +24,11 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 _usage_lock = threading.Lock()
-_usage = {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+_usage = {
+    "calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+    # B3：按端点（base_url）分账台账，供 /api/metrics 与账单告警
+    "by_endpoint": {},
+}
 _usage_pub_client = None
 _task_usage_client = None
 _task_ctx = None
@@ -650,16 +654,25 @@ def reset_task_budget(task_id: str = "") -> None:
 
 def _record_usage(
     prompt_tokens: int, completion_tokens: int,
-    model: str = "", cached: bool = False,
+    model: str = "", cached: bool = False, endpoint: str = "",
 ) -> None:
     """记录一次 LLM 调用用量。
-    cached=True 表示缓存命中：只记调用次数与 cached 标记，不计 token 成本。"""
+    cached=True 表示缓存命中：只记调用次数与 cached 标记，不计 token 成本。
+    endpoint：按端点（base_url）分账台账键（B3）。"""
     with _usage_lock:
         _usage["calls"] += 1
         _usage["prompt_tokens"] += int(prompt_tokens or 0)
         _usage["completion_tokens"] += int(completion_tokens or 0)
         if cached:
             _usage["cached"] = _usage.get("cached", 0) + 1
+        if endpoint:
+            _be = _usage.setdefault("by_endpoint", {})
+            _e = _be.setdefault(
+                endpoint, {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}
+            )
+            _e["calls"] += 1
+            _e["prompt_tokens"] += int(prompt_tokens or 0)
+            _e["completion_tokens"] += int(completion_tokens or 0)
     # 每任务台账（Redis Hash）：llm_usage_task:{task_id}
     tid = _task_context_var().get()
     if not tid:
@@ -1188,7 +1201,7 @@ class LLMClient:
         if usage:
             _record_usage(
                 usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
-                model=model or self.model,
+                model=model or self.model, endpoint=self.base_url,
             )
             _bump_task_budget(
                 usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),

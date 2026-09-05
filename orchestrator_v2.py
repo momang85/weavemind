@@ -284,6 +284,9 @@ class OrchestratorV2:
         # P0-1：反思 LLM 不可用标记（每次任务运行前重置）
         self._reflection_llm_unavailable = ""
         self._max_redo_rounds = 2
+        # B1：反思轮数预算按链路分级（排行 2 / 金融 3 / 通用 3），
+        # config.json system.reflection_budget 可覆盖
+        self._reflection_budget = {"ranking": 2, "financial": 3, "general": 3}
         # B3：单轮反思重做步数上限（默认 2，可用 REFLECT_MAX_REDO_STEPS 或
         # config.json system.reflect_max_redo_steps 覆盖）
         self._max_redo_steps = max(
@@ -346,6 +349,13 @@ class OrchestratorV2:
             self._max_reflection_steps = max(1, int(_sys.get('max_reflection_steps', 3)))
             self._reflection_accept_score = max(0.0, float(_sys.get('reflection_accept_score', 6.0)))
             self._max_redo_rounds = max(1, int(_sys.get('max_redo_rounds', 2)))
+            # B1：反思预算热更新（dict 段，逐键校验）
+            _rb = _sys.get('reflection_budget')
+            if isinstance(_rb, dict):
+                for _k in ("ranking", "financial", "general"):
+                    _v = _rb.get(_k)
+                    if isinstance(_v, int) and _v >= 1:
+                        self._reflection_budget[_k] = _v
             self._max_redo_steps = max(
                 1, int(_sys.get('reflect_max_redo_steps', self._max_redo_steps))
             )
@@ -4888,6 +4898,33 @@ class OrchestratorV2:
                               {"type": "iteration", "agent": "orchestrator",
                                "message": "确定性验收未通过，覆盖'报告类跳过反射轮'，进入修复迭代",
                                "timestamp": self._now_iso()})
+            # B1：反思预算按链路分级——预算耗尽直接收口，缺口随最终结果
+            # 如实披露为 SUCCESS_WITH_ISSUES（避免排行类任务无节制重做）
+            from acceptance_checker import traceability_domain
+            _gl = str(goal or "").lower()
+            _dom = (
+                "ranking"
+                if any(k in _gl for k in ("排行", "排名", "top10", "前十"))
+                else (traceability_domain(goal) or "general")
+            )
+            _rb = getattr(self, "_reflection_budget", None) or {
+                "ranking": 2, "financial": 3, "general": 3,
+            }
+            _budget = int(_rb.get(_dom, _rb.get("general", 3)) or 3)
+            if iteration >= _budget:
+                logger.warning(
+                    "Reflection budget exhausted (%s, budget=%d, iteration=%d, "
+                    "task=%s)，收口不再重做",
+                    _dom, _budget, iteration, task_id,
+                )
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "iteration", "agent": "orchestrator",
+                               "message": (
+                                   f"反思预算耗尽（{_dom} 链路，预算 {_budget} 轮），"
+                                   "按当前最优报告收口"
+                               ),
+                               "timestamp": self._now_iso()})
+                break
             verdict = self._reflect(
                 goal, best_report, task_id, all_steps, completed_all,
                 memory_context, _vsum, _eval_scores,

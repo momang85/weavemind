@@ -106,6 +106,9 @@ class ReportGeneratorWorker(AsyncWorkerBase):
         planned: list[tuple[int, str, str]] = []  # (插入行号, 图表名, markdown)
         for c in charts:
             entry = (manifests or {}).get(c.name) or {}
+            if isinstance(entry, dict) and str(entry.get("grade") or "") == "draft":
+                # A6：草稿级图不进正文（由 _grade_charts 收入附录并注明原因）
+                continue
             keywords = entry.get("keywords") if isinstance(entry, dict) else entry
             if not keywords:
                 keywords = chart_topics.get(c.name) or [
@@ -130,16 +133,42 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                 hidx = best_heading(keywords)
             if hidx is not None:
                 end = subsection_end(hidx, heading_map[hidx][0])
-                planned.append((end, c.name, f"![{c.stem}]({c})"))
+                planned.append((end, c.name, f"![{c.stem}]({c})", keywords or []))
             else:
-                planned.append((-1, c.name, f"![{c.stem}]({c})"))
+                planned.append((-1, c.name, f"![{c.stem}]({c})", keywords or []))
+        # A3：正文"如图 X 所示"锚点直插——报告引用名（top10_volume 等）与
+        # 实际文件名（chart_N）不一致时，按锚点行直接插入评分最高的未匹配图，
+        # 而非全部堆到附录（此前好图 chart_1 落附录、乱码图反而命中标题）
+        unmatched = [(n, m, kw) for line_no, n, m, kw in planned if line_no == -1]
+        used = set()
+        for refm in re.finditer(r"如图\s*([^\s，。所示]+)", report):
+            ref = refm.group(1)
+            ref_line = report[: refm.start()].count(chr(10))
+            # 锚点词与图表关键词/文件名重叠 → 命中；否则取该行前最近标题做语义评分
+            cands = []
+            for n, m, kw in unmatched:
+                if n in used:
+                    continue
+                s = 0.0
+                for k in (kw or []):
+                    if k and k in ref:
+                        s += 2.0
+                s += 1.0 if ref in n or n in ref else 0.0
+                if s > 0:
+                    cands.append((s, n, m))
+            if cands:
+                best = max(cands, key=lambda x: x[0])
+                used.add(best[1])
+                planned.append((ref_line, best[1], best[2]))
         # 未匹配 → 数据来源附录前（若无则文末）
         src_idx = next((i for i, l in enumerate(lines) if l.startswith("## ") and "来源" in l), None)
         fallback_line = src_idx if src_idx is not None else len(lines)
-        for name, md in [(n, m) for _, n, m in planned if _ == -1]:
-            planned.append((fallback_line, name, md))
-        planned = [(line_no, name, md) for line_no, name, md in planned if line_no >= 0]
+        for line_no, name, md, _kw in planned:
+            if line_no == -1 and name not in used:
+                planned.append((fallback_line, name, md))
+        planned = [(line_no, name, md, kw) for line_no, name, md, kw in planned if line_no >= 0]
         planned.sort(key=lambda x: (x[0], x[1]))
+        planned = [(line_no, name, md) for line_no, name, md, _kw in planned]
         # 按行号分组，每组末尾统一追加（多图落在同小节时按顺序排列）
         by_line: dict[int, list[str]] = {}
         for line_no, name, md in planned:
@@ -490,6 +519,62 @@ class ReportGeneratorWorker(AsyncWorkerBase):
         return "\n".join(out) if out else ""
 
     @staticmethod
+    def _grade_charts(report: str, charts, manifests: dict | None, instruction: str = "") -> str:
+        """A6：发布级/草稿级路由。
+        - 草稿级图（渲染 QA 未通过）收入文末"补充图表"附录并注明原因；
+        - 用户点名的图型（散点图/柱状图/饼图/折线图）未出现在任何发布级图中
+          → 报告头部明示，不做静默缺失。"""
+        if not charts:
+            return report
+        draft_charts: list = []
+        types_seen: set = set()
+        for c in charts:
+            entry = (manifests or {}).get(c.name) or {}
+            grade = str(entry.get("grade") or "publish") if isinstance(entry, dict) else "publish"
+            ctype = str(entry.get("type") or "") if isinstance(entry, dict) else ""
+            if ctype:
+                types_seen.add(ctype)
+            if grade == "draft":
+                reason = str(entry.get("draft_reason") or "未说明") if isinstance(entry, dict) else "未说明"
+                draft_charts.append((c, reason))
+        requested: list = []
+        for kw, ct in (("散点", "scatter"), ("柱状", "bar"), ("柱形", "bar"),
+                       ("条形", "horizontal_bar"), ("饼", "pie"), ("折线", "line")):
+            if kw in str(instruction or "") and ct not in types_seen:
+                requested.append(kw)
+        if requested:
+            head_note = (
+                "\n\n> ⚠️ **图表说明**：本任务要求生成的"
+                + "、".join(f"「{kw}图」" for kw in requested)
+                + " 未达发布标准或未能生成（数据不足或 QA 未通过），"
+                  "详见文末补充图表与运行日志。\n"
+            )
+            m = re.search(r"^#\s+.*$", report, re.M)
+            if m:
+                report = report[: m.end()] + head_note + report[m.end():]
+            else:
+                report = head_note + report
+        if draft_charts:
+            lines = ["\n\n## 补充图表（未达发布标准）\n"]
+            for c, reason in draft_charts:
+                lines.append(f"\n![{c.stem}]({c})\n\n*未达发布标准原因：{reason}*\n")
+            report += "\n".join(lines)
+        return report
+
+    @staticmethod
+    def _fix_source_urls(report: str) -> str:
+        """A5：参考来源清单里非 http(s):// 的"链接"（如 LLM 把来源名
+        "结构化数据块"当 URL 输出）转为纯文字说明，避免交付中出现无效链接。
+        图片语法（! 前缀）不受影响。"""
+        def _repl(m):
+            text = m.group(1)
+            url = m.group(2)
+            if re.match(r"https?://", url or "", re.I):
+                return m.group(0)
+            return text
+        return re.sub(r"(?<!!)\[([^\]]+)\]\(([^)]*)\)", _repl, report)
+
+    @staticmethod
     def _research_content(prev_content: str, max_chars: int = 6000) -> str:
         """从上游产物提取核心段落：去掉顶层标题、正文限长。
         仅当它是与当前主题同类型的完整报告（标题含"报告"且正文有 数据来源/
@@ -688,6 +773,8 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             # 图表内联嵌入：按主题把图表插到对应小节之后（紧贴需要可视化的文字）
             if charts:
                 report = self._embed_charts_inline(report, charts, manifests)
+                report = ReportGeneratorWorker._grade_charts(
+                    report, charts, manifests, str(instruction))
 
             # 后处理：剥离误嵌入的 [CHART_DATA] 原始 JSON，删除空数值表格行
             report = self._strip_chart_data_blocks(report)
@@ -697,6 +784,8 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             report = self._strip_reflection_residue(report)
             # 数据一致性检查：同一指标多个数值 → 追加分歧提示
             report = self._flag_conflicting_figures(report)
+            # A5：无效来源链接转纯文字
+            report = ReportGeneratorWorker._fix_source_urls(report)
             # P2-2 来源卫生：正文剔除声明与来源附录强一致（删除附录中被剔除条目）
             report = self._strip_rejected_sources(report)
 
@@ -750,9 +839,12 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             # 兜底也按章节内联嵌入图表（未匹配的插到数据来源前）
             if charts:
                 report = self._embed_charts_inline(report, charts)
+                report = ReportGeneratorWorker._grade_charts(
+                    report, charts, {}, str(instruction))
             report = self._strip_reflection_residue(report)
             # P2-2 来源卫生：兜底报告同样保证剔除声明与附录一致
             report = self._strip_rejected_sources(report)
+            report = ReportGeneratorWorker._fix_source_urls(report)
             try:
                 rpath = report_dir / "report.md"
                 old_size = rpath.stat().st_size if rpath.exists() else 0

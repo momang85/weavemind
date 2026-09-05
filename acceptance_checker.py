@@ -219,6 +219,58 @@ def _traceable_in_clean(num: dict, clean_text: str) -> bool:
     return False
 
 
+_ARITH_METRIC_WORDS = (
+    "换手率", "涨跌幅", "最新价", "成交额", "成交量", "收盘价", "开盘价",
+    "营收", "净利润", "归母净利润", "毛利率", "毛利润", "总资产", "总负债",
+    "经营现金流", "市占率", "份额",
+)
+
+
+def _arithmetic_derived_from_clean(num: dict, clean_text: str) -> bool:
+    """B2：报告数字是否可由 clean 数据按指标算术导出（求和/均值/头部占比）。
+    覆盖"TOP10总成交额 1161.03亿"（求和）、"平均换手率 4.49%"（均值）、
+    "头部三强合计占比 37.5%"（前 k 项占比）这类计算值——它们不应被当
+    "不可溯源"扣分并触发无效重做。容差 0.5%。"""
+    try:
+        data = json.loads(clean_text)
+    except Exception:
+        return False
+    md = data.get("market_data") or []
+    try:
+        v = float(num["value"])
+    except (TypeError, ValueError):
+        return False
+    groups: dict[str, list[float]] = {}
+    for r in md:
+        if not isinstance(r, dict):
+            continue
+        label = str(r.get("label") or "")
+        metric = next((w for w in _ARITH_METRIC_WORDS if w in label), None)
+        if not metric:
+            continue
+        try:
+            x = float(r.get("value") or 0)
+        except (TypeError, ValueError):
+            continue
+        groups.setdefault(metric, []).append(x)
+    tol = max(abs(v) * 0.005, 0.005)
+    for metric, xs in groups.items():
+        if len(xs) < 2:
+            continue
+        s = sum(xs)
+        if abs(s - v) <= tol:  # 求和（TOP10总成交额）
+            return True
+        if abs(s / len(xs) - v) <= tol:  # 均值（平均换手率）
+            return True
+        # 头部 k 项占比（37.5% = 前三/总）
+        if num["unit"].endswith("%") and s:
+            top = sorted(xs, reverse=True)
+            for k in range(2, min(6, len(top)) + 1):
+                if abs(sum(top[:k]) / s * 100 - v) <= tol:
+                    return True
+    return False
+
+
 def _derived_traceable(num: dict, clean_text: str) -> bool:
     """派生值溯源：报告里的同比增速 / 约数金额可追溯到结构化数据。
     - % 值：与同指标相邻年份 (b/a-1)*100 一致（容差 0.05 个百分点）；
@@ -381,9 +433,11 @@ def check_number_traceability(
                         hit = k
                         break
         item = {"raw": n["raw"], "value": n["value"], "unit": n["unit"]}
+        if not hit and clean_text and _arithmetic_derived_from_clean(n, clean_text):
+            hit = "derived_computed"
         if hit:
             item["source"] = hit
-            item["derived"] = hit == "derived_from_clean"
+            item["derived"] = hit in ("derived_from_clean", "derived_computed")
             traceable.append(item)
         else:
             # 数字后紧跟"基于模型知识/未验证"标注 → 已披露，不算缺口
@@ -419,9 +473,13 @@ def check_number_traceability(
                 research_note = f"数字样本过少（{total} 个）"
     else:
         passed = rate >= threshold or total < 3
+    # B2 三档分类：引用值 / 计算值（算术可验证）/ 模型知识（已披露标注）
+    _computed = [t for t in traceable if t.get("source") == "derived_computed"]
+    _cited = [t for t in traceable if t not in _computed]
     details = (
         (research_note + "；" if research_note else "")
         + f"数字溯源率 {rate:.0%}（{len(traceable)}/{total}）"
+        + f"；引用 {len(_cited)} / 计算 {len(_computed)} / 模型知识 {len(disclosed)}"
         + f"；财务金额溯源率 {amount_rate:.0%}（{amount_ok}/{len(amounts)}）"
         + (f"；域={domain}" if domain else "")
         + (f"；结构化数据覆盖 {len(traceable)}/{total}" if "structured_data" in src_norm else "")
@@ -442,6 +500,8 @@ def check_number_traceability(
         "amount_traceable": amount_ok,
         "amount_total": len(amounts),
         "disclosed_count": len(disclosed),
+        "computed_count": len(_computed),
+        "cited_count": len(_cited),
         "traceable": traceable,
         "untraceable": untraceable[:10],
     }

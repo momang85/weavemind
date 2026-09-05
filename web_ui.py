@@ -298,7 +298,13 @@ def _init_db():
             db.execute("ALTER TABLE task_history ADD COLUMN steps_json TEXT DEFAULT ''")
         if "logs_json" not in cols:
             db.execute("ALTER TABLE task_history ADD COLUMN logs_json TEXT DEFAULT ''")
+        # C1：会话持久化——webui 重启后未过期会话自动恢复，不再全员掉登录
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS sessions("
+            "token TEXT PRIMARY KEY, user TEXT, role TEXT, expires REAL)"
+        )
         db.commit(); db.close()
+        _load_sessions()
     except Exception: pass
 
 def _list_tasks(limit=50):
@@ -535,16 +541,51 @@ def _ensure_users_on_startup():
 
 # ---- 会话（内存 token → 用户/角色/过期时间） ----
 
+def _load_sessions():
+    """启动时从 SQLite 恢复未过期会话到内存；过期条目顺带清理。"""
+    try:
+        db = sqlite3.connect(DB_PATH, timeout=5)
+        db.row_factory = sqlite3.Row
+        rows = db.execute("SELECT token, user, role, expires FROM sessions").fetchall()
+        db.close()
+        now = time.time()
+        alive = [(r["token"], r["user"], r["role"], r["expires"]) for r in rows]
+        with _sessions_lock:
+            for token, user, role, expires in alive:
+                if expires > now:
+                    _sessions[token] = {
+                        "user": user, "role": role, "expires": expires,
+                    }
+        try:
+            db = sqlite3.connect(DB_PATH, timeout=5)
+            db.execute("DELETE FROM sessions WHERE expires <= ?", (now,))
+            db.commit(); db.close()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 def _create_session(username: str, role: str) -> str:
     """创建会话并返回 token；顺带清理已过期会话，防止内存无限增长。"""
     _cleanup_sessions()
     token = secrets.token_urlsafe(32)
+    expires = time.time() + SESSION_TTL_SECONDS
     with _sessions_lock:
         _sessions[token] = {
             "user": username,
             "role": role,
-            "expires": time.time() + SESSION_TTL_SECONDS,
+            "expires": expires,
         }
+    try:
+        db = sqlite3.connect(DB_PATH, timeout=5)
+        db.execute(
+            "INSERT OR REPLACE INTO sessions(token, user, role, expires) "
+            "VALUES(?,?,?,?)", (token, username, role, expires),
+        )
+        db.commit(); db.close()
+    except Exception:
+        pass
     return token
 
 
@@ -557,6 +598,12 @@ def _get_session(token: str | None) -> dict | None:
             return None
         if time.time() > session.get("expires", 0):
             _sessions.pop(token, None)
+            try:
+                db = sqlite3.connect(DB_PATH, timeout=5)
+                db.execute("DELETE FROM sessions WHERE token=?", (token,))
+                db.commit(); db.close()
+            except Exception:
+                pass
             return None
         return session
 
@@ -2979,6 +3026,22 @@ def _post_task(self, p, body, admin):
         if not g:
             g = tpl_goal
         if not g: return self._json({"error":"goal required"},400)
+        # B3：提交前余额预检——双端点都余额不足时直接拒绝，避免任务跑一半
+        # 全靠降级撑（实测主端点 402 切换 10 次）。预检有 30s TTL，不拖慢提交。
+        try:
+            from llm_client import get_balance_status
+            _bal = get_balance_status()
+            _p = _bal.get("primary") or {}
+            _b = _bal.get("backup") or {}
+            if (
+                _p.get("reason") == "insufficient_balance"
+                and _b.get("reason") == "insufficient_balance"
+            ):
+                return self._json(
+                    {"error": "全部 LLM 端点余额不足，请充值后重试"}, 503,
+                )
+        except Exception:
+            pass
         conv_id = (body.get("conversation_id") or "").strip()
         parent_id = (body.get("parent_task_id") or "").strip()
         is_new_conversation = not conv_id
@@ -3195,6 +3258,22 @@ def _post_single_agent(self, p, body, admin):
     if self.path == "/api/single-agent":
         g = body.get("goal","").strip()
         if not g: return self._json({"error":"goal required"},400)
+        # B3：提交前余额预检——双端点都余额不足时直接拒绝，避免任务跑一半
+        # 全靠降级撑（实测主端点 402 切换 10 次）。预检有 30s TTL，不拖慢提交。
+        try:
+            from llm_client import get_balance_status
+            _bal = get_balance_status()
+            _p = _bal.get("primary") or {}
+            _b = _bal.get("backup") or {}
+            if (
+                _p.get("reason") == "insufficient_balance"
+                and _b.get("reason") == "insufficient_balance"
+            ):
+                return self._json(
+                    {"error": "全部 LLM 端点余额不足，请充值后重试"}, 503,
+                )
+        except Exception:
+            pass
         import time as _t
         start = _t.time()
         try:
