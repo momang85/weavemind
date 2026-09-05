@@ -18,7 +18,8 @@ from pathlib import Path
 
 import chart_assembly
 
-logger = logging.getLogger(__name__)
+# 保持与 orchestrator_v2 相同的 logger 名：日志行为（含测试 assertLogs）零变化
+logger = logging.getLogger("orchestrator_v2")
 
 
 class ChartPipelineMixin:
