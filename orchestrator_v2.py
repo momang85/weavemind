@@ -4924,7 +4924,7 @@ class OrchestratorV2:
             # 继续迭代只会重复耗时（实测两轮重做后缺口不变仍继续）。
             # iteration 每次 while 循环末尾递增，iteration>0 表示已过首轮。
             _cur_sig = "|".join(
-                str(g).strip() for g in (_acc_summary.get("gaps") or [])
+                str(g).strip() for g in ((_acc_summary or {}).get("gaps") or [])
                 if str(g).strip()
             )
             if (
