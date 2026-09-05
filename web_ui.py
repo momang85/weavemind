@@ -293,6 +293,11 @@ def _init_db():
         if "user" not in cols:
             # P1-3：结果缓存需按提交者隔离，避免不同用户/项目/上下文互相命中缓存
             db.execute("ALTER TABLE task_history ADD COLUMN user TEXT DEFAULT ''")
+        if "steps_json" not in cols:
+            # BUG-8：持久化步骤/日志，历史页载入后仍可回放执行计划（重启不丢）
+            db.execute("ALTER TABLE task_history ADD COLUMN steps_json TEXT DEFAULT ''")
+        if "logs_json" not in cols:
+            db.execute("ALTER TABLE task_history ADD COLUMN logs_json TEXT DEFAULT ''")
         db.commit(); db.close()
     except Exception: pass
 
@@ -593,8 +598,17 @@ def _listen_results():
                                 # Persist to SQLite so History page updates
                                 try:
                                     db = sqlite3.connect(DB_PATH, timeout=5)
-                                    db.execute("INSERT INTO task_history(task_id,goal,status,report,completed_at) VALUES(?,?,?,?,CURRENT_TIMESTAMP) ON CONFLICT(task_id) DO UPDATE SET status=excluded.status,report=excluded.report,completed_at=CURRENT_TIMESTAMP",
-                                        (tid, existing.get("goal",""), payload.get("status","UNKNOWN"), payload.get("report","")))
+                                    db.execute(
+                                        "INSERT INTO task_history(task_id,goal,status,report,steps_json,logs_json,completed_at)"
+                                        " VALUES(?,?,?,?,?,?,CURRENT_TIMESTAMP)"
+                                        " ON CONFLICT(task_id) DO UPDATE SET status=excluded.status,"
+                                        " report=excluded.report,steps_json=excluded.steps_json,"
+                                        " logs_json=excluded.logs_json,completed_at=CURRENT_TIMESTAMP",
+                                        (tid, existing.get("goal",""), payload.get("status","UNKNOWN"),
+                                         payload.get("report",""),
+                                         json.dumps(existing.get("steps", []), ensure_ascii=False),
+                                         json.dumps(existing.get("logs", [])[-200:], ensure_ascii=False)),
+                                    )
                                     db.commit(); db.close()
                                 except Exception: pass
                             elif ptype == "plan_update":
@@ -2807,13 +2821,26 @@ def _get_task_page(self, p):
         if not data:
             for t in _list_tasks(100):
                 if t.get("task_id") == tid: data = t; break
-        if data: return self._json({
+        if data:
+            _steps = data.get("steps") or []
+            _logs = data.get("logs") or []
+            if not _steps and data.get("steps_json"):
+                try:
+                    _steps = json.loads(data["steps_json"]) or []
+                except Exception:
+                    pass
+            if not _logs and data.get("logs_json"):
+                try:
+                    _logs = json.loads(data["logs_json"]) or []
+                except Exception:
+                    pass
+            return self._json({
             "task_id": tid,
             "status": data.get("status", "PENDING"),
             "goal": data.get("goal", ""),
-            "steps": data.get("steps", []),
+            "steps": _steps,
             "report": data.get("final_report") or data.get("report", ""),
-            "logs": data.get("logs", []),
+            "logs": _logs,
             "project": data.get("project", ""),
             "revision": bool(data.get("revision")),
             "acceptance": data.get("acceptance"),

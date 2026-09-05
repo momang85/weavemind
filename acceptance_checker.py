@@ -718,6 +718,12 @@ _DOMAIN_MEDIA = {
     "csdn.net": "CSDN博客", "woshipm.com": "人人都是产品经理",
     "meituan.com": "美团官网", "weiyangx.com": "未央网",
     "sgpjbg.com": "三个皮匠报告", "alishui.com": "满银", "baidu.com": "百度",
+    # BUG-6 补录：实测被误判"虚假标注"的真实抓取域名
+    "100est.com": "百优价值网", "faxiangongchang.com": "天下工厂",
+    "9fzt.com": "九方智投", "cofool.com": "叩富网",
+    "xiniudata.com": "新牛数据", "dfcfw.com": "东方财富PDF",
+    "nbd.com.cn": "每日经济新闻", "hstong.com": "华盛通",
+    "ykzq.com": "粤开证券", "fddi.fudan.edu.cn": "复旦金融研究院",
 }
 
 # 媒体别名组：声明中出现的别名与已知媒体名归组匹配。
@@ -731,12 +737,19 @@ _MEDIA_ALIAS_GROUPS = (
     ("凤凰", "凤凰网", "凤凰财经"),
     ("第一财经", "第一财经日报"),
     ("财联社", "财联社电报"),
+    ("天下工厂", "天下工厂产业研究院", "法向工厂"),
+    ("东吴证券", "东吴证券研究所"),
+    ("九方智投", "九方"),
+    ("百优价值网", "百优"),
 )
 
 # A2：已登记的媒体名/别名集合——已登记的词不再重复建议补录
+# 无固定域名的权威机构（SNE Research 是韩国动力电池研究机构，报告常引用）
+_EXTRA_MEDIA_NAMES = ("SNE Research", "SNE", "FRED")
+
 _KNOWN_MEDIA_NAMES = frozenset(_DOMAIN_MEDIA.values()) | frozenset(
     name for grp in _MEDIA_ALIAS_GROUPS for name in grp
-)
+) | frozenset(_EXTRA_MEDIA_NAMES)
 
 # 形如「XX网/XX报/XX财经/XX新闻」的媒体词；
 # 尾随否定避免把「XX财经网」拆成「XX财经」+「网」两个候选
@@ -815,6 +828,14 @@ def _known_sources(sources: dict) -> dict:
                     media.add(name)
         for t in re.findall(r"(?:title|标题)[：:]\s*([^\n]{4,60})", text):
             titles.append(t)
+        # 拍平文本形态：标题紧邻 URL 之前（"…东吴证券研究所 1/39 … https://…"）。
+        # 取整行而非固定窗口，避免窗口截断把券商名切掉（限长 120 防吞行）
+        for m in re.finditer(r"https?://[^\s\]\)\"]+", text):
+            ls = text.rfind("\n", 0, m.start()) + 1
+            pre = text[ls:m.start()][-120:]
+            t = re.sub(r"^\s*\d+\s*", "", pre).strip(" -—_。;；")
+            if len(t) >= 4:
+                titles.append(t)
         # P1-2：署名/转引媒体识别——如"同花顺_新浪新闻"、"来源：同花顺"、
         # "XX转载"等，把署名媒体名并入已知媒体集合（内容真实存在于抓取正文时，
         # 声明"同花顺财务诊断"不应因域名是 k.sina.com.cn 而误判虚假标注）
@@ -829,7 +850,39 @@ def _known_sources(sources: dict) -> dict:
             text,
         ):
             media.add(m.group(1).strip())
+    for _nm in _EXTRA_MEDIA_NAMES:
+        media.add(_nm)
     return {"urls": urls, "domains": domains, "media": media, "titles": titles}
+
+
+def _claim_fragment(c: str) -> bool:
+    """非来源声明片段：纯分隔线/纯数字/百分比/引用编号/单字/括号失衡碎片。
+    （实测把表格分隔线 "------"、费率 "0.60%"、编号 "[1]"、碎片 "称 X）" 误判为虚假标注）"""
+    c = str(c or "").strip()
+    if not c:
+        return True
+    if re.fullmatch(r"[-—–_=~·\s]+", c):
+        return True
+    if re.fullmatch(r"[\d\s.%％()（）\[\]【】\-—–]+", c):
+        return True
+    if re.fullmatch(r"\[\d+\]|【\d+】", c):
+        return True
+    if len(c) < 2:
+        return True
+    # 连接词/动词残留前缀（"称 -2.85亿）（+42.28%"、"于公开渠道"）
+    if re.match(r"^[称于将已未并及]", c):
+        return True
+    # 负数开头的数值碎片（"-2.85亿"）
+    if re.match(r"^[-—–]\d", c):
+        return True
+    if c in ("来源", "年份", "链接", "口径", "单位", "数值", "指标",
+             "时间", "地域", "样本", "说明", "序号", "备注", "状态",
+             "限制", "综合费率", "附录"):
+        return True
+    # 括号失衡（"称 X）" 之类被截断的碎片）：左括号数 != 右括号数
+    if c.count("（") + c.count("(") != c.count("）") + c.count(")"):
+        return True
+    return False
 
 
 def _extract_source_claims(report: str) -> list[str]:
@@ -841,6 +894,14 @@ def _extract_source_claims(report: str) -> list[str]:
     ):
         c = m.group(1).strip()
         if not c:
+            continue
+        # （数据来源：X）括号声明：捕获可能吞入尾部右括号（如"腾讯官方年报）"）
+        if c.endswith(("）", ")")):
+            c = c[:-1].strip()
+        if not c:
+            continue
+        # BUG-6：分隔线/纯数字/百分比/引用编号/括号失衡碎片不是来源声明
+        if _claim_fragment(c):
             continue
         # 参考来源清单条目（如 '1. [来源](https://example.com/a)'）：链接本身
         # 即来源引用，不属于"数据来源：X"声明，交给 source_list_completeness 检查
@@ -873,7 +934,7 @@ def _extract_source_claims(report: str) -> list[str]:
                     if i >= len(cells):
                         continue
                     c2 = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", cells[i])
-                    if c2 and len(c2) >= 2 and "http" not in c2 and c2 not in claims:
+                    if c2 and len(c2) >= 2 and "http" not in c2 and not _claim_fragment(c2) and c2 not in claims:
                         claims.append(c2)
             return claims
     # 兜底：无表头/分隔符的松散表格行，保留旧行为
@@ -882,7 +943,7 @@ def _extract_source_claims(report: str) -> list[str]:
             cells = [c.strip() for c in line.strip("|").split("|")]
             for c in cells:
                 c2 = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", c)
-                if c2 and len(c2) >= 2 and "http" not in c2 and c2 not in claims:
+                if c2 and len(c2) >= 2 and "http" not in c2 and not _claim_fragment(c2) and c2 not in claims:
                     claims.append(c2)
     return claims
 
@@ -954,6 +1015,11 @@ def check_source_labeling(report: str, sources: dict) -> dict:
         ):
             continue
         if any(t and t in body for t in known["titles"] if len(t) >= 4):
+            continue
+        # BUG-6：声明主体是已知标题的子串（"东吴证券[3]" ⊂ 标题
+        # "东吴证券宁德时代深度研究"）→ 同一来源，诚实；先剥离 [n] 引用标记
+        seg = re.sub(r"[\[【]\d+[\]】]", "", body).strip(" .。；）)（")
+        if len(seg) >= 2 and any(seg in t for t in known["titles"] if t):
             continue
         # 否定/谨慎语境：'非财报类/非官方/未经证实/网络传言/仅供参考' 等
         # 为如实披露，不判虚假标注（含括号披露注释中的否定词）

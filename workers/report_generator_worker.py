@@ -463,6 +463,33 @@ class ReportGeneratorWorker(AsyncWorkerBase):
         return joined
 
     @staticmethod
+    @staticmethod
+    def _format_search_json(text: str) -> str:
+        """检索结果 JSON 数组（title/url/snippet）→ 可读清单。
+        否则 raw JSON 会整段贴进报告附录（渲染成一行超长文本且夹杂过滤痕迹）。"""
+        t = str(text or "").strip()
+        if not (t.startswith("[") and t.endswith("]")):
+            return ""
+        try:
+            items = json.loads(t)
+        except Exception:
+            return ""
+        if not isinstance(items, list):
+            return ""
+        out = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            title = str(it.get("title") or "").strip()
+            url = str(it.get("url") or "").strip()
+            snippet = str(it.get("snippet") or "").strip().replace("\n", " ")[:200]
+            if title and url:
+                line = f"- **{title}**：[{url}]({url})"
+                if snippet:
+                    line += f"\n  {snippet}"
+                out.append(line)
+        return "\n".join(out) if out else ""
+
     def _research_content(prev_content: str, max_chars: int = 6000) -> str:
         """从上游产物提取核心段落：去掉顶层标题、正文限长。
         仅当它是与当前主题同类型的完整报告（标题含"报告"且正文有 数据来源/
@@ -475,6 +502,10 @@ class ReportGeneratorWorker(AsyncWorkerBase):
         if m:
             title = m.group(1).strip()
         body = re.sub(r"^#\s+.*$", "", c, flags=re.M).strip()
+        # raw 检索 JSON → 可读清单（BUG-3）
+        formatted = self._format_search_json(body)
+        if formatted:
+            body = formatted
         if ("报告" in title or "Report" in title) and (
             "数据来源" in body or "来源链接" in body
             or len(re.findall(r"^#{2,3}\s+[一二三四五六七八九十]", body, re.M)) >= 3

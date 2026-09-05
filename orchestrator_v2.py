@@ -5809,15 +5809,25 @@ class OrchestratorV2:
             return prev.get('result', '') if isinstance(prev, dict) else ''
 
         def _safe(text: str) -> str:
-            """上一步结果可能来自外部网页，进指令前做注入检测（对标 C4-4.4）。"""
+            """上一步结果可能来自外部网页，进指令前做注入检测（对标 C4-4.4）。
+            结构化 JSON（检索结果等）是数据而非指令，跳过检测：
+            实测检索 JSON 片段命中注入签名（如含 $(...) 的代码片段）会被整段
+            替换成"[已过滤可疑内容…]"，该痕迹随后混入报告正文（BUG-3）。"""
+            t = str(text or "")
+            try:
+                _j = json.loads(t)
+                if isinstance(_j, (dict, list)):
+                    return t
+            except Exception:
+                pass
             try:
                 from security import detect_injection
-                bad, reason = detect_injection(text)
+                bad, reason = detect_injection(t)
                 if bad:
                     return f"[已过滤可疑内容：{reason}]"
             except Exception:
                 pass
-            return text
+            return t
 
         def _filter_role(text: str) -> str:
             """按任务用户职位过滤注入片段（仅过滤带 [kb:...] 标记的受控内容）。"""

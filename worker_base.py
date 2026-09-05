@@ -372,8 +372,16 @@ class BaseWorker(ABC):
         while self._running and not self._shutting_down:
             task: dict[str, Any] | None = None
             try:
-                # 阻塞等待任务
-                task = self._messaging.pop_task(self.agent_id, timeout=self._POP_TIMEOUT)
+                try:
+                    # 阻塞等待任务
+                    task = self._messaging.pop_task(self.agent_id, timeout=self._POP_TIMEOUT)
+                except Exception as exc:
+                    # BRPOP 阻塞时长超过 Redis socket_timeout（POP_TIMEOUT 与
+                    # socket_timeout 参数不匹配）时 redis 客户端抛 TimeoutError：
+                    # 属正常等待超时，静默续环（此前每 ~2.5 分钟刷一次整屏 ERROR）
+                    if type(exc).__name__ == "TimeoutError":
+                        continue
+                    raise
                 if task is None:
                     continue  # 超时，继续下一轮
 

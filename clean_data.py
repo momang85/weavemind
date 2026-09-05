@@ -185,7 +185,11 @@ def _market_size_rows(sent: str, url: str) -> tuple[list[dict], list[dict]]:
         # "净利润亏损6862亿元" 这类亏损表述 → 数值取负
         if "亏损" in sent[kw:num_pos] or "净亏" in sent[kw:num_pos]:
             val = -abs(val)
-        year_m = re.search(r"(20\d{2})年?", sent[:kw])
+        # 取数值前"最近"的一个年份（扫描顺序从前向后，re.search 会命中句子开头
+        # 的发布年，如 "May 5, 2026 - …2025年实现营收…" 误取 2026）；
+        # 财报语境中距数值最近的年份即数据所属财年。
+        _yrs = list(re.finditer(r"(20\d{2})年?", sent[:kw]))
+        year_m = _yrs[-1] if _yrs else None
         region = next((r for r in _REGIONS if r in sent[:kw]), None)
         mtype = "market_size" if _is_chip_theme(theme) else "ai_overall"
         rows.append({

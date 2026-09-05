@@ -69,11 +69,31 @@ _COMPANY_STOPWORDS = (
     "搜索", "最新", "历年", "年度", "最近", "当前", "近三年", "近五年",
     "做", "写", "请", "帮", "要", "想",
     "给出", "提供", "列出", "包括", "包含", "以及", "来源",
+    # 泛化语境片段（常被连接符/财务词误捕获为"公司名"的普通名词）：
+    # 观察例：'经营基本面'（…的经营基本面与…）、'所有关键'（所有关键数据）、
+    # '新能源'（LG新能源被截出后半段）。这些词不可能作为上市公司名主体。
+    "基本面", "关键", "格局", "图表", "因素", "水平", "差异",
+    "影响", "程度", "份额", "建议", "内容", "信息", "风险",
+    "环境", "范围", "方向", "进展", "前景", "空间", "策略",
+    "方案", "路径", "挑战", "机遇", "逻辑", "价值", "领域",
+)
+
+# 显式股票代码模式：'宁德时代（CATL, 300750.SZ）' / '腾讯(00700.HK)' /
+# 'Apple (AAPL)' / '宁德时代（300750.SZ）' —— 括号内的代码是权威锚点，
+# 其前的中文名直接可信（动词前缀由 _GENERIC_WORDS 剥离，如"调研宁德时代"）。
+_STOCK_CODE_RE = re.compile(
+    rf"(?:{_GENERIC_WORDS})*([\u4e00-\u9fff]{{2,10}}?)\s*[（(]\s*"
+    r"[A-Za-z]{0,8}(?:\s*,\s*[A-Za-z]{0,4}\s*)?\s*\d{4,6}\.?"
+    r"(?:SZ|SH|HK|US)?\s*[）)]"
 )
 
 
 def _extract_company(g: str) -> str:
-    """提取公司名：优先 'X集团/控股'，其次 'X公司'，再次财报前词。"""
+    """提取公司名：优先显式股票代码（'X（CODE）' 锚点），
+    其次 'X集团/控股'，再次 'X公司'、财报前词。"""
+    m = _STOCK_CODE_RE.search(g)
+    if m:
+        return m.group(1)
     for pat in (
         rf"(?:{_GENERIC_WORDS})*([\u4e00-\u9fff]{{2,6}})(?:集团|控股)",
         rf"(?:{_GENERIC_WORDS})*([\u4e00-\u9fff]{{2,6}})公司",
@@ -115,6 +135,14 @@ def _extract_companies(g: str) -> list[str]:
     g = str(g or "")
     if not _COMPARE_TRIGGER_RE.search(g):
         return []
+    # 显式股票代码是权威锚点：命中即只信它（如 '与LG新能源…对比' 这类
+    # 子串歧义句，代码模式把目标钉死在 '宁德时代'，不再拆出垃圾片段）
+    coded = [
+        m.group(1) for m in _STOCK_CODE_RE.finditer(g)
+        if _is_valid_company_name(m.group(1))
+    ]
+    if coded:
+        return list(dict.fromkeys(coded))
     names: list[str] = []
     seen: set[str] = set()
     for pattern in (

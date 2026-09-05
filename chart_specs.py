@@ -51,6 +51,21 @@ def validate_spec(spec) -> list[str]:
         if not isinstance(it, dict) or "label" not in it or "value" not in it:
             issues.append("data 行缺少 label/value")
             break
+    # 单位一致性（BUG-5）：同图数据必须同量纲，否则柱子/刻度语义错乱
+    # （实测例：指数点位 3450 与市盈率 11.8/8.5 同轴 → 后两者不可见）。
+    # 散点图例外：x/y 双轴按设计携带不同量纲（如量价散点 最新价×成交量）
+    if str(spec.get("type") or "") != "scatter":
+        spec_unit = str(spec.get("unit") or "").strip()
+        if re.search(r"[／/、]", spec_unit):
+            issues.append(f"unit 混合单位（{spec_unit}），同图禁止混装量纲")
+        row_units = {
+            str(it.get("unit") or "").strip()
+            for it in data if isinstance(it, dict) and str(it.get("unit") or "").strip()
+        }
+        if len(row_units) > 1:
+            issues.append(
+                "data 行单位不一致（" + "/".join(sorted(row_units)) + "），同图禁止混装量纲"
+            )
     return issues
 
 

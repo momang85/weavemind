@@ -25,7 +25,7 @@ export default function TaskConsole() {
   const {
     planTree, status, report,
     startTask, addLog, demoMode, activeConversationId,
-    setActiveConversation, setReport, reset,
+    setActiveConversation, setReport, reset, updatePlan,
     awaitingConfirm, revision, markPlanConfirmed, setLogs,
   } = useTaskStore()
 
@@ -71,9 +71,49 @@ export default function TaskConsole() {
     try {
       const res = await fetch('/api/conversations/' + convId)
       const data = await res.json()
-      setConvMessages(data.messages ?? [])
+      const msgs = data.messages ?? []
+      setConvMessages(msgs)
+      // BUG-8：历史/刷新载入后回放任务状态——
+      // 运行中的任务 → 交给轮询器实时跟踪（执行计划/日志实时更新）；
+      // 已结束的任务 → 一次性拉取持久化 steps/logs 回放执行计划
+      const running = msgs.find((m: any) =>
+        m.status === 'PENDING' || m.status === 'RUNNING')
+      const last = msgs[msgs.length - 1]
+      const targetId = running?.task_id || last?.task_id
+      if (!targetId) return
+      if (running?.task_id) {
+        setTaskId(running.task_id)
+      } else {
+        fetch('/task/' + targetId).then(r => r.json()).then((d: any) => {
+          if (!d || d.error) return
+          if (Array.isArray(d.steps) && d.steps.length > 0) {
+            updatePlan({
+              id: 'root', capability: '',
+              name: d.goal || 'Task',
+              status: d.status === 'SUCCESS' || d.status === 'SUCCESS_WITH_ISSUES'
+                ? 'success' : d.status === 'FAILED' ? 'failed' : 'running',
+              children: d.steps.map((s: any) => ({
+                id: s.step_id || '', step_id: s.step_id || '',
+                iteration: s.iteration || 0, capability: s.capability || '',
+                name: s.instruction || s.name || 'Step',
+                status: (s.result?.status || 'pending').toLowerCase(),
+                children: [], agent_id: s.result?.agent_id || '',
+                result: s.result || null,
+              })),
+            })
+          }
+          ;(d.logs || []).forEach((lg: any) => {
+            if (!lg || lg.id === undefined) return
+            addLog({
+              id: 'srv-' + lg.id, timestamp: lg.timestamp || '',
+              type: lg.type || 'info', agent: lg.agent || 'orchestrator',
+              message: lg.message || '',
+            })
+          })
+        }).catch(() => {})
+      }
     } catch { /* ignore */ }
-  }, [])
+  }, [updatePlan, addLog])
 
   const loadRecentTasks = useCallback(async () => {
     try {
