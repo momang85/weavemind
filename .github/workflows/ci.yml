@@ -21,7 +21,9 @@ jobs:
       - name: Secret scan
         run: python scripts/check_secrets.py
       - name: Compile all Python files
-        run: python -m py_compile $(git ls-files '*.py')
+        # core.quotepath=false：仓库含中文路径（标准/course_core/...），
+        # git 默认八进制转义输出导致 py_compile 收到字面量转义串而失败
+        run: python -m py_compile $(git -c core.quotepath=false ls-files '*.py')
       - name: Unit tests
         run: python test_common.py
       - name: Orchestrator regression tests
