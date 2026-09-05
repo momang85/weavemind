@@ -159,13 +159,16 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             if cands:
                 best = max(cands, key=lambda x: x[0])
                 used.add(best[1])
-                planned.append((ref_line, best[1], best[2]))
+                # 保持 4 元组与 planned 其余条目一致（BUG：曾 append 3 元组，
+                # 后续 "for ..., _kw in planned" 解包崩 → 报告生成器连环 fallback）
+                planned.append((ref_line, best[1], best[2], []))
         # 未匹配 → 数据来源附录前（若无则文末）
         src_idx = next((i for i, l in enumerate(lines) if l.startswith("## ") and "来源" in l), None)
         fallback_line = src_idx if src_idx is not None else len(lines)
-        for line_no, name, md, _kw in planned:
+        # 遍历快照，避免边迭代边 append 改变列表；追加条目保持 4 元组
+        for line_no, name, md, _kw in list(planned):
             if line_no == -1 and name not in used:
-                planned.append((fallback_line, name, md))
+                planned.append((fallback_line, name, md, []))
         planned = [(line_no, name, md, kw) for line_no, name, md, kw in planned if line_no >= 0]
         planned.sort(key=lambda x: (x[0], x[1]))
         planned = [(line_no, name, md) for line_no, name, md, _kw in planned]
@@ -786,6 +789,25 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             report = self._flag_conflicting_figures(report)
             # A5：无效来源链接转纯文字
             report = ReportGeneratorWorker._fix_source_urls(report)
+            # 数据缺口汇总：≥4 处缺失占位（未披露/未获取/待补充/数据缺失）
+            # 时在首个二级标题后插入一处汇总说明，避免占位散落全文影响可读性
+            _gaps = [
+                g for g in ("未披露", "未获取", "待补充", "数据缺失")
+                if report.count(g) >= 1
+            ]
+            if sum(report.count(g) for g in _gaps) >= 4:
+                _note = (
+                    "\n\n> **数据缺口说明**：本报告有 "
+                    + f"{sum(report.count(g) for g in _gaps)} 处数据未能获取，"
+                    + "已在正文如实标注（"
+                    + "、".join(_gaps) + "）。缺失项集中在公开数据未覆盖的"
+                    + "细分口径，不影响已标注数据的可信度。\n"
+                )
+                _m2 = re.search(r"^##\s+.*$", report, re.M)
+                if _m2:
+                    report = report[: _m2.start()] + _note + report[_m2.start():]
+                else:
+                    report = _note + report
             # P2-2 来源卫生：正文剔除声明与来源附录强一致（删除附录中被剔除条目）
             report = self._strip_rejected_sources(report)
 

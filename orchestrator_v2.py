@@ -137,8 +137,12 @@ _REPORT_FORMAT_REQUIREMENTS = (
     "排行类任务必须标注 '盘中/盘后/日终' 状态。\n"
     "3. 免责声明：报告结尾必须包含 '免责声明' 小节："
     "'本报告由织光 WeaveMind AI 自动生成，仅供参考，不构成任何投资建议；"
-    "数据来源于公开渠道，可能存在延迟或误差；据此操作风险自担。'"
+    "数据来源于公开渠道，可能存在延迟或误差；据此操作风险自担。'\n"
+    "4. 合规红线：不得给出具体投资组合配比（如'30%某股+70%某资产'）、"
+    "不得给出预期收益率/年化收益数值承诺；如涉及资产配置，只允许描述"
+    "常见配置思路与风险框架，并强调'不构成投资建议'。"
 )
+
 
 # P0：产物文件注入白名单——仅数据类文本素材（.md/.txt/.csv/.json）读取正文注入；
 # HTML/JS/CSS/PY/图片等源码或二进制一律跳过正文，只保留"文件存在 + 路径"提示，
@@ -2662,8 +2666,10 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
 
         agent_id = self._find_agent(capability)
         if not agent_id:
-            # Worker 可能瞬时掉线（如 Redis 超时重连），等待重查后再判失败
-            for _ in range(3):
+            # Worker 可能瞬时掉线（如 Redis 超时重连）或服务栈冷启动尚未
+            # 注册完成（实测重启后首任务 15s 内查不到 web_search worker）：
+            # 等待重查后再判失败（6×5s=30s 冷启动窗口）
+            for _ in range(6):
                 time.sleep(5)
                 agent_id = self._find_agent(capability)
                 if agent_id:

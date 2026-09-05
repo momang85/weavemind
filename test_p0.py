@@ -1929,6 +1929,33 @@ class TestTemplateGuard(unittest.TestCase):
 
 
 class TestReportCleanup(unittest.TestCase):
+    def test_embed_anchor_path_with_matching_candidate(self):
+        """A3 锚点直插回归：正文"如图 X 所示"命中候选图时计划列表元组
+        维度必须一致（曾混入 3 元组 → 解包崩 → 报告生成器连环 fallback）。"""
+        from workers.report_generator_worker import ReportGeneratorWorker
+
+        class _C:
+            def __init__(self, name):
+                self.name = name
+                self.stem = name.rsplit('.', 1)[0]
+            def __str__(self):
+                return '/files/' + self.name
+
+        report = (
+            "# 报告" + chr(10) + chr(10) + "## 成交额分布" + chr(10) + chr(10)
+            + "如图 top10_volume 所示，头部三强合计 37.5%。" + chr(10) + chr(10)
+            + "## 参考来源" + chr(10) + chr(10) + "1. x" + chr(10)
+        )
+        w = ReportGeneratorWorker.__new__(ReportGeneratorWorker)
+        out = w._embed_charts_inline(
+            report, [_C('chart_1.png')],
+            {'chart_1.png': {'keywords': ['成交额', 'TOP10'], 'grade': 'publish'}},
+        )
+        self.assertIn('![chart_1]', out)
+        self.assertIn(
+            'chart_1', out.split('如图 top10_volume')[1].split('## 参考来源')[0],
+        )
+
     def test_strip_chart_data_blocks(self):
         """模型误嵌入的 [CHART_DATA] 原始 JSON 应从报告中剥离。"""
         from workers.report_generator_worker import ReportGeneratorWorker
