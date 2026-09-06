@@ -139,8 +139,18 @@ class MetricsCollector:
         now = datetime.now(timezone.utc).isoformat()
 
         if channel == "orchestrator:response":
-            # 跳过进度消息（带 type+payload），只统计最终结果
+            # 进度消息：仅终态 task_complete 参与统计，其余跳过
             if data.get("type") and data.get("payload"):
+                if data.get("type") == "task_complete":
+                    _payload = data.get("payload") or {}
+                    self._handle_task_complete(now, {
+                        "task_id": data.get("task_id", ""),
+                        "status": str(
+                            _payload.get("status")
+                            or data.get("status") or "UNKNOWN"
+                        ),
+                        "steps": _payload.get("steps") or [],
+                    })
                 return
             self._handle_task_complete(now, data)
 
@@ -178,7 +188,9 @@ class MetricsCollector:
 
         with self._lock:
             self._total_tasks += 1
-            if status == "SUCCESS":
+            # SUCCESS_WITH_ISSUES 是"完成但有验收缺口"，同样计成功；
+            # 此前只认 SUCCESS，导致历史任务全部被统计成失败（成功率恒 0%）
+            if status in ("SUCCESS", "SUCCESS_WITH_ISSUES"):
                 self._success_tasks += 1
             else:
                 self._failed_tasks += 1
@@ -233,6 +245,12 @@ class MetricsCollector:
             now, tid, status, 0, replan_triggered,
             memory_chars, 0, len(steps), ""
         ])
+        # 逐行落盘：metrics 进程被 kill 时不丢已统计数据
+        # （此前 metrics.csv 长期 0 字节）
+        try:
+            self._csv_file.flush()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------
     # 汇总输出

@@ -232,6 +232,16 @@ class ScheduledJobsRunner:
         return fired
 
     @staticmethod
+    @staticmethod
+    def _cron_passed(job: dict, now: datetime) -> bool:
+        """当天该 cron 时刻是否已经过去（严格晚于时刻）。"""
+        cron = str(job.get("cron") or "").strip()
+        if not (cron and _TIME_RE.match(cron)):
+            return False
+        hour, minute = int(cron.split(":")[0]), int(cron.split(":")[1])
+        return now.hour > hour or (now.hour == hour and now.minute > minute)
+
+    @staticmethod
     def _is_due(
         job: dict, now: datetime, last: datetime | None,
         force: bool = False,
@@ -244,9 +254,10 @@ class ScheduledJobsRunner:
             if last is not None and last.date() == now.date():
                 return False
             hour, minute = int(cron.split(":")[0]), int(cron.split(":")[1])
-            return now.hour > hour or (
-                now.hour == hour and now.minute >= minute
-            )
+            if now.hour > hour or (now.hour == hour and now.minute > minute):
+                # 服务在当日时刻之后启动：错过当天窗口，不补发（次日按时触发）
+                return False
+            return now.hour == hour and now.minute >= minute
         minutes = int(job.get("interval_minutes") or 0)
         if minutes <= 0:
             return False
