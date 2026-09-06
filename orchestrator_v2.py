@@ -4913,7 +4913,29 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             })
             for s in steps
         ]
-        has_failure = has_failure or any(r.get("status") != "SUCCESS" for r in results)
+        # code_execution 降级：worker 内部"生成-校验-修复"循环耗尽仍未产出
+        # 可运行代码（"No valid code"）时，不再把任务整体判失败——本步骤降级
+        # 跳过并明示，报告与验收基于结构化数据和其他步骤产物继续
+        # （任务级 FAILED 只会发生在代码本身就是交付物的游戏/可视化类任务）
+        for _s, _r in zip(steps, results):
+            if (
+                _s.get("capability") == "code_execution"
+                and _r.get("status") == "FAILED"
+                and "No valid code" in str(_r.get("result") or "")
+            ):
+                _r["status"] = "SUCCESS"
+                _r["degraded_codegen"] = True
+                _r["result"] = (
+                    "（代码执行降级）代码生成-校验-修复循环未产出可运行代码，"
+                    "本步骤已跳过；相关数值请以结构化数据与其他步骤产物为准。"
+                )
+                logger.warning(
+                    "code_execution degraded (task=%s, step=%s)，跳过而非任务失败",
+                    task_id, _s.get("step_id"),
+                )
+        # 以最终 results 为准（含 code_execution 降级后的状态），
+        # 不再沿用循环内的即时失败标记——降级为 SUCCESS 的步骤不得拖垮任务
+        has_failure = any(r.get("status") != "SUCCESS" for r in results)
         return results, has_failure
 
     def _inject_step_context(

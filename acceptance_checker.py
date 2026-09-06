@@ -945,9 +945,31 @@ def _claim_fragment(c: str) -> bool:
     # 地区/渠道词碎片（"中国大陆"、"海外" 等不是来源主体）
     if c in ("中国大陆", "海外", "全球", "国内", "国外", "亚太", "北美", "欧洲", "港台"):
         return True
+    # Markdown 加粗标记（"**数据来源**"）不是来源主体
+    if "**" in c:
+        return True
+    # 含括号的长描述句（"高毛利业务（视频号广告、小游戏）占比提升以及AI
+    # 技术（混元大模型）…"）不是来源声明；短名称带单括号（"东方财富（A股）"）保留
+    if c.count("（") + c.count("(") >= 1 and len(c) > 15:
+        return True
+    # Markdown 列表符开头的短语（实测"- 高端产品国窖1573系列持续放量"）：
+    # 剥掉列表符后若不含媒体/机构词特征则判碎片；含（如"- 新浪财经"）保留
+    _stripped = c
+    _bullet = False
+    while _stripped and _stripped[0] in "-*•·":
+        _stripped = _stripped[1:].strip()
+        _bullet = True
+    if _bullet:
+        _media_hint = (
+            "网" in _stripped or "报" in _stripped or "证券" in _stripped
+            or "财经" in _stripped or "银行" in _stripped or "基金" in _stripped
+            or "研报" in _stripped or "数据" in _stripped or "统计" in _stripped
+        )
+        if not _media_hint:
+            return True
     if c in ("来源", "年份", "链接", "口径", "单位", "数值", "指标",
              "时间", "地域", "样本", "说明", "序号", "备注", "状态",
-             "限制", "综合费率", "附录"):
+             "限制", "综合费率", "附录", "口径/年份"):
         return True
     # 括号失衡（"称 X）" 之类被截断的碎片）：左括号数 != 右括号数
     if c.count("（") + c.count("(") != c.count("）") + c.count(")"):
