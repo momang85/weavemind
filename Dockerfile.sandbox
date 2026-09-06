@@ -1,10 +1,21 @@
 FROM python:3.12-slim
 
+# 构建期代理（仅构建用）：构建容器经 --network=host 走宿主代理；
+# 运行时容器 --network none 不受影响；不传 build-arg 时为空串即直连
+ARG http_proxy
+ARG https_proxy
+ENV http_proxy=${http_proxy} https_proxy=${https_proxy}
+
+
 # 沙箱镜像：仅用于 code_execution 隔离运行，禁止网络（docker run --network none）
-# fonts-noto-cjk：matplotlib/seaborn 中文图表渲染必需；nodejs：代码生成任务 JS 校验
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# fonts-droid-fallback：matplotlib/seaborn 中文图表渲染必需（与 CI 一致）；nodejs：代码生成任务 JS 校验
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources \
+    && apt-get update -o Acquire::Retries=5 \
+    && apt-get install -y --no-install-recommends -o Acquire::Retries=5 \
         nodejs \
-        fonts-noto-cjk \
+        fontconfig \
+    && apt-get install -y --no-install-recommends -o Acquire::Retries=5 \
+        fonts-droid-fallback \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /work
