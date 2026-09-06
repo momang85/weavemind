@@ -387,7 +387,7 @@ export default function TaskConsole() {
           onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submit() } }}
           placeholder={demoMode ? 'Demo mode' : 'Enter a task for your AI team...'}
           disabled={isRunning || demoMode}
-          rows={2}
+          rows={1}
           className="flex-1 min-w-0 bg-transparent border-none text-slate-200 placeholder-slate-600 resize-none p-3 text-sm focus:outline-none disabled:opacity-50" />
         <div className="flex items-center gap-2 pb-1 shrink-0">
           {activeConversationId && (
@@ -475,7 +475,7 @@ export default function TaskConsole() {
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 min-h-[400px]">
-        <div className="col-span-1 lg:col-span-2 bg-slate-900 border border-slate-800 rounded-xl p-5">
+        <div className="col-span-1 lg:col-span-2 self-start bg-slate-900 border border-slate-800 rounded-xl p-5">
           <h2 className="flex items-center gap-2 text-slate-200 font-semibold text-sm mb-4">
             <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
             {awaitingConfirm ? '计划待确认（可编辑）' : 'Execution Plan'}

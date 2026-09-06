@@ -28,8 +28,8 @@ const LogRow = memo(function LogRow({ entry }: { entry: LogEntry }) {
 
   return (
     <div className={`flex items-start gap-2 px-3 h-full border-l-2 ${cfg.border} ${cfg.bg}`}>
-        <span className="text-[10px] text-slate-600 font-mono shrink-0 w-14 mt-0.5 tabular-nums">
-          {entry.timestamp.slice(0, 8)}
+        <span className="text-[10px] text-slate-600 font-mono shrink-0 w-16 mt-0.5 tabular-nums whitespace-nowrap overflow-hidden">
+          {entry.timestamp && entry.timestamp.includes(':') ? entry.timestamp.slice(-8) : entry.timestamp.slice(0, 8)}
         </span>
         {IconComp ? (
           <IconComp className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />
