@@ -658,6 +658,27 @@ def _listen_results():
                                     )
                                     db.commit(); db.close()
                                 except Exception: pass
+                                # D1：日报项目任务终态自动生成分享链接（落地页入口），
+                                # 并补发一条带链接的通知（编排器通知早于分享生成，链接会缺失）
+                                try:
+                                    if str(existing.get("project") or "") == "daily-report":
+                                        _generate_share_token(tid)
+                                        from notifications import (
+                                            find_share_link,
+                                            make_summary,
+                                            notify_task_done,
+                                        )
+                                        notify_task_done(
+                                            tid,
+                                            goal=str(existing.get("goal") or ""),
+                                            status=str(existing.get("status") or ""),
+                                            report_link=find_share_link(tid),
+                                            summary=make_summary(
+                                                str(existing.get("report") or "")
+                                            ),
+                                        )
+                                except Exception:
+                                    pass
                             elif ptype == "plan_update":
                                 # 合并而非替换：迭代/修复轮的步骤只带当轮，
                                 # 直接替换会让前端计划树"缩水"，看起来不按顺序
@@ -1458,8 +1479,11 @@ def _report_parse_disclaimer(md: str) -> tuple[str, str | None]:
     return rest, text
 
 
-def _share_page_structured(md: str) -> dict:
-    """解析报告结构化元素，供分享页渲染（与前端 ReportViewer 等价）。"""
+def _share_page_structured(md: str, task_id: str = "") -> dict:
+    """解析报告结构化元素，供分享页渲染（与前端 ReportViewer 等价）。
+
+    D2：追加 top_stats（首张表格前 4 行 → 结论卡片）与 traceability
+    （来源数 + 验收可溯源率，来自任务工作区 acceptance_report.json）。"""
     try:
         from common import strip_outer_markdown_fence
         md = strip_outer_markdown_fence(str(md or ""))
@@ -1467,12 +1491,58 @@ def _share_page_structured(md: str) -> dict:
         md = str(md or "")
     body, sources, _sec = _report_parse_sources(md)
     body, disclaimer = _report_parse_disclaimer(body)
+    # D2：首张 Markdown 表格的前 4 行（指标/数值/来源列）→ TOP 结论卡片
+    top_stats: list[dict] = []
+    rows: list[list[str]] = []
+    header: list[str] = []
+    for line in str(md).split("\n"):
+        t = line.strip()
+        if not t.startswith("|"):
+            if header:
+                break
+            continue
+        cells = [c.strip() for c in t.strip("|").split("|")]
+        if all(not c or set(c) <= {"-", ":", "—"} for c in cells):
+            continue
+        if not header:
+            header = cells
+            continue
+        rows.append(cells)
+        if len(rows) >= 4:
+            break
+    if header and rows:
+        k_i = next((i for i, h in enumerate(header) if "指标" in h or "数值" in h), 0)
+        v_i = next((i for i, h in enumerate(header) if "数值" in h), min(1, len(header) - 1))
+        for r in rows:
+            if len(r) > v_i and str(r[v_i]).strip():
+                top_stats.append({
+                    "k": str(r[k_i])[:24] if len(r) > k_i else "",
+                    "v": str(r[v_i])[:32],
+                })
+    traceability: dict = {}
+    if task_id:
+        try:
+            acc_path = task_workspace(task_id) / "acceptance_report.json"
+            if acc_path.exists():
+                acc = json.loads(acc_path.read_text(encoding="utf-8"))
+                ntc = (acc.get("checks") or {}).get("number_traceability") or {}
+                if ntc:
+                    traceability = {
+                        "total": int(ntc.get("total_count") or 0),
+                        "traced": int(ntc.get("traceable_count") or 0),
+                        "disclosed": int(ntc.get("disclosed_count") or 0),
+                        "overall": str(acc.get("overall") or ""),
+                    }
+        except Exception:
+            pass
     return {
         "freshness": _report_parse_freshness(md),
         "toc": _report_parse_toc(body),
         "sources": sources,
         "disclaimer": disclaimer,
         "body": body,
+        "top_stats": top_stats,
+        "traceability": traceability,
     }
 
 
@@ -1713,10 +1783,12 @@ def _build_lang_context(report_lang: str, user_context: str) -> str:
 
 
 def _share_page_html(title: str, created_at: str, body_html: str,
-                     theme: str = "light", structured: dict | None = None) -> str:
+                     theme: str = "light", structured: dict | None = None,
+                     download_url: str = "") -> str:
     """生成公开只读分享页：自包含 HTML，无系统导航/管理功能。
     theme 支持 light / dark / paper（Roadmap 余项⑤：HTML 模板定制）；
-    structured 传入 _share_page_structured() 结果，渲染数据时效卡/目录/来源卡片/免责声明。"""
+    structured 传入 _share_page_structured() 结果，渲染数据时效卡/目录/来源卡片/免责声明。
+    D2：追加 TOP 结论卡片、数据溯源区块与可选的 CSV 下载按钮。"""
     theme = str(theme or "light").strip().lower()
     if theme not in ("light", "dark", "paper"):
         theme = "light"
@@ -1775,6 +1847,41 @@ def _share_page_html(title: str, created_at: str, body_html: str,
     # 结构化区块（数据时效卡 / 目录 / 来源卡片 / 免责声明）
     structured_html = ""
     parts: list[str] = []
+    # D2：TOP 结论卡片（首表前 4 行）
+    top_stats = st.get("top_stats") or []
+    if top_stats:
+        cards = "".join(
+            '<div class="stat-card"><div class="stat-k">'
+            f"{html.escape(s.get('k', ''))}</div>"
+            '<div class="stat-v">'
+            f"{html.escape(s.get('v', ''))}</div></div>"
+            for s in top_stats
+        )
+        parts.append(f'<div class="stats-row">{cards}</div>')
+    # D2：数据溯源区块（来源数 / 可溯源率 / CSV 下载）
+    trace = st.get("traceability") or {}
+    sources_n = len(st.get("sources") or [])
+    trace_lines: list[str] = []
+    if sources_n:
+        trace_lines.append(f"参考来源 <b>{sources_n}</b> 个")
+    if trace.get("total"):
+        rate = round(100.0 * trace["traced"] / trace["total"]) if trace["total"] else 0
+        trace_lines.append(f"数字可溯源 <b>{trace['traced']}/{trace['total']}</b>（{rate}%）")
+        if trace.get("disclosed"):
+            trace_lines.append(f"模型知识已标注 <b>{trace['disclosed']}</b> 处")
+    dl_html = ""
+    if download_url:
+        dl_html = (
+            '<a class="dl-btn" href="'
+            f'{html.escape(download_url, quote=True)}'
+            '" download>⬇ 下载排名数据 CSV</a>'
+        )
+    if trace_lines or dl_html:
+        parts.append(
+            '<div class="trace-card"><div class="trace-title">数据溯源</div>'
+            '<div class="trace-body">' + " · ".join(trace_lines) + "</div>"
+            + dl_html + "</div>"
+        )
     freshness = st.get("freshness")
     if freshness:
         parts.append(
@@ -1862,6 +1969,15 @@ def _share_page_html(title: str, created_at: str, body_html: str,
   .src-domain {{ display: block; font-size: 11px; color: #94a3b8; }}
   .src-ext {{ flex: none; color: #94a3b8; }}
   .disc-card {{ border: 1px solid #e2e8f0; border-radius: 10px; padding: 10px 14px; font-size: 12px; color: #94a3b8; background: #f8fafc; }}
+  .stats-row {{ display: flex; flex-wrap: wrap; gap: 10px; }}
+  .stat-card {{ flex: 1 1 150px; border: 1px solid #c9d4e5; border-radius: 10px; padding: 12px 14px; background: #f8fafc; }}
+  .stat-k {{ font-size: 12px; color: #64748b; margin-bottom: 4px; }}
+  .stat-v {{ font-size: 18px; font-weight: 700; color: #16213e; }}
+  .trace-card {{ border: 1px solid #c9d4e5; border-radius: 10px; padding: 12px 16px; background: #f8fafc; }}
+  .trace-title {{ font-weight: 600; font-size: 12px; color: #64748b; margin-bottom: 4px; }}
+  .trace-body {{ font-size: 13px; color: #475569; margin-bottom: 8px; }}
+  .dl-btn {{ display: inline-block; font-size: 13px; color: #1d4ed8; background: #dbeafe; border-radius: 8px; padding: 6px 12px; text-decoration: none; }}
+  .dl-btn:hover {{ background: #bfdbfe; }}
 {theme_css}
 </style>
 </head>
@@ -2845,8 +2961,17 @@ def _get_share_page(self, p):
             theme = (parse_qs(urlparse(self.path).query).get("theme") or ["light"])[0]
         except Exception:
             theme = "light"
-        return self._html(_share_page_html(title, created, body_html, theme=theme,
-                                           structured=structured))
+        # D2：日报落地页下载按钮——ranking.csv 存在时附下载链接
+        download_url = ""
+        try:
+            if (task_workspace(tid) / "data" / "ranking.csv").exists():
+                download_url = f"/files/{tid}/data/ranking.csv"
+        except Exception:
+            pass
+        structured = _share_page_structured(data.get("report") or "", task_id=tid)
+        return self._html(_share_page_html(
+            title, created, body_html, theme=theme,
+            structured=structured, download_url=download_url))
 
 def _get_task_report(self, p):
     if p.startswith("/task/") and p.endswith("/report"):
@@ -3307,6 +3432,83 @@ def _post_config(self, p, body, admin):
         audit_log(admin.get("user", ""), self._client_ip(), "config.save", result="ok")
         return self._json({"status":"saved"})
 
+def _post_verify(self, p, body, admin):
+    """POST /api/verify：报告溯源体检（商业化 API 雏形）。
+
+    body: {report_text: str, task_id?: str}
+    - 仅 report_text：用空来源跑 数字溯源/来源声明/免责声明 三项检查；
+    - 带 task_id（本系统任务）：收集该任务工作区来源，返回完整溯源结果。
+    返回三档分类（引用/计算/模型知识）与缺口清单——给自媒体、内容团队、
+    外部 AI 应用做"报告体检"，每千字计费可在此处接入。"""
+    # body 已由 do_POST 解析并传入，此处不得再读 self.rfile（会阻塞）
+    if not isinstance(body, dict):
+        body = {}
+    report_text = str(body.get("report_text") or "").strip()
+    if len(report_text) < 50:
+        return self._json({"error": "report_text 过短（至少 50 字符）"}, 400)
+    tid = str(body.get("task_id") or "").strip()
+    sources: dict = {}
+    goal = str(body.get("goal") or "") or "report-verify"
+    if tid:
+        try:
+            from acceptance_checker import _collect_sources
+            from workspace import task_workspace
+            sources = _collect_sources(task_workspace(tid))
+            data = _get_task_report_data(tid)
+            if data and data.get("goal"):
+                goal = str(data["goal"])
+        except Exception:
+            pass
+    try:
+        from acceptance_checker import (
+            check_disclaimer,
+            check_number_traceability,
+            check_source_labeling,
+            traceability_domain,
+        )
+        domain = traceability_domain(goal)
+        num = check_number_traceability(report_text, sources, domain=domain)
+        label = check_source_labeling(report_text, sources)
+        disc = check_disclaimer(report_text)
+        _cited = int(num.get("cited_count") or 0)
+        _computed = int(num.get("computed_count") or 0)
+        _disclosed = int(num.get("disclosed_count") or 0)
+        _total = int(num.get("total_count") or 0)
+        _untraced = int(num.get("unverifiable_count") or 0)
+        return self._json({
+            "ok": True,
+            "domain": domain,
+            "numbers": {
+                "total": _total,
+                "cited": _cited,
+                "computed": _computed,
+                "disclosed_model_knowledge": _disclosed,
+                "untraced": _untraced,
+                "coverage_ratio": num.get("covered_ratio"),
+            },
+            "source_labeling": {
+                "pass": bool(label.get("pass")),
+                "checked": label.get("checked_count"),
+                "mislabeled": (label.get("mislabeled") or [])[:10],
+                "suggestions": (label.get("suggestions") or [])[:5],
+            },
+            "disclaimer": {"present": bool(disc.get("pass"))},
+            "gaps": [
+                g for g in (
+                    [num.get("details") or ""] if not num.get("pass") else []
+                ) + (
+                    [label.get("details") or ""] if not label.get("pass") else []
+                )
+            ],
+            "summary": (
+                f"数字 {_total} 个：引用 {_cited} / 计算 {_computed} / "
+                f"模型知识 {_disclosed} / 不可溯源 {_untraced}"
+            ),
+        })
+    except Exception as exc:
+        return self._json({"error": f"verify failed: {str(exc)[:120]}"}, 500)
+
+
 def _post_llm_mode(self, p, body, admin):
     if self.path == "/api/llm-mode":
         # LLM 运行模式切换：cloud=全商业 API；hybrid=本地 LoRA 参与部分 Worker。
@@ -3436,6 +3638,7 @@ _POST_ROUTES = [
     (lambda self, p: self.path == "/api/llm-mode", _post_llm_mode),
     (lambda self, p: self.path == "/api/notifications", _post_notifications),
     (lambda self, p: self.path == "/api/scheduled-jobs", _post_scheduled_jobs),
+    (lambda self, p: self.path == "/api/verify", _post_verify),
 ]
 
 

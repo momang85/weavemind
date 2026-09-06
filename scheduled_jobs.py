@@ -38,16 +38,36 @@ DEFAULT_LOG_DIR = os.path.join(
 
 _TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 
+# D1：内置"每日 A 股活跃度日报"——已验证的排行链路（全市场数据 → TOP10 →
+# 图表 → 报告，约 6-10 分钟）。用户未配置同名任务时作为默认日报任务；
+# 可在设置页禁用/删除。project=daily-report 的任务终态会自动生成分享链接。
+BUILTIN_DAILY_REPORT = {
+    "name": "每日 A 股活跃度日报",
+    "goal": (
+        "统计今日A股总成交量排名前十的股票，对比其涨跌幅与成交额分布，"
+        "生成一份市场活跃度分析报告：需包含成交量TOP10柱状图、量价关系散点图、"
+        "活跃板块归纳与市场情绪解读，所有数据注明来源和采集时间"
+    ),
+    "project": "daily-report",
+    "cron": "16:00",
+    "enabled": True,
+}
+
 
 def load_jobs(config_path: str | None = None) -> list[dict]:
     """读取 config.json 的 scheduled_jobs 段；缺失/损坏返回空列表。"""
+    raw: list = []
     try:
         with open(config_path or DEFAULT_CONFIG_PATH, "r", encoding="utf-8") as f:
             cfg = json.load(f)
-        jobs = (cfg or {}).get("scheduled_jobs") or []
-        return [j for j in jobs if isinstance(j, dict)]
+        raw = (cfg or {}).get("scheduled_jobs") or []
     except Exception:
-        return []
+        raw = []
+    jobs = [j for j in raw if isinstance(j, dict)]
+    # D1：内置日报并入（用户同名任务优先，默认任务不重复）
+    if not any(str(j.get("name") or "") == BUILTIN_DAILY_REPORT["name"] for j in jobs):
+        jobs = [dict(BUILTIN_DAILY_REPORT)] + jobs
+    return jobs
 
 
 def save_jobs(jobs: list[dict], config_path: str | None = None) -> bool:
