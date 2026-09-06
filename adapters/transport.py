@@ -11,14 +11,87 @@ _num 全部收敛到此；新增数据源只需 import 本模块，不再复制�
 """
 
 import http.client
+import json as _json
 import logging
 import socket
 import ssl
+import threading as _threading
+import time as _time
 import urllib.error
 import urllib.parse
 import urllib.request
 
 logger = logging.getLogger(__name__)
+
+# ── D4：数据合规降险 ─────────────────────────────────────────────
+# 1) 抓取限频：同一 host 两次请求的最小间隔（秒）。
+_MIN_INTERVAL = float(__import__("os").environ.get("SOURCE_MIN_INTERVAL", "3.0") or 3.0)
+_throttle_lock = _threading.Lock()
+_last_hit: dict[str, float] = {}
+
+
+def _validate_public_url(url: str) -> bool:
+    """SSRF 防护：仅放行 http/https，且主机不是环回/私网/链路本地/
+    IP 字面量或 localhost 变体。"""
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except Exception:
+        return False
+    if parts.scheme not in ("http", "https"):
+        return False
+    host = (parts.hostname or "").lower()
+    if not host or host == "localhost" or host.endswith(".localhost"):
+        return False
+    if ":" in host:
+        return False
+    try:
+        ip = socket.inet_aton(host)
+    except OSError:
+        return True
+    blocked = (
+        b"\x7f", b"\x0a", b"\xac\x10", b"\xac\x11",
+        b"\xa9\xfe", b"\xc0\xa8", b"\x00", b"\xa0\x00",
+    )
+    return not any(ip.startswith(p) for p in blocked)
+
+
+def _load_official_map() -> dict:
+    """官方数据源切换位：环境变量 WM_OFFICIAL_SOURCES 为 JSON 映射
+    {"原URL前缀": "官方URL前缀"}，命中即重写；重写目标必须通过 SSRF 校验。"""
+    try:
+        raw = _json.loads(
+            __import__("os").environ.get("WM_OFFICIAL_SOURCES", "") or "{}"
+        )
+        if not isinstance(raw, dict):
+            return {}
+        return {
+            str(k): str(v)
+            for k, v in raw.items()
+            if _validate_public_url(str(v))
+        }
+    except Exception:
+        return {}
+
+
+def _throttle_and_rewrite(url: str) -> str:
+    """限频等待 + 官方源前缀重写。"""
+    global _last_hit
+    rewritten = url
+    for prefix, official in _load_official_map().items():
+        if url.startswith(prefix):
+            candidate = official + url[len(prefix):]
+            if _validate_public_url(candidate):
+                rewritten = candidate
+            break
+    host = urllib.parse.urlsplit(rewritten).hostname or ""
+    if _MIN_INTERVAL > 0 and host:
+        with _throttle_lock:
+            prev = _last_hit.get(host)
+            now = _time.time()
+            if prev is not None and now - prev < _MIN_INTERVAL:
+                _time.sleep(_MIN_INTERVAL - (now - prev))
+            _last_hit[host] = _time.time()
+    return rewritten
 
 # 完整浏览器头：动态反爬对 urllib 默认握手不友好，先伪装浏览器请求一次。
 BROWSER_HEADERS = {
@@ -46,6 +119,10 @@ def get_via_urllib(
 
     GBK 响应（新浪/腾讯）传 encoding="gbk"。
     """
+    url = _throttle_and_rewrite(url)
+    # SSRF 防护：校验紧邻请求点（协议/主机/IP 边界）
+    if not _validate_public_url(url):
+        raise RuntimeError(f"blocked URL by SSRF guard: {url[:120]}")
     req = urllib.request.Request(url, headers=headers or BROWSER_HEADERS)
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return resp.read().decode(encoding, errors="replace")
@@ -61,6 +138,10 @@ def get_via_socket(
 
     与 get_via_urllib 语义一致；encoding 决定响应解码。
     """
+    url = _throttle_and_rewrite(url)
+    # SSRF 防护：校验紧邻请求点（协议/主机/IP 边界）
+    if not _validate_public_url(url):
+        raise RuntimeError(f"blocked URL by SSRF guard: {url[:120]}")
     parsed = urllib.parse.urlsplit(url)
     host = parsed.hostname or ""
     port = parsed.port or 443

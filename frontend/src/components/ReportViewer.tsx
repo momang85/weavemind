@@ -360,6 +360,10 @@ export default memo(function ReportViewer() {
   const { report, logs, currentTaskId, demoMode } = useTaskStore()
   const taskIdForFiles = currentTaskId || report?.taskId || null
   const [showLogs, setShowLogs] = useState(false)
+  // E1 溯源页：POST /api/verify 的三档分类结果
+  const [verifyData, setVerifyData] = useState<any>(null)
+  const [verifyLoading, setVerifyLoading] = useState(false)
+  const [verifyError, setVerifyError] = useState('')
   const [expandedFiles, setExpandedFiles] = useState(false)
   const [runOutput, setRunOutput] = useState<Record<string, string>>({})
   const [running, setRunning] = useState<string | null>(null)
@@ -772,6 +776,38 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
         </div>
       )}
 
+      {/* E1 溯源面板：三档分类 + 来源声明 + 免责声明 */}
+      {(verifyData || verifyError || verifyLoading) && (
+        <div className="bg-slate-900/80 border border-cyan-500/20 rounded-xl p-4 space-y-3">
+          <div className="text-xs font-semibold text-cyan-400">数据溯源（确定性验收器）</div>
+          {verifyLoading && <div className="text-xs text-slate-500">体检中…</div>}
+          {verifyError && <div className="text-xs text-amber-400">体检失败：{verifyError}</div>}
+          {verifyData && (
+            <>
+              <div className="text-sm text-slate-200">{verifyData.summary}</div>
+              {verifyData.numbers && (
+                <div className="flex flex-wrap gap-2 text-xs">
+                  <span className="px-2 py-1 rounded bg-emerald-500/10 text-emerald-400">引用 {verifyData.numbers.cited}</span>
+                  <span className="px-2 py-1 rounded bg-cyan-500/10 text-cyan-400">计算 {verifyData.numbers.computed}</span>
+                  <span className="px-2 py-1 rounded bg-violet-500/10 text-violet-400">模型知识 {verifyData.numbers.disclosed_model_knowledge}</span>
+                  <span className="px-2 py-1 rounded bg-amber-500/10 text-amber-400">不可溯源 {verifyData.numbers.untraced}</span>
+                </div>
+              )}
+              {verifyData.source_labeling && !verifyData.source_labeling.pass && (
+                <div className="text-xs text-amber-400">
+                  疑似虚假来源标注：{(verifyData.source_labeling.mislabeled || []).slice(0, 5).join('、')}
+                </div>
+              )}
+              {verifyData.disclaimer && (
+                <div className="text-xs text-slate-500">
+                  免责声明：{verifyData.disclaimer.present ? '✅ 已包含' : '❌ 缺失'}
+                </div>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
       {/* Bottom actions */}
       <div className="flex gap-3 flex-wrap">
         <button onClick={downloadMarkdown}
@@ -781,6 +817,23 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
         <button onClick={downloadPDF}
           className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm transition-colors">
           <FileDown className="w-4 h-4" /> 下载PDF
+        </button>
+        <button onClick={async () => {
+          if (!taskIdForFiles) return
+          setVerifyLoading(true); setVerifyError('')
+          try {
+            const res = await fetch('/api/verify', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ report_text: report?.final_report || '', task_id: taskIdForFiles }),
+            })
+            const d = await res.json()
+            if (d.error) { setVerifyError(d.error) } else { setVerifyData(d) }
+          } catch (e: any) { setVerifyError(String(e)) }
+          setVerifyLoading(false)
+        }}
+          className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm transition-colors">
+          <ScrollText className="w-4 h-4" /> 数据溯源
         </button>
         <button onClick={() => setShowLogs(!showLogs)}
           className={`flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm transition-colors ${
