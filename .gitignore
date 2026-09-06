@@ -57,3 +57,11 @@ logs/audit.jsonl
 
 # Mimosa 扫描工件（运行期事件台账，不入库）
 .mimosa/
+
+# 本地运行产物（防误提交）
+logs/
+agents.db
+workspace/
+.venv-train/
+.venv/
+metrics_summary.json
