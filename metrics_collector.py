@@ -143,8 +143,17 @@ class MetricsCollector:
             if data.get("type") and data.get("payload"):
                 if data.get("type") == "task_complete":
                     _payload = data.get("payload") or {}
+                    tid = data.get("task_id", "")
+                    _el = _payload.get("elapsed_sec")
+                    if _el and tid and tid in self._task_start_times:
+                        self._recent_tasks.append({
+                            "task_id": tid,
+                            "status": str(_payload.get("status") or ""),
+                            "latency": round(float(_el), 2),
+                        })
+                        self._task_start_times.pop(tid, None)
                     self._handle_task_complete(now, {
-                        "task_id": data.get("task_id", ""),
+                        "task_id": tid,
                         "status": str(
                             _payload.get("status")
                             or data.get("status") or "UNKNOWN"

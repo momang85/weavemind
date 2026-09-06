@@ -8,6 +8,8 @@ import AgentsPage from './pages/Agents'
 import History from './pages/History'
 import HealthPage from './pages/Health'
 import SettingsPage from './pages/Settings'
+import AuditPage from './pages/AuditPage'
+import MetricsPage from './pages/MetricsPage'
 import MemoryPage from './pages/Memory'
 import EvalsPage from './pages/Evals'
 import SkillsPage from './pages/Skills'
@@ -99,6 +101,8 @@ export default function App() {
           <Route path="/evals" element={<EvalsPage />} />
           <Route path="/skills" element={<SkillsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/audit" element={<AuditPage />} />
+          <Route path="/metrics" element={<MetricsPage />} />
         </Routes>
       </AppLayout>
     </ErrorBoundary>

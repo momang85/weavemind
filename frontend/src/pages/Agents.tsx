@@ -197,6 +197,29 @@ export default function AgentsPage() {
 
   useEffect(() => { fetchAgents(); const t = setInterval(fetchAgents, 2000); return () => clearInterval(t) }, [fetchAgents])
 
+  // T6：单智能体直发（直接 LLM 问答，不经编排器）
+  const [directGoal, setDirectGoal] = useState('')
+  const [directResult, setDirectResult] = useState('')
+  const [directLoading, setDirectLoading] = useState(false)
+
+  const sendDirect = useCallback(async () => {
+    const g = directGoal.trim()
+    if (!g || directLoading) return
+    setDirectLoading(true); setDirectResult('')
+    try {
+      const res = await fetch('/api/single-agent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ goal: g }),
+      })
+      const d = await res.json()
+      setDirectResult(d.error || d.result || JSON.stringify(d))
+    } catch (e: any) {
+      setDirectResult(String(e))
+    }
+    setDirectLoading(false)
+  }, [directGoal, directLoading])
+
   const killAgent = useCallback(async (id: string) => {
     try {
       await fetch('/api/kill-worker', {
@@ -253,6 +276,26 @@ export default function AgentsPage() {
             <div className="text-slate-500 text-xs mt-1">{s.label}</div>
           </div>
         ))}
+      </div>
+
+      {/* T6 单智能体直发 */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-4 space-y-3">
+        <div className="text-xs font-semibold text-cyan-400">单智能体直发（不经编排器，直接 LLM 问答）</div>
+        <div className="flex gap-2">
+          <input value={directGoal} onChange={e => setDirectGoal(e.target.value)}
+            onKeyDown={e => { if (e.key === 'Enter') sendDirect() }}
+            placeholder="输入问题，如：贵州茅台最新财报要点是什么"
+            className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500" />
+          <button onClick={sendDirect} disabled={directLoading || !directGoal.trim()}
+            className="px-4 py-2 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 text-sm disabled:opacity-40 shrink-0">
+            {directLoading ? '发送中…' : '发送'}
+          </button>
+        </div>
+        {directResult && (
+          <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-3 text-xs text-slate-300 whitespace-pre-wrap max-h-48 overflow-y-auto">
+            {directResult}
+          </div>
+        )}
       </div>
 
       {/* Search + Filter */}

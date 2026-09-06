@@ -1,7 +1,133 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Save, RotateCcw, Key, Globe, Cpu, Clock, Shield, Server } from 'lucide-react'
+import { Save, RotateCcw, Key, Globe, Cpu, Clock, Shield, Server, Bell, CalendarClock, Plus, Trash2 } from 'lucide-react'
 import { useTaskStore } from '../stores/useTaskStore'
 
+// ── T1 通知配置 ───────────────────────────────────────────────
+function NotificationsSection() {
+  const [ncfg, setNcfg] = useState<any>(null)
+  const [saved, setSaved] = useState(false)
+  const [error, setError] = useState('')
+
+  const load = useCallback(() => {
+    fetch('/api/notifications').then(r => r.json()).then(d => setNcfg(d.notifications || {})).catch(() => setError('加载通知配置失败'))
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  const save = async () => {
+    setError('')
+    try {
+      const res = await fetch('/api/notifications', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notifications: ncfg }),
+      })
+      if (!res.ok) throw new Error('保存失败')
+      setSaved(true); setTimeout(() => setSaved(false), 2000)
+    } catch (e: any) { setError(e.message || '保存失败') }
+  }
+
+  if (!ncfg) return null
+  const channels = [
+    { key: 'webhook', label: '通用 Webhook（企业微信/钉钉/自建）', fields: ['url'] },
+    { key: 'serverchan', label: 'Server酱', fields: ['sendkey'] },
+    { key: 'email', label: '邮件', fields: ['host', 'port', 'user', 'password', 'to'] },
+  ]
+  return (
+    <section className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-5">
+      <h2 className="flex items-center gap-2 text-sm text-slate-300 font-medium">
+        <Bell className="w-4 h-4 text-amber-400" /> 通知配置（任务完成时推送报告链接）
+      </h2>
+      {channels.map(ch => {
+        const item = ncfg[ch.key] || {}
+        return (
+          <div key={ch.key} className="border border-slate-800 rounded-lg p-4 space-y-3">
+            <label className="flex items-center gap-3 text-sm text-slate-300">
+              <input type="checkbox" checked={!!item.enabled}
+                onChange={e => setNcfg({ ...ncfg, [ch.key]: { ...item, enabled: e.target.checked } })}
+                className="accent-cyan-500" />
+              {ch.label}
+            </label>
+            {item.enabled && ch.fields.map(f => (
+              <input key={f}
+                type={f === 'password' ? 'password' : f === 'port' ? 'number' : 'text'}
+                value={item[f] || ''}
+                placeholder={f}
+                onChange={e => setNcfg({ ...ncfg, [ch.key]: { ...item, [f]: e.target.value } })}
+                className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500/50" />
+            ))}
+          </div>
+        )
+      })}
+      <div className="flex items-center gap-3">
+        <button onClick={save} className="px-4 py-2 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 text-sm">保存通知配置</button>
+        {saved && <span className="text-emerald-400 text-xs">已保存</span>}
+        {error && <span className="text-amber-400 text-xs">{error}</span>}
+      </div>
+    </section>
+  )
+}
+
+// ── T2 定时任务管理 ───────────────────────────────────────────
+function ScheduledJobsSection() {
+  const [jobs, setJobs] = useState<any[]>([])
+  const [error, setError] = useState('')
+  const [nf, setNf] = useState({ name: '', goal: '', cron: '09:00' })
+
+  const load = useCallback(() => {
+    fetch('/api/scheduled-jobs').then(r => r.json()).then(d => setJobs(d.jobs || [])).catch(() => setError('加载定时任务失败'))
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  const act = async (action: string, payload: any) => {
+    setError('')
+    try {
+      const res = await fetch('/api/scheduled-jobs', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action, ...payload }),
+      })
+      if (!res.ok) throw new Error('操作失败')
+      load()
+    } catch (e: any) { setError(e.message || '操作失败') }
+  }
+
+  return (
+    <section className="bg-slate-900 border border-slate-800 rounded-xl p-6 space-y-4">
+      <h2 className="flex items-center gap-2 text-sm text-slate-300 font-medium">
+        <CalendarClock className="w-4 h-4 text-cyan-400" /> 定时任务（每日 HH:MM 触发一次）
+      </h2>
+      {jobs.map(j => (
+        <div key={j.name} className="flex items-center gap-3 border border-slate-800 rounded-lg px-4 py-3">
+          <input type="checkbox" checked={!!j.enabled}
+            onChange={e => act('update', { job: { ...j, enabled: e.target.checked }, name: j.name })}
+            className="accent-cyan-500" />
+          <div className="flex-1 min-w-0">
+            <div className="text-sm text-slate-200 truncate">{j.name}
+              <span className="ml-2 text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400">{j.cron ? `每日 ${j.cron}` : `每 ${j.interval_minutes} 分钟`}</span>
+              <span className="ml-2 text-[10px] px-2 py-0.5 rounded bg-violet-500/10 text-violet-400">{j.project}</span>
+            </div>
+            <div className="text-xs text-slate-500 truncate mt-1">{j.goal}</div>
+          </div>
+          <button onClick={() => act('delete', { name: j.name })}
+            className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs">
+            <Trash2 className="w-3 h-3" /> 删除
+          </button>
+        </div>
+      ))}
+      <div className="border-t border-slate-800 pt-4 grid grid-cols-1 md:grid-cols-4 gap-3">
+        <input value={nf.name} placeholder="任务名" onChange={e => setNf({ ...nf, name: e.target.value })}
+          className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200" />
+        <input value={nf.cron} placeholder="cron 如 16:00" onChange={e => setNf({ ...nf, cron: e.target.value })}
+          className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200" />
+        <input value={nf.goal} placeholder="任务目标" onChange={e => setNf({ ...nf, goal: e.target.value })}
+          className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 md:col-span-2" />
+        <button onClick={() => act('add', { job: nf })} disabled={!nf.name || !nf.goal}
+          className="flex items-center justify-center gap-1 px-4 py-2 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 text-sm disabled:opacity-40">
+          <Plus className="w-3.5 h-3.5" /> 新增任务
+        </button>
+      </div>
+      {error && <div className="text-amber-400 text-xs">{error}</div>}
+    </section>
+  )
+}
 interface Config {
   llm: { api_key: string; base_url: string; model: string }
   redis: { host: string; port: number }
@@ -175,6 +301,9 @@ export default function SettingsPage() {
           </Field>
         </div>
       </section>
+
+      <NotificationsSection />
+      <ScheduledJobsSection />
     </div>
   )
 }

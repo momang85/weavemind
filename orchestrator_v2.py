@@ -4401,12 +4401,16 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         clear_checkpoint(task_id)
         self._clear_task_running(task_id)
         ok_count = sum(1 for r in completed_all.values() if r.get("status") == "SUCCESS")
+        # T7：终态附带任务耗时（metrics 延迟统计的数据源对齐；run 入口已记 _task_starts）
+        _start_ts = (getattr(self, "_task_starts", {}) or {}).get(task_id)
+        _elapsed = round(time.time() - _start_ts, 1) if _start_ts else None
         push_progress(self._messaging, task_id, "task_complete",
                       {"status": overall,
                        "summary": f"{overall}: {ok_count}/{len(all_steps)} steps, {iteration} iterations",
                        "report": report,
                        "acceptance": acceptance_summary,
-                       "llm_degraded": llm_degraded})
+                       "llm_degraded": llm_degraded,
+                       "elapsed_sec": _elapsed})
 
         # 6. 提示词自迭代（后台线程，不阻塞交付）：LLM 分析本次输出与预期的差距，
         #    总结问题并产出改进版提示词写入注册表，下一轮任务自动生效
