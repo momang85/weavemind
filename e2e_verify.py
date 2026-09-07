@@ -5,7 +5,6 @@
 _prune_superseded_files/_build_delivery_summary 因依赖 messaging/内部静态方法，
 暂留 orchestrator（下次一并处理）。
 """
-import json
 import logging
 import os
 import re
@@ -13,23 +12,41 @@ import shutil
 import subprocess
 import threading
 
-from workspace import task_project_dir, task_workspace
+from workspace import task_workspace
 
 logger = logging.getLogger("orchestrator_v2")
 
 
-def _sanitized_process_env(base=None):
+def _sanitized_process_env(base: dict | None = None) -> dict:
     """延迟获取 orchestrator 的进程环境净化函数（避免顶层循环导入）。"""
     import orchestrator_v2 as _o
     return _o._sanitized_process_env(base)
 
 
-def run_e2e_verification(files, project_dir, game_goal):
+def _serve_local(project_dir: str):
+    """在 127.0.0.1 随机端口起一个静默静态文件服务（模拟浏览器打开）。"""
+    import http.server
+    import socketserver
+
+    class _H(http.server.SimpleHTTPRequestHandler):
+        def __init__(self, *a, **k):
+            super().__init__(*a, directory=project_dir, **k)
+
+        def log_message(self, *a):
+            pass
+
+    srv = socketserver.TCPServer(("127.0.0.1", 0), _H)
+    port = srv.server_address[1]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, port
+
+
+def run_e2e_verification(
+    files: list[dict], project_dir: str, game_goal: bool,
+) -> list[dict]:
     """对最终交付物做贯通验证（确定性，不依赖 LLM）：
     HTML → 文档结构 + 内联 JS 语法（node --check）+ 本地 HTTP 可访问；
     PY → 编译 + 无头冒烟运行（超时视为启动成功）。"""
-    import http.server
-    import socketserver
     import sys
     import tempfile
     import urllib.request
@@ -119,16 +136,7 @@ def run_e2e_verification(files, project_dir, game_goal):
                     pass
         # 本地 HTTP 可访问性（模拟在浏览器中打开）
         try:
-            class _H(http.server.SimpleHTTPRequestHandler):
-                def __init__(self, *a, **k):
-                    super().__init__(*a, directory=project_dir, **k)
-
-                def log_message(self, *a):
-                    pass
-
-            srv = socketserver.TCPServer(("127.0.0.1", 0), _H)
-            port = srv.server_address[1]
-            threading.Thread(target=srv.serve_forever, daemon=True).start()
+            srv, port = _serve_local(project_dir)
             try:
                 with urllib.request.urlopen(
                     f"http://127.0.0.1:{port}/{f['name']}", timeout=10,
@@ -198,15 +206,13 @@ def run_e2e_verification(files, project_dir, game_goal):
     return results
 
 
-def playwright_verify(project_dir, rel_name, fp, require_game):
+def playwright_verify(
+    project_dir: str, rel_name: str, fp: str, require_game: bool,
+) -> tuple[bool, str, str]:
     """用无头 Chromium 真实打开页面验证：
     require_game=True → 模拟拖拽/键盘交互（"能玩"级，canvas 有绘制）；
     require_game=False → 普通页面正常渲染（有内容、无 JS 错误）。
     返回 (是否通过, 详情, 截图路径)；Playwright 缺失时自动安装。"""
-    import http.server
-    import socketserver
-    import urllib.request
-
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
@@ -223,16 +229,7 @@ def playwright_verify(project_dir, rel_name, fp, require_game):
     shot = os.path.join(screenshot_dir, rel_name.replace("/", "_").replace(".html", ".png"))
     srv = None
     try:
-        class _H(http.server.SimpleHTTPRequestHandler):
-            def __init__(self, *a, **k):
-                super().__init__(*a, directory=project_dir, **k)
-
-            def log_message(self, *a):
-                pass
-
-        srv = socketserver.TCPServer(("127.0.0.1", 0), _H)
-        port = srv.server_address[1]
-        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        srv, port = _serve_local(project_dir)
         url = f"http://127.0.0.1:{port}/{rel_name}"
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
@@ -381,7 +378,7 @@ def playwright_verify(project_dir, rel_name, fp, require_game):
                 pass
 
 
-def is_game_goal(goal):
+def is_game_goal(goal: str) -> bool:
     """判断目标是否"可玩"类（游戏/交互），决定贯通测试走哪种验证。"""
     g = str(goal or "").lower()
     return any(k in g for k in (
@@ -391,7 +388,7 @@ def is_game_goal(goal):
     ))
 
 
-def sweep_workspace_artifacts(task_id):
+def sweep_workspace_artifacts(task_id: str) -> None:
     """收尾清扫：删除 __pycache__ 与临时校验文件，只保留最新交付包，
     让成果文件夹干净可移动。"""
     ws = task_workspace(task_id)

@@ -2210,6 +2210,10 @@ class TestSimpleTaskFastPath(unittest.TestCase):
         tmp = tempfile.mkdtemp(prefix="weavemind_reflect_")
         old_root = ws_mod.WORKSPACE_ROOT
         ws_mod.configure_workspace_root(tmp)
+        # 测试隔离：清掉可能残留的 checkpoint（上次运行崩溃会留下
+        # finalizing 快照，指向已删除的临时 zip，导致续跑误入修复轮）
+        from checkpointer import clear_checkpoint
+        clear_checkpoint("t-simple-1")
         html = ('<!DOCTYPE html><html><head><meta charset="utf-8"></head>'
                 "<body><h1>hi</h1></body></html>")
         o = make_orch()
@@ -2247,6 +2251,7 @@ class TestSimpleTaskFastPath(unittest.TestCase):
 
         o._execute_steps = fake_execute
         o._now_iso = lambda: "t"
+        o._find_agent = lambda cap: "fake-agent"
         try:
             res = o.run("t-simple-1", "生成一个 HTML 欢迎页", auto_run=True)
             self.assertEqual(res["status"], "SUCCESS")
@@ -2261,6 +2266,8 @@ class TestSimpleTaskFastPath(unittest.TestCase):
             ws_mod.WORKSPACE_ROOT = old_root
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
+            from checkpointer import clear_checkpoint
+            clear_checkpoint("t-simple-1")
 
     def test_report_links_rewritten(self):
         import tempfile
