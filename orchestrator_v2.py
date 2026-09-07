@@ -2958,13 +2958,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
 
     @staticmethod
     def _is_game_goal(goal: str) -> bool:
-        """判断目标是否"可玩"类（游戏/交互），决定贯通测试走哪种验证。"""
-        g = str(goal or "").lower()
-        return any(k in g for k in (
-            "游戏", "玩", "playable", "game", "canvas", "pygame",
-            "贪吃蛇", "打砖块", "弹弓", "小鸟", "棋盘", "2048", "扫雷",
-            "五子棋", "射击", "闯关", "体感", "可玩",
-        ))
+        """T9：委托 e2e_verify 模块实现。"""
+        from e2e_verify import is_game_goal
+        return is_game_goal(goal)
 
     def _prune_superseded_files(
         self, task_id: str, all_steps: list[dict],
@@ -3033,35 +3029,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         return True
 
     def _sweep_workspace_artifacts(self, task_id: str) -> None:
-        """收尾清扫：删除 __pycache__ 与临时校验文件，只保留最新交付包，
-        让成果文件夹干净可移动。"""
-        import shutil
-        ws = task_workspace(task_id)
-        try:
-            for p in ws.rglob("*"):
-                try:
-                    if p.name == "__pycache__" and p.is_dir():
-                        shutil.rmtree(p, ignore_errors=True)
-                    elif p.is_file() and (
-                        p.name.startswith("_check_")
-                        or p.name.startswith(".test_")
-                        or p.suffix in (".pyc", ".pyo")
-                    ):
-                        p.unlink(missing_ok=True)
-                except Exception:
-                    continue
-            # 多轮迭代会产生多个 zip（每轮打包一次）：只保留最新一份
-            zips = sorted(
-                (p for p in ws.glob("*.zip") if p.is_file()),
-                key=lambda p: p.stat().st_mtime,
-            )
-            for z in zips[:-1]:
-                try:
-                    z.unlink(missing_ok=True)
-                except Exception:
-                    continue
-        except Exception as exc:
-            logger.warning("Workspace sweep failed for %s: %s", task_id, exc)
+        """T9：委托 e2e_verify 模块实现。"""
+        from e2e_verify import sweep_workspace_artifacts
+        sweep_workspace_artifacts(task_id)
 
     @staticmethod
     def _rewrite_report_links(report: str, task_id: str) -> str:
@@ -3111,9 +3081,10 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
     def _run_e2e_verification(
         self, files: list[dict], project_dir: str, game_goal: bool = True,
     ) -> list[dict]:
-        """对最终交付物做贯通验证（确定性，不依赖 LLM）：
-        HTML → 文档结构 + 内联 JS 语法（node --check）+ 本地 HTTP 可访问；
-        PY → 编译 + 无头冒烟运行（超时视为启动成功）。"""
+        """T9：委托 e2e_verify 模块实现（原主体已搬迁）。"""
+        from e2e_verify import run_e2e_verification
+        return run_e2e_verification(files, project_dir, game_goal)
+        # ---- 以下为搬迁前的历史主体（dead code，待 T9b 清理） ----
         import http.server
         import socketserver
         import subprocess
@@ -3288,10 +3259,10 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         self, project_dir: str, rel_name: str, fp: str,
         require_game: bool = True,
     ) -> tuple[bool, str, str]:
-        """用无头 Chromium 真实打开页面验证：
-        require_game=True → 模拟拖拽/键盘交互（"能玩"级，canvas 有绘制）；
-        require_game=False → 普通页面正常渲染（有内容、无 JS 错误）。
-        返回 (是否通过, 详情, 截图路径)；Playwright 缺失时自动安装。"""
+        """T9：委托 e2e_verify 模块实现（原主体已搬迁）。"""
+        from e2e_verify import playwright_verify
+        return playwright_verify(project_dir, rel_name, fp, require_game)
+        # ---- 以下为搬迁前的历史主体（dead code，待 T9b 清理） ----
         import http.server
         import socketserver
         import urllib.request
