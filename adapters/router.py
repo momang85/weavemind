@@ -17,6 +17,7 @@ import re
 from task_classifier import classify_task
 from adapters.resolver import resolve_company
 from adapters.eastmoney import fetch as fetch_eastmoney, fetch_ashare
+from adapters.cninfo import fetch_cn_or_fallback
 from adapters.sec_edgar import fetch as fetch_sec
 from adapters.coingecko import fetch_market, coin_id
 from adapters.macro import fetch_macro
@@ -254,14 +255,41 @@ def _match_data_source(
     return None
 
 
+def _has_financial_entities(goal: str) -> bool:
+    """目标是否含可解析的金融实体（domain=financial 且提取到公司名）。
+
+    用于把"市场份额/占比/分布"类统计措辞与公司研究目标区分开：
+    "宁德时代与比亚迪…市场份额变化"是公司对比（走财务分支），
+    "统计A股前5%占比"是无公司的全市场统计（走排行分支）。
+    """
+    try:
+        from task_classifier import classify_task
+        cls = classify_task(str(goal or ""))
+        if cls.get("domain") != "financial":
+            return False
+        names = [str(c) for c in (cls.get("companies") or []) if str(c).strip()]
+        if not names and cls.get("company"):
+            names = [str(cls["company"])]
+        return bool(names)
+    except Exception:
+        return False
+
+
 def _is_ranking_goal(goal: str) -> bool:
     """是否排行类目标：命中排行关键词，或规模需求为全市场（统计/前 N>50），
     或含'前 N'/'前十'/'TOP N' 明确排行规模（如'A股成交额前10'）。
 
     仅关键词命中不够——"前5%占比"不含"排行"字样，必须靠 scale 兜住；
-    同时避免把普通 A股目标（如个股行情）误判为排行。"""
+    同时避免把普通 A股目标（如个股行情）误判为排行。
+    公司对比目标（含可解析实体）即使措辞带"份额/占比/分布"等统计词，
+    也应走财务分支而非全市场排行——那类词在公司研究里指竞争格局。"""
     if _keyword_hit(goal, _RANKING_KEYWORDS):
+        # 直接排行关键词（"成交量排行"等）是强信号，优先于公司研究措辞
         return True
+    if _has_financial_entities(goal):
+        # 公司对比/研究目标：统计措辞（份额/占比/分布）指竞争格局，
+        # 不进入全市场排行（会误抓 5000+ 行无关行情，挤掉财务预载）
+        return False
     if _parse_scale(goal) == "full_market":
         return True
     # 明确的排行规模表达：前N / 前十 / TOP N / 前N名
@@ -414,7 +442,8 @@ def _fetch_financial_entity(company: str, cls: dict) -> tuple[dict | None, str]:
                 year_range=cls.get("year_range"),
             )
         else:
-            data = fetch_ashare(
+            # CN：巨潮官方源优先（默认关闭，探针未通过），东财兜底
+            data = fetch_cn_or_fallback(
                 res["name"], res["stock_code"],
                 year_range=cls.get("year_range"),
             )
@@ -591,7 +620,8 @@ def route_structured(goal: str) -> dict | None:
                 res["name"], res["stock_code"], year_range=cls["year_range"],
             )
         else:
-            data = fetch_ashare(
+            # CN：巨潮官方源优先（默认关闭），东财兜底
+            data = fetch_cn_or_fallback(
                 res["name"], res["stock_code"], year_range=cls["year_range"],
             )
         data["classification"] = cls

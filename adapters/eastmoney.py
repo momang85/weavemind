@@ -164,6 +164,7 @@ def fetch_ashare(company: str, stock_code: str, year_range=None, max_years: int 
             "total_assets": _to_yi(r.get("TOTAL_ASSETS_PK")),
             "total_liabilities": _to_yi(r.get("LIABILITY")),
             "operating_cashflow": _to_yi(r.get("NETCASH_OPERATE_PK")),
+            "rd_expense": _to_yi(r.get("RDEXPEND")),
             "basic_eps": round(float(r["EPSJB"]), 3)
                          if r.get("EPSJB") is not None else None,
             "roe": round(float(r["ROEJQ"]), 2)

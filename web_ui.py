@@ -35,6 +35,7 @@ SHARE_AUTH_COOKIE_TTL = 7 * 24 * 3600  # 密码验证通过的 Cookie 有效期 
 _share_lock = threading.Lock()
 
 _events = []
+_sched_runner_ref: list = []  # 运行中的调度器实例（/api/scheduled-jobs 读 last_results 用）
 _events_lock = threading.Lock()
 _evt_seq = 0
 _rate_limiter = None
@@ -717,23 +718,47 @@ def _listen_results():
                         except Exception: pass
                         # D1：日报项目任务终态自动生成分享链接（落地页入口），
                         # 并补发一条带链接的通知（编排器通知早于分享生成，链接会缺失）
+                        # T2：FAILED 任务不生成分享链接（空报告落地页伤信任），
+                        # 只发失败通知 + 告警事件
                         try:
                             if str(existing.get("project") or "") == "daily-report":
-                                _generate_share_token(tid)
-                                from notifications import (
-                                    find_share_link,
-                                    make_summary,
-                                    notify_task_done,
-                                )
-                                notify_task_done(
-                                    tid,
-                                    goal=str(existing.get("goal") or ""),
-                                    status=str(existing.get("status") or ""),
-                                    report_link=find_share_link(tid),
-                                    summary=make_summary(
-                                        str(existing.get("report") or "")
-                                    ),
-                                )
+                                _status = str(existing.get("status") or "")
+                                if _status == "FAILED":
+                                    from notifications import notify_task_done
+                                    notify_task_done(
+                                        tid,
+                                        goal=str(existing.get("goal") or ""),
+                                        status="FAILED",
+                                        summary="日报任务执行失败，未生成落地页；请检查健康页事件与编排器日志",
+                                    )
+                                    try:
+                                        _new_redis().publish(
+                                            "orchestrator:alert",
+                                            json.dumps({
+                                                "type": "daily_report_failed",
+                                                "service": "scheduler",
+                                                "message": f"日报任务失败：{tid}",
+                                                "timestamp": _now_iso(),
+                                            }, ensure_ascii=False),
+                                        )
+                                    except Exception:
+                                        pass
+                                else:
+                                    _generate_share_token(tid)
+                                    from notifications import (
+                                        find_share_link,
+                                        make_summary,
+                                        notify_task_done,
+                                    )
+                                    notify_task_done(
+                                        tid,
+                                        goal=str(existing.get("goal") or ""),
+                                        status=_status,
+                                        report_link=find_share_link(tid),
+                                        summary=make_summary(
+                                            str(existing.get("report") or "")
+                                        ),
+                                    )
                         except Exception:
                             pass
             except Exception: pass
@@ -1558,6 +1583,7 @@ def _share_page_structured(md: str, task_id: str = "") -> dict:
                     traceability = {
                         "total": int(ntc.get("total_count") or 0),
                         "traced": int(ntc.get("traceable_count") or 0),
+                        "computed": int(ntc.get("computed_count") or 0),
                         "disclosed": int(ntc.get("disclosed_count") or 0),
                         "overall": str(acc.get("overall") or ""),
                     }
@@ -1895,6 +1921,8 @@ def _share_page_html(title: str, created_at: str, body_html: str,
     if trace.get("total"):
         rate = round(100.0 * trace["traced"] / trace["total"]) if trace["total"] else 0
         trace_lines.append(f"数字可溯源 <b>{trace['traced']}/{trace['total']}</b>（{rate}%）")
+        if trace.get("computed"):
+            trace_lines.append(f"计算值 <b>{trace['computed']}</b> 个")
         if trace.get("disclosed"):
             trace_lines.append(f"模型知识已标注 <b>{trace['disclosed']}</b> 处")
     dl_html = ""
@@ -2606,7 +2634,47 @@ def main():
             )
             return submitted.get("task_id", "")
 
-        runner = ScheduledJobsRunner(submit_fn=_submit, config_path=CONFIG_PATH)
+        def _outcome(task_id: str):
+            """查询调度任务终态（PENDING/运行中返回 None）。"""
+            try:
+                db = sqlite3.connect(DB_PATH, timeout=5)
+                row = db.execute(
+                    "SELECT status FROM task_history WHERE task_id=?",
+                    (task_id,),
+                ).fetchone()
+                db.close()
+                if not row:
+                    return None
+                st = str(row[0] or "")
+                return st if st in ("SUCCESS", "FAILED", "SUCCESS_WITH_ISSUES") else None
+            except Exception:
+                return None
+
+        def _on_failure(job_name: str, task_id: str, status: str):
+            """调度任务失败回调：告警事件 + 失败通知（按 task_id 去重由 runner 保证）。"""
+            try:
+                _new_redis().publish("orchestrator:alert", json.dumps({
+                    "type": "scheduled_task_failed",
+                    "service": "scheduler",
+                    "message": f"定时任务「{job_name}」执行失败：{task_id}（{status}）",
+                    "timestamp": _now_iso(),
+                }, ensure_ascii=False))
+            except Exception:
+                pass
+            try:
+                from notifications import notify_task_done_async
+                notify_task_done_async(
+                    task_id, goal=f"[定时任务] {job_name}", status="FAILED",
+                    summary=f"定时任务「{job_name}」执行失败（{status}），请检查健康页与任务详情",
+                )
+            except Exception:
+                pass
+
+        runner = ScheduledJobsRunner(
+            submit_fn=_submit, config_path=CONFIG_PATH,
+            outcome_fn=_outcome, on_failure=_on_failure,
+        )
+        _sched_runner_ref.append(runner)
         runner.run()
 
     threading.Thread(
@@ -2625,17 +2693,59 @@ def main():
     threading.Thread(target=_prewarm_memory, daemon=True).start()
 
     def _cleanup_stale_tasks():
-        """把长时间卡在 PENDING 的任务标记为过期，避免永久悬挂。"""
+        """把长时间卡在 PENDING 的任务标记为过期，避免永久悬挂。
+
+        T2：scheduler 任务（sched- 前缀 / user=scheduler）过期时不再静默——
+        发布 orchestrator:alert 事件（Health 页立即可见）并发送失败通知；
+        其他用户任务保持原静默行为（历史行为不变）。"""
         while True:
             time.sleep(60)
             try:
                 db = sqlite3.connect(DB_PATH, timeout=5)
-                db.execute(
-                    "UPDATE task_history SET status='FAILED', report='Task expired (no completion within %d s)' "
+                expired = [dict(zip(("task_id", "goal", "user"), row)) for row in db.execute(
+                    "SELECT task_id, goal, IFNULL(user,'') FROM task_history "
                     "WHERE status='PENDING' AND created_at < datetime('now', ?)",
                     (f"-{_STALE_AFTER_SECONDS} seconds",),
+                ).fetchall()]
+                if not expired:
+                    db.close()
+                    continue
+                db.execute(
+                    "UPDATE task_history SET status='FAILED', report=? "
+                    "WHERE status='PENDING' AND created_at < datetime('now', ?)",
+                    (
+                        f"Task expired (no completion within {_STALE_AFTER_SECONDS} s)",
+                        f"-{_STALE_AFTER_SECONDS} seconds",
+                    ),
                 )
                 db.commit(); db.close()
+                for row in expired:
+                    tid = str(row.get("task_id") or "")
+                    is_sched = tid.startswith("sched-") or str(row.get("user")) == "scheduler"
+                    if not is_sched:
+                        continue
+                    # 告警事件：Health 页事件流即刻可见
+                    try:
+                        r = _new_redis()
+                        r.publish("orchestrator:alert", json.dumps({
+                            "type": "scheduled_task_expired",
+                            "service": "scheduler",
+                            "message": f"定时任务过期未完成：{tid}（{str(row.get('goal') or '')[:60]}）",
+                            "timestamp": _now_iso(),
+                        }, ensure_ascii=False))
+                    except Exception:
+                        pass
+                    # 失败通知（复用任务完成通道，标题按状态）
+                    try:
+                        from notifications import notify_task_done_async
+                        notify_task_done_async(
+                            tid,
+                            goal=str(row.get("goal") or ""),
+                            status="FAILED",
+                            summary=f"定时任务在 {_STALE_AFTER_SECONDS}s 内未完成（编排器未消费或执行中断），已标记失败",
+                        )
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
@@ -2695,8 +2805,15 @@ def _get_projects(self, p):
 def _get_scheduled_jobs(self, p):
     if p == "/api/scheduled-jobs":
         # F2：定时任务列表（GET 仅 admin，见 _role_allowed_get）
+        # T2：附带最近触发记录（上次结果列），来自运行中的 runner 调度日志
         from scheduled_jobs import load_jobs
-        return self._json({"jobs": load_jobs(CONFIG_PATH)})
+        recent: list[dict] = []
+        if _sched_runner_ref:
+            try:
+                recent = _sched_runner_ref[-1].last_results(30)
+            except Exception:
+                recent = []
+        return self._json({"jobs": load_jobs(CONFIG_PATH), "recent": recent})
 
 def _get_files(self, p):
     if p.startswith("/files/"):
@@ -2726,6 +2843,25 @@ def _get_files(self, p):
         self.end_headers()
         self.wfile.write(body)
         return
+
+def _get_task_acceptance(self, p):
+    """T4：任务验收全量报告（四档计数 + traceable 明细）。
+
+    登录即可访问（viewer 允许）——只读工作区 acceptance_report.json；
+    报告未生成（任务未到验收阶段）返回 404，前端静默隐藏溯源行。"""
+    if p.startswith("/api/task/") and p.endswith("/acceptance"):
+        tid = p.split("/api/task/")[-1].rsplit("/acceptance", 1)[0]
+        try:
+            from workspace import task_workspace
+            acc_path = task_workspace(tid) / "acceptance_report.json"
+            if not acc_path.exists():
+                # 旧任务/未完成：查 SQLite 兜底提示
+                return self._json({"error": "not found"}, 404)
+            with open(acc_path, "r", encoding="utf-8") as f:
+                report = json.load(f)
+            return self._json(report)
+        except Exception:
+            return self._json({"error": "read failed"}, 500)
 
 def _get_task_deliverables(self, p):
     if p.startswith("/api/task/") and p.endswith("/deliverables"):
@@ -3565,6 +3701,87 @@ def _post_single_agent(self, p, body, admin):
         except Exception as e:
             return self._json({"result": f"Error: {e}", "duration": _t.time()-start})
 
+def _post_quick_answer(self, p, body, admin):
+    """T3 快答：先检索后作答——answers with sources, honest fallback.
+
+    检索失败时返回 mode=model_knowledge 并在答案尾部声明"未检索"，
+    不伪装可溯源。"""
+    if self.path == "/api/quick-answer":
+        g = str(body.get("goal") or "").strip()
+        if not g:
+            return self._json({"error": "goal required"}, 400)
+        # 余额预检（同 single-agent）
+        try:
+            from llm_client import get_balance_status
+            _bal = get_balance_status()
+            _p = _bal.get("primary") or {}
+            _b = _bal.get("backup") or {}
+            if (
+                _p.get("reason") == "insufficient_balance"
+                and _b.get("reason") == "insufficient_balance"
+            ):
+                return self._json(
+                    {"error": "全部 LLM 端点余额不足，请充值后重试"}, 503,
+                )
+        except Exception:
+            pass
+        import time as _t
+        start = _t.time()
+        # 1) 检索：Google News RSS（一次 HTTP，含 URL 的结果）
+        sources: list[dict] = []
+        search_ctx = ""
+        mode = "model_knowledge"
+        try:
+            from adapters.news import fetch_news
+            news = fetch_news(g)
+            items = (news or {}).get("items") or []
+            if items:
+                mode = "searched"
+                sources = [
+                    {"title": str(i.get("title") or "")[:120],
+                     "url": str(i.get("link") or "")}
+                    for i in items[:5] if i.get("link")
+                ]
+                search_ctx = (
+                    "以下是检索到的最新资讯（供引用，逐条附来源）：\n"
+                    + "\n".join(
+                        f"- {i.get('title')}（{i.get('link')}，{i.get('published','')}）"
+                        for i in items[:5]
+                    )
+                    + "\n\n"
+                )
+        except Exception:
+            sources = []
+        # 2) 作答：带检索上下文要求引用来源
+        try:
+            from llm_client import LLMClient
+            llm = LLMClient()
+            system = (
+                "你是快速问答助手。"
+                + (
+                    "回答末尾用一行列出参考来源（[来源] 标题 URL）。"
+                    "只依据提供的资讯回答；资讯不足的部分明确说明。"
+                    if mode == "searched"
+                    else "本次未能检索到资讯：回答末尾必须声明"
+                    "'（本次未检索到相关资讯，以上基于模型知识，未经验证）'。"
+                )
+            )
+            content = llm.call(
+                system, search_ctx + f"问题：{g}", expect_json=False,
+            )
+            return self._json({
+                "content": content,
+                "sources": sources,
+                "mode": mode,
+                "searched_at": _t.strftime("%Y-%m-%d %H:%M:%S") if mode == "searched" else "",
+                "duration": round(_t.time() - start, 1),
+            })
+        except Exception as e:
+            return self._json({
+                "content": f"Error: {e}", "sources": [], "mode": mode,
+                "duration": round(_t.time() - start, 1),
+            })
+
 def _post_kill_worker(self, p, body, admin):
     if self.path == "/api/kill-worker":
         agent_id = body.get("agent_id","")
@@ -3751,6 +3968,7 @@ _GET_ROUTES = [
     (lambda self, p: p == "/api/projects", _get_projects),
     (lambda self, p: p == "/api/scheduled-jobs", _get_scheduled_jobs),
     (lambda self, p: p.startswith("/files/"), _get_files),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/acceptance"), _get_task_acceptance),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/deliverables"), _get_task_deliverables),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/usage"), _get_task_usage),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/stream"), _get_task_stream),
@@ -3790,6 +4008,7 @@ _POST_ROUTES = [
     (lambda self, p: self.path == "/api/evolution/trigger", _post_evolution_trigger),
     (lambda self, p: self.path == "/api/evolution/approve", _post_evolution_approve),
     (lambda self, p: self.path == "/api/single-agent", _post_single_agent),
+    (lambda self, p: self.path == "/api/quick-answer", _post_quick_answer),
     (lambda self, p: self.path == "/api/kill-worker", _post_kill_worker),
     (lambda self, p: self.path == "/api/config", _post_config),
     (lambda self, p: self.path == "/api/llm-mode", _post_llm_mode),

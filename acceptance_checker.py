@@ -782,6 +782,7 @@ _DOMAIN_MEDIA = {
     "100est.com": "百优价值网", "faxiangongchang.com": "天下工厂",
     "9fzt.com": "九方智投", "cofool.com": "叩富网",
     "xiniudata.com": "新牛数据", "dfcfw.com": "东方财富PDF",
+    "cninfo.com.cn": "巨潮资讯网",
     "nbd.com.cn": "每日经济新闻", "hstong.com": "华盛通",
     "ykzq.com": "粤开证券", "fddi.fudan.edu.cn": "复旦金融研究院",
 }

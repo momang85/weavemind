@@ -114,6 +114,7 @@ _STRUCTURED_SOURCE_LABELS = {
     "eastmoney_datacenter": "东方财富数据中心（港股）",
     "eastmoney_ashare": "东方财富数据中心（A股）",
     "sec_edgar": "SEC EDGAR（10-K 年报）",
+    "cninfo_annual": "巨潮资讯网（A股年报）",
 }
 
 # 统计类目标关键词：命中后在 code_execution 步骤注入全市场占比计算指令

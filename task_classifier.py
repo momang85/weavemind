@@ -9,6 +9,7 @@ import re
 
 FINANCIAL_KEYWORDS = (
     "财报", "年报", "季报", "营收", "净利润", "财务", "业绩", "负债",
+    "研发投入", "研发费用", "研发开支",
     "报表", "financial", "revenue", "earnings", "annual report", "income statement",
 )
 
@@ -36,7 +37,9 @@ _AFTER_CONNECTOR_RE = re.compile(
     r"(?:与|和|及|以及|、|跟|vs)\s*([\u4e00-\u9fff]{2,6}?)"
     r"(?=(?:的)?(?:历年年度|历年|年度|最新|近三年|近五年|最近)?"
     r"(?:财报|年报|季报|财务|营收|净利润|净利|利润|收入|业绩|负债|报表|"
-    r"趋势|情况|数据|表现|相比|对比|比较|分别|vs)|$)",
+    r"趋势|情况|数据|表现|竞争格局|竞争|格局|技术路线|市场份额|"
+    r"在|于|的市|的行|"
+    r"相比|对比|比较|分别|vs)|$)",
     re.I,
 )
 
@@ -121,6 +124,9 @@ def _is_valid_company_name(name: str) -> bool:
     if re.search(r"(?:与|和|及|以及|、|跟|vs)", name, re.I):
         return False
     if name in ("公司", "集团", "控股"):
+        return False
+    # 量词+泛指后缀不是公司名（"两家公司/三家集团"来自"对比两家公司近三年营收"）
+    if re.fullmatch(r"[两三四五六七八九十几\d一二]+(?:家|个)?(?:公司|集团|控股|企业|厂商|巨头|主体)", name):
         return False
     if name.endswith(("公司", "集团", "控股")):
         return True

@@ -27,6 +27,7 @@ class StructuredPipelineMixin:
         g = str(goal or "").lower()
         return any(k in g for k in (
             "财报", "年报", "季报", "营收", "净利润", "负债", "财务", "业绩",
+            "研发投入", "研发费用",
             "financial", "revenue", "earnings", "annual report",
         ))
 
@@ -123,6 +124,7 @@ class StructuredPipelineMixin:
             metadata = data.get("metadata") or {}
             is_financial = source in (
                 "eastmoney_datacenter", "eastmoney_ashare", "sec_edgar",
+                "cninfo_annual",
             ) or (not source and isinstance(data.get("financials"), list))
             is_financial = is_financial or source == "multi_entity"
             proj = task_project_dir(task_id, project)
@@ -574,16 +576,18 @@ class StructuredPipelineMixin:
                     src_name = {
                         "eastmoney_datacenter": "东方财富数据中心（港交所披露）",
                         "eastmoney_ashare": "东方财富数据中心（A股财报）",
+                        "cninfo_annual": "巨潮资讯网（A股年报）",
                         "sec_edgar": "SEC EDGAR（10-K 年报）",
                     }.get(str(m.get("source")), str(m.get("source")))
                     rows = [
-                        "| 年份 | 营收 | 归母净利润 | 毛利率% | 总负债 | 经营现金流 |",
-                        "|---|---|---|---|---|---|",
+                        "| 年份 | 营收 | 归母净利润 | 毛利率% | 研发投入 | 总负债 | 经营现金流 |",
+                        "|---|---|---|---|---|---|---|",
                     ]
                     for f in fs:
                         rows.append(
                             f"| {f.get('year')} | {f.get('revenue')} | "
                             f"{f.get('net_profit')} | {f.get('gross_margin')} | "
+                            f"{f.get('rd_expense')} | "
                             f"{f.get('total_liabilities')} | "
                             f"{f.get('operating_cashflow')} |"
                         )
@@ -748,6 +752,7 @@ class StructuredPipelineMixin:
                 ("operating_profit", "经营利润", "亿元"),
                 ("total_assets", "总资产", "亿元"), ("total_liabilities", "总负债", "亿元"),
                 ("operating_cashflow", "经营现金流", "亿元"),
+                ("rd_expense", "研发投入", "亿元"),
             ):
                 v = f.get(key)
                 if v is None:

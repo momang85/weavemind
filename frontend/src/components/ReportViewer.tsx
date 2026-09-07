@@ -364,6 +364,19 @@ export default memo(function ReportViewer() {
   const [verifyData, setVerifyData] = useState<any>(null)
   const [verifyLoading, setVerifyLoading] = useState(false)
   const [verifyError, setVerifyError] = useState('')
+  // T4：报告打开即自动拉取验收全量报告（四档常驻徽章行）
+  const [accData, setAccData] = useState<any>(null)
+  useEffect(() => {
+    setAccData(null)
+    if (!taskIdForFiles) return
+    let cancelled = false
+    fetch('/api/task/' + taskIdForFiles + '/acceptance')
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (!cancelled && d && !d.error) setAccData(d) })
+      .catch(() => {})
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskIdForFiles])
   const [expandedFiles, setExpandedFiles] = useState(false)
   const [runOutput, setRunOutput] = useState<Record<string, string>>({})
   const [running, setRunning] = useState<string | null>(null)
@@ -606,6 +619,27 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
             <span className="text-slate-600 text-xs ml-1">— {report.summary}</span>
           </div>
         </div>
+
+        {/* T4 溯源四档常驻徽章行：报告打开即展示（来自验收器全量报告） */}
+        {accData?.checks?.number_traceability && (() => {
+          const nt = accData.checks.number_traceability
+          const total = nt.total_count ?? 0
+          const rate = nt.covered_ratio != null ? Math.round(nt.covered_ratio * 100) : null
+          return (
+            <div className="mx-4 mt-4 flex flex-wrap items-center gap-2 rounded-xl border border-cyan-500/20 bg-cyan-500/5 px-3.5 py-2.5">
+              <ScrollText className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+              <span className="text-xs font-semibold text-cyan-400">数字溯源</span>
+              <span className="text-xs text-slate-400">共 {total} 个：</span>
+              <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 text-[11px]">引用 {nt.cited_count ?? 0}</span>
+              <span className="px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-400 text-[11px]">计算 {nt.computed_count ?? 0}</span>
+              <span className="px-2 py-0.5 rounded bg-violet-500/10 text-violet-400 text-[11px]">模型知识 {nt.disclosed_count ?? 0}</span>
+              <span className="px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 text-[11px]">不可溯源 {nt.unverifiable_count ?? 0}</span>
+              {rate != null && (
+                <span className={`text-[11px] ml-1 ${rate >= 70 ? 'text-emerald-400' : 'text-amber-400'}`}>溯源率 {rate}%</span>
+              )}
+            </div>
+          )
+        })()}
 
         {/* 验收缺口横幅：SUCCESS_WITH_ISSUES 任务的报告顶部展示缺口明细 */}
         {report.summary === 'SUCCESS_WITH_ISSUES' && report.acceptance?.gaps && report.acceptance.gaps.length > 0 && (

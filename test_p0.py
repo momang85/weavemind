@@ -3948,7 +3948,7 @@ class TestMultiEntityPreload(unittest.TestCase):
         with mock.patch.object(
             router, "resolve_company", side_effect=[res_cat, res_byd],
         ), mock.patch.object(
-            router, "fetch_ashare", return_value=self._financial_payload(3000.0),
+            router, "fetch_cn_or_fallback", return_value=self._financial_payload(3000.0),
         ), mock.patch.object(
             router, "fetch_eastmoney", return_value=self._financial_payload(6000.0),
         ):
@@ -5813,6 +5813,199 @@ class TestNewDataAdapters(unittest.TestCase):
                 ["ftp://example.com/a", "not-a-url", "", "https://example.com/a", "https://example.com/a"],
             )
         self.assertEqual(out, {"https://example.com/a": "dead"})
+
+
+class TestFinancialRoutingFix(unittest.TestCase):
+    """市场导向 T1a：公司对比目标（含"市场份额"统计措辞）必须走财务分支，
+    不再被全市场排行误抓；纯排行/全市场统计目标行为不变。"""
+
+    def test_company_compare_with_share_wording_not_ranking(self):
+        from adapters.router import _is_ranking_goal
+        g = ("调研宁德时代与比亚迪在动力电池领域的竞争格局，对比两家公司近三年"
+             "营收、净利润与研发投入，分析技术路线差异与市场份额变化，输出投资"
+             "研究参考报告")
+        self.assertFalse(_is_ranking_goal(g), "公司对比目标不应判为排行")
+
+    def test_pure_ranking_keyword_still_ranking(self):
+        from adapters.router import _is_ranking_goal
+        self.assertTrue(_is_ranking_goal("统计今日A股总成交量排名前十的股票"))
+
+    def test_full_market_stat_no_company_still_ranking(self):
+        from adapters.router import _is_ranking_goal
+        self.assertTrue(_is_ranking_goal("查询今日A股前5%的股票的总成交额占A股总成交额的比例"))
+
+    def test_single_company_financial_not_ranking(self):
+        from adapters.router import _is_ranking_goal
+        self.assertFalse(_is_ranking_goal("分析贵州茅台2023年营收和净利润"))
+
+    def test_ranking_keyword_stronger_than_company(self):
+        from adapters.router import _is_ranking_goal
+        # 直接排行关键词是强信号：即使含公司名也走排行
+        self.assertTrue(_is_ranking_goal("宁德时代在A股成交量排行榜的位置"))
+
+    def test_quantifier_phrase_not_company(self):
+        from task_classifier import _is_valid_company_name, classify_task
+        self.assertFalse(_is_valid_company_name("两家公司"))
+        self.assertTrue(_is_valid_company_name("比亚迪"))
+        g = ("调研宁德时代与比亚迪的竞争格局，对比两家公司近三年营收、净利润与"
+             "研发投入，输出投资研究参考报告")
+        cls = classify_task(g)
+        self.assertIn("宁德时代", cls.get("companies") or [])
+        self.assertIn("比亚迪", cls.get("companies") or [])
+        self.assertNotIn("两家公司", cls.get("companies") or [])
+
+
+class TestCninfoFallback(unittest.TestCase):
+    """T1c：cninfo 默认关闭时回退东财；开启时优先巨潮。"""
+
+    def test_disabled_by_default_falls_back_to_eastmoney(self):
+        import adapters.cninfo as cninfo
+        from unittest import mock as _m
+        if cninfo.enabled():
+            self.skipTest("WEAVEMIND_CNINFO_ENABLED=1 环境下跳过默认关闭用例")
+        fake = {"financials": [{"year": 2025, "revenue": 4000.0}],
+                "metadata": {"source": "eastmoney_ashare"}, "raw": {}}
+        with _m.patch("adapters.eastmoney.fetch_ashare", return_value=fake) as fe:
+            out = cninfo.fetch_cn_or_fallback("宁德时代", "300750")
+        self.assertEqual(out["metadata"]["source"], "eastmoney_ashare")
+        fe.assert_called_once()
+
+    def test_enabled_prefers_cninfo(self):
+        import adapters.cninfo as cninfo
+        from unittest import mock as _m
+        fake = {"financials": [{"year": 2025, "rd_expense": 221.47}],
+                "metadata": {"source": "cninfo_annual"}, "raw": {}}
+        with _m.patch.dict("os.environ", {"WEAVEMIND_CNINFO_ENABLED": "1"}), \
+             _m.patch("adapters.eastmoney.fetch_ashare") as fe, \
+             _m.patch.object(cninfo, "fetch_annual_report", return_value=fake) as fc:
+            out = cninfo.fetch_cn_or_fallback("宁德时代", "300750")
+        self.assertEqual(out["metadata"]["source"], "cninfo_annual")
+        fc.assert_called_once()
+        fe.assert_not_called()
+
+
+class TestRdExpensePipeline(unittest.TestCase):
+    """T1b：研发投入字段从东财行到 clean_chart_data 的全链路。"""
+
+    def test_ashare_row_includes_rd_expense(self):
+        from adapters.eastmoney import _to_yi
+        self.assertEqual(_to_yi(22146581000), 221.47)
+        self.assertIsNone(_to_yi(None))
+
+    def test_merge_structured_financials_includes_rd(self):
+        from structured_pipeline import StructuredPipelineMixin
+        clean = {"market_data": []}
+        financials = [{
+            "year": 2025, "revenue": 4237.0, "net_profit": 722.0,
+            "rd_expense": 221.47,
+        }]
+        out = StructuredPipelineMixin._merge_structured_financials(
+            clean, financials, "https://example.com/f", entity="宁德时代",
+        )
+        labels = {r["label"] for r in out["market_data"]}
+        self.assertIn("宁德时代2025年研发投入", labels)
+        rd_row = next(r for r in out["market_data"] if "研发投入" in r["label"])
+        self.assertEqual(rd_row["value"], 221.47)
+        self.assertEqual(rd_row["unit"], "亿元")
+
+    def test_financial_keywords_cover_rd(self):
+        from task_classifier import classify_task
+        cls = classify_task("对比两家公司近三年研发投入")
+        self.assertEqual(cls["domain"], "financial")
+
+
+class TestScheduledJobAlertRetry(unittest.TestCase):
+    """T2：提交失败不推进 _last_fire（30 分钟后重试）、结果追踪触发失败回调。"""
+
+    def setUp(self):
+        self._tmp = tempfile.mkdtemp(prefix="wm_sched_t2_")
+
+    def tearDown(self):
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _write_config(self, jobs):
+        cfg_path = os.path.join(self._tmp, "config.json")
+        with open(cfg_path, "w", encoding="utf-8") as f:
+            json.dump({"scheduled_jobs": jobs}, f, ensure_ascii=False, indent=2)
+        return cfg_path
+
+    def test_submit_failure_retries_same_day(self):
+        from datetime import datetime
+        from scheduled_jobs import ScheduledJobsRunner
+        cfg = self._write_config([{
+            "name": "job-r", "goal": "日报", "cron": "09:00", "enabled": True,
+        }])
+        attempts: list[int] = []
+
+        def flaky_submit(job):
+            attempts.append(1)
+            if len(attempts) < 2:
+                raise RuntimeError("redis down")
+            return "sched-retry-1"
+
+        runner = ScheduledJobsRunner(
+            submit_fn=flaky_submit, config_path=cfg,
+            log_path=os.path.join(self._tmp, "s.log"),
+        )
+        t0 = datetime(2026, 8, 21, 9, 0, 0)
+        fired = runner.tick(t0)
+        self.assertEqual(fired[0]["result"], "error")
+        # 提交失败不推进 _last_fire：同分钟再 tick 不应再触发成功路径
+        # （重试信息记在 append_log 的 detail，此处验状态机）
+        # 5 分钟后：未到 30 分钟重试点，不触发
+        self.assertEqual(runner.tick(t0.replace(minute=5)), [])
+        # 30 分钟后：重试成功
+        fired2 = runner.tick(t0.replace(minute=30))
+        self.assertEqual(fired2[0]["result"], "submitted")
+        self.assertEqual(fired2[0]["task_id"], "sched-retry-1")
+        self.assertEqual(len(attempts), 2)
+
+    def test_outcome_tracking_fires_failure_callback_once(self):
+        from datetime import datetime
+        from scheduled_jobs import ScheduledJobsRunner
+        cfg = self._write_config([{
+            "name": "job-t", "goal": "盯盘", "cron": "09:00", "enabled": True,
+        }])
+        outcomes = {"sched-a": None}
+        alerts: list[tuple] = []
+        runner = ScheduledJobsRunner(
+            submit_fn=lambda job: "sched-a",
+            config_path=cfg,
+            log_path=os.path.join(self._tmp, "s.log"),
+            outcome_fn=lambda tid: outcomes.get(tid),
+            on_failure=lambda name, tid, st: alerts.append((name, tid, st)),
+        )
+        runner.tick(datetime(2026, 8, 21, 9, 0, 0))
+        # 5 分钟节流：立即 check 不触发（_last_outcome_check 刚设置）
+        self.assertEqual(alerts, [])
+        # 模拟节流窗口过后：直接改内部时间戳触发检查
+        runner._last_outcome_check = 0.0
+        outcomes["sched-a"] = None  # 未终态：不告警不移除追踪
+        runner._check_outcomes(datetime.now())
+        self.assertEqual(alerts, [])
+        outcomes["sched-a"] = "FAILED"
+        runner._last_outcome_check = 0.0  # 重置节流窗口（模拟 5 分钟后）
+        runner._check_outcomes(datetime.now())
+        self.assertEqual(alerts, [("job-t", "sched-a", "FAILED")])
+        # 再次检查不重复告警（task_id 去重）
+        runner._last_outcome_check = 0.0
+        runner._check_outcomes(datetime.now())
+        self.assertEqual(len(alerts), 1)
+
+    def test_notification_title_by_status(self):
+        import notifications as N
+        import requests as _requests_mod
+        cfg = {"sendkey": "sk-x"}
+        with mock.patch.object(_requests_mod, "post") as rp:
+            rp.return_value.raise_for_status.return_value = None
+            N._send_serverchan(cfg, {"goal": "日报", "status": "FAILED",
+                                     "task_id": "t1", "summary": "s"})
+            title = rp.call_args[1]["data"]["title"]
+            self.assertIn("任务失败", title)
+            N._send_serverchan(cfg, {"goal": "日报", "status": "SUCCESS",
+                                     "task_id": "t1", "summary": "s"})
+            title2 = rp.call_args[1]["data"]["title"]
+            self.assertIn("任务完成", title2)
 
 
 if __name__ == "__main__":

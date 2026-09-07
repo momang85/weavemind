@@ -69,13 +69,24 @@ function NotificationsSection() {
 // ── T2 定时任务管理 ───────────────────────────────────────────
 function ScheduledJobsSection() {
   const [jobs, setJobs] = useState<any[]>([])
+  const [recent, setRecent] = useState<any[]>([])
   const [error, setError] = useState('')
   const [nf, setNf] = useState({ name: '', goal: '', cron: '09:00' })
 
   const load = useCallback(() => {
-    fetch('/api/scheduled-jobs').then(r => r.json()).then(d => setJobs(d.jobs || [])).catch(() => setError('加载定时任务失败'))
+    fetch('/api/scheduled-jobs').then(r => r.json()).then(d => {
+      setJobs(d.jobs || [])
+      setRecent(d.recent || [])
+    }).catch(() => setError('加载定时任务失败'))
   }, [])
   useEffect(() => { load() }, [load])
+
+  // T2：每个 job 最近一次触发记录（失败红标）
+  const lastFire = (name: string) => {
+    const rec = recent.find((r: any) => r.job === name)
+    if (!rec) return null
+    return rec
+  }
 
   const act = async (action: string, payload: any) => {
     setError('')
@@ -105,6 +116,18 @@ function ScheduledJobsSection() {
               <span className="ml-2 text-[10px] px-2 py-0.5 rounded bg-violet-500/10 text-violet-400">{j.project}</span>
             </div>
             <div className="text-xs text-slate-500 truncate mt-1">{j.goal}</div>
+            {(() => {
+              const rec = lastFire(j.name)
+              if (!rec) return null
+              const bad = rec.result === 'error'
+              return (
+                <div className={`text-[10px] mt-1 ${bad ? 'text-red-400' : 'text-slate-600'}`}>
+                  上次：{rec.time || '-'} · {rec.result || '-'}
+                  {rec.task_id ? ` · ${rec.task_id}` : ''}
+                  {rec.detail ? `（${rec.detail}）` : ''}
+                </div>
+              )
+            })()}
           </div>
           <button onClick={() => act('delete', { name: j.name })}
             className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs">

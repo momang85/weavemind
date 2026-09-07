@@ -164,6 +164,33 @@ def append_log(
         logger.warning("scheduled job log append failed: %s", exc)
 
 
+def _read_log(log_path: str | None, limit: int = 50) -> list[dict]:
+    """读取调度日志尾部解析为记录（供 last_results / API 展示）。
+
+    行格式与 append_log 对应：时间 | job=名 | task_id=… | result=… | detail=…
+    """
+    path = Path(log_path or os.path.join(DEFAULT_LOG_DIR, "scheduled_jobs.log"))
+    if not path.exists():
+        return []
+    out: list[dict] = []
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except Exception:
+        return []
+    for line in lines[-max(1, int(limit)):]:
+        parts = [p.strip() for p in line.split("|")]
+        rec = {"time": "", "job": "", "task_id": "", "result": "", "detail": ""}
+        if parts:
+            rec["time"] = parts[0]
+        for p in parts[1:]:
+            for key in ("job=", "task_id=", "result=", "detail="):
+                if p.startswith(key):
+                    rec[key[:-1]] = p[len(key):]
+                    break
+        out.append(rec)
+    return out
+
+
 class ScheduledJobsRunner:
     """简单调度循环：轮询 tick(now)，到点经 submit_fn 提交任务。
 
@@ -176,12 +203,24 @@ class ScheduledJobsRunner:
         config_path: str | None = None,
         log_path: str | None = None,
         poll_seconds: int = 20,
+        outcome_fn: Callable[[str], str | None] | None = None,
+        on_failure: Callable[[str, str, str], None] | None = None,
     ) -> None:
         self._submit_fn = submit_fn
         self._config_path = config_path
         self._log_path = log_path
         self._poll_seconds = max(1, int(poll_seconds))
+        # T2 结果追踪：outcome_fn(task_id) -> 'SUCCESS'/'FAILED'/.../None（未终态）
+        self._outcome_fn = outcome_fn
+        # T2 失败回调：on_failure(job_name, task_id, status)——告警/通知由此触发
+        self._on_failure = on_failure
         self._last_fire: dict[str, datetime] = {}
+        self._retry_at: dict[str, datetime] = {}  # 提交失败后的重试等待点
+        self._submit_failures: dict[str, int] = {}  # 提交异常当日计数（重试用）
+        self._tracked: dict[str, str] = {}  # task_id -> job_name（等待终态）
+        self._alerted: set[str] = set()  # 已告警的 task_id（去重）
+        self._retried: set[str] = set()  # 当日已重提的 job:task_id
+        self._last_outcome_check = 0.0
         self._stop = threading.Event()
         self._lock = threading.Lock()
 
@@ -193,6 +232,7 @@ class ScheduledJobsRunner:
         force=True 时 interval 任务即使无启动基线也立即触发（CLI --once 用）。"""
         now = now or datetime.now()
         fired: list[dict] = []
+        self._check_outcomes(now)
         jobs = load_jobs(self._config_path)
         for job in jobs:
             if not job.get("enabled", True):
@@ -201,7 +241,14 @@ class ScheduledJobsRunner:
             cron = str(job.get("cron") or "").strip()
             with self._lock:
                 last = self._last_fire.get(name)
-            due = self._is_due(job, now, last, force=force)
+                retry_at = self._retry_at.get(name)
+            if retry_at is not None:
+                # 提交失败后的重试等待：到点即重提（不受 cron 同日判挡）
+                if now < retry_at:
+                    continue
+                due = True
+            else:
+                due = self._is_due(job, now, last, force=force)
             if not due:
                 # interval 任务首次轮询：建立启动基线（不立即触发）
                 if last is None and not cron and job.get("interval_minutes"):
@@ -217,7 +264,23 @@ class ScheduledJobsRunner:
             except Exception as exc:
                 detail = str(exc)[:200]
             with self._lock:
-                self._last_fire[name] = now
+                if result == "submitted":
+                    self._last_fire[name] = now
+                    self._retry_at.pop(name, None)
+                    self._submit_failures.pop(name, None)
+                    if task_id:
+                        self._tracked[task_id] = name
+                else:
+                    # 提交失败：不推进 _last_fire，30 分钟后重试（当日最多 2 次）
+                    fails = self._submit_failures.get(name, 0) + 1
+                    self._submit_failures[name] = fails
+                    if fails <= 2:
+                        self._retry_at[name] = now + timedelta(minutes=30)
+                        detail += f"；将于 30 分钟后重试（{fails}/2）"
+                    else:
+                        self._last_fire[name] = now
+                        self._retry_at.pop(name, None)
+                        detail += "；当日重试次数用尽，等待下次调度窗口"
             append_log(self._log_path, job, task_id, result, detail)
             fired.append({
                 "name": name,
@@ -230,6 +293,49 @@ class ScheduledJobsRunner:
                 name, task_id, result,
             )
         return fired
+
+    def _check_outcomes(self, now: datetime) -> None:
+        """T2 结果追踪：查询已提交任务的终态，FAILED 触发告警回调。
+
+        每 5 分钟一轮（随 poll 循环），按 task_id 去重只告警一次；
+        outcome_fn 未注入时静默跳过（CLI/测试路径行为不变）。"""
+        import time as _time
+        if self._outcome_fn is None:
+            return
+        if _time.time() - self._last_outcome_check < 300:
+            return
+        self._last_outcome_check = _time.time()
+        with self._lock:
+            pending = dict(self._tracked)
+        for task_id, name in list(pending.items()):
+            try:
+                status = self._outcome_fn(task_id)
+            except Exception:
+                continue
+            if not status:
+                continue  # 未终态
+            with self._lock:
+                self._tracked.pop(task_id, None)
+            if str(status).upper() != "FAILED":
+                continue
+            with self._lock:
+                if task_id in self._alerted:
+                    continue
+                self._alerted.add(task_id)
+            if self._on_failure:
+                try:
+                    self._on_failure(name, task_id, str(status))
+                except Exception as exc:
+                    logger.warning(
+                        "Scheduled job failure callback error: %s", exc)
+
+    def last_results(self, limit: int = 50) -> list[dict]:
+        """读取调度日志尾部，供 /api/scheduled-jobs 展示上次结果。"""
+        try:
+            entries = _read_log(self._log_path, limit)
+            return entries
+        except Exception:
+            return []
 
     @staticmethod
     @staticmethod

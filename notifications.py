@@ -183,7 +183,9 @@ def _send_serverchan(cfg: dict, payload: dict) -> bool:
         return False
     url = f"https://sctapi.ftqq.com/{sendkey}.send"
     goal = str(payload.get("goal") or "")
-    title = f"任务完成：{goal[:40]}" if goal else "任务完成"
+    _failed = str(payload.get("status") or "").upper() == "FAILED"
+    _word = "任务失败" if _failed else "任务完成"
+    title = f"{_word}：{goal[:40]}" if goal else _word
     desp_parts = [
         str(payload.get("summary") or ""),
         f"任务ID：{payload.get('task_id') or ''}",
@@ -222,7 +224,9 @@ def _send_email(cfg: dict, payload: dict) -> bool:
         return False
     port = int(cfg.get("port") or 465)
     goal = str(payload.get("goal") or "")
-    title = f"任务完成：{goal[:40]}" if goal else "任务完成"
+    _failed = str(payload.get("status") or "").upper() == "FAILED"
+    _word = "任务失败" if _failed else "任务完成"
+    title = f"{_word}：{goal[:40]}" if goal else _word
     body_parts = [
         str(payload.get("summary") or ""),
         f"任务ID：{payload.get('task_id') or ''}",
