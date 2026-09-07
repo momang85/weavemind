@@ -619,6 +619,53 @@ def _cleanup_sessions() -> None:
         for token in [t for t, s in _sessions.items() if now > s.get("expires", 0)]:
             _sessions.pop(token, None)
 
+def _merge_progress_message(existing: dict, data: dict) -> None:
+    """把一条 push_progress 消息合并进任务内存态（纯合并，无副作用）。
+
+    T11：全局监听器与 SSE 连接共用同一合并逻辑，保证 /task/{id} 快照与
+    SSE 推送的形态一致；DB 写入/分享等副作用只在全局监听器执行一次。
+    """
+    ptype = data.get("type")
+    payload = data.get("payload")
+    if ptype and isinstance(payload, dict):
+        if ptype == "task_complete":
+            existing["status"] = payload.get("status", existing.get("status", "PENDING"))
+            existing["report"] = payload.get("report", existing.get("report", ""))
+            existing["steps"] = payload.get("steps", existing.get("steps", []))
+            # P0-1/P0-2：验收缺口摘要 + LLM 降级汇总随任务结果暴露
+            existing["acceptance"] = payload.get("acceptance")
+            existing["llm_degraded"] = payload.get("llm_degraded")
+        elif ptype == "plan_update":
+            # 合并而非替换：迭代/修复轮的步骤只带当轮，
+            # 直接替换会让前端计划树"缩水"，看起来不按顺序
+            new_steps = payload.get("steps", [])
+            merged = {s.get("step_id"): s for s in existing.get("steps", [])}
+            for s in new_steps:
+                if s.get("step_id"):
+                    merged[s["step_id"]] = s
+            existing["steps"] = list(merged.values())
+        elif ptype == "log":
+            logs = existing.get("logs", [])
+            logs.append({
+                "id": len(logs),
+                "timestamp": payload.get("timestamp") or time.strftime("%H:%M:%S"),
+                "agent": payload.get("agent", ""),
+                "type": payload.get("type", "info"),
+                "message": payload.get("message", ""),
+            })
+            existing["logs"] = logs
+        elif ptype == "agent_status":
+            existing["agent_status"] = payload
+        elif ptype == "plan":
+            existing["steps"] = payload.get("steps", existing.get("steps", []))
+        # Keep status if not set
+        if "status" not in existing:
+            existing["status"] = "RUNNING"
+    else:
+        # Direct state update (e.g. final result)
+        existing.update(data)
+
+
 def _listen_results():
     while not _redis_ready():
         time.sleep(2)
@@ -631,82 +678,47 @@ def _listen_results():
                 if tid:
                     with _task_lock:
                         existing = _task_results.get(tid, {})
-                        # If progress update, merge payload
-                        if data.get("type") and data.get("payload"):
-                            ptype = data["type"]
-                            payload = data["payload"]
-                            if ptype == "task_complete":
-                                existing["status"] = payload.get("status", existing.get("status", "PENDING"))
-                                existing["report"] = payload.get("report", existing.get("report", ""))
-                                existing["steps"] = payload.get("steps", existing.get("steps", []))
-                                # P0-1/P0-2：验收缺口摘要 + LLM 降级汇总随任务结果暴露
-                                existing["acceptance"] = payload.get("acceptance")
-                                existing["llm_degraded"] = payload.get("llm_degraded")
-                                # Persist to SQLite so History page updates
-                                try:
-                                    db = sqlite3.connect(DB_PATH, timeout=5)
-                                    db.execute(
-                                        "INSERT INTO task_history(task_id,goal,status,report,steps_json,logs_json,completed_at)"
-                                        " VALUES(?,?,?,?,?,?,CURRENT_TIMESTAMP)"
-                                        " ON CONFLICT(task_id) DO UPDATE SET status=excluded.status,"
-                                        " report=excluded.report,steps_json=excluded.steps_json,"
-                                        " logs_json=excluded.logs_json,completed_at=CURRENT_TIMESTAMP",
-                                        (tid, existing.get("goal",""), payload.get("status","UNKNOWN"),
-                                         payload.get("report",""),
-                                         json.dumps(existing.get("steps", []), ensure_ascii=False),
-                                         json.dumps(existing.get("logs", [])[-200:], ensure_ascii=False)),
+                        ptype = data.get("type")
+                        payload = data.get("payload")
+                        _merge_progress_message(existing, data)
+                        if ptype == "task_complete":
+                            # Persist to SQLite so History page updates
+                            try:
+                                db = sqlite3.connect(DB_PATH, timeout=5)
+                                db.execute(
+                                    "INSERT INTO task_history(task_id,goal,status,report,steps_json,logs_json,completed_at)"
+                                    " VALUES(?,?,?,?,?,?,CURRENT_TIMESTAMP)"
+                                    " ON CONFLICT(task_id) DO UPDATE SET status=excluded.status,"
+                                    " report=excluded.report,steps_json=excluded.steps_json,"
+                                    " logs_json=excluded.logs_json,completed_at=CURRENT_TIMESTAMP",
+                                    (tid, existing.get("goal",""), (payload or {}).get("status","UNKNOWN"),
+                                     (payload or {}).get("report",""),
+                                     json.dumps(existing.get("steps", []), ensure_ascii=False),
+                                     json.dumps(existing.get("logs", [])[-200:], ensure_ascii=False)),
+                                )
+                                db.commit(); db.close()
+                            except Exception: pass
+                            # D1：日报项目任务终态自动生成分享链接（落地页入口），
+                            # 并补发一条带链接的通知（编排器通知早于分享生成，链接会缺失）
+                            try:
+                                if str(existing.get("project") or "") == "daily-report":
+                                    _generate_share_token(tid)
+                                    from notifications import (
+                                        find_share_link,
+                                        make_summary,
+                                        notify_task_done,
                                     )
-                                    db.commit(); db.close()
-                                except Exception: pass
-                                # D1：日报项目任务终态自动生成分享链接（落地页入口），
-                                # 并补发一条带链接的通知（编排器通知早于分享生成，链接会缺失）
-                                try:
-                                    if str(existing.get("project") or "") == "daily-report":
-                                        _generate_share_token(tid)
-                                        from notifications import (
-                                            find_share_link,
-                                            make_summary,
-                                            notify_task_done,
-                                        )
-                                        notify_task_done(
-                                            tid,
-                                            goal=str(existing.get("goal") or ""),
-                                            status=str(existing.get("status") or ""),
-                                            report_link=find_share_link(tid),
-                                            summary=make_summary(
-                                                str(existing.get("report") or "")
-                                            ),
-                                        )
-                                except Exception:
-                                    pass
-                            elif ptype == "plan_update":
-                                # 合并而非替换：迭代/修复轮的步骤只带当轮，
-                                # 直接替换会让前端计划树"缩水"，看起来不按顺序
-                                new_steps = payload.get("steps", [])
-                                merged = {s.get("step_id"): s for s in existing.get("steps", [])}
-                                for s in new_steps:
-                                    if s.get("step_id"):
-                                        merged[s["step_id"]] = s
-                                existing["steps"] = list(merged.values())
-                            elif ptype == "log":
-                                logs = existing.get("logs", [])
-                                logs.append({
-                                    "id": len(logs),
-                                    "timestamp": payload.get("timestamp") or time.strftime("%H:%M:%S"),
-                                    "agent": payload.get("agent", ""),
-                                    "type": payload.get("type", "info"),
-                                    "message": payload.get("message", ""),
-                                })
-                                existing["logs"] = logs
-                            elif ptype == "agent_status":
-                                existing["agent_status"] = payload
-                            elif ptype == "plan":
-                                existing["steps"] = payload.get("steps", existing.get("steps", []))
-                            # Keep status if not set
-                            if "status" not in existing: existing["status"] = "RUNNING"
-                        else:
-                            # Direct state update (e.g. final result)
-                            existing.update(data)
+                                    notify_task_done(
+                                        tid,
+                                        goal=str(existing.get("goal") or ""),
+                                        status=str(existing.get("status") or ""),
+                                        report_link=find_share_link(tid),
+                                        summary=make_summary(
+                                            str(existing.get("report") or "")
+                                        ),
+                                    )
+                            except Exception:
+                                pass
                         _task_results[tid] = existing
                         # 防止内存无限增长：最多保留最近 300 个任务
                         if len(_task_results) > 300:
@@ -2739,6 +2751,87 @@ def _get_task_stream(self, p):
             pass
         return self._json({"task_id": tid, "text": text[-20000:]})
 
+def _get_task_events(self, p):
+    if p.startswith("/api/task/") and p.endswith("/events"):
+        # T11 SSE：任务进度实时推送。每条消息后下发合并后的完整快照
+        # （与 /task/{id} 同构），前端 SSE 与轮询共用同一套应用逻辑；
+        # Redis 不可用时纯心跳降级，前端自动回退轮询。
+        tid = p.split("/api/task/")[-1].rsplit("/events", 1)[0]
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+        wf = self.wfile
+
+        def _emit(event: str, obj) -> bool:
+            try:
+                wf.write((
+                    f"event: {event}\ndata: "
+                    + json.dumps(obj, ensure_ascii=False) + "\n\n"
+                ).encode("utf-8"))
+                wf.flush()
+                return True
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return False
+
+        merged: dict = {}
+        try:
+            with _task_lock:
+                base = _task_results.get(tid)
+            if isinstance(base, dict):
+                merged = dict(base)
+                merged["steps"] = list(base.get("steps") or [])
+                merged["logs"] = list(base.get("logs") or [])
+        except Exception:
+            pass
+        if not _emit("snapshot", {"task_id": tid, "data": merged}):
+            return None
+        ps = None
+        try:
+            r = _new_redis()
+            ps = r.pubsub()
+            ps.subscribe("orchestrator:response")
+        except Exception:
+            ps = None
+        deadline = time.time() + 1800  # 单连接最长 30 分钟
+        try:
+            while time.time() < deadline:
+                if ps is None:
+                    if not _emit("hb", {"t": int(time.time())}):
+                        return None
+                    time.sleep(15)
+                    continue
+                try:
+                    msg = ps.get_message(ignore_subscribe_messages=True, timeout=15)
+                except Exception:
+                    msg = None
+                if msg and msg.get("type") == "message":
+                    try:
+                        evt = json.loads(msg["data"])
+                    except Exception:
+                        continue
+                    if str(evt.get("task_id")) != tid:
+                        continue
+                    _merge_progress_message(merged, evt)
+                    if not _emit("snapshot", {"task_id": tid, "data": merged}):
+                        return None
+                    if str(evt.get("type")) == "task_complete":
+                        # 终态已随快照下发；结束本连接（EventSource 会重连，
+                        # 前端在收到终态时会主动关闭）
+                        return None
+                else:
+                    if not _emit("hb", {"t": int(time.time())}):
+                        return None
+        finally:
+            try:
+                if ps is not None:
+                    ps.close()
+            except Exception:
+                pass
+        return None
+
 def _get_task_pdf(self, p):
     if p.startswith("/api/task/") and p.endswith("/pdf"):
         # F3：报告服务端 PDF 导出（Content-Disposition attachment）
@@ -3598,6 +3691,7 @@ _GET_ROUTES = [
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/deliverables"), _get_task_deliverables),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/usage"), _get_task_usage),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/stream"), _get_task_stream),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/events"), _get_task_events),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/pdf"), _get_task_pdf),
     (lambda self, p: p == "/api/config", _get_config),
     (lambda self, p: p == "/api/llm-mode", _get_llm_mode),
