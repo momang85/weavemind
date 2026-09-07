@@ -628,7 +628,25 @@ class CodeExecutionWorker(AsyncWorkerBase):
             # 其余 2000；环境变量 CODE_EXECUTION_MAX_TOKENS 可覆盖
             llm_tokens = self._estimate_token_need(instruction)
             # 小步快跑：生成 → 编译 → 冒烟运行 → 代码审查 → 带反馈修复（最多 3 轮）
+            # T3 时间预算：编排器按步骤超时（600s floor）等待结果；worker 循环
+            # 每轮前检查剩余时间，不足即带降级说明提前返回——此前最坏可烧
+            # 6 次 LLM 调用 ≈3600s，编排器早已判超时（浪费预算 + 孤儿结果）
+            deadline = None
+            try:
+                _dl = (task or {}).get("step_deadline")
+                deadline = float(_dl) if _dl else None
+            except (TypeError, ValueError):
+                deadline = None
             for _round in range(3):
+                if deadline and time.time() > deadline - 60:
+                    logger.warning(
+                        "code_execution time budget reached (deadline %.0f), "
+                        "returning degraded result", deadline,
+                    )
+                    return (
+                        "（代码执行时间预算耗尽）步骤在编排器超时前未能产出可运行"
+                        "代码，已提前停止；相关数值请以结构化数据与其他步骤产物为准。"
+                    )
                 llm_response = ""
                 for _gen in range(2):
                     try:

@@ -2715,39 +2715,79 @@ def main():
     def _cleanup_stale_tasks():
         """把长时间卡在 PENDING 的任务标记为过期，避免永久悬挂。
 
+        P0 时间轴修复：运行中的任务必须豁免——task_history 全程保持 PENDING
+        （只有提交与终态会写库），此前"超 30 分钟即翻 FAILED"会误杀合法长任务
+        （8 步串行 + 反思重做 + 修复轮可远超 30 分钟），并触发调度器对
+        "已失败"任务的重复重提。豁免判据：Redis task_running:{tid} 存在
+        （编排器 24h 标记）或内存 _task_results 中状态为 RUNNING。
+
         T2：scheduler 任务（sched- 前缀 / user=scheduler）过期时不再静默——
         发布 orchestrator:alert 事件（Health 页立即可见）并发送失败通知；
         其他用户任务保持原静默行为（历史行为不变）。"""
         while True:
             time.sleep(60)
             try:
+                # 每次循环读最新过期阈值（config system.stale_task_timeout，
+                # 默认 3600——对齐最坏合法总时长，环境变量可覆盖）
+                try:
+                    stale_seconds = int(
+                        str(((_load_config().get("system") or {}).get(
+                            "stale_task_timeout")) or "")
+                        or os.environ.get("STALE_TASK_TIMEOUT", "3600") or 3600
+                    )
+                except Exception:
+                    stale_seconds = 3600
+                stale_seconds = max(600, stale_seconds)
+                # 豁免集合：运行中的任务（编排器 task_running 标记 / 内存 RUNNING）
+                running_ids: set[str] = set()
+                try:
+                    r = _new_redis()
+                    for k in r.scan_iter("task_running:*", count=200):
+                        running_ids.add(str(k).split(":", 1)[-1])
+                except Exception:
+                    pass
+                with _task_lock:
+                    running_ids |= {
+                        str(tid) for tid, st in _task_results.items()
+                        if str(st.get("status") or "").upper() == "RUNNING"
+                    }
                 db = sqlite3.connect(DB_PATH, timeout=5)
-                # 先 UPDATE 再按"实际被本轮翻转"的行告警：
-                # SELECT-UPDATE 间隙里任务恰好完成时（竞态），UPDATE 的
-                # status='PENDING' 条件不命中该行，避免对已成功任务发假告警
-                db.execute(
-                    "UPDATE task_history SET status='FAILED', report=? "
+                # 先取候选（PENDING 且超时），逐个 UPDATE 时跳过豁免集合——
+                # 数量极少（PENDING 任务不会多），逐行处理可控
+                candidates = [row[0] for row in db.execute(
+                    "SELECT task_id FROM task_history "
                     "WHERE status='PENDING' AND created_at < datetime('now', ?)",
-                    (
-                        f"Task expired (no completion within {_STALE_AFTER_SECONDS} s)",
-                        f"-{_STALE_AFTER_SECONDS} seconds",
-                    ),
-                )
-                affected = db.total_changes
+                    (f"-{stale_seconds} seconds",),
+                ).fetchall()]
+                expired_rows = []
+                for tid in candidates:
+                    if tid in running_ids:
+                        continue
+                    db.execute(
+                        "UPDATE task_history SET status='FAILED', report=? "
+                        "WHERE task_id=? AND status='PENDING'",
+                        (
+                            f"Task expired (no completion within {stale_seconds} s)",
+                            tid,
+                        ),
+                    )
+                    if db.total_changes:
+                        expired_rows.append(tid)
                 db.commit()
-                if not affected:
+                if not expired_rows:
                     db.close()
                     continue
-                # 仅取本轮确实仍是 FAILED（被我们翻转）的 scheduler 任务
+                # 仅取本轮确实被翻转的 scheduler 任务
+                placeholders = ",".join("?" * len(expired_rows))
                 expired = [dict(zip(("task_id", "goal", "user"), row)) for row in db.execute(
                     "SELECT task_id, goal, IFNULL(user,'') FROM task_history "
                     "WHERE status='FAILED' AND report=? "
-                    "AND created_at < datetime('now', ?) "
+                    f"AND task_id IN ({placeholders}) "
                     "AND (task_id LIKE 'sched-%' OR IFNULL(user,'')='scheduler')",
-                    (
-                        f"Task expired (no completion within {_STALE_AFTER_SECONDS} s)",
-                        f"-{_STALE_AFTER_SECONDS} seconds",
-                    ),
+                    [
+                        f"Task expired (no completion within {stale_seconds} s)",
+                        *expired_rows,
+                    ],
                 ).fetchall()]
                 db.close()
                 _alerted_expired = set()
@@ -2768,7 +2808,7 @@ def main():
                             tid,
                             goal=str(row.get("goal") or ""),
                             status="FAILED",
-                            summary=f"定时任务在 {_STALE_AFTER_SECONDS}s 内未完成（编排器未消费或执行中断），已标记失败",
+                            summary=f"定时任务在 {stale_seconds}s 内未完成（编排器未消费或执行中断），已标记失败",
                         )
                     except Exception:
                         pass
@@ -3828,6 +3868,12 @@ def _post_config(self, p, body, admin):
         if llm.get("api_key"): os.environ["LLM_API_KEY"] = llm["api_key"]
         if llm.get("base_url"): os.environ["LLM_BASE_URL"] = llm["base_url"]
         if llm.get("model"): os.environ["LLM_MODEL"] = llm["model"]
+        # 换 key/端点后余额预检缓存必须失效，否则 30s 内仍按旧凭据判定
+        try:
+            from llm_client import _clear_balance_cache
+            _clear_balance_cache()
+        except Exception:
+            pass
         audit_log(admin.get("user", ""), self._client_ip(), "config.save", result="ok")
         return self._json({"status":"saved"})
 

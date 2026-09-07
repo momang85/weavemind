@@ -192,6 +192,7 @@ class CriticAgent:
             result = call_llm(
                 get_prompt("critic", CRITIC_SYSTEM, goal=goal),
                 user_prompt, expect_json=True,
+                usage="review",
             )
         except LLMJSONParseError as exc:
             logger.error("Critic LLM JSON parse error: %s", exc)

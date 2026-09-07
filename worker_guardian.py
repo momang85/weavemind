@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 CHECK_INTERVAL = 15
 
 # 心跳超时（秒）—— 超过此时间无心跳判定死亡
-HEARTBEAT_TIMEOUT = 20
+HEARTBEAT_TIMEOUT = 45
 
 # 隔离阈值：在此时间内重启次数
 QUARANTINE_WINDOW = 300  # 5 分钟
@@ -273,7 +273,11 @@ class WorkerGuardian:
             if age > HEARTBEAT_TIMEOUT:
                 # 确认在注册表中确实不可见（双重确认）
                 still_alive = any(
-                    a["agent_id"] == aid and "idle" in a.get("status", "")
+                    a["agent_id"] == aid and (
+                        "idle" in a.get("status", "")
+                        or "active" in a.get("status", "")
+                        or "busy" in a.get("status", "")
+                    )
                     for a in agents
                 )
 

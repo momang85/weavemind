@@ -271,7 +271,7 @@ _SYSTEM_HOT_RELOAD_FIELDS = (
     ("_max_parallel", "max_parallel", int, 3, lambda v: max(1, v)),
     ("_max_iterations", "max_iterations", int, 2, lambda v: max(0, v)),
     ("_critic_enabled", "critic", bool, False, lambda v: bool(v)),
-    ("_critic_timeout", "critic_timeout", int, 30, lambda v: max(10, v)),
+    ("_critic_timeout", "critic_timeout", int, 120, lambda v: max(10, v)),
     ("_max_retry", "max_retry", int, 2, lambda v: max(0, v)),
     ("_replan_depth", "replan_depth", int, 2, lambda v: max(0, v)),
     ("_task_timeout", "task_timeout", int, 300, lambda v: max(1, v)),
@@ -306,7 +306,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             1, int(os.environ.get("REFLECT_MAX_REDO_STEPS", "2") or 2)
         )
         self._plan_confirm_timeout = 300
-        self._stall_timeout = 300
+        # _stall_timeout 的默认值唯一来源是热重载表（stall_timeout=60）；
+        # 此处 300 的死赋值删除——同一旋钮两处默认值属时间轴 bug 类
+        self._stall_timeout = 60
         self._task_timeout = 300
         self._max_offtopic_regenerations = 2
         self._planner_model = None
@@ -1918,7 +1920,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         except Exception as exc:
             logger.warning("Revision confirm publish failed: %s", str(exc)[:120])
             return revision
-        timeout = min(self._plan_confirm_timeout, 180)
+        timeout = min(self._plan_confirm_timeout, 600)
         try:
             msg = self._brpop_with_deadline(
                 self._redis,
@@ -2321,7 +2323,10 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             push_progress(self._messaging, task_id, "log",
                           {"type": "review", "agent": "critic",
                            "message": "Plan submitted for review", "timestamp": self._now_iso()})
-            msg = r.brpop([f"plan_review:{plan_id}"], timeout=self._critic_timeout)
+            # redis-py 8 的单次 brpop(timeout) 不可靠：用分片轮询到 deadline
+            msg = self._brpop_with_deadline(
+                r, f"plan_review:{plan_id}", deadline=time.time() + self._critic_timeout,
+            )
             if not msg:
                 push_progress(self._messaging, task_id, "log",
                               {"type": "info", "agent": "critic",
@@ -2444,6 +2449,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             "task_id": dispatch_id,
             "instruction": instruction,
             "task_start_ts": task_start_ts,
+            "step_deadline": time.time() + timeout,
             "workspace": str(task_workspace(task_id)),
             "simple": bool(self._task_simple.get(task_id, False)),
         }, ensure_ascii=False))
@@ -3927,7 +3933,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                       {"type": "plan", "agent": "orchestrator",
                        "message": "报告终稿已生成，等待用户审批（超时自动放行）",
                        "timestamp": self._now_iso()})
-        timeout = min(self._plan_confirm_timeout, 180)
+        timeout = min(self._plan_confirm_timeout, 600)
         try:
             msg = self._brpop_with_deadline(
                 self._redis,

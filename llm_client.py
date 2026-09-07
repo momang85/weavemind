@@ -406,7 +406,11 @@ def _probe_endpoint_status(
     返回 {ok, reason}；reason ∈ ok/insufficient_balance/unauthorized/unreachable。"""
     try:
         client = LLMClient(base_url=base_url, api_key=api_key, model=model)
-        raw = client._send_request("你是连通性探测器，只回复：ok", "ping", 0.0, 1, endpoint=endpoint)
+        raw = client._send_request(
+            "你是连通性探测器，只回复：ok", "ping", 0.0, 1,
+            endpoint=endpoint, timeout=float(
+                os.environ.get("LLM_PROBE_TIMEOUT", "20") or 20),
+        )
         if bool(raw and str(raw).strip()):
             return {"ok": True, "reason": "ok"}
         return {"ok": False, "reason": "unreachable"}
@@ -516,19 +520,39 @@ def endpoints_available() -> tuple[bool, str]:
 
 
 def _health_monitor_loop(interval: float = 60.0) -> None:
-    """后台守护：主端点不健康时持续探测，恢复后自动切回。"""
+    """后台守护：端点不健康时持续探测，连续 N 次成功才恢复（防抖），
+    主/备端点都监控（backup 此前无恢复路径）。"""
+    _restore_needed = max(
+        1, int(os.environ.get("LLM_HEALTH_RESTORE", "2") or 2))
+    _consecutive = 0.0
     while True:
         time.sleep(interval)
         try:
-            if _primary_healthy():
-                continue
-            base_url = os.environ.get("LLM_BASE_URL") or ""
-            api_key = os.environ.get("LLM_API_KEY") or ""
-            model = os.environ.get("LLM_MODEL") or "gpt-4o"
-            ok = bool(base_url) and _probe_endpoint(base_url, api_key, model)
-            _mark_endpoint("primary", ok)
-            if ok:
-                logger.info("LLM primary endpoint recovered, traffic switched back")
+            # 主端点恢复探测（连续 N 次成功才转健康，避免单次成功即切回导致抖动）
+            if not _primary_healthy():
+                base_url = os.environ.get("LLM_BASE_URL") or ""
+                api_key = os.environ.get("LLM_API_KEY") or ""
+                model = os.environ.get("LLM_MODEL") or "gpt-4o"
+                if base_url and _probe_endpoint(base_url, api_key, model):
+                    _consecutive += 1
+                    if _consecutive >= _restore_needed:
+                        _mark_endpoint("primary", True)
+                        _consecutive = 0.0
+                        logger.info(
+                            "LLM primary endpoint recovered (%d 次连续探测成功), traffic switched back",
+                            _restore_needed)
+                else:
+                    _consecutive = 0.0
+            else:
+                _consecutive = 0.0
+            # 备份端点恢复探测（此前无：备份故障后永远不再被尝试）
+            if _BACKUP_CFG.get("base_url") and not _backup_healthy():
+                if _probe_endpoint(
+                    _BACKUP_CFG["base_url"], _BACKUP_CFG["api_key"],
+                    _BACKUP_CFG.get("model") or "gpt-4o",
+                ):
+                    _mark_endpoint("backup", True)
+                    logger.info("LLM backup endpoint recovered")
         except Exception:
             pass
 
@@ -921,7 +945,7 @@ class LLMClient:
     """
 
     # 最大重试次数
-    _MAX_RETRIES: int = 1
+    _MAX_RETRIES: int = max(1, int(os.environ.get("LLM_MAX_ATTEMPTS", "2") or 2))
     # 重试间隔基数（秒）
     _RETRY_BASE: float = 0.3
 
@@ -1072,6 +1096,19 @@ class LLMClient:
                 # JSON 解析失败不重试（格式问题重试没用）
                 raise
             except Exception as exc:
+                # 思考耗尽（reasoning 模型烧光预算）→ 放大 max_tokens 立即重试，
+                # 不计入端点失败（不是端点故障）
+                if (
+                    getattr(exc, "thinking_budget_exhausted", False)
+                    and max_tok
+                    and max_tok < 8192
+                ):
+                    max_tok = min(max_tok * 2, 8192)
+                    logger.warning(
+                        "thinking budget exhausted, retry with max_tokens=%d",
+                        max_tok,
+                    )
+                    continue
                 _reason = _degradation_reason(exc)
                 _mark_endpoint("primary", False, _reason)
                 _record_task_degradation(get_task_context(), _reason, both_failed=False)
@@ -1138,6 +1175,7 @@ class LLMClient:
         max_tokens: int,
         model: str | None = None,
         endpoint: str = "primary",
+        timeout: float | None = None,
     ) -> str:
         """发送 HTTP 请求到 LLM 服务。
 
@@ -1146,6 +1184,8 @@ class LLMClient:
             user: 用户提示词。
             temperature: 温度。
             max_tokens: 最大 token。
+            timeout: socket 读超时秒数；None 时取 LLM_REQUEST_TIMEOUT（默认 600）。
+                     探测类调用传短值（如 20），避免预检被挂死。
 
         Returns:
             LLM 的文本响应。
@@ -1184,8 +1224,12 @@ class LLMClient:
         try:
             # 非流式响应的 socket 读超时：模型计算/生成期间无数据到达即触发。
             # 长文生成（glm 类慢模型实测单次 60-75s，长文 >300s）会被默认 60s
-            # 误杀，默认放宽到 600，可用 LLM_REQUEST_TIMEOUT 环境变量覆盖
-            timeout = float(os.environ.get("LLM_REQUEST_TIMEOUT", "600") or 600)
+            # 误杀，默认放宽到 600，可用 LLM_REQUEST_TIMEOUT 环境变量覆盖；
+            # 探测类调用显式传短超时（timeout 参数）
+            timeout = float(
+                timeout if timeout is not None
+                else os.environ.get("LLM_REQUEST_TIMEOUT", "600") or 600
+            )
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 response_data = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
@@ -1210,6 +1254,17 @@ class LLMClient:
 
         content = choices[0].get("message", {}).get("content", "")
         if not content:
+            # 思考模型（reasoning）把预算烧在 reasoning_content 上导致
+            # content 空 + finish_reason=length：这不是端点故障，交由调用方
+            # 放大 max_tokens 重试（见 call() 的 thinking 重试分支）
+            reasoning = choices[0].get("message", {}).get("reasoning_content") or ""
+            finish = choices[0].get("finish_reason") or ""
+            if reasoning and finish == "length":
+                exc = LLMCallError(
+                    "Empty content in LLM response (thinking budget exhausted)"
+                )
+                exc.thinking_budget_exhausted = True
+                raise exc
             raise LLMCallError("Empty content in LLM response")
 
         # 记录用量
@@ -1505,7 +1560,9 @@ def _get_async_client() -> httpx.AsyncClient:
     global _async_client
     if _async_client is None or _async_client.is_closed:
         limits = httpx.Limits(max_connections=50, max_keepalive_connections=20)
-        timeout = httpx.Timeout(120.0, connect=10.0)
+        # 与同步路径统一超时口径（此前 120s 硬编码，慢模型长文生成会被误杀）
+        _t = float(os.environ.get("LLM_REQUEST_TIMEOUT", "600") or 600)
+        timeout = httpx.Timeout(_t, connect=10.0)
         _async_client = httpx.AsyncClient(limits=limits, timeout=timeout)
     return _async_client
 
