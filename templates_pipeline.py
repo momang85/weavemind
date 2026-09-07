@@ -62,7 +62,9 @@ def normalize_steps(steps: list, max_steps: int) -> list[dict]:
             logger.info("低风险步骤强制 pipeline：%s（step %s）", cap, sid)
             mode = "pipeline"
         s["mode"] = mode
-        s.setdefault("timeout", 300)
+        # 不填死默认超时：步骤无显式 timeout 时由编排器按 system.task_timeout
+        # 兜底（config 热重载可调）；规划器显式给定的 timeout 保持原样。
+        # （旧实现 setdefault 300 会把 config 的 task_timeout 架空）
         out.append(s)
     if len(out) > max_steps:
         logger.warning("Plan normalized from %d to %d steps (max_steps=%d)",

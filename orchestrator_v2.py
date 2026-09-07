@@ -195,9 +195,15 @@ Rules:
 16. 只能引用工作区实际存在的文件：data_loader/model_trainer 需要数据集时，
     先确认"工作区文件清单"里有对应文件；没有对应文件时禁止规划读取本地数据集，
     应改用 web_search/web_fetch 获取外部数据
+17. 单步耗时预算（LLM 慢模型/长文生成场景的硬约束）：
+    - 长文生成步骤（content_summary / report_generator 输出完整报告）timeout 设 600-900；
+    - 其余步骤 timeout 设 120-300，web_search/web_fetch 设 60-120；
+    - 预计单次生成超过 5 分钟的内容必须拆成多个更小的步骤（例如先出要点框架，
+      再分节撰写），禁止把全部写作压进一个步骤；
+    - 不要给任何步骤写 timeout:60（那是示例占位，不是规范值）
 
 Output ONLY this JSON with no extra text:
-{"steps":[{"step_id":"1","capability":"web_search","instruction":"search for house price dataset","depends_on":[],"timeout":60}]}"""
+{"steps":[{"step_id":"1","capability":"web_search","instruction":"search for house price dataset","depends_on":[],"timeout":120}]}"""
 
 KNOWN_CAPABILITIES = {
     "web_search", "web_fetch", "data_loader", "data_analyzer", "model_trainer",
@@ -2397,9 +2403,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             logger.warning("step envelope failed: %s", str(exc)[:100])
         step_id = step.get("step_id", uuid.uuid4().hex[:8])
         # LLM 生成/运行较慢：普通步骤下限 300s，code_execution（含生成-修复循环）下限 600s；
-        # 默认超时取 system.task_timeout（C3 热重载后对下一任务生效）
+        # 默认超时取 system.task_timeout（C3 热重载后对下一任务生效）。
+        # 步骤显式 timeout 优先（规划器按规则 17 设定），无显式值时用 config 兜底。
         task_timeout = int(getattr(self, "_task_timeout", 300) or 300)
-        timeout = max(int(step.get("timeout", task_timeout) or task_timeout), 300)
+        _step_t = step.get("timeout")
+        timeout = max(int(_step_t or task_timeout), 300)
         if capability == "code_execution":
             timeout = max(timeout, 600)
 

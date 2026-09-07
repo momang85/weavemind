@@ -1182,7 +1182,10 @@ class LLMClient:
         )
 
         try:
-            timeout = float(os.environ.get("LLM_REQUEST_TIMEOUT", "60") or 60)
+            # 非流式响应的 socket 读超时：模型计算/生成期间无数据到达即触发。
+            # 长文生成（glm 类慢模型实测单次 60-75s，长文 >300s）会被默认 60s
+            # 误杀，默认放宽到 600，可用 LLM_REQUEST_TIMEOUT 环境变量覆盖
+            timeout = float(os.environ.get("LLM_REQUEST_TIMEOUT", "600") or 600)
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 response_data = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
@@ -1330,7 +1333,8 @@ def _call_llm_stream_once(
         headers=headers, method="POST",
     )
     try:
-        timeout = float(os.environ.get("LLM_REQUEST_TIMEOUT", "180") or 180)
+        # 流式响应同样放宽：慢模型首块前可能长时间无数据
+        timeout = float(os.environ.get("LLM_REQUEST_TIMEOUT", "600") or 600)
         resp = urllib.request.urlopen(req, timeout=timeout)
     except urllib.error.HTTPError as exc:
         raise LLMCallError(
