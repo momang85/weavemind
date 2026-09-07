@@ -1248,17 +1248,26 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
     def _reduce_steps_for_structured(
         self, task_id: str, steps: list[dict], data: dict | None,
     ) -> list[dict]:
-        """B 方案：已预载结构化行情数据（排行/crypto/macro/news）的任务，
-        把 data_analyzer 步骤替换为 content_summary 直接消费 structured_data.json，
+        """B 方案：已预载结构化数据（排行/crypto/macro/news/财务）的任务，
+        把 data_analyzer 步骤替换为 content_summary 直接消费预载文件
+        （排行类 structured_data.json / 财务类 financials.json），
         避免 EDA 步骤只认 CSV 造成断链；图表仍由数据驱动兜底渲染提供。
         保持 step_id 与依赖不变，报告/打包步骤无需重连。"""
         if not steps or not data:
             return steps
         source = str(data.get("source") or "")
-        if source not in (
+        financial_sources = (
+            "eastmoney_datacenter", "eastmoney_ashare", "sec_edgar",
+            "cninfo_annual", "multi_entity",
+        )
+        other_sources = (
             "eastmoney_ranking", "tencent_ranking", "tencent_us_ranking",
             "coingecko", "macro", "news",
-        ):
+        )
+        is_financial = source in financial_sources or (
+            not source and isinstance(data.get("financials"), list)
+        )
+        if source not in other_sources and not is_financial:
             return steps
         label = {
             "eastmoney_ranking": "A股行情排行",
@@ -1268,22 +1277,38 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             "coingecko": "加密货币行情",
             "macro": "宏观指标",
             "news": "新闻列表",
+            "eastmoney_datacenter": "港交所财报",
+            "eastmoney_ashare": "A股财报",
+            "sec_edgar": "美股 10-K 年报",
+            "cninfo_annual": "巨潮 A 股年报",
+            "multi_entity": "多公司财报对比",
         }.get(source, source)
         out: list[dict] = []
         changed = False
         for s in steps:
             if str(s.get("capability")) == "data_analyzer":
                 changed = True
-                out.append({
-                    "step_id": s.get("step_id"),
-                    "capability": "content_summary",
-                    "instruction": (
+                if is_financial:
+                    instruction = (
+                        f"基于已预载的 financials.json（{label}，公司年报结构化"
+                        "财务数据，含营收/净利润/研发投入等科目）直接输出财务"
+                        "指标要点与趋势结论；无需寻找 CSV，无需重新抓取数据；"
+                        "财务数字必须与 financials.json 一致并标注数据来源与"
+                        "数据获取时间。"
+                        f"原始指令：{s.get('instruction', '')}"
+                    )
+                else:
+                    instruction = (
                         f"基于已预载的 structured_data.json（{label}）"
                         "直接输出结构化要点与结论；无需寻找 CSV，无需重新抓取数据；"
                         "如目标需要图表，请按 [CHART_DATA] 规格输出图表数据"
                         "或引用工作区已生成的图表。"
                         f"原始指令：{s.get('instruction', '')}"
-                    ),
+                    )
+                out.append({
+                    "step_id": s.get("step_id"),
+                    "capability": "content_summary",
+                    "instruction": instruction,
                     "depends_on": list(s.get("depends_on") or []),
                     "timeout": 120,
                 })
@@ -4197,6 +4222,24 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 finally:
                     with lock:
                         in_flight -= 1
+                # code_execution 降级必须在结果落盘时完成：若等全部线程 join
+                # 后再转换，依赖检查早已把下游步骤标记 Blocked（降级为 SUCCESS
+                # 也救不回 report/package 被连锁阻塞）
+                if (
+                    step.get("capability") == "code_execution"
+                    and result.get("status") == "FAILED"
+                    and "No valid code" in str(result.get("result") or "")
+                ):
+                    result["status"] = "SUCCESS"
+                    result["degraded_codegen"] = True
+                    result["result"] = (
+                        "（代码执行降级）代码生成-校验-修复循环未产出可运行代码，"
+                        "本步骤已跳过；相关数值请以结构化数据与其他步骤产物为准。"
+                    )
+                    logger.warning(
+                        "code_execution degraded (task=%s, step=%s)，跳过而非任务失败",
+                        task_id, k,
+                    )
                 with lock:
                     completed[k] = result
                     last_progress = time.time()
@@ -4269,10 +4312,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             })
             for s in steps
         ]
-        # code_execution 降级：worker 内部"生成-校验-修复"循环耗尽仍未产出
-        # 可运行代码（"No valid code"）时，不再把任务整体判失败——本步骤降级
-        # 跳过并明示，报告与验收基于结构化数据和其他步骤产物继续
-        # （任务级 FAILED 只会发生在代码本身就是交付物的游戏/可视化类任务）
+        # 兜底：执行期降级（上方 worker 内转换）已覆盖并行路径；
+        # 这里仅防御串行/异常路径漏网的 "No valid code" 失败
         for _s, _r in zip(steps, results):
             if (
                 _s.get("capability") == "code_execution"
@@ -4283,10 +4324,10 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 _r["degraded_codegen"] = True
                 _r["result"] = (
                     "（代码执行降级）代码生成-校验-修复循环未产出可运行代码，"
-                    "本步骤已跳过；相关数值请以结构化数据与其他步骤产物为准。"
+                    "本步骤已跳过；相关数值请以结构化数据和其他步骤产物为准。"
                 )
                 logger.warning(
-                    "code_execution degraded (task=%s, step=%s)，跳过而非任务失败",
+                    "code_execution degraded post-join (task=%s, step=%s)",
                     task_id, _s.get("step_id"),
                 )
         # 以最终 results 为准（含 code_execution 降级后的状态），

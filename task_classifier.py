@@ -101,21 +101,41 @@ def _extract_company(g: str) -> str:
         rf"(?:{_GENERIC_WORDS})*([\u4e00-\u9fff]{{2,6}})(?:集团|控股)",
         rf"(?:{_GENERIC_WORDS})*([\u4e00-\u9fff]{{2,6}})公司",
         rf"(?:{_GENERIC_WORDS})*([\u4e00-\u9fff]{{2,6}}?)(?:的)?"
-        r"(?:历年年度|历年|年度|最新|近三年|近五年|最近)?"
-        r"(?:财报|年报|季报|财务)",
+        r"(?:历年年度|历年|年度|最新|近三年|近五年|最近"
+        r"|20\d{2}(?:\s*[-—至]\s*20\d{2})?\s*年?)?"
+        r"(?:财报|年报|季报|财务|营收|净利润|净利|利润|收入|业绩|负债|研发投入)",
     ):
-        m = re.search(pat, g)
-        if not m:
-            continue
-        c = m.group(1)
-        if len(c) >= 2:
-            return c
+        # 全部匹配逐个过公司名校验：语境词前的垃圾片段（如"评估其财务"
+        # 的"评估其"）跳过继续找，真公司名（"贵州茅台近三年营收"）命中即返回
+        for m in re.finditer(pat, g):
+            c = m.group(1)
+            if len(c) >= 2 and _looks_like_company(c):
+                return c
     return ""
 
 
+def _looks_like_company(name: str) -> bool:
+    """公司名候选的非递归校验（供 _extract_company 使用）：
+    2-6 个中文字、无连接符/语境词/量词短语。不含"_extract_company 兜底"
+    递归分支——那会与调用方形成互递归。"""
+    name = str(name or "")
+    if not re.fullmatch(r"[一-鿿]{2,6}", name):
+        return False
+    if any(w in name for w in _COMPANY_STOPWORDS):
+        return False
+    if re.search(r"(?:与|和|及|以及|、|跟|vs)", name, re.I):
+        return False
+    if name in ("公司", "集团", "控股"):
+        return False
+    # 量词+泛指后缀不是公司名（"两家公司/三家集团"）
+    if re.fullmatch(r"[两三四五六七八九十几\d一二]+(?:家|个)?(?:公司|集团|控股|企业|厂商|巨头|主体)", name):
+        return False
+    return True
+
+
 def _is_valid_company_name(name: str) -> bool:
-    """公司名候选校验：2-6 个中文字、无连接符/语境词，
-    末尾带 '公司/集团/控股' 等合法后缀，或可被现有单实体提取规则认可。"""
+    """公司名候选校验：非递归基础校验 + 末尾带 '公司/集团/控股' 等合法
+    后缀，或可被现有单实体提取规则认可（递归分支仅此一处，有终结）。"""
     name = str(name or "")
     if not re.fullmatch(r"[\u4e00-\u9fff]{2,6}", name):
         return False
