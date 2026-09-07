@@ -82,11 +82,8 @@ function ScheduledJobsSection() {
   useEffect(() => { load() }, [load])
 
   // T2：每个 job 最近一次触发记录（失败红标）
-  const lastFire = (name: string) => {
-    const rec = recent.find((r: any) => r.job === name)
-    if (!rec) return null
-    return rec
-  }
+  // recent 已按新→旧排序：第一条匹配即该 job 最近一次触发
+  const lastFire = (name: string) => recent.find((r: any) => r.job === name) || null
 
   const act = async (action: string, payload: any) => {
     setError('')

@@ -10,6 +10,8 @@ function QuickAnswerCard({ qa }: { qa: any }) {
         <span className="text-cyan-400 font-semibold">快答</span>
         {qa.mode === 'searched' ? (
           <span className="text-emerald-400">已检索 {qa.sources?.length || 0} 条来源 · {qa.searched_at}</span>
+        ) : qa.mode === 'error' ? (
+          <span className="text-red-400">请求失败</span>
         ) : (
           <span className="text-amber-400">模型知识 · 未检索（未验证）</span>
         )}
@@ -115,10 +117,10 @@ export default function SubmitPanel({
         body: JSON.stringify({ goal: g }),
       })
       const d = await res.json()
-      if (d.error) setQa({ content: d.error, sources: [], mode: 'model_knowledge', duration: 0 })
+      if (d.error) setQa({ content: d.error, sources: [], mode: 'error', duration: 0 })
       else setQa(d)
     } catch {
-      setQa({ content: '请求失败，请稍后重试', sources: [], mode: 'model_knowledge', duration: 0 })
+      setQa({ content: '请求失败，请稍后重试', sources: [], mode: 'error', duration: 0 })
     } finally {
       setQaLoading(false)
     }

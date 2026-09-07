@@ -5992,6 +5992,55 @@ class TestScheduledJobAlertRetry(unittest.TestCase):
         runner._check_outcomes(datetime.now())
         self.assertEqual(len(alerts), 1)
 
+    def test_failure_triggers_daily_bounded_resubmit(self):
+        """T2 spec 补齐：终态失败 → 当日重提一次（每 job 每日 1 次），重提任务进追踪。"""
+        from datetime import datetime
+        from scheduled_jobs import ScheduledJobsRunner
+        cfg = self._write_config([{
+            "name": "job-x", "goal": "日报", "cron": "09:00", "enabled": True,
+        }])
+        submits: list[str] = []
+        outcomes: dict[str, str | None] = {}
+        alerts: list[tuple] = []
+        resubmitted: list[str] = []
+
+        def submit(job):
+            tid = f"sched-run-{len(submits) + 1}"
+            submits.append(tid)
+            outcomes[tid] = None
+            return tid
+
+        runner = ScheduledJobsRunner(
+            submit_fn=submit, config_path=cfg,
+            log_path=os.path.join(self._tmp, "s.log"),
+            outcome_fn=lambda tid: outcomes.get(tid),
+            on_failure=lambda n, t, s: alerts.append((n, t, s)),
+        )
+        runner.tick(datetime(2026, 8, 21, 9, 0, 0))
+        self.assertEqual(submits, ["sched-run-1"])
+        # 首任务终态失败 → 告警 + 当日重提一次
+        runner._last_outcome_check = 0.0
+        outcomes["sched-run-1"] = "FAILED"
+        runner._check_outcomes(datetime(2026, 8, 21, 9, 30, 0))
+        self.assertEqual(alerts, [("job-x", "sched-run-1", "FAILED")])
+        self.assertEqual(len(submits), 2, "失败后应重提一次")
+        # 重提任务再失败 → 告警（新 task_id）但不再重提（当日额度已用）
+        runner._last_outcome_check = 0.0
+        outcomes["sched-run-2"] = "FAILED"
+        runner._check_outcomes(datetime(2026, 8, 21, 10, 0, 0))
+        self.assertEqual(len(submits), 2, "当日重提额度已用，不再重提")
+        # 次日：runner.tick 触发新任务（sched-run-3），其失败后可再次重提
+        runner.tick(datetime(2026, 8, 22, 9, 0, 0))
+        self.assertEqual(len(submits), 3, "次日 cron 正常触发新任务")
+        runner._last_outcome_check = 0.0
+        outcomes["sched-run-3"] = "FAILED"
+        with mock.patch("scheduled_jobs.load_jobs", return_value=[
+            {"name": "job-x", "goal": "日报", "cron": "09:00", "enabled": True},
+        ]):
+            runner._check_outcomes(datetime(2026, 8, 22, 9, 30, 0))
+        self.assertEqual(len(submits), 4, "跨日额度恢复，可再重提")
+        _ = resubmitted
+
     def test_notification_title_by_status(self):
         import notifications as N
         import requests as _requests_mod

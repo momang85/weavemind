@@ -36,6 +36,37 @@ _share_lock = threading.Lock()
 
 _events = []
 _sched_runner_ref: list = []  # 运行中的调度器实例（/api/scheduled-jobs 读 last_results 用）
+_failure_notify_lock = threading.Lock()
+_failure_notified: set[str] = set()  # 已发过失败通知的 task_id（跨通道去重）
+
+
+def _try_claim_failure_notify(task_id: str) -> bool:
+    """失败通知全局去重：同一 task_id 只允许一个通道发一次失败通知。
+
+    调度器结果追踪（runner._on_failure）与全局监听器（D1 分支）都会
+    遇到同一失败任务；没有去重时用户会收到两条内容雷同的失败通知。"""
+    with _failure_notify_lock:
+        if task_id in _failure_notified:
+            return False
+        _failure_notified.add(task_id)
+        # 上限保护：常驻进程防无界增长
+        if len(_failure_notified) > 500:
+            for k in list(_failure_notified)[:-300]:
+                _failure_notified.discard(k)
+        return True
+
+
+def _publish_alert(alert_type: str, message: str, service: str = "scheduler") -> None:
+    """发布 orchestrator:alert 事件（Health 页事件流）；失败静默（尽力而为）。"""
+    try:
+        _new_redis().publish("orchestrator:alert", json.dumps({
+            "type": alert_type,
+            "service": service,
+            "message": message,
+            "timestamp": _now_iso(),
+        }, ensure_ascii=False))
+    except Exception:
+        pass
 _events_lock = threading.Lock()
 _evt_seq = 0
 _rate_limiter = None
@@ -719,30 +750,22 @@ def _listen_results():
                         # D1：日报项目任务终态自动生成分享链接（落地页入口），
                         # 并补发一条带链接的通知（编排器通知早于分享生成，链接会缺失）
                         # T2：FAILED 任务不生成分享链接（空报告落地页伤信任），
-                        # 只发失败通知 + 告警事件
+                        # 只发失败通知 + 告警事件。失败通知按 task_id 全局去重——
+                        # 调度器结果追踪（runner._on_failure）与本监听器都可能
+                        # 对同一失败任务发通知，双通道只发一条
                         try:
                             if str(existing.get("project") or "") == "daily-report":
                                 _status = str(existing.get("status") or "")
                                 if _status == "FAILED":
-                                    from notifications import notify_task_done
-                                    notify_task_done(
-                                        tid,
-                                        goal=str(existing.get("goal") or ""),
-                                        status="FAILED",
-                                        summary="日报任务执行失败，未生成落地页；请检查健康页事件与编排器日志",
-                                    )
-                                    try:
-                                        _new_redis().publish(
-                                            "orchestrator:alert",
-                                            json.dumps({
-                                                "type": "daily_report_failed",
-                                                "service": "scheduler",
-                                                "message": f"日报任务失败：{tid}",
-                                                "timestamp": _now_iso(),
-                                            }, ensure_ascii=False),
+                                    if _try_claim_failure_notify(tid):
+                                        from notifications import notify_task_done
+                                        notify_task_done(
+                                            tid,
+                                            goal=str(existing.get("goal") or ""),
+                                            status="FAILED",
+                                            summary="日报任务执行失败，未生成落地页；请检查健康页事件与编排器日志",
                                         )
-                                    except Exception:
-                                        pass
+                                    _publish_alert("daily_report_failed", f"日报任务失败：{tid}")
                                 else:
                                     _generate_share_token(tid)
                                     from notifications import (
@@ -2652,23 +2675,20 @@ def main():
 
         def _on_failure(job_name: str, task_id: str, status: str):
             """调度任务失败回调：告警事件 + 失败通知（按 task_id 去重由 runner 保证）。"""
-            try:
-                _new_redis().publish("orchestrator:alert", json.dumps({
-                    "type": "scheduled_task_failed",
-                    "service": "scheduler",
-                    "message": f"定时任务「{job_name}」执行失败：{task_id}（{status}）",
-                    "timestamp": _now_iso(),
-                }, ensure_ascii=False))
-            except Exception:
-                pass
-            try:
-                from notifications import notify_task_done_async
-                notify_task_done_async(
-                    task_id, goal=f"[定时任务] {job_name}", status="FAILED",
-                    summary=f"定时任务「{job_name}」执行失败（{status}），请检查健康页与任务详情",
-                )
-            except Exception:
-                pass
+            _publish_alert(
+                "scheduled_task_failed",
+                f"定时任务「{job_name}」执行失败：{task_id}（{status}）",
+            )
+            # 失败通知按 task_id 全局去重（与全局监听器 D1 分支共用一个闸）
+            if _try_claim_failure_notify(task_id):
+                try:
+                    from notifications import notify_task_done_async
+                    notify_task_done_async(
+                        task_id, goal=f"[定时任务] {job_name}", status="FAILED",
+                        summary=f"定时任务「{job_name}」执行失败（{status}），请检查健康页与任务详情",
+                    )
+                except Exception:
+                    pass
 
         runner = ScheduledJobsRunner(
             submit_fn=_submit, config_path=CONFIG_PATH,
@@ -2702,14 +2722,9 @@ def main():
             time.sleep(60)
             try:
                 db = sqlite3.connect(DB_PATH, timeout=5)
-                expired = [dict(zip(("task_id", "goal", "user"), row)) for row in db.execute(
-                    "SELECT task_id, goal, IFNULL(user,'') FROM task_history "
-                    "WHERE status='PENDING' AND created_at < datetime('now', ?)",
-                    (f"-{_STALE_AFTER_SECONDS} seconds",),
-                ).fetchall()]
-                if not expired:
-                    db.close()
-                    continue
+                # 先 UPDATE 再按"实际被本轮翻转"的行告警：
+                # SELECT-UPDATE 间隙里任务恰好完成时（竞态），UPDATE 的
+                # status='PENDING' 条件不命中该行，避免对已成功任务发假告警
                 db.execute(
                     "UPDATE task_history SET status='FAILED', report=? "
                     "WHERE status='PENDING' AND created_at < datetime('now', ?)",
@@ -2718,23 +2733,34 @@ def main():
                         f"-{_STALE_AFTER_SECONDS} seconds",
                     ),
                 )
-                db.commit(); db.close()
+                affected = db.total_changes
+                db.commit()
+                if not affected:
+                    db.close()
+                    continue
+                # 仅取本轮确实仍是 FAILED（被我们翻转）的 scheduler 任务
+                expired = [dict(zip(("task_id", "goal", "user"), row)) for row in db.execute(
+                    "SELECT task_id, goal, IFNULL(user,'') FROM task_history "
+                    "WHERE status='FAILED' AND report=? "
+                    "AND created_at < datetime('now', ?) "
+                    "AND (task_id LIKE 'sched-%' OR IFNULL(user,'')='scheduler')",
+                    (
+                        f"Task expired (no completion within {_STALE_AFTER_SECONDS} s)",
+                        f"-{_STALE_AFTER_SECONDS} seconds",
+                    ),
+                ).fetchall()]
+                db.close()
+                _alerted_expired = set()
                 for row in expired:
                     tid = str(row.get("task_id") or "")
-                    is_sched = tid.startswith("sched-") or str(row.get("user")) == "scheduler"
-                    if not is_sched:
+                    if tid in _alerted_expired:
                         continue
+                    _alerted_expired.add(tid)
                     # 告警事件：Health 页事件流即刻可见
-                    try:
-                        r = _new_redis()
-                        r.publish("orchestrator:alert", json.dumps({
-                            "type": "scheduled_task_expired",
-                            "service": "scheduler",
-                            "message": f"定时任务过期未完成：{tid}（{str(row.get('goal') or '')[:60]}）",
-                            "timestamp": _now_iso(),
-                        }, ensure_ascii=False))
-                    except Exception:
-                        pass
+                    _publish_alert(
+                        "scheduled_task_expired",
+                        f"定时任务过期未完成：{tid}（{str(row.get('goal') or '')[:60]}）",
+                    )
                     # 失败通知（复用任务完成通道，标题按状态）
                     try:
                         from notifications import notify_task_done_async

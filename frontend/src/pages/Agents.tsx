@@ -197,23 +197,27 @@ export default function AgentsPage() {
 
   useEffect(() => { fetchAgents(); const t = setInterval(fetchAgents, 2000); return () => clearInterval(t) }, [fetchAgents])
 
-  // T6：单智能体直发（直接 LLM 问答，不经编排器）
+  // T6：单智能体直发（快答 API：先检索后作答，来源可见）
   const [directGoal, setDirectGoal] = useState('')
   const [directResult, setDirectResult] = useState('')
+  const [directSources, setDirectSources] = useState<any[]>([])
+  const [directMode, setDirectMode] = useState('')
   const [directLoading, setDirectLoading] = useState(false)
 
   const sendDirect = useCallback(async () => {
     const g = directGoal.trim()
     if (!g || directLoading) return
-    setDirectLoading(true); setDirectResult('')
+    setDirectLoading(true); setDirectResult(''); setDirectSources([]); setDirectMode('')
     try {
-      const res = await fetch('/api/single-agent', {
+      const res = await fetch('/api/quick-answer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ goal: g }),
       })
       const d = await res.json()
-      setDirectResult(d.error || d.result || JSON.stringify(d))
+      setDirectResult(d.error || d.content || JSON.stringify(d))
+      setDirectSources(d.sources || [])
+      setDirectMode(d.mode || '')
     } catch (e: any) {
       setDirectResult(String(e))
     }
@@ -292,8 +296,27 @@ export default function AgentsPage() {
           </button>
         </div>
         {directResult && (
-          <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-3 text-xs text-slate-300 whitespace-pre-wrap max-h-48 overflow-y-auto">
-            {directResult}
+          <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-3 space-y-2">
+            {directMode && (
+              <div className="text-[10px]">
+                {directMode === 'searched'
+                  ? <span className="text-emerald-400">已检索 {directSources.length} 条来源</span>
+                  : <span className="text-amber-400">模型知识 · 未检索（未验证）</span>}
+              </div>
+            )}
+            <div className="text-xs text-slate-300 whitespace-pre-wrap max-h-48 overflow-y-auto">
+              {directResult}
+            </div>
+            {directSources.length > 0 && (
+              <div className="space-y-1 pt-1 border-t border-slate-700">
+                {directSources.slice(0, 5).map((s: any, i: number) => (
+                  <a key={i} href={s.url} target="_blank" rel="noreferrer"
+                    className="block text-[10px] text-cyan-400 hover:text-cyan-300 truncate">
+                    {s.title || s.url}
+                  </a>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>

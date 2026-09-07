@@ -23,7 +23,7 @@ import logging
 import os
 import re
 import threading
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
@@ -177,7 +177,9 @@ def _read_log(log_path: str | None, limit: int = 50) -> list[dict]:
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except Exception:
         return []
-    for line in lines[-max(1, int(limit)):]:
+    # 倒序读取（新→旧）：调用方取每个 job 的第一条匹配即"上次结果"，
+    # 正序会让活跃 job 显示窗口内最旧记录
+    for line in reversed(lines[-max(1, int(limit)):]):
         parts = [p.strip() for p in line.split("|")]
         rec = {"time": "", "job": "", "task_id": "", "result": "", "detail": ""}
         if parts:
@@ -219,7 +221,8 @@ class ScheduledJobsRunner:
         self._submit_failures: dict[str, int] = {}  # 提交异常当日计数（重试用）
         self._tracked: dict[str, str] = {}  # task_id -> job_name（等待终态）
         self._alerted: set[str] = set()  # 已告警的 task_id（去重）
-        self._retried: set[str] = set()  # 当日已重提的 job:task_id
+        self._retried: set[str] = set()  # 当日已重提的 job 名（每 job 每日最多 1 次）
+        self._retry_day: date | None = None  # 重提集合的归属日（跨日清空）
         self._last_outcome_check = 0.0
         self._stop = threading.Event()
         self._lock = threading.Lock()
@@ -319,15 +322,49 @@ class ScheduledJobsRunner:
             if str(status).upper() != "FAILED":
                 continue
             with self._lock:
+                # 跨日重置：重提额度与告警记录按自然日滚动
+                if self._retry_day != now.date():
+                    self._retry_day = now.date()
+                    self._retried.clear()
+                    self._submit_failures.clear()
                 if task_id in self._alerted:
                     continue
                 self._alerted.add(task_id)
+                should_resubmit = name not in self._retried
+                if should_resubmit:
+                    self._retried.add(name)
             if self._on_failure:
                 try:
                     self._on_failure(name, task_id, str(status))
                 except Exception as exc:
                     logger.warning(
                         "Scheduled job failure callback error: %s", exc)
+            # 有界当日重提：终态失败的任务重提一次（每 job 每日最多 1 次）。
+            # 重提的任务不推进 _last_fire 语义——它是一个新的调度实例，
+            # 由 submit_fn 重新发布，task_id 记入追踪。
+            if should_resubmit:
+                try:
+                    jobs = load_jobs(self._config_path)
+                    job = next(
+                        (j for j in jobs if str(j.get("name") or "") == name),
+                        None,
+                    )
+                    if job and job.get("enabled", True):
+                        new_tid = str(self._submit_fn(job) or "")
+                        if new_tid:
+                            with self._lock:
+                                self._tracked[new_tid] = name
+                            append_log(
+                                self._log_path, job, new_tid, "resubmitted",
+                                f"原任务 {task_id} 终态失败，当日重提一次",
+                            )
+                            logger.info(
+                                "Scheduled job %s resubmitted after failure "
+                                "(orig=%s, new=%s)", name, task_id, new_tid,
+                            )
+                except Exception as exc:
+                    logger.warning(
+                        "Scheduled job resubmit failed for %s: %s", name, exc)
 
     def last_results(self, limit: int = 50) -> list[dict]:
         """读取调度日志尾部，供 /api/scheduled-jobs 展示上次结果。"""
@@ -337,7 +374,6 @@ class ScheduledJobsRunner:
         except Exception:
             return []
 
-    @staticmethod
     @staticmethod
     def _cron_passed(job: dict, now: datetime) -> bool:
         """当天该 cron 时刻是否已经过去（严格晚于时刻）。"""

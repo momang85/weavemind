@@ -172,6 +172,14 @@ def _send_webhook(cfg: dict, payload: dict) -> bool:
     return True
 
 
+def _title_for(payload: dict) -> str:
+    """通知标题：按状态区分任务完成/任务失败（供各渠道复用）。"""
+    goal = str(payload.get("goal") or "")
+    _failed = str(payload.get("status") or "").upper() == "FAILED"
+    _word = "任务失败" if _failed else "任务完成"
+    return f"{_word}：{goal[:40]}" if goal else _word
+
+
 def _send_serverchan(cfg: dict, payload: dict) -> bool:
     """Server酱：POST https://sctapi.ftqq.com/<sendkey>.send。
     title=任务完成，desp=摘要+链接。"""
@@ -182,10 +190,7 @@ def _send_serverchan(cfg: dict, payload: dict) -> bool:
         logger.warning("notifications.serverchan: sendkey 未配置，跳过")
         return False
     url = f"https://sctapi.ftqq.com/{sendkey}.send"
-    goal = str(payload.get("goal") or "")
-    _failed = str(payload.get("status") or "").upper() == "FAILED"
-    _word = "任务失败" if _failed else "任务完成"
-    title = f"{_word}：{goal[:40]}" if goal else _word
+    title = _title_for(payload)
     desp_parts = [
         str(payload.get("summary") or ""),
         f"任务ID：{payload.get('task_id') or ''}",
@@ -223,10 +228,7 @@ def _send_email(cfg: dict, payload: dict) -> bool:
         logger.warning("notifications.email: from/to 未配置，跳过")
         return False
     port = int(cfg.get("port") or 465)
-    goal = str(payload.get("goal") or "")
-    _failed = str(payload.get("status") or "").upper() == "FAILED"
-    _word = "任务失败" if _failed else "任务完成"
-    title = f"{_word}：{goal[:40]}" if goal else _word
+    title = _title_for(payload)
     body_parts = [
         str(payload.get("summary") or ""),
         f"任务ID：{payload.get('task_id') or ''}",
