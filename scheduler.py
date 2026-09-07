@@ -75,13 +75,17 @@ class EvolutionScheduler:
                     wait_seconds / 60,
                     next_run.strftime("%Y-%m-%d %H:%M"),
                 )
-                # 分段 sleep
-                for _ in range(int(min(wait_seconds, 3600))):
-                    if not self._running:
-                        break
-                    time.sleep(1)
+                # 分段 sleep：睡满到下次调度的完整时长（旧实现最多睡 1 小时
+                # 就继续执行，把"每日一次"退化成"每小时一轮锦标赛"）
+                remaining = wait_seconds
+                while remaining > 0 and self._running:
+                    step = min(remaining, 60)
+                    time.sleep(step)
+                    remaining -= step
                 if not self._running:
                     break
+                # 睡醒后重算：跨天/时钟漂移时 next_run 已过，循环重取明天
+                continue
 
             # 到了预定时间
             if self._last_run and (datetime.now() - self._last_run).total_seconds() < 300:

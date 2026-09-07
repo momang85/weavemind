@@ -71,7 +71,9 @@ class FileIoWorker(AsyncWorkerBase):
         # 反斜杠是合法文件名字符，不归一化会导致 "..\\.." 绕过逃逸检测。
         normalized = str(filename).replace("\\", "/")
         path = (base / normalized).resolve()
-        if not str(path).startswith(str(base)):
+        # 前缀必须带分隔符：不带时 ../project_x 解析后仍以 ...\project
+        # 开头即通过，可逃逸写同级目录
+        if not (path == base or str(path).startswith(str(base) + os.sep)):
             raise ValueError(f"Path escapes workspace: {filename}")
         return path
 

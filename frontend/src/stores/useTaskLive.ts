@@ -11,7 +11,7 @@ export function useTaskLive(taskId: string | null) {
   const {
     demoMode,
     updatePlan, addLog, setReport,
-    fetchSystemStatus, setAwaitingConfirm, setRevision, lastConfirmAt,
+    fetchSystemStatus, setAwaitingConfirm, setRevision,
   } = useTaskStore()
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const esRef = useRef<EventSource | null>(null)
@@ -39,7 +39,9 @@ export function useTaskLive(taskId: string | null) {
       if (stopped || finished.current || !d || d.error) return
 
       // 防抖：用户刚点过"确认"后 8s 内忽略 AWAITING_CONFIRM，
-      // 避免后端状态回写延迟导致确认模块反复弹出
+      // 避免后端状态回写延迟导致确认模块反复弹出。
+      // 经 getState() 实时读取：effect 闭包会固化解构时的旧值
+      const lastConfirmAt = useTaskStore.getState().lastConfirmAt
       const justConfirmed = lastConfirmAt > 0 && Date.now() - lastConfirmAt < 8000
       setAwaitingConfirm(d.status === 'AWAITING_CONFIRM' && !justConfirmed)
       setRevision(d.status === 'AWAITING_CONFIRM' && !!d.revision)
@@ -151,7 +153,9 @@ export function useTaskLive(taskId: string | null) {
           const dl = await (await fetch('/api/task/' + taskId + '/deliverables')).json()
           reportObj.files = (dl.files ?? []).map((f: any) => ({ name: f.name, size: f.size, kind: f.kind }))
         } catch { /* ignore */ }
-        setReport(reportObj)
+        // 窗口期用户可能已切到新任务：迟到的报告不覆盖新任务状态
+        const cur = useTaskStore.getState().currentTaskId
+        if (cur === taskId) setReport(reportObj)
         fetchSystemStatus()
       }
     }

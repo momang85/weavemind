@@ -1794,10 +1794,10 @@ class TestE2EGoalTyping(unittest.TestCase):
                 "<body><h1>Hello</h1><p>内容</p></body></html>",
                 encoding="utf-8",
             )
-            ok, detail, _shot = o._playwright_verify(d, "welcome.html", fp, require_game=False)
+            ok, detail, _shot, _dg = o._playwright_verify(d, "welcome.html", fp, require_game=False)
             self.assertTrue(ok, detail)
             # 同页面走"游戏级"验证必须失败（无 canvas），证明两种模式确实分流
-            ok2, detail2, _ = o._playwright_verify(d, "welcome.html", fp, require_game=True)
+            ok2, detail2, _, _dg2 = o._playwright_verify(d, "welcome.html", fp, require_game=True)
             self.assertFalse(ok2, detail2)
         finally:
             import shutil
@@ -1817,7 +1817,7 @@ class TestE2EGoalTyping(unittest.TestCase):
                 "<!DOCTYPE html><html><body><h1>中文标题</h1></body></html>",
                 encoding="utf-8",
             )
-            ok, detail, _ = o._playwright_verify(d, "no_charset.html", fp, require_game=False)
+            ok, detail, _, _dg = o._playwright_verify(d, "no_charset.html", fp, require_game=False)
             self.assertFalse(ok, detail)
             self.assertIn("UTF-8", detail)
         finally:
@@ -1852,7 +1852,7 @@ loop();
 </script></body></html>"""
         fp = os.path.join(d, "broken.html")
         Path(fp).write_text(broken, encoding="utf-8")
-        ok, detail, _ = o._playwright_verify(d, "broken.html", fp, require_game=True)
+        ok, detail, _, _dg = o._playwright_verify(d, "broken.html", fp, require_game=True)
         self.assertFalse(ok, detail)
         self.assertIn("未重启", detail)
 
@@ -1862,7 +1862,7 @@ loop();
         )
         fp2 = os.path.join(d, "working.html")
         Path(fp2).write_text(working, encoding="utf-8")
-        ok2, detail2, _ = o._playwright_verify(d, "working.html", fp2, require_game=True)
+        ok2, detail2, _, _dg2 = o._playwright_verify(d, "working.html", fp2, require_game=True)
         self.assertTrue(ok2, detail2)
         try:
             import shutil

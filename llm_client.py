@@ -166,6 +166,7 @@ _ENDPOINT_FAIL_THRESHOLD = int(os.environ.get("LLM_ENDPOINT_FAIL_THRESHOLD", "1"
 
 
 def _mark_endpoint(endpoint: str, ok: bool, reason: str = "") -> None:
+    record_degradation = None
     with _endpoint_health_lock:
         st = _endpoint_health.setdefault(
             endpoint,
@@ -184,7 +185,11 @@ def _mark_endpoint(endpoint: str, ok: bool, reason: str = "") -> None:
                 # P2-3：记录 last_degradation_reason 时同步写入 Redis 任务级
                 # 降级记录，保证"主端点由他处标记不健康"也有根因可查
                 # （_record_task_degradation 对同因短窗口去重，避免调用点重复记）
-                _record_task_degradation(get_task_context(), reason, both_failed=False)
+                # Redis 写在锁外执行：_record_task_degradation 的连接无
+                # socket_timeout，Redis 卡顿时会拖死所有 LLM 调用
+                record_degradation = (get_task_context(), reason)
+    if record_degradation:
+        _record_task_degradation(record_degradation[0], record_degradation[1], both_failed=False)
 
 
 def _degradation_reason(exc: Exception) -> str:
@@ -213,6 +218,8 @@ def _record_task_degradation(task_id: str, reason: str, both_failed: bool = Fals
                 host=os.environ.get("REDIS_HOST", "localhost"),
                 port=int(os.environ.get("REDIS_PORT", "6379")),
                 decode_responses=True,
+                socket_connect_timeout=2,
+                socket_timeout=2,
             )
         key = f"llm_degradation:{task_id}"
         # P2-3：同根因 2 秒内去重（_mark_endpoint 与调用点各记一次），
@@ -265,6 +272,8 @@ def get_task_llm_degradation(task_id: str) -> dict:
                 host=os.environ.get("REDIS_HOST", "localhost"),
                 port=int(os.environ.get("REDIS_PORT", "6379")),
                 decode_responses=True,
+                socket_connect_timeout=2,
+                socket_timeout=2,
             )
         raw = _task_usage_client.lrange(f"llm_degradation:{task_id}", 0, -1) or []
         events: list[dict] = []
@@ -552,6 +561,8 @@ def _publish_stream_chunk(text: str) -> None:
                 host=os.environ.get("REDIS_HOST", "localhost"),
                 port=int(os.environ.get("REDIS_PORT", "6379")),
                 decode_responses=True,
+                socket_connect_timeout=2,
+                socket_timeout=2,
             )
         key = f"stream:{tid}"
         _task_usage_client.rpush(key, text)
@@ -685,6 +696,8 @@ def _record_usage(
                 host=os.environ.get("REDIS_HOST", "localhost"),
                 port=int(os.environ.get("REDIS_PORT", "6379")),
                 decode_responses=True,
+                socket_connect_timeout=2,
+                socket_timeout=2,
             )
         key = f"llm_usage_task:{tid}"
         _task_usage_client.hincrby(key, "calls", 1)

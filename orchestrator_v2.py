@@ -2477,12 +2477,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         fail = len(results) - ok
         status = "SUCCESS" if fail == 0 else "PARTIAL" if ok > 0 else "FAILED"
 
-        report = f"## Task Report\\n\\nGoal: {goal}\\nStatus: {status}\\nSteps: {len(steps)} ({ok} OK, {fail} failed)\\n\\n"
+        report = f"## Task Report\n\nGoal: {goal}\nStatus: {status}\nSteps: {len(steps)} ({ok} OK, {fail} failed)\n\n"
         for s, r in zip(steps, results):
             report += f"- [{r.get('status', '?')}] {s.get('instruction', '?')[:60]}"
             if r.get("result"):
-                report += f"\\n  Result: {str(r['result'])[:200]}"
-            report += "\\n"
+                report += f"\n  Result: {str(r['result'])[:200]}"
+            report += "\n"
         return report
 
     def _build_delivery_summary(
@@ -2801,8 +2801,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
     def _playwright_verify(
         self, project_dir: str, rel_name: str, fp: str,
         require_game: bool = True,
-    ) -> tuple[bool, str, str]:
-        """T9：委托 e2e_verify 模块实现（原主体已搬迁）。"""
+    ) -> tuple[bool, str, str, bool]:
+        """T9：委托 e2e_verify 模块实现（原主体已搬迁）。
+        第 4 个返回值为降级标志：True=Playwright 不可用可静态兜底。"""
         from e2e_verify import playwright_verify
         return playwright_verify(project_dir, rel_name, fp, require_game)
 
@@ -3770,8 +3771,19 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         self._notify_done_async(task_id, goal, overall, report)
 
         # 快速路径标志仅任务运行期间需要，用完即清，避免字典无限增长
+        # （含 goals/projects/user_ids/prompt_hints/market_resolution/starts
+        # 等全部按任务键存储的辅助字典，常驻进程不清会无界增长）
         self._task_simple.pop(task_id, None)
         self._task_sources.pop(task_id, None)
+        for d in (
+            "_task_goals", "_task_projects", "_task_user_ids",
+            "_task_prompt_hints", "_task_market_resolution", "_task_starts",
+            "_task_structured_data",
+        ):
+            try:
+                getattr(self, d).pop(task_id, None)
+            except AttributeError:
+                pass
         return {
             "task_id": task_id,
             "status": overall,

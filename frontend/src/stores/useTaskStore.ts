@@ -50,7 +50,11 @@ export const useTaskStore = create<TaskState & {
 
   updatePlan: (tree) => { console.log("[Store] updatePlan:", tree.id, tree.children?.length, "steps"); set({ planTree: tree }) },
 
-  addLog: (entry) => { console.log("[Store] addLog:", entry.type, entry.message?.slice(0,40)); set(s => ({ logs: [...s.logs, entry] })) },
+  addLog: (entry) => set(s => {
+    // 上限防泄漏：长任务日志无界增长会拖垮内存与 LiveActivity 渲染
+    const logs = s.logs.length >= 800 ? s.logs.slice(-700) : s.logs
+    return { logs: [...logs, entry] }
+  }),
 
   setLogs: (entries) => set({ logs: entries }),
 

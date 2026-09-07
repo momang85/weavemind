@@ -64,14 +64,16 @@ export default function PlanPanel({
   const confirmPlan = async (action: 'confirm' | 'cancel') => {
     if (!taskId) return
     try {
-      await fetch('/api/plan/confirm', {
+      const res = await fetch('/api/plan/confirm', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(action === 'confirm'
           ? { task_id: taskId, action, steps: editableSteps }
           : { task_id: taskId, action }),
       })
-      markPlanConfirmed()
+      // 后端拒绝（如 Redis 不可用 503）时保持面板：任务在后端仍是
+      // AWAITING_CONFIRM，前端关闭会造成"确认丢失"假象
+      if (res.ok) markPlanConfirmed()
     } catch { /* ignore */ }
   }
 

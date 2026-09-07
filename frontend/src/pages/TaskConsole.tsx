@@ -83,10 +83,15 @@ export default function TaskConsole() {
               })),
             })
           }
+          // 回放去重：实时通道可能已按相同 id 写入这些日志，
+          // 直接追加会造成完成后日志翻倍/重复 key
+          const existing = new Set(useTaskStore.getState().logs.map(l => l.id))
           ;(d.logs || []).forEach((lg: any) => {
             if (!lg || lg.id === undefined) return
+            const lid = 'srv-' + lg.id
+            if (existing.has(lid)) return
             addLog({
-              id: 'srv-' + lg.id, timestamp: lg.timestamp || '',
+              id: lid, timestamp: lg.timestamp || '',
               type: lg.type || 'info', agent: lg.agent || 'orchestrator',
               message: lg.message || '',
             })
@@ -143,7 +148,7 @@ export default function TaskConsole() {
       const data = await res.json()
       if (!res.ok || !data.task_id) {
         addLog({ timestamp: new Date().toISOString(), type: 'error', message: data.error || 'Failed to submit task' })
-        startTask('failed')
+        useTaskStore.setState({ status: 'idle' })
         return
       }
       const tid = data.task_id
@@ -164,7 +169,7 @@ export default function TaskConsole() {
       }
     } catch {
       addLog({ timestamp: new Date().toISOString(), type: 'error', message: 'Failed to submit task' })
-      startTask('failed')
+      useTaskStore.setState({ status: 'idle' })
     }
   }, [goal, project, status, demoMode, activeConversationId, confirmMode, templateName, userContext,
       startTask, addLog, setActiveConversation])
@@ -212,7 +217,10 @@ export default function TaskConsole() {
         }))
         setLogs(lg)
       } catch { /* ignore */ }
-      setReport(reportObj)
+      // 历史报告查看不改写运行态：运行中打开历史报告不应把全局
+      // status 翻成 completed（会解锁重复提交、停掉流式轮询）
+      const st = useTaskStore.getState().status
+      if (st !== 'running') setReport(reportObj)
     } catch { /* ignore */ }
   }, [setReport, setLogs])
 

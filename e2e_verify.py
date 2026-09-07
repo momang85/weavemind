@@ -55,31 +55,41 @@ def run_e2e_verification(
     htmls = [f for f in files if f["kind"] == "html"]
     pys = [f for f in files if f["kind"] == "py"]
 
-    # Node 是否可用（用于 JS 语法校验）
+    # Node 是否可用（用于 JS 语法校验）；环境净化，避免密钥进子进程
     js_checker = None
     try:
-        p = subprocess.run(["node", "--version"], capture_output=True, timeout=10)
+        p = subprocess.run(
+            ["node", "--version"], capture_output=True, timeout=10,
+            env=_sanitized_process_env(),
+        )
         if p.returncode == 0:
             js_checker = "node"
     except Exception:
         js_checker = None
 
     for f in htmls:
-        fp = os.path.join(project_dir, f["name"])
+        fp = os.path.abspath(os.path.join(project_dir, f["name"]))
+        # 路径穿越防护：交付物名来自 zip 条目，不允许逃出项目目录
+        if not fp.startswith(os.path.abspath(project_dir) + os.sep):
+            results.append({"name": f["name"], "type": "html", "ok": False, "detail": "非法文件名"})
+            continue
         # 优先浏览器级"可玩"验证（Playwright 缺失时自动安装）
         try:
-            pw_ok, pw_detail, shot = playwright_verify(
+            pw_ok, pw_detail, shot, pw_downgraded = playwright_verify(
                 project_dir, f["name"], fp, require_game=game_goal,
             )
         except Exception as exc:
             pw_ok, pw_detail, shot = False, f"Playwright 验证异常: {exc}", ""
+            pw_downgraded = False
         if pw_ok:
             results.append({
                 "name": f["name"], "type": "html", "ok": True,
                 "detail": pw_detail, "screenshot": shot,
             })
             continue
-        if "降级" not in pw_detail and "不可用" not in pw_detail:
+        if not pw_downgraded:
+            # 真实浏览器验证失败：不能凭 detail 文本里偶然含"降级/不可用"
+            # 字样就落入宽松静态检查（JS 错误信息常含这些词）
             results.append({
                 "name": f["name"], "type": "html", "ok": False,
                 "detail": pw_detail, "screenshot": shot,
@@ -101,6 +111,7 @@ def run_e2e_verification(
             ok = False
             notes.append("缺少 HTML 文档结构")
         if "<canvas" not in content.lower():
+            ok = False  # 游戏交付物无 canvas 即失败（与 Playwright 门禁一致）
             notes.append("无 <canvas>")
         if "<script" not in content.lower():
             ok = False
@@ -120,6 +131,7 @@ def run_e2e_verification(
                 p = subprocess.run(
                     [js_checker, "--check", tmp_js],
                     capture_output=True, timeout=15,
+                    env=_sanitized_process_env(),
                 )
                 if p.returncode != 0:
                     ok = False
@@ -148,7 +160,16 @@ def run_e2e_verification(
                     else:
                         notes.append("HTTP 200 可访问")
             finally:
-                srv.shutdown()
+                # shutdown 停止服务线程但 socket fd 仍占用，须 close 才释放
+                # （常驻 orchestrator 进程否则每个 HTML 文件泄漏一个监听 socket）
+                try:
+                    srv.shutdown()
+                except Exception:
+                    pass
+                try:
+                    srv.server_close()
+                except Exception:
+                    pass
         except Exception as exc:
             ok = False
             notes.append(f"HTTP 失败: {exc}")
@@ -208,18 +229,21 @@ def run_e2e_verification(
 
 def playwright_verify(
     project_dir: str, rel_name: str, fp: str, require_game: bool,
-) -> tuple[bool, str, str]:
+) -> tuple[bool, str, str, bool]:
     """用无头 Chromium 真实打开页面验证：
     require_game=True → 模拟拖拽/键盘交互（"能玩"级，canvas 有绘制）；
     require_game=False → 普通页面正常渲染（有内容、无 JS 错误）。
-    返回 (是否通过, 详情, 截图路径)；Playwright 缺失时自动安装。"""
+    返回 (是否通过, 详情, 截图路径, 是否降级)：
+    降级=True 表示 Playwright 本身不可用，调用方可走静态检查兜底；
+    真实浏览器跑出的失败（含 detail 文本偶然含"降级/不可用"字样的
+    JS 错误）一律不降级，避免宽松静态检查让坏交付物假通过。"""
     try:
         from playwright.sync_api import sync_playwright
     except ImportError:
         from env_setup import ensure_playwright
         ok, msg = ensure_playwright(install_browser=True)
         if not ok:
-            return False, f"Playwright 不可用（{msg}），降级为静态检查", ""
+            return False, f"Playwright 不可用（{msg}），降级为静态检查", "", True
         from playwright.sync_api import sync_playwright
     # 画布指纹 JS 常量延迟导入（避免顶层循环依赖）
     from orchestrator_v2 import _FINGERPRINT_JS
@@ -248,7 +272,7 @@ def playwright_verify(
                 enc = ""
             if enc and "utf-8" not in enc.lower():
                 browser.close()
-                return False, f"页面编码 {enc} 非 UTF-8（中文会显示为乱码）", shot
+                return False, f"页面编码 {enc} 非 UTF-8（中文会显示为乱码）", shot, False
             if not require_game:
                 # 普通页面：不要求 canvas，只需内容可见、无 JS 错误
                 visible = page.evaluate(
@@ -264,22 +288,22 @@ def playwright_verify(
                     pass
                 if js_errors:
                     browser.close()
-                    return False, "JS 错误: " + " | ".join(js_errors[:2]), shot
+                    return False, "JS 错误: " + " | ".join(js_errors[:2]), shot, False
                 if not visible["len"] and not visible["hasMedia"]:
                     browser.close()
-                    return False, "页面内容为空（没有可见文字或媒体元素）", shot
+                    return False, "页面内容为空（没有可见文字或媒体元素）", shot, False
                 browser.close()
                 return True, (
                     f"浏览器加载 OK，页面有内容（{visible['len']} 字符，无 JS 错误）"
-                ), shot
+                ), shot, False
             canvas = page.query_selector("canvas")
             if not canvas:
                 browser.close()
-                return False, "页面无 <canvas>（不是可视化游戏）", shot
+                return False, "页面无 <canvas>（不是可视化游戏）", shot, False
             box = canvas.bounding_box()
             if not box or box["width"] < 50 or box["height"] < 50:
                 browser.close()
-                return False, f"canvas 尺寸异常 {box}", shot
+                return False, f"canvas 尺寸异常 {box}", shot, False
             # 模拟拖拽（弹弓类）与键盘方向键（贪吃蛇类）交互
             cx = box["x"] + box["width"] / 2
             cy = box["y"] + box["height"] / 2
@@ -356,19 +380,19 @@ def playwright_verify(
                         break
                 if not restart_ok:
                     browser.close()
-                    return False, "撞墙/失败后游戏未重启（游戏循环卡死，不可玩）", shot
+                    return False, "撞墙/失败后游戏未重启（游戏循环卡死，不可玩）", shot, False
             browser.close()
         if js_errors:
-            return False, "JS 错误: " + " | ".join(js_errors[:2]), shot
+            return False, "JS 错误: " + " | ".join(js_errors[:2]), shot, False
         if not state.get("nonBlank"):
-            return False, "canvas 渲染为空白（游戏没有实际绘制内容）", shot
+            return False, "canvas 渲染为空白（游戏没有实际绘制内容）", shot, False
         score = str(state.get("scoreText") or "")[:30]
         detail = "浏览器加载 + 拖拽/方向键模拟 OK，canvas 有渲染内容（无 JS 错误）"
         if score:
             detail += f"；分数/状态='{score}'"
-        return True, detail, shot
+        return True, detail, shot, False
     except Exception as exc:
-        return False, f"浏览器验证异常: {exc}", ""
+        return False, f"浏览器验证异常: {exc}", "", False
     finally:
         if srv is not None:
             try:

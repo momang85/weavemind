@@ -36,6 +36,7 @@ _share_lock = threading.Lock()
 
 _events = []
 _events_lock = threading.Lock()
+_evt_seq = 0
 _rate_limiter = None
 _START_TIME = time.time()
 _METRICS_SUMMARY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "metrics_summary.json")
@@ -646,14 +647,24 @@ def _merge_progress_message(existing: dict, data: dict) -> None:
             existing["steps"] = list(merged.values())
         elif ptype == "log":
             logs = existing.get("logs", [])
-            logs.append({
+            # 幂等去重：SSE 连接的本地快照与全局监听器可能先后合并同一条
+            # 消息（订阅与快照读取之间存在窗口），同内容末条重复时跳过
+            entry = {
                 "id": len(logs),
                 "timestamp": payload.get("timestamp") or time.strftime("%H:%M:%S"),
                 "agent": payload.get("agent", ""),
                 "type": payload.get("type", "info"),
                 "message": payload.get("message", ""),
-            })
-            existing["logs"] = logs
+            }
+            if logs and (
+                logs[-1].get("message") == entry["message"]
+                and logs[-1].get("agent") == entry["agent"]
+                and logs[-1].get("type") == entry["type"]
+            ):
+                pass
+            else:
+                logs.append(entry)
+                existing["logs"] = logs
         elif ptype == "agent_status":
             existing["agent_status"] = payload
         elif ptype == "plan":
@@ -681,49 +692,50 @@ def _listen_results():
                         ptype = data.get("type")
                         payload = data.get("payload")
                         _merge_progress_message(existing, data)
-                        if ptype == "task_complete":
-                            # Persist to SQLite so History page updates
-                            try:
-                                db = sqlite3.connect(DB_PATH, timeout=5)
-                                db.execute(
-                                    "INSERT INTO task_history(task_id,goal,status,report,steps_json,logs_json,completed_at)"
-                                    " VALUES(?,?,?,?,?,?,CURRENT_TIMESTAMP)"
-                                    " ON CONFLICT(task_id) DO UPDATE SET status=excluded.status,"
-                                    " report=excluded.report,steps_json=excluded.steps_json,"
-                                    " logs_json=excluded.logs_json,completed_at=CURRENT_TIMESTAMP",
-                                    (tid, existing.get("goal",""), (payload or {}).get("status","UNKNOWN"),
-                                     (payload or {}).get("report",""),
-                                     json.dumps(existing.get("steps", []), ensure_ascii=False),
-                                     json.dumps(existing.get("logs", [])[-200:], ensure_ascii=False)),
-                                )
-                                db.commit(); db.close()
-                            except Exception: pass
-                            # D1：日报项目任务终态自动生成分享链接（落地页入口），
-                            # 并补发一条带链接的通知（编排器通知早于分享生成，链接会缺失）
-                            try:
-                                if str(existing.get("project") or "") == "daily-report":
-                                    _generate_share_token(tid)
-                                    from notifications import (
-                                        find_share_link,
-                                        make_summary,
-                                        notify_task_done,
-                                    )
-                                    notify_task_done(
-                                        tid,
-                                        goal=str(existing.get("goal") or ""),
-                                        status=str(existing.get("status") or ""),
-                                        report_link=find_share_link(tid),
-                                        summary=make_summary(
-                                            str(existing.get("report") or "")
-                                        ),
-                                    )
-                            except Exception:
-                                pass
                         _task_results[tid] = existing
                         # 防止内存无限增长：最多保留最近 300 个任务
                         if len(_task_results) > 300:
                             for _k in list(_task_results)[:-200]:
                                 _task_results.pop(_k, None)
+                    if ptype == "task_complete":
+                        # DB 写入与通知在锁外执行：这些是慢 I/O，
+                        # 放锁内会阻塞所有 /task/{id} 读取与 SSE 快照
+                        try:
+                            db = sqlite3.connect(DB_PATH, timeout=5)
+                            db.execute(
+                                "INSERT INTO task_history(task_id,goal,status,report,steps_json,logs_json,completed_at)"
+                                " VALUES(?,?,?,?,?,?,CURRENT_TIMESTAMP)"
+                                " ON CONFLICT(task_id) DO UPDATE SET status=excluded.status,"
+                                " report=excluded.report,steps_json=excluded.steps_json,"
+                                " logs_json=excluded.logs_json,completed_at=CURRENT_TIMESTAMP",
+                                (tid, existing.get("goal",""), (payload or {}).get("status","UNKNOWN"),
+                                 (payload or {}).get("report",""),
+                                 json.dumps(existing.get("steps", []), ensure_ascii=False),
+                                 json.dumps(existing.get("logs", [])[-200:], ensure_ascii=False)),
+                            )
+                            db.commit(); db.close()
+                        except Exception: pass
+                        # D1：日报项目任务终态自动生成分享链接（落地页入口），
+                        # 并补发一条带链接的通知（编排器通知早于分享生成，链接会缺失）
+                        try:
+                            if str(existing.get("project") or "") == "daily-report":
+                                _generate_share_token(tid)
+                                from notifications import (
+                                    find_share_link,
+                                    make_summary,
+                                    notify_task_done,
+                                )
+                                notify_task_done(
+                                    tid,
+                                    goal=str(existing.get("goal") or ""),
+                                    status=str(existing.get("status") or ""),
+                                    report_link=find_share_link(tid),
+                                    summary=make_summary(
+                                        str(existing.get("report") or "")
+                                    ),
+                                )
+                        except Exception:
+                            pass
             except Exception: pass
 
 def _listen_events():
@@ -742,8 +754,12 @@ def _listen_events():
                 _append_evolution(data)
             etype = data.get("type", msg["channel"].split(":")[-1])
             with _events_lock:
+                # 自增序号做 id：列表裁剪后 len 会回弹到固定值，
+                # 用 len 当 id 会导致所有新事件同 id（前端 key 冲突）
+                global _evt_seq
+                _evt_seq += 1
                 _events.append({
-                    "id": f"evt-{len(_events)}",
+                    "id": f"evt-{_evt_seq}",
                     "timestamp": data.get("timestamp") or _now_iso(),
                     "type": _map_event_type(etype),
                     "service": data.get("service", msg["channel"]),
@@ -2394,7 +2410,7 @@ class Handler(BaseHTTPRequestHandler):
             extra_headers={
                 "Set-Cookie": (
                     f"{_share_cookie_name(token)}=ok; HttpOnly; SameSite=Lax; "
-                    f"Path=/share/{token}; Max-Age={SHARE_AUTH_COOKIE_TTL}{self._cookie_secure_flag()}"
+                    f"Path=/; Max-Age={SHARE_AUTH_COOKIE_TTL}{self._cookie_secure_flag()}"
                 ),
             },
         )
@@ -2413,8 +2429,10 @@ class Handler(BaseHTTPRequestHandler):
         if not os.path.isdir(DIST_DIR):
             return False
         rel = "index.html" if path in ("", "/") else path.lstrip("/")
+        _dist_root = os.path.realpath(DIST_DIR)
         target = os.path.realpath(os.path.join(DIST_DIR, rel))
-        if not target.startswith(os.path.realpath(DIST_DIR)):
+        # 前缀必须带分隔符：否则 dist_backup 等同级目录可借道 ../ 通过检查
+        if target != _dist_root and not target.startswith(_dist_root + os.sep):
             return False
         if not os.path.isfile(target):
             if "." not in os.path.basename(rel):
@@ -2690,7 +2708,7 @@ def _get_files(self, p):
         fp = _safe_workspace_path(rel, tid)
         if fp:
             relative = os.path.relpath(fp, task_workspace(tid)).replace("\\", "/")
-            if not relative.startswith(("reports/", "charts/")):
+            if not relative.startswith(("reports/", "charts/", "data/")):
                 fp = None
         if not fp:
             return self._json({"error": "not found"}, 404)
@@ -2786,27 +2804,72 @@ def _get_task_events(self, p):
                 merged["logs"] = list(base.get("logs") or [])
         except Exception:
             pass
-        if not _emit("snapshot", {"task_id": tid, "data": merged}):
+
+        def _subscribe():
+            """建立 pubsub 订阅；失败返回 None（稍后重试）。"""
+            try:
+                r = _new_redis()
+                sub = r.pubsub()
+                sub.subscribe("orchestrator:response")
+                return sub
+            except Exception:
+                try:
+                    sub.close()
+                except Exception:
+                    pass
+                return None
+
+        def _resync_snapshot() -> bool:
+            """订阅空窗期（快照读取→订阅生效之间）的消息可能只进了全局态：
+            以全局态为准对账，避免本地快照漏日志/漏终态。"""
+            try:
+                with _task_lock:
+                    base = _task_results.get(tid)
+                if isinstance(base, dict):
+                    merged.update(base)
+                    merged["steps"] = list(base.get("steps") or [])
+                    merged["logs"] = list(base.get("logs") or [])
+                    return _emit("snapshot", {"task_id": tid, "data": merged})
+            except Exception:
+                pass
+            return True
+
+        # 先建订阅再取快照，空窗消息通过对账补偿
+        ps = _subscribe()
+        if not _resync_snapshot():
+            try:
+                if ps is not None:
+                    ps.close()
+            except Exception:
+                pass
             return None
-        ps = None
-        try:
-            r = _new_redis()
-            ps = r.pubsub()
-            ps.subscribe("orchestrator:response")
-        except Exception:
-            ps = None
         deadline = time.time() + 1800  # 单连接最长 30 分钟
+        next_resync = time.time() + 60
         try:
             while time.time() < deadline:
                 if ps is None:
+                    # Redis 断连：心跳保活并周期性重建订阅（不能只发心跳，
+                    # 否则连接看似健康但永远收不到消息）
                     if not _emit("hb", {"t": int(time.time())}):
                         return None
                     time.sleep(15)
+                    ps = _subscribe()
                     continue
                 try:
                     msg = ps.get_message(ignore_subscribe_messages=True, timeout=15)
                 except Exception:
+                    # 订阅故障：关闭旧连接，下轮重建
+                    try:
+                        ps.close()
+                    except Exception:
+                        pass
+                    ps = None
                     msg = None
+                if time.time() >= next_resync:
+                    # 周期对账：pubsub 与全局监听双通道下防漏
+                    next_resync = time.time() + 60
+                    if not _resync_snapshot():
+                        return None
                 if msg and msg.get("type") == "message":
                     try:
                         evt = json.loads(msg["data"])
@@ -3712,8 +3775,8 @@ _GET_ROUTES = [
     (lambda self, p: p.startswith("/api/conversations/"), _get_conversation_detail),
     (lambda self, p: p.startswith("/api/share/"), _get_share_data),
     (lambda self, p: p.startswith("/share/"), _get_share_page),
-    (lambda self, p: p.startswith("/task/"), _get_task_page),
     (lambda self, p: p.startswith("/task/") and p.endswith("/report"), _get_task_report),
+    (lambda self, p: p.startswith("/task/"), _get_task_page),
 ]
 
 _POST_ROUTES = [
