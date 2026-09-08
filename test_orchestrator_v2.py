@@ -926,6 +926,30 @@ class TestRedoStepLimit(unittest.TestCase):
         self.assertEqual(completed_all["3"]["result"], "old-3",
                          "超出上限的下游步骤不应被重做")
 
+    def test_redo_report_rechecks_acceptance(self):
+        """闭环修复：报告步骤重做成功后必须复跑确定性验收
+        （此前重做路径从不复检，终态引用过期 acceptance 快照）。"""
+        o = self._make(max_redo_steps=2)
+        all_steps = [
+            {"step_id": "1", "capability": "report_generator",
+             "instruction": "写报告", "depends_on": []},
+        ]
+        completed_all = {
+            "1": {"status": "SUCCESS", "result": "old-report-100-chars"},
+        }
+        o._dispatch_step_safe = lambda goal, step, tid, state: {
+            "task_id": step["step_id"], "status": "SUCCESS",
+            "result": "new-report-200-chars",
+        }
+        rechecks = []
+        o._run_acceptance_check = lambda tid, goal: rechecks.append(tid) or {"overall": "pass"}
+        ok = o._redo_step_and_dependents(
+            "t-redo-acc", "目标", all_steps, completed_all, "1", "修复",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(rechecks, ["t-redo-acc"], "报告重做成功后必须复跑验收")
+        self.assertEqual(completed_all["1"]["result"], "new-report-200-chars")
+
     def test_max_redo_steps_one_caps_to_single_step(self):
         o = self._make(max_redo_steps=1)
         all_steps = [

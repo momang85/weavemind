@@ -6057,5 +6057,63 @@ class TestScheduledJobAlertRetry(unittest.TestCase):
             self.assertIn("任务完成", title2)
 
 
+class TestSourceClaimExtraction(unittest.TestCase):
+    """来源声明抓取细化：来源链接/口径列不当作来源声明。"""
+
+    def test_source_link_and_caliber_cols_not_claimed(self):
+        from acceptance_checker import _extract_source_claims
+        report = (
+            "| 来源编号 | 指标 | 数值 | 口径说明 | 来源链接 |" + "\n"
+            "|---|---|---|---|---|" + "\n"
+            "| [1] | 市场规模 | 100 | 全年、全球 | https://example.com/a |" + "\n"
+            "| 模型知识 | 增速 | 20 | 同比 | |" + "\n"
+        )
+        claims = _extract_source_claims(report)
+        # 来源编号列（[1]/模型知识）与来源链接列（URL）都不是来源声明
+        self.assertNotIn("https://example.com/a", claims)
+        self.assertNotIn("[1]", claims)
+        self.assertNotIn("全年", claims)
+        self.assertNotIn("同比", claims)
+
+    def test_institution_source_col_still_checked(self):
+        from acceptance_checker import _extract_source_claims
+        report = (
+            "| 机构/来源 | 指标 | 数值 |" + "\n"
+            "|---|---|---|" + "\n"
+            "| 主要挑战 | 良率 | 40 |" + "\n"
+        )
+        claims = _extract_source_claims(report)
+        # 机构/来源列仍纳入声明检查（叙述片段当来源名是真实错误，须被验收拦截）
+        self.assertIn("主要挑战", claims)
+
+    def test_numbered_reference_list_entries_not_claims(self):
+        from acceptance_checker import _extract_source_claims
+        report = (
+            "数据来源：[1]" + "\n"
+            "## 参考来源" + "\n"
+            "1. [某标题](https://example.com/a)" + "\n"
+        )
+        claims = _extract_source_claims(report)
+        self.assertNotIn("[1]", claims)
+
+    def test_auto_repair_downgrades_false_labels(self):
+        from acceptance_checker import auto_repair_source_labels
+        report = (
+            "数据来源：主要挑战" + "\n"
+            "| 玩家 | 类型 | 进展详情 | 来源 |" + "\n"
+            "|---|---|---|---|" + "\n"
+            "| 蔚来 | 半固态 | 装车 | 涉及手机厂商折叠屏固态方案 |" + "\n"
+            "| 宁德时代 | 全固态 | 中试 | [1] |" + "\n"
+        )
+        repaired = auto_repair_source_labels(
+            report, ["主要挑战", "涉及手机厂商折叠屏固态方案"],
+        )
+        self.assertIn("数据来源：基于模型知识，未在本次检索中验证", repaired)
+        self.assertIn("| 蔚来 | 半固态 | 装车 | 模型知识 |", repaired)
+        # 合法 [1] 引用与表头不得被误改
+        self.assertIn("| 宁德时代 | 全固态 | 中试 | [1] |", repaired)
+        self.assertIn("| 玩家 | 类型 | 进展详情 | 来源 |", repaired)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -141,7 +141,14 @@ _REPORT_FORMAT_REQUIREMENTS = (
     "数据来源于公开渠道，可能存在延迟或误差；据此操作风险自担。'\n"
     "4. 合规红线：不得给出具体投资组合配比（如'30%某股+70%某资产'）、"
     "不得给出预期收益率/年化收益数值承诺；如涉及资产配置，只允许描述"
-    "常见配置思路与风险框架，并强调'不构成投资建议'。"
+    "常见配置思路与风险框架，并强调'不构成投资建议'。\n"
+    "5. 来源声明词汇表（硬约束）：任何'数据来源/来源'声明或表格来源列，"
+    "只允许以下三种形式之一：① [n] 编号（n 对应 '## 参考来源' 清单序号）；"
+    "② 参考来源清单中的媒体名/标题（逐字引用）；"
+    "③ '基于模型知识，未在本次检索中验证'。"
+    "禁止把正文短语、指标名、行业术语、观点片段当来源名"
+    "（如'指出'、'主要挑战'、'能量密度提升空间有限'这类不是来源）；"
+    "数据无对应检索来源时，必须写形式③，禁止编造任何来源名。"
 )
 
 
@@ -1729,6 +1736,17 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     issue=f"反思要求重做：{feedback}",
                     fix_prompt=f"优化前：{orig_instr[:250]}\n优化后：{s2.get('instruction', '')[:250]}",
                 )
+                # 闭环修复：报告步骤重做成功后必须复跑确定性验收——
+                # 此前重做路径从不重跑验收，_read_acceptance_summary 永远
+                # 引用过期快照（"重做后仍失败"实为旧文件未被复检）
+                if target.get("capability") in ("report_generator", "content_summary"):
+                    try:
+                        self._run_acceptance_check(task_id, goal)
+                    except Exception as exc:
+                        logger.warning(
+                            "Redo acceptance recheck failed for %s: %s",
+                            task_id, str(exc)[:120],
+                        )
             push_progress(self._messaging, task_id, "log",
                           {"type": "iteration", "agent": "orchestrator",
                            "message": f"反思单步重做: step {s['step_id']} ({s.get('capability')}) -> {result.get('status')}",
@@ -1758,6 +1776,32 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 return None
             report = rpath.read_text(encoding="utf-8")
             result = run_acceptance(task_id, goal, report, task_workspace(task_id))
+            # 虚假标注确定性修复：把验收器判定的 mislabeled 声明降级为诚实披露
+            # （"数据来源：X" → "基于模型知识，未在本次检索中验证"）后复检。
+            # 模型提示词约束无法根治"叙述片段当来源名"，此步骤保证验收终态
+            # 与报告文本一致（修复后重写 report.md + acceptance_report.json）。
+            try:
+                sl = (result.get("checks") or {}).get("source_labeling") or {}
+                mis = list(sl.get("mislabeled") or [])
+                if not sl.get("pass") and mis:
+                    from acceptance_checker import auto_repair_source_labels
+                    repaired = auto_repair_source_labels(report, mis)
+                    if repaired != report:
+                        rpath.write_text(repaired, encoding="utf-8")
+                        report = repaired
+                        result = run_acceptance(
+                            task_id, goal, repaired, task_workspace(task_id),
+                        )
+                        sl2 = (result.get("checks") or {}).get("source_labeling") or {}
+                        logger.info(
+                            "auto-repaired source labels for %s: %d -> %d mislabeled",
+                            task_id, len(mis), len(sl2.get("mislabeled") or []),
+                        )
+            except Exception as exc:
+                logger.warning(
+                    "source label auto-repair failed for %s: %s",
+                    task_id, str(exc)[:120],
+                )
             # V1.2 竞品启示：文末来源清单 URL 存活校验（仅提示，不判 fail）。
             # 支持 URL_HEALTH_CHECK=0 关闭，避免网络抖动误伤验收结果。
             try:
@@ -4013,9 +4057,17 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                             if u.startswith("http") and u not in urls:
                                 urls.append(u)
                 if urls:
+                    # 显式编号来源清单：模型在正文/表格里直接引用 [1]/[2]，
+                    # 与 '## 参考来源' 清单编号一致——避免模型自造来源名
                     base_instr += (
                         "\n\n[数据来源]\n"
-                        + "\n".join(f"- {u}" for u in urls[:12])
+                        "以下为本次任务检索到的来源清单，编号即引用编号：\n"
+                        + "\n".join(
+                            f"[{i+1}] {u}" for i, u in enumerate(urls[:12])
+                        )
+                        + "\n正文/表格引用时使用上述编号；'## 参考来源' 清单"
+                        "按上述编号与顺序原样列出（可追加额外条目，但编号必须"
+                        "与引用一致）。"
                     )
             # 注入全局任务目标，让 Worker 知道自己正在为哪个目标工作（Codex 式上下文感知）
             if goal and "任务目标" not in base_instr[:60]:

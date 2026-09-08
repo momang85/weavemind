@@ -980,7 +980,9 @@ def _claim_fragment(c: str) -> bool:
             return True
     if c in ("来源", "年份", "链接", "口径", "单位", "数值", "指标",
              "时间", "地域", "样本", "说明", "序号", "备注", "状态",
-             "限制", "综合费率", "附录", "口径/年份", "机构/来源"):
+             "限制", "综合费率", "附录", "口径/年份", "机构/来源",
+             "来源链接", "来源编号", "口径说明", "以发布时间为准",
+             "发布时间为准", "编号"):
         return True
     # 括号失衡（"称 X）" 之类被截断的碎片）：左括号数 != 右括号数
     if c.count("（") + c.count("(") != c.count("）") + c.count(")"):
@@ -1016,38 +1018,48 @@ def _extract_source_claims(report: str) -> list[str]:
                 continue
         if c not in claims:
             claims.append(c)
-    # 表格"来源"列单元格（非 URL 部分）：定位表头中的"来源"列，
-    # 仅取数据行该列单元格，避免把"指标/数值/来源"等表头标签当成声明
-    table_lines = [ln for ln in report.splitlines() if ln.strip().startswith("|")]
-    sep_idx = -1
-    for i, ln in enumerate(table_lines):
-        cells = [c.strip() for c in ln.strip().strip("|").split("|")]
-        if cells and all(not c or set(c) <= {"-", ":", "—"} for c in cells):
-            sep_idx = i
-            break
-    if sep_idx > 0:
+    # 表格"来源"列单元格（非 URL 部分）：逐表解析——报告含多张表格时，
+    # 每张表按自己的表头定位来源列（旧实现把首个分隔符后的所有行都当
+    # 第一张表的数据行，会把后续表的"口径说明"单元格错配成来源声明）
+    lines = report.splitlines()
+    i = 0
+    while i < len(lines):
+        if not lines[i].strip().startswith("|"):
+            i += 1
+            continue
         header_cells = [
-            c.strip() for c in table_lines[sep_idx - 1].strip().strip("|").split("|")
+            c.strip() for c in lines[i].strip().strip("|").split("|")
         ]
-        src_cols = [i for i, h in enumerate(header_cells) if "来源" in h]
-        if src_cols:
-            for ln in table_lines[sep_idx + 1:]:
-                cells = [c.strip() for c in ln.strip().strip("|").split("|")]
-                for i in src_cols:
-                    if i >= len(cells):
-                        continue
-                    c2 = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", cells[i])
-                    if c2 and len(c2) >= 2 and "http" not in c2 and not _claim_fragment(c2) and c2 not in claims:
-                        claims.append(c2)
-            return claims
-    # 兜底：无表头/分隔符的松散表格行，保留旧行为
-    for line in report.splitlines():
-        if line.strip().startswith("|") and "来源" in line:
-            cells = [c.strip() for c in line.strip("|").split("|")]
-            for c in cells:
-                c2 = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", c)
+        if i + 1 >= len(lines):
+            i += 1
+            continue
+        sep_cells = [
+            c.strip() for c in lines[i + 1].strip().strip("|").split("|")
+        ]
+        if not (sep_cells and all(
+            not c or set(c) <= {"-", ":", "—"} for c in sep_cells
+        )):
+            i += 1
+            continue
+        # 来源列细化：'来源链接' 列是 URL（不属声明），'口径' 列是计算口径
+        # （叙述性说明，不属来源）——都不作为来源声明抓取
+        src_cols = [
+            j for j, h in enumerate(header_cells)
+            if "来源" in h and "链接" not in h and "口径" not in h
+        ]
+        j = i + 2
+        while j < len(lines) and lines[j].strip().startswith("|"):
+            cells = [
+                c.strip() for c in lines[j].strip().strip("|").split("|")
+            ]
+            for ci in src_cols:
+                if ci >= len(cells):
+                    continue
+                c2 = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", cells[ci])
                 if c2 and len(c2) >= 2 and "http" not in c2 and not _claim_fragment(c2) and c2 not in claims:
                     claims.append(c2)
+            j += 1
+        i = j
     return claims
 
 
@@ -1072,6 +1084,71 @@ _GENERIC_HONEST_MARKERS = (
 
 # 权威文档词：命中且无否定/谨慎语境、检索中无 → 虚假标注
 _AUTHORITY_DOC_RE = re.compile(r"(年报|财报|公告|官网|投资者关系|招股书|报表|审计)")
+
+
+def auto_repair_source_labels(report: str, mislabeled: list[str]) -> str:
+    """把验收器判定的虚假来源标注确定性地降级为诚实披露。
+
+    - 正文声明 `数据来源：X`（X 在 mislabeled 中且非结构词）→
+      `数据来源：基于模型知识，未在本次检索中验证`；
+    - 表格来源列中等于 mislabeled 项的单元格 → `模型知识`（表头感知，
+      只替换分隔符行之后的数据行，不碰表头与其他列）。
+    保守原则：只替换精确命中项，不做任何模糊改写；返回改写后的全文。
+    """
+    if not mislabeled:
+        return report
+    mis_set = {
+        str(c).strip() for c in mislabeled
+        if str(c).strip() and not _claim_fragment(str(c).strip())
+    }
+    if not mis_set:
+        return report
+    out = report
+    # 1) 正文声明替换
+    for c in sorted(mis_set, key=len, reverse=True):
+        pat = re.compile(
+            r"(数据来源|来源|引自|出自|来自|根据)\s*[：:]?\s*"
+            + re.escape(c)
+        )
+        out = pat.sub(r"\1：基于模型知识，未在本次检索中验证", out)
+    # 2) 表格来源列单元格替换（逐表解析：每张表按自己的表头定位来源列，
+    #    与判定器一致；只替换分隔符行之后的数据行，不碰表头与其他列）
+    lines = out.split("\n")
+    i = 0
+    while i < len(lines):
+        if not lines[i].strip().startswith("|"):
+            i += 1
+            continue
+        header_cells = [
+            c.strip() for c in lines[i].strip().strip("|").split("|")
+        ]
+        if i + 1 >= len(lines):
+            i += 1
+            continue
+        sep_cells = [
+            c.strip() for c in lines[i + 1].strip().strip("|").split("|")
+        ]
+        if not (sep_cells and all(
+            not c or set(c) <= {"-", ":", "—"} for c in sep_cells
+        )):
+            i += 1
+            continue
+        src_cols = [
+            j for j, h in enumerate(header_cells)
+            if "来源" in h and "链接" not in h and "口径" not in h
+        ]
+        j = i + 2
+        while j < len(lines) and lines[j].strip().startswith("|"):
+            cells = [
+                c.strip() for c in lines[j].strip().strip("|").split("|")
+            ]
+            for ci in src_cols:
+                if ci < len(cells) and cells[ci] in mis_set:
+                    cells[ci] = "模型知识"
+            lines[j] = "| " + " | ".join(cells) + " |"
+            j += 1
+        i = j
+    return "\n".join(lines)
 
 
 def check_source_labeling(report: str, sources: dict) -> dict:
