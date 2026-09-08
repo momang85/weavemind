@@ -1,35 +1,38 @@
 import { useState, useEffect } from 'react'
+import { useVisibleInterval } from '../lib/useVisibleInterval'
 import { Layers, RefreshCw } from 'lucide-react'
 
 interface Skill { name: string; description: string; owner?: string; version?: string; applies?: string[]; lessons?: any[] }
 
 export default function Skills() {
   const [skills, setSkills] = useState<Skill[]>([])
+  const [error, setError] = useState('')
 
   const load = async () => {
     try {
       const d = await (await fetch('/api/skills')).json()
       setSkills(d.skills ?? [])
-    } catch {}
+      setError('')
+    } catch {
+      setError('加载 Skill 失败，请检查后端服务')
+    }
   }
 
-  useEffect(() => {
-    load()
-    const t = setInterval(load, 15000)
-    return () => clearInterval(t)
-  }, [])
+  useEffect(() => { load() }, [])
+  useVisibleInterval(load, 15000)
 
   return (
     <div className="max-w-6xl mx-auto space-y-6">
       <div className="flex items-center gap-3">
         <Layers className="w-6 h-6 text-cyan-400" />
         <h1 className="text-slate-200 text-lg font-semibold">Skill 管理</h1>
-        <button onClick={load} className="ml-auto text-slate-500 hover:text-cyan-400">
+        <button onClick={load} aria-label="刷新 Skill 列表" className="ml-auto text-slate-500 hover:text-cyan-400">
           <RefreshCw className="w-4 h-4" />
         </button>
       </div>
 
-      {skills.length === 0 && <div className="text-slate-600 text-xs">暂无 Skill</div>}
+      {error && <div className="text-red-400 text-xs bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2">{error}</div>}
+      {!error && skills.length === 0 && <div className="text-slate-600 text-xs">暂无 Skill</div>}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         {skills.map((s) => (
           <div key={s.name} className="bg-slate-900 border border-slate-800 rounded-2xl p-5">

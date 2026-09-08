@@ -45,21 +45,17 @@ const LogRow = memo(function LogRow({ entry }: { entry: LogEntry }) {
 })
 
 export default memo(function LiveActivity() {
-  const { logs, agents, status } = useTaskStore()
-
-  useEffect(() => {
-    console.log("[LiveActivity] mounted, agents:", agents.length, "logs:", logs.length, "status:", status)
-  }, [])
+  const logs = useTaskStore(s => s.logs)
+  const agents = useTaskStore(s => s.agents)
 
   const [paused, setPaused] = useState(false)
   const outerRef = useRef<HTMLDivElement>(null)
 
+  // 自动滚底：直接操作日志容器自身（此前查询不存在的 [data-virtual-list]，
+  // 且容器是 overflow-hidden——超出日志被裁剪且无法滚动）
   useEffect(() => {
     if (!paused && outerRef.current) {
-      const el = outerRef.current.querySelector('[data-virtual-list]') as HTMLElement | null
-      if (el) {
-        el.scrollTop = el.scrollHeight
-      }
+      outerRef.current.scrollTop = outerRef.current.scrollHeight
     }
   }, [logs, paused])
 
@@ -102,8 +98,8 @@ export default memo(function LiveActivity() {
         })}
       </div>
 
-      {/* Virtual list */}
-      <div ref={outerRef} className="flex-1 min-h-0 bg-slate-800/30 rounded-lg border border-slate-800 overflow-hidden">
+      {/* 日志列表（可滚动，自动滚底） */}
+      <div ref={outerRef} className="flex-1 min-h-0 bg-slate-800/30 rounded-lg border border-slate-800 overflow-y-auto">
         {logs.length === 0 ? (
           <div className="flex items-center justify-center h-64 text-slate-600 text-xs">等待事件中...</div>
         ) : (

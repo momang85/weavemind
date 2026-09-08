@@ -13,17 +13,28 @@ type Tab = 'live' | 'context' | 'results'
 /** 任务控制台（T11c 拆分后的薄编排页）：
  * 提交区/计划面板/右侧三栏各自独立组件；本页只保留任务生命周期编排。 */
 export default function TaskConsole() {
-  const {
-    planTree, status, report,
-    startTask, addLog, demoMode, activeConversationId,
-    setActiveConversation, setReport, reset, updatePlan,
-    awaitingConfirm, revision, markPlanConfirmed, setLogs,
-  } = useTaskStore()
+  const planTree = useTaskStore(s => s.planTree)
+  const status = useTaskStore(s => s.status)
+  const report = useTaskStore(s => s.report)
+  const demoMode = useTaskStore(s => s.demoMode)
+  const activeConversationId = useTaskStore(s => s.activeConversationId)
+  const awaitingConfirm = useTaskStore(s => s.awaitingConfirm)
+  const revision = useTaskStore(s => s.revision)
+  const currentTaskId = useTaskStore(s => s.currentTaskId)
+  const startTask = useTaskStore(s => s.startTask)
+  const addLog = useTaskStore(s => s.addLog)
+  const setActiveConversation = useTaskStore(s => s.setActiveConversation)
+  const setReport = useTaskStore(s => s.setReport)
+  const reset = useTaskStore(s => s.reset)
+  const updatePlan = useTaskStore(s => s.updatePlan)
+  const markPlanConfirmed = useTaskStore(s => s.markPlanConfirmed)
+  const setLogs = useTaskStore(s => s.setLogs)
 
   const [goal, setGoal] = useState('')
   const [project, setProject] = useState('default')
   const [lastGoal, setLastGoal] = useState('')
-  const [taskId, setTaskId] = useState<string | null>(null)
+  // 运行中任务切页恢复：taskId 迁入 store（重挂载自动恢复跟踪，不再孤儿化）
+  const taskId = currentTaskId
   const [selectedStep, setSelectedStep] = useState<TaskNode | null>(null)
   const [tab, setTab] = useState<Tab>('live')
   const [convMessages, setConvMessages] = useState<ConversationMessage[]>([])
@@ -63,7 +74,7 @@ export default function TaskConsole() {
       const targetId = running?.task_id || last?.task_id
       if (!targetId) return
       if (running?.task_id) {
-        setTaskId(running.task_id)
+        useTaskStore.setState({ currentTaskId: running.task_id })
       } else {
         fetch('/task/' + targetId).then(r => r.json()).then((d: any) => {
           if (!d || d.error) return
@@ -125,13 +136,12 @@ export default function TaskConsole() {
 
     if (demoMode) {
       startTask('demo-task-001')
-      setTaskId('demo-task-001')
       return
     }
 
     setGoal('')
     setLastGoal(g)
-    setTaskId(null)
+    useTaskStore.setState({ currentTaskId: null })
 
     try {
       const body: any = { goal: g }
@@ -152,8 +162,10 @@ export default function TaskConsole() {
         return
       }
       const tid = data.task_id
-      setTaskId(tid)
       startTask(tid)
+      // D17：新任务重置过期 UI（步骤检查器/验收缺口缓存）
+      setSelectedStep(null)
+      setGapsFor({})
       addLog({ timestamp: new Date().toISOString(), type: 'plan', agent: 'orchestrator', message: 'Submitted: ' + g.slice(0, 50) })
 
       // 进入/保持会话上下文
@@ -186,7 +198,7 @@ export default function TaskConsole() {
           totalSteps: steps.length,
           successSteps: steps.filter((s: any) => s.result?.status === 'SUCCESS').length,
           failedSteps: steps.filter((s: any) => s.result?.status === 'FAILED').length,
-          duration: 0,
+          duration: Math.max(0, Math.round((Date.now() - (useTaskStore.getState().startedAt || Date.now())) / 1000)),
         },
         steps: steps.map((s: any) => ({
           step_id: s.step_id || '', capability: s.capability || '',
@@ -248,7 +260,7 @@ export default function TaskConsole() {
   const newConversation = useCallback(() => {
     reset()
     setConvMessages([])
-    setTaskId(null)
+    useTaskStore.setState({ currentTaskId: null })
     window.history.replaceState({}, '', window.location.pathname)
   }, [reset])
 
@@ -260,6 +272,7 @@ export default function TaskConsole() {
   return (
     <div className="max-w-7xl mx-auto space-y-6">
       <SubmitPanel
+        key={taskId || 'idle'}
         goal={goal} setGoal={setGoal}
         project={project} setProject={setProject}
         confirmMode={confirmMode} setConfirmMode={setConfirmMode}

@@ -13,12 +13,12 @@ export const useTaskStore = create<TaskState & {
   setLogs: (entries: LogEntry[]) => void
   setReport: (report: TaskReport) => void
   updateAgents: (list: AgentInfo[]) => void
-  setConnected: (v: boolean) => void
   toggleDemo: (force?: boolean) => void
   fetchSystemStatus: () => Promise<void>
   reset: () => void
 }>((set, get) => ({
   currentTaskId: null,
+  startedAt: 0,
   activeConversationId: null,
   awaitingConfirm: false,
   revision: false,
@@ -34,6 +34,7 @@ export const useTaskStore = create<TaskState & {
 
   startTask: (id) => set({
     currentTaskId: id,
+    startedAt: Date.now(),
     planTree: null,
     logs: [],
     status: 'running',
@@ -48,7 +49,7 @@ export const useTaskStore = create<TaskState & {
 
   markPlanConfirmed: () => set({ awaitingConfirm: false, lastConfirmAt: Date.now() }),
 
-  updatePlan: (tree) => { console.log("[Store] updatePlan:", tree.id, tree.children?.length, "steps"); set({ planTree: tree }) },
+  updatePlan: (tree) => set({ planTree: tree }),
 
   addLog: (entry) => set(s => {
     // 上限防泄漏：长任务日志无界增长会拖垮内存与 LiveActivity 渲染
@@ -60,9 +61,8 @@ export const useTaskStore = create<TaskState & {
 
   setReport: (report) => set({ report, status: 'completed' }),
 
-  updateAgents: (agents) => { console.log("[Store] updateAgents:", agents.length, "agents"); set({ agents }) },
+  updateAgents: (agents) => set({ agents }),
 
-  setConnected: (connected) => { console.log("[Store] connected:", connected); set({ connected }) },
 
   toggleDemo: (force) => {
     const next = force ?? !get().demoMode

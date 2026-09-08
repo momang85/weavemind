@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Clock, TrendingUp, Shield, Activity, Play, Heart, Skull, FlaskConical, Plus, Cpu, RefreshCw } from 'lucide-react'
 import { useTaskStore } from '../stores/useTaskStore'
+import { useVisibleInterval } from '../lib/useVisibleInterval'
 
 interface HealthEvent {
   id: string; timestamp: string
@@ -32,9 +33,12 @@ function formatUptime(sec: number): string {
 }
 
 export default function HealthPage() {
-  const { agents, connected, systemStatus } = useTaskStore()
+  const agents = useTaskStore(s => s.agents)
+  const connected = useTaskStore(s => s.connected)
+  const systemStatus = useTaskStore(s => s.systemStatus)
   const [events, setEvents] = useState<HealthEvent[]>(DEMO_EVENTS)
   const [live, setLive] = useState(false)
+  const [loadError, setLoadError] = useState(false)
 
   const loadEvents = useCallback(async () => {
     try {
@@ -45,14 +49,15 @@ export default function HealthPage() {
         setEvents(list)
         setLive(true)
       }
-    } catch { /* 后端不可达时保留演示数据 */ }
+      setLoadError(false)
+    } catch {
+      // 后端不可达：保留演示数据，但明确标注
+      setLoadError(true)
+    }
   }, [])
 
-  useEffect(() => {
-    loadEvents()
-    const t = setInterval(loadEvents, 5000)
-    return () => clearInterval(t)
-  }, [loadEvents])
+  useEffect(() => { loadEvents() }, [loadEvents])
+  useVisibleInterval(loadEvents, 5000)
 
   const online = agents.filter(a => !a.status?.startsWith('offline')).length
   const survival = systemStatus?.survival_rate ?? (agents.length > 0 ? Math.round(online / agents.length * 100) : 100)
@@ -99,7 +104,9 @@ export default function HealthPage() {
         <div className="col-span-3 bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
           <div className="flex items-center justify-between px-5 py-3 border-b border-slate-800">
             <div className="flex items-center gap-2 text-sm text-slate-300 font-medium"><Activity className="w-4 h-4 text-cyan-400" />Event Timeline</div>
-            <span className="text-xs text-slate-600">{live ? 'Live' : 'Demo'}</span>
+            <span className={`text-xs ${loadError ? 'text-amber-400' : 'text-slate-600'}`}>
+              {loadError ? '后端不可达 · 演示数据' : (live ? 'Live' : 'Demo')}
+            </span>
           </div>
           <div className="divide-y divide-slate-800/50 max-h-[500px] overflow-y-auto">
             {events.map(e => {

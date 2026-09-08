@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { useTaskStore } from '../stores/useTaskStore'
 import type { ConversationSummary, ConversationMessage, TaskSummary } from '../stores/types'
 import { FileText, ChevronDown, ChevronRight, MessagesSquare, Play } from 'lucide-react'
+import { ReportMarkdown } from '../components/ReportViewer'
 
 function statusBadge(s: string) {
   const base = 'px-2.5 py-0.5 rounded-full text-xs font-semibold'
@@ -111,7 +112,7 @@ export default function History() {
               </button>
             ))}
           </div>
-          <button onClick={() => { loadConversations(); loadTasks() }}
+          <button onClick={() => { loadConversations(); loadTasks() }} aria-label="刷新历史记录"
             className="text-xs text-cyan-400 hover:text-cyan-300">刷新</button>
         </div>
       </div>
@@ -159,14 +160,14 @@ export default function History() {
                         </button>
                       </div>
                       {fullReports[m.task_id] ? (
-                        <pre className="mt-2 text-slate-400 text-xs whitespace-pre-wrap font-sans leading-relaxed max-h-64 overflow-y-auto">
-                          {fullReports[m.task_id]}
-                        </pre>
+                        <div className="mt-2 text-slate-400 text-xs leading-relaxed max-h-64 overflow-y-auto">
+                          <ReportMarkdown md={fullReports[m.task_id]} sources={[]} />
+                        </div>
                       ) : (
                         m.report_preview && (
-                          <pre className="mt-2 text-slate-500 text-xs whitespace-pre-wrap font-sans line-clamp-3">
-                            {m.report_preview}
-                          </pre>
+                          <div className="mt-2 text-slate-500 text-xs leading-relaxed line-clamp-3">
+                            <ReportMarkdown md={m.report_preview} sources={[]} />
+                          </div>
                         )
                       )}
                     </div>
@@ -204,9 +205,9 @@ export default function History() {
                 </button>
                 {expanded.has('task-' + t.task_id) && t.report && (
                   <div className="px-5 pb-4 border-t border-slate-800">
-                    <pre className="mt-3 text-slate-400 text-xs whitespace-pre-wrap font-sans leading-relaxed max-h-96 overflow-y-auto">
-                      {t.report}
-                    </pre>
+                    <div className="mt-3 text-slate-400 text-xs leading-relaxed max-h-96 overflow-y-auto">
+                      <ReportMarkdown md={t.report} sources={[]} />
+                    </div>
                   </div>
                 )}
                 {expanded.has('task-' + t.task_id) && t.status === 'SUCCESS_WITH_ISSUES' && (

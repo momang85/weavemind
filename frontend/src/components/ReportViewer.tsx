@@ -1,8 +1,26 @@
-import { useState, useEffect, memo } from 'react'
+import { useState, useEffect, useMemo, useRef, memo } from 'react'
 import type { ReactNode } from 'react'
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
+import { PrismLight as SyntaxHighlighter } from 'react-syntax-highlighter'
+import python from 'react-syntax-highlighter/dist/esm/languages/prism/python'
+import javascript from 'react-syntax-highlighter/dist/esm/languages/prism/javascript'
+import typescript from 'react-syntax-highlighter/dist/esm/languages/prism/typescript'
+import json from 'react-syntax-highlighter/dist/esm/languages/prism/json'
+import markdown from 'react-syntax-highlighter/dist/esm/languages/prism/markdown'
+import bash from 'react-syntax-highlighter/dist/esm/languages/prism/bash'
+SyntaxHighlighter.registerLanguage('python', python)
+SyntaxHighlighter.registerLanguage('py', python)
+SyntaxHighlighter.registerLanguage('javascript', javascript)
+SyntaxHighlighter.registerLanguage('js', javascript)
+SyntaxHighlighter.registerLanguage('typescript', typescript)
+SyntaxHighlighter.registerLanguage('ts', typescript)
+SyntaxHighlighter.registerLanguage('json', json)
+SyntaxHighlighter.registerLanguage('markdown', markdown)
+SyntaxHighlighter.registerLanguage('md', markdown)
+SyntaxHighlighter.registerLanguage('bash', bash)
+SyntaxHighlighter.registerLanguage('shell', bash)
+SyntaxHighlighter.registerLanguage('sh', bash)
 import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
 // types used: TaskReport
 
@@ -266,10 +284,24 @@ interface MarkdownComponentProps {
   node?: unknown
 }
 
+function scrollToId(id: string) {
+  // smooth 滚动在某些 WebView 中静默无效：先尝试 smooth，
+  // 700ms 后滚动位置未变化则回退为瞬时滚动，保证一定到位
+  const el = document.getElementById(id)
+  if (!el) return
+  const scroller = document.querySelector('main') as HTMLElement | null
+  const before = scroller ? scroller.scrollTop : 0
+  el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  window.setTimeout(() => {
+    const after = scroller ? scroller.scrollTop : 0
+    if (Math.abs(after - before) < 4) {
+      el.scrollIntoView({ block: 'start' })
+    }
+  }, 700)
+}
+
 function CitationBadges({ nums, sources }: { nums: number[]; sources: SourceItem[] }) {
-  const scrollToSources = () => {
-    document.getElementById('sources')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  }
+  const scrollToSources = () => scrollToId('sources')
   return (
     <span className="mx-0.5 inline-flex items-center gap-0.5 align-super">
       {nums.map(n => {
@@ -341,7 +373,7 @@ const markdownComponents = {
   code: CodeComponent,
 }
 
-function ReportMarkdown({ md, sources }: { md: string; sources: SourceItem[] }) {
+export const ReportMarkdown = memo(function ReportMarkdown({ md, sources }: { md: string; sources: SourceItem[] }) {
   citationSources = sources
   headingSeen = {}
 
@@ -354,10 +386,13 @@ function ReportMarkdown({ md, sources }: { md: string; sources: SourceItem[] }) 
       {md}
     </ReactMarkdown>
   )
-}
+})
 
 export default memo(function ReportViewer() {
-  const { report, logs, currentTaskId, demoMode } = useTaskStore()
+  const report = useTaskStore(s => s.report)
+  const logs = useTaskStore(s => s.logs)
+  const currentTaskId = useTaskStore(s => s.currentTaskId)
+  const demoMode = useTaskStore(s => s.demoMode)
   const taskIdForFiles = currentTaskId || report?.taskId || null
   const [showLogs, setShowLogs] = useState(false)
   // E1 溯源页：POST /api/verify 的三档分类结果
@@ -527,23 +562,48 @@ export default memo(function ReportViewer() {
     } catch { /* 下载失败静默 */ }
   }
 
+  // 任务完成自动滚动到报告顶部：report 引用变化（null→对象 / 切换任务 /
+  // 查看历史报告）即平滑滚动；真实完成、demo、viewFullReport 三路径均经
+  // store.report 变化触发。锚定报告顶部，不依赖异步 files/验收数据落地。
+  const prevReportKey = useRef<string | null>(null)
+  useEffect(() => {
+    if (!report) { prevReportKey.current = null; return }
+    const key = report.taskId || 'report'
+    if (prevReportKey.current === key) return
+    prevReportKey.current = key
+    const raf = requestAnimationFrame(() => {
+      scrollToId('report-viewer')
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [report])
+
+  // 解析管线 useMemo：report 引用不变时不重跑
+  // （原为渲染期直跑，每次日志推送/3s 轮询都全量重解析）
+  const parsed = useMemo(() => {
+    if (!report) return null
+    const rawMd = stripOuterFence(report.final_report || '')
+    const freshness = parseFreshness(rawMd)
+    const sourcesResult = parseSources(rawMd)
+    const disclaimerResult = parseDisclaimer(sourcesResult.rest)
+    const bodyMd = addCitationLinks(disclaimerResult.rest, sourcesResult.sectionText)
+    const toc = parseToc(disclaimerResult.rest)
+    return {
+      freshness,
+      sourcesResult,
+      disclaimerResult,
+      bodyMd,
+      toc,
+      sourceItems: sourcesResult.sources?.items ?? [],
+    }
+  }, [report])
+
   if (!report) return null
 
   const s = report.stats || { totalSteps: report.steps.length, successSteps: 0, failedSteps: 0, duration: 0 }
   const rate = s.totalSteps > 0 ? Math.round((s.successSteps / s.totalSteps) * 100) : 100
+  const { freshness, sourcesResult, disclaimerResult, bodyMd, toc, sourceItems } = parsed!
 
-  // 结构化解析流水线：围栏兜底 → 数据时效 → 来源清单 → 免责声明 → 引用上标 → 目录
-  const rawMd = stripOuterFence(report.final_report || '')
-  const freshness = parseFreshness(rawMd)
-  const sourcesResult = parseSources(rawMd)
-  const disclaimerResult = parseDisclaimer(sourcesResult.rest)
-  const bodyMd = addCitationLinks(disclaimerResult.rest, sourcesResult.sectionText)
-  const toc = parseToc(disclaimerResult.rest)
-  const sourceItems = sourcesResult.sources?.items ?? []
-
-  const scrollToHeading = (id: string) => {
-    document.getElementById(id)?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-  }
+  const scrollToHeading = (id: string) => scrollToId(id)
 
   const downloadMarkdown = () => {
     const blob = new Blob([report.final_report], { type: 'text/markdown' })
@@ -593,7 +653,7 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
   }
 
   return (
-    <div className="animate-fade-in space-y-5">
+    <div id="report-viewer" className="animate-fade-in space-y-5 scroll-mt-6">
       {/* Stats bar */}
       <div className="grid grid-cols-4 gap-3">
         {[

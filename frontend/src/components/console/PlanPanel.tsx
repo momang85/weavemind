@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import { Sparkles, RefreshCw, Plus, Play } from 'lucide-react'
 import TaskTreeView from '../TaskTreeView'
 import type { TaskNode } from '../../stores/types'
@@ -7,7 +7,7 @@ const CAPABILITIES = ['web_search', 'web_fetch', 'content_summary', 'code_execut
   'data_loader', 'data_analyzer', 'model_trainer', 'report_generator', 'file_io', 'package']
 
 /** 执行计划面板 + 待确认时的可编辑确认区（TaskConsole 拆分 T11c）。 */
-export default function PlanPanel({
+export default memo(function PlanPanel({
   planTree, awaitingConfirm, revision, isRunning, taskId,
   markPlanConfirmed, onSelectStep,
 }: {
@@ -145,4 +145,4 @@ export default function PlanPanel({
       )}
     </div>
   )
-}
+})

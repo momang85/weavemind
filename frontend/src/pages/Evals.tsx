@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { useVisibleInterval } from '../lib/useVisibleInterval'
 import { FlaskConical, RefreshCw } from 'lucide-react'
 
 interface EvalScore { task_id: string; scores: Record<string, number> }
@@ -7,21 +8,22 @@ export default function Evals() {
   const [cal, setCal] = useState<Record<string, any>>({})
   const [recent, setRecent] = useState<EvalScore[]>([])
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
 
   const load = async () => {
     try {
       const d = await (await fetch('/api/evals')).json()
       setCal(d.calibration ?? {})
       setRecent(d.recent ?? [])
-    } catch {}
+      setError('')
+    } catch {
+      setError('加载评测数据失败，请检查后端服务')
+    }
     setLoading(false)
   }
 
-  useEffect(() => {
-    load()
-    const t = setInterval(load, 10000)
-    return () => clearInterval(t)
-  }, [])
+  useEffect(() => { load() }, [])
+  useVisibleInterval(load, 10000)
 
   const metrics = ['answer_correctness', 'faithfulness', 'context_recall', 'context_precision']
 
@@ -30,7 +32,7 @@ export default function Evals() {
       <div className="flex items-center gap-3">
         <FlaskConical className="w-6 h-6 text-cyan-400" />
         <h1 className="text-slate-200 text-lg font-semibold">评测看板</h1>
-        <button onClick={load} className="ml-auto text-slate-500 hover:text-cyan-400">
+        <button onClick={load} aria-label="刷新评测数据" className="ml-auto text-slate-500 hover:text-cyan-400">
           <RefreshCw className="w-4 h-4" />
         </button>
       </div>
@@ -64,7 +66,8 @@ export default function Evals() {
 
         <div className="lg:col-span-2 bg-slate-900 border border-slate-800 rounded-2xl p-5">
           <div className="text-xs text-slate-500 mb-3">最近任务评测分数（评测驱动反思）</div>
-          {recent.length === 0 && <div className="text-slate-600 text-xs">暂无评测记录（任务匹配到评测案例后自动产生）</div>}
+          {error && <div className="text-red-400 text-xs bg-red-500/10 border border-red-500/20 rounded-lg px-3 py-2 mb-3">{error}</div>}
+          {!error && recent.length === 0 && <div className="text-slate-600 text-xs">暂无评测记录（任务匹配到评测案例后自动产生）</div>}
           <div className="space-y-2 max-h-96 overflow-y-auto">
             {recent.map((r, i) => (
               <div key={i} className="bg-slate-800/40 border border-slate-800 rounded-lg p-3">

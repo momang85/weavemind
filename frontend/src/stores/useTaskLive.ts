@@ -22,7 +22,6 @@ export function useTaskLive(taskId: string | null) {
   useEffect(() => {
     if (!taskId || demoMode) return
 
-    console.log('[TaskLive] Starting for', taskId)
     seenLogs.current = new Set()
     lastHash.current = ''
     finished.current = false
@@ -141,7 +140,7 @@ export function useTaskLive(taskId: string | null) {
           stats: { totalSteps: rawSteps.length,
             successSteps: rawSteps.filter((s: any) => (s.result?.status||'').toLowerCase() === 'success').length,
             failedSteps: rawSteps.filter((s: any) => (s.result?.status||'').toLowerCase() === 'failed').length,
-            duration: 0 },
+            duration: Math.max(0, Math.round((Date.now() - (useTaskStore.getState().startedAt || Date.now())) / 1000)) },
           steps: rawSteps.map((s: any) => ({ id: s.step_id||'', step_id: s.step_id||'', capability: s.capability||'', name: s.instruction||'Step', status: (s.result?.status||'pending').toLowerCase(), children: [] })),
           final_report: d.report || d.final_report || '',
           // 验收缺口：SUCCESS_WITH_ISSUES 任务的报告顶部展示
@@ -162,13 +161,12 @@ export function useTaskLive(taskId: string | null) {
 
     const startPolling = () => {
       if (timerRef.current || stopped || finished.current) return
-      console.log('[TaskLive] SSE unavailable, falling back to polling')
       timerRef.current = setInterval(async () => {
         try {
           const res = await fetch('/task/' + taskId)
           const d = await res.json()
           await applySnapshot(d)
-        } catch (err) { console.log('[TaskLive/poll]', err) }
+        } catch { /* 网络错误静默，下轮重试 */ }
       }, 2000)
     }
 

@@ -181,21 +181,16 @@ function LazyAgentCard(props: any) {
   )
 }
 export default function AgentsPage() {
-  const [agents, setAgents] = useState<(AgentInfo & { load?: string })[]>([])
+
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
   const [search, setSearch] = useState('')
   const [filter, setFilter] = useState<string | null>(null)
-  const { connected } = useTaskStore()
+  const connected = useTaskStore(s => s.connected)
+  const agents = useTaskStore(s => s.agents)
+  const fetchSystemStatus = useTaskStore(s => s.fetchSystemStatus)
 
-  const fetchAgents = useCallback(async () => {
-    try {
-      const res = await fetch('/api/status')
-      const data = await res.json()
-      setAgents(data.agents ?? [])
-    } catch {}
-  }, [])
-
-  useEffect(() => { fetchAgents(); const t = setInterval(fetchAgents, 2000); return () => clearInterval(t) }, [fetchAgents])
+  // 复用全局 /api/status 通道（AppLayout 3s 轮询已覆盖），删除本页重复 2s poller
+  useEffect(() => { fetchSystemStatus() }, [fetchSystemStatus])
 
   // T6：单智能体直发（快答 API：先检索后作答，来源可见）
   const [directGoal, setDirectGoal] = useState('')
@@ -231,9 +226,9 @@ export default function AgentsPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ agent_id: id }),
       })
-      setTimeout(fetchAgents, 1500)
+      setTimeout(fetchSystemStatus, 1500)
     } catch { /* ignore */ }
-  }, [fetchAgents])
+  }, [fetchSystemStatus])
 
   const allCaps = useMemo(() => {
     const caps = new Set<string>()
@@ -255,7 +250,7 @@ export default function AgentsPage() {
     setExpanded(next)
   }
 
-  const autoGenIds = new Set<string>()
+
 
   return (
     <div className="max-w-6xl mx-auto space-y-5">
@@ -349,7 +344,7 @@ export default function AgentsPage() {
           <LazyAgentCard
             key={a.agent_id}
             agent={a}
-            isAutoGen={autoGenIds.has(a.agent_id)}
+            isAutoGen={false}
             expanded={expanded.has(a.agent_id)}
             onToggle={() => toggle(a.agent_id)}
             onKill={killAgent}

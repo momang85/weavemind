@@ -1,6 +1,7 @@
 // 指标看板页（T4）：GET /api/metrics（metrics_collector 汇总 JSON）
-import { useState, useEffect } from 'react'
-import { BarChart3 } from 'lucide-react'
+import { useState, useEffect, useCallback } from 'react'
+import { BarChart3, RefreshCw } from 'lucide-react'
+import { useVisibleInterval } from '../lib/useVisibleInterval'
 
 interface MetricsSummary {
   timestamp?: string
@@ -32,12 +33,15 @@ export default function MetricsPage() {
   const [m, setM] = useState<MetricsSummary | null>(null)
   const [error, setError] = useState('')
 
-  useEffect(() => {
+  const load = useCallback(() => {
     fetch('/api/metrics')
       .then(r => { if (!r.ok) throw new Error('no data'); return r.json() })
-      .then(d => setM(d))
+      .then(d => { setM(d); setError('') })
       .catch(() => setError('暂无指标数据（metrics 收集器运行后产生）'))
   }, [])
+
+  useEffect(() => { load() }, [load])
+  useVisibleInterval(load, 30000)
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
@@ -45,6 +49,9 @@ export default function MetricsPage() {
         <BarChart3 className="w-5 h-5 text-cyan-400" />
         <h1 className="text-lg font-semibold text-slate-200">指标看板</h1>
         {m?.timestamp && <span className="text-xs text-slate-500">更新于 {m.timestamp.slice(0, 19).replace('T', ' ')}</span>}
+        <button onClick={load} aria-label="刷新指标" className="ml-auto p-1.5 rounded-lg bg-slate-800 text-slate-400 hover:text-slate-200 transition-colors">
+          <RefreshCw className="w-4 h-4" />
+        </button>
       </div>
       {error && <div className="bg-amber-500/10 border border-amber-500/30 text-amber-400 text-sm rounded-lg px-4 py-3">{error}</div>}
       {m && (

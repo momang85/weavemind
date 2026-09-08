@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import { MessagesSquare, FolderOpen, Activity, Eye, RefreshCw } from 'lucide-react'
 import LiveActivity from '../LiveActivity'
 
@@ -14,7 +14,7 @@ function statusBadge(status: string) {
 
 /** 右侧三栏：实时动态 / 对话上下文 / 项目结果（TaskConsole 拆分 T11c）。
  * 步骤级流式输出轮询（/api/task/{id}/stream）随本组件生命周期收敛。 */
-export default function ConsoleSideTabs({
+export default memo(function ConsoleSideTabs({
   tab, setTab, taskId, isRunning,
   convMessages, resultItems, activeConversationId,
   gapsFor, onToggleGaps, onViewReport, onSubmit,
@@ -31,21 +31,29 @@ export default function ConsoleSideTabs({
   onViewReport: (tid: string) => void
   onSubmit: (goalOverride?: string) => void
 }) {
-  // 步骤级流式输出（O-21）：运行中轮询 /api/task/<id>/stream 实时显示生成内容
+  // 步骤级流式输出（O-21）：运行中且停留在"实时动态"标签时才轮询
+  // /api/task/<id>/stream；内容不变不 setState（此前每 1.5s 无条件写入新字符串）
   const [streamText, setStreamText] = useState('')
+  const streamRef = useRef<HTMLPreElement>(null)
   useEffect(() => {
-    if (!taskId || !isRunning) { setStreamText(''); return }
+    if (!taskId || !isRunning || tab !== 'live') { setStreamText(''); return }
     let cancelled = false
+    let last = ''
     const poll = async () => {
       try {
         const d = await (await fetch('/api/task/' + taskId + '/stream')).json()
-        if (!cancelled) setStreamText(d.text || '')
+        const text = d.text || ''
+        if (!cancelled && text !== last) { last = text; setStreamText(text) }
       } catch {}
     }
     poll()
     const t = setInterval(poll, 1500)
     return () => { cancelled = true; clearInterval(t) }
-  }, [taskId, isRunning])
+  }, [taskId, isRunning, tab])
+  // 流式内容自动滚底
+  useEffect(() => {
+    if (streamRef.current) streamRef.current.scrollTop = streamRef.current.scrollHeight
+  }, [streamText])
 
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden flex flex-col">
@@ -73,7 +81,7 @@ export default function ConsoleSideTabs({
                 <div className="text-[10px] text-cyan-400 font-semibold mb-1">
                   生成内容（流式）· 实时
                 </div>
-                <pre className="whitespace-pre-wrap break-all text-slate-300 text-xs font-sans max-h-48 overflow-y-auto">
+                <pre ref={streamRef} className="whitespace-pre-wrap break-all text-slate-300 text-xs font-sans max-h-48 overflow-y-auto">
                   {streamText}
                 </pre>
               </div>
@@ -177,4 +185,4 @@ export default function ConsoleSideTabs({
       </div>
     </div>
   )
-}
+})

@@ -35,6 +35,8 @@ export default function Memory() {
   const [loading, setLoading] = useState(true)
   const [summary, setSummary] = useState('')
   const [summaryLoading, setSummaryLoading] = useState(false)
+  const [notice, setNotice] = useState('')
+  const [busyAction, setBusyAction] = useState('')
 
   const load = useCallback(async () => {
     try {
@@ -74,20 +76,31 @@ export default function Memory() {
     if (!summary) return
     try {
       await navigator.clipboard.writeText(summary)
-      alert('已复制')
-    } catch {}
+      setNotice('已复制')
+    } catch {
+      setNotice('复制失败')
+    }
   }
 
   const toggle = (id: string) => setExpanded(prev => ({ ...prev, [id]: !prev[id] }))
 
   const triggerEvolution = async () => {
+    if (busyAction) return
+    setBusyAction('evolution')
     try {
       await fetch('/api/evolution/trigger', { method: 'POST' })
-      alert('进化已触发，约需数分钟完成，稍后刷新查看回放。')
-    } catch {}
+      setNotice('进化已触发，约需数分钟完成，稍后刷新查看回放。')
+    } catch {
+      setNotice('触发失败，请检查后端服务')
+    } finally {
+      setBusyAction('')
+    }
   }
 
   const approveStrategy = async (id: string, approve: boolean) => {
+    if (busyAction) return
+    if (!window.confirm(`确认${approve ? '批准' : '驳回'}该进化策略？`)) return
+    setBusyAction(id)
     try {
       await fetch('/api/evolution/approve', {
         method: 'POST',
@@ -95,11 +108,18 @@ export default function Memory() {
         body: JSON.stringify({ strategy_id: id, approve }),
       })
       await load()
-    } catch {}
+      setNotice(approve ? '策略已批准' : '策略已驳回')
+    } catch {
+      setNotice('操作失败，请重试')
+    } finally {
+      setBusyAction('')
+    }
   }
 
   const del = async (type: 'conversations' | 'strategies', ids: string[]) => {
-    if (!ids.length) return
+    if (!ids.length || busyAction) return
+    if (!window.confirm(`确认删除 ${ids.length} 条${type === 'conversations' ? '记忆' : '策略'}？此操作不可撤销。`)) return
+    setBusyAction('del-' + type)
     try {
       await fetch('/api/memory/delete', {
         method: 'POST',
@@ -107,14 +127,20 @@ export default function Memory() {
         body: JSON.stringify({ type, ids }),
       })
       await load()
-    } catch {}
+      setNotice('删除完成')
+    } catch {
+      setNotice('删除失败，请重试')
+    } finally {
+      setBusyAction('')
+    }
   }
 
   return (
     <div className="max-w-6xl mx-auto space-y-6">
       <div className="flex items-center justify-between">
         <h2 className="text-slate-200 font-semibold text-lg">记忆与进化</h2>
-        <button onClick={load} className="text-xs text-cyan-400 hover:text-cyan-300">刷新</button>
+        {notice && <div className="text-xs text-cyan-400 bg-cyan-500/10 border border-cyan-500/20 rounded-lg px-3 py-2">{notice}</div>}
+        <button onClick={load} aria-label="刷新记忆数据" className="text-xs text-cyan-400 hover:text-cyan-300">刷新</button>
       </div>
 
       {/* 记忆健康度（P2 可观测：命中率 / 集合规模 / 过期清理） */}
@@ -194,8 +220,8 @@ export default function Memory() {
                       <span className="text-slate-300 text-xs truncate flex-1">{c.metadata.goal || (c.content || '').slice(0, 60)}</span>
                       {c.metadata.timestamp && <span className="text-slate-600 text-[10px]">{String(c.metadata.timestamp).slice(0, 16)}</span>}
                       {c.id && (
-                        <button onClick={() => del('conversations', [c.id!])}
-                          className="text-slate-600 hover:text-red-400 text-[10px] px-1">删除</button>
+                        <button onClick={() => del('conversations', [c.id!])} disabled={!!busyAction}
+                          className="text-slate-600 hover:text-red-400 text-[10px] px-1 disabled:opacity-40">删除</button>
                       )}
                     </div>
                   </div>
@@ -215,7 +241,7 @@ export default function Memory() {
                       <span className="text-violet-300 text-xs truncate flex-1">{String(s.metadata.goal_keywords || '').slice(0, 60) || '策略'}</span>
                       {s.metadata.step_count && chip(`${s.metadata.step_count} 步`, 'bg-slate-700/50 text-slate-400')}
                       {s.id && (
-                        <button onClick={() => del('strategies', [s.id!])}
+                        <button onClick={() => del('strategies', [s.id!])} disabled={!!busyAction}
                           className="text-slate-600 hover:text-red-400 text-[10px] px-1">删除</button>
                       )}
                     </button>
@@ -263,11 +289,11 @@ export default function Memory() {
                   </div>
                 )}
                 <div className="mt-3 flex gap-2">
-                  <button onClick={() => approveStrategy(p.strategy_id, true)}
+                  <button onClick={() => approveStrategy(p.strategy_id, true)} disabled={!!busyAction}
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 text-xs">
                     <CheckCircle2 className="w-3.5 h-3.5" /> 批准部署
                   </button>
-                  <button onClick={() => approveStrategy(p.strategy_id, false)}
+                  <button onClick={() => approveStrategy(p.strategy_id, false)} disabled={!!busyAction}
                     className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs">
                     <XCircle className="w-3.5 h-3.5" /> 驳回
                   </button>

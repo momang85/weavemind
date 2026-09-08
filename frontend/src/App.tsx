@@ -1,20 +1,30 @@
-import { Component, useEffect, useState, type ReactNode } from 'react'
+import { Component, Suspense, lazy, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Routes, Route } from 'react-router-dom'
-import { AlertTriangle, RefreshCw } from 'lucide-react'
+import { AlertTriangle, Loader2, RefreshCw } from 'lucide-react'
 import AppLayout from './components/AppLayout'
 import Login from './components/Login'
-import TaskConsole from './pages/TaskConsole'
-import AgentsPage from './pages/Agents'
-import History from './pages/History'
-import HealthPage from './pages/Health'
-import SettingsPage from './pages/Settings'
-import AuditPage from './pages/AuditPage'
-import MetricsPage from './pages/MetricsPage'
-import MemoryPage from './pages/Memory'
-import EvalsPage from './pages/Evals'
-import SkillsPage from './pages/Skills'
 import { useTaskStore } from './stores/useTaskStore'
 import { installAuthFetch, isAuthed, verifySession } from './auth'
+
+// 路由级代码分割：重页面独立 chunk，主包不承载 markdown/syntax-highlighter 重依赖
+const TaskConsole = lazy(() => import('./pages/TaskConsole'))
+const AgentsPage = lazy(() => import('./pages/Agents'))
+const History = lazy(() => import('./pages/History'))
+const HealthPage = lazy(() => import('./pages/Health'))
+const SettingsPage = lazy(() => import('./pages/Settings'))
+const AuditPage = lazy(() => import('./pages/AuditPage'))
+const MetricsPage = lazy(() => import('./pages/MetricsPage'))
+const MemoryPage = lazy(() => import('./pages/Memory'))
+const EvalsPage = lazy(() => import('./pages/Evals'))
+const SkillsPage = lazy(() => import('./pages/Skills'))
+
+function PageFallback() {
+  return (
+    <div className="flex items-center justify-center py-20 text-slate-500 text-sm">
+      <Loader2 className="w-4 h-4 animate-spin mr-2" /> 页面加载中…
+    </div>
+  )
+}
 
 // 全局 fetch 包装：会话凭据由浏览器自动携带的 session Cookie 完成，无需前端注入。
 // 数据接口 401 时回到登录页。
@@ -59,7 +69,8 @@ class ErrorBoundary extends Component<
 
 // ── App Root ──
 export default function App() {
-  const { toggleDemo, fetchSystemStatus } = useTaskStore()
+  const toggleDemo = useTaskStore(s => s.toggleDemo)
+  const fetchSystemStatus = useTaskStore(s => s.fetchSystemStatus)
   const isDemo = () => new URLSearchParams(window.location.search).has('demo')
   const [authed, setAuthed] = useState(() => isAuthed() || isDemo())
 
@@ -89,9 +100,9 @@ export default function App() {
     return <Login />
   }
 
-  return (
-    <ErrorBoundary>
-      <AppLayout>
+  const content = useMemo(() => (
+    <AppLayout>
+      <Suspense fallback={<PageFallback />}>
         <Routes>
           <Route path="/" element={<TaskConsole />} />
           <Route path="/agents" element={<AgentsPage />} />
@@ -104,7 +115,9 @@ export default function App() {
           <Route path="/audit" element={<AuditPage />} />
           <Route path="/metrics" element={<MetricsPage />} />
         </Routes>
-      </AppLayout>
-    </ErrorBoundary>
-  )
+      </Suspense>
+    </AppLayout>
+  ), [])
+
+  return <ErrorBoundary>{content}</ErrorBoundary>
 }

@@ -1,10 +1,10 @@
-import { useEffect, useState } from 'react'
-import { Loader2, Sparkles, RefreshCw, Plus, MessagesSquare, FileText, ChevronDown, Upload, Zap, ExternalLink } from 'lucide-react'
+import { memo, useEffect, useState } from 'react'
+import { Loader2, Sparkles, RefreshCw, Plus, MessagesSquare, FileText, ChevronDown, Upload, Zap, ExternalLink, X } from 'lucide-react'
 
 /** 快答结果卡片：正文 + 来源链接 + 诚实降级标签。 */
-function QuickAnswerCard({ qa }: { qa: any }) {
+function QuickAnswerCard({ qa, onClose }: { qa: any; onClose: () => void }) {
   return (
-    <div className="bg-cyan-500/5 border border-cyan-500/20 rounded-xl p-3 space-y-2">
+    <div id="quick-answer-card" className="bg-cyan-500/5 border border-cyan-500/20 rounded-xl p-3 space-y-2">
       <div className="flex items-center gap-2 text-[10px]">
         <Zap className="w-3 h-3 text-cyan-400" />
         <span className="text-cyan-400 font-semibold">快答</span>
@@ -15,7 +15,11 @@ function QuickAnswerCard({ qa }: { qa: any }) {
         ) : (
           <span className="text-amber-400">模型知识 · 未检索（未验证）</span>
         )}
-        <span className="text-slate-600 ml-auto">{qa.duration}s</span>
+        <span className="text-slate-600">{qa.duration}s</span>
+        <button onClick={onClose} aria-label="关闭快答"
+          className="ml-auto p-0.5 rounded text-slate-600 hover:text-slate-300 transition-colors">
+          <X className="w-3.5 h-3.5" />
+        </button>
       </div>
       <pre className="whitespace-pre-wrap break-all text-slate-300 text-xs font-sans max-h-64 overflow-y-auto">{qa.content}</pre>
       {qa.sources?.length > 0 && (
@@ -35,7 +39,7 @@ function QuickAnswerCard({ qa }: { qa: any }) {
 }
 
 /** 任务提交区 + 上下文导入区（TaskConsole 拆分 T11c）。 */
-export default function SubmitPanel({
+export default memo(function SubmitPanel({
   goal, setGoal, project, setProject, confirmMode, setConfirmMode,
   templateName, setTemplateName,
   userContext, setUserContext, importMsg, setImportMsg,
@@ -119,6 +123,10 @@ export default function SubmitPanel({
       const d = await res.json()
       if (d.error) setQa({ content: d.error, sources: [], mode: 'error', duration: 0 })
       else setQa(d)
+      requestAnimationFrame(() => {
+        document.getElementById('quick-answer-card')
+          ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+      })
     } catch {
       setQa({ content: '请求失败，请稍后重试', sources: [], mode: 'error', duration: 0 })
     } finally {
@@ -143,7 +151,7 @@ export default function SubmitPanel({
           快答
         </button>
       </div>
-      {qa && <QuickAnswerCard qa={qa} />}
+      {qa && <QuickAnswerCard qa={qa} onClose={() => setQa(null)} />}
 
       {/* 输入区 */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-1.5 flex items-end gap-2">
@@ -240,4 +248,5 @@ export default function SubmitPanel({
       </div>
     </>
   )
-}
+
+})

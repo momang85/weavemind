@@ -3,6 +3,7 @@ import { NavLink, useLocation } from 'react-router-dom'
 import { Settings } from 'lucide-react'
 import { Play, Users, Clock, Activity, PanelLeftClose, PanelLeft, Brain, FlaskConical, Layers, LogOut, Shield } from 'lucide-react'
 import { useTaskStore } from '../stores/useTaskStore'
+import { useVisibleInterval } from '../lib/useVisibleInterval'
 import { useDemoRunner } from '../stores/useDemoRunner'
 import { clearAuth, getAuthUser } from '../auth'
 import ModeToggle from './ModeToggle'
@@ -22,7 +23,16 @@ const navItems = [
 
 export default function AppLayout({ children }: { children: ReactNode }) {
   const [collapsed, setCollapsed] = useState(window.innerWidth < 768)
-  const { demoMode, connected, toggleDemo, fetchSystemStatus, agents, currentTaskId, planTree, logs, report, status } = useTaskStore()
+  const demoMode = useTaskStore(s => s.demoMode)
+  const connected = useTaskStore(s => s.connected)
+  const agents = useTaskStore(s => s.agents)
+  const currentTaskId = useTaskStore(s => s.currentTaskId)
+  const planTree = useTaskStore(s => s.planTree)
+  const logs = useTaskStore(s => s.logs)
+  const report = useTaskStore(s => s.report)
+  const status = useTaskStore(s => s.status)
+  const toggleDemo = useTaskStore(s => s.toggleDemo)
+  const fetchSystemStatus = useTaskStore(s => s.fetchSystemStatus)
   const user = getAuthUser()
   const location = useLocation()
   useDemoRunner()
@@ -34,13 +44,13 @@ export default function AppLayout({ children }: { children: ReactNode }) {
     clearAuth()
   }
 
+  useVisibleInterval(fetchSystemStatus, 3000)
   useEffect(() => {
     fetchSystemStatus()
-    const t = setInterval(fetchSystemStatus, 3000)
     const onResize = () => { if (window.innerWidth < 768) setCollapsed(true) }
     window.addEventListener('resize', onResize)
 
-    return () => { clearInterval(t); window.removeEventListener('resize', onResize) }
+    return () => { window.removeEventListener('resize', onResize) }
   }, [])
 
   const titles: Record<string, string> = {

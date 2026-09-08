@@ -105,15 +105,11 @@ export interface SystemStatus {
   llm_usage?: { calls: number; prompt_tokens: number; completion_tokens: number }
 }
 
-export interface WSMessage {
-  type: 'plan_update' | 'log' | 'agent_status' | 'task_complete' | 'error'
-  payload: any
-}
-
 export type TaskStatus = 'idle' | 'running' | 'completed'
 
 export interface TaskState {
   currentTaskId: string | null
+  startedAt: number
   activeConversationId: string | null
   awaitingConfirm: boolean
   revision: boolean
