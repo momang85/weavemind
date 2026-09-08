@@ -1263,17 +1263,23 @@ _NUMERIC_REQUIREMENT_KEYWORDS = (
 )
 
 
-def check_deliverable_completeness(report: str, goal: str) -> dict:
+def check_deliverable_completeness(
+    report: str, goal: str, domain: str | None = None,
+) -> dict:
     """交付物完整性检查：从 goal 提取关键交付要求（列表/前十/排名/表格类
     与数字要求），检查报告是否被数据缺失占位标记填满、是否缺少必需表格。
 
     规则：
-    - 报告含未披露/未获取/待补充/数据缺失等占位标记 ≥3 处 → FAIL；
+    - financial 域报告含未披露/未获取/待补充/数据缺失等占位标记 ≥3 处 → FAIL；
+      非金融域（行业调研/新闻/宏观/加密货币等）豁免该惩罚——诚实披露
+      "数据缺失"本身就是交付质量，数字溯源仍由 number_traceability 把关，
+      避免"调研任务必然 SUCCESS_WITH_ISSUES"的结构性双重惩罚；
     - goal 要求列表/前十/排名且报告无任何表格，或表格内容全为占位 → FAIL；
     - 正常完整报告（含真实数据表格/无列表要求）→ pass。
     """
     r = str(report or "")
     g = str(goal or "").lower()
+    domain = domain or traceability_domain(goal)
     placeholder_count = sum(r.count(m) for m in _PLACEHOLDER_MARKERS)
     list_required = any(k in g for k in _LIST_REQUIREMENT_KEYWORDS)
     numeric_required = any(k in g for k in _NUMERIC_REQUIREMENT_KEYWORDS)
@@ -1307,7 +1313,7 @@ def check_deliverable_completeness(report: str, goal: str) -> dict:
                 any(m in c for m in _PLACEHOLDER_MARKERS) for c in filled
             )
 
-    if placeholder_count >= 3:
+    if placeholder_count >= 3 and domain == "financial":
         passed = False
         detail = (
             f"交付物不完整：报告含 {placeholder_count} 处数据缺失占位"
@@ -1321,12 +1327,20 @@ def check_deliverable_completeness(report: str, goal: str) -> dict:
         )
     else:
         passed = True
-        detail = (
-            f"交付物完整性：占位标记 {placeholder_count} 处"
-            + ("，含数据表格" if has_table else "，无表格要求或表格非必需")
-            + ("，目标要求列表/前十" if list_required else "")
-            + ("，目标含数字要求" if numeric_required else "")
-        )
+        if placeholder_count >= 3:
+            # 非金融域豁免：诚实披露数据缺失不双重惩罚（数字溯源仍从严）
+            detail = (
+                f"交付物完整性：报告含 {placeholder_count} 处数据缺失占位，"
+                f"非金融域（{domain}）豁免占位惩罚——诚实披露视为交付质量，"
+                "数字要求仍由 number_traceability 把关"
+            )
+        else:
+            detail = (
+                f"交付物完整性：占位标记 {placeholder_count} 处"
+                + ("，含数据表格" if has_table else "，无表格要求或表格非必需")
+                + ("，目标要求列表/前十" if list_required else "")
+                + ("，目标含数字要求" if numeric_required else "")
+            )
     return {
         "pass": passed,
         "details": detail,
@@ -1564,7 +1578,7 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace) -> dict
     )
     checks["source_labeling"] = check_source_labeling(report_text, sources)
     checks["deliverable_completeness"] = check_deliverable_completeness(
-        report_text, goal,
+        report_text, goal, domain=domain,
     )
     # V1.2 竞品启示：三级溯源链 / 数据时效 / 免责声明。
     # financial 域计入 overall；无来源清单特征/无时效语义时检查自身跳过；

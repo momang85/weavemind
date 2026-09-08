@@ -818,6 +818,19 @@ class TestP2StreamHealth(unittest.TestCase):
         self.assertTrue(llm_client._primary_healthy())
         llm_client._mark_endpoint("primary", True)  # 还原
 
+    def test_endpoint_single_failure_no_flap(self):
+        """1a：失败阈值=2 时单次瞬时失败不判不健康（防主备互切抖动）。"""
+        import llm_client
+
+        with mock.patch.object(llm_client, "_ENDPOINT_FAIL_THRESHOLD", 2):
+            llm_client._mark_endpoint("primary", True)  # 复位
+            llm_client._mark_endpoint("primary", False)
+            self.assertTrue(llm_client._primary_healthy())
+            llm_client._mark_endpoint("primary", False)
+            self.assertFalse(llm_client._primary_healthy())
+        llm_client._mark_endpoint("primary", True)
+        llm_client._mark_endpoint("primary", True)  # 还原
+
 
 class TestP1Validators(unittest.TestCase):
     def test_builtin_validators_registered(self):
@@ -3866,6 +3879,17 @@ class TestPhase2ClassifierRouter(unittest.TestCase):
         for g in ("贵州茅台最新股价", "腾讯2025年报分析", "写一篇关于AI的报告"):
             self.assertFalse(_is_ranking_goal(g), g)
 
+    def test_is_industry_research_goal(self):
+        """行业调研目标（非财务域 + 行业关键词）→ 走 news 预载分支；财务域不触发。"""
+        from adapters.router import _is_industry_research_goal
+        for g in ("新能源行业现状与进展", "半导体产业格局分析",
+                  "低空经济政策盘点", "AI 赛道发展调研"):
+            self.assertTrue(_is_industry_research_goal(g), g)
+        # 财务域即使含行业措辞也不触发（公司研究走财务链路）
+        for g in ("宁德时代行业营收分析", "腾讯控股产业现状与财报",
+                  "A股成交额前十", "写一篇关于AI的报告"):
+            self.assertFalse(_is_industry_research_goal(g), g)
+
     def test_multi_entity_edge_cases(self):
         """多实体边界审查补丁：'给出'不得混入；时间词不吞入；普通'与'不误拆。"""
         from task_classifier import classify_task
@@ -5579,6 +5603,85 @@ class TestNewDataAdapters(unittest.TestCase):
         self.assertEqual(out["items"][0]["title"], "头条一")
         self.assertEqual(out["items"][1]["link"], "https://a.example/2")
         self.assertIsNone(parse_news_rss("<rss></rss>"))
+
+    def test_news_fallback_from_text_search(self):
+        """2a：RSS 不可达时 fetch_news_fallback 走 Bing/ddgs 检索链，source 如实标注。"""
+        from adapters import text_search
+        from adapters.news import fetch_news_fallback
+
+        with mock.patch.object(
+            text_search, "web_text_search",
+            return_value=[
+                {"title": "固态电池进展", "url": "https://x.example/1",
+                 "snippet": "s", "engine": "bing"},
+            ],
+        ):
+            out = fetch_news_fallback("固态电池")
+        self.assertIsNotNone(out)
+        self.assertEqual(out["source"], "bing")
+        self.assertEqual(out["items"][0]["title"], "固态电池进展")
+        self.assertEqual(out["items"][0]["link"], "https://x.example/1")
+        self.assertEqual(out["metadata"]["label"], "Bing 搜索结果")
+        # 检索空结果 → None（调用方诚实降级为 model_knowledge）
+        with mock.patch.object(text_search, "web_text_search", return_value=[]):
+            self.assertIsNone(fetch_news_fallback("无结果"))
+
+    def test_text_search_bing_parse_canned(self):
+        """2a：Bing HTML 解析（含 /ck/a 跳转解码）→ 结果列表。"""
+        from adapters import text_search
+
+        html = (
+            '<li class="b_algo"><h2><a href="https://x.example/1">标题一</a></h2>'
+            "<p>摘要一</p></li>"
+            '<li class="b_algo"><h2><a href="https://www.bing.com/ck/a?u=a1aHR0cHM6Ly95LmV4YW1wbGUvMg">'
+            "标题二</a></h2><p>摘要二</p></li>"
+        )
+        with mock.patch.object(text_search, "_fetch_bing_html", return_value=html):
+            out = text_search.web_text_search("q", max_results=5)
+        self.assertEqual(len(out), 2)
+        self.assertEqual(out[0]["title"], "标题一")
+        self.assertEqual(out[0]["url"], "https://x.example/1")
+        self.assertEqual(out[0]["engine"], "bing")
+        self.assertEqual(out[1]["url"], "https://y.example/2")
+
+    def test_text_search_ddg_fallback_and_empty(self):
+        """2a：Bing 失败 → ddgs 引擎探测兜底；全部失败返回空列表（不抛）。"""
+        from adapters import text_search
+
+        with mock.patch.object(
+            text_search, "_fetch_bing_html", side_effect=RuntimeError("net down"),
+        ), mock.patch.object(
+            text_search, "_search_ddg",
+            return_value=[{"title": "t", "url": "https://y.example/1",
+                           "snippet": "s", "engine": "duckduckgo:yandex"}],
+        ):
+            out = text_search.web_text_search("q")
+        self.assertEqual(out[0]["engine"], "duckduckgo:yandex")
+        with mock.patch.object(
+            text_search, "_fetch_bing_html", side_effect=RuntimeError("x"),
+        ), mock.patch.object(text_search, "_search_ddg", return_value=[]):
+            self.assertEqual(text_search.web_text_search("q"), [])
+
+    def test_router_news_fallback_when_rss_down(self):
+        """2a/2b：Google News RSS 不可达 → fallback 兜底，news 分支照常返回。"""
+        import adapters.router as router
+
+        fb = {
+            "source": "bing", "query": "头条",
+            "items": [{"title": "新闻一", "link": "https://b.example/1",
+                       "published": ""}],
+            "metadata": {"label": "Bing 搜索结果"},
+        }
+        with mock.patch.object(router, "fetch_news", return_value=None), \
+                mock.patch.object(router, "fetch_news_fallback", return_value=fb):
+            out = router.route_structured("最新新闻头条要闻")
+            industry = router.route_structured("固态电池行业现状与进展")
+        self.assertEqual(out["source"], "news")
+        self.assertEqual(out["data"]["items"][0]["link"], "https://b.example/1")
+        self.assertEqual(out["metadata"]["label"], "Bing 搜索结果")
+        # 2b：行业调研目标同样预载 news 数据
+        self.assertEqual(industry["source"], "news")
+        self.assertEqual(industry["data"]["items"][0]["title"], "新闻一")
 
     def test_router_keyword_routing(self):
         import adapters.router as router

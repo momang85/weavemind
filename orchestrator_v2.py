@@ -168,6 +168,36 @@ def _loads_json_loose(text: str) -> dict:
     except json.JSONDecodeError:
         return json.loads(text, strict=False)
 
+
+def filter_dead_search_results(parsed: list, timeout: float = 4) -> tuple[list, int]:
+    """2c 死链治理：剔除 URL 明确 dead 的搜索结果项（探测内部自带 1 次
+    重试防误杀），减少报告"来源链接失效"。返回 (过滤后列表, 剔除条数)。
+
+    任何探测异常静默放行全部结果——检索可用性优先，不伤任务主线；
+    URL_HEALTH_CHECK=0 时关闭过滤。"""
+    if os.environ.get("URL_HEALTH_CHECK", "1") == "0":
+        return parsed, 0
+    try:
+        src_urls = [
+            str((it or {}).get("url") or "").strip()
+            for it in parsed
+            if str((it or {}).get("url") or "").strip().startswith("http")
+        ]
+        if not src_urls:
+            return parsed, 0
+        from adapters.url_health import check_urls
+        health = check_urls(src_urls, timeout=timeout)
+        kept = [
+            it for it in parsed
+            if health.get(
+                str((it or {}).get("url") or "").strip(), "alive",
+            ) != "dead"
+        ]
+        return kept, len(parsed) - len(kept)
+    except Exception as exc:
+        logger.warning("web_search dead-link filter failed: %s", exc)
+        return parsed, 0
+
 # ─────────────────────────────────────────────
 # Planner prompt
 # ─────────────────────────────────────────────
@@ -4132,6 +4162,14 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 except Exception:
                     parsed = None
                 if isinstance(parsed, list):
+                    # 2c 死链治理：累计引用/落盘前剔除明确 dead 的链接，
+                    # 减少报告"来源链接失效"（探测异常静默放行，不伤任务主线）
+                    parsed, _dropped = filter_dead_search_results(parsed)
+                    if _dropped:
+                        logger.info(
+                            "web_search dead-link filter for %s: dropped %d/%d results",
+                            task_id, _dropped, _dropped + len(parsed),
+                        )
                     with self._task_sources_lock:
                         bucket = self._task_sources.setdefault(task_id, [])
                         for it in parsed:

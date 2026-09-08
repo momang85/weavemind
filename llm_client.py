@@ -159,10 +159,13 @@ def _ensure_cfg_fresh() -> None:
 # LLM 端点健康检查与自动切流（O-29，对标标准 C4-4.3 稳定性）
 # ---------------------------------------------------------------------------
 
-# 端点失败阈值：1 次失败即标记不健康，让健康路由在下一次调用直接切备用。
-# （原为 2：导致每次调用都在已失败的主端点上白等一轮超时才切换。
-# 监控线程 _health_monitor_loop 会周期性探测并恢复健康端点，不会永久禁用。）
-_ENDPOINT_FAIL_THRESHOLD = int(os.environ.get("LLM_ENDPOINT_FAIL_THRESHOLD", "1") or 1)
+# 端点失败阈值：连续 N 次失败才标记不健康（env LLM_ENDPOINT_FAIL_THRESHOLD，
+# 默认 2）。阈值 1 时一次瞬时抖动（timeout/504/连接重置）即判死端点，
+# 主备互切抖动；2 次连续失败能过滤绝大多数瞬时错误。恢复侧已由
+# _health_monitor_loop 的"连续 N 次探测成功"防抖（LLM_HEALTH_RESTORE）。
+_ENDPOINT_FAIL_THRESHOLD = max(
+    1, int(os.environ.get("LLM_ENDPOINT_FAIL_THRESHOLD", "2") or 2)
+)
 
 
 def _mark_endpoint(endpoint: str, ok: bool, reason: str = "") -> None:
@@ -479,6 +482,23 @@ def get_balance_status(use_cache: bool = True) -> dict:
         _balance_cache["ts"] = time.time()
         _balance_cache["data"] = result
     return {k: dict(v) for k, v in result.items()}
+
+
+def endpoint_hosts() -> dict[str, str]:
+    """主/备端点主机名（小写，含端口前域名）。用于提交预检提示"主备同源"风险：
+    主备指向同一供应商时余额/限流故障会同时打挂两端，健康路由无路可切。"""
+    def _host(url: str) -> str:
+        try:
+            from urllib.parse import urlparse
+            return (urlparse(str(url)).hostname or "").lower()
+        except Exception:
+            return ""
+
+    _ensure_cfg_fresh()
+    return {
+        "primary": _host(os.environ.get("LLM_BASE_URL") or ""),
+        "backup": _host(_BACKUP_CFG.get("base_url") or ""),
+    }
 
 
 def endpoints_available() -> tuple[bool, str]:

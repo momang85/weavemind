@@ -1423,6 +1423,50 @@ class TestV12ReportFormatAndUrlHealth(unittest.TestCase):
             ws_mod.WORKSPACE_ROOT = old_root
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_filter_dead_search_results_drops_dead(self):
+        """2c：web_search 结果落盘前剔除明确 dead 的 URL，保留 alive。"""
+        from adapters import url_health
+        from orchestrator_v2 import filter_dead_search_results
+
+        parsed = [
+            {"url": "https://alive.example/a", "title": "t1"},
+            {"url": "https://dead.example/b", "title": "t2"},
+            {"url": "https://gone.example/c", "title": "t3"},
+            {"title": "无 URL 条目应保留"},
+        ]
+        with mock.patch.object(
+            url_health, "check_urls",
+            return_value={
+                "https://alive.example/a": "alive",
+                "https://dead.example/b": "dead",
+                "https://gone.example/c": "dead",
+            },
+        ):
+            kept, dropped = filter_dead_search_results(parsed)
+        self.assertEqual(dropped, 2)
+        self.assertEqual(
+            [it.get("url") for it in kept],
+            ["https://alive.example/a", None],
+        )
+
+    def test_filter_dead_search_results_silent_on_error(self):
+        """2c：探测异常/关闭时静默放行全部结果，不伤检索可用性。"""
+        from adapters import url_health
+        from orchestrator_v2 import filter_dead_search_results
+
+        parsed = [{"url": "https://x.example/a", "title": "t1"}]
+        with mock.patch.object(
+            url_health, "check_urls", side_effect=RuntimeError("boom"),
+        ):
+            kept, dropped = filter_dead_search_results(parsed)
+        self.assertEqual(dropped, 0)
+        self.assertEqual(kept, parsed)
+        with mock.patch.dict(os.environ, {"URL_HEALTH_CHECK": "0"}), \
+                mock.patch.object(url_health, "check_urls") as chk:
+            kept, dropped = filter_dead_search_results(parsed)
+        self.assertEqual(dropped, 0)
+        chk.assert_not_called()
+
 
 class TestArtifactWhitelistInjection(unittest.TestCase):
     """P0：报告"抄产物"泄漏修复——产物文件注入白名单。

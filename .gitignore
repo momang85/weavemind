@@ -65,3 +65,7 @@ workspace/
 .venv-train/
 .venv/
 metrics_summary.json
+
+# 本地配置备份（含真实凭据，绝不入库）
+config.json.bak
+.zcode/

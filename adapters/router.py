@@ -21,7 +21,7 @@ from adapters.cninfo import fetch_cn_or_fallback
 from adapters.sec_edgar import fetch as fetch_sec
 from adapters.coingecko import fetch_market, coin_id
 from adapters.macro import fetch_macro
-from adapters.news import fetch_news
+from adapters.news import fetch_news, fetch_news_fallback
 from adapters.ashare_ranking import fetch_ranking
 from adapters.sina_ranking import fetch_ranking as fetch_sina_ranking
 from adapters.tencent_quotes import (
@@ -51,6 +51,10 @@ _FAST_PATH_MAX_TOP_N = 50
 _STATISTICAL_KEYWORDS = (
     "占比", "比例", "百分位", "分布", "合计", "汇总",
     "份额", "集中度", "全市场", "整个市场",
+)
+# 行业/政策调研类目标关键词：命中且非财务域时接入 news 适配器预载新闻
+_INDUSTRY_RESEARCH_KEYWORDS = (
+    "行业", "赛道", "产业", "格局", "现状", "进展", "政策",
 )
 
 # P1：数据能力注册表（{source: {markets, metrics, scale, paginated, max_top_n}}）
@@ -253,6 +257,20 @@ def _match_data_source(
         ):
             return name
     return None
+
+
+def _is_industry_research_goal(goal: str) -> bool:
+    """是否行业/政策调研类目标（非财务域）：命中行业研究关键词时，
+    接入 news 适配器预载结构化新闻数据（fetch_news 境内不可达时由
+    fetch_news_fallback 兜底）。仅作路由补充，不动财务五类分支。"""
+    try:
+        cls = classify_task(str(goal or ""))
+        if cls.get("domain") == "financial":
+            return False
+        g = str(goal or "")
+        return any(k in g for k in _INDUSTRY_RESEARCH_KEYWORDS)
+    except Exception:
+        return False
 
 
 def _has_financial_entities(goal: str) -> bool:
@@ -577,9 +595,9 @@ def route_structured(goal: str) -> dict | None:
             }
             return _wrap("macro", data, meta)
         return None
-    if _keyword_hit(goal, _NEWS_KEYWORDS):
+    if _keyword_hit(goal, _NEWS_KEYWORDS) or _is_industry_research_goal(goal):
         try:
-            out = fetch_news(str(goal or "")[:80])
+            out = fetch_news(str(goal or "")[:80]) or fetch_news_fallback(str(goal or "")[:80])
         except Exception as exc:
             logger.warning("news fetch failed: %s", exc)
             return None

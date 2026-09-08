@@ -3094,6 +3094,59 @@ class TestDeliverableCompleteness(unittest.TestCase):
         self.assertFalse(res["pass"])
         self.assertTrue(res["table_all_placeholder"])
 
+    def test_placeholder_penalty_exempt_for_research_domain(self):
+        """行业调研（非金融域）：诚实披露数据缺失不双重惩罚——占位不扣分，
+        数字溯源仍由 number_traceability 把关。"""
+        from acceptance_checker import check_deliverable_completeness
+
+        report = (
+            "# 固态电池行业现状调研\n\n"
+            "主要挑战：界面阻抗问题；空气稳定性差。\n\n"
+            "部分厂商未披露量产时间；头部企业数据缺失；"
+            "具体成本数据待补充。\n"
+        )
+        res = check_deliverable_completeness(report, "固态电池行业现状调研")
+        self.assertTrue(res["pass"], res["details"])
+        self.assertGreaterEqual(res["placeholder_count"], 3)
+        self.assertIn("豁免", res["details"])
+
+    def test_placeholder_penalty_kept_for_financial_domain(self):
+        """financial 域保持严格：同样的占位报告必须 FAIL（数字必须溯源）。"""
+        from acceptance_checker import check_deliverable_completeness
+
+        report = "宁德时代营收数据未披露；净利润未获取；毛利率待补充；负债数据缺失"
+        res = check_deliverable_completeness(report, "宁德时代2025年财报营收分析")
+        self.assertFalse(res["pass"])
+        self.assertIn("交付物不完整", res["details"])
+
+    def test_run_acceptance_research_exemption_in_checks(self):
+        """run_acceptance 将领域下传：调研任务的占位报告 deliverable 检查 pass。"""
+        import shutil as _shutil
+        import tempfile as _tempfile
+
+        import workspace as ws_mod
+        from acceptance_checker import run_acceptance
+
+        tmp = _tempfile.mkdtemp(prefix="wm_acc_research_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        try:
+            ws = ws_mod.task_workspace("t-research-1")
+            ws.mkdir(parents=True, exist_ok=True)
+            report = (
+                "# 固态电池行业现状调研\n\n"
+                "部分厂商未披露量产时间；头部企业数据缺失；"
+                "具体成本数据待补充。\n"
+            )
+            result = run_acceptance(
+                "t-research-1", "固态电池行业现状调研", report, ws,
+            )
+            comp = result["checks"]["deliverable_completeness"]
+            self.assertTrue(comp["pass"], comp["details"])
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_run_acceptance_detects_shell_report(self):
         import shutil as _shutil
         import tempfile as _tempfile

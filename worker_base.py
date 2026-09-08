@@ -1001,7 +1001,12 @@ class SearchAgent(BaseWorker):
                 if target:
                     try:
                         import base64
-                        target = base64.urlsafe_b64decode(target[2:].encode()).decode("utf-8", errors="replace")
+                        # Bing 跳转负载为无 padding 的 urlsafe base64，补足后再解
+                        payload = target[2:]
+                        payload += "=" * (-len(payload) % 4)
+                        target = base64.urlsafe_b64decode(
+                            payload.encode(),
+                        ).decode("utf-8", errors="replace")
                     except Exception:
                         target = urllib.parse.unquote(target)
                 if target.startswith("http"):

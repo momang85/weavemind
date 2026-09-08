@@ -3511,11 +3511,29 @@ def _post_task(self, p, body, admin):
         if not g: return self._json({"error":"goal required"},400)
         # B3：提交前余额预检——双端点都余额不足时直接拒绝，避免任务跑一半
         # 全靠降级撑（实测主端点 402 切换 10 次）。预检有 30s TTL，不拖慢提交。
+        # 余额不足时同步发布 alert 事件（Health 页可见），避免"静默耗尽"
         try:
-            from llm_client import get_balance_status
+            from llm_client import get_balance_status, endpoint_hosts
             _bal = get_balance_status()
             _p = _bal.get("primary") or {}
             _b = _bal.get("backup") or {}
+            _low_reasons = []
+            if _p.get("reason") == "insufficient_balance":
+                _low_reasons.append("主端点余额不足")
+            if _b.get("reason") == "insufficient_balance":
+                _low_reasons.append("备份端点余额不足")
+            _hosts = endpoint_hosts()
+            if (
+                _hosts.get("primary") and _hosts.get("backup")
+                and _hosts["primary"] == _hosts["backup"]
+            ):
+                _low_reasons.append("主备端点同一供应商（同源风险，建议主备分属不同厂商）")
+            if _low_reasons:
+                _publish_alert(
+                    "llm_balance_low",
+                    "LLM 端点余额预警：" + "；".join(_low_reasons) + "，请及时充值",
+                    service="llm",
+                )
             if (
                 _p.get("reason") == "insufficient_balance"
                 and _b.get("reason") == "insufficient_balance"
@@ -3798,8 +3816,9 @@ def _post_quick_answer(self, p, body, admin):
         search_ctx = ""
         mode = "model_knowledge"
         try:
-            from adapters.news import fetch_news
-            news = fetch_news(g)
+            from adapters.news import fetch_news, fetch_news_fallback
+            # Google News RSS 境内常不可达 → Bing/ddgs 文本检索兜底（同为 items 契约）
+            news = fetch_news(g) or fetch_news_fallback(g)
             items = (news or {}).get("items") or []
             if items:
                 mode = "searched"
