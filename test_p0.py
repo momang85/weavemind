@@ -3402,6 +3402,85 @@ class TestAcceptanceChecker(unittest.TestCase):
         self.assertFalse(r2["pass"])
         self.assertIn("腾讯官方年报", r2["mislabeled"][0])
 
+    def test_source_labeling_meta_talk_not_claims(self):
+        """元叙述不是来源声明：报告解释来源质量的句子（"[1] 仅为报告
+        目录页，不含任何统计数值"/"均与主题无关或同源无额外数据"）
+        与表格来源列备注词（"验证"/"直接披露"）不得判虚假标注。"""
+        from acceptance_checker import check_source_labeling
+
+        sources = {
+            "search_results": "title: 固态电池行业白皮书 https://example.com/report1",
+            "fetch_snapshot": "",
+            "clean_chart_data": "",
+        }
+        report = (
+            "# 行业调研\n\n"
+            "有\"未披露\"项，系因本次检索来源 [1] 仅为报告目录页，不含任何统计数值；"
+            "其余来源均与主题无关或同源无额外数据。\n\n"
+            "| 指标 | 来源 |\n|---|---|\n| 市场规模 | 验证 |\n| 增速 | 直接披露 |\n"
+        )
+        r = check_source_labeling(report, sources)
+        self.assertTrue(r["pass"], r["details"])
+        self.assertEqual(len(r["mislabeled"]), 0)
+
+    def test_source_labeling_paren_attribution(self):
+        """括号署名参与匹配："休闲食品专题（中研网）"的（中研网）是来源
+        署名而非披露注释；域名为 chinairn.com（静态映射）→ 诚实。"""
+        from acceptance_checker import check_source_labeling
+
+        sources = {
+            "search_results": (
+                "title: 2026休闲食品行业现状调研_中研网 "
+                "https://www.chinairn.com/hyzx/20260306/172244638.shtml"
+            ),
+            "fetch_snapshot": "",
+            "clean_chart_data": "",
+        }
+        report = (
+            "市场规模数据见休闲食品专题（中研网）；"
+            "另一份资料为休闲食品行业分析（中研网）。"
+        )
+        r = check_source_labeling(report, sources)
+        self.assertTrue(r["pass"], r["details"])
+
+    def test_source_labeling_title_derived_media(self):
+        """标题派生媒体词典：声明只写媒体名"中研网"，而检索标题含
+        "手机中研网"（静态映射域名不同）→ 同源诚实。"""
+        from acceptance_checker import check_source_labeling
+
+        sources = {
+            "search_results": (
+                "title: 2026体育旅游行业市场规模与趋势演进--手机中研网 "
+                "https://m.chinairn.com/scfx/20260401/165050820.shtml"
+            ),
+            "fetch_snapshot": "",
+            "clean_chart_data": "",
+        }
+        report = "行业规模数据（数据来源：中研网）。"
+        r = check_source_labeling(report, sources)
+        self.assertTrue(r["pass"], r["details"])
+
+    def test_source_labeling_static_map_entries(self):
+        """静态映射补录：问卷网/中国报告网实测域名不再误报。"""
+        from acceptance_checker import check_source_labeling
+
+        sources = {
+            "search_results": (
+                "title: 建筑业个人信息保护调研问卷 "
+                "https://www.wenjuan.com/lib_detail_full/69fbe04ce9cf9edf1e13\n"
+                "title: 行业报告目录页 "
+                "https://www.chinabaogao.com/free/202203/577138.html"
+            ),
+            "fetch_snapshot": "",
+            "clean_chart_data": "",
+        }
+        report = (
+            "问卷来源：问卷网建筑业个人信息保护问卷；"
+            "另一份为中国报告网免费报告页。"
+        )
+        r = check_source_labeling(report, sources)
+        self.assertTrue(r["pass"], r["details"])
+
     def test_source_labeling_real_collect_path(self):
         """真实 _collect_sources 路径：search_results 的 url 字段必须参与来源集合，
         平台名声明（CSDN/雪球/人人都是产品经理/美团官网）不得被误报为虚假标注。"""
@@ -5636,7 +5715,9 @@ class TestNewDataAdapters(unittest.TestCase):
             '<li class="b_algo"><h2><a href="https://www.bing.com/ck/a?u=a1aHR0cHM6Ly95LmV4YW1wbGUvMg">'
             "标题二</a></h2><p>摘要二</p></li>"
         )
-        with mock.patch.object(text_search, "_fetch_bing_html", return_value=html):
+        # Bing 结果 <max_results 时会合并 ddg——罐头测试下 ddg 置空
+        with mock.patch.object(text_search, "_fetch_bing_html", return_value=html), \
+                mock.patch.object(text_search, "_search_ddg", return_value=[]):
             out = text_search.web_text_search("q", max_results=5)
         self.assertEqual(len(out), 2)
         self.assertEqual(out[0]["title"], "标题一")
@@ -5661,6 +5742,28 @@ class TestNewDataAdapters(unittest.TestCase):
             text_search, "_fetch_bing_html", side_effect=RuntimeError("x"),
         ), mock.patch.object(text_search, "_search_ddg", return_value=[]):
             self.assertEqual(text_search.web_text_search("q"), [])
+
+    def test_score_results_long_hit_rule(self):
+        """检索相关性：查询含 ≥4 字词段时，仅靠 2 字词或"固态电子"这类
+        跨界 3 字连读凑分的结果必须被滤除；短词查询不误杀。"""
+        from adapters.search_quality import score_results
+
+        q = "固态电池行业现状与进展"
+        ssd = {"title": "固态硬盘_百度百科", "url": "https://baike.baidu.com/item/x",
+               "snippet": "是用固态电子存储芯片阵列制成的硬盘，读写速度快。"}
+        battery = {"title": "固态电池行业现状调研", "url": "https://www.chinairn.com/a/1.html",
+                   "snippet": "固态电池产业链全景梳理。"}
+        out = score_results(q, [ssd, battery])
+        urls = [r["url"] for r in out]
+        self.assertIn(battery["url"], urls)
+        self.assertNotIn(ssd["url"], urls)
+        self.assertTrue(any(r.get("authoritative") for r in out))
+        # 短词查询（词段 ≤2 字）不做长连读要求：两个 2 字词都命中即保留
+        out2 = score_results("苹果 财报", [
+            {"title": "苹果公司财报发布", "url": "https://finance.sina.com.cn/1",
+             "snippet": ""},
+        ])
+        self.assertEqual(len(out2), 1)
 
     def test_router_news_fallback_when_rss_down(self):
         """2a/2b：Google News RSS 不可达 → fallback 兜底，news 分支照常返回。"""

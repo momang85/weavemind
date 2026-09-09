@@ -21,6 +21,11 @@ import re
 import urllib.parse
 import urllib.request
 
+from adapters.search_quality import (
+    build_query_variants,
+    score_results,
+)
+
 logger = logging.getLogger(__name__)
 
 _UA = (
@@ -133,20 +138,43 @@ def _search_ddg(query: str, max_results: int, timeout: float) -> list[dict]:
 
 
 def web_text_search(query: str, max_results: int = 6, timeout: float = 3) -> list[dict]:
-    """轻量文本检索：Bing → ddgs 引擎探测。全部失败返回空列表（不抛）。"""
+    """轻量文本检索：Bing（含引号精确变体）→ ddg 引擎探测合并。
+
+    查询先经 search_quality 预处理（去指令包装/提取关键词），中文
+    长目标不再原样直塞引擎；结果统一相关性计分 + 权威域加权排序，
+    与主题无关的条目（如"固态硬盘"之于"固态电池"）被滤除。
+    全部失败返回空列表（不抛）。"""
     q = str(query or "").strip()
     if not q:
         return []
-    try:
-        out = _search_bing(q, max_results)
-        if out:
-            return out
-    except Exception as exc:
-        logger.warning("text_search bing failed: %s", exc)
-    try:
-        out = _search_ddg(q, max_results, timeout)
-        if out:
-            return out
-    except Exception as exc:
-        logger.warning("text_search ddg failed: %s", exc)
-    return []
+    variants = build_query_variants(q) or [q]
+    collected: list[dict] = []
+    seen: set[str] = set()
+
+    def _add(items) -> None:
+        for it in items or []:
+            if not isinstance(it, dict):
+                continue
+            u = str(it.get("url") or "")
+            if u and u not in seen:
+                seen.add(u)
+                collected.append(it)
+
+    # Bing 主变体；相关结果不足 3 条时追加带引号变体（每变体 ≤1 次请求）
+    for v in variants[:2]:
+        try:
+            _add(_search_bing(v, max_results * 2))
+        except Exception as exc:
+            logger.warning("text_search bing failed: %s", exc)
+        if len(score_results(q, collected)) >= 3 or len(variants) <= 1:
+            break
+    # ddg 引擎探测合并：Bing 相关结果不足时补充（yandex 等境内可达
+    # 引擎）；门槛按"计分后相关条数"判定——Bing 常灌入大量主题不符
+    # 的条目（如固态硬盘），原始条数充足不代表相关条数充足
+    if len(score_results(q, collected)) < max_results:
+        try:
+            _add(_search_ddg(q, max_results * 2, timeout))
+        except Exception as exc:
+            logger.warning("text_search ddg failed: %s", exc)
+    ranked = score_results(q, collected)
+    return ranked[:max_results]

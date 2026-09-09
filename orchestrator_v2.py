@@ -1132,16 +1132,13 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             "financial", "earnings", "annual", "revenue", "results",
             "quarterly", "investor",
         )
-        official_domains = (
-            "ir.", "investor.", "hkex", "eastmoney", "10jqka",
-            "cninfo", "sse.com.cn", "szse.cn",
+        # 来源分级常量收敛到 adapters.search_quality（text_search 结果
+        # 计分复用同一份权威域分级，保证快答/行业预载与财务抓取同口径）
+        from adapters.search_quality import (
+            AUTHORITY_GOOD as good_domains,
+            AUTHORITY_JUNK as junk_domains,
+            AUTHORITY_OFFICIAL as official_domains,
         )
-        good_domains = (
-            "sina", "163.com", "21jingji", "yicai", "cls.cn",
-            "finance", "stock", "xueqiu", "snowball", "pedaily",
-        )
-        junk_domains = ("blog.csdn", "zhihu.com", "zhengxianling",
-                        "cp.baidu", "toutiao", "csdn", "alishui", "sgpjbg")
         target = ""
         try:
             from task_classifier import _extract_company

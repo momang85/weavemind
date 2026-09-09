@@ -139,29 +139,31 @@ class MetricsCollector:
         now = datetime.now(timezone.utc).isoformat()
 
         if channel == "orchestrator:response":
-            # 进度消息：仅终态 task_complete 参与统计，其余跳过
-            if data.get("type") and data.get("payload"):
-                if data.get("type") == "task_complete":
-                    _payload = data.get("payload") or {}
-                    tid = data.get("task_id", "")
-                    _el = _payload.get("elapsed_sec")
-                    if _el and tid and tid in self._task_start_times:
-                        self._recent_tasks.append({
-                            "task_id": tid,
-                            "status": str(_payload.get("status") or ""),
-                            "latency": round(float(_el), 2),
-                        })
-                        self._task_start_times.pop(tid, None)
-                    self._handle_task_complete(now, {
-                        "task_id": tid,
-                        "status": str(
-                            _payload.get("status")
-                            or data.get("status") or "UNKNOWN"
-                        ),
-                        "steps": _payload.get("steps") or [],
-                    })
+            # 仅终态 task_complete 参与统计。此前"无 type/无 payload"的
+            # 消息（RUNNING 全量推送、AWAITING_CONFIRM 等直接 publish 到
+            # 本频道的进度消息）会落到 _handle_task_complete，被计成
+            # "RUNNING→失败"任务——这是 total/failed 虚高的根因
+            if data.get("type") != "task_complete" or not data.get("payload"):
                 return
-            self._handle_task_complete(now, data)
+            _payload = data.get("payload") or {}
+            tid = data.get("task_id", "")
+            _el = _payload.get("elapsed_sec")
+            if _el and tid and tid in self._task_start_times:
+                self._recent_tasks.append({
+                    "task_id": tid,
+                    "status": str(_payload.get("status") or ""),
+                    "latency": round(float(_el), 2),
+                })
+                self._task_start_times.pop(tid, None)
+            self._handle_task_complete(now, {
+                "task_id": tid,
+                "status": str(
+                    _payload.get("status")
+                    or data.get("status") or "UNKNOWN"
+                ),
+                "steps": _payload.get("steps") or [],
+            })
+            return
 
         elif channel == "orchestrator:plan_review":
             scores = data.get("scores", {})
@@ -267,10 +269,12 @@ class MetricsCollector:
 
     def _write_summary(self):
         with self._lock:
-            if self._total_tasks == 0:
-                return
-
-            success_rate = self._success_tasks / self._total_tasks * 100
+            # 无任务时仍写汇总：累计成本来自月度台账（与预算页同本账），
+            # 不依赖本进程任务计数；成功率等在 0 任务时显示 0
+            success_rate = (
+                self._success_tasks / self._total_tasks * 100
+                if self._total_tasks else 0.0
+            )
             latencies = [t.get("latency", 0) for t in self._recent_tasks
                          if isinstance(t.get("latency"), (int, float))]
             p95 = sorted(latencies)[int(len(latencies) * 0.95) - 1] if latencies else 0.0
@@ -287,6 +291,14 @@ class MetricsCollector:
                     search_health = _json.loads(raw)
             except Exception:
                 pass
+            # 累计成本与预算页同本账：月度台账（Redis llm_usage_month，
+            # 全进程记账、跨重启累计）。此前用"进程内累加 + 顶层任务键"
+            # 口径，worker 记账落在 dispatch_id 键上读不到，恒显示 0。
+            try:
+                from costs import get_monthly_spend
+                cost_total = get_monthly_spend()
+            except Exception:
+                cost_total = 0.0
             summary = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "total_tasks": self._total_tasks,
@@ -298,7 +310,7 @@ class MetricsCollector:
                     sum(latencies) / len(latencies), 2
                 ) if latencies else 0.0,
                 "p95_latency_sec": round(float(p95), 2),
-                "cost_usd_total": round(self._total_cost, 4),
+                "cost_usd_total": round(float(cost_total), 4),
                 "critic": {
                     "pass": self._critic_pass,
                     "fail": self._critic_fail,

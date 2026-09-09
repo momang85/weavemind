@@ -785,6 +785,9 @@ _DOMAIN_MEDIA = {
     "cninfo.com.cn": "巨潮资讯网",
     "nbd.com.cn": "每日经济新闻", "hstong.com": "华盛通",
     "ykzq.com": "粤开证券", "fddi.fudan.edu.cn": "复旦金融研究院",
+    # 行业调研实测补录：检索实际返回的中文行业研究/问卷站点
+    "chinairn.com": "中研网", "chinabaogao.com": "中国报告网",
+    "wenjuan.com": "问卷网",
 }
 
 # 媒体别名组：声明中出现的别名与已知媒体名归组匹配。
@@ -802,6 +805,7 @@ _MEDIA_ALIAS_GROUPS = (
     ("东吴证券", "东吴证券研究所"),
     ("九方智投", "九方"),
     ("百优价值网", "百优"),
+    ("中研网", "中研普华"),
 )
 
 # A2：已登记的媒体名/别名集合——已登记的词不再重复建议补录
@@ -911,6 +915,15 @@ def _known_sources(sources: dict) -> dict:
             text,
         ):
             media.add(m.group(1).strip())
+    # 标题派生媒体词典：从标题尾段提取媒体词形（"…--手机中研网"→
+    # "手机中研网"、"…_中研普华"→"中研普华"）并入已知媒体，声明只写
+    # 媒体名也可对上，减少对 _DOMAIN_MEDIA 静态表的依赖
+    for t in titles:
+        for seg in re.split(r"[-—_·|｜\s]+", t):
+            seg = seg.strip()
+            m3 = re.search(r"([\u4e00-\u9fffA-Za-z0-9]{2,10})(?:网|新闻|财经|报)$", seg)
+            if m3:
+                media.add(m3.group(1))
     for _nm in _EXTRA_MEDIA_NAMES:
         media.add(_nm)
     return {"urls": urls, "domains": domains, "media": media, "titles": titles}
@@ -1168,19 +1181,39 @@ def check_source_labeling(report: str, sources: dict) -> dict:
     _STATUS_MARKERS = (
         "无直接关联", "已剔除", "不适用", "待获取", "未获取", "暂缺",
         "未披露", "无此字段", "说明", "备注", "数据完整性", "口径说明",
+        "直接披露", "待核实", "自行整理",
+    )
+    # 元叙述：报告解释来源构成/质量的句子（"来源 [1] 仅为报告目录页，
+    # 不含任何统计数值"、"其余来源均与主题无关或同源无额外数据"），
+    # 是诚实披露本身而非"数据来源：X"声明
+    _META_SOURCE_TALK = (
+        "仅为", "只是", "目录页", "报告框架", "无具体数值",
+        "均与主题无关", "同源无额外数据", "不含任何统计",
+        "与主题无关",
+    )
+    _TABLE_NOTE_WORDS = (
+        "验证", "待核实", "直接披露", "自行整理", "数据缺失", "未披露",
     )
     for c in claims:
         if any(k in c for k in ("建议以", "仅供参考", "说明", "清单", "名称", "序号")):
             continue
         if any(k in c for k in _STATUS_MARKERS):
             continue
+        if any(k in c for k in _META_SOURCE_TALK):
+            continue
         if "模型知识" in c or "未验证" in c or "未在本次检索" in c:
             continue
-        # 剥离括号披露注释：括号内容是对来源构成的自愿披露，不作为声明主体
-        body = _PAREN_DISCLOSURE_RE.sub("", c).strip()
-        if not body:
+        # 表格来源列的短备注词（"验证/直接披露"等）：完整等于备注词
+        # 的短声明跳过（用精确匹配而非包含匹配，避免误伤含这些字的
+        # 真实媒体名，如"XX验证报告网"）
+        if len(c.strip()) <= 6 and c.strip() in _TABLE_NOTE_WORDS:
+            continue
+        # 括号收紧：仅当剥去括号注释后为空（纯披露注释）才跳过；
+        # 括号含媒体署名（"休闲食品专题（中研网）"）时用完整声明匹配
+        if not _PAREN_DISCLOSURE_RE.sub("", c).strip():
             continue  # 纯披露注释，无声明主体
         checked += 1
+        body = c  # 匹配主体 = 完整声明（含括号署名）
         if any(u in body for u in known["urls"]):
             continue
         if any(d and d in body for d in known["domains"]):
@@ -1204,6 +1237,14 @@ def check_source_labeling(report: str, sources: dict) -> dict:
         # 否定/谨慎语境：'非财报类/非官方/未经证实/网络传言/仅供参考' 等
         # 为如实披露，不判虚假标注（含括号披露注释中的否定词）
         if any(k in c for k in _NEGATION_MARKERS):
+            continue
+        # 标题派生媒体词典兜底：声明中的媒体词形（"中研网"）是已知检索
+        # 标题的子串（"手机中研网"）→ 同一来源，诚实（静态域名映射
+        # 缺失时靠标题自动对上，不依赖人工补录）
+        if any(
+            w and any(w in t for t in known["titles"] if t)
+            for w in (m.group(0) for m in _MEDIA_WORD_RE.finditer(c))
+        ):
             continue
         # 权威文档判定（否定感知）：仅当不含否定词且命中权威文档词，
         # 且检索中无对应文档 → 虚假标注
