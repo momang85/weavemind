@@ -110,6 +110,13 @@ export default memo(function SubmitPanel({
   const [qaGoal, setQaGoal] = useState('')
   const [qa, setQa] = useState<any>(null)
   const [qaLoading, setQaLoading] = useState(false)
+  // 后端契约：content 应为字符串；若为 {content: str} 或其它类型，
+  // 统一收敛为文本——直接把对象渲染成 React 子节点会触发 #31 崩溃
+  const coerceText = (v: any): string => {
+    if (typeof v === 'string') return v
+    if (v && typeof v === 'object' && typeof (v as any).content === 'string') return (v as any).content
+    return String(v ?? '')
+  }
   const askQuick = async () => {
     const g = qaGoal.trim()
     if (!g || qaLoading) return
@@ -122,7 +129,7 @@ export default memo(function SubmitPanel({
       })
       const d = await res.json()
       if (d.error) setQa({ content: d.error, sources: [], mode: 'error', duration: 0 })
-      else setQa(d)
+      else setQa({ ...d, content: coerceText(d.content) })
       requestAnimationFrame(() => {
         document.getElementById('quick-answer-card')
           ?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
@@ -173,7 +180,9 @@ export default memo(function SubmitPanel({
               const name = e.target.value
               setTemplateName(name)
               const tpl = templates.find(t => t.name === name)
-              if (tpl && tpl.goal) setGoal(tpl.goal)
+              // 仅当用户尚未输入目标时回填模板目标：直接覆盖会吞掉
+              // 用户已写好的任务描述（与后端"允许不传 goal"语义一致）
+              if (tpl && tpl.goal && !goal.trim()) setGoal(tpl.goal)
             }}
             className="hidden sm:block bg-slate-800 border border-slate-700 rounded-lg px-2 py-2 text-xs text-slate-300 shrink-0">
             <option value="">自定义任务</option>

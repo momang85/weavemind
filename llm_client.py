@@ -455,28 +455,40 @@ def get_balance_status(use_cache: bool = True) -> dict:
                 k: dict(v) for k, v in _balance_cache["data"].items()
             }
     result: dict = {}
+    probes: list[tuple[str, str, str, str]] = []
     primary_base = os.environ.get("LLM_BASE_URL") or ""
     if primary_base:
-        st = _probe_endpoint_status(
-            primary_base,
+        probes.append((
+            "primary", primary_base,
             os.environ.get("LLM_API_KEY") or "",
             os.environ.get("LLM_MODEL") or "gpt-4o",
-            endpoint="primary",
-        )
-        _mark_endpoint("primary", st["ok"], st["reason"])
-        result["primary"] = st
-    else:
-        result["primary"] = {"ok": False, "reason": "unreachable"}
+        ))
     if _BACKUP_CFG.get("base_url"):
-        st = _probe_endpoint_status(
-            _BACKUP_CFG.get("base_url", ""),
+        probes.append((
+            "backup", _BACKUP_CFG.get("base_url", ""),
             _BACKUP_CFG.get("api_key", ""),
             _BACKUP_CFG.get("model") or "gpt-4o",
-            endpoint="backup",
-        )
-        _mark_endpoint("backup", st["ok"], st["reason"])
-        result["backup"] = st
-    else:
+        ))
+    # 主/备同探并行：顺序探测时两个端点都不可达会让提交路径
+    # 阻塞 2×LLM_PROBE_TIMEOUT（默认 40s），并行把最坏延迟减半
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    # futures 在脚本层线性引用 as_completed（保证该引用在运行期解析）
+    if probes:
+        with ThreadPoolExecutor(max_workers=2) as _pool:
+            _futures = {}
+            for _ep, _base, _key, _model in probes:
+                _futures[_pool.submit(
+                    _probe_endpoint_status, _base, _key, _model,
+                    endpoint=_ep,
+                )] = _ep
+            for _fut in as_completed(_futures):
+                _ep = _futures[_fut]
+                _st = _fut.result()
+                _mark_endpoint(_ep, _st["ok"], _st["reason"])
+                result[_ep] = _st
+    if not result.get("primary"):
+        result["primary"] = {"ok": False, "reason": "unreachable"}
+    if not result.get("backup"):
         result["backup"] = {"ok": False, "reason": "unreachable"}
     with _balance_cache_lock:
         _balance_cache["ts"] = time.time()
@@ -541,38 +553,42 @@ def endpoints_available() -> tuple[bool, str]:
 
 def _health_monitor_loop(interval: float = 60.0) -> None:
     """后台守护：端点不健康时持续探测，连续 N 次成功才恢复（防抖），
-    主/备端点都监控（backup 此前无恢复路径）。"""
+    主/备端点都监控且各自独立计数——共享一个计数变量会让主端点
+    恢复期间的抖动被备份探测成功"喂饱"，反之亦然。"""
     _restore_needed = max(
         1, int(os.environ.get("LLM_HEALTH_RESTORE", "2") or 2))
-    _consecutive = 0.0
+    _consecutive = {"primary": 0, "backup": 0}
     while True:
         time.sleep(interval)
         try:
-            # 主端点恢复探测（连续 N 次成功才转健康，避免单次成功即切回导致抖动）
-            if not _primary_healthy():
-                base_url = os.environ.get("LLM_BASE_URL") or ""
-                api_key = os.environ.get("LLM_API_KEY") or ""
-                model = os.environ.get("LLM_MODEL") or "gpt-4o"
-                if base_url and _probe_endpoint(base_url, api_key, model):
-                    _consecutive += 1
-                    if _consecutive >= _restore_needed:
-                        _mark_endpoint("primary", True)
-                        _consecutive = 0.0
-                        logger.info(
-                            "LLM primary endpoint recovered (%d 次连续探测成功), traffic switched back",
-                            _restore_needed)
-                else:
-                    _consecutive = 0.0
-            else:
-                _consecutive = 0.0
-            # 备份端点恢复探测（此前无：备份故障后永远不再被尝试）
-            if _BACKUP_CFG.get("base_url") and not _backup_healthy():
-                if _probe_endpoint(
-                    _BACKUP_CFG["base_url"], _BACKUP_CFG["api_key"],
-                    _BACKUP_CFG.get("model") or "gpt-4o",
+            for ep in ("primary", "backup"):
+                if ep == "primary" and _primary_healthy():
+                    _consecutive[ep] = 0
+                    continue
+                if ep == "backup" and (
+                    not _BACKUP_CFG.get("base_url") or _backup_healthy()
                 ):
-                    _mark_endpoint("backup", True)
-                    logger.info("LLM backup endpoint recovered")
+                    _consecutive[ep] = 0
+                    continue
+                if ep == "primary":
+                    base_url = os.environ.get("LLM_BASE_URL") or ""
+                    api_key = os.environ.get("LLM_API_KEY") or ""
+                    model = os.environ.get("LLM_MODEL") or "gpt-4o"
+                else:
+                    base_url = _BACKUP_CFG.get("base_url", "")
+                    api_key = _BACKUP_CFG.get("api_key", "")
+                    model = _BACKUP_CFG.get("model") or "gpt-4o"
+                if base_url and _probe_endpoint(base_url, api_key, model):
+                    _consecutive[ep] += 1
+                    if _consecutive[ep] >= _restore_needed:
+                        _mark_endpoint(ep, True)
+                        _consecutive[ep] = 0
+                        logger.info(
+                            "LLM %s endpoint recovered (%d 次连续探测成功)",
+                            ep, _restore_needed,
+                        )
+                else:
+                    _consecutive[ep] = 0
         except Exception:
             pass
 

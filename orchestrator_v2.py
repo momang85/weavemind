@@ -4170,6 +4170,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                             "web_search dead-link filter for %s: dropped %d/%d results",
                             task_id, _dropped, _dropped + len(parsed),
                         )
+                        # 过滤结果回写 step 结果：下游 _inject_step_context
+                        # 会把 result 原文喂给 LLM，不回写则正文引用仍是
+                        # 含死链的旧列表（报告来源与落盘清单两套 URL）
+                        result["result"] = json.dumps(
+                            parsed, ensure_ascii=False,
+                        )
                     with self._task_sources_lock:
                         bucket = self._task_sources.setdefault(task_id, [])
                         for it in parsed:
@@ -4354,22 +4360,31 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     try:
                         parsed = json.loads(res_raw) if isinstance(res_raw, str) else res_raw
                         if isinstance(parsed, list) and not parsed and not revision_done:
+                            _snapshot = None
                             with lock:
-                                revision = self._build_search_revision(pending, goal)
-                                revision_done = True
-                            if revision:
-                                confirmed = self._confirm_revision(task_id, goal, steps, completed, revision)
-                                with lock:
-                                    self._apply_revision(steps, pending, completed, confirmed)
-                                    last_progress = time.time()
-                                self._push_realtime_state(task_id, goal, steps, completed)
-                            else:
-                                push_progress(
-                                    self._messaging, task_id, "log",
-                                    {"type": "info", "agent": "orchestrator",
-                                     "message": "Search returned no relevant results; no dependent fetch steps to revise",
-                                     "timestamp": self._now_iso()},
-                                )
+                                if not revision_done:
+                                    revision_done = True
+                                    # pending 是 {step_id: step} 字典，浅拷贝即可
+                                    # （_build_search_revision 只读）
+                                    _snapshot = dict(pending)
+                            # LLM 复盘在锁外执行：_build_search_revision 内含
+                            # 同步 LLM 调用（超时+重试可分钟级），持 DAG 锁会
+                            # 把其余步骤写入与 stall 看门狗全部冻结
+                            if _snapshot is not None:
+                                revision = self._build_search_revision(_snapshot, goal)
+                                if revision:
+                                    confirmed = self._confirm_revision(task_id, goal, steps, completed, revision)
+                                    with lock:
+                                        self._apply_revision(steps, pending, completed, confirmed)
+                                        last_progress = time.time()
+                                    self._push_realtime_state(task_id, goal, steps, completed)
+                                else:
+                                    push_progress(
+                                        self._messaging, task_id, "log",
+                                        {"type": "info", "agent": "orchestrator",
+                                         "message": "Search returned no relevant results; no dependent fetch steps to revise",
+                                         "timestamp": self._now_iso()},
+                                    )
                         elif isinstance(parsed, list) and not parsed:
                             push_progress(
                                 self._messaging, task_id, "log",

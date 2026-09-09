@@ -167,13 +167,30 @@ class AsyncWorkerBase(ABC):
 
     async def _task_loop(self):
         while self._running:
-            async with self._sem:
-                if not self._running: break
+            # 信号量槽位必须被任务全程持有：先扣槽再取任务，
+            # 槽位在 _handle_guarded 完成后归还——此前只在
+            # pop 瞬间持槽，max_concurrency 对并发执行形同虚设
+            await self._sem.acquire()
+            if not self._running:
+                self._sem.release()
+                break
+            try:
                 task = await self._messaging.pop_task(self.agent_id, timeout=2)
-                if not task: continue
-                self._active += 1
-                await self._update()
-                asyncio.create_task(self._handle(task))
+            except Exception:
+                task = None
+            if not task:
+                self._sem.release()
+                continue
+            self._active += 1
+            await self._update()
+            asyncio.create_task(self._handle_guarded(task))
+
+    async def _handle_guarded(self, task: dict):
+        """让 _handle 全程持有信号量槽位（真并发上限）。"""
+        try:
+            await self._handle(task)
+        finally:
+            self._sem.release()
 
     async def _handle(self, task: dict):
         tid = task.get("task_id","?"); instr = task.get("instruction","")

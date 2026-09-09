@@ -30,9 +30,28 @@ _throttle_lock = _threading.Lock()
 _last_hit: dict[str, float] = {}
 
 
+def _is_private_addr(addr: str) -> bool:
+    """IP 字面量是否为环回/私网/链路本地/未指定/运营商级 NAT。"""
+    import ipaddress as _ip
+    try:
+        ip = _ip.ip_address(addr)
+    except ValueError:
+        return False
+    return (
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_unspecified
+        or (isinstance(ip, _ip.IPv6Address) and ip.is_site_local)
+    )
+
+
 def _validate_public_url(url: str) -> bool:
     """SSRF 防护：仅放行 http/https，且主机不是环回/私网/链路本地/
-    IP 字面量或 localhost 变体。"""
+    IP 字面量、localhost 变体，域名解析后的全部地址同样必须公网。
+
+    注意：DNS 解析校验存在 rebinding 的固有竞态（校验与连接两次解析
+    可能不同），属纵深防御而非绝对保证。"""
     try:
         parts = urllib.parse.urlsplit(url)
     except Exception:
@@ -44,15 +63,25 @@ def _validate_public_url(url: str) -> bool:
         return False
     if ":" in host:
         return False
+    # 字面量 IP 直接判定；域名解析后逐地址判定
+    pending = [host]
+    import ipaddress as _ip
     try:
-        ip = socket.inet_aton(host)
-    except OSError:
-        return True
-    blocked = (
-        b"\x7f", b"\x0a", b"\xac\x10", b"\xac\x11",
-        b"\xa9\xfe", b"\xc0\xa8", b"\x00", b"\xa0\x00",
-    )
-    return not any(ip.startswith(p) for p in blocked)
+        _ip.ip_address(host)
+        # 字面量 IP：只查自身（下走公共判定，不做 DNS）
+    except ValueError:
+        try:
+            addr_infos = socket.getaddrinfo(host, None)
+        except OSError:
+            # 解析失败也放行：连接阶段同样无法解析，自然失败
+            addr_infos = None
+        if addr_infos:
+            pending = [
+                str(ai[4][0])
+                for ai in addr_infos
+                if ai[0] in (socket.AF_INET, socket.AF_INET6)
+            ]
+    return all(not _is_private_addr(a) for a in pending)
 
 
 def _load_official_map() -> dict:

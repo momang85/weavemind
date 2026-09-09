@@ -218,21 +218,24 @@ export default function TaskConsole() {
           name: f.name, size: f.size, kind: f.kind,
         }))
       } catch { /* ignore */ }
-      // 历史任务也载入思考日志，让"实时动态"页可回看该任务的完整过程
-      try {
-        const lg = (d.logs ?? []).map((l: any, i: number) => ({
-          id: 'srv-' + i,
-          timestamp: l.timestamp || '',
-          type: l.type || 'info',
-          agent: l.agent || 'orchestrator',
-          message: l.message || '',
-        }))
-        setLogs(lg)
-      } catch { /* ignore */ }
       // 历史报告查看不改写运行态：运行中打开历史报告不应把全局
       // status 翻成 completed（会解锁重复提交、停掉流式轮询）
       const st = useTaskStore.getState().status
-      if (st !== 'running') setReport(reportObj)
+      if (st !== 'running') {
+        // 历史任务也载入思考日志，让"实时动态"页可回看该任务的完整过程；
+        // 但运行中绝不替换全局日志（会把实时计划树与历史日志错位串台）
+        try {
+          const lg = (d.logs ?? []).map((l: any, i: number) => ({
+            id: 'srv-' + i,
+            timestamp: l.timestamp || '',
+            type: l.type || 'info',
+            agent: l.agent || 'orchestrator',
+            message: l.message || '',
+          }))
+          setLogs(lg)
+        } catch { /* ignore */ }
+        setReport(reportObj)
+      }
     } catch { /* ignore */ }
   }, [setReport, setLogs])
 

@@ -71,6 +71,14 @@ class WebFetchWorker(AsyncWorkerBase):
         if not urls:
             return json.dumps({"status": "failed", "error": "No URL found in instruction"}, ensure_ascii=False)
         url = urls[0]
+        # SSRF 防护：目标必须过公网地址校验（环回/私网/链路本地拒绝），
+        # 抓取内容会回灌任务与报告，不能放任指向内网的 URL
+        from adapters.transport import _validate_public_url
+        if not _validate_public_url(url):
+            return json.dumps(
+                {"status": "failed", "error": "blocked by SSRF guard: non-public URL"},
+                ensure_ascii=False,
+            )
         try:
             # 中文等非 ASCII 字符的 IRI → 百分号编码（否则 urllib 抛 ascii 编码错误）
             req = urllib.request.Request(

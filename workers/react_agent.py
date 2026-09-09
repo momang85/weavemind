@@ -66,9 +66,13 @@ class ReactAgent(AsyncWorkerBase):
                 history.append({"role": "assistant", "content": "（决策缺少 tool/arguments.instruction）"})
                 continue
             history.append({"role": "assistant", "content": f"调用工具 {tool}"})
+            # 工具等待上限：LLM 可控超时被钳制在 [10, 300]s——dispatch_tool
+            # 同步阻塞事件循环期间心跳停摆，无上限 timeout 会把 worker
+            # 冻结至被 guardian 误杀
+            tool_timeout = min(300, max(10, int(str(args.get("timeout") or 300))))
             result = dispatch_tool(
                 tool, str(args["instruction"]),
-                task_id=task_id, timeout=int(args.get("timeout") or 300),
+                task_id=task_id, timeout=tool_timeout,
                 workspace=workspace,
             )
             obs = str(result.get("result") or result)[:3000]

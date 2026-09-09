@@ -15,12 +15,19 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
+from adapters.transport import _validate_public_url
+
 _MAX_WORKERS = 8
 _HTTP_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 
 
 def _probe(url: str, timeout: float) -> bool:
-    """单次探测：HEAD 优先，被拒则 GET；返回是否存活（2xx/3xx）。"""
+    """单次探测：HEAD 优先，被拒则 GET；返回是否存活（2xx/3xx）。
+
+    SSRF 防护：探测目标先过公网地址校验（环回/私网/链路本地
+    直接判 dead，不入网）。"""
+    if not _validate_public_url(url):
+        return False
     for method in ("HEAD", "GET"):
         try:
             req = urllib.request.Request(url, method=method)

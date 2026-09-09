@@ -4,6 +4,7 @@ import { ShieldCheck } from 'lucide-react'
 
 interface AuditEntry {
   ts?: string
+  timestamp?: string
   user?: string
   ip?: string
   action?: string
@@ -53,7 +54,7 @@ export default function AuditPage() {
             <tbody>
               {entries.map((e, i) => (
                 <tr key={i} className="border-b border-slate-800/60 hover:bg-slate-800/30">
-                  <td className="px-4 py-2.5 text-xs text-slate-400 whitespace-nowrap">{e.ts || '-'}</td>
+                  <td className="px-4 py-2.5 text-xs text-slate-400 whitespace-nowrap">{e.ts || e.timestamp || '-'}</td>
                   <td className="px-4 py-2.5 text-xs text-slate-300">{e.user || '-'}</td>
                   <td className="px-4 py-2.5 text-xs text-cyan-400">{e.action || '-'}</td>
                   <td className="px-4 py-2.5 text-xs text-slate-300 max-w-[160px] truncate">{e.target || '-'}</td>

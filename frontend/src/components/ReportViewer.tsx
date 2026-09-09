@@ -599,7 +599,7 @@ export default memo(function ReportViewer() {
 
   if (!report) return null
 
-  const s = report.stats || { totalSteps: report.steps.length, successSteps: 0, failedSteps: 0, duration: 0 }
+  const s = report.stats || { totalSteps: report.steps?.length ?? 0, successSteps: 0, failedSteps: 0, duration: 0 }
   const rate = s.totalSteps > 0 ? Math.round((s.successSteps / s.totalSteps) * 100) : 100
   const { freshness, sourcesResult, disclaimerResult, bodyMd, toc, sourceItems } = parsed!
 
@@ -640,8 +640,13 @@ code{background:#f0f0f0;padding:2px 6px;border-radius:4px} table{border-collapse
 th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;color:#fff}
 </style></head><body><div id="content"></div></body></html>`)
     w.document.close()
-    // Convert markdown to HTML inline
-    const md = report.final_report
+    // Convert markdown to HTML inline；先整体实体转义再套标签——
+    // 报告正文是 LLM 聚合外部内容的产物，原样 innerHTML 会执行其中
+    // 任意 HTML（存储型 XSS），转义后注入标签的来源只剩本函数自身
+    const esc = (s: string) =>
+      s.replace(/&/g, '&amp;').replace(/</g, '&lt;')
+       .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+    const md = esc(report.final_report)
       .replace(/^### (.+)$/gm, '<h3>$1</h3>')
       .replace(/^## (.+)$/gm, '<h2>$1</h2>')
       .replace(/^# (.+)$/gm, '<h1>$1</h1>')

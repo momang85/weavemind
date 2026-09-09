@@ -3781,7 +3781,11 @@ def _post_single_agent(self, p, body, admin):
             from llm_client import LLMClient
             llm = LLMClient()
             result = llm.call("Answer directly.", g, expect_json=False)
-            return self._json({"result": result, "duration": round(_t.time()-start,1)})
+            text = (
+                str((result or {}).get("content") or "")
+                if isinstance(result, dict) else str(result or "")
+            )
+            return self._json({"result": text, "duration": round(_t.time()-start,1)})
         except Exception as e:
             return self._json({"result": f"Error: {e}", "duration": _t.time()-start})
 
@@ -3853,6 +3857,12 @@ def _post_quick_answer(self, p, body, admin):
             )
             content = llm.call(
                 system, search_ctx + f"问题：{g}", expect_json=False,
+            )
+            # call(expect_json=False) 返回 {"content": str}；提取文本，
+            # 否则前端把 dict 当字符串渲染会触发 React #31 崩溃
+            content = (
+                str((content or {}).get("content") or "")
+                if isinstance(content, dict) else str(content or "")
             )
             return self._json({
                 "content": content,

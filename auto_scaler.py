@@ -368,10 +368,13 @@ class AutoScaler:
             capability, target["agent_id"]
         )
 
-        # 发送退出指令（通过 Redis 发布）
+        # 发送退出指令（通过 Redis 发布）。
+        # 频道与载荷必须与 worker 侧 _listen_kill 对齐：
+        # agent.kill:{agent_id} + {"action": "die"}（旧 worker:control
+        # 频道无任何消费方，缩容指令曾全部落空）
         try:
-            self._messaging.publish(f"worker:control:{target['agent_id']}", {
-                "command": "shutdown",
+            self._messaging.publish(f"agent.kill:{target['agent_id']}", {
+                "action": "die",
                 "reason": "auto_scale_down",
                 "timestamp": _now_iso(),
             })

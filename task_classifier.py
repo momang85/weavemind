@@ -11,6 +11,9 @@ FINANCIAL_KEYWORDS = (
     "财报", "年报", "季报", "营收", "净利润", "财务", "业绩", "负债",
     "研发投入", "研发费用", "研发开支",
     "报表", "financial", "revenue", "earnings", "annual report", "income statement",
+    # 与验收器 _FINANCIAL_MARKERS 对齐：这类纯财务措辞此前不在分类器词表，
+    # 会被判 general/research——既不预载财务源，又享受非金融域的占位豁免
+    "毛利率", "净利率", "市值", "现金流", "利润", "股价", "股票",
 )
 
 _MARKET_HINTS = {
