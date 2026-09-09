@@ -275,6 +275,7 @@ class MetricsCollector:
                 self._success_tasks / self._total_tasks * 100
                 if self._total_tasks else 0.0
             )
+            # 0 任务时失败率也应为 0（不能 100-0=100 误导成"全失败"）
             latencies = [t.get("latency", 0) for t in self._recent_tasks
                          if isinstance(t.get("latency"), (int, float))]
             p95 = sorted(latencies)[int(len(latencies) * 0.95) - 1] if latencies else 0.0
@@ -304,7 +305,7 @@ class MetricsCollector:
                 "total_tasks": self._total_tasks,
                 "failed_tasks": self._failed_tasks,
                 "success_rate": round(success_rate, 1),
-                "failure_rate": round(100 - success_rate, 1),
+                "failure_rate": round(100 - success_rate, 1) if self._total_tasks else 0.0,
                 "search_health": search_health,
                 "avg_latency_sec": round(
                     sum(latencies) / len(latencies), 2
