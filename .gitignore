@@ -69,3 +69,9 @@ metrics_summary.json
 # 本地配置备份（含真实凭据，绝不入库）
 config.json.bak
 .zcode/
+
+# 运行时不需要的内容（已从跟踪移除，永久不上传）
+标准/
+distill_data.jsonl
+_p13_cache_check.py
+.tmp/
