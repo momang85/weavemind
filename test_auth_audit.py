@@ -8,6 +8,7 @@
 import io
 import json
 import os
+import re
 import shutil
 import sqlite3
 import tempfile
@@ -133,7 +134,11 @@ class TestAuthAudit(unittest.TestCase):
     def _login(self, username, password):
         h = self._req("/api/login", "POST", {"username": username, "password": password})
         self.assertEqual(h._status, 200, h.json_body())
-        return h.json_body()["token"]
+        # 会话 token 只经 Set-Cookie（HttpOnly）下发，body 已不含 token
+        sc = h._headers.get("Set-Cookie", "")
+        m = re.search(r"session=([^;]+)", sc)
+        self.assertIsNotNone(m, "Set-Cookie 缺少 session 值")
+        return m.group(1)
 
     def _audit(self):
         return audit_logger.read_audit(1000)
@@ -145,10 +150,14 @@ class TestAuthAudit(unittest.TestCase):
         d = h.json_body()
         self.assertEqual(d["status"], "ok")
         self.assertEqual(d["role"], "admin")
-        self.assertGreaterEqual(len(d["token"]), 32)
-        self.assertIsNotNone(web_ui._get_session(d["token"]))
-        self.assertIn("Set-Cookie", h._headers)
-        self.assertIn("session=", h._headers["Set-Cookie"])
+        # token 已从 body 移除（防 XSS 窃取面），只经 HttpOnly Cookie
+        self.assertNotIn("token", d)
+        sc = h._headers.get("Set-Cookie", "")
+        m = re.search(r"session=([^;]+)", sc)
+        self.assertIsNotNone(m)
+        self.assertGreaterEqual(len(m.group(1)), 32)
+        self.assertIsNotNone(web_ui._get_session(m.group(1)))
+        self.assertIn("session=", sc)
         actions = [a["action"] for a in self._audit()]
         self.assertIn("login.success", actions)
         self.assertEqual(self._audit()[-1]["user"], "admin")
@@ -350,7 +359,11 @@ class TestAuthAudit(unittest.TestCase):
         self.assertEqual(h2._status, 200, h2.json_body())
         d = h2.json_body()
         self.assertEqual(d["role"], "admin")
-        self.assertIsNotNone(web_ui._get_session(d["token"]))
+        self.assertNotIn("token", d)
+        sc = h2._headers.get("Set-Cookie", "")
+        m = re.search(r"session=([^;]+)", sc)
+        self.assertIsNotNone(m)
+        self.assertIsNotNone(web_ui._get_session(m.group(1)))
         self.assertFalse(self._req("/api/auth/bootstrap").json_body()["setup_required"])
         # 已存在用户后不可重复初始化
         h3 = self._req("/api/setup-admin", "POST", {"username": "boss", "password": "boss12345"})

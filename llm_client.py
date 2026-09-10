@@ -339,8 +339,14 @@ def _mark_auth_error(code: int, body: str, endpoint: str = "") -> None:
     """
     with _auth_error_lock:
         _last_auth_error["ts"] = time.time()
-        _last_auth_error["message"] = (
-            f"LLM 端点鉴权/余额错误 HTTP {code}：{body[:150]}"
+        # 面向用户的消息只保留状态码：供应商响应体可能含账户标识等
+        # 敏感回显，仅进日志，不随 /api/status 的 llm_warning 下发给任何
+        # 登录用户（含 viewer）
+        _last_auth_error["message"] = f"LLM 端点鉴权/余额错误 HTTP {code}"
+    if body:
+        logger.warning(
+            "LLM auth/balance error %s endpoint=%s body=%s",
+            code, endpoint, str(body)[:150],
         )
     if endpoint and _is_balance_error(body):
         # 余额不足是确定性故障：立即标记不健康（不走 2 次失败阈值），

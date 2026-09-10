@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useRef } from 'react'
 import { Save, RotateCcw, Key, Globe, Cpu, Clock, Shield, Server, Bell, CalendarClock, Plus, Trash2 } from 'lucide-react'
 import { useTaskStore } from '../stores/useTaskStore'
 
@@ -149,13 +149,13 @@ function ScheduledJobsSection() {
   )
 }
 interface Config {
-  llm: { api_key: string; base_url: string; model: string }
+  llm: { api_key: string; api_key_set: boolean; base_url: string; model: string }
   redis: { host: string; port: number }
   system: { task_timeout: number; max_retry: number; replan_depth: number; guardian_heartbeat: number }
 }
 
 const defaults: Config = {
-  llm: { api_key: '', base_url: 'https://api.siliconflow.cn/v1', model: 'deepseek-ai/DeepSeek-V3' },
+  llm: { api_key: '', api_key_set: false, base_url: 'https://api.siliconflow.cn/v1', model: 'deepseek-ai/DeepSeek-V3' },
   redis: { host: 'localhost', port: 6379 },
   system: { task_timeout: 90, max_retry: 2, replan_depth: 2, guardian_heartbeat: 20 },
 }
@@ -166,15 +166,18 @@ export default function SettingsPage() {
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(true)
   const [showKey, setShowKey] = useState(false)
+  const loadedRef = useRef<Config>(defaults)
   const { fetchSystemStatus } = useTaskStore()
 
   useEffect(() => {
     fetch('/api/config').then(r => r.json()).then(d => {
-      setCfg({
+      const merged: Config = {
         llm: { ...defaults.llm, ...(d.llm || {}) },
         redis: { ...defaults.redis, ...(d.redis || {}) },
         system: { ...defaults.system, ...(d.system || {}) },
-      })
+      }
+      loadedRef.current = merged
+      setCfg(merged)
     }).catch(() => setError('Failed to load config')).finally(() => setLoading(false))
   }, [])
 
@@ -208,7 +211,9 @@ export default function SettingsPage() {
   }, [cfg])
 
   const reset = useCallback(() => {
-    setCfg(defaults)
+    // 回退到"最近一次从服务端加载"的配置，而不是硬编码默认值——
+    // 用硬编码默认 Reset 后再保存会把真实 base_url/model 等写成默认
+    setCfg(loadedRef.current)
     setSaved(false)
     setError('')
   }, [])
@@ -250,11 +255,13 @@ export default function SettingsPage() {
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           <Field label="API Key" icon={Key}>
             <div className="flex gap-2">
+              {/* 后端已脱敏：已配置时下发的 api_key 为空 + api_key_set 标记，
+                  显示"留空保持不变"掩码态；只有用户新输入才会上报明文 */}
               <input type={showKey ? 'text' : 'password'}
                 value={cfg.llm.api_key}
                 onChange={e => update('llm', 'api_key', e.target.value)}
                 className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500/50"
-                placeholder="sk-..." />
+                placeholder={cfg.llm.api_key_set ? '••••••••（已配置，留空保持不变）' : 'sk-...'} />
               <button onClick={() => setShowKey(!showKey)}
                 className="px-3 py-2 text-xs text-slate-500 hover:text-slate-300 bg-slate-800 border border-slate-700 rounded-lg">
                 {showKey ? 'Hide' : 'Show'}

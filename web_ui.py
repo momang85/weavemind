@@ -447,6 +447,19 @@ def _save_config(cfg):
         # users 段（含密码哈希）只允许服务端通过初始管理员/环境变量流程管理，
         # 前端保存配置时不得覆盖或注入用户。
         incoming.pop("users", None)
+        # GET 回显已将 api_key 脱敏为空串；前端未改动时不得把真实
+        # 密钥清空——只有显式提交非空新值才覆盖（与通知配置同口径）
+        prev_llm_sections = {
+            k: (existing.get(k) or {}) for k in _LLM_KEY_SECTIONS
+        }
+        for sec in _LLM_KEY_SECTIONS:
+            inc = incoming.get(sec)
+            if not isinstance(inc, dict):
+                continue
+            if not str(inc.get("api_key") or ""):
+                prev_key = str((prev_llm_sections.get(sec) or {}).get("api_key") or "")
+                if prev_key:
+                    inc["api_key"] = prev_key
         existing.update(incoming)
     else:
         existing = cfg
@@ -454,11 +467,58 @@ def _save_config(cfg):
         json.dump(existing, f, ensure_ascii=False, indent=2)
 
 
+# LLM 相关且含 api_key 的配置段：脱敏与"空值不回写"保护统一按此表
+_LLM_KEY_SECTIONS = ("llm", "embedding", "planner", "backup", "image")
+
+
 def _public_config(cfg: dict | None) -> dict:
-    """返回给前端的配置副本：剥离 users 段，避免密码哈希被回显。"""
+    """返回给前端的配置副本：剥离 users 段与全部密钥。
+
+    - users（含密码哈希）不入响应；
+    - LLM 相关五段的 api_key 置空 + api_key_set 标记（已配置），
+      前端据此显示"已配置（留空保持不变）"掩码态；明文 key 永不下发；
+    - notifications 段复用 public_notifications_config（脱敏
+      password/sendkey，与 /api/notifications 同口径）；
+    - 兜底递归清扫其余段中的 api_key/password/secret/sendkey/token 类键。
+    """
     out = dict(cfg or {})
     out.pop("users", None)
+    # 先统一清零密钥类键（递归兜底），再补"已配置"标记
+    out = _scrub_secret_keys(out)
+    for sec in _LLM_KEY_SECTIONS:
+        sec_cfg = out.get(sec)
+        if isinstance(sec_cfg, dict):
+            orig_key = str(((cfg or {}).get(sec) or {}).get("api_key") or "")
+            sec_cfg["api_key_set"] = bool(orig_key)
+            sec_cfg["api_key"] = ""
+    if isinstance(out.get("notifications"), dict):
+        try:
+            from notifications import public_notifications_config
+            out["notifications"] = public_notifications_config(out["notifications"])
+        except Exception:
+            pass
+    out.pop("audit", None)  # 审计配置属服务端内部，不回显
     return out
+
+
+def _scrub_secret_keys(node):
+    """递归清扫 api_key/password/secret/sendkey/token 类键（防御性兜底；
+    跳过 *_set 类布尔标记键，避免误伤"已配置"状态位）。"""
+    if isinstance(node, dict):
+        cleaned = {}
+        for k, v in node.items():
+            lk = str(k).lower()
+            if (
+                not lk.endswith("_set")
+                and any(s in lk for s in ("api_key", "password", "secret", "sendkey", "token"))
+            ):
+                cleaned[k] = ""
+                continue
+            cleaned[k] = _scrub_secret_keys(v)
+        return cleaned
+    if isinstance(node, list):
+        return [_scrub_secret_keys(v) for v in node]
+    return node
 
 
 # ---- 用户与密码（pbkdf2_hmac + 随机盐，绝不明文） ----
@@ -2362,9 +2422,10 @@ class Handler(BaseHTTPRequestHandler):
         role = str(user.get("role") or "viewer")
         token = _create_session(username, role)
         audit_log(username, ip, "login.success", target=username, result="ok")
+        # 会话凭证只经 HttpOnly Cookie 传递；响应 body 不再携带 token
+        # （前端 Login/auth 未消费该字段，body 副本只会增加 XSS 窃取面）
         return self._json({
             "status": "ok",
-            "token": token,
             "user": username,
             "role": role,
             "expires_in": SESSION_TTL_SECONDS,
@@ -2401,7 +2462,6 @@ class Handler(BaseHTTPRequestHandler):
         token = _create_session(username, "admin")
         return self._json({
             "status": "ok",
-            "token": token,
             "user": username,
             "role": "admin",
             "expires_in": SESSION_TTL_SECONDS,

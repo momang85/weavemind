@@ -21,6 +21,13 @@ set "PYTHONIOENCODING=utf-8"
 
 :: ---- [2/7] Redis ----
 echo   [2/7] Redis
+:: 三级探测：本地 6379 已有 Redis（Memurai/redis-windows/WSL）→ 跳过 Docker；
+:: 否则走 Docker 容器；两者都不可用时给出下载指引
+python -c "import socket;s=socket.create_connection(('127.0.0.1',6379),2);s.sendall(b'PING\r\n');raise SystemExit(0 if s.recv(64).startswith(b'+PONG') else 1)" >nul 2>&1
+if not errorlevel 1 (
+    echo        Local Redis detected at 127.0.0.1:6379, skip Docker
+    goto redis_ok
+)
 docker info >nul 2>&1
 if errorlevel 1 goto redis_start_docker
 goto redis_check_container
@@ -32,7 +39,13 @@ if exist "C:\Program Files\Docker\Docker\Docker Desktop.exe" (
 ) else if exist "%LOCALAPPDATA%\Docker\Docker Desktop.exe" (
     start "" "%LOCALAPPDATA%\Docker\Docker Desktop.exe"
 ) else (
-    echo   ERROR: Docker not found. Please install Docker Desktop, then re-run start.bat.
+    echo   ERROR: 未找到 Docker，也未检测到本机 Redis 服务。
+    echo   无需 Docker 的三种方案（任选其一，装好保持 6379 端口即可重跑 start.bat^）：
+    echo     1^) Memurai（Redis 兼容的 Windows 服务，开发者版免费^）：https://www.memurai.com
+    echo     2^) tporadowski/redis（Redis 5.x Windows 移植版^）：GitHub 搜 tporadowski/redis 下载解压，
+    echo        双击 redis-server.exe 后保持窗口；或 redis-server.exe --service-install 注册服务
+    echo     3^) WSL2：wsl --install 后执行 sudo apt install redis-server ^&^& sudo service redis-server start
+    echo   详见 docs/部署指南.md「无 Docker 的 Redis 方案」。
     pause & exit /b 1
 )
 echo        Waiting for Docker engine (up to 90s)...
@@ -54,6 +67,8 @@ docker ps --filter name=zhiguan --format "{{.Names}}" 2>nul | findstr zhiguan >n
     docker start zhiguan-redis >nul 2>&1 || docker run -d --name zhiguan-redis -p 6379:6379 redis:7-alpine >nul 2>&1
     echo        Started
 )
+
+:redis_ok
 
 :: ---- [3/7] Dependencies ----
 echo   [3/7] Dependencies

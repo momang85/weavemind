@@ -2710,6 +2710,107 @@ class TestP0BalancePrecheck(unittest.TestCase):
         finally:
             llm_client._last_auth_error = old
 
+    def test_mark_auth_error_message_without_body(self):
+        """密钥安全：鉴权错误消息不下发供应商响应体（可能含账户回显）。"""
+        import llm_client
+
+        old = dict(llm_client._last_auth_error)
+        try:
+            llm_client._mark_auth_error(401, "{\"code\":30001,\"message\":\"Sorry, your account balance is insufficient\"}")
+            msg = llm_client.get_endpoint_warning()
+            self.assertIn("HTTP 401", msg)
+            self.assertNotIn("30001", msg)
+            self.assertNotIn("insufficient", msg)
+        finally:
+            llm_client._last_auth_error = old
+
+    def test_public_config_scrubs_keys(self):
+        """密钥安全：/api/config 的公开拷贝不带任何 api_key/密码明文。"""
+        import web_ui
+
+        out = web_ui._public_config({
+            "llm": {"api_key": "sk-REAL", "base_url": "https://x/v1", "model": "m"},
+            "embedding": {"api_key": "sk-EMB"},
+            "planner": {"api_key": "sk-PLAN"},
+            "backup": {"api_key": "sk-BAK"},
+            "image": {"api_key": "sk-IMG"},
+            "users": {"a": {"password_hash": "pbkdf2$x$s$h"}},
+            "notifications": {"serverchan": {"sendkey": "REALSENDKEY"}},
+            "crypto_api_key": "SECRET",
+        })
+        self.assertNotIn("users", out)
+        self.assertEqual(out["llm"]["api_key"], "")
+        self.assertTrue(out["llm"]["api_key_set"])
+        for sec in ("embedding", "planner", "backup", "image"):
+            self.assertEqual(out[sec]["api_key"], "")
+            self.assertTrue(out[sec]["api_key_set"])
+        self.assertNotIn("REALSENDKEY", str(out["notifications"]))
+        self.assertEqual(out["crypto_api_key"], "")
+
+    def test_save_config_preserves_empty_api_key(self):
+        """密钥安全：前端保存空 api_key 不得清空真实密钥（留空=保持）。"""
+        import json
+        import tempfile
+        import os
+        import web_ui
+
+        tmpdir = tempfile.mkdtemp(prefix="wm_cfg_")
+        real = {
+            "llm": {"api_key": "sk-REAL-KEY", "base_url": "https://x/v1", "model": "m"},
+            "redis": {"host": "localhost", "port": 6379},
+            "system": {"task_timeout": 90},
+        }
+        p = os.path.join(tmpdir, "config.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump(real, f)
+        with mock.patch.object(web_ui, "CONFIG_PATH", p):
+            web_ui._save_config({
+                "llm": {"api_key": "", "base_url": "https://y/v1", "model": "m2"},
+                "redis": real["redis"],
+                "system": real["system"],
+            })
+        with open(p, encoding="utf-8") as f:
+            saved = json.load(f)
+        self.assertEqual(saved["llm"]["api_key"], "sk-REAL-KEY")
+        self.assertEqual(saved["llm"]["base_url"], "https://y/v1")  # 非密钥字段照常更新
+
+    def test_login_response_has_no_token_in_body(self):
+        """密钥安全：登录/初始化响应 body 不携带会话 token（仅 HttpOnly Cookie）。"""
+        import io
+        import json as _json
+        import web_ui
+
+        h = web_ui.Handler.__new__(web_ui.Handler)
+        body = _json.dumps({"username": "u", "password": "p"}).encode()
+        h.headers = {"Content-Length": str(len(body))}
+        h.rfile = io.BytesIO(body)
+        h._client_ip = lambda: "127.0.0.1"
+        h._cookie_secure_flag = lambda: ""
+        captured = {}
+
+        def _fake_json(d, code=200, extra_headers=None):
+            captured.update(dict(d))
+            if extra_headers:
+                captured["__headers__"] = dict(extra_headers)
+
+        h._json = _fake_json
+        with mock.patch.object(web_ui, "_users_initialized", lambda: True), \
+                mock.patch.object(web_ui, "_load_users",
+                                  lambda: {"u": {"password_hash": "h", "role": "admin"}}), \
+                mock.patch.object(web_ui, "_verify_password", lambda p, h2: True), \
+                mock.patch.object(web_ui, "_bf_check", lambda k: (False, 0)), \
+                mock.patch.object(web_ui, "_bf_record", lambda *a, **k: None), \
+                mock.patch.object(web_ui, "_bf_reset", lambda *a, **k: None), \
+                mock.patch.object(web_ui, "audit_log", lambda *a, **k: None), \
+                mock.patch.object(web_ui, "_create_session", lambda u, r: "tok123"):
+            h._handle_login()
+        # 响应 body 无 token 字段与 token 值；仅 Set-Cookie（HttpOnly）携带
+        body_only = {k: v for k, v in captured.items() if k != "__headers__"}
+        self.assertNotIn("token", body_only)
+        self.assertNotIn("tok123", _json.dumps(body_only))
+        self.assertIn("Set-Cookie", captured["__headers__"] or {})
+        self.assertIn("tok123", captured["__headers__"]["Set-Cookie"])
+
     def test_pick_fetch_url_prefers_finance(self):
         """快照抓取应优先选中财经相关 URL，降权内容社区。"""
         from orchestrator_v2 import OrchestratorV2
