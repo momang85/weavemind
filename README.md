@@ -344,10 +344,12 @@ GitHub Actions CI 自动执行后端编译/单测与前端构建。
 
 ## 已知限制
 
-- 复杂目标的规划稳定性依赖所选模型；`deepseek-v4-flash` 偶发泛化，
-  复杂任务建议在 `planner` 段配置更强的模型。
+- 复杂目标的规划稳定性依赖所选模型；规划器（`planner` 段）建议配置强推理模型，
+  当前默认映射为 `qwen3.7-max`（见 `config.json` 的 `model_roles`）。
 - 日志默认 5MB × 3 轮转，位于 `logs/`；`priority_router.py`、`auto_scaler.py`
   保留但暂未接入主链路。
+- 数字溯源只校验数值与来源是否出现，不绑定"数值-主体"归属（报告写 A 公司、
+  来源是 B 公司同数值时当前判为可溯源）；对抗测试集已记录该盲区。
 - 密钥与本地数据不入库（`config.json`、`.env`、`agents.db*`、`chroma_memory*`、日志等均已忽略）。
 
 ## License

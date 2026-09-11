@@ -503,8 +503,7 @@ def get_balance_status(use_cache: bool = True) -> dict:
 
 
 def endpoint_hosts() -> dict[str, str]:
-    """主/备端点主机名（小写，含端口前域名）。用于提交预检提示"主备同源"风险：
-    主备指向同一供应商时余额/限流故障会同时打挂两端，健康路由无路可切。"""
+    """主/备端点主机名（小写，含端口前域名）。"""
     def _host(url: str) -> str:
         try:
             from urllib.parse import urlparse
@@ -517,6 +516,89 @@ def endpoint_hosts() -> dict[str, str]:
         "primary": _host(os.environ.get("LLM_BASE_URL") or ""),
         "backup": _host(_BACKUP_CFG.get("base_url") or ""),
     }
+
+
+# 厂商识别：host 后缀 → 厂商标识。仅比较域名相等发现不了"同厂商不同域名"
+# （api.siliconflow.cn vs api-inner.siliconflow.cn），故按后缀归组；
+# 未知厂商回退 hostname 本身（保证永远有可比对的值）。
+_VENDOR_MAP = (
+    (".tokenrhythm.studio", "TokenRhythm"), ("tokenrhythm.studio", "TokenRhythm"),
+    ("siliconflow.cn", "SiliconFlow"),
+    ("deepseek.com", "DeepSeek"),
+    ("moonshot.cn", "Moonshot"),
+    ("bigmodel.cn", "智谱"),
+    ("zhipuai.cn", "智谱"),
+    ("dashscope.aliyuncs.com", "阿里云百炼"),
+    ("volces.com", "火山引擎"),
+    ("openai.com", "OpenAI"),
+    ("anthropic.com", "Anthropic"),
+    ("generativelanguage.googleapis.com", "Google"),
+    ("openrouter.ai", "OpenRouter"),
+)
+
+
+def _vendor_of(host: str) -> str:
+    """host → 厂商标识；支持 LLM_VENDOR_MAP 环境变量覆盖（JSON: 后缀→厂商）。"""
+    h = str(host or "").lower()
+    if not h:
+        return ""
+    try:
+        raw = os.environ.get("LLM_VENDOR_MAP") or ""
+        if raw:
+            custom = json.loads(raw)
+            if isinstance(custom, dict):
+                for suffix, name in custom.items():
+                    if suffix and str(suffix).lower() in h:
+                        return str(name)
+    except Exception:
+        pass
+    for suffix, name in _VENDOR_MAP:
+        if h == suffix or h.endswith(suffix):
+            return name
+    return h
+
+
+def endpoint_vendors() -> dict[str, str]:
+    """主/备端点厂商标识（{primary, backup}）；未知厂商回退 hostname。"""
+    hosts = endpoint_hosts()
+    return {
+        "primary": _vendor_of(hosts.get("primary") or ""),
+        "backup": _vendor_of(hosts.get("backup") or ""),
+    }
+
+
+def check_endpoint_diversity() -> tuple[bool, str]:
+    """端点多样性校验：(是否多样, 原因)。
+
+    - 主备未成对配置 → ("", "backup_not_configured")，不算风险（单端点模式）
+    - host 完全相同 → "same_host"（同源，最高风险）
+    - 厂商相同但域名不同 → "same_vendor"（同厂商不同接入点，故障域相同）
+    - 其余 → 多样，ok
+    """
+    hosts = endpoint_hosts()
+    p_host, b_host = hosts.get("primary") or "", hosts.get("backup") or ""
+    if not b_host:
+        return False, "backup_not_configured"
+    if p_host and p_host == b_host:
+        return False, "same_host"
+    vendors = endpoint_vendors()
+    p_v, b_v = vendors.get("primary") or "", vendors.get("backup") or ""
+    if p_v and p_v == b_v:
+        return False, "same_vendor"
+    return True, "ok"
+
+
+def endpoint_diversity_notice() -> str:
+    """主备同源风险提示文案（空串=无风险）；供提交预检与状态接口复用。"""
+    ok, reason = check_endpoint_diversity()
+    vendors = endpoint_vendors()
+    if ok or reason == "backup_not_configured":
+        return ""
+    if reason == "same_host":
+        return (f"主备端点同一域名（{vendors.get('primary') or '?'}），"
+                "同源风险：该平台故障会同时打挂主备，建议主备分属不同厂商")
+    return (f"主备端点同一供应商（{vendors.get('primary') or '?'}），"
+            "同源风险：建议主备分属不同厂商")
 
 
 def endpoints_available() -> tuple[bool, str]:

@@ -6422,5 +6422,85 @@ class TestSourceClaimExtraction(unittest.TestCase):
         self.assertIn("| 玩家 | 类型 | 进展详情 | 来源 |", repaired)
 
 
+class TestEndpointDiversity(unittest.TestCase):
+    """主备同源治理：厂商识别与多样性校验（同域/同厂商不同域/异厂商/未知）。"""
+
+    def _patch(self, primary: str, backup: str):
+        """固定主备端点（绕开 _ensure_cfg_fresh 的配置热重载覆盖）。"""
+        import llm_client
+        patches = [
+            mock.patch.object(llm_client, "_ensure_cfg_fresh", lambda: None),
+            mock.patch.dict(os.environ, {"LLM_BASE_URL": primary}),
+            mock.patch.object(llm_client, "_BACKUP_CFG",
+                              {"base_url": backup, "api_key": "k", "model": "m"}),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        return llm_client
+
+    def test_same_host_detected(self):
+        lc = self._patch("https://tokenrhythm.studio/v1", "https://tokenrhythm.studio/v1")
+        ok, reason = lc.check_endpoint_diversity()
+        self.assertFalse(ok)
+        self.assertEqual(reason, "same_host")
+        self.assertIn("同一域名", lc.endpoint_diversity_notice())
+
+    def test_same_vendor_different_domain_detected(self):
+        """只比域名发现不了的同厂商风险：不同子域应归为 same_vendor。"""
+        lc = self._patch("https://api.siliconflow.cn/v1", "https://api-inner.siliconflow.cn/v1")
+        v = lc.endpoint_vendors()
+        self.assertEqual(v["primary"], "SiliconFlow")
+        self.assertEqual(v["backup"], "SiliconFlow")
+        ok, reason = lc.check_endpoint_diversity()
+        self.assertFalse(ok)
+        self.assertEqual(reason, "same_vendor")
+        self.assertIn("同一供应商", lc.endpoint_diversity_notice())
+
+    def test_different_vendors_ok(self):
+        lc = self._patch("https://api.deepseek.com/v1", "https://api.moonshot.cn/v1")
+        ok, reason = lc.check_endpoint_diversity()
+        self.assertTrue(ok)
+        self.assertEqual(reason, "ok")
+        self.assertEqual(lc.endpoint_diversity_notice(), "")
+
+    def test_backup_not_configured_not_a_risk(self):
+        lc = self._patch("https://api.deepseek.com/v1", "")
+        ok, reason = lc.check_endpoint_diversity()
+        self.assertFalse(ok)
+        self.assertEqual(reason, "backup_not_configured")
+        self.assertEqual(lc.endpoint_diversity_notice(), "")
+
+    def test_unknown_vendor_falls_back_to_host(self):
+        lc = self._patch("https://api.unknown-vendor.com/v1", "https://api.other-vendor.com/v1")
+        v = lc.endpoint_vendors()
+        self.assertEqual(v["primary"], "api.unknown-vendor.com")
+        self.assertEqual(v["backup"], "api.other-vendor.com")
+        ok, _ = lc.check_endpoint_diversity()
+        self.assertTrue(ok)
+
+    def test_vendor_map_env_override(self):
+        lc = self._patch("https://api.acme-llm.com/v1", "https://api.acme-cdn.com/v1")
+        with mock.patch.dict(os.environ, {"LLM_VENDOR_MAP": '{"acme-llm.com": "Acme", "acme-cdn.com": "Acme"}'}):
+            v = lc.endpoint_vendors()
+            self.assertEqual(v["primary"], "Acme")
+            self.assertEqual(v["backup"], "Acme")
+            ok, reason = lc.check_endpoint_diversity()
+            self.assertFalse(ok)
+            self.assertEqual(reason, "same_vendor")
+
+    def test_precheck_notify_publishes_alert(self):
+        """两条提交路径共用的预检出口：有风险项即发告警（否则静默）。"""
+        import web_ui
+        calls = []
+        with mock.patch.object(web_ui, "_publish_alert",
+                               side_effect=lambda *a, **k: calls.append((a, k))):
+            out = web_ui._llm_precheck_notify(["主备端点同一供应商"])
+            self.assertEqual(out, ["主备端点同一供应商"])
+            self.assertEqual(len(calls), 1)
+            web_ui._llm_precheck_notify([])
+            self.assertEqual(len(calls), 1)  # 无风险不发
+
+
 if __name__ == "__main__":
     unittest.main()

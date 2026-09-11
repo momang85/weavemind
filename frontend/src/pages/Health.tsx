@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { Clock, TrendingUp, Shield, Activity, Play, Heart, Skull, FlaskConical, Plus, Cpu, RefreshCw } from 'lucide-react'
+import { Clock, TrendingUp, Shield, Activity, Play, Heart, Skull, FlaskConical, Plus, Cpu, RefreshCw, AlertTriangle } from 'lucide-react'
 import { useTaskStore } from '../stores/useTaskStore'
 import { useVisibleInterval } from '../lib/useVisibleInterval'
 
@@ -24,6 +24,7 @@ const typeConf: Record<string,{icon:typeof Plus;color:string;bg:string;border:st
   recovery:  {icon:Heart,color:'text-emerald-400',bg:'bg-emerald-500/5',border:'border-l-emerald-400'},
   guardian:  {icon:Shield,color:'text-amber-400',bg:'bg-amber-500/5',border:'border-l-amber-400'},
   evolution: {icon:FlaskConical,color:'text-violet-400',bg:'bg-violet-500/5',border:'border-l-violet-400'},
+  llm:       {icon:AlertTriangle,color:'text-amber-400',bg:'bg-amber-500/5',border:'border-l-amber-400'},
 }
 
 function formatUptime(sec: number): string {
@@ -61,6 +62,14 @@ export default function HealthPage() {
 
   const online = agents.filter(a => !a.status?.startsWith('offline')).length
   const survival = systemStatus?.survival_rate ?? (agents.length > 0 ? Math.round(online / agents.length * 100) : 100)
+  // 端点风险提示：同源（主备同一供应商/域名）或端点鉴权/余额异常
+  const diversity = systemStatus?.llm_health?.diversity
+  const sameSource = !!diversity && diversity.ok === false
+    && diversity.reason !== 'backup_not_configured'
+  const endpointWarn = sameSource
+    ? `主备端点同源（${diversity?.reason === 'same_host' ? '同一域名' : '同一供应商'}：`
+      + `${diversity?.primary_vendor || '?'}）——该平台故障会同时打挂主备，建议分属不同厂商`
+    : (systemStatus?.llm_warning || '')
   const tasksToday = systemStatus?.tasks?.today ?? 0
   const uptime = systemStatus?.uptime_sec ?? 0
   const usage = systemStatus?.llm_usage
@@ -86,6 +95,12 @@ export default function HealthPage() {
 
   return (
     <div className="max-w-5xl mx-auto space-y-5">
+      {endpointWarn && (
+        <div className="flex items-start gap-2 bg-amber-500/10 border border-amber-500/30 text-amber-400 text-sm rounded-lg px-4 py-3">
+          <AlertTriangle className="w-4 h-4 mt-0.5 shrink-0" />
+          <span>{endpointWarn}</span>
+        </div>
+      )}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         {[
           { icon: Clock, label: 'Uptime', value: formatUptime(uptime), color: 'text-cyan-400' },

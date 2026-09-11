@@ -94,6 +94,13 @@ export interface TaskReport {
   acceptance?: { overall?: string; gaps?: string[] }
 }
 
+export interface EndpointDiversity {
+  ok: boolean
+  reason: string  // ok | same_host | same_vendor | backup_not_configured
+  primary_vendor?: string
+  backup_vendor?: string
+}
+
 export interface SystemStatus {
   tasks: { total: number; success: number; today?: number }
   agents: AgentInfo[]
@@ -103,6 +110,12 @@ export interface SystemStatus {
   survival_rate?: number
   uptime_sec?: number
   llm_usage?: { calls: number; prompt_tokens: number; completion_tokens: number }
+  llm_warning?: string
+  llm_health?: {
+    healthy?: boolean
+    balance?: Record<string, { ok?: boolean; reason?: string }>
+    diversity?: EndpointDiversity
+  }
 }
 
 export type TaskStatus = 'idle' | 'running' | 'completed'

@@ -67,6 +67,20 @@ def _publish_alert(alert_type: str, message: str, service: str = "scheduler") ->
         }, ensure_ascii=False))
     except Exception:
         pass
+
+
+def _llm_precheck_notify(reasons: list[str]) -> list[str]:
+    """端点预检结果的统一出口：非空即发布 llm_balance_low 告警（Health 可见）。
+
+    两条提交路径（/task 与 /api/single-agent）共用，避免同源风险
+    只在主路径告警、单智能体路径静默放行。返回原 reasons 便于调用方判断。"""
+    if reasons:
+        _publish_alert(
+            "llm_balance_low",
+            "LLM 端点预警：" + "；".join(reasons) + "，请及时处理",
+            service="llm",
+        )
+    return reasons
 _events_lock = threading.Lock()
 _evt_seq = 0
 _rate_limiter = None
@@ -886,6 +900,9 @@ def _map_event_type(t: str) -> str:
         return "recovery"
     if "evolution" in t:
         return "evolution"
+    # 端点/余额预警单列一类，避免被兜底成 guardian 混淆告警语义
+    if "llm" in t or "balance" in t or "endpoint" in t:
+        return "llm"
     if "scale" in t or "guardian" in t:
         return "guardian"
     return "guardian"
@@ -924,6 +941,21 @@ def _system_status():
             # A3：余额感知预检（30s TTL 缓存），llm_health.balance 供前端直接展示
             from llm_client import get_balance_status
             llm_health["balance"] = get_balance_status()
+        except Exception:
+            pass
+        try:
+            # 主备多样性校验：Health 页不提交任务也能看到同源单点风险
+            from llm_client import (
+                check_endpoint_diversity, endpoint_vendors,
+            )
+            _ok, _reason = check_endpoint_diversity()
+            _vendors = endpoint_vendors()
+            llm_health["diversity"] = {
+                "ok": _ok,
+                "reason": _reason,
+                "primary_vendor": _vendors.get("primary") or "",
+                "backup_vendor": _vendors.get("backup") or "",
+            }
         except Exception:
             pass
         try:
@@ -2989,6 +3021,22 @@ def _get_task_acceptance(self, p):
         except Exception:
             return self._json({"error": "read failed"}, 500)
 
+def _get_task_acceptance_timeline(self, p):
+    """验收事件流（可回放/可对账）：按顺序返回该任务历次验收事件。
+
+    事件含 trigger（报告步骤/反思重做）、rules_version/rules_fingerprint
+    （判定规则版本与指纹，规则变更后可反查旧结果由哪版规则产出）、
+    report_sha256（对应报告文本）、overall/gaps/耗时。
+    登录即可访问（viewer 允许）；无事件返回空列表（旧任务）。"""
+    if p.startswith("/api/task/") and p.endswith("/acceptance/timeline"):
+        tid = p.split("/api/task/")[-1].rsplit("/acceptance/timeline", 1)[0]
+        try:
+            from acceptance_checker import read_acceptance_events
+            events = read_acceptance_events(tid)
+            return self._json({"task_id": tid, "count": len(events), "events": events})
+        except Exception:
+            return self._json({"error": "read failed"}, 500)
+
 def _get_task_deliverables(self, p):
     if p.startswith("/api/task/") and p.endswith("/deliverables"):
         tid = p.split("/api/task/")[-1].rsplit("/deliverables", 1)[0]
@@ -3573,27 +3621,19 @@ def _post_task(self, p, body, admin):
         # 全靠降级撑（实测主端点 402 切换 10 次）。预检有 30s TTL，不拖慢提交。
         # 余额不足时同步发布 alert 事件（Health 页可见），避免"静默耗尽"
         try:
-            from llm_client import get_balance_status, endpoint_hosts
+            from llm_client import get_balance_status, endpoint_diversity_notice
             _bal = get_balance_status()
             _p = _bal.get("primary") or {}
             _b = _bal.get("backup") or {}
-            _low_reasons = []
+            _reasons = []
             if _p.get("reason") == "insufficient_balance":
-                _low_reasons.append("主端点余额不足")
+                _reasons.append("主端点余额不足")
             if _b.get("reason") == "insufficient_balance":
-                _low_reasons.append("备份端点余额不足")
-            _hosts = endpoint_hosts()
-            if (
-                _hosts.get("primary") and _hosts.get("backup")
-                and _hosts["primary"] == _hosts["backup"]
-            ):
-                _low_reasons.append("主备端点同一供应商（同源风险，建议主备分属不同厂商）")
-            if _low_reasons:
-                _publish_alert(
-                    "llm_balance_low",
-                    "LLM 端点余额预警：" + "；".join(_low_reasons) + "，请及时充值",
-                    service="llm",
-                )
+                _reasons.append("备份端点余额不足")
+            _div_notice = endpoint_diversity_notice()
+            if _div_notice:
+                _reasons.append(_div_notice)
+            _reasons = _llm_precheck_notify(_reasons)
             if (
                 _p.get("reason") == "insufficient_balance"
                 and _b.get("reason") == "insufficient_balance"
@@ -3821,11 +3861,21 @@ def _post_single_agent(self, p, body, admin):
         if not g: return self._json({"error":"goal required"},400)
         # B3：提交前余额预检——双端点都余额不足时直接拒绝，避免任务跑一半
         # 全靠降级撑（实测主端点 402 切换 10 次）。预检有 30s TTL，不拖慢提交。
+        # 与 /task 路径同口径：余额不足/主备同源都会发布告警（不再静默放行）
         try:
-            from llm_client import get_balance_status
+            from llm_client import get_balance_status, endpoint_diversity_notice
             _bal = get_balance_status()
             _p = _bal.get("primary") or {}
             _b = _bal.get("backup") or {}
+            _reasons = []
+            if _p.get("reason") == "insufficient_balance":
+                _reasons.append("主端点余额不足")
+            if _b.get("reason") == "insufficient_balance":
+                _reasons.append("备份端点余额不足")
+            _div_notice = endpoint_diversity_notice()
+            if _div_notice:
+                _reasons.append(_div_notice)
+            _llm_precheck_notify(_reasons)
             if (
                 _p.get("reason") == "insufficient_balance"
                 and _b.get("reason") == "insufficient_balance"
@@ -4129,6 +4179,7 @@ _GET_ROUTES = [
     (lambda self, p: p == "/api/projects", _get_projects),
     (lambda self, p: p == "/api/scheduled-jobs", _get_scheduled_jobs),
     (lambda self, p: p.startswith("/files/"), _get_files),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/acceptance/timeline"), _get_task_acceptance_timeline),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/acceptance"), _get_task_acceptance),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/deliverables"), _get_task_deliverables),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/usage"), _get_task_usage),
