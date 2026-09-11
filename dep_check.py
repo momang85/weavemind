@@ -49,7 +49,13 @@ REDIS_ZIP_URL = os.environ.get(
     "Redis-x64-5.0.14.1.zip",
 )
 REDIS_BIN = "redis-server.exe"
-DOWNLOAD_HOSTS = ("github.com", "objects.githubusercontent.com", "codeload.github.com")
+DOWNLOAD_HOSTS = (
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",      # release 下载的实际 302 目标
+    "github-releases.githubusercontent.com",      # 同一资源域的旧名
+    "codeload.github.com",
+)
 MAX_DOWNLOAD_BYTES = 60 * 1024 * 1024  # 60MB（Redis zip 约 5MB）
 _UA = "WeaveMind-DepCheck/1.0"
 
@@ -346,12 +352,20 @@ Redis 未运行且无法自动获取时的三种方案（任选其一，保持 6
 
 
 def _spawn_background(argv: list[str], log_path: Path, cwd: Path | None = None):
-    """后台启动外部程序：参数列表 + shell=False，日志落盘，Windows 不弹窗。"""
+    """后台启动外部程序（进程分离，父进程退出后仍存活）。
+
+    Windows 需 DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP：否则父 shell 退出时
+    子进程随控制台作业一起被结束（曾导致"自检刚启动的 Redis 随即消失"）。
+    """
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_handle = log_path.open("a", encoding="utf-8")
     extra = {}
     if os.name == "nt":
-        extra["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        detached = getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
+        new_group = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+        no_window = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        # DETACHED_PROCESS 本身无控制台；再叠加 CREATE_NO_WINDOW 会冲突，故分开取用
+        extra["creationflags"] = detached | new_group if detached else no_window
     return subprocess.Popen(
         argv, shell=False, stdout=log_handle, stderr=subprocess.STDOUT,
         cwd=str(cwd or BASE_DIR), **extra,
