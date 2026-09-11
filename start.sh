@@ -16,14 +16,33 @@ export PYTHONIOENCODING=utf-8
 
 # [1/6] Redis
 echo "[1/6] Redis..."
-if docker ps --format '{{.Names}}' 2>/dev/null | grep -q zhiguan-redis; then
-    echo "  Redis already running"
+# 三级探测（与 start.bat 对齐）：本机 6379 已有 Redis → 跳过 Docker；
+# 否则走 Docker 容器；两者都不可用时给出原生安装指引
+if python -c "import socket,sys
+try:
+    s=socket.create_connection(('127.0.0.1',6379),2); s.sendall(b'PING\r\n')
+    sys.exit(0 if s.recv(64).startswith(b'+PONG') else 1)
+except Exception:
+    sys.exit(1)" >/dev/null 2>&1; then
+    echo "  Local Redis detected at 127.0.0.1:6379, skip Docker"
+elif command -v docker >/dev/null 2>&1; then
+    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q zhiguan-redis; then
+        echo "  Redis already running (docker)"
+    else
+        docker rm -f zhiguan-redis 2>/dev/null || true
+        docker run -d --name zhiguan-redis -p 6379:6379 redis:7-alpine
+        echo "  Redis started (docker)"
+    fi
+    sleep 2
 else
-    docker rm -f zhiguan-redis 2>/dev/null || true
-    docker run -d --name zhiguan-redis -p 6379:6379 redis:7-alpine
-    echo "  Redis started"
+    echo "  ERROR: 未找到 Docker，也未检测到本机 Redis（127.0.0.1:6379）。"
+    echo "  无需 Docker 的三种方案（任选其一，装好保持 6379 端口后重跑）："
+    echo "    1) Memurai（Redis 兼容，Windows 原生服务）：https://www.memurai.com"
+    echo "    2) tporadowski/redis（Redis 5.x Windows 移植版）：GitHub 搜 tporadowski/redis"
+    echo "    3) WSL2 / Linux：sudo apt install redis-server && sudo service redis-server start"
+    echo "  详见 docs/部署指南.md「无 Docker 的 Redis 方案」"
+    exit 1
 fi
-sleep 2
 
 # [2/6] Dependencies
 echo "[2/6] Dependencies..."

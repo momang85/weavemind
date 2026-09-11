@@ -6502,5 +6502,60 @@ class TestEndpointDiversity(unittest.TestCase):
             self.assertEqual(len(calls), 1)  # 无风险不发
 
 
+class TestNoDockerDependency(unittest.TestCase):
+    """减依赖：redis 配置生效 + 启动前预检 + 无 Node 时的自包含状态页。"""
+
+    def test_apply_env_maps_redis_section(self):
+        """config.json 的 redis 段应注入 REDIS_HOST/REDIS_PORT（此前是死配置）。"""
+        import launcher
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("REDIS_HOST", None)
+            os.environ.pop("REDIS_PORT", None)
+            launcher._apply_env({"redis": {"host": "10.0.0.9", "port": 6380}})
+            self.assertEqual(os.environ.get("REDIS_HOST"), "10.0.0.9")
+            self.assertEqual(os.environ.get("REDIS_PORT"), "6380")
+
+    def test_apply_env_keeps_existing_redis_env(self):
+        """已存在的 REDIS_HOST/PORT 环境变量优先，不被配置覆盖。"""
+        import launcher
+        with mock.patch.dict(os.environ, {"REDIS_HOST": "env-host", "REDIS_PORT": "6399"}):
+            launcher._apply_env({"redis": {"host": "cfg-host", "port": 6380}})
+            self.assertEqual(os.environ["REDIS_HOST"], "env-host")
+            self.assertEqual(os.environ["REDIS_PORT"], "6399")
+
+    def test_redis_reachable_false_on_closed_port(self):
+        import launcher
+        self.assertFalse(launcher._redis_reachable("127.0.0.1", 6399, timeout=0.5))
+
+    def test_check_redis_exits_with_hint_when_unreachable(self):
+        """Redis 不可达时必须给出安装指引并退出（码 1），不静默启动。"""
+        import launcher
+        with mock.patch.object(launcher, "_redis_reachable", return_value=False), \
+                mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SKIP_REDIS_CHECK", None)
+            with self.assertRaises(SystemExit) as ctx, \
+                    mock.patch("builtins.print") as pr:
+                launcher._check_redis_or_exit()
+            self.assertEqual(ctx.exception.code, 1)
+            printed = " ".join(str(c) for c in pr.call_args_list)
+            self.assertIn("Memurai", printed)
+            self.assertIn("部署指南", printed)
+
+    def test_check_redis_skippable_by_env(self):
+        import launcher
+        with mock.patch.object(launcher, "_redis_reachable", return_value=False), \
+                mock.patch.dict(os.environ, {"SKIP_REDIS_CHECK": "1"}):
+            launcher._check_redis_or_exit()  # 不抛即通过
+
+    def test_status_page_is_self_contained(self):
+        """前端未构建时返回自包含状态页（含构建命令、无外链脚本依赖 Node）。"""
+        import web_ui
+        page = web_ui.HTML
+        self.assertIn("npm run build", page)
+        self.assertNotIn("localhost:5173/@vite/client", page)
+        self.assertNotIn("<script", page)  # 无 JS 依赖，离线可读
+        self.assertIn("/api/health", page)
+
+
 if __name__ == "__main__":
     unittest.main()

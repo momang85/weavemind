@@ -2294,7 +2294,54 @@ def _task_pdf_bytes(tid: str) -> bytes:
     )
 
 
-HTML = '<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>WeaveMind</title></head><body><div id="root"></div><script type="module" src="http://localhost:5173/@vite/client"></script><script type="module" src="http://localhost:5173/src/main.tsx"></script></body></html>'
+# 前端未构建时的自包含状态页：不依赖 Node/vite，离线可读。
+# （此前是一个只引用 localhost:5173/@vite/client 的壳——没装 Node 时白屏）
+HTML = """<!DOCTYPE html>
+<html lang="zh-CN"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>织光 WeaveMind · 后端运行中</title>
+<style>
+ body{margin:0;background:#020617;color:#e2e8f0;font:14px/1.7 system-ui,-apple-system,"Segoe UI",sans-serif}
+ .wrap{max-width:680px;margin:8vh auto;padding:0 24px}
+ h1{font-size:20px;margin:0 0 4px;color:#67e8f9}
+ .sub{color:#64748b;font-size:13px;margin-bottom:24px}
+ .card{background:#0f172a;border:1px solid #1e293b;border-radius:12px;padding:20px;margin-bottom:16px}
+ .card h2{font-size:14px;margin:0 0 10px;color:#cbd5e1;font-weight:600}
+ code,pre{background:#020617;border:1px solid #1e293b;border-radius:6px;color:#a5f3fc}
+ code{padding:2px 6px;font-size:13px}
+ pre{padding:12px;overflow-x:auto;font-size:13px}
+ ul{margin:8px 0 0;padding-left:20px;color:#94a3b8}
+ li{margin:4px 0}
+ .ok{color:#34d399}.warn{color:#fbbf24}
+</style></head><body><div class="wrap">
+<h1>织光 WeaveMind</h1>
+<div class="sub">后端已启动，前端界面尚未构建</div>
+<div class="card">
+  <h2>启用 Web 界面（任选其一）</h2>
+  <p>① 构建前端（需要 Node 18+，构建一次即可）：</p>
+  <pre>cd frontend
+npm install
+npm run build</pre>
+  <p>② 或用开发模式（需 Node）：<code>cd frontend &amp;&amp; npm run dev</code>，访问 http://localhost:5173</p>
+  <p>构建完成后刷新本页即可进入控制台。</p>
+</div>
+<div class="card">
+  <h2>当前可用的后端接口</h2>
+  <ul>
+    <li><a href="/api/health" style="color:#67e8f9">/api/health</a> — 健康检查</li>
+    <li><a href="/api/status" style="color:#67e8f9">/api/status</a> — 运行状态（需登录）</li>
+    <li><code>POST /api/login</code>、<code>POST /task</code>、<code>/files/*</code> 等 API 均可用</li>
+  </ul>
+</div>
+<div class="card">
+  <h2>排障提示</h2>
+  <ul>
+    <li>任务无法提交 → 确认 Redis 可用（<code>redis-cli ping</code> 返回 PONG）</li>
+    <li>服务未全部在线 → <code>python launcher.py status</code></li>
+    <li>依赖缺失 → <code>pip install -r requirements.txt</code></li>
+  </ul>
+</div>
+</div></body></html>"""
 DIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "dist")
 
 class Handler(BaseHTTPRequestHandler):

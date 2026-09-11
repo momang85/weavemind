@@ -35,8 +35,9 @@ distill_test_v2.jsonl
 distill_data_merged.jsonl
 
 # 前端
+# 前端：node_modules 与构建中间产物忽略；dist 入库（新用户免 Node 直接可用，
+# 前端源码改动后需 `rm -rf frontend/dist && npm run build` 干净重建再提交）
 frontend/node_modules/
-frontend/dist/
 frontend/tsconfig.tsbuildinfo
 
 # 运行状态

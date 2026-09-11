@@ -77,7 +77,56 @@ def _apply_env(cfg: dict) -> None:
         os.environ["EMBEDDING_BASE_URL"] = emb["base_url"]
     if emb.get("model"):
         os.environ["EMBEDDING_MODEL"] = emb["model"]
+    # redis 段此前只是"文档里的配置"（生产代码只读 REDIS_HOST/PORT 环境变量，
+    # 改 config.json 不生效）——这里补上映射：配置生效，且不覆盖已设的环境变量
+    redis_cfg = cfg.get("redis", {})
+    if redis_cfg.get("host") and not os.environ.get("REDIS_HOST"):
+        os.environ["REDIS_HOST"] = str(redis_cfg["host"])
+    if redis_cfg.get("port") and not os.environ.get("REDIS_PORT"):
+        os.environ["REDIS_PORT"] = str(redis_cfg["port"])
     os.environ["PYTHONIOENCODING"] = "utf-8"
+
+
+REDIS_SETUP_HINT = """\
+无法连接 Redis（{host}:{port}）——织光的消息总线/任务队列依赖它，服务无法启动。
+
+无需 Docker 的三种方案（任选其一，装好保持 6379 端口后重跑本命令）：
+  1) Memurai（Redis 兼容的 Windows 服务，开发者版免费）：https://www.memurai.com
+  2) tporadowski/redis（Redis 5.x Windows 移植版）：GitHub 搜 tporadowski/redis，
+     解压后双击 redis-server.exe，或 redis-server.exe --service-install 注册服务
+  3) WSL2：wsl --install 后 sudo apt install redis-server && sudo service redis-server start
+  或使用 Docker 方式：docker run -d --name zhiguan-redis -p 6379:6379 redis:7-alpine
+详见 docs/部署指南.md「无 Docker 的 Redis 方案」；也可用 REDIS_HOST/REDIS_PORT
+指向其它机器上的 Redis，或用 SKIP_REDIS_CHECK=1 跳过本检查。
+"""
+
+
+def _redis_reachable(host: str, port: int, timeout: float = 2.0) -> bool:
+    """socket + PING 探测 Redis 可达性（不依赖 redis 包，装依赖前也能用）。"""
+    import socket as _socket
+    try:
+        with _socket.create_connection((host, int(port)), timeout=timeout) as s:
+            s.sendall(b"PING\r\n")
+            return s.recv(64).startswith(b"+PONG")
+    except Exception:
+        return False
+
+
+def _check_redis_or_exit() -> None:
+    """启动前 Redis 预检：不可达则打印明确指引并退出（避免"打印 started 后
+    各服务静默崩溃"）。SKIP_REDIS_CHECK=1 可跳过。"""
+    if os.environ.get("SKIP_REDIS_CHECK", "0") == "1":
+        return
+    host = os.environ.get("REDIS_HOST", "localhost")
+    try:
+        port = int(os.environ.get("REDIS_PORT", "6379") or 6379)
+    except Exception:
+        port = 6379
+    if _redis_reachable(host, port):
+        return
+    logging.getLogger(__name__).error("Redis unreachable at %s:%s", host, port)
+    print(REDIS_SETUP_HINT.format(host=host, port=port))
+    sys.exit(1)
 
 
 def _read_pids() -> dict:
@@ -539,6 +588,7 @@ def main() -> None:
 
     action = sys.argv[1] if len(sys.argv) > 1 else "start"
     if action == "start":
+        _check_redis_or_exit()
         if os.environ.get("WEAVEMIND_SUPERVISE", "0") == "1":
             supervise_services()
         else:
@@ -554,6 +604,7 @@ def main() -> None:
     elif action == "status":
         print_status()
     elif action == "restart":
+        _check_redis_or_exit()
         stopped = stop_services()
         logger.info("Stopped: %s", ", ".join(stopped) if stopped else "none")
         time.sleep(2)
