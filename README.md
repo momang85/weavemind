@@ -182,11 +182,10 @@ bash stop.sh     # 一键停止
 与 Windows 一致：首次运行自动装依赖、自动构建前端。
 
 > **不需要 Docker**：项目唯一的外部依赖是 **Redis**（消息总线/任务队列），
-> SQLite 与向量库都是本地内嵌。`start.bat` / `start.sh` 会先探测本机
-> `127.0.0.1:6379`，已有原生 Redis 就直接跳过 Docker。没有 Redis 时，
-> 任选一种方式安装即可：[Memurai](https://www.memurai.com)（Windows 原生服务）、
-> [tporadowski/redis](https://github.com/tporadowski/redis)（Windows 移植版）、
-> 或 `sudo apt install redis-server`（Linux/WSL2）。
+> SQLite 与向量库都是本地内嵌。启动时会**自动依赖自检**——缺失的 pip 包自动补装，
+> Redis 缺失时（Windows）自动下载便携版并启动、其它平台优先用系统 `redis-server`
+> 或给出安装指引。也可手动执行：`python launcher.py deps`（只报告）/
+> `python launcher.py deps --fix`（检测并补齐）。
 > Docker 只是可选的容器化部署方式（方式 C），不是运行前提。
 
 > **Python 版本**：支持 3.10–3.14。官方 `pygame` 在 3.14 暂无 wheel，

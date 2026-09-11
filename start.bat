@@ -70,11 +70,14 @@ docker ps --filter name=zhiguan --format "{{.Names}}" 2>nul | findstr zhiguan >n
 
 :redis_ok
 
-:: ---- [3/7] Dependencies ----
+:: ---- [3/7] Dependencies (自检 + 自动补齐：缺包自动装、Redis 缺失自动获取) ----
 echo   [3/7] Dependencies
-pip install -r requirements.txt -q
-if errorlevel 1 echo   WARNING: some dependencies failed, services may be limited
-echo        OK
+python dep_check.py --fix
+if errorlevel 1 (
+    echo   ERROR: 必需依赖未就绪（见上方报告）。
+    echo   可手动处理：pip install -r requirements.txt；Redis 安装见 docs/部署指南.md
+    pause & exit /b 1
+)
 
 :: ---- [4/7] Frontend (首次运行自动构建) ----
 echo   [4/7] Frontend

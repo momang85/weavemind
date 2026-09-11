@@ -1,15 +1,19 @@
 """织光 (ZhiGuang) - 统一服务进程管理器。
 
 用法：
-    python launcher.py             # 启动全部服务（先清理旧进程）
+    python launcher.py             # 启动全部服务（先依赖自检 + 清理旧进程）
     python launcher.py start       # 同上
+    python launcher.py deps        # 依赖自检（只报告）
+    python launcher.py deps --fix  # 依赖自检并自动补齐（装包 / 获取 Redis）
     python launcher.py supervise   # 守护模式：启动全部服务后循环巡检，崩溃自动重启
     python launcher.py stop        # 按 PID 文件精确停止全部服务
     python launcher.py status      # 查看运行状态
 
-所有服务 PID 写入 .weavemind/pids.json，stop 时按 PID 精确结束，
+所有服务 PID 写入 .weavimind/pids.json，stop 时按 PID 精确结束，
 不再使用 taskkill /IM python.exe 之类的全杀方案。
 start 时若环境变量 WEAVEMIND_SUPERVISE=1 同样进入守护模式（start.bat 默认不开）。
+启动前会跑依赖自检（缺失的 pip 包自动补装、Redis 缺失按平台自动获取），
+SKIP_DEP_CHECK=1 可跳过自检。
 """
 
 from __future__ import annotations
@@ -582,17 +586,46 @@ def print_status() -> None:
     print(f"{alive}/{len(services)} services alive")
 
 
+def _run_dependency_check(fix: bool, fatal: bool) -> None:
+    """启动前依赖自检（缺失自动补齐）；fatal=True 时必需项缺失即退出。
+
+    SKIP_DEP_CHECK=1 可跳过（进阶/CI 场景）。依赖自检失败不静默——打印
+    分项报告，把"缺什么/装了什么/是否成功"显式暴露。"""
+    if os.environ.get("SKIP_DEP_CHECK", "0") == "1":
+        return
+    logger = logging.getLogger(__name__)
+    try:
+        import dep_check
+    except Exception as exc:
+        logger.warning("依赖自检模块不可用，跳过：%s", str(exc)[:120])
+        return
+    try:
+        report = dep_check.ensure_all(auto=fix)
+        print(dep_check.format_report(report))
+    except Exception as exc:
+        logger.warning("依赖自检异常（已忽略）：%s", str(exc)[:150])
+        return
+    if fatal and not report.get("ok"):
+        print("必需依赖未就绪：请按上面的提示处理后重试"
+              "（或用 SKIP_DEP_CHECK=1 跳过自检）。")
+        sys.exit(1)
+
+
 def main() -> None:
     logging_setup.setup_logging("launcher")
     logger = logging.getLogger(__name__)
 
     action = sys.argv[1] if len(sys.argv) > 1 else "start"
     if action == "start":
+        _run_dependency_check(fix=True, fatal=True)
         _check_redis_or_exit()
         if os.environ.get("WEAVEMIND_SUPERVISE", "0") == "1":
             supervise_services()
         else:
             start_services()
+    elif action == "deps":
+        fix = "--fix" in sys.argv[2:]
+        _run_dependency_check(fix=fix, fatal=False)
     elif action == "supervise":
         supervise_services()
     elif action == "stop":
@@ -604,6 +637,7 @@ def main() -> None:
     elif action == "status":
         print_status()
     elif action == "restart":
+        _run_dependency_check(fix=True, fatal=True)
         _check_redis_or_exit()
         stopped = stop_services()
         logger.info("Stopped: %s", ", ".join(stopped) if stopped else "none")

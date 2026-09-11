@@ -44,9 +44,13 @@ else
     exit 1
 fi
 
-# [2/6] Dependencies
+# [2/6] Dependencies（自检 + 自动补齐：缺包自动装、Redis 缺失自动获取）
 echo "[2/6] Dependencies..."
-pip install -q -r requirements.txt || echo "  WARNING: some dependencies failed, services may be limited"
+if ! python dep_check.py --fix; then
+    echo "  ERROR: 必需依赖未就绪（见上方报告）。"
+    echo "  可手动处理：pip install -r requirements.txt；Redis 安装见 docs/部署指南.md"
+    exit 1
+fi
 
 # [3/6] Frontend (首次运行自动构建)
 echo "[3/6] Frontend..."

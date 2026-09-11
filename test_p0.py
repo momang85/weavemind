@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
+import zipfile
 from pathlib import Path
 from unittest import mock
 
@@ -6555,6 +6556,178 @@ class TestNoDockerDependency(unittest.TestCase):
         self.assertNotIn("localhost:5173/@vite/client", page)
         self.assertNotIn("<script", page)  # 无 JS 依赖，离线可读
         self.assertIn("/api/health", page)
+
+
+class TestDependencyCheck(unittest.TestCase):
+    """启动依赖自检：检测/报告/自动补齐 + 下载与解压的安全约束。"""
+
+    def test_python_version_bounds(self):
+        import dep_check
+        cases = {(3, 9): False, (3, 10): True, (3, 14): True, (3, 15): False}
+        for vi, expected in cases.items():
+            got = dep_check.check_python_version(vi)
+            self.assertEqual(got["ok"], expected, got)
+
+    def test_check_packages_splits_required_and_optional(self):
+        import dep_check
+        specs = (
+            {"module": "definitely_missing_pkg_a", "package": "pkg-a",
+             "level": "required", "why": "t"},
+            {"module": "definitely_missing_pkg_b", "package": "pkg-b",
+             "level": "optional", "why": "t"},
+            {"module": "json", "package": "stdlib", "level": "required", "why": "t"},
+        )
+        res = dep_check.check_packages(specs)
+        self.assertEqual([i["package"] for i in res["missing_required"]], ["pkg-a"])
+        self.assertEqual([i["package"] for i in res["missing_optional"]], ["pkg-b"])
+        self.assertEqual(res["ready"], 1)
+
+    def test_valid_port_bounds(self):
+        import dep_check
+        self.assertEqual(dep_check._valid_port("6380"), 6380)
+        self.assertEqual(dep_check._valid_port(0), dep_check.DEFAULT_PORT)
+        self.assertEqual(dep_check._valid_port(70000), dep_check.DEFAULT_PORT)
+        self.assertEqual(dep_check._valid_port("abc"), dep_check.DEFAULT_PORT)
+
+    def test_import_has_no_side_effects(self):
+        """顶层零副作用：import 期间不得联网/安装/探测（CI 会 import launcher）。"""
+        import importlib
+        import socket
+        import subprocess as sp
+        import dep_check  # noqa: F401
+        with mock.patch.object(socket, "create_connection",
+                               side_effect=AssertionError("import 期不应探测网络")), \
+                mock.patch.object(sp, "run",
+                                  side_effect=AssertionError("import 期不应执行命令")), \
+                mock.patch.object(sp, "Popen",
+                                  side_effect=AssertionError("import 期不应起进程")):
+            importlib.reload(dep_check)
+
+
+class TestDownloadSafety(unittest.TestCase):
+    """安全约束：仅 https、host 白名单、拒绝环回/私网/保留地址。"""
+
+    def test_rejects_non_https(self):
+        import dep_check
+        for url in ("http://github.com/a.zip", "ftp://github.com/a.zip",
+                    "file:///etc/passwd"):
+            ok, why = dep_check._validate_download_url(url)
+            self.assertFalse(ok, url)
+            self.assertIn("https", why)
+
+    def test_rejects_non_allowlisted_host(self):
+        import dep_check
+        ok, why = dep_check._validate_download_url("https://evil.example.com/a.zip")
+        self.assertFalse(ok)
+        self.assertIn("白名单", why)
+
+    def test_rejects_loopback_and_private_even_if_allowlisted_suffix(self):
+        """即使主机名结尾像白名单，也不得放行环回/私网地址。"""
+        import dep_check
+        for url in ("https://localhost/a.zip", "https://127.0.0.1/a.zip",
+                    "https://10.0.0.5/a.zip", "https://192.168.1.9/a.zip",
+                    "https://169.254.169.254/a.zip"):
+            ok, why = dep_check._validate_download_url(url)
+            self.assertFalse(ok, url)
+
+    def test_accepts_allowlisted_public_host(self):
+        import dep_check
+        with mock.patch("adapters.transport._validate_public_url", return_value=True):
+            ok, why = dep_check._validate_download_url(
+                "https://github.com/tporadowski/redis/releases/download/v1/x.zip")
+        self.assertTrue(ok, why)
+
+    def test_fails_closed_without_validator(self):
+        """公网校验器不可用时拒绝下载（fail-closed）。"""
+        import dep_check
+        with mock.patch.dict("sys.modules", {"adapters.transport": None}):
+            ok, why = dep_check._validate_download_url("https://github.com/a.zip")
+        self.assertFalse(ok)
+
+    def test_extract_rejects_traversal_and_symlink(self):
+        import dep_check
+        tmp = tempfile.mkdtemp(prefix="wm_zip_")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        dest = os.path.join(tmp, "out")
+
+        def _zip(name, entries):
+            p = os.path.join(tmp, name)
+            with zipfile.ZipFile(p, "w") as zf:
+                for fname, data in entries:
+                    zf.writestr(fname, data)
+            return p
+
+        # 上跳路径
+        z1 = _zip("t1.zip", [("../evil.txt", "x")])
+        ok, why = dep_check._safe_extract_zip(z1, dest)
+        self.assertFalse(ok)
+        self.assertIn("越界", why)
+        # 绝对路径
+        z2 = _zip("t2.zip", [("/etc/cron.d/x", "x")])
+        ok, why = dep_check._safe_extract_zip(z2, dest)
+        self.assertFalse(ok)
+        # 符号链接（unix 模式位）
+        z3 = os.path.join(tmp, "t3.zip")
+        with zipfile.ZipFile(z3, "w") as zf:
+            info = zipfile.ZipInfo("link")
+            info.external_attr = (0o120777 << 16)
+            zf.writestr(info, "target")
+        ok, why = dep_check._safe_extract_zip(z3, dest)
+        self.assertFalse(ok)
+        self.assertIn("符号链接", why)
+        # 正常包可解压
+        z4 = _zip("t4.zip", [("redis-server.exe", b"BIN"), ("sub/a.txt", "ok")])
+        ok, why = dep_check._safe_extract_zip(z4, dest, expect_name="redis-server.exe")
+        self.assertTrue(ok, why)
+        self.assertTrue(os.path.exists(os.path.join(dest, "redis-server.exe")))
+
+    def test_extract_requires_expected_binary(self):
+        import dep_check
+        tmp = tempfile.mkdtemp(prefix="wm_zip2_")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        p = os.path.join(tmp, "t.zip")
+        with zipfile.ZipFile(p, "w") as zf:
+            zf.writestr("readme.txt", "no binary here")
+        ok, why = dep_check._safe_extract_zip(p, os.path.join(tmp, "out"),
+                                             expect_name="redis-server.exe")
+        self.assertFalse(ok)
+        self.assertIn("未找到", why)
+
+
+class TestLauncherDependencyHook(unittest.TestCase):
+    """launcher 接入：deps 动作可用，start 前自检可跳过/可失败退出。"""
+
+    def test_run_dependency_check_reports_and_passes(self):
+        import launcher
+        with mock.patch("dep_check.ensure_all",
+                        return_value={"ok": True, "python": {"ok": True, "detail": "py"},
+                                      "packages": {"ready": 1, "total": 1,
+                                                   "missing_required": [],
+                                                   "missing_optional": []},
+                                      "redis": {"ok": True, "detail": "ok"},
+                                      "frontend": {"ok": True, "detail": "ok"},
+                                      "install": {}}):
+            launcher._run_dependency_check(fix=False, fatal=True)  # 不抛即通过
+
+    def test_run_dependency_check_fatal_on_missing(self):
+        import launcher
+        bad = {"ok": False, "python": {"ok": True, "detail": "py"},
+               "packages": {"ready": 0, "total": 1,
+                            "missing_required": [{"package": "redis", "why": "x"}],
+                            "missing_optional": []},
+               "redis": {"ok": True, "detail": "ok"},
+               "frontend": {"ok": True, "detail": "ok"}, "install": {}}
+        with mock.patch("dep_check.ensure_all", return_value=bad):
+            with self.assertRaises(SystemExit) as ctx:
+                launcher._run_dependency_check(fix=True, fatal=True)
+            self.assertEqual(ctx.exception.code, 1)
+
+    def test_run_dependency_check_skippable(self):
+        import launcher
+        with mock.patch.dict(os.environ, {"SKIP_DEP_CHECK": "1"}), \
+                mock.patch("dep_check.ensure_all",
+                           side_effect=AssertionError("跳过时不应执行自检")):
+            launcher._run_dependency_check(fix=True, fatal=True)
 
 
 if __name__ == "__main__":
