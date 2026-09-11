@@ -1768,7 +1768,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 # 引用过期快照（"重做后仍失败"实为旧文件未被复检）
                 if target.get("capability") in ("report_generator", "content_summary"):
                     try:
-                        self._run_acceptance_check(task_id, goal)
+                        self._run_acceptance_check(task_id, goal, trigger="反思重做")
                     except Exception as exc:
                         logger.warning(
                             "Redo acceptance recheck failed for %s: %s",
@@ -1792,9 +1792,13 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             return True
         return False
 
-    def _run_acceptance_check(self, task_id: str, goal: str) -> dict | None:
+    def _run_acceptance_check(self, task_id: str, goal: str,
+                              trigger: str = "报告步骤") -> dict | None:
         """报告生成后跑确定性验收器：数字溯源等 checklist → 缺口报告。
-        结果写入任务工作区 acceptance_report.json 并推前端，供反思精准补缺口。"""
+        结果写入任务工作区 acceptance_report.json 并推前端，供反思精准补缺口；
+        同时向 acceptance_events.jsonl 追加一条审计事件（可回放、可对账）。"""
+        _t0 = time.time()
+        _repaired = False
         try:
             from acceptance_checker import run_acceptance
             from workspace import task_reports_dir, task_workspace
@@ -1816,6 +1820,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     if repaired != report:
                         rpath.write_text(repaired, encoding="utf-8")
                         report = repaired
+                        _repaired = True
                         result = run_acceptance(
                             task_id, goal, repaired, task_workspace(task_id),
                         )
@@ -1862,6 +1867,21 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     json.dumps(result, ensure_ascii=False, indent=1),
                     encoding="utf-8",
                 )
+            except Exception:
+                pass
+            # 验收审计事件流：快照文件（覆盖写）之上追加完整历史，
+            # 每条事件带规则版本/指纹与报告 hash，支持回放与对账
+            try:
+                from acceptance_checker import (
+                    append_acceptance_event, build_acceptance_event,
+                )
+                _ev = build_acceptance_event(
+                    result, trigger=trigger,
+                    iteration=int(getattr(self, "_accept_iteration", 0) or 0),
+                    duration_ms=int((time.time() - _t0) * 1000),
+                )
+                _ev["repaired"] = _repaired
+                append_acceptance_event(task_id, _ev)
             except Exception:
                 pass
             summary = "；".join(result.get("gaps") or []) or "验收通过"
@@ -4151,7 +4171,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 self._recycle_fetch_into_clean(task_id, goal, result)
             if step.get("capability") == "report_generator" and result.get("status") == "SUCCESS":
                 # 确定性验收器：数字溯源等 checklist → 缺口报告（供反思/前端/人工）
-                self._run_acceptance_check(task_id, goal)
+                self._run_acceptance_check(task_id, goal, trigger="报告步骤")
             if step.get("capability") == "web_search" and result.get("status") == "SUCCESS":
                 # 搜索结果 URL 累计到任务级，供后续（含反射轮）报告步骤引用来源
                 try:

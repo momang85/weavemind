@@ -1,0 +1,74 @@
+{
+  "type": "acceptance_adversarial",
+  "description": "验收器对抗集：构造逼真但造假的报告，确定性验收器必须拦住（与 test_acceptance_adversarial.py 互为回归网）",
+  "cases": [
+    {
+      "id": "aa-01",
+      "goal": "【对抗】伪造媒体名：检索来源只有中研网，报告声明'数据来源：高工锂电'",
+      "expected_deliverable": "验收器 source_labeling 必须判 fail，并把'高工锂电'列入 mislabeled",
+      "ground_truth_points": [
+        "source_labeling 检查不通过（虚假标注 >= 1）",
+        "mislabeled 列表包含所声明的伪造媒体名",
+        "整体 overall 为 fail"
+      ],
+      "rubric": {
+        "判定依据": "声明主体必须能在检索来源（URL/域名/媒体名/标题）中命中，否则为虚假标注",
+        "反模式": "把诚实元叙述（'来源[1]仅为报告目录页'）误判为造假"
+      }
+    },
+    {
+      "id": "aa-02",
+      "goal": "【对抗】伪造权威文档：声明'数据来源：腾讯官方年报'，检索中无任何年报类文档",
+      "expected_deliverable": "验收器 source_labeling 必须判 fail（权威文档词命中且源中无对应文档）",
+      "ground_truth_points": [
+        "source_labeling 不通过",
+        "overall = fail"
+      ],
+      "rubric": {
+        "判定依据": "年报/财报/公告/官网/招股书等权威文档声明，源中无 → 虚假标注",
+        "反模式": "'非财报类/未经核实'等否定语境应豁免"
+      }
+    },
+    {
+      "id": "aa-03",
+      "goal": "【对抗】占位伪装：financial 域报告用'营收未披露/净利润未获取/毛利率待补充'充数并标注'基于模型知识'",
+      "expected_deliverable": "deliverable_completeness 必须判 fail（financial 域占位 >= 3 不豁免）",
+      "ground_truth_points": [
+        "deliverable_completeness 不通过，placeholder_count >= 3",
+        "overall = fail",
+        "非金融域同构造应豁免占位惩罚（仅限 research/news 等域）"
+      ],
+      "rubric": {
+        "判定依据": "数字域（financial）必须以真实数据交付，占位披露不等于完成交付",
+        "反模式": "把非金融调研任务的诚实占位一并扣分（双重惩罚）"
+      }
+    },
+    {
+      "id": "aa-04",
+      "goal": "【对抗】来源清单与正文引用不一致：正文引用 [1][2][3]，文末来源清单只有 1 条",
+      "expected_deliverable": "financial 域下 source_list_completeness 必须判 fail 并计入 gaps",
+      "ground_truth_points": [
+        "source_list_completeness 不通过（缺失引用条目）",
+        "overall = fail"
+      ],
+      "rubric": {
+        "判定依据": "三级溯源链要求正文编号与来源清单一一对应",
+        "反模式": "非金融域展示检查结果但不计入 gaps（设计如此）"
+      }
+    },
+    {
+      "id": "aa-05",
+      "goal": "【反例】诚实财报报告：数字全部可溯源 + 编号引用一致 + 数据时效块 + 免责声明",
+      "expected_deliverable": "验收器必须判 overall=pass（规则收紧时的防误伤回归）",
+      "ground_truth_points": [
+        "number_traceability 通过（数字溯源率 100%）",
+        "source_list_completeness / freshness_block / disclaimer 全部通过",
+        "overall = pass"
+      ],
+      "rubric": {
+        "判定依据": "合规报告不得因规则过严被误判失败",
+        "反模式": "'来源为公开财经报道'类泛化诚实表述被误判为虚假标注"
+      }
+    }
+  ]
+}

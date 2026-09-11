@@ -942,7 +942,7 @@ class TestRedoStepLimit(unittest.TestCase):
             "result": "new-report-200-chars",
         }
         rechecks = []
-        o._run_acceptance_check = lambda tid, goal: rechecks.append(tid) or {"overall": "pass"}
+        o._run_acceptance_check = lambda tid, goal, **kw: rechecks.append(tid) or {"overall": "pass"}
         ok = o._redo_step_and_dependents(
             "t-redo-acc", "目标", all_steps, completed_all, "1", "修复",
         )

@@ -14,6 +14,151 @@
 import json
 import re
 from pathlib import Path
+from hashlib import sha256
+from time import gmtime, strftime
+from datetime import datetime, timezone
+
+
+# ─────────────────────────────────────────────
+# 规则版本化（可对账）
+# ─────────────────────────────────────────────
+
+# 判定规则集版本：任何规则表/阈值/正则变更时必须 bump，
+# 并同步更新 test_p0 的指纹基线（test_acceptance_rules_fingerprint_stable
+# 会因指纹变化而失败，强制走"改规则→bump 版本→更新基线"流程）。
+ACCEPTANCE_RULES_VERSION = "2026.09.10"
+
+# 纳入指纹的规则表（常量名；内部按 key/元素排序后哈希，顺序无关）
+_FINGERPRINT_RULES = (
+    "_TRACEABILITY_THRESHOLDS", "_DISCLOSED_MARKERS",
+    "_FINANCIAL_MARKERS", "_RESEARCH_MARKERS",
+    "_OTHER_ENTITIES", "_CORE_FIN_WORDS", "_RELATION_VERBS",
+    "_DOMAIN_MEDIA", "_MEDIA_ALIAS_GROUPS", "_EXTRA_MEDIA_NAMES",
+    "_NEGATION_MARKERS", "_GENERIC_HONEST_MARKERS",
+    "_PLACEHOLDER_MARKERS", "_LIST_REQUIREMENT_KEYWORDS",
+    "_NUMERIC_REQUIREMENT_KEYWORDS",
+    "_FRESHNESS_BLOCK_MARKERS", "_TIME_SENSITIVE_MARKERS",
+    "_STATUS_MARKERS", "_META_SOURCE_TALK", "_TABLE_NOTE_WORDS",
+)
+# 纳入指纹的关键正则（取 .pattern）
+_FINGERPRINT_PATTERNS = (
+    "_AUTHORITY_DOC_RE", "_SOURCE_LIST_HEADING_RE", "_INLINE_REF_RE",
+    "_MEDIA_WORD_RE", "_FRESHNESS_DATE_RE",
+)
+
+
+def _fingerprint_normalize(val):
+    """规则值规范化：字典按键排序、集合转排序列表，保证指纹与声明顺序无关。"""
+    if isinstance(val, dict):
+        return {str(k): _fingerprint_normalize(v) for k, v in sorted(val.items())}
+    if isinstance(val, (set, frozenset)):
+        return sorted(str(v) for v in val)
+    if isinstance(val, (list, tuple)):
+        return [_fingerprint_normalize(v) for v in val]
+    return str(val)
+
+
+def rules_fingerprint() -> str:
+    """规则指纹：规则表与关键正则规范化后的 sha256 前 8 位。
+
+    用于验收报告/事件的对账——同一份结果能反查"哪一版规则判的"，
+    规则变了指纹必变（配合版本守卫测试强制 bump 版本号）。"""
+    g = globals()
+    parts: list[str] = []
+    for name in _FINGERPRINT_RULES:
+        val = g.get(name)
+        if val is None:
+            continue
+        parts.append(
+            name + "=" + json.dumps(
+                _fingerprint_normalize(val), ensure_ascii=False, sort_keys=True,
+            )
+        )
+    for name in _FINGERPRINT_PATTERNS:
+        obj = g.get(name)
+        if obj is not None and hasattr(obj, "pattern"):
+            parts.append(name + "=" + str(obj.pattern))
+    return sha256("|".join(parts).encode("utf-8")).hexdigest()[:8]
+
+
+# ─────────────────────────────────────────────
+# 验收事件流（可回放、可对账）
+# ─────────────────────────────────────────────
+
+ACCEPTANCE_EVENTS_FILE = "acceptance_events.jsonl"
+
+
+def acceptance_events_path(task_id: str) -> Path:
+    """{task_dir}/acceptance_events.jsonl，与 acceptance_report.json 同层。"""
+    try:
+        from workspace import task_workspace
+        return task_workspace(task_id) / ACCEPTANCE_EVENTS_FILE
+    except Exception:
+        return Path(ACCEPTANCE_EVENTS_FILE)
+
+
+def build_acceptance_event(
+    result: dict, trigger: str = "", iteration: int = 0,
+    duration_ms: int = 0,
+) -> dict:
+    """由验收结果构造一条可对账的审计事件（schema 单一来源）。"""
+    checks = result.get("checks") or {}
+    # 仅显式 pass=False 的检查计入失败（缺 pass 字段的辅助项不算）
+    failed = sorted(
+        k for k, c in checks.items() if (c or {}).get("pass", True) is False
+    )
+    url_health = checks.get("url_health") or {}
+    return {
+        "task_id": str(result.get("report_id") or ""),
+        "trigger": str(trigger or ""),
+        "iteration": int(iteration or 0),
+        "rules_version": str(result.get("rules_version") or ACCEPTANCE_RULES_VERSION),
+        "rules_fingerprint": str(result.get("rules_fingerprint") or rules_fingerprint()),
+        "report_sha256": str(result.get("report_sha256") or ""),
+        "overall": str(result.get("overall") or ""),
+        "gaps_count": len(result.get("gaps") or []),
+        "gaps": [str(g)[:200] for g in (result.get("gaps") or [])][:10],
+        "checks_failed": failed,
+        "url_health_dead": int(url_health.get("dead_count") or 0),
+        "duration_ms": int(duration_ms or 0),
+        "timestamp": strftime("%Y-%m-%dT%H:%M:%SZ", gmtime()),
+    }
+
+
+def append_acceptance_event(task_id: str, event: dict) -> None:
+    """追加一条验收事件（JSONL，一行一事件，可顺序回放）。
+
+    事件流失败绝不影响验收主流程（与 step_diagnosis 同策略：静默降级）。"""
+    try:
+        p = acceptance_events_path(task_id)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def read_acceptance_events(task_id: str) -> list[dict]:
+    """按写入顺序读取验收事件（坏行跳过，不抛）。"""
+    p = acceptance_events_path(task_id)
+    if not p.exists():
+        return []
+    out: list[dict] = []
+    try:
+        for line in p.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(rec, dict):
+                rec["seq"] = len(out) + 1  # 顺序号由读取序确定，回放可直接排序
+                out.append(rec)
+    except Exception:
+        return out
+    return out
 
 
 # ─────────────────────────────────────────────
@@ -1013,6 +1158,10 @@ def _extract_source_claims(report: str) -> list[str]:
         c = m.group(1).strip()
         if not c:
             continue
+        # "来源为X"/"来源是X" 句式：剥掉引导字，避免把"公开财经报道"这类
+        # 泛化诚实表述误抽成来源声明主体
+        if c[:1] in ("为", "是") and len(c) > 1:
+            c = c[1:].strip()
         # （数据来源：X）括号声明：捕获可能吞入尾部右括号（如"腾讯官方年报）"）
         if c.endswith(("）", ")")):
             c = c[:-1].strip()
@@ -1079,6 +1228,25 @@ def _extract_source_claims(report: str) -> list[str]:
 # 括号披露注释：括号内是对来源构成的自愿披露/免责说明，
 # 不参与主体匹配（可在 details/mislabeled 中保留原声明文本）
 _PAREN_DISCLOSURE_RE = re.compile(r"（[^（）]*）|\([^()]*\)")
+
+# 来源列里的状态/免责说明不是来源声明（"无直接关联/已剔除/待获取/不适用"）
+_STATUS_MARKERS = (
+    "无直接关联", "已剔除", "不适用", "待获取", "未获取", "暂缺",
+    "未披露", "无此字段", "说明", "备注", "数据完整性", "口径说明",
+    "直接披露", "待核实", "自行整理",
+)
+# 元叙述：报告解释来源构成/质量的句子（"来源 [1] 仅为报告目录页，
+# 不含任何统计数值"、"其余来源均与主题无关或同源无额外数据"），
+# 是诚实披露本身而非"数据来源：X"声明
+_META_SOURCE_TALK = (
+    "仅为", "只是", "目录页", "报告框架", "无具体数值",
+    "均与主题无关", "同源无额外数据", "不含任何统计",
+    "与主题无关",
+)
+# 表格来源列的短备注词（精确匹配，避免误伤含这些字的真实媒体名）
+_TABLE_NOTE_WORDS = (
+    "验证", "待核实", "直接披露", "自行整理", "数据缺失", "未披露",
+)
 
 # 否定/谨慎语境：命中即视为如实披露，不判虚假标注
 _NEGATION_MARKERS = (
@@ -1177,23 +1345,6 @@ def check_source_labeling(report: str, sources: dict) -> dict:
     claims = _extract_source_claims(report)
     mislabeled: list[str] = []
     checked = 0
-    # 来源列里的状态/免责说明不是来源声明（"无直接关联/已剔除/待获取/不适用"）
-    _STATUS_MARKERS = (
-        "无直接关联", "已剔除", "不适用", "待获取", "未获取", "暂缺",
-        "未披露", "无此字段", "说明", "备注", "数据完整性", "口径说明",
-        "直接披露", "待核实", "自行整理",
-    )
-    # 元叙述：报告解释来源构成/质量的句子（"来源 [1] 仅为报告目录页，
-    # 不含任何统计数值"、"其余来源均与主题无关或同源无额外数据"），
-    # 是诚实披露本身而非"数据来源：X"声明
-    _META_SOURCE_TALK = (
-        "仅为", "只是", "目录页", "报告框架", "无具体数值",
-        "均与主题无关", "同源无额外数据", "不含任何统计",
-        "与主题无关",
-    )
-    _TABLE_NOTE_WORDS = (
-        "验证", "待核实", "直接披露", "自行整理", "数据缺失", "未披露",
-    )
     for c in claims:
         if any(k in c for k in ("建议以", "仅供参考", "说明", "清单", "名称", "序号")):
             continue
@@ -1252,7 +1403,10 @@ def check_source_labeling(report: str, sources: dict) -> dict:
             mislabeled.append(c)
             continue
         # 泛化诚实表述（公开渠道/公开资料等）：无可核验的具体主体，
-        # 检索缺失不判虚假
+        # 检索缺失不判虚假；"公开*"开头一律视为泛化表述
+        # （覆盖"公开财经报道""公开市场数据"等未逐一登记的变体）
+        if c.strip().startswith("公开"):
+            continue
         if any(k in c for k in _GENERIC_HONEST_MARKERS):
             continue
         # 其他具体来源声明（如"东方财富数据中心"）：无括号披露、无否定词、
@@ -1651,4 +1805,9 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace) -> dict
         "overall": overall,
         "gaps": gaps,
         "suggestions": suggestions,
+        # 规则版本化与报告指纹：供 acceptance_report.json / 事件流对账
+        "rules_version": ACCEPTANCE_RULES_VERSION,
+        "rules_fingerprint": rules_fingerprint(),
+        "report_sha256": sha256(str(report_text or "").encode("utf-8")).hexdigest()[:16],
+        "evaluated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
