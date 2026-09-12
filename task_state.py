@@ -209,6 +209,128 @@ def is_running(task_id: str, db_path: str | None = None) -> bool:
     return str(read_task(task_id, db_path).get("status") or "").upper() == RUNNING
 
 
+# ---------------------------------------------------------------- 任务投影
+
+# 运行期快照键：内存字典之外的实时态（计划树/日志/审批标记）落 Redis，
+# 服务重启或多 webui 进程都能重建，不必把运行期数据写进 SQLite（避免写放大
+# 与终态写竞争）。
+SNAPSHOT_KEY = "task_snapshot:{tid}"
+SNAPSHOT_TTL = int(os.environ.get("WM_TASK_SNAPSHOT_TTL", "86400"))
+
+
+def write_snapshot(task_id: str, data: dict, ttl: int | None = None) -> bool:
+    """把内存合并态写入 Redis 快照（失败静默：不影响任务执行）。"""
+    try:
+        import redis
+        client = redis.Redis(
+            host=os.environ.get("REDIS_HOST", "127.0.0.1"),
+            port=int(os.environ.get("REDIS_PORT", "6379") or 6379),
+            decode_responses=True, socket_connect_timeout=2, socket_timeout=2,
+        )
+        client.setex(SNAPSHOT_KEY.format(tid=task_id),
+                     int(ttl or SNAPSHOT_TTL),
+                     json.dumps(data, ensure_ascii=False, default=str))
+        return True
+    except Exception:
+        return False
+
+
+def read_snapshot(task_id: str) -> dict:
+    """读取运行期快照（无 Redis/无快照返回空 dict）。"""
+    try:
+        import redis
+        client = redis.Redis(
+            host=os.environ.get("REDIS_HOST", "127.0.0.1"),
+            port=int(os.environ.get("REDIS_PORT", "6379") or 6379),
+            decode_responses=True, socket_connect_timeout=2, socket_timeout=2,
+        )
+        raw = client.get(SNAPSHOT_KEY.format(tid=task_id))
+        data = json.loads(raw) if raw else {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def drop_snapshot(task_id: str) -> None:
+    try:
+        import redis
+        client = redis.Redis(
+            host=os.environ.get("REDIS_HOST", "127.0.0.1"),
+            port=int(os.environ.get("REDIS_PORT", "6379") or 6379),
+            decode_responses=True, socket_connect_timeout=2, socket_timeout=2,
+        )
+        client.delete(SNAPSHOT_KEY.format(tid=task_id))
+    except Exception:
+        pass
+
+
+def task_projection(task_id: str, db_path: str | None = None) -> dict:
+    """DB 投影：`/task/{id}` 的**事实层**（与前端既有键名保持一致）。
+
+    解析 steps_json / logs_json / acceptance_json；`report` 保留
+    `final_report or report` 语义；`acceptance` 变成对象（此前从 DB 兜底时
+    只取 `data["acceptance"]`，重启后恒为 None——属于真实缺陷）。
+
+    运行期的计划树/日志/审批标记不在库里，由调用方用 Redis 快照叠加。
+    """
+    row = read_task(task_id, db_path)
+    if not row:
+        return {}
+    steps: list = []
+    logs: list = []
+    for key, target in (("steps_json", "steps"), ("logs_json", "logs")):
+        raw = row.get(key) or ""
+        if not raw:
+            continue
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            parsed = []
+        if target == "steps":
+            steps = parsed if isinstance(parsed, list) else []
+        else:
+            logs = parsed if isinstance(parsed, list) else []
+    return {
+        "task_id": task_id,
+        "status": row.get("status") or "PENDING",
+        "goal": row.get("goal") or "",
+        "steps": steps,
+        "report": row.get("report") or "",
+        "logs": logs,
+        "project": row.get("project") or "",
+        "revision": bool(row.get("revision")) if "revision" in row else False,
+        "acceptance": row.get("acceptance") or None,
+        "llm_degraded": row.get("llm_degraded") if "llm_degraded" in row else None,
+        "phase": row.get("phase") or "",
+        "rules_fingerprint": row.get("rules_fingerprint") or "",
+        "created_at": row.get("created_at") or "",
+        "completed_at": row.get("completed_at") or "",
+        "conversation_id": row.get("conversation_id") or "",
+    }
+
+
+def merge_projection(task_id: str, overlay: dict | None = None,
+                     db_path: str | None = None) -> dict:
+    """投影 + 实时叠加层：快照优先、其次传入的 overlay，最后内存。
+
+    只叠加"实时字段"（steps/logs/revision/agent_status），终态事实以 DB 为准，
+    避免过期快照把已完成任务显示成运行中。
+    """
+    data = task_projection(task_id, db_path)
+    if not data:
+        data = {"task_id": task_id, "status": "PENDING", "goal": "", "steps": [],
+                "report": "", "logs": [], "project": "", "revision": False,
+                "acceptance": None, "llm_degraded": None}
+    live = read_snapshot(task_id) or {}
+    if not live and overlay:
+        live = overlay
+    if live:
+        for key in ("steps", "logs", "revision", "agent_status", "plan_stage"):
+            if live.get(key) not in (None, [], {}):
+                data[key] = live[key]
+    return data
+
+
 def mark_stale_failed(task_id: str, db_path: str | None = None) -> bool:
     """stale 清理：把长期无终态的排队任务翻成 FAILED。"""
     try:

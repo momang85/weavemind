@@ -19,6 +19,10 @@ PORT = int(os.environ.get("WEB_PORT", "8080"))
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 PROJECT_DIR = os.path.join(tempfile.gettempdir(), "agent_workspace", "project")
 
+# 任务实时态**缓存**（非真源）：事实层由 task_history 投影提供
+# （task_state.task_projection），实时层另有 Redis 快照 task_snapshot:{tid}。
+# 内存只用于加速同进程内的读放大与 SSE 合并；条目被淘汰或服务重启后
+# 读取必须能靠"投影 + 快照"重建（见 _get_task_page / SSE 基快照）。
 _task_results = {}
 _task_lock = threading.Lock()
 
@@ -809,6 +813,23 @@ def _merge_progress_message(existing: dict, data: dict) -> None:
             else:
                 logs.append(entry)
                 existing["logs"] = logs
+        elif ptype == "acceptance":
+            # 验收结果推送：此前没有分支，整条消息被静默丢弃（只有终态的
+            # task_complete 才带 acceptance），前端看不到中间轮次的验收缺口
+            existing["acceptance"] = payload.get("acceptance", payload)
+        elif ptype == "warning":
+            # 阶段性告警（余额/降级/阶段停滞）：并入日志流，前端可见
+            logs = existing.get("logs", [])
+            entry = {
+                "id": len(logs),
+                "timestamp": payload.get("timestamp") or time.strftime("%H:%M:%S"),
+                "agent": payload.get("agent", "orchestrator"),
+                "type": "warning",
+                "message": payload.get("message", ""),
+            }
+            if not logs or logs[-1].get("message") != entry["message"]:
+                logs.append(entry)
+                existing["logs"] = logs
         elif ptype == "agent_status":
             existing["agent_status"] = payload
         elif ptype == "plan":
@@ -841,6 +862,13 @@ def _listen_results():
                         if len(_task_results) > 300:
                             for _k in list(_task_results)[:-200]:
                                 _task_results.pop(_k, None)
+                    try:
+                        # 实时态落 Redis 快照：task_history 只在终态写 steps/logs，
+                        # 运行中的计划树/日志必须另有可重建来源（服务重启后不丢）
+                        import task_state as _ts
+                        _ts.write_snapshot(tid, existing)
+                    except Exception:
+                        pass
                     if ptype == "task_complete":
                         # DB 写入与通知在锁外执行：这些是慢 I/O，
                         # 放锁内会阻塞所有 /task/{id} 读取与 SSE 快照
@@ -1417,8 +1445,15 @@ def _task_deliverables(tid: str) -> list[dict]:
     files: list[dict] = []
     zip_path = None
     with _task_lock:
-        data = _task_results.get(tid)
-    steps = (data or {}).get("steps") or []
+        data = dict(_task_results.get(tid) or {})
+    steps = data.get("steps") or []
+    if not steps:
+        # 重启后内存为空：从 DB 投影取终态 steps（含打包步骤的 Download 链接）
+        try:
+            import task_state as _ts
+            steps = (_ts.task_projection(tid) or {}).get("steps") or []
+        except Exception:
+            steps = []
     for s in steps:
         res = s.get("result") or {}
         text = str(res.get("result") or "")
@@ -1503,10 +1538,18 @@ def _clean_report_text(report: str) -> str:
 
 
 def _get_task_report_data(tid: str) -> dict | None:
-    """取任务的分享数据（报告正文/目标/状态/时间）：优先内存结果，其次 SQLite。
-    服务重启后 _task_results 为空，仍可从 agents.db 的 task_history.report 恢复。"""
+    """取任务的分享数据（报告正文/目标/状态/时间）。
+
+    读取顺序：内存缓存 → Redis 快照/DB 投影（`task_state.merge_projection`）
+    → 裸 SQLite 行。服务重启后内存为空，投影仍能给出终态事实。"""
     with _task_lock:
-        data = _task_results.get(tid)
+        data = dict(_task_results.get(tid) or {})
+    if not data:
+        try:
+            import task_state as _ts
+            data = _ts.merge_projection(tid)
+        except Exception:
+            data = {}
     if data:
         report = str(data.get("final_report") or data.get("report") or "")
         if report.strip():
@@ -2991,11 +3034,8 @@ def main():
                     running_ids |= set(_db_running)
                 except Exception:
                     pass
-                with _task_lock:
-                    running_ids |= {
-                        str(tid) for tid, st in _task_results.items()
-                        if str(st.get("status") or "").upper() == "RUNNING"
-                    }
+                # 注：不再用内存 `_task_results` 的 RUNNING 作为豁免来源——
+                # 内存已降级为纯缓存，DB(投影) + Redis pid 校验才是真源。
                 db = sqlite3.connect(DB_PATH, timeout=5)
                 # 先取候选（PENDING 且超时），逐个 UPDATE 时跳过豁免集合——
                 # 数量极少（PENDING 任务不会多），逐行处理可控
@@ -3261,7 +3301,12 @@ def _get_task_events(self, p):
         merged: dict = {}
         try:
             with _task_lock:
-                base = _task_results.get(tid)
+                base = dict(_task_results.get(tid) or {})
+            if not base:
+                # 内存为空（服务刚重启/条目被淘汰）→ 用投影+Redis 快照重建，
+                # 否则运行中任务的计划树与日志在 SSE 首帧就是空的
+                import task_state as _ts
+                base = _ts.merge_projection(tid)
             if isinstance(base, dict):
                 merged = dict(base)
                 merged["steps"] = list(base.get("steps") or [])
@@ -3288,11 +3333,17 @@ def _get_task_events(self, p):
             以全局态为准对账，避免本地快照漏日志/漏终态。"""
             try:
                 with _task_lock:
-                    base = _task_results.get(tid)
-                if isinstance(base, dict):
+                    base = dict(_task_results.get(tid) or {})
+                if not base:
+                    import task_state as _ts
+                    base = _ts.merge_projection(tid)
+                if isinstance(base, dict) and base:
+                    # 对账以"投影/快照"为准补齐事实层，实时层用内存覆盖
+                    import task_state as _ts
+                    merged.update(_ts.merge_projection(tid))
                     merged.update(base)
-                    merged["steps"] = list(base.get("steps") or [])
-                    merged["logs"] = list(base.get("logs") or [])
+                    merged["steps"] = list(base.get("steps") or merged.get("steps") or [])
+                    merged["logs"] = list(base.get("logs") or merged.get("logs") or [])
                     return _emit("snapshot", {"task_id": tid, "data": merged})
             except Exception:
                 pass
@@ -3623,30 +3674,31 @@ def _get_task_report(self, p):
 def _get_task_page(self, p):
     if p.startswith("/task/"):
         tid = p.split("/task/")[-1]
-        with _task_lock: data = _task_results.get(tid)
-        if not data:
-            for t in _list_tasks(100):
-                if t.get("task_id") == tid: data = t; break
+        # 事实层走 DB 投影（解析 steps_json/logs_json/acceptance_json），实时层用
+        # Redis 快照/内存叠加。此前"内存优先 + 裸 DB 行兜底"有两个问题：
+        # 重启后 acceptance 恒为 None（acceptance_json 是字符串没人解析），
+        # 且内存被淘汰后运行中任务的计划树/日志直接消失。
+        try:
+            import task_state as _ts
+            with _task_lock:
+                _mem = dict(_task_results.get(tid) or {})
+            data = _ts.merge_projection(tid, overlay=_mem)
+        except Exception:
+            with _task_lock:
+                data = dict(_task_results.get(tid) or {})
+            if not data:
+                for t in _list_tasks(100):
+                    if t.get("task_id") == tid:
+                        data = t
+                        break
         if data:
-            _steps = data.get("steps") or []
-            _logs = data.get("logs") or []
-            if not _steps and data.get("steps_json"):
-                try:
-                    _steps = json.loads(data["steps_json"]) or []
-                except Exception:
-                    pass
-            if not _logs and data.get("logs_json"):
-                try:
-                    _logs = json.loads(data["logs_json"]) or []
-                except Exception:
-                    pass
             return self._json({
             "task_id": tid,
             "status": data.get("status", "PENDING"),
             "goal": data.get("goal", ""),
-            "steps": _steps,
+            "steps": data.get("steps") or [],
             "report": data.get("final_report") or data.get("report", ""),
-            "logs": _logs,
+            "logs": data.get("logs") or [],
             "project": data.get("project", ""),
             "revision": bool(data.get("revision")),
             "acceptance": data.get("acceptance"),
