@@ -198,7 +198,7 @@ class CodeExecutionWorker(AsyncWorkerBase):
             f"\n上一次生成的代码未通过验证（编译/运行/审查），请修复后重新输出完整代码：\n{compile_err}"
             if compile_err else ""
         )
-        ws = self._workspace_snapshot()
+        ws = self._workspace_snapshot(instruction)
         ws_note = (
             "\n\n工作区现有文件（若指令要求基于/修改某个文件，请读取其内容并输出"
             "修改后的完整文件，保持原文件名）：\n" + ws
@@ -209,7 +209,7 @@ class CodeExecutionWorker(AsyncWorkerBase):
             "（保持模块名与导出名一致，运行测试应全部通过）：\n" + test_context
             if test_context else ""
         )
-        clean_note = self._clean_data_schema_note()
+        clean_note = self._clean_data_schema_note(instruction)
         if minimal:
             from prompt_registry import get_prompt
             system = get_prompt(
@@ -246,15 +246,24 @@ class CodeExecutionWorker(AsyncWorkerBase):
             max_attempts=max_attempts, max_tokens=max_tokens,
         )
 
-    def _clean_data_schema_note(self) -> str:
+    def _clean_data_schema_note(self, instruction: str = "") -> str:
         """工作区存在 clean_chart_data.json 时，把其结构写进系统提示词，
-        强制作图任务使用结构化清洗数据而非原始文本。"""
+        强制作图任务使用结构化清洗数据而非原始文本。
+
+        仅在**本步确实要作图**时注入：无关步骤拿到这份 schema 会误以为任务
+        包含市场/图表要求（实测交付代码被带偏成金融绘图）。"""
         cd = None
         try:
             cd = self.workspace / "clean_chart_data.json"
         except Exception:
             cd = None
         if not cd or not cd.exists():
+            return ""
+        try:
+            from task_intent import has_chart_intent
+        except Exception:
+            return ""
+        if not has_chart_intent(instruction):
             return ""
         return (
             "\n\n工作区已提供清洗后的结构化图表数据 clean_chart_data.json"
@@ -327,9 +336,19 @@ class CodeExecutionWorker(AsyncWorkerBase):
             return html[:m.end()] + "\n" + meta + html[m.end():]
         return meta + "\n" + html
 
-    def _workspace_snapshot(self, max_files: int = 5, max_chars: int = 700) -> str:
-        """列出工作区已有文件及内容片段，让 LLM 知道"自己在做什么、已有什么"。"""
+    def _workspace_snapshot(self, instruction: str = "",
+                            max_files: int = 5, max_chars: int = 700) -> str:
+        """列出工作区已有文件，并**只对与本步相关的文件**贴内容片段。
+
+        此前对前 5 个文件一律贴内容，工作区里任何预载数据（如别的步骤用到的
+        行情 CSV、结构化 JSON）都会被塞进代码生成提示词，实测导致交付脚本
+        头部是销售报表、尾部变成金融图表任务。
+        """
         lines: list[str] = []
+        try:
+            from task_intent import is_relevant
+        except Exception:
+            is_relevant = None  # type: ignore[assignment]
         try:
             files = sorted(
                 p for p in self.workspace.iterdir()
@@ -341,12 +360,25 @@ class CodeExecutionWorker(AsyncWorkerBase):
                 except OSError:
                     continue
                 lines.append(f"[文件] {p.name}（{size} 字节）")
-                if size > 0:
+                if size <= 0:
+                    continue
+                # 相关性：指令点名了该文件（含不带后缀的文件名），或主题词相交
+                relevant = p.name.lower() in instruction.lower() or (
+                    p.stem.lower() in instruction.lower() if p.stem else False
+                )
+                if not relevant and is_relevant is not None and instruction:
                     try:
-                        snippet = p.read_text(encoding="utf-8", errors="replace")[:max_chars]
-                        lines.append(f"[内容] {snippet}")
+                        head = p.read_text(encoding="utf-8", errors="replace")[:400]
+                        relevant = is_relevant(instruction, p.name, head)
                     except Exception:
-                        pass
+                        relevant = False
+                if not relevant:
+                    continue
+                try:
+                    snippet = p.read_text(encoding="utf-8", errors="replace")[:max_chars]
+                    lines.append(f"[内容] {snippet}")
+                except Exception:
+                    pass
         except Exception:
             pass
         return "\n".join(lines)

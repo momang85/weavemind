@@ -4613,17 +4613,38 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     instr += f"\n[上一步结果 {dep_id}]:\n{_filter_role(_safe(snippet))}"
 
         if cap == 'code_execution':
-            # 数据清洗提示：作图任务优先读取结构化清洗数据，避免直接解析原始文本
+            # 数据清洗提示：走统一的相关性判定（与 worker 侧同一规则）——只在
+            # 本任务确实需要行情数据、或本步要作图且文件含相应键时注入。
+            # 此前只要文件存在就注入（并罗列 market_data 等键），无关任务
+            # （如内置销售数据的脚本）也会被告知"这是一份市场/图表数据"，
+            # 实测把交付代码带偏成金融绘图。
             try:
                 from workspace import task_project_dir as _tpd
+                from task_intent import is_relevant
                 _cd = _tpd(task_id) / "clean_chart_data.json"
                 if _cd.exists():
-                    instr += (
-                        "\n[数据] 工作区已提供清洗后的结构化图表数据 clean_chart_data.json"
-                        "（含 entity_frequency / market_data / source_distribution / topic_terms）。"
-                        "如任务需要作图，请优先读取该文件并按其中的 Label-Value 结构绘图，"
-                        "不要直接解析 search_results.json 的原始文本。"
+                    _goal = str(
+                        (getattr(self, "_task_goals", {}) or {}).get(task_id, "")
+                        or ""
                     )
+                    try:
+                        _head = _cd.read_text(encoding="utf-8", errors="replace")[:600]
+                    except Exception:
+                        _head = ""
+                    if is_relevant(_goal or instr, _cd.name, _head):
+                        try:
+                            _keys = sorted(
+                                json.loads(_cd.read_text(encoding="utf-8")).keys()
+                            )
+                        except Exception:
+                            _keys = []
+                        if _keys:
+                            instr += (
+                                "\n[数据] 工作区已提供清洗后的结构化图表数据"
+                                f" clean_chart_data.json（含 {' / '.join(_keys)}）。"
+                                "如任务需要作图，请优先读取该文件并按其中的 "
+                                "Label-Value 结构绘图，不要直接解析原始文本。"
+                            )
             except Exception:
                 pass
             # 统计类排行（前 N% 占比等）：明确指向全市场 ranking.csv，

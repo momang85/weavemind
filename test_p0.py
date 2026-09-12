@@ -7227,6 +7227,61 @@ class TestTaskIntentRouting(unittest.TestCase):
             "统计今日A股前5%成交额占比"))
 
 
+class TestInjectionRelevance(unittest.TestCase):
+    """注入相关性契约：工作区/预载数据只在与本步相关时进入提示词。
+
+    回归：`_workspace_snapshot` 对前 5 个文件一律贴内容、`_clean_data_schema_note`
+    只要文件存在就注入 schema，于是给定"A股行情 + 目标文件"的提示词被塞给
+    本地销售脚本任务，交付代码尾部变成金融绘图。
+    """
+
+    def _worker(self, files: dict):
+        from workers.code_execution_worker import CodeExecutionWorker
+        tmp = Path(tempfile.mkdtemp(prefix="wm_ws_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        for name, body in files.items():
+            (tmp / name).write_text(body, encoding="utf-8")
+        w = CodeExecutionWorker.__new__(CodeExecutionWorker)
+        w.workspace = tmp
+        return w
+
+    def test_unrelated_workspace_file_content_not_injected(self):
+        w = self._worker({
+            "ranking.csv": "code,name,amount\n600519,贵州茅台,1334\n",
+            "structured_data.json": '{"source": "sina_ranking"}',
+        })
+        snap = w._workspace_snapshot(
+            "用 Python 编写单文件脚本 sales_report.py：内置近12个月的月度销售数据，"
+            "计算合计/均值/最大值并打印 ASCII 柱状图")
+        self.assertNotIn("600519", snap, "无关行情数据的内容不得进入提示词")
+        self.assertNotIn("sina_ranking", snap)
+        self.assertIn("ranking.csv", snap, "仍应列出文件名（让模型知道工作区有什么）")
+
+    def test_relevant_workspace_file_content_injected(self):
+        w = self._worker({"ranking.csv": "code,name,amount\n600519,贵州茅台,1334\n"})
+        snap = w._workspace_snapshot("统计今日A股成交额排行前十，读取 ranking.csv 并计算占比")
+        self.assertIn("600519", snap)
+
+    def test_named_file_content_injected(self):
+        """指令点名的文件（不带后缀也算）应贴内容。"""
+        w = self._worker({"data.csv": "month,sales\n2025-01,100\n"})
+        snap = w._workspace_snapshot("读取 data.csv 计算月度合计并打印图表")
+        self.assertIn("2025-01", snap)
+
+    def test_clean_schema_only_for_chart_steps(self):
+        w = self._worker({"clean_chart_data.json": '{"market_data": []}'})
+        self.assertEqual(w._clean_data_schema_note("写一个销售统计脚本"), "")
+        self.assertIn("clean_chart_data.json",
+                      w._clean_data_schema_note("生成柱状图展示月度销售"))
+
+    def test_relevance_helper_ignores_generic_words(self):
+        from task_intent import has_chart_intent, is_relevant
+        self.assertFalse(is_relevant("写一个数据统计脚本", "ranking.csv", "code,name"))
+        self.assertTrue(is_relevant("统计A股成交额排行", "ranking.csv", "code,name,amount"))
+        self.assertTrue(has_chart_intent("输出 ASCII 柱状图"))
+        self.assertFalse(has_chart_intent("计算合计与均值"))
+
+
 class TestReportRouteAndMetricsConsistency(unittest.TestCase):
     """报告路由渲染 + 指标口径与状态接口一致。"""
 

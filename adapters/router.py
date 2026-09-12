@@ -109,9 +109,21 @@ _CRYPTO_KEYWORDS = (
 _MACRO_KEYWORDS = (
     "gdp", "cpi", "通胀", "通货膨胀", "失业率", "宏观", "宏观经济",
     "unrate", "pmi", "消费者物价",
-    # P1-1：利率/降息/美联储类关键词必须路由到 macro（FRED）
-    "利率", "降息", "加息", "美联储", "联邦基金",
+    # P1-1：利率/降息/美联储类关键词必须路由到 macro（FRED）。
+    # 注意裸"利率"不能进关键词表直接子串匹配——"毛利率/净利率"会被误命中，
+    # 于是财务目标被路由去抓 FRED 联邦基金利率（实测茅台三季报即如此）。
+    "降息", "加息", "美联储", "联邦基金",
 )
+# 裸"利率"只在不是"毛利率/净利率/费利率…"等更长金融词的一部分时才算宏观信号
+_RATE_RE = re.compile(r"(?<![毛净费税汇存贷利])利率")
+
+
+def _macro_hit(goal: str) -> bool:
+    """宏观语义命中：关键词表 + 裸"利率"的边界判定。"""
+    g = str(goal or "").lower()
+    if any(k in g for k in _MACRO_KEYWORDS):
+        return True
+    return bool(_RATE_RE.search(g))
 _NEWS_KEYWORDS = (
     "最新新闻", "头条", "要闻", "今日新闻", "实时新闻", "新闻资讯",
     "news", "headline",
@@ -581,7 +593,7 @@ def route_structured(goal: str) -> dict | None:
             }
             return _wrap("coingecko", data, meta)
         return None
-    if _keyword_hit(goal, _MACRO_KEYWORDS):
+    if _macro_hit(goal):
         indicator = _extract_indicator(goal)
         try:
             out = fetch_macro(indicator)

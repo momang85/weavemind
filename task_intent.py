@@ -41,6 +41,8 @@ _RANKING_WORDS = (
 _STAT_WORDS = (
     "占比", "比例", "百分位", "集中度", "份额", "分布", "覆盖率",
 )
+# 显式要"整个市场"的表达：本身就是需要分母的强信号
+_WHOLE_MARKET_WORDS = ("全市场", "整个市场", "两市", "沪深两市")
 
 # 全市场规模的强表达：前 N%（任意 N）或前 N（N 超过快路径上限）
 _FAST_PATH_MAX_TOP_N = 50
@@ -64,9 +66,9 @@ def _explicit_top_n(goal: str) -> bool:
 
 
 def _needs_denominator(goal: str) -> bool:
-    """是否需要全市场分母：占比/分布类语义，或前 N%（任意）/前 N（N>50）。"""
+    """是否需要全市场分母：显式"全市场"、占比/分布类语义，或前 N%/前 N>50。"""
     g = str(goal or "").lower()
-    if _hit(g, _STAT_WORDS):
+    if _hit(g, _STAT_WORDS) or _hit(g, _WHOLE_MARKET_WORDS):
         return True
     if re.search(r"前\s*\d+(?:\.\d+)?\s*%", g):
         return True
@@ -120,3 +122,66 @@ def needs_full_market(goal: str) -> bool:
 def is_statistical_goal(goal: str) -> bool:
     """兼容旧调用名：是否统计/排行类需要全市场数据的目标。"""
     return needs_full_market(goal)
+
+
+# 作图意图：出现这些词说明本步/本任务要出图（决定是否注入图表数据提示）
+_CHART_WORDS = (
+    "图", "图表", "柱状图", "折线图", "饼图", "散点图", "热力图", "可视化",
+    "chart", "plot", "histogram", "bar", "ascii 柱状", "绘图",
+)
+
+
+def has_chart_intent(text: str) -> bool:
+    """文本是否要求作图（用于按需注入图表数据，而非"工作区有就注入"）。"""
+    return _hit(text, _CHART_WORDS)
+
+
+def is_relevant(text: str, name: str = "", content_head: str = "") -> bool:
+    """某工作区文件是否与本步相关。
+
+    - 已知数据文件按**意图**判定：ranking.csv / structured_data.json 只在
+      目标确实需要行情数据时相关；clean_chart_data.json 只在作图步骤相关，
+      且非市场任务还要看它是否含研究类键（entity_frequency 等）；
+    - 其他文件按主题词相交判定（文件名或内容开头）。
+
+    背景：工作区里有什么就往提示词里说什么，会把别的步骤/预载的产物塞进当前
+    步骤，实测把本地销售脚本任务的交付代码带偏成金融绘图。
+    """
+    low = str(name or "").lower()
+    if "ranking" in low or "structured_data" in low:
+        return market_intent(text)["needs_market_data"]
+    if "clean_chart_data" in low:
+        if not has_chart_intent(text):
+            return False
+        if market_intent(text)["needs_market_data"]:
+            return True
+        try:
+            import json
+            keys = set(json.loads(str(content_head or "{}")).keys())
+        except Exception:
+            keys = set()
+        return bool(keys - _MARKET_ONLY_KEYS)
+    probe = f"{name} {str(content_head or '')[:400]}"
+    return _topic_overlap(text, probe)
+
+
+# clean_chart_data.json 里只对行情任务有意义的键
+_MARKET_ONLY_KEYS = {
+    "market_data", "market_share", "macro_indicators", "market_trends", "notes",
+}
+
+
+def _topic_overlap(text: str, other: str) -> bool:
+    """共享主题词判定：取两侧中文 2-4 字片段与英文词，剔除泛词后求交集。"""
+    from prompt_registry import _tokens  # 复用统一分词，避免再造一套
+
+    inter = _tokens(text) & _tokens(other)
+    inter -= _ABILITY_WORDS
+    return bool(inter)
+
+
+_ABILITY_WORDS = {
+    "代码", "脚本", "python", "文件", "程序", "实现", "运行", "步骤", "结果",
+    "图表", "绘图", "统计", "汇总", "合计", "要求", "标准", "格式", "来源",
+    "输出", "生成", "数据", "报告", "分析", "搜索", "内容", "数值", "指标",
+}
