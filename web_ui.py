@@ -1228,6 +1228,9 @@ def _memory_health(mem, stats: dict) -> dict:
     default = {
         "injections": 0, "hits": 0, "hit_rate": 0.0,
         "strategy_count": 0, "conversation_count": 0, "expired_purged": 0,
+        # 与前端口径一致：记忆不可用时明确标"不可用"，而不是显示成"命中率 0%"
+        "retrieval_mode": "unavailable", "degraded_queries": 0,
+        "degraded_hits": 0, "degraded_hit_rate": 0.0, "pending_writes": 0,
     }
     if mem is None:
         return default

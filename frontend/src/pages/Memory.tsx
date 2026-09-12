@@ -9,6 +9,11 @@ interface MemoryHealth {
   strategy_count: number
   conversation_count: number
   expired_purged: number
+  retrieval_mode?: 'vector' | 'literal' | 'unavailable'
+  degraded_queries?: number
+  degraded_hits?: number
+  degraded_hit_rate?: number
+  pending_writes?: number
 }
 
 const EMPTY_HEALTH: MemoryHealth = {
@@ -18,6 +23,11 @@ const EMPTY_HEALTH: MemoryHealth = {
   strategy_count: 0,
   conversation_count: 0,
   expired_purged: 0,
+  retrieval_mode: 'unavailable',
+  degraded_queries: 0,
+  degraded_hits: 0,
+  degraded_hit_rate: 0,
+  pending_writes: 0,
 }
 
 function chip(text: string, cls: string) {
@@ -135,6 +145,9 @@ export default function Memory() {
     }
   }
 
+  // 降级口径：embedding 不可用时命中率改按关键词兜底统计，避免误读成"没有经验"
+  const mode: 'vector' | 'literal' | 'unavailable' = health.retrieval_mode ?? 'unavailable'
+
   return (
     <div className="max-w-6xl mx-auto space-y-6">
       <div className="flex items-center justify-between">
@@ -148,12 +161,28 @@ export default function Memory() {
         <div className="flex items-center gap-2 mb-4">
           <Activity className="w-5 h-5 text-emerald-400" />
           <h3 className="text-slate-200 font-semibold text-sm">记忆健康度</h3>
-          <span className="text-slate-600 text-[10px]">命中率 = 检索到相关记忆的注入次数 / 注入总次数（进程内统计）</span>
+          <span className="text-slate-600 text-[10px]">
+            {mode === 'literal'
+              ? '向量检索不可用（Embedding 欠费/故障）：当前按关键词兜底检索，命中率分母是兜底检索次数'
+              : '命中率 = 检索到相关记忆的注入次数 / 注入总次数（进程内统计）'}
+          </span>
         </div>
+        {mode === 'literal' && (
+          <div className="mb-3 text-xs text-amber-300 bg-amber-500/10 border border-amber-500/20 rounded-lg px-3 py-2">
+            Embedding 接口不可用，历史经验的语义检索已降级为关键词匹配：仍能复用经验，但召回不如向量检索。
+            {(health.pending_writes ?? 0) > 0 && ` 另有 ${health.pending_writes} 条新经验排队待补录，接口恢复后会自动写入。`}
+          </div>
+        )}
         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
           <div className="bg-slate-800/40 border border-slate-800 rounded-lg p-3">
-            <div className="text-emerald-400 font-bold text-lg">{(health.hit_rate * 100).toFixed(1)}%</div>
-            <div className="text-slate-500 text-[10px] mt-0.5">记忆命中率</div>
+            <div className={`font-bold text-lg ${mode === 'literal' ? 'text-amber-400' : 'text-emerald-400'}`}>
+              {mode === 'unavailable'
+                ? '不可用'
+                : `${((mode === 'literal' ? (health.degraded_hit_rate ?? 0) : health.hit_rate) * 100).toFixed(1)}%`}
+            </div>
+            <div className="text-slate-500 text-[10px] mt-0.5">
+              {mode === 'literal' ? `关键词命中率（命中 ${health.degraded_hits ?? 0}）` : '记忆命中率'}
+            </div>
           </div>
           <div className="bg-slate-800/40 border border-slate-800 rounded-lg p-3">
             <div className="text-cyan-400 font-bold text-lg">{health.injections}</div>
