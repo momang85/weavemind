@@ -74,6 +74,7 @@ metrics_summary.json
 
 # 本地配置备份（含真实凭据，绝不入库）
 config.json.bak
+config.json.*.bak
 .zcode/
 
 # 运行时不需要的内容（已从跟踪移除，永久不上传）

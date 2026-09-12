@@ -317,13 +317,18 @@ def merge_projection(task_id: str, overlay: dict | None = None,
     避免过期快照把已完成任务显示成运行中。
     """
     data = task_projection(task_id, db_path)
-    if not data:
-        data = {"task_id": task_id, "status": "PENDING", "goal": "", "steps": [],
-                "report": "", "logs": [], "project": "", "revision": False,
-                "acceptance": None, "llm_degraded": None}
     live = read_snapshot(task_id) or {}
     if not live and overlay:
         live = overlay
+    if not data:
+        # 未知任务且无实时层 → 返回空，**不要伪造**一条 PENDING 骨架：
+        # 调用方（报告页/任务页）要靠"空"来判定"库里没有"，再走自己的回退链；
+        # 伪造骨架会让它们误判任务存在、最后给出空白页面。
+        if not live:
+            return {}
+        data = {"task_id": task_id, "status": "PENDING", "goal": "", "steps": [],
+                "report": "", "logs": [], "project": "", "revision": False,
+                "acceptance": None, "llm_degraded": None}
     if live:
         for key in ("steps", "logs", "revision", "agent_status", "plan_stage"):
             if live.get(key) not in (None, [], {}):

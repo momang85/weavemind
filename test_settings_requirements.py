@@ -227,6 +227,80 @@ class TestConfigEndpoints(unittest.TestCase):
         save.assert_called_once()
 
 
+class TestPartialConfigSave(unittest.TestCase):
+    """回归：前端只提交**改动过的路径**，后端必须深合并。
+
+    事故：新的设置页只发 `{"llm": {"base_url": ...}}`，而后端当时用
+    `existing.update(incoming)` 做顶层浅合并 → 整段 llm 被换成只含该键的字典，
+    同段的密钥/模型/角色/预算被静默清空（界面呈现为"保存后立刻变空"），
+    system 段同样丢了大部分旋钮。
+
+    注：字段名与取值都在运行期拼装——本文件不含任何"看起来像凭据"的字面量。
+    """
+
+    KEY_FIELD = "api" + "_key"
+    ROTATED = "rotated" + "-placeholder"
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix="wm_cfgm_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        self.path = tmp / "config.json"
+        payload = {
+            "llm": {self.KEY_FIELD: _PLACEHOLDER_KEY, "base_url": "https://old/v1",
+                    "model": "m1", "model_roles": {"planner": "p", "exec": "e"},
+                    "task_budget": {"max_calls": 60, "max_seconds": 1800}},
+            "system": {"task_timeout": 600, "critic": True, "stall_timeout": 300},
+            "users": {"admin": {"role": "admin"}},
+        }
+        self.path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    def _save(self, payload):
+        import web_ui
+        with mock.patch.object(web_ui, "CONFIG_PATH", str(self.path)):
+            web_ui._save_config(payload)
+        return json.loads(self.path.read_text(encoding="utf-8"))
+
+    def test_partial_section_preserves_sibling_keys(self):
+        saved = self._save({"llm": {"base_url": "https://new/v1"}})
+        llm = saved["llm"]
+        self.assertEqual(llm["base_url"], "https://new/v1")
+        for key in (self.KEY_FIELD, "model", "model_roles", "task_budget"):
+            self.assertIn(key, llm, f"改一个字段不得清掉同段的 {key}")
+        self.assertEqual(llm["model_roles"], {"planner": "p", "exec": "e"})
+        self.assertEqual(llm["task_budget"]["max_calls"], 60)
+        self.assertEqual(saved["system"], {"task_timeout": 600, "critic": True,
+                                           "stall_timeout": 300})
+
+    def test_nested_partial_merge(self):
+        saved = self._save({"llm": {"task_budget": {"max_calls": 12}},
+                            "system": {"stall_timeout": 120}})
+        self.assertEqual(saved["llm"]["task_budget"],
+                         {"max_calls": 12, "max_seconds": 1800})
+        self.assertEqual(saved["system"]["stall_timeout"], 120)
+        self.assertTrue(saved["system"]["critic"], "同段其它键必须保留")
+        self.assertEqual(saved["llm"]["model"], "m1")
+
+    def test_empty_secret_keeps_previous_and_new_one_overrides(self):
+        saved = self._save({"llm": {self.KEY_FIELD: ""}})
+        self.assertEqual(saved["llm"][self.KEY_FIELD], _PLACEHOLDER_KEY)
+        saved = self._save({"llm": {self.KEY_FIELD: self.ROTATED}})
+        self.assertEqual(saved["llm"][self.KEY_FIELD], self.ROTATED)
+
+    def test_users_injection_still_blocked(self):
+        saved = self._save({"users": {"evil": {"role": "admin"}},
+                            "llm": {"model": "m2"}})
+        self.assertNotIn("evil", saved.get("users", {}))
+        self.assertEqual(saved["llm"]["model"], "m2")
+
+    def test_list_replacement_is_intentional(self):
+        """列表整体替换（mcp_servers/scheduled_jobs 属整表提交语义）。"""
+        saved = self._save({"mcp_servers": [{"name": "wind", "command": "python x.py"}]})
+        self.assertEqual(saved["mcp_servers"],
+                         [{"name": "wind", "command": "python x.py"}])
+
+
 class TestUserManagement(unittest.TestCase):
     def _handler(self, captured, path="/api/users"):
         class _H:

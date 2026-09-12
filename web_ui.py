@@ -44,20 +44,34 @@ _failure_notify_lock = threading.Lock()
 _failure_notified: set[str] = set()  # 已发过失败通知的 task_id（跨通道去重）
 
 
-def _try_claim_failure_notify(task_id: str) -> bool:
-    """失败通知全局去重：同一 task_id 只允许一个通道发一次失败通知。
+def claim_notify(kind: str, task_id: str, ttl_seconds: int = 7 * 86400) -> bool:
+    """抢占一次"某类通知"的发送权（跨进程去重）。
 
-    调度器结果追踪（runner._on_failure）与全局监听器（D1 分支）都会
-    遇到同一失败任务；没有去重时用户会收到两条内容雷同的失败通知。"""
+    此前的进程内集合只在 webui 内有效：编排器 `_notify_done_async` 与 webui
+    监听器/调度器会各发一条内容雷同的通知（FAILED 时尤其明显）。改为 Redis
+    台账 `notify_claim:{kind}:{tid}`（SET NX EX）——两个进程共用同一键空间，
+    谁先抢到谁发。Redis 不可用时回退进程内集合（至少保证单进程不重复）。
+    """
+    if not task_id:
+        return False
+    try:
+        from notifications import claim_notify as _claim
+        return _claim(kind, task_id, ttl_seconds=ttl_seconds)
+    except Exception:
+        pass
     with _failure_notify_lock:
         if task_id in _failure_notified:
             return False
         _failure_notified.add(task_id)
-        # 上限保护：常驻进程防无界增长
         if len(_failure_notified) > 500:
             for k in list(_failure_notified)[:-300]:
                 _failure_notified.discard(k)
         return True
+
+
+def _try_claim_failure_notify(task_id: str) -> bool:
+    """失败通知去重（兼容旧调用名，语义等价于 claim_notify('failed', tid)）。"""
+    return claim_notify("failed", task_id)
 
 
 _alert_dedupe: dict[str, float] = {}
@@ -342,9 +356,20 @@ def _task_exists(task_id: str) -> bool:
 
 
 def _delete_task(task_id: str) -> bool:
-    """删除任务：撤销分享 → 移除内存结果 → 删除 SQLite 历史。
+    """删除任务：撤销分享 → 清理 Redis 任务级键 → 移除内存结果 → 删除 SQLite 历史。
     工作区落盘文件保留（避免误删交付物，属可恢复设计）。"""
     _revoke_share_token(task_id)
+    # 任务级 Redis 键随任务一起清掉：此前 task_snapshot（TTL 24h）没有任何删除路径，
+    # task_running 的死持有者键也要等 TTL 才消失，删除任务后会留下孤儿键。
+    try:
+        import task_state as _ts
+        _ts.drop_snapshot(task_id)
+    except Exception:
+        pass
+    try:
+        _new_redis().delete(f"task_running:{task_id}", f"task_ack:{task_id}")
+    except Exception:
+        pass
     with _task_lock:
         _task_results.pop(task_id, None)
     try:
@@ -516,11 +541,32 @@ def _save_config(cfg):
                 prev_key = str((prev_llm_sections.get(sec) or {}).get("api_key") or "")
                 if prev_key:
                     inc["api_key"] = prev_key
-        existing.update(incoming)
+        # **深合并**：新的设置页只提交被改动的路径，例如只改了 llm.base_url
+        # 就只发 {"llm": {"base_url": ...}}。此前用 `existing.update(incoming)`
+        # 做顶层浅合并，会把整段 llm 换成只含该键的字典——api_key/model/
+        # model_roles/task_budget 等同段字段被静默清空（实测把 llm 段清到只剩
+        # api_key，system 段也丢了大部分旋钮，界面上表现为"保存后立刻变空"）。
+        _deep_merge(existing, incoming)
     else:
         existing = cfg
     with open(CONFIG_PATH,"w",encoding="utf-8") as f:
         json.dump(existing, f, ensure_ascii=False, indent=2)
+
+
+def _deep_merge(base: dict, patch: dict) -> dict:
+    """递归合并 patch 到 base（就地修改并返回 base）。
+
+    语义：dict 逐层递归；其余类型（含列表与标量）整体替换。
+    列表整体替换是有意的——mcp_servers/scheduled_jobs 属"整表提交"语义。
+    """
+    if not isinstance(patch, dict):
+        return base
+    for key, value in patch.items():
+        if isinstance(value, dict) and isinstance(base.get(key), dict):
+            _deep_merge(base[key], value)
+        else:
+            base[key] = value
+    return base
 
 
 # LLM 相关且含 api_key 的配置段：脱敏与"空值不回写"保护统一按此表
@@ -3076,6 +3122,12 @@ def main():
                                     _tid, "编排器进程已退出（运行标记持有者已死）",
                                     min_age_seconds=_min_age):
                                 _dead.append(_tid)
+                                # 持有者已死 → 该标记已无意义：删掉避免每轮扫描
+                                # 反复判定，也避免孤儿键堆积到 TTL
+                                try:
+                                    _redis_client.delete(f"task_running:{_tid}")
+                                except Exception:
+                                    pass
                     for _tid in _dead:
                         _publish_alert(
                             "task_crashed",
@@ -3102,9 +3154,9 @@ def main():
 
                 # 注：不再用内存 `_task_results` 的 RUNNING 作为豁免来源——
                 # 内存已降级为纯缓存，DB(投影) + Redis pid 校验才是真源。
+                import task_state as _ts
                 db = sqlite3.connect(DB_PATH, timeout=5)
-                # 先取候选（PENDING 且超时），逐个 UPDATE 时跳过豁免集合——
-                # 数量极少（PENDING 任务不会多），逐行处理可控
+                # 候选：排队/历史 PENDING 且超时（豁免运行中任务）
                 candidates = [row[0] for row in db.execute(
                     "SELECT task_id FROM task_history "
                     "WHERE status IN ('PENDING','QUEUED') "
@@ -3115,17 +3167,11 @@ def main():
                 for tid in candidates:
                     if tid in running_ids:
                         continue
-                    db.execute(
-                        "UPDATE task_history SET status='FAILED', report=? "
-                        "WHERE task_id=? AND status IN ('PENDING','QUEUED')",
-                        (
-                            f"Task expired (no completion within {stale_seconds} s)",
-                            tid,
-                        ),
-                    )
-                    if db.total_changes:
+                    # 状态迁移统一走 task_state（webui 不再写 task_history）：
+                    # 同一段逻辑此前在 webui 内联重写了一遍，task_state 的同名
+                    # helper 成了死代码，且漏了 phase='过期'
+                    if _ts.mark_stale_failed(tid, db_path=DB_PATH):
                         expired_rows.append(tid)
-                db.commit()
                 if not expired_rows:
                     db.close()
                     continue
@@ -3133,13 +3179,9 @@ def main():
                 placeholders = ",".join("?" * len(expired_rows))
                 expired = [dict(zip(("task_id", "goal", "user"), row)) for row in db.execute(
                     "SELECT task_id, goal, IFNULL(user,'') FROM task_history "
-                    "WHERE status='FAILED' AND report=? "
-                    f"AND task_id IN ({placeholders}) "
+                    f"WHERE task_id IN ({placeholders}) "
                     "AND (task_id LIKE 'sched-%' OR IFNULL(user,'')='scheduler')",
-                    [
-                        f"Task expired (no completion within {stale_seconds} s)",
-                        *expired_rows,
-                    ],
+                    list(expired_rows),
                 ).fetchall()]
                 db.close()
                 _alerted_expired = set()
@@ -3153,7 +3195,11 @@ def main():
                         "scheduled_task_expired",
                         f"定时任务过期未完成：{tid}（{str(row.get('goal') or '')[:60]}）",
                     )
-                    # 失败通知（复用任务完成通道，标题按状态）
+                    # 失败通知（复用任务完成通道，标题按状态）。
+                    # 必须先去重：这条路径此前直接发送、没有 claim，会与监听器/
+                    # 调度器/编排器发出的同一条失败通知重复
+                    if not claim_notify("failed", tid):
+                        continue
                     try:
                         from notifications import notify_task_done_async
                         notify_task_done_async(
@@ -3713,7 +3759,20 @@ def _get_share_page(self, p):
 def _get_task_report(self, p):
     if p.startswith("/task/") and p.endswith("/report"):
         tid = p.split("/task/")[-1].rsplit("/report", 1)[0]
-        with _task_lock: data = _task_results.get(tid)
+        # 与其它读取点一致：内存缓存 → DB 投影（含 Redis 快照叠加）→ 裸 SQL 行。
+        # 此前只查内存与"最近 100 条"裸行，任务超出该窗口（或 report 列为空）时
+        # 报告页直接 404，而事实其实一直在库里。
+        data = {}
+        try:
+            import task_state as _ts
+            with _task_lock:
+                _mem = dict(_task_results.get(tid) or {})
+            data = _ts.merge_projection(tid, overlay=_mem)
+        except Exception:
+            data = {}
+        if not data:
+            with _task_lock:
+                data = dict(_task_results.get(tid) or {})
         if not data:
             for t in _list_tasks(100):
                 if t.get("task_id") == tid:

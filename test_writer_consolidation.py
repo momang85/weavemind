@@ -221,5 +221,86 @@ class TestWebuiIsSubscriberOnly(unittest.TestCase):
         self.assertIn("_ts.record_completion", src)
 
 
+class TestCleanupAndDedupe(unittest.TestCase):
+    """收尾项：webui 不再写状态、孤儿键清理、通知跨进程去重、报告页兜底。"""
+
+    def test_webui_has_no_state_writes(self):
+        """webui 不得再写 task_history 的状态列（只允许 DELETE 任务）。"""
+        src = Path("web_ui.py").read_text(encoding="utf-8")
+        self.assertNotIn("INSERT INTO task_history", src)
+        self.assertNotIn("record_completion(", src)
+        self.assertNotIn("UPDATE task_history SET status", src,
+                         "stale 翻转必须走 task_state（此前是 webui 内联裸 SQL）")
+        self.assertIn("mark_stale_failed", src)
+
+    def test_delete_task_clears_task_scoped_redis_keys(self):
+        import web_ui
+        fake = mock.MagicMock()
+        with mock.patch.object(web_ui, "_revoke_share_token"), \
+                mock.patch.object(web_ui, "_new_redis", return_value=fake), \
+                mock.patch("task_state.drop_snapshot") as drop, \
+                mock.patch.object(web_ui, "_task_results", {}):
+            web_ui._delete_task("ui-del1")
+        drop.assert_called_once_with("ui-del1")
+        deleted = fake.delete.call_args.args
+        self.assertIn("task_running:ui-del1", deleted)
+        self.assertIn("task_ack:ui-del1", deleted)
+
+    def test_notify_claim_is_cross_process(self):
+        """抢占走 Redis SET NX EX：第二个进程/第二次调用拿不到。"""
+        from notifications import claim_notify
+        fake = mock.MagicMock()
+        fake.set = mock.MagicMock(side_effect=[True, False])
+        with mock.patch("redis.Redis", return_value=fake):
+            self.assertTrue(claim_notify("failed", "ui-n1"))
+            self.assertFalse(claim_notify("failed", "ui-n1"), "同一 kind+task 只能抢到一次")
+        key = fake.set.call_args.args[0]
+        self.assertEqual(key, "notify_claim:failed:ui-n1")
+
+    def test_notify_claim_falls_back_without_redis(self):
+        from notifications import claim_notify, _CLAIMED
+        _CLAIMED.clear()
+        with mock.patch("redis.Redis", side_effect=RuntimeError("no redis")):
+            self.assertTrue(claim_notify("done", "ui-n2"))
+            self.assertFalse(claim_notify("done", "ui-n2"))
+        _CLAIMED.clear()
+
+    def test_orchestrator_skips_daily_report_and_claims_others(self):
+        """日报交给 webui（带分享链接）；其它任务由编排器按状态抢占。"""
+        src = Path("orchestrator_v2.py").read_text(encoding="utf-8")
+        block = src[src.index("def _notify_done_async"):]
+        block = block[:block.index("def _read_acceptance_summary")]
+        self.assertIn('== "daily-report"', block)
+        self.assertIn("claim_notify", block)
+
+    def test_progress_channel_gated_off_by_default(self):
+        from ws_helpers import push_progress
+        events = []
+        messaging = mock.MagicMock()
+        messaging.publish = lambda ch, msg: events.append(ch)
+        with mock.patch.dict("os.environ", {"WM_PUBLISH_PROGRESS_CHANNEL": "0"}):
+            push_progress(messaging, "t-1", "log", {"message": "x"})
+        self.assertEqual(events, ["orchestrator:response"],
+                         "默认不再发无人订阅的 orchestrator:progress")
+
+    def test_task_report_route_uses_projection(self):
+        """报告页在内存为空时也要能读（此前靠最近 100 条裸行兜底会 404）。"""
+        import web_ui
+        captured = {}
+        handler = type("H", (), {
+            "_html": lambda self, html, code=200: captured.update(html=html),
+            "_json": lambda self, data, code=200: captured.update(json=data, code=code),
+        })()
+        task = {"task_id": "ui-rep1", "goal": "目标", "status": "SUCCESS",
+                "report": "# 报告正文\n\n结论。\n", "steps": [], "logs": [],
+                "acceptance": {"overall": "pass"}, "project": "default"}
+        with mock.patch.object(web_ui, "_task_results", {}), \
+                mock.patch("task_state.merge_projection", return_value=task), \
+                mock.patch.object(web_ui, "_list_tasks",
+                                  side_effect=AssertionError("不应退到裸行兜底")):
+            web_ui._get_task_report(handler, "/task/ui-rep1/report")
+        self.assertIn("报告正文", captured.get("html", ""))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -39,7 +39,11 @@ def push_progress(messaging, task_id: str, update_type: str, payload: dict) -> N
             "payload": payload,
         }
         messaging.publish("orchestrator:response", msg)
-        messaging.publish("orchestrator:progress", msg)
+        # 曾有第二条 `orchestrator:progress` 频道，但全仓（后端/前端/脚本）从未有
+        # 任何订阅者，属于纯冗余流量，每次进度事件都多一次 pubsub 广播。
+        # 需要恢复时把下面的开关置 1（并补上订阅端）：
+        if os.environ.get("WM_PUBLISH_PROGRESS_CHANNEL", "0") == "1":
+            messaging.publish("orchestrator:progress", msg)
     except Exception as exc:
         logger.warning("push_progress failed for %s: %s", task_id, exc)
 

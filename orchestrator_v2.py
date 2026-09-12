@@ -941,7 +941,31 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         self, task_id: str, goal: str, status: str, report: str = "",
     ) -> None:
         """F5：任务终态外部通知（后台线程，不阻塞完成流程）。
-        链接复用已生成的分享路径（share_links.json）；任务未分享则不附链接，只附摘要。"""
+
+        分工与去重（跨进程台账 `notify_claim:{kind}:{tid}`，见 notifications.claim_notify）：
+        - daily-report 任务交给 webui——只有它会在终态生成分享链接并补发带链接的通知，
+          编排器先发会让用户收到一条没有链接的通知；
+        - 其它任务由编排器发（webui 不为普通任务发通知），按状态抢占 done/failed；
+        - 抢占失败说明另一个进程/另一条路径已经发过，直接跳过，避免重复通知。
+        """
+        do_notify = {"ok": False}
+
+        def _claim_and_mark() -> None:
+            try:
+                project = str((getattr(self, "_task_projects", {}) or {}).get(task_id) or "")
+                if project == "daily-report":
+                    return                      # webui 负责（带分享链接）
+                from notifications import claim_notify
+                kind = "failed" if str(status).upper() == "FAILED" else "done"
+                do_notify["ok"] = claim_notify(kind, task_id)
+            except Exception:
+                do_notify["ok"] = True          # 抢占机制不可用时保持既有行为
+
+        _claim_and_mark()
+        if not do_notify["ok"]:
+            logger.info("Skip duplicate notify for %s (%s)", task_id, status)
+            return
+
         def _notify_done() -> None:
             try:
                 from notifications import (

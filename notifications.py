@@ -55,6 +55,45 @@ DEFAULT_NOTIFICATIONS = {
 SECRET_FIELDS = {"password", "sendkey"}
 
 
+# ---- 通知去重（跨进程抢占）----
+# 同一件事（同一 task 的同一类通知）只能由一个进程发一次：编排器与 webui 都会
+# 在终态发通知（编排器 run() 各路径 + webui 监听器/调度器/stale 清理），此前
+# 去重只在 webui 进程内的集合里，跨进程完全无效 → 用户收到重复通知。
+# 用 Redis SET NX EX 抢占；Redis 不可用时回退进程内集合（至少单进程不重复）。
+_CLAIM_LOCK = threading.Lock()
+_CLAIMED: set[str] = set()
+_CLAIM_MAX = 500
+
+
+def claim_notify(kind: str, task_id: str, ttl_seconds: int = 7 * 86400) -> bool:
+    """抢占"给某任务发某类通知"的资格；True=抢到（应当发送）。
+
+    kind 建议用语义名（如 done / failed / expired），同一 kind 下同 task 只发一次。
+    """
+    task_id = str(task_id or "").strip()
+    if not task_id:
+        return False
+    key = f"notify_claim:{kind}:{task_id}"
+    try:
+        import redis
+        client = redis.Redis(
+            host=os.environ.get("REDIS_HOST", "127.0.0.1"),
+            port=int(os.environ.get("REDIS_PORT", "6379") or 6379),
+            decode_responses=True, socket_connect_timeout=2, socket_timeout=2,
+        )
+        return bool(client.set(key, "1", nx=True, ex=int(ttl_seconds)))
+    except Exception:
+        pass
+    with _CLAIM_LOCK:
+        if key in _CLAIMED:
+            return False
+        _CLAIMED.add(key)
+        if len(_CLAIMED) > _CLAIM_MAX:
+            for stale in list(_CLAIMED)[:-int(_CLAIM_MAX * 0.6)]:
+                _CLAIMED.discard(stale)
+        return True
+
+
 def load_notifications_config(cfg_path: str | None = None) -> dict:
     """读取 config.json 的 notifications 段；文件缺失/损坏返回全禁用默认。"""
     path = cfg_path or CONFIG_PATH
