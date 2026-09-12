@@ -221,6 +221,18 @@ python launcher.py status                            # 状态
 > 访问地址：http://localhost:8080（仓库内已附构建好的前端产物，**无需 Node 即可使用**）。
 > 仅在修改前端源码后才需要重新构建：`rm -rf frontend/dist && npm install --prefix frontend && npm run build --prefix frontend`。
 
+#### 跨设备与小技巧
+
+| 场景 | 做法 |
+|---|---|
+| 终端中文乱码（Windows cmd 默认 GBK） | 脚本会自动切 UTF-8 代码页；仍异常时用 `WM_PLAIN_TEXT=1` 输出纯英文 |
+| 只有 `py` 启动器 / 只有 `python3` | `start.bat` 自动回退 `py -3`；`start.sh` 优先 `python3` 再回退 `python` |
+| CI / 管道里运行（无交互） | `WM_NONINTERACTIVE=1`（start 不 pause）；`WM_ASSUME_YES=1`（stop 跳过 Redis 询问） |
+| Windows 防火墙反复弹框要放行 Redis | 便携 Redis 只监听本机回环（`--bind 127.0.0.1 -::1`），不暴露局域网、不触发入站询问；需要局域网共享时 `WM_REDIS_BIND=0.0.0.0`（历史"阻止"规则的放行命令见部署指南 5.1） |
+| 启动后想确认服务真的起来了 | 启动会自动校验并打印 `N/N 服务存活`；`WM_START_STRICT=1` 时未全部存活以非零码退出 |
+| 只想看依赖是否齐备 | `python launcher.py deps`（只报告）/ `--fix`（自动补齐） |
+| 停止 | `python launcher.py stop` 会一并停掉本项目启动的便携 Redis；系统级 Redis 需自行管理 |
+
 ## 配置
 
 真实配置统一放在 `config.json`（已 `.gitignore`，不入库）：

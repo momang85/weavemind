@@ -42,6 +42,8 @@ frontend/tsconfig.tsbuildinfo
 
 # 运行状态
 .weavemind/
+# 旧运行时目录（启动时自动迁移，保留忽略规则防漏网）
+.weavimind/
 poison_strategies.json
 prompts/overrides.json
 skills/lessons.jsonl

@@ -1,24 +1,39 @@
 #!/bin/bash
-# 织光 (ZhiGuang) - 一键启动脚本 (Git Bash / Linux)
+# 织光 (ZhiGuang) - 一键启动脚本 (Git Bash / Linux / macOS)
 # 用法: bash start.sh
+# 非交互（CI/管道）：WM_NONINTERACTIVE=1 bash start.sh
 
 set -e
+
+cd "$(dirname "$0")"
+
+# 控制台编码：UTF-8 是 *nix 默认；仅在未设置 locale 时兜底，避免覆盖用户环境
+if [ -z "${LC_ALL:-}" ] && [ -z "${LANG:-}" ]; then
+    export LC_ALL=C.UTF-8 2>/dev/null || true
+fi
+export PYTHONIOENCODING=utf-8     # 与 Windows 侧保持一致
 
 echo "============================================"
 echo "  织光 (ZhiGuang) - 一键启动"
 echo "============================================"
 echo ""
 
-cd "$(dirname "$0")"
-
-# 配置统一来自 config.json（与 start.bat 一致）
-export PYTHONIOENCODING=utf-8
+# ---- 解释器探测：python3 优先，回退 python ----
+PY=""
+if command -v python3 >/dev/null 2>&1; then
+    PY="python3"
+elif command -v python >/dev/null 2>&1; then
+    PY="python"
+else
+    echo "  ERROR: 未找到 python3 / python，请先安装 Python 3.10–3.14。"
+    exit 1
+fi
 
 # [1/6] Redis
 echo "[1/6] Redis..."
 # 三级探测（与 start.bat 对齐）：本机 6379 已有 Redis → 跳过 Docker；
 # 否则走 Docker 容器；两者都不可用时给出原生安装指引
-if python -c "import socket,sys
+if "$PY" -c "import socket,sys
 try:
     s=socket.create_connection(('127.0.0.1',6379),2); s.sendall(b'PING\r\n')
     sys.exit(0 if s.recv(64).startswith(b'+PONG') else 1)
@@ -35,24 +50,20 @@ elif command -v docker >/dev/null 2>&1; then
     fi
     sleep 2
 else
-    echo "  ERROR: 未找到 Docker，也未检测到本机 Redis（127.0.0.1:6379）。"
-    echo "  无需 Docker 的三种方案（任选其一，装好保持 6379 端口后重跑）："
-    echo "    1) Memurai（Redis 兼容，Windows 原生服务）：https://www.memurai.com"
-    echo "    2) tporadowski/redis（Redis 5.x Windows 移植版）：GitHub 搜 tporadowski/redis"
-    echo "    3) WSL2 / Linux：sudo apt install redis-server && sudo service redis-server start"
-    echo "  详见 docs/部署指南.md「无 Docker 的 Redis 方案」"
-    exit 1
+    echo "  提示：未找到 Docker 也未检测到本机 Redis，交由第 2 步依赖自检"
+    echo "        尝试自动获取（便携版 / 系统 redis-server）。"
 fi
 
 # [2/6] Dependencies（自检 + 自动补齐：缺包自动装、Redis 缺失自动获取）
 echo "[2/6] Dependencies..."
-if ! python dep_check.py --fix; then
+if ! "$PY" dep_check.py --fix; then
     echo "  ERROR: 必需依赖未就绪（见上方报告）。"
-    echo "  可手动处理：pip install -r requirements.txt；Redis 安装见 docs/部署指南.md"
+    echo "  可手动处理：$PY -m pip install -r requirements.txt"
+    echo "  Redis 安装见 docs/ 部署指南（5.1 节）"
     exit 1
 fi
 
-# [3/6] Frontend (首次运行自动构建)
+# [3/6] Frontend (首次运行自动构建；仓库已带构建产物时可跳过)
 echo "[3/6] Frontend..."
 if [ -f frontend/dist/index.html ]; then
     echo "  dist exists, skip build"
@@ -61,31 +72,38 @@ else
         echo "  Building frontend (first run)..."
         (cd frontend && npm install --no-audit --no-fund && npm run build) || echo "  WARNING: frontend build failed, will use fallback page"
     else
-        echo "  WARNING: Node.js not found; frontend will use built-in fallback page"
+        echo "  WARNING: Node.js not found; web UI will show a built-in status page"
     fi
 fi
 
 # [4/6] Start all services (PID-managed, 会先清理旧进程)
 echo "[4/6] Starting services..."
-python launcher.py
+"$PY" launcher.py
 
-# [5/6] Open browser
+# [5/6] Frontend URL
 if [ -f frontend/dist/index.html ]; then
     FRONT_URL="http://localhost:8080"
 else
-    FRONT_URL="http://localhost:5173"
+    FRONT_URL="http://localhost:8080"
 fi
 echo ""
 echo "============================================"
 echo "  织光系统已启动！"
 echo "  Web 前端: ${FRONT_URL}"
-echo "  停止: python launcher.py stop"
+echo "  停止: $PY launcher.py stop   （或 bash stop.sh）"
+echo "  状态: $PY launcher.py status"
 echo "============================================"
 echo ""
 
-# [6/6] 可选：自动打开浏览器
-if command -v start &>/dev/null; then
-    start "${FRONT_URL}" 2>/dev/null || true
-elif command -v open &>/dev/null; then
-    open "${FRONT_URL}" 2>/dev/null || true
+# [6/6] 可选：自动打开浏览器（macOS: open / Linux: xdg-open / WSL: cmd.exe start）
+if [ "${WM_NONINTERACTIVE:-0}" != "1" ]; then
+    if command -v open >/dev/null 2>&1; then
+        open "${FRONT_URL}" 2>/dev/null || true
+    elif command -v xdg-open >/dev/null 2>&1; then
+        xdg-open "${FRONT_URL}" 2>/dev/null || true
+    elif command -v cmd.exe >/dev/null 2>&1; then
+        cmd.exe /c start "" "${FRONT_URL}" 2>/dev/null || true
+    else
+        echo "  （未找到浏览器打开命令，请手动访问 ${FRONT_URL}）"
+    fi
 fi

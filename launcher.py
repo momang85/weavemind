@@ -1,19 +1,22 @@
 """织光 (ZhiGuang) - 统一服务进程管理器。
 
 用法：
-    python launcher.py             # 启动全部服务（先依赖自检 + 清理旧进程）
+    python launcher.py             # 启动全部服务（先依赖自检 + 清理旧进程 + 启动后校验）
     python launcher.py start       # 同上
     python launcher.py deps        # 依赖自检（只报告）
     python launcher.py deps --fix  # 依赖自检并自动补齐（装包 / 获取 Redis）
     python launcher.py supervise   # 守护模式：启动全部服务后循环巡检，崩溃自动重启
-    python launcher.py stop        # 按 PID 文件精确停止全部服务
-    python launcher.py status      # 查看运行状态
+    python launcher.py stop        # 按 PID 文件精确停止全部服务（含本项目启动的便携 Redis）
+    python launcher.py status      # 查看运行状态（含依赖与 Redis 来源摘要）
 
-所有服务 PID 写入 .weavimind/pids.json，stop 时按 PID 精确结束，
-不再使用 taskkill /IM python.exe 之类的全杀方案。
+所有服务 PID 写入 .weavemind/pids.json（同一目录还存放自动获取的 Redis 与下载缓存），
+stop 时按 PID 精确结束，不再使用 taskkill /IM python.exe 之类的全杀方案。
 start 时若环境变量 WEAVEMIND_SUPERVISE=1 同样进入守护模式（start.bat 默认不开）。
 启动前会跑依赖自检（缺失的 pip 包自动补装、Redis 缺失按平台自动获取），
 SKIP_DEP_CHECK=1 可跳过自检。
+输出编码：自动适配 UTF-8（Windows 下尝试切到 65001 代码页）；老旧终端可设
+WM_PLAIN_TEXT=1 输出纯英文。启动后校验：WM_START_VERIFY_WAIT 秒后汇总存活情况，
+WM_START_STRICT=1 时未全部存活则以非零码退出。
 """
 
 from __future__ import annotations
@@ -106,14 +109,22 @@ REDIS_SETUP_HINT = """\
 
 
 def _redis_reachable(host: str, port: int, timeout: float = 2.0) -> bool:
-    """socket + PING 探测 Redis 可达性（不依赖 redis 包，装依赖前也能用）。"""
+    """socket + PING 探测 Redis 可达性。
+
+    localhost 会同时尝试 127.0.0.1 与 ::1（便携 Redis 默认只监听 IPv4 回环，
+    而 localhost 可能先解析到 ::1 → 曾经的"服务在跑却探测不通"假阴性）。"""
     import socket as _socket
-    try:
-        with _socket.create_connection((host, int(port)), timeout=timeout) as s:
-            s.sendall(b"PING\r\n")
-            return s.recv(64).startswith(b"+PONG")
-    except Exception:
-        return False
+    candidates = [host] if host and host != "localhost" else ["127.0.0.1", "::1"]
+    for candidate in candidates:
+        try:
+            with _socket.create_connection((candidate, int(port)),
+                                           timeout=timeout) as sock:
+                sock.sendall(b"PING\r\n")
+                if sock.recv(64).startswith(b"+PONG"):
+                    return True
+        except Exception:
+            continue
+    return False
 
 
 def _check_redis_or_exit() -> None:
@@ -238,8 +249,41 @@ def _scan_residual_processes() -> list[tuple[int, str]]:
         return found
 
     if os.name == "nt":
-        return _scan_windows_wmic()
+        # wmic 在 Win11 24H2 起已移除 → 先试 tasklist 全量匹配，再退回 wmic
+        found = _scan_windows_tasklist()
+        return found if found else _scan_windows_wmic()
     return _scan_posix_pgrep()
+
+
+def _scan_windows_tasklist() -> list[tuple[int, str]]:
+    """Windows 兜底（无 psutil）：tasklist 取 python 进程，再用命令行复核。
+
+    tasklist 默认不输出命令行，需 /V；部分系统对非管理员隐藏命令行，
+    此时命令行匹配会失败（返回空），由 wmic 分支兜底。"""
+    found: list[tuple[int, str]] = []
+    try:
+        out = subprocess.check_output(
+            ["tasklist", "/FI", "IMAGENAME eq python.exe", "/FO", "CSV", "/NH", "/V"],
+            text=True, timeout=15, errors="replace",
+        )
+    except Exception:
+        return found
+    import csv as _csv
+    import io as _io
+    try:
+        for row in _csv.reader(_io.StringIO(out)):
+            if len(row) < 2:
+                continue
+            try:
+                pid = int(row[1])
+            except Exception:
+                continue
+            cmd = " ".join(row[1:])  # /V 末尾列含命令行（可用时有意义）
+            if _is_residual_command(cmd, pid):
+                found.append((pid, cmd))
+    except Exception:
+        return found
+    return found
 
 
 def _scan_windows_wmic() -> list[tuple[int, str]]:
@@ -310,8 +354,45 @@ def _scan_posix_pgrep() -> list[tuple[int, str]]:
     return found
 
 
+def _stop_portable_redis() -> dict:
+    """停止"本项目启动的"便携版 Redis（按 .weavemind/redis.pid）。
+
+    仅当 pid 文件存在且指向我们的便携实例时动作，绝不误杀用户自建 Redis；
+    返回 {stopped: bool, detail: str}，异常一律吞掉（停止流程不因此失败）。"""
+    try:
+        import dep_check
+        ok = dep_check._stop_recorded_redis()
+        if ok:
+            return {"stopped": True, "detail": "便携版 Redis 已停止"}
+        return {"stopped": False, "detail": ""}
+    except Exception as exc:
+        logger.warning("停止便携 Redis 时出错（已忽略）：%s", str(exc)[:120])
+        return {"stopped": False, "detail": ""}
+
+
+def _verified_stop_report(stopped: list[str], known_pids: set[int]) -> list[tuple[int, str]]:
+    """停止后复检：把仍存活的 PID 找出来（供上层如实报告，而非静默）。"""
+    survivors: list[tuple[int, str]] = []
+    for name, pid in _read_pids().get("services", {}).items():
+        try:
+            if pid and _is_alive(pid):
+                survivors.append((pid, name))
+        except Exception:
+            continue
+    # pids.json 已删时仍可能残留：用进程扫描兜底
+    if not survivors:
+        try:
+            survivors = [(p, c) for p, c in _scan_residual_processes()
+                         if p not in known_pids and _is_alive(p)]
+        except Exception:
+            pass
+    return survivors
+
+
 def stop_services() -> list[str]:
-    """按 PID 文件停止全部服务，返回已停止的服务名列表。"""
+    """按 PID 文件停止全部服务（含本项目启动的便携 Redis），返回已停止的服务名列表。
+
+    停止后做存活复检：仍有残留时如实打印（含 PID），不再静默。"""
     pids = _read_pids()
     services = pids.get("services", {})
     known_pids = set(p for p in services.values() if p)
@@ -345,7 +426,39 @@ def stop_services() -> list[str]:
             PID_FILE.unlink()
         except Exception:
             pass
+
+    # 便携版 Redis（本项目自动获取并启动的实例）：stop 时应一并收尾，
+    # 否则 stop 后 6379 仍被占用、下次启动会误判"已有 Redis 在跑"
+    redis_stop = _stop_portable_redis()
+    if redis_stop.get("stopped"):
+        logger.info("%s", redis_stop["detail"])
+
+    # 停止后复检：如实报告仍在运行的残留（含 PID），不再静默
+    survivors = _verified_stop_report(stopped, known_pids)
+    if survivors:
+        print(import_cli_text().msg(
+            f"  ⚠ 仍有 {len(survivors)} 个进程未停止："
+            + ", ".join(f"{name}(pid={pid})" for pid, name in survivors[:8]),
+            f"  WARNING: {len(survivors)} process(es) still running: "
+            + ", ".join(f"{name}(pid={pid})" for pid, name in survivors[:8]),
+        ))
     return stopped
+
+
+def import_cli_text():
+    """延迟导入 cli_text（保持 launcher 顶层仅依赖 stdlib + logging_setup）。"""
+    try:
+        import cli_text
+        return cli_text
+    except Exception:
+        class _Fallback:
+            @staticmethod
+            def msg(zh, en):
+                return zh
+            @staticmethod
+            def setup_console_encoding(*_a, **_k):
+                return None
+        return _Fallback()
 
 
 def build_services(cfg: dict) -> list[tuple[str, list[str], Path | None, Path | None]]:
@@ -405,6 +518,8 @@ def _spawn_service(name: str, argv: list[str], cwd: Path | None,
                 stdout=fh,
                 stderr=fh,
                 creationflags=_CREATE_NO_WINDOW,
+                # POSIX：独立进程组，停止时可整组回收（连带 npx→node 子进程）
+                start_new_session=(os.name != "nt"),
             )
             return proc.pid
         finally:
@@ -449,8 +564,58 @@ def start_services() -> dict:
         if (BASE_DIR / "frontend" / "dist" / "index.html").exists()
         else "http://localhost:5173"
     )
+    # 启动后校验：给子进程一点时间完成 import/连接，然后核对实际存活。
+    # 秒退服务在此暴露（此前只打印 started，用户看到"成功"却无服务）。
+    summary = verify_services(quiet=False)
+    if summary["down"]:
+        logger.error(
+            "启动校验：%d/%d 存活，未存活：%s（日志见 logs/）",
+            summary["alive"], summary["total"],
+            ", ".join(name for _, name in summary["down"]),
+        )
+        if os.environ.get("WM_START_STRICT", "0") == "1":
+            print(import_cli_text().msg(
+                "  启动校验未通过（WM_START_STRICT=1）：请查看 logs/ 后重试。",
+                "  Startup verification failed (WM_START_STRICT=1): see logs/ and retry.",
+            ))
+            sys.exit(1)
     logger.info("All services started. WebUI: http://localhost:8080  Frontend: %s", front_url)
     return pids
+
+
+def verify_services(quiet: bool = True) -> dict:
+    """启动后校验：等待若干秒后统计服务实际存活情况。
+
+    返回 {total, alive, down:[(pid, name)], waited}；不等严格模式也会如实打印。"""
+    try:
+        wait = float(os.environ.get("WM_START_VERIFY_WAIT", "8") or 8)
+    except Exception:
+        wait = 8.0
+    wait = max(0.0, min(wait, 60.0))
+    if wait:
+        time.sleep(wait)
+    services = _read_pids().get("services", {})
+    down: list[tuple[int, str]] = []
+    alive = 0
+    for name, pid in services.items():
+        try:
+            if _is_alive(pid):
+                alive += 1
+            else:
+                down.append((pid, name))
+        except Exception:
+            down.append((pid, name))
+    summary = {"total": len(services), "alive": alive, "down": down, "waited": wait}
+    if not quiet or down:
+        ok = not down
+        line = import_cli_text().msg(
+            f"  [{ 'OK' if ok else '!!' }] 启动校验：{alive}/{len(services)} 服务存活"
+            + ("" if ok else "；未存活：" + ", ".join(n for _, n in down[:6])),
+            f"  [{ 'OK' if ok else '!!' }] Startup check: {alive}/{len(services)} alive"
+            + ("" if ok else "; down: " + ", ".join(n for _, n in down[:6])),
+        )
+        print(line)
+    return summary
 
 
 def _supervise_interval() -> float:
@@ -571,19 +736,69 @@ def supervise_services() -> None:
         logger.info("supervise: 收到中断，退出守护模式（已启动的服务保持运行）")
 
 
+def _redis_source() -> str:
+    """Redis 来源摘要：便携（本项目下载）/ Docker 容器 / 系统服务 / 不可达。"""
+    try:
+        import dep_check
+        if not dep_check.redis_ping():
+            return "unreachable"
+        exe = dep_check._usable_portable_redis()
+        if exe is not None:
+            major = dep_check._redis_binary_version(exe)
+            return f"portable (v{major or '?'}, {exe.parent.name})"
+        ver = dep_check._redis_server_version()
+        return f"external (v{ver or '?'})"
+    except Exception:
+        return "unknown"
+
+
+def _pids_file_state() -> str:
+    """pids.json 状态：ok / missing（从未启动） / corrupt（损坏，勿静默）。"""
+    if not PID_FILE.exists():
+        return "missing"
+    try:
+        data = json.loads(PID_FILE.read_text(encoding="utf-8"))
+        return "ok" if isinstance(data, dict) else "corrupt"
+    except Exception:
+        return "corrupt"
+
+
 def print_status() -> None:
+    state = _pids_file_state()
+    if state != "ok":
+        msg = (
+            f"No services recorded ({PID_FILE.name} {state}；run `python launcher.py` to start)."
+            if state == "missing"
+            else f"WARNING: {PID_FILE.name} is corrupt (cannot be parsed); "
+                 "run `python launcher.py stop` then start again."
+        )
+        print(msg)
+        print(f"Redis: {_redis_source()}")
+        return
     pids = _read_pids()
     services = pids.get("services", {})
     if not services:
         print("No services recorded (run `python launcher.py` to start).")
+        print(f"Redis: {_redis_source()}")
         return
     print(f"Started at: {pids.get('started_at', 'unknown')}")
     alive = 0
+    down: list[str] = []
     for name, pid in services.items():
         ok = _is_alive(pid)
         alive += 1 if ok else 0
+        if not ok:
+            down.append(name)
         print(f"  [{'UP' if ok else 'DOWN'}] {name} (pid={pid})")
     print(f"{alive}/{len(services)} services alive")
+    if down:
+        print(import_cli_text().msg(
+            "  未存活服务的日志在 logs/ 下（worker-*.log / *.log）；"
+            "可 `python launcher.py restart` 重启。",
+            "  Logs for down services are under logs/ (worker-*.log); "
+            "run `python launcher.py restart`.",
+        ))
+    print(f"Redis: {_redis_source()}")
 
 
 def _run_dependency_check(fix: bool, fatal: bool) -> None:
@@ -606,12 +821,17 @@ def _run_dependency_check(fix: bool, fatal: bool) -> None:
         logger.warning("依赖自检异常（已忽略）：%s", str(exc)[:150])
         return
     if fatal and not report.get("ok"):
-        print("必需依赖未就绪：请按上面的提示处理后重试"
-              "（或用 SKIP_DEP_CHECK=1 跳过自检）。")
+        print(import_cli_text().msg(
+            "必需依赖未就绪：请按上面的提示处理后重试（或用 SKIP_DEP_CHECK=1 跳过自检）。",
+            "Required dependencies are not ready: fix per the report above and retry "
+            "(or set SKIP_DEP_CHECK=1 to skip this check).",
+        ))
         sys.exit(1)
 
 
 def main() -> None:
+    # 终端编码适配：UTF-8 输出 + Windows 下尝试切 65001（老旧终端可用 WM_PLAIN_TEXT=1）
+    import_cli_text().setup_console_encoding()
     logging_setup.setup_logging("launcher")
     logger = logging.getLogger(__name__)
 

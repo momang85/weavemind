@@ -34,7 +34,9 @@ import zipfile
 from pathlib import Path, PurePosixPath
 
 BASE_DIR = Path(__file__).resolve().parent
-RUNTIME_DIR = BASE_DIR / ".weavimind"
+# 运行时目录与 launcher 的 PID 目录统一为 .weavemind（曾用近名 .weavimind，极易混淆）
+RUNTIME_DIR = BASE_DIR / ".weavemind"
+LEGACY_RUNTIME_DIR = BASE_DIR / ".weavimind"   # 旧目录：仅用于一次性迁移
 DOWNLOAD_DIR = RUNTIME_DIR / "downloads"
 REDIS_DIR = RUNTIME_DIR / "redis"
 # 便携版解压到隔离子目录：避免与历史遗留目录（可能被占用/版本过旧）互相干扰
@@ -90,6 +92,15 @@ PY_MAX_INCL = (3, 14)
 DEFAULT_PORT = 6379
 
 
+def _t(zh: str, en: str) -> str:
+    """按输出模式取文案（WM_PLAIN_TEXT=1 时用英文）；cli_text 缺失时回退中文。"""
+    try:
+        import cli_text
+        return cli_text.msg(zh, en)
+    except Exception:
+        return zh
+
+
 def _valid_port(value, default: int = DEFAULT_PORT) -> int:
     """端口范围校验（1–65535），非法值回落默认端口。"""
     try:
@@ -107,9 +118,59 @@ def _env_host() -> str:
     return (os.environ.get("REDIS_HOST") or "localhost").strip() or "localhost"
 
 
+def _probe_hosts() -> list[str]:
+    """探测用的主机列表：localhost 同时试 IPv4/IPv6。
+
+    Windows 防火墙按程序+路径放行，且便携 Redis 默认监听 IPv4；而
+    `localhost` 可能先解析到 IPv6 `::1`，导致"服务在跑却探测不通"的假阴性。
+    """
+    host = _env_host()
+    if host in ("localhost", ""):
+        return ["127.0.0.1", "::1"]
+    return [host]
+
+
+def redis_bind_addr() -> str:
+    """便携 Redis 的绑定地址（默认仅本机回环，IPv4+IPv6 双栈）。
+
+    只绑回环的两个好处：不对局域网暴露（安全），且**不会触发 Windows
+    防火墙的入站放行询问**（此前绑 0.0.0.0 会反复弹框，用户点了取消还会
+    被直接拦掉连接）。用 WM_REDIS_BIND 可覆盖（如 0.0.0.0 供局域网共享）。"""
+    return (os.environ.get("WM_REDIS_BIND") or "127.0.0.1 -::1").strip()
+
+
 # ─────────────────────────────────────────────
 # 检测
 # ─────────────────────────────────────────────
+
+def _migrate_legacy_runtime_dir() -> str:
+    """把旧运行时目录 .weavimind 的内容迁到 .weavemind（幂等；失败静默）。
+
+    返回迁移说明（空串=无需迁移）。便携 Redis 目录被迁移后，运行中的实例
+    仍指向旧路径——由 ensure_redis 的版本/存活校验自然处理（必要时重启）。"""
+    try:
+        if not LEGACY_RUNTIME_DIR.exists():
+            return ""
+        moved: list[str] = []
+        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        for child in list(LEGACY_RUNTIME_DIR.iterdir()):
+            target = RUNTIME_DIR / child.name
+            if target.exists():
+                continue
+            try:
+                shutil.move(str(child), str(target))
+                moved.append(child.name)
+            except Exception:
+                continue  # 被占用（如运行中的 redis）：保留旧位置，不阻断启动
+        try:
+            if not any(LEGACY_RUNTIME_DIR.iterdir()):
+                LEGACY_RUNTIME_DIR.rmdir()
+        except Exception:
+            pass
+        return f"migrated: {', '.join(moved)}" if moved else ""
+    except Exception:
+        return ""
+
 
 def check_python_version(version_info=None) -> dict:
     """Python 版本检查：3.10–3.14 通过（越界给出可操作提示）。"""
@@ -150,24 +211,35 @@ def check_packages(specs=None) -> dict:
 
 
 def redis_ping(host: str = "", port: int = 0, timeout: float = 2.0) -> bool:
-    """socket + PING 探测（不依赖 redis 包，装依赖前也可用）。"""
+    """socket + PING 探测（不依赖 redis 包，装依赖前也可用）。
+
+    host 为空时按 _probe_hosts() 依次尝试（localhost 会同时试 127.0.0.1 与 ::1），
+    避免 IPv4 监听 + IPv6 解析造成的假不可达。"""
     import socket
-    host = host or _env_host()
+    hosts = [host] if host else _probe_hosts()
     target_port = _valid_port(port or _env_port())
-    try:
-        with socket.create_connection((host, target_port), timeout=timeout) as conn:
-            conn.sendall(b"PING\r\n")
-            return conn.recv(64).startswith(b"+PONG")
-    except Exception:
-        return False
+    for candidate in hosts:
+        try:
+            with socket.create_connection((candidate, target_port),
+                                          timeout=timeout) as conn:
+                conn.sendall(b"PING\r\n")
+                if conn.recv(64).startswith(b"+PONG"):
+                    return True
+        except Exception:
+            continue
+    return False
 
 
 def check_frontend() -> dict:
     if FRONTEND_INDEX.exists():
-        return {"ok": True, "detail": "前端产物已就绪（frontend/dist，免 Node）"}
+        return {"ok": True, "detail": _t("前端产物已就绪（frontend/dist，免 Node）",
+                                            "frontend dist ready (no Node needed)")}
     has_node = shutil.which("node") is not None
-    hint = ("前端未构建：可执行 cd frontend && npm install && npm run build"
-            if has_node else "前端未构建且本机无 Node：将显示自包含状态页（功能受限）")
+    hint = _t("前端未构建：可执行 cd frontend && npm install && npm run build",
+              "frontend not built: run `cd frontend && npm install && npm run build`"
+              ) if has_node else _t(
+        "前端未构建且本机无 Node：将显示自包含状态页（功能受限）",
+        "frontend not built and no Node: a built-in status page will be shown")
     return {"ok": False, "detail": hint, "has_node": has_node}
 
 
@@ -180,8 +252,9 @@ def check_dependencies() -> dict:
         "packages": pkgs,
         "redis": {
             "ok": redis_ok,
-            "detail": (f"Redis 可达（{_env_host()}:{_env_port()}）"
-                       if redis_ok else "Redis 不可达"),
+            "detail": (_t(f"Redis 可达（{_env_host()}:{_env_port()}）",
+                          f"Redis reachable ({_env_host()}:{_env_port()})")
+                       if redis_ok else _t("Redis 不可达", "Redis unreachable")),
         },
         "frontend": check_frontend(),
     }
@@ -347,6 +420,17 @@ def install_missing(pkgs: dict, include_optional: bool = True) -> dict:
     }
 
 
+REDIS_HINT_EN = """\
+Redis is not running and could not be fetched automatically. Options (any one,
+keep it on port 6379):
+  1) Memurai (Redis-compatible Windows service, free developer edition): https://www.memurai.com
+  2) redis-windows (Redis 8.x Windows builds): github.com/redis-windows/redis-windows
+  3) WSL2 / Linux: sudo apt install redis-server && sudo service redis-server start
+NOTE: Redis 6+ is REQUIRED - this project uses redis-py 8 (RESP3/HELLO), which
+Redis 5 does not support (services would crash at startup with "unknown command HELLO").
+See the deployment guide in docs/ (section 5.1).
+"""
+
 REDIS_HINT = """\
 Redis 未运行且无法自动获取时的三种方案（任选其一，保持 6379 端口即可）：
   1) Memurai（Redis 兼容的 Windows 服务，开发者版免费）：https://www.memurai.com
@@ -470,12 +554,13 @@ def _redis_binary_version(exe: Path) -> int | None:
 
 
 def _usable_portable_redis() -> Path | None:
-    """返回可用的便携版 redis-server（优先 isolated 子目录，要求版本 ≥ 兼容下限）。
+    """返回可用的便携版 redis-server（要求版本 ≥ 兼容下限）。
 
-    历史坑：曾下载过 Redis 5，redis-py 8 的 RESP3 握手（HELLO）不被支持，
-    表现为"服务启动即崩"。这里按主版本做准入，旧版本自动重新获取。
+    检索顺序：新目录 portable/ → 新目录 → 旧运行时目录（迁移时被占用
+    未能移动的实例），避免同一份二进制被重复下载。
     """
-    for base in (PORTABLE_DIR, REDIS_DIR):
+    legacy_redis = LEGACY_RUNTIME_DIR / "redis"
+    for base in (PORTABLE_DIR, REDIS_DIR, legacy_redis / "portable", legacy_redis):
         exe = _find_redis_binary(base)
         if exe is None:
             continue
@@ -485,15 +570,53 @@ def _usable_portable_redis() -> Path | None:
     return None
 
 
+def _redis_start_argv(exe_path: Path, port: int) -> list[str]:
+    """便携 Redis 启动参数：默认只绑本机回环（IPv6 用 - 前缀，绑不上不报错）。
+
+    只绑回环 → 不对局域网暴露，也不会触发 Windows 防火墙的入站放行询问。"""
+    argv = [str(exe_path), "--port", str(port)]
+    bind = redis_bind_addr()
+    if bind:
+        argv.append("--bind")
+        argv.extend(bind.split())   # 支持 "127.0.0.1 -::1" 这类多地址写法
+    return argv
+
+
+def _publish_redis_host_env(bind: str) -> None:
+    """把实际绑定地址写进 REDIS_HOST，供随后启动的服务子进程继承。
+
+    只在本机回环时生效：避免子进程仍按 localhost(可能解析到 ::1) 去连。"""
+    if not bind:
+        return
+    if bind not in ("127.0.0.1", "::1", "localhost") and bind != "0.0.0.0":
+        return
+    if os.environ.get("REDIS_HOST"):
+        return  # 用户显式指定过，不覆盖
+    if bind == "127.0.0.1":
+        os.environ["REDIS_HOST"] = "127.0.0.1"
+
+
+FIREWALL_HINT = """\
+若刚弹出过"Windows 防火墙已阻止此应用"的对话框（或曾点过取消）：
+  · 便携 Redis 现已默认只监听 127.0.0.1，正常情况不会再弹框；
+  · 若仍有残留的"阻止"规则，用管理员 PowerShell 允许该程序（路径固定）：
+      netsh advfirewall firewall add rule name="WeaveMind Redis" ^
+        dir=in action=allow program="%PROGRAM%" enable=yes
+    或直接在弹框里点"允许访问"。
+"""
+
+
 def ensure_redis(auto: bool = True, wait_sec: float = 12.0) -> dict:
     """确保 Redis 可用：已运行→通过；否则按平台获取并启动。"""
     host = _env_host()
     port = _env_port()
-    if redis_ping(host, port):
+    if redis_ping("", port):
         major = _redis_server_version(host, port)
         if major is None or major >= REDIS_MIN_MAJOR:
+            _publish_redis_host_env(redis_bind_addr())
             return {"ok": True, "action": "already_running",
-                    "detail": f"Redis 已运行（{host}:{port}，版本 {major or '未知'}）"}
+                    "detail": _t(f"Redis 已运行（{host}:{port}，版本 {major or '未知'}）",
+                              f"Redis already running ({host}:{port}, v{major or '?'})")}
         # 运行中的版本过低（Redis 5 不支持 HELLO）→ 停掉本项目启动的实例并换便携版
         replaced = _stop_recorded_redis()
         if not replaced:
@@ -508,51 +631,64 @@ def ensure_redis(auto: bool = True, wait_sec: float = 12.0) -> dict:
         found = shutil.which("redis-server")
         if found:
             proc = _spawn_background(
-                [str(Path(found).resolve()), "--port", str(port)],
+                _redis_start_argv(Path(found).resolve(), port),
                 LOG_DIR / "redis.log", cwd=RUNTIME_DIR)
             _write_redis_pid(proc.pid)
-            if _wait_redis(host, port, wait_sec):
+            if _wait_redis("", port, wait_sec):
+                _publish_redis_host_env(redis_bind_addr())
                 return {"ok": True, "action": "started",
-                        "detail": f"已启动本机 redis-server（pid={proc.pid}）"}
+                        "detail": _t(f"已启动本机 redis-server（pid={proc.pid}，绑定 {redis_bind_addr()}）",
+                                      f"started system redis-server (pid={proc.pid}, bind {redis_bind_addr()})")}
             return {"ok": False, "action": "failed",
-                    "detail": f"redis-server 已启动但探测失败（pid={proc.pid}）"}
+                    "detail": _t(f"redis-server 已启动但探测失败（pid={proc.pid}）",
+                                  f"redis-server started but probe failed (pid={proc.pid})")}
         return {"ok": False, "action": "no_binary",
-                "detail": f"未找到 redis-server 且本机无 Redis。\n{REDIS_HINT}"}
+                "detail": _t(f"未找到 redis-server 且本机无 Redis。\n{REDIS_HINT}",
+                             f"no redis-server on PATH and no local Redis.\n{REDIS_HINT_EN}")}
 
     # Windows：已下载的直接复用，否则从白名单源下载（WM_NO_AUTO_DOWNLOAD=1 可关闭）
     redis_exe = _usable_portable_redis()
     if redis_exe is None:
         if not auto or os.environ.get("WM_NO_AUTO_DOWNLOAD", "0") == "1":
             return {"ok": False, "action": "download_disabled",
-                    "detail": f"Redis 缺失且自动下载已关闭。\n{REDIS_HINT}"}
+                    "detail": _t(f"Redis 缺失且自动下载已关闭。\n{REDIS_HINT}",
+                                 f"Redis missing and auto-download disabled.\n{REDIS_HINT_EN}")}
         zip_path = DOWNLOAD_DIR / "redis-windows.zip"
         ok, msg = _safe_download(REDIS_ZIP_URL, zip_path)
         if not ok:
             return {"ok": False, "action": "download_failed",
-                    "detail": f"{msg}\n{REDIS_HINT}"}
+                    "detail": _t(f"{msg}\n{REDIS_HINT}", f"{msg}\n{REDIS_HINT_EN}")}
         ok, msg = _safe_extract_zip(zip_path, PORTABLE_DIR, expect_name=REDIS_BIN)
         if not ok:
             return {"ok": False, "action": "extract_failed",
-                    "detail": f"{msg}\n{REDIS_HINT}"}
+                    "detail": _t(f"{msg}\n{REDIS_HINT}", f"{msg}\n{REDIS_HINT_EN}")}
         redis_exe = _usable_portable_redis()
         if redis_exe is None:
             return {"ok": False, "action": "extract_failed",
-                    "detail": f"解压后未找到可用 {REDIS_BIN}（{PORTABLE_DIR}）\n{REDIS_HINT}"}
-    proc = _spawn_background([str(redis_exe), "--port", str(port)],
+                    "detail": _t(f"解压后未找到可用 {REDIS_BIN}（{PORTABLE_DIR}）\n{REDIS_HINT}",
+                                 f"no usable {REDIS_BIN} after extract ({PORTABLE_DIR})\n{REDIS_HINT_EN}")}
+    proc = _spawn_background(_redis_start_argv(redis_exe, port),
                              LOG_DIR / "redis.log", cwd=redis_exe.parent)
     _write_redis_pid(proc.pid)
-    if _wait_redis(host, port, wait_sec):
+    if _wait_redis("", port, wait_sec):
+        _publish_redis_host_env(redis_bind_addr())
         return {"ok": True, "action": "started",
-                "detail": f"已启动便携版 Redis（pid={proc.pid}，{redis_exe.parent}）"}
+                "detail": _t(f"已启动便携版 Redis（pid={proc.pid}，绑定 {redis_bind_addr()}，{redis_exe.parent}）",
+                          f"started portable Redis (pid={proc.pid}, bind {redis_bind_addr()}, {redis_exe.parent})")}
     return {"ok": False, "action": "failed",
-            "detail": f"Redis 已启动但探测失败（pid={proc.pid}，见 logs/redis.log）"}
+            "detail": _t(f"Redis 已启动但探测失败（pid={proc.pid}，见 logs/redis.log）\n"
+                         + FIREWALL_HINT.replace("%PROGRAM%", str(redis_exe)),
+                         f"Redis started but probe failed (pid={proc.pid}, see logs/redis.log)\n"
+                         + FIREWALL_HINT.replace("%PROGRAM%", str(redis_exe)))}
 
 
 def ensure_all(auto: bool = True, include_optional: bool = True) -> dict:
     """完整自检 + 修复：Python 版本 / 依赖包 / Redis / 前端。"""
+    migration = _migrate_legacy_runtime_dir()
     py = check_python_version()
     pkgs = check_packages()
-    install_result = {"attempted": [], "installed": [], "failed": [], "detail": "未启用修复"}
+    install_result = {"attempted": [], "installed": [], "failed": [],
+                      "detail": _t("未启用修复", "fix not enabled")}
     if auto and (pkgs["missing_required"] or pkgs["missing_optional"]):
         install_result = install_missing(pkgs, include_optional=include_optional)
         pkgs = check_packages()  # 复检
@@ -561,7 +697,9 @@ def ensure_all(auto: bool = True, include_optional: bool = True) -> dict:
     else:
         reachable = redis_ping()
         redis_result = {"ok": reachable, "action": "checked",
-                        "detail": "Redis 可达" if reachable else f"Redis 不可达。\n{REDIS_HINT}"}
+                        "detail": (_t("Redis 可达", "Redis reachable") if reachable
+                                   else _t(f"Redis 不可达。\n{REDIS_HINT}",
+                                           f"Redis unreachable.\n{REDIS_HINT_EN}"))}
     frontend = check_frontend()
     ok = bool(py["ok"] and not pkgs["missing_required"] and redis_result["ok"])
     return {
@@ -570,6 +708,7 @@ def ensure_all(auto: bool = True, include_optional: bool = True) -> dict:
         "install": install_result,
         "redis": redis_result,
         "frontend": frontend,
+        "migration": migration,
         "ok": ok,
     }
 
@@ -579,31 +718,56 @@ def ensure_all(auto: bool = True, include_optional: bool = True) -> dict:
 # ─────────────────────────────────────────────
 
 def format_report(rep: dict) -> str:
-    lines = ["依赖自检结果："]
+    """人类可读报告（WM_PLAIN_TEXT=1 时输出纯英文，适配老旧终端/CI）。"""
+    try:
+        import cli_text
+        t = cli_text.msg
+    except Exception:
+        t = lambda zh, en: zh  # noqa: E731
+    lines = [t("依赖自检结果：", "Dependency check:")]
     lines.append(f"  [{'OK' if rep['python']['ok'] else '!!'}] {rep['python']['detail']}")
     pk = rep["packages"]
-    lines.append(f"  [{'OK' if not pk['missing_required'] else '!!'}] "
-                 f"依赖包 {pk['ready']}/{pk['total']} 就绪")
+    lines.append(
+        f"  [{'OK' if not pk['missing_required'] else '!!'}] "
+        + t(f"依赖包 {pk['ready']}/{pk['total']} 就绪",
+            f"python packages {pk['ready']}/{pk['total']} ready")
+    )
     for item in pk["missing_required"]:
-        lines.append(f"       必需缺失：{item['package']}（{item['why']}）")
+        lines.append("       " + t(f"必需缺失：{item['package']}（{item['why']}）",
+                                  f"REQUIRED missing: {item['package']} ({item['why']})"))
     for item in pk["missing_optional"]:
-        lines.append(f"       可选缺失：{item['package']}（{item['why']}）")
+        lines.append("       " + t(f"可选缺失：{item['package']}（{item['why']}）",
+                                  f"optional missing: {item['package']} ({item['why']})"))
     ins = rep.get("install") or {}
     if ins.get("installed"):
-        lines.append(f"       已自动安装：{', '.join(ins['installed'])}")
+        lines.append("       " + t(f"已自动安装：{', '.join(ins['installed'])}",
+                                  f"auto-installed: {', '.join(ins['installed'])}"))
     if ins.get("failed"):
-        lines.append(f"       安装失败：{', '.join(ins['failed'])}（{ins.get('detail', '')}）")
+        lines.append("       " + t(f"安装失败：{', '.join(ins['failed'])}（{ins.get('detail', '')}）",
+                                  f"install failed: {', '.join(ins['failed'])} ({ins.get('detail', '')})"))
     lines.append(f"  [{'OK' if rep['redis']['ok'] else '!!'}] {rep['redis']['detail']}")
     lines.append(f"  [{'OK' if rep['frontend']['ok'] else '-'}] {rep['frontend']['detail']}")
-    lines.append("结论：" + ("全部就绪，可以启动" if rep["ok"] else "存在必需项缺失（见上）"))
+    if rep.get("migration"):
+        lines.append("       " + t(f"运行时目录迁移：{rep['migration']}",
+                                  f"runtime dir migration: {rep['migration']}"))
+    lines.append(t("结论：", "Result: ") + (
+        t("全部就绪，可以启动", "all set, ready to start") if rep["ok"]
+        else t("存在必需项缺失（见上）", "required items missing (see above)")
+    ))
     return "\n".join(lines)
 
 
 def main(argv=None) -> int:
+    try:
+        import cli_text
+        cli_text.setup_console_encoding()
+    except Exception:
+        pass
     ap = argparse.ArgumentParser(description="织光启动依赖自检")
     ap.add_argument("--fix", action="store_true", help="自动补齐缺失依赖（装包/获取 Redis）")
     ap.add_argument("--json", action="store_true", help="输出 JSON")
     ap.add_argument("--quiet", action="store_true", help="仅输出结论行")
+    ap.add_argument("--plain", action="store_true", help="纯英文输出（WM_PLAIN_TEXT=1 等价）")
     args = ap.parse_args(argv)
 
     rep = ensure_all(auto=args.fix)

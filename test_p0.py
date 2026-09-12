@@ -6730,5 +6730,191 @@ class TestLauncherDependencyHook(unittest.TestCase):
             launcher._run_dependency_check(fix=True, fatal=True)
 
 
+class TestLauncherCrossDevice(unittest.TestCase):
+    """启动器/停止器：乱码防护、编码适配、跨设备与非交互。"""
+
+    def test_bat_files_are_ascii_only(self):
+        """防乱码回归：Windows 批处理必须纯 ASCII。
+
+        .bat 由 cmd.exe 按当前代码页（默认 GBK）解码，文件里出现 UTF-8 中文
+        必然乱码——中文提示一律交给 Python 侧输出。"""
+        import io as _io
+        from pathlib import Path as _Path
+        root = _Path(__file__).resolve().parent
+        for name in ("start.bat", "stop.bat"):
+            data = (root / name).read_bytes()
+            bad = [(i, b) for i, b in enumerate(data) if b > 127]
+            self.assertEqual(bad, [], f"{name} 含非 ASCII 字节（会乱码）：{bad[:3]}")
+
+    def test_bat_sets_utf8_and_detects_interpreter(self):
+        from pathlib import Path as _Path
+        root = _Path(__file__).resolve().parent
+        start = (root / "start.bat").read_text(encoding="ascii")
+        stop = (root / "stop.bat").read_text(encoding="ascii")
+        for text, name in ((start, "start.bat"), (stop, "stop.bat")):
+            self.assertIn("chcp 65001", text, name)
+            self.assertIn("PYTHONIOENCODING=utf-8", text, name)
+            self.assertIn("where python", text, name)   # 解释器探测
+            self.assertIn("py -3", text, name)          # py 启动器回退
+
+    def test_cli_text_plain_mode_and_msg(self):
+        import cli_text
+        with mock.patch.dict(os.environ, {"WM_PLAIN_TEXT": "1"}):
+            self.assertTrue(cli_text.is_plain())
+            self.assertEqual(cli_text.msg("中文", "english"), "english")
+        with mock.patch.dict(os.environ, {"WM_PLAIN_TEXT": "0"}):
+            self.assertFalse(cli_text.is_plain())
+            self.assertEqual(cli_text.msg("中文", "english"), "中文")
+
+    def test_setup_console_encoding_is_safe_without_tty(self):
+        """非 tty（管道/CI）下不得抛异常、不得切代码页失败影响流程。"""
+        import cli_text
+        cli_text._setup_done = False
+        cli_text.setup_console_encoding()   # 不抛即通过
+        cli_text._setup_done = False
+
+    def test_dep_check_english_report_in_plain_mode(self):
+        """WM_PLAIN_TEXT=1 时依赖自检报告不得含中文（老旧终端兜底）。"""
+        import io as _io
+        import contextlib
+        import re as _re
+        import dep_check
+        rep = {"python": {"ok": True, "detail": "Python 3.14"},
+               "packages": {"ready": 1, "total": 1, "missing_required": [],
+                            "missing_optional": []},
+               "install": {}, "redis": {"ok": True, "detail": "ok"},
+               "frontend": {"ok": False, "detail": "no dist"}, "ok": False}
+        buf = _io.StringIO()
+        with mock.patch.dict(os.environ, {"WM_PLAIN_TEXT": "1"}), \
+                contextlib.redirect_stdout(buf):
+            print(dep_check.format_report(rep))
+        out = buf.getvalue()
+        self.assertFalse(_re.search(r"[\u4e00-\u9fff]", out), out)
+        self.assertIn("Dependency check", out)
+
+    def test_stop_also_stops_portable_redis(self):
+        """stop 链路必须收尾便携 Redis（否则 6379 被占、下次启动误判）。"""
+        import launcher
+        with mock.patch.object(launcher, "_read_pids", return_value={"services": {}}), \
+                mock.patch.object(launcher, "_scan_residual_processes", return_value=[]), \
+                mock.patch.object(launcher, "_stop_portable_redis",
+                                  return_value={"stopped": True, "detail": "ok"}) as m, \
+                mock.patch.object(launcher, "_verified_stop_report", return_value=[]):
+            launcher.stop_services()
+        m.assert_called_once()
+
+    def test_verify_services_reports_down(self):
+        """启动后校验：有服务未存活时给出 down 清单；strict 由调用方决定退出。"""
+        import launcher
+        with mock.patch.object(launcher, "_read_pids",
+                               return_value={"services": {"a": 1, "b": 2}}), \
+                mock.patch.object(launcher, "_is_alive", side_effect=[True, False]), \
+                mock.patch.dict(os.environ, {"WM_START_VERIFY_WAIT": "0"}), \
+                mock.patch("builtins.print"):
+            summary = launcher.verify_services(quiet=False)
+        self.assertEqual(summary["total"], 2)
+        self.assertEqual(summary["alive"], 1)
+        self.assertEqual([name for _pid, name in summary["down"]], ["b"])
+
+    def test_pids_file_state_distinguishes_missing_and_corrupt(self):
+        import launcher
+        from pathlib import Path as _Path
+        tmp = tempfile.mkdtemp(prefix="wm_pids_")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        fake = _Path(tmp) / "pids.json"
+        with mock.patch.object(launcher, "PID_FILE", fake):
+            self.assertEqual(launcher._pids_file_state(), "missing")
+            fake.write_text("{not json", encoding="utf-8")
+            self.assertEqual(launcher._pids_file_state(), "corrupt")
+            fake.write_text('{"services": {}}', encoding="utf-8")
+            self.assertEqual(launcher._pids_file_state(), "ok")
+
+    def test_migrate_legacy_runtime_dir(self):
+        """旧 .weavimind 内容应迁到 .weavemind（幂等；失败不抛）。"""
+        import dep_check
+        tmp = tempfile.mkdtemp(prefix="wm_mig_")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        new_dir = Path(tmp) / ".weavemind"
+        legacy = Path(tmp) / ".weavimind"
+        (legacy / "downloads").mkdir(parents=True)
+        (legacy / "downloads" / "x.zip").write_text("z", encoding="utf-8")
+        (legacy / "redis.pid").write_text("123", encoding="utf-8")
+        with mock.patch.object(dep_check, "RUNTIME_DIR", new_dir), \
+                mock.patch.object(dep_check, "LEGACY_RUNTIME_DIR", legacy):
+            detail = dep_check._migrate_legacy_runtime_dir()
+            self.assertIn("downloads", detail)
+            self.assertTrue((new_dir / "downloads" / "x.zip").exists())
+            self.assertTrue((new_dir / "redis.pid").exists())
+            # 幂等
+            self.assertEqual(dep_check._migrate_legacy_runtime_dir(), "")
+
+    def test_redis_binds_loopback_only(self):
+        """便携 Redis 默认只绑回环：不暴露到局域网，也不触发防火墙入站弹框。"""
+        import dep_check
+        with mock.patch.dict(os.environ):
+            os.environ.pop("WM_REDIS_BIND", None)
+            bind = dep_check.redis_bind_addr()
+            argv = dep_check._redis_start_argv(Path("redis-server.exe"), 6379)
+        self.assertEqual(bind, "127.0.0.1 -::1")
+        self.assertEqual(argv[:3], ["redis-server.exe", "--port", "6379"])
+        self.assertEqual(argv[argv.index("--bind") + 1:], ["127.0.0.1", "-::1"])
+        self.assertNotIn("0.0.0.0", argv)
+
+    def test_redis_bind_override_and_disable(self):
+        """WM_REDIS_BIND 可覆盖绑定地址；留空表示不传 --bind（交 Redis 默认）。"""
+        import dep_check
+        with mock.patch.dict(os.environ, {"WM_REDIS_BIND": "0.0.0.0"}):
+            argv = dep_check._redis_start_argv(Path("redis-server.exe"), 6380)
+        self.assertEqual(argv[argv.index("--bind") + 1:], ["0.0.0.0"])
+        with mock.patch.dict(os.environ, {"WM_REDIS_BIND": "   "}):
+            self.assertEqual(dep_check.redis_bind_addr(), "")
+            self.assertNotIn("--bind",
+                             dep_check._redis_start_argv(Path("redis-server.exe"), 6379))
+
+    def test_redis_probe_hosts_covers_both_stacks(self):
+        """localhost 探测须同时试 IPv4/IPv6，避免"服务在跑却探测不通"。"""
+        import dep_check
+        with mock.patch.dict(os.environ):
+            os.environ.pop("REDIS_HOST", None)
+            self.assertEqual(dep_check._probe_hosts(), ["127.0.0.1", "::1"])
+        with mock.patch.dict(os.environ, {"REDIS_HOST": "redis.internal"}):
+            self.assertEqual(dep_check._probe_hosts(), ["redis.internal"])
+
+    def test_redis_host_env_not_overridden(self):
+        """子进程继承回环 REDIS_HOST；用户已显式指定时不覆盖。"""
+        import dep_check
+        with mock.patch.dict(os.environ):
+            os.environ.pop("REDIS_HOST", None)
+            dep_check._publish_redis_host_env("127.0.0.1")
+            self.assertEqual(os.environ.get("REDIS_HOST"), "127.0.0.1")
+        with mock.patch.dict(os.environ, {"REDIS_HOST": "myhost"}):
+            dep_check._publish_redis_host_env("127.0.0.1")
+            self.assertEqual(os.environ.get("REDIS_HOST"), "myhost")
+
+    def test_setup_console_encoding_leaves_pipe_alone(self):
+        """管道/重定向且环境未要求 UTF-8 时不得 reconfigure 流编码。
+
+        控制台需要 UTF-8，但管道另一头的消费方（CI 日志、父进程）多按本机
+        代码页解码；强行 UTF-8 会把"修好控制台"变成"弄乱管道"。"""
+        import cli_text
+        saved_done = cli_text._setup_done
+        self.addCleanup(setattr, cli_text, "_setup_done", saved_done)
+
+        class _FakePipe:
+            encoding = "gbk"
+
+            def isatty(self):
+                return False
+
+            def reconfigure(self, **kwargs):
+                raise AssertionError("管道模式下不应 reconfigure")
+
+        with mock.patch.dict(os.environ, {"PYTHONIOENCODING": "", "PYTHONUTF8": "0"}), \
+                mock.patch.object(sys, "stdout", _FakePipe()), \
+                mock.patch.object(sys, "stderr", _FakePipe()):
+            cli_text._setup_done = False
+            cli_text.setup_console_encoding()   # 不抛即通过
+
+
 if __name__ == "__main__":
     unittest.main()
