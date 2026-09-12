@@ -203,10 +203,10 @@ class TestAcceptanceHonestBaseline(_AdversarialBase):
 class TestAcceptanceRulesVersioning(unittest.TestCase):
     """规则版本化与验收事件流。"""
 
-    # 规则指纹基线：任何规则表/阈值/正则变更都会改变指纹，
+    # 规则指纹基线：任何规则表/阈值/正则/分档表变更都会改变指纹，
     # 本断言随之失败 —— 强制"改规则 → bump ACCEPTANCE_RULES_VERSION
     # → 更新此基线"的流程，保证历史结果可反查判定规则版本。
-    _FINGERPRINT_BASELINE = "63311d7d"
+    _FINGERPRINT_BASELINE = "2ddecc9a"
 
     def test_acceptance_rules_fingerprint_stable(self):
         import acceptance_checker as ac
@@ -228,6 +228,7 @@ class TestAcceptanceRulesVersioning(unittest.TestCase):
             self.assertEqual(r["rules_fingerprint"], ac.rules_fingerprint())
             self.assertEqual(len(r["report_sha256"]), 16)
             self.assertTrue(r["evaluated_at"])
+            self.assertTrue(r["profile"], "验收结果应带档位（profile）")
             # 报告文本变化 → 指纹变化（对账可区分两次验收）
             r2 = run_acceptance("ver-1", "分析贵州茅台年报", "营收 1741 亿元。新增一句。", ws)
             self.assertNotEqual(r["report_sha256"], r2["report_sha256"])
@@ -267,6 +268,66 @@ class TestAcceptanceRulesVersioning(unittest.TestCase):
             self.assertEqual(events[1]["overall"], "pass")
         finally:
             ws_mod.WORKSPACE_ROOT = old
+
+
+class TestAcceptanceProfileGating(_AdversarialBase):
+    """验收按任务类型分档：报告格式类检查对代码/数据任务不适用。
+
+    回归：代码任务的验收报告里 source_list_completeness=false，读起来像交付缺陷
+    （"写个脚本却没来源清单"）；分档后该类检查标记 N/A 并说明原因。
+    """
+
+    CODE_GOAL = ("用 Python 编写单文件脚本 sales_report.py：内置近12个月的月度销售数据，"
+                 "计算合计/均值/最大值并打印 ASCII 柱状图")
+    RESEARCH_GOAL = "调研2026年国内固态电池产业化进展：主要厂商量产时间节点"
+
+    def test_profile_resolution(self):
+        from acceptance_checker import resolve_profile
+        self.assertEqual(resolve_profile(self.CODE_GOAL), "code")
+        self.assertEqual(resolve_profile(
+            "梳理贵州茅台2025年三季报核心财务数据（营收/净利润/毛利率/现金流）"), "financial")
+        self.assertEqual(resolve_profile(self.RESEARCH_GOAL), "research")
+        self.assertEqual(resolve_profile("读取 csv 数据集做 EDA 并训练回归模型"), "data")
+        # 步骤能力优先于目标线索
+        self.assertEqual(resolve_profile(
+            "分析茅台财报", capabilities=["code_execution", "package"]), "code")
+
+    def test_code_task_report_checks_marked_not_applicable(self):
+        r = self._run("prof-code", self.CODE_GOAL,
+                      "# 交付结果\n\n脚本已生成并运行通过。\n", [])
+        self.assertEqual(r["profile"], "code")
+        for key in ("source_list_completeness", "freshness_block", "disclaimer"):
+            check = r["checks"][key]
+            self.assertFalse(check.get("applicable"), f"{key} 对代码任务应不适用")
+            self.assertFalse(check.get("counted"))
+            self.assertTrue(check["pass"], "N/A 检查不得计为失败")
+            self.assertIn("不适用于", str(check.get("details")))
+        self.assertEqual(r["overall"], "pass")
+
+    def test_financial_profile_still_counts_report_checks(self):
+        """financial 档不受分档影响：来源清单缺失仍计入缺口。"""
+        report = "# 贵州茅台2025年三季报分析\n\n营收 1741 亿元，净利润 823 亿元。\n"
+        r = self._run("prof-fin", "梳理贵州茅台2025年三季报核心财务数据", report, [])
+        self.assertEqual(r["profile"], "financial")
+        for key in ("source_list_completeness", "freshness_block", "disclaimer"):
+            self.assertTrue(r["checks"][key].get("applicable"))
+            self.assertTrue(r["checks"][key].get("counted"))
+
+    def test_research_profile_not_counted_but_applicable(self):
+        """research 档沿用既有宽容语义：检查适用但不计入缺口（不改变既有判定）。"""
+        report = "# 固态电池产业化进展调研\n\n2026年多家厂商进入中试阶段。\n"
+        r = self._run("prof-res", self.RESEARCH_GOAL, report, [])
+        self.assertEqual(r["profile"], "research")
+        for key in ("source_list_completeness", "freshness_block", "disclaimer"):
+            check = r["checks"][key]
+            self.assertTrue(check.get("applicable"))
+            self.assertFalse(check.get("counted"))
+
+    def test_event_carries_profile(self):
+        from acceptance_checker import build_acceptance_event
+        r = self._run("prof-evt", self.CODE_GOAL, "# 交付\n脚本已生成。\n", [])
+        event = build_acceptance_event(r, trigger="报告步骤")
+        self.assertEqual(event["profile"], "code")
 
 
 if __name__ == "__main__":

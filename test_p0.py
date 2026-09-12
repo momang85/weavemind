@@ -1877,10 +1877,12 @@ class TestP2CleanData(unittest.TestCase):
         w = CodeExecutionWorker.__new__(CodeExecutionWorker)
         ws = Path(tempfile.mkdtemp(prefix="weavemind_cd_"))
         w.workspace = ws
-        self.assertEqual(w._clean_data_schema_note(), "")
+        self.assertEqual(w._clean_data_schema_note("生成柱状图展示分布"), "")
         (ws / "clean_chart_data.json").write_text(
             '{"entity_frequency": {"中国": 1}}', encoding="utf-8")
-        note = w._clean_data_schema_note()
+        # 非作图步骤不注入（工作区有文件 ≠ 本步相关）
+        self.assertEqual(w._clean_data_schema_note("写一个销售统计脚本"), "")
+        note = w._clean_data_schema_note("生成柱状图展示分布")
         self.assertIn("entity_frequency", note)
         self.assertIn("禁止解析 search_results.json", note)
         self.assertIn("错位", note)

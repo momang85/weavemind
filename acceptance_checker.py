@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 # 判定规则集版本：任何规则表/阈值/正则变更时必须 bump，
 # 并同步更新 test_p0 的指纹基线（test_acceptance_rules_fingerprint_stable
 # 会因指纹变化而失败，强制走"改规则→bump 版本→更新基线"流程）。
-ACCEPTANCE_RULES_VERSION = "2026.09.10"
+ACCEPTANCE_RULES_VERSION = "2026.09.12"
 
 # 纳入指纹的规则表（常量名；内部按 key/元素排序后哈希，顺序无关）
 _FINGERPRINT_RULES = (
@@ -39,6 +39,7 @@ _FINGERPRINT_RULES = (
     "_NUMERIC_REQUIREMENT_KEYWORDS",
     "_FRESHNESS_BLOCK_MARKERS", "_TIME_SENSITIVE_MARKERS",
     "_STATUS_MARKERS", "_META_SOURCE_TALK", "_TABLE_NOTE_WORDS",
+    "_PROFILE_REPORT_CHECKS", "_CODE_GOAL_HINTS", "_DATA_GOAL_HINTS",
 )
 # 纳入指纹的关键正则（取 .pattern）
 _FINGERPRINT_PATTERNS = (
@@ -116,6 +117,7 @@ def build_acceptance_event(
         "rules_fingerprint": str(result.get("rules_fingerprint") or rules_fingerprint()),
         "report_sha256": str(result.get("report_sha256") or ""),
         "overall": str(result.get("overall") or ""),
+        "profile": str(result.get("profile") or ""),
         "gaps_count": len(result.get("gaps") or []),
         "gaps": [str(g)[:200] for g in (result.get("gaps") or [])][:10],
         "checks_failed": failed,
@@ -1760,10 +1762,67 @@ def check_disclaimer(report: str) -> dict:
 # Checklist runner
 # ─────────────────────────────────────────────
 
-def run_acceptance(task_id: str, goal: str, report_text: str, workspace) -> dict:
-    """运行验收 checklist，输出缺口报告。"""
+# 报告格式类检查按任务类型分档：代码/数据类任务没有"来源清单/数据时效/免责声明"
+# 要求，此前一律展示为失败项，读起来像交付缺陷（实测"写个脚本"的验收报告里
+# source_list_completeness=false）。分档后这类检查标记"N/A"并给出原因。
+_PROFILE_REPORT_CHECKS: dict[str, tuple[str, ...]] = {
+    "financial": ("source_list_completeness", "freshness_block", "disclaimer"),
+    "research": ("source_list_completeness", "freshness_block", "disclaimer"),
+    "news": ("source_list_completeness", "freshness_block"),
+    "code": (),
+    "data": (),
+}
+
+# 代码/数据类任务的判定线索（目标文本层）
+_CODE_GOAL_HINTS = (
+    "python", "脚本", "代码", "单文件", ".py", ".html", "html 页面", "命令行程序",
+    "可直接运行", "自包含", "打印", "ascii 柱状图", "小程序",
+)
+_DATA_GOAL_HINTS = (
+    "csv", "数据集", "数据表", "eda", "训练模型", "回归", "预测模型", "特征工程",
+    "数据清洗", "建模",
+)
+
+
+def resolve_profile(goal: str, capabilities=None) -> str:
+    """判定验收档位：financial / research / news / code / data。
+
+    优先用步骤能力（可精确区分"写代码"与"写报告"），其次用目标线索，
+    最后回落到溯源域（financial/crypto/macro → financial，news → news，其余 research）。
+    """
+    caps = {str(c) for c in (capabilities or []) if str(c).strip()}
+    if caps:
+        if caps <= {"code_execution", "file_io", "package"}:
+            return "code"
+        if caps <= {"data_loader", "data_analyzer", "model_trainer", "package", "file_io"}:
+            return "data"
+    g = str(goal or "").lower()
+    domain = traceability_domain(goal)
+    if any(h in g for h in _CODE_GOAL_HINTS) and not any(
+        k in g for k in _FINANCIAL_MARKERS
+    ):
+        return "code"
+    if any(h in g for h in _DATA_GOAL_HINTS):
+        return "data"
+    if domain in ("financial", "crypto", "macro"):
+        return "financial"
+    if domain == "news":
+        return "news"
+    return "research"
+
+
+def run_acceptance(task_id: str, goal: str, report_text: str, workspace,
+                   capabilities=None, profile: str | None = None) -> dict:
+    """运行验收 checklist，输出缺口报告。
+
+    profile 决定"报告格式类检查"是否适用（代码/数据类任务不适用，标记 N/A 并说明
+    原因，不再是"失败项"）；是否计入 overall 缺口沿用既有语义（仅 financial 域计数），
+    避免本包顺带改变既有判定。
+    """
     sources = _collect_sources(workspace)
     domain = traceability_domain(goal)
+    profile = profile or resolve_profile(goal, capabilities)
+    report_checks = set(_PROFILE_REPORT_CHECKS.get(profile, ()))
     checks: dict = {}
     checks["number_traceability"] = check_number_traceability(
         report_text, sources, domain=domain,
@@ -1776,19 +1835,27 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace) -> dict
         report_text, goal, domain=domain,
     )
     # V1.2 竞品启示：三级溯源链 / 数据时效 / 免责声明。
-    # financial 域计入 overall；无来源清单特征/无时效语义时检查自身跳过；
-    # 非金融域只展示检查结果，不追加 gaps（避免误伤代码/通用任务）。
+    # applicable：按 profile 判断是否适用（不适用 → N/A，计 pass 但保留原始结果）；
+    # counted：是否计入 overall 缺口（financial 域计入，非金融域只展示）。
     checks["source_list_completeness"] = check_source_list_completeness(report_text)
     checks["freshness_block"] = check_freshness_block(report_text, goal)
     checks["disclaimer"] = check_disclaimer(report_text)
-    _V12_FINANCIAL_ONLY = (
+    _V12_REPORT_CHECKS = (
         "source_list_completeness", "freshness_block", "disclaimer",
     )
     gaps = []
     for _key, _c in checks.items():
-        if _c["pass"]:
-            continue
-        if _key in _V12_FINANCIAL_ONLY and domain != "financial":
+        if _key in _V12_REPORT_CHECKS:
+            applicable = _key in report_checks
+            _c["applicable"] = applicable
+            _c["counted"] = applicable and domain == "financial"
+            if not applicable:
+                _c["raw_pass"] = _c.get("pass")
+                _c["pass"] = True
+                _c["details"] = (
+                    f"不适用于 {profile} 类任务（无报告来源/时效/免责声明要求）"
+                )
+        if _c["pass"] or not _c.get("counted", True):
             continue
         gaps.append(_c["details"])
     overall = "pass" if not gaps else "fail"
@@ -1803,6 +1870,7 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace) -> dict
         "goal": str(goal or "")[:120],
         "checks": checks,
         "overall": overall,
+        "profile": profile,
         "gaps": gaps,
         "suggestions": suggestions,
         # 规则版本化与报告指纹：供 acceptance_report.json / 事件流对账
