@@ -963,14 +963,24 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
 
     @staticmethod
     def _read_acceptance_summary(task_id: str) -> dict | None:
-        """读取验收摘要：{overall, gaps}（无验收报告返回 None）。"""
+        """读取验收摘要：{overall, gaps, rules_version, rules_fingerprint, profile}。
+
+        供终态消息携带并落库（此前只带 overall/gaps，指纹与档位在 DB 里为空，
+        验收态虽然入库却无法按规则版本对账）。"""
         try:
             from workspace import task_workspace
             acc_path = task_workspace(task_id) / "acceptance_report.json"
             if not acc_path.exists():
                 return None
             acc = json.loads(acc_path.read_text(encoding="utf-8"))
-            return {"overall": acc.get("overall"), "gaps": acc.get("gaps") or []}
+            return {
+                "overall": acc.get("overall"),
+                "gaps": acc.get("gaps") or [],
+                "rules_version": acc.get("rules_version") or "",
+                "rules_fingerprint": acc.get("rules_fingerprint") or "",
+                "profile": acc.get("profile") or "",
+                "report_sha256": acc.get("report_sha256") or "",
+            }
         except Exception:
             return None
 
