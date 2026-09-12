@@ -5,7 +5,7 @@
 四要素（角色、受众、结构化输出、验收标准），并允许 prompt_registry 覆盖。
 """
 
-from prompt_registry import load_overrides
+from prompt_registry import resolve_override
 
 # 按能力分类：LLM 类（受众由模型按目标推断）/ 机器类（输出给下游程序）
 _ENVELOPES: dict[str, dict] = {
@@ -96,8 +96,13 @@ _ENVELOPES: dict[str, dict] = {
 
 def build_envelope(capability: str, goal: str, hints: list[str] | None = None) -> str:
     """生成步骤信封文本；优先使用注册表覆盖（prompt_registry 自迭代的产物），
-    并追加 RAG 检索到的历史提示词改进经验（进化系统反哺）。"""
-    ov = load_overrides().get(f"step:{capability}")
+    并追加 RAG 检索到的历史提示词改进经验（进化系统反哺）。
+
+    覆盖解析统一走 `resolve_override`（按目标作用域匹配）。此前这里直接
+    `load_overrides()[f"step:{capability}"]`，绕过目标匹配，使某一次任务学到的
+    要求（如"用 matplotlib 画 2014-2025 营收图"）被追加到所有同类步骤。
+    """
+    ov = resolve_override(f"step:{capability}", goal)
     if ov and str(ov.get("prompt") or "").strip():
         base = "\n\n" + str(ov["prompt"]).strip()
     else:

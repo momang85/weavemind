@@ -128,6 +128,7 @@ def refine_after_task(
                 str(f.get("fix_prompt") or ""),
                 str(f.get("rationale") or ""),
                 trigger_task=task_id,
+                goal=goal,
             )
             if ok:
                 applied += 1

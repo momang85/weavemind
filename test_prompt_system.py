@@ -65,6 +65,7 @@ class TestPromptRegistry(unittest.TestCase):
     def test_record_and_read_override(self):
         from prompt_registry import get_prompt, record_override
 
+        goal = "分析贵州茅台近三年营收与净利润趋势"
         ok, issues = record_override(
             "planner",
             "你是资深规划专家。【受众】下游编排引擎（机器可读）。"
@@ -73,19 +74,25 @@ class TestPromptRegistry(unittest.TestCase):
             "把用户目标拆成可执行的步骤。",
             "测试理由",
             "t-1",
+            goal=goal,
         )
         self.assertTrue(ok, issues)
-        self.assertIn("规划专家", get_prompt("planner", "DEFAULT"))
-        self.assertEqual(get_prompt("planner", "DEFAULT").count("规划专家"), 1)
+        # 作用域匹配：同主题目标命中；无关目标不再继承（覆盖不再全局生效）
+        self.assertIn("规划专家", get_prompt("planner", "DEFAULT", goal=goal))
+        self.assertEqual(
+            get_prompt("planner", "DEFAULT", goal=goal).count("规划专家"), 1)
+        self.assertEqual(
+            get_prompt("planner", "DEFAULT", goal="写一个月度销售统计脚本"), "DEFAULT")
 
     def test_override_appends_not_replaces(self):
         from prompt_registry import get_prompt, record_override
 
+        goal = "分析贵州茅台近三年营收与净利润趋势"
         fix = ("补充要求：每个步骤必须标注受众（按目标推断）、输出格式示例"
                "与可验证的验收标准；缺失以上要素视为不合格，需重写该步骤指令。")
-        ok, issues = record_override("planner", fix, "追加式改进", "t-1")
+        ok, issues = record_override("planner", fix, "追加式改进", "t-1", goal=goal)
         self.assertTrue(ok, issues)
-        got = get_prompt("planner", "DEFAULT_PLANNER")
+        got = get_prompt("planner", "DEFAULT_PLANNER", goal=goal)
         self.assertIn("DEFAULT_PLANNER", got, "默认提示词必须保留")
         self.assertIn("【自迭代改进】", got)
         self.assertIn("必须标注受众", got)
@@ -105,13 +112,16 @@ class TestPromptRegistry(unittest.TestCase):
     def test_version_increments(self):
         from prompt_registry import load_overrides, record_override
 
+        goal = "分析贵州茅台近三年营收与净利润趋势"
         fix = ("你是资深规划专家。【受众】下游编排引擎（机器可读）。"
                "【输出要求】严格JSON，包含 steps 数组。"
                "【质量标准】每步指令必须自带角色、受众、输出要求与验收标准。")
-        record_override("planner", fix, "v1", "t-1")
-        record_override("planner", fix, "v2", "t-2")
-        # 基线源码 v1 → 第一次覆盖 v2 → 第二次覆盖 v3
-        self.assertEqual(load_overrides()["planner"]["version"], 3)
+        record_override("planner", fix, "v1", "t-1", goal=goal)
+        record_override("planner", fix, "v2", "t-2", goal=goal)
+        # 基线源码 v1 → 第一次覆盖 v2 → 同作用域第二次覆盖 v3（并存的是列表，同作用域只更新版本）
+        entries = load_overrides()["planner"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(int(entries[0]["version"]), 3)
 
 
 class TestReflectionUsesRegistry(unittest.TestCase):
@@ -135,6 +145,7 @@ class TestReflectionUsesRegistry(unittest.TestCase):
             "你是测试评审员。输出严格JSON：{\"score\":10,\"verdict\":\"accept\",\"gaps\":[],\"next_steps\":[]}",
             "测试",
             "t-1",
+            goal="目标",
         )
         o = OrchestratorV2.__new__(OrchestratorV2)
         captured = {}
@@ -192,7 +203,9 @@ class TestPromptRefinery(unittest.TestCase):
             self.assertEqual(res["applied"], 1)
             data = load_overrides()
             self.assertIn("step:code_execution", data)
-            self.assertEqual(data["step:code_execution"]["version"], 2)
+            entries = data["step:code_execution"]
+            self.assertEqual(int(entries[0]["version"]), 2)
+            self.assertTrue(entries[0].get("match_goal"), "自迭代覆盖必须带作用域")
         finally:
             llm_client.call_llm = orig
 

@@ -7047,6 +7047,128 @@ class TestEmbeddingDegradationAlert(unittest.TestCase):
         self.assertTrue(embed_health.embedding_health()["degraded"])
 
 
+class TestPromptOverrideScoping(unittest.TestCase):
+    """提示词覆盖必须带作用域：单任务教训不得全局生效。
+
+    回归：`step:code_execution` 的覆盖（"用 matplotlib 画 2014-2025 营收/净利润图"，
+    来自某财务任务）经 step_envelope 的旁路被追加到**所有** code_execution 步骤，
+    使销售报表脚本尾部变成金融图表任务。
+    """
+
+    def _tmp_prompts(self):
+        tmp = Path(tempfile.mkdtemp(prefix="wm_prompts_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        patcher = mock.patch.dict(os.environ, {"WEAVEMIND_PROMPTS_DIR": str(tmp)})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        return tmp
+
+    def test_unrelated_goal_does_not_get_override(self):
+        import prompt_registry as pr
+        self._tmp_prompts()
+        with mock.patch.object(pr, "_trigger_goal",
+                               return_value="分析贵州茅台近三年营收与净利润趋势"):
+            ok, issues = pr.record_override(
+                "step:code_execution",
+                "在指令末尾追加：请使用 matplotlib 生成 2014-2025 年营收与净利润双 y 轴折线图，"
+                "输出为 PNG 并验证图像非空（要求单文件、自包含、可直接运行）。",
+                "提供具体图表规格可减少歧义",
+                trigger_task="ui-fin0001",
+                goal="分析贵州茅台近三年营收与净利润趋势",
+            )
+        self.assertTrue(ok, issues)
+        import step_envelope
+        env = step_envelope.build_envelope(
+            "code_execution",
+            "用 Python 编写单文件脚本 sales_report.py：内置近12个月的月度销售数据，"
+            "计算合计/均值/最大值并打印 ASCII 柱状图",
+        )
+        for leak in ("matplotlib", "2014-2025", "双 y 轴", "双y轴"):
+            self.assertNotIn(leak, env, "无关目标不得继承该覆盖")
+        # 同主题目标（茅台财务）仍应命中
+        env2 = step_envelope.build_envelope(
+            "code_execution", "分析贵州茅台近三年营收与净利润趋势并生成图表")
+        self.assertIn("matplotlib", env2)
+
+    def test_fail_closed_when_trigger_goal_missing(self):
+        """带 trigger_task 但触发目标无法解析 → 不应用（此前 fail-open 导致泄漏）。"""
+        import prompt_registry as pr
+        self._tmp_prompts()
+        with mock.patch.object(pr, "_trigger_goal", return_value=""):
+            ok, issues = pr.record_override(
+                "step:web_search",
+                "搜索时必须在指令中补充：优先检索官方公告并标注来源 URL 与日期，"
+                "若缺失需明确标注未获取。",
+                "补齐来源纪律",
+                trigger_task="ui-old0001",
+            )
+        self.assertTrue(ok, issues)
+        import step_envelope
+        env = step_envelope.build_envelope("web_search", "调研固态电池产业化进展")
+        self.assertNotIn("官方公告", env)
+
+    def test_record_override_requires_scope_for_task_specific_prompt(self):
+        """含任务特定内容却派不出主题词 → 拒绝写入。"""
+        import prompt_registry as pr
+        self._tmp_prompts()
+        with mock.patch.object(pr, "_trigger_goal", return_value=""):
+            ok, issues = pr.record_override(
+                "step:code_execution",
+                "【要求】请使用 akshare 或 tushare 获取当日 A股全市场成交量数据，"
+                "并确保包含数据完整性校验与异常值处理。",
+                "指定数据源可提高可执行性",
+            )
+        self.assertFalse(ok)
+        self.assertTrue(any("作用域" in i for i in issues), issues)
+
+    def test_same_scope_updates_version_and_other_scope_coexists(self):
+        import prompt_registry as pr
+        tmp = self._tmp_prompts()
+        prompt_a = ("【要求】请确保检索结果为权威金融数据平台（如东方财富、同花顺）并标注日期与口径，"
+                    "缺失时明确标注未获取。")
+        prompt_b = ("【要求】请围绕固态电池产业化节点组织检索，优先官方与厂商公告，并标注来源 URL。")
+        with mock.patch.object(pr, "_trigger_goal", return_value="统计今日A股成交量排行"):
+            pr.record_override("step:web_search", prompt_a, "来源纪律",
+                               trigger_task="ui-a", goal="统计今日A股成交量排行")
+        with mock.patch.object(pr, "_trigger_goal", return_value="调研固态电池产业化进展"):
+            pr.record_override("step:web_search", prompt_b, "节点优先",
+                               trigger_task="ui-b", goal="调研固态电池产业化进展")
+        data = json.loads((tmp / "overrides.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(data["step:web_search"]), 2, "不同作用域应并存")
+        # 同作用域再次写入 → 版本递增而非新增
+        with mock.patch.object(pr, "_trigger_goal", return_value="统计今日A股成交量排行"):
+            pr.record_override("step:web_search", prompt_a, "来源纪律 v2",
+                               trigger_task="ui-a", goal="统计今日A股成交量排行")
+        data = json.loads((tmp / "overrides.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(data["step:web_search"]), 2)
+        versions = sorted(int(e.get("version") or 0) for e in data["step:web_search"])
+        self.assertEqual(versions, [2, 3])
+
+    def test_generic_words_do_not_bind_two_tasks(self):
+        """能力泛词/通用领域词单独命中不算同类主题。"""
+        import prompt_registry as pr
+        self.assertFalse(pr._topic_overlap(
+            "用 Python 生成统计图表脚本", "生成财务数据的图表报告"))
+        self.assertTrue(pr._topic_overlap(
+            "分析贵州茅台近三年营收", "梳理贵州茅台三季报核心财务数据"))
+
+    def test_legacy_single_dict_still_loads(self):
+        """旧格式（单条 dict）仍可读取与匹配。"""
+        import prompt_registry as pr
+        tmp = self._tmp_prompts()
+        (tmp / "overrides.json").write_text(json.dumps({
+            "code_execution": {
+                "prompt": "请使用 akshare 获取当日 A股全市场成交量数据并做完整性校验。",
+                "version": 2, "trigger_task": "ui-l",
+            }
+        }, ensure_ascii=False), encoding="utf-8")
+        with mock.patch.object(pr, "_trigger_goal", return_value="统计今日A股成交量排行"):
+            hit = pr.resolve_override("code_execution", "统计今日A股总成交量排名前十")
+            miss = pr.resolve_override("code_execution", "写一个销售数据分析脚本")
+        self.assertIsNotNone(hit)
+        self.assertIsNone(miss)
+
+
 class TestReportRouteAndMetricsConsistency(unittest.TestCase):
     """报告路由渲染 + 指标口径与状态接口一致。"""
 
