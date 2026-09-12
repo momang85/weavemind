@@ -46,6 +46,9 @@ frontend/tsconfig.tsbuildinfo
 .weavimind/
 poison_strategies.json
 prompts/overrides.json
+# 提示词覆盖的运行时备份与归档（迁移脚本产出，不入库）
+prompts/*.bak
+prompts/overrides.archived.json
 skills/lessons.jsonl
 evals/calibration_report.json
 
