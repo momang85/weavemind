@@ -56,12 +56,10 @@ if errorlevel 1 (
 REM ---- [3/6] Redis ----
 echo   [3/6] Redis
 REM Three-stage probe: local 6379 first (skip Docker), then Docker, else guide.
-%PY% -c "import socket,sys
-try:
-    s=socket.create_connection(('127.0.0.1',6379),2); s.sendall(b'PING\r\n')
-    sys.exit(0 if s.recv(64).startswith(b'+PONG') else 1)
-except Exception:
-    sys.exit(1)" >nul 2>&1
+REM NOTE: keep the probe on ONE line. cmd.exe cannot pass a multi-line quoted
+REM argument to "python -c"; the following lines would be executed as commands
+REM ("'try:' is not recognized ...") and the script would abort here.
+%PY% -c "import socket,sys; s=socket.create_connection(('127.0.0.1',6379),2); s.sendall(b'PING\r\n'); sys.exit(0 if s.recv(64).startswith(b'+PONG') else 1)" >nul 2>&1
 if not errorlevel 1 (
     echo        Local Redis detected at 127.0.0.1:6379, skip Docker
     goto redis_ok
@@ -78,7 +76,7 @@ goto redis_ok
 
 :redis_no_docker
 echo        No local Redis and Docker engine is not running.
-echo        Starting Docker Desktop (waiting up to 90s)...
+echo        Starting Docker Desktop ^(waiting up to 90s^)...
 if exist "C:\Program Files\Docker\Docker\Docker Desktop.exe" (
     start "" "C:\Program Files\Docker\Docker\Docker Desktop.exe"
 ) else if exist "%LOCALAPPDATA%\Docker\Docker Desktop.exe" (
@@ -86,7 +84,7 @@ if exist "C:\Program Files\Docker\Docker\Docker Desktop.exe" (
 ) else (
     echo   NOTE: Docker Desktop not found. Redis is the only hard dependency;
     echo         Python-side dependency check will try to fetch a portable
-    echo         Redis automatically (see step 4).
+    echo         Redis automatically ^(see step 4^).
     goto redis_ok
 )
 set /a _redis_wait=0
@@ -96,8 +94,8 @@ docker info >nul 2>&1
 if not errorlevel 1 goto redis_ok
 set /a _redis_wait+=5
 if %_redis_wait% LSS 90 goto redis_wait_loop
-echo   WARNING: Docker Desktop not ready in 90s; continuing (step 4 will try
-echo            the local/portable Redis path).
+echo   WARNING: Docker Desktop not ready in 90s; continuing ^(step 4 will try
+echo            the local/portable Redis path^).
 goto redis_ok
 
 :redis_ok
@@ -153,5 +151,9 @@ exit /b 0
 
 :pause_if_interactive
 if defined WM_NONINTERACTIVE exit /b 0
-echo %cmdcmdline% | find /i "%~nx0" >nul && pause
+REM Keep the window open when launched by double-click. findstr (no Unix
+REM namesake) is used instead of find, because Git for Windows ships GNU
+REM find.exe which shadows the Windows tool in a Git shell. Automation should
+REM set WM_NONINTERACTIVE=1 to skip this entirely.
+echo %cmdcmdline% | findstr /i /c:"%~nx0" >nul && pause
 exit /b 0

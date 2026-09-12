@@ -29,13 +29,13 @@ if not defined PY (
     exit /b 1
 )
 
-echo   [2/3] Services (PID-managed; portable Redis started by us is stopped too)
+echo   [2/3] Services ^(PID-managed; portable Redis started by us is stopped too^)
 %PY% launcher.py stop
 if errorlevel 1 echo   WARNING: stop reported an issue (see messages above)
 
-echo   [3/3] Redis (optional)
+echo   [3/3] Redis ^(optional^)
 if "%WM_ASSUME_YES%"=="1" (
-    echo        WM_ASSUME_YES=1 : leaving Redis running (safe default)
+    echo        WM_ASSUME_YES=1 : leaving Redis running ^(safe default^)
     goto done
 )
 set "STOPREDIS="
@@ -46,7 +46,7 @@ if /i "%STOPREDIS%"=="y" (
         echo        Docker Redis container stopped
     ) || (
         echo        No Docker container named zhiguan-redis
-        echo        (a system-installed Redis is not managed by this script)
+        echo        ^(a system-installed Redis is not managed by this script^)
     )
 ) else (
     echo        Redis left running

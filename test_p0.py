@@ -6762,6 +6762,32 @@ class TestLauncherCrossDevice(unittest.TestCase):
             bad = [(i, b) for i, b in enumerate(data) if b > 127]
             self.assertEqual(bad, [], f"{name} 含非 ASCII 字节（会乱码）：{bad[:3]}")
 
+    def test_bat_has_no_cmd_parse_traps(self):
+        """防"一键启动报错"回归：三类别把 cmd.exe 弄崩的写法。
+
+        实测事故：start.bat 用**多行** `python -c "..."` 探测 Redis，cmd 不支持跨行
+        引号参数 → 后续行被当命令执行（`'try:' is not recognized`）并在 Redis 步骤中断；
+        块内 `echo ... (see step 4).` 的**未转义括号**提前闭合 ( ) 块 → 报
+        `. was unexpected at this time.`；块内 `find` 会被 Git for Windows 的
+        GNU find 抢走（`find: '/i': No such file or directory`）。"""
+        import re as _re
+        from pathlib import Path as _Path
+        root = _Path(__file__).resolve().parent
+        for name in ("start.bat", "stop.bat"):
+            lines = (root / name).read_text(encoding="ascii").splitlines()
+            for idx, line in enumerate(lines, 1):
+                if '-c "' in line:
+                    self.assertEqual(
+                        line.count('"') % 2, 0,
+                        f"{name}:{idx} `python -c` 引号未在同一行闭合（cmd 不支持跨行参数）")
+                stripped = line.strip()
+                if stripped.lower().startswith("echo"):
+                    self.assertIsNone(
+                        _re.search(r"(?<!\^)[()]", line),
+                        f"{name}:{idx} echo 含未转义括号（块内会破坏 cmd 解析）")
+                if "| find " in line or " find /i" in line:
+                    self.fail(f"{name}:{idx} 使用了 find（可能被 Git 的 GNU find 抢占），改用 findstr")
+
     def test_bat_sets_utf8_and_detects_interpreter(self):
         from pathlib import Path as _Path
         root = _Path(__file__).resolve().parent
