@@ -144,6 +144,32 @@ def _check_redis_or_exit() -> None:
     sys.exit(1)
 
 
+def _ensure_redis_available() -> None:
+    """启动前的 Redis 再确认：停掉上一轮服务后，若 Redis 已不可达则自动补齐。
+
+    预检（`_check_redis_or_exit`）发生在停服之前，而 stop 会收尾本项目启动的便携
+    Redis；此处在真正拉起服务前复核一次，避免"服务全起在无 Redis 的环境里"。"""
+    host = os.environ.get("REDIS_HOST", "localhost")
+    try:
+        port = int(os.environ.get("REDIS_PORT", "6379") or 6379)
+    except Exception:
+        port = 6379
+    if _redis_reachable(host, port):
+        return
+    try:
+        from dep_check import ensure_redis
+        result = ensure_redis(auto=True)
+        logging.getLogger(__name__).info("Redis 复核：%s", result.get("detail", ""))
+        if not result.get("ok"):
+            print(result.get("detail", ""))
+            sys.exit(1)
+    except SystemExit:
+        raise
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Redis 复核失败：%s", str(exc)[:150])
+        _check_redis_or_exit()
+
+
 def _read_pids() -> dict:
     try:
         with open(PID_FILE, "r", encoding="utf-8") as f:
@@ -389,9 +415,12 @@ def _verified_stop_report(stopped: list[str], known_pids: set[int]) -> list[tupl
     return survivors
 
 
-def stop_services() -> list[str]:
-    """按 PID 文件停止全部服务（含本项目启动的便携 Redis），返回已停止的服务名列表。
+def stop_services(stop_portable_redis: bool = True) -> list[str]:
+    """按 PID 文件停止全部服务，返回已停止的服务名列表。
 
+    `stop_portable_redis=False` 保留本项目启动的便携 Redis：start/restart 流程
+    在启动前会先停上一轮服务，但那一步不该把马上要用的 Redis 一起停掉
+    （否则服务全部起在没有 Redis 的环境里，表现为启动"成功"却全线连不上）。
     停止后做存活复检：仍有残留时如实打印（含 PID），不再静默。"""
     pids = _read_pids()
     services = pids.get("services", {})
@@ -428,10 +457,12 @@ def stop_services() -> list[str]:
             pass
 
     # 便携版 Redis（本项目自动获取并启动的实例）：stop 时应一并收尾，
-    # 否则 stop 后 6379 仍被占用、下次启动会误判"已有 Redis 在跑"
-    redis_stop = _stop_portable_redis()
-    if redis_stop.get("stopped"):
-        logger.info("%s", redis_stop["detail"])
+    # 否则 stop 后 6379 仍被占用、下次启动会误判"已有 Redis 在跑"。
+    # start/restart 的"停上一轮"调用会传 False 保留它。
+    if stop_portable_redis:
+        redis_stop = _stop_portable_redis()
+        if redis_stop.get("stopped"):
+            logger.info("%s", redis_stop["detail"])
 
     # 停止后复检：如实报告仍在运行的残留（含 PID），不再静默
     survivors = _verified_stop_report(stopped, known_pids)
@@ -543,9 +574,10 @@ def start_services() -> dict:
     logger = logging.getLogger(__name__)
 
     logger.info("Stopping previous services (if any)...")
-    stopped = stop_services()
+    stopped = stop_services(stop_portable_redis=False)
     if stopped:
         logger.info("Stopped: %s", ", ".join(stopped))
+    _ensure_redis_available()
     time.sleep(2)
 
     services = build_services(cfg)
@@ -767,7 +799,7 @@ def print_status() -> None:
     state = _pids_file_state()
     if state != "ok":
         msg = (
-            f"No services recorded ({PID_FILE.name} {state}；run `python launcher.py` to start)."
+            f"No services recorded ({PID_FILE.name} {state}; run `python launcher.py` to start)."
             if state == "missing"
             else f"WARNING: {PID_FILE.name} is corrupt (cannot be parsed); "
                  "run `python launcher.py stop` then start again."
@@ -859,8 +891,9 @@ def main() -> None:
     elif action == "restart":
         _run_dependency_check(fix=True, fatal=True)
         _check_redis_or_exit()
-        stopped = stop_services()
+        stopped = stop_services(stop_portable_redis=False)
         logger.info("Stopped: %s", ", ".join(stopped) if stopped else "none")
+        _ensure_redis_available()
         time.sleep(2)
         start_services()
     else:

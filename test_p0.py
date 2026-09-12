@@ -5125,6 +5125,13 @@ class TestLauncherStopFallback(unittest.TestCase):
 
         tmp = Path(tempfile.mkdtemp(prefix="wm_stop_"))
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        # 这些用例只验证"按 PID / 兜底扫描"的清理逻辑，必须隔离真实运行时：
+        # 否则 _stop_portable_redis 会按 .weavemind/redis.pid 杀掉本机**正在运行**
+        # 的便携 Redis（跑一次回归就把手里跑着的应用打瘫）。
+        patcher = mock.patch.object(launcher, "_stop_portable_redis",
+                                    return_value={"stopped": False, "detail": ""})
+        patcher.start()
+        self.addCleanup(patcher.stop)
         return launcher, tmp
 
     def test_stop_cleans_unregistered_residuals_without_pids_file(self):
@@ -5297,7 +5304,11 @@ class TestLauncherSupervise(unittest.TestCase):
     def test_start_respects_supervise_env(self):
         """WEAVEMIND_SUPERVISE=1 时 start 进入守护模式，否则保持原状。"""
         launcher, tmp = self._setup()
-        with mock.patch.object(launcher, "supervise_services") as sup, \
+        # 依赖自检与 Redis 预检走真实实现会拉起/探测本机 Redis —— 本用例只关心
+        # supervise 分支，故一并隔离，保持测试无运行时副作用。
+        with mock.patch.object(launcher, "_run_dependency_check"), \
+                mock.patch.object(launcher, "_check_redis_or_exit"), \
+                mock.patch.object(launcher, "supervise_services") as sup, \
                 mock.patch.object(launcher, "start_services") as start, \
                 mock.patch.object(sys, "argv", ["launcher.py", "start"]), \
                 mock.patch.dict(os.environ, {"WEAVEMIND_SUPERVISE": "1"}, clear=False):
@@ -5307,7 +5318,9 @@ class TestLauncherSupervise(unittest.TestCase):
 
         env = dict(os.environ)
         env.pop("WEAVEMIND_SUPERVISE", None)
-        with mock.patch.object(launcher, "supervise_services") as sup2, \
+        with mock.patch.object(launcher, "_run_dependency_check"), \
+                mock.patch.object(launcher, "_check_redis_or_exit"), \
+                mock.patch.object(launcher, "supervise_services") as sup2, \
                 mock.patch.object(launcher, "start_services") as start2, \
                 mock.patch.object(sys, "argv", ["launcher.py", "start"]), \
                 mock.patch.dict(os.environ, env, clear=True):
@@ -6795,13 +6808,20 @@ class TestLauncherCrossDevice(unittest.TestCase):
     def test_stop_also_stops_portable_redis(self):
         """stop 链路必须收尾便携 Redis（否则 6379 被占、下次启动误判）。"""
         import launcher
+        tmp = Path(tempfile.mkdtemp(prefix="wm_stop_redis_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        fake_pids = Path(tmp) / "pids.json"
+        fake_pids.write_text("{}", encoding="utf-8")
         with mock.patch.object(launcher, "_read_pids", return_value={"services": {}}), \
+                mock.patch.object(launcher, "PID_FILE", fake_pids), \
                 mock.patch.object(launcher, "_scan_residual_processes", return_value=[]), \
                 mock.patch.object(launcher, "_stop_portable_redis",
                                   return_value={"stopped": True, "detail": "ok"}) as m, \
                 mock.patch.object(launcher, "_verified_stop_report", return_value=[]):
             launcher.stop_services()
         m.assert_called_once()
+        # stop 清理的是被 patch 的 PID 文件（证明真实 pids.json 未被测试删除）
+        self.assertFalse(fake_pids.exists())
 
     def test_verify_services_reports_down(self):
         """启动后校验：有服务未存活时给出 down 清单；strict 由调用方决定退出。"""
@@ -6847,6 +6867,52 @@ class TestLauncherCrossDevice(unittest.TestCase):
             self.assertTrue((new_dir / "redis.pid").exists())
             # 幂等
             self.assertEqual(dep_check._migrate_legacy_runtime_dir(), "")
+
+    def test_start_does_not_kill_redis_before_launching(self):
+        """start 停上一轮服务时必须保留便携 Redis，且启动前复核其可用。
+
+        回归：stop 收尾便携 Redis 后，start 若沿用同一条 stop 路径，会把服务
+        全部起在"没有 Redis"的环境里——进程都在，却全线连不上。"""
+        import launcher
+        calls = {}
+
+        def _fake_stop(stop_portable_redis=True):
+            calls["stop_portable_redis"] = stop_portable_redis
+            return []
+
+        with mock.patch.object(launcher, "stop_services", side_effect=_fake_stop), \
+                mock.patch.object(launcher, "_ensure_redis_available") as m_ensure, \
+                mock.patch.object(launcher, "_write_pids"), \
+                mock.patch.object(launcher, "build_services", return_value=[]), \
+                mock.patch.object(launcher, "verify_services",
+                                  return_value={"total": 0, "alive": 0, "down": []}):
+            launcher.start_services()
+        self.assertFalse(calls.get("stop_portable_redis", True),
+                         "start 不应停掉马上要用的便携 Redis")
+        m_ensure.assert_called_once()
+
+    def test_ensure_redis_available_skips_when_reachable(self):
+        """Redis 可达时不再重复 ensure（避免每次都重新拉起实例）。"""
+        import launcher
+        with mock.patch.object(launcher, "_redis_reachable", return_value=True), \
+                mock.patch("dep_check.ensure_redis") as m_ensure:
+            launcher._ensure_redis_available()
+        m_ensure.assert_not_called()
+
+    def test_ensure_redis_available_restarts_when_down(self):
+        """不可达时按依赖自检逻辑拉起；拉起失败则终止启动（不再静默）。"""
+        import launcher
+        with mock.patch.object(launcher, "_redis_reachable", return_value=False), \
+                mock.patch("dep_check.ensure_redis",
+                           return_value={"ok": True, "detail": "started"}) as m_ensure:
+            launcher._ensure_redis_available()
+        m_ensure.assert_called_once()
+        with mock.patch.object(launcher, "_redis_reachable", return_value=False), \
+                mock.patch("dep_check.ensure_redis",
+                           return_value={"ok": False, "detail": "no binary"}), \
+                mock.patch.object(sys, "stdout", mock.MagicMock()):
+            with self.assertRaises(SystemExit):
+                launcher._ensure_redis_available()
 
     def test_redis_binds_loopback_only(self):
         """便携 Redis 默认只绑回环：不暴露到局域网，也不触发防火墙入站弹框。"""
