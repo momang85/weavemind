@@ -117,11 +117,9 @@ _STRUCTURED_SOURCE_LABELS = {
     "cninfo_annual": "巨潮资讯网（A股年报）",
 }
 
-# 统计类目标关键词：命中后在 code_execution 步骤注入全市场占比计算指令
-_STATISTICAL_GOAL_KEYWORDS = (
-    "占比", "比例", "百分位", "分布", "合计", "汇总",
-    "份额", "集中度", "全市场",
-)
+# 注：统计/排行类目标的判定统一在 task_intent.market_intent（唯一来源）。
+# 此处曾有一份 _STATISTICAL_GOAL_KEYWORDS 与该模块重复，导致两处规则分叉
+# （"合计/汇总"被当成全市场信号）——已移除。
 
 # V1.2 竞品启示：报告格式强制要求（三级溯源链 / 数据时效 / 免责声明）。
 # 注入 content_summary / report_generator 步骤指令；验收器负责硬检查。
@@ -4936,13 +4934,14 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
 
     @staticmethod
     def _is_statistical_goal(goal: str) -> bool:
-        """是否统计类排行目标：占比/比例/百分位/前N%/分布/合计/汇总等。
+        """是否统计/排行类目标（需要全市场分母）。
 
-        这类任务必须拿到全市场数据（含分母），不能只取前十。"""
-        g = str(goal or "").lower()
-        if any(k in g for k in _STATISTICAL_GOAL_KEYWORDS):
-            return True
-        return bool(re.search(r"前\s*\d+(?:\.\d+)?\s*%", g))
+        判定统一走 task_intent.market_intent（唯一规则来源）：必须同时具备
+        行情指标语义与统计语义——此前用"合计/汇总"等聚合动词判定，把
+        「月度销售数据计算合计/均值」这类本地自造数据任务也判成统计类，
+        于是往 code_execution 步骤注入全市场 ranking.csv 指令。"""
+        from task_intent import is_statistical_goal
+        return is_statistical_goal(goal)
 
     @staticmethod
     def _goal_search_tokens(goal: str) -> list[str]:

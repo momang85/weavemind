@@ -47,11 +47,9 @@ def _source_available(name: str) -> bool:
 
 # 快路径规模上限：≤50 走现有 eastmoney→tencent 链，>50 必须分页全市场
 _FAST_PATH_MAX_TOP_N = 50
-# 统计类/分布类目标关键词：命中即要求全市场数据（含分母）
-_STATISTICAL_KEYWORDS = (
-    "占比", "比例", "百分位", "分布", "合计", "汇总",
-    "份额", "集中度", "全市场", "整个市场",
-)
+# 注：统计类目标的判定统一在 task_intent.market_intent（唯一来源）。
+# 此处曾有一份 _STATISTICAL_KEYWORDS（含"合计/汇总"聚合动词）与 task_intent 重复，
+# 会把本地自造数据任务误判为全市场排行——已移除，避免两处规则再次分叉。
 # 行业/政策调研类目标关键词：命中且非财务域时接入 news 适配器预载新闻
 _INDUSTRY_RESEARCH_KEYWORDS = (
     "行业", "赛道", "产业", "格局", "现状", "进展", "政策",
@@ -190,16 +188,18 @@ def _parse_metric(goal: str) -> str:
 def _parse_scale(goal: str) -> str:
     """P1：从目标解析规模需求（topN / full_market）。
 
-    占比/比例/百分位/分布/合计/汇总/份额/全市场，以及"前 N%"、
-    显式前 N（N>50）→ full_market（需分页全市场）；其余 → topN。
+    统一走 task_intent.market_intent：需要全市场必须同时具备行情指标语义
+    （市场词/成交额等）与统计语义（排行/占比/分布/前 N）。
+    此前用"占比/分布/合计/汇总"裸关键词判定，把
+    「月度销售数据计算合计/均值」这类**本地自造数据**任务误判为全市场排行。
     """
+    from task_intent import market_intent
+    intent = market_intent(goal)
+    if intent["scope"] == "full_market":
+        return "full_market"
     g = str(goal or "").lower()
-    if any(k in g for k in _STATISTICAL_KEYWORDS):
-        return "full_market"
-    if re.search(r"前\s*\d+(?:\.\d+)?\s*%", g):
-        return "full_market"
     m = re.search(r"(?:前|top)\s*(\d{1,6})", g)
-    if m and int(m.group(1)) > _FAST_PATH_MAX_TOP_N:
+    if m and int(m.group(1)) > _FAST_PATH_MAX_TOP_N and intent["needs_market_data"]:
         return "full_market"
     return "topN"
 

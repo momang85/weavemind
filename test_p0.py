@@ -7169,6 +7169,64 @@ class TestPromptOverrideScoping(unittest.TestCase):
         self.assertIsNone(miss)
 
 
+class TestTaskIntentRouting(unittest.TestCase):
+    """意图路由唯一来源：本地自造数据任务不得被判为全市场行情。
+
+    回归：「内置近12个月的月度销售数据，计算合计/均值/最大值」曾因"合计"命中
+    统计关键词被判 full_market，任务工作区被塞进 A股 ranking.csv/structured_data.json，
+    并进一步进入提示词与交付包。
+    """
+
+    CASES = [
+        # (目标, 期望 scope, 是否需要外部行情)
+        ("用 Python 编写单文件脚本：内置近12个月的月度销售数据，计算合计/均值/最大值并打印 ASCII 柱状图",
+         "local", False),
+        ("生成一份示例销售数据报表，统计汇总与占比", "local", False),
+        ("统计今日A股总成交量排名前十的股票", "symbol", True),
+        ("统计今日A股前5%成交额占比并列出头部股票", "full_market", True),
+        ("A股成交额分布分析", "full_market", True),
+        ("A股成交额排行前250", "full_market", True),
+        ("今日A股成交额排行", "symbol", True),
+        ("梳理贵州茅台2025年三季报核心财务数据", "none", False),
+        ("调研2026年国内固态电池产业化进展", "none", False),
+        ("分析宁德时代与比亚迪2025年的市场份额变化", "none", False),
+    ]
+
+    def test_market_intent_table(self):
+        from task_intent import market_intent
+        for goal, scope, needs in self.CASES:
+            with self.subTest(goal=goal[:24]):
+                intent = market_intent(goal)
+                self.assertEqual(intent["scope"], scope)
+                self.assertEqual(intent["needs_market_data"], needs)
+                self.assertTrue(intent["reason"])
+
+    def test_router_scale_matches_intent(self):
+        """router 的规模判定必须与 intent 一致（单一来源，不再各自维护关键词表）。"""
+        import adapters.router as router
+        from task_intent import needs_full_market
+        for goal, scope, _ in self.CASES:
+            with self.subTest(goal=goal[:24]):
+                expected = "full_market" if scope == "full_market" else "topN"
+                self.assertEqual(router._parse_scale(goal), expected)
+                self.assertEqual(needs_full_market(goal), scope == "full_market")
+
+    def test_local_data_task_not_routed_to_market(self):
+        """本地数据任务不得进排行分支（否则会去抓 A股全市场数据）。"""
+        import adapters.router as router
+        goal = ("用 Python 编写单文件脚本 sales_report.py：内置近12个月的月度销售数据，"
+                "计算合计/均值/最大值并打印 ASCII 柱状图")
+        self.assertFalse(router._is_ranking_goal(goal))
+
+    def test_orchestrator_statistical_goal_delegates(self):
+        """编排器的 _is_statistical_goal 必须与 intent 同源。"""
+        from orchestrator_v2 import OrchestratorV2
+        self.assertFalse(OrchestratorV2._is_statistical_goal(
+            "内置示例销售数据，统计合计与均值"))
+        self.assertTrue(OrchestratorV2._is_statistical_goal(
+            "统计今日A股前5%成交额占比"))
+
+
 class TestReportRouteAndMetricsConsistency(unittest.TestCase):
     """报告路由渲染 + 指标口径与状态接口一致。"""
 
