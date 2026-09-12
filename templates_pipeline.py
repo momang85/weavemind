@@ -265,11 +265,16 @@ def consolidate_template(
             cap = s.get("capability")
             if cap in ("report_generator", "package"):
                 continue  # 收尾打包类步骤不进模板，保留核心能力链（含内容摘要）
+            if str(s.get("step_id") or "").startswith("fix-"):
+                continue  # 任务级修复轮（fix-1/fix-2）不是能力链的一环
             ins = str(s.get("instruction") or "")
-            # 剥离追加的反思反馈与自动沉淀的历史教训块
-            # （"【历史教训（自动沉淀）】反思要求重做：…"、"【反思要求重做】…"），
-            # 保留原可执行指令；经反思重做的任务同样可固化
-            for marker in ("【历史教训", "【反思要求重做】", "反思要求重做"):
+            # 剥离追加的反思反馈、自动沉淀的历史教训块与任务级修复提示
+            # （"【历史教训（自动沉淀）】反思要求重做：…"、"【反思要求重做】…"、
+            # "以下交付物未通过可运行性验证，请针对失败原因修复…"），
+            # 保留原可执行指令；经反思/修复重做的任务同样可固化
+            for marker in ("【历史教训", "【反思要求重做】", "反思要求重做",
+                           "以下交付物未通过可运行性验证",
+                           "请针对失败原因修复并重新生成完整文件"):
                 if marker in ins:
                     ins = ins.split(marker, 1)[0].strip()
                     break
