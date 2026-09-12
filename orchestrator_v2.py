@@ -3174,6 +3174,29 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         thread.start()
         return thread
 
+    def _finalize_task(self, task_id: str, goal: str, status: str,
+                       report: str = "", steps: list | None = None,
+                       logs: list | None = None,
+                       acceptance: dict | None = None) -> None:
+        """终态唯一落库点（状态写者收口的一部分）。
+
+        编排器是 task_history 的**唯一写者**：终态（含 6 个提前 return 路径）都经此
+        写库并记录已终态，避免出现"进程内认为结束、DB 里永远 RUNNING"的空洞。
+        """
+        try:
+            if not hasattr(self, "_finalized_tasks"):
+                self._finalized_tasks = set()
+            if task_id in self._finalized_tasks:
+                return
+            import task_state as _ts
+            _ts.record_completion(
+                task_id, goal=goal, status=status, report=report or "",
+                steps=steps or [], logs=logs or [], acceptance=acceptance or {},
+            )
+            self._finalized_tasks.add(task_id)
+        except Exception as exc:
+            logger.warning("Finalize task %s failed: %s", task_id, str(exc)[:150])
+
     def run(self, task_id: str, goal: str, context: str = "",
             auto_run: bool = True, template_steps: list | None = None,
             user_id: str = "", project: str | None = None,
@@ -4034,6 +4057,28 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                        "acceptance": acceptance_summary,
                        "llm_degraded": llm_degraded,
                        "elapsed_sec": _elapsed})
+        # 状态写者收口：终态由编排器直接落库（不再依赖 webui 监听器转写；
+        # webui 重启或消息丢失都不会让 DB 停在 RUNNING）
+        try:
+            _snap = {}
+            try:
+                import task_state as _ts
+                _snap = _ts.read_snapshot(task_id) or {}
+            except Exception:
+                _snap = {}
+            _steps_out = _snap.get("steps") or [
+                {"step_id": s["step_id"], "capability": s["capability"],
+                 "instruction": s["instruction"],
+                 "result": completed_all.get(s["step_id"], {})}
+                for s in all_steps
+            ]
+            self._finalize_task(
+                task_id, goal, overall, report=report,
+                steps=_steps_out, logs=_snap.get("logs") or [],
+                acceptance=acceptance_summary or {},
+            )
+        except Exception as exc:
+            logger.warning("finalize on main terminal failed: %s", str(exc)[:150])
 
         # 6. 提示词自迭代（后台线程，不阻塞交付）：LLM 分析本次输出与预期的差距，
         #    总结问题并产出改进版提示词写入注册表，下一轮任务自动生效
@@ -5332,6 +5377,42 @@ def _group_financial_rows(rows) -> dict:
 # Standalone listener (drop-in replacement)
 # ─────────────────────────────────────────────
 
+def accept_task_request(orch, data: dict) -> tuple[bool, str]:
+    """接收一条任务请求：登记 QUEUED（唯一写者）+ 写收执键。
+
+    返回 (是否接收, 原因)。抽出成独立函数是为了可测：收执是"提交是否成功"的
+    唯一依据，不能让它的判定逻辑埋在 main() 的循环里。
+    """
+    task_id = str(data.get("task_id") or "")
+    goal = str(data.get("goal") or "")
+    if not task_id:
+        return False, "缺少 task_id"
+    ok, reason = True, ""
+    try:
+        import task_state as _ts
+        _ts.mark_queued(
+            task_id, goal,
+            project=str(data.get("project") or "default"),
+            conversation_id=str(data.get("conversation_id") or ""),
+            parent_task_id=str(data.get("parent_task_id") or ""),
+            context=str(data.get("context") or ""),
+            user=str(data.get("user_id") or ""),
+        )
+    except Exception as exc:
+        ok, reason = False, f"登记失败：{str(exc)[:120]}"
+    try:
+        orch._redis.setex(
+            f"task_ack:{task_id}", 120,
+            "accepted" if ok else f"rejected:{reason}")
+    except Exception:
+        pass
+    if ok:
+        logger.info("Task %s accepted (queued)", task_id)
+    else:
+        logger.error("Task %s rejected: %s", task_id, reason)
+    return ok, reason
+
+
 def main():
     from logging_setup import setup_logging
     setup_logging("orchestrator")
@@ -5362,6 +5443,12 @@ def main():
             report_confirm = bool(data.get("report_confirm", False))
             project = data.get("project") or "default"
 
+            # 状态写者收口：QUEUED 由**编排器**登记（webui 不再写 task_history），
+            # 并写收执键让提交方知道请求已被接收（pub/sub 本身无回执；
+            # 编排器不在时消息静默丢失，收执键能把这个事实变成"提交失败"）
+            if goal and goal != "EVOLUTION_TRIGGER":
+                accept_task_request(orch, data)
+
             if goal == "EVOLUTION_TRIGGER":
                 push_progress(orch._messaging, task_id, "log",
                               {"type": "info", "message": "Evolution trigger received"})
@@ -5389,9 +5476,19 @@ def main():
                         user_id=uid, project=proj, report_confirm=rc,
                     )
                     result["project"] = proj
+                    # 兜底落库：run() 内有 6 个提前 return（余额不足/端点不可用/
+                    # 规划失败等），它们各自 push 了 task_complete 但未必走到主终态；
+                    # 这里是唯一能覆盖全部返回路径与异常路径的单点。
+                    orch._finalize_task(
+                        tid, g, str(result.get("status") or "FAILED"),
+                        report=str(result.get("report") or ""),
+                        steps=result.get("steps") or [],
+                        acceptance=result.get("acceptance") or {},
+                    )
                     orch._messaging.publish("orchestrator:response", result)
                 except Exception as e:
                     logger.error("Task %s failed: %s", tid, e)
+                    orch._finalize_task(tid, g, "FAILED", report=str(e))
                     orch._messaging.publish("orchestrator:response",
                                             {"task_id": tid, "status": "FAILED",
                                              "report": str(e), "project": proj})

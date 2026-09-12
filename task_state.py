@@ -331,6 +331,34 @@ def merge_projection(task_id: str, overlay: dict | None = None,
     return data
 
 
+def mark_dead_running_failed(task_id: str, reason: str = "编排器进程已退出",
+                             min_age_seconds: int = 600,
+                             db_path: str | None = None) -> bool:
+    """崩溃兜底：DB 仍是 RUNNING、Redis 运行标记已消失 → 翻 FAILED。
+
+    此前 webui 只"豁免"RUNNING、从不翻转，编排器崩溃后任务既不过期也不完成。
+
+    `min_age_seconds` 是安全门槛：只有超过该时长没有更新的 RUNNING 行才会被翻转，
+    避免把"刚写 RUNNING 但标记尚未落 Redis"的正常任务误杀（标记 TTL 24h，
+    超长任务也不会因此被误判，因为它的 updated_at 会随阶段刷新）。"""
+    try:
+        con = _connect(db_path)
+        try:
+            cur = con.execute(
+                "UPDATE task_history SET status=?, phase='崩溃', report=?,"
+                " updated_at=CURRENT_TIMESTAMP WHERE task_id=? AND status=?"
+                " AND COALESCE(updated_at, created_at) < datetime('now', ?)",
+                (FAILED, f"Task failed: {reason}", task_id, RUNNING,
+                 f"-{int(max(60, min_age_seconds))} seconds"),
+            )
+            con.commit()
+            return bool(cur.rowcount)
+        finally:
+            con.close()
+    except Exception:
+        return False
+
+
 def mark_stale_failed(task_id: str, db_path: str | None = None) -> bool:
     """stale 清理：把长期无终态的排队任务翻成 FAILED。"""
     try:

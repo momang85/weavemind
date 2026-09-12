@@ -768,6 +768,10 @@ def _cleanup_sessions() -> None:
         for token in [t for t, s in _sessions.items() if now > s.get("expires", 0)]:
             _sessions.pop(token, None)
 
+import logging as _logging
+_cleanup_logger = _logging.getLogger(__name__)
+
+
 def _merge_progress_message(existing: dict, data: dict) -> None:
     """把一条 push_progress 消息合并进任务内存态（纯合并，无副作用）。
 
@@ -872,23 +876,10 @@ def _listen_results():
                     if ptype == "task_complete":
                         # DB 写入与通知在锁外执行：这些是慢 I/O，
                         # 放锁内会阻塞所有 /task/{id} 读取与 SSE 快照
-                        try:
-                            # 状态真源：终态写入统一走 task_state 投影器，
-                            # 并把验收摘要与规则指纹一起落库（此前 acceptance 被丢弃）
-                            import task_state
-                            _payload = payload or {}
-                            task_state.record_completion(
-                                tid,
-                                goal=str(existing.get("goal") or ""),
-                                status=str(_payload.get("status") or "UNKNOWN"),
-                                report=str(_payload.get("report") or ""),
-                                steps=existing.get("steps") or [],
-                                logs=existing.get("logs") or [],
-                                acceptance=_payload.get("acceptance") or {},
-                                db_path=DB_PATH,
-                            )
-                        except Exception:
-                            pass
+                        # 状态写者收口：终态落库由**编排器**完成（run() 主终态 +
+                        # _run_task 兜底覆盖提前返回/异常路径）。webui 只做展示与
+                        # 副作用（内存合并、日报分享链接、失败通知），不再写 task_history——
+                        # 此前依赖"监听器必须在线"才能落库，webui 重启即丢终态。
                         # D1：日报项目任务终态自动生成分享链接（落地页入口），
                         # 并补发一条带链接的通知（编排器通知早于分享生成，链接会缺失）
                         # T2：FAILED 任务不生成分享链接（空报告落地页伤信任），
@@ -2349,13 +2340,25 @@ def _publish_task(
     prefix: str = "ui",
     report_confirm: bool = False,
 ) -> dict:
-    """核心提交通道：发布到 Redis orchestrator:main 并登记内存/SQLite。
-    供 POST /task 与定时任务调度器共用；失败抛异常由调用方处理。"""
+    """核心提交通道：把请求交给编排器并等待**收执**。
+
+    状态写者收口后：task_history 由编排器独占写入（webui 不再登记 QUEUED/QRUNNING/
+    终态），因此提交必须确认"请求已被接收"，否则会出现"界面上提交成功、现实里任务
+    从未存在"的幽灵状态。`orchestrator:main` 是不可靠 pub/sub，编排器不在时消息
+    静默丢失，所以这里靠 Redis 收执键 `task_ack:{tid}` 判定：收到 accepted 才算成功，
+    超时/被拒直接抛错（HTTP 侧转 503 并说明原因）。
+
+    内存 `_task_results` 也不再建骨架：它已降级为纯缓存，由监听器在收到消息时创建。
+    """
     if not _redis_ready():
         raise RuntimeError("Redis 未连接，任务无法派发")
     project = _safe_project(project)
     tid = f"{prefix}-" + uuid.uuid4().hex[:10]
     r = _new_redis()
+    try:
+        r.delete(f"task_ack:{tid}")
+    except Exception:
+        pass
     r.publish("orchestrator:main", json.dumps({
         "task_id": tid,
         "goal": goal,
@@ -2365,33 +2368,34 @@ def _publish_task(
         "template_steps": template_steps,
         "user_id": user_id,
         "report_confirm": bool(report_confirm),
+        # 会话/父子关系随请求下发：编排器是唯一写库者，缺了这两项它无法落列
+        "conversation_id": conversation_id,
+        "parent_task_id": parent_task_id,
     }, ensure_ascii=False))
-    with _task_lock:
-        _task_results[tid] = {
-            "task_id": tid,
-            "status": "PENDING",
-            "goal": goal,
-            "project": project,
-            "steps": [],
-            "report": "",
-            "conversation_id": conversation_id,
-            "auto_run": auto_run,
-        }
+    # 等待收执：编排器登记成功后写 task_ack:{tid} = accepted / rejected:原因
     try:
-        db = sqlite3.connect(DB_PATH, timeout=3)
-        db.execute(
-            "INSERT INTO task_history"
-            "(task_id,goal,status,project,conversation_id,parent_task_id,context,user,phase)"
-            " VALUES(?,?,?,?,?,?,?,?,?)",
-            (tid, goal, "QUEUED", project, conversation_id,
-             parent_task_id, context, user_id, "排队"),
-        )
-        db.commit()
-        db.close()
+        timeout = max(0.5, float(os.environ.get("WM_SUBMIT_ACK_TIMEOUT", "5") or 5))
     except Exception:
-        pass
+        timeout = 5.0
+    deadline = time.time() + timeout
+    ack = ""
+    while time.time() < deadline:
+        try:
+            ack = str(r.get(f"task_ack:{tid}") or "")
+        except Exception:
+            ack = ""
+        if ack:
+            break
+        time.sleep(0.05)
+    if not ack:
+        raise RuntimeError(
+            f"编排器未在 {timeout:.0f}s 内接收任务（服务未启动或正在重启）；"
+            "任务未被创建，请确认 `python launcher.py status` 中 orchestrator 在线"
+        )
+    if not ack.startswith("accepted"):
+        raise RuntimeError(f"编排器拒绝该任务：{ack.split(':', 1)[-1] or '未知原因'}")
     return {"task_id": tid, "conversation_id": conversation_id,
-            "status": "PENDING", "project": project}
+            "status": "QUEUED", "project": project}
 
 
 def _task_pdf_bytes(tid: str) -> bytes:
@@ -2904,13 +2908,19 @@ def main():
         from scheduled_jobs import ScheduledJobsRunner
 
         def _submit(job: dict) -> str:
-            submitted = _publish_task(
-                goal=str(job.get("goal") or ""),
-                project=str(job.get("project") or "default"),
-                auto_run=True,
-                user_id="scheduler",
-                prefix="sched",
-            )
+            try:
+                submitted = _publish_task(
+                    goal=str(job.get("goal") or ""),
+                    project=str(job.get("project") or "default"),
+                    auto_run=True,
+                    user_id="scheduler",
+                    prefix="sched",
+                )
+            except RuntimeError as exc:
+                # 编排器未接收（离线/超时）：返回空 id 让调度器按失败处理，
+                # 不抛异常中断整个调度轮次
+                _cleanup_logger.warning("定时任务提交失败：%s", str(exc)[:150])
+                return ""
             return submitted.get("task_id", "")
 
         def _outcome(task_id: str):
@@ -2994,19 +3004,24 @@ def main():
                 except Exception:
                     stale_seconds = 3600
                 stale_seconds = max(600, stale_seconds)
-                # 豁免集合：运行中的任务。Redis task_running 标记必须**校验 pid**
-                # （编排器崩溃后该键仍存活 24h，只看键存在会让任务永远 PENDING，
-                #  既不过期也不完成）；DB 侧 status=RUNNING 的同样豁免。
-                running_ids: set[str] = set()
+                # 豁免集合 + 崩溃兜底（一次扫描同时得到两个结论）：
+                #  Redis task_running 标记必须**校验 pid**——编排器崩溃后该键仍存活
+                #  24h，只看"键是否存在"会让任务永远既不过期也不完成。
+                #  DB 侧 status=RUNNING 的同样按"标记持有者是否存活"判定。
+                running_ids: set[str] = set()      # 标记存在且进程存活
+                dead_marked: set[str] = set()      # 标记存在但持有者已死
+                marker_seen: set[str] = set()      # 所有见过的标记
                 try:
                     import errno as _errno
                     r = _new_redis()
                     for k in r.scan_iter("task_running:*", count=200):
                         tid_key = str(k).split(":", 1)[-1]
+                        marker_seen.add(tid_key)
                         alive = True
                         try:
                             raw = r.get(k)
-                            pid = int((json.loads(raw) or {}).get("pid") or 0) if raw else 0
+                            payload = json.loads(raw) if raw else {}
+                            pid = int((payload or {}).get("pid") or 0) if raw else 0
                             if pid > 0:
                                 try:
                                     os.kill(pid, 0)
@@ -3016,15 +3031,37 @@ def main():
                                         alive = False
                                 except Exception:
                                     pass
+                                # PID 复用防护：pid 存活不等于"还是当初那个进程"。
+                                # 比对进程创建时间与标记写入时间，创建时间晚于标记
+                                # 说明这是被复用的新进程 → 旧持有者其实已死。
+                                if alive:
+                                    try:
+                                        import psutil
+                                        import datetime as _dt
+                                        started_raw = str((payload or {}).get("started") or "")
+                                        started_ts = _dt.datetime.fromisoformat(
+                                            started_raw.replace("Z", "+00:00")).timestamp()                                             if started_raw else 0.0
+                                        if started_ts:
+                                            created = psutil.Process(pid).create_time()
+                                            if created > started_ts + 5:
+                                                alive = False
+                                    except Exception:
+                                        pass
                         except Exception:
                             pass
-                        if alive:
-                            running_ids.add(tid_key)
-                except Exception:
-                    pass
+                        (running_ids if alive else dead_marked).add(tid_key)
+                except Exception as exc:
+                    _cleanup_logger.warning("stale 扫描：读取运行标记失败：%s", str(exc)[:120])
+
+                _db_running: list[str] = []
+                _dead: list[str] = []
+                _min_age = 600
                 try:
-                    # DB 口径的运行中（投影器写入的 RUNNING）
                     import task_state
+                    try:
+                        _min_age = int(os.environ.get("WM_DEAD_RUNNING_MIN_AGE", "600") or 600)
+                    except Exception:
+                        _min_age = 600
                     _db_running = [
                         row[0] for row in sqlite3.connect(DB_PATH, timeout=5).execute(
                             "SELECT task_id FROM task_history WHERE status=?",
@@ -3032,8 +3069,37 @@ def main():
                         ).fetchall()
                     ]
                     running_ids |= set(_db_running)
-                except Exception:
-                    pass
+                    for _tid in _db_running:
+                        if _tid in dead_marked or _tid not in marker_seen:
+                            # 标记持有者已死，或标记已消失 → 交给年龄门槛判定
+                            if task_state.mark_dead_running_failed(
+                                    _tid, "编排器进程已退出（运行标记持有者已死）",
+                                    min_age_seconds=_min_age):
+                                _dead.append(_tid)
+                    for _tid in _dead:
+                        _publish_alert(
+                            "task_crashed",
+                            f"任务 {_tid} 的编排器进程已退出，已标记失败",
+                            service="orchestrator",
+                        )
+                    if _db_running or dead_marked:
+                        # 只在有 RUNNING 行/死标记时记录扫描结论：既能让"兜底没生效"
+                        # 可定位，又不至于每 60s 刷日志
+                        _cleanup_logger.info(
+                            "stale 扫描：DB RUNNING=%d（存活标记 %d、死标记 %d、无标记 %d），"
+                            "本轮翻转 %d（年龄门槛 %ss）",
+                            len(_db_running),
+                            sum(1 for _t in _db_running if _t in running_ids),
+                            len(dead_marked), len(marker_seen - set(_db_running)),
+                            len(_dead), _min_age,
+                        )
+                    if _dead:
+                        _cleanup_logger.warning(
+                            "崩溃兜底：%d 个 RUNNING 任务翻为 FAILED：%s",
+                            len(_dead), ", ".join(_dead))
+                except Exception as exc:
+                    _cleanup_logger.warning("stale 扫描：崩溃兜底失败：%s", str(exc)[:150])
+
                 # 注：不再用内存 `_task_results` 的 RUNNING 作为豁免来源——
                 # 内存已降级为纯缓存，DB(投影) + Redis pid 校验才是真源。
                 db = sqlite3.connect(DB_PATH, timeout=5)
