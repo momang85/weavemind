@@ -282,13 +282,56 @@ class TestCodeExecutionTokenTruncation(unittest.TestCase):
         self.assertTrue(CodeExecutionWorker._looks_truncated(
             "df['share'] = (df['amount'] / total"))
         self.assertTrue(CodeExecutionWorker._looks_truncated("x = 'abc\n"))
-        self.assertTrue(CodeExecutionWorker._looks_truncated("print('hi')"))
+        self.assertTrue(CodeExecutionWorker._looks_truncated("total = a + b +\n"))
         # 完整代码（带换行、括号/引号闭合）→ False
         self.assertFalse(CodeExecutionWorker._looks_truncated("print('hi')\n"))
         self.assertFalse(CodeExecutionWorker._looks_truncated(
             "df['share'] = df['amount'] / total\nprint(df)\n"))
         self.assertFalse(CodeExecutionWorker._looks_truncated(
             "def f():\n    return {'a': 1}\n"))
+
+    def test_looks_truncated_accepts_fenced_and_unterminated_output(self):
+        """围栏结尾 / 无换行结尾都不等于截断。
+
+        回归：模型默认把代码包在 ``` 围栏里，最后两个字符是 "\\n```"，旧的
+        "必须以换行结尾"判据把完整代码判成截断并丢弃，实测 code_execution 卡在
+        round 1/2/3 循环里反复重生成，任务最终没有任何代码交付物。"""
+        from workers.code_execution_worker import CodeExecutionWorker
+
+        fenced = 'import sys\nprint("x")\nsys.exit(0)\n```'
+        self.assertFalse(CodeExecutionWorker._looks_truncated(fenced))
+        # 无换行结尾但结构完整
+        self.assertFalse(CodeExecutionWorker._looks_truncated("print('hi')"))
+        # 围栏只有开头没有收尾 → 真截断
+        self.assertTrue(CodeExecutionWorker._looks_truncated(
+            "```python\nimport sys\nprint('x')\n"))
+        # 注释以句号结尾不应误判（运算符判据跑在剥掉注释的结构上）
+        self.assertFalse(CodeExecutionWorker._looks_truncated(
+            "x = 1  # 说明。\nprint(x)\n"))
+
+    def test_smoke_rejects_script_without_entry_call(self):
+        """零输出脚本不得算通过冒烟：退出码 0 但什么也不打印的交付物没有价值。
+
+        回归：实测交付的 index.py 写好了 main() 却没有 if __name__ == "__main__"
+        调用，运行 exit 0 且无输出，任务仍判成功。"""
+        import asyncio
+        import tempfile
+        from pathlib import Path
+        from workers.code_execution_worker import CodeExecutionWorker
+
+        w = CodeExecutionWorker.__new__(CodeExecutionWorker)
+        w.workspace = Path(tempfile.mkdtemp(prefix="weavemind_smoke_"))
+
+        no_entry = (
+            "import random\n\n"
+            "def main():\n"
+            "    print(random.randint(1, 10))\n"
+        )
+        err = asyncio.run(w._run_smoke(no_entry))
+        self.assertIn("没有任何输出", err)
+
+        with_entry = no_entry + "\nif __name__ == \"__main__\":\n    main()\n"
+        self.assertEqual(asyncio.run(w._run_smoke(with_entry)), "")
 
     def test_empty_response_sets_feedback_and_retries(self):
         import asyncio
@@ -334,7 +377,9 @@ class TestCodeExecutionTokenTruncation(unittest.TestCase):
         async def fake_llm(system="", prompt="", instruction="", max_attempts=3, max_tokens=2000):
             calls.append({"prompt": prompt, "max_tokens": max_tokens})
             if len(calls) == 1:
-                return "import pandas as pd\nimport os"
+                # 结构上真截断：括号未闭合（旧夹具用"无换行结尾"充当截断，
+                # 那是误判规则，已修正）
+                return "import pandas as pd\nimport os\n\ndef load_data():\n    return pd.read_csv("
             return "print('ok')\n"
 
         w._call_llm = fake_llm

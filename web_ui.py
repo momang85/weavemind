@@ -81,6 +81,19 @@ def _llm_precheck_notify(reasons: list[str]) -> list[str]:
             service="llm",
         )
     return reasons
+
+
+_embed_alert_state = {"last_ts": 0.0}
+_EMBED_ALERT_COOLDOWN_SECONDS = 1800
+
+
+def _publish_embed_alert(notice: str) -> None:
+    """Embedding 降级告警：按冷却窗口发布，避免状态轮询把事件时间线刷满。"""
+    now = time.time()
+    if now - float(_embed_alert_state.get("last_ts") or 0.0) < _EMBED_ALERT_COOLDOWN_SECONDS:
+        return
+    _embed_alert_state["last_ts"] = now
+    _publish_alert("embedding_degraded", "Embedding 预警：" + notice, service="memory")
 _events_lock = threading.Lock()
 _evt_seq = 0
 _rate_limiter = None
@@ -963,6 +976,19 @@ def _system_status():
             llm_warning = get_endpoint_warning()
         except Exception:
             llm_warning = ""
+        # Embedding 降级（额度耗尽/网络不通）：记忆与提示词经验检索随之失效，
+        # 界面上的表现只是"记忆命中率 0%"，故并入 llm_warning 走既有横幅展示，
+        # 并按冷却窗口发布一次告警事件（避免每 3 秒轮询刷屏）
+        embedding_health = {}
+        try:
+            import embed_health as _embed_health
+            embedding_health = _embed_health.embedding_health()
+            _notice = _embed_health.degradation_notice()
+            if _notice:
+                llm_warning = f"{llm_warning}；{_notice}" if llm_warning else _notice
+                _publish_embed_alert(_notice)
+        except Exception:
+            embedding_health = {}
         search_health = {}
         if _redis_ready():
             try:
@@ -987,6 +1013,7 @@ def _system_status():
             "agents": agents,
             "llm_health": llm_health,
             "llm_warning": llm_warning,
+            "embedding_health": embedding_health,
             "search_health": search_health,
             "source_health": source_health,
             "budget": budget,
@@ -3496,7 +3523,21 @@ def _get_task_report(self, p):
                     data = t
                     break
         if data and data.get("report"):
-            return self._html(data["report"])
+            # 与公开分享页同一套渲染：Markdown → 结构化卡片 → 主题化 HTML。
+            # 此前直接 self._html(报告正文)，浏览器只看到一坨无样式的 Markdown
+            # 源码；深色主题下默认黑字落在深色底上，正文几乎不可见。
+            report = data["report"]
+            try:
+                structured = _share_page_structured(report, task_id=tid)
+            except Exception:
+                structured = {}
+            body_html = _markdown_to_html(
+                structured.get("body") or report, tid)
+            return self._html(_share_page_html(
+                str(data.get("goal") or "任务报告"),
+                str(data.get("created_at") or data.get("completed_at") or ""),
+                body_html, theme="light", structured=structured,
+            ))
         return self._json({"error": "report not found"}, 404)
 
 def _get_task_page(self, p):

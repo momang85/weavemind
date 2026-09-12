@@ -41,6 +41,30 @@ WATCH_CHANNELS = [
 ]
 
 
+def _db_task_totals() -> dict:
+    """从 agents.db 读取累计任务数（与 /api/status 同口径）。
+
+    失败返回空 dict，调用方回退到进程内计数器（单进程演示场景仍可用）。"""
+    try:
+        import sqlite3
+        path = os.environ.get("AGENTS_DB") or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "agents.db")
+        db = sqlite3.connect(path, timeout=5)
+        try:
+            total = db.execute("SELECT COUNT(*) FROM task_history").fetchone()[0]
+            success = db.execute(
+                "SELECT COUNT(*) FROM task_history WHERE status='SUCCESS'"
+            ).fetchone()[0]
+            failed = db.execute(
+                "SELECT COUNT(*) FROM task_history WHERE status='FAILED'"
+            ).fetchone()[0]
+        finally:
+            db.close()
+        return {"total": int(total), "success": int(success), "failed": int(failed)}
+    except Exception:
+        return {}
+
+
 class MetricsCollector:
     """实时指标收集器。"""
 
@@ -300,12 +324,23 @@ class MetricsCollector:
                 cost_total = get_monthly_spend()
             except Exception:
                 cost_total = 0.0
+            # 累计任务数/成功率：与 /api/status 同源（agents.db 的 task_history）。
+            # 进程内计数器只统计"本次运行"，重启即归零，看板上却写作"总任务数"，
+            # 于是同一时刻状态接口 412 条、指标页 0 条。
+            db_totals = _db_task_totals()
+            total_tasks = db_totals.get("total") if db_totals else self._total_tasks
+            failed_tasks = db_totals.get("failed") if db_totals else self._failed_tasks
+            if db_totals:
+                success_rate = (
+                    db_totals.get("success", 0) / total_tasks * 100
+                    if total_tasks else 0.0
+                )
             summary = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "total_tasks": self._total_tasks,
-                "failed_tasks": self._failed_tasks,
+                "total_tasks": total_tasks,
+                "failed_tasks": failed_tasks,
                 "success_rate": round(success_rate, 1),
-                "failure_rate": round(100 - success_rate, 1) if self._total_tasks else 0.0,
+                "failure_rate": round(100 - success_rate, 1) if total_tasks else 0.0,
                 "search_health": search_health,
                 "avg_latency_sec": round(
                     sum(latencies) / len(latencies), 2

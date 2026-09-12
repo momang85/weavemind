@@ -408,15 +408,29 @@ class CodeExecutionWorker(AsyncWorkerBase):
 
     @staticmethod
     def _looks_truncated(response: str) -> bool:
-        """判断 LLM 返回的代码是否可能因 token 上限被截断：
-        空响应、无换行结尾、以语句头（def/import 等）或冒号结束、
-        括号/引号未闭合，都视为疑似截断。"""
+        """判断 LLM 返回的代码是否可能因 token 上限被截断。
+
+        判据只用"结构上确实没写完"的信号：围栏未闭合、以语句头
+        （def/import 等）或冒号结束、字符串/括号未闭合、行尾断在运算符上。
+
+        注意：**不能**用"是否以换行结尾"判断。模型默认把代码包在 ``` 围栏里，
+        完整输出的最后一个字符是反引号而不是换行，于是完整代码被判截断丢弃、
+        反复重生成（实测 code_execution 卡在 round 1/2/3 循环，任务最终没有任何
+        代码交付物）。围栏闭合本身就是"输出完整"的证据。"""
         if not response or not response.strip():
             return True
-        # 完整输出通常以换行结尾；被截断的响应往往在行中断开
-        if not response.endswith(("\n", "\r")):
+        text = response.rstrip()
+        # 只有开头围栏、没有收尾围栏 → 真的被截断
+        if text.startswith("```") and text.count("```") % 2 == 1:
             return True
-        tail = response.rstrip("\r\n")
+        try:
+            body = CodeExecutionWorker._strip_fences(text)
+        except Exception:
+            body = text
+        structure, unclosed = CodeExecutionWorker._strip_strings_and_comments(body.rstrip())
+        if unclosed:
+            return True
+        tail = structure.rstrip()
         # 以语句/代码块头结束，说明后面还应有函数体或 import 目标
         if re.search(
             r"\b(?:def|class|import|from|if|elif|else|for|while|with|try|except|finally)\s*$",
@@ -425,8 +439,9 @@ class CodeExecutionWorker(AsyncWorkerBase):
             return True
         if tail.endswith(":"):
             return True
-        structure, unclosed = CodeExecutionWorker._strip_strings_and_comments(tail)
-        if unclosed:
+        # 行尾断在运算符/逗号/续行符上（在剥掉注释与字符串后的结构上判断，
+        # 避免"注释以句号结尾"这类正常文本被误判）
+        if re.search(r"(?:[+\-*/%=<>&|,.]|\\)\s*$", tail):
             return True
         for pair in (("(", ")"), ("[", "]"), ("{", "}")):
             if structure.count(pair[0]) > structure.count(pair[1]):
@@ -513,7 +528,8 @@ class CodeExecutionWorker(AsyncWorkerBase):
             except asyncio.TimeoutError:
                 proc.kill()
                 return "冒烟运行超时（30s）"
-            text = (out or err).decode("utf-8", errors="replace")
+            out_text = (out or b"").decode("utf-8", errors="replace")
+            text = out_text or (err or b"").decode("utf-8", errors="replace")
             if proc.returncode != 0:
                 return text[-1200:]
             bad = re.search(
@@ -523,6 +539,14 @@ class CodeExecutionWorker(AsyncWorkerBase):
             )
             if bad:
                 return text[-800:]
+            # "能运行"不等于"有用"：定义了函数却没有任何入口调用时，脚本退出码 0
+            # 且零输出（实测交付的 index.py 就是 main() 已写好但没有
+            # if __name__ == "__main__" 调用，任务判成功却什么也不打印）
+            if not out_text.strip() and re.search(r"^def \w+", candidate, re.M):
+                if "__main__" not in candidate:
+                    return ("脚本运行成功但没有任何输出：已定义函数却缺少入口调用，"
+                            "请补上 `if __name__ == \"__main__\":` 并调用主流程，"
+                            "使其直接运行即可输出结果")
             return ""
         except Exception as exc:
             return f"冒烟异常: {exc}"

@@ -74,6 +74,23 @@ MEMORY_CONVERSATION_DEDUP_HOURS = _env_float(
 # ============================================================================
 
 
+def _note_embed_fail(error: str) -> None:
+    """旁路记录 Embedding 失败（供 Health 呈现降级）；任何异常都不得外溢。"""
+    try:
+        import embed_health
+        embed_health.record_embed_fail(error)
+    except Exception:
+        pass
+
+
+def _note_embed_ok() -> None:
+    try:
+        import embed_health
+        embed_health.record_embed_ok()
+    except Exception:
+        pass
+
+
 class SiliconFlowEmbeddingFunction(EmbeddingFunction):
     """使用 SiliconFlow（兼容 OpenAI）Embedding API 进行文本向量化。
 
@@ -113,14 +130,17 @@ class SiliconFlowEmbeddingFunction(EmbeddingFunction):
                 data = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
+            _note_embed_fail(f"HTTP {exc.code}: {error_body[:200]}")
             raise RuntimeError(f"Embedding API HTTP {exc.code}: {error_body[:500]}") from exc
         except urllib.error.URLError as exc:
+            _note_embed_fail(f"network error: {exc}")
             raise RuntimeError(f"Embedding API network error: {exc}") from exc
 
         # 提取所有向量
         embeddings: list[list[float]] = []
         for item in data.get("data", []):
             embeddings.append(item["embedding"])
+        _note_embed_ok()
         return embeddings
 
 

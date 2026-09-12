@@ -6982,5 +6982,115 @@ class TestLauncherCrossDevice(unittest.TestCase):
             cli_text.setup_console_encoding()   # 不抛即通过
 
 
+class TestEmbeddingDegradationAlert(unittest.TestCase):
+    """Embedding 降级可见性：额度耗尽时界面必须给出明确提示。
+
+    否则唯一的表现是"记忆命中率 0%"，用户无法判断是接口欠费还是记忆库为空。"""
+
+    def test_fail_threshold_marks_degraded_and_ok_recovers(self):
+        import embed_health
+        saved_state = embed_health._load()
+        self.addCleanup(embed_health._store, saved_state)
+        embed_health.reset_health()
+
+        for _ in range(embed_health.FAIL_THRESHOLD - 1):
+            embed_health.record_embed_fail("网络抖动")
+        self.assertFalse(embed_health.embedding_health()["degraded"],
+                         "阈值内的偶发失败不应判定降级")
+        self.assertEqual(embed_health.degradation_notice(), "")
+
+        embed_health.record_embed_fail("Embedding API HTTP 402: insufficient balance")
+        health = embed_health.embedding_health()
+        self.assertTrue(health["degraded"])
+        self.assertEqual(health["fails"], embed_health.FAIL_THRESHOLD)
+        notice = embed_health.degradation_notice()
+        self.assertIn("Embedding", notice)
+        self.assertIn("充值", notice)      # 402 → 必须给出可执行的处置提示
+        self.assertIn("0%", notice)        # 与记忆页 0% 命中率的表象对上
+
+        embed_health.record_embed_ok()
+        self.assertFalse(embed_health.embedding_health()["degraded"])
+
+    def test_status_surfaces_embedding_warning_with_cooldown(self):
+        """降级时并入 llm_warning（Health 现成横幅），且告警按冷却窗口只发一次。"""
+        import web_ui
+        web_ui._embed_alert_state["last_ts"] = 0.0
+        self.addCleanup(web_ui._embed_alert_state.__setitem__, "last_ts", 0.0)
+        with mock.patch("embed_health.embedding_health",
+                        return_value={"healthy": False, "degraded": True, "fails": 9}), \
+                mock.patch("embed_health.degradation_notice",
+                           return_value="Embedding 接口连续失败 9 次：记忆检索已降级"), \
+                mock.patch.object(web_ui, "_publish_alert") as pub:
+            first = web_ui._system_status()
+            second = web_ui._system_status()
+        self.assertIn("Embedding", first["llm_warning"])
+        self.assertIn("Embedding", second["llm_warning"])
+        self.assertTrue(first["embedding_health"]["degraded"])
+        self.assertEqual(pub.call_count, 1, "冷却窗口内不得重复发布告警")
+
+    def test_embedding_call_records_failure(self):
+        """Embedding 调用失败必须落到健康记录里（旁路，不影响原异常抛出）。"""
+        import embed_health
+        import memory_manager
+        saved_state = embed_health._load()
+        self.addCleanup(embed_health._store, saved_state)
+        embed_health.reset_health()
+
+        class _Fn(memory_manager.SiliconFlowEmbeddingFunction):
+            def __init__(self):
+                super().__init__("k", "http://127.0.0.1:1/v1", "m")
+
+        fn = _Fn()
+        for _ in range(embed_health.FAIL_THRESHOLD):
+            with self.assertRaises(RuntimeError):
+                fn(["hello"])
+        self.assertTrue(embed_health.embedding_health()["degraded"])
+
+
+class TestReportRouteAndMetricsConsistency(unittest.TestCase):
+    """报告路由渲染 + 指标口径与状态接口一致。"""
+
+    def test_task_report_route_renders_html_not_raw_markdown(self):
+        """`/task/<id>/report` 必须渲染成带样式的 HTML。
+
+        回归：此前直接 self._html(报告正文)，浏览器看到的是无样式 Markdown 源码，
+        深色主题下默认黑字落在深色底上，正文几乎不可见。"""
+        import web_ui
+        report = "# 项目交付结果\n\n**目标**：测试目标\n\n## 一、结论\n\n- 要点一\n"
+        handlers = {}
+        fake = type("FakeHandler", (), {
+            "_html": lambda self, html, code=200: handlers.update(html=html, code=code),
+            "_json": lambda self, data, code=200: handlers.update(json=data, code=code),
+            "_task_results": {},
+        })()
+        with mock.patch.object(web_ui, "_list_tasks",
+                               return_value=[{"task_id": "ui-test0001", "goal": "测试目标",
+                                              "status": "SUCCESS", "report": report,
+                                              "created_at": "2026-09-12T00:00:00Z"}]):
+            web_ui._get_task_report(fake, "/task/ui-test0001/report")
+        html = handlers.get("html") or ""
+        self.assertTrue(html.lstrip().startswith("<!DOCTYPE html") or "<html" in html,
+                        "报告路由应返回完整 HTML 页面")
+        self.assertIn("结论", html)
+        self.assertNotIn("**目标**", html, "Markdown 强调语法应已渲染，而非原样输出")
+
+    def test_metrics_totals_match_database(self):
+        """指标看板的累计任务数/成功率须与 agents.db 同口径（跨重启不归零）。"""
+        import metrics_collector as mc
+        totals = mc._db_task_totals()
+        self.assertIn("total", totals)
+        self.assertGreater(totals["total"], 0)
+        con = __import__("sqlite3").connect("agents.db")
+        try:
+            expect = con.execute("SELECT COUNT(*) FROM task_history").fetchone()[0]
+            expect_success = con.execute(
+                "SELECT COUNT(*) FROM task_history WHERE status='SUCCESS'"
+            ).fetchone()[0]
+        finally:
+            con.close()
+        self.assertEqual(totals["total"], expect)
+        self.assertEqual(totals["success"], expect_success)
+
+
 if __name__ == "__main__":
     unittest.main()
