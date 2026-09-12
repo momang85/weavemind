@@ -79,6 +79,7 @@ def mark_failure(source: str, error: Exception | str) -> None:
         if h["fails"] >= SOURCE_FAIL_THRESHOLD:
             if h["cooldown_until"] <= now:
                 h["cooldown_until"] = now + _cooldown_seconds()
+    _publish_snapshot()
 
 
 def mark_success(source: str) -> None:
@@ -88,6 +89,27 @@ def mark_success(source: str) -> None:
         return
     with _LOCK:
         _HEALTH[name] = _blank()
+    _publish_snapshot()
+
+
+def _publish_snapshot() -> None:
+    """把健康快照写进 Redis，供**其它进程**（webui 的 /api/status）读取。
+
+    适配器状态是进程内的：orchestrator 与 webui 是两个进程，只读本进程 dict
+    会一直显示"无异常"。写失败静默——健康观测不得影响数据链路。"""
+    try:
+        import json
+        import os
+        import redis
+        client = redis.Redis(
+            host=os.environ.get("REDIS_HOST", "127.0.0.1"),
+            port=int(os.environ.get("REDIS_PORT", "6379") or 6379),
+            decode_responses=True, socket_connect_timeout=2, socket_timeout=2,
+        )
+        client.set("wm:source:health",
+                   json.dumps(get_health(), ensure_ascii=False), ex=600)
+    except Exception:
+        pass
 
 
 def is_available(source: str) -> tuple[bool, str]:

@@ -7015,21 +7015,24 @@ class TestEmbeddingDegradationAlert(unittest.TestCase):
         self.assertFalse(embed_health.embedding_health()["degraded"])
 
     def test_status_surfaces_embedding_warning_with_cooldown(self):
-        """降级时并入 llm_warning（Health 现成横幅），且告警按冷却窗口只发一次。"""
+        """降级时并入 llm_warning（Health 现成横幅），告警走统一去重层只发一次。"""
         import web_ui
-        web_ui._embed_alert_state["last_ts"] = 0.0
-        self.addCleanup(web_ui._embed_alert_state.__setitem__, "last_ts", 0.0)
+        published: list = []
+        fake = mock.MagicMock()
+        fake.publish = lambda ch, msg: published.append(msg)
         with mock.patch("embed_health.embedding_health",
                         return_value={"healthy": False, "degraded": True, "fails": 9}), \
                 mock.patch("embed_health.degradation_notice",
                            return_value="Embedding 接口连续失败 9 次：记忆检索已降级"), \
-                mock.patch.object(web_ui, "_publish_alert") as pub:
+                mock.patch.object(web_ui, "_new_redis", return_value=fake):
+            web_ui._alert_dedupe.clear()
+            self.addCleanup(web_ui._alert_dedupe.clear)
             first = web_ui._system_status()
             second = web_ui._system_status()
         self.assertIn("Embedding", first["llm_warning"])
         self.assertIn("Embedding", second["llm_warning"])
         self.assertTrue(first["embedding_health"]["degraded"])
-        self.assertEqual(pub.call_count, 1, "冷却窗口内不得重复发布告警")
+        self.assertEqual(len(published), 1, "冷却窗口内不得重复发布同一告警")
 
     def test_embedding_call_records_failure(self):
         """Embedding 调用失败必须落到健康记录里（旁路，不影响原异常抛出）。"""
@@ -7459,6 +7462,82 @@ class TestLLMDeadlineBudget(unittest.TestCase):
                 c.call("s", "u", expect_json=False, deadline=time.time() + 20)
         self.assertTrue(seen and all(t is not None for t in seen),
                         f"备用端点也必须收到剩余预算，实际 {seen}")
+
+
+class TestHealthRegistryAndAlertDedupe(unittest.TestCase):
+    """依赖健康注册表（统一字段）与告警去重下沉。"""
+
+    def test_snapshot_uniform_fields_and_covers_dependencies(self):
+        import health_registry
+        items = health_registry.snapshot()
+        names = {it["name"] for it in items}
+        self.assertTrue(
+            {"llm", "search", "market_source", "embedding", "code_sandbox"} <= names,
+            f"注册表应覆盖全部外部依赖，实际 {names}")
+        for it in items:
+            self.assertTrue(
+                {"name", "ok", "reason", "since", "source_process", "detail"} <= set(it),
+                f"{it['name']} 字段不齐：{sorted(it)}")
+            self.assertIsInstance(it["ok"], bool)
+
+    def test_probe_failure_degrades_not_raises(self):
+        """单个探针异常不得炸掉整张表（逐条降级为"状态不可读"）。"""
+        import health_registry
+        with mock.patch.object(health_registry, "probe_llm",
+                               side_effect=RuntimeError("boom")):
+            items = health_registry.snapshot()
+        self.assertEqual(len(items), 5)
+        self.assertTrue(all("name" in it for it in items))
+
+    def test_unhealthy_filters_only_failing(self):
+        import health_registry
+        fake = [
+            {"name": "a", "ok": True}, {"name": "b", "ok": False},
+        ]
+        with mock.patch.object(health_registry, "snapshot", return_value=fake):
+            self.assertEqual([i["name"] for i in health_registry.unhealthy()], ["b"])
+
+    def test_alert_dedupe_same_message_once(self):
+        import web_ui
+        published: list = []
+        fake = mock.MagicMock()
+        fake.publish = lambda ch, msg: published.append(msg)
+        web_ui._alert_dedupe.clear()
+        self.addCleanup(web_ui._alert_dedupe.clear)
+        with mock.patch.object(web_ui, "_new_redis", return_value=fake):
+            for _ in range(3):
+                web_ui._publish_alert("llm_balance_low", "同一原因", service="llm")
+            web_ui._publish_alert("llm_balance_low", "另一种原因", service="llm")
+        self.assertEqual(len(published), 2, "同消息去重、不同消息照常发布")
+
+    def test_alert_repeats_after_cooldown(self):
+        import web_ui
+        published: list = []
+        fake = mock.MagicMock()
+        fake.publish = lambda ch, msg: published.append(msg)
+        web_ui._alert_dedupe.clear()
+        self.addCleanup(web_ui._alert_dedupe.clear)
+        with mock.patch.object(web_ui, "_new_redis", return_value=fake):
+            web_ui._publish_alert("x", "msg", service="s")
+            web_ui._alert_dedupe["x|s|msg"] = 0.0      # 模拟冷却窗口已过
+            web_ui._publish_alert("x", "msg", service="s")
+        self.assertEqual(len(published), 2)
+
+    def test_heartbeat_downsampled_in_timeline(self):
+        """心跳只在 worker 健康构成变化时入时间线（否则 30s 一条刷屏）。"""
+        import web_ui
+        web_ui._events.clear()
+        web_ui._last_heartbeat_sig = None
+        self.addCleanup(setattr, web_ui, "_last_heartbeat_sig", None)
+
+        def _ingest(sig):
+            if sig == web_ui._last_heartbeat_sig:
+                return False
+            web_ui._last_heartbeat_sig = sig
+            return True
+
+        results = [_ingest(s) for s in [(11, 11), (11, 11), (11, 9), (11, 9)]]
+        self.assertEqual(results, [True, False, True, False])
 
 
 class TestReportRouteAndMetricsConsistency(unittest.TestCase):

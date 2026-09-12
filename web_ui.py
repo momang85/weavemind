@@ -56,7 +56,27 @@ def _try_claim_failure_notify(task_id: str) -> bool:
         return True
 
 
+_alert_dedupe: dict[str, float] = {}
+_ALERT_COOLDOWN_SECONDS = int(os.environ.get("WM_ALERT_COOLDOWN_SECONDS", "1800"))
+
+
 def _publish_alert(alert_type: str, message: str, service: str = "scheduler") -> None:
+    """发布告警事件（内置去重/冷却）。
+
+    同 (type, service, message) 在冷却窗口内只发一次：此前裸 PUBLISH 无任何去重，
+    周期探测（如每 30s 一次的端点预检）会把同一条告警反复写进事件时间线，
+    真正的告警被刷掉。"""
+    key = f"{alert_type}|{service}|{str(message)[:120]}"
+    now = time.time()
+    with _events_lock:
+        last = float(_alert_dedupe.get(key) or 0.0)
+        if now - last < _ALERT_COOLDOWN_SECONDS:
+            return
+        _alert_dedupe[key] = now
+        if len(_alert_dedupe) > 200:
+            for stale in sorted(_alert_dedupe, key=_alert_dedupe.get)[:100]:
+                _alert_dedupe.pop(stale, None)
+
     """发布 orchestrator:alert 事件（Health 页事件流）；失败静默（尽力而为）。"""
     try:
         _new_redis().publish("orchestrator:alert", json.dumps({
@@ -83,19 +103,15 @@ def _llm_precheck_notify(reasons: list[str]) -> list[str]:
     return reasons
 
 
-_embed_alert_state = {"last_ts": 0.0}
-_EMBED_ALERT_COOLDOWN_SECONDS = 1800
-
-
 def _publish_embed_alert(notice: str) -> None:
-    """Embedding 降级告警：按冷却窗口发布，避免状态轮询把事件时间线刷满。"""
-    now = time.time()
-    if now - float(_embed_alert_state.get("last_ts") or 0.0) < _EMBED_ALERT_COOLDOWN_SECONDS:
-        return
-    _embed_alert_state["last_ts"] = now
+    """Embedding 降级告警。
+
+    去重/冷却统一在 `_publish_alert` 内处理（按 type+service+message），
+    这里不再自建一套冷却，避免同一件事有两处节流实现。"""
     _publish_alert("embedding_degraded", "Embedding 预警：" + notice, service="memory")
 _events_lock = threading.Lock()
 _evt_seq = 0
+_last_heartbeat_sig = None
 _rate_limiter = None
 _START_TIME = time.time()
 _METRICS_SUMMARY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "metrics_summary.json")
@@ -887,6 +903,14 @@ def _listen_events():
             data = json.loads(msg["data"])
             if msg["channel"] == "orchestrator:evolution_result":
                 _append_evolution(data)
+            if msg["channel"] == "guardian.heartbeat":
+                # 心跳每 30s 一条，全量进时间线会把真正的告警刷掉；
+                # 只在 worker 健康构成变化时记一条（降采样）
+                sig = (data.get("workers_tracked"), data.get("workers_healthy"))
+                global _last_heartbeat_sig
+                if sig == _last_heartbeat_sig:
+                    continue
+                _last_heartbeat_sig = sig
             etype = data.get("type", msg["channel"].split(":")[-1])
             with _events_lock:
                 # 自增序号做 id：列表裁剪后 len 会回弹到固定值，
@@ -1009,11 +1033,19 @@ def _system_status():
             budget = get_budget_status()
         except Exception:
             budget = {}
+        try:
+            # 统一依赖健康视图：LLM/搜索/行情源/Embedding/沙箱一次列出
+            # （字段统一为 {name, ok, reason, since, source_process, detail}）
+            import health_registry
+            dependencies = health_registry.snapshot()
+        except Exception:
+            dependencies = []
         return {
             "agents": agents,
             "llm_health": llm_health,
             "llm_warning": llm_warning,
             "embedding_health": embedding_health,
+            "dependencies": dependencies,
             "search_health": search_health,
             "source_health": source_health,
             "budget": budget,
