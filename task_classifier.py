@@ -34,12 +34,18 @@ _COMPARE_TRIGGER_RE = re.compile(
     r"(?:对比|比较|vs|分别|相比)", re.I,
 )
 
+# 报告期短语（整词）：断言/前瞻里必须先于"年报/季报"匹配，否则
+# "比亚迪三季报"会被切成"比亚迪三" + "季报"（多实体拆分同款切分 bug）
+_PERIOD_PHRASE_ALT = (
+    r"年度报告|半年度报告|中期报告|一季报|三季报|半年报|中报|年度|年报|季报"
+)
+
 # 连接符后的公司名：名称后紧跟财务/对比语境词或句子结尾。
 # 用前瞻限定“近三年营收”“的财报”等合法后缀语境，避免吞入后续普通动词。
 _AFTER_CONNECTOR_RE = re.compile(
     r"(?:与|和|及|以及|、|跟|vs)\s*([\u4e00-\u9fff]{2,6}?)"
-    r"(?=(?:的)?(?:历年年度|历年|年度|最新|近三年|近五年|最近)?"
-    r"(?:财报|年报|季报|财务|营收|净利润|净利|利润|收入|业绩|负债|报表|"
+    rf"(?=(?:的)?(?:历年年度|历年|年度|最新|近三年|近五年|最近)?"
+    rf"(?:{_PERIOD_PHRASE_ALT}|财报|财务|营收|净利润|净利|利润|收入|业绩|负债|报表|"
     r"趋势|情况|数据|表现|竞争格局|竞争|格局|技术路线|市场份额|"
     r"在|于|的市|的行|"
     r"相比|对比|比较|分别|vs)|$)",
@@ -57,8 +63,8 @@ _BEFORE_CONNECTOR_RE = re.compile(
 _BEFORE_FINANCIAL_RE = re.compile(
     rf"(?:{_GENERIC_WORDS}|对比|比较|分别|相比)*"
     r"([\u4e00-\u9fff]{2,6}?)"
-    r"(?:的)?(?:历年年度|历年|年度|最新|近三年|近五年|最近)?"
-    r"(?:财报|年报|季报|财务|营收|净利润|净利|利润|收入|业绩|负债|报表|"
+    rf"(?:的)?(?:历年年度|历年|年度|最新|近三年|近五年|最近)?"
+    rf"(?:{_PERIOD_PHRASE_ALT}|财报|财务|营收|净利润|净利|利润|收入|业绩|负债|报表|"
     r"趋势|情况|数据|表现)",
     re.I,
 )
@@ -92,29 +98,126 @@ _STOCK_CODE_RE = re.compile(
     r"[A-Za-z]{0,8}(?:\s*,\s*[A-Za-z]{0,4}\s*)?\s*\d{4,6}\.?"
     r"(?:SZ|SH|HK|US)?\s*[）)]"
 )
+# 反向写法：'600519（贵州茅台）' —— 代码在前、括号内是名称（同样是权威锚点）
+_STOCK_CODE_FIRST_RE = re.compile(
+    r"\d{4,6}\.?(?:SZ|SH|HK|US)?\s*[（(]\s*([\u4e00-\u9fff]{2,10})\s*[）)]",
+    re.I,
+)
 
 
 def _extract_company(g: str) -> str:
-    """提取公司名：优先显式股票代码（'X（CODE）' 锚点），
-    其次 'X集团/控股'，再次 'X公司'、财报前词。"""
+    """提取公司名：优先显式股票代码（'X（CODE）' 锚点）、'X集团/控股'、
+    'X公司'，其次"公司名紧接报告期短语"，最后退回"财报/营收"等前词。
+
+    报告期短语单独成一条模式的原因（实测 bug）：旧模式的关键词里含"季报/年报"，
+    于是"2025年三季报"被切成 `年三` + `季报`（"研究宁德时代三季报"则得到
+    `宁德时代三`）。公司名提取错 → `resolve_company` 失败 → `route_structured`
+    返回 None → **结构化财务链路从不命中**，报告只能靠搜索拼口径。
+    """
     m = _STOCK_CODE_RE.search(g)
+    if m:
+        return m.group(1)
+    m = _STOCK_CODE_FIRST_RE.search(g)
     if m:
         return m.group(1)
     for pat in (
         rf"(?:{_GENERIC_WORDS})*([\u4e00-\u9fff]{{2,6}})(?:集团|控股)",
         rf"(?:{_GENERIC_WORDS})*([\u4e00-\u9fff]{{2,6}})公司",
-        rf"(?:{_GENERIC_WORDS})*([\u4e00-\u9fff]{{2,6}}?)(?:的)?"
-        r"(?:历年年度|历年|年度|最新|近三年|近五年|最近"
-        r"|20\d{2}(?:\s*[-—至]\s*20\d{2})?\s*年?)?"
-        r"(?:财报|年报|季报|财务|营收|净利润|净利|利润|收入|业绩|负债|研发投入)",
     ):
         # 全部匹配逐个过公司名校验：语境词前的垃圾片段（如"评估其财务"
         # 的"评估其"）跳过继续找，真公司名（"贵州茅台近三年营收"）命中即返回
         for m in re.finditer(pat, g):
             c = m.group(1)
-            if len(c) >= 2 and _looks_like_company(c):
-                return c
+            if len(c) < 2 or not _looks_like_company(c):
+                continue
+            # 报告期残片守卫：捕获串含报告期词一律不认（防"年三""宁德时代三"）
+            if any(w in c for w in _REPORT_PERIOD_WORDS):
+                continue
+            return c
+    c = _company_before_period(g)
+    if c:
+        return c
+    pat = (
+        rf"(?:{_GENERIC_WORDS})*([\u4e00-\u9fff]{{2,6}}?)(?:的)?"
+        r"(?:历年年度|历年|年度|最新|近三年|近五年|最近"
+        r"|20\d{2}(?:\s*[-—至]\s*20\d{2})?\s*年?)?"
+        r"(?:财报|年报|季报|财务|营收|净利润|净利|利润|收入|业绩|负债|研发投入)"
+    )
+    for m in re.finditer(pat, g):
+        c = m.group(1)
+        if len(c) < 2 or not _looks_like_company(c):
+            continue
+        if any(w in c for w in _REPORT_PERIOD_WORDS):
+            continue
+        return c
     return ""
+
+
+# 报告期短语：允许带年份（"2025年三季报"），用于定位紧邻其前的公司名
+_PERIOD_PHRASE_RE = re.compile(
+    r"(?:20\d{2}\s*年?)?\s*"
+    r"(?:年度报告|半年度报告|年度|年报|三季报|一季报|中期报告|半年报|中报|季报)"
+)
+
+# 公司名左侧可能粘着的语境词（剥离用）。取"通用语境词 + 公司名停用词 + 常见请求语"，
+# 长词优先匹配，保证"梳理/分析"整体剥掉而不是留下单字伪名。
+_CTX_TOKENS = tuple(sorted(
+    set(_GENERIC_WORDS.split("|")) | set(_COMPANY_STOPWORDS)
+    | {"看看", "看", "我要", "我想", "给我", "帮我", "麻烦", "帮忙", "请"},
+    key=len, reverse=True,
+))
+
+
+def _company_before_period(g: str) -> str:
+    """取紧贴报告期短语之前的公司名。
+
+    不能用 `([\\u4e00-\\u9fff]{2,6})(?=报告期短语)` 这种"从头捕获"的写法：
+    它会在最早位置吞掉整段（"我要贵州茅台"），校验失败后 `finditer` 已越过
+    正确起点，正确公司名再也匹配不到——实测"我要贵州茅台2025年三季报…"
+    返回空、整条结构化财务链路失效。
+
+    也不能"从长到短试后缀"：截短会切出"理贵州茅台"（"梳理"的尾巴）这类
+    看似合法的片段，而校验只看整词存在与否，反而比真名更容易通过。
+    正确做法是先剥掉左侧语境词，再对剩余整段做校验。
+    """
+    for m in _PERIOD_PHRASE_RE.finditer(g):
+        window = g[max(0, m.start() - 6):m.start()]
+        tail = re.search(r"[\u4e00-\u9fff]{2,6}$", window)
+        if not tail:
+            continue
+        cand = _peel_context_prefix(tail.group(0))
+        if cand:
+            return cand
+    return ""
+
+
+def _peel_context_prefix(seg: str) -> str:
+    """剥掉公司名左侧的语境词（"我要贵州茅台"→"贵州茅台"）。
+
+    逐字左滑而非只看开头：语境词可能不在首位（"我要…"的"要"在第 2 字）。
+    滑动时优先整词剥离，避免把"梳理"剥成"理"留下"理贵州茅台"这种伪合法名。
+    """
+    while len(seg) > 1:
+        hit = next((t for t in _CTX_TOKENS if seg.startswith(t)), "")
+        if hit:
+            seg = seg[len(hit):]
+            continue
+        if any(t in seg for t in _CTX_TOKENS):
+            seg = seg[1:]
+            continue
+        break
+    if len(seg) < 2 or any(t in seg for t in _CTX_TOKENS):
+        return ""
+    if any(w in seg for w in _REPORT_PERIOD_WORDS):
+        return ""
+    return seg if _looks_like_company(seg) else ""
+
+
+# 报告期词：出现在"公司名候选"里说明切分切错了（如"年三"/"宁德时代三"）
+_REPORT_PERIOD_WORDS = (
+    "季报", "年报", "半年报", "中报", "年度", "半年", "年三", "年半", "年一",
+    "一季", "三季", "二季", "四季度", "单季",
+)
 
 
 def _looks_like_company(name: str) -> bool:
@@ -180,6 +283,9 @@ def _extract_companies(g: str) -> list[str]:
         for m in pattern.finditer(g):
             name = m.group(1)
             if name in seen or not _is_valid_company_name(name):
+                continue
+            # 报告期残片守卫（与 _extract_company 同款）：'比亚迪三' 不得当公司名
+            if any(word in name for word in _REPORT_PERIOD_WORDS):
                 continue
             seen.add(name)
             names.append(name)

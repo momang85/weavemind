@@ -60,8 +60,32 @@ def _to_yi(raw) -> float | None:
     return round(v / 1e8, 2)
 
 
-def fetch(company: str, stock_code: str, year_range=None, max_years: int = 12) -> dict:
-    """抓取港股主要财务指标（年报序列 + 最新季报）。
+def _select_period_rows(rows: list, period: str, max_years: int) -> list:
+    """按报告期粒度挑行：annual=仅年报（默认，保持既有行为）；
+    quarter=仅季报/中报（最新优先）；all=全部期次（年报优先排序）。
+
+    接口本身就返回全部期次（实测 600519：年报 28 / 三季报 24 / 中报 26 /
+    一季报 25 行），此前代码写死只保留"年报"，于是"三季报"目标拿不到对应
+    报告期，只能靠搜索拼口径。
+    """
+    def _date(r):
+        return str(r.get("REPORT_DATE") or "")
+
+    mode = str(period or "annual").lower()
+    if mode == "quarter":
+        picked = [r for r in rows if "年报" not in str(r.get("REPORT_TYPE") or "")]
+    elif mode == "all":
+        picked = list(rows)
+    else:
+        picked = [r for r in rows if "年报" in str(r.get("REPORT_TYPE") or "")]
+    picked.sort(key=_date, reverse=True)
+    return picked[:max_years] if max_years else picked
+
+
+def fetch(company: str, stock_code: str, year_range=None, max_years: int = 12,
+          period: str = "annual") -> dict:
+    """抓取港股主要财务指标。period=annual（默认）仅年报；quarter 取非年报期次
+    （港股多为半年报，是否含季报取决于该接口，实测确认）。
 
     Args:
         company: 公司名（仅用于 metadata 标注）。
@@ -79,21 +103,20 @@ def fetch(company: str, stock_code: str, year_range=None, max_years: int = 12) -
     if not rows:
         raise RuntimeError(f"EastMoney 无数据: {stock_code}")
 
-    annuals = [r for r in rows if "年报" in str(r.get("REPORT_TYPE") or "")]
-    annuals.sort(key=lambda r: str(r.get("REPORT_DATE") or ""), reverse=True)
+    annuals = _select_period_rows(rows, period, max_years)
     if year_range:
         start, end = year_range
         annuals = [
             r for r in annuals
             if start <= int(str(r.get("REPORT_DATE") or "")[:4]) <= end
         ]
-    annuals = annuals[:max_years]
 
     financials = []
     for r in annuals:
         year = int(str(r.get("REPORT_DATE") or "")[:4])
         financials.append({
             "year": year,
+            "report_date": str(r.get("REPORT_DATE") or "")[:10],
             "report_type": str(r.get("REPORT_TYPE") or ""),
             "revenue": _to_yi(r.get("OPERATE_INCOME")),
             "net_profit": _to_yi(r.get("HOLDER_PROFIT")),
@@ -119,6 +142,7 @@ def fetch(company: str, stock_code: str, year_range=None, max_years: int = 12) -
         "unit": "亿元",
         "retrieved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "annual_count": len(annuals),
+        "period": str(period or "annual"),
         "latest_report": f"{str(latest.get('REPORT_DATE') or '')[:10]} {latest.get('REPORT_TYPE')}",
     }
     return {
@@ -128,8 +152,11 @@ def fetch(company: str, stock_code: str, year_range=None, max_years: int = 12) -
     }
 
 
-def fetch_ashare(company: str, stock_code: str, year_range=None, max_years: int = 12) -> dict:
-    """抓取 A 股主要财务指标（RPT_F10_FINANCE_MAINFINADATA，年报序列 + 最新季报）。"""
+def fetch_ashare(company: str, stock_code: str, year_range=None, max_years: int = 12,
+                 period: str = "annual") -> dict:
+    """抓取 A 股主要财务指标（RPT_F10_FINANCE_MAINFINADATA，含全部报告期）。
+
+    period: annual（默认，仅年报，保持既有行为）/ quarter（季报与中报）/ all。"""
     url = _api_url_ashare(stock_code)
     text = _get(url)
     data = json.loads(text)
@@ -137,15 +164,13 @@ def fetch_ashare(company: str, stock_code: str, year_range=None, max_years: int 
     if not rows:
         raise RuntimeError(f"EastMoney A股 无数据: {stock_code}")
 
-    annuals = [r for r in rows if "年报" in str(r.get("REPORT_TYPE") or "")]
-    annuals.sort(key=lambda r: str(r.get("REPORT_DATE") or ""), reverse=True)
+    annuals = _select_period_rows(rows, period, max_years)
     if year_range:
         start, end = year_range
         annuals = [
             r for r in annuals
             if start <= int(str(r.get("REPORT_DATE") or "")[:4]) <= end
         ]
-    annuals = annuals[:max_years]
 
     financials = []
     for r in annuals:
@@ -154,6 +179,7 @@ def fetch_ashare(company: str, stock_code: str, year_range=None, max_years: int 
         gross = _to_yi(r.get("MLR"))
         financials.append({
             "year": year,
+            "report_date": str(r.get("REPORT_DATE") or "")[:10],
             "report_type": str(r.get("REPORT_TYPE") or ""),
             "revenue": revenue,
             "net_profit": _to_yi(r.get("PARENTNETPROFIT")),
@@ -179,6 +205,7 @@ def fetch_ashare(company: str, stock_code: str, year_range=None, max_years: int 
         "unit": "亿元",
         "retrieved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "annual_count": len(annuals),
+        "period": str(period or "annual"),
         "latest_report": f"{str(latest.get('REPORT_DATE') or '')[:10]} {latest.get('REPORT_TYPE')}",
     }
     return {

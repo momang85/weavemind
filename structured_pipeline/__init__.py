@@ -19,6 +19,34 @@ from ws_helpers import push_progress
 logger = logging.getLogger("orchestrator_v2")
 
 
+
+def _period_tag(row: dict) -> str:
+    """财务行的报告期标签：季报/中报用季度写法（2025Q3），年报沿用“2025年”。"""
+    year = row.get("year")
+    rtype = str(row.get("report_type") or "")
+    if year is None:
+        return ""
+    if "一季报" in rtype:
+        return f"{year}Q1"
+    if "中报" in rtype or "半年报" in rtype:
+        return f"{year}Q2"
+    if "三季报" in rtype:
+        return f"{year}Q3"
+    return f"{year}年"
+
+
+def _caliber_tag(row: dict) -> str:
+    """口径说明：把报告期写清楚（年报口径/三季报口径/中报口径/一季报口径）。"""
+    rtype = str(row.get("report_type") or "")
+    date = str(row.get("report_date") or "")
+    base = "年报口径"
+    for name in ("一季报", "中报", "半年报", "三季报"):
+        if name in rtype:
+            base = f"{name}口径"
+            break
+    return f"{base}（{rtype}{'，' + date if date else ''}）"
+
+
 class StructuredPipelineMixin:
 
     @staticmethod
@@ -735,6 +763,7 @@ class StructuredPipelineMixin:
         return ""
 
     @staticmethod
+    @staticmethod
     def _merge_structured_financials(
         clean: dict, financials: list, source_url: str,
         entity: str | None = None,
@@ -761,8 +790,12 @@ class StructuredPipelineMixin:
                 v = f.get(key)
                 if v is None:
                     continue
-                label = f"{entity}{f.get('year')}年{label}" if entity else (
-                    f"{f.get('year')}年{label}"
+                # 报告期标签：季报/中报用"2025Q3"这类季度写法，避免与同年年报行
+                # 撞标签被去重掉（此前统一写"2025年"，季报与年报只能留一条），
+                # caliber 也如实标注口径（三季报/中报/一季报/年报）
+                _period_label = _period_tag(f)
+                label = f"{entity}{_period_label}{label}" if entity else (
+                    f"{_period_label}{label}"
                 )
                 row = {
                     "type": "market_size",
@@ -770,7 +803,7 @@ class StructuredPipelineMixin:
                     "value": v, "unit": unit,
                     "year": f.get("year"),
                     "source": source_url,
-                    "caliber": f"年报口径（{f.get('report_type') or ''}）",
+                    "caliber": _caliber_tag(f),
                 }
                 k = (row["label"], row["value"], row["unit"])
                 if k not in seen:

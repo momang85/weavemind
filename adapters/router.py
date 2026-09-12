@@ -454,10 +454,22 @@ def _fetch_ranking_with_fallback(
     return None
 
 
-def _fetch_financial_entity(company: str, cls: dict) -> tuple[dict | None, str]:
+# 要求"季报/中报"口径的目标：结构化财务要取对应报告期，而不是默认只给年报
+_QUARTER_HINTS = ("季报", "三季报", "一季报", "中报", "半年报", "中期报告", "单季", "季度报告")
+
+
+def _wants_quarterly(goal: str) -> bool:
+    g = str(goal or "")
+    return any(k in g for k in _QUARTER_HINTS)
+
+
+def _fetch_financial_entity(company: str, cls: dict,
+                            period: str = "annual") -> tuple[dict | None, str]:
     """单个实体的财务抓取：resolve_company + 按市场分发
     （HK→fetch_eastmoney / US→fetch_sec / CN→fetch_ashare），
     参照单实体分支的写法；返回 (entry, error)，失败时 entry 为 None。
+
+    period 由调用方按目标算出（季报/中报目标取对应报告期），本函数不重复解析目标。
     """
     try:
         res = resolve_company(company)
@@ -469,9 +481,10 @@ def _fetch_financial_entity(company: str, cls: dict) -> tuple[dict | None, str]:
         if res["market"] == "HK":
             data = fetch_eastmoney(
                 res["name"], res["stock_code"],
-                year_range=cls.get("year_range"),
+                year_range=cls.get("year_range"), period=period,
             )
         elif res["market"] == "US":
+            # SEC 通道目前只做 10-K（年报）；10-Q 未接入，记为已知限制
             data = fetch_sec(
                 res["name"], res["stock_code"],
                 year_range=cls.get("year_range"),
@@ -480,7 +493,7 @@ def _fetch_financial_entity(company: str, cls: dict) -> tuple[dict | None, str]:
             # CN：巨潮官方源优先（默认关闭，探针未通过），东财兜底
             data = fetch_cn_or_fallback(
                 res["name"], res["stock_code"],
-                year_range=cls.get("year_range"),
+                year_range=cls.get("year_range"), period=period,
             )
     except Exception as exc:
         return None, f"财务抓取失败: {exc}"
@@ -500,7 +513,7 @@ def _fetch_financial_entity(company: str, cls: dict) -> tuple[dict | None, str]:
 
 
 def _route_multi_entity_financial(
-    companies: list[str], cls: dict,
+    companies: list[str], cls: dict, period: str = "annual",
 ) -> dict | None:
     """多实体对比目标：逐个 resolve + 抓取，成功实体照常返回，
     失败实体记入 warnings；全部失败返回 None（回退搜索链路）。"""
@@ -512,7 +525,7 @@ def _route_multi_entity_financial(
         if not company or company in seen:
             continue
         seen.add(company)
-        entry, error = _fetch_financial_entity(company, cls)
+        entry, error = _fetch_financial_entity(company, cls, period)
         if entry is None:
             warnings.append({
                 "name": company,
@@ -638,7 +651,8 @@ def route_structured(goal: str, scope: str = "") -> dict | None:
     ]
     companies = list(dict.fromkeys(companies))
     if len(companies) >= 2:
-        return _route_multi_entity_financial(companies, cls)
+        return _route_multi_entity_financial(
+            companies, cls, "quarter" if _wants_quarterly(goal) else "annual")
     if not cls["company"]:
         # 多实体拆分只拆出一个实体时，也走单实体链路（如“对比苹果的营收”）
         if len(companies) == 1:
@@ -650,11 +664,15 @@ def route_structured(goal: str, scope: str = "") -> dict | None:
     if not res or res["market"] not in ("HK", "US", "CN"):
         return None
     try:
+        # 期次粒度：目标含"季报/中报"时取对应报告期（接口含全部期次）
+        _period = "quarter" if _wants_quarterly(goal) else "annual"
         if res["market"] == "HK":
             data = fetch_eastmoney(
                 res["name"], res["stock_code"], year_range=cls["year_range"],
+                period=_period,
             )
         elif res["market"] == "US":
+            # SEC 通道只做 10-K（年报）；10-Q 未接入，属已知限制
             data = fetch_sec(
                 res["name"], res["stock_code"], year_range=cls["year_range"],
             )
@@ -662,6 +680,7 @@ def route_structured(goal: str, scope: str = "") -> dict | None:
             # CN：巨潮官方源优先（默认关闭），东财兜底
             data = fetch_cn_or_fallback(
                 res["name"], res["stock_code"], year_range=cls["year_range"],
+                period=_period,
             )
         data["classification"] = cls
         data["resolution"] = res

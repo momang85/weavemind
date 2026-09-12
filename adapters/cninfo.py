@@ -127,12 +127,15 @@ def fetch_annual_report(
     }
 
 
-def fetch_cn_or_fallback(company: str, stock_code: str, year_range=None, max_years: int = 12) -> dict:
+def fetch_cn_or_fallback(company: str, stock_code: str, year_range=None,
+                         max_years: int = 12, period: str = "annual") -> dict:
     """A 股财务抓取统一入口：巨潮优先（启用且可用时），东财兜底。
 
     路由层调用本函数即可获得"官方源优先 + 降级"语义；
-    巨潮关闭（默认）时直接走东财，行为与现状完全一致。"""
-    if enabled():
+    巨潮关闭（默认）时直接走东财，行为与现状完全一致。
+    period 透传给东财（annual/quarter/all）；巨潮通道目前只做年报，
+    period != annual 时直接走东财（它才带季报/中报行）。"""
+    if enabled() and str(period or "annual").lower() == "annual":
         try:
             return fetch_annual_report(company, stock_code, year_range, max_years)
         except Exception as exc:
@@ -140,4 +143,4 @@ def fetch_cn_or_fallback(company: str, stock_code: str, year_range=None, max_yea
             logging.getLogger("adapters.cninfo").info(
                 "cninfo unavailable, fallback to eastmoney_ashare: %s", str(exc)[:120])
     from adapters.eastmoney import fetch_ashare
-    return fetch_ashare(company, stock_code, year_range, max_years)
+    return fetch_ashare(company, stock_code, year_range, max_years, period=period)

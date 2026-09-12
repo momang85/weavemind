@@ -332,6 +332,34 @@ def _collect_sources(workspace) -> dict[str, str]:
             src["structured_data"] = sd.read_text(encoding="utf-8")
     except Exception:
         pass
+    # 结构化财务（东财/SEC/巨潮适配器的落盘产物）：这是**已抓取并留档**的权威来源，
+    # 必须参与溯源。此前只认 clean_chart_data.json——而该文件要在清洗步骤跑过之后
+    # 才存在（实测：财务任务若在清洗前降级/失败，金额与比率全部被判"不可溯源"，
+    # 报告里明明写着 1309.04 亿元、91.29% 却溯源率 0%）。
+    try:
+        fin = proj / "financials.json"
+        if fin.exists():
+            rows = (json.loads(fin.read_text(encoding="utf-8")) or {}).get("financials") or []
+            parts = []
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                for key, unit in (("revenue", "亿元"), ("net_profit", "亿元"),
+                                  ("gross_profit", "亿元"), ("gross_margin", "%"),
+                                  ("operating_profit", "亿元"),
+                                  ("total_assets", "亿元"), ("total_liabilities", "亿元"),
+                                  ("operating_cashflow", "亿元"),
+                                  ("rd_expense", "亿元"), ("roe", "%")):
+                    v = r.get(key)
+                    if v is None:
+                        continue
+                    parts.append(
+                        f"{r.get('year')}年{r.get('report_type') or ''} "
+                        f"{key}={v}{unit} 值 {v} {unit}"
+                    )
+            src["financials"] = "\n".join(parts)
+    except Exception:
+        pass
     return src
 
 
