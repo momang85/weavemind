@@ -119,6 +119,20 @@ def call_with_heartbeat(messaging, task_id: str, phase: str, fn, *args,
 
     调用异常原样抛出（由调用方决定重试/降级）；心跳线程始终会被清理。
     """
+    # 兼容性：`deadline` 是后加的调用级预算参数，若目标可调用对象不接受它
+    # （自定义客户端/测试打桩），自动去掉而不是让调用直接失败。
+    if "deadline" in kwargs:
+        try:
+            import inspect
+            params = inspect.signature(fn).parameters
+            has_var_kw = any(
+                p.kind == p.VAR_KEYWORD for p in params.values()
+            )
+            if not has_var_kw and "deadline" not in params:
+                kwargs.pop("deadline")
+        except Exception:
+            pass
+
     result_box: dict = {}
 
     def _runner():

@@ -1218,8 +1218,9 @@ class LLMClient:
         # 健康路由（O-29）：主端点已被判定不健康 → 优先走备用，避免每次白白等待超时
         if not _primary_healthy():
             try:
+                _bk_timeout = _attempt_timeout()
                 return self._call_backup(system, user, temp, max_tok, expect_json,
-                                         timeout=_attempt_timeout())
+                                         timeout=_bk_timeout)
             except LLMJSONParseError:
                 raise
             except Exception as exc:
@@ -1238,8 +1239,12 @@ class LLMClient:
                 logger.warning("LLM time budget exhausted (usage=%s)", usage)
                 raise exc
             try:
+                _t = _attempt_timeout()
+                # 无预算时不传 timeout：保持调用形状与改动前一致
+                # （既有打桩/自定义 _send_request 不必为新增特性适配）
+                _req_kw = {"timeout": _t} if _t is not None else {}
                 raw = self._send_request(system, user, temp, max_tok, model=model,
-                                         timeout=_attempt_timeout())
+                                         **_req_kw)
                 _mark_endpoint("primary", True)
                 if not expect_json:
                     result: dict[str, Any] = {"content": raw}
@@ -1280,8 +1285,9 @@ class LLMClient:
         # 主端点失败 → 自动切换备用端点/模型（时间预算耗尽时不再切，直接交给调用方降级）
         if self._backup_cfg and not _budget_exhausted():
             try:
+                _bk_timeout = _attempt_timeout()
                 return self._call_backup(system, user, temp, max_tok, expect_json,
-                                         timeout=_attempt_timeout())
+                                         timeout=_bk_timeout)
             except LLMJSONParseError:
                 raise
             except Exception as exc:
@@ -1309,8 +1315,9 @@ class LLMClient:
             api_key=self._backup_cfg.get("api_key"),
             model=self._backup_cfg.get("model") or self.model,
         )
+        _bk_kw = {"timeout": timeout} if timeout is not None else {}
         raw = backup._send_request(system, user, temperature, max_tokens,
-                                   endpoint="backup", timeout=timeout)
+                                   endpoint="backup", **_bk_kw)
         _mark_endpoint("backup", True)
         # P2-3：切换发生时把主端点 last_degradation_reason（为空则记
         # inherited_unhealthy）作为根因，避免 llm_degraded 只有 switch 事件
