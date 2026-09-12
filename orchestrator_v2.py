@@ -629,18 +629,31 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                            "timestamp": self._now_iso()})
             try:
                 from prompt_registry import get_prompt
+                from ws_helpers import call_with_heartbeat, phase_begin, phase_end
                 # B2：同目标重复规划直接命中缓存（LLM_CACHE_TTL 开启时生效），
                 # 键含目标哈希，同一会话追问重复提交不会重复花规划 token
                 plan_cache_key = (
                     "plan:"
                     + hashlib.sha256(str(goal).encode("utf-8")).hexdigest()
                 )
-                raw = self._planner_llm.call(
-                    get_prompt("planner", PLANNER_SYSTEM, goal=goal),
-                    attempt_prompt, expect_json=True, max_tokens=8192,
-                    # B1：规划/反思/评审统一走 planner 用途模型
-                    usage="plan", cache_key=plan_cache_key,
-                )
+                phase_begin(self._messaging, task_id, "规划", attempt=attempt + 1)
+                try:
+                    # 规划调用可能阻塞数分钟：放进工作线程并按时心跳，
+                    # 控制台因此显示"规划进行中（已等待 Ns）"而不是静默
+                    raw = call_with_heartbeat(
+                        self._messaging, task_id, "规划",
+                        self._planner_llm.call,
+                        get_prompt("planner", PLANNER_SYSTEM, goal=goal),
+                        attempt_prompt, expect_json=True, max_tokens=8192,
+                        # B1：规划/反思/评审统一走 planner 用途模型
+                        usage="plan", cache_key=plan_cache_key,
+                    )
+                    phase_end(self._messaging, task_id, "规划", ok=True,
+                              detail=f"规划完成（第 {attempt + 1} 次尝试）")
+                except Exception:
+                    phase_end(self._messaging, task_id, "规划", ok=False,
+                              detail=f"规划第 {attempt + 1} 次尝试失败")
+                    raise
                 plan_data = self._parse_plan_response(raw)
                 break
             except Exception as e:
@@ -1625,11 +1638,20 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         prompt = "\n\n".join(ctx_parts)
         try:
             from prompt_registry import get_prompt
-            raw = self._planner_llm.call(
-                get_prompt("reflect", ITERATOR_SYSTEM, goal=goal),
-                prompt, expect_json=True, max_tokens=8192,
-                usage="plan",
-            )
+            from ws_helpers import call_with_heartbeat, phase_begin, phase_end
+            phase_begin(self._messaging, task_id, "反思")
+            try:
+                raw = call_with_heartbeat(
+                    self._messaging, task_id, "反思",
+                    self._planner_llm.call,
+                    get_prompt("reflect", ITERATOR_SYSTEM, goal=goal),
+                    prompt, expect_json=True, max_tokens=8192,
+                    usage="plan",
+                )
+                phase_end(self._messaging, task_id, "反思", ok=True)
+            except Exception:
+                phase_end(self._messaging, task_id, "反思", ok=False)
+                raise
             if isinstance(raw, dict):
                 return raw
             clean = str(raw).strip()
@@ -3047,6 +3069,74 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
 
 
     # ── Main Loop ──
+    def _start_phase_monitor(self, task_id: str,
+                             stop_evt: "threading.Event") -> "threading.Thread":
+        """阶段看门狗（分级第一步：告警，不终止）。
+
+        判定依据是 ws_helpers 的统一阶段心跳：某阶段超过 `_stall_timeout`
+        没有心跳 → 发一条 warning 事件（含已等待时长与阶段名），让"卡在 LLM 调用"
+        在控制台/日志里可见。真正的重试与超时由各阶段既有逻辑处理。"""
+        try:
+            threshold = int(
+                os.environ.get("WM_PHASE_STALL_SECONDS")
+                or max(30, int(getattr(self, "_stall_timeout", 60) or 60))
+            )
+        except Exception:
+            threshold = max(30, int(getattr(self, "_stall_timeout", 60) or 60))
+        threshold = max(1, threshold)
+        interval = 10.0
+        try:
+            # 轮询间隔（默认 10s）；下限 0.1s 只影响轮询频率，便于测试与调优
+            interval = max(0.1, float(os.environ.get("WM_PHASE_WATCH_INTERVAL", "10") or 10))
+        except Exception:
+            interval = 10.0
+
+        def _loop():
+            last_alert = 0.0
+            while not stop_evt.wait(interval):
+                # 自终止：任务已不在运行（正常完成/失败/被清理）即退出，
+                # 不必在每个 return 路径上穿线设置 stop 事件
+                try:
+                    if not self._task_is_running(task_id):
+                        return
+                except Exception:
+                    pass
+                try:
+                    from ws_helpers import phase_state
+                    state = phase_state(task_id)
+                    if not state:
+                        continue
+                    age = time.time() - float(state.get("last_beat") or 0)
+                    if age < threshold or time.time() - last_alert < threshold:
+                        continue
+                    last_alert = time.time()
+                    push_progress(self._messaging, task_id, "log", {
+                        "type": "warning",
+                        "agent": "orchestrator",
+                        "message": (
+                            f"{state.get('phase') or '当前'}阶段已 {age:.0f}s 无进展"
+                            f"（疑似 LLM 调用阻塞，阈值 {threshold}s）；仍在等待，"
+                            "超时后会重试或降级"
+                        ),
+                        "phase": str(state.get("phase") or ""),
+                        "elapsed_seconds": round(age, 1),
+                        "timestamp": self._now_iso(),
+                    })
+                    logger.warning(
+                        "Phase watchdog: %s stuck for %.0fs (task %s)",
+                        state.get("phase"), age, task_id,
+                    )
+                except Exception as exc:
+                    # 不能静默：看门狗自身出错会表现为"永远不告警"
+                    logger.warning("Phase watchdog error for %s: %s",
+                                   task_id, str(exc)[:150])
+                    continue
+
+        thread = threading.Thread(target=_loop, daemon=True,
+                                 name=f"phase-watch-{task_id}")
+        thread.start()
+        return thread
+
     def run(self, task_id: str, goal: str, context: str = "",
             auto_run: bool = True, template_steps: list | None = None,
             user_id: str = "", project: str | None = None,
@@ -3086,6 +3176,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             )
             resumed = None
         self._mark_task_running(task_id)
+        # 阶段看门狗：规划/评审/反思这类阻塞调用此前完全在进度模型之外，
+        # 卡住时控制台没有任何信号（实测静默 6 分钟）。这里按统一阶段心跳判定，
+        # 超阈值先告警（分级第一步；重试/终止仍由各阶段的既有逻辑负责）。
+        _phase_stop = threading.Event()
+        _phase_thread = self._start_phase_monitor(task_id, _phase_stop)
         if resumed is None:
             # 每任务独立成果文件夹：清空本项目目录与旧交付包，保证只含本次产物
             ensure_task_workspace(task_id, project)

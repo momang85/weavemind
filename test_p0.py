@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import zipfile
@@ -7282,6 +7283,112 @@ class TestInjectionRelevance(unittest.TestCase):
         self.assertTrue(is_relevant("统计A股成交额排行", "ranking.csv", "code,name,amount"))
         self.assertTrue(has_chart_intent("输出 ASCII 柱状图"))
         self.assertFalse(has_chart_intent("计算合计与均值"))
+
+
+class TestPhaseProgressAndWatchdog(unittest.TestCase):
+    """统一阶段进度源 + 阶段看门狗。
+
+    回归：规划/评审/反思的 LLM 调用不在进度模型里，某个规划调用卡了 6 分钟，
+    控制台只有 "Planning (LLM thinking)…"，没有任何"还在跑/已等待多久"的信号。
+    """
+
+    def setUp(self):
+        self.events = []
+        self.messaging = mock.MagicMock()
+        self.messaging.publish = lambda ch, msg: self.events.append(msg)
+        self.addCleanup(lambda: [os.environ.pop(k, None) for k in (
+            "WM_PHASE_WATCH_INTERVAL", "WM_PHASE_STALL_SECONDS",
+            "WM_PHASE_HEARTBEAT_SECONDS")])
+
+    def _payloads(self):
+        """push_progress 会同时发两个通道，测试里按 (type,state,message) 去重。"""
+        seen, out = set(), []
+        for e in self.events:
+            p = e.get("payload") or {}
+            key = (p.get("type"), p.get("state"), p.get("message"))
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(p)
+        return out
+
+    def test_phase_lifecycle_events(self):
+        import ws_helpers
+        ws_helpers.phase_begin(self.messaging, "t-ph1", "规划", attempt=1)
+        ws_helpers.phase_heartbeat(self.messaging, "t-ph1", "规划")
+        ws_helpers.phase_end(self.messaging, "t-ph1", "规划", ok=True)
+        payloads = self._payloads()
+        states = [p.get("state") for p in payloads if p.get("type") == "phase"]
+        self.assertEqual(states[:3], ["begin", "heartbeat", "end"])
+        self.assertEqual(payloads[0].get("attempt"), 1)
+        self.assertTrue(any(p.get("elapsed_seconds") is not None for p in payloads))
+        self.assertEqual(ws_helpers.phase_state("t-ph1"), {}, "阶段结束后状态应清理")
+
+    def test_call_with_heartbeat_reports_during_blocking_call(self):
+        import ws_helpers
+        ws_helpers.phase_begin(self.messaging, "t-ph2", "规划")
+        out = ws_helpers.call_with_heartbeat(
+            self.messaging, "t-ph2", "规划",
+            lambda: (time.sleep(0.5), "done")[1], interval=0.1)
+        self.assertEqual(out, "done")
+        # 心跳可能在同一秒内多次（消息文本相同），这里按原始事件计数
+        beats = [e.get("payload") or {} for e in self.events
+                 if (e.get("payload") or {}).get("state") == "heartbeat"]
+        self.assertGreaterEqual(len(beats), 2, "阻塞调用期间必须有心跳")
+        self.assertIn("已等待", beats[0]["message"])
+
+    def test_call_with_heartbeat_propagates_exception(self):
+        import ws_helpers
+
+        def boom():
+            raise RuntimeError("endpoint down")
+        with self.assertRaises(RuntimeError):
+            ws_helpers.call_with_heartbeat(self.messaging, "t-ph3", "反思", boom, interval=0.1)
+
+    def test_watchdog_alerts_when_phase_stalls(self):
+        import ws_helpers
+        from orchestrator_v2 import OrchestratorV2
+        captured = []
+        with mock.patch("orchestrator_v2.push_progress",
+                        side_effect=lambda m, tid, t, p: captured.append(p)):
+            o = OrchestratorV2.__new__(OrchestratorV2)
+            o._messaging = self.messaging
+            o._now_iso = lambda: "now"
+            os.environ["WM_PHASE_WATCH_INTERVAL"] = "0.2"
+            os.environ["WM_PHASE_STALL_SECONDS"] = "1"
+            with mock.patch.object(o, "_task_is_running", return_value=True):
+                stop = threading.Event()
+                o._start_phase_monitor("t-wd", stop)
+                ws_helpers.phase_begin(self.messaging, "t-wd", "规划")
+                time.sleep(1.6)
+                stop.set()
+        warns = [p for p in captured if p.get("type") == "warning"]
+        self.assertEqual(len(warns), 1, "阶段停滞应恰好告警一次（冷却窗口内不重复）")
+        self.assertIn("规划", warns[0]["message"])
+        self.assertIn("无进展", warns[0]["message"])
+        self.assertEqual(warns[0]["phase"], "规划")
+
+    def test_watchdog_silent_when_heartbeats_flow(self):
+        import ws_helpers
+        from orchestrator_v2 import OrchestratorV2
+        captured = []
+        with mock.patch("orchestrator_v2.push_progress",
+                        side_effect=lambda m, tid, t, p: captured.append(p)):
+            o = OrchestratorV2.__new__(OrchestratorV2)
+            o._messaging = self.messaging
+            o._now_iso = lambda: "now"
+            os.environ["WM_PHASE_WATCH_INTERVAL"] = "0.15"
+            os.environ["WM_PHASE_STALL_SECONDS"] = "1"
+            with mock.patch.object(o, "_task_is_running", return_value=True):
+                stop = threading.Event()
+                o._start_phase_monitor("t-wd2", stop)
+                ws_helpers.phase_begin(self.messaging, "t-wd2", "评审")
+                for _ in range(6):
+                    time.sleep(0.25)
+                    ws_helpers.phase_heartbeat(self.messaging, "t-wd2", "评审")
+                stop.set()
+        self.assertEqual([p for p in captured if p.get("type") == "warning"], [],
+                         "持续有心跳时不得告警")
 
 
 class TestReportRouteAndMetricsConsistency(unittest.TestCase):
