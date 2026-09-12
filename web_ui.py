@@ -374,6 +374,13 @@ def _init_db():
             db.execute("ALTER TABLE task_history ADD COLUMN steps_json TEXT DEFAULT ''")
         if "logs_json" not in cols:
             db.execute("ALTER TABLE task_history ADD COLUMN logs_json TEXT DEFAULT ''")
+        # 状态真源收口：验收摘要/规则指纹/阶段/更新时间由 task_state 统一维护
+        # （此前终态消息里的 acceptance 因表里没有该列被直接丢弃）
+        try:
+            import task_state
+            task_state.ensure_schema(DB_PATH)
+        except Exception:
+            pass
         # C1：会话持久化——webui 重启后未过期会话自动恢复，不再全员掉登录
         db.execute(
             "CREATE TABLE IF NOT EXISTS sessions("
@@ -836,20 +843,22 @@ def _listen_results():
                         # DB 写入与通知在锁外执行：这些是慢 I/O，
                         # 放锁内会阻塞所有 /task/{id} 读取与 SSE 快照
                         try:
-                            db = sqlite3.connect(DB_PATH, timeout=5)
-                            db.execute(
-                                "INSERT INTO task_history(task_id,goal,status,report,steps_json,logs_json,completed_at)"
-                                " VALUES(?,?,?,?,?,?,CURRENT_TIMESTAMP)"
-                                " ON CONFLICT(task_id) DO UPDATE SET status=excluded.status,"
-                                " report=excluded.report,steps_json=excluded.steps_json,"
-                                " logs_json=excluded.logs_json,completed_at=CURRENT_TIMESTAMP",
-                                (tid, existing.get("goal",""), (payload or {}).get("status","UNKNOWN"),
-                                 (payload or {}).get("report",""),
-                                 json.dumps(existing.get("steps", []), ensure_ascii=False),
-                                 json.dumps(existing.get("logs", [])[-200:], ensure_ascii=False)),
+                            # 状态真源：终态写入统一走 task_state 投影器，
+                            # 并把验收摘要与规则指纹一起落库（此前 acceptance 被丢弃）
+                            import task_state
+                            _payload = payload or {}
+                            task_state.record_completion(
+                                tid,
+                                goal=str(existing.get("goal") or ""),
+                                status=str(_payload.get("status") or "UNKNOWN"),
+                                report=str(_payload.get("report") or ""),
+                                steps=existing.get("steps") or [],
+                                logs=existing.get("logs") or [],
+                                acceptance=_payload.get("acceptance") or {},
+                                db_path=DB_PATH,
                             )
-                            db.commit(); db.close()
-                        except Exception: pass
+                        except Exception:
+                            pass
                         # D1：日报项目任务终态自动生成分享链接（落地页入口），
                         # 并补发一条带链接的通知（编排器通知早于分享生成，链接会缺失）
                         # T2：FAILED 任务不生成分享链接（空报告落地页伤信任），
@@ -2327,10 +2336,10 @@ def _publish_task(
         db = sqlite3.connect(DB_PATH, timeout=3)
         db.execute(
             "INSERT INTO task_history"
-            "(task_id,goal,status,project,conversation_id,parent_task_id,context,user)"
-            " VALUES(?,?,?,?,?,?,?,?)",
-            (tid, goal, "PENDING", project, conversation_id,
-             parent_task_id, context, user_id),
+            "(task_id,goal,status,project,conversation_id,parent_task_id,context,user,phase)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
+            (tid, goal, "QUEUED", project, conversation_id,
+             parent_task_id, context, user_id, "排队"),
         )
         db.commit()
         db.close()
@@ -2936,12 +2945,44 @@ def main():
                 except Exception:
                     stale_seconds = 3600
                 stale_seconds = max(600, stale_seconds)
-                # 豁免集合：运行中的任务（编排器 task_running 标记 / 内存 RUNNING）
+                # 豁免集合：运行中的任务。Redis task_running 标记必须**校验 pid**
+                # （编排器崩溃后该键仍存活 24h，只看键存在会让任务永远 PENDING，
+                #  既不过期也不完成）；DB 侧 status=RUNNING 的同样豁免。
                 running_ids: set[str] = set()
                 try:
+                    import errno as _errno
                     r = _new_redis()
                     for k in r.scan_iter("task_running:*", count=200):
-                        running_ids.add(str(k).split(":", 1)[-1])
+                        tid_key = str(k).split(":", 1)[-1]
+                        alive = True
+                        try:
+                            raw = r.get(k)
+                            pid = int((json.loads(raw) or {}).get("pid") or 0) if raw else 0
+                            if pid > 0:
+                                try:
+                                    os.kill(pid, 0)
+                                except OSError as exc:
+                                    if (exc.errno == _errno.ESRCH
+                                            or getattr(exc, "winerror", None) == 87):
+                                        alive = False
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                        if alive:
+                            running_ids.add(tid_key)
+                except Exception:
+                    pass
+                try:
+                    # DB 口径的运行中（投影器写入的 RUNNING）
+                    import task_state
+                    _db_running = [
+                        row[0] for row in sqlite3.connect(DB_PATH, timeout=5).execute(
+                            "SELECT task_id FROM task_history WHERE status=?",
+                            (task_state.RUNNING,),
+                        ).fetchall()
+                    ]
+                    running_ids |= set(_db_running)
                 except Exception:
                     pass
                 with _task_lock:
@@ -2954,7 +2995,8 @@ def main():
                 # 数量极少（PENDING 任务不会多），逐行处理可控
                 candidates = [row[0] for row in db.execute(
                     "SELECT task_id FROM task_history "
-                    "WHERE status='PENDING' AND created_at < datetime('now', ?)",
+                    "WHERE status IN ('PENDING','QUEUED') "
+                    "AND created_at < datetime('now', ?)",
                     (f"-{stale_seconds} seconds",),
                 ).fetchall()]
                 expired_rows = []
@@ -2963,7 +3005,7 @@ def main():
                         continue
                     db.execute(
                         "UPDATE task_history SET status='FAILED', report=? "
-                        "WHERE task_id=? AND status='PENDING'",
+                        "WHERE task_id=? AND status IN ('PENDING','QUEUED')",
                         (
                             f"Task expired (no completion within {stale_seconds} s)",
                             tid,

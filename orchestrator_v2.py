@@ -997,18 +997,28 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         - 其余成功 → SUCCESS。
         reflection_unavailable 保留入参仅用于调用方日志追溯，不再参与判定：
         只要最终 acceptance_report.json 仍为 fail，就如实降级，避免
-        "反思执行过但重做后仍失败"被误报为 SUCCESS。"""
-        if has_failure:
-            return "FAILED"
-        # A1：读最终验收报告——overall != pass 即视为验收未通过，
-        # 不区分"反思未执行/反思执行后仍失败"两条路径
-        accept_fail = bool(
-            acceptance_summary and acceptance_summary.get("overall") != "pass"
-        )
-        both_failed = bool(llm_degraded and llm_degraded.get("both_failed"))
-        if accept_fail or both_failed:
-            return "SUCCESS_WITH_ISSUES"
-        return "SUCCESS"
+        "反思执行过但重做后仍失败"被误报为 SUCCESS。
+
+        派生规则**唯一实现**已收归 task_state.derive_status（状态真源收口），
+        这里只做入参适配，避免两处规则分叉。"""
+        try:
+            import task_state
+            return task_state.derive_status(
+                step_statuses=["FAILED"] if has_failure else ["SUCCESS"],
+                acceptance=acceptance_summary or {},
+                llm_degraded=llm_degraded or {},
+            )
+        except Exception:
+            # 投影器不可用时的兜底：保持与收口前一致的判定
+            if has_failure:
+                return "FAILED"
+            accept_fail = bool(
+                acceptance_summary and acceptance_summary.get("overall") != "pass"
+            )
+            both_failed = bool(llm_degraded and llm_degraded.get("both_failed"))
+            if accept_fail or both_failed:
+                return "SUCCESS_WITH_ISSUES"
+            return "SUCCESS"
 
     def _precheck_llm_balance(self, task_id: str) -> tuple[bool, str]:
         """A3：LLM 端点余额预检（任务开始前调用）。
@@ -3193,6 +3203,13 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             )
             resumed = None
         self._mark_task_running(task_id)
+        # 状态真源：进入执行写 RUNNING（提交时是 QUEUED），
+        # 让历史/状态接口能区分"排队中"与"运行中"
+        try:
+            import task_state
+            task_state.mark_running(task_id, phase="规划")
+        except Exception:
+            pass
         # 阶段看门狗：规划/评审/反思这类阻塞调用此前完全在进度模型之外，
         # 卡住时控制台没有任何信号（实测静默 6 分钟）。这里按统一阶段心跳判定，
         # 超阈值先告警（分级第一步；重试/终止仍由各阶段的既有逻辑负责）。
@@ -3266,6 +3283,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         except Exception:
             pass
 
+        # 状态真源：阶段名落库（规划 → 执行 → 反思），供历史页展示当前阶段
+        try:
+            import task_state
+            task_state.set_phase(task_id, "规划")
+        except Exception:
+            pass
         # 1. Plan（模板步骤直接采用，否则 LLM 规划）——恢复路径跳过规划
         used_template = False
         if resumed is None:
@@ -4182,6 +4205,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         if not hasattr(self, "_task_sources"):
             self._task_sources = {}
             self._task_sources_lock = threading.Lock()
+        # 状态真源：阶段名落库（进入步骤执行）
+        try:
+            import task_state
+            task_state.set_phase(task_id, "执行")
+        except Exception:
+            pass
         completed: dict = {}
         has_failure = False
         state = {"replan_used": 0}
