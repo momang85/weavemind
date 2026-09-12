@@ -2469,11 +2469,56 @@ class TestSimpleTaskFastPath(unittest.TestCase):
             if p.is_file():
                 os.utime(p, (now, now))
         w = PackagingWorker.__new__(PackagingWorker)
+        # 默认口径：代码与图表进包；data/*.csv 属流程数据，不进包
         files = w._fresh_files(ws / "project", {"workspace": str(ws), "task_start_ts": now - 60})
         names = [rel for _, rel in files]
         self.assertIn("index.html", names)
         self.assertIn("charts/heatmap.png", names, "图表应进入交付包")
-        self.assertIn("data/x.csv", names, "数据应进入交付包")
+        self.assertNotIn("data/x.csv", names,
+                         "data/*.csv 默认是流程数据，不当作交付物")
+        # 目标明确要数据文件时，data/*.csv 才进包
+        files2 = w._fresh_files(ws / "project", {
+            "workspace": str(ws), "task_start_ts": now - 60,
+            "goal": "统计A股成交额并导出 CSV 数据文件",
+        })
+        self.assertIn("data/x.csv", [rel for _, rel in files2])
+
+    def test_packaging_excludes_preload_caches(self):
+        """预载/中间产物不得作为交付物（结构化数据、清洗数据、行情 CSV）。"""
+        import os
+        import tempfile
+        import time
+        from pathlib import Path
+        from workers.packaging_worker import PackagingWorker
+
+        ws = Path(tempfile.mkdtemp(prefix="weavemind_preload_"))
+        (ws / "project").mkdir(parents=True)
+        (ws / "data").mkdir(parents=True)
+        now = time.time()
+        (ws / "project" / "sales_report.py").write_text("print(1)\n", encoding="utf-8")
+        (ws / "project" / "structured_data.json").write_text("{}", encoding="utf-8")
+        (ws / "project" / "clean_chart_data.json").write_text("{}", encoding="utf-8")
+        (ws / "data" / "ranking.csv").write_text("code,name\n", encoding="utf-8")
+        for p in ws.rglob("*"):
+            if p.is_file():
+                os.utime(p, (now, now))
+        w = PackagingWorker.__new__(PackagingWorker)
+        names = [rel for _, rel in w._fresh_files(
+            ws / "project", {"workspace": str(ws), "task_start_ts": now - 60})]
+        self.assertIn("sales_report.py", names)
+        for preload in ("structured_data.json", "clean_chart_data.json", "data/ranking.csv"):
+            self.assertNotIn(preload, names, f"{preload} 是预载产物，不应入交付包")
+
+    def test_packaging_refuses_shared_dir_without_workspace(self):
+        """无任务工作区时拒绝打包共享目录（否则会混入其它任务的产物）。"""
+        import asyncio
+        from unittest import mock as _mock
+        from workers.packaging_worker import PackagingWorker
+
+        w = PackagingWorker.__new__(PackagingWorker)
+        with _mock.patch("llm_client.call_llm", return_value={}):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(w.execute("打包交付", {}))
 
     def test_workspace_path_safe_helper(self):
         import tempfile

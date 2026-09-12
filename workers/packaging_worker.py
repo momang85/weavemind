@@ -5,6 +5,7 @@ file_io 的落盘目录）为基础，只打包时间窗口内的新文件，避
 的陈旧产物混入交付包。
 """
 
+import logging
 import os
 import sys
 import tempfile
@@ -16,10 +17,29 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from async_worker_base import AsyncWorkerBase, AsyncRegistry, AsyncMessaging
 
+logger = logging.getLogger(__name__)
 PROJECT_DIR = Path(tempfile.gettempdir()) / "agent_workspace" / "project"
 REPORT_DIR = Path(tempfile.gettempdir()) / "agent_workspace" / "reports"
 STATIC_DIR = Path(os.environ.get("PACKAGE_OUTPUT_DIR", str(Path(tempfile.gettempdir()) / "agent_packages")))
 FRESH_MINUTES = int(os.environ.get("PACKAGE_FRESH_MINUTES", "120"))
+
+# 预载/中间产物：属于"给流程用的缓存"，不是用户要的交付物，默认不入包
+# （structured_data.json / clean_chart_data.json 由结构化预载写入，
+#  ranking.csv 是行情预载落盘；此前按 mtime 全量 rglob 会把它们塞进交付包）
+PRELOAD_NAMES = {
+    "structured_data.json", "clean_chart_data.json", "search_results.json",
+    "ranking.csv",
+}
+# 目标明确要数据文件时，才把 data/*.csv 视为交付物
+_DATA_DELIVERABLE_HINTS = (
+    "csv", "excel", "xlsx", "数据文件", "数据表", "原始数据", "导出", "下载数据",
+    "数据集", "附件数据",
+)
+
+
+def _goal_wants_data(goal: str) -> bool:
+    g = str(goal or "").lower()
+    return any(k in g for k in _DATA_DELIVERABLE_HINTS)
 
 
 class PackagingWorker(AsyncWorkerBase):
@@ -58,16 +78,23 @@ class PackagingWorker(AsyncWorkerBase):
             except Exception:
                 pass
         if proj_path is None:
-            proj_path = (
-                Path(str(task["workspace"])) / "project"
-                if task and task.get("workspace")
-                else PROJECT_DIR
-            )
+            if task and task.get("workspace"):
+                proj_path = Path(str(task["workspace"])) / "project"
+            else:
+                # 无任务工作区时不再回落到共享目录：那里可能躺着别的任务的产物，
+                # 打出来的"交付包"会混入他人文件。宁可明确失败。
+                raise RuntimeError(
+                    "缺少任务工作区，拒绝打包共享目录（避免混入其它任务的产物）"
+                )
         return self._package(proj_path, task or {})
 
     def _fresh_files(self, root: Path, task: dict) -> list[tuple[Path, str]]:
-        """返回 (绝对路径, 相对路径) 且属于本次任务的文件：
-        mtime 在任务开始之后（或窗口内），避免把历史任务/并行任务的产物混进交付包。"""
+        """返回 (绝对路径, 相对路径) 且属于本次任务交付物的文件。
+
+        白名单口径：本任务的代码/资源（project/**）+ reports/*.md + charts/*.png；
+        `data/*.csv` 与预载 JSON 属于流程缓存，默认排除（目标明确要数据文件时保留），
+        避免把"别的步骤/预载吃的行情数据"当成用户交付物。"""
+        excluded: list[str] = []
         cutoff = time.time() - FRESH_MINUTES * 60
         try:
             task_start = float(task.get("task_start_ts") or 0)
@@ -96,6 +123,10 @@ class PackagingWorker(AsyncWorkerBase):
                 or "/screenshots/" in rel
             ):
                 continue
+            # 预载/中间产物默认不入包（详见 PRELOAD_NAMES 注释）
+            if Path(rel).name in PRELOAD_NAMES and not _goal_wants_data(task.get("goal", "")):
+                excluded.append(rel)
+                continue
             files.append((p, rel))
         # 报告文件独立存放，若新鲜则一并纳入（放在 reports/ 前缀下）
         report_dir = REPORT_DIR
@@ -108,10 +139,16 @@ class PackagingWorker(AsyncWorkerBase):
                         files.append((p, f"reports/{p.name}"))
                 except OSError:
                     continue
-        # 任务工作区的图表/数据也纳入交付包（charts/、data/ 前缀），成果自包含
+        # 任务工作区的图表纳入交付包；data/*.csv 仅当目标明确要数据文件时纳入
         if task and task.get("workspace"):
             ws_root = Path(str(task["workspace"]))
-            for sub, glob_pat in (("charts", "*.png"), ("data", "*.csv")):
+            subs = [("charts", "*.png")]
+            if _goal_wants_data(task.get("goal", "")):
+                subs.append(("data", "*.csv"))
+            else:
+                for p in sorted((ws_root / "data").glob("*.csv")) if (ws_root / "data").is_dir() else []:
+                    excluded.append(f"data/{p.name}")
+            for sub, glob_pat in subs:
                 sub_dir = ws_root / sub
                 if not sub_dir.is_dir():
                     continue
@@ -121,6 +158,9 @@ class PackagingWorker(AsyncWorkerBase):
                             files.append((p, f"{sub}/{p.name}"))
                     except OSError:
                         continue
+        if excluded:
+            logger.info("交付包排除 %d 个预载/中间产物: %s",
+                        len(excluded), ", ".join(sorted(set(excluded))[:8]))
         return files
 
     def _package(self, proj_path: Path, task: dict) -> str:

@@ -2541,6 +2541,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             "step_deadline": time.time() + timeout,
             "workspace": str(task_workspace(task_id)),
             "simple": bool(self._task_simple.get(task_id, False)),
+            # 目标文本随派发下发：打包步骤据此判断"预载数据是否为交付物"
+            # （预载的行情/结构化数据默认不进交付包，除非目标明确要数据文件）
+            "goal": str(
+                (getattr(self, "_task_goals", {}) or {}).get(task_id, "") or ""
+            )[:400],
         }, ensure_ascii=False))
 
         # Wait for result
