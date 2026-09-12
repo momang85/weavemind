@@ -639,7 +639,10 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 phase_begin(self._messaging, task_id, "规划", attempt=attempt + 1)
                 try:
                     # 规划调用可能阻塞数分钟：放进工作线程并按时心跳，
-                    # 控制台因此显示"规划进行中（已等待 Ns）"而不是静默
+                    # 控制台因此显示"规划进行中（已等待 Ns）"而不是静默；
+                    # deadline 给出调用级时间预算，预算耗尽不再无谓重试/切备用
+                    _plan_budget = float(os.environ.get("WM_PLAN_BUDGET_SECONDS", "180") or 180)
+                    _plan_deadline = time.time() + _plan_budget
                     raw = call_with_heartbeat(
                         self._messaging, task_id, "规划",
                         self._planner_llm.call,
@@ -647,12 +650,21 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                         attempt_prompt, expect_json=True, max_tokens=8192,
                         # B1：规划/反思/评审统一走 planner 用途模型
                         usage="plan", cache_key=plan_cache_key,
+                        deadline=_plan_deadline,
                     )
                     phase_end(self._messaging, task_id, "规划", ok=True,
                               detail=f"规划完成（第 {attempt + 1} 次尝试）")
-                except Exception:
+                except Exception as exc:
                     phase_end(self._messaging, task_id, "规划", ok=False,
                               detail=f"规划第 {attempt + 1} 次尝试失败")
+                    if getattr(exc, "budget_exhausted", False):
+                        push_progress(self._messaging, task_id, "log", {
+                            "type": "warning", "agent": "orchestrator",
+                            "message": (f"规划时间预算（{_plan_budget:.0f}s）已耗尽，"
+                                        "转入确定性降级规划"),
+                            "timestamp": self._now_iso(),
+                        })
+                        break
                     raise
                 plan_data = self._parse_plan_response(raw)
                 break
@@ -1641,12 +1653,17 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             from ws_helpers import call_with_heartbeat, phase_begin, phase_end
             phase_begin(self._messaging, task_id, "反思")
             try:
+                # 反思同样受调用级预算约束：耗尽即跳过本轮（宁可少一轮反思，
+                # 也不要拖到任务级超时把整个交付拖垮）
+                _reflect_budget = float(
+                    os.environ.get("WM_REFLECT_BUDGET_SECONDS", "120") or 120)
                 raw = call_with_heartbeat(
                     self._messaging, task_id, "反思",
                     self._planner_llm.call,
                     get_prompt("reflect", ITERATOR_SYSTEM, goal=goal),
                     prompt, expect_json=True, max_tokens=8192,
                     usage="plan",
+                    deadline=time.time() + _reflect_budget,
                 )
                 phase_end(self._messaging, task_id, "反思", ok=True)
             except Exception:

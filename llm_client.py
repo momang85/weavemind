@@ -1149,6 +1149,7 @@ class LLMClient:
         usage: str = "",
         model_override: str | None = None,
         cache_key: str | None = None,
+        deadline: float | None = None,
     ) -> dict[str, Any]:
         """调用 LLM 并返回解析结果。
 
@@ -1169,6 +1170,26 @@ class LLMClient:
         temp = temperature if temperature is not None else self.temperature
         max_tok = max_tokens if max_tokens is not None else self.max_tokens
         model = self._resolve_model(usage, model_override)
+
+        def _remaining() -> float | None:
+            """距 deadline 的剩余预算（秒）；未设 deadline 返回 None。"""
+            if deadline is None:
+                return None
+            return float(deadline) - time.time()
+
+        def _attempt_timeout(default: float | None = None) -> float | None:
+            """单次请求超时：不超过剩余预算（至少 5s，避免瞬间放弃）。"""
+            remaining = _remaining()
+            if remaining is None:
+                return default
+            if remaining <= 0:
+                return 0.0
+            base = default if default is not None else 600.0
+            return max(5.0, min(base, remaining))
+
+        def _budget_exhausted() -> bool:
+            remaining = _remaining()
+            return remaining is not None and remaining <= 0
 
         _ensure_cfg_fresh()
         if self._is_planner:
@@ -1197,7 +1218,8 @@ class LLMClient:
         # 健康路由（O-29）：主端点已被判定不健康 → 优先走备用，避免每次白白等待超时
         if not _primary_healthy():
             try:
-                return self._call_backup(system, user, temp, max_tok, expect_json)
+                return self._call_backup(system, user, temp, max_tok, expect_json,
+                                         timeout=_attempt_timeout())
             except LLMJSONParseError:
                 raise
             except Exception as exc:
@@ -1207,8 +1229,17 @@ class LLMClient:
                 )
                 logger.warning("Health-routed backup failed: %s", str(exc)[:150])
         for attempt in range(1, self._MAX_RETRIES + 1):
+            if _budget_exhausted():
+                # 时间预算耗尽：不再重试/切备用，给调用方一个明确信号去降级
+                exc = LLMCallError(
+                    f"LLM time budget exhausted before attempt {attempt}"
+                )
+                setattr(exc, "budget_exhausted", True)
+                logger.warning("LLM time budget exhausted (usage=%s)", usage)
+                raise exc
             try:
-                raw = self._send_request(system, user, temp, max_tok, model=model)
+                raw = self._send_request(system, user, temp, max_tok, model=model,
+                                         timeout=_attempt_timeout())
                 _mark_endpoint("primary", True)
                 if not expect_json:
                     result: dict[str, Any] = {"content": raw}
@@ -1246,10 +1277,11 @@ class LLMClient:
                 if attempt < self._MAX_RETRIES:
                     time.sleep(self._RETRY_BASE * attempt)
 
-        # 主端点失败 → 自动切换备用端点/模型
-        if self._backup_cfg:
+        # 主端点失败 → 自动切换备用端点/模型（时间预算耗尽时不再切，直接交给调用方降级）
+        if self._backup_cfg and not _budget_exhausted():
             try:
-                return self._call_backup(system, user, temp, max_tok, expect_json)
+                return self._call_backup(system, user, temp, max_tok, expect_json,
+                                         timeout=_attempt_timeout())
             except LLMJSONParseError:
                 raise
             except Exception as exc:
@@ -1264,9 +1296,12 @@ class LLMClient:
 
     def _call_backup(
         self, system: str, user: str, temperature: float, max_tokens: int,
-        expect_json: bool,
+        expect_json: bool, timeout: float | None = None,
     ) -> dict[str, Any]:
-        """调用备用端点并标记健康状态。"""
+        """调用备用端点并标记健康状态。
+
+        timeout 继承主端点的**剩余预算**：否则切备后就按自己的 600s 超时跑，
+        调用方设的时间预算形同虚设（实测切备后总耗时被拖到 50s+）。"""
         if not self._backup_cfg:
             raise LLMCallError("No backup endpoint configured")
         backup = LLMClient(
@@ -1274,7 +1309,8 @@ class LLMClient:
             api_key=self._backup_cfg.get("api_key"),
             model=self._backup_cfg.get("model") or self.model,
         )
-        raw = backup._send_request(system, user, temperature, max_tokens, endpoint="backup")
+        raw = backup._send_request(system, user, temperature, max_tokens,
+                                   endpoint="backup", timeout=timeout)
         _mark_endpoint("backup", True)
         # P2-3：切换发生时把主端点 last_degradation_reason（为空则记
         # inherited_unhealthy）作为根因，避免 llm_degraded 只有 switch 事件

@@ -7391,6 +7391,76 @@ class TestPhaseProgressAndWatchdog(unittest.TestCase):
                          "持续有心跳时不得告警")
 
 
+class TestLLMDeadlineBudget(unittest.TestCase):
+    """LLM 调用级时间预算：预算耗尽不再无谓重试/切备用。
+
+    回归：无 deadline 时每请求 600s × 2 重试 × 备用一次，规划阶段能拖到 10 分钟以上，
+    且备用端点不继承预算（实测切备后总耗时被拖到 50s+）。
+    """
+
+    def _client(self):
+        from llm_client import LLMClient
+        return LLMClient(base_url="http://127.0.0.1:9/v1", api_key="k", model="m")
+
+    def test_per_attempt_timeout_shrinks_to_budget(self):
+        from unittest import mock
+        c = self._client()
+        seen = []
+
+        def slow(*a, **kw):
+            seen.append(kw.get("timeout"))
+            raise TimeoutError("slow")
+
+        with mock.patch.object(c, "_send_request", side_effect=slow), \
+                mock.patch.object(type(c), "_send_request", side_effect=slow), \
+                mock.patch.object(c, "_backup_cfg", {}), \
+                mock.patch("llm_client._mark_endpoint"), \
+                mock.patch("llm_client._record_task_degradation"), \
+                mock.patch("time.sleep"):
+            with self.assertRaises(Exception):
+                c.call("s", "u", expect_json=False, deadline=time.time() + 30)
+        self.assertTrue(seen, "应实际发起请求")
+        self.assertTrue(all(t is not None and t <= 30 for t in seen),
+                        f"单次超时必须收缩到剩余预算内，实际 {seen}")
+
+    def test_exhausted_budget_raises_with_marker(self):
+        from unittest import mock
+        from llm_client import LLMCallError
+        c = self._client()
+        with mock.patch.object(c, "_send_request", side_effect=TimeoutError("slow")), \
+                mock.patch.object(c, "_backup_cfg", {}), \
+                mock.patch("llm_client._mark_endpoint"), \
+                mock.patch("llm_client._record_task_degradation"), \
+                mock.patch("time.sleep"):
+            with self.assertRaises(LLMCallError) as ctx:
+                c.call("s", "u", expect_json=False, deadline=time.time() - 1)
+        self.assertTrue(getattr(ctx.exception, "budget_exhausted", False),
+                        "预算耗尽应带 budget_exhausted 标记，供调用方降级")
+
+    def test_backup_inherits_remaining_budget(self):
+        from unittest import mock
+        from llm_client import LLMClient
+        c = self._client()
+        seen = []
+
+        def slow(*a, **kw):
+            seen.append(kw.get("timeout"))
+            raise TimeoutError("slow")
+
+        with mock.patch.object(type(c), "_send_request", side_effect=slow), \
+                mock.patch.object(c, "_backup_cfg",
+                                  {"base_url": "http://127.0.0.1:9/v1",
+                                   "api_key": "k", "model": "m"}), \
+                mock.patch("llm_client._mark_endpoint"), \
+                mock.patch("llm_client._record_task_degradation"), \
+                mock.patch("llm_client._primary_degradation_root", return_value="x"), \
+                mock.patch("time.sleep"):
+            with self.assertRaises(Exception):
+                c.call("s", "u", expect_json=False, deadline=time.time() + 20)
+        self.assertTrue(seen and all(t is not None for t in seen),
+                        f"备用端点也必须收到剩余预算，实际 {seen}")
+
+
 class TestReportRouteAndMetricsConsistency(unittest.TestCase):
     """报告路由渲染 + 指标口径与状态接口一致。"""
 
