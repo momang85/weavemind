@@ -495,8 +495,10 @@ def _save_config(cfg):
     if isinstance(existing, dict):
         incoming = {k: v for k, v in cfg.items() if v is not None}
         # users 段（含密码哈希）只允许服务端通过初始管理员/环境变量流程管理，
-        # 前端保存配置时不得覆盖或注入用户。
-        incoming.pop("users", None)
+        # 前端保存配置时不得覆盖或注入用户；audit/notifications 各有独立写入端点，
+        # 同样不从这里落盘（settings_schema 侧已忽略，这里再做一次落盘保护）。
+        for _drop in ("users", "audit", "notifications"):
+            incoming.pop(_drop, None)
         # GET 回显已将 api_key 脱敏为空串；前端未改动时不得把真实
         # 密钥清空——只有显式提交非空新值才覆盖（与通知配置同口径）
         prev_llm_sections = {
@@ -2520,6 +2522,8 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if (
             path == "/api/config"
+            or path == "/api/config/requirements"
+            or path == "/api/users"
             or path == "/api/notifications"
             or path == "/api/audit"
             or path.startswith("/api/audit")
@@ -2807,6 +2811,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "删除失败"}, 500)
             audit_log(admin.get("user", ""), ip, "task.delete", target=tid, result="ok")
             return self._json({"status": "ok", "task_id": tid})
+        if p.startswith("/api/users/"):
+            return _delete_users(self, p, admin)
         if p.startswith("/api/share/"):
             tid = p.split("/api/share/", 1)[-1].strip()
             if tid == "revoke":
@@ -4164,6 +4170,17 @@ def _post_kill_worker(self, p, body, admin):
 
 def _post_config(self, p, body, admin):
     if self.path == "/api/config":
+        # 白名单校验：只接受 settings_schema 声明过的路径，避免前端（或伪造请求）
+        # 往 config.json 里注入任意键。未声明的键整段拒绝并回报原因。
+        try:
+            import settings_schema
+            issues = settings_schema.validate_payload(body)
+        except Exception as exc:
+            issues = [f"校验器不可用：{str(exc)[:120]}"]
+        if issues:
+            audit_log(admin.get("user", ""), self._client_ip(), "config.save",
+                      result="fail", detail="; ".join(issues)[:200])
+            return self._json({"error": "配置校验失败", "issues": issues}, 400)
         _save_config(body)
         llm = body.get("llm",{})
         if llm.get("api_key"): os.environ["LLM_API_KEY"] = llm["api_key"]
@@ -4177,6 +4194,213 @@ def _post_config(self, p, body, admin):
             pass
         audit_log(admin.get("user", ""), self._client_ip(), "config.save", result="ok")
         return self._json({"status":"saved"})
+
+
+def _get_config_requirements(self, p):
+    """GET /api/config/requirements：系统所需全部外部配置 + 当前状态。
+
+    这是设置页"到底要配哪些东西"的单一来源：清单来自 settings_schema，
+    状态来自 health_registry（含 embedding 欠费这类降级信号）。
+    """
+    if p != "/api/config/requirements":
+        return
+    import settings_schema
+    cfg = _load_config() or {}
+    env = os.environ
+    try:
+        import health_registry
+        health = {item["name"]: item for item in health_registry.snapshot()}
+    except Exception:
+        health = {}
+    try:
+        from llm_client import get_balance_status
+        balance = get_balance_status() or {}
+    except Exception:
+        balance = {}
+    try:
+        from costs import get_budget_status
+        budget = get_budget_status() or {}
+    except Exception:
+        budget = {}
+
+    sections_out = []
+    missing_required, degraded = [], []
+    for section in settings_schema.SECTIONS:
+        entries_out = []
+        for entry in section.get("entries", []):
+            item = dict(entry)
+            item.setdefault("status", "active")
+            item.setdefault("required", False)
+            item.setdefault("editable", item["status"] != "env_only")
+            resolved = settings_schema.resolve(item, cfg, env)
+            api_key_set = bool(resolved.get("value")) and item.get("kind") == "secret"
+            display_value = settings_schema.mask(item, resolved.get("value"), api_key_set)
+            health_item = health.get(str(item.get("health") or "")) or {}
+            entries_out.append({
+                "path": item["path"],
+                "label": item.get("label", item["path"]),
+                "kind": item.get("kind", "string"),
+                "status": item["status"],
+                "required": bool(item.get("required")),
+                "editable": bool(item.get("editable")),
+                "testable": bool(item.get("testable")),
+                "affects": item.get("affects", ""),
+                "group": item.get("group", ""),
+                "env_name": resolved.get("env_name", ""),
+                "default": item.get("default"),
+                "value": display_value,
+                "configured": bool(resolved.get("configured")),
+                "api_key_set": api_key_set,
+                "source": resolved.get("source", "default"),
+                "health": item.get("health", ""),
+                "health_ok": health_item.get("ok") if health_item else None,
+                "health_reason": (health_item.get("reason") or health_item.get("detail") or "")
+                                 if health_item else "",
+            })
+            if item.get("required") and not resolved.get("configured"):
+                missing_required.append(item["path"])
+            if health_item and health_item.get("ok") is False:
+                degraded.append(item["path"])
+        sections_out.append({
+            "key": section["key"], "label": section.get("label", section["key"]),
+            "note": section.get("note", ""), "entries": entries_out,
+        })
+    return self._json({
+        "sections": sections_out,
+        "health": list(health.values()),
+        "balance": balance,
+        "budget": budget,
+        "missing_required": missing_required,
+        "degraded": degraded,
+        "test_targets": sorted(settings_schema.testable_targets().keys()),
+    })
+
+
+def _post_config_test(self, p, body, admin):
+    """POST /api/config/test：对某个端点做一次真实连通性/余额探测。
+
+    设置页的"测试"按钮走这里。带限流：探测有网络开销（LLM ping 可能数秒）。
+    """
+    if self.path != "/api/config/test":
+        return
+    body = body if isinstance(body, dict) else {}
+    target = str(body.get("target") or "").strip()
+    try:
+        import settings_schema
+        allowed = set(settings_schema.testable_targets().keys()) | {"mcp", "lora"}
+    except Exception:
+        allowed = {"llm", "planner", "backup", "embedding"}
+    if target not in allowed:
+        return self._json({"error": f"不支持的探测目标：{target or '(空)'}"}, 400)
+    ip = self._client_ip()
+    if ip not in ("127.0.0.1", "::1"):
+        locked, wait = _bf_check(f"cfgtest:{ip}")
+        if locked:
+            return self._json({"error": f"探测过于频繁，请 {wait}s 后重试"}, 429)
+        _bf_record(f"cfgtest:{ip}")
+    try:
+        import health_registry
+        result = health_registry.live_probe(target)
+    except Exception as exc:
+        return self._json({"error": f"探测失败：{str(exc)[:150]}"}, 500)
+    # 探测出欠费/鉴权失败时同步清余额缓存，让 /api/status 立刻反映真实状态
+    if not result.get("ok"):
+        try:
+            from llm_client import _clear_balance_cache
+            _clear_balance_cache()
+        except Exception:
+            pass
+    audit_log(admin.get("user", ""), ip, "config.test", target=target,
+              result="ok" if result.get("ok") else "fail",
+              detail=str(result.get("reason") or "")[:120])
+    return self._json(result)
+
+
+# ---- 用户管理（admin）：列表/新增改密/删除；哈希永不下发 ----
+
+def _list_users_public() -> list[dict]:
+    return [
+        {"username": name, "role": str((info or {}).get("role") or "viewer"),
+         "created_at": str((info or {}).get("created_at") or "")}
+        for name, info in sorted(_load_users().items())
+        if isinstance(info, dict)
+    ]
+
+
+def _get_users(self, p):
+    if p != "/api/users":
+        return
+    return self._json({"users": _list_users_public()})
+
+
+def _post_users(self, p, body, admin):
+    """POST /api/users：新增用户或改密/改角色。
+
+    body: {username, password?, role?}；改密时 password 必填（≥8 位）。
+    保护：不允许把最后一个 admin 降级为 viewer（否则系统将无人可管理）。
+    """
+    if self.path != "/api/users":
+        return
+    body = body if isinstance(body, dict) else {}
+    username = str(body.get("username") or "").strip()
+    password = str(body.get("password") or "")
+    role = str(body.get("role") or "").strip()
+    if not username or len(username) > 40:
+        return self._json({"error": "用户名必填且不超过 40 字符"}, 400)
+    if "/" in username or "\\" in username:
+        return self._json({"error": "用户名不能包含路径分隔符"}, 400)
+    users = _load_users()
+    exists = username in users
+    if not exists:
+        if len(password) < 8:
+            return self._json({"error": "新用户密码至少 8 位"}, 400)
+        if len(users) >= 50:
+            return self._json({"error": "用户数已达上限（50）"}, 400)
+    if password and len(password) < 8:
+        return self._json({"error": "密码至少 8 位"}, 400)
+    new_role = role or str((users.get(username) or {}).get("role") or "viewer")
+    if new_role not in ("admin", "viewer"):
+        return self._json({"error": "角色只能是 admin 或 viewer"}, 400)
+    admins = [n for n, i in users.items()
+              if isinstance(i, dict) and str(i.get("role")) == "admin"]
+    if (exists and username in admins and new_role != "admin"
+            and len(admins) <= 1):
+        return self._json({"error": "不能降级最后一个管理员"}, 400)
+    entry = dict(users.get(username) or {})
+    entry["role"] = new_role
+    if password:
+        entry["password_hash"] = _hash_password(password)
+    if not exists:
+        entry["created_at"] = _now_iso()
+    users[username] = entry
+    if not _save_users(users):
+        return self._json({"error": "写入 config.json 失败"}, 500)
+    audit_log(admin.get("user", ""), self._client_ip(),
+              "user.upsert", target=username, result="ok",
+              detail=f"role={new_role}, password={'changed' if password else 'unchanged'}")
+    return self._json({"status": "ok", "users": _list_users_public()})
+
+
+def _delete_users(self, p, admin):
+    """DELETE /api/users/<name>：删除用户（禁止删自己与最后一个 admin）。"""
+    if not p.startswith("/api/users/"):
+        return
+    username = p.split("/api/users/", 1)[-1].strip()
+    users = _load_users()
+    if username not in users:
+        return self._json({"error": "用户不存在"}, 404)
+    if username == str(admin.get("user") or ""):
+        return self._json({"error": "不能删除当前登录账号"}, 400)
+    admins = [n for n, i in users.items()
+              if isinstance(i, dict) and str(i.get("role")) == "admin"]
+    if username in admins and len(admins) <= 1:
+        return self._json({"error": "不能删除最后一个管理员"}, 400)
+    users.pop(username, None)
+    if not _save_users(users):
+        return self._json({"error": "写入 config.json 失败"}, 500)
+    audit_log(admin.get("user", ""), self._client_ip(),
+              "user.delete", target=username, result="ok")
+    return self._json({"status": "ok", "users": _list_users_public()})
 
 def _post_verify(self, p, body, admin):
     """POST /api/verify：报告溯源体检（商业化 API 雏形）。
@@ -4349,6 +4573,8 @@ _GET_ROUTES = [
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/events"), _get_task_events),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/pdf"), _get_task_pdf),
     (lambda self, p: p == "/api/config", _get_config),
+    (lambda self, p: p == "/api/config/requirements", _get_config_requirements),
+    (lambda self, p: p == "/api/users", _get_users),
     (lambda self, p: p == "/api/llm-mode", _get_llm_mode),
     (lambda self, p: p == "/api/notifications", _get_notifications),
     (lambda self, p: p == "/api/events", _get_events),
@@ -4385,6 +4611,8 @@ _POST_ROUTES = [
     (lambda self, p: self.path == "/api/quick-answer", _post_quick_answer),
     (lambda self, p: self.path == "/api/kill-worker", _post_kill_worker),
     (lambda self, p: self.path == "/api/config", _post_config),
+    (lambda self, p: self.path == "/api/config/test", _post_config_test),
+    (lambda self, p: self.path == "/api/users", _post_users),
     (lambda self, p: self.path == "/api/llm-mode", _post_llm_mode),
     (lambda self, p: self.path == "/api/notifications", _post_notifications),
     (lambda self, p: self.path == "/api/scheduled-jobs", _post_scheduled_jobs),

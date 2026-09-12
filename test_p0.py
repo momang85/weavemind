@@ -7512,7 +7512,8 @@ class TestHealthRegistryAndAlertDedupe(unittest.TestCase):
         with mock.patch.object(health_registry, "probe_llm",
                                side_effect=RuntimeError("boom")):
             items = health_registry.snapshot()
-        self.assertEqual(len(items), 5)
+        self.assertEqual(len(items), len(health_registry._PROBES),
+                         "单个探针异常不得改变表的条目数")
         self.assertTrue(all("name" in it for it in items))
 
     def test_unhealthy_filters_only_failing(self):
