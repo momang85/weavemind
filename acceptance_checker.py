@@ -1843,6 +1843,29 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace,
     _V12_REPORT_CHECKS = (
         "source_list_completeness", "freshness_block", "disclaimer",
     )
+    # 代码/数据类任务：报告是"交付说明"，其中数字多为程序输出（内置/示例数据），
+    # 不存在"可溯源来源"的要求。仅当目标本身要求外部数据（行情/财务口径）时
+    # 才继续按溯源规则判定；否则记 N/A —— 否则"脚本跑出的样本汇总"会被判
+    # "数字溯源率 0%"（实测销售脚本任务即如此）。
+    if profile in ("code", "data"):
+        try:
+            from task_intent import market_intent
+            requires_sourced = market_intent(goal)["needs_market_data"] or any(
+                k in str(goal or "").lower() for k in _FINANCIAL_MARKERS
+            )
+        except Exception:
+            requires_sourced = False
+        if not requires_sourced:
+            _nt = checks["number_traceability"]
+            _nt["applicable"] = False
+            _nt["counted"] = False
+            _nt["raw_pass"] = _nt.get("pass")
+            _nt["pass"] = True
+            _nt["details"] = (
+                f"不适用于 {profile} 类任务（报告数字来自程序输出/示例数据，"
+                "无外部来源可溯源要求）"
+            )
+    checks["number_traceability"].setdefault("applicable", True)
     gaps = []
     for _key, _c in checks.items():
         if _key in _V12_REPORT_CHECKS:

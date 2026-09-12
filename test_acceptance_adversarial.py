@@ -330,5 +330,35 @@ class TestAcceptanceProfileGating(_AdversarialBase):
         self.assertEqual(event["profile"], "code")
 
 
+    def test_code_task_traceability_not_applicable_for_local_data(self):
+        """代码任务报告里的数字来自程序输出 → 不按"可溯源"判定。
+
+        回归：销售脚本任务交付代码可运行、无污染，但报告里的样本汇总数字被判
+        "数字溯源率 0%" 而 overall=fail。"""
+        report = ("# 交付结果\n\n脚本已生成并运行：合计 1788.50 万元、"
+                  "均值 149.04 万元、最大值 183.70 万元。\n")
+        r = self._run("prof-nt", self.CODE_GOAL, report, [])
+        self.assertEqual(r["profile"], "code")
+        c = r["checks"]["number_traceability"]
+        self.assertFalse(c.get("applicable"))
+        self.assertFalse(c.get("counted"))
+        self.assertTrue(c["pass"])
+        self.assertIn("程序输出", str(c.get("details")))
+        self.assertEqual(r["overall"], "pass")
+
+    def test_code_task_traceability_applies_when_goal_needs_market_data(self):
+        """目标本身要外部行情数据时，代码任务仍按溯源判定。"""
+        report = "# 交付结果\n\nA股前5%成交额占比 43.21%，合计 1.2 万亿元。\n"
+        r = self._run("prof-nt2", "用 Python 统计今日A股成交额排行前十并计算占比",
+                      report, [])
+        self.assertTrue(r["checks"]["number_traceability"].get("applicable"))
+        self.assertEqual(r["overall"], "fail", "无来源的行情数字仍应判缺口")
+
+    def test_financial_traceability_marked_applicable(self):
+        report = "# 贵州茅台2025年三季报分析\n\n营收 1741 亿元，净利润 823 亿元。\n"
+        r = self._run("prof-nt3", "梳理贵州茅台2025年三季报核心财务数据", report, [])
+        self.assertTrue(r["checks"]["number_traceability"].get("applicable"))
+
+
 if __name__ == "__main__":
     unittest.main()
