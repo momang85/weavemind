@@ -2933,6 +2933,55 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args): pass
 
+def _pid_same_process(pid, started_raw) -> bool | None:
+    """运行标记的持有者进程是否仍存活、且仍是当初那个进程。
+
+    返回 ``True``（存活）/ ``False``（确认已死）/ ``None``（无法判定）。
+
+    为什么不用 `os.kill(pid, 0)` 判死：Windows 上对**存活进程**该调用亦可能抛
+    `WinError 87`（实测编排器 pid 与标记一致、psutil 可正常读取 create_time，
+    但 os.kill 报 87），把 87 当"已死"会误杀正在跑的任务并覆写其报告。
+    因此 psutil 可用时以它为准（能区分"进程不存在"与"存在但不是同一个"），
+    不可用时 os.kill 只能证明存活、报错一律归为不可判定（``None``），
+    由调用方按"不据此翻任务"处理。
+    """
+    try:
+        pid = int(pid or 0)
+    except Exception:
+        return None
+    if pid <= 0:
+        return None
+    started_ts = 0.0
+    raw = str(started_raw or "")
+    if raw:
+        try:
+            import datetime as _dt
+            started_ts = _dt.datetime.fromisoformat(
+                raw.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            started_ts = 0.0
+    try:
+        import psutil
+    except Exception:
+        psutil = None
+    if psutil is not None:
+        try:
+            created = psutil.Process(pid).create_time()
+        except Exception as exc:
+            if type(exc).__name__ == "NoSuchProcess":
+                return False          # 进程不存在：确认为死
+            # AccessDenied 等：进程很可能存在但读不到，无法做 PID 复用比对
+            return True
+        if started_ts and created > started_ts + 5:
+            return False              # PID 复用：这不是当初那个进程
+        return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return None                   # 无 psutil 时不敢据"报错"判死
+
+
 def main():
     from logging_setup import setup_logging
     setup_logging("webui")
@@ -3056,46 +3105,33 @@ def main():
                 #  DB 侧 status=RUNNING 的同样按"标记持有者是否存活"判定。
                 running_ids: set[str] = set()      # 标记存在且进程存活
                 dead_marked: set[str] = set()      # 标记存在但持有者已死
+                unknown_marked: set[str] = set()   # 标记存在但存活无法判定（保守当存活）
                 marker_seen: set[str] = set()      # 所有见过的标记
                 try:
-                    import errno as _errno
                     r = _new_redis()
                     for k in r.scan_iter("task_running:*", count=200):
                         tid_key = str(k).split(":", 1)[-1]
                         marker_seen.add(tid_key)
-                        alive = True
+                        # 持有者状态：True 存活 / False 确认已死 / None 不可判定。
+                        # 只有 False 才允许把任务判死——`None`（如无 psutil 时
+                        # os.kill 报错）不足以支撑翻转，误杀的代价是覆写真实报告。
+                        holder = None
                         try:
                             raw = r.get(k)
                             payload = json.loads(raw) if raw else {}
-                            pid = int((payload or {}).get("pid") or 0) if raw else 0
-                            if pid > 0:
-                                try:
-                                    os.kill(pid, 0)
-                                except OSError as exc:
-                                    if (exc.errno == _errno.ESRCH
-                                            or getattr(exc, "winerror", None) == 87):
-                                        alive = False
-                                except Exception:
-                                    pass
-                                # PID 复用防护：pid 存活不等于"还是当初那个进程"。
-                                # 比对进程创建时间与标记写入时间，创建时间晚于标记
-                                # 说明这是被复用的新进程 → 旧持有者其实已死。
-                                if alive:
-                                    try:
-                                        import psutil
-                                        import datetime as _dt
-                                        started_raw = str((payload or {}).get("started") or "")
-                                        started_ts = _dt.datetime.fromisoformat(
-                                            started_raw.replace("Z", "+00:00")).timestamp()                                             if started_raw else 0.0
-                                        if started_ts:
-                                            created = psutil.Process(pid).create_time()
-                                            if created > started_ts + 5:
-                                                alive = False
-                                    except Exception:
-                                        pass
+                            holder = _pid_same_process(
+                                (payload or {}).get("pid"),
+                                (payload or {}).get("started"))
                         except Exception:
                             pass
-                        (running_ids if alive else dead_marked).add(tid_key)
+                        if holder is True:
+                            running_ids.add(tid_key)
+                        elif holder is False:
+                            dead_marked.add(tid_key)
+                        else:
+                            # 不可判定：保守当作存活（既不豁免也不翻），并计数
+                            running_ids.add(tid_key)
+                            unknown_marked.add(tid_key)
                 except Exception as exc:
                     _cleanup_logger.warning("stale 扫描：读取运行标记失败：%s", str(exc)[:120])
 
@@ -3138,11 +3174,12 @@ def main():
                         # 只在有 RUNNING 行/死标记时记录扫描结论：既能让"兜底没生效"
                         # 可定位，又不至于每 60s 刷日志
                         _cleanup_logger.info(
-                            "stale 扫描：DB RUNNING=%d（存活标记 %d、死标记 %d、无标记 %d），"
-                            "本轮翻转 %d（年龄门槛 %ss）",
+                            "stale 扫描：DB RUNNING=%d（存活标记 %d、死标记 %d、"
+                            "不可判定 %d、无标记 %d），本轮翻转 %d（年龄门槛 %ss）",
                             len(_db_running),
                             sum(1 for _t in _db_running if _t in running_ids),
-                            len(dead_marked), len(marker_seen - set(_db_running)),
+                            len(dead_marked), len(unknown_marked),
+                            len(marker_seen - set(_db_running)),
                             len(_dead), _min_age,
                         )
                     if _dead:

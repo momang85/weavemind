@@ -219,7 +219,12 @@ SNAPSHOT_TTL = int(os.environ.get("WM_TASK_SNAPSHOT_TTL", "86400"))
 
 
 def write_snapshot(task_id: str, data: dict, ttl: int | None = None) -> bool:
-    """把内存合并态写入 Redis 快照（失败静默：不影响任务执行）。"""
+    """把内存合并态写入 Redis 快照（失败静默：不影响任务执行）。
+
+    payload 里带 `updated_ts`（写入时刻的 epoch）：快照的新鲜度是"任务是否仍在
+    被驱动"的独立佐证——崩溃兜底判定不能只看运行标记的 pid（实测某平台
+    `os.kill(pid, 0)` 对**存活进程**也抛 WinError 87，据此判死会误杀运行中的任务）。
+    """
     try:
         import redis
         client = redis.Redis(
@@ -227,12 +232,28 @@ def write_snapshot(task_id: str, data: dict, ttl: int | None = None) -> bool:
             port=int(os.environ.get("REDIS_PORT", "6379") or 6379),
             decode_responses=True, socket_connect_timeout=2, socket_timeout=2,
         )
+        payload = dict(data or {})
+        payload["updated_ts"] = time.time()
         client.setex(SNAPSHOT_KEY.format(tid=task_id),
                      int(ttl or SNAPSHOT_TTL),
-                     json.dumps(data, ensure_ascii=False, default=str))
+                     json.dumps(payload, ensure_ascii=False, default=str))
         return True
     except Exception:
         return False
+
+
+def snapshot_age(task_id: str) -> float | None:
+    """快照距上次更新的秒数；无快照返回 None。"""
+    data = read_snapshot(task_id)
+    if not data:
+        return None
+    try:
+        ts = float(data.get("updated_ts") or 0.0)
+    except Exception:
+        ts = 0.0
+    if ts <= 0:
+        return None
+    return max(0.0, time.time() - ts)
 
 
 def read_snapshot(task_id: str) -> dict:
@@ -345,8 +366,17 @@ def mark_dead_running_failed(task_id: str, reason: str = "编排器进程已退�
 
     `min_age_seconds` 是安全门槛：只有超过该时长没有更新的 RUNNING 行才会被翻转，
     避免把"刚写 RUNNING 但标记尚未落 Redis"的正常任务误杀（标记 TTL 24h，
-    超长任务也不会因此被误判，因为它的 updated_at 会随阶段刷新）。"""
+    超长任务也不会因此被误判，因为它的 updated_at 会随阶段刷新）。
+
+    第二道门槛是**快照新鲜度**：编排器仍活着时，监听器会持续把实时态写进
+    `task_snapshot:{tid}`（每次进度/心跳一条）。快照在 `min_age_seconds` 内更新过
+    → 任务显然仍被驱动 → 拒绝翻转。"持有者已死"的结论可能来自不可靠的进程探活
+    （实测某平台对存活进程 `os.kill(pid, 0)` 也抛 WinError 87 被误当已死），
+    而快照更新是与进程探活完全无关的独立信号，故此处不采信任何单一判据。"""
     try:
+        _snap_age = snapshot_age(task_id)
+        if _snap_age is not None and _snap_age < max(60, int(min_age_seconds)):
+            return False
         con = _connect(db_path)
         try:
             cur = con.execute(

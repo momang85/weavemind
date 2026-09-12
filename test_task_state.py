@@ -110,37 +110,25 @@ class TestTaskStateProjector(unittest.TestCase):
 
 
 class TestStaleExemptionValidation(unittest.TestCase):
-    """stale 豁免必须校验 Redis 标记的 pid（否则崩溃后任务永远 PENDING）。"""
+    """stale 豁免/崩溃兜底必须用可靠的探活判定，不能把报错当成"已死"。
 
-    def test_dead_pid_marker_does_not_exempt(self):
-        import importlib
+    回归背景：旧实现把 `os.kill(pid, 0)` 的 WinError 87 当"进程已死"，而实测
+    该错误对**存活进程**也会出现，于是正在跑的任务被翻成 FAILED、真实报告被覆写。
+    """
+
+    def test_liveness_contract(self):
         import web_ui
 
         src = Path(web_ui.__file__).read_text(encoding="utf-8")
-        self.assertIn("winerror", src, "stale 豁免应做 pid 存活校验")
-
-        fake_redis = mock.MagicMock()
-        fake_redis.scan_iter.return_value = ["task_running:dead-task"]
-        fake_redis.get.return_value = json.dumps({"pid": 4_000_000})
-        with mock.patch.object(web_ui, "_new_redis", return_value=fake_redis):
-            running = set()
-            # 复刻豁免判定：pid 不存在 → 不加入豁免集合
-            import errno
-            for k in fake_redis.scan_iter("task_running:*", count=200):
-                tid = str(k).split(":", 1)[-1]
-                alive = True
-                raw = fake_redis.get(k)
-                pid = int((json.loads(raw) or {}).get("pid") or 0) if raw else 0
-                if pid > 0:
-                    try:
-                        os.kill(pid, 0)
-                    except OSError as exc:
-                        if (exc.errno == errno.ESRCH
-                                or getattr(exc, "winerror", None) == 87):
-                            alive = False
-                if alive:
-                    running.add(tid)
-        self.assertNotIn("dead-task", running)
+        self.assertIn("_pid_same_process", src, "存活判定必须走统一的探活函数")
+        self.assertNotIn("winerror", src, "不得再用 winerror 87 作为'已死'判据")
+        # 存活进程（本进程）必须判存活
+        self.assertIs(web_ui._pid_same_process(os.getpid(), ""), True)
+        # psutil 报"进程不存在"才判死
+        import psutil
+        with mock.patch.object(psutil, "Process",
+                               side_effect=psutil.NoSuchProcess(4_000_000)):
+            self.assertIs(web_ui._pid_same_process(4_000_000, ""), False)
 
 
 if __name__ == "__main__":

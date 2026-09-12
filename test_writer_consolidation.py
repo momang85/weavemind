@@ -6,7 +6,9 @@
 """
 
 import json
+import os
 import shutil
+import sys
 import sqlite3
 import tempfile
 import time
@@ -300,6 +302,120 @@ class TestCleanupAndDedupe(unittest.TestCase):
                                   side_effect=AssertionError("不应退到裸行兜底")):
             web_ui._get_task_report(handler, "/task/ui-rep1/report")
         self.assertIn("报告正文", captured.get("html", ""))
+
+
+class TestLivenessJudgement(unittest.TestCase):
+    """进程探活判定：错误信号不得被当成"已死"（会误杀运行中的任务）。
+
+    回归背景：某平台上 `os.kill(pid, 0)` 对**存活进程**也抛 WinError 87，
+    旧实现把 87 当已死，于是把正在跑的任务翻成 FAILED 并覆写了真实报告。
+    """
+
+    def test_live_pid_is_alive(self):
+        import web_ui
+        import datetime
+        started = datetime.datetime.now().astimezone().isoformat()
+        self.assertIs(web_ui._pid_same_process(os.getpid(), started), True)
+
+    def test_live_pid_without_started_is_alive(self):
+        import web_ui
+        self.assertIs(web_ui._pid_same_process(os.getpid(), ""), True)
+
+    def test_missing_process_is_dead(self):
+        import web_ui
+        self.assertIs(web_ui._pid_same_process(999999, ""), False)
+
+    def test_pid_reuse_is_dead(self):
+        """pid 对得上但创建时间晚于标记：那是被复用的新进程，旧持有者已死。"""
+        import web_ui
+        import datetime
+        old = (datetime.datetime.now().astimezone()
+               - datetime.timedelta(days=3)).isoformat()
+        self.assertIs(web_ui._pid_same_process(os.getpid(), old), False)
+
+    def test_winerror_87_is_unknown_not_dead(self):
+        """无 psutil 时 os.kill 报错只能算"不可判定"，绝不能返回 False。"""
+        import web_ui
+        import errno
+        exc = OSError(errno.EINVAL, "Invalid argument")
+        exc.winerror = 87
+        with mock.patch.dict(sys.modules, {"psutil": None}),                 mock.patch("os.kill", side_effect=exc):
+            self.assertIsNone(web_ui._pid_same_process(4242, ""))
+
+    def test_access_denied_is_treated_alive(self):
+        """进程存在但读不到（AccessDenied）→ 不得判死。"""
+        import web_ui
+        import psutil
+        with mock.patch.object(psutil, "Process",
+                              side_effect=psutil.AccessDenied(1)):
+            self.assertIs(web_ui._pid_same_process(1, ""), True)
+
+    def test_no_such_process_is_dead(self):
+        import web_ui
+        import psutil
+        with mock.patch.object(psutil, "Process",
+                              side_effect=psutil.NoSuchProcess(4242)):
+            self.assertIs(web_ui._pid_same_process(4242, ""), False)
+
+    def test_scan_uses_conservative_unknown_bucket(self):
+        """源码级：扫描必须只用 holder is False 才判死，并单列"不可判定"。"""
+        src = Path("web_ui.py").read_text(encoding="utf-8")
+        self.assertNotIn("winerror", src,
+                         "不得再用 winerror 87 作为'已死'判据")
+        self.assertIn("_pid_same_process(", src)
+        self.assertIn("elif holder is False:", src)
+        self.assertIn("unknown_marked", src)
+
+
+class TestSnapshotFreshnessGuard(unittest.TestCase):
+    """快照新鲜度：编排器仍在写快照时，任务绝不能被判死。"""
+
+    def setUp(self):
+        tmp = Path(tempfile.mkdtemp(prefix="wm_fresh_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        self.db = str(tmp / "tasks.db")
+        _mk_db(self.db)
+
+    def _aged_running(self, tid: str) -> None:
+        task_state.mark_queued(tid, "目标", db_path=self.db)
+        task_state.mark_running(tid, db_path=self.db)
+        con = sqlite3.connect(self.db)
+        con.execute("UPDATE task_history SET updated_at=datetime('now','-2 hours')"
+                    " WHERE task_id=?", (tid,))
+        con.commit()
+        con.close()
+
+    def test_fresh_snapshot_blocks_flip(self):
+        self._aged_running("ui-fresh")
+        with mock.patch.object(task_state, "snapshot_age", return_value=30.0):
+            self.assertFalse(
+                task_state.mark_dead_running_failed("ui-fresh", db_path=self.db),
+                "快照 30s 前刚更新过 → 任务仍被驱动，不得翻 FAILED")
+        row = task_state.read_task("ui-fresh", self.db)
+        self.assertEqual(row["status"], task_state.RUNNING)
+        self.assertNotIn("Task failed", str(row.get("report") or ""))
+
+    def test_stale_snapshot_allows_flip(self):
+        self._aged_running("ui-stale")
+        with mock.patch.object(task_state, "snapshot_age", return_value=99999.0):
+            self.assertTrue(
+                task_state.mark_dead_running_failed("ui-stale", db_path=self.db))
+
+    def test_absent_snapshot_allows_flip(self):
+        """无快照（Redis 不可用/任务从未上报）→ 不构成存活证据，按年龄门槛走。"""
+        self._aged_running("ui-none")
+        with mock.patch.object(task_state, "snapshot_age", return_value=None):
+            self.assertTrue(
+                task_state.mark_dead_running_failed("ui-none", db_path=self.db))
+
+    def test_snapshot_age_roundtrip(self):
+        """write_snapshot 记录的 updated_ts 必须能被 snapshot_age 读回。"""
+        if not task_state.write_snapshot("wm-age-probe", {"status": "RUNNING"}, ttl=60):
+            self.skipTest("Redis 不可用")
+        self.addCleanup(task_state.drop_snapshot, "wm-age-probe")
+        age = task_state.snapshot_age("wm-age-probe")
+        self.assertIsNotNone(age)
+        self.assertLess(age, 30.0)
 
 
 if __name__ == "__main__":
