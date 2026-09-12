@@ -375,38 +375,42 @@ def _fetch_sina_ranking_payload(
     return payload
 
 
-def _route_ranking(goal: str, market: str, metric: str) -> dict | None:
+def _route_ranking(goal: str, market: str, metric: str,
+                  scope: str = "") -> dict | None:
     """排行路由：按规模选择 sina 分页全市场或 eastmoney→tencent 快路径。
 
     缓存读取由调用方（route_structured）负责，这里只负责取数；
     候选源全部冷却时返回 None。"""
     top_n = _parse_top_n(goal, None)
     scale = _parse_scale(goal)
+    # 未配置作用域时不改变调用形状（既有打桩/调用方无需适配新参数）
+    _scope_kw = {"scope": scope} if scope else {}
     if scale == "full_market":
         payload = _fetch_sina_ranking_payload(goal, market, metric)
         if payload is None:
             return None
         # 全市场规模按 target_top_n（或 0）隔离缓存，避免百分比/规模串键
         key_top_n = int(payload.get("target_top_n") or 0)
-        cache_set_ranking(market, metric, payload, top_n=key_top_n)
+        cache_set_ranking(market, metric, payload, top_n=key_top_n, **_scope_kw)
         return payload
     # 快路径：排行前 N（N≤50）→ eastmoney → tencent 降级链
     top_n = int(top_n or 10)
-    return _fetch_ranking_with_fallback(market, metric, top_n)
+    return _fetch_ranking_with_fallback(market, metric, top_n, **_scope_kw)
 
 
 def _route_ranking_by_source(
-    source: str, goal: str, market: str, metric: str,
+    source: str, goal: str, market: str, metric: str, scope: str = "",
 ) -> dict:
     """能力注册表命中后的排行取数（source 由 _match_data_source 给出）。
 
     内部仍走 _route_ranking（规模感知 + 缓存），保证 sina 全市场与
     eastmoney→tencent 快路径行为一致。"""
-    return _route_ranking(goal, market, metric)
+    _scope_kw = {"scope": scope} if scope else {}
+    return _route_ranking(goal, market, metric, **_scope_kw)
 
 
 def _fetch_ranking_with_fallback(
-    market: str, metric: str, top_n: int = 10,
+    market: str, metric: str, top_n: int = 10, scope: str = "",
 ) -> dict | None:
     """排行降级链（快路径，N≤50）：
     A股：eastmoney_ranking → 失败 tencent_ranking（腾讯候选池）；
@@ -415,6 +419,7 @@ def _fetch_ranking_with_fallback(
     保持原有语义。候选源按健康状态过滤：冷却中的直接跳过；
     全部冷却 → 返回 None（预载层已有重试与可见化，恢复后自动可用）。"""
     top_n = int(top_n or 10)
+    _scope_kw = {"scope": scope} if scope else {}
     if market == "us":
         if not _source_available("tencent_us_ranking"):
             logger.warning(
@@ -426,7 +431,7 @@ def _fetch_ranking_with_fallback(
         except Exception as exc:
             logger.warning("tencent_us ranking fetch failed: %s", exc)
             return None
-        cache_set_ranking(market, metric, payload, top_n=top_n)
+        cache_set_ranking(market, metric, payload, top_n=top_n, **_scope_kw)
         return payload
     if _source_available("eastmoney_ranking"):
         try:
@@ -441,7 +446,7 @@ def _fetch_ranking_with_fallback(
         except Exception as exc:
             logger.warning("tencent ranking fetch failed: %s", exc)
             return None
-        cache_set_ranking(market, metric, payload, top_n=top_n)
+        cache_set_ranking(market, metric, payload, top_n=top_n, **_scope_kw)
         return payload
     logger.warning(
         "ranking fetch failed: all ranking sources unavailable or in cooldown"
@@ -532,10 +537,12 @@ def _route_multi_entity_financial(
     }
 
 
-def route_structured(goal: str) -> dict | None:
+def route_structured(goal: str, scope: str = "") -> dict | None:
     """按目标关键词路由到结构化数据源；成功返回 {source, data, metadata}，
     失败返回 None（调用方回退搜索链路）。
-    顺序：A股行情排行 → crypto → macro → news → financial。"""
+    顺序：A股行情排行 → crypto → macro → news → financial。
+    scope 为任务所属项目：行情缓存按项目分桶（不同项目的数据源策略/口径可能
+    不同，不共用同一份排行快照）。"""
     # P0-2/P1：规模感知 + 能力注册表路由。
     # 统计/分布/前 N>50 → sina_ranking 分页全市场；前十/前 N≤50 →
     # eastmoney→tencent 快路径。关键词保留为快速兜底。
@@ -546,11 +553,13 @@ def route_structured(goal: str) -> dict | None:
         scale = _parse_scale(goal)
         matched = _match_data_source(market, metric, scale, top_n or 10)
         cache_hit = False
+        # 未配置作用域时不传该参数（保持既有调用形状）
+        _scope_kw = {"scope": scope} if scope else {}
         try:
             if scale == "full_market":
-                payload = _route_ranking(goal, market, metric)
+                payload = _route_ranking(goal, market, metric, **_scope_kw)
             else:
-                cached = cache_get_ranking(market, metric, top_n or 10)
+                cached = cache_get_ranking(market, metric, top_n or 10, **_scope_kw)
                 if cached:
                     payload = cached
                     cache_hit = True
@@ -560,10 +569,10 @@ def route_structured(goal: str) -> dict | None:
                     )
                 elif matched:
                     payload = _route_ranking_by_source(
-                        matched, goal, market, metric,
+                        matched, goal, market, metric, **_scope_kw,
                     )
                 else:
-                    payload = _route_ranking(goal, market, metric)
+                    payload = _route_ranking(goal, market, metric, **_scope_kw)
         except Exception as exc:
             # P2-6 预载失败可见化：瞬时接口异常不再静默吞掉，
             # 记录 warning 后由调用方（orchestrator）重试或回退搜索链路

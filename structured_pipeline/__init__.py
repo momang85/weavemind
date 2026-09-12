@@ -104,7 +104,11 @@ class StructuredPipelineMixin:
         clean_chart_data.json，供搜索清洗、图表与报告引用。失败静默回退搜索链路。"""
         try:
             from adapters.router import route_structured
-            data = route_structured(goal)
+            # scope=项目名：行情缓存按项目分桶（不同项目的数据源策略/口径可能不同）；
+            # 无项目时不传参，保持既有调用形状
+            _scope = str(project or "")
+            _scope_kw = {"scope": _scope} if _scope else {}
+            data = route_structured(goal, **_scope_kw)
             if not data:
                 # P2-6 预载失败可见化：首次未命中（如瞬时接口异常）等待 2s
                 # 重试一次，第二次仍返回 None 才放弃并告警，避免静默占位
@@ -113,7 +117,7 @@ class StructuredPipelineMixin:
                     task_id,
                 )
                 time.sleep(2)
-                data = route_structured(goal)
+                data = route_structured(goal, **_scope_kw)
                 if not data:
                     logger.warning(
                         "Structured preload retry failed for %s: "

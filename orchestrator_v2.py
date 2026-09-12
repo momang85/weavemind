@@ -3227,8 +3227,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 logger.warning("Old zip cleanup failed for %s: %s", task_id, exc)
             logger.info("Task %s: %s", task_id, goal[:80])
         else:
+            # 恢复语义（显式化，避免"为什么这次没清工作区"成为疑问）：
+            # 从 checkpoint 恢复时**保留**已有产物——已完成的步骤结果就靠这些文件，
+            # 清掉会让恢复变成"从零重跑"。清理只发生在全新任务（resumed is None）。
             logger.info(
-                "Task %s resumed from checkpoint: phase=%s pending_steps=%d",
+                "Task %s resumed from checkpoint: phase=%s pending_steps=%d"
+                "（保留工作区已有产物，不做清理）",
                 task_id, resumed.get("phase"), len(resumed.get("steps") or []),
             )
 

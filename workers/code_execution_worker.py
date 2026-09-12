@@ -133,7 +133,10 @@ class CodeExecutionWorker(AsyncWorkerBase):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.workspace = Path(tempfile.gettempdir()) / "agent_workspace" / "project"
+        # 兜底工作目录：不再共用 %TEMP%/agent_workspace/project（那是跨任务共享目录，
+        # 没有 task workspace 的调用会把产物写进别人的目录里）。改为本 worker 进程
+        # 独立的临时目录；正常派发都会带 task["workspace"]（见 execute 内切换）。
+        self.workspace = Path(tempfile.mkdtemp(prefix="agent_workspace_worker_"))
         self.workspace.mkdir(parents=True, exist_ok=True)
 
     def _clean_env(self) -> dict:

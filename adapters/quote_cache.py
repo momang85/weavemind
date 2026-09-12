@@ -1,8 +1,10 @@
 # -*- coding: utf-8 -*-
 """行情排行缓存：Redis 优先，进程内内存 dict 兜底。
 
-key 规则：ranking:{market}:{metric}:{top_n}
-（如 ranking:a:amount:10 / ranking:us:volume:0），
+key 规则：ranking:{scope}:{market}:{metric}:{top_n}
+（如 ranking:default:a:amount:10 / ranking:research:us:volume:0），
+scope 是任务所属项目——不同项目的数据源策略与口径可能不同，不共用同一份快照；
+未指定 scope 时退回旧键（ranking:{market}:{metric}:{top_n}）以兼容既有缓存。
 top_n=0 表示全市场分页规模，避免不同规模排行串缓存。
 TTL 默认 600 秒，可用环境变量 QUOTE_CACHE_TTL 覆盖（秒）。
 Redis 不可用/读写异常时自动降级内存缓存（带过期时间），
@@ -66,9 +68,11 @@ class QuoteCache:
         self._lock = threading.Lock()
 
     @staticmethod
-    def _key(market: str, metric: str, top_n: int = 0) -> str:
-        """排行缓存键：market + metric + top_n（0=全市场规模）。"""
-        return f"{_KEY_PREFIX}:{market}:{metric}:{int(top_n or 0)}"
+    def _key(market: str, metric: str, top_n: int = 0, scope: str = "") -> str:
+        """排行缓存键：scope + market + metric + top_n（0=全市场规模）。"""
+        base = f"{market}:{metric}:{int(top_n or 0)}"
+        scoped = str(scope or "").strip()
+        return f"{_KEY_PREFIX}:{scoped}:{base}" if scoped else f"{_KEY_PREFIX}:{base}"
 
     def _memory_get(self, key: str) -> dict | None:
         with self._lock:
@@ -95,9 +99,25 @@ class QuoteCache:
                     )
                     del self._memory[oldest]
 
-    def get(self, market: str, metric: str, top_n: int = 0) -> dict | None:
-        """命中返回 payload，未命中/过期返回 None。"""
-        key = self._key(market, metric, top_n)
+    def get(self, market: str, metric: str, top_n: int = 0,
+            scope: str = "") -> dict | None:
+        """命中返回 payload，未命中/过期返回 None。
+
+        带 scope 时先查本作用域键；未命中再退回旧的无作用域键（兼容既有缓存），
+        这样切换作用域不会让缓存整体失效，同时新写入只进本作用域桶。"""
+        scoped_key = self._key(market, metric, top_n, scope)
+        found = self._read_key(scoped_key)
+        if found is not None:
+            return found
+        if scope:
+            legacy_key = self._key(market, metric, top_n, "")
+            found = self._read_key(legacy_key)
+            if found is not None:
+                _logger.info("quote cache: 命中旧的无作用域键（scope=%s）", scope)
+            return found
+        return None
+
+    def _read_key(self, key: str) -> dict | None:
         if self._redis is not None:
             try:
                 raw = self._redis.get(key)
@@ -110,10 +130,10 @@ class QuoteCache:
 
     def set(
         self, market: str, metric: str, payload: dict,
-        top_n: int = 0, ttl: int | None = None,
+        top_n: int = 0, ttl: int | None = None, scope: str = "",
     ) -> bool:
         """回填缓存；返回是否成功写入 Redis（内存兜底失败不算失败）。"""
-        key = self._key(market, metric, top_n)
+        key = self._key(market, metric, top_n, scope)
         ttl = ttl if ttl is not None else self._ttl
         redis_ok = False
         if self._redis is not None:
@@ -128,9 +148,10 @@ class QuoteCache:
         self._memory_set(key, payload, ttl)
         return redis_ok
 
-    def delete(self, market: str, metric: str, top_n: int = 0) -> None:
+    def delete(self, market: str, metric: str, top_n: int = 0,
+               scope: str = "") -> None:
         """删除指定缓存（测试/运维清理用）。"""
-        key = self._key(market, metric, top_n)
+        key = self._key(market, metric, top_n, scope)
         if self._redis is not None:
             try:
                 self._redis.delete(key)
@@ -155,19 +176,22 @@ class QuoteCache:
 quote_cache = QuoteCache()
 
 
-def get_ranking(market: str, metric: str, top_n: int = 0) -> dict | None:
-    """快捷入口：读取排行缓存（top_n 参与键）。"""
-    return quote_cache.get(market, metric, top_n)
+def get_ranking(market: str, metric: str, top_n: int = 0,
+                scope: str = "") -> dict | None:
+    """快捷入口：读取排行缓存（scope + top_n 参与键）。"""
+    return quote_cache.get(market, metric, top_n, scope=scope)
 
 
 def set_ranking(
     market: str, metric: str, payload: dict,
-    top_n: int = 0, ttl: int | None = None,
+    top_n: int = 0, ttl: int | None = None, scope: str = "",
 ) -> bool:
-    """快捷入口：回填排行缓存（top_n 参与键）。"""
-    return quote_cache.set(market, metric, payload, top_n=top_n, ttl=ttl)
+    """快捷入口：回填排行缓存（scope + top_n 参与键）。"""
+    return quote_cache.set(market, metric, payload, top_n=top_n, ttl=ttl,
+                           scope=scope)
 
 
-def delete_ranking(market: str, metric: str, top_n: int = 0) -> None:
+def delete_ranking(market: str, metric: str, top_n: int = 0,
+                   scope: str = "") -> None:
     """快捷入口：删除排行缓存。"""
-    quote_cache.delete(market, metric, top_n)
+    quote_cache.delete(market, metric, top_n, scope=scope)
