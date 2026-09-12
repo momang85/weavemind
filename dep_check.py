@@ -37,18 +37,23 @@ BASE_DIR = Path(__file__).resolve().parent
 RUNTIME_DIR = BASE_DIR / ".weavimind"
 DOWNLOAD_DIR = RUNTIME_DIR / "downloads"
 REDIS_DIR = RUNTIME_DIR / "redis"
+# 便携版解压到隔离子目录：避免与历史遗留目录（可能被占用/版本过旧）互相干扰
+PORTABLE_DIR = REDIS_DIR / "portable"
 REDIS_PID_FILE = RUNTIME_DIR / "redis.pid"
 LOG_DIR = BASE_DIR / "logs"
 FRONTEND_INDEX = BASE_DIR / "frontend" / "dist" / "index.html"
 
-# 便携版 Redis 下载源（tporadowski/redis 官方 release；可用环境变量换镜像，
+# 便携版 Redis 下载源（redis-windows 官方 release；可用环境变量换镜像，
 # 但仍须通过 _validate_download_url 的白名单与公网地址校验）
+# 兼容性下限：项目用的 redis-py 8 默认 RESP3（HELLO 3），Redis 5 不支持该命令，
+# 会表现为"服务启动即崩、日志报 unknown command HELLO"——故必须取 Redis 6+。
 REDIS_ZIP_URL = os.environ.get(
     "WM_REDIS_ZIP_URL",
-    "https://github.com/tporadowski/redis/releases/download/v5.0.14.1/"
-    "Redis-x64-5.0.14.1.zip",
+    "https://github.com/redis-windows/redis-windows/releases/download/8.10.1/"
+    "Redis-8.10.1-Windows-x64-msys2.zip",
 )
 REDIS_BIN = "redis-server.exe"
+REDIS_MIN_MAJOR = 6
 DOWNLOAD_HOSTS = (
     "github.com",
     "objects.githubusercontent.com",
@@ -345,8 +350,10 @@ def install_missing(pkgs: dict, include_optional: bool = True) -> dict:
 REDIS_HINT = """\
 Redis 未运行且无法自动获取时的三种方案（任选其一，保持 6379 端口即可）：
   1) Memurai（Redis 兼容的 Windows 服务，开发者版免费）：https://www.memurai.com
-  2) tporadowski/redis：GitHub 搜 tporadowski/redis，解压后运行 redis-server.exe
+  2) redis-windows（Redis 8.x Windows 构建）：github.com/redis-windows/redis-windows
   3) WSL2 / Linux：sudo apt install redis-server && sudo service redis-server start
+注意：需要 **Redis 6 及以上**——本项目用的 redis-py 8 默认 RESP3（HELLO 命令），
+Redis 5 不支持该命令，会表现为"服务启动即崩、日志报 unknown command HELLO"。
 详见 docs/部署指南.md「无 Docker 的完整路径」。
 """
 
@@ -389,13 +396,112 @@ def _wait_redis(host: str, port: int, wait_sec: float) -> bool:
     return False
 
 
+def _redis_server_version(host: str = "", port: int = 0,
+                          timeout: float = 2.0) -> int | None:
+    """读取"正在运行的" Redis 主版本（inline INFO server，不依赖 redis 包）。
+
+    raw PING 对 Redis 5 也会成功应答，但 redis-py 8 默认 RESP3（HELLO 3）
+    不被 Redis 5 支持——因此必须校验运行实例的真实版本。
+    """
+    import socket
+    target_host = host or _env_host()
+    target_port = _valid_port(port or _env_port())
+    try:
+        with socket.create_connection((target_host, target_port),
+                                      timeout=timeout) as conn:
+            conn.sendall(b"INFO server\r\n")
+            data = b""
+            while b"redis_version" not in data and len(data) < 16384:
+                chunk = conn.recv(4096)
+                if not chunk:
+                    break
+                data += chunk
+        import re as _re
+        m = _re.search(rb"redis_version:(\d+)\.", data)
+        return int(m.group(1)) if m else None
+    except Exception:
+        return None
+
+
+def _stop_recorded_redis() -> bool:
+    """停掉本项目记录在案的便携版 Redis（仅按 redis.pid，避免误杀用户服务）。"""
+    try:
+        pid = int(REDIS_PID_FILE.read_text(encoding="utf-8").strip())
+    except Exception:
+        return False
+    if pid <= 0:
+        return False
+    try:
+        if os.name == "nt":
+            proc = subprocess.run(["taskkill", "/F", "/PID", str(pid)],
+                                  shell=False, capture_output=True, timeout=10)
+            return proc.returncode == 0
+        import signal as _signal
+        os.kill(pid, _signal.SIGTERM)
+        return True
+    except Exception:
+        return False
+
+
+def _find_redis_binary(root: Path) -> Path | None:
+    """在解压目录内定位 redis-server.exe（发行包常有一层同名子目录）。"""
+    try:
+        if not root.exists():
+            return None
+        for candidate in root.rglob(REDIS_BIN):
+            if candidate.is_file():
+                return candidate
+    except Exception:
+        return None
+    return None
+
+
+def _redis_binary_version(exe: Path) -> int | None:
+    """读取 redis-server 主版本号（--version，不绑定端口）；失败返回 None。"""
+    try:
+        proc = subprocess.run([str(exe), "--version"], shell=False,
+                              capture_output=True, text=True, timeout=8)
+        text = f"{proc.stdout} {proc.stderr}"
+        import re as _re
+        m = _re.search(r"v=(\d+)\.", text) or _re.search(r"(\d+)\.\d+\.\d+", text)
+        return int(m.group(1)) if m else None
+    except Exception:
+        return None
+
+
+def _usable_portable_redis() -> Path | None:
+    """返回可用的便携版 redis-server（优先 isolated 子目录，要求版本 ≥ 兼容下限）。
+
+    历史坑：曾下载过 Redis 5，redis-py 8 的 RESP3 握手（HELLO）不被支持，
+    表现为"服务启动即崩"。这里按主版本做准入，旧版本自动重新获取。
+    """
+    for base in (PORTABLE_DIR, REDIS_DIR):
+        exe = _find_redis_binary(base)
+        if exe is None:
+            continue
+        major = _redis_binary_version(exe)
+        if major is not None and major >= REDIS_MIN_MAJOR:
+            return exe
+    return None
+
+
 def ensure_redis(auto: bool = True, wait_sec: float = 12.0) -> dict:
     """确保 Redis 可用：已运行→通过；否则按平台获取并启动。"""
     host = _env_host()
     port = _env_port()
     if redis_ping(host, port):
-        return {"ok": True, "action": "already_running",
-                "detail": f"Redis 已运行（{host}:{port}）"}
+        major = _redis_server_version(host, port)
+        if major is None or major >= REDIS_MIN_MAJOR:
+            return {"ok": True, "action": "already_running",
+                    "detail": f"Redis 已运行（{host}:{port}，版本 {major or '未知'}）"}
+        # 运行中的版本过低（Redis 5 不支持 HELLO）→ 停掉本项目启动的实例并换便携版
+        replaced = _stop_recorded_redis()
+        if not replaced:
+            return {"ok": False, "action": "version_too_old",
+                    "detail": (f"检测到 Redis {major}（需 ≥{REDIS_MIN_MAJOR}："
+                               f"redis-py 8 用 RESP3/HELLO 握手，Redis 5 不支持），"
+                               f"且该实例非本项目启动、不会自动停止。\n{REDIS_HINT}")}
+        time.sleep(1.0)
 
     # 非 Windows：优先 PATH 上的 redis-server（不自动 apt/yum，需 root 交用户）
     if os.name != "nt":
@@ -414,8 +520,8 @@ def ensure_redis(auto: bool = True, wait_sec: float = 12.0) -> dict:
                 "detail": f"未找到 redis-server 且本机无 Redis。\n{REDIS_HINT}"}
 
     # Windows：已下载的直接复用，否则从白名单源下载（WM_NO_AUTO_DOWNLOAD=1 可关闭）
-    redis_exe = REDIS_DIR / REDIS_BIN
-    if not redis_exe.exists():
+    redis_exe = _usable_portable_redis()
+    if redis_exe is None:
         if not auto or os.environ.get("WM_NO_AUTO_DOWNLOAD", "0") == "1":
             return {"ok": False, "action": "download_disabled",
                     "detail": f"Redis 缺失且自动下载已关闭。\n{REDIS_HINT}"}
@@ -424,16 +530,20 @@ def ensure_redis(auto: bool = True, wait_sec: float = 12.0) -> dict:
         if not ok:
             return {"ok": False, "action": "download_failed",
                     "detail": f"{msg}\n{REDIS_HINT}"}
-        ok, msg = _safe_extract_zip(zip_path, REDIS_DIR, expect_name=REDIS_BIN)
+        ok, msg = _safe_extract_zip(zip_path, PORTABLE_DIR, expect_name=REDIS_BIN)
         if not ok:
             return {"ok": False, "action": "extract_failed",
                     "detail": f"{msg}\n{REDIS_HINT}"}
+        redis_exe = _usable_portable_redis()
+        if redis_exe is None:
+            return {"ok": False, "action": "extract_failed",
+                    "detail": f"解压后未找到可用 {REDIS_BIN}（{PORTABLE_DIR}）\n{REDIS_HINT}"}
     proc = _spawn_background([str(redis_exe), "--port", str(port)],
-                             LOG_DIR / "redis.log", cwd=REDIS_DIR)
+                             LOG_DIR / "redis.log", cwd=redis_exe.parent)
     _write_redis_pid(proc.pid)
     if _wait_redis(host, port, wait_sec):
         return {"ok": True, "action": "started",
-                "detail": f"已启动便携版 Redis（pid={proc.pid}，目录 {REDIS_DIR}）"}
+                "detail": f"已启动便携版 Redis（pid={proc.pid}，{redis_exe.parent}）"}
     return {"ok": False, "action": "failed",
             "detail": f"Redis 已启动但探测失败（pid={proc.pid}，见 logs/redis.log）"}
 
