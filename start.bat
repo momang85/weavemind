@@ -117,10 +117,11 @@ goto redis_ok
 
 :redis_no_docker
 echo        No local Redis and Docker engine is not running.
-echo        Starting Docker Desktop ^(waiting up to 90s^)...
 if exist "C:\Program Files\Docker\Docker\Docker Desktop.exe" (
+    echo        Starting Docker Desktop ^(waiting up to 90s^)...
     start "" "C:\Program Files\Docker\Docker\Docker Desktop.exe"
 ) else if exist "%LOCALAPPDATA%\Docker\Docker Desktop.exe" (
+    echo        Starting Docker Desktop ^(waiting up to 90s^)...
     start "" "%LOCALAPPDATA%\Docker\Docker Desktop.exe"
 ) else (
     echo   NOTE: Docker Desktop not found. Redis is the only hard dependency;

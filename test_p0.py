@@ -6659,21 +6659,41 @@ class TestPipMirrorPolicy(unittest.TestCase):
             self.assertEqual(dep_check._pip_mirror(),
                              "https://mirrors.aliyun.com/pypi/simple")
 
-    def test_pip_install_retries_with_mirror_after_failure(self):
+    def test_pip_install_prefers_mirror_then_default(self):
+        """顺序必须是"镜像优先、默认源兜底"。
+
+        国内 pypi.org 常表现为**长时间无响应**而非快速失败，若先撞默认源，
+        新手会卡很久（实测就是这一步停很久）。
+        """
         import dep_check
         calls = []
 
         def fake(packages, timeout=600, index_url=""):
             calls.append(index_url)
-            return (False, "默认源失败") if len(calls) == 1 else (True, "镜像装好了")
+            return (False, "镜像也不通") if len(calls) == 1 else (True, "默认源装好了")
 
-        with mock.patch.object(dep_check, "_pip_install_once", side_effect=fake):
+        with mock.patch.object(dep_check, "_pip_install_once", side_effect=fake), \
+                mock.patch("builtins.print"):
             ok, msg = dep_check.pip_install(["redis"], timeout=5)
         self.assertTrue(ok)
-        self.assertEqual(len(calls), 2, "默认源失败后应用镜像重试一次")
-        self.assertEqual(calls[0], "")
-        self.assertTrue(calls[1].startswith("https://"))
-        self.assertIn("镜像", msg)
+        self.assertTrue(calls[0].startswith("https://"), "第一次就应该走镜像")
+        self.assertEqual(calls[1], "", "镜像失败后才回退默认源")
+        self.assertIn("默认源", msg)
+
+    def test_pip_install_off_uses_default_only(self):
+        import dep_check
+        calls = []
+
+        def fake(packages, timeout=600, index_url=""):
+            calls.append(index_url)
+            return (True, "好了")
+
+        with mock.patch.dict(os.environ, {"WM_PIP_INDEX_URL": "off"}), \
+                mock.patch.object(dep_check, "_pip_install_once", side_effect=fake), \
+                mock.patch("builtins.print"):
+            ok, _ = dep_check.pip_install(["redis"], timeout=5)
+        self.assertTrue(ok)
+        self.assertEqual(calls, [""], "关闭镜像时只尝试默认源")
 
 
 class TestDownloadSafety(unittest.TestCase):

@@ -384,28 +384,33 @@ def _safe_extract_zip(zip_path: Path, dest_dir: Path,
 def pip_install(packages: list[str], timeout: int = 600) -> tuple[bool, str]:
     """用当前解释器 pip 安装指定包（只装缺失项，参数列表 + shell=False）。
 
-    默认源失败后用国内镜像重试一次：目标用户里 pypi.org 经常不可达或极慢，
-    而这一步是"一键启动"里最可能卡住新手的地方（实测报错
-    `No matching distribution found for aiosqlite`）。镜像地址可用
-    WM_PIP_INDEX_URL 覆盖（设为 off 关闭回退），且必须是公网 http/https——
-    按仓库既有 SSRF 规则校验，内网/回环地址一律不采用。
+    顺序：**先国内镜像、再默认源**。此前是"默认源失败后才回退镜像"，而国内
+    pypi.org 往往不是"失败"而是"长时间无响应"——实测新手就卡在这一步很久
+    （终端还因为 -q 没有任何输出，看起来像死了）。镜像可用 WM_PIP_INDEX_URL
+    覆盖（指向自己的内网/厂商镜像），设为 off 则只用默认源。
+    镜像地址按仓库既有 SSRF 规则校验：仅 http/https + 公网，环回/内网不采用。
     """
     if not packages:
         return True, "无需安装"
-    ok, msg = _pip_install_once(packages, timeout=timeout)
-    if ok:
-        return True, msg
     mirror = _pip_mirror()
-    if not mirror:
-        return False, f"{msg}（可设 WM_PIP_INDEX_URL 指向可用镜像后重试）"
-    ok2, msg2 = _pip_install_once(packages, timeout=timeout, index_url=mirror)
-    if ok2:
-        return True, f"{msg2}（默认源失败，已改用镜像 {mirror}）"
-    return False, f"{msg}；镜像重试也失败：{msg2}"
+    attempts: list[tuple[str, str]] = []
+    if mirror:
+        attempts.append((f"镜像 {mirror}", mirror))
+    attempts.append(("默认源 PyPI", ""))
+    detail = ""
+    for label, index_url in attempts:
+        print(_t(f"      正在安装 {len(packages)} 个依赖（{label}，首次可能要几分钟）…",
+                 f"      installing {len(packages)} packages via {label}..."),
+              flush=True)
+        ok, msg = _pip_install_once(packages, timeout=timeout, index_url=index_url)
+        if ok:
+            return True, f"{msg}（{label}）"
+        detail = f"{detail}{'；' if detail else ''}{label}失败：{msg}"
+    return False, f"{detail}（可设 WM_PIP_INDEX_URL 指定可用镜像）"
 
 
 def _pip_mirror() -> str:
-    """镜像地址（默认清华源）；非法/关闭/非公网时返回空串表示不回退。"""
+    """镜像地址（默认清华源）；非法/关闭/非公网时返回空串表示只用默认源。"""
     raw = str(os.environ.get(
         "WM_PIP_INDEX_URL", "https://pypi.tuna.tsinghua.edu.cn/simple") or "").strip()
     if not raw or raw.lower() in ("off", "0", "none", "no"):
@@ -428,9 +433,9 @@ def _pip_mirror() -> str:
 
 def _pip_install_once(packages: list[str], timeout: int = 600,
                       index_url: str = "") -> tuple[bool, str]:
-    """单次 pip 安装（可指定 index-url）。"""
-    cmd = [sys.executable, "-m", "pip", "install", "-q",
-           "--timeout", "60", "--retries", "2"]
+    """单次 pip 安装（可指定 index-url）；关进度条但保留错误可见。"""
+    cmd = [sys.executable, "-m", "pip", "install",
+           "--progress-bar", "off", "--timeout", "30", "--retries", "1"]
     if index_url:
         cmd += ["--index-url", index_url]
     cmd += list(packages)
@@ -483,6 +488,8 @@ Redis 未运行且无法自动获取时的三种方案（任选其一，保持 6
   1) Memurai（Redis 兼容的 Windows 服务，开发者版免费）：https://www.memurai.com
   2) redis-windows（Redis 8.x Windows 构建）：github.com/redis-windows/redis-windows
   3) WSL2 / Linux：sudo apt install redis-server && sudo service redis-server start
+若只是 GitHub 下不动：可先把 Redis zip 放到别处，再用环境变量
+  WM_REDIS_ZIP_URL=<可达的 zip 地址>  重新运行（仍要求 https + 公网地址）
 注意：需要 **Redis 6 及以上**——本项目用的 redis-py 8 默认 RESP3（HELLO 命令），
 Redis 5 不支持该命令，会表现为"服务启动即崩、日志报 unknown command HELLO"。
 详见 docs/部署指南.md「无 Docker 的完整路径」。
@@ -701,6 +708,10 @@ def ensure_redis(auto: bool = True, wait_sec: float = 12.0) -> dict:
                     "detail": _t(f"Redis 缺失且自动下载已关闭。\n{REDIS_HINT}",
                                  f"Redis missing and auto-download disabled.\n{REDIS_HINT_EN}")}
         zip_path = DOWNLOAD_DIR / "redis-windows.zip"
+        print(_t("      正在获取便携版 Redis（约 5MB，来自 GitHub releases；"
+                 "国内网络可能较慢或需要代理）…",
+                 "      fetching portable Redis (~5MB from GitHub releases; "
+                 "may be slow on restricted networks)..."), flush=True)
         ok, msg = _safe_download(REDIS_ZIP_URL, zip_path)
         if not ok:
             return {"ok": False, "action": "download_failed",
