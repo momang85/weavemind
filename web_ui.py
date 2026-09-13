@@ -12,6 +12,15 @@ from workspace import (
     task_workspace,
 )
 
+# Redis 客户端统一关掉 redis-py 的内建重试：默认重试会把 socket_connect_timeout
+# 叠成 26~48 秒才失败（实测 127.0.0.1 26s / localhost 48s），Redis 不在时
+# 表现为"服务没崩但处处卡"。NoBackoff + 0 次重试 → 稳定 2 秒内失败并可被上层降级。
+from redis.backoff import NoBackoff as _NoBackoff
+from redis.retry import Retry as _Retry
+
+_NO_REDIS_RETRY = _Retry(_NoBackoff(), 0)
+
+
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 DB_PATH = os.environ.get("REGISTRY_DB", "agents.db")
@@ -206,7 +215,7 @@ def _new_redis():
     """带超时的 Redis 客户端：Redis 不可用时快速失败，避免请求挂死。"""
     return redis.Redis(
         host=REDIS_HOST, port=REDIS_PORT, decode_responses=True,
-        socket_connect_timeout=2, socket_timeout=3,
+        socket_connect_timeout=2, socket_timeout=3, retry=_NO_REDIS_RETRY,
     )
 
 def _redis_ready(timeout: float = 0.5) -> bool:

@@ -60,6 +60,14 @@ _FINGERPRINT_JS = """() => {
 from memory_manager import MemoryManager
 from ws_helpers import push_progress
 
+# Redis 客户端统一关掉 redis-py 的内建重试：默认重试会把 socket_connect_timeout
+# 叠成 26~48 秒才失败（实测 127.0.0.1 26s / localhost 48s），Redis 不在时
+# 表现为"服务没崩但处处卡"。NoBackoff + 0 次重试 → 稳定 2 秒内失败并可被上层降级。
+from redis.backoff import NoBackoff as _NoBackoff  # noqa: E402
+from redis.retry import Retry as _Retry  # noqa: E402
+
+_NO_REDIS_RETRY = _Retry(_NoBackoff(), 0)
+
 logger = logging.getLogger(__name__)
 
 # 来源纪律红线（#6 幻觉来源闭环）：追加到验收缺口文本后，让反思/重做指令

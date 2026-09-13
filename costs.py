@@ -14,6 +14,14 @@
 import os
 from datetime import datetime
 
+# Redis 客户端统一关掉 redis-py 的内建重试：默认重试会把 socket_connect_timeout
+# 叠成 26~48 秒才失败（实测 127.0.0.1 26s / localhost 48s），Redis 不在时
+# 表现为"服务没崩但处处卡"。NoBackoff + 0 次重试 → 稳定 2 秒内失败并可被上层降级。
+from redis.backoff import NoBackoff as _NoBackoff  # noqa: E402
+from redis.retry import Retry as _Retry  # noqa: E402
+
+_NO_REDIS_RETRY = _Retry(_NoBackoff(), 0)
+
 PRICES = {
     "deepseek-v4-flash": {"in": 0.30, "out": 0.60},
     "deepseek-ai/deepseek-v3": {"in": 0.30, "out": 0.90},
@@ -79,10 +87,7 @@ def _month_redis_client():
             port=int(os.environ.get("REDIS_PORT", "6379")),
             decode_responses=True,
             socket_connect_timeout=2,
-            socket_timeout=2,
-            # redis-py 8 默认对连接错误重试：只给超时不够，实测仍要 26~48s 才失败
-            # （127.0.0.1 26s / localhost 48s）。关掉重试后稳定 2s 内失败。
-            retry=Retry(NoBackoff(), 0),
+            socket_timeout=2, retry=_NO_REDIS_RETRY,
         )
     except Exception:
         return None

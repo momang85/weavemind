@@ -25,6 +25,14 @@ from threading import Lock
 
 import redis
 
+# Redis 客户端统一关掉 redis-py 的内建重试：默认重试会把 socket_connect_timeout
+# 叠成 26~48 秒才失败（实测 127.0.0.1 26s / localhost 48s），Redis 不在时
+# 表现为"服务没崩但处处卡"。NoBackoff + 0 次重试 → 稳定 2 秒内失败并可被上层降级。
+from redis.backoff import NoBackoff as _NoBackoff  # noqa: E402
+from redis.retry import Retry as _Retry  # noqa: E402
+
+_NO_REDIS_RETRY = _Retry(_NoBackoff(), 0)
+
 logger = logging.getLogger(__name__)
 
 # 输出文件
@@ -262,7 +270,7 @@ class MetricsCollector:
                 host=os.environ.get("REDIS_HOST", "localhost"),
                 port=int(os.environ.get("REDIS_PORT", "6379")),
                 decode_responses=True,
-                socket_connect_timeout=2, socket_timeout=2,
+                socket_connect_timeout=2, socket_timeout=2, retry=_NO_REDIS_RETRY,
             )
             ledger = r.hgetall(f"llm_usage_task:{tid}") or {}
             from costs import ledger_cost
@@ -311,7 +319,7 @@ class MetricsCollector:
                     host=os.environ.get("REDIS_HOST", "localhost"),
                     port=int(os.environ.get("REDIS_PORT", "6379")),
                     decode_responses=True,
-                    socket_connect_timeout=2, socket_timeout=2,
+                    socket_connect_timeout=2, socket_timeout=2, retry=_NO_REDIS_RETRY,
                 )
                 raw = r.get("search_engine_health")
                 if raw:

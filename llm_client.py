@@ -16,6 +16,14 @@ from typing import Any
 
 from common import extract_json_object, loads_loose
 
+# Redis 客户端统一关掉 redis-py 的内建重试：默认重试会把 socket_connect_timeout
+# 叠成 26~48 秒才失败（实测 127.0.0.1 26s / localhost 48s），Redis 不在时
+# 表现为"服务没崩但处处卡"。NoBackoff + 0 次重试 → 稳定 2 秒内失败并可被上层降级。
+from redis.backoff import NoBackoff as _NoBackoff  # noqa: E402
+from redis.retry import Retry as _Retry  # noqa: E402
+
+_NO_REDIS_RETRY = _Retry(_NoBackoff(), 0)
+
 logger = logging.getLogger(__name__)
 
 
@@ -222,7 +230,7 @@ def _record_task_degradation(task_id: str, reason: str, both_failed: bool = Fals
                 port=int(os.environ.get("REDIS_PORT", "6379")),
                 decode_responses=True,
                 socket_connect_timeout=2,
-                socket_timeout=2,
+                socket_timeout=2, retry=_NO_REDIS_RETRY,
             )
         key = f"llm_degradation:{task_id}"
         # P2-3：同根因 2 秒内去重（_mark_endpoint 与调用点各记一次），
@@ -276,7 +284,7 @@ def get_task_llm_degradation(task_id: str) -> dict:
                 port=int(os.environ.get("REDIS_PORT", "6379")),
                 decode_responses=True,
                 socket_connect_timeout=2,
-                socket_timeout=2,
+                socket_timeout=2, retry=_NO_REDIS_RETRY,
             )
         raw = _task_usage_client.lrange(f"llm_degradation:{task_id}", 0, -1) or []
         events: list[dict] = []
@@ -718,7 +726,7 @@ def _publish_stream_chunk(text: str) -> None:
                 port=int(os.environ.get("REDIS_PORT", "6379")),
                 decode_responses=True,
                 socket_connect_timeout=2,
-                socket_timeout=2,
+                socket_timeout=2, retry=_NO_REDIS_RETRY,
             )
         key = f"stream:{tid}"
         _task_usage_client.rpush(key, text)
@@ -853,7 +861,7 @@ def _record_usage(
                 port=int(os.environ.get("REDIS_PORT", "6379")),
                 decode_responses=True,
                 socket_connect_timeout=2,
-                socket_timeout=2,
+                socket_timeout=2, retry=_NO_REDIS_RETRY,
             )
         key = f"llm_usage_task:{tid}"
         _task_usage_client.hincrby(key, "calls", 1)
@@ -917,7 +925,7 @@ def _get_llm_cache_client():
             port=int(os.environ.get("REDIS_PORT", "6379")),
             decode_responses=True,
             socket_connect_timeout=2,
-            socket_timeout=2,
+            socket_timeout=2, retry=_NO_REDIS_RETRY,
         )
     return _llm_cache_client
 
@@ -980,7 +988,7 @@ def _publish_usage_snapshot() -> None:
                 port=int(os.environ.get("REDIS_PORT", "6379")),
                 decode_responses=True,
                 socket_connect_timeout=2,
-                socket_timeout=2,
+                socket_timeout=2, retry=_NO_REDIS_RETRY,
             )
         _usage_pub_client.set(
             f"llm_usage:{os.getpid()}",
