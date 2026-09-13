@@ -183,18 +183,66 @@ def load_template() -> dict:
 
 
 def _interactive() -> bool:
+    """是否进入问答流程。
+
+    优先级：WM_NONINTERACTIVE=1（自动化/CI，绝不提问）> WM_WIZARD_FORCE=1
+    （强制问答：stdin 被管道或包装器接管、但答案已备好时仍走完整流程）> tty 判断。
+    """
     if os.environ.get("WM_NONINTERACTIVE"):
         return False
+    if str(os.environ.get("WM_WIZARD_FORCE", "")).strip().lower() in ("1", "true", "yes"):
+        return True
     try:
         return sys.stdin is not None and sys.stdin.isatty()
     except Exception:
         return False
 
 
+_ANSWER_SOURCE = None
+
+
+def _answer_source():
+    """答案文件迭代器（WM_WIZARD_ANSWERS）：无人值守/被包装终端里的脚本化配置。
+
+    为什么需要它：把 start.bat 挂在管道下时，cmd 会先消费 stdin，引导拿到的
+    是空输入（实测 EOF）。真实用户用控制台不受影响，但自动化部署/回归测试
+    需要一个不受 stdin 影响的入口。
+    """
+    global _ANSWER_SOURCE
+    if _ANSWER_SOURCE is not None:
+        return _ANSWER_SOURCE if _ANSWER_SOURCE is not False else None
+    path = str(os.environ.get("WM_WIZARD_ANSWERS") or "").strip()
+    if not path:
+        _ANSWER_SOURCE = False
+        return None
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except Exception:
+        _ANSWER_SOURCE = False
+        return None
+    _ANSWER_SOURCE = iter(lines)
+    return _ANSWER_SOURCE
+
+
+def _read_line(prompt: str, *, secret: bool = False) -> str:
+    """读一行答案：优先答案文件，否则读控制台。"""
+    src = _answer_source()
+    if src is None:
+        return input(f"{prompt}: ").strip()
+    try:
+        line = next(src)
+    except StopIteration:
+        print()
+        print(_t("答案文件已用尽，配置未完成。", "Answer file exhausted; setup incomplete."))
+        raise SystemExit(3)
+    print(f"{prompt}: {'********' if secret else line.strip()}")
+    return str(line).strip()
+
+
 def _ask(prompt: str, default: str = "") -> str:
     hint = f"[{default}]" if default else ""
     try:
-        ans = input(f"{prompt}{hint}: ").strip()
+        ans = _read_line(f"{prompt}{hint}")
     except (EOFError, KeyboardInterrupt):
         # 不能静默退出（实测：stdin 不是控制台时旧行为只打印横幅就结束，
         # 用户只看到一句"guided setup..."然后报错，无从判断发生了什么）
@@ -208,7 +256,9 @@ def _ask(prompt: str, default: str = "") -> str:
 
 
 def _ask_secret(prompt: str) -> str:
-    """隐藏输入；无 tty（如脚本喂 stdin）时退回普通读取。"""
+    """隐藏输入；答案文件模式下从文件读，无 tty 时退回普通读取。"""
+    if _answer_source() is not None:
+        return _read_line(prompt, secret=True)
     try:
         if sys.stdin is not None and sys.stdin.isatty():
             import getpass
