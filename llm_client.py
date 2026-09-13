@@ -411,19 +411,27 @@ def _classify_probe_error(exc: Exception) -> str:
 def _probe_endpoint_status(
     base_url: str, api_key: str, model: str, endpoint: str = "primary",
 ) -> dict:
-    """余额感知探测：极短请求（max_tokens=1）验证端点可用，
-    返回 {ok, reason}；reason ∈ ok/insufficient_balance/unauthorized/unreachable。"""
+    """余额感知探测：极短请求验证端点可用，
+    返回 {ok, reason}；reason ∈ ok/insufficient_balance/unauthorized/unreachable。
+
+    预算给 32 而不是 1：本项目接入的推理模型（deepseek-flash 等）会把极小的
+    max_tokens 全烧在 reasoning 上，content 恒为空。即便如此，"HTTP 往返成功 +
+    鉴权通过"已足以判定端点可达——因此把 thinking_budget_exhausted 视为 ok，
+    否则探测会永久误报 unreachable（设置页一直显示"主备均不健康"，
+    并可能让任务预检直接拒绝任务）。
+    """
     try:
         client = LLMClient(base_url=base_url, api_key=api_key, model=model)
         raw = client._send_request(
-            "你是连通性探测器，只回复：ok", "ping", 0.0, 1,
+            "你是连通性探测器，只回复：ok", "ping", 0.0, 32,
             endpoint=endpoint, timeout=float(
                 os.environ.get("LLM_PROBE_TIMEOUT", "20") or 20),
         )
-        if bool(raw and str(raw).strip()):
-            return {"ok": True, "reason": "ok"}
-        return {"ok": False, "reason": "unreachable"}
+        return {"ok": True, "reason": "ok"}
     except Exception as exc:
+        if getattr(exc, "thinking_budget_exhausted", False):
+            # 端点可达且鉴权通过，只是探测预算被推理吃光
+            return {"ok": True, "reason": "ok"}
         return {"ok": False, "reason": _classify_probe_error(exc)}
 
 

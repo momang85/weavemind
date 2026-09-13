@@ -739,6 +739,55 @@ class TestModelRoleRouting(unittest.TestCase):
         self.assertEqual(posts[0][1]["model"], "deepseek-v4-flash")
 
 
+class TestProbeClassifiesThinkingBudget(unittest.TestCase):
+    """连通性探测不得把"推理吃光预算"误判成端点不可达。
+
+    回归背景：探测原用 max_tokens=1，而本项目接入的推理模型会把预算全烧在
+    reasoning 上、content 恒空 → `_send_request` 抛 thinking_budget_exhausted →
+    归类函数对"无 HTTP 码的异常"一律返回 unreachable。于是设置页永远显示
+    "主备端点均不健康"，并可能让任务预检直接拒绝任务（端点其实是通的）。
+    """
+
+    @staticmethod
+    def _exc(kind: str):
+        import llm_client
+        if kind == "thinking":
+            exc = llm_client.LLMCallError("Empty content in LLM response (thinking budget exhausted)")
+            exc.thinking_budget_exhausted = True
+            return exc
+        return llm_client.LLMCallError("Network error: [Errno 111] Connection refused")
+
+    def test_thinking_budget_is_treated_as_reachable(self):
+        import llm_client
+        with mock.patch.object(llm_client.LLMClient, "_send_request",
+                               side_effect=self._exc("thinking")):
+            res = llm_client._probe_endpoint_status("https://e.invalid/v1", "k", "m")
+        self.assertTrue(res["ok"], f"应判可达（HTTP 往返已成功），实际 {res}")
+        self.assertEqual(res["reason"], "ok")
+
+    def test_transport_error_still_unreachable(self):
+        import llm_client
+        with mock.patch.object(llm_client.LLMClient, "_send_request",
+                               side_effect=self._exc("net")):
+            res = llm_client._probe_endpoint_status("https://e.invalid/v1", "k", "m")
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["reason"], "unreachable")
+
+    def test_balance_error_still_classified(self):
+        import llm_client
+        exc = llm_client.LLMCallError("HTTP 402: insufficient balance")
+        with mock.patch.object(llm_client.LLMClient, "_send_request", side_effect=exc):
+            res = llm_client._probe_endpoint_status("https://e.invalid/v1", "k", "m")
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["reason"], "insufficient_balance")
+
+    def test_probe_success_when_content_returned(self):
+        import llm_client
+        with mock.patch.object(llm_client.LLMClient, "_send_request", return_value="ok"):
+            res = llm_client._probe_endpoint_status("https://e.invalid/v1", "k", "m")
+        self.assertEqual(res, {"ok": True, "reason": "ok"})
+
+
 class TestLLMCache(unittest.TestCase):
     """B2：LLM_CACHE_TTL 开启后同键调用命中缓存，不触发网络，不计 token 成本。"""
 
