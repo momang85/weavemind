@@ -93,13 +93,16 @@ exit /b 1
 
 REM ---- [3/6] Redis ----
 echo   [3/6] Redis
-REM Three-stage probe: local 6379 first (skip Docker), then Docker, else guide.
+REM Three-stage probe: local Redis first (skip Docker), then Docker, else guide.
 REM NOTE: keep the probe on ONE line. cmd.exe cannot pass a multi-line quoted
 REM argument to "python -c"; the following lines would be executed as commands
 REM ("'try:' is not recognized ...") and the script would abort here.
-%PY% -c "import socket,sys; s=socket.create_connection(('127.0.0.1',6379),2); s.sendall(b'PING\r\n'); sys.exit(0 if s.recv(64).startswith(b'+PONG') else 1)" >nul 2>&1
+REM Honor REDIS_PORT when set: probing a hardcoded 6379 would claim "local Redis
+REM detected" while the services are pointed at a different port.
+if not defined REDIS_PORT set "REDIS_PORT=6379"
+%PY% -c "import os,socket,sys; p=int(os.environ.get('REDIS_PORT') or 6379); s=socket.create_connection(('127.0.0.1',p),2); s.sendall(b'PING\r\n'); sys.exit(0 if s.recv(64).startswith(b'+PONG') else 1)" >nul 2>&1
 if not errorlevel 1 (
-    echo        Local Redis detected at 127.0.0.1:6379, skip Docker
+    echo        Local Redis detected on port %REDIS_PORT%, skip Docker
     goto redis_ok
 )
 docker info >nul 2>&1

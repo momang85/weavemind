@@ -382,11 +382,58 @@ def _safe_extract_zip(zip_path: Path, dest_dir: Path,
 # ─────────────────────────────────────────────
 
 def pip_install(packages: list[str], timeout: int = 600) -> tuple[bool, str]:
-    """用当前解释器 pip 安装指定包（只装缺失项，参数列表 + shell=False）。"""
+    """用当前解释器 pip 安装指定包（只装缺失项，参数列表 + shell=False）。
+
+    默认源失败后用国内镜像重试一次：目标用户里 pypi.org 经常不可达或极慢，
+    而这一步是"一键启动"里最可能卡住新手的地方（实测报错
+    `No matching distribution found for aiosqlite`）。镜像地址可用
+    WM_PIP_INDEX_URL 覆盖（设为 off 关闭回退），且必须是公网 http/https——
+    按仓库既有 SSRF 规则校验，内网/回环地址一律不采用。
+    """
     if not packages:
         return True, "无需安装"
+    ok, msg = _pip_install_once(packages, timeout=timeout)
+    if ok:
+        return True, msg
+    mirror = _pip_mirror()
+    if not mirror:
+        return False, f"{msg}（可设 WM_PIP_INDEX_URL 指向可用镜像后重试）"
+    ok2, msg2 = _pip_install_once(packages, timeout=timeout, index_url=mirror)
+    if ok2:
+        return True, f"{msg2}（默认源失败，已改用镜像 {mirror}）"
+    return False, f"{msg}；镜像重试也失败：{msg2}"
+
+
+def _pip_mirror() -> str:
+    """镜像地址（默认清华源）；非法/关闭/非公网时返回空串表示不回退。"""
+    raw = str(os.environ.get(
+        "WM_PIP_INDEX_URL", "https://pypi.tuna.tsinghua.edu.cn/simple") or "").strip()
+    if not raw or raw.lower() in ("off", "0", "none", "no"):
+        return ""
+    try:
+        from urllib.parse import urlparse
+        p = urlparse(raw)
+        if p.scheme not in ("http", "https") or not p.hostname:
+            return ""
+    except Exception:
+        return ""
+    try:
+        from adapters.transport import _validate_public_url
+        if not _validate_public_url(raw):
+            return ""          # 回环/内网/保留地址：不发起请求
+    except Exception:
+        return ""
+    return raw
+
+
+def _pip_install_once(packages: list[str], timeout: int = 600,
+                      index_url: str = "") -> tuple[bool, str]:
+    """单次 pip 安装（可指定 index-url）。"""
     cmd = [sys.executable, "-m", "pip", "install", "-q",
-           "--timeout", "60", "--retries", "2", *packages]
+           "--timeout", "60", "--retries", "2"]
+    if index_url:
+        cmd += ["--index-url", index_url]
+    cmd += list(packages)
     try:
         proc = subprocess.run(cmd, shell=False, capture_output=True, text=True,
                               timeout=timeout)

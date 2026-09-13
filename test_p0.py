@@ -6620,6 +6620,62 @@ class TestDependencyCheck(unittest.TestCase):
             importlib.reload(dep_check)
 
 
+class TestPipMirrorPolicy(unittest.TestCase):
+    """依赖安装的镜像回退：默认公网镜像、拒绝环回/内网/非 http(s)、可显式关闭。
+
+    动机：一键启动里最可能卡住新手的一步就是装依赖（国内 pypi.org 常不可达，
+    实测报 `No matching distribution found for aiosqlite`）。
+    """
+
+    def test_default_mirror_is_public_https(self):
+        import dep_check
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("WM_PIP_INDEX_URL", None)
+            m = dep_check._pip_mirror()
+        self.assertTrue(m.startswith("https://"), m)
+        self.assertIn("tuna", m, "默认应指向国内镜像")
+
+    def test_off_disables_fallback(self):
+        import dep_check
+        for value in ("off", "0", "none", "no", "", "   "):
+            with mock.patch.dict(os.environ, {"WM_PIP_INDEX_URL": value}):
+                self.assertEqual(dep_check._pip_mirror(), "", value)
+
+    def test_private_and_loopback_and_bad_scheme_rejected(self):
+        import dep_check
+        for value in ("http://127.0.0.1:8080/simple",
+                      "http://10.0.0.9/simple",
+                      "http://192.168.1.5/simple",
+                      "http://169.254.169.254/simple",
+                      "ftp://mirrors.example/simple",
+                      "not-a-url"):
+            with mock.patch.dict(os.environ, {"WM_PIP_INDEX_URL": value}):
+                self.assertEqual(dep_check._pip_mirror(), "", value)
+
+    def test_public_alternative_accepted(self):
+        import dep_check
+        with mock.patch.dict(os.environ,
+                             {"WM_PIP_INDEX_URL": "https://mirrors.aliyun.com/pypi/simple"}):
+            self.assertEqual(dep_check._pip_mirror(),
+                             "https://mirrors.aliyun.com/pypi/simple")
+
+    def test_pip_install_retries_with_mirror_after_failure(self):
+        import dep_check
+        calls = []
+
+        def fake(packages, timeout=600, index_url=""):
+            calls.append(index_url)
+            return (False, "默认源失败") if len(calls) == 1 else (True, "镜像装好了")
+
+        with mock.patch.object(dep_check, "_pip_install_once", side_effect=fake):
+            ok, msg = dep_check.pip_install(["redis"], timeout=5)
+        self.assertTrue(ok)
+        self.assertEqual(len(calls), 2, "默认源失败后应用镜像重试一次")
+        self.assertEqual(calls[0], "")
+        self.assertTrue(calls[1].startswith("https://"))
+        self.assertIn("镜像", msg)
+
+
 class TestDownloadSafety(unittest.TestCase):
     """安全约束：仅 https、host 白名单、拒绝环回/私网/保留地址。"""
 
