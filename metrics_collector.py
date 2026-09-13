@@ -52,7 +52,10 @@ WATCH_CHANNELS = [
 def _db_task_totals() -> dict:
     """从 agents.db 读取累计任务数（与 /api/status 同口径）。
 
-    失败返回空 dict，调用方回退到进程内计数器（单进程演示场景仍可用）。"""
+    失败/库不存在时返回**零值同形状**，不返回空 dict：空 dict 会让调用方与消费方
+    （指标看板、测试、CI）各自处理缺键，形状随环境变化——CI 是全新检出、没有
+    agents.db，因此该项在 CI 上长期失败。
+    """
     try:
         import sqlite3
         path = os.environ.get("AGENTS_DB") or os.path.join(
@@ -70,7 +73,7 @@ def _db_task_totals() -> dict:
             db.close()
         return {"total": int(total), "success": int(success), "failed": int(failed)}
     except Exception:
-        return {}
+        return {"total": 0, "success": 0, "failed": 0}
 
 
 class MetricsCollector:

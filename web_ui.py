@@ -1148,9 +1148,31 @@ def _system_status():
             "llm_usage": _get_llm_usage(),
         }
     except Exception:
-        return {"agents":[],"queues":{},"tasks":{"total":0,"success":0,"today":0},
-                "memory":{"conversations":0,"strategies":0},"recent":[],"uptime_sec":0,"survival_rate":100,
-                "llm_usage":{"calls":0,"prompt_tokens":0,"completion_tokens":0}}
+        # 兜底必须与正常返回**同形状、同告警面**：此前少了 llm_warning/embedding_health，
+        # 消费方（前端横幅、测试）在异常路径上取键就 KeyError；更实质的是——兜底发生在
+        # 数据库不可读时（CI 全新检出没有 agents 表），此时**恰恰最需要**展示端点/Embedding
+        # 降级提示，却被整段跳过。降级提示的采集只依赖进程内状态与只读探测，不依赖 DB。
+        _fb_warning = ""
+        _fb_embedding: dict = {}
+        try:
+            from llm_client import get_endpoint_warning
+            _fb_warning = get_endpoint_warning() or ""
+        except Exception:
+            _fb_warning = ""
+        try:
+            import embed_health as _embed_health
+            _fb_embedding = _embed_health.embedding_health()
+            _fb_notice = _embed_health.degradation_notice()
+            if _fb_notice:
+                _fb_warning = f"{_fb_warning}；{_fb_notice}" if _fb_warning else _fb_notice
+                _publish_embed_alert(_fb_notice)
+        except Exception:
+            _fb_embedding = {}
+        return {"agents": [], "queues": {}, "tasks": {"total": 0, "success": 0, "today": 0},
+                "memory": {"conversations": 0, "strategies": 0}, "recent": [],
+                "uptime_sec": 0, "survival_rate": 100,
+                "llm_warning": _fb_warning, "embedding_health": _fb_embedding,
+                "llm_usage": {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}}
 
 def _code_sandbox_status() -> dict:
     """沙箱状态快照（实际模式/判定来源/docker 可用性/镜像是否存在）。

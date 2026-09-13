@@ -7608,21 +7608,32 @@ class TestReportRouteAndMetricsConsistency(unittest.TestCase):
         self.assertNotIn("**目标**", html, "Markdown 强调语法应已渲染，而非原样输出")
 
     def test_metrics_totals_match_database(self):
-        """指标看板的累计任务数/成功率须与 agents.db 同口径（跨重启不归零）。"""
+        """指标看板的累计任务数/成功率须与 agents.db 同口径（跨重启不归零）。
+
+        自备临时库：此前直接读仓库的 agents.db 并断言 total>0，在全新检出（CI）
+        上没有库/没有历史任务，必然失败——测试因此与本地环境状态耦合。
+        """
         import metrics_collector as mc
-        totals = mc._db_task_totals()
+        import sqlite3
+        tmp = Path(tempfile.mkdtemp(prefix="wm_metrics_db_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        db_path = str(tmp / "agents.db")
+        con = sqlite3.connect(db_path)
+        con.execute("CREATE TABLE task_history(task_id TEXT PRIMARY KEY, status TEXT)")
+        con.executemany("INSERT INTO task_history VALUES(?,?)",
+                        [("t1", "SUCCESS"), ("t2", "SUCCESS"), ("t3", "FAILED")])
+        con.commit()
+        con.close()
+        with mock.patch.dict(os.environ, {"AGENTS_DB": db_path}):
+            totals = mc._db_task_totals()
         self.assertIn("total", totals)
-        self.assertGreater(totals["total"], 0)
-        con = __import__("sqlite3").connect("agents.db")
-        try:
-            expect = con.execute("SELECT COUNT(*) FROM task_history").fetchone()[0]
-            expect_success = con.execute(
-                "SELECT COUNT(*) FROM task_history WHERE status='SUCCESS'"
-            ).fetchone()[0]
-        finally:
-            con.close()
-        self.assertEqual(totals["total"], expect)
-        self.assertEqual(totals["success"], expect_success)
+        self.assertEqual(totals, {"total": 3, "success": 2, "failed": 1})
+
+    def test_metrics_totals_degrade_to_zero_shape(self):
+        """库缺失/不可读时返回零值同形状，而不是空 dict（消费方无需处理缺键）。"""
+        import metrics_collector as mc
+        with mock.patch.dict(os.environ, {"AGENTS_DB": str(Path(tempfile.gettempdir()) / "definitely_missing_wm.db")}):
+            self.assertEqual(mc._db_task_totals(), {"total": 0, "success": 0, "failed": 0})
 
 
 if __name__ == "__main__":
