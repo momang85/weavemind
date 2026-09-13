@@ -43,7 +43,7 @@ REM matches the Microsoft Store placeholder alias, which executes nothing and
 REM prints nothing - the novice then sees only a confusing config error later.
 %PY% -c "import sys;assert sys.version_info>=(3,10)" 2>nul
 if errorlevel 1 (
-    echo   ERROR: Python was found but does not run scripts (or is older than 3.10^).
+    echo   ERROR: Python was found but does not run scripts ^(or is older than 3.10^).
     echo          This is usually the Microsoft Store placeholder alias.
     echo          Install Python 3.10+ from https://www.python.org/downloads/
     echo          and enable "Add python.exe to PATH" during setup.
