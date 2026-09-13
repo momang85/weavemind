@@ -38,6 +38,20 @@ if not defined PY (
 )
 echo        Using: %PY%
 
+REM Verify the interpreter actually RUNS a script: on Windows "where python" also
+REM matches the Microsoft Store placeholder alias, which executes nothing and
+REM prints nothing - the novice then sees only a confusing config error later.
+%PY% -c "import sys;assert sys.version_info>=(3,10)" 2>nul
+if errorlevel 1 (
+    echo   ERROR: Python was found but does not run scripts (or is older than 3.10^).
+    echo          This is usually the Microsoft Store placeholder alias.
+    echo          Install Python 3.10+ from https://www.python.org/downloads/
+    echo          and enable "Add python.exe to PATH" during setup.
+    echo          Then open a NEW terminal and run start.bat again.
+    call :pause_if_interactive
+    exit /b 1
+)
+
 REM ---- [2/6] Config ----
 echo   [2/6] Config
 call :check_config
@@ -46,7 +60,10 @@ if not errorlevel 1 goto :config_ok
 REM Missing/incomplete config: hand over to the guided setup (interactive only).
 if defined WM_NONINTERACTIVE goto :config_fail
 echo   config.json is missing or incomplete - starting guided setup...
-%PY% setup_wizard.py
+REM -u: unbuffered, so a prompt/crash is never swallowed. Absolute path: immune
+REM to a changed working directory. Exit code is surfaced for troubleshooting.
+%PY% -u "%~dp0setup_wizard.py"
+if errorlevel 1 echo   guided setup exited with code %errorlevel% ^(python=%PY%^)
 call :check_config
 if not errorlevel 1 goto :config_ok
 
@@ -58,7 +75,13 @@ if not exist config.json (
 ) else (
     echo   ERROR: config.json exists but llm.api_key / base_url / model is incomplete.
 )
-echo   Tip: run "%PY% setup_wizard.py" in a terminal for a guided prompt.
+echo   Tip: run "%PY% -u setup_wizard.py" in a terminal for a guided prompt.
+if not defined WM_NONINTERACTIVE (
+    echo.
+    echo   Press Y to open a separate console window for the guided setup.
+    choice /c YN /t 15 /d N >nul
+    if not errorlevel 2 start "WeaveMind guided setup" cmd /k %PY% -u "%~dp0setup_wizard.py"
+)
 call :pause_if_interactive
 exit /b 1
 :config_ok

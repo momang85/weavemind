@@ -196,8 +196,14 @@ def _ask(prompt: str, default: str = "") -> str:
     try:
         ans = input(f"{prompt}{hint}: ").strip()
     except (EOFError, KeyboardInterrupt):
+        # 不能静默退出（实测：stdin 不是控制台时旧行为只打印横幅就结束，
+        # 用户只看到一句"guided setup..."然后报错，无从判断发生了什么）
         print()
-        raise SystemExit(1)
+        print(_t("输入被中断（stdin 不是可交互控制台）。请在终端里运行："
+                 " python setup_wizard.py",
+                 "Input aborted (stdin is not an interactive console). "
+                 "Run this in a terminal: python setup_wizard.py"))
+        raise SystemExit(2)
     return ans or default
 
 
@@ -213,7 +219,11 @@ def _ask_secret(prompt: str) -> str:
         return input(f"{prompt}: ").strip()
     except (EOFError, KeyboardInterrupt):
         print()
-        raise SystemExit(1)
+        print(_t("输入被中断（stdin 不是可交互控制台）。请在终端里运行："
+                 " python setup_wizard.py",
+                 "Input aborted (stdin is not an interactive console). "
+                 "Run this in a terminal: python setup_wizard.py"))
+        raise SystemExit(2)
 
 
 def _print_guidance() -> None:
@@ -230,6 +240,12 @@ def _print_guidance() -> None:
 def run_interactive(force: bool = False, path: Path | None = None) -> int:
     """引导流程；返回进程退出码（0 成功）。"""
     target = Path(path or CONFIG_PATH)
+    # 先打一行 ASCII 横幅：即使控制台字体渲染不了中文/输出编码异常，
+    # 也能从用户截图里一眼确认"引导确实跑起来了"（实测排障吃过这个亏）。
+    print()
+    print("=== WeaveMind first-run setup ===")
+    print(_t("=== 织光首次配置引导 ===", "(中文界面需终端支持 UTF-8)"))
+
     ok, why = config_status(target)
     if ok and not force:
         print(_t(f"配置已就绪（{why or 'OK'}），无需引导。",
@@ -238,8 +254,6 @@ def run_interactive(force: bool = False, path: Path | None = None) -> int:
     if not force and target.exists() and not ok:
         print(_t(f"检测到 config.json 不完整：{why}", f"config.json incomplete: {why}"))
 
-    print()
-    print(_t("=== 织光首次配置引导 ===", "=== WeaveMind first-run setup ==="))
     print(_t("回车即采用方括号中的默认值；Ctrl+C 可随时退出。",
              "Press Enter to accept the default in brackets; Ctrl+C to abort."))
 
