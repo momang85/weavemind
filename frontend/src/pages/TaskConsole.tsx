@@ -285,6 +285,7 @@ export default function TaskConsole() {
         isRunning={isRunning} demoMode={demoMode}
         activeConversationId={activeConversationId}
         lastGoal={lastGoal} reportSummary={report?.summary} status={status}
+        taskId={taskId}
         onSubmit={submit} onNewConversation={newConversation} />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 min-h-[400px]">

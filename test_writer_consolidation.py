@@ -503,5 +503,137 @@ class TestPlanCacheScope(unittest.TestCase):
         self.assertIn("plan_cache_key_for(goal", src)
 
 
+class TestTaskCancelApi(unittest.TestCase):
+    """停止运行中任务的 API：只写标志，终态任务拒绝，全流程不碰真 Redis。
+
+    教训：验证这个处理器时曾用真实任务 id 试跑，把取消标志写进了当时正在跑的
+    任务——所以这里一律 mock `_task_exists`/`_new_redis`/`read_task`。
+    """
+
+    class _Fake:
+        def __init__(self, path=""):
+            self.path = path
+        def _json(self, payload, code=200, **kw):
+            return (code, payload)
+        def _client_ip(self):
+            return "127.0.0.1"
+
+    def _call(self, path, *, exists=True, status="RUNNING"):
+        import web_ui
+        fake_redis = mock.MagicMock()
+        with mock.patch.object(web_ui, "_task_exists", return_value=exists),                 mock.patch.object(web_ui, "_redis_ready", return_value=True),                 mock.patch.object(web_ui, "_new_redis", return_value=fake_redis),                 mock.patch.object(web_ui, "_publish_alert") as alert,                 mock.patch.object(web_ui, "audit_log"),                 mock.patch("task_state.read_task", return_value={"status": status}):
+            res = web_ui._post_task_cancel(self._Fake(path), path, {}, {"user": "u"})
+        return res, fake_redis, alert
+
+    def test_non_cancel_path_returns_none(self):
+        import web_ui
+        self.assertIsNone(web_ui._post_task_cancel(self._Fake(), "/api/other", {}, {"user": "u"}))
+
+    def test_empty_task_id_rejected(self):
+        res, _, _ = self._call("/api/task//cancel")
+        self.assertEqual(res[0], 400)
+
+    def test_unknown_task_404(self):
+        res, _, _ = self._call("/api/task/ui-nope/cancel", exists=False)
+        self.assertEqual(res[0], 404)
+
+    def test_terminal_task_409_and_no_flag(self):
+        for status in ("SUCCESS", "SUCCESS_WITH_ISSUES", "FAILED"):
+            res, fake_redis, _ = self._call("/api/task/ui-done/cancel", status=status)
+            self.assertEqual(res[0], 409, f"{status} 应拒绝取消")
+            fake_redis.setex.assert_not_called()
+
+    def test_running_task_sets_flag_with_ttl(self):
+        res, fake_redis, alert = self._call("/api/task/ui-run/cancel", status="RUNNING")
+        self.assertEqual(res[0], 200)
+        self.assertEqual(res[1]["status"], "ok")
+        fake_redis.setex.assert_called_once()
+        args = fake_redis.setex.call_args[0]
+        self.assertEqual(args[0], "task_cancel:ui-run")
+        self.assertGreaterEqual(int(args[1]), 60, "TTL 要足够长，标志须活到下次检查")
+        alert.assert_called_once()
+
+    def test_redis_failure_is_503(self):
+        import web_ui
+        with mock.patch.object(web_ui, "_task_exists", return_value=True),                 mock.patch.object(web_ui, "_redis_ready", return_value=True),                 mock.patch.object(web_ui, "_new_redis",
+                                  side_effect=RuntimeError("redis down")),                 mock.patch("task_state.read_task", return_value={"status": "RUNNING"}):
+            res = web_ui._post_task_cancel(self._Fake(), "/api/task/ui-run/cancel",
+                                           {}, {"user": "u"})
+        self.assertEqual(res[0], 503)
+
+    def test_route_registered_and_delete_clears_flag(self):
+        src = Path("web_ui.py").read_text(encoding="utf-8")
+        self.assertIn('p.endswith("/cancel"), _post_task_cancel', src)
+        self.assertIn('f"task_cancel:{task_id}"', src,
+                      "删除任务要一并清掉取消标志，避免孤儿键")
+
+
+class TestCancelCooperativeChecks(unittest.TestCase):
+    """协作式取消：标志位 + 派发边界检查（异常会被 step worker 吞掉，不能用抛异常）。"""
+
+    @staticmethod
+    def _orch(flag):
+        from orchestrator_v2 import OrchestratorV2
+        orch = OrchestratorV2.__new__(OrchestratorV2)
+        orch._redis = mock.MagicMock()
+        orch._redis.get.return_value = flag
+        return orch
+
+    def test_flag_semantics(self):
+        self.assertTrue(self._orch("1")._cancel_requested("t1"))
+        self.assertFalse(self._orch(None)._cancel_requested("t1"))
+        orch = self._orch("1")
+        orch._redis.get.side_effect = RuntimeError("redis down")
+        self.assertFalse(orch._cancel_requested("t1"), "Redis 异常不得当成取消")
+
+    def test_finish_cancelled_finalizes_and_clears(self):
+        orch = self._orch("1")
+        orch._messaging = mock.MagicMock()
+        orch._now_iso = lambda: "2026-01-01T00:00:00"
+        with mock.patch.object(orch, "_clear_task_running") as clear_run,                 mock.patch.object(orch, "_finalize_task") as fin,                 mock.patch.object(orch, "_notify_done_async") as notify,                 mock.patch.object(orch, "_clear_cancel") as clear_cancel,                 mock.patch("orchestrator_v2.push_progress"):
+            out = orch._finish_cancelled("t1", "目标", [{"step_id": "1"}])
+        self.assertEqual(out["status"], "FAILED")
+        self.assertIn("取消", out["report"])
+        clear_run.assert_called_once_with("t1")
+        self.assertEqual(fin.call_args[0][2], "FAILED")
+        notify.assert_called_once()
+        clear_cancel.assert_called_once_with("t1")
+
+    def test_cancel_stops_retry_loop(self):
+        orch = self._orch("1")
+        orch._max_retry = 3
+        orch._replan_depth = 2
+        orch._messaging = mock.MagicMock()
+        with mock.patch.object(orch, "_dispatch",
+                               return_value={"status": "FAILED", "result": "boom"}) as disp,                 mock.patch.object(orch, "_contract_issue", return_value=""),                 mock.patch("orchestrator_v2.push_progress"):
+            res = orch._dispatch_step_safe("目标", {"step_id": "1"}, "t1",
+                                            {"replan_used": 0})
+        self.assertEqual(disp.call_count, 1, "取消后不得再重试（重试循环最烧额度）")
+        self.assertEqual(res["status"], "FAILED")
+
+    def test_cancel_also_suppresses_replan(self):
+        """取消后不得走进重规划分支（那里还有一次 LLM 调用）。"""
+        orch = self._orch("1")
+        orch._max_retry = 3
+        orch._replan_depth = 2
+        orch._messaging = mock.MagicMock()
+        with mock.patch.object(orch, "_dispatch",
+                               return_value={"status": "FAILED", "result": "boom"}),                 mock.patch.object(orch, "_contract_issue", return_value=""),                 mock.patch.object(orch, "_replan_step") as replan,                 mock.patch("orchestrator_v2.push_progress"):
+            orch._dispatch_step_safe("目标", {"step_id": "1"}, "t1", {"replan_used": 0})
+        replan.assert_not_called()
+
+    def test_run_and_worker_have_guards(self):
+        src = Path("orchestrator_v2.py").read_text(encoding="utf-8")
+        self.assertIn("_cancel_requested(task_id)", src)
+        # run() 的轮次头与执行后各一个检查点
+        self.assertGreaterEqual(src.count("self._finish_cancelled(task_id, goal"), 2)
+        # 调度循环里必须在派发前检查（把已取出的步骤放回、不再派发新步骤）
+        i = src.index("pending[k] = step")
+        self.assertIn("_cancel_requested(task_id)", src[i - 300:i],
+                      "停止派发的检查必须紧邻派发点")
+        # 新一轮开始前清残留标志
+        self.assertIn("self._clear_cancel(task_id)", src)
+
+
 if __name__ == "__main__":
     unittest.main()

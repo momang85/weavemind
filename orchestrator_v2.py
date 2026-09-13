@@ -2213,6 +2213,52 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         except Exception:
             pass
 
+    # ------------------------------------------------------------------
+    # 用户取消（协作式）：webui 写 task_cancel:{tid}，编排器在派发边界检查
+    # ------------------------------------------------------------------
+
+    def _cancel_key(self, task_id: str) -> str:
+        return f"task_cancel:{task_id}"
+
+    def _cancel_requested(self, task_id: str) -> bool:
+        """用户是否请求停止该任务。
+
+        用"标志位 + 派发边界检查"而不是抛异常：step worker 的 `except Exception`
+        会把深层异常转成"步骤失败"继续跑，而 run() 又没有兜底 except——抛异常
+        既停不下来也收尾不干净。
+        """
+        try:
+            return bool(self._redis.get(self._cancel_key(task_id)))
+        except Exception:
+            return False
+
+    def _clear_cancel(self, task_id: str) -> None:
+        try:
+            self._redis.delete(self._cancel_key(task_id))
+        except Exception:
+            pass
+
+    def _finish_cancelled(self, task_id: str, goal: str,
+                          steps: list | None = None) -> dict:
+        """取消收尾：通告终态 → 清运行标记 → 落库/通知，返回 FAILED 结果。
+
+        与既有"计划未确认即取消"的早返回同一套收尾动作；差异只在文案与
+        报告备注（用户取消要能在历史里看出来）。
+        """
+        note = "任务被用户取消（运行中被停止）"
+        push_progress(self._messaging, task_id, "log",
+                      {"type": "log", "agent": "orchestrator", "message": note,
+                       "timestamp": self._now_iso()})
+        push_progress(self._messaging, task_id, "task_complete",
+                      {"status": "FAILED", "summary": note})
+        self._clear_task_running(task_id)
+        self._finalize_task(task_id, goal, "FAILED", report=note,
+                            steps=steps or [])
+        self._notify_done_async(task_id, goal, "FAILED", note)
+        self._clear_cancel(task_id)
+        return {"task_id": task_id, "status": "FAILED", "steps": steps or [],
+                "report": note}
+
     def _task_is_running(self, task_id: str) -> bool:
         """进行中标记存在且其 pid 仍存活 → True；否则 False（允许恢复）。
 
@@ -3278,6 +3324,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             )
             resumed = None
         self._mark_task_running(task_id)
+        # 新一轮任务开始前清掉可能残留的取消标志（同 id 复用/重跑时不被旧标志秒杀）
+        self._clear_cancel(task_id)
         # 状态真源：进入执行写 RUNNING（提交时是 QUEUED），
         # 让历史/状态接口能区分"排队中"与"运行中"
         try:
@@ -3368,6 +3416,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             task_state.set_phase(task_id, "规划")
         except Exception:
             pass
+        # 取消可能在提交后立刻到达（用户在规划期就点了停止）：规划前先看一眼，
+        # 免得为一次已经不要的任务再花一次规划调用
+        if self._cancel_requested(task_id):
+            _phase_stop.set()
+            return self._finish_cancelled(task_id, goal, None)
         # 1. Plan（模板步骤直接采用，否则 LLM 规划）——恢复路径跳过规划
         used_template = False
         if resumed is None:
@@ -3531,8 +3584,16 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         while True:
             if resumed is not None and resumed.get("phase") == "finalizing":
                 break
+            # 每轮（执行→反思→重做）开始前检查取消：这是覆盖面最广的检查点
+            if self._cancel_requested(task_id):
+                _phase_stop.set()
+                return self._finish_cancelled(task_id, goal, last_steps)
             if not skip_execute:
                 iter_results, iter_failed = self._execute_steps(steps, task_id, goal)
+                # 执行途中被取消：立刻收尾，不再进入反思/重做（否则会继续花额度）
+                if self._cancel_requested(task_id):
+                    _phase_stop.set()
+                    return self._finish_cancelled(task_id, goal, last_steps or steps)
                 has_failure = has_failure or iter_failed
                 last_steps = steps
                 last_results = iter_results
@@ -4584,6 +4645,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     time.sleep(0.5)
                     continue
                 k, step = ready
+                # 取消：把刚取出的步骤放回、退出调度，不再派发新步骤
+                # （已在飞的步骤让它自然结束，强杀会留下半成品产物）
+                if self._cancel_requested(task_id):
+                    with lock:
+                        pending[k] = step
+                    return
                 with lock:
                     in_flight += 1
                 try:
@@ -5082,6 +5149,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         issue = self._contract_issue(goal, step, result)
         tried: list[str] = []
         while (result.get("status") == "FAILED" or issue) and attempt < self._max_retry:
+            # 取消：不再重试/重规划（失败重试循环是实测最爱烧额度的地方）
+            if self._cancel_requested(task_id):
+                break
             attempt += 1
             tried.append(
                 f"重试#{attempt}"
@@ -5129,7 +5199,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         alt = None
         alt_result = None
         fail_result = None
-        if result.get("status") == "FAILED" and state["replan_used"] < self._replan_depth:
+        if (result.get("status") == "FAILED"
+                and state["replan_used"] < self._replan_depth
+                and not self._cancel_requested(task_id)):
             fail_result = result
             alt = self._replan_step(goal, step, result.get("result", ""), task_id)
             if alt:

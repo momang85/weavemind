@@ -367,7 +367,8 @@ def _delete_task(task_id: str) -> bool:
     except Exception:
         pass
     try:
-        _new_redis().delete(f"task_running:{task_id}", f"task_ack:{task_id}")
+        _new_redis().delete(f"task_running:{task_id}", f"task_ack:{task_id}",
+                            f"task_cancel:{task_id}")
     except Exception:
         pass
     with _task_lock:
@@ -4147,6 +4148,45 @@ def _post_plan_confirm(self, p, body, admin):
             return self._json({"error": "Redis 写入失败，无法确认计划"}, 503)
         return self._json({"status": "ok"})
 
+def _post_task_cancel(self, p, body, admin):
+    """POST /api/task/<task_id>/cancel：请求停止正在运行的任务。
+
+    写 `task_cancel:{tid}` 标志（编排器在派发边界检查，协作式取消）；
+    终态任务直接拒绝——避免把已完成的任务改写成 FAILED。
+    """
+    if not (p.startswith("/api/task/") and p.endswith("/cancel")):
+        return None
+    tid = p[len("/api/task/"):].rsplit("/cancel", 1)[0].strip()
+    if not tid:
+        return self._json({"error": "task_id required"}, 400)
+    if not _task_exists(tid):
+        return self._json({"error": "task not found"}, 404)
+    if not _redis_ready():
+        return self._json({"error": "Redis 未连接，无法请求取消"}, 503)
+    row = {}
+    try:
+        import task_state as _ts
+        row = _ts.read_task(tid) or {}
+    except Exception:
+        row = {}
+    status = str(row.get("status") or "").upper()
+    if status in ("SUCCESS", "SUCCESS_WITH_ISSUES", "FAILED"):
+        return self._json(
+            {"error": f"任务已结束（{status}），无需取消"}, 409)
+    try:
+        # TTL 给足：编排器可能正卡在一次长调用里，标志要活到它下一次检查
+        _new_redis().setex(f"task_cancel:{tid}", 3600, "1")
+    except Exception:
+        return self._json({"error": "Redis 写入失败，无法请求取消"}, 503)
+    _publish_alert("task_cancel_requested",
+                   f"任务 {tid} 收到停止请求（当前状态 {status or '未知'}）",
+                   service="orchestrator")
+    audit_log(admin.get("user", ""), self._client_ip(), "task.cancel",
+              target=tid, result="ok")
+    return self._json({"status": "ok", "task_id": tid,
+                       "note": "已请求停止；编排器会在下一个派发边界收尾"})
+
+
 def _post_step_confirm(self, p, body, admin):
     if self.path == "/api/step/confirm":
         # 人机协作：确认/取消单个步骤（mode=human_in_loop）
@@ -4822,6 +4862,7 @@ _POST_ROUTES = [
     (lambda self, p: self.path == "/api/deliverable/run", _post_deliverable_run),
     (lambda self, p: self.path == "/task", _post_task),
     (lambda self, p: self.path == "/api/memory/delete", _post_memory_delete),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/cancel"), _post_task_cancel),
     (lambda self, p: self.path == "/api/plan/confirm", _post_plan_confirm),
     (lambda self, p: self.path == "/api/step/confirm", _post_step_confirm),
     (lambda self, p: self.path == "/api/context/extract", _post_context_extract),

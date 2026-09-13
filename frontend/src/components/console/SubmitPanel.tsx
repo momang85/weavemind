@@ -1,5 +1,5 @@
 import { memo, useEffect, useState } from 'react'
-import { Loader2, Sparkles, RefreshCw, Plus, MessagesSquare, FileText, ChevronDown, Upload, Zap, ExternalLink, X } from 'lucide-react'
+import { Loader2, Sparkles, RefreshCw, Plus, MessagesSquare, FileText, ChevronDown, Upload, Zap, ExternalLink, X, Square } from 'lucide-react'
 
 /** 快答结果卡片：正文 + 来源链接 + 诚实降级标签。 */
 function QuickAnswerCard({ qa, onClose }: { qa: any; onClose: () => void }) {
@@ -44,7 +44,7 @@ export default memo(function SubmitPanel({
   templateName, setTemplateName,
   userContext, setUserContext, importMsg, setImportMsg,
   isRunning, demoMode, activeConversationId, lastGoal, reportSummary, status,
-  onSubmit, onNewConversation,
+  taskId, onSubmit, onNewConversation,
 }: {
   goal: string
   setGoal: (v: string) => void
@@ -64,11 +64,31 @@ export default memo(function SubmitPanel({
   lastGoal: string
   reportSummary?: string
   status: string
+  taskId?: string | null
   onSubmit: (goalOverride?: string) => void
   onNewConversation: () => void
 }) {
   const [showContext, setShowContext] = useState(false)
   const [templates, setTemplates] = useState<any[]>([])
+  const [stopping, setStopping] = useState(false)
+  const [stopMsg, setStopMsg] = useState('')
+
+  // 停止运行中的任务：写取消标志，编排器在下一个派发边界收尾
+  const stopTask = async () => {
+    if (!taskId || stopping) return
+    setStopping(true)
+    setStopMsg('')
+    try {
+      const r = await fetch(`/api/task/${taskId}/cancel`, { method: 'POST' })
+      const d = await r.json().catch(() => ({}))
+      setStopMsg(r.ok ? '已请求停止，任务将在当前步骤结束后收尾'
+                      : (d?.error || '停止请求失败'))
+    } catch {
+      setStopMsg('停止请求失败（网络错误）')
+    } finally {
+      setStopping(false)
+    }
+  }
 
   // 加载任务模板（模板复用：确定性步骤，跳过 LLM 规划）
   useEffect(() => {
@@ -203,6 +223,15 @@ export default memo(function SubmitPanel({
             className="flex items-center gap-2 bg-cyan-500 hover:bg-cyan-400 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 font-semibold px-5 py-2.5 rounded-lg transition-all text-sm shrink-0">
             {isRunning ? (<><Loader2 className="w-4 h-4 animate-spin" /> Running...</>) : (<><Sparkles className="w-4 h-4" /> Execute</>)}
           </button>
+          {isRunning && taskId && (
+            <button onClick={stopTask} disabled={stopping} title="请求停止当前任务"
+              className="flex items-center gap-2 bg-rose-500/10 hover:bg-rose-500/20 disabled:opacity-40 text-rose-400 font-semibold px-4 py-2.5 rounded-lg transition-all text-sm border border-rose-500/20 shrink-0">
+              <Square className="w-4 h-4" /> {stopping ? '停止中…' : '停止'}
+            </button>
+          )}
+          {stopMsg && (
+            <span className="text-[11px] text-amber-400 whitespace-nowrap">{stopMsg}</span>
+          )}
           {status === 'completed' && reportSummary === 'FAILED' && lastGoal && (
             <button onClick={() => onSubmit(lastGoal)}
               className="flex items-center gap-2 bg-red-500/10 hover:bg-red-500/20 text-red-400 font-semibold px-5 py-2.5 rounded-lg transition-all text-sm border border-red-500/20 shrink-0">
