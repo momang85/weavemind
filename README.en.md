@@ -25,6 +25,17 @@ reusable memory, and strategies that literally evolve. Every step is visible; ev
 
 ---
 
+## 📰 Recent milestones
+
+- **Cancel a running task**: one click stops it; the orchestrator winds down at the next dispatch boundary instead of burning quota in a fail→retry→replan loop
+- **Single source of truth for task state**: the orchestrator is the only writer, with a submit acknowledgement — no more "UI says submitted, the task never existed"
+- **Memory degrades gracefully**: when the Embedding endpoint is out of quota or down, retrieval falls back to keyword search; writes that fail are queued and replayed after recovery
+- **Financial data chain unlocked**: report-period aware fetching (annual/interim/quarterly) for both A-shares and HK, so gross margin and operating cash flow are available and traceable back to the on-disk `financials.json`
+- **Share scope tightened**: a share link exposes only the report and the charts it references, not the whole task workspace (raw search results, fetch snapshots, deliverable archives)
+- **Endpoint probing & CI hardened**: the connectivity probe no longer mistakes a reasoning model's empty `content` for an unreachable endpoint, and CI tests no longer drift with the public endpoint's state
+
+---
+
 ## ✨ Why WeaveMind
 
 Agent frameworks make you assemble everything yourself. WeaveMind hands you a **ready-made AI team**:
@@ -53,19 +64,23 @@ Agent frameworks make you assemble everything yourself. WeaveMind hands you a **
 
 ## 🚀 30-second quick start
 
+**Prerequisites**: Python 3.10+ (no Node needed — the built frontend ships with the repo; the first start auto-downloads a portable Redis on Windows). All you need to bring is an OpenAI-compatible LLM API key.
+
 ```bash
 # 1. Clone
 git clone https://github.com/momang85/weavemind.git && cd weavemind
 
-# 2. Configure
+# 2. Configure (or fill it in later on the Settings page)
 cp config.example.json config.json   # fill in your LLM API key
 
-# 3. Start (pick one, see "Install & Run" below)
-bash start.sh                        # or start.bat / docker compose up --build -d
+# 3. Install deps and start (pick one, see "Install & Run" below)
+pip install -r requirements.txt
+bash start.sh                        # start.bat on Windows / docker compose up --build -d
 
-# 4. Open http://localhost:5173 (8080 in production/Docker mode) and type:
+# 4. Open http://localhost:8080 and type:
 #    "Research the 2026 global industrial AI vision market and write a board-level
 #     report with architecture diagram and ROI estimates"
+#    (5173 is the `npm run dev` port; normal use does not need Node)
 ```
 
 You will see: the plan tree generate in real time → multiple workers working in parallel →
