@@ -102,12 +102,24 @@ def probe_allowed(url: str) -> tuple[bool, str]:
 
 
 def probe_endpoint(base_url: str, api_key: str, model: str,
-                   timeout: float = 20.0) -> tuple[bool, str]:
-    """极短请求验证端点可用；返回 (ok, 可读原因)。"""
+                   timeout: float = 20.0) -> tuple[bool | None, str]:
+    """极短请求验证端点可用；返回 (ok, 可读原因)。
+
+    `ok is None` 表示**跳过**（例：依赖尚未安装）。本模块在启动脚本的 [2/6] 运行，
+    而依赖要到 [4/6] 才自动安装，此时 import llm_client 会失败——那是"还没轮到"，
+    不是端点有问题；当成失败会让新手卡在"重填/仍然保存"上（实测如此）。
+    """
     try:
         import llm_client
+    except ImportError as exc:
+        return None, _t(
+            f"依赖尚未安装（{str(exc)[:60]}），跳过连通性自测；"
+            "后面的依赖步骤会自动安装，装好后会再复查一次",
+            f"Dependencies not installed yet ({str(exc)[:60]}); skipping the probe "
+            "(they are installed automatically later and the probe runs again)")
     except Exception as exc:
-        return False, _t(f"无法加载 llm_client：{exc}", f"llm_client unavailable: {exc}")
+        return None, _t(f"无法加载 llm_client：{str(exc)[:80]}",
+                        f"llm_client unavailable: {str(exc)[:80]}")
     try:
         res = llm_client._probe_endpoint_status(base_url, api_key, model) or {}
     except Exception as exc:
@@ -353,7 +365,7 @@ def run_interactive(force: bool = False, path: Path | None = None) -> int:
         emb_model = _ask(_t("Embedding 模型", "Embedding model"), DEFAULT_EMBEDDING_MODEL)
         embedding = {"base_url": base_url, "api_key": api_key, "model": emb_model}
 
-    # 5) 连通性自测（回环/内网按策略跳过）
+    # 5) 连通性自测（回环/内网按策略跳过；依赖未装也跳过而非报错）
     print()
     allowed, why_skip = probe_allowed(base_url)
     if not allowed:
@@ -361,8 +373,14 @@ def run_interactive(force: bool = False, path: Path | None = None) -> int:
     else:
         print(_t(f"正在测试 {base_url} …", f"Probing {base_url} …"))
         good, reason = probe_endpoint(base_url, api_key, model)
-        print(("  ✓ " if good else "  ! ") + reason)
-        if not good:
+        if good is None:
+            # 依赖未安装等"时机未到"：不算失败，也不问"重填"
+            print("  - " + reason)
+            print(_t("    （装好依赖后会自动复查，无需现在处理）",
+                     "    (re-checked automatically after dependencies are installed)"))
+        else:
+            print(("  ✓ " if good else "  ! ") + reason)
+        if good is False:
             # 默认重填：探测已给出可读原因（key 无效/额度不足/网络不通），
             # 新手在"回车即保存"的默认下极易把坏配置带进启动流程。
             again = _ask(_t("回车=重新填写 / 输入 n = 仍然保存",
@@ -385,6 +403,36 @@ def run_interactive(force: bool = False, path: Path | None = None) -> int:
     return 0
 
 
+def probe_configured(path: Path | None = None) -> int:
+    """复查已写入配置的端点连通性（不提问）：装好依赖后由启动脚本调用。
+
+    返回 0 = 连通 / 跳过（回环、内网按策略不探测）；1 = 不连通或配置不完整。
+    """
+    p = Path(path or CONFIG_PATH)
+    ok, why = config_status(p)
+    if not ok:
+        print(_t(f"跳过连通性复查：{why}", f"Skip probe: {why}"))
+        return 0          # 配置未完成是 [2/6] 的事，这里不重复报错
+    cfg = json.loads(p.read_text(encoding="utf-8"))
+    llm = cfg.get("llm") or {}
+    base_url = str(llm.get("base_url") or "")
+    allowed, why_skip = probe_allowed(base_url)
+    if not allowed:
+        print("  - " + why_skip)
+        return 0
+    print(_t(f"连通性复查 {base_url} …", f"Re-checking {base_url} …"))
+    good, reason = probe_endpoint(base_url, str(llm.get("api_key") or ""),
+                                  str(llm.get("model") or ""))
+    if good is None:
+        print("  - " + reason)
+        return 0
+    print(("  ✓ " if good else "  ! ") + reason)
+    if not good:
+        print(_t("    （不影响启动：可稍后在网页「设置」页修正端点或密钥）",
+                 "    (startup continues; fix it later on the Settings page)"))
+    return 0 if good else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(argv if argv is not None else sys.argv[1:])
     if "--plain" in args:
@@ -399,6 +447,8 @@ def main(argv: list[str] | None = None) -> int:
         ok, why = config_status()
         print(("OK: " if ok else "MISSING: ") + (why or "config OK"))
         return 0 if ok else 1
+    if "--probe" in args:
+        return probe_configured()
     if not _interactive():
         ok, why = config_status()
         if ok:

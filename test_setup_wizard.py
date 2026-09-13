@@ -290,6 +290,99 @@ class TestNonInteractive(_Tmp):
         self.assertNotIn(KEY_LONG, out.getvalue(), "终端输出不得含明文 key")
 
 
+class TestProbeSkipWhenDepsMissing(_Tmp):
+    """依赖没装时探测必须**跳过**，不能算失败。
+
+    实测事故：引导在 [2/6] 跑，而依赖要到 [4/6] 才自动安装，此时 import llm_client
+    会因缺 redis 失败；旧实现报"无法加载 llm_client"并让新手面对"重填/仍然保存"，
+    看起来像 key 有问题。
+    """
+
+    def test_probe_returns_none_when_dependency_missing(self):
+        with mock.patch.dict(sys.modules, {"llm_client": None}):
+            ok, reason = w.probe_endpoint("https://api.openai.com/v1", KEY_A, "m")
+        self.assertIsNone(ok, "依赖缺失应返回 None（跳过），而不是 False（失败）")
+        self.assertIn("依赖尚未安装", reason)
+
+    def test_interactive_skips_retry_prompt_when_deps_missing(self):
+        """跳过时不问"重新填写"，直接完成写盘。"""
+        answers = f"4\nhttps://api.example.invalid/v1\n{KEY_A}\nm\n2\n"
+        code, pe = self._run(answers, probe_side_effect=[
+            (None, "依赖尚未安装（No module named 'redis'），跳过连通性自测"),
+        ])
+        self.assertEqual(code, 0, "跳过探测不应中断引导")
+        cfg = json.loads(self.cfg_path.read_text(encoding="utf-8"))
+        self.assertEqual(cfg["llm"]["base_url"], "https://api.example.invalid/v1")
+        self.assertEqual(pe.call_count, 1)
+
+    def _run(self, answers: str, probe_side_effect=None):
+        with mock.patch.object(w, "CONFIG_PATH", self.cfg_path), \
+                mock.patch.object(w, "_interactive", return_value=True), \
+                mock.patch.object(sys.stdin, "isatty", return_value=False, create=True), \
+                mock.patch.object(w, "probe_endpoint", side_effect=probe_side_effect) as pe, \
+                mock.patch.object(w, "load_template", return_value=_template()), \
+                mock.patch("sys.stdout", io.StringIO()), \
+                mock.patch("builtins.input", side_effect=self._answers(answers)):
+            code = w.run_interactive(force=False, path=self.cfg_path)
+        return code, pe
+
+    @staticmethod
+    def _answers(text: str):
+        buf = io.StringIO(text)
+
+        def _next(prompt=""):
+            line = buf.readline()
+            if line == "":
+                raise EOFError
+            return line.rstrip("\n")
+        return _next
+
+
+class TestProbeConfiguredMode(_Tmp):
+    """`--probe`：依赖装好后的自动复查（不提问、不阻塞启动）。"""
+
+    def _write_cfg(self, base_url, key=KEY_A, model="m"):
+        self.cfg_path.write_text(json.dumps({"llm": {"api_key": key,
+                                                     "base_url": base_url,
+                                                     "model": model}}),
+                                 encoding="utf-8")
+
+    def test_ok_path(self):
+        self._write_cfg("https://api.example.invalid/v1")
+        out = io.StringIO()
+        with mock.patch.object(w, "probe_endpoint", return_value=(True, "连通正常")), \
+                mock.patch("sys.stdout", out):
+            rc = w.probe_configured(self.cfg_path)
+        self.assertEqual(rc, 0)
+        self.assertIn("连通正常", out.getvalue())
+
+    def test_failure_returns_nonzero_but_does_not_raise(self):
+        self._write_cfg("https://api.example.invalid/v1")
+        with mock.patch.object(w, "probe_endpoint", return_value=(False, "鉴权失败")), \
+                mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(w.probe_configured(self.cfg_path), 1)
+
+    def test_loopback_is_not_probed(self):
+        self._write_cfg("http://127.0.0.1:11434/v1")
+        pe = mock.Mock()
+        with mock.patch.object(w, "probe_endpoint", pe), \
+                mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(w.probe_configured(self.cfg_path), 0)
+        pe.assert_not_called()
+
+    def test_incomplete_config_is_skipped(self):
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            self.assertEqual(w.probe_configured(self.cfg_path), 0)
+        self.assertIn("跳过", out.getvalue())
+
+    def test_deps_missing_skip_is_not_failure(self):
+        self._write_cfg("https://api.example.invalid/v1")
+        with mock.patch.object(w, "probe_endpoint", return_value=(None, "依赖尚未安装")), \
+                mock.patch("sys.stdout", io.StringIO()):
+            self.assertEqual(w.probe_configured(self.cfg_path), 0)
+
+
 class TestStartupScriptWiring(unittest.TestCase):
     """启动脚本必须真的会调用引导，且不破坏既有 bat 约束。"""
 
@@ -309,6 +402,13 @@ class TestStartupScriptWiring(unittest.TestCase):
         self.assertIn("setup_wizard.py", src)
         self.assertIn("WM_NONINTERACTIVE", src)
         self.assertLess(src.index("setup_wizard.py"), src.index('"$PY" launcher.py'))
+
+    def test_start_bat_rechecks_endpoint_after_dependencies(self):
+        """依赖装好后要复查端点：引导阶段的探测可能因缺依赖被跳过。"""
+        src = Path("start.bat").read_text(encoding="ascii")
+        self.assertIn('setup_wizard.py" --probe', src)
+        # 复查必须在依赖步骤之后（依赖装好探测才有意义）
+        self.assertLess(src.index("dep_check.py --fix"), src.index('" --probe'))
 
     def test_python_candidates_are_verified_not_just_located(self):
         """解释器必须"验过才采用"，不能只靠 where 找到就认。

@@ -149,6 +149,12 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM Guided setup runs at [2/6], before dependencies exist here, so its live probe
+REM is skipped in that case. Now that the dependencies are installed, re-check the
+REM configured endpoint once (non-fatal: a bad key must not block startup).
+echo   [4/6] Endpoint check
+%PY% -u "%~dp0setup_wizard.py" --probe
+
 REM ---- [5/6] Frontend ----
 echo   [5/6] Frontend
 if exist frontend\dist\index.html (
