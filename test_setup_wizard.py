@@ -310,6 +310,27 @@ class TestStartupScriptWiring(unittest.TestCase):
         self.assertIn("WM_NONINTERACTIVE", src)
         self.assertLess(src.index("setup_wizard.py"), src.index('"$PY" launcher.py'))
 
+    def test_python_candidates_are_verified_not_just_located(self):
+        """解释器必须"验过才采用"，不能只靠 where 找到就认。
+
+        Windows 上 `where python` 会命中 Microsoft Store 占位别名：它被找到、
+        退出码甚至可能是 0，但什么都不执行。实测新手就是卡在这里（[1/6] 通过、
+        之后所有 python 调用静默失败）。因此要求：输出标记校验 + 候选顺序。
+        """
+        src = Path("start.bat").read_text(encoding="ascii")
+        self.assertIn("WMPYOK", src, "必须用解释器输出标记做验证，而不是只看退出码")
+        self.assertIn(":try_python", src)
+        # 顺序：先 python（用户依赖装在这里），再 py -3（python.org 启动器），最后 python3
+        i_py = src.index('call :try_python "python"')
+        i_launcher = src.index('call :try_python "py -3"')
+        i_py3 = src.index('call :try_python "python3"')
+        self.assertLess(i_py, i_launcher, "应优先复用用户已有的 python（依赖装在那里）")
+        self.assertLess(i_launcher, i_py3)
+        # 全部失败时的指引必须可行动
+        self.assertIn("python.org/downloads", src)
+        self.assertIn("winget install", src)
+        self.assertIn("App execution aliases", src)
+
 
 if __name__ == "__main__":
     unittest.main()

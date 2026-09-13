@@ -25,32 +25,37 @@ echo.
 REM ---- [1/6] Locate a Python interpreter ----
 echo   [1/6] Python
 set "PY="
-where python >nul 2>&1 && set "PY=python"
-if not defined PY (
-    where py >nul 2>&1 && set "PY=py -3"
-)
-if not defined PY (
-    echo   ERROR: Python not found in PATH.
-    echo   Install Python 3.10-3.14 from https://www.python.org/downloads/
-    echo   and enable "Add python.exe to PATH" during setup.
-    call :pause_if_interactive
-    exit /b 1
-)
+REM Try candidates in order and only accept one that actually RUNS a script.
+REM Why verification matters: on Windows "where python" also matches the
+REM Microsoft Store placeholder alias, which executes nothing and prints
+REM nothing - the novice then only sees a confusing error further down.
+REM Order matters: prefer "python" (that is where the user's dependencies were
+REM installed), fall back to the official launcher "py -3" when "python" is a
+REM placeholder, then "python3". A working candidate is required in every case.
+where python >nul 2>&1 && call :try_python "python"
+if defined PY goto :python_ready
+where py >nul 2>&1 && call :try_python "py -3"
+if defined PY goto :python_ready
+where python3 >nul 2>&1 && call :try_python "python3"
+:python_ready
+if not defined PY goto :python_missing
 echo        Using: %PY%
+goto :python_ok
 
-REM Verify the interpreter actually RUNS a script: on Windows "where python" also
-REM matches the Microsoft Store placeholder alias, which executes nothing and
-REM prints nothing - the novice then sees only a confusing config error later.
-%PY% -c "import sys;assert sys.version_info>=(3,10)" 2>nul
-if errorlevel 1 (
-    echo   ERROR: Python was found but does not run scripts ^(or is older than 3.10^).
-    echo          This is usually the Microsoft Store placeholder alias.
-    echo          Install Python 3.10+ from https://www.python.org/downloads/
-    echo          and enable "Add python.exe to PATH" during setup.
-    echo          Then open a NEW terminal and run start.bat again.
-    call :pause_if_interactive
-    exit /b 1
-)
+:python_missing
+echo   ERROR: no usable Python 3.10+ found.
+echo          "python" may be the Microsoft Store placeholder alias: it is
+echo          found by "where" but runs nothing.
+echo          Fix it with either:
+echo            1^) install from https://www.python.org/downloads/ and check
+echo               "Add python.exe to PATH" during setup; or
+echo            2^) winget install -e --id Python.Python.3.12
+echo          Also turn OFF App execution aliases for python.exe in
+echo          Settings ^> Apps ^> Advanced app settings ^> App execution aliases.
+echo          Then open a NEW terminal and run start.bat again.
+call :pause_if_interactive
+exit /b 1
+:python_ok
 
 REM ---- [2/6] Config ----
 echo   [2/6] Config
@@ -180,6 +185,15 @@ echo   ============================================
 echo.
 start "" "http://localhost:8080"
 call :pause_if_interactive
+exit /b 0
+
+:try_python
+REM %~1 = candidate command (e.g. "py -3"). Accept it only when it really runs
+REM Python 3.10+ and actually prints our marker.
+REM Checking the marker (not just the exit code) matters: a placeholder alias
+REM may exit 0 while running nothing at all.
+%~1 -c "import sys;assert sys.version_info>=(3,10);print('WMPYOK')" 2>nul | findstr /c:"WMPYOK" >nul
+if not errorlevel 1 set "PY=%~1"
 exit /b 0
 
 :check_config
