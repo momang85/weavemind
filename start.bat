@@ -40,18 +40,28 @@ echo        Using: %PY%
 
 REM ---- [2/6] Config ----
 echo   [2/6] Config
-%PY% -c "import json;c=json.load(open('config.json',encoding='utf-8'));l=c['llm'];assert l.get('api_key') and l.get('base_url') and l.get('model'),'missing llm config';print('Config OK:',l['model'])" 2>nul
-if errorlevel 1 (
-    if not exist config.json (
-        echo   ERROR: config.json not found. First run:
-        echo          copy config.example.json config.json
-        echo   then fill in llm.api_key / base_url / model.
-    ) else (
-        echo   ERROR: config.json exists but llm.api_key / base_url / model is incomplete.
-    )
-    call :pause_if_interactive
-    exit /b 1
+call :check_config
+if not errorlevel 1 goto :config_ok
+
+REM Missing/incomplete config: hand over to the guided setup (interactive only).
+if defined WM_NONINTERACTIVE goto :config_fail
+echo   config.json is missing or incomplete - starting guided setup...
+%PY% setup_wizard.py
+call :check_config
+if not errorlevel 1 goto :config_ok
+
+:config_fail
+if not exist config.json (
+    echo   ERROR: config.json not found. First run:
+    echo          copy config.example.json config.json
+    echo   then fill in llm.api_key / base_url / model.
+) else (
+    echo   ERROR: config.json exists but llm.api_key / base_url / model is incomplete.
 )
+echo   Tip: run "%PY% setup_wizard.py" in a terminal for a guided prompt.
+call :pause_if_interactive
+exit /b 1
+:config_ok
 
 REM ---- [3/6] Redis ----
 echo   [3/6] Redis
@@ -148,6 +158,12 @@ echo.
 start "" "http://localhost:8080"
 call :pause_if_interactive
 exit /b 0
+
+:check_config
+REM Exit code 0 when config.json has a usable llm.api_key / base_url / model.
+REM Keep this a single line: the guard test requires balanced quotes per line.
+%PY% -c "import json;c=json.load(open('config.json',encoding='utf-8'));l=c['llm'];assert l.get('api_key') and l.get('base_url') and l.get('model'),'missing llm config';print('Config OK:',l['model'])" 2>nul
+exit /b %errorlevel%
 
 :pause_if_interactive
 if defined WM_NONINTERACTIVE exit /b 0

@@ -83,7 +83,9 @@
 # 1. 克隆
 git clone https://github.com/momang85/weavemind.git && cd weavemind
 
-# 2. 配密钥（也可以启动后在「设置」页里填）
+# 2. 配密钥（首次启动会自动进入中文引导；也可以启动后在「设置」页里填）
+#    引导会问：供应商（SiliconFlow/DeepSeek/OpenAI/自定义）→ API Key → 模型 → 是否配 Embedding，
+#    并当场测一次连通性。跳过引导手动配置也行：
 cp config.example.json config.json   # 填入你的 LLM_API_KEY
 
 # 3. 安装依赖并启动（任选一种，见下方"安装与运行"）

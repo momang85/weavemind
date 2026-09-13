@@ -29,6 +29,23 @@ else
     exit 1
 fi
 
+# [0/6] Config（首次运行引导：缺少/不完整时进入交互问答）
+# 此前 *nix 侧没有任何 config 闸门——新手会一路启动到"任务失败"才发现没配 key。
+if "$PY" setup_wizard.py --check >/dev/null 2>&1; then
+    echo "[0/6] Config OK"
+else
+    if [ "${WM_NONINTERACTIVE:-0}" = "1" ]; then
+        echo "  ERROR: config.json 缺失或 llm.api_key / base_url / model 未填。"
+        echo "  非交互环境请手动执行：cp config.example.json config.json 并填写 llm.*"
+        exit 1
+    fi
+    echo "[0/6] Config - 首次配置引导"
+    if ! "$PY" setup_wizard.py; then
+        echo "  ERROR: 配置未完成，已退出。修好后重跑 bash start.sh 即可。"
+        exit 1
+    fi
+fi
+
 # [1/6] Redis
 echo "[1/6] Redis..."
 # 三级探测（与 start.bat 对齐）：本机 6379 已有 Redis → 跳过 Docker；

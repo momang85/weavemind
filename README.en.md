@@ -70,7 +70,9 @@ Agent frameworks make you assemble everything yourself. WeaveMind hands you a **
 # 1. Clone
 git clone https://github.com/momang85/weavemind.git && cd weavemind
 
-# 2. Configure (or fill it in later on the Settings page)
+# 2. Configure (the first start opens a guided prompt; you can also do it later on the Settings page)
+#    It asks: provider (SiliconFlow/DeepSeek/OpenAI/custom) -> API key -> model -> optional Embedding,
+#    and tests the connection on the spot. Manual configuration still works:
 cp config.example.json config.json   # fill in your LLM API key
 
 # 3. Install deps and start (pick one, see "Install & Run" below)
