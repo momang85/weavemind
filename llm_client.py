@@ -916,6 +916,8 @@ def _get_llm_cache_client():
             host=os.environ.get("REDIS_HOST", "localhost"),
             port=int(os.environ.get("REDIS_PORT", "6379")),
             decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=2,
         )
     return _llm_cache_client
 
@@ -977,6 +979,8 @@ def _publish_usage_snapshot() -> None:
                 host=os.environ.get("REDIS_HOST", "localhost"),
                 port=int(os.environ.get("REDIS_PORT", "6379")),
                 decode_responses=True,
+                socket_connect_timeout=2,
+                socket_timeout=2,
             )
         _usage_pub_client.set(
             f"llm_usage:{os.getpid()}",

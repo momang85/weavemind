@@ -169,16 +169,26 @@ const STATUS_BADGE: Record<string, { text: string; cls: string }> = {
 }
 
 function healthBadge(entry: ReqEntry) {
+  // 必需项未配置优先于健康状态：健康判据取自进程内端点状态，缺 key 时它仍可能是
+  // "正常"（新实例实测：llm.api_key 标"必需项未配置"、同行徽章却显示"正常"，
+  // 徽章的 tooltip 还留着上一次 401 的原因——三处自相矛盾）。
+  if (entry.required && !entry.configured) {
+    return {
+      text: '未配置',
+      cls: 'bg-amber-500/15 text-amber-400',
+      title: entry.health_reason
+        ? `必需项未配置：${entry.health_reason}`
+        : '该项为必需项，缺失会影响任务执行',
+    }
+  }
   if (entry.health_ok === false) {
     const reason = entry.health_reason || ''
     const quota = /402|insufficient|balance|credit|额度|余额/i.test(reason)
     return { text: quota ? '欠费/额度不足' : '异常', cls: 'bg-red-500/15 text-red-400', title: reason }
   }
-  if (entry.health_ok === true && entry.health) {
+  // 未配置的可选项不显示"正常"（那只是进程内默认状态，不代表真的可用）
+  if (entry.health_ok === true && entry.health && entry.configured) {
     return { text: '正常', cls: 'bg-emerald-500/10 text-emerald-400', title: entry.health_reason }
-  }
-  if (entry.required && !entry.configured) {
-    return { text: '未配置', cls: 'bg-amber-500/15 text-amber-400', title: '该项为必需项，缺失会影响任务执行' }
   }
   return null
 }

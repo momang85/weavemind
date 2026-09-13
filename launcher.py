@@ -591,8 +591,11 @@ def start_services() -> dict:
             logger.error("[%s] failed to start", name)
 
     _write_pids(pids)
+    # 消息里的端口必须反映实际监听端口：此前写死 8080，用户用 WEB_PORT 改了端口
+    # 仍被提示 8080（WEB_PORT 本身是被尊重的），实测新环境因此走错端口。
+    _web_port = os.environ.get("WEB_PORT", "8080")
     front_url = (
-        "http://localhost:8080"
+        f"http://localhost:{_web_port}"
         if (BASE_DIR / "frontend" / "dist" / "index.html").exists()
         else "http://localhost:5173"
     )
@@ -611,7 +614,7 @@ def start_services() -> dict:
                 "  Startup verification failed (WM_START_STRICT=1): see logs/ and retry.",
             ))
             sys.exit(1)
-    logger.info("All services started. WebUI: http://localhost:8080  Frontend: %s", front_url)
+    logger.info("All services started. WebUI: %s  Frontend: %s", front_url, front_url)
     return pids
 
 

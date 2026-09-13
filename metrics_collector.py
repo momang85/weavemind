@@ -113,7 +113,8 @@ class MetricsCollector:
         self._running = True
         r = redis.Redis(host=os.environ.get("REDIS_HOST", "localhost"),
                         port=int(os.environ.get("REDIS_PORT", "6379")),
-                        decode_responses=True)
+                        decode_responses=True,
+                        socket_connect_timeout=2, socket_timeout=2)
         # 实际的 psubscribe 支持 pattern
         logger.info("MetricsCollector started, writing to %s", METRICS_FILE)
 
@@ -261,6 +262,7 @@ class MetricsCollector:
                 host=os.environ.get("REDIS_HOST", "localhost"),
                 port=int(os.environ.get("REDIS_PORT", "6379")),
                 decode_responses=True,
+                socket_connect_timeout=2, socket_timeout=2,
             )
             ledger = r.hgetall(f"llm_usage_task:{tid}") or {}
             from costs import ledger_cost
@@ -309,6 +311,7 @@ class MetricsCollector:
                     host=os.environ.get("REDIS_HOST", "localhost"),
                     port=int(os.environ.get("REDIS_PORT", "6379")),
                     decode_responses=True,
+                    socket_connect_timeout=2, socket_timeout=2,
                 )
                 raw = r.get("search_engine_health")
                 if raw:

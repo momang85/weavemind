@@ -7427,6 +7427,19 @@ class TestLLMDeadlineBudget(unittest.TestCase):
     且备用端点不继承预算（实测切备后总耗时被拖到 50s+）。
     """
 
+    def setUp(self):
+        """固定"主端点健康"，让本组用例只验证预算语义。
+
+        端点健康是**进程内共享状态**，会被后台健康探测线程按真实探测结果改写。
+        端点不可达时（CI 环境没有可达的 LLM 端点）`call()` 会走"主端点不健康 →
+        优先备用"分支，绕开本组用例在 `_send_request` 上打的桩：表现为 `seen`
+        为空、并在真实探测数十秒后以"预算耗尽"收尾。用例因此随外网状态漂移，
+        公开仓库的 CI 连续多次失败即由此而来。
+        """
+        patch = mock.patch("llm_client._primary_healthy", return_value=True)
+        patch.start()
+        self.addCleanup(patch.stop)
+
     def _client(self):
         from llm_client import LLMClient
         return LLMClient(base_url="http://127.0.0.1:9/v1", api_key="k", model="m")

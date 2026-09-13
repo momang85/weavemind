@@ -60,13 +60,29 @@ def _month_key() -> str:
 
 
 def _month_redis_client():
-    """月度预算 Redis 客户端（懒加载，失败返回 None 静默降级）。"""
+    """月度预算 Redis 客户端（懒加载，失败返回 None 静默降级）。
+
+    必须带 socket 超时：redis-py 默认无超时时，Redis 不在会退到系统级 TCP 重试，
+    实测 Windows 下 `localhost`（解析出 127.0.0.1 与 ::1 两个地址）单次约 49 秒。
+    而本函数在**每次 LLM 调用**的预算检查链上（get_model_for_usage →
+    resolve_model_with_budget → budget_exceeded → get_monthly_spend），于是
+    "Redis 挂了"会表现为"每个 LLM 调用莫名多等约 50 秒"。
+    """
     try:
         import redis as _redis
+        from redis.backoff import NoBackoff
+        from redis.retry import Retry
         return _redis.Redis(
-            host=os.environ.get("REDIS_HOST", "localhost"),
+            # 默认 127.0.0.1：`localhost` 会解析出两个地址（127.0.0.1 与 ::1），
+            # Redis 不在时失败耗时翻倍
+            host=os.environ.get("REDIS_HOST", "127.0.0.1"),
             port=int(os.environ.get("REDIS_PORT", "6379")),
             decode_responses=True,
+            socket_connect_timeout=2,
+            socket_timeout=2,
+            # redis-py 8 默认对连接错误重试：只给超时不够，实测仍要 26~48s 才失败
+            # （127.0.0.1 26s / localhost 48s）。关掉重试后稳定 2s 内失败。
+            retry=Retry(NoBackoff(), 0),
         )
     except Exception:
         return None
