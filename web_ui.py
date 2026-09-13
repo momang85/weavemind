@@ -95,7 +95,7 @@ def _publish_alert(alert_type: str, message: str, service: str = "scheduler") ->
             for stale in sorted(_alert_dedupe, key=_alert_dedupe.get)[:100]:
                 _alert_dedupe.pop(stale, None)
 
-    """发布 orchestrator:alert 事件（Health 页事件流）；失败静默（尽力而为）。"""
+    # 发布 orchestrator:alert 事件（Health 页事件流）；失败静默（尽力而为）
     try:
         _new_redis().publish("orchestrator:alert", json.dumps({
             "type": alert_type,
@@ -952,15 +952,18 @@ def _listen_results():
                                         make_summary,
                                         notify_task_done,
                                     )
-                                    notify_task_done(
-                                        tid,
-                                        goal=str(existing.get("goal") or ""),
-                                        status=_status,
-                                        report_link=find_share_link(tid),
-                                        summary=make_summary(
-                                            str(existing.get("report") or "")
-                                        ),
-                                    )
+                                    # 与其它通知路径一致先抢占：日报成功通知此前是唯一
+                                    # 不做去重的一条，监听器重启或消息重复时会重复推送
+                                    if claim_notify("done", tid):
+                                        notify_task_done(
+                                            tid,
+                                            goal=str(existing.get("goal") or ""),
+                                            status=_status,
+                                            report_link=find_share_link(tid),
+                                            summary=make_summary(
+                                                str(existing.get("report") or "")
+                                            ),
+                                        )
                         except Exception:
                             pass
             except Exception: pass
@@ -2937,52 +2940,30 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args): pass
 
 def _pid_same_process(pid, started_raw) -> bool | None:
-    """运行标记的持有者进程是否仍存活、且仍是当初那个进程。
+    """探活判据（薄包装）：实现唯一落在 `task_state.pid_same_process`。
 
-    返回 ``True``（存活）/ ``False``（确认已死）/ ``None``（无法判定）。
+    看护线程与编排器的检查点恢复必须用同一条判据——此前两处各写一份，webui 修好
+    了 WinError 87 误判，编排器仍把 87 当"已死"，两边结论相反。
 
-    为什么不用 `os.kill(pid, 0)` 判死：Windows 上对**存活进程**该调用亦可能抛
-    `WinError 87`（实测编排器 pid 与标记一致、psutil 可正常读取 create_time，
-    但 os.kill 报 87），把 87 当"已死"会误杀正在跑的任务并覆写其报告。
-    因此 psutil 可用时以它为准（能区分"进程不存在"与"存在但不是同一个"），
-    不可用时 os.kill 只能证明存活、报错一律归为不可判定（``None``），
-    由调用方按"不据此翻任务"处理。
+    只有 ``False`` 才是"确认已死"；``None``（判据不足）不得据此判死。
+    """
+    import task_state as _ts
+    return _ts.pid_same_process(pid, started_raw)
+
+
+def _drop_running_marker(task_id: str) -> bool:
+    """删除某个任务的运行标记（持有者已死时该标记已无意义）。
+
+    独立成函数而非内联：内联版本误用了 checkpointer 模块的私有客户端名
+    （web_ui 里并未定义），NameError 又被宽 except 吞掉，于是"删掉死标记"
+    从未真正执行过，孤儿键一直堆到 24h TTL。
     """
     try:
-        pid = int(pid or 0)
-    except Exception:
-        return None
-    if pid <= 0:
-        return None
-    started_ts = 0.0
-    raw = str(started_raw or "")
-    if raw:
-        try:
-            import datetime as _dt
-            started_ts = _dt.datetime.fromisoformat(
-                raw.replace("Z", "+00:00")).timestamp()
-        except Exception:
-            started_ts = 0.0
-    try:
-        import psutil
-    except Exception:
-        psutil = None
-    if psutil is not None:
-        try:
-            created = psutil.Process(pid).create_time()
-        except Exception as exc:
-            if type(exc).__name__ == "NoSuchProcess":
-                return False          # 进程不存在：确认为死
-            # AccessDenied 等：进程很可能存在但读不到，无法做 PID 复用比对
-            return True
-        if started_ts and created > started_ts + 5:
-            return False              # PID 复用：这不是当初那个进程
+        _new_redis().delete(f"task_running:{task_id}")
         return True
-    try:
-        os.kill(pid, 0)
-        return True
-    except Exception:
-        return None                   # 无 psutil 时不敢据"报错"判死
+    except Exception as exc:
+        _cleanup_logger.debug("删除运行标记失败（%s）：%s", task_id, str(exc)[:100])
+        return False
 
 
 def main():
@@ -3082,8 +3063,8 @@ def main():
         P0 时间轴修复：运行中的任务必须豁免——task_history 全程保持 PENDING
         （只有提交与终态会写库），此前"超 30 分钟即翻 FAILED"会误杀合法长任务
         （8 步串行 + 反思重做 + 修复轮可远超 30 分钟），并触发调度器对
-        "已失败"任务的重复重提。豁免判据：Redis task_running:{tid} 存在
-        （编排器 24h 标记）或内存 _task_results 中状态为 RUNNING。
+        "已失败"任务的重复重提。豁免判据：Redis `task_running:{tid}` 存在且其
+        持有者进程仍存活（内存 `_task_results` 已降级为纯缓存，不作判据）。
 
         T2：scheduler 任务（sched- 前缀 / user=scheduler）过期时不再静默——
         发布 orchestrator:alert 事件（Health 页立即可见）并发送失败通知；
@@ -3163,10 +3144,7 @@ def main():
                                 _dead.append(_tid)
                                 # 持有者已死 → 该标记已无意义：删掉避免每轮扫描
                                 # 反复判定，也避免孤儿键堆积到 TTL
-                                try:
-                                    _redis_client.delete(f"task_running:{_tid}")
-                                except Exception:
-                                    pass
+                                _drop_running_marker(_tid)
                     for _tid in _dead:
                         _publish_alert(
                             "task_crashed",
@@ -3319,6 +3297,27 @@ def _get_scheduled_jobs(self, p):
                 recent = []
         return self._json({"jobs": load_jobs(CONFIG_PATH), "recent": recent})
 
+# `/files/<tid>/<rel>` 的可见范围白名单（relative 为任务工作区内的相对路径）。
+# 匿名（分享链接持有者）只放行报告与其引用的图表，外加日报导出的 ranking.csv；
+# 已登录用户沿用"报告/图表/数据"目录。此前匿名也能按 `/data/<任意文件名>` 取到
+# 整个工作区——原始检索结果、抓取快照、financials.json、交付 zip 全在内，
+# 等于"分享一份报告 = 公开该任务全部原始数据"。
+_FILES_PUBLIC_PREFIXES = ("reports/", "charts/")
+_FILES_PUBLIC_FILES = ("data/ranking.csv",)
+_FILES_AUTHED_PREFIXES = ("reports/", "charts/", "data/")
+
+
+def _files_visible_rel(relative: str, authed: bool) -> bool:
+    """该请求能否读取任务工作区内的这个相对路径。"""
+    rel = str(relative or "").replace("\\", "/").lstrip("/")
+    # 纵深防御：路径穿越由 _safe_workspace_path 兜底，但白名单自己也不接受 .. 段
+    if not rel or any(seg in ("..", ".") for seg in rel.split("/")):
+        return False
+    if authed:
+        return rel.startswith(_FILES_AUTHED_PREFIXES)
+    return rel.startswith(_FILES_PUBLIC_PREFIXES) or rel in _FILES_PUBLIC_FILES
+
+
 def _get_files(self, p):
     if p.startswith("/files/"):
         rel = p[len("/files/"):]
@@ -3329,7 +3328,11 @@ def _get_files(self, p):
         fp = _safe_workspace_path(rel, tid)
         if fp:
             relative = os.path.relpath(fp, task_workspace(tid)).replace("\\", "/")
-            if not relative.startswith(("reports/", "charts/", "data/")):
+            try:
+                authed = self._auth_session() is not None
+            except Exception:
+                authed = False
+            if not _files_visible_rel(relative, authed):
                 fp = None
         if not fp:
             return self._json({"error": "not found"}, 404)

@@ -16,7 +16,9 @@
 - `derive_status()`：状态派生规则**唯一实现**（编排器 `_resolve_final_status` 委托此处）；
 - `mark_queued/mark_running/record_completion()`：状态迁移的唯一入口；
 - `read_task()`：含 acceptance 的统一读取；
-- `is_running()`：供 stale 豁免使用（DB 状态，配合 pid 校验的 Redis 标记）。
+- `is_running()`：供 stale 豁免使用（DB 状态，配合 pid 校验的 Redis 标记）；
+- `pid_same_process()`：运行标记持有者探活的**唯一实现**（webui 看护线程与
+  编排器检查点恢复共用同一条判据）。
 """
 
 from __future__ import annotations
@@ -355,6 +357,56 @@ def merge_projection(task_id: str, overlay: dict | None = None,
             if live.get(key) not in (None, [], {}):
                 data[key] = live[key]
     return data
+
+
+def pid_same_process(pid, started_raw: str = "") -> bool | None:
+    """运行标记的持有者进程是否仍存活、且仍是当初那个进程。
+
+    返回 ``True``（存活）/ ``False``（确认已死）/ ``None``（无法判定）。
+
+    为什么不用 `os.kill(pid, 0)` 判死：Windows 上对**存活进程**该调用亦可能抛
+    `WinError 87`（实测编排器 pid 与标记一致、psutil 可正常读取 create_time，
+    但 os.kill 报 87）。把 87 当"已死"会误杀正在跑的任务并让检查点恢复到运行中
+    的任务上，因此 psutil 可用时以它为准（能区分"进程不存在"与"存在但不是同一个
+    进程"），不可用时 os.kill 只能证明存活、报错一律归为不可判定。
+
+    调用方必须**只把 False 当作已死**：None 表示判据不足，宁可晚处理也不误判。
+    """
+    try:
+        pid = int(pid or 0)
+    except Exception:
+        return None
+    if pid <= 0:
+        return None
+    started_ts = 0.0
+    raw = str(started_raw or "")
+    if raw:
+        try:
+            import datetime as _dt
+            started_ts = _dt.datetime.fromisoformat(
+                raw.replace("Z", "+00:00")).timestamp()
+        except Exception:
+            started_ts = 0.0
+    try:
+        import psutil
+    except Exception:
+        psutil = None
+    if psutil is not None:
+        try:
+            created = psutil.Process(pid).create_time()
+        except Exception as exc:
+            if type(exc).__name__ == "NoSuchProcess":
+                return False          # 进程不存在：确认为死
+            # AccessDenied 等：进程很可能存在但读不到，无法做 PID 复用比对
+            return True
+        if started_ts and created > started_ts + 5:
+            return False              # PID 复用：这不是当初那个进程
+        return True
+    try:
+        os.kill(pid, 0)
+        return True
+    except Exception:
+        return None                   # 无 psutil 时不敢据"报错"判死
 
 
 def mark_dead_running_failed(task_id: str, reason: str = "编排器进程已退出",

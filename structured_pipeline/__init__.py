@@ -19,7 +19,6 @@ from ws_helpers import push_progress
 logger = logging.getLogger("orchestrator_v2")
 
 
-
 def _period_tag(row: dict) -> str:
     """财务行的报告期标签：季报/中报用季度写法（2025Q3），年报沿用“2025年”。"""
     year = row.get("year")
@@ -758,11 +757,13 @@ class StructuredPipelineMixin:
                         "若上下文中没有任何结构化数据块，须在报告末尾标注"
                         "'数据截至日期：未获取（本次任务未提供结构化数据）'。"
                     )
-        except Exception:
-            pass
+        except Exception as exc:
+            # 不能静默：注入块是报告数字的权威口径来源，块丢了会让报告退回搜索
+            # 片段拼口径（此前 `except: pass` 把这类失效藏了整整一段时间）
+            logger.warning("结构化数据注入失败（task=%s）：%s",
+                           task_id, str(exc)[:150])
         return ""
 
-    @staticmethod
     @staticmethod
     def _merge_structured_financials(
         clean: dict, financials: list, source_url: str,

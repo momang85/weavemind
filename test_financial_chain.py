@@ -36,12 +36,21 @@ class TestCompanyExtraction(unittest.TestCase):
         ("贵州茅台2025年年报", "贵州茅台"),
         ("分析比亚迪2024年中报", "比亚迪"),
         ("贵州茅台2025年一季报营收", "贵州茅台"),
+        # 请求语 + 尾部虚词（窗口以"的"结尾会诱使裁剪啃掉真名，实测曾全部返回空）
+        ("帮我看看茅台的财报", "茅台"),
+        ("看看茅台的三季报", "茅台"),
+        ("查一下贵州茅台的年报", "贵州茅台"),
+        ("给我茅台的三季报营收", "茅台"),
+        ("阅读宁德时代三季报", "宁德时代"),
+        ("瞧瞧贵州茅台的三季报", "贵州茅台"),
+        ("说说腾讯控股的年报", "腾讯"),
         # 既有行为必须保持
         ("贵州茅台近三年营收", "贵州茅台"),
         ("宁德时代历年年度净利润", "宁德时代"),
         ("600519（贵州茅台）2025年三季报", "贵州茅台"),
         ("贵州茅台（600519）2025年三季报", "贵州茅台"),
         ("贵州茅台集团2025年三季报", "贵州茅台"),
+        ("中国平安控股2024年报", "中国平安"),
     ]
 
     def test_company_names_extracted(self):
@@ -283,6 +292,117 @@ class TestRouterPeriodWiring(unittest.TestCase):
         self.assertEqual(len(out.get("companies") or []), 2)
         self.assertEqual(seen, ["quarter", "quarter"],
                          "每个实体的抓取都要带 quarter")
+
+
+class TestMultiEntityFinancialsTraceability(unittest.TestCase):
+    """对比类任务的 financials.json 是 {source, companies:[{name,financials}]}。
+
+    `_collect_sources` 只读顶层 financials 时，这类任务在"清洗未跑"场景下数字
+    全部判不可溯源（假失败）。两种形状都要认。
+    """
+
+    def _ws(self, payload: dict) -> Path:
+        tmp = Path(tempfile.mkdtemp(prefix="wm_fin_multi_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (tmp / "project").mkdir(parents=True)
+        (tmp / "project" / "financials.json").write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return tmp
+
+    def test_multi_entity_rows_collected_with_entity_names(self):
+        ws = self._ws({
+            "source": "multi_entity",
+            "companies": [
+                {"name": "宁德时代", "financials": [
+                    {"year": 2025, "report_type": "三季报",
+                     "revenue": 1309.04, "gross_margin": 91.29}]},
+                {"name": "比亚迪", "financials": [
+                    {"year": 2025, "report_type": "三季报", "revenue": 6000.0}]},
+            ],
+            "metadata": {},
+        })
+        src = acceptance_checker._collect_sources(ws)
+        text = src.get("financials", "")
+        self.assertIn("1309.04", text)
+        self.assertIn("6000.0", text)
+        self.assertIn("宁德时代", text, "实体名要带进文本，供主体归属校验绑定")
+        res = acceptance_checker.check_number_traceability(
+            "- 宁德时代营收 1309.04 亿元\n- 比亚迪营收 6000.0 亿元\n"
+            "- 编造 7777.77 亿元\n", src, domain="financial")
+        tr = {str(t.get("value")) for t in res["traceable"]}
+        un = {str(t.get("value")) for t in res["untraceable"]}
+        self.assertIn("1309.04", tr)
+        self.assertIn("6000.0", tr)
+        self.assertIn("7777.77", un, "编造数字仍不得被判可溯源")
+
+    def test_single_entity_shape_still_works(self):
+        ws = self._ws({"financials": [
+            {"year": 2025, "report_type": "三季报", "revenue": 1309.04}],
+            "metadata": {"company": "贵州茅台"}})
+        text = acceptance_checker._collect_sources(ws).get("financials", "")
+        self.assertIn("1309.04", text)
+        self.assertIn("贵州茅台", text)
+
+    def test_broken_json_logs_and_does_not_raise(self):
+        tmp = Path(tempfile.mkdtemp(prefix="wm_fin_bad_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (tmp / "project").mkdir(parents=True)
+        (tmp / "project" / "financials.json").write_text("{坏", encoding="utf-8")
+        with self.assertLogs("acceptance_checker", level="WARNING") as cm:
+            src = acceptance_checker._collect_sources(tmp)
+        self.assertNotIn("financials", src)
+        self.assertIn("解析失败", "\n".join(cm.output))
+
+
+class TestGeneratedArtifactsClean(unittest.TestCase):
+    """编辑残留守卫：双装饰器/连续空行/静默吞异常。"""
+
+    def test_no_double_staticmethod(self):
+        src = Path("structured_pipeline/__init__.py").read_text(encoding="utf-8")
+        self.assertNotIn("@staticmethod\n        @staticmethod", src)
+        self.assertNotIn("@staticmethod\n    @staticmethod", src)
+
+    def test_injection_failure_is_logged(self):
+        src = Path("structured_pipeline/__init__.py").read_text(encoding="utf-8")
+        i = src.index("def _structured_injection")
+        block = src[i:i + 20000]
+        tail = block[:block.index("def _merge_structured_financials")]
+        self.assertIn("结构化数据注入失败", tail,
+                      "注入失败必须留日志，不能静默丢权威口径")
+
+    def test_router_financial_failure_is_logged(self):
+        src = Path("adapters/router.py").read_text(encoding="utf-8")
+        # 取最后一处（route_structured 的单实体分支）；_fetch_financial_entity
+        # 也有一处同名赋值，但它已经有自己的错误返回路径
+        i = src.rindex('data["classification"] = cls')
+        self.assertIn("logger.warning", src[i:i + 400])
+
+
+class TestFilesVisibilityPolicy(unittest.TestCase):
+    """P0-1：/files 白名单——匿名分享不得读整个任务工作区。"""
+
+    def test_public_sees_only_reports_and_charts(self):
+        import web_ui
+        for rel in ("reports/report.md", "charts/c1.png", "data/ranking.csv"):
+            self.assertTrue(web_ui._files_visible_rel(rel, False),
+                            f"匿名应可读 {rel}")
+        for rel in ("data/search_results.json", "data/fetch_snapshot.json",
+                    "data/financials.json", "data/pkg.zip", "project/x.py",
+                    "../outside.txt", "charts/../../secret"):
+            self.assertFalse(web_ui._files_visible_rel(rel, False),
+                             f"匿名不得读 {rel}")
+
+    def test_authed_keeps_legacy_scope(self):
+        import web_ui
+        for rel in ("reports/report.md", "charts/c1.png",
+                    "data/search_results.json", "data/pkg.zip"):
+            self.assertTrue(web_ui._files_visible_rel(rel, True))
+        self.assertFalse(web_ui._files_visible_rel("project/x.py", True),
+                         "project/ 向来不放行，保持不变")
+
+    def test_handler_uses_policy(self):
+        src = Path("web_ui.py").read_text(encoding="utf-8")
+        self.assertIn("_files_visible_rel(relative, authed)", src)
 
 
 class TestEastmoneyMetadata(unittest.TestCase):

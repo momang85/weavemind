@@ -418,5 +418,90 @@ class TestSnapshotFreshnessGuard(unittest.TestCase):
         self.assertLess(age, 30.0)
 
 
+class TestDeadMarkerCleanup(unittest.TestCase):
+    """死持有者的运行标记必须真被删除。
+
+    回归背景：清理内联写成 `_redis_client.delete(...)`——那是 checkpointer 模块的
+    名字，在 web_ui 里未定义，NameError 被宽 except 吞掉，于是"删掉死标记"从未
+    执行过，孤儿键一直堆到 24h TTL，且每轮扫描重复判定。
+    """
+
+    def test_marker_delete_uses_defined_client(self):
+        src = Path("web_ui.py").read_text(encoding="utf-8")
+        # 只禁"真的用它"（属性访问/赋值）；文档里解释历史的那处提及允许保留
+        self.assertNotIn("_redis_client.", src,
+                         "web_ui 不得引用 checkpointer 的模块私有名")
+        self.assertNotIn("_redis_client =", src)
+        self.assertIn("_drop_running_marker(", src)
+
+    def test_drop_marker_deletes_key(self):
+        import web_ui
+        fake = mock.MagicMock()
+        fake.delete.return_value = 1
+        with mock.patch.object(web_ui, "_new_redis", return_value=fake):
+            self.assertTrue(web_ui._drop_running_marker("ui-x"))
+        fake.delete.assert_called_once_with("task_running:ui-x")
+
+    def test_drop_marker_swallows_redis_failure(self):
+        import web_ui
+        with mock.patch.object(web_ui, "_new_redis",
+                               side_effect=RuntimeError("redis down")):
+            self.assertFalse(web_ui._drop_running_marker("ui-x"))
+
+
+class TestLivenessSharedImplementation(unittest.TestCase):
+    """探活判据必须只有一份实现，且编排器不得把探活报错当"已死"。"""
+
+    def test_orchestrator_has_no_winerror_heuristic(self):
+        src = Path("orchestrator_v2.py").read_text(encoding="utf-8")
+        self.assertNotIn("winerror", src,
+                         "不得再用 winerror 87 作为'已死'判据（对存活进程也会抛）")
+        self.assertIn("pid_same_process", src,
+                      "编排器必须复用 task_state 的探活实现")
+
+    def test_task_is_running_conservative(self):
+        from orchestrator_v2 import OrchestratorV2
+        import task_state
+        orch = OrchestratorV2.__new__(OrchestratorV2)
+        orch._redis = mock.MagicMock()
+        orch._redis.get.return_value = json.dumps({"pid": 4242, "started": ""})
+        # 探活不可判定（None）→ 视为运行中，绝不对运行中的任务做检查点恢复
+        with mock.patch.object(task_state, "pid_same_process", return_value=None):
+            self.assertTrue(orch._task_is_running("t1"))
+        # 确认已死 → 允许恢复
+        with mock.patch.object(task_state, "pid_same_process", return_value=False):
+            self.assertFalse(orch._task_is_running("t1"))
+        # 确认存活
+        with mock.patch.object(task_state, "pid_same_process", return_value=True):
+            self.assertTrue(orch._task_is_running("t1"))
+
+    def test_marker_payload_unparseable_is_alive(self):
+        from orchestrator_v2 import OrchestratorV2
+        orch = OrchestratorV2.__new__(OrchestratorV2)
+        orch._redis = mock.MagicMock()
+        orch._redis.get.return_value = "{不是 JSON"
+        self.assertTrue(orch._task_is_running("t1"))
+
+
+class TestPlanCacheScope(unittest.TestCase):
+    """P1-3：规划缓存键必须带作用域，否则不同项目/用户同一句目标互相命中。"""
+
+    def test_scope_changes_key(self):
+        import orchestrator_v2 as O
+        base = O.plan_cache_key_for("贵州茅台三季报", "p1:u1")
+        self.assertEqual(base, O.plan_cache_key_for("贵州茅台三季报", "p1:u1"))
+        self.assertNotEqual(base, O.plan_cache_key_for("贵州茅台三季报", "p2:u1"))
+        self.assertNotEqual(base, O.plan_cache_key_for("贵州茅台三季报", "p1:u2"))
+
+    def test_goal_changes_key(self):
+        import orchestrator_v2 as O
+        self.assertNotEqual(O.plan_cache_key_for("目标A", "s"),
+                            O.plan_cache_key_for("目标B", "s"))
+
+    def test_plan_uses_scoped_key(self):
+        src = Path("orchestrator_v2.py").read_text(encoding="utf-8")
+        self.assertIn("plan_cache_key_for(goal", src)
+
+
 if __name__ == "__main__":
     unittest.main()

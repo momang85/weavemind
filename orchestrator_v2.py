@@ -86,6 +86,22 @@ def _sanitized_process_env(base: dict | None = None) -> dict:
     return {k: v for k, v in src.items()
             if not any(p in k.upper() for p in _SECRET_ENV_PREFIXES)}
 
+
+def plan_cache_key_for(goal: str, scope: str = "") -> str:
+    """规划缓存键：目标哈希 + 作用域哈希。
+
+    P1-3：只按目标文本哈希会让"不同项目/不同用户的同一句目标"互相命中
+    （缓存串台）。作用域由调用方给出（project:user），空作用域也参与哈希，
+    避免与旧键混用。
+    """
+    return (
+        "plan:"
+        + hashlib.sha256(str(goal).encode("utf-8")).hexdigest()
+        + ":"
+        + hashlib.sha256(str(scope or "").encode("utf-8")).hexdigest()[:12]
+    )
+
+
 # 行情类目标关键词：命中后 web_search 指令追加财经行情站点限定，
 # 并允许搜索代理把"今日 A股 成交量 排行 前十 东方财富"加入查询变体。
 _MARKET_SEARCH_KEYWORDS = (
@@ -631,11 +647,14 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 from prompt_registry import get_prompt
                 from ws_helpers import call_with_heartbeat, phase_begin, phase_end
                 # B2：同目标重复规划直接命中缓存（LLM_CACHE_TTL 开启时生效），
-                # 键含目标哈希，同一会话追问重复提交不会重复花规划 token
-                plan_cache_key = (
-                    "plan:"
-                    + hashlib.sha256(str(goal).encode("utf-8")).hexdigest()
+                # 键含目标哈希，同一会话追问重复提交不会重复花规划 token。
+                # P1-3：键必须带作用域——只按目标文本哈希会让"不同项目/不同用户
+                # 的同一句目标"互相命中（缓存串台），项目与用户各加一段。
+                _scope = "{}:{}".format(
+                    str((getattr(self, "_task_projects", {}) or {}).get(task_id) or ""),
+                    str((getattr(self, "_task_user_ids", {}) or {}).get(task_id) or ""),
                 )
+                plan_cache_key = plan_cache_key_for(goal, _scope)
                 phase_begin(self._messaging, task_id, "规划", attempt=attempt + 1)
                 try:
                     # 规划调用可能阻塞数分钟：放进工作线程并按时心跳，
@@ -2195,7 +2214,13 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             pass
 
     def _task_is_running(self, task_id: str) -> bool:
-        """进行中标记存在且其 pid 仍存活 → True；否则 False（允许恢复）。"""
+        """进行中标记存在且其 pid 仍存活 → True；否则 False（允许恢复）。
+
+        探活判据与 webui 看护线程共用同一条实现（`task_state.pid_same_process`）：
+        此处此前把 os.kill 的 WinError 87 当"进程已不存在"，而实测该错误对**存活
+        进程**也会出现——会把检查点恢复到正在跑的任务上。判据不足（None）一律视为
+        运行中，宁可少恢复一次。
+        """
         try:
             raw = self._redis.get(f"task_running:{task_id}")
         except Exception:
@@ -2203,22 +2228,15 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         if not raw:
             return False
         try:
-            pid = int((json.loads(raw) or {}).get("pid") or 0)
+            payload = json.loads(raw) or {}
         except Exception:
-            return True
-        if pid <= 0:
-            return True
+            return True  # 标记在但解析不了：不敢当作已死
         try:
-            os.kill(pid, 0)
-        except OSError as exc:
-            # Windows 上进程不存在抛 WinError 87（ERROR_INVALID_PARAMETER），
-            # POSIX 上是 ESRCH；两者都视为"旧标记已死"，允许恢复
-            if exc.errno == errno.ESRCH or getattr(exc, "winerror", None) == 87:
-                return False  # 进程已不存在 → 旧标记失效，允许恢复
-            return True  # EPERM 等：进程存活但无权限探测
+            import task_state as _ts
+            holder = _ts.pid_same_process(payload.get("pid"), payload.get("started"))
         except Exception:
             return True
-        return True
+        return holder is not False
 
     def _checkpoint_payload(
         self, task_id: str, goal: str, project: str,

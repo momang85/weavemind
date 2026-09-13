@@ -12,11 +12,14 @@
 """
 
 import json
+import logging
 import re
 from pathlib import Path
 from hashlib import sha256
 from time import gmtime, strftime
 from datetime import datetime, timezone
+
+logger = logging.getLogger(__name__)
 
 
 # ─────────────────────────────────────────────
@@ -339,27 +342,41 @@ def _collect_sources(workspace) -> dict[str, str]:
     try:
         fin = proj / "financials.json"
         if fin.exists():
-            rows = (json.loads(fin.read_text(encoding="utf-8")) or {}).get("financials") or []
+            payload = json.loads(fin.read_text(encoding="utf-8")) or {}
+            _metrics = (("revenue", "亿元"), ("net_profit", "亿元"),
+                        ("gross_profit", "亿元"), ("gross_margin", "%"),
+                        ("operating_profit", "亿元"),
+                        ("total_assets", "亿元"), ("total_liabilities", "亿元"),
+                        ("operating_cashflow", "亿元"),
+                        ("rd_expense", "亿元"), ("roe", "%"))
+            # 两种形状都要认：单实体是顶层 financials；对比任务是
+            # {source: multi_entity, companies:[{name, financials}]}——只读顶层会让
+            # 对比任务在"清洗未跑"时全部判不可溯源（假失败）。
+            rows: list[tuple[str, dict]] = []
+            _top_company = str((payload.get("metadata") or {}).get("company") or "")
+            for r in payload.get("financials") or []:
+                rows.append((_top_company, r))
+            for ent in payload.get("companies") or []:
+                if not isinstance(ent, dict):
+                    continue
+                for r in ent.get("financials") or []:
+                    rows.append((str(ent.get("name") or ""), r))
             parts = []
-            for r in rows:
+            for entity, r in rows:
                 if not isinstance(r, dict):
                     continue
-                for key, unit in (("revenue", "亿元"), ("net_profit", "亿元"),
-                                  ("gross_profit", "亿元"), ("gross_margin", "%"),
-                                  ("operating_profit", "亿元"),
-                                  ("total_assets", "亿元"), ("total_liabilities", "亿元"),
-                                  ("operating_cashflow", "亿元"),
-                                  ("rd_expense", "亿元"), ("roe", "%")):
+                for key, unit in _metrics:
                     v = r.get(key)
                     if v is None:
                         continue
                     parts.append(
-                        f"{r.get('year')}年{r.get('report_type') or ''} "
+                        f"{entity}{r.get('year')}年{r.get('report_type') or ''} "
                         f"{key}={v}{unit} 值 {v} {unit}"
                     )
             src["financials"] = "\n".join(parts)
-    except Exception:
-        pass
+    except Exception as exc:
+        # 静默会让"该源为空"与"解析失败"无法区分 → 溯源率假性下降查不出原因
+        logger.warning("financials.json 解析失败，该源不参与溯源：%s", str(exc)[:150])
     return src
 
 

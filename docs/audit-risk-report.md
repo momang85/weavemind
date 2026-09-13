@@ -90,3 +90,26 @@
 ---
 
 > 下一阶段：待 Codex 代理可用后按上述方案实施并验证；或在用户许可下由主审查员直接实施 P0 补丁。
+
+---
+
+## 4. 逐项复核与收口（2026-09-13 更新）
+
+上面"待实施"的判断已过时：后续批次陆续修掉了其中大部分，只有 P0-1 留到本批。以下为逐项读码复核（证据记函数名，行号随重构漂移）。
+
+| 项 | 复核结论 | 证据 |
+|----|----------|------|
+| P0-1 `/files` 越权 | **本批已修**：白名单 = 匿名仅 `reports/` + `charts/` + 日报专用 `data/ranking.csv`；已登录沿用 reports/charts/data；`..` 段一律拒绝 | `web_ui._files_visible_rel()` + `_get_files` 调用；`orchestrator_v2._rewrite_report_links` 早前已按"只改写 reports/charts"同步；旧单段 `/files/<rel>` 早由 `len(seg) != 2` 返回 404 |
+| P0-2 生成脚本继承全量 env | **已修**（随重构）：图表路径改用剥离密钥的子进程环境；生产代码已无 `dict(os.environ)` | `charts_pipeline` 调 `_sanitized_process_env()`；全仓 grep 仅测试里出现 `dict(os.environ)` |
+| P1-1 登录/分享无限流 | **早已修**（本报告此处有误）：per-IP + per-用户名/per-token 双计数，5 次失败锁 900s，成功即清零；`BIND_HOST` 默认已为 `127.0.0.1` | `web_ui._bf_check/_bf_record/_bf_reset`（`LOGIN_MAX_FAILS`/`LOGIN_LOCKOUT_SECONDS` 可调），`_handle_login` 与 `_handle_share_auth` 均有 429/403 分支 |
+| P1-2 Docker Redis 未认证对外 | **已修**：不再映射宿主端口，仅 compose 内部可达（未加 `requirepass`，列为可选加固） | `docker-compose.yml` 的 `expose: ["6379"]` 及原因注释 |
+| P1-3 缓存跨项目/用户串台 | **本批已修**：规划缓存键加 `project:user` 作用域（缓存仍默认关闭，`LLM_CACHE_TTL=0`） | `orchestrator_v2.plan_cache_key_for()` 及调用点 |
+| P2-1 Cookie 缺 Secure/SameSite | **已修** | session/share Cookie 均带 `SameSite=Lax` + `_cookie_secure_flag()` |
+| P2-2 分享链接 Host 头污染 | **已修**：优先 `PUBLIC_BASE_URL`，不信任请求 Host | `web_ui` 链接合成处 |
+| P2-3 LoRA 无鉴权 | **已按设计实现**：可选共享 token，未配置时仅绑回环 | `lora_serve._token_ok` |
+| P2-4 lora 端口→adapter 名漂移 | **已修**：adapter 名与 server 名同源写入，端口由所选 adapter 反查 | `lora_serve.load()` 与 `generate()` |
+| P2-5 `/api/deliverable/run` 未沙箱 | **已修**：改走 `code_sandbox.run_script`（含 `sanitize_env`） | `web_ui._post_deliverable_run` |
+| P3-1 token 存 localStorage | **已修**：前端不接触 token，仅存展示用非敏感信息 | `frontend/src/auth.ts` |
+| P3-2 `_share_cookie_ok` 子串匹配 | **已修**：Cookie 头按 `;` 切分后精确匹配 `share_<token>=ok` | `web_ui._share_cookie_ok` |
+
+> 本表以代码证据为准，不采信任何单份文档的自述。P0-1 的行为变化：分享页仅暴露报告与其引用的图表，`data/` 下除日报 `ranking.csv` 外不再对外；已登录用户的既有下载路径不变。

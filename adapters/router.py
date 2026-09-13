@@ -685,5 +685,9 @@ def route_structured(goal: str, scope: str = "") -> dict | None:
         data["classification"] = cls
         data["resolution"] = res
         return data
-    except Exception:
+    except Exception as exc:
+        # 不能静默：链路内的真实 bug（如曾出现的未定义变量）会被这里吞成
+        # "回退搜索"，能力静默消失且无从定位
+        logger.warning("单实体财务抓取失败（%s）：%s",
+                       cls.get("company"), str(exc)[:150])
         return None
