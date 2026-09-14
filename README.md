@@ -155,7 +155,7 @@ bash start.sh                        # Windows 用 start.bat；或 docker compos
 - **多项目工作区**：任务按项目隔离组织，成果互不干扰
 - **定时任务**：按间隔或每日时间自动执行目标
 - **MCP 兼容**：自研 MCP Server（mcp_lite）+ 第三方 MCP Client 即插即用
-- **代码沙箱三模式**：docker（容器隔离）/ restricted（密钥剥离）/ none，自动探测降级
+- **代码沙箱**：默认要求容器隔离（docker）；隔离不可用时拒绝执行、不回退宿主；restricted / none 无操作系统级隔离，仅限显式选择
 - **模型分级路由**：规划/执行/评测按用途选模型；相同目标规划缓存命中零成本
 - **成本与可观测**：任务级 token/成本台账、SLO 看板、LLM 端点健康与自动切流
 - Web 控制台：实时进度、任务树、Agent 拓扑、健康监控、历史会话、在线配置、LLM 用量
@@ -354,7 +354,7 @@ GitHub Actions CI 自动执行后端编译/单测与前端构建。
 - [x] 工具插件化 + MCP 兼容（`mcp_lite.py` 自研 MCP server / `mcp_client.py` 第三方 MCP / `tool_dispatch.py` 路由+审计）
 - [x] 多用户鉴权与审计日志（admin/viewer 角色、操作审计、初始管理员引导）
 - [x] 报告一键分享链接（公开只读 + 可选密码 + 自定义有效期）
-- [x] 代码执行容器级沙箱（docker-first 自动降级：容器隔离 → restricted → none）
+- [x] 代码执行容器级沙箱（默认要求容器隔离；隔离不可用即拒绝执行，不回退宿主）
 - [x] 私有化部署文档（[docs/部署指南.md](docs/部署指南.md)）+ Docker Compose / Windows / Linux 一键
 - [x] 验收器（数字溯源/主体归属/来源标注诚实性）→ SUCCESS_WITH_ISSUES 状态诚实化
 - [x] 结构化数据适配器：港股/美股/A股/加密货币/宏观/新闻 六类数据源

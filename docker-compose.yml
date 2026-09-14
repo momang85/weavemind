@@ -30,6 +30,12 @@ services:
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BAAI/bge-large-zh-v1.5}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      # 代码执行沙箱：默认要求容器隔离。本服务**不具备隔离能力**（镜像内无 Docker CLI，
+      # 也未挂载 docker socket），因此容器内涉及 code_execution 的步骤会被**拒绝**
+      # （不是降级到宿主执行）。工作台与不依赖代码执行的功能照常启动与使用。
+      # 容器内的受控执行（真隔离）需要单独的镜像与挂载设计，本文件不提供
+      # "挂个 socket 即可用"的承诺；无隔离的显式开发模式见 docs/部署指南.md 8.2
+      # （restricted / none，无操作系统级隔离，勿用于机构环境）。
     ports:
       - "8080:8080"
     volumes:

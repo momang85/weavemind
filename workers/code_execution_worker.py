@@ -18,6 +18,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import db_paths
+from code_sandbox import is_facility_error
 from async_worker_base import AsyncWorkerBase, AsyncRegistry, AsyncMessaging
 
 logger = logging.getLogger(__name__)
@@ -585,6 +586,10 @@ class CodeExecutionWorker(AsyncWorkerBase):
                             "使其直接运行即可输出结果")
             return ""
         except Exception as exc:
+            if is_facility_error(exc):
+                # 设施/配置拒绝（隔离不可用等）：直接失败，不进入"让模型改代码"的
+                # 修复循环——模型修不好基础设施，还会把隔离根因冲成通用失败
+                raise
             return f"冒烟异常: {exc}"
         finally:
             try:
@@ -924,6 +929,10 @@ class CodeExecutionWorker(AsyncWorkerBase):
                 proc.kill()
                 raise RuntimeError("Code execution timed out after 120s")
         except Exception as exc:
+            if is_facility_error(exc):
+                # 隔离不可用/配置非法：这不是"脚本跑错了"，必须原样上抛并保留根因
+                # （包装成通用失败会让编排器与用户看不到隔离根因）
+                raise
             raise RuntimeError(f"Code execution failed: {exc}") from exc
         finally:
             # TDD 测试文件是验证资产而非交付物：执行结束后删除

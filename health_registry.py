@@ -145,17 +145,27 @@ def probe_embedding() -> dict:
 
 
 def probe_sandbox() -> dict:
-    """代码沙箱可用性（现算）。"""
+    """代码沙箱的隔离状态（现算）。
+
+    健康判据是**隔离是否就绪**，不是"能不能跑"：restricted / none 能在宿主机跑但
+    没有任何隔离，对机构部署属于不达标状态；默认模式下隔离不可用则代码执行会被拒绝。
+    两个事实分开报：`isolation_ready` 与 `execution_available`。
+    """
     try:
         from code_sandbox import sandbox_status
         status = sandbox_status() or {}
         mode = str(status.get("mode") or "unknown")
-        docker = bool(status.get("docker_available"))
-        return _entry(_NAME_SANDBOX, mode != "disabled",
-                      "" if mode != "disabled" else "沙箱不可用",
-                      detail=f"mode={mode}, docker={'yes' if docker else 'no'}")
+        ready = bool(status.get("isolation_ready"))
+        exec_ok = bool(status.get("execution_available"))
+        reason = str(status.get("isolation_reason") or status.get("isolation_note") or "")
+        return _entry(
+            _NAME_SANDBOX, ready,
+            "" if ready else (reason or "隔离未就绪"),
+            detail=(f"mode={mode}, isolation_ready={'yes' if ready else 'no'}, "
+                    f"execution_available={'yes' if exec_ok else 'no'}"),
+        )
     except Exception as exc:
-        return _entry(_NAME_SANDBOX, True, f"状态不可读：{str(exc)[:80]}")
+        return _entry(_NAME_SANDBOX, False, f"状态不可读：{str(exc)[:80]}")
 
 
 def _config_section(name: str) -> dict:

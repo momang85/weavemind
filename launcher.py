@@ -582,6 +582,21 @@ def start_services() -> dict:
     logging_setup.setup_logging("launcher")
     logger = logging.getLogger(__name__)
 
+    # 代码执行的隔离强度与"此刻是否真的可用"必须在启动时说明白：默认要求容器隔离，
+    # 隔离不可用时代码执行会被拒绝；restricted/none 只能由操作者显式选择。
+    try:
+        import code_sandbox
+        _st = code_sandbox.sandbox_status()
+        _ready = bool(_st.get("isolation_ready"))
+        logger.info("代码执行沙箱：mode=%s, isolation_ready=%s（%s）",
+                    _st.get("mode"), "yes" if _ready else "no",
+                    _st.get("isolation_note"))
+        if _st.get("isolation_required") and not _ready:
+            logger.warning("容器隔离未就绪，涉及代码执行的步骤会被拒绝：%s",
+                           _st.get("isolation_reason") or "")
+    except Exception as exc:
+        logger.warning("沙箱状态检查失败（代码执行会被拒绝）：%s", str(exc)[:120])
+
     logger.info("Stopping previous services (if any)...")
     stopped = stop_services(stop_portable_redis=False)
     if stopped:

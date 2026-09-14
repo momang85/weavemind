@@ -1182,17 +1182,24 @@ def _system_status():
                 "llm_usage": {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0}}
 
 def _code_sandbox_status() -> dict:
-    """沙箱状态快照（实际模式/判定来源/docker 可用性/镜像是否存在）。
+    """沙箱状态快照（模式/是否要求隔离/隔离是否就绪/镜像是否存在）。
     状态接口与健康检查共用，供部署者确认容器级隔离是否生效。"""
     try:
         from code_sandbox import sandbox_status
         return sandbox_status()
-    except Exception:
+    except Exception as exc:
         return {
-            "mode": "restricted",
+            "mode": "unavailable",
             "mode_explicit": None,
             "mode_env_raw": os.environ.get("CODE_EXECUTION_SANDBOX"),
             "mode_source": "unknown",
+            "config_error": f"沙箱模块不可用：{str(exc)[:80]}",
+            "isolation_required": True,
+            "isolation_ready": False,
+            "isolation_reason": "沙箱模块不可用，代码执行会被拒绝",
+            "execution_available": False,
+            "execution_reason": "沙箱模块不可用，代码执行会被拒绝",
+            "isolation_note": "沙箱模块不可用，代码执行会被拒绝",
             "docker_available": False,
             "sandbox_image": None,
             "sandbox_image_exists": False,

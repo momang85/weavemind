@@ -261,7 +261,7 @@ GitHub Actions CI runs backend compile/unit tests and the frontend build automat
 - [x] Plugin / MCP compatibility (mcp_lite built-in MCP server + mcp_client third-party MCP + tool_dispatch routing)
 - [x] Scenario template library (4 handcrafted templates + auto-* consolidation from acceptance passes)
 - [x] Multi-user auth & audit logs (admin/viewer roles, operation audit, initial admin bootstrap, deployment docs)
-- [x] Container-level code-execution isolation (docker-first with automatic fallback) + one-click report sharing (read-only public links with optional password & expiry)
+- [x] Container-level code-execution isolation (required by default; when isolation is unavailable the step is refused instead of falling back to host execution) + one-click report sharing (read-only public links with optional password & expiry)
 
 ## Contributing
 

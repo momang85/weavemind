@@ -1,11 +1,34 @@
 # -*- coding: utf-8 -*-
 """真实交付链回归测试：搜索相关性过滤、file_io 落盘逻辑、code_execution 命名。"""
 import json
+import os
 import shutil
 import unittest
 from http.client import RemoteDisconnected
 from pathlib import Path
 from unittest import mock
+
+
+class _DevSandboxMode:
+    """显式选择本地开发沙箱模式（restricted，无操作系统级隔离）。
+
+    本文件里驱动代码执行的用例验证的是**执行流水线**（截断重试、冒烟校验、简单任务
+    快速路径），不是隔离策略；隔离策略的默认安全用例在 test_sandbox_isolation.py。
+    默认策略要求容器隔离，而 CI 与多数开发机没有 Docker——若不显式选择，这些用例会
+    因"代码执行被拒绝"而正确地失败，那属于环境事实，不是流水线缺陷。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self._old_sandbox_mode = os.environ.get("CODE_EXECUTION_SANDBOX")
+        os.environ["CODE_EXECUTION_SANDBOX"] = "restricted"
+        self.addCleanup(self._restore_sandbox_mode)
+
+    def _restore_sandbox_mode(self):
+        if self._old_sandbox_mode is None:
+            os.environ.pop("CODE_EXECUTION_SANDBOX", None)
+        else:
+            os.environ["CODE_EXECUTION_SANDBOX"] = self._old_sandbox_mode
 
 
 class TestSearchQuality(unittest.TestCase):
@@ -235,7 +258,7 @@ class TestCodeExecutionNaming(unittest.TestCase):
         self.assertTrue(name.startswith("generated_"))
 
 
-class TestCodeExecutionTokenTruncation(unittest.TestCase):
+class TestCodeExecutionTokenTruncation(_DevSandboxMode, unittest.TestCase):
     """修复：code_execution 响应被 token 上限截断，导致统计任务反复编译失败。"""
 
     def test_estimate_token_need_stats_and_html(self):
@@ -2165,7 +2188,7 @@ class TestTemplateConsolidation(unittest.TestCase):
                 pass
 
 
-class TestSimpleTaskFastPath(unittest.TestCase):
+class TestSimpleTaskFastPath(_DevSandboxMode, unittest.TestCase):
     """简单任务快速路径：只影响直达型任务，复杂任务逻辑保持不变。"""
 
     def test_simple_plan_detected(self):
