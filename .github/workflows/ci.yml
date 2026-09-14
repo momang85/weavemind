@@ -13,7 +13,9 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        # 运行依赖锁 = requirements.txt 的运行闭包（按 linux/cp311 解析，含 wheel 可用性校验）；
+        # 它不等于 requirements.lock（那是含 torch/CUDA/pywin32 的整机训练快照）
+        run: pip install -r requirements-runtime.lock
       - name: Install CJK fonts (PDF tests)
         # DroidSansFallbackFull.ttf 是真 TrueType（report_pdf 完整支持中文）；
         # Noto CJK / wqy 多为 TTC/CFF，report_pdf 会跳过（回退 Helvetica）
@@ -38,6 +40,32 @@ jobs:
         run: python test_p0.py
       - name: Acceptance adversarial suite
         run: python test_acceptance_adversarial.py
+      - name: Deploy manifest & lock guards
+        run: python test_deploy_manifest.py
+      - name: Task state tests
+        run: python test_task_state.py
+      - name: Task projection tests
+        run: python test_task_projection.py
+      - name: Writer consolidation tests
+        run: python test_writer_consolidation.py
+      - name: Checkpoint tests
+        run: python test_checkpointer.py
+      - name: Financial chain tests
+        run: python test_financial_chain.py
+      - name: Memory degradation tests
+        run: python test_memory_degradation.py
+      - name: Auth & audit tests
+        run: python test_auth_audit.py
+      - name: Isolation scope tests
+        run: python test_isolation_scope.py
+      - name: LoRA manager tests
+        run: python test_lora_manager.py
+      - name: Notification tests
+        run: python test_notifications.py
+      - name: Settings requirements tests
+        run: python test_settings_requirements.py
+      - name: Task time optimization tests
+        run: python test_task_time_optimization.py
       - name: Skills & validators check
         run: python -c "from skill_registry import list_skills; assert len(list_skills())>=3; from validators.registry import list_validators; assert len(list_validators())>=4"
       - name: Eval cases schema check

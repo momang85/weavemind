@@ -9,12 +9,22 @@ RUN npm run build
 FROM python:3.11-slim
 WORKDIR /app
 
-COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements-runtime.lock ./
+RUN pip install --no-cache-dir -r requirements-runtime.lock
 
 COPY --from=frontend-build /build/dist frontend/dist
 COPY *.py ./
 COPY workers/ ./workers/
+# 运行期导入的本地包：编排器（launcher 拉起的子进程）顶层 import 这两个 pipeline，
+# 缺失会导入即崩；其余按能力/校验路径懒加载，跑起来才炸。
+COPY charts_pipeline/ ./charts_pipeline/
+COPY structured_pipeline/ ./structured_pipeline/
+COPY adapters/ ./adapters/
+COPY validators/ ./validators/
+COPY skills/ ./skills/
+COPY evals/ ./evals/
+COPY prompts/ ./prompts/
+COPY templates.json config.example.json ./
 
 # 数据目录（通过卷挂载持久化）
 RUN mkdir -p /data /app/logs
