@@ -6990,7 +6990,11 @@ class TestLauncherCrossDevice(unittest.TestCase):
                 mock.patch.object(launcher, "_write_pids"), \
                 mock.patch.object(launcher, "build_services", return_value=[]), \
                 mock.patch.object(launcher, "verify_services",
-                                  return_value={"total": 0, "alive": 0, "down": []}):
+                                  return_value={"total": 0, "alive": 0, "down": []}), \
+                mock.patch.dict(os.environ):
+            # patch.dict 无参 = 快照并还原整个环境：start_services 会经 _apply_env 写环境
+            # （含任务库路径 WEAVEMIND_DB/REGISTRY_DB/AGENTS_DB），不还原会污染同进程内
+            # 后续测试——表现为"补丁了 AGENTS_DB 却仍读到仓库里的 agents.db"。
             launcher.start_services()
         self.assertFalse(calls.get("stop_portable_redis", True),
                          "start 不应停掉马上要用的便携 Redis")
