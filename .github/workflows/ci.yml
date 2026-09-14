@@ -90,3 +90,48 @@ jobs:
       - name: Build
         run: npm run build
         working-directory: frontend
+
+  docker-image:
+    # 镜像此前"看着能构建、其实起不来"：编排器由 launcher 以子进程拉起，缺 charts_pipeline
+    # 等包即导入崩溃，而 CI 既不构建镜像也不做导入检查。这里把"能起"变成可验证的闸门。
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Prepare compose env file
+        # compose 的 LLM_API_KEY 是必填插值变量（:? 语法），构建阶段解析文件时就要有值；
+        # 这里给占位值，仅为验证镜像能构建、服务能就绪
+        run: printf 'LLM_API_KEY=ci-dummy-key\n' > .env
+      - name: Build image
+        run: docker compose build app
+      - name: Import check — 编排器与 API 层
+        run: |
+          docker compose run --rm --no-deps app python -c \
+            "import orchestrator_v2, web_ui, launcher, metrics_collector, db_paths, data_paths, charts_pipeline, structured_pipeline, adapters, validators"
+      - name: Import check — 全部 worker
+        run: |
+          docker compose run --rm --no-deps app python -c "
+          import importlib.util, pathlib, sys
+          bad = []
+          for p in sorted(pathlib.Path('workers').glob('*.py')):
+              spec = importlib.util.spec_from_file_location(p.stem, p)
+              mod = importlib.util.module_from_spec(spec)
+              try:
+                  spec.loader.exec_module(mod)
+              except Exception as exc:
+                  bad.append((p.name, type(exc).__name__, str(exc)[:120]))
+          print('workers imported:', len(list(pathlib.Path('workers').glob('*.py'))))
+          assert not bad, bad
+          "
+      - name: Compose up and readiness check
+        run: |
+          docker compose up -d
+          code=""
+          for i in $(seq 1 40); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/health || true)
+            if [ "$code" = "200" ]; then echo "ready after ${i} tries"; break; fi
+            sleep 5
+          done
+          docker compose ps || true
+          docker compose logs --tail=60 || true
+          docker compose down -v || true
+          test "$code" = "200"

@@ -28,14 +28,20 @@ from email.utils import formataddr
 from redis.backoff import NoBackoff as _NoBackoff  # noqa: E402
 from redis.retry import Retry as _Retry  # noqa: E402
 
+import data_paths  # noqa: E402
+
 _NO_REDIS_RETRY = _Retry(_NoBackoff(), 0)
 
 logger = logging.getLogger("notifications")
 
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+# 与 web_ui 同一份分享记录（同一解析口径），否则容器里两边会读写不同文件
 SHARE_FILE = os.environ.get(
     "SHARE_FILE",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "share_links.json"),
+    data_paths.under_data_root(
+        "share_links.json",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "share_links.json"),
+    ),
 )
 
 # 渠道默认值：新增渠道在此登记，读取配置时自动补齐缺失字段

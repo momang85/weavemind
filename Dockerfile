@@ -31,11 +31,14 @@ RUN mkdir -p /data /app/logs
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONIOENCODING=utf-8 \
+    WEAVEMIND_DATA_DIR=/data \
+    WEAVEMIND_DB=/data/agents.db \
     REGISTRY_DB=/data/agents.db \
     MEMORY_DIR=/data/chroma_memory \
     METRICS_FILE=/data/metrics.csv \
     METRICS_SUMMARY=/data/metrics_summary.json \
-    WEB_PORT=8080
+    WEB_PORT=8080 \
+    SKIP_DEP_CHECK=1
 
 EXPOSE 8080
 CMD ["python", "launcher.py"]

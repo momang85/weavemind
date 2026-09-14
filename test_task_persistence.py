@@ -253,6 +253,67 @@ class TestFinalizeNeedsRealWrite(_BadDbMixin, unittest.TestCase):
         self.assertEqual(row["report"], "正文")
 
 
+class TestDataRootBoundaries(unittest.TestCase):
+    """运行时可写路径要能整体挂到数据根下（审查 P1-3）。
+
+    compose 只挂 `/data`，而任务产物默认落在系统临时目录、分享记录与审计日志默认落在
+    应用目录——容器重建后历史、附件、审计一起消失，这几样恰恰是"可核验"的依赖。
+    这些路径都是导入期常量，所以用子进程取真实取值。
+    """
+
+    _CODE = (
+        "import json, workspace, web_ui, notifications, audit_logger, prompt_registry;"
+        "print(json.dumps({"
+        " 'workspace': str(workspace.WORKSPACE_ROOT),"
+        " 'share': web_ui.SHARE_FILE,"
+        " 'notify_share': notifications.SHARE_FILE,"
+        " 'audit': audit_logger.AUDIT_FILE,"
+        " 'prompts': str(prompt_registry._overrides_path())}))"
+    )
+    _OVERRIDE_VARS = ("WEAVEMIND_DATA_DIR", "WEAVEMIND_WORKSPACE_ROOT", "SHARE_FILE",
+                      "AUDIT_FILE", "WEAVEMIND_PROMPTS_DIR")
+
+    def setUp(self):
+        tmp = Path(tempfile.mkdtemp(prefix="wm_dataroot_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        self.root = str(tmp / "data")
+
+    def _paths(self, **env):
+        base = {k: v for k, v in os.environ.items() if k not in self._OVERRIDE_VARS}
+        base.update(env)
+        proc = subprocess.run([sys.executable, "-c", self._CODE], cwd=str(ROOT),
+                              env=base, capture_output=True, text=True, timeout=300)
+        self.assertEqual(proc.returncode, 0, proc.stderr[-500:])
+        return json.loads(proc.stdout.strip().splitlines()[-1])
+
+    def test_local_defaults_unchanged(self):
+        """本地不设数据根时沿用既有位置——不动用户机器上已有的产物目录。"""
+        paths = self._paths()
+        self.assertEqual(os.path.dirname(os.path.abspath(paths["share"])), str(ROOT))
+        self.assertIn("agent_workspace", paths["workspace"].replace("\\", "/"))
+        self.assertTrue(paths["audit"].replace("\\", "/").endswith("logs/audit.jsonl"))
+        self.assertIn("prompts", paths["prompts"].replace("\\", "/"))
+
+    def test_all_runtime_state_follows_data_root(self):
+        paths = self._paths(WEAVEMIND_DATA_DIR=self.root)
+        expected = (
+            ("workspace", "workspace"),
+            ("share", "share_links.json"),
+            ("notify_share", "share_links.json"),
+            ("audit", "logs/audit.jsonl"),
+            ("prompts", "prompts/overrides.json"),
+        )
+        for key, rel in expected:
+            with self.subTest(key=key):
+                got = os.path.abspath(paths[key])
+                self.assertTrue(got.startswith(os.path.abspath(self.root) + os.sep),
+                                f"{key} 未挂到数据根：{got}")
+                self.assertTrue(got.endswith(rel.replace("/", os.sep)), got)
+        self.assertEqual(os.path.abspath(paths["share"]),
+                         os.path.abspath(paths["notify_share"]),
+                         "web_ui 与 notifications 必须读写同一份分享记录")
+
+
 class TestSubmitIdentityComesFromSession(unittest.TestCase):
     """提交人取会话身份，不信请求体（此前 user_id 由客户端自报，可伪造提交人）。"""
 

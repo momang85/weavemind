@@ -13,7 +13,9 @@
 - 旧版平铺路径 <WORKSPACE_ROOT>/<task_id>/ 仍可通过 task_workspace() 回退定位；
 - task_workspace(task_id) 不带 project 时，先按新路径（内存索引 → 扫描
   projects/ 目录）查找，找不到再回退旧路径；
-- 可通过环境变量 WEAVEMIND_WORKSPACE_ROOT 覆盖根目录（测试/多实例部署用）。
+- 可通过环境变量 WEAVEMIND_WORKSPACE_ROOT 覆盖根目录（测试/多实例部署用）；
+  未覆盖而设置了 WEAVEMIND_DATA_DIR（容器部署）时，落在 <数据根>/workspace，
+  避免产物写进容器临时目录、重建即丢。
 """
 
 import os
@@ -22,9 +24,12 @@ import tempfile
 import threading
 from pathlib import Path
 
+import data_paths
+
 WORKSPACE_ROOT = Path(
-    os.environ.get(
-        "WEAVEMIND_WORKSPACE_ROOT",
+    os.environ.get("WEAVEMIND_WORKSPACE_ROOT")
+    or data_paths.under_data_root(
+        "workspace",
         str(Path(tempfile.gettempdir()) / "agent_workspace" / "tasks"),
     )
 )

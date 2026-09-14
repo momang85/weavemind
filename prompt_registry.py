@@ -6,6 +6,7 @@
   有覆盖则用覆盖版，否则用默认版。默认空注册表 = 与旧行为完全一致。
 """
 
+import data_paths
 import db_paths
 import json
 import os
@@ -57,6 +58,9 @@ def _overrides_path() -> Path:
     env = os.environ.get("WEAVEMIND_PROMPTS_DIR") or ""
     if env:
         d = Path(env)
+    elif data_paths.data_root() is not None:
+        # 容器部署：自迭代产出的覆盖属于运行时状态，挂到数据根下才不会重建即丢
+        d = Path(data_paths.under_data_root("prompts", Path(__file__).resolve().parent / "prompts"))
     else:
         d = Path(__file__).resolve().parent / "prompts"
     return d / "overrides.json"

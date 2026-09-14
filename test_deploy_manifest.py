@@ -259,6 +259,26 @@ class TestRuntimeLock(unittest.TestCase):
                       "Dockerfile 未使用运行依赖锁")
 
 
+class TestPersistentDataRoot(unittest.TestCase):
+    """容器重建后必须还在的东西（任务库/工作区/分享/审计/提示词覆盖）要挂到数据根，
+    而数据根必须真的被 compose 挂成卷——只声明 ENV 不挂卷等于没做。"""
+
+    def test_image_declares_data_root(self):
+        text = DOCKERFILE.read_text(encoding="utf-8")
+        self.assertIn("WEAVEMIND_DATA_DIR=/data", text,
+                      "镜像必须声明可变数据根，否则产物落到容器临时目录")
+        self.assertIn("WEAVEMIND_DB=/data/agents.db", text)
+
+    def test_compose_mounts_the_data_root(self):
+        compose = ROOT / "docker-compose.yml"
+        self.assertTrue(compose.is_file(), "缺少 docker-compose.yml")
+        text = compose.read_text(encoding="utf-8")
+        m = re.search(r"^\s{2}app:\n(.*?)(?=^\s{2}\w+:|\Z)", text, re.S | re.M)
+        self.assertIsNotNone(m, "compose 里找不到 app 服务")
+        self.assertRegex(m.group(1), r"-\s*[\w.\-]+:/data\b",
+                         "app 服务必须把数据根挂成卷（否则容器重建即丢历史与审计）")
+
+
 # ── CI 覆盖面 ─────────────────────────────────────────────────────
 
 class TestCiSuiteCoverage(unittest.TestCase):

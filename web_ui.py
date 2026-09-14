@@ -6,6 +6,7 @@ from urllib.parse import urlparse, unquote
 import redis
 
 from audit_logger import audit_log, read_audit
+import data_paths
 import db_paths
 from workspace import (
     _safe_project,
@@ -44,7 +45,10 @@ _task_lock = threading.Lock()
 # 磁盘文件 + 原子替换更稳，也不依赖外部服务可用性。
 SHARE_FILE = os.environ.get(
     "SHARE_FILE",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "share_links.json"),
+    data_paths.under_data_root(
+        "share_links.json",
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "share_links.json"),
+    ),
 )
 SHARE_TTL_SECONDS = int(os.environ.get("SHARE_TTL_SECONDS", str(7 * 24 * 3600)))
 SHARE_AUTH_COOKIE_TTL = 7 * 24 * 3600  # 密码验证通过的 Cookie 有效期 7 天

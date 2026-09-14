@@ -15,9 +15,16 @@ import os
 import threading
 from datetime import datetime, timezone
 
+import data_paths
+
+# 审计日志是运行时可写状态：容器部署挂到数据根下（/data/logs/…），否则重建容器后
+# 审计轨迹一并消失——而它正是"可核验"要依赖的记录。
 AUDIT_FILE = os.environ.get(
     "AUDIT_FILE",
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "audit.jsonl"),
+    data_paths.under_data_root(
+        os.path.join("logs", "audit.jsonl"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "audit.jsonl"),
+    ),
 )
 _lock = threading.Lock()
 
