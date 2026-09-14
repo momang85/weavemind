@@ -31,17 +31,36 @@ function StatCard({ label, value, sub }: { label: string; value: string; sub?: s
 
 export default function MetricsPage() {
   const [m, setM] = useState<MetricsSummary | null>(null)
+  const [running, setRunning] = useState(0)
   const [error, setError] = useState('')
 
+  // 指标汇总来自 metrics_summary.json（已落库任务），但"还在跑"的任务不在其中：
+  // 若直接把 total_tasks 当分母，运行中就会被算成失败——实测首屏显示
+  // "成功率 0% / 失败率 100%"（两个任务刚提交、正在跑），极易误读为系统故障。
+  // 这里额外取 /tasks 得到进行中数量，成功率只按"已完成"计算。
   const load = useCallback(() => {
-    fetch('/api/metrics')
-      .then(r => { if (!r.ok) throw new Error('no data'); return r.json() })
-      .then(d => { setM(d); setError('') })
-      .catch(() => setError('暂无指标数据（metrics 收集器运行后产生）'))
+    Promise.all([
+      fetch('/api/metrics').then(r => { if (!r.ok) throw new Error('no data'); return r.json() }),
+      fetch('/tasks').then(r => (r.ok ? r.json() : null)).catch(() => null),
+    ])
+      .then(([metrics, tasksRaw]) => {
+        setM(metrics)
+        setError('')
+        const list = Array.isArray(tasksRaw) ? tasksRaw : (tasksRaw?.tasks || [])
+        setRunning(list.filter((t: any) =>
+          ['RUNNING', 'QUEUED', 'PENDING'].includes(String(t?.status || '').toUpperCase())).length)
+      })
+      .catch(() => setError('暂无指标数据（服务不可达或 metrics 收集器尚未运行）'))
   }, [])
 
   useEffect(() => { load() }, [load])
   useVisibleInterval(load, 30000)
+
+  const total = m?.total_tasks ?? 0
+  const completed = Math.max(0, total - running)
+  const failed = Math.min(m?.failed_tasks ?? 0, completed)
+  const succeeded = Math.max(0, completed - failed)
+  const successRate = completed > 0 ? Math.round((succeeded / completed) * 100) : null
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
@@ -57,10 +76,14 @@ export default function MetricsPage() {
       {m && (
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <StatCard label="总任务数" value={String(m.total_tasks ?? 0)} />
-            <StatCard label="成功率" value={`${m.success_rate ?? 0}%`} sub={`失败率 ${m.failure_rate ?? 0}%`} />
-            <StatCard label="平均耗时" value={`${m.avg_latency_sec ?? 0}s`} sub={`P95 ${m.p95_latency_sec ?? 0}s`} />
-            <StatCard label="累计成本" value={`$${(m.cost_usd_total ?? 0).toFixed(4)}`} />
+            <StatCard label="总任务数" value={String(total)}
+              sub={running > 0 ? `进行中 ${running}` : `已完成 ${completed}`} />
+            <StatCard label="成功率" value={successRate === null ? '—' : `${successRate}%`}
+              sub={completed > 0 ? `已完成 ${completed} · 失败 ${failed}` : '尚无已完成任务'} />
+            <StatCard label="平均耗时" value={completed > 0 ? `${m.avg_latency_sec ?? 0}s` : '—'}
+              sub={completed > 0 ? `P95 ${m.p95_latency_sec ?? 0}s` : '尚无已完成任务'} />
+            <StatCard label="累计成本" value={`$${(m.cost_usd_total ?? 0).toFixed(4)}`}
+              sub={running > 0 ? `含进行中 ${running} 个任务` : undefined} />
           </div>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <StatCard label="Critic 评审" value={`${m.critic?.pass ?? 0} 通过`} sub={`${m.critic?.fail ?? 0} 未通过`} />
@@ -70,6 +93,9 @@ export default function MetricsPage() {
           </div>
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
             <h2 className="text-sm text-slate-300 font-medium mb-4">各能力成功率</h2>
+            {Object.keys(m.by_capability || {}).length === 0 && (
+              <div className="text-xs text-slate-500">暂无数据：任务完成一次后按能力类型统计（当前无已完成任务）。</div>
+            )}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               {Object.entries(m.by_capability || {}).map(([cap, v]) => (
                 <div key={cap} className="border border-slate-800 rounded-lg p-3">

@@ -1,4 +1,4 @@
-import { Component, Suspense, lazy, useEffect, useMemo, useState, type ReactNode } from 'react'
+import { Component, Suspense, lazy, useEffect, useState, type ReactNode } from 'react'
 import { Routes, Route } from 'react-router-dom'
 import { AlertTriangle, Loader2, RefreshCw } from 'lucide-react'
 import AppLayout from './components/AppLayout'
@@ -97,27 +97,34 @@ export default function App() {
   }, [authed])
 
   if (!authed) {
-    return <Login />
+    return (
+      <ErrorBoundary>
+        <Login />
+      </ErrorBoundary>
+    )
   }
 
-  const content = useMemo(() => (
-    <AppLayout>
-      <Suspense fallback={<PageFallback />}>
-        <Routes>
-          <Route path="/" element={<TaskConsole />} />
-          <Route path="/agents" element={<AgentsPage />} />
-          <Route path="/history" element={<History />} />
-          <Route path="/health" element={<HealthPage />} />
-          <Route path="/memory" element={<MemoryPage />} />
-          <Route path="/evals" element={<EvalsPage />} />
-          <Route path="/skills" element={<SkillsPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
-          <Route path="/audit" element={<AuditPage />} />
-          <Route path="/metrics" element={<MetricsPage />} />
-        </Routes>
-      </Suspense>
-    </AppLayout>
-  ), [])
-
-  return <ErrorBoundary>{content}</ErrorBoundary>
+  // 注意：这里**不能**用 useMemo 之类的 hook 包裹——它位于 `if (!authed)` 早退之后，
+  // 登录态翻转时本次渲染的 hook 数量与上次不同，React 会抛 #300/#310 并卸载整棵树，
+  // 表现就是"登录/退出后白屏、刷新一次才恢复"（实测截图与错误已在案）。
+  return (
+    <ErrorBoundary>
+      <AppLayout>
+        <Suspense fallback={<PageFallback />}>
+          <Routes>
+            <Route path="/" element={<TaskConsole />} />
+            <Route path="/agents" element={<AgentsPage />} />
+            <Route path="/history" element={<History />} />
+            <Route path="/health" element={<HealthPage />} />
+            <Route path="/memory" element={<MemoryPage />} />
+            <Route path="/evals" element={<EvalsPage />} />
+            <Route path="/skills" element={<SkillsPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="/audit" element={<AuditPage />} />
+            <Route path="/metrics" element={<MetricsPage />} />
+          </Routes>
+        </Suspense>
+      </AppLayout>
+    </ErrorBoundary>
+  )
 }

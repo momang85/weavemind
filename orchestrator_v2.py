@@ -2815,7 +2815,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         files.sort(key=lambda x: x["name"])
 
         lines = ["# 项目交付结果", "", f"**目标**：{goal[:200]}",
-                 f"**状态**：{status}（{ok}/{len(results)} 个步骤成功）", ""]
+                 f"**步骤**：{ok}/{len(results)} 成功" if ok == len(results)
+                 else f"**步骤**：{ok}/{len(results)} 成功（其余失败或未完成）", ""]
         if files:
             lines.append("## 交付文件")
             for f in files:

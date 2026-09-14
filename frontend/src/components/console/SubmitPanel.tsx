@@ -139,7 +139,9 @@ export default memo(function SubmitPanel({
   }
   const askQuick = async () => {
     const g = qaGoal.trim()
-    if (!g || qaLoading) return
+    // 演示模式必须一并拦住：快答走的是真实检索+模型接口，会产生真实调用与费用，
+    // 而界面上此时写着"演示"——语义不一致会让用户以为没花钱。
+    if (!g || qaLoading || demoMode) return
     setQaLoading(true); setQa(null)
     try {
       const res = await fetch('/api/quick-answer', {
@@ -169,10 +171,13 @@ export default memo(function SubmitPanel({
         <input value={qaGoal}
           onChange={e => setQaGoal(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') askQuick() }}
-          placeholder="快答：秒级问答（自动检索资讯并附来源），如「贵州茅台最新财报要点」"
-          disabled={qaLoading}
+          placeholder={demoMode
+            ? '演示模式：快答已停用（它会调用真实接口）'
+            : '快答：秒级问答（自动检索资讯并附来源），如「贵州茅台最新财报要点」'}
+          disabled={qaLoading || demoMode}
           className="flex-1 min-w-0 bg-transparent border-none text-slate-200 placeholder-slate-600 p-2 text-sm focus:outline-none disabled:opacity-50" />
-        <button onClick={askQuick} disabled={qaLoading || !qaGoal.trim()}
+        <button onClick={askQuick} disabled={qaLoading || demoMode || !qaGoal.trim()}
+          title={demoMode ? '演示模式下不可用（避免真实调用）' : '秒级问答，不走编排器'}
           className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 rounded-lg text-xs transition-colors shrink-0 disabled:opacity-40 disabled:cursor-not-allowed">
           {qaLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Zap className="w-3.5 h-3.5" />}
           快答
@@ -219,7 +224,8 @@ export default memo(function SubmitPanel({
               className="accent-cyan-500" />
             先确认计划
           </label>
-          <button onClick={() => onSubmit()} disabled={isRunning || (!goal.trim() && !demoMode)}
+          <button onClick={() => onSubmit()} disabled={isRunning || demoMode || !goal.trim()}
+            title={demoMode ? '演示模式下不可提交真实任务' : '提交任务（Enter）'}
             className="flex items-center gap-2 bg-cyan-500 hover:bg-cyan-400 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 font-semibold px-5 py-2.5 rounded-lg transition-all text-sm shrink-0">
             {isRunning ? (<><Loader2 className="w-4 h-4 animate-spin" /> Running...</>) : (<><Sparkles className="w-4 h-4" /> Execute</>)}
           </button>

@@ -25,6 +25,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
   const [collapsed, setCollapsed] = useState(window.innerWidth < 768)
   const demoMode = useTaskStore(s => s.demoMode)
   const connected = useTaskStore(s => s.connected)
+  const systemStatus = useTaskStore(s => s.systemStatus)
   const agents = useTaskStore(s => s.agents)
   const currentTaskId = useTaskStore(s => s.currentTaskId)
   const planTree = useTaskStore(s => s.planTree)
@@ -65,6 +66,20 @@ export default function AppLayout({ children }: { children: ReactNode }) {
     '/audit': '审计日志',
   }
 
+  // 连接状态三态：首帧还没拿到过 /api/status 时不能说"离线"——那是"连接中"，
+  // 否则用户刚打开页面就看到"离线"，会以为服务没起来（实测：约 3 秒后才变"在线"）。
+  const connState: 'connecting' | 'online' | 'offline' =
+    connected ? 'online' : (systemStatus === null ? 'connecting' : 'offline')
+  const connLabel = connState === 'online' ? '在线' : connState === 'connecting' ? '连接中' : '离线'
+  const connDot = connState === 'online' ? 'bg-emerald-400 animate-pulse'
+    : connState === 'connecting' ? 'bg-amber-400 animate-pulse' : 'bg-red-400'
+
+  const onToggleDemo = () => {
+    if (demoMode) { toggleDemo(); return }
+    if (!window.confirm('进入演示模式后，界面展示内置演示数据、不调用真实接口（提交与快答都会被停用）。确认进入？')) return
+    toggleDemo()
+  }
+
   return (
     <div className="flex h-screen overflow-hidden console-layout">
       {/* Mobile bottom nav */}
@@ -98,7 +113,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
           ))}
         </nav>
         {!collapsed && (
-          <button onClick={() => toggleDemo()} className={`mx-3 mb-1 flex items-center gap-2 px-3 py-2 rounded-lg text-sm border transition-opacity duration-200 opacity-80 hover:opacity-100
+          <button onClick={onToggleDemo} title={demoMode ? '退出演示模式' : '进入演示模式（用内置数据，不调用真实接口）'} className={`mx-3 mb-1 flex items-center gap-2 px-3 py-2 rounded-lg text-sm border transition-opacity duration-200 opacity-80 hover:opacity-100
             ${demoMode ? 'bg-purple-500/10 border-purple-500/30 text-purple-400' : 'border-slate-700 text-slate-500'}`}>
             <FlaskConical className="w-4 h-4" /> 演示 {demoMode ? 'ON' : 'OFF'}
           </button>
@@ -122,9 +137,11 @@ export default function AppLayout({ children }: { children: ReactNode }) {
             {demoMode && (
               <span className="hidden sm:inline px-2.5 py-0.5 rounded-full text-xs font-semibold bg-purple-500/20 text-purple-400">演示</span>
             )}
-            <div className="flex items-center gap-2">
-              <span className={`w-2 h-2 rounded-full ${connected ? 'bg-green-400 animate-pulse' : 'bg-red-400'}`} />
-              <span className="hidden sm:inline text-slate-400">{connected ? '在线' : '离线'}</span>
+            <div className="flex items-center gap-2"
+              title={connState === 'connecting' ? '正在连接后端…'
+                : connState === 'offline' ? '后端不可达，正在自动重试' : '后端连接正常'}>
+              <span className={`w-2 h-2 rounded-full ${connDot}`} />
+              <span className="hidden sm:inline text-slate-400">{connLabel}</span>
             </div>
             <div className="hidden sm:block text-slate-400">
               智能体: <span className="text-slate-200 font-mono">{agents.length}</span>
@@ -145,6 +162,11 @@ export default function AppLayout({ children }: { children: ReactNode }) {
             )}
           </div>
         </header>
+        {demoMode && (
+          <div className="shrink-0 bg-violet-500/10 border-b border-violet-500/30 text-violet-300 text-xs px-4 md:px-6 py-2">
+            演示模式：当前展示内置演示数据，不调用真实接口（提交任务与快答已停用）。点侧栏「演示 ON」退出。
+          </div>
+        )}
         <main className="flex-1 overflow-auto p-4 md:p-6 mobile-scroll">
           {children}
         </main>
