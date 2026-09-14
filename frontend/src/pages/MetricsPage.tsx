@@ -1,7 +1,8 @@
-// 指标看板页（T4）：GET /api/metrics（metrics_collector 汇总 JSON）
+// 指标看板页（T4）：GET /api/metrics（metrics_collector 汇总 JSON）+ GET /tasks（进行中数量）
 import { useState, useEffect, useCallback } from 'react'
 import { BarChart3, RefreshCw } from 'lucide-react'
 import { useVisibleInterval } from '../lib/useVisibleInterval'
+import { Alert, StatCard } from '../components/ui'
 
 interface MetricsSummary {
   timestamp?: string
@@ -17,16 +18,6 @@ interface MetricsSummary {
   alerts?: number
   by_capability?: Record<string, { success_rate: number }>
   search_health?: Record<string, unknown>
-}
-
-function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
-  return (
-    <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-      <div className="text-xs text-slate-500">{label}</div>
-      <div className="text-xl font-semibold text-slate-200 mt-1">{value}</div>
-      {sub && <div className="text-[11px] text-slate-500 mt-0.5">{sub}</div>}
-    </div>
-  )
 }
 
 export default function MetricsPage() {
@@ -72,14 +63,16 @@ export default function MetricsPage() {
           <RefreshCw className="w-4 h-4" />
         </button>
       </div>
-      {error && <div className="bg-amber-500/10 border border-amber-500/30 text-amber-400 text-sm rounded-lg px-4 py-3">{error}</div>}
+      {error && <Alert tone="warn" title="指标不可用">{error}</Alert>}
       {m && (
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
             <StatCard label="总任务数" value={String(total)}
               sub={running > 0 ? `进行中 ${running}` : `已完成 ${completed}`} />
             <StatCard label="成功率" value={successRate === null ? '—' : `${successRate}%`}
-              sub={completed > 0 ? `已完成 ${completed} · 失败 ${failed}` : '尚无已完成任务'} />
+              tone={successRate === null ? 'default' : successRate >= 80 ? 'success' : successRate >= 50 ? 'issue' : 'failure'}
+              sub={completed > 0 ? `已完成 ${completed} · 失败 ${failed}` : '尚无已完成任务'}
+              hint="仅按已完成任务计算；进行中与排队中不计入分母" />
             <StatCard label="平均耗时" value={completed > 0 ? `${m.avg_latency_sec ?? 0}s` : '—'}
               sub={completed > 0 ? `P95 ${m.p95_latency_sec ?? 0}s` : '尚无已完成任务'} />
             <StatCard label="累计成本" value={`$${(m.cost_usd_total ?? 0).toFixed(4)}`}
@@ -94,7 +87,10 @@ export default function MetricsPage() {
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
             <h2 className="text-sm text-slate-300 font-medium mb-4">各能力成功率</h2>
             {Object.keys(m.by_capability || {}).length === 0 && (
-              <div className="text-xs text-slate-500">暂无数据：任务完成一次后按能力类型统计（当前无已完成任务）。</div>
+              <div className="text-xs text-slate-500 leading-relaxed">
+                暂无数据：需要至少一次任务完成才会按能力类型统计。当前
+                {running > 0 ? `有 ${running} 个任务进行中` : '没有已完成的任务'}。
+              </div>
             )}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               {Object.entries(m.by_capability || {}).map(([cap, v]) => (

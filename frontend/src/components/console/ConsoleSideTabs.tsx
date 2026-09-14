@@ -1,16 +1,10 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { MessagesSquare, FolderOpen, Activity, Eye, RefreshCw } from 'lucide-react'
 import LiveActivity from '../LiveActivity'
+import { Alert, EmptyState, StatusBadge } from '../ui'
+import { normalizeDeliverySummary } from '../../lib/format'
 
 type Tab = 'live' | 'context' | 'results'
-
-function statusBadge(status: string) {
-  const base = 'px-2 py-0.5 rounded-full text-[10px] font-semibold'
-  if (status === 'SUCCESS') return `${base} bg-emerald-500/20 text-emerald-400`
-  if (status === 'FAILED') return `${base} bg-red-500/20 text-red-400`
-  if (status === 'SUCCESS_WITH_ISSUES') return `${base} bg-amber-500/20 text-amber-400`
-  return `${base} bg-cyan-500/20 text-cyan-400`
-}
 
 /** 右侧三栏：实时动态 / 对话上下文 / 项目结果（TaskConsole 拆分 T11c）。
  * 步骤级流式输出轮询（/api/task/{id}/stream）随本组件生命周期收敛。 */
@@ -104,11 +98,11 @@ export default memo(function ConsoleSideTabs({
                 </div>
                 <div className="max-w-[95%] bg-slate-800/50 border border-slate-800 text-slate-400 text-xs rounded-lg rounded-tl-none px-3 py-2">
                   <div className="flex items-center gap-2 mb-1">
-                    <span className={statusBadge(m.status)}>{m.status}</span>
+                    <StatusBadge status={m.status} />
                     <span className="text-slate-600">{new Date(m.created_at).toLocaleTimeString()}</span>
                   </div>
                   <pre className="whitespace-pre-wrap break-all max-h-32 overflow-y-auto font-sans">
-                    {m.report_preview || '（运行中...）'}
+                    {normalizeDeliverySummary(m.report_preview) || '（运行中...）'}
                   </pre>
                   {(m.status === 'SUCCESS' || m.status === 'FAILED' || m.status === 'SUCCESS_WITH_ISSUES') && (
                     <div className="flex gap-2 mt-2 flex-wrap">
@@ -129,11 +123,12 @@ export default memo(function ConsoleSideTabs({
                     </div>
                   )}
                   {m.status === 'SUCCESS_WITH_ISSUES' && gapsFor[m.task_id] && (
-                    <div className="mt-2 text-amber-300/90 bg-amber-500/10 border border-amber-500/20 rounded p-2 text-[10px] space-y-1">
-                      <div className="font-semibold">已完成但有验收缺口：</div>
-                      {gapsFor[m.task_id].length === 0 && <div>（无缺口明细）</div>}
-                      {gapsFor[m.task_id].map((g, i) => <div key={i}>- {g}</div>)}
-                    </div>
+                    <Alert tone="warn" title="已完成但有验收缺口">
+                      <div className="mt-1 space-y-1 text-xs">
+                        {gapsFor[m.task_id].length === 0 && <div>（无缺口明细）</div>}
+                        {gapsFor[m.task_id].map((g, i) => <div key={i}>· {g}</div>)}
+                      </div>
+                    </Alert>
                   )}
                 </div>
               </div>
@@ -147,12 +142,13 @@ export default memo(function ConsoleSideTabs({
               {activeConversationId ? '当前对话的完成结果' : '最近完成的任务'}
             </p>
             {resultItems.length === 0 && (
-              <div className="text-center text-slate-600 text-xs py-10">暂无完成结果</div>
+              <EmptyState title="暂无完成结果"
+                description="任务完成后，这里显示结论摘要、报告入口与验收缺口。" />
             )}
             {resultItems.map(t => (
               <div key={t.task_id} className="bg-slate-800/40 border border-slate-800 rounded-lg px-3 py-2">
                 <div className="flex items-center gap-2 mb-1">
-                  <span className={statusBadge(t.status)}>{t.status}</span>
+                  <StatusBadge status={t.status} />
                   <span className="text-slate-300 text-xs truncate flex-1">{t.goal}</span>
                 </div>
                 <div className="flex gap-3 flex-wrap">
@@ -172,11 +168,12 @@ export default memo(function ConsoleSideTabs({
                   )}
                 </div>
                 {t.status === 'SUCCESS_WITH_ISSUES' && gapsFor[t.task_id] && (
-                  <div className="mt-2 text-amber-300/90 bg-amber-500/10 border border-amber-500/20 rounded p-2 text-[10px] space-y-1">
-                    <div className="font-semibold">已完成但有验收缺口：</div>
-                    {gapsFor[t.task_id].length === 0 && <div>（无缺口明细）</div>}
-                    {gapsFor[t.task_id].map((g, i) => <div key={i}>- {g}</div>)}
-                  </div>
+                  <Alert tone="warn" title="已完成但有验收缺口">
+                    <div className="mt-1 space-y-1 text-xs">
+                      {gapsFor[t.task_id].length === 0 && <div>（无缺口明细）</div>}
+                      {gapsFor[t.task_id].map((g, i) => <div key={i}>· {g}</div>)}
+                    </div>
+                  </Alert>
                 )}
               </div>
             ))}

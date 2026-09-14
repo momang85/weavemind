@@ -3,14 +3,8 @@ import { useTaskStore } from '../stores/useTaskStore'
 import type { ConversationSummary, ConversationMessage, TaskSummary } from '../stores/types'
 import { FileText, ChevronDown, ChevronRight, MessagesSquare, Play } from 'lucide-react'
 import { ReportMarkdown } from '../components/ReportViewer'
-
-function statusBadge(s: string) {
-  const base = 'px-2.5 py-0.5 rounded-full text-xs font-semibold'
-  if (s === 'SUCCESS') return `${base} bg-emerald-500/20 text-emerald-400`
-  if (s === 'FAILED') return `${base} bg-red-500/20 text-red-400`
-  if (s === 'SUCCESS_WITH_ISSUES') return `${base} bg-amber-500/20 text-amber-400`
-  return `${base} bg-cyan-500/20 text-cyan-400`
-}
+import { EmptyState, StatusBadge } from '../components/ui'
+import { normalizeDeliverySummary } from '../lib/format'
 
 export default function History() {
   const [mode, setMode] = useState<'conv' | 'tasks'>('conv')
@@ -120,7 +114,8 @@ export default function History() {
       {mode === 'conv' && (
         <div className="space-y-3">
           {conversations.length === 0 && (
-            <div className="text-slate-600 text-sm text-center py-12">暂无对话记录</div>
+            <EmptyState title="暂无对话记录"
+              description="在任务控制台提交一个任务后，这里会出现对话与报告入口；也可以点右上「任务」按单次任务查看。" />
           )}
           {conversations.map(c => (
             <div key={c.conversation_id} className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
@@ -133,7 +128,7 @@ export default function History() {
                   <MessagesSquare className="w-4 h-4 text-violet-400 shrink-0" />
                   <span className="flex-1 text-slate-300 text-sm truncate">{c.title || '(空对话)'}</span>
                   <span className="text-slate-600 text-xs shrink-0">{c.message_count} 条消息</span>
-                  <span className={statusBadge(c.last_status || 'PENDING')}>{c.last_status || 'PENDING'}</span>
+                  <StatusBadge status={c.last_status || 'PENDING'} />
                   <span className="text-slate-600 text-xs shrink-0">
                     {new Date(c.last_updated).toLocaleString()}
                   </span>
@@ -153,7 +148,7 @@ export default function History() {
                         <span className="text-slate-300 text-xs">{m.goal}</span>
                       </div>
                       <div className="flex items-center gap-2 mt-2">
-                        <span className={statusBadge(m.status)}>{m.status}</span>
+                        <StatusBadge status={m.status} />
                         <button onClick={() => viewFullReport(m.task_id)}
                           className="text-[10px] text-cyan-400 hover:text-cyan-300">
                           查看报告
@@ -166,7 +161,7 @@ export default function History() {
                       ) : (
                         m.report_preview && (
                           <div className="mt-2 text-slate-500 text-xs leading-relaxed line-clamp-3">
-                            <ReportMarkdown md={m.report_preview} sources={[]} />
+                            <ReportMarkdown md={normalizeDeliverySummary(m.report_preview)} sources={[]} />
                           </div>
                         )
                       )}
@@ -182,7 +177,8 @@ export default function History() {
       {mode === 'tasks' && (
         <div className="space-y-3">
           {tasks.length === 0 ? (
-            <div className="text-slate-600 text-sm text-center py-12">No tasks yet</div>
+            <EmptyState title="暂无任务记录"
+              description="提交任务后，这里按单次任务列出状态、报告与验收缺口。" />
           ) : (
             tasks.map(t => (
               <div key={t.task_id} className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
@@ -200,7 +196,7 @@ export default function History() {
                       {t.project}
                     </span>
                   )}
-                  <span className={statusBadge(t.status)}>{t.status}</span>
+                  <StatusBadge status={t.status} />
                   <span className="text-slate-600 text-xs">{new Date(t.created_at).toLocaleDateString()}</span>
                 </button>
                 {expanded.has('task-' + t.task_id) && t.report && (
