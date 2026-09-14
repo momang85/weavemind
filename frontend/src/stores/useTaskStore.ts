@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { TaskState, TaskNode, LogEntry, TaskReport, AgentInfo, SystemStatus } from './types'
 import { DEMO_PLAN, DEMO_AGENTS } from './demoData'
+import { setDemoActive } from '../lib/demoGuard'
 
 export const useTaskStore = create<TaskState & {
   startTask: (id: string) => void
@@ -67,6 +68,8 @@ export const useTaskStore = create<TaskState & {
   toggleDemo: (force) => {
     const next = force ?? !get().demoMode
     set({ demoMode: next })
+    // 同步 fetch 层守卫：演示模式下的写/付费操作会被拦截（见 lib/demoGuard.ts）
+    setDemoActive(next)
     if (next) {
       set({
         currentTaskId: 'demo-task-001',

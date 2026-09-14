@@ -52,29 +52,51 @@ WATCH_CHANNELS = [
 
 
 def _db_task_totals() -> dict:
-    """从 agents.db 读取累计任务数（与 /api/status 同口径）。
+    """任务状态分布：**一次查询、同一范围（task_history 全表）**给出全部计数。
 
-    失败/库不存在时返回**零值同形状**，不返回空 dict：空 dict 会让调用方与消费方
-    （指标看板、测试、CI）各自处理缺键，形状随环境变化——CI 是全新检出、没有
-    agents.db，因此该项在 CI 上长期失败。
+    口径（返回值的 `scope` 字段同步写明）：
+    - 终态 = SUCCESS + SUCCESS_WITH_ISSUES + FAILED + CANCELLED
+    - running / queued 是未结束态；其余状态计入 unknown
+    - 成功率分母是**终态数**，不是总任务数（此前用总数当分母，运行中的任务会稀释成功率，
+      前端还不得不用"最近 50 条"的运行数去凑，100 个任务全在运行时会被算成 100% 成功）
+
+    失败/库不存在时返回 `available=False` 的同形状结果：调用方据此显示"未知"，
+    不能把缺失数据当成 0（`available=False` 与"确实 0 个失败"是两件事）。
     """
+    zero = {
+        "total": 0, "success": 0, "with_issues": 0, "failed": 0, "cancelled": 0,
+        "running": 0, "queued": 0, "unknown": 0, "terminal": 0,
+        "available": False, "scope": "task_history 全表",
+    }
     try:
         import sqlite3
         path = db_paths.resolve_db_path()
         db = sqlite3.connect(path, timeout=5)
         try:
-            total = db.execute("SELECT COUNT(*) FROM task_history").fetchone()[0]
-            success = db.execute(
-                "SELECT COUNT(*) FROM task_history WHERE status='SUCCESS'"
-            ).fetchone()[0]
-            failed = db.execute(
-                "SELECT COUNT(*) FROM task_history WHERE status='FAILED'"
-            ).fetchone()[0]
+            rows = db.execute(
+                "SELECT status, COUNT(*) FROM task_history GROUP BY status"
+            ).fetchall()
         finally:
             db.close()
-        return {"total": int(total), "success": int(success), "failed": int(failed)}
     except Exception:
-        return {"total": 0, "success": 0, "failed": 0}
+        return zero
+    counts: dict[str, int] = {}
+    for status, n in rows or []:
+        counts[str(status or "").upper()] = int(n or 0)
+    out = dict(zero)
+    out["available"] = True
+    out["success"] = counts.get("SUCCESS", 0)
+    out["with_issues"] = counts.get("SUCCESS_WITH_ISSUES", 0)
+    out["failed"] = counts.get("FAILED", 0)
+    out["cancelled"] = counts.get("CANCELLED", 0) + counts.get("CANCELED", 0)
+    out["running"] = counts.get("RUNNING", 0)
+    out["queued"] = counts.get("QUEUED", 0) + counts.get("PENDING", 0)
+    out["total"] = sum(counts.values())
+    out["terminal"] = (out["success"] + out["with_issues"]
+                       + out["failed"] + out["cancelled"])
+    known = out["terminal"] + out["running"] + out["queued"]
+    out["unknown"] = max(0, out["total"] - known)
+    return out
 
 
 class MetricsCollector:
@@ -339,23 +361,28 @@ class MetricsCollector:
                 cost_total = get_monthly_spend()
             except Exception:
                 cost_total = 0.0
-            # 累计任务数/成功率：与 /api/status 同源（agents.db 的 task_history）。
-            # 进程内计数器只统计"本次运行"，重启即归零，看板上却写作"总任务数"，
-            # 于是同一时刻状态接口 412 条、指标页 0 条。
+            # 累计任务数/成功率：与 /api/status 同源（agents.db 的 task_history），
+            # 且**同一快照、同一范围**给出全部分类计数——前端不再自行推断成功数。
             db_totals = _db_task_totals()
-            total_tasks = db_totals.get("total") if db_totals else self._total_tasks
-            failed_tasks = db_totals.get("failed") if db_totals else self._failed_tasks
-            if db_totals:
-                success_rate = (
-                    db_totals.get("success", 0) / total_tasks * 100
-                    if total_tasks else 0.0
-                )
+            available = bool(db_totals.get("available"))
+            tasks = {k: db_totals.get(k, 0) for k in (
+                "total", "success", "with_issues", "failed", "cancelled",
+                "running", "queued", "unknown", "terminal")}
+            tasks["available"] = available
+            tasks["scope"] = db_totals.get("scope", "task_history 全表")
+            terminal = tasks["terminal"] if available else 0
+            # 分母是终态数；无终态任务（或数据不可用）时成功/失败率均为 None → 前端显示"未知"
+            success_rate = (tasks["success"] / terminal * 100) if terminal else None
+            failure_rate = (tasks["failed"] / terminal * 100) if terminal else None
+            total_tasks = tasks["total"] if available else self._total_tasks
+            failed_tasks = tasks["failed"] if available else self._failed_tasks
             summary = {
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "total_tasks": total_tasks,
                 "failed_tasks": failed_tasks,
-                "success_rate": round(success_rate, 1),
-                "failure_rate": round(100 - success_rate, 1) if total_tasks else 0.0,
+                "success_rate": round(success_rate, 1) if success_rate is not None else None,
+                "failure_rate": round(failure_rate, 1) if failure_rate is not None else None,
+                "tasks": tasks,
                 "search_health": search_health,
                 "avg_latency_sec": round(
                     sum(latencies) / len(latencies), 2
@@ -381,8 +408,9 @@ class MetricsCollector:
                 json.dump(summary, f, ensure_ascii=False, indent=2)
 
             logger.info(
-                "Metrics: %d tasks, %.1f%% success, %d replans, %d alerts",
-                self._total_tasks, success_rate, self._replan_count, self._alerts,
+                "Metrics: %d tasks (%d terminal), %.1f%% success, %d replans, %d alerts",
+                tasks["total"], terminal, success_rate or 0.0,
+                self._replan_count, self._alerts,
             )
 
     def shutdown(self):

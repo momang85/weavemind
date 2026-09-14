@@ -164,7 +164,8 @@ export default function AppLayout({ children }: { children: ReactNode }) {
         </header>
         {demoMode && (
           <div className="shrink-0 bg-violet-500/10 border-b border-violet-500/30 text-violet-300 text-xs px-4 md:px-6 py-2">
-            演示模式：当前展示内置演示数据，不调用真实接口（提交任务与快答已停用）。点侧栏「演示 ON」退出。
+            演示模式：<span className="font-medium">控制台展示内置演示数据</span>，其余页面读的是真实环境（只读接口仍访问真实服务）；
+            写操作与付费操作（提交任务、快答、设置保存、记忆删除、触发演化等）已被拦截，不会真的改数据或花钱。点侧栏「演示 ON」退出。
           </div>
         )}
         <main className="flex-1 overflow-auto p-4 md:p-6 mobile-scroll">

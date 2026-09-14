@@ -7683,14 +7683,25 @@ class TestReportRouteAndMetricsConsistency(unittest.TestCase):
         con.close()
         with mock.patch.dict(os.environ, {"AGENTS_DB": db_path}):
             totals = mc._db_task_totals()
-        self.assertIn("total", totals)
-        self.assertEqual(totals, {"total": 3, "success": 2, "failed": 1})
+        # 一次分组查询给出全部分类计数（同范围同快照）；终态是成功率分母
+        self.assertTrue(totals["available"], "库可读时 available 应为 True")
+        self.assertEqual(
+            {k: totals[k] for k in ("total", "success", "failed", "terminal",
+                                    "running", "queued", "with_issues", "unknown")},
+            {"total": 3, "success": 2, "failed": 1, "terminal": 3,
+             "running": 0, "queued": 0, "with_issues": 0, "unknown": 0})
+        self.assertEqual(totals["scope"], "task_history 全表")
 
-    def test_metrics_totals_degrade_to_zero_shape(self):
-        """库缺失/不可读时返回零值同形状，而不是空 dict（消费方无需处理缺键）。"""
+    def test_metrics_totals_degrade_to_unknown_shape(self):
+        """库缺失/不可读时形状不变但 `available=False` —— 消费方显示"未知"，
+        不能把缺失当成 0（否则"全在运行"会被误算成 0 失败 / 100% 成功）。"""
         import metrics_collector as mc
         with mock.patch.dict(os.environ, {"AGENTS_DB": str(Path(tempfile.gettempdir()) / "definitely_missing_wm.db")}):
-            self.assertEqual(mc._db_task_totals(), {"total": 0, "success": 0, "failed": 0})
+            totals = mc._db_task_totals()
+        self.assertFalse(totals["available"])
+        self.assertEqual(totals["total"], 0)
+        self.assertEqual(totals["terminal"], 0)
+        self.assertIn("scope", totals)
 
 
 if __name__ == "__main__":

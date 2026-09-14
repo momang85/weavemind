@@ -5,6 +5,7 @@ import AppLayout from './components/AppLayout'
 import Login from './components/Login'
 import { useTaskStore } from './stores/useTaskStore'
 import { installAuthFetch, isAuthed, verifySession } from './auth'
+import { installDemoGuard } from './lib/demoGuard'
 
 // 路由级代码分割：重页面独立 chunk，主包不承载 markdown/syntax-highlighter 重依赖
 const TaskConsole = lazy(() => import('./pages/TaskConsole'))
@@ -29,6 +30,9 @@ function PageFallback() {
 // 全局 fetch 包装：会话凭据由浏览器自动携带的 session Cookie 完成，无需前端注入。
 // 数据接口 401 时回到登录页。
 installAuthFetch()
+// 演示模式的真实操作边界：写操作与付费操作在 fetch 层被拦截（返回 403 + 原因），
+// 只读接口仍走真实服务——所以界面文案必须写明"演示只替换控制台展示数据"。
+installDemoGuard()
 
 // ── Error Boundary ──
 class ErrorBoundary extends Component<

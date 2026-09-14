@@ -3,13 +3,28 @@ import { useState, useEffect, useCallback } from 'react'
 import { BarChart3, RefreshCw } from 'lucide-react'
 import { useVisibleInterval } from '../lib/useVisibleInterval'
 import { Alert, StatCard } from '../components/ui'
+import { formatDuration, formatUsd } from '../lib/format'
+
+interface TaskBreakdown {
+  total: number
+  success: number
+  with_issues: number
+  failed: number
+  cancelled: number
+  running: number
+  queued: number
+  unknown: number
+  terminal: number
+  available: boolean
+  scope?: string
+}
 
 interface MetricsSummary {
   timestamp?: string
   total_tasks?: number
   failed_tasks?: number
-  success_rate?: number
-  failure_rate?: number
+  success_rate?: number | null
+  failure_rate?: number | null
   avg_latency_sec?: number
   p95_latency_sec?: number
   cost_usd_total?: number
@@ -18,40 +33,32 @@ interface MetricsSummary {
   alerts?: number
   by_capability?: Record<string, { success_rate: number }>
   search_health?: Record<string, unknown>
+  /** 后端同一快照、同一范围（task_history 全表）的分类计数——前端只展示，不推断。 */
+  tasks?: TaskBreakdown
 }
 
 export default function MetricsPage() {
   const [m, setM] = useState<MetricsSummary | null>(null)
-  const [running, setRunning] = useState(0)
   const [error, setError] = useState('')
 
-  // 指标汇总来自 metrics_summary.json（已落库任务），但"还在跑"的任务不在其中：
-  // 若直接把 total_tasks 当分母，运行中就会被算成失败——实测首屏显示
-  // "成功率 0% / 失败率 100%"（两个任务刚提交、正在跑），极易误读为系统故障。
-  // 这里额外取 /tasks 得到进行中数量，成功率只按"已完成"计算。
+  // 全部统计量由后端在同一快照、同一范围（task_history 全表）算好。
+  // 前端**不再**用 /tasks 列表（分页/截断）去推算运行数——那会把"100 个任务全在跑"
+  // 算成 100% 成功（列表只回最近 50 条）。
   const load = useCallback(() => {
-    Promise.all([
-      fetch('/api/metrics').then(r => { if (!r.ok) throw new Error('no data'); return r.json() }),
-      fetch('/tasks').then(r => (r.ok ? r.json() : null)).catch(() => null),
-    ])
-      .then(([metrics, tasksRaw]) => {
-        setM(metrics)
-        setError('')
-        const list = Array.isArray(tasksRaw) ? tasksRaw : (tasksRaw?.tasks || [])
-        setRunning(list.filter((t: any) =>
-          ['RUNNING', 'QUEUED', 'PENDING'].includes(String(t?.status || '').toUpperCase())).length)
-      })
-      .catch(() => setError('暂无指标数据（服务不可达或 metrics 收集器尚未运行）'))
+    fetch('/api/metrics')
+      .then(r => { if (!r.ok) throw new Error('no data'); return r.json() })
+      .then(d => { setM(d); setError('') })
+      .catch(() => setError('指标接口不可达（服务未启动或 metrics 收集器未运行）。统计值显示为"未知"，不代表 0。'))
   }, [])
 
   useEffect(() => { load() }, [load])
   useVisibleInterval(load, 30000)
 
-  const total = m?.total_tasks ?? 0
-  const completed = Math.max(0, total - running)
-  const failed = Math.min(m?.failed_tasks ?? 0, completed)
-  const succeeded = Math.max(0, completed - failed)
-  const successRate = completed > 0 ? Math.round((succeeded / completed) * 100) : null
+  const t = m?.tasks
+  const available = t ? t.available : false
+  const terminal = t?.terminal ?? 0
+  // 成功率/失败率以终态为分母；无终态或统计不可用 → 显示"未知"，绝不显示 0% 或 100%
+  const rate = (v?: number | null) => (typeof v === 'number' ? `${v}%` : '未知')
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
@@ -67,18 +74,26 @@ export default function MetricsPage() {
       {m && (
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-            <StatCard label="总任务数" value={String(total)}
-              sub={running > 0 ? `进行中 ${running}` : `已完成 ${completed}`} />
-            <StatCard label="成功率" value={successRate === null ? '—' : `${successRate}%`}
-              tone={successRate === null ? 'default' : successRate >= 80 ? 'success' : successRate >= 50 ? 'issue' : 'failure'}
-              sub={completed > 0 ? `已完成 ${completed} · 失败 ${failed}` : '尚无已完成任务'}
-              hint="仅按已完成任务计算；进行中与排队中不计入分母" />
-            <StatCard label="平均耗时" value={completed > 0 ? `${m.avg_latency_sec ?? 0}s` : '—'}
-              sub={completed > 0 ? `P95 ${m.p95_latency_sec ?? 0}s` : '尚无已完成任务'} />
-            <StatCard label="累计成本" value={`$${(m.cost_usd_total ?? 0).toFixed(4)}`}
-              sub={running > 0 ? `含进行中 ${running} 个任务` : undefined} />
+            <StatCard label="总任务数" value={available ? String(t?.total ?? 0) : '未知'}
+              sub={available ? `终态 ${terminal} · 进行中 ${t?.running ?? 0} · 排队 ${t?.queued ?? 0}` : '任务库读取失败'}
+              hint={t?.scope ? `统计范围：${t.scope}` : undefined} />
+            <StatCard label="成功率" value={available && terminal > 0 ? rate(m.success_rate) : (available ? '—' : '未知')}
+              tone={!available || terminal === 0 ? 'default'
+                : (m.success_rate ?? 0) >= 80 ? 'success' : (m.success_rate ?? 0) >= 50 ? 'issue' : 'failure'}
+              sub={!available ? '统计不可用，不能按 0 计'
+                : terminal === 0 ? `尚无终态任务（进行中 ${t?.running ?? 0}）`
+                : `分母 ${terminal}：成功 ${t?.success ?? 0} · 有缺口 ${t?.with_issues ?? 0} · 失败 ${t?.failed ?? 0} · 已取消 ${t?.cancelled ?? 0}`}
+              hint="分母为终态任务数；进行中与排队中不计入" />
+            <StatCard label="失败率" value={available && terminal > 0 ? rate(m.failure_rate) : (available ? '—' : '未知')}
+              tone={available && terminal > 0 && (m.failure_rate ?? 0) > 0 ? 'failure' : 'default'}
+              sub={available && terminal > 0 ? `失败 ${t?.failed ?? 0}/${terminal}` : '无终态任务'}
+              hint={t && t.unknown > 0 ? `另有 ${t.unknown} 条状态未登记，未计入成功或失败` : undefined} />
+            <StatCard label="累计成本" value={formatUsd(m.cost_usd_total)}
+              sub={available ? `含进行中 ${t?.running ?? 0} 个任务` : undefined} />
           </div>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+            <StatCard label="平均耗时" value={available && terminal > 0 ? formatDuration(m.avg_latency_sec) : '—'}
+              sub={available && terminal > 0 ? `P95 ${formatDuration(m.p95_latency_sec)}` : '无终态任务'} />
             <StatCard label="Critic 评审" value={`${m.critic?.pass ?? 0} 通过`} sub={`${m.critic?.fail ?? 0} 未通过`} />
             <StatCard label="重规划" value={String(m.replan?.total ?? 0)} sub={`${m.replan?.success ?? 0} 成功`} />
             <StatCard label="告警" value={String(m.alerts ?? 0)} />
@@ -88,8 +103,8 @@ export default function MetricsPage() {
             <h2 className="text-sm text-slate-300 font-medium mb-4">各能力成功率</h2>
             {Object.keys(m.by_capability || {}).length === 0 && (
               <div className="text-xs text-slate-500 leading-relaxed">
-                暂无数据：需要至少一次任务完成才会按能力类型统计。当前
-                {running > 0 ? `有 ${running} 个任务进行中` : '没有已完成的任务'}。
+                暂无数据：需要至少一次任务结束才会按能力类型统计。当前
+                {terminal > 0 ? `已有 ${terminal} 个终态任务，统计将随下次汇总刷新` : `没有终态任务（进行中 ${t?.running ?? 0}）`}。
               </div>
             )}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
