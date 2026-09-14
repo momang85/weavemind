@@ -24,6 +24,8 @@ from datetime import datetime, timezone
 from redis.backoff import NoBackoff as _NoBackoff  # noqa: E402
 from redis.retry import Retry as _Retry  # noqa: E402
 
+import db_paths  # noqa: E402
+
 _NO_REDIS_RETRY = _Retry(_NoBackoff(), 0)
 
 logger = logging.getLogger(__name__)
@@ -46,7 +48,7 @@ def _now_iso() -> str:
 
 
 def _db_path() -> str:
-    return os.environ.get("REGISTRY_DB", "agents.db")
+    return db_paths.resolve_db_path()
 
 
 def _get_redis():

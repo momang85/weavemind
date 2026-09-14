@@ -30,6 +30,7 @@ from workspace import (
     _safe_project,
 )
 
+import db_paths
 from common import AgentRegistry, MessagingClient, RedisAgentRegistry
 import chart_assembly
 from charts_pipeline import ChartPipelineMixin
@@ -446,7 +447,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         self._reload_system_config()
         self._redis = self._new_redis_sync()
         self._redis_reg = RedisAgentRegistry(self._redis)
-        self._sqlite_reg = AgentRegistry(os.environ.get("REGISTRY_DB", "agents.db"))
+        self._sqlite_reg = AgentRegistry(db_paths.resolve_db_path())
         self._messaging = MessagingClient(
             os.environ.get("REDIS_HOST", "localhost"),
             int(os.environ.get("REDIS_PORT", "6379")),
@@ -3285,11 +3286,31 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             if task_id in self._finalized_tasks:
                 return
             import task_state as _ts
-            _ts.record_completion(
-                task_id, goal=goal, status=status, report=report or "",
-                steps=steps or [], logs=logs or [], acceptance=acceptance or {},
-            )
-            self._finalized_tasks.add(task_id)
+            # 本地 SQLite 的失败多半是瞬时争用（库忙/锁），小幅重试即可；重试后仍失败
+            # 就**不**算已终结：库里会停在 RUNNING，由 stale 兜底与后续重试处理，
+            # 并在 Redis 留一个可查标记（此前只写一行 warning，等于没人知道）。
+            ok, err = False, ""
+            for attempt in range(3):
+                try:
+                    ok = bool(_ts.record_completion(
+                        task_id, goal=goal, status=status, report=report or "",
+                        steps=steps or [], logs=logs or [], acceptance=acceptance or {},
+                    ))
+                except Exception as exc:
+                    ok, err = False, str(exc)
+                if ok:
+                    break
+                if attempt < 2:
+                    time.sleep(0.2)
+            if ok:
+                self._finalized_tasks.add(task_id)
+            else:
+                logger.error("任务 %s 终态未落库（已尝试 3 次），不标记为已终结：%s",
+                             task_id, err[:150] or "任务库不可写")
+                try:
+                    _ts.mark_persist_failed(task_id, err or "任务库不可写")
+                except Exception:
+                    pass
         except Exception as exc:
             logger.warning("Finalize task %s failed: %s", task_id, str(exc)[:150])
 
@@ -5504,6 +5525,10 @@ def accept_task_request(orch, data: dict) -> tuple[bool, str]:
 
     返回 (是否接收, 原因)。抽出成独立函数是为了可测：收执是"提交是否成功"的
     唯一依据，不能让它的判定逻辑埋在 main() 的循环里。
+
+    判定依据是 `task_state.mark_queued()` 的**返回值**，不是异常：该函数此前
+    内部吞掉一切异常并正常返回，靠 except 区分 accepted/rejected 的分支永不触发，
+    于是任务库不可写时提交方仍拿到 accepted（界面显示成功、现实里没有任务）。
     """
     task_id = str(data.get("task_id") or "")
     goal = str(data.get("goal") or "")
@@ -5512,7 +5537,7 @@ def accept_task_request(orch, data: dict) -> tuple[bool, str]:
     ok, reason = True, ""
     try:
         import task_state as _ts
-        _ts.mark_queued(
+        wrote = _ts.mark_queued(
             task_id, goal,
             project=str(data.get("project") or "default"),
             conversation_id=str(data.get("conversation_id") or ""),
@@ -5520,14 +5545,17 @@ def accept_task_request(orch, data: dict) -> tuple[bool, str]:
             context=str(data.get("context") or ""),
             user=str(data.get("user_id") or ""),
         )
+        if not wrote:
+            ok, reason = False, "登记失败：任务库不可写（详见编排器日志）"
     except Exception as exc:
         ok, reason = False, f"登记失败：{str(exc)[:120]}"
     try:
         orch._redis.setex(
             f"task_ack:{task_id}", 120,
             "accepted" if ok else f"rejected:{reason}")
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.error("任务 %s 收执键写入失败：%s（提交方会超时判为失败）",
+                     task_id, str(exc)[:150])
     if ok:
         logger.info("Task %s accepted (queued)", task_id)
     else:

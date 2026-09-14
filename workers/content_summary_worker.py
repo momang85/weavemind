@@ -9,6 +9,7 @@ import os, sys, logging
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import db_paths
 from async_worker_base import AsyncWorkerBase, AsyncRegistry, AsyncMessaging
 from common import extract_json_object
 
@@ -333,7 +334,7 @@ async def amain():
     setup_logging("worker-content-summary")
     redis_host = os.environ.get("REDIS_HOST", "localhost")
     redis_port = int(os.environ.get("REDIS_PORT", "6379"))
-    db_path = os.environ.get("REGISTRY_DB", "agents.db")
+    db_path = db_paths.resolve_db_path()
 
     registry = AsyncRegistry(db_path)
     messaging = AsyncMessaging(redis_host, redis_port)

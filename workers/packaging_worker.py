@@ -15,6 +15,7 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import db_paths
 from async_worker_base import AsyncWorkerBase, AsyncRegistry, AsyncMessaging
 
 logger = logging.getLogger(__name__)
@@ -194,7 +195,7 @@ class PackagingWorker(AsyncWorkerBase):
 async def amain():
     from logging_setup import setup_logging
     setup_logging("worker-packaging")
-    registry = AsyncRegistry(os.environ.get("REGISTRY_DB", "agents.db"))
+    registry = AsyncRegistry(db_paths.resolve_db_path())
     messaging = AsyncMessaging(
         os.environ.get("REDIS_HOST", "localhost"),
         int(os.environ.get("REDIS_PORT", "6379")),

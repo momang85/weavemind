@@ -44,6 +44,8 @@ jobs:
         run: python test_deploy_manifest.py
       - name: Task state tests
         run: python test_task_state.py
+      - name: Task persistence & db path tests
+        run: python test_task_persistence.py
       - name: Task projection tests
         run: python test_task_projection.py
       - name: Writer consolidation tests

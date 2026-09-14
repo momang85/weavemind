@@ -8,6 +8,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_squared_error, r2_score
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import db_paths
 from async_worker_base import AsyncWorkerBase
 
 class ModelTrainerWorker(AsyncWorkerBase):
@@ -89,7 +90,7 @@ if __name__ == "__main__":
     setup_logging("worker-model-trainer")
     agent_id = sys.argv[1] if len(sys.argv) > 1 else "modeltrainerworker"
     from async_worker_base import AsyncRegistry, AsyncMessaging
-    reg = AsyncRegistry(os.environ.get("REGISTRY_DB", "agents.db"))
+    reg = AsyncRegistry(db_paths.resolve_db_path())
     msg = AsyncMessaging(os.environ.get("REDIS_HOST", "localhost"), int(os.environ.get("REDIS_PORT", "6379")))
     async def run():
         worker = ModelTrainerWorker(agent_id=agent_id, capabilities=ModelTrainerWorker._class_capabilities, registry=reg, messaging=msg)

@@ -8,6 +8,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import db_paths
 from async_worker_base import AsyncWorkerBase
 
 CHART_DIR = Path(tempfile.gettempdir()) / "agent_workspace" / "charts"
@@ -161,7 +162,7 @@ if __name__ == "__main__":
     setup_logging("worker-data-analyzer")
     agent_id = sys.argv[1] if len(sys.argv) > 1 else "dataanalyzerworker"
     from async_worker_base import AsyncRegistry, AsyncMessaging
-    reg = AsyncRegistry(os.environ.get("REGISTRY_DB", "agents.db"))
+    reg = AsyncRegistry(db_paths.resolve_db_path())
     msg = AsyncMessaging(os.environ.get("REDIS_HOST", "localhost"), int(os.environ.get("REDIS_PORT", "6379")))
     async def run():
         worker = DataAnalyzerWorker(agent_id=agent_id, capabilities=DataAnalyzerWorker._class_capabilities, registry=reg, messaging=msg)

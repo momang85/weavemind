@@ -12,6 +12,8 @@ import time
 import uuid
 from pathlib import Path
 
+import db_paths
+
 AUDIT_FILE = Path(__file__).resolve().parent / "logs" / "tool_audit.jsonl"
 
 
@@ -38,7 +40,7 @@ def find_agent(capability: str) -> str | None:
         pass
     try:
         from common import AgentRegistry
-        reg = AgentRegistry(os.environ.get("REGISTRY_DB", "agents.db"))
+        reg = AgentRegistry(db_paths.resolve_db_path())
         return reg.find_capable_agent(capability)
     except Exception:
         return None

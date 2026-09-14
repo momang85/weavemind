@@ -3,6 +3,7 @@ import asyncio, json, tempfile, os, sys
 from pathlib import Path
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import db_paths
 from async_worker_base import AsyncWorkerBase
 
 WORKSPACE = Path(tempfile.gettempdir()) / "agent_workspace" / "data"
@@ -68,7 +69,7 @@ if __name__ == "__main__":
     setup_logging("worker-data-loader")
     agent_id = sys.argv[1] if len(sys.argv) > 1 else "dataloaderworker"
     from async_worker_base import AsyncRegistry, AsyncMessaging
-    reg = AsyncRegistry(os.environ.get("REGISTRY_DB", "agents.db"))
+    reg = AsyncRegistry(db_paths.resolve_db_path())
     msg = AsyncMessaging(os.environ.get("REDIS_HOST", "localhost"), int(os.environ.get("REDIS_PORT", "6379")))
     async def run():
         worker = DataLoaderWorker(agent_id=agent_id, capabilities=DataLoaderWorker._class_capabilities, registry=reg, messaging=msg)

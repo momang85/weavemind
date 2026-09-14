@@ -5,6 +5,8 @@ from abc import ABC, abstractmethod
 import redis.asyncio as aioredis
 import redis.exceptions
 
+import db_paths
+
 logger = logging.getLogger(__name__)
 
 class AsyncMessaging:
@@ -240,7 +242,7 @@ class AsyncSearchAgent(AsyncWorkerBase):
 async def amain():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     h = os.environ.get("REDIS_HOST","localhost"); p = int(os.environ.get("REDIS_PORT","6379"))
-    db = os.environ.get("REGISTRY_DB","agents.db"); mc = int(os.environ.get("MAX_CONCURRENCY","10"))
+    db = db_paths.resolve_db_path(); mc = int(os.environ.get("MAX_CONCURRENCY","10"))
     w = AsyncSearchAgent("async_search", ["web_search"], AsyncRegistry(db), AsyncMessaging(h,p), mc)
     await w.run()
 

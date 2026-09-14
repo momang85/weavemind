@@ -18,12 +18,20 @@
 - `read_task()`：含 acceptance 的统一读取；
 - `is_running()`：供 stale 豁免使用（DB 状态，配合 pid 校验的 Redis 标记）；
 - `pid_same_process()`：运行标记持有者探活的**唯一实现**（webui 看护线程与
-  编排器检查点恢复共用同一条判据）。
+  编排器检查点恢复共用同一条判据）；
+- `mark_persist_failed()`：终态落库失败的可查标记（失败不能只留一行日志）。
+
+两条不变量：
+- 任务库路径由 `db_paths.resolve_db_path()` 统一解析，各模块不再自读
+  `REGISTRY_DB`/`AGENTS_DB`（Docker 下曾因此把状态写进另一个文件）；
+- `mark_queued`/`record_completion` 返回**是否真的写入成功**——提交收执据此判定，
+  不允许"落库失败仍回 accepted"。
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sqlite3
 import time
@@ -34,10 +42,16 @@ import time
 from redis.backoff import NoBackoff as _NoBackoff  # noqa: E402
 from redis.retry import Retry as _Retry  # noqa: E402
 
+import db_paths as _db_paths  # noqa: E402
+
 _NO_REDIS_RETRY = _Retry(_NoBackoff(), 0)
 
-DB_PATH = os.environ.get("AGENTS_DB") or os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "agents.db")
+logger = logging.getLogger(__name__)
+
+# 任务库路径：唯一解析入口（见 db_paths）。此前本模块读 AGENTS_DB、web_ui 读
+# REGISTRY_DB，Dockerfile 只设了后者——状态被写进既没建表、也不在挂载卷里的
+# 另一个文件，表现为"提交 accepted、历史查不到、状态永远缺失"。
+DB_PATH = _db_paths.resolve_db_path()
 
 # 状态词表（项目此前只有常用 4 值的 TaskStatus 枚举且未被编排链路使用；
 # 这里显式区分"排队"与"运行"，终结状态沿用既有词表以免破坏前端映射）
@@ -48,12 +62,7 @@ SUCCESS_WITH_ISSUES = "SUCCESS_WITH_ISSUES"
 FAILED = "FAILED"
 TERMINAL = (SUCCESS, SUCCESS_WITH_ISSUES, FAILED)
 
-_NEW_COLUMNS = (
-    ("acceptance_json", "TEXT DEFAULT ''"),
-    ("rules_fingerprint", "TEXT DEFAULT ''"),
-    ("phase", "TEXT DEFAULT ''"),
-    ("updated_at", "TIMESTAMP"),
-)
+# 列补丁的 DDL 直接写在 _add_missing_columns 里（字面量、不拼接），此处不再维护映射表。
 
 
 def _connect(db_path: str | None = None) -> sqlite3.Connection:
@@ -62,20 +71,38 @@ def _connect(db_path: str | None = None) -> sqlite3.Connection:
     return con
 
 
+def _add_missing_columns(con: sqlite3.Connection) -> list[str]:
+    """在既有连接上补列（幂等）。表还没建时返回空——建表由 web_ui._init_db 负责。
+
+    DDL 逐条写成字面量、直接执行：不做 SQL 文本拼接，也不把变量交给 execute，
+    既避免注入面，也避免被安全扫描判为动态构造。
+    """
+    existing = {r[1] for r in con.execute("PRAGMA table_info(task_history)")}
+    if not existing:
+        return []
+    added: list[str] = []
+    if "acceptance_json" not in existing:
+        con.execute("ALTER TABLE task_history ADD COLUMN acceptance_json TEXT DEFAULT ''")
+        added.append("acceptance_json")
+    if "rules_fingerprint" not in existing:
+        con.execute("ALTER TABLE task_history ADD COLUMN rules_fingerprint TEXT DEFAULT ''")
+        added.append("rules_fingerprint")
+    if "phase" not in existing:
+        con.execute("ALTER TABLE task_history ADD COLUMN phase TEXT DEFAULT ''")
+        added.append("phase")
+    if "updated_at" not in existing:
+        con.execute("ALTER TABLE task_history ADD COLUMN updated_at TIMESTAMP")
+        added.append("updated_at")
+    return added
+
+
 def ensure_schema(db_path: str | None = None) -> list[str]:
     """补齐列（幂等）。返回本次新增的列名，便于日志/测试观察。"""
     added: list[str] = []
     try:
         con = _connect(db_path)
         try:
-            existing = {r[1] for r in con.execute("PRAGMA table_info(task_history)")}
-            if not existing:
-                return []          # 表还没建（webui 的 _init_db 负责）
-            for name, decl in _NEW_COLUMNS:
-                if name in existing:
-                    continue
-                con.execute(f"ALTER TABLE task_history ADD COLUMN {name} {decl}")
-                added.append(name)
+            added = _add_missing_columns(con)
             if added:
                 con.commit()
         finally:
@@ -106,11 +133,18 @@ def derive_status(step_statuses=None, acceptance: dict | None = None,
 
 def mark_queued(task_id: str, goal: str, project: str = "default",
                 conversation_id: str = "", parent_task_id: str = "",
-                context: str = "", user: str = "", db_path: str | None = None) -> None:
-    """登记排队中的任务（提交时调用）。"""
+                context: str = "", user: str = "", db_path: str | None = None) -> bool:
+    """登记排队中的任务（提交时调用）。返回是否**真的写入成功**。
+
+    返回值的意义：提交收执（`task_ack`）必须依据"是否真的登记成功"。此前本函数
+    吞掉一切异常后正常返回 None，于是 `accept_task_request` 里"靠异常区分
+    accepted / rejected"的分支永不触发——任务库不可写时提交方仍拿到 accepted。
+    """
     try:
         con = _connect(db_path)
         try:
+            # 编排器可能先于 web_ui 初始化库；缺列会让写入静默失败
+            _add_missing_columns(con)
             con.execute(
                 "INSERT INTO task_history"
                 "(task_id,goal,status,project,conversation_id,parent_task_id,context,user,phase)"
@@ -119,14 +153,19 @@ def mark_queued(task_id: str, goal: str, project: str = "default",
                  parent_task_id, context, user, "排队"),
             )
             con.commit()
+            return True
         finally:
             con.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.error("任务 %s 登记失败（任务库不可写）：%s", task_id, str(exc)[:200])
+        return False
 
 
-def mark_running(task_id: str, phase: str = "执行", db_path: str | None = None) -> None:
-    """标记进入执行（排队 → 运行），让历史/状态接口能区分两种阶段。"""
+def mark_running(task_id: str, phase: str = "执行", db_path: str | None = None) -> bool:
+    """标记进入执行（排队 → 运行），让历史/状态接口能区分两种阶段。
+
+    返回是否写入成功；失败只记日志不回抛（阶段推进不该拖垮任务执行）。
+    """
     try:
         con = _connect(db_path)
         try:
@@ -136,13 +175,15 @@ def mark_running(task_id: str, phase: str = "执行", db_path: str | None = None
                 (RUNNING, phase, task_id, QUEUED, "PENDING"),
             )
             con.commit()
+            return True
         finally:
             con.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("任务 %s 标记运行失败：%s", task_id, str(exc)[:200])
+        return False
 
 
-def set_phase(task_id: str, phase: str, db_path: str | None = None) -> None:
+def set_phase(task_id: str, phase: str, db_path: str | None = None) -> bool:
     """更新阶段名（规划/执行/反思/交付），不改状态。"""
     try:
         con = _connect(db_path)
@@ -153,21 +194,28 @@ def set_phase(task_id: str, phase: str, db_path: str | None = None) -> None:
                 (str(phase)[:40], task_id),
             )
             con.commit()
+            return True
         finally:
             con.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("任务 %s 阶段写入失败：%s", task_id, str(exc)[:200])
+        return False
 
 
 def record_completion(task_id: str, *, goal: str = "", status: str = "",
                       report: str = "", steps: list | None = None,
                       logs: list | None = None, acceptance: dict | None = None,
-                      db_path: str | None = None) -> None:
-    """写入终态：状态 + 报告 + 步骤/日志 + **验收摘要与规则指纹**（不再丢弃）。"""
+                      db_path: str | None = None) -> bool:
+    """写入终态：状态 + 报告 + 步骤/日志 + **验收摘要与规则指纹**（不再丢弃）。
+
+    返回是否真的写入成功——调用方（编排器的 `_finalize_task`）据此决定是否把任务
+    记为已终结：写失败却记为已终结，库里就会永远停在 RUNNING 且不再重试。
+    """
     acceptance = acceptance or {}
     try:
         con = _connect(db_path)
         try:
+            _add_missing_columns(con)
             con.execute(
                 "INSERT INTO task_history"
                 "(task_id,goal,status,report,steps_json,logs_json,"
@@ -185,10 +233,12 @@ def record_completion(task_id: str, *, goal: str = "", status: str = "",
                  str(acceptance.get("rules_fingerprint") or ""), "完成"),
             )
             con.commit()
+            return True
         finally:
             con.close()
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.error("任务 %s 终态落库失败（任务库不可写）：%s", task_id, str(exc)[:200])
+        return False
 
 
 def read_task(task_id: str, db_path: str | None = None) -> dict:
@@ -293,6 +343,44 @@ def drop_snapshot(task_id: str) -> None:
         client.delete(SNAPSHOT_KEY.format(tid=task_id))
     except Exception:
         pass
+
+
+# 终态落库失败标记：独立键，不覆盖运行期快照（计划树/日志还用着那个键）
+PERSIST_FAIL_KEY = "task_state_persist_failed:{tid}"
+PERSIST_FAIL_TTL = int(os.environ.get("WM_PERSIST_FAIL_TTL", "") or 7 * 86400)
+
+
+def _redis_client():
+    """任务状态用的 Redis 客户端（短超时 + 不重试，Redis 不在时 2 秒内失败）。"""
+    import redis
+    return redis.Redis(
+        host=os.environ.get("REDIS_HOST", "127.0.0.1"),
+        port=int(os.environ.get("REDIS_PORT", "6379") or 6379),
+        decode_responses=True, socket_connect_timeout=2, socket_timeout=2,
+        retry=_NO_REDIS_RETRY,
+    )
+
+
+def mark_persist_failed(task_id: str, reason: str) -> bool:
+    """记录"终态没能落库"：除日志外再留一个可查标记，避免只剩一行 warning 没人看见。"""
+    try:
+        _redis_client().setex(
+            PERSIST_FAIL_KEY.format(tid=task_id), PERSIST_FAIL_TTL,
+            json.dumps({"reason": str(reason)[:300], "ts": time.time()},
+                       ensure_ascii=False))
+        return True
+    except Exception:
+        return False
+
+
+def read_persist_failed(task_id: str) -> dict:
+    """读取落库失败标记（无标记或无 Redis 返回空 dict）。"""
+    try:
+        raw = _redis_client().get(PERSIST_FAIL_KEY.format(tid=task_id))
+        data = json.loads(raw) if raw else {}
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
 
 def task_projection(task_id: str, db_path: str | None = None) -> dict:

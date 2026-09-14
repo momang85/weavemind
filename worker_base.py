@@ -17,6 +17,7 @@ import time
 from abc import ABC, abstractmethod
 from typing import Any
 
+import db_paths
 from common import AgentRegistry, MessagingClient
 
 # ---------------------------------------------------------------------------
@@ -1176,7 +1177,7 @@ def main() -> None:
     # 从环境变量读取配置，提供合理的默认值
     redis_host = os.environ.get("REDIS_HOST", "localhost")
     redis_port = int(os.environ.get("REDIS_PORT", "6379"))
-    db_path = os.environ.get("REGISTRY_DB", "agents.db")
+    db_path = db_paths.resolve_db_path()
 
     logger.info(
         "Starting SearchAgent (Redis: %s:%d, DB: %s)",

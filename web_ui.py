@@ -6,6 +6,7 @@ from urllib.parse import urlparse, unquote
 import redis
 
 from audit_logger import audit_log, read_audit
+import db_paths
 from workspace import (
     _safe_project,
     list_projects,
@@ -23,7 +24,9 @@ _NO_REDIS_RETRY = _Retry(_NoBackoff(), 0)
 
 REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
-DB_PATH = os.environ.get("REGISTRY_DB", "agents.db")
+# 任务库路径：与 task_state / worker / 编排器共用同一解析入口（此前本模块读
+# REGISTRY_DB 的相对默认值，与 task_state 的 AGENTS_DB 分叉；Docker 下两库不一致）
+DB_PATH = db_paths.resolve_db_path()
 PORT = int(os.environ.get("WEB_PORT", "8080"))
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 PROJECT_DIR = os.path.join(tempfile.gettempdir(), "agent_workspace", "project")
@@ -4113,7 +4116,8 @@ def _post_task(self, p, body, admin):
                 context=context,
                 auto_run=auto_run,
                 template_steps=template_steps,
-                user_id=str(body.get("user_id") or ""),
+                # 提交人取会话身份：此前取请求体的 user_id，客户端可自报任意提交人
+                user_id=str(admin.get("user") or ""),
                 report_confirm=report_confirm,
             )
             tid = submitted["task_id"]

@@ -23,6 +23,8 @@ from collections import defaultdict
 from datetime import datetime, timezone
 from threading import Lock
 
+import db_paths
+
 import redis
 
 # Redis 客户端统一关掉 redis-py 的内建重试：默认重试会把 socket_connect_timeout
@@ -58,8 +60,7 @@ def _db_task_totals() -> dict:
     """
     try:
         import sqlite3
-        path = os.environ.get("AGENTS_DB") or os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "agents.db")
+        path = db_paths.resolve_db_path()
         db = sqlite3.connect(path, timeout=5)
         try:
             total = db.execute("SELECT COUNT(*) FROM task_history").fetchone()[0]

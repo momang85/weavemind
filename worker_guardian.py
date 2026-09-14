@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+import db_paths
 from common import MessagingClient, AgentRegistry
 
 logger = logging.getLogger(__name__)
@@ -519,7 +520,7 @@ def main() -> None:
 
     redis_host = os.environ.get("REDIS_HOST", "localhost")
     redis_port = int(os.environ.get("REDIS_PORT", "6379"))
-    db_path = os.environ.get("REGISTRY_DB", "agents.db")
+    db_path = db_paths.resolve_db_path()
     simulate = os.environ.get("GUARDIAN_SIMULATE", "0").lower() in ("1", "true", "yes")
 
     logger.info("Starting WorkerGuardian (Redis=%s:%d, simulate=%s)", redis_host, redis_port, simulate)

@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
+import db_paths
 from common import MessagingClient, AgentRegistry
 from llm_client import call_llm, LLMCallError
 
@@ -801,7 +802,7 @@ def main() -> None:
 
     redis_host = os.environ.get("REDIS_HOST", "localhost")
     redis_port = int(os.environ.get("REDIS_PORT", "6379"))
-    db_path = os.environ.get("REGISTRY_DB", "agents.db")
+    db_path = db_paths.resolve_db_path()
 
     logger.info("Starting EvolutionSandbox (Redis: %s:%d)", redis_host, redis_port)
 

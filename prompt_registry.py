@@ -6,6 +6,7 @@
   有覆盖则用覆盖版，否则用默认版。默认空注册表 = 与旧行为完全一致。
 """
 
+import db_paths
 import json
 import os
 import re
@@ -222,9 +223,7 @@ def _trigger_goal(task_id: str) -> str:
     goal = ""
     try:
         import sqlite3
-        db_path = os.environ.get("REGISTRY_DB") or os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "agents.db"
-        )
+        db_path = db_paths.resolve_db_path()
         con = sqlite3.connect(db_path, timeout=3)
         try:
             row = con.execute(

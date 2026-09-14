@@ -23,6 +23,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Any
 
+import db_paths
 from common import MessagingClient, AgentRegistry
 from evolution_sandbox import EvolutionSandbox
 from memory_manager import MemoryManager
@@ -197,7 +198,7 @@ def main() -> None:
 
     redis_host = os.environ.get("REDIS_HOST", "localhost")
     redis_port = int(os.environ.get("REDIS_PORT", "6379"))
-    db_path = os.environ.get("REGISTRY_DB", "agents.db")
+    db_path = db_paths.resolve_db_path()
     memory_dir = os.environ.get("MEMORY_DIR", "./chroma_memory")
     run_now = "--now" in sys.argv
 

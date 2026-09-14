@@ -31,6 +31,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+import db_paths
 import logging_setup
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -92,6 +93,14 @@ def _apply_env(cfg: dict) -> None:
     if redis_cfg.get("port") and not os.environ.get("REDIS_PORT"):
         os.environ["REDIS_PORT"] = str(redis_cfg["port"])
     os.environ["PYTHONIOENCODING"] = "utf-8"
+    # 任务库路径：所有子进程（编排器 / worker / web / 守护 / 调度）必须指向同一个文件，
+    # 否则会出现"提交受理、状态缺失"。历史上 web 侧读 REGISTRY_DB、task_state 读
+    # AGENTS_DB，Dockerfile 只设了前者，状态因此被写进既没建表、也不在挂载卷里的库。
+    # 这里统一解析后注入：WEAVEMIND_DB 为唯一入口，另两个变量保留给外部脚本读取。
+    db_file = db_paths.resolve_db_path()
+    os.environ["WEAVEMIND_DB"] = db_file
+    os.environ.setdefault("REGISTRY_DB", db_file)
+    os.environ.setdefault("AGENTS_DB", db_file)
 
 
 REDIS_SETUP_HINT = """\
