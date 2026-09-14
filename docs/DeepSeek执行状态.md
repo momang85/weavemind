@@ -22,6 +22,12 @@
 - `test_delivery_chain` 的 `TestSourceHealthRouting` / `TestSinaRankingAdapter` 未跑（本机访问不到新浪行情），由 CI 覆盖
 - CI 未跑：本机 git 代理 `localhost:7897` 未监听，`git push` 失败，本批提交仅存在本地
 
+**新环境实测补充（第一手，`docs/新手实测报告_20260914.md`）**
+
+- 首启把 Docker Desktop 拉起后，`code_execution` 实际在容器内跑通（图表 `grade=publish` 来自沙箱）→ 真实容器路径**间接**验证；对抗性隔离断言仍未做
+- **P0 前端缺陷已修（批 F1，本地提交）**：登录/创建管理员/退出白屏（原 `React #300/#310`）→ `App.tsx` 去掉早退后的 `useMemo` + `ErrorBoundary` 覆盖两条分支；浏览器复测退出与登录两次转换均正常、无未捕获错误。同批：演示模式不再发真实请求（快答停用 + 开关二次确认 + 顶部常驻提示）、首屏状态改"连接中"、指标页区分进行中/已完成、交付摘要不再自称"状态 SUCCESS"
+- 未修（已排序）：交付包内 `index.html` 编码缺陷已检出未拦截、图表分级未覆盖自动生成图、美股结构化财务链路未生效（金额溯源 0%）、便携 Redis 默认源为 GitHub（无代理会卡住）
+
 **阻塞与下一步**
 
 - 阻塞：无 Docker 守护进程（真实容器证据缺失）；git 代理未启动（无法推送 / 跑 CI）
