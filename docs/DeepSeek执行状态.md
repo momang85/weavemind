@@ -106,7 +106,23 @@
 - 三态分离：约 29 处静默 `catch {}` 尚未逐页改为"错误态 + 重试"（优先 History / TaskConsole / Memory /
   ReportViewer / useTaskLive）。逐页都要补错误态 UI，批量改容易引入回归，单独一批做
 
-## 六、阻塞与待验证
+## 六、F4 守卫固化（已落地）
+
+`test_frontend_guards.py` 由 13 项扩到 **27 项**（该文件已在 CI 内，由 `test_deploy_manifest` 的
+"每个 test 文件都进 CI"断言兜底），新增守卫：
+
+- **浮层必须走 `createPortal`**：并断言"`fixed inset-0` 数量 ≤ `createPortal(` 数量"——正是 F3a 实测到的
+  6388px 浮层那个坑。已用合成反例自证有齿（未挂 portal / 未引入 createPortal 两种写法都报红）
+- **报告页接线**：`covered_ratio`、`amount_rate`、`untraceable`、`unverifiable_count`、四项指纹字段、
+  `/acceptance/timeline`、结论卡口径（键 24 / 值 32 截断）、图表三件套（草稿级 / Esc / 下载图片）
+- **窄屏入口**：底栏 4+更多 收敛标记、抽屉含「演示模式」「退出登录」
+- **步骤详情**：`redactPaths` 不仅定义还要在实际渲染路径上用（≥4 处）、原始 JSON 默认不展开、
+  中文标签齐全、不得残留英文标签
+- **重跑必须确认**：且不得退回 `onClick={() => onSubmit(m.goal)}` 这种直接提交
+
+未纳入（依赖 F3b 第二批）："错误态 ≠ 空态"的断言。
+
+## 七、阻塞与待验证
 
 - **`docker-image` 作业本轮无本地复现**：本机到 `auth.docker.io` 超时（Docker Hub 不可达），镜像构建
   走不到 COPY 那步；修复依据是"COPY 源与干净检出不等价"这一确凿事实，最终确认只能靠 CI 复跑。

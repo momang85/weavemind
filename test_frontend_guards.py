@@ -282,5 +282,115 @@ class TestNoHookAfterEarlyReturn(unittest.TestCase):
                          "自检失败：正确写法被误报")
 
 
+class TestOverlaysEscapeTransformedAncestors(unittest.TestCase):
+    """浮层必须挂到 body（createPortal）。
+
+    报告容器带 `.animate-fade-in`（`will-change: opacity, transform`），而 transform / will-change
+    会为 `fixed` 后代新建**包含块**：留在树内的浮层会被拉到容器全高。实测图表放大浮层高 6408px、
+    按钮跑到视口之上（top=-106）；既有的分享对话框更糟——top=-5693，用户根本看不到、无法生成分享链接。
+    两处都改成 createPortal 后，浮层高度=视口高度、按钮均在视口内。
+    """
+
+    OVERLAY_FILES = (
+        "components/ReportViewer.tsx",              # 图表放大浮层 + 分享对话框
+        "components/AppLayout.tsx",                 # 窄屏「更多」抽屉
+        "components/console/ConsoleSideTabs.tsx",   # 重跑确认
+    )
+
+    def test_overlay_files_import_portal(self):
+        missing = [rel for rel in self.OVERLAY_FILES
+                   if "createPortal" not in (SRC / rel).read_text(encoding="utf-8")]
+        self.assertEqual(missing, [], f"这些文件有全屏浮层但没走 createPortal：{missing}")
+
+    def test_every_fullscreen_overlay_is_portaled(self):
+        bad = []
+        for rel in self.OVERLAY_FILES:
+            src = (SRC / rel).read_text(encoding="utf-8")
+            fixed = src.count("fixed inset-0")
+            portals = src.count("createPortal(")
+            if fixed > portals:
+                bad.append(f"{rel}: fixed inset-0 ×{fixed} > createPortal ×{portals}")
+        self.assertEqual(bad, [], f"有全屏浮层没挂到 body（会被祖先 transform 拉长）：{bad}")
+
+
+class TestReportPageWiring(unittest.TestCase):
+    """报告页必须渲染后端**早就在返回**的证据字段（F3a 之前这些字段一个都没上屏）。"""
+
+    def setUp(self):
+        self.text = (SRC / "components" / "ReportViewer.tsx").read_text(encoding="utf-8")
+
+    def test_traceability_fields_rendered(self):
+        for field in ("covered_ratio", "amount_rate", "untraceable", "unverifiable_count"):
+            self.assertIn(field, self.text, f"数字可信度卡缺少 {field}")
+
+    def test_fingerprint_fields_rendered(self):
+        for field in ("rules_version", "rules_fingerprint", "report_sha256", "evaluated_at"):
+            self.assertIn(field, self.text, f"证据指纹缺少 {field}")
+
+    def test_timeline_endpoint_wired(self):
+        self.assertIn("/acceptance/timeline", self.text, "验收时间线未接线")
+
+    def test_top_stats_matches_share_page_convention(self):
+        """结论卡与分享页同口径：列取表头含"指标"/"数值"者，键截 24 字、值截 32 字。"""
+        self.assertIn("parseTopStats", self.text)
+        self.assertIn("slice(0, 24)", self.text)
+        self.assertIn("slice(0, 32)", self.text)
+
+    def test_chart_figure_features(self):
+        self.assertIn("草稿级", self.text, "缺少草稿图标签")
+        self.assertIn("Escape", self.text, "图表放大缺 Esc 关闭")
+        self.assertIn("下载图片", self.text, "缺单图下载")
+
+
+class TestMobileEntryPoints(unittest.TestCase):
+    """窄屏必须有演示开关与退出登录入口：此前两者都带 hidden sm:flex / hidden md:flex，
+    <640px 完全够不到（模拟实测发现）。"""
+
+    def setUp(self):
+        self.text = (SRC / "components" / "AppLayout.tsx").read_text(encoding="utf-8")
+
+    def test_bottom_nav_trimmed_with_more_entry(self):
+        self.assertIn("MOBILE_PRIMARY", self.text, "底栏未做 4+更多 收敛")
+        self.assertIn("MOBILE_MORE", self.text, "缺少其余页面的窄屏入口")
+
+    def test_mobile_drawer_has_demo_and_logout(self):
+        for label in ("退出登录", "演示模式"):
+            self.assertIn(label, self.text, f"窄屏抽屉缺少 {label}")
+
+
+class TestStepInspectorHygiene(unittest.TestCase):
+    """步骤详情：中文字段、结果白名单、本机路径脱敏、原始 JSON 默认折叠。"""
+
+    def setUp(self):
+        self.text = (SRC / "components" / "StepInspector.tsx").read_text(encoding="utf-8")
+
+    def test_paths_are_redacted(self):
+        self.assertIn("export function redactPaths", self.text)
+        self.assertGreaterEqual(self.text.count("redactPaths("), 4,
+                                "脱敏函数定义了却没在实际渲染路径上使用")
+
+    def test_raw_json_is_opt_in(self):
+        self.assertIn("查看原始 JSON", self.text)
+        self.assertIn("useState(false)", self.text, "原始 JSON 不应默认展开")
+
+    def test_chinese_labels_present(self):
+        for label in ("步骤详情", "能力", "执行体", "指令", "执行结果"):
+            self.assertIn(label, self.text, f"步骤详情缺少中文标签：{label}")
+
+    def test_no_english_field_labels_left(self):
+        for legacy in (">Step Details<", ">Capability<", ">Instruction<", ">Result<", ">Decision Trace<"):
+            self.assertNotIn(legacy, self.text, f"仍有英文标签 {legacy}")
+
+
+class TestRerunRequiresConfirmation(unittest.TestCase):
+    """重跑会重新规划并消耗额度，必须先确认（此前点一下就跑）。"""
+
+    def test_rerun_opens_confirmation(self):
+        text = (SRC / "components" / "console" / "ConsoleSideTabs.tsx").read_text(encoding="utf-8")
+        self.assertIn("确认重跑", text, "重跑没有二次确认")
+        self.assertNotIn("onClick={() => onSubmit(m.goal)}", text,
+                         "重跑按钮又变回直接提交（绕过确认）")
+
+
 if __name__ == "__main__":
     unittest.main()
