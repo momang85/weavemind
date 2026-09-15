@@ -117,7 +117,7 @@ export default function HealthPage() {
         ))}
       </div>
 
-      <div className="grid grid-cols-5 gap-5">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5 sm:gap-5">
         <div className="col-span-3 bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
           <div className="flex items-center justify-between px-5 py-3 border-b border-slate-800">
             <div className="flex items-center gap-2 text-sm text-slate-300 font-medium"><Activity className="w-4 h-4 text-cyan-400" />Event Timeline</div>

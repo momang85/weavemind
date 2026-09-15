@@ -72,7 +72,7 @@ export default function Evals() {
             {recent.map((r, i) => (
               <div key={i} className="bg-slate-800/40 border border-slate-800 rounded-lg p-3">
                 <div className="text-slate-400 text-xs mb-1 truncate">{r.task_id}</div>
-                <div className="grid grid-cols-4 gap-2">
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
                   {metrics.map((m) => (
                     <div key={m} className="text-xs text-slate-500">
                       {m}: <span className="text-cyan-300 font-semibold">{typeof r.scores?.[m] === 'number' ? r.scores[m].toFixed(2) : '—'}</span>

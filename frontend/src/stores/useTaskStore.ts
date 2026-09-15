@@ -14,6 +14,7 @@ export const useTaskStore = create<TaskState & {
   setLogs: (entries: LogEntry[]) => void
   setReport: (report: TaskReport) => void
   updateAgents: (list: AgentInfo[]) => void
+  setLiveTransport: (t: 'sse' | 'polling' | 'idle') => void
   toggleDemo: (force?: boolean) => void
   fetchSystemStatus: () => Promise<void>
   reset: () => void
@@ -30,6 +31,8 @@ export const useTaskStore = create<TaskState & {
   report: null,
   agents: [],
   connected: false,
+  // 实时通道状态：'sse' 正常 / 'polling' 已降级（顶部提示，避免"数据好像不动了"没人解释）
+  liveTransport: 'idle' as 'sse' | 'polling' | 'idle',
   demoMode: new URLSearchParams(window.location.search).has('demo'),
   systemStatus: null,
 
@@ -63,6 +66,8 @@ export const useTaskStore = create<TaskState & {
   setReport: (report) => set({ report, status: 'completed' }),
 
   updateAgents: (agents) => set({ agents }),
+
+  setLiveTransport: (t) => set({ liveTransport: t }),
 
 
   toggleDemo: (force) => {

@@ -186,8 +186,15 @@ export default function TaskConsole() {
   }, [goal, project, status, demoMode, activeConversationId, confirmMode, templateName, userContext,
       startTask, addLog, setActiveConversation])
 
-  const viewFullReport = useCallback(async (tid: string) => {
-    try {
+  // 「改为修改目标」：把目标填回提交框并滚回提交区，不自动提交
+  const prefillGoal = useCallback((g: string) => {
+    setGoal(g)
+    const main = document.querySelector('main')
+    if (main) main.scrollTo({ top: 0, behavior: 'smooth' })
+    else window.scrollTo({ top: 0, behavior: 'smooth' })
+  }, [])
+
+  const viewFullReport = useCallback(async (tid: string) => {    try {
       const res = await fetch('/task/' + tid)
       const d = await res.json()
       const steps = d.steps ?? []
@@ -299,7 +306,7 @@ export default function TaskConsole() {
           convMessages={convMessages}
           resultItems={resultItems} activeConversationId={activeConversationId}
           gapsFor={gapsFor} onToggleGaps={toggleGaps}
-          onViewReport={viewFullReport} onSubmit={submit} />
+          onViewReport={viewFullReport} onSubmit={submit} onPrefillGoal={prefillGoal} />
       </div>
 
       <ReportViewer />

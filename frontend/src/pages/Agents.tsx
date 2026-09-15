@@ -37,13 +37,14 @@ function timeAgo(iso: string) {
 // （此前的本地实现把"忙碌"画成蓝色、并给空闲态显示英文 "Idle"）
 
 function AgentCard({
-  agent, isAutoGen, expanded, onToggle, onKill
+  agent, isAutoGen, expanded, onToggle, onKill, demoMode
 }: {
   agent: AgentInfo & { load?: string; avgTime?: number; successRate?: number; tasks?: any[] }
   isAutoGen: boolean
   expanded: boolean
   onToggle: () => void
   onKill: (id: string) => void
+  demoMode: boolean
 }) {
   const load = agent.load ?? agent.status?.match(/active:(\d+)/)?.[1] ?? '0'
   const maxLoad = agent.status?.match(/\/(\d+)/)?.[1] ?? '5'
@@ -97,9 +98,10 @@ function AgentCard({
 
         <button
           onClick={() => onKill(agent.agent_id)}
-          disabled={!agent.status || agent.status.startsWith('offline')}
+          disabled={demoMode || !agent.status || agent.status.startsWith('offline')}
+          title={demoMode ? '演示模式下已停用（会真的终止本机智能体进程）' : '终止该智能体进程'}
           className="mt-3 w-full flex items-center justify-center gap-1.5 text-xs text-red-400/80 hover:text-red-400 py-1.5 rounded-lg hover:bg-red-500/10 transition-colors disabled:opacity-30 disabled:cursor-not-allowed">
-          <Power className="w-3.5 h-3.5" /> Terminate
+          <Power className="w-3.5 h-3.5" /> 终止
         </button>
 
         {/* Expand toggle */}
@@ -177,6 +179,7 @@ export default function AgentsPage() {
   const [filter, setFilter] = useState<string | null>(null)
   const connected = useTaskStore(s => s.connected)
   const agents = useTaskStore(s => s.agents)
+  const demoMode = useTaskStore(s => s.demoMode)
   const fetchSystemStatus = useTaskStore(s => s.fetchSystemStatus)
 
   // 复用全局 /api/status 通道（AppLayout 3s 轮询已覆盖），删除本页重复 2s poller
@@ -253,7 +256,7 @@ export default function AgentsPage() {
       </div>
 
       {/* Stats */}
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         {[
           { label: '总计', value: agents.length, color: 'text-cyan-400' },
           { label: '在线', value: agents.filter(a => !a.status?.startsWith('offline')).length, color: 'text-emerald-400' },
@@ -272,10 +275,12 @@ export default function AgentsPage() {
         <div className="text-xs font-semibold text-cyan-400">单智能体直发（不经编排器，直接 LLM 问答）</div>
         <div className="flex gap-2">
           <input value={directGoal} onChange={e => setDirectGoal(e.target.value)}
-            onKeyDown={e => { if (e.key === 'Enter') sendDirect() }}
-            placeholder="输入问题，如：贵州茅台最新财报要点是什么"
-            className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500" />
-          <button onClick={sendDirect} disabled={directLoading || !directGoal.trim()}
+            onKeyDown={e => { if (e.key === 'Enter' && !demoMode) sendDirect() }}
+            disabled={demoMode}
+            placeholder={demoMode ? '演示模式下已停用（直发会调用真实付费模型）' : '输入问题，如：贵州茅台最新财报要点是什么'}
+            className="flex-1 bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500 disabled:opacity-50" />
+          <button onClick={sendDirect} disabled={demoMode || directLoading || !directGoal.trim()}
+            title={demoMode ? '演示模式下已停用（直发会调用真实付费模型）' : '不经编排器直接提问'}
             className="px-4 py-2 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 text-sm disabled:opacity-40 shrink-0">
             {directLoading ? '发送中…' : '发送'}
           </button>
@@ -338,6 +343,7 @@ export default function AgentsPage() {
             expanded={expanded.has(a.agent_id)}
             onToggle={() => toggle(a.agent_id)}
             onKill={killAgent}
+            demoMode={demoMode}
           />
         ))}
       </div>

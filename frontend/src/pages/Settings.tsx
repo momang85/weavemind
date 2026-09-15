@@ -9,6 +9,8 @@ function NotificationsSection() {
   const [ncfg, setNcfg] = useState<any>(null)
   const [saved, setSaved] = useState(false)
   const [error, setError] = useState('')
+  // hook 在早退之前（`if (!ncfg) return null` 之后调 hook 会触发 React #310）
+  const demoMode = useTaskStore(s => s.demoMode)
 
   const load = useCallback(() => {
     fetch('/api/notifications').then(r => r.json()).then(d => setNcfg(d.notifications || {})).catch(() => setError('加载通知配置失败'))
@@ -60,7 +62,9 @@ function NotificationsSection() {
         )
       })}
       <div className="flex items-center gap-3">
-        <button onClick={save} className="px-4 py-2 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 text-sm">保存通知配置</button>
+        <button onClick={save} disabled={demoMode}
+          title={demoMode ? '演示模式下已停用（保存会真实改写通知配置）' : '保存通知配置'}
+          className="px-4 py-2 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 text-sm disabled:opacity-40 disabled:cursor-not-allowed">保存通知配置</button>
         {saved && <span className="text-emerald-400 text-xs">已保存</span>}
         {error && <span className="text-amber-400 text-xs">{error}</span>}
       </div>
@@ -74,6 +78,7 @@ function ScheduledJobsSection() {
   const [recent, setRecent] = useState<any[]>([])
   const [error, setError] = useState('')
   const [nf, setNf] = useState({ name: '', goal: '', cron: '09:00' })
+  const demoMode = useTaskStore(s => s.demoMode)
 
   const load = useCallback(() => {
     fetch('/api/scheduled-jobs').then(r => r.json()).then(d => {
@@ -104,9 +109,10 @@ function ScheduledJobsSection() {
       </h2>
       {jobs.map(j => (
         <div key={j.name} className="flex items-center gap-3 border border-slate-800 rounded-lg px-4 py-3">
-          <input type="checkbox" checked={!!j.enabled}
+          <input type="checkbox" checked={!!j.enabled} disabled={demoMode}
+            title={demoMode ? '演示模式下已停用（会真实改定时任务）' : '启用/停用该定时任务'}
             onChange={e => act('update', { job: { ...j, enabled: e.target.checked }, name: j.name })}
-            className="accent-cyan-500" />
+            className="accent-cyan-500 disabled:opacity-40" />
           <div className="flex-1 min-w-0">
             <div className="text-sm text-slate-200 truncate">{j.name}
               <span className="ml-2 text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-400">{j.cron ? `每日 ${j.cron}` : `每 ${j.interval_minutes} 分钟`}</span>
@@ -126,8 +132,9 @@ function ScheduledJobsSection() {
               )
             })()}
           </div>
-          <button onClick={() => act('delete', { name: j.name })}
-            className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs">
+          <button onClick={() => act('delete', { name: j.name })} disabled={demoMode}
+            title={demoMode ? '演示模式下已停用（会真实删除定时任务）' : '删除该定时任务'}
+            className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs disabled:opacity-40">
             <Trash2 className="w-3 h-3" /> 删除
           </button>
         </div>
@@ -139,7 +146,8 @@ function ScheduledJobsSection() {
           className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200" />
         <input value={nf.goal} placeholder="任务目标" onChange={e => setNf({ ...nf, goal: e.target.value })}
           className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 md:col-span-2" />
-        <button onClick={() => act('add', { job: nf })} disabled={!nf.name || !nf.goal}
+        <button onClick={() => act('add', { job: nf })} disabled={demoMode || !nf.name || !nf.goal}
+          title={demoMode ? '演示模式下已停用（新增后会真实触发任务）' : '新增定时任务'}
           className="flex items-center justify-center gap-1 px-4 py-2 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 text-sm disabled:opacity-40">
           <Plus className="w-3.5 h-3.5" /> 新增任务
         </button>
@@ -440,6 +448,7 @@ function UsersSection() {
   const [users, setUsers] = useState<any[]>([])
   const [error, setError] = useState('')
   const [form, setForm] = useState({ username: '', password: '', role: 'viewer' })
+  const demoMode = useTaskStore(s => s.demoMode)
 
   const load = useCallback(() => {
     fetch('/api/users').then(r => r.json()).then(d => setUsers(d.users || [])).catch(() => setError('加载用户失败'))
@@ -475,19 +484,24 @@ function UsersSection() {
             </div>
             <div className="text-xs text-slate-600 mt-1">创建于 {u.created_at || '-'}</div>
           </div>
-          <select value={u.role} onChange={e => act('POST', '/api/users', { username: u.username, role: e.target.value })}
-            className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-xs text-slate-200">
+          <select value={u.role} disabled={demoMode}
+            title={demoMode ? '演示模式下已停用（会真实改用户权限）' : '修改该用户角色'}
+            onChange={e => act('POST', '/api/users', { username: u.username, role: e.target.value })}
+            className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-xs text-slate-200 disabled:opacity-40">
             <option value="admin">admin</option>
             <option value="viewer">viewer</option>
           </select>
           <button onClick={() => {
             const pwd = window.prompt(`为 ${u.username} 设置新密码（至少 8 位）`)
             if (pwd) act('POST', '/api/users', { username: u.username, password: pwd })
-          }} className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs">
+          }} disabled={demoMode}
+            title={demoMode ? '演示模式下已停用（会真实改密码）' : '设置新密码'}
+            className="px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs disabled:opacity-40">
             <Key className="w-3 h-3 inline" /> 改密
           </button>
-          <button onClick={() => act('DELETE', `/api/users/${encodeURIComponent(u.username)}`)}
-            className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs">
+          <button onClick={() => act('DELETE', `/api/users/${encodeURIComponent(u.username)}`)} disabled={demoMode}
+            title={demoMode ? '演示模式下已停用（会真实删除用户）' : '删除该用户'}
+            className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs disabled:opacity-40">
             <Trash2 className="w-3 h-3" /> 删除
           </button>
         </div>
@@ -505,7 +519,8 @@ function UsersSection() {
         <button onClick={async () => {
           const ok = await act('POST', '/api/users', form)
           if (ok) setForm({ username: '', password: '', role: 'viewer' })
-        }} disabled={!form.username || form.password.length < 8}
+        }} disabled={demoMode || !form.username || form.password.length < 8}
+          title={demoMode ? '演示模式下已停用（会真实创建用户）' : '创建用户'}
           className="flex items-center justify-center gap-1 px-4 py-2 rounded-lg bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 text-sm disabled:opacity-40">
           <Plus className="w-3.5 h-3.5" /> 新增用户
         </button>

@@ -1,7 +1,8 @@
 import { ReactNode, useState, useEffect } from 'react'
+import { createPortal } from 'react-dom'
 import { NavLink, useLocation } from 'react-router-dom'
 import { Settings } from 'lucide-react'
-import { Play, Users, Clock, Activity, PanelLeftClose, PanelLeft, Brain, FlaskConical, Layers, LogOut, Shield } from 'lucide-react'
+import { Play, Users, Clock, Activity, PanelLeftClose, PanelLeft, Brain, FlaskConical, Layers, LogOut, Shield, MoreHorizontal, X } from 'lucide-react'
 import { useTaskStore } from '../stores/useTaskStore'
 import { useVisibleInterval } from '../lib/useVisibleInterval'
 import { useDemoRunner } from '../stores/useDemoRunner'
@@ -21,8 +22,14 @@ const navItems = [
   { to: '/settings', icon: Settings, label: '设置' },
 ]
 
+// 窄屏底栏 5 项：前 4 个高频页 + 「更多」。10 项平铺时每项约 37px，
+// 且演示开关与退出登录此前在小屏完全不可达（都带 hidden sm:flex/md:flex）。
+const MOBILE_PRIMARY = navItems.slice(0, 4)
+const MOBILE_MORE = navItems.slice(4)
+
 export default function AppLayout({ children }: { children: ReactNode }) {
   const [collapsed, setCollapsed] = useState(window.innerWidth < 768)
+  const [moreOpen, setMoreOpen] = useState(false)
   const demoMode = useTaskStore(s => s.demoMode)
   const connected = useTaskStore(s => s.connected)
   const systemStatus = useTaskStore(s => s.systemStatus)
@@ -32,6 +39,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
   const logs = useTaskStore(s => s.logs)
   const report = useTaskStore(s => s.report)
   const status = useTaskStore(s => s.status)
+  const liveTransport = useTaskStore(s => s.liveTransport)
   const toggleDemo = useTaskStore(s => s.toggleDemo)
   const fetchSystemStatus = useTaskStore(s => s.fetchSystemStatus)
   const user = getAuthUser()
@@ -54,6 +62,9 @@ export default function AppLayout({ children }: { children: ReactNode }) {
     return () => { window.removeEventListener('resize', onResize) }
   }, [])
 
+  // 窄屏抽屉在切页后自动收起（否则点完页面还盖着）
+  useEffect(() => { setMoreOpen(false) }, [location.pathname])
+
   const titles: Record<string, string> = {
     '/': '任务控制台',
     '/agents': '智能体团队',
@@ -64,6 +75,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
     '/skills': 'Skill 管理',
     '/metrics': '指标看板',
     '/audit': '审计日志',
+    '/settings': '设置',
   }
 
   // 连接状态三态：首帧还没拿到过 /api/status 时不能说"离线"——那是"连接中"，
@@ -82,9 +94,9 @@ export default function AppLayout({ children }: { children: ReactNode }) {
 
   return (
     <div className="flex h-screen overflow-hidden console-layout">
-      {/* Mobile bottom nav */}
-      <nav className="md:hidden fixed inset-x-0 bottom-0 z-20 flex bg-slate-900 border-t border-slate-800 h-14">
-        {navItems.map(({ to, icon: Icon, label }) => (
+      {/* Mobile bottom nav：4 个高频页 + 更多（抽屉内含其余页面、演示开关、退出登录） */}
+      <nav className="md:hidden fixed inset-x-0 bottom-0 z-30 flex bg-slate-900 border-t border-slate-800 h-14">
+        {MOBILE_PRIMARY.map(({ to, icon: Icon, label }) => (
           <NavLink key={to} to={to}
             className={({ isActive }) =>
               `flex-1 flex flex-col items-center justify-center gap-0.5 text-xs transition-opacity duration-200 ${
@@ -93,7 +105,58 @@ export default function AppLayout({ children }: { children: ReactNode }) {
             <Icon className="w-5 h-5" />{label}
           </NavLink>
         ))}
+        <button onClick={() => setMoreOpen(true)}
+          className={`flex-1 flex flex-col items-center justify-center gap-0.5 text-xs ${
+            moreOpen ? 'text-cyan-400' : 'text-slate-500 opacity-70'}`}>
+          <MoreHorizontal className="w-5 h-5" />更多{demoMode ? ' · 演示' : ''}
+        </button>
       </nav>
+
+      {/* 窄屏「更多」抽屉：挂到 body，避免被带 transform 的祖先改变 fixed 参照 */}
+      {moreOpen && createPortal(
+        <div className="fixed inset-0 z-50 flex items-end bg-black/60 md:hidden"
+          onClick={() => setMoreOpen(false)}>
+          <div className="w-full max-h-[80vh] overflow-y-auto rounded-t-2xl border-t border-slate-700 bg-slate-900 p-4"
+            onClick={e => e.stopPropagation()}>
+            <div className="mb-3 flex items-center justify-between">
+              <div className="flex items-center gap-2 text-sm text-slate-300">
+                <MoreHorizontal className="w-4 h-4 text-cyan-400" /> 更多
+              </div>
+              <button onClick={() => setMoreOpen(false)} className="text-slate-500 hover:text-slate-300">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            {user && (
+              <div className="mb-3 flex items-center justify-between rounded-lg border border-slate-800 bg-slate-800/30 px-3 py-2">
+                <span className="text-xs text-slate-400">
+                  {user.username} · {user.role === 'admin' ? '管理员' : '只读'}
+                </span>
+                <button onClick={logout}
+                  className="flex items-center gap-1 rounded-lg px-2 py-1 text-xs text-slate-300 hover:bg-slate-800">
+                  <LogOut className="w-3.5 h-3.5" /> 退出登录
+                </button>
+              </div>
+            )}
+            <button onClick={onToggleDemo}
+              className={`mb-3 flex w-full items-center gap-2 rounded-lg border px-3 py-2 text-sm ${
+                demoMode ? 'border-purple-500/30 bg-purple-500/10 text-purple-400' : 'border-slate-700 text-slate-400'}`}>
+              <FlaskConical className="w-4 h-4" /> 演示模式 {demoMode ? 'ON（点此关闭）' : 'OFF（点此开启）'}
+            </button>
+            <div className="grid grid-cols-2 gap-2">
+              {MOBILE_MORE.map(({ to, icon: Icon, label }) => (
+                <NavLink key={to} to={to} onClick={() => setMoreOpen(false)}
+                  className={({ isActive }) =>
+                    `flex items-center gap-2 rounded-lg px-3 py-2.5 text-sm ${
+                      isActive ? 'bg-slate-800 text-cyan-400' : 'text-slate-400 hover:bg-slate-800/50'
+                    }`}>
+                  <Icon className="w-4 h-4 shrink-0" />{label}
+                </NavLink>
+              ))}
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
 
       {/* Desktop sidebar */}
       <aside className={`hidden md:flex flex-col ${collapsed ? 'w-16' : 'w-60'} bg-slate-900 border-r border-slate-800 transition-all duration-200 shrink-0`}>
@@ -165,7 +228,14 @@ export default function AppLayout({ children }: { children: ReactNode }) {
         {demoMode && (
           <div className="shrink-0 bg-violet-500/10 border-b border-violet-500/30 text-violet-300 text-xs px-4 md:px-6 py-2">
             演示模式：<span className="font-medium">控制台展示内置演示数据</span>，其余页面读的是真实环境（只读接口仍访问真实服务）；
-            写操作与付费操作（提交任务、快答、设置保存、记忆删除、触发演化等）已被拦截，不会真的改数据或花钱。点侧栏「演示 ON」退出。
+            写操作与付费操作（提交任务、快答、设置保存、记忆删除、触发演化等）已被拦截，不会真的改数据或花钱。
+            点左侧栏的「演示 ON」退出（窄屏在底栏「更多」里）。
+          </div>
+        )}
+        {liveTransport === 'polling' && !demoMode && (
+          <div className="shrink-0 bg-amber-500/10 border-b border-amber-500/30 text-amber-300 text-xs px-4 md:px-6 py-2">
+            实时通道已降级为轮询（每 2 秒拉一次）：进度仍会更新，但延迟比推送高；
+            通常是浏览器/代理不支持 SSE 或连接被中断，任务本身不受影响。
           </div>
         )}
         <main className="flex-1 overflow-auto p-4 md:p-6 mobile-scroll">

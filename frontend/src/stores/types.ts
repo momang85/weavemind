@@ -133,6 +133,8 @@ export interface TaskState {
   report: TaskReport | null
   agents: AgentInfo[]
   connected: boolean
+  /** 实时通道：sse 正常 / polling 已降级（降级时页面顶部提示） */
+  liveTransport: 'sse' | 'polling' | 'idle'
   demoMode: boolean
   systemStatus: SystemStatus | null
 }

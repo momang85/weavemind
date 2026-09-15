@@ -1,4 +1,5 @@
 import { memo, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { MessagesSquare, FolderOpen, Activity, Eye, RefreshCw } from 'lucide-react'
 import LiveActivity from '../LiveActivity'
 import { Alert, EmptyState, StatusBadge } from '../ui'
@@ -11,7 +12,7 @@ type Tab = 'live' | 'context' | 'results'
 export default memo(function ConsoleSideTabs({
   tab, setTab, taskId, isRunning,
   convMessages, resultItems, activeConversationId,
-  gapsFor, onToggleGaps, onViewReport, onSubmit,
+  gapsFor, onToggleGaps, onViewReport, onSubmit, onPrefillGoal,
 }: {
   tab: Tab
   setTab: (t: Tab) => void
@@ -24,7 +25,10 @@ export default memo(function ConsoleSideTabs({
   onToggleGaps: (tid: string) => void
   onViewReport: (tid: string) => void
   onSubmit: (goalOverride?: string) => void
+  onPrefillGoal?: (goal: string) => void
 }) {
+  // 重跑二次确认：此前点一下就直接重跑（会重新规划并消耗额度），且没说明会发生什么
+  const [rerunGoal, setRerunGoal] = useState<string | null>(null)
   // 步骤级流式输出（O-21）：运行中且停留在"实时动态"标签时才轮询
   // /api/task/<id>/stream；内容不变不 setState（此前每 1.5s 无条件写入新字符串）
   const [streamText, setStreamText] = useState('')
@@ -51,6 +55,40 @@ export default memo(function ConsoleSideTabs({
 
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden flex flex-col">
+      {/* 重跑确认：说明会发生什么，并给"改目标"的出口（此前点一下就重跑） */}
+      {rerunGoal !== null && createPortal(
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
+          onClick={() => setRerunGoal(null)}>
+          <div className="w-full max-w-md rounded-xl border border-slate-700 bg-slate-900 p-5"
+            onClick={e => e.stopPropagation()}>
+            <div className="mb-2 text-sm font-semibold text-slate-200">确认重跑？</div>
+            <p className="mb-3 text-xs leading-relaxed text-slate-400">
+              会用<b className="text-slate-300">同一目标</b>重新规划并执行，产生新的额度消耗；
+              原计划不会复用（复用原计划需要后端支持，当前按重新规划执行）。
+            </p>
+            <div className="mb-4 max-h-24 overflow-y-auto rounded-lg bg-slate-800/60 px-3 py-2 text-xs text-slate-300">
+              {rerunGoal}
+            </div>
+            <div className="flex flex-wrap justify-end gap-2">
+              <button onClick={() => setRerunGoal(null)}
+                className="rounded-lg bg-slate-800 px-3 py-2 text-xs text-slate-300 hover:bg-slate-700">
+                取消
+              </button>
+              {onPrefillGoal && (
+                <button onClick={() => { onPrefillGoal(rerunGoal); setRerunGoal(null) }}
+                  className="rounded-lg bg-slate-800 px-3 py-2 text-xs text-cyan-400 hover:bg-slate-700">
+                  改为修改目标
+                </button>
+              )}
+              <button onClick={() => { onSubmit(rerunGoal); setRerunGoal(null) }}
+                className="rounded-lg bg-cyan-500 px-3 py-2 text-xs font-semibold text-slate-950 hover:bg-cyan-400">
+                确认重跑
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body,
+      )}
       {/* 标签页：实时动态 / 对话上下文 / 项目结果 */}
       <div className="flex border-b border-slate-800 shrink-0">
         {([
@@ -110,7 +148,7 @@ export default memo(function ConsoleSideTabs({
                         className="flex items-center gap-1 text-xs text-cyan-400 hover:text-cyan-300">
                         <Eye className="w-3 h-3" /> 查看完整报告
                       </button>
-                      <button onClick={() => onSubmit(m.goal)}
+                      <button onClick={() => setRerunGoal(m.goal)}
                         className="flex items-center gap-1 text-xs text-violet-400 hover:text-violet-300">
                         <RefreshCw className="w-3 h-3" /> 重跑
                       </button>

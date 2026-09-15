@@ -848,7 +848,7 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
       ) : null}
 
       {/* Stats bar */}
-      <div className="grid grid-cols-4 gap-3">
+      <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
         {[
           { icon: Clock, label: '耗时', value: `${s.duration}s`, color: 'text-slate-400' },
           { icon: CheckCircle2, label: '成功率', value: `${rate}%`, color: 'text-emerald-400' },

@@ -11,7 +11,7 @@ export function useTaskLive(taskId: string | null) {
   const {
     demoMode,
     updatePlan, addLog, setReport,
-    fetchSystemStatus, setAwaitingConfirm, setRevision,
+    fetchSystemStatus, setAwaitingConfirm, setRevision, setLiveTransport,
   } = useTaskStore()
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const esRef = useRef<EventSource | null>(null)
@@ -20,7 +20,7 @@ export function useTaskLive(taskId: string | null) {
   const finished = useRef(false)
 
   useEffect(() => {
-    if (!taskId || demoMode) return
+    if (!taskId || demoMode) { setLiveTransport('idle'); return }
 
     seenLogs.current = new Set()
     lastHash.current = ''
@@ -32,6 +32,7 @@ export function useTaskLive(taskId: string | null) {
       stopped = true
       if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null }
       if (esRef.current) { esRef.current.close(); esRef.current = null }
+      setLiveTransport('idle')
     }
 
     const applySnapshot = async (d: any) => {
@@ -174,6 +175,7 @@ export function useTaskLive(taskId: string | null) {
       try {
         const es = new EventSource('/api/task/' + taskId + '/events')
         esRef.current = es
+        setLiveTransport('sse')
         es.addEventListener('snapshot', (ev) => {
           try {
             const msg = JSON.parse((ev as MessageEvent).data)
@@ -185,9 +187,10 @@ export function useTaskLive(taskId: string | null) {
           if (esRef.current === es) esRef.current = null
           // 终态后服务端主动断连（EventSource 会触发 onerror）：
           // 此时不再回退轮询，避免完成后的空转
-          if (!finished.current) startPolling()
+          if (!finished.current) { setLiveTransport('polling'); startPolling() }
         }
       } catch {
+        setLiveTransport('polling')
         startPolling()
       }
     }
