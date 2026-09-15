@@ -18,6 +18,7 @@ from __future__ import annotations
 import ast
 import fnmatch
 import re
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -43,7 +44,6 @@ REQUIRED_RESOURCES = (
     "templates.json",             # web_ui/orchestrator 读任务模板
     "config.example.json",        # 容器内首次配置的引导模板
     "frontend/dist",              # 由构建阶段产出
-    "prompts",                    # 提示词覆盖与注册表
     "skills",                     # 技能注册表（缺目录则记录教训失败）
     "evals",                      # 评测用例与自动生长
     "requirements-runtime.lock",  # 镜像安装依赖的依据
@@ -90,6 +90,16 @@ def _copy_records() -> list[dict]:
             "from_stage": from_stage,
         })
     return recs
+
+
+def _tracked_paths() -> set[str] | None:
+    """git 索引里的全部路径。只有这些条目会出现在干净检出里（CI 就是这么取的），
+    本地"目录还在"是因为里面躺着被 gitignore 的产物。"""
+    out = subprocess.run(["git", "ls-files"], cwd=ROOT, capture_output=True,
+                         text=True, encoding="utf-8", errors="replace")
+    if out.returncode != 0:
+        return None
+    return {line.strip() for line in out.stdout.splitlines() if line.strip()}
 
 
 def _implanted_entries(recs: list[dict]) -> set[str]:
@@ -198,6 +208,26 @@ class TestDockerfileManifest(unittest.TestCase):
     def test_config_json_is_not_baked(self):
         """真实配置（含密钥）绝不能烘进镜像；容器里靠引导或挂载。"""
         self.assertNotIn("config.json", self.entries)
+
+    def test_copy_sources_exist_in_clean_checkout(self):
+        """COPY 的源必须在干净检出里存在。反例：`COPY prompts/ ./prompts/`——该目录
+        本地只装 gitignore 的 overrides.json，CI 检出后目录根本不存在，构建以
+        "not found" 失败；本地因为目录还在，怎么跑都看不出问题。"""
+        tracked = _tracked_paths()
+        if tracked is None:
+            self.skipTest("非 git 工作树，无法核对检出等价性")
+        bad: list[str] = []
+        for rec in self.recs:
+            if rec["from_stage"]:
+                continue
+            for src in rec["sources"]:
+                s = src.replace("\\", "/").rstrip("/")
+                if "*" in s or "?" in s:
+                    if not any(fnmatch.fnmatch(t, s) for t in tracked):
+                        bad.append(f"{src}（通配式在检出里无匹配）")
+                elif not any(t == s or t.startswith(s + "/") for t in tracked):
+                    bad.append(src)
+        self.assertEqual(bad, [], f"这些 COPY 源不在干净检出里，构建必失败：{bad}")
 
 
 # ── 运行依赖锁 ────────────────────────────────────────────────────

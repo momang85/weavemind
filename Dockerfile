@@ -23,7 +23,8 @@ COPY adapters/ ./adapters/
 COPY validators/ ./validators/
 COPY skills/ ./skills/
 COPY evals/ ./evals/
-COPY prompts/ ./prompts/
+# 不拷 prompts/：它只装自迭代产出的 overrides.json（已 gitignore），干净检出里目录不存在，
+# COPY 会直接失败；override 属于运行时可写状态，prompt_registry 写入时自建目录，缺失即空覆盖。
 COPY templates.json config.example.json ./
 
 # 数据目录（通过卷挂载持久化）

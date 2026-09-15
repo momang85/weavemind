@@ -21,9 +21,22 @@ class TestSettingsSchema(unittest.TestCase):
     """清单必须覆盖系统实际读取的配置面（否则设置页又漏项）。"""
 
     def test_all_config_sections_covered_or_declared(self):
+        """清单必须覆盖"实际配置里出现的段"。
+
+        配置来源优先用本机 `config.json`（含真实部署的段），**没有时回退
+        `config.example.json`**——前者被 gitignore，CI/新检出没有它，此前该用例会直接
+        抛 FileNotFoundError（属"测试依赖本地环境"，与指标统计那类问题同源）。
+        """
         root = Path(__file__).resolve().parent
-        with open(root / "config.json", encoding="utf-8") as fh:
-            cfg = json.load(fh)
+        for name in ("config.json", "config.example.json"):
+            path = root / name
+            if path.exists():
+                with open(path, encoding="utf-8") as fh:
+                    cfg = json.load(fh)
+                used = name
+                break
+        else:
+            self.fail("既没有 config.json 也没有 config.example.json：无法校验配置清单覆盖")
         declared = {e["path"].split(".")[0] for e in ss.iter_entries()}
         known_not_config = {"PUBLIC_BASE_URL", "BUDGET_MONTHLY_USD", "WEB_PORT",
                             "LLM_REQUEST_TIMEOUT", "WM_LOCAL_URL", "WM_LORA_TOKEN",
@@ -33,7 +46,7 @@ class TestSettingsSchema(unittest.TestCase):
             if key not in declared
             and key not in ("users", "scheduled_jobs", "audit", "notifications")
         ]
-        self.assertEqual(missing, [], f"config.json 里这些段没进清单：{missing}")
+        self.assertEqual(missing, [], f"{used} 里这些段没进清单：{missing}")
         self.assertTrue(known_not_config <= declared,
                         "仅环境变量的项也必须出现在清单里（否则用户看不到）")
 
