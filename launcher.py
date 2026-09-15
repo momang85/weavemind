@@ -153,6 +153,40 @@ def _check_redis_or_exit() -> None:
     sys.exit(1)
 
 
+def _wait_redis_ready(timeout: float | None = None) -> bool:
+    """等 Redis 真正能处理命令后再拉起服务（最多等 WM_REDIS_READY_WAIT 秒，默认 20）。
+
+    背景（实测）：`_ensure_redis_available()` 只保证"已启动/在运行"，而便携 Redis 从
+    "端口在听"到"能响应命令"还有一段时间；此前固定 `time.sleep(2)` 不够时，编排器的
+    MessagingClient 会在启动期连不上 Redis 而进入重试风暴、静默挂住——表现为
+    "启动校验 15/16、orchestrator 未存活"且它的日志停在 AgentRegistry 之后没有任何进展。
+    """
+    host = os.environ.get("REDIS_HOST", "localhost")
+    try:
+        port = int(os.environ.get("REDIS_PORT", "6379") or 6379)
+    except Exception:
+        port = 6379
+    try:
+        budget = float(timeout if timeout is not None
+                       else (os.environ.get("WM_REDIS_READY_WAIT", "20") or 20))
+    except Exception:
+        budget = 20.0
+    log = logging.getLogger(__name__)
+    started = time.time()
+    deadline = started + max(0.0, budget)
+    while True:
+        if _redis_reachable(host, port):
+            waited = time.time() - started
+            if waited > 0.5:
+                log.info("Redis %s:%d 已就绪（等待 %.1fs）", host, port, waited)
+            return True
+        if time.time() >= deadline:
+            log.warning("Redis %s:%d 在 %.0fs 内仍未就绪，继续启动（服务会自行重试）",
+                        host, port, budget)
+            return False
+        time.sleep(0.5)
+
+
 def _ensure_redis_available() -> None:
     """启动前的 Redis 再确认：停掉上一轮服务后，若 Redis 已不可达则自动补齐。
 
@@ -602,7 +636,7 @@ def start_services() -> dict:
     if stopped:
         logger.info("Stopped: %s", ", ".join(stopped))
     _ensure_redis_available()
-    time.sleep(2)
+    _wait_redis_ready()
 
     services = build_services(cfg)
     pids: dict = {"services": {}}

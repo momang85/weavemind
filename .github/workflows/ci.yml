@@ -46,6 +46,8 @@ jobs:
         run: python test_metrics_scope.py
       - name: Frontend invariants (source-level guards)
         run: python test_frontend_guards.py
+      - name: Startup readiness (cold-start race)
+        run: python test_startup_readiness.py
       - name: Deploy manifest & lock guards
         run: python test_deploy_manifest.py
       - name: Task state tests

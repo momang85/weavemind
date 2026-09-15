@@ -303,6 +303,11 @@ class MessagingClient:
                     socket_connect_timeout=5,
                     socket_keepalive=True,
                     health_check_interval=30,
+                    # 关掉 redis-py 内建重试（文件顶部定义的 _NO_REDIS_RETRY）：默认重试会把
+                    # socket_connect_timeout 叠成分钟级，冷启动时 Redis 尚未就绪 → 编排器
+                    # 在构造期静默挂住（实测栈：common.py _connect → redis ping →
+                    # retry.call_with_retry），最终"服务 15/16、编排器未存活"且日志无进展。
+                    retry=_NO_REDIS_RETRY,
                 )
                 r.ping()
                 return r
