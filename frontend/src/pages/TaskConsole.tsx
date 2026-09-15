@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useMemo } from 'react'
 import { useTaskStore } from '../stores/useTaskStore'
 import { useTaskLive } from '../stores/useTaskLive'
 import ReportViewer from '../components/ReportViewer'
@@ -45,6 +45,9 @@ export default function TaskConsole() {
   const [importMsg, setImportMsg] = useState<{ name: string; note: string }[]>([])
   // P0-1：SUCCESS_WITH_ISSUES 的验收缺口明细（按任务缓存，点击展开）
   const [gapsFor, setGapsFor] = useState<Record<string, string[]>>({})
+  // 交付节奏提示的数据源（ETA 用历史样本，已运行时长用 startedAt）
+  const startedAt = useTaskStore(s => s.startedAt)
+  const systemStatus = useTaskStore(s => s.systemStatus)
 
   useTaskLive(demoMode ? null : taskId)
 
@@ -275,6 +278,28 @@ export default function TaskConsole() {
   }, [reset])
 
   const isRunning = status === 'running'
+
+  // 交付节奏：近 N 次已完成任务的平均耗时（无样本时明说未知，不给假预期）；
+  // 运行中显示已运行时长，每 30s 走一次，避免看着不动以为卡死
+  const [nowTick, setNowTick] = useState(() => Date.now())
+  useEffect(() => {
+    if (!isRunning) return
+    const t = setInterval(() => setNowTick(Date.now()), 30000)
+    return () => clearInterval(t)
+  }, [isRunning])
+  const etaText = useMemo(() => {
+    const recent = (systemStatus?.recent || []) as any[]
+    const mins = recent
+      .filter(r => r?.created_at && r?.completed_at)
+      .map(r => (new Date(r.completed_at).getTime() - new Date(r.created_at).getTime()) / 60000)
+      .filter(m => Number.isFinite(m) && m > 0 && m < 24 * 60)
+    if (!mins.length) return '预计时长未知（暂无已完成任务样本）'
+    const avg = mins.reduce((a, b) => a + b, 0) / mins.length
+    return `近 ${mins.length} 次任务平均 ${avg < 1 ? '不足 1' : Math.round(avg)} 分钟`
+  }, [systemStatus])
+  const elapsedText = isRunning && startedAt
+    ? `已运行 ${Math.max(0, Math.round((nowTick - startedAt) / 60000))} 分钟`
+    : null
   const resultItems = activeConversationId
     ? convMessages.filter(m => m.status !== 'PENDING')
     : recentTasks.filter(t => t.status !== 'PENDING')
@@ -292,7 +317,7 @@ export default function TaskConsole() {
         isRunning={isRunning} demoMode={demoMode}
         activeConversationId={activeConversationId}
         lastGoal={lastGoal} reportSummary={report?.summary} status={status}
-        taskId={taskId}
+        taskId={taskId} etaText={etaText} elapsedText={elapsedText}
         onSubmit={submit} onNewConversation={newConversation} />
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 min-h-[400px]">

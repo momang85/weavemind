@@ -44,7 +44,7 @@ export default memo(function SubmitPanel({
   templateName, setTemplateName,
   userContext, setUserContext, importMsg, setImportMsg,
   isRunning, demoMode, activeConversationId, lastGoal, reportSummary, status,
-  taskId, onSubmit, onNewConversation,
+  taskId, etaText, elapsedText, onSubmit, onNewConversation,
 }: {
   goal: string
   setGoal: (v: string) => void
@@ -65,6 +65,8 @@ export default memo(function SubmitPanel({
   reportSummary?: string
   status: string
   taskId?: string | null
+  etaText?: string
+  elapsedText?: string | null
   onSubmit: (goalOverride?: string) => void
   onNewConversation: () => void
 }) {
@@ -250,6 +252,13 @@ export default memo(function SubmitPanel({
             <Plus className="w-4 h-4" /> 新对话
           </button>
         </div>
+        {(elapsedText || (!isRunning && etaText)) && (
+          <div className="mt-2 text-xs text-slate-500">
+            {isRunning
+              ? `${elapsedText || ''}${elapsedText && etaText && !etaText.includes('未知') ? ' · ' : ''}${etaText && !etaText.includes('未知') ? etaText : ''}`
+              : etaText}
+          </div>
+        )}
       </div>
 
       {/* 导入上下文（可选） */}
