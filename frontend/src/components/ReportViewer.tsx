@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo, useRef, memo } from 'react'
+import { createPortal } from 'react-dom'
 import type { ReactNode } from 'react'
 import ReactMarkdown, { defaultUrlTransform } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -28,7 +29,7 @@ import { useTaskStore } from '../stores/useTaskStore'
 import {
   FileDown, Package, ScrollText, Clock, CheckCircle2, AlertTriangle,
   ChevronDown, ChevronRight, Award, Zap, Download, ExternalLink, Play,
-  Share2, Link2, Copy, Check, X, Trash2, CalendarClock, ListTree, Quote,
+  Share2, Link2, Copy, Check, X, Trash2, CalendarClock, ListTree, Quote, Fingerprint,
 } from 'lucide-react'
 
 /* ===================== 报告结构化解析（纯函数，无新增依赖） ===================== */
@@ -246,6 +247,135 @@ function parseDisclaimer(md: string): DisclaimerResult {
   return { rest, disclaimer: text }
 }
 
+/* ───────────────── 结论卡 / 图表 / 证据指纹（F3a） ───────────────── */
+
+interface TopStat { k: string; v: string }
+
+/** 正文首张 Markdown 表格的前 4 行 → 结论卡。
+ *  与分享页 `web_ui._share_page_structured` 同口径：列取表头含"指标"/"数值"者，
+ *  缺省第 0/1 列；键截 24 字、值截 32 字。无表返回空数组（由调用方决定降级展示）。 */
+export function parseTopStats(md: string): TopStat[] {
+  let header: string[] = []
+  const rows: string[][] = []
+  for (const line of md.split('\n')) {
+    const t = line.trim()
+    if (!t.startsWith('|')) {
+      if (header.length) break
+      continue
+    }
+    const cells = t.replace(/^\|+|\|+$/g, '').split('|').map(c => c.trim())
+    if (cells.every(c => !c || /^[-:\s—]*$/.test(c))) continue
+    if (!header.length) { header = cells; continue }
+    rows.push(cells)
+    if (rows.length >= 4) break
+  }
+  if (!header.length || !rows.length) return []
+  const kFind = header.findIndex(h => h.includes('指标') || h.includes('数值'))
+  const vFind = header.findIndex(h => h.includes('数值'))
+  const kIdx = kFind >= 0 ? kFind : 0
+  const vIdx = vFind >= 0 ? vFind : Math.min(1, header.length - 1)
+  return rows
+    .filter(r => r.length > vIdx && r[vIdx].trim())
+    .map(r => ({ k: (r.length > kIdx ? r[kIdx] : '').slice(0, 24), v: r[vIdx].slice(0, 32) }))
+}
+
+/** "补充图表（未达发布标准）"章节下的图片地址集合 —— 这些图不是发布级，需标"草稿级"。 */
+export function draftChartSrcs(md: string): string[] {
+  const out: string[] = []
+  let draft = false
+  for (const line of md.split('\n')) {
+    const heading = line.match(/^#{1,6}\s+(.*)$/)
+    if (heading) { draft = /补充图表|未达发布标准/.test(heading[1]); continue }
+    if (!draft) continue
+    for (const m of line.matchAll(/!\[[^\]]*\]\(([^)\s]+)/g)) {
+      if (!out.includes(m[1])) out.push(m[1])
+    }
+  }
+  return out
+}
+
+async function downloadViaBlob(url: string, name: string) {
+  try {
+    const res = await fetch(url)
+    if (!res.ok) return
+    const blob = await res.blob()
+    const href = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = href
+    a.download = name
+    a.click()
+    URL.revokeObjectURL(href)
+  } catch { /* 下载失败保持原状，不改页面状态 */ }
+}
+
+async function openViaBlob(url: string) {
+  try {
+    const res = await fetch(url)
+    if (!res.ok) return
+    window.open(URL.createObjectURL(await res.blob()), '_blank')
+  } catch { /* 打开失败保持原状 */ }
+}
+
+/** 报告内嵌图：图注（title/alt）+ 点击放大（Esc/遮罩关闭）+ 单图下载。 */
+function ReportImage({ src, alt, title, draft, taskId }: {
+  src?: string; alt?: string; title?: string; draft?: boolean; taskId?: string | null
+}) {
+  const [zoom, setZoom] = useState(false)
+  useEffect(() => {
+    if (!zoom) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setZoom(false) }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [zoom])
+  const raw = String(src || '')
+  if (!raw) return null
+  const caption = String(title || alt || '').trim()
+  const name = raw.split('/').pop()?.split('?')[0] || 'chart.png'
+  const url = raw.startsWith('http') || raw.startsWith('/')
+    ? raw
+    : (taskId ? `/files/${encodeURIComponent(taskId)}/${encodeURIComponent(raw)}` : raw)
+  return (
+    <figure className="my-4 rounded-xl border border-slate-800 bg-slate-900/60 p-2">
+      <button type="button" onClick={() => setZoom(true)}
+        title="点击放大（Esc 关闭）" className="block w-full cursor-zoom-in">
+        <img src={url} alt={caption || '报告图表'} loading="lazy"
+          className="mx-auto max-h-[420px] w-auto rounded-lg" />
+      </button>
+      <figcaption className="mt-2 flex flex-wrap items-center gap-2 px-1 pb-1">
+        {draft && (
+          <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-xs text-amber-400">草稿级</span>
+        )}
+        <span className="min-w-0 flex-1 truncate text-xs text-slate-400" title={caption}>
+          {caption || name}
+        </span>
+        <button type="button" onClick={() => downloadViaBlob(url, name)}
+          className="rounded bg-slate-800 px-2 py-1 text-xs text-slate-300 hover:bg-slate-700">
+          下载图片
+        </button>
+      </figcaption>
+      {zoom && createPortal(
+        <div role="dialog" aria-modal="true" onClick={() => setZoom(false)}
+          className="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-slate-950/90 p-4">
+          <img src={url} alt={caption || '报告图表'} onClick={e => e.stopPropagation()}
+            className="max-h-[75vh] max-w-full rounded-lg bg-white/5 object-contain" />
+          <div className="flex items-center gap-3" onClick={e => e.stopPropagation()}>
+            <span className="max-w-[60vw] truncate text-xs text-slate-300">{caption || name}</span>
+            <button type="button" onClick={() => downloadViaBlob(url, name)}
+              className="rounded bg-slate-800 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-700">
+              下载图片
+            </button>
+            <button type="button" onClick={() => setZoom(false)}
+              className="rounded bg-slate-800 px-3 py-1.5 text-xs text-slate-200 hover:bg-slate-700">
+              关闭（Esc）
+            </button>
+          </div>
+        </div>,
+        document.body,
+      )}
+    </figure>
+  )
+}
+
 const CITATION_SEQ_RE = /(^|[^\[!\]\w])(\[\d{1,2}\](?:\s*\[\d{1,2}\])*)(?![(:\d])/gm
 
 /** 将 [1]、[1][2] 编号引用转换为 cite: 链接（由 a 组件渲染上标徽章） */
@@ -373,15 +503,25 @@ const markdownComponents = {
   code: CodeComponent,
 }
 
-export const ReportMarkdown = memo(function ReportMarkdown({ md, sources }: { md: string; sources: SourceItem[] }) {
+export const ReportMarkdown = memo(function ReportMarkdown({ md, sources, taskId }: {
+  md: string; sources: SourceItem[]; taskId?: string | null
+}) {
   citationSources = sources
   headingSeen = {}
+  // 图片组件需要知道哪些图落在"补充图表（未达发布标准）"之下，故按报告内容建一次映射
+  const draftSrcs = useMemo(() => new Set(draftChartSrcs(md)), [md])
+  const components = useMemo(() => ({
+    ...markdownComponents,
+    img: (props: { src?: string; alt?: string; title?: string }) => (
+      <ReportImage {...props} taskId={taskId} draft={draftSrcs.has(String(props.src || ''))} />
+    ),
+  }), [draftSrcs, taskId])
 
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
       urlTransform={(url) => (url.startsWith('cite:') ? url : defaultUrlTransform(url))}
-      components={markdownComponents}
+      components={components}
     >
       {md}
     </ReactMarkdown>
@@ -409,6 +549,20 @@ export default memo(function ReportViewer() {
       .then(r => (r.ok ? r.json() : null))
       .then(d => { if (!cancelled && d && !d.error) setAccData(d) })
       .catch(() => {})
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskIdForFiles])
+  // F3a：验收事件流（反思重做/每轮验收可回放）+ 证据指纹折叠态
+  const [timeline, setTimeline] = useState<any[] | null>(null)
+  const [fingerprintOpen, setFingerprintOpen] = useState(false)
+  useEffect(() => {
+    setTimeline(null)
+    if (!taskIdForFiles) return
+    let cancelled = false
+    fetch('/api/task/' + taskIdForFiles + '/acceptance/timeline')
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (!cancelled && Array.isArray(d?.events)) setTimeline(d.events) })
+      .catch(() => { if (!cancelled) setTimeline([]) })
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskIdForFiles])
@@ -540,26 +694,11 @@ export default memo(function ReportViewer() {
   // 文件可能受鉴权保护（未分享任务）：走带 Authorization 头的 fetch + Blob 打开/下载，
   // 避免 window.open 新标签页不带 token 而 401。
   const openFile = async (name: string) => {
-    try {
-      const res = await fetch(fileUrl(name))
-      if (!res.ok) return
-      const blob = await res.blob()
-      window.open(URL.createObjectURL(blob), '_blank')
-    } catch { /* 打开失败静默 */ }
+    await openViaBlob(fileUrl(name))
   }
 
   const downloadFile = async (name: string) => {
-    try {
-      const res = await fetch(fileUrl(name))
-      if (!res.ok) return
-      const blob = await res.blob()
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = name.split('/').pop() || name
-      a.click()
-      URL.revokeObjectURL(url)
-    } catch { /* 下载失败静默 */ }
+    await downloadViaBlob(fileUrl(name), name.split('/').pop() || name)
   }
 
   // 任务完成自动滚动到报告顶部：report 引用变化（null→对象 / 切换任务 /
@@ -594,6 +733,8 @@ export default memo(function ReportViewer() {
       bodyMd,
       toc,
       sourceItems: sourcesResult.sources?.items ?? [],
+      // 结论卡取自正文首表（与分享页同口径；无表则空数组，由渲染端降级到验收数字）
+      topStats: parseTopStats(rawMd),
     }
   }, [report])
 
@@ -601,7 +742,9 @@ export default memo(function ReportViewer() {
 
   const s = report.stats || { totalSteps: report.steps?.length ?? 0, successSteps: 0, failedSteps: 0, duration: 0 }
   const rate = s.totalSteps > 0 ? Math.round((s.successSteps / s.totalSteps) * 100) : 100
-  const { freshness, sourcesResult, disclaimerResult, bodyMd, toc, sourceItems } = parsed!
+  // 验收器统计（与报告页可信度卡同一份数据；未加载时为 null，渲染端据此显示"未知"而非 0）
+  const accTrace = accData?.checks?.number_traceability || null
+  const { freshness, sourcesResult, disclaimerResult, bodyMd, toc, sourceItems, topStats } = parsed!
 
   const scrollToHeading = (id: string) => scrollToId(id)
 
@@ -659,6 +802,51 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
 
   return (
     <div id="report-viewer" className="animate-fade-in space-y-5 scroll-mt-6">
+      {/* F3a 结论卡：报告正文首表前 4 行（与分享页同口径）；无表时降级到验收器数字统计 */}
+      {topStats.length > 0 ? (
+        <div className="rounded-xl border border-cyan-500/20 bg-slate-900 p-4">
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <Award className="h-4 w-4 text-cyan-400" />
+            <span className="text-sm font-semibold text-cyan-400">结论速览</span>
+            <span className="text-xs text-slate-500">取自报告正文首表前 4 行</span>
+          </div>
+          <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+            {topStats.map((it, i) => (
+              <div key={i} className="rounded-lg border border-slate-800 bg-slate-800/30 px-3 py-2">
+                <div className="truncate text-xs text-slate-400" title={it.k}>{it.k}</div>
+                <div className="mt-0.5 truncate font-semibold text-slate-100" title={it.v}>{it.v}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : accTrace ? (
+        <div className="rounded-xl border border-slate-800 bg-slate-900 p-4">
+          <div className="mb-3 flex flex-wrap items-center gap-2">
+            <ScrollText className="h-4 w-4 text-slate-400" />
+            <span className="text-sm font-semibold text-slate-300">结论速览</span>
+            <span className="text-xs text-slate-500">
+              报告正文没有可提取的表格，以下为验收器统计（非报告结论）
+            </span>
+          </div>
+          <div className="grid grid-cols-3 gap-3">
+            {[
+              { label: '关键数字', value: String(accTrace.total_count ?? 0) },
+              { label: '可溯源', value: String(accTrace.traceable_count ?? 0) },
+              {
+                label: '溯源率',
+                value: accTrace.covered_ratio != null
+                  ? `${Math.round(accTrace.covered_ratio * 100)}%` : '未知',
+              },
+            ].map(item => (
+              <div key={item.label} className="rounded-lg border border-slate-800 bg-slate-800/30 px-3 py-2">
+                <div className="text-xs text-slate-400">{item.label}</div>
+                <div className="mt-0.5 font-semibold text-slate-100">{item.value}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      ) : null}
+
       {/* Stats bar */}
       <div className="grid grid-cols-4 gap-3">
         {[
@@ -685,23 +873,73 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
           </div>
         </div>
 
-        {/* T4 溯源四档常驻徽章行：报告打开即展示（来自验收器全量报告） */}
-        {accData?.checks?.number_traceability && (() => {
-          const nt = accData.checks.number_traceability
+        {/* F3a 数字可信度卡：四档分类 + 溯源率/金额溯源率 + 不可溯源明细 + 口径（同一份验收器数据） */}
+        {accTrace && (() => {
+          const nt = accTrace
           const total = nt.total_count ?? 0
-          const rate = nt.covered_ratio != null ? Math.round(nt.covered_ratio * 100) : null
+          const ratio = nt.covered_ratio != null ? Math.round(nt.covered_ratio * 100) : null
+          const amountRate = nt.amount_rate != null ? Math.round(nt.amount_rate * 100) : null
+          const untraced: any[] = Array.isArray(nt.untraceable) ? nt.untraceable : []
+          const unverifiable = nt.unverifiable_count ?? untraced.length
+          const pass = nt.pass !== false
+          const DOMAIN_LABEL: Record<string, string> = {
+            financial: '财务', news: '新闻', crypto: '加密资产', macro: '宏观', research: '调研',
+          }
           return (
-            <div className="mx-4 mt-4 flex flex-wrap items-center gap-2 rounded-xl border border-cyan-500/20 bg-cyan-500/5 px-3.5 py-2.5">
-              <ScrollText className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-              <span className="text-xs font-semibold text-cyan-400">数字溯源</span>
-              <span className="text-xs text-slate-400">共 {total} 个：</span>
-              <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 text-xs">引用 {nt.cited_count ?? 0}</span>
-              <span className="px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-400 text-xs">计算 {nt.computed_count ?? 0}</span>
-              <span className="px-2 py-0.5 rounded bg-violet-500/10 text-violet-400 text-xs">模型知识 {nt.disclosed_count ?? 0}</span>
-              <span className="px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 text-xs">不可溯源 {nt.unverifiable_count ?? 0}</span>
-              {rate != null && (
-                <span className={`text-xs ml-1 ${rate >= 70 ? 'text-emerald-400' : 'text-amber-400'}`}>溯源率 {rate}%</span>
+            <div className="mx-4 mt-4 space-y-2.5 rounded-xl border border-cyan-500/20 bg-cyan-500/5 px-3.5 py-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <ScrollText className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                <span className="text-xs font-semibold text-cyan-400">数字可信度</span>
+                <span className={`px-2 py-0.5 rounded text-xs ${
+                  pass ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'}`}>
+                  {pass ? '达阈值' : '低于阈值'}
+                </span>
+                <span className="text-xs text-slate-400">共 {total} 个：</span>
+                <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 text-xs">引用 {nt.cited_count ?? 0}</span>
+                <span className="px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-400 text-xs">计算 {nt.computed_count ?? 0}</span>
+                <span className="px-2 py-0.5 rounded bg-violet-500/10 text-violet-400 text-xs">模型知识 {nt.disclosed_count ?? 0}</span>
+                <span className="px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 text-xs">不可溯源 {unverifiable}</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs">
+                <span className="text-slate-400">
+                  数字溯源率
+                  <span className={`ml-1.5 font-semibold ${ratio != null && ratio >= 70 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                    {ratio != null ? `${ratio}%` : '未知'}
+                  </span>
+                  {nt.traceable_count != null && total > 0 && (
+                    <span className="ml-1 text-slate-500">（{nt.traceable_count}/{total}）</span>
+                  )}
+                </span>
+                <span className="text-slate-400">
+                  金额溯源率
+                  <span className={`ml-1.5 font-semibold ${amountRate != null && amountRate >= 70 ? 'text-emerald-400' : 'text-amber-400'}`}>
+                    {amountRate != null ? `${amountRate}%` : '未知'}
+                  </span>
+                  {nt.amount_total != null && (
+                    <span className="ml-1 text-slate-500">（{nt.amount_traceable ?? 0}/{nt.amount_total}）</span>
+                  )}
+                </span>
+              </div>
+              {untraced.length > 0 && (
+                <div>
+                  <div className="text-xs text-slate-400">
+                    不可溯源数字（最多显示 10 条，共 {unverifiable} 条）
+                  </div>
+                  <ul className="mt-1 space-y-0.5">
+                    {untraced.slice(0, 10).map((u: any, i: number) => (
+                      <li key={i} className="truncate text-xs text-amber-300/80" title={String(u?.raw ?? '')}>
+                        - {String(u?.raw ?? '').slice(0, 60)}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               )}
+              <div className="text-xs leading-relaxed text-slate-500">
+                口径：分母 = 报告正文提取到的关键数字个数；本域阈值
+                {nt.threshold != null ? ` ${Math.round(nt.threshold * 100)}%` : ' —'}
+                {nt.domain ? `，域=${DOMAIN_LABEL[nt.domain] || nt.domain}` : ''}。
+                金额溯源率只统计带货币单位的数字，与整体溯源率分开看——整体达标不代表金额可信。
+              </div>
             </div>
           )
         })()}
@@ -781,7 +1019,7 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
             [&_strong]:text-slate-200 [&_code]:text-cyan-400 [&_code]:bg-slate-800 [&_code]:px-1.5 [&_code]:py-0.5 [&_code]:rounded [&_code]:text-xs
             [&_table]:w-full [&_table]:text-xs [&_th]:text-left [&_th]:text-slate-400 [&_th]:font-medium [&_th]:px-2 [&_th]:py-1 [&_th]:border-b [&_th]:border-slate-800
             [&_td]:px-2 [&_td]:py-1 [&_td]:border-b [&_td]:border-slate-800/50">
-            <ReportMarkdown md={bodyMd} sources={sourceItems} />
+            <ReportMarkdown md={bodyMd} sources={sourceItems} taskId={taskIdForFiles} />
 
             {/* 参考来源结构化卡片 */}
             {sourcesResult.sources && (
@@ -821,6 +1059,77 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
           </div>
         </div>
       </div>
+
+      {/* F3a 验收证据：判定规则指纹（可反查旧结果由哪版规则产出）+ 验收时间线（反思重做可见） */}
+      {accData && (
+        <div className="bg-slate-900 border border-slate-800 rounded-xl overflow-hidden">
+          <button onClick={() => setFingerprintOpen(!fingerprintOpen)}
+            className="w-full flex items-center justify-between px-5 py-3 hover:bg-slate-800/30 transition-colors">
+            <div className="flex items-center gap-2 text-sm text-slate-300">
+              <Fingerprint className="w-4 h-4 text-cyan-400" />
+              验收证据
+              {timeline && timeline.length > 0 && (
+                <span className="text-xs text-slate-500">验收 {timeline.length} 次</span>
+              )}
+            </div>
+            {fingerprintOpen ? <ChevronDown className="w-4 h-4 text-slate-500" /> : <ChevronRight className="w-4 h-4 text-slate-500" />}
+          </button>
+          {fingerprintOpen && (
+            <div className="px-5 pb-4 space-y-3">
+              <div className="grid gap-2 sm:grid-cols-2">
+                {[
+                  { k: '判定规则版本', v: accData.rules_version || '—' },
+                  { k: '规则指纹', v: accData.rules_fingerprint || '—' },
+                  { k: '报告 SHA256', v: accData.report_sha256 || '—' },
+                  { k: '评估时间', v: accData.evaluated_at || '—' },
+                ].map(row => (
+                  <div key={row.k} className="rounded-lg border border-slate-800 bg-slate-800/30 px-3 py-2">
+                    <div className="text-xs text-slate-400">{row.k}</div>
+                    <div className="mt-0.5 truncate font-mono text-xs text-slate-200" title={String(row.v)}>
+                      {String(row.v)}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <div className="text-xs leading-relaxed text-slate-500">
+                规则指纹随验收规则内容变化——同一份报告在不同规则版本下的判定不同，
+                留指纹才能在规则更新后反查旧结论由哪一版产出。
+              </div>
+              <div>
+                <div className="mb-1.5 text-xs font-semibold text-slate-400">验收时间线</div>
+                {timeline == null && <div className="text-xs text-slate-500">加载中…</div>}
+                {timeline != null && timeline.length === 0 && (
+                  <div className="text-xs text-slate-500">该任务没有验收事件（旧任务或尚未进入验收阶段）</div>
+                )}
+                {timeline != null && timeline.length > 0 && (
+                  <ol className="space-y-1.5">
+                    {timeline.map((ev: any, i: number) => {
+                      const ok = String(ev?.overall || '').includes('SUCCESS') && !String(ev?.overall || '').includes('ISSUE')
+                      return (
+                        <li key={i} className="flex flex-wrap items-center gap-2 rounded border border-slate-800 bg-slate-800/20 px-3 py-2 text-xs">
+                          <span className="text-slate-500">#{ev?.seq ?? i + 1}</span>
+                          <span className="text-slate-300">{ev?.trigger || '验收'}</span>
+                          {ev?.iteration ? <span className="text-slate-500">第 {ev.iteration} 轮</span> : null}
+                          <span className={`px-1.5 py-0.5 rounded ${ok ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'}`}>
+                            {ev?.overall || '—'}
+                          </span>
+                          <span className="text-slate-400">缺口 {ev?.gaps_count ?? 0}</span>
+                          <span className="text-slate-500">{String(ev?.timestamp || '').replace('T', ' ').replace('Z', '')}</span>
+                          {ev?.report_sha256 ? (
+                            <span className="font-mono text-slate-600" title={`报告指纹 ${ev.report_sha256}`}>
+                              {String(ev.report_sha256).slice(0, 8)}
+                            </span>
+                          ) : null}
+                        </li>
+                      )
+                    })}
+                  </ol>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Files section */}
       {report.files && report.files.length > 0 && (
@@ -908,8 +1217,14 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
         </div>
       )}
 
-      {/* Bottom actions */}
-      <div className="flex gap-3 flex-wrap">
+      {/* F3a 导出与复核：下载 / 复核 / 分享集中一处，并说明交付包 zip 为何暂不提供 */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
+        <div className="mb-2 flex flex-wrap items-center gap-2">
+          <span className="text-sm font-medium text-slate-300">导出与复核</span>
+          <span className="text-xs text-slate-500">报告文件、复核与分享都在这里</span>
+        </div>
+        <div className="flex gap-3 flex-wrap">
+        <span className="basis-full text-xs text-slate-500">报告文件</span>
         <button onClick={downloadMarkdown}
           className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm transition-colors">
           <FileDown className="w-4 h-4" /> 下载Markdown
@@ -918,6 +1233,17 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
           className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm transition-colors">
           <FileDown className="w-4 h-4" /> 下载PDF
         </button>
+        {report.files && report.files.length > 0 && (
+          <button onClick={() => setExpandedFiles(!expandedFiles)}
+            className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm transition-colors">
+            <Package className="w-4 h-4" /> 生成文件 ({report.files.length}) {expandedFiles ? '收起' : '展开'}
+          </button>
+        )}
+        <span className="basis-full text-xs leading-relaxed text-slate-500">
+          交付包 zip 暂不提供：服务端 /files 只开放 reports、charts、data 三个目录，整体打包需要后端批处理。
+          当前按文件逐个下载——上方"生成文件"列表与正文里的图表都带下载按钮。
+        </span>
+        <span className="basis-full text-xs text-slate-500">复核与分享</span>
         <button onClick={async () => {
           if (!taskIdForFiles) return
           setVerifyLoading(true); setVerifyError('')
@@ -963,9 +1289,12 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
           )
         )}
       </div>
+      </div>
 
-      {/* 分享链接复制对话框 */}
-      {shareDialogOpen && (
+      {/* 分享链接复制对话框：挂到 body 上——报告容器带 animate-fade-in
+          （will-change: transform）会为 fixed 后代新建包含块，留在树内会被
+          拉到报告全高（实测 6388px）、跑到视口之外，用户看不到对话框。 */}
+      {shareDialogOpen && createPortal(
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4"
           onClick={() => setShareDialogOpen(false)}>
           <div className="w-full max-w-md bg-slate-900 border border-slate-700 rounded-xl p-5 shadow-xl"
@@ -1038,7 +1367,8 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
               </div>
             )}
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
 
       {/* Inline logs */}
