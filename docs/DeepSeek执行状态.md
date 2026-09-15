@@ -51,7 +51,14 @@
 
 - **`docker-image` 作业本轮无本地复现**：本机到 `auth.docker.io` 超时（Docker Hub 不可达），镜像构建
   走不到 COPY 那步；修复依据是"COPY 源与干净检出不等价"这一确凿事实，最终确认只能靠 CI 复跑。
-- 推送：此前 `git push` 挂死在本机 Git Credential Manager，现代理已监听，推送后需以 CI 结果为准。
+- **推送需要一次性凭据（已定位，不是代理问题）**：代理 `http://localhost:7897` 正常——`curl` 走代理访问
+  `github.com` 首页与 `git-receive-pack` 端点均在 0.7~1.4 秒内返回（未带凭据的 401）；`git ls-remote` 正常。
+  阻塞点在凭据：`git credential fill`（配 `GCM_INTERACTIVE=never`）返回"无缓存凭据"，而仓库内
+  `credential.helper=manager`（GCM）在无 TTY 环境下转为等待交互式登录 → push 挂住直到超时。
+  本机也没有 `gh` CLI、没有 `~/.git-credentials`、环境变量里没有令牌。
+  补齐一次 GitHub 凭据（或由本机人工执行一次 push）即可；本地现有 4 个提交待推：
+  `8cbee18`（冷启动竞态）、`ee99dd0`（CI 两条红灯）、`ebfad59`（Redis 重试收口）、`6e3799e`（门禁记录）。
+- **CI 尚未复跑**：上述 4 个提交未推送，`docker-image` 作业的修复只能等推送后有 CI 结果才能确认。
 - 未修（已排序）：交付包内 `index.html` 编码缺陷已检出未拦截、图表分级未覆盖自动生成图、
   美股结构化财务链路未生效（金额溯源 0%）、便携 Redis 默认源为 GitHub（无代理会卡住）。
 
