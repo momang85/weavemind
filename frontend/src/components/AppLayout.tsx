@@ -87,7 +87,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
         {navItems.map(({ to, icon: Icon, label }) => (
           <NavLink key={to} to={to}
             className={({ isActive }) =>
-              `flex-1 flex flex-col items-center justify-center gap-0.5 text-[10px] transition-opacity duration-200 ${
+              `flex-1 flex flex-col items-center justify-center gap-0.5 text-xs transition-opacity duration-200 ${
                 isActive ? 'text-cyan-400 opacity-100' : 'text-slate-500 opacity-70'
               }`}>
             <Icon className="w-5 h-5" />{label}
@@ -175,7 +175,7 @@ export default function AppLayout({ children }: { children: ReactNode }) {
     
       {/* Debug Panel (activated with ?debug=true) */}
       {new URLSearchParams(window.location.search).has('debug') && (
-        <div className="fixed top-16 right-4 z-50 bg-slate-950/95 border border-cyan-500/30 rounded-lg p-4 text-[10px] font-mono text-slate-400 max-w-sm max-h-[80vh] overflow-auto opacity-90">
+        <div className="fixed top-16 right-4 z-50 bg-slate-950/95 border border-cyan-500/30 rounded-lg p-4 text-xs font-mono text-slate-400 max-w-sm max-h-[80vh] overflow-auto opacity-90">
           <div className="text-cyan-400 text-xs mb-2 font-bold">Debug Panel</div>
           <div className="space-y-2">
             <div><span className="text-yellow-400">connected:</span> {String(connected)}</div>

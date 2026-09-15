@@ -5,7 +5,7 @@ import { Loader2, Sparkles, RefreshCw, Plus, MessagesSquare, FileText, ChevronDo
 function QuickAnswerCard({ qa, onClose }: { qa: any; onClose: () => void }) {
   return (
     <div id="quick-answer-card" className="bg-cyan-500/5 border border-cyan-500/20 rounded-xl p-3 space-y-2">
-      <div className="flex items-center gap-2 text-[10px]">
+      <div className="flex items-center gap-2 text-xs">
         <Zap className="w-3 h-3 text-cyan-400" />
         <span className="text-cyan-400 font-semibold">快答</span>
         {qa.mode === 'searched' ? (
@@ -24,10 +24,10 @@ function QuickAnswerCard({ qa, onClose }: { qa: any; onClose: () => void }) {
       <pre className="whitespace-pre-wrap break-all text-slate-300 text-xs font-sans max-h-64 overflow-y-auto">{qa.content}</pre>
       {qa.sources?.length > 0 && (
         <div className="space-y-1 pt-1 border-t border-slate-800">
-          <div className="text-[10px] text-slate-500">参考来源：</div>
+          <div className="text-xs text-slate-500">参考来源：</div>
           {qa.sources.map((s: any, i: number) => (
             <a key={i} href={s.url} target="_blank" rel="noreferrer"
-              className="flex items-center gap-1 text-[10px] text-cyan-400 hover:text-cyan-300 truncate">
+              className="flex items-center gap-1 text-xs text-cyan-400 hover:text-cyan-300 truncate">
               <ExternalLink className="w-2.5 h-2.5 shrink-0" />
               <span className="truncate">{s.title || s.url}</span>
             </a>
@@ -56,8 +56,8 @@ export default memo(function SubmitPanel({
   setTemplateName: (v: string) => void
   userContext: string
   setUserContext: React.Dispatch<React.SetStateAction<string>>
-  importMsg: { name: string; status: string }[]
-  setImportMsg: React.Dispatch<React.SetStateAction<{ name: string; status: string }[]>>
+  importMsg: { name: string; note: string }[]
+  setImportMsg: React.Dispatch<React.SetStateAction<{ name: string; note: string }[]>>
   isRunning: boolean
   demoMode: boolean
   activeConversationId: string | null
@@ -105,7 +105,7 @@ export default memo(function SubmitPanel({
   const importFiles = async (files: FileList | null) => {
     if (!files) return
     for (const f of Array.from(files)) {
-      setImportMsg(prev => [...prev, { name: f.name, status: '提取中...' }])
+      setImportMsg(prev => [...prev, { name: f.name, note: '提取中...' }])
       try {
         const b64 = await readFileBase64(f)
         const res = await fetch('/api/context/extract', {
@@ -116,12 +116,12 @@ export default memo(function SubmitPanel({
         const d = await res.json()
         if (d.text) {
           setUserContext(prev => (prev ? `${prev}\n\n[文件 ${f.name}]\n${d.text}` : `[文件 ${f.name}]\n${d.text}`))
-          setImportMsg(prev => [...prev, { name: f.name, status: `成功 ${d.chars} 字${d.truncated ? '（已截断）' : ''}` }])
+          setImportMsg(prev => [...prev, { name: f.name, note: `成功 ${d.chars} 字${d.truncated ? '（已截断）' : ''}` }])
         } else {
-          setImportMsg(prev => [...prev, { name: f.name, status: d.error || '无内容' }])
+          setImportMsg(prev => [...prev, { name: f.name, note: d.error || '无内容' }])
         }
       } catch {
-        setImportMsg(prev => [...prev, { name: f.name, status: '导入失败' }])
+        setImportMsg(prev => [...prev, { name: f.name, note: '导入失败' }])
       }
     }
   }
@@ -230,13 +230,14 @@ export default memo(function SubmitPanel({
             {isRunning ? (<><Loader2 className="w-4 h-4 animate-spin" /> Running...</>) : (<><Sparkles className="w-4 h-4" /> Execute</>)}
           </button>
           {isRunning && taskId && (
-            <button onClick={stopTask} disabled={stopping} title="请求停止当前任务"
+            <button onClick={stopTask} disabled={stopping || demoMode}
+              title={demoMode ? '演示模式下已停用' : '请求停止当前任务'}
               className="flex items-center gap-2 bg-rose-500/10 hover:bg-rose-500/20 disabled:opacity-40 text-rose-400 font-semibold px-4 py-2.5 rounded-lg transition-all text-sm border border-rose-500/20 shrink-0">
               <Square className="w-4 h-4" /> {stopping ? '停止中…' : '停止'}
             </button>
           )}
           {stopMsg && (
-            <span className="text-[11px] text-amber-400 whitespace-nowrap">{stopMsg}</span>
+            <span className="text-xs text-amber-400 whitespace-nowrap">{stopMsg}</span>
           )}
           {status === 'completed' && reportSummary === 'FAILED' && lastGoal && (
             <button onClick={() => onSubmit(lastGoal)}
@@ -275,14 +276,14 @@ export default memo(function SubmitPanel({
                 className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs cursor-pointer">
                 <Upload className="w-3.5 h-3.5" /> 导入文件（txt/md/csv/json/pdf/docx/xlsx...）
               </label>
-              <span className="text-[11px] text-slate-600">文件内容将自动追加到上下文中</span>
+              <span className="text-xs text-slate-600">文件内容将自动追加到上下文中</span>
             </div>
             {importMsg.length > 0 && (
               <div className="space-y-1">
                 {importMsg.map((m, i) => (
-                  <div key={i} className="text-[11px] flex gap-2">
+                  <div key={i} className="text-xs flex gap-2">
                     <span className="text-slate-400 truncate max-w-[200px]">{m.name}</span>
-                    <span className={m.status.startsWith('成功') ? 'text-emerald-400' : 'text-amber-400'}>{m.status}</span>
+                    <span className={m.note.startsWith('成功') ? 'text-emerald-400' : 'text-amber-400'}>{m.note}</span>
                   </div>
                 ))}
               </div>

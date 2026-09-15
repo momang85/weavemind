@@ -15,7 +15,7 @@ export function Card({ children, className = '', padded = true }: {
   children: ReactNode; className?: string; padded?: boolean
 }) {
   return (
-    <div className={`bg-slate-900 border border-slate-800 rounded-xl ${padded ? 'p-4 md:p-5' : ''} ${className}`}>
+    <div className={`bg-surface border border-line rounded-xl ${padded ? 'p-4 md:p-5' : ''} ${className}`}>
       {children}
     </div>
   )
@@ -27,8 +27,8 @@ export function SectionTitle({ icon, title, extra }: {
   return (
     <div className="flex items-center gap-2 mb-3">
       {icon}
-      <h2 className="text-sm font-medium text-slate-300">{title}</h2>
-      {extra && <div className="ml-auto text-xs text-slate-500">{extra}</div>}
+      <h2 className="text-sm font-medium text-ink-muted">{title}</h2>
+      {extra && <div className="ml-auto text-xs text-ink-faint">{extra}</div>}
     </div>
   )
 }
@@ -38,15 +38,15 @@ export function StatCard({ label, value, sub, hint, tone = 'default' }: {
   label: string; value: string; sub?: string; hint?: string
   tone?: 'default' | 'success' | 'issue' | 'failure'
 }) {
-  const color = tone === 'success' ? 'text-emerald-400'
-    : tone === 'issue' ? 'text-amber-400'
-    : tone === 'failure' ? 'text-red-400' : 'text-slate-100'
+  const color = tone === 'success' ? 'text-state-success'
+    : tone === 'issue' ? 'text-state-issue'
+    : tone === 'failure' ? 'text-state-failure' : 'text-ink'
   return (
-    <div className="bg-slate-900 border border-slate-800 rounded-xl p-4">
-      <div className="text-xs text-slate-500">{label}</div>
+    <div className="bg-surface border border-line rounded-xl p-4">
+      <div className="text-xs text-ink-faint">{label}</div>
       <div className={`text-2xl font-semibold mt-1 tabular-nums ${color}`}>{value}</div>
-      {sub && <div className="text-xs text-slate-500 mt-0.5">{sub}</div>}
-      {hint && <div className="text-xs text-slate-600 mt-1 leading-snug">{hint}</div>}
+      {sub && <div className="text-xs text-ink-faint mt-0.5">{sub}</div>}
+      {hint && <div className="text-xs text-ink-faint/80 mt-1 leading-snug">{hint}</div>}
     </div>
   )
 }
@@ -97,11 +97,11 @@ export function EmptyState({ title, description, action, icon }: {
 }) {
   return (
     <div className="text-center py-10 px-4">
-      <div className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-slate-800/60 text-slate-500 mb-3">
+      <div className="inline-flex items-center justify-center w-10 h-10 rounded-full bg-surface-raised text-ink-faint mb-3">
         {icon || <Inbox className="w-5 h-5" />}
       </div>
-      <div className="text-sm text-slate-400">{title}</div>
-      {description && <div className="text-xs text-slate-600 mt-1 leading-relaxed max-w-md mx-auto">{description}</div>}
+      <div className="text-sm text-ink-muted">{title}</div>
+      {description && <div className="text-xs text-ink-faint mt-1 leading-relaxed max-w-md mx-auto">{description}</div>}
       {action && <div className="mt-3 flex justify-center">{action}</div>}
     </div>
   )
@@ -109,12 +109,12 @@ export function EmptyState({ title, description, action, icon }: {
 
 /** 加载骨架：替代"加载中…"文字，形状与最终内容一致，避免布局跳动。 */
 export function Skeleton({ className = 'h-4 w-full' }: { className?: string }) {
-  return <div className={`animate-pulse rounded bg-slate-800/70 ${className}`} />
+  return <div className={`animate-pulse rounded bg-surface-raised/70 ${className}`} />
 }
 
 export function LoadingBlock({ label = '加载中…' }: { label?: string }) {
   return (
-    <div className="flex items-center justify-center py-10 text-slate-500 text-xs">
+    <div className="flex items-center justify-center py-10 text-ink-faint text-xs">
       <Loader2 className="w-4 h-4 animate-spin mr-2" /> {label}
     </div>
   )

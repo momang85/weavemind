@@ -144,13 +144,13 @@ export default function History() {
                   {convMessages[c.conversation_id].map(m => (
                     <div key={m.task_id} className="bg-slate-800/40 rounded-lg p-3">
                       <div className="flex items-start gap-2">
-                        <span className="text-[10px] text-cyan-400 bg-cyan-500/10 px-1.5 py-0.5 rounded shrink-0 mt-0.5">用户</span>
+                        <span className="text-xs text-cyan-400 bg-cyan-500/10 px-1.5 py-0.5 rounded shrink-0 mt-0.5">用户</span>
                         <span className="text-slate-300 text-xs">{m.goal}</span>
                       </div>
                       <div className="flex items-center gap-2 mt-2">
                         <StatusBadge status={m.status} />
                         <button onClick={() => viewFullReport(m.task_id)}
-                          className="text-[10px] text-cyan-400 hover:text-cyan-300">
+                          className="text-xs text-cyan-400 hover:text-cyan-300">
                           查看报告
                         </button>
                       </div>
@@ -192,7 +192,7 @@ export default function History() {
                   <FileText className="w-4 h-4 text-cyan-400" />
                   <span className="flex-1 text-slate-300 text-sm truncate">{t.goal}</span>
                   {t.project && (
-                    <span className="text-[10px] px-2 py-0.5 rounded bg-slate-700/60 text-slate-400 shrink-0">
+                    <span className="text-xs px-2 py-0.5 rounded bg-slate-700/60 text-slate-400 shrink-0">
                       {t.project}
                     </span>
                   )}

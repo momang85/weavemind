@@ -2,7 +2,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { BarChart3, RefreshCw } from 'lucide-react'
 import { useVisibleInterval } from '../lib/useVisibleInterval'
-import { Alert, StatCard } from '../components/ui'
+import { Card, ErrorState, SectionTitle, Skeleton, StatCard } from '../components/ui'
 import { formatDuration, formatUsd } from '../lib/format'
 
 interface TaskBreakdown {
@@ -39,6 +39,7 @@ interface MetricsSummary {
 
 export default function MetricsPage() {
   const [m, setM] = useState<MetricsSummary | null>(null)
+  const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
 
   // 全部统计量由后端在同一快照、同一范围（task_history 全表）算好。
@@ -49,6 +50,7 @@ export default function MetricsPage() {
       .then(r => { if (!r.ok) throw new Error('no data'); return r.json() })
       .then(d => { setM(d); setError('') })
       .catch(() => setError('指标接口不可达（服务未启动或 metrics 收集器未运行）。统计值显示为"未知"，不代表 0。'))
+      .finally(() => setLoading(false))
   }, [])
 
   useEffect(() => { load() }, [load])
@@ -70,7 +72,12 @@ export default function MetricsPage() {
           <RefreshCw className="w-4 h-4" />
         </button>
       </div>
-      {error && <Alert tone="warn" title="指标不可用">{error}</Alert>}
+      {error && <ErrorState title="指标不可用" description={error} onRetry={load} />}
+      {loading && !m && (
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+          {[0, 1, 2, 3].map(i => <Skeleton key={i} className="h-24" />)}
+        </div>
+      )}
       {m && (
         <>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
@@ -99,8 +106,9 @@ export default function MetricsPage() {
             <StatCard label="告警" value={String(m.alerts ?? 0)} />
             <StatCard label="搜索源" value={m.search_health && Object.keys(m.search_health).length > 0 ? '已接入' : '—'} />
           </div>
-          <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
-            <h2 className="text-sm text-slate-300 font-medium mb-4">各能力成功率</h2>
+          <Card>
+            <SectionTitle title="各能力成功率"
+              extra={t?.scope ? `统计范围：${t.scope}` : undefined} />
             {Object.keys(m.by_capability || {}).length === 0 && (
               <div className="text-xs text-slate-500 leading-relaxed">
                 暂无数据：需要至少一次任务结束才会按能力类型统计。当前
@@ -109,15 +117,17 @@ export default function MetricsPage() {
             )}
             <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
               {Object.entries(m.by_capability || {}).map(([cap, v]) => (
-                <div key={cap} className="border border-slate-800 rounded-lg p-3">
-                  <div className="text-xs text-slate-400 truncate">{cap}</div>
-                  <div className="text-lg font-semibold mt-1" style={{ color: v.success_rate >= 80 ? '#34d399' : v.success_rate >= 50 ? '#fbbf24' : '#f87171' }}>
+                <div key={cap} className="border border-line rounded-lg p-3">
+                  <div className="text-xs text-ink-muted truncate">{cap}</div>
+                  <div className={`text-lg font-semibold mt-1 tabular-nums ${
+                    v.success_rate >= 80 ? 'text-state-success' : v.success_rate >= 50 ? 'text-state-issue' : 'text-state-failure'
+                  }`}>
                     {v.success_rate}%
                   </div>
                 </div>
               ))}
             </div>
-          </div>
+          </Card>
         </>
       )}
     </div>

@@ -38,22 +38,22 @@ export default function Skills() {
           <div key={s.name} className="bg-slate-900 border border-slate-800 rounded-2xl p-5">
             <div className="flex items-center gap-2 mb-1">
               <span className="text-cyan-400 text-sm font-semibold">{s.name}</span>
-              {s.version && <span className="text-[10px] text-slate-600">v{s.version}</span>}
-              {s.owner && <span className="text-[10px] text-slate-500">owner: {s.owner}</span>}
+              {s.version && <span className="text-xs text-slate-600">v{s.version}</span>}
+              {s.owner && <span className="text-xs text-slate-500">owner: {s.owner}</span>}
             </div>
             <div className="text-slate-400 text-xs mb-2">{s.description}</div>
             {s.applies && s.applies.length > 0 && (
               <div className="flex flex-wrap gap-1 mb-2">
                 {s.applies.map((c) => (
-                  <span key={c} className="px-2 py-0.5 rounded-full bg-slate-800 text-[10px] text-slate-400">{c}</span>
+                  <span key={c} className="px-2 py-0.5 rounded-full bg-slate-800 text-xs text-slate-400">{c}</span>
                 ))}
               </div>
             )}
             {s.lessons && s.lessons.length > 0 && (
               <div className="mt-2 pt-2 border-t border-slate-800">
-                <div className="text-[10px] text-amber-500 mb-1">自动沉淀教训</div>
+                <div className="text-xs text-amber-500 mb-1">自动沉淀教训</div>
                 {s.lessons.map((l, i) => (
-                  <div key={i} className="text-[11px] text-slate-500 mb-1">
+                  <div key={i} className="text-xs text-slate-500 mb-1">
                     {String(l.issue || '').slice(0, 80)}
                   </div>
                 ))}

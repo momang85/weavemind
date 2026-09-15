@@ -6,6 +6,7 @@ import {
 import AgentTopology from '../components/AgentTopology'
 import { AgentInfo } from '../stores/types'
 import { useTaskStore } from '../stores/useTaskStore'
+import { agentStatusDotClass, agentStatusLabel } from '../lib/statusMeta'
 
 const gradients = [
   'from-cyan-500 to-blue-500', 'from-emerald-500 to-teal-500',
@@ -24,27 +25,16 @@ function initials(id: string) {
 }
 
 function timeAgo(iso: string) {
-  if (!iso) return 'never'
+  if (!iso) return '从未'
   const sec = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
-  if (sec < 5) return 'just now'
-  if (sec < 60) return `${sec}s ago`
+  if (sec < 5) return '刚刚'
+  if (sec < 60) return `${sec} 秒前`
   if (sec < 3600) return `${Math.floor(sec / 60)}m ago`
   return `${Math.floor(sec / 3600)}h ago`
 }
 
-const statusDot = (status: string) => {
-  if (!status || status.startsWith('offline'))
-    return <span className="w-2 h-2 rounded-full bg-slate-500" />
-  if (status.includes('active'))
-    return <span className="w-2.5 h-2.5 rounded-full bg-blue-400 animate-pulse shadow-[0_0_6px] shadow-blue-400/50" />
-  return <span className="w-2 h-2 rounded-full bg-emerald-400" />
-}
-
-const statusLabel = (status: string) => {
-  if (!status || status.startsWith('offline')) return '离线'
-  if (status.includes('active')) return '忙碌'
-  return 'Idle'
-}
+// 状态语义（含 Agent 运行状态）统一走 lib/statusMeta，本页不再自建色板与英文标签
+// （此前的本地实现把"忙碌"画成蓝色、并给空闲态显示英文 "Idle"）
 
 function AgentCard({
   agent, isAutoGen, expanded, onToggle, onKill
@@ -71,14 +61,14 @@ function AgentCard({
           </div>
           <div className="flex flex-col items-end gap-1">
             <div className="flex items-center gap-1.5">
-              {statusDot(agent.status)}
+              <span className={agentStatusDotClass(agent.status)} />
               <span className={`text-xs font-medium ${
                 !agent.status || agent.status.startsWith('offline') ? 'text-slate-500' :
-                agent.status.includes('active') ? 'text-blue-400' : 'text-emerald-400'
-              }`}>{statusLabel(agent.status)}</span>
+                agent.status.includes('active') ? 'text-cyan-400' : 'text-emerald-400'
+              }`}>{agentStatusLabel(agent.status)}</span>
             </div>
             {isAutoGen && (
-              <span className="flex items-center gap-1 text-[10px] font-semibold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-full">
+              <span className="flex items-center gap-1 text-xs font-semibold text-amber-400 bg-amber-500/10 px-2 py-0.5 rounded-full">
                 <Sparkles className="w-2.5 h-2.5" /> 新物种
               </span>
             )}
@@ -126,15 +116,15 @@ function AgentCard({
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3 mt-4 text-center">
             <div className="bg-slate-800/50 rounded-lg p-2.5">
               <div className="text-emerald-400 font-bold text-lg">{agent.successRate ?? 0}%</div>
-              <div className="text-slate-500 text-[11px]">成功率</div>
+              <div className="text-slate-500 text-xs">成功率</div>
             </div>
             <div className="bg-slate-800/50 rounded-lg p-2.5">
               <div className="text-cyan-400 font-bold text-lg">{agent.tasks?.length ?? 0}</div>
-              <div className="text-slate-500 text-[11px]">任务数</div>
+              <div className="text-slate-500 text-xs">任务数</div>
             </div>
             <div className="bg-slate-800/50 rounded-lg p-2.5">
               <div className="text-violet-400 font-bold text-lg">{agent.avgTime ?? '-'}s</div>
-              <div className="text-slate-500 text-[11px]">平均耗时</div>
+              <div className="text-slate-500 text-xs">平均耗时</div>
             </div>
           </div>
 
@@ -293,7 +283,7 @@ export default function AgentsPage() {
         {directResult && (
           <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-3 space-y-2">
             {directMode && (
-              <div className="text-[10px]">
+              <div className="text-xs">
                 {directMode === 'searched'
                   ? <span className="text-emerald-400">已检索 {directSources.length} 条来源</span>
                   : <span className="text-amber-400">模型知识 · 未检索（未验证）</span>}
@@ -306,7 +296,7 @@ export default function AgentsPage() {
               <div className="space-y-1 pt-1 border-t border-slate-700">
                 {directSources.slice(0, 5).map((s: any, i: number) => (
                   <a key={i} href={s.url} target="_blank" rel="noreferrer"
-                    className="block text-[10px] text-cyan-400 hover:text-cyan-300 truncate">
+                    className="block text-xs text-cyan-400 hover:text-cyan-300 truncate">
                     {s.title || s.url}
                   </a>
                 ))}

@@ -45,21 +45,21 @@ export default function Evals() {
               <div className="text-2xl text-cyan-400 font-bold">
                 {typeof cal.mae === 'number' ? cal.mae.toFixed(3) : '—'}
               </div>
-              <div className="text-[10px] text-slate-500">MAE（误差）</div>
+              <div className="text-xs text-slate-500">MAE（误差）</div>
             </div>
             <div>
               <div className="text-2xl text-emerald-400 font-bold">
                 {typeof cal.pass_agreement === 'number' ? (cal.pass_agreement * 100).toFixed(0) + '%' : '—'}
               </div>
-              <div className="text-[10px] text-slate-500">通过/失败一致率</div>
+              <div className="text-xs text-slate-500">通过/失败一致率</div>
             </div>
             <div>
               <div className="text-xl text-slate-300 font-bold">{cal.n ?? '—'}</div>
-              <div className="text-[10px] text-slate-500">样本数</div>
+              <div className="text-xs text-slate-500">样本数</div>
             </div>
             <div>
               <div className="text-xl text-slate-300 font-bold">{typeof cal.threshold === 'number' ? cal.threshold : '—'}</div>
-              <div className="text-[10px] text-slate-500">达标阈值</div>
+              <div className="text-xs text-slate-500">达标阈值</div>
             </div>
           </div>
         </div>
@@ -74,7 +74,7 @@ export default function Evals() {
                 <div className="text-slate-400 text-xs mb-1 truncate">{r.task_id}</div>
                 <div className="grid grid-cols-4 gap-2">
                   {metrics.map((m) => (
-                    <div key={m} className="text-[10px] text-slate-500">
+                    <div key={m} className="text-xs text-slate-500">
                       {m}: <span className="text-cyan-300 font-semibold">{typeof r.scores?.[m] === 'number' ? r.scores[m].toFixed(2) : '—'}</span>
                     </div>
                   ))}

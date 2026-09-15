@@ -37,6 +37,8 @@ export default function HealthPage() {
   const agents = useTaskStore(s => s.agents)
   const connected = useTaskStore(s => s.connected)
   const systemStatus = useTaskStore(s => s.systemStatus)
+  // 演示模式下停用"触发进化"等真实动作（fetch 层另有统一兜底拦截）
+  const demoMode = useTaskStore(s => s.demoMode)
   const [events, setEvents] = useState<HealthEvent[]>(DEMO_EVENTS)
   const [live, setLive] = useState(false)
   const [loadError, setLoadError] = useState(false)
@@ -160,17 +162,18 @@ export default function HealthPage() {
           </div>
 
           <div className="bg-slate-900 border border-slate-800 rounded-xl p-5">
-            <h3 className="flex items-center gap-2 text-sm text-slate-300 font-medium mb-4"><FlaskConical className="w-4 h-4 text-violet-400" />Evolution Sandbox</h3>
+            <h3 className="flex items-center gap-2 text-sm text-slate-300 font-medium mb-4"><FlaskConical className="w-4 h-4 text-violet-400" />进化沙箱</h3>
             <div className="space-y-3 text-sm">
-              {[['Last run', lastEvolution ? String(lastEvolution.timestamp).slice(0, 19) : '-'], ['Status', lastEvolution ? 'Completed' : 'Idle']].map(([k, v]) => (
+              {[['上次运行', lastEvolution ? String(lastEvolution.timestamp).slice(0, 19) : '—'], ['状态', lastEvolution ? '已完成' : '空闲']].map(([k, v]) => (
                 <div key={k} className="flex justify-between"><span className="text-slate-500">{k}</span><span className="text-slate-300">{v}</span></div>
               ))}
             </div>
-            <button onClick={triggerEvolution}
-              className="mt-4 w-full flex items-center justify-center gap-2 py-2.5 bg-violet-500/10 hover:bg-violet-500/20 text-violet-400 rounded-lg text-sm font-medium transition-colors border border-violet-500/20">
-              <Play className="w-3.5 h-3.5" />Trigger Evolution
+            <button onClick={triggerEvolution} disabled={demoMode}
+              title={demoMode ? '演示模式下已停用（进化会真实烧 token 并跑后台任务）' : '触发一轮策略进化（后台约 3-5 分钟）'}
+              className="mt-4 w-full flex items-center justify-center gap-2 py-2.5 bg-violet-500/10 hover:bg-violet-500/20 text-violet-400 rounded-lg text-sm font-medium transition-colors border border-violet-500/20 disabled:opacity-40">
+              <Play className="w-3.5 h-3.5" />触发一轮进化
             </button>
-            <p className="text-xs text-slate-600 mt-2 text-center">Admin confirmation required</p>
+            <p className="text-xs text-slate-600 mt-2 text-center">需要管理员确认</p>
           </div>
         </div>
       </div>

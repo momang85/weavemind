@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Brain, FlaskConical, ChevronDown, ChevronRight, Play, CheckCircle2, XCircle, ShieldCheck, Sparkles, Copy, RefreshCw, Activity } from 'lucide-react'
 import type { MemoryDoc, EvolutionRound } from '../stores/types'
+import { useTaskStore } from '../stores/useTaskStore'
 
 interface MemoryHealth {
   injections: number
@@ -31,10 +32,13 @@ const EMPTY_HEALTH: MemoryHealth = {
 }
 
 function chip(text: string, cls: string) {
-  return <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold ${cls}`}>{text}</span>
+  return <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${cls}`}>{text}</span>
 }
 
 export default function Memory() {
+  // 演示模式：本页的删除/审批/触发进化都会真实改数据或烧 token，逐项停用；
+  // fetch 层还有统一兜底拦截（lib/demoGuard.ts），两者都要在，避免"看起来能点"。
+  const demoMode = useTaskStore(s => s.demoMode)
   const [convs, setConvs] = useState<MemoryDoc[]>([])
   const [strats, setStrats] = useState<MemoryDoc[]>([])
   const [stats, setStats] = useState({ conversations: 0, strategies: 0 })
@@ -161,7 +165,7 @@ export default function Memory() {
         <div className="flex items-center gap-2 mb-4">
           <Activity className="w-5 h-5 text-emerald-400" />
           <h3 className="text-slate-200 font-semibold text-sm">记忆健康度</h3>
-          <span className="text-slate-600 text-[10px]">
+          <span className="text-slate-600 text-xs">
             {mode === 'literal'
               ? '向量检索不可用（Embedding 欠费/故障）：当前按关键词兜底检索，命中率分母是兜底检索次数'
               : '命中率 = 检索到相关记忆的注入次数 / 注入总次数（进程内统计）'}
@@ -180,25 +184,25 @@ export default function Memory() {
                 ? '不可用'
                 : `${((mode === 'literal' ? (health.degraded_hit_rate ?? 0) : health.hit_rate) * 100).toFixed(1)}%`}
             </div>
-            <div className="text-slate-500 text-[10px] mt-0.5">
+            <div className="text-slate-500 text-xs mt-0.5">
               {mode === 'literal' ? `关键词命中率（命中 ${health.degraded_hits ?? 0}）` : '记忆命中率'}
             </div>
           </div>
           <div className="bg-slate-800/40 border border-slate-800 rounded-lg p-3">
             <div className="text-cyan-400 font-bold text-lg">{health.injections}</div>
-            <div className="text-slate-500 text-[10px] mt-0.5">注入次数（命中 {health.hits}）</div>
+            <div className="text-slate-500 text-xs mt-0.5">注入次数（命中 {health.hits}）</div>
           </div>
           <div className="bg-slate-800/40 border border-slate-800 rounded-lg p-3">
             <div className="text-violet-400 font-bold text-lg">{health.strategy_count}</div>
-            <div className="text-slate-500 text-[10px] mt-0.5">策略条数</div>
+            <div className="text-slate-500 text-xs mt-0.5">策略条数</div>
           </div>
           <div className="bg-slate-800/40 border border-slate-800 rounded-lg p-3">
             <div className="text-amber-400 font-bold text-lg">{health.conversation_count}</div>
-            <div className="text-slate-500 text-[10px] mt-0.5">对话条数</div>
+            <div className="text-slate-500 text-xs mt-0.5">对话条数</div>
           </div>
           <div className="bg-slate-800/40 border border-slate-800 rounded-lg p-3">
             <div className="text-slate-200 font-bold text-lg">{health.expired_purged}</div>
-            <div className="text-slate-500 text-[10px] mt-0.5">过期策略已清理</div>
+            <div className="text-slate-500 text-xs mt-0.5">过期策略已清理</div>
           </div>
         </div>
       </div>
@@ -222,7 +226,7 @@ export default function Memory() {
         <p className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">
           {summaryLoading && !summary ? '正在让 LLM 阅读记忆库并生成自述...' : (summary || '暂无自述，点击「重新生成」。')}
         </p>
-        <p className="text-[11px] text-slate-600 mt-2">基于真实记忆数据生成，可直接用于发布到社交媒体。</p>
+        <p className="text-xs text-slate-600 mt-2">基于真实记忆数据生成，可直接用于发布到社交媒体。</p>
       </div>
 
       {/* 记忆库 */}
@@ -245,12 +249,14 @@ export default function Memory() {
                 {convs.map((c, i) => (
                   <div key={i} className="bg-slate-800/40 border border-slate-800 rounded-lg p-3">
                     <div className="flex items-center gap-2">
-                      <span className="text-amber-400/80 text-[10px]">目标</span>
+                      <span className="text-amber-400/80 text-xs">目标</span>
                       <span className="text-slate-300 text-xs truncate flex-1">{c.metadata.goal || (c.content || '').slice(0, 60)}</span>
-                      {c.metadata.timestamp && <span className="text-slate-600 text-[10px]">{String(c.metadata.timestamp).slice(0, 16)}</span>}
+                      {c.metadata.timestamp && <span className="text-slate-600 text-xs">{String(c.metadata.timestamp).slice(0, 16)}</span>}
                       {c.id && (
-                        <button onClick={() => del('conversations', [c.id!])} disabled={!!busyAction}
-                          className="text-slate-600 hover:text-red-400 text-[10px] px-1 disabled:opacity-40">删除</button>
+                        <button onClick={() => del('conversations', [c.id!])}
+                          disabled={!!busyAction || demoMode}
+                          title={demoMode ? '演示模式下已停用（会真实删除记忆）' : '删除该条记忆'}
+                          className="text-slate-600 hover:text-red-400 text-xs px-1 disabled:opacity-40">删除</button>
                       )}
                     </div>
                   </div>
@@ -270,8 +276,10 @@ export default function Memory() {
                       <span className="text-violet-300 text-xs truncate flex-1">{String(s.metadata.goal_keywords || '').slice(0, 60) || '策略'}</span>
                       {s.metadata.step_count && chip(`${s.metadata.step_count} 步`, 'bg-slate-700/50 text-slate-400')}
                       {s.id && (
-                        <button onClick={() => del('strategies', [s.id!])} disabled={!!busyAction}
-                          className="text-slate-600 hover:text-red-400 text-[10px] px-1">删除</button>
+                        <button onClick={() => del('strategies', [s.id!])}
+                          disabled={!!busyAction || demoMode}
+                          title={demoMode ? '演示模式下已停用（会真实删除策略）' : '删除该策略'}
+                          className="text-slate-600 hover:text-red-400 text-xs px-1 disabled:opacity-40">删除</button>
                       )}
                     </button>
                     {expanded['s' + i] && (
@@ -292,7 +300,7 @@ export default function Memory() {
         <div className="flex items-center gap-2 mb-4">
           <ShieldCheck className="w-5 h-5 text-cyan-400" />
           <h3 className="text-slate-200 font-semibold text-sm">进化部署审批</h3>
-          <span className="text-slate-500 text-[10px]">人工确认后，胜出策略将实际作用于对应 Worker</span>
+          <span className="text-slate-500 text-xs">人工确认后，胜出策略将实际作用于对应 Worker</span>
         </div>
         {pendingList.length === 0 ? (
           <div className="text-slate-600 text-xs py-4 text-center">
@@ -307,7 +315,7 @@ export default function Memory() {
                   {chip(p.agent_type || 'search_agent', 'bg-slate-700/50 text-slate-400')}
                   {p.temperature != null && chip('温度 ' + p.temperature, 'bg-slate-700/50 text-slate-400')}
                   {p.max_sources != null && chip('源数 ' + p.max_sources, 'bg-slate-700/50 text-slate-400')}
-                  {p.timestamp && <span className="text-slate-600 text-[10px] ml-auto">{new Date(p.timestamp).toLocaleString()}</span>}
+                  {p.timestamp && <span className="text-slate-600 text-xs ml-auto">{new Date(p.timestamp).toLocaleString()}</span>}
                 </div>
                 <div className="mt-2 text-xs text-slate-400">
                   摘要提示：<span className="text-slate-300">{p.summarization_prompt || '—'}</span>
@@ -318,12 +326,16 @@ export default function Memory() {
                   </div>
                 )}
                 <div className="mt-3 flex gap-2">
-                  <button onClick={() => approveStrategy(p.strategy_id, true)} disabled={!!busyAction}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 text-xs">
+                  <button onClick={() => approveStrategy(p.strategy_id, true)}
+                    disabled={!!busyAction || demoMode}
+                    title={demoMode ? '演示模式下已停用（会真实部署策略）' : '批准并部署该策略'}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 text-xs disabled:opacity-40">
                     <CheckCircle2 className="w-3.5 h-3.5" /> 批准部署
                   </button>
-                  <button onClick={() => approveStrategy(p.strategy_id, false)} disabled={!!busyAction}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs">
+                  <button onClick={() => approveStrategy(p.strategy_id, false)}
+                    disabled={!!busyAction || demoMode}
+                    title={demoMode ? '演示模式下已停用' : '驳回该部署请求'}
+                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs disabled:opacity-40">
                     <XCircle className="w-3.5 h-3.5" /> 驳回
                   </button>
                 </div>
@@ -338,8 +350,9 @@ export default function Memory() {
         <div className="flex items-center gap-2 mb-4">
           <FlaskConical className="w-5 h-5 text-violet-400" />
           <h3 className="text-slate-200 font-semibold text-sm">进化锦标赛回放</h3>
-          <button onClick={triggerEvolution}
-            className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-500/10 hover:bg-violet-500/20 text-violet-400 text-xs">
+          <button onClick={triggerEvolution} disabled={demoMode}
+            title={demoMode ? '演示模式下已停用（进化会真实烧 token 并跑后台任务）' : '触发一轮策略进化（后台约 3-5 分钟）'}
+            className="ml-auto flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-500/10 hover:bg-violet-500/20 text-violet-400 text-xs disabled:opacity-40">
             <Play className="w-3 h-3" /> 触发新一轮进化
           </button>
         </div>
@@ -357,7 +370,7 @@ export default function Memory() {
                   <ChevronDown className="w-4 h-4 text-slate-500 shrink-0" />
                   <div className="flex-1 min-w-0">
                     <div className="text-slate-300 text-xs font-medium truncate">{r.summary || '进化轮次'}</div>
-                    {r.timestamp && <div className="text-slate-600 text-[10px]">{new Date(r.timestamp).toLocaleString()}</div>}
+                    {r.timestamp && <div className="text-slate-600 text-xs">{new Date(r.timestamp).toLocaleString()}</div>}
                   </div>
                   {r.stable ? chip('稳定', 'bg-emerald-500/15 text-emerald-400') : chip('不稳定', 'bg-amber-500/15 text-amber-400')}
                   {r.deployed ? chip('已部署', 'bg-cyan-500/15 text-cyan-400') : chip('未部署', 'bg-slate-700/50 text-slate-400')}
@@ -371,7 +384,7 @@ export default function Memory() {
                         {Object.entries(r.scoreboard).map(([k, v]) => (
                           <div key={k} className="bg-slate-800/60 rounded-lg p-2 text-center">
                             <div className="text-cyan-400 font-bold text-sm">{v}</div>
-                            <div className="text-slate-500 text-[10px] truncate">{k}</div>
+                            <div className="text-slate-500 text-xs truncate">{k}</div>
                           </div>
                         ))}
                       </div>

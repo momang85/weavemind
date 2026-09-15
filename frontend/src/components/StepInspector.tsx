@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import type { TaskNode } from '../stores/types'
 import { X, ChevronDown, ChevronUp } from 'lucide-react'
+import { stepStatusMeta } from '../lib/statusMeta'
 
 const roleColors: Record<string, string> = {
   planner: '#38bdf8', critic: '#c084fc', worker: '#6ee7b7',
@@ -8,11 +9,8 @@ const roleColors: Record<string, string> = {
 }
 
 function statusColor(status: string) {
-  if (status === 'success') return 'text-emerald-400'
-  if (status === 'failed') return 'text-red-400'
-  if (status === 'running') return 'text-cyan-400'
-  if (status === 'skipped') return 'text-amber-400'
-  return 'text-slate-400'
+  // 颜色统一来自 lib/statusMeta（此前本文件自建一套 success/failed/running/skipped → 色值）
+  return stepStatusMeta(status).text
 }
 
 function formatResult(result: any): string {
@@ -36,7 +34,7 @@ function CollapsibleText({ text, limit = 200, className = '' }: { text: string; 
       </div>
       {long && (
         <button onClick={() => setOpen(!open)}
-          className="mt-1 flex items-center gap-1 text-[10px] text-cyan-400 hover:text-cyan-300">
+          className="mt-1 flex items-center gap-1 text-xs text-cyan-400 hover:text-cyan-300">
           {open ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
           {open ? '收起' : `展开（${text.length} 字符）`}
         </button>
@@ -83,8 +81,8 @@ export default function StepInspector({ node, onClose }: { node: TaskNode | null
           </div>
         )}
         <div>
-          <div className="text-gray-400">Status</div>
-          <div className={`font-mono text-sm font-semibold ${statusColor(node.status)}`}>{node.status}</div>
+          <div className="text-gray-400">状态</div>
+          <div className={`font-mono text-sm font-semibold ${statusColor(node.status)}`}>{stepStatusMeta(node.status).label}</div>
         </div>
         {(node.instruction || (node.name && node.id !== 'root')) && (
           <div>
@@ -108,7 +106,7 @@ export default function StepInspector({ node, onClose }: { node: TaskNode | null
             {resultText.slice(0, 2000)}
           </pre>
           {resultText.length > 2000 && (
-            <div className="text-[10px] text-slate-500 mt-1">结果过长，已截断前 2000 字符（完整结果见日志）</div>
+            <div className="text-xs text-slate-500 mt-1">结果过长，已截断前 2000 字符（完整结果见日志）</div>
           )}
         </div>
       )}

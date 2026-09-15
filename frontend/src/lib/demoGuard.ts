@@ -10,20 +10,33 @@
 
 const state = { active: false }
 
-// 演示模式下会被拦截的路径（写 / 付费 / 后台任务 / 管理操作）。
-// 前缀匹配：`/task` 同时覆盖 `/task/<id>/cancel`、`/task/<id>/retry` 等派生动作。
+// 演示模式下会被拦截的路径（写 / 付费 / 后台任务 / 管理操作）。前缀匹配。
+// 注意：任务相关端点有两种前缀——提交是 `/task`，而取消/重跑等动作是 `/api/task/...`，
+// 两者都要列（此前只写 `/task`，导致"停止"在演示模式下仍会真的发出去）。
 export const DEMO_BLOCKED_PREFIXES = [
-  '/task',                 // 提交任务、重跑、取消（真实 LLM 费用）
-  '/api/quick-answer',     // 快答（真实检索 + 模型调用）
-  '/api/memory',           // 记忆/策略的删除、审批等写操作
+  '/task',                 // 提交任务、重跑、重新运行（真实 LLM 费用）
+  '/api/task',             // 取消/重跑等任务动作（此前漏拦）
+  '/api/quick-answer',     // 快答 / 单智能体直发（真实检索 + 模型调用）
+  '/api/memory',           // 记忆/策略的删除等写操作
   '/api/evolution',        // 触发/审批演化（真实后台任务，会烧 token）
-  '/api/settings',         // 设置写回
   '/api/notifications',    // 通知配置写回与测试发送
-  '/api/scheduled-jobs',   // 定时任务增删改
+  '/api/scheduled-jobs',   // 定时任务增删改（会导致日后真实任务运行）
   '/api/users',            // 用户管理
-  '/api/config',           // 配置写回与连通性测试
-  '/api/agents',           // 终止/直发等管理动作
+  '/api/config',           // 配置写回与连通性测试（会调用付费端点）
+  '/api/plan',             // 计划确认/放弃（确认后继续花钱执行）
+  '/api/step',             // 步骤级人工确认（同上）
+  '/api/context',          // 上下文文件提取（服务端解析）
+  '/api/deliverable',      // 运行交付物代码（服务端执行）
+  '/api/verify',           // 数据溯源复核（LLM 费用）
+  '/api/share',            // 生成/撤销分享链接（写状态）
+  '/api/kill-worker',      // 终止 worker（改进程池）
+  '/api/llm-mode',         // 切换 LLM 路由（改全局模式）
+  '/api/single-agent',     // 单智能体直发（费用）
 ] as const
+
+// 显式放行（不拦截）：会话相关操作必须可用，否则用户退出不了演示/登不回来。
+//   POST /api/logout、/api/login、/api/setup-admin、/api/auth/*
+// 只读请求（GET/HEAD/OPTIONS）一律放行——演示只替换控制台展示数据，其余页面读真实环境。
 
 /** 是否为演示模式（显式开关，或 URL 带 ?demo —— 与 store 的初始判定一致）。 */
 export function demoActive(): boolean {

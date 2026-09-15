@@ -28,7 +28,7 @@ const LogRow = memo(function LogRow({ entry }: { entry: LogEntry }) {
 
   return (
     <div className={`flex items-start gap-2 px-3 h-full border-l-2 ${cfg.border} ${cfg.bg}`}>
-        <span className="text-[10px] text-slate-600 font-mono shrink-0 w-16 mt-0.5 tabular-nums whitespace-nowrap overflow-hidden">
+        <span className="text-xs text-slate-600 font-mono shrink-0 w-16 mt-0.5 tabular-nums whitespace-nowrap overflow-hidden">
           {entry.timestamp && entry.timestamp.includes(':') ? entry.timestamp.slice(-8) : entry.timestamp.slice(0, 8)}
         </span>
         {IconComp ? (
@@ -37,7 +37,7 @@ const LogRow = memo(function LogRow({ entry }: { entry: LogEntry }) {
           <span className="shrink-0 text-xs mt-0.5">{cfg.icon}</span>
         )}
         <span className="text-xs text-slate-400 truncate mt-0.5">
-          {entry.agent && <span className="text-[10px] font-semibold text-slate-500">{entry.agent}: </span>}
+          {entry.agent && <span className="text-xs font-semibold text-slate-500">{entry.agent}: </span>}
           {entry.message}
         </span>
     </div>
@@ -86,7 +86,7 @@ export default memo(function LiveActivity() {
           const Icon = agentIcons[a.agent_id] || Brain
           return (
             <div key={a.agent_id}
-              className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] border ${
+              className={`flex items-center gap-1 px-2 py-0.5 rounded-full text-xs border ${
                 a.status?.startsWith('offline') ? 'border-red-500/20 bg-red-500/5 text-red-400' :
                 a.status?.includes('active') ? 'border-amber-500/20 bg-amber-500/5 text-amber-400' :
                 'border-emerald-500/20 bg-emerald-500/5 text-emerald-400'
@@ -112,7 +112,7 @@ export default memo(function LiveActivity() {
       </div>
 
       {paused && (
-        <div className="shrink-0 flex items-center gap-2 text-[11px] text-amber-400 bg-amber-500/10 rounded-lg px-3 py-1.5">
+        <div className="shrink-0 flex items-center gap-2 text-xs text-amber-400 bg-amber-500/10 rounded-lg px-3 py-1.5">
           <Pause className="w-3 h-3" /> Paused
         </div>
       )}

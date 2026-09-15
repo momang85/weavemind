@@ -4,13 +4,15 @@ import {
   CheckCircle2, XCircle, Circle, Loader2, AlertTriangle,
   ChevronRight, ChevronDown, RefreshCw, GripVertical
 } from 'lucide-react'
+import { stepStatusMeta } from '../lib/statusMeta'
 
+// 步骤状态：颜色来自 lib/statusMeta（唯一实现），图标仍由本组件选择（图标是 UI 关注点）
 const statusConfig = {
-  success:  { icon: CheckCircle2,   line: 'bg-emerald-400',  dot: 'bg-emerald-400',  text: 'text-emerald-300', bg: 'border-emerald-500/20 bg-emerald-500/5' },
-  failed:   { icon: XCircle,        line: 'bg-red-400',       dot: 'bg-red-400',       text: 'text-red-300',      bg: 'border-red-500/20 bg-red-500/5' },
-  running:  { icon: Loader2,        line: 'bg-cyan-400',      dot: 'bg-cyan-400',       text: 'text-cyan-300',     bg: 'border-cyan-500/20 bg-cyan-500/5' },
-  skipped:  { icon: AlertTriangle,  line: 'bg-amber-400',     dot: 'bg-amber-400',     text: 'text-amber-300',    bg: 'border-amber-500/20 bg-amber-500/5' },
-  pending:  { icon: Circle,         line: 'bg-slate-700',     dot: 'bg-slate-600',     text: 'text-slate-500',    bg: 'border-slate-800' },
+  success:  { icon: CheckCircle2,   ...stepStatusMeta('success') },
+  failed:   { icon: XCircle,        ...stepStatusMeta('failed') },
+  running:  { icon: Loader2,        ...stepStatusMeta('running') },
+  skipped:  { icon: AlertTriangle,  ...stepStatusMeta('skipped') },
+  pending:  { icon: Circle,         ...stepStatusMeta('pending') },
 } as const
 
 function StatusIcon({ status }: { status: TaskNode['status'] }) {
@@ -83,22 +85,22 @@ const TreeNode = memo(function TreeNode({
 
         <StatusIcon status={node.status} />
 
-        <span className="text-[10px] font-mono text-slate-600 bg-slate-800/60 px-1.5 py-0.5 rounded shrink-0">
+        <span className="text-xs font-mono text-slate-600 bg-slate-800/60 px-1.5 py-0.5 rounded shrink-0">
           {node.capability || 'goal'}
         </span>
 
         {!!node.iteration && (
-          <span className="text-[10px] font-mono text-violet-400 bg-violet-500/10 px-1.5 py-0.5 rounded shrink-0">
+          <span className="text-xs font-mono text-violet-400 bg-violet-500/10 px-1.5 py-0.5 rounded shrink-0">
             第{node.iteration}轮
           </span>
         )}
         {(node.step_id?.startsWith('fix-')) && (
-          <span className="text-[10px] font-mono text-orange-400 bg-orange-500/10 px-1.5 py-0.5 rounded shrink-0">
+          <span className="text-xs font-mono text-orange-400 bg-orange-500/10 px-1.5 py-0.5 rounded shrink-0">
             修复
           </span>
         )}
         {(node.step_id?.startsWith('alt-')) && (
-          <span className="text-[10px] font-mono text-cyan-400 bg-cyan-500/10 px-1.5 py-0.5 rounded shrink-0">
+          <span className="text-xs font-mono text-cyan-400 bg-cyan-500/10 px-1.5 py-0.5 rounded shrink-0">
             备选
           </span>
         )}
@@ -108,7 +110,7 @@ const TreeNode = memo(function TreeNode({
         </span>
 
         {node.agent_id && (
-          <span className="text-[10px] text-slate-500 bg-slate-800/40 px-1.5 py-0.5 rounded-full shrink-0 ml-auto">
+          <span className="text-xs text-slate-500 bg-slate-800/40 px-1.5 py-0.5 rounded-full shrink-0 ml-auto">
             {node.agent_id.replace('_', ' ')}
           </span>
         )}
@@ -116,11 +118,11 @@ const TreeNode = memo(function TreeNode({
         {editable && depth >= 1 && (
           <span className="flex items-center gap-0.5 shrink-0">
             <button onClick={e => { e.stopPropagation(); onMove?.(node.id, -1) }} title="上移"
-              className="w-5 h-5 text-[10px] text-slate-500 hover:text-cyan-400 hover:bg-slate-800 rounded transition-colors">↑</button>
+              className="w-5 h-5 text-xs text-slate-500 hover:text-cyan-400 hover:bg-slate-800 rounded transition-colors">↑</button>
             <button onClick={e => { e.stopPropagation(); onMove?.(node.id, 1) }} title="下移"
-              className="w-5 h-5 text-[10px] text-slate-500 hover:text-cyan-400 hover:bg-slate-800 rounded transition-colors">↓</button>
+              className="w-5 h-5 text-xs text-slate-500 hover:text-cyan-400 hover:bg-slate-800 rounded transition-colors">↓</button>
             <button onClick={e => { e.stopPropagation(); onDelete?.(node.id) }} title="删除"
-              className="w-5 h-5 text-[10px] text-slate-500 hover:text-red-400 hover:bg-red-500/10 rounded transition-colors">×</button>
+              className="w-5 h-5 text-xs text-slate-500 hover:text-red-400 hover:bg-red-500/10 rounded transition-colors">×</button>
           </span>
         )}
 
@@ -206,7 +208,7 @@ export default memo(function TaskTreeView({
           editable={editable} onMove={onMove} onDelete={onDelete} />
       </div>
 
-      <div className="flex flex-wrap gap-x-4 gap-y-1 pt-3 border-t border-slate-800 text-[11px]">
+      <div className="flex flex-wrap gap-x-4 gap-y-1 pt-3 border-t border-slate-800 text-xs">
         <span className="flex items-center gap-1 text-emerald-400"><span className="w-2 h-2 rounded-full bg-emerald-400" /> {stats.success} success</span>
         <span className="flex items-center gap-1 text-red-400"><span className="w-2 h-2 rounded-full bg-red-400" /> {stats.failed} failed</span>
         {stats.running > 0 && <span className="flex items-center gap-1 text-cyan-400"><span className="w-2 h-2 rounded-full bg-cyan-400 animate-pulse" /> {stats.running} running</span>}

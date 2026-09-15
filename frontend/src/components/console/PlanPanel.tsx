@@ -2,6 +2,7 @@ import { memo, useEffect, useMemo, useState } from 'react'
 import { Sparkles, RefreshCw, Plus, Play } from 'lucide-react'
 import TaskTreeView from '../TaskTreeView'
 import type { TaskNode } from '../../stores/types'
+import { useTaskStore } from '../../stores/useTaskStore'
 
 const CAPABILITIES = ['web_search', 'web_fetch', 'content_summary', 'code_execution',
   'data_loader', 'data_analyzer', 'model_trainer', 'report_generator', 'file_io', 'package']
@@ -22,6 +23,8 @@ export default memo(function PlanPanel({
   const [editableSteps, setEditableSteps] = useState<any[]>([])
   const [newCap, setNewCap] = useState('content_summary')
   const [newInstr, setNewInstr] = useState('')
+  // 演示模式下停用"确认并执行/放弃"（确认后会真实继续执行并产生费用）
+  const demoMode = useTaskStore(s => s.demoMode)
 
   // 计划待确认时，把后端计划同步到本地可编辑数组
   useEffect(() => {
@@ -132,12 +135,14 @@ export default memo(function PlanPanel({
             </button>
           </div>
           <div className="flex gap-2">
-            <button onClick={() => confirmPlan('confirm')}
-              className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 rounded-lg text-sm border border-emerald-500/30 transition-colors">
+            <button onClick={() => confirmPlan('confirm')} disabled={demoMode}
+              title={demoMode ? '演示模式下已停用（确认后会真实继续执行并产生费用）' : '确认计划并开始执行'}
+              className="flex-1 flex items-center justify-center gap-2 py-2.5 bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 rounded-lg text-sm border border-emerald-500/30 transition-colors disabled:opacity-40">
               <Play className="w-4 h-4" /> 确认并执行（{editableSteps.length} 步）
             </button>
-            <button onClick={() => confirmPlan('cancel')}
-              className="px-4 py-2.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-lg text-sm border border-red-500/20 transition-colors">
+            <button onClick={() => confirmPlan('cancel')} disabled={demoMode}
+              title={demoMode ? '演示模式下已停用' : '放弃本次任务'}
+              className="px-4 py-2.5 bg-red-500/10 hover:bg-red-500/20 text-red-400 rounded-lg text-sm border border-red-500/20 transition-colors disabled:opacity-40">
               放弃
             </button>
           </div>

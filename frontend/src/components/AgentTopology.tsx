@@ -28,7 +28,7 @@ export default function AgentTopology() {
     ctx.beginPath(); ctx.arc(cx, cy, 22, 0, Math.PI * 2)
     ctx.fillStyle = '#38bdf8'; ctx.fill()
     ctx.strokeStyle = '#0f172a'; ctx.lineWidth = 2; ctx.stroke()
-    ctx.fillStyle = '#fff'; ctx.font = 'bold 10px sans-serif'
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 12px sans-serif'
     ctx.textAlign = 'center'; ctx.fillText('中枢', cx, cy + 4)
 
     const n = agents.length
@@ -56,7 +56,7 @@ export default function AgentTopology() {
       }
 
       // 标签
-      ctx.fillStyle = '#94a3b8'; ctx.font = '9px sans-serif'
+      ctx.fillStyle = '#94a3b8'; ctx.font = '12px sans-serif'
       ctx.textAlign = 'center'
       ctx.fillText(a.agent_id.replace('_', ' ').slice(0, 10), x, y + size + 12)
 

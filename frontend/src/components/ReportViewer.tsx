@@ -310,7 +310,7 @@ function CitationBadges({ nums, sources }: { nums: number[]; sources: SourceItem
         return (
           <button key={n} type="button" title={tip}
             onClick={src ? scrollToSources : undefined}
-            className={`rounded px-1 py-px text-[10px] font-semibold leading-none transition-colors ${
+            className={`rounded px-1 py-px text-xs font-semibold leading-none transition-colors ${
               src
                 ? 'border border-cyan-500/25 bg-cyan-500/15 text-cyan-400 hover:bg-cyan-500/30 hover:text-cyan-300'
                 : 'border border-slate-700 bg-slate-800/60 text-slate-500'
@@ -695,12 +695,12 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
               <ScrollText className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
               <span className="text-xs font-semibold text-cyan-400">数字溯源</span>
               <span className="text-xs text-slate-400">共 {total} 个：</span>
-              <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 text-[11px]">引用 {nt.cited_count ?? 0}</span>
-              <span className="px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-400 text-[11px]">计算 {nt.computed_count ?? 0}</span>
-              <span className="px-2 py-0.5 rounded bg-violet-500/10 text-violet-400 text-[11px]">模型知识 {nt.disclosed_count ?? 0}</span>
-              <span className="px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 text-[11px]">不可溯源 {nt.unverifiable_count ?? 0}</span>
+              <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 text-xs">引用 {nt.cited_count ?? 0}</span>
+              <span className="px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-400 text-xs">计算 {nt.computed_count ?? 0}</span>
+              <span className="px-2 py-0.5 rounded bg-violet-500/10 text-violet-400 text-xs">模型知识 {nt.disclosed_count ?? 0}</span>
+              <span className="px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 text-xs">不可溯源 {nt.unverifiable_count ?? 0}</span>
               {rate != null && (
-                <span className={`text-[11px] ml-1 ${rate >= 70 ? 'text-emerald-400' : 'text-amber-400'}`}>溯源率 {rate}%</span>
+                <span className={`text-xs ml-1 ${rate >= 70 ? 'text-emerald-400' : 'text-amber-400'}`}>溯源率 {rate}%</span>
               )}
             </div>
           )
@@ -735,7 +735,7 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
         {/* 窄屏：顶部粘性目录 */}
         {toc.length >= 2 && (
           <div className="lg:hidden sticky top-4 z-20 mt-4 border-y border-slate-800/80 bg-slate-900/95 px-4 py-2.5 backdrop-blur">
-            <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-slate-500">
+            <div className="mb-1.5 flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-slate-500">
               <ListTree className="h-3 w-3" /> 目录
             </div>
             <div className="flex gap-1.5 overflow-x-auto pb-0.5">
@@ -753,7 +753,7 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
           {/* 宽屏：左侧粘性目录 */}
           {toc.length >= 2 && (
             <aside className="sticky top-6 hidden max-h-[calc(100vh-6rem)] self-start overflow-y-auto border-r border-slate-800/70 px-4 py-4 lg:block">
-              <div className="mb-3 flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-slate-500">
+              <div className="mb-3 flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-slate-500">
                 <ListTree className="h-3.5 w-3.5" /> 目录
               </div>
               <nav className="space-y-0.5">
@@ -794,7 +794,7 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
                     <li key={`${s.url}-${i}`}>
                       <a href={s.url} target="_blank" rel="noopener noreferrer"
                         className="group flex items-center gap-3 rounded-lg border border-slate-800 bg-slate-800/30 px-3.5 py-2.5 transition-colors hover:border-cyan-500/30 hover:bg-slate-800/60">
-                        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-cyan-500/15 text-[11px] font-semibold text-cyan-400">
+                        <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-md bg-cyan-500/15 text-xs font-semibold text-cyan-400">
                           {i + 1}
                         </span>
                         <span className="min-w-0 flex-1">
@@ -812,7 +812,7 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
             {/* 免责声明弱化卡片 */}
             {disclaimerResult.disclaimer && (
               <section className="mt-6 rounded-lg border border-slate-800/60 bg-slate-900/40 px-4 py-3">
-                <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wider text-slate-600">
+                <div className="flex items-center gap-1.5 text-xs font-medium uppercase tracking-wider text-slate-600">
                   <Quote className="h-3 w-3" /> 免责声明
                 </div>
                 <p className="mt-1 text-xs leading-relaxed text-slate-600">{disclaimerResult.disclaimer}</p>
@@ -841,30 +841,31 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
                     <FileDown className="w-3 h-3 text-slate-500 shrink-0" />
                     <span className="truncate">{f.name}</span>
                     {f.size != null && <span className="text-slate-600 shrink-0">{(f.size / 1024).toFixed(1)} KB</span>}
-                    {f.kind && <span className="px-1.5 py-0.5 rounded bg-slate-700/60 text-slate-400 text-[10px] shrink-0">{f.kind}</span>}
+                    {f.kind && <span className="px-1.5 py-0.5 rounded bg-slate-700/60 text-slate-400 text-xs shrink-0">{f.kind}</span>}
                     <div className="ml-auto flex items-center gap-1.5 shrink-0">
                       {f.kind === 'html' && (
                         <button onClick={() => openFile(f.name)}
-                          className="flex items-center gap-1 px-2 py-1 rounded bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 text-[10px]">
+                          className="flex items-center gap-1 px-2 py-1 rounded bg-cyan-500/15 hover:bg-cyan-500/25 text-cyan-400 text-xs">
                           <ExternalLink className="w-3 h-3" /> 打开
                         </button>
                       )}
                       {f.kind === 'py' && (
-                        <button onClick={() => runFile(f.name)} disabled={running === f.name}
-                          className="flex items-center gap-1 px-2 py-1 rounded bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 text-[10px] disabled:opacity-50">
+                        <button onClick={() => runFile(f.name)} disabled={running === f.name || demoMode}
+                          title={demoMode ? '演示模式下已停用（会在服务端执行代码）' : '运行该交付物（沙箱内执行）'}
+                          className="flex items-center gap-1 px-2 py-1 rounded bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-400 text-xs disabled:opacity-50">
                           <Play className="w-3 h-3" /> {running === f.name ? '运行中...' : '运行'}
                         </button>
                       )}
                       {f.kind !== 'html' && (
                         <button onClick={() => downloadFile(f.name)}
-                          className="flex items-center gap-1 px-2 py-1 rounded bg-slate-700/50 hover:bg-slate-700 text-slate-300 text-[10px]">
+                          className="flex items-center gap-1 px-2 py-1 rounded bg-slate-700/50 hover:bg-slate-700 text-slate-300 text-xs">
                           <Download className="w-3 h-3" /> 下载
                         </button>
                       )}
                     </div>
                   </div>
                   {runOutput[f.name] && (
-                    <pre className="px-3 py-2 text-[11px] text-emerald-300/90 bg-slate-950 rounded whitespace-pre-wrap max-h-48 overflow-y-auto">
+                    <pre className="px-3 py-2 text-xs text-emerald-300/90 bg-slate-950 rounded whitespace-pre-wrap max-h-48 overflow-y-auto">
                       {runOutput[f.name]}
                     </pre>
                   )}
@@ -931,7 +932,9 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
           } catch (e: any) { setVerifyError(String(e)) }
           setVerifyLoading(false)
         }}
-          className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm transition-colors">
+          className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm transition-colors disabled:opacity-50"
+          disabled={demoMode || verifyLoading}
+          title={demoMode ? '演示模式下已停用（数据溯源会调用真实模型）' : '对报告数字做一次可溯源复核'}>
           <ScrollText className="w-4 h-4" /> 数据溯源
         </button>
         <button onClick={() => setShowLogs(!showLogs)}

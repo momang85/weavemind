@@ -72,7 +72,7 @@ export default memo(function ConsoleSideTabs({
           <>
             {streamText && (
               <div className="mb-4 bg-slate-900/80 border border-cyan-500/20 rounded-xl p-3">
-                <div className="text-[10px] text-cyan-400 font-semibold mb-1">
+                <div className="text-xs text-cyan-400 font-semibold mb-1">
                   生成内容（流式）· 实时
                 </div>
                 <pre ref={streamRef} className="whitespace-pre-wrap break-all text-slate-300 text-xs font-sans max-h-48 overflow-y-auto">
@@ -107,16 +107,16 @@ export default memo(function ConsoleSideTabs({
                   {(m.status === 'SUCCESS' || m.status === 'FAILED' || m.status === 'SUCCESS_WITH_ISSUES') && (
                     <div className="flex gap-2 mt-2 flex-wrap">
                       <button onClick={() => onViewReport(m.task_id)}
-                        className="flex items-center gap-1 text-[10px] text-cyan-400 hover:text-cyan-300">
+                        className="flex items-center gap-1 text-xs text-cyan-400 hover:text-cyan-300">
                         <Eye className="w-3 h-3" /> 查看完整报告
                       </button>
                       <button onClick={() => onSubmit(m.goal)}
-                        className="flex items-center gap-1 text-[10px] text-violet-400 hover:text-violet-300">
+                        className="flex items-center gap-1 text-xs text-violet-400 hover:text-violet-300">
                         <RefreshCw className="w-3 h-3" /> 重跑
                       </button>
                       {m.status === 'SUCCESS_WITH_ISSUES' && (
                         <button onClick={() => onToggleGaps(m.task_id)}
-                          className="flex items-center gap-1 text-[10px] text-amber-400 hover:text-amber-300">
+                          className="flex items-center gap-1 text-xs text-amber-400 hover:text-amber-300">
                           {gapsFor[m.task_id] ? '收起' : '验收缺口'}
                         </button>
                       )}
@@ -138,7 +138,7 @@ export default memo(function ConsoleSideTabs({
 
         {tab === 'results' && (
           <div className="space-y-2">
-            <p className="text-[11px] text-slate-500 mb-3">
+            <p className="text-xs text-slate-500 mb-3">
               {activeConversationId ? '当前对话的完成结果' : '最近完成的任务'}
             </p>
             {resultItems.length === 0 && (
@@ -153,16 +153,16 @@ export default memo(function ConsoleSideTabs({
                 </div>
                 <div className="flex gap-3 flex-wrap">
                   <button onClick={() => onViewReport(t.task_id)}
-                    className="flex items-center gap-1 text-[10px] text-cyan-400 hover:text-cyan-300">
+                    className="flex items-center gap-1 text-xs text-cyan-400 hover:text-cyan-300">
                     <Eye className="w-3 h-3" /> 查看
                   </button>
                   <button onClick={() => onSubmit(t.goal)}
-                    className="flex items-center gap-1 text-[10px] text-violet-400 hover:text-violet-300">
+                    className="flex items-center gap-1 text-xs text-violet-400 hover:text-violet-300">
                     <RefreshCw className="w-3 h-3" /> 重新运行
                   </button>
                   {t.status === 'SUCCESS_WITH_ISSUES' && (
                     <button onClick={() => onToggleGaps(t.task_id)}
-                      className="flex items-center gap-1 text-[10px] text-amber-400 hover:text-amber-300">
+                      className="flex items-center gap-1 text-xs text-amber-400 hover:text-amber-300">
                       {gapsFor[t.task_id] ? '收起' : '验收缺口'}
                     </button>
                   )}

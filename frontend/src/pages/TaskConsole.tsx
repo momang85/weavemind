@@ -42,7 +42,7 @@ export default function TaskConsole() {
   const [confirmMode, setConfirmMode] = useState(false)
   const [templateName, setTemplateName] = useState('')
   const [userContext, setUserContext] = useState('')
-  const [importMsg, setImportMsg] = useState<{ name: string; status: string }[]>([])
+  const [importMsg, setImportMsg] = useState<{ name: string; note: string }[]>([])
   // P0-1：SUCCESS_WITH_ISSUES 的验收缺口明细（按任务缓存，点击展开）
   const [gapsFor, setGapsFor] = useState<Record<string, string[]>>({})
 

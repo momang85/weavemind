@@ -1,6 +1,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { Save, RotateCcw, Key, Cpu, Clock, Shield, Server, Bell, CalendarClock, Plus, Trash2, Activity, Users, AlertTriangle, CheckCircle2, PlugZap } from 'lucide-react'
 import { useTaskStore } from '../stores/useTaskStore'
+import { resultLabel } from '../lib/statusMeta'
+import { LoadingBlock } from '../components/ui'
 
 // ── T1 通知配置 ───────────────────────────────────────────────
 function NotificationsSection() {
@@ -107,8 +109,8 @@ function ScheduledJobsSection() {
             className="accent-cyan-500" />
           <div className="flex-1 min-w-0">
             <div className="text-sm text-slate-200 truncate">{j.name}
-              <span className="ml-2 text-[10px] px-2 py-0.5 rounded bg-slate-800 text-slate-400">{j.cron ? `每日 ${j.cron}` : `每 ${j.interval_minutes} 分钟`}</span>
-              <span className="ml-2 text-[10px] px-2 py-0.5 rounded bg-violet-500/10 text-violet-400">{j.project}</span>
+              <span className="ml-2 text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-400">{j.cron ? `每日 ${j.cron}` : `每 ${j.interval_minutes} 分钟`}</span>
+              <span className="ml-2 text-xs px-2 py-0.5 rounded bg-violet-500/10 text-violet-400">{j.project}</span>
             </div>
             <div className="text-xs text-slate-500 truncate mt-1">{j.goal}</div>
             {(() => {
@@ -116,8 +118,8 @@ function ScheduledJobsSection() {
               if (!rec) return null
               const bad = rec.result === 'error'
               return (
-                <div className={`text-[10px] mt-1 ${bad ? 'text-red-400' : 'text-slate-600'}`}>
-                  上次：{rec.time || '-'} · {rec.result || '-'}
+                <div className={`text-xs mt-1 ${bad ? 'text-red-400' : 'text-slate-600'}`}>
+                  上次：{rec.time || '-'} · {resultLabel(rec.result)}
                   {rec.task_id ? ` · ${rec.task_id}` : ''}
                   {rec.detail ? `（${rec.detail}）` : ''}
                 </div>
@@ -276,7 +278,13 @@ export default function SettingsPage() {
     } finally { setTesting('') }
   }
 
-  if (loading && !req) return <div className="flex items-center justify-center h-64 text-slate-500">Loading...</div>
+  // 演示模式：本页的保存 / 连通性测试会真实写配置或调用付费端点，逐项停用
+  //（fetch 层另有统一兜底拦截，见 lib/demoGuard.ts）
+  // 注意：必须放在下面的早退（if (loading && !req) return …）**之前**——
+  // hook 在早退之后会让登录/加载态翻转时 hook 数量变化，React 抛 #310 卸载整棵树。
+  const demoMode = useTaskStore(s => s.demoMode)
+
+  if (loading && !req) return <LoadingBlock label="正在读取配置…" />
 
   const renderEntry = (e: ReqEntry, sectionTarget?: string) => {
     const badge = healthBadge(e)
@@ -285,16 +293,16 @@ export default function SettingsPage() {
       <div key={e.path} className="border border-slate-800 rounded-lg p-3 space-y-2">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="text-xs text-slate-300">{e.label}</span>
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-800/70 text-slate-500 font-mono">{e.path}</span>
-          {badge && <span title={badge.title} className={`text-[10px] px-1.5 py-0.5 rounded ${badge.cls}`}>{badge.text}</span>}
+          <span className="text-xs px-1.5 py-0.5 rounded bg-slate-800/70 text-slate-500 font-mono">{e.path}</span>
+          {badge && <span title={badge.title} className={`text-xs px-1.5 py-0.5 rounded ${badge.cls}`}>{badge.text}</span>}
           {STATUS_BADGE[e.status] && e.status !== 'active' && (
-            <span className={`text-[10px] px-1.5 py-0.5 rounded ${STATUS_BADGE[e.status].cls}`}>{STATUS_BADGE[e.status].text}</span>
+            <span className={`text-xs px-1.5 py-0.5 rounded ${STATUS_BADGE[e.status].cls}`}>{STATUS_BADGE[e.status].text}</span>
           )}
-          <span className="text-[10px] text-slate-600">来源：{e.source === 'config' ? 'config.json' : e.source === 'env' ? `环境变量 ${e.env_name || ''}` : '默认值'}</span>
+          <span className="text-xs text-slate-600">来源：{e.source === 'config' ? 'config.json' : e.source === 'env' ? `环境变量 ${e.env_name || ''}` : '默认值'}</span>
           {e.testable && (
             <button onClick={() => runTest(sectionTarget || 'llm')}
               disabled={testing !== ''}
-              className="ml-auto flex items-center gap-1 px-2 py-1 rounded bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 text-[11px] disabled:opacity-40">
+              className="ml-auto flex items-center gap-1 px-2 py-1 rounded bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 text-xs disabled:opacity-40">
               <PlugZap className="w-3 h-3" /> {testing === (sectionTarget || 'llm') ? '测试中…' : '测试'}
             </button>
           )}
@@ -320,7 +328,7 @@ export default function SettingsPage() {
               : e.kind === 'float' ? (parseFloat(ev.target.value) || 0) : ev.target.value)}
             className="w-full bg-slate-800 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-cyan-500/50 disabled:opacity-50" />
         )}
-        {e.affects && <div className="text-[11px] text-slate-500">影响：{e.affects}</div>}
+        {e.affects && <div className="text-xs text-slate-500">影响：{e.affects}</div>}
       </div>
     )
   }
@@ -336,9 +344,10 @@ export default function SettingsPage() {
             className="flex items-center gap-2 px-4 py-2 text-sm text-slate-400 hover:text-slate-300 bg-slate-800/50 hover:bg-slate-800 rounded-lg transition-colors border border-slate-700/50">
             <RotateCcw className="w-4 h-4" /> Reset
           </button>
-          <button onClick={save}
-            className="flex items-center gap-2 px-5 py-2 text-sm font-semibold bg-cyan-500 hover:bg-cyan-400 text-slate-950 rounded-lg transition-colors">
-            <Save className="w-4 h-4" /> {saved ? 'Saved!' : dirty.size > 0 ? `Save (${dirty.size})` : 'Save'}
+          <button onClick={save} disabled={demoMode}
+            title={demoMode ? '演示模式下已停用（保存会真实改写配置）' : '保存配置（写回 config.json）'}
+            className="flex items-center gap-2 px-5 py-2 text-sm font-semibold bg-cyan-500 hover:bg-cyan-400 text-slate-950 rounded-lg transition-colors disabled:opacity-40">
+            <Save className="w-4 h-4" /> {saved ? '已保存' : dirty.size > 0 ? `保存 (${dirty.size})` : '保存'}
           </button>
         </div>
       </div>
@@ -365,7 +374,7 @@ export default function SettingsPage() {
         {req?.missing_required?.length ? (
           <div className="text-xs text-amber-300">· 必需项未配置：{req.missing_required.join('、')}</div>
         ) : null}
-        <div className="text-[11px] text-slate-500">
+        <div className="text-xs text-slate-500">
           余额：主端点 {req?.balance?.primary?.reason || '-'} · 备用 {req?.balance?.backup?.reason || '-'}
           {req?.budget?.limit_usd ? ` · 本月已用 $${req.budget.spend_usd ?? 0} / $${req.budget.limit_usd}` : ''}
         </div>
@@ -389,10 +398,11 @@ export default function SettingsPage() {
                     : <Shield className="w-4 h-4 text-slate-400" />}
                   {sec.label}
                 </h2>
-                {sec.note && <p className="text-[11px] text-slate-500 mt-1">{sec.note}</p>}
+                {sec.note && <p className="text-xs text-slate-500 mt-1">{sec.note}</p>}
               </div>
               {testable && (
-                <button onClick={() => runTest(testable)} disabled={testing !== ''}
+                <button onClick={() => runTest(testable)} disabled={testing !== '' || demoMode}
+                  title={demoMode ? '演示模式下已停用（测试会调用真实付费端点）' : '测试该功能是否可用'}
                   className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 text-xs disabled:opacity-40">
                   <Activity className="w-3.5 h-3.5" /> {testing === testable ? '测试中…' : '测试连通性'}
                 </button>
@@ -406,7 +416,7 @@ export default function SettingsPage() {
             )}
             {groups.length > 0 ? groups.map(g => (
               <div key={g} className="space-y-3">
-                <div className="text-[11px] text-slate-500 uppercase tracking-wider">{g}</div>
+                <div className="text-xs text-slate-500 uppercase tracking-wider">{g}</div>
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   {entries.filter(e => e.group === g).map(e => renderEntry(e, sectionTarget))}
                 </div>
@@ -461,9 +471,9 @@ function UsersSection() {
           <div className="flex-1 min-w-0">
             <div className="text-sm text-slate-200">
               {u.username}
-              <span className={`ml-2 text-[10px] px-2 py-0.5 rounded ${u.role === 'admin' ? 'bg-cyan-500/10 text-cyan-400' : 'bg-slate-700/40 text-slate-400'}`}>{u.role}</span>
+              <span className={`ml-2 text-xs px-2 py-0.5 rounded ${u.role === 'admin' ? 'bg-cyan-500/10 text-cyan-400' : 'bg-slate-700/40 text-slate-400'}`}>{u.role}</span>
             </div>
-            <div className="text-[10px] text-slate-600 mt-1">创建于 {u.created_at || '-'}</div>
+            <div className="text-xs text-slate-600 mt-1">创建于 {u.created_at || '-'}</div>
           </div>
           <select value={u.role} onChange={e => act('POST', '/api/users', { username: u.username, role: e.target.value })}
             className="bg-slate-800 border border-slate-700 rounded-lg px-2 py-1 text-xs text-slate-200">
@@ -539,7 +549,7 @@ function McpServersEditor({ value, onChange, disabled }: {
         className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs disabled:opacity-40">
         <Plus className="w-3 h-3" /> 添加 MCP 服务
       </button>
-      <div className="text-[11px] text-slate-500">
+      <div className="text-xs text-slate-500">
         常见来源：Wind（商业授权）、同花顺 iFinD（付费）、SEC EDGAR（已内置适配器，无需 MCP）。
       </div>
     </div>

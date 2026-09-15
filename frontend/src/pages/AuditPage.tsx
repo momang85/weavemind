@@ -1,6 +1,7 @@
 // 审计日志页（T3）：GET /api/audit，仅 admin
 import { useState, useEffect } from 'react'
 import { ShieldCheck } from 'lucide-react'
+import { resultClass, resultLabel } from '../lib/statusMeta'
 
 interface AuditEntry {
   ts?: string
@@ -59,7 +60,7 @@ export default function AuditPage() {
                   <td className="px-4 py-2.5 text-xs text-cyan-400">{e.action || '-'}</td>
                   <td className="px-4 py-2.5 text-xs text-slate-300 max-w-[160px] truncate">{e.target || '-'}</td>
                   <td className="px-4 py-2.5 text-xs">
-                    <span className={e.result === 'ok' ? 'text-emerald-400' : 'text-amber-400'}>{e.result || '-'}</span>
+                    <span className={resultClass(e.result)}>{resultLabel(e.result)}</span>
                   </td>
                   <td className="px-4 py-2.5 text-xs text-slate-500 max-w-[260px] truncate">{e.detail || ''}</td>
                 </tr>
