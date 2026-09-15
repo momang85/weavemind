@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import ast
 import socket
 import time
 import unittest
@@ -77,6 +78,52 @@ class TestLauncherWaitsForRedis(unittest.TestCase):
         src = Path("launcher.py").read_text(encoding="utf-8")
         self.assertIn("_wait_redis_ready()", src)
         self.assertNotIn("_ensure_redis_available()\n    time.sleep(2)", src)
+
+
+class TestNoUnretriedRedisClients(unittest.TestCase):
+    """同一缺陷家族的全仓守卫：`redis.Redis(...)` 必须显式关掉 redis-py 内建重试。
+
+    实测代价：设置页/健康页的 `/api/config/requirements` 走 `health_registry._redis_get`，
+    Redis 端口被丢包时单次调用要 26~48 秒才失败（默认重试叠加 socket_connect_timeout），
+    页面表现为长时间卡死；本地跑该测试文件也因此挂住 20 秒以上。全仓另有 8 处裸客户端
+    （quote_cache/source_health/lora_client/metrics_collector/orchestrator_v2/tool_dispatch/
+    smoke_test/verification_suite）同因。新增客户端忘记传 retry 时，本用例报红。
+    """
+
+    def _scan(self, name: str, src: str) -> list[str]:
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:
+            return []
+        found: list[str] = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            func = node.func
+            if not isinstance(func, ast.Attribute) or func.attr != "Redis":
+                continue
+            recv = func.value.id if isinstance(func.value, ast.Name) else ""
+            if recv == "aioredis":      # 异步客户端没有 retry 参数
+                continue
+            if "retry" not in {kw.arg for kw in node.keywords}:
+                found.append(f"{name}:{node.lineno}")
+        return found
+
+    def test_detector_has_teeth(self):
+        src = "import redis\nr = redis.Redis(host='h')\n_ = redis.Redis(host='h', retry=NO)\n"
+        self.assertEqual(self._scan("syn.py", src), ["syn.py:2"])
+
+    def test_no_unretried_client_in_repo(self):
+        bad: list[str] = []
+        for path in sorted(Path(".").rglob("*.py")):
+            rel = path.as_posix()
+            if rel.startswith(".") or "/site-packages/" in rel or "/node_modules/" in rel:
+                continue
+            bad += self._scan(rel, path.read_text(encoding="utf-8", errors="replace"))
+        self.assertEqual(
+            bad, [],
+            "这些 Redis 客户端没关内建重试：Redis 不可达时会从 2 秒失败退化成数十秒挂死"
+            "（用 common._NO_REDIS_RETRY 或同款本地常量传 retry=）：" + ", ".join(bad))
 
 
 if __name__ == "__main__":

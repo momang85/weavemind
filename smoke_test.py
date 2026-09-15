@@ -89,7 +89,11 @@ def check_env() -> list[str]:
     """
     problems = []
     try:
-        r = redis.Redis(host="localhost", port=6379, decode_responses=True)
+        # 无超时 + 默认重试时，端口被丢包会让本检查挂近百秒；这里短超时 + 不重试
+        from common import _NO_REDIS_RETRY
+        r = redis.Redis(host="localhost", port=6379, decode_responses=True,
+                        socket_connect_timeout=2, socket_timeout=2,
+                        retry=_NO_REDIS_RETRY)
         r.ping()
     except Exception as exc:
         problems.append(f"Redis 不可达: {exc}")

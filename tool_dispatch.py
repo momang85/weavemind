@@ -19,11 +19,13 @@ AUDIT_FILE = Path(__file__).resolve().parent / "logs" / "tool_audit.jsonl"
 
 def _redis():
     import redis as _redis
+    from common import _NO_REDIS_RETRY
     return _redis.Redis(
         host=os.environ.get("REDIS_HOST", "localhost"),
         port=int(os.environ.get("REDIS_PORT", "6379")),
         decode_responses=True,
         socket_connect_timeout=5,
+        retry=_NO_REDIS_RETRY,
     )
 
 

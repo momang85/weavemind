@@ -36,10 +36,16 @@ EMBED_HEALTH_KEY = "wm:embed:health"
 def _redis_get(key: str) -> dict:
     try:
         import redis
+        # 关掉 redis-py 内建重试（common._NO_REDIS_RETRY）：默认重试会把
+        # socket_connect_timeout=2 叠成 26~48 秒才失败，而本函数在
+        # /api/config/requirements 与 /api/status 的同步路径上，Redis 不可达时
+        # 表现为页面长时间卡死，而不是"这一项不可用"。
+        from common import _NO_REDIS_RETRY
         client = redis.Redis(
             host=os.environ.get("REDIS_HOST", "127.0.0.1"),
             port=int(os.environ.get("REDIS_PORT", "6379") or 6379),
             decode_responses=True, socket_connect_timeout=2, socket_timeout=2,
+            retry=_NO_REDIS_RETRY,
         )
         raw = client.get(key)
         if not raw:

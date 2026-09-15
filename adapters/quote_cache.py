@@ -39,6 +39,7 @@ def cache_ttl() -> int:
 
 def _new_redis_client():
     """环境变量感知的 Redis 客户端（连接超时短，失败快速回落内存）。"""
+    from common import _NO_REDIS_RETRY
     return _redis_lib.Redis(
         host=os.environ.get("REDIS_HOST", "localhost"),
         port=int(os.environ.get("REDIS_PORT", "6379")),
@@ -46,6 +47,7 @@ def _new_redis_client():
         socket_connect_timeout=1.0,
         socket_timeout=1.5,
         socket_keepalive=True,
+        retry=_NO_REDIS_RETRY,
     )
 
 

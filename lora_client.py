@@ -55,7 +55,7 @@ def _mode(timeout: float = 0.5) -> str:
                 host=os.environ.get("REDIS_HOST", "localhost"),
                 port=int(os.environ.get("REDIS_PORT", "6379")),
                 decode_responses=True, socket_connect_timeout=timeout,
-                socket_timeout=timeout,
+                socket_timeout=timeout, retry=_NO_REDIS_RETRY,
             )
             mode = str(r.get("llm_mode") or "")
         except Exception:

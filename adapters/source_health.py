@@ -101,10 +101,13 @@ def _publish_snapshot() -> None:
         import json
         import os
         import redis
+        # 不关重试会把 2 秒连接超时叠成 26~48 秒（见 common._NO_REDIS_RETRY）
+        from common import _NO_REDIS_RETRY
         client = redis.Redis(
             host=os.environ.get("REDIS_HOST", "127.0.0.1"),
             port=int(os.environ.get("REDIS_PORT", "6379") or 6379),
             decode_responses=True, socket_connect_timeout=2, socket_timeout=2,
+            retry=_NO_REDIS_RETRY,
         )
         client.set("wm:source:health",
                    json.dumps(get_health(), ensure_ascii=False), ex=600)

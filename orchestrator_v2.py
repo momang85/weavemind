@@ -531,6 +531,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             # 消息处理被延迟数分钟；连接超时保留 5s 快速失败
             socket_timeout=None,
             socket_connect_timeout=5,
+            # 重试必须显式关掉，否则 redis-py 的默认重试会把 5s 连接超时
+            # 叠成分钟级才失败（见 _NO_REDIS_RETRY）
+            retry=_NO_REDIS_RETRY,
         )
 
     @staticmethod

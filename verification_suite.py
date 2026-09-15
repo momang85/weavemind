@@ -97,8 +97,11 @@ def verify_state_consistency():
     print("=" * 60)
 
     import redis
+    from common import _NO_REDIS_RETRY
 
-    r = redis.Redis(host="localhost", port=6379, decode_responses=True)
+    r = redis.Redis(host="localhost", port=6379, decode_responses=True,
+                    socket_connect_timeout=2, socket_timeout=2,
+                    retry=_NO_REDIS_RETRY)
 
     # 注册 FlakyWorker
     r.set("flaky_state", "idle")
