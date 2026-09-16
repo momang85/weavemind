@@ -1085,11 +1085,79 @@ def traceability_domain(goal: str) -> str:
     return "research"
 
 
+def _subject_of(text: str) -> str:
+    """从一段文本里取**主体**（公司/实体名）；取不到返回空串（=未知）。
+
+    复用任务分类器的公司提取（中英文都支持），因此"宁德时代/比亚迪/Apple/AAPL"
+    都能被认出来。**未知不等于冲突**：只有两边都已知且不同才判冲突，
+    避免把没写主体的报告一律否掉。
+    """
+    try:
+        from task_classifier import _extract_company
+        return str(_extract_company(str(text or "")) or "")
+    except Exception:
+        return ""
+
+
+def _subjects_conflict(report_subject: str, source_subject: str) -> bool:
+    """主体冲突：两边都已知、且互不包含才算冲突。"""
+    a = str(report_subject or "").strip()
+    b = str(source_subject or "").strip()
+    if not a or not b:
+        return False
+    if a == b or a in b or b in a:
+        return False
+    return True
+
+
+def _line_with(text: str, needle: str) -> str:
+    """取包含 `needle` 的那一行（financials 通道每行都带实体前缀）。"""
+    for line in str(text or "").splitlines():
+        if needle and needle in line:
+            return line
+    return ""
+
+
+def _subject_conflict_for(n: dict, report: str, goal: str, source_text: str,
+                          candidates: list[str]) -> bool:
+    """报告里的这个数字与命中来源的**主体**是否冲突（数字-主体绑定）。
+
+    实测缺口（架构复核点名）：报告写"宁德时代营收 1741 亿元"、来源其实是
+    "比亚迪营收 1741 亿元"，只比 `(值, 单位)` 会判可溯源。这里补主体维度：
+    报告侧主体取自数字所在子句，取不到再退回**任务目标**（报告通常只说一家公司）；
+    来源侧主体取自命中行。
+    """
+    pos = int(n.get("pos") or 0)
+    raw = str(n.get("raw") or "")
+    # 只用**紧邻数字的子句**里写明的公司：不拿任务目标兜底。
+    # 目标兜底会把"多实体对比报告"和"代码/全称别名不一致"误判成主体冲突（假阴性），
+    # 而架构复核明确要求不能靠收紧把真话否掉。子句提不出主体 → 视为未知 → 不冲突。
+    report_subject = _subject_of(_clause_of(str(report or ""), pos, pos + len(raw)))
+    if not report_subject:
+        return False
+    # 定位"包含这个数字的那一行"：候选串可能带空格/单位差异（"6000.0 亿元" vs
+    # "6000.0亿元"），退而用数值核心匹配。**找不到行就按未知处理、不判冲突**——
+    # 退化成"整块文本"会把主体取成第一家公司，在对比类报告里制造假阴性。
+    needles = [str(n.get("value") or "")] + [str(c) for c in candidates if c]
+    for needle in needles:
+        if not needle:
+            continue
+        line = _line_with(source_text, needle)
+        if not line:
+            continue
+        src_subject = _subject_of(line)
+        if src_subject and _subjects_conflict(report_subject, src_subject):
+            return True
+    return False
+
+
 def check_number_traceability(
     report: str,
     sources: dict,
     threshold: float | None = None,
     domain: str | None = None,
+    goal: str = "",
+    subject_check: bool = True,
 ) -> dict:
     """数字溯源校验：报告中的数字能否在检索/快照/清洗/结构化数据中找到。
     threshold 默认按 domain 取 _TRACEABILITY_THRESHOLDS；未给 domain 时用 0.7。
@@ -1110,6 +1178,8 @@ def check_number_traceability(
             "untraceable": [],
         }
     src_norm = {k: _norm(v) for k, v in sources.items() if v}
+    # 主体抽取要用**未归一化**的原文：`_norm` 会去掉换行，行内的实体前缀就取不到了
+    src_raw = {k: str(v) for k, v in sources.items() if v}
     clean_text = sources.get("clean_chart_data") or ""
     # V1：用户材料本身是**来源**（不证明内容真实），但必须**分通道**处理：
     # clean_chart_data 是结构化 JSON，任何文本拼接都会让结构化解析失败
@@ -1129,14 +1199,24 @@ def check_number_traceability(
         else:
             if n["unit"]:
                 for k, st in src_norm.items():
-                    if any(c and c in st for c in _candidates(n)):
-                        hit = k
-                        break
+                    cands = [c for c in _candidates(n) if c and c in st]
+                    if not cands:
+                        continue
+                    # 数字-主体绑定：命中来源属于**另一家公司**时不算可溯源
+                    if subject_check and _subject_conflict_for(
+                            n, report, goal, src_raw.get(k, st), cands):
+                        continue
+                    hit = k
+                    break
             else:
                 for k, st in src_norm.items():
-                    if _bare_match(n["value"], st):
-                        hit = k
-                        break
+                    if not _bare_match(n["value"], st):
+                        continue
+                    if subject_check and _subject_conflict_for(
+                            n, report, goal, src_raw.get(k, st), [str(n["value"])]):
+                        continue
+                    hit = k
+                    break
         item = {"raw": n["raw"], "value": n["value"], "unit": n["unit"]}
         if not hit and clean_text and _arithmetic_derived_from_clean(n, clean_text):
             hit = "derived_computed"
@@ -1396,7 +1476,8 @@ def check_entity_attribution(
         return other_found
 
     # 1) 报告中的数字（可溯源部分）：以报告句子判定归属
-    trace = check_number_traceability(report, sources)
+    # 归属检查自己会做实体推理；这里关掉主体冲突筛选，避免两套判断互相污染
+    trace = check_number_traceability(report, sources, goal=goal, subject_check=False)
     for n in trace.get("traceable", []):
         ctxs = _locate_and_context(report, n["value"], n["unit"])
         for ctx, prev in ctxs:
@@ -2414,7 +2495,7 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace,
     report_checks = set(_PROFILE_REPORT_CHECKS.get(profile, ()))
     checks: dict = {}
     checks["number_traceability"] = check_number_traceability(
-        report_text, sources, domain=domain,
+        report_text, sources, domain=domain, goal=goal,
     )
     checks["entity_attribution"] = check_entity_attribution(
         report_text, sources, goal,

@@ -152,10 +152,13 @@ class TestAcceptanceAdversarial(_AdversarialBase):
         self.assertGreaterEqual(len(r.get("gaps") or []), 2)
 
     def test_known_gap_number_subject_mismatch(self):
-        """已知盲区（记录现状，非通过标准）：数字溯源只比对数值、不绑定主体——
-        报告写"宁德时代营收1741亿元"而来源是"比亚迪营收1741亿元"时，
-        当前判为可溯源。将来实现"数字-主体绑定"校验后，本用例应改为
-        断言 number_traceability 判 fail。"""
+        """**仍存在的缺口（记录现状，非通过标准）**：报告只在标题/文档级声明主体、
+        数字本身所在单元没有局部归属时，主体仍不参与绑定。
+
+        报告写"宁德时代2024年报"、表格单元只有"营业收入 | 1741亿元"，来源其实是
+        "比亚迪营收1741亿元"——当前仍判可溯源。已绑定的部分见下一个用例
+        （数字紧邻的子句里写明他司主体、且来源行主体不同 → 拒绝）。
+        """
         report = (
             "# 宁德时代2024年报\n\n## 核心指标\n\n| 指标 | 数值 | 来源 |\n|---|---|---|\n"
             "| 营业收入 | 1741亿元 | [1] |\n\n## 数据时效\n\n数据截至 2024-12-31 年报，日终更新。\n\n"
@@ -169,8 +172,37 @@ class TestAcceptanceAdversarial(_AdversarialBase):
                 "snippet": "比亚迪2024年营收1741亿元。",
             }],
         )
-        # 记录现状：值命中即算可溯源（主体未绑定）
+        # 记录现状：数字所在的表格单元没有局部主体声明 → 主体维度未参与绑定
         self.assertTrue(r["checks"]["number_traceability"]["pass"])
+        # 阈值未被本批下调
+        from acceptance_checker import _TRACEABILITY_THRESHOLDS
+        self.assertEqual(_TRACEABILITY_THRESHOLDS.get("financial"), 0.7)
+
+    def test_clause_subject_conflict_is_rejected(self):
+        """已绑定部分：数字**紧邻的子句**里写明他司主体、来源行主体不同 → 不可溯源。"""
+        from acceptance_checker import check_number_traceability
+        report = (
+            "# 行业对比\n\n比亚迪2024年营收 1741 亿元。\n\n"
+            "## 数据时效\n\n数据截至 2024-12-31。\n\n" + _DISCLAIMER
+        )
+        tmp = _mk_env("adv-clause", [{
+            "title": "宁德时代2024年营收1741亿元_新浪财经",
+            "url": "https://finance.sina.com.cn/c/3",
+            "snippet": "宁德时代2024年营收1741亿元。",
+        }])
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        ws_mod.configure_workspace_root(tmp)
+        src = acceptance_checker_sources(ws_mod.task_workspace("adv-clause"))
+        res = check_number_traceability(report, src, domain="financial",
+                                        goal="分析宁德时代2024年报营收")
+        raws = [str(t.get("raw")) for t in (res.get("traceable") or [])]
+        self.assertNotIn("1741 亿元", raws,
+                         f"子句主体与来源主体冲突不得算可溯源：{res.get('details')}")
+
+
+def acceptance_checker_sources(ws):
+    import acceptance_checker as ac
+    return ac._collect_sources(ws)
 
 
 class TestAcceptanceHonestBaseline(_AdversarialBase):
