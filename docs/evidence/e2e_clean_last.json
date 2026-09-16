@@ -1,0 +1,16 @@
+{
+ "ok": true,
+ "stage": "done",
+ "clone": "C:\\Users\\ding0\\AppData\\Local\\Temp\\wm_e2e_l0hmu2su\\clone",
+ "commit": "c1a7559",
+ "deps_ok": true,
+ "launcher_tail": [
+  "  [OK] 前端产物已就绪（frontend/dist，免 Node）",
+  "结论：全部就绪，可以启动",
+  "  [OK] 启动校验：16/16 服务存活"
+ ],
+ "task_id": "ui-842ff25fe6",
+ "status": "SUCCESS",
+ "report_produced": true,
+ "report_detail": "任务库 report 1648 字符"
+}

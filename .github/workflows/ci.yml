@@ -127,6 +127,40 @@ jobs:
         run: npm run build
         working-directory: frontend
 
+  clean-env-e2e:
+    # 干净环境端到端门禁（市场评估的 P0-1）：从**提交内容**克隆 → 装依赖 → 起服务 →
+    # 提交任务 → 产出报告。模型指向仓库内的 stub（不消耗真实额度），Redis 用 service
+    # 容器，WebUI 用独立端口；这条闸门证明的是"一个干净检出足以跑出第一份报告"。
+    runs-on: ubuntu-latest
+    services:
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements-runtime.lock
+      - name: Install CJK fonts (PDF export path)
+        run: sudo apt-get update && sudo apt-get install -y fonts-droid-fallback
+      - name: Clean-checkout end-to-end (clone → deps → start → task → report)
+        run: python scripts/e2e_clean_check.py --ci --timeout 900
+      - name: Upload e2e evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-clean-last
+          path: docs/evidence/e2e_clean_last.json
+          if-no-files-found: warn
+
   docker-image:
     # 镜像此前"看着能构建、其实起不来"：编排器由 launcher 以子进程拉起，缺 charts_pipeline
     # 等包即导入崩溃，而 CI 既不构建镜像也不做导入检查。这里把"能起"变成可验证的闸门。
