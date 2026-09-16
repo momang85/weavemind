@@ -1,6 +1,333 @@
-# DeepSeek 执行状态（2026-09-15 更新）
+# DeepSeek 执行状态（2026-09-16 晚 更新）
 
-**本批目标**：先把我推送后出现的两条 CI 红灯修掉，再把同一个缺陷家族（redis-py 内建重试）收口。
+**当前关卡**：M0 已实现并通过**部分**定向验证；**本批 = P0 联调 + R0.1/R0.4**（工作区，**未提交**，HEAD 仍 `ab740b5`）。
+下一批 = **R0.2 版本身份真实接线 / R0.3 已验证交付谓词**（《修订》§2）。台账见
+`docs/实机运行记录_M0f_20260916.md`（含 P0 一节）。
+
+**R0 进度（首批，逐项给证据）**
+
+- ✅ **R0.4 计算反例**（`acceptance_checker.py`）：常量豁免改为**按操作数位置**判定
+  （`1000/1-1` 的分母 1 不再被末尾 `-1` 连带豁免）；新增逐操作数语义联合判定
+  （`_combo_semantics`：每个必需输入都要绑定指标/期间/币种，未绑定 → unknown 而非 ok）；
+  材料解析新增币种，并修掉两处被它照出来的真实缺陷——指标取"±20 字窗口首个词"（会把
+  `2025 年收入 1200 万元` 标成"毛利率"）、期间取"子句首个年份"（会把 2024 的数标成 2025），
+  现在都改为**取数字之前最近**的词/年；顺带补上 `万美元/万港元` 的单位解析。
+  回归：`test_r0_boundaries`（R0.4 部分 7 项）+ `test_report_quality` 26 + `test_acceptance_adversarial` 19 全绿。
+- ✅ **R0.1 目标达成与诚实披露分开**：新增 `derive_requirements`（目标里要求数据吗？要来源吗？
+  点名了哪些指标/期间？）与 `check_requirement_coverage`（四态 `executed / honest_disclosure /
+  goal_met / evidence`），并把"目标未达成"做成**独立门槛**：缺必需数值或来源 → 不得 `overall=pass`；
+  缺失但已显式披露 → `partial`；未披露 → `fail`；正文为空 → `unknown`；定性要求（"定性即可、
+  不需要数字"）不被迫造数字。缺口现在直接给可操作文案。
+  最小复现（架构给的）**已转绿**：要求数据与官方来源、正文全"未披露"、来源为空 → 由 `pass` 变为非 pass 并给出缺口。
+- ⏳ **R0.2 版本身份真实接线**、**R0.3 已验证交付谓词**：未开始，见下节"实机缺口 ④/⑤"。
+
+**四分类（按《修订》§5 要求）**
+
+- **已实现**：版本/证据记录（`report_version.py`）、导出清单、根预算（`root_budget.py`）、
+  评审协议（`review-policy/v1` + 根任务状态）、准入谓词（`admission.py`）、取消四分类与
+  可取消的模型等待、阶段观测、按端点额度冷却；前端 ReportViewer/Console 的中文与门户化改动**在源码里**。
+- **独立定向通过**（他人可在禁止真实连接下复现）：`test_offline_delivery.TestOfflineFullDelivery`
+  3 项、增量验收 4 反例、`test_review_protocol` + `test_admission` 53 项；本机另跑
+  `test_report_version` 17 / `test_root_budget` 19 / `test_cancel_semantics` 36 / `test_offline_delivery` 8
+  均 EXIT=0（**未跑全套**，不以单测总数替代关卡）。
+- **实机缺口**：① `ui-2554df5f9f` 是 SUCCESS_WITH_ISSUES，但两个目标收入数值都未取得、
+  来源 URL=0、验收多处占位却 `overall=pass` → **不代表研究目标达成**；② 该任务账本
+  `plan=2/step=5`、`tokens_settled=0` → worker 内部请求与费用**未对齐**；③ 该样例当时
+  未生成 `export_manifest.json`；④ 配置 0（不限）实际回落 600s（任务①因此提前收尾）；
+  ⑤ 取消时票据 `1/1/1` 是"真票据已结算 + 虚构 inflight 未结算"的**假平衡**；
+  ⑥ 检索通道对茅台类查询返回无关结果（本轮两个任务失败的直接原因）。
+- **未验证**：① **浏览器/UI 未验收**（`dist` 已重建为 `index-yUwXXuD1.js` 并被 8080 提供，
+  但未在浏览器逐项验收）；② pending_review 是否经 RAG 泄漏**未被证明**——注册表侧已隔离，
+  RAG 侧今天 0 条记录是因为嵌入欠费写入失败，不是隔离生效；③ 主/备同 host，"主备容灾"未做跨供应商验证。
+
+**P0 联调结论（本轮，已记录改动）**
+
+- LLM 检测：主/备探测 ok（1.9s）；三段模型真实最小调用均返回（1.2/2.1/2.2s）；JSON 规划路径可用。
+  生效模型：plan/reflect/review → `qwen3.8-max`，exec/judge → `deepseek-flash`；
+  `planner.model=qwen3.7-max` 对规划调用不生效（**只记录，不改模型权限**）。
+- `system.budget` 已改 `{0,0,0}`（按你的选择）；`frontend/dist` 已重建（新指纹）。
+- 三个任务：① 含来源研究 FAILED（验收 fail，数字溯源 0/48）；② 定性研究 FAILED（检索无关结果，0/6 步）；
+  ③ 运行中取消 CANCELLED（**停止延迟 1.0s**，账本假平衡见上）。
+- 任务①②的"失败"**不是**目标达成证据；每份交付物都带"预算耗尽/评审降级/未验收草稿"注记，
+  状态如实降级，未进成功沉淀。
+
+**M0-f 三块（分开做）**
+
+- ① **离线完整交付**（`test_offline_delivery.py`，CI 已挂）：固定官方文档夹具 +
+  真实编排链路（模型回包与 worker 结果在请求边界替身）跑完整交付，核对
+  页面正文 hash == 记录的交付 hash、Markdown/PDF 各自 hash 且绑定同一 `report_version_id`、
+  服务端导出路由送达字节 == 清单登记 hash、验收规则指纹与版本记录一致。
+  同文件覆盖"离线不得联网"（`socket.connect` 直接失败）。
+- ② **离线故障注入**（同文件）：取消（终态 CANCELLED、在飞转待对账）、评审超时（个人记降级并
+  写进交付物 / 银行拒绝且不留已验证交付）、协议错误回包（不得判成功）、迟到结果
+  （不覆盖已选中版本、留痕）。
+- ③ **实机少量真实任务**（已重启服务加载新代码）：4 次公开研究任务 + 3 次取消验收，
+  结果与暴露缺陷见 `docs/实机运行记录_M0f_20260916.md`。
+
+**实机暴露并已修的 6 个缺陷**（每个都带离线回归）：取消无法打断模型调用/健康探测的等待；
+预算耗尽只拒绝单次派发导致循环空转；配置里的预算上限不生效；研究类任务从不产生验收；
+快速路径/单步任务没有选中版本；未验收草稿只在日志里说（现在写进交付物并如实降级状态）。
+
+**验证**（真实退出码）
+
+- 离线（全部 EXIT=0）：`test_offline_delivery` 8 项、`test_root_budget` 19 项、
+  `test_cancel_semantics` 36 项、`test_report_version` 17 项、`test_admission` 29 项、
+  `test_review_protocol` 24 项、`test_task_state` 8 项；`test_orchestrator_v2` 68 项、
+  `test_delivery_chain` 184 项、`test_p0`、`test_deploy_manifest` 10 项均通过。
+- 实机：`ui-2554df5f9f` 验收 pass + 选中版本带自身验收 + 交付 `ok=True` + 5/5 步、
+  报告 12.3KB；取消 13s 进 CANCELLED 且被放弃的调用记为 `unsettled`；
+  预算账本 `limits` 来自配置且 `reserved==settled`。
+
+**未验证 / 已知缺口**
+
+- **UI 鉴权与浏览器渲染未验证**：本机无有效会话、我没有凭据，也没有新建旁路凭据；
+  任务提交走 webui 同一条内部通道，页面只核对数据一致性。
+- 模型端点本轮持续退化（504/读超时/推理预算耗尽）：happy path 仅第 4 次跑通，
+  不据此宣称稳定；应用内定时任务与实跑并发争用同一端点，耗时有干扰。
+- 取消延迟 13s（>预期 3s）：取消信号还未传进 `llm_client` 的每次重试间隙。
+- Embedding 欠费（402）：待补录队列在用，策略沉淀本轮因准入拒绝而未发生。
+- 实跑为有界写入了 `system.budget={900s,60 次,0}`；是否保留由你决定（默认 0/0/0＝不限）。
+
+**M0-a…e 摘要（已完成）**
+
+- **a 版本与证据绑定**：单一权威版本记录（正文全量 SHA256 + 来源/规则指纹 + 该版自身验收）、
+  唯一采纳点、恢复校验归属与 hash、收尾交付一致性与最终交付 hash、导出清单逐格式各自 hash。
+- **b 评审协议**：非法身份模式不降级、裁决白名单（仅 PASS/FAIL）、修订稿需复评取得绑定 PASS、
+  评审状态按根任务隔离、critic 关闭/直出/模板/恢复共用策略、降级写进交付物与 `review_state.json`。
+- **c 取消/超时/协议**：等待四分类（result/cancel/timeout/protocol）、协议错误不冒充超时、
+  取消覆盖验收前与三处人工确认、取消为持久终态、在飞转待对账。
+- **d 经验与模板准入**：`admission.admit_success` 显式谓词（默认拒绝）三处共用；
+  未验证策略标 `needs_review`、自迭代产出写 `pending_review` 不生效；统计只认 `verified`、同任务只计一次。
+- **e 根任务预算与阶段观测**：一次任务一份账（原子落盘、恢复不重置）、先预留后发送、失败也结算、
+  取消转待对账；规划与派发在发送前卡预算；阶段观测带等待对象/进展/剩余预算；
+  额度冷却按端点生效（健康主端点不被欠费备用冻住）。
+
+# 历史批次（V1 反例批次，2026-09-16 上半场）
+
+**当时问题**：按《架构复核与纠偏_20260916》第 0 节修 V1 的三个实际回归（不放宽阈值）。
+
+**本批修改**（工作区，**未提交**）
+
+V1 三个反例（第 0 节）：
+
+- **0.2 分来源通道**（`acceptance_checker`）：`clean_chart_data` 的结构化 JSON 与 `user_material` 文本不再拼成一段；
+  派生判定改用"结构化文本 / 用户材料文本"各自通道，公式核验改用**结构化记录 + 用户材料里带单位的数字**
+  组成的记录列表。修前：仅加入 `user_material` 文本就把原本 pass/1.0 的同比计算判成 fail/0.0。
+- **0.3 完整公式 + 单位 + token 边界**（`_formula_derived_in_report` + `_unit_profile` + `_collect_source_records`）：
+  表达式必须是紧邻数字的**完整括号算式**（删掉"截取局部二元式"的兜底）、操作数必须**按值**命中来源记录
+  （不再用子串，`12` 不能命中 `1200`）、操作数之间量纲一致且与结果量纲/缩放相容（挡住 万元 与 亿元 混用）；
+  换算常量（1/2/100）放行，其余缺输入即拒绝。指标/期间语义**尚未绑定**，未实现部分保持"未核实"。
+
+**验证**（真实退出码，全部离线）
+
+- 复核给的三条反例现在**全部拒绝**：`120%（1200/1000-1）` computed=0（值不符）、`2200亿元（1200+1000）` computed=0
+  （量纲错一万倍）、`利润2亿元（12-10）` coverage=0.0 computed=0（缺输入+子串命中已被边界挡住）；
+  正向对照 `20%（1200/1000-1）` 仍 **coverage 1.0 / computed 1**（没有靠收紧阈值把真话否掉）。
+- 结构化通道不再被文本破坏：同一份报告在"仅 clean"与"clean+user_material"两种输入下判定一致（都 pass/1.0）。
+- `test_report_quality` **22 项 EXIT=0**（新增 5 项反例/对照）；`test_acceptance_adversarial` EXIT=0、
+  `test_deploy_manifest` EXIT=0。
+
+**尚未修（按复核顺序，下一步）**
+
+- **0.1 版本绑定**：`orchestrator_v2` 仍把同一份最新 acceptance 传给旧稿与候选稿（3746-3748、4048-4050），
+  4209 用旧 best_report、4232 读最新验收 → 交付内容与元数据可能错配。要做的是把正文/来源/验收/指纹
+  绑成**不可混用的版本记录**，修订比较与导出引用同一版本（不能只改 `compare_versions` 排序）。
+- **第 1 节**：未知/缺失/非法评审裁决在银行口径下仍被放行（只有 ERROR/DEGRADED 被拦）；
+  `_review_is_required` 吞掉 `default_mode()` 的配置错误 → 非法 mode 默认按个人模式；
+  取消导致的等待返回被上层当作超时；`system.critic` 关闭/模板/恢复入口未覆盖。
+- **缺验收/有缺口不得计成功经验或 verified 模板**（记忆与模板沉淀需按验收结果设闸）。
+- B/C/D/E/F 连续实跑按复核要求**暂缓**；先离线定向回归、再一次有界端到端。
+
+**事实更正**：B `ui-4cf6e482e9` 已于 **01:05:36 以 SUCCESS_WITH_ISSUES 结束（1697 秒，acceptance_json 为空）**，
+当前 RUNNING=0；我此前"仍在卡死"的判断已过时，不再据此重启或断言死锁。它只作为"有缺口/失败样例"，
+其财务数字不得当作事实引用。
+
+**保护项**：门禁原样（命中留证、走复核）；模型权限未动；`templates.json` 指纹未变；配置中只写入了你提供的新 Key
+（`llm`/`planner`/`backup` 三处，`config.json` 已在版本库忽略，未写入任何源码/示例/测试）。
+
+# 历史批次（V2-1/V2-2/V1.1/V1.2/L01 网络通道）
+
+**当前问题**：V2-2 评审退化（超时/异常不得当通过）；V2-1 取消语义与端到端验证待续。
+
+**本批修改**（工作区，**未提交**）
+
+V2-2 评审退化（本轮）：
+
+- `_review_plan`：超时/异常/`ERROR`/`DEGRADED` 四种"没评上"的情形统一走 `_review_unavailable`——
+  **个人模式**标记 `_review_degraded`（如实标注"未完成评审（降级）"，计划按草案继续，交付物注明需人工复核）；
+  **银行口径**（`WEAVEMIND_IDENTITY_MODE=bank`）抛 `ReviewRequiredError` **拒绝继续**，不再把超时当通过。
+- `verdict=ERROR`（Critic 身份/协议拒绝）与 `DEGRADED` 不再掉进"修订"分支（那里会多花一次 LLM 并掩盖"没评上"）。
+- `critic_agent._fallback_review`：不再返回 `PASS`，改为 `DEGRADED` + 原因（"评审系统不可用，未完成评审——不得视为通过"）。
+
+**执行过的测试与结果**（真实退出码）
+
+- 新增 `test_review_degradation` **10 项 EXIT=0**：个人模式超时/异常标降级且不修订、银行模式超时/异常拒绝、
+  ERROR 与 DEGRADED 不进修订分支、PASS/FAIL 行为不变（FAIL 仍触发一次修订）、回退评审非 PASS
+- `test_deploy_manifest` EXIT=0、`test_prompt_system` 72s EXIT=0
+- ⚠️ **`test_orchestrator_v2` 首次复跑超时：EXIT=124（900s 上限，此前 ~217s）**——属**未查明**的回归信号。
+  已做一次防御性修正（`_plan` 里改为 `getattr(self, "_review_degraded", "")`，避免测试用 `__new__`
+  构造的实例触发 AttributeError 在重试循环里拖死），并已重跑该套件，结果见下条；**在套件通过前不宣称 V2-2 已验证**。
+
+**尚未验证**：8080 未重启，取消语义与评审退化的端到端行为（真实停止、真实 Critic 超时）需一次实机操作；
+`_review_plan` 之外（反思 `3809`、评测闸门 `3712`、收尾阶段 `4175/4198/4241`）仍无取消前置检查。
+
+**本批修改**（工作区，**未提交**）
+
+V2-1 取消语义（本轮）：
+
+- **独立终态**：`task_state.CANCELLED` 加入终态词表（`TERMINAL` 四值）；`_finish_cancelled` 改写 `CANCELLED`
+  （此前硬编码 `FAILED`），SSE `task_complete`、落库、通知一致；`web_ui` 取消接口的终态集合补 `CANCELLED`。
+  前端 `statusMeta` 早已映射「已取消」，此前是**死代码**。
+- **派发取消闸门**：`_dispatch` 在入队（`lpush`）**之前**统一判定取消，覆盖所有派发路径（首次派发、重做链、
+  任务级修复、ReAct 降级重派、重试、重规划后派发）——取消后不再发起新步骤与新付费调用。
+- **等待提前返回**：`_wait_for_result` 增加 `cancel_task_id`，按 1 秒切片检查取消并立即返回——这正是实测
+  "停止后仍等 ~92 秒"的那条路径（此前只在派发前挡新步骤）。
+
+**执行过的测试与结果**（真实退出码）
+
+- 新增 `test_cancel_semantics` **11 项 EXIT=0**：取消是独立终态、`_finish_cancelled` 写 CANCELLED 且清标志、
+  SSE 事件携带 CANCELLED、**闸门位于入队之前**、`_cancel_requested` 读标志、等待循环**取消后 <5s 返回**
+  （对照：无取消时正常拿结果、不传新参数行为不变）、取消接口终态集合含 CANCELLED、指标可计数、前端映射存在
+- 受影响用例按新语义更新并注明原因：`test_writer_consolidation.test_finish_cancelled_finalizes_and_clears`
+  由断言 `FAILED` 改为 `CANCELLED`（EXIT=0）
+- 相关回归：`test_deploy_manifest` EXIT=0、`test_task_state` EXIT=0；新测试已接进 CI
+
+**V2-1 尚未完成**（下一轮）：收尾阶段（验收 `4533`、Memory 固化 `4175`、模板沉淀 `4198`、后台提示词自迭代
+线程 `4241`）与反思/评测闸门（`3809`/`3712`）仍无取消前置检查；无超时 `t.join()`（`4819-4820`）未显式加界
+（当前靠等待提前返回来收敛）；人工确认等待（`4323/4380`，上限 600s）取消后不会立即结束。
+**端到端未验证**：8080 服务按要求未重启，取消语义需一次真实"运行中停止"确认卡片显示"已取消"与收尾耗时——单测不能替代。
+
+## 历史批次（V1 / L01 / 门禁）
+
+**本批修改**（工作区，**未提交**）
+
+V1.1 修订稿选择（不再以长短代替质量）：
+
+- 新增 `report_quality.py`：`compare_versions()` 按**硬约束→验收→实质改进**排序——
+  验收等级（pass>未知>fail）→ 验收缺口数 → 占位/未完成痕迹 → 是否重复用户需求块；
+  全部相同则**保持当前版本**，并在原因里写明"长度差异不作为改进依据"。
+- `orchestrator_v2.py` 两处（初稿轮次 3649、反思重做后 3947）都改为调用它，替换
+  `len(cand) > len(best_report)`；日志改为输出**可解释的比较原因**，不再只说字符数。
+
+V1.2 来源语义（用户材料是来源，但真实性未核实）：
+
+- `acceptance_checker.py`：`run_acceptance` 把**用户材料**（任务目标/指令）注为独立来源通道；
+  数字命中它记为 `source=user_material` + `user_provided=True` + `verified=False`（**不**算模型知识、
+  **不**算不可溯源），并新增 `user_input_count` 计数；派生判定改用"清洗数据 + 用户材料"，
+  再对**报告内写明的公式**做核验（`_eval_arith_expression` 用 AST 白名单求值，
+  **不使用动态执行入口**——报告文本是不可信输入），要求公式的所有操作数都能在来源中找到。
+- 阈值与判定强度**未放宽**：外部无证据数字仍失败、无输入的计算仍不可溯源。
+
+**执行过的测试与结果**（真实退出码）
+
+- 新增 `test_report_quality`（离线固定样例，不用付费 LLM）**11 项 EXIT=0**：更短纠错稿被接受、
+  更长错误稿被拒绝、仅变长不算改进、验收等级压过长度、用户材料可溯源且标"未核实"、
+  混合来源都可溯源、写明公式的派生值可溯源、未写公式的仍不可溯源、缺输入的计算仍被拒、
+  外部无证据数字仍失败
+- `test_deploy_manifest` / `test_acceptance_adversarial` / `test_p0`：本轮相关回归（见下条追加）
+
+**门禁**：本轮写时扫描拦下一次**真问题**——我最初用动态求值算报告里的算式，被"代码注入"规则拦下，
+判定正确，已改为 AST 白名单求值。另：先前那次 `execute` 命名与注释字面量误报仍记录在
+`docs/门禁命中证据与复核请求.md` 第三节。未停用钩子、未换终端绕过。
+
+V1.2b 免责声明按来源生成（本轮新增）：
+
+- `report_quality.py` 新增 `disclaimer_clause(has_external, has_user_material)` 与 `disclaimer_instruction()`：
+  三种措辞（只用用户材料 / 只用外部检索 / 两者都有）+ 选择规则，并明确"没有外部检索禁止写
+  『数据来源于公开渠道』""用户材料必须写明真实性未经独立核实、不得改称模型知识、不得伪造来源"。
+- `orchestrator_v2._REPORT_FORMAT_REQUIREMENTS` 里那条**写死的**"数据来源于公开渠道"已替换为
+  `disclaimer_instruction()` 注入（A/C 这类以用户材料为来源的任务不再被强行宣称公开渠道）。
+
+**执行过的测试与结果**（真实退出码）
+
+- `test_report_quality` **17 项 EXIT=0**（11 → 17）：新增免责声明 6 项——只用用户材料不得出现"公开渠道"、
+  只有外部来源保留公开渠道措辞、混合来源分别说明、无来源时说明是模型知识、注入要求含三种措辞与禁止条款、
+  编排器不得再写死固定免责声明；以及修订稿选择 4 项与来源语义 7 项
+- `test_deploy_manifest` EXIT=0、`test_acceptance_adversarial` EXIT=0、`test_p0` EXIT=0
+
+**尚未做**（V1 余项，位置已定位，留给下一批）：
+
+- **跨任务经验相关性/约束优先级过滤**：教训经 `orchestrator_v2._inject_memory_context(goal)`
+  → `memory_manager.inject_context(goal)` 进入规划提示词（`:641` 以 "Relevant past experience" 拼入）。
+  实测 B 被注入 A 的"不联网、虚构数据"约束，与 B 的官方检索目标冲突。做法：按当前目标过滤
+  "约束类教训"（联网/虚构/离线/不执行代码 等），不相关的不注入或降级为"历史做法、未必适用"，
+  且不得覆盖本次任务的显式约束；需要独立测试（相关/不相关/显式约束优先）。
+- 正文长度策略显式化；页面/Markdown/PDF 同版本的端到端断言。
+- `llm_client`/`lora_client`/`mcp_client`/embedding/webhook 仍未接入登记端点（L01 未完成项）。
+
+**下一步**：V2 预算/评审退化/取消 → V3 PDF 排版 → V4 中文进度；银行认证未接入，**不宣称银行可用**。
+
+**本批修改**（工作区，**未提交**）
+
+L01 协议入口收口（依 17:38 复核补充，不只针对例子打补丁）：
+
+1. **模式校验统一**：`resolve_mode(mode)` 让**显式传参与环境变量走同一条规则**——`admit_dispatch(..., mode="bnak")`
+   与环境变量写成 `bnak` 得到同样拒绝（`IdentityConfigError`），不再因为"显式传参"跳过校验。
+2. **只有缺 `context` 键才算旧消息**：显式 `context: null` 属协议非法，直接拒绝；旧消息走独立的本地兼容策略。
+3. **v1 版本号仅接受 JSON 整数**：布尔（`True`/`False` 是 int 子类）、小数 `1.9`、字符串 `"1"`、`null`、数组、对象
+   一律拒绝，不做 `int()` 转换；缺失版本键也拒绝；支持版本忽略新增可选字段。
+4. **兼容缺口可观测**：`admit_dispatch` 返回 `(ctx, gaps, refuse_reason)`，三个接收点（两个 Worker + Critic）
+   都记 warning 日志，Worker 还把 `context_gaps` 随结果回传——不再像以前那样在内部丢掉。
+
+L01 此前四项（上一批，已接受）：Critic 先校验后评审（银行缺身份零调用 + 明确 ERROR）、清理进 `finally`、
+心跳子线程 `copy_context`、Worker/Critic 共用 `admit_dispatch` 边界。
+
+**执行过的测试与结果**（真实退出码）
+
+- `test_task_context` **43 项 EXIT=0**（30 → 43）：新增边界矩阵 9 项（显式模式校验、`context: null`、
+  版本类型矩阵、缺版本键、银行拒绝、兼容缺口返回）+ 真实 Worker 接收边界 4 项
+  （调用基类真实 `_handle`：银行拒绝 → **零执行** + FAILED 回传 + 不残留身份；坏版本 → 零执行；
+  `context: null` → 零执行；本地旧消息照常执行且回传 `context_gaps`）
+- 相关回归：`test_deploy_manifest` EXIT=0、`test_p0` 128s **EXIT=0**、`test_orchestrator_v2` 202s **EXIT=0**
+
+**门禁**：写时扫描第二次 `execute` 误报（测试替身里的协议方法名）已在
+`docs/门禁命中证据与复核请求.md` 第三节如实记录（含取舍说明）；未改产品代码、未停用钩子、未换终端绕过。
+
+**本批修改**（工作区，**未提交**）
+
+网络通道（依《身份与网络边界》决策，新增 `net_policy.py` + `test_net_policy.py`）：
+
+- 两类接口互不重叠：`request_service(endpoint_id, operation)` 读 `config.json` 的 `network.endpoints`
+  登记表（用途/scheme/host/port/允许操作/`loopback` 标记），**调用方自报 `trusted`/`allow_private` 一律拒绝**；
+  `fetch_document(url)` 走内容派生通道——仅 http/https 公网、拒绝环回/私网/链路本地/共享(`100.64.0.0/10`)/
+  保留/组播/未指定/**IPv4+IPv6 映射地址**、拒绝 URL 用户凭据、**解析失败即拒绝**。
+- 校验与连接同源：抓取用**已验 IP** 连接、TLS 保留 SNI 与系统 CA 校验、**不跟随重定向**、不带调用方凭据、
+  有超时与响应体上限；审计只记脱敏目标与策略判定（`audit_logger`）。
+- `adapters/transport._validate_public_url` 收敛为委托共享策略，修掉旧实现"DNS 解析失败也放行"、
+  缺 `100.64/8`、缺映射地址判定三处（现有抓取点因此立即变为严格）。
+- 真实缺陷：`workers/data_loader_worker.py` 的下载改走 `fetch_document`（内容派生 SSRF），
+  文件名改为 `Path(name).name` + 落盘前 `resolve()` 边界校验（Windows 反斜杠穿越），失败如实回报。
+- 配置面：`config.example.json` 新增 `network.endpoints` 示例（含登记的本机模型），`settings_schema` 同步。
+
+L01 协议入口（上一批，已接受）：模式校验统一（显式 mode 与环境同规则）、只有缺 `context` 键才算旧消息、
+v1 只接受非布尔整数、兼容缺口可由调用方记录与回传。
+
+**执行过的测试与结果**（真实退出码）
+
+- `test_net_policy` **22 项 EXIT=0**：决策的最小验收集合全覆盖——登记本地模型允许、同一地址经内容抓取拒绝、
+  未登记私网拒绝、公网允许、DNS 失败/公网+私网混合/映射地址/`100.64.0.1`/元数据主机/用户凭据/协议 全部拒绝、
+  重定向不跟随、跨源不携带凭据、**连接使用已验 IP**（防重绑定）、体量上限、未登记/私网目标不触达传输层、
+  旧校验器委托后行为一致；另含 data_loader 接线 2 项（内网地址拒绝且不落盘、穿越文件名被夹在工作区内）
+- `test_task_context` **43 项 EXIT=0**；相关回归：`test_settings_requirements` 26 项 EXIT=0（新配置段已进设置清单）、
+  `test_deploy_manifest` EXIT=0、`test_p0` 126s **EXIT=0**、`test_delivery_chain` 132s **EXIT=0**
+
+**门禁**：写时扫描第三次误报（注释里出现"关闭证书校验"的字面量被当作真的关闭校验）已记入
+`docs/门禁命中证据与复核请求.md` 第三节；实现用的是系统 CA 校验。未改产品语义、未停用钩子、未换终端绕过。
+
+**下一步**：把 `llm_client`/`lora_client`/`mcp_client`/embedding/webhook 的地址解析接到登记端点
+（当前它们仍直接用配置里的 base_url，未走 `request_service`）；随后 L02 全链预算、事实链。
+银行认证与可信身份仍未接入，**不宣称银行可用**。
+
+**尚未验证**（按决策显式保留）：编排器仍未从可信认证/会话链填 `tenant/workspace/actor` → **银行能力未就绪**，
+不从提示词/前端自报/默认公共租户补值；`deadline` 与 `step_deadline` 的同步规则未定；预算强制执行属 L02。
+
+**下一步**：按决策实现网络通道（`request_service` 登记端点 / `fetch_document` 内容抓取；修
+`_validate_public_url` 的 DNS 失败放行与 `100.64.0.0/10`、校验与连接同源解析），再做 L02 与事实链。
+门禁保持原样，不换终端绕过、不为减命中改写代码。
+
+# 历史记录（2026-09-15 之前）
+
+**该批修改**（提交 `d6505ef` / `c600943` / `de2a825` / `8cbee18` / `ee99dd0` / `ebfad59` / `e72378a` / `eea6f0f` / `ab740b5`）
 
 ## 一、CI 红灯定位与修复（提交 `fix(CI)`）
 

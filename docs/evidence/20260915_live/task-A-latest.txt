@@ -1,0 +1,326 @@
+- navigation:
+  - link "任务控制台":
+    - /url: /
+    - text: 任务控制台
+  - link "智能体":
+    - /url: /agents
+    - text: 智能体
+  - link "历史":
+    - /url: /history
+    - text: 历史
+  - link "健康":
+    - /url: /health
+    - text: 健康
+  - button "更多":
+    - text: 更多
+- banner:
+  - heading "任务控制台" [level=1]
+  - button "云端 API":
+    - generic: 云端 API
+  - generic "后端连接正常"
+- main:
+  - textbox "快答：秒级问答（自动检索资讯并附来源），如「贵州茅台最新财报要点」"
+  - button "快答" [disabled]:
+    - text: 快答
+  - textbox "Enter a task for your AI team..."
+  - checkbox "先确认计划"
+  - text: 先确认计划
+  - button "Execute" [disabled]:
+    - text: Execute
+  - generic: 已请求停止，任务将在当前步骤结束后收尾
+  - button "Retry":
+    - text: Retry
+  - button "新对话":
+    - text: 新对话
+  - generic: 近 4 次任务平均 5 分钟
+  - button "导入上下文（需求背景 / 参考资料 / 约束条件）":
+    - text: 导入上下文（需求背景 / 参考资料 / 约束条件）
+  - heading "Execution Plan" [level=2]: Execution Plan
+  - generic: 2/5
+  - button:
+  - generic: goal
+  - generic: 【架构试用A：口径核算】仅使用以下虚构数据，不联网，不调用代码执行，写一份不超过600字的经营分析，含计算表和公式。单位均为万元：2024年收入1000、成本700、经营现金流120；2025年收入1200、成本900、经营现金流80。计算收入同比、两年毛利率、毛利率变化（百分点）、现金流/收入；说明收入增长与现金流恶化能否直接证明财务造假。所有数字标注“用户提供的虚构数据/据此计算”，不得编造来源，输出Markdown报告。
+  - generic: report_generator
+  - generic: "任务目标：【架构试用A：口径核算】仅使用以下虚构数据，不联网，不调用代码执行，写一份不超过600字的经营分析，含计算表和公式。单位均为万元：2024年收入1000、成本700、经营现金流120；2025年收入1200、成本900、经营现金流80。计算收入同比、两年毛利率、毛利率变化（百分点）、现金流/收入；说明收入增长与现金流恶化能否直接证明财务造假。所有数字标注“用户提供的虚构数据/据此计算”，不得编造来源，输出Markdown报告。 用户目标：【架构试用A：口径核算】仅使用以下虚构数据，不联网，不调用代码执行，写一份不超过600字的经营分析，含计算表和公式。单位均为万元：2024年收入1000、成本700、经营现金流120；2025年收入1200、成本900、经营现金流80。计算收入同比、两年毛利率、毛利率变化（百分点）、现金流/收入；说明收入增长与现金流恶化能否直接证明财务造假。所有数字标注“用户提供的虚构数据/据此计算”，不得编造来源，输出Markdown报告。 原始指令：围绕【架构试用A：口径核算】生成一份不超过600字的中文Markdown经营分析报告，严格仅使用用户提供的虚构数据：2024年收入1000万元、成本700万元、经营现金流120万元；2025年收入1200万元、成本900万元、经营现金流80万元。不得联网、不得调用代码执行、不得编造外部来源。报告需包含：1）标题；2）数据口径说明：单位均为万元，所有数字标注“用户提供的虚构数据/据此计算”；3）计算表，列示收入、成本、经营现金流、毛利、毛利率、现金流/收入；4）公式：收入同比=(2025收入-2024收入)/2024收入；毛利率=(收入-成本)/收入；现金流/收入=经营现金流/收入；毛利率变化=2025毛利率-2024毛利率（百分点）；5）计算结果：收入同比20%；2024毛利率30%；2025毛利率25%；毛利率变化-5个百分点；2024现金流/收入12%；2025现金流/收入约6.67%；6）结论：收入增长与经营现金流恶化只能提示口径差异、营运资本变化、确认时点或现金流质量等风险信号，不能直接证明财务造假，需要进一步核查应收、存货、付款条件、折旧摊销、税费、非现金项目等。将图表嵌入报告（本任务仅使用Markdown表格，不生成图片图表）；在报告末尾标注每条数据的来源链接：无外部URL，来源为用户提供的虚构数据/据此计算。验收：输出为Markdown报告，全文不超过600字，包含计算表和公式，所有数字均标注用户提供的虚构数据/据此计算，并明确不能直接证明财务造假。 [Skill: financial-research] 金融/财报调研标准：时效性（必须最新季度/年度）、核心财务指标清单、多来源交叉验证、口径与币种标注。当目标涉及财报、营收、净利润、毛利率、现金流、汽车交付量、股价、季报/年报、最新季度、公司业绩时触发。 【质量标准】- 必须标注数据所属季度/年度，以及\"实际 vs 预测\" - 禁止把旧季度数据当作最新；无法确认最新时明确说明\"数据截至 X 期\" - 金额带币种与单位（美元/亿元/百万） - 关键数值必须可溯源到来源链接 【反模式】- 用 2023/2024 年旧数据回答\"最新财报\" - 只给单一来源且不标注日期 - 混淆同比/环比、单季/累计口径 - 编造管理层指引数值 【历史教训（自动沉淀）】柱状图未生成（code_execution步骤失败）；数字溯源率极低（3%），未提供真实URL，违反来源纪律红线→- [web_search] 【角色】金融数据研究员。【受众】报告生成器。【输出要求】搜索“贵州茅台 2025年三季报 营业总收入 归母净利润 毛利率 经营性现金流”，提取具体数值及对应的真实来源URL（如东方财富、巨潮资讯等）。【质量标准；反思要求重做：步骤2未获取到具体的财报来源URL，导致报告数字溯源率为0%，严重违反来源纪律红线（参考来源仅为主页，无具体URL）；且下游步骤3代码执行失败导致图表生成降级。修复要求：1. 必须通过检索获取贵州茅台2025年三季报的真实公告或新闻页面具体URL（如巨潮资讯、东方财富个股财报页面），并提取准确的财务数据（营业总收入、归母净利润、毛利率、经营性现金流）。2. 输出结果必须包含每个数据点对应的具体来源URL，确保数字可溯源。3. 下游报告生成需严格逐条列出真实URL，并使用Mermaid或Markdown文本图表绘制柱状图，避免依赖易失败的代码执行环境。→优化前：任务目标：梳理贵州茅台2025年三季报核心财务数据（营业总收入、归母净利润、毛利率、经营性现金流），生成含柱状图与来源标注的分析报告 用户目标：梳理贵州茅台2025年三季报核心财务数据（营业总收入、归母净利润、毛利率、经营性现金流 [报告格式要求]（强制，报告/总结步骤必须遵守） 1. 三级溯源链：报告正文引用外部信息（网页/数据源内容）处，必须紧跟 [n] 编号上标引用（n 从 1 递增，可并列如 [1][2]）；文末必须提供 '## 参考来源' 清单，逐条列出全部编号对应的 URL 与标题（格式：1. [标题](URL)）。没有引用任何外部信息时可不编号，但一旦引用必须编号并全部登记到清单。 2. 数据时效：报告开头（摘要之前）必须包含 '数据时效' 小节，写明数据截止时间/行情快照时间（如 '行情数据截至 2026-08-30 15:00 收盘'）、数据源与更新频次（如 '腾讯行情接口，日终刷新'）；排行类任务必须标注 '盘中/盘后/日终' 状态。 3. 免责声明：报告结尾必须包含 '免责声明' 小节：'本报告由织光 WeaveMind AI 自动生成，仅供参考，不构成任何投资建议；数据来源于公开渠道，可能存在延迟或误差；据此操作风险自担。' 4. 合规红线：不得给出具体投资组合配比（如'30%某股+70%某资产'）、不得给出预期收益率/年化收益数值承诺；如涉及资产配置，只允许描述常见配置思路与风险框架，并强调'不构成投资建议'。 5. 来源声明词汇表（硬约束）：任何'数据来源/来源'声明或表格来源列，只允许以下三种形式之一：① [n] 编号（n 对应 '## 参考来源' 清单序号）；② 参考来源清单中的媒体名/标题（逐字引用）；③ '基于模型知识，未在本次检索中验证'。禁止把正文短语、指标名、行业术语、观点片段当来源名（如'指出'、'主要挑战'、'能量密度提升空间有限'这类不是来源）；数据无对应检索来源时，必须写形式③，禁止编造任何来源名。 [指令] 仅使用与任务目标主题直接相关的信息；若上一步结果中的来源与主题无关（如无关政策新闻、其他领域文档、垃圾站点或空结果），一律不要纳入输出，并注明已剔除无关内容。"
+  - generic: reportgeneratorworker
+  - generic: package
+  - generic: 用户目标：【架构试用A：口径核算】仅使用以下虚构数据，不联网，不调用代码执行，写一份不超过600字的经营分析，含计算表和公式。单位均为万元：2024年收入1000、成本700、经营现金流120；2025年收入1200、成本900、经营现金流80。计算收入同比、两年毛利率、毛利率变化（百分点）、现金流/收入；说明收入增长与现金流恶化能否直接证明财务造假。所有数字标注“用户提供的虚构数据/据此计算”，不得编造来源，输出Markdown报告。 原始指令：将本次任务产出的所有文件打包为一个 ZIP 交付包（包含代码、资源、报告等），并返回下载链接。
+  - generic: report_generator
+  - generic: 第1轮
+  - generic: "任务目标：【架构试用A：口径核算】仅使用以下虚构数据，不联网，不调用代码执行，写一份不超过600字的经营分析，含计算表和公式。单位均为万元：2024年收入1000、成本700、经营现金流120；2025年收入1200、成本900、经营现金流80。计算收入同比、两年毛利率、毛利率变化（百分点）、现金流/收入；说明收入增长与现金流恶化能否直接证明财务造假。所有数字标注“用户提供的虚构数据/据此计算”，不得编造来源，输出Markdown报告。 用户目标：【架构试用A：口径核算】仅使用以下虚构数据，不联网，不调用代码执行，写一份不超过600字的经营分析，含计算表和公式。单位均为万元：2024年收入1000、成本700、经营现金流120；2025年收入1200、成本900、经营现金流80。计算收入同比、两年毛利率、毛利率变化（百分点）、现金流/收入；说明收入增长与现金流恶化能否直接证明财务造假。所有数字标注“用户提供的虚构数据/据此计算”，不得编造来源，输出Markdown报告。 原始指令：按确定性验收缺口重做报告： - 数字溯源率 0%（0/30）；引用 0 / 计算 0 / 模型知识 6；财务金额溯源率 100%（0/0）；域=financial；已披露（模型知识标注）20%（6），低于阈值 70%；不可溯源示例：1000、1200、1200、1000、1000 - 数据时效区块：包含，具体时间/日期：缺失 来源纪律红线（必须遵守）：1) 只引用【上一步检索结果】中真实存在的来源 URL，检索结果中没有的来源（如 Gartner/IDC/TrendForce 原文）一律不得引用；2) 参考来源清单逐条给出真实 URL 与标题，不得用 [n] 引用标记代替链接；3) 检索无法核实的数据明确标注『基于模型知识，未经核实』，并在数据要点中剔除该行。 验收：步骤完成后输出可验证的结果（文件/数据/文本均可）。 [Skill: financial-research] 金融/财报调研标准：时效性（必须最新季度/年度）、核心财务指标清单、多来源交叉验证、口径与币种标注。当目标涉及财报、营收、净利润、毛利率、现金流、汽车交付量、股价、季报/年报、最新季度、公司业绩时触发。 【质量标准】- 必须标注数据所属季度/年度，以及\"实际 vs 预测\" - 禁止把旧季度数据当作最新；无法确认最新时明确说明\"数据截至 X 期\" - 金额带币种与单位（美元/亿元/百万） - 关键数值必须可溯源到来源链接 【反模式】- 用 2023/2024 年旧数据回答\"最新财报\" - 只给单一来源且不标注日期 - 混淆同比/环比、单季/累计口径 - 编造管理层指引数值 【历史教训（自动沉淀）】数字溯源率 0%（0/30）；引用 0 / 计算 0 / 模型知识 6；财务金额溯源率 100%（0/0）；域=financial；已披露（模型知识标注）20%（6），低于阈值 70%；不可溯源示例：1000、1200、1200、1000、1000；数据时效区块：包含，具体时间/日期：缺失→- [report_generator] 按确定性验收缺口重做报告： - 数字溯源率 0%（0/30）；引用 0 / 计算 0 / 模型知识 6；财务金额溯源率 100%（0/0）；域=financial；已披露（模型知识标注）20%（6）；反思要求重做：【角色】资深财务分析报告撰写者。【受众】要求进行口径核算试用的用户/验收评审。【输出要求】重写步骤1的Markdown经营分析报告，仅使用用户提供的虚构数据，不联网、不调用代码执行；总字数不超过600字；必须包含计算表、公式、计算结果与结论。【质量标准】1) 收入同比=20%、2024毛利率=30%、2025毛利率=25%、毛利率变化=-5个百分点、2024现金流/收入=12%、2025现金流/收入≈6.67%；2) 每个数字或每行指标必须可溯源，逐条标注“用户提供的虚构数据/据此计算”，可在表格增加“来源”列并在关键数字后括注；3) 不得出现“公开渠道”“外部来源”“URL”等→优化前：任务目标：【架构试用A：口径核算】仅使用以下虚构数据，不联网，不调用代码执行，写一份不超过600字的经营分析，含计算表和公式。单位均为万元：2024年收入1000、成本700、经营现金流120；2025年收入1200、成本900、经 [报告格式要求]（强制，报告/总结步骤必须遵守） 1. 三级溯源链：报告正文引用外部信息（网页/数据源内容）处，必须紧跟 [n] 编号上标引用（n 从 1 递增，可并列如 [1][2]）；文末必须提供 '## 参考来源' 清单，逐条列出全部编号对应的 URL 与标题（格式：1. [标题](URL)）。没有引用任何外部信息时可不编号，但一旦引用必须编号并全部登记到清单。 2. 数据时效：报告开头（摘要之前）必须包含 '数据时效' 小节，写明数据截止时间/行情快照时间（如 '行情数据截至 2026-08-30 15:00 收盘'）、数据源与更新频次（如 '腾讯行情接口，日终刷新'）；排行类任务必须标注 '盘中/盘后/日终' 状态。 3. 免责声明：报告结尾必须包含 '免责声明' 小节：'本报告由织光 WeaveMind AI 自动生成，仅供参考，不构成任何投资建议；数据来源于公开渠道，可能存在延迟或误差；据此操作风险自担。' 4. 合规红线：不得给出具体投资组合配比（如'30%某股+70%某资产'）、不得给出预期收益率/年化收益数值承诺；如涉及资产配置，只允许描述常见配置思路与风险框架，并强调'不构成投资建议'。 5. 来源声明词汇表（硬约束）：任何'数据来源/来源'声明或表格来源列，只允许以下三种形式之一：① [n] 编号（n 对应 '## 参考来源' 清单序号）；② 参考来源清单中的媒体名/标题（逐字引用）；③ '基于模型知识，未在本次检索中验证'。禁止把正文短语、指标名、行业术语、观点片段当来源名（如'指出'、'主要挑战'、'能量密度提升空间有限'这类不是来源）；数据无对应检索来源时，必须写形式③，禁止编造任何来源名。 [指令] 仅使用与任务目标主题直接相关的信息；若上一步结果中的来源与主题无关（如无关政策新闻、其他领域文档、垃圾站点或空结果），一律不要纳入输出，并注明已剔除无关内容。"
+  - generic: reportgeneratorworker
+  - generic: report_generator
+  - generic: 第2轮
+  - generic: "用户目标：【架构试用A：口径核算】仅使用以下虚构数据，不联网，不调用代码执行，写一份不超过600字的经营分析，含计算表和公式。单位均为万元：2024年收入1000、成本700、经营现金流120；2025年收入1200、成本900、经营现金流80。计算收入同比、两年毛利率、毛利率变化（百分点）、现金流/收入；说明收入增长与现金流恶化能否直接证明财务造假。所有数字标注“用户提供的虚构数据/据此计算”，不得编造来源，输出Markdown报告。 原始指令：按确定性验收缺口重做报告： - 数字溯源率 0%（0/32）；引用 0 / 计算 0 / 模型知识 0；财务金额溯源率 100%（0/0）；域=financial，低于阈值 70%；不可溯源示例：1000、1200、1200、1000、1000 - 数据时效区块：包含，具体时间/日期：缺失 来源纪律红线（必须遵守）：1) 只引用【上一步检索结果】中真实存在的来源 URL，检索结果中没有的来源（如 Gartner/IDC/TrendForce 原文）一律不得引用；2) 参考来源清单逐条给出真实 URL 与标题，不得用 [n] 引用标记代替链接；3) 检索无法核实的数据明确标注『基于模型知识，未经核实』，并在数据要点中剔除该行。 验收：步骤完成后输出可验证的结果（文件/数据/文本均可）。 [Skill: financial-research] 金融/财报调研标准：时效性（必须最新季度/年度）、核心财务指标清单、多来源交叉验证、口径与币种标注。当目标涉及财报、营收、净利润、毛利率、现金流、汽车交付量、股价、季报/年报、最新季度、公司业绩时触发。 【质量标准】- 必须标注数据所属季度/年度，以及\"实际 vs 预测\" - 禁止把旧季度数据当作最新；无法确认最新时明确说明\"数据截至 X 期\" - 金额带币种与单位（美元/亿元/百万） - 关键数值必须可溯源到来源链接 【反模式】- 用 2023/2024 年旧数据回答\"最新财报\" - 只给单一来源且不标注日期 - 混淆同比/环比、单季/累计口径 - 编造管理层指引数值 【历史教训（自动沉淀）】数字溯源率 0%（0/32）；引用 0 / 计算 0 / 模型知识 0；财务金额溯源率 100%（0/0）；域=financial，低于阈值 70%；不可溯源示例：1000、1200、1200、1000、1000；数据时效区块：包含，具体时间/日期：缺失→- [report_generator] 按确定性验收缺口重做报告： - 数字溯源率 0%（0/32）；引用 0 / 计算 0 / 模型知识 0；财务金额溯源率 100%（0/0）；域=financial，低于阈值 70%；不可溯源示例：1；数字溯源率 0%（0/30）；引用 0 / 计算 0 / 模型知识 6；财务金额溯源率 100%（0/0）；域=financial；已披露（模型知识标注）20%（6），低于阈值 70%；不可溯源示例：1000、1200、1200、1000、1000；数据时效区块：包含，具体时间/日期：缺失→- [report_generator] 按确定性验收缺口重做报告： - 数字溯源率 0%（0/30）；引用 0 / 计算 0 / 模型知识 6；财务金额溯源率 100%（0/0）；域=financial；已披露（模型知识标注）20%（6）"
+  - generic: 2 success
+  - generic: 1 failed
+  - generic: 2 pending
+  - button "实时动态":
+    - text: 实时动态
+  - button "对话":
+    - text: 对话
+  - button "项目结果":
+    - text: 项目结果
+  - generic: 11 online
+  - generic: ·
+  - generic: 1 busy
+  - button "Pause":
+  - generic: search agent
+  - generic: dataloaderworker
+  - generic: packaging worker
+  - generic: reportgeneratorworker
+  - generic: content summarizer
+  - generic: modeltrainerworker
+  - generic: dataanalyzerworker
+  - generic: codeexecworker
+  - generic: fileioworker
+  - generic: webfetchworker
+  - generic: reactagentworker
+  - generic: :35.117Z
+  - generic: "orchestrator:"
+  - text: "Submitted: 【架构试用A：口径核算】仅使用以下虚构数据，不联网，不调用代码执行，写一份不超过600字的经营分析，"
+  - generic: 19:17:35
+  - generic: "orchestrator:"
+  - text: "Accepted: 【架构试用A：口径核算】仅使用以下虚构数据，不联网，不调用代码执行，写一份不超过600字的经营分析，"
+  - generic: 82+00:00
+  - generic: "orchestrator:"
+  - text: "Memory: 注入历史经验（2311 chars）"
+  - generic: 19+00:00
+  - generic: "orchestrator:"
+  - text: "Prompt RAG: 注入提示词改进经验 3 条"
+  - generic: 16+00:00
+  - generic: "orchestrator:"
+  - text: 模板路由（LLM）：6 个模板待匹配（手工模板优先）
+  - generic: 92+00:00
+  - generic: "orchestrator:"
+  - text: 模板路由结束：未命中模板，进入 LLM 规划
+  - generic: 76+00:00
+  - generic: "orchestrator:"
+  - text: "Planning: 【架构试用A：口径核算】仅使用以下虚构数据，不联网，不调用代码执行，写一份不超过600字的经营分析，含计算表和公式。单位"
+  - generic: 82+00:00
+  - generic: "orchestrator:"
+  - text: 正在规划（LLM 第 1/2 次尝试）...
+  - generic: 11:17:56
+  - generic: "orchestrator:"
+  - text: 规划 开始（第 1 次尝试）
+  - generic: 11:18:11
+  - generic: "orchestrator:"
+  - text: 规划 进行中（已等待 15s）
+  - generic: 11:18:26
+  - generic: "orchestrator:"
+  - text: 规划 进行中（已等待 30s）
+  - generic: 11:18:41
+  - generic: "orchestrator:"
+  - text: 规划 进行中（已等待 45s）
+  - generic: 11:18:48
+  - generic: "orchestrator:"
+  - text: 规划完成（第 1 次尝试）
+  - generic: 95+00:00
+  - generic: "critic:"
+  - text: Plan submitted for review
+  - generic: 45+00:00
+  - generic: "critic:"
+  - text: Review timeout (30s), proceeding
+  - generic: 78+00:00
+  - generic: "orchestrator:"
+  - text: "Plan ready: 1 steps"
+  - generic: 48+00:00
+  - generic: 📤
+  - generic: "report_generator:"
+  - text: "Dispatching to reportgeneratorworker: 任务目标：【架构试用A：口径核算】仅使用以下虚构数据，不联网，不调用代码执行，写一份不超过600字的经营分析，含计算表和"
+  - generic: 82+00:00
+  - generic: ℹ
+  - generic: "report_generator:"
+  - text: "Step 1: SUCCESS"
+  - generic: 19:19:31
+  - generic: 📤
+  - generic: "report_generator:"
+  - text: "Completed: 任务目标：【架构试用A：口径核算】仅使用以下虚构数据，不联网，不调用代码执行，写一份不超过600字的经营分析，含计算表和"
+  - generic: 85+00:00
+  - generic: 📤
+  - generic: "package:"
+  - text: "Dispatching to packaging_worker: 任务目标：【架构试用A：口径核算】仅使用以下虚构数据，不联网，不调用代码执行，写一份不超过600字的经营分析，含计算表和"
+  - generic: 61+00:00
+  - generic: ℹ
+  - generic: "package:"
+  - text: "Step package-2: SUCCESS"
+  - generic: 19:19:34
+  - generic: 📤
+  - generic: "package:"
+  - text: "Completed: 任务目标：【架构试用A：口径核算】仅使用以下虚构数据，不联网，不调用代码执行，写一份不超过600字的经营分析，含计算表和"
+  - generic: 32+00:00
+  - generic: "orchestrator:"
+  - text: "Reflecting: reviewing deliverable against goal"
+  - generic: 11:19:57
+  - generic: "orchestrator:"
+  - text: 反思 开始
+  - generic: 11:20:12
+  - generic: "orchestrator:"
+  - text: 反思 进行中（已等待 15s）
+  - generic: 11:20:27
+  - generic: "orchestrator:"
+  - text: 反思 进行中（已等待 30s）
+  - generic: 11:20:42
+  - generic: "orchestrator:"
+  - text: 反思 进行中（已等待 45s）
+  - generic: 11:20:57
+  - generic: "orchestrator:"
+  - text: 反思 进行中（已等待 60s）
+  - generic: 11:21:12
+  - generic: "orchestrator:"
+  - text: 反思 进行中（已等待 75s）
+  - generic: 11:21:27
+  - generic: "orchestrator:"
+  - text: 反思 进行中（已等待 90s）
+  - generic: 11:21:42
+  - generic: "orchestrator:"
+  - text: 反思 进行中（已等待 105s）
+  - generic: 11:21:55
+  - generic: "orchestrator:"
+  - text: 反思 完成（耗时 118s）
+  - generic: 71+00:00
+  - generic: 📤
+  - generic: "report_generator:"
+  - text: "Dispatching to reportgeneratorworker: 任务目标：【架构试用A：口径核算】仅使用以下虚构数据，不联网，不调用代码执行，写一份不超过600字的经营分析，含计算表和"
+  - generic: 20+00:00
+  - generic: ℹ
+  - generic: "report_generator:"
+  - text: "Step 1: SUCCESS"
+  - generic: 98+00:00
+  - generic: "orchestrator:"
+  - text: "反思单步重做: step 1 (report_generator) -> SUCCESS"
+  - generic: 44+00:00
+  - generic: 📤
+  - generic: "package:"
+  - text: "Dispatching to packaging_worker: 任务目标：【架构试用A：口径核算】仅使用以下虚构数据，不联网，不调用代码执行，写一份不超过600字的经营分析，含计算表和"
+  - generic: 18+00:00
+  - generic: ℹ
+  - generic: "package:"
+  - text: "Step package-2: SUCCESS"
+  - generic: 91+00:00
+  - generic: "orchestrator:"
+  - text: "反思单步重做: step package-2 (package) -> SUCCESS"
+  - generic: 51+00:00
+  - generic: "orchestrator:"
+  - text: "Reflecting: reviewing deliverable against goal"
+  - generic: 11:22:07
+  - generic: "orchestrator:"
+  - text: 反思 开始
+  - generic: 11:22:22
+  - generic: "orchestrator:"
+  - text: 反思 进行中（已等待 15s）
+  - generic: 11:22:37
+  - generic: "orchestrator:"
+  - text: 反思 进行中（已等待 30s）
+  - generic: 11:22:52
+  - generic: "orchestrator:"
+  - text: 反思 进行中（已等待 45s）
+  - generic: 11:23:07
+  - generic: "orchestrator:"
+  - text: 反思 进行中（已等待 60s）
+  - generic: 11:23:22
+  - generic: "orchestrator:"
+  - text: 反思 进行中（已等待 75s）
+  - generic: 11:23:37
+  - generic: "orchestrator:"
+  - text: 反思 进行中（已等待 90s）
+  - generic: 11:23:52
+  - generic: "orchestrator:"
+  - text: 反思 进行中（已等待 105s）
+  - generic: 11:24:07
+  - generic: "orchestrator:"
+  - text: 反思 进行中（已等待 120s）
+  - generic: 11:24:07
+  - generic: "orchestrator:"
+  - text: 反思 失败（耗时 120s）
+  - generic: 76+00:00
+  - generic: "orchestrator:"
+  - text: "Iteration 1: closing 2 gaps with 2 steps"
+  - generic: 84+00:00
+  - generic: 📤
+  - generic: "report_generator:"
+  - text: "Dispatching to reportgeneratorworker: 任务目标：【架构试用A：口径核算】仅使用以下虚构数据，不联网，不调用代码执行，写一份不超过600字的经营分析，含计算表和"
+  - generic: 54+00:00
+  - generic: ℹ
+  - generic: "report_generator:"
+  - text: "Step i1-acc-redo: SUCCESS"
+  - generic: 19:24:19
+  - generic: 📤
+  - generic: "report_generator:"
+  - text: "Completed: 任务目标：【架构试用A：口径核算】仅使用以下虚构数据，不联网，不调用代码执行，写一份不超过600字的经营分析，含计算表和"
+  - generic: 82+00:00
+  - generic: 📤
+  - generic: "package:"
+  - text: "Dispatching to packaging_worker: 任务目标：【架构试用A：口径核算】仅使用以下虚构数据，不联网，不调用代码执行，写一份不超过600字的经营分析，含计算表和"
+  - generic: 26+00:00
+  - generic: ℹ
+  - generic: "package:"
+  - text: "Step package-2: SUCCESS"
+  - generic: 10+00:00
+  - generic: "orchestrator:"
+  - text: "Reflecting: reviewing deliverable against goal"
+  - generic: 11:24:22
+  - generic: "orchestrator:"
+  - text: 反思 开始
+  - generic: 11:24:38
+  - generic: "orchestrator:"
+  - text: 反思 进行中（已等待 15s）
+  - generic: 11:24:53
+  - generic: "orchestrator:"
+  - text: 反思 进行中（已等待 30s）
+  - generic: 11:25:08
+  - generic: "orchestrator:"
+  - text: 反思 进行中（已等待 45s）
+  - generic: 11:25:23
+  - generic: "orchestrator:"
+  - text: 反思 进行中（已等待 60s）
+  - generic: 11:25:38
+  - generic: "orchestrator:"
+  - text: 反思 进行中（已等待 75s）
+  - generic: 11:25:53
+  - generic: "orchestrator:"
+  - text: 反思 进行中（已等待 90s）
+  - generic: 11:26:08
+  - generic: "orchestrator:"
+  - text: 反思 进行中（已等待 105s）
+  - generic: 11:26:23
+  - generic: "orchestrator:"
+  - text: 反思 进行中（已等待 120s）
+  - generic: 11:26:23
+  - generic: "orchestrator:"
+  - text: 反思 失败（耗时 120s）
+  - generic: 30+00:00
+  - generic: "orchestrator:"
+  - text: "Iteration 2: closing 2 gaps with 2 steps"
+  - generic: 88+00:00
+  - generic: "orchestrator:"
+  - text: 任务被用户取消（运行中被停止）
+  - generic: 528s
+  - generic: 耗时
+  - generic: 50%
+  - generic: 成功率
+  - generic: 2/4
+  - generic: Steps
+  - generic: "1"
+  - generic: Files
+  - generic: 任务完成
+  - generic: — FAILED
+  - button "生成文件 (1)":
+    - text: 生成文件 (1)
+  - generic: 导出与复核
+  - generic: 报告文件、复核与分享都在这里
+  - generic: 报告文件
+  - button "下载Markdown":
+    - text: 下载Markdown
+  - button "下载PDF":
+    - text: 下载PDF
+  - button "生成文件 (1) 展开":
+    - text: 生成文件 (1) 展开
+  - generic: 交付包 zip 暂不提供：服务端 /files 只开放 reports、charts、data 三个目录，整体打包需要后端批处理。 当前按文件逐个下载——上方"生成文件"列表与正文里的图表都带下载按钮。
+  - generic: 复核与分享
+  - button "数据溯源":
+    - text: 数据溯源
+  - button "View 完整日志 (68)":
+    - text: View 完整日志 (68)
+  - button "分享链接":
+    - text: 分享链接

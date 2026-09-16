@@ -1,0 +1,50 @@
+[
+  {
+    "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\orchestrator_v2.py",
+    "Hash": "0401E3F21102C6E864E7B4A8A02DF4B4ADA5D1E041098956E71EB0B23A88D811"
+  },
+  {
+    "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\acceptance_checker.py",
+    "Hash": "8F730FD67B6BD90CAE959CAFAE9EC14DB2984F01B67AE8E8C60DCDC52661138C"
+  },
+  {
+    "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\report_quality.py",
+    "Hash": "F6DDE3B30D40DA0A0F8A1A869AF76CCD17DA0E7BBF7BF0A8D001C2BE59907D68"
+  },
+  {
+    "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\critic_agent.py",
+    "Hash": "D41BCABCBAE748F3D4E28A15883BCA75257728B05BD69445ACF3ED8536124720"
+  },
+  {
+    "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\llm_client.py",
+    "Hash": "D7EAABB64B62212CD0AAED6B5241FC696D6DABDD001973A8D4D680598F809112"
+  },
+  {
+    "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\task_state.py",
+    "Hash": "4A535588201D8E318AAB64A14F876E44AA3C741B112D3779D0708C2BB1B36AAC"
+  },
+  {
+    "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\web_ui.py",
+    "Hash": "4A595A9272900B69A27C9E9CEBB013181C207769F7698E993FA76D89CD368914"
+  },
+  {
+    "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\test_cancel_semantics.py",
+    "Hash": "7D25D8BA68ADF4486D06F8F62F9E3B746F73BE2AF382C6EB02DC2DC4089AB774"
+  },
+  {
+    "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\test_review_degradation.py",
+    "Hash": "12B58198DF9CEBEB2FC6101DA624E98F57CDAD584CB8DFE37D1F82B5260AC7C5"
+  },
+  {
+    "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\test_report_quality.py",
+    "Hash": "A0B45BBC60E27A43274C4B97BE2A4C8BB9013F6FB21024F62D9641A0B31ED940"
+  },
+  {
+    "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\test_orchestrator_v2.py",
+    "Hash": "F50E14CBB7949B39E8EB7A3B0800A04BF779A4C73E191ABDB667BFE77A19C968"
+  },
+  {
+    "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\templates.json",
+    "Hash": "677B93FD37333744D8BCC0659C007394CA97ABD15CB8DF7826D328434378B2A4"
+  }
+]

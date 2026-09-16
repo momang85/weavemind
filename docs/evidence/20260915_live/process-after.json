@@ -1,0 +1,114 @@
+[
+  {
+    "Service": "worker-search",
+    "PID": 37788,
+    "Alive": true,
+    "CPU": 1.875,
+    "WorkingMB": 94.0
+  },
+  {
+    "Service": "worker-web-fetch",
+    "PID": 16720,
+    "Alive": true,
+    "CPU": 0.921875,
+    "WorkingMB": 46.7
+  },
+  {
+    "Service": "worker-content-summary",
+    "PID": 28752,
+    "Alive": true,
+    "CPU": 1.09375,
+    "WorkingMB": 58.6
+  },
+  {
+    "Service": "worker-code-execution",
+    "PID": 25480,
+    "Alive": true,
+    "CPU": 0.9375,
+    "WorkingMB": 47.3
+  },
+  {
+    "Service": "worker-file-io",
+    "PID": 31224,
+    "Alive": true,
+    "CPU": 0.890625,
+    "WorkingMB": 45.9
+  },
+  {
+    "Service": "worker-packaging",
+    "PID": 34572,
+    "Alive": true,
+    "CPU": 1.109375,
+    "WorkingMB": 58.4
+  },
+  {
+    "Service": "worker-data-loader",
+    "PID": 38616,
+    "Alive": true,
+    "CPU": 0.8125,
+    "WorkingMB": 45.3
+  },
+  {
+    "Service": "worker-data-analyzer",
+    "PID": 28472,
+    "Alive": true,
+    "CPU": 2.25,
+    "WorkingMB": 190.7
+  },
+  {
+    "Service": "worker-model-trainer",
+    "PID": 25340,
+    "Alive": true,
+    "CPU": 2.359375,
+    "WorkingMB": 180.5
+  },
+  {
+    "Service": "worker-report-generator",
+    "PID": 28500,
+    "Alive": true,
+    "CPU": 2.09375,
+    "WorkingMB": 61.3
+  },
+  {
+    "Service": "worker-react-agent",
+    "PID": 16648,
+    "Alive": true,
+    "CPU": 1.046875,
+    "WorkingMB": 58.3
+  },
+  {
+    "Service": "critic",
+    "PID": 14364,
+    "Alive": true,
+    "CPU": 0.921875,
+    "WorkingMB": 56.5
+  },
+  {
+    "Service": "orchestrator",
+    "PID": 6612,
+    "Alive": true,
+    "CPU": 4.125,
+    "WorkingMB": 218.6
+  },
+  {
+    "Service": "webui",
+    "PID": 17052,
+    "Alive": true,
+    "CPU": 50.171875,
+    "WorkingMB": 168.1
+  },
+  {
+    "Service": "guardian",
+    "PID": 19224,
+    "Alive": true,
+    "CPU": 0.828125,
+    "WorkingMB": 52.6
+  },
+  {
+    "Service": "metrics",
+    "PID": 27188,
+    "Alive": true,
+    "CPU": 0.90625,
+    "WorkingMB": 47.0
+  }
+]

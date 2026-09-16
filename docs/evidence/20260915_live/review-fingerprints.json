@@ -1,0 +1,38 @@
+[
+  {
+    "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\orchestrator_v2.py",
+    "Hash": "C805D8D4569412393EFBB567BCEF3D5BC82F2C374C931132357413F22F63CC10"
+  },
+  {
+    "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\frontend\\src\\components\\LiveActivity.tsx",
+    "Hash": "A5A420CE81D89006F656663C1485F1E29A8FCC51E8C114DA3D797A85320DB138"
+  },
+  {
+    "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\frontend\\src\\components\\ReportViewer.tsx",
+    "Hash": "D7EDBE22E2B9A5A8C49F68DC92CC6CCCCE153FDA757AB03C538713419EB98AFE"
+  },
+  {
+    "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\report_pdf.py",
+    "Hash": "5EE4D33871EC9890FC57204CECA552DF7738BC9E4870EF098C9D765953678B51"
+  },
+  {
+    "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\web_ui.py",
+    "Hash": "4AD09EDB4AA425FE63BAA69DA1246CAF0DFC37C253C28C373E342196CE4B35F6"
+  },
+  {
+    "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\frontend\\dist\\index.html",
+    "Hash": "45C002D30D96DB2A239705AA91E0E648B3680D8CD49CC10DEF8FFC39862B8A41"
+  },
+  {
+    "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\task_context.py",
+    "Hash": "8880E851D8E12AC95094BFBFA74B6A3F53B5F27371B5F63234D95F5B160F087B"
+  },
+  {
+    "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\net_policy.py",
+    "Hash": "057A76E08996137E0F5A430F64787641A23FF876C2657BBA450B4B45B7D47113"
+  },
+  {
+    "Path": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\templates.json",
+    "Hash": "677B93FD37333744D8BCC0659C007394CA97ABD15CB8DF7826D328434378B2A4"
+  }
+]
