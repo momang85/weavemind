@@ -274,6 +274,16 @@ Before developing, run `python test_common.py` and `npm run build` to make sure 
   model in the `planner` section if needed.
 - Logs rotate at 5 MB × 3 in `logs/`; `priority_router.py` and `auto_scaler.py` are kept
   but not yet wired into the main pipeline.
+- Number traceability varies widely by task type: **8%–85%**, not a single figure. The
+  A-share/HK structured chain reached 85% (206/241) in the referenced run; the US chain
+  (SEC EDGAR) measured **8%** (3/37) with **0%** amount traceability (0/17) in independent
+  testing. The US root cause (structured financials never wired to that target) is fixed and
+  covered by a fixed synthetic fixture, but real `data.sec.gov` fetches are not yet verified,
+  so 8% still stands as the citable measurement.
+- Number traceability binds the **adjacent clause's** subject: a figure whose neighbouring
+  clause names another company is rejected. Binding against a subject declared only in the
+  report title/document is **not** implemented — see
+  `test_acceptance_adversarial.py::test_known_gap_number_subject_mismatch`.
 - Secrets and local data are never committed (`config.json`, `.env`, `agents.db*`,
   `chroma_memory*`, logs are all gitignored).
 
