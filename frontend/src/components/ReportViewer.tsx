@@ -748,13 +748,28 @@ export default memo(function ReportViewer() {
 
   const scrollToHeading = (id: string) => scrollToId(id)
 
+  // 导出鉴权/故障分级（R0.3）：401 要登录、403 无权限——都不自动下载；
+  // 只有"服务端不可用"这类故障才允许退本地缓存稿，且必须显式标注未验证。
+  const exportBlocked = async (res: Response): Promise<boolean> => {
+    if (res.status === 401) {
+      window.alert('需登录后才能导出：请先登录再重试。')
+      return true
+    }
+    if (res.status === 403) {
+      window.alert('无权限导出该报告：请确认账号权限或报告归属。')
+      return true
+    }
+    return false
+  }
+
   // Markdown 导出优先走服务端：导出字节的 hash 与服务端导出清单一并落盘，
   // 并与 PDF 绑定同一个选中版本；服务端不可用（离线/旧版）时退回内存稿，
-  // 此时只保证可下载，不产生清单绑定。
+  // 此时文件名为"本地未验证副本"，并明确提示它没有清单绑定。
   const downloadMarkdown = async () => {
     if (taskIdForFiles) {
       try {
         const res = await fetch('/api/task/' + encodeURIComponent(taskIdForFiles) + '/report.md')
+        if (await exportBlocked(res)) return
         if (res.ok) {
           const blob = await res.blob()
           const url = URL.createObjectURL(blob)
@@ -765,12 +780,16 @@ export default memo(function ReportViewer() {
           URL.revokeObjectURL(url)
           return
         }
-      } catch { /* 退回内存稿 */ }
+      } catch { /* 服务端不可达 → 退本地缓存稿（下面标注） */ }
     }
     const blob = new Blob([report.final_report], { type: 'text/markdown' })
     const url = URL.createObjectURL(blob)
-    const a = document.createElement('a'); a.href = url; a.download = 'report.md'; a.click()
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'report-本地未验证副本.md'
+    a.click()
     URL.revokeObjectURL(url)
+    window.alert('服务端导出不可用：已导出**本地未验证副本**（无版本绑定与验收清单，不得当作已通过）。')
   }
 
   const fileUrl = (name: string) =>
@@ -781,6 +800,7 @@ export default memo(function ReportViewer() {
     if (taskIdForFiles) {
       try {
         const res = await fetch('/api/task/' + encodeURIComponent(taskIdForFiles) + '/pdf')
+        if (await exportBlocked(res)) return
         if (!res.ok) throw new Error('PDF unavailable')
         const blob = await res.blob()
         const url = URL.createObjectURL(blob)
@@ -790,15 +810,17 @@ export default memo(function ReportViewer() {
         a.click()
         URL.revokeObjectURL(url)
         return
-      } catch { /* 退回浏览器打印方案 */ }
+      } catch { /* 服务端 PDF 不可用 → 浏览器打印（打印件会标版本/草稿或"未知"） */ }
     }
     const w = window.open('', '_blank')
     if (!w) return
     // 打印页正文优先取服务端导出的同一份选中版本（顺带拿到版本号/草稿标记，
-    // 打印件因此可追溯到它是哪一版）；服务端不可用时退回内存稿。
+    // 打印件因此可追溯到它是哪一版）；服务端不可用时退回内存稿，并在页脚
+    // 明确写"版本未知（本地未验证副本）"，不冒充已验证交付。
     let printBody = report.final_report
     let versionId = ''
     let isDraft = false
+    let bodyFromServer = false
     if (taskIdForFiles) {
       try {
         const res = await fetch('/api/task/' + encodeURIComponent(taskIdForFiles) + '/report.md')
@@ -806,8 +828,9 @@ export default memo(function ReportViewer() {
           printBody = await res.text()
           versionId = res.headers.get('X-Report-Version-Id') || ''
           isDraft = res.headers.get('X-Report-Draft') === '1'
+          bodyFromServer = true
         }
-      } catch { /* 用内存稿 */ }
+      } catch { /* 用内存稿（下面标注版本未知） */ }
     }
     w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Report</title>
 <style>body{font-family:system-ui;max-width:800px;margin:40px auto;padding:20px;color:#1a1a2e;line-height:1.8}
@@ -830,11 +853,16 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
       .replace(/\n/g, '<br/>')
     w.document.getElementById('content')!.innerHTML = md
-    if (versionId) {
+    {
+      // 页脚必须说清"这是哪一版、能不能当已通过用"：拿不到服务端版本时
+      // 显式写"版本未知（本地未验证副本）"，不留下"看起来正常"的打印件
       const foot = w.document.createElement('p')
       foot.style.cssText = 'margin-top:32px;padding-top:12px;border-top:1px solid #ddd;'
         + 'color:#666;font-size:12px'
-      foot.textContent = (isDraft ? '未验收草稿 · ' : '') + '版本 ' + versionId
+      const head = isDraft ? '未验收草稿 · ' : ''
+      foot.textContent = bodyFromServer
+        ? head + '版本 ' + versionId
+        : head + '版本未知（本地未验证副本，无验收清单绑定）'
       w.document.getElementById('content')!.appendChild(foot)
     }
     w.print()

@@ -8,6 +8,12 @@ import redis
 from audit_logger import audit_log, read_audit
 import data_paths
 import db_paths
+
+# 模块级 logger：导出/清单路径要用它记录失败。此前那些位置直接写 `logger.xxx`，
+# 但模块里并没有定义 logger → 抛 NameError 被上层 catch 吞掉，等于"清单写不进去
+# 也没有任何可见记录"。R0.3 要求失败可见，故在此统一定义。
+logger = logging.getLogger("web_ui")
+
 from workspace import (
     _safe_project,
     list_projects,
@@ -2505,9 +2511,12 @@ def _write_export_manifest(tid: str, body: str, pdf_bytes: bytes = b"",
     - 逐格式累加：先导出 PDF 再导出 Markdown（或反之）不互相覆盖，两次
       导出绑定的是**同一个**选中版本；
     - 浏览器打印页是客户端渲染，只登记其来源正文 hash（不伪造产物字节 hash）；
-    - `aligned=False` 或该版本没有自身验收 → `draft=True`：只能作为**未验收草稿**导出。
+    - `draft`/`status` 与页面/PDF/打印件/准入**共用** `report_version.verified_delivery`：
+      绑定验收 ≠ 通过验收——验收 `overall != pass` 同样是草稿；
+    - 清单写入失败必须**可见**（`manifest_write_error` 字段 + 日志），不静默吞掉。
     """
-    from report_version import VersionStore, body_hash
+    from report_version import (DELIVERY_VERIFIED, VersionStore, body_hash,
+                                verified_delivery)
     ws = task_workspace(tid)
     store = VersionStore(ws, tid)
     adopted = store.adopted()
@@ -2548,6 +2557,24 @@ def _write_export_manifest(tid: str, body: str, pdf_bytes: bytes = b"",
         aligned = delivered == final_sha
     else:
         aligned = bool(adopted) and adopted.version_id == delivered
+    # R0.3：导出状态由**唯一谓词**给出（页面/PDF/打印件/manifest/准入共用）。
+    # 注意两个不同对象：验收对象是**研究正文**（version.body），导出的是**交付文档**
+    # （交付说明 + 研究正文 + 注记）。因此：先判"这版验收是否通过且属于本正文"，
+    # 再叠加"导出字节是否就是收尾记录的那份交付"与"那份交付本身是否 ok"。
+    status, draft_reason = verified_delivery(
+        adopted, (adopted.body if adopted is not None else ""),
+        review_valid=True, hard_ok=True)
+    if status == DELIVERY_VERIFIED and not aligned:
+        status, draft_reason = "draft", "导出字节与收尾记录的交付正文不一致（装配后未重验）"
+    _last_delivery = {}
+    try:
+        _dels = store.deliveries()
+        _last_delivery = _dels[-1] if _dels else {}
+    except Exception:
+        _last_delivery = {}
+    if status == DELIVERY_VERIFIED and _last_delivery and not _last_delivery.get("ok"):
+        status = "draft"
+        draft_reason = str(_last_delivery.get("reason") or "收尾时已判为未验收草稿")
     manifest = {
         "report_version_id": ver.identity_id(),
         "body_sha256": ver.version_id,
@@ -2557,7 +2584,9 @@ def _write_export_manifest(tid: str, body: str, pdf_bytes: bytes = b"",
         "final_content_sha256": final_sha,
         "final_content_matches": bool(final_sha) and final_sha == delivered,
         "aligned": aligned,
-        "draft": (not ver.acceptance_for_this_body()) or (not aligned),
+        "status": status,
+        "draft": status != DELIVERY_VERIFIED,
+        "draft_reason": draft_reason,
         "renderer_version": "report_pdf/v1",
         "template_version": "default",
         "files": files,
@@ -2569,8 +2598,11 @@ def _write_export_manifest(tid: str, body: str, pdf_bytes: bytes = b"",
     try:
         prev_path.write_text(
             json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
-    except Exception:
-        pass
+        manifest["manifest_path"] = str(prev_path)
+    except Exception as exc:
+        # 写入失败必须可见：不能"写不进清单却宣称可追溯"
+        manifest["manifest_write_error"] = str(exc)[:200]
+        logger.error("导出清单写入失败（task=%s）：%s", tid, str(exc)[:200])
     return manifest
 
 
@@ -2614,8 +2646,13 @@ def _get_task_markdown(self, p):
         tid = p.split("/api/task/")[-1].rsplit("/report.md", 1)[0]
         try:
             raw, manifest = _task_markdown_export(tid)
-        except Exception:
+        except LookupError:
             return self._json({"error": "report not found"}, 404)
+        except Exception as exc:
+            # 导出失败必须如实报错，不能混成"没有报告"
+            logger.error("Markdown 导出失败（task=%s）：%s", tid, str(exc)[:200])
+            return self._json(
+                {"error": "markdown export failed", "detail": str(exc)[:200]}, 500)
         self.send_response(200)
         self.send_header("Content-Type", "text/markdown; charset=utf-8")
         self.send_header(
@@ -3735,17 +3772,30 @@ def _get_task_events(self, p):
 def _get_task_pdf(self, p):
     if p.startswith("/api/task/") and p.endswith("/pdf"):
         # F3：报告服务端 PDF 导出（Content-Disposition attachment）
+        # R0.3：响应头带版本与草稿标记（与 /report.md 对齐），下载件自身可辨识
         tid = p.split("/api/task/")[-1].rsplit("/pdf", 1)[0]
         try:
             body = _task_pdf_bytes(tid)
-        except Exception:
+        except LookupError:
             return self._json({"error": "report not found"}, 404)
+        except Exception as exc:
+            logger.error("PDF 导出失败（task=%s）：%s", tid, str(exc)[:200])
+            return self._json(
+                {"error": "pdf export failed", "detail": str(exc)[:200]}, 500)
+        try:
+            _m = _write_export_manifest(tid, str(_get_task_report_data(tid).get("report") or ""),
+                                        pdf_bytes=body)
+        except Exception:
+            _m = {}
         self.send_response(200)
         self.send_header("Content-Type", "application/pdf")
         self.send_header(
             "Content-Disposition",
             f'attachment; filename="{tid}.pdf"',
         )
+        self.send_header("X-Report-Version-Id", str(_m.get("report_version_id") or ""))
+        self.send_header("X-Report-Body-Sha256", str(_m.get("body_sha256") or ""))
+        self.send_header("X-Report-Draft", "1" if _m.get("draft", True) else "0")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
