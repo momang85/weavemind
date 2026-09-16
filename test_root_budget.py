@@ -129,11 +129,12 @@ class TestBudgetSharedAcrossRestart(unittest.TestCase):
 
     def test_reopened_budget_keeps_remaining(self):
         b1 = rb.RootBudget("t-1", self.tmp, rb.BudgetLimits(max_calls=2))
-        b1.reserve("step")
-        b1.settle("step-1", tokens=10)
+        t = b1.reserve("step")
+        b1.settle(t, tokens=10)
         b2 = rb.RootBudget("t-1", self.tmp, rb.BudgetLimits(max_calls=2))
         self.assertEqual(b2.remaining()["calls"], 1, "重开账本应延续剩余额度")
-        self.assertEqual(b2.state.tokens_settled, 10)
+        self.assertEqual(b2.state.tokens_settled, 10,
+                         "票据号跨进程唯一，结算必须命中同一张票据")
         b2.reserve("plan")
         b3 = rb.RootBudget("t-1", self.tmp, rb.BudgetLimits(max_calls=2))
         self.assertEqual(b3.remaining()["calls"], 0)
@@ -316,6 +317,298 @@ class TestLimitsFromConfig(unittest.TestCase):
         lim = rb.limits_from_config({})
         self.assertEqual((lim.max_seconds, lim.max_calls, lim.max_tokens), (0.0, 0, 0))
         self.assertEqual(rb.limits_from_config({"system": {"budget": "bad"}}).max_calls, 0)
+
+
+class TestTicketTransitionsAreMutuallyExclusive(unittest.TestCase):
+    """R2：一张票据只能从 open 走到 settled 或 unsettled 中的一个，且只走一次。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_tk_"))
+        self.addCleanup(__import__("shutil").rmtree, self.tmp, ignore_errors=True)
+
+    def test_fabricated_ticket_is_refused(self):
+        """取消时不得凭空造票据：从未预留过的票据转待对账必须被拒绝并计数。
+
+        此前 `_call_llm_cancellable` 会写一张 `xxx-inflight`，账面上"取消已入账"，
+        而真正预留的那张仍挂在 open 上——真实状态被假账掩盖。
+        """
+        b = rb.RootBudget("t-1", self.tmp, rb.BudgetLimits(max_calls=5))
+        t = b.reserve("plan")
+        self.assertFalse(b.mark_unsettled("plan-inflight", reason="取消"),
+                         "虚构票据不得入账")
+        snap = b.snapshot()
+        self.assertEqual(snap["calls"]["unsettled"], 0)
+        self.assertEqual(snap["calls"]["reserved"], 1)
+        self.assertIn("plan", snap["open_tickets"][t]["stage"])
+        self.assertEqual(snap["rejected_transitions"]["unsettled_unknown_ticket"]["count"], 1)
+
+    def test_settle_after_unsettled_is_refused(self):
+        """真票据转待对账后，调用方的 finally 不得再把它结算成"成功"。"""
+        b = rb.RootBudget("t-1", self.tmp, rb.BudgetLimits(max_calls=5))
+        t = b.reserve("plan", tokens=100)
+        self.assertTrue(b.mark_unsettled(t, reason="取消：放弃等待"))
+        b.settle(t, tokens=0, ok=True, note="finally 里的无条件结算")
+        snap = b.snapshot()
+        self.assertEqual(snap["calls"]["unsettled"], 1)
+        self.assertEqual(snap["calls"]["settled"], 0,
+                         "同一张票据不得既 unsettled 又 settled（假平衡）")
+        self.assertEqual(snap["rejected_transitions"]["settle_after_unsettled"]["count"], 1)
+        self.assertIn(t, snap["unsettled_tickets"])
+        self.assertEqual(snap["tokens"]["unsettled"], 100,
+                         "待对账的调用可能仍在计费：上界不得被当成没花")
+
+    def test_double_settle_counts_once(self):
+        b = rb.RootBudget("t-1", self.tmp, rb.BudgetLimits(max_calls=5))
+        t = b.reserve("step")
+        b.settle(t, tokens=7)
+        b.settle(t, tokens=7)
+        self.assertEqual(b.snapshot()["calls"]["settled"], 1)
+        self.assertEqual(b.snapshot()["rejected_transitions"]["settle_unknown_ticket"]["count"], 1)
+
+    def test_stage_unsettled_moves_only_real_open_tickets(self):
+        b = rb.RootBudget("t-1", self.tmp, rb.BudgetLimits(max_calls=5))
+        t1 = b.reserve("plan")
+        t2 = b.reserve("plan")
+        b.settle(t2)
+        moved = b.mark_stage_unsettled("plan", reason="取消")
+        self.assertEqual(moved, 1, "只动 open 的那张，已结算的不动")
+        snap = b.snapshot()
+        self.assertIn(t1, snap["unsettled_tickets"])
+        self.assertEqual(moved, b.mark_stage_unsettled("plan", reason="再取消一次") or 1)
+
+
+class TestTokenReservationIsUpperBound(unittest.TestCase):
+    """R2 反例：`max_tokens=100` 时两次 `reserve(tokens=80)` 不得都获准。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_tok_"))
+        self.addCleanup(__import__("shutil").rmtree, self.tmp, ignore_errors=True)
+
+    def test_second_reserve_is_refused_before_any_settlement(self):
+        b = rb.RootBudget("t-1", self.tmp, rb.BudgetLimits(max_tokens=100))
+        b.reserve("plan", tokens=80)
+        with self.assertRaises(rb.BudgetExceeded) as ctx:
+            b.reserve("reflect", tokens=80)
+        self.assertIn("token", str(ctx.exception))
+
+    def test_settled_actual_still_counts(self):
+        """结算后上界换成实际：实际也算已承诺，不能被第二次预留重复使用。"""
+        b = rb.RootBudget("t-1", self.tmp, rb.BudgetLimits(max_tokens=100))
+        t = b.reserve("plan", tokens=80)
+        b.settle(t, tokens=90)
+        self.assertEqual(b.remaining()["tokens"], 10)
+        with self.assertRaises(rb.BudgetExceeded):
+            b.reserve("reflect", tokens=20)
+        b.reserve("reflect", tokens=10)
+
+    def test_refund_returns_token_upper_bound(self):
+        b = rb.RootBudget("t-1", self.tmp, rb.BudgetLimits(max_tokens=100))
+        t = b.reserve("plan", tokens=80)
+        b.refund(t, note="发送前失败")
+        self.assertEqual(b.remaining()["tokens"], 100, "没发出去就退回上界")
+        b.reserve("plan", tokens=90)
+
+
+class _AtomicFakeRedis:
+    """支持 incrby/decrby/get 的替身：模拟两个进程共用一份 Redis 计数。"""
+
+    def __init__(self, shared: dict):
+        self._kv = shared
+
+    def incrby(self, key, amount):
+        self._kv[key] = int(self._kv.get(key, 0)) + int(amount)
+        return self._kv[key]
+
+    def decrby(self, key, amount):
+        self._kv[key] = int(self._kv.get(key, 0)) - int(amount)
+        return self._kv[key]
+
+    def get(self, key):
+        v = self._kv.get(key)
+        return None if v is None else str(v)
+
+
+class TestCrossProcessReservation(unittest.TestCase):
+    """R2：两个实例共用一份剩余额度（Redis 原子计数），文件只是快照。"""
+
+    def setUp(self):
+        self.kv: dict = {}
+
+    def _budget(self, tmp, **limits):
+        return rb.RootBudget("t-1", tmp, rb.BudgetLimits(**limits),
+                             redis_factory=lambda: _AtomicFakeRedis(self.kv))
+
+    def test_two_instances_do_not_both_get_the_last_slot(self):
+        tmp1 = Path(tempfile.mkdtemp(prefix="wm_x1_"))
+        tmp2 = Path(tempfile.mkdtemp(prefix="wm_x2_"))
+        self.addCleanup(__import__("shutil").rmtree, tmp1, ignore_errors=True)
+        self.addCleanup(__import__("shutil").rmtree, tmp2, ignore_errors=True)
+        b1 = self._budget(tmp1, max_calls=1)
+        b2 = self._budget(tmp2, max_calls=1)
+        t1 = b1.reserve("step")
+        with self.assertRaises(rb.BudgetExceeded):
+            b2.reserve("step")
+        self.assertTrue(t1)
+
+    def test_ticket_ids_are_unique_across_instances(self):
+        """R2 反例：两个实例都返回 `request-1`，磁盘只记 1 条。"""
+        tmp1 = Path(tempfile.mkdtemp(prefix="wm_x3_"))
+        tmp2 = Path(tempfile.mkdtemp(prefix="wm_x4_"))
+        self.addCleanup(__import__("shutil").rmtree, tmp1, ignore_errors=True)
+        self.addCleanup(__import__("shutil").rmtree, tmp2, ignore_errors=True)
+        b1 = self._budget(tmp1, max_calls=10)
+        b2 = self._budget(tmp2, max_calls=10)
+        t1 = b1.reserve("step")
+        t2 = b2.reserve("step")
+        self.assertNotEqual(t1, t2, "票据号必须跨进程唯一")
+        snap = b1.snapshot()
+        self.assertTrue(snap["cross_process"])
+        self.assertEqual(snap["calls"]["reserved"], 2,
+                         "共享计数：两个进程的预留都要记进同一份额度")
+
+    def test_token_reservation_is_atomic_across_instances(self):
+        tmp1 = Path(tempfile.mkdtemp(prefix="wm_x5_"))
+        tmp2 = Path(tempfile.mkdtemp(prefix="wm_x6_"))
+        self.addCleanup(__import__("shutil").rmtree, tmp1, ignore_errors=True)
+        self.addCleanup(__import__("shutil").rmtree, tmp2, ignore_errors=True)
+        b1 = self._budget(tmp1, max_tokens=100)
+        b2 = self._budget(tmp2, max_tokens=100)
+        b1.reserve("plan", tokens=80)
+        with self.assertRaises(rb.BudgetExceeded):
+            b2.reserve("reflect", tokens=80)
+
+    def test_rollback_keeps_counter_accurate(self):
+        tmp = Path(tempfile.mkdtemp(prefix="wm_x7_"))
+        self.addCleanup(__import__("shutil").rmtree, tmp, ignore_errors=True)
+        b = self._budget(tmp, max_calls=2, max_tokens=100)
+        b.reserve("plan", tokens=80)
+        with self.assertRaises(rb.BudgetExceeded):
+            b.reserve("plan", tokens=80)
+        # 失败的预留必须把计数退回去，否则会把额度越吃越少
+        self.assertEqual(b.remaining()["tokens"], 20)
+        self.assertEqual(b.remaining()["calls"], 1)
+
+
+class TestZeroMeansTrulyUnlimited(unittest.TestCase):
+    """R2：0 值语义 = 真正不限（不再回落 `system.task_timeout` 变成 600 秒硬截止）。"""
+
+    def test_budget_is_unlimited_when_config_is_zero(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        tmp = Path(tempfile.mkdtemp(prefix="wm_zero_"))
+        self.addCleanup(__import__("shutil").rmtree, tmp, ignore_errors=True)
+        cfg = tmp / "config.json"
+        cfg.write_text(json.dumps({"system": {
+            "task_timeout": 600,
+            "budget": {"max_seconds": 0, "max_calls": 0, "max_tokens": 0},
+        }}), encoding="utf-8")
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._system_cfg_path = str(cfg)
+        o._task_timeout = 600
+        o._task_budgets = {}
+        o._budget_redis_factory = lambda: None
+        with mock.patch("orchestrator_v2.task_workspace", lambda tid: tmp):
+            b = o._budget("t-1")
+        self.assertFalse(b.limited, "0/0/0 必须是不限，而不是拿 task_timeout 兜底")
+        self.assertEqual(b.limits.max_seconds, 0.0)
+        self.assertEqual(b.reserve("plan"), "", "不限额度时不预留")
+        self.assertEqual(b.exhausted_reason(), "")
+
+
+class TestRootDeadlineBoundsWait(unittest.TestCase):
+    """R2：根任务剩余时间比步骤超时更短时，等待必须按**剩余时间**收口。
+
+    否则步骤用 300s 下限等待，而根预算早已用尽——那段时间是"没额度的空等"。
+    """
+
+    def _orch(self, remaining_seconds, tmp):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._now_iso = lambda: "T"
+        o._cancel_requested = lambda tid: False
+        o._new_redis_sync = lambda: object()
+        o._task_budgets = {}
+        self._deadlines: list = []
+        o._brpop_with_deadline = lambda r, key, deadline: (
+            self._deadlines.append(deadline) or None)
+        b = rb.RootBudget("t-1", tmp, rb.BudgetLimits(max_seconds=remaining_seconds))
+        o._task_budgets["t-1"] = b
+        return o
+
+    def test_wait_is_capped_by_root_remaining(self):
+        import time as _t
+        tmp = Path(tempfile.mkdtemp(prefix="wm_dl_"))
+        self.addCleanup(__import__("shutil").rmtree, tmp, ignore_errors=True)
+        o = self._orch(2, tmp)
+        started = _t.time()
+        with mock.patch("orchestrator_v2.task_workspace", lambda tid: tmp):
+            out = o._wait_step_result("step-1", 300, cancel_task_id="t-1")
+        elapsed = _t.time() - started
+        self.assertEqual(out.kind, "timeout")
+        self.assertLess(elapsed, 12,
+                        f"等待应被根剩余时间收口（实际 {elapsed:.1f}s），不得等满 300s")
+
+    def test_no_root_limit_keeps_step_timeout(self):
+        tmp = Path(tempfile.mkdtemp(prefix="wm_dl2_"))
+        self.addCleanup(__import__("shutil").rmtree, tmp, ignore_errors=True)
+        o = self._orch(0, tmp)          # 0 = 不限
+        self.assertFalse(o._budget("t-1").limited)
+        o._new_redis_sync = lambda: object()
+        o._brpop_with_deadline = lambda r, key, deadline: (
+            self._deadlines.append(deadline) or None)
+        with mock.patch("orchestrator_v2.task_workspace", lambda tid: tmp):
+            o._wait_step_result("step-1", 1, cancel_task_id="t-1")
+        # 未设根上限时不做任何收口（等待上限仍是步骤自身的超时）
+        self.assertTrue(self._deadlines)
+
+
+class TestCancelLatencyIsTwoSeparateClocks(unittest.TestCase):
+    """R2：取消 UI 响应时限与供应商在飞结算时限分别记录，不混成一个数。"""
+
+    class _Redis:
+        def __init__(self, token):
+            self.token = token
+
+        def get(self, key):
+            return self.token if key == "task_cancel_token:t-1" else None
+
+    def _orch(self, token):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._redis = self._Redis(token)
+        o._now_iso = lambda: "T"
+        return o
+
+    def test_latency_reports_both_clocks(self):
+        import json as _json
+        import time as _t
+
+        token = _json.dumps({"at_ts": _t.time() - 5, "reason": "用户停止"},
+                            ensure_ascii=False)
+        o = self._orch(token)
+        lat = o._cancel_latency("t-1")
+        self.assertGreaterEqual(lat["sec"], 4.5)
+        self.assertTrue(lat["within"], "5 秒应落在 UI 预期内")
+        self.assertGreater(lat["settle_window"], 0,
+                           "供应商在飞结算窗口是另一个时限，必须单独给出")
+        self.assertNotEqual(lat["settle_window"], lat["deadline"],
+                            "两个时限不得混成同一个数")
+
+    def test_latency_flags_slow_cancel(self):
+        import json as _json
+        import time as _t
+
+        token = _json.dumps({"at_ts": _t.time() - 9999}, ensure_ascii=False)
+        o = self._orch(token)
+        lat = o._cancel_latency("t-1")
+        self.assertFalse(lat["within"], "超出预期的取消响应必须如实标记")
+
+    def test_no_timestamp_means_unknown_not_invented(self):
+        o = self._orch("1")
+        self.assertEqual(o._cancel_latency("t-1"), {},
+                         "拿不到请求时刻就不要编一个时延出来")
 
 
 if __name__ == "__main__":

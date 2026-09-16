@@ -72,7 +72,7 @@ jobs:
         run: python test_redis_acquisition.py
       - name: US financial chain (SEC fixture / subject extraction / amount rate)
         run: python test_us_chain.py
-      - name: Root-task budget & stage observability (M0-e)
+      - name: Root-task budget & stage observability (M0-e / R2 tickets)
         run: python test_root_budget.py
       - name: Offline delivery & fault injection (M0-f)
         run: python test_offline_delivery.py

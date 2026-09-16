@@ -4392,7 +4392,18 @@ def _post_task_cancel(self, p, body, admin):
             {"error": f"任务已结束（{status}），无需取消"}, 409)
     try:
         # TTL 给足：编排器可能正卡在一次长调用里，标志要活到它下一次检查
-        _new_redis().setex(f"task_cancel:{tid}", 3600, "1")
+        r = _new_redis()
+        r.setex(f"task_cancel:{tid}", 3600, "1")
+        # R2：再写一张**不可复位**的取消令牌（无 TTL）。提示键有可能过期/被清，
+        # 而"用户明确停过这个任务"这件事必须一直成立——否则任务在 Redis 重启或
+        # 令牌过期后被恢复/重跑时，会继续发起新请求。
+        try:
+            r.set(f"task_cancel_token:{tid}", json.dumps(
+                {"at": time.strftime("%Y-%m-%dT%H:%M:%S"), "at_ts": time.time(),
+                 "reason": f"用户在 {status or '运行中'} 状态下请求停止"},
+                ensure_ascii=False), nx=True)
+        except TypeError:
+            r.set(f"task_cancel_token:{tid}", "1")
     except Exception:
         return self._json({"error": "Redis 写入失败，无法请求取消"}, 503)
     _publish_alert("task_cancel_requested",

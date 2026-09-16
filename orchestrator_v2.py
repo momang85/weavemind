@@ -109,7 +109,16 @@ REVIEW_POLICY_VERSION = "review-policy/v1"
 
 
 class TaskCancelled(RuntimeError):
-    """用户请求停止且**已放弃等待在飞调用**：由 run() 的取消路径收尾（M0-c）。"""
+    """用户请求停止且**已放弃等待在飞调用**：由 run() 的取消路径收尾（M0-c）。
+
+    `ticket_settled=True`（R2）表示"这次调用预留的那张预算票据**已经**由放弃等待的
+    那一方转成了待对账"——调用方不得再对它结算，否则一张票据会被记两次
+    （unsettled 一次、settled 一次），真实状态被假平衡掩盖。
+    """
+
+    def __init__(self, message: str = "", *, ticket_settled: bool = False):
+        super().__init__(message)
+        self.ticket_settled = bool(ticket_settled)
 
 
 # 等待步骤结果的四类结果（M0-c）：此前取消/超时/协议错误都返回 None，
@@ -385,6 +394,42 @@ _SYSTEM_HOT_RELOAD_FIELDS = (
     ("_stall_timeout", "stall_timeout", int, 60, lambda v: max(5, v)),
     ("_plan_confirm_timeout", "plan_confirm_timeout", int, 300, lambda v: max(30, v)),
 )
+
+
+class _BudgetScope:
+    """一次计费调用的票据生命周期（R2）：预留 → 结算/转待对账，三选一。
+
+    存在的理由：此前票据的结算散在调用方的 `finally` 里，而取消路径又在别处把
+    **另一张虚构票据**标成待对账——结果是"取消后这次调用停没停"在账本里读不出来。
+    把生命周期收成一个上下文管理器后，出口只有三条，且互斥：
+
+    - 正常返回 → `settle(ok=True)`；
+    - `TaskCancelled(ticket_settled=True)`（放弃等待方已把真票据转待对账）→ 不再动它；
+    - 其它异常 → `settle(ok=False)`（失败也花了钱，不能当没发生）。
+    """
+
+    def __init__(self, orch, task_id: str, stage: str, detail: dict):
+        self._orch = orch
+        self.task_id = task_id
+        self.stage = stage
+        self.detail = dict(detail or {})
+        self.ticket = ""
+
+    def __enter__(self) -> str:
+        self.ticket = self._orch._budget_reserve(self.task_id, self.stage,
+                                                 detail=self.detail)
+        return self.ticket
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        if not self.ticket:
+            return False
+        if isinstance(exc, TaskCancelled) and getattr(exc, "ticket_settled", False):
+            # 票据已转待对账（可能仍在计费）：不得再结算
+            return False
+        note = f"{self.stage}:{'failed' if exc_type else 'ok'}"
+        self._orch._budget_settle(self.task_id, self.ticket, ok=exc_type is None,
+                                  note=note)
+        return False
 
 
 class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
@@ -726,9 +771,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     _plan_budget = float(os.environ.get("WM_PLAN_BUDGET_SECONDS", "180") or 180)
                     _plan_deadline = time.time() + _plan_budget
                     # M0-e：规划调用也要在根任务预算里预留（重试/降级共享同一份剩余额度）
-                    _ticket = self._budget_reserve(
-                        task_id, "plan", detail={"stage": "规划", "attempt": attempt + 1})
-                    try:
+                    # R2：预留与结算走同一个 scope——取消时票据由 helper 转待对账，
+                    # 出口**不**再结算（此前 finally 无条件结算成 ok=True，
+                    # 与虚构的 inflight 票据凑成假平衡）
+                    with self._budget_scope(
+                            task_id, "plan",
+                            detail={"stage": "规划", "attempt": attempt + 1}) as _ticket:
                         # M0-c：规划调用在可取消的等待里跑——端点退化时"停止"也要能立刻生效
                         raw = self._call_llm_cancellable(
                             task_id, "规划", call_with_heartbeat,
@@ -739,10 +787,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                             # B1：规划/反思/评审统一走 planner 用途模型
                             usage="plan", cache_key=plan_cache_key,
                             deadline=_plan_deadline,
+                            ticket=_ticket,
                         )
-                    finally:
-                        self._budget_settle(
-                            task_id, _ticket, ok=True, note=f"规划尝试 {attempt + 1}")
                     phase_end(self._messaging, task_id, "规划", ok=True,
                               detail=f"规划完成（第 {attempt + 1} 次尝试）")
                 except Exception as exc:
@@ -2682,23 +2728,113 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
     def _cancel_key(self, task_id: str) -> str:
         return f"task_cancel:{task_id}"
 
+    def _cancel_token_key(self, task_id: str) -> str:
+        """不可复位的取消令牌（R2）。
+
+        Redis 里的 `task_cancel:{tid}` 是**可被删除/过期**的提示（webui 写、编排器
+        收尾时清），单靠它判断"用户是否请求过停止"会漏：键被清掉、过期、或 Redis
+        重启之后，同一个任务再被恢复/重跑就"看不到取消"，于是一个用户明确停掉的
+        任务可能继续派发新请求。因此取消信号落成两个不可复位的东西：
+        令牌（set 后不再清除，值里带时间与来源）与任务终态 CANCELLED。
+        """
+        return f"task_cancel_token:{task_id}"
+
+    def request_cancel(self, task_id: str, reason: str = "用户请求停止") -> None:
+        """记录一次取消请求（webui 入口）：同时写提示键与**不可复位令牌**。"""
+        payload = json.dumps({"at": self._now_iso(), "at_ts": time.time(),
+                              "reason": str(reason or "")[:120]},
+                             ensure_ascii=False)
+        try:
+            self._redis.set(self._cancel_key(task_id), payload)
+        except Exception as exc:
+            logger.warning("取消提示键写入失败（task=%s）：%s", task_id, str(exc)[:100])
+        try:
+            # 只在第一次写入（NX）：令牌不可复位，重复取消不改写既有时间与来源
+            self._redis.set(self._cancel_token_key(task_id), payload, nx=True)
+        except TypeError:
+            try:
+                self._redis.set(self._cancel_token_key(task_id), payload)
+            except Exception as exc:
+                logger.warning("取消令牌写入失败（task=%s）：%s", task_id, str(exc)[:100])
+        except Exception as exc:
+            logger.warning("取消令牌写入失败（task=%s）：%s", task_id, str(exc)[:100])
+
     def _cancel_requested(self, task_id: str) -> bool:
         """用户是否请求停止该任务。
 
         用"标志位 + 派发边界检查"而不是抛异常：step worker 的 `except Exception`
         会把深层异常转成"步骤失败"继续跑，而 run() 又没有兜底 except——抛异常
         既停不下来也收尾不干净。
+
+        R2：三个来源取**或**——提示键（快）、不可复位令牌（慢但不会丢）、
+        已落库的 CANCELLED 终态（最慢但持久）。任何一个说"停过"，就不再发起新请求。
         """
         try:
-            return bool(self._redis.get(self._cancel_key(task_id)))
+            if self._redis.get(self._cancel_key(task_id)):
+                return True
+            if self._redis.get(self._cancel_token_key(task_id)):
+                return True
         except Exception:
-            return False
+            pass
+        # 持久终态：CANCELLED 一旦落库就不可复位（Redis 被清也不影响）
+        try:
+            import task_state as _ts
+            st = str((_ts.read_task(task_id) or {}).get("status") or "").upper()
+            if st == _ts.CANCELLED:
+                return True
+        except Exception:
+            pass
+        return False
 
     def _clear_cancel(self, task_id: str) -> None:
+        """清掉**提示键**；不可复位令牌与 CANCELLED 终态都保留。
+
+        保留令牌是刻意的：这个任务已经被用户停过一次，恢复/重跑时不得因为
+        "提示键被清了"就当没发生过。
+        """
         try:
             self._redis.delete(self._cancel_key(task_id))
         except Exception:
             pass
+
+    def _cancel_latency(self, task_id: str) -> dict:
+        """取消的两个时限（R2）：UI 响应时延与供应商在飞结算窗口。
+
+        - UI 响应：从取消请求落盘的时间戳到**现在**（收尾时刻）。用户在意的就是这个；
+          预期上限 `WM_CANCEL_UI_DEADLINE_SECONDS`（默认 30s），超出如实标记。
+        - 供应商结算：被放弃等待的调用在供应商侧多久内仍可能计费
+          （`root_budget.INFLIGHT_SETTLE_SECONDS`）。它是账目窗口，不是用户等待时间，
+          两者混成"取消花了 N 秒"会把账目不确定性写成性能问题。
+        """
+        requested_at = 0.0
+        for key in (self._cancel_token_key(task_id), self._cancel_key(task_id)):
+            try:
+                raw = self._redis.get(key)
+            except Exception:
+                raw = None
+            if not raw:
+                continue
+            try:
+                requested_at = float((json.loads(raw) or {}).get("at_ts") or 0.0) \
+                    if str(raw).startswith("{") else 0.0
+            except Exception:
+                requested_at = 0.0
+            if requested_at:
+                break
+        if not requested_at:
+            return {}
+        sec = max(0.0, time.time() - requested_at)
+        try:
+            deadline = float(os.environ.get("WM_CANCEL_UI_DEADLINE_SECONDS", "30") or 30)
+        except (TypeError, ValueError):
+            deadline = 30.0
+        try:
+            from root_budget import INFLIGHT_SETTLE_SECONDS as _win
+        except Exception:
+            _win = 0.0
+        return {"sec": sec, "deadline": deadline, "within": sec <= deadline,
+                "settle_window": float(_win or 0.0),
+                "requested_at": requested_at}
 
     def _finish_cancelled(self, task_id: str, goal: str,
                           steps: list | None = None) -> dict:
@@ -2711,9 +2847,27 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         note = "任务被用户取消（运行中被停止）"
         import task_state as _ts
         status = _ts.CANCELLED
+        # R2：两个时限**分别**记录，不混成一个数：
+        # ① 取消 UI 响应时限——从用户点"停止"到编排器真正收尾（用户在意的时延）；
+        # ② 供应商在飞结算时限——被放弃等待的调用多久后才可能真正结清（账目问题）。
+        _lat = self._cancel_latency(task_id)
+        if _lat:
+            note += (f"（自请求停止起 {_lat['sec']:.1f}s 生效"
+                     f"{'，' if _lat['within'] else '，超出 UI 预期，'}"
+                     f"{'在时限内' if _lat['within'] else '需关注'}）")
         push_progress(self._messaging, task_id, "log",
                       {"type": "log", "agent": "orchestrator", "message": note,
                        "timestamp": self._now_iso()})
+        if _lat:
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "review", "agent": "orchestrator",
+                           "message": (f"取消时限：UI 响应 {_lat['sec']:.1f}s"
+                                       f"（预期 ≤{_lat['deadline']:.0f}s，"
+                                       f"{'达标' if _lat['within'] else '超时'}）；"
+                                       f"在飞调用的供应商结算窗口 "
+                                       f"{_lat['settle_window']:.0f}s（可能仍在计费，"
+                                       f"按待对账记账）"),
+                           "timestamp": self._now_iso()})
         push_progress(self._messaging, task_id, "task_complete",
                       {"status": status, "summary": note})
         self._clear_task_running(task_id)
@@ -3262,12 +3416,26 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             except Exception:
                 cfg = {}
             limits = limits_from_config(cfg)
-            if not limits.max_seconds and not limits.max_calls and not limits.max_tokens:
-                # 未配置预算时用 `system.task_timeout` 兜底时间上限（0 = 仍不限额）
-                limits.max_seconds = float(getattr(self, "_task_timeout", 0) or 0)
-            b = RootBudget(task_id, task_workspace(task_id), limits)
+            # R2：0 就是**真正不限**。此前全 0 时会拿 `system.task_timeout` 兜底成
+            # 时间上限——于是"我把预算都设成 0（不限）"实际得到的是"600 秒硬截止"，
+            # 账本里记的上限和配置写的不是一回事。
+            b = RootBudget(task_id, task_workspace(task_id), limits,
+                           redis_factory=self._budget_redis_factory)
             budgets[task_id] = b
         return b
+
+    def _budget_redis_factory(self):
+        """预算账本的跨进程后端。
+
+        预留必须是**跨进程原子**的（INCRBY 先加后校验）：主进程、Worker、评审进程
+        各有一份内存账本时，"两个进程各自预留都获准"就会把同一份额度花两次。
+        Redis 不可用时退回单进程语义（文件仍是快照，但并发写是后写覆盖）。
+        """
+        try:
+            return self._new_redis_sync()
+        except Exception as exc:
+            logger.warning("预算跨进程后端不可用（按单进程记账）：%s", str(exc)[:100])
+            return None
 
     def _load_cfg_snapshot(self) -> dict:
         """读取 config.json（`system.budget` 等）。
@@ -3309,22 +3477,39 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         except Exception as exc:
             return {"error": str(exc)[:120]}
 
-    def _call_llm_cancellable(self, task_id: str, phase: str, fn, *args, **kwargs):
+    def _call_llm_cancellable(self, task_id: str, phase: str, fn, *args,
+                              ticket: str = "", **kwargs):
         """在**可取消的等待**里跑一次 LLM 调用（M0-c/M0-e）。
 
         单次模型调用本身不可中断（它跑在 `llm_client` 里，含自身重试与主备切换），
         但**等待**可以中断：调用放到工作线程，主线程按 1 秒分片轮询取消标志。
-        取消命中就放弃等待、抛 `TaskCancelled` 让 run() 走取消收尾，并把这次调用
-        记为"在飞待对账"——可能仍在计费，不冒充已停止。
+        取消命中就放弃等待、抛 `TaskCancelled` 让 run() 走取消收尾。
 
-        实测依据：模型端点退化（504/读超时 + 重试）时规划阶段会卡在一次调用里，
-        "停止"要等这次调用自己失败才生效，请求取消后 300 秒仍未终结。
+        R2：取消时把**真实票据**（`ticket`，即发送前预留的那张）转"待对账"——
+        该调用可能仍在计费，不冒充已停止。此前这里写的是凭空造的
+        `f"{phase}-inflight"` 票据：账面多一张不存在的票据，而真正预留的那张仍挂在
+        `open` 上，随后又被调用方的 `finally` 结算成"成功"，于是"取消后到底停没停"
+        在账本里再也读不出来。票据状态改为互斥迁移后，这里只动真票据。
         """
         box: dict = {}
 
+        # R2：新线程默认**不继承** contextvars（`threading.Thread` 拿到的是空上下文）。
+        # 之前在 `_run` 里丢掉任务上下文 → worker/客户端按任务归属的台账记不上，
+        # 取消守卫也拿不到 task_id（于是取消后仍会重试、切备用）。这里在**创建边界**
+        # 显式把上下文拷进线程，并补一次 set_task_context（编排器知道根任务 id）。
+        import contextvars
+        _ctx = contextvars.copy_context()
+
         def _run() -> None:
             try:
-                box["value"] = fn(*args, **kwargs)
+                from llm_client import set_task_context
+                # 在**拷贝出来的上下文里**设置：set 只影响当前上下文，若在拷贝之外
+                # 设置，`_ctx.run(fn)` 里读到的仍是空值（实测踩过）
+                _ctx.run(set_task_context, task_id)
+            except Exception:
+                pass
+            try:
+                box["value"] = _ctx.run(fn, *args, **kwargs)
             except BaseException as exc:       # 原样带回主线程（含 KeyboardInterrupt）
                 box["error"] = exc
 
@@ -3335,21 +3520,54 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             if self._cancel_requested(task_id):
                 logger.info("取消命中：放弃等待 %s 阶段的模型调用（task=%s）",
                             phase, task_id)
+                moved = 0
                 try:
-                    self._budget(task_id).mark_unsettled(
-                        f"{phase}-inflight", reason="取消后不再等待本次模型调用")
-                except Exception:
-                    pass
+                    b = self._budget(task_id)
+                    if ticket:
+                        moved = 1 if b.mark_unsettled(
+                            ticket, reason="取消后不再等待本次模型调用") else 0
+                    else:
+                        # 该阶段的每次调用各自预留票据（调用方未透传时的兜底）：
+                        # 只把当前 open 的那些转待对账，不造票据
+                        moved = b.mark_stage_unsettled(
+                            phase, reason="取消后不再等待本次模型调用")
+                except Exception as exc:
+                    logger.warning("取消时票据转待对账失败：%s", str(exc)[:100])
                 push_progress(self._messaging, task_id, "log",
                               {"type": "info", "agent": "orchestrator",
                                "message": (f"已取消：放弃等待{phase}阶段的模型调用"
-                                           "（该调用可能仍在计费，已转待对账）"),
+                                           f"（{moved} 次调用可能仍在计费，已转待对账）"),
                                "timestamp": self._now_iso()})
-                raise TaskCancelled(f"取消：放弃等待{phase}阶段模型调用")
+                # 票据已转待对账 → 告诉调用方不要再去结算它（互斥迁移）
+                raise TaskCancelled(
+                    f"取消：放弃等待{phase}阶段模型调用", ticket_settled=True)
             th.join(1.0)
         if "error" in box:
-            raise box["error"]
+            err = box["error"]
+            # R2：客户端在重试/切备前看到取消后抛的是 LLMCancelledError——那是"取消"，
+            # 不是"调用失败"，交给 run() 的取消收尾（当失败处理会触发重试/降级）
+            try:
+                from llm_client import LLMCancelledError
+            except Exception:
+                LLMCancelledError = ()          # type: ignore[assignment]
+            if LLMCancelledError and isinstance(err, LLMCancelledError):
+                raise TaskCancelled(f"取消：{phase}阶段的模型调用不再重试/切换端点")
+            raise err
         return box.get("value")
+
+    def _budget_scope(self, task_id: str, stage: str, **detail):
+        """一次计费调用的**预留—结算**上下文：唯一正确的票据生命周期。
+
+        用法：
+            with self._budget_scope(task_id, "plan", attempt=1) as ticket:
+                raw = self._call_llm_cancellable(task_id, "规划", fn, ticket=ticket, ...)
+
+        出口规则（R2）：
+        - 正常返回 → `settle(ok=True)`；
+        - 抛 `TaskCancelled(ticket_settled=True)`（helper 已把票据转待对账）→ **不**结算；
+        - 其它异常 → `settle(ok=False)`（失败也花了钱，不能当没发生）。
+        """
+        return _BudgetScope(self, task_id, stage, detail)
 
     # 计划指纹只取**定义这一版计划**的字段；执行期回填的字段不进指纹。
     # 否则同一版计划在执行前（评审时）与执行后（`iteration`/`status` 被回填）会算出
@@ -3797,7 +4015,18 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         M0-c：取消、超时、协议错误必须能区分开——上层据此决定是否记超时日志、
         是否写 step_failure、是否按取消收尾。空字典、非字典、JSON 解析失败、
         status 与 result 均缺失，一律算**协议错误**（不是成功，也不是"没消息"）。
+
+        R2：等待上限还要受**根任务 deadline** 约束——步骤超时（常是 300s 下限）
+        比根任务剩余时间还长时，等到根预算早就用尽了才返回，属于"没额度的空等"。
         """
+        root_left = None
+        try:
+            root_left = self._budget(cancel_task_id).remaining().get("seconds") \
+                if cancel_task_id else None
+        except Exception:
+            root_left = None
+        if root_left is not None:
+            timeout = min(float(timeout), max(1.0, float(root_left)))
         deadline = time.time() + max(timeout, 5)
         while True:
             slice_end = min(deadline, time.time() + 1.0)
@@ -4430,8 +4659,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             report_confirm: bool = False) -> dict:
         """Execute a full task lifecycle. Returns final status dict."""
         try:
-            from llm_client import set_task_context
+            from llm_client import set_task_context, set_cancel_guard
             set_task_context(task_id)
+            # R2：把"这个任务是否已请求停止"交给 LLM 客户端——它在**每次尝试前**与
+            # **切备用前**复查，取消后不再重试、不再换端点（此前只有派发边界看得见取消）
+            set_cancel_guard(self._cancel_requested)
         except Exception:
             pass
         project = _safe_project(project)
@@ -5972,6 +6204,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             while True:
                 wait_serial = False
                 ready = None
+                counted_in_flight = False
                 with lock:
                     if not pending:
                         return
@@ -5982,6 +6215,13 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                         for k, s in pending.items():
                             if deps_ok(s) and not deps_failed(s):
                                 ready = (k, pending.pop(k))
+                                # 串行判定与"占用名额"必须在**同一次持锁**里完成：
+                                # 否则两个 worker 都可能读到 in_flight==0（各自持锁），
+                                # 各自取走一个步骤，pipeline 模式的串行约束就失效了
+                                # （实测并发 2）。名额在这里占，下面按标记跳过重复 +1。
+                                if serial:
+                                    in_flight += 1
+                                    counted_in_flight = True
                                 break
                 if wait_serial:
                     time.sleep(0.5)
@@ -6038,7 +6278,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                                    "timestamp": self._now_iso()})
                     return
                 with lock:
-                    in_flight += 1
+                    if not counted_in_flight:
+                        in_flight += 1
                 try:
                     result = execute_step(step)
                 except Exception as exc:

@@ -1,9 +1,52 @@
 # DeepSeek 执行状态（2026-09-16 晚 更新）
 
-**当前关卡**：M0 已实现并通过**部分**定向验证；**本批 = R1 评审与待复核隔离**。
-R0b/R0c 与 MKT-P0 四项已提交本地（`c1a7559`…`7a90568`，共 7 个提交**未推送**——
-本机 GitHub 凭据失效，需人工重新认证一次）。下一批 = **R2 请求级预算与取消**。
-台账见 `docs/实机运行记录_M0f_20260916.md`（含 P0 一节）。
+**当前关卡**：M0 已实现并通过**部分**定向验证；R0b/R0c、MKT-P0 四项、R1、R2 均已落地。
+共 8 个提交在本地**未推送**（`c1a7559`…，本机 GitHub 凭据失效，需人工重新认证一次）。
+下一批 = **检索通道质量统一**，随后 B–F。台账见 `docs/实机运行记录_M0f_20260916.md`。
+
+**R2 请求级预算与取消：已落地**
+
+- **票据状态互斥迁移**（去掉假平衡）：一张票据只能从 `open` 走到 `settled` **或**
+  `unsettled` 之一，且只走一次。此前 `_call_llm_cancellable` 取消时写的是**凭空造的**
+  `"{phase}-inflight"` 票据（账面上"取消已入账"），而真正预留的那张仍挂在 open 上，
+  随后又被调用方的 `finally` 无条件 `settle(ok=True)`——同一张调用一次 unsettled、
+  一次 settled，真实状态再也读不出来。现在：取消只动**真票据**（`mark_unsettled(ticket)`
+  或 `mark_stage_unsettled(stage)` 只迁移当前 open 的），虚构票据一律拒绝并计入
+  `rejected_transitions`；票据的生命周期收进 `_budget_scope` 上下文管理器（正常返回
+  → settle ok；`TaskCancelled(ticket_settled=True)` → 不再结算；其它异常 → settle
+  ok=False）。
+- **token 也按上界预留**：修掉反例——`max_tokens=100` 时两次 `reserve(tokens=80)` 都会获准
+  （此前只在结算时才扣）。现在 `remaining()["tokens"]` 用"已承诺量 = open 上界 + 已结算实际
+  + 待对账上界"，第二次预留直接被拒；退回（发送前失败）会把上界还回去。
+- **跨进程原子预留**：计数与票据号走 Redis `INCRBY`（先加后校验、超了回退），文件只是快照。
+  修掉反例——两个实例各自 `reserve` 都获准、各自返回同一票据号（`step-1`）。现在票据号带
+  序号 + 实例标记，`remaining()`/`snapshot()` 读共享计数，`snapshot()` 另给本地口径
+  （`calls.local_reserved`）并标 `cross_process`。Redis 不可用时降级为单进程账本（如实说明）。
+- **取消不可复位**：取消请求同时写提示键（可清）与**不可复位令牌**（无 TTL，`NX` 只写一次），
+  并且 `_cancel_requested` 还认**已落库的 CANCELLED 终态**——Redis 被清/重启也不会
+  "取消被抹掉"。`_clear_cancel` 只清提示键，令牌与终态保留。
+- **取消后零新请求**：`llm_client` 新增取消守卫（编排器在 `run()` 注册 `_cancel_requested`），
+  在**每次尝试前**与**切备用前**（含"健康路由直接走备用"那条分支）复查，命中即抛
+  `LLMCancelledError` → `_call_llm_cancellable` 转成 `TaskCancelled`（取消不是失败，
+  不走重试/降级）。此前取消只在派发边界可见，客户端仍会把重试与主备各跑一遍。
+- **新线程在创建边界传 context**：`_call_llm_cancellable` 用 `contextvars.copy_context()`
+  把调用方上下文带进工作线程并在拷贝里 `set_task_context`（`threading.Thread` 默认不继承
+  contextvars；之前线程内台账/守卫都拿不到 task_id）。
+- **根 deadline 收口等待**：`_wait_step_result` 的等待上限取 `min(步骤超时, 根任务剩余秒数)`，
+  避免"根预算早已用尽还在按 300s 空等"。
+- **两个时限分开记录**：`_cancel_latency` 分别给出取消 UI 响应时延（`WM_CANCEL_UI_DEADLINE_SECONDS`，
+  默认 30s，超出如实标记）与供应商在飞结算窗口（`WM_INFLIGHT_SETTLE_SECONDS`，默认 900s，
+  进 `unsettled` 票据的 `reconcile_by`）；拿不到请求时刻就报"未知"，不编数字。
+- **0 值语义修正**：`system.budget` 全 0 = **真正不限**，不再回落 `system.task_timeout`
+  变成 600 秒硬截止（配置写 0 与账本记的上限从此一致）。
+- **顺带修（实机复现的真缺陷）**：`_execute_steps` 的 pipeline 串行判定与"占名额"不在同一次
+  持锁里——两个 worker 都可能读到 `in_flight==0` 各取一步，pipeline 模式实测并发变成 2。
+  现在串行判定与 `in_flight += 1` 在同一次持锁内完成。
+- 回归：`test_root_budget` 19→36（token 上界、跨进程双实例、票据互斥、根 deadline、两个时限）、
+  `test_cancel_semantics` 36→46（不可复位令牌、客户端重试/切备复查、线程上下文），
+  `test_p0` 388、`test_orchestrator_v2` 68、`test_delivery_chain` 184、`test_offline_delivery` 8 全绿。
+- **未验证**：跨进程原子预留只在替身 Redis（`INCRBY` 语义）上验证，未做真实多进程并发压测；
+  真实供应商的计费窗口未观测（`WM_INFLIGHT_SETTLE_SECONDS` 是策略值，不是实测值）。
 
 **R1 评审与待复核隔离：已落地（4 项 + 审批 API 并发保护）**
 

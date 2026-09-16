@@ -1072,6 +1072,44 @@ class LLMUnavailableError(LLMCallError):
     pass
 
 
+class LLMCancelledError(LLMCallError):
+    """任务已被取消：**不再重试、也不再切备用**（R2）。
+
+    取消与"调用失败"是两回事：失败可以重试/换端点，取消只应更快停下来。
+    此前取消只在派发边界被检查，模型调用内部的重试与主备切换完全看不见它——
+    用户点了停止，客户端仍会把 3 次重试 + 备用端点各跑一遍，白花钱。
+    """
+
+    def __init__(self, message: str = "任务已取消，不再发起 LLM 请求") -> None:
+        super().__init__(message)
+        self.cancelled = True
+
+
+# 取消守卫（R2）：由编排器注册"这个任务是否已请求停止"，客户端在**每次尝试前**
+# 与**切备用前**复查。没注册守卫时行为与以前一致（不假装知道取消状态）。
+_cancel_guard = None
+
+
+def set_cancel_guard(fn) -> None:
+    """注册取消守卫：`fn(task_id) -> bool`。传 None 取消注册。"""
+    global _cancel_guard
+    _cancel_guard = fn if callable(fn) else None
+
+
+def _cancelled() -> bool:
+    """当前任务是否已请求停止（无守卫时恒为 False）。"""
+    if _cancel_guard is None:
+        return False
+    task_id = get_task_context()
+    if not task_id:
+        return False
+    try:
+        return bool(_cancel_guard(task_id))
+    except Exception as exc:          # 守卫异常不得影响正常调用
+        logger.warning("取消守卫异常（按未取消继续）：%s", str(exc)[:100])
+        return False
+
+
 def _parse_json_content(raw: str) -> dict[str, Any]:
     """模块级 JSON 解析（async 路径使用）：统一走 common.extract_json_object。"""
     result = extract_json_object(raw)
@@ -1275,6 +1313,9 @@ class LLMClient:
 
         last_error: Exception | None = None
         # 健康路由（O-29）：主端点已被判定不健康 → 优先走备用，避免每次白白等待超时
+        if _cancelled():
+            # R2：取消后连这一次"健康路由到备用"的请求都不发
+            raise LLMCancelledError()
         if not _primary_healthy():
             try:
                 _bk_timeout = _attempt_timeout()
@@ -1289,6 +1330,11 @@ class LLMClient:
                 )
                 logger.warning("Health-routed backup failed: %s", str(exc)[:150])
         for attempt in range(1, self._MAX_RETRIES + 1):
+            if _cancelled():
+                # R2：取消优先于预算——重试只会让"停止"更晚生效
+                logger.info("任务已取消：不再重试 LLM 调用（usage=%s, attempt=%d）",
+                            usage, attempt)
+                raise LLMCancelledError()
             if _budget_exhausted():
                 # 时间预算耗尽：不再重试/切备用，给调用方一个明确信号去降级
                 exc = LLMCallError(
@@ -1342,6 +1388,9 @@ class LLMClient:
                     time.sleep(self._RETRY_BASE * attempt)
 
         # 主端点失败 → 自动切换备用端点/模型（时间预算耗尽时不再切，直接交给调用方降级）
+        # R2：取消后也不再切备用——换端点等于再发一次请求
+        if _cancelled():
+            raise LLMCancelledError()
         if self._backup_cfg and not _budget_exhausted():
             try:
                 _bk_timeout = _attempt_timeout()

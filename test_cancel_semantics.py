@@ -484,5 +484,237 @@ class TestInFlightAccounting(unittest.TestCase):
         self.assertEqual(o._inflight.get("t-1"), {})
 
 
+class TestCancelIsNotResettable(unittest.TestCase):
+    """R2：取消不是"可以清掉的提示键"，而是不可复位的令牌 + 持久终态。"""
+
+    class _Redis:
+        def __init__(self):
+            self.kv = {}
+
+        def get(self, key):
+            return self.kv.get(key)
+
+        def set(self, key, value, nx=False):
+            if nx and key in self.kv:
+                return None
+            self.kv[key] = value
+            return True
+
+        def setex(self, key, ttl, value):
+            self.kv[key] = value
+            return True
+
+        def delete(self, key):
+            self.kv.pop(key, None)
+            return 1
+
+        def lpush(self, *a, **k):
+            return 1
+
+        def expire(self, *a, **k):
+            return True
+
+    def _orch(self, redis, status=""):
+        o = ov.OrchestratorV2.__new__(ov.OrchestratorV2)
+        o._redis = redis
+        o._now_iso = lambda: "T"
+        o._messaging = _FakeMessaging()
+        self._status = status
+        return o
+
+    def test_request_cancel_writes_token_without_ttl(self):
+        r = self._Redis()
+        o = self._orch(r)
+        with mock.patch("orchestrator_v2.push_progress"):
+            o.request_cancel("t-1", reason="用户点了停止")
+        self.assertIn("task_cancel:t-1", r.kv)
+        self.assertIn("task_cancel_token:t-1", r.kv, "必须同时写下不可复位令牌")
+        self.assertTrue(o._cancel_requested("t-1"))
+
+    def test_clearing_hint_key_does_not_reset_cancel(self):
+        """清掉提示键之后，取消状态仍然成立（此前清键=取消被抹掉）。"""
+        r = self._Redis()
+        o = self._orch(r)
+        o.request_cancel("t-1")
+        o._clear_cancel("t-1")
+        self.assertNotIn("task_cancel:t-1", r.kv, "提示键按约定清掉")
+        self.assertIn("task_cancel_token:t-1", r.kv)
+        self.assertTrue(o._cancel_requested("t-1"),
+                        "提示键被清不代表用户没停过：令牌仍在")
+
+    def test_persisted_cancelled_terminal_is_a_cancel_source(self):
+        """Redis 全空（重启/被清）时，已落库的 CANCELLED 终态仍然算取消。"""
+        import task_state
+        r = self._Redis()
+        o = self._orch(r)
+        with mock.patch.object(task_state, "read_task",
+                               return_value={"status": task_state.CANCELLED}):
+            self.assertTrue(o._cancel_requested("t-1"),
+                            "CANCELLED 是持久终态，不得被当成可以继续跑")
+        with mock.patch.object(task_state, "read_task",
+                               return_value={"status": "SUCCESS"}):
+            self.assertFalse(o._cancel_requested("t-2"))
+
+    def test_repeated_cancel_keeps_first_timestamp(self):
+        r = self._Redis()
+        o = self._orch(r)
+        o.request_cancel("t-1", reason="第一次")
+        first = r.kv["task_cancel_token:t-1"]
+        o.request_cancel("t-1", reason="第二次")
+        self.assertEqual(r.kv["task_cancel_token:t-1"], first,
+                         "令牌不可复位：重复取消不改写既有记录")
+
+
+class TestLlmClientRechecksCancel(unittest.TestCase):
+    """R2：取消后不再重试、不再切备用（此前客户端完全看不见取消）。"""
+
+    def tearDown(self):
+        import llm_client as lc
+        lc.set_cancel_guard(None)
+        lc.clear_task_context()
+
+    def _client(self, failures: int = 5):
+        import llm_client as lc
+
+        class _C(lc.LLMClient):
+            def __init__(self):
+                super().__init__()
+                self._MAX_RETRIES = 3
+                self._RETRY_BASE = 0
+                self.calls = 0
+
+            def _send_request(self, *a, **k):
+                self.calls += 1
+                raise lc.LLMCallError("端点故障")
+
+            def _call_backup(self, *a, **k):
+                # 离线纪律：测试里绝不允许真的切到配置里的备用端点（会外呼真实模型）
+                self.backup_attempted = True
+                raise lc.LLMCallError("测试替身：不应切备用")
+
+        c = _C()
+        c.backup_attempted = False
+        return c
+
+    def test_no_retry_after_cancel(self):
+        import llm_client as lc
+
+        c = self._client()
+        lc.set_task_context("t-1")
+        lc.set_cancel_guard(lambda tid: True)
+        with mock.patch.object(lc, "_BACKUP_CFG", {}), \
+                mock.patch.object(lc, "_primary_healthy", lambda: True), \
+                mock.patch.object(lc, "_ensure_cfg_fresh"), \
+                mock.patch.object(lc.time, "sleep"):
+            with self.assertRaises(lc.LLMCancelledError):
+                c.call("sys", "user", expect_json=False)
+        self.assertEqual(c.calls, 0, "取消后一次请求都不该发出")
+
+    def test_no_failover_after_cancel(self):
+        """主端点已失败、取消在重试期间到达 → 不切备用。"""
+        import llm_client as lc
+
+        c = self._client()
+        # 精确表达"取消在重试期间到达"：第一次请求发出之前还没取消，之后才取消
+        lc.set_task_context("t-1")
+        lc.set_cancel_guard(lambda tid: c.calls > 0)
+        with mock.patch.object(lc, "_BACKUP_CFG",
+                               {"base_url": "https://backup.test/v1", "api_key": "k"}), \
+                mock.patch.object(lc, "_primary_healthy", lambda: True), \
+                mock.patch.object(lc, "_ensure_cfg_fresh"), \
+                mock.patch.object(lc, "_record_task_degradation"), \
+                mock.patch.object(lc.time, "sleep"):
+            with self.assertRaises(lc.LLMCancelledError):
+                c.call("sys", "user", expect_json=False)
+        self.assertEqual(c.calls, 1, "只允许取消前的那一次尝试")
+        self.assertFalse(c.backup_attempted, "取消后不得切备用端点")
+
+    def test_health_routed_backup_is_blocked_after_cancel(self):
+        """主端点已被判定不健康时走的是**另一条分支**（直接路由备用，不入重试循环）：
+        取消同样要拦住它，否则"停止"之后还会有一次备用端点请求。"""
+        import llm_client as lc
+
+        c = self._client()
+        lc.set_task_context("t-1")
+        lc.set_cancel_guard(lambda tid: True)
+        with mock.patch.object(lc, "_BACKUP_CFG",
+                               {"base_url": "https://backup.test/v1", "api_key": "k"}), \
+                mock.patch.object(lc, "_primary_healthy", lambda: False), \
+                mock.patch.object(lc, "_ensure_cfg_fresh"), \
+                mock.patch.object(lc.time, "sleep"):
+            with self.assertRaises(lc.LLMCancelledError):
+                c.call("sys", "user", expect_json=False)
+        self.assertFalse(c.backup_attempted, "取消后连健康路由的备用请求都不发")
+        self.assertEqual(c.calls, 0)
+
+    def test_guard_is_ignored_without_task_context(self):
+        import llm_client as lc
+
+        c = self._client()
+        lc.clear_task_context()
+        lc.set_cancel_guard(lambda tid: True)
+        with mock.patch.object(lc, "_BACKUP_CFG", {}), \
+                mock.patch.object(lc, "_primary_healthy", lambda: True), \
+                mock.patch.object(lc, "_ensure_cfg_fresh"), \
+                mock.patch.object(lc.time, "sleep"):
+            with self.assertRaises(lc.LLMCallError) as ctx:
+                c.call("sys", "user", expect_json=False)
+        self.assertNotIsInstance(ctx.exception, lc.LLMCancelledError,
+                                "没有任务上下文时不得假装知道取消状态")
+
+
+class TestThreadGetsContextAtCreation(unittest.TestCase):
+    """R2：新线程默认不继承 contextvars —— 必须在**创建边界**把上下文传进去。"""
+
+    def test_cancellable_call_keeps_task_context_in_thread(self):
+        import contextvars
+        import llm_client as lc
+
+        o = ov.OrchestratorV2.__new__(ov.OrchestratorV2)
+        o._messaging = _FakeMessaging()
+        o._now_iso = lambda: "T"
+        o._cancel_requested = lambda tid: False
+        o._task_budgets = {}
+        seen = {}
+
+        def _capture():
+            seen["task"] = lc.get_task_context()
+            seen["var"] = contextvars.copy_context().get(
+                _probe_var, "missing") if False else seen.get("var")
+            return "ok"
+
+        probe = contextvars.ContextVar("probe", default="missing")
+        _probe_var = probe
+
+        def _with_probe():
+            probe.set("propagated")
+            return _capture()
+
+        out = o._call_llm_cancellable("root-1", "规划", _with_probe)
+        self.assertEqual(out, "ok")
+        self.assertEqual(seen["task"], "root-1",
+                         "工作线程里必须能看到根任务上下文（台账/取消守卫都依赖它）")
+
+    def test_contextvar_value_propagates_into_thread(self):
+        import contextvars
+
+        o = ov.OrchestratorV2.__new__(ov.OrchestratorV2)
+        o._messaging = _FakeMessaging()
+        o._now_iso = lambda: "T"
+        o._cancel_requested = lambda tid: False
+        o._task_budgets = {}
+        var = contextvars.ContextVar("probe2", default="missing")
+        var.set("inherited")
+        seen = {}
+
+        def _read():
+            seen["v"] = var.get()
+            return 1
+
+        o._call_llm_cancellable("root-2", "规划", _read)
+        self.assertEqual(seen["v"], "inherited",
+                         "创建边界拷上下文：线程内读到的应是调用方的值")
+
+
 if __name__ == "__main__":
     unittest.main()
