@@ -355,24 +355,32 @@ def _collect_sources(workspace) -> dict[str, str]:
             # 对比任务在"清洗未跑"时全部判不可溯源（假失败）。
             rows: list[tuple[str, dict]] = []
             _top_company = str((payload.get("metadata") or {}).get("company") or "")
+            # 金额单位不能对所有市场都写"亿元"：美股（SEC）的量纲是"亿美元"，
+            # 写错会让报告里的"亿美元"只能靠短单位兜底命中——既掩盖口径又不利于主体绑定。
+            # 优先用源自己声明的单位（metadata.unit，单实体/多实体各自读）。
+            _md_unit = str((payload.get("metadata") or {}).get("unit") or "")
             for r in payload.get("financials") or []:
-                rows.append((_top_company, r))
+                rows.append((_top_company, r, _md_unit))
             for ent in payload.get("companies") or []:
                 if not isinstance(ent, dict):
                     continue
+                _ent_unit = str((ent.get("metadata") or {}).get("unit") or "") or _md_unit
                 for r in ent.get("financials") or []:
-                    rows.append((str(ent.get("name") or ""), r))
+                    rows.append((str(ent.get("name") or ""), r, _ent_unit))
             parts = []
-            for entity, r in rows:
+            for entity, r, md_unit in rows:
                 if not isinstance(r, dict):
                     continue
                 for key, unit in _metrics:
                     v = r.get(key)
                     if v is None:
                         continue
+                    use_unit = unit
+                    if unit == "亿元" and md_unit:
+                        use_unit = md_unit      # 金额类指标改用源声明的单位
                     parts.append(
                         f"{entity}{r.get('year')}年{r.get('report_type') or ''} "
-                        f"{key}={v}{unit} 值 {v} {unit}"
+                        f"{key}={v}{use_unit} 值 {v} {use_unit}"
                     )
             src["financials"] = "\n".join(parts)
     except Exception as exc:

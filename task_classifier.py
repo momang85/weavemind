@@ -104,6 +104,112 @@ _STOCK_CODE_FIRST_RE = re.compile(
     re.I,
 )
 
+# ── 英文公司名 / 美股代码（MKT-P0-3）──────────────────────────────────────────
+# 此前公司名只认中文（`_looks_like_company` 要求 2-6 个汉字），于是英文/代码驱动的
+# 目标（"分析 WBD 的财报"、"AAPL 营收"）提取不到主体 → `route_structured` 返回 None
+# → **SEC EDGAR 链路永远不触发**（工作区里也就没有 financials.json）。
+_EN_NAME_ANCHOR_RE = re.compile(
+    r"(?<![A-Za-z])([A-Z][A-Za-z&.\-]{1,30}(?:\s+[A-Z][A-Za-z&.\-]{1,20}){0,3})\s*[（(]\s*"
+    r"(?:NASDAQ|NYSE|AMEX|NASDAQGS)?[:\s]*([A-Za-z]{1,5})\s*[）)]"
+)
+_EN_TICKER_COLON_RE = re.compile(
+    r"(?<![A-Za-z])([A-Z]{1,5})\s*[:：]\s*(?:US|NASDAQ|NYSE|AMEX)\b")
+_EN_TICKER_RE = re.compile(r"(?<![A-Za-z])([A-Z]{1,5})(?![A-Za-z])")
+# 不是代码的大写词（机构/指标/期间/常见词），命中即排除
+_EN_TICKER_STOPWORDS = {
+    "AI", "CEO", "CFO", "CTO", "IPO", "ETF", "GDP", "CPI", "PPI", "PMI", "USD",
+    "CNY", "HKD", "EPS", "PE", "PB", "ROE", "ROA", "ROI", "YOY", "QOQ", "ESG",
+    "US", "USA", "UK", "HK", "CN", "SEC", "FDA", "FED", "IRS", "NYSE", "NASDAQ",
+    "AMEX", "GAAP", "IFRS", "YTD", "TTM", "EBIT", "EBITDA", "FCF", "DCF", "WACC",
+    "Q1", "Q2", "Q3", "Q4", "H1", "H2", "FY", "A", "I", "AND", "OR", "THE", "FOR",
+    "WITH", "VS", "REPORT", "ANALYSIS", "STOCK", "SHARE", "MARKET", "REVENUE",
+}
+# 金融语境词：裸代码/英文公司名必须出现在这些词的邻域内才认（否则 "AI"/"CEO" 之类会误判）
+_EN_FIN_CONTEXT = (
+    "财报", "年报", "季报", "营收", "收入", "净利润", "利润", "业绩", "毛利率",
+    "现金流", "每股收益", "财务", "股价", "市值", "美股", "revenue", "earnings",
+    "financial", "financials", "10-k", "10-q", "income", "profit", "margin",
+    "cash flow", "eps", "stock", "share price", "market cap", "fiscal",
+)
+_EN_NAME_STOPWORDS = {
+    "the", "a", "an", "and", "or", "for", "with", "annual", "quarterly", "report",
+    "analysis", "stock", "share", "market", "revenue", "earnings", "financial",
+    "q1", "q2", "q3", "q4", "fiscal", "year", "latest", "sec", "edgar", "us",
+}
+# 英文请求动词/前缀：'Analyze Apple's revenue' 里的 Analyze 不是公司名的一部分
+_EN_LEADING_VERBS = {
+    "analyze", "analyse", "review", "research", "study", "summarize", "summarise",
+    "compare", "evaluate", "assess", "check", "explain", "tell", "give", "show",
+    "please", "about", "on", "for", "read", "look", "find", "get", "write",
+}
+# 中文名 + 纯字母代码：'微软（MSFT）' / '苹果(AAPL)' —— 与数字代码锚点同等权威
+_CN_NAME_TICKER_RE = re.compile(
+    r"(?:%s)*([\u4e00-\u9fff]{2,6})\s*[（(]\s*[A-Za-z]{1,5}\s*[）)]" % _GENERIC_WORDS
+)
+# 期间与泛称残片：这些串能通过"2-6 个汉字"的字面检查，却是提取噪声
+_NON_COMPANY_FRAGMENTS = (
+    "一期", "二期", "三期", "本期", "上期", "当期", "各期", "期间", "年内",
+    "季度", "全年", "上半年", "下半年", "股市", "个股", "股权",
+    "美股", "港股", "A股", "中概", "行业", "板块", "赛道", "概念", "指数",
+    "市场", "标的", "头部", "同行", "竞品", "科技", "医药", "消费",
+    "新能源", "半导体", "互联网", "地产", "汽车", "白酒",
+)
+
+
+def _has_en_fin_context(text: str, start: int, end: int, window: int = 40) -> bool:
+    """英文候选是否处在金融语境里（前/后 window 字内出现语境词）。"""
+    lo = max(0, start - window)
+    hi = min(len(text), end + window)
+    blob = text[lo:hi].lower()
+    return any(w.lower() in blob for w in _EN_FIN_CONTEXT)
+
+
+def _extract_en_subject(g: str) -> str:
+    """英文公司名或美股代码提取（只在中文路径无果时兜底）。
+
+    `resolve_company` 对两者都能解析（美股代码本身就是 ticker）。
+    只在金融语境内认，避免把 'AI'/'CEO'/'IPO' 之类当成公司。
+    """
+    text = str(g or "")
+    if not text:
+        return ""
+    m = _EN_NAME_ANCHOR_RE.search(text)
+    if m:
+        name = (m.group(1) or "").strip()
+        if name:
+            return name
+        ticker = (m.group(2) or "").strip().upper()
+        if ticker and ticker not in _EN_TICKER_STOPWORDS:
+            return ticker
+    m = _EN_TICKER_COLON_RE.search(text)
+    if m:
+        ticker = m.group(1).upper()
+        if ticker not in _EN_TICKER_STOPWORDS:
+            return ticker
+    for m in _EN_TICKER_RE.finditer(text):
+        tok = m.group(1).upper()
+        if tok in _EN_TICKER_STOPWORDS:
+            continue
+        if not _has_en_fin_context(text, m.start(1), m.end(1)):
+            continue
+        return tok
+    for m in re.finditer(
+            r"(?<![A-Za-z])([A-Z][A-Za-z&.\-]{1,20}(?:\s+[A-Z][A-Za-z&.\-]{1,20}){0,3})\b",
+            text):
+        # 去掉前导请求动词（"Analyze Apple" → "Apple"）
+        words = [w for w in m.group(1).strip().split()
+                 if w.lower() not in _EN_LEADING_VERBS]
+        name = " ".join(words)
+        words = name.split()
+        if not words or all(w.lower() in _EN_NAME_STOPWORDS for w in words):
+            continue
+        if len(words) == 1 and words[0].upper() in _EN_TICKER_STOPWORDS:
+            continue
+        if not _has_en_fin_context(text, m.start(1), m.end(1)):
+            continue
+        return name
+    return ""
+
 
 def _extract_company(g: str) -> str:
     """提取公司名：优先显式股票代码（'X（CODE）' 锚点）、'X集团/控股'、
@@ -117,6 +223,11 @@ def _extract_company(g: str) -> str:
     m = _STOCK_CODE_RE.search(g)
     if m:
         return m.group(1)
+    m = _CN_NAME_TICKER_RE.search(g)
+    if m:
+        cand = _trim_context(m.group(1))
+        if cand and _looks_like_company(cand):
+            return cand
     m = _STOCK_CODE_FIRST_RE.search(g)
     if m:
         return m.group(1)
@@ -152,7 +263,8 @@ def _extract_company(g: str) -> str:
         if any(w in c for w in _REPORT_PERIOD_WORDS):
             continue
         return c
-    return ""
+    # 中文路径全部无果时，兜底认英文公司名/美股代码（MKT-P0-3；中文行为不变）
+    return _extract_en_subject(g)
 
 
 # 报告期/财报语境短语：允许带年份（"2025年三季报"），用于定位紧邻其前的公司名。
@@ -169,7 +281,10 @@ _CTX_TOKENS = tuple(sorted(
     set(_GENERIC_WORDS.split("|")) | set(_COMPANY_STOPWORDS)
     | {"看看", "看", "我要", "我想", "想要", "给我", "帮我", "帮我看看", "麻烦",
        "帮忙", "请", "阅读", "查看", "查一下", "看一下", "讲一下", "说说",
-       "能否", "可以", "读一下", "浏览"},
+       "能否", "可以", "读一下", "浏览",
+       # 请求语补充（"请给微软（MSFT）…" 曾留下"给微软"）
+       "给", "请给", "请给我", "请帮我", "请帮忙", "帮我查", "帮我查一下",
+       "帮我分析", "帮我梳理", "帮我看看", "麻烦帮我", "麻烦给"},
     key=len, reverse=True,
 ))
 
@@ -263,6 +378,9 @@ def _looks_like_company(name: str) -> bool:
     if not re.fullmatch(r"[一-鿿]{2,6}", name):
         return False
     if any(w in name for w in _COMPANY_STOPWORDS):
+        return False
+    # 期间/泛称残片（"一期"、"美股科技"）不是公司名：它们能过"2-6 个汉字"的字面检查
+    if any(w in name for w in _NON_COMPANY_FRAGMENTS):
         return False
     if re.search(r"(?:与|和|及|以及|、|跟|vs)", name, re.I):
         return False
