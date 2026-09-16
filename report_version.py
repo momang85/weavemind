@@ -74,13 +74,28 @@ class ReportVersion:
     def acceptance_overall(self) -> str:
         return str((self.acceptance or {}).get("overall") or "")   # "" = 未知
 
+    def acceptance_is_full_hash(self) -> bool:
+        """验收是否带**全量**正文 hash（身份可证明）。"""
+        got = str((self.acceptance or {}).get("report_sha256") or "")
+        return len(got) >= 64
+
+    def acceptance_needs_reverify(self) -> bool:
+        """该版只有旧的短 hash 验收：按"待重验"处理，不算已验证（R0.2）。"""
+        acc = self.acceptance or {}
+        return bool(acc) and not self.acceptance_is_full_hash()
+
     def acceptance_for_this_body(self) -> bool:
-        """验收是否确实是对**这版正文**做的（否则不得算已验证）。"""
+        """验收是否确实是对**这版正文**做的（否则不得算已验证）。
+
+        R0.2：只认**全量** hash 相等。短 hash（16 位）无法证明身份——旧记录按
+        "待重验"处理（`acceptance_needs_reverify()`），不再用前缀匹配冒充完整性。
+        """
         got = str((self.acceptance or {}).get("report_sha256") or "")
         if not got:
             return False
-        # 验收侧用的是短 hash（前 16 位）；两边都按前缀比较
-        return self.version_id.startswith(got) or got.startswith(self.version_id[:16])
+        if not self.acceptance_is_full_hash():
+            return False
+        return got == self.version_id
 
 
 def _from_raw(raw: dict) -> "ReportVersion":
@@ -119,15 +134,20 @@ class VersionStore:
     # ── 记录 ────────────────────────────────────────────────
     @staticmethod
     def _key_for(versions: dict, version: ReportVersion) -> str:
-        """定位条目键：**正文 hash 是锚点**，身份键会随验收规则变化而变。
+        """定位条目键：**身份优先**，其次正文 hash（仅用于兼容旧键）。
 
-        实测缺陷（M0-f 离线完整交付）：先采纳（身份键 A）后绑验收（规则指纹进入身份
-        → 键 B），于是同一个正文出现两条记录，选中条目上没有验收，交付守卫判"未知"。
+        实测缺陷（R0.2）：先采纳 sourceA（键=身份A）后再采纳同正文的 sourceB，
+        旧实现按正文 hash 找到了 sourceA 那条 → 采纳写错条目，选中还是 sourceA。
+        因此这里先要身份精确相等，找不到才回退到"同正文的第一条"。
         """
+        want_identity = version.identity_id()
+        for key, raw in (versions or {}).items():
+            if key == want_identity or str(raw.get("identity_id") or "") == want_identity:
+                return key
         for key, raw in (versions or {}).items():
             if str(raw.get("version_id") or "") == version.version_id:
                 return key
-        return version.identity_id()
+        return want_identity
 
     def record(self, body: str, *, sources_fingerprint: str = "", rules_version: str = "",
                rules_fingerprint: str = "", parent_id: str = "", iteration: int = 0,
@@ -157,72 +177,100 @@ class VersionStore:
             self._save(data)
             return _from_raw(versions[key])
 
-    def bind_acceptance(self, acceptance: dict) -> ReportVersion | None:
-        """把一次验收结果绑到**产出它的那版正文**（按验收的 report_sha256 找版本）。
+    def bind_acceptance(self, acceptance: dict, *, sources_fingerprint: str = "",
+                        rules_fingerprint: str = "") -> ReportVersion | None:
+        """把一次验收结果绑到**产出它的那版正文**（R0.2：按完整身份精确绑定）。
 
-        找不到匹配版本时返回 None —— 调用方必须按"未知"处理，**不得**把这份验收
-        借给别的版本。绑定**就地更新**（键不变），避免同一正文出现"有验收/无验收"两条。
+        规则：
+        - 只接受**全量** `report_sha256`（64 位十六进制）；短 hash 不能证明身份 →
+          返回 None，该版保持"未知"（读取侧会标"待重验"）。
+        - 调用方给出 `sources_fingerprint` 时，必须与该版记录的来源指纹一致，
+          否则**不绑**（同正文不同来源是两版证据，不得互相借验收）。
+        - 命中多条（历史分裂数据）时只更新**选中**那条，其余保持原样。
         """
         want = str((acceptance or {}).get("report_sha256") or "")
-        if not want:
+        if len(want) < 64:
             return None
         with self._lock:
             data = self._load()
             versions = data.get("versions") or {}
-            hits = [
-                (key, raw) for key, raw in versions.items()
-                if str(raw.get("version_id") or "").startswith(want) or want.startswith(
-                    str(raw.get("version_id") or "")[:16])
-            ]
+            hits = [(key, raw) for key, raw in versions.items()
+                    if str(raw.get("version_id") or "") == want]
             if not hits:
                 return None
-            # 多条同正文时全部绑定（历史数据可能已分裂），选中那条优先返回
-            sel = str(data.get("selected") or "")
-            chosen = None
-            for key, raw in hits:
-                raw["acceptance"] = dict(acceptance or {})
-                raw["rules_version"] = str((acceptance or {}).get("rules_version")
-                                           or raw.get("rules_version") or "")
-                raw["rules_fingerprint"] = str((acceptance or {}).get("rules_fingerprint")
-                                               or raw.get("rules_fingerprint") or "")
-                if key == sel or chosen is None:
-                    chosen = raw
+            if sources_fingerprint:
+                exact = [(k, r) for k, r in hits
+                         if str(r.get("sources_fingerprint") or "") == sources_fingerprint]
+                if not exact:
+                    return None
+                hits = exact
+            if len(hits) > 1:
+                sel = str(data.get("selected") or "")
+                selected_hits = [(k, r) for k, r in hits if k == sel]
+                hits = selected_hits or hits[:1]
+            key, raw = hits[0]
+            raw["acceptance"] = dict(acceptance or {})
+            raw["rules_version"] = str((acceptance or {}).get("rules_version")
+                                       or raw.get("rules_version") or "")
+            raw["rules_fingerprint"] = str(
+                (acceptance or {}).get("rules_fingerprint")
+                or rules_fingerprint or raw.get("rules_fingerprint") or "")
             self._save(data)
-            return _from_raw(chosen)
+            return _from_raw(raw)
 
     def get(self, version_id: str) -> ReportVersion | None:
-        """按正文 hash 取版本；同正文多条时优先带验收的那条（证据更全）。"""
+        """按正文 hash 取版本；同正文多条时按"证据强度"排序取第一条（R0.2）。
+
+        排序优先级：验收已**全量绑定** > 有验收（可能待重验） > 被选中 > 登记更晚。
+        同正文不同来源是两版证据，调用方若需要精确某一条应改用 `find_identity()`。
+        """
         with self._lock:
             data = self._load()
+            sel = str(data.get("selected") or "")
             hits = [raw for raw in (data.get("versions") or {}).values()
                     if str(raw.get("version_id") or "") == str(version_id)]
             if not hits:
                 return None
-            hits.sort(key=lambda r: 1 if (r.get("acceptance") or {}) else 0, reverse=True)
+
+            def _rank(raw: dict) -> tuple:
+                v = _from_raw(raw)
+                return (
+                    1 if v.acceptance_for_this_body() else 0,
+                    1 if (raw.get("acceptance") or {}) else 0,
+                    1 if (raw.get("identity_id") == sel or raw.get("version_id") == sel) else 0,
+                    float(raw.get("created_at") or 0),
+                )
+
+            hits.sort(key=_rank, reverse=True)
             return _from_raw(hits[0])
+
+    def find_identity(self, identity_id: str) -> ReportVersion | None:
+        """按**完整身份键**取版本（R0.2 精确绑定用）。"""
+        with self._lock:
+            raw = (self._load().get("versions") or {}).get(str(identity_id))
+            return _from_raw(raw) if isinstance(raw, dict) else None
 
     def find_by_body(self, body: str) -> ReportVersion | None:
         return self.get(body_hash(body))
 
     def adopted(self) -> ReportVersion | None:
-        """当前选中版本；选中条目缺验收时，回退到同正文带验收的那条（历史分裂数据）。"""
+        """当前选中版本（**只返回选中条目自身**）。
+
+        R0.2：去掉"同正文兄弟条目借验收"的回退——那会让 sourceB 借到 sourceA 的
+        PASS；选中条目没有自己的验收就是"未知"，由交付守卫按草稿处理。
+        """
         with self._lock:
             data = self._load()
             sel = str(data.get("selected") or "")
-            versions = data.get("versions") or {}
-            chosen = None
-            for raw in versions.values():
+            for raw in (data.get("versions") or {}).values():
                 if raw.get("identity_id") == sel or raw.get("version_id") == sel:
-                    chosen = raw
-                    break
-            if chosen is None:
-                return None
-            if not (chosen.get("acceptance") or {}):
-                for raw in versions.values():
-                    if (str(raw.get("version_id") or "") == str(chosen.get("version_id") or "")
-                            and (raw.get("acceptance") or {})):
-                        return _from_raw(raw)
-            return _from_raw(chosen)
+                    return _from_raw(raw)
+        return None
+
+    def selected_needs_reverify(self) -> bool:
+        """选中版本是否只有旧的短 hash 验收（需要重验）。"""
+        v = self.adopted()
+        return bool(v and v.acceptance_needs_reverify())
 
     # ── 采纳（原子切换）─────────────────────────────────────
     def adopt(self, version: ReportVersion, *, reason: str = "") -> bool:
@@ -328,3 +376,46 @@ def verify_delivery(version: ReportVersion, delivered_body: str) -> tuple[bool, 
     if body_hash(delivered_body) != version.version_id:
         return False, "交付正文与该版本的验收对象不一致（装配/链接重写后未重验）"
     return True, ""
+
+
+# 交付状态：唯一枚举（页面/MD/PDF/打印件/manifest/准入共用）
+DELIVERY_VERIFIED = "verified"
+DELIVERY_DRAFT = "draft"
+DELIVERY_UNKNOWN = "unknown"
+
+
+def verified_delivery(version: ReportVersion | None, delivered_body: str, *,
+                      review_valid: bool = True,
+                      hard_ok: bool = True,
+                      hard_reason: str = "") -> tuple[str, str]:
+    """**已验证交付**谓词（R0.3 唯一实现）：返回 `(status, reason)`。
+
+    `status ∈ {verified, draft, unknown}`，判断顺序即优先级：
+
+    1. `unknown`：没有选中版本，或该版验收无法证明属于本正文（短 hash / 身份不符）；
+    2. `draft`：验收**不是 pass**（`overall != "pass"`）、交付正文与该版不一致（装配后变了）、
+       任务硬约束未满足、或必需评审无效；
+    3. `verified`：以上全部成立。
+
+    "hash 相同"不能替代质量通过——这是 R0.3 的核心：绑定验收 ≠ 通过验收。
+    调用方（页面/导出/manifest/准入）必须共用本函数，不得各自拼条件。
+    """
+    if version is None:
+        return DELIVERY_UNKNOWN, "无选中版本"
+    acc = version.acceptance or {}
+    if not acc:
+        return DELIVERY_UNKNOWN, "该版本没有对应它自身的验收（未知）"
+    if not version.acceptance_for_this_body():
+        why = ("该版只有短 hash 验收，需重验" if version.acceptance_needs_reverify()
+               else "验收身份与本正文不符（未知）")
+        return DELIVERY_UNKNOWN, why
+    overall = str(acc.get("overall") or "")
+    if overall != "pass":
+        return DELIVERY_DRAFT, f"验收未通过（overall={overall or '未知'}）"
+    if body_hash(delivered_body) != version.version_id:
+        return DELIVERY_DRAFT, "交付正文与该版本的验收对象不一致（装配/链接重写后未重验）"
+    if not hard_ok:
+        return DELIVERY_DRAFT, hard_reason or "任务硬约束未满足"
+    if not review_valid:
+        return DELIVERY_DRAFT, "必需评审未取得绑定的 PASS"
+    return DELIVERY_VERIFIED, ""

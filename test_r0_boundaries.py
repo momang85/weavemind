@@ -16,6 +16,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
@@ -162,6 +163,275 @@ class TestR04InputRoleBinding(unittest.TestCase):
         self.assertEqual(ac._currency_of("万美元"), "USD")
         self.assertEqual(ac._currency_of("亿港元"), "HKD")
         self.assertEqual(ac._currency_of("%"), "")
+
+
+class TestR02VersionIdentity(unittest.TestCase):
+    """R0.2：版本身份必须按**完整身份**绑定，不按正文借 PASS。
+
+    反例来自架构复核：sourceA 的正文拿到 pass，再登记同正文的 sourceB 并采纳，
+    选中却仍是 sourceA/pass；随后绑定 rules2/fail 又把两份来源记录一起覆盖。
+    """
+
+    def setUp(self):
+        from report_version import VersionStore
+
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_r02_"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.store = VersionStore(self.tmp, "t-r02")
+
+    def _acc(self, overall: str, body_hash: str, *, fingerprint: str = "") -> dict:
+        return {"overall": overall, "gaps": [],
+                "report_sha256": body_hash,
+                "report_sha256_short": body_hash[:16],
+                "rules_version": "2026.09.12",
+                "rules_fingerprint": fingerprint or "rules-1"}
+
+    def test_short_hash_cannot_bind(self):
+        """调用方给短 hash → 不绑（该版保持未知）。"""
+        from report_version import body_hash
+
+        body = "研究正文"
+        v = self.store.record(body)
+        short = dict(self._acc("pass", body_hash(body)))
+        short["report_sha256"] = body_hash(body)[:16]
+        self.assertIsNone(self.store.bind_acceptance(short), "短 hash 不得绑定")
+        self.store.adopt(v, reason="t")
+        got = self.store.adopted()
+        self.assertFalse(bool(got.acceptance), "被拒的绑定不得写入")
+        self.assertFalse(got.acceptance_for_this_body())
+
+    def test_legacy_short_hash_record_is_needs_reverify(self):
+        """磁盘上遗留的短 hash 验收：按"待重验"处理，不得当已验证。"""
+        from report_version import VERSIONS_FILE, body_hash
+
+        body = "历史正文"
+        v = self.store.record(body)
+        data = json.loads((self.tmp / VERSIONS_FILE).read_text(encoding="utf-8"))
+        key = v.identity_id()
+        data["versions"][key]["acceptance"] = {
+            "overall": "pass", "gaps": [], "report_sha256": body_hash(body)[:16]}
+        data["selected"] = key
+        (self.tmp / VERSIONS_FILE).write_text(
+            json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        got = self.store.adopted()
+        self.assertFalse(got.acceptance_for_this_body(), "短 hash 不得算已验证")
+        self.assertTrue(got.acceptance_needs_reverify(), "应标为待重验")
+
+    def test_same_body_two_sources_are_isolated(self):
+        """同正文换来源 = 两版证据，绑定互不影响、不互相借 PASS。"""
+        from report_version import body_hash
+
+        body = "同一份正文"
+        a = self.store.record(body, sources_fingerprint="src-A")
+        self.store.bind_acceptance(self._acc("pass", body_hash(body)),
+                                   sources_fingerprint="src-A")
+        b = self.store.record(body, sources_fingerprint="src-B")
+        self.assertNotEqual(a.identity_id(), b.identity_id(), "来源不同 → 身份不同")
+        self.store.adopt(b, reason="采纳 sourceB")
+        got = self.store.adopted()
+        self.assertEqual(str(got.sources_fingerprint), "src-B")
+        self.assertFalse(bool(got.acceptance), "sourceB 不得继承 sourceA 的验收")
+        # 用正确的指纹绑 fail → 只改 sourceB 那条
+        bound = self.store.bind_acceptance(self._acc("fail", body_hash(body), fingerprint="rules-2"),
+                                           sources_fingerprint="src-B")
+        self.assertIsNotNone(bound)
+        self.assertEqual(bound.acceptance_overall(), "fail")
+        a_after = self.store.find_identity(a.identity_id())
+        self.assertIsNotNone(a_after)
+        self.assertEqual(a_after.acceptance_overall(), "pass",
+                         "sourceA 的验收不得被 sourceB 的绑定覆盖")
+        self.assertEqual(str(a_after.sources_fingerprint), "src-A")
+
+    def test_bind_refuses_when_source_identity_mismatches(self):
+        """库里只有 sourceB 时，拿 sourceA 的来源指纹来绑 → 拒绝（不借）。"""
+        from report_version import body_hash
+
+        body = "只有一条来源的正文"
+        self.store.record(body, sources_fingerprint="src-B")
+        self.assertIsNone(
+            self.store.bind_acceptance(self._acc("pass", body_hash(body)),
+                                       sources_fingerprint="src-A"),
+            "来源指纹不符时不得绑定")
+        self.assertIsNone(self.store.find_by_body(body).acceptance or None,
+                          "被拒的绑定不得写入")
+
+    def test_adopted_does_not_borrow_sibling_acceptance(self):
+        """选中条目没有验收时，不得从同正文兄弟条目借。"""
+        from report_version import body_hash
+
+        body = "正文"
+        a = self.store.record(body, sources_fingerprint="src-A")
+        self.store.bind_acceptance(self._acc("pass", body_hash(body)),
+                                   sources_fingerprint="src-A")
+        b = self.store.record(body, sources_fingerprint="src-B")
+        self.store.adopt(b, reason="选 sourceB")
+        got = self.store.adopted()
+        self.assertEqual(str(got.sources_fingerprint), "src-B")
+        self.assertFalse(got.acceptance_for_this_body())
+        self.assertNotEqual(got.acceptance_overall(), "pass")
+
+    def test_final_status_summary_uses_selected_and_marks_unbound(self):
+        """终态摘要读选中版本自身验收；未绑定时 overall 记空（未知）。"""
+        from orchestrator_v2 import OrchestratorV2
+        from report_version import body_hash
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._version_stores = {}
+        with mock.patch("orchestrator_v2.task_workspace", lambda tid: self.tmp):
+            body = "正文"
+            v = self.store.record(body, sources_fingerprint="src-A")
+            self.store.adopt(v, reason="t")
+            summary = o._acceptance_summary_for_status("t-r02")
+            self.assertEqual(str(summary.get("overall") or ""), "",
+                             "没有验收 → 终态不得读成通过")
+            self.assertFalse(summary.get("version_bound"))
+            self.store.bind_acceptance(self._acc("pass", body_hash(body)),
+                                       sources_fingerprint="src-A")
+            summary2 = o._acceptance_summary_for_status("t-r02")
+            self.assertEqual(str(summary2.get("overall")), "pass")
+            self.assertTrue(summary2.get("version_bound"))
+
+
+class TestR02Wiring(unittest.TestCase):
+    """生产接线必须真的传身份：登记/绑定两处都不能再用默认空指纹。"""
+
+    def test_record_and_bind_sites_pass_identity(self):
+        src = (ROOT / "orchestrator_v2.py").read_text(encoding="utf-8")
+        self.assertIn("sources_fingerprint=", src)
+        self.assertIn("policy_version=REVIEW_POLICY_VERSION", src)
+        self.assertIn("_sources_fingerprint(", src)
+        self.assertIn("bind_acceptance(", src)
+        # 绑定必须带来源指纹，否则同正文不同来源会被混用
+        idx = src.index("_store.bind_acceptance(")
+        self.assertIn("sources_fingerprint=", src[idx:idx + 400])
+
+    def test_acceptance_emits_full_hash(self):
+        src = (ROOT / "acceptance_checker.py").read_text(encoding="utf-8")
+        self.assertIn('"report_sha256_short"', src)
+        # 旧的"截断成 16 位再写成 report_sha256"不得再出现
+        self.assertNotIn('"report_sha256": sha256(str(report_text or "").encode("utf-8")).hexdigest()[:16]',
+                         src)
+
+
+class TestR03VerifiedDelivery(unittest.TestCase):
+    """R0.3：绑定验收 ≠ 通过验收；六处（谓词/页面/清单/路由/打印件/准入）共用同一状态。
+
+    离线复现（架构给）：登记正文 → 绑 `overall=fail` → adopt → 导出，
+    此前得到 `acceptance_overall=fail` 却 `draft=False`。
+    """
+
+    def setUp(self):
+        from report_version import VersionStore
+
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_r03_"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.tid = "t-r03"
+        self.store = VersionStore(self.tmp, self.tid)
+
+    def _seed(self, overall: str, *, sources: str = "src-A") -> str:
+        from report_version import body_hash
+
+        body = (
+            "# 研究正文\n\n营业收入 1000 亿元。\n"
+        )
+        v = self.store.record(body, sources_fingerprint=sources)
+        self.store.bind_acceptance(
+            {"overall": overall, "gaps": [], "report_sha256": body_hash(body),
+             "rules_version": "2026.09.12", "rules_fingerprint": "fp"},
+            sources_fingerprint=sources)
+        self.store.adopt(self.store.find_by_body(body), reason="交付")
+        return body
+
+    def test_bound_fail_is_not_verified(self):
+        from report_version import DELIVERY_DRAFT, verified_delivery
+
+        body = self._seed("fail")
+        status, why = verified_delivery(self.store.adopted(), body)
+        self.assertEqual(status, DELIVERY_DRAFT, why)
+        self.assertIn("验收未通过", why)
+
+    def test_pass_and_bound_is_verified(self):
+        from report_version import DELIVERY_VERIFIED, verified_delivery
+
+        body = self._seed("pass")
+        status, why = verified_delivery(self.store.adopted(), body)
+        self.assertEqual(status, DELIVERY_VERIFIED, why)
+
+    def test_missing_or_unbound_acceptance_is_unknown(self):
+        from report_version import DELIVERY_UNKNOWN, VersionStore, body_hash, verified_delivery
+
+        st = VersionStore(self.tmp / "u", "t-u")
+        body = "没有验收的正文"
+        v = st.record(body, sources_fingerprint="src-A")
+        st.adopt(v, reason="t")
+        status, _ = verified_delivery(st.adopted(), body)
+        self.assertEqual(status, DELIVERY_UNKNOWN)
+        # 只有短 hash 的旧记录同样不得算已验证
+        st2 = VersionStore(self.tmp / "u2", "t-u2")
+        v2 = st2.record(body, sources_fingerprint="src-A")
+        st2.bind_acceptance({"overall": "pass", "report_sha256": body_hash(body)[:16]},
+                            sources_fingerprint="src-A")
+        st2.adopt(st2.find_by_body(body) or v2, reason="t")
+        got = st2.adopted()
+        if got.acceptance is not None:
+            st2.bind_acceptance({"overall": "pass",
+                                 "report_sha256": body_hash(body)[:16]},
+                                sources_fingerprint="src-A")
+
+    def test_export_manifest_draft_and_route_headers_agree(self):
+        """清单/路由/谓词三处状态一致：绑 fail 导出必须是草稿。"""
+        from unittest import mock
+
+        import web_ui
+
+        body = self._seed("fail")
+        with mock.patch("web_ui.task_workspace", lambda tid: self.tmp):
+            manifest = web_ui._write_export_manifest(self.tid, body, b"%PDF-1.4 x")
+        self.assertTrue(manifest["draft"], manifest)
+        self.assertEqual(manifest["acceptance_overall"], "fail")
+        self.assertIn("验收未通过", str(manifest.get("draft_reason") or ""))
+        # 路由响应头与清单一致
+        from test_report_version import _FakeHandler
+
+        h = _FakeHandler()
+        with mock.patch("web_ui.task_workspace", lambda tid: self.tmp),                 mock.patch("web_ui._get_task_report_data",
+                           lambda tid: {"report": body, "goal": "目标"}),                 mock.patch("web_ui._task_pdf_bytes", lambda tid: b"%PDF-1.4 x"):
+            web_ui._get_task_pdf(h, f"/api/task/{self.tid}/pdf")
+        headers = dict(h.headers)
+        self.assertEqual(headers.get("X-Report-Draft"), "1",
+                         "未验收草稿的 PDF 必须带草稿标记")
+        self.assertTrue(headers.get("X-Report-Version-Id"))
+
+    def test_manifest_write_failure_is_visible(self):
+        """写不进清单时不得静默：manifest 里要有 manifest_write_error。"""
+        from unittest import mock
+
+        import web_ui
+
+        body = self._seed("pass")
+        with mock.patch("web_ui.task_workspace", lambda tid: self.tmp),                 mock.patch("pathlib.Path.write_text", side_effect=OSError("disk full")):
+            manifest = web_ui._write_export_manifest(self.tid, body, b"%PDF-1.4 x")
+        self.assertIn("manifest_write_error", manifest)
+        self.assertIn("disk full", manifest["manifest_write_error"])
+
+
+class TestR03FrontendExportGuards(unittest.TestCase):
+    """前端源码级守卫：401/403 不自动下载；本地缓存稿必须标注未验证。"""
+
+    def setUp(self):
+        self.text = (ROOT / "frontend" / "src" / "components"
+                     / "ReportViewer.tsx").read_text(encoding="utf-8")
+
+    def test_auth_errors_are_distinguished(self):
+        self.assertIn("exportBlocked", self.text)
+        self.assertIn("401", self.text)
+        self.assertIn("403", self.text)
+        self.assertIn("需登录", self.text)
+        self.assertIn("无权限", self.text)
+
+    def test_local_fallback_is_labelled(self):
+        self.assertIn("本地未验证副本", self.text)
+        self.assertIn("版本未知", self.text)
 
 
 class TestR04NoRegressionOnExistingFixtures(unittest.TestCase):

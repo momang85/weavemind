@@ -188,7 +188,7 @@ class TestVersionBoundDedupe(unittest.TestCase):
         store = VersionStore(ws, tid)
         v = store.record(body)
         store.bind_acceptance({"overall": "pass", "gaps": [],
-                               "report_sha256": v.version_id[:16]})
+                               "report_sha256": v.version_id})
         store.adopt(store.get(v.version_id), reason="t")
         return adm.AdmissionDecision(admitted=True, verified=verified)
 
@@ -262,7 +262,7 @@ class TestAdmissionDecisionFromOrchestrator(unittest.TestCase):
         v = store.record(body)
         if bind:
             store.bind_acceptance({"overall": "pass", "gaps": [],
-                                   "report_sha256": v.version_id[:16]})
+                                   "report_sha256": v.version_id})
         store.adopt(store.get(v.version_id) or v, reason="交付")
         store.record_delivery(body + "\n\n---\n\n交付说明", accepted_body=body,
                               ok=delivery_ok)

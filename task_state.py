@@ -135,7 +135,10 @@ def derive_status(step_statuses=None, acceptance: dict | None = None,
         return FAILED
     accept_fail = bool(acceptance and acceptance.get("overall") != "pass")
     both_failed = bool((llm_degraded or {}).get("both_failed"))
-    if accept_fail or both_failed or str(draft_delivery or "").strip():
+    # R0.2：验收没能证明属于**选中的那版正文**（短 hash / 身份不符 / 只读到文件）
+    # → 证据不可信，按有缺口处理，不得显示"通过"
+    unbound = bool(acceptance) and acceptance.get("version_bound") is False
+    if accept_fail or both_failed or unbound or str(draft_delivery or "").strip():
         return SUCCESS_WITH_ISSUES
     return SUCCESS
 

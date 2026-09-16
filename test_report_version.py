@@ -23,7 +23,7 @@ import report_version as rv  # noqa: E402
 
 def _accept(overall: str, body: str, gaps=None) -> dict:
     return {"overall": overall, "gaps": gaps or [],
-            "report_sha256": rv.body_hash(body)[:16],
+            "report_sha256": rv.body_hash(body),   # R0.2：绑定只认全量 hash
             "rules_version": "2026.09.12", "rules_fingerprint": "abc12345"}
 
 

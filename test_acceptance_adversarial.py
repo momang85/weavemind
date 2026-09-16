@@ -226,7 +226,9 @@ class TestAcceptanceRulesVersioning(unittest.TestCase):
             import acceptance_checker as ac
             self.assertEqual(r["rules_version"], ac.ACCEPTANCE_RULES_VERSION)
             self.assertEqual(r["rules_fingerprint"], ac.rules_fingerprint())
-            self.assertEqual(len(r["report_sha256"]), 16)
+            # R0.2：`report_sha256` 给全量（身份可证明），短 hash 单列一个字段
+            self.assertEqual(len(r["report_sha256"]), 64)
+            self.assertEqual(len(r["report_sha256_short"]), 16)
             self.assertTrue(r["evaluated_at"])
             self.assertTrue(r["profile"], "验收结果应带档位（profile）")
             # 报告文本变化 → 指纹变化（对账可区分两次验收）

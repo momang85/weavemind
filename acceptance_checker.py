@@ -2512,6 +2512,10 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace,
         # 规则版本化与报告指纹：供 acceptance_report.json / 事件流对账
         "rules_version": ACCEPTANCE_RULES_VERSION,
         "rules_fingerprint": rules_fingerprint(),
-        "report_sha256": sha256(str(report_text or "").encode("utf-8")).hexdigest()[:16],
+        # R0.2：`report_sha256` 给**全量**（身份可证明，用于精确绑定版本）；
+        # 短 hash 单独放在 `report_sha256_short`，只作显示/对账，不参与身份判断。
+        "report_sha256": sha256(str(report_text or "").encode("utf-8")).hexdigest(),
+        "report_sha256_short": sha256(
+            str(report_text or "").encode("utf-8")).hexdigest()[:16],
         "evaluated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }

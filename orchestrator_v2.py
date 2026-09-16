@@ -1065,6 +1065,109 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         except Exception:
             return None
 
+    def _sources_fingerprint(self, task_id: str, report_text: str = "") -> str:
+        """本轮**来源/事实快照指纹**（R0.2）：版本身份的一部分。
+
+        只取**真正的来源通道**（搜索/抓取/清洗结构化/结构化财务）与报告里的来源清单、
+        外链集合——**不含**账簿类文件（`report_versions.json`/`acceptance_report.json`/
+        `budget_state.json` 等），否则同一正文在不同时刻算出的指纹不同，身份会漂移
+        （实测：离线完整交付因此被判"未验收草稿"）。
+
+        同一正文换了来源就是**两版证据**，不得互相借验收。
+        """
+        try:
+            import hashlib
+            from acceptance_checker import _collect_sources
+            from workspace import task_workspace
+            parts: list[str] = []
+            try:
+                src = _collect_sources(task_workspace(task_id)) or {}
+            except Exception:
+                src = {}
+            for name in sorted(src):
+                text = str(src.get(name) or "")
+                parts.append(f"{name}:{hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]}")
+            text = str(report_text or "")
+            blocks = re.findall(
+                r"(?m)^#+\s*(?:参考来源|来源清单|参考资料|数据来源|来源附录)\s*$([\s\S]{0,2000})",
+                text)
+            for b in blocks[:3]:
+                parts.append("srclist:" + hashlib.sha256(
+                    b.strip().encode("utf-8")).hexdigest()[:16])
+            urls = sorted(set(re.findall(r"https?://[^\s)>\]]+", text)))[:60]
+            if urls:
+                parts.append("urls:" + hashlib.sha256(
+                    "\n".join(urls).encode("utf-8")).hexdigest()[:16])
+            if not parts:
+                return ""
+            return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+        except Exception:
+            return ""
+
+    def _rules_identity(self, task_id: str) -> tuple[str, str]:
+        """本轮验收**规则版本与指纹**（取自最近一次验收；没有则取当前常量）。"""
+        try:
+            acc = self._read_acceptance_summary(task_id) or {}
+            if acc.get("rules_version") or acc.get("rules_fingerprint"):
+                return (str(acc.get("rules_version") or ""),
+                        str(acc.get("rules_fingerprint") or ""))
+        except Exception:
+            pass
+        try:
+            from acceptance_checker import ACCEPTANCE_RULES_VERSION, rules_fingerprint
+            return ACCEPTANCE_RULES_VERSION, rules_fingerprint()
+        except Exception:
+            return "", ""
+
+    def _acceptance_summary_for_status(self, task_id: str) -> dict | None:
+        """**终态判定**用的验收摘要（R0.2）：以选中版本自身的验收为准。
+
+        保留验收记录里的 `overall/gaps/rules_*`（供记忆准入等按原文判断），
+        另加 `version_bound`（该验收能否证明属于本正文）与 `needs_reverify`
+        （只有旧短 hash）。**未绑定**由 `derive_status` 统一按"有缺口"处理，
+        这里不擅自改写 `overall`，避免把"fail"抹成未知。
+        """
+        try:
+            adopted = self._version_store(task_id).adopted()
+        except Exception:
+            adopted = None
+        if adopted is not None:
+            acc = dict(adopted.acceptance or {})
+            bound = adopted.acceptance_for_this_body()
+            if not acc:
+                # 选中版本没有自己的验收：仍把文件里的结论带给上层（记忆准入需要知道
+                # "验收 fail"），但显式标 version_bound=False —— 状态派生会按有缺口处理
+                summary = self._read_acceptance_summary(task_id)
+                if summary is None:
+                    return {"overall": "", "gaps": ["选中版本没有对应它自身的验收（未知）"],
+                            "rules_version": "", "rules_fingerprint": "",
+                            "report_sha256": adopted.version_id, "version_bound": False}
+                summary = dict(summary)
+                summary["version_bound"] = False
+                summary["unverified_source"] = "file"
+                summary.setdefault("gaps", []).append(
+                    "选中版本没有对应它自身的验收：按未知处理（文件结论仅供参照）")
+                return summary
+            out = {
+                "overall": str(acc.get("overall") or ""),
+                "gaps": list(acc.get("gaps") or []),
+                "rules_version": str(acc.get("rules_version") or ""),
+                "rules_fingerprint": str(acc.get("rules_fingerprint") or ""),
+                "report_sha256": str(acc.get("report_sha256") or ""),
+                "version_bound": bool(bound),
+            }
+            if not bound:
+                out["needs_reverify"] = adopted.acceptance_needs_reverify()
+                out.setdefault("gaps", []).append(
+                    "该版验收无法证明属于本正文（短 hash 或身份不符）：按未知处理")
+            return out
+        summary = self._read_acceptance_summary(task_id)
+        if summary is not None:
+            summary = dict(summary)
+            summary["unverified_source"] = "file"
+            summary["version_bound"] = False
+        return summary
+
     def _admission_decision(self, task_id: str, status: str,
                             acceptance: dict | None) -> "AdmissionDecision":
         """本次运行的准入结论（M0-d）：经验池与模板固化都以它为准。"""
@@ -1188,10 +1291,18 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             return adopted.body
         v = store.find_by_body(body)
         if v is None:
-            v = store.record(body)
+            # R0.2：恢复登记同样带完整身份（来源快照 + 规则 + 策略版本）
+            _rules_v, _rules_fp = self._rules_identity(task_id)
+            v = store.record(
+                body, sources_fingerprint=self._sources_fingerprint(task_id, body),
+                rules_version=_rules_v, rules_fingerprint=_rules_fp,
+                policy_version=REVIEW_POLICY_VERSION)
             logger.warning(
                 "恢复：检查点正文在版本库无记录（task=%s），按证据未知登记", task_id,
             )
+        if v.acceptance_needs_reverify():
+            logger.warning(
+                "恢复：选中版本只有旧的短 hash 验收（task=%s），按待重验处理", task_id)
         store.adopt(v, reason="恢复自检查点")
         return body
 
@@ -1207,11 +1318,19 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         if cancelled:
             store.reject_late("任务已取消/终态：迟到候选稿不采用")
             return cur_text
+        # R0.2：登记一律带完整身份（来源/事实快照指纹 + 规则版本与指纹 + 策略版本）
+        _src_fp = self._sources_fingerprint(task_id, cand)
+        _rules_v, _rules_fp = self._rules_identity(task_id)
         cur_v = store.find_by_body(cur_text) if str(cur_text or "").strip() else None
         if cur_v is None and str(cur_text or "").strip():
-            cur_v = store.record(cur_text)
+            cur_v = store.record(
+                cur_text, sources_fingerprint=self._sources_fingerprint(task_id, cur_text),
+                rules_version=_rules_v, rules_fingerprint=_rules_fp,
+                policy_version=REVIEW_POLICY_VERSION)
         cand_v = store.record(cand, parent_id=(cur_v.version_id if cur_v else ""),
-                              iteration=iteration)
+                              iteration=iteration, sources_fingerprint=_src_fp,
+                              rules_version=_rules_v, rules_fingerprint=_rules_fp,
+                              policy_version=REVIEW_POLICY_VERSION)
         improved, why = compare_versions(
             cur_text, cand,
             cur_acceptance=(cur_v.acceptance if cur_v else None),
@@ -2245,22 +2364,32 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     json.dumps(result, ensure_ascii=False, indent=1),
                     encoding="utf-8",
                 )
-                # M0-a：把这次验收绑到**产出它的那版正文**（按验收自己的 report_sha256 找版本）。
-                # 验收发生在报告步骤刚写完、正文还没被采纳的时刻，版本库里可能还没有该版：
-                # 此时先按**验收对象**登记该版再绑定，否则这条验收永远找不到归属，
-                # 交付守卫只能按"未知"处理（实测即此：验收 pass 却被判未验收草稿）。
+                # R0.2：绑定要带**完整身份**——全量正文 hash + 本轮来源快照指纹；
+                # 短 hash / 来源不符一律不绑（该版保持"未知"，不借别版验收）。
                 _store = self._version_store(task_id)
+                _src_fp = self._sources_fingerprint(task_id, report)
                 _acc = {
                     "overall": result.get("overall"),
                     "gaps": result.get("gaps") or [],
                     "report_sha256": result.get("report_sha256") or "",
+                    "report_sha256_short": result.get("report_sha256_short") or "",
                     "rules_version": result.get("rules_version") or "",
                     "rules_fingerprint": result.get("rules_fingerprint") or "",
                 }
-                _bound = _store.bind_acceptance(_acc)
-                if _bound is None and str(_acc["report_sha256"]):
-                    _store.record(report)
-                    _bound = _store.bind_acceptance(_acc)
+                _bound = _store.bind_acceptance(
+                    _acc, sources_fingerprint=_src_fp,
+                    rules_fingerprint=_acc["rules_fingerprint"])
+                if _bound is None and len(str(_acc["report_sha256"])) >= 64:
+                    # 验收发生在正文被采纳之前：先按**验收对象**登记该版（带同一身份）再绑
+                    _rules_v, _rules_fp = self._rules_identity(task_id)
+                    _store.record(
+                        report, sources_fingerprint=_src_fp,
+                        rules_version=_acc["rules_version"] or _rules_v,
+                        rules_fingerprint=_acc["rules_fingerprint"] or _rules_fp,
+                        policy_version=REVIEW_POLICY_VERSION)
+                    _bound = _store.bind_acceptance(
+                        _acc, sources_fingerprint=_src_fp,
+                        rules_fingerprint=_acc["rules_fingerprint"])
                 if _bound is None:
                     logger.warning(
                         "验收无法绑到正文版本（task=%s, sha=%s）：该版将按证据未知处理",
@@ -4987,7 +5116,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         try:
             _store0 = self._version_store(task_id)
             if _store0.adopted() is None and str(detail or "").strip():
-                _store0.record(detail)
+                _rules_v, _rules_fp = self._rules_identity(task_id)
+                _store0.record(
+                    detail, sources_fingerprint=self._sources_fingerprint(task_id, detail),
+                    rules_version=_rules_v, rules_fingerprint=_rules_fp,
+                    policy_version=REVIEW_POLICY_VERSION)
                 _v0 = _store0.find_by_body(detail)
                 if _v0 is not None:
                     _store0.adopt(_v0, reason="收尾补齐：快速路径/单步任务未经采纳")
@@ -5004,33 +5137,54 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         report = delivery + "\n\n---\n\n" + detail
         # 报告内任务工作区绝对路径 → 前端可访问 URL（图表/数据图片链接可显示）
         report = self._rewrite_report_links(report, task_id)
-        # M0-a 交付一致性：装配/链接重写后的**交付正文**必须与选中版本验收所指正文一致。
-        # 不一致（或该版本没有对应自身的验收）→ 只作"未验收草稿"：不显示通过、不进成功沉淀。
+        # R0.3 交付状态（唯一谓词）：身份/正文/交付一致 **且** 验收 pass **且** 属该版
+        # **且** 硬约束满足 **且** 必需评审有效；否则按"未验收草稿/未知"交付。
+        # 只用 hash 相同来判断"可以当已通过用"是错的——绑定验收 ≠ 通过验收。
         try:
-            from report_version import verify_delivery
+            from report_version import (DELIVERY_DRAFT, DELIVERY_VERIFIED,
+                                        DELIVERY_UNKNOWN, verified_delivery)
             _store = self._version_store(task_id)
             _v = _store.adopted()
-            _ok, _why = verify_delivery(_v, detail) if _v else (False, "无选中版本")
-            if not _ok:
+            # "必需评审"只看是否处于**要求评审**的口径（银行）：个人模式下降级已在
+            # 交付物里如实标注（`_with_review_note`），不因此把交付判成草稿；
+            # 身份非法/不可判定时按草稿处理（保守）。
+            try:
+                _review_required = self._review_is_required()
+                _review_ok = (not _review_required) or bool(
+                    self._review_state(task_id).get("verdict") == "PASS")
+            except Exception as exc:
+                _review_required, _review_ok = True, False
+                logger.error("评审要求不可判定，按保守处理：%s", str(exc)[:120])
+            _status, _why = verified_delivery(
+                _v, detail,
+                review_valid=_review_ok,
+                hard_ok=not bool(getattr(self, "_delivery_hard_fail", "")),
+                hard_reason=str(getattr(self, "_delivery_hard_fail", "") or ""),
+            )
+            if _status != DELIVERY_VERIFIED:
                 # 未验收草稿必须在**交付物本体**上写明（页面/导出都看得到），
                 # 只在日志里说一句等于用户看不到"这份不能当已通过用"
                 report = self._with_draft_note(report, str(_why))
                 self._delivery_draft_reason = str(_why)
-                logger.warning("交付按未验收草稿处理：%s", _why)
+                logger.warning("交付状态=%s：%s", _status, _why)
                 push_progress(self._messaging, task_id, "log",
                               {"type": "review", "agent": "orchestrator",
-                               "message": f"交付版本与验收对象不一致或缺失（{_why}）："
-                                          "本次按未验收草稿交付，不得视为已通过",
+                               "message": f"交付状态：{'未验收草稿' if _status == DELIVERY_DRAFT else '证据未知'}"
+                                          f"（{_why}）：不得视为已通过",
                                "timestamp": self._now_iso()})
             else:
                 self._delivery_draft_reason = ""
             # 记录**最终交付正文**（含交付说明、评审/草稿注记与链接重写）的 hash：
             # 导出清单据此核对"导出的字节就是这份交付"。必须在注记之后记录，
             # 否则清单会认为导出字节与交付不一致。
-            _store.record_delivery(report, accepted_body=detail, ok=_ok, reason=_why)
+            _store.record_delivery(report, accepted_body=detail,
+                                   ok=(_status == DELIVERY_VERIFIED),
+                                   reason=_why)
+            self._delivery_status = _status
         except Exception as exc:
             logger.warning("交付一致性校验失败（按未验收草稿）：%s", str(exc)[:120])
             self._delivery_draft_reason = "校验异常"
+            self._delivery_status = "unknown"
         # 贯通测试守门：修复后仍全部未通过 → 如实标记失败
         if e2e_results and not any(r.get("ok") for r in e2e_results):
             has_failure = True
@@ -5045,10 +5199,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                        "message": f"Generating report ({len(all_steps)} steps, {iteration} iterations, {time.time()-started:.0f}s)",
                        "timestamp": self._now_iso()})
 
-        # P0-1/P0-2 + A1：以最终 acceptance_report.json 判定——验收 fail
-        # 无论反思是否执行/重做后仍 fail 都如实降级为 SUCCESS_WITH_ISSUES；
-        # 反思重做后验收 pass 则 SUCCESS；LLM 双端点均失败同样降级
-        acceptance_summary = self._read_acceptance_summary(task_id)
+        # P0-1/P0-2 + A1：以最终验收判定——验收 fail 无论反思是否执行/重做后仍 fail
+        # 都如实降级为 SUCCESS_WITH_ISSUES；反思重做后验收 pass 则 SUCCESS；
+        # LLM 双端点均失败同样降级。
+        # R0.2：终态判定读**选中版本自身**的验收（而不是"最新那份 acceptance 文件"），
+        # 否则"正文换成 sourceB、验收文件还是 sourceA 的 pass"会被当成功。
+        acceptance_summary = self._acceptance_summary_for_status(task_id)
         llm_degraded = self._read_llm_degraded(task_id)
         overall = self._resolve_final_status(
             has_failure, acceptance_summary,

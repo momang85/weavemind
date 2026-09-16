@@ -2587,7 +2587,7 @@ class TestP0BalancePrecheck(unittest.TestCase):
                 if overall:
                     store.bind_acceptance({
                         "overall": overall, "gaps": [],
-                        "report_sha256": ver.version_id[:16],
+                        "report_sha256": ver.version_id,
                         "rules_version": "2026.09.12", "rules_fingerprint": "fp",
                     })
                     store.adopt(store.get(ver.version_id), reason="历史样例")

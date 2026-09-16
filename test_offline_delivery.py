@@ -443,7 +443,7 @@ class TestOfflineFaultInjection(unittest.TestCase):
         store = VersionStore(ws, tid)
         v = store.record("已选中的稿子")
         store.bind_acceptance({"overall": "pass", "gaps": [],
-                               "report_sha256": v.version_id[:16]})
+                               "report_sha256": v.version_id})
         store.adopt(store.get(v.version_id), reason="交付")
         # 迟到结果：只登记拒绝，不改选中版本
         store.reject_late("迟到 worker 结果")
