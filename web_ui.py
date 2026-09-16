@@ -4476,7 +4476,32 @@ def _post_evolution_approve(self, p, body, admin):
             if not matched:
                 return self._json({"error": "pending strategy not found"}, 404)
             raw, item = matched
-            r.lrem("evolution:pending", 0, raw)
+            agent_type = str(item.get("agent_type", "search_agent"))
+            active_key = f"strategy:active:{agent_type}"
+            # 并发版本保护：不静默覆盖已部署的另一版策略（先查冲突，再认领——
+            # 认领是不可回退的，冲突时不能让待审策略凭空消失）
+            if approve and not bool(body.get("force")):
+                try:
+                    prev_raw = r.get(active_key)
+                    prev = json.loads(prev_raw) if prev_raw else {}
+                except Exception:
+                    prev = {}
+                prev_id = str((prev or {}).get("strategy_id") or "")
+                if prev_id and prev_id != sid:
+                    return self._json({
+                        "error": f"{agent_type} 已部署策略 {prev_id}，"
+                                 "如需替换请带 force=true",
+                        "active_strategy_id": prev_id,
+                        "requested_strategy_id": sid,
+                    }, 409)
+            # R1：原子认领。此前是 `lrem(count=0)` 后再部署——两个并发审批都能读到
+            # 同一条待审策略、都能删成功、都去部署（同一策略被批准两次、后一次覆盖
+            # 前一次的 rollout）。改为按 count=1 删除并以返回值当认领凭据：
+            # 只有真正删掉那一条的请求才继续，另一个拿到 409。
+            if int(r.lrem("evolution:pending", 1, raw) or 0) != 1:
+                return self._json(
+                    {"error": "该策略已被其它审批请求处理（并发冲突），请刷新后重试"},
+                    409)
             deployed = False
             if approve:
                 item["status"] = "deployed"
@@ -4486,10 +4511,7 @@ def _post_evolution_approve(self, p, body, admin):
                 except (TypeError, ValueError):
                     rollout = 1.0
                 item["rollout"] = rollout
-                r.set(
-                    f"strategy:active:{item.get('agent_type', 'search_agent')}",
-                    json.dumps(item, ensure_ascii=False),
-                )
+                r.set(active_key, json.dumps(item, ensure_ascii=False))
                 deployed = True
             return self._json({
                 "status": "ok",

@@ -1189,15 +1189,31 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             if deliveries and not any(d.get("ok") for d in deliveries):
                 hard_ok = False
                 hard_reasons.append("交付一致性守卫未通过（按未验收草稿交付）")
-            if getattr(self, "_delivery_draft_reason", ""):
+            _draft_why = str(self._delivery(task_id).get("reason") or "")
+            if _draft_why:
                 hard_ok = False
-                hard_reasons.append(f"交付按草稿处理：{self._delivery_draft_reason}")
+                hard_reasons.append(f"交付按草稿处理：{_draft_why}")
         except Exception as exc:
             hard_ok = False
             hard_reasons.append(f"版本/交付证据不可读：{str(exc)[:80]}")
+        # R1：准入看的不是裸 `verdict == "PASS"`，而是"该 PASS 是否覆盖交付所依据的
+        # 计划版本"。异版 PASS 一律按"未完成评审"处理（银行不入池 / 个人只算 admitted），
+        # 不把"另一个计划版本被评审过"当成"这一版已验证成功"。
+        review = dict(self._review_state(task_id))
+        try:
+            review_bound = self.review_scope_ok(task_id)
+        except Exception as exc:
+            review_bound = False
+            logger.error("评审绑定不可判定，按未绑定处理：%s", str(exc)[:120])
+        if str(review.get("verdict") or "") == "PASS" and not review_bound:
+            review["verdict"] = "UNBOUND"
+            review["degraded_reason"] = (
+                f"持有的 PASS 绑定计划版本 v{int(review.get('plan_version') or 0)}，"
+                f"当前为 v{self._plan_version(task_id)}")
         decision = admit_success(
             status=status, acceptance=acceptance, hard_ok=hard_ok,
-            hard_reasons=hard_reasons, review=self._review_state(task_id),
+            hard_reasons=hard_reasons, review=review,
+            review_bound=review_bound,
             mode=self._identity_mode(), version_bound=version_bound,
         )
         self._task_admission[task_id] = decision
@@ -2232,7 +2248,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 completed_all[step_id] = old_result
                 # M0-a：回退只恢复**内存结果**；磁盘 report.md 可能仍是重做版 →
                 # 明确标为"需重验的草稿"，不让交付路径把它当已验收版本。
-                self._delivery_draft_reason = (
+                self._delivery(task_id)["reason"] = (
                     f"步骤 {step_id} 重做劣化已回退：磁盘报告可能仍为重做版本，交付需重验")
                 push_progress(self._messaging, task_id, "log",
                               {"type": "iteration", "agent": "orchestrator",
@@ -2432,7 +2448,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
     def _record_reflection_refinement(
         self, goal: str, task_id: str, key: str, issue: str, fix_prompt: str,
     ) -> None:
-        """把反思对提示词的改动沉淀进进化系统 RAG。失败不影响任务主线。"""
+        """把反思对提示词的改动沉淀进进化系统 RAG。失败不影响任务主线。
+
+        R1：只有**本次运行已取得已验证成功**时才写 `active`（可被后续任务注入）；
+        否则写 `pending_review` 只留档——反思发生在任务尚在迭代的中途，
+        那时它自己的结论还没被任何验收/评审确认过。
+        """
         # 失败教训写回 Skill（对标标准 3.8）：自动沉淀，供后续任务注入
         if str(task_id or "").startswith("ui-"):
             try:
@@ -2450,12 +2471,23 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         if not callable(rec):
             return
         try:
+            from memory_manager import REFINEMENT_ACTIVE, REFINEMENT_PENDING
+        except Exception:
+            REFINEMENT_ACTIVE, REFINEMENT_PENDING = "active", "pending_review"
+        _verified = False
+        try:
+            _adm = (getattr(self, "_task_admission", {}) or {}).get(task_id)
+            _verified = bool(getattr(_adm, "verified", False))
+        except Exception:
+            _verified = False
+        try:
             rec(
                 goal=goal, key=key,
                 issue=str(issue)[:300],
                 fix_prompt=str(fix_prompt)[:800],
                 rationale="反思轮发现缺陷后对步骤提示词的修改",
                 task_id=task_id, version=1, outcome="reflection",
+                status=(REFINEMENT_ACTIVE if _verified else REFINEMENT_PENDING),
             )
         except Exception as exc:
             logger.warning("Reflection refinement RAG record failed: %s", str(exc)[:120])
@@ -2758,6 +2790,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             "used_template": bool(used_template),
             # M0-b：评审状态随检查点走，恢复时据此判断能否复用 PASS
             "review": dict(self._review_state(task_id)),
+            # R1：当前**计划版本号**。与 review.plan_version 分开记：两者不同即表示
+            # 落盘时计划已被改写而 PASS 还是旧版本——恢复时按"异版 PASS 不复用"处理。
+            "plan_version": self._plan_version(task_id),
             "status": "RUNNING",
             "saved_at": self._now_iso(),
         }
@@ -2856,6 +2891,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             "redo_rounds": int(cp.get("redo_rounds") or 0),
             "best_report": restored_best,
             "review": dict(cp.get("review") or {}),
+            # R1：计划版本号随 checkpoint 恢复（与 review.plan_version 相比即知
+            # "落盘时计划是否已被改写、PASS 是否还是旧版本"）
+            "plan_version": int(cp.get("plan_version") or 0),
             "gate_checked": bool(cp.get("gate_checked") or False),
             "simple": bool(cp.get("simple") or False),
             "used_template": bool(cp.get("used_template") or False),
@@ -3135,6 +3173,81 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             states[task_id] = st
         return st
 
+    def _plan_version(self, task_id: str) -> int:
+        """本任务当前**计划版本号**（R1）。
+
+        为什么需要版本号而不是只比指纹：Critic 评审发生在规划返回时，之后编排器还要做
+        机械加工（依赖连线、包步骤补齐、目标/Skills 注入、结构化裁剪）与计划确认编辑，
+        执行的那份 `steps` 与评审时看到的对象**本来就不同**——若按对象相等判定，
+        每一次真实运行都会被判成"没有绑定的 PASS"，这个判定就废了。
+
+        因此把"评审覆盖哪一版计划"记成版本号：机械加工不改变版本（同一版计划的物化），
+        而**实质改写**（反思追加/替换计划、用户确认阶段的编辑）会 +1，于是
+        "异版 PASS" 不再被复用。
+        """
+        versions = getattr(self, "_task_plan_versions", None)
+        if versions is None:
+            versions = {}
+            self._task_plan_versions = versions
+        return int(versions.get(task_id) or 0)
+
+    def _bump_plan_version(self, task_id: str, why: str) -> int:
+        """计划被**实质改写** → 版本 +1（此前绑定的 PASS 随之失效）。"""
+        versions = getattr(self, "_task_plan_versions", None)
+        if versions is None:
+            versions = {}
+            self._task_plan_versions = versions
+        nv = int(versions.get(task_id) or 0) + 1
+        versions[task_id] = nv
+        st = self._review_state(task_id)
+        if (str(st.get("verdict") or "") == "PASS"
+                and int(st.get("plan_version") or 0) != nv
+                and getattr(self, "_messaging", None) is not None):
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "review", "agent": "critic",
+                           "message": (f"计划已改写（{why}）→ 计划版本 v{nv}："
+                                       "此前绑定的评审 PASS 不再覆盖该版本"),
+                           "timestamp": self._now_iso()})
+        return nv
+
+    def review_scope_ok(self, task_id: str) -> bool:
+        """当前持有的 PASS 是否覆盖**本任务当前这一版计划**（R1 准入/交付用）。
+
+        与 `review_passed_for` 的分工：后者按指纹比对（调用方手里有评审时那一版计划，
+        用于测试与"这版计划是否被评审过"的精确判断）；本方法按版本号判断，
+        用于编排器内部——那里的 `steps` 已经过机械加工，指纹天然不同。
+        """
+        st = self._review_state(task_id)
+        if str(st.get("verdict") or "") != "PASS":
+            return False
+        if str(st.get("policy_version") or "") != REVIEW_POLICY_VERSION:
+            return False
+        try:
+            if str(st.get("mode") or "") != self._identity_mode():
+                return False
+        except Exception:
+            return False
+        bound = int(st.get("plan_version") or 0)
+        return bound > 0 and bound == self._plan_version(task_id)
+
+    def _delivery(self, task_id: str) -> dict:
+        """交付状态**按根任务**归属（R1）。
+
+        此前是三个实例标量（`_delivery_draft_reason` / `_delivery_status` /
+        `_delivery_hard_fail`）：同一实例并发跑两个任务时，任务 A 收尾写入的草稿理由
+        会把任务 B 已判定的 verified 翻成 false（准入判定随之误判）。按根任务存放后，
+        每个任务的交付结论只受自己的证据影响。
+        """
+        states = getattr(self, "_task_delivery", None)
+        if states is None:
+            states = {}
+            self._task_delivery = states
+        st = states.get(task_id)
+        if st is None:
+            st = {"status": "", "reason": "", "hard_fail": ""}
+            states[task_id] = st
+        return st
+
     def _budget(self, task_id: str):
         """根任务预算（M0-e）：一次任务一份账，落盘在任务工作区，跨进程/恢复共用。"""
         budgets = getattr(self, "_task_budgets", None)
@@ -3238,15 +3351,42 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             raise box["error"]
         return box.get("value")
 
+    # 计划指纹只取**定义这一版计划**的字段；执行期回填的字段不进指纹。
+    # 否则同一版计划在执行前（评审时）与执行后（`iteration`/`status` 被回填）会算出
+    # 两个指纹，"PASS 绑定在这版计划上"就永远无法在交付口被验证。
+    _PLAN_FP_STR_FIELDS = ("step_id", "capability", "instruction")
+    _PLAN_FP_LIST_FIELDS = ("depends_on",)
+
     def _plan_fingerprint(self, steps: list[dict]) -> str:
-        """计划指纹：PASS 绑定的对象是**这一版计划**，不是"某个计划"。"""
-        payload = json.dumps(list(steps or []), ensure_ascii=False, sort_keys=True)
+        """计划指纹：PASS 绑定的对象是**这一版计划**，不是"某个计划"。
+
+        按 `_PLAN_FP_*_FIELDS` 做规范投影——缺字段与空字段等价（依赖连线等加工
+        会补上 `depends_on`，不该因此算作另一版计划），依赖顺序无关（排序后入指纹），
+        步骤顺序敏感（顺序即并行拓扑的输入）。
+        """
+        projection = []
+        for s in (steps or []):
+            if not isinstance(s, dict):
+                projection.append({"raw": str(s)})
+                continue
+            item = {f: str(s.get(f) or "") for f in self._PLAN_FP_STR_FIELDS}
+            for f in self._PLAN_FP_LIST_FIELDS:
+                raw = s.get(f) or []
+                if isinstance(raw, (list, tuple)):
+                    item[f] = sorted(str(x) for x in raw)
+                else:
+                    item[f] = [str(raw)]
+            item["round"] = s.get("round")
+            projection.append(item)
+        payload = json.dumps(projection, ensure_ascii=False, sort_keys=True)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def _review_bind_pass(self, task_id: str, steps: list[dict]) -> dict:
         st = self._review_state(task_id)
         st.update({
             "plan_fingerprint": self._plan_fingerprint(steps),
+            # R1：PASS 覆盖的是**这一版**计划；版本号与指纹一起记，恢复/准入据此判断
+            "plan_version": self._plan_version(task_id),
             "verdict": "PASS",
             "policy_version": REVIEW_POLICY_VERSION,
             "mode": self._identity_mode(),
@@ -3325,18 +3465,28 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                               plan: list[dict] | None = None) -> bool:
         """恢复 checkpoint 里的评审状态；返回是否复用了仍有效的 PASS。
 
-        复用条件：裁决 PASS、同一策略版本、同一身份模式。任一不符 → 按"未完成评审"
-        处置（银行拒绝 / 个人记降级），不复用过期或异版 PASS，也不默认已通过。
+        复用条件：裁决 PASS、同一策略版本、同一身份模式、**同一计划版本**。
+        计划版本这一条是 R1 补的：checkpoint 里的 PASS 绑定在它当时评审的那一版计划上，
+        若落盘之后计划又被改写（反思追加步骤等），恢复时不能把旧 PASS 当成覆盖新版计划。
+        旧 checkpoint 没有 `plan_version` 字段 → 视为**无法证明**，不复用（拦下而不是放行）。
+        任一不符 → 按"未完成评审"处置（银行拒绝 / 个人记降级），也不默认已通过。
         """
         cur_mode = self._identity_mode()
         saved = saved if isinstance(saved, dict) else {}
+        try:
+            saved_pv = int(saved.get("plan_version") or 0)
+        except (TypeError, ValueError):
+            saved_pv = 0
+        cur_pv = self._plan_version(task_id)
         ok = (str(saved.get("verdict") or "") == "PASS"
               and str(saved.get("policy_version") or "") == REVIEW_POLICY_VERSION
-              and str(saved.get("mode") or "") == cur_mode)
+              and str(saved.get("mode") or "") == cur_mode
+              and saved_pv > 0 and saved_pv == cur_pv)
         st = self._review_state(task_id)
         if ok:
             st.update({
                 "plan_fingerprint": str(saved.get("plan_fingerprint") or ""),
+                "plan_version": saved_pv,
                 "verdict": "PASS",
                 "policy_version": REVIEW_POLICY_VERSION,
                 "mode": cur_mode,
@@ -3346,9 +3496,13 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             })
             push_progress(self._messaging, task_id, "log",
                           {"type": "review", "agent": "critic",
-                           "message": "恢复：复用仍有效的评审 PASS（同策略版本/同身份模式）",
+                           "message": (f"恢复：复用仍有效的评审 PASS"
+                                       f"（同策略版本/同身份模式/同计划版本 v{saved_pv}）"),
                            "timestamp": self._now_iso()})
             return True
+        if str(saved.get("verdict") or "") == "PASS" and saved_pv != cur_pv:
+            logger.warning("恢复：checkpoint 的 PASS 绑定计划v%s，当前为 v%s，不复用"
+                           "（task=%s）", saved_pv or "未知", cur_pv, task_id)
         self._require_review_or_refuse(
             task_id, "恢复的计划没有仍有效的评审 PASS", plan=plan)
         return False
@@ -4299,10 +4453,15 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         # 交付物注明需人工复核）。任务开始时清掉本任务这一条，不动别的任务。
         self._review_state(task_id).update({
             "verdict": "", "degraded_reason": "", "plan_fingerprint": "",
+            "plan_version": 0,
             "policy_version": REVIEW_POLICY_VERSION, "rounds": 0, "at": 0.0,
         })
+        # R1：计划版本号从 v1 起；恢复路径会把 checkpoint 里的版本号带回来
+        self._bump_plan_version(task_id, "任务起始规划")
         # M0-d：本次运行的准入结论（收尾时计算并落库/注入模板与经验沉淀）
-        self._delivery_draft_reason = ""
+        # R1：交付状态按**根任务**归属（此前是实例标量：另一个任务写草稿会把本任务
+        # 已判定的 verified 翻成 false，反之亦然）
+        self._delivery(task_id).update({"status": "", "reason": "", "hard_fail": ""})
         # M0-e：根任务预算耗尽时，本任务不再尝试新调用（见 _dispatch 的拒绝分支）
         if not hasattr(self, "_budget_exhausted"):
             self._budget_exhausted = {}
@@ -4522,6 +4681,10 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     )
                     return {"task_id": task_id, "status": "FAILED", "steps": [],
                             "report": "Plan not confirmed"}
+                # R1：用户在确认阶段**改了计划**（不是原样确认）→ 这是评审看到的那一版
+                # 之外的另一个版本，此前绑定的 PASS 不覆盖它；原样确认不升级版本号。
+                if self._plan_fingerprint(confirmed) != self._plan_fingerprint(steps):
+                    self._bump_plan_version(task_id, "计划确认阶段被编辑")
                 steps = confirmed
                 steps = self._wire_report_deps(steps)
                 steps = self._wire_search_fetch_deps(steps)
@@ -4571,8 +4734,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             steps = list(resumed.get("steps") or [])
             used_template = bool(resumed.get("used_template"))
             simple = bool(resumed.get("simple"))
-            # M0-b：恢复的评审状态要么仍有效（同策略版本、同身份模式），
+            # M0-b：恢复的评审状态要么仍有效（同策略版本、同身份模式、同计划版本），
             # 要么按"未完成评审"处置——不复用过期/异版 PASS，也不默认已通过
+            # R1：先把 checkpoint 里的计划版本号带回来，再判 PASS 是否覆盖该版本
+            # （旧 checkpoint 无该字段 → 回到任务起始的 v1；此时若自带 PASS，
+            # 其 plan_version 为 0，判定必然不复用——无法证明就不放行）
+            self._task_plan_versions[task_id] = int(resumed.get("plan_version") or 1)
             self._restore_review_state(task_id, resumed.get("review") or {}, steps)
             with self._task_starts_lock:
                 self._task_simple[task_id] = simple
@@ -5010,6 +5177,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 s["depends_on"] = []
                 s["step_id"] = f"i{iteration}-{s['step_id']}"
             steps = next_steps
+            # R1：反思追加/替换步骤 = **另一版计划**，此前绑定的评审 PASS 不覆盖它
+            self._bump_plan_version(task_id, "反思追加/替换步骤")
             steps = self._wire_report_deps(steps)
             steps = self._wire_search_fetch_deps(steps)
             steps = self._ensure_package_step(steps)
@@ -5148,24 +5317,25 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             # "必需评审"只看是否处于**要求评审**的口径（银行）：个人模式下降级已在
             # 交付物里如实标注（`_with_review_note`），不因此把交付判成草稿；
             # 身份非法/不可判定时按草稿处理（保守）。
+            # R1：读的不再是裸 `verdict == "PASS"`，而是"该 PASS 是否覆盖本任务
+            # **当前这一版计划**"——反思改写计划后，旧版 PASS 不得当成本版已评审。
             try:
                 _review_required = self._review_is_required()
-                _review_ok = (not _review_required) or bool(
-                    self._review_state(task_id).get("verdict") == "PASS")
+                _review_ok = (not _review_required) or self.review_scope_ok(task_id)
             except Exception as exc:
                 _review_required, _review_ok = True, False
                 logger.error("评审要求不可判定，按保守处理：%s", str(exc)[:120])
             _status, _why = verified_delivery(
                 _v, detail,
                 review_valid=_review_ok,
-                hard_ok=not bool(getattr(self, "_delivery_hard_fail", "")),
-                hard_reason=str(getattr(self, "_delivery_hard_fail", "") or ""),
+                hard_ok=not bool(self._delivery(task_id).get("hard_fail")),
+                hard_reason=str(self._delivery(task_id).get("hard_fail") or ""),
             )
             if _status != DELIVERY_VERIFIED:
                 # 未验收草稿必须在**交付物本体**上写明（页面/导出都看得到），
                 # 只在日志里说一句等于用户看不到"这份不能当已通过用"
                 report = self._with_draft_note(report, str(_why))
-                self._delivery_draft_reason = str(_why)
+                self._delivery(task_id)["reason"] = str(_why)
                 logger.warning("交付状态=%s：%s", _status, _why)
                 push_progress(self._messaging, task_id, "log",
                               {"type": "review", "agent": "orchestrator",
@@ -5173,18 +5343,17 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                                           f"（{_why}）：不得视为已通过",
                                "timestamp": self._now_iso()})
             else:
-                self._delivery_draft_reason = ""
+                self._delivery(task_id)["reason"] = ""
             # 记录**最终交付正文**（含交付说明、评审/草稿注记与链接重写）的 hash：
             # 导出清单据此核对"导出的字节就是这份交付"。必须在注记之后记录，
             # 否则清单会认为导出字节与交付不一致。
             _store.record_delivery(report, accepted_body=detail,
                                    ok=(_status == DELIVERY_VERIFIED),
                                    reason=_why)
-            self._delivery_status = _status
+            self._delivery(task_id)["status"] = _status
         except Exception as exc:
             logger.warning("交付一致性校验失败（按未验收草稿）：%s", str(exc)[:120])
-            self._delivery_draft_reason = "校验异常"
-            self._delivery_status = "unknown"
+            self._delivery(task_id).update({"reason": "校验异常", "status": "unknown"})
         # 贯通测试守门：修复后仍全部未通过 → 如实标记失败
         if e2e_results and not any(r.get("ok") for r in e2e_results):
             has_failure = True
@@ -5209,7 +5378,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         overall = self._resolve_final_status(
             has_failure, acceptance_summary,
             getattr(self, "_reflection_llm_unavailable", ""), llm_degraded,
-            draft_reason=str(getattr(self, "_delivery_draft_reason", "") or ""),
+            draft_reason=str(self._delivery(task_id).get("reason") or ""),
         )
         if overall == "SUCCESS_WITH_ISSUES":
             logger.error(

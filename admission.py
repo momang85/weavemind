@@ -47,6 +47,7 @@ def admit_success(
     hard_ok: bool = True,
     hard_reasons: list[str] | None = None,
     review: dict | None = None,
+    review_bound: bool | None = None,
     mode: str = "local",
     version_bound: bool = True,
 ) -> AdmissionDecision:
@@ -61,6 +62,10 @@ def admit_success(
     verified（计入"已验证成功次数"与模板固化）额外要求：
       5. 必需评审已完成且拿到绑定 PASS。银行口径下这是硬要求；local 下若评审降级，
          仍然只是 admitted，不得当成"已验证成功"。
+
+    R1 `review_bound`：PASS 是否绑定在**本次交付所依据的计划版本**上。调用方若能给出
+    这个结论（`review_scope_ok`），则以它为准——"另一个计划版本曾被评审通过"不是
+    "这一版已评审"。为 None 时退回只看 `verdict`（兼容不传该参数的旧调用方）。
     """
     d = AdmissionDecision()
     if str(status or "").upper() != SUCCESS:
@@ -81,6 +86,9 @@ def admit_success(
 
     mode = str(mode or "local").lower()
     verdict = str((review or {}).get("verdict") or "").upper()
+    if verdict == "PASS" and review_bound is False:
+        # 评审确实通过了，但过的是**另一版计划**：按"这一版没有评审"处置
+        verdict = "UNBOUND"
     if mode == "bank" and verdict != "PASS":
         # 银行口径：必需评审没有绑定 PASS 的执行连经验池都不进
         d.reasons.append(f"银行口径缺少绑定 PASS（verdict={verdict or '缺失'}）")

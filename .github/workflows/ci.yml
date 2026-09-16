@@ -66,6 +66,8 @@ jobs:
         run: python test_admission.py
       - name: R0 boundaries (goal-vs-evidence, operand roles)
         run: python test_r0_boundaries.py
+      - name: Review/pending-review isolation (R1: bound PASS, RAG gate, claim)
+        run: python test_review_isolation.py
       - name: Portable Redis acquisition (multi-source / budget / offline reuse)
         run: python test_redis_acquisition.py
       - name: US financial chain (SEC fixture / subject extraction / amount rate)

@@ -229,13 +229,29 @@ class TestRecallRouting(unittest.TestCase):
         self.assertEqual(m._degraded_queries, 0)
 
     def test_prompt_refinements_degrade_path(self):
-        col = FakeCollection([("r1", "把目标拆成三步并标注来源", {"key": "planner_v2"})])
+        col = FakeCollection([("r1", "把目标拆成三步并标注来源",
+                               {"key": "planner_v2", "status": "active"})])
         m = _mk_manager(refinements=col)
         with mock.patch.object(M, "_embedding_degraded", return_value=True):
             out = m.query_prompt_refinements("目标拆解 来源标注")
         self.assertEqual(len(out), 1)
         self.assertIn("planner_v2", out[0])
         self.assertIn("把目标拆成三步", out[0])
+
+    def test_pending_refinement_is_held_back_in_degrade_path(self):
+        """R1：待复核（或缺状态）的改进经验在字面兜底路径上同样不得注入。"""
+        col = FakeCollection([
+            ("r1", "待复核的改进", {"key": "planner_v2", "status": "pending_review"}),
+            ("r2", "缺状态的旧记录", {"key": "legacy_v1"}),
+            ("r3", "已生效的改进", {"key": "planner_v3", "status": "active"}),
+        ])
+        m = _mk_manager(refinements=col)
+        with mock.patch.object(M, "_embedding_degraded", return_value=True):
+            out = m.query_prompt_refinements("目标拆解 来源标注")
+        self.assertEqual(len(out), 1, out)
+        self.assertIn("planner_v3", out[0])
+        self.assertEqual(m.count_pending_refinements(), 2,
+                         "待复核与缺状态的记录都要计入被隔离条数")
 
 
 # ---------------------------------------------------------------------------

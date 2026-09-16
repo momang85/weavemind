@@ -1,9 +1,53 @@
 # DeepSeek 执行状态（2026-09-16 晚 更新）
 
-**当前关卡**：M0 已实现并通过**部分**定向验证；**本批 = MKT-P0 收尾**（美股硬绑定后半 +
-README 区间披露）。R0b/R0c 与 MKT-P0-1/2/3 前半已提交本地（`c1a7559`…`d0e5a72`，共 6 个提交
-**未推送**——本机 GitHub 凭据失效，需人工重新认证一次）。下一批 = **R1 评审与待复核隔离**、
-**R2 请求级预算与取消**。台账见 `docs/实机运行记录_M0f_20260916.md`（含 P0 一节）。
+**当前关卡**：M0 已实现并通过**部分**定向验证；**本批 = R1 评审与待复核隔离**。
+R0b/R0c 与 MKT-P0 四项已提交本地（`c1a7559`…`7a90568`，共 7 个提交**未推送**——
+本机 GitHub 凭据失效，需人工重新认证一次）。下一批 = **R2 请求级预算与取消**。
+台账见 `docs/实机运行记录_M0f_20260916.md`（含 P0 一节）。
+
+**R1 评审与待复核隔离：已落地（4 项 + 审批 API 并发保护）**
+
+- **交付状态按根任务**：`_delivery_draft_reason` / `_delivery_status` / `_delivery_hard_fail`
+  三个实例标量 → `_delivery(task_id)`（按根任务存放）。此前同一实例并发跑两个任务时，
+  A 收尾写入的草稿理由会把 B 已判定的 verified 翻成 false，B 的交付与准入随之误判。
+- **异版 PASS 不复用（评审绑定计划版本）**：`_review_bind_pass` 除指纹外再记
+  `plan_version`；新增 `review_scope_ok()`（PASS + 策略版本 + 身份模式 + **绑定版本 == 当前版本**），
+  交付守卫与准入判定都改读它，不再读裸 `verdict == "PASS"`。
+  - 为什么用版本号而不是只比指纹：Critic 评审发生在规划返回时，之后编排器还要做机械加工
+    （依赖连线、包步骤补齐、目标/Skills 注入、结构化裁剪），执行的那份 `steps` 与评审时
+    看到的对象**本来就不同**——按对象相等判定会让每一次真实运行都被判成"没有绑定的 PASS"。
+    因此机械加工**不**改版本（同一版计划的物化），**实质改写**才 +1：反思追加/替换步骤、
+    计划确认阶段用户改了计划。
+  - `_plan_fingerprint` 同时改成规范投影（只取 step_id/capability/instruction/depends_on/round，
+    缺字段与空字段等价、依赖排序无关），执行期回填的 `iteration/status/result` 不再改变指纹。
+  - 后果如实说明：反思改写过计划的运行，旧 PASS 不再覆盖它 → 个人模式仍可作经验
+    （admitted）但**不计入已验证成功**（verified=false，模板固化因此不触发）；
+    银行口径下连经验池都不进。这是"异版 PASS 不复用"的应有语义，不是回归。
+- **恢复不复用旧 PASS**：`_restore_review_state` 增加计划版本比较（策略版本/身份模式已有），
+  版本不符 → 按"未完成评审"处置；**旧 checkpoint 没有 `plan_version` 字段 → 视为无法证明，
+  一律不复用**（拦下而不是放行）。checkpoint 新增 `plan_version`（与 `review.plan_version`
+  分开记：两者不同即表示落盘时计划已被改写）。
+- **待复核内容的隔离闭环**：
+  - `add_prompt_refinement(..., status=...)`：默认 **`pending_review`**（默认拒绝），
+    调用方必须显式声明"本次运行已验证成功"才写 `active`；状态同时进 metadata 与文档正文。
+  - `query_prompt_refinements`：向量路径与**字面兜底路径**都只返回 `status == "active"` 的条目；
+    **缺 status 的历史记录一律按未生效处理**（它们写入时正是"反思产出直接生效"的年代，
+    状态无从证明）。此前注册表按 M0-d 拦住了 pending_review，但 RAG 那条没有拦——
+    同一次运行写下的改进仍然会被下一个任务检索并注入。
+  - `count_pending_refinements()` + `memory_health.refinements_held`：隔离**可见**，
+    不是静默丢弃；`set_prompt_refinement_status(ids, "active")` 是放行入口（只改状态，
+    **不动**任何样本的核实标记——人工 approve ≠ 数据已核实）。
+  - 反思写入方（`_record_reflection_refinement`）与自迭代写入方（`prompt_refinery`）都改成
+    按准入结论传状态：注册表与 RAG 两条路径用**同一个**状态。
+- **审批 API 并发保护**（`/api/evolution/approve`）：认领改为原子
+  （`lrem(count=1)` 的返回值当凭据，拿不到 → 409），修掉"两个并发审批都读到同一条待审策略、
+  都删成功、都去部署（同一策略被批准两次、后一次覆盖前一次的 rollout）"；另加版本保护——
+  已部署的另一版策略不再被静默覆盖（需显式 `force=true`，冲突时返回 409 且**不**把待审策略
+  认领掉，否则它会凭空消失）。**未做**：CSRF（后端同时接受 `Cookie: session=`，
+  跨站表单可借会话 cookie 发起写操作）与 A5 管理界面——按计划留到 D 批。
+- 回归：新增 `test_review_isolation.py`（10 项，含"生成→待审→下一任务检索/注入为零→放行后可用"
+  链路）已接入 CI；`test_review_protocol` 24→28、`test_admission` 29→31（新增异版 PASS
+  的本地/银行两条判定）、`test_memory_degradation` 30 项。
 
 **MKT-P0-4 README 区间披露 + 定位改写：已落地（仅仓库内）**
 

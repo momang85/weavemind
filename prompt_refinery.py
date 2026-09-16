@@ -155,6 +155,9 @@ def refine_after_task(
                             task_id=task_id,
                             version=2,
                             outcome="applied",
+                            # R1：注册表与 RAG **同一个状态**——注册表按 pending_review
+                            # 留档时，RAG 里的那条也不得被后续任务注入
+                            status=status,
                         )
                     except Exception as exc:
                         logger.warning("Refinement RAG record failed: %s", str(exc)[:120])

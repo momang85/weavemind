@@ -210,19 +210,94 @@ class TestSharedPolicyAcrossEntryPoints(unittest.TestCase):
         o._identity_mode = lambda: "local"
         o._messaging = mock.MagicMock()
         o._now_iso = lambda: "T"
+        # 复用的前提：PASS 绑定在**恢复后的计划版本**上（R1 起按版本号判定）
+        pv = o._bump_plan_version("t-1", "任务起始规划")
         saved = {"verdict": "PASS", "policy_version": ov.REVIEW_POLICY_VERSION,
-                 "mode": "local", "plan_fingerprint": "fp", "rounds": 1}
+                 "mode": "local", "plan_fingerprint": o._plan_fingerprint(STEPS),
+                 "plan_version": pv, "rounds": 1}
         with mock.patch("orchestrator_v2.push_progress"):
             self.assertTrue(o._restore_review_state("t-1", saved, STEPS))
         self.assertEqual(o._review_state("t-1")["verdict"], "PASS")
+        self.assertTrue(o.review_passed_for("t-1", STEPS),
+                        "恢复后的 PASS 仍应按指纹绑定在这版计划上")
+        self.assertTrue(o.review_scope_ok("t-1"))
+
+    def test_resume_rejects_pass_bound_to_other_plan_version(self):
+        """R1：checkpoint 的 PASS 绑定在别的计划版本上 → 不复用（异版 PASS 不放行）。"""
+        o = ov.OrchestratorV2.__new__(ov.OrchestratorV2)
+        o._identity_mode = lambda: "local"
+        o._messaging = mock.MagicMock()
+        o._now_iso = lambda: "T"
+        o._bump_plan_version("t-1", "任务起始规划")
+        saved = {"verdict": "PASS", "policy_version": ov.REVIEW_POLICY_VERSION,
+                 "mode": "local", "plan_fingerprint": o._plan_fingerprint(STEPS),
+                 "plan_version": 1}
+        # 落盘之后计划被改写（反思追加/替换步骤）→ 当前版本变成 v2
+        o._bump_plan_version("t-1", "反思追加/替换步骤")
+        with mock.patch("orchestrator_v2.push_progress"):
+            self.assertFalse(o._restore_review_state("t-1", saved, STEPS))
+        self.assertEqual(o._review_state("t-1")["verdict"], "DEGRADED")
+        self.assertFalse(o.review_scope_ok("t-1"), "异版 PASS 不得当作覆盖本版计划")
+
+    def test_resume_rejects_legacy_pass_without_plan_version(self):
+        """旧 checkpoint 没有 plan_version → 无法证明覆盖本版计划，按不复用处理。"""
+        o = ov.OrchestratorV2.__new__(ov.OrchestratorV2)
+        o._identity_mode = lambda: "local"
+        o._messaging = mock.MagicMock()
+        o._now_iso = lambda: "T"
+        o._bump_plan_version("t-1", "任务起始规划")
+        legacy = {"verdict": "PASS", "policy_version": ov.REVIEW_POLICY_VERSION,
+                  "mode": "local", "plan_fingerprint": o._plan_fingerprint(STEPS)}
+        with mock.patch("orchestrator_v2.push_progress"):
+            self.assertFalse(o._restore_review_state("t-1", legacy, STEPS))
+
+    def test_review_scope_tracks_plan_rewrite(self):
+        """PASS → 计划被反思改写 → 该 PASS 不再覆盖当前版本计划。"""
+        o = ov.OrchestratorV2.__new__(ov.OrchestratorV2)
+        o._identity_mode = lambda: "local"
+        o._messaging = mock.MagicMock()
+        o._now_iso = lambda: "T"
+        o._bump_plan_version("t-1", "任务起始规划")
+        with mock.patch("orchestrator_v2.push_progress"):
+            o._review_bind_pass("t-1", STEPS)
+            self.assertTrue(o.review_scope_ok("t-1"))
+            o._bump_plan_version("t-1", "反思追加/替换步骤")
+        self.assertFalse(o.review_scope_ok("t-1"),
+                         "计划改写后旧 PASS 不得再被当成覆盖本版计划")
+
+    def test_mechanical_postprocessing_keeps_pass_valid(self):
+        """机械加工（依赖连线/目标注入等回填字段）不算改版：PASS 必须仍然有效。
+
+        否则每一次真实运行都会被判成"没有绑定的 PASS"——判定本身失去意义。
+        """
+        o = ov.OrchestratorV2.__new__(ov.OrchestratorV2)
+        o._identity_mode = lambda: "local"
+        o._messaging = mock.MagicMock()
+        o._now_iso = lambda: "T"
+        o._bump_plan_version("t-1", "任务起始规划")
+        reviewed = [dict(s) for s in STEPS]
+        with mock.patch("orchestrator_v2.push_progress"):
+            o._review_bind_pass("t-1", reviewed)
+        executed = [dict(s) for s in reviewed]
+        for s in executed:
+            s["iteration"] = 1
+            s["status"] = "SUCCESS"
+            s["result"] = {"status": "SUCCESS", "result": "内容"}
+            s["depends_on"] = list(s.get("depends_on") or [])
+        self.assertEqual(o._plan_fingerprint(reviewed), o._plan_fingerprint(executed),
+                         "执行期回填的字段不得改变计划指纹")
+        self.assertTrue(o.review_passed_for("t-1", executed))
+        self.assertTrue(o.review_scope_ok("t-1"))
 
     def test_resume_rejects_stale_or_other_mode_pass(self):
         o = ov.OrchestratorV2.__new__(ov.OrchestratorV2)
         o._identity_mode = lambda: "local"
         o._messaging = mock.MagicMock()
         o._now_iso = lambda: "T"
+        pv = o._bump_plan_version("t-1", "任务起始规划")
         stale = {"verdict": "PASS", "policy_version": "review-policy/v0",
-                 "mode": "local", "plan_fingerprint": "fp"}
+                 "mode": "local", "plan_fingerprint": o._plan_fingerprint(STEPS),
+                 "plan_version": pv}
         with mock.patch("orchestrator_v2.push_progress"):
             self.assertFalse(o._restore_review_state("t-1", stale, STEPS))
         self.assertEqual(o._review_state("t-1")["verdict"], "DEGRADED")
@@ -242,6 +317,8 @@ class TestSharedPolicyAcrossEntryPoints(unittest.TestCase):
         o._review_state("t-1").update({"verdict": "PASS", "plan_fingerprint": "fp"})
         cp = o._checkpoint_payload("t-1", "目标", None, [], {})
         self.assertEqual(cp["review"]["verdict"], "PASS")
+        self.assertIn("plan_version", cp,
+                      "checkpoint 必须记下当前计划版本（与 review.plan_version 对比用）")
 
 
 class TestReviewStatusIsVisible(unittest.TestCase):

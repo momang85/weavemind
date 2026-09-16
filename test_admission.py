@@ -245,7 +245,7 @@ class TestAdmissionDecisionFromOrchestrator(unittest.TestCase):
         self.o._now_iso = lambda: "T"
         self.o._task_admission = {}
         self.o._task_review = {}
-        self.o._delivery_draft_reason = ""
+        self.o._task_delivery = {}
 
     def tearDown(self):
         self.ws_mod.WORKSPACE_ROOT = self.old_root
@@ -266,8 +266,12 @@ class TestAdmissionDecisionFromOrchestrator(unittest.TestCase):
         store.adopt(store.get(v.version_id) or v, reason="交付")
         store.record_delivery(body + "\n\n---\n\n交付说明", accepted_body=body,
                               ok=delivery_ok)
-        self.o._review_state(tid).update({"verdict": verdict, "policy_version":
-                                          "review-policy/v1", "mode": "local"})
+        self.o._review_state(tid).update({
+            "verdict": verdict, "policy_version": "review-policy/v1", "mode": "local",
+            # R1：PASS 必须绑定在**本任务当前计划版本**上才算数
+            "plan_version": (self.o._plan_version(tid) or
+                             self.o._bump_plan_version(tid, "任务起始规划")),
+        })
         return tid
 
     def test_verified_when_all_evidence_present(self):
@@ -305,6 +309,32 @@ class TestAdmissionDecisionFromOrchestrator(unittest.TestCase):
         finally:
             self.o._identity_mode = orig
         self.assertFalse(d.admitted)
+
+    def test_pass_bound_to_other_plan_version_is_not_verified(self):
+        """R1：计划被改写后，旧版 PASS 不得让本次运行算"已验证成功"。
+
+        评审确实通过过——但过的是**另一版计划**。个人模式下仍可作经验（admitted），
+        但不能计入已验证成功（模板固化阈值吃的是这个数）。
+        """
+        tid = self._seed("t-rewritten")
+        self.o._bump_plan_version(tid, "反思追加/替换步骤")
+        d = self.o._admission_decision(tid, "SUCCESS", {"overall": "pass"})
+        self.assertTrue(d.admitted, "个人模式：经验可参考")
+        self.assertFalse(d.verified, "异版 PASS 不得当成本版已验证成功")
+        self.assertIn("降级", " ".join(d.reasons))
+
+    def test_pass_bound_to_other_plan_version_blocks_bank(self):
+        """R1：银行口径下，异版 PASS 连经验池都不进。"""
+        tid = self._seed("t-rewritten-bank")
+        self.o._bump_plan_version(tid, "反思追加/替换步骤")
+        orig = self.o._identity_mode
+        self.o._identity_mode = lambda: "bank"
+        try:
+            d = self.o._admission_decision(tid, "SUCCESS", {"overall": "pass"})
+        finally:
+            self.o._identity_mode = orig
+        self.assertFalse(d.admitted)
+        self.assertIn("缺少绑定 PASS", " ".join(d.reasons))
 
 
 class TestStatsPathSafety(unittest.TestCase):

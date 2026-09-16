@@ -34,6 +34,14 @@ _NO_REDIS_RETRY = _Retry(_NoBackoff(), 0)
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
+# 提示词改进经验的状态（R1）
+# ---------------------------------------------------------------------------
+
+# 生效：可取回、可注入；待复核：只留档，**不**注入后续任务
+REFINEMENT_ACTIVE = "active"
+REFINEMENT_PENDING = "pending_review"
+
+# ---------------------------------------------------------------------------
 # 环境变量默认值
 # ---------------------------------------------------------------------------
 
@@ -538,10 +546,17 @@ class MemoryManager:
         task_id: str = "",
         version: int = 1,
         outcome: str = "applied",
+        status: str = REFINEMENT_PENDING,
     ) -> None:
         """沉淀一条提示词改进记录（反思结论或自迭代覆盖），供后续任务 RAG 检索。
-        任何异常都不抛出（进化系统不能拖垮任务主线）。"""
+        任何异常都不抛出（进化系统不能拖垮任务主线）。
+
+        `status`（R1）：`pending_review` 的记录**只留档、不注入**——待人工复核的经验
+        不得在审核通过前影响后续任务。默认 `pending_review` 是**默认拒绝**：调用方
+        必须显式说明"这次运行已取得已验证成功"才写成 `active`。
+        """
         import uuid
+        _status = str(status or REFINEMENT_PENDING)[:20]
         try:
             doc = (
                 f"提示词进化记录（{key} v{version}）\n"
@@ -549,7 +564,7 @@ class MemoryManager:
                 f"问题/反思结论：{issue}\n"
                 f"改进后的提示词（追加/覆盖）：{fix_prompt}\n"
                 f"改进理由：{rationale}\n"
-                f"结果：{outcome}"
+                f"结果：{outcome}（状态：{_status}）"
             )
             self._prompt_refinements.add(
                 ids=[f"prf-{task_id or 'x'}-{uuid.uuid4().hex[:8]}"],
@@ -558,19 +573,69 @@ class MemoryManager:
                     "key": key,
                     "version": int(version or 1),
                     "outcome": outcome,
+                    "status": _status,
                     "task_id": str(task_id)[:40],
                     "created_at": _now_iso(),
                 }],
             )
-            logger.info("Prompt refinement recorded: %s v%s (task %s)", key, version, task_id)
+            logger.info("Prompt refinement recorded: %s v%s status=%s (task %s)",
+                        key, version, _status, task_id)
         except Exception as exc:
             logger.warning("Failed to record prompt refinement: %s", str(exc)[:150])
+
+    @staticmethod
+    def _refinement_effective(meta: dict | None) -> bool:
+        """该条提示词改进经验是否**已生效**（可取回/注入）。
+
+        R1：只认显式写着 `active` 的记录。缺 `status` 的历史记录一律按**未生效**处理
+        ——它们写入时正是"反思产出直接生效"的年代，状态无从证明；审核通过后再用
+        `approve_prompt_refinement` 放行（宁可少注入，不可让待复核内容影响后续任务）。
+        """
+        return str((meta or {}).get("status") or "") == REFINEMENT_ACTIVE
+
+    def count_pending_refinements(self) -> int:
+        """被隔离（待人工复核）的提示词改进经验条数——让隔离可见而不是静默丢弃。"""
+        try:
+            res = self._prompt_refinements.get(include=["metadatas"])
+        except Exception as exc:
+            logger.debug("统计待复核改进经验失败: %s", str(exc)[:80])
+            return 0
+        metas = (res or {}).get("metadatas") or []
+        return sum(1 for m in metas if not self._refinement_effective(m))
+
+    def set_prompt_refinement_status(self, entry_ids, status: str) -> int:
+        """人工复核结论：把指定条目放行/退回（返回实际改动条数）。
+
+        R1 只要求"隔离可解除"这一能力本身；管理界面与审批 API 属 D 批。
+        `status` 只接受 active/pending_review 两个值，拒绝其它取值（不发明第三态）。
+        """
+        want = str(status or "")
+        if want not in (REFINEMENT_ACTIVE, REFINEMENT_PENDING):
+            raise ValueError(f"未知的经验状态 {want!r}")
+        ids = [str(i) for i in (entry_ids or []) if str(i or "").strip()]
+        if not ids:
+            return 0
+        res = self._prompt_refinements.get(ids=ids, include=["metadatas"])
+        got = (res or {}).get("ids") or []
+        if not got:
+            return 0
+        metas = (res or {}).get("metadatas") or [{} for _ in got]
+        new_metas = []
+        for m in metas:
+            m = dict(m or {})
+            m["status"] = want
+            m["reviewed_at"] = _now_iso()
+            new_metas.append(m)
+        self._prompt_refinements.update(ids=list(got), metadatas=new_metas)
+        logger.info("提示词经验状态更新：%d 条 → %s", len(got), want)
+        return len(got)
 
     def query_prompt_refinements(
         self, current_goal: str, n: int = 3, threshold: float | None = None
     ) -> list[str]:
         """按目标检索相关提示词改进经验；返回格式化文本列表（已按相似度过滤）。
 
+        R1：只返回**已生效**（`status=active`）的条目——待人工复核的改进不得注入后续任务。
         embedding 降级时走字面兜底：欠费期一样能读到历史提示词经验。
         """
         thr = self._similarity_threshold if threshold is None else threshold
@@ -583,7 +648,8 @@ class MemoryManager:
                 self._degraded_queries += 1
                 self._degraded_hits += 1
                 rows = [(h["document"], h["metadata"]) for h in literal_hits]
-                return [f"[{(m or {}).get('key', '?')}] {d[:500]}" for d, m in rows]
+                return [f"[{(m or {}).get('key', '?')}] {d[:500]}" for d, m in rows
+                        if self._refinement_effective(m)]
         try:
             res = self._prompt_refinements.query(
                 query_texts=[current_goal],
@@ -596,6 +662,8 @@ class MemoryManager:
             for doc, dist, meta in zip(docs, dists, metas):
                 if not doc or not doc.strip() or dist > thr:
                     continue
+                if not self._refinement_effective(meta):
+                    continue
                 rows.append((doc, meta or {}))
         except Exception as exc:
             logger.warning("Failed to query prompt refinements: %s", str(exc)[:120])
@@ -606,7 +674,8 @@ class MemoryManager:
             if literal_hits:
                 self._degraded_hits += 1
             rows = [(h["document"], h["metadata"]) for h in literal_hits]
-        return [f"[{(meta or {}).get('key', '?')}] {doc[:500]}" for doc, meta in rows]
+        return [f"[{(meta or {}).get('key', '?')}] {doc[:500]}" for doc, meta in rows
+                if self._refinement_effective(meta)]
 
     # ------------------------------------------------------------------
     # 记忆沉淀
@@ -979,6 +1048,8 @@ class MemoryManager:
                 if self._degraded_queries else 0.0
             ),
             "pending_writes": self.pending_count(),
+            # R1：待人工复核的提示词改进经验被隔离的条数（隔离必须可见，不能静默丢弃）
+            "refinements_held": self.count_pending_refinements(),
         }
 
     # ------------------------------------------------------------------

@@ -265,7 +265,7 @@ class TestOfflineFullDelivery(unittest.TestCase):
         self.o._brpop_with_deadline = self.run.mixed_brpop(self.tid)
         res = self._run()
         self.assertEqual(res["status"], "SUCCESS",
-                         f"draft={getattr(self.o, '_delivery_draft_reason', None)!r} "
+                         f"delivery={self.o._delivery(self.tid)!r} "
                          + res.get("report", "")[:200])
 
         from report_version import VersionStore, body_hash
@@ -287,9 +287,9 @@ class TestOfflineFullDelivery(unittest.TestCase):
         deliveries = store.deliveries()
         self.assertTrue(deliveries, "收尾必须记录最终交付文档")
         self.assertTrue(deliveries[-1]["ok"], deliveries[-1].get("reason"))
-        self.assertEqual(getattr(self.o, "_delivery_draft_reason", ""), "",
+        self.assertEqual(self.o._delivery(self.tid).get("reason"), "",
                          "通过验收的交付不得被标草稿")
-
+        self.assertEqual(self.o._delivery(self.tid).get("status"), "verified")
         final_report = res["final_report"]
         self.assertIn(REPORT_BODY.splitlines()[0], final_report)
         self.assertEqual(deliveries[-1]["delivered_sha256"], body_hash(final_report),
