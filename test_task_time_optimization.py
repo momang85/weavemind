@@ -229,7 +229,11 @@ class TestReflectionConvergence(unittest.TestCase):
             return {"accepted": True, "score": 9.0, "verdict": "accept"}
 
         o._reflect = fake_reflect
-        res = o.run("t-conv-go", "目标", auto_run=True)
+        # M0-a 起"候选稿更优"由**两版各自的验收**判定，长度不再决定胜负；本测试考的是
+        # 反思收敛逻辑，故把比较结果固定为"更优"（版本比较本身在 test_report_version 覆盖）
+        with mock.patch("orchestrator_v2.compare_versions",
+                        lambda cur, cand, **kw: (True, "测试：候选稿更优")):
+            res = o.run("t-conv-go", "目标", auto_run=True)
 
         self.assertEqual(reflected["n"], 2, "best_report 有改善应继续反思")
         self.assertEqual(res["status"], "SUCCESS")

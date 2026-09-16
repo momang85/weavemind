@@ -968,11 +968,30 @@ class TestMemoryGovernanceV2(unittest.TestCase):
         self.assertEqual(m._conversations.count(), 1)
 
     def test_no_acceptance_report_keeps_current_behavior(self):
-        """P0：无验收报告 → 维持现状（两者都沉淀）。"""
+        """M0-d：无验收报告 = **未知**，只沉淀对话，不进策略池。
+
+        旧行为是"没有验收就照旧沉淀策略"，于是无证据样本被当成成功经验，
+        抬高模板固化的已验证计数（本测试按新准入谓词重写）。
+        """
         m = self._make_mem()
         m.consolidate_memory("无验收目标", self.STEPS, "报告")
+        self.assertEqual(m._strategies.count(), 0, "未知证据不得进策略池")
+        self.assertEqual(m._conversations.count(), 1, "对话记录保留（可追溯）")
+
+    def test_degraded_review_strategy_is_marked_needs_review(self):
+        """评审降级（未取得 PASS）的经验可沉淀，但显式标 needs_review 且不算已验证。"""
+        m = self._make_mem()
+        m.consolidate_memory(
+            "评审降级目标", self.STEPS, "报告",
+            acceptance_summary={"overall": "pass"},
+            admission={"admitted": True, "verified": False,
+                       "reasons": ["评审未完成（降级）"]},
+        )
         self.assertEqual(m._strategies.count(), 1)
-        self.assertEqual(m._conversations.count(), 1)
+        meta = m._strategies._docs[0]["metadata"]
+        self.assertTrue(meta.get("needs_review"))
+        self.assertFalse(meta.get("verified"))
+        self.assertIn("评审未完成", " ".join(meta.get("admission_reasons") or []))
 
     def test_same_goal_strategy_dedup_updates_not_inserts(self):
         """P1：同 goal 二次沉淀 → 策略数不增（更新刷新 timestamp/expires_at）。"""
@@ -1247,7 +1266,10 @@ class TestP2ConfigHotReload(unittest.TestCase):
         import time
         import llm_client
 
-        tmp = tempfile.mktemp(suffix=".json")
+        # 安全临时文件（CWE-377）：mktemp 只给路径、可被抢占/替换；
+        # 改用 mkdtemp 建目录 + 目录内固定文件名（写入写法保持原样）
+        tmpdir = tempfile.mkdtemp(prefix="wm_llmcfg_")
+        tmp = os.path.join(tmpdir, "llm_config.json")
         old_path = llm_client._CFG_PATH
         old_mtime = llm_client._cfg_mtime
         old_env = {
@@ -1280,6 +1302,7 @@ class TestP2ConfigHotReload(unittest.TestCase):
                 os.remove(tmp)
             except Exception:
                 pass
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 
 class TestP2ToolContracts(unittest.TestCase):
@@ -2526,19 +2549,25 @@ class TestP0BalancePrecheck(unittest.TestCase):
         self.assertEqual(c, ("web_search", "web_fetch", "content_summary"))
 
     def test_consolidation_stats_threshold(self):
-        """同 domain×能力链 验收 pass ≥ 阈值后才允许固化。"""
-        import os
+        """同 domain×能力链 **准入为已验证成功** ≥ 阈值后才允许固化（M0-d）。
+
+        判定依据从"最新验收文件"改为准入谓词：只有终态 SUCCESS + 选中版本验收 pass +
+        绑定 PASS 的评审才算 verified；缺验收（未知）与验收 fail 都不计数，
+        同任务同版本重复收尾也只计一次。
+        """
         import tempfile
         from pathlib import Path
         import workspace as ws_mod
+        from admission import admit_success
         from orchestrator_v2 import OrchestratorV2
+        from report_version import VersionStore
 
         o = OrchestratorV2.__new__(OrchestratorV2)
         tmp = Path(tempfile.mkdtemp(prefix="stat_"))
         old_root = ws_mod.WORKSPACE_ROOT
-        old_env = os.environ.get("WEAVEMIND_CONSOLIDATION_STATS")
+        old_stats = OrchestratorV2.CONSOLIDATION_STATS_FILE
         stats_path = tmp / "stats.json"
-        os.environ["WEAVEMIND_CONSOLIDATION_STATS"] = str(stats_path)
+        OrchestratorV2.CONSOLIDATION_STATS_FILE = str(stats_path)
         ws_mod.configure_workspace_root(str(tmp))
         try:
             goal = "分析腾讯历年财报"
@@ -2548,21 +2577,49 @@ class TestP0BalancePrecheck(unittest.TestCase):
             ]
             domain, chain = o._consolidation_key(goal, steps)
             self.assertEqual(o._count_verified_chain(domain, chain, "t-now"), 0)
-            # 记录 2 次验收 pass + 1 次 fail
-            for i in range(3):
-                tid = f"hist-{i}"
+
+            def _hist(tid: str, overall: str, body: str):
+                """建一版正文 + 绑定该版验收（或留未知），返回该任务的准入结论。"""
                 ws_dir = ws_mod.task_workspace(tid)
                 ws_dir.mkdir(parents=True, exist_ok=True)
-                (ws_dir / "acceptance_report.json").write_text(
-                    json.dumps({"overall": "pass" if i < 2 else "fail"}),
-                    encoding="utf-8")
-                o._record_consolidation_stat(tid, goal, steps)
+                store = VersionStore(ws_dir, tid)
+                ver = store.record(body)
+                if overall:
+                    store.bind_acceptance({
+                        "overall": overall, "gaps": [],
+                        "report_sha256": ver.version_id[:16],
+                        "rules_version": "2026.09.12", "rules_fingerprint": "fp",
+                    })
+                    store.adopt(store.get(ver.version_id), reason="历史样例")
+                acc = {"overall": overall} if overall else None
+                return admit_success(
+                    status="SUCCESS", acceptance=acc,
+                    review={"verdict": "PASS"}, mode="local",
+                    version_bound=bool(overall),
+                )
+
+            # 2 次验收 pass（含评审 PASS）+ 1 次验收 fail
+            for i in range(3):
+                tid = f"hist-{i}"
+                adm = _hist(tid, "pass" if i < 2 else "fail", f"正文{i}")
+                o._record_consolidation_stat(tid, goal, steps, admission=adm)
             self.assertEqual(o._count_verified_chain(domain, chain, "t-now"), 2)
+
+            # 缺验收（未知）不计入，也不得覆盖已验证的计数
+            adm_unknown = _hist("hist-unknown", "", "无验收正文")
+            self.assertFalse(adm_unknown.verified)
+            o._record_consolidation_stat("hist-unknown", goal, steps,
+                                         admission=adm_unknown)
+            self.assertEqual(o._count_verified_chain(domain, chain, "t-now"), 2,
+                             "未知证据不得计为已验证成功")
+
+            # 同任务同版本重复收尾只计一次
+            o._record_consolidation_stat("hist-0", goal, steps,
+                                         admission=_hist("hist-0", "pass", "正文0"))
+            self.assertEqual(o._count_verified_chain(domain, chain, "t-now"), 2,
+                             "同任务同版本重复收尾不得刷高已验证计数")
         finally:
-            if old_env is None:
-                os.environ.pop("WEAVEMIND_CONSOLIDATION_STATS", None)
-            else:
-                os.environ["WEAVEMIND_CONSOLIDATION_STATS"] = old_env
+            OrchestratorV2.CONSOLIDATION_STATS_FILE = old_stats
             ws_mod.WORKSPACE_ROOT = old_root
 
     def test_embed_charts_uses_section_hint(self):

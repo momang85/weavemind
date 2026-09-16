@@ -48,6 +48,28 @@ jobs:
         run: python test_frontend_guards.py
       - name: Startup readiness (cold-start race)
         run: python test_startup_readiness.py
+      - name: Task context contract (identity across threads/processes)
+        run: python test_task_context.py
+      - name: Network access policy (registered endpoints vs content URLs)
+        run: python test_net_policy.py
+      - name: Report version selection & source semantics (V1 fixed samples)
+        run: python test_report_quality.py
+      - name: Report version & evidence binding (M0-a)
+        run: python test_report_version.py
+      - name: Cancel semantics (terminal state / gate / bounded wait)
+        run: python test_cancel_semantics.py
+      - name: Review degradation (timeout/exception must not pass)
+        run: python test_review_degradation.py
+      - name: Review protocol & per-root-task state (M0-b)
+        run: python test_review_protocol.py
+      - name: Admission for lessons/templates/refinery (M0-d)
+        run: python test_admission.py
+      - name: R0 boundaries (goal-vs-evidence, operand roles)
+        run: python test_r0_boundaries.py
+      - name: Root-task budget & stage observability (M0-e)
+        run: python test_root_budget.py
+      - name: Offline delivery & fault injection (M0-f)
+        run: python test_offline_delivery.py
       - name: Deploy manifest & lock guards
         run: python test_deploy_manifest.py
       - name: Task state tests
@@ -89,11 +111,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # 行为测试直接跑 .ts（Node 的类型擦除需要 22.6+；本地用 24 验证过）
+          node-version: "22"
           cache: npm
           cache-dependency-path: frontend/package-lock.json
       - name: Install
         run: npm ci
+        working-directory: frontend
+      - name: Behavior tests (demo guard / API result / metrics state)
+        # 真实行为测试：用内存 fetch 替身断言"请求有没有真的发出去""失败/拦截有没有被当成成功"，
+        # 不依赖浏览器与真实接口
+        run: node --experimental-strip-types --test tests/*.test.mjs
         working-directory: frontend
       - name: Build
         run: npm run build

@@ -592,10 +592,12 @@ class TestCancelCooperativeChecks(unittest.TestCase):
         orch._now_iso = lambda: "2026-01-01T00:00:00"
         with mock.patch.object(orch, "_clear_task_running") as clear_run,                 mock.patch.object(orch, "_finalize_task") as fin,                 mock.patch.object(orch, "_notify_done_async") as notify,                 mock.patch.object(orch, "_clear_cancel") as clear_cancel,                 mock.patch("orchestrator_v2.push_progress"):
             out = orch._finish_cancelled("t1", "目标", [{"step_id": "1"}])
-        self.assertEqual(out["status"], "FAILED")
+        # V2-1：取消是独立终态 CANCELLED（此前写成 FAILED，导致历史/SSE/指标分不清
+        # "用户主动停止"与"真实失败"，前端 statusMeta 的"已取消"成了死代码）
+        self.assertEqual(out["status"], "CANCELLED")
         self.assertIn("取消", out["report"])
         clear_run.assert_called_once_with("t1")
-        self.assertEqual(fin.call_args[0][2], "FAILED")
+        self.assertEqual(fin.call_args[0][2], "CANCELLED")
         notify.assert_called_once()
         clear_cancel.assert_called_once_with("t1")
 

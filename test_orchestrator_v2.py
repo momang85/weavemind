@@ -26,6 +26,45 @@ from orchestrator_v2 import OrchestratorV2
 import workspace as ws_mod
 
 
+# ── 模块级离线桩 ───────────────────────────────────────────────────
+# 本文件自称"fakes 模式"，但实测里仍有未打桩的真实出站调用：编排器的
+# `_structured_preload`（结构化数据路由，失败还会退避 2 秒再试）与少数未打桩的
+# LLM 调用。供应商账户余额不足时（402）这些调用会挂到超时，套件从 ~200 秒膨胀到
+# 900 秒以上并超时——测试不该依赖付费端点。
+#
+# 这里在模块加载期把这两类出站路径替换为确定性桩；确需真实网络时显式设
+# `WM_REAL_NETWORK=1`（按规划，网络/真实模型用例单独分组，不进默认套件）。
+_PATCHERS: list = []
+
+
+def setUpModule():
+    if os.environ.get("WM_REAL_NETWORK") == "1":
+        return
+
+    _PATCHERS.append(mock.patch.object(
+        OrchestratorV2, "_structured_preload", lambda *a, **k: None, create=True))
+    # 结构化数据路由的真实出站入口（miss 时还会 time.sleep(2) 再试一次）
+    import adapters.router as _router
+    _PATCHERS.append(mock.patch.object(_router, "route_structured", lambda *a, **k: None))
+
+    def _offline_call_llm(*a, **k):
+        raise RuntimeError("离线测试：真实 LLM 调用被禁用（设 WM_REAL_NETWORK=1 才允许）")
+
+    import llm_client
+    _PATCHERS.append(mock.patch.object(llm_client, "call_llm", _offline_call_llm))
+    _PATCHERS.append(mock.patch.object(llm_client.LLMClient, "call", _offline_call_llm))
+    for p in _PATCHERS:
+        p.start()
+
+
+def tearDownModule():
+    while _PATCHERS:
+        try:
+            _PATCHERS.pop().stop()
+        except Exception:
+            pass
+
+
 class FakeMessaging:
     def __init__(self):
         self.published = []
@@ -368,7 +407,10 @@ class TestRunIteration(unittest.TestCase):
         o._reflect = fake_reflect
         o._now_iso = lambda: "t"
         res = o.run("t1", "目标", auto_run=True)
-        self.assertEqual(res["status"], "SUCCESS")
+        # M0-a：这一跑没有任何验收（测试替身不产生验收报告）→ 交付只能是"未验收草稿"，
+        # 状态如实降级为 SUCCESS_WITH_ISSUES，不得显示"通过"
+        self.assertEqual(res["status"], "SUCCESS_WITH_ISSUES")
+        self.assertIn("未验收草稿", res["final_report"])
         self.assertEqual(len(res["steps"]), 2)
         self.assertTrue(res["final_report"].startswith("#"))
 
@@ -519,7 +561,8 @@ class TestRunIteration(unittest.TestCase):
         self.assertEqual(reflected["n"], 2, "重做后应再次反思")
         self.assertGreaterEqual(dispatch_calls["1"], 2, "步骤1应被重做（至少2次派发）")
         # 单步重做不应整轮重跑：步骤2/3在初始轮各执行1次，重做后因依赖1被重做 → 也会重跑
-        self.assertEqual(res["status"], "SUCCESS")
+        # M0-a：无验收 → 未验收草稿 → 如实降级（不再报 SUCCESS）
+        self.assertEqual(res["status"], "SUCCESS_WITH_ISSUES")
 
     def test_inject_memory_context_logs(self):
         o = make_orch()
@@ -547,7 +590,11 @@ class TestRunIteration(unittest.TestCase):
 
 
 class TestFinalReportConfirm(unittest.TestCase):
-    """V1.2 关键节点 HITL：报告终稿审批（report_confirm）。"""
+    """V1.2 关键节点 HITL：报告终稿审批（report_confirm）。
+
+    注：这些用例的替身流程不产生验收报告 → 交付按"未验收草稿"处理，
+    M0-a 起状态如实降级为 SUCCESS_WITH_ISSUES（本类只关心审批触发次数与放行/取消语义）。
+    """
 
     def _orch(self, **overrides):
         o = make_orch(**overrides)
@@ -582,7 +629,7 @@ class TestFinalReportConfirm(unittest.TestCase):
         o = self._orch()
         o._wait_report_confirm = mock.MagicMock(return_value=True)
         res = o.run("t-rc-default", "目标", auto_run=True)
-        self.assertEqual(res["status"], "SUCCESS")
+        self.assertEqual(res["status"], "SUCCESS_WITH_ISSUES")
         o._wait_report_confirm.assert_not_called()
         self.assertEqual(self._awaiting_messages(o), [])
 
@@ -598,7 +645,7 @@ class TestFinalReportConfirm(unittest.TestCase):
 
         o._brpop_with_deadline = fake_brpop
         res = o.run("t-rc-ok", "目标", auto_run=True, report_confirm=True)
-        self.assertEqual(res["status"], "SUCCESS")
+        self.assertEqual(res["status"], "SUCCESS_WITH_ISSUES")
         self.assertIn("plan_confirm:t-rc-ok", keys)
         awaits = self._awaiting_messages(o)
         self.assertEqual(len(awaits), 1, "终稿审批只发布一次 AWAITING_CONFIRM")
@@ -625,11 +672,21 @@ class TestFinalReportConfirm(unittest.TestCase):
         self.assertEqual(completes[-1], "FAILED", "任务完成消息应如实标记失败")
 
     def test_timeout_auto_releases_task(self):
-        """report_confirm=True + 超时 → 自动放行 SUCCESS，不卡死。"""
+        """report_confirm=True + 超时 → 自动放行 SUCCESS，不卡死。
+
+        确认等待按 1 秒分片轮询（取消要能立刻中断等待）：测试把确认超时压到 1 秒，
+        且 brpop 替身"到点才回 None"——替身若秒回，轮询会一直跑到 300 秒默认超时。
+        """
         o = self._orch()
-        o._brpop_with_deadline = lambda r, key, deadline: None
+        o._plan_confirm_timeout = 1
+
+        def fake_brpop(r, key, deadline):
+            time.sleep(0.05)
+            return None
+
+        o._brpop_with_deadline = fake_brpop
         res = o.run("t-rc-timeout", "目标", auto_run=True, report_confirm=True)
-        self.assertEqual(res["status"], "SUCCESS")
+        self.assertEqual(res["status"], "SUCCESS_WITH_ISSUES")
         msgs = [
             m.get("payload", {}).get("message", "")
             for _, m in o._messaging.published
@@ -679,7 +736,7 @@ class TestFinalReportConfirm(unittest.TestCase):
         self.assertEqual(wait.call_count, 1, "多轮反思也只应审批一次")
         self.assertEqual(len(self._awaiting_messages(o)), 0,
                          "审批方法被 mock 时不发布状态消息")
-        self.assertEqual(res["status"], "SUCCESS")
+        self.assertEqual(res["status"], "SUCCESS_WITH_ISSUES")
 
 
 class TestMemoryAcceptanceWiring(unittest.TestCase):

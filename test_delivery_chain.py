@@ -2376,7 +2376,8 @@ class TestSimpleTaskFastPath(_DevSandboxMode, unittest.TestCase):
         o._find_agent = lambda cap: "fake-agent"
         try:
             res = o.run("t-simple-1", "生成一个 HTML 欢迎页", auto_run=True)
-            self.assertEqual(res["status"], "SUCCESS")
+            # M0-a：该替身流程没有验收报告 → 交付按未验收草稿，状态如实降级
+            self.assertEqual(res["status"], "SUCCESS_WITH_ISSUES")
             self.assertEqual(reflected["n"], 0, "简单任务跳过反射评审")
             fast_logs = [
                 m for _, m in o._messaging.published

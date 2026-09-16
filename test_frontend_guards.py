@@ -133,7 +133,64 @@ class TestStatusSemanticsUnified(unittest.TestCase):
         self.assertEqual(bad, [], f"直接渲染了状态枚举原文：{bad[:8]}")
 
 
+class TestDemoBoundaryRealBehavior(unittest.TestCase):
+    """演示边界必须由**真实行为测试**兜底，前缀清单只是补充。
+
+    架构复核 01:05 明确：断言前缀存在不等于缺陷关闭——要证明"请求没有真的发出去"、
+    "退出演示后不再拦截"、"403 不再被当成成功"、"刷新失败不留旧值"。这些在
+    `frontend/tests/*.test.mjs` 里用 Node 内存 fetch 替身验证，并由 CI 执行。
+    """
+
+    NODE_TESTS = ROOT / "frontend" / "tests"
+    CI_YML = ROOT / ".github" / "workflows" / "ci.yml"
+
+    def test_behavior_test_files_exist(self):
+        files = {p.name for p in self.NODE_TESTS.glob("*.test.mjs")}
+        for name, why in (
+            ("demoGuard.test.mjs", "演示守卫：真实出网次数 / 退出后是否仍拦截"),
+            ("apiResult.test.mjs", "API 结果判定：403 拦截与真实失败不得显示成功"),
+            ("metricsState.test.mjs", "指标状态机：失败后不得保留旧快照当当前值"),
+        ):
+            self.assertIn(name, files, f"缺少行为测试 {name}（{why}）")
+
+    def test_behavior_tests_run_in_ci(self):
+        ci = self.CI_YML.read_text(encoding="utf-8")
+        self.assertIn("--test tests/*.test.mjs", ci,
+                      "前端行为测试没有接进 CI（没跑过的测试不算闸门）")
+
+    def test_paid_get_paths_are_declared(self):
+        """GET 不能一概视作无副作用：记忆摘要冷缓存与 ?refresh=1 都会调用付费模型。"""
+        src = DEMO_GUARD.read_text(encoding="utf-8")
+        self.assertIn("DEMO_BLOCKED_GET", src, "缺少付费 GET 清单")
+        self.assertIn("/api/memory/summary", src, "记忆摘要未按付费接口拦截")
+
+    def test_url_param_is_initialization_only(self):
+        """URL 的 `?demo` 只能用于初始化：显式开关过之后必须以显式状态为准。"""
+        src = DEMO_GUARD.read_text(encoding="utf-8")
+        self.assertIn("resolved", src, "缺少「显式状态优先」标记")
+        self.assertNotIn("if (state.active) return true", src,
+                         "又写成 URL 与开关做或运算（退出后仍会拦截）")
+
+    def test_memory_handlers_judge_response(self):
+        """Memory 的删除/演化/审批必须逐个判定响应结果，不得无条件报成功。"""
+        src = (SRC / "pages" / "Memory.tsx").read_text(encoding="utf-8")
+        self.assertIn("readApiOutcome", src, "处理函数未统一判定响应")
+        self.assertGreaterEqual(
+            src.count("readApiOutcome(") + src.count("apiOutcome("), 4,
+            "删除/演化/审批/摘要四处都要判定结果（否则 403 会显示成功）")
+        self.assertNotIn("setNotice('删除完成')", src, "删除仍无条件报成功")
+        self.assertNotIn("setNotice('进化已触发", src, "演化仍无条件报成功")
+
+    def test_metrics_page_uses_state_machine(self):
+        """失败即不可用：指标页必须走 lib/metricsState（旧实现只设错误文案、留着旧值）。"""
+        src = (SRC / "pages" / "MetricsPage.tsx").read_text(encoding="utf-8")
+        self.assertIn("metricsFailure", src, "指标页未使用状态机（刷新失败会继续显示旧值）")
+        self.assertIn("lastOkAt", src, "失败后要明确标注「上次成功刷新」，而不是继续当当前值")
+
+
 class TestDemoGuardCoverage(unittest.TestCase):
+    """前缀清单（结构检查）。真实行为见 TestDemoBoundaryRealBehavior。"""
+
     def _prefixes(self) -> list[str]:
         text = DEMO_GUARD.read_text(encoding="utf-8")
         block = text.split("DEMO_BLOCKED_PREFIXES", 1)[1].split("] as const", 1)[0]
@@ -340,6 +397,27 @@ class TestReportPageWiring(unittest.TestCase):
         self.assertIn("草稿级", self.text, "缺少草稿图标签")
         self.assertIn("Escape", self.text, "图表放大缺 Esc 关闭")
         self.assertIn("下载图片", self.text, "缺单图下载")
+
+
+class TestReportExportBinding(unittest.TestCase):
+    """导出必须绑定"哪一版正文"（M0-a）：Markdown 也从服务端取字节，
+    否则清单里没有它的 hash，页面/PDF/清单就可能指向不同版本。"""
+
+    def setUp(self):
+        self.text = (SRC / "components" / "ReportViewer.tsx").read_text(encoding="utf-8")
+
+    def test_markdown_download_uses_server_export(self):
+        body = self.text.split("const downloadMarkdown", 1)[1].split("\n  }", 1)[0]
+        self.assertIn("/report.md", body, "Markdown 下载未走服务端导出（清单拿不到 hash）")
+
+    def test_print_path_reads_version_headers(self):
+        self.assertIn("X-Report-Version-Id", self.text, "打印件未标注导出对应版本")
+        self.assertIn("X-Report-Draft", self.text, "打印件未标注未验收草稿")
+
+    def test_print_body_comes_from_served_export(self):
+        """打印页正文优先取服务端同一份（内存稿只作兜底），且仍先转义再套标签。"""
+        self.assertIn("esc(printBody)", self.text)
+        self.assertNotIn("innerHTML = esc(report.final_report)", self.text)
 
 
 class TestMobileEntryPoints(unittest.TestCase):
