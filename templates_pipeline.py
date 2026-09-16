@@ -322,13 +322,17 @@ def consolidate_template(
             return
         # ── 探索→固化：domain×能力链 验收驱动 ──
         domain, chain = consolidation_key(goal, all_steps)
-        # 本次任务验收：存在验收报告时必须 pass
+        # 本次任务必须**验收通过**才算"已验证的一次"：未知（None：缺验收/缺证据）
+        # 与 fail 一样不能参与固化（此前只拦 False，缺验收的任务也按已验证计入）
         if task_id:
             acc = acceptance_passed(task_id)
-            if acc is False:
-                logger.info("Template not consolidated (acceptance fail): %s", goal[:40])
+            if acc is not True:
+                logger.info(
+                    "Template not consolidated (acceptance=%s): %s",
+                    "未知" if acc is None else "fail", goal[:40],
+                )
                 return
-        # 历史同链验收 pass 计数（不含本次）
+        # 历史同链已验证计数（不含本次；只认准入谓词给出的 verified）
         verified = count_verified_chain(domain, chain, task_id)
         if verified + 1 < threshold:
             logger.info(

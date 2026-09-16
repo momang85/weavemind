@@ -105,8 +105,33 @@ class CriticAgent:
                     len(steps),
                 )
 
-                # 执行评审
-                review = self.review_plan(plan_id, goal, steps)
+                # L01：Critic 是独立进程，身份校验**先于**评审。
+                # 协议非法 / 银行模式缺身份 / 配置非法 → 拒绝评审：零模型调用，
+                # 发布带 plan_id 的明确 ERROR，不吞异常继续。
+                from task_context import admit_dispatch, bind_llm_accounting, clear_llm_accounting
+                ctx, gaps, refuse_reason = admit_dispatch(raw_message)
+                if ctx is None:
+                    logger.error("拒绝评审 plan '%s'：%s", plan_id, refuse_reason)
+                    self._publish_review({
+                        "plan_id": plan_id,
+                        "verdict": "ERROR",
+                        "error": refuse_reason,
+                        "scores": {},
+                        "suggestions": ["身份/协议校验未通过，按策略未执行评审"],
+                        "summary": "拒绝评审（身份或协议未通过校验）",
+                    })
+                    continue
+                if gaps:
+                    # 兼容/不完整身份的可观测记录（此前 admit_dispatch 内部丢弃）
+                    logger.warning("plan draft %s 身份兼容缺口：%s", plan_id, gaps)
+
+                # 台账归属在本段无条件清理（finally）：评审抛异常也不能把
+                # 上一任务的根身份留在 contextvar 里带进下一次评审。
+                try:
+                    bind_llm_accounting(ctx)
+                    review = self.review_plan(plan_id, goal, steps)
+                finally:
+                    clear_llm_accounting()
 
                 # 发布评审结果
                 self._publish_review(review)
@@ -261,15 +286,12 @@ class CriticAgent:
         logger.warning("Using fallback review for '%s': %s", plan_id, error_msg)
         return {
             "plan_id": plan_id,
-            "verdict": "PASS",
-            "scores": {
-                "completeness": 5,
-                "efficiency": 5,
-                "safety": 5,
-                "executability": 5,
-            },
+            # V2-2：评审不可用时**不能默认通过**——返回专用降级裁决（含原因），
+            # 由编排器按模式处置：个人模式标注"未完成评审（降级）"，银行模式拒绝继续。
+            "verdict": "DEGRADED",
+            "scores": {},
             "suggestions": [f"评审系统降级: {error_msg}"],
-            "summary": "评审系统暂时不可用，默认通过",
+            "summary": f"评审系统不可用（{error_msg}），未完成评审——不得视为通过",
             "reviewer": "critic_agent_fallback",
             "timestamp": _now_iso(),
         }

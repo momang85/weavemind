@@ -401,8 +401,30 @@ class BaseWorker(ABC):
                 with self._current_task_lock:
                     self._current_task_id = task_id
 
-                # 处理任务
-                self._process_task(task)
+                # L01：LLM 台账归属根任务。contextvars 不跨线程，必须在**本任务线程**里绑定；
+                # 接收边界统一走 admit_dispatch（协议非法/银行缺身份/配置非法都拒绝）。
+                from task_context import admit_dispatch, bind_llm_accounting, clear_llm_accounting
+                ctx, gaps, refuse_reason = admit_dispatch(task)
+                if ctx is None:
+                    logger.error("'%s' 拒绝派发 %s：%s", self.agent_id, task_id, refuse_reason)
+                    self._publish_failure(task_id, refuse_reason)
+                    with self._current_task_lock:
+                        self._current_task_id = None
+                    continue
+                if gaps:
+                    # 本地兼容/身份不完整的可观测记录：日志 + 随结果回传，不静默吞掉
+                    logger.warning("'%s' 派发 %s 身份兼容缺口：%s", self.agent_id, task_id, gaps)
+                bind_llm_accounting(ctx)
+                with self._current_task_lock:
+                    self._current_ctx = ctx
+                    self._current_gaps = gaps
+                try:
+                    # 处理任务
+                    self._process_task(task)
+                finally:
+                    clear_llm_accounting()
+                    with self._current_task_lock:
+                        self._current_ctx = None
 
             except Exception as exc:
                 logger.error(
@@ -471,6 +493,17 @@ class BaseWorker(ABC):
             "status": status,
             "result": result,
         }
+        # L01：结果回显身份上下文，否则上游只能看到派发 id，
+        # 步骤/派发级归属（花了多少、属于哪一步）无从重建。
+        ctx = getattr(self, "_current_ctx", None)
+        if ctx is not None:
+            try:
+                message["context"] = ctx.to_wire()
+                gaps = getattr(self, "_current_gaps", None) or []
+                if gaps:
+                    message["context_gaps"] = list(gaps)
+            except Exception:
+                pass
         try:
             self._messaging._redis.rpush(channel, json.dumps(message, ensure_ascii=False))
             logger.info(

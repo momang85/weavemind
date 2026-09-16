@@ -152,6 +152,12 @@ SECTIONS: list[dict] = [
              "default": True, "group": "评审"},
             {"path": "system.critic_timeout", "affects": "评审 Agent 的等待上限；超时按 PASS 放行", "label": "评审超时(秒)", "kind": "int",
              "default": 30, "group": "评审"},
+            {"path": "system.budget.max_seconds", "affects": "根任务时间预算上限（秒），0=不限；规划/派发/评审/反思/收尾共用这一份，超限即拒绝新调用", "label": "根任务时间预算(秒)", "kind": "int",
+             "default": 0, "group": "风控"},
+            {"path": "system.budget.max_calls", "affects": "根任务调用次数上限，0=不限；主备回退与重试共享同一份额度", "label": "根任务调用预算(次)", "kind": "int",
+             "default": 0, "group": "风控"},
+            {"path": "system.budget.max_tokens", "affects": "根任务 token 上限，0=不限（按已结算用量计）", "label": "根任务 token 预算", "kind": "int",
+             "default": 0, "group": "风控"},
             {"path": "system.stall_timeout", "label": "停滞判定(秒)", "kind": "int",
              "default": 300, "group": "风控",
              "affects": "依赖长期未满足时把剩余步骤判失败；阶段看门狗阈值也参照它"},
@@ -180,6 +186,18 @@ SECTIONS: list[dict] = [
         "entries": [
             {"path": "mcp_servers", "label": "服务列表", "kind": "list", "testable": True,
              "health": "mcp", "affects": "外部工具调用（Wind/iFinD 等）；不可用时相关工具静默失败"},
+        ],
+    },
+    {
+        "key": "network",
+        "label": "网络登记端点",
+        "note": ("按用途登记可信服务（模型/MCP/embedding/webhook）；私网例外只来自登记项自身的 "
+                 "loopback 标记，调用方不能自行声明。资料正文、任务指令、模型输出与搜索结果派生的 "
+                 "URL 一律只走公网内容抓取通道。"),
+        "kind": "list",
+        "entries": [
+            {"path": "network.endpoints", "label": "端点列表", "kind": "list",
+             "affects": "出站访问策略：未登记的内部地址会被拒绝（含本机模型服务）"},
         ],
     },
     {

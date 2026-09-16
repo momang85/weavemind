@@ -25,15 +25,30 @@ class DataLoaderWorker(AsyncWorkerBase):
             
             if urls:
                 url = urls[0]
-                import requests
-                fname = url.split("/")[-1].split("?")[0] or "dataset.csv"
-                fpath = ws / fname
-                r = requests.get(url, stream=True, timeout=120)
-                r.raise_for_status()
-                with open(fpath, "wb") as f:
-                    for chunk in r.iter_content(8192):
-                        f.write(chunk)
-                return json.dumps({"status": "downloaded", "path": str(fpath), "url": url, "size": fpath.stat().st_size})
+                # 内容派生 URL（来自任务指令文本）→ 走受约束的抓取通道：
+                # 仅 http/https 公网、解析失败即拒绝、用已验 IP 连接、不跟随重定向。
+                from net_policy import NetworkPolicyError, fetch_document
+                # 文件名只取末段并去掉路径分隔符（Windows 下 URL 可含反斜杠，会越出工作区）
+                raw_name = url.split("/")[-1].split("?")[0] or "dataset.csv"
+                fname = Path(raw_name.replace("\\", "/")).name
+                if not fname or fname in (".", ".."):
+                    fname = "dataset.csv"
+                try:
+                    doc = fetch_document(url, timeout=120)
+                except NetworkPolicyError as exc:
+                    return json.dumps({"status": "failed", "url": url,
+                                       "reason": f"网络策略拒绝：{exc}"}, ensure_ascii=False)
+                except Exception as exc:
+                    return json.dumps({"status": "failed", "url": url,
+                                       "reason": f"下载失败：{exc}"}, ensure_ascii=False)
+                fpath = (ws / fname).resolve()
+                # 落盘前再校验边界：目标必须仍在任务数据目录内
+                if ws.resolve() not in fpath.parents:
+                    return json.dumps({"status": "failed", "url": url,
+                                       "reason": f"拒绝写入工作区之外：{fname}"}, ensure_ascii=False)
+                fpath.write_bytes(doc.get("raw") or doc["text"].encode("utf-8"))
+                return json.dumps({"status": "downloaded", "path": str(fpath), "url": url,
+                                   "size": fpath.stat().st_size})
 
             # Fallback: sklearn built-in dataset —— 仅当指令明确涉及数据任务时才启用，
             # 避免把内置房价等数据集拉进无关任务（污染上下文与交付物）。

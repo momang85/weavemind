@@ -122,6 +122,16 @@ def refine_after_task(
         if not data or not findings or not data.get("apply"):
             return {"ran": True, "applied": 0, "findings": 0}
         applied, rejected = 0, []
+        # M0-d：只有**准入为已验证成功**的运行，产出才能直接生效；否则写
+        # pending_review 留档（可查、待人工复核），不得自动升级成全局指令
+        _adm = flags.get("admission") if isinstance(flags, dict) else None
+        status = "active" if (isinstance(_adm, dict) and _adm.get("verified")) else "pending_review"
+        if status != "active":
+            push_progress(messaging, task_id, "log", {
+                "type": "prompt_refine", "agent": "prompt_refinery",
+                "message": "本次运行未达已验证成功：改进建议按待复核留档，不自动生效",
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()),
+            })
         for f in findings[:3]:
             ok, issues = record_override(
                 str(f.get("target") or "").strip(),
@@ -129,6 +139,7 @@ def refine_after_task(
                 str(f.get("rationale") or ""),
                 trigger_task=task_id,
                 goal=goal,
+                status=status,
             )
             if ok:
                 applied += 1

@@ -2496,17 +2496,138 @@ def _publish_task(
             "status": "QUEUED", "project": project}
 
 
+def _write_export_manifest(tid: str, body: str, pdf_bytes: bytes = b"",
+                           markdown_bytes: bytes | None = None) -> dict:
+    """导出清单：各文件**自己的** hash + 绑定同一 `report_version_id`（M0-a）。
+
+    - 语义一致性：`report_version_id` / `body_sha256` 指向选中版本；
+    - 字节完整性：Markdown 与 PDF 各有自己的 sha256（PDF 字节必然不同于正文）；
+    - 逐格式累加：先导出 PDF 再导出 Markdown（或反之）不互相覆盖，两次
+      导出绑定的是**同一个**选中版本；
+    - 浏览器打印页是客户端渲染，只登记其来源正文 hash（不伪造产物字节 hash）；
+    - `aligned=False` 或该版本没有自身验收 → `draft=True`：只能作为**未验收草稿**导出。
+    """
+    from report_version import VersionStore, body_hash
+    ws = task_workspace(tid)
+    store = VersionStore(ws, tid)
+    adopted = store.adopted()
+    ver = adopted or store.record(body)
+    delivered = body_hash(body)
+    aligned = bool(adopted) and adopted.version_id == delivered
+    md_bytes = body.encode("utf-8") if markdown_bytes is None else markdown_bytes
+    files: dict = {}
+    prev_path = ws / "export_manifest.json"
+    if prev_path.exists():
+        try:
+            prev = json.loads(prev_path.read_text(encoding="utf-8"))
+            # 只有"同一选中版本 + 同一份送达正文"才继承已登记格式：
+            # 装配后正文变了（版本相同、送达 hash 不同）时不得把旧 PDF 挂过来
+            if (isinstance(prev.get("files"), dict)
+                    and str(prev.get("report_version_id") or "") == ver.identity_id()
+                    and str(prev.get("delivered_body_sha256") or "") == delivered):
+                files.update(prev["files"])
+        except Exception:
+            pass
+    files["markdown"] = {"sha256": hashlib.sha256(md_bytes).hexdigest(),
+                         "bytes": len(md_bytes)}
+    if pdf_bytes:
+        files["pdf"] = {"sha256": hashlib.sha256(pdf_bytes).hexdigest(),
+                        "bytes": len(pdf_bytes)}
+    # 与收尾时记录的最终交付正文 hash 对照：导出字节是否就是那份交付。
+    # 交付文档 = 交付说明 + 研究正文，与"验收对象（研究正文）"不是同一份字节，
+    # 所以对齐判定以**记录的交付正文**为准，验收对象是否命中另由 accepted_body_matches 表达。
+    final_sha = ""
+    try:
+        for d in reversed(store.deliveries()):
+            final_sha = str(d.get("delivered_sha256") or "")
+            if final_sha:
+                break
+    except Exception:
+        final_sha = ""
+    if final_sha:
+        aligned = delivered == final_sha
+    else:
+        aligned = bool(adopted) and adopted.version_id == delivered
+    manifest = {
+        "report_version_id": ver.identity_id(),
+        "body_sha256": ver.version_id,
+        "acceptance_overall": ver.acceptance_overall(),
+        "accepted_body_matches": ver.acceptance_for_this_body(),
+        "delivered_body_sha256": delivered,
+        "final_content_sha256": final_sha,
+        "final_content_matches": bool(final_sha) and final_sha == delivered,
+        "aligned": aligned,
+        "draft": (not ver.acceptance_for_this_body()) or (not aligned),
+        "renderer_version": "report_pdf/v1",
+        "template_version": "default",
+        "files": files,
+        "client_side_renders": {
+            "html_print": {"source_body_sha256": delivered, "byte_hash_available": False},
+        },
+        "generated_at": time.time(),
+    }
+    try:
+        prev_path.write_text(
+            json.dumps(manifest, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception:
+        pass
+    return manifest
+
+
 def _task_pdf_bytes(tid: str) -> bytes:
     """生成任务报告 PDF；无报告/生成失败抛异常（路由转 404）。"""
     data = _get_task_report_data(tid)
     if not data or not str(data.get("report") or "").strip():
         raise LookupError("report not found")
     from report_pdf import markdown_to_pdf
-    return markdown_to_pdf(
-        str(data["report"]),
+    body = str(data["report"])
+    pdf = markdown_to_pdf(
+        body,
         title=str(data.get("goal") or "任务报告"),
         workspace=task_workspace(tid),
     )
+    # M0-a：导出即写清单（各文件 hash + 绑定的报告版本 + 草稿判定）
+    try:
+        _write_export_manifest(tid, body, pdf)
+    except Exception as exc:
+        logger.warning("export manifest 写入失败（不影响导出）：%s", str(exc)[:120])
+    return pdf
+
+
+def _task_markdown_export(tid: str) -> tuple[bytes, dict]:
+    """服务端 Markdown 导出：返回（正文字节, 导出清单）。
+
+    走服务端而非前端内存稿，导出字节才能被写进清单并与 PDF 绑定同一选中版本；
+    无报告/读取失败抛异常（路由转 404）。
+    """
+    data = _get_task_report_data(tid)
+    if not data or not str(data.get("report") or "").strip():
+        raise LookupError("report not found")
+    body = str(data["report"])
+    raw = body.encode("utf-8")
+    manifest = _write_export_manifest(tid, body, markdown_bytes=raw)
+    return raw, manifest
+
+
+def _get_task_markdown(self, p):
+    if p.startswith("/api/task/") and p.endswith("/report.md"):
+        tid = p.split("/api/task/")[-1].rsplit("/report.md", 1)[0]
+        try:
+            raw, manifest = _task_markdown_export(tid)
+        except Exception:
+            return self._json({"error": "report not found"}, 404)
+        self.send_response(200)
+        self.send_header("Content-Type", "text/markdown; charset=utf-8")
+        self.send_header(
+            "Content-Disposition", f'attachment; filename="{tid}.md"')
+        # 导出页/前端据此显示"这份导出对应的哪个选中版本、是否未验收草稿"
+        self.send_header("X-Report-Version-Id", manifest["report_version_id"])
+        self.send_header("X-Report-Body-Sha256", manifest["body_sha256"])
+        self.send_header("X-Report-Draft", "1" if manifest["draft"] else "0")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+        return
 
 
 # 前端未构建时的自包含状态页：不依赖 Node/vite，离线可读。
@@ -4216,7 +4337,7 @@ def _post_task_cancel(self, p, body, admin):
     except Exception:
         row = {}
     status = str(row.get("status") or "").upper()
-    if status in ("SUCCESS", "SUCCESS_WITH_ISSUES", "FAILED"):
+    if status in ("SUCCESS", "SUCCESS_WITH_ISSUES", "FAILED", "CANCELLED"):
         return self._json(
             {"error": f"任务已结束（{status}），无需取消"}, 409)
     try:
@@ -4878,6 +4999,7 @@ _GET_ROUTES = [
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/stream"), _get_task_stream),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/events"), _get_task_events),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/pdf"), _get_task_pdf),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/report.md"), _get_task_markdown),
     (lambda self, p: p == "/api/config", _get_config),
     (lambda self, p: p == "/api/config/requirements", _get_config_requirements),
     (lambda self, p: p == "/api/users", _get_users),

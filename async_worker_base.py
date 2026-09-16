@@ -198,8 +198,16 @@ class AsyncWorkerBase(ABC):
         tid = task.get("task_id","?"); instr = task.get("instruction","")
         ok = False; res = ""
         try:
-            from llm_client import clear_task_context, set_task_context
-            set_task_context(tid)
+            # L01：台账归属根任务（此前用派发 id，根任务台账读不到）；
+            # 接收边界统一走 admit_dispatch（协议非法/银行缺身份/配置非法都拒绝）
+            from task_context import admit_dispatch, bind_llm_accounting
+            ctx, gaps, refuse_reason = admit_dispatch(task)
+            if ctx is None:
+                raise RuntimeError(refuse_reason)
+            if gaps:
+                logger.warning("dispatch %s 身份兼容缺口：%s", tid, gaps)
+            self._context_gaps = list(gaps)
+            bind_llm_accounting(ctx)
             if self._needs_task:
                 res = await self.execute(instr, task); self._failures = 0; ok = True
             else:
@@ -210,14 +218,20 @@ class AsyncWorkerBase(ABC):
                 await self._registry.register(self.agent_id, self.capabilities, "offline")
         finally:
             try:
-                from llm_client import clear_task_context
-                clear_task_context()
+                from task_context import clear_llm_accounting
+                clear_llm_accounting()
             except Exception:
                 pass
             self._active -= 1; await self._update()
+            result_msg = {"task_id": tid, "agent_id": self.agent_id,
+                          "status": "SUCCESS" if ok else "FAILED", "result": res}
+            gaps = getattr(self, "_context_gaps", None) or []
+            if gaps:
+                # 兼容缺口随结果回传（可观测），不只写在日志里
+                result_msg["context_gaps"] = list(gaps)
+            self._context_gaps = []
             await self._messaging._redis.rpush(
-                f"task_result:{tid}",
-                json.dumps({"task_id":tid,"agent_id":self.agent_id,"status":"SUCCESS" if ok else "FAILED","result":res}, ensure_ascii=False))
+                f"task_result:{tid}", json.dumps(result_msg, ensure_ascii=False))
 
     def _status_str(self):
         return f"active:{self._active}/{self.max_concurrency}" if self._active else f"idle:0/{self.max_concurrency}"

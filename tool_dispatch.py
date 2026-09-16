@@ -72,8 +72,13 @@ def dispatch_tool(
         return {"task_id": "?", "status": "FAILED", "result": f"No worker for {capability}"}
     r = _redis()
     dispatch_id = f"tool-{uuid.uuid4().hex[:8]}"
+    # L01：工具派发同样是"一次派发"，补上版本化身份上下文，否则目标 Worker 只能看到
+    # 派发 id（台账会记到派发键上，根任务读不到）。task_id 为空时按本地口径兜底。
+    from task_context import make_context
+    ctx = make_context(root_task_id=task_id or dispatch_id, step_id="", dispatch_id=dispatch_id)
     r.lpush(f"task_queue:{agent}", json.dumps({
         "task_id": dispatch_id,
+        "context": ctx.to_wire(),
         "instruction": str(instruction),
         "task_start_ts": time.time(),
         "workspace": str(workspace),

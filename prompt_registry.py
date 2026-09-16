@@ -167,8 +167,14 @@ def _entry_signature(entry: dict) -> tuple:
 
 def _entry_applies(entry: dict, goal: str) -> bool:
     """条目是否适用于该目标。带触发任务却无法解析其目标时 **不应用**
-    （fail-closed：此前这里 fail-open，导致历史清理后旧覆盖全局泄漏）。"""
+    （fail-closed：此前这里 fail-open，导致历史清理后旧覆盖全局泄漏）。
+
+    M0-d：`status == "pending_review"` 的条目**不生效**——待人工复核的经验只留档
+    可查，不得自动升级成全局指令。
+    """
     if not isinstance(entry, dict):
+        return False
+    if str(entry.get("status") or "active") != "active":
         return False
     mg = entry.get("match_goal")
     if isinstance(mg, str):
@@ -270,12 +276,15 @@ def _validate_fix(key: str, prompt: str, rationale: str) -> list[str]:
 def record_override(
     key: str, prompt: str, rationale: str,
     trigger_task: str = "", version_base: int = 1, goal: str = "",
+    status: str = "active",
 ) -> tuple[bool, list[str]]:
     """写入一条覆盖（同名 key 下**按作用域并存**，版本 +1）。返回 (是否成功, 问题列表)。
 
     写入时必须能确定作用域：自迭代产出的是"某一次任务的教训"，若它含任务特定内容
     却派生不出主题词，就拒绝写入——此前这类条目会以裸能力键全局生效，把单个任务的
     要求（如"用 matplotlib 画 2014-2025 营收图"）追加到所有同类步骤。
+
+    `status="pending_review"`：留档待人工复核，不参与 `resolve_override`（M0-d）。
     """
     issues = _validate_fix(key, prompt, rationale)
     if issues:
@@ -299,6 +308,9 @@ def record_override(
             "trigger_task": str(trigger_task)[:40],
             "match_goal": match_goal,
             "scope": scope,
+            # M0-d：默认生效；未准入（未验证成功）的产出写 pending_review，
+            # 留档可查但不生效——审核通过前不得影响后续任务
+            "status": str(status or "active"),
         }
         signature = _entry_signature(new_entry)
         merged = False

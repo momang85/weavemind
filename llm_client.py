@@ -449,8 +449,12 @@ def _probe_endpoint(base_url: str, api_key: str, model: str) -> bool:
 
 
 _BALANCE_CACHE_TTL = 30.0
+# 终态类失败（欠费/鉴权失败）不会在几十秒内自愈：给长冷却，避免每 30 秒白打一次
+# 已知不可用的端点（实测日志里每 32 秒刷一条 402 INSUFFICIENT_BALANCE）。
+_BALANCE_COOLDOWN = float(os.environ.get("LLM_BALANCE_COOLDOWN", "") or 600.0)
+_BALANCE_TERMINAL_REASONS = ("insufficient_balance", "unauthorized")
 _balance_cache_lock = threading.Lock()
-_balance_cache = {"ts": 0.0, "data": None}
+_balance_cache: dict = {"ts": 0.0, "data": None, "ttl": _BALANCE_CACHE_TTL, "ep_ts": {}}
 
 
 def _clear_balance_cache() -> None:
@@ -458,6 +462,27 @@ def _clear_balance_cache() -> None:
     with _balance_cache_lock:
         _balance_cache["ts"] = 0.0
         _balance_cache["data"] = None
+        _balance_cache["ep_ts"] = {}
+
+
+def _frozen_terminal_endpoints(now: float) -> dict:
+    """仍处长冷却期的终态失败端点 → 复用上次结论，**不重复探测**（M0-e）。
+
+    冷却按端点判定：欠费的备用端点在自己的冷却期内不再被白打，健康的主端点
+    照常探测——此前只要任一端点是终态失败就把整份结果缓存 600 秒，
+    等于用欠费的备用端点把健康主端点一起冻住。
+    """
+    frozen: dict = {}
+    with _balance_cache_lock:
+        data = dict(_balance_cache.get("data") or {})
+        ep_ts = dict(_balance_cache.get("ep_ts") or {})
+    for ep in ("primary", "backup"):
+        st = data.get(ep) or {}
+        if (str(st.get("reason") or "") in _BALANCE_TERMINAL_REASONS
+                and now - float(ep_ts.get(ep, 0.0)) < _BALANCE_COOLDOWN):
+            frozen[ep] = dict(st)
+            frozen[ep]["frozen"] = True
+    return frozen
 
 
 def get_balance_status(use_cache: bool = True) -> dict:
@@ -471,21 +496,21 @@ def get_balance_status(use_cache: bool = True) -> dict:
         if (
             use_cache
             and _balance_cache["data"] is not None
-            and now - _balance_cache["ts"] < _BALANCE_CACHE_TTL
+            and now - _balance_cache["ts"] < _balance_cache.get("ttl", _BALANCE_CACHE_TTL)
         ):
             return {
                 k: dict(v) for k, v in _balance_cache["data"].items()
             }
-    result: dict = {}
+    result: dict = _frozen_terminal_endpoints(now) if use_cache else {}
     probes: list[tuple[str, str, str, str]] = []
     primary_base = os.environ.get("LLM_BASE_URL") or ""
-    if primary_base:
+    if primary_base and "primary" not in result:
         probes.append((
             "primary", primary_base,
             os.environ.get("LLM_API_KEY") or "",
             os.environ.get("LLM_MODEL") or "gpt-4o",
         ))
-    if _BACKUP_CFG.get("base_url"):
+    if _BACKUP_CFG.get("base_url") and "backup" not in result:
         probes.append((
             "backup", _BACKUP_CFG.get("base_url", ""),
             _BACKUP_CFG.get("api_key", ""),
@@ -513,8 +538,22 @@ def get_balance_status(use_cache: bool = True) -> dict:
     if not result.get("backup"):
         result["backup"] = {"ok": False, "reason": "unreachable"}
     with _balance_cache_lock:
-        _balance_cache["ts"] = time.time()
+        _now = time.time()
+        _balance_cache["ts"] = _now
         _balance_cache["data"] = result
+        ep_ts = dict(_balance_cache.get("ep_ts") or {})
+        for _ep, _st in result.items():
+            if _st.get("frozen"):
+                continue                      # 冻结复用的结论保留原探测时间
+            ep_ts[_ep] = _now
+        _balance_cache["ep_ts"] = ep_ts
+        # 整体 TTL 只在**所有**端点都处于终态失败时才拉长；只要还有一个端点可用，
+        # 就保持 30 秒的常规刷新（终态端点另有 per-endpoint 冷却，不会被打爆）
+        _all_terminal = all(
+            (result.get(ep) or {}).get("reason") in _BALANCE_TERMINAL_REASONS
+            for ep in ("primary", "backup")
+        )
+        _balance_cache["ttl"] = _BALANCE_COOLDOWN if _all_terminal else _BALANCE_CACHE_TTL
     return {k: dict(v) for k, v in result.items()}
 
 

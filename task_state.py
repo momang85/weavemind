@@ -60,7 +60,10 @@ RUNNING = "RUNNING"
 SUCCESS = "SUCCESS"
 SUCCESS_WITH_ISSUES = "SUCCESS_WITH_ISSUES"
 FAILED = "FAILED"
-TERMINAL = (SUCCESS, SUCCESS_WITH_ISSUES, FAILED)
+# V2-1：用户主动停止是一个**独立终态**。此前取消被写成 FAILED，前端 statusMeta 的
+# "已取消"映射永远收不到值，指标页统计的 CANCELLED 也恒为 0。
+CANCELLED = "CANCELLED"
+TERMINAL = (SUCCESS, SUCCESS_WITH_ISSUES, FAILED, CANCELLED)
 
 # 列补丁的 DDL 直接写在 _add_missing_columns 里（字面量、不拼接），此处不再维护映射表。
 
@@ -113,20 +116,26 @@ def ensure_schema(db_path: str | None = None) -> list[str]:
 
 
 def derive_status(step_statuses=None, acceptance: dict | None = None,
-                  llm_degraded: dict | None = None) -> str:
+                  llm_degraded: dict | None = None,
+                  draft_delivery: str = "") -> str:
     """状态派生规则（唯一实现）。
 
     - 任一步骤非 SUCCESS（含 PARTIAL/FAILED）→ FAILED；
     - 验收报告存在且 overall != pass → SUCCESS_WITH_ISSUES；
     - 主备端点均失败（llm_degraded.both_failed）→ SUCCESS_WITH_ISSUES；
+    - **交付按未验收草稿处理**（draft_delivery 非空：正文没有对应自身的验收、
+      或最终交付文档与选中版本不一致）→ SUCCESS_WITH_ISSUES —— 缺证据不得显示"通过"；
     - 其余 → SUCCESS。
+
+    用户取消是**显式终态**（`CANCELLED`），不由本函数派生：取消时可能没有验收报告，
+    也不应被记成"步骤失败"。
     """
     statuses = [str(s or "").upper() for s in (step_statuses or [])]
     if any(s and s != "SUCCESS" for s in statuses):
         return FAILED
     accept_fail = bool(acceptance and acceptance.get("overall") != "pass")
     both_failed = bool((llm_degraded or {}).get("both_failed"))
-    if accept_fail or both_failed:
+    if accept_fail or both_failed or str(draft_delivery or "").strip():
         return SUCCESS_WITH_ISSUES
     return SUCCESS
 
@@ -216,6 +225,19 @@ def record_completion(task_id: str, *, goal: str = "", status: str = "",
         con = _connect(db_path)
         try:
             _add_missing_columns(con)
+            # 取消是**可持久终态**（M0-c）：迟到的 SUCCESS/FAILED 不得把它覆盖回去
+            # （用户主动停止后又被"结果回来了"改写成成功，等于把停止当没发生）
+            row = con.execute(
+                "SELECT status FROM task_history WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if row and str(row[0] or "") == CANCELLED and str(status or "") != CANCELLED:
+                # 返回 True：终态已经落定（CANCELLED），没有"写失败"这回事——
+                # 返回 False 会让调用方重试并写 persist_failed，把拒绝误报成故障
+                logger.warning(
+                    "任务 %s 已是 CANCELLED 终态，忽略迟到终态 %s（不覆盖）",
+                    task_id, status,
+                )
+                return True
             con.execute(
                 "INSERT INTO task_history"
                 "(task_id,goal,status,report,steps_json,logs_json,"

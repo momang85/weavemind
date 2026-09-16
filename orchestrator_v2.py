@@ -18,6 +18,7 @@ import shutil
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 from workspace import (
@@ -60,6 +61,11 @@ _FINGERPRINT_JS = """() => {
 }"""
 from memory_manager import MemoryManager
 from ws_helpers import push_progress
+# L01：三层身份契约（根任务/步骤/派发）跨进程传递
+from task_context import make_context
+# V1：修订稿比较（硬约束 + 验收结果，不用字数）
+from report_quality import compare_versions
+from report_quality import disclaimer_instruction
 
 # Redis 客户端统一关掉 redis-py 的内建重试：默认重试会把 socket_connect_timeout
 # 叠成 26~48 秒才失败（实测 127.0.0.1 26s / localhost 48s），Redis 不在时
@@ -87,6 +93,49 @@ _SOURCE_DISCIPLINE_REDLINES = (
 # 与 code_sandbox.SECRET_PREFIXES 保持一致，并显式纳入 planner 密钥段。
 _SECRET_ENV_PREFIXES = ("LLM_", "OPENAI_", "EMBEDDING_", "PLANNER_LLM_",
                         "API_KEY", "SERPAPI", "TOKEN", "SECRET")
+
+
+class ReviewRequiredError(RuntimeError):
+    """银行口径下"必需评审"未完成：按策略拒绝继续，不得当作评审通过。
+
+    个人模式不抛此异常——改为按**根任务**记降级（`_review_state(task_id)` 的
+    `degraded_reason`）并在交付物里注明需人工复核。身份模式配置非法/不可判定时同样
+    抛此异常：配置坏了不能默认按个人模式放行。
+    """
+
+
+# 评审策略版本：PASS 与它绑定，策略变了旧 PASS 不再复用于新计划（M0-b）
+REVIEW_POLICY_VERSION = "review-policy/v1"
+
+
+class TaskCancelled(RuntimeError):
+    """用户请求停止且**已放弃等待在飞调用**：由 run() 的取消路径收尾（M0-c）。"""
+
+
+# 等待步骤结果的四类结果（M0-c）：此前取消/超时/协议错误都返回 None，
+# 上层一律记成 "Step X timed out"——取消被写成超时、畸形回包被写成超时，
+# 日志、诊断与状态三方对不上账。
+WAIT_RESULT = "result"
+WAIT_CANCEL = "cancel"
+WAIT_TIMEOUT = "timeout"
+WAIT_PROTOCOL = "protocol"
+
+
+@dataclass
+class WaitOutcome:
+    """一次等待的分类结果：kind 决定上层怎么记（成功/取消/超时/协议错误）。"""
+
+    kind: str
+    result: dict | None = None
+    reason: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.kind == WAIT_RESULT
+
+# 允许的评审裁决：只认这两个。其余（含缺失、拼写错误、别的进程塞进来的裁决）
+# 一律按"评审未完成"处理——既不当通过，也不进付费修订分支。
+REVIEW_VERDICTS = ("PASS", "FAIL")
 
 
 def _sanitized_process_env(base: dict | None = None) -> dict:
@@ -159,9 +208,7 @@ _REPORT_FORMAT_REQUIREMENTS = (
     "数据截止时间/行情快照时间（如 '行情数据截至 2026-08-30 15:00 收盘'）、"
     "数据源与更新频次（如 '腾讯行情接口，日终刷新'）；"
     "排行类任务必须标注 '盘中/盘后/日终' 状态。\n"
-    "3. 免责声明：报告结尾必须包含 '免责声明' 小节："
-    "'本报告由织光 WeaveMind AI 自动生成，仅供参考，不构成任何投资建议；"
-    "数据来源于公开渠道，可能存在延迟或误差；据此操作风险自担。'\n"
+    + disclaimer_instruction() +
     "4. 合规红线：不得给出具体投资组合配比（如'30%某股+70%某资产'）、"
     "不得给出预期收益率/年化收益数值承诺；如涉及资产配置，只允许描述"
     "常见配置思路与风险框架，并强调'不构成投资建议'。\n"
@@ -600,7 +647,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                           {"type": "plan", "agent": "orchestrator",
                            "message": "Plan: deterministic direct-delivery template (LLM planning skipped)",
                            "timestamp": self._now_iso()})
-            return self._normalize_steps(direct)
+            direct_steps = self._normalize_steps(direct)
+            # M0-b：确定性直出计划同样受评审策略约束（跳过 Critic 不等于免评审）
+            self._require_review_or_refuse(
+                task_id, "确定性直出计划未经过 Critic 评审", plan=direct_steps)
+            return direct_steps
         push_progress(self._messaging, task_id, "log",
                       {"type": "plan", "agent": "orchestrator", "message": f"Planning: {goal[:60]}", "timestamp": self._now_iso()})
         if context:
@@ -674,15 +725,24 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     # deadline 给出调用级时间预算，预算耗尽不再无谓重试/切备用
                     _plan_budget = float(os.environ.get("WM_PLAN_BUDGET_SECONDS", "180") or 180)
                     _plan_deadline = time.time() + _plan_budget
-                    raw = call_with_heartbeat(
-                        self._messaging, task_id, "规划",
-                        self._planner_llm.call,
-                        get_prompt("planner", PLANNER_SYSTEM, goal=goal),
-                        attempt_prompt, expect_json=True, max_tokens=8192,
-                        # B1：规划/反思/评审统一走 planner 用途模型
-                        usage="plan", cache_key=plan_cache_key,
-                        deadline=_plan_deadline,
-                    )
+                    # M0-e：规划调用也要在根任务预算里预留（重试/降级共享同一份剩余额度）
+                    _ticket = self._budget_reserve(
+                        task_id, "plan", detail={"stage": "规划", "attempt": attempt + 1})
+                    try:
+                        # M0-c：规划调用在可取消的等待里跑——端点退化时"停止"也要能立刻生效
+                        raw = self._call_llm_cancellable(
+                            task_id, "规划", call_with_heartbeat,
+                            self._messaging, task_id, "规划",
+                            self._planner_llm.call,
+                            get_prompt("planner", PLANNER_SYSTEM, goal=goal),
+                            attempt_prompt, expect_json=True, max_tokens=8192,
+                            # B1：规划/反思/评审统一走 planner 用途模型
+                            usage="plan", cache_key=plan_cache_key,
+                            deadline=_plan_deadline,
+                        )
+                    finally:
+                        self._budget_settle(
+                            task_id, _ticket, ok=True, note=f"规划尝试 {attempt + 1}")
                     phase_end(self._messaging, task_id, "规划", ok=True,
                               detail=f"规划完成（第 {attempt + 1} 次尝试）")
                 except Exception as exc:
@@ -699,6 +759,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     raise
                 plan_data = self._parse_plan_response(raw)
                 break
+            except TaskCancelled:
+                # 取消不是"规划失败"：不重试、不降级，直接交给 run() 的取消收尾
+                raise
             except Exception as e:
                 last_error = e
                 logger.warning("Plan attempt %d failed: %s", attempt + 1, str(e)[:200])
@@ -776,8 +839,31 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 "timeout": 120,
             }]
         # Critic 评审（可选，config system.critic）
-        if self._critic_enabled and steps:
-            steps = self._review_plan(goal, steps, task_id)
+        if steps:
+            if self._critic_enabled:
+                try:
+                    steps = self._review_plan(goal, steps, task_id)
+                except ReviewRequiredError as exc:
+                    # V2-2：银行口径下必需评审未完成 → 拒绝继续（不把超时当通过）
+                    push_progress(self._messaging, task_id, "log",
+                                  {"type": "error", "agent": "critic",
+                                   "message": f"必需评审未完成，按策略拒绝继续：{exc}",
+                                   "timestamp": self._now_iso()})
+                    raise
+            else:
+                # M0-b：critic 关掉也要走同一套策略——银行口径没有任何绑定 PASS，
+                # 不能靠"配置里关了评审"就把必需评审变成可选项
+                self._require_review_or_refuse(
+                    task_id, "critic 已关闭（system.critic=false），本计划没有评审", plan=steps)
+            _degraded = str(self._review_state(task_id).get("degraded_reason") or "")
+            if _degraded:
+                # 个人模式：评审未完成/降级**如实标注**，不假装通过；银行模式在
+                # _review_plan 内直接拒绝（抛 ReviewRequiredError）
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "review", "agent": "critic",
+                               "message": f"未完成评审（降级）：{_degraded}——"
+                                          "计划按原始草案继续，交付物需人工复核",
+                               "timestamp": self._now_iso()})
         push_progress(self._messaging, task_id, "log",
                       {"type": "plan", "agent": "orchestrator",
                        "message": f"Plan ready: {len(steps)} steps", "timestamp": self._now_iso()})
@@ -957,16 +1043,65 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
 
     @staticmethod
     def _acceptance_passed(task_id: str) -> bool | None:
-        """任务验收是否通过（无验收报告返回 None）。"""
+        """任务验收是否通过（无验收报告返回 None）。
+
+        M0-d：优先取**选中版本自身的验收**（验收与正文版本绑定）；版本库里没有该版
+        证据时退回 acceptance_report.json，两者都没有就是未知（None，不算通过）。
+        """
         try:
+            from report_version import VersionStore
             from workspace import task_workspace
-            acc_path = task_workspace(task_id) / "acceptance_report.json"
+            ws = task_workspace(task_id)
+            adopted = VersionStore(ws, task_id).adopted()
+            if adopted is not None:
+                acc = adopted.acceptance or {}
+                if acc:
+                    return str(acc.get("overall") or "") == "pass"
+            acc_path = ws / "acceptance_report.json"
             if not acc_path.exists():
                 return None
             acc = json.loads(acc_path.read_text(encoding="utf-8"))
             return acc.get("overall") == "pass"
         except Exception:
             return None
+
+    def _admission_decision(self, task_id: str, status: str,
+                            acceptance: dict | None) -> "AdmissionDecision":
+        """本次运行的准入结论（M0-d）：经验池与模板固化都以它为准。"""
+        from admission import admit_success
+        from report_version import VersionStore, body_hash
+        from workspace import task_workspace
+        hard_ok, hard_reasons = True, []
+        version_bound = False
+        try:
+            ws = task_workspace(task_id)
+            store = VersionStore(ws, task_id)
+            adopted = store.adopted()
+            if adopted is not None:
+                # 验收绑在选中版本；交付守卫若已判为草稿，硬约束不成立
+                version_bound = adopted.acceptance_for_this_body()
+                if not version_bound:
+                    hard_reasons.append("验收未绑定选中版本正文")
+            deliveries = store.deliveries()
+            if deliveries and not any(d.get("ok") for d in deliveries):
+                hard_ok = False
+                hard_reasons.append("交付一致性守卫未通过（按未验收草稿交付）")
+            if getattr(self, "_delivery_draft_reason", ""):
+                hard_ok = False
+                hard_reasons.append(f"交付按草稿处理：{self._delivery_draft_reason}")
+        except Exception as exc:
+            hard_ok = False
+            hard_reasons.append(f"版本/交付证据不可读：{str(exc)[:80]}")
+        decision = admit_success(
+            status=status, acceptance=acceptance, hard_ok=hard_ok,
+            hard_reasons=hard_reasons, review=self._review_state(task_id),
+            mode=self._identity_mode(), version_bound=version_bound,
+        )
+        self._task_admission[task_id] = decision
+        if not decision.admitted or not decision.verified:
+            logger.info("准入结论（task=%s）：admitted=%s verified=%s 原因=%s",
+                        task_id, decision.admitted, decision.verified, decision.reasons)
+        return decision
 
     def _notify_done_async(
         self, task_id: str, goal: str, status: str, report: str = "",
@@ -1016,6 +1151,78 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
 
         threading.Thread(target=_notify_done, daemon=True).start()
 
+    def _version_store(self, task_id: str):
+        """每任务一份权威版本记录（M0-a），落在任务工作区的 `report_versions.json`。"""
+        from report_version import VersionStore
+        stores = getattr(self, "_version_stores", None)
+        if stores is None:
+            stores = {}
+            self._version_stores = stores
+        st = stores.get(task_id)
+        if st is None:
+            st = VersionStore(task_workspace(task_id), task_id)
+            stores[task_id] = st
+        return st
+
+    def _restore_version_state(self, task_id: str, best_report: str) -> str:
+        """恢复时校验版本归属与 hash（M0-a），返回应用作 `best_report` 的正文。
+
+        - 版本库里已有**选中**版本时以它为准：检查点里的正文可能是旧稿或另一版，
+          不能只凭检查点就把未验收正文当成当前版本；
+        - 检查点正文在版本库里查不到（旧格式检查点 / 工作区被清）→ 重新登记，
+          但**不补**验收：证据未知，交付守卫会据此判为未验收草稿；
+        - 查得到但该版自身没有验收 → 同样保持未知。
+        """
+        body = str(best_report or "")
+        if not body.strip():
+            return body
+        from report_version import body_hash
+        store = self._version_store(task_id)
+        adopted = store.adopted()
+        if adopted is not None and adopted.body:
+            if body_hash(adopted.body) != body_hash(body):
+                logger.warning(
+                    "恢复：检查点正文与已选中版本不一致（task=%s），以已选中版本为准",
+                    task_id,
+                )
+            return adopted.body
+        v = store.find_by_body(body)
+        if v is None:
+            v = store.record(body)
+            logger.warning(
+                "恢复：检查点正文在版本库无记录（task=%s），按证据未知登记", task_id,
+            )
+        store.adopt(v, reason="恢复自检查点")
+        return body
+
+    def _adopt_candidate(self, task_id: str, cur_text: str, cand: str, *,
+                         iteration: int = 0, cancelled: bool = False) -> str:
+        """**唯一采纳点**：两个反思/重做分支都走这里（M0-a）。
+
+        候选稿先登记成版本；比较时取**两版各自**的验收（缺失即未知，不借用最新那份）；
+        采纳用 `adopt()` 原子切换；任务已取消/终态时只记迟到拒绝，不覆盖已选中版本。
+        返回采纳后应作为 `best_report` 的正文。
+        """
+        store = self._version_store(task_id)
+        if cancelled:
+            store.reject_late("任务已取消/终态：迟到候选稿不采用")
+            return cur_text
+        cur_v = store.find_by_body(cur_text) if str(cur_text or "").strip() else None
+        if cur_v is None and str(cur_text or "").strip():
+            cur_v = store.record(cur_text)
+        cand_v = store.record(cand, parent_id=(cur_v.version_id if cur_v else ""),
+                              iteration=iteration)
+        improved, why = compare_versions(
+            cur_text, cand,
+            cur_acceptance=(cur_v.acceptance if cur_v else None),
+            cand_acceptance=cand_v.acceptance)
+        if improved:
+            store.adopt(cand_v, reason=why)
+            logger.info("版本比较：采用候选稿（%s）", why)
+            return cand
+        logger.info("版本比较：保留当前稿（%s）", why)
+        return cur_text
+
     @staticmethod
     def _read_acceptance_summary(task_id: str) -> dict | None:
         """读取验收摘要：{overall, gaps, rules_version, rules_fingerprint, profile}。
@@ -1054,6 +1261,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         acceptance_summary: dict | None,
         reflection_unavailable: str,
         llm_degraded: dict,
+        draft_reason: str = "",
     ) -> str:
         """任务最终状态（A1：以最终验收报告判定，而非反思是否执行）：
         - 有步骤失败 → FAILED；
@@ -1072,6 +1280,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 step_statuses=["FAILED"] if has_failure else ["SUCCESS"],
                 acceptance=acceptance_summary or {},
                 llm_degraded=llm_degraded or {},
+                # M0-a：交付按未验收草稿处理时不得显示"通过"
+                draft_delivery=draft_reason,
             )
         except Exception:
             # 投影器不可用时的兜底：保持与收口前一致的判定
@@ -1081,7 +1291,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 acceptance_summary and acceptance_summary.get("overall") != "pass"
             )
             both_failed = bool(llm_degraded and llm_degraded.get("both_failed"))
-            if accept_fail or both_failed:
+            if accept_fail or both_failed or str(draft_reason or "").strip():
                 return "SUCCESS_WITH_ISSUES"
             return "SUCCESS"
 
@@ -1118,12 +1328,26 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             pass
         return True, ""
 
-    def _record_consolidation_stat(self, task_id: str, goal: str, all_steps: list) -> None:
-        """任务完成时记录 domain×能力链 与验收结果，供探索-固化阈值判定。"""
+    # 探索-固化统计文件：项目目录下的固定文件名（跨任务共享的计数依据）。
+    # 不做环境变量覆盖——计数依据的载体若能由环境指向任意位置，"已验证成功次数"
+    # 就能被外部改写；测试隔离改这个类属性（或打桩 _consolidation_stats_path）。
+    CONSOLIDATION_STATS_FILE = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "consolidation_stats.json")
+
+    @classmethod
+    def _consolidation_stats_path(cls) -> str:
+        """统计文件位置（唯一解析点）。"""
+        return cls.CONSOLIDATION_STATS_FILE
+
+    def _record_consolidation_stat(self, task_id: str, goal: str, all_steps: list,
+                                   admission=None) -> None:
+        """任务完成时记录 domain×能力链 与准入结论，供探索-固化阈值判定。
+
+        M0-d：①只记准入谓词的 `verified`，不再用"最新验收"；②同任务同版本只计一次
+        （按 task_id + 正文版本去重），重复收尾不会把已验证计数刷上去。
+        """
         try:
-            path = os.environ.get("WEAVEMIND_CONSOLIDATION_STATS") or os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "consolidation_stats.json",
-            )
+            path = self._consolidation_stats_path()
             stats = []
             if os.path.exists(path):
                 try:
@@ -1132,12 +1356,29 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 except Exception:
                     stats = []
             domain, chain = self._consolidation_key(goal, all_steps)
-            stats = [s for s in stats if s.get("task_id") != task_id]
+            version_id = ""
+            try:
+                from report_version import VersionStore
+                from workspace import task_workspace
+                adopted = VersionStore(task_workspace(task_id), task_id).adopted()
+                version_id = adopted.version_id if adopted else ""
+            except Exception:
+                version_id = ""
+            key = (str(task_id), version_id)
+            stats = [
+                s for s in stats
+                if (str(s.get("task_id")), str(s.get("report_version_id") or "")) != key
+            ]
             stats.append({
                 "task_id": str(task_id),
+                "report_version_id": version_id,
                 "domain": domain,
                 "chain": list(chain),
                 "acceptance": self._acceptance_passed(task_id),
+                # verified 才是"计入阈值"的字段；旧条目没有该键 → 不计（历史样例隔离）
+                "verified": bool(getattr(admission, "verified", False)),
+                "admitted": bool(getattr(admission, "admitted", False)),
+                "reasons": list(getattr(admission, "reasons", []) or []),
                 "ts": self._now_iso(),
             })
             with open(path, "w", encoding="utf-8") as f:
@@ -1146,24 +1387,33 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             pass
 
     def _count_verified_chain(self, domain: str, chain: tuple, current_task: str = "") -> int:
-        """统计历史上同 domain×能力链 且验收 pass 的任务数（不含当前任务）。"""
+        """统计历史上同 domain×能力链 且**已准入为已验证成功**的任务数（不含当前任务）。
+
+        M0-d：只认 `verified is True`。旧条目（只有 acceptance、没有 verified）在重建
+        证据前不再计入——历史样例原样留档，既不批量删也不继续抬高固化计数。
+        """
         try:
-            path = os.environ.get("WEAVEMIND_CONSOLIDATION_STATS") or os.path.join(
-                os.path.dirname(os.path.abspath(__file__)), "consolidation_stats.json",
-            )
+            path = self._consolidation_stats_path()
             if not os.path.exists(path):
                 return 0
             with open(path, encoding="utf-8") as f:
                 stats = json.loads(f.read())
             count = 0
-            for s in stats:
-                if str(s.get("task_id")) == str(current_task):
+            seen: set[str] = set()
+            # 同一任务只算一次：倒序扫描（文件按写入顺序追加），每个任务取**最新**那条，
+            # 否则同一任务的两个版本会把这个任务的成功算成两次
+            for s in reversed(stats):
+                tid = str(s.get("task_id") or "")
+                if not tid or tid in seen:
+                    continue
+                seen.add(tid)
+                if tid == str(current_task):
                     continue
                 if s.get("domain") != domain:
                     continue
                 if tuple(s.get("chain") or []) != chain:
                     continue
-                if s.get("acceptance") is True:
+                if s.get("verified") is True:
                     count += 1
             return count
         except Exception:
@@ -1861,6 +2111,10 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     step_id, len(old_text), len(str(result.get("result") or "")),
                 )
                 completed_all[step_id] = old_result
+                # M0-a：回退只恢复**内存结果**；磁盘 report.md 可能仍是重做版 →
+                # 明确标为"需重验的草稿"，不让交付路径把它当已验收版本。
+                self._delivery_draft_reason = (
+                    f"步骤 {step_id} 重做劣化已回退：磁盘报告可能仍为重做版本，交付需重验")
                 push_progress(self._messaging, task_id, "log",
                               {"type": "iteration", "agent": "orchestrator",
                                "message": "反思重做结果劣化，保留原结果并停止该步骤重做",
@@ -1905,19 +2159,31 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         return False
 
     def _run_acceptance_check(self, task_id: str, goal: str,
-                              trigger: str = "报告步骤") -> dict | None:
+                              trigger: str = "报告步骤",
+                              report_body: str = "") -> dict | None:
         """报告生成后跑确定性验收器：数字溯源等 checklist → 缺口报告。
         结果写入任务工作区 acceptance_report.json 并推前端，供反思精准补缺口；
         同时向 acceptance_events.jsonl 追加一条审计事件（可回放、可对账）。"""
+        # M0-c：取消后不再为一次已放弃的任务跑验收（验收会读报告、写审计事件，
+        # 甚至触发 LLM 语义核对）——取消是终态，不该再产生新的副作用
+        if self._cancel_requested(task_id):
+            logger.info("任务已取消，跳过验收（task=%s, trigger=%s）", task_id, trigger)
+            return None
         _t0 = time.time()
         _repaired = False
         try:
             from acceptance_checker import run_acceptance
             from workspace import task_reports_dir, task_workspace
             rpath = task_reports_dir(task_id) / "report.md"
-            if not rpath.exists():
+            if rpath.exists():
+                report = rpath.read_text(encoding="utf-8")
+            elif str(report_body or "").strip():
+                # 没有 report_generator 步骤时（研究类任务常被规划成单个 content_summary）
+                # 报告正文只在步骤结果里：仍按**同一正文**验收，否则这类任务永远没有验收、
+                # 交付恒被判"未验收草稿"。验收阈值与检查项不变。
+                report = str(report_body)
+            else:
                 return None
-            report = rpath.read_text(encoding="utf-8")
             result = run_acceptance(task_id, goal, report, task_workspace(task_id))
             # 虚假标注确定性修复：把验收器判定的 mislabeled 声明降级为诚实披露
             # （"数据来源：X" → "基于模型知识，未在本次检索中验证"）后复检。
@@ -1979,6 +2245,27 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     json.dumps(result, ensure_ascii=False, indent=1),
                     encoding="utf-8",
                 )
+                # M0-a：把这次验收绑到**产出它的那版正文**（按验收自己的 report_sha256 找版本）。
+                # 验收发生在报告步骤刚写完、正文还没被采纳的时刻，版本库里可能还没有该版：
+                # 此时先按**验收对象**登记该版再绑定，否则这条验收永远找不到归属，
+                # 交付守卫只能按"未知"处理（实测即此：验收 pass 却被判未验收草稿）。
+                _store = self._version_store(task_id)
+                _acc = {
+                    "overall": result.get("overall"),
+                    "gaps": result.get("gaps") or [],
+                    "report_sha256": result.get("report_sha256") or "",
+                    "rules_version": result.get("rules_version") or "",
+                    "rules_fingerprint": result.get("rules_fingerprint") or "",
+                }
+                _bound = _store.bind_acceptance(_acc)
+                if _bound is None and str(_acc["report_sha256"]):
+                    _store.record(report)
+                    _bound = _store.bind_acceptance(_acc)
+                if _bound is None:
+                    logger.warning(
+                        "验收无法绑到正文版本（task=%s, sha=%s）：该版将按证据未知处理",
+                        task_id, str(_acc["report_sha256"])[:16],
+                    )
             except Exception:
                 pass
             # 验收审计事件流：快照文件（覆盖写）之上追加完整历史，
@@ -2198,6 +2485,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 "status": "RUNNING",
                 "steps": current,
                 "goal": goal,
+                # M0-e：全量状态里带阶段观测（剩余预算 + 各阶段等待对象/进展）
+                "budget": self.budget_snapshot(task_id),
             })
         except Exception as exc:
             logger.warning("Full state push failed: %s", str(exc)[:120])
@@ -2252,23 +2541,26 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
 
     def _finish_cancelled(self, task_id: str, goal: str,
                           steps: list | None = None) -> dict:
-        """取消收尾：通告终态 → 清运行标记 → 落库/通知，返回 FAILED 结果。
+        """取消收尾：通告终态 → 清运行标记 → 落库/通知，返回 CANCELLED 结果。
 
-        与既有"计划未确认即取消"的早返回同一套收尾动作；差异只在文案与
-        报告备注（用户取消要能在历史里看出来）。
+        V2-1：终态是 **CANCELLED**（不再写成 FAILED）。此前用户主动停止与真实失败
+        在历史、SSE、指标里无法区分——前端 statusMeta 早就映射了"已取消"，但后端
+        从不产生该状态，属于死代码。
         """
         note = "任务被用户取消（运行中被停止）"
+        import task_state as _ts
+        status = _ts.CANCELLED
         push_progress(self._messaging, task_id, "log",
                       {"type": "log", "agent": "orchestrator", "message": note,
                        "timestamp": self._now_iso()})
         push_progress(self._messaging, task_id, "task_complete",
-                      {"status": "FAILED", "summary": note})
+                      {"status": status, "summary": note})
         self._clear_task_running(task_id)
-        self._finalize_task(task_id, goal, "FAILED", report=note,
+        self._finalize_task(task_id, goal, status, report=note,
                             steps=steps or [])
-        self._notify_done_async(task_id, goal, "FAILED", note)
+        self._notify_done_async(task_id, goal, status, note)
         self._clear_cancel(task_id)
-        return {"task_id": task_id, "status": "FAILED", "steps": steps or [],
+        return {"task_id": task_id, "status": status, "steps": steps or [],
                 "report": note}
 
     def _task_is_running(self, task_id: str) -> bool:
@@ -2335,6 +2627,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             "gate_checked": bool(gate_checked),
             "simple": bool(simple),
             "used_template": bool(used_template),
+            # M0-b：评审状态随检查点走，恢复时据此判断能否复用 PASS
+            "review": dict(self._review_state(task_id)),
             "status": "RUNNING",
             "saved_at": self._now_iso(),
         }
@@ -2420,6 +2714,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             s for s in all_steps
             if str(s.get("step_id")) not in pending_ids
         ]
+        # M0-a：恢复的正文要过版本归属/hash 校验，缺证据保持未知
+        restored_best = self._restore_version_state(
+            task_id, str(cp.get("best_report") or ""))
         return {
             "steps": pending,
             "all_steps": prior,
@@ -2428,7 +2725,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             "iteration": int(cp.get("iteration") or 0),
             "has_failure": bool(cp.get("has_failure") or False),
             "redo_rounds": int(cp.get("redo_rounds") or 0),
-            "best_report": str(cp.get("best_report") or ""),
+            "best_report": restored_best,
+            "review": dict(cp.get("review") or {}),
             "gate_checked": bool(cp.get("gate_checked") or False),
             "simple": bool(cp.get("simple") or False),
             "used_template": bool(cp.get("used_template") or False),
@@ -2559,46 +2857,406 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         return None
 
     def _review_plan(self, goal: str, steps: list[dict], task_id: str) -> list[dict]:
-        """把计划草案交给 Critic 评审；FAIL 则修订一次；超时/异常兜底放行。"""
+        """把计划草案交给 Critic 评审；FAIL 修订一次，修订稿要**再评一次**。
+
+        V2-2 / M0-b：超时、异常、ERROR 一律"评审未完成"：
+        - 个人模式：按**根任务**记降级（`_review_state`），交付物需人工复核；
+        - 银行模式：抛 `ReviewRequiredError` 拒绝继续（修订稿没有拿到绑定的 PASS 也一样）。
+        裁决只认 PASS/FAIL：别的一律按"评审未完成"处置，既不通过也不进付费修订。
+        """
         plan_id = f"plan-{task_id}-{int(time.time())}"
+        st = self._review_state(task_id)
+        st["degraded_reason"] = ""
+        st["verdict"] = ""
+        st["rounds"] = 0
+        bank = self._review_is_required()
+        max_rounds = 2                      # 初评 + 修订后复评，最多一次付费修订
+        plan = list(steps or [])
+        for round_no in range(1, max_rounds + 1):
+            # 每轮用各自的 plan_id：回复列表键随之不同，上一轮的迟到回包不会
+            # 被当成本轮裁决（同一 plan_id 复用会让复评读到初评的结果）
+            round_plan_id = f"{plan_id}-r{round_no}-{os.urandom(4).hex()}"
+            review = self._request_plan_review(
+                goal, plan, task_id, round_plan_id, round_no, bank)
+            if review is None:                       # 已被 _review_unavailable 处置
+                return plan
+            verdict = str(review.get("verdict", "")).upper()
+            if verdict == "PASS":
+                self._review_bind_pass(task_id, plan)
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "review", "agent": "critic",
+                               "message": f"Review PASSED {review.get('scores', {})}"
+                                          f"（绑定第 {round_no} 轮计划）",
+                               "timestamp": self._now_iso()})
+                return plan
+            # 只有 FAIL 才进修订分支；其余裁决在 _request_plan_review 里按协议错误处理
+            suggestions = review.get("suggestions") or []
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "review", "agent": "critic",
+                           "message": f"Review FAILED, revising ({len(suggestions)} suggestions)",
+                           "timestamp": self._now_iso()})
+            if round_no == max_rounds:
+                return self._review_unavailable(
+                    task_id, f"修订后仍未通过评审（{max_rounds} 轮）", plan, bank)
+            revised = self._revise_plan(goal, plan, suggestions, task_id)
+            if not revised:
+                return self._review_unavailable(task_id, "评审 FAIL 且修订未产出计划", plan, bank)
+            plan = list(revised)
+            st["rounds"] = round_no
+        return plan
+
+    def _request_plan_review(self, goal: str, steps: list[dict], task_id: str,
+                             plan_id: str, round_no: int, bank: bool) -> dict | None:
+        """发起一轮评审；返回评审结果，或已按"评审未完成"处置时返回 None。
+
+        每次评审带**步骤指纹**：PASS 只对这份计划有效，换计划要重新拿 PASS。
+        """
         try:
             r = self._new_redis_sync()
             self._messaging.publish("orchestrator:plan_draft", {
                 "plan_id": plan_id,
                 "goal": goal,
                 "steps": steps,
+                "round": round_no,
+                "plan_fingerprint": self._plan_fingerprint(steps),
+                # L01：Critic 是独立进程，它的 LLM 调用也要能归属到根任务
+                "context": make_context(task_id, step_id="plan_review",
+                                        dispatch_id=plan_id).to_wire(),
             })
             push_progress(self._messaging, task_id, "log",
                           {"type": "review", "agent": "critic",
-                           "message": "Plan submitted for review", "timestamp": self._now_iso()})
+                           "message": f"Plan submitted for review (round {round_no})",
+                           "timestamp": self._now_iso()})
             # redis-py 8 的单次 brpop(timeout) 不可靠：用分片轮询到 deadline
             msg = self._brpop_with_deadline(
-                r, f"plan_review:{plan_id}", deadline=time.time() + self._critic_timeout,
+                r, f"plan_review:{plan_id}",
+                deadline=time.time() + self._critic_timeout,
             )
             if not msg:
-                push_progress(self._messaging, task_id, "log",
-                              {"type": "info", "agent": "critic",
-                               "message": f"Review timeout ({self._critic_timeout}s), proceeding",
-                               "timestamp": self._now_iso()})
-                return steps
+                self._review_unavailable(task_id, f"评审超时（{self._critic_timeout}s）",
+                                         steps, bank)
+                return None
             review = json.loads(msg[1])
-            verdict = str(review.get("verdict", "PASS")).upper()
-            if verdict == "PASS":
-                scores = review.get("scores", {})
+            if not isinstance(review, dict):
+                # 空/非字典回包属于协议错误：不是"没有建议"，更不能当通过
+                self._review_unavailable(task_id, f"评审回包非字典：{type(review).__name__}",
+                                         steps, bank)
+                return None
+            verdict = str(review.get("verdict", "")).upper()
+            if verdict in ("ERROR", "DEGRADED") or verdict not in REVIEW_VERDICTS:
+                reason = (f"评审返回 {verdict or '（缺失）'}："
+                          f"{str(review.get('error') or review.get('summary') or '')[:120]}")
+                self._review_unavailable(task_id, reason, steps, bank)
+                return None
+            return review
+        except ReviewRequiredError:
+            raise
+        except Exception as exc:
+            self._review_unavailable(task_id, f"评审异常：{str(exc)[:150]}", steps, bank)
+            return None
+
+    def _review_is_required(self) -> bool:
+        """评审是否"必需"：银行口径（`WEAVEMIND_IDENTITY_MODE=bank`）下必需。
+
+        个人模式允许降级交付，但必须在报告/状态里如实标注（不能当作通过）。
+        """
+        return self._identity_mode() == "bank"
+
+    def _identity_mode(self) -> str:
+        """身份模式判定；配置非法/不可判定 → 抛错，**不**按宽松模式放行。
+
+        合法取值只认 `task_context.VALID_MODES`（local / bank），不另立词表；
+        此前 `default_mode()` 抛错被吞成 False，等于"配置写错就按个人模式放行"，
+        必需评审整套失效。
+        """
+        try:
+            from task_context import VALID_MODES, default_mode
+        except Exception as exc:
+            raise ReviewRequiredError(f"身份模块不可用，无法判定评审要求：{exc}") from exc
+        try:
+            mode = str(default_mode() or "")
+        except Exception as exc:
+            raise ReviewRequiredError(
+                f"身份模式配置非法（不得按个人模式放行）：{exc}") from exc
+        if mode not in VALID_MODES:
+            raise ReviewRequiredError(f"未知身份模式 {mode!r}：拒绝按宽松模式放行")
+        return mode
+
+    def _review_state(self, task_id: str) -> dict:
+        """评审状态**按根任务**归属（M0-b）。
+
+        此前是实例级 `_review_degraded` 标量：同一实例上跑另一个任务时会被清空，
+        于是"这个任务的降级"可能在收尾前消失，变成看起来已通过。
+        """
+        states = getattr(self, "_task_review", None)
+        if states is None:
+            states = {}
+            self._task_review = states
+        st = states.get(task_id)
+        if st is None:
+            st = {
+                "plan_fingerprint": "",
+                "verdict": "",
+                "policy_version": REVIEW_POLICY_VERSION,
+                "mode": "",
+                "degraded_reason": "",
+                "rounds": 0,
+                "at": 0.0,
+            }
+            states[task_id] = st
+        return st
+
+    def _budget(self, task_id: str):
+        """根任务预算（M0-e）：一次任务一份账，落盘在任务工作区，跨进程/恢复共用。"""
+        budgets = getattr(self, "_task_budgets", None)
+        if budgets is None:
+            budgets = {}
+            self._task_budgets = budgets
+        b = budgets.get(task_id)
+        if b is None:
+            from root_budget import RootBudget, limits_from_config
+            try:
+                cfg = self._load_cfg_snapshot()
+            except Exception:
+                cfg = {}
+            limits = limits_from_config(cfg)
+            if not limits.max_seconds and not limits.max_calls and not limits.max_tokens:
+                # 未配置预算时用 `system.task_timeout` 兜底时间上限（0 = 仍不限额）
+                limits.max_seconds = float(getattr(self, "_task_timeout", 0) or 0)
+            b = RootBudget(task_id, task_workspace(task_id), limits)
+            budgets[task_id] = b
+        return b
+
+    def _load_cfg_snapshot(self) -> dict:
+        """读取 config.json（`system.budget` 等）。
+
+        与 `system` 段热重载同源：用编排器自己的配置路径。此前尝试的
+        `llm_client._load_config` 并不存在 → 静默回落成 {} → 配置里的预算上限
+        不生效（实测账本记的是 `task_timeout` 兜底值，而不是配置值）。
+        """
+        path = str(getattr(self, "_system_cfg_path", "") or "")
+        if not path:
+            return {}
+        try:
+            with open(path, encoding="utf-8") as fh:
+                return json.load(fh) or {}
+        except Exception:
+            return {}
+
+    def _budget_reserve(self, task_id: str, stage: str, **kw) -> str:
+        """发送前预留；预算不足抛 `BudgetExceeded`（调用方决定如何收尾）。"""
+        return self._budget(task_id).reserve(stage, **kw)
+
+    def _budget_settle(self, task_id: str, ticket: str, **kw) -> None:
+        try:
+            self._budget(task_id).settle(ticket, **kw)
+        except Exception:
+            pass
+
+    def _budget_note(self, task_id: str, stage: str, **detail) -> None:
+        """记一次有效进展（心跳不算进展）。"""
+        try:
+            self._budget(task_id).note_progress(stage, detail)
+        except Exception:
+            pass
+
+    def budget_snapshot(self, task_id: str) -> dict:
+        """阶段观测快照（含剩余预算与各阶段等待对象/最近有效进展）。"""
+        try:
+            return self._budget(task_id).snapshot()
+        except Exception as exc:
+            return {"error": str(exc)[:120]}
+
+    def _call_llm_cancellable(self, task_id: str, phase: str, fn, *args, **kwargs):
+        """在**可取消的等待**里跑一次 LLM 调用（M0-c/M0-e）。
+
+        单次模型调用本身不可中断（它跑在 `llm_client` 里，含自身重试与主备切换），
+        但**等待**可以中断：调用放到工作线程，主线程按 1 秒分片轮询取消标志。
+        取消命中就放弃等待、抛 `TaskCancelled` 让 run() 走取消收尾，并把这次调用
+        记为"在飞待对账"——可能仍在计费，不冒充已停止。
+
+        实测依据：模型端点退化（504/读超时 + 重试）时规划阶段会卡在一次调用里，
+        "停止"要等这次调用自己失败才生效，请求取消后 300 秒仍未终结。
+        """
+        box: dict = {}
+
+        def _run() -> None:
+            try:
+                box["value"] = fn(*args, **kwargs)
+            except BaseException as exc:       # 原样带回主线程（含 KeyboardInterrupt）
+                box["error"] = exc
+
+        th = threading.Thread(target=_run, daemon=True,
+                              name=f"llm-{phase}-{task_id}")
+        th.start()
+        while th.is_alive():
+            if self._cancel_requested(task_id):
+                logger.info("取消命中：放弃等待 %s 阶段的模型调用（task=%s）",
+                            phase, task_id)
+                try:
+                    self._budget(task_id).mark_unsettled(
+                        f"{phase}-inflight", reason="取消后不再等待本次模型调用")
+                except Exception:
+                    pass
                 push_progress(self._messaging, task_id, "log",
-                              {"type": "review", "agent": "critic",
-                               "message": f"Review PASSED {scores}", "timestamp": self._now_iso()})
-                return steps
-            suggestions = review.get("suggestions") or []
+                              {"type": "info", "agent": "orchestrator",
+                               "message": (f"已取消：放弃等待{phase}阶段的模型调用"
+                                           "（该调用可能仍在计费，已转待对账）"),
+                               "timestamp": self._now_iso()})
+                raise TaskCancelled(f"取消：放弃等待{phase}阶段模型调用")
+            th.join(1.0)
+        if "error" in box:
+            raise box["error"]
+        return box.get("value")
+
+    def _plan_fingerprint(self, steps: list[dict]) -> str:
+        """计划指纹：PASS 绑定的对象是**这一版计划**，不是"某个计划"。"""
+        payload = json.dumps(list(steps or []), ensure_ascii=False, sort_keys=True)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _review_bind_pass(self, task_id: str, steps: list[dict]) -> dict:
+        st = self._review_state(task_id)
+        st.update({
+            "plan_fingerprint": self._plan_fingerprint(steps),
+            "verdict": "PASS",
+            "policy_version": REVIEW_POLICY_VERSION,
+            "mode": self._identity_mode(),
+            "degraded_reason": "",
+            "at": time.time(),
+        })
+        return st
+
+    def _review_mark_degraded(self, task_id: str, reason: str,
+                              *, plan: list[dict] | None = None) -> None:
+        """记一次"评审未完成/降级"——只在个人模式用；银行模式走拒绝路径。"""
+        st = self._review_state(task_id)
+        st.update({
+            "verdict": "DEGRADED",
+            "policy_version": REVIEW_POLICY_VERSION,
+            "mode": self._identity_mode(),
+            "degraded_reason": str(reason or ""),
+            "at": time.time(),
+        })
+        if plan is not None:
+            st["plan_fingerprint"] = self._plan_fingerprint(plan)
+
+    def review_passed_for(self, task_id: str, steps: list[dict]) -> bool:
+        """该任务当前的 PASS 是否**绑定**在这版计划与当前策略版本上。"""
+        st = self._review_state(task_id)
+        return bool(
+            st.get("verdict") == "PASS"
+            and st.get("plan_fingerprint") == self._plan_fingerprint(steps)
+            and st.get("policy_version") == REVIEW_POLICY_VERSION
+        )
+
+    @staticmethod
+    def _with_draft_note(report: str, reason: str) -> str:
+        """在**未验收草稿**的交付物本体上加显著注记（页面与导出都可见）。"""
+        note = (f"> **未验收草稿：{str(reason or '缺少与该正文对应的验收')}**\n"
+                "> 本次交付没有取得针对该版正文的验收通过，不得视为已通过，"
+                "也不得直接用于对外发布或审批。\n")
+        text = str(report or "")
+        if "未验收草稿" in text:
+            return text
+        head, sep, tail = text.partition("\n\n---\n\n")
+        if sep:
+            return f"{head}\n\n{note}{sep}{tail}"
+        return f"{note}\n\n{text}"
+
+    def _with_review_note(self, task_id: str, delivery: str) -> str:
+        """把本任务的评审状态写进交付说明（M0-b）。
+
+        - PASS：不额外加字（正常交付物不加噪声）；
+        - 降级（未完成评审）：显式写明"未经评审/评审未完成"并说明理由，交付物需人工复核；
+        - 银行模式不会走到这里（必需评审未完成会直接拒绝继续）。
+
+        同时把状态落成工作区文件 `review_state.json`，供历史/复核与导出对账。
+        """
+        st = self._review_state(task_id)
+        verdict = str(st.get("verdict") or "NONE")
+        label = "PASS" if verdict == "PASS" else ""
+        note = ""
+        if verdict != "PASS":
+            reason = str(st.get("degraded_reason") or "未执行或未完成评审")
+            label = "未经评审（critic 关闭）" if "critic 已关闭" in reason else "评审未完成（降级）"
+            note = (f"> **评审状态：{label}** —— {reason}。\n"
+                    "> 本交付物未取得绑定计划版本的评审 PASS，须经人工复核后方可使用。\n\n")
+        try:
+            payload = dict(st)
+            payload.update({"task_id": task_id, "label": label,
+                            "written_at": self._now_iso()})
+            (task_workspace(task_id) / "review_state.json").write_text(
+                json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+        except Exception as exc:
+            logger.warning("评审状态落盘失败（task=%s）：%s", task_id, str(exc)[:100])
+        # 附在交付说明**之后**：交付说明本身仍以标题开头（导出件首行不变）
+        return (delivery + "\n\n" + note.rstrip()) if note else delivery
+
+    def _restore_review_state(self, task_id: str, saved: dict,
+                              plan: list[dict] | None = None) -> bool:
+        """恢复 checkpoint 里的评审状态；返回是否复用了仍有效的 PASS。
+
+        复用条件：裁决 PASS、同一策略版本、同一身份模式。任一不符 → 按"未完成评审"
+        处置（银行拒绝 / 个人记降级），不复用过期或异版 PASS，也不默认已通过。
+        """
+        cur_mode = self._identity_mode()
+        saved = saved if isinstance(saved, dict) else {}
+        ok = (str(saved.get("verdict") or "") == "PASS"
+              and str(saved.get("policy_version") or "") == REVIEW_POLICY_VERSION
+              and str(saved.get("mode") or "") == cur_mode)
+        st = self._review_state(task_id)
+        if ok:
+            st.update({
+                "plan_fingerprint": str(saved.get("plan_fingerprint") or ""),
+                "verdict": "PASS",
+                "policy_version": REVIEW_POLICY_VERSION,
+                "mode": cur_mode,
+                "degraded_reason": "",
+                "rounds": int(saved.get("rounds") or 0),
+                "at": float(saved.get("at") or 0.0),
+            })
             push_progress(self._messaging, task_id, "log",
                           {"type": "review", "agent": "critic",
-                           "message": f"Review FAILED, revising ({len(suggestions)} suggestions)",
+                           "message": "恢复：复用仍有效的评审 PASS（同策略版本/同身份模式）",
                            "timestamp": self._now_iso()})
-            revised = self._revise_plan(goal, steps, suggestions, task_id)
-            return revised if revised else steps
-        except Exception as exc:
-            logger.warning("Critic review failed, proceeding: %s", str(exc)[:200])
-            return steps
+            return True
+        self._require_review_or_refuse(
+            task_id, "恢复的计划没有仍有效的评审 PASS", plan=plan)
+        return False
+
+    def _require_review_or_refuse(self, task_id: str, reason: str,
+                                  *, plan: list[dict] | None = None) -> None:
+        """按身份模式统一处置"必需评审未完成"：银行拒绝，个人记降级。"""
+        if self._review_is_required():
+            logger.error("必需评审未完成（银行口径），拒绝继续：%s", reason)
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "error", "agent": "critic",
+                           "message": f"必需评审未完成，按策略拒绝继续：{reason}",
+                           "timestamp": self._now_iso()})
+            raise ReviewRequiredError(reason)
+        logger.warning("评审未完成（降级，个人模式继续）：%s", reason)
+        self._review_mark_degraded(task_id, reason, plan=plan)
+        push_progress(self._messaging, task_id, "log",
+                      {"type": "review", "agent": "critic",
+                       "message": f"未完成评审（降级）：{reason}——继续执行，交付物需人工复核",
+                       "timestamp": self._now_iso()})
+
+    def _review_unavailable(self, task_id: str, reason: str,
+                            steps: list[dict], bank: bool) -> list[dict]:
+        """评审不可用（超时/异常/ERROR/裁决非法）时的统一处置。"""
+        if bank:
+            logger.error("必需评审未完成（银行口径），拒绝继续：%s", reason)
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "error", "agent": "critic",
+                           "message": f"必需评审未完成，按策略拒绝继续：{reason}",
+                           "timestamp": self._now_iso()})
+            raise ReviewRequiredError(reason)
+        self._review_mark_degraded(task_id, reason, plan=steps)
+        push_progress(self._messaging, task_id, "log",
+                      {"type": "review", "agent": "critic",
+                       "message": f"未完成评审（降级）：{reason}——继续执行，交付物需人工复核",
+                       "timestamp": self._now_iso()})
+        return steps
 
     def _revise_plan(self, goal: str, steps: list[dict], suggestions: list[str], task_id: str) -> list[dict] | None:
         """按 Critic 建议让 LLM 修订计划。"""
@@ -2688,13 +3346,49 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
 
         # Push task to worker queue
         r = self._new_redis_sync()
+        # V2-1 取消闸门：**所有**派发都经过这里，取消后不再发起新步骤与新付费调用
+        # （此前首次派发无取消检查，重做/修复/降级重派等路径也能在取消后继续派发）
+        if self._cancel_requested(task_id):
+            logger.info("已取消：跳过派发（step=%s, capability=%s）", step_id, capability)
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "info", "agent": "orchestrator",
+                           "message": f"已取消，跳过步骤 {step_id}（{capability}）的派发",
+                           "timestamp": self._now_iso()})
+            return {"task_id": step_id, "status": "CANCELLED",
+                    "result": "任务已取消，该步骤未派发"}
         # 唯一派发 ID：避免 task_result:{step_id} 与其它任务/历史残留键碰撞
         # （步骤 ID 如 "1"/"2" 在所有任务中通用，曾导致跨任务误取结果）
         dispatch_id = f"{step_id}-{uuid.uuid4().hex[:8]}"
         with self._task_starts_lock:
             task_start_ts = self._task_starts.get(task_id, time.time())
+        # L01：派发载荷带版本化身份上下文。`task_id` 仍是派发 id（结果通道
+        # `task_result:{dispatch_id}` 与旧 Worker 都靠它），根任务身份放在 context 里
+        # ——此前 Worker 只拿到派发 id，LLM 台账记在派发键上，根任务台账恒为空。
+        # M0-e：先预留再发送（预算不足**拒绝发送**，不是"先花再算"）
+        try:
+            _ticket = self._budget_reserve(
+                task_id, "step",
+                detail={"step_id": step_id, "capability": capability,
+                        "dispatch_id": dispatch_id})
+        except Exception as exc:
+            logger.error("根任务预算不足，拒绝派发步骤 %s：%s", step_id, str(exc)[:150])
+            # 预算耗尽必须**停止本任务的后续尝试**：只拒绝这一次派发的话，
+            # 重试/重做循环会每 2 秒再试一次，任务永远收不了尾（实机观测）
+            try:
+                self._budget_exhausted[task_id] = str(exc)[:200]
+            except Exception:
+                pass
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "error", "agent": capability,
+                           "message": f"预算不足，未派发步骤 {step_id}：{str(exc)[:120]}",
+                           "timestamp": self._now_iso()})
+            return {"task_id": step_id, "status": "FAILED", "budget_exceeded": True,
+                    "result": f"根任务预算不足，未派发：{str(exc)[:150]}"}
+
+        ctx = make_context(root_task_id=task_id, step_id=step_id, dispatch_id=dispatch_id)
         r.lpush(f"task_queue:{agent_id}", json.dumps({
             "task_id": dispatch_id,
+            "context": ctx.to_wire(),
             "instruction": instruction,
             "task_start_ts": task_start_ts,
             "step_deadline": time.time() + timeout,
@@ -2707,8 +3401,48 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             )[:400],
         }, ensure_ascii=False))
 
-        # Wait for result
-        result = self._wait_for_result(dispatch_id, timeout)
+        # Wait for result（M0-c：等待结果分四类，取消不再被写成"超时"）
+        self._track_inflight(task_id, dispatch_id, time.time())
+        try:
+            out = self._wait_step_result(dispatch_id, timeout, cancel_task_id=task_id)
+        except Exception as exc:
+            out = WaitOutcome(WAIT_PROTOCOL, reason=f"等待步骤结果异常：{str(exc)[:120]}")
+        if out.kind == WAIT_CANCEL:
+            # 取消时**不**销账：worker 可能仍在跑、仍在计费，留痕供对账
+            self._mark_inflight_unsettled(task_id, dispatch_id)
+            self._budget(task_id).mark_unsettled(_ticket, reason=out.reason)
+            self._budget(task_id).note_progress("step", {
+                "step_id": step_id, "capability": capability,
+                "dispatch_id": dispatch_id, "cancelled": True})
+        else:
+            self._untrack_inflight(task_id, dispatch_id)
+            self._budget_settle(
+                task_id, _ticket, ok=(out.kind == WAIT_RESULT),
+                note=f"{capability}:{out.kind}")
+            self._budget_note(task_id, "step", step_id=step_id,
+                              capability=capability, outcome=out.kind)
+        if out.kind == WAIT_CANCEL:
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "info", "agent": capability,
+                           "message": f"已取消，停止等待步骤 {step_id}（{out.reason}）",
+                           "timestamp": self._now_iso()})
+            return {"task_id": step_id, "status": "CANCELLED", "cancelled": True,
+                    "result": f"任务已取消：{out.reason}"}
+        if out.kind == WAIT_TIMEOUT:
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "error", "agent": capability,
+                           "message": f"Step {step_id} timed out ({timeout}s)",
+                           "timestamp": self._now_iso()})
+            return {"task_id": step_id, "status": "FAILED", "result": f"Timeout after {timeout}s"}
+        if out.kind == WAIT_PROTOCOL:
+            # 协议错误不是超时：日志与结果都要说清是哪一类，别混成"没等到"
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "error", "agent": capability,
+                           "message": f"Step {step_id} 结果不合协议：{out.reason}",
+                           "timestamp": self._now_iso()})
+            return {"task_id": step_id, "status": "FAILED", "protocol_error": True,
+                    "result": f"结果协议错误：{out.reason}"}
+        result = out.result
         if result:
             result = self._normalize_result(result)
             # 展示层保留原步骤 ID（任务结果仅用于完成状态与内容）
@@ -2722,23 +3456,102 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         else:
             push_progress(self._messaging, task_id, "log",
                           {"type": "error", "agent": capability,
-                           "message": f"Step {step_id} timed out ({timeout}s)", "timestamp": self._now_iso()})
-            result = {"task_id": step_id, "status": "FAILED", "result": f"Timeout after {timeout}s"}
+                           "message": f"Step {step_id} empty result", "timestamp": self._now_iso()})
+            result = {"task_id": step_id, "status": "FAILED", "result": "Empty result"}
 
         return result
 
-    def _wait_for_result(self, task_id: str, timeout: int) -> dict | None:
-        """Block until worker result arrives via Redis BRPOP."""
-        r = self._new_redis_sync()
-        deadline = time.time() + max(timeout, 5)
-        msg = self._brpop_with_deadline(r, f"task_result:{task_id}", deadline)
-        if not msg:
-            return None
+    def _inflight_map(self) -> dict:
+        table = getattr(self, "_inflight", None)
+        if table is None:
+            table = {}
+            self._inflight = table
+        return table
+
+    def _track_inflight(self, task_id: str, dispatch_id: str, started: float) -> None:
+        """登记在飞派发：等待提前返回**不代表** worker 停止（M0-c/M0-e 对账依据）。"""
+        lock = getattr(self, "_inflight_lock", None)
+        if lock is None:
+            lock = threading.Lock()
+            self._inflight_lock = lock
+        with lock:
+            self._inflight_map().setdefault(task_id, {})[dispatch_id] = started
+
+    def _untrack_inflight(self, task_id: str, dispatch_id: str) -> None:
+        lock = getattr(self, "_inflight_lock", None)
+        if lock is None:
+            return
+        with lock:
+            self._inflight_map().get(task_id, {}).pop(dispatch_id, None)
+
+    def _mark_inflight_unsettled(self, task_id: str, dispatch_id: str) -> None:
+        """取消/放弃等待时把在飞调用转入"待对账"：可能已计费但结果不再读取。"""
+        lock = getattr(self, "_inflight_lock", None)
+        started = 0.0
+        if lock is not None:
+            with lock:
+                started = float(
+                    self._inflight_map().get(task_id, {}).get(dispatch_id, 0.0) or 0.0)
+        record = {"dispatch_id": dispatch_id, "started_at": started,
+                  "marked_at": time.time(), "task_id": task_id,
+                  "reason": "取消后不再读取结果，调用可能仍在计费，需对账"}
         try:
-            return json.loads(msg[1])
-        except Exception as e:
-            logger.warning("Result parse error for %s: %s", task_id, e)
-            return None
+            path = task_workspace(task_id) / "inflight_unsettled.json"
+            data = []
+            if path.exists():
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                data = raw if isinstance(raw, list) else []
+            data = [d for d in data if str(d.get("dispatch_id")) != dispatch_id] + [record]
+            path.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        except Exception as exc:
+            logger.warning("在飞未结算记录写入失败（task=%s）：%s", task_id, str(exc)[:100])
+        logger.warning("在飞调用转入待对账（task=%s, dispatch=%s）", task_id, dispatch_id)
+
+    def _wait_step_result(self, task_id: str, timeout: int,
+                          cancel_task_id: str = "") -> WaitOutcome:
+        """等待步骤结果，返回**分类**结果：result / cancel / timeout / protocol。
+
+        M0-c：取消、超时、协议错误必须能区分开——上层据此决定是否记超时日志、
+        是否写 step_failure、是否按取消收尾。空字典、非字典、JSON 解析失败、
+        status 与 result 均缺失，一律算**协议错误**（不是成功，也不是"没消息"）。
+        """
+        deadline = time.time() + max(timeout, 5)
+        while True:
+            slice_end = min(deadline, time.time() + 1.0)
+            try:
+                r = self._new_redis_sync()
+                msg = self._brpop_with_deadline(r, f"task_result:{task_id}", slice_end)
+            except Exception as exc:
+                return WaitOutcome(WAIT_PROTOCOL, reason=f"读取结果通道失败：{str(exc)[:100]}")
+            if msg:
+                try:
+                    payload = json.loads(msg[1])
+                except Exception as exc:
+                    logger.warning("Result parse error for %s: %s", task_id, exc)
+                    return WaitOutcome(WAIT_PROTOCOL, reason=f"结果不是合法 JSON：{str(exc)[:80]}")
+                if not isinstance(payload, dict):
+                    return WaitOutcome(
+                        WAIT_PROTOCOL, reason=f"结果不是字典：{type(payload).__name__}")
+                if not payload:
+                    return WaitOutcome(WAIT_PROTOCOL, reason="结果为空字典")
+                if payload.get("status") is None and payload.get("result") is None:
+                    return WaitOutcome(
+                        WAIT_PROTOCOL, reason="结果缺关键字段（status 与 result 均缺失）")
+                return WaitOutcome(WAIT_RESULT, result=payload)
+            if cancel_task_id and self._cancel_requested(cancel_task_id):
+                logger.info("收到取消请求：停止等待步骤结果（dispatch=%s）", task_id)
+                return WaitOutcome(WAIT_CANCEL, reason="用户取消：停止等待该步骤结果")
+            if time.time() >= deadline:
+                return WaitOutcome(WAIT_TIMEOUT, reason=f"等待步骤结果超时（{timeout}s）")
+
+    def _wait_for_result(self, task_id: str, timeout: int,
+                         cancel_task_id: str = "") -> dict | None:
+        """兼容包装：只返回结果本体，取消/超时/协议错误都是 None。
+
+        新调用点请用 `_wait_step_result`——None 无法区分"取消"与"超时"。
+        """
+        return self._wait_step_result(
+            task_id, timeout, cancel_task_id).result
 
     def _normalize_result(self, result: dict) -> dict:
         """识别 Worker 返回中的显式失败标记，避免"假成功"污染结果。
@@ -3248,6 +4061,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     if age < threshold or time.time() - last_alert < threshold:
                         continue
                     last_alert = time.time()
+                    # M0-e 阶段观测：卡住时把"等待对象/最近有效进展/剩余预算/取消状态"
+                    # 一起报出来——只报"卡了多久"没法判断是等模型、等 worker 还是没钱了
+                    _budget = self.budget_snapshot(task_id)
+                    _stage = str(state.get("phase") or "")
+                    _detail = ((_budget.get("stages") or {}).get(_stage) or {})
                     push_progress(self._messaging, task_id, "log", {
                         "type": "warning",
                         "agent": "orchestrator",
@@ -3256,8 +4074,13 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                             f"（疑似 LLM 调用阻塞，阈值 {threshold}s）；仍在等待，"
                             "超时后会重试或降级"
                         ),
-                        "phase": str(state.get("phase") or ""),
+                        "phase": _stage,
                         "elapsed_seconds": round(age, 1),
+                        "waiting_on": _detail.get("waiting_on") or {},
+                        "last_progress": _detail.get("last_progress") or {},
+                        "since_progress_sec": _detail.get("since_progress_sec"),
+                        "budget_remaining": _budget.get("remaining") or {},
+                        "cancelled": self._cancel_requested(task_id),
                         "timestamp": self._now_iso(),
                     })
                     logger.warning(
@@ -3343,6 +4166,21 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         if not hasattr(self, "_task_user_ids"):
             self._task_user_ids = {}
         self._task_user_ids[task_id] = str(user_id or "")
+        # V2-2 / M0-b：评审状态按**根任务**归属（个人模式评审未完成时如实标注，
+        # 交付物注明需人工复核）。任务开始时清掉本任务这一条，不动别的任务。
+        self._review_state(task_id).update({
+            "verdict": "", "degraded_reason": "", "plan_fingerprint": "",
+            "policy_version": REVIEW_POLICY_VERSION, "rounds": 0, "at": 0.0,
+        })
+        # M0-d：本次运行的准入结论（收尾时计算并落库/注入模板与经验沉淀）
+        self._delivery_draft_reason = ""
+        # M0-e：根任务预算耗尽时，本任务不再尝试新调用（见 _dispatch 的拒绝分支）
+        if not hasattr(self, "_budget_exhausted"):
+            self._budget_exhausted = {}
+        self._budget_exhausted.pop(task_id, None)
+        if not hasattr(self, "_task_admission"):
+            self._task_admission = {}
+        self._task_admission.pop(task_id, None)
         # V1.2 checkpointer：进程崩溃后从最后完成步骤续跑。
         # 仅当无进行中标记（或旧标记 pid 已死）且 goal 哈希/终态校验通过时恢复；
         # 恢复时跳过工作区清理，保护已有成果文件。
@@ -3411,7 +4249,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         # 避免带着死端点空转 30 分钟（余额不足/密钥失效/无响应）。
         try:
             from llm_client import endpoints_available
-            _llm_ok, _llm_msg = endpoints_available()
+            # M0-c：健康探测是网络等待，取消要能立刻打断（不等探测超时）
+            _llm_ok, _llm_msg = self._call_llm_cancellable(
+                task_id, "健康预检", endpoints_available)
             if not _llm_ok:
                 push_progress(self._messaging, task_id, "warning",
                               {"type": "llm", "agent": "orchestrator",
@@ -3433,13 +4273,23 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                                + "（已自动切换备用端点；若任务质量下降，请检查前端 API 设置）",
                                "timestamp": self._now_iso()})
             # A3：LLM 端点余额预检——主/备均余额不足直接拒绝任务；
-            # 单端点不足照常运行并在 llm_degraded 预置余额警告
-            _balance_ok, _balance_msg = self._precheck_llm_balance(task_id)
+            # 单端点不足照常运行并在 llm_degraded 预置余额警告。
+            # M0-c：预检本身也是网络等待，同样要能被"停止"打断（实测：端点退化时
+            # 健康/余额探测会各占数十秒，取消要等它们跑完才生效 → 停止延迟 58s）
+            try:
+                _balance_ok, _balance_msg = self._call_llm_cancellable(
+                    task_id, "余额预检", self._precheck_llm_balance, task_id)
+            except TaskCancelled:
+                _phase_stop.set()
+                return self._finish_cancelled(task_id, goal, None)
             if not _balance_ok:
                 self._clear_task_running(task_id)
                 self._notify_done_async(task_id, goal, "FAILED", _balance_msg)
                 return {"task_id": task_id, "status": "FAILED",
                         "steps": [], "report": _balance_msg, "reason": _balance_msg}
+        except TaskCancelled:
+            _phase_stop.set()
+            return self._finish_cancelled(task_id, goal, None)
         except Exception:
             pass
 
@@ -3461,6 +4311,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 steps = self._normalize_steps(template_steps)
                 steps = self._ensure_report_step(steps, task_id)
                 used_template = True
+                # M0-b：模板计划同样受评审策略约束
+                self._require_review_or_refuse(
+                    task_id, "模板计划未经过 Critic 评审", plan=steps)
             else:
                 routed = self._route_template(goal, task_id)
                 if routed:
@@ -3471,10 +4324,17 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     steps = self._normalize_steps(routed)
                     steps = self._ensure_report_step(steps, task_id)
                     used_template = True
+                    # M0-b：路由到模板同样是"没有 Critic 评审"的计划
+                    self._require_review_or_refuse(
+                        task_id, "路由模板计划未经过 Critic 评审", plan=steps)
                 else:
                     try:
                         from llm_client import LLMUnavailableError
                         steps = self._plan(goal, task_id, context, memory_context)
+                    except TaskCancelled:
+                        # 规划期间用户点了停止：放弃在飞调用并立即收尾（不再等模型超时）
+                        _phase_stop.set()
+                        return self._finish_cancelled(task_id, goal, None)
                     except LLMUnavailableError as exc:
                         push_progress(self._messaging, task_id, "warning",
                                       {"type": "llm", "agent": "orchestrator",
@@ -3518,8 +4378,13 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     "goal": goal,
                     "revision": False,
                 })
-                confirmed = self._wait_plan_confirm(task_id, steps)
+                _cf: dict = {}
+                confirmed = self._wait_plan_confirm(task_id, steps, _cf)
                 if confirmed is None:
+                    if _cf.get("kind") == WAIT_CANCEL:
+                        # 用户在计划确认期间取消 → 终态是 CANCELLED（不是 FAILED）
+                        _phase_stop.set()
+                        return self._finish_cancelled(task_id, goal, None)
                     push_progress(self._messaging, task_id, "task_complete",
                                   {"status": "FAILED", "summary": "Plan not confirmed, task cancelled"})
                     self._clear_task_running(task_id)
@@ -3577,6 +4442,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             steps = list(resumed.get("steps") or [])
             used_template = bool(resumed.get("used_template"))
             simple = bool(resumed.get("simple"))
+            # M0-b：恢复的评审状态要么仍有效（同策略版本、同身份模式），
+            # 要么按"未完成评审"处置——不复用过期/异版 PASS，也不默认已通过
+            self._restore_review_state(task_id, resumed.get("review") or {}, steps)
             with self._task_starts_lock:
                 self._task_simple[task_id] = simple
 
@@ -3636,9 +4504,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 all_steps.extend(steps)
 
                 cand = self._best_deliverable(goal, last_steps, last_results)
-                _cand_improved = len(cand) > len(best_report)
-                if _cand_improved:
-                    best_report = cand
+                # V1/M0-a：按**两版各自的验收**比较，并原子采纳（唯一采纳点）
+                _before_best = best_report
+                best_report = self._adopt_candidate(
+                    task_id, best_report, cand, iteration=iteration,
+                    cancelled=self._cancel_requested(task_id))
+                _cand_improved = best_report != _before_best
                 self._publish_full_state(task_id, goal, all_steps, completed_all)
                 # V1.2 checkpoint：每轮执行完成后保存（含全部步骤/结果/迭代轮次）
                 self._save_checkpoint(task_id, self._checkpoint_payload(
@@ -3680,6 +4551,17 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             skip_execute = False
 
             if has_failure or self._max_iterations <= 0 or iteration >= self._max_iterations:
+                break
+            # M0-e：预算已耗尽 → 不再进入新一轮（新一轮的每次派发都会被拒绝，
+            # 只会把"每 2 秒重试一次"的循环拖到天荒地老）
+            if (getattr(self, "_budget_exhausted", {}) or {}).get(task_id):
+                logger.warning("根任务预算已耗尽，停止后续迭代（task=%s）", task_id)
+                has_failure = True
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "error", "agent": "orchestrator",
+                               "message": ("根任务预算已耗尽：不再进入新的迭代，"
+                                           "按现有结果如实收尾"),
+                               "timestamp": self._now_iso()})
                 break
             if simple:
                 # 简单任务：一轮执行即交付，由贯通测试守门，不做反射式追加迭代
@@ -3934,9 +4816,14 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                             goal, all_steps,
                             [completed_all.get(s["step_id"], {}) for s in all_steps],
                         )
-                        _cand_improved = len(cand) > len(best_report)
-                        if _cand_improved:
-                            best_report = cand
+                        # V1/M0-a：重做后同样走唯一采纳点（各自验收 + 原子切换；取消/终态不覆盖）
+                        _before = best_report
+                        best_report = self._adopt_candidate(
+                            task_id, best_report, cand, iteration=iteration,
+                            cancelled=self._cancel_requested(task_id))
+                        _cand_improved = best_report != _before
+                        _why = "采纳候选稿" if _cand_improved else "保留当前稿（各自验收比较）"
+                        logger.info("重做后版本比较：%s", _why)
                         self._publish_full_state(task_id, goal, all_steps, completed_all)
                         # V1.2 checkpoint：反思单步重做后保存（继续反思轮）
                         self._save_checkpoint(task_id, self._checkpoint_payload(
@@ -4094,9 +4981,56 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         detail = best_report or self._finalize(goal, all_steps, [
             completed_all.get(s["step_id"], {}) for s in all_steps
         ])
+        # M0-a：快速路径/单步任务不走反思循环，也就不会经过"唯一采纳点"——
+        # 收尾时补齐选中版本，否则这类任务永远没有选中版本，交付恒被判"未验收草稿"
+        # （实机：验收 pass 却按草稿交付、经验也被准入拒绝）。
+        try:
+            _store0 = self._version_store(task_id)
+            if _store0.adopted() is None and str(detail or "").strip():
+                _store0.record(detail)
+                _v0 = _store0.find_by_body(detail)
+                if _v0 is not None:
+                    _store0.adopt(_v0, reason="收尾补齐：快速路径/单步任务未经采纳")
+        except Exception as exc:
+            logger.warning("收尾补齐选中版本失败（task=%s）：%s", task_id, str(exc)[:120])
+        # M0-b：评审状态写进交付物本体（不只留日志）——降级交付物必须一眼看出需人工复核
+        delivery = self._with_review_note(task_id, delivery)
+        # M0-e：预算耗尽的运行要说清"为什么没做完"（不是失败于内容，而是没额度了）
+        _budget_stop = str((getattr(self, "_budget_exhausted", {}) or {}).get(task_id) or "")
+        if _budget_stop:
+            has_failure = True
+            delivery = (f"> **本次运行因根任务预算耗尽而提前收尾：{_budget_stop}**\n"
+                        "> 结果可能不完整，需人工确认后再使用。\n\n" + delivery)
         report = delivery + "\n\n---\n\n" + detail
         # 报告内任务工作区绝对路径 → 前端可访问 URL（图表/数据图片链接可显示）
         report = self._rewrite_report_links(report, task_id)
+        # M0-a 交付一致性：装配/链接重写后的**交付正文**必须与选中版本验收所指正文一致。
+        # 不一致（或该版本没有对应自身的验收）→ 只作"未验收草稿"：不显示通过、不进成功沉淀。
+        try:
+            from report_version import verify_delivery
+            _store = self._version_store(task_id)
+            _v = _store.adopted()
+            _ok, _why = verify_delivery(_v, detail) if _v else (False, "无选中版本")
+            if not _ok:
+                # 未验收草稿必须在**交付物本体**上写明（页面/导出都看得到），
+                # 只在日志里说一句等于用户看不到"这份不能当已通过用"
+                report = self._with_draft_note(report, str(_why))
+                self._delivery_draft_reason = str(_why)
+                logger.warning("交付按未验收草稿处理：%s", _why)
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "review", "agent": "orchestrator",
+                               "message": f"交付版本与验收对象不一致或缺失（{_why}）："
+                                          "本次按未验收草稿交付，不得视为已通过",
+                               "timestamp": self._now_iso()})
+            else:
+                self._delivery_draft_reason = ""
+            # 记录**最终交付正文**（含交付说明、评审/草稿注记与链接重写）的 hash：
+            # 导出清单据此核对"导出的字节就是这份交付"。必须在注记之后记录，
+            # 否则清单会认为导出字节与交付不一致。
+            _store.record_delivery(report, accepted_body=detail, ok=_ok, reason=_why)
+        except Exception as exc:
+            logger.warning("交付一致性校验失败（按未验收草稿）：%s", str(exc)[:120])
+            self._delivery_draft_reason = "校验异常"
         # 贯通测试守门：修复后仍全部未通过 → 如实标记失败
         if e2e_results and not any(r.get("ok") for r in e2e_results):
             has_failure = True
@@ -4119,6 +5053,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         overall = self._resolve_final_status(
             has_failure, acceptance_summary,
             getattr(self, "_reflection_llm_unavailable", ""), llm_degraded,
+            draft_reason=str(getattr(self, "_delivery_draft_reason", "") or ""),
         )
         if overall == "SUCCESS_WITH_ISSUES":
             logger.error(
@@ -4136,8 +5071,13 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         # 超时自动放行（与单步确认语义一致），用户取消则任务标记为 FAILED，
         # 并在报告中注明"用户取消终稿审批"。
         if report_confirm and overall != "FAILED":
-            approved = self._wait_report_confirm(task_id, goal, report)
+            _rf: dict = {}
+            approved = self._wait_report_confirm(task_id, goal, report, _rf)
             if not approved:
+                if _rf.get("kind") == WAIT_CANCEL:
+                    # 用户在终稿审批期间点了停止 → CANCELLED 终态，不写成"失败"
+                    _phase_stop.set()
+                    return self._finish_cancelled(task_id, goal, all_steps)
                 overall = "FAILED"
                 has_failure = True
                 report = str(report or "") + "\n\n---\n\n> 用户取消终稿审批"
@@ -4146,36 +5086,47 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                                "message": "终稿审批被用户取消，任务标记为失败",
                                "timestamp": self._now_iso()})
 
+        # M0-d：准入结论（经验池/模板固化/自迭代都据此；无证据一律拒绝）
+        admission = self._admission_decision(task_id, overall, acceptance_summary)
+        self._record_consolidation_stat(task_id, goal, all_steps, admission=admission)
+
         # 4. Memory（P0 验收准入：验收 fail 只沉淀对话，不沉淀策略；
-        #    判定逻辑在 MemoryManager.consolidate_memory 内，这里传入验收摘要）
+        #    M0-d：准入判据统一在 admission.admit_success，未知/取消/有缺口都不进经验池）
         if not has_failure:
-            # 记录探索-固化统计（domain×能力链 × 验收），供模板固化阈值判定
-            self._record_consolidation_stat(task_id, goal, all_steps)
-            with self._memory_lock:
-                self._memory.consolidate_memory(
-                    goal, all_steps, report,
-                    acceptance_summary=acceptance_summary,
-                    task_id=task_id,
-                )
-            if acceptance_summary is not None and (
-                acceptance_summary.get("overall") or ""
-            ) != "pass":
-                logger.warning(
-                    "Task %s acceptance failed, skipped strategy consolidation",
-                    task_id,
-                )
-                push_progress(self._messaging, task_id, "log",
-                              {"type": "memory", "agent": "orchestrator",
-                               "message": "验收未通过，仅记录对话，跳过策略沉淀",
-                               "timestamp": self._now_iso()})
+            # M0-c：**已取消的任务不再产生新沉淀**——收尾期间到达的取消同样有效，
+            # 否则"停止"之后还会往记忆/模板池里写入这次运行的经验
+            if self._cancel_requested(task_id):
+                logger.info("任务已取消，跳过记忆与模板沉淀（task=%s）", task_id)
             else:
-                push_progress(self._messaging, task_id, "log",
-                              {"type": "memory", "agent": "orchestrator",
-                               "message": "Strategy memory consolidated",
-                               "timestamp": self._now_iso()})
-            # 进化沉淀：复杂任务（未走模板）成功后提炼为确定性模板，供后续 LLM 路由选择
-            if not used_template:
-                self._consolidate_template(goal, all_steps, task_id=task_id)
+                with self._memory_lock:
+                    self._memory.consolidate_memory(
+                        goal, all_steps, report,
+                        acceptance_summary=acceptance_summary,
+                        task_id=task_id,
+                        admission=admission.as_dict(),
+                    )
+                if admission.admitted:
+                    push_progress(self._messaging, task_id, "log",
+                                  {"type": "memory", "agent": "orchestrator",
+                                   "message": ("Strategy memory consolidated"
+                                               + ("（已验证成功）" if admission.verified
+                                                  else "（经验参考，未计入已验证成功）")),
+                                   "timestamp": self._now_iso()})
+                else:
+                    logger.warning(
+                        "Task %s 未通过经验准入，跳过策略沉淀：%s",
+                        task_id, "; ".join(admission.reasons) or "未知原因")
+                    push_progress(self._messaging, task_id, "log",
+                                  {"type": "memory", "agent": "orchestrator",
+                                   "message": "未通过经验准入（" + "；".join(admission.reasons)
+                                              + "），仅记录对话，跳过策略沉淀",
+                                   "timestamp": self._now_iso()})
+                # 进化沉淀：复杂任务（未走模板）且**已验证成功**才提炼为确定性模板；
+                # 未验证的经验（评审降级/缺证据）不得固化成"以后都这么做"
+                if not used_template and admission.verified:
+                    self._consolidate_template(goal, all_steps, task_id=task_id)
+                elif not used_template:
+                    logger.info("模板固化跳过（未达已验证成功）：%s", goal[:40])
 
         # 5. Complete
         # V1.2 checkpointer：最终交付前清理断点与进行中标记，
@@ -4220,14 +5171,22 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         #    总结问题并产出改进版提示词写入注册表，下一轮任务自动生效
         def _refine_async() -> None:
             try:
+                # M0-c：后台自迭代也要认取消——线程排在终态之后启，
+                # 用户点了停止就不该再花一次模型调用去改提示词
+                if self._cancel_requested(task_id):
+                    logger.info("任务已取消，跳过后台提示词自迭代（task=%s）", task_id)
+                    return None
                 from prompt_refinery import maybe_refine
                 maybe_refine(
                     self._messaging, task_id, goal, all_steps, completed_all, report,
                     {"has_failure": has_failure, "reflection_used": iteration > 0,
-                     "iterations": iteration, "memory": getattr(self, "_memory", None)},
+                     "iterations": iteration, "memory": getattr(self, "_memory", None),
+                     # M0-d：自迭代产出是否可直接生效，取决于本次运行的准入结论
+                     "admission": admission.as_dict()},
                 )
             except Exception as exc:
                 logger.warning("prompt refinery async failed: %s", str(exc)[:150])
+            return None
 
         threading.Thread(target=_refine_async, daemon=True).start()
 
@@ -4259,21 +5218,50 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             "final_report": report,
         }
 
-    def _wait_plan_confirm(self, task_id: str, original_steps: list[dict]) -> list[dict] | None:
-        """等待用户确认/编辑计划；返回确认后的步骤，取消或超时返回 None。"""
+    def _confirm_wait(self, task_id: str, key: str, timeout: float) -> WaitOutcome:
+        """带取消感知的人工确认等待（M0-c）。
+
+        此前确认等待是一次到底的 brpop：用户点了停止，编排器仍要等确认超时
+        （最长 180s）才收尾。现在按 1 秒分片轮询，取消立即返回 cancel。
+        """
+        deadline = time.time() + max(timeout, 1)
+        while True:
+            slice_end = min(deadline, time.time() + 1.0)
+            msg = self._brpop_with_deadline(self._redis, key, slice_end)
+            if msg:
+                return WaitOutcome(WAIT_RESULT, result={"raw": msg[1]})
+            if self._cancel_requested(task_id):
+                return WaitOutcome(WAIT_CANCEL, reason="用户已取消：停止等待人工确认")
+            if time.time() >= deadline:
+                return WaitOutcome(WAIT_TIMEOUT, reason="人工确认超时")
+
+    def _wait_plan_confirm(self, task_id: str, original_steps: list[dict],
+                           outcome: dict | None = None) -> list[dict] | None:
+        """等待用户确认/编辑计划；返回确认后的步骤，取消或超时返回 None。
+
+        `outcome`（可选）回填本次等待的分类（`kind` = cancel/timeout/result），
+        调用方据此区分"用户取消"与"没人确认"——两者后续处置不同。
+        """
         try:
-            msg = self._brpop_with_deadline(
-                self._redis,
-                f"plan_confirm:{task_id}",
-                time.time() + self._plan_confirm_timeout,
-            )
-            if not msg:
+            wait = self._confirm_wait(
+                task_id, f"plan_confirm:{task_id}", self._plan_confirm_timeout)
+            if outcome is not None:
+                outcome["kind"] = wait.kind
+                outcome["reason"] = wait.reason
+            if wait.kind == WAIT_CANCEL:
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "info", "agent": "orchestrator",
+                               "message": "计划确认期间收到取消请求，停止等待",
+                               "timestamp": self._now_iso()})
+                return None
+            if wait.kind != WAIT_RESULT:
                 push_progress(self._messaging, task_id, "log",
                               {"type": "info", "agent": "orchestrator",
                                "message": f"Plan confirm timeout ({self._plan_confirm_timeout}s), cancelling",
                                "timestamp": self._now_iso()})
                 return None
-            data = json.loads(msg[1] if isinstance(msg[1], str) else msg[1].decode())
+            msg = wait.result["raw"]
+            data = json.loads(msg if isinstance(msg, str) else msg.decode())
             if data.get("action") == "cancel":
                 push_progress(self._messaging, task_id, "log",
                               {"type": "info", "agent": "orchestrator",
@@ -4289,7 +5277,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                            "timestamp": self._now_iso()})
             return normalized
         except Exception as exc:
+            # Redis 不可用/通道异常 → 按"没等到确认"记录（可观测），仍用原计划继续
             logger.warning("Plan confirm error for %s: %s", task_id, str(exc)[:120])
+            if outcome is not None:
+                outcome["kind"] = WAIT_PROTOCOL
+                outcome["reason"] = f"确认通道异常：{str(exc)[:100]}"
             return original_steps
 
     def _wait_step_confirm(self, task_id: str, step: dict) -> bool:
@@ -4300,16 +5292,21 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                           {"type": "step_confirm", "agent": step.get("capability", "?"),
                            "message": f"等待人工确认步骤 {step.get('step_id')}（{step.get('capability')}）",
                            "timestamp": self._now_iso()})
-            msg = self._brpop_with_deadline(
-                self._redis, key, time.time() + self._plan_confirm_timeout,
-            )
-            if not msg:
+            wait = self._confirm_wait(task_id, key, self._plan_confirm_timeout)
+            if wait.kind == WAIT_CANCEL:
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "info", "agent": "orchestrator",
+                               "message": f"步骤 {step.get('step_id')} 等待确认期间被取消",
+                               "timestamp": self._now_iso()})
+                return False
+            if wait.kind != WAIT_RESULT:
                 push_progress(self._messaging, task_id, "log",
                               {"type": "info", "agent": "orchestrator",
                                "message": f"步骤 {step.get('step_id')} 确认超时，自动继续",
                                "timestamp": self._now_iso()})
                 return True
-            data = json.loads(msg[1] if isinstance(msg[1], str) else msg[1].decode())
+            msg = wait.result["raw"]
+            data = json.loads(msg if isinstance(msg, str) else msg.decode())
             if data.get("action") == "cancel":
                 push_progress(self._messaging, task_id, "log",
                               {"type": "info", "agent": "orchestrator",
@@ -4322,12 +5319,14 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             logger.info("Step confirm skipped (auto-proceed): %s", str(exc)[:100])
             return True
 
-    def _wait_report_confirm(self, task_id: str, goal: str, report: str) -> bool:
+    def _wait_report_confirm(self, task_id: str, goal: str, report: str,
+                             outcome: dict | None = None) -> bool:
         """报告终稿审批（关键节点 HITL）：确认放行，取消拒绝，超时自动放行。
 
         复用 plan_confirm 通道：发布 AWAITING_CONFIRM 状态（stage='final_report'
         并附报告前 3000 字符预览），等待 plan_confirm:{task_id} 上的确认/取消；
         超时（_plan_confirm_timeout 封顶 180s）自动放行返回 True。
+        `outcome`（可选）回填等待分类，供调用方区分"用户取消"与"没人审批"。
         """
         preview = str(report or "")[:3000]
         # 状态消息：直接发布到 orchestrator:response，web_ui 会合并进
@@ -4359,26 +5358,32 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                        "timestamp": self._now_iso()})
         timeout = min(self._plan_confirm_timeout, 600)
         try:
-            msg = self._brpop_with_deadline(
-                self._redis,
-                f"plan_confirm:{task_id}",
-                time.time() + timeout,
-            )
+            wait = self._confirm_wait(task_id, f"plan_confirm:{task_id}", timeout)
         except Exception as exc:
             logger.warning(
                 "Final report confirm wait failed for %s: %s",
                 task_id, str(exc)[:120],
             )
             return True
-        if not msg:
+        if outcome is not None:
+            outcome["kind"] = wait.kind
+            outcome["reason"] = wait.reason
+        if wait.kind == WAIT_CANCEL:
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "info", "agent": "orchestrator",
+                           "message": "终稿审批期间收到取消请求，停止等待",
+                           "timestamp": self._now_iso()})
+            return False
+        if wait.kind != WAIT_RESULT:
             push_progress(self._messaging, task_id, "log",
                           {"type": "info", "agent": "orchestrator",
                            "message": f"终稿审批 {timeout}s 超时，自动放行",
                            "timestamp": self._now_iso()})
             return True
+        msg = wait.result["raw"]
         try:
             data = json.loads(
-                msg[1] if isinstance(msg[1], str) else msg[1].decode()
+                msg if isinstance(msg, str) else msg.decode()
             )
         except Exception:
             return True
@@ -4511,6 +5516,19 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             if step.get("capability") == "report_generator" and result.get("status") == "SUCCESS":
                 # 确定性验收器：数字溯源等 checklist → 缺口报告（供反思/前端/人工）
                 self._run_acceptance_check(task_id, goal, trigger="报告步骤")
+            elif (
+                step.get("capability") == "content_summary"
+                and result.get("status") == "SUCCESS"
+                and not any(str(x.get("capability") or "") == "report_generator"
+                            for x in steps)
+                and steps and step is steps[-1]
+            ):
+                # 计划里没有独立报告步骤：最后一步的输出就是交付正文，
+                # 同样要过验收（实机：研究类任务被规划成单个 content_summary，
+                # 于是从来没有验收报告 → 交付恒为"未验收草稿"）
+                self._run_acceptance_check(
+                    task_id, goal, trigger="内容摘要步骤",
+                    report_body=str(result.get("result") or ""))
             if step.get("capability") == "web_search" and result.get("status") == "SUCCESS":
                 # 搜索结果 URL 累计到任务级，供后续（含反射轮）报告步骤引用来源
                 try:
@@ -4684,6 +5702,16 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     with lock:
                         pending[k] = step
                     return
+                # 预算耗尽：同理停止派发（每步都会被拒，继续循环只是空转）
+                if (getattr(self, "_budget_exhausted", {}) or {}).get(task_id):
+                    with lock:
+                        pending[k] = step
+                    push_progress(self._messaging, task_id, "log",
+                                  {"type": "error", "agent": "orchestrator",
+                                   "message": ("根任务预算已耗尽：停止派发剩余步骤，"
+                                               "按现有结果收尾"),
+                                   "timestamp": self._now_iso()})
+                    return
                 with lock:
                     in_flight += 1
                 try:
@@ -4777,7 +5805,20 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     return
                 time.sleep(5)
 
-        threads = [threading.Thread(target=worker, daemon=True)
+        # L01：contextvars 不跨线程。步骤线程里也会发起 LLM 调用（滚动摘要、上下文注入），
+        # 不绑定的话这些调用既无任务归属、也不进预算台账；这里把根任务身份显式带进线程。
+        from llm_client import clear_task_context, set_task_context
+
+        def _bind_task_ctx(fn, tid):
+            def _bound():
+                set_task_context(tid)
+                try:
+                    fn()
+                finally:
+                    clear_task_context()
+            return _bound
+
+        threads = [threading.Thread(target=_bind_task_ctx(worker, task_id), daemon=True)
                    for _ in range(max(1, self._max_parallel))]
         for t in threads:
             t.start()
@@ -5176,10 +6217,15 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         P1-4：重试/重规划结束后写结构化失败诊断（step_failure.json），
         替换步骤结果已知后再落盘，供反思精准补缺口。"""
         result = self._dispatch(step, task_id)
+        if result.get("budget_exceeded"):
+            # 预算已耗尽：重试/重规划都只会被同样拒绝，直接返回如实失败
+            return result
         attempt = 0
         # 输出契约校验（对标 3.1 引导-校验-重试）：契约不通过视为失败，
         # 并把校验错误喂回指令重试，而不是盲目重发
-        issue = self._contract_issue(goal, step, result)
+        # M0-c：取消导致的空/短结果不是"输出不合契约"，不能被改写成步骤失败
+        issue = ("" if str(result.get("status")) == "CANCELLED"
+                 else self._contract_issue(goal, step, result))
         tried: list[str] = []
         while (result.get("status") == "FAILED" or issue) and attempt < self._max_retry:
             # 取消：不再重试/重规划（失败重试循环是实测最爱烧额度的地方）

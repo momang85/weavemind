@@ -645,6 +645,7 @@ class MemoryManager:
         final_summary: str,
         acceptance_summary: dict | None = None,
         task_id: str = "",
+        admission: dict | None = None,
     ) -> None:
         """任务成功执行后，将经验沉淀到记忆中。
 
@@ -652,9 +653,11 @@ class MemoryManager:
             goal: 用户原始目标。
             plan_steps: 各步骤的信息列表，每项含 capability, instruction, status。
             final_summary: 最终报告文本。
-            acceptance_summary: 验收摘要（{overall, gaps}）。验收 fail 时只沉淀
-                对话（追溯用），跳过策略沉淀，避免空壳报告污染 successful_strategies。
+            acceptance_summary: 验收摘要（{overall, gaps}）。
             task_id: 任务 ID（写入策略元数据，便于追溯）。
+            admission: 准入结论（`admission.admit_success` 的结果字典）。缺省时
+                按验收摘要现算——**没有验收就是未知，不进策略池**；`verified` 为假
+                （如评审降级）的经验标 `needs_review`，可检索但不冒充已验证成功。
         """
         # 生成策略模式描述
         strategy_pattern = self._extract_strategy_pattern(goal, plan_steps, final_summary)
@@ -692,15 +695,18 @@ class MemoryManager:
         if not _embedding_degraded() and self.pending_count():
             self.drain_pending()
 
-        # P0 验收准入：存在验收报告且 overall != pass → 跳过策略沉淀
-        if acceptance_summary is not None and (
-            acceptance_summary.get("overall") or ""
-        ) != "pass":
+        # M0-d 准入：判据唯一实现在 admission.admit_success——**没有验收就是未知**，
+        # 未知不得进策略池（此前"无验收报告 → 照旧沉淀"，于是无证据样本混进成功经验）
+        from admission import admit_success
+        decision = admission if isinstance(admission, dict) else admit_success(
+            status="SUCCESS", acceptance=acceptance_summary).as_dict()
+        if not decision.get("admitted"):
             logger.warning(
-                "Acceptance failed (overall=%s), skip strategy consolidation: %s",
-                (acceptance_summary or {}).get("overall"), goal[:60],
+                "未通过经验准入，跳过策略沉淀（%s）：%s",
+                "；".join(decision.get("reasons") or []) or "未知原因", goal[:60],
             )
             return
+        _verified = bool(decision.get("verified"))
 
         # 存入 strategies 集合（P1 去重：相似策略更新而非新增）
         try:
@@ -713,6 +719,10 @@ class MemoryManager:
                 "step_count": len(plan_steps),
                 "task_id": str(task_id)[:40],
                 "expires_at": _expires_at_iso(),
+                # M0-d：准入结论随策略一起留档，检索方可区分"已验证成功"与"仅经验参考"
+                "verified": _verified,
+                "needs_review": not _verified,
+                "admission_reasons": list(decision.get("reasons") or []),
             }
             existing_id = self._find_similar_strategy(
                 strategy_pattern, threshold=MEMORY_STRATEGY_DEDUP_THRESHOLD

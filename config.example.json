@@ -66,6 +66,12 @@
       "ranking": 2,
       "financial": 3,
       "general": 3
+    },
+    "_comment_budget": "根任务总预算（M0-e）：三项为 0 表示不限。设置后规划、步骤派发、评审、反思、主备回退与收尾共用同一份额度，超限即拒绝新调用（不再逐层各自重新计时）",
+    "budget": {
+      "max_seconds": 0,
+      "max_calls": 0,
+      "max_tokens": 0
     }
   },
   "data_sources": {
@@ -119,5 +125,18 @@
       "interval_minutes": 60,
       "enabled": false
     }
-  ]
+  ],
+  "network": {
+    "endpoints": [
+      {
+        "id": "local-llm",
+        "purpose": "model",
+        "url": "http://127.0.0.1:11434/v1",
+        "loopback": true,
+        "operations": [
+          "chat"
+        ]
+      }
+    ]
+  }
 }

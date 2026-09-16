@@ -14,6 +14,7 @@
 import json
 import logging
 import re
+import itertools
 from pathlib import Path
 from hashlib import sha256
 from time import gmtime, strftime
@@ -418,6 +419,504 @@ _ARITH_METRIC_WORDS = (
 )
 
 
+def _eval_arith_expression(expr: str) -> float | None:
+    """只允许"数字 + 四则运算 + 括号"的算式求值。
+
+    报告文本是模型生成/外部拼接的**不可信输入**，因此不使用任何动态求值入口；
+    这里显式解析语法树，只放行常量与四则运算节点，字符集校验作为第一道闸。
+    """
+    import ast as _ast
+    if not re.fullmatch(r"[0-9.,\s*/+\-()]+", expr or ""):
+        return None
+    try:
+        tree = _ast.parse(str(expr).replace(",", "").strip(), mode="eval")
+    except SyntaxError:
+        return None
+
+    def _walk(node):
+        if isinstance(node, _ast.Expression):
+            return _walk(node.body)
+        if isinstance(node, _ast.Constant) and isinstance(node.value, (int, float)):
+            return float(node.value)
+        if isinstance(node, _ast.UnaryOp) and isinstance(node.op, _ast.USub):
+            inner = _walk(node.operand)
+            return None if inner is None else -inner
+        if isinstance(node, _ast.BinOp):
+            left, right = _walk(node.left), _walk(node.right)
+            if left is None or right is None:
+                return None
+            if isinstance(node.op, _ast.Add):
+                return left + right
+            if isinstance(node.op, _ast.Sub):
+                return left - right
+            if isinstance(node.op, _ast.Mult):
+                return left * right
+            if isinstance(node.op, _ast.Div):
+                return None if right == 0 else left / right
+        return None
+
+    try:
+        return _walk(tree)
+    except Exception:
+        return None
+
+
+def _unit_profile(unit: str) -> tuple[str, float]:
+    """单位 → (量纲类, 相对"元"的缩放)：pct / amount(元=1) / count。
+
+    用于挡住"1200 万元 + 1000 万元 = 2200 亿元"这类**量纲错一万倍**的伪计算。
+    """
+    u = str(unit or "")
+    if u in ("%", "％"):
+        return ("pct", 1.0)
+    for marker, factor in (("万亿", 1e12), ("千亿", 1e11), ("百亿", 1e10),
+                           ("亿", 1e8), ("万", 1e4), ("元", 1.0)):
+        if marker in u:
+            return ("amount", factor)
+    return ("count", 1.0)
+
+
+def _collect_source_records(clean_text: str, user_text: str, sources: dict | None) -> list[dict]:
+    """把各来源通道整理成 `(数值, 单位, 量纲, 缩放, 出处)` 记录列表——**不拼接文本**。
+
+    结构化通道（clean_chart_data JSON）单独解析；用户材料按"数字+单位"成对抽取。
+    这样结构化计算不会被另一通道的文本破坏。
+    """
+    records: list[dict] = []
+    if clean_text:
+        try:
+            data = json.loads(clean_text)
+            for row in (data.get("market_data") or []):
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    val = float(row.get("value"))
+                except (TypeError, ValueError):
+                    continue
+                cls, scale = _unit_profile(str(row.get("unit") or ""))
+                records.append({"value": val, "unit": str(row.get("unit") or ""),
+                                "class": cls, "scale": scale,
+                                "currency": _currency_of(str(row.get("unit") or "")),
+                                "label": str(row.get("label") or "")})
+        except Exception:
+            pass
+    _um_text = str(user_text or "")
+    _UNIT_RE = (r"(\d[\d,]*(?:\.\d+)?)\s*"
+                r"(万亿|千亿|百亿|亿美元|亿港元|万美元|万港元|亿|万元|万|元|港元|美元|%)")
+    # 用 finditer 拿**每个出现位置**（此前用 find(token) 取首次出现，同值多次出现会错位）
+    for _m in re.finditer(_UNIT_RE, _um_text):
+        token, unit = _m.group(1), _m.group(2)
+        try:
+            val = float(token.replace(",", ""))
+        except ValueError:
+            continue
+        cls, scale = _unit_profile(unit)
+        # 期间与指标按**所在子句**取，且指标取离数字最近的那个：
+        # 跨子句的 ±20 字窗口会把相邻指标的词串到本数字上（实测踩过）。
+        _c_start, _c_end = _clause_span(_um_text, _m.start(1), _m.end(2))
+        _clause = _um_text[_c_start:_c_end]
+        _at_in_clause = max(0, _m.start(1) - _c_start)
+        records.append({"value": val, "unit": unit, "class": cls, "scale": scale,
+                        "currency": _currency_of(unit),
+                        "label": "user_material",
+                        "period": _period_near(_clause, _at_in_clause),
+                        "indicator": _indicator_near(_clause, _at_in_clause)})
+    for k, v in (sources or {}).items():
+        if k in ("clean_chart_data", "user_material"):
+            continue        # 已单独处理，避免把 JSON 文本当记录源
+        for token, unit in re.findall(
+                r"(\d[\d,]*(?:\.\d+)?)\s*(万亿|千亿|百亿|亿美元|亿港元|万美元|万港元|亿|万元|万|元|港元|美元|%)", str(v or "")):
+            try:
+                val = float(token.replace(",", ""))
+            except ValueError:
+                continue
+            cls, scale = _unit_profile(unit)
+            records.append({"value": val, "unit": unit, "class": cls, "scale": scale,
+                            "currency": _currency_of(unit), "label": k})
+    return records
+
+
+def _currency_of(unit: str) -> str:
+    """单位 → 币种（CNY/HKD/USD；百分比等非金额返回空串）。
+
+    币种必须参与操作数绑定：`万元` 与 `万美元` 相加/相除都是错币种，不能算通过。
+    """
+    u = str(unit or "")
+    if "美元" in u:
+        return "USD"
+    if "港元" in u or "港币" in u:
+        return "HKD"
+    if "元" in u or u in ("万", "亿", "万亿", "千亿", "百亿"):
+        return "CNY"
+    return ""
+
+
+def _operand_roles(expr: str) -> list[tuple[str, str]]:
+    """列出算式里的操作数及其角色：`(token, "conversion"|"input")`。
+
+    常量豁免必须**按位置**判定，不能用"整串里出现过合法用法"来豁免整串
+    （实测缺陷：材料只有"2025 年收入 1000 万元"时，`1000/1-1` 里的分母 1 被
+    末尾的 `-1` 连带豁免 → 认证成"增长 99900%"）。
+
+    允许的换算角色只有两种，且必须真的处在该位置上：
+    - `1`/`2`：作为 `+`/`-` 的右操作数**且是整式最后一个操作数**（`…-1` 这种增速调整）；
+    - `100`：作为整式最后的 `*` 乘数（百分数换算）。
+    其余位置一律按"财务输入"处理——必须有来源记录。
+    """
+    out: list[tuple[str, str]] = []
+    matches = list(re.finditer(r"\d[\d,]*(?:\.\d+)?", str(expr or "")))
+    for idx, m in enumerate(matches):
+        tok = m.group(0)
+        before = str(expr)[:m.start()].rstrip()
+        prev_op = before[-1] if before else ""
+        is_last = idx == len(matches) - 1
+        after = str(expr)[m.end():].strip()
+        conversion = False
+        if tok in ("1", "2") and prev_op in ("+", "-") and is_last and not after:
+            conversion = True
+        elif tok == "100" and prev_op == "*" and is_last and not after:
+            conversion = True
+        out.append((tok, "conversion" if conversion else "input"))
+    return out
+
+
+_REQ_DATA_HINTS = ("数据", "数值", "数字", "财务", "营收", "收入", "净利润", "利润",
+                   "现金流", "毛利", "指标", "多少", "增幅", "增速", "市场规模",
+                   "出货量", "销量", "财报", "年报", "季报", "业绩")
+_REQ_SOURCE_HINTS = ("来源", "引用", "出处", "官方", "公告", "链接", "权威", "原文",
+                     "可核实", "佐证", "披露")
+_REQ_DELIVERABLE_HINTS = ("报告", "表格", "图表", "清单", "对比", "提纲", "结论")
+# 定性研究线索：明确"不需要数字/仅定性"时不得强迫造数字
+_REQ_QUALITATIVE_HINTS = ("定性", "不需要具体数字", "无需具体数字", "只要观点",
+                          "不必给出数字", "不需要数字", "仅需定性", "无需数据")
+
+
+def derive_requirements(goal: str, capabilities=None) -> dict:
+    """从**目标**推导明确任务要求（R0.1）。
+
+    为什么要它：此前的严宽只按 financial/research 标签选，于是"目标要数据与官方来源、
+    报告却什么都没有"在 research 档下照样 `overall=pass`（零数字/无来源反而更容易过）。
+    这里把要求显式化：需要数据吗？需要来源吗？点名了哪些指标与期间？要交付什么？
+    """
+    g = str(goal or "")
+    qualitative = any(h in g for h in _REQ_QUALITATIVE_HINTS)
+    indicators = [w for w in _INDICATOR_WORDS if w in g]
+    periods = sorted({m.group(1) for m in re.finditer(r"(20\d{2})\s*年", g)})
+    needs_data = (not qualitative) and (
+        any(h in g for h in _REQ_DATA_HINTS) or bool(indicators) or bool(periods)
+    )
+    needs_sources = any(h in g for h in _REQ_SOURCE_HINTS)
+    deliverables = [h for h in _REQ_DELIVERABLE_HINTS if h in g]
+    return {
+        "qualitative": qualitative,
+        "needs_data": needs_data,
+        "needs_sources": needs_sources,
+        "indicators": indicators,
+        "periods": periods,
+        "deliverables": deliverables,
+    }
+
+
+def check_requirement_coverage(goal: str, report_text: str, reqs: dict,
+                               nt: dict, sources: dict | None,
+                               source_list: dict | None = None) -> dict:
+    """目标达成 vs 诚实披露**分开**输出（R0.1 的四态）。
+
+    - `executed`：报告本体是否产出（非空、有正文段）；
+    - `honest_disclosure`：缺的必需项是否被显式披露（"未披露/未获取/待补充/基于模型知识"）；
+    - `goal_met`：目标点名的数据/来源是否**真的拿到**（可溯源数值 + 有来源清单/URL）；
+    - `evidence`：数字可溯源率与来源条数（沿用 number_traceability / 来源清单的结论）。
+
+    只有 `goal_met` 为真才可能 `pass`；缺失但诚实披露 → `partial`；缺失且未披露 → `fail`
+    或 `unknown`（连正文都没有）。**允许交付诚实缺口稿，但不冒充合格研究成果。**
+    """
+    text = str(report_text or "")
+    # "已执行"只看**有没有产出正文**：代码/数据类任务的报告就是一段交付说明，
+    # 用长度阈值会把合法短报告误判成"没做"（实测回归：脚本任务的交付说明被判 unknown）
+    executed = bool(text.strip())
+    disclosed_markers = tuple(_DISCLOSED_MARKERS) + (
+        "未披露", "未获取", "待补充", "未提供", "暂缺", "无法获取", "未公开",
+    )
+    lower = text
+    gaps: list[str] = []
+    # 数据要求
+    data_ok = True
+    if reqs.get("needs_data"):
+        traceable = list((nt or {}).get("traceable") or [])
+        computed = int((nt or {}).get("computed_count") or 0)
+        covered = float((nt or {}).get("covered_ratio") or 0.0)
+        total = int((nt or {}).get("total_count") or 0)
+        wanted = [i for i in (reqs.get("indicators") or [])]
+        wanted_ok = False
+        for w in wanted:
+            for t in traceable:
+                blob = "%s %s" % (t.get("raw"), t.get("unit"))
+                if w in str(t.get("source") or "") or True:
+                    pass
+            if any(w in str(t.get("raw") or "") for t in traceable):
+                wanted_ok = True
+        # 目标点名了指标时以"该指标是否有可溯源数值"为准；否则看整体覆盖
+        if wanted:
+            data_ok = wanted_ok or covered >= 0.5
+        else:
+            data_ok = (total > 0 and covered >= 0.5) or computed > 0
+        if not data_ok:
+            gaps.append(
+                "目标要求给出" + ("、".join(wanted) if wanted else "具体数值")
+                + f"，报告未提供可溯源数值（可溯源 {covered:.0%}，共 {total} 个数字）"
+            )
+    # 来源要求
+    sources_ok = True
+    if reqs.get("needs_sources"):
+        src_items = list((source_list or {}).get("items") or [])
+        urls = re.findall(r"https?://[^\s)>\]]+", text)
+        cited = int((nt or {}).get("cited_count") or 0)
+        src_keys = [k for k in (sources or {}) if k not in ("user_material",)]
+        sources_ok = bool(src_items) or bool(urls) or cited > 0
+        if not sources_ok:
+            gaps.append("目标要求引用官方/可核实来源，报告未给出任何来源链接或来源清单条目")
+    told = any(m in lower for m in disclosed_markers)
+    if not executed:
+        status = "unknown"
+    elif data_ok and sources_ok:
+        status = "pass"
+    elif told:
+        status = "partial"
+    else:
+        status = "fail"
+    return {
+        "pass": status == "pass",
+        "status": status,
+        "executed": executed,
+        "honest_disclosure": told,
+        "goal_met": bool(data_ok and sources_ok),
+        "needs_data": bool(reqs.get("needs_data")),
+        "needs_sources": bool(reqs.get("needs_sources")),
+        "indicators": list(reqs.get("indicators") or []),
+        "periods": list(reqs.get("periods") or []),
+        "gaps": gaps,
+        "counted": bool(gaps),
+        "details": (
+            "目标达成" if (data_ok and sources_ok)
+            else ("缺失但已诚实披露" if told else "目标要求的数据/来源缺失且未披露")
+        ),
+        "applicable": True,
+    }
+
+
+def _combo_semantics(combo: list[dict], expr: str, period: str, indicator: str,
+                     res_cls: str) -> str:
+    """操作数语义**联合**判定：每个必需操作数都要绑定指标/期间/币种。
+
+    返回 `ok`（全部绑定一致）/ `unknown`（有操作数或报告上下文没绑定）/ `mismatch`（冲突）。
+    实测缺陷：`2024年收入1000万元` + `2025年净利润1200万元` 时，
+    `2025年净利润增长20%（1200/1000-1）` 因为"分子对上了"就被判 ok——分母错了指标与期间。
+    """
+    if not combo:
+        return "mismatch"
+    if not period and not indicator:
+        return "unknown"
+    # 币种必须一致（百分比结果不要求）
+    currencies = {str(r.get("currency") or "") for r in combo}
+    currencies.discard("")
+    if len(currencies) > 1:
+        return "mismatch"
+    # 每个操作数都要有明确的指标与期间，否则整式只能停在 unknown
+    for r in combo:
+        if not (str(r.get("indicator") or "") or str(r.get("period") or "")):
+            return "unknown"
+    is_ratio = res_cls == "pct" or bool(re.search(r"[-+]\s*[12]\s*$|\*\s*100\s*$", str(expr or "")))
+    pairs = [(str(r.get("period") or ""), str(r.get("indicator") or "")) for r in combo]
+    if not is_ratio:
+        # 加减/同尺度合成：所有操作数同指标同期
+        for p, i in pairs:
+            if period and p and p != period:
+                return "mismatch"
+            if indicator and i and indicator not in i and i not in indicator:
+                return "mismatch"
+        return "ok"
+    # 比例/增速：分子=(期间,指标)，分母=(上一年,同指标)，允许顺序对调
+    try:
+        prev_year = str(int(period) - 1) if period else ""
+    except ValueError:
+        prev_year = ""
+    for pair_a, pair_b in (pairs, list(reversed(pairs))):
+        p_a, i_a = pair_a
+        p_b, i_b = pair_b
+        ok_a = (not indicator) or (indicator in i_a or i_a in indicator)
+        ok_b = (not indicator) or (indicator in i_b or i_b in indicator)
+        y_a = (not period) or p_a == period
+        y_b = (not prev_year) or p_b == prev_year
+        if ok_a and ok_b and y_a and y_b:
+            return "ok"
+    return "mismatch"
+
+
+def _constant_role_ok(expr: str, tok: str) -> bool:
+    """兼容包装：`tok` 在 `expr` 中是否存在**至少一个允许的换算角色位置**。
+
+    新代码请直接用 `_operand_roles`（按位置逐操作数判定）；保留本函数仅供既有调用/测试。
+    """
+    return any(t == tok and role == "conversion" for t, role in _operand_roles(expr))
+
+
+_INDICATOR_WORDS = ("营业收入", "归母净利润", "净利润", "毛利率", "收入", "营收",
+                    "经营现金流", "现金流", "资本支出", "每股收益", "EPS", "毛利")
+
+
+def _clause_span(text: str, start: int, end: int) -> tuple[int, int]:
+    """数字所在**子句**的 [起, 止) 下标（以 ；;，,。.\n 为界）。
+
+    实测缺陷：`2024 年收入 1000 万元，2025 年收入 1200 万元；2024 年毛利率 30%`
+    里，1200 的 ±20 字窗口越过了分号，"毛利率"（词表里排在"收入"之前）被记成
+    它的指标 → 逐操作数绑定时正确算式反被判成错配。
+    """
+    t = str(text or "")
+    left = max([t.rfind(ch, 0, start) for ch in "；;，,。.\n"] + [-1])
+    rights = [t.find(ch, end) for ch in "；;，,。.\n"]
+    rights = [r for r in rights if r != -1]
+    right = min(rights) if rights else len(t)
+    return left + 1, right
+
+
+def _clause_of(text: str, start: int, end: int) -> str:
+    """数字所在子句的文本（`_clause_span` 的便捷包装）。"""
+    a, b = _clause_span(text, start, end)
+    return str(text or "")[a:b]
+
+
+def _indicator_near(clause: str, at: int) -> str:
+    """子句里**离数字最近**的指标词（只看数字之前），重叠时取更长者。"""
+    best, best_end, best_len = "", -1, 0
+    for w in _INDICATOR_WORDS:
+        for m in re.finditer(re.escape(w), str(clause or "")):
+            if m.end() > at:
+                continue
+            if m.end() > best_end or (m.end() == best_end and len(w) > best_len):
+                best, best_end, best_len = w, m.end(), len(w)
+    return best
+
+
+def _period_near(clause: str, at: int) -> str:
+    """子句里**离数字最近**的年份（只看数字之前）；取不到返回空串。
+
+    同样不能用"子句里第一个年份"：句首的"公司2025年经营表现"会把后面的
+    2024 年数字标成 2025，逐操作数绑定时正确算式因此被判期间错配。
+    """
+    best, best_end = "", -1
+    for m in re.finditer(r"(20\d{2})\s*年", str(clause or "")):
+        if m.start() > at:
+            continue
+        if m.end() > best_end:
+            best, best_end = m.group(1), m.end()
+    return best
+
+
+def _context_semantics(prefix: str, window: str) -> tuple[str, str]:
+    """从数字**之前的上下文**取 (期间, 指标)；取不到返回空串（=未知）。"""
+    ctx = (str(prefix or "")[-40:] + " " + str(window or ""))
+    period = ""
+    m = re.search(r"(20\d{2})\s*年", ctx)
+    if m:
+        period = m.group(1)
+    indicator = next((w for w in _INDICATOR_WORDS if w in ctx), "")
+    return period, indicator
+
+
+def _semantics_match(records: list[dict], period: str, indicator: str) -> str:
+    """来源记录与报告上下文的语义匹配：`ok` / `unknown` / `mismatch`。
+
+    - 报告没写期间与指标 → `unknown`（**可追溯但不升级为已验证金融结论**）；
+    - 报告写了，且与来源记录一致 → `ok`；
+    - 报告写了，但与所有来源记录都冲突 → `mismatch`（拒绝，如"2023 年净利润"配 2024/2025 收入材料）。
+    """
+    if not records:
+        return "mismatch"
+    if not period and not indicator:
+        return "unknown"
+    for r in records:
+        blob = "%s %s %s" % (r.get("label") or "", r.get("period") or "", r.get("indicator") or "")
+        if period and str(r.get("period") or "") and str(r["period"]) != period:
+            continue
+        if indicator and indicator not in blob:
+            continue
+        return "ok"
+    return "mismatch"
+
+
+def _records_for_value(records: list[dict], token: str) -> list[dict]:
+    """按**数值**取候选来源记录（可能多条：同值不同来源/指标/单位）。"""
+    try:
+        val = float(str(token).replace(",", ""))
+    except ValueError:
+        return []
+    return [r for r in records if abs(float(r["value"]) - val) <= 1e-9]
+
+
+def _formula_derived_in_report(num: dict, window: str, records: list[dict],
+                               prefix: str = "") -> tuple[bool, str]:
+    """V1：报告里**紧邻数字**的完整公式，且操作数能按"值 + 单位"在来源记录里对上。
+
+    严格三关（任一不满足即保持"未核实"，不授予计算值标记）：
+
+    1. **完整表达式**：窗口必须以括号包住的整段算式开头，不做"截取局部二元式"的兜底
+       ——否则 `1200/1000-1` 会被截成 `1200/1000`，把 20% 算成 120%；
+    2. **操作数按值匹配**（带 token 边界），不接受数字子串命中（`12` 不能命中 `1200`）；
+    3. **量纲/缩放绑定**：操作数之间必须同量纲同缩放；金额结果要求与操作数缩放一致
+       （挡住 `1200+1000 = 2200 亿元`），百分比结果允许"同单位金额相除"或"百分比相减"。
+
+    指标/期间语义尚未绑定（未实现部分保持未核实，不声称已验证）。
+    """
+    try:
+        target = float(num["value"])
+    except (TypeError, ValueError):
+        return False, "mismatch"
+    m = re.match(r"\s*[（(]\s*([0-9][0-9.,\s*/+\-()]*?)\s*[）)]", str(window or ""))
+    if not m:
+        return False, "mismatch"                     # 必须紧跟一个完整的括号算式
+    expr = m.group(1)
+    value = _eval_arith_expression(expr)
+    if value is None:
+        return False, "mismatch"
+    res_cls, res_scale = _unit_profile(str(num.get("unit") or ""))
+    if res_cls not in ("amount", "pct"):
+        return False, "mismatch"
+    candidates = [value, value * 100.0] if res_cls == "pct" else [value]
+    if not any(abs(c - target) <= max(0.005 * abs(c), 0.01) for c in candidates):
+        return False, "mismatch"
+
+    toks_roles = _operand_roles(expr)
+    if not toks_roles:
+        return False, "mismatch"
+    # 每个**输入**操作数的候选记录（同一数值可能有多条来源），稍后联合筛选；
+    # 换算角色（末尾 -1 / *100）按位置豁免——分母位置上的 1 不在此列。
+    option_lists: list[list[dict]] = []
+    for tok, role in toks_roles:
+        if role == "conversion":
+            continue
+        cands = _records_for_value(records, tok)
+        if not cands:
+            return False, "mismatch"                 # 缺输入（含把常量当财务输入）→ 拒绝
+        option_lists.append(cands)
+    if not option_lists:
+        return False, "mismatch"
+
+    period, indicator = _context_semantics(prefix, window)
+    for combo in itertools.product(*option_lists):
+        if len({(r["class"], r["scale"]) for r in combo}) != 1:
+            continue                                 # 操作数之间量纲不一致
+        cls, scale = combo[0]["class"], combo[0]["scale"]
+        if res_cls == "amount" and not (cls == "amount" and abs(scale - res_scale) < 1e-9):
+            continue                                 # 金额结果必须与操作数同量纲同缩放
+        if res_cls == "pct" and cls not in ("pct", "amount"):
+            continue
+        sem = _combo_semantics(combo, expr, period, indicator, res_cls)
+        if sem == "mismatch":
+            continue                                 # 指标/期间/币种与来源冲突 → 换组合
+        return True, sem                             # ok = 全部绑定一致；unknown = 未绑定
+    return False, "mismatch"
+
+
 def _arithmetic_derived_from_clean(num: dict, clean_text: str) -> bool:
     """B2：报告数字是否可由 clean 数据按指标算术导出（求和/均值/头部占比）。
     覆盖"TOP10总成交额 1161.03亿"（求和）、"平均换手率 4.49%"（均值）、
@@ -604,6 +1103,12 @@ def check_number_traceability(
         }
     src_norm = {k: _norm(v) for k, v in sources.items() if v}
     clean_text = sources.get("clean_chart_data") or ""
+    # V1：用户材料本身是**来源**（不证明内容真实），但必须**分通道**处理：
+    # clean_chart_data 是结构化 JSON，任何文本拼接都会让结构化解析失败
+    # （实测：仅加入 user_material 文本，就把原本 pass 的同比计算判成 fail）。
+    user_text = str((sources or {}).get("user_material") or "")
+    # 公式核验的来源记录（结构化记录 + 用户材料里带单位的数字），不拼成一段文本
+    source_records = _collect_source_records(clean_text, user_text, sources)
     traceable: list[dict] = []
     untraceable: list[dict] = []
     disclosed: list[dict] = []
@@ -627,9 +1132,30 @@ def check_number_traceability(
         item = {"raw": n["raw"], "value": n["value"], "unit": n["unit"]}
         if not hit and clean_text and _arithmetic_derived_from_clean(n, clean_text):
             hit = "derived_computed"
+        # V1：报告内写明的**完整公式**（紧邻数字），且操作数能按值+单位+指标/期间联合匹配
+        _derived_sem = ""
+        if not hit:
+            _win_start = int(n.get("pos") or 0) + len(str(n.get("raw") or ""))
+            _ok, _derived_sem = _formula_derived_in_report(
+                n, report[_win_start:_win_start + 40], source_records,
+                prefix=report[max(0, _win_start - 40):_win_start])
+            if _ok:
+                hit = "derived_computed"
         if hit:
             item["source"] = hit
             item["derived"] = hit in ("derived_from_clean", "derived_computed")
+            if hit == "user_material":
+                # 与用户提供的材料一致：**是来源**，但真实性未经独立核实
+                item["user_provided"] = True
+                item["verified"] = False
+            if hit == "derived_computed":
+                # 派生值的四类结论**分开输出**（不得合并成"已验证"）：
+                # 数值可追溯 + 算术正确 已成立；指标/期间可能仍未绑定；外部核实继承用户输入。
+                item["arithmetic_ok"] = True
+                item["indicator_period"] = _derived_sem or "unknown"
+                item["verified"] = False
+                if (item["indicator_period"] or "unknown") == "unknown":
+                    item["semantics_unverified"] = True
             traceable.append(item)
         else:
             # 数字后紧跟"基于模型知识/未验证"标注 → 已披露，不算缺口
@@ -668,6 +1194,8 @@ def check_number_traceability(
     # B2 三档分类：引用值 / 计算值（算术可验证）/ 模型知识（已披露标注）
     _computed = [t for t in traceable if t.get("source") == "derived_computed"]
     _cited = [t for t in traceable if t not in _computed]
+    # V1：用户材料单独计数（不再与"模型知识"混为一谈，也不算"不可溯源"）
+    _user_input = [t for t in traceable if t.get("user_provided")]
     details = (
         (research_note + "；" if research_note else "")
         + f"数字溯源率 {rate:.0%}（{len(traceable)}/{total}）"
@@ -692,6 +1220,7 @@ def check_number_traceability(
         "amount_traceable": amount_ok,
         "amount_total": len(amounts),
         "disclosed_count": len(disclosed),
+        "user_input_count": len(_user_input),
         "computed_count": len(_computed),
         "cited_count": len(_cited),
         "traceable": traceable,
@@ -1865,6 +2394,13 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace,
     避免本包顺带改变既有判定。
     """
     sources = _collect_sources(workspace)
+    # V1：用户材料（任务目标/指令里给出的数字）本身就是来源通道。注入为独立来源，
+    # 数字命中它时记为 user_material（真实性未核实），而不是"不可溯源"或"模型知识"。
+    # 注意：这不降低任何阈值，也不把未知来源改判为已知来源。
+    _user_material = str(goal or "")
+    if _user_material.strip():
+        sources = dict(sources)
+        sources["user_material"] = _user_material
     domain = traceability_domain(goal)
     profile = profile or resolve_profile(goal, capabilities)
     report_checks = set(_PROFILE_REPORT_CHECKS.get(profile, ()))
@@ -1911,7 +2447,21 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace,
                 "无外部来源可溯源要求）"
             )
     checks["number_traceability"].setdefault("applicable", True)
+    # R0.1：按**目标里写明的要求**判定（需要数据？需要来源？点名了哪些指标/期间？），
+    # 与"诚信披露"分开输出；代码/数据类任务在目标未要求外部数据时不适用。
+    _reqs = derive_requirements(goal, capabilities)
+    if profile in ("code", "data") and not (
+        checks["number_traceability"].get("applicable", True)
+        and not checks["number_traceability"].get("counted") is False
+    ):
+        _reqs = dict(_reqs, needs_data=False, needs_sources=False)
+    checks["requirement_coverage"] = check_requirement_coverage(
+        goal, report_text, _reqs,
+        checks.get("number_traceability") or {},
+        sources, checks.get("source_list_completeness") or {},
+    )
     gaps = []
+    _req_gap_msgs: list[str] = []
     for _key, _c in checks.items():
         if _key in _V12_REPORT_CHECKS:
             applicable = _key in report_checks
@@ -1925,8 +2475,26 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace,
                 )
         if _c["pass"] or not _c.get("counted", True):
             continue
-        gaps.append(_c["details"])
-    overall = "pass" if not gaps else "fail"
+        # 优先给出检查项自己的**可操作缺口**（如"目标要求给出营业收入…"），
+        # 没有细分缺口时退回 details 摘要
+        _msgs = [str(m) for m in (_c.get("gaps") or [])] or [str(_c.get("details") or "")]
+        gaps.extend(_msgs)
+        if _key == "requirement_coverage":
+            _req_gap_msgs.extend(_msgs)
+    # R0.1：目标达成作为**独立门槛**（不再只按 financial/research 标签选严宽）。
+    # 目标要数据/来源而报告都没给 → 不得整体 pass；缺失但已诚实披露 → partial。
+    _req = checks.get("requirement_coverage") or {}
+    _other_gaps = [g for g in gaps if g not in _req_gap_msgs]
+    if gaps:
+        overall = "fail"
+    else:
+        overall = "pass"
+    if not _req.get("pass") and not _other_gaps:
+        # 只由"目标未达成"造成的非通过：按四态如实给 partial/unknown，
+        # 其余检查已经失败时保持 fail（不软化既有判定）
+        _st = str(_req.get("status") or "")
+        if _st in ("partial", "unknown"):
+            overall = _st
     # A2：汇总各检查项的域名媒体补录建议，供 GET /api/acceptance/suggestions 读取
     suggestions: list[str] = []
     for c in checks.values():

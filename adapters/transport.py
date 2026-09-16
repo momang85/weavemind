@@ -47,41 +47,21 @@ def _is_private_addr(addr: str) -> bool:
 
 
 def _validate_public_url(url: str) -> bool:
-    """SSRF 防护：仅放行 http/https，且主机不是环回/私网/链路本地/
-    IP 字面量、localhost 变体，域名解析后的全部地址同样必须公网。
+    """SSRF 防护（内容派生 URL）：仅放行 http/https 公网目标。
 
-    注意：DNS 解析校验存在 rebinding 的固有竞态（校验与连接两次解析
-    可能不同），属纵深防御而非绝对保证。"""
+    实现收敛到 `net_policy.validate_public_url`（共享网络策略），修掉旧实现的三处不足：
+    1. **DNS 解析失败不再放行**（旧实现"解析失败也放行"，等于把失败当安全）；
+    2. 补上共享地址段 `100.64.0.0/10` 等非全局可路由地址；
+    3. IPv4/IPv6 映射地址（如 `::ffff:127.0.0.1`）按内部地址判定，并拒绝 URL 用户凭据。
+
+    注意：校验与真正发起连接之间存在 DNS 重绑定竞态；需要强保证时走
+    `net_policy.fetch_document`（用已验 IP 连接）。
+    """
     try:
-        parts = urllib.parse.urlsplit(url)
+        from net_policy import validate_public_url
+        return bool(validate_public_url(url).ok)
     except Exception:
         return False
-    if parts.scheme not in ("http", "https"):
-        return False
-    host = (parts.hostname or "").lower()
-    if not host or host == "localhost" or host.endswith(".localhost"):
-        return False
-    if ":" in host:
-        return False
-    # 字面量 IP 直接判定；域名解析后逐地址判定
-    pending = [host]
-    import ipaddress as _ip
-    try:
-        _ip.ip_address(host)
-        # 字面量 IP：只查自身（下走公共判定，不做 DNS）
-    except ValueError:
-        try:
-            addr_infos = socket.getaddrinfo(host, None)
-        except OSError:
-            # 解析失败也放行：连接阶段同样无法解析，自然失败
-            addr_infos = None
-        if addr_infos:
-            pending = [
-                str(ai[4][0])
-                for ai in addr_infos
-                if ai[0] in (socket.AF_INET, socket.AF_INET6)
-            ]
-    return all(not _is_private_addr(a) for a in pending)
 
 
 def _load_official_map() -> dict:

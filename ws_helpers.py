@@ -139,9 +139,15 @@ def call_with_heartbeat(messaging, task_id: str, phase: str, fn, *args,
 
     result_box: dict = {}
 
+    # L01：contextvars 不跨线程。阻塞调用跑在子线程里，若不复制上下文，
+    # 线程内的任务身份（LLM 台账归属/预算）会丢失——这里在**创建线程时**复制
+    # 调用方的上下文，子线程内的绑定也不会回写污染调用方。
+    import contextvars
+    caller_ctx = contextvars.copy_context()
+
     def _runner():
         try:
-            result_box["value"] = fn(*args, **kwargs)
+            result_box["value"] = caller_ctx.run(fn, *args, **kwargs)
         except BaseException as exc:  # 原样回抛给调用线程
             result_box["error"] = exc
 
