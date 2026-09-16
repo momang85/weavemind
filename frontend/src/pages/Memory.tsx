@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { Brain, FlaskConical, ChevronDown, ChevronRight, Play, CheckCircle2, XCircle, ShieldCheck, Sparkles, Copy, RefreshCw, Activity } from 'lucide-react'
 import type { MemoryDoc, EvolutionRound } from '../stores/types'
 import { useTaskStore } from '../stores/useTaskStore'
+import { apiOutcome, readApiOutcome } from '../lib/apiResult'
 
 interface MemoryHealth {
   injections: number
@@ -48,8 +49,11 @@ export default function Memory() {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [loading, setLoading] = useState(true)
   const [summary, setSummary] = useState('')
+  const [summaryError, setSummaryError] = useState('')
   const [summaryLoading, setSummaryLoading] = useState(false)
   const [notice, setNotice] = useState('')
+  // 提示语气：拦截/失败用 warn（琥珀），成功用 info（青）——避免"被拦了还显示成功样式"
+  const [noticeTone, setNoticeTone] = useState<'info' | 'warn'>('info')
   const [busyAction, setBusyAction] = useState('')
 
   const load = useCallback(async () => {
@@ -77,10 +81,21 @@ export default function Memory() {
     setSummaryLoading(true)
     try {
       const res = await fetch('/api/memory/summary' + (refresh ? '?refresh=1' : ''))
-      const d = await res.json()
-      setSummary(d.summary || '')
-      if (d.memory_health) setHealth(d.memory_health)
-    } catch {}
+      const payload = await res.json().catch(() => null)
+      const out = apiOutcome(res.status, payload, '', '摘要加载失败')
+      if (!out.ok) {
+        // 拦截/失败都不得当成"摘要为空"：演示模式下该 GET 会调付费模型，已被守卫拦下
+        setSummary('')
+        setSummaryError(out.message)
+      } else {
+        setSummary(payload?.summary || '')
+        if (payload?.memory_health) setHealth(payload.memory_health)
+        setSummaryError('')
+      }
+    } catch (e: any) {
+      setSummary('')
+      setSummaryError('摘要加载失败：' + (e?.message || '网络错误'))
+    }
     setSummaryLoading(false)
   }, [])
 
@@ -102,10 +117,13 @@ export default function Memory() {
     if (busyAction) return
     setBusyAction('evolution')
     try {
-      await fetch('/api/evolution/trigger', { method: 'POST' })
-      setNotice('进化已触发，约需数分钟完成，稍后刷新查看回放。')
+      const res = await fetch('/api/evolution/trigger', { method: 'POST' })
+      const out = await readApiOutcome(res, '进化已触发，约需数分钟完成，稍后刷新查看回放。', '触发失败')
+      setNotice(out.message)
+      if (out.blocked) setNoticeTone('warn')
     } catch {
-      setNotice('触发失败，请检查后端服务')
+      setNotice('触发失败：网络错误或后端不可达')
+      setNoticeTone('warn')
     } finally {
       setBusyAction('')
     }
@@ -116,15 +134,18 @@ export default function Memory() {
     if (!window.confirm(`确认${approve ? '批准' : '驳回'}该进化策略？`)) return
     setBusyAction(id)
     try {
-      await fetch('/api/evolution/approve', {
+      const res = await fetch('/api/evolution/approve', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ strategy_id: id, approve }),
       })
-      await load()
-      setNotice(approve ? '策略已批准' : '策略已驳回')
+      const out = await readApiOutcome(res, approve ? '策略已批准' : '策略已驳回', '操作失败')
+      setNotice(out.message)
+      if (out.blocked) setNoticeTone('warn')
+      if (out.ok) await load()
     } catch {
-      setNotice('操作失败，请重试')
+      setNotice('操作失败：网络错误或后端不可达')
+      setNoticeTone('warn')
     } finally {
       setBusyAction('')
     }
@@ -135,15 +156,18 @@ export default function Memory() {
     if (!window.confirm(`确认删除 ${ids.length} 条${type === 'conversations' ? '记忆' : '策略'}？此操作不可撤销。`)) return
     setBusyAction('del-' + type)
     try {
-      await fetch('/api/memory/delete', {
+      const res = await fetch('/api/memory/delete', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ type, ids }),
       })
-      await load()
-      setNotice('删除完成')
+      const out = await readApiOutcome(res, '删除完成', '删除失败')
+      setNotice(out.message)
+      if (out.blocked) setNoticeTone('warn')
+      if (out.ok) await load()
     } catch {
-      setNotice('删除失败，请重试')
+      setNotice('删除失败：网络错误或后端不可达')
+      setNoticeTone('warn')
     } finally {
       setBusyAction('')
     }
@@ -156,7 +180,13 @@ export default function Memory() {
     <div className="max-w-6xl mx-auto space-y-6">
       <div className="flex items-center justify-between">
         <h2 className="text-slate-200 font-semibold text-lg">记忆与进化</h2>
-        {notice && <div className="text-xs text-cyan-400 bg-cyan-500/10 border border-cyan-500/20 rounded-lg px-3 py-2">{notice}</div>}
+        {notice && (
+          <div className={`text-xs rounded-lg px-3 py-2 border ${
+            noticeTone === 'warn'
+              ? 'text-amber-300 bg-amber-500/10 border-amber-500/30'
+              : 'text-cyan-400 bg-cyan-500/10 border-cyan-500/20'
+          }`}>{notice}</div>
+        )}
         <button onClick={load} aria-label="刷新记忆数据" className="text-xs text-cyan-400 hover:text-cyan-300">刷新</button>
       </div>
 
@@ -226,6 +256,11 @@ export default function Memory() {
         <p className="text-slate-300 text-sm leading-relaxed whitespace-pre-wrap">
           {summaryLoading && !summary ? '正在让 LLM 阅读记忆库并生成自述...' : (summary || '暂无自述，点击「重新生成」。')}
         </p>
+        {summaryError && (
+          <p className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+            {summaryError}
+          </p>
+        )}
         <p className="text-xs text-slate-600 mt-2">基于真实记忆数据生成，可直接用于发布到社交媒体。</p>
       </div>
 

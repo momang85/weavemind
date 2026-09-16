@@ -8,11 +8,12 @@
 // 直接返回 403 + 可读原因），只读接口仍走真实服务。因此文案必须如实写明：
 // 演示只替换"控制台展示的数据"，其余页面读的是真实环境，写操作已被拦截。
 
-const state = { active: false }
-
 // 演示模式下会被拦截的路径（写 / 付费 / 后台任务 / 管理操作）。前缀匹配。
 // 注意：任务相关端点有两种前缀——提交是 `/task`，而取消/重跑等动作是 `/api/task/...`，
 // 两者都要列（此前只写 `/task`，导致"停止"在演示模式下仍会真的发出去）。
+//
+// 这里的清单按**实际调用清单**核对：终止 worker 的真实路由是 `POST /api/kill-worker`
+// （不匹配 `/api/agents`），单智能体直发是 `POST /api/quick-answer` 与 `/api/single-agent`。
 export const DEMO_BLOCKED_PREFIXES = [
   '/task',                 // 提交任务、重跑、重新运行（真实 LLM 费用）
   '/api/task',             // 取消/重跑等任务动作（此前漏拦）
@@ -34,13 +35,29 @@ export const DEMO_BLOCKED_PREFIXES = [
   '/api/single-agent',     // 单智能体直发（费用）
 ] as const
 
+// **付费的 GET**：不能按"只读一律放行"处理。
+// `GET /api/memory/summary` 的冷缓存与 `?refresh=1` 都会走 `_build_memory_summary` → `call_llm`，
+// 也就是"只读方法照样花钱"。这类接口按付费操作拦截，与写操作同等待遇。
+export const DEMO_BLOCKED_GET = [
+  '/api/memory/summary',   // 记忆摘要：冷缓存 / ?refresh=1 会生成摘要（付费）
+] as const
+
 // 显式放行（不拦截）：会话相关操作必须可用，否则用户退出不了演示/登不回来。
 //   POST /api/logout、/api/login、/api/setup-admin、/api/auth/*
-// 只读请求（GET/HEAD/OPTIONS）一律放行——演示只替换控制台展示数据，其余页面读真实环境。
+// 其余只读请求（GET/HEAD/OPTIONS）放行——演示只替换控制台展示数据，其余页面读真实环境。
 
-/** 是否为演示模式（显式开关，或 URL 带 ?demo —— 与 store 的初始判定一致）。 */
+// 演示状态：URL 参数**只用于初始化**。一旦显式开关过（setDemoActive），
+// 就以显式状态为准——否则 `?demo` 进入后 toggleDemo(false) 会"界面显示已退出、守卫仍在拦截"。
+const state = { active: false, resolved: false }
+
+export const DEMO_REASON_WRITE =
+  '演示模式：该操作会真实修改数据或产生费用，已被拦截。退出演示模式（侧栏「演示 ON」）后可执行。'
+export const DEMO_REASON_PAID_GET =
+  '演示模式：该接口会调用付费模型（记忆摘要的冷缓存与 ?refresh=1 都会生成摘要），已按付费操作拦截。'
+
+/** 是否为演示模式：显式开关优先，未显式设置过才回落到 URL 的 `?demo`。 */
 export function demoActive(): boolean {
-  if (state.active) return true
+  if (state.resolved) return state.active
   try {
     return new URLSearchParams(window.location.search).has('demo')
   } catch {
@@ -48,23 +65,40 @@ export function demoActive(): boolean {
   }
 }
 
-/** 由 store 的 toggleDemo 调用，保持守卫与界面状态一致。 */
+/** 由 store 的 toggleDemo 调用，保持守卫与界面状态一致（并锁定显式状态）。 */
 export function setDemoActive(on: boolean): void {
   state.active = !!on
+  state.resolved = true
 }
 
-/** 该请求在演示模式下是否应被拦截（只读放行）。纯函数，便于测试与复用。 */
-export function blockedInDemo(path: string, method?: string, active?: boolean): boolean {
+/** 供测试复位（模块级状态与安装标记都不该跨用例泄漏）。 */
+export function resetDemoGuardForTest(): void {
+  state.active = false
+  state.resolved = false
+  installed = false
+}
+
+function _pathOf(path: string): string {
+  return String(path || '').replace(/^https?:\/\/[^/]+/, '')
+}
+
+/** 拦截原因；不拦截时返回 null。纯函数，便于真实行为测试。 */
+export function demoBlockReason(path: string, method?: string, active?: boolean): string | null {
   const on = active === undefined ? demoActive() : active
-  if (!on) return false
+  if (!on) return null
+  const p = _pathOf(path)
+  if (DEMO_BLOCKED_GET.some(pre => p === pre || p.startsWith(pre + '?') || p.startsWith(pre))) {
+    return DEMO_REASON_PAID_GET
+  }
   const m = String(method || 'GET').toUpperCase()
-  if (m === 'GET' || m === 'HEAD' || m === 'OPTIONS') return false
-  const p = String(path || '').replace(/^https?:\/\/[^/]+/, '')
-  return DEMO_BLOCKED_PREFIXES.some(pre => p === pre || p.startsWith(pre))
+  if (m === 'GET' || m === 'HEAD' || m === 'OPTIONS') return null
+  return DEMO_BLOCKED_PREFIXES.some(pre => p === pre || p.startsWith(pre)) ? DEMO_REASON_WRITE : null
 }
 
-const DEMO_BLOCK_MESSAGE =
-  '演示模式：该操作会真实修改数据或产生费用，已被拦截。退出演示模式（侧栏「演示 ON」）后可执行。'
+/** 该请求在演示模式下是否应被拦截（只读放行，付费 GET 除外）。 */
+export function blockedInDemo(path: string, method?: string, active?: boolean): boolean {
+  return demoBlockReason(path, method, active) !== null
+}
 
 let installed = false
 
@@ -78,8 +112,9 @@ export function installDemoGuard(): void {
       : input instanceof Request ? input.url
       : input.toString()
     const method = init?.method || (input instanceof Request ? input.method : 'GET')
-    if (blockedInDemo(url, method)) {
-      return new Response(JSON.stringify({ error: DEMO_BLOCK_MESSAGE, demo_blocked: true }), {
+    const reason = demoBlockReason(url, method)
+    if (reason) {
+      return new Response(JSON.stringify({ error: reason, demo_blocked: true }), {
         status: 403,
         headers: { 'Content-Type': 'application/json' },
       })

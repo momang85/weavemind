@@ -748,7 +748,25 @@ export default memo(function ReportViewer() {
 
   const scrollToHeading = (id: string) => scrollToId(id)
 
-  const downloadMarkdown = () => {
+  // Markdown 导出优先走服务端：导出字节的 hash 与服务端导出清单一并落盘，
+  // 并与 PDF 绑定同一个选中版本；服务端不可用（离线/旧版）时退回内存稿，
+  // 此时只保证可下载，不产生清单绑定。
+  const downloadMarkdown = async () => {
+    if (taskIdForFiles) {
+      try {
+        const res = await fetch('/api/task/' + encodeURIComponent(taskIdForFiles) + '/report.md')
+        if (res.ok) {
+          const blob = await res.blob()
+          const url = URL.createObjectURL(blob)
+          const a = document.createElement('a')
+          a.href = url
+          a.download = taskIdForFiles + '.md'
+          a.click()
+          URL.revokeObjectURL(url)
+          return
+        }
+      } catch { /* 退回内存稿 */ }
+    }
     const blob = new Blob([report.final_report], { type: 'text/markdown' })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a'); a.href = url; a.download = 'report.md'; a.click()
@@ -776,6 +794,21 @@ export default memo(function ReportViewer() {
     }
     const w = window.open('', '_blank')
     if (!w) return
+    // 打印页正文优先取服务端导出的同一份选中版本（顺带拿到版本号/草稿标记，
+    // 打印件因此可追溯到它是哪一版）；服务端不可用时退回内存稿。
+    let printBody = report.final_report
+    let versionId = ''
+    let isDraft = false
+    if (taskIdForFiles) {
+      try {
+        const res = await fetch('/api/task/' + encodeURIComponent(taskIdForFiles) + '/report.md')
+        if (res.ok) {
+          printBody = await res.text()
+          versionId = res.headers.get('X-Report-Version-Id') || ''
+          isDraft = res.headers.get('X-Report-Draft') === '1'
+        }
+      } catch { /* 用内存稿 */ }
+    }
     w.document.write(`<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Report</title>
 <style>body{font-family:system-ui;max-width:800px;margin:40px auto;padding:20px;color:#1a1a2e;line-height:1.8}
 h1,h2{color:#16213e} pre{background:#f5f5f5;padding:16px;border-radius:8px;overflow-x:auto}
@@ -789,7 +822,7 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
     const esc = (s: string) =>
       s.replace(/&/g, '&amp;').replace(/</g, '&lt;')
        .replace(/>/g, '&gt;').replace(/"/g, '&quot;')
-    const md = esc(report.final_report)
+    const md = esc(printBody)
       .replace(/^### (.+)$/gm, '<h3>$1</h3>')
       .replace(/^## (.+)$/gm, '<h2>$1</h2>')
       .replace(/^# (.+)$/gm, '<h1>$1</h1>')
@@ -797,6 +830,13 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
       .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
       .replace(/\n/g, '<br/>')
     w.document.getElementById('content')!.innerHTML = md
+    if (versionId) {
+      const foot = w.document.createElement('p')
+      foot.style.cssText = 'margin-top:32px;padding-top:12px;border-top:1px solid #ddd;'
+        + 'color:#666;font-size:12px'
+      foot.textContent = (isDraft ? '未验收草稿 · ' : '') + '版本 ' + versionId
+      w.document.getElementById('content')!.appendChild(foot)
+    }
     w.print()
   }
 

@@ -4,6 +4,10 @@ import { BarChart3, RefreshCw } from 'lucide-react'
 import { useVisibleInterval } from '../lib/useVisibleInterval'
 import { Card, ErrorState, SectionTitle, Skeleton, StatCard } from '../components/ui'
 import { formatDuration, formatUsd } from '../lib/format'
+import {
+  METRICS_UNAVAILABLE_MESSAGE, MetricsView,
+  metricsFailure, metricsInitial, metricsStart, metricsSuccess,
+} from '../lib/metricsState'
 
 interface TaskBreakdown {
   total: number
@@ -38,19 +42,20 @@ interface MetricsSummary {
 }
 
 export default function MetricsPage() {
-  const [m, setM] = useState<MetricsSummary | null>(null)
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
+  // 状态机在 lib/metricsState（纯函数）：失败即不可用，绝不把上次快照当当前值
+  const [view, setView] = useState<MetricsView<MetricsSummary>>(() => metricsInitial<MetricsSummary>())
+  const m = view.data
+  const { error, loading, lastOkAt } = view
 
   // 全部统计量由后端在同一快照、同一范围（task_history 全表）算好。
   // 前端**不再**用 /tasks 列表（分页/截断）去推算运行数——那会把"100 个任务全在跑"
   // 算成 100% 成功（列表只回最近 50 条）。
   const load = useCallback(() => {
+    setView(v => metricsStart(v))
     fetch('/api/metrics')
       .then(r => { if (!r.ok) throw new Error('no data'); return r.json() })
-      .then(d => { setM(d); setError('') })
-      .catch(() => setError('指标接口不可达（服务未启动或 metrics 收集器未运行）。统计值显示为"未知"，不代表 0。'))
-      .finally(() => setLoading(false))
+      .then(d => setView(v => metricsSuccess(v, d, new Date().toISOString())))
+      .catch(() => setView(v => metricsFailure(v, METRICS_UNAVAILABLE_MESSAGE)))
   }, [])
 
   useEffect(() => { load() }, [load])
@@ -72,7 +77,12 @@ export default function MetricsPage() {
           <RefreshCw className="w-4 h-4" />
         </button>
       </div>
-      {error && <ErrorState title="指标不可用" description={error} onRetry={load} />}
+      {error && (
+        <ErrorState title="指标不可用" onRetry={load}
+          description={lastOkAt
+            ? `${error}（上次成功刷新：${lastOkAt.slice(0, 19).replace('T', ' ')}——该快照不作为当前值）`
+            : error} />
+      )}
       {loading && !m && (
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           {[0, 1, 2, 3].map(i => <Skeleton key={i} className="h-24" />)}
