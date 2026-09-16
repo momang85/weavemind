@@ -17,6 +17,24 @@
 - **未验证**：CI 作业尚未观察到绿灯；克隆源是本机 `.git`（证明"提交内容足够"），
   不等于远端 clone 的同一性；该演练不证明报告质量（stub 返回固定文本）。
 
+**MKT-P0-2 便携 Redis 国内可用性：已落地（多源 + 预算 + 离线复用 + 中文指引）**
+
+- `dep_check.py`：**系统已装 Redis 优先**（Windows 先探 PATH / 已注册服务 / 常见安装目录）→
+  **离线复用**（`.weavemind/downloads/redis-windows.zip` 合法即用，不联网）→ **多源下载**
+  （`WM_REDIS_ZIP_URL` → `WM_REDIS_MIRRORS` 前缀 → 内置 ghproxy/gh-proxy/ghfast → 官方 release），
+  默认总预算 60s、每源 20s，到点即停；可选 `WM_REDIS_ZIP_SHA256` 强校验摘要；镜像主机已进下载白名单，
+  但仍走 https + 重定向逐跳复校 + 体积上限。失败指引改为**可执行步骤**（系统安装/Docker/镜像/
+  手动放包/固定摘要/换 host）。
+- **实测（真实网络）**：用户镜像不可用时自动落到 `ghproxy.net`，**24.6s** 取到 zip
+  （13,933,009 字节，sha256 `4e8f2f956ed92fea…`），且与更早一次从官方源获取的同一文件
+  **逐字节一致**（两条独立路径互证）；预算纪律 ≤30s 达标。
+- 回归：新增 `test_redis_acquisition` **14 项 EXIT=0**（源顺序/前缀语义/摘要拒绝后继续试/
+  非 zip 拒绝/预算到点停/离线复用不联网/系统 Redis 优先/指引可执行/默认预算 60s），已接入 CI。
+- 顺带修：`test_startup_readiness` 的全仓守卫抓到我这轮三个驱动脚本没关 Redis 内建重试
+  （Redis 不可达会挂几十秒），已统一传 `_NO_REDIS_RETRY`。
+- **未验证**：镜像可达性只在**本机网络**验证过一次；"无代理 60 秒就绪"这条判据在你的真实网络里
+  需要再跑一次确认（清掉 `.weavemind/redis/portable` 后 `python launcher.py deps --fix` 即可复现）。
+
 **R0b/R0c 进度（逐项给证据）**
 
 - ✅ **R0.2 版本身份真实接线**：验收输出**全量** `report_sha256`（短 hash 单列 `report_sha256_short`，

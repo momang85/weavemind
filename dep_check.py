@@ -54,6 +54,19 @@ REDIS_ZIP_URL = os.environ.get(
     "https://github.com/redis-windows/redis-windows/releases/download/8.10.1/"
     "Redis-8.10.1-Windows-x64-msys2.zip",
 )
+# 国内网络下 GitHub release 常下不动：按顺序试多个镜像（每个源都有独立超时，
+# 总预算见 WM_REDIS_FETCH_BUDGET）。镜像只是**同一条 release 资源的转发**，
+# 第三方转发不构成信任来源——因此：
+#   1) 仍走 https + host 白名单 + 重定向逐跳复校 + 体积上限；
+#   2) 可用 WM_REDIS_ZIP_SHA256 固定摘要，下载后强校验（推荐；摘要请与官方 release 页核对）；
+#   3) 未固定摘要时把实际摘要打进日志，便于事后对账。
+REDIS_MIRROR_PREFIXES = (
+    "https://ghproxy.net/",
+    "https://gh-proxy.com/",
+    "https://ghfast.top/",
+)
+# 镜像前缀随源地址一起使用，因此这些转发主机也要在白名单内（仅用于本文件的下载器）
+MIRROR_HOSTS = ("ghproxy.net", "gh-proxy.com", "ghfast.top")
 REDIS_BIN = "redis-server.exe"
 REDIS_MIN_MAJOR = 6
 DOWNLOAD_HOSTS = (
@@ -62,7 +75,7 @@ DOWNLOAD_HOSTS = (
     "release-assets.githubusercontent.com",      # release 下载的实际 302 目标
     "github-releases.githubusercontent.com",      # 同一资源域的旧名
     "codeload.github.com",
-)
+) + MIRROR_HOSTS
 MAX_DOWNLOAD_BYTES = 60 * 1024 * 1024  # 60MB（Redis zip 约 5MB）
 _UA = "WeaveMind-DepCheck/1.0"
 
@@ -302,6 +315,174 @@ class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def redis_zip_sources() -> list[str]:
+    """便携 Redis 的下载源，按尝试顺序（MKT-P0-2）。
+
+    顺序：用户显式 `WM_REDIS_ZIP_URL` → `WM_REDIS_MIRRORS`（逗号分隔，**镜像前缀**；
+    以 `.zip` 结尾的条目按完整地址处理）→ 内置镜像 → 官方 GitHub release。
+    用户显式给的排最前（尊重"我知道从哪下"），官方源排最后兜底。
+    """
+    srcs: list[str] = []
+
+    def _expand(item: str) -> str:
+        item = item.strip()
+        if not item:
+            return ""
+        if item.lower().endswith(".zip"):
+            return item                 # 已经是完整地址
+        return item.rstrip("/") + "/" + REDIS_ZIP_URL
+
+    explicit = str(os.environ.get("WM_REDIS_ZIP_URL") or "").strip()
+    if explicit:
+        srcs.append(explicit)
+    extra = str(os.environ.get("WM_REDIS_MIRRORS") or "").strip()
+    if extra:
+        srcs.extend(_expand(u) for u in extra.split(","))
+    mirror_base = str(os.environ.get("WM_REDIS_MIRROR_BASE") or "").strip()
+    prefixes = (mirror_base,) if mirror_base else REDIS_MIRROR_PREFIXES
+    srcs.extend(_expand(p) for p in prefixes)
+    srcs.append(REDIS_ZIP_URL)
+    # 去重且保持顺序
+    seen: set[str] = set()
+    out: list[str] = []
+    for u in srcs:
+        if u and u not in seen:
+            seen.add(u)
+            out.append(u)
+    return out
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+    h = hashlib.sha256()
+    try:
+        with open(path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 512), b""):
+                h.update(chunk)
+    except Exception:
+        return ""
+    return h.hexdigest()
+
+
+def fetch_portable_redis(zip_path: Path, *, budget: float | None = None,
+                         per_source: float = 20.0) -> tuple[bool, str, str]:
+    """多源获取便携 Redis（MKT-P0-2）：返回 `(ok, 说明, 实际使用的源)`。
+
+    - **离线可复制**：目标 zip 已存在且是合法 zip 时直接用（不联网）；
+    - **总预算**：默认 `WM_REDIS_FETCH_BUDGET`（60s），每个源 `per_source` 秒；
+      预算耗尽即停，不再无限等某个源；
+    - **摘要固定**：给了 `WM_REDIS_ZIP_SHA256` 就强校验，不符即换源；
+      没给就把实际摘要打进日志，便于事后与官方 release 对账。
+    """
+    zip_path = Path(zip_path)
+    if zip_path.exists() and zip_path.stat().st_size > 0:
+        if zipfile.is_zipfile(zip_path):
+            digest = _sha256_file(zip_path)
+            return True, f"复用已有下载包（sha256 {digest[:16]}…）", "local-cache"
+    try:
+        total = float(budget if budget is not None
+                      else (os.environ.get("WM_REDIS_FETCH_BUDGET", "60") or 60))
+    except Exception:
+        total = 60.0
+    want_sha = str(os.environ.get("WM_REDIS_ZIP_SHA256") or "").strip().lower()
+    deadline = time.time() + max(5.0, total)
+    problems: list[str] = []
+    for url in redis_zip_sources():
+        if time.time() >= deadline:
+            problems.append("预算耗尽，剩余源未尝试")
+            break
+        left = max(3.0, min(float(per_source), deadline - time.time()))
+        ok, msg = _safe_download(url, zip_path, timeout=left)
+        if not ok:
+            problems.append(f"{_host_of(url)}: {msg}")
+            continue
+        got = _sha256_file(zip_path)
+        if want_sha and got != want_sha:
+            problems.append(f"{_host_of(url)}: 摘要不符（期望 {want_sha[:16]}…，实际 {got[:16]}…）")
+            try:
+                zip_path.unlink()
+            except Exception:
+                pass
+            continue
+        if not zipfile.is_zipfile(zip_path):
+            problems.append(f"{_host_of(url)}: 下载内容不是合法 zip")
+            try:
+                zip_path.unlink()
+            except Exception:
+                pass
+            continue
+        log_line = f"sha256 {got[:16]}…" + ("（已按 WM_REDIS_ZIP_SHA256 校验）" if want_sha else "")
+        return True, f"来自 {_host_of(url)}（{log_line}）", url
+    return False, "；".join(problems[:6]) or "没有可用下载源", ""
+
+
+def _system_redis_exe() -> Path | None:
+    """Windows 上**系统已装**的 Redis：PATH → 已注册服务名 → 常见安装目录。
+
+    为什么要先找它：能复用本机已有的 Redis 就不该联网下载（国内网络下 GitHub
+    release 常下不动，而 Memurai/redis-windows 服务版往往已经装好）。
+    版本下限仍按 `REDIS_MIN_MAJOR` 判定，版本过旧会被判为不可用。
+    """
+    if os.name != "nt":
+        return None
+    candidates: list[Path] = []
+    found = shutil.which("redis-server") or shutil.which("redis-server.exe")
+    if found:
+        candidates.append(Path(found))
+    # 已注册的 Windows 服务（服务名 → 可执行文件路径）
+    for svc in ("Memurai", "Redis", "memurai", "redis"):
+        try:
+            proc = subprocess.run(["sc", "qc", svc], capture_output=True, text=True,
+                                  timeout=8)
+        except Exception:
+            continue
+        if proc.returncode != 0:
+            continue
+        import re as _re
+        m = _re.search(r'BINARY_PATH_NAME\s*:\s*(.+?)\s*$', proc.stdout or "", _re.M)
+        if not m:
+            continue
+        raw = m.group(1).strip().strip('"')
+        exe = Path(raw.split(" --")[0].strip().strip('"'))
+        if exe.suffix.lower() == ".exe":
+            candidates.append(exe)
+    for base in (r"C:\Program Files\Memurai",
+                 r"C:\Program Files\Redis",
+                 r"C:\Redis",
+                 str(Path(os.environ.get("LOCALAPPDATA") or "") / "Programs" / "Redis")):
+        if not base:
+            continue
+        p = Path(base) / REDIS_BIN
+        if p.exists():
+            candidates.append(p)
+    for path in candidates:
+        try:
+            if path.exists() and _redis_version_of(path) >= REDIS_MIN_MAJOR:
+                return path
+        except Exception:
+            continue
+    return None
+
+
+def _redis_version_of(exe: Path) -> int:
+    """跑一次 `--version` 取主版本号；失败返回 0（= 不可用）。"""
+    try:
+        proc = subprocess.run([str(exe), "--version"], capture_output=True, text=True,
+                              timeout=8)
+    except Exception:
+        return 0
+    import re as _re
+    m = _re.search(r"v=(\d+)\.", (proc.stdout or "") + (proc.stderr or ""))
+    return int(m.group(1)) if m else 0
+
+
+def _host_of(url: str) -> str:
+    try:
+        return urllib.parse.urlsplit(str(url)).hostname or str(url)[:40]
+    except Exception:
+        return str(url)[:40]
+
+
 def _safe_download(url: str, dest: Path, max_bytes: int = MAX_DOWNLOAD_BYTES,
                    timeout: float = 60.0) -> tuple[bool, str]:
     """把白名单公网 https 资源下载到 dest（超限/失败即中止并清理）。"""
@@ -484,14 +665,31 @@ See the deployment guide in docs/ (section 5.1).
 """
 
 REDIS_HINT = """\
-Redis 未运行且无法自动获取时的三种方案（任选其一，保持 6379 端口即可）：
-  1) Memurai（Redis 兼容的 Windows 服务，开发者版免费）：https://www.memurai.com
-  2) redis-windows（Redis 8.x Windows 构建）：github.com/redis-windows/redis-windows
-  3) WSL2 / Linux：sudo apt install redis-server && sudo service redis-server start
-若只是 GitHub 下不动：可先把 Redis zip 放到别处，再用环境变量
-  WM_REDIS_ZIP_URL=<可达的 zip 地址>  重新运行（仍要求 https + 公网地址）
+Redis 未运行且无法自动获取。按"最省事优先"试这几步：
+
+  1) 先用系统已装的（推荐，不用联网）：
+     - Windows 服务版：Memurai（https://www.memurai.com）装上即用，
+       或 tporadowski/redis 解压后执行
+         redis-server.exe --service-install
+     - WSL2 / Linux：sudo apt install redis-server && sudo service redis-server start
+     - 已有 Docker：docker run -d --name zhiguan-redis -p 6379:6379 redis:7-alpine
+
+  2) 下载慢/超时（国内网络常见）：换镜像或把包放到本机
+     a. 指定镜像源后重跑（会依次尝试，60s 预算）：
+          set WM_REDIS_MIRROR_BASE=https://ghproxy.net
+     b. 或者手动下载 zip（约 5MB，来自 redis-windows 的 release）后放到
+          .weavind/downloads/redis-windows.zip
+        再重跑——**已存在的合法 zip 会直接复用，不再联网**。
+     c. 有官方 release 页给出的 sha256 时，建议固定摘要再下载：
+          set WM_REDIS_ZIP_SHA256=<官方 release 的 sha256>
+        （镜像只是转发，固定摘要才能真正校验内容；未固定时日志会打印实际摘要便于对账）
+
+  3) 把 Redis 放在别的机器/端口：
+          set REDIS_HOST=<host>  &  set REDIS_PORT=<port>
+     或者临时跳过本检查：set SKIP_REDIS_CHECK=1
+
 注意：需要 **Redis 6 及以上**——本项目用的 redis-py 8 默认 RESP3（HELLO 命令），
-Redis 5 不支持该命令，会表现为"服务启动即崩、日志报 unknown command HELLO"。
+Redis 5 不支持，会表现为"服务启动即崩、日志报 unknown command HELLO"。
 详见 docs/部署指南.md「无 Docker 的完整路径」。
 """
 
@@ -700,7 +898,18 @@ def ensure_redis(auto: bool = True, wait_sec: float = 12.0) -> dict:
                 "detail": _t(f"未找到 redis-server 且本机无 Redis。\n{REDIS_HINT}",
                              f"no redis-server on PATH and no local Redis.\n{REDIS_HINT_EN}")}
 
-    # Windows：已下载的直接复用，否则从白名单源下载（WM_NO_AUTO_DOWNLOAD=1 可关闭）
+    # Windows：**先看系统已装的 Redis**（PATH / 已注册服务 / 常见安装目录），
+    # 再复用便携版，最后才是多源下载（MKT-P0-2：不许"能复用却先联网下载"）。
+    sys_redis = _system_redis_exe()
+    if sys_redis is not None:
+        proc = _spawn_background(_redis_start_argv(sys_redis, port),
+                                 LOG_DIR / "redis.log", cwd=sys_redis.parent)
+        _write_redis_pid(proc.pid)
+        if _wait_redis("", port, wait_sec):
+            _publish_redis_host_env(redis_bind_addr())
+            return {"ok": True, "action": "started_system",
+                    "detail": _t(f"已启动系统已装的 Redis（pid={proc.pid}，{sys_redis}）",
+                                 f"started system-installed Redis (pid={proc.pid}, {sys_redis})")}
     redis_exe = _usable_portable_redis()
     if redis_exe is None:
         if not auto or os.environ.get("WM_NO_AUTO_DOWNLOAD", "0") == "1":
@@ -708,14 +917,18 @@ def ensure_redis(auto: bool = True, wait_sec: float = 12.0) -> dict:
                     "detail": _t(f"Redis 缺失且自动下载已关闭。\n{REDIS_HINT}",
                                  f"Redis missing and auto-download disabled.\n{REDIS_HINT_EN}")}
         zip_path = DOWNLOAD_DIR / "redis-windows.zip"
-        print(_t("      正在获取便携版 Redis（约 5MB，来自 GitHub releases；"
-                 "国内网络可能较慢或需要代理）…",
-                 "      fetching portable Redis (~5MB from GitHub releases; "
-                 "may be slow on restricted networks)..."), flush=True)
-        ok, msg = _safe_download(REDIS_ZIP_URL, zip_path)
+        print(_t("      正在获取便携版 Redis（约 5MB；依次尝试镜像与官方源，"
+                 "总预算 60s，可用 WM_REDIS_FETCH_BUDGET 调整）…",
+                 "      fetching portable Redis (~5MB; trying mirrors then the "
+                 "official source, 60s budget)..."), flush=True)
+        t0 = time.time()
+        ok, msg, used = fetch_portable_redis(zip_path)
         if not ok:
             return {"ok": False, "action": "download_failed",
-                    "detail": _t(f"{msg}\n{REDIS_HINT}", f"{msg}\n{REDIS_HINT_EN}")}
+                    "detail": _t(f"下载失败（已试 {len(redis_zip_sources())} 个源，"
+                                 f"耗时 {time.time() - t0:.0f}s）：{msg}\n{REDIS_HINT}",
+                                 f"download failed: {msg}\n{REDIS_HINT_EN}")}
+        print(_t(f"      已获取：{msg}", f"      fetched: {msg}"), flush=True)
         ok, msg = _safe_extract_zip(zip_path, PORTABLE_DIR, expect_name=REDIS_BIN)
         if not ok:
             return {"ok": False, "action": "extract_failed",
@@ -725,6 +938,7 @@ def ensure_redis(auto: bool = True, wait_sec: float = 12.0) -> dict:
             return {"ok": False, "action": "extract_failed",
                     "detail": _t(f"解压后未找到可用 {REDIS_BIN}（{PORTABLE_DIR}）\n{REDIS_HINT}",
                                  f"no usable {REDIS_BIN} after extract ({PORTABLE_DIR})\n{REDIS_HINT_EN}")}
+        _ = used
     proc = _spawn_background(_redis_start_argv(redis_exe, port),
                              LOG_DIR / "redis.log", cwd=redis_exe.parent)
     _write_redis_pid(proc.pid)

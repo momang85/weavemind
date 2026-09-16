@@ -226,8 +226,10 @@ def _submit(clone: Path, env: dict) -> str:
 
     import redis  # noqa: PLC0415
 
+    from common import _NO_REDIS_RETRY
     r = redis.Redis(host=env["REDIS_HOST"], port=int(env["REDIS_PORT"]),
-                    decode_responses=True)
+                    decode_responses=True, socket_connect_timeout=5,
+                    socket_timeout=5, retry=_NO_REDIS_RETRY)
     tid = "ui-" + uuid.uuid4().hex[:10]
     r.delete(f"task_ack:{tid}")
     r.publish("orchestrator:main", json.dumps({

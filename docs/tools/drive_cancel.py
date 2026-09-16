@@ -50,7 +50,10 @@ def _status(db: str, tid: str) -> str:
 
 
 def main() -> int:
-    r = redis.Redis(host="127.0.0.1", port=6379, decode_responses=True)
+    from common import _NO_REDIS_RETRY
+    r = redis.Redis(host="127.0.0.1", port=6379, decode_responses=True,
+                    socket_connect_timeout=5, socket_timeout=5,
+                    retry=_NO_REDIS_RETRY)
     tid = "ui-" + uuid.uuid4().hex[:10]
     r.delete(f"task_ack:{tid}")
     r.publish("orchestrator:main", json.dumps({
