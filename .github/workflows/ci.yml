@@ -136,9 +136,14 @@ jobs:
         working-directory: frontend
 
   clean-env-e2e:
-    # 干净环境端到端门禁（市场评估的 P0-1）：从**提交内容**克隆 → 装依赖 → 起服务 →
-    # 提交任务 → 产出报告。模型指向仓库内的 stub（不消耗真实额度），Redis 用 service
-    # 容器，WebUI 用独立端口；这条闸门证明的是"一个干净检出足以跑出第一份报告"。
+    # **部署烟测（固定模型替身）**：从**提交内容**克隆 → 装依赖 → 起服务 → 提交任务 →
+    # 产出**夹具预期**的报告，外加一条负向用例（替身注入故障 → 任务必须如实失败，
+    # 且成功判据必须拒绝它的文本）。
+    #
+    # 这条闸门证明与不证明什么（写清口径，别把绿当成金融质量）：
+    #   证明：干净检出可安装、依赖自检通过、服务能就绪、任务能到成功终态、
+    #         交付物含夹具标记与夹具事实（不是"文本非空"）。
+    #   不证明：真实模型质量、真实 SEC/行情抓取、金融数字正确性——那是 S1/S2 的单独关卡。
     runs-on: ubuntu-latest
     services:
       redis:
@@ -159,7 +164,7 @@ jobs:
         run: pip install -r requirements-runtime.lock
       - name: Install CJK fonts (PDF export path)
         run: sudo apt-get update && sudo apt-get install -y fonts-droid-fallback
-      - name: Clean-checkout end-to-end (clone → deps → start → task → report)
+      - name: "Deployment smoke (stub model: clone → deps → start → task → fixture report + negative case)"
         run: python scripts/e2e_clean_check.py --ci --timeout 900
       - name: Upload e2e evidence
         if: always()

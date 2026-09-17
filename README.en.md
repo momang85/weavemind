@@ -2,7 +2,7 @@
 
 # WeaveMind · ZhiGuang
 
-**A visible, self-remembering, self-evolving AI team that runs on your own computer.**
+**A verifiable listed-company research workbench: every number traces back to a source position and is recomputable.**
 
 [![CI](https://github.com/momang85/weavemind/actions/workflows/ci.yml/badge.svg)](https://github.com/momang85/weavemind/actions)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -15,9 +15,32 @@ English · [中文](README.md)
 
 ![WeaveMind hero demo](docs/hero-demo.gif)
 
-Type one goal → **a 10-worker AI team works in parallel** → a complete deliverable lands on disk.
-This is not another chat window. It is a **visual multi-agent workshop**: editable plans,
-reusable memory, and strategies that literally evolve. Every step is visible; every deliverable is real.
+> The demo asset was recorded on an earlier version and shows the generic multi-agent
+> workshop. The first-screen promise is now the verifiable listed-company research
+> workbench described below; the asset is to be re-recorded.
+
+**Focus: a verifiable listed-company research workbench.** Give it a company and a period;
+get a research write-up, a recomputable working paper, and a gap list — **every number in the
+report must trace back to a source position and be recomputable**, and anything that cannot be
+recomputed must be labelled "unverified / insufficient source" rather than glossed over.
+
+Multi-agent orchestration, memory and strategy evolution are *mechanisms* (every plan step is
+editable and replayable), no longer the first-screen promise.
+
+Traceability varies enormously by sample, so we disclose it **sample by sample** instead of
+folding it into a "stable range" or an average:
+
+| Sample | Number traceability | Amount traceability | Note / source |
+|---|---|---|---|
+| A-share activity daily (repo's own claim) | 85% (206/241) | — | Structured financial chain hit; report-period data on disk in `financials.json`, numbers recomputable |
+| WBD US task (independent, 2026-09-14) | 8% (3/37), 18 model-knowledge figures | 0% (0/17) | Root cause: structured financials were not wired to that target; see [新手实测报告](docs/新手实测报告_20260914.md) |
+| Legendary Pictures task (independent, 2026-09-14) | 0 verifiable numbers, 15 data-missing placeholders | — | Same report |
+| Financial task (trial run, 2026-09-12) | 46% | 53% (12 placeholders) | Reproduced twice on the same goal; see [试运行报告](docs/试运行报告_20260912.md) |
+
+**These samples differ in period, rules and goal — they cannot be combined into one "quality
+range".** Likewise a **fixed synthetic fixture** (amount traceability 0.833 > 0.70 threshold)
+only proves the chain and the gate are connected; it says nothing about live fetching or
+real-report quality.
 
 **The one-line difference**: other agents forget what they did — WeaveMind **sees, remembers, and evolves**.
 
@@ -274,12 +297,10 @@ Before developing, run `python test_common.py` and `npm run build` to make sure 
   model in the `planner` section if needed.
 - Logs rotate at 5 MB × 3 in `logs/`; `priority_router.py` and `auto_scaler.py` are kept
   but not yet wired into the main pipeline.
-- Number traceability varies widely by task type: **8%–85%**, not a single figure. The
-  A-share/HK structured chain reached 85% (206/241) in the referenced run; the US chain
-  (SEC EDGAR) measured **8%** (3/37) with **0%** amount traceability (0/17) in independent
-  testing. The US root cause (structured financials never wired to that target) is fixed and
-  covered by a fixed synthetic fixture, but real `data.sec.gov` fetches are not yet verified,
-  so 8% still stands as the citable measurement.
+- Traceability is disclosed **sample by sample** on the first screen; the samples
+  differ in period, rules and goal, so they are deliberately **not** combined into a
+  stable range or average. A fixed synthetic fixture (amount traceability 0.833) only
+  proves the chain is wired, not live-fetch or real-report quality.
 - Number traceability binds the **adjacent clause's** subject: a figure whose neighbouring
   clause names another company is rejected. Binding against a subject declared only in the
   report title/document is **not** implemented — see
