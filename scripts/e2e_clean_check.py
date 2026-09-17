@@ -247,14 +247,31 @@ def _submit(clone: Path, env: dict) -> str:
 
 
 def _status(tid: str) -> str:
+    """读任务终态；**读不到就返回空串**，由调用方继续轮询。
+
+    这里必须容错，不能把"还没落库"当成错误：服务刚起来时数据库文件可能已存在、
+    但表还没建好（`sqlite3.OperationalError: no such table: task_history`）——
+    一次查询异常就把整条门禁打红。实测在 CI 上就是这样翻车的（同一份代码上一次是
+    绿的），属于"没有重试的脆弱门禁"。
+    """
     import sqlite3
 
     import db_paths  # noqa: PLC0415
 
-    con = sqlite3.connect(db_paths.resolve_db_path())
+    try:
+        con = sqlite3.connect(db_paths.resolve_db_path())
+    except Exception as exc:                     # 库文件暂时打不开
+        _log(f"状态查询暂不可用（继续轮询）：{str(exc)[:80]}")
+        return ""
     try:
         row = con.execute("SELECT status FROM task_history WHERE task_id=?",
                           (tid,)).fetchone()
+    except sqlite3.OperationalError as exc:      # 表还没建好
+        _log(f"任务表尚未就绪（继续轮询）：{str(exc)[:80]}")
+        return ""
+    except Exception as exc:
+        _log(f"状态查询失败（继续轮询）：{str(exc)[:80]}")
+        return ""
     finally:
         con.close()
     return str(row[0]) if row else ""

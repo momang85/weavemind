@@ -161,6 +161,21 @@ class TestContentSummaryMergedCall(unittest.IsolatedAsyncioTestCase):
 class TestReflectionConvergence(unittest.TestCase):
     """反思循环收敛：best_report 无改善提前终止；有改善继续；验收 fail 仍重做。"""
 
+    def setUp(self):
+        # LLM 预检打桩：`run()` 开头会探端点可用性与**余额**，不打桩就是拿本机
+        # config.json 的真实 key 去真端点问——余额耗尽时任务在预检就以
+        # "端点余额不足"被拒，这里要验证的"反思收敛"根本没机会发生
+        # （CI 上无 key 则表现为"端点不可用"，同样早退）。
+        for target, value in (
+            ("llm_client.endpoints_available", lambda: (True, "stub")),
+            ("llm_client.get_balance_status",
+             lambda **kw: {"primary": {"ok": True, "reason": "ok"},
+                           "backup": {"ok": True, "reason": "ok"}}),
+        ):
+            pat = mock.patch(target, value)
+            pat.start()
+            self.addCleanup(pat.stop)
+
     def _orch(self, **overrides):
         from test_orchestrator_v2 import make_orch
         kwargs = dict(_max_iterations=5)
@@ -236,7 +251,13 @@ class TestReflectionConvergence(unittest.TestCase):
             res = o.run("t-conv-go", "目标", auto_run=True)
 
         self.assertEqual(reflected["n"], 2, "best_report 有改善应继续反思")
-        self.assertEqual(res["status"], "SUCCESS")
+        # 状态由**验收证据**决定，不由长度决定：本用例的步骤结果是打桩的，
+        # 既没有版本绑定的验收、也没有 acceptance_report.json → 按项目"以最终验收
+        # 判定"的诚实口径记 SUCCESS_WITH_ISSUES（不是 FAILED，也不是假装 SUCCESS）。
+        # 这里要考的是"有改善就继续反思"，验收链路本身由 test_p0 /
+        # test_r0_boundaries / test_delivery_chain 覆盖。
+        # （此断言在 R1/R2 之前就是红的：`d0e5a72` 上同样报 SUCCESS_WITH_ISSUES != SUCCESS。）
+        self.assertEqual(res["status"], "SUCCESS_WITH_ISSUES")
         self.assertEqual(len(res["steps"]), 2)
 
     def test_acceptance_fail_still_redoes_despite_unchanged_report(self):

@@ -244,6 +244,19 @@ class TestRunResumePath(unittest.TestCase):
         ws_mod.configure_workspace_root(self._tmp)
         self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", self._old_root)
         self.addCleanup(shutil.rmtree, self._tmp, ignore_errors=True)
+        # LLM 预检必须打桩：`run()` 开头会探端点可用性与**余额**，不打桩就是拿本机
+        # config.json 里的真实 key 去真端点问——实测余额耗尽时任务直接以
+        # "端点余额不足"被拒，用例看到的失败原因与本文件要验证的恢复语义无关
+        # （CI 上无 key 则表现为"端点不可用"，同样早退）。
+        for target, value in (
+            ("llm_client.endpoints_available", lambda: (True, "stub")),
+            ("llm_client.get_balance_status",
+             lambda **kw: {"primary": {"ok": True, "reason": "ok"},
+                           "backup": {"ok": True, "reason": "ok"}}),
+        ):
+            pat = mock.patch(target, value)
+            pat.start()
+            self.addCleanup(pat.stop)
 
     def test_run_resumes_and_skips_completed_steps_without_cleaning(self):
         """f) 构造 checkpoint -> run()：已完成步骤不再执行（计数），

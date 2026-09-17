@@ -159,11 +159,22 @@ class TestHealthRegistryProbes(unittest.TestCase):
         self.assertIn("未知", result["reason"])
 
     def test_live_probe_embedding_classifies_quota(self):
+        """402 → 归类为欠费。
+
+        用例必须**自己把端点配出来**：探测按 环境变量 → config.json → LLM_* 回退
+        去找 base_url，本机有 config.json 时能走到请求，CI 上（无 config.json、
+        无 EMBEDDING_*）则在发起请求前就返回"未配置"——断言看到的失败原因与
+        被测行为无关（实测：CI 报 `'未配置' != 'insufficient_balance'`，
+        本机通过，因为本机配置里有 embedding 段）。
+        """
         import health_registry
         import urllib.error
         err = urllib.error.HTTPError(
             "http://x/v1/embeddings", 402, "Payment Required", {}, None)
-        with mock.patch("urllib.request.urlopen", side_effect=err):
+        with mock.patch.dict(os.environ, {
+                "EMBEDDING_BASE_URL": "http://x/v1",
+                "EMBEDDING_API_KEY": "k"}), \
+                mock.patch("urllib.request.urlopen", side_effect=err):
             result = health_registry.live_probe("embedding")
         self.assertFalse(result["ok"])
         self.assertEqual(result["reason"], "insufficient_balance")
