@@ -69,13 +69,42 @@ PLAN = {
 
 _PLAN_HINTS = ("拆解", "规划", "steps", "计划", "json")
 
+# 规划请求的**特征**：只有规划器会这样要输出——系统提示说明"把目标拆成步骤/返回 JSON"，
+# 或用户提示同时含"拆解/规划"与 JSON 要求。
+#
+# 早期判据只看"消息里出现 步/计划/json"就回计划 JSON，结果**报告步骤**的提示里
+# 提到"按计划步骤写报告"也被误判成规划：交付物里出现的是计划 JSON 而不是报告正文。
+# 实测（干净环境烟测）：任务 SUCCESS、验收还 pass，而落盘的"报告"开头是
+# `# 报告` + `{"steps": [...]}`——内容判据正是靠夹具标记才把这种假绿拦住。
+_PLAN_SYSTEM_RE = re.compile(
+    r"(break .{0,20}goals? into|decompose .{0,20}(goal|task)|拆解.{0,10}(目标|任务)"
+    r"|规划器|planner\b)", re.I)
+_PLAN_JSON_RE = re.compile(r'(json|"steps"\s*:|步骤列表|steps)', re.I)
+
+
+def _wants_plan(system: str, user: str) -> bool:
+    """这次请求是不是"让模型给出计划"。"""
+    if _PLAN_SYSTEM_RE.search(system or ""):
+        return True
+    return bool(re.search(r"(拆解|规划)", user or "")
+                and _PLAN_JSON_RE.search(user or ""))
+
 
 def _reply_text(payload: dict) -> str:
     """按请求内容决定回什么（规划 → JSON；其它 → 报告正文）。"""
-    blob = json.dumps(payload.get("messages") or [], ensure_ascii=False).lower()
-    wants_json = bool(payload.get("response_format")) or any(
-        h.lower() in blob for h in _PLAN_HINTS)
-    if wants_json and re.search(r"步|step|计划|plan", blob):
+    msgs = payload.get("messages") or []
+    system = ""
+    user = ""
+    for m in msgs:
+        if not isinstance(m, dict):
+            continue
+        role = str(m.get("role") or "")
+        content = str(m.get("content") or "")
+        if role == "system" and not system:
+            system = content
+        elif role != "system":
+            user += "\n" + content
+    if _wants_plan(system, user):
         return json.dumps(PLAN, ensure_ascii=False)
     return REPORT_BODY
 
