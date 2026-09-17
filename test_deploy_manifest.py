@@ -320,6 +320,44 @@ class TestCiSuiteCoverage(unittest.TestCase):
             sorted(on_disk - executed), [],
             "以下测试文件不在 CI 门禁内，会随代码漂移静默失效")
 
+    def test_workflow_yaml_parses(self):
+        """CI 工作流必须能被 YAML 解析。
+
+        实测过的事故：新加的步骤名里写了冒号（`- name: xxx (R1: bound PASS...)`），
+        冒号后带空格让整份 YAML 解析失败——GitHub 照样创建一个 run，但**零作业**、
+        结论 failure，本地跑测试全绿、看不出任何异常。这类"门禁自身坏了"的问题
+        必须由测试拦住，而不是等下一次 CI 红灯再猜。
+        """
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML 不可用")
+        try:
+            doc = yaml.safe_load(CI_YML.read_text(encoding="utf-8"))
+        except Exception as exc:            # noqa: BLE001 - 解析失败就是要报出来
+            self.fail(f".github/workflows/ci.yml 无法解析：{exc}")
+        self.assertIsInstance(doc, dict)
+        jobs = doc.get("jobs") or {}
+        self.assertTrue(jobs, "工作流必须至少有一个作业")
+        for jname, job in jobs.items():
+            self.assertIn("runs-on", job, f"作业 {jname} 缺少 runs-on")
+            for idx, step in enumerate(job.get("steps") or []):
+                has_run = "run" in step
+                has_uses = "uses" in step
+                self.assertEqual(
+                    has_run + has_uses, 1,
+                    f"作业 {jname} 第 {idx} 步必须恰有 run 或 uses 之一：{sorted(step)}")
+
+    def test_workflow_step_names_avoid_unquoted_colons(self):
+        """步骤名/作业名里出现 `: ` 必须加引号（否则就是上一例的解析事故）。"""
+        raw = CI_YML.read_text(encoding="utf-8")
+        offenders = [
+            line.strip() for line in raw.splitlines()
+            if re.match(r"^\s*-?\s*name:\s+[^\"']*: ", line)
+        ]
+        self.assertEqual(offenders, [],
+                         "这些 name 含未加引号的冒号，会让 YAML 解析失败")
+
 
 if __name__ == "__main__":
     unittest.main()
