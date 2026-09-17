@@ -140,6 +140,10 @@ class TTFont:
                 m = self._parse_cmap4(sub)
             elif fmt == 12:
                 m = self._parse_cmap12(sub)
+            elif fmt == 0:
+                m = self._parse_cmap0(sub)
+            elif fmt == 6:
+                m = self._parse_cmap6(sub)
             else:
                 continue
             if not m:
@@ -159,6 +163,40 @@ class TTFont:
                 if gid:
                     merged[cp] = gid
         return merged
+
+    @staticmethod
+    def _parse_cmap0(sub: bytes) -> dict[int, int]:
+        """format 0：256 字节映射（ASCII 常只出现在这类子表里）。
+
+        实测依据：CI 上的 DroidSansFallbackFull.ttf 只有 format 4/12 的 CJK 子表被
+        解析到时，ASCII/数字**一个都取不到**（`glyph_id("1") == 0`），PDF 里数字与
+        英文整段渲染成空白。这类字体的 Latin 覆盖通常放在 Mac Roman(1,0) 的
+        format 0 子表里——不解析它，正文里的数字、英文、文件名就全丢。
+        """
+        out: dict[int, int] = {}
+        for cp in range(256):
+            gid = sub[6 + cp] if len(sub) > 6 + cp else 0
+            if gid:
+                out[cp] = gid
+        return out
+
+    @staticmethod
+    def _parse_cmap6(sub: bytes) -> dict[int, int]:
+        """format 6：裁剪映射（firstCode + 连续 glyphId 数组）。"""
+        try:
+            first = _u16(sub, 6)
+            count = _u16(sub, 8)
+        except Exception:
+            return {}
+        out: dict[int, int] = {}
+        for i in range(count):
+            pos = 10 + i * 2
+            if len(sub) < pos + 2:
+                break
+            gid = _u16(sub, pos)
+            if gid:
+                out[first + i] = gid
+        return out
 
     @staticmethod
     def _parse_cmap4(sub: bytes) -> dict[int, int]:
@@ -576,6 +614,12 @@ class _PDFBuilder:
         self.image_refs: dict[str, int] = {}
         self.font_ref: int | None = None
         self.used_glyphs: dict[int, int] = {}  # gid -> unicode cp
+        # 字形回退：中文字体常常**不含** ASCII/数字（实测 CI 的
+        # DroidSansFallbackFull.ttf：`glyph_id("1") == 0`），那样正文里的数字、
+        # 英文、文件名会整段渲染成空白。缺字形的单字节字符改用 PDF 内置
+        # Helvetica（base-14，不必嵌入、任何阅读器都有）画，保证看得见。
+        self.fallback_ref: int | None = None
+        self.fallback_used = False
         # obj 1 Catalog, obj 2 Pages
         self.objects.append(b"<< /Type /Catalog /Pages 2 0 R >>")
         self.objects.append(b"<< /Type /Pages /Kids [] /Count 0 >>")
@@ -686,36 +730,76 @@ class _PDFBuilder:
             + body + b"\nendstream"
         )
 
+    def _needs_fallback(self, ch: str) -> bool:
+        """该字符是否要交给内置 Helvetica 画（字体缺字形且落在单字节可编码范围）。"""
+        if self.font is None:
+            return False
+        if ord(ch) >= 256:          # 多字节字符 Helvetica 也画不了，仍交给嵌入字体
+            return False
+        return self.font.glyph_id(ch) == 0
+
+    def _text_runs(self, text: str) -> list[tuple[str, bool]]:
+        """把一段文本切成 (片段, 是否走回退字体) 的运行序列。"""
+        runs: list[tuple[str, bool]] = []
+        for ch in text:
+            fb = self._needs_fallback(ch)
+            if runs and runs[-1][1] == fb:
+                runs[-1] = (runs[-1][0] + ch, fb)
+            else:
+                runs.append((ch, fb))
+        return runs
+
     def _text_ops(self, x: float, y: float, text: str, size: float,
                   color: tuple) -> bytes:
         """一段文本的绘制指令（不改游标）。
 
-        抽出来是为了**页脚**：页脚要在所有页都排完之后才能补上（总页数那时才知道），
-        而此时页面内容已经作为字节串存起来了，不能再用会改游标的 `_draw_text`。
+        缺字形的字符走内置 Helvetica：否则它们会以 glyph 0（.notdef）落笔——页面
+        上是空白，抽取文本里是 \\x00（实测 CI 上「第 1 页」变成「第  页」）。
         """
         r, g, b = color
-        if self.font is not None:
-            parts: list[str] = []
-            for ch in text:
-                gid = self.font.glyph_id(ch)
-                if gid:
-                    self.used_glyphs[gid] = ord(ch)
-                parts.append(f"{gid:04X}")
-            encoded = ("<" + "".join(parts) + ">").encode()
-        else:
-            encoded = b"(" + _escape_text(text) + b")"
-        return (
-            f"BT /F1 {size:.2f} Tf {r} {g} {b} rg "
-            f"1 0 0 1 {x:.2f} {y:.2f} Tm "
-        ).encode() + encoded + b" Tj ET\n"
+        ops = b""
+        cur_x = x
+        for run_text, fallback in self._text_runs(text):
+            if fallback:
+                if not self.fallback_used:
+                    self.fallback_used = True
+                ref_name = b"/F2"
+                encoded = b"(" + _escape_text(run_text) + b")"
+            else:
+                if self.font is not None:
+                    parts: list[str] = []
+                    for ch in run_text:
+                        gid = self.font.glyph_id(ch)
+                        if gid:
+                            self.used_glyphs[gid] = ord(ch)
+                        parts.append(f"{gid:04X}")
+                    encoded = ("<" + "".join(parts) + ">").encode()
+                else:
+                    encoded = b"(" + _escape_text(run_text) + b")"
+                ref_name = b"/F1"
+            ops += (
+                b"BT " + ref_name + f" {size:.2f} Tf {r} {g} {b} rg "
+                f"1 0 0 1 {cur_x:.2f} {y:.2f} Tm ".encode()
+            ) + encoded + b" Tj ET\n"
+            cur_x += self._run_width(run_text, size, fallback)
+        return ops
+
+    def _run_width(self, text: str, size: float, fallback: bool) -> float:
+        if fallback or self.font is None:
+            return len(text) * size * 0.55
+        return self.font.text_width(text, size)
 
     def _draw_text(self, x: float, text: str, size: float, color: tuple) -> None:
         self.page_content += self._text_ops(x, self.cursor_y, text, size, color)
 
     def _text_width(self, text: str, size: float) -> float:
-        if self.font is not None:
-            return self.font.text_width(text, size)
-        return len(text) * size * 0.55
+        """文本宽度：缺字形的字符按 Helvetica 的近似宽度计入（与绘制口径一致）。"""
+        if self.font is None:
+            return len(text) * size * 0.55
+        total = 0.0
+        for run_text, fallback in self._text_runs(text):
+            total += self._run_width(run_text, size, fallback)
+        return total
 
     def _footer_ops(self, index: int, total: int) -> bytes:
         """页脚：细线 + 居中页码「第 N 页 / 共 M 页」。
@@ -1034,13 +1118,22 @@ class _PDFBuilder:
             (content + self._footer_ops(idx, total), images)
             for idx, (content, images) in enumerate(self.page_bodies, start=1)
         ]
+        # 有过字形回退就登记内置 Helvetica，并在页面资源里挂成 /F2
+        if self.fallback_used and self.fallback_ref is None:
+            self.fallback_ref = self._add_obj(
+                b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica "
+                b"/Encoding /WinAnsiEncoding >>"
+            )
         self._finalize_to_unicode()
         for content, images in bodies:
             content_ref = self._add_obj(
                 b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n"
                 + content + b"\nendstream"
             )
-            resources = b"<< /Font << /F1 " + str(self.font_ref).encode() + b" 0 R >>"
+            resources = b"<< /Font << /F1 " + str(self.font_ref).encode() + b" 0 R"
+            if self.fallback_ref:
+                resources += b" /F2 " + str(self.fallback_ref).encode() + b" 0 R"
+            resources += b" >>"
             if images:
                 imgs = b" ".join(
                     b"/Im" + str(i).encode() + b" " + str(ref).encode() + b" 0 R"

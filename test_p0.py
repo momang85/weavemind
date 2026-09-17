@@ -5872,21 +5872,32 @@ class TestReportPdfLayout(unittest.TestCase):
         from pypdf import PdfReader
         return [p.extract_text() or "" for p in PdfReader(io.BytesIO(pdf)).pages]
 
-    def test_loaded_font_covers_ascii_and_cjk(self):
-        """排版所依赖的字体必须同时覆盖 ASCII 与中文。
+    def test_digits_render_even_if_font_lacks_latin(self):
+        """中文字体不含 ASCII 时，数字/英文改用内置 Helvetica 画。
 
-        实测缺陷（CI 暴露）：Linux 字体的 cmap 把 ASCII 与 CJK 分在不同子表，而
-        解析时只保留了最后一个命中的子表 → 数字取不到字形，PDF 里「第 1 页」
-        渲染成「第  页」、英文文件名整段消失（抽取文本里是 \\x00）。
-        这条先于排版断言失败，直接指出"字体覆盖不全"而不是让页脚断言报一个
-        看不懂的字符串不匹配。
+        实测缺陷（CI 暴露）：Linux 的 DroidSansFallbackFull.ttf 对 ASCII/数字
+        `glyph_id == 0`，于是「第 1 页」渲染成「第  页」、英文文件名整段消失
+        （抽取文本里是 \\x00）。这里把字体对 ASCII 的映射强制成 0 复现该环境，
+        断言数字仍然可见（走 /F2 内置字体）——**要断言的是"文档能渲染"，
+        而不是"字体恰好覆盖全"**：后者取决于部署环境装了什么字体。
         """
-        import report_pdf
-        font = report_pdf._load_font()
+        import report_pdf as R
+        font = R._load_font()
         if font is None:
-            self.skipTest("环境中无可用中文字体（回退 Helvetica），字形覆盖无从断言")
-        missing = [ch for ch in "0123456789ABZaz/第页" if not font.glyph_id(ch)]
-        self.assertEqual(missing, [], f"字体缺少这些字形：{missing}")
+            self.skipTest("环境中无中文字体（回退 Helvetica），无需回退路径")
+        real_gid = font.glyph_id
+
+        def _gid(ch):
+            return 0 if ord(ch) < 128 else real_gid(ch)
+
+        with mock.patch.object(font, "glyph_id", _gid), \
+                mock.patch.object(R, "_load_font", lambda: font):
+            pdf = R.markdown_to_pdf("# 复核结论\n\n营收 1741 亿元。\n",
+                                    title="复核结论", workspace=None)
+        text = self._text(pdf)[0]
+        self.assertIn("1741", text, "缺 Latin 字形时数字必须回退到内置字体，不能留白")
+        self.assertIn("第 1 页", text)
+        self.assertIn(b"/F2", pdf, "回退字体应登记并挂进页面资源")
 
     def test_page_footer_with_total(self):
         import report_pdf
