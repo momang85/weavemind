@@ -1192,11 +1192,25 @@ def check_number_traceability(
     disclosed: list[dict] = []
     for n in nums:
         hit = None
-        if clean_text and _traceable_in_clean(n, clean_text):
-            hit = "clean_chart_data"
-        elif clean_text and _derived_traceable(n, clean_text):
-            hit = "derived_from_clean"
-        else:
+        if clean_text:
+            # clean_chart_data 命中**同样要过主体归属**：此前它优先接受并直接定案，
+            # 绕过了后面的子句主体筛选——于是"clean 里是 B 公司的数字"也能给
+            # "报告写 A 公司"的数字当来源（S1-1 定位的 P1）。
+            # 修法是让**所有来源通道共用同一套归属校验**，不给结构化源开特例。
+            _clean_kind = ""
+            if _traceable_in_clean(n, clean_text):
+                _clean_kind = "clean_chart_data"
+            elif _derived_traceable(n, clean_text):
+                _clean_kind = "derived_from_clean"
+            if _clean_kind:
+                _cands_clean = [c for c in _candidates(n) if c and c in clean_text] \
+                    or list(_candidates(n))
+                if subject_check and _subject_conflict_for(
+                        n, report, goal, clean_text, _cands_clean):
+                    logger.debug("clean 命中因主体不符被跳过：%s", n.get("value"))
+                else:
+                    hit = _clean_kind
+        if hit is None:
             if n["unit"]:
                 for k, st in src_norm.items():
                     cands = [c for c in _candidates(n) if c and c in st]

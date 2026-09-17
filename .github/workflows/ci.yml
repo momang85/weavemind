@@ -70,6 +70,8 @@ jobs:
         run: python test_review_isolation.py
       - name: Search quality unified (single impl + configurable policy)
         run: python test_search_quality_unified.py
+      - name: "Fact fidelity across layers (S1: subject / currency / unit / clean attribution)"
+        run: python test_fact_fidelity.py
       - name: Portable Redis acquisition (multi-source / budget / offline reuse)
         run: python test_redis_acquisition.py
       - name: US financial chain (SEC fixture / subject extraction / amount rate)

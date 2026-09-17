@@ -266,15 +266,28 @@ class StructuredPipelineMixin:
                         clean = {}
                 if source == "multi_entity":
                     for ent in data.get("companies") or []:
+                        _md = ent.get("metadata") or {}
                         clean = self._merge_structured_financials(
                             clean, ent.get("financials") or [],
                             (ent.get("raw") or {}).get("url", ""),
                             entity=ent.get("name"),
+                            subject=str(ent.get("name") or ""),
+                            subject_id=str(_md.get("ticker") or _md.get("code") or ""),
+                            currency=str(_md.get("currency") or ""),
+                            amount_unit=str(_md.get("unit") or ""),
+                            source_kind=str(_md.get("source") or source),
                         )
                 else:
                     clean = self._merge_structured_financials(
                         clean, data.get("financials") or [],
                         (data.get("raw") or {}).get("url", ""),
+                        # 单实体此前不传主体/币种/单位：主体在进入 clean 这层就丢了，
+                        # 金额单位还会被硬写成"亿元"（SEC 的亿美元被改写成人民币口径）
+                        subject=str(metadata.get("company") or ""),
+                        subject_id=str(metadata.get("ticker") or metadata.get("code") or ""),
+                        currency=str(metadata.get("currency") or ""),
+                        amount_unit=str(metadata.get("unit") or ""),
+                        source_kind=str(metadata.get("source") or source),
                     )
                 clean_path.write_text(
                     json.dumps(clean, ensure_ascii=False, indent=1), encoding="utf-8",
@@ -764,15 +777,45 @@ class StructuredPipelineMixin:
                            task_id, str(exc)[:150])
         return ""
 
+    # 指标 → (字段名, 中文标签, 是否金额)。金额类指标的**单位取自来源声明**
+    # （SEC=亿美元、东财=亿元/亿港元），不能一律写"亿元"。
+    _FIN_METRICS = (
+        ("revenue", "营收", True),
+        ("net_profit", "归母净利润", True),
+        ("gross_profit", "毛利润", True),
+        ("gross_margin", "毛利率", False),
+        ("operating_profit", "经营利润", True),
+        ("total_assets", "总资产", True),
+        ("total_liabilities", "总负债", True),
+        ("operating_cashflow", "经营现金流", True),
+        ("rd_expense", "研发投入", True),
+    )
+    _DEFAULT_AMOUNT_UNIT = "亿元"
+
     @staticmethod
     def _merge_structured_financials(
         clean: dict, financials: list, source_url: str,
         entity: str | None = None,
+        *,
+        subject: str = "",
+        subject_id: str = "",
+        currency: str = "",
+        amount_unit: str = "",
+        source_kind: str = "",
     ) -> dict:
         """把适配器结构化财务行并入 clean_chart_data 的 market_data（去重）。
 
         entity 非空时标签带实体前缀（多实体对比，如“宁德时代2024年营收”），
         避免不同公司同年指标互相覆盖。
+
+        **每层都要保住主体/期间/币种单位**（S1-1）：
+        - `amount_unit` 取自来源声明（`metadata.unit`）：此前对所有市场一律写"亿元"，
+          于是 SEC 的"亿美元"进了 clean 就变成"亿元"——币种被改写（100 亿美元读成人民币）。
+          来源没声明时回落到 `_DEFAULT_AMOUNT_UNIT`，并把 `unit_source` 标成 `default`，
+          让"这是默认值、不是来源事实"可见。
+        - `subject`/`subject_id`/`currency`/`source_kind` 写进每一行：单实体预载此前只把
+          financials 传进来，主体在进入 clean 那一层就丢了，下游（验收/底稿）无从判断
+          "这个数字属于谁"。
         """
         clean = dict(clean or {})
         md = list(clean.get("market_data") or [])
@@ -780,17 +823,16 @@ class StructuredPipelineMixin:
         for f in financials or []:
             if not isinstance(f, dict):
                 continue
-            for key, label, unit in (
-                ("revenue", "营收", "亿元"), ("net_profit", "归母净利润", "亿元"),
-                ("gross_profit", "毛利润", "亿元"), ("gross_margin", "毛利率", "%"),
-                ("operating_profit", "经营利润", "亿元"),
-                ("total_assets", "总资产", "亿元"), ("total_liabilities", "总负债", "亿元"),
-                ("operating_cashflow", "经营现金流", "亿元"),
-                ("rd_expense", "研发投入", "亿元"),
-            ):
+            for key, label, is_amount in StructuredPipelineMixin._FIN_METRICS:
                 v = f.get(key)
                 if v is None:
                     continue
+                if is_amount:
+                    unit = str(amount_unit or StructuredPipelineMixin._DEFAULT_AMOUNT_UNIT)
+                    unit_source = "source" if amount_unit else "default"
+                else:
+                    unit = "%"
+                    unit_source = "metric"
                 # 报告期标签：季报/中报用"2025Q3"这类季度写法，避免与同年年报行
                 # 撞标签被去重掉（此前统一写"2025年"，季报与年报只能留一条），
                 # caliber 也如实标注口径（三季报/中报/一季报/年报）
@@ -802,9 +844,17 @@ class StructuredPipelineMixin:
                     "type": "market_size",
                     "label": label,
                     "value": v, "unit": unit,
+                    "unit_source": unit_source,
                     "year": f.get("year"),
                     "source": source_url,
                     "caliber": _caliber_tag(f),
+                    # 主体/期间/币种随事实走（下游判归属与重算都靠这几项）
+                    "entity": str(subject or entity or ""),
+                    "entity_id": str(subject_id or ""),
+                    "currency": str(currency or ""),
+                    "period": str(_period_label or ""),
+                    "period_type": str(f.get("report_type") or ""),
+                    "source_kind": str(source_kind or ""),
                 }
                 k = (row["label"], row["value"], row["unit"])
                 if k not in seen:
@@ -825,15 +875,27 @@ class StructuredPipelineMixin:
             clean = json.loads(clean_path.read_text(encoding="utf-8"))
             if str(fin.get("source") or "") == "multi_entity":
                 for ent in fin.get("companies") or []:
+                    _md = ent.get("metadata") or {}
                     clean = self._merge_structured_financials(
                         clean, ent.get("financials") or [],
                         (ent.get("raw") or {}).get("url", ""),
                         entity=ent.get("name"),
+                        subject=str(ent.get("name") or ""),
+                        subject_id=str(_md.get("ticker") or _md.get("code") or ""),
+                        currency=str(_md.get("currency") or ""),
+                        amount_unit=str(_md.get("unit") or ""),
+                        source_kind=str(_md.get("source") or "multi_entity"),
                     )
             else:
+                _md = fin.get("metadata") or {}
                 clean = self._merge_structured_financials(
                     clean, fin.get("financials") or [],
                     (fin.get("raw") or {}).get("url", ""),
+                    subject=str(_md.get("company") or ""),
+                    subject_id=str(_md.get("ticker") or _md.get("code") or ""),
+                    currency=str(_md.get("currency") or ""),
+                    amount_unit=str(_md.get("unit") or ""),
+                    source_kind=str(_md.get("source") or ""),
                 )
             clean_path.write_text(
                 json.dumps(clean, ensure_ascii=False, indent=1), encoding="utf-8",
