@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import csv
 import io
+import json
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -21,6 +24,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 import facts as F  # noqa: E402
+import workspace as ws_mod  # noqa: E402
 import working_paper as W  # noqa: E402
 
 # ── 冻结基准输入（合成；两年度 × 三核心指标）────────────────
@@ -233,6 +237,116 @@ class TestPaperExport(unittest.TestCase):
         self.assertGreaterEqual(len(body), 6 + 3, "明细 6 行 + 同比 3 行")
         self.assertTrue(any("公式" in r[0] or "formula" in r[0] for r in rows if r),
                         "派生段应带公式列")
+
+
+# ── 真实数据落盘快照（2026-09-17 东财公开接口实抓，冻结为夹具）──
+# 这是**真实抓取的快照**（非合成），用于在 CI 里回归"真实数据形状"下的链路；
+# 数值取自东财 datacenter 公开接口的当年年报，抓取时间与 URL 见
+# docs/evidence/real_data_chain_20260917.md。真实网络抓取本身不进 CI（网络不可控）。
+REAL_SNAPSHOT = {
+    "financials": [
+        {"year": 2023, "report_type": "年报", "revenue": 1505.6, "net_profit": 747.34,
+         "operating_cashflow": 665.93},
+        {"year": 2024, "report_type": "年报", "revenue": 1741.44, "net_profit": 862.28,
+         "operating_cashflow": 924.64},
+    ],
+    "metadata": {"source": "eastmoney_ashare", "company": "贵州茅台",
+                 "stock_code": "600519", "currency": "CNY", "unit": "亿元",
+                 "period": "年报", "latest_report": "2025-12-31"},
+    "raw": {"url": "https://datacenter-web.eastmoney.com/api/data/v1/get（实抓，见证据文件）",
+            "text": "[real snapshot trimmed]"},
+}
+
+
+class TestRealSnapshotChain(unittest.TestCase):
+    """真实抓取快照：链路在真实数据形状下同样成立，且数值可重算。"""
+
+    def setUp(self):
+        # 契约要用**快手**的公司（复用合成夹具的请求会被主体校验正确拦下）
+        req = F.parse_research_request(
+            "研究贵州茅台 2023 与 2024 两个年度的营业收入、归母净利润、"
+            "经营活动现金流净额，合并报表口径，数据截至 2025-04-30",
+            company="贵州茅台", company_id="600519", market="cn",
+            caliber="合并", as_of="2025-04-30")
+        self.facts = F.facts_from_financials(REAL_SNAPSHOT)
+        self.paper = W.build_working_paper(self.facts, req)
+
+    def test_subject_identifier_and_units_from_real_payload(self):
+        self.assertTrue(self.facts)
+        for f in self.facts:
+            self.assertEqual(f.entity, "贵州茅台")
+            self.assertEqual(f.entity_id, "600519", "稳定标识取自适配器 metadata")
+            self.assertEqual(f.currency, "CNY")
+            self.assertEqual(f.unit, "亿元")
+            self.assertEqual(f.period_type, "年报")
+
+    def test_combos_and_yoy_recomputable_on_real_numbers(self):
+        self.assertEqual(self.paper.completeness["present"], 6,
+                         self.paper.completeness)
+        yoy = {d["metric"]: d["value"] for d in self.paper.derived}
+        self.assertAlmostEqual(yoy["revenue_yoy"],
+                               round((1741.44 - 1505.6) / 1505.6 * 100, 2), places=2)
+        self.assertAlmostEqual(yoy["operating_cashflow_yoy"],
+                               round((924.64 - 665.93) / 665.93 * 100, 2), places=2)
+
+    def test_no_gaps_when_request_supplies_caliber_and_as_of(self):
+        self.assertEqual([g for g in self.paper.gaps if g["kind"] == "fact"], [])
+        self.assertEqual(self.paper.problems, [], [p.detail for p in self.paper.problems])
+        self.assertTrue(self.paper.ok)
+
+
+class TestWorkingPaperExport(unittest.TestCase):
+    """底稿要真的落进任务产物，缺口要写进交付物（不是只留在内存里）。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_wp_"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self._old = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(self.tmp))
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", self._old)
+
+    def _write_fin(self, tid: str, payload: dict) -> None:
+        # 必须与 write_working_paper 用**同一个 project 作用域**定位目录，
+        # 否则两边找的不是同一个地方（无 project 时回退旧版平铺路径）
+        proj = ws_mod.task_project_dir(tid, "default")
+        proj.mkdir(parents=True, exist_ok=True)
+        (proj / "financials.json").write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+    def test_files_written_and_gap_note_reflects_missing(self):
+        import working_paper_export as WPX
+        tid = "wp-1"
+        # 缺经营现金流 → 应产出缺口，并写进交付物可读段落
+        payload = {
+            "financials": [
+                {"year": 2023, "report_type": "年报", "revenue": 1505.6,
+                 "net_profit": 747.34},
+                {"year": 2024, "report_type": "年报", "revenue": 1741.44,
+                 "net_profit": 862.28},
+            ],
+            "metadata": REAL_SNAPSHOT["metadata"],
+            "raw": {"url": "https://example.invalid/x", "text": "snapshot"},
+        }
+        self._write_fin(tid, payload)
+        res = WPX.write_working_paper(
+            tid, "研究贵州茅台 2023 与 2024 两个年度的营业收入、归母净利润、"
+                 "经营活动现金流净额，合并报表口径，数据截至 2025-04-30",
+            project="default")
+        self.assertTrue(res["ok"], res)
+        proj = ws_mod.task_project_dir(tid, "default")
+        self.assertTrue((proj / WPX.PAPER_JSON).exists(), "底稿 JSON 必须落盘")
+        self.assertTrue((proj / WPX.PAPER_CSV).exists(), "底稿 CSV 必须落盘")
+        saved = json.loads((proj / WPX.PAPER_JSON).read_text(encoding="utf-8"))
+        self.assertFalse(saved["ok"], "缺必需指标时底稿不得判达成")
+        note = WPX.gaps_note(res)
+        self.assertIn("底稿缺口与待核验项", note)
+        self.assertIn("经营活动现金流", note, "缺口要具体到指标")
+
+    def test_no_financials_means_no_paper(self):
+        import working_paper_export as WPX
+        res = WPX.write_working_paper("wp-2", "研究某公司", project="default")
+        self.assertFalse(res["ok"])
+        self.assertTrue(res.get("skipped"), "没有结构化财务时不产出空底稿冒充已复核")
 
 
 if __name__ == "__main__":

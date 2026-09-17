@@ -5546,6 +5546,17 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     _store0.adopt(_v0, reason="收尾补齐：快速路径/单步任务未经采纳")
         except Exception as exc:
             logger.warning("收尾补齐选中版本失败（task=%s）：%s", task_id, str(exc)[:120])
+        # S1：可重算底稿与缺口表落进任务产物；**缺证据项要写进交付物**，
+        # 不能只留在工作区文件里（报告不得据此声称已达成）
+        try:
+            from working_paper_export import gaps_note, write_working_paper
+            _wp = write_working_paper(task_id, goal, project=project)
+            self._working_paper = _wp
+            _wp_note = gaps_note(_wp)
+            if _wp_note:
+                delivery = delivery + "\n\n" + _wp_note
+        except Exception as exc:
+            logger.warning("底稿产出接入失败（task=%s）：%s", task_id, str(exc)[:120])
         # M0-b：评审状态写进交付物本体（不只留日志）——降级交付物必须一眼看出需人工复核
         delivery = self._with_review_note(task_id, delivery)
         # M0-e：预算耗尽的运行要说清"为什么没做完"（不是失败于内容，而是没额度了）
