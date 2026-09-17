@@ -161,6 +161,61 @@ class TestReviewEditEndpoint(_Base):
         _, status = h.last
         self.assertEqual(status, 409, "终态任务不得改写正文")
 
+    def test_revision_reaches_delivered_report(self):
+        """改版必须同步进**交付正文**（页面/导出/PDF 读的就是它）。
+
+        实机反例（任务 ui-01efce721a）：接口返回 ok、版本库也有新版本且绑了新验收，
+        但导出的 Markdown 字节与改版前完全一样——修订只落在版本库里，
+        用户改完看到的还是旧文。
+        """
+        import task_state
+        import web_ui
+        tid = "s2-edit-delivery"
+        store, old = self._seed(tid)
+        delivered = "## 交付说明\n\n步骤 5/5\n\n---\n\n" + old.body
+        seen = {}
+
+        def fake_update(t, report, db_path=None):
+            seen["tid"], seen["report"] = t, report
+            return True
+
+        with mock.patch.object(task_state, "read_task",
+                               return_value={"status": "SUCCESS", "goal": "目标"}), \
+                mock.patch.object(task_state, "update_report", side_effect=fake_update), \
+                mock.patch.object(web_ui, "_get_task_report_data",
+                                  return_value={"report": delivered}):
+            h = _Handler(f"/api/task/{tid}/review/edit")
+            web_ui._post_task_review_edit(
+                h, h.path, {"find": "1741 亿元", "replace": "1741.44 亿元"},
+                {"user": "admin", "role": "admin"})
+        payload, status = h.last
+        self.assertEqual(status, 200, payload)
+        self.assertTrue(payload.get("delivery_updated"),
+                        "修订没进交付正文 → 用户看到的仍是旧文")
+        self.assertEqual(seen.get("tid"), tid)
+        self.assertIn("1741.44 亿元", seen["report"])
+        self.assertIn("## 交付说明", seen["report"], "交付说明不能被改版丢掉")
+        self.assertNotIn("1741 亿元。", seen["report"], "旧数字不得留在交付正文里")
+
+    def test_unmappable_revision_does_not_touch_delivery(self):
+        """交付正文里找不到被修订的那版正文时**不猜**：如实返回未同步。"""
+        import task_state
+        import web_ui
+        tid = "s2-edit-unmappable"
+        self._seed(tid)
+        with mock.patch.object(task_state, "read_task",
+                               return_value={"status": "SUCCESS", "goal": "目标"}), \
+                mock.patch.object(task_state, "update_report") as m, \
+                mock.patch.object(web_ui, "_get_task_report_data",
+                                  return_value={"report": "另一份完全无关的交付正文"}):
+            h = _Handler(f"/api/task/{tid}/review/edit")
+            web_ui._post_task_review_edit(h, h.path, {"body": "修订后的正文"},
+                                         {"user": "admin", "role": "admin"})
+        payload, status = h.last
+        self.assertEqual(status, 200, payload)
+        self.assertFalse(payload.get("delivery_updated"))
+        m.assert_not_called()
+
 
 class TestWorkingPaperExportAndDownload(_Base):
     """底稿要出现在导出清单里，并且能下载（缺则 404，不编空底稿）。"""

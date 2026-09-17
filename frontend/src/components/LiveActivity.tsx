@@ -2,6 +2,7 @@ import { memo, useEffect, useRef, useState } from 'react'
 
 import { useTaskStore } from '../stores/useTaskStore'
 import { LogEntry } from '../stores/types'
+import { formatLocalClock } from '../lib/format'
 import { Pause, Play, Search, FileText, Code2, PackageCheck, Brain, Eye } from 'lucide-react'
 
 
@@ -28,8 +29,11 @@ const LogRow = memo(function LogRow({ entry }: { entry: LogEntry }) {
 
   return (
     <div className={`flex items-start gap-2 px-3 h-full border-l-2 ${cfg.border} ${cfg.bg}`}>
-        <span className="text-xs text-slate-600 font-mono shrink-0 w-16 mt-0.5 tabular-nums whitespace-nowrap overflow-hidden">
-          {entry.timestamp && entry.timestamp.includes(':') ? entry.timestamp.slice(-8) : entry.timestamp.slice(0, 8)}
+        <span
+          className="text-xs text-slate-600 font-mono shrink-0 w-24 mt-0.5 tabular-nums whitespace-nowrap overflow-hidden"
+          title={entry.timestamp ? String(entry.timestamp) : undefined}
+        >
+          {formatLocalClock(entry.timestamp)}
         </span>
         {IconComp ? (
           <IconComp className="w-3.5 h-3.5 text-slate-400 shrink-0 mt-0.5" />

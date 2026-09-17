@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -193,6 +194,87 @@ class TestWebuiProjectionFirst(unittest.TestCase):
         """内存已降级为缓存：stale 豁免不得再以内存 RUNNING 为真源。"""
         src = Path("web_ui.py").read_text(encoding="utf-8")
         self.assertNotIn('str(st.get("status") or "").upper() == "RUNNING"', src)
+
+    def test_log_timestamp_fallback_is_iso_not_bare_clock(self):
+        """没带 timestamp 的推送要落成 UTC ISO，而不是裸 `HH:MM:SS`。
+
+        裸时钟取的是**服务器**本地时间；实测服务器时区为 UTC 时，同一列日志一半
+        渲染成本地时间、一半渲染成 UTC（真实页面：21:56 与 13:56 交替出现）。
+        """
+        import web_ui
+        for ptype in ("log", "warning"):
+            existing = {}
+            web_ui._merge_progress_message(existing, {
+                "type": ptype, "payload": {"message": "阶段停滞", "agent": "orchestrator"}})
+            ts = str(existing["logs"][-1]["timestamp"])
+            self.assertRegex(ts, r"^\d{4}-\d{2}-\d{2}T", f"{ptype} 的时间戳应为 ISO：{ts}")
+            self.assertIsNotNone(web_ui._parse_utc_ts(ts), ts)
+
+
+class TestElapsedTimezone(unittest.TestCase):
+    """elapsed_sec 的口径：任务时间戳是 UTC，显示口径不能擅自加本地偏移。
+
+    实测反例（真实运行中任务）：创建于 13:29:14Z、已运行 2 分钟，接口返回
+    elapsed_sec=28854（≈8 小时）——因为 SQLite 的朴素 UTC 串被 `.timestamp()`
+    按本地时区解释，UTC+8 上凭空多出一天里的 8 小时。
+    """
+
+    def setUp(self):
+        import web_ui
+        self.web_ui = web_ui
+        # 固定"现在"，避免依赖真实时钟
+        self.now = datetime(2026, 9, 17, 13, 31, 14, tzinfo=timezone.utc)
+
+    def _elapsed(self, task):
+        import web_ui
+        captured = {}
+
+        class _H:
+            def _json(self, data, code=200, extra_headers=None):
+                captured.update(data=data, code=code)
+
+        with mock.patch.object(web_ui, "_task_results", {}), \
+                mock.patch("task_state.merge_projection", return_value=task), \
+                mock.patch.object(web_ui.time, "time", return_value=self.now.timestamp()):
+            web_ui._get_task_page(_H(), "/task/t-tz")
+        return captured["data"].get("elapsed_sec")
+
+    def test_sqlite_naive_utc_not_offset(self):
+        """SQLite `CURRENT_TIMESTAMP` 写法（朴素 UTC）：2 分钟就是 2 分钟。"""
+        got = self._elapsed({"task_id": "t-tz", "status": "RUNNING",
+                             "created_at": "2026-09-17 13:29:14"})
+        self.assertIsNotNone(got)
+        self.assertAlmostEqual(got, 120.0, delta=1.0)
+
+    def test_iso_with_offset_same_result(self):
+        """内存快照写法（带 +00:00）：与朴素 UTC 同解。"""
+        got = self._elapsed({"task_id": "t-tz", "status": "RUNNING",
+                             "created_at": "2026-09-17T13:29:14.000000+00:00"})
+        self.assertAlmostEqual(got, 120.0, delta=1.0)
+
+    def test_missing_or_broken_created_at_is_unknown_not_zero(self):
+        """拿不到 created_at 时是 None（前端显示未知），不是 0。"""
+        self.assertIsNone(self._elapsed({"task_id": "t-tz", "status": "RUNNING"}))
+        self.assertIsNone(self._elapsed({"task_id": "t-tz", "status": "RUNNING",
+                                         "created_at": "昨天"}))
+
+    def test_finished_task_uses_completed_at(self):
+        got = self._elapsed({"task_id": "t-tz", "status": "SUCCESS",
+                             "created_at": "2026-09-17 13:20:00",
+                             "completed_at": "2026-09-17 13:25:00"})
+        self.assertAlmostEqual(got, 300.0, delta=1.0)
+
+    def test_helper_parses_both_shapes_and_refuses_garbage(self):
+        h = self.web_ui._parse_utc_ts
+        self.assertAlmostEqual(h("2026-09-17 13:29:14"),
+                               datetime(2026, 9, 17, 13, 29, 14,
+                                        tzinfo=timezone.utc).timestamp(), places=6)
+        self.assertAlmostEqual(h("2026-09-17T13:29:14Z"),
+                               datetime(2026, 9, 17, 13, 29, 14,
+                                        tzinfo=timezone.utc).timestamp(), places=6)
+        self.assertIsNone(h(None))
+        self.assertIsNone(h(""))
+        self.assertIsNone(h("not-a-time"))
 
 
 if __name__ == "__main__":

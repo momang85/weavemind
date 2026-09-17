@@ -253,6 +253,24 @@ def _iso_utc(s):
         return s
     return s.replace(" ", "T") + "Z"
 
+def _parse_utc_ts(value):
+    """时间字段 → epoch 秒；**朴素时间按 UTC 解释**，解析不了返回 None。
+
+    任务时间戳有两种写法：内存快照里是 `_now_iso()`（带 +00:00 偏移），
+    数据库行是 SQLite `CURRENT_TIMESTAMP`（朴素 UTC `YYYY-MM-DD HH:MM:SS`）。
+    对后者直接 `.timestamp()` 会按**本地时区**解释，UTC+8 上凭空多出 8 小时
+    （实测已运行 2 分钟的任务 elapsed_sec=28854）。
+    """
+    if value is None or value == "":
+        return None
+    try:
+        dt = datetime.fromisoformat(str(value).strip().replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
 def _load_shares() -> dict:
     """读取分享映射，并顺带清理过期 token；文件缺失/损坏时返回空映射。"""
     try:
@@ -872,7 +890,7 @@ def _merge_progress_message(existing: dict, data: dict) -> None:
             # 消息（订阅与快照读取之间存在窗口），同内容末条重复时跳过
             entry = {
                 "id": len(logs),
-                "timestamp": payload.get("timestamp") or time.strftime("%H:%M:%S"),
+                "timestamp": payload.get("timestamp") or _now_iso(),
                 "agent": payload.get("agent", ""),
                 "type": payload.get("type", "info"),
                 "message": payload.get("message", ""),
@@ -895,7 +913,7 @@ def _merge_progress_message(existing: dict, data: dict) -> None:
             logs = existing.get("logs", [])
             entry = {
                 "id": len(logs),
-                "timestamp": payload.get("timestamp") or time.strftime("%H:%M:%S"),
+                "timestamp": payload.get("timestamp") or _now_iso(),
                 "agent": payload.get("agent", "orchestrator"),
                 "type": "warning",
                 "message": payload.get("message", ""),
@@ -4154,19 +4172,13 @@ def _get_task_page(self, p):
             # elapsed_sec：无 created_at（旧任务/字段缺失）时为 None，由前端显示"未知"。
             elapsed = None
             try:
-                from datetime import datetime as _dt
-                _created = data.get("created_at")
-                if _created:
-                    _fmt = "%Y-%m-%d %H:%M:%S.%f" if "." in str(_created) else "%Y-%m-%d %H:%M:%S"
-                    _c = _dt.strptime(str(_created), _fmt).timestamp()
+                _c = _parse_utc_ts(data.get("created_at"))
+                if _c is not None:
                     _end = None
                     if str(data.get("status") or "").upper() not in (
                             "RUNNING", "PENDING", "QUEUED"):
-                        _fin = data.get("completed_at") or data.get("updated_at")
-                        if _fin:
-                            _ffmt = ("%Y-%m-%d %H:%M:%S.%f" if "." in str(_fin)
-                                     else "%Y-%m-%d %H:%M:%S")
-                            _end = _dt.strptime(str(_fin), _ffmt).timestamp()
+                        _end = _parse_utc_ts(data.get("completed_at")
+                                             or data.get("updated_at"))
                     elapsed = max(0.0, (_end or time.time()) - _c)
             except Exception:
                 elapsed = None
@@ -4185,21 +4197,27 @@ def _get_task_page(self, p):
                                     "degraded_reason": _review.get("degraded_reason") or ""}
                 _store_path = _ws / "report_versions.json"
                 if _store_path.exists():
-                    from report_version import DELIVERY_VERIFIED, VersionStore
+                    from report_version import DELIVERY_VERIFIED, VersionStore, verified_delivery
                     _store = VersionStore(_ws, tid)
                     _v = _store.adopted()
                     if _v is not None:
+                        # 状态与理由都走**唯一谓词**（页面/导出/manifest 共用）：
+                        # 此前理由直接抄"最后一次交付记录"，人工改版后验收已变，
+                        # 理由却还是收尾时那句（同一次读取里结论与理由互相矛盾）。
+                        _status, _why = verified_delivery(_v, _v.body)
                         _dels = _store.deliveries()
                         _last = _dels[-1] if _dels else {}
-                        _is_draft = not (_last.get("ok") if _last else True)
+                        if (_status == DELIVERY_VERIFIED and _last
+                                and not _last.get("ok")):
+                            _status = "draft"
+                            _why = str(_last.get("reason") or "收尾时已判为未验收草稿")
                         delivery = {
                             "version_id": _v.identity_id(),
                             "acceptance_overall": _v.acceptance_overall(),
-                            "draft": bool(_is_draft),
-                            "draft_reason": (str(_last.get("reason") or "")
-                                             if _is_draft else ""),
-                            "verified": bool(not _is_draft
-                                             and _v.acceptance_overall() == "pass"),
+                            "draft": _status != DELIVERY_VERIFIED,
+                            "draft_reason": ("" if _status == DELIVERY_VERIFIED
+                                             else str(_why)),
+                            "verified": _status == DELIVERY_VERIFIED,
                         }
             except Exception as exc:
                 logger.warning("状态补充字段读取失败（task=%s）：%s", tid, str(exc)[:120])
@@ -4557,6 +4575,34 @@ def _post_task_review_edit(self, p, body, admin):
             store.bind_acceptance(verdict)
         except Exception as exc:
             verdict = {"error": str(exc)[:200], "overall": ""}
+        # 修订要进**交付正文**：页面/导出/PDF 都读任务的 report 字段，
+        # 只写版本库的话用户改完看到的还是旧文（实机：改版返回 ok，导出仍无修订）。
+        # 映射不上（交付文档里找不到被替换的那版正文）就不动交付，如实标记未更新。
+        delivery_updated = False
+        try:
+            _delivered = (_get_task_report_data(tid) or {}).get("report") or ""
+            if _delivered and current.body and current.body in _delivered:
+                _new_delivered = _delivered.replace(current.body, new_body, 1)
+                from task_state import update_report as _update_report
+                delivery_updated = bool(_update_report(tid, _new_delivered))
+                if delivery_updated:
+                    with _task_lock:
+                        _mem = _task_results.get(tid)
+                        if isinstance(_mem, dict):
+                            for _k in ("report", "final_report"):
+                                if _k in _mem:
+                                    _mem[_k] = _new_delivered
+                    try:
+                        _snap = task_state.read_snapshot(tid) or {}
+                        if isinstance(_snap, dict):
+                            for _k in ("report", "final_report"):
+                                if _k in _snap:
+                                    _snap[_k] = _new_delivered
+                            task_state.write_snapshot(tid, _snap)
+                    except Exception:
+                        pass
+        except Exception as exc:
+            logger.warning("修订未写进交付正文（task=%s）：%s", tid, str(exc)[:160])
         refreshed = store.adopted() or nv
         return self._json({
             "status": "ok", "task_id": tid,
@@ -4565,6 +4611,7 @@ def _post_task_review_edit(self, p, body, admin):
             "acceptance": {"overall": str((verdict or {}).get("overall") or ""),
                            "gaps": (verdict or {}).get("gaps") or []},
             "note": "修订版是新版本：旧验收与旧批准不自动迁移，须重新验证通过",
+            "delivery_updated": delivery_updated,
             "needs_reverify": bool(
                 not (verdict or {}).get("overall")
                 or str((verdict or {}).get("overall")) != "pass"),

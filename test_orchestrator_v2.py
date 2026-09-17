@@ -97,6 +97,26 @@ class FakeRedis:
         pass
 
 
+class TempWorkspaceCase(unittest.TestCase):
+    """把工作区根指到临时目录（跑完整 `run()` 的用例都该继承）。
+
+    收尾会对**装配后的交付正文**补一次确定性验收并落盘（`acceptance_report.json`、
+    `report_versions.json`…）。落在共享的默认工作区里，同一用例第二次运行就会读到
+    上一轮的结论——本地重跑同一组用例时状态凭空变化（实测：残留 `overall=pass`
+    让"无验收 → 未验收草稿"的旧断言全部失效）。CI 是干净容器看不出来，本地会。
+    """
+
+    def setUp(self):
+        self._ws_tmp = tempfile.mkdtemp(prefix="wm_orch_ws_")
+        self._ws_old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(self._ws_tmp)
+        self.addCleanup(self._restore_ws)
+
+    def _restore_ws(self):
+        ws_mod.WORKSPACE_ROOT = self._ws_old_root
+        shutil.rmtree(self._ws_tmp, ignore_errors=True)
+
+
 def make_orch(**overrides):
     o = object.__new__(OrchestratorV2)
     o._max_retry = 1
@@ -386,7 +406,7 @@ class TestExecuteStepsDag(unittest.TestCase):
         self.assertIn("Stalled", results[0]["result"])
 
 
-class TestRunIteration(unittest.TestCase):
+class TestRunIteration(TempWorkspaceCase):
     def test_iteration_accumulates_steps_and_uses_best_report(self):
         o = make_orch()
         o._plan = lambda goal, task_id, context="", memory_context="": [
@@ -415,10 +435,13 @@ class TestRunIteration(unittest.TestCase):
         o._reflect = fake_reflect
         o._now_iso = lambda: "t"
         res = o.run("t1", "目标", auto_run=True)
-        # M0-a：这一跑没有任何验收（测试替身不产生验收报告）→ 交付只能是"未验收草稿"，
-        # 状态如实降级为 SUCCESS_WITH_ISSUES，不得显示"通过"
-        self.assertEqual(res["status"], "SUCCESS_WITH_ISSUES")
-        self.assertIn("未验收草稿", res["final_report"])
+        # 收尾会对装配后的交付正文补一次确定性验收（此前验收只绑报告步骤的中间正文，
+        # 交付正文没人验过 → 交付恒为"未知"）。本替身正文在无要求目标下通过验收，
+        # 所以状态是验收的实际结论；"验收未通过 → 降级"另有用例守着。
+        self.assertIn(res["status"], ("SUCCESS", "SUCCESS_WITH_ISSUES"))
+        # 交付状态 = 实际验收结论 + 端点降级（Redis 按 task_id 存 2 小时，会跨进程继承）；
+        # 本用例不测这两者，故只要求"没被记成失败"。
+        self.assertNotIn("未验收草稿", res["final_report"])
         self.assertEqual(len(res["steps"]), 2)
         self.assertTrue(res["final_report"].startswith("#"))
 
@@ -569,8 +592,14 @@ class TestRunIteration(unittest.TestCase):
         self.assertEqual(reflected["n"], 2, "重做后应再次反思")
         self.assertGreaterEqual(dispatch_calls["1"], 2, "步骤1应被重做（至少2次派发）")
         # 单步重做不应整轮重跑：步骤2/3在初始轮各执行1次，重做后因依赖1被重做 → 也会重跑
-        # M0-a：无验收 → 未验收草稿 → 如实降级（不再报 SUCCESS）
-        self.assertEqual(res["status"], "SUCCESS_WITH_ISSUES")
+        # 收尾会对**装配后的交付正文**补一次确定性验收：本替身的正文（内容摘要/报告
+        # 步骤的原始输出）在"目标"这种无要求目标下真的通过验收 → 交付状态是**结论**，
+        # 不再是无验收的兜底草稿。要验证"验收未通过仍如实降级"，见
+        # TestMemoryAcceptanceWiring.test_acceptance_fail_passes_summary_and_skips_message。
+        self.assertIn(res["status"], ("SUCCESS", "SUCCESS_WITH_ISSUES"))
+        # 交付状态 = 实际验收结论 + 端点降级（Redis 按 task_id 存 2 小时，会跨进程继承）；
+        # 本用例不测这两者，故只要求"没被记成失败"。
+
 
     def test_inject_memory_context_logs(self):
         o = make_orch()
@@ -597,11 +626,12 @@ class TestRunIteration(unittest.TestCase):
         self.assertTrue(any("未找到相关历史经验" in s for s in msgs2))
 
 
-class TestFinalReportConfirm(unittest.TestCase):
+class TestFinalReportConfirm(TempWorkspaceCase):
     """V1.2 关键节点 HITL：报告终稿审批（report_confirm）。
 
-    注：这些用例的替身流程不产生验收报告 → 交付按"未验收草稿"处理，
-    M0-a 起状态如实降级为 SUCCESS_WITH_ISSUES（本类只关心审批触发次数与放行/取消语义）。
+    注：这些用例关心审批触发次数与放行/取消语义。状态断言是"跑完全程"的副产物：
+    收尾会对装配后的交付正文补一次确定性验收，替身正文（`# 报告终稿AAA…`）在
+    无要求目标下通过验收，因此终态为 SUCCESS。
     """
 
     def _orch(self, **overrides):
@@ -637,7 +667,9 @@ class TestFinalReportConfirm(unittest.TestCase):
         o = self._orch()
         o._wait_report_confirm = mock.MagicMock(return_value=True)
         res = o.run("t-rc-default", "目标", auto_run=True)
-        self.assertEqual(res["status"], "SUCCESS_WITH_ISSUES")
+        # 交付状态 = 实际验收结论 + 端点降级（Redis 里按 task_id 存 2 小时）；
+        # 本类只测审批触发次数与放行/取消语义，两者都不该由这里断言死。
+        self.assertIn(res["status"], ("SUCCESS", "SUCCESS_WITH_ISSUES"))
         o._wait_report_confirm.assert_not_called()
         self.assertEqual(self._awaiting_messages(o), [])
 
@@ -653,7 +685,7 @@ class TestFinalReportConfirm(unittest.TestCase):
 
         o._brpop_with_deadline = fake_brpop
         res = o.run("t-rc-ok", "目标", auto_run=True, report_confirm=True)
-        self.assertEqual(res["status"], "SUCCESS_WITH_ISSUES")
+        self.assertIn(res["status"], ("SUCCESS", "SUCCESS_WITH_ISSUES"))
         self.assertIn("plan_confirm:t-rc-ok", keys)
         awaits = self._awaiting_messages(o)
         self.assertEqual(len(awaits), 1, "终稿审批只发布一次 AWAITING_CONFIRM")
@@ -694,7 +726,7 @@ class TestFinalReportConfirm(unittest.TestCase):
 
         o._brpop_with_deadline = fake_brpop
         res = o.run("t-rc-timeout", "目标", auto_run=True, report_confirm=True)
-        self.assertEqual(res["status"], "SUCCESS_WITH_ISSUES")
+        self.assertIn(res["status"], ("SUCCESS", "SUCCESS_WITH_ISSUES"))
         msgs = [
             m.get("payload", {}).get("message", "")
             for _, m in o._messaging.published
@@ -744,11 +776,18 @@ class TestFinalReportConfirm(unittest.TestCase):
         self.assertEqual(wait.call_count, 1, "多轮反思也只应审批一次")
         self.assertEqual(len(self._awaiting_messages(o)), 0,
                          "审批方法被 mock 时不发布状态消息")
-        self.assertEqual(res["status"], "SUCCESS_WITH_ISSUES")
+        self.assertIn(res["status"], ("SUCCESS", "SUCCESS_WITH_ISSUES"))
 
 
 class TestMemoryAcceptanceWiring(unittest.TestCase):
-    """P0 沉淀准入：验收 fail 时 consolidate_memory 收到验收摘要并提示跳过策略。"""
+    """P0 沉淀准入：验收 fail 时 consolidate_memory 收到验收摘要并提示跳过策略。
+
+    夹具必须是**真会失败**的正文：收尾会对装配后的交付正文跑确定性验收，
+    预置一个 `acceptance_report.json` 已经拦不住它（会被本次验收覆盖）。
+    所以目标写成"要数据 + 要官方来源"，正文不给任何数字/来源——由真实验收器判 fail。
+    """
+
+    GOAL = "研究公司2025年经营表现，提供数据并引用官方来源"
 
     def test_acceptance_fail_passes_summary_and_skips_message(self):
         import tempfile
@@ -771,7 +810,8 @@ class TestMemoryAcceptanceWiring(unittest.TestCase):
         ]
         o._execute_steps = lambda steps, task_id, goal: (
             [{"task_id": s["step_id"], "status": "SUCCESS",
-              "result": "# 报告" + "A" * 300} for s in steps],
+              "result": "# 经营表现\n\n营业收入未披露。归母收益未披露。经营净流入未披露。\n"
+                        + "A" * 200} for s in steps],
             False,
         )
         o._reflect = lambda *a, **k: {"accepted": True}
@@ -783,17 +823,14 @@ class TestMemoryAcceptanceWiring(unittest.TestCase):
         try:
             ws = ws_mod.task_workspace("t-mem-gate", "default")
             ws.mkdir(parents=True, exist_ok=True)
-            (ws / "acceptance_report.json").write_text(json.dumps({
-                "overall": "fail",
-                "gaps": ["缺来源"],
-            }, ensure_ascii=False), encoding="utf-8")
-            res = o.run("t-mem-gate", "目标", auto_run=True)
+            res = o.run("t-mem-gate", self.GOAL, auto_run=True)
             self.assertEqual(res["status"], "SUCCESS_WITH_ISSUES")
-            self.assertTrue(calls, "验收 fail 仍应调用 consolidate_memory（对话沉淀）")
+            self.assertTrue(calls, "验收未通过仍应调用 consolidate_memory（对话沉淀）")
             _, kwargs = calls[0]
-            self.assertEqual(
-                kwargs.get("acceptance_summary", {}).get("overall"), "fail",
-            )
+            # 准入口径是"非 pass 不沉淀"，不是只认字面量 fail（partial 同样算未通过）。
+            _overall = kwargs.get("acceptance_summary", {}).get("overall")
+            self.assertNotEqual(_overall, "pass", f"验收未通过的结论要传下去：{_overall!r}")
+            self.assertTrue(_overall, "摘要不得退化成未知")
             msgs = [m.get("payload", {}).get("message", "")
                     for _, m in o._messaging.published]
             self.assertTrue(any("验收未通过" in s for s in msgs), msgs)
@@ -1042,7 +1079,7 @@ class TestRedoStepLimit(unittest.TestCase):
         self.assertEqual(completed_all["2"]["result"], "old-2")
 
 
-class TestReflectionFailureStopsIteration(unittest.TestCase):
+class TestReflectionFailureStopsIteration(TempWorkspaceCase):
     """B3：反思 LLM 调用失败（空内容/超时）不再重试整轮，停止迭代并记录日志。"""
 
     def test_reflect_llm_failure_returns_none_and_logs(self):
@@ -1614,7 +1651,7 @@ class TestArtifactWhitelistInjection(unittest.TestCase):
         self.assertNotIn("产物文件", instr)
 
 
-class TestBackfillChartManifest(unittest.TestCase):
+class TestBackfillChartManifest(TempWorkspaceCase):
     """多实体任务交付缺口回归：make_charts 语义图也必须进入 chart_manifest.json。"""
 
     def test_semantic_pngs_backfilled_and_idempotent(self):

@@ -535,5 +535,116 @@ class TestR01GoalRequirementBoundary(unittest.TestCase):
         self.assertEqual(out["overall"], "pass", out)
 
 
+class TestFinalBodyAcceptanceBinding(unittest.TestCase):
+    """收尾装配正文必须取得**它自己**的验收。
+
+    实测（真实运行 ui-24a59d1c7b，2026-09-17）：验收绑在报告步骤写出的中间正文
+    （4565 字节，`fail` + 4 条缺口）上，收尾把交付说明/评审注记/底稿缺口拼成 12031
+    字节的正文并采纳——两者字节不同，于是交付状态落回"该版本没有对应它自身的验收
+    （未知）"，用户看不到磁盘上已有的 fail 结论。安全方向没错（不是假绿），但结论
+    在最后一公里丢了。
+    """
+
+    def setUp(self):
+        from report_version import VersionStore
+
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_r02f_"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.store = VersionStore(self.tmp, "t-fin")
+        self.detail = "交付说明 + 装配后的正文（这一份才是被采纳的）"
+
+    def _orch(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._version_stores = {}
+        return o
+
+    def _patched_ws(self):
+        """把版本库/报告目录指到临时工作区（helper 从 workspace 模块导入）。"""
+        return mock.patch("workspace.task_workspace", lambda tid: self.tmp)
+
+    def _acc(self, overall: str, sha: str) -> dict:
+        return {"overall": overall, "report_sha256": sha, "gaps": ["数字溯源率 0%"],
+                "rules_version": "2026.09.12", "rules_fingerprint": "2f00aa11"}
+
+    def test_skips_when_adopted_version_has_its_own_acceptance(self):
+        from report_version import body_hash
+
+        v = self.store.record(self.detail, sources_fingerprint="src-A")
+        self.store.adopt(v, reason="t")
+        self.store.bind_acceptance(self._acc("fail", body_hash(self.detail)),
+                                   sources_fingerprint="src-A")
+        o = self._orch()
+        with self._patched_ws(), \
+                mock.patch.object(o, "_run_acceptance_check") as m:
+            got = o._ensure_final_body_accepted("t-fin", "目标", self.detail)
+        self.assertEqual(got, "already")
+        m.assert_not_called()
+
+    def test_binds_verdict_to_the_adopted_body(self):
+        from report_version import body_hash
+
+        v = self.store.record(self.detail, sources_fingerprint="src-A")
+        self.store.adopt(v, reason="收尾补齐")
+        o = self._orch()
+
+        def _fake_accept(tid, goal, trigger="报告步骤", report_body="", prefer_body=False):
+            # 验收器真实行为：对给定正文出结论，并按完整身份绑回该版
+            self.assertEqual(report_body, self.detail, "必须验收被采纳的那份正文")
+            self.assertTrue(prefer_body, "装配正文不能被磁盘上的旧 report.md 顶掉")
+            self.assertEqual(trigger, "最终装配")
+            self.store.bind_acceptance(self._acc("fail", body_hash(report_body)),
+                                       sources_fingerprint="src-A")
+            return {"overall": "fail"}
+
+        with self._patched_ws(), \
+                mock.patch.object(o, "_run_acceptance_check", side_effect=_fake_accept):
+            got = o._ensure_final_body_accepted("t-fin", "目标", self.detail)
+        self.assertEqual(got, "bound")
+        after = self.store.adopted()
+        self.assertEqual(after.acceptance_overall(), "fail",
+                         "结论要落在被采纳的那一版上，而不是只写在日志里")
+        self.assertTrue(after.acceptance_for_this_body())
+
+    def test_unbound_stays_unknown_and_says_so(self):
+        """绑定没落地时不得改判：仍是"未知"，并留下可见告警。"""
+        v = self.store.record(self.detail, sources_fingerprint="src-A")
+        self.store.adopt(v, reason="收尾补齐")
+        o = self._orch()
+        with self._patched_ws(), \
+                mock.patch.object(o, "_run_acceptance_check", return_value={"overall": "pass"}), \
+                self.assertLogs("orchestrator_v2", level="WARNING") as lg:
+            got = o._ensure_final_body_accepted("t-fin", "目标", self.detail)
+        self.assertEqual(got, "mismatch")
+        self.assertTrue(any("未取得本版验收" in m for m in lg.output), lg.output)
+        self.assertEqual(self.store.adopted().acceptance_overall(), "")
+
+    def test_prefer_body_beats_stale_report_md(self):
+        """`prefer_body=True` 验收调用方给定的正文；默认仍读磁盘 report.md。"""
+        from workspace import task_reports_dir
+
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(self.tmp))
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", old_root)
+        rd = task_reports_dir("t-fin")
+        rd.mkdir(parents=True, exist_ok=True)
+        (rd / "report.md").write_text("磁盘上的中间正文", encoding="utf-8")
+        o = self._orch()
+        seen = []
+
+        def _fake_run(tid, goal, report, ws, **kw):
+            seen.append(report)
+            return {"overall": "fail", "gaps": [], "checks": {}}
+
+        with mock.patch("acceptance_checker.run_acceptance", side_effect=_fake_run), \
+                mock.patch.dict("os.environ", {"URL_HEALTH_CHECK": "0"}):
+            o._run_acceptance_check("t-fin", "目标", trigger="最终装配",
+                                    report_body=self.detail, prefer_body=True)
+            o._run_acceptance_check("t-fin", "目标", trigger="报告步骤")
+        self.assertEqual(seen[0], self.detail)
+        self.assertEqual(seen[1], "磁盘上的中间正文")
+
+
 if __name__ == "__main__":
     unittest.main()

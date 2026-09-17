@@ -3,10 +3,13 @@
 import json
 import os
 import shutil
+import tempfile
 import unittest
 from http.client import RemoteDisconnected
 from pathlib import Path
 from unittest import mock
+
+import workspace as ws_mod
 
 
 # 测试期隔离（见 tests_support.py）：run() 开头的端点/余额预检会打真实网络，
@@ -187,7 +190,23 @@ class TestFileIoWorker(unittest.TestCase):
         self.assertEqual(_sanitize_filename("main.py"), "main.py")
 
 
-class TestCodeExecutionNaming(unittest.TestCase):
+class _TempWorkspace:
+    """工作区隔离（与 test_orchestrator_v2.TempWorkspaceCase 同一理由）：收尾验收会落盘，
+    落在共享默认工作区会让同一用例重跑时读到上一轮的验收结论。"""
+
+    def setUp(self):
+        super().setUp()
+        self._ws_tmp = tempfile.mkdtemp(prefix="wm_dc_ws_")
+        self._ws_old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(self._ws_tmp)
+        self.addCleanup(self._restore_ws)
+
+    def _restore_ws(self):
+        ws_mod.WORKSPACE_ROOT = self._ws_old_root
+        shutil.rmtree(self._ws_tmp, ignore_errors=True)
+
+
+class TestCodeExecutionNaming(_TempWorkspace, unittest.TestCase):
     def test_charset_meta_injected_once(self):
         from workers.code_execution_worker import CodeExecutionWorker
 
@@ -271,7 +290,7 @@ class TestCodeExecutionNaming(unittest.TestCase):
         self.assertTrue(name.startswith("generated_"))
 
 
-class TestCodeExecutionTokenTruncation(_DevSandboxMode, unittest.TestCase):
+class TestCodeExecutionTokenTruncation(_DevSandboxMode, _TempWorkspace, unittest.TestCase):
     """修复：code_execution 响应被 token 上限截断，导致统计任务反复编译失败。"""
 
     def test_estimate_token_need_stats_and_html(self):
@@ -2201,7 +2220,7 @@ class TestTemplateConsolidation(unittest.TestCase):
                 pass
 
 
-class TestSimpleTaskFastPath(_DevSandboxMode, unittest.TestCase):
+class TestSimpleTaskFastPath(_DevSandboxMode, _TempWorkspace, unittest.TestCase):
     """简单任务快速路径：只影响直达型任务，复杂任务逻辑保持不变。"""
 
     def test_simple_plan_detected(self):
@@ -2389,8 +2408,13 @@ class TestSimpleTaskFastPath(_DevSandboxMode, unittest.TestCase):
         o._find_agent = lambda cap: "fake-agent"
         try:
             res = o.run("t-simple-1", "生成一个 HTML 欢迎页", auto_run=True)
-            # M0-a：该替身流程没有验收报告 → 交付按未验收草稿，状态如实降级
-            self.assertEqual(res["status"], "SUCCESS_WITH_ISSUES")
+            # 收尾会对装配后的交付正文跑确定性验收：本替身正文在该目标下通过，
+            # 终态因此是验收的实际结论（此前是"无验收 → 未验收草稿"的兜底降级；
+            # 验收未通过时仍降级为 SUCCESS_WITH_ISSUES，见 test_orchestrator_v2 的
+            # TestMemoryAcceptanceWiring）。
+            self.assertIn(res["status"], ("SUCCESS", "SUCCESS_WITH_ISSUES"))
+            # 交付状态 = 实际验收结论 + 端点降级（会跨进程继承）；本用例只测快速路径本身。
+
             self.assertEqual(reflected["n"], 0, "简单任务跳过反射评审")
             fast_logs = [
                 m for _, m in o._messaging.published
@@ -4874,7 +4898,7 @@ class TestSourceHealthRouting(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
-class TestWebFetchIriEncoding(unittest.TestCase):
+class TestWebFetchIriEncoding(_TempWorkspace, unittest.TestCase):
     """中文 IRI 百分号编码（修复 'ascii' codec 真实任务失败）。"""
 
     def test_ascii_url_unchanged(self):

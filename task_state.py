@@ -214,6 +214,38 @@ def set_phase(task_id: str, phase: str, db_path: str | None = None) -> bool:
         return False
 
 
+def update_report(task_id: str, report: str, db_path: str | None = None) -> bool:
+    """只改**交付正文**（人工复核修订用）：状态/步骤/日志/验收一律不动。
+
+    页面、Markdown/PDF 导出、分享页都读这处正文；修订若只写进版本库，
+    用户改完看到的仍是旧文（版本库是审计轨迹，不是展示源）。
+
+    CANCELLED 是持久终态，与 `review/edit` 的 409 口径一致：不改。
+    """
+    try:
+        con = _connect(db_path)
+        try:
+            _add_missing_columns(con)
+            row = con.execute(
+                "SELECT status FROM task_history WHERE task_id=?", (task_id,)
+            ).fetchone()
+            if row and str(row[0] or "") == CANCELLED:
+                logger.warning("任务 %s 已取消，忽略正文修订（不覆盖交付）", task_id)
+                return False
+            cur = con.execute(
+                "UPDATE task_history SET report=?, updated_at=CURRENT_TIMESTAMP"
+                " WHERE task_id=?",
+                (str(report), task_id),
+            )
+            con.commit()
+            return bool(cur.rowcount)
+        finally:
+            con.close()
+    except Exception as exc:
+        logger.warning("任务 %s 正文写入失败：%s", task_id, str(exc)[:200])
+        return False
+
+
 def record_completion(task_id: str, *, goal: str = "", status: str = "",
                       report: str = "", steps: list | None = None,
                       logs: list | None = None, acceptance: dict | None = None,

@@ -2339,12 +2339,47 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             return True
         return False
 
+    def _ensure_final_body_accepted(self, task_id: str, goal: str,
+                                    detail: str) -> str:
+        """收尾装配后的交付正文要拿到**它自己**的验收（幂等）。
+
+        报告步骤的验收绑的是那一步写出的中间正文；收尾会把交付说明、评审注记、
+        底稿缺口拼成最终正文 `detail` 并采纳它。两者字节不同 → 交付状态只能落回
+        "该版本没有对应它自身的验收（未知）"，用户看不到本该出现的"验收未通过 +
+        缺口"。这里对 `detail` 本体补一次确定性验收并按完整身份绑定。
+
+        返回：`"bound"`（已绑到本版）/ `"already"`（本版已有自己的验收，跳过）/
+        `"mismatch"`（验收正文被自动修复改写，与本版不一致——按证据未知交付）。
+        """
+        from report_version import VersionStore
+        from workspace import task_workspace
+        store = VersionStore(task_workspace(task_id), task_id)
+        ver = store.adopted()
+        if ver is None or not str(detail or "").strip():
+            return "skipped"
+        if ver.acceptance_for_this_body():
+            return "already"
+        self._run_acceptance_check(task_id, goal, trigger="最终装配",
+                                   report_body=detail, prefer_body=True)
+        after = store.adopted()
+        if after is not None and after.acceptance_for_this_body():
+            return "bound"
+        # 机制性说明：自动修复会把"把叙述当来源"的句子改写成诚实披露，此时被验收的
+        # 正文不再等于已采纳的这版——不把两者混为一谈，如实留在"未知"。
+        logger.warning(
+            "最终装配正文未取得本版验收（task=%s）：交付按证据未知处理", task_id)
+        return "mismatch"
+
     def _run_acceptance_check(self, task_id: str, goal: str,
                               trigger: str = "报告步骤",
-                              report_body: str = "") -> dict | None:
+                              report_body: str = "",
+                              prefer_body: bool = False) -> dict | None:
         """报告生成后跑确定性验收器：数字溯源等 checklist → 缺口报告。
         结果写入任务工作区 acceptance_report.json 并推前端，供反思精准补缺口；
-        同时向 acceptance_events.jsonl 追加一条审计事件（可回放、可对账）。"""
+        同时向 acceptance_events.jsonl 追加一条审计事件（可回放、可对账）。
+
+        `prefer_body=True` 时以 `report_body` 为准（不读 `reports/report.md`）：
+        收尾装配后的交付正文与报告步骤写在磁盘上的那份不是同一份字节。"""
         # M0-c：取消后不再为一次已放弃的任务跑验收（验收会读报告、写审计事件，
         # 甚至触发 LLM 语义核对）——取消是终态，不该再产生新的副作用
         if self._cancel_requested(task_id):
@@ -2356,7 +2391,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             from acceptance_checker import run_acceptance
             from workspace import task_reports_dir, task_workspace
             rpath = task_reports_dir(task_id) / "report.md"
-            if rpath.exists():
+            if prefer_body and str(report_body or "").strip():
+                report = str(report_body)
+            elif rpath.exists():
                 report = rpath.read_text(encoding="utf-8")
             elif str(report_body or "").strip():
                 # 没有 report_generator 步骤时（研究类任务常被规划成单个 content_summary）
@@ -5546,6 +5583,14 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     _store0.adopt(_v0, reason="收尾补齐：快速路径/单步任务未经采纳")
         except Exception as exc:
             logger.warning("收尾补齐选中版本失败（task=%s）：%s", task_id, str(exc)[:120])
+        # 最终装配正文自己也要有验收：上面的验收绑的是**报告步骤的中间正文**，
+        # 而交付采纳的是收尾装配后的 `detail`——两者字节不同，于是每次真实运行
+        # 都以"该版本没有对应它自身的验收（未知）"交付，用户看不到本该显示的
+        # "验收未通过 + 缺口"。这里按**同一正文**补一次确定性验收（幂等：已有则跳过）。
+        try:
+            self._ensure_final_body_accepted(task_id, goal, detail)
+        except Exception as exc:
+            logger.warning("最终装配验收失败（task=%s）：%s", task_id, str(exc)[:120])
         # S1：可重算底稿与缺口表落进任务产物；**缺证据项要写进交付物**，
         # 不能只留在工作区文件里（报告不得据此声称已达成）
         try:

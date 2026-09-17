@@ -45,12 +45,33 @@ export function formatUsd(usd?: number | null): string {
  *
  * 此前各处直接 `new Date(x).toLocaleString()`，缺值/脏数据会渲染出字面量
  * "Invalid Date"——用户读到的是一个看起来像值的东西，其实是我们没拿到时间。
+ * 例外：后端部分日志只带 `HH:MM:SS`（本就无日期），原样保留好过谎报"未知"。
  */
 export function formatLocalTime(value?: string | number | null): string {
   if (value === null || value === undefined || value === '') return '时间未知'
-  const d = new Date(value)
+  const raw = String(value).trim()
+  if (CLOCK_ONLY.test(raw)) return raw
+  const d = new Date(raw)
   if (isNaN(d.getTime())) return '时间未知'
   return d.toLocaleString()
+}
+
+/** 只有时分秒的本地时钟串（后端日志的另一种时间戳写法）。 */
+const CLOCK_ONLY = /^\d{1,2}:\d{2}:\d{2}(\.\d+)?$/
+
+/**
+ * 时间显示（只有时分秒，本地时区）——用于日志行等窄列。
+ *
+ * 此前日志行取 `timestamp.slice(-8)`：ISO 串尾 8 位是 `59+00:00` 或 `:14.834Z`，
+ * 于是界面上出现的是 UTC 残片而非时间。
+ */
+export function formatLocalClock(value?: string | number | null): string {
+  if (value === null || value === undefined || value === '') return '时间未知'
+  const raw = String(value).trim()
+  if (CLOCK_ONLY.test(raw)) return raw
+  const d = new Date(raw)
+  if (isNaN(d.getTime())) return '时间未知'
+  return d.toLocaleTimeString()
 }
 
 /**
