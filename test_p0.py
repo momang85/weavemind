@@ -5937,6 +5937,29 @@ class TestReportPdfLayout(unittest.TestCase):
                                                      workspace=None))[0]
         self.assertIn("复核结论与建议", text, "只有完全同名才合并，相似标题不得误删")
 
+    def test_draft_banner_before_title_still_dedupes(self):
+        """草稿横幅在前、`# 标题` 在后时同样去重（未验收草稿交付就是这形状）。"""
+        import report_pdf
+        md = ("> **未验收草稿：缺少与该正文对应的验收**\n\n"
+              "# 复核结论\n\n正文。\n")
+        text = self._flat(report_pdf.markdown_to_pdf(md, title="复核结论",
+                                                     workspace=None))[0]
+        self.assertEqual(text.count("复核结论"), 1,
+                         "横幅在前时正文标题仍应去重（此前只看首块会漏）")
+
+    def test_long_table_starts_on_current_page(self):
+        """长表格不能因为"整表放不下"就整体推到下一页（首页会几乎空白）。"""
+        import report_pdf
+        rows = ["| 公司 | 营收 |", "|---|---|"]
+        for i in range(1, 46):
+            rows.append(f"| 公司{i} | {1000 + i}亿元 |")
+        md = "# 长表\n\n下表 45 行。\n\n" + "\n".join(rows) + "\n"
+        pages = self._flat(report_pdf.markdown_to_pdf(md, workspace=None))
+        self.assertGreaterEqual(len(pages), 2, "45 行应跨页")
+        self.assertIn("公司1", pages[0],
+                      "第一页就应开始画表（表头 + 至少一行），不能整表推到下一页")
+        self.assertIn("公司", pages[0], "第一页应有表头")
+
     def test_long_table_repeats_header_on_continuation_pages(self):
         import report_pdf
         rows = ["| 公司 | 营收 | 备注 |", "|---|---|---|"]

@@ -1074,12 +1074,13 @@ class _PDFBuilder:
             ])
         line_h = TABLE_SIZE * 1.55
         pad = 5
-        total_h = sum(
-            max(len(lines) for lines in row) * line_h + pad * 2
-            for row in cell_lines
-        )
         header_h = max(len(lines) for lines in cell_lines[0]) * line_h + pad * 2
-        self._ensure_space(total_h + 10)
+        # 只要求"表头 + 几行数据"放得下就开画，**不再要求整张表**放得下：
+        # 此前用 total_h（45 行表格的整高）预留，结果整表被推到下一页，
+        # 第一页只剩标题、85% 版面空白（视觉门禁实测）。逐行的分页与跨页重画表头
+        # 已经能处理续页，所以这里只需要保证"表头不会孤零零留在页底"。
+        min_h = header_h + pad * 2 + line_h * 2 + 12
+        self._ensure_space(min_h)
         self.cursor_y -= 6
         y = self.cursor_y
         self._draw_table_header(y, rows, ncols, header_h)
@@ -1200,11 +1201,18 @@ def markdown_to_pdf(
     # 封面标题与正文首个标题重复时跳过正文那一个：报告 Markdown 常自带
     # `# 同一标题`，此前会连着出现两遍标题（实测输出 "复核结论 | 复核结论"），
     # 既占版面又像排版事故。
-    if title and blocks:
-        first = blocks[0]
-        if first.get("type") == "heading" and _norm_title(
-                str(first.get("text") or "")) == _norm_title(str(title)):
-            blocks = blocks[1:]
+    #
+    # 找的是**第一个标题块**而不是 blocks[0]：未验收草稿的正文形状是
+    # "引用横幅在前、`# 标题` 在后"，只检查首块会漏（视觉门禁实测：草稿样例里
+    # 标题仍然印了两遍）。前置的横幅/说明不属于"正文标题"，不影响判断。
+    if title:
+        want = _norm_title(str(title))
+        for i, blk in enumerate(blocks):
+            if blk.get("type") != "heading":
+                continue
+            if _norm_title(str(blk.get("text") or "")) == want:
+                blocks = blocks[:i] + blocks[i + 1:]
+            break
     for block in blocks:
         builder._render_block(block, workspace)
     return builder.finish()
