@@ -104,3 +104,34 @@
 - `identity_id()` 漂移（第三节第 1 条）**仍未修**：页面/清单里的 `report_version_id` 是重算值，
   与版本库里的键不是同一个串。
 
+## 七、部署烟测（clean-env-e2e）间歇变红的根因与修法
+
+推送后 CI 在 `7338713` 上红了：`backend`/`frontend`/`docker-image` 三个作业通过，
+**`clean-env-e2e` 失败**。用 `gh run view --log-failed` 取到日志（不必绕门禁）：
+
+- 失败点是"提交任务"阶段：任务 `RUNNING` → **27 秒后 FAILED**，随后脚本按设计报错退出。
+- 同一失败签名**在我这批改动之前就出现过**（`0330b6f`，12:00Z，同样 30 秒内 FAILED、
+  同一行报错）——所以不是这批改动引入的，是这道闸门本来就间歇。
+
+在本机隔离环境（独立 Redis 端口 6390，不与你正在跑的应用共用）复现并保留现场后，
+从克隆库的 `steps_json` 读到真实链条：
+
+1. 步骤 1 `web_search`（抓 Bing）结果被判不足 → 触发 `Replan (search-fallback)`，
+   追加 `code_execution` 步骤（`alt-1-…`）；
+2. 该步骤 FAILED，并**替换了步骤 1 的结果**；
+3. 步骤 2 `report_generator`、步骤 3 `package` 因此 `Blocked by failed dependency`
+   → 0/3 成功 → 任务 FAILED。
+
+也就是说：**部署烟测的成败由外部搜索（Bing）是否返回可解析结果决定**，而 CI 上它间歇失败。
+修法是让这道闸门自足：
+
+- `scripts/stub_llm.py` 的替身计划不再排 `web_search`（改 `content_summary`），
+  烟测任务的步骤因此全部本地可完成；
+- `scripts/e2e_clean_check.py` 的提交目标改为"不需要联网检索"的自足目标，
+  并在 `does_not_prove` 里写明"不证明真实检索/抓取链路"。
+
+本地连跑 3 次全部稳定（正向 `SUCCESS_WITH_ISSUES`、负向按预期 `FAILED` 且成功判据拒绝）；
+改动前同样的 3 次里有 2 次红。**这不是把闸门调松**：成功判据（夹具标记 + 夹具事实）与
+负向用例一条没改，改的只是"不再让外网决定颜色"。
+
+

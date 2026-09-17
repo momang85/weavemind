@@ -58,10 +58,17 @@ STUB_MODE_FAIL = "fail"
 
 PLAN = {
     "steps": [
-        {"step_id": "1", "capability": "web_search",
-         "instruction": "检索目标主题的公开资料并记录来源链接", "timeout": 120},
+        # **不排检索步骤**：替身回的这个计划就是烟测任务的全部步骤，若含 `web_search`，
+        # 烟测就会去抓真实搜索页（`adapters/text_search.py` → Bing）。实测在 CI 上 Bing
+        # 偶尔返回空/被拦 → 触发 search-fallback 的 code_execution 步骤 → 该步骤失败并替换
+        # 步骤 1 的结果 → 下游因依赖失败被阻塞 → 任务 FAILED → 闸门间歇变红（同一签名在改动
+        # 前的 `0330b6f` 上就出现过）。部署烟测证明的是"装得上、起得来、跑得通、产出夹具内容"，
+        # 不该由外部检索决定成败；检索链路的覆盖在 S1/S2 的单独证据里。
+        {"step_id": "1", "capability": "content_summary",
+         "instruction": "按目标直接组织要点（仅用模型知识与夹具内容，不检索外部资料）",
+         "timeout": 120},
         {"step_id": "2", "capability": "report_generator",
-         "instruction": "基于检索结果生成结构化报告并标注来源", "timeout": 120},
+         "instruction": "生成结构化报告（夹具内容，含数字与期间）", "timeout": 120},
         {"step_id": "3", "capability": "package",
          "instruction": "把交付物打包为 ZIP", "timeout": 120},
     ]

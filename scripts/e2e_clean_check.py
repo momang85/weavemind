@@ -39,6 +39,15 @@ DEFAULT_PORTS = {"web": 8099, "redis": 6390, "stub": 8799}
 # 部署烟测的**成功态**：只有这两种才算"跑通并产出可交付结果"。
 # FAILED/CANCELLED 必须走负向用例（见 --negative），不能算成功。
 SUCCESS_STATES = ("SUCCESS", "SUCCESS_WITH_ISSUES")
+# 提交给烟测任务的目标：**自足、不需要外网**。
+#
+# 此前用的是"检索公开资料并生成一份含来源链接的研究报告"——它让烟测依赖真实检索
+# （`web_search` 走 `adapters/text_search.py` 抓 Bing）。CI 上 Bing 偶尔返回空/被拦，
+# 于是触发 search-fallback 的 `code_execution` 步骤；该步骤失败又会替换步骤 1 的结果，
+# 下游 report/package 因依赖失败被阻塞 → 任务 FAILED → 闸门变红（间歇，实测同一失败
+# 签名在改动前的 `0330b6f` 上出现过）。部署烟测要证明的是"装得上、起得来、任务能跑通、
+# 交付物含夹具标记"，不该由外部检索决定成败；检索链路的覆盖在 S1/S2 的单独证据里。
+SMOKE_GOAL = "用三句话说明归母净利润与净利润的区别，不需要联网检索。"
 # 本脚本起过的替身进程（含负向用例重启的那个），finally 里统一收掉
 _STUB_PROCS: list = []
 # 允许请求的回环主机（只有本脚本自己启动的服务在这些地址上）
@@ -128,7 +137,8 @@ def main() -> int:
         "gate": "部署烟测（固定模型替身）",
         "proves": ["干净 clone 可安装", "依赖自检通过", "服务可就绪",
                    "任务能跑到成功终态", "交付物含夹具标记与夹具事实"],
-        "does_not_prove": ["真实模型质量", "真实 SEC/行情抓取", "金融数字正确性"],
+        "does_not_prove": ["真实模型质量", "真实 SEC/行情抓取", "金融数字正确性",
+                           "真实检索/抓取链路（替身计划不排检索步骤，避免外网抖动决定闸门颜色）"],
     }
     try:
         # 1) 干净 clone（只取版本库内容：未提交/被忽略的文件一律不参与）
@@ -263,7 +273,7 @@ def _submit(clone: Path, env: dict) -> str:
     tid = "ui-" + uuid.uuid4().hex[:10]
     r.delete(f"task_ack:{tid}")
     r.publish("orchestrator:main", json.dumps({
-        "task_id": tid, "goal": "检索公开资料并生成一份含来源链接的研究报告",
+        "task_id": tid, "goal": SMOKE_GOAL,
         "project": "default", "context": "", "auto_run": True,
         "template_steps": None, "user_id": "", "report_confirm": False,
         "conversation_id": "", "parent_task_id": "",
