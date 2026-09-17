@@ -9,6 +9,19 @@ from pathlib import Path
 from unittest import mock
 
 
+# 测试期隔离（见 tests_support.py）：run() 开头的端点/余额预检会打真实网络，
+# 本机余额耗尽或 CI 无 key 都会让任务在预检被拒，用例断言的业务逻辑根本没机会发生。
+from tests_support import restore_llm_prechecks, stub_llm_prechecks  # noqa: E402
+
+
+def setUpModule():
+    stub_llm_prechecks()
+
+
+def tearDownModule():
+    restore_llm_prechecks()
+
+
 class _DevSandboxMode:
     """显式选择本地开发沙箱模式（restricted，无操作系统级隔离）。
 

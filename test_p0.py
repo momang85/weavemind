@@ -5831,6 +5831,9 @@ class TestReportPdfLineGeometry(unittest.TestCase):
         self.assertTrue(starts and ends, "正文里的分隔线/表线必须真的画出来")
         self.assertEqual(len(starts), len(ends))
         import report_pdf as R
+        # 页脚细线按设计落在**下边距内**（MARGIN_B 之下），其余线都必须在可打印区：
+        # 一刀切会让这条守卫把正确的页脚判成越界（实测 37.2 < MARGIN_B-1）。
+        footer_y = R.MARGIN_B * 0.45 + 12
         for (x1, y1), (x2, y2) in zip(starts, ends):
             self.assertAlmostEqual(y1, y2, places=4,
                                    msg=f"分隔线必须水平：(x1={x1}, y1={y1}) → (x2={x2}, y2={y2})")
@@ -5838,7 +5841,9 @@ class TestReportPdfLineGeometry(unittest.TestCase):
             width = x2 - x1
             self.assertIn(round(width, 2), (round(R.USABLE_W, 2), 80.0),
                           "线的长度只能是正文宽或标题下划线的 80pt")
-            self.assertGreaterEqual(y1, R.MARGIN_B - 1)
+            if abs(y1 - footer_y) < 0.5:
+                continue                    # 页脚细线：在下边距内，属预期
+            self.assertGreaterEqual(y1, R.MARGIN_B - 1, "正文线不得压进下边距")
             self.assertLessEqual(y1, R.PAGE_H - R.MARGIN_T + 1)
 
     def test_line_is_not_a_diagonal_to_the_origin(self):
@@ -5852,6 +5857,67 @@ class TestReportPdfLineGeometry(unittest.TestCase):
             x, y = nums
             self.assertFalse(abs(x - R.USABLE_W) < 0.01 and abs(y) < 0.01,
                              f"起点落在 (USABLE_W, 0) 说明又出现斜线：{line!r}")
+
+
+class TestReportPdfLayout(unittest.TestCase):
+    """B 批（PDF 排版）：页脚页码、封面标题去重、跨页表头、图片占位。
+
+    这些都是"渲染出来才看得见"的问题，靠"没报错"发现不了：页码缺失、标题印两遍、
+    续页表格没有列名、图片静默消失——PDF 都照样生成成功。
+    （真正的逐页视觉验收需要栅格化渲染器，本机没有；见状态文档"未验证"一节。）
+    """
+
+    def _text(self, pdf: bytes) -> list[str]:
+        import io
+        from pypdf import PdfReader
+        return [p.extract_text() or "" for p in PdfReader(io.BytesIO(pdf)).pages]
+
+    def test_page_footer_with_total(self):
+        import report_pdf
+        # 正文要足够长才能稳定跨页（实测 11 段×40 字仍只有一页）
+        md = "# 复核结论\n\n" + "\n\n".join(
+            f"第 {i} 段。" + "内容" * 60 for i in range(1, 31))
+        pages = self._text(report_pdf.markdown_to_pdf(md, title="复核结论",
+                                                     workspace=None))
+        self.assertGreaterEqual(len(pages), 2, "样例应至少两页，否则测不出页码")
+        total = len(pages)
+        self.assertIn(f"第 1 页 / 共 {total} 页", pages[0])
+        self.assertIn(f"第 {total} 页 / 共 {total} 页", pages[-1])
+
+    def test_cover_title_not_printed_twice(self):
+        import report_pdf
+        md = "# 复核结论\n\n正文。\n"
+        text = self._text(report_pdf.markdown_to_pdf(md, title="复核结论",
+                                                     workspace=None))[0]
+        self.assertEqual(text.count("复核结论"), 1,
+                         "封面标题与正文首个同名标题只应出现一次")
+
+    def test_similar_but_different_heading_is_kept(self):
+        import report_pdf
+        md = "# 复核结论与建议\n\n正文。\n"
+        text = self._text(report_pdf.markdown_to_pdf(md, title="复核结论",
+                                                     workspace=None))[0]
+        self.assertIn("复核结论与建议", text, "只有完全同名才合并，相似标题不得误删")
+
+    def test_long_table_repeats_header_on_continuation_pages(self):
+        import report_pdf
+        rows = ["| 公司 | 营收 | 备注 |", "|---|---|---|"]
+        for i in range(1, 61):
+            rows.append(f"| 公司{i} | {1000 + i}亿元 | 第{i}行说明 |")
+        md = "# 长表\n\n" + "\n".join(rows) + "\n"
+        pages = self._text(report_pdf.markdown_to_pdf(md, workspace=None))
+        self.assertGreaterEqual(len(pages), 2, "60 行表格应跨页")
+        with_header = [p for p in pages if "公司" in p and "备注" in p]
+        self.assertGreaterEqual(len(with_header), 2,
+                                f"续页必须重画表头，实际含表头的页：{len(with_header)}")
+
+    def test_missing_image_is_visible_as_placeholder(self):
+        import report_pdf
+        md = "# 图表\n\n![营收趋势](no_such_chart.png)\n\n正文。\n"
+        text = self._text(report_pdf.markdown_to_pdf(md, workspace=None))[0]
+        self.assertIn("图片未能嵌入", text,
+                      "缺图必须留可见占位，不能静默消失")
+        self.assertIn("no_such_chart.png", text, "占位应带上原路径便于排查")
 
 
 class TestNewDataAdapters(unittest.TestCase):

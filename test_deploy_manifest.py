@@ -409,5 +409,34 @@ class TestCiSuiteCoverage(unittest.TestCase):
                          "这些 name 含未加引号的冒号，会让 YAML 解析失败")
 
 
+class TestOrchestratorRunTestsAreOffline(unittest.TestCase):
+    """驱动 `orchestrator.run()` 的测试文件必须隔离 LLM 预检。
+
+    `run()` 开头会做两次**真实网络**预检（端点可达性 + 余额）。不隔离时：
+    - 本机 `config.json` 有真实 key → 真端点；余额耗尽（402）就在预检被拒，
+      用例断言的"反思/交付/恢复/审批"逻辑根本没发生（表现为各种毫不相关的断言失败）；
+    - CI 无 key → "端点不可用"，同样早退。
+    这一种机依赖在本会话里把四个套件打成过假红，所以按静态规则钉住。
+    """
+
+    def test_run_drivers_isolate_prechecks(self):
+        offenders = []
+        for path in sorted(ROOT.glob("test_*.py")):
+            src = path.read_text(encoding="utf-8")
+            if not re.search(r"\b(?:o|orch|self\.o|_orch)\.run\(", src):
+                continue
+            isolated = (
+                "stub_llm_prechecks" in src
+                or "get_balance_status" in src
+                or "endpoints_available" in src
+            )
+            if not isolated:
+                offenders.append(path.name)
+        self.assertEqual(
+            offenders, [],
+            "这些文件驱动 run() 却没隔离 LLM 预检，会随本机 key/余额状态假红："
+            f"{offenders}（用 tests_support.stub_llm_prechecks 或自行 patch）")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -26,6 +26,11 @@ from orchestrator_v2 import OrchestratorV2
 import workspace as ws_mod
 
 
+# 测试期隔离（见 tests_support.py）：run() 开头的端点/余额预检会打真实网络，
+# 本机余额耗尽或 CI 无 key 都会让任务在预检被拒，用例断言的业务逻辑根本没机会发生。
+from tests_support import restore_llm_prechecks, stub_llm_prechecks  # noqa: E402
+
+
 # ── 模块级离线桩 ───────────────────────────────────────────────────
 # 本文件自称"fakes 模式"，但实测里仍有未打桩的真实出站调用：编排器的
 # `_structured_preload`（结构化数据路由，失败还会退避 2 秒再试）与少数未打桩的
@@ -55,9 +60,12 @@ def setUpModule():
     _PATCHERS.append(mock.patch.object(llm_client.LLMClient, "call", _offline_call_llm))
     for p in _PATCHERS:
         p.start()
+    # run() 起点的端点/余额预检（本文件有真实 key 时会打到付费端点）
+    stub_llm_prechecks()
 
 
 def tearDownModule():
+    restore_llm_prechecks()
     while _PATCHERS:
         try:
             _PATCHERS.pop().stop()

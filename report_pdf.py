@@ -240,6 +240,18 @@ def _load_font() -> TTFont | None:
 
 # ─────────────────────────── Markdown 解析 ───────────────────────────
 
+def _norm_title(text: str) -> str:
+    """标题比较用的归一化：去空白与常见标点，忽略大小写后缀差异。
+
+    用于判断"正文首个标题是否就是封面标题"，只做保守归一（空白/常见标点/全半角
+    空格），避免把"复核结论"和"复核结论与建议"当成同一个而误删真标题。
+    """
+    t = _inline_plain(str(text or "")).lower()
+    t = re.sub(r"[\s\u3000]+", "", t)
+    t = re.sub(r"[：:，,。.、；;！!？?“”\"'（）()【】\[\]《》<>—\-_*#]+", "", t)
+    return t
+
+
 def _inline_plain(text: str) -> str:
     """把内联 Markdown 语法剥掉，保留可读纯文本。"""
     text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", text)
@@ -535,6 +547,9 @@ class _PDFBuilder:
         self.font = font
         self.objects: list[bytes] = []
         self.page_refs: list[int] = []
+        # 已排完的页：(内容字节, 该页图片对象号)。页脚要在总页数确定后统一补，
+        # 所以页面内容先攒在这里，由 finish() 落成对象（见 _finish_page）。
+        self.page_bodies: list[tuple[bytes, list[int]]] = []
         self.image_refs: dict[str, int] = {}
         self.font_ref: int | None = None
         self.used_glyphs: dict[int, int] = {}  # gid -> unicode cp
@@ -648,7 +663,13 @@ class _PDFBuilder:
             + body + b"\nendstream"
         )
 
-    def _draw_text(self, x: float, text: str, size: float, color: tuple) -> None:
+    def _text_ops(self, x: float, y: float, text: str, size: float,
+                  color: tuple) -> bytes:
+        """一段文本的绘制指令（不改游标）。
+
+        抽出来是为了**页脚**：页脚要在所有页都排完之后才能补上（总页数那时才知道），
+        而此时页面内容已经作为字节串存起来了，不能再用会改游标的 `_draw_text`。
+        """
         r, g, b = color
         if self.font is not None:
             parts: list[str] = []
@@ -660,15 +681,37 @@ class _PDFBuilder:
             encoded = ("<" + "".join(parts) + ">").encode()
         else:
             encoded = b"(" + _escape_text(text) + b")"
-        self.page_content += (
+        return (
             f"BT /F1 {size:.2f} Tf {r} {g} {b} rg "
-            f"1 0 0 1 {x:.2f} {self.cursor_y:.2f} Tm "
+            f"1 0 0 1 {x:.2f} {y:.2f} Tm "
         ).encode() + encoded + b" Tj ET\n"
+
+    def _draw_text(self, x: float, text: str, size: float, color: tuple) -> None:
+        self.page_content += self._text_ops(x, self.cursor_y, text, size, color)
 
     def _text_width(self, text: str, size: float) -> float:
         if self.font is not None:
             return self.font.text_width(text, size)
         return len(text) * size * 0.55
+
+    def _footer_ops(self, index: int, total: int) -> bytes:
+        """页脚：细线 + 居中页码「第 N 页 / 共 M 页」。
+
+        没有页码时，"这份 PDF 到第几页了、还有多少"只能靠滚动手感判断；
+        跨页长表格尤其容易让人以为内容被截断。
+        """
+        y = MARGIN_B * 0.45
+        label = f"第 {index} 页 / 共 {total} 页"
+        w = self._text_width(label, 8.5)
+        ops = (
+            f"q 0.80 0.80 0.83 RG 0.5 w {MARGIN_L:.2f} {y + 12:.2f} m "
+            f"{MARGIN_L + USABLE_W:.2f} {y + 12:.2f} l S Q\n"
+        ).encode()
+        ops += self._text_ops(
+            MARGIN_L + max(0.0, (USABLE_W - w) / 2), y, label, 8.5,
+            (0.42, 0.44, 0.48),
+        )
+        return ops
 
     def _ensure_space(self, needed: float) -> None:
         if self.cursor_y - needed < MARGIN_B:
@@ -678,26 +721,8 @@ class _PDFBuilder:
     def _finish_page(self) -> None:
         if not self.page_content and not self.page_images:
             return
-        content = bytes(self.page_content)
-        content_ref = self._add_obj(
-            b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n"
-            + content + b"\nendstream"
-        )
-        resources = b"<< /Font << /F1 " + str(self.font_ref).encode() + b" 0 R >>"
-        if self.page_images:
-            imgs = b" ".join(
-                b"/Im" + str(i).encode() + b" " + str(ref).encode() + b" 0 R"
-                for i, ref in enumerate(self.page_images)
-            )
-            resources += b" /XObject << " + imgs + b" >>"
-        resources += b" >>"
-        page_ref = self._add_obj(
-            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 "
-            + f"{PAGE_W:.2f} {PAGE_H:.2f}".encode()
-            + b"] /Resources " + resources + b" /Contents "
-            + str(content_ref).encode() + b" 0 R >>"
-        )
-        self.page_refs.append(page_ref)
+        # 不在这里写内容对象：页脚要等总页数确定（见 finish()）。先攒在内存里。
+        self.page_bodies.append((bytes(self.page_content), list(self.page_images)))
 
     def _embed_image(self, src: str, workspace: os.PathLike | None) -> int | None:
         fp = _resolve_image_src(src, workspace)
@@ -739,9 +764,38 @@ class _PDFBuilder:
         self.image_refs[fp] = ref
         return ref
 
+    def _draw_image_placeholder(self, src: str, reason: str = "") -> None:
+        """图片没能嵌入时画一个占位框，把"这里本来有图"说出来。
+
+        此前是**静默 return**：读者只看到正文里缺了一块，既不知道有图、也不知道
+        为什么没有（路径失效/格式不支持/文件为空都表现成"什么都没发生"）。
+        """
+        label = str(src or "").strip() or "（未提供图片路径）"
+        lines = self._wrap(f"[图片未能嵌入] {label}", 9.0, USABLE_W - 16)
+        if reason:
+            lines += self._wrap(f"原因：{reason}", 8.5, USABLE_W - 16)
+        box_h = 12.0 * len(lines) + 16
+        self._ensure_space(box_h + 6)
+        top = self.cursor_y
+        self.page_content += (
+            f"q 0.94 0.94 0.96 rg {MARGIN_L:.2f} {top - box_h:.2f} "
+            f"{USABLE_W:.2f} {box_h:.2f} re f Q "
+            f"q 0.72 0.72 0.76 RG 0.6 w {MARGIN_L:.2f} {top - box_h:.2f} "
+            f"{USABLE_W:.2f} {box_h:.2f} re S Q "
+            f"q 0.72 0.72 0.76 RG 0.6 w {MARGIN_L:.2f} {top - box_h / 2:.2f} m "
+            f"{MARGIN_L + USABLE_W:.2f} {top - box_h / 2:.2f} l S Q\n"
+        ).encode()
+        y = top - 14
+        for line in lines:
+            self.page_content += self._text_ops(
+                MARGIN_L + 8, y, line, 9.0, (0.42, 0.44, 0.48))
+            y -= 12.0
+        self.cursor_y = top - box_h - BODY_SIZE
+
     def _draw_image(self, src: str, workspace: os.PathLike | None) -> None:
         ref = self._embed_image(src, workspace)
         if ref is None:
+            self._draw_image_placeholder(src, reason="文件不存在或格式不受支持")
             return
         # 取宽高：重新读取（简单起见）；最大宽度 USABLE_W
         fp = _resolve_image_src(src, workspace)
@@ -749,15 +803,18 @@ class _PDFBuilder:
             with open(fp, "rb") as f:
                 data = f.read()
         except Exception:
+            self._draw_image_placeholder(src, reason="读取失败")
             return
         if data[:8] == b"\x89PNG\r\n\x1a\n":
             parsed = _png_to_rgb(data)
             if not parsed:
+                self._draw_image_placeholder(src, reason="PNG 解析失败")
                 return
             w, h = parsed[0], parsed[1]
         else:
             info = _jpeg_info(data)
             if not info:
+                self._draw_image_placeholder(src, reason="既不是 PNG 也不是 JPEG")
                 return
             w, h = info
         max_w = USABLE_W
@@ -878,6 +935,24 @@ class _PDFBuilder:
             ).encode()
             self.cursor_y -= 14
 
+    def _draw_table_header(self, top_y: float, rows: list[list[str]], ncols: int,
+                           header_h: float) -> None:
+        """画表头（底色 + 拼接标题）。跨页续画时也走这里，保证一致。
+
+        底色矩形覆盖 `[top_y - header_h, top_y]`，**文字基线要落在框内**
+        （此前直接用未调整的 cursor_y 画，白字落在色块上方，视觉上是"表头跑出框"）。
+        """
+        self.page_content += (
+            f"q 0.16 0.20 0.34 rg {MARGIN_L:.2f} {top_y - header_h:.2f} "
+            f"{USABLE_W:.2f} {header_h:.2f} re f Q\n"
+        ).encode()
+        self.cursor_y = top_y - 5 - TABLE_SIZE
+        self._draw_text(
+            MARGIN_L + 4, "  ".join(
+                str(c)[:20] for c in (rows[0] + [""] * ncols)[:ncols]
+            ), TABLE_SIZE, (1, 1, 1),
+        )
+
     def _render_table(self, rows: list[list[str]]) -> None:
         if not rows:
             return
@@ -896,28 +971,23 @@ class _PDFBuilder:
             max(len(lines) for lines in row) * line_h + pad * 2
             for row in cell_lines
         )
-        # 表头背景
         header_h = max(len(lines) for lines in cell_lines[0]) * line_h + pad * 2
         self._ensure_space(total_h + 10)
         self.cursor_y -= 6
         y = self.cursor_y
-        self.page_content += (
-            f"q 0.16 0.20 0.34 rg {MARGIN_L:.2f} {y - header_h:.2f} "
-            f"{USABLE_W:.2f} {header_h:.2f} re f Q\n"
-        ).encode()
-        self._draw_text(
-            MARGIN_L + 4, "  ".join(
-                str(c)[:20] for c in (rows[0] + [""] * ncols)[:ncols]
-            ), TABLE_SIZE, (1, 1, 1),
-        )
+        self._draw_table_header(y, rows, ncols, header_h)
         # 简化实现：表头仅输出拼接文本；正文逐行绘制
         y -= header_h
-        for row_idx, row in enumerate(cell_lines[1:], start=1):
+        for row in cell_lines[1:]:
             row_h = max(len(lines) for lines in row) * line_h + pad * 2
-            if y - row_h < MARGIN_B:
+            if y - row_h - header_h < MARGIN_B:
+                # 跨页：先给本页留表头位置，再在新页**重画表头**——否则续页的第一行
+                # 数据没有任何列名，"第 4 行那个数字是哪一列"只能回到上一页翻。
                 self._finish_page()
                 self._new_page()
                 y = self.cursor_y
+                self._draw_table_header(y, rows, ncols, header_h)
+                y -= header_h
             self.cursor_y = y - pad - TABLE_SIZE
             for c, lines in enumerate(row):
                 x = MARGIN_L + c * col_w + 4
@@ -934,7 +1004,34 @@ class _PDFBuilder:
 
     def finish(self) -> bytes:
         self._finish_page()
+        # 页脚要写「第 N 页 / 共 M 页」，总页数只有此刻才知道：先把各页内容补上页脚，
+        # 再生成对象与 ToUnicode 映射（页脚用到的字形必须在 finalize 之前登记）。
+        total = len(self.page_bodies)
+        bodies = [
+            (content + self._footer_ops(idx, total), images)
+            for idx, (content, images) in enumerate(self.page_bodies, start=1)
+        ]
         self._finalize_to_unicode()
+        for content, images in bodies:
+            content_ref = self._add_obj(
+                b"<< /Length " + str(len(content)).encode() + b" >>\nstream\n"
+                + content + b"\nendstream"
+            )
+            resources = b"<< /Font << /F1 " + str(self.font_ref).encode() + b" 0 R >>"
+            if images:
+                imgs = b" ".join(
+                    b"/Im" + str(i).encode() + b" " + str(ref).encode() + b" 0 R"
+                    for i, ref in enumerate(images)
+                )
+                resources += b" /XObject << " + imgs + b" >>"
+            resources += b" >>"
+            page_ref = self._add_obj(
+                b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 "
+                + f"{PAGE_W:.2f} {PAGE_H:.2f}".encode()
+                + b"] /Resources " + resources + b" /Contents "
+                + str(content_ref).encode() + b" 0 R >>"
+            )
+            self.page_refs.append(page_ref)
         # 回填 Pages Kids/Count
         kids = b" ".join(
             str(ref).encode() + b" 0 R" for ref in self.page_refs
@@ -983,6 +1080,15 @@ def markdown_to_pdf(
             f"{MARGIN_L + 80:.2f} {builder.cursor_y:.2f} l S Q\n"
         ).encode()
         builder.cursor_y -= 16
-    for block in _split_blocks(markdown):
+    blocks = _split_blocks(markdown)
+    # 封面标题与正文首个标题重复时跳过正文那一个：报告 Markdown 常自带
+    # `# 同一标题`，此前会连着出现两遍标题（实测输出 "复核结论 | 复核结论"），
+    # 既占版面又像排版事故。
+    if title and blocks:
+        first = blocks[0]
+        if first.get("type") == "heading" and _norm_title(
+                str(first.get("text") or "")) == _norm_title(str(title)):
+            blocks = blocks[1:]
+    for block in blocks:
         builder._render_block(block, workspace)
     return builder.finish()
