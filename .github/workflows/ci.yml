@@ -74,6 +74,8 @@ jobs:
         run: python test_fact_fidelity.py
       - name: "Research contract & fact records (S1: contract gaps, fact_id stability)"
         run: python test_facts.py
+      - name: "Working paper & exit gate (S1: two years x three metrics, negatives)"
+        run: python test_working_paper.py
       - name: Portable Redis acquisition (multi-source / budget / offline reuse)
         run: python test_redis_acquisition.py
       - name: US financial chain (SEC fixture / subject extraction / amount rate)

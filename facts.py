@@ -133,10 +133,26 @@ def parse_research_request(goal: str, *, company: str = "", company_id: str = ""
     if mk == UNKNOWN:
         req.gaps.append("未确定市场（A股/港股/美股）：口径与数据源不同，需确认")
 
+    # 资料截至日：**必须在取年份之前解析**——否则"数据截至 2025-04-30"里的 2025
+    # 会被当成研究年度（6 个必需组合凭空变成 9 个）。调用方传入的 as_of 同样要先记下来。
+    req.as_of = str(as_of or "").strip()
+    if not req.as_of:
+        m = _ASOF_RE.search(text)
+        req.as_of = m.group(1) if m else ""
+    if not req.as_of:
+        req.gaps.append("未给资料截至日：报告须明示数据时效")
+
     # 期间：调用方给 > 目标里的年份（同一公司两个年度是首发默认）
+    #
+    # **先把"资料截至日"那段摘掉**再取年份：否则 "数据截至 2025-04-30" 里的 2025
+    # 会被当成研究年度，凭空多出一个组合（实测：6 个必需组合变成 9 个，任务永远缺 3 个）。
     years = [int(y) for y in (periods or []) if str(y).isdigit()]
     if not years:
-        years = sorted({int(m) for m in _YEAR_RE.findall(text)})
+        _scan = text
+        if req.as_of:
+            _scan = _scan.replace(req.as_of, " ")
+            _scan = re.sub(r"(?:截至|截至日|数据截至|as\s*of)\s*", " ", _scan)
+        years = sorted({int(m) for m in _YEAR_RE.findall(_scan)})
     req.periods = sorted(set(years))
     if len(req.periods) < 2:
         req.gaps.append(
@@ -153,13 +169,6 @@ def parse_research_request(goal: str, *, company: str = "", company_id: str = ""
     if req.caliber == UNKNOWN:
         req.gaps.append("未声明报表口径（合并/母公司）：按未知处理，不默认合并")
 
-    # 资料截至日
-    req.as_of = str(as_of or "").strip()
-    if not req.as_of:
-        m = _ASOF_RE.search(text)
-        req.as_of = m.group(1) if m else ""
-    if not req.as_of:
-        req.gaps.append("未给资料截至日：报告须明示数据时效")
 
     # 来源要求与预算：给了就记，没给不编
     req.source_requirements = ["公开年报", "可定位到来源位置"]
@@ -307,14 +316,19 @@ def facts_from_financials(payload: dict, *, source_kind: str = "",
                 if key not in row or row.get(key) is None:
                     continue
                 caliber = str(row.get("caliber") or UNKNOWN)
+                # 行级声明优先于元数据：同一载荷里不同年度/不同来源的币种可能不同，
+                # 只有行级能如实表达；缺失仍记 unknown。
+                row_currency = str(row.get("currency") or currency or UNKNOWN)
+                row_unit = str(row.get("unit") or unit or UNKNOWN)
                 facts.append(Fact(
                     fact_id=make_fact_id(entity_id, entity, key, period, caliber),
                     entity=entity, entity_id=entity_id,
                     metric=key, metric_label=label,
                     period=period, period_start=p_start, period_end=p_end,
                     period_type=p_type,
-                    currency=currency, unit=unit,
-                    unit_source="source" if str(md.get("unit") or "") else UNKNOWN,
+                    currency=row_currency, unit=row_unit,
+                    unit_source=("row" if str(row.get("unit") or "")
+                                 else ("source" if str(md.get("unit") or "") else UNKNOWN)),
                     value=row.get(key), raw_value=row.get(key),
                     caliber=caliber,
                     source_url=url, source_hash=snap,
