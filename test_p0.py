@@ -5872,6 +5872,22 @@ class TestReportPdfLayout(unittest.TestCase):
         from pypdf import PdfReader
         return [p.extract_text() or "" for p in PdfReader(io.BytesIO(pdf)).pages]
 
+    def test_loaded_font_covers_ascii_and_cjk(self):
+        """排版所依赖的字体必须同时覆盖 ASCII 与中文。
+
+        实测缺陷（CI 暴露）：Linux 字体的 cmap 把 ASCII 与 CJK 分在不同子表，而
+        解析时只保留了最后一个命中的子表 → 数字取不到字形，PDF 里「第 1 页」
+        渲染成「第  页」、英文文件名整段消失（抽取文本里是 \\x00）。
+        这条先于排版断言失败，直接指出"字体覆盖不全"而不是让页脚断言报一个
+        看不懂的字符串不匹配。
+        """
+        import report_pdf
+        font = report_pdf._load_font()
+        if font is None:
+            self.skipTest("环境中无可用中文字体（回退 Helvetica），字形覆盖无从断言")
+        missing = [ch for ch in "0123456789ABZaz/第页" if not font.glyph_id(ch)]
+        self.assertEqual(missing, [], f"字体缺少这些字形：{missing}")
+
     def test_page_footer_with_total(self):
         import report_pdf
         # 正文要足够长才能稳定跨页（实测 11 段×40 字仍只有一页）

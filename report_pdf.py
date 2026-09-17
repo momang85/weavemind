@@ -113,11 +113,22 @@ class TTFont:
         return advances
 
     def _parse_cmap(self) -> dict[int, int]:
+        """合并**所有** Unicode cmap 子表（而不是只留一个）。
+
+        实测缺陷（CI 上暴露）：Linux 字体（DroidSansFallbackFull.ttf）的 cmap 里，
+        ASCII/数字与 CJK 分处不同子表；此前 `best = m or best` 只保留**最后一个**
+        命中的子表，于是取到的那份不含 ASCII → `glyph_id("1") == 0` → PDF 里
+        「第 1 页」渲染成「第  页」、`no_such_chart.png` 里的英文整段消失
+        （抽取文本里是一串 \\x00）。合并后 ASCII 与 CJK 都能解析。
+
+        优先级（高者覆盖低者）：Windows 全量 (3,10) > Windows BMP (3,1) >
+        Unicode (0,x) > 其它。
+        """
         cmap = self._table_data.get("cmap")
         if not cmap:
             return {}
         n = _u16(cmap, 2)
-        best: dict[int, int] = {}
+        tables: list[tuple[int, dict[int, int]]] = []
         for i in range(n):
             pid, eid = _u16(cmap, 4 + i * 8), _u16(cmap, 6 + i * 8)
             off = _u32(cmap, 8 + i * 8)
@@ -125,17 +136,29 @@ class TTFont:
             if len(sub) < 4:
                 continue
             fmt = _u16(sub, 0)
-            # 优先 Windows Unicode BMP / Unicode 全量
-            score = (pid == 3 and eid == 1) or (pid == 0)
             if fmt == 4:
                 m = self._parse_cmap4(sub)
-                if score or not best:
-                    best = m or best
             elif fmt == 12:
                 m = self._parse_cmap12(sub)
-                if score or not best:
-                    best = m or best
-        return best
+            else:
+                continue
+            if not m:
+                continue
+            if pid == 3 and eid == 10:
+                pri = 3
+            elif pid == 3 and eid == 1:
+                pri = 2
+            elif pid == 0:
+                pri = 1
+            else:
+                pri = 0
+            tables.append((pri, m))
+        merged: dict[int, int] = {}
+        for _pri, m in sorted(tables, key=lambda x: x[0]):
+            for cp, gid in m.items():
+                if gid:
+                    merged[cp] = gid
+        return merged
 
     @staticmethod
     def _parse_cmap4(sub: bytes) -> dict[int, int]:
