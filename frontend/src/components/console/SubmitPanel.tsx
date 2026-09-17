@@ -194,7 +194,9 @@ export default memo(function SubmitPanel({
         onReady={(goalText) => setGoal(goalText)} />
 
       {/* 输入区 */}
-      <div className="bg-slate-900 border border-slate-800 rounded-xl p-1.5 flex items-end gap-2">
+      {/* 窄屏：操作按钮组 basis-full 独占一行，输入框才能拿到整行宽度。
+          此前按钮组 shrink-0 且不换行，390px 窗口下把输入框压到 24px（实际不可输入）。 */}
+      <div className="bg-slate-900 border border-slate-800 rounded-xl p-1.5 flex flex-wrap items-end gap-2">
         <textarea value={goal}
           onChange={e => setGoal(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSubmit() } }}
@@ -202,7 +204,7 @@ export default memo(function SubmitPanel({
           disabled={isRunning || demoMode}
           rows={1}
           className="flex-1 min-w-0 bg-transparent border-none text-slate-200 placeholder-slate-600 resize-none p-3 text-sm focus:outline-none disabled:opacity-50" />
-        <div className="flex items-center gap-2 pb-1 shrink-0">
+        <div className="flex flex-wrap items-center justify-end gap-2 pb-1 shrink-0 basis-full sm:basis-auto">
           {activeConversationId && (
             <span className="hidden sm:inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-violet-500/10 border border-violet-500/20 text-violet-400 text-xs whitespace-nowrap">
               <MessagesSquare className="w-3.5 h-3.5" /> 对话中
@@ -259,7 +261,7 @@ export default memo(function SubmitPanel({
           </button>
         </div>
         {(elapsedText || (!isRunning && etaText)) && (
-          <div className="mt-2 text-xs text-slate-500">
+          <div className="mt-2 text-xs text-slate-500 basis-full">
             {isRunning
               ? `${elapsedText || ''}${elapsedText && etaText && !etaText.includes('未知') ? ' · ' : ''}${etaText && !etaText.includes('未知') ? etaText : ''}`
               : etaText}
