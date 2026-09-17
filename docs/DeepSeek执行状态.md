@@ -1,8 +1,30 @@
 # DeepSeek 执行状态（2026-09-17 更新）
 
 **当前关卡**：M0 / R0b / R0c / MKT-P0 / R1 / R2 / 检索质量统一均已落地；**B 批只做了线几何**。
-共 10 个提交在本地**未推送**（`c1a7559`…，本机 GitHub 凭据失效 + 代理 `localhost:7897`
-不可达，需你重新认证并恢复代理）。下一批 = **B 批其余项 → C → D → E → F**。
+推送已恢复：远端 `main` = `4acf814`（本轮共 12 个提交全部推上去）。**CI 已能真实运行**
+（此前"从未观察到绿灯"的项目里，`clean-env-e2e` 现在**绿了**）。下一批 = **B 批其余项 → C → D → E → F**。
+
+**CI 现状（按 run `4acf814` 的作业结论）**
+
+| 作业 | 结论 | 说明 |
+|---|---|---|
+| `clean-env-e2e` | ✅ success | **首次绿灯**：干净 clone → 依赖 → 起服务（Redis 服务容器 + 仓库内 stub）→ 提交任务 → 产出报告 |
+| `frontend` | ✅ success | 行为测试 + 构建 |
+| `backend` | ❌ 停在 "Portable Redis acquisition" | 该步之前全绿（含本轮修的 "Setup wizard tests"）；该步之后 ~37 步被跳过 |
+| `docker-image` | ❌ 停在 "Compose up and readiness check" | 构建与两个导入检查全绿；容器就绪检查失败 |
+
+- **已修并验证生效**：`backend` 原先卡在 "Setup wizard tests"（3 个用例拿 `api.example.invalid`
+  当目标，而探测策略先看真实 DNS，替身根本没被调用）→ 已修，新 run 已越过该步。
+- **已修但 CI 仍红**：`docker-image` 的就绪检查。修了两处（`WEAVEMIND_SUPERVISE=1` 让容器常驻、
+  redis 就绪探针 + `condition: service_healthy`），宿主上先验证过同一份代码在 supervise 模式下
+  `/api/health` 返回 200——但容器里仍不就绪，说明还有别的原因，**需要该步骤的 CI 日志**才能定位。
+- **未定位**：`backend` 的 "Portable Redis acquisition"（`test_redis_acquisition.py`）。
+  本机 14 项全绿，且该文件与 `dep_check` 都没有平台分支；没有 CI 日志无法判断是 Linux 环境差异
+  还是 runner 抖动。
+- **CI 日志读不到**：GitHub 的 job 日志与 annotation 都需要登录（API 返回 403），
+  提交状态接口也不带失败文本。要定位上面两步，需要你把这两步的日志贴过来（浏览器里点开即可）。
+- **口径提醒**：`backend` 是 fail-fast，一个早步骤失败会让后面 ~37 步显示 skipped——
+  那些套件在该 commit 上**并未**在 CI 验证（本机已逐条跑过，见下）。
 
 **B 批（PDF 排版）：线几何已修，其余项与视觉门禁未做**
 
