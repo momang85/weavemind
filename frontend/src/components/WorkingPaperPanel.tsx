@@ -20,18 +20,18 @@ function WorkingPaperPanelImpl({ paper }: { paper: unknown }) {
       <div className="flex items-center gap-2 px-4 py-3 border-b border-slate-800">
         <FileSpreadsheet className="w-4 h-4 text-cyan-400" />
         <span className="text-sm text-slate-200">可重算底稿</span>
-        <span className={`ml-auto inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] ${
+        <span className={`ml-auto inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs ${
           s.goalMet ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'}`}>
           {s.goalMet
             ? <><CheckCircle2 className="w-3 h-3" />目标达成（{s.present}/{s.required}）</>
             : <><AlertTriangle className="w-3 h-3" />未达成（{s.present}/{s.required}）</>}
         </span>
-        {s.asOf && <span className="text-[11px] text-slate-500">资料截至 {s.asOf}</span>}
+        {s.asOf && <span className="text-xs text-slate-500">资料截至 {s.asOf}</span>}
       </div>
 
       {(s.missing.length > 0 || s.gaps.length > 0 || s.problems.length > 0) && (
         <div className="px-4 py-3 border-b border-slate-800 space-y-1">
-          <div className="text-[11px] text-slate-400">缺口与待核验项（不得据此声称已达成）</div>
+          <div className="text-xs text-slate-400">缺口与待核验项（不得据此声称已达成）</div>
           <ul className="text-xs space-y-0.5">
             {s.missing.map(m => (
               <li key={`m-${m}`} className="text-amber-400">· 缺少必需事实：{m}</li>
@@ -84,7 +84,7 @@ function WorkingPaperPanelImpl({ paper }: { paper: unknown }) {
 
       {s.derived.length > 0 && (
         <div className="px-4 py-3 border-t border-slate-800">
-          <div className="flex items-center gap-1.5 text-[11px] text-slate-400 mb-1">
+          <div className="flex items-center gap-1.5 text-xs text-slate-400 mb-1">
             <Sigma className="w-3 h-3" />计算值（公式与输入已附，可自行重算）
           </div>
           <ul className="text-xs space-y-1">

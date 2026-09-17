@@ -383,7 +383,7 @@ function ResearchQuickForm({ disabled, onReady }: {
               className="px-3 py-1.5 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 rounded-lg text-xs disabled:opacity-40">
               生成研究目标（写入输入框）
             </button>
-            <span className="text-[11px] text-slate-500">
+            <span className="text-xs text-slate-500">
               只拼目标，不自动提交；三个核心指标：营业收入 / 归母净利润 / 经营活动现金流净额
             </span>
           </div>
