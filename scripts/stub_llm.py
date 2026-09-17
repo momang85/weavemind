@@ -41,6 +41,21 @@ REPORT_BODY = """# 测试目标研究报告（stub 模型产出）
 数据来源于公开渠道，可能存在延迟或误差；据此操作风险自担。
 """
 
+# 固定模型替身产出里的**夹具标记**：门禁靠它在交付物里认出"这确实是替身那份报告"，
+# 而不是"文本非空就算数"——失败说明（如"LLM 端点不可用"）或取消说明同样是"非空"，
+# 早期判据会把它们当报告通过（假绿）。
+FIXTURE_MARK = "STUB-FIXTURE-REPORT-1200"
+
+# 已在夹具里固定的两个数字与来源，供门禁断言"内容符合夹具预期"。
+FIXTURE_FACTS = ("1200亿元", "240亿元", "2025 年度")
+
+REPORT_BODY = REPORT_BODY.replace("# 测试目标研究报告（stub 模型产出）",
+                                  f"# 测试目标研究报告（stub 模型产出）\n\n{FIXTURE_MARK}")
+
+# 负向用例用的失败模式：让模型端点直接报错，任务必须如实终结为 FAILED。
+STUB_MODE_OK = "ok"
+STUB_MODE_FAIL = "fail"
+
 PLAN = {
     "steps": [
         {"step_id": "1", "capability": "web_search",
@@ -63,6 +78,13 @@ def _reply_text(payload: dict) -> str:
     if wants_json and re.search(r"步|step|计划|plan", blob):
         return json.dumps(PLAN, ensure_ascii=False)
     return REPORT_BODY
+
+
+def _stub_mode() -> str:
+    """替身工作模式：`ok` 正常回包；`fail` 让端点报错（负向用例专用）。"""
+    import os
+    mode = str(os.environ.get("WM_STUB_MODE") or STUB_MODE_OK).strip().lower()
+    return STUB_MODE_FAIL if mode == STUB_MODE_FAIL else STUB_MODE_OK
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -97,6 +119,12 @@ class _Handler(BaseHTTPRequestHandler):
                 "data": [{"embedding": [0.01] * 8, "index": i} for i in range(max(1, n))],
                 "model": "stub-embed", "usage": {"total_tokens": 1},
             })
+        if _stub_mode() == STUB_MODE_FAIL:
+            # 负向用例：端点如实报错，任务必须终结为 FAILED，且不得产出"报告"
+            return self._json({
+                "error": {"message": "stub 故障注入：模型端点不可用",
+                          "type": "stub_injected_failure"},
+            }, 500)
         text = _reply_text(payload)
         return self._json({
             "id": "stub-1",

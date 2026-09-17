@@ -36,6 +36,11 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_PORTS = {"web": 8099, "redis": 6390, "stub": 8799}
+# 部署烟测的**成功态**：只有这两种才算"跑通并产出可交付结果"。
+# FAILED/CANCELLED 必须走负向用例（见 --negative），不能算成功。
+SUCCESS_STATES = ("SUCCESS", "SUCCESS_WITH_ISSUES")
+# 本脚本起过的替身进程（含负向用例重启的那个），finally 里统一收掉
+_STUB_PROCS: list = []
 # 允许请求的回环主机（只有本脚本自己启动的服务在这些地址上）
 LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
 
@@ -102,6 +107,10 @@ def main() -> int:
     ap.add_argument("--ci", action="store_true", help="CI 模式（Redis 用 6379）")
     ap.add_argument("--keep", action="store_true", help="保留临时目录便于排查")
     ap.add_argument("--timeout", type=float, default=900.0, help="任务等待上限（秒）")
+    ap.add_argument("--negative", dest="negative", action="store_true", default=True,
+                    help="同时跑负向用例（端点故障注入 → 必须如实失败且成功判据拒绝）")
+    ap.add_argument("--no-negative", dest="negative", action="store_false",
+                    help="只跑成功路径（调试用）")
     args = ap.parse_args()
 
     ports = dict(DEFAULT_PORTS)
@@ -112,7 +121,15 @@ def main() -> int:
     clone = tmp / "clone"
     stub_proc = None
     started = False
-    report: dict = {"ok": False, "stage": "init", "clone": str(clone)}
+    report: dict = {
+        "ok": False, "stage": "init", "clone": str(clone),
+        # 口径声明：本门禁只证明"装得上、起得来、跑通、产出夹具预期产物"，
+        # 用固定模型替身，**不证明真实上市公司研究的金融质量**（那是 S1/S2 的单独关卡）。
+        "gate": "部署烟测（固定模型替身）",
+        "proves": ["干净 clone 可安装", "依赖自检通过", "服务可就绪",
+                   "任务能跑到成功终态", "交付物含夹具标记与夹具事实"],
+        "does_not_prove": ["真实模型质量", "真实 SEC/行情抓取", "金融数字正确性"],
+    }
     try:
         # 1) 干净 clone（只取版本库内容：未提交/被忽略的文件一律不参与）
         report["stage"] = "clone"
@@ -139,11 +156,7 @@ def main() -> int:
         report["stage"] = "stub"
         base = f"http://127.0.0.1:{ports['stub']}/v1"
         stub_log = tmp / "stub.log"
-        stub_proc = subprocess.Popen(
-            [sys.executable, str(clone / "scripts" / "stub_llm.py"),
-             "--port", str(ports["stub"])],
-            stdout=open(stub_log, "w", encoding="utf-8"),
-            stderr=subprocess.STDOUT)
+        stub_proc = _spawn_stub(sys.executable, clone, ports["stub"], stub_log, "ok")
         if not _wait_http(f"{base}/models", allowed_ports, timeout=30):
             raise SystemExit("stub 模型未就绪")
         key = _stub_credential()
@@ -179,16 +192,32 @@ def main() -> int:
         report["status"] = status
         if status not in ("SUCCESS", "SUCCESS_WITH_ISSUES", "FAILED", "CANCELLED"):
             raise SystemExit(f"任务未在 {args.timeout:.0f}s 内进入终态：{status}")
+        # 成功烟测只认**成功态**：FAILED/CANCELLED 是"服务跑起来了"以外的结果，
+        # 此前它们照样往下走、只要文本非空就判通过（假绿）。
+        if status not in SUCCESS_STATES:
+            raise SystemExit(
+                f"任务终态是 {status}（不是 {SUCCESS_STATES}）："
+                "部署烟测只接受成功态，失败/取消必须按负向用例单独断言")
 
-        # 6) 产出报告
+        # 6) 产出报告（按夹具内容判，不按"非空"判）
         report["stage"] = "report"
         produced, detail = _report_produced(clone, env, task_id)
         report["report_produced"] = produced
         report["report_detail"] = detail
         if not produced:
-            raise SystemExit("任务结束但没有产出报告：" + detail)
+            raise SystemExit("任务结束但没有产出**夹具预期**的报告：" + detail)
         report["ok"] = True
         report["stage"] = "done"
+
+        # 7) 负向用例（默认开启）：把替身切成"端点报错"，再走一次同一条链路，
+        #    断言任务**如实失败**且成功判据拒绝它的文本。没有这一步，
+        #    "失败也算产出报告"的假绿没有任何回归保护。
+        if args.negative:
+            report["stage"] = "negative"
+            neg = _run_negative_case(clone, env, ports, allowed_ports, stub_log,
+                                     args.timeout, report)
+            if not neg:
+                return 1
         return 0
     except SystemExit as exc:
         if str(exc):
@@ -200,11 +229,12 @@ def main() -> int:
             subprocess.run([sys.executable, "launcher.py", "stop"], cwd=str(clone),
                            env=os.environ.copy(), capture_output=True, text=True,
                            timeout=180)
-        if stub_proc is not None:
+        for proc in _STUB_PROCS:
             try:
-                stub_proc.send_signal(signal.SIGTERM)
+                proc.send_signal(signal.SIGTERM)
             except Exception:
                 pass
+
         out = ROOT / "docs" / "evidence" / "e2e_clean_last.json"
         try:
             out.parent.mkdir(parents=True, exist_ok=True)
@@ -292,13 +322,77 @@ def _await_terminal(clone: Path, env: dict, tid: str, timeout: float) -> str:
     return last
 
 
+def _spawn_stub(python: str, clone: Path, port: int, log_path: Path,
+                mode: str) -> subprocess.Popen:
+    """起一个替身端点进程（`mode=fail` 时端点如实报错）。"""
+    env = os.environ.copy()
+    env["WM_STUB_MODE"] = mode
+    proc = subprocess.Popen(
+        [python, str(clone / "scripts" / "stub_llm.py"), "--port", str(port)],
+        stdout=open(log_path, "a", encoding="utf-8"),
+        stderr=subprocess.STDOUT, env=env)
+    _STUB_PROCS.append(proc)
+    return proc
+
+
+def _run_negative_case(clone: Path, env: dict, ports: dict, allowed_ports: set,
+                       stub_log: Path, timeout: float, report: dict) -> bool:
+    """负向用例：端点报错时任务必须**如实失败**，且成功判据拒绝它的文本。
+
+    断言两件事（缺一不可）：
+    1. 终态不是成功态（此前 FAILED 也被当作可继续的终态）；
+    2. `_report_produced` 对失败运行返回 False —— 失败说明是"非空文本"，
+       早期判据会把它当报告，这正是假绿的来源。
+    """
+    for proc in _STUB_PROCS:                    # 换模式要重启替身
+        try:
+            proc.send_signal(signal.SIGTERM)
+            proc.wait(timeout=10)
+        except Exception:
+            pass
+    _STUB_PROCS.clear()
+    _spawn_stub(sys.executable, clone, ports["stub"], stub_log, "fail")
+    base = f"http://127.0.0.1:{ports['stub']}/v1"
+    if not _wait_http(f"{base}/models", allowed_ports, timeout=30):
+        report["negative_ok"] = False
+        report["negative_detail"] = "故障注入替身未就绪"
+        _log("负向用例失败：故障注入替身未就绪")
+        return False
+    tid = _submit(clone, env)
+    neg_status = _await_terminal(clone, env, tid, min(float(timeout), 300.0))
+    report["negative_task_id"] = tid
+    report["negative_status"] = neg_status
+    produced, detail = _report_produced(clone, env, tid)
+    report["negative_report_accepted"] = produced
+    report["negative_detail"] = detail
+    ok = (neg_status not in SUCCESS_STATES) and (not produced)
+    report["negative_ok"] = ok
+    _log(f"负向用例：终态={neg_status}（{'符合预期' if neg_status not in SUCCESS_STATES else '预期外成功'}），"
+         f"成功判据={'拒绝' if not produced else '误接受'}；{detail}")
+    return ok
+
+
 def _report_produced(clone: Path, env: dict, tid: str) -> tuple[bool, str]:
-    """报告产出的判据：任务库 report 非空，或工作区里有 reports/report.md。"""
+    """**成功路径**的报告产出的判据：交付物里必须能找到夹具标记与夹具数字。
+
+    早期判据只要"任务库 report 非空"就算通过——失败说明（"LLM 端点不可用…"）与取消说明
+    （"任务被用户取消…"）同样是"非空"，于是失败/取消也能让成功烟测变绿（假绿）。
+    现在按**内容**判：必须含替身报告里的夹具标记（`FIXTURE_MARK`）与夹具事实
+    （`FIXTURE_FACTS`），否则一律不算"产出了预期报告"。
+
+    交付物可以是任务库 report，也可以是工作区里的报告文件；两处都按同一内容判据。
+    """
     del env
     import sqlite3
 
     import db_paths  # noqa: PLC0415
     import workspace as ws_mod  # noqa: PLC0415
+
+    try:
+        from scripts.stub_llm import FIXTURE_FACTS, FIXTURE_MARK  # noqa: PLC0415
+    except Exception:                       # 以脚本方式运行时按同目录导入
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from stub_llm import FIXTURE_FACTS, FIXTURE_MARK  # noqa: PLC0415
 
     con = sqlite3.connect(db_paths.resolve_db_path())
     try:
@@ -306,14 +400,25 @@ def _report_produced(clone: Path, env: dict, tid: str) -> tuple[bool, str]:
                           (tid,)).fetchone()
     finally:
         con.close()
-    text = str((row[0] if row else "") or "")
+    candidates: list[tuple[str, str]] = []
+    db_text = str((row[0] if row else "") or "")
+    if db_text.strip():
+        candidates.append(("任务库 report", db_text))
     ws = ws_mod.task_workspace(tid)
     rp = Path(ws) / "reports" / "report.md"
-    if text.strip():
-        return True, f"任务库 report {len(text)} 字符"
-    if rp.exists() and rp.read_text(encoding="utf-8", errors="replace").strip():
-        return True, f"{rp} 非空"
-    return False, f"任务库 report 为空且 {rp} 不存在"
+    if rp.exists():
+        txt = rp.read_text(encoding="utf-8", errors="replace")
+        if txt.strip():
+            candidates.append((str(rp), txt))
+    if not candidates:
+        return False, f"任务库 report 为空且 {rp} 不存在"
+    problems: list[str] = []
+    for where, text in candidates:
+        miss = [t for t in (FIXTURE_MARK, *FIXTURE_FACTS) if t not in text]
+        if not miss:
+            return True, f"{where} 含夹具标记与全部夹具事实（{len(text)} 字符）"
+        problems.append(f"{where} 缺少 {miss}")
+    return False, "；".join(problems) + "（失败/取消说明同样是非空文本，不算报告）"
 
 
 if __name__ == "__main__":
