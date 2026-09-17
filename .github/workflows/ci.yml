@@ -78,6 +78,8 @@ jobs:
         run: python test_working_paper.py
       - name: "Review-edit & working-paper API (S2: new version, no approval migration)"
         run: python test_review_edit_api.py
+      - name: "Trial metrics (S3: unknown is not zero, anonymous records)"
+        run: python test_trial_metrics.py
       - name: Portable Redis acquisition (multi-source / budget / offline reuse)
         run: python test_redis_acquisition.py
       - name: US financial chain (SEC fixture / subject extraction / amount rate)
