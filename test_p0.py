@@ -5872,6 +5872,17 @@ class TestReportPdfLayout(unittest.TestCase):
         from pypdf import PdfReader
         return [p.extract_text() or "" for p in PdfReader(io.BytesIO(pdf)).pages]
 
+    def _flat(self, pdf: bytes) -> list[str]:
+        """抽取文本并**去掉所有空白**：便于断言内容而不受"运行序列切分"影响。
+
+        画文本时按"字形是否存在"切成多段（中文走嵌入字体、缺字形的 ASCII 走内置
+        Helvetica），抽取工具会在两段接缝处多插一个空格——实测 CI 上抽出的是
+        `第 1 页 /  共 3 页`（`/` 与 `共` 之间两个空格）。空格数量是实现细节，
+        不是被测内容。
+        """
+        import re as _re
+        return [_re.sub(r"\s+", "", t) for t in self._text(pdf)]
+
     def test_digits_render_even_if_font_lacks_latin(self):
         """中文字体不含 ASCII 时，数字/英文改用内置 Helvetica 画。
 
@@ -5894,9 +5905,9 @@ class TestReportPdfLayout(unittest.TestCase):
                 mock.patch.object(R, "_load_font", lambda: font):
             pdf = R.markdown_to_pdf("# 复核结论\n\n营收 1741 亿元。\n",
                                     title="复核结论", workspace=None)
-        text = self._text(pdf)[0]
+        text = self._flat(pdf)[0]
         self.assertIn("1741", text, "缺 Latin 字形时数字必须回退到内置字体，不能留白")
-        self.assertIn("第 1 页", text)
+        self.assertIn("第1页", text)
         self.assertIn(b"/F2", pdf, "回退字体应登记并挂进页面资源")
 
     def test_page_footer_with_total(self):
@@ -5904,17 +5915,17 @@ class TestReportPdfLayout(unittest.TestCase):
         # 正文要足够长才能稳定跨页（实测 11 段×40 字仍只有一页）
         md = "# 复核结论\n\n" + "\n\n".join(
             f"第 {i} 段。" + "内容" * 60 for i in range(1, 31))
-        pages = self._text(report_pdf.markdown_to_pdf(md, title="复核结论",
-                                                     workspace=None))
+        pages = self._flat(report_pdf.markdown_to_pdf(md, title="复核结论",
+                                                      workspace=None))
         self.assertGreaterEqual(len(pages), 2, "样例应至少两页，否则测不出页码")
         total = len(pages)
-        self.assertIn(f"第 1 页 / 共 {total} 页", pages[0])
-        self.assertIn(f"第 {total} 页 / 共 {total} 页", pages[-1])
+        self.assertIn(f"第1页/共{total}页", pages[0])
+        self.assertIn(f"第{total}页/共{total}页", pages[-1])
 
     def test_cover_title_not_printed_twice(self):
         import report_pdf
         md = "# 复核结论\n\n正文。\n"
-        text = self._text(report_pdf.markdown_to_pdf(md, title="复核结论",
+        text = self._flat(report_pdf.markdown_to_pdf(md, title="复核结论",
                                                      workspace=None))[0]
         self.assertEqual(text.count("复核结论"), 1,
                          "封面标题与正文首个同名标题只应出现一次")
@@ -5922,7 +5933,7 @@ class TestReportPdfLayout(unittest.TestCase):
     def test_similar_but_different_heading_is_kept(self):
         import report_pdf
         md = "# 复核结论与建议\n\n正文。\n"
-        text = self._text(report_pdf.markdown_to_pdf(md, title="复核结论",
+        text = self._flat(report_pdf.markdown_to_pdf(md, title="复核结论",
                                                      workspace=None))[0]
         self.assertIn("复核结论与建议", text, "只有完全同名才合并，相似标题不得误删")
 
@@ -5932,7 +5943,7 @@ class TestReportPdfLayout(unittest.TestCase):
         for i in range(1, 61):
             rows.append(f"| 公司{i} | {1000 + i}亿元 | 第{i}行说明 |")
         md = "# 长表\n\n" + "\n".join(rows) + "\n"
-        pages = self._text(report_pdf.markdown_to_pdf(md, workspace=None))
+        pages = self._flat(report_pdf.markdown_to_pdf(md, workspace=None))
         self.assertGreaterEqual(len(pages), 2, "60 行表格应跨页")
         with_header = [p for p in pages if "公司" in p and "备注" in p]
         self.assertGreaterEqual(len(with_header), 2,
@@ -5941,7 +5952,7 @@ class TestReportPdfLayout(unittest.TestCase):
     def test_missing_image_is_visible_as_placeholder(self):
         import report_pdf
         md = "# 图表\n\n![营收趋势](no_such_chart.png)\n\n正文。\n"
-        text = self._text(report_pdf.markdown_to_pdf(md, workspace=None))[0]
+        text = self._flat(report_pdf.markdown_to_pdf(md, workspace=None))[0]
         self.assertIn("图片未能嵌入", text,
                       "缺图必须留可见占位，不能静默消失")
         self.assertIn("no_such_chart.png", text, "占位应带上原路径便于排查")
