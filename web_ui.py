@@ -2539,6 +2539,33 @@ def _write_export_manifest(tid: str, body: str, pdf_bytes: bytes = b"",
             pass
     files["markdown"] = {"sha256": hashlib.sha256(md_bytes).hexdigest(),
                          "bytes": len(md_bytes)}
+    # S2：可重算底稿是交付的一部分——单独登记各自的字节 hash 与摘要
+    # （缺证据的项要能被清单看见：目标达成与否 + 缺口/待核验条数）
+    paper_meta: dict = {}
+    try:
+        from workspace import task_project_dir as _tpd
+        proj = _tpd(tid)
+        for key, name in (("working_paper_json", "working_paper.json"),
+                          ("working_paper_csv", "working_paper.csv")):
+            fp = proj / name
+            if not fp.exists():
+                continue
+            raw = fp.read_bytes()
+            files[key] = {"sha256": hashlib.sha256(raw).hexdigest(),
+                          "bytes": len(raw)}
+        jp = proj / "working_paper.json"
+        if jp.exists():
+            paper = json.loads(jp.read_text(encoding="utf-8"))
+            paper_meta = {
+                "goal_met": bool(paper.get("ok")),
+                "rows": len(paper.get("rows") or []),
+                "derived": len(paper.get("derived") or []),
+                "gaps": len(paper.get("gaps") or []),
+                "problems": len(paper.get("problems") or []),
+            }
+    except Exception as exc:
+        logger.warning("清单登记底稿失败（task=%s）：%s", tid, str(exc)[:120])
+        paper_meta = {"error": str(exc)[:160]}
     if pdf_bytes:
         files["pdf"] = {"sha256": hashlib.sha256(pdf_bytes).hexdigest(),
                         "bytes": len(pdf_bytes)}
@@ -2587,6 +2614,7 @@ def _write_export_manifest(tid: str, body: str, pdf_bytes: bytes = b"",
         "status": status,
         "draft": status != DELIVERY_VERIFIED,
         "draft_reason": draft_reason,
+        "working_paper": paper_meta,
         "renderer_version": "report_pdf/v1",
         "template_version": "default",
         "files": files,
@@ -2639,6 +2667,32 @@ def _task_markdown_export(tid: str) -> tuple[bytes, dict]:
     raw = body.encode("utf-8")
     manifest = _write_export_manifest(tid, body, markdown_bytes=raw)
     return raw, manifest
+
+
+def _get_task_working_paper_file(self, p):
+    """S2：下载可重算底稿（CSV / JSON）。缺底稿 404——不编一份空的。"""
+    for suffix, name, ctype in (("/working_paper.csv", "working_paper.csv", "text/csv"),
+                                ("/working_paper.json", "working_paper.json",
+                                 "application/json")):
+        if not (p.startswith("/api/task/") and p.endswith(suffix)):
+            continue
+        tid = p.split("/api/task/")[-1].rsplit(suffix, 1)[0]
+        try:
+            from workspace import task_project_dir
+            fp = task_project_dir(tid) / name
+            if not fp.exists():
+                return self._json({"error": "working paper not found"}, 404)
+            raw = fp.read_bytes()
+        except Exception as exc:
+            logger.error("底稿下载失败（task=%s）：%s", tid, str(exc)[:200])
+            return self._json({"error": "read failed", "detail": str(exc)[:200]}, 500)
+        self.send_response(200)
+        self.send_header("Content-Type", f"{ctype}; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="{tid}-{name}"')
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+        return
 
 
 def _get_task_markdown(self, p):
@@ -4096,9 +4150,63 @@ def _get_task_page(self, p):
                         data = t
                         break
         if data:
+            # C/S2：状态字段的口径——**未知就说未知**，不用 0 冒充。
+            # elapsed_sec：无 created_at（旧任务/字段缺失）时为 None，由前端显示"未知"。
+            elapsed = None
+            try:
+                from datetime import datetime as _dt
+                _created = data.get("created_at")
+                if _created:
+                    _fmt = "%Y-%m-%d %H:%M:%S.%f" if "." in str(_created) else "%Y-%m-%d %H:%M:%S"
+                    _c = _dt.strptime(str(_created), _fmt).timestamp()
+                    _end = None
+                    if str(data.get("status") or "").upper() not in (
+                            "RUNNING", "PENDING", "QUEUED"):
+                        _fin = data.get("completed_at") or data.get("updated_at")
+                        if _fin:
+                            _ffmt = ("%Y-%m-%d %H:%M:%S.%f" if "." in str(_fin)
+                                     else "%Y-%m-%d %H:%M:%S")
+                            _end = _dt.strptime(str(_fin), _ffmt).timestamp()
+                    elapsed = max(0.0, (_end or time.time()) - _c)
+            except Exception:
+                elapsed = None
+            # 评审状态与交付状态：读工作区（缺失即 None → 前端显示"未知"，不默认通过）
+            review_state = None
+            delivery = None
+            try:
+                import json as _json
+                from workspace import task_workspace as _tws
+                _ws = _tws(tid)
+                _rp = _ws / "review_state.json"
+                if _rp.exists():
+                    _review = _json.loads(_rp.read_text(encoding="utf-8"))
+                    review_state = {"verdict": _review.get("verdict") or "",
+                                    "label": _review.get("label") or "",
+                                    "degraded_reason": _review.get("degraded_reason") or ""}
+                _store_path = _ws / "report_versions.json"
+                if _store_path.exists():
+                    from report_version import DELIVERY_VERIFIED, VersionStore
+                    _store = VersionStore(_ws, tid)
+                    _v = _store.adopted()
+                    if _v is not None:
+                        _dels = _store.deliveries()
+                        _last = _dels[-1] if _dels else {}
+                        _is_draft = not (_last.get("ok") if _last else True)
+                        delivery = {
+                            "version_id": _v.identity_id(),
+                            "acceptance_overall": _v.acceptance_overall(),
+                            "draft": bool(_is_draft),
+                            "draft_reason": (str(_last.get("reason") or "")
+                                             if _is_draft else ""),
+                            "verified": bool(not _is_draft
+                                             and _v.acceptance_overall() == "pass"),
+                        }
+            except Exception as exc:
+                logger.warning("状态补充字段读取失败（task=%s）：%s", tid, str(exc)[:120])
             return self._json({
             "task_id": tid,
             "status": data.get("status", "PENDING"),
+            "phase": data.get("phase") or "",
             "goal": data.get("goal", ""),
             "steps": data.get("steps") or [],
             "report": data.get("final_report") or data.get("report", ""),
@@ -4107,6 +4215,9 @@ def _get_task_page(self, p):
             "revision": bool(data.get("revision")),
             "acceptance": data.get("acceptance"),
             "llm_degraded": data.get("llm_degraded"),
+            "elapsed_sec": elapsed,
+            "review_state": review_state,
+            "delivery": delivery,
         })
         return self._json({"error":"not found"},404)
 
@@ -5180,6 +5291,8 @@ _GET_ROUTES = [
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/stream"), _get_task_stream),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/events"), _get_task_events),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/pdf"), _get_task_pdf),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/working_paper.csv"), _get_task_working_paper_file),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/working_paper.json"), _get_task_working_paper_file),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/report.md"), _get_task_markdown),
     (lambda self, p: p == "/api/config", _get_config),
     (lambda self, p: p == "/api/config/requirements", _get_config_requirements),

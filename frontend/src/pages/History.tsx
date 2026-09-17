@@ -5,6 +5,7 @@ import { FileText, ChevronDown, ChevronRight, MessagesSquare, Play } from 'lucid
 import { ReportMarkdown } from '../components/ReportViewer'
 import { EmptyState, StatusBadge } from '../components/ui'
 import { normalizeDeliverySummary } from '../lib/format'
+import { formatLocalTime } from '../lib/format'
 
 export default function History() {
   const [mode, setMode] = useState<'conv' | 'tasks'>('conv')
@@ -130,7 +131,7 @@ export default function History() {
                   <span className="text-slate-600 text-xs shrink-0">{c.message_count} 条消息</span>
                   <StatusBadge status={c.last_status || 'PENDING'} />
                   <span className="text-slate-600 text-xs shrink-0">
-                    {new Date(c.last_updated).toLocaleString()}
+                    {formatLocalTime(c.last_updated)}
                   </span>
                 </button>
                 <button onClick={() => continueConversation(c.conversation_id)}
@@ -197,7 +198,7 @@ export default function History() {
                     </span>
                   )}
                   <StatusBadge status={t.status} />
-                  <span className="text-slate-600 text-xs">{new Date(t.created_at).toLocaleDateString()}</span>
+                  <span className="text-slate-600 text-xs">{formatLocalTime(t.created_at)}</span>
                 </button>
                 {expanded.has('task-' + t.task_id) && t.report && (
                   <div className="px-5 pb-4 border-t border-slate-800">

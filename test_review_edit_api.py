@@ -162,5 +162,87 @@ class TestReviewEditEndpoint(_Base):
         self.assertEqual(status, 409, "终态任务不得改写正文")
 
 
+class TestWorkingPaperExportAndDownload(_Base):
+    """底稿要出现在导出清单里，并且能下载（缺则 404，不编空底稿）。"""
+
+    def _seed_paper(self, tid: str, *, ok: bool = False) -> Path:
+        proj = ws_mod.task_project_dir(tid)
+        proj.mkdir(parents=True, exist_ok=True)
+        paper = {
+            "ok": ok,
+            "request": {"company": "示例公司", "as_of": "2025-04-30"},
+            "rows": [{"fact_id": "fact-1", "metric": "revenue", "value": 1380.0,
+                      "unit": "亿元", "entity": "示例公司"}],
+            "derived": [{"fact_id": "fact-d1", "metric": "revenue_yoy", "value": 15.0,
+                         "formula": "(1380 - 1200) / 1200 * 100",
+                         "derived_from": ["fact-1"]}],
+            "gaps": [{"kind": "fact", "detail": "缺少必需事实：经营活动现金流净额 2023年"}],
+            "problems": [],
+        }
+        (proj / "working_paper.json").write_text(
+            json.dumps(paper, ensure_ascii=False), encoding="utf-8")
+        (proj / "working_paper.csv").write_text(
+            "fact_id,指标\nfact-1,营业收入\n", encoding="utf-8")
+        return proj
+
+    def test_manifest_registers_paper_with_own_hashes(self):
+        import hashlib
+        import web_ui
+        tid = "s2-dl"
+        proj = self._seed_paper(tid)
+        manifest = web_ui._write_export_manifest(tid, "研究正文", b"%PDF-1.4 stub")
+        files = manifest["files"]
+        self.assertIn("working_paper_json", files)
+        self.assertIn("working_paper_csv", files)
+        want = hashlib.sha256((proj / "working_paper.json").read_bytes()).hexdigest()
+        self.assertEqual(files["working_paper_json"]["sha256"], want,
+                         "底稿要按自己的字节登记 hash")
+        meta = manifest["working_paper"]
+        self.assertEqual(meta["goal_met"], False)
+        self.assertEqual(meta["rows"], 1)
+        self.assertEqual(meta["gaps"], 1)
+
+    def test_download_serves_csv_and_404_without_paper(self):
+        import web_ui
+
+        class _H(_Handler):
+            def __init__(self, path):
+                super().__init__(path)
+                self.headers_out: list[tuple] = []
+                self.written = b""
+                self.status = None
+
+            def send_response(self, code):
+                self.status = code
+
+            def send_header(self, k, v):
+                self.headers_out.append((k, v))
+
+            def end_headers(self):
+                pass
+
+            @property
+            def wfile(self):
+                outer = self
+
+                class _W:
+                    def write(self, data):
+                        outer.written += data
+                return _W()
+
+        tid = "s2-dl-2"
+        self._seed_paper(tid)
+        h = _H(f"/api/task/{tid}/working_paper.csv")
+        web_ui._get_task_working_paper_file(h, h.path)
+        self.assertEqual(h.status, 200)
+        self.assertIn(b"fact-1", h.written)
+        self.assertTrue(any(k == "Content-Type" for k, _ in h.headers_out))
+
+        h2 = _H("/api/task/no-paper-here/working_paper.json")
+        web_ui._get_task_working_paper_file(h2, h2.path)
+        _, status = h2.last
+        self.assertEqual(status, 404)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

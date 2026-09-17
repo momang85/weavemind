@@ -39,3 +39,29 @@ export function formatUsd(usd?: number | null): string {
   if (usd === null || usd === undefined || !isFinite(usd)) return '—'
   return usd >= 1 ? `$${usd.toFixed(2)}` : `$${usd.toFixed(4)}`
 }
+
+/**
+ * 时间显示统一口径：**本地时区** + 非法/缺失值显示"时间未知"。
+ *
+ * 此前各处直接 `new Date(x).toLocaleString()`，缺值/脏数据会渲染出字面量
+ * "Invalid Date"——用户读到的是一个看起来像值的东西，其实是我们没拿到时间。
+ */
+export function formatLocalTime(value?: string | number | null): string {
+  if (value === null || value === undefined || value === '') return '时间未知'
+  const d = new Date(value)
+  if (isNaN(d.getTime())) return '时间未知'
+  return d.toLocaleString()
+}
+
+/**
+ * 预算显示口径：**0 / 缺省 = 不限**（不是"用完了"），余额未知时说未知。
+ *
+ * 0 值在过去会被显示成 0（读起来像"额度用尽"），而它实际表示"没有设置上限"。
+ */
+export function formatBudgetLabel(limit?: number | null, left?: number | null): string {
+  if (limit === null || limit === undefined || !isFinite(limit) || limit <= 0) return '不限'
+  if (left === null || left === undefined || !isFinite(left)) {
+    return `限额 ${limit}（剩余未知）`
+  }
+  return `剩余 ${left}/${limit}`
+}

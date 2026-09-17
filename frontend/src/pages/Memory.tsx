@@ -3,6 +3,7 @@ import { Brain, FlaskConical, ChevronDown, ChevronRight, Play, CheckCircle2, XCi
 import type { MemoryDoc, EvolutionRound } from '../stores/types'
 import { useTaskStore } from '../stores/useTaskStore'
 import { apiOutcome, readApiOutcome } from '../lib/apiResult'
+import { formatLocalTime } from '../lib/format'
 
 interface MemoryHealth {
   injections: number
@@ -350,7 +351,7 @@ export default function Memory() {
                   {chip(p.agent_type || 'search_agent', 'bg-slate-700/50 text-slate-400')}
                   {p.temperature != null && chip('温度 ' + p.temperature, 'bg-slate-700/50 text-slate-400')}
                   {p.max_sources != null && chip('源数 ' + p.max_sources, 'bg-slate-700/50 text-slate-400')}
-                  {p.timestamp && <span className="text-slate-600 text-xs ml-auto">{new Date(p.timestamp).toLocaleString()}</span>}
+                  {p.timestamp && <span className="text-slate-600 text-xs ml-auto">{formatLocalTime(p.timestamp)}</span>}
                 </div>
                 <div className="mt-2 text-xs text-slate-400">
                   摘要提示：<span className="text-slate-300">{p.summarization_prompt || '—'}</span>
@@ -405,7 +406,7 @@ export default function Memory() {
                   <ChevronDown className="w-4 h-4 text-slate-500 shrink-0" />
                   <div className="flex-1 min-w-0">
                     <div className="text-slate-300 text-xs font-medium truncate">{r.summary || '进化轮次'}</div>
-                    {r.timestamp && <div className="text-slate-600 text-xs">{new Date(r.timestamp).toLocaleString()}</div>}
+                    {r.timestamp && <div className="text-slate-600 text-xs">{formatLocalTime(r.timestamp)}</div>}
                   </div>
                   {r.stable ? chip('稳定', 'bg-emerald-500/15 text-emerald-400') : chip('不稳定', 'bg-amber-500/15 text-amber-400')}
                   {r.deployed ? chip('已部署', 'bg-cyan-500/15 text-cyan-400') : chip('未部署', 'bg-slate-700/50 text-slate-400')}
