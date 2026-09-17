@@ -31,6 +31,7 @@ import {
   ChevronDown, ChevronRight, Award, Zap, Download, ExternalLink, Play,
   Share2, Link2, Copy, Check, X, Trash2, CalendarClock, ListTree, Quote, Fingerprint,
 } from 'lucide-react'
+import { WorkingPaperPanel } from './WorkingPaperPanel'
 
 /* ===================== 报告结构化解析（纯函数，无新增依赖） ===================== */
 
@@ -541,6 +542,8 @@ export default memo(function ReportViewer() {
   const [verifyError, setVerifyError] = useState('')
   // T4：报告打开即自动拉取验收全量报告（四档常驻徽章行）
   const [accData, setAccData] = useState<any>(null)
+  // S2：可重算底稿（明细 / 派生 / 缺口），供"关键数字定位到 fact、计算值看公式"
+  const [paperData, setPaperData] = useState<any>(null)
   useEffect(() => {
     setAccData(null)
     if (!taskIdForFiles) return
@@ -552,6 +555,18 @@ export default memo(function ReportViewer() {
     return () => { cancelled = true }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskIdForFiles])
+  useEffect(() => {
+    setPaperData(null)
+    if (!taskIdForFiles) return
+    let cancelled = false
+    fetch('/api/task/' + taskIdForFiles + '/working_paper')
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (!cancelled && d && !d.error) setPaperData(d) })
+      .catch(() => {})
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskIdForFiles])
+
   // F3a：验收事件流（反思重做/每轮验收可回放）+ 证据指纹折叠态
   const [timeline, setTimeline] = useState<any[] | null>(null)
   const [fingerprintOpen, setFingerprintOpen] = useState(false)
@@ -1011,6 +1026,13 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
             </div>
           )
         })()}
+
+        {/* S2：可重算底稿（目标达成 / 关键指标 / 来源与缺口 / 计算值公式） */}
+        {paperData && (
+          <div className="mx-4 mt-4">
+            <WorkingPaperPanel paper={paperData} />
+          </div>
+        )}
 
         {/* 验收缺口横幅：SUCCESS_WITH_ISSUES 任务的报告顶部展示缺口明细 */}
         {report.summary === 'SUCCESS_WITH_ISSUES' && report.acceptance?.gaps && report.acceptance.gaps.length > 0 && (

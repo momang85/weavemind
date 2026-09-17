@@ -1,5 +1,6 @@
 import { memo, useEffect, useState } from 'react'
-import { Loader2, Sparkles, RefreshCw, Plus, MessagesSquare, FileText, ChevronDown, Upload, Zap, ExternalLink, X, Square } from 'lucide-react'
+import { Loader2, Sparkles, RefreshCw, Plus, MessagesSquare, FileText, ChevronDown, Upload, Zap, ExternalLink, X, Square, Building2 } from 'lucide-react'
+import { buildResearchGoal, type ResearchForm } from '../../lib/researchGoal'
 
 /** 快答结果卡片：正文 + 来源链接 + 诚实降级标签。 */
 function QuickAnswerCard({ qa, onClose }: { qa: any; onClose: () => void }) {
@@ -187,6 +188,11 @@ export default memo(function SubmitPanel({
       </div>
       {qa && <QuickAnswerCard qa={qa} onClose={() => setQa(null)} />}
 
+      {/* S2：研究一家公司（首发路径的默认入口）——只拼目标，不绕过自由输入框 */}
+      <ResearchQuickForm
+        disabled={isRunning || demoMode}
+        onReady={(goalText) => setGoal(goalText)} />
+
       {/* 输入区 */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-1.5 flex items-end gap-2">
         <textarea value={goal}
@@ -304,3 +310,85 @@ export default memo(function SubmitPanel({
   )
 
 })
+
+/**
+ * S2 首发入口：研究一家公司（公司与两个年度 + 口径 + 数据截至日）。
+ *
+ * 只做一件事——把表单拼成**符合契约的目标**写进输入框（用户仍可继续手改），
+ * 缺字段就把缺口显示出来，**不拼一个含糊的目标**提交（身份/期间不靠猜）。
+ */
+function ResearchQuickForm({ disabled, onReady }: {
+  disabled: boolean
+  onReady: (goal: string) => void
+}) {
+  const [form, setForm] = useState<ResearchForm>({
+    company: '', yearFrom: '', yearTo: '', caliber: '合并', asOf: '', materials: '',
+  })
+  const [gaps, setGaps] = useState<string[]>([])
+  const [open, setOpen] = useState(true)
+  const preview = buildResearchGoal(form)
+
+  const fill = () => {
+    if (preview.gaps.length) {
+      setGaps(preview.gaps)
+      return
+    }
+    setGaps([])
+    onReady(preview.goal)
+  }
+
+  const field = 'bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500'
+  return (
+    <div className="bg-slate-900 border border-slate-800 rounded-xl p-3">
+      <button type="button" onClick={() => setOpen(o => !o)}
+        className="flex items-center gap-2 text-xs text-slate-300 hover:text-cyan-400">
+        <Building2 className="w-3.5 h-3.5 text-cyan-400" />
+        研究一家公司（上市公司研究工作台）
+        <span className="text-slate-500">{open ? '收起' : '展开'}</span>
+      </button>
+      {open && (
+        <div className="mt-3 space-y-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <input value={form.company ?? ''} placeholder="公司名或代码，如 贵州茅台 / 600519.SH"
+              disabled={disabled}
+              onChange={e => setForm({ ...form, company: e.target.value })}
+              className={`${field} flex-1 min-w-[12rem]`} />
+            <input value={String(form.yearFrom ?? '')} placeholder="起始年 2023"
+              disabled={disabled} onChange={e => setForm({ ...form, yearFrom: e.target.value })}
+              className={`${field} w-28`} />
+            <input value={String(form.yearTo ?? '')} placeholder="结束年 2024"
+              disabled={disabled} onChange={e => setForm({ ...form, yearTo: e.target.value })}
+              className={`${field} w-28`} />
+            <select value={form.caliber ?? '合并'} disabled={disabled}
+              onChange={e => setForm({ ...form, caliber: e.target.value })}
+              className={field}>
+              <option value="合并">合并报表</option>
+              <option value="母公司">母公司报表</option>
+            </select>
+            <input value={form.asOf ?? ''} placeholder="资料截至日 2025-04-30"
+              disabled={disabled} onChange={e => setForm({ ...form, asOf: e.target.value })}
+              className={`${field} w-40`} />
+          </div>
+          <textarea value={form.materials ?? ''} rows={2} disabled={disabled}
+            placeholder="可选：参考资料（年报链接 / 用户提供的材料；会在目标里注明）"
+            onChange={e => setForm({ ...form, materials: e.target.value })}
+            className={`${field} w-full resize-none`} />
+          {gaps.length > 0 && (
+            <ul className="text-xs text-amber-400 space-y-0.5">
+              {gaps.map(g => <li key={g}>· {g}</li>)}
+            </ul>
+          )}
+          <div className="flex items-center gap-2">
+            <button type="button" onClick={fill} disabled={disabled}
+              className="px-3 py-1.5 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 rounded-lg text-xs disabled:opacity-40">
+              生成研究目标（写入输入框）
+            </button>
+            <span className="text-[11px] text-slate-500">
+              只拼目标，不自动提交；三个核心指标：营业收入 / 归母净利润 / 经营活动现金流净额
+            </span>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}

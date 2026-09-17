@@ -3555,6 +3555,25 @@ def _get_files(self, p):
         self.wfile.write(body)
         return
 
+def _get_task_working_paper(self, p):
+    """S2：可重算底稿（明细 / 派生 / 缺口与问题）+ 请求契约，供结果页渲染。
+
+    登录即可访问（viewer 允许）：只读任务工作区里的 `working_paper.json`。
+    没有结构化财务（未产出底稿）返回 404，前端按"无底稿"处理——不编一份空底稿。
+    """
+    if p.startswith("/api/task/") and p.endswith("/working_paper"):
+        tid = p.split("/api/task/")[-1].rsplit("/working_paper", 1)[0]
+        try:
+            from workspace import task_project_dir
+            path = task_project_dir(tid) / "working_paper.json"
+            if not path.exists():
+                return self._json({"error": "not found"}, 404)
+            with open(path, "r", encoding="utf-8") as f:
+                return self._json(json.load(f))
+        except Exception:
+            return self._json({"error": "read failed"}, 500)
+
+
 def _get_task_acceptance(self, p):
     """T4：任务验收全量报告（四档计数 + traceable 明细）。
 
@@ -4365,6 +4384,84 @@ def _post_plan_confirm(self, p, body, admin):
             return self._json({"error": "Redis 写入失败，无法确认计划"}, 503)
         return self._json({"status": "ok"})
 
+def _post_task_review_edit(self, p, body, admin):
+    """S2：人工复核后的**修订版**——落成新版本并立刻重验（旧批准不迁移）。
+
+    请求：`POST /api/task/<id>/review/edit`，body 可以是
+      - `{"body": "<修订后的研究正文>"}`：整篇替换；
+      - `{"find": "...", "replace": "..."}`：定点替换（找不到就 400，不改任何东西）。
+    返回：新版本的 `version_id` / 是否 `verified_delivery` / 重验结论。
+
+    三条纪律（复用 R0 契约，不另立一套）：
+    - 修订版是**新版本**（`parent_id` 指向原版），**旧验收不被迁移**：新版本默认没有
+      对应它自身的验收 → 交付状态只能是"未验收草稿"，直到重新验证通过；
+    - 重验用的是**同一个验收器**（`run_acceptance`），不是"改完就算过"；
+    - 终态任务（CANCELLED/FAILED）不允许改写正文。
+    """
+    if not (p.startswith("/api/task/") and p.endswith("/review/edit")):
+        return None
+    import task_state as _ts
+    tid = p[len("/api/task/"):].rsplit("/review/edit", 1)[0].strip()
+    if not tid:
+        return self._json({"error": "task_id required"}, 400)
+    if not _task_exists(tid):
+        return self._json({"error": "task not found"}, 404)
+    row = {}
+    try:
+        row = _ts.read_task(tid) or {}
+    except Exception:
+        row = {}
+    status = str(row.get("status") or "").upper()
+    if status in ("CANCELLED", "FAILED"):
+        return self._json(
+            {"error": f"任务已终态（{status}），不得改写正文"}, 409)
+    try:
+        from report_version import VersionStore, body_hash
+        from workspace import task_workspace
+        store = VersionStore(task_workspace(tid), tid)
+        current = store.adopted()
+        if current is None:
+            return self._json({"error": "该任务没有可修订的版本"}, 409)
+        new_body = str(body.get("body") or "")
+        if not new_body:
+            find = str(body.get("find") or "")
+            repl = str(body.get("replace") or "")
+            if not find:
+                return self._json({"error": "需要 body 或 find/replace"}, 400)
+            if find not in current.body:
+                return self._json({"error": "find 未出现在当前版本正文中"}, 400)
+            new_body = current.body.replace(find, repl, 1)
+        if body_hash(new_body) == current.version_id:
+            return self._json({"error": "修订后正文与当前版本一致，无需新建版本"}, 400)
+        nv = store.record(new_body, parent_id=current.version_id)
+        # 旧验收**不迁移**：新版本默认"没有对应它自身的验收"
+        store.adopt(nv, reason="人工复核修订")
+        verdict = {}
+        try:
+            from acceptance_checker import run_acceptance
+            goal = str(row.get("goal") or "")
+            # 用**同一个验收器**重验新正文（不是"改完就算过"）
+            verdict = run_acceptance(tid, goal, new_body, task_workspace(tid)) or {}
+            # 绑定到**新版本**（按完整身份精确绑定），使"这一版"的交付状态可判
+            store.bind_acceptance(verdict)
+        except Exception as exc:
+            verdict = {"error": str(exc)[:200], "overall": ""}
+        refreshed = store.adopted() or nv
+        return self._json({
+            "status": "ok", "task_id": tid,
+            "parent_version_id": current.version_id,
+            "version_id": refreshed.version_id,
+            "acceptance": {"overall": str((verdict or {}).get("overall") or ""),
+                           "gaps": (verdict or {}).get("gaps") or []},
+            "note": "修订版是新版本：旧验收与旧批准不自动迁移，须重新验证通过",
+            "needs_reverify": bool(
+                not (verdict or {}).get("overall")
+                or str((verdict or {}).get("overall")) != "pass"),
+        })
+    except Exception as exc:
+        return self._json({"error": f"修订失败：{str(exc)[:200]}"}, 500)
+
+
 def _post_task_cancel(self, p, body, admin):
     """POST /api/task/<task_id>/cancel：请求停止正在运行的任务。
 
@@ -5075,6 +5172,7 @@ _GET_ROUTES = [
     (lambda self, p: p == "/api/projects", _get_projects),
     (lambda self, p: p == "/api/scheduled-jobs", _get_scheduled_jobs),
     (lambda self, p: p.startswith("/files/"), _get_files),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/working_paper"), _get_task_working_paper),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/acceptance/timeline"), _get_task_acceptance_timeline),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/acceptance"), _get_task_acceptance),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/deliverables"), _get_task_deliverables),
@@ -5113,6 +5211,7 @@ _POST_ROUTES = [
     (lambda self, p: self.path == "/api/deliverable/run", _post_deliverable_run),
     (lambda self, p: self.path == "/task", _post_task),
     (lambda self, p: self.path == "/api/memory/delete", _post_memory_delete),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/review/edit"), _post_task_review_edit),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/cancel"), _post_task_cancel),
     (lambda self, p: self.path == "/api/plan/confirm", _post_plan_confirm),
     (lambda self, p: self.path == "/api/step/confirm", _post_step_confirm),
