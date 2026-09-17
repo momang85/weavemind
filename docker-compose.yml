@@ -40,6 +40,12 @@ services:
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BAAI/bge-large-zh-v1.5}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      # WebUI 绑定地址：`web_ui.py` 默认只绑回环（未加鉴权时不暴露到局域网）。
+      # 容器里那意味着进程只监听**容器自己的** 127.0.0.1，而 `ports: 8080:8080`
+      # 是把流量转到容器 IP —— 端口映射等于空转：宿主机 curl 一直拿不到响应
+      # （实测：容器 16/16 服务存活、端口映射在 `docker compose ps` 里显示正常，
+      # 但 readiness 探活 200 秒全失败）。对外服务必须显式绑 0.0.0.0。
+      - BIND_HOST=0.0.0.0
       # 守护模式：`launcher.py start` 拉起子进程后**自己就返回了**，容器的 PID 1 随即
       # 退出——子进程跟着死，`/api/health` 永远不就绪（实测：compose 起来后反复重启、
       # 端口无响应）。`supervise` 模式会常驻巡检并崩溃自愈，才是"容器里跑一支服务"

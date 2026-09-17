@@ -148,26 +148,66 @@ class TestOfflineReuse(unittest.TestCase):
 
 
 class TestSystemRedisPreference(unittest.TestCase):
-    """能复用系统已装的 Redis 就不要联网下载。"""
+    """能复用系统已装的 Redis 就不要联网下载。
 
+    "系统已装的 Redis"在两端是**两条不同分支**：Windows 走 `_system_redis_exe()`
+    （PATH → 注册服务 → 常见安装目录），Linux/其它平台走 PATH 上的 `redis-server`。
+    所以覆盖也要分成两个平台用例——此前只有 Windows 那条，在 Linux CI 上必然失败
+    （实测：`ensure_redis` 返回 `no_binary`，因为该分支在 Linux 上根本不看
+    `_system_redis_exe`）。
+    """
+
+    def _common_patches(self):
+        return [
+            mock.patch.object(dc, "_spawn_background",
+                              lambda argv, log, cwd=None: mock.Mock(pid=4242)),
+            mock.patch.object(dc, "_write_redis_pid", lambda pid: None),
+            mock.patch.object(dc, "_wait_redis", lambda h, p, w: True),
+            mock.patch.object(dc, "_publish_redis_host_env", lambda a: None),
+            mock.patch.object(dc, "redis_ping", lambda h, p: False),
+            mock.patch.object(dc, "_usable_portable_redis", lambda: None),
+            mock.patch.object(dc, "fetch_portable_redis",
+                              side_effect=AssertionError("不该下载")),
+            mock.patch.object(dc, "_redis_server_version", lambda h, p: 8),
+        ]
+
+    @unittest.skipUnless(os.name == "nt", "Windows 专属分支：_system_redis_exe 探测")
     def test_windows_prefers_system_binary(self):
         fake = Path(tempfile.mkdtemp(prefix="wm_redis3_")) / "redis-server.exe"
         fake.write_bytes(b"MZ")
         self.addCleanup(__import__("shutil").rmtree, fake.parent, ignore_errors=True)
-        with mock.patch.object(dc, "_system_redis_exe", lambda: fake), \
-                mock.patch.object(dc, "_spawn_background",
-                                  lambda argv, log, cwd=None: mock.Mock(pid=4242)), \
-                mock.patch.object(dc, "_write_redis_pid", lambda pid: None), \
-                mock.patch.object(dc, "_wait_redis", lambda h, p, w: True), \
-                mock.patch.object(dc, "_publish_redis_host_env", lambda a: None), \
-                mock.patch.object(dc, "redis_ping", lambda h, p: False), \
-                mock.patch.object(dc, "_usable_portable_redis", lambda: None), \
-                mock.patch.object(dc, "fetch_portable_redis",
-                                  side_effect=AssertionError("不该下载")), \
-                mock.patch.object(dc, "_redis_server_version", lambda h, p: 8):
+        with mock.patch.object(dc, "_system_redis_exe", lambda: fake):
+            for pat in self._common_patches():
+                pat.start()
+                self.addCleanup(pat.stop)
             res = dc.ensure_redis(auto=True)
         self.assertTrue(res["ok"], res)
         self.assertEqual(res["action"], "started_system")
+
+    @unittest.skipIf(os.name == "nt", "非 Windows 分支：PATH 上的 redis-server")
+    def test_posix_prefers_path_binary(self):
+        fake = Path(tempfile.mkdtemp(prefix="wm_redis5_")) / "redis-server"
+        fake.write_text("#!/bin/sh\n", encoding="utf-8")
+        self.addCleanup(__import__("shutil").rmtree, fake.parent, ignore_errors=True)
+        with mock.patch.object(dc.shutil, "which", lambda name: str(fake)
+                               if name == "redis-server" else None):
+            for pat in self._common_patches():
+                pat.start()
+                self.addCleanup(pat.stop)
+            res = dc.ensure_redis(auto=True)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["action"], "started_system")
+
+    @unittest.skipIf(os.name == "nt", "非 Windows 分支：PATH 上没有才会走到下载")
+    def test_posix_without_binary_reports_guidance(self):
+        with mock.patch.object(dc.shutil, "which", lambda name: None):
+            for pat in self._common_patches():
+                pat.start()
+                self.addCleanup(pat.stop)
+            res = dc.ensure_redis(auto=True)
+        self.assertFalse(res["ok"])
+        self.assertEqual(res["action"], "no_binary")
+        self.assertIn("redis-server", res["detail"])
 
     def test_version_probe_parses_major(self):
         tmp = Path(tempfile.mkdtemp(prefix="wm_redis4_"))

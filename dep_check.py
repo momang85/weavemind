@@ -678,7 +678,7 @@ Redis 未运行且无法自动获取。按"最省事优先"试这几步：
      a. 指定镜像源后重跑（会依次尝试，60s 预算）：
           set WM_REDIS_MIRROR_BASE=https://ghproxy.net
      b. 或者手动下载 zip（约 5MB，来自 redis-windows 的 release）后放到
-          .weavind/downloads/redis-windows.zip
+          {_zip_dir}/redis-windows.zip
         再重跑——**已存在的合法 zip 会直接复用，不再联网**。
      c. 有官方 release 页给出的 sha256 时，建议固定摘要再下载：
           set WM_REDIS_ZIP_SHA256=<官方 release 的 sha256>
@@ -692,6 +692,10 @@ Redis 未运行且无法自动获取。按"最省事优先"试这几步：
 Redis 5 不支持，会表现为"服务启动即崩、日志报 unknown command HELLO"。
 详见 docs/部署指南.md「无 Docker 的完整路径」。
 """
+
+# 指引里的路径用**真实**下载目录拼出来：此前写死成 `.weavind/downloads/...`
+# （少了 me），照着做的用户会把包放进一个永远不会被读取的目录。
+REDIS_HINT = REDIS_HINT.replace("{_zip_dir}", f"{RUNTIME_DIR.name}/downloads")
 
 
 def _spawn_background(argv: list[str], log_path: Path, cwd: Path | None = None):

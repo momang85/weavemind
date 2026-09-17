@@ -346,6 +346,20 @@ class TestComposeKeepsContainerAlive(unittest.TestCase):
                               "app 必须用 condition: service_healthy 等 redis 真就绪")
         self.assertEqual(dep.get("redis", {}).get("condition"), "service_healthy")
 
+    def test_app_binds_all_interfaces_inside_container(self):
+        """容器内的 WebUI 必须绑 0.0.0.0，否则端口映射空转。
+
+        `web_ui.py` 默认 `BIND_HOST=127.0.0.1`（未加鉴权时不暴露到局域网），
+        在容器里就是"只监听容器自己"——`ports: 8080:8080` 把流量转到容器 IP 时
+        连不上。实测：容器起来、16/16 服务存活、`docker compose ps` 显示映射正常，
+        但宿主机 readiness 探活 200 秒全失败。
+        """
+        doc = self._doc()
+        env = [str(e) for e in (doc["services"]["app"].get("environment") or [])]
+        self.assertIn(
+            "BIND_HOST=0.0.0.0", env,
+            "容器内必须显式绑 0.0.0.0，否则发布出去的端口拿不到响应")
+
 
 class TestCiSuiteCoverage(unittest.TestCase):
     def test_every_test_file_runs_in_ci(self):
