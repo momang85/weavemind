@@ -1,7 +1,7 @@
 {
  "ok": true,
  "stage": "negative",
- "clone": "C:\\Users\\ding0\\AppData\\Local\\Temp\\wm_e2e_qit2isk_\\clone",
+ "clone": "C:\\Users\\ding0\\AppData\\Local\\Temp\\wm_e2e_1w1owx2l\\clone",
  "gate": "部署烟测（固定模型替身）",
  "proves": [
   "干净 clone 可安装",
@@ -16,18 +16,18 @@
   "金融数字正确性",
   "真实检索/抓取链路（替身计划不排检索步骤，避免外网抖动决定闸门颜色）"
  ],
- "commit": "89659cf",
+ "commit": "c9b671d",
  "deps_ok": true,
  "launcher_tail": [
   "  [OK] 前端产物已就绪（frontend/dist，免 Node）",
   "结论：全部就绪，可以启动",
   "  [OK] 启动校验：16/16 服务存活"
  ],
- "task_id": "ui-c34e9d8470",
+ "task_id": "ui-372a792599",
  "status": "SUCCESS_WITH_ISSUES",
  "report_produced": true,
- "report_detail": "任务库 report 含夹具标记与全部夹具事实（5953 字符）",
- "negative_task_id": "ui-29d9575468",
+ "report_detail": "任务库 report 含夹具标记与全部夹具事实（814 字符）",
+ "negative_task_id": "ui-b345602436",
  "negative_status": "FAILED",
  "negative_report_accepted": false,
  "negative_detail": "任务库 report 缺少 ['STUB-FIXTURE-REPORT-1200', '1200亿元', '240亿元', '2025 年度']（失败/取消说明同样是非空文本，不算报告）",

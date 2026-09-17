@@ -2340,7 +2340,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         return False
 
     def _ensure_final_body_accepted(self, task_id: str, goal: str,
-                                    detail: str) -> str:
+                                    detail: str) -> tuple[str, str]:
         """收尾装配后的交付正文要拿到**它自己**的验收（幂等）。
 
         报告步骤的验收绑的是那一步写出的中间正文；收尾会把交付说明、评审注记、
@@ -2348,27 +2348,40 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         "该版本没有对应它自身的验收（未知）"，用户看不到本该出现的"验收未通过 +
         缺口"。这里对 `detail` 本体补一次确定性验收并按完整身份绑定。
 
-        返回：`"bound"`（已绑到本版）/ `"already"`（本版已有自己的验收，跳过）/
-        `"mismatch"`（验收正文被自动修复改写，与本版不一致——按证据未知交付）。
+        返回 `(状态, 交付正文)`：
+        - `"bound"`：本版已取得自己的验收，`交付正文` 可能与 `detail` 不同——
+          **验收器自动修复过正文时，修复版就是交付正文**（交付与验收对象必须是
+          同一份字节，否则绑定又会落空、状态又回到"未知"）；
+        - `"already"`：本版已有自己的验收，原样交付；
+        - `"mismatch"`：验收没能落到本版（无全量 hash / 身份不符）→ 按证据未知交付。
         """
         from report_version import VersionStore
         from workspace import task_workspace
         store = VersionStore(task_workspace(task_id), task_id)
         ver = store.adopted()
         if ver is None or not str(detail or "").strip():
-            return "skipped"
+            return "skipped", detail
         if ver.acceptance_for_this_body():
-            return "already"
-        self._run_acceptance_check(task_id, goal, trigger="最终装配",
-                                   report_body=detail, prefer_body=True)
+            return "already", detail
+        res = self._run_acceptance_check(task_id, goal, trigger="最终装配",
+                                        report_body=detail, prefer_body=True)
+        accepted = str((res or {}).get("_accepted_body") or detail)
         after = store.adopted()
         if after is not None and after.acceptance_for_this_body():
-            return "bound"
-        # 机制性说明：自动修复会把"把叙述当来源"的句子改写成诚实披露，此时被验收的
-        # 正文不再等于已采纳的这版——不把两者混为一谈，如实留在"未知"。
+            return "bound", accepted
+        # 验收器修过正文（把"叙述片段当来源"降级为诚实披露）：被验收的是修复版，
+        # 该版已由验收路径登记并绑定——**把交付切到它**，否则交付与验收对象永远
+        # 不是同一份字节，绑定必然落空（实测真实运行就是这样回到"未知"的）。
+        if accepted != detail:
+            v_fix = store.find_by_body(accepted)
+            if v_fix is not None and v_fix.acceptance_for_this_body():
+                store.adopt(v_fix, reason="交付正文采用验收修正版")
+                return "bound", accepted
+        # 机制性说明：验收没能证明属于这一版（短 hash / 身份不符）时不硬绑；
+        # 交付按"未知"处理，不把"验过别的正文"当成验过这一版。
         logger.warning(
             "最终装配正文未取得本版验收（task=%s）：交付按证据未知处理", task_id)
-        return "mismatch"
+        return "mismatch", accepted
 
     def _run_acceptance_check(self, task_id: str, goal: str,
                               trigger: str = "报告步骤",
@@ -2523,6 +2536,10 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     harvest_failure(task_id, goal, result, report)
             except Exception as _exc:
                 logger.warning("评测集自动沉淀异常（已忽略）: %s", str(_exc)[:100])
+            # **被验收的那份正文**（自动修复会把它改写成诚实披露版）。
+            # 只给调用方用于"让交付正文与验收对象成为同一份字节"；写盘与事件在此之前
+            # 已经完成，故不污染 acceptance_report.json / 审计事件。
+            result["_accepted_body"] = report
             return result
         except Exception as exc:
             logger.warning("Acceptance check failed: %s", str(exc)[:150])
@@ -5586,9 +5603,14 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         # 最终装配正文自己也要有验收：上面的验收绑的是**报告步骤的中间正文**，
         # 而交付采纳的是收尾装配后的 `detail`——两者字节不同，于是每次真实运行
         # 都以"该版本没有对应它自身的验收（未知）"交付，用户看不到本该显示的
-        # "验收未通过 + 缺口"。这里按**同一正文**补一次确定性验收（幂等：已有则跳过）。
+        # "验收未通过 + 缺口"。这里按**同一正文**补一次确定性验收（幂等：已有则跳过）；
+        # 验收器若把正文修成诚实披露版，就**以那一版交付**（交付与验收对象同一份字节）。
         try:
-            self._ensure_final_body_accepted(task_id, goal, detail)
+            _st, _final = self._ensure_final_body_accepted(task_id, goal, detail)
+            if _final and _final != detail:
+                # helper 已把修复版采纳为交付版本；这里只切换交付正文
+                detail = _final
+                logger.info("交付正文采用验收器修正版（task=%s，%s）", task_id, _st)
         except Exception as exc:
             logger.warning("最终装配验收失败（task=%s）：%s", task_id, str(exc)[:120])
         # S1：可重算底稿与缺口表落进任务产物；**缺证据项要写进交付物**，

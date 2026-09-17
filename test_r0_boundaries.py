@@ -578,8 +578,9 @@ class TestFinalBodyAcceptanceBinding(unittest.TestCase):
         o = self._orch()
         with self._patched_ws(), \
                 mock.patch.object(o, "_run_acceptance_check") as m:
-            got = o._ensure_final_body_accepted("t-fin", "目标", self.detail)
+            got, body = o._ensure_final_body_accepted("t-fin", "目标", self.detail)
         self.assertEqual(got, "already")
+        self.assertEqual(body, self.detail, "已有本版验收时交付正文不变")
         m.assert_not_called()
 
     def test_binds_verdict_to_the_adopted_body(self):
@@ -600,8 +601,9 @@ class TestFinalBodyAcceptanceBinding(unittest.TestCase):
 
         with self._patched_ws(), \
                 mock.patch.object(o, "_run_acceptance_check", side_effect=_fake_accept):
-            got = o._ensure_final_body_accepted("t-fin", "目标", self.detail)
+            got, body = o._ensure_final_body_accepted("t-fin", "目标", self.detail)
         self.assertEqual(got, "bound")
+        self.assertEqual(body, self.detail)
         after = self.store.adopted()
         self.assertEqual(after.acceptance_overall(), "fail",
                          "结论要落在被采纳的那一版上，而不是只写在日志里")
@@ -615,10 +617,41 @@ class TestFinalBodyAcceptanceBinding(unittest.TestCase):
         with self._patched_ws(), \
                 mock.patch.object(o, "_run_acceptance_check", return_value={"overall": "pass"}), \
                 self.assertLogs("orchestrator_v2", level="WARNING") as lg:
-            got = o._ensure_final_body_accepted("t-fin", "目标", self.detail)
+            got, body = o._ensure_final_body_accepted("t-fin", "目标", self.detail)
         self.assertEqual(got, "mismatch")
+        self.assertEqual(body, self.detail)
         self.assertTrue(any("未取得本版验收" in m for m in lg.output), lg.output)
         self.assertEqual(self.store.adopted().acceptance_overall(), "")
+
+    def test_repaired_body_becomes_the_delivery(self):
+        """验收器修过的正文就是交付正文——否则绑定必然落空、状态又回到"未知"。
+
+        实测（真实运行 `ui-2def3b4241`）：收尾把 13302 字节的 `detail` 送去验收，
+        验收器的来源标注修复把它改写成 13458 字节的诚实披露版并绑定了那一版；
+        而交付用的还是修复前的 `detail` → 交付状态显示"该版本没有对应它自身的验收"。
+        """
+        from report_version import body_hash
+
+        repaired = self.detail + "\n（验收器修正：把叙述片段当来源的句子降级为诚实披露）"
+        v = self.store.record(self.detail, sources_fingerprint="src-A")
+        self.store.adopt(v, reason="收尾补齐")
+        o = self._orch()
+
+        def _fake_accept(tid, goal, trigger="报告步骤", report_body="", prefer_body=False):
+            self.store.record(repaired, sources_fingerprint="src-A")
+            self.store.bind_acceptance(self._acc("fail", body_hash(repaired)),
+                                       sources_fingerprint="src-A")
+            return {"overall": "fail", "_accepted_body": repaired}
+
+        with self._patched_ws(), \
+                mock.patch.object(o, "_run_acceptance_check", side_effect=_fake_accept):
+            got, body = o._ensure_final_body_accepted("t-fin", "目标", self.detail)
+        self.assertEqual(got, "bound")
+        self.assertEqual(body, repaired, "交付正文必须是被验收的那一份（修复版）")
+        after = self.store.adopted()
+        self.assertEqual(after.acceptance_overall(), "fail")
+        self.assertTrue(after.acceptance_for_this_body(),
+                        "修复版要成为被采纳版本，交付状态才判得出来")
 
     def test_prefer_body_beats_stale_report_md(self):
         """`prefer_body=True` 验收调用方给定的正文；默认仍读磁盘 report.md。"""

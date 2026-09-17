@@ -48,6 +48,8 @@ SUCCESS_STATES = ("SUCCESS", "SUCCESS_WITH_ISSUES")
 # 签名在改动前的 `0330b6f` 上出现过）。部署烟测要证明的是"装得上、起得来、任务能跑通、
 # 交付物含夹具标记"，不该由外部检索决定成败；检索链路的覆盖在 S1/S2 的单独证据里。
 SMOKE_GOAL = "用三句话说明归母净利润与净利润的区别，不需要联网检索。"
+# 收执拿到后多久仍读不到任务行，就打印可诊断现场（库路径/文件状态/服务日志尾部）。
+LATE_ROW_GRACE = 120.0
 # 本脚本起过的替身进程（含负向用例重启的那个），finally 里统一收掉
 _STUB_PROCS: list = []
 # 允许请求的回环主机（只有本脚本自己启动的服务在这些地址上）
@@ -152,11 +154,16 @@ def main() -> int:
         env = os.environ.copy()
         # 2) 依赖自检（requirements 覆盖 / 前端产物就绪 / Redis 可达）
         report["stage"] = "deps"
+        # 任务库路径**显式钉住**：服务与读取方各读各的环境变量是历史事故（见 db_paths 注释），
+        # 这里统一指向克隆目录里的同一个文件，避免"服务写别处、门禁读这里"的整类问题。
+        db_file = str(clone / "agents.db")
         env.update({
             "REDIS_HOST": "127.0.0.1", "REDIS_PORT": str(ports["redis"]),
             "WEB_PORT": str(ports["web"]),
             "SKIP_REDIS_CHECK": "1",           # Redis 由本机/CI 环境提供
+            "WEAVEMIND_DB": db_file,
         })
+        os.environ["WEAVEMIND_DB"] = db_file    # 本进程（_status 读取）用同一个库
         deps = _run([sys.executable, "launcher.py", "deps"], clone, env, timeout=300,
                     check=False)
         report["deps_ok"] = deps.returncode == 0
@@ -317,10 +324,41 @@ def _status(tid: str) -> str:
     return str(row[0]) if row else ""
 
 
+def _service_log_tails(clone: Path, names=("orchestrator.log", "webui.log", "guardian.log"),
+                       lines: int = 12) -> dict:
+    """服务日志尾部（服务自己写在 `<clone>/logs/` 下）。
+
+    任务迟迟不落库时，只有这几行能说明"是编排器没起来还是写到了别处"——CI 上
+    此前只能看到"900 秒里表不存在"，看不出为什么。
+    """
+    out: dict = {}
+    for n in names:
+        p = clone / "logs" / n
+        try:
+            if p.exists():
+                out[n] = p.read_text(encoding="utf-8", errors="replace").strip().splitlines()[-lines:]
+            else:
+                out[n] = ["（无此日志文件）"]
+        except Exception as exc:                     # 读日志失败不该盖住原本的失败
+            out[n] = [f"（读取失败：{str(exc)[:80]}）"]
+    return out
+
+
 def _await_terminal(clone: Path, env: dict, tid: str, timeout: float) -> str:
-    del clone, env              # 只依赖已注入的模块路径
+    """等终态。任务**迟迟不落库**时不再干等到超时：给出可诊断的现场。
+
+    实测（CI，`c9b671d`）：任务收执拿到了，但 `task_history` 在 900 秒里一直不存在，
+    日志里只有一行"表尚未就绪"，看不出服务是否真的在处理。这里在收执后
+    `LATE_ROW_GRACE` 秒仍读不到任务行时，把库路径/文件状态与服务日志尾部带进错误，
+    让下一次失败能直接定位（而不是又变成一次"神秘的 15 分钟红"）。
+    """
+    del env
+    import db_paths  # noqa: PLC0415
+
     deadline = time.time() + timeout
+    started = time.time()
     last = ""
+    reported = False
     while time.time() < deadline:
         st = _status(tid)
         if st != last:
@@ -328,6 +366,16 @@ def _await_terminal(clone: Path, env: dict, tid: str, timeout: float) -> str:
             last = st
         if st in ("SUCCESS", "SUCCESS_WITH_ISSUES", "FAILED", "CANCELLED"):
             return st
+        if not st and not reported and time.time() - started > LATE_ROW_GRACE:
+            reported = True
+            dbp = db_paths.resolve_db_path()
+            size = os.path.getsize(dbp) if os.path.exists(dbp) else -1
+            tails = _service_log_tails(clone)
+            detail = " | ".join(
+                f"{n}: {' / '.join(v[-3:])}" for n, v in tails.items())
+            _log(f"任务 {tid} 超过 {LATE_ROW_GRACE:.0f}s 仍未落库："
+                 f"库={dbp}（存在={os.path.exists(dbp)}，字节={size}）"
+                 f"；服务日志尾部 → {detail[:600]}")
         time.sleep(3.0)
     return last
 
