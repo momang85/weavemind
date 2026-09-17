@@ -151,14 +151,24 @@ class TestSystemRedisPreference(unittest.TestCase):
     """能复用系统已装的 Redis 就不要联网下载。
 
     "系统已装的 Redis"在两端是**两条不同分支**：Windows 走 `_system_redis_exe()`
-    （PATH → 注册服务 → 常见安装目录），Linux/其它平台走 PATH 上的 `redis-server`。
-    所以覆盖也要分成两个平台用例——此前只有 Windows 那条，在 Linux CI 上必然失败
-    （实测：`ensure_redis` 返回 `no_binary`，因为该分支在 Linux 上根本不看
-    `_system_redis_exe`）。
+    （PATH → 注册服务 → 常见安装目录，action=`started_system`），Linux/其它平台走
+    PATH 上的 `redis-server`（action=`started`）。此前只有 Windows 那条用例，
+    在 Linux CI 上必然失败（实测：`no_binary`——该分支在 Linux 上根本不看
+    `_system_redis_exe`），而补的 POSIX 用例又把 action 名猜成了 `started_system`。
+
+    因此按平台各留一条、各断言**本平台分支**的真实取值：拿一端的行为套另一端
+    已经错过两次（一次漏了另一端，一次名字抄错）。用 `os.name` 替身强行跨平台跑
+    也不通——它会连带改掉 `pathlib` 的 flavor（Python 3.14 下 `Path()` 直接抛
+    `UnsupportedOperation`）。
     """
 
-    def _common_patches(self):
-        return [
+    def _run(self, extras: tuple = ()):
+        """跑一遍 `ensure_redis`：系统探测全部打桩，只留被测分支。
+
+        `extras` 是 (点号目标, 替身值) —— `shutil.which` 在 shutil 模块上、
+        `_system_redis_exe` 在 dep_check 上，不能都按 dep_check 的属性找。
+        """
+        for pat in (
             mock.patch.object(dc, "_spawn_background",
                               lambda argv, log, cwd=None: mock.Mock(pid=4242)),
             mock.patch.object(dc, "_write_redis_pid", lambda pid: None),
@@ -169,42 +179,39 @@ class TestSystemRedisPreference(unittest.TestCase):
             mock.patch.object(dc, "fetch_portable_redis",
                               side_effect=AssertionError("不该下载")),
             mock.patch.object(dc, "_redis_server_version", lambda h, p: 8),
-        ]
+        ):
+            pat.start()
+            self.addCleanup(pat.stop)
+        for target, value in extras:
+            pat = mock.patch(target, value)
+            pat.start()
+            self.addCleanup(pat.stop)
+        return dc.ensure_redis(auto=True)
 
-    @unittest.skipUnless(os.name == "nt", "Windows 专属分支：_system_redis_exe 探测")
+    @unittest.skipUnless(os.name == "nt", "Windows 分支：_system_redis_exe 探测")
     def test_windows_prefers_system_binary(self):
         fake = Path(tempfile.mkdtemp(prefix="wm_redis3_")) / "redis-server.exe"
         fake.write_bytes(b"MZ")
         self.addCleanup(__import__("shutil").rmtree, fake.parent, ignore_errors=True)
-        with mock.patch.object(dc, "_system_redis_exe", lambda: fake):
-            for pat in self._common_patches():
-                pat.start()
-                self.addCleanup(pat.stop)
-            res = dc.ensure_redis(auto=True)
+        res = self._run((("dep_check._system_redis_exe", lambda: fake),))
         self.assertTrue(res["ok"], res)
         self.assertEqual(res["action"], "started_system")
 
-    @unittest.skipIf(os.name == "nt", "非 Windows 分支：PATH 上的 redis-server")
+    @unittest.skipIf(os.name == "nt", "POSIX 分支：PATH 上的 redis-server")
     def test_posix_prefers_path_binary(self):
         fake = Path(tempfile.mkdtemp(prefix="wm_redis5_")) / "redis-server"
         fake.write_text("#!/bin/sh\n", encoding="utf-8")
         self.addCleanup(__import__("shutil").rmtree, fake.parent, ignore_errors=True)
-        with mock.patch.object(dc.shutil, "which", lambda name: str(fake)
-                               if name == "redis-server" else None):
-            for pat in self._common_patches():
-                pat.start()
-                self.addCleanup(pat.stop)
-            res = dc.ensure_redis(auto=True)
+        res = self._run((("dep_check.shutil.which",
+                          lambda name: str(fake) if name == "redis-server" else None),))
         self.assertTrue(res["ok"], res)
-        self.assertEqual(res["action"], "started_system")
+        self.assertEqual(res["action"], "started",
+                         "POSIX 分支的 action 是 started（Windows 才是 started_system）")
+        self.assertIn("redis-server", res["detail"])
 
-    @unittest.skipIf(os.name == "nt", "非 Windows 分支：PATH 上没有才会走到下载")
+    @unittest.skipIf(os.name == "nt", "POSIX 分支：PATH 上没有就给出可执行指引")
     def test_posix_without_binary_reports_guidance(self):
-        with mock.patch.object(dc.shutil, "which", lambda name: None):
-            for pat in self._common_patches():
-                pat.start()
-                self.addCleanup(pat.stop)
-            res = dc.ensure_redis(auto=True)
+        res = self._run((("dep_check.shutil.which", lambda name: None),))
         self.assertFalse(res["ok"])
         self.assertEqual(res["action"], "no_binary")
         self.assertIn("redis-server", res["detail"])
@@ -235,6 +242,20 @@ class TestGuidanceIsActionable(unittest.TestCase):
     def test_mentions_minimum_version_reason(self):
         self.assertIn("Redis 6", self.hint)
         self.assertIn("HELLO", self.hint)
+
+    def test_offline_zip_path_is_the_real_runtime_dir(self):
+        """指引里的落地路径必须与代码实际读取的目录一致（跨平台可跑）。
+
+        实测事故：指引写的是 `.weavind/downloads/redis-windows.zip`（少一个 me），
+        照着做的人会把包放进一个**永远不会被读取**的目录，然后继续卡在"Redis 缺失"。
+        所以这里同时断言"含真实路径"和"不含错字"，并按 `DOWNLOAD_DIR` 拼出来——
+        目录名以后改了，测试会跟着改而不是漂移。
+        """
+        real = f"{dc.RUNTIME_DIR.name}/downloads/redis-windows.zip"
+        self.assertIn(real, self.hint,
+                      f"指引应写真实下载目录（{real}）")
+        self.assertNotIn(".weavind/", self.hint, "不得出现少了 me 的错字路径")
+        self.assertEqual(dc.DOWNLOAD_DIR.name, "downloads")
 
 
 class TestFetchBudgetDefault(unittest.TestCase):
