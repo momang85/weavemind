@@ -72,6 +72,28 @@
       "max_seconds": 0,
       "max_calls": 0,
       "max_tokens": 0
+    },
+    "_comment_search_quality": "检索质量策略（可选）：不配时用内置默认值。阈值与词表此前写死在两条检索路径里（worker_base 与 adapters/search_quality），现在只有一份、可按部署环境调整。标量项可用环境变量覆盖：WM_SEARCH_MIN_SCORE / WM_SEARCH_REQUIRE_HIT_RUN / WM_SEARCH_MAX_VARIANTS",
+    "search_quality": {
+      "_comment": "以下为默认值，按需覆盖；engines 为 ddgs 引擎清单，research_domains 为调研类目标追加 site: 定向的机构域名",
+      "min_score": 2,
+      "require_hit_min_run": 3,
+      "max_variants": 10,
+      "authority_official": 4,
+      "authority_industry": 3,
+      "authority_good": 2,
+      "authority_junk": -2,
+      "finance_hints": true,
+      "research_hints": true,
+      "ashare_hints": true,
+      "engines": [
+        "brave", "duckduckgo", "google", "grokipedia", "mojeek",
+        "startpage", "wikipedia", "yahoo", "yandex"
+      ],
+      "research_domains": [
+        "gartner.com", "idc.com", "trendforce.com", "statista.com",
+        "counterpointresearch.com", "canalys.com", "macrotrends.net"
+      ]
     }
   },
   "data_sources": {

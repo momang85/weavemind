@@ -30,10 +30,21 @@ _ENGINE_COOLDOWN = float(os.environ.get("SEARCH_ENGINE_COOLDOWN", "120") or 120)
 # ddgs 支持的 text 引擎全集（backend 参数按名过滤）。
 # auto 模式每次查询都尝试全部引擎——环境内 wikipedia/google 等 100% 超时，
 # 每次白等 5s×N。任务级健康缓存只查询存活引擎，显著缩短搜索耗时。
+# 清单本身**可配置**（config.json 的 `system.search_quality.engines`），
+# 默认值取自 adapters.search_quality（检索质量的唯一事实来源）。
 _DDG_ENGINES = (
     "brave", "duckduckgo", "google", "grokipedia", "mojeek",
     "startpage", "wikipedia", "yahoo", "yandex",
 )
+
+
+def _ddg_engines() -> tuple:
+    """当前生效的引擎清单（策略可覆盖；取回失败用默认清单）。"""
+    try:
+        from adapters.search_quality import current_policy
+        return tuple(current_policy().engines or _DDG_ENGINES)
+    except Exception:
+        return _DDG_ENGINES
 # 异常消息里的 URL → 引擎名（ddgs 异常含失败引擎的 URL）
 _DDG_URL_HINTS = (
     ("wikipedia.org", "wikipedia"),
@@ -778,230 +789,68 @@ class SearchAgent(BaseWorker):
     @staticmethod
     def _clean_search_text(text: str) -> str:
         """去掉指令包装，取"用户目标"作为查询基础（否则"任务目标/用户目标/原始指令"
-        等包装词会混进查询词，导致搜索结果与主题无关）。"""
-        import re as _re
-        m = _re.search(r"用户目标：([^\n]+)", str(text))
-        if m:
-            return m.group(1).strip()
-        t = _re.sub(r"^(任务目标|原始指令|用户目标)[：:]\s*", "", str(text).strip())
-        # 信封（【角色】…）对搜索无意义，截断到信封之前
-        idx = t.find("\n【角色】")
-        if idx > 0:
-            t = t[:idx]
-        return t.strip()
+        等包装词会混进查询词，导致搜索结果与主题无关）。
+
+        实现收敛到 `adapters.search_quality`（唯一事实来源）：本方法此前与
+        轻量检索那条路径各有一份近似实现，改一处忘一处就会两边判定不一致。
+        """
+        from adapters.search_quality import clean_search_text
+        return clean_search_text(text)
 
     def _extract_keywords(self, text: str) -> str:
         """从用户目标中提取核心搜索词：去指令包装与停用词、保留年份、
         按停用词切分出完整词段（避免 2-4 字滑窗把"新能源汽车"拆成碎片）。"""
-        import re as _re
+        from adapters.search_quality import extract_keywords
+        return extract_keywords(text, self._search_policy())
 
-        text = self._clean_search_text(text)
-        # 年份单独保留："2026年" → "2026"
-        text = _re.sub(r"(\d{4})年", r"\1 ", text)
-        for w in self._ZH_STOP:
-            text = text.replace(w, " ")
-        zh = [
-            s for s in _re.split(
-                r"[\s\u3000，。、；：！？（）()【】《》\"'“”‘’,.…]+", text,
-            )
-            if _re.search(r"[\u4e00-\u9fff]", s) and len(s) >= 2
-        ]
-        en = [
-            w.lower()
-            for w in _re.findall(r"[a-zA-Z][a-zA-Z0-9-]{2,}", text)
-            if w.lower() not in self._EN_STOP
-        ]
-        years = _re.findall(r"\d{4}", text)
-        merged = list(dict.fromkeys(years + zh + en))
-        return " ".join(merged)[:150]
+    @staticmethod
+    def _search_policy():
+        """当前检索质量策略（阈值/词表/引擎清单，来自 config + 环境变量）。
+
+        取回失败时用模块默认值：检索路径不能因为配置读取问题整体失效。
+        """
+        try:
+            from adapters.search_quality import current_policy
+            return current_policy()
+        except Exception:
+            from adapters.search_quality import _DEFAULT_POLICY
+            return _DEFAULT_POLICY
 
     def _query_variants(self, instruction: str) -> list[str]:
-        """生成多个查询变体（关键词组合优先 + 整句 + 中英混合），显著提升召回。
+        """生成多个查询变体（关键词组合优先 + 整句 + 定向模板 + 中英混合）。
 
-        关键词组合排首位：完整目标文本常含"生成一份董事会汇报：需包含…"等
-        指令性文字，整句直发搜索引擎会被拒/超时（wikipedia 超时、mojeek 403
-        的实测根因）。整句变体截断到 60 字符，并剥离指令尾段。
+        实现收敛到 `adapters.search_quality.build_query_variants(rich=True)`：
+        整句截断、时效年份、财经/A 股定向模板与机构/公司 IR 定向变体原先写死在
+        这里，与轻量检索的变体逻辑是两套；现在只有一套，上限与机构白名单可配置。
         """
-        import re as _re
-        import time
+        from adapters.search_quality import build_query_variants
+        pol = self._search_policy()
+        out = build_query_variants(instruction, policy=pol, rich=True)
+        return out or [str(instruction or "")[:120]]
 
-        goal = self._clean_search_text(instruction)
-        kws = [k for k in self._extract_keywords(instruction).split() if k]
-        variants: list[str] = []
-        # 关键词组合优先（高召回、搜索引擎友好）；无关键词才回退整句
-        if kws:
-            variants.append(" ".join(kws)[:120])
-        # 整句变体：截断 + 剥离"生成…汇报/需包含/请"等指令尾段
-        if goal and len(goal) >= 4:
-            # 在指令性标记处截断（生成/汇报/需包含/列出/注明/撰写/给出等）
-            cut = _re.split(
-                r"(生成|撰写|输出|需包含|请给出|列出|注明|要求|必须|包含[^，。]{0,10}图表|汇报[：:])",
-                goal, maxsplit=1,
-            )[0].strip()
-            trimmed = (cut or goal)[:60]
-            if trimmed not in variants:
-                variants.append(trimmed)
-            # 时效性（修复"最新财报"返回旧年份）：目标要求最新时补当前年份
-            if any(k in instruction for k in ("最新", "最近", "latest", "current")):
-                variants.append(f"{trimmed[:50]} {time.localtime().tm_year}")
-            # 财报/财务类目标：引导结果页含具体数字（营收/净利润/亿元），
-            # 否则 snippet 常只有叙事没有数值，清洗层无数据可洗
-            if any(k in instruction for k in (
-                "财报", "年报", "季报", "营收", "净利润", "负债", "财务", "业绩",
-                "financial", "revenue", "earnings",
-            )):
-                variants.append(f"{trimmed[:50]} 年报 营收 净利润 亿元")
-                variants.append(f"{trimmed[:50]} 财务数据 亿元")
-            # 调研/研报类目标（市场规模/竞争格局/预测/份额/趋势）：追加权威
-            # 机构定向查询（Gartner/IDC/TrendForce 等）。实测发现报告大量引用
-            # 权威机构但搜索结果从未命中——源头是查询未定向，LLM 只能编造来源。
-            # 机构白名单命中后按域名追加变体，让搜索引擎直接返回机构页面。
-            if any(k in instruction for k in (
-                "调研", "市场规模", "竞争格局", "预测", "趋势", "行业报告",
-                "市场份额", "占比", "研报", "analysis", "forecast", "market size",
-            )):
-                for dom in ("gartner.com", "idc.com", "trendforce.com",
-                            "statista.com", "counterpointresearch.com",
-                            "canalys.com", "macrotrends.net"):
-                    variants.append(f"{trimmed[:40]} site:{dom}")
-                # 公司维度：追加官方财报/IR 页定向（营收/净利/出货量）
-                # 公司关键词用完整指令判断（可能落在截断位置之后）
-                if any(k in str(instruction).lower() for k in (
-                    "英伟达", "nvidia", "amd", "英特尔", "intel",
-                    "台积电", "tsmc", "苹果", "apple", "微软", "microsoft",
-                )):
-                    variants.append(f"{trimmed[:40]} 财报 营收 净利润 site:ir.nvidia.com site:investor.amd.com")
-            # A股行情排行类目标：追加财经站点定向查询模板，并排除无关平台
-            # （YouTube/百度百科/美股平台），避免通用搜索返回无关来源。
-            if any(k in instruction for k in (
-                "成交量排行", "成交额排行", "成交量前十", "成交额前十",
-                "涨停", "跌幅榜", "a股今日", "今日a股", "前十股", "排名榜",
-                "股票排行", "a股排行", "股票排名",
-            )):
-                metric = (
-                    "成交额"
-                    if "成交额" in instruction and "成交量" not in instruction
-                    else "成交量"
-                )
-                variants.append(
-                    f"今日 A股 {metric} 排行 前十 东方财富 "
-                    "-site:youtube.com -site:baike.baidu.com"
-                )
-                variants.append(
-                    f"{trimmed[:50]} {metric} 排行 site:eastmoney.com"
-                )
-                variants.append(
-                    f"{trimmed[:50]} 东方财富 同花顺 新浪财经 雪球"
-                )
-        # 域名定向（ReAct 兜底）：指令含 site:xxx 时追加定向查询变体，
-        # 让"官方 IR / SEC"类重检索指令真正落地
-        for m in _re.finditer(r"site:\s*([a-zA-Z0-9.\-]+)", str(instruction)):
-            dom = m.group(1).strip()
-            variants.append(f"{goal[:110]} site:{dom}")
-            if kws:
-                variants.append(f"{' '.join(kws[:3])} site:{dom}")
-        if kws:
-            for i in range(1, min(len(kws), 5)):
-                sub = " ".join(kws[: i + 1])
-                if sub:
-                    variants.append(sub[:120])
-        en = [
-            w.lower()
-            for w in _re.findall(r"[a-zA-Z][a-zA-Z0-9-]{2,}", instruction)
-            if w.lower() not in self._EN_STOP
-        ]
-        if en and kws:
-            mix = " ".join(kws[:2] + en[:2])
-            variants.append(mix[:120])
-        seen: set[str] = set()
-        out: list[str] = []
-        for v in variants:
-            if v and v not in seen:
-                seen.add(v)
-                out.append(v)
-        # 上限 10：关键词 + 整句 + 7 个机构定向 + 公司 IR 定向
-        # （旧上限 6 会挤掉 trendforce/公司 IR 等新增定向，白名单形同虚设）
-        return out[:10]
+    def _filter_results(self, query: str, results: list[dict],
+                        min_score: int | None = None) -> list[dict]:
+        """按主题相关性过滤并排序搜索结果。
 
-    def _filter_results(self, query: str, results: list[dict], min_score: int = 2) -> list[dict]:
-        """按主题相关性过滤并排序搜索结果：
-        英文词按词边界匹配（避免 star 误中 Stars），中文按 2/3/4 字片段计分，
-        得分不足的结果剔除，最终按相关度降序返回。"""
-        import re as _re
-
-        clean = self._clean_search_text(query)
-        # 中文按 2/3/4 字滑窗生成匹配 token（findall 不会滑窗，长词串
-        # 会变成单一巨型 token，导致真实结果几乎无法命中而被误过滤）
-        tokens: set[str] = set()
-        for run in _re.findall(r"[\u4e00-\u9fff]+", clean):
-            for size in (4, 3, 2):
-                if len(run) >= size:
-                    tokens.update(run[i : i + size] for i in range(len(run) - size + 1))
-        year_tokens = {y for y in _re.findall(r"\d{4}", clean)}
-        en_tokens = {w.lower() for w in _re.findall(r"[a-zA-Z][a-zA-Z0-9-]{2,}", clean)}
-        kept: list[tuple[int, dict]] = []
-        for r in results:
-            title = str(r.get("title") or "")
-            url = str(r.get("url") or "")
-            snip = str(r.get("snippet") or "")
-            if not title or not url or not url.startswith("http"):
-                continue
-            if self._is_garbage_result(title, url, snip):
-                logger.info("Search result filtered as garbage: %s | %s", title[:40], url[:60])
-                continue
-            if any(d in url for d in self._SPAM_DOMAINS):
-                continue
-            if title.lower().strip() in self._JUNK_TITLES:
-                continue
-            url_title = (url + " " + title).lower()
-            if any(b in url_title for b in self._strategy_blocks):
-                continue
-            hay = title + " " + snip
-            hay_lower = hay.lower()
-            score = 0
-            for tok in tokens:
-                if tok in hay:
-                    score += 1 if len(tok) == 2 else 2
-            for y in year_tokens:
-                if y in hay:
-                    score += 1
-            for tok in en_tokens:
-                if len(tok) >= 3 and _re.search(
-                    rf"(?<![a-z0-9]){_re.escape(tok)}(?![a-z0-9])", hay_lower
-                ):
-                    score += 2
-            if any(b in url_title for b in self._strategy_boosts):
-                score += 3
-            if score < min_score:
-                continue
-            kept.append((score, r))
-        kept.sort(key=lambda x: -x[0])
-        return [r for _, r in kept]
+        实现收敛到 `adapters.search_quality.score_results`：中文按 2/3/4 字滑窗、
+        英文按词边界计分，长连读要求、权威域加权与垃圾过滤都取自策略；
+        已部署策略的 blocks/boosts（个性化域名黑/白名单）作为参数传入。
+        """
+        from adapters.search_quality import score_results
+        pol = self._search_policy()
+        return score_results(
+            query, results,
+            min_score=pol.min_score if min_score is None else min_score,
+            policy=pol,
+            blocks=tuple(getattr(self, "_strategy_blocks", ()) or ()),
+            boosts=tuple(getattr(self, "_strategy_boosts", ()) or ()),
+        )
 
     @staticmethod
     def _is_garbage_result(title: str, url: str, snip: str = "") -> bool:
-        """通用垃圾识别：博彩/娱乐导航/下载站/假页。
-        域名特征 + URL 路径特征 + 标题/摘要博彩词，任一命中即剔除。"""
-        import re as _re
-
-        u = str(url or "").lower()
-        t = str(title or "").lower()
-        s = str(snip or "").lower()
-        if any(d in u for d in SearchAgent._LOW_AUTHORITY_DOMAINS):
-            return True
-        for pat in SearchAgent._JUNK_URL_PATTERNS:
-            if _re.search(pat, u):
-                return True
-        if any(d in u for d in SearchAgent._SPAM_DOMAINS):
-            return True
-        hay = t + " " + s
-        if any(k in hay for k in SearchAgent._GAMBLING_KEYWORDS):
-            return True
-        # 假页/空页
-        if any(m in hay for m in ("404 not found", "page not found", "无法访问该页面",
-                                  "页面不存在", "您访问的页面不存在")):
-            return True
-        return False
+        """通用垃圾识别（博彩/娱乐导航/下载站/假页）——实现取自策略共享模块。"""
+        from adapters.search_quality import is_garbage_result
+        return is_garbage_result(title, url, snip)
 
     def _search_bing(self, query: str) -> list[dict]:
         """备用搜索源：Bing HTML 结果解析（无需 API Key）。"""
@@ -1090,7 +939,7 @@ class SearchAgent(BaseWorker):
                         # 探测：首个变体逐引擎查询，记录存活引擎与结果
                         q0 = qs.pop(0)
                         alive = []
-                        for eng in _DDG_ENGINES:
+                        for eng in _ddg_engines():
                             try:
                                 results = ddgs.text(
                                     q0, backend=eng,

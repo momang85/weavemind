@@ -68,6 +68,8 @@ jobs:
         run: python test_r0_boundaries.py
       - name: Review/pending-review isolation (R1: bound PASS, RAG gate, claim)
         run: python test_review_isolation.py
+      - name: Search quality unified (single impl + configurable policy)
+        run: python test_search_quality_unified.py
       - name: Portable Redis acquisition (multi-source / budget / offline reuse)
         run: python test_redis_acquisition.py
       - name: US financial chain (SEC fixture / subject extraction / amount rate)

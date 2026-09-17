@@ -3430,9 +3430,28 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         预留必须是**跨进程原子**的（INCRBY 先加后校验）：主进程、Worker、评审进程
         各有一份内存账本时，"两个进程各自预留都获准"就会把同一份额度花两次。
         Redis 不可用时退回单进程语义（文件仍是快照，但并发写是后写覆盖）。
+
+        **短超时**是刻意的：账本在预留、收尾、看门狗等热路径上被读，而消息总线用的
+        客户端连接超时是 5 秒（为长连接 pubsub 保留）。Redis 不在时那 5 秒会把一次
+        告警、一次预留拖到秒级（实测：看门狗告警被拖到断言之后才发出）。这里只要
+        0.3s 连接 / 0.5s 读，失败立刻降级为本地账本。
         """
         try:
-            return self._new_redis_sync()
+            import redis as _redis
+            try:
+                from common import _NO_REDIS_RETRY as _noretry
+            except Exception:
+                from redis.backoff import NoBackoff as _NoBackoff
+                from redis.retry import Retry as _Retry
+                _noretry = _Retry(_NoBackoff(), 0)
+            return _redis.Redis(
+                host=os.environ.get("REDIS_HOST", "localhost"),
+                port=int(os.environ.get("REDIS_PORT", "6379")),
+                decode_responses=True,
+                socket_timeout=0.5,
+                socket_connect_timeout=0.3,
+                retry=_noretry,
+            )
         except Exception as exc:
             logger.warning("预算跨进程后端不可用（按单进程记账）：%s", str(exc)[:100])
             return None

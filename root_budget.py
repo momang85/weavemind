@@ -29,6 +29,7 @@ import os
 import threading
 import time
 import uuid
+import weakref
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -65,6 +66,9 @@ class BudgetState:
     tokens_settled: int = 0
     tokens_unsettled: int = 0
     seq: int = 0
+    # 账本身份：首次落盘时生成、随文件持久化。共享计数的键空间按它隔离，
+    # 这样"同一次运行"（含断点恢复）共用计数，"重新开始的一次"不继承上一轮。
+    ledger_id: str = ""
     # 票据号 → {stage, at, calls, tokens, detail}；只在 open/unsettled 时存在
     open_tickets: dict = field(default_factory=dict)
     unsettled_tickets: dict = field(default_factory=dict)
@@ -100,6 +104,11 @@ class RootBudget:
     _locks_guard = threading.Lock()
     # 票据号里的实例标记：即使两个进程各自从 0 计数，票据号也不会撞成同一个
     _instance_tag = f"{os.getpid():x}-{uuid.uuid4().hex[:4]}"
+    # 跨进程后端健康：**按后端实例缓存**（进程级），失败一次就不再重复付连接超时。
+    # 账本在预留/收尾/看门狗等热路径上被读，"每次都探测一次不可达的后端"会把
+    # 一次告警、一次预留拖到秒级（实测过）。
+    _backend_health: "weakref.WeakKeyDictionary" = None
+    _health_guard = threading.Lock()
 
     def __init__(self, root_task_id: str, workspace: str | Path,
                  limits: BudgetLimits | None = None, redis_factory=None):
@@ -113,11 +122,47 @@ class RootBudget:
         self._redis_factory = redis_factory
         self._redis = None
         self._redis_failed = False
+        # 跨进程后端是否已**建立**（写路径成功用过一次）。观测读取不建立后端。
+        self._established = False
         self.state = self._load()
+        if not self.state.ledger_id:
+            # 新账本：生成身份并立刻落盘，后续实例（含恢复）读回同一个身份
+            self.state.ledger_id = uuid.uuid4().hex[:12]
+            self._save()
 
     # ── Redis 原子后端 ──────────────────────────────────────
+    @classmethod
+    def _health_cache(cls):
+        if cls._backend_health is None:
+            cls._backend_health = weakref.WeakKeyDictionary()
+        return cls._backend_health
+
+    def _mark_backend(self, healthy: bool) -> None:
+        """记住该后端（factory 实例）当前是否可用；失败即永久降级到进程结束。"""
+        self._redis_failed = not healthy
+        if self._redis_factory is None:
+            return
+        try:
+            with RootBudget._health_guard:
+                RootBudget._health_cache()[self._redis_factory] = bool(healthy)
+        except TypeError:
+            # 不可弱引用的可调用对象（如内置函数）：只记在本实例上
+            pass
+
+    def _known_unhealthy(self) -> bool:
+        if self._redis_factory is None:
+            return True
+        try:
+            with RootBudget._health_guard:
+                return RootBudget._health_cache().get(self._redis_factory) is False
+        except TypeError:
+            return False
+
     def _r(self):
         if self._redis_failed or self._redis_factory is None:
+            return None
+        if self._known_unhealthy():
+            self._redis_failed = True
             return None
         if self._redis is None:
             try:
@@ -128,21 +173,42 @@ class RootBudget:
                 self._redis = client
             except Exception as exc:
                 logger.warning("预算跨进程后端不可用，降级为单进程账本：%s", str(exc)[:100])
-                self._redis_failed = True
+                self._mark_backend(False)
                 return None
         return self._redis
 
     def _keys(self) -> dict:
-        base = f"wm:budget:{self.root_task_id}"
+        """共享计数的键空间：**按账本身份**（根任务 + 本次运行起始时间）隔离。
+
+        只用 root_task_id 会串账：同一个任务 id 被重新提交（重跑、测试复用 id）时，
+        上一轮留在 Redis 里的计数还在（键不会自己消失），新一次的第一次预留就会被
+        "上一轮已经花完"直接拒绝——实测复现：跨进程用例把计数留在 Redis 后，
+        同 id 的其它用例第一次派发即被拒绝（用 started_at 的**整秒**做过一版，
+        同一秒内启动的两个账本仍会撞键，故改用随账本持久化的 `ledger_id`）。
+
+        `ledger_id` 随账本文件持久化：同一次运行（含断点恢复）共用同一份计数，
+        重新开始的一次运行拿到新的键空间，不继承上一轮。
+        """
+        base = f"wm:budget:{self.root_task_id}:{self.state.ledger_id}"
         return {"calls": f"{base}:calls", "tokens": f"{base}:tokens",
                 "seq": f"{base}:seq"}
 
     def _shared(self, name: str):
-        """读共享计数（Redis）；不可用时返回 None（读本地快照）。
+        """读共享计数（Redis）；不可用或后端尚未建立时返回 None（读本地快照）。
 
         跨进程时**共享计数才是真源**：本进程的本地字段只记"我这个进程预留了多少"，
         另一个进程花的额度只有 Redis 知道——额度是否还有剩余必须按共享值判断。
+
+        两条纪律：
+        - **观测读取不为探测付代价**：只有写路径（`reserve`）才建立后端连接，
+          看门狗/快照这类观测读取不带连接超时（实测：看门狗的首次告警被后端探测的
+          连接超时拖到断言之后才发出，告警形同无效）。后端建立后这里自然读到共享计数。
+        - 探测失败**永久降级**为本进程的本地账本（`_mark_backend`）：账本在预留、
+          收尾、看门狗等热路径上被读，每次重试会把"Redis 不可用"变成反复的连接超时。
+          降级状态在 `snapshot()["shared"]` 里可见，不假装还在跨进程合并。
         """
+        if not self._established:
+            return None
         r = self._r()
         if r is None:
             return None
@@ -150,7 +216,8 @@ class RootBudget:
             v = r.get(self._keys()[name])
             return None if v is None else int(v)
         except Exception as exc:
-            logger.warning("预算共享计数读取失败（按本地快照）：%s", str(exc)[:100])
+            self._mark_backend(False)
+            logger.warning("预算共享计数读取失败，降级为本地账本：%s", str(exc)[:100])
             return None
 
     def calls_committed(self) -> int:
@@ -172,6 +239,7 @@ class RootBudget:
         st.tokens_settled = int(raw.get("tokens_settled") or 0)
         st.tokens_unsettled = int(raw.get("tokens_unsettled") or 0)
         st.seq = int(raw.get("seq") or 0)
+        st.ledger_id = str(raw.get("ledger_id") or "")
         st.open_tickets = dict(raw.get("open_tickets") or {})
         st.unsettled_tickets = dict(raw.get("unsettled_tickets") or {})
         st.stages = dict(raw.get("stages") or {})
@@ -189,6 +257,7 @@ class RootBudget:
             "tokens_settled": self.state.tokens_settled,
             "tokens_unsettled": self.state.tokens_unsettled,
             "seq": self.state.seq,
+            "ledger_id": self.state.ledger_id,
             "open_tickets": self.state.open_tickets,
             "unsettled_tickets": self.state.unsettled_tickets,
             "stages": self.state.stages,
@@ -340,12 +409,13 @@ class RootBudget:
                         f"根任务 token 预算已用尽（上限 {self.limits.max_tokens}，"
                         f"本次已到 {new_tok}）")
             seq = int(r.incrby(k["seq"], calls))
+            self._established = True
             return seq
         except BudgetExceeded:
             raise
         except Exception as exc:
             logger.warning("跨进程预留失败，按本地账本继续：%s", str(exc)[:100])
-            self._redis_failed = True
+            self._mark_backend(False)
             return None
 
     def _take_open(self, ticket: str) -> dict | None:
@@ -364,16 +434,18 @@ class RootBudget:
     def _release_tokens_remote(self, tokens: int, *, actual: int | None = None) -> None:
         """跨进程 token 计数回退：`actual=None` 表示整笔上界退回（发送前失败）；
         给定 `actual` 表示结算——把上界换成实际（可能多退，也可能补扣）。"""
-        if self._r() is None:
+        r = self._r()
+        if r is None:
             return
         delta = -tokens if actual is None else (actual - tokens)
         if not delta:
             return
-        r = self._r()
         try:
             r.incrby(self._keys()["tokens"], delta)
+            self._established = True
         except Exception as exc:
-            logger.warning("跨进程 token 回退失败：%s", str(exc)[:100])
+            self._mark_backend(False)
+            logger.warning("跨进程 token 回退失败，降级为本地账本：%s", str(exc)[:100])
 
     def _release_calls_remote(self, calls: int) -> None:
         r = self._r()
@@ -381,8 +453,10 @@ class RootBudget:
             return
         try:
             r.decrby(self._keys()["calls"], calls)
+            self._established = True
         except Exception as exc:
-            logger.warning("跨进程调用次数回退失败：%s", str(exc)[:100])
+            self._mark_backend(False)
+            logger.warning("跨进程调用次数回退失败，降级为本地账本：%s", str(exc)[:100])
 
     def settle(self, ticket: str, *, tokens: int = 0, ok: bool = True,
                note: str = "") -> None:
@@ -576,6 +650,8 @@ class RootBudget:
             "unsettled_tickets": {t: dict(rec)
                                   for t, rec in self.state.unsettled_tickets.items()},
             "rejected_transitions": dict(self.state.rejected_transitions),
-            "cross_process": self._r() is not None,
+            "cross_process": bool(self._established),
+            "shared": ("failed" if self._redis_failed
+                       else ("established" if self._established else "unprobed")),
             "limited": self.limited,
         }

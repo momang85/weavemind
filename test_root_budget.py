@@ -429,22 +429,26 @@ class _AtomicFakeRedis:
 
 
 class TestCrossProcessReservation(unittest.TestCase):
-    """R2：两个实例共用一份剩余额度（Redis 原子计数），文件只是快照。"""
+    """R2：同一任务的两个实例共用一份剩余额度（Redis 原子计数），文件只是快照。
+
+    这里的"两个实例"= 同一个根任务的两次编排器实例（重启后恢复、或并行实例），
+    它们指向**同一个账本目录**（同一 task 工作区）。共享计数的键空间按账本身份
+    （`ledger_id`）隔离，所以"同一次运行"的两个实例读到的是同一份额度，
+    而重新提交的一次运行不会继承上一轮的花费。
+    """
 
     def setUp(self):
         self.kv: dict = {}
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_x_"))
+        self.addCleanup(__import__("shutil").rmtree, self.tmp, ignore_errors=True)
 
     def _budget(self, tmp, **limits):
         return rb.RootBudget("t-1", tmp, rb.BudgetLimits(**limits),
                              redis_factory=lambda: _AtomicFakeRedis(self.kv))
 
     def test_two_instances_do_not_both_get_the_last_slot(self):
-        tmp1 = Path(tempfile.mkdtemp(prefix="wm_x1_"))
-        tmp2 = Path(tempfile.mkdtemp(prefix="wm_x2_"))
-        self.addCleanup(__import__("shutil").rmtree, tmp1, ignore_errors=True)
-        self.addCleanup(__import__("shutil").rmtree, tmp2, ignore_errors=True)
-        b1 = self._budget(tmp1, max_calls=1)
-        b2 = self._budget(tmp2, max_calls=1)
+        b1 = self._budget(self.tmp, max_calls=1)
+        b2 = self._budget(self.tmp, max_calls=1)
         t1 = b1.reserve("step")
         with self.assertRaises(rb.BudgetExceeded):
             b2.reserve("step")
@@ -452,35 +456,36 @@ class TestCrossProcessReservation(unittest.TestCase):
 
     def test_ticket_ids_are_unique_across_instances(self):
         """R2 反例：两个实例都返回 `request-1`，磁盘只记 1 条。"""
-        tmp1 = Path(tempfile.mkdtemp(prefix="wm_x3_"))
-        tmp2 = Path(tempfile.mkdtemp(prefix="wm_x4_"))
-        self.addCleanup(__import__("shutil").rmtree, tmp1, ignore_errors=True)
-        self.addCleanup(__import__("shutil").rmtree, tmp2, ignore_errors=True)
-        b1 = self._budget(tmp1, max_calls=10)
-        b2 = self._budget(tmp2, max_calls=10)
+        b1 = self._budget(self.tmp, max_calls=10)
+        b2 = self._budget(self.tmp, max_calls=10)
         t1 = b1.reserve("step")
         t2 = b2.reserve("step")
-        self.assertNotEqual(t1, t2, "票据号必须跨进程唯一")
+        self.assertNotEqual(t1, t2, "票据号必须跨实例唯一")
         snap = b1.snapshot()
         self.assertTrue(snap["cross_process"])
         self.assertEqual(snap["calls"]["reserved"], 2,
-                         "共享计数：两个进程的预留都要记进同一份额度")
+                         "共享计数：两个实例的预留都要记进同一份额度")
 
     def test_token_reservation_is_atomic_across_instances(self):
-        tmp1 = Path(tempfile.mkdtemp(prefix="wm_x5_"))
-        tmp2 = Path(tempfile.mkdtemp(prefix="wm_x6_"))
-        self.addCleanup(__import__("shutil").rmtree, tmp1, ignore_errors=True)
-        self.addCleanup(__import__("shutil").rmtree, tmp2, ignore_errors=True)
-        b1 = self._budget(tmp1, max_tokens=100)
-        b2 = self._budget(tmp2, max_tokens=100)
+        b1 = self._budget(self.tmp, max_tokens=100)
+        b2 = self._budget(self.tmp, max_tokens=100)
         b1.reserve("plan", tokens=80)
         with self.assertRaises(rb.BudgetExceeded):
             b2.reserve("reflect", tokens=80)
 
+    def test_new_run_does_not_inherit_previous_counters(self):
+        """重新开始的一次运行（新账本目录）不得继承上一轮留在 Redis 的花费。"""
+        other = Path(tempfile.mkdtemp(prefix="wm_x_new_"))
+        self.addCleanup(__import__("shutil").rmtree, other, ignore_errors=True)
+        b1 = self._budget(self.tmp, max_calls=1)
+        b1.reserve("step")
+        b2 = self._budget(other, max_calls=1)
+        self.assertTrue(b2.reserve("step"),
+                        "另一个账本（新一次运行）应拿到自己的额度")
+        self.assertEqual(b2.snapshot()["shared"], "established")
+
     def test_rollback_keeps_counter_accurate(self):
-        tmp = Path(tempfile.mkdtemp(prefix="wm_x7_"))
-        self.addCleanup(__import__("shutil").rmtree, tmp, ignore_errors=True)
-        b = self._budget(tmp, max_calls=2, max_tokens=100)
+        b = self._budget(self.tmp, max_calls=2, max_tokens=100)
         b.reserve("plan", tokens=80)
         with self.assertRaises(rb.BudgetExceeded):
             b.reserve("plan", tokens=80)

@@ -344,6 +344,22 @@ class TestOfflineFaultInjection(unittest.TestCase):
 
     def setUp(self):
         self.run = _OfflineRun(self)
+        # 端点健康/余额探测是**进程级缓存**的：本类里前一条用例故意让端点失败，
+        # 缓存把"端点不可用"带到后一条用例上——后者的 run() 会在健康预检直接终止，
+        # 于是"银行模式评审超时应拒绝"这类断言看到的失败原因完全不是被测行为
+        # （实测：用例单独跑通过、整类跑失败）。这里按"端点可用"固定住探测结论，
+        # 让每条用例只验证自己要验证的那一条故障路径。
+        for target, value in (
+            ("llm_client.endpoints_available", lambda: (True, "offline")),
+            ("llm_client.get_task_llm_degradation", lambda tid: {}),
+            ("llm_client.get_endpoint_warning", lambda: ""),
+            ("llm_client.get_balance_status",
+             lambda **kw: {"primary": {"ok": True, "reason": "ok"},
+                           "backup": {"ok": True, "reason": "ok"}}),
+        ):
+            pt = mock.patch(target, value)
+            pt.start()
+            self.addCleanup(pt.stop)
 
     def _mixed_brpop(self, tid: str, *, review_reply=None):
         """按 key 分流：task_result:* 回步骤结果（含报告落盘），plan_review:* 按参数回包。
