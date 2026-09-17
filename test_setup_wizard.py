@@ -320,6 +320,7 @@ class TestProbeSkipWhenDepsMissing(_Tmp):
                 mock.patch.object(w, "_interactive", return_value=True), \
                 mock.patch.object(sys.stdin, "isatty", return_value=False, create=True), \
                 mock.patch.object(w, "probe_endpoint", side_effect=probe_side_effect) as pe, \
+                _allow_probe(), \
                 mock.patch.object(w, "load_template", return_value=_template()), \
                 mock.patch("sys.stdout", io.StringIO()), \
                 mock.patch("builtins.input", side_effect=self._answers(answers)):
@@ -338,6 +339,18 @@ class TestProbeSkipWhenDepsMissing(_Tmp):
         return _next
 
 
+def _allow_probe():
+    """放行"是否允许探测"的策略检查（测试替身）。
+
+    探测策略要看**真实 DNS**（解析不了的主机一律不探测，这是 SSRF 守卫的一部分），
+    而这些用例验证的是探测结果的输出/退出码/交互流程，不该依赖本机能否解析
+    `example.invalid`——实测：CI 与本机都会因此在策略这一步短路，`probe_endpoint`
+    替身根本不被调用，用例失败的原因与被测行为无关。
+    策略本身的行为有专门用例（`test_loopback_is_not_probed`，用 IP 字面量，不依赖 DNS）。
+    """
+    return mock.patch.object(w, "probe_allowed", return_value=(True, ""))
+
+
 class TestProbeConfiguredMode(_Tmp):
     """`--probe`：依赖装好后的自动复查（不提问、不阻塞启动）。"""
 
@@ -351,6 +364,7 @@ class TestProbeConfiguredMode(_Tmp):
         self._write_cfg("https://api.example.invalid/v1")
         out = io.StringIO()
         with mock.patch.object(w, "probe_endpoint", return_value=(True, "连通正常")), \
+                _allow_probe(), \
                 mock.patch("sys.stdout", out):
             rc = w.probe_configured(self.cfg_path)
         self.assertEqual(rc, 0)
@@ -359,6 +373,7 @@ class TestProbeConfiguredMode(_Tmp):
     def test_failure_returns_nonzero_but_does_not_raise(self):
         self._write_cfg("https://api.example.invalid/v1")
         with mock.patch.object(w, "probe_endpoint", return_value=(False, "鉴权失败")), \
+                _allow_probe(), \
                 mock.patch("sys.stdout", io.StringIO()):
             self.assertEqual(w.probe_configured(self.cfg_path), 1)
 
@@ -379,6 +394,7 @@ class TestProbeConfiguredMode(_Tmp):
     def test_deps_missing_skip_is_not_failure(self):
         self._write_cfg("https://api.example.invalid/v1")
         with mock.patch.object(w, "probe_endpoint", return_value=(None, "依赖尚未安装")), \
+                _allow_probe(), \
                 mock.patch("sys.stdout", io.StringIO()):
             self.assertEqual(w.probe_configured(self.cfg_path), 0)
 

@@ -311,6 +311,42 @@ class TestPersistentDataRoot(unittest.TestCase):
 
 # ── CI 覆盖面 ─────────────────────────────────────────────────────
 
+class TestComposeKeepsContainerAlive(unittest.TestCase):
+    """compose 的"容器起来之后要一直在"不变量（实测事故：容器起来即退出）。
+
+    `python launcher.py start` 拉起子进程后**自己会返回**：宿主上没问题（终端还在），
+    容器里 PID 1 一退出，子进程被一起收走、`/api/health` 永远不就绪，CI 的
+    "Compose up and readiness check" 就是这样一直红的。守护模式 + Redis 就绪探针
+    是修法，这里把它钉住。
+    """
+
+    COMPOSE = ROOT / "docker-compose.yml"
+
+    def _doc(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML 不可用")
+        return yaml.safe_load(self.COMPOSE.read_text(encoding="utf-8"))
+
+    def test_app_runs_in_supervise_mode(self):
+        doc = self._doc()
+        env = doc["services"]["app"].get("environment") or []
+        env = [str(e) for e in env]
+        self.assertIn(
+            "WEAVEMIND_SUPERVISE=1", env,
+            "容器必须常驻守护：否则 launcher start 返回后 PID 1 退出，服务全被收走")
+
+    def test_redis_has_healthcheck_and_app_waits_for_it(self):
+        doc = self._doc()
+        self.assertTrue(doc["services"]["redis"].get("healthcheck"),
+                        "redis 需要就绪探针（depends_on 默认只保证启动顺序）")
+        dep = doc["services"]["app"].get("depends_on")
+        self.assertIsInstance(dep, dict,
+                              "app 必须用 condition: service_healthy 等 redis 真就绪")
+        self.assertEqual(dep.get("redis", {}).get("condition"), "service_healthy")
+
+
 class TestCiSuiteCoverage(unittest.TestCase):
     def test_every_test_file_runs_in_ci(self):
         ci = CI_YML.read_text(encoding="utf-8")

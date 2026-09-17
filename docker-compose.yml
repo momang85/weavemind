@@ -11,6 +11,15 @@ services:
     # 如需从宿主机调试，可临时用 `docker exec -it zhiguan-redis redis-cli`。
     expose:
       - "6379"
+    # 就绪探针：`depends_on` 默认只保证**启动顺序**，不保证"已经能接受命令"。
+    # 而 app 启动时会先校验 Redis（`launcher._check_redis_or_exit`），探不通就 exit(1)
+    # → app 反复重启、健康检查迟迟不就绪（CI 的 "Compose up and readiness check" 卡这里）。
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+      start_period: 3s
     volumes:
       - redis_data:/data
     restart: unless-stopped
@@ -19,7 +28,8 @@ services:
     build: .
     container_name: zhiguan-app
     depends_on:
-      - redis
+      redis:
+        condition: service_healthy
     environment:
       # 密钥通过 .env（与 docker-compose.yml 同目录）注入，不写入镜像
       - LLM_API_KEY=${LLM_API_KEY:?请在 .env 中设置 LLM_API_KEY}
@@ -30,6 +40,11 @@ services:
       - EMBEDDING_MODEL=${EMBEDDING_MODEL:-BAAI/bge-large-zh-v1.5}
       - REDIS_HOST=redis
       - REDIS_PORT=6379
+      # 守护模式：`launcher.py start` 拉起子进程后**自己就返回了**，容器的 PID 1 随即
+      # 退出——子进程跟着死，`/api/health` 永远不就绪（实测：compose 起来后反复重启、
+      # 端口无响应）。`supervise` 模式会常驻巡检并崩溃自愈，才是"容器里跑一支服务"
+      # 该有的语义；宿主上 `start.bat` 走的也是同一套。
+      - WEAVEMIND_SUPERVISE=1
       # 代码执行沙箱：默认要求容器隔离。本服务**不具备隔离能力**（镜像内无 Docker CLI，
       # 也未挂载 docker socket），因此容器内涉及 code_execution 的步骤会被**拒绝**
       # （不是降级到宿主执行）。工作台与不依赖代码执行的功能照常启动与使用。
