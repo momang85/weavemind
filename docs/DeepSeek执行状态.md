@@ -1,30 +1,30 @@
 # DeepSeek 执行状态（2026-09-17 更新）
 
 **当前关卡**：M0 / R0b / R0c / MKT-P0 / R1 / R2 / 检索质量统一均已落地；**B 批只做了线几何**。
-推送已恢复：远端 `main` = `4acf814`（本轮共 12 个提交全部推上去）。**CI 已能真实运行**
-（此前"从未观察到绿灯"的项目里，`clean-env-e2e` 现在**绿了**）。下一批 = **B 批其余项 → C → D → E → F**。
+**CI 全绿**（`ec4f942`：`backend` / `frontend` / `docker-image` / `clean-env-e2e` 四个作业全部 success，
+本地全部对齐复跑过）。下一批 = **B 批其余项 → C → D → E → F**。
 
-**CI 现状（按 run `4acf814` 的作业结论）**
+**CI 从"从未观察过绿灯"到全绿：这轮修掉的七个真问题**
 
-| 作业 | 结论 | 说明 |
+| # | 问题 | 性质 |
 |---|---|---|
-| `clean-env-e2e` | ✅ success | **首次绿灯**：干净 clone → 依赖 → 起服务（Redis 服务容器 + 仓库内 stub）→ 提交任务 → 产出报告 |
-| `frontend` | ✅ success | 行为测试 + 构建 |
-| `backend` | ❌ 停在 "Portable Redis acquisition" | 该步之前全绿（含本轮修的 "Setup wizard tests"）；该步之后 ~37 步被跳过 |
-| `docker-image` | ❌ 停在 "Compose up and readiness check" | 构建与两个导入检查全绿；容器就绪检查失败 |
+| 1 | `ci.yml` 步骤名里未加引号的冒号（`(R1: bound PASS…)`）→ 整份 YAML 解析失败 | **门禁自身坏了**：GitHub 仍创建 run，但**零作业**、结论 failure，本地全绿看不出来 |
+| 2 | `launcher.py start` 拉起子进程后自己返回 → 容器 PID 1 退出、服务被收走 | 部署真缺陷：`docker compose up` 起来即退 |
+| 3 | redis 无就绪探针 + `depends_on` 只保证启动顺序 → app 反复重启 | 部署真缺陷 |
+| 4 | `web_ui` 默认 `BIND_HOST=127.0.0.1` → 容器只监听自己，`ports: 8080:8080` 空转 | 部署真缺陷（宿主机 readiness 探活 200s 全失败） |
+| 5 | `test_windows_prefers_system_binary` 在 Linux 上必然失败（两端分支不同） | 用例机依赖（已按平台分叉 + 补 POSIX 用例） |
+| 6 | `live_probe_embedding_classifies_quota` / `test_checkpointer` / `test_task_time_optimization` 依赖本机 config.json（CI 无配置、本机改用了真实 key 的余额） | 用例机依赖：CI 报"未配置"、本机报"余额不足"——都不是被测行为 |
+| 7 | e2e 脚本 `_status` 查 `task_history` 时表未建好即抛异常 → 门禁一次轮询失败就整轮崩 | 门禁脆弱：同一份代码上一次绿、这一次红 |
 
-- **已修并验证生效**：`backend` 原先卡在 "Setup wizard tests"（3 个用例拿 `api.example.invalid`
-  当目标，而探测策略先看真实 DNS，替身根本没被调用）→ 已修，新 run 已越过该步。
-- **已修但 CI 仍红**：`docker-image` 的就绪检查。修了两处（`WEAVEMIND_SUPERVISE=1` 让容器常驻、
-  redis 就绪探针 + `condition: service_healthy`），宿主上先验证过同一份代码在 supervise 模式下
-  `/api/health` 返回 200——但容器里仍不就绪，说明还有别的原因，**需要该步骤的 CI 日志**才能定位。
-- **未定位**：`backend` 的 "Portable Redis acquisition"（`test_redis_acquisition.py`）。
-  本机 14 项全绿，且该文件与 `dep_check` 都没有平台分支；没有 CI 日志无法判断是 Linux 环境差异
-  还是 runner 抖动。
-- **CI 日志读不到**：GitHub 的 job 日志与 annotation 都需要登录（API 返回 403），
-  提交状态接口也不带失败文本。要定位上面两步，需要你把这两步的日志贴过来（浏览器里点开即可）。
-- **口径提醒**：`backend` 是 fail-fast，一个早步骤失败会让后面 ~37 步显示 skipped——
-  那些套件在该 commit 上**并未**在 CI 验证（本机已逐条跑过，见下）。
+- 另外补了守卫：`ci.yml` 必须能被 YAML 解析、每步恰有 `run`/`uses` 之一、名里不得有未加引号的 `: `；
+  compose 的"容器必须常驻 + redis 就绪探针 + `BIND_HOST=0.0.0.0`"不变量。
+- `test_task_time_optimization::test_convergence_continues_when_best_report_improves` 的状态断言
+  在 R1/R2 **之前就是红的**（用 `d0e5a72` 的 worktree 复核过）：该用例全程打桩、没有版本绑定的
+  验收，按"以最终验收判定"就该记 `SUCCESS_WITH_ISSUES`；已按可达且正确的期望改写并注明原因。
+- **仍如实记两件事**：① `backend` 是 fail-fast，当前全绿说明所有 44 步都过了，但一旦早步骤失败，
+  后面会显示 skipped（本轮就是这样才发现不了后面 37 步的问题）；② CI 日志/annotation 需要登录
+  才能读（API 403），本轮起 `gh` 已登录（`momang85`，scope 含 `repo`）但**推送/读日志要记得给代理**
+  （`HTTPS_PROXY=http://127.0.0.1:7897`，gh 不读 git 的 `http.proxy`）。
 
 **B 批（PDF 排版）：线几何已修，其余项与视觉门禁未做**
 
