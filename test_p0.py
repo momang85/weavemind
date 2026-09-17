@@ -5759,6 +5759,101 @@ class TestReportPdf(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestReportPdfLineGeometry(unittest.TestCase):
+    """B 批（PDF 排版）：分隔线/表线/标题下划线的几何不变量。
+
+    为什么用**绘制指令**而不是只看"没报错"：此前三处画线都多写了一个宽度操作数
+    （`x y W 0 m x2 y l`），`m`/`l` 各自只吃两个数——PDF 取的是最后两个，于是线被画成
+    从 (W, 0) 到 (x2, y) 的斜线：位置、长度、方向全错，而 PDF 仍然"生成成功"。
+    这里直接解内容流，按几何断言（水平、跨度、落在可打印区内）把它钉住。
+    （视觉门禁需要把页面栅格化成 PNG，本机没有渲染器——见状态文档"未验证"一节。）
+    """
+
+    MD = (
+        "# 复核结论\n\n"
+        "正文第一段。\n\n"
+        "---\n\n"
+        "## 关键指标\n\n"
+        "| 指标 | 数值 | 来源 |\n|---|---|---|\n"
+        "| 营业收入 | 1741亿元 | [1] |\n"
+        "| 净利润 | 862亿元 | [1] |\n"
+    )
+
+    def _path_ops(self, data: bytes):
+        """解出所有内容流里的 `m` / `l` / `re` 绘制（返回 (op, [操作数]) 列表）。
+
+        按 PDF 语义取算子**紧前**的操作数并逐个算子清零——不能"把一行里所有数字都算上"：
+        `q RG w x y m x2 y l S Q` 里 x/y 之前还有颜色与线宽的数值。
+        """
+        import io
+        import re as _re
+        from pypdf import PdfReader
+        num_re = _re.compile(r"^-?\d+\.?\d*$")
+        reader = PdfReader(io.BytesIO(data))
+        ops = []
+        for page in reader.pages:
+            content = page.get_contents()
+            raw = content.get_data() if content is not None else b""
+            text = raw.decode("latin-1", errors="replace")
+            for line in text.splitlines():
+                pending: list[float] = []
+                for tok in line.split():
+                    if num_re.match(tok):
+                        pending.append(float(tok))
+                        continue
+                    if tok in ("m", "l"):
+                        self.assertEqual(len(pending), 2,
+                                         f"{tok} 只吃两个操作数：{line!r}")
+                        ops.append((tok, pending[-2:], line))
+                    elif tok == "re":
+                        self.assertEqual(len(pending), 4,
+                                         f"re 需要四个操作数：{line!r}")
+                        ops.append((tok, pending[-4:], line))
+                    pending = []
+        return ops
+
+    def test_path_operators_take_exactly_two_operands(self):
+        import report_pdf
+        data = report_pdf.markdown_to_pdf(self.MD, title="复核结论", workspace=None)
+        for op, nums, line in self._path_ops(data):
+            if op in ("m", "l"):
+                self.assertEqual(len(nums), 2,
+                                 f"{op} 只吃两个操作数，多了就会错位：{line!r}")
+            else:
+                self.assertEqual(len(nums), 4, f"re 需要四个操作数：{line!r}")
+
+    def test_drawn_lines_are_horizontal_inside_printable_area(self):
+        import report_pdf
+        data = report_pdf.markdown_to_pdf(self.MD, title="复核结论", workspace=None)
+        ops = self._path_ops(data)
+        starts = [nums for op, nums, _ in ops if op == "m"]
+        ends = [nums for op, nums, _ in ops if op == "l"]
+        self.assertTrue(starts and ends, "正文里的分隔线/表线必须真的画出来")
+        self.assertEqual(len(starts), len(ends))
+        import report_pdf as R
+        for (x1, y1), (x2, y2) in zip(starts, ends):
+            self.assertAlmostEqual(y1, y2, places=4,
+                                   msg=f"分隔线必须水平：(x1={x1}, y1={y1}) → (x2={x2}, y2={y2})")
+            self.assertAlmostEqual(x1, R.MARGIN_L, places=2, msg="线应从左页边起")
+            width = x2 - x1
+            self.assertIn(round(width, 2), (round(R.USABLE_W, 2), 80.0),
+                          "线的长度只能是正文宽或标题下划线的 80pt")
+            self.assertGreaterEqual(y1, R.MARGIN_B - 1)
+            self.assertLessEqual(y1, R.PAGE_H - R.MARGIN_T + 1)
+
+    def test_line_is_not_a_diagonal_to_the_origin(self):
+        """回归：斜线是从 (USABLE_W, 0) 起步的——那正是"多一个操作数"的特征。"""
+        import report_pdf
+        data = report_pdf.markdown_to_pdf(self.MD, title="复核结论", workspace=None)
+        import report_pdf as R
+        for op, nums, line in self._path_ops(data):
+            if op != "m":
+                continue
+            x, y = nums
+            self.assertFalse(abs(x - R.USABLE_W) < 0.01 and abs(y) < 0.01,
+                             f"起点落在 (USABLE_W, 0) 说明又出现斜线：{line!r}")
+
+
 class TestNewDataAdapters(unittest.TestCase):
     """F4：canned 数据解析（不联网）+ router 关键词路由。"""
 

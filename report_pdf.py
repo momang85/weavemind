@@ -869,10 +869,12 @@ class _PDFBuilder:
         elif btype == "hr":
             self._ensure_space(8)
             self.cursor_y -= 8
+            # 分隔线：`m`/`l` 各自只吃两个操作数（x y）。此前这里多写了一个宽度操作数
+            # （`x y W 0 m x2 y l`），PDF 取**最后两个**数当起点 → 线被画成从
+            # (W, 0) 到 (x2, y) 的斜线：位置、长度、方向都不是本意。
             self.page_content += (
-                f"q 0.75 0.75 0.78 RG 1 w {MARGIN_L:.2f} {self.cursor_y:.2f} "
-                f"{USABLE_W:.2f} 0 m {MARGIN_L + USABLE_W:.2f} "
-                f"{self.cursor_y:.2f} l S Q\n"
+                f"q 0.75 0.75 0.78 RG 1 w {MARGIN_L:.2f} {self.cursor_y:.2f} m "
+                f"{MARGIN_L + USABLE_W:.2f} {self.cursor_y:.2f} l S Q\n"
             ).encode()
             self.cursor_y -= 14
 
@@ -924,9 +926,8 @@ class _PDFBuilder:
                     self.cursor_y -= line_h
                 self.cursor_y = y - pad - TABLE_SIZE
             self.page_content += (
-                f"q 0.72 0.73 0.76 RG 0.6 w {MARGIN_L:.2f} {y - row_h:.2f} "
-                f"{USABLE_W:.2f} 0 m {MARGIN_L + USABLE_W:.2f} "
-                f"{y - row_h:.2f} l S Q\n"
+                f"q 0.72 0.73 0.76 RG 0.6 w {MARGIN_L:.2f} {y - row_h:.2f} m "
+                f"{MARGIN_L + USABLE_W:.2f} {y - row_h:.2f} l S Q\n"
             ).encode()
             y -= row_h
         self.cursor_y = y - 10
@@ -978,8 +979,8 @@ def markdown_to_pdf(
             builder.cursor_y -= 21
         builder.cursor_y -= 10
         builder.page_content += (
-            f"q 0.20 0.42 0.72 RG 1.2 w {MARGIN_L:.2f} {builder.cursor_y:.2f} "
-            f"80 0 m {MARGIN_L + 80:.2f} {builder.cursor_y:.2f} l S Q\n"
+            f"q 0.20 0.42 0.72 RG 1.2 w {MARGIN_L:.2f} {builder.cursor_y:.2f} m "
+            f"{MARGIN_L + 80:.2f} {builder.cursor_y:.2f} l S Q\n"
         ).encode()
         builder.cursor_y -= 16
     for block in _split_blocks(markdown):
