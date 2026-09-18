@@ -6,6 +6,7 @@ import StepInspector from '../components/StepInspector'
 import SubmitPanel from '../components/console/SubmitPanel'
 import PlanPanel from '../components/console/PlanPanel'
 import ConsoleSideTabs from '../components/console/ConsoleSideTabs'
+import { clearLastTask, readLastTask, saveLastTask, shouldResume } from '../lib/lastTask'
 import type { TaskNode, ConversationMessage, TaskReport } from '../stores/types'
 
 type Tab = 'live' | 'context' | 'results'
@@ -62,6 +63,37 @@ export default function TaskConsole() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  // 运行中任务刷新后恢复跟踪（此前 taskId 只在内存，刷新即"孤儿化"：
+  // 后端日志还在、页面空着）。只恢复**未终态**的任务——任务结束后刷新回到空白
+  // 控制台是原有行为，不顺手改掉；已结束的恢复点顺手清掉，避免每次刷新都白查一次。
+  useEffect(() => {
+    if (taskId || demoMode) return
+    const saved = readLastTask()
+    if (!saved || saved.id.startsWith('demo-')) return
+    let cancelled = false
+    fetch('/task/' + saved.id)
+      .then(r => (r.ok ? r.json() : null))
+      .then((d: any) => {
+        if (cancelled) return
+        const st = String((d && d.status) || '')
+        if (shouldResume(st)) {
+          // 悬停态与提交路径一致：`useTaskLive` 只回写计划树/日志，不回写顶层 status，
+          // 不补这一项的话恢复后顶栏没有"运行中/停止"，用户没法停掉它。
+          useTaskStore.setState({
+            currentTaskId: saved.id,
+            startedAt: saved.startedAt || Date.now(),
+            status: 'running',
+          })
+        } else if (st) {
+          clearLastTask()   // **明确读到终态**才清恢复点
+        }
+        // 读不到（服务不可达/响应异常）就留着：下次刷新再试，别因为一次失败丢掉跟踪
+      })
+      .catch(() => { /* 同上：网络失败不清恢复点 */ })
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskId, demoMode])
+
   const loadConversation = useCallback(async (convId: string) => {
     try {
       const res = await fetch('/api/conversations/' + convId)
@@ -78,6 +110,7 @@ export default function TaskConsole() {
       if (!targetId) return
       if (running?.task_id) {
         useTaskStore.setState({ currentTaskId: running.task_id })
+        saveLastTask(running.task_id)   // 与提交路径一致：刷新后仍能恢复跟踪
       } else {
         fetch('/task/' + targetId).then(r => r.json()).then((d: any) => {
           if (!d || d.error) return
@@ -272,6 +305,7 @@ export default function TaskConsole() {
 
   const newConversation = useCallback(() => {
     reset()
+    clearLastTask()   // "新对话"= 主动放弃当前任务：连刷新恢复点一起清
     setConvMessages([])
     useTaskStore.setState({ currentTaskId: null })
     window.history.replaceState({}, '', window.location.pathname)

@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import { TaskState, TaskNode, LogEntry, TaskReport, AgentInfo, SystemStatus } from './types'
 import { DEMO_PLAN, DEMO_AGENTS } from './demoData'
 import { setDemoActive } from '../lib/demoGuard'
+import { saveLastTask } from '../lib/lastTask'
 
 export const useTaskStore = create<TaskState & {
   startTask: (id: string) => void
@@ -36,14 +37,18 @@ export const useTaskStore = create<TaskState & {
   demoMode: new URLSearchParams(window.location.search).has('demo'),
   systemStatus: null,
 
-  startTask: (id) => set({
-    currentTaskId: id,
-    startedAt: Date.now(),
-    planTree: null,
-    logs: [],
-    status: 'running',
-    report: null,
-  }),
+  startTask: (id) => {
+    // 记下"最后一次提交的任务"：刷新后据此恢复跟踪（此前刷新即丢跟踪）
+    saveLastTask(id)
+    set({
+      currentTaskId: id,
+      startedAt: Date.now(),
+      planTree: null,
+      logs: [],
+      status: 'running',
+      report: null,
+    })
+  },
 
   setActiveConversation: (id) => set({ activeConversationId: id }),
 
@@ -99,6 +104,10 @@ export const useTaskStore = create<TaskState & {
     }
   },
 
+  // 注意：这里**不**清恢复点。`reset()` 不只是"用户要新对话"——`useDemoRunner` 在每次
+  // 非演示模式挂载时也会调它（`stop()` → `reset()`），把 `clearLastTask()` 放这里会让
+  // 刷新后的恢复点被挂载流程立刻抹掉（实测：重载后 9 秒内 `wm.lastTask` 变 null）。
+  // 清恢复点是"用户主动放弃这个任务"的语义，放在 `newConversation` 里。
   reset: () => set({
     currentTaskId: null,
     activeConversationId: null,
