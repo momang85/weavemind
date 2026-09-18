@@ -200,6 +200,10 @@ class TestExportManifestWiring(unittest.TestCase):
         v = self.store.get(v.version_id)
         self.store.adopt(v, reason="产出版本被选中")
         self.version_id = v.identity_id()
+        # 正常任务在收尾/修订时会记录交付正文；清单的 aligned/同版绑定就靠这条记录。
+        # （"没有交付记录"是另一条用例专门覆盖的边界。）
+        self.store.record_delivery(self.body, accepted_body=self.body,
+                                   ok=True, reason="")
         self._orig_ws = web_ui.task_workspace
         self._orig_data = web_ui._get_task_report_data
         web_ui.task_workspace = lambda tid: self.ws
@@ -226,6 +230,20 @@ class TestExportManifestWiring(unittest.TestCase):
         self.assertEqual(m2["files"]["markdown"]["sha256"], m1["files"]["markdown"]["sha256"])
         self.assertFalse(m2["draft"])
         self.assertTrue(m2["aligned"])
+
+    def test_no_delivery_record_means_draft(self):
+        """没有交付记录时**无法核对导出字节**：不得判为已验证（B 批）。
+
+        此前那种情况会落到"比较交付文档 hash 与研究正文 hash"的兜底分支——两者本就不是
+        同一份字节，判定结构性错误。现在如实记 draft 并说明原因。
+        """
+        data = self.store._load()
+        data["deliveries"] = []          # 只清交付记录，保留版本与选中
+        self.store._save(data)
+        m = self.web_ui._write_export_manifest(self.tid, self.body, b"")
+        self.assertIsNone(m["aligned"], m)
+        self.assertTrue(m["draft"])
+        self.assertIn("交付记录", m["draft_reason"])
 
     def test_markdown_route_serves_bytes_with_version_headers(self):
         h = _FakeHandler()

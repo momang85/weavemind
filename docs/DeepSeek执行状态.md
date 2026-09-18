@@ -1,31 +1,29 @@
 # DeepSeek 执行状态（2026-09-18 更新）
 
-**当前批次**：A′ 补修进行中（架构复核 `ebbc120` 后的四组漏检：主体标识含市场、
-候选顺序无关+无关记录只作审计、文档主体门槛与异常 fail closed、截至日成为证据约束）。
-A 主体已实现并复核通过；S0–S3 与登录态实机检查此前已完成，不重开。
+**当前批次**：B（修订后按新版本重新装配交付）实现完成，**本地提交，未推送**。
+A / A′ 已通过复核；C（固定研究路径 + 一次有界实机）、D（试用）按指令后续。
 
-**A 批已完成（离线；证据 `docs/evidence/research_contract_A_20260918.md`）**
-- 契约先落库：表单送结构化字段（公司/稳定标识/市场/两年度/口径/截至日），提交流程经
-  白名单校验 → Redis → `task_state` 新列 `research_request_json`；底稿**优先读契约**，
-  抓取元数据只作候选（不再反向改写用户请求）。
-- 单一事实选择：`select_facts` 供校验与计算**共用**；跨公司记录被排除并列出；同组合冲突
-  候选连值一起列出；同比仅相邻年度、基期 0 明确"不可算"、单位落 `%`。
-- 认证门槛：口径未知/不符、缺主体、缺来源位置、文档主体作用域未绑定 → 一律不达标。
-- 交付硬约束：`hard_fail` 首次被赋值（此前全仓无人写），底稿结论因此能约束交付判定 →
-  `draft` / `SUCCESS_WITH_ISSUES`；普通非财务任务不进门槛。
+**B 已完成（离线；证据 `docs/evidence/revision_same_version_B_20260918.md`）**
+- 抽共享模块 `delivery_pipeline`：验收（含自动修复/产物/事件/按身份绑定）、装配、判定、
+  记录交付**只有一套实现**，编排器收尾与人工修订都走它 → 交付字节与 `delivered_sha256` 同源。
+- 修订端点重写：新版本 → 对本版重验 → 固定顺序重装交付 → 同步投影（正文+验收摘要+状态）；
+  验收异常仍 200 但为 draft；**交付投影写入失败返回 500**，不用 HTTP 成功掩盖部分更新。
+- 旧评审不迁移：`review_state.json` 记 PASS 所属版本；正文一改即需重新评审
+  （个人模式本不要求评审，不受影响）。
+- 页面 / 验收详情 / manifest / 导出共用 `delivery_state` 读取口径；验收详情按版本绑定
+  （旧快照标 `stale_file` 且不返回旧 checks）；导出头描述**实际送达字节**。
 
 **已验证范围（三类证据分开）**
-- **离线反例先行**：8 组反例（含架构复核的 564.12%、顺序依赖、`'亿元' != '%'`）先红后绿。
-- **定向测试**：`test_r0_boundaries/test_working_paper/test_facts/test_fact_fidelity/
-  test_review_edit_api/test_task_state/test_task_projection/test_report_version` 159 项 OK；
-  `test_offline_delivery` 9 项 OK；前端 36 项 + 守卫 36 项 OK；`npm run build` 通过。
-- **CI 自报通过**：最近一次为 `0d26acd`（A 批前，四作业全绿 run `35303904399`）；
-  **A 批尚未推送，因此没有 A 的 CI 结论**。
+- **离线矩阵**：四例 × 四面（旧 fail→新 pass、旧 pass→新 fail、验收异常、交付更新失败）
+  全部一致；另加"旧评审不迁移（银行口径）"一例。
+- **定向回归**：`test_delivery_chain / test_orchestrator_v2 / test_p0 / test_acceptance_adversarial /
+  test_report_quality / test_task_time_optimization / test_r0_boundaries / test_report_version /
+  test_review_edit_api / test_offline_delivery` → 792 项 OK（含评测闸门）。
+- **CI 自报通过**：最近一次为 `0d26acd`（B 批前）。**B 尚未推送，因此没有 B 的 CI 结论。**
 
 **阻塞与下一步**
-- 阻塞：真实研究链路仍未闭环（需 C 批的固定路径 + 一次有界实机）；东财报表口径未声明
-  （未取证前真实快照只能是"口径未知 ⇒ 不达标"）。
-- 下一步：B（修订后按新版本重新装配交付、验收详情与 manifest 同步）、C、D 由架构指令逐批下达。
+- 阻塞：真实研究链路仍未闭环（C 批：固定公司研究路径 + 一次有界实机 + 东财口径/日期取证）。
+- 未做：前端修订入口（仓库内无 `review/edit` 调用点，人工改版目前只能调 API，界面留到 D）。
 
 ## 历史（按日期，保留当时结论）
 

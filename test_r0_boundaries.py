@@ -646,7 +646,7 @@ class TestFinalBodyAcceptanceBinding(unittest.TestCase):
         o = self._orch()
         with self._patched_ws(), \
                 mock.patch.object(o, "_run_acceptance_check", return_value={"overall": "pass"}), \
-                self.assertLogs("orchestrator_v2", level="WARNING") as lg:
+                self.assertLogs("delivery_pipeline", level="WARNING") as lg:
             got, body = o._ensure_final_body_accepted("t-fin", "目标", self.detail)
         self.assertEqual(got, "mismatch")
         self.assertEqual(body, self.detail)

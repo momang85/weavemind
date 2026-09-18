@@ -2646,39 +2646,16 @@ def _write_export_manifest(tid: str, body: str, pdf_bytes: bytes = b"",
     if pdf_bytes:
         files["pdf"] = {"sha256": hashlib.sha256(pdf_bytes).hexdigest(),
                         "bytes": len(pdf_bytes)}
-    # 与收尾时记录的最终交付正文 hash 对照：导出字节是否就是那份交付。
-    # 交付文档 = 交付说明 + 研究正文，与"验收对象（研究正文）"不是同一份字节，
-    # 所以对齐判定以**记录的交付正文**为准，验收对象是否命中另由 accepted_body_matches 表达。
-    final_sha = ""
-    try:
-        for d in reversed(store.deliveries()):
-            final_sha = str(d.get("delivered_sha256") or "")
-            if final_sha:
-                break
-    except Exception:
-        final_sha = ""
-    if final_sha:
-        aligned = delivered == final_sha
-    else:
-        aligned = bool(adopted) and adopted.version_id == delivered
-    # R0.3：导出状态由**唯一谓词**给出（页面/PDF/打印件/manifest/准入共用）。
+    # R0.3 + B：导出状态由**唯一读取口径**给出（页面/PDF/打印件/manifest/验收详情共用）。
     # 注意两个不同对象：验收对象是**研究正文**（version.body），导出的是**交付文档**
-    # （交付说明 + 研究正文 + 注记）。因此：先判"这版验收是否通过且属于本正文"，
-    # 再叠加"导出字节是否就是收尾记录的那份交付"与"那份交付本身是否 ok"。
-    status, draft_reason = verified_delivery(
-        adopted, (adopted.body if adopted is not None else ""),
-        review_valid=True, hard_ok=True)
-    if status == DELIVERY_VERIFIED and not aligned:
-        status, draft_reason = "draft", "导出字节与收尾记录的交付正文不一致（装配后未重验）"
-    _last_delivery = {}
-    try:
-        _dels = store.deliveries()
-        _last_delivery = _dels[-1] if _dels else {}
-    except Exception:
-        _last_delivery = {}
-    if status == DELIVERY_VERIFIED and _last_delivery and not _last_delivery.get("ok"):
-        status = "draft"
-        draft_reason = str(_last_delivery.get("reason") or "收尾时已判为未验收草稿")
+    # （交付说明 + 研究正文 + 注记）。这里用 `delivery_state` 一次算清：
+    # 选中版本 + 本版验收 + 持久化评审事实 + 可重算的研究硬门槛 + **同一版本**的交付记录。
+    from delivery_pipeline import delivery_state
+    state = delivery_state(tid, body, ws_dir=task_workspace(tid))
+    status = str(state.get("status") or DELIVERY_UNKNOWN)
+    draft_reason = str(state.get("draft_reason") or "")
+    aligned = state.get("aligned")
+    final_sha = str(state.get("delivered_sha256") or "")
     manifest = {
         "report_version_id": ver.identity_id(),
         "body_sha256": ver.version_id,
@@ -2691,6 +2668,8 @@ def _write_export_manifest(tid: str, body: str, pdf_bytes: bytes = b"",
         "status": status,
         "draft": status != DELIVERY_VERIFIED,
         "draft_reason": draft_reason,
+        "review_valid": bool(state.get("review_valid")),
+        "hard_fail": str(state.get("hard_fail") or ""),
         "working_paper": paper_meta,
         "renderer_version": "report_pdf/v1",
         "template_version": "default",
@@ -2709,6 +2688,17 @@ def _write_export_manifest(tid: str, body: str, pdf_bytes: bytes = b"",
         manifest["manifest_write_error"] = str(exc)[:200]
         logger.error("导出清单写入失败（task=%s）：%s", tid, str(exc)[:200])
     return manifest
+
+
+def _read_export_manifest(tid: str) -> dict:
+    """读回任务工作区里的导出清单（缺/坏 → 空 dict，不抛）。"""
+    try:
+        p = task_workspace(tid) / "export_manifest.json"
+        if not p.exists():
+            return {}
+        return json.loads(p.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
 
 
 def _task_pdf_bytes(tid: str) -> bytes:
@@ -2790,7 +2780,12 @@ def _get_task_markdown(self, p):
             "Content-Disposition", f'attachment; filename="{tid}.md"')
         # 导出页/前端据此显示"这份导出对应的哪个选中版本、是否未验收草稿"
         self.send_header("X-Report-Version-Id", manifest["report_version_id"])
-        self.send_header("X-Report-Body-Sha256", manifest["body_sha256"])
+        # 送达字节自身的 hash（客户端核对"我拿到的就是清单登记的那份"）
+        self.send_header("X-Report-Body-Sha256",
+                         str((manifest.get("files") or {}).get("markdown", {}).get("sha256")
+                             or manifest["delivered_body_sha256"]))
+        # 该版**研究正文**的 hash（验收对象），与送达字节不是同一份
+        self.send_header("X-Report-Research-Body-Sha256", manifest["body_sha256"])
         self.send_header("X-Report-Draft", "1" if manifest["draft"] else "0")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
@@ -3706,22 +3701,59 @@ def _get_task_working_paper(self, p):
 
 
 def _get_task_acceptance(self, p):
-    """T4：任务验收全量报告（四档计数 + traceable 明细）。
+    """任务验收详情：**以选中版本的绑定验收为准**（B 批）。
 
-    登录即可访问（viewer 允许）——只读工作区 acceptance_report.json；
-    报告未生成（任务未到验收阶段）返回 404，前端静默隐藏溯源行。"""
+    此前直接吐工作区 `acceptance_report.json`——人工修订后那个文件还是旧版本的结论，
+    页面就会出现"交付已是新版、验收详情还是旧版 fail/旧正文 hash"。现在：
+    - 选中版本有本版验收 → 以它为准（`version_bound: true`）；
+    - 磁盘文件属于**别的版本** → 标 `stale_file: true`，其 `checks` 只作参照（不冒充本版结论）；
+    - 两者都没有 → 404（未到验收阶段）。
+
+    登录即可访问（viewer 允许）。"""
     if p.startswith("/api/task/") and p.endswith("/acceptance"):
         tid = p.split("/api/task/")[-1].rsplit("/acceptance", 1)[0]
         try:
+            from report_version import VersionStore
             from workspace import task_workspace
-            acc_path = task_workspace(tid) / "acceptance_report.json"
-            if not acc_path.exists():
-                # 旧任务/未完成：查 SQLite 兜底提示
-                return self._json({"error": "not found"}, 404)
-            with open(acc_path, "r", encoding="utf-8") as f:
-                report = json.load(f)
-            return self._json(report)
-        except Exception:
+            ws = task_workspace(tid)
+            store = VersionStore(ws, tid)
+            adopted = store.adopted()
+            acc_path = ws / "acceptance_report.json"
+            file_report = None
+            if acc_path.exists():
+                try:
+                    file_report = json.loads(acc_path.read_text(encoding="utf-8"))
+                except Exception:
+                    file_report = None
+            if adopted is not None and adopted.acceptance:
+                bound = dict(adopted.acceptance)
+                file_sha = str((file_report or {}).get("report_sha256") or "")
+                stale = bool(file_report) and file_sha != adopted.version_id
+                out = dict(file_report or {})
+                out.update({
+                    "overall": str(bound.get("overall") or ""),
+                    "gaps": list(bound.get("gaps") or []),
+                    "report_sha256": str(bound.get("report_sha256") or ""),
+                    "rules_version": str(bound.get("rules_version") or ""),
+                    "rules_fingerprint": str(bound.get("rules_fingerprint") or ""),
+                    "version_bound": bool(adopted.acceptance_for_this_body()),
+                    "report_version_id": adopted.identity_id(),
+                    "version_id": adopted.version_id,
+                    "stale_file": stale,
+                })
+                if stale:
+                    out.pop("checks", None)      # 旧版的 checks 不得当本版证据
+                    out["stale_note"] = ("磁盘上的验收快照属于其他版本："
+                                         "已按选中版本自身的验收返回，旧明细不展示")
+                return self._json(out)
+            if file_report is not None:
+                out = dict(file_report)
+                out.update({"version_bound": False, "stale_file": True,
+                            "stale_note": "该快照无法证明属于当前选中版本"})
+                return self._json(out)
+            return self._json({"error": "not found"}, 404)
+        except Exception as exc:
+            logger.warning("验收详情读取失败（task=%s）：%s", tid, str(exc)[:160])
             return self._json({"error": "read failed"}, 500)
 
 def _get_task_acceptance_timeline(self, p):
@@ -3932,9 +3964,10 @@ def _get_task_pdf(self, p):
             logger.error("PDF 导出失败（task=%s）：%s", tid, str(exc)[:200])
             return self._json(
                 {"error": "pdf export failed", "detail": str(exc)[:200]}, 500)
+        # 清单在 `_task_pdf_bytes` 里已按同一正文与 PDF 字节写过一次；
+        # 这里只读回来设置响应头，避免同一份导出写两遍（此前重复写、两份结果还可能不同）。
         try:
-            _m = _write_export_manifest(tid, str(_get_task_report_data(tid).get("report") or ""),
-                                        pdf_bytes=body)
+            _m = _read_export_manifest(tid)
         except Exception:
             _m = {}
         self.send_response(200)
@@ -3944,7 +3977,9 @@ def _get_task_pdf(self, p):
             f'attachment; filename="{tid}.pdf"',
         )
         self.send_header("X-Report-Version-Id", str(_m.get("report_version_id") or ""))
-        self.send_header("X-Report-Body-Sha256", str(_m.get("body_sha256") or ""))
+        self.send_header("X-Report-Body-Sha256",
+                         str(((_m.get("files") or {}).get("pdf") or {}).get("sha256") or ""))
+        self.send_header("X-Report-Research-Body-Sha256", str(_m.get("body_sha256") or ""))
         self.send_header("X-Report-Draft", "1" if _m.get("draft", True) else "0")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -4244,6 +4279,7 @@ def _get_task_page(self, p):
             # 评审状态与交付状态：读工作区（缺失即 None → 前端显示"未知"，不默认通过）
             review_state = None
             delivery = None
+            acceptance_bound = None
             try:
                 import json as _json
                 from workspace import task_workspace as _tws
@@ -4253,31 +4289,34 @@ def _get_task_page(self, p):
                     _review = _json.loads(_rp.read_text(encoding="utf-8"))
                     review_state = {"verdict": _review.get("verdict") or "",
                                     "label": _review.get("label") or "",
-                                    "degraded_reason": _review.get("degraded_reason") or ""}
-                _store_path = _ws / "report_versions.json"
-                if _store_path.exists():
-                    from report_version import DELIVERY_VERIFIED, VersionStore, verified_delivery
-                    _store = VersionStore(_ws, tid)
-                    _v = _store.adopted()
-                    if _v is not None:
-                        # 状态与理由都走**唯一谓词**（页面/导出/manifest 共用）：
-                        # 此前理由直接抄"最后一次交付记录"，人工改版后验收已变，
-                        # 理由却还是收尾时那句（同一次读取里结论与理由互相矛盾）。
-                        _status, _why = verified_delivery(_v, _v.body)
-                        _dels = _store.deliveries()
-                        _last = _dels[-1] if _dels else {}
-                        if (_status == DELIVERY_VERIFIED and _last
-                                and not _last.get("ok")):
-                            _status = "draft"
-                            _why = str(_last.get("reason") or "收尾时已判为未验收草稿")
-                        delivery = {
-                            "version_id": _v.identity_id(),
-                            "acceptance_overall": _v.acceptance_overall(),
-                            "draft": _status != DELIVERY_VERIFIED,
-                            "draft_reason": ("" if _status == DELIVERY_VERIFIED
-                                             else str(_why)),
-                            "verified": _status == DELIVERY_VERIFIED,
-                        }
+                                    "degraded_reason": _review.get("degraded_reason") or "",
+                                    "report_version_id": _review.get("report_version_id") or "",
+                                    "required": bool(_review.get("required"))}
+                if (_ws / "report_versions.json").exists():
+                    # B 批：页面与 manifest 共用**同一个读取口径**（delivery_state），
+                    # 因此不可能再出现"页面说 verified、清单说 draft"这种自相矛盾。
+                    from delivery_pipeline import delivery_state
+                    _state = delivery_state(
+                        tid, str(data.get("final_report") or data.get("report") or ""),
+                        ws_dir=_ws)
+                    delivery = {
+                        # 与 manifest 用同一套词：status/draft/draft_reason/verified/aligned
+                        "status": _state.get("status") or "",
+                        "version_id": _state.get("identity_id") or "",
+                        "acceptance_overall": _state.get("acceptance_overall") or "",
+                        "draft": bool(_state.get("draft", True)),
+                        "draft_reason": str(_state.get("draft_reason") or ""),
+                        "verified": bool(_state.get("verified")),
+                        "aligned": _state.get("aligned"),
+                        "accepted_body_matches": bool(_state.get("accepted_body_matches")),
+                        "review_valid": bool(_state.get("review_valid")),
+                    }
+                    # 页面里的验收结论也按**选中版本**给（同一份 payload 不得两个版本并存）
+                    acceptance_bound = {
+                        "overall": _state.get("acceptance_overall") or "",
+                        "version_bound": bool(_state.get("accepted_body_matches")),
+                        "report_version_id": _state.get("identity_id") or "",
+                    }
             except Exception as exc:
                 logger.warning("状态补充字段读取失败（task=%s）：%s", tid, str(exc)[:120])
             return self._json({
@@ -4290,7 +4329,10 @@ def _get_task_page(self, p):
             "logs": data.get("logs") or [],
             "project": data.get("project", ""),
             "revision": bool(data.get("revision")),
-            "acceptance": data.get("acceptance"),
+            # B 批：验收结论与交付状态都以**选中版本**为准（同一份 payload 不得两个版本并存）
+            "acceptance": (dict(data.get("acceptance") or {}, **(acceptance_bound or {}))
+                           if isinstance(data.get("acceptance"), dict)
+                           else (acceptance_bound or data.get("acceptance"))),
             "llm_degraded": data.get("llm_degraded"),
             "elapsed_sec": elapsed,
             "review_state": review_state,
@@ -4574,18 +4616,20 @@ def _post_plan_confirm(self, p, body, admin):
         return self._json({"status": "ok"})
 
 def _post_task_review_edit(self, p, body, admin):
-    """S2：人工复核后的**修订版**——落成新版本并立刻重验（旧批准不迁移）。
+    """人工复核后的**修订版**：落成新版本 → 对实际采用正文重验 → **重新装配交付**。
 
     请求：`POST /api/task/<id>/review/edit`，body 可以是
       - `{"body": "<修订后的研究正文>"}`：整篇替换；
       - `{"find": "...", "replace": "..."}`：定点替换（找不到就 400，不改任何东西）。
-    返回：新版本的 `version_id` / 是否 `verified_delivery` / 重验结论。
 
-    三条纪律（复用 R0 契约，不另立一套）：
-    - 修订版是**新版本**（`parent_id` 指向原版），**旧验收不被迁移**：新版本默认没有
-      对应它自身的验收 → 交付状态只能是"未验收草稿"，直到重新验证通过；
-    - 重验用的是**同一个验收器**（`run_acceptance`），不是"改完就算过"；
-    - 终态任务（CANCELLED/FAILED）不允许改写正文。
+    B 批的四条纪律（与编排器收尾**同一条装配路径**，因此交付字节与记录的
+    `delivered_sha256` 对得上，页面/验收详情/manifest/导出指向同一选定版本）：
+    - 修订版是**新版本**（`parent_id` 指向原版），旧验收、旧评审 PASS、旧人工批准
+      **都不迁移**：新版本默认没有对应它自身的验收与评审；
+    - 重验用**同一个验收器**（共享 `accept_for_body`），并采纳它真正验收的那一版；
+    - 装配顺序固定（共享 `assemble_and_verify`），草稿注记写在交付物本体上；
+    - **失败方向**：验收异常 → 仍是 200 但状态为 draft（新版本已采纳、无本版验收）；
+      交付/投影写入失败 → 5xx + 明确原因，不用 HTTP 成功掩盖部分更新。
     """
     if not (p.startswith("/api/task/") and p.endswith("/review/edit")):
         return None
@@ -4604,6 +4648,7 @@ def _post_task_review_edit(self, p, body, admin):
     if status in ("CANCELLED", "FAILED"):
         return self._json(
             {"error": f"任务已终态（{status}），不得改写正文"}, 409)
+    goal = str(row.get("goal") or "")
     try:
         from report_version import VersionStore, body_hash
         from workspace import task_workspace
@@ -4622,61 +4667,106 @@ def _post_task_review_edit(self, p, body, admin):
             new_body = current.body.replace(find, repl, 1)
         if body_hash(new_body) == current.version_id:
             return self._json({"error": "修订后正文与当前版本一致，无需新建版本"}, 400)
-        nv = store.record(new_body, parent_id=current.version_id)
+
+        from delivery_pipeline import (accept_for_body, assemble_and_verify,
+                                       read_wrapper, rules_identity,
+                                       sources_fingerprint)
+        # 交付说明：优先用收尾时落盘的那份（逐字节），旧任务回退到"剥离旧正文与自动注记"
+        _delivered = (_get_task_report_data(tid) or {}).get("report") or ""
+        wrapper, wrapper_source = read_wrapper(tid, _delivered, current.body)
+        if wrapper_source == "derived":
+            wrapper = (wrapper + "\n\n> 注：交付说明由旧交付正文推导（该任务没有"
+                       "落盘交付说明），请人工确认。").strip("\n")
+
+        nv = store.record(
+            new_body, parent_id=current.version_id,
+            sources_fingerprint=sources_fingerprint(tid, new_body),
+            rules_version=rules_identity(tid)[0], rules_fingerprint=rules_identity(tid)[1])
         # 旧验收**不迁移**：新版本默认"没有对应它自身的验收"
         store.adopt(nv, reason="人工复核修订")
-        verdict = {}
+
+        verdict: dict = {}
+        accept_error = ""
         try:
-            from acceptance_checker import run_acceptance
-            goal = str(row.get("goal") or "")
-            # 用**同一个验收器**重验新正文（不是"改完就算过"）
-            verdict = run_acceptance(tid, goal, new_body, task_workspace(tid)) or {}
-            # 绑定到**新版本**（按完整身份精确绑定），使"这一版"的交付状态可判
-            store.bind_acceptance(verdict)
+            # 与收尾同一个验收入口（含来源标注自动修复与产物落盘/事件）
+            verdict = accept_for_body(tid, goal, new_body, trigger="人工修订重验",
+                                      prefer_body=True,
+                                      ws_dir=task_workspace(tid)) or {}
         except Exception as exc:
-            verdict = {"error": str(exc)[:200], "overall": ""}
-        # 修订要进**交付正文**：页面/导出/PDF 都读任务的 report 字段，
-        # 只写版本库的话用户改完看到的还是旧文（实机：改版返回 ok，导出仍无修订）。
-        # 映射不上（交付文档里找不到被替换的那版正文）就不动交付，如实标记未更新。
-        delivery_updated = False
-        try:
-            _delivered = (_get_task_report_data(tid) or {}).get("report") or ""
-            if _delivered and current.body and current.body in _delivered:
-                _new_delivered = _delivered.replace(current.body, new_body, 1)
-                from task_state import update_report as _update_report
-                delivery_updated = bool(_update_report(tid, _new_delivered))
-                if delivery_updated:
-                    with _task_lock:
-                        _mem = _task_results.get(tid)
-                        if isinstance(_mem, dict):
-                            for _k in ("report", "final_report"):
-                                if _k in _mem:
-                                    _mem[_k] = _new_delivered
-                    try:
-                        _snap = task_state.read_snapshot(tid) or {}
-                        if isinstance(_snap, dict):
-                            for _k in ("report", "final_report"):
-                                if _k in _snap:
-                                    _snap[_k] = _new_delivered
-                            task_state.write_snapshot(tid, _snap)
-                    except Exception:
-                        pass
-        except Exception as exc:
-            logger.warning("修订未写进交付正文（task=%s）：%s", tid, str(exc)[:160])
+            accept_error = str(exc)[:200]
+            verdict = {}
+
+        asm = assemble_and_verify(tid, goal, new_body, wrapper=wrapper,
+                                  accept_fn=lambda t, g, b: verdict or None,
+                                  ws_dir=task_workspace(tid))
         refreshed = store.adopted() or nv
+        # 投影同步：正文 + 验收摘要 + 状态（页面顶部读的就是这三处）
+        from task_state import update_delivery_projection
+        _acc_summary = {
+            "overall": refreshed.acceptance_overall(),
+            "gaps": list((refreshed.acceptance or {}).get("gaps") or []),
+            "rules_version": str((refreshed.acceptance or {}).get("rules_version") or ""),
+            "rules_fingerprint": str((refreshed.acceptance or {}).get("rules_fingerprint") or ""),
+            "report_sha256": str((refreshed.acceptance or {}).get("report_sha256") or ""),
+            "version_bound": bool(refreshed.acceptance_for_this_body()),
+        }
+        _status = str(asm.get("status") or "")
+        _task_status = _ts.derive_status(
+            step_statuses=["SUCCESS"],
+            acceptance=_acc_summary,
+            llm_degraded={},
+            draft_delivery=("" if _status == "verified" else str(asm.get("reason") or "")))
+        projected = update_delivery_projection(
+            tid, report=str(asm.get("report") or ""), acceptance=_acc_summary,
+            status=_task_status)
+        if not projected:
+            # 投影写不进去：版本库里已经是新版本，但页面还读旧正文——**不得假成功**
+            return self._json({
+                "error": "修订已生成新版本，但交付投影写入失败（页面/导出仍是旧正文）",
+                "task_id": tid, "version_id": refreshed.version_id,
+                "delivery_updated": False, "status": "draft",
+                "draft_reason": "交付投影写入失败",
+            }, 500)
+        with _task_lock:
+            _mem = _task_results.get(tid)
+            if isinstance(_mem, dict):
+                for _k in ("report", "final_report"):
+                    if _k in _mem:
+                        _mem[_k] = str(asm.get("report") or "")
         return self._json({
             "status": "ok", "task_id": tid,
             "parent_version_id": current.version_id,
             "version_id": refreshed.version_id,
-            "acceptance": {"overall": str((verdict or {}).get("overall") or ""),
-                           "gaps": (verdict or {}).get("gaps") or []},
-            "note": "修订版是新版本：旧验收与旧批准不自动迁移，须重新验证通过",
-            "delivery_updated": delivery_updated,
-            "needs_reverify": bool(
-                not (verdict or {}).get("overall")
-                or str((verdict or {}).get("overall")) != "pass"),
+            "report_version_id": refreshed.identity_id(),
+            "acceptance": {
+                "overall": refreshed.acceptance_overall(),
+                "gaps": _acc_summary["gaps"],
+                "report_sha256": _acc_summary["report_sha256"],
+                "rules_version": _acc_summary["rules_version"],
+                "rules_fingerprint": _acc_summary["rules_fingerprint"],
+                "version_bound": _acc_summary["version_bound"],
+                "error": accept_error,
+            },
+            "delivery": {
+                "status": _status,
+                "draft": bool(asm.get("draft", _status != "verified")),
+                "draft_reason": str(asm.get("reason") or ""),
+                "verified": _status == "verified",
+                "aligned": asm.get("aligned"),
+                "delivered_sha256": str(asm.get("delivered_sha256") or ""),
+                "hard_fail": str(asm.get("hard_fail") or ""),
+            },
+            "task_status": _task_status,
+            "wrapper_source": wrapper_source,
+            "report": str(asm.get("report") or ""),
+            "note": ("修订版是新版本：旧验收、旧评审与旧批准都不迁移，"
+                     "须重新验证（并在要求评审的口径下重新评审）"),
+            "delivery_updated": True,
+            "needs_reverify": bool(not refreshed.acceptance_for_this_body()
+                                   or refreshed.acceptance_overall() != "pass"),
         })
     except Exception as exc:
+        logger.warning("修订失败（task=%s）：%s", tid, str(exc)[:200])
         return self._json({"error": f"修订失败：{str(exc)[:200]}"}, 500)
 
 

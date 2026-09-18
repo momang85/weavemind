@@ -1112,58 +1112,14 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             return None
 
     def _sources_fingerprint(self, task_id: str, report_text: str = "") -> str:
-        """本轮**来源/事实快照指纹**（R0.2）：版本身份的一部分。
-
-        只取**真正的来源通道**（搜索/抓取/清洗结构化/结构化财务）与报告里的来源清单、
-        外链集合——**不含**账簿类文件（`report_versions.json`/`acceptance_report.json`/
-        `budget_state.json` 等），否则同一正文在不同时刻算出的指纹不同，身份会漂移
-        （实测：离线完整交付因此被判"未验收草稿"）。
-
-        同一正文换了来源就是**两版证据**，不得互相借验收。
-        """
-        try:
-            import hashlib
-            from acceptance_checker import _collect_sources
-            from workspace import task_workspace
-            parts: list[str] = []
-            try:
-                src = _collect_sources(task_workspace(task_id)) or {}
-            except Exception:
-                src = {}
-            for name in sorted(src):
-                text = str(src.get(name) or "")
-                parts.append(f"{name}:{hashlib.sha256(text.encode('utf-8')).hexdigest()[:16]}")
-            text = str(report_text or "")
-            blocks = re.findall(
-                r"(?m)^#+\s*(?:参考来源|来源清单|参考资料|数据来源|来源附录)\s*$([\s\S]{0,2000})",
-                text)
-            for b in blocks[:3]:
-                parts.append("srclist:" + hashlib.sha256(
-                    b.strip().encode("utf-8")).hexdigest()[:16])
-            urls = sorted(set(re.findall(r"https?://[^\s)>\]]+", text)))[:60]
-            if urls:
-                parts.append("urls:" + hashlib.sha256(
-                    "\n".join(urls).encode("utf-8")).hexdigest()[:16])
-            if not parts:
-                return ""
-            return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
-        except Exception:
-            return ""
+        """本轮来源/事实快照指纹（B 批起唯一实现在 `delivery_pipeline`）。"""
+        from delivery_pipeline import sources_fingerprint
+        return sources_fingerprint(task_id, report_text)
 
     def _rules_identity(self, task_id: str) -> tuple[str, str]:
-        """本轮验收**规则版本与指纹**（取自最近一次验收；没有则取当前常量）。"""
-        try:
-            acc = self._read_acceptance_summary(task_id) or {}
-            if acc.get("rules_version") or acc.get("rules_fingerprint"):
-                return (str(acc.get("rules_version") or ""),
-                        str(acc.get("rules_fingerprint") or ""))
-        except Exception:
-            pass
-        try:
-            from acceptance_checker import ACCEPTANCE_RULES_VERSION, rules_fingerprint
-            return ACCEPTANCE_RULES_VERSION, rules_fingerprint()
-        except Exception:
-            return "", ""
+        """本次验收的规则版本与指纹（B 批起唯一实现在 `delivery_pipeline`）。"""
+        from delivery_pipeline import rules_identity
+        return rules_identity(task_id)
 
     def _acceptance_summary_for_status(self, task_id: str) -> dict | None:
         """**终态判定**用的验收摘要（R0.2）：以选中版本自身的验收为准。
@@ -1406,26 +1362,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
 
     @staticmethod
     def _read_acceptance_summary(task_id: str) -> dict | None:
-        """读取验收摘要：{overall, gaps, rules_version, rules_fingerprint, profile}。
-
-        供终态消息携带并落库（此前只带 overall/gaps，指纹与档位在 DB 里为空，
-        验收态虽然入库却无法按规则版本对账）。"""
-        try:
-            from workspace import task_workspace
-            acc_path = task_workspace(task_id) / "acceptance_report.json"
-            if not acc_path.exists():
-                return None
-            acc = json.loads(acc_path.read_text(encoding="utf-8"))
-            return {
-                "overall": acc.get("overall"),
-                "gaps": acc.get("gaps") or [],
-                "rules_version": acc.get("rules_version") or "",
-                "rules_fingerprint": acc.get("rules_fingerprint") or "",
-                "profile": acc.get("profile") or "",
-                "report_sha256": acc.get("report_sha256") or "",
-            }
-        except Exception:
-            return None
+        """读工作区验收快照（B 批起唯一实现在 `delivery_pipeline`）。"""
+        from delivery_pipeline import read_acceptance_summary
+        return read_acceptance_summary(task_id)
 
     @staticmethod
     def _read_llm_degraded(task_id: str) -> dict:
@@ -2341,287 +2280,70 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
 
     def _ensure_final_body_accepted(self, task_id: str, goal: str,
                                     detail: str) -> tuple[str, str]:
-        """收尾装配后的交付正文要拿到**它自己**的验收（幂等）。
+        """被采纳的交付正文要拿到**它自己**的验收（B 批起唯一实现在 `delivery_pipeline`）。
 
-        报告步骤的验收绑的是那一步写出的中间正文；收尾会把交付说明、评审注记、
-        底稿缺口拼成最终正文 `detail` 并采纳它。两者字节不同 → 交付状态只能落回
-        "该版本没有对应它自身的验收（未知）"，用户看不到本该出现的"验收未通过 +
-        缺口"。这里对 `detail` 本体补一次确定性验收并按完整身份绑定。
-
-        返回 `(状态, 交付正文)`：
-        - `"bound"`：本版已取得自己的验收，`交付正文` 可能与 `detail` 不同——
-          **验收器自动修复过正文时，修复版就是交付正文**（交付与验收对象必须是
-          同一份字节，否则绑定又会落空、状态又回到"未知"）；
-        - `"already"`：本版已有自己的验收，原样交付；
-        - `"mismatch"`：验收没能落到本版（无全量 hash / 身份不符）→ 按证据未知交付。
+        返回 `(状态, 交付正文)`；验收器修复过正文时，修复版就是交付正文。
         """
-        from report_version import VersionStore
-        from workspace import task_workspace
-        store = VersionStore(task_workspace(task_id), task_id)
-        ver = store.adopted()
-        if ver is None or not str(detail or "").strip():
-            return "skipped", detail
-        if ver.acceptance_for_this_body():
-            return "already", detail
-        res = self._run_acceptance_check(task_id, goal, trigger="最终装配",
-                                        report_body=detail, prefer_body=True)
-        accepted = str((res or {}).get("_accepted_body") or detail)
-        after = store.adopted()
-        if after is not None and after.acceptance_for_this_body():
-            return "bound", accepted
-        # 验收器修过正文（把"叙述片段当来源"降级为诚实披露）：被验收的是修复版，
-        # 该版已由验收路径登记并绑定——**把交付切到它**，否则交付与验收对象永远
-        # 不是同一份字节，绑定必然落空（实测真实运行就是这样回到"未知"的）。
-        if accepted != detail:
-            v_fix = store.find_by_body(accepted)
-            if v_fix is not None and v_fix.acceptance_for_this_body():
-                store.adopt(v_fix, reason="交付正文采用验收修正版")
-                return "bound", accepted
-        # 机制性说明：验收没能证明属于这一版（短 hash / 身份不符）时不硬绑；
-        # 交付按"未知"处理，不把"验过别的正文"当成验过这一版。
-        logger.warning(
-            "最终装配正文未取得本版验收（task=%s）：交付按证据未知处理", task_id)
-        return "mismatch", accepted
+        from delivery_pipeline import ensure_body_accepted
+        return ensure_body_accepted(task_id, goal, detail,
+                                    accept_fn=self._accept_fn_for(task_id, goal))
 
     def _apply_research_hard_gate(self, task_id: str, goal: str, wp: dict | None,
                                   report_body: str = "") -> str:
-        """研究任务的**交付硬门槛**：底稿/必需事实/文档主体不达标 → 拒绝判为已验证。
+        """研究任务交付硬门槛（B 批起唯一实现在 `delivery_pipeline`）。
 
-        为什么要有这一步：`_delivery(task_id)["hard_fail"]` 此前全仓无人赋值，
-        `verified_delivery` 的 `hard_ok` 分支永远不可达——底稿说"未知口径/缺口"，
-        交付状态却仍可能"已验证"。研究任务必须让底稿结论约束交付判定。
-
-        **失败方向（A′3）**：任何校验异常按"证据未知"处理——抛异常时也写 hard_fail，
-        不因为"我们没算出来"就放行；读取契约失败时同样不跳过（先按目标补一份契约再判）。
-
-        返回要附加到交付物的一段说明（空串=未触发）。判定只对**研究任务**生效：
-        存在研究契约（落库的或从目标解析出的），或本次确实产出了底稿。
+        这里保留实例语义：把门槛原因写进 `_delivery(task_id)["hard_fail"]`，
+        供准入判定与终态派生使用；返回要附加到交付物的一段说明。
         """
-        notes: list[str] = []
-        try:
-            import task_state as _ts
-            from facts import CALIBERS, ResearchRequest, parse_research_request
-            raw = (_ts.read_task(task_id) or {}).get("research_request") or {}
-            request = ResearchRequest.from_payload(raw)
-            if request is None:
-                # 契约缺失/读取失败：从目标解析一份**只用于判定任务性质**的契约。
-                # 必须是"公司研究请求"的形状（有主体 + 两个年度 + 声明口径）才算研究任务——
-                # 否则"根据材料分析…"这类普通任务会被误判成研究任务、被要求有底稿。
-                fallback = parse_research_request(goal, identity_source="gate-fallback")
-                if ((fallback.company or fallback.company_id)
-                        and len(fallback.periods) >= 2
-                        and str(fallback.caliber) in CALIBERS):
-                    request = fallback
-                else:
-                    request = None
-        except Exception as exc:
-            request = None
-            self._delivery(task_id)["hard_fail"] = f"研究契约读取异常：{str(exc)[:120]}"
-            logger.warning("研究契约读取异常（task=%s）：%s", task_id, str(exc)[:120])
-        has_contract = bool(request and (request.company or request.company_id))
-        paper_present = bool(wp and wp.get("ok"))
-        if not (has_contract or paper_present):
-            return "> **研究交付硬门槛未通过**：研究任务身份不可判定（契约读取异常）" \
-                if self._delivery(task_id).get("hard_fail") else ""
+        from delivery_pipeline import apply_research_hard_gate
+        note, hard_fail = apply_research_hard_gate(task_id, goal, wp, report_body)
+        if hard_fail:
+            self._delivery(task_id)["hard_fail"] = hard_fail
+        return note
 
-        reasons: list[str] = []
-        try:
-            if wp is None or wp.get("skipped"):
-                reasons.append("研究任务未取得结构化事实：底稿缺失，本次不得判为已验证")
-            elif not paper_present:
-                reasons.append(f"底稿产出失败：{str((wp or {}).get('reason') or '')[:120]}")
-            else:
-                if not wp.get("paper_ok"):
-                    problems = wp.get("problems") or []
-                    gaps = [g for g in (wp.get("gaps") or []) if g.get("kind") == "fact"]
-                    head = (problems or gaps)
-                    detail = "；".join(
-                        str((p.get("detail") if isinstance(p, dict) else p) or "")[:80]
-                        for p in head[:3])
-                    reasons.append(f"底稿未达标（{len(problems)} 项问题 / {len(gaps)} 项必需事实缺口）：{detail}")
-                # 文档级主体作用域：报告本体必须绑定请求主体（本批覆盖三项核心指标）
-                if request is not None and report_body:
-                    from working_paper import WorkingPaper, document_subject_scope
-                    paper = WorkingPaper(request=request)
-                    paper.rows = list(wp.get("rows_detail") or [])
-                    scope = document_subject_scope(report_body, request, paper)
-                    if scope:
-                        reasons.append("文档主体作用域未绑定：" + scope[0].detail[:120])
-        except Exception as exc:
-            # A′3：**校验异常必须明确失败**——"我们没算出来"不是放行的理由
-            reasons.append(f"研究校验异常（按证据未知交付）：{str(exc)[:140]}")
-            logger.warning("研究校验异常（task=%s）：%s", task_id, str(exc)[:160])
-        if not reasons:
-            return ""
-        self._delivery(task_id)["hard_fail"] = reasons[0]
-        logger.warning("研究交付硬门槛触发（task=%s）：%s", task_id, reasons[0][:160])
-        notes.append("> **研究交付硬门槛未通过**：" + reasons[0])
-        for extra in reasons[1:]:
-            notes.append("> " + extra)
-        notes.append("> 交付状态不得判为已验证；请按上述缺口补齐后重跑或人工修订。")
-        return "\n".join(notes)
+    def _accept_fn_for(self, task_id: str, goal: str):
+        """给共享装配器用的验收回调：仍走本实例的验收（取消检查、前端推送、评测集沉淀）。
+
+        共享模块只负责"对哪份正文验收、产物落盘、按身份绑定"，实例相关的副作用留在
+        编排器这一侧——两条入口（收尾/人工修订）因此共用同一套验收语义。
+        """
+        def _accept(tid: str, goal_text: str, body: str):
+            return self._run_acceptance_check(
+                tid, goal_text or goal, trigger="最终装配",
+                report_body=body, prefer_body=True)
+        return _accept
 
     def _run_acceptance_check(self, task_id: str, goal: str,
                               trigger: str = "报告步骤",
                               report_body: str = "",
                               prefer_body: bool = False) -> dict | None:
         """报告生成后跑确定性验收器：数字溯源等 checklist → 缺口报告。
-        结果写入任务工作区 acceptance_report.json 并推前端，供反思精准补缺口；
-        同时向 acceptance_events.jsonl 追加一条审计事件（可回放、可对账）。
 
-        `prefer_body=True` 时以 `report_body` 为准（不读 `reports/report.md`）：
-        收尾装配后的交付正文与报告步骤写在磁盘上的那份不是同一份字节。"""
-        # M0-c：取消后不再为一次已放弃的任务跑验收（验收会读报告、写审计事件，
-        # 甚至触发 LLM 语义核对）——取消是终态，不该再产生新的副作用
-        if self._cancel_requested(task_id):
-            logger.info("任务已取消，跳过验收（task=%s, trigger=%s）", task_id, trigger)
-            return None
-        _t0 = time.time()
-        _repaired = False
-        try:
-            from acceptance_checker import run_acceptance
-            from workspace import task_reports_dir, task_workspace
-            rpath = task_reports_dir(task_id) / "report.md"
-            if prefer_body and str(report_body or "").strip():
-                report = str(report_body)
-            elif rpath.exists():
-                report = rpath.read_text(encoding="utf-8")
-            elif str(report_body or "").strip():
-                # 没有 report_generator 步骤时（研究类任务常被规划成单个 content_summary）
-                # 报告正文只在步骤结果里：仍按**同一正文**验收，否则这类任务永远没有验收、
-                # 交付恒被判"未验收草稿"。验收阈值与检查项不变。
-                report = str(report_body)
-            else:
-                return None
-            result = run_acceptance(task_id, goal, report, task_workspace(task_id))
-            # 虚假标注确定性修复：把验收器判定的 mislabeled 声明降级为诚实披露
-            # （"数据来源：X" → "基于模型知识，未在本次检索中验证"）后复检。
-            # 模型提示词约束无法根治"叙述片段当来源名"，此步骤保证验收终态
-            # 与报告文本一致（修复后重写 report.md + acceptance_report.json）。
+        B 批起核心（修复 → 产物落盘 → 审计事件 → 按身份绑定）搬进
+        `delivery_pipeline.accept_for_body`，与 web_ui 的人工修订共用同一实现；
+        这里只挂本实例的副作用：取消检查、前端推送、评测集沉淀。
+        """
+        from delivery_pipeline import accept_for_body
+        return accept_for_body(
+            task_id, goal, report_body, trigger=trigger, prefer_body=prefer_body,
+            hooks={
+                "cancelled": lambda: self._cancel_requested(task_id),
+                "iteration": int(getattr(self, "_accept_iteration", 0) or 0),
+                "on_summary": lambda summary: push_progress(
+                    self._messaging, task_id, "acceptance",
+                    {"message": summary, "timestamp": self._now_iso()}),
+                "on_failure": self._harvest_acceptance_failure(task_id, goal),
+            })
+
+    def _harvest_acceptance_failure(self, task_id: str, goal: str):
+        """验收 fail 的真实任务沉淀为评测案例（静默，不干扰主线）。"""
+        def _hook(result: dict, report: str) -> None:
             try:
-                sl = (result.get("checks") or {}).get("source_labeling") or {}
-                mis = list(sl.get("mislabeled") or [])
-                if not sl.get("pass") and mis:
-                    from acceptance_checker import auto_repair_source_labels
-                    repaired = auto_repair_source_labels(report, mis)
-                    if repaired != report:
-                        rpath.write_text(repaired, encoding="utf-8")
-                        report = repaired
-                        _repaired = True
-                        result = run_acceptance(
-                            task_id, goal, repaired, task_workspace(task_id),
-                        )
-                        sl2 = (result.get("checks") or {}).get("source_labeling") or {}
-                        logger.info(
-                            "auto-repaired source labels for %s: %d -> %d mislabeled",
-                            task_id, len(mis), len(sl2.get("mislabeled") or []),
-                        )
+                from evals.auto_grow import harvest_failure
+                harvest_failure(task_id, goal, result, report)
             except Exception as exc:
-                logger.warning(
-                    "source label auto-repair failed for %s: %s",
-                    task_id, str(exc)[:120],
-                )
-            # V1.2 竞品启示：文末来源清单 URL 存活校验（仅提示，不判 fail）。
-            # 支持 URL_HEALTH_CHECK=0 关闭，避免网络抖动误伤验收结果。
-            try:
-                if os.environ.get("URL_HEALTH_CHECK", "1") != "0":
-                    from acceptance_checker import extract_source_list
-                    from adapters.url_health import check_urls
-                    src_urls = [
-                        e.get("url") for e in extract_source_list(report)
-                        if e.get("url")
-                    ]
-                    if src_urls:
-                        health = check_urls(src_urls)
-                        dead = [
-                            u for u, st in health.items() if st == "dead"
-                        ]
-                        if dead:
-                            hint = f"来源链接失效: {len(dead)} 条"
-                            result.setdefault("checks", {})["url_health"] = {
-                                "pass": True,  # 仅提示：不改变 overall
-                                "hint": True,
-                                "details": hint + "（仅提示，不影响验收结论）",
-                                "dead_count": len(dead),
-                                "dead_urls": dead[:10],
-                            }
-                            if hint not in result.get("gaps", []):
-                                result.setdefault("gaps", []).append(hint)
-            except Exception:
-                pass
-            try:
-                (task_workspace(task_id) / "acceptance_report.json").write_text(
-                    json.dumps(result, ensure_ascii=False, indent=1),
-                    encoding="utf-8",
-                )
-                # R0.2：绑定要带**完整身份**——全量正文 hash + 本轮来源快照指纹；
-                # 短 hash / 来源不符一律不绑（该版保持"未知"，不借别版验收）。
-                _store = self._version_store(task_id)
-                _src_fp = self._sources_fingerprint(task_id, report)
-                _acc = {
-                    "overall": result.get("overall"),
-                    "gaps": result.get("gaps") or [],
-                    "report_sha256": result.get("report_sha256") or "",
-                    "report_sha256_short": result.get("report_sha256_short") or "",
-                    "rules_version": result.get("rules_version") or "",
-                    "rules_fingerprint": result.get("rules_fingerprint") or "",
-                }
-                _bound = _store.bind_acceptance(
-                    _acc, sources_fingerprint=_src_fp,
-                    rules_fingerprint=_acc["rules_fingerprint"])
-                if _bound is None and len(str(_acc["report_sha256"])) >= 64:
-                    # 验收发生在正文被采纳之前：先按**验收对象**登记该版（带同一身份）再绑
-                    _rules_v, _rules_fp = self._rules_identity(task_id)
-                    _store.record(
-                        report, sources_fingerprint=_src_fp,
-                        rules_version=_acc["rules_version"] or _rules_v,
-                        rules_fingerprint=_acc["rules_fingerprint"] or _rules_fp,
-                        policy_version=REVIEW_POLICY_VERSION)
-                    _bound = _store.bind_acceptance(
-                        _acc, sources_fingerprint=_src_fp,
-                        rules_fingerprint=_acc["rules_fingerprint"])
-                if _bound is None:
-                    logger.warning(
-                        "验收无法绑到正文版本（task=%s, sha=%s）：该版将按证据未知处理",
-                        task_id, str(_acc["report_sha256"])[:16],
-                    )
-            except Exception:
-                pass
-            # 验收审计事件流：快照文件（覆盖写）之上追加完整历史，
-            # 每条事件带规则版本/指纹与报告 hash，支持回放与对账
-            try:
-                from acceptance_checker import (
-                    append_acceptance_event, build_acceptance_event,
-                )
-                _ev = build_acceptance_event(
-                    result, trigger=trigger,
-                    iteration=int(getattr(self, "_accept_iteration", 0) or 0),
-                    duration_ms=int((time.time() - _t0) * 1000),
-                )
-                _ev["repaired"] = _repaired
-                append_acceptance_event(task_id, _ev)
-            except Exception:
-                pass
-            summary = "；".join(result.get("gaps") or []) or "验收通过"
-            push_progress(self._messaging, task_id, "acceptance",
-                          {"message": summary, "timestamp": self._now_iso()})
-            logger.info("Acceptance(%s): overall=%s %s",
-                        task_id, result.get("overall"), summary)
-            # 评测集自动生长：验收 fail 的真实任务沉淀为新评测案例（静默，不干扰主线）
-            try:
-                if result.get("overall") == "fail":
-                    from evals.auto_grow import harvest_failure
-                    harvest_failure(task_id, goal, result, report)
-            except Exception as _exc:
-                logger.warning("评测集自动沉淀异常（已忽略）: %s", str(_exc)[:100])
-            # **被验收的那份正文**（自动修复会把它改写成诚实披露版）。
-            # 只给调用方用于"让交付正文与验收对象成为同一份字节"；写盘与事件在此之前
-            # 已经完成，故不污染 acceptance_report.json / 审计事件。
-            result["_accepted_body"] = report
-            return result
-        except Exception as exc:
-            logger.warning("Acceptance check failed: %s", str(exc)[:150])
-            return None
+                logger.warning("评测集自动沉淀异常（已忽略）: %s", str(exc)[:100])
+        return _hook
 
     def _record_reflection_refinement(
         self, goal: str, task_id: str, key: str, issue: str, fix_prompt: str,
@@ -3789,46 +3511,32 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
 
     @staticmethod
     def _with_draft_note(report: str, reason: str) -> str:
-        """在**未验收草稿**的交付物本体上加显著注记（页面与导出都可见）。"""
-        note = (f"> **未验收草稿：{str(reason or '缺少与该正文对应的验收')}**\n"
-                "> 本次交付没有取得针对该版正文的验收通过，不得视为已通过，"
-                "也不得直接用于对外发布或审批。\n")
-        text = str(report or "")
-        if "未验收草稿" in text:
-            return text
-        head, sep, tail = text.partition("\n\n---\n\n")
-        if sep:
-            return f"{head}\n\n{note}{sep}{tail}"
-        return f"{note}\n\n{text}"
+        """未验收草稿注记（B 批起唯一实现在 `delivery_pipeline`）。"""
+        from delivery_pipeline import with_draft_note
+        return with_draft_note(report, reason)
 
     def _with_review_note(self, task_id: str, delivery: str) -> str:
-        """把本任务的评审状态写进交付说明（M0-b）。
+        """把评审状态写进交付说明并落盘（M0-b；B 批起注记文本与落盘走共享实现）。
 
-        - PASS：不额外加字（正常交付物不加噪声）；
-        - 降级（未完成评审）：显式写明"未经评审/评审未完成"并说明理由，交付物需人工复核；
-        - 银行模式不会走到这里（必需评审未完成会直接拒绝继续）。
-
-        同时把状态落成工作区文件 `review_state.json`，供历史/复核与导出对账。
+        B1b：落盘时**记下这个 PASS 属于哪一版**（`report_version_id`）与"是否必需"
+        （`required`）——人工修订产生新版本后，旧 PASS 不再适用（不迁移），
+        而个人模式本来不要求评审，因此不受影响。两个事实都持久化，另一个进程
+        （web_ui）也能算出同一个结论。
         """
+        from delivery_pipeline import (read_review_facts, review_note_text,
+                                       write_review_facts)
         st = self._review_state(task_id)
         verdict = str(st.get("verdict") or "NONE")
-        label = "PASS" if verdict == "PASS" else ""
-        note = ""
-        if verdict != "PASS":
-            reason = str(st.get("degraded_reason") or "未执行或未完成评审")
-            label = "未经评审（critic 关闭）" if "critic 已关闭" in reason else "评审未完成（降级）"
-            note = (f"> **评审状态：{label}** —— {reason}。\n"
-                    "> 本交付物未取得绑定计划版本的评审 PASS，须经人工复核后方可使用。\n\n")
-        try:
-            payload = dict(st)
-            payload.update({"task_id": task_id, "label": label,
-                            "written_at": self._now_iso()})
-            (task_workspace(task_id) / "review_state.json").write_text(
-                json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
-        except Exception as exc:
-            logger.warning("评审状态落盘失败（task=%s）：%s", task_id, str(exc)[:100])
-        # 附在交付说明**之后**：交付说明本身仍以标题开头（导出件首行不变）
-        return (delivery + "\n\n" + note.rstrip()) if note else delivery
+        facts = {
+            "verdict": verdict,
+            "label": "PASS" if verdict == "PASS" else "",
+            "degraded_reason": str(st.get("degraded_reason") or ""),
+            "required": bool(self._review_is_required()),
+        }
+        write_review_facts(task_id, facts)
+        merged = read_review_facts(task_id)          # 落盘后再读，保证与文件一致
+        note = review_note_text(merged)
+        return (delivery + "\n\n" + note) if note else delivery
 
     def _restore_review_state(self, task_id: str, saved: dict,
                               plan: list[dict] | None = None) -> bool:
@@ -4518,48 +4226,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
 
     @staticmethod
     def _rewrite_report_links(report: str, task_id: str) -> str:
-        """把报告 Markdown 链接目标里的任务工作区绝对路径改写成
-        /files/<task_id>/ URL（图表/数据图片在浏览器里才能显示）；
-        正文里的绝对路径（如"成果文件夹"）保持不变。
-
-        P2-4：工作区改写后，剩余的图片链接若仍为 Windows 盘符绝对路径
-        （如 ![](C:\\...\\charts\\xxx.png)），进一步重写为相对路径
-        charts/xxx.png，避免交付报告残留本机绝对路径。"""
-        ws = str(task_workspace(task_id))
-        ws_bs = ws.replace("/", "\\")
-        seg = f"/files/{task_id}"
-        # P0-1 同步：/files/ 只提供 reports/ 与 charts/ 两子目录（web_ui._files）
-        # 只有这两种目标改写为 /files/<tid>/ URL；其余子目录（data/project 等）
-        # 改写为工作区相对路径，避免交付报告出现 404 死链。
-        def _rewrite_to(url: str, old: str, new: str) -> str:
-            rel = url.replace(old, new).replace("\\", "/").lstrip("/")
-            if rel.startswith(("reports/", "charts/")):
-                return f"{seg}/{rel}"
-            return rel
-
-        def _fix_target(m):
-            t = m.group(2)
-            if t.startswith(ws_bs):
-                t = _rewrite_to(t, ws_bs, "")
-            elif t.startswith(ws):
-                t = _rewrite_to(t, ws, "")
-            return m.group(1) + t.replace("\\", "/") + m.group(3)
-
-        report = re.sub(r"(\]\()([^)\s]+)(\))", _fix_target, report)
-
-        def _fix_windows_image(m):
-            target = m.group(2)
-            if not re.match(r"^[A-Za-z]:[\\/]", target):
-                return m.group(0)
-            rel = re.sub(r"^[A-Za-z]:[\\/]", "", target).replace("\\", "/")
-            parts = rel.split("/")
-            if len(parts) >= 2 and parts[-2] in ("charts", "data", "reports", "project"):
-                rel = f"{parts[-2]}/{parts[-1]}"
-            else:
-                rel = parts[-1]
-            return f"{m.group(1)}{rel}{m.group(3)}"
-
-        return re.sub(r"(!\[[^\]]*\]\()([^)\s]+)(\))", _fix_windows_image, report)
+        """工作区绝对路径 → 前端可访问 URL（B 批起唯一实现在 `delivery_pipeline`）。"""
+        from delivery_pipeline import rewrite_report_links
+        return rewrite_report_links(report, task_id)
 
     def _run_e2e_verification(
         self, files: list[dict], project_dir: str, game_goal: bool = True,
@@ -5691,81 +5360,53 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 logger.info("交付正文采用验收器修正版（task=%s，%s）", task_id, _st)
         except Exception as exc:
             logger.warning("最终装配验收失败（task=%s）：%s", task_id, str(exc)[:120])
-        # S1：可重算底稿与缺口表落进任务产物；**缺证据项要写进交付物**，
-        # 不能只留在工作区文件里（报告不得据此声称已达成）
-        try:
-            from working_paper_export import gaps_note, write_working_paper
-            _wp = write_working_paper(task_id, goal, project=project)
-            self._working_paper = _wp
-            _wp_note = gaps_note(_wp)
-            if _wp_note:
-                delivery = delivery + "\n\n" + _wp_note
-            # A 批硬门槛：底稿缺口 / 未知或错口径 / 文档主体作用域未绑定
-            # **进入交付硬约束**（此前只当一段文本附注，`hard_fail` 全仓无人赋值）。
-            _gate = self._apply_research_hard_gate(task_id, goal, _wp, detail)
-            if _gate:
-                delivery = delivery + "\n\n" + _gate
-        except Exception as exc:
-            logger.warning("底稿产出接入失败（task=%s）：%s", task_id, str(exc)[:120])
-        # M0-b：评审状态写进交付物本体（不只留日志）——降级交付物必须一眼看出需人工复核
-        delivery = self._with_review_note(task_id, delivery)
-        # M0-e：预算耗尽的运行要说清"为什么没做完"（不是失败于内容，而是没额度了）
+        # S1 + B：底稿与交付装配走**唯一实现**（与人工修订同一条路径，
+        # 交付字节与记录的 delivered_sha256 才对得上；此前两边各写一套必然分叉）。
         _budget_stop = str((getattr(self, "_budget_exhausted", {}) or {}).get(task_id) or "")
         if _budget_stop:
             has_failure = True
             delivery = (f"> **本次运行因根任务预算耗尽而提前收尾：{_budget_stop}**\n"
                         "> 结果可能不完整，需人工确认后再使用。\n\n" + delivery)
-        report = delivery + "\n\n---\n\n" + detail
-        # 报告内任务工作区绝对路径 → 前端可访问 URL（图表/数据图片链接可显示）
-        report = self._rewrite_report_links(report, task_id)
-        # R0.3 交付状态（唯一谓词）：身份/正文/交付一致 **且** 验收 pass **且** 属该版
-        # **且** 硬约束满足 **且** 必需评审有效；否则按"未验收草稿/未知"交付。
-        # 只用 hash 相同来判断"可以当已通过用"是错的——绑定验收 ≠ 通过验收。
         try:
-            from report_version import (DELIVERY_DRAFT, DELIVERY_VERIFIED,
-                                        DELIVERY_UNKNOWN, verified_delivery)
-            _store = self._version_store(task_id)
-            _v = _store.adopted()
-            # "必需评审"只看是否处于**要求评审**的口径（银行）：个人模式下降级已在
-            # 交付物里如实标注（`_with_review_note`），不因此把交付判成草稿；
-            # 身份非法/不可判定时按草稿处理（保守）。
-            # R1：读的不再是裸 `verdict == "PASS"`，而是"该 PASS 是否覆盖本任务
-            # **当前这一版计划**"——反思改写计划后，旧版 PASS 不得当成本版已评审。
-            try:
-                _review_required = self._review_is_required()
-                _review_ok = (not _review_required) or self.review_scope_ok(task_id)
-            except Exception as exc:
-                _review_required, _review_ok = True, False
-                logger.error("评审要求不可判定，按保守处理：%s", str(exc)[:120])
-            _status, _why = verified_delivery(
-                _v, detail,
-                review_valid=_review_ok,
-                hard_ok=not bool(self._delivery(task_id).get("hard_fail")),
-                hard_reason=str(self._delivery(task_id).get("hard_fail") or ""),
-            )
+            from delivery_pipeline import assemble_and_verify, write_wrapper
+            from report_version import DELIVERY_DRAFT, DELIVERY_VERIFIED
+            from working_paper_export import write_working_paper
+            _wp = write_working_paper(task_id, goal, project=project)
+            self._working_paper = _wp
+            # 评审结论是**本次运行**的内存态：连同"属于哪一版"一起交给装配器落盘
+            _rv = self._review_state(task_id)
+            _review_facts = {
+                "verdict": str(_rv.get("verdict") or "NONE"),
+                "label": str(_rv.get("label") or ""),
+                "degraded_reason": str(_rv.get("degraded_reason") or ""),
+                "required": bool(self._review_is_required()),
+            }
+            _asm = assemble_and_verify(
+                task_id, goal, detail, wrapper=delivery, project=project,
+                paper=_wp, accept_fn=self._accept_fn_for(task_id, goal),
+                review_facts=_review_facts)
+            report = _asm["report"]
+            write_wrapper(task_id, delivery)
+            self._delivery(task_id)["hard_fail"] = str(_asm.get("hard_fail") or "")
+            _status, _why = _asm["status"], _asm["reason"]
+            self._delivery(task_id)["status"] = _status
+            self._delivery(task_id)["reason"] = "" if _status == DELIVERY_VERIFIED else str(_why)
             if _status != DELIVERY_VERIFIED:
-                # 未验收草稿必须在**交付物本体**上写明（页面/导出都看得到），
-                # 只在日志里说一句等于用户看不到"这份不能当已通过用"
-                report = self._with_draft_note(report, str(_why))
-                self._delivery(task_id)["reason"] = str(_why)
                 logger.warning("交付状态=%s：%s", _status, _why)
                 push_progress(self._messaging, task_id, "log",
                               {"type": "review", "agent": "orchestrator",
                                "message": f"交付状态：{'未验收草稿' if _status == DELIVERY_DRAFT else '证据未知'}"
                                           f"（{_why}）：不得视为已通过",
                                "timestamp": self._now_iso()})
-            else:
-                self._delivery(task_id)["reason"] = ""
-            # 记录**最终交付正文**（含交付说明、评审/草稿注记与链接重写）的 hash：
-            # 导出清单据此核对"导出的字节就是这份交付"。必须在注记之后记录，
-            # 否则清单会认为导出字节与交付不一致。
-            _store.record_delivery(report, accepted_body=detail,
-                                   ok=(_status == DELIVERY_VERIFIED),
-                                   reason=_why)
-            self._delivery(task_id)["status"] = _status
         except Exception as exc:
-            logger.warning("交付一致性校验失败（按未验收草稿）：%s", str(exc)[:120])
-            self._delivery(task_id).update({"reason": "校验异常", "status": "unknown"})
+            logger.warning("交付装配失败（按未验收草稿）：%s", str(exc)[:160])
+            self._delivery(task_id).update({"reason": "装配异常", "status": "unknown"})
+            try:
+                from delivery_pipeline import with_draft_note
+                report = with_draft_note(
+                    delivery + "\n\n---\n\n" + detail, f"装配异常：{str(exc)[:120]}")
+            except Exception:
+                report = delivery + "\n\n---\n\n" + detail
         # 贯通测试守门：修复后仍全部未通过 → 如实标记失败
         if e2e_results and not any(r.get("ok") for r in e2e_results):
             has_failure = True

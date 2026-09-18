@@ -83,6 +83,44 @@ def resolve_request(task_id: str, goal: str, metadata: dict,
     return parsed, candidates, "text"
 
 
+def build_result(task_id: str, goal: str, *, project: str | None = None) -> dict:
+    """**只算不写**的底稿结果（供读取侧复用：交付状态/硬门槛在页面与导出里也要能重算）。
+
+    与 `write_working_paper` 同源：那边 = 本函数 + 落盘两件套。分开是为了让
+    "读一次任务状态"不必顺手改写工作区文件。
+    """
+    proj = task_project_dir(task_id, project) if project else task_project_dir(task_id)
+    fin_path = Path(proj) / "financials.json"
+    if not fin_path.exists():
+        return {"ok": False, "skipped": True, "reason": "没有结构化财务，不产出底稿"}
+    payload = json.loads(fin_path.read_text(encoding="utf-8"))
+    md = dict(payload.get("metadata") or {})
+    if str(payload.get("source") or "") == "multi_entity":
+        md = dict((payload.get("companies") or [{}])[0].get("metadata") or {})
+    resolution = payload.get("resolution") or {}
+
+    request, candidates, request_source = resolve_request(task_id, goal, md, resolution)
+    facts = _facts.facts_from_financials(payload)
+    paper = build_working_paper(facts, request)
+    return {
+        "ok": True,
+        "request": request.as_dict(),
+        "request_source": request_source,
+        "candidates": candidates,
+        "selection": paper.selection,
+        # 交付硬门槛要用它做"文档主体作用域"判定（只需要指标/期间/值）
+        "rows_detail": [{"metric": r.get("metric"),
+                         "metric_label": r.get("metric_label"),
+                         "period": r.get("period"),
+                         "value": r.get("value")} for r in paper.rows],
+        "rows": len(paper.rows), "derived": len(paper.derived),
+        "gaps": paper.gaps, "problems": [p.as_dict() for p in paper.problems],
+        "audit": paper.audit,
+        "completeness": paper.completeness, "paper_ok": paper.ok,
+        "paper": paper,                      # 仅内存用；落盘时由 write_working_paper 使用
+    }
+
+
 def write_working_paper(task_id: str, goal: str, *,
                         project: str | None = None) -> dict:
     """读任务的结构化财务 → 生成事实与底稿 → 落盘两件套。
@@ -91,21 +129,11 @@ def write_working_paper(task_id: str, goal: str, *,
     （底稿是交付增强，不能拖垮主线），失败时记日志并把原因放进返回值。
     """
     try:
+        result = build_result(task_id, goal, project=project)
+        if result.get("skipped") or not result.get("ok"):
+            return result
         proj = task_project_dir(task_id, project) if project else task_project_dir(task_id)
-        fin_path = Path(proj) / "financials.json"
-        if not fin_path.exists():
-            return {"ok": False, "skipped": True, "reason": "没有结构化财务，不产出底稿"}
-        payload = json.loads(fin_path.read_text(encoding="utf-8"))
-        md = dict(payload.get("metadata") or {})
-        if str(payload.get("source") or "") == "multi_entity":
-            md = dict((payload.get("companies") or [{}])[0].get("metadata") or {})
-        resolution = payload.get("resolution") or {}
-
-        request, candidates, request_source = resolve_request(
-            task_id, goal, md, resolution)
-        facts = _facts.facts_from_financials(payload)
-        paper = build_working_paper(facts, request)
-
+        paper = result.pop("paper")
         out_json = Path(proj) / PAPER_JSON
         out_csv = Path(proj) / PAPER_CSV
         out_json.write_text(
@@ -114,22 +142,8 @@ def write_working_paper(task_id: str, goal: str, *,
         logger.info("底稿已落盘（task=%s）：%d 条事实、%d 条同比、%d 项缺口、%d 项问题",
                     task_id, len(paper.rows), len(paper.derived),
                     len(paper.gaps), len(paper.problems))
-        return {
-            "ok": True,
-            "request": request.as_dict(),
-            "request_source": request_source,
-            "candidates": candidates,
-            "selection": paper.selection,
-            # 交付硬门槛要用它做"文档主体作用域"判定（只需要指标/期间/值）
-            "rows_detail": [{"metric": r.get("metric"),
-                             "metric_label": r.get("metric_label"),
-                             "period": r.get("period"),
-                             "value": r.get("value")} for r in paper.rows],
-            "rows": len(paper.rows), "derived": len(paper.derived),
-            "gaps": paper.gaps, "problems": [p.as_dict() for p in paper.problems],
-            "completeness": paper.completeness, "paper_ok": paper.ok,
-            "files": {"json": str(out_json), "csv": str(out_csv)},
-        }
+        result["files"] = {"json": str(out_json), "csv": str(out_csv)}
+        return result
     except Exception as exc:                     # noqa: BLE001 - 交付增强不得拖垮主线
         logger.warning("底稿产出失败（task=%s）：%s", task_id, str(exc)[:160])
         return {"ok": False, "reason": str(exc)[:200]}

@@ -293,6 +293,50 @@ def update_report(task_id: str, report: str, db_path: str | None = None) -> bool
         return False
 
 
+def update_delivery_projection(task_id: str, *, report: str = "",
+                               acceptance: dict | None = None,
+                               status: str = "", db_path: str | None = None) -> bool:
+    """人工修订后同步**投影**：交付正文 + 验收摘要 + 状态（B 批）。
+
+    为什么不能只用 `update_report`：页面顶部的状态与验收缺口读的是任务行里的
+    `status`/`acceptance_json`，只改正文会让"正文换了、状态还是旧结论"同时出现。
+
+    纪律：
+    - CANCELLED/FAILED 一律不改（取消是持久终态；失败任务不得被改成成功）；
+    - 只写这三处，步骤/日志/规则指纹不动（修订不重跑流水线）；
+    - 状态由调用方按 `derive_status` 算好后传入，本函数不自行派生。
+    """
+    try:
+        con = _connect(db_path)
+        try:
+            _add_missing_columns(con)
+            row = con.execute(
+                "SELECT status FROM task_history WHERE task_id=?", (task_id,)
+            ).fetchone()
+            cur_status = str(row[0] or "").upper() if row else ""
+            if cur_status in (CANCELLED, FAILED):
+                logger.warning("任务 %s 是终态（%s），忽略交付投影更新", task_id, cur_status)
+                return False
+            sets = ["report=?", "updated_at=CURRENT_TIMESTAMP"]
+            params: list = [str(report)]
+            if acceptance is not None:
+                sets.append("acceptance_json=?")
+                params.append(json.dumps(acceptance, ensure_ascii=False))
+            if status:
+                sets.append("status=?")
+                params.append(str(status))
+            params.append(task_id)
+            cur = con.execute(
+                f"UPDATE task_history SET {', '.join(sets)} WHERE task_id=?", params)
+            con.commit()
+            return bool(cur.rowcount)
+        finally:
+            con.close()
+    except Exception as exc:
+        logger.warning("任务 %s 交付投影写入失败：%s", task_id, str(exc)[:200])
+        return False
+
+
 def record_completion(task_id: str, *, goal: str = "", status: str = "",
                       report: str = "", steps: list | None = None,
                       logs: list | None = None, acceptance: dict | None = None,
