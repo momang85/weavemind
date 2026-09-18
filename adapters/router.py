@@ -527,7 +527,7 @@ def route_structured_for_request(request) -> dict | None:
     if not code:
         return None
     try:
-        from facts import market_of_code
+        from facts import bare_code, market_of_code
     except Exception:                            # pragma: no cover - 导入失败按不适用
         return None
     mk, ambiguous = market_of_code(code)
@@ -538,17 +538,20 @@ def route_structured_for_request(request) -> dict | None:
     if market not in ("cn", "hk", "us"):
         logger.warning("契约驱动抓取跳过：市场不可判定（code=%s）", code)
         return None
+    # 适配器只认**本地代码**：东财 A 股接口收到 `600519.SH` 会直接报"无数据"
+    local_code = bare_code(code)
     periods = sorted({int(y) for y in (getattr(request, "periods", None) or [])})
     year_range = (periods[0], periods[-1]) if periods else None
-    name = str(getattr(request, "company", "") or "").strip() or code
+    name = str(getattr(request, "company", "") or "").strip() or local_code
     upper = market.upper()
     try:
         if upper == "HK":
-            data = fetch_eastmoney(name, code, year_range=year_range, period="annual")
+            data = fetch_eastmoney(name, local_code, year_range=year_range,
+                                   period="annual")
         elif upper == "US":
-            data = fetch_sec(name, code, year_range=year_range)
+            data = fetch_sec(name, local_code, year_range=year_range)
         else:
-            data = fetch_cn_or_fallback(name, code, year_range=year_range,
+            data = fetch_cn_or_fallback(name, local_code, year_range=year_range,
                                         period="annual")
     except Exception as exc:
         logger.warning("契约驱动抓取失败（%s/%s）：%s", upper, code, str(exc)[:150])
@@ -556,7 +559,7 @@ def route_structured_for_request(request) -> dict | None:
     if not data:
         return None
     data["resolution"] = {
-        "market": upper, "stock_code": code, "name": name,
+        "market": upper, "stock_code": local_code, "name": name,
         "quote_id": "", "resolved_alternatives": [], "from": "research_request",
     }
     data["contract"] = {

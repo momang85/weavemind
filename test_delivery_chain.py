@@ -2821,7 +2821,22 @@ class TestSimpleTaskFastPath(_DevSandboxMode, _TempWorkspace, unittest.TestCase)
                            side_effect=AssertionError("后缀是 HK，不该走 A 股链路")):
             out = router.route_structured_for_request(req)
         self.assertEqual(out["resolution"]["market"], "HK")
-        self.assertEqual(fe.call_args.args[1], "00001.HK")
+        # 适配器只认本地代码：`00001.HK` 要按 `00001` 抓（东财 A 股接口收到带后缀
+        # 的代码会直接报"无数据"——实机预探针发现的缺陷）
+        self.assertEqual(fe.call_args.args[1], "00001")
+        self.assertEqual(out["resolution"]["stock_code"], "00001")
+        self.assertEqual(out["contract"]["company_id"], "00001.HK",
+                         "契约身份保留带后缀的稳定标识")
+
+    def test_contract_fetch_strips_exchange_suffix(self):
+        """`600519.SH` → 适配器拿 `600519`；美股 ticker 原样（`BRK.B` 不是后缀）。"""
+        from facts import bare_code
+
+        self.assertEqual(bare_code("600519.SH"), "600519")
+        self.assertEqual(bare_code("000001.SZ"), "000001")
+        self.assertEqual(bare_code("00700.HK"), "00700")
+        self.assertEqual(bare_code("AAPL"), "AAPL")
+        self.assertEqual(bare_code("BRK.B"), "BRK.B")
 
     def test_contract_fetch_returns_none_without_code(self):
         """契约没有稳定代码 → 不猜（返回 None，由调用方回落文本路由）。"""

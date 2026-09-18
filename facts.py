@@ -272,6 +272,20 @@ def parse_research_request(goal: str, *, company: str = "", company_id: str = ""
     return req
 
 
+def bare_code(code: str) -> str:
+    """去掉交易所后缀的**本地代码**：`600519.SH` → `600519`、`00700.HK` → `00700`。
+
+    契约里的 `company_id` 是稳定身份（带后缀，跨市场不撞车），而各市场适配器只认
+    本地代码（东财 A 股接口收到 `600519.SH` 直接报"无数据"）。美股 ticker
+    （`AAPL`、`BRK.B`）不带交易所后缀，原样返回。
+    """
+    s = str(code or "").strip().upper()
+    m = re.match(r"^([0-9A-Z.]+?)[.\-]([A-Z]{2,6})$", s)
+    if m and m.group(2) in _SUFFIX_MARKET:
+        return m.group(1)
+    return s
+
+
 def research_subject(request: ResearchRequest | None) -> bool:
     """契约里有没有**明确主体**（公司名或稳定标识）——研究门槛的最低条件。"""
     return bool(request is not None and (request.company or request.company_id))
