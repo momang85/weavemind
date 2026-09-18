@@ -17,7 +17,7 @@ import json
 import logging
 from pathlib import Path
 
-from facts import parse_research_request
+from facts import UNKNOWN, ResearchRequest, parse_research_request
 from workspace import task_project_dir
 from working_paper import build_working_paper, paper_csv
 import facts as _facts
@@ -46,6 +46,43 @@ def _market_of(metadata: dict, resolution: dict | None) -> str:
     return ""
 
 
+def resolve_request(task_id: str, goal: str, metadata: dict,
+                    resolution: dict | None = None) -> tuple:
+    """取本次研究的**请求契约**，以及抓取到的候选主体。
+
+    顺序（A 批）：
+    1. **提交时落库的契约**（`task_state.read_task(...)` 的 `research_request`）——用户请求的
+       公司/市场/两年度/口径/截至日以它为准；
+    2. 没有（自由文本入口、旧任务）→ 从目标文本解析，`identity_source="text"`；
+    3. 抓取到的 `metadata`/`resolution` **只作为候选**返回，用于比对与缺口说明，
+       **不参与构造契约**——否则取错公司会把请求一起改成错公司（架构复核 P1）。
+
+    返回 `(request, candidates, source)`；`candidates` 形如
+    `{"company": ..., "company_id": ..., "market": ...}`。
+    """
+    candidates = {
+        "company": str((metadata or {}).get("company")
+                       or (metadata or {}).get("name") or "").strip(),
+        "company_id": str((metadata or {}).get("ticker") or (metadata or {}).get("code")
+                          or (metadata or {}).get("stock_code") or "").strip(),
+        "market": _market_of(metadata or {}, resolution),
+    }
+    persisted = {}
+    try:
+        import task_state as _ts
+        row = _ts.read_task(task_id) or {}
+        persisted = row.get("research_request") or {}
+    except Exception as exc:                     # 读不到就按"没有契约"处理，不猜
+        logger.warning("读取研究契约失败（task=%s）：%s", task_id, str(exc)[:120])
+        persisted = {}
+    req = ResearchRequest.from_payload(persisted)
+    if req is not None and (req.company or req.company_id or req.periods or req.caliber != UNKNOWN):
+        req.goal = req.goal or str(goal or "")
+        return req, candidates, "stored"
+    parsed = parse_research_request(goal, identity_source="text")
+    return parsed, candidates, "text"
+
+
 def write_working_paper(task_id: str, goal: str, *,
                         project: str | None = None) -> dict:
     """读任务的结构化财务 → 生成事实与底稿 → 落盘两件套。
@@ -64,12 +101,8 @@ def write_working_paper(task_id: str, goal: str, *,
             md = dict((payload.get("companies") or [{}])[0].get("metadata") or {})
         resolution = payload.get("resolution") or {}
 
-        request = parse_research_request(
-            goal,
-            company=str(md.get("company") or md.get("name") or ""),
-            company_id=str(md.get("ticker") or md.get("code") or md.get("stock_code") or ""),
-            market=_market_of(md, resolution),
-        )
+        request, candidates, request_source = resolve_request(
+            task_id, goal, md, resolution)
         facts = _facts.facts_from_financials(payload)
         paper = build_working_paper(facts, request)
 
@@ -83,6 +116,15 @@ def write_working_paper(task_id: str, goal: str, *,
                     len(paper.gaps), len(paper.problems))
         return {
             "ok": True,
+            "request": request.as_dict(),
+            "request_source": request_source,
+            "candidates": candidates,
+            "selection": paper.selection,
+            # 交付硬门槛要用它做"文档主体作用域"判定（只需要指标/期间/值）
+            "rows_detail": [{"metric": r.get("metric"),
+                             "metric_label": r.get("metric_label"),
+                             "period": r.get("period"),
+                             "value": r.get("value")} for r in paper.rows],
             "rows": len(paper.rows), "derived": len(paper.derived),
             "gaps": paper.gaps, "problems": [p.as_dict() for p in paper.problems],
             "completeness": paper.completeness, "paper_ok": paper.ok,

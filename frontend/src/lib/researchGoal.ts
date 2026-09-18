@@ -8,6 +8,8 @@
 
 export interface ResearchForm {
   company?: string
+  companyId?: string
+  market?: string
   yearFrom?: string | number
   yearTo?: string | number
   caliber?: string
@@ -15,19 +17,42 @@ export interface ResearchForm {
   materials?: string
 }
 
+/** 发给后端的**结构化契约字段**（与 `web_ui._sanitize_research_request` 的白名单一致）。 */
+export interface ResearchFields {
+  company: string
+  company_id?: string
+  market?: string
+  caliber: string
+  as_of: string
+  year_from: number
+  year_to: number
+  periods: number[]
+  materials?: string
+}
+
 export interface ResearchGoal {
   goal: string
+  fields: ResearchFields | null
   gaps: string[]
 }
 
 const CALIBERS = ['合并', '母公司']
+const MARKETS = ['cn', 'hk', 'us']
 
 function _year(v: string | number | undefined): string {
   const s = String(v ?? '').trim()
   return /^(19|20)\d{2}$/.test(s) ? s : ''
 }
 
-/** 把"公司与期间"表单拼成任务目标；缺什么就返回什么缺口（不猜）。 */
+/**
+ * 把"公司与期间"表单拼成任务目标**并同时给出结构化契约字段**；缺什么就报什么缺口（不猜）。
+ *
+ * 为什么要两份：目标是给编排器/模型的自然语言，契约是给底稿判定的**身份与口径依据**
+ * （提交时落库，见 `task_state.mark_queued(research_request=...)`）。以前只发目标，
+ * 底稿只好从抓取结果里反推公司，于是抓错公司会把研究主体一起改错。
+ *
+ * `market` 未选时**不填默认值**（不猜 A 股）：契约里就没有这一项，由契约层记缺口。
+ */
 export function buildResearchGoal(form: ResearchForm): ResearchGoal {
   const gaps: string[] = []
   const company = String(form.company ?? '').trim()
@@ -44,16 +69,30 @@ export function buildResearchGoal(form: ResearchForm): ResearchGoal {
   const asOf = String(form.asOf ?? '').trim()
   if (!asOf) gaps.push('请填写资料截至日（报告须明示数据时效）')
 
-  if (gaps.length) return { goal: '', gaps }
+  if (gaps.length) return { goal: '', fields: null, gaps }
 
-  const years = [y1, y2].sort()
+  const years = [y1, y2].sort() as [string, string]
   let goal =
     `研究${company} ${years[0]} 与 ${years[1]} 两个年度的营业收入、归母净利润、` +
     `经营活动现金流净额，${caliber}报表口径，数据截至 ${asOf}。` +
     `每个数字须能回溯到来源位置并可重算；缺证据的如实标缺口。`
   const materials = String(form.materials ?? '').trim()
   if (materials) goal += `\n\n参考资料：${materials}`
-  return { goal, gaps: [] }
+
+  const companyId = String(form.companyId ?? '').trim()
+  const market = String(form.market ?? '').trim().toLowerCase()
+  const fields: ResearchFields = {
+    company,
+    caliber,
+    as_of: asOf,
+    year_from: Number(years[0]),
+    year_to: Number(years[1]),
+    periods: [Number(years[0]), Number(years[1])],
+  }
+  if (companyId) fields.company_id = companyId
+  if (MARKETS.includes(market)) fields.market = market
+  if (materials) fields.materials = materials
+  return { goal, fields, gaps: [] }
 }
 
 /** 底稿里一条明细/派生行的展示字段（缺什么显示"未知"，不填 0）。 */

@@ -8,6 +8,7 @@ import PlanPanel from '../components/console/PlanPanel'
 import ConsoleSideTabs from '../components/console/ConsoleSideTabs'
 import { clearLastTask, readLastTask, saveLastTask, shouldResume } from '../lib/lastTask'
 import type { TaskNode, ConversationMessage, TaskReport } from '../stores/types'
+import type { ResearchFields } from '../lib/researchGoal'
 
 type Tab = 'live' | 'context' | 'results'
 
@@ -166,7 +167,8 @@ export default function TaskConsole() {
     }
   }, [status, activeConversationId, loadConversation, loadRecentTasks])
 
-  const submit = useCallback(async (goalOverride?: string) => {
+  const submit = useCallback(async (goalOverride?: string,
+                                   fields?: ResearchFields | null) => {
     const g = (goalOverride ?? goal).trim()
     if (!g || status === 'running') return
 
@@ -186,6 +188,8 @@ export default function TaskConsole() {
       if (confirmMode) body.auto_run = false
       if (templateName) body.template = templateName
       if (userContext.trim()) body.context = userContext.trim()
+      // A 批：研究契约随任务提交（提交时落库）——底稿只读它，抓取元数据不作数
+      if (fields) body.research_request = fields
       const res = await fetch('/task', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

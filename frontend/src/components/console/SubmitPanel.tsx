@@ -1,6 +1,6 @@
 import { memo, useEffect, useState } from 'react'
 import { Loader2, Sparkles, RefreshCw, Plus, MessagesSquare, FileText, ChevronDown, Upload, Zap, ExternalLink, X, Square, Building2 } from 'lucide-react'
-import { buildResearchGoal, type ResearchForm } from '../../lib/researchGoal'
+import { buildResearchGoal, type ResearchFields, type ResearchForm } from '../../lib/researchGoal'
 
 /** 快答结果卡片：正文 + 来源链接 + 诚实降级标签。 */
 function QuickAnswerCard({ qa, onClose }: { qa: any; onClose: () => void }) {
@@ -68,13 +68,15 @@ export default memo(function SubmitPanel({
   taskId?: string | null
   etaText?: string
   elapsedText?: string | null
-  onSubmit: (goalOverride?: string) => void
+  onSubmit: (goalOverride?: string, fields?: ResearchFields | null) => void
   onNewConversation: () => void
 }) {
   const [showContext, setShowContext] = useState(false)
   const [templates, setTemplates] = useState<any[]>([])
   const [stopping, setStopping] = useState(false)
   const [stopMsg, setStopMsg] = useState('')
+  // 研究表单的结构化契约字段（与目标一起提交；重新输入目标时清空，避免张冠李戴）
+  const [researchFields, setResearchFields] = useState<ResearchFields | null>(null)
 
   // 停止运行中的任务：写取消标志，编排器在下一个派发边界收尾
   const stopTask = async () => {
@@ -191,15 +193,15 @@ export default memo(function SubmitPanel({
       {/* S2：研究一家公司（首发路径的默认入口）——只拼目标，不绕过自由输入框 */}
       <ResearchQuickForm
         disabled={isRunning || demoMode}
-        onReady={(goalText) => setGoal(goalText)} />
+        onReady={(goalText, fields) => { setGoal(goalText); setResearchFields(fields) }} />
 
       {/* 输入区 */}
       {/* 窄屏：操作按钮组 basis-full 独占一行，输入框才能拿到整行宽度。
           此前按钮组 shrink-0 且不换行，390px 窗口下把输入框压到 24px（实际不可输入）。 */}
       <div className="bg-slate-900 border border-slate-800 rounded-xl p-1.5 flex flex-wrap items-end gap-2">
         <textarea value={goal}
-          onChange={e => setGoal(e.target.value)}
-          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSubmit() } }}
+          onChange={e => { setGoal(e.target.value); if (researchFields) setResearchFields(null) }}
+          onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); onSubmit(undefined, researchFields) } }}
           placeholder={demoMode ? 'Demo mode' : 'Enter a task for your AI team...'}
           disabled={isRunning || demoMode}
           rows={1}
@@ -234,7 +236,7 @@ export default memo(function SubmitPanel({
               className="accent-cyan-500" />
             先确认计划
           </label>
-          <button onClick={() => onSubmit()} disabled={isRunning || demoMode || !goal.trim()}
+          <button onClick={() => onSubmit(undefined, researchFields)} disabled={isRunning || demoMode || !goal.trim()}
             title={demoMode ? '演示模式下不可提交真实任务' : '提交任务（Enter）'}
             className="flex items-center gap-2 bg-cyan-500 hover:bg-cyan-400 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 font-semibold px-5 py-2.5 rounded-lg transition-all text-sm shrink-0">
             {isRunning ? (<><Loader2 className="w-4 h-4 animate-spin" /> Running...</>) : (<><Sparkles className="w-4 h-4" /> Execute</>)}
@@ -321,10 +323,11 @@ export default memo(function SubmitPanel({
  */
 function ResearchQuickForm({ disabled, onReady }: {
   disabled: boolean
-  onReady: (goal: string) => void
+  onReady: (goal: string, fields: ResearchFields | null) => void
 }) {
   const [form, setForm] = useState<ResearchForm>({
-    company: '', yearFrom: '', yearTo: '', caliber: '合并', asOf: '', materials: '',
+    company: '', companyId: '', market: '', yearFrom: '', yearTo: '',
+    caliber: '合并', asOf: '', materials: '',
   })
   const [gaps, setGaps] = useState<string[]>([])
   const [open, setOpen] = useState(true)
@@ -336,7 +339,7 @@ function ResearchQuickForm({ disabled, onReady }: {
       return
     }
     setGaps([])
-    onReady(preview.goal)
+    onReady(preview.goal, preview.fields)
   }
 
   const field = 'bg-slate-800 border border-slate-700 rounded-lg px-2 py-1.5 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-cyan-500'
@@ -355,6 +358,19 @@ function ResearchQuickForm({ disabled, onReady }: {
               disabled={disabled}
               onChange={e => setForm({ ...form, company: e.target.value })}
               className={`${field} flex-1 min-w-[12rem]`} />
+            <input value={form.companyId ?? ''} placeholder="稳定标识（可选）600519.SH"
+              disabled={disabled}
+              onChange={e => setForm({ ...form, companyId: e.target.value })}
+              className={`${field} w-48`} />
+            <select value={form.market ?? ''} disabled={disabled}
+              title="市场决定数据源与口径；不选则记为缺口，不替你猜"
+              onChange={e => setForm({ ...form, market: e.target.value })}
+              className={field}>
+              <option value="">市场：未指定（留缺口）</option>
+              <option value="cn">A股</option>
+              <option value="hk">港股</option>
+              <option value="us">美股</option>
+            </select>
             <input value={String(form.yearFrom ?? '')} placeholder="起始年 2023"
               disabled={disabled} onChange={e => setForm({ ...form, yearFrom: e.target.value })}
               className={`${field} w-28`} />
@@ -386,7 +402,8 @@ function ResearchQuickForm({ disabled, onReady }: {
               生成研究目标（写入输入框）
             </button>
             <span className="text-xs text-slate-500">
-              只拼目标，不自动提交；三个核心指标：营业收入 / 归母净利润 / 经营活动现金流净额
+              只拼目标，不自动提交；表格与年度/口径会作为**结构化契约**随任务提交；
+              三个核心指标：营业收入 / 归母净利润 / 经营活动现金流净额
             </span>
           </div>
         </div>

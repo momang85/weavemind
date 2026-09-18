@@ -50,6 +50,7 @@ VERIFY_UNVERIFIED = "unverified"    # 有来源但未被独立核实
 VERIFY_VERIFIED = "verified"        # 经人工/独立渠道核实
 
 _CALIBERS = ("合并", "母公司")
+CALIBERS = _CALIBERS          # 公开别名：判定侧要用同一份枚举（不各写一遍）
 
 
 def _norm_metric(key: str) -> str:
@@ -78,6 +79,8 @@ class ResearchRequest:
     source_requirements: list[str] = field(default_factory=list)
     budget: dict = field(default_factory=dict)
     gaps: list[str] = field(default_factory=list)
+    # 身份来自哪里：form（表单结构化字段）/ text（自由文本解析）/ candidate（抓取候选，仅用于比对）
+    identity_source: str = ""
 
     @property
     def needs_confirmation(self) -> bool:
@@ -90,6 +93,50 @@ class ResearchRequest:
         out["required_metrics"] = list(self.required_metrics)
         return out
 
+    def to_payload(self) -> dict:
+        """落库用（JSON 安全，不依赖 pickle）；与 `from_payload` 成对。"""
+        return {
+            "goal": str(self.goal or ""),
+            "company": str(self.company or ""),
+            "company_id": str(self.company_id or ""),
+            "market": str(self.market or UNKNOWN),
+            "periods": [int(y) for y in (self.periods or [])],
+            "caliber": str(self.caliber or UNKNOWN),
+            "required_metrics": [str(m) for m in (self.required_metrics or [])],
+            "as_of": str(self.as_of or ""),
+            "source_requirements": [str(s) for s in (self.source_requirements or [])],
+            "budget": dict(self.budget or {}),
+            "gaps": [str(g) for g in (self.gaps or [])],
+            "identity_source": str(self.identity_source or ""),
+        }
+
+    @classmethod
+    def from_payload(cls, raw: dict | None) -> "ResearchRequest | None":
+        """从落库载荷恢复契约；结构不对（不是 dict / 没有可用字段）返回 None，不猜。"""
+        if not isinstance(raw, dict) or not raw:
+            return None
+        periods = []
+        for y in raw.get("periods") or []:
+            try:
+                periods.append(int(str(y).strip()))
+            except Exception:
+                continue
+        return cls(
+            goal=str(raw.get("goal") or ""),
+            company=str(raw.get("company") or "").strip(),
+            company_id=str(raw.get("company_id") or "").strip(),
+            market=str(raw.get("market") or UNKNOWN).strip().lower() or UNKNOWN,
+            periods=sorted(set(periods)),
+            caliber=str(raw.get("caliber") or UNKNOWN).strip() or UNKNOWN,
+            required_metrics=[str(m) for m in (raw.get("required_metrics") or [])
+                              if str(m).strip()] or [m for m, _ in CORE_METRICS],
+            as_of=str(raw.get("as_of") or "").strip(),
+            source_requirements=[str(s) for s in (raw.get("source_requirements") or [])],
+            budget=dict(raw.get("budget") or {}),
+            gaps=[str(g) for g in (raw.get("gaps") or [])],
+            identity_source=str(raw.get("identity_source") or ""),
+        )
+
 
 _YEAR_RE = re.compile(r"(20\d{2})")
 _ASOF_RE = re.compile(r"(?:截至|截至日|数据截至|as\s*of)\s*(20\d{2}[-/年.]\d{1,2}(?:[-/月.]\d{1,2})?)")
@@ -98,7 +145,8 @@ _ASOF_RE = re.compile(r"(?:截至|截至日|数据截至|as\s*of)\s*(20\d{2}[-/�
 def parse_research_request(goal: str, *, company: str = "", company_id: str = "",
                            market: str = "", periods: list[int] | None = None,
                            caliber: str = "", as_of: str = "",
-                           budget: dict | None = None) -> ResearchRequest:
+                           budget: dict | None = None,
+                           identity_source: str = "") -> ResearchRequest:
     """把目标文本（+ 调用方已知的解析结果）整理成契约，并把不确定项列成缺口。
 
     不做"猜身份"：公司名/代码/市场这些**必须**来自目标文本或调用方，缺了就记缺口。
@@ -106,13 +154,17 @@ def parse_research_request(goal: str, *, company: str = "", company_id: str = ""
     req = ResearchRequest(goal=str(goal or ""))
     text = str(goal or "")
 
-    # 公司：优先调用方给的（来自 classifier/解析器），否则从目标里取一个候选
+    # 公司：优先调用方给的（表单结构化字段/解析器），否则从目标里取一个候选。
+    # **抓取来的元数据不得走这里**：那样用户请求会被数据源反向决定（A 批门槛的前提）。
     req.company = str(company or "").strip()
     req.company_id = str(company_id or "").strip()
+    req.identity_source = str(identity_source or ("caller" if req.company else ""))
     if not req.company:
         try:
             from task_classifier import _extract_company  # 本地导入，避免循环依赖
             req.company = str(_extract_company(text) or "").strip()
+            if req.company:
+                req.identity_source = identity_source or "text"
         except Exception:
             req.company = ""
         if not req.company:
@@ -315,7 +367,9 @@ def facts_from_financials(payload: dict, *, source_kind: str = "",
             for key, label in metrics:
                 if key not in row or row.get(key) is None:
                     continue
-                caliber = str(row.get("caliber") or UNKNOWN)
+                # 报表口径只认**来源声明的**：行级优先，其次实体级；没有就是 unknown
+                # （不默认成"合并"，也不接受把报告期描述当口径——那是另一个维度）
+                caliber = str(row.get("caliber") or md.get("caliber") or UNKNOWN)
                 # 行级声明优先于元数据：同一载荷里不同年度/不同来源的币种可能不同，
                 # 只有行级能如实表达；缺失仍记 unknown。
                 row_currency = str(row.get("currency") or currency or UNKNOWN)
@@ -344,8 +398,14 @@ def facts_from_financials(payload: dict, *, source_kind: str = "",
 
 
 def derived_fact(base: list[Fact], metric: str, *, formula: str,
-                 value: Any, period: str, inputs: list[Fact]) -> Fact:
-    """派生事实：公式 + 输入 fact_id 都要记，值由调用方算好（本函数不做算术）。"""
+                 value: Any, period: str, inputs: list[Fact],
+                 unit: str | None = None, unit_source: str | None = None) -> Fact:
+    """派生事实：公式 + 输入 fact_id 都要记，值由调用方算好（本函数不做算术）。
+
+    `unit`/`unit_source` 可显式给出：**同比是百分比**，不能继承输入的"亿元"——否则
+    底稿上会出现"同比 = 15.66 亿元"这种把比率当金额的单位错位（实测缺陷）。
+    未显式给出时才沿用首个输入（例如同为金额的加减派生）。
+    """
     first = inputs[0] if inputs else None
     return Fact(
         fact_id=make_fact_id(
@@ -354,7 +414,9 @@ def derived_fact(base: list[Fact], metric: str, *, formula: str,
         entity=(first.entity if first else ""), entity_id=(first.entity_id if first else ""),
         metric=metric, metric_label=metric_label(metric),
         period=period, currency=(first.currency if first else UNKNOWN),
-        unit=(first.unit if first else UNKNOWN),
+        unit=(unit if unit is not None else (first.unit if first else UNKNOWN)),
+        unit_source=(unit_source if unit_source is not None
+                     else ("derived" if unit is not None else UNKNOWN)),
         value=value, raw_value=value,
         caliber=(first.caliber if first else UNKNOWN),
         source_url=(first.source_url if first else ""),
@@ -368,3 +430,68 @@ def derived_fact(base: list[Fact], metric: str, *, formula: str,
 
 def facts_to_json(facts: list[Fact]) -> str:
     return json.dumps([f.as_dict() for f in facts], ensure_ascii=False, indent=1)
+
+
+# ── 主体比对（稳定标识优先，其次名称归一）────────────────────
+#
+# 为什么不用裸字符串包含：`"贵州茅台" in "贵州茅台酒股份有限公司"` 这类判断对
+# 全称/简称好使，但抓错公司时同样能"包含"成功（如"贵州茅台镇某酒业"），而且
+# 从不看稳定标识。这里先比 id，再比归一后的名称；两边都缺就返回 unknown（不算不符）。
+
+_NAME_NOISE = ("股份有限公司", "有限责任公司", "有限公司", "控股集团", "集团公司",
+               "集团", "股份", "公司", "控股")
+
+
+def _id_tokens(value: str) -> set[str]:
+    """稳定标识的归一形式集合：`600519.SH` → {600519, 600519SH, SH600519 之类}。"""
+    raw = re.sub(r"[^0-9A-Za-z]", "", str(value or "")).upper()
+    if not raw:
+        return set()
+    out = {raw}
+    m = re.match(r"^(\d+)(SH|SZ|SS|HK|US|NASDAQ|NYSE)?$", raw)
+    if m:
+        num, suffix = m.group(1), m.group(2) or ""
+        out.add(num)
+        out.add(num.lstrip("0") or "0")          # 00700 与 700 视为同一个
+        if suffix:
+            out.add(f"{num}{suffix}")
+    m2 = re.match(r"^(SH|SZ|SS|HK|US)(\d+)$", raw)
+    if m2:
+        out.add(m2.group(2))
+    return out
+
+
+def _norm_name(value: str) -> str:
+    s = re.sub(r"[\s·・,，.。()（）\-—/]", "", str(value or ""))
+    s = s.lower()
+    for word in _NAME_NOISE:
+        s = s.replace(word.lower(), "")
+    return s
+
+
+def check_subject(request: ResearchRequest, entity: str, entity_id: str = "") -> tuple[bool, str]:
+    """事实主体是否就是请求主体。返回 `(是否一致, 说明)`。
+
+    规则（确定性、离线）：
+    - 双方都有稳定标识 → **以标识为准**，token 有交集才算一致；
+    - 否则比归一名称（去掉公司后缀后互为包含）；
+    - 任一侧缺主体 → `False`（缺主体不能算已核验）。
+    """
+    want_name = str(getattr(request, "company", "") or "").strip()
+    want_id = str(getattr(request, "company_id", "") or "").strip()
+    got_name = str(entity or "").strip()
+    got_id = str(entity_id or "").strip()
+    if not got_name and not got_id:
+        return False, "事实没有主体（缺主体不得算已核验）"
+    if want_id and got_id:
+        if _id_tokens(want_id) & _id_tokens(got_id):
+            return True, ""
+        return False, f"标识不一致（请求 {want_id} vs 事实 {got_id}）"
+    if not want_name:
+        return False, "请求没有公司主体，无法比对"
+    if not got_name:
+        return False, "事实没有主体名称，无法比对"
+    a, b = _norm_name(want_name), _norm_name(got_name)
+    if a and b and (a in b or b in a):
+        return True, ""
+    return False, f"主体不一致（请求「{want_name}」vs 事实「{got_name}」）"

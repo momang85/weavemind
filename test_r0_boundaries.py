@@ -709,5 +709,93 @@ class TestFinalBodyAcceptanceBinding(unittest.TestCase):
         self.assertEqual(seen[1], "磁盘上的中间正文")
 
 
+class TestResearchHardGate(unittest.TestCase):
+    """A 批：底稿/必需事实/文档主体不达标 → 交付**硬约束**必须被触发。
+
+    背景：`_delivery(task_id)["hard_fail"]` 此前全仓无人赋值，`verified_delivery` 的
+    `hard_ok` 分支永远不可达——底稿写着"未知口径/缺口"，交付却仍可能被判已验证。
+    """
+
+    def setUp(self):
+        from orchestrator_v2 import OrchestratorV2
+
+        self.o = OrchestratorV2.__new__(OrchestratorV2)
+        self.tid = "t-gate"
+
+    def _contract(self):
+        from facts import parse_research_request
+        return parse_research_request(
+            "研究贵州茅台 2023 与 2024 年营业收入、归母净利润、经营活动现金流净额",
+            company="贵州茅台", company_id="600519.SH", market="cn",
+            periods=[2023, 2024], caliber="合并", as_of="2025-04-30",
+            identity_source="form").to_payload()
+
+    def _run_gate(self, wp, report="", contract="default"):
+        payload = self._contract() if contract == "default" else (contract or {})
+        with mock.patch("task_state.read_task",
+                        return_value={"research_request": payload}):
+            return self.o._apply_research_hard_gate(self.tid, "目标", wp, report)
+
+    def test_paper_not_ok_triggers_hard_fail(self):
+        wp = {"ok": True, "paper_ok": False,
+              "problems": [{"kind": "caliber_mismatch",
+                            "detail": "营业收入 2024年 的口径是「unknown」"}],
+              "gaps": [], "rows_detail": []}
+        note = self._run_gate(wp)
+        self.assertIn("研究交付硬门槛未通过", note)
+        self.assertTrue(self.o._delivery(self.tid)["hard_fail"],
+                        "硬约束必须被写进交付状态（否则谓词那一分支永远不可达）")
+        # 已有"验收通过"的版本，但硬约束不满足 → 交付只能是草稿
+        from report_version import VersionStore, body_hash, verified_delivery
+        import tempfile
+        from pathlib import Path
+        tmp = Path(tempfile.mkdtemp(prefix="wm_gate_"))
+        self.addCleanup(__import__("shutil").rmtree, tmp, ignore_errors=True)
+        store = VersionStore(tmp, self.tid)
+        v = store.record("正文", sources_fingerprint="src-A")
+        store.adopt(v, reason="t")
+        store.bind_acceptance({"overall": "pass", "gaps": [],
+                               "report_sha256": body_hash("正文")},
+                              sources_fingerprint="src-A")
+        self.assertEqual(store.adopted().acceptance_overall(), "pass")
+        status, _why = verified_delivery(
+            store.adopted(), "正文",
+            hard_ok=not bool(self.o._delivery(self.tid).get("hard_fail")),
+            hard_reason=str(self.o._delivery(self.tid).get("hard_fail") or ""))
+        self.assertEqual(status, "draft", "硬约束不满足时交付只能是草稿")
+
+    def test_missing_working_paper_triggers_gate(self):
+        note = self._run_gate({"ok": False, "skipped": True,
+                               "reason": "没有结构化财务，不产出底稿"})
+        self.assertIn("底稿缺失", note)
+        self.assertTrue(self.o._delivery(self.tid)["hard_fail"])
+
+    def test_non_research_task_is_not_gated(self):
+        """普通任务：既没有研究契约、也没有底稿 → 不进门槛（不强制要底稿）。"""
+        note = self._run_gate({"ok": False, "skipped": True}, contract=None)
+        self.assertEqual(note, "")
+        self.assertFalse(self.o._delivery(self.tid)["hard_fail"])
+
+    def test_document_scope_unbound_triggers_gate(self):
+        """文档作用域没绑定请求主体（标题是别家公司）→ 触发门槛。"""
+        wp = {"ok": True, "paper_ok": True, "problems": [], "gaps": [],
+              "rows_detail": [{"metric": "revenue", "metric_label": "营业收入",
+                               "period": "2024年", "value": 9999.0}]}
+        report = ("# 比亚迪 2024 年度研究\n\n| 指标 | 2024 |\n|---|---|\n"
+                  "| 营业收入（亿元） | 9999.0 |\n")
+        note = self._run_gate(wp, report=report)
+        self.assertIn("文档主体作用域", note)
+        self.assertTrue(self.o._delivery(self.tid)["hard_fail"])
+
+    def test_scoped_report_does_not_trigger(self):
+        wp = {"ok": True, "paper_ok": True, "problems": [], "gaps": [],
+              "rows_detail": [{"metric": "revenue", "metric_label": "营业收入",
+                               "period": "2024年", "value": 1741.44}]}
+        report = ("# 贵州茅台 2024 年度研究\n\n| 指标 | 2024 |\n|---|---|\n"
+                  "| 营业收入（亿元） | 1741.44 |\n")
+        self.assertEqual(self._run_gate(wp, report=report), "")
+        self.assertFalse(self.o._delivery(self.tid)["hard_fail"])
+
+
 if __name__ == "__main__":
     unittest.main()

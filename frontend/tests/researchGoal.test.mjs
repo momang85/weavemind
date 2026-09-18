@@ -48,6 +48,48 @@ test('参考资料作为附注进入目标', () => {
   assert.match(goal, /参考资料：年报 PDF 与官网新闻稿/)
 })
 
+// ── A 批：结构化契约字段（与目标一起提交，提交时落库）──────────────
+
+test('完整表单同时给出结构化契约字段', () => {
+  const { fields, gaps } = buildResearchGoal({
+    company: '贵州茅台', companyId: '600519.SH', market: 'cn',
+    yearFrom: '2023', yearTo: '2024', caliber: '合并', asOf: '2025-04-30',
+    materials: '年报链接',
+  })
+  assert.deepEqual(gaps, [])
+  assert.deepEqual(fields, {
+    company: '贵州茅台', company_id: '600519.SH', market: 'cn',
+    caliber: '合并', as_of: '2025-04-30',
+    year_from: 2023, year_to: 2024, periods: [2023, 2024],
+    materials: '年报链接',
+  })
+})
+
+test('市场未选时**不填默认值**（不替你猜 A 股），字段里就没有这一项', () => {
+  const { fields } = buildResearchGoal({
+    company: '示例公司', yearFrom: '2023', yearTo: '2024',
+    caliber: '合并', asOf: '2025-04-30',
+  })
+  assert.ok(fields)
+  assert.equal('market' in fields, false, '不能默认成 cn/hk/us')
+  assert.equal('company_id' in fields, false)
+})
+
+test('市场只接受 cn/hk/us；非法值同样不写进字段', () => {
+  const { fields } = buildResearchGoal({
+    company: '示例公司', market: 'A股', yearFrom: '2023', yearTo: '2024',
+    caliber: '合并', asOf: '2025-04-30',
+  })
+  assert.equal('market' in fields, false, '中文写法不当作市场代码')
+})
+
+test('表单不完整时既不给目标也不给字段', () => {
+  const { goal, fields, gaps } = buildResearchGoal({ company: '', yearFrom: '2024' })
+  assert.equal(goal, '')
+  assert.equal(fields, null)
+  assert.ok(gaps.length > 0)
+})
+
 const PAPER = {
   ok: false,
   request: { as_of: '2025-04-30' },

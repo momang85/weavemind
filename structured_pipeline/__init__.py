@@ -834,8 +834,10 @@ class StructuredPipelineMixin:
                     unit = "%"
                     unit_source = "metric"
                 # 报告期标签：季报/中报用"2025Q3"这类季度写法，避免与同年年报行
-                # 撞标签被去重掉（此前统一写"2025年"，季报与年报只能留一条），
-                # caliber 也如实标注口径（三季报/中报/一季报/年报）
+                # 撞标签被去重掉（此前统一写"2025年"，季报与年报只能留一条）。
+                # 注意：报告期描述**不是报表口径**——"年报口径（年报）"讲的是期间，
+                # 合并/母公司讲的才是口径。此前把前者写进 `caliber`，下游按口径解析必然
+                # 对不上（A 批：未知/不符口径不得算已核验）。两者分开写。
                 _period_label = _period_tag(f)
                 label = f"{entity}{_period_label}{label}" if entity else (
                     f"{_period_label}{label}"
@@ -847,7 +849,9 @@ class StructuredPipelineMixin:
                     "unit_source": unit_source,
                     "year": f.get("year"),
                     "source": source_url,
-                    "caliber": _caliber_tag(f),
+                    # 期间描述留在 period_label；`caliber` 只保留**来源真声明的**报表口径
+                    "period_label": _caliber_tag(f),
+                    "caliber": str(f.get("caliber") or ""),
                     # 主体/期间/币种随事实走（下游判归属与重算都靠这几项）
                     "entity": str(subject or entity or ""),
                     "entity_id": str(subject_id or ""),

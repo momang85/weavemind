@@ -96,7 +96,8 @@ def _ensure_task_table(con: sqlite3.Connection) -> None:
         " user TEXT DEFAULT '', phase TEXT DEFAULT '',"
         " steps_json TEXT DEFAULT '', logs_json TEXT DEFAULT '',"
         " acceptance_json TEXT DEFAULT '',"
-        " rules_fingerprint TEXT DEFAULT '', updated_at TIMESTAMP)"
+        " rules_fingerprint TEXT DEFAULT '', updated_at TIMESTAMP,"
+        " research_request_json TEXT DEFAULT '')"
     )
 
 
@@ -123,6 +124,11 @@ def _add_missing_columns(con: sqlite3.Connection) -> list[str]:
     if "updated_at" not in existing:
         con.execute("ALTER TABLE task_history ADD COLUMN updated_at TIMESTAMP")
         added.append("updated_at")
+    if "research_request_json" not in existing:
+        # 研究契约在提交时先落库（A 批）：底稿只读它，抓取元数据不得反向决定研究对象
+        con.execute(
+            "ALTER TABLE task_history ADD COLUMN research_request_json TEXT DEFAULT ''")
+        added.append("research_request_json")
     return added
 
 
@@ -172,13 +178,26 @@ def derive_status(step_statuses=None, acceptance: dict | None = None,
 
 def mark_queued(task_id: str, goal: str, project: str = "default",
                 conversation_id: str = "", parent_task_id: str = "",
-                context: str = "", user: str = "", db_path: str | None = None) -> bool:
+                context: str = "", user: str = "",
+                research_request: dict | None = None,
+                db_path: str | None = None) -> bool:
     """登记排队中的任务（提交时调用）。返回是否**真的写入成功**。
 
     返回值的意义：提交收执（`task_ack`）必须依据"是否真的登记成功"。此前本函数
     吞掉一切异常后正常返回 None，于是 `accept_task_request` 里"靠异常区分
     accepted / rejected"的分支永不触发——任务库不可写时提交方仍拿到 accepted。
+
+    `research_request`：研究契约（公司/市场/两期/口径/截至日/来源要求/预算）。
+    **在提交时先落库**，后续底稿只读它——抓取到的公司名/代码只能作为候选比对，
+    不能反过来改写用户请求（否则请求会被数据源决定）。
     """
+    request_json = ""
+    if isinstance(research_request, dict) and research_request:
+        try:
+            request_json = json.dumps(research_request, ensure_ascii=False)
+        except Exception as exc:
+            logger.warning("任务 %s 研究契约无法序列化（按空处理）：%s", task_id, str(exc)[:120])
+            request_json = ""
     try:
         con = _connect(db_path)
         try:
@@ -186,10 +205,11 @@ def mark_queued(task_id: str, goal: str, project: str = "default",
             _add_missing_columns(con)
             con.execute(
                 "INSERT INTO task_history"
-                "(task_id,goal,status,project,conversation_id,parent_task_id,context,user,phase)"
-                " VALUES(?,?,?,?,?,?,?,?,?)",
+                "(task_id,goal,status,project,conversation_id,parent_task_id,context,user,"
+                " phase,research_request_json)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (task_id, goal, QUEUED, project, conversation_id,
-                 parent_task_id, context, user, "排队"),
+                 parent_task_id, context, user, "排队", request_json),
             )
             con.commit()
             return True
@@ -345,6 +365,12 @@ def read_task(task_id: str, db_path: str | None = None) -> dict:
         out["acceptance"] = json.loads(raw) if raw else {}
     except Exception:
         out["acceptance"] = {}
+    # 研究契约（提交时先落库的那份）：读不出就是没有，不回退成"从财务载荷反推"
+    req_raw = out.get("research_request_json") or ""
+    try:
+        out["research_request"] = json.loads(req_raw) if req_raw else {}
+    except Exception:
+        out["research_request"] = {}
     return out
 
 

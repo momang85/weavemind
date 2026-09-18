@@ -318,6 +318,55 @@ class TestOfflineFullDelivery(unittest.TestCase):
         self.assertEqual(hashlib.sha256(h.body).hexdigest(), md_sha,
                          "路由送达的字节必须与清单登记的 markdown 一致")
 
+    def test_research_gate_keeps_unverified_paper_as_draft(self):
+        """研究任务：底稿不达标（口径未知）→ 交付只能是草稿，终态 SUCCESS_WITH_ISSUES。
+
+        对偶于上面那条 happy path：验收通过、评审也过，但**底稿侧认证不过**时交付不得
+        判为已验证（A 批把底稿结论接进交付硬约束）。
+        """
+        self.o = self.run.orch(self.tid, critic=True)
+        self.o._brpop_with_deadline = self.run.mixed_brpop(self.tid)
+        payload = {
+            "financials": [
+                # 行内**不声明口径**（真实快照就是这样）→ 口径未知 → 不达标
+                {"year": 2023, "report_type": "年报", "revenue": 1505.6,
+                 "net_profit": 747.34, "operating_cashflow": 665.93},
+                {"year": 2024, "report_type": "年报", "revenue": 1741.44,
+                 "net_profit": 862.28, "operating_cashflow": 924.64},
+            ],
+            "metadata": {"source": "eastmoney_ashare", "company": "贵州茅台",
+                         "stock_code": "600519", "currency": "CNY", "unit": "亿元"},
+            "raw": {"url": "https://example.invalid/mt", "text": "{}"},
+        }
+        proj = ws_mod.task_project_dir(self.tid, "default")
+
+        # `run()` 开头会重建任务工作区（预置文件会被清掉），所以结构化财务必须在
+        # **执行阶段**落地——这正是生产里结构化预载做的事：把 `route_structured`
+        # 换成"写夹具并返回载荷"，其余链路（底稿→门槛→交付）全走真实实现。
+        def _fake_preload(task_id, goal, project=None, **_kw):
+            proj.mkdir(parents=True, exist_ok=True)
+            (proj / "financials.json").write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            return payload
+
+        self.o = self.run.orch(self.tid, critic=True)
+        self.o._brpop_with_deadline = self.run.mixed_brpop(self.tid)
+        self.o._structured_data_preload = _fake_preload
+
+        res = self._run()
+        self.assertEqual(res["status"], "SUCCESS_WITH_ISSUES",
+                         f"delivery={self.o._delivery(self.tid)!r}")
+        self.assertEqual(self.o._delivery(self.tid).get("status"), "draft")
+        self.assertTrue(self.o._delivery(self.tid).get("hard_fail"),
+                        "底稿不达标必须写进交付硬约束")
+        self.assertIn("研究交付硬门槛未通过", res["final_report"])
+
+        from report_version import VersionStore
+        store = VersionStore(ws_mod.task_workspace(self.tid), self.tid)
+        deliveries = store.deliveries()
+        self.assertTrue(deliveries)
+        self.assertFalse(deliveries[-1]["ok"], "草稿交付不得记为 ok")
+
     def test_admitted_run_consolidates_experience(self):
         """通过验收 + 评审 PASS 的运行才允许沉淀经验（准入谓词的真实接线）。"""
         self.o = self.run.orch(self.tid, critic=True)

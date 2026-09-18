@@ -2383,6 +2383,66 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             "最终装配正文未取得本版验收（task=%s）：交付按证据未知处理", task_id)
         return "mismatch", accepted
 
+    def _apply_research_hard_gate(self, task_id: str, goal: str, wp: dict | None,
+                                  report_body: str = "") -> str:
+        """研究任务的**交付硬门槛**：底稿/必需事实/文档主体不达标 → 拒绝判为已验证。
+
+        为什么要有这一步：`_delivery(task_id)["hard_fail"]` 此前全仓无人赋值，
+        `verified_delivery` 的 `hard_ok` 分支永远不可达——底稿说"未知口径/缺口"，
+        交付状态却仍可能"已验证"。研究任务必须让底稿结论约束交付判定。
+
+        返回要附加到交付物的一段说明（空串=未触发）。判定只对**研究任务**生效：
+        存在研究契约，或本次确实产出了底稿（`skipped` 不算），普通任务不受影响。
+        """
+        notes: list[str] = []
+        request = None
+        try:
+            import task_state as _ts
+            from facts import ResearchRequest
+            request = ResearchRequest.from_payload(
+                (_ts.read_task(task_id) or {}).get("research_request") or {})
+        except Exception:
+            request = None
+        has_contract = bool(request and (request.company or request.company_id))
+        paper_present = bool(wp and wp.get("ok"))
+        if not (has_contract or paper_present):
+            return ""                       # 非研究任务：不强制要求底稿
+
+        reasons: list[str] = []
+        if wp is None or wp.get("skipped"):
+            reasons.append("研究任务未取得结构化事实：底稿缺失，本次不得判为已验证")
+        elif not paper_present:
+            reasons.append(f"底稿产出失败：{str((wp or {}).get('reason') or '')[:120]}")
+        else:
+            if not wp.get("paper_ok"):
+                problems = wp.get("problems") or []
+                gaps = [g for g in (wp.get("gaps") or []) if g.get("kind") == "fact"]
+                head = (problems or gaps)
+                detail = "；".join(
+                    str((p.get("detail") if isinstance(p, dict) else p) or "")[:80]
+                    for p in head[:3])
+                reasons.append(f"底稿未达标（{len(problems)} 项问题 / {len(gaps)} 项必需事实缺口）：{detail}")
+            # 文档级主体作用域：报告本体必须绑定请求主体（本批覆盖三项核心指标）
+            try:
+                from working_paper import WorkingPaper, document_subject_scope
+                if request is not None and report_body:
+                    paper = WorkingPaper(request=request)
+                    paper.rows = list(wp.get("rows_detail") or [])
+                    scope = document_subject_scope(report_body, request, paper)
+                    if scope:
+                        reasons.append("文档主体作用域未绑定：" + scope[0].detail[:120])
+            except Exception as exc:
+                logger.warning("文档主体作用域判定失败（task=%s）：%s", task_id, str(exc)[:120])
+        if not reasons:
+            return ""
+        self._delivery(task_id)["hard_fail"] = reasons[0]
+        logger.warning("研究交付硬门槛触发（task=%s）：%s", task_id, reasons[0][:160])
+        notes.append("> **研究交付硬门槛未通过**：" + reasons[0])
+        for extra in reasons[1:]:
+            notes.append("> " + extra)
+        notes.append("> 交付状态不得判为已验证；请按上述缺口补齐后重跑或人工修订。")
+        return "\n".join(notes)
+
     def _run_acceptance_check(self, task_id: str, goal: str,
                               trigger: str = "报告步骤",
                               report_body: str = "",
@@ -5622,6 +5682,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             _wp_note = gaps_note(_wp)
             if _wp_note:
                 delivery = delivery + "\n\n" + _wp_note
+            # A 批硬门槛：底稿缺口 / 未知或错口径 / 文档主体作用域未绑定
+            # **进入交付硬约束**（此前只当一段文本附注，`hard_fail` 全仓无人赋值）。
+            _gate = self._apply_research_hard_gate(task_id, goal, _wp, detail)
+            if _gate:
+                delivery = delivery + "\n\n" + _gate
         except Exception as exc:
             logger.warning("底稿产出接入失败（task=%s）：%s", task_id, str(exc)[:120])
         # M0-b：评审状态写进交付物本体（不只留日志）——降级交付物必须一眼看出需人工复核
@@ -7257,6 +7322,9 @@ def accept_task_request(orch, data: dict) -> tuple[bool, str]:
             parent_task_id=str(data.get("parent_task_id") or ""),
             context=str(data.get("context") or ""),
             user=str(data.get("user_id") or ""),
+            # 研究契约在**提交时**落库：底稿只读它，抓取元数据不得反向决定研究对象
+            research_request=(data.get("research_request")
+                              if isinstance(data.get("research_request"), dict) else None),
         )
         if not wrote:
             ok, reason = False, "登记失败：任务库不可写（详见编排器日志）"

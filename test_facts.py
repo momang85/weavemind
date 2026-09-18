@@ -172,5 +172,110 @@ class TestDerivedFact(unittest.TestCase):
                          "派生值同样不是已核实")
 
 
+class TestContractPersistenceAndSubject(unittest.TestCase):
+    """A 批：契约要能原样落库/读回，主体比对要以**稳定标识**为先。"""
+
+    def _req(self) -> F.ResearchRequest:
+        return F.parse_research_request(
+            "研究贵州茅台 2023 与 2024 两个年度的营业收入、归母净利润、"
+            "经营活动现金流净额，合并报表口径，数据截至 2025-04-30",
+            company="贵州茅台", company_id="600519.SH", market="cn",
+            caliber="合并", as_of="2025-04-30", identity_source="form")
+
+    def test_payload_round_trip_keeps_identity(self):
+        req = self._req()
+        back = F.ResearchRequest.from_payload(req.to_payload())
+        self.assertIsNotNone(back)
+        self.assertEqual(back.company, "贵州茅台")
+        self.assertEqual(back.company_id, "600519.SH")
+        self.assertEqual(back.market, "cn")
+        self.assertEqual(back.caliber, "合并")
+        self.assertEqual(back.periods, [2023, 2024])
+        self.assertEqual(back.as_of, "2025-04-30")
+        self.assertEqual(back.identity_source, "form")
+        self.assertEqual(back.gaps, req.gaps)
+
+    def test_broken_payload_is_none_not_guessed(self):
+        self.assertIsNone(F.ResearchRequest.from_payload(None))
+        self.assertIsNone(F.ResearchRequest.from_payload({}))
+        self.assertIsNone(F.ResearchRequest.from_payload("not a dict"))
+
+    def test_identity_source_marks_text_fallback(self):
+        """没有结构化字段时从目标解析：来源标成 text（审计看得出契约是怎么来的）。"""
+        req = F.parse_research_request(
+            "贵州茅台（600519.SH）2023 与 2024 年年度报告研究")
+        self.assertEqual(req.identity_source, "text")
+        self.assertEqual(req.company, "贵州茅台")
+
+    def test_text_entry_keeps_gaps_instead_of_guessing(self):
+        """自由文本入口识别不出公司时**留缺口**，不猜、也不让数据源来定。
+
+        实测（A 批记录）：`task_classifier._extract_company` 对"研究贵州茅台 2023 与
+        2024 年营业收入"这类短名给不出公司（对全称还会截成"台酒股份有限"）——这正是
+        这份契约要求表单送结构化字段的原因；文本入口只作为兼容通道，歧义留 `gaps`。
+        """
+        req = F.parse_research_request("研究贵州茅台 2023 与 2024 年营业收入")
+        self.assertEqual(req.company, "")
+        self.assertTrue(req.needs_confirmation)
+        self.assertTrue(any("未识别到公司" in g for g in req.gaps), req.gaps)
+
+    def test_caller_identity_is_not_overwritten_by_text(self):
+        """调用方（表单）给的身份不被目标文本改掉——文本解析只在缺身份时兜底。"""
+        req = F.parse_research_request(
+            "研究比亚迪 2023 与 2024 年营业收入",
+            company="贵州茅台", company_id="600519.SH", identity_source="form")
+        self.assertEqual(req.company, "贵州茅台")
+        self.assertEqual(req.company_id, "600519.SH")
+        self.assertEqual(req.identity_source, "form")
+
+    def test_check_subject_id_first(self):
+        req = self._req()
+        # 全称/简称：靠归一名称
+        self.assertTrue(F.check_subject(req, "贵州茅台酒股份有限公司", "600519")[0])
+        # 稳定标识优先：名称不同但标识相同（别名/改名场景）也算一致
+        self.assertTrue(F.check_subject(req, "贵州茅台（旧名）", "600519.SH")[0])
+        # 标识不同 → 不一致（即使名称相同）
+        ok, why = F.check_subject(req, "贵州茅台", "002594")
+        self.assertFalse(ok)
+        self.assertIn("标识", why)
+
+    def test_check_subject_refuses_when_subject_missing(self):
+        req = self._req()
+        ok, why = F.check_subject(req, "", "")
+        self.assertFalse(ok)
+        self.assertIn("缺主体", why)
+        req_no_name = F.parse_research_request("研究某公司", company="", company_id="")
+        self.assertFalse(F.check_subject(req_no_name, "贵州茅台", "600519")[0])
+
+    def test_check_subject_rejects_unrelated_company(self):
+        req = self._req()
+        ok, why = F.check_subject(req, "比亚迪", "002594")
+        self.assertFalse(ok, why)
+
+
+class TestCaliberIsSourceDeclared(unittest.TestCase):
+    """口径只认**来源声明的**：行级 > 实体级 > unknown；不从别处借、不默认合并。"""
+
+    def test_row_caliber_wins(self):
+        payload = {"financials": [{"year": 2024, "report_type": "年报",
+                                   "caliber": "母公司", "revenue": 100.0}],
+                   "metadata": {"company": "示例", "caliber": "合并"},
+                   "raw": {"url": "https://example.invalid/a", "text": "{}"}}
+        fact = F.facts_from_financials(payload)[0]
+        self.assertEqual(fact.caliber, "母公司")
+
+    def test_entity_level_caliber_used_as_fallback(self):
+        payload = {"financials": [{"year": 2024, "report_type": "年报", "revenue": 100.0}],
+                   "metadata": {"company": "示例", "caliber": "合并"},
+                   "raw": {"url": "https://example.invalid/a", "text": "{}"}}
+        self.assertEqual(F.facts_from_financials(payload)[0].caliber, "合并")
+
+    def test_missing_caliber_stays_unknown(self):
+        payload = {"financials": [{"year": 2024, "report_type": "年报", "revenue": 100.0}],
+                   "metadata": {"company": "示例"},
+                   "raw": {"url": "https://example.invalid/a", "text": "{}"}}
+        self.assertEqual(F.facts_from_financials(payload)[0].caliber, F.UNKNOWN)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

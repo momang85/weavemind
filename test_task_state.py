@@ -35,7 +35,9 @@ class TestTaskStateProjector(unittest.TestCase):
         added = task_state.ensure_schema(self.db)
         self.assertEqual(
             set(added),
-            {"acceptance_json", "rules_fingerprint", "phase", "updated_at"})
+            {"acceptance_json", "rules_fingerprint", "phase", "updated_at",
+             "research_request_json"},      # A 批：研究契约在提交时落库
+        )
         self.assertEqual(task_state.ensure_schema(self.db), [],
                          "重复调用不得重复加列（幂等）")
 

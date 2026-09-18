@@ -1504,6 +1504,62 @@ def _load_templates() -> list:
     except Exception:
         return []
 
+_RESEARCH_MARKETS = ("cn", "hk", "us")
+_RESEARCH_CALIBERS = ("合并", "母公司")
+_RESEARCH_FIELD_MAX = 200
+
+
+def _sanitize_research_request(raw) -> dict:
+    """研究契约的结构化字段白名单校验（A 批）。
+
+    只收**表单明确给出的**字段，逐项限长与枚举校验；不合法就丢弃该项（宁可少字段、
+    由后续解析补缺口，也不把脏值当契约）。返回空 dict 表示"本次没有结构化契约"。
+    """
+    if not isinstance(raw, dict):
+        return {}
+    out: dict = {}
+
+    def _text(key: str, limit: int = _RESEARCH_FIELD_MAX) -> str:
+        v = raw.get(key)
+        return str(v).strip()[:limit] if isinstance(v, (str, int)) and str(v).strip() else ""
+
+    company = _text("company")
+    if company:
+        out["company"] = company
+    company_id = _text("company_id", 40)
+    if company_id:
+        out["company_id"] = company_id
+    market = _text("market", 8).lower()
+    if market in _RESEARCH_MARKETS:
+        out["market"] = market
+    caliber = _text("caliber", 8)
+    if caliber in _RESEARCH_CALIBERS:
+        out["caliber"] = caliber
+    as_of = _text("as_of", 20)
+    if as_of and re.match(r"^20\d{2}[-/.]\d{1,2}([-/.]\d{1,2})?$", as_of):
+        out["as_of"] = as_of
+
+    periods: list[int] = []
+    for key in ("year_from", "year_to"):
+        v = str(raw.get(key) or "").strip()
+        if re.match(r"^(19|20)\d{2}$", v):
+            periods.append(int(v))
+    extra = raw.get("periods")
+    if isinstance(extra, list):
+        for v in extra[:8]:
+            s = str(v).strip()
+            if re.match(r"^(19|20)\d{2}$", s):
+                periods.append(int(s))
+    if periods:
+        out["periods"] = sorted(set(periods))
+        out["year_from"], out["year_to"] = periods[0], periods[-1]
+
+    materials = _text("materials", 500)
+    if materials:
+        out["materials"] = materials
+    return out
+
+
 def _safe_project_path(rel: str, tid: str | None = None) -> str | None:
     """把相对路径限定在（任务的）project 工作区内，防止路径穿越。"""
     base = os.path.abspath(
@@ -2461,6 +2517,7 @@ def _publish_task(
     user_id: str = "",
     prefix: str = "ui",
     report_confirm: bool = False,
+    research_request: dict | None = None,
 ) -> dict:
     """核心提交通道：把请求交给编排器并等待**收执**。
 
@@ -2493,6 +2550,8 @@ def _publish_task(
         # 会话/父子关系随请求下发：编排器是唯一写库者，缺了这两项它无法落列
         "conversation_id": conversation_id,
         "parent_task_id": parent_task_id,
+        # 研究契约：**提交时**随请求下发并在登记时落库（底稿只读它，抓取元数据只作候选）
+        "research_request": dict(research_request or {}),
     }, ensure_ascii=False))
     # 等待收执：编排器登记成功后写 task_ack:{tid} = accepted / rejected:原因
     try:
@@ -4449,6 +4508,7 @@ def _post_task(self, p, body, admin):
                 # 提交人取会话身份：此前取请求体的 user_id，客户端可自报任意提交人
                 user_id=str(admin.get("user") or ""),
                 report_confirm=report_confirm,
+                research_request=_sanitize_research_request(body.get("research_request")),
             )
             tid = submitted["task_id"]
         except RuntimeError as exc:
