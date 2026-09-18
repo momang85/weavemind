@@ -65,11 +65,30 @@ class ReportVersion:
     created_at: float = 0.0
     adopted: bool = False
     draft_only: bool = False        # 交付正文与验收对象不一致时置位（未验收草稿）
+    # 入库时的身份（版本库的键）。身份由"正文+来源+规则"算出，但 `bind_acceptance`
+    # 会把 `rules_fingerprint` 覆盖成验收里的值——于是**重算**出来的身份与入库时的键
+    # 不再相等（实测：键 `7faeb4d9…`、重算 `2033fae7…`），页面/导出清单里的
+    # `report_version_id` 与版本库里那条记录对不上，审计无法对账。
+    # 记录里存下来的身份才是权威（`record()` 就把它随记录一起写），这里只负责带上它。
+    stored_identity: str = ""
 
     def identity_id(self) -> str:
-        """身份 = 正文 + 来源 + 规则：同正文但证据变化时不是同一个"已验收版本"。"""
+        """身份 = 正文 + 来源 + 规则：同正文但证据变化时不是同一个"已验收版本"。
+
+        已入库的记录返回**入库时算出的身份**（`stored_identity`）：身份一旦确定就不再
+        随字段回填而漂移。只有尚未入库/旧记录（没有存下身份）才现算。
+        """
+        if self.stored_identity:
+            return self.stored_identity
         raw = "|".join([self.version_id, self.sources_fingerprint, self.rules_fingerprint])
         return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+    def identity_drifted(self) -> bool:
+        """现算身份与入库身份是否已不一致（审计用：能显示"这条记录的身份被回填改过"）。"""
+        if not self.stored_identity:
+            return False
+        raw = "|".join([self.version_id, self.sources_fingerprint, self.rules_fingerprint])
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest() != self.stored_identity
 
     def acceptance_overall(self) -> str:
         return str((self.acceptance or {}).get("overall") or "")   # "" = 未知
@@ -99,9 +118,20 @@ class ReportVersion:
 
 
 def _from_raw(raw: dict) -> "ReportVersion":
-    """从落盘记录重建（忽略非字段键，如存放的 `identity_id`/`adopt_reason`）。"""
+    """从落盘记录重建（非字段键忽略，如 `adopt_reason`）。
+
+    记录里存的 `identity_id` 是入库时的身份，带进 `stored_identity`——身份因此不会
+    因为事后回填 `rules_fingerprint` 而漂移（页面/清单里的 `report_version_id` 与
+    版本库的键保持同一个串）。
+    """
+    raw = dict(raw or {})
     valid = {f.name for f in dataclasses.fields(ReportVersion)}
-    return ReportVersion(**{k: v for k, v in dict(raw or {}).items() if k in valid})
+    data = {k: v for k, v in raw.items() if k in valid}
+    if not data.get("stored_identity"):
+        stored = str(raw.get("identity_id") or "")
+        if stored:
+            data["stored_identity"] = stored
+    return ReportVersion(**data)
 
 
 class VersionStore:

@@ -934,6 +934,15 @@ class TestMemoryGovernanceV2(unittest.TestCase):
 
     STEPS = [{"capability": "web_search", "instruction": "搜索", "status": "SUCCESS"}]
 
+    def setUp(self):
+        # 待写队列不参与：`consolidate_memory` 会把 Redis 里排队的待写经验回填进集合，
+        # 于是"这一次调用写了几条"取决于**这台机器上 Redis 的积累**——本机（跑过真实
+        # 任务、队列非空）实测 `_conversations.count()` 是 5 而不是 1，CI 上队列为空则
+        # 一直是 1。本类断言的是准入规则而不是回填，故把队列摘掉让用例自足。
+        pat = mock.patch("memory_manager._pending_redis", lambda: None)
+        pat.start()
+        self.addCleanup(pat.stop)
+
     def _make_mem(self):
         from memory_manager import MemoryManager
 

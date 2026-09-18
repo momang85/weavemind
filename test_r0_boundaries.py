@@ -200,6 +200,36 @@ class TestR02VersionIdentity(unittest.TestCase):
         self.assertFalse(bool(got.acceptance), "被拒的绑定不得写入")
         self.assertFalse(got.acceptance_for_this_body())
 
+    def test_identity_does_not_drift_after_bind(self):
+        """身份是**入库时**算出的那个，不随事后回填 `rules_fingerprint` 改变。
+
+        实测（真实任务 `ui-01efce721a`）：同一份 `report_versions.json` 里，
+        条目键是 `7faeb4d9…`，而重算身份是 `2033fae7…`——因为 `bind_acceptance`
+        会把 `rules_fingerprint` 覆盖成验收里的值。页面/清单里的 `report_version_id`
+        用的是重算值，与版本库的键对不上，审计无法对账。
+        """
+        from report_version import VERSIONS_FILE, body_hash
+
+        body = "研究正文（身份稳定性）"
+        v = self.store.record(body, sources_fingerprint="src-A",
+                              rules_version="r1", rules_fingerprint="fp-1")
+        self.store.adopt(v, reason="t")
+        identity = v.identity_id()
+        raw = json.loads((self.tmp / VERSIONS_FILE).read_text(encoding="utf-8"))
+        self.assertIn(identity, raw["versions"], "身份就是入库时的键")
+
+        self.store.bind_acceptance(
+            self._acc("fail", body_hash(body), fingerprint="fp-9"),
+            sources_fingerprint="src-A")
+        got = self.store.adopted()
+        self.assertEqual(got.rules_fingerprint, "fp-9", "回填本身要生效")
+        self.assertEqual(got.identity_id(), identity,
+                         "身份不得因回填而漂移（否则键/身份无法对账）")
+        self.assertIn(got.identity_id(), raw and json.loads(
+            (self.tmp / VERSIONS_FILE).read_text(encoding="utf-8"))["versions"])
+        self.assertTrue(got.identity_drifted(),
+                        "底层字段确实变了——这个信号要能被审计看到")
+
     def test_legacy_short_hash_record_is_needs_reverify(self):
         """磁盘上遗留的短 hash 验收：按"待重验"处理，不得当已验证。"""
         from report_version import VERSIONS_FILE, body_hash
