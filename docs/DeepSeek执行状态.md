@@ -1,10 +1,10 @@
 # DeepSeek 执行状态（2026-09-18 更新）
 
-**当前批次**：C（固定公司研究路径 + 离线故障注入 + 一次有界实机）实现完成、实机跑过一轮；
-证据 `docs/evidence/research_path_C_20260918.md`。**A / A′ / B 已在 main（`87c0755`）**；
-C 的提交 `ba0a54b` 因本地代理未运行尚未推送（`87c0755` 的 CI backend 曾红，修复已在该提交：
-`test_review_protocol` 的评审注记、`test_r0_boundaries` 的身份接线守卫、
-`test_financial_chain` 的期间断言）。
+**当前批次**：C（固定公司研究路径 + 离线故障注入 + 一次有界实机）实现完成、实机跑过一轮、
+**已推送并 CI 全绿**（`c451491`：backend / frontend / docker-image / clean-env-e2e 四 job success）；
+证据 `docs/evidence/research_path_C_20260918.md`。A / A′ / B 亦在 main（`87c0755`；
+该提交的 CI backend 曾红——`test_review_protocol` 的评审注记、`test_r0_boundaries` 的身份
+接线守卫、`test_financial_chain` 的期间断言三处失败——修复随后续提交一起推送）。
 
 **C 已完成**
 - 研究任务走**代码内固定步骤**（契约 → 搜索/抓取 → 解释已选事实 → 出报告）：命中条件是
@@ -19,7 +19,9 @@ C 的提交 `ba0a54b` 因本地代理未运行尚未推送（`87c0755` 的 CI ba
 **已验证范围（三类证据分开）**
 - **离线矩阵**：`TestResearchFixedPathOffline` 11 项（规划超时/坏 JSON 仍进受控路径、
   素材缺失绝不判已验证、正文失败仍留可重算底稿、三种时点取消、根预算耗尽、诊断脱敏）。
-- **全量回归**：CI backend 的全部 **45 个测试文件本地逐个跑通**（与 CI 同一命令）。
+- **全量回归**：CI backend 的全部 **45 个测试文件本地逐个跑通**（与 CI 同一命令，最终提交
+  `c451491` 上重跑确认）。
+- **CI**：`c451491` 四个 job 全部 success（backend / frontend / docker-image / clean-env-e2e）。
 - **实机（一轮，未达终态）**：固定路径与契约抓取在真实服务上生效（执行步骤正是固定四步，
   规划器未被咨询；`financials.json.contract` 与东财两年数据齐全；11 次调用形状脱敏可读）。
   未达成"合格报告"：① 抓到的 18 条事实口径全 unknown（**没有适配器声明报表口径**，而 A′
