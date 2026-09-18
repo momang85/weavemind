@@ -125,6 +125,10 @@ test_offline_delivery`）：
 - 诊断标签缺口：`_reflect` 用的是既有 `usage="plan"`，所以反思调用在 `llm_calls` 里
   记为 `stage=plan`。**本次刻意不改**：`usage` 同时决定模型角色（`plan` → qwen3.8-max），
   改成 `reflect` 会顺带换掉反思用的模型（属于"不切模型"的红线）。
+- CI 抖动一次：纯文档提交 `1bba827` 的 `clean-env-e2e` 报"60s 内没收到任务收执
+  （orchestrator 未消费队列）"，而**同一 job 在代码提交 `c451491` 上通过**；按失败 job
+  重跑后 success。判为 CI 侧冷启动/排队抖动，与本批改动无关（该 smoke 的 goal 无研究契约，
+  固定路径不会命中）。
 
 ## 5 未验证项与已知短板
 
