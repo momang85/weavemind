@@ -158,9 +158,27 @@
   `logs/{orchestrator,webui,guardian}.log` 尾部**写进日志与证据，下一次失败能直接定位，
   不再是一次"神秘的 15 分钟红"。
 
-本地复跑通过（正向 `SUCCESS_WITH_ISSUES`、负向 `FAILED`）。这一处**根因未确认**：
-CI 上那次没有留下现场（脚本当时不打印这些），所以我把"能留下现场"当成这一步的交付，
-不把"改成能诊断"说成"已修好"。
+本地复跑通过（正向 `SUCCESS_WITH_ISSUES`、负向 `FAILED`）。
+
+### 该闸门的第二种间歇失败：根因已确认并修
+
+上一轮我把它改成"失败时会留下现场"，下一次 CI（`c7eb111`）立刻给出了根因：
+
+```
+[e2e] 任务 ui-e74d2f61a1 超过 120s 仍未落库：库=…/clone/agents.db（存在=True，字节=57344）；
+      orchestrator.log: 任务 … 终态落库失败（任务库不可写）：no such table: task_history
+      orchestrator.log: 任务 … 终态未落库（已尝试 3 次），不标记为已终结：任务库不可写
+      webui.log: stale 扫描：崩溃兜底失败：no such table: task_history
+```
+
+也就是说：**任务其实跑完了，但写不进库**——库文件存在（agents/sessions/checkpoints 由别的
+写入方建了），只缺 `task_history` 这张表。建表此前只由 `web_ui._init_db()` 负责，而任务提交
+走 Redis 不经 HTTP：初始化没跑到的进程就只能看着每次写入失败，任务永远停在 RUNNING，
+门禁 900 秒超时。这是**产品侧的写库健壮性缺口**，不是门禁挑剔。
+
+修法：让**写入方自己保证表在**——`task_state` 在补列之前先 `CREATE TABLE IF NOT EXISTS
+task_history(...)`（基础列与 `web_ui._init_db()` 一致，两边都是 `IF NOT EXISTS`，谁先来都安全）。
+新增 3 条回归：空库提交要自建表并落库、空库终态落库要成功、`ensure_schema` 幂等。
 
 ## 八、第二次真实公司研究（端点在用，但规划请求失败）
 

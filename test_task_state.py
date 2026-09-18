@@ -131,5 +131,56 @@ class TestStaleExemptionValidation(unittest.TestCase):
             self.assertIs(web_ui._pid_same_process(4_000_000, ""), False)
 
 
+class TestFreshDbSchema(unittest.TestCase):
+    """写入方自己保证 `task_history` 在——不能让"建表等人来"把任务卡死。
+
+    实测（CI 部署烟测 `c7eb111`）：任务跑完了却写不进库，`no such table: task_history`，
+    编排器连续 3 次落库失败后"不标记为已终结"，任务永远停在 RUNNING，门禁 900 秒超时。
+    库文件存在（agents/sessions/checkpoints 由别的写入方建了），只缺这张表；而任务提交走
+    Redis 不经 HTTP，`web_ui._init_db()` 没跑到的进程就只能看着写失败。
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_fresh_db_"))
+        self.addCleanup(__import__("shutil").rmtree, self.tmp, ignore_errors=True)
+        self.db = str(self.tmp / "fresh.db")
+
+    def _tables(self) -> list:
+        con = sqlite3.connect(self.db)
+        try:
+            return [r[0] for r in con.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'")]
+        finally:
+            con.close()
+
+    def test_empty_db_has_no_table_then_writer_creates_it(self):
+        assert self._tables() == [], "前提：这是一个还没有任何表的空库"
+        self.assertTrue(task_state.mark_queued(
+            "t-fresh", goal="目标", db_path=self.db), "空库上提交必须成功")
+        self.assertIn("task_history", self._tables())
+        got = task_state.read_task("t-fresh", self.db)
+        self.assertEqual(got.get("status"), task_state.QUEUED)
+
+    def test_terminal_write_lands_on_fresh_db(self):
+        """终态落库同样要能自建表（否则任务永远"未终结"）。"""
+        ok = task_state.record_completion(
+            "t-fresh2", goal="目标", status=task_state.SUCCESS,
+            report="正文", steps=[], logs=[], db_path=self.db)
+        self.assertTrue(ok)
+        self.assertEqual(task_state.read_task("t-fresh2", self.db).get("status"),
+                         task_state.SUCCESS)
+
+    def test_ensure_schema_is_idempotent_on_existing_table(self):
+        task_state.ensure_schema(self.db)
+        rows = sqlite3.connect(self.db).execute(
+            "PRAGMA table_info(task_history)").fetchall()
+        cols = {r[1] for r in rows}
+        for need in ("task_id", "status", "steps_json", "logs_json",
+                     "acceptance_json", "phase", "updated_at"):
+            self.assertIn(need, cols)
+        self.assertEqual(task_state.ensure_schema(self.db), [],
+                         "第二次调用不该再补列（幂等）")
+
+
 if __name__ == "__main__":
     unittest.main()

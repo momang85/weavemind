@@ -74,12 +74,39 @@ def _connect(db_path: str | None = None) -> sqlite3.Connection:
     return con
 
 
+def _ensure_task_table(con: sqlite3.Connection) -> None:
+    """确保 `task_history` 存在（幂等）。**写入方自己保证表在**。
+
+    实测（CI 部署烟测）：任务跑完了却写不进库——`no such table: task_history`，
+    编排器连续 3 次落库失败后"不标记为已终结"，任务永远停在 RUNNING，门禁 900 秒超时。
+    库文件是存在的（agents/sessions/checkpoints 由别的写入方建了），只缺这张表：
+    建表此前只由 `web_ui._init_db()` 负责，任务提交走 Redis 而不经 HTTP，
+    初始化没跑到的那些进程就只能干看着写失败。
+
+    基础列与 `web_ui._init_db()` 的建表保持一致（两边都是 `IF NOT EXISTS`，谁先来都安全）；
+    其余列由 `_add_missing_columns` 在此之后补。
+    """
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS task_history("
+        "task_id TEXT PRIMARY KEY, goal TEXT, status TEXT,"
+        " created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
+        " completed_at TIMESTAMP, report TEXT,"
+        " conversation_id TEXT DEFAULT '', parent_task_id TEXT DEFAULT '',"
+        " context TEXT DEFAULT '', project TEXT DEFAULT 'default',"
+        " user TEXT DEFAULT '', phase TEXT DEFAULT '',"
+        " steps_json TEXT DEFAULT '', logs_json TEXT DEFAULT '',"
+        " acceptance_json TEXT DEFAULT '',"
+        " rules_fingerprint TEXT DEFAULT '', updated_at TIMESTAMP)"
+    )
+
+
 def _add_missing_columns(con: sqlite3.Connection) -> list[str]:
-    """在既有连接上补列（幂等）。表还没建时返回空——建表由 web_ui._init_db 负责。
+    """先确保表在，再在既有连接上补列（都是幂等操作）。
 
     DDL 逐条写成字面量、直接执行：不做 SQL 文本拼接，也不把变量交给 execute，
     既避免注入面，也避免被安全扫描判为动态构造。
     """
+    _ensure_task_table(con)
     existing = {r[1] for r in con.execute("PRAGMA table_info(task_history)")}
     if not existing:
         return []
