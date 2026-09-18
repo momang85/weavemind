@@ -21,7 +21,8 @@ import re
 from dataclasses import dataclass, field
 
 from facts import (CALIBERS, CORE_METRICS, UNKNOWN, VERIFY_VERIFIED,
-                   Fact, ResearchRequest, check_subject, derived_fact, metric_label)
+                   Fact, ResearchRequest, check_subject, derived_fact,
+                   market_of_code, metric_label)
 
 # 判定类别（给缺口表/报告用，字符串稳定，便于测试与前端展示）
 PROBLEM_MISSING = "missing_required"
@@ -35,6 +36,7 @@ PROBLEM_UNRELATED = "unrelated_subject"     # 载荷含其他公司的记录
 PROBLEM_CONFLICT = "conflicting_candidates"  # 同一组合多条互相冲突的候选
 PROBLEM_NOT_COMPUTABLE = "not_computable"   # 明确"不可算"（如分母为 0）
 PROBLEM_DOC_SCOPE = "document_scope_unbound"  # 文档级主体作用域缺失/张冠李戴
+PROBLEM_AS_OF = "as_of_unverifiable"        # 截至日无法成立（未披露/日期未知）
 
 
 @dataclass
@@ -58,10 +60,11 @@ class WorkingPaper:
     problems: list[Problem] = field(default_factory=list)
     completeness: dict = field(default_factory=dict)
     selection: dict = field(default_factory=dict)
+    audit: list[dict] = field(default_factory=list)   # 只读提示：不参与 ok 判定
 
     @property
     def ok(self) -> bool:
-        """目标达成的底稿侧判据：无缺口、无实质问题。"""
+        """目标达成的底稿侧判据：无缺口、无实质问题（审计提示不算）。"""
         return not self.gaps and not self.problems
 
     def as_dict(self) -> dict:
@@ -70,7 +73,7 @@ class WorkingPaper:
             "rows": self.rows, "derived": self.derived, "gaps": self.gaps,
             "problems": [p.as_dict() for p in self.problems],
             "completeness": self.completeness, "selection": self.selection,
-            "ok": self.ok,
+            "audit": self.audit, "ok": self.ok,
         }
 
 
@@ -102,13 +105,17 @@ class Conflict:
 class Selection:
     """按完整身份选出的**一份**事实集合：校验、完整度、计算共用它。
 
-    三种产出分开记：
-    - `selected`：主体/口径/期间都归属本次研究的行（同一组合去重后只留一条）；
-    - `unrelated`：其他主体的行（不参与任何计算，且要作为问题列出来）；
-    - `conflicts`：同一组合多条互相冲突的候选（列出全部 fact_id，该组合视为未满足）。
+    四种产出分开记（A′2）：
+    - `selected`：主体、口径、币种单位都**与请求兼容**的候选（同一组合只留一条，
+      且该条携带全部一致来源）；
+    - `pending`：主体是本公司的，但口径未知/不符等**不能用于认证**的记录——
+      可以展示为待核验事实，不参与达标与派生；
+    - `unrelated`：其他主体的记录（**只作审计提示**，不否决本公司结果）；
+    - `conflicts`：同一组合存在互不相容的候选（值/口径悬而未决），该组合视为未满足。
     """
 
     selected: list[Fact] = field(default_factory=list)
+    pending: list[Fact] = field(default_factory=list)
     unrelated: list[Fact] = field(default_factory=list)
     conflicts: list[Conflict] = field(default_factory=list)
 
@@ -135,8 +142,12 @@ class Selection:
     def as_dict(self) -> dict:
         return {
             "selected": [f.fact_id for f in self.selected],
+            "pending": [{"fact_id": f.fact_id, "caliber": str(f.caliber or UNKNOWN),
+                         "reason": "口径未知或与请求不符：仅展示，不用于认证"}
+                        for f in self.pending],
             "unrelated": [{"fact_id": f.fact_id, "entity": f.entity,
-                           "entity_id": f.entity_id} for f in self.unrelated],
+                           "entity_id": f.entity_id, "market": f.market}
+                          for f in self.unrelated],
             "conflicts": [c.as_dict() for c in self.conflicts],
         }
 
@@ -151,18 +162,38 @@ def _annual_year(f: Fact) -> int | None:
     return None
 
 
-def select_facts(facts: list[Fact], request: ResearchRequest) -> Selection:
-    """按 **主体 → 组合去重/冲突** 选出一份事实集合；校验与计算共用它。
+def _caliber_ok(request: ResearchRequest, f: Fact) -> bool:
+    """这条事实的口径能否用于**认证**（未知/不符都不能）。"""
+    want = str(request.caliber or UNKNOWN)
+    got = str(f.caliber or UNKNOWN)
+    if want in CALIBERS:
+        return got == want
+    return got in CALIBERS          # 请求没声明口径时，只有来源真声明的才敢用
 
-    这是本批的核心修复：此前校验用"先到先得"、计算用"后到覆盖"，两者看的是**不同的行**
-    ——给正确公司的事实后面追加一条别家公司记录，校验看前者、计算看后者，于是
-    "贵州茅台 2023→2024 营业收入同比"能算出别家公司带来的 564.12%，底稿却仍然通过。
+
+def select_facts(facts: list[Fact], request: ResearchRequest) -> Selection:
+    """按 **主体 → 口径/币种单位兼容 → 去重/冲突** 选出一份事实集合。
+
+    本批（A′2）修两件事：
+    1) **不能有顺序依赖**：去重键必须含口径与来源——同值但口径不同（合并 vs 母公司）
+       此前被当成"同一条"取列表第一条，于是合并在前 ok、母公司在前不 ok；
+    2) **无关记录只作审计**：别家公司的记录不参与本公司任何计算，也不否决本公司的
+       正确结果（此前的 `PROBLEM_UNRELATED` 让 paper.ok 从 true 变 false）。
+
+    策略（显式，不靠"第一条有没有来源"）：
+    - 候选按 (metric, period, caliber, 值, 币种, 单位) 分组：
+      只有一组 → 认证候选（合并该组全部来源，来源数≥1 记录在案）；
+      多组 → 冲突（列出全部候选及其值与来源），该组合**不产生**认证结果；
+    - 口径与请求不符/未知的候选进 `pending`：只展示，不参与达标与派生。
     """
     sel = Selection()
     for f in facts:
-        ok, _why = check_subject(request, f.entity, f.entity_id)
+        ok, _why = check_subject(request, f.entity, f.entity_id, f.market)
         if not ok:
             sel.unrelated.append(f)
+            continue
+        if not _caliber_ok(request, f):
+            sel.pending.append(f)
             continue
         sel.selected.append(f)
 
@@ -171,24 +202,39 @@ def select_facts(facts: list[Fact], request: ResearchRequest) -> Selection:
         groups.setdefault((f.metric, f.period), []).append(f)
     keep: list[Fact] = []
     for (metric, period), items in groups.items():
-        if len(items) == 1:
-            keep.append(items[0])
+        # 按"值 + 币种 + 单位"分组：口径已在上一步统一，这一层判"数据是否一致"
+        buckets: dict[tuple, list[Fact]] = {}
+        for i in items:
+            buckets.setdefault((str(i.value), str(i.currency), str(i.unit)), []).append(i)
+        if len(buckets) == 1:
+            group = next(iter(buckets.values()))
+            chosen = group[0]
+            # 多个来源给出同一个值 = 更强的证据：来源全部记在这一条上（可审计）
+            urls = sorted({str(g.source_url or "") for g in group if g.source_url})
+            if len(group) > 1:
+                chosen = group[0]
+                chosen.source_locator = dict(chosen.source_locator or {})
+                chosen.source_locator["agreeing_sources"] = [
+                    {"fact_id": g.fact_id, "url": str(g.source_url or "")} for g in group]
+                chosen.source_locator["agreeing_count"] = len(group)
+            del urls
+            keep.append(chosen)
             continue
-        # 完全同值/同币种/同单位的重复登记视为同一行（真幂等），否则算冲突
-        fingerprints = {(str(i.value), str(i.currency), str(i.unit),
-                         str(i.period_type)) for i in items}
-        if len(fingerprints) == 1:
-            keep.append(items[0])
-            continue
-        cands = [{"fact_id": i.fact_id, "value": i.value,
-                  "currency": str(i.currency or UNKNOWN), "unit": str(i.unit or UNKNOWN),
-                  "period_type": str(i.period_type or ""),
-                  "source_url": str(i.source_url or "")} for i in items]
+        cands = []
+        for (value, currency, unit), group in sorted(buckets.items()):
+            cands.append({
+                "fact_id": group[0].fact_id, "value": group[0].value,
+                "currency": currency, "unit": unit,
+                "period_type": str(group[0].period_type or ""),
+                "caliber": str(group[0].caliber or UNKNOWN),
+                "source_url": str(group[0].source_url or ""),
+                "source_count": len(group),
+            })
         shown = "、".join(
             f"{c['value']}{c['unit']}（{c['source_url'] or '无来源'}）" for c in cands)
         sel.conflicts.append(Conflict(
             metric=metric, period=period, candidates=cands,
-            detail=(f"{metric_label(metric)} {period} 有 {len(items)} 条互相冲突的候选"
+            detail=(f"{metric_label(metric)} {period} 有 {len(cands)} 组互不相容的候选"
                     f"（{shown}）：不按列表先后取用，需人工确认后重跑")))
     ordered = {id(f) for f in keep}
     sel.selected = [f for f in sel.selected if id(f) in ordered]
@@ -207,8 +253,11 @@ def build_working_paper(facts: list[Fact], request: ResearchRequest) -> WorkingP
     **校验、完整度与计算共用同一个 `select_facts` 结果**——不再各取各的行。
     """
     selection = select_facts(facts, request)
-    paper = WorkingPaper(request=request, rows=[_row(f) for f in selection.selected],
-                         selection=selection.as_dict())
+    # 明细展示"选中 + 待核验"两类（待核验的只展示，不进达标与派生）
+    paper = WorkingPaper(
+        request=request,
+        rows=[_row(f) for f in list(selection.selected) + list(selection.pending)],
+        selection=selection.as_dict())
 
     # 1) 缺口：契约缺口 + 必需组合缺失
     for g in request.gaps:
@@ -227,21 +276,41 @@ def build_working_paper(facts: list[Fact], request: ResearchRequest) -> WorkingP
             "detail": f"缺少必需事实：{metric_label(metric)} {period}（如实缺失，不推断）",
         })
 
-    # 1a) 其他公司的记录：不参与判定，但要**明确列出来**（取错公司只能产生缺口）
+    # 1a) 其他公司的记录：**只作审计提示**，不否决本公司的正确结果（A′2）
     if selection.unrelated:
         names = sorted({(f.entity or f.entity_id or "（无主体）")
                         for f in selection.unrelated})
-        ids = [f.fact_id for f in selection.unrelated]
-        paper.problems.append(Problem(
-            PROBLEM_UNRELATED,
-            f"载荷含 {len(ids)} 条非本次研究主体的记录（{('、'.join(names))[:120]}）："
-            f"不参与本公司任何判定与计算；fact_id：{('、'.join(ids))[:200]}"))
+        paper.audit.append({
+            "kind": PROBLEM_UNRELATED,
+            "detail": (f"载荷含 {len(selection.unrelated)} 条非本次研究主体的记录"
+                       f"（{'、'.join(names)[:120]}）：已排除，不参与任何判定与计算"),
+            "fact_ids": [f.fact_id for f in selection.unrelated][:50],
+        })
+    # 1a2) 主体是本公司但口径不能用于认证的记录：只展示（待核验）
+    if selection.pending:
+        paper.audit.append({
+            "kind": PROBLEM_CALIBER,
+            "detail": (f"{len(selection.pending)} 条记录口径未知或与请求不符："
+                       "已列在明细中供核对，不用于达标与同比"),
+            "fact_ids": [f.fact_id for f in selection.pending][:50],
+        })
 
-    # 1b) 冲突候选：列全部 fact_id（不先到先得）
+    # 1b) 冲突候选：列全部候选（不先到先得）
     for c in selection.conflicts:
         paper.problems.append(Problem(PROBLEM_CONFLICT, c.detail, c.metric, c.period))
 
-    # 1c) 年度要求只能由**年报**满足：只有季报/中报时不能当年度口径（累计 vs 单季不可比）
+    # 1c) 截至日与研究期间的基本冲突：报告期末还没到，就不可能"截至该日已披露"
+    _as_of = str(getattr(request, "as_of", "") or "").strip()[:10]
+    if _as_of and request.periods:
+        _last_end = f"{max(request.periods)}-12-31"
+        if _as_of < _last_end:
+            paper.gaps.append({
+                "kind": "contract",
+                "detail": (f"资料截至日 {_as_of} 早于研究期末 {_last_end}："
+                           "该期间的年报在该时点尚未披露，时点不可核实"),
+            })
+
+    # 1d) 年度要求只能由**年报**满足：只有季报/中报时不能当年度口径（累计 vs 单季不可比）
     for y in request.periods:
         for metric, _label in CORE_METRICS:
             if (metric, f"{y}年") in by_combo:
@@ -256,19 +325,19 @@ def build_working_paper(facts: list[Fact], request: ResearchRequest) -> WorkingP
                     "（季报/中报属累计口径）：不能当年度数字，需补年报",
                     metric, f"{y}年"))
 
-    # 2) 问题判定（只针对**必需组合自身的行**，无关的同值记录不得影响）
+    # 2) 问题判定（只针对**必需组合自身的认证行**，无关记录与本条目已排除）
     want_caliber = str(request.caliber or UNKNOWN)
     for metric, period in combos:
         f = by_combo.get((metric, period))
         if f is None:
             continue
-        ok_subject, why_subject = check_subject(request, f.entity, f.entity_id)
+        ok_subject, why_subject = check_subject(request, f.entity, f.entity_id, f.market)
         if not ok_subject:
             paper.problems.append(Problem(
                 PROBLEM_SUBJECT,
                 f"{metric_label(metric)} {period} 的主体无法确认属于本次研究：{why_subject}",
                 metric, period))
-        # 口径：请求声明了合并/母公司时，事实必须**声明且相符**；未知或不同一律不得算已核验
+        # 口径：能进 by_combo 的已经过兼容筛选；这里再确认一遍请求口径已知时不缺声明
         got_caliber = str(f.caliber or UNKNOWN)
         if want_caliber in CALIBERS and got_caliber != want_caliber:
             paper.problems.append(Problem(
@@ -300,6 +369,22 @@ def build_working_paper(facts: list[Fact], request: ResearchRequest) -> WorkingP
                 PROBLEM_UNVERIFIED,
                 f"{metric_label(metric)} {period} 没有来源位置：不得算已核验",
                 metric, period))
+        # 截至日证据（A′4）：报告期末 ≠ 抓取时间 ≠ 披露时间。只有能证明"截至该日
+        # 这份数据已可用"时才算满足；披露日缺失 → 时点未核实，不得宣称目标达成。
+        if _as_of:
+            disclosed = str(f.disclosed_at or "")[:10]
+            if not disclosed:
+                paper.problems.append(Problem(
+                    PROBLEM_AS_OF,
+                    f"{metric_label(metric)} {period} 没有披露/可用日期："
+                    f"无法证明截至 {_as_of} 该数据已可用（时点未核实）",
+                    metric, period))
+            elif disclosed > _as_of:
+                paper.problems.append(Problem(
+                    PROBLEM_AS_OF,
+                    f"{metric_label(metric)} {period} 的披露日是 {disclosed}，"
+                    f"晚于请求的资料截至日 {_as_of}：该时点尚未披露",
+                    metric, period))
 
     # 3) 同指标同期多行：币种不一致 / 累计与单季混用
     seen: dict[tuple[str, str], list[Fact]] = {}
@@ -364,42 +449,93 @@ def build_working_paper(facts: list[Fact], request: ResearchRequest) -> WorkingP
     return paper
 
 
-def _value_forms(value) -> list[str]:
-    """报告里可能出现的写法：原样 + 千分位。"""
+_NUM_TOKEN_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
+
+
+def _number_forms(value) -> set[str]:
+    """一个数值可能出现的写法（去千分位后的规范串 + 常见保留位数）。"""
     if value is None or isinstance(value, bool):
-        return []
+        return set()
     if isinstance(value, (int, float)):
-        out = [f"{value:g}"]
-        for d in (0, 1, 2):
-            out.append(f"{value:,.{d}f}")
-        return sorted({s for s in out if s})
-    return [str(value)]
+        out = set()
+        for d in (0, 1, 2, 3, 4):
+            s = f"{float(value):.{d}f}".rstrip("0").rstrip(".")
+            if s:
+                out.add(s)
+        out.add(str(value))
+        return {o for o in out if o}
+    return {str(value)}
 
 
-def _headings_before(text: str, pos: int) -> list[str]:
-    """pos 之前的所有 Markdown 标题（按出现顺序）。"""
-    return [m.group(1).strip()
-            for m in re.finditer(r"(?m)^#{1,6}\s*(.+?)\s*$", text[:pos])]
+# 标题/表头的作用域分类（A′3）：只覆盖首发报告模板，不做通用语言理解。
+_NEUTRAL_SECTION_WORDS = (
+    "指标", "财务", "数据", "分析", "风险", "结论", "摘要", "要点", "同比", "概览",
+    "时效", "来源", "免责", "附录", "表格", "图表", "说明", "口径", "期间", "年度",
+    "业绩", "现金流", "利润", "收入", "估值", "展望", "对比", "概况", "简介", "背景",
+    "方法", "总览", "明细", "注", "目录", "序言",
+)
+_COMPANY_HINT_WORDS = (
+    "公司", "集团", "股份", "控股", "银行", "证券", "保险", "酒业", "科技", "汽车",
+    "医药", "能源", "地产", "实业", "有限", "厂商", "标的",
+)
+
+
+def _classify_heading(request: ResearchRequest, text: str, names_subject) -> str:
+    """标题/表头属于哪一类作用域：`subject` / `other` / `neutral`。
+
+    - 点名请求主体（名称或代码）→ `subject`；
+    - 明显是章节词（指标/财务/分析/风险…）→ `neutral`（**继承**父作用域）；
+    - 带公司后缀、或带交易所代码、或是短的专名（如裸的"比亚迪"）→ `other`（**切断**继承）。
+
+    为什么要自己判：`acceptance_checker._subject_of` 依赖 `task_classifier._extract_company`，
+    它对"## 比亚迪"这种裸专名给不出公司（实测），于是错公司小节会被当成中性标题、
+    继承到母公司的作用域——这正是"错公司小节的 1741.44 漏检"的根因。
+    """
+    s = str(text or "").strip()
+    if not s:
+        return "neutral"
+    if names_subject(s):
+        return "subject"
+    if any(w in s for w in _NEUTRAL_SECTION_WORDS):
+        return "neutral"
+    if market_of_code(s)[0] or re.search(r"\.(SZ|SH|SS|HK|US)$", s, re.I):
+        return "other"
+    if any(w in s for w in _COMPANY_HINT_WORDS):
+        return "other"
+    if 2 <= len(s) <= 8 and re.fullmatch(r"[\u4e00-\u9fffA-Za-z·]+", s):
+        return "other"          # 短专名：首发模板里就是"别家公司小节"
+    return "neutral"
+
+
+def _heading_tree(text: str) -> list[tuple[int, int, str]]:
+    """(行起点, 级别, 标题文本) 列表。"""
+    return [(m.start(), len(m.group(1)), m.group(2).strip())
+            for m in re.finditer(r"(?m)^(#{1,6})\s*(.+?)\s*$", text)]
 
 
 def document_subject_scope(report_text: str, request: ResearchRequest,
                            paper: WorkingPaper | None = None) -> list[Problem]:
-    """文档级主体作用域：标题与承载必需数值的表格/行必须绑定**请求主体**。
+    """文档级主体作用域：标题层级与承载必需数值的作用域必须绑定**请求主体**。
 
-    本批只覆盖三项核心指标（不做通用自然语言证明系统）：
-    - 报告首个标题必须点名请求公司；
-    - 每个必需数值必须落在"点名了本公司"的作用域里：要么所在行自己带公司名，
-      要么它上方的最近标题仍是本公司的（一旦上方出现别家公司标题，该数值不得认证）。
+    A′3 重写（此前四条都能漏）：
+    - 用**标题层级**判定作用域：中性子标题（如"财务指标"）继承父标题的公司作用域，
+      只有出现**别家公司**标题才切断；不再"最近标题必须点名本公司"；
+    - 逐个**出现**判定：同一数值可能在文中出现多次，任何一次落在别家/无主作用域都要报，
+      正确出现不能抵消错误出现；判定用数值 token 归一，`1741.44` 与 `1,741.44` 同结论；
+    - 表格：表头行声明的主体（列作用域）同样生效。
 
-    这正是"给 A 公司报告配 B 公司同值来源"这类张冠李戴能被拦住的地方。
+    本批只覆盖三项核心指标（不做通用语言理解）。
     """
     problems: list[Problem] = []
     text = str(report_text or "")
     want = str(getattr(request, "company", "") or "").strip()
-    if not want or not text.strip():
+    want_id = str(getattr(request, "company_id", "") or "").strip()
+    if not (want or want_id) or not text.strip():
         return problems
 
     def _names_subject(segment: str) -> bool:
+        if not str(segment or "").strip():
+            return False
         ok, _why = check_subject(request, segment, "")
         if ok:
             return True
@@ -407,50 +543,90 @@ def document_subject_scope(report_text: str, request: ResearchRequest,
         n = _norm_name(want)
         return bool(n) and n in _norm_name(segment)
 
-    heads = [m.group(1).strip() for m in re.finditer(r"(?m)^#{1,6}\s*(.+?)\s*$", text)]
+    heads = _heading_tree(text)
     if not heads:
         problems.append(Problem(
             PROBLEM_DOC_SCOPE,
-            "报告没有任何标题：无法确认这份文档是写给「%s」的" % want, "", ""))
-    elif not _names_subject(heads[0]):
-        problems.append(Problem(
-            PROBLEM_DOC_SCOPE,
-            f"报告首个标题是「{heads[0][:60]}」，未点名请求主体「{want}」："
-            "文档主体作用域未绑定，不得据此认证", "", ""))
+            f"报告没有任何标题：无法确认这份文档是写给「{want or want_id}」的", "", ""))
+    else:
+        first = heads[0][2]
+        if not _names_subject(first):
+            problems.append(Problem(
+                PROBLEM_DOC_SCOPE,
+                f"报告首个标题是「{first[:60]}」，未点名请求主体"
+                f"「{want or want_id}」：文档主体作用域未绑定", "", ""))
+
+    def _scope_state(pos: int) -> tuple[bool, str]:
+        """pos 处的作用域：返回 (是否属本公司, 说明)。按标题层级继承。
+
+        中性子标题（"财务指标"）**继承**父标题的作用域；只有"别家公司"标题才切断。
+        """
+        stack: list[tuple[int, str, str]] = []       # (级别, 标题, 类别)
+        for start, level, title in heads:
+            if start > pos:
+                break
+            while stack and stack[-1][0] >= level:
+                stack.pop()
+            stack.append((level, title, _classify_heading(request, title, _names_subject)))
+        for _level, title, kind in reversed(stack):
+            if kind == "other":
+                return False, title
+            if kind == "subject":
+                return True, title
+        return False, (stack[-1][1] if stack else "")
+
+    def _table_head_for(pos: int) -> str:
+        """该行上方最近的表格表头行（含"指标/年份"这类表头时返回它）。"""
+        line_start = text.rfind("\n", 0, pos) + 1
+        lines = text[:line_start].rstrip("\n").split("\n")
+        for line in reversed(lines[-8:]):
+            s = line.strip()
+            if s.startswith("|") and re.search(r"(指标|科目|项目|年份|期间)", s):
+                return s
+            if s.startswith("|"):
+                continue
+            break
+        return ""
 
     rows = (paper.rows if paper is not None else [])
     for r in rows:
-        if str(r.get("metric") or "") not in {m for m, _ in CORE_METRICS}:
+        metric = str(r.get("metric") or "")
+        if metric not in {m for m, _ in CORE_METRICS}:
             continue
-        forms = _value_forms(r.get("value"))
-        hit = None
-        for form in forms:
-            idx = text.find(form)
-            while idx >= 0:
-                line_start = text.rfind("\n", 0, idx) + 1
-                line_end = text.find("\n", idx)
-                line = text[line_start:line_end if line_end >= 0 else len(text)]
-                if _names_subject(line):
-                    hit = None
-                    break
-                prev = [h for h in _headings_before(text, idx)]
-                scope = prev[-1] if prev else ""
-                if scope and _names_subject(scope):
-                    hit = None
-                    break
-                hit = (form, scope, line.strip()[:80])
-                idx = text.find(form, idx + len(form))
-            if hit is None:
-                break
-        if hit is not None:
-            metric_label_text = r.get("metric_label") or metric_label(
-                str(r.get("metric") or ""))
+        label = str(r.get("metric_label") or metric_label(metric))
+        forms = _number_forms(r.get("value"))
+        if not forms:
+            continue
+        # 逐个**数值 token** 出现位置判定：任何一次落在别家/无主作用域都记账
+        offenders: list[str] = []
+        for m in _NUM_TOKEN_RE.finditer(text):
+            token = m.group(0)
+            norm = token.replace(",", "").rstrip("0").rstrip(".") if "." in token else token
+            if norm not in forms and token not in forms and token.replace(",", "") not in forms:
+                continue
+            pos = m.start()
+            line_start = text.rfind("\n", 0, pos) + 1
+            line_end = text.find("\n", pos)
+            line = text[line_start:line_end if line_end >= 0 else len(text)]
+            # 指标要对得上（同一行或同表头提到该指标），避免把别的指标的数字算进来
+            head_row = _table_head_for(pos)
+            if label not in line and label not in head_row \
+                    and metric not in line and metric not in head_row:
+                continue
+            if _names_subject(line):
+                continue                     # 本行显式点名本公司 → 在作用域内
+            if head_row and _names_subject(head_row):
+                continue                     # 表头列作用域点名本公司
+            ok_scope, scope_name = _scope_state(pos)
+            if ok_scope:
+                continue
+            offenders.append(f"{token}（作用域：{scope_name[:40] or '无标题'}）")
+        if offenders:
             problems.append(Problem(
                 PROBLEM_DOC_SCOPE,
-                f"{metric_label_text} {r.get('period')} 的数值 {hit[0]} 落在"
-                f"「{hit[1] or '无标题'}」作用域下（行：{hit[2]}）："
-                f"没有绑定本次研究的主体「{want}」，不得认证",
-                str(r.get("metric") or ""), str(r.get("period") or "")))
+                f"{label} {r.get('period')} 的数值在报告中出现于未绑定本次研究主体"
+                f"「{want or want_id}」的作用域：{('；'.join(offenders[:3]))}",
+                metric, str(r.get("period") or "")))
     return problems
 
 
@@ -487,4 +663,10 @@ def paper_csv(paper: WorkingPaper) -> str:
                     g.get("detail", "")])
     for p in paper.problems:
         w.writerow([p.kind, p.metric, p.period, p.detail])
+    if paper.audit:
+        w.writerow([])
+        w.writerow(["# 审计提示（不参与达标判定）"])
+        w.writerow(["类型", "说明"])
+        for a in paper.audit:
+            w.writerow([a.get("kind"), a.get("detail")])
     return buf.getvalue()

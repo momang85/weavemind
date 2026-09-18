@@ -37,6 +37,8 @@ export interface ResearchGoal {
 }
 
 const CALIBERS = ['合并', '母公司']
+// 代码形状（与后端 facts.market_of_code 的识别一致；市场由后端定）
+const CODE_SHAPE = /^\d{4,6}(\.[A-Za-z]{2,6})?$|^[A-Za-z]{1,5}(\.[A-Za-z]{1,2})?$/
 const MARKETS = ['cn', 'hk', 'us']
 
 function _year(v: string | number | undefined): string {
@@ -55,7 +57,11 @@ function _year(v: string | number | undefined): string {
  */
 export function buildResearchGoal(form: ResearchForm): ResearchGoal {
   const gaps: string[] = []
-  const company = String(form.company ?? '').trim()
+  // "公司名或代码"：公司栏与稳定标识栏任一填了即可——只填 `600519.SH` 也是有效身份
+  // （后端契约层会把带后缀的代码规范化成 company_id + market，两边同一套规则）
+  const companyRaw = String(form.company ?? '').trim()
+  const companyIdRaw = String(form.companyId ?? '').trim()
+  const company = companyRaw || companyIdRaw
   if (!company) gaps.push('请填写公司名或股票代码')
   const y1 = _year(form.yearFrom)
   const y2 = _year(form.yearTo)
@@ -79,7 +85,9 @@ export function buildResearchGoal(form: ResearchForm): ResearchGoal {
   const materials = String(form.materials ?? '').trim()
   if (materials) goal += `\n\n参考资料：${materials}`
 
-  const companyId = String(form.companyId ?? '').trim()
+  // 公司栏里写的是**代码形状**（如 600519.SH / AAPL）时，也作为稳定标识送出；
+  // 市场由后端按后缀规范化（前端不猜）。名字形状（"贵州茅台"）不当代码。
+  const companyId = companyIdRaw || (CODE_SHAPE.test(companyRaw) ? companyRaw : '')
   const market = String(form.market ?? '').trim().toLowerCase()
   const fields: ResearchFields = {
     company,

@@ -2391,48 +2391,66 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         `verified_delivery` 的 `hard_ok` 分支永远不可达——底稿说"未知口径/缺口"，
         交付状态却仍可能"已验证"。研究任务必须让底稿结论约束交付判定。
 
+        **失败方向（A′3）**：任何校验异常按"证据未知"处理——抛异常时也写 hard_fail，
+        不因为"我们没算出来"就放行；读取契约失败时同样不跳过（先按目标补一份契约再判）。
+
         返回要附加到交付物的一段说明（空串=未触发）。判定只对**研究任务**生效：
-        存在研究契约，或本次确实产出了底稿（`skipped` 不算），普通任务不受影响。
+        存在研究契约（落库的或从目标解析出的），或本次确实产出了底稿。
         """
         notes: list[str] = []
-        request = None
         try:
             import task_state as _ts
-            from facts import ResearchRequest
-            request = ResearchRequest.from_payload(
-                (_ts.read_task(task_id) or {}).get("research_request") or {})
-        except Exception:
+            from facts import CALIBERS, ResearchRequest, parse_research_request
+            raw = (_ts.read_task(task_id) or {}).get("research_request") or {}
+            request = ResearchRequest.from_payload(raw)
+            if request is None:
+                # 契约缺失/读取失败：从目标解析一份**只用于判定任务性质**的契约。
+                # 必须是"公司研究请求"的形状（有主体 + 两个年度 + 声明口径）才算研究任务——
+                # 否则"根据材料分析…"这类普通任务会被误判成研究任务、被要求有底稿。
+                fallback = parse_research_request(goal, identity_source="gate-fallback")
+                if ((fallback.company or fallback.company_id)
+                        and len(fallback.periods) >= 2
+                        and str(fallback.caliber) in CALIBERS):
+                    request = fallback
+                else:
+                    request = None
+        except Exception as exc:
             request = None
+            self._delivery(task_id)["hard_fail"] = f"研究契约读取异常：{str(exc)[:120]}"
+            logger.warning("研究契约读取异常（task=%s）：%s", task_id, str(exc)[:120])
         has_contract = bool(request and (request.company or request.company_id))
         paper_present = bool(wp and wp.get("ok"))
         if not (has_contract or paper_present):
-            return ""                       # 非研究任务：不强制要求底稿
+            return "> **研究交付硬门槛未通过**：研究任务身份不可判定（契约读取异常）" \
+                if self._delivery(task_id).get("hard_fail") else ""
 
         reasons: list[str] = []
-        if wp is None or wp.get("skipped"):
-            reasons.append("研究任务未取得结构化事实：底稿缺失，本次不得判为已验证")
-        elif not paper_present:
-            reasons.append(f"底稿产出失败：{str((wp or {}).get('reason') or '')[:120]}")
-        else:
-            if not wp.get("paper_ok"):
-                problems = wp.get("problems") or []
-                gaps = [g for g in (wp.get("gaps") or []) if g.get("kind") == "fact"]
-                head = (problems or gaps)
-                detail = "；".join(
-                    str((p.get("detail") if isinstance(p, dict) else p) or "")[:80]
-                    for p in head[:3])
-                reasons.append(f"底稿未达标（{len(problems)} 项问题 / {len(gaps)} 项必需事实缺口）：{detail}")
-            # 文档级主体作用域：报告本体必须绑定请求主体（本批覆盖三项核心指标）
-            try:
-                from working_paper import WorkingPaper, document_subject_scope
+        try:
+            if wp is None or wp.get("skipped"):
+                reasons.append("研究任务未取得结构化事实：底稿缺失，本次不得判为已验证")
+            elif not paper_present:
+                reasons.append(f"底稿产出失败：{str((wp or {}).get('reason') or '')[:120]}")
+            else:
+                if not wp.get("paper_ok"):
+                    problems = wp.get("problems") or []
+                    gaps = [g for g in (wp.get("gaps") or []) if g.get("kind") == "fact"]
+                    head = (problems or gaps)
+                    detail = "；".join(
+                        str((p.get("detail") if isinstance(p, dict) else p) or "")[:80]
+                        for p in head[:3])
+                    reasons.append(f"底稿未达标（{len(problems)} 项问题 / {len(gaps)} 项必需事实缺口）：{detail}")
+                # 文档级主体作用域：报告本体必须绑定请求主体（本批覆盖三项核心指标）
                 if request is not None and report_body:
+                    from working_paper import WorkingPaper, document_subject_scope
                     paper = WorkingPaper(request=request)
                     paper.rows = list(wp.get("rows_detail") or [])
                     scope = document_subject_scope(report_body, request, paper)
                     if scope:
                         reasons.append("文档主体作用域未绑定：" + scope[0].detail[:120])
-            except Exception as exc:
-                logger.warning("文档主体作用域判定失败（task=%s）：%s", task_id, str(exc)[:120])
+        except Exception as exc:
+            # A′3：**校验异常必须明确失败**——"我们没算出来"不是放行的理由
+            reasons.append(f"研究校验异常（按证据未知交付）：{str(exc)[:140]}")
+            logger.warning("研究校验异常（task=%s）：%s", task_id, str(exc)[:160])
         if not reasons:
             return ""
         self._delivery(task_id)["hard_fail"] = reasons[0]

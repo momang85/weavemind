@@ -142,6 +142,20 @@ _YEAR_RE = re.compile(r"(20\d{2})")
 _ASOF_RE = re.compile(r"(?:截至|截至日|数据截至|as\s*of)\s*(20\d{2}[-/年.]\d{1,2}(?:[-/月.]\d{1,2})?)")
 
 
+def _norm_date(value: str) -> str:
+    """把常见日期写法归一成 `YYYY-MM-DD`；解析不了返回空串（不猜）。"""
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    digits = re.findall(r"\d+", s)
+    if len(digits) < 3:
+        return ""
+    y, m, d = (int(digits[0]), int(digits[1]), int(digits[2]))
+    if not (1900 <= y <= 2100 and 1 <= m <= 12 and 1 <= d <= 31):
+        return ""
+    return f"{y:04d}-{m:02d}-{d:02d}"
+
+
 def parse_research_request(goal: str, *, company: str = "", company_id: str = "",
                            market: str = "", periods: list[int] | None = None,
                            caliber: str = "", as_of: str = "",
@@ -182,7 +196,26 @@ def parse_research_request(goal: str, *, company: str = "", company_id: str = ""
         else:
             mk = UNKNOWN
     req.market = mk
-    if mk == UNKNOWN:
+    # 代码形输入：表单提示"公司名或代码"，用户可能只在公司栏里写 `600519.SH`。
+    # 带明确市场后缀的代码可以**确定性**识别（补出 company_id 与市场）；裸 1–5 位
+    # 数字有市场歧义 → 留缺口请确认，不静默猜公司（A′1 一起补的正常入口）。
+    if req.company:
+        _shape_market, _ambiguous = market_of_code(req.company)
+        if _shape_market and not _ambiguous:
+            if not req.company_id:
+                req.company_id = req.company
+            if req.market == UNKNOWN:
+                req.market = _shape_market
+            elif req.market != _shape_market:
+                req.gaps.append(
+                    f"公司代码后缀（{_shape_market}）与所选市场（{req.market}）不一致："
+                    "请确认后再研究")
+            req.identity_source = req.identity_source or "code"
+        elif _ambiguous and not req.company_id:
+            req.gaps.append(
+                f"「{req.company}」是裸代码，无法确定市场（A股/港股/美股）："
+                "请带交易所后缀（如 00700.HK）或选择市场")
+    if req.market == UNKNOWN:
         req.gaps.append("未确定市场（A股/港股/美股）：口径与数据源不同，需确认")
 
     # 资料截至日：**必须在取年份之前解析**——否则"数据截至 2025-04-30"里的 2025
@@ -191,6 +224,15 @@ def parse_research_request(goal: str, *, company: str = "", company_id: str = ""
     if not req.as_of:
         m = _ASOF_RE.search(text)
         req.as_of = m.group(1) if m else ""
+    if req.as_of:
+        # 格式要能解析（`2025-04-30` / `2025/4/30` / `2025.4.30` / `2025年4月30日`），
+        # 归一成 ISO；解析不了的日期不是"截至日"，是错误输入（A′4）
+        _norm = _norm_date(req.as_of)
+        if _norm:
+            req.as_of = _norm
+        else:
+            req.gaps.append(f"资料截至日「{req.as_of}」不是有效日期：请写成 2025-04-30")
+            req.as_of = ""
     if not req.as_of:
         req.gaps.append("未给资料截至日：报告须明示数据时效")
 
@@ -252,6 +294,10 @@ class Fact:
     value: Any = None                 # 规范化值（已按 unit 缩放）
     raw_value: Any = None             # 原始值（源里怎么写就怎么记）
     caliber: str = UNKNOWN
+    # 主体所在市场（cn/hk/us）与披露日期：前者是主体标识的一部分（A′1），
+    # 后者是"截至日能否成立"的证据（A′4，与期末 period_end、抓取时间分开记）
+    market: str = ""
+    disclosed_at: str = ""
     source_url: str = ""
     source_hash: str = ""
     source_locator: dict = field(default_factory=dict)
@@ -357,6 +403,10 @@ def facts_from_financials(payload: dict, *, source_kind: str = "",
         entity_id = str(md.get("ticker") or md.get("code") or md.get("stock_code") or "")
         currency = str(md.get("currency") or UNKNOWN)
         unit = str(md.get("unit") or UNKNOWN)
+        # 市场：元数据显式给 > 从代码后缀读（都不猜）；主体标识的一部分
+        md_market = str(md.get("market") or "").strip().lower()
+        if md_market not in MARKETS:
+            md_market = market_of_code(entity_id)[0] or market_of_code(entity)[0]
         url = str((ent["raw"] or {}).get("url") or "")
         snap = _snapshot_hash(ent["raw"])
         kind = str(source_kind or md.get("source") or "")
@@ -374,6 +424,10 @@ def facts_from_financials(payload: dict, *, source_kind: str = "",
                 # 只有行级能如实表达；缺失仍记 unknown。
                 row_currency = str(row.get("currency") or currency or UNKNOWN)
                 row_unit = str(row.get("unit") or unit or UNKNOWN)
+                # 披露日期（有就记）：报告期末 ≠ 抓取时间 ≠ 披露时间，三者分开
+                row_disclosed = str(row.get("disclosure_date")
+                                    or row.get("disclosed_at")
+                                    or row.get("report_date") or "").strip()[:10]
                 facts.append(Fact(
                     fact_id=make_fact_id(entity_id, entity, key, period, caliber),
                     entity=entity, entity_id=entity_id,
@@ -385,6 +439,8 @@ def facts_from_financials(payload: dict, *, source_kind: str = "",
                                  else ("source" if str(md.get("unit") or "") else UNKNOWN)),
                     value=row.get(key), raw_value=row.get(key),
                     caliber=caliber,
+                    market=md_market,
+                    disclosed_at=row_disclosed,
                     source_url=url, source_hash=snap,
                     source_locator={
                         "kind": "structured_field",
@@ -441,24 +497,88 @@ def facts_to_json(facts: list[Fact]) -> str:
 _NAME_NOISE = ("股份有限公司", "有限责任公司", "有限公司", "控股集团", "集团公司",
                "集团", "股份", "公司", "控股")
 
+# 交易所后缀 → 市场。**唯一映射来源**：不从别处猜。
+_SUFFIX_MARKET = {"SZ": "cn", "SH": "cn", "SS": "cn", "BJ": "cn", "HK": "hk",
+                  "US": "us", "NASDAQ": "us", "NYSE": "us"}
 
-def _id_tokens(value: str) -> set[str]:
-    """稳定标识的归一形式集合：`600519.SH` → {600519, 600519SH, SH600519 之类}。"""
-    raw = re.sub(r"[^0-9A-Za-z]", "", str(value or "")).upper()
-    if not raw:
-        return set()
-    out = {raw}
-    m = re.match(r"^(\d+)(SH|SZ|SS|HK|US|NASDAQ|NYSE)?$", raw)
-    if m:
-        num, suffix = m.group(1), m.group(2) or ""
-        out.add(num)
-        out.add(num.lstrip("0") or "0")          # 00700 与 700 视为同一个
-        if suffix:
-            out.add(f"{num}{suffix}")
-    m2 = re.match(r"^(SH|SZ|SS|HK|US)(\d+)$", raw)
-    if m2:
-        out.add(m2.group(2))
-    return out
+
+def market_of_code(code: str) -> tuple[str, bool]:
+    """从代码读市场：返回 `(market, ambiguous)`。
+
+    - `600519.SH` / `000001.SZ` → cn；`00700.HK` → hk；`AAPL` / `BRK.B` → us；
+    - 裸 6 位数字 → cn（港股票代码最多 5 位，6 位无歧义）；
+    - 裸 1–5 位数字 → **有歧义**（港股/其它），不猜；
+    - 其余 → 未知。
+    """
+    s = str(code or "").strip().upper()
+    if not s:
+        return "", False
+    m = re.match(r"^([0-9A-Z.]+?)[.\-]([A-Z]{2,6})$", s)
+    if m and m.group(2) in _SUFFIX_MARKET:
+        return _SUFFIX_MARKET[m.group(2)], False
+    if re.match(r"^\d{6}$", s):
+        return "cn", False
+    if re.match(r"^\d{1,5}$", s):
+        return "", True                     # 裸代码：市场不明，请确认
+    if re.match(r"^[A-Z]{1,5}(\.[A-Z]{1,2})?$", s):
+        return "us", False
+    return "", False
+
+
+def _norm_code(code: str, market: str) -> str:
+    """按**已知市场**归一代码：只在同一市场内做别名归一（跨市场绝不相同）。
+
+    - cn：保留 6 位（`000001` 是有效代码，**不能**去前导零）；
+    - hk：去前导零（`00700` 与 `700` 是同一个）；
+    - us：大写 ticker 原样。
+    """
+    s = re.sub(r"[^0-9A-Z.]", "", str(code or "").upper())
+    s = re.sub(r"\.(SZ|SH|SS|BJ|HK|US|NASDAQ|NYSE)$", "", s)
+    if market == "hk":
+        return s.lstrip("0") or "0"
+    if market == "us":
+        return s
+    return s
+
+
+@dataclass(frozen=True)
+class SubjectKey:
+    """带命名空间的主体标识：`market` 与 `code` 必须一起看。"""
+
+    market: str = ""
+    code: str = ""
+    name: str = ""
+
+    @property
+    def has_code(self) -> bool:
+        return bool(self.code)
+
+
+def canonical_subject(*, name: str = "", code: str = "", market: str = "") -> SubjectKey:
+    """把 (名称, 代码, 市场) 归一成可核对的主体标识。
+
+    关键点（A′1）：**市场是标识的一部分**——`000001.SZ`（平安银行）与 `00001.HK`
+    是两家公司，此前把后缀与前导零都剥掉后两者都剩 `1`，于是被判成同一主体。
+    """
+    mk = str(market or "").strip().lower()
+    if mk in ("unknown", "none"):
+        mk = ""
+    code_s = str(code or "").strip()
+    name_s = str(name or "").strip()
+    # 名称栏里写了带后缀的代码（表单提示"公司名或代码"）→ 当作代码处理
+    if not code_s and name_s:
+        shape_market, ambiguous = market_of_code(name_s)
+        if shape_market and not ambiguous:
+            code_s, mk = name_s, (mk or shape_market)
+    shape_market, ambiguous = market_of_code(code_s) if code_s else ("", False)
+    if shape_market and not mk:
+        mk = shape_market
+    elif shape_market and not ambiguous and mk and mk != shape_market:
+        # 代码后缀与显式市场冲突：两个都是声明，不能替用户选一个
+        return SubjectKey(market=f"conflict:{mk}>{shape_market}", code=code_s, name=name_s)
+    elif ambiguous and not mk:
+        return SubjectKey(market="ambiguous", code=code_s, name=name_s)
+    return SubjectKey(market=mk, code=_norm_code(code_s, mk) if code_s else "", name=name_s)
 
 
 def _norm_name(value: str) -> str:
@@ -469,29 +589,42 @@ def _norm_name(value: str) -> str:
     return s
 
 
-def check_subject(request: ResearchRequest, entity: str, entity_id: str = "") -> tuple[bool, str]:
+def check_subject(request: ResearchRequest, entity: str, entity_id: str = "",
+                  market: str = "") -> tuple[bool, str]:
     """事实主体是否就是请求主体。返回 `(是否一致, 说明)`。
 
-    规则（确定性、离线）：
-    - 双方都有稳定标识 → **以标识为准**，token 有交集才算一致；
-    - 否则比归一名称（去掉公司后缀后互为包含）；
-    - 任一侧缺主体 → `False`（缺主体不能算已核验）。
+    规则（A′1，确定性、离线）：
+    - 双方都有稳定标识 → **先比市场/交易所**：都不明或相同才继续比代码；
+      市场明确冲突 → 直接不一致（**不允许**用名称包含关系补救）；
+    - 同一市场内按该市场的规则比代码（cn 保留前导零、hk 去前导零、us 大写）；
+    - 一侧没有可用代码才退回名称比对，且仍要求市场不冲突；
+    - 任一侧缺主体 / 代码市场有歧义 → `False`（缺证据不能算已核验）。
     """
-    want_name = str(getattr(request, "company", "") or "").strip()
-    want_id = str(getattr(request, "company_id", "") or "").strip()
-    got_name = str(entity or "").strip()
-    got_id = str(entity_id or "").strip()
-    if not got_name and not got_id:
+    want = canonical_subject(name=str(getattr(request, "company", "") or ""),
+                             code=str(getattr(request, "company_id", "") or ""),
+                             market=str(getattr(request, "market", "") or ""))
+    got = canonical_subject(name=entity, code=entity_id, market=market)
+    if not (got.name or got.has_code):
         return False, "事实没有主体（缺主体不得算已核验）"
-    if want_id and got_id:
-        if _id_tokens(want_id) & _id_tokens(got_id):
+    if want.market.startswith("conflict:"):
+        return False, f"请求自身的市场与代码后缀冲突（{want.market.split(':', 1)[1]}）"
+    if got.market.startswith("conflict:"):
+        return False, f"事实的市场与代码后缀冲突（{got.market.split(':', 1)[1]}）"
+    if want.market == "ambiguous" or got.market == "ambiguous":
+        return False, "代码市场有歧义（请确认市场：A股/港股/美股）"
+    # 市场明确冲突 → 直接拒绝，不看名称
+    if want.market and got.market and want.market != got.market:
+        return False, (f"市场/交易所冲突：请求 {want.market} vs 事实 {got.market}"
+                       "（跨市场同名/同码不是同一主体）")
+    if want.has_code and got.has_code:
+        if want.code and got.code and want.code == got.code:
             return True, ""
-        return False, f"标识不一致（请求 {want_id} vs 事实 {got_id}）"
-    if not want_name:
+        return False, f"标识不一致（请求 {want.code or want.name} vs 事实 {got.code or got.name}）"
+    if not want.name and not want.has_code:
         return False, "请求没有公司主体，无法比对"
-    if not got_name:
+    if not got.name:
         return False, "事实没有主体名称，无法比对"
-    a, b = _norm_name(want_name), _norm_name(got_name)
+    a, b = _norm_name(want.name), _norm_name(got.name)
     if a and b and (a in b or b in a):
         return True, ""
-    return False, f"主体不一致（请求「{want_name}」vs 事实「{got_name}」）"
+    return False, f"主体不一致（请求「{want.name or want.code}」vs 事实「{got.name or got.code}」）"

@@ -796,6 +796,30 @@ class TestResearchHardGate(unittest.TestCase):
         self.assertEqual(self._run_gate(wp, report=report), "")
         self.assertFalse(self.o._delivery(self.tid)["hard_fail"])
 
+    def test_scope_check_exception_fails_closed(self):
+        """校验异常必须**明确失败**：不能只记日志、留空 hard_fail（A′3 故障注入确认）。
+
+        此前 `document_subject_scope` 抛异常被吞掉 → 门槛返回空说明、hard_fail 仍为空，
+        等于"我们没算出来"就放行。研究必需校验异常要按证据未知/草稿处理。
+        """
+        wp = {"ok": True, "paper_ok": True, "problems": [], "gaps": [],
+              "rows_detail": [{"metric": "revenue", "metric_label": "营业收入",
+                               "period": "2024年", "value": 1741.44}]}
+        with mock.patch("working_paper.document_subject_scope",
+                        side_effect=RuntimeError("注入：作用域判定失败")):
+            note = self._run_gate(wp, report="# 贵州茅台\n\n营业收入 1741.44 亿元\n")
+        self.assertIn("研究交付硬门槛未通过", note)
+        self.assertTrue(self.o._delivery(self.tid)["hard_fail"],
+                        "校验异常不得留空 hard_fail")
+
+    def test_contract_read_exception_fails_closed(self):
+        """契约读取异常同样不得跳过关卡：研究任务身份不能因异常丢失。"""
+        wp = {"ok": False, "skipped": True, "reason": "没有结构化财务"}
+        with mock.patch("task_state.read_task", side_effect=RuntimeError("注入：库不可读")):
+            note = self.o._apply_research_hard_gate(self.tid, "目标", wp, "")
+        self.assertTrue(self.o._delivery(self.tid)["hard_fail"])
+        self.assertIn("研究契约读取异常", self.o._delivery(self.tid)["hard_fail"])
+
 
 if __name__ == "__main__":
     unittest.main()

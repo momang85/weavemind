@@ -90,6 +90,27 @@ test('表单不完整时既不给目标也不给字段', () => {
   assert.ok(gaps.length > 0)
 })
 
+test('只填稳定标识栏也算有效身份（与后端契约同规则）', () => {
+  const { goal, fields, gaps } = buildResearchGoal({
+    company: '', companyId: '600519.SH', yearFrom: '2023', yearTo: '2024',
+    caliber: '合并', asOf: '2025-04-30',
+  })
+  assert.deepEqual(gaps, [])
+  assert.match(goal, /600519\.SH/)
+  assert.equal(fields.company, '600519.SH')
+  assert.equal(fields.company_id, '600519.SH')
+})
+
+test('公司栏写代码：作为 company_id 一并送出，市场仍不猜', () => {
+  const { fields } = buildResearchGoal({
+    company: '600519.SH', yearFrom: '2023', yearTo: '2024',
+    caliber: '合并', asOf: '2025-04-30',
+  })
+  assert.equal(fields.company, '600519.SH')
+  assert.equal(fields.company_id, '600519.SH')
+  assert.equal('market' in fields, false, '市场由后端按代码后缀规范化，前端不猜')
+})
+
 const PAPER = {
   ok: false,
   request: { as_of: '2025-04-30' },

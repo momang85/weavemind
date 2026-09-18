@@ -33,8 +33,10 @@ FIXTURE_CODE = "000001.SZ"
 BASELINE_PAYLOAD = {
     "financials": [
         {"year": 2023, "report_type": "年报", "caliber": "合并",
+         "report_date": "2024-04-20",          # 披露日：截至日证据（A′4）
          "revenue": 1200.0, "net_profit": 150.0, "operating_cashflow": 210.0},
         {"year": 2024, "report_type": "年报", "caliber": "合并",
+         "report_date": "2025-04-20",
          "revenue": 1380.0, "net_profit": 174.0, "operating_cashflow": 231.0},
     ],
     "metadata": {"source": "eastmoney", "company": FIXTURE_COMPANY,
@@ -143,8 +145,8 @@ class TestNeverVerifiedNegatives(unittest.TestCase):
                                     company="另一家公司", code="000002.SZ"),
                    "raw": BASELINE_PAYLOAD["raw"]}
         paper = _paper(payload)
-        kinds = {p.kind for p in paper.problems}
-        self.assertIn(W.PROBLEM_UNRELATED, kinds, [p.detail for p in paper.problems])
+        self.assertTrue(any(a.get("kind") == W.PROBLEM_UNRELATED for a in paper.audit),
+                        paper.audit)
         self.assertFalse(paper.ok)
         # 取错公司就是"必需事实没拿到"：缺口照记（不是把别家公司的数当自己的）
         missing = [g for g in paper.gaps if g["kind"] == "fact"]
@@ -255,10 +257,10 @@ class TestPaperExport(unittest.TestCase):
 # docs/evidence/real_data_chain_20260917.md。真实网络抓取本身不进 CI（网络不可控）。
 REAL_SNAPSHOT = {
     "financials": [
-        {"year": 2023, "report_type": "年报", "revenue": 1505.6, "net_profit": 747.34,
-         "operating_cashflow": 665.93},
-        {"year": 2024, "report_type": "年报", "revenue": 1741.44, "net_profit": 862.28,
-         "operating_cashflow": 924.64},
+        {"year": 2023, "report_type": "年报", "report_date": "2024-04-02",
+         "revenue": 1505.6, "net_profit": 747.34, "operating_cashflow": 665.93},
+        {"year": 2024, "report_type": "年报", "report_date": "2025-04-02",
+         "revenue": 1741.44, "net_profit": 862.28, "operating_cashflow": 924.64},
     ],
     "metadata": {"source": "eastmoney_ashare", "company": "贵州茅台",
                  "stock_code": "600519", "currency": "CNY", "unit": "亿元",
@@ -290,24 +292,28 @@ class TestRealSnapshotChain(unittest.TestCase):
             self.assertEqual(f.unit, "亿元")
             self.assertEqual(f.period_type, "年报")
 
-    def test_combos_and_yoy_recomputable_on_real_numbers(self):
-        self.assertEqual(self.paper.completeness["present"], 6,
-                         self.paper.completeness)
-        yoy = {d["metric"]: d["value"] for d in self.paper.derived}
-        self.assertAlmostEqual(yoy["revenue_yoy"],
-                               round((1741.44 - 1505.6) / 1505.6 * 100, 2), places=2)
-        self.assertAlmostEqual(yoy["operating_cashflow_yoy"],
-                               round((924.64 - 665.93) / 665.93 * 100, 2), places=2)
+    def test_unusable_caliber_rows_are_pending_not_certified(self):
+        """口径未知的行进"待核验"：**只展示，不参与达标与同比**（A′2 政策）。
+
+        真实快照的行没有声明口径 → 六条必需组合都拿不到认证输入 ⇒ 不达标；
+        数值本身仍可从明细核对（可重算的链路在"行内声明口径"的正例里验证）。
+        """
+        self.assertEqual(self.paper.completeness["present"], 0, self.paper.completeness)
+        self.assertFalse(self.paper.ok)
+        self.assertFalse(self.paper.derived, "待核验输入不得生成同比")
+        pending = self.paper.selection.get("pending") or []
+        self.assertEqual(len(pending), 6, self.paper.selection)
+        self.assertTrue(any("口径" in a.get("detail", "") for a in self.paper.audit),
+                        self.paper.audit)
 
     def test_unknown_caliber_does_not_pass(self):
-        """快照的行没有声明口径 → 六条必需事实口径未知 → **不得达标**。
+        """快照的行没有声明口径 → **不得达标**（A 批接受项，A′ 保持）。
 
-        架构复核（2026-09-18）：此前 `paper.ok=True` 且无缺口，而六条必需事实的
-        `caliber` 全是 unknown；同比单位还继承成"亿元"。未知口径不得算已核验。
+        判定路径按 A′2 调整：口径不可用的行进 `selection.pending` + 审计提示，
+        不达标来自"必需组合拿不到认证输入"，而不是把本公司记录当成"问题"。
         """
-        kinds = {p.kind for p in self.paper.problems}
-        self.assertIn(W.PROBLEM_CALIBER, kinds, [p.detail for p in self.paper.problems])
         self.assertFalse(self.paper.ok, "口径未知的必需事实不得算目标达成")
+        self.assertTrue(self.paper.selection.get("pending"), self.paper.selection)
 
 
 class TestBatchAContractAndCertification(unittest.TestCase):
@@ -388,9 +394,13 @@ class TestBatchAContractAndCertification(unittest.TestCase):
                          "别家公司的记录不进本公司明细")
         self.assertFalse(set(rev["revenue_yoy"]["derived_from"]) & {u["fact_id"] for u in byd},
                          "跨公司记录不得作为同比输入")
-        kinds = {p.kind for p in paper.problems}
-        self.assertIn(W.PROBLEM_UNRELATED, kinds, [p.detail for p in paper.problems])
-        self.assertFalse(paper.ok, "载荷含别家公司记录时不得悄悄算达标")
+        # A′2：无关记录只作**审计提示**，不否决本公司的正确结果
+        self.assertTrue(any(a.get("kind") == W.PROBLEM_UNRELATED
+                            for a in paper.audit), paper.audit)
+        self.assertEqual([p for p in paper.problems if p.kind == W.PROBLEM_UNRELATED], [],
+                         "无关记录不得进 problems（那会让 paper.ok 从 true 变 false）")
+        self.assertTrue(paper.ok, [p.detail for p in paper.problems])
+        self.assertEqual(paper.completeness["present"], 6, paper.completeness)
 
     def test_candidate_order_does_not_change_outcome(self):
         """候选换序（别家公司在前/在后）结果必须一致——不得由列表先后决定。"""
@@ -480,6 +490,231 @@ class TestBatchAContractAndCertification(unittest.TestCase):
         self.assertIn(W.PROBLEM_UNVERIFIED, {p.kind for p in paper.problems},
                       [p.detail for p in paper.problems])
         self.assertFalse(paper.ok)
+
+
+class TestBatchAPrimeMatrix(unittest.TestCase):
+    """A′ 复核的四组反例矩阵（架构指令 2026-09-18 下午）。"""
+
+    def _req(self, **over) -> F.ResearchRequest:
+        base = dict(company="贵州茅台", company_id="600519.SH", market="cn",
+                    caliber="合并", as_of="2025-04-30")
+        base.update(over)
+        return F.parse_research_request(
+            "研究贵州茅台 2023 与 2024 两个年度的营业收入、归母净利润、"
+            "经营活动现金流净额，合并报表口径，数据截至 2025-04-30",
+            periods=[2023, 2024], identity_source="form", **base)
+
+    def _maotai(self, **row_over):
+        rows = [dict(r, caliber="合并", report_date="2024-04-02" if r["year"] == 2023
+                     else "2025-04-02") for r in REAL_SNAPSHOT["financials"]]
+        for r in rows:
+            r.update(row_over)
+        return {"metadata": dict(REAL_SNAPSHOT["metadata"]), "financials": rows,
+                "raw": dict(REAL_SNAPSHOT["raw"])}
+
+    # ── 1) 主体标识必须含市场/交易所 ──────────────────────────
+
+    def test_same_digits_across_markets_is_not_the_same_subject(self):
+        """`000001.SZ` 与 `00001.HK` 不是同一主体：跨市场同码不得当同一家。"""
+        req = self._req(company="平安银行", company_id="000001.SZ", market="cn")
+        ok, why = F.check_subject(req, "某港股公司", "00001.HK", "hk")
+        self.assertFalse(ok, why)
+        self.assertIn("市场", why)
+        req_hk = self._req(company="腾讯控股", company_id="00700.HK", market="hk")
+        self.assertTrue(F.check_subject(req_hk, "腾讯控股", "700.HK", "hk")[0],
+                        "同市场内的前导零差异仍算同一家（有依据的别名归一）")
+
+    def test_cross_market_candidate_does_not_complete_the_six(self):
+        """跨市场候选混进来：本公司六项不得因此齐备。"""
+        payload = {"companies": [
+            {"metadata": {"company": "贵州茅台", "stock_code": "600519", "market": "cn",
+                          "currency": "CNY", "unit": "亿元"},
+             "financials": [], "raw": dict(REAL_SNAPSHOT["raw"])},
+            {"metadata": {"company": "某港股公司", "stock_code": "00001.HK", "market": "hk",
+                          "currency": "HKD", "unit": "亿元"},
+             "financials": [dict(r, caliber="合并", report_date="2025-04-02")
+                            for r in REAL_SNAPSHOT["financials"]],
+             "raw": dict(REAL_SNAPSHOT["raw"])},
+        ]}
+        paper = W.build_working_paper(F.facts_from_financials(payload), self._req())
+        self.assertEqual(paper.completeness["present"], 0, paper.completeness)
+        self.assertFalse(paper.ok)
+        self.assertFalse(paper.derived)
+
+    def test_form_with_code_only_is_accepted(self):
+        """表单只填 `600519.SH`（稳定标识留空）：契约要能识别出来，六项齐备。"""
+        req = F.parse_research_request(
+            "研究贵州茅台 2023 与 2024 两个年度的营业收入、归母净利润、"
+            "经营活动现金流净额，合并报表口径，数据截至 2025-04-30",
+            company="600519.SH", periods=[2023, 2024], caliber="合并",
+            as_of="2025-04-30", identity_source="form")
+        self.assertEqual(req.company_id, "600519.SH")
+        self.assertEqual(req.market, "cn")
+        self.assertFalse([g for g in req.gaps if "未识别到公司" in g], req.gaps)
+        paper = W.build_working_paper(F.facts_from_financials(self._maotai()), req)
+        self.assertEqual(paper.completeness["present"], 6, paper.completeness)
+        self.assertTrue(paper.ok, [p.detail for p in paper.problems])
+
+    def test_bare_ambiguous_code_asks_for_confirmation(self):
+        """裸 1–5 位数字代码有市场歧义 → 留缺口请确认，不静默猜。"""
+        req = F.parse_research_request("研究某公司 2023 与 2024", company="00700")
+        self.assertTrue(any("裸代码" in g for g in req.gaps), req.gaps)
+
+    # ── 2) 候选选择：顺序无关 + 无关记录只作审计 ──────────────
+
+    def test_same_value_different_caliber_is_order_independent(self):
+        """同值、不同口径（合并/母公司）两种排列结果一致；母公司不得进认证与同比。"""
+        def paper_with(calibers):
+            rows = []
+            for year, d in ((2023, "2024-04-02"), (2024, "2025-04-02")):
+                for c in calibers:
+                    rows.append({"year": year, "report_type": "年报", "caliber": c,
+                                 "report_date": d,
+                                 "revenue": 1505.6 if year == 2023 else 1741.44,
+                                 "net_profit": 747.34 if year == 2023 else 862.28,
+                                 "operating_cashflow": 665.93 if year == 2023 else 924.64})
+            payload = {"financials": rows, "metadata": dict(REAL_SNAPSHOT["metadata"]),
+                       "raw": dict(REAL_SNAPSHOT["raw"])}
+            return W.build_working_paper(F.facts_from_financials(payload), self._req())
+
+        a = paper_with(["合并", "母公司"])
+        b = paper_with(["母公司", "合并"])
+        self.assertEqual(a.ok, b.ok, (a.ok, b.ok))
+        self.assertEqual([(d["metric"], d["value"]) for d in a.derived],
+                         [(d["metric"], d["value"]) for d in b.derived])
+        self.assertTrue(a.ok, [p.detail for p in a.problems])
+        pending = {p["fact_id"] for p in (a.selection.get("pending") or [])}
+        self.assertTrue(pending, "母公司候选应进待核验")
+        used = set().union(*[set(d["derived_from"]) for d in a.derived]) if a.derived else set()
+        self.assertFalse(used & pending, "待核验候选不得作为同比输入")
+
+    def test_same_caliber_different_value_conflicts_same_value_agrees(self):
+        """同口径异值 → 冲突；同口径同值异来源 → 视为一致（来源全部记录在案）。"""
+        rows = [dict(r, caliber="合并", report_date="2024-04-02" if r["year"] == 2023
+                     else "2025-04-02") for r in REAL_SNAPSHOT["financials"]]
+        conflict = {"financials": rows + [{"year": 2024, "report_type": "年报",
+                                          "caliber": "合并", "report_date": "2025-04-02",
+                                          "revenue": 9999.0}],
+                    "metadata": dict(REAL_SNAPSHOT["metadata"]),
+                    "raw": dict(REAL_SNAPSHOT["raw"])}
+        paper = W.build_working_paper(F.facts_from_financials(conflict), self._req())
+        self.assertIn(W.PROBLEM_CONFLICT, {p.kind for p in paper.problems})
+        self.assertFalse(any(d["metric"] == "revenue_yoy" for d in paper.derived))
+
+        agree_rows = [dict(r) for r in rows]
+        agree_rows.append(dict(rows[1]))          # 同一值、第二个来源
+        agree_rows[-1]["report_date"] = "2025-04-03"
+        agree = {"financials": agree_rows, "metadata": dict(REAL_SNAPSHOT["metadata"]),
+                 "raw": dict(REAL_SNAPSHOT["raw"])}
+        paper2 = W.build_working_paper(F.facts_from_financials(agree), self._req())
+        self.assertTrue(paper2.ok, [p.detail for p in paper2.problems])
+        rev = [r for r in paper2.rows if r["metric"] == "revenue" and r["period"] == "2024年"]
+        self.assertTrue(rev)
+        self.assertGreaterEqual((rev[0].get("source_locator") or {}).get("agreeing_count", 0),
+                                2, "一致来源要记在案（可审计）")
+
+    def test_unrelated_extra_keeps_correct_six_ok(self):
+        """追加已排除的无关公司：本公司六项与三个同比**不受影响**（A′2 明确要求）。"""
+        payload = {"companies": [
+            {"metadata": dict(REAL_SNAPSHOT["metadata"], company="贵州茅台", market="cn"),
+             "financials": [dict(r, caliber="合并",
+                                 report_date="2024-04-02" if r["year"] == 2023
+                                 else "2025-04-02")
+                            for r in REAL_SNAPSHOT["financials"]],
+             "raw": dict(REAL_SNAPSHOT["raw"])},
+            {"metadata": {"company": "比亚迪", "stock_code": "002594", "market": "cn",
+                          "currency": "CNY", "unit": "亿元"},
+             "financials": [{"year": 2024, "report_type": "年报", "caliber": "合并",
+                             "report_date": "2025-04-02", "revenue": 9999.0}],
+             "raw": {"url": "https://example.invalid/byd", "text": "{}"}},
+        ]}
+        paper = W.build_working_paper(F.facts_from_financials(payload), self._req())
+        self.assertEqual(paper.completeness["present"], 6, paper.completeness)
+        self.assertTrue(paper.ok, [p.detail for p in paper.problems])
+        yoy = {d["metric"]: d["value"] for d in paper.derived}
+        self.assertAlmostEqual(yoy["revenue_yoy"],
+                               round((1741.44 - 1505.6) / 1505.6 * 100, 2), places=2)
+        self.assertTrue(any(a.get("kind") == W.PROBLEM_UNRELATED for a in paper.audit))
+
+    # ── 4) 截至日成为证据约束 ────────────────────────────────
+
+    def test_as_of_before_period_end_fails(self):
+        """2023/2024 的事实配截至 2022-01-01：该时点年报还没披露 → 不达标。"""
+        paper = W.build_working_paper(F.facts_from_financials(self._maotai()),
+                                      self._req(as_of="2022-01-01"))
+        self.assertFalse(paper.ok)
+        self.assertTrue(any("早于研究期末" in g["detail"] for g in paper.gaps), paper.gaps)
+
+    def test_disclosure_after_as_of_fails(self):
+        """披露日晚于截至日 → 时点不成立。"""
+        paper = W.build_working_paper(F.facts_from_financials(self._maotai()),
+                                      self._req(as_of="2025-03-01"))
+        self.assertIn(W.PROBLEM_AS_OF, {p.kind for p in paper.problems})
+        self.assertFalse(paper.ok)
+
+    def test_missing_disclosure_date_is_unverified(self):
+        """没有披露/可用日期 → 标"时点未核实"，不得宣称目标达成。"""
+        payload = self._maotai()
+        for r in payload["financials"]:
+            r.pop("report_date", None)
+        paper = W.build_working_paper(F.facts_from_financials(payload), self._req())
+        self.assertIn(W.PROBLEM_AS_OF, {p.kind for p in paper.problems})
+        self.assertFalse(paper.ok)
+
+    def test_sourced_dates_make_as_of_satisfiable(self):
+        """有出处的披露日期且不晚于截至日 → 截至日成立（正例）。"""
+        paper = W.build_working_paper(F.facts_from_financials(self._maotai()), self._req())
+        self.assertEqual([p for p in paper.problems if p.kind == W.PROBLEM_AS_OF], [])
+        self.assertTrue(paper.ok, [p.detail for p in paper.problems])
+
+    def test_invalid_as_of_is_a_contract_gap(self):
+        req = F.parse_research_request("研究贵州茅台 2023 与 2024", company="600519.SH",
+                                       as_of="昨天")
+        self.assertTrue(any("不是有效日期" in g for g in req.gaps), req.gaps)
+
+
+class TestDocumentSubjectScopeMatrix(unittest.TestCase):
+    """A′3 的四条漏检场景（架构指令表格），逐条对号。"""
+
+    def setUp(self):
+        rows = [dict(r, caliber="合并", report_date="2024-04-02" if r["year"] == 2023
+                     else "2025-04-02") for r in REAL_SNAPSHOT["financials"]]
+        self.req = F.parse_research_request(
+            "研究贵州茅台 2023 与 2024 两个年度的营业收入、归母净利润、"
+            "经营活动现金流净额，合并报表口径，数据截至 2025-04-30",
+            company="贵州茅台", company_id="600519.SH", market="cn",
+            periods=[2023, 2024], caliber="合并", as_of="2025-04-30")
+        payload = {"financials": rows, "metadata": dict(REAL_SNAPSHOT["metadata"]),
+                   "raw": dict(REAL_SNAPSHOT["raw"])}
+        self.paper = W.build_working_paper(F.facts_from_financials(payload), self.req)
+
+    def _scope(self, text: str):
+        return W.document_subject_scope(text, self.req, self.paper)
+
+    def test_other_company_section_is_flagged_plain_number(self):
+        problems = self._scope("# 贵州茅台\n\n## 比亚迪\n\n营业收入 1741.44 亿元\n")
+        self.assertTrue(problems, "错公司小节的数值必须被拦")
+        self.assertIn(W.PROBLEM_DOC_SCOPE, {p.kind for p in problems})
+
+    def test_comma_format_same_conclusion(self):
+        plain = self._scope("# 贵州茅台\n\n## 比亚迪\n\n营业收入 1741.44 亿元\n")
+        comma = self._scope("# 贵州茅台\n\n## 比亚迪\n\n营业收入 1,741.44 亿元\n")
+        self.assertEqual(bool(plain), bool(comma), (plain, comma))
+        self.assertTrue(comma)
+
+    def test_neutral_subheading_inherits_scope(self):
+        self.assertEqual(self._scope("# 贵州茅台\n\n## 财务指标\n\n营业收入 1741.44 亿元\n"),
+                         [], "中性子标题应继承公司作用域")
+
+    def test_correct_occurrence_does_not_cancel_wrong_one(self):
+        text = ("# 贵州茅台\n\n营业收入 1741.44 亿元\n\n"
+                "## 比亚迪\n\n营业收入 1741.44 亿元\n")
+        self.assertTrue(self._scope(text), "正确出现不能抵消错误出现")
+
+    def test_non_core_metric_number_is_ignored(self):
+        """别的指标的数字不该被算进本指标的判定（指标/期间/单位随事实绑定）。"""
+        self.assertEqual(self._scope("# 贵州茅台\n\n## 比亚迪\n\n毛利率 41.2 %\n"), [],
+                         "不属于核心三指标的数值不参与判定")
 
 
 class TestDocumentSubjectScope(unittest.TestCase):
@@ -613,9 +848,9 @@ class TestWorkingPaperExport(unittest.TestCase):
         self.assertEqual(saved["request"]["company"], "贵州茅台",
                          "抓取到的公司名不得改写用户请求")
         self.assertEqual(saved["request"]["identity_source"], "text")
-        kinds = {p["kind"] for p in saved["problems"]}
-        self.assertIn(W.PROBLEM_UNRELATED, kinds, saved["problems"])
-        self.assertFalse(saved["ok"], "抓到别家公司的数据时不得判为达成")
+        self.assertTrue(any(a.get("kind") == W.PROBLEM_UNRELATED
+                            for a in saved["audit"]), saved["audit"])
+        self.assertFalse(saved["ok"], "抓到别家公司的数据时不得判为达成（必需事实没拿到）")
 
     def test_persisted_contract_wins_over_goal_and_scraped(self):
         """提交时落库的契约优先：目标文本与抓取元数据都不能改它。"""
