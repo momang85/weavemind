@@ -512,6 +512,60 @@ def _fetch_financial_entity(company: str, cls: dict,
     }, ""
 
 
+def route_structured_for_request(request) -> dict | None:
+    """按**研究契约**取财务数据：契约给了市场 + 稳定代码就直接抓，不猜公司名。
+
+    与 `route_structured` 的分工：那边从目标文本分类 + 联网 `resolve_company`（名字
+    对不上就会取到别的主体），这里用提交时保存的契约直接分派到对应市场适配器，
+    期间来自契约的 `periods`。契约说不清（无代码/市场不支持/代码歧义）或抓取失败
+    返回 None，由调用方回落文本路由——降级要可见，不静默。
+
+    返回载荷与单实体分支同形（`financials`/`metadata`/`raw` + `resolution`），并多带
+    一个 `contract` 溯源字段，使 `financials.json` 及下游消费者无需改动。
+    """
+    code = str(getattr(request, "company_id", "") or "").strip()
+    if not code:
+        return None
+    try:
+        from facts import market_of_code
+    except Exception:                            # pragma: no cover - 导入失败按不适用
+        return None
+    mk, ambiguous = market_of_code(code)
+    market = str(getattr(request, "market", "") or "").strip().lower()
+    if mk and not ambiguous:
+        # 代码后缀比表单选择更确定（`00001.HK` 与 `000001.SZ` 是不同主体）
+        market = mk
+    if market not in ("cn", "hk", "us"):
+        logger.warning("契约驱动抓取跳过：市场不可判定（code=%s）", code)
+        return None
+    periods = sorted({int(y) for y in (getattr(request, "periods", None) or [])})
+    year_range = (periods[0], periods[-1]) if periods else None
+    name = str(getattr(request, "company", "") or "").strip() or code
+    upper = market.upper()
+    try:
+        if upper == "HK":
+            data = fetch_eastmoney(name, code, year_range=year_range, period="annual")
+        elif upper == "US":
+            data = fetch_sec(name, code, year_range=year_range)
+        else:
+            data = fetch_cn_or_fallback(name, code, year_range=year_range,
+                                        period="annual")
+    except Exception as exc:
+        logger.warning("契约驱动抓取失败（%s/%s）：%s", upper, code, str(exc)[:150])
+        return None
+    if not data:
+        return None
+    data["resolution"] = {
+        "market": upper, "stock_code": code, "name": name,
+        "quote_id": "", "resolved_alternatives": [], "from": "research_request",
+    }
+    data["contract"] = {
+        "company": name, "company_id": code, "market": market,
+        "periods": periods, "caliber": str(getattr(request, "caliber", "") or ""),
+    }
+    return data
+
+
 def _route_multi_entity_financial(
     companies: list[str], cls: dict, period: str = "annual",
 ) -> dict | None:

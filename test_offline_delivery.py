@@ -518,5 +518,450 @@ class TestOfflineFaultInjection(unittest.TestCase):
         self.assertTrue(data.get("late_rejected"), "迟到结果必须留痕")
 
 
+RESEARCH_GOAL = (
+    "研究贵州茅台 2023 与 2024 两个年度的营业收入、归母净利润、经营活动现金流净额，"
+    "合并报表口径，数据截至 2025-04-30。"
+)
+
+
+def _research_contract():
+    """表单提交的契约（主体/市场/两年度/口径/截至日都来自表单，不靠文本解析）。"""
+    from facts import parse_research_request
+    return parse_research_request(
+        RESEARCH_GOAL, company="贵州茅台", company_id="600519.SH", market="cn",
+        periods=[2023, 2024], caliber="合并", as_of="2025-04-30",
+        identity_source="form")
+
+
+# 研究路径的报告正文夹具：数字必须与 financials.json 里的**逐字一致**
+# （溯源按数值+单位比对，"1741亿元"与源里的"1741.44亿元"不算同一条事实）
+RESEARCH_REPORT_BODY = (
+    "# 贵州茅台 2023–2024 年度财务数据（合并报表口径）\n\n"
+    "## 核心指标\n\n"
+    "| 指标 | 2023 | 2024 | 来源 |\n|---|---|---|---|\n"
+    "| 营业收入 | 1505.6亿元 | 1741.44亿元 | [1] |\n"
+    "| 归母净利润 | 747.34亿元 | 862.28亿元 | [1] |\n"
+    "| 经营活动现金流净额 | 665.93亿元 | 924.64亿元 | [1] |\n\n"
+    "## 数据时效\n\n数据截至 2025-04-30，取自公司年度报告（合并报表口径），日终更新。\n\n"
+    "## 参考来源\n\n1. [贵州茅台2024年报：营业收入1741亿元]"
+    "(https://finance.sina.com.cn/a/1)\n\n"
+    "## 免责声明\n\n" + DISCLAIMER
+)
+
+
+def _research_financials(*, caliber: str = "合并") -> dict:
+    """两年 × 三项必需指标的财务夹具（合并口径，行内声明口径）。"""
+    rows = []
+    for year, rev, np_, cf in ((2023, 1505.6, 747.34, 665.93),
+                               (2024, 1741.44, 862.28, 924.64)):
+        rows.append({"year": year, "report_type": "年报", "caliber": caliber,
+                     "revenue": rev, "net_profit": np_, "operating_cashflow": cf,
+                     "disclosed_at": f"{year + 1}-04-02"})
+    return {
+        "financials": rows,
+        "metadata": {"source": "eastmoney_ashare", "company": "贵州茅台",
+                     "stock_code": "600519.SH", "currency": "CNY", "unit": "亿元",
+                     "period": "annual", "latest_report": "2024-12-31",
+                     "disclosure_date": "2025-04-02"},
+        "raw": {"url": "https://example.invalid/mt", "text": "{}"},
+    }
+
+
+class _BrokenPlanner:
+    """规划器替身：按指定方式坏掉（超时 / 坏 JSON）。
+
+    固定研究路径的断言前提是"**规划器根本没被问到**"——所以这里的 `calls`
+    计数必须为 0；真被问到就会抛错让用例失败。
+    """
+
+    def __init__(self, mode: str = "timeout"):
+        self.mode = mode
+        self.calls = 0
+
+    def call(self, system, user, **kw):
+        self.calls += 1
+        from llm_client import LLMCallError, LLMJSONParseError
+        if self.mode == "timeout":
+            exc = LLMCallError("HTTP 504: gateway timeout（注入）")
+            raise exc
+        raise LLMJSONParseError("plan is not JSON（注入）")
+
+
+class _RecordingRedis:
+    """替身 Redis：把 `_record_llm_call` 真正**写下去**的载荷记下来。
+
+    断言对象是落盘载荷（默认值已补齐），不是调用参数——否则测的是"传了什么"
+    而不是"记了什么"。
+    """
+
+    def __init__(self):
+        self.rows: list = []
+
+    def __getattr__(self, name):
+        """除 lrange 外一律当空实现。
+
+        只通过 `pipeline()` 收集载荷：降级台账用的是直接 `rpush`（另一种记录），
+        混进来会让断言比的是两套 schema。
+        """
+        def _noop(*a, **k):
+            if name == "lrange":
+                return list(self.rows)
+            return None
+        return _noop
+
+    def pipeline(self):
+        rows = self.rows
+
+        def _rpush(*a, **k):
+            if len(a) == 2:
+                rows.append(a[1])
+
+        class _Pipe:
+            rpush = staticmethod(_rpush)
+            ltrim = staticmethod(lambda *a, **k: None)
+            expire = staticmethod(lambda *a, **k: None)
+            execute = staticmethod(lambda *a, **k: None)
+
+        return _Pipe()
+
+
+class TestResearchFixedPathOffline(unittest.TestCase):
+    """③ 固定研究路径的离线故障注入（C 批）。
+
+    契约驱动的研究任务不经过通用规划器：把规划器打成"坏"，研究路径仍要
+    取到事实、建出底稿、交付可核对的结论（或明确失败），而不是掉进
+    单步 content_summary 兜底、也不是无源长文冒充已验证交付。
+    """
+
+    def setUp(self):
+        self.run = _OfflineRun(self)
+        self.tid = "off-res-1"
+        # 契约落库用临时库（不碰真实任务库）
+        import task_state
+        self.db = str(self.run.tmp / "research.db")
+        self._orig_db = task_state.DB_PATH
+        task_state.DB_PATH = self.db
+        self.addCleanup(setattr, task_state, "DB_PATH", self._orig_db)
+        for target, value in (
+            ("llm_client.endpoints_available", lambda: (True, "offline")),
+            ("llm_client.get_task_llm_degradation", lambda tid: {}),
+            ("llm_client.get_endpoint_warning", lambda: ""),
+            ("llm_client.get_balance_status",
+             lambda **kw: {"primary": {"ok": True, "reason": "ok"},
+                           "backup": {"ok": True, "reason": "ok"}}),
+        ):
+            pt = mock.patch(target, value)
+            pt.start()
+            self.addCleanup(pt.stop)
+        guard = mock.patch("socket.socket.connect",
+                           side_effect=AssertionError("离线测试不得联网"))
+        guard.start()
+        self.addCleanup(guard.stop)
+
+    def _seed_contract(self, **overrides):
+        import task_state
+        payload = _research_contract().to_payload()
+        payload.update(overrides)
+        task_state.mark_queued(self.tid, goal=RESEARCH_GOAL,
+                               research_request=payload, db_path=self.db)
+
+    def _brpop(self, *, fail_report: bool = False):
+        """步骤回包替身：按固定研究计划的步骤语义回包。
+
+        1 搜索 → 结果列表（含原始 URL）；2 抓取 → 真实 worker 的 `{title,url,text}`
+        JSON 形态；3 解释 → 文本；4 报告 → 落盘正文（与真实 worker 的落盘位置一致）。
+        """
+        tid = self.tid
+
+        def _pop(r, key, deadline):
+            k = str(key)
+            if k.startswith("plan_review:"):
+                return ("k", json.dumps(PASS_JSON))
+            if not k.startswith("task_result:"):
+                return None
+            step_id = self.run.step_by_key.get(k, "")
+            if step_id == "2":
+                return ("k", json.dumps({
+                    "task_id": step_id, "status": "SUCCESS",
+                    "result": json.dumps({
+                        "title": "贵州茅台2024年报：营业收入1741亿元_新浪财经",
+                        "url": "https://finance.sina.com.cn/a/1",
+                        "text": ("贵州茅台2023年年报（合并报表口径）：营业收入1505.6亿元，"
+                                 "归母净利润747.34亿元，经营活动现金流净额665.93亿元。"
+                                 "2024年年报（合并报表口径）：营业收入1741.44亿元，"
+                                 "归母净利润862.28亿元，经营活动现金流净额924.64亿元。"
+                                 "以上数据取自公司年度报告，单位人民币亿元。"),
+                    }, ensure_ascii=False)}))
+            if step_id == "4":
+                if fail_report:
+                    return ("k", json.dumps({"task_id": step_id, "status": "FAILED",
+                                             "result": "注入的正文模型失败"}))
+                rpath = ws_mod.task_reports_dir(tid) / "report.md"
+                rpath.parent.mkdir(parents=True, exist_ok=True)
+                rpath.write_text(RESEARCH_REPORT_BODY, encoding="utf-8")
+                return ("k", json.dumps({"task_id": step_id, "status": "SUCCESS",
+                                         "result": RESEARCH_REPORT_BODY}))
+            return ("k", json.dumps({
+                "task_id": step_id, "status": "SUCCESS",
+                "result": ("搜索结果：贵州茅台2024年营业收入1741.44亿元，"
+                           "归母净利润862.28亿元。"
+                           "来源：https://finance.sina.com.cn/a/1")}))
+
+        return _pop
+
+    def _orch(self, planner_mode: str = "timeout", *, critic: bool = False,
+              fail_report: bool = False, **overrides):
+        import orchestrator_v2 as ov
+        o = self.run.orch(self.tid, critic=critic, **overrides)
+        # 恢复**真实**模板路由：固定研究路径就在它里面（其余替身照旧）
+        o._route_template = (
+            lambda goal, task_id="": ov.OrchestratorV2._route_template(o, goal, task_id)
+        )
+        o._planner_llm = _BrokenPlanner(planner_mode)
+        # 固定研究计划的报告步骤是第 4 步（1 搜索 / 2 抓取 / 3 解释 / 4 报告）
+        o._brpop_with_deadline = self._brpop(fail_report=fail_report)
+        return o
+
+    @staticmethod
+    def _fake_preload(task_id: str, goal: str, project=None, **kw):
+        """生产里预载会写 financials.json；这里写夹具并返回载荷。"""
+        if kw.get("payload") is None:
+            return None
+        proj = ws_mod.task_project_dir(task_id, project or "default")
+        proj.mkdir(parents=True, exist_ok=True)
+        (proj / "financials.json").write_text(
+            json.dumps(kw["payload"], ensure_ascii=False), encoding="utf-8")
+        return kw["payload"]
+
+    def _preload_writer(self, payload):
+        def _pre(task_id, goal, project=None, **_kw):
+            proj = ws_mod.task_project_dir(task_id, project or "default")
+            proj.mkdir(parents=True, exist_ok=True)
+            (proj / "financials.json").write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+            return payload
+        return _pre
+
+    def _plan_messages(self, o):
+        out = []
+        for _chan, msg in (o._messaging.published or []):
+            if isinstance(msg, dict) and msg.get("type") == "plan":
+                out.append(str(msg.get("message") or ""))
+        return out
+
+    # ── 规划器坏掉：仍进受控研究路径 ─────────────────────────
+
+    def _assert_fixed_path(self, o, res, planner):
+        self.assertEqual(planner.calls, 0,
+                         "固定研究路径不得先问通用规划器（它是坏的）")
+        self.assertNotIn("Plan fallback: single content_summary step",
+                         " ".join(self._plan_messages(o)),
+                         "研究任务不得掉进单步兜底")
+        proj = ws_mod.task_project_dir(self.tid, "default")
+        self.assertTrue((proj / "financials.json").exists(),
+                        "研究路径必须取到事实（结构化预载）")
+        paper = json.loads((proj / "working_paper.json").read_text(encoding="utf-8"))
+        self.assertEqual(paper["request"]["company"], "贵州茅台",
+                         "底稿主体必须来自契约（不得被解析/抓取改写）")
+        self.assertEqual(paper["request"]["periods"], [2023, 2024])
+        return paper
+
+    def test_planner_timeout_still_enters_controlled_research_path(self):
+        self._seed_contract()
+        o = self._orch("timeout")
+        o._structured_data_preload = self._preload_writer(_research_financials())
+        with mock.patch("orchestrator_v2.push_progress"):
+            res = o.run(self.tid, RESEARCH_GOAL, auto_run=True)
+        paper = self._assert_fixed_path(o, res, o._planner_llm)
+        self.assertTrue(paper["ok"], paper.get("problems"))
+        self.assertEqual(res["status"], "SUCCESS",
+                         f"delivery={o._delivery(self.tid)!r}")
+
+    def test_planner_bad_json_still_enters_controlled_research_path(self):
+        self._seed_contract()
+        o = self._orch("badjson")
+        o._structured_data_preload = self._preload_writer(_research_financials())
+        with mock.patch("orchestrator_v2.push_progress"):
+            res = o.run(self.tid, RESEARCH_GOAL, auto_run=True)
+        self._assert_fixed_path(o, res, o._planner_llm)
+        self.assertIn(res["status"], ("SUCCESS", "SUCCESS_WITH_ISSUES"))
+
+    # ── 素材缺失：绝不判已验证 ───────────────────────────────
+
+    def test_missing_material_never_certifies(self):
+        """契约在、事实拿不到（预载未命中 + 搜索无结果）→ 只能是草稿 + 明确缺口。"""
+        self._seed_contract()
+        o = self._orch("timeout", critic=True)
+        o._structured_data_preload = lambda *a, **k: None
+        with mock.patch("orchestrator_v2.push_progress"):
+            res = o.run(self.tid, RESEARCH_GOAL, auto_run=True)
+        delivery = o._delivery(self.tid)
+        self.assertEqual(delivery.get("status"), "draft",
+                         f"没有事实来源不得判已验证：{delivery!r}")
+        self.assertTrue(delivery.get("hard_fail"), delivery)
+        self.assertIn("研究交付硬门槛未通过", res["final_report"],
+                      "缺口必须写进交付物本体，而不是静默通过")
+        self.assertNotEqual(res["status"], "SUCCESS")
+        from report_version import VersionStore
+        store = VersionStore(ws_mod.task_workspace(self.tid), self.tid)
+        self.assertTrue(store.deliveries())
+        self.assertFalse(store.deliveries()[-1]["ok"], "草稿交付不得记为 ok")
+
+    # ── 正文模型失败：底稿仍可复核 ───────────────────────────
+
+    def test_body_model_failure_keeps_recomputable_paper(self):
+        """报告步骤失败：任务不得算成功，但已取到的事实要留下可复核底稿。"""
+        self._seed_contract()
+        o = self._orch("timeout", fail_report=True)
+        o._structured_data_preload = self._preload_writer(_research_financials())
+        with mock.patch("orchestrator_v2.push_progress"):
+            res = o.run(self.tid, RESEARCH_GOAL, auto_run=True)
+        proj = ws_mod.task_project_dir(self.tid, "default")
+        paper_path = proj / "working_paper.json"
+        self.assertTrue(paper_path.exists(), "正文失败也要留底稿")
+        saved = json.loads(paper_path.read_text(encoding="utf-8"))
+        # 可重算：读侧口径（build_result）与落盘底稿的行数一致
+        import working_paper_export as WPX
+        recomputed = WPX.build_result(self.tid, RESEARCH_GOAL, project="default")
+        self.assertTrue(recomputed.get("ok"), recomputed)
+        self.assertEqual(len(recomputed["rows_detail"]), len(saved["rows"]))
+        self.assertNotEqual(o._delivery(self.tid).get("status"), "verified")
+
+    def test_salvage_paper_on_failure_branch(self):
+        """计划为空/模型不可用的失败分支：兜底也要落底稿（直接覆盖该分支的实现）。"""
+        self._seed_contract()
+        o = self._orch("timeout")
+        o._structured_data_preload = self._preload_writer(_research_financials())
+        o._structured_data_preload(self.tid, RESEARCH_GOAL, "default")
+        wp = o._salvage_working_paper(self.tid, RESEARCH_GOAL, "default")
+        self.assertTrue(wp.get("ok"), wp)
+        proj = ws_mod.task_project_dir(self.tid, "default")
+        self.assertTrue((proj / "working_paper.json").exists())
+        self.assertTrue((proj / "working_paper.csv").exists())
+
+    # ── 取消 ─────────────────────────────────────────────────
+
+    def test_cancel_before_plan_stops_run(self):
+        self._seed_contract()
+        o = self._orch("timeout")
+        o._cancel_requested = lambda tid: True
+        with mock.patch("orchestrator_v2.push_progress"):
+            res = o.run(self.tid, RESEARCH_GOAL, auto_run=True)
+        self.assertEqual(res["status"], "CANCELLED")
+        self.assertEqual(len(self.run.step_by_key), 0, "取消后不得派发步骤")
+
+    def test_cancel_during_preload_stops_before_dispatch(self):
+        """取消在预载期间到达：事实照取（预载不占预算），但一步都不许派发。"""
+        self._seed_contract()
+        o = self._orch("timeout")
+        state = {"cancelled": False}
+        writer = self._preload_writer(_research_financials())
+
+        def _pre(task_id, goal, project=None, **_kw):
+            out = writer(task_id, goal, project, **_kw)
+            state["cancelled"] = True          # 预载过程中用户点了停止
+            return out
+
+        o._structured_data_preload = _pre
+        o._cancel_requested = lambda tid: state["cancelled"]
+        with mock.patch("orchestrator_v2.push_progress"):
+            res = o.run(self.tid, RESEARCH_GOAL, auto_run=True)
+        self.assertEqual(res["status"], "CANCELLED")
+        self.assertEqual(len(self.run.step_by_key), 0, "取消后不得派发步骤")
+
+    def test_cancel_during_execution_stops_run(self):
+        from orchestrator_v2 import WAIT_CANCEL
+        self._seed_contract()
+        o = self._orch("timeout")
+        o._structured_data_preload = self._preload_writer(_research_financials())
+        o._wait_step_result = lambda *a, **k: WAIT_CANCEL
+        o._cancel_requested = lambda tid: True
+        with mock.patch("orchestrator_v2.push_progress"):
+            res = o.run(self.tid, RESEARCH_GOAL, auto_run=True)
+        self.assertEqual(res["status"], "CANCELLED")
+
+    # ── 根预算共享 ───────────────────────────────────────────
+
+    def test_root_budget_refuses_dispatch_but_keeps_facts(self):
+        """根预算耗尽：不得再派发步骤；预载（不发 LLM）不占预算，事实仍留底稿。"""
+        import root_budget as rb
+        self._seed_contract()
+        o = self._orch("timeout")
+        o._structured_data_preload = self._preload_writer(_research_financials())
+        budget = o._budget(self.tid)
+        budget.limits = rb.BudgetLimits(max_calls=1)
+        budget.reserve("pre-consume")          # 把根预算的额度先用掉
+        with mock.patch("orchestrator_v2.push_progress"):
+            res = o.run(self.tid, RESEARCH_GOAL, auto_run=True)
+        self.assertEqual(len(self.run.step_by_key), 0,
+                         "预算耗尽后不得派发新步骤")
+        self.assertNotEqual(res["status"], "SUCCESS")
+        proj = ws_mod.task_project_dir(self.tid, "default")
+        self.assertTrue((proj / "working_paper.json").exists(),
+                        "预算耗尽也要保住已取到的事实")
+
+    # ── 诊断脱敏 ─────────────────────────────────────────────
+
+    def test_diagnostics_are_sanitized_shapes_only(self):
+        """调用形状落盘：字段齐全，且**不含**目标文本、提示词或凭据。"""
+        import llm_client
+        self._seed_contract()
+        fake = _RecordingRedis()
+        o = self._orch("timeout")
+        o._structured_data_preload = self._preload_writer(_research_financials())
+        with mock.patch.object(llm_client, "_task_usage_client", fake):
+            with mock.patch("orchestrator_v2.push_progress"):
+                o.run(self.tid, RESEARCH_GOAL, auto_run=True)
+        self.assertTrue(fake.rows, "研究路径至少要记下调用形状")
+        allowed = {"ts", "stage", "attempt", "elapsed_ms", "input_chars",
+                   "max_tokens", "http_status", "error_class", "end_reason",
+                   "endpoint"}
+        records = [json.loads(r) for r in fake.rows]
+        for rec in records:
+            self.assertEqual(set(rec), allowed, f"字段集不符：{set(rec) ^ allowed}")
+            self.assertIsInstance(rec["input_chars"], int)
+            self.assertIsInstance(rec["elapsed_ms"], int)
+            self.assertIsInstance(rec["http_status"], int)
+        # 阶段标签来自调用方的 usage：本用例的步骤 worker 在**请求边界**替身，
+        # 所以这里只断言 schema 与脱敏；带标签的记录另有一条直接用例
+        self.assertTrue(all(isinstance(r.get("stage"), str) for r in records))
+        # 记录里不得出现目标文本/公司名等正文（只有形状）
+        blob = json.dumps(records, ensure_ascii=False)
+        self.assertNotIn("贵州茅台", blob)
+        self.assertNotIn(RESEARCH_GOAL[:20], blob)
+        # 同一批形状要落成工作区文件（离线取证用），且与内存记录一致
+        lc = ws_mod.task_workspace(self.tid) / "llm_calls.jsonl"
+        self.assertTrue(lc.exists(), "调用形状必须落盘")
+        saved = [json.loads(x) for x in lc.read_text(encoding="utf-8").splitlines() if x.strip()]
+        self.assertEqual(len(saved), len(records))
+        self.assertEqual(set(saved[0]), allowed)
+
+    def test_call_record_carries_stage_and_shape(self):
+        """带阶段标签的调用：记录里是"长度/上限/类别"，不是提示词本身。"""
+        import llm_client
+        fake = _RecordingRedis()
+        client = llm_client.LLMClient(base_url="http://offline.invalid", api_key="k",
+                                      model="m")
+        client._send_request = lambda *a, **k: '{"ok": true}'
+        llm_client.set_task_context(self.tid)
+        self.addCleanup(llm_client.set_task_context, "")
+        with mock.patch.object(llm_client, "_task_usage_client", fake):
+            out = client.call("系统提示词", "用户提示词", usage="plan", expect_json=True)
+        self.assertEqual(out, {"ok": True})
+        self.assertEqual(len(fake.rows), 1, fake.rows)
+        rec = json.loads(fake.rows[0])
+        self.assertEqual(rec["stage"], "plan")
+        self.assertEqual(rec["end_reason"], "ok")
+        self.assertEqual(rec["attempt"], 1)
+        self.assertEqual(rec["input_chars"], len("系统提示词") + len("用户提示词"))
+        self.assertEqual(rec["max_tokens"], client.max_tokens)
+        self.assertEqual(rec["http_status"], 0)
+        self.assertEqual(rec["error_class"], "")
+        self.assertEqual(rec["endpoint"], "primary")
+        blob = json.dumps(rec, ensure_ascii=False)
+        self.assertNotIn("系统提示词", blob)
+        self.assertNotIn("用户提示词", blob)
+
+
 if __name__ == "__main__":
     unittest.main()

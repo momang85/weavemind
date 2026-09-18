@@ -326,14 +326,23 @@ class TestR02Wiring(unittest.TestCase):
     """生产接线必须真的传身份：登记/绑定两处都不能再用默认空指纹。"""
 
     def test_record_and_bind_sites_pass_identity(self):
-        src = (ROOT / "orchestrator_v2.py").read_text(encoding="utf-8")
+        """生产接线必须真的传身份：登记/绑定两处都不能再用默认空指纹。
+
+        B 批把"验收→登记→绑定"收敛到 `delivery_pipeline`（唯一实现）：本守卫跟着
+        看那个文件，并要求编排器侧只**委托**它——不许再长出第二份本地实现。
+        """
+        src = (ROOT / "delivery_pipeline.py").read_text(encoding="utf-8")
         self.assertIn("sources_fingerprint=", src)
-        self.assertIn("policy_version=REVIEW_POLICY_VERSION", src)
-        self.assertIn("_sources_fingerprint(", src)
+        self.assertIn("rules_fingerprint=", src)
+        self.assertIn("sources_fingerprint(task_id", src)
         self.assertIn("bind_acceptance(", src)
         # 绑定必须带来源指纹，否则同正文不同来源会被混用
-        idx = src.index("_store.bind_acceptance(")
+        idx = src.index(".bind_acceptance(")
         self.assertIn("sources_fingerprint=", src[idx:idx + 400])
+        orch = (ROOT / "orchestrator_v2.py").read_text(encoding="utf-8")
+        self.assertIn("from delivery_pipeline import", orch)
+        self.assertNotIn("_store.bind_acceptance(", orch,
+                         "绑定只能有一处实现（共享模块），不得在编排器里再写一份")
 
     def test_acceptance_emits_full_hash(self):
         src = (ROOT / "acceptance_checker.py").read_text(encoding="utf-8")

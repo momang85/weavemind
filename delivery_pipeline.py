@@ -283,22 +283,21 @@ def apply_research_hard_gate(task_id: str, goal: str, wp: dict | None,
     hard_fail = ""
     try:
         import task_state as _ts
-        from facts import CALIBERS, ResearchRequest, parse_research_request
+        from facts import (ResearchRequest, parse_research_request,
+                           research_shaped, research_subject)
         raw = (_ts.read_task(task_id) or {}).get("research_request") or {}
         request = ResearchRequest.from_payload(raw)
         if request is None:
             fallback = parse_research_request(goal, identity_source="gate-fallback")
-            if ((fallback.company or fallback.company_id)
-                    and len(fallback.periods) >= 2
-                    and str(fallback.caliber) in CALIBERS):
-                request = fallback
-            else:
-                request = None
+            # 自由文本兜底：说不清期间/口径的请求不据此判门槛（判据与固定路径同源）
+            request = fallback if research_shaped(fallback) else None
     except Exception as exc:
         request = None
         hard_fail = f"研究契约读取异常：{str(exc)[:120]}"
         logger.warning("研究契约读取异常（task=%s）：%s", task_id, str(exc)[:120])
-    has_contract = bool(request and (request.company or request.company_id))
+    # 门槛口径比路径选择宽：有明确主体即算（严格版 research_shaped 用于选固定路径），
+    # 或者本次确实产出了底稿——"已有底稿"本身就是研究任务的独立证据
+    has_contract = research_subject(request)
     paper_present = bool(wp and wp.get("ok"))
     if not (has_contract or paper_present):
         if hard_fail:

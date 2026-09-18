@@ -4280,10 +4280,30 @@ def _get_task_page(self, p):
             review_state = None
             delivery = None
             acceptance_bound = None
+            llm_calls = None
             try:
                 import json as _json
                 from workspace import task_workspace as _tws
                 _ws = _tws(tid)
+                # C 批：调用形状（脱敏）——阶段/次数/耗时/输入长度/输出上限/错误类别/
+                # 结束原因。文件里只有形状，没有提示词与密钥。
+                _lcp = _ws / "llm_calls.jsonl"
+                if _lcp.exists():
+                    _events = []
+                    for _line in _lcp.read_text(encoding="utf-8").splitlines():
+                        _line = _line.strip()
+                        if not _line:
+                            continue
+                        try:
+                            _events.append(_json.loads(_line))
+                        except Exception:
+                            continue
+                    llm_calls = {
+                        "calls": len(_events),
+                        "failed": sum(1 for e in _events
+                                      if str(e.get("end_reason") or "") != "ok"),
+                        "events": _events[-30:],
+                    }
                 _rp = _ws / "review_state.json"
                 if _rp.exists():
                     _review = _json.loads(_rp.read_text(encoding="utf-8"))
@@ -4337,6 +4357,8 @@ def _get_task_page(self, p):
             "elapsed_sec": elapsed,
             "review_state": review_state,
             "delivery": delivery,
+            # C 批：脱敏调用形状（无提示词/密钥），失败取证用
+            "llm_calls": llm_calls,
         })
         return self._json({"error":"not found"},404)
 

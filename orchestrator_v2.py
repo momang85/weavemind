@@ -204,6 +204,9 @@ _STRUCTURED_SOURCE_LABELS = {
 # 此处曾有一份 _STATISTICAL_GOAL_KEYWORDS 与该模块重复，导致两处规则分叉
 # （"合计/汇总"被当成全市场信号）——已移除。
 
+# 已选事实注入块的展开上限（条数）：块本身有界，避免把报告步骤的输入撑大
+_FACTS_BLOCK_MAX_ROWS = 40
+
 # V1.2 竞品启示：报告格式强制要求（三级溯源链 / 数据时效 / 免责声明）。
 # 注入 content_summary / report_generator 步骤指令；验收器负责硬检查。
 _REPORT_FORMAT_REQUIREMENTS = (
@@ -810,18 +813,31 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 raise
             except Exception as e:
                 last_error = e
-                logger.warning("Plan attempt %d failed: %s", attempt + 1, str(e)[:200])
+                try:
+                    from llm_client import describe_error
+                    _err_cls = describe_error(e)
+                except Exception:
+                    _err_cls = type(e).__name__
+                logger.warning("Plan attempt %d failed（%s / %s）",
+                               attempt + 1, _err_cls, type(e).__name__)
                 push_progress(self._messaging, task_id, "log",
                               {"type": "error", "agent": "orchestrator",
-                               "message": f"规划第 {attempt + 1} 次尝试失败：{str(e)[:80]}，重试中",
+                               "message": f"规划第 {attempt + 1} 次尝试失败：{_err_cls}，重试中",
                                "timestamp": self._now_iso()})
                 if attempt == 0:
                     time.sleep(3)  # 瞬断退避：给双端点恢复留出窗口
         if plan_data is None:
-            logger.error("Plan failed: %s", str(last_error)[:300])
+            # 进度流会随 logs_json 落库并显示给用户：只写**脱敏类别**，不写异常原文
+            # （LLMCallError 可能带上游响应片段）
+            try:
+                from llm_client import describe_error
+                _err_cls = describe_error(last_error)
+            except Exception:
+                _err_cls = type(last_error).__name__
+            logger.error("Plan failed（%s / %s）", _err_cls, type(last_error).__name__)
             push_progress(self._messaging, task_id, "log",
                           {"type": "error", "agent": "orchestrator",
-                           "message": f"Plan failed: {last_error}", "timestamp": self._now_iso()})
+                           "message": f"Plan failed: {_err_cls}", "timestamp": self._now_iso()})
             # P0-1：双端点均不可用（余额不足/无响应）→ 抛异常让任务终止并弹警告，
             # 不再回退到 content_summary 单步（那个 worker 同样会因 LLM 死掉而失败）
             try:
@@ -1004,8 +1020,181 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         except Exception:
             return []
 
+    def _fixed_research_plan(self, task_id: str, goal: str) -> list[dict] | None:
+        """公司研究的**固定步骤序列**（代码内模板，不改 templates.json）。
+
+        命中条件：**表单落库的研究契约**（`research_request`）且 `facts.research_shaped`
+        ——有主体、≥2 个期间、已声明口径。只认落库契约不认自由文本解析：实测
+        `_extract_company` 会把"2023 与 2024 两个年度"里的"两个"当主体，据此选路径
+        等于让路径依赖一个会认错主体的解析（A 批"身份不猜"的延伸）。自由文本仍走
+        通用规划器，并由 A 批的交付硬门槛兜底。
+
+        命中后：取来源与事实（结构化预载 + 搜索）→ 解释已选事实 → 出报告；
+        不经过 LLM 规划，因此也不花那次无预算的路由调用。返回 None 表示不适用。
+        """
+        try:
+            from facts import research_shaped
+            from working_paper_export import resolve_request
+            request, _candidates, source = resolve_request(task_id, goal, {}, None)
+        except Exception as exc:
+            logger.warning("固定研究路径判据读取失败（task=%s）：%s", task_id, str(exc)[:140])
+            return None
+        if source != "stored" or not research_shaped(request):
+            return None
+        return self._research_steps(request)
+
+    @staticmethod
+    def _research_steps(request) -> list[dict]:
+        """固定研究步骤（能力复用既有 worker，不新造执行体）。"""
+        from facts import metric_label
+        years = sorted({int(y) for y in (request.periods or [])})
+        span = "、".join(str(y) for y in years)
+        who = str(request.company or request.company_id or "目标公司")
+        code = f"（{request.company_id}）" if request.company_id else ""
+        metrics = "、".join(metric_label(m) for m in (request.required_metrics or []))
+        contract_note = (
+            f"研究契约（以此为准，不得替换主体）：公司 {who}{code}；"
+            f"期间 {span}；报表口径 {request.caliber}；"
+            f"资料截至 {request.as_of or '未声明'}；必需指标 {metrics}。"
+        )
+        return [
+            {
+                "step_id": "1",
+                "capability": "web_search",
+                "instruction": (
+                    f"检索 {who}{code} 的年报与财务数据的权威来源（优先公司公告/交易所/"
+                    f"官方年报），返回含原始 URL 的结果列表。{contract_note}"
+                ),
+                "timeout": 120,
+            },
+            {
+                "step_id": "2",
+                "capability": "web_fetch",
+                "instruction": (
+                    f"从步骤1结果中选取与 {span} 年报/财务数据最相关的 2-3 个链接，抓取完整"
+                    f"正文并保留原始 URL 与全部数字（年份、金额、币种、单位、报表口径）；"
+                    f"主链接失败则换备用链接。{contract_note}"
+                ),
+                "timeout": 240,
+            },
+            {
+                "step_id": "3",
+                "capability": "content_summary",
+                "instruction": (
+                    "只解释本次**已选定的事实**：按注入的[已选事实]块逐项说明指标含义与期间"
+                    "变化，块内列出的缺口要如实写出来源不足的部分。不得引入块外数字，"
+                    "不得自行换算或补齐缺失年份。"
+                ),
+                "timeout": 180,
+            },
+            {
+                "step_id": "4",
+                "capability": "report_generator",
+                "instruction": (
+                    f"生成 {who} 研究报告：以已选事实与来源为依据给出结论，每个财务数字标注"
+                    f"来源位置；不得出现已选事实之外的财务数字，缺口按实际情况写明。"
+                    f"{contract_note}"
+                ),
+                "timeout": 300,
+            },
+        ]
+
+    @staticmethod
+    def _dump_llm_calls(task_id: str) -> None:
+        """把任务的 LLM 调用形状（阶段/次数/耗时/输入长度/输出上限/错误类别/结束原因）
+        写成工作区 `llm_calls.jsonl`（Redis 里是累计的，这里按快照整体重写，
+        避免失败路径与收尾各写一次造成重复）。**只落形状**：提示词与响应体不进这里。"""
+        try:
+            import json as _json
+            from llm_client import get_task_llm_calls
+            data = get_task_llm_calls(task_id)
+            events = list(data.get("events") or [])
+            if not events:
+                return
+            out = Path(task_workspace(task_id)) / "llm_calls.jsonl"
+            out.write_text("".join(_json.dumps(ev, ensure_ascii=False) + "\n"
+                                   for ev in events), encoding="utf-8")
+        except Exception as exc:                 # noqa: BLE001 - 诊断不得拖垮收尾
+            logger.warning("调用形状落盘失败（task=%s）：%s", task_id, str(exc)[:140])
+
+    def _salvage_working_paper(self, task_id: str, goal: str,
+                               project: str | None = None) -> dict:
+        """失败路径专用：把已取到的结构化事实落成可复核底稿（不抛异常）。
+
+        计划为空或正文模型不可用时，工作区里的 financials.json 仍在——底稿是"事实
+        可复核"的证据，不该随任务失败一起消失（任务状态仍是 FAILED）。
+        """
+        try:
+            from working_paper_export import write_working_paper
+            wp = write_working_paper(task_id, goal, project=project)
+        except Exception as exc:                 # noqa: BLE001 - 兜底不得再抛
+            logger.warning("失败路径底稿落盘异常（task=%s）：%s", task_id, str(exc)[:140])
+            return {"ok": False, "reason": str(exc)[:160]}
+        if wp.get("ok"):
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "info", "agent": "orchestrator",
+                           "message": (f"已保留可复核底稿：{wp.get('rows', 0)} 条事实、"
+                                       f"{wp.get('derived', 0)} 条同比、"
+                                       f"{len(wp.get('gaps') or [])} 项缺口"),
+                           "timestamp": self._now_iso()})
+        return wp
+
+    @staticmethod
+    def _selected_facts_block(task_id: str, goal: str) -> str:
+        """把**已选定的事实**注入报告/总结步骤（C 批）。
+
+        与 `_structured_injection`（整张原始财务表）的分工：这里给的是按研究契约
+        完整身份选出来、并算过同比与缺口的那一组事实，模型只解释它，不自行挑选、
+        换算或补齐缺失年份。没有契约/没有事实时返回空串（不编）。
+        """
+        try:
+            from working_paper_export import build_result
+            res = build_result(task_id, goal)
+        except Exception as exc:                 # noqa: BLE001 - 注入失败不拖垮步骤
+            logger.warning("已选事实注入失败（task=%s）：%s", task_id, str(exc)[:140])
+            return ""
+        if not res.get("ok"):
+            return ""
+        rows = list(res.get("rows_detail") or [])
+        derived = list(res.get("derived_detail") or [])
+        if not rows and not derived:
+            return ""
+        lines = ["\n\n[已选事实]（按研究契约的完整身份选定；只解释本块内的事实）",
+                 "| 指标 | 期间 | 值 | 单位 |", "|---|---|---|---|"]
+        for r in rows[:_FACTS_BLOCK_MAX_ROWS]:
+            lines.append(f"| {r.get('metric_label') or r.get('metric')} | "
+                         f"{r.get('period')} | {r.get('value')} | |")
+        for r in derived[:_FACTS_BLOCK_MAX_ROWS]:
+            lines.append(f"| {r.get('metric_label') or r.get('metric')} | "
+                         f"{r.get('period')} | {r.get('value')} | {r.get('unit') or ''} |")
+        hidden = (len(rows) + len(derived)) - min(len(rows), _FACTS_BLOCK_MAX_ROWS) \
+            - min(len(derived), _FACTS_BLOCK_MAX_ROWS)
+        if hidden > 0:
+            lines.append(f"| …（另有 {hidden} 条未展开） | | | |")
+        lines.append("说明：同比为系统按相邻年度可比重算，单位 %。")
+        gaps = [str(g.get("detail") or g) if isinstance(g, dict) else str(g)
+                for g in (res.get("gaps") or [])]
+        problems = [str(p.get("detail") or "") if isinstance(p, dict) else str(p)
+                    for p in (res.get("problems") or [])]
+        if gaps or problems:
+            lines.append("\n必须如实写出的缺口：")
+            for g in (gaps + problems)[:8]:
+                lines.append(f"- {g[:120]}")
+        else:
+            lines.append("\n本块无缺口记录。")
+        lines.append("硬规则：不得引入本块之外的财务数字，不得自行换算或补齐缺失年份；"
+                     "缺口按上面列出的内容原样说明。")
+        return "\n".join(lines)
+
     def _route_template(self, goal: str, task_id: str = "") -> list[dict] | None:
-        """T10b：委托 templates_pipeline 模块实现（依赖注入，原主体已搬迁）。"""
+        """T10b：委托 templates_pipeline 模块实现（依赖注入，原主体已搬迁）。
+
+        C 批：研究任务先走固定步骤（契约 → 来源与事实 → 解释已选事实），
+        不依赖通用规划器成功；命中即返回。
+        """
+        fixed = self._fixed_research_plan(task_id, goal)
+        if fixed:
+            return fixed
         from templates_pipeline import route_template
         return route_template(
             goal, task_id,
@@ -3529,12 +3718,23 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         verdict = str(st.get("verdict") or "NONE")
         facts = {
             "verdict": verdict,
-            "label": "PASS" if verdict == "PASS" else "",
+            # 注记标签是**当时**记下的（如"未经评审（critic 关闭）"）：不能按 verdict
+            # 反推，否则 critic 关闭与评审降级会被说成同一件事
+            "label": str(st.get("label") or ("PASS" if verdict == "PASS" else "")),
             "degraded_reason": str(st.get("degraded_reason") or ""),
             "required": bool(self._review_is_required()),
         }
-        write_review_facts(task_id, facts)
-        merged = read_review_facts(task_id)          # 落盘后再读，保证与文件一致
+        # 工作区走本模块名（可替换），并把同一路径显式传给共享实现——否则两边各算
+        # 一次工作区，注记与落盘文件可能落在不同位置
+        ws = task_workspace(task_id)
+        write_review_facts(task_id, facts, ws_dir=ws)
+        # 注记以**内存事实**为准（写盘失败也不能让交付物变成"未执行评审"的通用文案）；
+        # 读回仅用于与文件对账，取到非空值才覆盖
+        merged = dict(facts)
+        for k, v in (read_review_facts(task_id, ws_dir=ws) or {}).items():
+            if v not in ("", None) and k in merged:
+                merged[k] = v
+        merged["required"] = facts["required"]
         note = review_note_text(merged)
         return (delivery + "\n\n" + note) if note else delivery
 
@@ -4644,6 +4844,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         if self._cancel_requested(task_id):
             _phase_stop.set()
             return self._finish_cancelled(task_id, goal, None)
+        # 结构化数据源预载：financial → 东方财富/SEC；crypto/macro/news → 对应适配器。
+        # C 批把它提到**规划之前**：研究任务的主路径不得因为规划失败/超时就丢掉来源与
+        # 事实（预载不发 LLM、不占预算票，取消检查已在上面做过）。
+        preloaded = None
+        if resumed is None:
+            preloaded = self._structured_data_preload(task_id, goal, project)
         # 1. Plan（模板步骤直接采用，否则 LLM 规划）——恢复路径跳过规划
         used_template = False
         if resumed is None:
@@ -4679,6 +4885,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                         push_progress(self._messaging, task_id, "warning",
                                       {"type": "llm", "agent": "orchestrator",
                                        "message": str(exc), "timestamp": self._now_iso()})
+                        # 正文模型不可用也要把已取到的事实落成可复核底稿（失败状态不变）
+                        self._salvage_working_paper(task_id, goal, project)
                         push_progress(self._messaging, task_id, "task_complete",
                                       {"status": "FAILED", "summary": str(exc)})
                         logger.error("Task %s aborted: %s", task_id, exc)
@@ -4700,6 +4908,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             steps = self._inject_skills(steps, goal)
             steps = self._enforce_no_web_scrape_code(steps, goal, task_id)
             if not steps:
+                # 计划产不出来也要保住已取到的事实（失败状态不变）
+                self._salvage_working_paper(task_id, goal, project)
                 push_progress(self._messaging, task_id, "task_complete",
                               {"status": "FAILED", "summary": "Planning failed"})
                 self._clear_task_running(task_id)
@@ -4775,11 +4985,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                                "message": "Simple task: fast path enabled (skip TDD/review/reflection, early LLM failover)",
                                "timestamp": self._now_iso()})
 
-            # 结构化数据源预载：financial → 东方财富/SEC；crypto/macro/news →
-            # 对应新适配器（若命中，搜索仅作补充）
-            preloaded = self._structured_data_preload(task_id, goal, project)
-            # B 方案：已预载结构化行情数据时，data_analyzer 替换为 content_summary，
-            # 让下游步骤直接消费 structured_data.json（图表仍由数据驱动兜底渲染）
+            # 结构化数据源预载已在规划前完成（见上方 preloaded），此处只按预载结果
+            # 做步骤替换：data_analyzer → content_summary，让下游直接消费结构化数据
             steps = self._reduce_steps_for_structured(task_id, steps, preloaded)
         else:
             # 恢复路径：直接用 checkpoint 中的待执行步骤与历史标记
@@ -5373,6 +5580,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             from working_paper_export import write_working_paper
             _wp = write_working_paper(task_id, goal, project=project)
             self._working_paper = _wp
+            # C 批：把脱敏的 LLM 调用形状落到工作区，供离线取证（无正文/密钥）
+            self._dump_llm_calls(task_id)
             # 评审结论是**本次运行**的内存态：连同"属于哪一版"一起交给装配器落盘
             _rv = self._review_state(task_id)
             _review_facts = {
@@ -6453,6 +6662,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 block = self._structured_injection(task_id)
                 if block:
                     instr += block
+                # C 批：把**已选定的事实**（含同比与缺口）给到模型——研究路径下模型
+                # 只解释这组事实，不自行从原始表里挑数或换算
+                selected = self._selected_facts_block(
+                    task_id, str((getattr(self, "_task_goals", {}) or {}).get(task_id, "")))
+                if selected:
+                    instr += selected
                 # P2-5 追加数据源选择依据：市场偏好与候选列表（前 3）
                 prefs = (
                     getattr(self, "_task_market_resolution", {}) or {}

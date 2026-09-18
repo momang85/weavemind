@@ -277,5 +277,36 @@ class TestCaliberIsSourceDeclared(unittest.TestCase):
         self.assertEqual(F.facts_from_financials(payload)[0].caliber, F.UNKNOWN)
 
 
+class TestResearchShape(unittest.TestCase):
+    """“是不是研究任务”的唯一定义（固定路径与交付硬门槛共用）。"""
+
+    def _req(self, **kw):
+        base = dict(company="贵州茅台", company_id="600519.SH", periods=[2023, 2024],
+                    caliber="合并")
+        base.update(kw)
+        return F.parse_research_request("表单提交", **base)
+
+    def test_shaped_requires_subject_periods_and_caliber(self):
+        self.assertTrue(F.research_shaped(self._req()))
+        self.assertFalse(F.research_shaped(self._req(periods=[2024])),
+                         "单期间不是两年度研究")
+        self.assertFalse(F.research_shaped(self._req(caliber="")),
+                         "口径未知不得当研究任务（不默认合并）")
+        self.assertFalse(F.research_shaped(self._req(company="", company_id="")),
+                         "没有主体就没有研究任务")
+        self.assertFalse(F.research_shaped(None))
+
+    def test_subject_is_the_looser_gate_criterion(self):
+        """门槛口径（有主体即可）比路径选择（严格版）宽：两者同源、各有其用。"""
+        only_subject = self._req(periods=[2024], caliber="")
+        self.assertTrue(F.research_subject(only_subject))
+        self.assertFalse(F.research_shaped(only_subject))
+        self.assertTrue(F.research_subject(self._req(company="", company_id="600519.SH")),
+                        "有稳定标识也算有主体")
+
+    def test_code_only_contract_still_shaped(self):
+        self.assertTrue(F.research_shaped(self._req(company="")))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

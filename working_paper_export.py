@@ -113,6 +113,14 @@ def build_result(task_id: str, goal: str, *, project: str | None = None) -> dict
                          "metric_label": r.get("metric_label"),
                          "period": r.get("period"),
                          "value": r.get("value")} for r in paper.rows],
+        # 可重算的派生行（同比等，单位 %）：注入给模型解释，也便于读侧核对
+        "derived_detail": [{"metric": r.get("metric"),
+                            "metric_label": r.get("metric_label"),
+                            "period": r.get("period"),
+                            "value": r.get("value"),
+                            "unit": r.get("unit"),
+                            "derived_from": list(r.get("derived_from") or [])}
+                           for r in paper.derived],
         "rows": len(paper.rows), "derived": len(paper.derived),
         "gaps": paper.gaps, "problems": [p.as_dict() for p in paper.problems],
         "audit": paper.audit,

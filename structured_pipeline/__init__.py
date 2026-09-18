@@ -130,12 +130,29 @@ class StructuredPipelineMixin:
         新增的 crypto/macro/news 适配器；命中后写入工作区并合并到
         clean_chart_data.json，供搜索清洗、图表与报告引用。失败静默回退搜索链路。"""
         try:
-            from adapters.router import route_structured
+            from adapters.router import route_structured, route_structured_for_request
+            # C 批：先试**契约驱动**（表单落库的 company_id + market + periods），
+            # 命中就不必再从目标文本猜公司名；取不到才回落文本路由
+            data = None
+            try:
+                from working_paper_export import resolve_request
+                request, _cands, _src = resolve_request(task_id, goal, {}, None)
+                # **只认落库契约**：文本解析出来的主体可能认错（实测把"两个"当公司名），
+                # 据此直接抓数就是让抓取主体由解析器决定——与固定路径同一纪律
+                if _src == "stored" and request is not None and request.company_id:
+                    data = route_structured_for_request(request)
+                    if not data:
+                        logger.info(
+                            "契约驱动抓取未命中，回落文本路由（task=%s）", task_id)
+            except Exception as exc:
+                logger.warning("契约驱动抓取异常（task=%s）：%s", task_id, str(exc)[:140])
+                data = None
             # scope=项目名：行情缓存按项目分桶（不同项目的数据源策略/口径可能不同）；
             # 无项目时不传参，保持既有调用形状
             _scope = str(project or "")
             _scope_kw = {"scope": _scope} if _scope else {}
-            data = route_structured(goal, **_scope_kw)
+            if not data:
+                data = route_structured(goal, **_scope_kw)
             if not data:
                 # P2-6 预载失败可见化：首次未命中（如瞬时接口异常）等待 2s
                 # 重试一次，第二次仍返回 None 才放弃并告警，避免静默占位

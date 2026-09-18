@@ -2687,6 +2687,153 @@ class TestSimpleTaskFastPath(_DevSandboxMode, _TempWorkspace, unittest.TestCase)
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_fixed_research_plan_needs_stored_contract(self):
+        """C 批：固定研究路径只认**表单落库契约**（严格版研究判据）。
+
+        自由文本里出现期间与口径也不选固定路径：`_extract_company` 会把
+        "两个年度"里的"两个"当主体，据此选路径等于让路径依赖会认错主体的解析。
+        """
+        import tempfile
+        import task_state
+        import workspace as ws_mod
+        from facts import parse_research_request
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._messaging = type("M", (), {"publish": lambda *a, **k: None})()
+        o._now_iso = lambda: "t"
+        tmp = tempfile.mkdtemp(prefix="weavemind_res_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        old_db = task_state.DB_PATH
+        ws_mod.configure_workspace_root(tmp)
+        task_state.DB_PATH = str(Path(tmp) / "res.db")
+        goal = ("研究贵州茅台 2023 与 2024 两个年度的营业收入、归母净利润、"
+                "经营活动现金流净额，合并报表口径，数据截至 2025-04-30。")
+        try:
+            # ① 没有落库契约：即使目标文本能被解析成"研究形状"，也不走固定路径
+            self.assertIsNone(o._fixed_research_plan("t-fixed-1", goal))
+            # ② 落库契约（表单）：命中固定路径，步骤能力序列固定
+            req = parse_research_request(goal, company="贵州茅台", company_id="600519.SH",
+                                        market="cn", periods=[2023, 2024],
+                                        caliber="合并", as_of="2025-04-30",
+                                        identity_source="form")
+            task_state.mark_queued("t-fixed-1", goal=goal,
+                                   research_request=req.to_payload(),
+                                   db_path=task_state.DB_PATH)
+            steps = o._fixed_research_plan("t-fixed-1", goal)
+            self.assertIsNotNone(steps)
+            self.assertEqual([s["capability"] for s in steps],
+                             ["web_search", "web_fetch", "content_summary",
+                              "report_generator"])
+            self.assertIn("贵州茅台", steps[0]["instruction"])
+            self.assertIn("2023、2024", steps[1]["instruction"])
+            self.assertIn("已选定的事实", steps[2]["instruction"])
+            # ③ 只有主体、说不清期间/口径的契约不选固定路径（交给通用规划器）
+            thin_goal = "研究贵州茅台的发展历程与现状"
+            thin = parse_research_request(thin_goal, company="贵州茅台",
+                                          identity_source="form")
+            self.assertEqual(thin.periods, [])
+            task_state.mark_queued("t-fixed-2", goal=thin_goal,
+                                   research_request=thin.to_payload(),
+                                   db_path=task_state.DB_PATH)
+            self.assertIsNone(o._fixed_research_plan("t-fixed-2", thin_goal))
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            task_state.DB_PATH = old_db
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_fixed_research_plan_preempts_llm_router(self):
+        """固定路径先于模板路由：命中时不再花那次无预算的路由调用。"""
+        import tempfile
+        import task_state
+        import templates_pipeline
+        import workspace as ws_mod
+        from facts import parse_research_request
+        from orchestrator_v2 import OrchestratorV2
+        from unittest import mock
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._messaging = type("M", (), {"publish": lambda *a, **k: None})()
+        o._now_iso = lambda: "t"
+        tmp = tempfile.mkdtemp(prefix="weavemind_res2_")
+        old_root = ws_mod.WORKSPACE_ROOT
+        old_db = task_state.DB_PATH
+        ws_mod.configure_workspace_root(tmp)
+        task_state.DB_PATH = str(Path(tmp) / "res2.db")
+        goal = "研究贵州茅台 2023 与 2024 两个年度的营业收入，合并报表口径。"
+        try:
+            req = parse_research_request(goal, company="贵州茅台", company_id="600519.SH",
+                                        market="cn", periods=[2023, 2024],
+                                        caliber="合并", identity_source="form")
+            task_state.mark_queued("t-fixed-3", goal=goal,
+                                   research_request=req.to_payload(),
+                                   db_path=task_state.DB_PATH)
+            with mock.patch.object(templates_pipeline, "route_template",
+                                   side_effect=AssertionError("不应进入模板路由")):
+                steps = o._route_template(goal, "t-fixed-3")
+            self.assertEqual(len(steps), 4)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            task_state.DB_PATH = old_db
+            import shutil
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_contract_fetch_skips_company_resolution(self):
+        """C 批：契约给了市场 + 代码就直接抓，不再联网 resolve 公司名。"""
+        from unittest import mock
+
+        import adapters.router as router
+        from facts import parse_research_request
+
+        req = parse_research_request("表单提交", company="贵州茅台",
+                                     company_id="600519.SH", market="cn",
+                                     periods=[2023, 2024], caliber="合并",
+                                     identity_source="form")
+        payload = {"financials": [{"year": 2024, "revenue": 1741.44}],
+                   "metadata": {"company": "贵州茅台", "unit": "亿元"},
+                   "raw": {"url": "https://example.invalid/a", "text": "{}"}}
+        with mock.patch("adapters.router.fetch_cn_or_fallback",
+                        return_value=dict(payload)) as fc, \
+                mock.patch("adapters.router.resolve_company",
+                           side_effect=AssertionError("契约路径不得再 resolve")):
+            out = router.route_structured_for_request(req)
+        self.assertEqual(out["contract"]["company_id"], "600519.SH")
+        self.assertEqual(out["resolution"]["market"], "CN")
+        self.assertEqual(fc.call_args.kwargs.get("year_range"), (2023, 2024))
+        self.assertEqual(fc.call_args.kwargs.get("period"), "annual")
+
+    def test_contract_fetch_market_follows_code_suffix(self):
+        """代码后缀比表单选择更确定：`00001.HK` 与 `000001.SZ` 不是同一主体。"""
+        from unittest import mock
+
+        import adapters.router as router
+        from facts import parse_research_request
+
+        # 表单把市场写成 cn，但代码后缀是 HK → 按 HK 走东财港股接口
+        req = parse_research_request("表单提交", company="长和", company_id="00001.HK",
+                                     market="cn", periods=[2023, 2024],
+                                     caliber="合并", identity_source="form")
+        with mock.patch("adapters.router.fetch_eastmoney",
+                        return_value={"financials": [], "metadata": {},
+                                      "raw": {}}) as fe, \
+                mock.patch("adapters.router.fetch_cn_or_fallback",
+                           side_effect=AssertionError("后缀是 HK，不该走 A 股链路")):
+            out = router.route_structured_for_request(req)
+        self.assertEqual(out["resolution"]["market"], "HK")
+        self.assertEqual(fe.call_args.args[1], "00001.HK")
+
+    def test_contract_fetch_returns_none_without_code(self):
+        """契约没有稳定代码 → 不猜（返回 None，由调用方回落文本路由）。"""
+        import adapters.router as router
+        from facts import parse_research_request
+
+        req = parse_research_request("表单提交", company="贵州茅台", market="cn",
+                                     periods=[2023, 2024], caliber="合并",
+                                     identity_source="form")
+        self.assertIsNone(router.route_structured_for_request(req))
+        self.assertIsNone(router.route_structured_for_request(None))
+
     def test_load_templates_sorts_manual_before_auto(self):
         """P2-6 模板优先级：_load_templates 手工模板在前，auto-* 沉淀模板在后。"""
         import json

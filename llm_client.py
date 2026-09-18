@@ -258,6 +258,144 @@ def _record_task_degradation(task_id: str, reason: str, both_failed: bool = Fals
         pass
 
 
+def _error_shape(exc: Exception) -> tuple[int, str]:
+    """把调用异常压成**脱敏形状**：`(http_status, error_class)`。
+
+    只看类别与状态码：HTTP 响应体、提示词、密钥都不进诊断记录（`LLMCallError`
+    的文本里可能带上游响应片段，不能原样落到诊断/日志里）。
+    """
+    text = str(exc or "")
+    if isinstance(exc, LLMCancelledError):
+        return 0, "cancelled"
+    if getattr(exc, "budget_exhausted", False):
+        return 0, "budget_exhausted"
+    if isinstance(exc, LLMJSONParseError):
+        return 0, "bad_json"
+    m = re.search(r"HTTP[ _-]?(\d{3})", text)
+    if m:
+        return int(m.group(1)), f"http_{m.group(1)}"
+    low = text.lower()
+    if "timeout" in low or "timed out" in low:
+        return 0, "timeout"
+    if "network error" in low:
+        return 0, "network_error"
+    if "empty content" in low or "empty choices" in low:
+        return 0, "empty_content"
+    return 0, "generic"
+
+
+def describe_error(exc: Exception) -> str:
+    """给用户可见的进度流/日志用的**脱敏**错误类别（如 `http_500`、`timeout`）。
+
+    提示词与响应体不进这里：`LLMCallError` 的文本可能带上游响应片段，
+    原样写进进度流会随 `logs_json` 落库并在界面上显示。
+    """
+    status, cls = _error_shape(exc)
+    if status:
+        return f"{cls}(HTTP {status})"
+    return cls or type(exc).__name__
+
+
+_LLM_CALLS_MAX = 200          # 每任务保留的调用形状条数上限
+
+
+def _record_llm_call(task_id: str, *, stage: str = "", attempt: int = 0,
+                     elapsed_ms: int = 0, input_chars: int = 0,
+                     max_tokens: int = 0, http_status: int = 0,
+                     error_class: str = "", end_reason: str = "",
+                     endpoint: str = "primary") -> None:
+    """把一次 LLM 调用的**形状**写入 Redis（`llm_calls:{task_id}`）。
+
+    只记形状：阶段 / 第几次 / 耗时 / 输入长度 / 输出上限 / HTTP 状态或错误类别 /
+    结束原因。**不记提示词、响应体、密钥**——失败取证不需要正文。写失败只吞掉，
+    诊断不得拖累主线。
+    """
+    if not task_id:
+        return
+    global _task_usage_client
+    try:
+        if _task_usage_client is None:
+            import redis as _redis
+            _task_usage_client = _redis.Redis(
+                host=os.environ.get("REDIS_HOST", "localhost"),
+                port=int(os.environ.get("REDIS_PORT", "6379")),
+                decode_responses=True,
+                socket_connect_timeout=2,
+                socket_timeout=2, retry=_NO_REDIS_RETRY,
+            )
+        key = f"llm_calls:{task_id}"
+        payload = json.dumps({
+            "ts": time.time(),
+            "stage": str(stage or ""),
+            "attempt": int(attempt or 0),
+            "elapsed_ms": int(elapsed_ms or 0),
+            "input_chars": int(input_chars or 0),
+            "max_tokens": int(max_tokens or 0),
+            "http_status": int(http_status or 0),
+            "error_class": str(error_class or ""),
+            "end_reason": str(end_reason or ""),
+            "endpoint": str(endpoint or ""),
+        }, ensure_ascii=False)
+        # 一次往返写三条（每次调用都记，不能一个调用三次 RTT）
+        pipe = _task_usage_client.pipeline()
+        pipe.rpush(key, payload)
+        pipe.ltrim(key, -_LLM_CALLS_MAX, -1)
+        pipe.expire(key, 7200)
+        pipe.execute()
+    except Exception:
+        pass
+
+
+def get_task_llm_calls(task_id: str) -> dict:
+    """读任务的调用形状汇总：`{calls, failed, by_stage, total_elapsed_ms,
+    total_input_chars, max_tokens, events}`（events 为脱敏后的逐次记录）。"""
+    if not task_id:
+        return {}
+    global _task_usage_client
+    try:
+        if _task_usage_client is None:
+            import redis as _redis
+            _task_usage_client = _redis.Redis(
+                host=os.environ.get("REDIS_HOST", "localhost"),
+                port=int(os.environ.get("REDIS_PORT", "6379")),
+                decode_responses=True,
+                socket_connect_timeout=2,
+                socket_timeout=2, retry=_NO_REDIS_RETRY,
+            )
+        raw = _task_usage_client.lrange(f"llm_calls:{task_id}", 0, -1) or []
+    except Exception:
+        return {}
+    events: list[dict] = []
+    for item in raw:
+        try:
+            ev = json.loads(item)
+        except Exception:
+            continue
+        if isinstance(ev, dict):
+            events.append(ev)
+    by_stage: dict[str, int] = {}
+    failed = 0
+    total_elapsed = 0
+    total_input = 0
+    max_tok = 0
+    for ev in events:
+        stage = str(ev.get("stage") or "")
+        by_stage[stage] = by_stage.get(stage, 0) + 1
+        if str(ev.get("end_reason") or "") != "ok":
+            failed += 1
+        try:
+            total_elapsed += int(ev.get("elapsed_ms") or 0)
+            total_input += int(ev.get("input_chars") or 0)
+            max_tok = max(max_tok, int(ev.get("max_tokens") or 0))
+        except (TypeError, ValueError):
+            pass
+    return {
+        "calls": len(events), "failed": failed, "by_stage": by_stage,
+        "total_elapsed_ms": total_elapsed, "total_input_chars": total_input,
+        "max_tokens": max_tok, "events": events,
+    }
+
+
 def _primary_degradation_root() -> str:
     """返回主端点当前降级根因；无具体失败时回填 inherited_unhealthy。"""
     with _endpoint_health_lock:
@@ -1267,6 +1405,8 @@ class LLMClient:
         temp = temperature if temperature is not None else self.temperature
         max_tok = max_tokens if max_tokens is not None else self.max_tokens
         model = self._resolve_model(usage, model_override)
+        # 诊断用输入长度（**只记长度不记内容**）：提示词不进任何诊断记录
+        _input_chars = len(str(system or "")) + len(str(user or ""))
 
         def _remaining() -> float | None:
             """距 deadline 的剩余预算（秒）；未设 deadline 返回 None。"""
@@ -1334,6 +1474,9 @@ class LLMClient:
                 # R2：取消优先于预算——重试只会让"停止"更晚生效
                 logger.info("任务已取消：不再重试 LLM 调用（usage=%s, attempt=%d）",
                             usage, attempt)
+                _record_llm_call(get_task_context(), stage=usage, attempt=attempt,
+                                 input_chars=_input_chars, max_tokens=max_tok,
+                                 error_class="cancelled", end_reason="cancelled")
                 raise LLMCancelledError()
             if _budget_exhausted():
                 # 时间预算耗尽：不再重试/切备用，给调用方一个明确信号去降级
@@ -1342,12 +1485,17 @@ class LLMClient:
                 )
                 setattr(exc, "budget_exhausted", True)
                 logger.warning("LLM time budget exhausted (usage=%s)", usage)
+                _record_llm_call(get_task_context(), stage=usage, attempt=attempt,
+                                 input_chars=_input_chars, max_tokens=max_tok,
+                                 error_class="budget_exhausted",
+                                 end_reason="budget_exhausted")
                 raise exc
             try:
                 _t = _attempt_timeout()
                 # 无预算时不传 timeout：保持调用形状与改动前一致
                 # （既有打桩/自定义 _send_request 不必为新增特性适配）
                 _req_kw = {"timeout": _t} if _t is not None else {}
+                _t0 = time.monotonic()
                 raw = self._send_request(system, user, temp, max_tok, model=model,
                                          **_req_kw)
                 _mark_endpoint("primary", True)
@@ -1356,9 +1504,17 @@ class LLMClient:
                 else:
                     result = self._parse_json(raw)
                 _cache_set(cache_key, user, result)
+                _record_llm_call(get_task_context(), stage=usage, attempt=attempt,
+                                 elapsed_ms=int((time.monotonic() - _t0) * 1000),
+                                 input_chars=_input_chars, max_tokens=max_tok,
+                                 end_reason="ok")
                 return result
-            except LLMJSONParseError:
+            except LLMJSONParseError as exc:
                 # JSON 解析失败不重试（格式问题重试没用）
+                _record_llm_call(get_task_context(), stage=usage, attempt=attempt,
+                                 elapsed_ms=int((time.monotonic() - _t0) * 1000),
+                                 input_chars=_input_chars, max_tokens=max_tok,
+                                 error_class="bad_json", end_reason="bad_json")
                 raise
             except Exception as exc:
                 # 思考耗尽（reasoning 模型烧光预算）→ 放大 max_tokens 立即重试，
@@ -1377,6 +1533,14 @@ class LLMClient:
                 _reason = _degradation_reason(exc)
                 _mark_endpoint("primary", False, _reason)
                 _record_task_degradation(get_task_context(), _reason, both_failed=False)
+                _http_status, _err_class = _error_shape(exc)
+                _record_llm_call(
+                    get_task_context(), stage=usage, attempt=attempt,
+                    elapsed_ms=int((time.monotonic() - _t0) * 1000),
+                    input_chars=_input_chars, max_tokens=max_tok,
+                    http_status=_http_status, error_class=_err_class,
+                    end_reason="retry" if attempt < self._MAX_RETRIES else "exhausted",
+                )
                 last_error = exc
                 logger.warning(
                     "LLM call attempt %d/%d failed: %s",
@@ -1394,14 +1558,26 @@ class LLMClient:
         if self._backup_cfg and not _budget_exhausted():
             try:
                 _bk_timeout = _attempt_timeout()
-                return self._call_backup(system, user, temp, max_tok, expect_json,
-                                         timeout=_bk_timeout)
+                _t0 = time.monotonic()
+                out = self._call_backup(system, user, temp, max_tok, expect_json,
+                                        timeout=_bk_timeout)
+                _record_llm_call(get_task_context(), stage=usage, attempt=attempt,
+                                 elapsed_ms=int((time.monotonic() - _t0) * 1000),
+                                 input_chars=_input_chars, max_tokens=max_tok,
+                                 end_reason="ok", endpoint="backup")
+                return out
             except LLMJSONParseError:
                 raise
             except Exception as exc:
                 _reason = _degradation_reason(exc)
                 _mark_endpoint("backup", False, _reason)
                 _record_task_degradation(get_task_context(), _reason, both_failed=True)
+                _http_status, _err_class = _error_shape(exc)
+                _record_llm_call(get_task_context(), stage=usage, attempt=attempt,
+                                 elapsed_ms=int((time.monotonic() - _t0) * 1000),
+                                 input_chars=_input_chars, max_tokens=max_tok,
+                                 http_status=_http_status, error_class=_err_class,
+                                 end_reason="exhausted", endpoint="backup")
                 logger.error("Backup LLM also failed: %s", str(exc)[:200])
         raise LLMCallError(
             f"LLM call failed after {self._MAX_RETRIES} attempts",

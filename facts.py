@@ -272,6 +272,24 @@ def parse_research_request(goal: str, *, company: str = "", company_id: str = ""
     return req
 
 
+def research_subject(request: ResearchRequest | None) -> bool:
+    """契约里有没有**明确主体**（公司名或稳定标识）——研究门槛的最低条件。"""
+    return bool(request is not None and (request.company or request.company_id))
+
+
+def research_shaped(request: ResearchRequest | None) -> bool:
+    """**研究任务**判据：有主体 + ≥2 个期间 + 已声明口径。
+
+    只声明主体、说不清期间或口径的请求不算：连取数区间都不确定，不能据此选路径
+    （口径未知按未知处理，不默认合并）。固定研究路径与交付硬门槛共用这一处定义。
+    """
+    if not research_subject(request):
+        return False
+    if len(list(request.periods or [])) < 2:
+        return False
+    return str(request.caliber or UNKNOWN) in _CALIBERS
+
+
 # ── 最小事实记录 ────────────────────────────────────────────
 
 

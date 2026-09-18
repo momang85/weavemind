@@ -149,7 +149,11 @@ class TestMergeStructuredFinancials(unittest.TestCase):
         self.assertIn("2025Q3毛利率", labels)
         self.assertIn("2025Q3经营现金流", labels)
         for r in out["market_data"]:
-            self.assertIn("三季报口径", r["caliber"])
+            # 期间描述只在 period_label：A 批起 `caliber` 只保留**来源真声明的**报表
+            # 口径（合并/母公司），期间文字混进去会把"口径未知"变成"已知"
+            self.assertIn("三季报口径", r["period_label"])
+            self.assertEqual(r["caliber"], "",
+                             "来源没声明口径时不得用期间文字填充口径字段")
         self.assertEqual(out["market_data"][0]["source"], "https://example.invalid/src")
 
     def test_annual_and_quarter_do_not_collide(self):
