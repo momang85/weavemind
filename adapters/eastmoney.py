@@ -60,6 +60,23 @@ def _to_yi(raw) -> float | None:
     return round(v / 1e8, 2)
 
 
+def _declare_consolidated(rows: list, field: str, label: str) -> tuple[str, str]:
+    """按**来源自身的结构证据**声明报表口径，返回 `(caliber, evidence)`。
+
+    东财主要指标表以合并报表口径披露：表内含"归属于母公司股东的净利润"
+    （A 股 `PARENTNETPROFIT` / 港股 `HOLDER_PROFIT`，即股东应占溢利），
+    该科目只在**合并**报表中存在（母公司单独报表没有"归属母公司股东"这一层）。
+
+    只在这些字段**确实存在且非空**时才声明；来源形状一旦变化就退回"未声明"，
+    由 `facts` 记 unknown 并在底稿里如实列缺口——不猜、不用请求的口径顶替。
+    """
+    for r in rows:
+        if r.get(field) is not None:
+            return "合并", (
+                f"来源行含 {field}（{label}），该科目只存在于合并报表 → 合并报表口径")
+    return "", ""
+
+
 def _select_period_rows(rows: list, period: str, max_years: int) -> list:
     """按报告期粒度挑行：annual=仅年报（默认，保持既有行为）；
     quarter=仅季报/中报（最新优先）；all=全部期次（年报优先排序）。
@@ -118,6 +135,8 @@ def fetch(company: str, stock_code: str, year_range=None, max_years: int = 12,
             "year": year,
             "report_date": str(r.get("REPORT_DATE") or "")[:10],
             "report_type": str(r.get("REPORT_TYPE") or ""),
+            # 公告日期（NOTICE_DATE）：事实的"披露时间"证据，与报告期末区分开
+            "disclosure_date": str(r.get("NOTICE_DATE") or "")[:10],
             "revenue": _to_yi(r.get("OPERATE_INCOME")),
             "net_profit": _to_yi(r.get("HOLDER_PROFIT")),
             "gross_profit": _to_yi(r.get("GROSS_PROFIT")),
@@ -134,6 +153,8 @@ def fetch(company: str, stock_code: str, year_range=None, max_years: int = 12,
         })
 
     latest = rows[0] if rows else {}
+    _cal, _cal_ev = _declare_consolidated(annuals, "HOLDER_PROFIT",
+                                          "股东应占溢利/归母净利润")
     metadata = {
         "source": "eastmoney_datacenter",
         "company": str(company or latest.get("SECURITY_NAME_ABBR") or ""),
@@ -145,6 +166,9 @@ def fetch(company: str, stock_code: str, year_range=None, max_years: int = 12,
         "period": str(period or "annual"),
         "latest_report": f"{str(latest.get('REPORT_DATE') or '')[:10]} {latest.get('REPORT_TYPE')}",
     }
+    if _cal:
+        metadata["caliber"] = _cal
+        metadata["caliber_evidence"] = _cal_ev
     return {
         "financials": financials,
         "metadata": metadata,
@@ -181,6 +205,8 @@ def fetch_ashare(company: str, stock_code: str, year_range=None, max_years: int 
             "year": year,
             "report_date": str(r.get("REPORT_DATE") or "")[:10],
             "report_type": str(r.get("REPORT_TYPE") or ""),
+            # 公告日期（NOTICE_DATE）：事实的"披露时间"证据，与报告期末区分开
+            "disclosure_date": str(r.get("NOTICE_DATE") or "")[:10],
             "revenue": revenue,
             "net_profit": _to_yi(r.get("PARENTNETPROFIT")),
             "gross_profit": gross,
@@ -197,6 +223,8 @@ def fetch_ashare(company: str, stock_code: str, year_range=None, max_years: int 
                    if r.get("ROEJQ") is not None else None,
         })
     latest = rows[0] if rows else {}
+    _cal, _cal_ev = _declare_consolidated(annuals, "PARENTNETPROFIT",
+                                          "归属于母公司股东的净利润")
     metadata = {
         "source": "eastmoney_ashare",
         "company": str(company or latest.get("SECURITY_NAME_ABBR") or ""),
@@ -208,6 +236,9 @@ def fetch_ashare(company: str, stock_code: str, year_range=None, max_years: int 
         "period": str(period or "annual"),
         "latest_report": f"{str(latest.get('REPORT_DATE') or '')[:10]} {latest.get('REPORT_TYPE')}",
     }
+    if _cal:
+        metadata["caliber"] = _cal
+        metadata["caliber_evidence"] = _cal_ev
     return {
         "financials": financials,
         "metadata": metadata,

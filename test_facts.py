@@ -308,5 +308,68 @@ class TestResearchShape(unittest.TestCase):
         self.assertTrue(F.research_shaped(self._req(company="")))
 
 
+class TestCaliberEvidence(unittest.TestCase):
+    """口径证据链：口径只认来源声明的，且**必须能说出依据**（否则按未知处理）。"""
+
+    def _payload(self, *, md_extra=None, row_extra=None):
+        row = {"year": 2024, "report_type": "年报", "revenue": 100.0}
+        row.update(row_extra or {})
+        md = {"source": "eastmoney_ashare", "company": "示例", "currency": "CNY",
+              "unit": "亿元"}
+        md.update(md_extra or {})
+        return {"financials": [row], "metadata": md,
+                "raw": {"url": "https://example.invalid/a", "text": "{}"}}
+
+    def test_metadata_declaration_is_recorded_with_evidence(self):
+        """适配器按来源结构声明的口径：采信，并留下依据原文（可复核）。"""
+        facts = F.facts_from_financials(self._payload(md_extra={
+            "caliber": "合并",
+            "caliber_evidence": "来源行含 PARENTNETPROFIT → 合并报表口径"}))
+        self.assertEqual(facts[0].caliber, "合并")
+        self.assertEqual(facts[0].caliber_source, "metadata")
+        self.assertIn("PARENTNETPROFIT", facts[0].caliber_evidence)
+
+    def test_row_declaration_wins_over_metadata(self):
+        facts = F.facts_from_financials(self._payload(
+            md_extra={"caliber": "合并", "caliber_evidence": "实体级依据"},
+            row_extra={"caliber": "母公司",
+                       "caliber_evidence": "行内声明：母公司报表"}))
+        self.assertEqual(facts[0].caliber, "母公司")
+        self.assertEqual(facts[0].caliber_source, "row")
+        self.assertIn("行内声明", facts[0].caliber_evidence)
+
+    def test_declaration_without_evidence_is_still_labeled(self):
+        """有口径但没写依据：仍采信，但证据要标出"未附依据"（不假装有据）。"""
+        facts = F.facts_from_financials(self._payload(md_extra={"caliber": "合并"}))
+        self.assertEqual(facts[0].caliber, "合并")
+        self.assertIn("未附依据", facts[0].caliber_evidence)
+
+    def test_no_declaration_stays_unknown_fail_closed(self):
+        """来源没声明 → unknown 且证据为空（不默认合并、不用请求的口径顶替）。"""
+        facts = F.facts_from_financials(self._payload())
+        self.assertEqual(facts[0].caliber, F.UNKNOWN)
+        self.assertEqual(facts[0].caliber_source, "")
+        self.assertEqual(facts[0].caliber_evidence, "")
+
+    def test_period_text_is_not_a_caliber(self):
+        """把期间描述塞进口径字段（如"三季报口径"）不采信：那是另一个维度。"""
+        facts = F.facts_from_financials(self._payload(
+            row_extra={"caliber": "三季报口径"}))
+        self.assertEqual(facts[0].caliber, F.UNKNOWN)
+
+    def test_disclosure_date_becomes_disclosed_at(self):
+        """公告日期（NOTICE_DATE）是"截至日能否成立"的证据，与报告期末分开记。"""
+        facts = F.facts_from_financials(self._payload(
+            row_extra={"report_date": "2024-12-31", "disclosure_date": "2025-04-03"}))
+        self.assertEqual(facts[0].disclosed_at, "2025-04-03")
+        self.assertEqual(facts[0].period_end, "2024-12-31")
+
+    def test_period_end_fallback_is_recorded(self):
+        """没有公告日期的来源：回落到报告期末（已知弱点，见证据文档）。"""
+        facts = F.facts_from_financials(self._payload(
+            row_extra={"report_date": "2024-12-31"}))
+        self.assertEqual(facts[0].disclosed_at, "2024-12-31")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

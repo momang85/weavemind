@@ -326,6 +326,10 @@ class Fact:
     value: Any = None                 # 规范化值（已按 unit 缩放）
     raw_value: Any = None             # 原始值（源里怎么写就怎么记）
     caliber: str = UNKNOWN
+    # 口径证据链：这条事实的口径**是谁说的**（row/metadata/unknown）与依据原文。
+    # 空口径配空证据 = 未声明；有口径必须有证据，否则审核人无从复核。
+    caliber_source: str = ""
+    caliber_evidence: str = ""
     # 主体所在市场（cn/hk/us）与披露日期：前者是主体标识的一部分（A′1），
     # 后者是"截至日能否成立"的证据（A′4，与期末 period_end、抓取时间分开记）
     market: str = ""
@@ -415,6 +419,24 @@ def _period_of(row: dict) -> tuple[str, str, str, str]:
     return label, start, end, report_type
 
 
+def _caliber_of(row: dict, md: dict) -> tuple[str, str, str]:
+    """报表口径只认**来源声明的**，并记下"是谁声明的 + 依据原文"。
+
+    优先级：行级 > 实体级；都没有 → `unknown`（空口径配空证据）。口径与证据成对：
+    有口径必须能说出依据（适配器给的结构证据或申报规则依据），说不出就不声明——
+    宁可按未知处理，也不让一条口径无从复核。非法值（如把期间描述当口径）不采信。
+    """
+    for level, src in (("row", row or {}), ("metadata", md or {})):
+        cal = str(src.get("caliber") or "").strip()
+        if cal not in _CALIBERS:
+            continue
+        ev = str(src.get("caliber_evidence") or "").strip()
+        if not ev:
+            ev = f"{'行内' if level == 'row' else '来源元数据'}声明口径「{cal}」（未附依据）"
+        return cal, level, ev
+    return UNKNOWN, "", ""
+
+
 def facts_from_financials(payload: dict, *, source_kind: str = "",
                           metrics: tuple[tuple[str, str], ...] = ALL_METRICS,
                           verify_state: str = VERIFY_UNVERIFIED) -> list[Fact]:
@@ -446,12 +468,15 @@ def facts_from_financials(payload: dict, *, source_kind: str = "",
             if not isinstance(row, dict):
                 continue
             period, p_start, p_end, p_type = _period_of(row)
+            # 报告期末：来源给了 end 就用它，否则用 report_date（适配器行里它**就是**
+            # 期末）——否则"期末"留空而 disclosed_at 回落成期末，两者看起来会互相矛盾
+            p_end = p_end or str(row.get("report_date") or "").strip()[:10]
             for key, label in metrics:
                 if key not in row or row.get(key) is None:
                     continue
                 # 报表口径只认**来源声明的**：行级优先，其次实体级；没有就是 unknown
                 # （不默认成"合并"，也不接受把报告期描述当口径——那是另一个维度）
-                caliber = str(row.get("caliber") or md.get("caliber") or UNKNOWN)
+                caliber, cal_source, cal_evidence = _caliber_of(row, md)
                 # 行级声明优先于元数据：同一载荷里不同年度/不同来源的币种可能不同，
                 # 只有行级能如实表达；缺失仍记 unknown。
                 row_currency = str(row.get("currency") or currency or UNKNOWN)
@@ -471,6 +496,8 @@ def facts_from_financials(payload: dict, *, source_kind: str = "",
                                  else ("source" if str(md.get("unit") or "") else UNKNOWN)),
                     value=row.get(key), raw_value=row.get(key),
                     caliber=caliber,
+                    caliber_source=cal_source,
+                    caliber_evidence=cal_evidence,
                     market=md_market,
                     disclosed_at=row_disclosed,
                     source_url=url, source_hash=snap,

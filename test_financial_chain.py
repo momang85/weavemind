@@ -419,5 +419,49 @@ class TestEastmoneyMetadata(unittest.TestCase):
         self.assertIn("report_date", src, "行必须带报告期日期")
 
 
+class TestCaliberDeclaration(unittest.TestCase):
+    """适配器按来源**结构证据**声明口径：有依据才声明，来源形状变了就不声明。"""
+
+    def _raw_rows(self, *, with_parent: bool):
+        row = {"REPORT_DATE": "2024-12-31 00:00:00", "REPORT_TYPE": "年报",
+               "TOTALOPERATEREVE": 174144000000.0, "MLR": 100000000000.0,
+               "OPERATE_PROFIT_PK": 100000000000.0, "TOTAL_ASSETS_PK": 200000000000.0,
+               "LIABILITY": 50000000000.0, "NETCASH_OPERATE_PK": 92000000000.0,
+               "RDEXPEND": 1000000.0, "EPSJB": 60.0, "ROEJQ": 30.0,
+               "XSMLL": 91.0, "CURRENCY": "CNY", "SECURITY_NAME_ABBR": "示例",
+               "NOTICE_DATE": "2025-04-03 00:00:00"}
+        if with_parent:
+            row["PARENTNETPROFIT"] = 86228000000.0
+        return {"result": {"data": [row]}}
+
+    def _fetch(self, *, with_parent: bool):
+        import adapters.eastmoney as em
+        from unittest import mock
+        with mock.patch.object(em, "_get",
+                               return_value=json.dumps(self._raw_rows(
+                                   with_parent=with_parent), ensure_ascii=False)):
+            return em.fetch_ashare("示例", "600519", year_range=(2024, 2024))
+
+    def test_declares_consolidated_with_structural_evidence(self):
+        out = self._fetch(with_parent=True)
+        md = out["metadata"]
+        self.assertEqual(md.get("caliber"), "合并")
+        self.assertIn("PARENTNETPROFIT", md.get("caliber_evidence") or "")
+        self.assertEqual(out["financials"][0].get("disclosure_date"), "2025-04-03",
+                         "公告日期要逐行带出来（截至日的证据）")
+
+    def test_withholds_declaration_when_structure_absent(self):
+        """来源没有"归母净利"类字段 → 不声明口径（fail closed，不猜合并）。"""
+        out = self._fetch(with_parent=False)
+        self.assertNotIn("caliber", out["metadata"])
+        self.assertNotIn("caliber_evidence", out["metadata"])
+
+    def test_sec_declaration_carries_filing_rule_evidence(self):
+        src = Path("adapters/sec_edgar.py").read_text(encoding="utf-8")
+        self.assertIn('"caliber": "合并"', src)
+        self.assertIn("母公司单独报表不在 10-K 事实集中", src,
+                      "口径声明必须写出依据（申报规则），否则审核人无从复核")
+
+
 if __name__ == "__main__":
     unittest.main()

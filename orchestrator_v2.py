@@ -1172,6 +1172,19 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         if hidden > 0:
             lines.append(f"| …（另有 {hidden} 条未展开） | | | |")
         lines.append("说明：同比为系统按相邻年度可比重算，单位 %。")
+        # 口径证据链：口径"是谁声明的、依据是什么"要一并给到模型与报告读者——
+        # 口径不能只活在底稿内部，报告里必须能被人工复核
+        cal_ev = ""
+        for r in rows + derived:
+            _cal = str(r.get("caliber") or "")
+            _ev = str(r.get("caliber_evidence") or "")
+            if _cal and _ev:
+                cal_ev = f"{_cal}（{_ev}）"
+                break
+        if cal_ev:
+            lines.append(f"报表口径：{cal_ev}。报告中须注明口径及该依据。")
+        else:
+            lines.append("报表口径：**未声明**——报告不得声称已知口径，须如实写明这一缺口。")
         gaps = [str(g.get("detail") or g) if isinstance(g, dict) else str(g)
                 for g in (res.get("gaps") or [])]
         problems = [str(p.get("detail") or "") if isinstance(p, dict) else str(p)

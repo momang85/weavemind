@@ -108,17 +108,25 @@ def build_result(task_id: str, goal: str, *, project: str | None = None) -> dict
         "request_source": request_source,
         "candidates": candidates,
         "selection": paper.selection,
-        # 交付硬门槛要用它做"文档主体作用域"判定（只需要指标/期间/值）
+        # 交付硬门槛要用它做"文档主体作用域"判定（只需要指标/期间/值）；
+        # 口径与依据一并带出：报告步骤的"已选事实"块要能把口径证据讲给读者
         "rows_detail": [{"metric": r.get("metric"),
                          "metric_label": r.get("metric_label"),
                          "period": r.get("period"),
-                         "value": r.get("value")} for r in paper.rows],
+                         "value": r.get("value"),
+                         "unit": r.get("unit"),
+                         "caliber": r.get("caliber"),
+                         "caliber_source": r.get("caliber_source"),
+                         "caliber_evidence": r.get("caliber_evidence")}
+                        for r in paper.rows],
         # 可重算的派生行（同比等，单位 %）：注入给模型解释，也便于读侧核对
         "derived_detail": [{"metric": r.get("metric"),
                             "metric_label": r.get("metric_label"),
                             "period": r.get("period"),
                             "value": r.get("value"),
                             "unit": r.get("unit"),
+                            "caliber": r.get("caliber"),
+                            "caliber_evidence": r.get("caliber_evidence"),
                             "derived_from": list(r.get("derived_from") or [])}
                            for r in paper.derived],
         "rows": len(paper.rows), "derived": len(paper.derived),

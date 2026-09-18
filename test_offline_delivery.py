@@ -550,21 +550,39 @@ RESEARCH_REPORT_BODY = (
 
 
 def _research_financials(*, caliber: str = "合并") -> dict:
-    """两年 × 三项必需指标的财务夹具（合并口径，行内声明口径）。"""
+    """两年 × 三项必需指标的财务夹具（行内声明口径，便于既有用例继续用）。"""
     rows = []
     for year, rev, np_, cf in ((2023, 1505.6, 747.34, 665.93),
                                (2024, 1741.44, 862.28, 924.64)):
         rows.append({"year": year, "report_type": "年报", "caliber": caliber,
                      "revenue": rev, "net_profit": np_, "operating_cashflow": cf,
-                     "disclosed_at": f"{year + 1}-04-02"})
+                     # 公告日期（NOTICE_DATE）：截至日证据，与报告期末分开
+                     "disclosure_date": f"{year + 1}-04-03",
+                     "report_date": f"{year}-12-31"})
     return {
         "financials": rows,
         "metadata": {"source": "eastmoney_ashare", "company": "贵州茅台",
-                     "stock_code": "600519.SH", "currency": "CNY", "unit": "亿元",
-                     "period": "annual", "latest_report": "2024-12-31",
-                     "disclosure_date": "2025-04-02"},
+                     "stock_code": "600519", "currency": "CNY", "unit": "亿元",
+                     "period": "annual", "latest_report": "2024-12-31"},
         "raw": {"url": "https://example.invalid/mt", "text": "{}"},
     }
+
+
+def _adapter_shaped_financials(*, declare: bool = True) -> dict:
+    """**生产形状**的夹具：行内不声明口径，由适配器在 metadata 里按来源结构声明。
+
+    实机 `ui-96f5c363cc` 抓到的就是这种形状（行内无 caliber）；区别只在适配器现在
+    会带上 `caliber` + `caliber_evidence`。
+    """
+    payload = _research_financials()
+    for r in payload["financials"]:
+        r.pop("caliber", None)
+    if declare:
+        payload["metadata"]["caliber"] = "合并"
+        payload["metadata"]["caliber_evidence"] = (
+            "来源行含 PARENTNETPROFIT（归属于母公司股东的净利润），"
+            "该科目只存在于合并报表 → 合并报表口径")
+    return payload
 
 
 class _BrokenPlanner:
@@ -806,6 +824,42 @@ class TestResearchFixedPathOffline(unittest.TestCase):
         store = VersionStore(ws_mod.task_workspace(self.tid), self.tid)
         self.assertTrue(store.deliveries())
         self.assertFalse(store.deliveries()[-1]["ok"], "草稿交付不得记为 ok")
+
+    def test_adapter_declared_caliber_reaches_verified_delivery(self):
+        """口径证据链修好的判据：生产形状（行内无口径、适配器按来源结构声明）
+        要能一路走到 **verified** 交付，并带出三核心指标的同比。"""
+        self._seed_contract()
+        o = self._orch("timeout", critic=True)
+        o._structured_data_preload = self._preload_writer(_adapter_shaped_financials())
+        with mock.patch("orchestrator_v2.push_progress"):
+            res = o.run(self.tid, RESEARCH_GOAL, auto_run=True)
+        delivery = o._delivery(self.tid)
+        self.assertEqual(delivery.get("status"), "verified",
+                         f"delivery={delivery!r}")
+        self.assertEqual(delivery.get("hard_fail"), "")
+        self.assertEqual(res["status"], "SUCCESS")
+        proj = ws_mod.task_project_dir(self.tid, "default")
+        paper = json.loads((proj / "working_paper.json").read_text(encoding="utf-8"))
+        self.assertTrue(paper["ok"], paper.get("problems"))
+        self.assertEqual(paper["completeness"]["present"], 6)
+        yoy = [d for d in paper["derived"] if str(d.get("unit") or "") == "%"]
+        self.assertEqual(len(yoy), 3, "三核心指标各一条同比（单位 %）")
+        row = paper["rows"][0]
+        self.assertEqual(row.get("caliber"), "合并")
+        self.assertIn("PARENTNETPROFIT", row.get("caliber_evidence") or "")
+
+    def test_undeclared_caliber_delivery_stays_draft(self):
+        """对偶：来源形状变了（没有归母净利类字段）→ 不声明口径 → 只能草稿。"""
+        self._seed_contract()
+        o = self._orch("timeout", critic=True)
+        o._structured_data_preload = self._preload_writer(
+            _adapter_shaped_financials(declare=False))
+        with mock.patch("orchestrator_v2.push_progress"):
+            res = o.run(self.tid, RESEARCH_GOAL, auto_run=True)
+        delivery = o._delivery(self.tid)
+        self.assertEqual(delivery.get("status"), "draft", delivery)
+        self.assertTrue(delivery.get("hard_fail"), delivery)
+        self.assertIn("研究交付硬门槛未通过", res["final_report"])
 
     # ── 正文模型失败：底稿仍可复核 ───────────────────────────
 

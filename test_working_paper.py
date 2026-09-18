@@ -891,5 +891,106 @@ class TestWorkingPaperExport(unittest.TestCase):
         self.assertEqual(saved["request"]["identity_source"], "form")
 
 
+class TestCaliberEvidenceChain(unittest.TestCase):
+    """口径证据链（实机复现的 bug）：适配器按来源结构声明口径后，研究底稿才能达标。
+
+    修前：东财/SEC/巨潮都不声明口径 → 18 条事实全进 `pending` → 6 项必需事实全缺 →
+    硬门槛判 draft（实机 `ui-96f5c363cc` 就是这个终态）。修后：来源用**自身结构**
+    （含"归母净利润"类科目）声明合并口径，事实带 `caliber_source`/`caliber_evidence`
+    参与达标；来源没有该结构时仍按未知处理（fail closed，见 `test_facts`）。
+    """
+
+    def _payload(self, *, declare: bool):
+        md = {"source": "eastmoney_ashare", "company": "示例制造",
+              "stock_code": "000001", "currency": "CNY", "unit": "亿元"}
+        if declare:
+            md["caliber"] = "合并"
+            md["caliber_evidence"] = (
+                "来源行含 PARENTNETPROFIT（归属于母公司股东的净利润），"
+                "该科目只存在于合并报表 → 合并报表口径")
+        rows = []
+        for year, rev, np_, cf in ((2023, 1200.0, 150.0, 210.0),
+                                   (2024, 1380.0, 174.0, 231.0)):
+            rows.append({"year": year, "report_type": "年报",
+                         "report_date": f"{year + 1}-04-20",
+                         "disclosure_date": f"{year + 1}-04-03",
+                         "revenue": rev, "net_profit": np_,
+                         "operating_cashflow": cf})
+        return {"financials": rows, "metadata": md,
+                "raw": {"url": "https://example.invalid/financials/000001.json",
+                        "text": '{"data": []}'}}
+
+    def _request(self):
+        return F.parse_research_request(
+            "研究示例制造 2023 与 2024 两个年度的营业收入、归母净利润、"
+            "经营活动现金流净额，合并报表口径，数据截至 2025-04-30",
+            company="示例制造", company_id="000001.SZ", market="cn",
+            caliber="合并", as_of="2025-04-30", identity_source="form")
+
+    def _paper(self, payload):
+        return W.build_working_paper(F.facts_from_financials(payload), self._request())
+
+    def test_declared_caliber_reaches_the_bar_with_yoy(self):
+        paper = self._paper(self._payload(declare=True))
+        self.assertTrue(paper.ok, [p.as_dict() for p in paper.problems])
+        self.assertEqual(paper.completeness["present"], 6)
+        self.assertEqual(paper.completeness["missing"], [])
+        yoy = [d for d in paper.derived if str(d.get("unit") or "") == "%"]
+        self.assertEqual(len(yoy), 3, "三核心指标各一条同比")
+        for d in paper.derived:
+            self.assertEqual(d.get("unit"), "%")
+            self.assertIn("同比", str(d.get("period") or ""))
+
+    def test_undeclared_caliber_still_fails_closed(self):
+        """对偶：来源不声明口径 → 事实只作展示，6 项必需事实仍缺、不得达标。"""
+        paper = self._paper(self._payload(declare=False))
+        self.assertFalse(paper.ok)
+        self.assertEqual(paper.completeness["present"], 0)
+        self.assertTrue(any(a.get("kind") == "caliber_mismatch" for a in paper.audit),
+                        paper.audit)
+        self.assertEqual(paper.derived, [], "未达标的事实不得参与同比")
+
+    def test_row_carries_caliber_evidence_for_review(self):
+        """底稿行要带口径与依据，审核人才能复核这条口径从哪来。"""
+        paper = self._paper(self._payload(declare=True))
+        row = paper.rows[0]
+        self.assertEqual(row.get("caliber"), "合并")
+        self.assertIn("PARENTNETPROFIT", row.get("caliber_evidence") or "")
+        self.assertEqual({r.get("disclosed_at") for r in paper.rows},
+                         {"2024-04-03", "2025-04-03"},
+                         "披露日取公告日期（不是报告期末）")
+
+    def test_read_side_detail_exposes_caliber_evidence(self):
+        """读侧（`build_result`）也要带出口径与依据：报告步骤的"已选事实"块靠它。"""
+        import tempfile
+        import task_state
+        import working_paper_export as WPX
+        tid = "wp-caliber-detail"
+        tmp = tempfile.mkdtemp(prefix="wm_cal_")
+        old = ws_mod.WORKSPACE_ROOT
+        old_db = task_state.DB_PATH
+        ws_mod.configure_workspace_root(tmp)
+        task_state.DB_PATH = str(Path(tmp) / "cal.db")
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", old)
+        self.addCleanup(setattr, task_state, "DB_PATH", old_db)
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        # 契约落库：读侧按完整身份选事实，主体必须与夹具一致
+        task_state.mark_queued(tid, goal="表单提交",
+                               research_request=self._request().to_payload(),
+                               db_path=task_state.DB_PATH)
+        proj = ws_mod.task_project_dir(tid, "default")
+        proj.mkdir(parents=True, exist_ok=True)
+        (proj / "financials.json").write_text(
+            json.dumps(self._payload(declare=True), ensure_ascii=False),
+            encoding="utf-8")
+        res = WPX.build_result(tid, "表单提交", project="default")
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res["rows_detail"][0]["caliber"], "合并")
+        self.assertIn("PARENTNETPROFIT",
+                      res["rows_detail"][0]["caliber_evidence"] or "")
+        self.assertTrue(res["derived_detail"])
+        self.assertEqual(res["derived_detail"][0]["caliber"], "合并")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

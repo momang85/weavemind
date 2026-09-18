@@ -171,6 +171,13 @@ def fetch(company: str, ticker: str, year_range=None, max_years: int = 12) -> di
         "unit": "亿美元",
         "retrieved_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "annual_count": len(financials),
+        # 口径声明：10-K 的 us-gaap XBRL 事实是**合并**财务报表口径——SEC 的 10-K
+        # 事实集只含合并报表，母公司单独报表（Schedule I 等）不在其中。依据是申报
+        # 规则本身，证据写清以便人工复核（不是从数字反推的猜测）。
+        "caliber": "合并",
+        "caliber_evidence": (
+            "SEC 10-K 的 us-gaap XBRL 事实集为合并财务报表口径"
+            "（母公司单独报表不在 10-K 事实集中）→ 合并报表口径"),
     }
     # raw 保留原始 XBRL 摘要（截断，避免 Apple 级 companyfacts 数十 MB）
     raw_text = text[:300000]
