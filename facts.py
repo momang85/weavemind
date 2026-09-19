@@ -88,6 +88,56 @@ for _m, _ in DERIVED_METRICS:
 RATIO_SCOPE_NOTE = ("以上比率与同比适用于**非金融企业**的经营简报；"
                     "金融机构作为研究对象时需要独立的指标配置，不得机械套用工业企业的比率。")
 
+# 研究对象类型（F3-A1）：与**阅读视角**分开——bank_corporate 只是读者目标，
+# 不代表被研究公司是银行；equity 也可能研究银行。
+SUBJECT_TYPES = ("non_financial", "financial", "unknown")
+SUBJECT_TYPE_LABELS = {"non_financial": "非金融企业", "financial": "金融机构",
+                       "unknown": "未确定"}
+# 名称线索：**只作提示**（判定来源必须记录，不是可核验的行业元数据）
+_FINANCIAL_NAME_HINTS = ("银行", "证券", "保险", "信托", "基金管理", "期货", "金融租赁",
+                         "消费金融", "财务公司", "金融控股", "AMC")
+
+
+def subject_type_of(declared: str = "", company: str = "",
+                    company_id: str = "") -> tuple[str, str]:
+    """研究对象类型 + **判定来源**：用户声明 > 名称线索 > unknown（未知如实显示）。"""
+    d = str(declared or "").strip()
+    if d in ("non_financial", "financial"):
+        return d, "declared"
+    name = f"{company or ''}{company_id or ''}"
+    if any(h in name for h in _FINANCIAL_NAME_HINTS):
+        return "financial", "name_hint"
+    return "unknown", ""
+
+
+# 哪些派生指标适用于哪类研究对象（A1：**可判定**，不是文案）。
+# 金融机构的专用指标（净息差/不良与拨备/资本充足率）另列后续小批——未支持前，
+# 企业口径的质量比率对金融机构**不生成**，只保留同比这类两期变化对照。
+RATIO_SUBJECT_TYPES: dict[str, tuple[str, ...]] = {
+    "net_margin": ("non_financial",),
+    "cashflow_coverage": ("non_financial",),
+    "debt_ratio": ("non_financial",),
+    "rd_intensity": ("non_financial",),
+    "revenue_yoy": ("non_financial", "financial"),
+    "net_profit_yoy": ("non_financial", "financial"),
+    "operating_cashflow_yoy": ("non_financial", "financial"),
+}
+
+
+def ratio_applies(metric: str, subject_type: str) -> bool:
+    """派生指标是否适用于该研究对象类型；未登记的指标默认两类都适用。
+
+    类型未知（`unknown`/空串）时**不排除**——按"未确定"呈现并标注判定来源，
+    只有判定为金融机构才禁用企业口径比率。
+    """
+    st = str(subject_type or "").strip() or "unknown"
+    if st not in SUBJECT_TYPES:
+        st = "unknown"
+    allowed = RATIO_SUBJECT_TYPES.get(str(metric or ""))
+    if allowed is None:
+        return True
+    return st in allowed or st == "unknown"
+
 # 金额单位数量级（以"元"为基准）：比率计算前必须把分子/分母换算到同一量级，
 # 否则"亿元 ÷ 万元"会静默放大 1e4 倍（架构复核给的内存反例）。
 _AMOUNT_SCALES = {"万亿": 1e12, "千亿": 1e11, "百亿": 1e10, "亿": 1e8, "万": 1e4}
@@ -146,6 +196,9 @@ class ResearchRequest:
     as_of: str = ""                    # 资料截至日（空=未知）
     # 阅读视角（equity / bank_corporate）：只认用户声明，不按公司名推断
     perspective: str = DEFAULT_PERSPECTIVE
+    # 研究对象类型（non_financial / financial / unknown）：可由用户声明；
+    # 未声明时按名称线索给提示并记录判定来源（与视角无关）
+    subject_type: str = ""
     source_requirements: list[str] = field(default_factory=list)
     budget: dict = field(default_factory=dict)
     gaps: list[str] = field(default_factory=list)
@@ -175,6 +228,7 @@ class ResearchRequest:
             "required_metrics": [str(m) for m in (self.required_metrics or [])],
             "as_of": str(self.as_of or ""),
             "perspective": str(self.perspective or DEFAULT_PERSPECTIVE),
+            "subject_type": str(self.subject_type or ""),
             "source_requirements": [str(s) for s in (self.source_requirements or [])],
             "budget": dict(self.budget or {}),
             "gaps": [str(g) for g in (self.gaps or [])],
@@ -205,6 +259,9 @@ class ResearchRequest:
             perspective=(str(raw.get("perspective") or "").strip()
                          if str(raw.get("perspective") or "").strip() in PERSPECTIVE_LABELS
                          else DEFAULT_PERSPECTIVE),
+            subject_type=(str(raw.get("subject_type") or "").strip()
+                          if str(raw.get("subject_type") or "").strip() in SUBJECT_TYPES[:2]
+                          else ""),
             source_requirements=[str(s) for s in (raw.get("source_requirements") or [])],
             budget=dict(raw.get("budget") or {}),
             gaps=[str(g) for g in (raw.get("gaps") or [])],
@@ -234,17 +291,20 @@ def parse_research_request(goal: str, *, company: str = "", company_id: str = ""
                            market: str = "", periods: list[int] | None = None,
                            caliber: str = "", as_of: str = "",
                            budget: dict | None = None,
-                           perspective: str = "",
+                           perspective: str = "", subject_type: str = "",
                            identity_source: str = "") -> ResearchRequest:
     """把目标文本（+ 调用方已知的解析结果）整理成契约，并把不确定项列成缺口。
 
     不做"猜身份"：公司名/代码/市场这些**必须**来自目标文本或调用方，缺了就记缺口。
     视角同理：只取调用方（表单）声明的值，不从目标文本或公司名推断。
+    研究对象类型可由用户声明；未声明时按名称线索给提示（判定来源另记）。
     """
     req = ResearchRequest(goal=str(goal or ""))
     text = str(goal or "")
     ps = str(perspective or "").strip()
     req.perspective = ps if ps in PERSPECTIVE_LABELS else DEFAULT_PERSPECTIVE
+    st = str(subject_type or "").strip()
+    req.subject_type = st if st in ("non_financial", "financial") else ""
 
     # 公司：优先调用方给的（表单结构化字段/解析器），否则从目标里取一个候选。
     # **抓取来的元数据不得走这里**：那样用户请求会被数据源反向决定（A 批门槛的前提）。

@@ -140,21 +140,67 @@ class TestContractApplicability(unittest.TestCase):
         self.assertEqual({r["validation_status"] for r in recs}, {"applicable"})
         self.assertFalse(any(r["excluded"] for r in recs))
 
-    def test_comparison_disclosure_is_allowed_not_crudely_rejected(self):
-        """允许匹配两期的真实比较披露：不按"只含最新年份"粗暴拒绝。"""
+    def test_comparison_disclosure_with_full_date_is_admitted(self):
+        """允许匹配两期的真实比较披露（发布日**完整**且在资料截止前）。"""
         recs = self._recs(
-            "茅台2022年报", "https://www.sse.com.cn/a/2022",
+            "茅台2022年报", "https://www.sse.com.cn/a/2023-04-08/2022.PDF",
             "一、经营情况讨论与分析\n\n2022年营业收入1275.5亿元，2023年营业收入1505.6亿元。\n")
         self.assertTrue(recs)
         self.assertEqual({r["validation_status"] for r in recs}, {"comparison"})
+        self.assertEqual({r["admission"] for r in recs}, {"comparison"})
         self.assertFalse(any(r["excluded"] for r in recs))
 
-    def test_third_party_within_as_of_is_usable_but_typed_third_party(self):
+    def test_month_or_year_precision_dates_are_not_admitted(self):
+        """A3：仅知年月/年份不能断言"未晚于资料截止"——不得虚构月初/年初据此通过。"""
+        month = self._recs(
+            "贵州茅台2024年报解读_某媒体", "https://news.example/2025-03/review",
+            "一、经营情况讨论与分析\n\n贵州茅台2024年营业收入1741.44亿元。\n")
+        year = self._recs(
+            "贵州茅台2024年报解读_某媒体", "https://news.example/2025/review",
+            "一、经营情况讨论与分析\n\n贵州茅台2024年营业收入1741.44亿元。\n")
+        for recs in (month, year):
+            self.assertTrue(recs)
+            self.assertTrue(all(r["admission"] == "unknown" for r in recs), recs)
+            self.assertTrue(all(r["published_precision"] in ("month", "year") for r in recs))
+        # 月份精度参与排序，但**精度另记**，不冒充已核实日期
+        self.assertEqual(month[0]["published_at"], "2025-03-01")
+        self.assertEqual(month[0]["published_precision"], "month")
+
+    def test_full_date_after_the_cutoff_is_excluded(self):
+        """A3 反例：资料截止 2025-04-15，文档发布 2025-04-20 → 必须排除。"""
         recs = self._recs(
-            "贵州茅台2024年报解读_某媒体", "https://news.example/2025/03/review",
+            "贵州茅台2024年年度报告",
+            "https://www.cninfo.com.cn/a/2025-04-20/x.PDF",
+            "一、经营情况讨论与分析\n\n2024年度营业收入288.76亿元。\n",
+            as_of="2025-04-15")
+        self.assertTrue(recs)
+        self.assertEqual({r["validation_status"] for r in recs}, {"after_as_of"})
+        self.assertTrue(all(r["admission"] == "excluded" for r in recs))
+
+    def test_report_period_year_is_not_a_publication_date(self):
+        """A3 反例：只有"2024年年度报告"、无发布日 → 缺项记 unknown，不当 applicable。"""
+        recs = self._recs(
+            "2024年年度报告", "https://news.example/report/2024",
+            "一、经营情况讨论与分析\n\n本公司2024年度营业收入同比增长。\n")
+        self.assertTrue(recs)
+        self.assertEqual({r["subject_state"] for r in recs}, {"unknown"})
+        self.assertEqual({r["subject"] for r in recs}, {""},
+                         "subject 不得从请求回填")
+        self.assertTrue(all(r["admission"] == "unknown" for r in recs), recs)
+        # _located 只收明确准入的证据：unknown 不得进"管理层/附注解释"
+        import report_brief
+        self.assertEqual(report_brief._located(
+            {"records": [dict(x, kind="change_explanation") for x in recs]},
+            "change_explanation"), [])
+
+    def test_third_party_with_full_date_within_as_of_is_usable(self):
+        """合法第三方引用正例：完整发布日 + 命中主体 → admitted（类型仍是第三方）。"""
+        recs = self._recs(
+            "贵州茅台2024年报解读_某媒体", "https://news.example/2025-03-12/review",
             "一、经营情况讨论与分析\n\n贵州茅台2024年营业收入1741.44亿元，较2023年增长15.66%。\n")
         self.assertTrue(recs)
         self.assertEqual({r["source_type"] for r in recs}, {"third_party"})
+        self.assertEqual({r["admission"] for r in recs}, {"admitted"})
         self.assertFalse(any(r["excluded"] for r in recs))
 
     def test_publisher_identity_ignores_title_and_query_params(self):
@@ -251,6 +297,78 @@ class TestCaptureFailureFixtures(unittest.TestCase):
         located = {r["kind"] for r in all_recs
                    if r.get("has_location") and not r.get("excluded")}
         self.assertEqual(located, set(), located)
+
+
+class TestSourceAdmission(unittest.TestCase):
+    """A2：来源准入只有一条规则，全入口共用；正文引用不能绕过。"""
+
+    EV = {"records": [
+        {"url": "https://news.example/2026/q1", "title": "洋河2026Q1点评",
+         "kind": "change_explanation", "source_type": "third_party",
+         "has_location": True, "admission": "excluded",
+         "validation_status": "after_as_of"},
+        {"url": "https://static.cninfo.com.cn/2025-04-03/annual.PDF",
+         "title": "洋河股份2024年年度报告", "kind": "business_background",
+         "source_type": "issuer_annual_report", "has_location": True,
+         "admission": "admitted", "validation_status": "applicable"},
+    ]}
+
+    def test_excluded_url_is_rejected_at_every_entry(self):
+        """已排除 URL 从叙事证据、正文引用、检索候选任何入口都不再准入。"""
+        from narrative_evidence import admission_of, excluded_urls, source_registry
+        self.assertEqual(admission_of("https://news.example/2026/q1", evidence=self.EV),
+                         "excluded")
+        reg = source_registry(["https://news.example/2026/q1"], evidence=self.EV,
+                              known_urls=("https://news.example/2026/q1",))
+        self.assertEqual(reg["https://news.example/2026/q1"], "excluded")
+        self.assertIn("https://news.example/2026/q1", excluded_urls(self.EV))
+
+    def test_unknown_urls_stay_unknown_not_adopted(self):
+        """未抓取/仅罗列的 URL：unknown（待核查），不显示为已采用。"""
+        from narrative_evidence import admission_of
+        self.assertEqual(admission_of("https://never-fetched.example/a"), "unknown")
+        self.assertEqual(
+            admission_of("https://news.example/2026/q1",
+                         fetched_urls=("https://news.example/2026/q1",)),
+            "unknown", "抓到了但没有定位/校验结果，仍是 unknown")
+
+    def test_body_citation_of_excluded_url_is_rejected(self):
+        """实机反例：excluded URL 出现在模型来源清单时，不得以"正文引用"重新准入。"""
+        import report_brief
+        body = ("# 报告\n\n洋河 2026 年一季度收入下滑[1]。\n\n## 参考来源\n\n"
+                "1. [洋河2026Q1点评](https://news.example/2026/q1)\n")
+        data = {"source_label": "东方财富数据中心（A股）",
+                "source_url": "https://datacenter-web.eastmoney.com/api?x=1"}
+        cits, audit = report_brief._collect_citations(
+            "no-such-task", "研究洋河股份", body, data, evidence=self.EV)
+        urls = [c["url"] for c in cits]
+        self.assertNotIn("https://news.example/2026/q1", urls,
+                         "已排除 URL 不得进入采用清单")
+        self.assertTrue(any(r["url"] == "https://news.example/2026/q1"
+                            for r in audit.get("rejected") or []),
+                        "拒绝原因要记录（晚于资料截止日）")
+
+    def test_legit_third_party_body_citation_is_adopted(self):
+        """合法第三方引用正例：正文引用 + 已抓取 + 准入通过 → 进采用清单。"""
+        import report_brief
+        ev = {"records": [
+            {"url": "https://news.example/2025-03-12/review", "title": "洋河2024年报解读",
+             "kind": "change_explanation", "source_type": "third_party",
+             "has_location": True, "admission": "admitted",
+             "validation_status": "applicable"},
+        ]}
+        body = ("# 报告\n\n洋河 2024 年收入下滑[1]。\n\n## 参考来源\n\n"
+                "1. [洋河2024年报解读](https://news.example/2025-03-12/review)\n")
+        data = {"source_label": "东方财富数据中心（A股）",
+                "source_url": "https://datacenter-web.eastmoney.com/api?x=1"}
+        cits, _audit = report_brief._collect_citations(
+            "no-such-task", "研究洋河股份", body, data, evidence=ev)
+        by_url = {c["url"]: c for c in cits}
+        self.assertIn("https://news.example/2025-03-12/review", by_url)
+        self.assertEqual(by_url["https://news.example/2025-03-12/review"]["type"],
+                         "third_party")
+        self.assertEqual(by_url["https://news.example/2025-03-12/review"]["admission"],
+                         "admitted")
 
 
 class TestBuild(unittest.TestCase):

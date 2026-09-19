@@ -1562,6 +1562,10 @@ def _sanitize_research_request(raw) -> dict:
     perspective = _text("perspective", 20).lower()
     if perspective in _RESEARCH_PERSPECTIVES:
         out["perspective"] = perspective
+    # 研究对象类型（F3-A1）：可由用户声明（非金融企业/金融机构）；未声明时按名称线索提示
+    stype = _text("subject_type", 20).lower()
+    if stype in ("non_financial", "financial"):
+        out["subject_type"] = stype
     return out
 
 

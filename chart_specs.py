@@ -258,7 +258,8 @@ def financial_research_specs(rows: list[dict], derived: list[dict], *,
                              unit: str = "", source: str = "",
                              company: str = "", caliber: str = "",
                              periods: list[int] | None = None,
-                             core_metrics: list[str] | None = None) -> list[dict]:
+                             core_metrics: list[str] | None = None,
+                             subject_type: str = "") -> list[dict]:
     """公司研究任务的**三张财务分析图**（确定性规格，不经 LLM）。
 
     为什么单独一条：实机 `ui-2084c2c9cc` 的图是"市场规模对比（亿元）"——16 个会计科目
@@ -270,6 +271,9 @@ def financial_research_specs(rows: list[dict], derived: list[dict], *,
     - 对比图**只画契约点名的必需指标**（`core_metrics`），且**同图不得混装量纲**——
       否则毛利率（%）会与营收（亿元）同轴，小项完全不可见（实机 `ui-ecb93e57a1`）；
     - 只在数据够画时才产出（单点图无结论，按规范跳过）；结论由数据算出，不写空话。
+
+    A1：研究对象为**金融机构**时不生成第三张（企业口径质量比率图）——净利率/现金
+    覆盖/资产负债率对银行不成立，画出来就是误导；保留两期对比与同比两张。
     """
     try:
         from facts import metric_label
@@ -369,9 +373,11 @@ def financial_research_specs(rows: list[dict], derived: list[dict], *,
         })
 
     # ③ 盈利与现金流质量（柱：净利率 / 现金流对净利润覆盖 / 资产负债率 等 %）
+    #    A1：金融机构不生成（企业口径比率对银行不成立，画出来就是误导）
     ratio_rows = [d for d in derived
                   if str(d.get("metric") or "") in _QUALITY_RATIOS
-                  and isinstance(d.get("value"), (int, float))]
+                  and isinstance(d.get("value"), (int, float))
+                  and subject_type != "financial"]
     if len(ratio_rows) >= 2:
         cov = next((d for d in ratio_rows
                     if d.get("metric") == "cashflow_coverage"

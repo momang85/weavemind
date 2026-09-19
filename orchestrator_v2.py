@@ -4655,6 +4655,15 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             if not data.get("ok"):
                 return []
             req = data.get("request") or {}
+            # A1：研究对象类型决定哪些图适用（金融机构不出企业口径比率图）
+            try:
+                from facts import subject_type_of
+                stype, _src = subject_type_of(
+                    declared=str(req.get("subject_type") or ""),
+                    company=str(req.get("company") or ""),
+                    company_id=str(req.get("company_id") or ""))
+            except Exception:
+                stype = "unknown"
             return financial_research_specs(
                 data.get("rows") or [], data.get("derived") or [],
                 unit=str(data.get("unit") or ""),
@@ -4665,6 +4674,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 # 对比图只画契约点名的必需指标：底稿里还有总资产/毛利率这类
                 # 支撑事实，混进同一张金额图会把小项压成看不见（实机踩过）
                 core_metrics=list(req.get("required_metrics") or []),
+                subject_type=stype,
             )
         except Exception as exc:
             logger.warning("财务图规格生成失败（task=%s）：%s", task_id, str(exc)[:140])

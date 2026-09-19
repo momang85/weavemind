@@ -35,6 +35,8 @@ _ISSUER_SOURCES = ("sec_edgar", "cninfo_annual", "eastmoney_ashare",
                    "eastmoney_datacenter")
 
 _YOY_SUFFIX = "_yoy"
+# 覆盖倍数判"相当"的容差（百分点）：低于/相当/高于三分支都要有确定判定
+_COVERAGE_TOL = 0.5
 _SECTION_RE = re.compile(r"^#{1,4}\s*(.+?)\s*$", re.M)
 _NUM_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
 # 编排器的工程收尾报告（`orchestrator_v2._finalize`）：正文模型失效时它会成为
@@ -114,12 +116,22 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
     periods = list(data.get("periods") or [])
     rows = list(data.get("rows") or [])
     derived = list(data.get("derived") or [])
+    # A1：**研究对象类型**（可判定适用性）与阅读视角分开——bank_corporate 只是读者目标
+    try:
+        from facts import subject_type_of
+        subject_type, type_source = subject_type_of(
+            declared=str(req.get("subject_type") or ""),
+            company=str(req.get("company") or ""),
+            company_id=str(req.get("company_id") or ""))
+    except Exception:
+        subject_type, type_source = "unknown", ""
     evidence = _evidence(task_id, ws_dir=ws_dir)
     citations, audit = _collect_citations(task_id, goal, body, data,
                                           evidence=evidence, ws_dir=ws_dir)
     table = _metrics_table(rows, derived, periods, citations, req,
-                            source_url=str(data.get("source_url") or ""))
-    findings = _findings(rows, derived, periods)
+                           source_url=str(data.get("source_url") or ""),
+                           subject_type=subject_type)
+    findings = _findings(rows, derived, periods, subject_type=subject_type)
     # 引用重编号：模型正文里的 `[n]` 是它**自己清单**的编号，装配后编号会变；
     # 按 URL 建立"旧编号 → 新编号"映射并逐处重写，映射不到的去编号并记缺口
     ref_map: dict[int, int] = {}
@@ -150,6 +162,8 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
             "audit_sources": len(audit.get("unused_sources") or []),
             "charts": len(charts),
             "perspective": perspective,
+            "subject_type": subject_type,
+            "subject_type_source": type_source,
         },
         "metrics_table": table,
         "findings": findings,
@@ -191,12 +205,14 @@ def _evidence(task_id: str, *, ws_dir=None) -> dict | None:
 
 
 def _located(evidence: dict | None, kind: str, limit: int = 3) -> list[dict]:
-    """取某一类的**可用**证据：带正文定位且通过契约适用性校验。
+    """取某一类的**可用**证据：带正文定位且**准入状态明确为 admitted/comparison**。
 
-    检索摘要（无正文定位）与校验不通过的（错主体/超资料截止/期间不符）都不算证据。
+    检索摘要（无正文定位）、缺字段（unknown）与明确排除的（错主体/超截止/期间不符）
+    都不算证据——"not excluded" 不等于"已验证支持本期变化"。
     """
     out = [r for r in ((evidence or {}).get("records") or [])
-           if r.get("kind") == kind and r.get("has_location") and not r.get("excluded")]
+           if r.get("kind") == kind and r.get("has_location")
+           and r.get("admission") in ("admitted", "comparison")]
     return out[:limit]
 
 
@@ -246,8 +262,11 @@ def _change_explanation(rows, derived, periods, findings, evidence, citations) -
                 "publisher": str(r.get("publisher") or ""),
                 "document_period": str(r.get("document_period") or ""),
                 "validation_status": str(r.get("validation_status") or "")}
-        (management if str(r.get("source_type")) == "issuer_annual_report"
-         else third_party).append(item)
+        # 管理层解释 = 发行人披露（官方路径**或**文档 provenance 为年报原文——
+        # 后者含"经第三方平台转载的年报原文"）；其余（媒体解读/评论）进第三方观点
+        is_issuer = (str(r.get("source_type")) == "issuer_annual_report"
+                     or str(r.get("document_provenance")) == "issuer_annual_report")
+        (management if is_issuer else third_party).append(item)
     unproven = [{"label": c["label"], "materials": list(MATERIALS_BY_METRIC.get(c["metric"], ()))}
                 for c in changes[:3]]
     unproven = [u for u in unproven if u["materials"]]
@@ -260,8 +279,17 @@ def _change_explanation(rows, derived, periods, findings, evidence, citations) -
 # ── 指标表与关键发现（全部由底稿算）──────────────────────────────
 
 
-def _metrics_table(rows, derived, periods, citations, req, source_url: str = "") -> dict:
-    """指标 × 期间 的对照表 + 同比/比率列（数值、口径、来源编号）。"""
+def _metrics_table(rows, derived, periods, citations, req, source_url: str = "",
+                   subject_type: str = "") -> dict:
+    """指标 × 期间 的对照表 + 同比/比率列（数值、口径、来源编号）。
+
+    A1：质量比率按**研究对象类型**判定适用性——金融机构不生成企业口径比率
+    （净利率/现金覆盖/资产负债率/研发强度），只保留同比这类两期变化对照。
+    """
+    try:
+        from facts import ratio_applies
+    except Exception:
+        ratio_applies = lambda m, st: True          # noqa: E731 - 退化时不误删
     by_metric: dict[str, dict] = {}
     for r in rows:
         m = str(r.get("metric") or "")
@@ -287,6 +315,8 @@ def _metrics_table(rows, derived, periods, citations, req, source_url: str = "")
         })
     quality = []
     for d in derived:
+        if not ratio_applies(str(d.get("metric") or ""), subject_type):
+            continue          # A1：金融机构不生成企业口径比率（同比类仍保留）
         quality.append({"metric": str(d.get("metric") or ""),
                         "label": str(d.get("metric_label") or d.get("metric") or ""),
                         "period": str(d.get("period") or ""),
@@ -295,11 +325,20 @@ def _metrics_table(rows, derived, periods, citations, req, source_url: str = "")
                         "fact_ids": list(d.get("derived_from") or [])})
     return {"rows": out_rows, "quality": quality,
             "periods": list(periods),
+            "subject_type": subject_type,
             "columns": ["指标", "上期", "本期", "同比", "口径", "来源"]}
 
 
-def _findings(rows, derived, periods) -> list[dict]:
-    """由数字算出的**观察**（不是模型写的），每条带 fact_id 便于复核。"""
+def _findings(rows, derived, periods, subject_type: str = "") -> list[dict]:
+    """由数字算出的**观察**（不是模型写的），每条带 fact_id 便于复核。
+
+    A1：覆盖倍数按派生读数判 低于/相当/高于；金融机构不生成企业口径的质量结论。
+    """
+    try:
+        from facts import ratio_applies
+    except Exception:
+        ratio_applies = lambda m, st: True          # noqa: E731 - 退化时不误删
+
     out: list[dict] = []
     by: dict[str, dict] = {}
     for r in rows:
@@ -324,21 +363,31 @@ def _findings(rows, derived, periods) -> list[dict]:
             text += f"，同比 {y['value']:g}%"
             facts += list(y.get("derived_from") or [])
         out.append({"text": text, "fact_ids": [f for f in facts if f]})
-    # 质量比率：覆盖倍数带符号条件
+    # 质量比率：覆盖倍数按**校验过、单位统一**的派生读数判 低于/相当/高于（A1）；
+    # 金融机构不生成企业口径的质量结论（该结论依赖"利润→现金流"的企业逻辑）
     cov = next((d for d in derived if d.get("metric") == "cashflow_coverage"
-                and d.get("year") == last), None)
+                and d.get("year") == last and ratio_applies("cashflow_coverage",
+                                                            subject_type)), None)
     np_cur = (by.get("net_profit") or {}).get(last) if last else None
     cf_cur = (by.get("operating_cashflow") or {}).get(last) if last else None
     if cov is not None:
         # 覆盖倍数的**解释**不带阈值数字：`>100%` 这种裸数字在验收里算"待溯源数字"，
         # 而读数本身已在派生块里带公式给出
+        ratio = cov.get("value") if isinstance(cov.get("value"), (int, float)) else None
         text = f"经营现金流对归母净利润的覆盖：{last} 年"
         if isinstance(np_cur and np_cur.get("value"), (int, float)) and np_cur["value"] < 0:
             text += "当期归母净利润为负，该比值不表示利润有现金支撑"
         elif isinstance(cf_cur and cf_cur.get("value"), (int, float)) and cf_cur["value"] < 0:
             text += "当期经营现金流为净流出，该比值不表示利润有现金支撑"
-        else:
+        elif ratio is None:
+            text += "该比值不可算（分母为零或事实缺失，见派生指标）"
+        elif ratio < 100 - _COVERAGE_TOL:
+            # 实机反例：46.29/66.73 = 69.37% 曾被写成"现金流高于利润"
+            text += "当期经营现金流低于归母净利润（读数与算式见派生指标）"
+        elif ratio > 100 + _COVERAGE_TOL:
             text += "当期经营现金流高于归母净利润（读数与算式见派生指标）"
+        else:
+            text += "当期经营现金流与归母净利润相当（读数与算式见派生指标）"
         out.append({"text": text, "fact_ids": list(cov.get("derived_from") or [])})
     return out
 
@@ -553,25 +602,54 @@ def _locator_text(locator) -> str:
 def _collect_citations(task_id: str, goal: str, body: str, data: dict, *,
                        evidence: dict | None = None,
                        ws_dir=None) -> tuple[list[dict], dict]:
-    """来源清单：**只收实际被采用的**，按**发布者域名**标类型；未采用的留在 audit。"""
+    """来源清单：**只收实际被采用的**，按**发布者域名**标类型；未采用的留在 audit。
+
+    A2：全入口共用同一条准入规则——叙事证据里已判 `excluded` 的 URL，**不得**从
+    "正文引用"入口重新准入（实机反例：after_as_of 的文章经模型来源清单又进了采用清单）。
+    """
     adopted: list[dict] = []
     seen: set[str] = set()
+    rejected: list[dict] = []
+    known_urls = tuple(_project_sources(task_id, ws_dir=ws_dir))
 
-    def _add(url: str, title: str, kind: str, used_by: str, **extra) -> None:
+    def _add(url: str, title: str, kind: str, used_by: str, *, entry: str,
+             **extra) -> None:
         u = str(url or "").strip()
-        if not u or u in seen:
-            if u and used_by:
+        if not u:
+            return
+        if u in seen:
+            # 已采用：只合并用途，不再走准入（也避免同一 URL 既在清单又被记"拒绝"）
+            if used_by:
                 for c in adopted:
                     if c["url"] == u and used_by not in c["used_by"]:
                         c["used_by"].append(used_by)
             return
+        if entry == "structured":
+            # 结构化财务来源是**本次研究取数本身**（chart_rows ok 即证据），
+            # 不按网页规则判 unknown
+            adm = "admitted"
+        else:
+            adm = _admission(u, evidence=evidence, known=known_urls)
+        if adm == "excluded":
+            # 已明确排除：任何入口都不再准入，改记"未采用"并说明原因
+            rejected.append({"url": u, "title": str(title or "").strip() or _host(u),
+                             "entry": entry, "admission": adm,
+                             "reason": _validation_reason(u, evidence)})
+            return
+        if adm == "unknown" and entry in ("body", "material"):
+            # 未抓取/未核验、仅罗列：留在待核查，不显示为已采用
+            rejected.append({"url": u, "title": str(title or "").strip() or _host(u),
+                             "entry": entry, "admission": adm,
+                             "reason": "未取得正文或未核验，仅罗列"})
+            return
         seen.add(u)
-        entry = {"n": len(adopted) + 1, "url": u,
-                 "title": str(title or "").strip() or _host(u),
-                 "type": kind, "publisher": _publisher(u),
-                 "used_by": [used_by] if used_by else []}
-        entry.update({k: v for k, v in extra.items() if v})
-        adopted.append(entry)
+        entry_out = {"n": len(adopted) + 1, "url": u,
+                     "title": str(title or "").strip() or _host(u),
+                     "type": kind, "publisher": _publisher(u),
+                     "admission": adm,
+                     "used_by": [used_by] if used_by else []}
+        entry_out.update({k: v for k, v in extra.items() if v})
+        adopted.append(entry_out)
 
     # ① 结构化财务来源：**发布者是数据平台就标第三方**，并单独记录它依据的披露。
     # 实机教训：东方财富 API 被硬标成"发行人年报/官方披露"，读者会把第三方转载
@@ -584,27 +662,56 @@ def _collect_citations(task_id: str, goal: str, body: str, data: dict, *,
         if stype != "issuer_annual_report":
             extra = {"based_on": "发行人定期报告（经第三方数据平台转载；"
                                  "本次未取得原始披露文件）"}
-        _add(surl, label, stype, "财务事实", **extra)
+        _add(surl, label, stype, "财务事实", entry="structured", **extra)
     # ② 定向取证采用的年报/公告页（业务背景/变化解释/风险用到它们才登记）
+    # 类型按"访问路径域名 + 文档 provenance"：年报原文经第三方平台转载仍标发行人披露，
+    # 但写明转载路径；"年报解读"类文章（域名第三方、非报告原文）保持第三方。
     for kind, used_by in (("business_background", "业务背景"),
                           ("change_explanation", "变化解释"),
                           ("footnote", "财务附注"),
                           ("risk", "风险因素")):
         for r in _located(evidence, kind, 4):
-            _add(str(r.get("url") or ""), str(r.get("title") or ""),
-                 str(r.get("source_type") or _source_type(str(r.get("url") or ""))),
-                 used_by)
+            url = str(r.get("url") or "")
+            prov = str(r.get("document_provenance") or "")
+            if prov == "issuer_annual_report":
+                ctype = "issuer_annual_report"
+                extra = {"based_on": f"发行人年度报告原文，经第三方平台"
+                                     f"（{r.get('publisher') or '转载方'}）获取"}
+            else:
+                ctype = str(r.get("source_type") or _source_type(url))
+                extra = {}
+            _add(url, str(r.get("title") or ""), ctype, used_by,
+                 entry="evidence", **extra)
     # ③ 正文实际引用的检索来源（按正文出现顺序编号）
     for url, title in _body_sources(body):
-        _add(url, title, _source_type(url), "正文引用")
+        _add(url, title, _source_type(url), "正文引用", entry="body")
     # ④ 用户材料（goal 文本）
     if str(goal or "").strip() and any(k in str(goal) for k in ("材料", "附件", "上传")):
-        _add("user-material", "用户提供的材料", "user_material", "用户材料")
+        _add("user-material", "用户提供的材料", "user_material", "用户材料",
+             entry="material")
     # 未被采用的候选（检索落盘里存在但正文没引用）→ 只留内部审计
     known = _project_sources(task_id, ws_dir=ws_dir)
     unused = [{"url": u, "title": _host(u)} for u in known if u not in seen]
     return adopted, {"unused_sources": unused[:20],
+                     "rejected": rejected[:20],
                      "note": "未采用/越界材料只留在内部审计，不进简报来源清单"}
+
+
+def _admission(url: str, *, evidence: dict | None, known=()) -> str:
+    """来源准入：复用叙事证据的**同一实现**（单一规则）。"""
+    try:
+        import narrative_evidence as ne
+        return ne.admission_of(url, evidence=evidence, known_urls=known)
+    except Exception:
+        return "unknown"
+
+
+def _validation_reason(url: str, evidence: dict | None) -> str:
+    for r in ((evidence or {}).get("records") or []):
+        if str(r.get("url") or "") == str(url or ""):
+            return _VALIDATION_LABELS.get(str(r.get("validation_status") or ""),
+                                          "不满足主体/期间/资料截止")
+    return "不满足主体/期间/资料截止"
 
 
 def _source_type(url: str) -> str:
@@ -849,7 +956,16 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
             lines.append(f"- {q.get('label')} {q.get('period')}：{q.get('value')}%"
                          + (f"（{expr}）" if expr else ""))
         conds = _ratio_conditions(quality)
-        if conds:
+        stype = str(table.get("subject_type") or "")
+        if stype == "financial":
+            # A1：金融机构——不呈现企业口径比率，也不靠页尾声明补救
+            lines.append("")
+            lines.append("**研究对象适用性**：按名称线索判定研究对象为**金融机构**"
+                         "（未经行业元数据核实）。企业口径的质量比率（归母净利率、"
+                         "经营现金流覆盖、资产负债率、研发强度）对金融机构不成立，"
+                         "本次**不呈现**；银行需专用指标（净息差、不良与拨备、资本充足率等），"
+                         "当前版本未配置。")
+        elif conds:
             lines.append("")
             lines.append("**比率适用条件**：")
             for label, cond in conds:
@@ -916,14 +1032,20 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
                          f"{'、'.join(u.get('materials') or [])}")
     excluded = list((structure.get("evidence") or {}).get("excluded") or [])
     if excluded:
-        # 不适用的材料照实说明（错主体/超资料截止/期间不符），不静默丢弃
+        # 非准入材料照实说明（错主体/超资料截止/期间不符/缺字段），不静默丢弃
         lines.append("")
-        lines.append("**未采用的材料（不满足主体/期间/资料截止）**：")
+        lines.append("**未采用的材料（不满足主体/期间/资料截止或未核验）**：")
         for e in excluded[:6]:
             why = _VALIDATION_LABELS.get(str(e.get("validation_status") or ""),
                                          str(e.get("validation_status") or "不适用"))
             lines.append(f"- {str(e.get('title') or e.get('url'))[:60]}"
                          f"（{why}{'；发布 ' + e['published_at'] if e.get('published_at') else ''}）")
+    rejected = list((structure.get("audit") or {}).get("rejected") or [])
+    if rejected:
+        lines.append("")
+        lines.append("**正文引用但未准入的来源（已去编号，不借编号给其他来源）**：")
+        for r in rejected[:6]:
+            lines.append(f"- {str(r.get('title') or r.get('url'))[:60]}（{r.get('reason') or '未准入'}）")
     lines.append("")
     lines.append("## 风险与核查")
     risks = structure.get("risks") or []
@@ -973,6 +1095,11 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
     lines.append(f"- 主体：{who}{('（' + sc['company_id'] + '）') if sc.get('company_id') else ''}")
     lines.append(f"- 阅读视角：{_perspective_label(sc.get('perspective'))}"
                  "（由用户在表单声明；不按公司名或机构名推断）")
+    st_label = {"non_financial": "非金融企业", "financial": "金融机构（按名称线索，未经行业元数据核实）",
+                "unknown": "未确定"}.get(str(sc.get("subject_type") or "unknown"), "未确定")
+    lines.append(f"- 研究对象类型：{st_label}"
+                 + (f"（判定来源：{sc.get('subject_type_source')}）"
+                    if sc.get("subject_type_source") else "（与阅读视角无关）"))
     lines.append("")
     lines.append("### 字段位置与计算底稿")
     ap = structure.get("appendix") or {}

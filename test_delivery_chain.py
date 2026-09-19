@@ -5396,9 +5396,21 @@ class TestResearchBriefAssembly(unittest.TestCase):
             "raw": {"url": "https://datacenter-web.eastmoney.com/api/x", "text": "{}"},
         }, ensure_ascii=False), encoding="utf-8")
         (proj / "search_results.json").write_text(json.dumps([
-            {"title": "茅台2024年报解读", "url": "https://news.example/a",
+            {"title": "茅台2024年报解读", "url": "https://news.example/2025-03-12/a",
              "snippet": "贵州茅台2024年营业收入1741.44亿元"},
             {"title": "无关链接", "url": "https://garbage.example/b", "snippet": "广告"},
+        ], ensure_ascii=False), encoding="utf-8")
+        # 抓取落盘（A2：正文引用要被准入，前提是**真的抓取并校验过**）
+        (proj / "fetch_snapshot.json").write_text(json.dumps([
+            {"title": "贵州茅台2024年年度报告",
+             "url": "https://static.cninfo.com.cn/finalpage/2025-04-03/1.PDF",
+             "text": ("第三节 管理层讨论与分析\n\n一、经营情况讨论与分析\n\n"
+                      "2024年度营业收入1741.44亿元，主要系销量增加及产品结构变化所致。\n\n"
+                      "（一）主营业务情况\n\n公司主营业务为茅台酒及系列酒的生产与销售。\n")},
+            {"title": "贵州茅台2024年报解读_某媒体",
+             "url": "https://news.example/2025-03-12/a",
+             "text": ("一、经营情况讨论与分析\n\n"
+                      "贵州茅台2024年营业收入1741.44亿元，渠道改革是主要驱动。\n")},
         ], ensure_ascii=False), encoding="utf-8")
         (proj / "chart_manifest.json").write_text(json.dumps({"charts": [
             {"file": "chart_1.png", "type": "grouped_bar", "grade": "publish",
@@ -5438,7 +5450,7 @@ class TestResearchBriefAssembly(unittest.TestCase):
         urls = [c["url"] for c in structure["citations"]]
         self.assertIn("https://datacenter-web.eastmoney.com/api/x", urls,
                       "结构化财务来源属采用项")
-        self.assertIn("https://news.example/a", urls, "正文引用的来源属采用项")
+        self.assertIn("https://news.example/2025-03-12/a", urls, "正文引用的来源属采用项")
         self.assertNotIn("https://garbage.example/b", urls, "未引用来源不进清单")
         by_url = {c["url"]: c for c in structure["citations"]}
         # F2′-1：数据平台是**第三方**，不得标成"发行人年报/官方披露"；
@@ -5448,7 +5460,8 @@ class TestResearchBriefAssembly(unittest.TestCase):
         self.assertIn("转载", str(em.get("based_on") or ""))
         self.assertEqual(em["publisher"], "datacenter-web.eastmoney.com")
         # 第三方媒体同样是第三方
-        self.assertEqual(by_url["https://news.example/a"]["type"], "third_party")
+        self.assertEqual(by_url["https://news.example/2025-03-12/a"]["type"], "third_party")
+        self.assertEqual(by_url["https://news.example/2025-03-12/a"]["admission"], "admitted")
         unused = [u["url"] for u in (structure["audit"].get("unused_sources") or [])]
         self.assertIn("https://garbage.example/b", unused)
 
@@ -5464,23 +5477,23 @@ class TestResearchBriefAssembly(unittest.TestCase):
         self.assertEqual(
             by_url["https://static.cninfo.com.cn/finalpage/2025-04-03/1.PDF"]["type"],
             "issuer_annual_report")
-        self.assertEqual(by_url["https://news.example/annual-report-review"]["type"],
+        self.assertEqual(by_url["https://news.example/2025-03-12/a"]["type"],
                          "third_party", "标题含『年报』不能证明发布者身份")
 
     def test_inline_refs_keep_pointing_at_the_same_material(self):
         """引用重编号：模型正文的 [1] 指的是它自己清单第 1 条，装配后必须仍指那份材料。"""
         import report_brief
         tid, _ = self._env()
-        body = ("# 我的报告\n\n前瞻眼数据显示经营活动现金流净额 924.64亿元[1]。\n\n"
+        body = ("# 我的报告\n\n年报显示经营活动现金流净额 924.64亿元[1]。\n\n"
                 "## 参考来源\n\n"
-                "1. [前瞻眼现金流量表](https://stock.qianzhan.com/item/xianliu.html)\n")
+                "1. [贵州茅台2024年年度报告](https://static.cninfo.com.cn/finalpage/2025-04-03/1.PDF)\n")
         structure = report_brief.build_structure(tid, self.GOAL, body)
         md = report_brief.render_brief_markdown(structure, body)
         by_n = {c["n"]: c["url"] for c in structure["citations"]}
-        sentence = next(l for l in md.splitlines() if "前瞻眼数据" in l)
+        sentence = next(l for l in md.splitlines() if "年报显示经营活动现金流" in l)
         n = int(re.search(r"\[(\d+)\]", sentence).group(1))
-        self.assertEqual(by_n[n], "https://stock.qianzhan.com/item/xianliu.html",
-                         "这句话必须仍指向前瞻眼那份材料")
+        self.assertEqual(by_n[n], "https://static.cninfo.com.cn/finalpage/2025-04-03/1.PDF",
+                         "这句话必须仍指向原来那份年报材料")
 
     def test_unmappable_inline_ref_becomes_a_gap_not_a_guess(self):
         """映射不到采用来源的编号：去掉编号并记引用缺口，不得猜指向。"""
@@ -5548,6 +5561,85 @@ class TestResearchBriefAssembly(unittest.TestCase):
         # 人工修订重验不得替换用户正文：走的是同一实现，但不做候选稿替换
         res2 = dp.accept_for_body(tid, self.GOAL, body, trigger="人工修订重验")
         self.assertIsNotNone(res2)
+
+    # ── F3-A1：现金覆盖三分支 + 研究对象适用性 ─────────────
+
+    def test_cashflow_coverage_reads_lower_when_below_100(self):
+        """离线反例：46.29/66.73 = 69.37%，不得写成"现金流高于利润"。"""
+        import report_brief
+        tid, _ = self._env()
+        rows = [
+            {"metric": "net_profit", "metric_label": "归母净利润", "year": 2024,
+             "value": 66.73, "unit": "亿元", "fact_id": "f-np"},
+            {"metric": "operating_cashflow", "metric_label": "经营活动现金流净额",
+             "year": 2024, "value": 46.29, "unit": "亿元", "fact_id": "f-cf"},
+        ]
+        derived = [{"metric": "cashflow_coverage",
+                    "metric_label": "经营现金流对归母净利润的覆盖", "year": 2024,
+                    "period": "2024年", "value": 69.37, "unit": "%",
+                    "formula": "46.29 / 66.73 * 100",
+                    "derived_from": ["f-cf", "f-np"]}]
+        got = [f["text"] for f in report_brief._findings(rows, derived, [2023, 2024])
+               if "覆盖" in f["text"]]
+        self.assertTrue(got)
+        self.assertIn("低于", got[0], got)
+        self.assertNotIn("高于", got[0])
+
+    def test_financial_subject_suppresses_corporate_ratios(self):
+        """研究对象为金融机构：不生成企业口径比率与比率图，只保留同比对照。"""
+        import report_brief
+        tid, _ = self._env(perspective="equity")
+        # 契约未声明时按名称线索判定（判定来源 name_hint）
+        structure = report_brief.build_structure(tid, self.GOAL, "")
+        # 贵州茅台不在金融名称线索里 → 未确定（如实显示），比对公视角的机构更典型
+        self.assertEqual(structure["scope"]["subject_type"], "unknown")
+        # 换一份"金融机构"契约：同名招商银行的契约由声明/名称线索驱动
+        import facts as F
+        st, src = F.subject_type_of(company="招商银行")
+        self.assertEqual((st, src), ("financial", "name_hint"))
+        # 表格质量比率按类型过滤
+        table = report_brief._metrics_table([], [
+            {"metric": "net_margin", "metric_label": "归母净利率", "period": "2024年",
+             "value": 30.0, "unit": "%", "formula": "x", "derived_from": []},
+            {"metric": "revenue_yoy", "metric_label": "营业收入同比", "period": "2024年",
+             "value": 5.0, "unit": "%", "formula": "y", "derived_from": []},
+        ], [2024], [], {}, "", subject_type="financial")
+        labels = [q["metric"] for q in table["quality"]]
+        self.assertNotIn("net_margin", labels, "金融机构不生成企业口径比率")
+        self.assertIn("revenue_yoy", labels, "同比类两期变化对照保留")
+        self.assertEqual(table["subject_type"], "financial")
+        # 图表：金融机构不出第三张（质量比率图）
+        from chart_specs import financial_research_specs
+        specs = financial_research_specs(
+            [{"metric": "revenue", "metric_label": "营业收入", "year": 2024,
+              "value": 100.0, "unit": "亿元"}],
+            [{"metric": "net_margin", "metric_label": "归母净利率", "year": 2024,
+              "period": "2024年", "value": 30.0, "unit": "%", "formula": "x",
+              "derived_from": []},
+             {"metric": "debt_ratio", "metric_label": "资产负债率", "year": 2024,
+              "period": "2024年", "value": 90.0, "unit": "%", "formula": "z",
+              "derived_from": []}],
+            company="招商银行", subject_type="financial")
+        kinds = [s["section_hint"] for s in specs]
+        self.assertNotIn("盈利质量", kinds, kinds)
+        self.assertTrue(all(s["section_hint"] != "盈利质量" for s in specs))
+
+    def test_subject_type_round_trips_through_contract(self):
+        """研究对象类型可由用户声明并随契约往返；非法值丢弃（按名称线索兜底）。"""
+        import facts as F
+        req = F.parse_research_request(self.GOAL, company="招商银行",
+                                       company_id="600036.SH", market="cn",
+                                       periods=[2023, 2024], caliber="合并",
+                                       as_of="2025-04-30", subject_type="financial",
+                                       identity_source="form")
+        self.assertEqual(req.subject_type, "financial")
+        back = F.ResearchRequest.from_payload(req.to_payload())
+        self.assertEqual(back.subject_type, "financial")
+        bad = F.parse_research_request(self.GOAL, company="招商银行",
+                                       subject_type="bank", identity_source="form")
+        self.assertEqual(bad.subject_type, "")
+        self.assertEqual(F.subject_type_of(company="招商银行"),
+                         ("financial", "name_hint"))
 
     def test_citations_match_inline_refs(self):
         """引用一一对应：装配后的正文过 `check_source_list_completeness`。"""
@@ -5649,7 +5741,7 @@ class TestResearchBriefAssembly(unittest.TestCase):
              "url": "https://static.cninfo.com.cn/finalpage/2025-04-03/1.PDF",
              "text": self.ANNUAL_TEXT},
             {"title": "贵州茅台2024年报解读_某媒体",
-             "url": "https://news.example/2025/03/review",
+             "url": "https://news.example/2025-03-12/review",
              "text": ("一、经营情况讨论与分析\n\n"
                       "贵州茅台2024年营业收入变动主要系渠道改革与直营占比提升所致，"
                       "销量与吨价的结构变化是主要原因。\n")},
@@ -5692,7 +5784,7 @@ class TestResearchBriefAssembly(unittest.TestCase):
         statuses = {e["validation_status"] for e in excluded}
         self.assertEqual(statuses, {"after_as_of"}, statuses)
         md = report_brief.render_brief_markdown(structure, "")
-        self.assertIn("**未采用的材料（不满足主体/期间/资料截止）**", md)
+        self.assertIn("**未采用的材料（不满足主体/期间/资料截止或未核验）**", md)
         self.assertIn("晚于资料截止日", md)
 
     def test_risk_rows_carry_evidence_conditions_and_materials(self):
