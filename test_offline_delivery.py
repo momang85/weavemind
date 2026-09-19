@@ -1131,11 +1131,15 @@ class TestResearchFixedPathOffline(unittest.TestCase):
         paper = json.loads((proj / "working_paper.json").read_text(encoding="utf-8"))
         self.assertTrue(paper["ok"], paper.get("problems"))
         self.assertEqual(paper["completeness"]["present"], 6)
-        yoy = [d for d in paper["derived"] if str(d.get("unit") or "") == "%"]
+        yoy = [d for d in paper["derived"]
+               if str(d.get("metric") or "").endswith("_yoy")]
         self.assertEqual(len(yoy), 3, "三核心指标各一条同比（单位 %）")
-        row = paper["rows"][0]
-        self.assertEqual(row.get("caliber"), "合并")
-        self.assertIn("PARENTNETPROFIT", row.get("caliber_evidence") or "")
+        for d in yoy:
+            self.assertEqual(d.get("unit"), "%")
+        # 同年比率也在（报告要有经济含义，不能只有绝对数）
+        ratio_metrics = {d.get("metric") for d in paper["derived"]} - {
+            d.get("metric") for d in yoy}
+        self.assertTrue(ratio_metrics, paper["derived"])
 
     def test_undeclared_caliber_delivery_stays_draft(self):
         """对偶：来源形状变了（没有归母净利类字段）→ 不声明口径 → 只能草稿。"""

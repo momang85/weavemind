@@ -446,7 +446,59 @@ def build_working_paper(facts: list[Fact], request: ResearchRequest) -> WorkingP
                              value=round(rate, 2), period=f"{cur}年同比",
                              inputs=[f0, f1], unit="%", unit_source="derived")
             paper.derived.append(_row(d))
+
+    # 5) 同年比率（报告要有"经济含义"，不能只有绝对数）：净利率、经营现金流对净利润
+    #    的覆盖、资产负债率、研发投入强度——全部由**已选事实**算出，带公式与输入
+    #    fact_id，可复核。两条纪律（与同比区分开）：
+    #    - 缺输入**不生成、不记问题**：契约可能没要求那个指标，不能因此把交付判成
+    #      不达标（同比是契约要求的一部分，比率是增强项）；
+    #    - 分母为 0 / 输入口径不一致只记**审计提示**（`audit` 不参与 ok 判定）：
+    #      如实说"不可算"，不编造，也不因一个比率算不出来就把整份交付打回。
+    for _metric, _num_key, _den_key, _desc in _RATIO_SPECS:
+        _num_series = series.get(_num_key) or {}
+        _den_series = series.get(_den_key) or {}
+        for year in years:
+            num, den = _num_series.get(year), _den_series.get(year)
+            if not num or not den:
+                continue
+            if (not isinstance(num.value, (int, float))
+                    or not isinstance(den.value, (int, float))):
+                continue
+            if float(den.value) == 0.0:
+                paper.audit.append({
+                    "kind": PROBLEM_NOT_COMPUTABLE,
+                    "detail": (f"{metric_label(_metric)} {year}年 的分母为 0（{_desc}）："
+                               "不可算，不编造"),
+                    "fact_ids": [num.fact_id, den.fact_id],
+                })
+                continue
+            if (str(num.caliber) != str(den.caliber)
+                    or str(num.currency) != str(den.currency)):
+                paper.audit.append({
+                    "kind": PROBLEM_CALIBER,
+                    "detail": (f"{metric_label(_metric)} {year}年 的两个输入口径/币种不一致"
+                               f"（{num.caliber}/{num.currency} vs "
+                               f"{den.caliber}/{den.currency}）：不计算"),
+                    "fact_ids": [num.fact_id, den.fact_id],
+                })
+                continue
+            ratio = float(num.value) / float(den.value) * 100.0
+            formula = f"{num.value} / {den.value} * 100，输入 {num.fact_id} / {den.fact_id}"
+            d = derived_fact([num, den], _metric, formula=formula,
+                             value=round(ratio, 2), period=f"{year}年",
+                             inputs=[num, den], unit="%", unit_source="derived")
+            paper.derived.append(_row(d))
     return paper
+
+
+# 同年比率：(派生指标, 分子, 分母, 口径说明)。分母为 0 只记审计提示。
+_RATIO_SPECS: tuple[tuple[str, str, str, str], ...] = (
+    ("net_margin", "net_profit", "revenue", "归母净利润 / 营业收入 × 100"),
+    ("cashflow_coverage", "operating_cashflow", "net_profit",
+     "经营活动现金流净额 / 归母净利润 × 100（>100% 说明利润有现金支撑）"),
+    ("debt_ratio", "total_liabilities", "total_assets", "总负债 / 总资产 × 100"),
+    ("rd_intensity", "rd_expense", "revenue", "研发投入 / 营业收入 × 100"),
+)
 
 
 _NUM_TOKEN_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")

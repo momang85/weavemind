@@ -85,16 +85,32 @@ class TestBaselineClosesLoop(unittest.TestCase):
         self.assertAlmostEqual(d["value"], 15.0, places=2)
         self.assertIn("1380", d["formula"])
         self.assertEqual(len(d["derived_from"]), 2, "同比必须带两个输入 fact_id")
+        # 三条同比 + 该夹具能算出的同年比率（只有三核心指标 → 净利率、现金流覆盖）
         self.assertEqual(set(d["metric"] for d in self.paper.derived),
-                         {"revenue_yoy", "net_profit_yoy", "operating_cashflow_yoy"})
+                         {"revenue_yoy", "net_profit_yoy", "operating_cashflow_yoy",
+                          "net_margin", "cashflow_coverage"})
 
     def test_derived_values_match_hand_computation(self):
-        want = {"revenue_yoy": 15.0,
-                "net_profit_yoy": (174.0 - 150.0) / 150.0 * 100,
-                "operating_cashflow_yoy": (231.0 - 210.0) / 210.0 * 100}
+        """派生值必须能手算复现（同比 + 同年比率都算在内）。"""
+        want = {
+            ("revenue_yoy", "2024年同比"): (1380.0 - 1200.0) / 1200.0 * 100,
+            ("net_profit_yoy", "2024年同比"): (174.0 - 150.0) / 150.0 * 100,
+            ("operating_cashflow_yoy", "2024年同比"):
+                (231.0 - 210.0) / 210.0 * 100,
+            ("net_margin", "2023年"): 150.0 / 1200.0 * 100,
+            ("net_margin", "2024年"): 174.0 / 1380.0 * 100,
+            ("cashflow_coverage", "2023年"): 210.0 / 150.0 * 100,
+            ("cashflow_coverage", "2024年"): 231.0 / 174.0 * 100,
+        }
+        seen = set()
         for d in self.paper.derived:
-            self.assertAlmostEqual(d["value"], round(want[d["metric"]], 2), places=2,
-                                   msg=f"{d['metric']} 可从底稿重算")
+            key = (d["metric"], d["period"])
+            if key not in want:
+                self.fail(f"出现计划外的派生指标：{key}")
+            self.assertAlmostEqual(d["value"], round(want[key], 2), places=2,
+                                   msg=f"{key} 可从底稿重算")
+            seen.add(key)
+        self.assertEqual(seen, set(want), "该夹具应有的派生指标都要在")
 
     def test_rows_carry_source_position_and_currency(self):
         for r in self.paper.rows:
@@ -935,9 +951,10 @@ class TestCaliberEvidenceChain(unittest.TestCase):
         self.assertTrue(paper.ok, [p.as_dict() for p in paper.problems])
         self.assertEqual(paper.completeness["present"], 6)
         self.assertEqual(paper.completeness["missing"], [])
-        yoy = [d for d in paper.derived if str(d.get("unit") or "") == "%"]
+        yoy = [d for d in paper.derived
+               if str(d.get("metric") or "").endswith(F.YOY_SUFFIX)]
         self.assertEqual(len(yoy), 3, "三核心指标各一条同比")
-        for d in paper.derived:
+        for d in yoy:
             self.assertEqual(d.get("unit"), "%")
             self.assertIn("同比", str(d.get("period") or ""))
 
@@ -990,6 +1007,89 @@ class TestCaliberEvidenceChain(unittest.TestCase):
                       res["rows_detail"][0]["caliber_evidence"] or "")
         self.assertTrue(res["derived_detail"])
         self.assertEqual(res["derived_detail"][0]["caliber"], "合并")
+
+
+class TestDerivedRatios(unittest.TestCase):
+    """同年比率（净利率/现金流覆盖/资产负债率/研发强度）：报告要有经济含义，
+    不能只有绝对数。比率必须可从已选事实复算，且不得因算不出来就把交付判成不达标。
+    """
+
+    def _payload(self, rows):
+        return {"financials": rows,
+                "metadata": {"source": "eastmoney_ashare", "company": "示例制造",
+                             "currency": "CNY", "unit": "亿元", "caliber": "合并",
+                             "caliber_evidence": "含 PARENTNETPROFIT"},
+                "raw": {"url": "https://example.invalid/a", "text": "{}"}}
+
+    def _rows(self, **over):
+        base = [
+            {"year": 2023, "report_type": "年报", "revenue": 1200.0, "net_profit": 150.0,
+             "operating_cashflow": 210.0, "total_assets": 900.0,
+             "total_liabilities": 300.0, "rd_expense": 12.0,
+             "disclosure_date": "2024-04-03"},
+            {"year": 2024, "report_type": "年报", "revenue": 1380.0, "net_profit": 174.0,
+             "operating_cashflow": 231.0, "total_assets": 1000.0,
+             "total_liabilities": 350.0, "rd_expense": 15.0,
+             "disclosure_date": "2025-04-03"},
+        ]
+        for r in base:
+            r.update(over)
+        return base
+
+    def _paper(self, rows):
+        req = F.parse_research_request(
+            "研究示例制造 2023 与 2024 两个年度的营业收入、归母净利润、"
+            "经营活动现金流净额，合并报表口径，数据截至 2025-04-30",
+            company="示例制造", company_id="000001.SZ", market="cn",
+            caliber="合并", as_of="2025-04-30", identity_source="form")
+        return W.build_working_paper(F.facts_from_financials(self._payload(rows)), req)
+
+    def test_ratios_are_recomputable_with_formula_and_inputs(self):
+        paper = self._paper(self._rows())
+        by = {(d["metric"], d["period"]): d for d in paper.derived}
+        self.assertAlmostEqual(by[("net_margin", "2024年")]["value"],
+                               round(174.0 / 1380.0 * 100, 2), places=2)
+        self.assertAlmostEqual(by[("cashflow_coverage", "2024年")]["value"],
+                               round(231.0 / 174.0 * 100, 2), places=2)
+        self.assertAlmostEqual(by[("debt_ratio", "2024年")]["value"],
+                               round(350.0 / 1000.0 * 100, 2), places=2)
+        self.assertAlmostEqual(by[("rd_intensity", "2024年")]["value"],
+                               round(15.0 / 1380.0 * 100, 2), places=2)
+        for key in (("net_margin", "2024年"), ("debt_ratio", "2024年")):
+            d = by[key]
+            self.assertEqual(d["unit"], "%")
+            self.assertIn("/", d["formula"], "公式要能复核")
+            self.assertEqual(len(d["derived_from"]), 2, "两个输入 fact_id")
+            self.assertEqual(d["caliber"], "合并", "口径继承输入")
+        self.assertTrue(paper.ok, [p.detail for p in paper.problems])
+
+    def test_zero_denominator_is_audited_not_fatal(self):
+        """分母为 0：如实记"不可算"，但不把整份交付判成不达标。"""
+        paper = self._paper(self._rows(total_assets=0.0))
+        self.assertFalse(any(d["metric"] == "debt_ratio" for d in paper.derived))
+        self.assertTrue(paper.ok, [p.detail for p in paper.problems])
+        self.assertTrue(any("资产负债率" in str(a.get("detail") or "")
+                            for a in paper.audit), paper.audit)
+
+    def test_missing_input_is_not_a_gap(self):
+        """契约没要求总资产/总负债 → 不算比率、也不记缺口（支撑事实不是交付要求）。"""
+        rows = [{k: v for k, v in r.items()
+                 if k not in ("total_assets", "total_liabilities", "rd_expense")}
+                for r in self._rows()]
+        paper = self._paper(rows)
+        metrics = {d["metric"] for d in paper.derived}
+        self.assertNotIn("debt_ratio", metrics)
+        self.assertNotIn("rd_intensity", metrics)
+        self.assertIn("net_margin", metrics)
+        self.assertTrue(paper.ok, [p.detail for p in paper.problems])
+        self.assertEqual(paper.audit, [])
+
+    def test_labels_are_chinese_for_injection(self):
+        """注入块与报告都直接读标签：英文 slug 对报告读者没有意义。"""
+        self.assertEqual(F.metric_label("net_margin"), "净利率")
+        self.assertEqual(F.metric_label("cashflow_coverage"), "经营现金流对净利润的覆盖")
+        self.assertEqual(F.metric_label("debt_ratio"), "资产负债率")
+        self.assertEqual(F.metric_label("revenue_yoy"), "营业收入同比")
 
 
 if __name__ == "__main__":

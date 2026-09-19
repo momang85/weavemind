@@ -233,6 +233,28 @@ _REPORT_FORMAT_REQUIREMENTS = (
     "数据无对应检索来源时，必须写形式③，禁止编造任何来源名。"
 )
 
+# 报告**内容**要求（与上面的格式要求分开）：研究类报告不能只有"口径自证 + 来源清单"，
+# 必须把已选事实讲成有经济含义的分析。实机教训（ui-2084c2c9cc）：18 条事实 + 3 条同比
+# 全部注入过模型，但指令只说"给出结论"，报告最终只写了 2 个数字、没有任何分析段落。
+# 这里给一份**可检查的骨架**：小节名固定、每项都要落到注入块里的数字。
+_REPORT_ANALYSIS_REQUIREMENTS = (
+    "\n\n[报告内容要求]（强制，研究/财务类报告必须遵守；数字只能来自上面的"
+    "[已选事实]块，比率与同比已由系统算好，不得自行换算或补算）\n"
+    "1. 关键数据一览表：正文必须有一张表，列为"
+    "『指标 | 上一期 | 本期 | 同比 | 口径 | 来源』，逐行覆盖全部必需指标"
+    "与系统给出的派生指标（同比、比率），每个数值都要与[已选事实]块一致。\n"
+    "2. 逐项同比解读：对每个核心指标写一句『增长/下降多少、方向如何』，"
+    "并说明本期与上期的差异来自哪里（能说清就说，说不清就写『原因未在本次资料中体现』）。\n"
+    "3. 盈利质量：给出净利率（与毛利率，如有）的水平与变化，并说明含义。\n"
+    "4. 现金流质量：给出经营活动现金流对净利润的覆盖倍数/百分比，"
+    "并说明利润是否有现金支撑（覆盖>100% 说明当期利润有现金支撑）。\n"
+    "5. 结构与杠杆：给出资产负债率及其变化（如有总资产/总负债事实）。\n"
+    "6. 风险与结论：基于上述事实写 2-4 条风险与一段结论；"
+    "不得出现[已选事实]块之外的数字，不得给投资建议或收益承诺。\n"
+    "7. 缺口纪律：块内标为缺口/不可算的项，必须在正文里如实写明，"
+    "不得用模型知识补数、不得跳过不提。"
+)
+
 
 # P0：产物文件注入白名单——仅数据类文本素材（.md/.txt/.csv/.json）读取正文注入；
 # HTML/JS/CSS/PY/图片等源码或二进制一律跳过正文，只保留"文件存在 + 路径"提示，
@@ -1086,9 +1108,10 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 "step_id": "3",
                 "capability": "content_summary",
                 "instruction": (
-                    "只解释本次**已选定的事实**：按注入的[已选事实]块逐项说明指标含义与期间"
-                    "变化，块内列出的缺口要如实写出来源不足的部分。不得引入块外数字，"
-                    "不得自行换算或补齐缺失年份。"
+                    "只解释本次**已选定的事实**：按注入的[已选事实]块逐项说明指标含义、"
+                    "期间变化与同比，并给出盈利质量（净利率）与现金流质量（经营现金流对"
+                    "净利润的覆盖）的读数。块内列出的缺口要如实写出来源不足的部分，"
+                    "不得引入块外数字，不得自行换算或补齐缺失年份。"
                 ),
                 "timeout": 900,
             },
@@ -1096,9 +1119,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 "step_id": "4",
                 "capability": "report_generator",
                 "instruction": (
-                    f"生成 {who} 研究报告：以已选事实与来源为依据给出结论，每个财务数字标注"
-                    f"来源位置；不得出现已选事实之外的财务数字，缺口按实际情况写明。"
-                    f"{contract_note}"
+                    f"生成 {who} 研究报告，按[报告内容要求]的骨架写全："
+                    f"①关键数据一览表（指标×期间×同比×口径×来源，覆盖全部必需指标与"
+                    f"系统给出的派生指标）；②逐项同比解读；③盈利质量（净利率/毛利率）；"
+                    f"④现金流质量（经营现金流对净利润的覆盖）；⑤结构与杠杆（资产负债率）；"
+                    f"⑥风险与结论。每个财务数字标注来源位置，只能用[已选事实]块里的数字"
+                    f"（含块内的同比与比率），缺口如实写明。{contract_note}"
                 ),
                 "timeout": 1200,
             },
@@ -1176,7 +1202,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             - min(len(derived), _FACTS_BLOCK_MAX_ROWS)
         if hidden > 0:
             lines.append(f"| …（另有 {hidden} 条未展开） | | | |")
-        lines.append("说明：同比为系统按相邻年度可比重算，单位 %。")
+        lines.append("说明：同比与比率均由系统按已选事实重算（带公式与输入 fact_id），"
+                     "单位 %；报告须逐个给出这些读数。")
         # 口径证据链：口径"是谁声明的、依据是什么"要一并给到模型与报告读者——
         # 口径不能只活在底稿内部，报告里必须能被人工复核
         cal_ev = ""
@@ -4313,6 +4340,45 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         m = re.match(r"^(.*)_\d{9,11}$", stem)
         return m.group(1) if m else stem
 
+    def _is_research_task(self, task_id: str) -> bool:
+        """是否有**落库研究契约**（表单提交的研究任务）。
+
+        用于图表分流：研究任务的图必须回答"公司怎么样"（两期对比/同比/质量比率），
+        而不是"我搜了多少"（词频/域名分布）。
+        """
+        try:
+            from working_paper_export import resolve_request
+            req, _cands, source = resolve_request(task_id, "", {}, None)
+            return source == "stored" and req is not None
+        except Exception as exc:
+            logger.warning("研究任务判定失败（task=%s）：%s", task_id, str(exc)[:120])
+            return False
+
+    def _financial_chart_specs(self, task_id: str, goal: str) -> list[dict]:
+        """研究任务的财务分析图规格（确定性：底稿 → 两期对比 / 同比 / 质量三张）。
+
+        数据来自 `working_paper_export.chart_rows`（只保留契约期间、含同比与比率），
+        不经过 LLM，也不走"把财务行归一成市场规模"那条老路。非研究任务返回 []。
+        """
+        try:
+            from chart_specs import financial_research_specs
+            from working_paper_export import chart_rows
+            data = chart_rows(task_id, goal)
+            if not data.get("ok"):
+                return []
+            req = data.get("request") or {}
+            return financial_research_specs(
+                data.get("rows") or [], data.get("derived") or [],
+                unit=str(data.get("unit") or ""),
+                source=str(data.get("source_label") or ""),
+                company=str(req.get("company") or req.get("company_id") or ""),
+                caliber=str(req.get("caliber") or ""),
+                periods=list(data.get("periods") or []),
+            )
+        except Exception as exc:
+            logger.warning("财务图规格生成失败（task=%s）：%s", task_id, str(exc)[:140])
+            return []
+
     @staticmethod
     def _wants_visualization(goal: str) -> bool:
         """图表装配逻辑已迁移至 chart_assembly（深化拆分），此处为薄委托。"""
@@ -6176,8 +6242,13 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                             clean_file(_json_path, goal=goal)
                             self._remerge_structured_financials(task_id)
                             self._remerge_structured_points(task_id)
-                            self._generate_search_charts(task_id, goal)
-                            self._render_clean_chart_data(task_id, goal)
+                            # 研究任务：**不出检索统计图**（词频/域名分布回答的是"搜了多少"，
+                            # 不是"公司怎么样"）；财务图由底稿确定性生成（见 content_summary
+                            # 分支）。顺带堵住越界数据进图：那类图的来源是检索清洗结果，
+                            # 会把契约期间之外的数字（如 2025 半年报）画进交付。
+                            if not self._is_research_task(task_id):
+                                self._generate_search_charts(task_id, goal)
+                                self._render_clean_chart_data(task_id, goal)
                         except Exception as exc:
                             logger.warning("search_results.json write failed: %s", exc)
             if (step.get("capability") == "content_summary"
@@ -6189,32 +6260,41 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     merge_year_series, verify_specs_against_text, wrap_rows_to_specs,
                 )
                 _summary_text = str(result.get("result") or "")
-                _llm_specs = self._extract_chart_data(_summary_text)
-                _table_rows = self._extract_chart_rows_from_table(_summary_text)
-                # LLM 规格 + 表格兜底合并（不再二选一），保证结果更可能有图
-                chart_specs = list(_llm_specs) + wrap_rows_to_specs(_table_rows)
-                # 去重：同标题优先保留 LLM 版
-                _seen_titles = {}
-                for _s in chart_specs:
-                    _t = str(_s.get("title") or "")
-                    if _t not in _seen_titles:
-                        _seen_titles[_t] = _s
-                chart_specs = list(_seen_titles.values())
-                # 同指标跨年份的单点图合并为时间序列（防 2025/2026 拆成两张单点图）
-                chart_specs = merge_year_series(chart_specs)
-                # 数据溯源：数值必须能在摘要文本中找到（防 LLM 编造/转写错误）
-                chart_specs, _dropped_rows = verify_specs_against_text(
-                    chart_specs, _summary_text
-                )
-                chart_specs = self._filter_chart_specs(chart_specs, goal)
-                logger.info(
-                    "chart pipeline %s: llm_specs=%d table_rows=%d dropped_rows=%d kept=%d",
-                    task_id,
-                    len(_llm_specs),
-                    len(_table_rows),
-                    _dropped_rows,
-                    len(chart_specs),
-                )
+                # 研究任务：图由**底稿确定性生成**（两期核心指标对比 / 同比增速 /
+                # 盈利与现金流质量），不走 LLM 规格与"市场规模"兜底——实机里那条路
+                # 把 16 个会计科目塞进一张同轴图，读者拿不到任何结论。
+                _fin_specs = self._financial_chart_specs(task_id, goal)
+                if _fin_specs:
+                    chart_specs = _fin_specs
+                    logger.info("chart pipeline %s: financial_research_specs=%d",
+                                task_id, len(chart_specs))
+                else:
+                    _llm_specs = self._extract_chart_data(_summary_text)
+                    _table_rows = self._extract_chart_rows_from_table(_summary_text)
+                    # LLM 规格 + 表格兜底合并（不再二选一），保证结果更可能有图
+                    chart_specs = list(_llm_specs) + wrap_rows_to_specs(_table_rows)
+                    # 去重：同标题优先保留 LLM 版
+                    _seen_titles = {}
+                    for _s in chart_specs:
+                        _t = str(_s.get("title") or "")
+                        if _t not in _seen_titles:
+                            _seen_titles[_t] = _s
+                    chart_specs = list(_seen_titles.values())
+                    # 同指标跨年份的单点图合并为时间序列（防 2025/2026 拆成两张单点图）
+                    chart_specs = merge_year_series(chart_specs)
+                    # 数据溯源：数值必须能在摘要文本中找到（防 LLM 编造/转写错误）
+                    chart_specs, _dropped_rows = verify_specs_against_text(
+                        chart_specs, _summary_text
+                    )
+                    chart_specs = self._filter_chart_specs(chart_specs, goal)
+                    logger.info(
+                        "chart pipeline %s: llm_specs=%d table_rows=%d dropped_rows=%d kept=%d",
+                        task_id,
+                        len(_llm_specs),
+                        len(_table_rows),
+                        _dropped_rows,
+                        len(chart_specs),
+                    )
                 if chart_specs:
                     try:
                         _cd_path = task_project_dir(task_id) / "chart_data.json"
@@ -6226,8 +6306,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     except Exception as exc:
                         logger.warning("chart_data render failed: %s", exc)
                 else:
-                    # P1-3：LLM 未产出图表规格时，数据驱动兜底（≥2 个可作图点即渲染）
-                    self._render_clean_chart_data(task_id, goal)
+                    # P1-3：LLM 未产出图表规格时，数据驱动兜底（≥2 个可作图点即渲染）。
+                    # 研究任务不走这条：它的图必须来自底稿（否则又会画出"市场规模"那类
+                    # 同轴混装图）；底稿没有可用事实时宁可不出图。
+                    if not self._is_research_task(task_id):
+                        self._render_clean_chart_data(task_id, goal)
             result["elapsed_sec"] = round(time.time() - step_start, 1)
             return result
 
@@ -6671,8 +6754,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             # V1.2 竞品启示：注入三级溯源链/数据时效/免责声明强制要求
             try:
                 instr += _REPORT_FORMAT_REQUIREMENTS
-            except Exception:
-                pass
+            except Exception:                pass
             # 结构化财务数据【内容】注入（不只文件提及）：让报告/总结 LLM 真正看到
             # 权威年报序列，否则模型只会用搜索片段（如 IT之家）并宣称历史年份缺失；
             # 新数据源（crypto/macro/news）经 structured_data.json 走同一通道。
@@ -6686,6 +6768,10 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     task_id, str((getattr(self, "_task_goals", {}) or {}).get(task_id, "")))
                 if selected:
                     instr += selected
+                    # E 批：研究类报告的内容骨架（关键数据表 + 同比解读 + 盈利/现金流
+                    # 质量 + 结构杠杆 + 风险结论）。只在**有已选事实块**时注入：通用
+                    # 任务没有这块，硬套会要求模型写它拿不到的数字。
+                    instr += _REPORT_ANALYSIS_REQUIREMENTS
                 # P2-5 追加数据源选择依据：市场偏好与候选列表（前 3）
                 prefs = (
                     getattr(self, "_task_market_resolution", {}) or {}

@@ -830,5 +830,104 @@ class TestResearchHardGate(unittest.TestCase):
         self.assertIn("研究契约读取异常", self.o._delivery(self.tid)["hard_fail"])
 
 
+class TestAnalysisCompleteness(unittest.TestCase):
+    """分析完整性（研究任务）：正文有没有把必需事实讲全。
+
+    实机 `ui-2084c2c9cc` 的教训：底稿 6/6 事实 + 3 条同比齐全、硬门槛通过，正文却只写了
+    2 个数字、没有任何同比/质量/结构分析——既有检查一个都拦不住。本检查**只提示**：
+    `counted=False`，缺口进 `checks.analysis_completeness`，不进 overall 的 gaps 汇总。
+    """
+
+    GOAL = ("研究示例制造 2023 与 2024 两个年度的营业收入、归母净利润、"
+            "经营活动现金流净额，合并报表口径，数据截至 2025-04-30")
+    ROWS = [
+        {"year": 2023, "report_type": "年报", "revenue": 1200.0, "net_profit": 150.0,
+         "operating_cashflow": 210.0, "total_assets": 900.0, "total_liabilities": 300.0,
+         "disclosure_date": "2024-04-03"},
+        {"year": 2024, "report_type": "年报", "revenue": 1380.0, "net_profit": 174.0,
+         "operating_cashflow": 231.0, "total_assets": 1000.0, "total_liabilities": 350.0,
+         "disclosure_date": "2025-04-03"},
+    ]
+    THIN = ("# 示例制造财务研究\n\n归母净利润 174 亿元（2024）、150 亿元（2023）。\n\n"
+            "## 免责声明\n\n本文基于公开数据整理，不构成任何投资建议。\n")
+    FULL = (
+        "# 示例制造财务研究\n\n"
+        "## 关键数据一览\n\n"
+        "| 指标 | 2023 | 2024 | 同比 |\n|---|---|---|---|\n"
+        "| 营业收入 | 1200 | 1380 | 15% |\n| 归母净利润 | 150 | 174 | 16% |\n"
+        "| 经营活动现金流净额 | 210 | 231 | 10% |\n\n"
+        "营业收入 1200 / 1380 亿元；归母净利润 150 / 174 亿元；"
+        "经营活动现金流净额 210 / 231 亿元。同比：营业收入 15%、归母净利润 16%、"
+        "经营现金流 10%。净利率 12.61%；经营现金流对净利润的覆盖 132.76%；"
+        "资产负债率 35%。\n\n"
+        "## 风险提示\n\n价格与需求波动。\n\n## 结论\n\n经营稳健。\n\n"
+        "## 免责声明\n\n本文基于公开数据整理，不构成任何投资建议。\n"
+    )
+
+    def _run_with_paper(self, report: str) -> dict:
+        import facts as F
+        import task_state
+        tmp = Path(tempfile.mkdtemp(prefix="wm_ana_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        old_db = task_state.DB_PATH
+        ws_mod.configure_workspace_root(str(tmp))
+        task_state.DB_PATH = str(tmp / "ana.db")
+        try:
+            tid = "ana-01"
+            req = F.parse_research_request(
+                self.GOAL, company="示例制造", company_id="000001.SZ", market="cn",
+                periods=[2023, 2024], caliber="合并", as_of="2025-04-30",
+                identity_source="form")
+            task_state.mark_queued(tid, goal=self.GOAL,
+                                   research_request=req.to_payload(),
+                                   db_path=task_state.DB_PATH)
+            proj = ws_mod.task_project_dir(tid, "default")
+            proj.mkdir(parents=True, exist_ok=True)
+            (proj / "financials.json").write_text(
+                json.dumps({"financials": self.ROWS,
+                            "metadata": {"source": "eastmoney_ashare",
+                                         "company": "示例制造", "currency": "CNY",
+                                         "unit": "亿元", "caliber": "合并",
+                                         "caliber_evidence": "含 PARENTNETPROFIT"},
+                            "raw": {"url": "https://example.invalid/a", "text": "{}"}},
+                           ensure_ascii=False), encoding="utf-8")
+            ws = ws_mod.task_workspace(tid)
+            ws.mkdir(parents=True, exist_ok=True)
+            return ac.run_acceptance(tid, self.GOAL, report, ws,
+                                     capabilities=["web_search"])
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            task_state.DB_PATH = old_db
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_thin_report_is_flagged_but_does_not_drive_overall(self):
+        res = self._run_with_paper(self.THIN)
+        chk = (res.get("checks") or {}).get("analysis_completeness") or {}
+        self.assertTrue(chk.get("applicable"), chk)
+        self.assertFalse(chk.get("pass"), chk)
+        self.assertFalse(chk.get("counted"), "只提示：不得计入 overall")
+        gaps = chk.get("analysis_gaps") or []
+        blob = " ".join(gaps)
+        self.assertIn("营业收入", blob, "缺口要点名缺失的指标")
+        self.assertIn("经营活动现金流净额", blob)
+        self.assertTrue(any("同比" in g for g in gaps), gaps)
+        # 只提示：这些缺口不得混进 overall 的 gaps 汇总
+        self.assertNotIn("分析要素", " ".join(res.get("gaps") or []))
+
+    def test_complete_report_passes(self):
+        res = self._run_with_paper(self.FULL)
+        chk = (res.get("checks") or {}).get("analysis_completeness") or {}
+        self.assertTrue(chk.get("pass"), chk)
+        self.assertEqual(chk.get("facts_missing"), 0)
+        self.assertEqual(chk.get("derived_missing"), 0)
+
+    def test_non_research_task_is_not_applicable(self):
+        """没有底稿的任务不适用（不误报）。"""
+        res = _run("ana-02", "用三句话说明毛利率与净利率的区别", "毛利率与净利率的区别如下。")
+        chk = (res.get("checks") or {}).get("analysis_completeness") or {}
+        self.assertFalse(chk.get("applicable"), chk)
+        self.assertTrue(chk.get("pass"))
+
+
 if __name__ == "__main__":
     unittest.main()

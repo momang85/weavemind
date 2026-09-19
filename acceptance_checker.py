@@ -655,14 +655,14 @@ def check_requirement_coverage(goal: str, report_text: str, reqs: dict,
         covered = float((nt or {}).get("covered_ratio") or 0.0)
         total = int((nt or {}).get("total_count") or 0)
         wanted = [i for i in (reqs.get("indicators") or [])]
+        # "点名指标是否给出可溯源数值"：逐个指标看有没有对应数字（此前那段
+        # `for w ... if ... or True: pass` 是死循环，判定实际只落在 any() 上）
         wanted_ok = False
         for w in wanted:
-            for t in traceable:
-                blob = "%s %s" % (t.get("raw"), t.get("unit"))
-                if w in str(t.get("source") or "") or True:
-                    pass
-            if any(w in str(t.get("raw") or "") for t in traceable):
+            if any(w in str(t.get("raw") or "") or w in str(t.get("source") or "")
+                   for t in traceable):
                 wanted_ok = True
+                break
         # 目标点名了指标时以"该指标是否有可溯源数值"为准；否则看整体覆盖
         if wanted:
             data_ok = wanted_ok or covered >= 0.5
@@ -709,6 +709,99 @@ def check_requirement_coverage(goal: str, report_text: str, reqs: dict,
             else ("缺失但已诚实披露" if told else "目标要求的数据/来源缺失且未披露")
         ),
         "applicable": True,
+    }
+
+
+def _normalized_numbers(text: str) -> str:
+    """把正文里的数字归一化（去掉千分位与数字内空格），便于与底稿值逐字比对。"""
+    return re.sub(r"(?<=\d)[,\u3000 ](?=\d)", "", str(text or ""))
+
+
+def check_analysis_completeness(report: str, goal: str, task_id: str) -> dict:
+    """**分析完整性**（研究任务）：正文有没有把已选事实讲全、讲成分析。
+
+    实机教训（`ui-2084c2c9cc`）：底稿 6/6 事实 + 3 条同比齐全、硬门槛通过，但正文只写了
+    2 个数字、没有任何同比/质量/结构分析——而既有检查一个都拦不住：`number_traceability`
+    只审"已出现的数字"（一个数字都不写反而 pass），`requirement_coverage` 只要
+    "出现过的数字 ≥50% 可溯源"。这里按底稿逐项核对正文覆盖。
+
+    **只提示、不计入 overall**（`counted=False`，见 `run_acceptance` 的汇总规则）：
+    先把缺口显性化、观察一批真实任务，再决定是否收紧门禁。
+    """
+    gaps: list[str] = []
+    try:
+        from working_paper_export import build_result
+        paper = build_result(task_id, goal)
+    except Exception as exc:                     # 读不到底稿 → 不适用，不误报
+        return {"pass": True, "counted": False, "applicable": False,
+                "analysis_gaps": [], "gaps": [],
+                "details": f"无底稿可核对（{str(exc)[:80]}）：不适用"}
+    if not paper.get("ok"):
+        return {"pass": True, "counted": False, "applicable": False,
+                "analysis_gaps": [], "gaps": [],
+                "details": "非研究任务（无结构化财务底稿）：不适用"}
+
+    norm = _normalized_numbers(report)
+    rows = list(paper.get("rows_detail") or [])
+    derived = list(paper.get("derived_detail") or [])
+    # 只把**契约点名的必需指标**算作"必须写进正文"；总资产/总负债这类支撑事实
+    # 是比率的输入、不是交付要求，缺了不该报缺口（它们的意义体现在比率读数上）。
+    _required = {str(m) for m in ((paper.get("request") or {}).get("required_metrics") or [])}
+    required_rows = [r for r in rows
+                     if not _required or str(r.get("metric") or "") in _required]
+
+    def _num_forms(value) -> list[str]:
+        out: list[str] = []
+        for f in (f"{value}", f"{value:g}"):
+            if f not in out:
+                out.append(f)
+        return out
+
+    missing_facts: list[str] = []
+    for r in required_rows:
+        if not any(f in norm for f in _num_forms(r.get("value"))):
+            missing_facts.append(f"{r.get('metric_label') or r.get('metric')}"
+                                 f" {r.get('period')}（{r.get('value')}"
+                                 f"{r.get('unit') or ''}）")
+    if missing_facts:
+        gaps.append("正文未给出必需事实的数值：" + "、".join(missing_facts[:6])
+                    + (f" 等 {len(missing_facts)} 项" if len(missing_facts) > 6 else ""))
+
+    _ratio_concepts = {"net_margin": "净利率", "cashflow_coverage": "现金流",
+                       "debt_ratio": "资产负债率", "rd_intensity": "研发"}
+    missing_derived: list[str] = []
+    for d in derived:
+        metric = str(d.get("metric") or "")
+        concept = "同比" if metric.endswith("_yoy") else _ratio_concepts.get(metric, "")
+        if (not any(f in norm for f in _num_forms(d.get("value")))
+                and not (concept and concept in norm)):
+            missing_derived.append(f"{d.get('metric_label') or metric}"
+                                   f" {d.get('period')}（{d.get('value')}%）")
+    if missing_derived:
+        gaps.append("正文未给出派生指标（同比/比率）的读数："
+                    + "、".join(missing_derived[:6])
+                    + (f" 等 {len(missing_derived)} 项" if len(missing_derived) > 6 else ""))
+
+    if "风险" not in report:
+        gaps.append("正文缺少风险提示段落")
+    if not any(w in report for w in ("结论", "小结", "总结")):
+        gaps.append("正文缺少结论段落")
+
+    total = len(required_rows) + len(derived)
+    return {
+        "pass": not gaps,
+        "counted": False,                        # 只提示：不进 overall/gaps 汇总
+        "applicable": True,
+        "analysis_gaps": gaps,
+        "facts_total": len(required_rows), "facts_missing": len(missing_facts),
+        "derived_total": len(derived), "derived_missing": len(missing_derived),
+        "gaps": gaps,
+        "details": (
+            f"分析要素覆盖完整（必需事实 {len(required_rows)} 项、派生 {len(derived)} 项都在正文）"
+            if not gaps else
+            f"分析要素缺口 {len(gaps)} 类：必需事实缺 {len(missing_facts)}/{len(required_rows)}、"
+            f"派生缺 {len(missing_derived)}/{len(derived)}（共 {total} 项）"
+        ),
     }
 
 
@@ -2562,6 +2655,11 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace,
         goal, report_text, _reqs,
         checks.get("number_traceability") or {},
         sources, checks.get("source_list_completeness") or {},
+    )
+    # 分析完整性（研究任务）：正文有没有把已选事实讲全。**只提示**——`counted=False`
+    # 使其不参与下面的 gaps 汇总与 overall；缺口在 checks 里可见、可诊断。
+    checks["analysis_completeness"] = check_analysis_completeness(
+        report_text, goal, task_id,
     )
     gaps = []
     _req_gap_msgs: list[str] = []

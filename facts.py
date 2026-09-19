@@ -42,6 +42,22 @@ ALL_METRICS: tuple[tuple[str, str], ...] = CORE_METRICS + (
 )
 METRIC_LABELS = dict(ALL_METRICS)
 
+# 派生指标的中文标签：注入给模型的 [已选事实] 块与报告都直接读它，
+# 英文 slug（revenue_yoy）对报告读者没有意义。
+DERIVED_METRICS: tuple[tuple[str, str], ...] = (
+    ("revenue_yoy", "营业收入同比"),
+    ("net_profit_yoy", "归母净利润同比"),
+    ("operating_cashflow_yoy", "经营活动现金流净额同比"),
+    ("net_margin", "净利率"),
+    ("cashflow_coverage", "经营现金流对净利润的覆盖"),
+    ("debt_ratio", "资产负债率"),
+    ("rd_intensity", "研发投入强度"),
+)
+METRIC_LABELS.update(dict(DERIVED_METRICS))
+
+# 同比类派生（`<metric>_yoy`）：报告里必须写成"同比/增速"，不能只说"变化"
+YOY_SUFFIX = "_yoy"
+
 MARKETS = ("cn", "hk", "us")
 UNKNOWN = "unknown"
 
@@ -534,6 +550,9 @@ def derived_fact(base: list[Fact], metric: str, *, formula: str,
                      else ("derived" if unit is not None else UNKNOWN)),
         value=value, raw_value=value,
         caliber=(first.caliber if first else UNKNOWN),
+        # 派生行的口径来自输入事实的来源声明：证据一并带出，报告里才能复核
+        caliber_source=(first.caliber_source if first else ""),
+        caliber_evidence=(first.caliber_evidence if first else ""),
         source_url=(first.source_url if first else ""),
         source_hash=(first.source_hash if first else ""),
         verify_state=VERIFY_UNVERIFIED,

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 
 from facts import UNKNOWN, ResearchRequest, parse_research_request
@@ -135,6 +136,84 @@ def build_result(task_id: str, goal: str, *, project: str | None = None) -> dict
         "completeness": paper.completeness, "paper_ok": paper.ok,
         "paper": paper,                      # 仅内存用；落盘时由 write_working_paper 使用
     }
+
+
+def chart_rows(task_id: str, goal: str, *, project: str | None = None) -> dict:
+    """底稿 → **图表数据行**（只算不写）。
+
+    为什么不让图表继续吃 `financials.json`（`_merge_structured_financials` 那条）：
+    那份只有原始指标、**没有同比与比率**，也没有"契约期间"的概念——搜索清洗带进来的
+    越界期间（如 2025 半年报）会一起进图，报告正文却声明"未予采用"（实机
+    `ui-2084c2c9cc` 的 `market_trends.png` 就是这样把越界数据画进了交付）。
+
+    这里以底稿为准：只保留**契约期间**的行，并带上派生指标（同比/比率），
+    图上才有经济含义。
+
+    返回 `{"ok", "rows", "derived", "periods", "unit", "source_label", "source_url",
+    "request"}`；没有结构化财务时 `ok=False`（不编数据）。
+    """
+    res = build_result(task_id, goal, project=project)
+    if not res.get("ok"):
+        return {"ok": False,
+                "reason": str(res.get("reason") or "没有结构化财务，无图表数据"),
+                "rows": [], "derived": []}
+    request = res.get("request") or {}
+    periods = sorted({int(y) for y in (request.get("periods") or [])
+                      if str(y).strip().isdigit()})
+
+    def _year(text: str) -> int | None:
+        m = re.search(r"(20\d{2})", str(text or ""))
+        return int(m.group(1)) if m else None
+
+    def _keep(period: str) -> bool:
+        y = _year(period)
+        return y is None or not periods or y in set(periods)
+
+    rows = [dict(r, year=_year(r.get("period")))
+            for r in (res.get("rows_detail") or [])
+            if _keep(str(r.get("period") or ""))]
+    derived = [dict(d, year=_year(d.get("period")))
+               for d in (res.get("derived_detail") or [])
+               if _keep(str(d.get("period") or ""))]
+    unit = ""
+    for r in rows:
+        u = str(r.get("unit") or "").strip()
+        if u:
+            unit = u
+            break
+    src_label, src_url = _source_labels(task_id, project)
+    return {
+        "ok": bool(rows or derived), "rows": rows, "derived": derived,
+        "periods": periods, "unit": unit,
+        "source_label": src_label, "source_url": src_url,
+        "request": request,
+    }
+
+
+def _source_labels(task_id: str, project: str | None = None) -> tuple[str, str]:
+    """`financials.json` 的来源 → (可读名, 原始 URL)。
+
+    图上要写"东方财富数据中心"这类**可读来源名**；把接口 URL 原样印在图注里
+    对读者是噪音（实机图注里出现过整串 API 地址）。
+    """
+    try:
+        proj = task_project_dir(task_id, project) if project else task_project_dir(task_id)
+        payload = json.loads((Path(proj) / "financials.json").read_text(encoding="utf-8"))
+    except Exception:
+        return "", ""
+    md = payload.get("metadata") or {}
+    raw = payload.get("raw") or {}
+    if str(payload.get("source") or "") == "multi_entity":
+        md = ((payload.get("companies") or [{}])[0].get("metadata") or {}) or md
+        raw = ((payload.get("companies") or [{}])[0].get("raw") or {}) or raw
+    key = str(md.get("source") or "")
+    label = key
+    try:
+        import orchestrator_v2 as _ov
+        label = _ov._STRUCTURED_SOURCE_LABELS.get(key, key or "结构化数据源")
+    except Exception:
+        pass
+    return label or "结构化数据源", str(raw.get("url") or "")
 
 
 def write_working_paper(task_id: str, goal: str, *,

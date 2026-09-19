@@ -622,6 +622,12 @@ def clean_and_structure(items: list[dict], goal: str = "") -> dict:
     topic_terms = Counter()
     for d in docs:
         text = _doc_text(d)
+        # 结构化数据源的快照是**原始 JSON**（含接口字段名如 TOTALOPER_RATIO / _PK）：
+        # 把它当散文分词，热词会变成 RATIO/PK/NET 这类字段碎片（实机 topic_terms.png
+        # 的"热词"就是 null 5929 / RATIO 1648 / PK 1236）。JSON 不是文本，直接不参与
+        # 热词统计；数值溯源仍走原始快照，不受影响。
+        if text.lstrip().startswith(("{", "[")):
+            continue
         tl = text.lower()
         if not any(_anchor_in(tl, a) for a in anchors):
             continue

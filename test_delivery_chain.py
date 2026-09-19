@@ -5120,5 +5120,142 @@ class TestWebFetchIriEncoding(_TempWorkspace, unittest.TestCase):
         self.assertIn("正文内容", d["text"])
 
 
+class TestFinancialResearchCharts(unittest.TestCase):
+    """研究任务的财务分析图：两期对比 / 同比增速 / 盈利与现金流质量。
+
+    实机教训（`ui-2084c2c9cc`）：老链路把 16 个会计科目（含流量与存量）归一成一张
+    "市场规模对比（亿元）"，每行自成单点序列 → 图上只有孤立圆点，读者拿不到结论。
+    这里钉住新链路：规格由底稿确定性生成、结论由数据算出、越界期间不进图。
+    """
+
+    ROWS = [
+        {"metric": "revenue", "metric_label": "营业收入", "year": 2023,
+         "value": 1505.6, "unit": "亿元"},
+        {"metric": "revenue", "metric_label": "营业收入", "year": 2024,
+         "value": 1741.44, "unit": "亿元"},
+        {"metric": "net_profit", "metric_label": "归母净利润", "year": 2023,
+         "value": 747.34, "unit": "亿元"},
+        {"metric": "net_profit", "metric_label": "归母净利润", "year": 2024,
+         "value": 862.28, "unit": "亿元"},
+        {"metric": "operating_cashflow", "metric_label": "经营活动现金流净额",
+         "year": 2023, "value": 665.93, "unit": "亿元"},
+        {"metric": "operating_cashflow", "metric_label": "经营活动现金流净额",
+         "year": 2024, "value": 924.64, "unit": "亿元"},
+    ]
+    DERIVED = [
+        {"metric": "revenue_yoy", "metric_label": "营业收入同比", "year": 2024,
+         "value": 15.66, "unit": "%"},
+        {"metric": "net_profit_yoy", "metric_label": "归母净利润同比", "year": 2024,
+         "value": 15.38, "unit": "%"},
+        {"metric": "operating_cashflow_yoy", "metric_label": "经营活动现金流净额同比",
+         "year": 2024, "value": 38.85, "unit": "%"},
+        {"metric": "net_margin", "metric_label": "净利率", "year": 2023,
+         "value": 49.64, "unit": "%"},
+        {"metric": "net_margin", "metric_label": "净利率", "year": 2024,
+         "value": 49.52, "unit": "%"},
+        {"metric": "cashflow_coverage", "metric_label": "经营现金流对净利润的覆盖",
+         "year": 2023, "value": 89.11, "unit": "%"},
+        {"metric": "cashflow_coverage", "metric_label": "经营现金流对净利润的覆盖",
+         "year": 2024, "value": 107.23, "unit": "%"},
+    ]
+
+    def _specs(self):
+        import chart_specs as CS
+        return CS.financial_research_specs(
+            self.ROWS, self.DERIVED, unit="亿元", source="东方财富数据中心（A股）",
+            company="贵州茅台", caliber="合并", periods=[2023, 2024])
+
+    def test_three_specs_are_valid_and_grouped(self):
+        import chart_specs as CS
+        specs = self._specs()
+        self.assertEqual(len(specs), 3)
+        self.assertEqual([s["type"] for s in specs],
+                         ["grouped_bar", "bar", "grouped_bar"])
+        for s in specs:
+            self.assertEqual(CS.validate_spec(s), [], s.get("title"))
+            self.assertEqual(s["source"], "东方财富数据中心（A股）",
+                             "图注要写可读来源名，不是接口 URL")
+        # 两期对比图：每个指标两年并排（分组靠 caliber=年度）
+        cmp_spec = specs[0]
+        self.assertEqual({r["caliber"] for r in cmp_spec["data"]}, {"2023年", "2024年"})
+        self.assertEqual(len({r["label"] for r in cmp_spec["data"]}), 3)
+        # 结论由数据算出（不是"随年份变化"这类同义反复）
+        self.assertIn("38.85", specs[0]["conclusion"])
+        self.assertIn("107.23", specs[2]["conclusion"])
+
+    def test_render_script_draws_grouped_bar(self):
+        """真跑一遍渲染脚本：分组柱必须画出来（模板是字符串，靠这条兜住）。"""
+        import subprocess
+        import sys
+        import chart_assembly as CA
+        repo = Path(__file__).resolve().parent
+        tmp = tempfile.mkdtemp(prefix="wm_finchart_")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        script = CA.RENDER_CHART_SCRIPT.replace("__REPO_ROOT__", str(repo))
+        (Path(tmp) / "render_charts.py").write_text(script, encoding="utf-8")
+        (Path(tmp) / "chart_data.json").write_text(
+            json.dumps({"charts": self._specs()}, ensure_ascii=False), encoding="utf-8")
+        proc = subprocess.run([sys.executable, "render_charts.py"], cwd=tmp,
+                              capture_output=True, text=True, timeout=600)
+        self.assertEqual(proc.returncode, 0, proc.stderr[:400])
+        out = proc.stdout
+        self.assertIn("total=3 skipped=0", out, out[:400])
+        for name in ("chart_1.png", "chart_2.png", "chart_3.png"):
+            self.assertTrue((Path(tmp) / name).exists(), name)
+            self.assertGreater((Path(tmp) / name).stat().st_size, 5000, name)
+
+    def test_chart_rows_keep_only_contract_periods(self):
+        """越界期间不进图：报告正文声明"未予采用"的数据，图上也不能出现。"""
+        import facts as F
+        import task_state
+        import working_paper_export as WPX
+        tid = "chart-rows-01"
+        tmp = Path(tempfile.mkdtemp(prefix="wm_crows_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        old_db = task_state.DB_PATH
+        ws_mod.configure_workspace_root(str(tmp))
+        task_state.DB_PATH = str(tmp / "cr.db")
+        try:
+            req = F.parse_research_request(
+                "表单", company="贵州茅台", company_id="600519.SH", market="cn",
+                periods=[2023, 2024], caliber="合并", as_of="2025-04-30",
+                identity_source="form")
+            task_state.mark_queued(tid, goal="表单", research_request=req.to_payload(),
+                                   db_path=task_state.DB_PATH)
+            proj = ws_mod.task_project_dir(tid, "default")
+            proj.mkdir(parents=True, exist_ok=True)
+            # 注意：这里要的是 **financials 行**（revenue/net_profit/... 原始字段），
+            # 不是上面的图表行（metric/value）——两者形状不同，别混用。
+            rows = [
+                {"year": 2023, "report_type": "年报", "revenue": 1505.6,
+                 "net_profit": 747.34, "operating_cashflow": 665.93,
+                 "disclosure_date": "2024-04-03"},
+                {"year": 2024, "report_type": "年报", "revenue": 1741.44,
+                 "net_profit": 862.28, "operating_cashflow": 924.64,
+                 "disclosure_date": "2025-04-03"},
+                {"year": 2025, "report_type": "中报", "revenue": 9999.0,
+                 "net_profit": 999.0, "operating_cashflow": 999.0,
+                 "disclosure_date": "2025-08-15"},
+            ]
+            (proj / "financials.json").write_text(
+                json.dumps({"financials": rows,
+                            "metadata": {"source": "eastmoney_ashare",
+                                         "company": "贵州茅台", "currency": "CNY",
+                                         "unit": "亿元", "caliber": "合并",
+                                         "caliber_evidence": "含 PARENTNETPROFIT"},
+                            "raw": {"url": "https://datacenter-web.eastmoney.com/api/x",
+                                    "text": "{}"}}, ensure_ascii=False), encoding="utf-8")
+            out = WPX.chart_rows(tid, "表单", project="default")
+            self.assertTrue(out["ok"], out)
+            self.assertEqual(out["periods"], [2023, 2024])
+            self.assertEqual({r["year"] for r in out["rows"]}, {2023, 2024})
+            self.assertEqual({d["year"] for d in out["derived"]}, {2023, 2024})
+            self.assertEqual(out["source_label"], "东方财富数据中心（A股）")
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            task_state.DB_PATH = old_db
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

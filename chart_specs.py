@@ -11,7 +11,7 @@
 
 import re
 
-CHART_TYPES = ("line", "bar", "horizontal_bar", "pie", "scatter")
+CHART_TYPES = ("line", "bar", "horizontal_bar", "pie", "scatter", "grouped_bar")
 
 # 关键字段缺失即视为无效图（跳过）
 CRITICAL_FIELDS = (
@@ -252,6 +252,142 @@ def verify_specs_against_text(specs: list[dict], text: str) -> tuple[list[dict],
         elif rows_kept and len(rows_kept) < 2:
             dropped_rows += 0  # 行数已计入
     return kept_specs, dropped_rows
+
+
+def financial_research_specs(rows: list[dict], derived: list[dict], *,
+                             unit: str = "", source: str = "",
+                             company: str = "", caliber: str = "",
+                             periods: list[int] | None = None) -> list[dict]:
+    """公司研究任务的**三张财务分析图**（确定性规格，不经 LLM）。
+
+    为什么单独一条：实机 `ui-2084c2c9cc` 的图是"市场规模对比（亿元）"——16 个会计科目
+    （含流量与存量）塞进同一坐标轴、每个"序列"只有一个点，退化成 16 个孤立圆点；财务
+    读者要的是**两期对比 + 同比 + 质量比率**这三张。数据一律来自底稿（含同比/比率），
+    越界期间已在上游 `chart_rows` 过滤。
+
+    只在数据够画时才产出（单点图无结论，按规范跳过）；结论由数据算出，不写空话。
+    """
+    try:
+        from facts import metric_label
+    except Exception:                     # 生成脚本环境缺依赖时退回英文键
+        def metric_label(key):
+            return str(key)
+
+    years = sorted({int(r.get("year")) for r in rows if r.get("year") is not None})
+    periods = sorted(int(y) for y in (periods or years)) or years
+    src = source or "结构化财务数据源"
+    span = (f"{periods[0]}-{periods[-1]}" if len(periods) >= 2
+            else str(periods[0] if periods else "未知"))
+    who = f"{company} " if company else ""
+    specs: list[dict] = []
+
+    # ① 两期核心指标对比（分组柱：x=指标，series=年度）
+    core_rows = [r for r in rows if r.get("year") in set(periods)]
+    if len(years) >= 2 and len(core_rows) >= 2:
+        yoy_by_metric = {str(d.get("metric") or ""): d.get("value")
+                         for d in derived
+                         if str(d.get("metric") or "").endswith("_yoy")}
+        ups = [v for v in yoy_by_metric.values() if isinstance(v, (int, float))]
+        if ups and all(v > 0 for v in ups):
+            top = max(yoy_by_metric.items(), key=lambda kv: kv[1])
+            conclusion = (f"两期核心指标均上升，{metric_label(top[0])}增幅最大"
+                          f"（{top[1]:g}%）；分项同比见同比增速图")
+        elif ups:
+            conclusion = "两期核心指标有升有降，分项同比见同比增速图"
+        else:
+            conclusion = "两期核心指标规模对比，数值见图注"
+        specs.append({
+            "question": f"{who}{periods[0]} 与 {periods[-1]} 三个核心指标的规模对比如何？",
+            "conclusion": conclusion,
+            "type": "grouped_bar",
+            "title": f"{who}{periods[0]} vs {periods[-1]} 核心指标对比（{unit or '原值'}）",
+            "x_axis_title": "核心指标",
+            "y_axis_title": f"金额（{unit}）" if unit else "数值",
+            "unit": unit,
+            "time_range": span,
+            "region": "未标注",
+            "sample_size": str(len(core_rows)),
+            "source": src,
+            "section_hint": "关键数据",
+            "data": [
+                {"label": str(r.get("metric_label") or metric_label(r.get("metric"))),
+                 "value": r.get("value"), "unit": r.get("unit") or unit,
+                 "year": r.get("year"), "caliber": f"{r.get('year')}年",
+                 "source": src}
+                for r in core_rows
+            ],
+        })
+
+    # ② 同比增速（柱：每个核心指标的同比 %）
+    yoy_rows = [d for d in derived
+                if str(d.get("metric") or "").endswith("_yoy")
+                and isinstance(d.get("value"), (int, float))]
+    if len(yoy_rows) >= 2:
+        best = max(yoy_rows, key=lambda d: d["value"])
+        worst = min(yoy_rows, key=lambda d: d["value"])
+        last_year = periods[-1] if periods else ""
+        specs.append({
+            "question": f"{who}{last_year} 年各核心指标同比增速是多少？",
+            "conclusion": (f"{metric_label(best.get('metric'))} 增幅最大"
+                           f"（{best['value']:g}%），"
+                           f"{metric_label(worst.get('metric'))} 最低（{worst['value']:g}%）"),
+            "type": "bar",
+            "title": f"{who}{last_year} 年核心指标同比增速（%）",
+            "x_axis_title": "核心指标",
+            "y_axis_title": "同比（%）",
+            "unit": "%",
+            "time_range": span,
+            "region": "未标注",
+            "sample_size": str(len(yoy_rows)),
+            "source": src,
+            "section_hint": "同比",
+            "data": [
+                {"label": str(d.get("metric_label") or metric_label(d.get("metric"))),
+                 "value": d.get("value"), "unit": "%", "source": src}
+                for d in yoy_rows
+            ],
+        })
+
+    # ③ 盈利与现金流质量（柱：净利率 / 现金流对净利润覆盖 / 资产负债率 等 %）
+    ratio_rows = [d for d in derived
+                  if str(d.get("metric") or "") in _QUALITY_RATIOS
+                  and isinstance(d.get("value"), (int, float))]
+    if len(ratio_rows) >= 2:
+        cov = next((d for d in ratio_rows
+                    if d.get("metric") == "cashflow_coverage"
+                    and d.get("year") == (periods[-1] if periods else None)), None)
+        if cov is not None:
+            conclusion = (f"最新一期经营现金流对净利润覆盖 {cov['value']:g}%"
+                          + ("（>100%，当期利润有现金支撑）" if cov["value"] > 100
+                             else "（<100%，当期利润的现金支撑偏弱）"))
+        else:
+            conclusion = "盈利与现金流质量指标（比率，单位 %）"
+        specs.append({
+            "question": f"{who}盈利质量与现金流质量如何？",
+            "conclusion": conclusion,
+            "type": "grouped_bar",
+            "title": f"{who}盈利与现金流质量两期对比（%）",
+            "x_axis_title": "质量指标",
+            "y_axis_title": "比率（%）",
+            "unit": "%",
+            "time_range": span,
+            "region": "未标注",
+            "sample_size": str(len(ratio_rows)),
+            "source": src,
+            "section_hint": "盈利质量",
+            "data": [
+                {"label": str(d.get("metric_label") or metric_label(d.get("metric"))),
+                 "value": d.get("value"), "unit": "%",
+                 "year": d.get("year"), "caliber": f"{d.get('year')}年",
+                 "source": src}
+                for d in ratio_rows
+            ],
+        })
+    return specs
+
+
+# 质量类比率（与 working_paper._RATIO_SPECS 的派生指标同名）
+_QUALITY_RATIOS = ("net_margin", "cashflow_coverage", "debt_ratio", "rd_intensity")
 
 
 def wrap_rows_to_specs(rows: list[dict]) -> list[dict]:
