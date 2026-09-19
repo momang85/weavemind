@@ -186,6 +186,9 @@ def main() -> int:
             "EMBEDDING_BASE_URL": base, "EMBEDDING_API_KEY": key,
             "EMBEDDING_MODEL": "stub-embed",
             "WEAVEMIND_IDENTITY_MODE": "local",
+            # 冒烟用的是本机替身端点（127.0.0.1）：端点守卫默认拒绝私网/环回，
+            # 这里显式放行——生产端点走公网策略校验，不受此开关影响
+            "WM_LLM_ALLOW_LOCAL": "1",
         })
         _log(f"stub 就绪：{base}")
 

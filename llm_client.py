@@ -305,6 +305,168 @@ def describe_error(exc: Exception) -> str:
     return cls or type(exc).__name__
 
 
+# ── 流式传输（SSE）─────────────────────────────────────────
+#
+# 为什么要有流式：网关（实测响应体里的 alb）在 ~60s 处切断**整段**非流式响应，
+# 而报告/总结这类长生成（4096–8192 tokens 的中文）普遍超过这个窗口——于是每次都
+# 504、重试、强制重做，任务根本跑不到终态。流式让字节持续到达，网关不再按"整段
+# 响应耗时"判超时。
+#
+# 设计要点：流式只是**传输**层的变化——累积完成后还原成与非流式**同形**的响应体，
+# 下游的解析、用量记账、缓存、健康标记、调用形状记录全都不用改。
+
+_STREAM_ENV = "WM_LLM_STREAM"
+_STREAM_UNSUPPORTED_CODES = (400, 404, 405, 415, 422)
+
+
+def _stream_enabled() -> bool:
+    """流式开关（默认开）；个别供应商不支持时由调用方回退非流式。"""
+    return os.environ.get(_STREAM_ENV, "1") != "0"
+
+
+def _stream_unsupported(exc: Exception) -> bool:
+    """异常是不是"供应商不支持流式"（400/404/405/415/422）——只认这些码，
+    其它错误（超时/5xx/鉴权）如实上报，不当成"回退就能好"。"""
+    status, _cls = _error_shape(exc)
+    return status in _STREAM_UNSUPPORTED_CODES
+
+
+def _sse_payload(line: str) -> str:
+    """从一行 SSE 里取出 data 载荷；非 data 行（注释/空行）返回空串。"""
+    s = str(line or "").strip()
+    if not s.startswith("data:"):
+        return ""
+    return s[5:].strip()
+
+
+def _merge_stream_chunk(acc: dict, chunk: dict) -> None:
+    """把一条 SSE chunk 并入累积结果（内容/思考内容/结束原因/用量）。"""
+    if not isinstance(chunk, dict):
+        return
+    if isinstance(chunk.get("usage"), dict) and chunk["usage"]:
+        acc["usage"] = chunk["usage"]
+    for ch in chunk.get("choices") or []:
+        if not isinstance(ch, dict):
+            continue
+        delta = ch.get("delta") or {}
+        if delta.get("content"):
+            acc["content"].append(str(delta["content"]))
+        # 思考模型的 reasoning_content 也要收：否则"思考烧光预算"的判据会失效
+        if delta.get("reasoning_content"):
+            acc["reasoning"].append(str(delta["reasoning_content"]))
+        if ch.get("finish_reason"):
+            acc["finish_reason"] = str(ch["finish_reason"])
+
+
+def _new_stream_acc() -> dict:
+    return {"content": [], "reasoning": [], "finish_reason": "", "usage": {}}
+
+
+def _stream_result(acc: dict) -> dict:
+    """累积结果 → 与非流式同形的响应体。"""
+    return {
+        "choices": [{
+            "index": 0,
+            "finish_reason": acc.get("finish_reason") or "stop",
+            "message": {
+                "role": "assistant",
+                "content": "".join(acc.get("content") or []),
+                "reasoning_content": "".join(acc.get("reasoning") or []),
+            },
+        }],
+        "usage": acc.get("usage") or {},
+    }
+
+
+def _with_stream(body: dict, stream: bool) -> dict:
+    """按需加上/去掉流式参数（回退非流式时要去干净）。"""
+    out = dict(body)
+    if stream:
+        out["stream"] = True
+        # 用量在流式下要显式索取，否则拿不到 token 数
+        out["stream_options"] = {"include_usage": True}
+    else:
+        out.pop("stream", None)
+        out.pop("stream_options", None)
+    return out
+
+
+# ── LLM 端点守卫 ────────────────────────────────────────────
+#
+# 模型端点地址来自配置/环境（运维写），不是用户输入；但配错就会把提示词与数据
+# 发到内网服务（元数据、本机管理口）。因此发请求前按项目既有策略校验：
+# 仅 http/https、不得带用户凭据、公网端点解析后**全部**地址必须是公网；
+# 本机/私网端点必须由运维显式登记（`network.endpoints`）或显式开关放行。
+
+_ENDPOINT_OK_CACHE: dict[tuple, str] = {}
+_ENDPOINT_CACHE_LOCK = threading.Lock()
+_LOCAL_ENDPOINT_ENV = "WM_LLM_ALLOW_LOCAL"
+
+
+def _local_endpoint_allowed() -> bool:
+    """本机/私网 LLM 端点是否被显式允许（CI 替身、本机 Ollama/LoRA 用）。
+
+    默认**不允许**：端点写错时不得静默把请求发到内网。
+    """
+    return os.environ.get(_LOCAL_ENDPOINT_ENV, "0") == "1"
+
+
+def _registered_hosts() -> set:
+    """运维登记表里的 (scheme, host, port)：登记即视为授权（含 loopback 标记的本机服务）。"""
+    try:
+        import net_policy
+        out = set()
+        for ep in (net_policy.load_registry() or {}).values():
+            out.add((str(ep.scheme).lower(), str(ep.host).lower(), int(ep.port or 0)))
+        return out
+    except Exception:
+        return set()
+
+
+def _endpoint_guard(url: str) -> str:
+    """校验 LLM 端点 URL，返回可用 URL；不通过抛 `LLMCallError`。
+
+    结果按 (scheme, host, port) 缓存：每次调用都解析 DNS 不值得。
+    """
+    import urllib.parse
+    raw = str(url or "").strip()
+    try:
+        parts = urllib.parse.urlsplit(raw)
+    except Exception as exc:
+        raise LLMCallError(f"LLM 端点无法解析：{str(exc)[:80]}") from exc
+    scheme = str(parts.scheme or "").lower()
+    host = str(parts.hostname or "").lower().rstrip(".")
+    port = int(parts.port or (443 if scheme == "https" else 80))
+    if scheme not in ("http", "https"):
+        raise LLMCallError(f"LLM 端点协议不允许：{scheme or '(空)'}")
+    if parts.username or parts.password:
+        raise LLMCallError("LLM 端点 URL 不得携带用户凭据")
+    if not host:
+        raise LLMCallError("LLM 端点缺少主机名")
+    key = (scheme, host, port)
+    with _ENDPOINT_CACHE_LOCK:
+        if _ENDPOINT_OK_CACHE.get(key):
+            return raw
+    if key in _registered_hosts():
+        with _ENDPOINT_CACHE_LOCK:
+            _ENDPOINT_OK_CACHE[key] = raw
+        return raw
+    if _local_endpoint_allowed():
+        with _ENDPOINT_CACHE_LOCK:
+            _ENDPOINT_OK_CACHE[key] = raw
+        return raw
+    try:
+        import net_policy
+        decision = net_policy.validate_public_url(raw)
+    except Exception as exc:                    # 策略模块不可用：按"无法证明"拒绝
+        raise LLMCallError(f"LLM 端点策略校验不可用：{str(exc)[:80]}") from exc
+    if not decision.ok:
+        raise LLMCallError(f"LLM 端点被网络策略拒绝：{decision.reason}")
+    with _ENDPOINT_CACHE_LOCK:
+        _ENDPOINT_OK_CACHE[key] = raw
+    return raw
+
+
 _LLM_CALLS_MAX = 200          # 每任务保留的调用形状条数上限
 
 
@@ -1681,6 +1843,35 @@ class LLMClient:
             url, data=data, headers=headers, method="POST"
         )
 
+        # 流式优先（复用既有流式实现 `_call_llm_stream_once`，不新增请求站点）：
+        # 网关在 ~60s 处切断**整段**非流式响应，报告/总结这类长生成因此必 504
+        # （实机复现：8192 tokens 中文生成非流式 60.6s 被 504，流式 76.7s 正常返回）。
+        if _stream_enabled():
+            _info: dict = {}
+            try:
+                text = _call_llm_stream_once(
+                    self.base_url, self.api_key, model or self.model, system, user,
+                    temperature=temperature, max_tokens=max_tokens,
+                    publish=False, out=_info,
+                )
+            except LLMCallError as exc:
+                if not _stream_unsupported(exc):
+                    raise
+                logger.warning("流式请求被拒（%s），回退非流式", describe_error(exc))
+            else:
+                text = str(text or "").strip()
+                if not text:
+                    # 与下面非流式分支同判据：思考烧光预算（content 空 + length）
+                    # 不是端点故障，交由调用方放大 max_tokens 重试
+                    exc = LLMCallError("Empty content in LLM response")
+                    if _info.get("reasoning") and _info.get("finish_reason") == "length":
+                        exc = LLMCallError(
+                            "Empty content in LLM response (thinking budget exhausted)"
+                        )
+                        exc.thinking_budget_exhausted = True
+                    raise exc
+                return text
+
         try:
             # 非流式响应的 socket 读超时：模型计算/生成期间无数据到达即触发。
             # 长文生成（glm 类慢模型实测单次 60-75s，长文 >300s）会被默认 60s
@@ -1810,6 +2001,20 @@ def call_llm(
     )
 
 
+def _record_stream_usage(usage: dict, model: str) -> None:
+    """流式响应的用量记账（`stream_options.include_usage` 时在末尾 chunk 里给出）。"""
+    if not isinstance(usage, dict) or not usage:
+        return
+    try:
+        _record_usage(usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
+                      model=model)
+        _bump_task_budget(usage.get("prompt_tokens", 0),
+                          usage.get("completion_tokens", 0), model)
+        _publish_usage_snapshot()
+    except Exception:
+        pass
+
+
 def _call_llm_stream_once(
     base_url: str,
     api_key: str,
@@ -1819,10 +2024,16 @@ def _call_llm_stream_once(
     on_chunk=None,
     temperature: float = 0.1,
     max_tokens: int = 2000,
+    publish: bool = True,
+    out: dict | None = None,
 ) -> str:
     """单次 SSE 流式请求（同步，urllib）：逐块回调 on_chunk，返回累计文本。
     空响应/网络错误在此层统一抛 LLMCallError；端点健康标记与备用切换由
-    call_llm_stream 负责（与 call()/call_llm_async 语义对齐）。"""
+    call_llm_stream 负责（与 call()/call_llm_async 语义对齐）。
+
+    `publish=False`：只做传输（不往步骤流推显示片段）——`_send_request` 这类
+    非展示用途用它；`out` 用于把用量与结束原因回传给调用方（空内容的
+    "思考烧光预算"判据需要 finish_reason）。"""
     import urllib.error
     import urllib.request
 
@@ -1842,6 +2053,8 @@ def _call_llm_stream_once(
         "temperature": temperature,
         "max_tokens": max_tokens,
         "stream": True,
+        # 用量要显式索取：流式下 token 数只出现在末尾 chunk
+        "stream_options": {"include_usage": True},
     }
     req = urllib.request.Request(
         url, data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
@@ -1874,12 +2087,22 @@ def _call_llm_stream_once(
                 break
             try:
                 obj = json.loads(payload)
-                delta = obj.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                if isinstance(obj.get("usage"), dict) and obj["usage"]:
+                    _record_stream_usage(obj["usage"], model)
+                    if out is not None:
+                        out["usage"] = obj["usage"]
+                choices = obj.get("choices") or [{}]
+                delta = (choices[0] or {}).get("delta", {}).get("content", "")
+                if (choices[0] or {}).get("finish_reason") and out is not None:
+                    out["finish_reason"] = str(choices[0]["finish_reason"])
+                if (choices[0] or {}).get("delta", {}).get("reasoning_content") and out is not None:
+                    out["reasoning"] = True
             except Exception:
                 delta = ""
             if delta:
                 chunks.append(delta)
-                _publish_stream_chunk(delta)
+                if publish:
+                    _publish_stream_chunk(delta)
                 if on_chunk is not None:
                     try:
                         on_chunk(delta)
@@ -1892,7 +2115,10 @@ def _call_llm_stream_once(
             data = json.loads(body_text)
             content = data["choices"][0]["message"]["content"]
             chunks.append(str(content))
-            _publish_stream_chunk(str(content))
+            if data.get("usage") and out is not None:
+                out["usage"] = data["usage"]
+            if publish:
+                _publish_stream_chunk(str(content))
             if on_chunk is not None:
                 try:
                     on_chunk(str(content))
@@ -2094,11 +2320,10 @@ async def call_llm_async(
         _t0 = time.monotonic()
         try:
             client = _get_async_client()
-            url = base_url.rstrip('/') + '/chat/completions'
+            # 端点先过网络策略（协议/凭据/解析后地址边界）：拒绝本机、内网与元数据服务
+            url = _endpoint_guard(base_url.rstrip('/') + '/chat/completions')
 
-            response = await client.post(url, json=payload, headers=headers)
-            response.raise_for_status()
-            data = response.json()
+            data = await _async_chat_once(client, url, payload, headers)
             usage = data.get("usage") or {}
             _record_usage(
                 usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
@@ -2203,10 +2428,52 @@ async def call_llm_async(
     raise LLMCallError(f'LLM async call failed after {max_attempts} attempts') from last_error
 
 
+async def _async_chat_once(client, url: str, payload: dict, headers: dict) -> dict:
+    """发一次 chat 请求，返回响应体；流式时把 SSE 累积**还原成同形响应体**。
+
+    流式的意义（实机复现）：网关在 ~60s 处切断**整段**非流式响应，报告/总结这类
+    长生成（4096–8192 tokens 中文）因此必 504、重试、强制重做，任务跑不到终态；
+    流式让字节持续到达，不再按整段耗时判超时。
+
+    供应商不支持流式（400/404/405/415/422）时**如实回退**非流式，不当成端点故障。
+    """
+    import httpx
+    # 注入的替身/自定义客户端可能只有 post（测试与私有部署会替换客户端）：
+    # 没有 stream 就按非流式走，不因为"换了客户端"而整个调用失败
+    if _stream_enabled() and hasattr(client, "stream"):
+        acc = _new_stream_acc()
+        try:
+            async with client.stream("POST", url, json=_with_stream(payload, True),
+                                     headers=headers) as resp:
+                if resp.status_code >= 400:
+                    await resp.aread()          # 流式响应必须先读完再抛，否则连接不释放
+                    resp.raise_for_status()
+                async for line in resp.aiter_lines():
+                    payload_line = _sse_payload(line)
+                    if not payload_line:
+                        continue
+                    if payload_line == "[DONE]":
+                        break
+                    try:
+                        _merge_stream_chunk(acc, json.loads(payload_line))
+                    except Exception:
+                        continue                # 单条坏 chunk 不废掉整段
+            return _stream_result(acc)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code not in _STREAM_UNSUPPORTED_CODES:
+                raise
+            logger.warning("流式请求被拒（HTTP %s），回退非流式",
+                           exc.response.status_code)
+    response = await client.post(url, json=_with_stream(payload, False),
+                                 headers=headers)
+    response.raise_for_status()
+    return response.json()
+
+
 async def _async_call_backup(payload: dict, fallback_model: str, expect_json: bool):
     """调用备用端点（async），标记健康状态，带清晰日志。"""
     client = _get_async_client()
-    url = _BACKUP_CFG["base_url"].rstrip("/") + "/chat/completions"
+    url = _endpoint_guard(_BACKUP_CFG["base_url"].rstrip("/") + "/chat/completions")
     b_headers = {
         "Authorization": f"Bearer {_BACKUP_CFG.get('api_key', '')}",
         "Content-Type": "application/json",

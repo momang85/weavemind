@@ -162,6 +162,8 @@ class _Handler(BaseHTTPRequestHandler):
                           "type": "stub_injected_failure"},
             }, 500)
         text = _reply_text(payload)
+        if payload.get("stream"):
+            return self._sse(text, str(payload.get("model") or "stub-model"))
         return self._json({
             "id": "stub-1",
             "object": "chat.completion",
@@ -171,6 +173,36 @@ class _Handler(BaseHTTPRequestHandler):
             "usage": {"prompt_tokens": 32, "completion_tokens": 64,
                       "total_tokens": 96},
         })
+
+    def _sse(self, text: str, model: str) -> None:
+        """按 OpenAI 流式协议回包（`stream: true` 时用）。
+
+        生产客户端默认走流式（网关会在 ~60s 切断整段非流式响应），所以替身也要
+        支持：否则 CI 冒烟里所有模型调用都会被当成"流式被拒"而回退。
+        结束用 `Connection: close` 定界，不写 Content-Length。
+        """
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        step = 400
+        for i in range(0, len(text), step):
+            chunk = {"id": "stub-1", "object": "chat.completion.chunk",
+                     "model": model,
+                     "choices": [{"index": 0, "delta": {"content": text[i:i + step]}}]}
+            self.wfile.write(
+                f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode("utf-8"))
+            self.wfile.flush()
+        final = {"id": "stub-1", "object": "chat.completion.chunk", "model": model,
+                 "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+                 "usage": {"prompt_tokens": 32, "completion_tokens": 64,
+                           "total_tokens": 96}}
+        self.wfile.write(
+            f"data: {json.dumps(final, ensure_ascii=False)}\n\n".encode("utf-8"))
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
 
 
 def main() -> int:

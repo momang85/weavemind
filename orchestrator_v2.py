@@ -1045,7 +1045,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
 
     @staticmethod
     def _research_steps(request) -> list[dict]:
-        """固定研究步骤（能力复用既有 worker，不新造执行体）。"""
+        """固定研究步骤（能力复用既有 worker，不新造执行体）。
+
+        超时按**流式下的真实生成时长**给（实机实测）：报告类步骤一次生成可到 5 分钟
+        （8192 tokens 中文），而 `_dispatch` 的等待下限是 300s——给 180/300 会让步骤在
+        生成中途被判超时、随后进入重做循环。这里显式放宽，让长生成能跑完。
+        """
         from facts import metric_label
         years = sorted({int(y) for y in (request.periods or [])})
         span = "、".join(str(y) for y in years)
@@ -1065,7 +1070,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     f"检索 {who}{code} 的年报与财务数据的权威来源（优先公司公告/交易所/"
                     f"官方年报），返回含原始 URL 的结果列表。{contract_note}"
                 ),
-                "timeout": 120,
+                "timeout": 180,
             },
             {
                 "step_id": "2",
@@ -1075,7 +1080,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     f"正文并保留原始 URL 与全部数字（年份、金额、币种、单位、报表口径）；"
                     f"主链接失败则换备用链接。{contract_note}"
                 ),
-                "timeout": 240,
+                "timeout": 300,
             },
             {
                 "step_id": "3",
@@ -1085,7 +1090,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     "变化，块内列出的缺口要如实写出来源不足的部分。不得引入块外数字，"
                     "不得自行换算或补齐缺失年份。"
                 ),
-                "timeout": 180,
+                "timeout": 900,
             },
             {
                 "step_id": "4",
@@ -1095,7 +1100,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     f"来源位置；不得出现已选事实之外的财务数字，缺口按实际情况写明。"
                     f"{contract_note}"
                 ),
-                "timeout": 300,
+                "timeout": 1200,
             },
         ]
 

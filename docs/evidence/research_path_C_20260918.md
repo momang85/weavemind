@@ -172,6 +172,49 @@ test_offline_delivery`）：
 埋了调用形状，故步骤侧 `llm_calls` 为空；已修（提交 `3edb1a1`），并顺带让 `_error_shape`
 识别 httpx 形状（此前 httpx 的 504 会落成 `generic`）。
 
+## 4.6 第三轮实机（流式修复后）：**交付级核对全部完成**
+
+任务 `ui-2084c2c9cc`，浏览器首页表单提交（贵州茅台 / 600519.SH / A股 / 2023–2024 /
+合并报表 / 截至日 2025-04-30）。**终态 SUCCESS_WITH_ISSUES，墙钟 1220s（20 分钟，在预声明的
+25 分钟内）**，执行步骤 = 固定四步 + package + 一次验收重做。
+
+### 4.6.1 先解决的两道门槛
+
+1. **网关 ~60s 切断整段响应**（见 4.5）→ 改**流式**：同步（复用既有 `call_llm_stream`）与
+   异步（`client.stream`）两条路径都走 SSE，累积后还原成与非流式**同形**的响应体，下游
+   解析/记账/缓存/健康标记全不变。真实网关验证：8192 tokens 中文生成非流式必 504，流式
+   deepseek-flash 76.7s、qwen3.8-max 177s（首字节 65.5s）均正常返回。
+2. **步骤超时把长生成砍在半路**：固定计划原给 content_summary 180s / report 300s，而
+   `_dispatch` 的等待下限是 300s、worker 实际要 ~5 分钟 → 步骤被判超时 → 重做循环。
+   固定计划改为 180/300/**900**/**1200**（按流式下的真实生成时长给）。
+
+### 4.6.2 验收清单逐项（实机读数）
+
+| 项 | 结果 |
+|---|---|
+| 表单 → 契约 | `research_request`：company 贵州茅台 / company_id 600519.SH / market cn / periods [2023,2024] / caliber 合并 / as_of 2025-04-30 |
+| 固定研究路径 | 步骤 = `web_search → web_fetch → content_summary → report_generator → package`，规划器未被咨询 |
+| **六项必需事实** | `required_rows=6`、`six_ok=true`、`with_source_locator=6`：两年 × 三指标齐全，每条都能指到来源 URL（eastmoney datacenter） |
+| **同比** | 3 条，单位 `%`，期间"2024年同比"（相邻年度），每条带 `derived_from` 的两个事实 id（营收 15.66 / 归母净利 15.38 / 经营现金流 38.85） |
+| **口径证据链** | `metadata.caliber=合并` + 依据（PARENTNETPROFIT）；底稿 `paper_ok=true`、`fact_gaps=0`、`problems=0`；**交付硬门槛通过（`hard_fail` 为空）** |
+| **一次人工修订** | 走真实端点函数：HTTP 200，新版本 `92e3…`（父版本 `5289…`），对本版重验（免责声明缺口消失、仅剩引用清单项），`wrapper_source=stored`，交付重新装配 |
+| **四面同版** | 修订后四面全部指向 `1f42c6428f707288`：任务页 `delivery.version_id`、验收详情 `report_version_id`、manifest `report_version_id`、导出头 `X-Report-Version-Id`；`aligned=true`、`final_content_matches=true`、导出头 body sha == 实际送达字节 |
+| **导出四件套 + manifest** | markdown 7796B / pdf 5,514,058B / working_paper.csv 9452B / working_paper.json 26933B；manifest 记版本、状态与四文件 hash |
+| 上限遵守 | LLM 调用 20 次（< 40）、墙钟 1220s（< 25 分钟）、全局预算保持 0/0/0 |
+| 脱敏调用形状 | 20 条：`by_stage {'':5,'plan':7,'exec':8}`、13 条失败、累计 356s、最大输入 11782 字符；记录内无目标文本 |
+
+### 4.6.3 仍未达标的一项（交付状态 = draft）
+
+验收 `overall=fail`，缺口是**正文格式合规**而非取数：
+- 正文引用 `[1]..[7]` 在文末来源清单中无对应条目（自动来源标注修复未能补齐编号对应）；
+- 缺"免责声明/不构成投资建议"——**我在修订里补上后该项消失**，可见修订链路有效；
+- 正文只出现 6 个必需数字中的 2 个（`747.34`、`862.28`）：模型自述内容不全，
+  尽管注入的"已选事实"块里 6 个数字齐全。
+
+即：**事实、证据、装配、版本、导出这条链已在实机上跑通并逐项核对；卡住的是"模型把要求
+写全"这一层**（报告格式合规与数字覆盖），属报告生成质量，不是本批的管线问题。
+按纪律：本轮不重试同一条实机。
+
 
 
 - **口径证据链（本批最关键的开放项）**：东财/SEC/巨潮都不声明报表口径，而 A′ 规则要求

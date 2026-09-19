@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -696,6 +697,239 @@ class TestAsyncCallDiagnostics(unittest.TestCase):
         blob = json.dumps(recs, ensure_ascii=False)
         self.assertNotIn("系统提示词", blob)
         self.assertNotIn("用户提示词", blob)
+
+
+class TestStreamTransport(unittest.TestCase):
+    """流式传输：SSE 累积还原成**同形**响应体，网关不再按整段耗时判超时。
+
+    实机背景：网关（响应体里的 alb）在 ~60s 处切断整段非流式响应，报告/总结这类
+    长生成必 504；流式让字节持续到达。这里只验证"传输层替换、下游语义不变"。
+    """
+
+    def setUp(self):
+        # 端点守卫默认拒绝本机/私网；这些用例测的是传输与解析，不是地址策略
+        self._old = os.environ.get("WM_LLM_ALLOW_LOCAL")
+        os.environ["WM_LLM_ALLOW_LOCAL"] = "1"
+        self.addCleanup(self._restore_env)
+
+    def _restore_env(self):
+        if self._old is None:
+            os.environ.pop("WM_LLM_ALLOW_LOCAL", None)
+        else:
+            os.environ["WM_LLM_ALLOW_LOCAL"] = self._old
+
+    @staticmethod
+    def _sse_lines(text, *, with_usage=True, done=True):
+        out = []
+        for i in range(0, len(text), 5):
+            chunk = {"choices": [{"index": 0, "delta": {"content": text[i:i + 5]}}]}
+            out.append("data: " + json.dumps(chunk, ensure_ascii=False))
+        final = {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+        if with_usage:
+            final["usage"] = {"prompt_tokens": 11, "completion_tokens": 22,
+                              "total_tokens": 33}
+        out.append("data: " + json.dumps(final, ensure_ascii=False))
+        if done:
+            out.append("data: [DONE]")
+        return out
+
+    def test_async_stream_reassembles_response(self):
+        import asyncio
+
+        import llm_client
+
+        body = "报告正文：营业收入 1741.44 亿元。"
+        seen: dict = {}
+
+        class _Resp:
+            status_code = 200
+
+            async def aiter_lines(self):
+                for line in TestStreamTransport._sse_lines(body):
+                    yield line
+
+        class _StreamCtx:
+            async def __aenter__(self):
+                return _Resp()
+
+            async def __aexit__(self, *a):
+                return False
+
+        class _Client:
+            # 注意：httpx 的 `client.stream(...)` 是**同步**方法，返回异步上下文管理器
+            def stream(self, method, url, json=None, headers=None):
+                seen["payload"] = json
+                return _StreamCtx()
+
+            async def post(self, *a, **k):        # 不该被调用
+                raise AssertionError("流式成功时不得再发非流式请求")
+
+        llm_client.set_task_context("stream-diag")
+        self.addCleanup(llm_client.set_task_context, "")
+        fake = _RecordingRedis()
+        with mock.patch.object(llm_client, "_task_usage_client", fake), \
+                mock.patch.object(llm_client, "_get_async_client", lambda: _Client()), \
+                mock.patch.object(llm_client, "_ensure_cfg_fresh", lambda: None), \
+                mock.patch.object(llm_client, "_task_budget_limits",
+                                  lambda: {"max_calls": 0, "max_seconds": 0.0,
+                                           "max_cost_usd": 0.0}):
+            out = asyncio.run(llm_client.call_llm_async(
+                "系统", "用户", expect_json=False, usage="exec",
+                max_attempts=1, model_override="m"))
+        self.assertEqual(out, body, "SSE 累积必须还原成完整正文")
+        self.assertTrue(seen["payload"].get("stream"), seen["payload"])
+        self.assertTrue(seen["payload"].get("stream_options", {}).get("include_usage"))
+        # 用量在流式下也要记到（否则成本账目变空）
+        rec = json.loads(fake.rows[-1])
+        self.assertEqual(rec["end_reason"], "ok")
+        self.assertEqual(rec["stage"], "exec")
+
+    def test_async_stream_rejected_falls_back_to_plain(self):
+        import asyncio
+
+        import httpx
+        import llm_client
+
+        req = httpx.Request("POST", "https://example.invalid/v1/chat/completions")
+        calls = {"stream": 0, "post": 0}
+
+        class _Rejected:
+            """流式被拒的响应（400 + 可读 body），走 raise_for_status 分支。"""
+            status_code = 400
+
+            async def aread(self):
+                return b"stream not supported"
+
+            def raise_for_status(self):
+                raise httpx.HTTPStatusError(
+                    "400", request=req,
+                    response=httpx.Response(400, request=req,
+                                            text="stream not supported"))
+
+        class _StreamCtx:
+            async def __aenter__(self):
+                return _Rejected()
+
+            async def __aexit__(self, *a):
+                return False
+
+        class _Ok:
+            status_code = 200
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"choices": [{"message": {"content": "ok"}}], "usage": {}}
+
+        class _Client:
+            def stream(self, *a, **k):
+                calls["stream"] += 1
+                return _StreamCtx()
+
+            async def post(self, *a, **k):
+                calls["post"] += 1
+                return _Ok()
+
+        llm_client.set_task_context("stream-fb")
+        self.addCleanup(llm_client.set_task_context, "")
+        fake = _RecordingRedis()
+        with mock.patch.object(llm_client, "_task_usage_client", fake), \
+                mock.patch.object(llm_client, "_get_async_client", lambda: _Client()), \
+                mock.patch.object(llm_client, "_ensure_cfg_fresh", lambda: None), \
+                mock.patch.object(llm_client, "_task_budget_limits",
+                                  lambda: {"max_calls": 0, "max_seconds": 0.0,
+                                           "max_cost_usd": 0.0}):
+            out = asyncio.run(llm_client.call_llm_async(
+                "s", "u", expect_json=False, usage="exec", max_attempts=1,
+                model_override="m"))
+        self.assertEqual(calls["stream"], 1, "先试流式")
+        self.assertEqual(calls["post"], 1, "被拒后回退非流式")
+        self.assertEqual(out, "ok")
+
+    def test_sse_helpers_ignore_noise(self):
+        """非 data 行、坏 chunk、[DONE] 都不该让整段失败。"""
+        import llm_client
+        acc = llm_client._new_stream_acc()
+        for line in (": keep-alive", "", "event: ping", "data: {broken",
+                     "data: " + json.dumps({"choices": [{"delta": {"content": "甲"}}]}),
+                     "data: " + json.dumps({"choices": [{"delta": {"content": "乙"}}]}),
+                     "data: [DONE]"):
+            payload_line = llm_client._sse_payload(line)
+            if not payload_line or payload_line == "[DONE]":
+                continue
+            try:
+                llm_client._merge_stream_chunk(acc, json.loads(payload_line))
+            except Exception:
+                continue
+        self.assertEqual(llm_client._stream_result(acc)["choices"][0]["message"]["content"],
+                         "甲乙")
+
+    def test_endpoint_guard_rejects_local_by_default(self):
+        """默认拒绝本机/私网端点；显式开关或登记端点才放行。"""
+        import llm_client
+        llm_client._ENDPOINT_OK_CACHE.clear()
+        os.environ.pop("WM_LLM_ALLOW_LOCAL", None)
+        with self.assertRaises(llm_client.LLMCallError):
+            llm_client._endpoint_guard("http://127.0.0.1:8799/v1/chat/completions")
+        with self.assertRaises(llm_client.LLMCallError):
+            llm_client._endpoint_guard("ftp://example.invalid/x")
+        with self.assertRaises(llm_client.LLMCallError):
+            llm_client._endpoint_guard("https://user:pw@example.invalid/x")
+        os.environ["WM_LLM_ALLOW_LOCAL"] = "1"
+        llm_client._ENDPOINT_OK_CACHE.clear()
+        self.assertTrue(llm_client._endpoint_guard("http://127.0.0.1:8799/v1/x"))
+
+
+    def test_sync_request_streams_and_skips_plain_request(self):
+        """同步路径也走流式（复用既有实现）：长生成不再被网关 60s 切断。"""
+        import llm_client
+
+        client = llm_client.LLMClient(base_url="http://offline.invalid", api_key="k",
+                                      model="m")
+        with mock.patch.object(llm_client, "_call_llm_stream_once",
+                               return_value="报告正文") as st, \
+                mock.patch("urllib.request.urlopen",
+                           side_effect=AssertionError("流式成功时不该再发非流式请求")):
+            out = client._send_request("系统", "用户", 0.1, 100)
+        self.assertEqual(out, "报告正文")
+        self.assertFalse(st.call_args.kwargs.get("publish", True),
+                         "非展示用途不得把片段推进步骤流")
+
+    def test_sync_request_falls_back_when_stream_rejected(self):
+        import llm_client
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps({"choices": [{"message": {"content": "非流式正文"}}],
+                                   "usage": {}}).encode("utf-8")
+
+        client = llm_client.LLMClient(base_url="http://offline.invalid", api_key="k",
+                                      model="m")
+        with mock.patch.object(llm_client, "_call_llm_stream_once",
+                               side_effect=llm_client.LLMCallError("HTTP 400: no stream")), \
+                mock.patch("urllib.request.urlopen", return_value=_Resp()):
+            out = client._send_request("s", "u", 0.1, 100)
+        self.assertEqual(out, "非流式正文")
+
+    def test_sync_request_reports_stream_failure_other_than_unsupported(self):
+        """5xx/超时不算"不支持流式"：如实抛出，不静默回退。"""
+        import llm_client
+
+        client = llm_client.LLMClient(base_url="http://offline.invalid", api_key="k",
+                                      model="m")
+        with mock.patch.object(llm_client, "_call_llm_stream_once",
+                               side_effect=llm_client.LLMCallError("HTTP 504: gateway")), \
+                mock.patch("urllib.request.urlopen",
+                           side_effect=AssertionError("不得回退")):
+            with self.assertRaises(llm_client.LLMCallError):
+                client._send_request("s", "u", 0.1, 100)
 
 
 class TestResearchFixedPathOffline(unittest.TestCase):

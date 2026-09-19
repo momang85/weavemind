@@ -1,10 +1,40 @@
-# DeepSeek 执行状态（2026-09-18 更新）
+# DeepSeek 执行状态（2026-09-19 更新）
 
-**当前批次**：C（固定公司研究路径 + 离线故障注入 + 一次有界实机）实现完成、实机跑过一轮、
-**已推送并 CI 全绿**（`c451491`：backend / frontend / docker-image / clean-env-e2e 四 job success）；
-证据 `docs/evidence/research_path_C_20260918.md`。A / A′ / B 亦在 main（`87c0755`；
-该提交的 CI backend 曾红——`test_review_protocol` 的评审注记、`test_r0_boundaries` 的身份
-接线守卫、`test_financial_chain` 的期间断言三处失败——修复随后续提交一起推送）。
+**当前批次**：C 完成——固定公司研究路径、口径证据链、**流式传输**、一次有界实机（交付级
+核对全部跑通）。证据：`docs/evidence/research_path_C_20260918.md`（§4.6 第三轮实机）、
+`docs/evidence/caliber_evidence_chain_20260918.md`。A / A′ / B 已在 main。
+
+**第三轮实机（`ui-2084c2c9cc`，表单提交，20 分钟 / 20 次调用，均在预声明上限内）**
+- 六项必需事实 **6/6 且都能指到来源位置**；同比 3 条（单位 `%`、相邻年度、带 derived_from）；
+- 口径证据链生效：`metadata.caliber=合并` + 依据（PARENTNETPROFIT），底稿 `paper_ok=true`、
+  零缺口零问题，**交付硬门槛通过**；
+- 一次人工修订走真实端点：新版本 → 对本版重验 → 重新装配，**四面同版**（`1f42…`：
+  任务页 / 验收详情 / manifest / 导出头），`aligned=true`、`final_content_matches=true`；
+- 导出四件套 + manifest 齐全（md 7796B / pdf 5.5MB / csv 9452B / json 26933B）。
+- 仍为 **draft**：验收 fail 于**正文格式合规**（引用编号无对应来源清单条目；缺免责声明——
+  修订补上后该项消失；正文只写了 6 个必需数字中的 2 个）。属报告生成质量，不是取数/管线。
+
+**本轮为打通实机做的两处修复**
+- **流式传输**：网关在 ~60s 处切断整段响应（实测 8192 tokens 中文生成非流式必 504），
+  同步（复用既有 `call_llm_stream`）与异步（`client.stream`）两条路径改走 SSE，累积后还原
+  成同形响应体，下游语义不变；不支持流式的供应商按 400/404/405/415/422 如实回退。
+  另加**LLM 端点守卫**（仅 http/https、禁凭据、解析后地址必须公网；本机/私网需登记或显式
+  开关），以及替身端点的 SSE 支持（CI 冒烟用）。
+- **固定研究步骤的超时**按流式下的真实生成时长放宽（content_summary 900s / report 1200s）：
+  原来 180/300s 会在生成中途判超时并进入重做循环。
+
+**已知短板**
+- 报告格式合规（来源清单编号对应、免责声明、数字覆盖）依赖模型自觉，实机未达标；这属于
+  D 批（试用与质量）要解决的一类。
+- 同步路径的 `_send_request` 直接 `urlopen` 会被 Mimosa 判 SSRF（跨函数校验它看不见），
+  故流式改为复用既有 `call_llm_stream`；`llm_calls` 目前覆盖同步 `LLMClient.call` 与
+  `call_llm_async`，而 `call_llm_stream` 这条（worker 展示流）只记用量未记形状。
+- 港股/美股契约抓取未实机验证；前端仍无修订入口；`report_versions.json` 仍单进程锁。
+- Mimosa 预推送仍无完整扫描结论，不据此宣称项目安全。
+
+## 历史（按日期，保留当时结论）
+
+### 2026-09-18：C 批（固定研究路径）与 CI 修复
 
 **C 已完成**
 - 研究任务走**代码内固定步骤**（契约 → 搜索/抓取 → 解释已选事实 → 出报告）：命中条件是
