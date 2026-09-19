@@ -111,6 +111,38 @@ test('公司栏写代码：作为 company_id 一并送出，市场仍不猜', ()
   assert.equal('market' in fields, false, '市场由后端按代码后缀规范化，前端不猜')
 })
 
+// ── F2：阅读视角由用户选，不按公司名推断 ──────────────────────
+
+test('视角随契约字段送出，并在目标里注明阅读重点', () => {
+  const base = {
+    company: '贵州茅台', yearFrom: '2023', yearTo: '2024',
+    caliber: '合并', asOf: '2025-04-30',
+  }
+  const equity = buildResearchGoal({ ...base, perspective: 'equity' })
+  assert.equal(equity.fields.perspective, 'equity')
+  assert.match(equity.goal, /投研视角/)
+  const bank = buildResearchGoal({ ...base, perspective: 'bank_corporate' })
+  assert.equal(bank.fields.perspective, 'bank_corporate')
+  assert.match(bank.goal, /银行对公客户研究视角/)
+})
+
+test('视角不按公司名推断：公司叫"银行"但未选视角时按默认投研', () => {
+  const { fields, goal } = buildResearchGoal({
+    company: '中国工商银行', yearFrom: '2023', yearTo: '2024',
+    caliber: '合并', asOf: '2025-04-30',
+  })
+  assert.equal(fields.perspective, undefined, '未选就不送该字段（后端默认投研）')
+  assert.doesNotMatch(goal, /银行对公/)
+})
+
+test('非法视角值不送字段（与后端白名单一致）', () => {
+  const { fields } = buildResearchGoal({
+    company: '示例公司', yearFrom: '2023', yearTo: '2024',
+    caliber: '合并', asOf: '2025-04-30', perspective: 'credit',
+  })
+  assert.equal(fields.perspective, undefined)
+})
+
 const PAPER = {
   ok: false,
   request: { as_of: '2025-04-30' },

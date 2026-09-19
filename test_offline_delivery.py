@@ -988,16 +988,52 @@ class TestResearchFixedPathOffline(unittest.TestCase):
                 return None
             step_id = self.run.step_by_key.get(k, "")
             if step_id == "2":
+                # 真实 worker 的输出形态（`workers/web_fetch_worker.py`）：**必须带
+                # `status`**——缺了它会被 tool_contracts 判为契约不符，触发重试与
+                # 重规划，抓取结果被换成别的步骤的输出（离线替身曾漏掉这一字段）
                 return ("k", json.dumps({
                     "task_id": step_id, "status": "SUCCESS",
                     "result": json.dumps({
-                        "title": "贵州茅台2024年报：营业收入1741亿元_新浪财经",
+                        "status": "success",
+                        "title": "贵州茅台2024年年度报告：营业收入1741亿元_新浪财经",
                         "url": "https://finance.sina.com.cn/a/1",
-                        "text": ("贵州茅台2023年年报（合并报表口径）：营业收入1505.6亿元，"
-                                 "归母净利润747.34亿元，经营活动现金流净额665.93亿元。"
-                                 "2024年年报（合并报表口径）：营业收入1741.44亿元，"
-                                 "归母净利润862.28亿元，经营活动现金流净额924.64亿元。"
-                                 "以上数据取自公司年度报告，单位人民币亿元。"),
+                        "text": (
+                            "贵州茅台2024年年度报告\n\n"
+                            "第三节 管理层讨论与分析\n\n"
+                            "一、经营情况讨论与分析\n\n"
+                            "贵州茅台2023年年报（合并报表口径）：营业收入1505.6亿元，"
+                            "归母净利润747.34亿元，经营活动现金流净额665.93亿元。"
+                            "2024年年报（合并报表口径）：营业收入1741.44亿元，"
+                            "归母净利润862.28亿元，经营活动现金流净额924.64亿元。"
+                            "以上数据取自公司年度报告，单位人民币亿元。"
+                            "报告期内营业收入变动主要系本期销量增加及产品结构变化所致；"
+                            "归属于上市公司股东的净利润变动与营业收入变动基本同步，"
+                            "经营活动产生的现金流量净额同比增加，主要系销售商品、"
+                            "提供劳务收到的现金增加所致。上述变动的具体构成见下文分析。"),
+                    }, ensure_ascii=False)}))
+            if step_id == "2b":
+                # F2：第二个抓取步骤（定向取证）——附注/风险页，与步骤 2 不同 URL
+                return ("k", json.dumps({
+                    "task_id": step_id, "status": "SUCCESS",
+                    "result": json.dumps({
+                        "status": "success",
+                        "title": "贵州茅台2024年年度报告：财务报表附注与风险因素",
+                        "url": "https://static.cninfo.com.cn/finalpage/2025-04-03/2.PDF",
+                        "text": (
+                            "第三节 管理层讨论与分析\n\n"
+                            "（一）主营业务情况\n\n"
+                            "公司主营业务为茅台酒及系列酒的生产与销售，经营模式为以销定产，"
+                            "主要产品为茅台酒、系列酒，销售模式以直销与批发代理并行。\n\n"
+                            "二、可能面对的风险\n\n"
+                            "风险因素：宏观经济波动可能影响高端白酒消费需求；"
+                            "行业政策与税收政策变化存在不确定性。\n\n"
+                            "七、财务报表附注\n\n"
+                            "现金流量表附注：报告期内经营活动产生的现金流量净额924.64亿元，"
+                            "主要系销售商品收到的现金增加所致；营运资本变动情况见附注。"
+                            "应收账款与存货的明细及减值计提情况见附注相关说明；"
+                            "分部报告显示本期主营业务结构未发生重大变化，"
+                            "主要会计政策与上期保持一致，未发生会计估计变更。"
+                            "研发投入情况、营业收入明细与分部报告数据见附注相关表格。"),
                     }, ensure_ascii=False)}))
             if step_id == "4":
                 if fail_report:
@@ -1071,6 +1107,17 @@ class TestResearchFixedPathOffline(unittest.TestCase):
         self.assertEqual(paper["request"]["company"], "贵州茅台",
                          "底稿主体必须来自契约（不得被解析/抓取改写）")
         self.assertEqual(paper["request"]["periods"], [2023, 2024])
+        # F2：抓到的年报正文切成带定位的叙事证据（四类都有），供简报引用
+        ev = json.loads((ws_mod.task_workspace(self.tid) / "narrative_evidence.json")
+                        .read_text(encoding="utf-8"))
+        located = {r["kind"] for r in ev["records"] if r.get("has_location")}
+        self.assertEqual(located, {"business_background", "change_explanation",
+                                   "footnote", "risk"},
+                         "定向取证要落到业务背景/变化解释/附注/风险四类")
+        for r in ev["records"]:
+            if r.get("has_location"):
+                self.assertIn("小节：", r["locator"])
+                self.assertIn("字符 ", r["locator"])
         return paper
 
     def test_planner_timeout_still_enters_controlled_research_path(self):

@@ -207,6 +207,20 @@ _STRUCTURED_SOURCE_LABELS = {
 # 已选事实注入块的展开上限（条数）：块本身有界，避免把报告步骤的输入撑大
 _FACTS_BLOCK_MAX_ROWS = 40
 
+# F2 定向取证：研究路径两个抓取步骤的**角色**（年报正文页 / 附注风险页）。
+# 角色由 step_id 推出（不新增契约字段），供 `_pick_fetch_url` 分流候选。
+_FETCH_ROLE_BY_STEP = {"2": "annual_report", "2b": "notes"}
+_FETCH_ROLE_KW = {
+    "annual_report": ("年报", "年度报告", "经营情况讨论", "管理层讨论", "经营回顾",
+                      "经营情况", "annual report", "10-k", "20-f", "公告"),
+    "notes": ("附注", "现金流量", "风险因素", "风险提示", "财务数据", "财务报表",
+              "分部", "notes", "cash flow", "risk factor"),
+}
+
+# 叙事证据注入块上限（F2）：条数与单条字数都有界，避免把报告输入撑大
+_NARRATIVE_MAX_RECORDS = 6
+_NARRATIVE_SNIPPET_CHARS = 300
+
 # 前序结果注入的结构化限长（F1）：JSON 按结构裁剪后**仍是合法 JSON**，
 # 下游才能把它当数据识别；散文另有字符上限。
 _STEP_JSON_MAX_ITEMS = 20
@@ -343,6 +357,28 @@ _REPORT_ANALYSIS_REQUIREMENTS = (
     "8. 缺口纪律：块内标为缺口/不可算的项，必须在正文里如实写明，"
     "不得用模型知识补数、不得跳过不提。"
 )
+
+
+# 阅读视角（F2）：两种视角复用**同一底稿**，只是"要回答的问题"不同。
+# 视角只认用户声明（契约字段），不按公司名或机构名自动套用——银行做权益投研时
+# 仍用权益视角，不能因为机构名称就切成信用分析。
+_PERSPECTIVE_REQUIREMENTS = {
+    "equity": (
+        "\n[阅读视角：投研] 在骨架之外还要回答：增长来源（量/价/结构，能说清就说）、"
+        "盈利变化与盈利质量、现金流与利润的差异、关键假设与下一步要查的材料。"
+        "没有同业与行情数据时不得给出估值或目标价。\n"
+    ),
+    "bank_corporate": (
+        "\n[阅读视角：银行对公客户研究] 在骨架之外还要回答：经营现金的来源与波动、"
+        "客户经营风险、需要向客户询问的事项（债务到期结构、受限资金、对外担保、"
+        "授信与利息负担）。**偿债结论要等债务与利息材料齐备**，本次不得下偿债能力结论。\n"
+    ),
+}
+
+
+def perspective_requirements(perspective: str) -> str:
+    """视角 → 报告步骤的追加要求（未声明/未知视角返回空串，不硬套）。"""
+    return _PERSPECTIVE_REQUIREMENTS.get(str(perspective or "").strip(), "")
 
 
 # P0：产物文件注入白名单——仅数据类文本素材（.md/.txt/.csv/.json）读取正文注入；
@@ -1168,6 +1204,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         who = str(request.company or request.company_id or "目标公司")
         code = f"（{request.company_id}）" if request.company_id else ""
         metrics = "、".join(metric_label(m) for m in (request.required_metrics or []))
+        perspective = str(getattr(request, "perspective", "") or "")
+        perspective_note = perspective_requirements(perspective)
         contract_note = (
             f"研究契约（以此为准，不得替换主体）：公司 {who}{code}；"
             f"期间 {span}；报表口径 {request.caliber}；"
@@ -1179,7 +1217,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 "capability": "web_search",
                 "instruction": (
                     f"检索 {who}{code} 的年报与财务数据的权威来源（优先公司公告/交易所/"
-                    f"官方年报），返回含原始 URL 的结果列表。{contract_note}"
+                    f"官方年报）；其中至少一条要指向 {span} 的**发行人年报/公告**"
+                    f"（经营情况讨论与分析、管理层讨论、财务附注、风险因素），"
+                    f"返回含原始 URL 的结果列表。{contract_note}"
                 ),
                 "timeout": 180,
             },
@@ -1187,11 +1227,29 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 "step_id": "2",
                 "capability": "web_fetch",
                 "instruction": (
-                    f"从步骤1结果中选取与 {span} 年报/财务数据最相关的 2-3 个链接，抓取完整"
-                    f"正文并保留原始 URL 与全部数字（年份、金额、币种、单位、报表口径）；"
+                    f"从步骤1结果中选取与 {span} 匹配的**发行人年报/公告正文页**"
+                    f"（经营情况讨论与分析、管理层讨论、经营回顾），抓取完整正文并保留"
+                    f"小节标题、原始 URL 与全部数字（年份、金额、币种、单位、报表口径）；"
                     f"主链接失败则换备用链接。{contract_note}"
                 ),
                 "timeout": 300,
+            },
+            {
+                # F2 定向取证：第二个抓取步骤，取与步骤 2 **不同**的一页（附注/风险/数据）。
+                # 有界：不新增搜索步骤、不循环；步骤1没有合适候选时 worker 直接返回
+                # failed（指令里没有 URL，不联网），缺口照实记，不编 URL。
+                # `optional`：第二个来源取不到**不算任务失败**（缺资料列待核查即可），
+                # 不得阻塞分析/报告/打包步骤。
+                "step_id": "2b",
+                "capability": "web_fetch",
+                "instruction": (
+                    f"抓取与步骤2**不同**的一个链接：优先 {span} 的财务附注、"
+                    f"现金流量表附注、风险因素或财务数据页，保留小节标题与原始 URL；"
+                    f"若步骤1结果中没有可用的第二来源，直接返回 failed 并说明，"
+                    f"不得编造 URL。{contract_note}"
+                ),
+                "timeout": 300,
+                "optional": True,
             },
             {
                 "step_id": "3",
@@ -1214,6 +1272,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     f"④现金流质量（经营现金流对净利润的覆盖）；⑤结构与杠杆（资产负债率）；"
                     f"⑥风险与结论。每个财务数字标注来源位置，只能用[已选事实]块里的数字"
                     f"（含块内的同比与比率），缺口如实写明。{contract_note}"
+                    f"{perspective_note}"
                 ),
                 "timeout": 1200,
             },
@@ -1258,6 +1317,38 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                                        f"{len(wp.get('gaps') or [])} 项缺口"),
                            "timestamp": self._now_iso()})
         return wp
+
+    @staticmethod
+    def _narrative_evidence_block(task_id: str, goal: str = "") -> str:
+        """把**已抓取的年报/公告正文证据**（带小节定位）注入报告/总结步骤（F2）。
+
+        与 `_selected_facts_block`（数字）互补：这里给的是解释"为什么变"的短证据。
+        没有证据时返回空串——缺口由报告正文如实写明，不在这里编原因。
+        """
+        try:
+            import narrative_evidence as ne
+            data = ne.read(task_id)
+            if data is None:
+                data = ne.build(task_id, goal=goal)
+        except Exception as exc:                 # noqa: BLE001 - 注入失败不拖垮步骤
+            logger.warning("叙事证据读取失败（task=%s）：%s", task_id, str(exc)[:140])
+            return ""
+        records = [r for r in (data.get("records") or []) if r.get("has_location")]
+        missing = list(data.get("missing_labels") or [])
+        if not records and not missing:
+            return ""
+        lines = ["\n\n[已取证据]（发行人年报/公告正文的**小节定位**；只能用它解释变化，"
+                 "块内没有的原因不得自行推断）"]
+        for r in records[:_NARRATIVE_MAX_RECORDS]:
+            snip = str(r.get("snippet") or "")[:_NARRATIVE_SNIPPET_CHARS]
+            lines.append(f"- {r.get('kind_label') or r.get('kind')}｜{r.get('locator')}｜"
+                         f"{r.get('url')}\n  {snip}")
+        if missing:
+            lines.append("未取得正文定位的类别：" + "、".join(missing)
+                         + "。报告中必须写明『需核查……』，不得用模型知识补原因。")
+        lines.append("硬规则：解释经营变化只能引用本块证据并写明其小节位置；"
+                     "证据不足时如实写『原因未在本次资料中体现』，不得编造因果。")
+        return "\n".join(lines)
 
     @staticmethod
     def _selected_facts_block(task_id: str, goal: str) -> str:
@@ -1951,14 +2042,18 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
 
 
     @staticmethod
-    def _pick_fetch_url(items: list, goal: str = "") -> str | None:
+    def _pick_fetch_url(items: list, goal: str = "", *, role: str = "",
+                        exclude: tuple = ()) -> str | None:
         """从搜索结果中挑选财务相关度最高的 URL（搜索根因缩小版）。
 
         评分维度：
         1) 标题-目标相关性：标题真正关于目标公司财报/研报/IR 才高分；
            仅"提到"目标（合作新闻）或标题是其他公司（Line/Lululemon）→ 强降权；
         2) 来源分级：官方 IR/交易所披露 > 权威财经 > 内容社区/杂页；
-        3) 财务关键词：标题命中 > URL 命中。"""
+        3) 财务关键词：标题命中 > URL 命中；
+        4) **抓取角色**（F2 研究路径）：`annual_report` 优先年报/公告正文页，
+           `notes` 优先附注/现金流/风险页——两个抓取步骤各取所需，且排除已抓过的
+           URL（`exclude`），不把同一页抓两遍。"""
         finance_kw = (
             "财报", "年报", "季报", "营收", "净利润", "业绩", "财务", "公告",
             "研报", "复盘", "深度", "投资者关系",
@@ -1994,10 +2089,18 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             url = str(it.get("url") or it.get("href") or "")
             if not url.startswith("http"):
                 continue
+            if role and url in tuple(exclude or ()):
+                continue          # 已抓过的页面不再选（研究路径的第二个抓取步骤）
             low_t = title.lower()
             low_u = url.lower()
             score = 0
             is_official = any(o in low_u for o in official_domains)
+            # 抓取角色：年报正文页 / 附注风险页各取所需
+            for k in _FETCH_ROLE_KW.get(role, ()):
+                if k in low_t:
+                    score += 5
+                elif k in low_u:
+                    score += 3
             # 财务关键词：标题命中 +2，URL 命中 +1
             for k in finance_kw:
                 if k in low_t:
@@ -2049,6 +2152,26 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 best = url
                 best_is_official = is_official
         return best
+
+    @staticmethod
+    def _fetched_urls(task_id: str, project=None) -> tuple:
+        """本任务已抓取过的 URL（`fetch_snapshot.json`）：第二个抓取步骤据此避重。"""
+        try:
+            proj = task_project_dir(task_id, project) if project \
+                else task_project_dir(task_id)
+            p = Path(proj) / "fetch_snapshot.json"
+            if not p.exists():
+                return ()
+            items = json.loads(p.read_text(encoding="utf-8")) or []
+        except Exception:
+            return ()
+        out: list[str] = []
+        for it in (items if isinstance(items, list) else []):
+            if isinstance(it, dict):
+                u = str(it.get("url") or "").strip()
+                if u.startswith("http") and u not in out:
+                    out.append(u)
+        return tuple(out)
 
 
 
@@ -2273,8 +2396,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             "step_id": f"package-{len(steps) + 1}",
             "capability": "package",
             "instruction": "将本次任务产出的所有文件打包为一个 ZIP 交付包（包含代码、资源、报告等），并返回下载链接。",
-            # 打包必须等所有步骤（含摘要/报告）完成，否则工作区还没有新文件可打包
-            "depends_on": [s.get("step_id") for s in steps],
+            # 打包必须等所有步骤（含摘要/报告）完成，否则工作区还没有新文件可打包；
+            # 可选步骤（如定向取证的第二个来源）不进依赖：取不到不该拖垮交付包
+            "depends_on": [s.get("step_id") for s in steps if not s.get("optional")],
             "timeout": 180,
         }]
 
@@ -6226,8 +6350,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             return all(d in completed for d in step.get("depends_on", []))
 
         def deps_failed(step):
+            # `optional` 依赖失败不阻塞下游：定向取证的第二个来源取不到是**正常缺口**
+            # （缺资料列待核查即可），不该让分析/报告/打包步骤一起失败
+            optional_ids = {s.get("step_id") for s in steps if s.get("optional")}
             return [d for d in step.get("depends_on", [])
-                    if d in completed and completed[d].get("status") == "FAILED"]
+                    if d in completed and completed[d].get("status") == "FAILED"
+                    and d not in optional_ids]
 
         def execute_step(step):
             step_start = time.time()
@@ -6318,6 +6446,17 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             if step.get("capability") == "web_fetch" and result.get("status") == "SUCCESS":
                 # 快照页回灌清洗：抓到的正文并入清洗输入，财务数字进入图表/摘要
                 self._recycle_fetch_into_clean(task_id, goal, result)
+                # F2：抓到的年报/公告正文切成带定位的叙事证据，供报告步骤解释变化
+                try:
+                    import narrative_evidence as _ne
+                    try:
+                        _parsed = json.loads(str(result.get("result") or ""))
+                    except Exception:
+                        _parsed = None
+                    _ne.build(task_id, goal=goal,
+                              extra_docs=[_parsed] if isinstance(_parsed, dict) else None)
+                except Exception as exc:         # noqa: BLE001 - 证据提取不拖垮主线
+                    logger.warning("叙事证据构建失败（task=%s）：%s", task_id, str(exc)[:140])
             if step.get("capability") == "report_generator" and result.get("status") == "SUCCESS":
                 # 确定性验收器：数字溯源等 checklist → 缺口报告（供反思/前端/人工）
                 self._run_acceptance_check(task_id, goal, trigger="报告步骤")
@@ -6735,6 +6874,10 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     "financial", "revenue", "earnings",
                 ))
             )
+            # F2：研究路径的两个抓取步骤按角色分流（年报正文页 / 附注风险页）。
+            # 角色只在固定研究计划的 step_id 上生效，模板任务的抓取行为不变。
+            fetch_role = _FETCH_ROLE_BY_STEP.get(str(step.get("step_id") or ""), "") \
+                if finance_fetch else ""
             for dep_id in deps:
                 prev_res = _prev(dep_id)
                 try:
@@ -6746,6 +6889,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                         best = self._pick_fetch_url(
                             prev_json,
                             str((getattr(self, "_task_goals", {}) or {}).get(task_id, "") or ""),
+                            role=fetch_role,
+                            exclude=self._fetched_urls(task_id),
                         )
                         if best:
                             instr = f"[URL: {best}] " + instr
@@ -6759,9 +6904,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     url = prev_json.get('url') or prev_json.get('href') or ''
                     if url:
                         instr += f' [URL: {url}]'
-                urls = re.findall(r'https?://\S+', prev_res if isinstance(prev_res, str) else '')
-                if urls:
-                    instr += f' [URL: {urls[0]}]'
+                # 角色步骤**不追加兜底 URL**：没有合适候选时让 worker 明确失败（不联网），
+                # 否则会退化成"抓第一页"，第二个抓取步骤就和第一个抓重了
+                if not fetch_role:
+                    urls = re.findall(r'https?://\S+', prev_res if isinstance(prev_res, str) else '')
+                    if urls:
+                        instr += f' [URL: {urls[0]}]'
             if finance_fetch:
                 instr += (
                     " 优先抓取与财报/财务数据直接相关的页面，"
@@ -6898,6 +7046,14 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     # 质量 + 结构杠杆 + 风险结论）。只在**有已选事实块**时注入：通用
                     # 任务没有这块，硬套会要求模型写它拿不到的数字。
                     instr += _REPORT_ANALYSIS_REQUIREMENTS
+                # F2：已抓取的年报/公告正文证据（带小节定位）——解释变化只能引它。
+                # 只对**落库研究契约**的任务注入：通用报告的素材不是年报附注，
+                # 硬塞"未取得财务附注"这类缺口只会干扰它。
+                if self._is_research_task(task_id):
+                    evidence = self._narrative_evidence_block(
+                        task_id, str((getattr(self, "_task_goals", {}) or {}).get(task_id, "")))
+                    if evidence:
+                        instr += evidence
                 # P2-5 追加数据源选择依据：市场偏好与候选列表（前 3）
                 prefs = (
                     getattr(self, "_task_market_resolution", {}) or {}

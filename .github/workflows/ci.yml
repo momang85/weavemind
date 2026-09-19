@@ -88,6 +88,8 @@ jobs:
         run: python test_root_budget.py
       - name: Offline delivery & fault injection (M0-f)
         run: python test_offline_delivery.py
+      - name: "Narrative evidence: annual-report sections, locations, fetch roles (F2)"
+        run: python test_narrative_evidence.py
       - name: Deploy manifest & lock guards
         run: python test_deploy_manifest.py
       - name: Task state tests

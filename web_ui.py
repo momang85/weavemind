@@ -1506,6 +1506,8 @@ def _load_templates() -> list:
 
 _RESEARCH_MARKETS = ("cn", "hk", "us")
 _RESEARCH_CALIBERS = ("合并", "母公司")
+# 阅读视角（F2）：只收表单明确选的值，不从公司名/机构名推断
+_RESEARCH_PERSPECTIVES = ("equity", "bank_corporate")
 _RESEARCH_FIELD_MAX = 200
 
 
@@ -1557,6 +1559,9 @@ def _sanitize_research_request(raw) -> dict:
     materials = _text("materials", 500)
     if materials:
         out["materials"] = materials
+    perspective = _text("perspective", 20).lower()
+    if perspective in _RESEARCH_PERSPECTIVES:
+        out["perspective"] = perspective
     return out
 
 

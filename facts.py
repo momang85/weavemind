@@ -61,6 +61,33 @@ METRIC_LABELS.update(dict(DERIVED_METRICS))
 # 同比类派生（`<metric>_yoy`）：报告里必须写成"同比/增速"，不能只说"变化"
 YOY_SUFFIX = "_yoy"
 
+# 阅读视角（F2）：**由用户声明**，绝不按公司名或机构名推断。
+# 两种视角复用同一底稿（同一组事实与同比），只是"要回答的问题"与"要补的材料"不同。
+PERSPECTIVES: tuple[tuple[str, str], ...] = (
+    ("equity", "投研视角（增长来源与盈利质量）"),
+    ("bank_corporate", "银行对公客户研究视角（经营现金与债务核查）"),
+)
+PERSPECTIVE_LABELS = dict(PERSPECTIVES)
+DEFAULT_PERSPECTIVE = "equity"
+
+# 比率适用条件（F2）：新增比率必须写清"什么情况下成立、什么情况下不适用"，
+# 否则读者会把"覆盖倍数""资产负债率"套到结构不同的主体上（金融机构尤其不可比）。
+_YOY_CONDITION = "两期均为正且基期不为零；基期为负时同比不具可比含义"
+RATIO_CONDITIONS: dict[str, str] = {
+    "net_margin": "分子为归母净利润、分母为营业收入（合并口径）；"
+                  "金融机构利润表结构不同，不适用",
+    "cashflow_coverage": "仅当分子分母**同为正**时表示『当期经营现金流高于归母净利润』；"
+                         "任一为负（亏损或经营净流出）不表示利润有现金支撑；分母为零时不可算",
+    "debt_ratio": "总负债 ÷ 总资产；金融机构负债以存款为主，与其经营模式不可比",
+    "rd_intensity": "需公司实际披露研发投入；未披露时不生成（不填零）",
+}
+for _m, _ in DERIVED_METRICS:
+    if _m.endswith(YOY_SUFFIX):
+        RATIO_CONDITIONS[_m] = _YOY_CONDITION
+
+RATIO_SCOPE_NOTE = ("以上比率与同比适用于**非金融企业**的经营简报；"
+                    "金融机构作为研究对象时需要独立的指标配置，不得机械套用工业企业的比率。")
+
 # 金额单位数量级（以"元"为基准）：比率计算前必须把分子/分母换算到同一量级，
 # 否则"亿元 ÷ 万元"会静默放大 1e4 倍（架构复核给的内存反例）。
 _AMOUNT_SCALES = {"万亿": 1e12, "千亿": 1e11, "百亿": 1e10, "亿": 1e8, "万": 1e4}
@@ -117,6 +144,8 @@ class ResearchRequest:
     caliber: str = UNKNOWN             # 合并 / 母公司 / unknown
     required_metrics: list[str] = field(default_factory=lambda: [m for m, _ in CORE_METRICS])
     as_of: str = ""                    # 资料截至日（空=未知）
+    # 阅读视角（equity / bank_corporate）：只认用户声明，不按公司名推断
+    perspective: str = DEFAULT_PERSPECTIVE
     source_requirements: list[str] = field(default_factory=list)
     budget: dict = field(default_factory=dict)
     gaps: list[str] = field(default_factory=list)
@@ -145,6 +174,7 @@ class ResearchRequest:
             "caliber": str(self.caliber or UNKNOWN),
             "required_metrics": [str(m) for m in (self.required_metrics or [])],
             "as_of": str(self.as_of or ""),
+            "perspective": str(self.perspective or DEFAULT_PERSPECTIVE),
             "source_requirements": [str(s) for s in (self.source_requirements or [])],
             "budget": dict(self.budget or {}),
             "gaps": [str(g) for g in (self.gaps or [])],
@@ -172,6 +202,9 @@ class ResearchRequest:
             required_metrics=[str(m) for m in (raw.get("required_metrics") or [])
                               if str(m).strip()] or [m for m, _ in CORE_METRICS],
             as_of=str(raw.get("as_of") or "").strip(),
+            perspective=(str(raw.get("perspective") or "").strip()
+                         if str(raw.get("perspective") or "").strip() in PERSPECTIVE_LABELS
+                         else DEFAULT_PERSPECTIVE),
             source_requirements=[str(s) for s in (raw.get("source_requirements") or [])],
             budget=dict(raw.get("budget") or {}),
             gaps=[str(g) for g in (raw.get("gaps") or [])],
@@ -201,13 +234,17 @@ def parse_research_request(goal: str, *, company: str = "", company_id: str = ""
                            market: str = "", periods: list[int] | None = None,
                            caliber: str = "", as_of: str = "",
                            budget: dict | None = None,
+                           perspective: str = "",
                            identity_source: str = "") -> ResearchRequest:
     """把目标文本（+ 调用方已知的解析结果）整理成契约，并把不确定项列成缺口。
 
     不做"猜身份"：公司名/代码/市场这些**必须**来自目标文本或调用方，缺了就记缺口。
+    视角同理：只取调用方（表单）声明的值，不从目标文本或公司名推断。
     """
     req = ResearchRequest(goal=str(goal or ""))
     text = str(goal or "")
+    ps = str(perspective or "").strip()
+    req.perspective = ps if ps in PERSPECTIVE_LABELS else DEFAULT_PERSPECTIVE
 
     # 公司：优先调用方给的（表单结构化字段/解析器），否则从目标里取一个候选。
     # **抓取来的元数据不得走这里**：那样用户请求会被数据源反向决定（A 批门槛的前提）。

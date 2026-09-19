@@ -37,6 +37,36 @@ _ISSUER_SOURCES = ("sec_edgar", "cninfo_annual", "eastmoney_ashare",
 _YOY_SUFFIX = "_yoy"
 _SECTION_RE = re.compile(r"^#{1,4}\s*(.+?)\s*$", re.M)
 _NUM_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
+# 编排器的工程收尾报告（`orchestrator_v2._finalize`）：正文模型失效时它会成为
+# "正文"，但它回答的是"哪些步骤成功"，不是研究结论——不得当成分析一节交付
+_ENGINEERING_REPORT_RE = re.compile(
+    r"^##\s*Task Report\s*$|^\s*Steps:\s*\d+\s*\(\d+\s*OK,\s*\d+\s*failed\)", re.M)
+
+# 变化解释：**缺口 → 需要补充的材料**（确定性映射）。
+# 为什么写死一张表：没有营运资本/税费/结算条款证据就推断"回款改善"是编因果
+# （架构复核 §F2 的样例）；这里只说明"要判断这件事需要什么材料"。
+MATERIALS_BY_METRIC = {
+    "revenue": ("收入构成与量价拆分", "主要客户与销售模式变化"),
+    "net_profit": ("毛利率构成", "期间费用与非经常性损益", "少数股东损益"),
+    "operating_cashflow": ("现金流量表附注", "营运资本变化（应收/应付/存货）",
+                           "税费与结算条款"),
+    "total_liabilities": ("债务结构与到期分布", "受限资金与对外担保"),
+    "total_assets": ("资产结构与减值计提",),
+}
+# 变化解释里"还不能证明什么"的固定边界（不因数据好看而放宽）
+_INFERENCE_BOUNDARY = (
+    "两期数据只能说明这两期的变化，不能据此声称长期趋势；"
+    "未取得同业、行情与关键假设资料，本简报不给出估值或目标价。",
+)
+
+# 阅读视角 → 需要补充的材料（F2）：两种视角复用同一底稿，但要查的东西不同。
+# 视角由用户声明（契约字段），**不按公司名或机构名推断**。
+PERSPECTIVE_MATERIALS = {
+    "equity": ("收入构成与量价拆分", "毛利率构成与非经常性损益",
+               "同业可比数据与行情", "管理层对下一年度的经营计划"),
+    "bank_corporate": ("债务到期结构与利率", "受限资金与对外担保", "授信与用信情况",
+                       "主要客户与回款条款", "实际控制人与关联交易"),
+}
 
 
 def is_research_task(task_id: str, goal: str = "", *, ws_dir=None) -> bool:
@@ -66,11 +96,17 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
     periods = list(data.get("periods") or [])
     rows = list(data.get("rows") or [])
     derived = list(data.get("derived") or [])
-    citations, audit = _collect_citations(task_id, goal, body, data, ws_dir=ws_dir)
+    evidence = _evidence(task_id, ws_dir=ws_dir)
+    citations, audit = _collect_citations(task_id, goal, body, data,
+                                          evidence=evidence, ws_dir=ws_dir)
     table = _metrics_table(rows, derived, periods, citations, req)
     findings = _findings(rows, derived, periods)
     claims = _claims(body, rows, derived, citations)
-    risks = _risks(task_id, goal, body, project=project)
+    background = _background(evidence, citations)
+    changes = _change_explanation(rows, derived, periods, findings, evidence, citations)
+    perspective = str(req.get("perspective") or "equity")
+    risks = _risks(task_id, goal, body, project=project, evidence=evidence,
+                   citations=citations, changes=changes, perspective=perspective)
     charts = _charts(task_id, project=project)
     structure = {
         "scope": {
@@ -85,16 +121,95 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
             "adopted_sources": len(citations),
             "audit_sources": len(audit.get("unused_sources") or []),
             "charts": len(charts),
+            "perspective": perspective,
         },
         "metrics_table": table,
         "findings": findings,
+        "background": background,
+        "change_explanation": changes,
         "claims": claims,
         "risks": risks,
         "citations": citations,
         "charts": charts,
+        "appendix": _appendix(task_id, rows, derived, citations, evidence,
+                              project=project, ws_dir=ws_dir),
+        "evidence": {
+            "located": int((evidence or {}).get("located") or 0),
+            "missing_labels": list((evidence or {}).get("missing_labels") or []),
+        },
         "audit": audit,
     }
     return structure
+
+
+# ── 定向取证结果（叙事证据）──────────────────────────────────
+
+
+def _evidence(task_id: str, *, ws_dir=None) -> dict | None:
+    """读叙事证据（年报/公告正文的小节定位）；没落盘时按契约重算一次（幂等、不联网）。"""
+    try:
+        import narrative_evidence as ne
+        data = ne.read(task_id, ws_dir=ws_dir)
+        if data is None:
+            data = ne.build(task_id, ws_dir=ws_dir)
+        return data if isinstance(data, dict) else None
+    except Exception as exc:                     # noqa: BLE001 - 证据缺失不拖垮简报
+        logger.warning("叙事证据读取失败（task=%s）：%s", task_id, str(exc)[:140])
+        return None
+
+
+def _located(evidence: dict | None, kind: str, limit: int = 3) -> list[dict]:
+    """取某一类的**带定位**证据（检索摘要不算证据，只有正文定位才算）。"""
+    out = [r for r in ((evidence or {}).get("records") or [])
+           if r.get("kind") == kind and r.get("has_location")]
+    return out[:limit]
+
+
+def _background(evidence: dict | None, citations: list[dict]) -> list[dict]:
+    """业务背景：只取**与本期变化有关的年报段落**（公司怎么赚钱、产品/客户/成本驱动）。"""
+    out: list[dict] = []
+    for r in _located(evidence, "business_background"):
+        out.append({"text": str(r.get("snippet") or ""),
+                    "source_n": _citation_n(citations, str(r.get("url") or "")),
+                    "locator": str(r.get("locator") or "")})
+    return out
+
+
+def _change_explanation(rows, derived, periods, findings, evidence, citations) -> dict:
+    """变化解释：发生了什么 → 管理层/附注怎么解释 → 能推断到哪一步 → 还不能证明什么。"""
+    by: dict[str, dict] = {}
+    for r in rows:
+        by.setdefault(str(r.get("metric") or ""), {})[int(r.get("year"))] = r
+    yoy = {str(d.get("metric") or ""): d for d in derived
+           if str(d.get("metric") or "").endswith(_YOY_SUFFIX)}
+    last = periods[-1] if periods else None
+    changes: list[dict] = []
+    for metric, label in (("revenue", "营业收入"), ("net_profit", "归母净利润"),
+                          ("operating_cashflow", "经营活动现金流净额")):
+        d = yoy.get(f"{metric}{_YOY_SUFFIX}")
+        v = d.get("value") if d else None
+        if not isinstance(v, (int, float)):
+            continue
+        cur = (by.get(metric) or {}).get(last) if last else None
+        text = (f"{label}同比{'增长' if v > 0 else '下降' if v < 0 else '持平'} "
+                f"{abs(v):g}%")
+        if cur is not None:
+            text += f"（{last} 年 {cur.get('value')}{cur.get('unit') or ''}）"
+        changes.append({"metric": metric, "label": label, "yoy": v, "text": text,
+                        "fact_ids": list((d or {}).get("derived_from") or [])})
+    # 变化幅度大在前（本期最值得关注的先看）
+    changes.sort(key=lambda c: -abs(float(c.get("yoy") or 0)))
+    explained: list[dict] = []
+    for r in _located(evidence, "change_explanation", 2) + _located(evidence, "footnote", 2):
+        explained.append({"text": str(r.get("snippet") or ""),
+                          "source_n": _citation_n(citations, str(r.get("url") or "")),
+                          "locator": str(r.get("locator") or "")})
+    unproven = [{"label": c["label"], "materials": list(MATERIALS_BY_METRIC.get(c["metric"], ()))}
+                for c in changes[:3]]
+    unproven = [u for u in unproven if u["materials"]]
+    return {"changes": changes[:3], "explained_by": explained,
+            "inference": list(_INFERENCE_BOUNDARY), "unproven": unproven}
+
 
 
 # ── 指标表与关键发现（全部由底稿算）──────────────────────────────
@@ -206,6 +321,10 @@ def _claims(body: str, rows, derived, citations) -> list[dict]:
             continue
         if s.startswith(("#", "|", ">", "-", "*")):
             s = s.lstrip("#|>-* ").strip()
+        if "|" in s and s.count("|") >= 2:
+            continue                      # 表格行不是主张（模型自写的表由装配器接管）
+        if re.match(r"^\d+\.\s*\[", s) or re.match(r"^[-*]\s*\[", s):
+            continue                      # 来源清单条目不是主张
         facts: list[str] = []
         for tok in _NUM_RE.findall(s):
             fid = values.get(_num_key(tok))
@@ -231,32 +350,148 @@ def _num_key(value) -> str:
 # ── 风险与待核查（底稿缺口 + 模型风险小节）──────────────────────
 
 
-def _risks(task_id: str, goal: str, body: str, *, project=None) -> list[dict]:
+def _risks(task_id: str, goal: str, body: str, *, project=None,
+           evidence: dict | None = None, citations: list[dict] | None = None,
+           changes: dict | None = None, perspective: str = "") -> list[dict]:
+    """风险与核查：**每条风险都要有对应证据、会改变判断的观察条件、要补的材料**。
+
+    只有"底稿缺口 + 模型自述"的风险是不完整的（读者无法判断该查什么）；这里为每条
+    风险补上确定性的核查条件与材料清单——没有证据的写"底稿无对应证据"，不编。
+    """
+    citations = citations or []
+    changes = changes or {}
     out: list[dict] = []
+
+    def _add(kind: str, text: str, *, evidence_note: str, would_change: str,
+             materials: list[str]) -> None:
+        out.append({"kind": kind, "text": str(text)[:160],
+                    "evidence": evidence_note, "would_change": would_change,
+                    "materials_needed": list(materials)})
+
+    # ① 底稿自身的缺口/问题/审计项（数字层面的"待核查"）
     try:
         from working_paper_export import build_result
         res = build_result(task_id, goal, project=project)
         for g in (res.get("gaps") or []):
-            out.append({"kind": "fact_gap", "text": str(g.get("detail") or g)[:160]})
+            _add("fact_gap", str(g.get("detail") or g),
+                 evidence_note="底稿缺口（结构化来源未取得该事实）",
+                 would_change="补齐该事实后，若与现有读数方向相反，需修订相关判断",
+                 materials=["发行人年报/公告中的对应指标", "该期间的审计报告"])
         for p in (res.get("problems") or []):
-            out.append({"kind": "problem", "text": str(p.get("detail") or p)[:160]})
+            _add("problem", str(p.get("detail") or p),
+                 evidence_note="底稿问题（口径/期间/主体不一致）",
+                 would_change="澄清口径或期间归属后，相关比率与同比需重算",
+                 materials=["报表附注中的口径说明", "同一口径的历史序列"])
         for a in (res.get("audit") or []):
-            out.append({"kind": "audit", "text": str(a.get("detail") or a)[:160]})
-    except Exception as exc:
+            _add("audit", str(a.get("detail") or a),
+                 evidence_note="底稿审计项（不影响结论，但需知悉）",
+                 would_change="若审计项改变了可比口径，则需重述对比结论",
+                 materials=["原始取数记录", "口径声明依据"])
+    except Exception as exc:                     # noqa: BLE001 - 缺口读取失败不拖垮简报
         logger.warning("底稿缺口读取失败（task=%s）：%s", task_id, str(exc)[:120])
+
+    # ② 年报里明确列示的风险（带小节定位）——这是"有证据的风险"
+    for r in _located(evidence, "risk", 3):
+        _add("evidence_risk", str(r.get("snippet") or ""),
+             evidence_note=(f"来源 [{_citation_n(citations, str(r.get('url') or ''))}]"
+                            f" {r.get('locator')}"),
+             would_change="若该风险出现缓释或加剧的公开证据（年报/公告更新），需修订判断",
+             materials=["最新年报/公告中的风险因素章节", "相关事项的进展公告"])
+
+    # ③ 变化解释里还没能证明的部分 → 需要补充的材料
+    for u in (changes.get("unproven") or []):
+        _add("unproven_change", f"{u.get('label')}的变化原因尚不能证明",
+             evidence_note="未取得对应附注/管理层讨论证据",
+             would_change=f"取得{'、'.join(u.get('materials') or [])}后，"
+                         "若显示的原因与本期变化方向不一致，需修订解释",
+             materials=list(u.get("materials") or []))
+
+    # ④ 模型正文里的风险小节（原样带出，但标注"由模型提出、需取得证据"）
     section = _section_text(body, ("风险", "待核查", "核查"))
     if section:
         for line in section.splitlines():
             t = line.strip().lstrip("#-*• ").strip()
             if t and len(t) >= 6:
-                out.append({"kind": "from_report", "text": t[:160]})
+                _add("from_report", t,
+                     evidence_note="由模型提出，尚未与底稿或年报证据绑定",
+                     would_change="取得对应证据后方可改变判断；无证据时不得据此行动",
+                     materials=["支持该判断的年报/公告段落或数据"])
+    # ⑤ 视角要求的核查材料（视角由用户声明；两种视角查的东西不同）
+    mats = list(PERSPECTIVE_MATERIALS.get(str(perspective or ""), ()))
+    if mats:
+        label = _perspective_label(perspective)
+        _add("perspective_material", f"按{label}还需要核查的事项",
+             evidence_note="视角由用户声明（不按公司名或机构名推断）",
+             would_change="这些材料齐备后才可能形成相应判断；本次不预设结论",
+             materials=mats)
     return out[:12]
+
+
+def _perspective_label(perspective: str) -> str:
+    try:
+        from facts import PERSPECTIVE_LABELS
+        return str(PERSPECTIVE_LABELS.get(str(perspective or ""), "") or "投研")
+    except Exception:
+        return "投研"
+
+
+# ── 附录：字段位置与计算底稿 ─────────────────────────────────
+
+
+def _appendix(task_id: str, rows, derived, citations, evidence: dict | None, *,
+              project=None, ws_dir=None) -> dict:
+    """附录要能回答"这个数字从哪来、怎么算的"：字段位置 + 计算底稿文件。"""
+    locs: list[dict] = []
+    seen: set[str] = set()
+    src_n = _source_number(citations, "")
+    for r in list(rows) + list(derived):
+        label = str(r.get("metric_label") or r.get("metric") or "")
+        loc = _locator_text(r.get("source_locator"))
+        if not label or not loc or label in seen:
+            continue
+        seen.add(label)
+        locs.append({"label": label, "locator": loc, "source_n": src_n})
+    files: list[dict] = []
+    try:
+        proj = workspace.task_project_dir(task_id, project) if project \
+            else workspace.task_project_dir(task_id)
+        root = Path(ws_dir) if ws_dir else workspace.task_workspace(task_id)
+        for base, name, purpose in (
+            (proj, "working_paper.json", "底稿（事实、同比/比率与算式）"),
+            (proj, "financials.json", "结构化取数原始载荷"),
+            (root, "narrative_evidence.json", "年报/公告正文的证据与定位"),
+            (root, "report_structure.json", "本简报的结构化对象"),
+        ):
+            p = Path(base) / name
+            if p.exists():
+                files.append({"file": name, "purpose": purpose,
+                              "bytes": int(p.stat().st_size)})
+    except Exception:
+        pass
+    return {"field_locations": locs[:12], "worksheet": files,
+            "note": "网页来源按小节与字符区间定位；年报 PDF 的页码待后续支持"}
+
+
+def _locator_text(locator) -> str:
+    """`Fact.source_locator` → 可读字段位置（结构化来源的字段路径）。"""
+    if not isinstance(locator, dict):
+        return ""
+    kind = str(locator.get("kind") or "")
+    field = str(locator.get("field") or "")
+    rtype = str(locator.get("report_type") or "")
+    if not field:
+        return ""
+    parts = [p for p in (rtype, field) if p]
+    return ("结构化字段：" + ".".join(parts)) if kind == "structured_field" \
+        else (".".join(parts))
+
 
 
 # ── 来源（只收采用项，三类分别标识）────────────────────────────
 
 
 def _collect_citations(task_id: str, goal: str, body: str, data: dict, *,
+                       evidence: dict | None = None,
                        ws_dir=None) -> tuple[list[dict], dict]:
     """来源清单：**只收实际被采用的**，并标注类型；未采用的留在 audit。"""
     adopted: list[dict] = []
@@ -280,10 +515,18 @@ def _collect_citations(task_id: str, goal: str, body: str, data: dict, *,
     surl = str(data.get("source_url") or "")
     if surl:
         _add(surl, label, "issuer_annual_report", "财务事实")
-    # ② 正文实际引用的检索来源（按正文出现顺序编号）
+    # ② 定向取证采用的年报/公告页（业务背景/变化解释/风险用到它们才登记）
+    for kind, used_by in (("business_background", "业务背景"),
+                          ("change_explanation", "变化解释"),
+                          ("footnote", "财务附注"),
+                          ("risk", "风险因素")):
+        for r in _located(evidence, kind, 4):
+            _add(str(r.get("url") or ""), str(r.get("title") or ""),
+                 str(r.get("source_type") or "third_party"), used_by)
+    # ③ 正文实际引用的检索来源（按正文出现顺序编号）
     for url, title in _body_sources(body):
         _add(url, title, "third_party", "正文引用")
-    # ③ 用户材料（goal 文本）
+    # ④ 用户材料（goal 文本）
     if str(goal or "").strip() and any(k in str(goal) for k in ("材料", "附件", "上传")):
         _add("user-material", "用户提供的材料", "user_material", "用户材料")
     # 未被采用的候选（检索落盘里存在但正文没引用）→ 只留内部审计
@@ -291,6 +534,18 @@ def _collect_citations(task_id: str, goal: str, body: str, data: dict, *,
     unused = [{"url": u, "title": _host(u)} for u in known if u not in seen]
     return adopted, {"unused_sources": unused[:20],
                      "note": "未采用/越界材料只留在内部审计，不进简报来源清单"}
+
+
+def _citation_n(citations: list[dict], url: str) -> str:
+    """来源 URL → 清单编号（不在清单里返回空串，不编编号）。"""
+    u = str(url or "").strip()
+    if not u:
+        return ""
+    for c in citations or []:
+        if c.get("url") == u:
+            return str(c.get("n") or "")
+    return ""
+
 
 
 def _body_sources(body: str) -> list[tuple[str, str]]:
@@ -411,9 +666,10 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
     who = sc.get("company") or "目标公司"
     span = "–".join(str(y) for y in periods) if len(periods) >= 2 else str(periods or "")
     lines: list[str] = [f"# {who} 经营分析简报（{span} 年度）", ""]
-    # 资料范围与状态（不隐藏限制）
+    # 资料范围与状态（不隐藏限制）。"数据时效"用验收器认的字样：本简报由代码装配，
+    # 时效声明也必须是代码给的（模型不写也不能因此丢分）
     lines.append(f"> 报表口径：{sc.get('caliber') or '未声明'}；"
-                 f"资料截至：{sc.get('as_of') or '未声明'}；"
+                 f"数据时效：截至 {sc.get('as_of') or '未声明'}；"
                  f"单位：{sc.get('unit') or '见表中标注'}；"
                  f"采用来源 {sc.get('adopted_sources', 0)} 条"
                  f"（未采用 {sc.get('audit_sources', 0)} 条留在内部审计）。")
@@ -425,6 +681,19 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
             lines.append(f"- {f.get('text')}")
     else:
         lines.append("- 本次未取得可复算的财务事实（见文末资料缺口）。")
+    lines.append("")
+    # 业务背景：公司怎么赚钱（只取与本期变化有关的年报段落，带 [n] 与小节定位）
+    lines.append("## 业务背景")
+    background = structure.get("background") or []
+    if background:
+        for b in background:
+            n = f"[{b.get('source_n')}]" if b.get("source_n") else ""
+            lines.append(f"- {b.get('text')}{n}")
+            if b.get("locator"):
+                lines.append(f"  - 出处：{b.get('locator')}")
+    else:
+        lines.append("- 未取得与本期变化相关的年报业务段落"
+                     "（需补充材料见『风险与核查』）。")
     lines.append("")
     lines.append("## 财务对照")
     rows = table.get("rows") or []
@@ -458,6 +727,13 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
             expr = _formula_expr(f)
             lines.append(f"- {q.get('label')} {q.get('period')}：{q.get('value')}%"
                          + (f"（{expr}）" if expr else ""))
+        conds = _ratio_conditions(quality)
+        if conds:
+            lines.append("")
+            lines.append("**比率适用条件**：")
+            for label, cond in conds:
+                lines.append(f"- {label}：{cond}")
+            lines.append(f"- 适用范围：{_ratio_scope_note()}")
     charts = structure.get("charts") or []
     if charts:
         lines.append("")
@@ -473,13 +749,56 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
     lines.append(analysis if analysis else
                  "> 本次未产出可交付的分析正文（数据与底稿已保留，见文末）。")
     lines.append("")
-    lines.append("## 风险与待核查")
+    # 变化解释：发生了什么 → 管理层/附注怎么解释 → 能推断到哪一步 → 还不能证明什么
+    lines.append("## 变化解释")
+    changes = structure.get("change_explanation") or {}
+    rows_ch = changes.get("changes") or []
+    if rows_ch:
+        lines.append("**发生了什么**：")
+        for c in rows_ch:
+            lines.append(f"- {c.get('text')}")
+    else:
+        lines.append("- 本次未取得可复算的同比，无法说明变化（见文末资料缺口）。")
+    explained = changes.get("explained_by") or []
+    lines.append("")
+    lines.append("**管理层/附注的解释**：")
+    if explained:
+        for e in explained:
+            n = f"[{e.get('source_n')}]" if e.get("source_n") else ""
+            lines.append(f"- {e.get('text')}{n}")
+            if e.get("locator"):
+                lines.append(f"  - 出处：{e.get('locator')}")
+    else:
+        lines.append("- 未取得与上述变化对应的管理层讨论或附注段落，"
+                     "原因**未在本次资料中体现**（需补充材料见下）。")
+    lines.append("")
+    lines.append("**推断边界**：")
+    for t in (changes.get("inference") or []):
+        lines.append(f"- {t}")
+    unproven = changes.get("unproven") or []
+    if unproven:
+        lines.append("")
+        lines.append("**还不能证明什么**：")
+        for u in unproven:
+            lines.append(f"- {u.get('label')}的变化原因：需先取得"
+                         f"{'、'.join(u.get('materials') or [])}")
+    lines.append("")
+    lines.append("## 风险与核查")
     risks = structure.get("risks") or []
     if risks:
         for r in risks:
-            lines.append(f"- {r.get('text')}")
+            lines.append(f"- **{r.get('text')}**")
+            lines.append(f"  - 对应证据：{r.get('evidence') or '底稿无对应证据'}")
+            if r.get("would_change"):
+                lines.append(f"  - 会使判断改变的观察条件：{r.get('would_change')}")
+            mats = r.get("materials_needed") or []
+            if mats:
+                lines.append(f"  - 需要补充的材料：{'、'.join(mats)}")
     else:
         lines.append("- 底稿未记录缺口；仍建议核对现金流量表附注与营运资本变化。")
+    lines.append("")
+    lines.append("- **结论边界**：本简报只覆盖上述期间的变化与缺口，"
+                 "不构成趋势判断、评级或投资建议。")
     claims = [c for c in (structure.get("claims") or [])
               if c.get("status") == "needs_check"]
     if claims:
@@ -499,6 +818,8 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
             kind = SOURCE_TYPE_LABELS.get(str(c.get("type") or ""), "来源")
             lines.append(f"{c.get('n')}. [{c.get('title')}]({c.get('url')})")
             lines.append(f"   - 来源类型：{kind}")
+            if c.get("used_by"):
+                lines.append(f"   - 用于：{'、'.join(c.get('used_by') or [])}")
     else:
         lines.append("本次没有可登记的采用来源。")
     lines.append("")
@@ -508,6 +829,20 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
                  "（归母净利润属合并报表中归属母公司的部分；经营现金流为合并口径）")
     lines.append(f"- 资料截至：{sc.get('as_of') or '未声明'}")
     lines.append(f"- 主体：{who}{('（' + sc['company_id'] + '）') if sc.get('company_id') else ''}")
+    lines.append(f"- 阅读视角：{_perspective_label(sc.get('perspective'))}"
+                 "（由用户在表单声明；不按公司名或机构名推断）")
+    lines.append("")
+    lines.append("### 字段位置与计算底稿")
+    ap = structure.get("appendix") or {}
+    for loc in (ap.get("field_locations") or []):
+        n = f"[{loc.get('source_n')}]" if loc.get("source_n") else ""
+        lines.append(f"- {loc.get('label')}：{loc.get('locator')}{n}")
+    if not (ap.get("field_locations") or []):
+        lines.append("- 未登记结构化字段位置（本次未取得结构化事实）。")
+    for f in (ap.get("worksheet") or []):
+        lines.append(f"- 计算底稿：{f.get('file')}（{f.get('purpose')}）")
+    if ap.get("note"):
+        lines.append(f"- 定位说明：{ap.get('note')}")
     lines.append("")
     lines.append("### 版本与验收状态")
     lines.append("> 本简报由代码装配关键数据与来源，模型仅撰写『分析』一节；"
@@ -516,6 +851,38 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
     lines.append("### 免责声明")
     lines.append(_disclaimer(structure))
     return "\n".join(lines).strip() + "\n"
+
+
+def _ratio_conditions(quality: list[dict]) -> list[tuple[str, str]]:
+    """派生读数 → 适用条件（**按条件文本合并标签**：同比类共一条，不重复三遍）。"""
+    try:
+        from facts import RATIO_CONDITIONS
+    except Exception:
+        return []
+    grouped: dict[str, list[str]] = {}
+    order: list[str] = []
+    for q in quality:
+        metric = str(q.get("metric") or "")
+        if metric.endswith(_YOY_SUFFIX):
+            metric = f"revenue{_YOY_SUFFIX}"       # 同比类共用一条条件
+        cond = str(RATIO_CONDITIONS.get(metric) or "")
+        label = str(q.get("label") or metric)
+        if not cond:
+            continue
+        if cond not in grouped:
+            grouped[cond] = []
+            order.append(cond)
+        if label not in grouped[cond]:
+            grouped[cond].append(label)
+    return [("、".join(grouped[c]), c) for c in order]
+
+
+def _ratio_scope_note() -> str:
+    try:
+        from facts import RATIO_SCOPE_NOTE
+        return str(RATIO_SCOPE_NOTE)
+    except Exception:
+        return "以上比率适用于非金融企业的经营简报。"
 
 
 def _formula_expr(formula: str) -> str:
@@ -536,6 +903,10 @@ def _analysis_section(body: str) -> str:
     """模型正文 → 分析一节：剥掉它自己写的数字表/来源清单/免责声明（避免与装配结果打架）。"""
     text = str(body or "")
     if not text:
+        return ""
+    if _ENGINEERING_REPORT_RE.search(text):
+        # 工程收尾报告不是分析（"5 个步骤成功"回答不了经营问题）：返回空，
+        # 简报会如实写"本次未产出可交付的分析正文"
         return ""
     cut = len(text)
     for marker in ("## 参考来源", "## 资料来源", "## 数据来源", "## 免责声明",

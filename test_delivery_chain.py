@@ -2723,11 +2723,11 @@ class TestSimpleTaskFastPath(_DevSandboxMode, _TempWorkspace, unittest.TestCase)
             steps = o._fixed_research_plan("t-fixed-1", goal)
             self.assertIsNotNone(steps)
             self.assertEqual([s["capability"] for s in steps],
-                             ["web_search", "web_fetch", "content_summary",
+                             ["web_search", "web_fetch", "web_fetch", "content_summary",
                               "report_generator"])
             self.assertIn("贵州茅台", steps[0]["instruction"])
             self.assertIn("2023、2024", steps[1]["instruction"])
-            self.assertIn("已选定的事实", steps[2]["instruction"])
+            self.assertIn("已选定的事实", steps[3]["instruction"])
             # ③ 只有主体、说不清期间/口径的契约不选固定路径（交给通用规划器）
             thin_goal = "研究贵州茅台的发展历程与现状"
             thin = parse_research_request(thin_goal, company="贵州茅台",
@@ -2772,7 +2772,9 @@ class TestSimpleTaskFastPath(_DevSandboxMode, _TempWorkspace, unittest.TestCase)
             with mock.patch.object(templates_pipeline, "route_template",
                                    side_effect=AssertionError("不应进入模板路由")):
                 steps = o._route_template(goal, "t-fixed-3")
-            self.assertEqual(len(steps), 4)
+            # 1 搜索 / 2 年报正文抓取 / 2b 附注风险抓取（可选）/ 3 解释 / 4 报告
+            self.assertEqual(len(steps), 5)
+            self.assertEqual([s["capability"] for s in steps].count("web_fetch"), 2)
         finally:
             ws_mod.WORKSPACE_ROOT = old_root
             task_state.DB_PATH = old_db
@@ -5363,11 +5365,11 @@ class TestResearchBriefAssembly(unittest.TestCase):
          "total_liabilities": 569.33, "disclosure_date": "2025-04-03"},
     ]
 
-    def _env(self, *, body: str = ""):
+    def _env(self, *, body: str = "", tid: str = "brief-01",
+             perspective: str = "equity"):
         """临时工作区 + 落库契约 + financials + 检索候选 + 图表清单。"""
         import facts as F
         import task_state
-        tid = "brief-01"
         tmp = Path(tempfile.mkdtemp(prefix="wm_brief_"))
         old_root = ws_mod.WORKSPACE_ROOT
         old_db = task_state.DB_PATH
@@ -5379,7 +5381,7 @@ class TestResearchBriefAssembly(unittest.TestCase):
         req = F.parse_research_request(
             self.GOAL, company="贵州茅台", company_id="600519.SH", market="cn",
             periods=[2023, 2024], caliber="合并", as_of="2025-04-30",
-            identity_source="form")
+            perspective=perspective, identity_source="form")
         task_state.mark_queued(tid, goal=self.GOAL,
                                research_request=req.to_payload(),
                                db_path=task_state.DB_PATH)
@@ -5476,6 +5478,176 @@ class TestResearchBriefAssembly(unittest.TestCase):
         self.assertEqual(structure["metrics_table"]["periods"], [2023, 2024])
         md = report_brief.render_brief_markdown(structure, "")
         self.assertIn("| 2023 | 2024 |", md)
+
+    # ── F2：让简报回答金融研究问题 ──────────────────────────
+
+    ANNUAL_TEXT = (
+        "贵州茅台2024年年度报告\n\n"
+        "第三节 管理层讨论与分析\n\n"
+        "一、经营情况讨论与分析\n\n"
+        "报告期内营业收入变动主要系本期销量增加及产品结构变化所致；"
+        "归属于上市公司股东的净利润变动与营业收入变动基本同步。\n\n"
+        "（一）主营业务情况\n\n"
+        "公司主营业务为茅台酒及系列酒的生产与销售，经营模式为以销定产，"
+        "主要产品为茅台酒、系列酒，销售模式以直销与批发代理并行。\n\n"
+        "二、可能面对的风险\n\n"
+        "风险因素：宏观经济波动可能影响高端白酒消费需求；"
+        "行业政策与税收政策变化存在不确定性。\n\n"
+        "七、财务报表附注\n\n"
+        "现金流量表附注：报告期内经营活动产生的现金流量净额924.64亿元，"
+        "主要系销售商品收到的现金增加所致；营运资本变动情况见附注。")
+
+    def _env_with_evidence(self, *, body: str = ""):
+        """在 `_env` 基础上放一份抓取到的年报正文（证据由 narrative_evidence 提取）。"""
+        tid, _ = self._env(body=body)
+        proj = ws_mod.task_project_dir(tid, "default")
+        (proj / "fetch_snapshot.json").write_text(json.dumps([{
+            "title": "贵州茅台2024年年度报告",
+            "url": "https://static.cninfo.com.cn/finalpage/2025-04-03/1.PDF",
+            "text": self.ANNUAL_TEXT,
+        }], ensure_ascii=False), encoding="utf-8")
+        return tid
+
+    def test_business_background_and_change_explanation_from_evidence(self):
+        """业务背景与变化解释来自**抓到的年报正文**（带 [n] 与小节定位），不靠模型。"""
+        import report_brief
+        tid = self._env_with_evidence()
+        structure = report_brief.build_structure(tid, self.GOAL, "")
+        md = report_brief.render_brief_markdown(structure, "")
+        self.assertIn("## 业务背景", md)
+        self.assertIn("主营业务为茅台酒及系列酒", md)
+        self.assertIn("小节：", md, "业务背景要带小节定位")
+        self.assertIn("## 变化解释", md)
+        for marker in ("**发生了什么**", "**管理层/附注的解释**", "**推断边界**",
+                       "**还不能证明什么**"):
+            self.assertIn(marker, md, marker)
+        self.assertIn("不能据此声称长期趋势", md)
+        # 变化幅度大的在前（收入/利润/现金流三个变化都给出）
+        ch = structure["change_explanation"]["changes"]
+        self.assertGreaterEqual(len(ch), 3)
+        self.assertGreaterEqual(abs(float(ch[0]["yoy"])), abs(float(ch[-1]["yoy"])))
+        # 现金流变化的"还不能证明什么"落到确定性的材料清单
+        unproven = {u["label"]: u["materials"] for u in structure["change_explanation"]["unproven"]}
+        self.assertIn("现金流量表附注", unproven.get("经营活动现金流净额", []))
+        # 来源编号一一对应：变化解释引用的 [n] 必须在清单里
+        n = structure["change_explanation"]["explained_by"][0]["source_n"]
+        self.assertIn(f"[{n}]", md)
+
+    def test_risk_rows_carry_evidence_conditions_and_materials(self):
+        """每条风险都要有对应证据、会改变判断的观察条件、需要补充的材料。"""
+        import report_brief
+        tid = self._env_with_evidence()
+        structure = report_brief.build_structure(tid, self.GOAL, "")
+        risks = structure["risks"]
+        self.assertTrue(risks, "年报风险因素要进简报")
+        kinds = {r["kind"] for r in risks}
+        self.assertIn("evidence_risk", kinds, "年报里的风险要有证据")
+        for r in risks:
+            self.assertTrue(r.get("evidence"), r)
+            self.assertTrue(r.get("would_change"), r)
+        ev = next(r for r in risks if r["kind"] == "evidence_risk")
+        self.assertIn("小节：", ev["evidence"], "有证据的风险要写明小节位置")
+        self.assertTrue(ev["materials_needed"], ev)
+        unproven = next(r for r in risks if r["kind"] == "unproven_change")
+        self.assertIn("现金流量表附注", unproven["materials_needed"])
+        md = report_brief.render_brief_markdown(structure, "")
+        for marker in ("对应证据", "会使判断改变的观察条件", "需要补充的材料", "结论边界"):
+            self.assertIn(marker, md, marker)
+
+    def test_appendix_records_field_locations_and_worksheet(self):
+        """附录要能回答"这个数字取自哪个字段、怎么算的"。"""
+        import report_brief
+        import working_paper_export as WPX
+        tid = self._env_with_evidence()
+        WPX.write_working_paper(tid, self.GOAL, project="default")
+        structure = report_brief.build_structure(tid, self.GOAL, "")
+        ap = structure["appendix"]
+        labels = {l["label"]: l["locator"] for l in ap["field_locations"]}
+        self.assertTrue(labels, ap)
+        self.assertIn("结构化字段", next(iter(labels.values())))
+        self.assertTrue(any(l["locator"] for l in ap["field_locations"]))
+        files = {f["file"] for f in ap["worksheet"]}
+        self.assertIn("working_paper.json", files)
+        self.assertIn("narrative_evidence.json", files)
+        md = report_brief.render_brief_markdown(structure, "")
+        self.assertIn("### 字段位置与计算底稿", md)
+        self.assertIn("计算底稿：working_paper.json", md)
+        self.assertIn("PDF 的页码待后续支持", md, "定位口径要如实说明")
+
+    def test_brief_with_evidence_still_passes_acceptance(self):
+        """带定位（含字符区间的数字）的简报仍要过验收：数字可溯源、引用一一对应。"""
+        import report_brief
+        from acceptance_checker import run_acceptance
+        tid = self._env_with_evidence()
+        body = ("# 我的报告\n\n贵州茅台 2024 年营业收入 1741.44亿元[1]，"
+                "同比 15.66%（(1741.44 - 1505.6) / 1505.6 * 100）。\n")
+        structure = report_brief.build_structure(tid, self.GOAL, body)
+        md = report_brief.render_brief_markdown(structure, body)
+        ws = ws_mod.task_workspace(tid)
+        res = run_acceptance(tid, self.GOAL, md, ws, profile="financial")
+        checks = res.get("checks") or {}
+        for key in ("number_traceability", "source_list_completeness", "disclaimer"):
+            c = checks.get(key) or {}
+            self.assertTrue(c.get("pass"), f"{key}: {c.get('gaps') or c.get('details')}")
+
+    def test_missing_analysis_is_not_certified(self):
+        """没有分析、只有数据与底稿时不得判为已验证；工程日志（步骤成功数）不算分析。"""
+        import delivery_pipeline as dp
+        self.assertFalse(dp._has_analysis_section(
+            "## 分析\n\n> 本次未产出可交付的分析正文（数据与底稿已保留，见文末）。\n"))
+        self.assertFalse(dp._has_analysis_section(
+            "## 分析\n\n## Task Report\n\nGoal: x\nStatus: PARTIAL\n"
+            "Steps: 5 (4 OK, 1 failed)\n"))
+        self.assertTrue(dp._has_analysis_section(
+            "## 分析\n\n收入增长主要来自销量提升与产品结构变化，" + "详见上文说明。" * 12))
+        # 通用报告没有固定小节名：不在本门槛判定范围内（不误伤）
+        self.assertTrue(dp._has_analysis_section("这是一份简短但完整的通用报告正文。"))
+
+    # ── F2-3：两种阅读视角 + 比率适用条件 ──────────────────
+
+    def test_two_perspectives_share_one_paper(self):
+        """两种视角复用同一底稿：数字一致、核查清单不同；视角只认声明。"""
+        import report_brief
+        out: dict[str, dict] = {}
+        for persp, tid in (("equity", "brief-eq"), ("bank_corporate", "brief-bk")):
+            self._env(tid=tid, perspective=persp)
+            st = report_brief.build_structure(tid, self.GOAL, "")
+            out[persp] = {"st": st, "md": report_brief.render_brief_markdown(st, "")}
+        eq, bk = out["equity"], out["bank_corporate"]
+        # 同一底稿：指标表与派生读数完全一致
+        self.assertEqual(eq["st"]["metrics_table"], bk["st"]["metrics_table"])
+        self.assertEqual(eq["st"]["findings"], bk["st"]["findings"])
+        self.assertEqual(eq["st"]["change_explanation"]["changes"],
+                         bk["st"]["change_explanation"]["changes"])
+        # 视角不同 → 核查材料与正文里的视角声明不同
+        eq_mats = next(r["materials_needed"] for r in eq["st"]["risks"]
+                       if r["kind"] == "perspective_material")
+        bk_mats = next(r["materials_needed"] for r in bk["st"]["risks"]
+                       if r["kind"] == "perspective_material")
+        self.assertIn("同业可比数据与行情", eq_mats)
+        self.assertIn("债务到期结构与利率", bk_mats)
+        self.assertNotEqual(eq_mats, bk_mats)
+        self.assertIn("阅读视角：投研视角", eq["md"])
+        self.assertIn("阅读视角：银行对公客户研究视角", bk["md"])
+        self.assertIn("由用户在表单声明", bk["md"])
+        # 视角不改变数字：两版正文的财务对照表逐行一致
+        def _table(md):
+            return [ln for ln in md.splitlines()
+                    if ln.startswith("|") and "营业收入" in ln or ln.startswith("| 指标")]
+        self.assertEqual(_table(eq["md"]), _table(bk["md"]))
+
+    def test_ratio_conditions_and_scope_are_rendered(self):
+        """比率适用条件与"仅非金融企业"边界必须写在正文里（不静默套用）。"""
+        import report_brief
+        tid, _ = self._env()
+        st = report_brief.build_structure(tid, self.GOAL, "")
+        md = report_brief.render_brief_markdown(st, "")
+        self.assertIn("**比率适用条件**", md)
+        self.assertIn("归母净利率", md)
+        self.assertIn("非金融企业", md)
+        self.assertIn("不得机械套用", md)
+        # 现金流覆盖倍数的符号条件必须写明（负值不表示利润有现金支撑）
+        self.assertIn("同为正", md)
 
 
 if __name__ == "__main__":

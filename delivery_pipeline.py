@@ -272,6 +272,32 @@ def review_valid_for(version, facts: dict) -> tuple[bool, str]:
 # ── 研究硬门槛（可重算；返回原因而不写实例状态）────────────────
 
 
+def _has_analysis_section(report_body: str) -> bool:
+    """研究简报里是否有**实质**分析（`## 分析` 一节非占位、有内容）。
+
+    只对带 `## 分析` 小节的代码装配简报判定；通用报告没有固定小节名，不在本门槛内。
+    """
+    body = str(report_body or "")
+    idx = body.find("## 分析")
+    if idx < 0:
+        return True
+    section = body[idx + len("## 分析"):]
+    nxt = section.find("\n## ")
+    if nxt > 0:
+        section = section[:nxt]
+    section = section.strip()
+    if _ANALYSIS_PLACEHOLDER in section:
+        return False
+    if _ENGINEERING_SUMMARY_RE.search(section):
+        return False          # 工程收尾报告（步骤成功数）不是分析
+    return len(section) >= 60
+
+
+_ANALYSIS_PLACEHOLDER = "本次未产出可交付的分析正文"
+_ENGINEERING_SUMMARY_RE = re.compile(
+    r"^##\s*Task Report\s*$|^\s*Steps:\s*\d+\s*\(\d+\s*OK,\s*\d+\s*failed\)", re.M)
+
+
 def apply_research_hard_gate(task_id: str, goal: str, wp: dict | None,
                              report_body: str = "") -> tuple[str, str]:
     """研究任务的交付硬门槛。返回 `(附加到交付物的说明, hard_fail 原因)`。
@@ -326,6 +352,11 @@ def apply_research_hard_gate(task_id: str, goal: str, wp: dict | None,
                 scope = document_subject_scope(report_body, request, paper)
                 if scope:
                     reasons.append("文档主体作用域未绑定：" + scope[0].detail[:120])
+            # 研究简报必须有**可交付的分析**：只有数据表与底稿时按草稿交付
+            # （架构复核：正文失效时交付"数据表/底稿 + 分析未完成"，不以拼接日志冒充研报）
+            if report_body and not _has_analysis_section(report_body):
+                reasons.append("分析未完成：交付正文只有数据与底稿，"
+                               "未产出可交付的分析结论（见文末资料缺口）")
     except Exception as exc:
         reasons.append(f"研究校验异常（按证据未知交付）：{str(exc)[:140]}")
         logger.warning("研究校验异常（task=%s）：%s", task_id, str(exc)[:160])

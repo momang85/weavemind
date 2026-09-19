@@ -371,5 +371,73 @@ class TestCaliberEvidence(unittest.TestCase):
         self.assertEqual(facts[0].disclosed_at, "2024-12-31")
 
 
+class TestPerspectiveAndRatioConditions(unittest.TestCase):
+    """F2：阅读视角**只认声明**（不按公司名/机构名推断），比率要写适用条件。"""
+
+    GOAL = ("研究中国工商银行 2023 与 2024 两个年度的营业收入、归母净利润、"
+            "经营活动现金流净额，合并报表口径，数据截至 2025-04-30")
+
+    def _req(self, **over):
+        kw = dict(company="中国工商银行", company_id="601398.SH", market="cn",
+                  periods=[2023, 2024], caliber="合并", as_of="2025-04-30",
+                  identity_source="form")
+        kw.update(over)
+        return F.parse_research_request(self.GOAL, **kw)
+
+    def test_perspective_round_trips_through_payload(self):
+        req = self._req(perspective="bank_corporate")
+        self.assertEqual(req.perspective, "bank_corporate")
+        back = F.ResearchRequest.from_payload(req.to_payload())
+        self.assertEqual(back.perspective, "bank_corporate")
+
+    def test_perspective_is_not_inferred_from_subject(self):
+        """银行做权益投研时仍用权益视角：公司名里带"银行"不得自动切成信用分析。"""
+        self.assertEqual(self._req().perspective, F.DEFAULT_PERSPECTIVE)
+        self.assertEqual(F.ResearchRequest.from_payload(
+            {"company": "中国工商银行"}).perspective, F.DEFAULT_PERSPECTIVE)
+
+    def test_invalid_perspective_falls_back_to_default(self):
+        self.assertEqual(self._req(perspective="credit").perspective,
+                         F.DEFAULT_PERSPECTIVE)
+        self.assertEqual(self._req(perspective="").perspective, F.DEFAULT_PERSPECTIVE)
+        self.assertEqual(F.ResearchRequest.from_payload(
+            {"company": "X", "perspective": "信用分析"}).perspective,
+            F.DEFAULT_PERSPECTIVE)
+
+    def test_every_derived_ratio_has_applicability_conditions(self):
+        for metric, _label in F.DERIVED_METRICS:
+            self.assertIn(metric, F.RATIO_CONDITIONS, metric)
+        self.assertIn("同为正", F.RATIO_CONDITIONS["cashflow_coverage"],
+                      "覆盖倍数的符号条件必须写明")
+        self.assertIn("金融机构", F.RATIO_CONDITIONS["debt_ratio"])
+        self.assertIn("非金融企业", F.RATIO_SCOPE_NOTE)
+
+    def test_perspective_requirements_are_declared_only(self):
+        from orchestrator_v2 import perspective_requirements
+        self.assertIn("投研", perspective_requirements("equity"))
+        self.assertIn("银行对公客户研究", perspective_requirements("bank_corporate"))
+        self.assertEqual(perspective_requirements(""), "")
+        self.assertEqual(perspective_requirements("credit"), "")
+
+
+class TestResearchRequestSanitizer(unittest.TestCase):
+    """表单白名单：视角只收枚举值，非法值丢弃（宁可少字段，也不把脏值当契约）。"""
+
+    def _sanitize(self, raw):
+        from web_ui import _sanitize_research_request
+        return _sanitize_research_request(raw)
+
+    def test_perspective_is_whitelisted(self):
+        self.assertEqual(
+            self._sanitize({"company": "贵州茅台", "perspective": "BANK_CORPORATE"}),
+            {"company": "贵州茅台", "perspective": "bank_corporate"})
+        self.assertEqual(
+            self._sanitize({"company": "贵州茅台", "perspective": "credit"}),
+            {"company": "贵州茅台"}, "非法视角必须丢弃，不得当契约")
+        self.assertEqual(
+            self._sanitize({"company": "贵州茅台", "perspective": "equity"}),
+            {"company": "贵州茅台", "perspective": "equity"})
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -15,6 +15,7 @@ export interface ResearchForm {
   caliber?: string
   asOf?: string
   materials?: string
+  perspective?: string
 }
 
 /** 发给后端的**结构化契约字段**（与 `web_ui._sanitize_research_request` 的白名单一致）。 */
@@ -28,6 +29,7 @@ export interface ResearchFields {
   year_to: number
   periods: number[]
   materials?: string
+  perspective?: string
 }
 
 export interface ResearchGoal {
@@ -37,6 +39,11 @@ export interface ResearchGoal {
 }
 
 const CALIBERS = ['合并', '母公司']
+// 阅读视角（F2）：只由用户选，**不按公司名推断**（银行做权益投研时仍用权益视角）
+const PERSPECTIVES: Record<string, string> = {
+  equity: '投研视角',
+  bank_corporate: '银行对公客户研究视角',
+}
 // 代码形状（与后端 facts.market_of_code 的识别一致；市场由后端定）
 const CODE_SHAPE = /^\d{4,6}(\.[A-Za-z]{2,6})?$|^[A-Za-z]{1,5}(\.[A-Za-z]{1,2})?$/
 const MARKETS = ['cn', 'hk', 'us']
@@ -78,10 +85,16 @@ export function buildResearchGoal(form: ResearchForm): ResearchGoal {
   if (gaps.length) return { goal: '', fields: null, gaps }
 
   const years = [y1, y2].sort() as [string, string]
+  const perspective = PERSPECTIVES[String(form.perspective ?? '')]
+    ? String(form.perspective)
+    : ''
   let goal =
     `研究${company} ${years[0]} 与 ${years[1]} 两个年度的营业收入、归母净利润、` +
     `经营活动现金流净额，${caliber}报表口径，数据截至 ${asOf}。` +
     `每个数字须能回溯到来源位置并可重算；缺证据的如实标缺口。`
+  if (perspective) {
+    goal += `阅读重点：${PERSPECTIVES[perspective]}（${perspective}）。`
+  }
   const materials = String(form.materials ?? '').trim()
   if (materials) goal += `\n\n参考资料：${materials}`
 
@@ -100,6 +113,7 @@ export function buildResearchGoal(form: ResearchForm): ResearchGoal {
   if (companyId) fields.company_id = companyId
   if (MARKETS.includes(market)) fields.market = market
   if (materials) fields.materials = materials
+  if (perspective) fields.perspective = perspective
   return { goal, fields, gaps: [] }
 }
 

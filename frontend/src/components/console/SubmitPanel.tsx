@@ -327,7 +327,7 @@ function ResearchQuickForm({ disabled, onReady }: {
 }) {
   const [form, setForm] = useState<ResearchForm>({
     company: '', companyId: '', market: '', yearFrom: '', yearTo: '',
-    caliber: '合并', asOf: '', materials: '',
+    caliber: '合并', asOf: '', materials: '', perspective: 'equity',
   })
   const [gaps, setGaps] = useState<string[]>([])
   const [open, setOpen] = useState(true)
@@ -382,6 +382,13 @@ function ResearchQuickForm({ disabled, onReady }: {
               className={field}>
               <option value="合并">合并报表</option>
               <option value="母公司">母公司报表</option>
+            </select>
+            <select value={form.perspective ?? 'equity'} disabled={disabled}
+              title="阅读重点：两种视角复用同一底稿；视角由你选，不按公司名推断"
+              onChange={e => setForm({ ...form, perspective: e.target.value })}
+              className={field}>
+              <option value="equity">投研视角</option>
+              <option value="bank_corporate">银行对公视角</option>
             </select>
             <input value={form.asOf ?? ''} placeholder="资料截至日 2025-04-30"
               disabled={disabled} onChange={e => setForm({ ...form, asOf: e.target.value })}
