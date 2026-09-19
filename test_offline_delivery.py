@@ -643,6 +643,61 @@ class _RecordingRedis:
         return _Pipe()
 
 
+class TestAsyncCallDiagnostics(unittest.TestCase):
+    """异步调用路径（worker 步骤走的那条）也要记调用形状。
+
+    此前只埋了同步 `LLMClient.call`：实机里 worker 的步骤调用全部走 async，
+    于是 `llm_calls` 只在编排器侧有记录、步骤侧为空——诊断等于漏了最要紧的一段。
+    """
+
+    def test_async_records_shape_and_keeps_stage_label(self):
+        import asyncio
+
+        import httpx
+        import llm_client
+
+        fake = _RecordingRedis()
+        req = httpx.Request("POST", "https://example.invalid/v1/chat/completions")
+        resp504 = httpx.Response(504, request=req, text="<html>504</html>")
+
+        class _Client:
+            def __init__(self):
+                self.calls = 0
+
+            async def post(self, *a, **k):
+                self.calls += 1
+                return resp504
+
+        client = _Client()
+        llm_client.set_task_context("async-diag")
+        self.addCleanup(llm_client.set_task_context, "")
+        with mock.patch.object(llm_client, "_task_usage_client", fake), \
+                mock.patch.object(llm_client, "_get_async_client", lambda: client), \
+                mock.patch.object(llm_client, "_ensure_cfg_fresh", lambda: None), \
+                mock.patch.object(llm_client, "_BACKUP_CFG", {}), \
+                mock.patch.object(llm_client, "_task_budget_limits",
+                                  lambda: {"max_calls": 0, "max_seconds": 0.0,
+                                           "max_cost_usd": 0.0}):
+            with self.assertRaises(llm_client.LLMCallError):
+                asyncio.run(llm_client.call_llm_async(
+                    "系统提示词", "用户提示词", expect_json=False,
+                    usage="exec", max_attempts=2))
+        self.assertEqual(client.calls, 2)
+        recs = [json.loads(r) for r in fake.rows]
+        self.assertEqual(len(recs), 2, recs)
+        for rec in recs:
+            # 阶段标签来自 usage：**不能**被响应里的 token 用量覆盖
+            self.assertEqual(rec["stage"], "exec", rec)
+            self.assertEqual(rec["http_status"], 504)
+            self.assertEqual(rec["error_class"], "http_504")
+            self.assertEqual(rec["input_chars"], len("系统提示词") + len("用户提示词"))
+        self.assertEqual(recs[0]["end_reason"], "retry")
+        self.assertEqual(recs[-1]["end_reason"], "exhausted")
+        blob = json.dumps(recs, ensure_ascii=False)
+        self.assertNotIn("系统提示词", blob)
+        self.assertNotIn("用户提示词", blob)
+
+
 class TestResearchFixedPathOffline(unittest.TestCase):
     """③ 固定研究路径的离线故障注入（C 批）。
 

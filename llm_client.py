@@ -271,6 +271,15 @@ def _error_shape(exc: Exception) -> tuple[int, str]:
         return 0, "budget_exhausted"
     if isinstance(exc, LLMJSONParseError):
         return 0, "bad_json"
+    # httpx 异常：状态码在 response 上，类名区分超时/连接（文本里往往没有 "HTTP 504"）
+    _code = getattr(getattr(exc, "response", None), "status_code", None)
+    if isinstance(_code, int) and _code:
+        return _code, f"http_{_code}"
+    _name = type(exc).__name__.lower()
+    if "timeout" in _name:
+        return 0, "timeout"
+    if "connect" in _name:
+        return 0, "network_error"
     m = re.search(r"HTTP[ _-]?(\d{3})", text)
     if m:
         return int(m.group(1)), f"http_{m.group(1)}"
@@ -2076,7 +2085,13 @@ async def call_llm_async(
         except Exception as exc:
             logger.warning("Health-routed async backup failed: %s", str(exc)[:150])
 
+    # 诊断用：阶段标签与输入长度必须在**被覆盖之前**取好——下面循环里
+    # `usage` 会被响应里的 token 用量覆盖，异步路径的 stage 就丢了
+    _stage = str(usage or "")
+    _input_chars = len(str(system_prompt or "")) + len(str(user_prompt or ""))
+
     for attempt in range(1, max_attempts + 1):
+        _t0 = time.monotonic()
         try:
             client = _get_async_client()
             url = base_url.rstrip('/') + '/chat/completions'
@@ -2105,10 +2120,19 @@ async def call_llm_async(
             else:
                 result = content
             _cache_set(cache_key, user_prompt, result)
+            _record_llm_call(get_task_context(), stage=_stage, attempt=attempt,
+                             elapsed_ms=int((time.monotonic() - _t0) * 1000),
+                             input_chars=_input_chars, max_tokens=max_tokens,
+                             end_reason="ok")
             return result
 
         except LLMEmptyResponseError as exc:
             last_error = exc
+            _record_llm_call(get_task_context(), stage=_stage, attempt=attempt,
+                             elapsed_ms=int((time.monotonic() - _t0) * 1000),
+                             input_chars=_input_chars, max_tokens=max_tokens,
+                             error_class="empty_content",
+                             end_reason="retry" if attempt < max_attempts else "exhausted")
             logger.warning('LLM async empty response, retry %d/%d', attempt, max_attempts)
             await asyncio.sleep(1)
             continue
@@ -2116,6 +2140,14 @@ async def call_llm_async(
         except httpx.HTTPStatusError as exc:
             last_error = exc
             _mark_endpoint("primary", False)
+            _code = int(exc.response.status_code)
+            _record_llm_call(get_task_context(), stage=_stage, attempt=attempt,
+                             elapsed_ms=int((time.monotonic() - _t0) * 1000),
+                             input_chars=_input_chars, max_tokens=max_tokens,
+                             http_status=_code, error_class=f"http_{_code}",
+                             end_reason=("auth" if _code in (401, 402, 403)
+                                         else ("retry" if attempt < max_attempts
+                                               else "exhausted")))
             if exc.response.status_code == 429:
                 backoff = min(2 ** attempt, 30)
                 logger.warning('LLM async rate limited (429), retry %d/%d in %ds', attempt, max_attempts, backoff)
@@ -2141,15 +2173,32 @@ async def call_llm_async(
         except (httpx.TimeoutException, httpx.ConnectError) as exc:
             last_error = exc
             _mark_endpoint("primary", False)
+            _record_llm_call(get_task_context(), stage=_stage, attempt=attempt,
+                             elapsed_ms=int((time.monotonic() - _t0) * 1000),
+                             input_chars=_input_chars, max_tokens=max_tokens,
+                             error_class="timeout",
+                             end_reason="retry" if attempt < max_attempts else "exhausted")
             logger.warning('LLM async timeout/connect, retry %d/%d', attempt, max_attempts)
             await asyncio.sleep(1)
             continue
 
     # 主端点失败 → 备用端点/模型（单次尝试）
     if _BACKUP_CFG and _BACKUP_CFG.get("base_url") and _BACKUP_CFG.get("api_key"):
+        _tb = time.monotonic()
         try:
-            return await _async_call_backup(payload, model, expect_json)
+            out = await _async_call_backup(payload, model, expect_json)
+            _record_llm_call(get_task_context(), stage=_stage, attempt=max_attempts,
+                             elapsed_ms=int((time.monotonic() - _tb) * 1000),
+                             input_chars=_input_chars, max_tokens=max_tokens,
+                             end_reason="ok", endpoint="backup")
+            return out
         except Exception as exc:
+            _hs, _cls = _error_shape(exc)
+            _record_llm_call(get_task_context(), stage=_stage, attempt=max_attempts,
+                             elapsed_ms=int((time.monotonic() - _tb) * 1000),
+                             input_chars=_input_chars, max_tokens=max_tokens,
+                             http_status=_hs, error_class=_cls, end_reason="exhausted",
+                             endpoint="backup")
             logger.error("Backup LLM async also failed: %s", str(exc)[:150])
     raise LLMCallError(f'LLM async call failed after {max_attempts} attempts') from last_error
 
