@@ -1052,6 +1052,28 @@ def _records_for_value(records: list[dict], token: str) -> list[dict]:
     return [r for r in records if abs(float(r["value"]) - val) <= 1e-9]
 
 
+def _extract_balanced_expr(window: str) -> str:
+    """取窗口开头 `（…）` 里**括号配对**的整段算式。
+
+    为什么不能只用正则：增长率的标准写法是 `(1741.44 - 1505.6) / 1505.6 * 100`，
+    懒匹配会在内层 `)` 处截断，得到不平衡的 `(1741.44 - 1505.6` → 判不可溯源
+    （F1 实机简报因此掉到 74%）。这里按配对深度取整段；实质校验（求值、操作数能在
+    来源里对上、量纲一致）一条不减。
+    """
+    t = str(window or "").lstrip()
+    if not t or t[0] not in "（(":
+        return ""
+    depth = 0
+    for i, ch in enumerate(t):
+        if ch in "（(":
+            depth += 1
+        elif ch in "）)":
+            depth -= 1
+            if depth == 0:
+                return t[1:i].strip()
+    return ""
+
+
 def _formula_derived_in_report(num: dict, window: str, records: list[dict],
                                prefix: str = "") -> tuple[bool, str]:
     """V1：报告里**紧邻数字**的完整公式，且操作数能按"值 + 单位"在来源记录里对上。
@@ -1070,10 +1092,10 @@ def _formula_derived_in_report(num: dict, window: str, records: list[dict],
         target = float(num["value"])
     except (TypeError, ValueError):
         return False, "mismatch"
-    m = re.match(r"\s*[（(]\s*([0-9][0-9.,\s*/+\-()]*?)\s*[）)]", str(window or ""))
-    if not m:
-        return False, "mismatch"                     # 必须紧跟一个完整的括号算式
-    expr = m.group(1)
+    # 必须紧跟一个**括号配对**的完整算式（允许算式内部再有括号，如增长率的标准写法）
+    expr = _extract_balanced_expr(window)
+    if not expr or expr[0] not in "0123456789(（":
+        return False, "mismatch"
     value = _eval_arith_expression(expr)
     if value is None:
         return False, "mismatch"

@@ -523,6 +523,37 @@ def assemble_and_verify(task_id: str, goal: str, body: str, *,
     不传则读工作区里已有的评审事实（人工修订走这条：没有针对新版的 PASS）。
     """
     store = VersionStore(_ws(task_id, ws_dir), task_id)
+    # F1：研究任务改用**代码装配的研究简报**作为交付正文（关键发现/财务对照/图表/
+    # 引用编号/资料范围/声明由代码输出，模型只贡献"分析"一节）；工程交付说明不再进
+    # 研究简报正文。装配必须在验收之前——验收对象就是最终交付的那份正文。
+    brief_note = ""
+    try:
+        import report_brief
+        if report_brief.is_research_task(task_id, goal, ws_dir=ws_dir):
+            structure = report_brief.build_structure(
+                task_id, goal, body, project=project, ws_dir=ws_dir)
+            if structure:
+                brief_body = report_brief.render_brief_markdown(structure, body)
+                # 链接重写必须在验收**之前**：验收对象就是最终交付的那份字节，
+                # 装配后若再改写链接，记录的验收对象与送达字节就对不上了
+                brief_body = rewrite_report_links(brief_body, task_id)
+                # 简报是**新版本**：登记并采纳它（编排器先前采纳的是模型正文，
+                # 不切换过来的话"选中版本"与交付字节会是两版 → 只能判草稿）
+                _src_fp = sources_fingerprint(task_id, brief_body)
+                _rules_v, _rules_fp = rules_identity(task_id)
+                _v_brief = store.record(
+                    brief_body, sources_fingerprint=_src_fp,
+                    rules_version=_rules_v, rules_fingerprint=_rules_fp)
+                if _v_brief is not None:
+                    store.adopt(_v_brief, reason="研究简报（代码装配）")
+                report_brief.write_structure(task_id, structure, ws_dir=ws_dir)
+                body = brief_body
+                wrapper = ""             # 工程说明移到任务详情，不进简报
+                brief_note = ("研究简报由代码装配（关键数据/来源/声明）；"
+                              f"采用来源 {len(structure.get('citations') or [])} 条")
+                logger.info("研究简报装配（task=%s）：%s", task_id, brief_note)
+    except Exception as exc:                     # noqa: BLE001 - 装配失败退回原正文
+        logger.warning("研究简报装配失败（task=%s，退回原正文）：%s", task_id, str(exc)[:160])
     _st, body = ensure_body_accepted(task_id, goal, body, accept_fn=accept_fn,
                                      ws_dir=ws_dir)
 
@@ -537,6 +568,8 @@ def assemble_and_verify(task_id: str, goal: str, body: str, *,
         write_review_facts(task_id, facts, ws_dir=ws_dir)
 
     notes: list[str] = []
+    if brief_note:
+        notes.append(f"> **装配说明**：{brief_note}。")
     wp_note = gaps_note(wp)
     if wp_note:
         notes.append(wp_note)

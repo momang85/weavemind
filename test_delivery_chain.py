@@ -5344,5 +5344,139 @@ class TestFinancialResearchCharts(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestResearchBriefAssembly(unittest.TestCase):
+    """研究简报由**代码装配**：数字/来源/引用不依赖模型（架构复核 §F1）。
+
+    实机教训：正文只写 2/6 个数字、引用 [1..7] 与清单不对应、首屏是工程说明。
+    这里钉住装配器的四件事：数字来自底稿、来源只收采用项并分类、引用一一对应、
+    工程内容不进简报正文。
+    """
+
+    GOAL = ("研究贵州茅台 2023 与 2024 两个年度的营业收入、归母净利润、"
+            "经营活动现金流净额，合并报表口径，数据截至 2025-04-30")
+    ROWS = [
+        {"year": 2023, "report_type": "年报", "revenue": 1505.6, "net_profit": 747.34,
+         "operating_cashflow": 665.93, "total_assets": 2727.0,
+         "total_liabilities": 490.43, "disclosure_date": "2024-04-03"},
+        {"year": 2024, "report_type": "年报", "revenue": 1741.44, "net_profit": 862.28,
+         "operating_cashflow": 924.64, "total_assets": 2989.45,
+         "total_liabilities": 569.33, "disclosure_date": "2025-04-03"},
+    ]
+
+    def _env(self, *, body: str = ""):
+        """临时工作区 + 落库契约 + financials + 检索候选 + 图表清单。"""
+        import facts as F
+        import task_state
+        tid = "brief-01"
+        tmp = Path(tempfile.mkdtemp(prefix="wm_brief_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        old_db = task_state.DB_PATH
+        ws_mod.configure_workspace_root(str(tmp))
+        task_state.DB_PATH = str(tmp / "b.db")
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", old_root)
+        self.addCleanup(setattr, task_state, "DB_PATH", old_db)
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        req = F.parse_research_request(
+            self.GOAL, company="贵州茅台", company_id="600519.SH", market="cn",
+            periods=[2023, 2024], caliber="合并", as_of="2025-04-30",
+            identity_source="form")
+        task_state.mark_queued(tid, goal=self.GOAL,
+                               research_request=req.to_payload(),
+                               db_path=task_state.DB_PATH)
+        proj = ws_mod.task_project_dir(tid, "default")
+        proj.mkdir(parents=True, exist_ok=True)
+        (proj / "financials.json").write_text(json.dumps({
+            "financials": self.ROWS,
+            "metadata": {"source": "eastmoney_ashare", "company": "贵州茅台",
+                         "currency": "CNY", "unit": "亿元", "caliber": "合并",
+                         "caliber_evidence": "含 PARENTNETPROFIT"},
+            "raw": {"url": "https://datacenter-web.eastmoney.com/api/x", "text": "{}"},
+        }, ensure_ascii=False), encoding="utf-8")
+        (proj / "search_results.json").write_text(json.dumps([
+            {"title": "茅台2024年报解读", "url": "https://news.example/a",
+             "snippet": "贵州茅台2024年营业收入1741.44亿元"},
+            {"title": "无关链接", "url": "https://garbage.example/b", "snippet": "广告"},
+        ], ensure_ascii=False), encoding="utf-8")
+        (proj / "chart_manifest.json").write_text(json.dumps({"charts": [
+            {"file": "chart_1.png", "type": "grouped_bar", "grade": "publish",
+             "keywords": ["对比"]},
+            {"file": "entity_frequency.png", "type": None, "grade": None},
+        ]}, ensure_ascii=False), encoding="utf-8")
+        ws = ws_mod.task_workspace(tid)
+        ws.mkdir(parents=True, exist_ok=True)
+        return tid, body
+
+    def test_numbers_come_from_paper_not_model(self):
+        """模型正文里的数字不得改写简报的数据部分。"""
+        import report_brief
+        tid, _ = self._env()
+        hostile = ("# 我的报告\n\n营业收入 9999亿元，归母净利润 1234亿元。\n\n"
+                   "## 参考来源\n\n1. [无关](https://garbage.example/b)\n")
+        structure = report_brief.build_structure(tid, self.GOAL, hostile)
+        self.assertIsNotNone(structure)
+        md = report_brief.render_brief_markdown(structure, hostile)
+        head = md.split("## 分析")[0]
+        self.assertIn("1741.44", head)
+        self.assertIn("1505.6", head)
+        self.assertNotIn("9999", head, "数据部分不得被模型正文改写")
+        self.assertIn("## 关键发现", md)
+        self.assertIn("## 财务对照", md)
+        # 同比与比率带可复算公式（验收按文本公式判可溯源）
+        self.assertIn("同比与比率（可复算）", md)
+        self.assertIn("（", md)
+
+    def test_sources_are_adopted_only_and_typed(self):
+        """来源只收采用项、三类分别标识；未采用只留内部审计。"""
+        import report_brief
+        tid, _ = self._env()
+        body = ("# 我的报告\n\n贵州茅台 2024 年营业收入 1741.44亿元[1]。\n\n"
+                "## 参考来源\n\n1. [茅台2024年报解读](https://news.example/a)\n")
+        structure = report_brief.build_structure(tid, self.GOAL, body)
+        urls = [c["url"] for c in structure["citations"]]
+        self.assertIn("https://datacenter-web.eastmoney.com/api/x", urls,
+                      "结构化财务来源属采用项")
+        self.assertIn("https://news.example/a", urls, "正文引用的来源属采用项")
+        self.assertNotIn("https://garbage.example/b", urls, "未引用来源不进清单")
+        types = {c["type"] for c in structure["citations"]}
+        self.assertIn("issuer_annual_report", types)
+        self.assertIn("third_party", types)
+        unused = [u["url"] for u in (structure["audit"].get("unused_sources") or [])]
+        self.assertIn("https://garbage.example/b", unused)
+
+    def test_citations_match_inline_refs(self):
+        """引用一一对应：装配后的正文过 `check_source_list_completeness`。"""
+        import report_brief
+        from acceptance_checker import check_source_list_completeness
+        tid, _ = self._env()
+        body = ("# 我的报告\n\n营业收入 1741.44亿元[1]。\n\n"
+                "## 参考来源\n\n1. [茅台2024年报解读](https://news.example/a)\n")
+        structure = report_brief.build_structure(tid, self.GOAL, body)
+        md = report_brief.render_brief_markdown(structure, body)
+        res = check_source_list_completeness(md)
+        self.assertTrue(res.get("pass"), res.get("gaps"))
+
+    def test_engineering_sections_do_not_enter_the_brief(self):
+        """工程交付说明（交付文件/贯通测试/如何启动）不进研究简报正文。"""
+        import report_brief
+        tid, _ = self._env()
+        structure = report_brief.build_structure(tid, self.GOAL, "")
+        md = report_brief.render_brief_markdown(structure, "")
+        for bad in ("贯通测试", "如何启动", "运行验证", "## 交付文件", "**步骤**"):
+            self.assertNotIn(bad, md, bad)
+        self.assertTrue(md.startswith("# 贵州茅台"), md[:40])
+        # 图表只收发布级、且只收 chart_*（检索统计图不进简报）
+        files = [c["file"] for c in structure["charts"]]
+        self.assertEqual(files, ["chart_1.png"])
+
+    def test_periods_match_the_paper(self):
+        """图表/正文/底稿同期间：表格期间 = 契约期间。"""
+        import report_brief
+        tid, _ = self._env()
+        structure = report_brief.build_structure(tid, self.GOAL, "")
+        self.assertEqual(structure["metrics_table"]["periods"], [2023, 2024])
+        md = report_brief.render_brief_markdown(structure, "")
+        self.assertIn("| 2023 | 2024 |", md)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
