@@ -102,6 +102,157 @@ class TestSectionExtraction(unittest.TestCase):
         self.assertEqual(ne.extract_sections({"url": ISSUER_URL}), [])
 
 
+class TestContractApplicability(unittest.TestCase):
+    """F2′-1：有字符位置只证明"在某段文本里找到"，不证明主体/期间/资料截止成立。"""
+
+    GOAL_AS_OF = "2025-04-30"
+    PERIODS = [2023, 2024]
+
+    def _recs(self, title, url, text, **kw):
+        return ne.extract_sections(
+            {"title": title, "url": url, "text": text},
+            periods=kw.pop("periods", self.PERIODS), company="贵州茅台",
+            company_id="600519.SH", as_of=kw.pop("as_of", self.GOAL_AS_OF), **kw)
+
+    def test_other_subject_or_later_document_is_excluded(self):
+        """离线反例：五粮液 2026 年报与 2027 年发布的第三方段落都不得当证据。"""
+        wuliangye = self._recs(
+            "五粮液2026年年度报告",
+            "https://static.cninfo.com.cn/finalpage/2027-04-01/999.PDF",
+            "一、经营情况讨论与分析\n\n本公司2026年度营业收入891.75亿元，主要系系列酒销量增加所致。\n")
+        third_2027 = self._recs(
+            "白酒行业2027年展望_某媒体", "https://news.example/2027/outlook",
+            "一、经营情况讨论与分析\n\n贵州茅台2027年经营情况讨论：预计营业收入将保持增长。\n")
+        for recs in (wuliangye, third_2027):
+            self.assertTrue(recs)
+            self.assertTrue(all(r["excluded"] for r in recs), recs)
+            self.assertTrue(all(r["has_location"] for r in recs),
+                            "位置仍然记录（用于说明为什么没采用）")
+        self.assertEqual({r["validation_status"] for r in wuliangye}, {"after_as_of"})
+        self.assertEqual({r["validation_status"] for r in third_2027}, {"after_as_of"})
+
+    def test_real_annual_report_within_as_of_is_applicable(self):
+        recs = self._recs(
+            "贵州茅台2024年年度报告",
+            "https://static.cninfo.com.cn/finalpage/2025-04-03/1.PDF",
+            "一、经营情况讨论与分析\n\n2024年度营业收入1741.44亿元，主要系销量增加所致。\n")
+        self.assertTrue(recs)
+        self.assertEqual({r["validation_status"] for r in recs}, {"applicable"})
+        self.assertFalse(any(r["excluded"] for r in recs))
+
+    def test_comparison_disclosure_is_allowed_not_crudely_rejected(self):
+        """允许匹配两期的真实比较披露：不按"只含最新年份"粗暴拒绝。"""
+        recs = self._recs(
+            "茅台2022年报", "https://www.sse.com.cn/a/2022",
+            "一、经营情况讨论与分析\n\n2022年营业收入1275.5亿元，2023年营业收入1505.6亿元。\n")
+        self.assertTrue(recs)
+        self.assertEqual({r["validation_status"] for r in recs}, {"comparison"})
+        self.assertFalse(any(r["excluded"] for r in recs))
+
+    def test_third_party_within_as_of_is_usable_but_typed_third_party(self):
+        recs = self._recs(
+            "贵州茅台2024年报解读_某媒体", "https://news.example/2025/03/review",
+            "一、经营情况讨论与分析\n\n贵州茅台2024年营业收入1741.44亿元，较2023年增长15.66%。\n")
+        self.assertTrue(recs)
+        self.assertEqual({r["source_type"] for r in recs}, {"third_party"})
+        self.assertFalse(any(r["excluded"] for r in recs))
+
+    def test_publisher_identity_ignores_title_and_query_params(self):
+        """发布者身份只看主机名：标题含"年报"、查询参数里带官方域名都不算发行人披露。"""
+        self.assertEqual(ne.source_type("https://static.cninfo.com.cn/x.PDF"),
+                         "issuer_annual_report")
+        self.assertEqual(
+            ne.source_type("https://datacenter-web.eastmoney.com/api?u=sse.com.cn"),
+            "third_party", "查询参数里的域名不是发布者")
+        self.assertEqual(ne.source_type("https://news.example/贵州茅台2024年年度报告"),
+                         "third_party", "标题/路径里的『年报』字样不能证明发布者")
+
+    def test_record_carries_the_required_provenance_fields(self):
+        recs = self._recs(
+            "贵州茅台2024年年度报告",
+            "https://static.cninfo.com.cn/finalpage/2025-04-03/1.PDF",
+            "一、经营情况讨论与分析\n\n2024年度营业收入1741.44亿元。\n")
+        rec = recs[0]
+        for field in ("subject", "document_period", "published_at", "fetched_at",
+                      "publisher", "source_type", "content_hash", "locator",
+                      "validation_status"):
+            self.assertIn(field, rec, field)
+        self.assertEqual(rec["publisher"], "static.cninfo.com.cn")
+        self.assertEqual(rec["document_period"], "2024")
+        self.assertEqual(rec["published_at"], "2025-04-03")
+        self.assertTrue(rec["content_hash"])
+
+
+class TestPdfEvidence(unittest.TestCase):
+    """F2′-2：年报 PDF 的文本提取与**页码定位**（解析通道不依赖网页 worker）。"""
+
+    def test_looks_like_pdf(self):
+        import annual_report_pdf as pdf
+        self.assertTrue(pdf.looks_like_pdf("https://x.com/a.PDF"))
+        self.assertTrue(pdf.looks_like_pdf("https://x.com/a.pdf?t=1"))
+        self.assertTrue(pdf.looks_like_pdf("https://x.com/download", b"%PDF-1.7"))
+        self.assertFalse(pdf.looks_like_pdf("https://x.com/a.html"))
+
+    def test_pages_map_to_page_numbers_in_locators(self):
+        """每页文本 → 页码偏移 → 小节 locator 写"第 N 页"（可回溯到原页）。"""
+        import annual_report_pdf as pdf
+        pages = [
+            "第一节 释义\n\n本报告书指贵州茅台酒股份有限公司年度报告。",
+            "第三节 管理层讨论与分析\n\n一、经营情况讨论与分析\n\n2024年度营业收入1741.44亿元，"
+            "主要系销量增加及产品结构变化所致。",
+            "第八节 财务报告\n\n七、财务报表附注\n\n现金流量表附注：经营活动现金流量净额924.64亿元。",
+        ]
+        doc = pdf.doc_from_pages("贵州茅台2024年年度报告", "https://x.com/a.pdf", pages)
+        recs = ne.extract_sections(doc, periods=[2023, 2024], company="贵州茅台",
+                                   company_id="600519.SH", as_of="2025-04-30")
+        by_kind = {r["kind"]: r for r in recs}
+        self.assertEqual(by_kind["change_explanation"]["page"], 2)
+        self.assertEqual(by_kind["footnote"]["page"], 3)
+        self.assertIn("第 2 页", by_kind["change_explanation"]["locator"])
+        self.assertIn("第 3 页", by_kind["footnote"]["locator"])
+        # 页码与正文能对上：按页码取回该页，能找到定位到的那段
+        self.assertIn("营业收入1741.44亿元", pages[1])
+
+    def test_garbage_or_scanned_pdf_yields_no_doc(self):
+        """反例：不是 PDF 的字节、或提取不出文本 → 返回 None（缺口），不硬编。"""
+        import annual_report_pdf as pdf
+        self.assertIsNone(pdf.doc_from_url("https://x.com/a.pdf", data=b"<script>waf</script>"))
+        self.assertIsNone(pdf.doc_from_url("https://x.com/a.pdf", data=b"%PDF-1.4\n\n"))
+        self.assertEqual(pdf.pages_text(b"not a pdf"), [])
+
+    def test_url_from_instruction_reads_the_url_hint(self):
+        import annual_report_pdf as pdf
+        instr = "抓取年报 [URL: https://www.sse.com.cn/a/2024.pdf] 保留正文"
+        self.assertEqual(pdf.url_from_instruction(instr), "https://www.sse.com.cn/a/2024.pdf")
+
+
+class TestCaptureFailureFixtures(unittest.TestCase):
+    """F2′-2 回放夹具：实机四类失败产物都必须**明示缺口**，不用模型常识补成证据。"""
+
+    FIXTURE = ROOT / "evals" / "fixtures" / "f2p_capture_failures.json"
+
+    def test_real_capture_failures_yield_gaps_only(self):
+        import json as _json
+        data = _json.loads(self.FIXTURE.read_text(encoding="utf-8"))
+        docs = [v for k, v in data.items() if not k.startswith("_")]
+        self.assertGreaterEqual(len(docs), 4)
+        for doc in docs:
+            recs = ne.extract_sections(doc, periods=[2023, 2024], company="贵州茅台",
+                                       company_id="600519.SH", as_of="2025-04-30")
+            usable = [r for r in recs if r.get("has_location") and not r.get("excluded")]
+            self.assertEqual(usable, [],
+                             f"{doc.get('title') or doc.get('url')} 不得产出可用证据")
+        # 四类失败合起来仍然四类全缺（缺口如实报告）
+        all_recs = []
+        for doc in docs:
+            all_recs.extend(ne.extract_sections(
+                doc, periods=[2023, 2024], company="贵州茅台",
+                company_id="600519.SH", as_of="2025-04-30"))
+        located = {r["kind"] for r in all_recs
+                   if r.get("has_location") and not r.get("excluded")}
+        self.assertEqual(located, set(), located)
+
+
 class TestBuild(unittest.TestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp(prefix="weavemind_narr_"))

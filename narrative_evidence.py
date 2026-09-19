@@ -15,9 +15,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
+import time
 from pathlib import Path
 
 import workspace
@@ -63,11 +65,11 @@ KIND_KEYWORDS: dict[str, tuple[str, ...]] = {
     ),
 }
 
-# 发行人官方披露的信号（域 + 标题/URL 关键词）；其余按第三方处理
-_ISSUER_HOSTS = ("sse.com.cn", "szse.cn", "hkexnews.hk", "cninfo.com.cn",
-                 "sec.gov", "bse.cn", "neeq.com.cn")
-_ISSUER_WORDS = ("年度报告", "年报", "半年度报告", "季度报告", "公告",
-                 "annual report", "10-k", "20-f", "form 10")
+# 发布者身份按**解析后的域名**判定：标题里出现"年报"或 URL 查询参数里带着官方域名，
+# 都不能证明发布者身份（实机：东方财富 API 被标成"发行人年报/官方披露"，
+# 前瞻眼被标成"发行人年报"）。域名不在名单里 → 第三方。
+OFFICIAL_HOSTS = ("sse.com.cn", "szse.cn", "hkexnews.hk", "cninfo.com.cn",
+                  "sec.gov", "bse.cn", "neeq.com.cn", "sseinfo.com", "hkex.com.hk")
 
 _HEAD_PATTERNS = (
     re.compile(r"^第[一二三四五六七八九十百零〇\d]+[节章部分]"),
@@ -85,16 +87,133 @@ _LEVEL_PATTERNS = (
 )
 _SENT_END = "。！？；.!?;"
 
+# 文档自身的报告期：标题里的"2026年年度报告"这类写法（取最后一个年份）
+_DOC_PERIOD_RE = re.compile(r"(19|20)\d{2}\s*年?\s*(?:年度报告|年报|annual report)", re.I)
+# 发布日：URL 或标题里的日期（2027-04-01 / 2027/04 / 2027年4月）
+_PUB_DATE_RE = re.compile(r"(19|20)\d{2}[-/年.]\d{1,2}(?:[-/月.]\d{1,2})?")
+# 只有年份的发布线索（URL 路径 /2027/outlook、标题"2027年展望"）：按该年年初算
+_PUB_YEAR_PATH_RE = re.compile(r"[/\-_.]((?:19|20)\d{2})(?=[/\-_.]|$)")
+_PUB_YEAR_TITLE_RE = re.compile(r"((?:19|20)\d{2})\s*年")
+# 主体形态：公司/股份/集团等企业名结尾（用于"是不是别家公司"的判定）
+_ENTITY_HINT_RE = re.compile(r"[\u4e00-\u9fff]{2,12}(?:股份|集团|控股|公司|酒业|银行|能源|"
+                             r"科技|医药|地产|汽车|电器|电力|煤业|矿业)")
 
-def source_type(url: str, title: str = "") -> str:
-    """来源类型：发行人年报/官方披露 vs 第三方数据/媒体（不得统称权威原始披露）。"""
-    u = str(url or "").lower()
-    t = str(title or "").lower()
-    if any(h in u for h in _ISSUER_HOSTS):
-        return "issuer_annual_report"
-    if any(w in t or w in u for w in _ISSUER_WORDS):
-        return "issuer_annual_report"
-    return "third_party"
+
+def publisher_of(url: str) -> str:
+    """URL → 发布者域名（去 www.；**只看主机名**，不把查询参数里的域名当发布者）。"""
+    try:
+        from urllib.parse import urlsplit
+        host = str(urlsplit(str(url or "")).hostname or "").lower()
+    except Exception:
+        host = ""
+    return host[4:] if host.startswith("www.") else host
+
+
+def source_type(url: str) -> str:
+    """来源类型：**只按主机名**判官方披露，其余一律第三方。"""
+    host = publisher_of(url)
+    if not host:
+        return "third_party"
+    return "issuer_annual_report" if any(
+        host == h or host.endswith("." + h) for h in OFFICIAL_HOSTS) else "third_party"
+
+
+def _doc_period(title: str, url: str = "") -> str:
+    """文档自身的报告期（标题里的"2026年年度报告"）；取不到返回空串（不猜）。"""
+    m = _DOC_PERIOD_RE.search(str(title or ""))
+    return m.group(0)[:4] if m else ""
+
+
+def _published_at(doc: dict) -> str:
+    """发布日：URL 路径或标题里的日期（取最早出现的那个）；取不到返回空串（不猜）。
+
+    只有年份的线索（`/2027/outlook`、"2027年展望"）按该年**年初**算——用于判断
+    "这份材料是不是在资料截止日之后才出现"，宁可判早也不放过晚于截止日的材料。
+    """
+    url = str(doc.get("url") or "")
+    title = str(doc.get("title") or "")
+    m = _PUB_DATE_RE.search(url) or _PUB_DATE_RE.search(title)
+    if m:
+        return m.group(0).replace("年", "-").replace("月", "-").rstrip("-.")
+    m = _PUB_YEAR_PATH_RE.search(url) or _PUB_YEAR_TITLE_RE.search(title)
+    if m:
+        return f"{m.group(1)}-01-01"
+    return ""
+
+
+def _subject_state(doc: dict, company: str, company_id: str) -> str:
+    """主体适用性：命中本主体 → ok；只出现别家主体 → mismatch；都没有 → unknown。"""
+    title = str(doc.get("title") or "")
+    text = str(doc.get("text") or "")[:4000]
+    subject = str(company or "").strip()
+    code = str(company_id or "").strip()
+    if subject and subject in (title + text):
+        return "ok"
+    if code:
+        from facts import bare_code
+        if bare_code(code) and bare_code(code) in (title + text):
+            return "ok"
+    hints = {h for h in _ENTITY_HINT_RE.findall(title)}
+    if hints and subject:
+        return "mismatch"
+    return "unknown"
+
+
+def _date_key(text: str) -> tuple[int, int] | None:
+    """日期 → (年, 月) 元组；取不到返回 None（按数字比较，不做字符串比较）。"""
+    s = str(text or "").strip()
+    if not s:
+        return None
+    m = re.match(r"^((?:19|20)\d{2})[-/年.](\d{1,2})", s)
+    if not m:
+        m = re.match(r"^((?:19|20)\d{2})$", s)
+        if not m:
+            return None
+        return int(m.group(1)), 1
+    return int(m.group(1)), int(m.group(2))
+
+
+def _norm_date(text: str) -> str:
+    """`2025/03` / `2025-04-03` / `2025年3月` → `YYYY-MM-DD`（统一落盘格式）。"""
+    s = str(text or "").strip()
+    m = re.match(r"^((?:19|20)\d{2})[-/年. ](\d{1,2})(?:[-/月. ](\d{1,2}))?", s)
+    if not m:
+        y = re.match(r"^((?:19|20)\d{2})$", s)
+        return f"{y.group(1)}-01-01" if y else ""
+    return f"{int(m.group(1)):04d}-{int(m.group(2)):02d}-{int(m.group(3) or 1):02d}"
+
+
+def validate_record(rec: dict, doc: dict, *, company: str = "", company_id: str = "",
+                    periods=None, as_of: str = "") -> dict:
+    """证据的**契约适用性**校验（先校验，再分类/绑定主张）。
+
+    有字符位置只证明"在某段文本里找到"，不证明主体、期间与资料截止成立。
+    返回 `{validation_status, subject, document_period, published_at, excluded}`；
+    缺失字段记 `unknown`（保留但标注），错主体/超截止**明确排除**。
+    """
+    years = [int(y) for y in (periods or [])]
+    subject_state = _subject_state(doc, company, company_id)
+    doc_period = _doc_period(str(doc.get("title") or ""), str(doc.get("url") or ""))
+    pub = _norm_date(_published_at(doc))
+    status = "applicable"
+    if subject_state == "mismatch":
+        status = "subject_mismatch"
+    elif pub and _date_key(pub) and _date_key(as_of) and _date_key(pub) > _date_key(as_of):
+        status = "after_as_of"
+    elif doc_period and years and int(doc_period) > max(years):
+        status = "period_after_contract"
+    elif doc_period and years and int(doc_period) < min(years):
+        # 早于契约期间的文档：若证据段落里出现契约期间，则算**比较披露**（允许）；
+        # 否则期间不适用（不按"只含最新年份"粗暴拒绝）
+        snip = str(rec.get("snippet") or "") + str(rec.get("section") or "")
+        status = "comparison" if any(str(y) in snip for y in years) else "period_before_contract"
+    elif not doc_period:
+        status = "unknown_period"
+    excluded = status in ("subject_mismatch", "after_as_of", "period_after_contract",
+                          "period_before_contract")
+    return {"validation_status": status, "subject": company or company_id or "",
+            "subject_state": subject_state, "document_period": doc_period,
+            "published_at": pub, "excluded": excluded}
 
 
 def _heading_level(line: str) -> int | None:
@@ -123,8 +242,11 @@ def _is_heading(line: str) -> bool:
     return False
 
 
-def split_sections(text: str) -> list[dict]:
-    """按标题行切分正文，返回 `{title, path, body, start, end}`（字符区间含标题行）。"""
+def split_sections(text: str, page_offsets=None) -> list[dict]:
+    """按标题行切分正文，返回 `{title, path, body, start, end, page}`。
+
+    `page_offsets`（PDF 专用）：`[(字符起点, 页码)]`，用于给每个小节标出所在页。
+    """
     lines = str(text or "").splitlines()
     out: list[dict] = []
     cur: dict | None = None
@@ -154,7 +276,19 @@ def split_sections(text: str) -> list[dict]:
         out.append(cur)
     for sec in out:
         sec["body"] = "\n".join(sec["lines"]).strip()
+        sec["page"] = _page_of(sec["start"], page_offsets)
     return [s for s in out if s["body"] or s["title"]]
+
+
+def _page_of(char_start: int, page_offsets) -> int | None:
+    """字符位置 → 页码（PDF 用；没有页码信息返回 None）。"""
+    page = None
+    for start, no in (page_offsets or []):
+        if int(char_start) >= int(start):
+            page = int(no)
+        else:
+            break
+    return page
 
 
 def classify(title: str, body: str = "") -> str | None:
@@ -187,19 +321,25 @@ def _snippet(body: str, limit: int = SNIPPET_CHARS) -> str:
 
 
 def extract_sections(doc: dict, *, periods=None, company: str = "",
+                     company_id: str = "", as_of: str = "",
                      max_per_kind: int = MAX_PER_KIND,
                      snippet_chars: int = SNIPPET_CHARS) -> list[dict]:
-    """一份抓取文档 → 带定位的证据记录（每类最多 `max_per_kind` 条）。"""
+    """一份抓取文档 → 带定位的证据记录（每类最多 `max_per_kind` 条）。
+
+    每条都先过**契约适用性校验**（主体/期间/资料截止），并把校验字段一并带出；
+    不适用的记录照实保留（`excluded=True` + 原因），由调用方排除与说明，不静默丢弃。
+    """
     text = str((doc or {}).get("text") or "")
     if not text:
         return []
     url = str((doc or {}).get("url") or "")
     title = str((doc or {}).get("title") or "")
-    stype = source_type(url, title)
+    stype = source_type(url)
     years = [str(y) for y in (periods or [])]
+    page_offsets = doc.get("page_offsets")
     picked: dict[str, list[dict]] = {}
     seen: set[tuple[str, str]] = set()
-    for sec in split_sections(text):
+    for sec in split_sections(text, page_offsets=page_offsets):
         kind = classify(sec["title"], sec["body"])
         if not kind:
             continue
@@ -214,24 +354,39 @@ def extract_sections(doc: dict, *, periods=None, company: str = "",
         if len(bucket) >= max_per_kind:
             continue
         hint = next((y for y in years if y in (sec["path"] + snip)), "")
-        bucket.append({
+        rec = {
             "kind": kind,
             "kind_label": KIND_LABELS[kind],
             "title": title,
             "url": url,
             "source_type": stype,
+            "publisher": publisher_of(url),
             "section": sec["path"],
             "snippet": snip,
             "char_start": int(sec["start"]),
             "char_end": int(sec["end"]),
+            "page": sec.get("page"),
             "period_hint": hint,
             "has_location": True,
-            "locator": f"小节：{sec['path']}（字符 {sec['start']}-{sec['end']}）",
-        })
+            "locator": _locator_text(sec),
+            "content_hash": hashlib.sha256(snip.encode("utf-8")).hexdigest()[:16],
+            "fetched_at": str(doc.get("fetched_at") or ""),
+        }
+        rec.update(validate_record(rec, doc, company=company, company_id=company_id,
+                                   periods=periods, as_of=as_of))
+        bucket.append(rec)
     out: list[dict] = []
     for kind in KIND_ORDER:
         out.extend(picked.get(kind) or [])
     return out
+
+
+def _locator_text(sec: dict) -> str:
+    """定位文本：有页码就写页码（PDF），否则写小节 + 字符区间（网页）。"""
+    page = sec.get("page")
+    if page:
+        return f"第 {page} 页 · 小节：{sec['path']}（字符 {sec['start']}-{sec['end']}）"
+    return f"小节：{sec['path']}（字符 {sec['start']}-{sec['end']}）"
 
 
 def _project_dir(task_id: str, project=None):
@@ -257,27 +412,33 @@ def _read_inputs(task_id: str, project=None) -> tuple[list[dict], list[dict]]:
             [s for s in snips if isinstance(s, dict)])
 
 
-def _contract_hint(task_id: str, goal: str = "") -> tuple[list[int], str]:
+def _contract_hint(task_id: str, goal: str = "") -> tuple[list[int], str, str, str]:
+    """契约提示：期间 / 主体名 / 稳定标识 / 资料截止（用于证据适用性校验）。"""
     try:
         from working_paper_export import resolve_request
         req, _c, _s = resolve_request(task_id, goal, {}, None)
         if req is not None:
-            return [int(y) for y in (req.periods or [])], str(req.company or "")
+            return ([int(y) for y in (req.periods or [])], str(req.company or ""),
+                    str(req.company_id or ""), str(req.as_of or ""))
     except Exception:
         pass
-    return [], ""
+    return [], "", "", ""
 
 
-def build(task_id: str, *, periods=None, company: str = "", goal: str = "",
-          ws_dir=None, project=None, extra_docs=None) -> dict:
+def build(task_id: str, *, periods=None, company: str = "", company_id: str = "",
+          as_of: str = "", goal: str = "", ws_dir=None, project=None,
+          extra_docs=None) -> dict:
     """从工作区抓取正文提取叙事证据并落盘 `narrative_evidence.json`（幂等，不联网）。
 
     `extra_docs`：刚抓取、尚未落进 `fetch_snapshot.json` 的文档（`{title,url,text}`），
     按 URL 去重后并入——抓取回灌有它自己的启用条件，证据提取不依赖那条件。
     """
     if not periods and not company:
-        periods, company = _contract_hint(task_id, goal)
+        periods, company, company_id, as_of = _contract_hint(task_id, goal)
+    if not as_of:
+        as_of = _contract_hint(task_id, goal)[3]
     years = [int(y) for y in (periods or [])]
+    fetched_at = time.strftime("%Y-%m-%dT%H:%M:%S")
     records: list[dict] = []
     try:
         docs, snips = _read_inputs(task_id, project)
@@ -293,7 +454,9 @@ def build(task_id: str, *, periods=None, company: str = "", goal: str = "",
         docs = docs + [doc]
     for doc in docs:
         try:
-            records.extend(extract_sections(doc, periods=years, company=company))
+            doc = dict(doc, fetched_at=fetched_at)
+            records.extend(extract_sections(doc, periods=years, company=company,
+                                            company_id=company_id, as_of=as_of))
         except Exception as exc:                 # noqa: BLE001 - 单篇失败不影响其余
             logger.warning("叙事证据切分失败（task=%s）：%s", task_id, str(exc)[:140])
     # 检索摘要：只作无定位提示（不计入"已取得证据"）
@@ -304,13 +467,21 @@ def build(task_id: str, *, periods=None, company: str = "", goal: str = "",
         if not kind:
             continue
         url = str(s.get("url") or "")
-        records.append({
+        rec = {
             "kind": kind, "kind_label": KIND_LABELS[kind], "title": title, "url": url,
-            "source_type": source_type(url, title), "section": "",
+            "source_type": source_type(url), "publisher": publisher_of(url), "section": "",
             "snippet": _snippet(body, 200), "char_start": 0, "char_end": 0,
+            "page": None,
             "period_hint": next((str(y) for y in years if str(y) in (title + body)), ""),
             "has_location": False, "locator": "检索摘要（未取得正文定位）",
-        })
+            "content_hash": hashlib.sha256(
+                _snippet(body, 200).encode("utf-8")).hexdigest()[:16],
+            "fetched_at": fetched_at,
+        }
+        rec.update(validate_record(rec, {"title": title, "url": url, "text": body},
+                                   company=company, company_id=company_id,
+                                   periods=periods, as_of=as_of))
+        records.append(rec)
     # 每次抓取成功都会重跑本函数：**保留**上一轮来自别的页面的证据（同一 URL 以本轮
     # 重新抽取的为准）。否则后抓的一页会把先抓那页的证据覆盖掉（抓取回灌写快照有它
     # 自己的长度门槛，不能假定快照一定收录了每一页）。
@@ -328,30 +499,47 @@ def build(task_id: str, *, periods=None, company: str = "", goal: str = "",
     ordered: list[dict] = []
     for kind in KIND_ORDER:
         bucket = [r for r in dedup.values()
-                  if r.get("kind") == kind and r.get("has_location")]
+                  if r.get("kind") == kind and r.get("has_location")
+                  and not r.get("excluded")]
         bucket.sort(key=lambda r: (str(r.get("url") or ""), int(r.get("char_start") or 0)))
         ordered.extend(bucket[:MAX_PER_KIND])
-    ordered.extend(r for r in dedup.values() if not r.get("has_location"))
+    # 不适用的记录（错主体/超截止/期间不符）与无定位的检索摘要照实保留：
+    # 前者用于向读者说明"为什么这些材料没被采用"，不静默丢弃
+    ordered.extend(r for r in dedup.values()
+                   if not r.get("has_location") or r.get("excluded"))
     records = ordered
     missing = [k for k in KIND_ORDER
-               if not any(r["kind"] == k and r.get("has_location") for r in records)]
+               if not any(r["kind"] == k and r.get("has_location") and not r.get("excluded")
+                          for r in records)]
     sources: list[dict] = []
     for r in records:
         if not r.get("url") or any(s["url"] == r["url"] for s in sources):
             continue
         sources.append({"url": r["url"], "title": r.get("title") or "",
                         "source_type": r.get("source_type") or "third_party",
+                        "publisher": r.get("publisher") or "",
                         "has_location": bool(r.get("has_location"))})
+    excluded = [{"url": r.get("url") or "", "title": r.get("title") or "",
+                 "validation_status": r.get("validation_status") or "",
+                 "document_period": r.get("document_period") or "",
+                 "published_at": r.get("published_at") or "",
+                 "locator": r.get("locator") or ""}
+                for r in records if r.get("excluded")]
     payload = {
-        "ok": bool(records),
+        "ok": bool([r for r in records if r.get("has_location") and not r.get("excluded")]),
         "company": company,
+        "company_id": company_id,
+        "as_of": as_of,
         "periods": years,
         "records": records,
         "missing_kinds": missing,
         "missing_labels": [KIND_LABELS[k] for k in missing],
         "sources": sources,
+        "excluded": excluded[:12],
         "docs": len(docs),
-        "located": sum(1 for r in records if r.get("has_location")),
+        "located": sum(1 for r in records
+                       if r.get("has_location") and not r.get("excluded")),
+        "built_at": fetched_at,
     }
     _write(task_id, payload, ws_dir=ws_dir)
     return payload

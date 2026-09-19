@@ -2,6 +2,7 @@
 """真实交付链回归测试：搜索相关性过滤、file_io 落盘逻辑、code_execution 命名。"""
 import json
 import os
+import re
 import shutil
 import tempfile
 import unittest
@@ -5428,7 +5429,7 @@ class TestResearchBriefAssembly(unittest.TestCase):
         self.assertIn("（", md)
 
     def test_sources_are_adopted_only_and_typed(self):
-        """来源只收采用项、三类分别标识；未采用只留内部审计。"""
+        """来源只收采用项、按**发布者域名**标类型；未采用只留内部审计。"""
         import report_brief
         tid, _ = self._env()
         body = ("# 我的报告\n\n贵州茅台 2024 年营业收入 1741.44亿元[1]。\n\n"
@@ -5439,11 +5440,114 @@ class TestResearchBriefAssembly(unittest.TestCase):
                       "结构化财务来源属采用项")
         self.assertIn("https://news.example/a", urls, "正文引用的来源属采用项")
         self.assertNotIn("https://garbage.example/b", urls, "未引用来源不进清单")
-        types = {c["type"] for c in structure["citations"]}
-        self.assertIn("issuer_annual_report", types)
-        self.assertIn("third_party", types)
+        by_url = {c["url"]: c for c in structure["citations"]}
+        # F2′-1：数据平台是**第三方**，不得标成"发行人年报/官方披露"；
+        # 同时单独记录它依据的披露（本次未取得原文）
+        em = by_url["https://datacenter-web.eastmoney.com/api/x"]
+        self.assertEqual(em["type"], "third_party")
+        self.assertIn("转载", str(em.get("based_on") or ""))
+        self.assertEqual(em["publisher"], "datacenter-web.eastmoney.com")
+        # 第三方媒体同样是第三方
+        self.assertEqual(by_url["https://news.example/a"]["type"], "third_party")
         unused = [u["url"] for u in (structure["audit"].get("unused_sources") or [])]
         self.assertIn("https://garbage.example/b", unused)
+
+    def test_issuer_host_is_typed_as_issuer_disclosure(self):
+        """官方披露域名（交易所/巨潮/SEC）才标发行人披露——不看标题里的"年报"字样。"""
+        import report_brief
+        tid, _ = self._env()
+        body = ("# 报告\n\n年报数据[1][2]。\n\n## 参考来源\n\n"
+                "1. [贵州茅台2024年年度报告](https://static.cninfo.com.cn/finalpage/2025-04-03/1.PDF)\n"
+                "2. [贵州茅台2024年报解读_某媒体](https://news.example/annual-report-review)\n")
+        structure = report_brief.build_structure(tid, self.GOAL, body)
+        by_url = {c["url"]: c for c in structure["citations"]}
+        self.assertEqual(
+            by_url["https://static.cninfo.com.cn/finalpage/2025-04-03/1.PDF"]["type"],
+            "issuer_annual_report")
+        self.assertEqual(by_url["https://news.example/annual-report-review"]["type"],
+                         "third_party", "标题含『年报』不能证明发布者身份")
+
+    def test_inline_refs_keep_pointing_at_the_same_material(self):
+        """引用重编号：模型正文的 [1] 指的是它自己清单第 1 条，装配后必须仍指那份材料。"""
+        import report_brief
+        tid, _ = self._env()
+        body = ("# 我的报告\n\n前瞻眼数据显示经营活动现金流净额 924.64亿元[1]。\n\n"
+                "## 参考来源\n\n"
+                "1. [前瞻眼现金流量表](https://stock.qianzhan.com/item/xianliu.html)\n")
+        structure = report_brief.build_structure(tid, self.GOAL, body)
+        md = report_brief.render_brief_markdown(structure, body)
+        by_n = {c["n"]: c["url"] for c in structure["citations"]}
+        sentence = next(l for l in md.splitlines() if "前瞻眼数据" in l)
+        n = int(re.search(r"\[(\d+)\]", sentence).group(1))
+        self.assertEqual(by_n[n], "https://stock.qianzhan.com/item/xianliu.html",
+                         "这句话必须仍指向前瞻眼那份材料")
+
+    def test_unmappable_inline_ref_becomes_a_gap_not_a_guess(self):
+        """映射不到采用来源的编号：去掉编号并记引用缺口，不得猜指向。"""
+        import report_brief
+        tid, _ = self._env()
+        body = ("# 报告\n\n某处引用 1741.44亿元[7]。\n\n## 参考来源\n\n"
+                "1. [某材料](https://news.example/a)\n")
+        structure = report_brief.build_structure(tid, self.GOAL, body)
+        self.assertIn(7, structure["citation_gaps"])
+        md = report_brief.render_brief_markdown(structure, body)
+        self.assertNotIn("[7]", md.split("## 变化解释")[0])
+        self.assertIn("未能在本次采用来源中唯一对应", md)
+
+    # ── F2′-3：成稿顺序与内容保留 ──────────────────────────
+
+    def test_analysis_after_duplicate_table_is_preserved(self):
+        """离线反例：重复表格之后的有效分析不得被截掉（旧实现返回空串）。"""
+        import report_brief
+        body = ("# 标题\n\n## 关键数据\n\n| 指标 | 2024 |\n|---|---|\n| 收入 | 1741.44 |\n\n"
+                "## 三、盈利质量\n\n归母净利率 49.52%，较上年下降 0.12 个百分点，"
+                "主要受产品结构变化影响。\n\n## 四、现金流质量\n\n经营现金流覆盖 107.23%。\n")
+        kept = report_brief._analysis_section(body)
+        self.assertIn("盈利质量", kept)
+        self.assertIn("现金流质量", kept)
+        self.assertNotIn("| 指标 | 2024 |", kept, "重复表格仍要移除")
+
+    def test_model_charts_and_empty_headings_are_dropped(self):
+        """模型重复贴的图与空标题不进简报；结论/免责声明不列作风险。"""
+        import report_brief
+        body = ("# 报告\n\n## 分析\n\n结论：收入与利润同向增长。\n\n"
+                "![chart_1](charts/chart_1.png)\n\n## \n\n"
+                "## 免责声明\n\n本报告不构成任何投资建议。\n")
+        kept = report_brief._analysis_section(body)
+        self.assertNotIn("![", kept)
+        self.assertIn("同向增长", kept)
+
+    def test_brief_body_is_not_wrapped_again(self):
+        """验收候选稿回流时不得"简报套简报"（否则分析一节变成整份简报）。"""
+        import report_brief
+        tid, _ = self._env()
+        body = ("# 我的报告\n\n## 分析与结论\n\n营业收入同比增长 15.66%，"
+                "主要来自销量与产品结构变化。" + "补充说明。" * 20 + "\n")
+        first = report_brief.build_structure(tid, self.GOAL, body)
+        md1 = report_brief.render_brief_markdown(first, body)
+        self.assertTrue(report_brief._looks_like_brief(md1))
+        # 再把装配结果当作正文喂回去：分析一节必须还是原来那段，而不是整份简报
+        second = report_brief.build_structure(tid, self.GOAL, md1)
+        sec = report_brief._brief_section(
+            report_brief.render_brief_markdown(second, md1), "## 分析")
+        self.assertIn("营业收入同比增长 15.66%", sec)
+        self.assertNotIn("## 关键发现", sec)
+        self.assertLess(len(sec), 400)
+
+    def test_acceptance_targets_the_assembled_candidate(self):
+        """F2′-3：研究任务先装配候选稿再验收——代码负责的声明不再要求模型重做。"""
+        import delivery_pipeline as dp
+        import task_state
+        tid, _ = self._env()
+        # 模型稿**故意不写免责声明与来源清单**（那两项由装配器给出）
+        body = ("# 报告\n\n## 分析与结论\n\n营业收入同比增长 15.66%，"
+                "归因于销量与产品结构变化。" + "补充说明。" * 20 + "\n")
+        res = dp.accept_for_body(tid, self.GOAL, body, trigger="报告步骤")
+        self.assertIsNotNone(res)
+        self.assertEqual(res.get("overall"), "pass", res.get("gaps"))
+        # 人工修订重验不得替换用户正文：走的是同一实现，但不做候选稿替换
+        res2 = dp.accept_for_body(tid, self.GOAL, body, trigger="人工修订重验")
+        self.assertIsNotNone(res2)
 
     def test_citations_match_inline_refs(self):
         """引用一一对应：装配后的正文过 `check_source_list_completeness`。"""
@@ -5518,7 +5622,7 @@ class TestResearchBriefAssembly(unittest.TestCase):
         self.assertIn("主营业务为茅台酒及系列酒", md)
         self.assertIn("小节：", md, "业务背景要带小节定位")
         self.assertIn("## 变化解释", md)
-        for marker in ("**发生了什么**", "**管理层/附注的解释**", "**推断边界**",
+        for marker in ("**发生了什么（数据观察）**", "**管理层/附注的解释**", "**推断边界**",
                        "**还不能证明什么**"):
             self.assertIn(marker, md, marker)
         self.assertIn("不能据此声称长期趋势", md)
@@ -5529,9 +5633,67 @@ class TestResearchBriefAssembly(unittest.TestCase):
         # 现金流变化的"还不能证明什么"落到确定性的材料清单
         unproven = {u["label"]: u["materials"] for u in structure["change_explanation"]["unproven"]}
         self.assertIn("现金流量表附注", unproven.get("经营活动现金流净额", []))
-        # 来源编号一一对应：变化解释引用的 [n] 必须在清单里
-        n = structure["change_explanation"]["explained_by"][0]["source_n"]
+        # 来源编号一一对应：变化解释引用的 [n] 必须在清单里，且是发行人披露
+        n = structure["change_explanation"]["management"][0]["source_n"]
         self.assertIn(f"[{n}]", md)
+        by_n = {c["n"]: c for c in structure["citations"]}
+        self.assertEqual(by_n[int(n)]["type"], "issuer_annual_report")
+
+    def test_third_party_commentary_is_not_dressed_as_management(self):
+        """第三方评论不得进"管理层/附注的解释"：单独成块并标明发布者。"""
+        import report_brief
+        tid = self._env_with_evidence()
+        proj = ws_mod.task_project_dir(tid, "default")
+        (proj / "fetch_snapshot.json").write_text(json.dumps([
+            {"title": "贵州茅台2024年年度报告",
+             "url": "https://static.cninfo.com.cn/finalpage/2025-04-03/1.PDF",
+             "text": self.ANNUAL_TEXT},
+            {"title": "贵州茅台2024年报解读_某媒体",
+             "url": "https://news.example/2025/03/review",
+             "text": ("一、经营情况讨论与分析\n\n"
+                      "贵州茅台2024年营业收入变动主要系渠道改革与直营占比提升所致，"
+                      "销量与吨价的结构变化是主要原因。\n")},
+        ], ensure_ascii=False), encoding="utf-8")
+        structure = report_brief.build_structure(tid, self.GOAL, "")
+        ch = structure["change_explanation"]
+        mg_urls = {c["n"] for c in structure["citations"]
+                   if c["type"] == "issuer_annual_report"}
+        for item in ch["management"]:
+            self.assertIn(int(item["source_n"]), mg_urls,
+                          "管理层解释只能引发行人披露")
+        self.assertTrue(ch["third_party_views"], "第三方观点要单独列出")
+        md = report_brief.render_brief_markdown(structure, "")
+        self.assertIn("**第三方观点（非管理层解释，仅供参照）**", md)
+        self.assertIn("news.example", md)
+
+    def test_inapplicable_evidence_is_excluded_and_explained(self):
+        """错主体/超资料截止的材料不得进解释，但要照实说明为什么没采用。"""
+        import report_brief
+        tid, _ = self._env()
+        proj = ws_mod.task_project_dir(tid, "default")
+        (proj / "fetch_snapshot.json").write_text(json.dumps([
+            {"title": "五粮液2026年年度报告",
+             "url": "https://static.cninfo.com.cn/finalpage/2027-04-01/999.PDF",
+             "text": ("一、经营情况讨论与分析\n\n"
+                      "本公司2026年度营业收入891.75亿元，主要系系列酒销量增加所致。\n")},
+            {"title": "白酒行业2027年展望_某媒体",
+             "url": "https://news.example/2027/outlook",
+             "text": ("一、经营情况讨论与分析\n\n"
+                      "贵州茅台2027年经营情况讨论：预计营业收入将保持增长。\n")},
+        ], ensure_ascii=False), encoding="utf-8")
+        structure = report_brief.build_structure(tid, self.GOAL, "")
+        ch = structure["change_explanation"]
+        self.assertEqual(ch["management"], [], "错主体/超截止的材料不得当管理层解释")
+        self.assertEqual(ch["third_party_views"], [])
+        self.assertEqual(structure["evidence"]["missing_labels"],
+                         ["业务背景", "经营变化解释", "财务附注", "风险因素"])
+        excluded = structure["evidence"]["excluded"]
+        self.assertEqual(len(excluded), 2, excluded)
+        statuses = {e["validation_status"] for e in excluded}
+        self.assertEqual(statuses, {"after_as_of"}, statuses)
+        md = report_brief.render_brief_markdown(structure, "")
+        self.assertIn("**未采用的材料（不满足主体/期间/资料截止）**", md)
+        self.assertIn("晚于资料截止日", md)
 
     def test_risk_rows_carry_evidence_conditions_and_materials(self):
         """每条风险都要有对应证据、会改变判断的观察条件、需要补充的材料。"""

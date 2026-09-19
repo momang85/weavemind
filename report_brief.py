@@ -42,6 +42,24 @@ _NUM_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
 _ENGINEERING_REPORT_RE = re.compile(
     r"^##\s*Task Report\s*$|^\s*Steps:\s*\d+\s*\(\d+\s*OK,\s*\d+\s*failed\)", re.M)
 
+# 未采用材料的说明用词（错主体/超资料截止/期间不符等）
+_VALIDATION_LABELS = {
+    "subject_mismatch": "主体不符",
+    "after_as_of": "晚于资料截止日",
+    "period_after_contract": "期间晚于契约期间",
+    "period_before_contract": "期间早于契约期间且无比较数据",
+    "comparison": "比较披露（已采用）",
+    "unknown_period": "期间未标注（已标注）",
+    "applicable": "适用",
+}
+
+
+# 与代码装配结果**重复**的小节：整节丢弃（其余小节保留，不再在首个重复标题处截断全文）
+_DUPLICATE_SECTIONS = (
+    "参考来源", "资料来源", "数据来源", "参考文献", "免责声明", "数据时效",
+    "关键数据", "核心指标", "财务对照", "财务数据一览", "图表",
+)
+
 # 变化解释：**缺口 → 需要补充的材料**（确定性映射）。
 # 为什么写死一张表：没有营运资本/税费/结算条款证据就推断"回款改善"是编因果
 # （架构复核 §F2 的样例）；这里只说明"要判断这件事需要什么材料"。
@@ -99,14 +117,24 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
     evidence = _evidence(task_id, ws_dir=ws_dir)
     citations, audit = _collect_citations(task_id, goal, body, data,
                                           evidence=evidence, ws_dir=ws_dir)
-    table = _metrics_table(rows, derived, periods, citations, req)
+    table = _metrics_table(rows, derived, periods, citations, req,
+                            source_url=str(data.get("source_url") or ""))
     findings = _findings(rows, derived, periods)
-    claims = _claims(body, rows, derived, citations)
+    # 引用重编号：模型正文里的 `[n]` 是它**自己清单**的编号，装配后编号会变；
+    # 按 URL 建立"旧编号 → 新编号"映射并逐处重写，映射不到的去编号并记缺口
+    ref_map: dict[int, int] = {}
+    for old_n, _t, url in _body_source_list(body):
+        new_n = _citation_n(citations, url)
+        if new_n:
+            ref_map[old_n] = int(new_n)
+    analysis_text, unmapped = _remap_inline_refs(_analysis_section(body), ref_map)
+    claims = _claims(analysis_text, rows, derived, citations)
     background = _background(evidence, citations)
     changes = _change_explanation(rows, derived, periods, findings, evidence, citations)
     perspective = str(req.get("perspective") or "equity")
     risks = _risks(task_id, goal, body, project=project, evidence=evidence,
-                   citations=citations, changes=changes, perspective=perspective)
+                   citations=citations, changes=changes, perspective=perspective,
+                   citation_gaps=unmapped)
     charts = _charts(task_id, project=project)
     structure = {
         "scope": {
@@ -127,15 +155,19 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
         "findings": findings,
         "background": background,
         "change_explanation": changes,
+        "analysis": analysis_text,
+        "citation_gaps": list(unmapped),
         "claims": claims,
         "risks": risks,
         "citations": citations,
         "charts": charts,
         "appendix": _appendix(task_id, rows, derived, citations, evidence,
+                              source_url=str(data.get("source_url") or ""),
                               project=project, ws_dir=ws_dir),
         "evidence": {
             "located": int((evidence or {}).get("located") or 0),
             "missing_labels": list((evidence or {}).get("missing_labels") or []),
+            "excluded": list((evidence or {}).get("excluded") or []),
         },
         "audit": audit,
     }
@@ -159,9 +191,12 @@ def _evidence(task_id: str, *, ws_dir=None) -> dict | None:
 
 
 def _located(evidence: dict | None, kind: str, limit: int = 3) -> list[dict]:
-    """取某一类的**带定位**证据（检索摘要不算证据，只有正文定位才算）。"""
+    """取某一类的**可用**证据：带正文定位且通过契约适用性校验。
+
+    检索摘要（无正文定位）与校验不通过的（错主体/超资料截止/期间不符）都不算证据。
+    """
     out = [r for r in ((evidence or {}).get("records") or [])
-           if r.get("kind") == kind and r.get("has_location")]
+           if r.get("kind") == kind and r.get("has_location") and not r.get("excluded")]
     return out[:limit]
 
 
@@ -176,7 +211,10 @@ def _background(evidence: dict | None, citations: list[dict]) -> list[dict]:
 
 
 def _change_explanation(rows, derived, periods, findings, evidence, citations) -> dict:
-    """变化解释：发生了什么 → 管理层/附注怎么解释 → 能推断到哪一步 → 还不能证明什么。"""
+    """变化解释：发生了什么 → 管理层/附注怎么解释 → 能推断到哪一步 → 还不能证明什么。
+
+    **管理层解释与第三方观点分开**：第三方评论（数据平台/媒体）不得包装成管理层解释。
+    """
     by: dict[str, dict] = {}
     for r in rows:
         by.setdefault(str(r.get("metric") or ""), {})[int(r.get("year"))] = r
@@ -199,15 +237,22 @@ def _change_explanation(rows, derived, periods, findings, evidence, citations) -
                         "fact_ids": list((d or {}).get("derived_from") or [])})
     # 变化幅度大在前（本期最值得关注的先看）
     changes.sort(key=lambda c: -abs(float(c.get("yoy") or 0)))
-    explained: list[dict] = []
+    management: list[dict] = []
+    third_party: list[dict] = []
     for r in _located(evidence, "change_explanation", 2) + _located(evidence, "footnote", 2):
-        explained.append({"text": str(r.get("snippet") or ""),
-                          "source_n": _citation_n(citations, str(r.get("url") or "")),
-                          "locator": str(r.get("locator") or "")})
+        item = {"text": str(r.get("snippet") or ""),
+                "source_n": _citation_n(citations, str(r.get("url") or "")),
+                "locator": str(r.get("locator") or ""),
+                "publisher": str(r.get("publisher") or ""),
+                "document_period": str(r.get("document_period") or ""),
+                "validation_status": str(r.get("validation_status") or "")}
+        (management if str(r.get("source_type")) == "issuer_annual_report"
+         else third_party).append(item)
     unproven = [{"label": c["label"], "materials": list(MATERIALS_BY_METRIC.get(c["metric"], ()))}
                 for c in changes[:3]]
     unproven = [u for u in unproven if u["materials"]]
-    return {"changes": changes[:3], "explained_by": explained,
+    return {"changes": changes[:3], "management": management,
+            "third_party_views": third_party,
             "inference": list(_INFERENCE_BOUNDARY), "unproven": unproven}
 
 
@@ -215,7 +260,7 @@ def _change_explanation(rows, derived, periods, findings, evidence, citations) -
 # ── 指标表与关键发现（全部由底稿算）──────────────────────────────
 
 
-def _metrics_table(rows, derived, periods, citations, req) -> dict:
+def _metrics_table(rows, derived, periods, citations, req, source_url: str = "") -> dict:
     """指标 × 期间 的对照表 + 同比/比率列（数值、口径、来源编号）。"""
     by_metric: dict[str, dict] = {}
     for r in rows:
@@ -229,7 +274,8 @@ def _metrics_table(rows, derived, periods, citations, req) -> dict:
         m = str(d.get("metric") or "")
         if m.endswith(_YOY_SUFFIX):
             yoy_by_metric[m[: -len(_YOY_SUFFIX)]] = d.get("value")
-    src_n = _source_number(citations, str(req.get("company_id") or ""))
+    # 表里的数字来自**结构化财务来源**本身：按 URL 定位它的编号（数据平台是第三方也照样标）
+    src_n = _citation_n(citations, source_url) or _source_number(citations, "")
     out_rows = []
     for m, info in by_metric.items():
         if m in ("gross_margin",):
@@ -352,7 +398,8 @@ def _num_key(value) -> str:
 
 def _risks(task_id: str, goal: str, body: str, *, project=None,
            evidence: dict | None = None, citations: list[dict] | None = None,
-           changes: dict | None = None, perspective: str = "") -> list[dict]:
+           changes: dict | None = None, perspective: str = "",
+           citation_gaps: list[int] | None = None) -> list[dict]:
     """风险与核查：**每条风险都要有对应证据、会改变判断的观察条件、要补的材料**。
 
     只有"底稿缺口 + 模型自述"的风险是不完整的（读者无法判断该查什么）；这里为每条
@@ -406,16 +453,21 @@ def _risks(task_id: str, goal: str, body: str, *, project=None,
                          "若显示的原因与本期变化方向不一致，需修订解释",
              materials=list(u.get("materials") or []))
 
-    # ④ 模型正文里的风险小节（原样带出，但标注"由模型提出、需取得证据"）
+    # ④ 模型正文里的风险小节（原样带出，但标注"由模型提出、需取得证据"）。
+    # 结论与免责声明不是风险：它们是收尾陈述，列成风险只会稀释真正要查的事项。
     section = _section_text(body, ("风险", "待核查", "核查"))
     if section:
         for line in section.splitlines():
             t = line.strip().lstrip("#-*• ").strip()
-            if t and len(t) >= 6:
-                _add("from_report", t,
-                     evidence_note="由模型提出，尚未与底稿或年报证据绑定",
-                     would_change="取得对应证据后方可改变判断；无证据时不得据此行动",
-                     materials=["支持该判断的年报/公告段落或数据"])
+            if not t or len(t) < 6:
+                continue
+            if any(k in t for k in ("免责声明", "不构成投资建议", "不构成任何投资建议",
+                                    "结论边界", "本报告不含")):
+                continue
+            _add("from_report", t,
+                 evidence_note="由模型提出，尚未与底稿或年报证据绑定",
+                 would_change="取得对应证据后方可改变判断；无证据时不得据此行动",
+                 materials=["支持该判断的年报/公告段落或数据"])
     # ⑤ 视角要求的核查材料（视角由用户声明；两种视角查的东西不同）
     mats = list(PERSPECTIVE_MATERIALS.get(str(perspective or ""), ()))
     if mats:
@@ -424,6 +476,14 @@ def _risks(task_id: str, goal: str, body: str, *, project=None,
              evidence_note="视角由用户声明（不按公司名或机构名推断）",
              would_change="这些材料齐备后才可能形成相应判断；本次不预设结论",
              materials=mats)
+    # ⑥ 引用缺口：正文里映射不到采用来源的编号（已去编号，不猜指向）
+    gaps = [int(n) for n in (citation_gaps or [])]
+    if gaps:
+        _add("citation_gap",
+             "正文引用 " + "、".join(f"[{n}]" for n in gaps) + " 未能在本次采用来源中唯一对应",
+             evidence_note="装配时按 URL 建立旧→新编号映射，映射不到的编号已移除",
+             would_change="补齐对应来源或删除该处引用后，相关句子才可复核",
+             materials=["该句原本引用的材料原文或链接"])
     return out[:12]
 
 
@@ -439,11 +499,11 @@ def _perspective_label(perspective: str) -> str:
 
 
 def _appendix(task_id: str, rows, derived, citations, evidence: dict | None, *,
-              project=None, ws_dir=None) -> dict:
+              source_url: str = "", project=None, ws_dir=None) -> dict:
     """附录要能回答"这个数字从哪来、怎么算的"：字段位置 + 计算底稿文件。"""
     locs: list[dict] = []
     seen: set[str] = set()
-    src_n = _source_number(citations, "")
+    src_n = _citation_n(citations, source_url) or _source_number(citations, "")
     for r in list(rows) + list(derived):
         label = str(r.get("metric_label") or r.get("metric") or "")
         loc = _locator_text(r.get("source_locator"))
@@ -493,11 +553,11 @@ def _locator_text(locator) -> str:
 def _collect_citations(task_id: str, goal: str, body: str, data: dict, *,
                        evidence: dict | None = None,
                        ws_dir=None) -> tuple[list[dict], dict]:
-    """来源清单：**只收实际被采用的**，并标注类型；未采用的留在 audit。"""
+    """来源清单：**只收实际被采用的**，按**发布者域名**标类型；未采用的留在 audit。"""
     adopted: list[dict] = []
     seen: set[str] = set()
 
-    def _add(url: str, title: str, kind: str, used_by: str) -> None:
+    def _add(url: str, title: str, kind: str, used_by: str, **extra) -> None:
         u = str(url or "").strip()
         if not u or u in seen:
             if u and used_by:
@@ -506,15 +566,25 @@ def _collect_citations(task_id: str, goal: str, body: str, data: dict, *,
                         c["used_by"].append(used_by)
             return
         seen.add(u)
-        adopted.append({"n": len(adopted) + 1, "url": u,
-                        "title": str(title or "").strip() or _host(u),
-                        "type": kind, "used_by": [used_by] if used_by else []})
+        entry = {"n": len(adopted) + 1, "url": u,
+                 "title": str(title or "").strip() or _host(u),
+                 "type": kind, "publisher": _publisher(u),
+                 "used_by": [used_by] if used_by else []}
+        entry.update({k: v for k, v in extra.items() if v})
+        adopted.append(entry)
 
-    # ① 结构化财务来源（本次研究实际采用的数据源）
+    # ① 结构化财务来源：**发布者是数据平台就标第三方**，并单独记录它依据的披露。
+    # 实机教训：东方财富 API 被硬标成"发行人年报/官方披露"，读者会把第三方转载
+    # 当成发行人原文（标题含"年报"、URL 里出现官方域名都不能证明发布者身份）。
     label = str(data.get("source_label") or "")
     surl = str(data.get("source_url") or "")
     if surl:
-        _add(surl, label, "issuer_annual_report", "财务事实")
+        stype = _source_type(surl)
+        extra = {}
+        if stype != "issuer_annual_report":
+            extra = {"based_on": "发行人定期报告（经第三方数据平台转载；"
+                                 "本次未取得原始披露文件）"}
+        _add(surl, label, stype, "财务事实", **extra)
     # ② 定向取证采用的年报/公告页（业务背景/变化解释/风险用到它们才登记）
     for kind, used_by in (("business_background", "业务背景"),
                           ("change_explanation", "变化解释"),
@@ -522,10 +592,11 @@ def _collect_citations(task_id: str, goal: str, body: str, data: dict, *,
                           ("risk", "风险因素")):
         for r in _located(evidence, kind, 4):
             _add(str(r.get("url") or ""), str(r.get("title") or ""),
-                 str(r.get("source_type") or "third_party"), used_by)
+                 str(r.get("source_type") or _source_type(str(r.get("url") or ""))),
+                 used_by)
     # ③ 正文实际引用的检索来源（按正文出现顺序编号）
     for url, title in _body_sources(body):
-        _add(url, title, "third_party", "正文引用")
+        _add(url, title, _source_type(url), "正文引用")
     # ④ 用户材料（goal 文本）
     if str(goal or "").strip() and any(k in str(goal) for k in ("材料", "附件", "上传")):
         _add("user-material", "用户提供的材料", "user_material", "用户材料")
@@ -534,6 +605,56 @@ def _collect_citations(task_id: str, goal: str, body: str, data: dict, *,
     unused = [{"url": u, "title": _host(u)} for u in known if u not in seen]
     return adopted, {"unused_sources": unused[:20],
                      "note": "未采用/越界材料只留在内部审计，不进简报来源清单"}
+
+
+def _source_type(url: str) -> str:
+    """发布者身份按**解析后的域名**判定（复用叙事证据的同一实现）。"""
+    try:
+        import narrative_evidence as ne
+        return ne.source_type(url)
+    except Exception:
+        return "third_party"
+
+
+def _publisher(url: str) -> str:
+    try:
+        import narrative_evidence as ne
+        return ne.publisher_of(url)
+    except Exception:
+        return _host(url)
+
+
+def _body_source_list(body: str) -> list[tuple[int, str, str]]:
+    """模型正文自己的来源清单 → `[(原编号, 标题, URL)]`（用于引用重编号映射）。"""
+    out: list[tuple[int, str, str]] = []
+    section = _section_text(body, ("参考来源", "资料来源", "数据来源", "参考文献"))
+    for line in (section or "").splitlines():
+        m = re.match(r"^\s*(\d{1,2})\s*[.、)]\s*\[([^\]]+)\]\((https?://[^\s)]+)\)", line)
+        if m:
+            out.append((int(m.group(1)), m.group(2), m.group(3)))
+            continue
+        m = re.match(r"^\s*(\d{1,2})\s*[.、)]\s*(https?://\S+)", line)
+        if m:
+            out.append((int(m.group(1)), "", m.group(2)))
+    return out
+
+
+def _remap_inline_refs(text: str, mapping: dict[int, int]) -> tuple[str, list[int]]:
+    """把正文里的旧引用编号换成装配后的新编号；换不到的**移除编号**并报缺口（不猜）。"""
+    unmapped: list[int] = []
+
+    def _sub(m: re.Match) -> str:
+        old = int(m.group(1))
+        new = mapping.get(old)
+        if new is None:
+            if old not in unmapped:
+                unmapped.append(old)
+            return ""                     # 编号无法唯一对应：去掉，进"待核查"
+        return f"[{new}]"
+
+    out = re.sub(r"\[(\d{1,2})\]", _sub, str(text or ""))
+    return out, unmapped
+
 
 
 def _citation_n(citations: list[dict], url: str) -> str:
@@ -745,7 +866,7 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
                          f"数据同『财务对照』表与底稿）")
     lines.append("")
     lines.append("## 分析")
-    analysis = _analysis_section(body)
+    analysis = str(structure.get("analysis") or "").strip() or _analysis_section(body)
     lines.append(analysis if analysis else
                  "> 本次未产出可交付的分析正文（数据与底稿已保留，见文末）。")
     lines.append("")
@@ -754,16 +875,17 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
     changes = structure.get("change_explanation") or {}
     rows_ch = changes.get("changes") or []
     if rows_ch:
-        lines.append("**发生了什么**：")
+        lines.append("**发生了什么（数据观察）**：")
         for c in rows_ch:
             lines.append(f"- {c.get('text')}")
     else:
         lines.append("- 本次未取得可复算的同比，无法说明变化（见文末资料缺口）。")
-    explained = changes.get("explained_by") or []
+    management = changes.get("management") or []
+    third = changes.get("third_party_views") or []
     lines.append("")
     lines.append("**管理层/附注的解释**：")
-    if explained:
-        for e in explained:
+    if management:
+        for e in management:
             n = f"[{e.get('source_n')}]" if e.get("source_n") else ""
             lines.append(f"- {e.get('text')}{n}")
             if e.get("locator"):
@@ -771,6 +893,16 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
     else:
         lines.append("- 未取得与上述变化对应的管理层讨论或附注段落，"
                      "原因**未在本次资料中体现**（需补充材料见下）。")
+    if third:
+        # 第三方评论不得包装成管理层解释：单独成块并标明发布者与文档期
+        lines.append("")
+        lines.append("**第三方观点（非管理层解释，仅供参照）**：")
+        for e in third:
+            n = f"[{e.get('source_n')}]" if e.get("source_n") else ""
+            pub = f"（{e.get('publisher')}）" if e.get("publisher") else ""
+            lines.append(f"- {e.get('text')}{n}{pub}")
+            if e.get("locator"):
+                lines.append(f"  - 出处：{e.get('locator')}")
     lines.append("")
     lines.append("**推断边界**：")
     for t in (changes.get("inference") or []):
@@ -782,6 +914,16 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
         for u in unproven:
             lines.append(f"- {u.get('label')}的变化原因：需先取得"
                          f"{'、'.join(u.get('materials') or [])}")
+    excluded = list((structure.get("evidence") or {}).get("excluded") or [])
+    if excluded:
+        # 不适用的材料照实说明（错主体/超资料截止/期间不符），不静默丢弃
+        lines.append("")
+        lines.append("**未采用的材料（不满足主体/期间/资料截止）**：")
+        for e in excluded[:6]:
+            why = _VALIDATION_LABELS.get(str(e.get("validation_status") or ""),
+                                         str(e.get("validation_status") or "不适用"))
+            lines.append(f"- {str(e.get('title') or e.get('url'))[:60]}"
+                         f"（{why}{'；发布 ' + e['published_at'] if e.get('published_at') else ''}）")
     lines.append("")
     lines.append("## 风险与核查")
     risks = structure.get("risks") or []
@@ -899,30 +1041,86 @@ def _formula_expr(formula: str) -> str:
     return expr
 
 
+def _looks_like_brief(text: str) -> bool:
+    """传入的正文是否**已经是装配好的简报**（验收候选稿会回流到这里）。"""
+    t = str(text or "")
+    return "> 报表口径：" in t and "## 关键发现" in t
+
+
+def _brief_analysis_section(text: str) -> str:
+    """从已装配的简报里取**它自己的『## 分析』一节**。
+
+    只按**简报自己的小节标题**收尾（`BRIEF_SECTIONS`），不按"任意 `## `"截断——
+    模型的分析正文自带小标题（如"## 分析与结论"），按任意标题截会把整节判成空。
+    """
+    return _brief_section(text, "## 分析")
+
+
+# 简报自己的小节标题（顺序即渲染顺序）：取某一节时按这张表收尾
+BRIEF_SECTIONS = ("## 关键发现", "## 业务背景", "## 财务对照", "## 图表", "## 分析",
+                  "## 变化解释", "## 风险与核查", "## 附录", "## 参考来源")
+
+
+def _brief_section(text: str, heading: str) -> str:
+    """取简报里 `heading` 一节的内容（到下一个**简报小节**为止）。"""
+    body = str(text or "")
+    idx = body.find(heading)
+    if idx < 0:
+        return ""
+    rest = body[idx + len(heading):]
+    cut = len(rest)
+    for other in BRIEF_SECTIONS:
+        if other == heading:
+            continue
+        j = rest.find("\n" + other)
+        if j >= 0:
+            cut = min(cut, j)
+    return rest[:cut].strip()
+
+
 def _analysis_section(body: str) -> str:
-    """模型正文 → 分析一节：剥掉它自己写的数字表/来源清单/免责声明（避免与装配结果打架）。"""
+    """模型正文 → 分析一节：**只移除与装配结果重复的块**，保留后续解释与结论。
+
+    实机/离线反例：此前在首个 `## 关键数据/财务对照` 标题处**截掉全部后文**，
+    于是"重复表格之后的有效分析"被一起删除（复现读数：保留内容为空串）。
+    现在按节边界处理：重复小节整节丢弃，其余小节原样保留；模型自写的图表行与
+    空标题去掉，避免与装配的图重复。
+    """
     text = str(body or "")
     if not text:
         return ""
+    if _looks_like_brief(text):
+        # 已经是装配好的简报（如验收候选稿回流）：只取它的"## 分析"一节，
+        # 不再把整份简报包一层——否则会"简报套简报"，分析一节变成整份简报，
+        # "分析未完成"的判据随之失效（离线读数：交付状态误判为 verified）
+        return _brief_analysis_section(text)
     if _ENGINEERING_REPORT_RE.search(text):
         # 工程收尾报告不是分析（"5 个步骤成功"回答不了经营问题）：返回空，
         # 简报会如实写"本次未产出可交付的分析正文"
         return ""
-    cut = len(text)
-    for marker in ("## 参考来源", "## 资料来源", "## 数据来源", "## 免责声明",
-                   "## 关键数据", "## 财务对照"):
-        idx = text.find(marker)
-        if idx > 0:
-            cut = min(cut, idx)
-    text = text[:cut]
-    lines = []
+    keep: list[str] = []
+    skip_section = False
     for line in text.splitlines():
-        if line.strip().startswith("# ") and not lines:
-            continue                     # 去掉模型自己的大标题（简报已有标题）
-        if line.strip().startswith("|") and "|" in line:
-            continue                     # 模型自写的表格由装配器接管
-        lines.append(line)
-    return "\n".join(lines).strip()
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            title = stripped.lstrip("#").strip()
+            skip_section = any(k in title for k in _DUPLICATE_SECTIONS)
+            if skip_section:
+                continue
+            if not title:
+                continue                      # 空标题（模型常见产物）不进正文
+            keep.append(line)
+            continue
+        if skip_section:
+            continue
+        if stripped.startswith("![") and "](" in stripped:
+            continue                          # 模型重复贴的图由装配器接管
+        if stripped.startswith("|") and "|" in stripped:
+            continue                          # 模型自写的表格由装配器接管
+        if not keep and stripped.startswith("# "):
+            continue                          # 模型自己的大标题（简报已有标题）
+        keep.append(line)
+    return "\n".join(keep).strip()
 
 
 def _disclaimer(structure: dict) -> str:

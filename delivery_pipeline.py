@@ -276,16 +276,17 @@ def _has_analysis_section(report_body: str) -> bool:
     """研究简报里是否有**实质**分析（`## 分析` 一节非占位、有内容）。
 
     只对带 `## 分析` 小节的代码装配简报判定；通用报告没有固定小节名，不在本门槛内。
+    小节收尾按**简报自己的标题表**（模型的分析正文自带 `## ` 小标题，按任意标题截会误判为空）。
     """
     body = str(report_body or "")
-    idx = body.find("## 分析")
-    if idx < 0:
+    if "## 分析" not in body:
         return True
-    section = body[idx + len("## 分析"):]
-    nxt = section.find("\n## ")
-    if nxt > 0:
-        section = section[:nxt]
-    section = section.strip()
+    try:
+        import report_brief
+        section = report_brief._brief_section(body, "## 分析")
+    except Exception:
+        idx = body.find("## 分析")
+        section = body[idx + len("## 分析"):].strip()
     if _ANALYSIS_PLACEHOLDER in section:
         return False
     if _ENGINEERING_SUMMARY_RE.search(section):
@@ -379,6 +380,31 @@ def _ws(task_id: str, ws_dir=None):
     return Path(ws_dir) if ws_dir else workspace.task_workspace(task_id)
 
 
+def research_candidate_body(task_id: str, goal: str, body: str, *,
+                            project: str | None = None,
+                            ws_dir=None) -> str | None:
+    """研究任务：**先确定性装配最终候选稿**（关键数据/来源编号/声明由代码给出）。
+
+    用途：报告步骤的验收要针对**同一版候选稿**，否则模型会被要求重做装配器本就会
+    补齐的东西（实机读数：第一次验收 fail 是"缺少免责声明"，而装配器必定写
+    `### 免责声明`），触发整稿重生成。这里只装配、不登记版本、不记录交付。
+    """
+    try:
+        import report_brief
+        if not report_brief.is_research_task(task_id, goal, ws_dir=ws_dir):
+            return None
+        structure = report_brief.build_structure(task_id, goal, body,
+                                                project=project, ws_dir=ws_dir)
+        if not structure:
+            return None
+        candidate = report_brief.render_brief_markdown(structure, body)
+        return rewrite_report_links(candidate, task_id) or candidate
+    except Exception as exc:                     # noqa: BLE001 - 装配失败退回原正文
+        logger.warning("研究候选稿装配失败（task=%s，退回原正文）：%s",
+                       task_id, str(exc)[:160])
+        return None
+
+
 def accept_for_body(task_id: str, goal: str, body: str = "", *,
                     trigger: str = "报告步骤", prefer_body: bool = True,
                     hooks: dict | None = None, ws_dir=None) -> dict | None:
@@ -408,6 +434,16 @@ def accept_for_body(task_id: str, goal: str, body: str = "", *,
             report = str(body)
         else:
             return None
+        # F2′-3：研究任务的**模型草稿**先装配最终候选稿，再对**同一版**验收——代码负责的
+        # 声明/编号/链接不触发整稿模型重生成（否则验收会要求模型重做装配器的工作）。
+        # 人工修订重验（trigger="人工修订重验"）不得替换用户正文：那会丢掉他的改动。
+        if str(trigger or "") != "人工修订重验":
+            candidate = research_candidate_body(task_id, goal, report,
+                                                project=None, ws_dir=ws_dir)
+            if candidate and candidate != report:
+                logger.info("验收对象改为代码装配的候选稿（task=%s，%d→%d 字符）",
+                            task_id, len(report), len(candidate))
+                report = candidate
         result = run_acceptance(task_id, goal, report, _ws(task_id, ws_dir))
         # 虚假标注确定性修复：把"把叙述片段当来源"的句子降级为诚实披露后复检
         try:

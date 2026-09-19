@@ -419,11 +419,21 @@ class TestPerspectiveAndRatioConditions(unittest.TestCase):
         self.assertEqual(perspective_requirements(""), "")
         self.assertEqual(perspective_requirements("credit"), "")
 
-    def test_perspective_labels_avoid_the_word_source(self):
-        """视角标签里不得出现"来源"：验收器的来源标注修复会把"来源：X"改写成
-        "来源：基于模型知识…"，实机里把"增长来源与盈利质量"改成了模型知识声明。"""
-        for key, label in F.PERSPECTIVES:
-            self.assertNotIn("来源", label, key)
+    def test_repair_leaves_perspective_label_and_prose_untouched(self):
+        """来源修复只改**带冒号的引用声明**：视角标签与普通财务叙述保持原义。
+
+        实机教训：修复规则原来把"增长来源/现金来自/净利率来自"这类普通叙述改写成
+        "基于模型知识"，连视角标签也被改写（"增长来源与盈利质量"→模型知识声明）。
+        """
+        from acceptance_checker import auto_repair_source_labels
+        label = f"阅读视角：{F.PERSPECTIVE_LABELS['equity']}"
+        self.assertEqual(
+            auto_repair_source_labels(label, [F.PERSPECTIVE_LABELS["equity"]]), label)
+        prose = "报告期内经营活动现金主要来自销售回款，归母净利率下降来自毛利率回落。"
+        self.assertEqual(auto_repair_source_labels(prose, ["销售回款", "毛利率回落"]), prose)
+        # 真正的引用声明仍要被降级为诚实披露
+        self.assertIn("基于模型知识", auto_repair_source_labels("数据来源：某财经媒体",
+                                                              ["某财经媒体"]))
 
 
 class TestResearchRequestSanitizer(unittest.TestCase):

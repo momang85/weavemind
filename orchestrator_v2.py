@@ -1319,6 +1319,39 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         return wp
 
     @staticmethod
+    def _try_pdf_evidence(task_id: str, step: dict, result: dict) -> bool:
+        """抓取目标是 PDF 时：解析成带页码正文并入快照（F2′-2）。
+
+        只在**目标 URL 是 .pdf**（或返回字节头是 %PDF）时触发；解析不出文本
+        （扫描件/受保护/下载受限）就什么都不写——缺口由证据提取如实报告。
+        """
+        try:
+            import annual_report_pdf as pdf
+        except Exception:
+            return False
+        url = pdf.url_from_instruction(str(step.get("instruction") or ""))
+        head = b""
+        try:
+            parsed = json.loads(str(result.get("result") or ""))
+            if isinstance(parsed, dict):
+                url = str(parsed.get("url") or url)
+                head = str(parsed.get("text") or "")[:8].encode("utf-8", "replace")
+        except Exception:
+            pass
+        if not url or not pdf.looks_like_pdf(url, head):
+            return False
+        doc = pdf.doc_from_url(url)
+        if not doc:
+            logger.info("PDF 证据通道未取得正文（按缺口处理，task=%s）：%s",
+                        task_id, url[:100])
+            return False
+        ok = pdf.append_snapshot(task_id, doc)
+        if ok:
+            logger.info("PDF 证据通道：%s（%d 页，%d 字符）", url[:80],
+                        len(doc.get("page_offsets") or []), len(doc.get("text") or ""))
+        return ok
+
+    @staticmethod
     def _narrative_evidence_block(task_id: str, goal: str = "") -> str:
         """把**已抓取的年报/公告正文证据**（带小节定位）注入报告/总结步骤（F2）。
 
@@ -6446,6 +6479,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             if step.get("capability") == "web_fetch" and result.get("status") == "SUCCESS":
                 # 快照页回灌清洗：抓到的正文并入清洗输入，财务数字进入图表/摘要
                 self._recycle_fetch_into_clean(task_id, goal, result)
+                # F2′-2：目标是**年报 PDF** 时走解析通道（抓取 worker 只会把它按
+                # UTF-8 解码成乱码）；拿到带页码的正文后并入快照，证据里就能写页码
+                self._try_pdf_evidence(task_id, step, result)
                 # F2：抓到的年报/公告正文切成带定位的叙事证据，供报告步骤解释变化
                 try:
                     import narrative_evidence as _ne
@@ -6457,6 +6493,10 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                               extra_docs=[_parsed] if isinstance(_parsed, dict) else None)
                 except Exception as exc:         # noqa: BLE001 - 证据提取不拖垮主线
                     logger.warning("叙事证据构建失败（task=%s）：%s", task_id, str(exc)[:140])
+            elif step.get("capability") == "web_fetch" and result.get("status") != "SUCCESS":
+                # 抓取失败也可能是"这份材料是 PDF"：照样试一次解析通道，
+                # 拿不到就按缺口处理（不编内容）
+                self._try_pdf_evidence(task_id, step, result)
             if step.get("capability") == "report_generator" and result.get("status") == "SUCCESS":
                 # 确定性验收器：数字溯源等 checklist → 缺口报告（供反思/前端/人工）
                 self._run_acceptance_check(task_id, goal, trigger="报告步骤")
