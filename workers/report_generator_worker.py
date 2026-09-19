@@ -35,6 +35,18 @@ _APPENDIX_HEADING_RE = re.compile(
 )
 
 
+def _looks_like_valid_json(line: str) -> bool:
+    """整行是否为合法 JSON（用于区分"数据"与"被截断的过程痕迹"）。"""
+    t = str(line or "").strip()
+    if t[:1] not in "[{":
+        return False
+    try:
+        json.loads(t)
+    except Exception:
+        return False
+    return True
+
+
 class ReportGeneratorWorker(AsyncWorkerBase):
     _class_capabilities = ["report_generator"]
     _needs_task = True
@@ -292,7 +304,12 @@ class ReportGeneratorWorker(AsyncWorkerBase):
     @staticmethod
     def _clean_fallback_content(text: str) -> str:
         """剥离 fallback 内容里的角色/指令残留与过程噪音（【角色】、【输出要求】、
-        [指令]/[数据来源] 标记、ReAct 未收敛提示、原始 JSON），只保留可交付信息。"""
+        [指令]/[数据来源] 标记、ReAct 未收敛提示、原始 JSON），只保留可交付信息。
+
+        F1 补：安全隔离标记（`[已隔离可疑内容：…]`/旧的 `[已过滤可疑内容：…]`）、
+        `[数据]`/`[URL: …]`/`[产物文件 …]` 提示行、以及**截断的 JSON** 一律剔除——
+        它们是过程痕迹，不是研究内容（实机里这些痕迹进了 `## 研究内容（检索/摘要）`）。
+        """
         out: list[str] = []
         for ln in str(text or "").split("\n"):
             line = ln.strip()
@@ -300,12 +317,17 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                 "【角色】", "【受众】", "【输出要求】", "【质量标准】",
                 "[指令]", "[数据来源]", "[上一步结果]",
                 "ReAct 达到最大轮数", "用户目标：", "原始指令：", "任务目标：",
+                "[已隔离可疑内容", "[已过滤可疑内容", "[数据]", "[URL:",
+                "[产物文件",
             )):
                 continue
             if re.match(r"^\{\"|^\[\{", line):
                 continue
             if re.fullmatch(r"- https?://\S+", line):
                 continue  # 数据来源 URL 由附录统一呈现
+            # 截断的 JSON 片段（以 [ { 开头但不合法）也算过程痕迹
+            if line[:1] in "[{" and not _looks_like_valid_json(line):
+                continue
             out.append(ln)
         return "\n".join(out).strip()
 
@@ -747,17 +769,22 @@ class ReportGeneratorWorker(AsyncWorkerBase):
             if not report.startswith("#"):
                 report = "# 报告\n\n" + report
 
-            # 报告完整性守门：研究/调研类报告必须有正文骨架（规模/玩家/趋势），
-            # 若 LLM 输出过薄或被截断（只剩摘要），自动补上检索摘要的完整研究内容
+            # 报告完整性守门（F1 改造）：不再用"规模/玩家/趋势"这类**行业调研模板关键词**
+            # 判断内容是否足够（套在公司财务研究上会误触发，把过程痕迹补进正文）。改为
+            # **数据驱动**：只有当报告缺"关键数据/分析"骨架、且前序确实有可用素材时才补；
+            # 素材被安全规则隔离的部分**写成缺口**，不用占位符把正文补成"完整研报"。
             if any(k in str(instruction) for k in ("报告", "调研", "研报")):
-                missing = [k for k in ("规模", "玩家", "趋势") if k not in report]
-                if missing:
+                has_skeleton = any(k in report for k in ("关键数据", "## 分析", "财务对照",
+                                                         "## 结论", "## 风险"))
+                if not has_skeleton:
                     prev_parts = re.findall(
                         r"\[上一步结果 \d+\]:\s*(.*?)(?=\n\[上一步结果 |\n用户目标：|\Z)",
                         str(instruction), re.S,
                     )
-                    prev_content = "\n\n".join(p.strip() for p in prev_parts)
-                    prev_content = self._clean_fallback_content(prev_content)
+                    prev_raw = "\n\n".join(p.strip() for p in prev_parts)
+                    isolated = ("[已隔离可疑内容" in prev_raw
+                                or "[已过滤可疑内容" in prev_raw)
+                    prev_content = self._clean_fallback_content(prev_raw)
                     research = self._research_content(prev_content)
                     if research:
                         report += (
@@ -765,6 +792,12 @@ class ReportGeneratorWorker(AsyncWorkerBase):
                         )
                     elif prev_content:
                         logger.info("Research content skipped: same-type full report")
+                    if isolated:
+                        # 隔离过的资料必须有**缺口状态**：不得被当成已分析
+                        report += ("\n\n> **资料缺口**：部分检索资料被安全规则隔离，"
+                                   "未纳入本次分析；如需使用请人工核对原文。")
+                        logger.warning("Report has isolated material: gap noted (task=%s)",
+                                       task_id)
 
             # 数据来源附录：从指令中的 [数据来源] 块提取 URL 并去重
             src_urls: list[str] = []

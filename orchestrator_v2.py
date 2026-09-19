@@ -207,6 +207,88 @@ _STRUCTURED_SOURCE_LABELS = {
 # 已选事实注入块的展开上限（条数）：块本身有界，避免把报告步骤的输入撑大
 _FACTS_BLOCK_MAX_ROWS = 40
 
+# 前序结果注入的结构化限长（F1）：JSON 按结构裁剪后**仍是合法 JSON**，
+# 下游才能把它当数据识别；散文另有字符上限。
+_STEP_JSON_MAX_ITEMS = 20
+_STEP_JSON_MAX_FIELD = 400
+_STEP_TEXT_MAX_CHARS = 2500
+
+
+def _parse_json_text(text: str):
+    """整串能解析成 dict/list 就返回对象，否则 None（不做"猜半截 JSON"）。"""
+    t = str(text or "").strip()
+    if not t or t[0] not in "[{":
+        return None
+    try:
+        obj = json.loads(t)
+    except Exception:
+        return None
+    return obj if isinstance(obj, (dict, list)) else None
+
+
+def _trim_json_value(obj, *, max_items: int = _STEP_JSON_MAX_ITEMS,
+                     max_field: int = _STEP_JSON_MAX_FIELD):
+    """按结构限长：列表保留前 N 条、长字符串截断；返回 `(新对象, 是否有裁剪)`。"""
+    changed = False
+
+    def _walk(node):
+        nonlocal changed
+        if isinstance(node, list):
+            if len(node) > max_items:
+                changed = True
+            return [_walk(x) for x in node[:max_items]]
+        if isinstance(node, dict):
+            return {str(k): _walk(v) for k, v in node.items()}
+        if isinstance(node, str) and len(node) > max_field:
+            changed = True
+            return node[:max_field]
+        return node
+
+    return _walk(obj), changed
+
+
+def _is_json_text(text: str) -> bool:
+    """整串是否为结构化 JSON（数据非指令，注入扫描豁免）。"""
+    return _parse_json_text(text) is not None
+
+
+def _isolate_injection_lines(task_id: str, text: str, *, stage: str = "",
+                             dep_step_id: str = "",
+                             content_type: str = "markdown") -> str:
+    """把命中注入签名的**那一行**替换成隔离标记，其余原文保留。
+
+    为什么逐行：整段替换会把没问题的分析一起吃掉（架构复核 F1：含 `` `CNY` `` 的正常
+    研报段落曾被整段替换成过滤标记，再被报告 worker 补进正文）。结构化 JSON 是数据
+    而非指令，整体豁免（既有设计）。
+    """
+    t = str(text or "")
+    if not t or _is_json_text(t):
+        return t
+    try:
+        from security import scan_lines
+        hits = scan_lines(t)
+    except Exception:
+        return t
+    if not hits:
+        return t
+    lines = t.splitlines()
+    for idx, label, _rule_id in hits:
+        if 0 <= idx < len(lines):
+            lines[idx] = f"[已隔离可疑内容：{label}]"
+    out = "\n".join(lines)
+    try:
+        import content_filter_log as _cfl
+        for _idx, label, rule_id in hits:
+            _cfl.append_event(task_id, rule_id=rule_id, stage=stage,
+                              dep_step_id=str(dep_step_id or ""),
+                              content_type=content_type,
+                              chars_before=len(t), chars_after=len(out),
+                              isolation="line", reason=label)
+    except Exception as exc:                     # noqa: BLE001 - 诊断不得拖垮主线
+        logger.warning("内容过滤诊断落盘失败（task=%s）：%s", task_id, str(exc)[:120])
+    return out
+
+
 # V1.2 竞品启示：报告格式强制要求（三级溯源链 / 数据时效 / 免责声明）。
 # 注入 content_summary / report_generator 步骤指令；验收器负责硬检查。
 _REPORT_FORMAT_REQUIREMENTS = (
@@ -1237,6 +1319,48 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         lines.append("硬规则：不得引入本块之外的财务数字，不得自行换算或补齐缺失年份；"
                      "缺口按上面列出的内容原样说明。")
         return "\n".join(lines)
+
+    def _step_context_snippet(self, task_id: str, dep_id: str, raw: str,
+                              *, max_chars: int = _STEP_TEXT_MAX_CHARS) -> str:
+        """前序结果 → 注入片段：**先按内容类型处理，再限长**（架构复核 F1）。
+
+        - 结构化 JSON（dict/list）：按结构裁剪（前 N 条 / 单字段限长），结果**仍是合法
+          JSON**——下游 `_format_search_json` 才能把它当数据识别；
+        - 长散文：滚动摘要（失败兜底为截断），随后逐行做注入隔离；
+        - 任何裁剪都记一条脱敏诊断（`isolation=truncated`，只记长度不记正文）。
+        """
+        text = str(raw or "")
+        if not text:
+            return ""
+        obj = _parse_json_text(text)
+        if obj is not None:
+            trimmed, changed = _trim_json_value(obj)
+            out = json.dumps(trimmed, ensure_ascii=False)
+            if changed or len(out) != len(text):
+                self._log_snippet_event(task_id, dep_id, text, out, content_type="json")
+            return out                       # JSON 是数据不是指令，不扫描
+        if len(text) > 6000 and os.environ.get("ROLLING_SUMMARY", "1") != "0":
+            snippet = self._rolling_summarize(text)
+        else:
+            snippet = text[:max_chars]
+        if len(snippet) != len(text):
+            self._log_snippet_event(task_id, dep_id, text, snippet,
+                                    content_type="markdown")
+        return _isolate_injection_lines(task_id, snippet, stage="inject_step_context",
+                                        dep_step_id=dep_id, content_type="markdown")
+
+    @staticmethod
+    def _log_snippet_event(task_id: str, dep_id: str, before: str, after: str, *,
+                           content_type: str, isolation: str = "truncated") -> None:
+        """脱敏诊断：只记来源步骤/内容类型/前后长度/隔离状态，不记正文。"""
+        try:
+            import content_filter_log as _cfl
+            _cfl.append_event(task_id, rule_id="", stage="inject_step_context",
+                              dep_step_id=str(dep_id or ""), content_type=content_type,
+                              chars_before=len(before), chars_after=len(after),
+                              isolation=isolation)
+        except Exception as exc:                 # noqa: BLE001 - 诊断不得拖垮主线
+            logger.warning("内容过滤诊断落盘失败（task=%s）：%s", task_id, str(exc)[:120])
 
     def _route_template(self, goal: str, task_id: str = "") -> list[dict] | None:
         """T10b：委托 templates_pipeline 模块实现（依赖注入，原主体已搬迁）。
@@ -6579,24 +6703,14 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
 
         def _safe(text: str) -> str:
             """上一步结果可能来自外部网页，进指令前做注入检测（对标 C4-4.4）。
-            结构化 JSON（检索结果等）是数据而非指令，跳过检测：
-            实测检索 JSON 片段命中注入签名（如含 $(...) 的代码片段）会被整段
-            替换成"[已过滤可疑内容…]"，该痕迹随后混入报告正文（BUG-3）。"""
-            t = str(text or "")
-            try:
-                _j = json.loads(t)
-                if isinstance(_j, (dict, list)):
-                    return t
-            except Exception:
-                pass
-            try:
-                from security import detect_injection
-                bad, reason = detect_injection(t)
-                if bad:
-                    return f"[已过滤可疑内容：{reason}]"
-            except Exception:
-                pass
-            return t
+
+            F1 起改为**逐行隔离**：命中签名的行替换成隔离标记，其余原文保留——整段替换
+            会把没问题的分析一起吃掉（实机：含 `` `CNY` `` 的正常研报段落被整段替换成
+            过滤标记，随后又被报告 worker 补进正文）。结构化 JSON 是数据而非指令，
+            整体豁免（既有设计）。
+            """
+            return _isolate_injection_lines(
+                task_id, str(text or ""), stage="inject_step_context")
 
         def _filter_role(text: str) -> str:
             """按任务用户职位过滤注入片段（仅过滤带 [kb:...] 标记的受控内容）。"""
@@ -6703,9 +6817,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         if cap == 'file_io':
             for dep_id in deps:
                 prev_res = _prev(dep_id)
-                snippet = str(prev_res)[:12000] if prev_res else ''
+                # 结构优先 + 逐行隔离（同报告分支）：file_io 的产物也可能是 JSON
+                snippet = self._step_context_snippet(task_id, dep_id, str(prev_res or ""),
+                                                     max_chars=12000)
                 if snippet:
-                    instr += f"\n[上一步结果 {dep_id}]:\n{_filter_role(_safe(snippet))}"
+                    instr += f"\n[上一步结果 {dep_id}]:\n{_filter_role(snippet)}"
 
         if cap == 'code_execution':
             # 数据清洗提示：走统一的相关性判定（与 worker 侧同一规则）——只在
@@ -6802,14 +6918,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 pass
             for dep_id in deps:
                 prev_res = _prev(dep_id)
-                _raw = str(prev_res or "")
-                if len(_raw) > 6000 and os.environ.get("ROLLING_SUMMARY", "1") != "0":
-                    # 滚动摘要（对标标准 3.4）：长前序先压缩成要点，防中间迷失
-                    snippet = self._rolling_summarize(_raw)
-                else:
-                    snippet = _raw[:2500]
+                # 结构优先（F1）：**先判内容类型再限长**。此前"先截 2500 字再交给 _safe"，
+                # 而 _safe 的 JSON 豁免要求整串可解析——长 JSON 被切坏后既失去豁免、
+                # 又只剩半截，最终整段被替换成过滤标记并混进报告正文。
+                snippet = self._step_context_snippet(task_id, dep_id, str(prev_res or ""))
                 if snippet:
-                    instr += f"\n[上一步结果 {dep_id}]:\n{_filter_role(_safe(snippet))}"
+                    instr += f"\n[上一步结果 {dep_id}]:\n{_filter_role(snippet)}"
                 # 读取产物文件（如 code_execution 落盘的 HTML/代码），给报告真实素材；
                 # 仅白名单数据类文本注入正文，源码/二进制（HTML/JS/CSS/PY/图片等）
                 # 只提示文件存在与路径，禁止把文件原文抄进报告指令

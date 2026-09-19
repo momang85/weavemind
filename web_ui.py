@@ -4281,10 +4281,18 @@ def _get_task_page(self, p):
             delivery = None
             acceptance_bound = None
             llm_calls = None
+            content_filter = None
             try:
                 import json as _json
                 from workspace import task_workspace as _tws
                 _ws = _tws(tid)
+                # F1：内容过滤/隔离的脱敏汇总（规则分布与条数；文件里只有形状，
+                # 没有正文与提示词）——隔离过的资料必须让用户看得见
+                try:
+                    import content_filter_log as _cfl
+                    content_filter = _cfl.summarize(tid, ws_dir=_ws) or None
+                except Exception as exc:
+                    logger.warning("内容过滤汇总读取失败（task=%s）：%s", tid, str(exc)[:120])
                 # C 批：调用形状（脱敏）——阶段/次数/耗时/输入长度/输出上限/错误类别/
                 # 结束原因。文件里只有形状，没有提示词与密钥。
                 _lcp = _ws / "llm_calls.jsonl"
@@ -4359,6 +4367,8 @@ def _get_task_page(self, p):
             "delivery": delivery,
             # C 批：脱敏调用形状（无提示词/密钥），失败取证用
             "llm_calls": llm_calls,
+            # F1：内容过滤/隔离的脱敏汇总（只含规则 ID/条数/长度，无正文）
+            "content_filter": content_filter,
         })
         return self._json({"error":"not found"},404)
 
