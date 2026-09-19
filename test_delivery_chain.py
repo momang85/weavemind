@@ -5257,5 +5257,92 @@ class TestFinancialResearchCharts(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+    def test_compare_chart_does_not_mix_units_or_extra_metrics(self):
+        """对比图只画契约必需指标、且不混装量纲。
+
+        实机 `ui-ecb93e57a1`：底稿把 9 个已选事实都给了图表，结果毛利率（%）被画进
+        "亿元"轴、研发投入 6.95 亿被 2989 亿压成看不见的贴地柱。
+        """
+        import chart_specs as CS
+        rows = list(self.ROWS) + [
+            {"metric": "gross_margin", "metric_label": "毛利率", "year": 2023,
+             "value": 91.96, "unit": "%"},
+            {"metric": "gross_margin", "metric_label": "毛利率", "year": 2024,
+             "value": 91.93, "unit": "%"},
+            {"metric": "total_assets", "metric_label": "总资产", "year": 2023,
+             "value": 2727.0, "unit": "亿元"},
+            {"metric": "total_assets", "metric_label": "总资产", "year": 2024,
+             "value": 2989.45, "unit": "亿元"},
+        ]
+        specs = CS.financial_research_specs(
+            rows, self.DERIVED, unit="亿元", source="东方财富数据中心（A股）",
+            company="贵州茅台", caliber="合并", periods=[2023, 2024],
+            core_metrics=["revenue", "net_profit", "operating_cashflow"])
+        cmp_spec = specs[0]
+        labels = {r["label"] for r in cmp_spec["data"]}
+        self.assertEqual(labels, {"营业收入", "归母净利润", "经营活动现金流净额"})
+        self.assertEqual({r["unit"] for r in cmp_spec["data"]}, {"亿元"},
+                         "同图不得混装量纲（毛利率是 %）")
+        # 年度顺序稳定：2023 在前（否则图例与柱子顺序随数据顺序漂移）
+        self.assertEqual([r["caliber"] for r in cmp_spec["data"][:2]],
+                         ["2023年", "2024年"])
+
+    def test_research_task_skips_search_charts(self):
+        """研究任务：检索统计图与"市场规模"兜底都不生成（图只来自底稿）。
+
+        实机 `ui-ecb93e57a1` 暴露过：编排器那处守卫不够——`structured_pipeline` 的快照
+        回收/预载路径也会调这两个方法，于是词频/域名分布图照样进了交付。守卫放进方法
+        内部（唯一收口点）后，任何调用方都拦得住。
+        """
+        import facts as F
+        import orchestrator_v2 as ov
+        import task_state
+        tid = "chart-guard-01"
+        tmp = Path(tempfile.mkdtemp(prefix="wm_cguard_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        old_db = task_state.DB_PATH
+        ws_mod.configure_workspace_root(str(tmp))
+        task_state.DB_PATH = str(tmp / "cg.db")
+        try:
+            goal = "分析贵州茅台历年财报并生成可视化报告"
+            req = F.parse_research_request(
+                goal, company="贵州茅台", company_id="600519.SH", market="cn",
+                periods=[2023, 2024], caliber="合并", as_of="2025-04-30",
+                identity_source="form")
+            task_state.mark_queued(tid, goal=goal, research_request=req.to_payload(),
+                                   db_path=task_state.DB_PATH)
+            proj = ws_mod.task_project_dir(tid, "default")
+            proj.mkdir(parents=True, exist_ok=True)
+            # 有可作图数据：守卫若失效，这两个方法就会真的去跑渲染脚本
+            (proj / "search_results.json").write_text(json.dumps(
+                [{"title": "贵州茅台2024年报", "url": "https://example.invalid/a",
+                  "snippet": "营业收入 1741.44 亿元"}], ensure_ascii=False),
+                encoding="utf-8")
+            (proj / "clean_chart_data.json").write_text(json.dumps({
+                "entity_frequency": {"贵州茅台": 3, "五粮液": 1},
+                "source_distribution": {"example.invalid": 2, "other.invalid": 1},
+                "topic_terms": {"营收": 5, "净利": 3},
+                "market_data": [
+                    {"type": "market_size", "label": "2023年营收", "value": 1505.6,
+                     "unit": "亿元", "year": 2023},
+                    {"type": "market_size", "label": "2024年营收", "value": 1741.44,
+                     "unit": "亿元", "year": 2024},
+                ],
+            }, ensure_ascii=False), encoding="utf-8")
+
+            o = ov.OrchestratorV2.__new__(ov.OrchestratorV2)
+            o._messaging = mock.MagicMock()
+            with mock.patch("subprocess.run") as run:
+                o._generate_search_charts(tid, goal)
+                o._render_clean_chart_data(tid, goal)
+            self.assertFalse(run.called, "研究任务不得再生成检索统计图/市场规模兜底图")
+            self.assertEqual(sorted(p.name for p in (ws_mod.task_workspace(tid)).glob("*.png")),
+                             [], "不该落任何检索侧 PNG")
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            task_state.DB_PATH = old_db
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

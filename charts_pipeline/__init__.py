@@ -32,6 +32,14 @@ class ChartPipelineMixin:
         行情点再转可作图行。LLM 规格缺失时保证加密/宏观任务仍有图表。"""
         if not self._wants_visualization(goal):
             return
+        # 研究任务不出检索统计图（词频/域名分布回答的是"搜了多少"，不是"公司怎么样"）：
+        # 它的图由底稿确定性生成（两期对比/同比/质量）。守卫放在**方法内部**——
+        # 调用方除编排器外还有 structured_pipeline 的快照回收/预载两条路，逐处加会漏。
+        try:
+            if self._is_research_task(task_id):
+                return
+        except AttributeError:
+            pass
         from workspace import task_project_dir
         project = task_project_dir(task_id)
         clean_path = project / "clean_chart_data.json"
@@ -141,6 +149,12 @@ class ChartPipelineMixin:
         import os
         if not self._wants_visualization(goal):
             return
+        # 研究任务不出检索统计图（理由同 `_render_clean_chart_data`）
+        try:
+            if self._is_research_task(task_id):
+                return
+        except AttributeError:
+            pass
         from workspace import task_project_dir
         project = task_project_dir(task_id)
         # __file__ 为 charts_pipeline/__init__.py：上溯两级才是仓库根

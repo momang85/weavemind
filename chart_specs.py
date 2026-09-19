@@ -257,7 +257,8 @@ def verify_specs_against_text(specs: list[dict], text: str) -> tuple[list[dict],
 def financial_research_specs(rows: list[dict], derived: list[dict], *,
                              unit: str = "", source: str = "",
                              company: str = "", caliber: str = "",
-                             periods: list[int] | None = None) -> list[dict]:
+                             periods: list[int] | None = None,
+                             core_metrics: list[str] | None = None) -> list[dict]:
     """公司研究任务的**三张财务分析图**（确定性规格，不经 LLM）。
 
     为什么单独一条：实机 `ui-2084c2c9cc` 的图是"市场规模对比（亿元）"——16 个会计科目
@@ -265,7 +266,10 @@ def financial_research_specs(rows: list[dict], derived: list[dict], *,
     读者要的是**两期对比 + 同比 + 质量比率**这三张。数据一律来自底稿（含同比/比率），
     越界期间已在上游 `chart_rows` 过滤。
 
-    只在数据够画时才产出（单点图无结论，按规范跳过）；结论由数据算出，不写空话。
+    两条硬约束（都是实机踩出来的）：
+    - 对比图**只画契约点名的必需指标**（`core_metrics`），且**同图不得混装量纲**——
+      否则毛利率（%）会与营收（亿元）同轴，小项完全不可见（实机 `ui-ecb93e57a1`）；
+    - 只在数据够画时才产出（单点图无结论，按规范跳过）；结论由数据算出，不写空话。
     """
     try:
         from facts import metric_label
@@ -283,6 +287,22 @@ def financial_research_specs(rows: list[dict], derived: list[dict], *,
 
     # ① 两期核心指标对比（分组柱：x=指标，series=年度）
     core_rows = [r for r in rows if r.get("year") in set(periods)]
+    if core_metrics:
+        _want = [str(m) for m in core_metrics]
+        core_rows = [r for r in core_rows if str(r.get("metric") or "") in set(_want)]
+        core_rows.sort(key=lambda r: (_want.index(str(r.get("metric") or ""))
+                                      if str(r.get("metric") or "") in _want else 99,
+                                      r.get("year") or 0))
+    else:
+        core_rows.sort(key=lambda r: (str(r.get("metric") or ""), r.get("year") or 0))
+    if core_rows:
+        # 同图一个量纲：只保留占多数的单位（金额类指标），百分比指标不混进来
+        _units = [str(r.get("unit") or "") for r in core_rows]
+        _main_unit = max(set(_units), key=_units.count) if _units else ""
+        if _main_unit:
+            core_rows = [r for r in core_rows
+                         if str(r.get("unit") or "") == _main_unit]
+            unit = unit or _main_unit
     if len(years) >= 2 and len(core_rows) >= 2:
         yoy_by_metric = {str(d.get("metric") or ""): d.get("value")
                          for d in derived

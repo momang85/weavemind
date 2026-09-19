@@ -4374,6 +4374,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 company=str(req.get("company") or req.get("company_id") or ""),
                 caliber=str(req.get("caliber") or ""),
                 periods=list(data.get("periods") or []),
+                # 对比图只画契约点名的必需指标：底稿里还有总资产/毛利率这类
+                # 支撑事实，混进同一张金额图会把小项压成看不见（实机踩过）
+                core_metrics=list(req.get("required_metrics") or []),
             )
         except Exception as exc:
             logger.warning("财务图规格生成失败（task=%s）：%s", task_id, str(exc)[:140])
