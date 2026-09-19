@@ -419,6 +419,12 @@ class TestPerspectiveAndRatioConditions(unittest.TestCase):
         self.assertEqual(perspective_requirements(""), "")
         self.assertEqual(perspective_requirements("credit"), "")
 
+    def test_perspective_labels_avoid_the_word_source(self):
+        """视角标签里不得出现"来源"：验收器的来源标注修复会把"来源：X"改写成
+        "来源：基于模型知识…"，实机里把"增长来源与盈利质量"改成了模型知识声明。"""
+        for key, label in F.PERSPECTIVES:
+            self.assertNotIn("来源", label, key)
+
 
 class TestResearchRequestSanitizer(unittest.TestCase):
     """表单白名单：视角只收枚举值，非法值丢弃（宁可少字段，也不把脏值当契约）。"""
