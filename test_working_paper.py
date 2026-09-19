@@ -1084,10 +1084,68 @@ class TestDerivedRatios(unittest.TestCase):
         self.assertTrue(paper.ok, [p.detail for p in paper.problems])
         self.assertEqual(paper.audit, [])
 
+    def test_ratio_normalizes_units_before_dividing(self):
+        """架构复核 P1：分子/分母单位不同时必须先归一再相除（否则静默放大 1e4 倍）。
+
+        反例形状：同一年的净利润来自"万元"行、营业收入来自"亿元"行——此前只比币种与
+        口径，直接相除得到 125000%（而非 12.5%），且 paper.ok 仍为 True、无任何提示。
+        """
+        rows = [
+            {"year": 2023, "report_type": "年报", "revenue": 1200.0,
+             "disclosure_date": "2024-04-03"},
+            {"year": 2023, "report_type": "年报", "unit": "万元",
+             "net_profit": 1500000.0, "disclosure_date": "2024-04-03"},
+            {"year": 2024, "report_type": "年报", "revenue": 1380.0,
+             "disclosure_date": "2025-04-03"},
+            {"year": 2024, "report_type": "年报", "unit": "万元",
+             "net_profit": 1740000.0, "disclosure_date": "2025-04-03"},
+        ]
+        paper = self._paper(rows)
+        by = {(d["metric"], d["period"]): d for d in paper.derived}
+        self.assertAlmostEqual(by[("net_margin", "2023年")]["value"], 12.5, places=2)
+        self.assertAlmostEqual(by[("net_margin", "2024年")]["value"], 12.61, places=2)
+        # 换算过程必须留在公式里，读者才能复核
+        self.assertIn("万元", by[("net_margin", "2024年")]["formula"])
+        self.assertIn("换算", by[("net_margin", "2024年")]["formula"])
+
+    def test_ratio_not_produced_when_units_not_convertible(self):
+        """单位不可换算（百分比/未知）→ 不生成比率，只记审计提示，不硬算。"""
+        rows = [
+            {"year": 2023, "report_type": "年报", "revenue": 1200.0,
+             "disclosure_date": "2024-04-03"},
+            {"year": 2023, "report_type": "年报", "unit": "%",
+             "net_profit": 12.5, "disclosure_date": "2024-04-03"},
+        ]
+        paper = self._paper(rows)
+        self.assertFalse(any(d["metric"] == "net_margin" for d in paper.derived))
+        self.assertTrue(any("不可换算" in str(a.get("detail") or "")
+                            for a in paper.audit), paper.audit)
+
+    def test_negative_base_is_not_a_yoy(self):
+        """负基期：同比不具可比含义 → 记为不可算（应分别描述亏损/转正），不硬算。"""
+        rows = [
+            {"year": 2023, "report_type": "年报", "revenue": 1200.0, "net_profit": -50.0,
+             "operating_cashflow": 210.0, "disclosure_date": "2024-04-03"},
+            {"year": 2024, "report_type": "年报", "revenue": 1380.0, "net_profit": 174.0,
+             "operating_cashflow": 231.0, "disclosure_date": "2025-04-03"},
+        ]
+        paper = self._paper(rows)
+        self.assertFalse(any(d["metric"] == "net_profit_yoy" for d in paper.derived),
+                         "负基期不得产出同比")
+        self.assertTrue(any("基期为负" in p.detail for p in paper.problems),
+                        [p.detail for p in paper.problems])
+
+    def test_ratio_labels_state_attribution(self):
+        """命名要写清归属口径：分子是归母净利润、现金流是合并口径。"""
+        self.assertEqual(F.metric_label("net_margin"), "归母净利率")
+        self.assertEqual(F.metric_label("cashflow_coverage"),
+                         "经营现金流对归母净利润的覆盖")
+
     def test_labels_are_chinese_for_injection(self):
         """注入块与报告都直接读标签：英文 slug 对报告读者没有意义。"""
-        self.assertEqual(F.metric_label("net_margin"), "净利率")
-        self.assertEqual(F.metric_label("cashflow_coverage"), "经营现金流对净利润的覆盖")
+        self.assertEqual(F.metric_label("net_margin"), "归母净利率")
+        self.assertEqual(F.metric_label("cashflow_coverage"),
+                         "经营现金流对归母净利润的覆盖")
         self.assertEqual(F.metric_label("debt_ratio"), "资产负债率")
         self.assertEqual(F.metric_label("revenue_yoy"), "营业收入同比")
 

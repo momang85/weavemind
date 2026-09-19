@@ -21,8 +21,8 @@ import re
 from dataclasses import dataclass, field
 
 from facts import (CALIBERS, CORE_METRICS, UNKNOWN, VERIFY_VERIFIED,
-                   Fact, ResearchRequest, check_subject, derived_fact,
-                   market_of_code, metric_label)
+                   Fact, ResearchRequest, amount_scale, check_subject,
+                   derived_fact, market_of_code, metric_label)
 
 # 判定类别（给缺口表/报告用，字符串稳定，便于测试与前端展示）
 PROBLEM_MISSING = "missing_required"
@@ -431,6 +431,15 @@ def build_working_paper(facts: list[Fact], request: ResearchRequest) -> WorkingP
                     "（不编造、不跳过）",
                     metric, f"{cur}年同比"))
                 continue
+            if float(f0.value) < 0.0:
+                # 负基期：同比（比例变化）没有可比含义，如实记为不可算而不是硬算一个
+                # 会误导的百分比（亏损转正/亏损扩大要**分别描述**，不能塞进"同比"）
+                paper.problems.append(Problem(
+                    PROBLEM_NOT_COMPUTABLE,
+                    f"{metric_label(metric)} {prev}→{cur} 的基期为负（{f0.value}）："
+                    "同比不具可比含义（应分别描述亏损/转正与绝对额变化），不计算",
+                    metric, f"{cur}年同比"))
+                continue
             if str(f0.currency) != str(f1.currency) or str(f0.unit) != str(f1.unit):
                 paper.problems.append(Problem(
                     PROBLEM_CURRENCY,
@@ -482,8 +491,26 @@ def build_working_paper(facts: list[Fact], request: ResearchRequest) -> WorkingP
                     "fact_ids": [num.fact_id, den.fact_id],
                 })
                 continue
-            ratio = float(num.value) / float(den.value) * 100.0
+            # **单位归一**（架构复核 P1）：先换算到同一量级再相除。此前只比币种/口径，
+            # "净利润 150 亿元 ÷ 营收 1500000 万元" 会静默放大 1e4 倍且毫无提示；
+            # 换算不出来（百分比/未知单位）就不生成这个比率——不猜、不硬算。
+            _s_num, _s_den = amount_scale(num.unit), amount_scale(den.unit)
+            if _s_num <= 0 or _s_den <= 0:
+                paper.audit.append({
+                    "kind": PROBLEM_NOT_COMPUTABLE,
+                    "detail": (f"{metric_label(_metric)} {year}年 的输入单位不可换算为金额"
+                               f"（{num.unit} / {den.unit}）：不生成该比率"),
+                    "fact_ids": [num.fact_id, den.fact_id],
+                })
+                continue
+            factor = _s_num / _s_den
+            ratio = float(num.value) * factor / float(den.value) * 100.0
             formula = f"{num.value} / {den.value} * 100，输入 {num.fact_id} / {den.fact_id}"
+            if abs(factor - 1.0) > 1e-12:
+                # 换算过程要留在公式里，读者才能复核（不能只给一个变了量级的结果）
+                formula = (f"{num.value}{num.unit} 换算为 {float(num.value) * factor:g}"
+                           f"{den.unit}，再 / {den.value} * 100"
+                           f"（输入 {num.fact_id} / {den.fact_id}）")
             d = derived_fact([num, den], _metric, formula=formula,
                              value=round(ratio, 2), period=f"{year}年",
                              inputs=[num, den], unit="%", unit_source="derived")
@@ -491,11 +518,15 @@ def build_working_paper(facts: list[Fact], request: ResearchRequest) -> WorkingP
     return paper
 
 
-# 同年比率：(派生指标, 分子, 分母, 口径说明)。分母为 0 只记审计提示。
+# 同年比率：(派生指标, 分子, 分母, 口径说明)。分母为 0 / 单位不可换算只记审计提示。
+# 说明里必须写清**归属口径**：`net_profit` 是归母净利润（合并报表里归属母公司的部分），
+# 而经营现金流是合并现金流量表的数——两者归属层不同，读者不能当成同口径比值。
 _RATIO_SPECS: tuple[tuple[str, str, str, str], ...] = (
     ("net_margin", "net_profit", "revenue", "归母净利润 / 营业收入 × 100"),
     ("cashflow_coverage", "operating_cashflow", "net_profit",
-     "经营活动现金流净额 / 归母净利润 × 100（>100% 说明利润有现金支撑）"),
+     "经营活动现金流净额（合并口径） / 归母净利润 × 100"
+     "（>100% 仅表示当期经营现金流高于归母净利润；分子或分母为负时该倍数不表示"
+     "'利润有现金支撑'）"),
     ("debt_ratio", "total_liabilities", "total_assets", "总负债 / 总资产 × 100"),
     ("rd_intensity", "rd_expense", "revenue", "研发投入 / 营业收入 × 100"),
 )

@@ -717,16 +717,75 @@ def _normalized_numbers(text: str) -> str:
     return re.sub(r"(?<=\d)[,\u3000 ](?=\d)", "", str(text or ""))
 
 
+# 占位/未完成标记：出现这些词说明该处**没有真的分析**，不能算"已解释"。
+_PLACEHOLDER_MARKERS = (
+    "待写", "待补充", "待完善", "待填", "尚未分析", "未分析", "未展开", "待核",
+    "占位", "todo", "tbd", "n/a", "[待", "（待", "(待", "略）", "略。",
+)
+
+
+def _has_placeholder(text: str) -> bool:
+    low = str(text or "").lower()
+    return any(m in low for m in _PLACEHOLDER_MARKERS)
+
+
+def _sentences(text: str) -> list[str]:
+    """粗切句：按句末标点与换行切分（含 Markdown 表格行）。"""
+    parts = re.split(r"[。！？!?\n]+", str(text or ""))
+    return [p.strip() for p in parts if p and p.strip()]
+
+
+def _section_text(report: str, keywords: tuple[str, ...]) -> str:
+    """取某个小节（标题含关键词）到下一个标题之间的正文。"""
+    lines = str(report or "").splitlines()
+    start = -1
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("#") and any(k in line for k in keywords):
+            start = i + 1
+            break
+    if start < 0:
+        return ""
+    out: list[str] = []
+    for line in lines[start:]:
+        if line.lstrip().startswith("#"):
+            break
+        out.append(line)
+    return "\n".join(out).strip()
+
+
+def _binding_tokens(metric: str, label: str) -> tuple[str, ...]:
+    """该指标在正文里的**绑定词**：数值必须与这些词之一同句，才算"讲到了这个指标"。
+
+    只写"同比/净利率"这类词而不给读数不算覆盖（架构复核 P2）；反过来，要求逐字命中
+    改名后的完整标签（"归母净利率"）又太脆——报告写"净利率 12.61%"是合规表达。
+    """
+    m = str(metric or "")
+    if m.endswith("_yoy"):
+        return ("同比", "增速", "增长", "下降")
+    table = {
+        "net_margin": ("净利率",),
+        "cashflow_coverage": ("现金流",),
+        "debt_ratio": ("资产负债率", "负债率"),
+        "rd_intensity": ("研发",),
+    }
+    if m in table:
+        return table[m]
+    return (str(label or ""),) if label else ()
+
+
 def check_analysis_completeness(report: str, goal: str, task_id: str) -> dict:
     """**分析完整性**（研究任务）：正文有没有把已选事实讲全、讲成分析。
 
-    实机教训（`ui-2084c2c9cc`）：底稿 6/6 事实 + 3 条同比齐全、硬门槛通过，但正文只写了
-    2 个数字、没有任何同比/质量/结构分析——而既有检查一个都拦不住：`number_traceability`
-    只审"已出现的数字"（一个数字都不写反而 pass），`requirement_coverage` 只要
-    "出现过的数字 ≥50% 可溯源"。这里按底稿逐项核对正文覆盖。
+    三层分开判，缺一层说一层（架构复核 P2 的反例：六个裸数字 + "同比、净利率、现金流……
+    尚未分析。风险：待写。结论：待写" 曾被判 pass——因为"概念词一出现就算分析"）：
+    ① 数值覆盖：每个必需 (指标, 年度) 的数值是否出现；
+    ② 解释覆盖：该数值所在的句子里是否同时出现指标名、且**没有**占位/未完成标记
+       （"待写/尚未分析/待补充"不算解释）；派生指标要求**数值**出现，不接受只写"同比"两字；
+    ③ 风险/结论覆盖：小节存在且去掉占位标记后仍有实质内容。
 
-    **只提示、不计入 overall**（`counted=False`，见 `run_acceptance` 的汇总规则）：
-    先把缺口显性化、观察一批真实任务，再决定是否收紧门禁。
+    实机教训（`ui-2084c2c9cc`）：底稿 6/6 事实 + 3 条同比齐全、硬门槛通过，正文却只写了
+    2 个数字、没有任何分析——既有检查一个都拦不住。本检查**只提示、不计入 overall**
+    （`counted=False`）：先把缺口显性化、观察一批真实任务，再决定是否收紧门禁。
     """
     gaps: list[str] = []
     try:
@@ -749,6 +808,7 @@ def check_analysis_completeness(report: str, goal: str, task_id: str) -> dict:
     _required = {str(m) for m in ((paper.get("request") or {}).get("required_metrics") or [])}
     required_rows = [r for r in rows
                      if not _required or str(r.get("metric") or "") in _required]
+    sents = _sentences(report)
 
     def _num_forms(value) -> list[str]:
         out: list[str] = []
@@ -757,35 +817,69 @@ def check_analysis_completeness(report: str, goal: str, task_id: str) -> dict:
                 out.append(f)
         return out
 
-    missing_facts: list[str] = []
+    def _value_seen(value) -> bool:
+        return any(f in norm for f in _num_forms(value))
+
+    def _explained(label: str, value, metric: str) -> bool:
+        """该值是否出现在"带该指标绑定词、且非占位"的句子里（按指标绑定，不靠全文任一处）。"""
+        tokens = _binding_tokens(metric, label)
+        for s in sents:
+            if not _value_seen_in(s, value):
+                continue
+            if tokens and not any(t and t in s for t in tokens):
+                continue
+            if _has_placeholder(s):
+                continue
+            return True
+        return False
+
+    def _value_seen_in(sentence: str, value) -> bool:
+        s = _normalized_numbers(sentence)
+        return any(f in s for f in _num_forms(value))
+
+    # ① 数值覆盖 + ② 解释覆盖（必需事实）
+    numbers_missing: list[str] = []
+    unexplained: list[str] = []
     for r in required_rows:
-        if not any(f in norm for f in _num_forms(r.get("value"))):
-            missing_facts.append(f"{r.get('metric_label') or r.get('metric')}"
-                                 f" {r.get('period')}（{r.get('value')}"
-                                 f"{r.get('unit') or ''}）")
-    if missing_facts:
-        gaps.append("正文未给出必需事实的数值：" + "、".join(missing_facts[:6])
-                    + (f" 等 {len(missing_facts)} 项" if len(missing_facts) > 6 else ""))
+        label = str(r.get("metric_label") or r.get("metric") or "")
+        tag = f"{label} {r.get('period')}（{r.get('value')}{r.get('unit') or ''}）"
+        if not _value_seen(r.get("value")):
+            numbers_missing.append(tag)
+        elif not _explained(label, r.get("value"), str(r.get("metric") or "")):
+            unexplained.append(tag)
+    if numbers_missing:
+        gaps.append("正文未给出必需事实的数值：" + "、".join(numbers_missing[:6])
+                    + (f" 等 {len(numbers_missing)} 项" if len(numbers_missing) > 6 else ""))
+    if unexplained:
+        gaps.append("正文有数值但未与该指标绑定或标为未完成（不构成分析）："
+                    + "、".join(unexplained[:6])
+                    + (f" 等 {len(unexplained)} 项" if len(unexplained) > 6 else ""))
 
-    _ratio_concepts = {"net_margin": "净利率", "cashflow_coverage": "现金流",
-                       "debt_ratio": "资产负债率", "rd_intensity": "研发"}
-    missing_derived: list[str] = []
+    # ② 派生指标：要求**读数**出现（只写"同比/净利率"这类词不算），且非占位
+    derived_missing: list[str] = []
     for d in derived:
-        metric = str(d.get("metric") or "")
-        concept = "同比" if metric.endswith("_yoy") else _ratio_concepts.get(metric, "")
-        if (not any(f in norm for f in _num_forms(d.get("value")))
-                and not (concept and concept in norm)):
-            missing_derived.append(f"{d.get('metric_label') or metric}"
-                                   f" {d.get('period')}（{d.get('value')}%）")
-    if missing_derived:
-        gaps.append("正文未给出派生指标（同比/比率）的读数："
-                    + "、".join(missing_derived[:6])
-                    + (f" 等 {len(missing_derived)} 项" if len(missing_derived) > 6 else ""))
-
-    if "风险" not in report:
+        label = str(d.get("metric_label") or d.get("metric") or "")
+        tag = f"{label} {d.get('period')}（{d.get('value')}%）"
+        if not _value_seen(d.get("value")):
+            derived_missing.append(tag)
+        elif not _explained(label, d.get("value"), str(d.get("metric") or "")):
+            unexplained.append(tag)
+    if derived_missing:
+        gaps.append("正文未给出派生指标（同比/比率）的读数：" + "、".join(derived_missing[:6])
+                    + (f" 等 {len(derived_missing)} 项" if len(derived_missing) > 6 else ""))
+    # ③ 风险 / 结论覆盖：小节存在 + 去掉占位标记后仍有实质内容
+    risk_text = _section_text(report, ("风险",))
+    risk_ok = bool(risk_text) and not _has_placeholder(risk_text) and len(risk_text) >= 10
+    if not risk_text:
         gaps.append("正文缺少风险提示段落")
-    if not any(w in report for w in ("结论", "小结", "总结")):
+    elif not risk_ok:
+        gaps.append("风险提示段落是占位或过短（未构成风险描述）")
+    concl_text = _section_text(report, ("结论", "小结", "总结"))
+    concl_ok = bool(concl_text) and not _has_placeholder(concl_text) and len(concl_text) >= 10
+    if not concl_text:
         gaps.append("正文缺少结论段落")
+    elif not concl_ok:
+        gaps.append("结论段落是占位或过短（未构成结论）")
 
     total = len(required_rows) + len(derived)
     return {
@@ -793,14 +887,18 @@ def check_analysis_completeness(report: str, goal: str, task_id: str) -> dict:
         "counted": False,                        # 只提示：不进 overall/gaps 汇总
         "applicable": True,
         "analysis_gaps": gaps,
-        "facts_total": len(required_rows), "facts_missing": len(missing_facts),
-        "derived_total": len(derived), "derived_missing": len(missing_derived),
+        "facts_total": len(required_rows), "facts_missing": len(numbers_missing),
+        "facts_unexplained": len(unexplained),
+        "derived_total": len(derived), "derived_missing": len(derived_missing),
+        "risk_ok": risk_ok, "conclusion_ok": concl_ok,
         "gaps": gaps,
         "details": (
-            f"分析要素覆盖完整（必需事实 {len(required_rows)} 项、派生 {len(derived)} 项都在正文）"
+            f"分析要素覆盖完整（必需事实 {len(required_rows)} 项、派生 {len(derived)} 项都在正文，"
+            "风险与结论有实质内容）"
             if not gaps else
-            f"分析要素缺口 {len(gaps)} 类：必需事实缺 {len(missing_facts)}/{len(required_rows)}、"
-            f"派生缺 {len(missing_derived)}/{len(derived)}（共 {total} 项）"
+            f"分析要素缺口 {len(gaps)} 类：数值缺 {len(numbers_missing)}/{len(required_rows)}、"
+            f"解释缺 {len(unexplained)}、派生读数缺 {len(derived_missing)}/{len(derived)}、"
+            f"风险{'有' if risk_ok else '缺'}、结论{'有' if concl_ok else '缺'}（共 {total} 项）"
         ),
     }
 

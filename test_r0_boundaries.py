@@ -857,10 +857,13 @@ class TestAnalysisCompleteness(unittest.TestCase):
         "| 营业收入 | 1200 | 1380 | 15% |\n| 归母净利润 | 150 | 174 | 16% |\n"
         "| 经营活动现金流净额 | 210 | 231 | 10% |\n\n"
         "营业收入 1200 / 1380 亿元；归母净利润 150 / 174 亿元；"
-        "经营活动现金流净额 210 / 231 亿元。同比：营业收入 15%、归母净利润 16%、"
-        "经营现金流 10%。净利率 12.61%；经营现金流对净利润的覆盖 132.76%；"
-        "资产负债率 35%。\n\n"
-        "## 风险提示\n\n价格与需求波动。\n\n## 结论\n\n经营稳健。\n\n"
+        "经营活动现金流净额 210 / 231 亿元。\n"
+        "同比：营业收入 15%、归母净利润 16%、经营现金流 10%。\n"
+        "归母净利率 2023 年 12.5%、2024 年 12.61%；"
+        "经营现金流对归母净利润的覆盖 2023 年 140%、2024 年 132.76%；"
+        "资产负债率 2023 年 33.33%、2024 年 35%。\n\n"
+        "## 风险提示\n\n需求与价格波动可能影响收入与毛利，需结合行业数据判断。\n\n"
+        "## 结论\n\n两期收入与归母净利润均增长，经营现金流同步改善。\n\n"
         "## 免责声明\n\n本文基于公开数据整理，不构成任何投资建议。\n"
     )
 
@@ -920,6 +923,42 @@ class TestAnalysisCompleteness(unittest.TestCase):
         self.assertTrue(chk.get("pass"), chk)
         self.assertEqual(chk.get("facts_missing"), 0)
         self.assertEqual(chk.get("derived_missing"), 0)
+
+    def test_bare_numbers_with_placeholders_do_not_pass(self):
+        """架构复核 P2 反例：六个裸数字 + "尚未分析/待写" 不得算作分析完整。
+
+        此前"概念词一出现就算分析"（写了"同比、净利率"就满足派生覆盖），于是
+        "六个数字 + 风险：待写 + 结论：待写" 也能 pass——检查必须诚实。
+        """
+        bare = (
+            "# 示例制造财务研究\n\n"
+            "营业收入 1200 / 1380；归母净利润 150 / 174；经营活动现金流净额 210 / 231。\n"
+            "同比、归母净利率、现金流覆盖等指标尚未分析。\n\n"
+            "## 风险提示\n\n风险：待写。\n\n## 结论\n\n结论：待写。\n"
+        )
+        res = self._run_with_paper(bare)
+        chk = (res.get("checks") or {}).get("analysis_completeness") or {}
+        self.assertFalse(chk.get("pass"), chk)
+        self.assertFalse(chk.get("counted"), "仍只提示、不计入 overall")
+        self.assertTrue(chk.get("facts_missing", 0) >= 1
+                        or chk.get("facts_unexplained", 0) >= 1,
+                        f"裸数字不得算已解释：{chk}")
+        self.assertGreater(chk.get("derived_missing", 0), 0,
+                           "只写'同比/净利率'这类词不算给出读数")
+        self.assertFalse(chk.get("risk_ok"), "占位风险段落不算覆盖")
+        self.assertFalse(chk.get("conclusion_ok"), "占位结论段落不算覆盖")
+        blob = " ".join(chk.get("analysis_gaps") or [])
+        self.assertIn("占位", blob)
+
+    def test_numbers_without_metric_binding_are_not_explanations(self):
+        """数字出现但没跟指标名绑定 → 不算解释（避免"数字散落各处"冒充分析）。"""
+        body = ("# 示例制造财务研究\n\n本期若干科目出现变化：1200、1380、150、174、"
+                "210、231 亿元。\n\n## 风险提示\n\n需求与价格波动会影响毛利。\n\n"
+                "## 结论\n\n经营保持增长。\n\n## 免责声明\n\n不构成任何投资建议。\n")
+        res = self._run_with_paper(body)
+        chk = (res.get("checks") or {}).get("analysis_completeness") or {}
+        self.assertGreater(chk.get("facts_unexplained", 0), 0, chk)
+        self.assertIn("未与该指标绑定", " ".join(chk.get("analysis_gaps") or []))
 
     def test_non_research_task_is_not_applicable(self):
         """没有底稿的任务不适用（不误报）。"""

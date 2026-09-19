@@ -376,10 +376,28 @@ def financial_research_specs(rows: list[dict], derived: list[dict], *,
         cov = next((d for d in ratio_rows
                     if d.get("metric") == "cashflow_coverage"
                     and d.get("year") == (periods[-1] if periods else None)), None)
+        # 覆盖倍数的解释**带符号条件**：只有分子分母都为正时才谈"现金支撑"；
+        # 亏损或经营现金净流出时该倍数没有质量含义（负÷负也会 >100%）。
+        _np_val = next((r.get("value") for r in rows
+                        if r.get("metric") == "net_profit"
+                        and r.get("year") == (periods[-1] if periods else None)), None)
+        _cf_val = next((r.get("value") for r in rows
+                        if r.get("metric") == "operating_cashflow"
+                        and r.get("year") == (periods[-1] if periods else None)), None)
         if cov is not None:
-            conclusion = (f"最新一期经营现金流对净利润覆盖 {cov['value']:g}%"
-                          + ("（>100%，当期利润有现金支撑）" if cov["value"] > 100
-                             else "（<100%，当期利润的现金支撑偏弱）"))
+            if isinstance(_np_val, (int, float)) and _np_val < 0:
+                conclusion = (f"最新一期归母净利润为负（{_np_val:g}），"
+                              f"经营现金流对归母净利润的覆盖（{cov['value']:g}%）"
+                              "不表示利润有现金支撑")
+            elif isinstance(_cf_val, (int, float)) and _cf_val < 0:
+                conclusion = (f"最新一期经营活动现金流为净流出（{_cf_val:g}），"
+                              "覆盖倍数不表示利润有现金支撑")
+            elif cov["value"] > 100:
+                conclusion = (f"最新一期经营现金流对归母净利润覆盖 {cov['value']:g}%"
+                              "（>100%，当期经营现金流高于归母净利润）")
+            else:
+                conclusion = (f"最新一期经营现金流对归母净利润覆盖 {cov['value']:g}%"
+                              "（<100%，当期经营现金流低于归母净利润）")
         else:
             conclusion = "盈利与现金流质量指标（比率，单位 %）"
         specs.append({

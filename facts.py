@@ -44,12 +44,15 @@ METRIC_LABELS = dict(ALL_METRICS)
 
 # 派生指标的中文标签：注入给模型的 [已选事实] 块与报告都直接读它，
 # 英文 slug（revenue_yoy）对报告读者没有意义。
+# 命名按**分子口径**写实：`net_profit` 是归母净利润 → "归母净利率"；现金流比率
+# 的分子是合并现金流量表的经营现金流、分母是归母净利润，两者归属层不同，
+# 名称必须写出来（否则读者会把"覆盖"当成同口径比值）。
 DERIVED_METRICS: tuple[tuple[str, str], ...] = (
     ("revenue_yoy", "营业收入同比"),
     ("net_profit_yoy", "归母净利润同比"),
     ("operating_cashflow_yoy", "经营活动现金流净额同比"),
-    ("net_margin", "净利率"),
-    ("cashflow_coverage", "经营现金流对净利润的覆盖"),
+    ("net_margin", "归母净利率"),
+    ("cashflow_coverage", "经营现金流对归母净利润的覆盖"),
     ("debt_ratio", "资产负债率"),
     ("rd_intensity", "研发投入强度"),
 )
@@ -57,6 +60,28 @@ METRIC_LABELS.update(dict(DERIVED_METRICS))
 
 # 同比类派生（`<metric>_yoy`）：报告里必须写成"同比/增速"，不能只说"变化"
 YOY_SUFFIX = "_yoy"
+
+# 金额单位数量级（以"元"为基准）：比率计算前必须把分子/分母换算到同一量级，
+# 否则"亿元 ÷ 万元"会静默放大 1e4 倍（架构复核给的内存反例）。
+_AMOUNT_SCALES = {"万亿": 1e12, "千亿": 1e11, "百亿": 1e10, "亿": 1e8, "万": 1e4}
+
+
+def amount_scale(unit: str) -> float:
+    """金额单位的数量级（以"元"为基准）：`亿元` → 1e8、`万元` → 1e4、`元` → 1.0。
+
+    **不可换算就返回 0**（比率/派生一律不生成，不猜）：百分比、未知单位、空单位
+    都不是金额量级。币种是否一致由调用方另行判定（`亿美元` 的 `亿` 在这里是量级，
+    币种在 Fact.currency 上）。
+    """
+    u = str(unit or "").strip()
+    if not u or "%" in u or "％" in u:
+        return 0.0
+    for key, scale in _AMOUNT_SCALES.items():
+        if key in u:
+            return scale
+    if u in ("元", "人民币", "元人民币"):
+        return 1.0
+    return 0.0
 
 MARKETS = ("cn", "hk", "us")
 UNKNOWN = "unknown"
