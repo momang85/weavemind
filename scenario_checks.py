@@ -114,6 +114,43 @@ class TestOfflineScenarios(unittest.TestCase):
                 self.assertNotIn("%", ln, f"{name} 图注含百分比读数：{ln[:80]}")
                 self.assertNotIn("个百分点", ln, f"{name} 图注含百分点读数：{ln[:80]}")
 
+    # ── C3：成稿形态（主文给研究员，工程说明与口径细节进附录）────────────
+
+    def test_no_engineering_notes_in_the_delivered_body(self):
+        """工程说明（"由代码装配""内部规则"）不得进产品主文，改放任务详情。"""
+        for name in self.manifests:
+            report = (self.tmp / name / "report.md").read_text(encoding="utf-8")
+            for bad in ("装配说明", "由代码装配", "内部规则"):
+                self.assertNotIn(bad, report, f"{name} 正文仍含工程说明：{bad}")
+
+    def test_main_body_stays_within_page_target(self):
+        """主文（附录之前）以 2–4 页为设计目标：附录标题必须落在第 5 页以内。"""
+        import io
+        from pypdf import PdfReader
+        for name in self.manifests:
+            pdf = (self.tmp / name / "report.pdf")
+            if not pdf.exists():
+                continue
+            pages = list(PdfReader(str(pdf)).pages)
+            hit = next((i for i, pg in enumerate(pages, 1)
+                        if any(l.strip() == "附录" for l in
+                               (pg.extract_text() or "").splitlines())), None)
+            self.assertIsNotNone(hit, f"{name} 找不到附录标题")
+            self.assertLessEqual(hit, 5, f"{name} 主文到第 {hit} 页才开始附录")
+
+    def test_evidence_moved_to_appendix_is_still_present(self):
+        """让出主文版面的证据（口径条件/次要图表）必须在附录里仍在，不得为压页数删除。"""
+        for name, m in self.manifests.items():
+            report = (self.tmp / name / "report.md").read_text(encoding="utf-8")
+            head, _, tail = report.partition("## 附录")
+            self.assertTrue(tail, f"{name} 没有附录")
+            self.assertIn("比率适用条件", tail, f"{name} 附录缺口径条件")
+            self.assertIn("参考来源", tail, f"{name} 附录缺来源清单")
+            extra = len(m.get("charts") or []) - 3
+            if extra > 0:
+                self.assertIn("其他图表", tail,
+                              f"{name} 有 {extra} 张图不在主文，附录里应列出")
+
     # ── C1：导出可用性（图必须真进 PDF、表头必须与数据列对齐）──────────
 
     def test_referenced_charts_are_embedded_not_placeholders(self):

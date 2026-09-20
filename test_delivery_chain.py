@@ -5846,9 +5846,11 @@ class TestResearchBriefAssembly(unittest.TestCase):
         self.assertIn("主营业务为茅台酒及系列酒", md)
         self.assertIn("小节：", md, "业务背景要带小节定位")
         self.assertIn("## 变化解释", md)
-        for marker in ("**发生了什么（数据观察）**", "**管理层/附注的解释**", "**推断边界**",
-                       "**还不能证明什么**"):
+        for marker in ("**发生了什么（数据观察）**", "**管理层/附注的解释**", "**推断边界**"):
             self.assertIn(marker, md, marker)
+        # C3：未证明的部分只在『风险与核查』写一次，变化解释处留一行指引（原两节各写一遍）
+        self.assertIn("尚未证明的部分（需补材料）见『风险与核查』", md)
+        self.assertNotIn("**还不能证明什么**", md)
         self.assertIn("不能据此声称长期趋势", md)
         # 变化幅度大的在前（收入/利润/现金流三个变化都给出）
         ch = structure["change_explanation"]["changes"]
@@ -5937,7 +5939,8 @@ class TestResearchBriefAssembly(unittest.TestCase):
         unproven = next(r for r in risks if r["kind"] == "unproven_change")
         self.assertIn("现金流量表附注", unproven["materials_needed"])
         md = report_brief.render_brief_markdown(structure, "")
-        for marker in ("对应证据", "会使判断改变的观察条件", "需要补充的材料", "结论边界"):
+        # C3：每条风险压成"主张 + 一行（证据/条件/材料）"，语义项不变
+        for marker in ("证据：", "改变判断的观察条件：", "需补材料：", "结论边界"):
             self.assertIn(marker, md, marker)
 
     def test_appendix_records_field_locations_and_worksheet(self):
@@ -6023,17 +6026,23 @@ class TestResearchBriefAssembly(unittest.TestCase):
         self.assertEqual(_table(eq["md"]), _table(bk["md"]))
 
     def test_ratio_conditions_and_scope_are_rendered(self):
-        """比率适用条件与"仅非金融企业"边界必须写在正文里（不静默套用）。"""
+        """比率适用条件与"仅非金融企业"边界必须写清（不静默套用）。
+
+        C3 起位置改到附录（主文只留一行指引）：口径说明不进主文版面，但**证据不删**，
+        所以断言改为"附录里有完整条件"，而不是"主文里必须有这个标题"。
+        """
         import report_brief
         tid, _ = self._env()
         st = report_brief.build_structure(tid, self.GOAL, "")
         md = report_brief.render_brief_markdown(st, "")
-        self.assertIn("**比率适用条件**", md)
-        self.assertIn("归母净利率", md)
-        self.assertIn("非金融企业", md)
-        self.assertIn("不得机械套用", md)
+        self.assertIn("比率适用条件与适用范围见附录", md)
+        _head, _, tail = md.partition("## 附录")
+        self.assertIn("### 比率适用条件", tail)
+        self.assertIn("归母净利率", tail)
+        self.assertIn("非金融企业", tail)
+        self.assertIn("不得机械套用", tail)
         # 现金流覆盖倍数的符号条件必须写明（负值不表示利润有现金支撑）
-        self.assertIn("同为正", md)
+        self.assertIn("同为正", tail)
 
 
 class TestReviewHonestyProjection(unittest.TestCase):

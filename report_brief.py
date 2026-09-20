@@ -706,15 +706,27 @@ def _risks(task_id: str, goal: str, body: str, *, project=None,
 
     # ④ 模型正文里的风险小节（原样带出，但标注"由模型提出、需取得证据"）。
     # 结论与免责声明不是风险：它们是收尾陈述，列成风险只会稀释真正要查的事项。
+    # 模型常把一条风险写成"主张 + 若干子项"（`- **主张**` 后面跟 `- 证据：…`、
+    # `- 会使判断改变的观察条件：…`），逐行抓取会把子项也当成独立风险——既重复又
+    # 读不出主张（C3：减少相同风险的重复）。这里跳过子项行并按文本去重。
+    _SUBITEM_PREFIXES = ("证据：", "对应证据", "会使判断改变", "改变判断的观察条件",
+                         "需要补充的材料", "需补材料", "出处：", "来源：")
     section = _section_text(body, ("风险", "待核查", "核查"))
     if section:
+        seen_texts: set[str] = set()
         for line in section.splitlines():
             t = line.strip().lstrip("#-*• ").strip()
             if not t or len(t) < 6:
                 continue
+            if any(t.startswith(p) for p in _SUBITEM_PREFIXES):
+                continue
             if any(k in t for k in ("免责声明", "不构成投资建议", "不构成任何投资建议",
                                     "结论边界", "本报告不含")):
                 continue
+            key = _sentence_key(t)[:120]
+            if key in seen_texts:
+                continue
+            seen_texts.add(key)
             _add("from_report", t,
                  evidence_note="由模型提出，尚未与底稿或年报证据绑定",
                  would_change="取得对应证据后方可改变判断；无证据时不得据此行动",
@@ -1118,6 +1130,9 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
     who = sc.get("company") or "目标公司"
     span = "–".join(str(y) for y in periods) if len(periods) >= 2 else str(periods or "")
     lines: list[str] = [f"# {who} 经营分析简报（{span} 年度）", ""]
+    # 附录延后写入的两块（C3）：口径说明与次要图表不进主文版面
+    _appendix_extra: list[tuple[str, list[str]]] = []
+    _appendix_charts: list[dict] = []
     # 资料范围与状态（不隐藏限制）。"数据时效"用验收器认的字样：本简报由代码装配，
     # 时效声明也必须是代码给的（模型不写也不能因此丢分）
     lines.append(f"> 报表口径：{sc.get('caliber') or '未声明'}；"
@@ -1190,16 +1205,25 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
                          "本次**不呈现**；银行需专用指标（净息差、不良与拨备、资本充足率等），"
                          "当前版本未配置。")
         elif conds:
+            # C3：比率适用条件与适用范围是**口径说明**，放附录（主文只留一行指引），
+            # 否则同一份说明会在主文里占掉半页，把"变化与缺口"挤下去
             lines.append("")
-            lines.append("**比率适用条件**：")
-            for label, cond in conds:
-                lines.append(f"- {label}：{cond}")
-            lines.append(f"- 适用范围：{_ratio_scope_note()}")
+            lines.append("- 比率适用条件与适用范围见附录（主文不重复口径说明）。")
+            _appendix_extra.append(("### 比率适用条件", [
+                *(f"- {label}：{cond}" for label, cond in conds),
+                f"- 适用范围：{_ratio_scope_note()}",
+            ]))
     charts = structure.get("charts") or []
     if charts:
         lines.append("")
         lines.append("## 图表")
-        for i, c in enumerate(charts, 1):
+        # C3：主文只留能帮助判断的图（最多 3 张，且优先 publish 级），其余置附录——
+        # 图注仍然逐图回答"这张图在问什么"，但不再让附录图挤占主文版面
+        main_charts = [c for c in charts if str(c.get("grade") or "publish") == "publish"][:3]
+        if not main_charts:
+            main_charts = charts[:3]
+        rest = [c for c in charts if c not in main_charts]
+        for i, c in enumerate(main_charts, 1):
             lines.append(f"![{c.get('file')}](charts/{c.get('file')})")
             lines.append("")
             # 图注回答"这张图在回答什么、数据说了什么"；**正文图注不带数字**——
@@ -1209,6 +1233,10 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
             head = q or f"{c.get('type') or '图'}"
             tail = f"；{obs}" if obs else ""
             lines.append(f"图 {i}：{head}{tail}（数据同『财务对照』表与底稿）")
+        if rest:
+            lines.append("")
+            lines.append(f"- 其余 {len(rest)} 张图（含比率分面）见附录『其他图表』。")
+            _appendix_charts.extend(rest)
     lines.append("")
     lines.append("## 分析")
     analysis = str(structure.get("analysis") or "").strip() or _analysis_section(body)
@@ -1254,11 +1282,10 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
         lines.append(f"- {t}")
     unproven = changes.get("unproven") or []
     if unproven:
+        # C3：同一件事不在两处重复说——"还不能证明什么"的完整条目（含要补的材料）
+        # 只在『风险与核查』出现，这里只留一行指引（原先两节各写一遍，读者看到两份）
         lines.append("")
-        lines.append("**还不能证明什么**：")
-        for u in unproven:
-            lines.append(f"- {u.get('label')}的变化原因：需先取得"
-                         f"{'、'.join(u.get('materials') or [])}")
+        lines.append("- 尚未证明的部分（需补材料）见『风险与核查』，本处不重复。")
     excluded = list((structure.get("evidence") or {}).get("excluded") or [])
     if excluded:
         # 非准入材料照实说明（错主体/超资料截止/期间不符/缺字段），不静默丢弃
@@ -1279,14 +1306,24 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
     lines.append("## 风险与核查")
     risks = structure.get("risks") or []
     if risks:
-        for r in risks:
+        # C3：每条风险压成"一行主张 + 一行证据/条件/材料"，主文最多 6 条，
+        # 其余（多为同类的底稿审计项）置附录——原先 12 条 × 3 行会占掉两三页
+        _main_risks = risks[:6]
+        _rest_risks = risks[6:]
+        for r in _main_risks:
             lines.append(f"- **{r.get('text')}**")
-            lines.append(f"  - 对应证据：{r.get('evidence') or '底稿无对应证据'}")
+            bits = [f"证据：{r.get('evidence') or '底稿无对应证据'}"]
             if r.get("would_change"):
-                lines.append(f"  - 会使判断改变的观察条件：{r.get('would_change')}")
+                bits.append(f"改变判断的观察条件：{r.get('would_change')}")
             mats = r.get("materials_needed") or []
             if mats:
-                lines.append(f"  - 需要补充的材料：{'、'.join(mats)}")
+                bits.append(f"需补材料：{'、'.join(mats)}")
+            lines.append(f"  - {'；'.join(bits)}")
+        if _rest_risks:
+            lines.append(f"- 另有 {len(_rest_risks)} 条同类核查项（底稿审计/材料清单）见附录。")
+            _appendix_extra.append(("### 其他核查项", [
+                *(f"- **{r.get('text')}**（证据：{r.get('evidence') or '底稿无对应证据'}）"
+                  for r in _rest_risks)]))
     else:
         lines.append("- 底稿未记录缺口；仍建议核对现金流量表附注与营运资本变化。")
     lines.append("")
@@ -1341,9 +1378,24 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
         lines.append(f"- 计算底稿：{f.get('file')}（{f.get('purpose')}）")
     if ap.get("note"):
         lines.append(f"- 定位说明：{ap.get('note')}")
+    # C3：主文让出来的两块（口径说明 / 次要图表）在附录按原样呈现，证据不因压版面而丢
+    for title, block in _appendix_extra:
+        lines.append("")
+        lines.append(title)
+        lines.extend(block)
+    if _appendix_charts:
+        lines.append("")
+        lines.append("### 其他图表")
+        for c in _appendix_charts:
+            lines.append(f"![{c.get('file')}](charts/{c.get('file')})")
+            lines.append("")
+            q = str(c.get("question") or "").strip()
+            obs = str(c.get("caption") or c.get("observation") or "").strip()
+            tail = f"；{obs}" if obs else ""
+            lines.append(f"图：{q or c.get('type') or '图'}{tail}（数据同『财务对照』表与底稿）")
     lines.append("")
     lines.append("### 版本与验收状态")
-    lines.append("> 本简报由代码装配关键数据与来源，模型仅撰写『分析』一节；"
+    lines.append("> 关键数据与来源清单由底稿生成（可复算）；『分析』一节为模型撰写。"
                  "交付状态与验收结论见任务页与导出清单（未验收时按草稿处理）。")
     lines.append("")
     lines.append("### 免责声明")

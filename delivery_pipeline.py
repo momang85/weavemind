@@ -638,8 +638,16 @@ def assemble_and_verify(task_id: str, goal: str, body: str, *,
         write_review_facts(task_id, facts, ws_dir=ws_dir)
 
     notes: list[str] = []
+    # C3：**装配说明不进正文**——"研究简报由代码装配（关键数据/来源/声明）"是工程说明，
+    # 读者要的是结论与证据；它改为写进任务详情（structure 的 assembly_note）与日志。
     if brief_note:
-        notes.append(f"> **装配说明**：{brief_note}。")
+        try:
+            _st_now = report_brief.read_structure(task_id, ws_dir=ws_dir) or {}
+            _st_now["assembly_note"] = brief_note
+            report_brief.write_structure(task_id, _st_now, ws_dir=ws_dir)
+        except Exception as exc:                     # noqa: BLE001 - 详情写不进去不影响交付
+            logger.warning("装配说明写入任务详情失败（task=%s）：%s",
+                           task_id, str(exc)[:120])
     wp_note = gaps_note(wp)
     if wp_note:
         notes.append(wp_note)
