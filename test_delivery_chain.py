@@ -5168,26 +5168,69 @@ class TestFinancialResearchCharts(unittest.TestCase):
             self.ROWS, self.DERIVED, unit="亿元", source="东方财富数据中心（A股）",
             company="贵州茅台", caliber="合并", periods=[2023, 2024])
 
-    def test_three_specs_are_valid_and_grouped(self):
+    def test_specs_are_faceted_and_valid(self):
+        """规格按**问题**分面：对比 1 张 + 同比 1 张 + **每个比率各 1 张**。
+
+        为什么不再挤一张（实机 chart_3）：归母净利率（利润率）、经营现金流覆盖（倍数）、
+        资产负债率（杠杆）经济含义与量级不同，同轴会把小项压扁；且长标签会被类别清洗
+        退化成"2024年"，x 轴混入年份、分组与系列配对错位。
+        """
         import chart_specs as CS
         specs = self._specs()
-        self.assertEqual(len(specs), 3)
+        # 两张总览 + 每个有≥2期的比率各一张（本夹具两个比率 → 共 4 张）
         self.assertEqual([s["type"] for s in specs],
-                         ["grouped_bar", "bar", "grouped_bar"])
+                         ["grouped_bar", "bar", "bar", "bar"])
         for s in specs:
             self.assertEqual(CS.validate_spec(s), [], s.get("title"))
             self.assertEqual(s["source"], "东方财富数据中心（A股）",
                              "图注要写可读来源名，不是接口 URL")
+            self.assertTrue(s.get("question"), "每张图要回答一个问题")
+            self.assertTrue(s.get("conclusion"), "每张图要有一条由数据算出的观察")
         # 两期对比图：每个指标两年并排（分组靠 caliber=年度）
         cmp_spec = specs[0]
         self.assertEqual({r["caliber"] for r in cmp_spec["data"]}, {"2023年", "2024年"})
         self.assertEqual(len({r["label"] for r in cmp_spec["data"]}), 3)
         # 结论由数据算出（不是"随年份变化"这类同义反复）
-        self.assertIn("38.85", specs[0]["conclusion"])
-        self.assertIn("107.23", specs[2]["conclusion"])
+        self.assertIn("38.85", cmp_spec["conclusion"])
+
+    def test_ratio_facets_do_not_mix_metrics_on_one_axis(self):
+        """回归：比率图**一张只画一个指标**，类别是期间、单位统一为 %。"""
+        import chart_specs as CS
+        facets = self._specs()[2:]
+        self.assertTrue(facets)
+        for f in facets:
+            labels = [str(r.get("label")) for r in f["data"]]
+            self.assertEqual(set(labels), {"2023年", "2024年"},
+                             f"比率图的类别应是期间，实际 {labels}")
+            self.assertEqual({str(r.get("unit")) for r in f["data"]}, {"%"},
+                             "同一张图不得混装不同单位")
+            self.assertEqual(f["x_axis_title"], "期间")
+            # 纵轴写清是哪个比率（而不是笼统"比率（%）"）
+            self.assertIn(str(f["data"][0].get("label"))[:0] + "（%）", f["y_axis_title"])
+        # 观察用**百分点**表述，且覆盖倍数的符号结论与读数一致
+        cov = next(f for f in facets if "覆盖" in f["title"])
+        self.assertIn("个百分点", cov["conclusion"])
+        last_val = [r["value"] for r in cov["data"]][-1]
+        self.assertIn("高于归母净利润" if last_val > 100 else "低于归母净利润",
+                      cov["conclusion"], "符号结论必须与读数一致")
+        # 每个比率只出现一次（没有把两个比率塞进同一张图）
+        titles = [f["title"] for f in facets]
+        self.assertEqual(len(titles), len(set(titles)))
+
+    def test_period_labels_keep_chronological_order(self):
+        """回归：类别是"2023年/2024年"这类期间标签时不得按数值降序重排。
+
+        实机反例：判定只认纯数字标签，"2023年"带"年"字匹配不上 → 两期被排成
+        "2024年/2023年"，颜色与年份的对应也跟着反了。
+        """
+        import chart_specs as CS
+        self.assertTrue(CS.is_period_labels(["2023年", "2024年"]))
+        self.assertTrue(CS.is_period_labels(["2023", "2024"]))
+        self.assertFalse(CS.is_period_labels(["营业收入", "归母净利润"]))
+        self.assertFalse(CS.is_period_labels([]))
 
     def test_render_script_draws_grouped_bar(self):
-        """真跑一遍渲染脚本：分组柱必须画出来（模板是字符串，靠这条兜住）。"""
+        """真跑一遍渲染脚本：分面后的每张图都必须画出来（模板是字符串，靠这条兜住）。"""
         import subprocess
         import sys
         import chart_assembly as CA
@@ -5196,16 +5239,27 @@ class TestFinancialResearchCharts(unittest.TestCase):
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         script = CA.RENDER_CHART_SCRIPT.replace("__REPO_ROOT__", str(repo))
         (Path(tmp) / "render_charts.py").write_text(script, encoding="utf-8")
+        specs = self._specs()
         (Path(tmp) / "chart_data.json").write_text(
-            json.dumps({"charts": self._specs()}, ensure_ascii=False), encoding="utf-8")
+            json.dumps({"charts": specs}, ensure_ascii=False), encoding="utf-8")
         proc = subprocess.run([sys.executable, "render_charts.py"], cwd=tmp,
                               capture_output=True, text=True, timeout=600)
         self.assertEqual(proc.returncode, 0, proc.stderr[:400])
         out = proc.stdout
-        self.assertIn("total=3 skipped=0", out, out[:400])
-        for name in ("chart_1.png", "chart_2.png", "chart_3.png"):
-            self.assertTrue((Path(tmp) / name).exists(), name)
-            self.assertGreater((Path(tmp) / name).stat().st_size, 5000, name)
+        self.assertIn(f"total={len(specs)} skipped=0", out, out[:400])
+        for i in range(1, len(specs) + 1):
+            p = Path(tmp) / f"chart_{i}.png"
+            self.assertTrue(p.exists(), f"chart_{i}.png 未生成")
+            self.assertGreater(p.stat().st_size, 5000, f"chart_{i}.png 过小")
+        # 图注信息（问题/观察）要写进 manifest，简报才拿得到
+        man = json.loads((Path(tmp) / "chart_manifest.json").read_text(encoding="utf-8"))
+        entries = {c["file"]: c for c in man["charts"]}
+        self.assertEqual(len(entries), len(specs))
+        for i in range(1, len(specs) + 1):
+            e = entries[f"chart_{i}.png"]
+            self.assertTrue(e.get("question"), e)
+            self.assertTrue(e.get("observation"), e)
+            self.assertIn(e.get("grade"), ("publish", "draft"))
 
     def test_chart_rows_keep_only_contract_periods(self):
         """越界期间不进图：报告正文声明"未予采用"的数据，图上也不能出现。"""

@@ -252,6 +252,10 @@ export default function TaskConsole() {
           name: s.instruction || 'Step', status: (s.result?.status || 'pending').toLowerCase(),
         })),
         final_report: d.report || d.final_report || '',
+        // F3-B：研究简报的结构化对象与导出版本绑定——结果页据此呈现
+        // 关键发现/缺口/证据定位，以及"包生成于 vX、当前 vY"的如实标注
+        research: d.research ?? null,
+        export: d.export ?? null,
       }
       // P0-1：随任务详情缓存验收缺口摘要（报告视图顶部横幅也用）
       const acc = d.acceptance

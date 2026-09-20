@@ -1,0 +1,40 @@
+{
+  "name": "loss_mixed_units",
+  "note": "② 亏损 + 经营现金净流出 + 混合单位：基期为负不得算同比、覆盖倍数不表示现金支撑；2024 年以万元披露、2023 年以亿元披露，同比须经单位换算后仍正确（E 批的单位归一）。",
+  "review": {"verdict": "PASS", "required": false, "degraded_reason": ""},
+  "contract": {
+    "company": "示例亏损公司",
+    "company_id": "000555.SZ",
+    "market": "cn",
+    "periods": [2023, 2024],
+    "caliber": "合并",
+    "as_of": "2025-04-30",
+    "perspective": "bank_corporate",
+    "identity_source": "scenario"
+  },
+  "goal": "研究示例亏损公司 2023 与 2024 两个年度的营业收入、归母净利润、经营活动现金流净额，合并报表口径，数据截至 2025-04-30。",
+  "financials": {
+    "financials": [
+      {"year": 2023, "report_type": "年报", "revenue": 88.0, "net_profit": -12.5,
+       "operating_cashflow": -8.4, "unit": "亿元", "disclosure_date": "2024-04-20"},
+      {"year": 2024, "report_type": "年报", "revenue": 760000.0, "net_profit": -302000.0,
+       "operating_cashflow": -216000.0, "unit": "万元", "disclosure_date": "2025-04-20"}
+    ],
+    "metadata": {"source": "eastmoney_ashare", "company": "示例亏损公司",
+                 "currency": "CNY", "caliber": "合并",
+                 "caliber_evidence": "含 PARENTNETPROFIT"},
+    "raw": {"url": "https://datacenter-web.eastmoney.com/api/data/v1/get?x=2", "text": "{}"}
+  },
+  "docs": [
+    {"title": "示例亏损公司2024年年度报告",
+     "url": "https://static.cninfo.com.cn/finalpage/2025-04-20/9.PDF",
+     "text": "第三节 管理层讨论与分析\n\n一、经营情况讨论与分析\n\n2024年度营业收入76亿元，同比下降13.6%；归母净利润为负，主要系计提资产减值与产品价格下行所致。\n\n七、财务报表附注\n\n现金流量表附注：经营活动现金流量净额为净流出，主要系回款放缓与存货增加。"}
+  ],
+  "model_body": "# 示例亏损公司 2023–2024 年度财务数据\n\n## 分析与结论\n\n2024 年营业收入 76亿元，同比下降；归母净利润为负（-30.2亿元），经营活动现金流净额为净流出（-21.6亿元）。亏损与净流出同时出现时，经营现金流对归母净利润的覆盖倍数不表示利润有现金支撑。\n\n基期为负（2023 年归母净利润 -12.5亿元），同比不具可比含义。\n\n风险与结论：两期均为亏损，不能据此判断长期趋势；需核查减值计提与存货明细。\n",
+  "expect": {
+    "coverage_contains": "不表示利润有现金支撑",
+    "no_yoy_for": ["revenue", "net_profit", "operating_cashflow"],
+    "problems_contain": "币种/单位不一致",
+    "chart_min": 2
+  }
+}

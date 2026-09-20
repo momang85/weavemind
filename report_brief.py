@@ -864,7 +864,12 @@ def _charts(task_id: str, *, project=None) -> list[dict]:
             continue          # 检索统计图（词频/域名分布）不进研究简报
         if f:
             out.append({"file": f, "type": str(c.get("type") or ""),
-                        "keywords": list(c.get("keywords") or [])})
+                        "keywords": list(c.get("keywords") or []),
+                        "section_hint": str(c.get("section_hint") or ""),
+                        "question": str(c.get("question") or ""),
+                        "observation": str(c.get("observation") or ""),
+                        "caption": str(c.get("caption") or ""),
+                        "grade": str(c.get("grade") or "publish")})
     return out
 
 
@@ -985,8 +990,13 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
         for i, c in enumerate(charts, 1):
             lines.append(f"![{c.get('file')}](charts/{c.get('file')})")
             lines.append("")
-            lines.append(f"图 {i}：{c.get('file')}（{c.get('type') or '图'}；"
-                         f"数据同『财务对照』表与底稿）")
+            # 图注回答"这张图在回答什么、数据说了什么"；**正文图注不带数字**——
+            # 正文里的数字必须逐个可溯源，图注单列读数会变成"不可溯源数字"
+            q = str(c.get("question") or "").strip()
+            obs = str(c.get("caption") or c.get("observation") or "").strip()
+            head = q or f"{c.get('type') or '图'}"
+            tail = f"；{obs}" if obs else ""
+            lines.append(f"图 {i}：{head}{tail}（数据同『财务对照』表与底稿）")
     lines.append("")
     lines.append("## 分析")
     analysis = str(structure.get("analysis") or "").strip() or _analysis_section(body)

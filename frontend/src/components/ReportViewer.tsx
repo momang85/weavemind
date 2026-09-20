@@ -32,6 +32,7 @@ import {
   Share2, Link2, Copy, Check, X, Trash2, CalendarClock, ListTree, Quote, Fingerprint,
 } from 'lucide-react'
 import { WorkingPaperPanel } from './WorkingPaperPanel'
+import ResearchBriefPanel from './ResearchBriefPanel'
 
 /* ===================== 报告结构化解析（纯函数，无新增依赖） ===================== */
 
@@ -535,6 +536,25 @@ export default memo(function ReportViewer() {
   const currentTaskId = useTaskStore(s => s.currentTaskId)
   const demoMode = useTaskStore(s => s.demoMode)
   const taskIdForFiles = currentTaskId || report?.taskId || null
+  // F3-B：人工修订后重取任务详情（正文/结构对象/导出版本都换到新版本）
+  const reloadTask = async (tid: string) => {
+    try {
+      const res = await fetch(`/task/${tid}`)
+      if (!res.ok) return
+      const d = await res.json()
+      const cur = useTaskStore.getState().report
+      if (!cur) return
+      useTaskStore.getState().setReport({
+        ...cur,
+        final_report: d.report || cur.final_report,
+        research: d.research ?? cur.research,
+        export: d.export ?? cur.export,
+        acceptance: d.acceptance && Array.isArray(d.acceptance.gaps)
+          ? { overall: d.acceptance.overall || d.status, gaps: d.acceptance.gaps }
+          : cur.acceptance,
+      })
+    } catch { /* 重取失败保留旧视图，面板会显示提交结果 */ }
+  }
   const [showLogs, setShowLogs] = useState(false)
   // E1 溯源页：POST /api/verify 的三档分类结果
   const [verifyData, setVerifyData] = useState<any>(null)
@@ -945,6 +965,15 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
           </div>
         ))}
       </div>
+
+      {/* F3-B：研究简报面板——关键发现 → 缺口 → 证据 → 修改/重验 → 导出版本绑定。
+          放在正文之前：金融读者先看结论与缺口，再决定要不要改、怎么导。 */}
+      <ResearchBriefPanel
+        taskId={report.taskId}
+        research={report.research}
+        exportState={report.export}
+        onRevised={() => { if (report.taskId) void reloadTask(report.taskId) }}
+      />
 
       {/* Report card */}
       <div className="bg-slate-900 border border-emerald-500/20 rounded-xl">

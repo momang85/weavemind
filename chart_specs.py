@@ -323,6 +323,9 @@ def financial_research_specs(rows: list[dict], derived: list[dict], *,
         specs.append({
             "question": f"{who}{periods[0]} 与 {periods[-1]} 三个核心指标的规模对比如何？",
             "conclusion": conclusion,
+            # 图注（报告正文用）**不带数字**：正文里的数字必须可溯源，图注里的
+            # 同比/百分点若单列一处就成"不可溯源数字"（实测把溯源率从 ~100% 拉到 69%）
+            "caption": "两期核心指标规模对比（升/降方向见图中标注）",
             "type": "grouped_bar",
             "title": f"{who}{periods[0]} vs {periods[-1]} 核心指标对比（{unit or '原值'}）",
             "x_axis_title": "核心指标",
@@ -356,6 +359,7 @@ def financial_research_specs(rows: list[dict], derived: list[dict], *,
                            f"（{best['value']:g}%），"
                            f"{metric_label(worst.get('metric'))} 最低（{worst['value']:g}%）"),
             "type": "bar",
+            "caption": "各核心指标同比增速（升/降方向见图中标注）",
             "title": f"{who}{last_year} 年核心指标同比增速（%）",
             "x_axis_title": "核心指标",
             "y_axis_title": "同比（%）",
@@ -372,59 +376,66 @@ def financial_research_specs(rows: list[dict], derived: list[dict], *,
             ],
         })
 
-    # ③ 盈利与现金流质量（柱：净利率 / 现金流对净利润覆盖 / 资产负债率 等 %）
-    #    A1：金融机构不生成（企业口径比率对银行不成立，画出来就是误导）
+    # ③ 质量比率：**按指标分面**（每个比率一张两期对比图）
+    #    为什么不再挤一张：归母净利率（利润率）、经营现金流覆盖（倍数，可 >100%）、
+    #    资产负债率（杠杆）、研发投入强度（投入强度）经济含义与量级都不同，同轴会把
+    #    小项压成看不见；且长标签（覆盖 14 字）会被类别清洗退化成"2024年"，
+    #    x 轴混入年份、分组与系列配对错位（实机 chart_3）。
+    #    A1：金融机构不生成（企业口径比率对银行不成立，画出来就是误导）。
     ratio_rows = [d for d in derived
                   if str(d.get("metric") or "") in _QUALITY_RATIOS
                   and isinstance(d.get("value"), (int, float))
                   and subject_type != "financial"]
-    if len(ratio_rows) >= 2:
-        cov = next((d for d in ratio_rows
-                    if d.get("metric") == "cashflow_coverage"
-                    and d.get("year") == (periods[-1] if periods else None)), None)
-        # 覆盖倍数的解释**带符号条件**：只有分子分母都为正时才谈"现金支撑"；
-        # 亏损或经营现金净流出时该倍数没有质量含义（负÷负也会 >100%）。
-        _np_val = next((r.get("value") for r in rows
-                        if r.get("metric") == "net_profit"
-                        and r.get("year") == (periods[-1] if periods else None)), None)
-        _cf_val = next((r.get("value") for r in rows
-                        if r.get("metric") == "operating_cashflow"
-                        and r.get("year") == (periods[-1] if periods else None)), None)
-        if cov is not None:
+    by_metric: dict[str, list[dict]] = {}
+    for d in ratio_rows:
+        by_metric.setdefault(str(d.get("metric") or ""), []).append(d)
+    last_year = periods[-1] if periods else None
+    for metric in _QUALITY_RATIOS:
+        series = sorted(by_metric.get(metric) or [], key=lambda d: d.get("year") or 0)
+        if len(series) < 2:
+            continue                      # 单点不画（无对比就没有观察）
+        label = str(series[0].get("metric_label") or metric_label(metric))
+        vals = [d.get("value") for d in series]
+        # 观察由数据算出：变化用**百分点**表述（比率型指标的规范写法）
+        delta = vals[-1] - vals[0]
+        direction = "上升" if delta > 0 else "下降" if delta < 0 else "持平"
+        observation = (f"{label} {vals[0]:g}% → {vals[-1]:g}%，"
+                       f"{direction} {abs(delta):.2f} 个百分点")
+        if metric == "cashflow_coverage":
+            _np_val = next((r.get("value") for r in rows
+                            if r.get("metric") == "net_profit"
+                            and r.get("year") == last_year), None)
+            _cf_val = next((r.get("value") for r in rows
+                            if r.get("metric") == "operating_cashflow"
+                            and r.get("year") == last_year), None)
             if isinstance(_np_val, (int, float)) and _np_val < 0:
-                conclusion = (f"最新一期归母净利润为负（{_np_val:g}），"
-                              f"经营现金流对归母净利润的覆盖（{cov['value']:g}%）"
-                              "不表示利润有现金支撑")
+                observation += f"；最新一期归母净利润为负（{_np_val:g}），该倍数不表示利润有现金支撑"
             elif isinstance(_cf_val, (int, float)) and _cf_val < 0:
-                conclusion = (f"最新一期经营活动现金流为净流出（{_cf_val:g}），"
-                              "覆盖倍数不表示利润有现金支撑")
-            elif cov["value"] > 100:
-                conclusion = (f"最新一期经营现金流对归母净利润覆盖 {cov['value']:g}%"
-                              "（>100%，当期经营现金流高于归母净利润）")
+                observation += "；最新一期经营现金流为净流出，该倍数不表示利润有现金支撑"
+            elif vals[-1] > 100:
+                observation += "；当期经营现金流高于归母净利润（>100%）"
             else:
-                conclusion = (f"最新一期经营现金流对归母净利润覆盖 {cov['value']:g}%"
-                              "（<100%，当期经营现金流低于归母净利润）")
-        else:
-            conclusion = "盈利与现金流质量指标（比率，单位 %）"
+                observation += "；当期经营现金流低于归母净利润（<100%）"
         specs.append({
-            "question": f"{who}盈利质量与现金流质量如何？",
-            "conclusion": conclusion,
-            "type": "grouped_bar",
-            "title": f"{who}盈利与现金流质量两期对比（%）",
-            "x_axis_title": "质量指标",
-            "y_axis_title": "比率（%）",
+            "question": f"{who}{label} {periods[0]} 与 {periods[-1]} 两期变化如何？",
+            "conclusion": observation,
+            "caption": f"{label}两期{'上升' if delta > 0 else '下降' if delta < 0 else '持平'}"
+                       "（百分点变化见『同比与比率』块）",
+            "type": "bar",
+            "title": f"{who}{label}两期对比（%）",
+            "x_axis_title": "期间",
+            "y_axis_title": f"{label}（%）",
             "unit": "%",
             "time_range": span,
             "region": "未标注",
-            "sample_size": str(len(ratio_rows)),
+            "sample_size": str(len(series)),
             "source": src,
             "section_hint": "盈利质量",
             "data": [
-                {"label": str(d.get("metric_label") or metric_label(d.get("metric"))),
-                 "value": d.get("value"), "unit": "%",
+                {"label": f"{d.get('year')}年", "value": d.get("value"), "unit": "%",
                  "year": d.get("year"), "caliber": f"{d.get('year')}年",
                  "source": src}
-                for d in ratio_rows
+                for d in series
             ],
         })
     return specs
@@ -432,6 +443,21 @@ def financial_research_specs(rows: list[dict], derived: list[dict], *,
 
 # 质量类比率（与 working_paper._RATIO_SPECS 的派生指标同名）
 _QUALITY_RATIOS = ("net_margin", "cashflow_coverage", "debt_ratio", "rd_intensity")
+
+_PERIOD_LABEL_RE = re.compile(r"^\d{4}|\d+(\.\d+)?$")
+
+
+def is_period_labels(labels) -> bool:
+    """类别标签是否全是"期间/序号"（`2023年`、`2024`、`1`）——是则保持给定顺序，不按值排序。
+
+    实机反例：只认纯数字标签时，"2023年"匹配不上 → 比率分面图的两期被按数值降序排成
+    "2024年/2023年"，颜色与年份的对应也跟着反了。带"年/月/季度"后缀的一并认作期间标签。
+    """
+    items = [str(x or "").strip() for x in (labels or [])]
+    if not items:
+        return False
+    norm = [re.sub(r"[年月日季度]+$", "", x) for x in items]
+    return all(re.fullmatch(r"\d{4}|\d+(\.\d+)?", x) for x in norm)
 
 
 def wrap_rows_to_specs(rows: list[dict]) -> list[dict]:

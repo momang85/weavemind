@@ -3644,6 +3644,9 @@ def _get_scheduled_jobs(self, p):
 _FILES_PUBLIC_PREFIXES = ("reports/", "charts/")
 _FILES_PUBLIC_FILES = ("data/ranking.csv",)
 _FILES_AUTHED_PREFIXES = ("reports/", "charts/", "data/")
+# F3-B：交付包与导出清单落在**工作区根目录**，此前不在白名单 → 包根本下不来。
+# 只对登录用户放行，且限定文件名形状（路径穿越仍由 _safe_workspace_path 兜底）。
+_FILES_AUTHED_ROOT_RE = re.compile(r"^(deliverables_[0-9_]+\.zip|export_manifest\.json)$")
 
 
 def _files_visible_rel(relative: str, authed: bool) -> bool:
@@ -3653,7 +3656,7 @@ def _files_visible_rel(relative: str, authed: bool) -> bool:
     if not rel or any(seg in ("..", ".") for seg in rel.split("/")):
         return False
     if authed:
-        return rel.startswith(_FILES_AUTHED_PREFIXES)
+        return rel.startswith(_FILES_AUTHED_PREFIXES) or bool(_FILES_AUTHED_ROOT_RE.match(rel))
     return rel.startswith(_FILES_PUBLIC_PREFIXES) or rel in _FILES_PUBLIC_FILES
 
 
@@ -4291,10 +4294,19 @@ def _get_task_page(self, p):
             acceptance_bound = None
             llm_calls = None
             content_filter = None
+            research = None
+            export = None
             try:
                 import json as _json
                 from workspace import task_workspace as _tws
                 _ws = _tws(tid)
+                # F3-B：研究简报的结构化对象（关键发现/缺口/证据定位/图表问题）——
+                # 结果页要按"发现→缺口→证据→修改→导出"呈现，这些字段就得给到前端。
+                # 只读工作区文件，缺文件即 None（不编）。
+                try:
+                    research = _research_payload(tid, _ws)
+                except Exception as exc:
+                    logger.warning("研究简报读取失败（task=%s）：%s", tid, str(exc)[:120])
                 # F1：内容过滤/隔离的脱敏汇总（规则分布与条数；文件里只有形状，
                 # 没有正文与提示词）——隔离过的资料必须让用户看得见
                 try:
@@ -4354,6 +4366,26 @@ def _get_task_page(self, p):
                         "version_bound": bool(_state.get("accepted_body_matches")),
                         "report_version_id": _state.get("identity_id") or "",
                     }
+                # F3-B：导出与版本绑定——Markdown/PDF 按当前版本导出（带版本响应头），
+                # 交付包可能生成于**更早**的版本：如实标注"包生成于 vX，当前 vY"，
+                # 不假装包与当前版本同版。
+                try:
+                    _exp = _read_export_manifest(tid)
+                    _zips = sorted((p for p in _ws.glob("deliverables_*.zip")),
+                                   key=lambda p: p.stat().st_mtime, reverse=True)
+                    export = {
+                        "manifest": _exp or None,
+                        "manifest_version_id": str((_exp or {}).get("report_version_id") or ""),
+                        "current_version_id": str((delivery or {}).get("version_id") or ""),
+                        "package": (_zips[0].name if _zips else ""),
+                        "package_generated_at": (
+                            time.strftime("%Y-%m-%d %H:%M",
+                                          time.localtime(_zips[0].stat().st_mtime))
+                            if _zips else ""),
+                    }
+                except Exception as exc:
+                    logger.warning("导出信息读取失败（task=%s）：%s", tid, str(exc)[:120])
+                    export = None
             except Exception as exc:
                 logger.warning("状态补充字段读取失败（task=%s）：%s", tid, str(exc)[:120])
             return self._json({
@@ -4378,9 +4410,117 @@ def _get_task_page(self, p):
             "llm_calls": llm_calls,
             # F1：内容过滤/隔离的脱敏汇总（只含规则 ID/条数/长度，无正文）
             "content_filter": content_filter,
+            "research": research,
+            "export": export,
         })
         return self._json({"error":"not found"},404)
 
+def _research_payload(tid: str, ws) -> dict | None:
+        """研究简报的结构化对象 → 页面字段（F3-B）。只读、缺文件即空，不编造。
+
+        数据来源与页面/导出口径一致：`report_structure.json`（代码装配的关键发现/引用缺口/
+        证据缺口/字段位置/图表问题）、`narrative_evidence.json`（证据准入与未采用原因）、
+        `chart_manifest.json`（图表问题与观察）、`report_versions.json`（同版身份）。
+        """
+        import json as _json
+        out: dict = {}
+        sp = ws / "report_structure.json"
+        if sp.exists():
+            try:
+                st = _json.loads(sp.read_text(encoding="utf-8")) or {}
+            except Exception:
+                st = {}
+            sc = st.get("scope") or {}
+            table = st.get("metrics_table") or {}
+            ev = st.get("evidence") or {}
+            ch = st.get("change_explanation") or {}
+            appendix = st.get("appendix") or {}
+            out["scope"] = {"company": sc.get("company") or "", "periods": sc.get("periods") or [],
+                            "caliber": sc.get("caliber") or "", "as_of": sc.get("as_of") or "",
+                            "unit": sc.get("unit") or "", "perspective": sc.get("perspective") or "",
+                            "subject_type": sc.get("subject_type") or "",
+                            "subject_type_source": sc.get("subject_type_source") or ""}
+            out["findings"] = [{"text": str(f.get("text") or ""),
+                                "fact_ids": list(f.get("fact_ids") or [])}
+                               for f in (st.get("findings") or [])]
+            # 缺口分三类显示：必需数据（底稿缺口/问题）、证据（未取得正文定位的类别）、
+            # 引用（映射不到采用来源的编号）；另记资料截止是否成立
+            out["gaps"] = {
+                "required_data": [{"kind": str(r.get("kind") or ""),
+                                   "text": str(r.get("text") or ""),
+                                   "materials": list(r.get("materials_needed") or [])}
+                                  for r in (st.get("risks") or [])
+                                  if str(r.get("kind") or "") in ("fact_gap", "problem", "audit")],
+                "evidence": list(ev.get("missing_labels") or []),
+                "citations": [int(n) for n in (st.get("citation_gaps") or [])],
+                "as_of": str(sc.get("as_of") or ""),
+                "unproven": [{"label": str(u.get("label") or ""),
+                              "materials": list(u.get("materials") or [])}
+                             for u in (ch.get("unproven") or [])],
+            }
+            out["evidence"] = {
+                "located": int(ev.get("located") or 0),
+                "missing_labels": list(ev.get("missing_labels") or []),
+                "excluded": [{"title": str(e.get("title") or ""),
+                              "url": str(e.get("url") or ""),
+                              "validation_status": str(e.get("validation_status") or ""),
+                              "published_at": str(e.get("published_at") or ""),
+                              "locator": str(e.get("locator") or "")}
+                             for e in (ev.get("excluded") or [])],
+                "rejected_citations": [{"title": str(r.get("title") or ""),
+                                        "url": str(r.get("url") or ""),
+                                        "reason": str(r.get("reason") or "")}
+                                       for r in ((st.get("audit") or {}).get("rejected") or [])],
+            }
+            out["citations"] = [{"n": c.get("n"), "title": str(c.get("title") or ""),
+                                 "url": str(c.get("url") or ""),
+                                 "type": str(c.get("type") or ""),
+                                 "admission": str(c.get("admission") or ""),
+                                 "used_by": list(c.get("used_by") or [])}
+                                for c in (st.get("citations") or [])]
+            # 来源定位：结构化字段位置 + 带小节/页码定位的证据（供"来源定位"展示）
+            out["locators"] = [{"label": str(x.get("label") or ""),
+                                "locator": str(x.get("locator") or ""),
+                                "source_n": str(x.get("source_n") or "")}
+                               for x in (appendix.get("field_locations") or [])]
+            out["evidence_locations"] = [
+                {"kind": str(r.get("kind_label") or r.get("kind") or ""),
+                 "locator": str(r.get("locator") or ""),
+                 "source_n": str(r.get("source_n") or ""),
+                 "text": str(r.get("text") or "")[:200]}
+                for r in (ch.get("management") or []) + (ch.get("third_party_views") or [])]
+            out["analysis"] = str(st.get("analysis") or "")
+        # 图表清单写在**项目目录**（渲染脚本的 cwd），工作区根目录只作回退
+        try:
+            from workspace import task_project_dir as _tpd
+            _proj = _tpd(tid)
+        except Exception:
+            _proj = ws
+        cp = _proj / "chart_manifest.json"
+        if not cp.exists():
+            cp = ws / "chart_manifest.json"
+        if cp.exists():
+            try:
+                items = (_json.loads(cp.read_text(encoding="utf-8")) or {}).get("charts") or []
+            except Exception:
+                items = []
+            out["charts"] = [{"file": str(c.get("file") or ""),
+                              "type": str(c.get("type") or ""),
+                              "grade": str(c.get("grade") or "publish"),
+                              "draft_reason": str(c.get("draft_reason") or ""),
+                              "question": str(c.get("question") or ""),
+                              "observation": str(c.get("observation") or "")}
+                             for c in items if str(c.get("file") or "").startswith("chart_")]
+        ep = ws / "narrative_evidence.json"
+        if ep.exists():
+            try:
+                evp = _json.loads(ep.read_text(encoding="utf-8")) or {}
+                out.setdefault("evidence", {})["rules_version"] = str(evp.get("rules_version") or "")
+            except Exception:
+                pass
+        if not out:
+            return None
+        return out
 def _post_share(self, p, body, admin):
     share_tid = ""
     if p == "/api/share":

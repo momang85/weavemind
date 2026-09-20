@@ -1,0 +1,43 @@
+{
+  "name": "missing_footnote_asof",
+  "note": "③ 缺附注 + 资料截止不满足：只抓到一篇无关页与一篇超截止的文章 → 证据四类缺口、未采用材料写明原因、交付如实为草稿。",
+  "review": {"verdict": "PASS", "required": false, "degraded_reason": ""},
+  "contract": {
+    "company": "洋河股份",
+    "company_id": "002304.SZ",
+    "market": "cn",
+    "periods": [2023, 2024],
+    "caliber": "合并",
+    "as_of": "2025-04-15",
+    "perspective": "bank_corporate",
+    "identity_source": "scenario"
+  },
+  "goal": "研究洋河股份 2023 与 2024 两个年度的营业收入、归母净利润、经营活动现金流净额，合并报表口径，数据截至 2025-04-15。",
+  "financials": {
+    "financials": [
+      {"year": 2023, "report_type": "年报", "revenue": 331.26, "net_profit": 100.16,
+       "operating_cashflow": 61.3, "disclosure_date": "2024-04-27"},
+      {"year": 2024, "report_type": "年报", "revenue": 288.76, "net_profit": 66.73,
+       "operating_cashflow": 46.29, "disclosure_date": "2025-04-29"}
+    ],
+    "metadata": {"source": "eastmoney_ashare", "company": "洋河股份",
+                 "currency": "CNY", "unit": "亿元", "caliber": "合并",
+                 "caliber_evidence": "含 PARENTNETPROFIT"},
+    "raw": {"url": "https://datacenter-web.eastmoney.com/api/data/v1/get?x=3", "text": "{}"}
+  },
+  "docs": [
+    {"title": "洋河股份2024年年度报告",
+     "url": "https://static.cninfo.com.cn/finalpage/2025-04-29/8.PDF",
+     "text": "第三节 管理层讨论与分析\n\n一、经营情况讨论与分析\n\n2024年度营业收入288.76亿元，同比下降12.83%。\n\n七、财务报表附注\n\n现金流量表附注：经营活动现金流量净额46.29亿元。"},
+    {"title": "Statista - The Statistics Portal",
+     "url": "https://www.statista.com/",
+     "text": "Statista - The Statistics Portal\n\nMarket Data\nMarket Research\nMarket Studies\nConsumers\nIndustries\nTrends\nLogin\nSign up"}
+  ],
+  "model_body": "# 洋河股份 2023–2024 年度财务数据\n\n## 分析与结论\n\n营业收入 2024 年为 288.76亿元，较 2023 年的 331.26亿元下降 12.83%；归母净利润 66.73亿元，同比下降 33.38%；经营活动现金流净额 46.29亿元，同比下降 24.49%。三项同时下行，利润降幅明显大于收入降幅。\n\n变化原因：原因未在本次资料中体现，需核查收入构成、毛利率构成与现金流量表附注。\n\n风险与结论：两期数据只能说明这两期的变化；不给出估值或目标价。\n",
+  "expect": {
+    "evidence_missing_min": 1,
+    "excluded_reason": "after_as_of",
+    "delivery_draft": true,
+    "coverage_contains": "低于"
+  }
+}

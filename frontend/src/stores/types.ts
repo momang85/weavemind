@@ -82,6 +82,54 @@ export interface LogEntry {
   step_id?: string
 }
 
+export interface ResearchGap {
+  kind?: string
+  text: string
+  materials?: string[]
+}
+
+/** 研究简报的结构化对象（后端 `_research_payload`）——结果页按"发现→缺口→证据"呈现。 */
+export interface ResearchBrief {
+  scope?: {
+    company?: string
+    periods?: number[]
+    caliber?: string
+    as_of?: string
+    unit?: string
+    perspective?: string
+    subject_type?: string
+    subject_type_source?: string
+  }
+  findings?: { text: string; fact_ids?: string[] }[]
+  gaps?: {
+    required_data?: ResearchGap[]
+    evidence?: string[]
+    citations?: number[]
+    as_of?: string
+    unproven?: { label: string; materials?: string[] }[]
+  }
+  evidence?: {
+    located?: number
+    missing_labels?: string[]
+    rules_version?: string
+    excluded?: { title?: string; url?: string; validation_status?: string; published_at?: string; locator?: string }[]
+    rejected_citations?: { title?: string; url?: string; reason?: string }[]
+  }
+  citations?: { n?: number; title?: string; url?: string; type?: string; admission?: string; used_by?: string[] }[]
+  locators?: { label?: string; locator?: string; source_n?: string }[]
+  evidence_locations?: { kind?: string; locator?: string; source_n?: string; text?: string }[]
+  charts?: { file: string; type?: string; grade?: string; draft_reason?: string; question?: string; observation?: string }[]
+  analysis?: string
+}
+
+/** 导出与版本绑定（后端 `_get_task_page` 的 `export` 块）。 */
+export interface ExportState {
+  manifest_version_id?: string
+  current_version_id?: string
+  package?: string
+  package_generated_at?: string
+}
+
 export interface TaskReport {
   summary: string
   taskId?: string
@@ -92,6 +140,8 @@ export interface TaskReport {
   files?: { name: string; size?: number; kind?: string }[]
   // 验收缺口摘要：SUCCESS_WITH_ISSUES 任务在报告视图顶部展示
   acceptance?: { overall?: string; gaps?: string[] }
+  research?: ResearchBrief | null
+  export?: ExportState | null
 }
 
 export interface EndpointDiversity {
