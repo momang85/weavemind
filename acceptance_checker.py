@@ -729,6 +729,45 @@ def _has_placeholder(text: str) -> bool:
     return any(m in low for m in _PLACEHOLDER_MARKERS)
 
 
+# 说明性语境词：标记出现在**解释性句子**里（如"未披露时不生成（不填零）"、
+# "本报告未获取行业基准，故不给出评级"）是诚实披露，不是占位符。
+# 判别靠语境而不是长度：对抗用例"营收未披露，净利润未获取，毛利率待补充"同样长，
+# 但它把标记当**数值**用、没有任何说明，仍须计入占位。
+_DISCLOSURE_HINTS = ("需", "应", "故", "因此", "见", "说明", "不生成", "不填", "不给出",
+                     "未取得与", "需先取得", "需核查", "待核查", "已采用", "不适用")
+
+
+def _count_placeholders(text: str) -> int:
+    """占位符计数：**逐行**判定，带说明语境的诚实披露不计。
+
+    实机教训：交付简报里"研发投入强度：…未披露时不生成（不填零）"（比率适用条件）与
+    "本报告未获取行业基准或同业数据，故不给出评级"被当成"3 处数据缺失占位"，触发整稿
+    重做——而这两句正是要求保留的诚实说明；同时"营收未披露，净利润未获取"这类
+    无说明的占位仍须判不完整。
+    """
+    hits = 0
+    for ln in str(text or "").splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        low = s.lower()
+        found = [m for m in _PLACEHOLDER_MARKERS if m in low]
+        if not found:
+            continue
+        if s.startswith("|"):
+            # 表格：只把"整格就是占位符"的单元格算作占位（表头/说明列不算）
+            for cell in s.strip("|").split("|"):
+                c = cell.strip().lower()
+                if c and any(m in c for m in _PLACEHOLDER_MARKERS) \
+                        and len(c) <= 6 and not any(h in c for h in _DISCLOSURE_HINTS):
+                    hits += 1
+            continue
+        if any(h in s for h in _DISCLOSURE_HINTS):
+            continue                      # 带说明的披露：诚实说明，不计占位
+        hits += len(found)
+    return hits
+
+
 def _sentences(text: str) -> list[str]:
     """粗切句：按句末标点与换行切分（含 Markdown 表格行）。"""
     parts = re.split(r"[。！？!?\n]+", str(text or ""))
@@ -2377,7 +2416,7 @@ def check_deliverable_completeness(
     r = str(report or "")
     g = str(goal or "").lower()
     domain = domain or traceability_domain(goal)
-    placeholder_count = sum(r.count(m) for m in _PLACEHOLDER_MARKERS)
+    placeholder_count = _count_placeholders(r)
     list_required = any(k in g for k in _LIST_REQUIREMENT_KEYWORDS)
     numeric_required = any(k in g for k in _NUMERIC_REQUIREMENT_KEYWORDS)
 

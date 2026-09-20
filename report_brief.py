@@ -51,7 +51,10 @@ _VALIDATION_LABELS = {
     "period_after_contract": "期间晚于契约期间",
     "period_before_contract": "期间早于契约期间且无比较数据",
     "comparison": "比较披露（已采用）",
+    "period_unstated": "期间未标注（已采用）",
     "unknown_period": "期间未标注（已标注）",
+    "unknown_published_at": "发布时点未核实",
+    "unknown_subject": "主体未核实",
     "applicable": "适用",
 }
 
@@ -747,11 +750,15 @@ def _body_source_list(body: str) -> list[tuple[int, str, str]]:
 
 
 def _remap_inline_refs(text: str, mapping: dict[int, int]) -> tuple[str, list[int]]:
-    """把正文里的旧引用编号换成装配后的新编号；换不到的**移除编号**并报缺口（不猜）。"""
+    """把正文里的旧引用编号换成装配后的新编号；换不到的**移除编号**并报缺口（不猜）。
+
+    同时归一 `[n=2]` 这类把指令记号抄进正文的写法（实机出现，会被验收判"引用无对应条目"
+    并触发整稿重做）：按编号 2 处理，映射不到就同样去编号记缺口。
+    """
     unmapped: list[int] = []
 
     def _sub(m: re.Match) -> str:
-        old = int(m.group(1))
+        old = int(m.group(1) if m.group(1) else m.group(2))
         new = mapping.get(old)
         if new is None:
             if old not in unmapped:
@@ -759,7 +766,7 @@ def _remap_inline_refs(text: str, mapping: dict[int, int]) -> tuple[str, list[in
             return ""                     # 编号无法唯一对应：去掉，进"待核查"
         return f"[{new}]"
 
-    out = re.sub(r"\[(\d{1,2})\]", _sub, str(text or ""))
+    out = re.sub(r"\[(?:n\s*=\s*(\d{1,2})|(\d{1,2}))\]", _sub, str(text or ""))
     return out, unmapped
 
 

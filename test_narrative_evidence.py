@@ -177,6 +177,42 @@ class TestContractApplicability(unittest.TestCase):
         self.assertEqual({r["validation_status"] for r in recs}, {"after_as_of"})
         self.assertTrue(all(r["admission"] == "excluded" for r in recs))
 
+    def test_paragraph_fallback_when_page_has_no_headings(self):
+        """整页无小节标题（新闻/解读类）→ 段落窗口回退，仍可定位、可准入。
+
+        实机读数：21 财经 2024-05-14 的行业观察（主体命中、发布日在截止内）因整页
+        没有标题行而产出 0 条证据，简报只能写"未取得"。
+        """
+        text = ("两大苏酒同日举行业绩说明会：洋河、今世缘如何错位竞争？\n\n"
+                "洋河股份 2024 年营业收入同比下滑，公司称主要系产品结构主动调整与"
+                "渠道去库存所致，省内市场竞争加剧是共同背景。\n\n"
+                "公司同时披露了经销商库存与合同负债的变化情况，但未给出下一阶段指引。\n")
+        recs = ne.extract_sections(
+            {"title": "两大苏酒同日举行业绩说明会：洋河、今世缘如何错位竞争？",
+             "url": "https://m.21jingji.com/article/20240514/herald/x.html", "text": text},
+            periods=[2023, 2024], company="洋河股份", company_id="002304.SZ",
+            as_of="2025-04-30")
+        self.assertTrue(recs, "无标题页面应走段落回退")
+        self.assertEqual({r["extraction"] for r in recs}, {"paragraph"})
+        rec = recs[0]
+        self.assertEqual(rec["admission"], "admitted")
+        self.assertEqual(rec["validation_status"], "period_unstated",
+                         "新闻页标题没有报告期 → 记未标注，不据此排除")
+        self.assertIn("段落 ", rec["locator"])
+        self.assertIn("字符 ", rec["locator"])
+        # 段落窗口在原文里的位置是真实的：按区间能取回同一段
+        seg = text[rec["char_start"]:rec["char_end"]]
+        self.assertIn(rec["snippet"][:20], " ".join(seg.split()))
+
+    def test_heading_mode_still_wins_when_headings_exist(self):
+        """有可分类小节标题时仍走标题模式（段落回退只在整页无标题时启用）。"""
+        recs = self._recs(
+            "贵州茅台2024年年度报告",
+            "https://static.cninfo.com.cn/finalpage/2025-04-03/1.PDF",
+            "一、经营情况讨论与分析\n\n2024年度营业收入1741.44亿元。\n")
+        self.assertTrue(recs)
+        self.assertEqual({r.get("extraction") for r in recs}, {None})
+
     def test_report_period_year_is_not_a_publication_date(self):
         """A3 反例：只有"2024年年度报告"、无发布日 → 缺项记 unknown，不当 applicable。"""
         recs = self._recs(
@@ -273,30 +309,27 @@ class TestPdfEvidence(unittest.TestCase):
 
 
 class TestCaptureFailureFixtures(unittest.TestCase):
-    """F2′-2 回放夹具：实机四类失败产物都必须**明示缺口**，不用模型常识补成证据。"""
+    """F2′-2 回放夹具：实机四类失败产物都不得产出可用证据。
+
+    四类分别是：反爬 WAF 载荷、付费墙页（"会员可见"）、无关页（Statista 首页）、
+    以及一条**URL 里没有可核实发布日**的短新闻（不透明文章 ID）——最后一条按 A3
+    "未知披露时点不能当已验证支持"同样不准入。段落回退能读无标题页面的正向能力
+    由 `test_paragraph_fallback_when_page_has_no_headings`（带日期 URL）覆盖。
+    """
 
     FIXTURE = ROOT / "evals" / "fixtures" / "f2p_capture_failures.json"
 
-    def test_real_capture_failures_yield_gaps_only(self):
+    def test_real_capture_failures_yield_no_usable_evidence(self):
         import json as _json
         data = _json.loads(self.FIXTURE.read_text(encoding="utf-8"))
-        docs = [v for k, v in data.items() if not k.startswith("_")]
+        docs = {k: v for k, v in data.items() if not k.startswith("_")}
         self.assertGreaterEqual(len(docs), 4)
-        for doc in docs:
-            recs = ne.extract_sections(doc, periods=[2023, 2024], company="贵州茅台",
-                                       company_id="600519.SH", as_of="2025-04-30")
-            usable = [r for r in recs if r.get("has_location") and not r.get("excluded")]
-            self.assertEqual(usable, [],
-                             f"{doc.get('title') or doc.get('url')} 不得产出可用证据")
-        # 四类失败合起来仍然四类全缺（缺口如实报告）
-        all_recs = []
-        for doc in docs:
-            all_recs.extend(ne.extract_sections(
+        for key, doc in docs.items():
+            usable = [r for r in ne.extract_sections(
                 doc, periods=[2023, 2024], company="贵州茅台",
-                company_id="600519.SH", as_of="2025-04-30"))
-        located = {r["kind"] for r in all_recs
-                   if r.get("has_location") and not r.get("excluded")}
-        self.assertEqual(located, set(), located)
+                company_id="600519.SH", as_of="2025-04-30")
+                if r.get("admission") in ("admitted", "comparison")]
+            self.assertEqual(usable, [], f"{key} 不得产出可用证据")
 
 
 class TestSourceAdmission(unittest.TestCase):

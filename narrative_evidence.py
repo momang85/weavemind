@@ -260,7 +260,10 @@ def validate_record(rec: dict, doc: dict, *, company: str = "", company_id: str 
             status = ("comparison" if any(str(y) in snip for y in years)
                       else "period_before_contract")
         elif not doc_period:
-            status = "unknown_period"
+            # 新闻/解读类页面标题里通常没有"报告期"：**缺项记未标注**，不据此排除——
+            # 发布日与主体都已核实，期间由读者按小节/段落自行判断（实机：21财经 2024-05-14
+            # 的行业观察文章因"期间未标注"被挡在证据之外）
+            status = "period_unstated"
     elif status == "unknown_published_at" and doc_period and years \
             and int(doc_period) > max(years):
         # 发布日未知但报告期已晚于契约期间：明确不适用（这一条不依赖发布日）
@@ -271,7 +274,7 @@ def validate_record(rec: dict, doc: dict, *, company: str = "", company_id: str 
     excluded = status in ("subject_mismatch", "after_as_of", "period_after_contract",
                           "period_before_contract")
     admission = ("excluded" if excluded
-                 else "admitted" if status == "applicable"
+                 else "admitted" if status in ("applicable", "period_unstated")
                  else "comparison" if status == "comparison" else "unknown")
     return {"validation_status": status, "admission": admission,
             "subject": "", "subject_state": subject_state,
@@ -383,6 +386,105 @@ def _snippet(body: str, limit: int = SNIPPET_CHARS) -> str:
     return cut.strip()
 
 
+# 散文体关键词（段落模式专用）：新闻/解读类页面的正文不会写"经营情况讨论与分析"
+# 这类标题词，而是"营业收入同比下滑""渠道去库存""合同负债"这种叙述。标题模式仍用
+# 上面那套**标题词**（保持标题判定的精度），只有段落回退时用这套。
+PROSE_KEYWORDS: dict[str, tuple[str, ...]] = {
+    KIND_BACKGROUND: ("主营业务", "主要业务", "产品结构", "品牌", "行业竞争", "市场格局",
+                      "渠道", "经销商", "客户", "产能", "经营模式", "市场份额"),
+    KIND_CHANGE: ("营业收入同比", "净利润同比", "收入同比", "同比增长", "同比下滑",
+                  "同比下降", "业绩说明会", "经营业绩", "营收", "净利", "动销", "去库存",
+                  "提价", "价格调整"),
+    KIND_NOTES: ("合同负债", "预收款", "应收账款", "存货", "经销商库存", "现金流",
+                 "销售费用", "管理费用", "研发投入", "税金", "分红", "派息"),
+    KIND_RISK: ("风险", "不确定性", "竞争加剧", "压力", "下滑", "挑战", "承压", "库存高企"),
+}
+
+
+# 付费墙/未登录占位：这类文字不是证据（实机：前瞻眼页字段显示"会员可见"）
+_NO_CONTENT_MARKERS = ("会员可见", "登录后可见", "请登录", "订阅后", "付费可见",
+                       "暂无数据", "加载中", "内容不存在")
+
+
+def _prose_classify(body: str) -> str | None:
+    """段落模式归类：按**散文体关键词**打分（命中数最多者胜，平手按 KIND_ORDER）。"""
+    text = str(body or "")[:400]
+    best: str | None = None
+    best_score = 0
+    for kind in KIND_ORDER:
+        score = sum(1 for kw in PROSE_KEYWORDS.get(kind, ()) if kw in text)
+        if score > best_score:
+            best, best_score = kind, score
+    return best
+
+
+def _paragraph_records(doc: dict, *, periods=None, company: str = "",
+                       company_id: str = "", as_of: str = "",
+                       max_per_kind: int = MAX_PER_KIND,
+                       snippet_chars: int = SNIPPET_CHARS) -> list[dict]:
+    """**无小节标题**的页面回退：按段落窗口取证据（新闻/解读类页面常见）。
+
+    为什么需要：实机里 21 财经那篇 2024-05-14 的行业观察（主体命中、发布日在截止内）
+    因为整页没有标题行而产出 0 条证据，简报只能写"未取得"——而它确实含可用的经营信息。
+    段落模式下定位写成"段落 N（字符 a-b）"（有页码时带页码），与标题模式同样可回溯。
+    """
+    text = str((doc or {}).get("text") or "")
+    if not text:
+        return []
+    url = str(doc.get("url") or "")
+    title = str(doc.get("title") or "")
+    stype = source_type(url)
+    page_offsets = doc.get("page_offsets")
+    years = [str(y) for y in (periods or [])]
+    picked: dict[str, list[dict]] = {}
+    seen: set[tuple[str, str]] = set()
+    pos = 0
+    for n, raw in enumerate(re.split(r"\n\s*\n", text), 1):
+        start = text.find(raw, pos) if raw else pos
+        if start < 0:
+            start = pos
+        pos = start + len(raw)
+        body = " ".join(str(raw or "").split())
+        if len(body) < 25:          # 太短的片段（导航/页脚/一句话标题）不作证据
+            continue
+        if any(k in body for k in _NO_CONTENT_MARKERS):
+            continue          # 付费墙/未登录占位："会员可见"不是证据
+        kind = _prose_classify(body)
+        if not kind:
+            continue
+        snip = _snippet(body, snippet_chars)
+        key = (kind, snip[:60])
+        if key in seen:
+            continue
+        seen.add(key)
+        bucket = picked.setdefault(kind, [])
+        if len(bucket) >= max_per_kind:
+            continue
+        page = _page_of(start, page_offsets)
+        loc = (f"第 {page} 页 · 段落 {n}（字符 {start}-{start + len(raw)}）" if page
+               else f"段落 {n}（字符 {start}-{start + len(raw)}）")
+        rec = {
+            "kind": kind, "kind_label": KIND_LABELS[kind], "title": title, "url": url,
+            "source_type": stype,
+            "document_provenance": document_provenance(doc, company, company_id),
+            "publisher": publisher_of(url), "section": f"段落 {n}",
+            "snippet": snip, "char_start": start, "char_end": start + len(raw),
+            "page": page,
+            "period_hint": next((y for y in years if y in body), ""),
+            "has_location": True, "locator": loc,
+            "content_hash": hashlib.sha256(snip.encode("utf-8")).hexdigest()[:16],
+            "fetched_at": str(doc.get("fetched_at") or ""),
+            "extraction": "paragraph",
+        }
+        rec.update(validate_record(rec, doc, company=company, company_id=company_id,
+                                   periods=periods, as_of=as_of))
+        bucket.append(rec)
+    out: list[dict] = []
+    for kind in KIND_ORDER:
+        out.extend(picked.get(kind) or [])
+    return out
+
+
 def extract_sections(doc: dict, *, periods=None, company: str = "",
                      company_id: str = "", as_of: str = "",
                      max_per_kind: int = MAX_PER_KIND,
@@ -442,6 +544,12 @@ def extract_sections(doc: dict, *, periods=None, company: str = "",
     out: list[dict] = []
     for kind in KIND_ORDER:
         out.extend(picked.get(kind) or [])
+    if not out:
+        # 整页没有可分类的小节标题（新闻/解读类页面常见）→ 段落窗口回退
+        return _paragraph_records(doc, periods=periods, company=company,
+                                  company_id=company_id, as_of=as_of,
+                                  max_per_kind=max_per_kind,
+                                  snippet_chars=snippet_chars)
     return out
 
 

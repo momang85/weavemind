@@ -5547,6 +5547,32 @@ class TestResearchBriefAssembly(unittest.TestCase):
         self.assertNotIn("## 关键发现", sec)
         self.assertLess(len(sec), 400)
 
+    def test_literal_n_notation_is_normalized_like_a_ref(self):
+        """`[n=1]` 这类把指令记号抄进正文的写法按编号处理（否则验收判引用无对应条目）。"""
+        import report_brief
+        tid, _ = self._env()
+        body = ("# 报告\n\n年报显示经营活动现金流净额 924.64亿元[n=1]。\n\n"
+                "## 参考来源\n\n"
+                "1. [贵州茅台2024年年度报告](https://static.cninfo.com.cn/finalpage/2025-04-03/1.PDF)\n")
+        structure = report_brief.build_structure(tid, self.GOAL, body)
+        md = report_brief.render_brief_markdown(structure, body)
+        by_n = {c["n"]: c["url"] for c in structure["citations"]}
+        sentence = next(l for l in md.splitlines() if "年报显示经营活动现金流" in l)
+        self.assertNotIn("[n=", sentence)
+        n = int(re.search(r"\[(\d+)\]", sentence).group(1))
+        self.assertEqual(by_n[n], "https://static.cninfo.com.cn/finalpage/2025-04-03/1.PDF")
+        self.assertEqual(structure["citation_gaps"], [])
+
+    def test_explained_gap_is_not_a_placeholder_but_bare_marker_is(self):
+        """诚实披露（带说明）不计占位；无说明的"营收未披露"仍算占位。"""
+        from acceptance_checker import _count_placeholders
+        explained = ("- 研发投入强度：需公司实际披露研发投入；未披露时不生成（不填零）\n"
+                     "- 本报告未获取行业基准或同业数据，故不给出评级\n"
+                     "- 未取得与本期变化相关的年报业务段落（需补充材料见下）\n")
+        bare = "核心指标：营收未披露，净利润未获取，毛利率待补充。\n"
+        self.assertEqual(_count_placeholders(explained), 0)
+        self.assertGreaterEqual(_count_placeholders(bare), 3)
+
     def test_acceptance_targets_the_assembled_candidate(self):
         """F2′-3：研究任务先装配候选稿再验收——代码负责的声明不再要求模型重做。"""
         import delivery_pipeline as dp
