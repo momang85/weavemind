@@ -10,6 +10,7 @@ C2 见 `c2_claim_evidence_support_20260920.md`，C1 见 `c1_export_and_review_ho
 | 单测 | `scenario_checks` 新增 3 项形态关卡（无工程说明 / 附录标题 ≤第 5 页 / 移出的证据仍在附录）共 17 项；`test_delivery_chain` 241 项、`test_offline_delivery`+`test_p0`+`test_frontend_guards`+`test_deploy_manifest`+`test_facts` 527 项全绿（3 处断言按新形态更新并注明原因） |
 | 主文读数 | 三场景：主文 **3 / 3 / 4 页**（附录起于第 4/4/5 页），正文（附录前）占 58%/64%/66%；正文无工程说明 |
 | 未验证 | 实机报告（洋河 11.7k 字符）在新形态下的页数未测（需实机重跑或对现有交付正文重新装配）；图注"问句 + 分号"措辞未改；主文选图规则仍是"publish 级前 3 张"，未按"是否帮助判断"排序 |
+| CI | `0c621de` **绿**（backend / frontend / docker-image / clean-env-e2e + Pages）。前三次提交（`85f1772`/`40e4237`/`bbcb7b9`）CI 红，**同一个原因**：C1 新增的表头列网格检查在 Linux（DroidSansFallback）上误报不对齐——字形回退把同一单元格里的 ASCII 与 CJK 拆成两段绘制、多出 x 位置，而判定用的是"表头格数 == 数据列格数"。已改为平台无关的三条（跨度 ≥ 90% / 多数格位落在列位 / 首列从左边距 +4），本地用"强制 ASCII 走回退"复现拆段环境验证 |
 | 人工验收 | **未做**（研究员五项 0–2 评分 ≥8/10 → D 内部试用） |
 
 **C3 修了什么（三条）**
