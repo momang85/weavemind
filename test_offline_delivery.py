@@ -1370,5 +1370,47 @@ class TestResearchFixedPathOffline(unittest.TestCase):
         self.assertNotIn("用户提示词", blob)
 
 
+class TestFrozenOfflineScenarios(unittest.TestCase):
+    """F3-B：三份**冻结离线场景**在本套件内跑（CI 门禁要求每个 test_*.py 都在 ci.yml 里，
+    场景检查做成 `scenario_checks` 模块由这里调用，既进门禁又不新增工作流条目）。
+
+    覆盖：①正常增长且证据齐全 ②亏损/现金净流出 + 跨期单位不一致 ③缺附注且资料截止不满足。
+    断言的是场景自带预期（`evals/scenarios/*.json` 的 `expect`）与几条跨场景不变量；
+    跑法见 `scripts/scenario_run.py`，产物清单（含 sha256）用于跨修订比对。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import scenario_checks
+        cls.tmp = Path(tempfile.mkdtemp(prefix="wm_scen_ci_"))
+        cls.manifests = scenario_checks.run_all(out_root=cls.tmp)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_scenarios_meet_frozen_expectations(self):
+        self.assertEqual(sorted(self.manifests),
+                         ["loss_mixed_units", "missing_footnote_asof", "normal_growth"])
+        for name, m in self.manifests.items():
+            checks = {k: v for k, v in (m.get("checks") or {}).items() if k != "all_passed"}
+            failed = [k for k, v in checks.items() if not v]
+            self.assertEqual(failed, [], f"{name} 未通过：{failed}；交付={m['delivery']}")
+
+    def test_normal_growth_verified_and_loss_case_keeps_honest_gaps(self):
+        ok = self.manifests["normal_growth"]
+        self.assertEqual(ok["delivery"]["status"], "verified", ok["delivery"])
+        self.assertEqual(ok["evidence"]["missing_labels"], [])
+        self.assertEqual(ok["paper"]["problems"], 0)
+        loss = self.manifests["loss_mixed_units"]
+        self.assertIn("不表示利润有现金支撑", loss["coverage_finding"])
+        self.assertTrue(any("基期为负" in p for p in loss["paper_problems"]))
+        self.assertEqual(loss["delivery"]["status"], "draft")
+        miss = self.manifests["missing_footnote_asof"]
+        self.assertTrue(any(e.get("validation_status") == "after_as_of"
+                            for e in (miss["evidence"]["excluded"] or [])))
+        self.assertEqual(miss["delivery"]["status"], "draft")
+
+
 if __name__ == "__main__":
     unittest.main()

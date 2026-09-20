@@ -68,7 +68,11 @@
 - `scripts/scenario_run.py` 跑**真实路径**（底稿 → 证据 → 图表规格+渲染子进程 → 交付装配 →
   导出 markdown/PDF/清单），产物写 `.weavemind/scenarios/<name>/`（运行期、gitignore），
   输出 `manifest.json`（每产物 sha256+字节、版本号、验收、缺口、图表分级、PDF 视觉判定），
-  跨修订可直接比对。`test_scenarios.py` 把它纳入回归（含"图注不得含读数"的不变量）。
+  跨修订可直接比对。场景检查做成 `scenario_checks.py` 模块，由 CI 清单内的
+  `test_offline_delivery.TestFrozenOfflineScenarios` 调用（仓库守卫要求每个 `test_*.py`
+  都必须在 `ci.yml` 里，而工作流文件需要 `workflow` scope 才能推送——做成模块既进门禁
+  又不新增工作流条目；也可 `python -m unittest scenario_checks` 单独跑），含
+  "正文图注不得含读数"的不变量。
 
 **三场景读数**：
 
@@ -98,12 +102,14 @@
 
 ## 未验证 / 遗留
 
-- **推送已完成**：`dc84d0f`（F3-B 主体）+ 其后提交已上 `origin/main`。注意两点：
-  ①`git push` 会先调 GCM（`git credential-manager get`）等弹窗——本次用
-  `-c credential.helper=`（清空 helper 链）+ `gh auth token` 注入才走通；
-  ②gh 令牌**没有 `workflow` scope**，`.github/workflows/ci.yml` 的改动被拆成独立提交留在本地，
-  需用有该 scope 的凭据推送（或 `gh auth refresh -s workflow`）。因此新增的
-  `test_scenarios.py` 暂未进 CI 清单（测试文件本身已推送）。
+- **推送已完成**：`dc84d0f`（F3-B 主体）、`b81565e`（文档）与随后的场景模块重构均已上
+  `origin/main`。两点经验记在这里：①`git push` 会先调 GCM（`git credential-manager get`）
+  等弹窗，而本机 GCM 无缓存凭据 → 表现为"推送挂住"；本次用
+  `-c credential.helper=`（清空 helper 链）+ `gh auth token` 注入走通。②gh 令牌**没有
+  `workflow` scope**，不能推 `.github/workflows/`；因此场景检查改为 `scenario_checks.py`
+  模块（由 CI 清单内的 `test_offline_delivery.py` 调用），**不再需要改工作流文件**——
+  这也是 CI 首轮失败的根因（守卫 `test_every_test_file_runs_in_ci` 抓到
+  `test_scenarios.py` 不在门禁内）。
 - **新实机被端点上限阻塞**：`POST https://ark.cn-beijing.volces.com/api/v3/chat/completions`
   → `429 SetLimitExceeded`（账号 2132184326 的 glm-5-3-flash 达到推理上限、模型服务已暂停，
   需在"模型激活"页调整或关闭"安全体验模式"）。按约定不切模型、不绕过；端点恢复后按
