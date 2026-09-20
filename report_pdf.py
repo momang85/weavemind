@@ -1277,6 +1277,12 @@ def _column_starts(runs: list[dict]) -> tuple[list[float], int]:
     return sorted(x for x, c in counts.items() if c >= need), len(rows)
 
 
+def _row_spread(runs: list[dict]) -> float:
+    """一组文本段的横向跨度（最右 - 最左）。"""
+    xs = [r["x"] for r in runs]
+    return (max(xs) - min(xs)) if xs else 0.0
+
+
 def _page_contents(pdf_bytes: bytes) -> list[bytes]:
     """按**页序**取出各页内容流（本模块写出的 PDF 未压缩，直接取字节）。"""
     objs = {int(m.group(1)): m.group(2) for m in _OBJ_RE.finditer(pdf_bytes)}
@@ -1410,27 +1416,31 @@ def pdf_table_grids(pdf_bytes: bytes) -> list[dict]:
             and r["size"] == TABLE_SIZE
             and r["y"] < hd["bottom"] and (nxt is None or r["y"] > nxt)
         ]
-        body_cols, body_rows = _column_starts(cells)
-        header_cols, header_rows = _column_starts(white)
-        # 表头落在数据列位上的格数
-        on_grid = [hx for hx in header_cols
-                   if any(abs(hx - bx) <= 0.6 for bx in body_cols)]
-        col_w = USABLE_W / len(header_cols) if header_cols else 0.0
-        if not header_cols:
+        header_x = sorted({round(r["x"], 2) for r in white})
+        body_x = sorted({round(r["x"], 2) for r in cells})
+        h_span, b_span = _row_spread(white), _row_spread(cells)
+        # 判定用**平台无关**的三条（字形回退会把同一格拆成多段，各平台拆法不同）：
+        # ① 表头必须铺满数据列所在的横向范围——拼接式表头把各列名画在一个 x 上，
+        #    跨度退化为 0，这一条直接抓住它；
+        # ② 表头格位多数要落在数据列位上（允许少数因字形回退产生的偏移）；
+        # ③ 首列仍从左边距 +4 起。
+        on_grid = [hx for hx in header_x
+                   if any(abs(hx - bx) <= 0.6 for bx in body_x)]
+        need_on_grid = max(1, int(len(header_x) * 0.6 + 0.999)) if header_x else 0
+        col_w = USABLE_W / len(header_x) if header_x else 0.0
+        if not header_x:
             aligned = True
-        elif body_cols and len(on_grid) < len(body_cols):
-            # 表头格数少于数据列 → 列名被拼成一段（或漏列），读者无法把列名对上数字
-            aligned = False
-        elif body_cols:
-            aligned = True
+        elif b_span > 0:
+            aligned = (h_span >= 0.9 * b_span and len(on_grid) >= need_on_grid
+                       and abs(header_x[0] - (MARGIN_L + 4)) <= 0.6)
         else:
-            # 数据列全空：退化为"表头格位等距且首列落在左边距 +4"
-            aligned = (abs(header_cols[0] - (MARGIN_L + 4)) <= 0.6
-                       and all(abs((header_cols[j + 1] - header_cols[j]) - col_w) <= 0.6
-                               for j in range(len(header_cols) - 1)))
-        grids.append({"page": hd["page"], "cols": len(on_grid), "header_cols": header_cols,
-                      "body_cols": body_cols, "header_rows": header_rows,
-                      "body_rows": body_rows, "col_w": round(col_w, 2), "aligned": aligned})
+            aligned = (abs(header_x[0] - (MARGIN_L + 4)) <= 0.6
+                       and all(abs((header_x[j + 1] - header_x[j]) - col_w) <= 0.6
+                               for j in range(len(header_x) - 1)))
+        grids.append({"page": hd["page"], "cols": len(on_grid),
+                      "header_cols": header_x, "body_cols": body_x,
+                      "header_span": round(h_span, 1), "body_span": round(b_span, 1),
+                      "col_w": round(col_w, 2), "aligned": aligned})
     return grids
 
 
