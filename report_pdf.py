@@ -927,6 +927,15 @@ class _PDFBuilder:
         max_w = USABLE_W
         scale = min(1.0, max_w / w)
         dw, dh = w * scale, h * scale
+        # 单页放不下的图不嵌：`_ensure_space(dh)` 会翻页，但翻页之后图片底边仍落在
+        # 页面之外（整张图在可视区外），页面上什么都看不到——实测一张 1038×121366
+        # 的畸形 PNG（画布被 tight bbox 撑爆）就这样"嵌进去了却看不见"。
+        # 这种图按缺图处理：留可见占位，并让导出完整性判定失败。
+        if dh > USABLE_H:
+            self._draw_image_placeholder(
+                src, reason=f"图片尺寸异常（{w}×{h}，高宽比 {h / max(w, 1):.1f}），"
+                            f"单页放不下")
+            return
         self._ensure_space(dh + BODY_SIZE)
         # 图片底部 = cursor 上方
         y_bottom = self.cursor_y - dh - 4
@@ -1042,23 +1051,29 @@ class _PDFBuilder:
             ).encode()
             self.cursor_y -= 14
 
-    def _draw_table_header(self, top_y: float, rows: list[list[str]], ncols: int,
-                           header_h: float) -> None:
-        """画表头（底色 + 拼接标题）。跨页续画时也走这里，保证一致。
+    def _draw_table_header(self, top_y: float, header_lines: list[list[str]],
+                           col_w: float, header_h: float) -> None:
+        """画表头（底色 + **逐列**标题）。跨页续画时也走这里，保证一致。
 
         底色矩形覆盖 `[top_y - header_h, top_y]`，**文字基线要落在框内**
         （此前直接用未调整的 cursor_y 画，白字落在色块上方，视觉上是"表头跑出框"）。
+
+        标题与数据列**共用列宽与 x 起点**（`MARGIN_L + c * col_w + 4`）：此前表头把
+        各列名用两个空格拼成一行画在左上角，正文却按列定位，读者会把年度与数字错配
+        （实测正常场景第 1 页"指标 2023 2024 口径 来源"全挤在左侧）。
         """
         self.page_content += (
             f"q 0.16 0.20 0.34 rg {MARGIN_L:.2f} {top_y - header_h:.2f} "
             f"{USABLE_W:.2f} {header_h:.2f} re f Q\n"
         ).encode()
-        self.cursor_y = top_y - 5 - TABLE_SIZE
-        self._draw_text(
-            MARGIN_L + 4, "  ".join(
-                str(c)[:20] for c in (rows[0] + [""] * ncols)[:ncols]
-            ), TABLE_SIZE, (1, 1, 1),
-        )
+        baseline = top_y - 5 - TABLE_SIZE
+        for c, lines in enumerate(header_lines):
+            x = MARGIN_L + c * col_w + 4
+            for line in lines:
+                self.page_content += self._text_ops(x, baseline, line, TABLE_SIZE, (1, 1, 1))
+                baseline -= TABLE_SIZE * 1.55
+            baseline = top_y - 5 - TABLE_SIZE
+        self.cursor_y = top_y - header_h
 
     def _render_table(self, rows: list[list[str]]) -> None:
         if not rows:
@@ -1074,7 +1089,8 @@ class _PDFBuilder:
             ])
         line_h = TABLE_SIZE * 1.55
         pad = 5
-        header_h = max(len(lines) for lines in cell_lines[0]) * line_h + pad * 2
+        header_lines = cell_lines[0]
+        header_h = max(len(lines) for lines in header_lines) * line_h + pad * 2
         # 只要求"表头 + 几行数据"放得下就开画，**不再要求整张表**放得下：
         # 此前用 total_h（45 行表格的整高）预留，结果整表被推到下一页，
         # 第一页只剩标题、85% 版面空白（视觉门禁实测）。逐行的分页与跨页重画表头
@@ -1083,8 +1099,7 @@ class _PDFBuilder:
         self._ensure_space(min_h)
         self.cursor_y -= 6
         y = self.cursor_y
-        self._draw_table_header(y, rows, ncols, header_h)
-        # 简化实现：表头仅输出拼接文本；正文逐行绘制
+        self._draw_table_header(y, header_lines, col_w, header_h)
         y -= header_h
         for row in cell_lines[1:]:
             row_h = max(len(lines) for lines in row) * line_h + pad * 2
@@ -1094,7 +1109,7 @@ class _PDFBuilder:
                 self._finish_page()
                 self._new_page()
                 y = self.cursor_y
-                self._draw_table_header(y, rows, ncols, header_h)
+                self._draw_table_header(y, header_lines, col_w, header_h)
                 y -= header_h
             self.cursor_y = y - pad - TABLE_SIZE
             for c, lines in enumerate(row):
@@ -1216,3 +1231,206 @@ def markdown_to_pdf(
     for block in blocks:
         builder._render_block(block, workspace)
     return builder.finish()
+
+
+# ─────────────────────── 结构自检（导出完整性） ───────────────────────
+#
+# 为什么要有这一层：页数与文本量只证明"PDF 能被解析"，证明不了"该有的图进去了"。
+# 实测三个离线场景 PDF 分别缺 5/2/4 张图（引用图全部渲染成"[图片未能嵌入]"占位），
+# 而当时的页数/字符检查一律 pass。这里用内容流做**确定性**判定：数嵌入的
+# XObject 图、找缺图占位、核对表头与数据列是否共用同一列网格。
+
+_TEXT_OP_RE = re.compile(
+    rb"BT /F\d+ ([\d.]+) Tf ([\d.]+) ([\d.]+) ([\d.]+) rg "
+    rb"1 0 0 1 ([\d.]+) ([\d.]+) Tm (.*?) Tj ET", re.S)
+_HEADER_FILL_RE = re.compile(
+    rb"q 0\.16 0\.20 0\.34 rg ([\d.]+) ([\d.]+) ([\d.]+) ([\d.]+) re f Q")
+_IMAGE_XOBJECT_RE = re.compile(rb"/Subtype\s*/Image")
+_OBJ_RE = re.compile(rb"(\d+) 0 obj\n(.*?)\nendobj", re.S)
+_PLACEHOLDER_TEXT = "图片未能嵌入"
+# 表格正文的字色（与正文段落同色但字号不同，见 `_render_table`）
+_TABLE_TEXT_COLOR = (0.1, 0.1, 0.12)
+
+
+def _row_key(run: dict) -> int:
+    """同一基线（0.5pt 内）算同一行。"""
+    return round(run["y"] * 2)
+
+
+def _column_starts(runs: list[dict]) -> tuple[list[float], int]:
+    """从一组表格文本段推出**列位**：在多数行里都出现的 x。
+
+    单元格文字换行会在同一 x 多画一行、字形回退会在同一单元格内多画一段（x 连续
+    推进）——两者都不改变"列位"这一事实，所以用"多行共有"来定列，不依赖字宽估算。
+    返回（列位 x 列表，行数）。
+    """
+    rows: dict[int, list[dict]] = {}
+    for r in runs:
+        rows.setdefault(_row_key(r), []).append(r)
+    counts: dict[float, int] = {}
+    for _, row in rows.items():
+        for x in {round(r["x"], 2) for r in row}:
+            counts[x] = counts.get(x, 0) + 1
+    if not counts:
+        return [], 0
+    need = max(1, int(len(rows) * 0.6 + 0.999))
+    return sorted(x for x, c in counts.items() if c >= need), len(rows)
+
+
+def _page_contents(pdf_bytes: bytes) -> list[bytes]:
+    """按**页序**取出各页内容流（本模块写出的 PDF 未压缩，直接取字节）。"""
+    objs = {int(m.group(1)): m.group(2) for m in _OBJ_RE.finditer(pdf_bytes)}
+    pages: list[tuple[int, bytes]] = []
+    for num, body in objs.items():
+        if b"/Type /Page " not in body or b"/Contents" not in body:
+            continue
+        cm = re.search(rb"/Contents (\d+) 0 R", body)
+        if not cm:
+            continue
+        content = objs.get(int(cm.group(1)), b"")
+        sm = re.search(rb"stream\n(.*?)\nendstream", content, re.S)
+        pages.append((num, sm.group(1) if sm else b""))
+    pages.sort()
+    return [body for _, body in pages]
+
+
+def _text_runs_in_pdf(pdf_bytes: bytes) -> list[dict]:
+    """PDF 内容流里的文本绘制指令 → `{page, x, y, size, color, text}`。
+
+    只认本模块 `_text_ops` 写出的形状（`BT /F1 <size> Tf <r> <g> <b> rg 1 0 0 1 x y Tm <..> Tj ET`），
+    内容流未压缩，因此直接按字节解析即可（不引第三方 PDF 库）。
+    非 ASCII 走子集字体的十六进制字形码，无法反解回原文——这里只保留长度与坐标，
+    需要**文本内容**的判定（如缺图占位）改从页面文本抽取做，见 `pdf_image_report`。
+    """
+    out: list[dict] = []
+    for page, body in enumerate(_page_contents(pdf_bytes), 1):
+        for t in _TEXT_OP_RE.finditer(body):
+            size, r, g, b, x, y, payload = t.groups()
+            out.append({"page": page, "x": float(x), "y": float(y),
+                        "size": float(size), "color": (float(r), float(g), float(b)),
+                        "glyphs": max(0, (len(payload) - 2) // 4)
+                        if payload.startswith(b"<") else len(payload),
+                        "literal": payload[1:-1].decode("latin-1", "replace")
+                        if not payload.startswith(b"<") else ""})
+    return out
+
+
+def pdf_page_image_counts(pdf_bytes: bytes) -> list[int]:
+    """每页实际绘制的图片数（按页序）。整页只有一张图时文本量极小，
+    "文字少"不等于"空白页"——判空白必须把图算进去。"""
+    out = []
+    for body in _page_contents(pdf_bytes):
+        out.append(len(re.findall(rb"/Im\d+ Do", body)))
+    return out
+
+
+def pdf_image_report(pdf_bytes: bytes, *, expected: int = 0,
+                     text: str | None = None) -> dict:
+    """嵌入图与缺图占位的**确定性**读数。
+
+    `images` 是页面资源里真实登记的图片 XObject 数；`placeholders` 是渲染成
+    "[图片未能嵌入]" 的引用数（从**页面文本**数，因为占位文案走子集字体的字形码，
+    内容流里读不出原文）。`expected` 由调用方按该报告引用的图表数给出——
+    "有几张 PNG 落在磁盘上"不等于"PDF 里有几张图"。
+
+    `drawn_on_page` 是**真的画在页面可视区内**的图片数：登记了 XObject 但变换矩阵把
+    它放到页面外（例如畸形尺寸导致高度 5 万 pt）时，页面上什么都看不到——那种情况
+    必须算缺图，不能因为"资源里有一个 Image 对象"就报"已嵌入"。
+    """
+    images = len(_IMAGE_XOBJECT_RE.findall(pdf_bytes))
+    drawn = 0
+    oversized = 0
+    for body in _page_contents(pdf_bytes):
+        for m in re.finditer(rb"q ([\d.]+) 0 0 ([\d.]+) ([\d.]+) ([\d.]+) cm /Im\d+ Do Q", body):
+            dw, dh, x, y = (float(v) for v in m.groups())
+            if dw <= 0 or dh <= 0:
+                continue
+            if dh > USABLE_H or dw > USABLE_W:
+                oversized += 1
+                continue
+            if y < MARGIN_B - 1 or y + dh > PAGE_H - MARGIN_T + 1:
+                oversized += 1                      # 底边或顶边落在可视区之外
+                continue
+            drawn += 1
+    if text is None:
+        text = ""
+        try:
+            from pypdf import PdfReader
+            import io as _io
+            text = "".join((pg.extract_text() or "") for pg in PdfReader(_io.BytesIO(pdf_bytes)).pages)
+        except Exception:                              # noqa: BLE001 - 读不了就没有文本证据
+            text = ""
+    placeholders = text.count(_PLACEHOLDER_TEXT)
+    # 占位框里会写"原因：…"，但排版会按宽度折行，抽取文本里可能夹换行——
+    # 去掉所有空白再找关键词，免得"尺寸异常"被断行拆开而漏判。
+    flat = re.sub(r"\s+", "", text)
+    oversized_placeholder = "尺寸异常" in flat
+    issues: list[str] = []
+    if placeholders:
+        issues.append(f"{placeholders} 处图片未能嵌入"
+                      + ("（尺寸异常）" if oversized_placeholder else ""))
+    if oversized:
+        issues.append(f"{oversized} 张图被放到页面可视区之外（尺寸异常）")
+    if expected and drawn < expected:
+        issues.append(f"应有 {expected} 张图，实际画在页面上 {drawn} 张")
+    return {"images": images, "drawn_on_page": drawn, "oversized": oversized,
+            "expected": int(expected or 0),
+            "placeholders": placeholders,
+            "oversized_placeholder": oversized_placeholder,
+            "ok": not issues, "issues": issues}
+
+
+
+def pdf_table_grids(pdf_bytes: bytes) -> list[dict]:
+    """每张表的**表头/数据列网格**读数：表头单元格是否落在数据列的列位上。
+
+    表的定位：表头底色（`0.16 0.20 0.34 rg` 的填充矩形）标出顶部；数据行是同一页
+    中位于表头之下、下一张表头之上的表格正文（表格正文的颜色与字号是固定的
+    `(0.10,0.10,0.12)` / `TABLE_SIZE`，正文段落是 `BODY_SIZE`，据此区分）。
+
+    "单元格"= 同一行里 x 间距 > `_CELL_GAP` 的文本段；同一单元格内的字形回退会把
+    一段文字拆成多个绘制指令（x 连续推进），按间距合并回一格。判定：表头单元格
+    数必须与数据行单元格数一致，且表头每个格位都能在数据行里找到同 x 的格位。
+    拼接式表头（各列名连成一个字符串画在左上角）会退化成 1 格 → 判不对齐。
+    """
+    runs = _text_runs_in_pdf(pdf_bytes)
+    headers: list[dict] = []
+    for page, body in enumerate(_page_contents(pdf_bytes), 1):
+        for f in _HEADER_FILL_RE.finditer(body):
+            x, y, w, h = (float(v) for v in f.groups())
+            headers.append({"page": page, "top": y + h, "bottom": y, "left": x, "width": w})
+    grids: list[dict] = []
+    for i, hd in enumerate(headers):
+        nxt = next((h["top"] for h in headers[i + 1:] if h["page"] == hd["page"]), None)
+        white = [r for r in runs if r["page"] == hd["page"] and r["color"] == (1.0, 1.0, 1.0)
+                 and hd["bottom"] <= r["y"] <= hd["top"] + 1]
+        cells = [
+            r for r in runs
+            if r["page"] == hd["page"] and r["color"] == _TABLE_TEXT_COLOR
+            and r["size"] == TABLE_SIZE
+            and r["y"] < hd["bottom"] and (nxt is None or r["y"] > nxt)
+        ]
+        body_cols, body_rows = _column_starts(cells)
+        header_cols, header_rows = _column_starts(white)
+        # 表头落在数据列位上的格数
+        on_grid = [hx for hx in header_cols
+                   if any(abs(hx - bx) <= 0.6 for bx in body_cols)]
+        col_w = USABLE_W / len(header_cols) if header_cols else 0.0
+        if not header_cols:
+            aligned = True
+        elif body_cols and len(on_grid) < len(body_cols):
+            # 表头格数少于数据列 → 列名被拼成一段（或漏列），读者无法把列名对上数字
+            aligned = False
+        elif body_cols:
+            aligned = True
+        else:
+            # 数据列全空：退化为"表头格位等距且首列落在左边距 +4"
+            aligned = (abs(header_cols[0] - (MARGIN_L + 4)) <= 0.6
+                       and all(abs((header_cols[j + 1] - header_cols[j]) - col_w) <= 0.6
+                               for j in range(len(header_cols) - 1)))
+        grids.append({"page": hd["page"], "cols": len(on_grid), "header_cols": header_cols,
+                      "body_cols": body_cols, "header_rows": header_rows,
+                      "body_rows": body_rows, "col_w": round(col_w, 2), "aligned": aligned})
+    return grids
+
+

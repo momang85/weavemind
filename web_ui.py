@@ -4518,6 +4518,32 @@ def _research_payload(tid: str, ws) -> dict | None:
                 out.setdefault("evidence", {})["rules_version"] = str(evp.get("rules_version") or "")
             except Exception:
                 pass
+        # 机器通过与人工待复核**分开展示**：机器一栏是本版绑定的验收结论；人工一栏只读
+        # 工作区 `human_review.json`——**只有真实研究员的复核动作**才写它，自动流程与
+        # 执行者都不写，因此缺文件（或没写批准者）一律如实显示"待复核"。
+        machine = {"overall": "", "version_id": "", "bound": False}
+        try:
+            from report_version import VersionStore as _VS
+            _cur = _VS(ws, tid).adopted()
+            if _cur is not None:
+                machine = {"overall": _cur.acceptance_overall(),
+                           "version_id": str(_cur.version_id or ""),
+                           "bound": bool(_cur.acceptance_for_this_body())}
+        except Exception:
+            pass
+        human = {"status": "pending", "approver": "", "at": "", "version_id": ""}
+        hp = ws / "human_review.json"
+        if hp.exists():
+            try:
+                h = _json.loads(hp.read_text(encoding="utf-8")) or {}
+                # 缺批准者不算已复核（fail closed）：不允许匿名/自动填写的"批准"
+                if str(h.get("status") or "") == "recorded" and str(h.get("approver") or "").strip():
+                    human = {"status": "recorded", "approver": str(h.get("approver") or ""),
+                             "at": str(h.get("at") or ""),
+                             "version_id": str(h.get("version_id") or "")}
+            except Exception:
+                pass
+        out["review"] = {"machine": machine, "human": human}
         if not out:
             return None
         return out

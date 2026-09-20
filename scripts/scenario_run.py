@@ -54,14 +54,18 @@ def _write(path: Path, payload) -> None:
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
-def _pdf_verdict(pdf_path: Path) -> dict:
-    """导出 PDF 的**确定性**视觉判定：页数、空白页、文本量（不依赖视觉模型）。
+def _pdf_parse_verdict(pdf_path: Path) -> dict:
+    """导出 PDF 的**可解析性**判定：页数、空白页、文本量（不依赖视觉模型）。
 
-    只判"能不能读"这一层：无页 / 空白页 / 整册几乎无文字 → fail 并给证据；
-    排版观感（字号、拥挤、图文比例）由渲染后的 PNG 视觉评审负责，不在这里假装判过。
+    只判"能不能读"这一层：无页 / 空白页 / 整册几乎无文字 → fail 并给证据。
+    **不叫视觉通过**：图有没有进去、表头对不对齐由 `_pdf_export_verdict` 判，
+    排版观感（字号、拥挤、图文比例）要渲染成 PNG 后另做视觉评审。
     """
     try:
         from pypdf import PdfReader
+        import report_pdf
+        raw = pdf_path.read_bytes()
+        per_page_images = report_pdf.pdf_page_image_counts(raw)
         reader = PdfReader(str(pdf_path))
         pages = []
         for i, page in enumerate(reader.pages, 1):
@@ -69,19 +73,47 @@ def _pdf_verdict(pdf_path: Path) -> dict:
                 chars = len((page.extract_text() or "").strip())
             except Exception:
                 chars = 0
-            pages.append({"page": i, "chars": chars})
+            imgs = per_page_images[i - 1] if i - 1 < len(per_page_images) else 0
+            pages.append({"page": i, "chars": chars, "images": imgs})
     except Exception as exc:                          # noqa: BLE001 - 读不了照实记
         return {"verdict": "fail", "issues": [f"PDF 无法解析：{str(exc)[:120]}"], "pages": []}
     issues = []
     if not pages:
         issues.append("PDF 没有页")
-    blank = [p["page"] for p in pages if p["chars"] < 50]
+    # 空白页 = 既没有文字、也没有图；只有图的页（图表整页）不算空白
+    blank = [p["page"] for p in pages if p["chars"] < 50 and not p["images"]]
     if blank:
         issues.append(f"疑似空白页：{blank[:5]}")
     if pages and sum(p["chars"] for p in pages) < 200:
         issues.append("整册文字过少（<200 字符）")
     return {"verdict": "pass" if not issues else "fail", "issues": issues,
             "pages": pages, "page_count": len(pages)}
+
+
+def _pdf_export_verdict(pdf_path: Path, *, expected_images: int) -> dict:
+    """导出**完整性**判定：引用图是否真进了 PDF、缺图占位、表头与数据列是否对齐。
+
+    `expected_images` 来自本场景的图表清单（不是磁盘上的 PNG 数）——磁盘有图而
+    PDF 里是占位，正是本判定要抓的情形。
+    """
+    import report_pdf
+    raw = pdf_path.read_bytes()
+    text = ""
+    try:
+        from pypdf import PdfReader
+        text = "".join((pg.extract_text() or "") for pg in PdfReader(str(pdf_path)).pages)
+    except Exception:                                 # noqa: BLE001 - 文本读不出照实记
+        text = ""
+    img = report_pdf.pdf_image_report(raw, expected=expected_images, text=text)
+    grids = report_pdf.pdf_table_grids(raw)
+    misaligned = [g for g in grids if not g["aligned"]]
+    issues = list(img["issues"])
+    if misaligned:
+        issues.append(f"{len(misaligned)} 张表的表头未与数据列对齐"
+                      f"（第 {[g['page'] for g in misaligned]} 页）")
+    return {"verdict": "pass" if not issues else "fail", "issues": issues,
+            "images": img, "tables": grids, "tables_checked": len(grids)}
+
 
 
 def run_scenario(spec: dict, *, out_root: Path = OUT_ROOT) -> dict:
@@ -142,6 +174,11 @@ def run_scenario(spec: dict, *, out_root: Path = OUT_ROOT) -> dict:
                 core_metrics=list(r0.get("required_metrics") or []), subject_type=stype)
         charts_dir = out_dir / "charts"
         charts_dir.mkdir(parents=True, exist_ok=True)
+        # 图必须落在**导出路径解析图片的那个根**（`<工作区>/charts/`，与线上一致）：
+        # 只往场景输出目录拷一份"展示副本"，导出 PDF 就会把每张图渲染成
+        # "[图片未能嵌入]"占位（实测三场景分别缺 5/2/4 张）。
+        ws_charts = ws / "charts"
+        ws_charts.mkdir(parents=True, exist_ok=True)
         render_log = ""
         if specs:
             work = Path(tempfile.mkdtemp(prefix=f"scenchart_{name}_"))
@@ -155,6 +192,7 @@ def run_scenario(spec: dict, *, out_root: Path = OUT_ROOT) -> dict:
                 (proc.stdout or "").strip().splitlines()[-1] or ""
             for png in sorted(work.glob("chart_*.png")):
                 shutil.copy2(png, charts_dir / png.name)
+                shutil.copy2(png, ws_charts / png.name)
             if (work / "chart_manifest.json").exists():
                 shutil.copy2(work / "chart_manifest.json", proj / "chart_manifest.json")
             shutil.rmtree(work, ignore_errors=True)
@@ -245,10 +283,18 @@ def run_scenario(spec: dict, *, out_root: Path = OUT_ROOT) -> dict:
             "charts": charts,
             "render_log": render_log,
             "pdf_note": pdf_note,
-            "visual_verdict": (_pdf_verdict(out_dir / "report.pdf")
-                               if (out_dir / "report.pdf").exists()
-                               else {"verdict": "unknown", "issues": [pdf_note or "未生成 PDF"],
-                                     "pages": []}),
+            # 引用图数取自**本场景的图表清单**（不是磁盘上的 PNG 数）：正文引用了
+            # 几张图，PDF 就该嵌几张。
+            "pdf_parse": (_pdf_parse_verdict(out_dir / "report.pdf")
+                          if (out_dir / "report.pdf").exists()
+                          else {"verdict": "unknown", "issues": [pdf_note or "未生成 PDF"],
+                                "pages": []}),
+            "pdf_export": (_pdf_export_verdict(out_dir / "report.pdf",
+                                               expected_images=len(charts))
+                           if (out_dir / "report.pdf").exists()
+                           else {"verdict": "unknown",
+                                 "issues": [pdf_note or "未生成 PDF"],
+                                 "images": {}, "tables": [], "tables_checked": 0}),
             "artifacts": artifacts,
         }
         manifest["checks"] = _check(manifest, spec.get("expect") or {})
@@ -292,6 +338,15 @@ def _check(manifest: dict, expect: dict) -> dict:
         out["audit_contains"] = any(expect["audit_contains"] in a for a in manifest.get("audit") or [])
     if "chart_min" in expect:
         out["chart_min"] = len(manifest.get("charts") or []) >= int(expect["chart_min"])
+    # 导出完整性对**每个**场景都成立（不是场景可选预期）：正文引用的图必须真进 PDF、
+    # 表头必须与数据列共用同一列网格。此前只查页数与字符量，三场景分别缺 5/2/4 张图
+    # 却一律 pass——"磁盘上有 PNG"不等于"PDF 里有图"。
+    export = manifest.get("pdf_export") or {}
+    img = export.get("images") or {}
+    out["pdf_parseable"] = (manifest.get("pdf_parse") or {}).get("verdict") == "pass"
+    out["images_embedded"] = bool(img.get("ok"))
+    out["no_image_placeholder"] = int(img.get("placeholders") or 0) == 0
+    out["table_columns_aligned"] = all(g.get("aligned") for g in (export.get("tables") or []))
     out["all_passed"] = all(out.values()) if out else True
     return out
 

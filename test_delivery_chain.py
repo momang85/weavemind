@@ -5665,6 +5665,58 @@ class TestResearchBriefAssembly(unittest.TestCase):
         self.assertIn("低于", got[0], got)
         self.assertNotIn("高于", got[0])
 
+    def test_cashflow_coverage_branches_on_the_actual_reading(self):
+        """定向检查：69.37% / 100% / 107.23% 分别落在 低于 / 相当 / 高于（容差 0.5pp）。"""
+        import report_brief
+        tid, _ = self._env()
+
+        def reading(cf, npv, ratio):
+            rows = [
+                {"metric": "net_profit", "metric_label": "归母净利润", "year": 2024,
+                 "value": npv, "unit": "亿元", "fact_id": "f-np"},
+                {"metric": "operating_cashflow", "metric_label": "经营活动现金流净额",
+                 "year": 2024, "value": cf, "unit": "亿元", "fact_id": "f-cf"},
+            ]
+            derived = [{"metric": "cashflow_coverage",
+                        "metric_label": "经营现金流对归母净利润的覆盖", "year": 2024,
+                        "period": "2024年", "value": ratio, "unit": "%",
+                        "formula": f"{cf} / {npv} * 100", "derived_from": ["f-cf", "f-np"]}]
+            got = [f["text"] for f in report_brief._findings(rows, derived, [2023, 2024])
+                   if "覆盖" in f["text"]]
+            self.assertTrue(got)
+            return got[0]
+
+        low = reading(46.29, 66.73, 69.37)
+        self.assertIn("低于", low)
+        self.assertNotIn("高于", low)
+        same = reading(66.73, 66.73, 100.0)
+        self.assertIn("相当", same)
+        self.assertNotIn("高于", same)
+        high = reading(71.56, 66.73, 107.23)
+        self.assertIn("高于", high)
+        self.assertNotIn("低于", high)
+        # 负值与零分母不套覆盖解释（既不高于也不低于）
+        for cf, npv, ratio, want in ((-46.29, 66.73, -69.37, "不表示利润有现金支撑"),
+                                     (46.29, -66.73, -69.37, "不表示利润有现金支撑"),
+                                     (46.29, 0.0, None, "不可算")):
+            text = reading(cf, npv, ratio)
+            self.assertIn(want, text, text)
+            self.assertNotIn("高于", text, text)
+            self.assertNotIn("低于", text, text)
+
+    def test_cashflow_coverage_condition_text_matches_the_branches(self):
+        """条件文案必须与三分支一致：同为正才比大小，负值/零值不套覆盖解释。"""
+        import facts as F
+        cond = F.RATIO_CONDITIONS["cashflow_coverage"]
+        self.assertIn("低于", cond)
+        self.assertIn("相当", cond)
+        self.assertIn("高于", cond)
+        self.assertIn("同为正", cond)
+        self.assertIn("不套覆盖解释", cond)
+        # 旧文案在正数区间是误导：不得再声称"同为正即高于"
+        self.assertNotIn("同为正时表示", cond)
+        self.assertNotIn("同为正**时表示", cond)
+
     def test_financial_subject_suppresses_corporate_ratios(self):
         """研究对象为金融机构：不生成企业口径比率与比率图，只保留同比对照。"""
         import report_brief
@@ -5982,6 +6034,60 @@ class TestResearchBriefAssembly(unittest.TestCase):
         self.assertIn("不得机械套用", md)
         # 现金流覆盖倍数的符号条件必须写明（负值不表示利润有现金支撑）
         self.assertIn("同为正", md)
+
+
+class TestReviewHonestyProjection(unittest.TestCase):
+    """机器通过与人工复核**分开**，且人工一栏 fail closed（C1-4）。
+
+    起因：接口验证把正文标题改成"（人工复核：口径与缺口已核对）"，任务状态随之变
+    SUCCESS/verified，文档还把它记成"真实人工修订实测"——自动修订 + 机器重验**不能**
+    充当研究员复核。因此页面必须两栏分开，且没有研究员批准记录时只能显示"待复核"。
+    """
+
+    def _ws(self, files: dict) -> Path:
+        tmp = Path(tempfile.mkdtemp(prefix="wm_review_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        for name, payload in files.items():
+            (tmp / name).write_text(json.dumps(payload, ensure_ascii=False),
+                                    encoding="utf-8")
+        return tmp
+
+    def _payload(self, ws: Path):
+        import web_ui
+        return web_ui._research_payload("ui-review-01", ws) or {}
+
+    def test_human_review_defaults_to_pending(self):
+        """没有 human_review.json → 待复核（不显示成已复核）。"""
+        ws = self._ws({"report_structure.json": {"findings": [{"text": "营业收入增长"}]}})
+        rev = self._payload(ws).get("review") or {}
+        self.assertEqual((rev.get("human") or {}).get("status"), "pending")
+        self.assertIn("machine", rev)
+
+    def test_approval_without_approver_is_not_a_review(self):
+        """写了 status=recorded 但没有批准者 → 仍按待复核（不允许匿名/自动批准）。"""
+        ws = self._ws({"report_structure.json": {"findings": []},
+                       "human_review.json": {"status": "recorded", "at": "2026-09-20"}})
+        rev = self._payload(ws).get("review") or {}
+        self.assertEqual((rev.get("human") or {}).get("status"), "pending")
+
+    def test_recorded_review_is_shown_with_approver_and_version(self):
+        """真实研究员写入的批准（含批准者/时间/版本）原样呈现。"""
+        ws = self._ws({"report_structure.json": {"findings": []},
+                       "human_review.json": {"status": "recorded", "approver": "研究员甲",
+                                             "at": "2026-09-20T10:00:00", "version_id": "abc123"}})
+        human = (self._payload(ws).get("review") or {}).get("human") or {}
+        self.assertEqual(human.get("status"), "recorded")
+        self.assertEqual(human.get("approver"), "研究员甲")
+        self.assertEqual(human.get("version_id"), "abc123")
+
+    def test_frontend_shows_both_columns(self):
+        """结果页源码级：机器验收与人工复核必须各占一行，且待复核文案写明"不代表已复核"。"""
+        src = (Path(__file__).resolve().parent / "frontend" / "src" / "components"
+               / "ResearchBriefPanel.tsx").read_text(encoding="utf-8")
+        self.assertIn("机器验收", src)
+        self.assertIn("人工复核", src)
+        self.assertIn("待复核（无研究员批准记录）", src)
+        self.assertIn("机器重验通过不代表已复核", src)
 
 
 if __name__ == "__main__":

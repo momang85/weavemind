@@ -41,6 +41,7 @@ export default function ResearchBriefPanel({ taskId, research, exportState, onRe
   const citationGaps = gaps.citations || []
   const unproven = gaps.unproven || []
   const requiredGaps = gaps.required_data || []
+  const rv = research.review || {}
   const hasGaps = evidenceGaps.length + citationGaps.length + unproven.length + requiredGaps.length > 0
 
   const submitRevision = async () => {
@@ -177,6 +178,16 @@ export default function ResearchBriefPanel({ taskId, research, exportState, onRe
       {taskId && (
         <div className={box}>
           <div className={h}>修改与重验（新建版本，不覆盖历史）</div>
+          {/* 机器通过与人工复核**分开**说：自动重验通过不等于研究员已复核 */}
+          <ul className={li}>
+            <li>· 机器验收：{rv.machine?.overall || '未知'}
+              {rv.machine?.version_id ? `（本版 ${String(rv.machine.version_id).slice(0, 12)}` : '（版本未知'}
+              {rv.machine?.bound ? '，绑定本版正文）' : '，未绑定本版正文）'}</li>
+            {rv.human?.status === 'recorded'
+              ? <li>· 人工复核：{rv.human.approver} 于 {rv.human.at || '时间未记录'} 批准
+                  {rv.human.version_id ? `（版本 ${String(rv.human.version_id).slice(0, 12)}）` : ''}</li>
+              : <li className="text-amber-400">· 人工复核：待复核（无研究员批准记录）——机器重验通过不代表已复核</li>}
+          </ul>
           {!editing ? (
             <button type="button" onClick={() => setEditing(true)}
               className="px-3 py-1.5 bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-400 rounded-lg text-xs">

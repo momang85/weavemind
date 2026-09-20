@@ -88,11 +88,41 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _pdf_verdict(raw: bytes) -> dict:
+    """机器可读 verdict：页数、空白页（**把图算进去**）、嵌入图与缺图占位。"""
+    import io
+    text = ""
+    try:
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(raw))
+        text = "".join((pg.extract_text() or "") for pg in reader.pages)
+        chars = [len((pg.extract_text() or "").strip()) for pg in reader.pages]
+    except Exception as exc:                           # noqa: BLE001 - 读不了照实记
+        return {"verdict": "fail", "issues": [f"PDF 无法解析：{str(exc)[:120]}"],
+                "pages": 0, "blank_pages": []}
+    imgs = report_pdf.pdf_page_image_counts(raw)
+    blank = [i + 1 for i, c in enumerate(chars) if c < 50 and not (i < len(imgs) and imgs[i])]
+    issues = []
+    if blank:
+        issues.append(f"疑似空白页：{blank[:5]}")
+    if not chars:
+        issues.append("PDF 没有页")
+    img = report_pdf.pdf_image_report(raw, text=text)
+    issues += img["issues"]
+    return {"verdict": "pass" if not issues else "fail", "issues": issues,
+            "pages": len(chars), "blank_pages": blank,
+            "images_embedded": img["images"], "image_placeholders": img["placeholders"]}
+
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", default=str(ROOT / ".weavemind" / "pdf_visual"))
     ap.add_argument("--scale", type=float, default=2.0,
                     help="栅格化缩放（2.0 ≈ 144dpi，够看清字号与单位）")
+    ap.add_argument("--pdf", action="append", default=[],
+                    help="额外栅格化的真实 PDF（可重复；如场景导出 report.pdf）。"
+                         "给了它就只渲染这些文件，并输出逐页 verdict")
     args = ap.parse_args()
 
     try:
@@ -106,6 +136,43 @@ def main() -> int:
     out_root.mkdir(parents=True, exist_ok=True)
     index: dict = {"renderer": f"pypdfium2 {getattr(pdfium, '__version__', '?')}",
                    "scale": args.scale, "cases": []}
+
+    if args.pdf:
+        for spec in args.pdf:
+            p = Path(spec)
+            if not p.is_file():
+                print(f"PDF 不存在：{p}", file=sys.stderr)
+                return 2
+            raw = p.read_bytes()
+            # 用例名带上父目录：场景导出的文件名都叫 report.pdf，只用 stem 会互相覆盖
+            label = f"{p.parent.name}-{p.stem}" if p.stem in ("report", "report.pdf") \
+                else p.stem
+            case_dir = out_root / label
+            case_dir.mkdir(parents=True, exist_ok=True)
+            (case_dir / "report.pdf").write_bytes(raw)
+            doc = pdfium.PdfDocument(raw)
+            pages = []
+            for idx in range(len(doc)):
+                bitmap = doc[idx].render(scale=args.scale)
+                png_path = case_dir / f"page-{idx + 1}.png"
+                bitmap.to_pil().save(png_path)
+                pages.append({"page": idx + 1, "png": str(png_path),
+                              "png_sha256": _sha256(png_path)})
+            doc.close()
+            index["cases"].append({
+                "case": label, "title": label, "pdf": str(p), "pages": pages,
+                "pdf_sha256": hashlib.sha256(raw).hexdigest(),
+                # 机器可读 verdict：与 `report_pdf` 的确定性判定同源，**只覆盖**
+                # "有没有页 / 是不是空白 / 图有没有进去"，观感由看 PNG 的人判。
+                "verdict": _pdf_verdict(raw),
+            })
+            print(f"[{label}] {len(pages)} 页 → {case_dir} "
+                  f"（verdict={index['cases'][-1]['verdict']['verdict']}）")
+        idx_path = out_root / "index.json"
+        idx_path.write_text(json.dumps(index, ensure_ascii=False, indent=1),
+                            encoding="utf-8")
+        print(f"索引：{idx_path}")
+        return 0
 
     for name, builder in CASES.items():
         md, title = builder()

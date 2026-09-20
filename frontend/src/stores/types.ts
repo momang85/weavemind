@@ -120,6 +120,12 @@ export interface ResearchBrief {
   evidence_locations?: { kind?: string; locator?: string; source_n?: string; text?: string }[]
   charts?: { file: string; type?: string; grade?: string; draft_reason?: string; question?: string; observation?: string }[]
   analysis?: string
+  /** 机器通过与人工复核**分开**：机器一栏是本版绑定的验收结论；人工一栏只有真实
+   *  研究员复核后才会是 recorded，缺记录一律 pending（不允许自动填批准）。 */
+  review?: {
+    machine?: { overall?: string; version_id?: string; bound?: boolean }
+    human?: { status?: string; approver?: string; at?: string; version_id?: string }
+  }
 }
 
 /** 导出与版本绑定（后端 `_get_task_page` 的 `export` 块）。 */

@@ -24,6 +24,36 @@ MIN_TICK_FONT = 8
 MIN_LABEL_FONT = 10
 OVERLAP_PX = 3          # 相邻标签重叠超过 3px 判定为重叠
 LEGEND_CORE_RATIO = 0.38  # 图例 bbox 与轴中央区域相交比例阈值
+# 画布高宽比上限：正常图表 ≤1.5；被 tight bbox 撑爆的画布会达到上百（实测 1038×121366）。
+# 超限说明有 artist 被放到了画布外（典型成因：坐标变换退化后数值标签落在数据范围之外），
+# 这种 PNG 在报告里几乎全是空白——必须报出来，不能算"发布级"。
+MAX_CANVAS_ASPECT = 12.0
+
+
+def canvas_aspect_issue(path) -> dict | None:
+    """已保存 PNG 的画布高宽比异常 → 返回一条 issue（正常返回 None）。
+
+    为什么读文件而不是读 figure：`bbox_inches="tight"` 的膨胀只体现在**落盘结果**里，
+    figure 的 `get_size_inches()` 看不出来。
+    """
+    try:
+        import struct
+        with open(path, "rb") as f:
+            head = f.read(24)
+        if head[:8] != b"\x89PNG\r\n\x1a\n":
+            return None
+        w, h = struct.unpack(">II", head[16:24])
+    except Exception:                       # noqa: BLE001 - 读不了就不下判断
+        return None
+    if not w or not h:
+        return None
+    aspect = h / w
+    if aspect <= MAX_CANVAS_ASPECT:
+        return None
+    return {"type": "canvas_aspect", "kind": "canvas",
+            "detail": f"画布尺寸异常（{w}×{h}，高宽比 {aspect:.1f}）——"
+                      f"图在页面里几乎全是空白，检查是否有标签落在坐标轴范围之外"}
+
 
 
 def _tick_overlap(labels) -> list[dict]:
@@ -154,4 +184,9 @@ def render_with_qa(fig, ax, path, max_rounds: int = 3, dpi: int = 110) -> list[d
         fig.savefig(path, dpi=dpi, bbox_inches="tight")
     except Exception:
         fig.savefig(path, dpi=dpi)
+    # 落盘后再判一次画布尺寸：tight bbox 的膨胀只有读文件才看得见（见 canvas_aspect_issue）
+    aspect_issue = canvas_aspect_issue(path)
+    if aspect_issue is not None and not any(
+            i.get("type") == "canvas_aspect" for i in residual):
+        residual = list(residual) + [aspect_issue]
     return residual
