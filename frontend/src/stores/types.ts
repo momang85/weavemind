@@ -120,6 +120,23 @@ export interface ResearchBrief {
   evidence_locations?: { kind?: string; locator?: string; source_n?: string; text?: string }[]
   charts?: { file: string; type?: string; grade?: string; draft_reason?: string; question?: string; observation?: string }[]
   analysis?: string
+  /** 主张记录（C2-2）：结论/主体/期间/类型/支持状态/来源；与正文、缺口、风险、导出同源。 */
+  claims?: {
+    text?: string
+    type?: string
+    status?: string
+    reason?: string
+    subject?: string
+    periods?: number[]
+    citations?: number[]
+    fact_ids?: string[]
+    source?: { url?: string; title?: string; old_n?: number }
+  }[]
+  /** 引用了未采用来源的句子（逐句，带原因） */
+  unsupported_claims?: { sentence?: string; title?: string; url?: string; old_n?: number; reason?: string }[]
+  /** 面板（结构对象）绑定的版本；与当前选中版本不一致时页面必须提示 */
+  structure_version?: string
+  structure_current?: boolean
   /** 机器通过与人工复核**分开**：机器一栏是本版绑定的验收结论；人工一栏只有真实
    *  研究员复核后才会是 recorded，缺记录一律 pending（不允许自动填批准）。 */
   review?: {

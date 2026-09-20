@@ -42,6 +42,9 @@ export default function ResearchBriefPanel({ taskId, research, exportState, onRe
   const unproven = gaps.unproven || []
   const requiredGaps = gaps.required_data || []
   const rv = research.review || {}
+  const claims = research.claims || []
+  const unsupported = research.unsupported_claims || []
+  const weakClaims = claims.filter(c => c.status === 'unsupported' || c.status === 'needs_check')
   const hasGaps = evidenceGaps.length + citationGaps.length + unproven.length + requiredGaps.length > 0
 
   const submitRevision = async () => {
@@ -178,6 +181,30 @@ export default function ResearchBriefPanel({ taskId, research, exportState, onRe
       {taskId && (
         <div className={box}>
           <div className={h}>修改与重验（新建版本，不覆盖历史）</div>
+          {/* 主张与支持状态：与正文标记、缺口、风险、导出同一状态 */}
+          {weakClaims.length > 0 && (
+            <ul className={li}>
+              {weakClaims.slice(0, 5).map((c, i) => (
+                <li key={i} className={c.status === 'unsupported' ? 'text-amber-400' : ''}>
+                  · {c.status === 'unsupported' ? '未采用来源' : '待核查'}
+                  {c.type === 'target_claim' ? '（目标类判断）' : ''}：{String(c.text || '').slice(0, 60)}
+                  {c.reason ? `——${c.reason}` : ''}
+                </li>
+              ))}
+              {unsupported.length > 0 && (
+                <li className="text-slate-500">
+                  · 未采用来源共 {unsupported.length} 条，正文对应句已逐句标『待核查』（不删句）
+                </li>
+              )}
+            </ul>
+          )}
+          {research.structure_current === false && (
+            <div className="text-xs text-amber-400">
+              · 面板（发现/缺口/证据）绑定版本 {String(research.structure_version || '未知').slice(0, 12)}
+              ，与当前版本 {String(rv.machine?.version_id || '未知').slice(0, 12)} 不一致——
+              修订后需重新装配，勿把旧发现当新版
+            </div>
+          )}
           {/* 机器通过与人工复核**分开**说：自动重验通过不等于研究员已复核 */}
           <ul className={li}>
             <li>· 机器验收：{rv.machine?.overall || '未知'}

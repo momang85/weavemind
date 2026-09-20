@@ -4490,6 +4490,29 @@ def _research_payload(tid: str, ws) -> dict | None:
                  "text": str(r.get("text") or "")[:200]}
                 for r in (ch.get("management") or []) + (ch.get("third_party_views") or [])]
             out["analysis"] = str(st.get("analysis") or "")
+            # C2-2/C2-4：主张记录（结论/主体/期间/类型/支持状态/来源）与正文、缺口、
+            # 风险、导出共用同一状态——"来源清单合规"不等于"结论受支持"。
+            out["claims"] = [{"text": str(c.get("text") or ""),
+                              "type": str(c.get("type") or ""),
+                              "status": str(c.get("status") or ""),
+                              "reason": str(c.get("reason") or ""),
+                              "subject": str(c.get("subject") or ""),
+                              "periods": list(c.get("periods") or []),
+                              "citations": list(c.get("citations") or []),
+                              "fact_ids": list(c.get("fact_ids") or []),
+                              "source": c.get("source") or {}}
+                             for c in (st.get("claims") or [])]
+            out["unsupported_claims"] = [
+                {"sentence": str(u.get("sentence") or ""),
+                 "title": str(u.get("title") or ""),
+                 "url": str(u.get("url") or ""),
+                 "old_n": u.get("old_n"),
+                 "reason": str(u.get("reason") or "")}
+                for u in (st.get("unsupported_claims") or [])]
+            # 结构对象属于哪一版：修订后若未重新装配，页面必须明说"面板是旧版"。
+            # 默认 False（证明不了就是不一致），只有与当前选中版本相符才置 True。
+            out["structure_version"] = str(st.get("version_id") or "")
+            out["structure_current"] = False
         # 图表清单写在**项目目录**（渲染脚本的 cwd），工作区根目录只作回退
         try:
             from workspace import task_project_dir as _tpd
@@ -4529,6 +4552,11 @@ def _research_payload(tid: str, ws) -> dict | None:
                 machine = {"overall": _cur.acceptance_overall(),
                            "version_id": str(_cur.version_id or ""),
                            "bound": bool(_cur.acceptance_for_this_body())}
+                # 面板（结构对象）是否属于当前选中版本：修订后没重新装配 → 明确提示，
+                # 不拿旧发现冒充新版（C2-6）
+                out["structure_current"] = bool(
+                    out.get("structure_version")
+                    and out.get("structure_version") == machine["version_id"])
         except Exception:
             pass
         human = {"status": "pending", "approver": "", "at": "", "version_id": ""}

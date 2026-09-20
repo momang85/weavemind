@@ -6089,6 +6089,405 @@ class TestReviewHonestyProjection(unittest.TestCase):
         self.assertIn("待复核（无研究员批准记录）", src)
         self.assertIn("机器重验通过不代表已复核", src)
 
+    def test_panel_reports_stale_structure(self):
+        """C2-6：面板绑定的版本与当前版本不一致时必须明说（不拿旧发现冒充新版）。"""
+        ws = self._ws({"report_structure.json": {
+            "version_id": "old-version", "findings": [{"text": "营业收入增长"}],
+            "claims": [{"text": "营业收入 288.76 亿元", "status": "unsupported",
+                        "reason": "该来源未采用", "type": "third_party_view"}]}})
+        p = self._payload(ws)
+        self.assertEqual(p.get("structure_version"), "old-version")
+        # 工作区里没有版本记录 → 无法证明面板属于当前版本，必须为 False（fail closed）
+        self.assertIs(p.get("structure_current"), False)
+        self.assertEqual((p.get("claims") or [{}])[0].get("status"), "unsupported")
+
+    def test_panel_claims_carry_support_status(self):
+        """主张记录进面板：状态/原因/主体/期间/来源与结构对象一致。"""
+        ws = self._ws({"report_structure.json": {
+            "version_id": "v1",
+            "claims": [{"text": "2024 年目标未达成", "status": "needs_check",
+                        "type": "target_claim", "reason": "目标类判断需核对目标年度",
+                        "subject": "洋河股份", "periods": [2024],
+                        "source": {"url": "https://news.example/a", "old_n": 3}}],
+            "unsupported_claims": [{"sentence": "经媒体报道…", "title": "某媒体",
+                                    "url": "https://news.example/a", "old_n": 3,
+                                    "reason": "晚于资料截止日"}]}})
+        p = self._payload(ws)
+        c = (p.get("claims") or [])[0]
+        self.assertEqual(c["type"], "target_claim")
+        self.assertEqual(c["status"], "needs_check")
+        self.assertEqual(c["periods"], [2024])
+        self.assertEqual(c["source"]["old_n"], 3)
+        self.assertEqual((p.get("unsupported_claims") or [])[0]["reason"], "晚于资料截止日")
+
+
+class TestUnsupportedClaimLinkage(unittest.TestCase):
+    """C2-1/C2-2/C2-4：结论依赖**未采用来源**时，主张与证据的关联必须留下来。
+
+    实机反例（洋河 `ui-f00775cfdf` 原稿）：正文用"经21财经报道交叉印证""2024 年
+    5%—10% 目标未达成"开展判断，而同一材料在来源清单里是"未采用"；装配只把编号去掉，
+    读者仍把该句当成有来源支持的事实。这里冻结该形态：逐句标"待核查 + 原因"、
+    主张记录 `status=unsupported`、风险清单点名同一句，且**不得删光分析**。
+    """
+
+    GOAL = ("研究洋河股份 2023 与 2024 两个年度的营业收入、归母净利润、"
+            "经营活动现金流净额，合并报表口径，数据截至 2025-04-30")
+    # 模型自写的分析：三句，其中第二句依赖"21财经报道"（该材料晚于资料截止日）
+    BODY = (
+        "## 分析\n\n"
+        "2024 年营业收入 288.76 亿元，较上年下降 12.83%，降幅为近三年最大。"
+        "经21财经报道交叉印证，2024 年 5%—10% 的增长目标未达成，说明渠道调整尚未见效。[3]\n"
+        "归母净利润 66.73 亿元，同比下降 33.38%。\n\n"
+        "## 参考来源\n\n"
+        "1. [东方财富数据中心](https://data.eastmoney.com/api/qt/stock/main)\n"
+        "2. [洋河股份2024年年度报告](https://static.cninfo.com.cn/finalpage/2025-04-29/1.PDF)\n"
+        "3. [21财经：洋河的目标与渠道](https://news.example/2025-06-01/yanghe)\n")
+
+    def _env(self, *, tid: str = "c2-unsup-1"):
+        import facts as F
+        import task_state
+        tmp = Path(tempfile.mkdtemp(prefix="wm_c2_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        old_db = task_state.DB_PATH
+        ws_mod.configure_workspace_root(str(tmp))
+        task_state.DB_PATH = str(tmp / "c2.db")
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", old_root)
+        self.addCleanup(setattr, task_state, "DB_PATH", old_db)
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        req = F.parse_research_request(
+            self.GOAL, company="洋河股份", company_id="002304.SZ", market="cn",
+            periods=[2023, 2024], caliber="合并", as_of="2025-04-30",
+            perspective="bank_corporate", identity_source="form")
+        task_state.mark_queued(tid, goal=self.GOAL, research_request=req.to_payload(),
+                               db_path=task_state.DB_PATH)
+        proj = ws_mod.task_project_dir(tid, "default")
+        proj.mkdir(parents=True, exist_ok=True)
+        (proj / "financials.json").write_text(json.dumps({
+            "financials": [
+                {"year": 2023, "report_type": "年报", "revenue": 331.26,
+                 "net_profit": 100.16, "operating_cashflow": 61.3,
+                 "total_assets": 700.0, "total_liabilities": 200.0,
+                 "disclosure_date": "2024-04-26"},
+                {"year": 2024, "report_type": "年报", "revenue": 288.76,
+                 "net_profit": 66.73, "operating_cashflow": 46.29,
+                 "total_assets": 720.0, "total_liabilities": 210.0,
+                 "disclosure_date": "2025-04-29"},
+            ],
+            "metadata": {"source": "eastmoney_ashare", "company": "洋河股份",
+                         "stock_code": "002304.SZ", "currency": "CNY", "unit": "亿元",
+                         "caliber": "合并", "caliber_evidence": "含 PARENTNETPROFIT"},
+            "raw": {"url": "https://datacenter-web.eastmoney.com/api/x", "text": "{}"},
+        }, ensure_ascii=False), encoding="utf-8")
+        (proj / "search_results.json").write_text(json.dumps([
+            {"title": "洋河股份2024年报解读", "url": "https://news.example/2025-04-30/a",
+             "snippet": "洋河股份2024年营业收入288.76亿元"},
+        ], ensure_ascii=False), encoding="utf-8")
+        # 21财经那篇晚于资料截止日 → 叙事证据判 after_as_of（同一 URL 在模型来源清单里）
+        (proj / "fetch_snapshot.json").write_text(json.dumps([
+            {"title": "21财经：洋河的目标与渠道",
+             "url": "https://news.example/2025-06-01/yanghe",
+             "published_at": "2025-06-01",
+             "text": ("一、经营情况讨论与分析\n\n"
+                      "洋河股份2024年营业收入288.76亿元，公司年度经营目标为增长5%—10%，"
+                      "实际未达成，主要系渠道调整。\n")},
+        ], ensure_ascii=False), encoding="utf-8")
+        import working_paper_export as WPX
+        WPX.write_working_paper(tid, self.GOAL, project="default")
+        return tid
+
+    def test_excluded_source_leaves_claim_marked_not_silently_dropped(self):
+        import report_brief
+        tid = self._env()
+        st = report_brief.build_structure(tid, self.GOAL, self.BODY)
+        unsup = st.get("unsupported_claims") or []
+        self.assertTrue(unsup, "未采用来源的依赖句没有被记下来")
+        self.assertIn("21财经", json.dumps(unsup, ensure_ascii=False))
+        self.assertIn("晚于资料截止日", unsup[0]["reason"], unsup)
+        # 主张记录：同一句 status=unsupported 且带来源与原因（可追溯）
+        bad = [c for c in st["claims"] if c.get("status") == "unsupported"]
+        self.assertTrue(bad, st["claims"])
+        self.assertIn("21财经", json.dumps(bad, ensure_ascii=False))
+        self.assertEqual(bad[0]["subject"], "洋河股份")
+        self.assertEqual(bad[0]["periods"], [2024])
+        # 版本绑定：装配前为空串，盖章后与本版正文一致
+        self.assertEqual(bad[0]["version_id"], "")
+        report_brief.stamp_structure_version(st, "v-abc123")
+        self.assertEqual(st["version_id"], "v-abc123")
+        self.assertEqual(st["claims"][0]["version_id"], "v-abc123")
+        # 正文：该句标『待核查』，但分析**不得被删光**（其余两句仍在）
+        self.assertIn("〔待核查：本句引用的来源未采用", st["analysis"])
+        self.assertIn("归母净利润 66.73 亿元", st["analysis"])
+        self.assertIn("降幅为近三年最大", st["analysis"])
+        md = report_brief.render_brief_markdown(st, self.BODY)
+        self.assertIn("〔待核查：本句引用的来源未采用", md)
+        self.assertIn("结论不得当作已证事实", md)
+        # 风险清单点名同一句（缺口/风险/主张同一状态）
+        kinds = {r["kind"] for r in st["risks"]}
+        self.assertIn("unsupported_claim", kinds, st["risks"])
+        hit = next(r for r in st["risks"] if r["kind"] == "unsupported_claim")
+        self.assertIn("未采用来源", hit["text"])
+        self.assertIn("晚于资料截止日", hit["evidence"])
+        # 标记文字里不得带无法溯源的读数（验收会逐个数）
+        marker = st["analysis"].split("〔待核查：本句引用的来源未采用", 1)[1].split("〕", 1)[0]
+        self.assertNotRegex(marker, r"\d", marker)
+
+    def test_adopted_source_claims_are_untouched(self):
+        """正例：来源在采用清单里的句子不得被标记（不能把真话也标成待核查）。"""
+        import report_brief
+        tid = self._env(tid="c2-unsup-2")
+        # 补上被引用的那份年报（抓取过、契约内）→ 它会被准入，句子不该被标
+        proj = ws_mod.task_project_dir(tid, "default")
+        (proj / "fetch_snapshot.json").write_text(json.dumps([
+            {"title": "洋河股份2024年年度报告",
+             "url": "https://static.cninfo.com.cn/finalpage/2025-04-29/1.PDF",
+             "published_at": "2025-04-29",
+             "text": ("一、经营情况讨论与分析\n\n"
+                      "报告期内营业收入同比下降，主要系公司主动调整产品结构与渠道库存所致。\n")},
+        ], ensure_ascii=False), encoding="utf-8")
+        import working_paper_export as WPX
+        WPX.write_working_paper(tid, self.GOAL, project="default")
+        body = self.BODY.replace("[3]", "[2]")
+        st = report_brief.build_structure(tid, self.GOAL, body)
+        self.assertEqual(st.get("unsupported_claims"), [], st.get("unsupported_claims"))
+        self.assertNotIn("〔待核查", st["analysis"])
+        self.assertIn("归母净利润 66.73 亿元", st["analysis"])
+
+    def test_explanation_present_is_not_reported_as_missing(self):
+        """C2-4：解释已取得时写"贡献程度未核实"，不得同时宣称"原因尚不能证明"。"""
+        import report_brief
+        tid = self._env(tid="c2-unsup-3")
+        proj = ws_mod.task_project_dir(tid, "default")
+        # 补一份**已采用**的年报正文（含经营讨论）→ 管理层解释存在
+        (proj / "fetch_snapshot.json").write_text(json.dumps([
+            {"title": "洋河股份2024年年度报告",
+             "url": "https://static.cninfo.com.cn/finalpage/2025-04-29/1.PDF",
+             "published_at": "2025-04-29",
+             "text": ("一、经营情况讨论与分析\n\n"
+                      "报告期内营业收入同比下降，主要系公司主动调整产品结构与渠道库存所致。\n"
+                      "二、财务报表附注\n\n"
+                      "营业收入明细：本期 288.76 亿元，上期 331.26 亿元。\n")},
+        ], ensure_ascii=False), encoding="utf-8")
+        import working_paper_export as WPX
+        WPX.write_working_paper(tid, self.GOAL, project="default")
+        st = report_brief.build_structure(tid, self.GOAL, self.BODY)
+        ch = st["change_explanation"]
+        if not ch.get("management"):
+            self.skipTest("该夹具未取得管理层解释，另有用例覆盖无解释分支")
+        unproven = ch.get("unproven") or []
+        self.assertTrue(unproven)
+        self.assertTrue(all(u.get("has_explanation") for u in unproven), unproven)
+        texts = [r["text"] for r in st["risks"] if r["kind"] == "unproven_change"]
+        self.assertTrue(texts)
+        for t in texts:
+            self.assertIn("解释已取得", t, t)
+            self.assertNotIn("尚不能证明", t, t)
+
+
+
+class TestChangeExplanationGuards(unittest.TestCase):
+    """C2-3：文档可准入 ≠ 每句话可证明。
+
+    三类不能冒充"经营变化原因"的材料：会计政策/准则套话、仅重复数字的附注、
+    只命中"变化"关键词却没有任何因果语言的段落；目标/达成类判断另需核对目标年度、
+    发布时点与实际数（实机反例：洋河原稿把"2024 年 5%—10% 目标未达成"当已证事实）。
+    """
+
+    POLICY_TEXT = ("重要会计政策及会计估计\n\n"
+                   "本公司自 2024 年 1 月 1 日起执行财政部修订后的《企业会计准则第 14 号》，"
+                   "会计政策变更采用追溯调整法，比较期间数据已重述。")
+    NUMBER_ONLY_TEXT = ("财务报表附注\n\n"
+                        "经营活动产生的现金流量净额本期为 46.29 亿元，上期为 61.30 亿元，"
+                        "同比变化幅度见上表。")
+    CAUSAL_TEXT = ("经营情况讨论与分析\n\n"
+                   "报告期内营业收入同比下降，主要系公司主动调整产品结构与渠道库存所致。")
+
+    def test_policy_text_is_not_a_change_explanation(self):
+        import narrative_evidence as ne
+        self.assertTrue(ne.is_policy_text(self.POLICY_TEXT))
+        self.assertFalse(ne.is_causal(self.POLICY_TEXT))
+        # 标题命中"经营情况讨论与分析"但内容是政策套话 → 不得归为变化解释
+        kind = ne.classify("经营情况讨论与分析", self.POLICY_TEXT)
+        self.assertNotEqual(kind, ne.KIND_CHANGE, kind)
+
+    def test_number_only_paragraph_is_not_a_change_explanation(self):
+        import narrative_evidence as ne
+        self.assertFalse(ne.is_causal(self.NUMBER_ONLY_TEXT))
+        self.assertNotEqual(ne._prose_classify(self.NUMBER_ONLY_TEXT), ne.KIND_CHANGE)
+        # 有因果语言的段落仍是变化解释（不能把真解释一起否掉）
+        self.assertTrue(ne.is_causal(self.CAUSAL_TEXT))
+        self.assertEqual(ne._prose_classify(self.CAUSAL_TEXT), ne.KIND_CHANGE)
+
+    def test_number_only_footnote_does_not_enter_change_explanation(self):
+        """仅重复数字的附注不进"管理层/附注的解释"（数字已由底稿给出）。"""
+        import report_brief
+        t = TestUnsupportedClaimLinkage("test_adopted_source_claims_are_untouched")
+        t.setUp()
+        self.addCleanup(lambda: None)
+        tid = t._env(tid="c2-guard-1")
+        proj = ws_mod.task_project_dir(tid, "default")
+        (proj / "fetch_snapshot.json").write_text(json.dumps([
+            {"title": "洋河股份2024年年度报告",
+             "url": "https://static.cninfo.com.cn/finalpage/2025-04-29/1.PDF",
+             "published_at": "2025-04-29",
+             "text": ("一、经营情况讨论与分析\n\n" + self.NUMBER_ONLY_TEXT + "\n\n"
+                      "二、重要会计政策及会计估计\n\n" + self.POLICY_TEXT + "\n")},
+        ], ensure_ascii=False), encoding="utf-8")
+        import working_paper_export as WPX
+        WPX.write_working_paper(tid, t.GOAL, project="default")
+        st = report_brief.build_structure(tid, t.GOAL, t.BODY)
+        ch = st["change_explanation"]
+        joined = json.dumps(ch["management"] + ch["third_party_views"], ensure_ascii=False)
+        self.assertNotIn("会计政策", joined, "政策套话不得作为变化解释")
+        self.assertNotIn("同比变化幅度见上表", joined, "仅重复数字的附注不得作为变化解释")
+
+    def test_target_claim_needs_issuer_support(self):
+        """目标/达成类判断：无发行人披露直接支持时标 needs_check（不是已证事实）。"""
+        import report_brief
+        t = TestUnsupportedClaimLinkage("test_adopted_source_claims_are_untouched")
+        t.setUp()
+        tid = t._env(tid="c2-guard-2")
+        body = ("## 分析\n\n"
+                "经媒体报道，2024 年 5%—10% 的增长目标未达成，说明渠道调整尚未见效。[2]\n\n"
+                "## 参考来源\n\n"
+                "1. [东方财富数据中心](https://data.eastmoney.com/api/qt/stock/main)\n"
+                "2. [某媒体：洋河的目标与渠道](https://news.example/2025-04-30/yanghe)\n")
+        proj = ws_mod.task_project_dir(tid, "default")
+        (proj / "fetch_snapshot.json").write_text(json.dumps([
+            {"title": "某媒体：洋河的目标与渠道",
+             "url": "https://news.example/2025-04-30/yanghe",
+             "published_at": "2025-04-30",
+             "text": ("经营情况讨论与分析\n\n"
+                      "洋河股份2024年经营目标为增长5%—10%，实际未达成，主要系渠道调整。\n")},
+        ], ensure_ascii=False), encoding="utf-8")
+        import working_paper_export as WPX
+        WPX.write_working_paper(tid, t.GOAL, project="default")
+        st = report_brief.build_structure(tid, t.GOAL, body)
+        targets = [c for c in st["claims"] if c.get("type") == "target_claim"]
+        self.assertTrue(targets, st["claims"])
+        self.assertEqual(targets[0]["status"], "needs_check")
+        self.assertIn("目标年度", targets[0]["reason"], targets[0])
+
+
+class TestRealAnnualReportPositivePath(unittest.TestCase):
+    """C2-5：用**真实年报文本 + 真实页码定位**做正向离线验收。
+
+    合成场景（normal_growth 等）只证明分支行为；真实年报才证明"经营讨论/附注/风险能
+    定位、能进入简报、发布日在契约内"。夹具 `evals/real/yanghe_ar2024_excerpt.json`
+    是洋河股份 2024 年年度报告（东财公告文本 API，art_code 内嵌披露日 2025-04-29 ≤
+    资料截止 2025-04-30）**真实文本的有界摘录**，按真实页码摘取、一字未改。
+    """
+
+    GOAL = ("研究洋河股份 2023 与 2024 两个年度的营业收入、归母净利润、"
+            "经营活动现金流净额，合并报表口径，数据截至 2025-04-30")
+    FIXTURE = Path(__file__).resolve().parent / "evals" / "real" / "yanghe_ar2024_excerpt.json"
+
+    def _fx(self) -> dict:
+        return json.loads(self.FIXTURE.read_text(encoding="utf-8"))
+
+    def _doc(self, sections: list[dict]) -> dict:
+        """真实小节 → 文档对象：正文拼接 + **保留真实页码**的 page_offsets。"""
+        fx = self._fx()
+        parts, offsets, pos = [], [], 0
+        for sec in sections:
+            offsets.append((pos, int(sec["page"])))
+            body = f"### {sec['title']}\n\n{sec['text']}"
+            parts.append(body)
+            pos += len(body) + 1
+        return {"title": fx["title"], "url": fx["url"],
+                "published_at": fx["published_at"], "text": "\n".join(parts),
+                "page_offsets": offsets}
+
+    def _env(self, *, tid: str = "c2-real-1"):
+        import facts as F
+        import task_state
+        tmp = Path(tempfile.mkdtemp(prefix="wm_c2real_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        old_db = task_state.DB_PATH
+        ws_mod.configure_workspace_root(str(tmp))
+        task_state.DB_PATH = str(tmp / "c2r.db")
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", old_root)
+        self.addCleanup(setattr, task_state, "DB_PATH", old_db)
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        req = F.parse_research_request(
+            self.GOAL, company="洋河股份", company_id="002304.SZ", market="cn",
+            periods=[2023, 2024], caliber="合并", as_of="2025-04-30",
+            perspective="bank_corporate", identity_source="form")
+        task_state.mark_queued(tid, goal=self.GOAL, research_request=req.to_payload(),
+                               db_path=task_state.DB_PATH)
+        proj = ws_mod.task_project_dir(tid, "default")
+        proj.mkdir(parents=True, exist_ok=True)
+        (proj / "financials.json").write_text(json.dumps({
+            "financials": [
+                {"year": 2023, "report_type": "年报", "revenue": 331.26,
+                 "net_profit": 100.16, "operating_cashflow": 61.3,
+                 "total_assets": 700.0, "total_liabilities": 200.0,
+                 "disclosure_date": "2024-04-26"},
+                {"year": 2024, "report_type": "年报", "revenue": 288.76,
+                 "net_profit": 66.73, "operating_cashflow": 46.29,
+                 "total_assets": 720.0, "total_liabilities": 210.0,
+                 "disclosure_date": "2025-04-29"},
+            ],
+            "metadata": {"source": "eastmoney_ashare", "company": "洋河股份",
+                         "stock_code": "002304.SZ", "currency": "CNY", "unit": "亿元",
+                         "caliber": "合并", "caliber_evidence": "含 PARENTNETPROFIT"},
+            "raw": {"url": "https://datacenter-web.eastmoney.com/api/x", "text": "{}"},
+        }, ensure_ascii=False), encoding="utf-8")
+        fx = self._fx()
+        docs = [self._doc(fx["sections"]), self._doc(fx["policy_sections"])]
+        (proj / "fetch_snapshot.json").write_text(
+            json.dumps(docs, ensure_ascii=False), encoding="utf-8")
+        import working_paper_export as WPX
+        WPX.write_working_paper(tid, self.GOAL, project="default")
+        return tid, fx
+
+    def test_real_report_evidence_is_admitted_with_real_page_locators(self):
+        import report_brief
+        tid, fx = self._env()
+        st = report_brief.build_structure(tid, self.GOAL, "")
+        ev = st["evidence"]
+        self.assertEqual(ev["excluded"], [], "契约内的真实年报不该被排除")
+        self.assertGreaterEqual(ev["located"], 3, ev)
+        # 摘录里**没有**带因果语言的经营讨论小节（真实年报的 MD&A 正文不在所摘页码内），
+        # 而会计政策/审计意见小节必须**填不上这个缺口**——所以"经营变化解释"如实缺失。
+        # F3-A 那轮把"第 37 页 · 会计政策声明"当成了变化解释，正是本批要修的行为。
+        self.assertEqual(ev["missing_labels"], ["经营变化解释"], ev)
+        # 定位必须带**真实页码**（摘录保留原页码：2/3/5/10/64 页）
+        locs = []
+        for kind in ("business_background", "change_explanation", "footnote", "risk"):
+            for r in report_brief._located(
+                    report_brief._evidence(tid), kind, 4):
+                locs.append(str(r.get("locator") or ""))
+        self.assertTrue(any("第 2 页" in l for l in locs), locs)
+        self.assertTrue(any("第 10 页" in l or "第 64 页" in l for l in locs), locs)
+        # 来源类型：年报原文经第三方平台获取 → 标发行人披露并写明转载路径
+        md = report_brief.render_brief_markdown(st, "")
+        self.assertIn("第 10 页", md)
+        issuer = [c for c in st["citations"] if c["type"] == "issuer_annual_report"]
+        self.assertTrue(issuer, st["citations"])
+        self.assertTrue(any("第三方平台" in str(c.get("based_on") or "") for c in issuer),
+                        issuer)
+
+    def test_real_accounting_policy_is_not_dressed_as_change_explanation(self):
+        """真实文本上的 C2-3：年报里的会计政策/审计意见不得当经营变化原因。"""
+        import report_brief
+        tid, _fx = self._env(tid="c2-real-2")
+        st = report_brief.build_structure(tid, self.GOAL, "")
+        ch = st["change_explanation"]
+        joined = json.dumps(ch["management"] + ch["third_party_views"], ensure_ascii=False)
+        self.assertNotIn("收入确认", joined, "会计政策不得作为变化解释")
+        self.assertNotIn("审计意见", joined, "审计意见不得作为变化解释")
+
+    def test_fixture_is_real_text_not_synthetic(self):
+        """夹具自证：真实 URL/披露日/页码，且含年报原文特征串。"""
+        fx = self._fx()
+        self.assertEqual(fx["published_at"], "2025-04-29")
+        self.assertIn("eastmoney", fx["url"])
+        self.assertTrue(str(fx["art_code"]).startswith("AN"))
+        blob = json.dumps(fx, ensure_ascii=False)
+        self.assertIn("江苏洋河", blob)
+        self.assertTrue(fx["policy_sections"], "缺真实会计政策小节")
+        self.assertNotIn("示例", blob)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

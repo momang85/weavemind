@@ -358,7 +358,11 @@ def _page_of(char_start: int, page_offsets) -> int | None:
 
 
 def classify(title: str, body: str = "") -> str | None:
-    """按关键词给小节归类；标题命中权重 3、正文（前 200 字）命中权重 1。"""
+    """按关键词给小节归类；标题命中权重 3、正文（前 200 字）命中权重 1。
+
+    C2-3：归为"变化解释"的小节必须有**因果语言**、且不是会计政策套话——标题写着
+    "经营情况讨论与分析"、内容却是准则/政策声明的段落不能当变化原因。
+    """
     head = str(title or "")
     lead = str(body or "")[:200]
     best: str | None = None
@@ -372,6 +376,8 @@ def classify(title: str, body: str = "") -> str | None:
                 score += 1
         if score > best_score:
             best, best_score = kind, score
+    if best == KIND_CHANGE and (is_policy_text(body) or not is_causal(body)):
+        return KIND_NOTES if best_score > 0 else None
     return best
 
 
@@ -405,9 +411,36 @@ PROSE_KEYWORDS: dict[str, tuple[str, ...]] = {
 _NO_CONTENT_MARKERS = ("会员可见", "登录后可见", "请登录", "订阅后", "付费可见",
                        "暂无数据", "加载中", "内容不存在")
 
+# 因果语言：**变化解释**必须说出"为什么变"，只命中"同比/现金流"关键词的段落不算。
+# 实机教训：会计政策声明、仅重复现金流数字的附注都能命中关键词，被当成"经营变化原因"
+# 写进简报（读者会以为管理层解释过了）。
+CAUSAL_MARKERS = ("主要系", "所致", "由于", "原因", "影响", "导致", "带动", "推动",
+                  "得益于", "拖累", "拉动", "主要是", "归因于", "源于", "使得", "从而")
+# 会计政策/准则套话：编制口径声明，不是经营变化原因
+_POLICY_MARKERS = ("会计政策", "会计估计", "企业会计准则", "准则第", "采用修订",
+                   "修订后的", "财政部", "追溯调整", "编制基础",
+                   "计量属性", "确认与计量", "重要会计政策")
+
+
+def is_causal(text: str) -> bool:
+    """段落里有没有"为什么变"的语言（无因果词 = 不是变化解释）。"""
+    body = str(text or "")
+    return any(k in body for k in CAUSAL_MARKERS)
+
+
+def is_policy_text(text: str) -> bool:
+    """会计政策/准则套话（编制口径声明，不能冒充经营变化原因）。"""
+    body = str(text or "")
+    hits = sum(1 for k in _POLICY_MARKERS if k in body)
+    return hits >= 2 or (hits >= 1 and "会计" in body)
+
 
 def _prose_classify(body: str) -> str | None:
-    """段落模式归类：按**散文体关键词**打分（命中数最多者胜，平手按 KIND_ORDER）。"""
+    """段落模式归类：按**散文体关键词**打分（命中数最多者胜，平手按 KIND_ORDER）。
+
+    C2-3：命中"变化"关键词不等于解释——会计政策声明、仅重复数字的段落一律**不归为
+    变化解释**（降级为附注；附注也不能当解释用，见 `report_brief._change_explanation`）。
+    """
     text = str(body or "")[:400]
     best: str | None = None
     best_score = 0
@@ -415,6 +448,10 @@ def _prose_classify(body: str) -> str | None:
         score = sum(1 for kw in PROSE_KEYWORDS.get(kind, ()) if kw in text)
         if score > best_score:
             best, best_score = kind, score
+    if best == KIND_CHANGE and (is_policy_text(text) or not is_causal(text)):
+        # 无因果语言 → 只是"提到了变化"；政策套话 → 是编制口径声明。
+        # 两者都退为附注（数字出处），不得作为变化原因进入简报。
+        return KIND_NOTES if best_score > 0 else None
     return best
 
 

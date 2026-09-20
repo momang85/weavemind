@@ -613,6 +613,9 @@ def assemble_and_verify(task_id: str, goal: str, body: str, *,
                     rules_version=_rules_v, rules_fingerprint=_rules_fp)
                 if _v_brief is not None:
                     store.adopt(_v_brief, reason="研究简报（代码装配）")
+                # 结构对象与每条主张**绑定本版正文**：修订后页面不会拿旧结构冒充新版
+                report_brief.stamp_structure_version(
+                    structure, str(getattr(_v_brief, "version_id", "") or ""))
                 report_brief.write_structure(task_id, structure, ws_dir=ws_dir)
                 body = brief_body
                 wrapper = ""             # 工程说明移到任务详情，不进简报

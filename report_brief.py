@@ -137,19 +137,28 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
     findings = _findings(rows, derived, periods, subject_type=subject_type)
     # 引用重编号：模型正文里的 `[n]` 是它**自己清单**的编号，装配后编号会变；
     # 按 URL 建立"旧编号 → 新编号"映射并逐处重写，映射不到的去编号并记缺口
+    body_sources = _body_source_list(body)
     ref_map: dict[int, int] = {}
-    for old_n, _t, url in _body_source_list(body):
+    for old_n, _t, url in body_sources:
         new_n = _citation_n(citations, url)
         if new_n:
             ref_map[old_n] = int(new_n)
-    analysis_text, unmapped = _remap_inline_refs(_analysis_section(body), ref_map)
-    claims = _claims(analysis_text, rows, derived, citations)
+    raw_analysis = _analysis_section(body)
+    # C2-1：映射不到 ≠ 无事发生。先把"引用了未采用来源"的句子逐句记下来（带原因），
+    # 再去编号、再标注——保留主张与证据的关联，不用末尾免责声明代替。
+    unsupported = _unsupported_claims(raw_analysis, ref_map, body_sources=body_sources,
+                                      rejected=list((audit or {}).get("rejected") or []))
+    analysis_text, unmapped = _remap_inline_refs(raw_analysis, ref_map)
+    analysis_text = _mark_unsupported(analysis_text, unsupported)
+    claims = _claims(analysis_text, rows, derived, citations, unsupported=unsupported,
+                     subject=str(req.get("company") or req.get("company_id") or ""),
+                     periods=periods)
     background = _background(evidence, citations)
     changes = _change_explanation(rows, derived, periods, findings, evidence, citations)
     perspective = str(req.get("perspective") or "equity")
     risks = _risks(task_id, goal, body, project=project, evidence=evidence,
                    citations=citations, changes=changes, perspective=perspective,
-                   citation_gaps=unmapped)
+                   citation_gaps=unmapped, unsupported=unsupported)
     charts = _charts(task_id, project=project)
     structure = {
         "scope": {
@@ -175,6 +184,7 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
         "analysis": analysis_text,
         "citation_gaps": list(unmapped),
         "claims": claims,
+        "unsupported_claims": unsupported,
         "risks": risks,
         "citations": citations,
         "charts": charts,
@@ -188,6 +198,7 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
         },
         "audit": audit,
     }
+    structure["version_id"] = ""
     return structure
 
 
@@ -258,12 +269,24 @@ def _change_explanation(rows, derived, periods, findings, evidence, citations) -
     changes.sort(key=lambda c: -abs(float(c.get("yoy") or 0)))
     management: list[dict] = []
     third_party: list[dict] = []
-    for r in _located(evidence, "change_explanation", 2) + _located(evidence, "footnote", 2):
+    # C2-3：附注只有在**说得出原因**时才能作为解释；仅重复现金流数字的附注只是数字出处
+    # （数字已由底稿给出），把它当"管理层解释"会让读者以为原因已被说明。
+    try:
+        import narrative_evidence as _ne
+        _causal = _ne.is_causal
+    except Exception:                            # noqa: BLE001 - 退化时不误删解释
+        _causal = lambda _t: True                # noqa: E731
+    candidates = [(r, "change_explanation")
+                  for r in _located(evidence, "change_explanation", 2)]
+    candidates += [(r, "footnote") for r in _located(evidence, "footnote", 2)
+                   if _causal(str(r.get("snippet") or ""))]
+    for r, kind in candidates:
         item = {"text": str(r.get("snippet") or ""),
                 "source_n": _citation_n(citations, str(r.get("url") or "")),
                 "locator": str(r.get("locator") or ""),
                 "publisher": str(r.get("publisher") or ""),
                 "document_period": str(r.get("document_period") or ""),
+                "kind": kind,
                 "validation_status": str(r.get("validation_status") or "")}
         # 管理层解释 = 发行人披露（官方路径**或**文档 provenance 为年报原文——
         # 后者含"经第三方平台转载的年报原文"）；其余（媒体解读/评论）进第三方观点
@@ -273,6 +296,10 @@ def _change_explanation(rows, derived, periods, findings, evidence, citations) -
     unproven = [{"label": c["label"], "materials": list(MATERIALS_BY_METRIC.get(c["metric"], ()))}
                 for c in changes[:3]]
     unproven = [u for u in unproven if u["materials"]]
+    # C2-4：解释**已取得**时不得再写"原因尚不能证明"（正常场景第 3 页曾同时出现两句）。
+    # 支持程度逐条标：已取得定性解释 → "解释已取得，贡献程度未核实"；否则才是"尚不能证明"。
+    for u in unproven:
+        u["has_explanation"] = bool(management)
     return {"changes": changes[:3], "management": management,
             "third_party_views": third_party,
             "inference": list(_INFERENCE_BOUNDARY), "unproven": unproven}
@@ -397,11 +424,126 @@ def _findings(rows, derived, periods, subject_type: str = "") -> list[dict]:
 
 # ── 主张（从模型正文解析并与底稿绑定）────────────────────────────
 
+# 未采用来源导致的"这句话没有支持"标记：**逐句**标，不用末尾笼统免责声明代替
+_UNSUPPORTED_MARK = "〔待核查：本句引用的来源未采用"
+_UNSUPPORTED_NOTE = "（该来源未采用，结论不得当作已证事实）"
 
-def _claims(body: str, rows, derived, citations) -> list[dict]:
+
+def _digit_free(text: str) -> str:
+    """去掉数字/日期：正文里新增的文字不得带无法溯源的读数（验收会逐个数）。"""
+    s = re.sub(r"\d{4}\s*[-/年]\s*\d{1,2}\s*[-/月]\s*\d{1,2}\s*日?", "", str(text or ""))
+    s = re.sub(r"\d+(?:\.\d+)?\s*%?", "", s)
+    return re.sub(r"\s{2,}", " ", s).strip(" ，、；;：:（）()")
+
+
+def _sentence_key(text: str) -> str:
+    """句子的归一化键：去掉标点、括号、引用编号与空白。
+
+    编号会被重写/移除，标点会被切句吃掉，标记又会被插进句内——键必须对这些差异免疫，
+    否则"未核查标记"与"主张记录"会各自认不出同一句话。
+    """
+    s = re.sub(r"\[(?:n\s*=\s*\d{1,2}|\d{1,2})\]", "", str(text or ""))
+    return re.sub(r"[\s。！？!?，,、；;：:（）()〔〕【】\[\]「」『』]", "", s)
+
+
+def _sentences(text: str) -> list[str]:
+    """按句切分，并把**紧跟句末标点**的引用记号留在该句里。
+
+    实机形态："…尚未见效。[3]"——编号写在句号之后。按标点直接切会让引用与它支持的
+    那句话脱钩，未核查标记就落不到该句上（也无法与主张记录对上）。
+    """
+    out: list[str] = []
+    for part in re.split(r"(?<=[。！？!?])|\n", str(text or "")):
+        if not part.strip():
+            continue
+        if out and re.fullmatch(r"\s*(?:\[(?:n\s*=\s*\d{1,2}|\d{1,2})\]\s*)+", part):
+            out[-1] = out[-1] + part
+            continue
+        out.append(part)
+    return out
+
+
+def _unsupported_claims(text: str, mapping: dict[int, int], *,
+                        body_sources: list[tuple[int, str, str]] | None = None,
+                        rejected: list[dict] | None = None) -> list[dict]:
+    """正文里**引用了未采用来源**的句子 → 逐句记下原因（C2-1）。
+
+    为什么不能只去编号：去编号只是让"引用无对应条目"的格式检查通过，读者仍会把该句
+    当成有来源支持的事实（实机反例：洋河报告用"2024 年 5%—10% 目标未达成"开展判断，
+    同一材料在来源清单里却是"未采用"）。这里把主张与证据的关联保留下来：
+    句子、原编号、原 URL、未采用原因、以及"缺的是哪份材料"。
+    """
+    src_by_n = {int(n): (str(t or ""), str(u or ""))
+                for n, t, u in (body_sources or [])}
+    rej_by_url = {str(r.get("url") or ""): str(r.get("reason") or "")
+                  for r in (rejected or [])}
+    out: list[dict] = []
+    for raw in _sentences(text):
+        s = raw.strip()
+        if not s:
+            continue
+        # 来源清单条目本身不是主张（"2. [标题](url)"里没有 [n] 引用记号，跳过更稳）
+        if re.match(r"^\s*\d{1,2}\s*[.、)]\s*[\[(]", s):
+            continue
+        nums = {int(m.group(1) if m.group(1) else m.group(2))
+                for m in re.finditer(r"\[(?:n\s*=\s*(\d{1,2})|(\d{1,2}))\]", s)}
+        bad = sorted(n for n in nums if n not in (mapping or {}))
+        if not bad:
+            continue
+        for n in bad:
+            title, url = src_by_n.get(n, ("", ""))
+            reason = rej_by_url.get(url) or "该编号在本次采用来源中没有对应条目"
+            out.append({"old_n": n, "url": url, "title": title,
+                        "reason": str(reason),
+                        "sentence": s[:200], "key": _sentence_key(s)[:200]})
+    return out
+
+
+def _mark_unsupported(text: str, items: list[dict]) -> str:
+    """把"本句引用未采用来源"标到**该句**上（不是末尾免责声明）。"""
+    if not items:
+        return text
+    by_sentence: dict[str, list[dict]] = {}
+    for it in items:
+        key = str(it.get("key") or _sentence_key(it.get("sentence") or ""))
+        if key:
+            by_sentence.setdefault(key, []).append(it)
+
+    def _mark_sentence(raw: str) -> str:
+        s = raw.strip()
+        key = _sentence_key(s)
+        if not s or not key or key not in by_sentence:
+            return raw
+        # 标记里**不写来源标题**：标题常含数字（"21财经"），正文新增的读数会变成
+        # "不可溯源数字"被验收拦下；来源身份与 URL 记在结构对象/风险清单/面板里。
+        reasons = []
+        for it in by_sentence[key]:
+            why = _digit_free(it.get("reason") or "")
+            if why and why not in reasons:
+                reasons.append(why)
+        note = _UNSUPPORTED_MARK + (f"（原因：{'；'.join(reasons)}）" if reasons else "（原因见缺口清单）") \
+               + _UNSUPPORTED_NOTE + "〕"
+        # 句末标点之前插入，保证仍是同一句（拆句规则不会把它变成新句子）
+        m = re.search(r"([。！？!?])\s*$", s)
+        if m:
+            return s[: m.start()] + note + m.group(1) + raw[len(raw.rstrip()):]
+        return s + note + raw[len(raw.rstrip()):]
+
+    parts = _sentences(text)
+    return "".join(_mark_sentence(p) for p in parts)
+
+
+def _claims(body: str, rows, derived, citations, *,
+            unsupported: list[dict] | None = None, subject: str = "",
+            periods: list[int] | None = None) -> list[dict]:
     """模型正文里含数字的句子 → 与底稿值比对绑定（**不要求模型输出 schema**）。
 
-    绑不上的主张进"待核查"（`status=needs_check`），既不丢弃也不当作已核实。
+    绑不上的主张进"待核查"（`status=needs_check`），既不丢弃也不当作已核实；
+    引用了**未采用来源**的句子单独记 `status=unsupported`（C2-1/C2-2），
+    并带上该来源与未采用原因——"来源清单合规"不等于"结论受支持"。
+
+    每条主张记录可追溯的最小字段：结论文本、主体、期间、类型、支持片段（fact_id 或
+    来源编号）、支持状态；`version_id` 由装配器在本版正文确定后补上（见 structure）。
     """
     values: dict[str, str] = {}
     for r in rows:
@@ -412,6 +554,12 @@ def _claims(body: str, rows, derived, citations) -> list[dict]:
         v = d.get("value")
         if isinstance(v, (int, float)):
             values[_num_key(v)] = ",".join(str(x) for x in (d.get("derived_from") or []))
+    unsup_by_sentence: dict[str, list[dict]] = {}
+    for u in (unsupported or []):
+        key = str(u.get("key") or _sentence_key(u.get("sentence") or ""))
+        if key:
+            unsup_by_sentence.setdefault(key, []).append(u)
+    years = {int(y) for y in (periods or [])}
     out: list[dict] = []
     for sent in re.split(r"[。！？!?\n]+", str(body or "")):
         s = sent.strip()
@@ -433,9 +581,48 @@ def _claims(body: str, rows, derived, citations) -> list[dict]:
             kind = "inference" if facts else "unbound"
         if any(k in s for k in ("假设", "假如")):
             kind = "assumption" if facts else "unbound"
-        out.append({"text": s[:200], "type": kind,
-                    "fact_ids": facts, "status": "bound" if facts else "needs_check"})
+        cite_ns = [int(m.group(1) if m.group(1) else m.group(2))
+                   for m in re.finditer(r"\[(?:n\s*=\s*(\d{1,2})|(\d{1,2}))\]", s)]
+        hit = next((u for key, items in unsup_by_sentence.items()
+                    for u in items if key and key in _sentence_key(s)), None)
+        claim = {"text": s[:200], "type": kind,
+                 "fact_ids": facts, "status": "bound" if facts else "needs_check",
+                 "subject": str(subject or ""),
+                 "periods": sorted({y for y in years
+                                    if re.search(rf"(?<!\d){y}(?!\d)", s)}),
+                 "citations": cite_ns,
+                 # 版本号在装配时由 `stamp_structure_version` 盖上（未盖 = 空串，
+                 # 页面据此判"结构对象是否属于当前版本"，不拿旧结构冒充新版）
+                 "version_id": ""}
+        if hit is not None:
+            # 未采用来源：不因"数字绑得上底稿"就算支持（结论依赖那份材料）
+            claim["status"] = "unsupported"
+            claim["reason"] = str(hit.get("reason") or "")
+            claim["source"] = {"url": str(hit.get("url") or ""),
+                               "title": str(hit.get("title") or ""),
+                               "old_n": hit.get("old_n")}
+            claim["type"] = "third_party_view" if "报道" in s or "媒体" in s else kind
+        elif _is_target_claim(s):
+            # C2-3：**目标/达成类**判断不能靠"某篇文章提到"成立——必须核对目标年度、
+            # 目标发布时点与实际数。实机反例：洋河原稿用"2024 年 5%—10% 目标未达成
+            # 这一事实"开展判断，来源却是未采用/期间未标注的第三方材料。
+            issuer_ns = {int(c.get("n")) for c in (citations or [])
+                         if str(c.get("type")) == "issuer_annual_report"}
+            if not (set(cite_ns) & issuer_ns):
+                claim["status"] = "needs_check"
+                claim["type"] = "target_claim"
+                claim["reason"] = ("目标类判断需核对目标年度、目标发布时点与实际数；"
+                                   "本次未取得发行人披露对该目标的直接支持")
+        out.append(claim)
     return out[:40]
+
+
+def _is_target_claim(text: str) -> bool:
+    """句子是不是在讲"目标/计划/达成"（这类判断的证据门槛高于普通读数）。"""
+    s = str(text or "")
+    return any(k in s for k in ("目标", "计划完成", "达成", "完成率", "考核指标",
+                                "经营计划", "预算目标"))
+
 
 
 def _num_key(value) -> str:
@@ -451,7 +638,8 @@ def _num_key(value) -> str:
 def _risks(task_id: str, goal: str, body: str, *, project=None,
            evidence: dict | None = None, citations: list[dict] | None = None,
            changes: dict | None = None, perspective: str = "",
-           citation_gaps: list[int] | None = None) -> list[dict]:
+           citation_gaps: list[int] | None = None,
+           unsupported: list[dict] | None = None) -> list[dict]:
     """风险与核查：**每条风险都要有对应证据、会改变判断的观察条件、要补的材料**。
 
     只有"底稿缺口 + 模型自述"的风险是不完整的（读者无法判断该查什么）；这里为每条
@@ -497,13 +685,24 @@ def _risks(task_id: str, goal: str, body: str, *, project=None,
              would_change="若该风险出现缓释或加剧的公开证据（年报/公告更新），需修订判断",
              materials=["最新年报/公告中的风险因素章节", "相关事项的进展公告"])
 
-    # ③ 变化解释里还没能证明的部分 → 需要补充的材料
+    # ③ 变化解释里还没能证明的部分 → 需要补充的材料。
+    # C2-4：区分"解释已取得、贡献程度未核实"与"原因尚不能证明"——不能一边给解释
+    # 一边在缺口里说没有解释（读者会以为整段解释是编的）。
     for u in (changes.get("unproven") or []):
-        _add("unproven_change", f"{u.get('label')}的变化原因尚不能证明",
-             evidence_note="未取得对应附注/管理层讨论证据",
-             would_change=f"取得{'、'.join(u.get('materials') or [])}后，"
-                         "若显示的原因与本期变化方向不一致，需修订解释",
-             materials=list(u.get("materials") or []))
+        if u.get("has_explanation"):
+            _add("unproven_change",
+                 f"{u.get('label')}：解释已取得（见『变化解释』的管理层/附注说明），"
+                 f"但量价与贡献程度未核实",
+                 evidence_note="已取得定性解释；分解到量/价/结构的数据尚未取得",
+                 would_change=f"取得{'、'.join(u.get('materials') or [])}后，"
+                             "若显示的贡献结构与本期变化方向不一致，需修订解释",
+                 materials=list(u.get("materials") or []))
+        else:
+            _add("unproven_change", f"{u.get('label')}的变化原因尚不能证明",
+                 evidence_note="未取得对应附注/管理层讨论证据",
+                 would_change=f"取得{'、'.join(u.get('materials') or [])}后，"
+                             "若显示的原因与本期变化方向不一致，需修订解释",
+                 materials=list(u.get("materials") or []))
 
     # ④ 模型正文里的风险小节（原样带出，但标注"由模型提出、需取得证据"）。
     # 结论与免责声明不是风险：它们是收尾陈述，列成风险只会稀释真正要查的事项。
@@ -536,6 +735,16 @@ def _risks(task_id: str, goal: str, body: str, *, project=None,
              evidence_note="装配时按 URL 建立旧→新编号映射，映射不到的编号已移除",
              would_change="补齐对应来源或删除该处引用后，相关句子才可复核",
              materials=["该句原本引用的材料原文或链接"])
+    # ⑦ 引用了**未采用来源**的句子：逐句点名（与正文标记、主张记录同一状态）
+    for u in (unsupported or [])[:4]:
+        who = str(u.get("title") or u.get("url") or f"原编号 {u.get('old_n')}")[:50]
+        _add("unsupported_claim",
+             f"正文结论依赖未采用来源（{who}）：{str(u.get('sentence') or '')[:80]}",
+             evidence_note=f"该来源未采用：{str(u.get('reason') or '')[:60]}；"
+                           "正文对应句已标『待核查』",
+             would_change="改用已采用的来源重述该结论，或取得该材料的可用版本后重验",
+             materials=[f"{who}的原文/可核验版本",
+                        "或支持该结论的其他已披露材料"])
     return out[:12]
 
 
@@ -754,6 +963,9 @@ def _remap_inline_refs(text: str, mapping: dict[int, int]) -> tuple[str, list[in
 
     同时归一 `[n=2]` 这类把指令记号抄进正文的写法（实机出现，会被验收判"引用无对应条目"
     并触发整稿重做）：按编号 2 处理，映射不到就同样去编号记缺口。
+
+    只做编号重写；**主张与证据的关联**由 `_unsupported_claims` 保留（C2-1）——去编号
+    不等于把"这句话没有来源支持"这件事一起抹掉。
     """
     unmapped: list[int] = []
 
@@ -1288,6 +1500,23 @@ def write_structure(task_id: str, structure: dict, *, ws_dir=None) -> None:
             json.dumps(structure, ensure_ascii=False, indent=1), encoding="utf-8")
     except Exception as exc:
         logger.warning("报告结构落盘失败（task=%s）：%s", task_id, str(exc)[:120])
+
+
+def stamp_structure_version(structure: dict, version_id: str) -> dict:
+    """把**本版正文的版本号**盖到结构对象与每条主张上（C2-2/C2-6）。
+
+    为什么必须盖：结构对象是页面展示的发现/缺口/主张来源，而"版本"在装配时才确定。
+    不盖的话，修订后页面会拿旧结构冒充新版（读者看到的发现与导出的正文不是同一版）。
+    """
+    vid = str(version_id or "")
+    if not isinstance(structure, dict):
+        return structure
+    structure["version_id"] = vid
+    for c in (structure.get("claims") or []):
+        if isinstance(c, dict):
+            c["version_id"] = vid
+    return structure
+
 
 
 def read_structure(task_id: str, *, ws_dir=None) -> dict | None:
