@@ -83,16 +83,33 @@
 对比图/比率分面图逐张核对：类别正确、数值与底稿一致、轴标题齐备、两期顺序与配色一致）。
 `visual-judge` 子代理本次因账号连接不可用未能启动（回退为人工核对，读数见上）。
 
+## B3 实机验证（真实接口，不需要模型调用）
+
+在任务 `ui-f00775cfdf` 上走了一次**真实人工修订**（浏览器内，与结果页"修改与重验"同一接口）：
+
+| 项 | 读数 |
+|---|---|
+| 请求 | `POST /api/task/ui-f00775cfdf/review/edit`，`{"find": "## 分析", "replace": "## 分析（人工复核：口径与缺口已核对）"}` |
+| 响应 | 200；新版本 `cc6f2190…` ← 父版本 `65ec49d1…`；`acceptance=pass`；`delivery.status=verified`、`draft=false`；`needs_reverify=false`；`wrapper_source=stored`（交付说明逐字节复用） |
+| 旧结论不迁移 | 响应注记："修订版是新版本：旧验收、旧评审与旧批准都不迁移，须重新验证" |
+| 同版导出 | `/api/task/…/report.md` → 200、11,739 字节、**正文含本次修订标记**、响应头 `X-Report-Version-Id=634f5de4a33c` 与页面当前版本一致 |
+| 交付包下载 | `/files/ui-f00775cfdf/deliverables_20260920_104729.zip` → **200（449,041 字节）**——白名单修复前该路径不可下载 |
+| 耗时 | 约 1 分钟（含重验与导出），无需重跑任务 |
+
 ## 未验证 / 遗留
 
-- **推送未完成**：提交 `80d65d1` 在本地，远端仍 `02aa6b9`。读数：`git ls-remote`（带 `gh` 凭据）
-  通、`curl` 对 GitHub 的 GET/POST（含 569KB body）都通（404/401 快速返回），但 `git push`
-  的 receive-pack 上传在 ~4 分钟后被超时终止——代理/直连、HTTP/1.1/2、`http.postBuffer`
-  单次缓冲、`gh` 凭据注入四种组合都试过，均在同样位置挂住（今天早些时候同一环境推送成功过两次，
-  判断是网络路径变化）。另外凭据缓存已失效（`GIT_TERMINAL_PROMPT=0` 时报
-  "could not read Username"），用户终端里直接 `git push` 会弹 x-access-token 弹窗。
-- 修订入口（B3）只做了接口联调与源码级检查，**未做一次真实人工修订的端到端实机**
-  （需要一份新实机任务；按指令实机要预声明预算，留到下一轮）。
-- 图表分面后的**实机**产出未跑（场景跑法是离线渲染；真机下一轮确认）。
+- **推送已完成**：`dc84d0f`（F3-B 主体）+ 其后提交已上 `origin/main`。注意两点：
+  ①`git push` 会先调 GCM（`git credential-manager get`）等弹窗——本次用
+  `-c credential.helper=`（清空 helper 链）+ `gh auth token` 注入才走通；
+  ②gh 令牌**没有 `workflow` scope**，`.github/workflows/ci.yml` 的改动被拆成独立提交留在本地，
+  需用有该 scope 的凭据推送（或 `gh auth refresh -s workflow`）。因此新增的
+  `test_scenarios.py` 暂未进 CI 清单（测试文件本身已推送）。
+- **新实机被端点上限阻塞**：`POST https://ark.cn-beijing.volces.com/api/v3/chat/completions`
+  → `429 SetLimitExceeded`（账号 2132184326 的 glm-5-3-flash 达到推理上限、模型服务已暂停，
+  需在"模型激活"页调整或关闭"安全体验模式"）。按约定不切模型、不绕过；端点恢复后按
+  洋河对公同契约跑一份（≤25 分钟 / ≤40 次调用），用于人工评分与分面图的真机确认。
+- 图表分面后的**实机**产出因此未跑（场景跑法是离线渲染）。
+- 人工评分表已备好：`docs/研究员评分表_F3_20260920.md`（五项 0–2 + 客观读数 + 打开方式，
+  明确不由模型自评）。
 - 场景②的"单位不可换算→不生成比率"由既有单测覆盖（`test_ratio_not_produced_when_units_not_convertible`）；
   场景里体现的是"跨期单位不一致 → 底稿判问题、不硬算同比"。
