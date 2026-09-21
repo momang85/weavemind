@@ -1,18 +1,17 @@
 # DeepSeek 执行状态（2026-09-21 更新）
 
-**当前批次**：实机端到端验证 + 五处真问题修复 + **第二轮遗留项收口**（服务重启后复测）。
-证据：`docs/evidence/e2e_test_report_20260921.md`（分钟级运行报告、复测记录、§6 收口）、
-`docs/evidence/live_e2e_yanghe_20260921.md`；提交 `4aee354`（版本口径/图表渲染）、
-`4dc1742`（装配幂等）、`29ec71d`（交付包陈旧信号）、`d316a25`（风险提取按全部标题行排除）、
-`a84e24f`（绑定来源说明 + 计划评审行 + 叙事降级目标按来源分）。
+**当前批次**：阶段 D · D1（主张真实性与证据计数）——离线完成，反例冻结、最小修复、定向验证全绿。
+证据：`docs/evidence/d1_claim_support_20260921.md`；冻结用例
+`evals/claims/d1_counterexamples_{before,after}.json`（before 0/10、after 10/10）；
+可重放脚本 `scripts/claims_d1_cases.py`（before/after/check）。
 
 | 层 | 状态 |
 |---|---|
-| 实机任务 | 洋河对公 ui-31305a2b28：11:49:48 提交、**15 分 59 秒**完成（上限 25 分钟内），SUCCESS_WITH_ISSUES → 修订重验后 SUCCESS/verified；预算 0/0/0；编排器侧调用台账 5 条（2 条输出上限耗尽），总次数不可确知、费用记"未知" |
-| 修复（第一轮） | ①同页两个"当前版本" → 导出块双命名空间；②正文图表全部 404（`%2F`）→ 逐段编码；③1038×121366 超高图隐形 → 同 chart_qa 阈值占位；④装配不幂等（`****`/重复/回食/标题成主张）→ 修复+补修；⑤清单重写未重建 zip → `package_stale` |
-| 收口（第二轮） | A 装配候选未采纳 = 修订路径设计语义（用户修订不被重建覆盖），页面改为按"绑定版本是否存在/因何登记"分三支说明；B 评审降级 = 设计（模板计划不经 Critic，个人模式放行/银行拒绝），补页面一行含"属版本 X，当前版本无评审结论"；C 新闻误标"财务附注" = C2-3 降级目标写死，改为按来源分（发行人→附注，第三方→业务背景），实机文档复验为业务背景；D Mimosa deep 扫描完成（46 条静态发现、2 条凭据发现核实为误报、覆盖率 partial/inconclusive，不宣称安全） |
-| 验证 | 修订版 PDF 8 页 6/6 图在页、表格对齐；离线三场景 risks 零伪影；实机正文复跑风险提取 4 条干净；test_delivery_chain 252、guards 44、narrative_evidence 38、scenario_checks 17、offline_delivery 32 全绿；面板五行读数 DOM 实测 |
-| 遗留 | 双装配取舍（编排层待决策）；反思重做稿（分析节 891 字）未进交付；214 字分析双成因（节名过滤 + 输出上限耗尽）；调用台账只覆盖编排器侧；现采纳正文仍带旧渲染伪影（候选 8b23aad3 按语义留档） |
+| D1 反例（修复前） | c1 跨期跨指标同名值被 bound；c2 同句虚假利润整句 bound；c3 目标判断仅凭年报引用通过；c4 负号被丢（真话也绑不上）；c5 20 万元被 20 亿元支持；e1 收入解释扩散给利润/现金流；n1 located=3 而实际只有 2 条带定位（且"风险因素"被摘要抹掉） |
+| D1 修复 | `rows_detail` 补 `fact_id`；`_claims` 逐条断言（指标/期间/单位换算/符号）→ `bound/partially_supported/unsupported/needs_check`，带 `assertions[]`/`evidence_ids`；无数字的目标/因果判断也进清单；目标类逐项点名缺口；解释按指标+期间匹配（废除全局 bool）；`located` 只数已准入+有定位+去重，摘要另计 `snippet_hints`；`[已取证据]` 注入加准入过滤；面板区分"部分支持/无底稿支持" |
+| D1 验证 | `check` 10/10；test_delivery_chain 256、narrative_evidence 39、guards 45、scenario_checks 17、offline_delivery 32、report_quality+report_version 44 全绿；三场景冻结期望全过（normal_growth 仍 located=4）；前端构建通过 |
+| 前一批 | 实机 ui-31305a2b28（15 分 59 秒，上限内）+ 五处修复 + 第二轮四项收口（提交 `4aee354`/`4dc1742`/`29ec71d`/`d316a25`/`a84e24f`）；文档"按字数弃稿"表述已按 `compare_versions` 实测改正 |
+| 遗留 | 真实年报 MD&A 正向解释（D3）；当前交付稿的同版投影（D2）；根任务调用账本与截止（D5）；双装配取舍（编排层待决策）；214 字分析双成因；现采纳正文仍带旧渲染伪影（候选 8b23aad3 按语义留档） |
 | 人工验收 | **未做**（研究员五项 0–2 评分 ≥8/10 → D 内部试用） |
 
 ## F3-C / C3（已完成，证据见 `docs/evidence/c3_brief_shape_20260920.md`）
