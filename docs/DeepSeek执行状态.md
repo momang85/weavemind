@@ -1,21 +1,27 @@
 # DeepSeek 执行状态（2026-09-21 更新）
 
-**当前批次**：阶段 D · D1（含验收轮）、D2（两批）已完成；**D3 完成**（单位语义、真实 MD&A
-正向样本、研究问题计划）。证据：`docs/evidence/d1_claim_support_20260921.md`、
-`d2_analysis_retention_and_projection_20260921.md`、`d2_candidate_acceptance_and_diff_20260921.md`、
-`d3_real_disclosure_and_units_20260921.md`；冻结样本 `evals/claims/d1_counterexamples_{before,after}.json`、
-`evals/brief/d2_analysis_samples.json`、`evals/real/yanghe_ar2024_mdna_excerpt.json`；
-脚本 `scripts/claims_d1_cases.py`、`scripts/d2_freeze_samples.py`、`scripts/freeze_ar_mdna.py`。
+**当前批次**：阶段 D · D1/D2/D3 完成；**D5 第一批完成**（账本贯通到每次真实请求 + 每任务上限
+声明 + 模拟供应商验收），并完成 D1–D3 存疑项验收。证据：`docs/evidence/` 下
+`d1_claim_support_*`、`d2_analysis_retention_and_projection_*`、`d2_candidate_acceptance_and_diff_*`、
+`d3_real_disclosure_and_units_*`、`d5_request_ledger_and_caps_20260921.md`。
 
 | 层 | 状态 |
 |---|---|
-| D1（已验收） | 反例 11 项冻结；逐条断言（就近指标、紧邻年份、单位换算、符号）、语义门、百分点差两期重算、located 只数已准入+有定位+去重；实机复核又修 3 处 |
-| D2 | 分析保留块级判断（实机 214→581、891→1235 字）；"有分析"最低要求；同版投影（面板按当前版本重建，重建失败隐藏）；候选先验收再比较 + 质量向量 + `report_quality.jsonl` 差异记录 |
-| D3 单位语义 | `facts.PERCENT_METRICS`：毛利率一律 `%`/metric_semantics，不继承载荷金额单位（实机读数 73.16 亿元 → 73.16 %） |
-| D3 真实披露 | 分类器补"环境+应对"因果措辞（洋河原文"存量竞争/承压/调整经营策略"此前被判非因果）；`net_policy` 有界抓取并冻结第 3 页真实段落；离线正向：真实解释进入**收入**解释（带定位），利润/现金流仍为缺口 |
-| D3 研究问题 | 三问（收入量价结构 / 利润与收入差异 / 现金与覆盖关系），每问观察+支持证据+推断边界+核查动作；银行视角补"已知/未知 + 询问清单"；护栏入正文（覆盖率上升≠回款改善、负债下降≠偿债安全） |
-| 验证 | CI 全量后端清单 46 文件本地 0 失败（418s）；三场景全过（normal_growth verified）；test_delivery_chain 277、narrative_evidence 42、facts 43、working_paper 61 全绿 |
-| 遗留 | D5：根任务调用账本与截止（达标前不新增实机）。D6：真人五项评分与试用记录（含把真实目标句纳入回归包）。D3 未验：抓取仅前 16 页、利润/现金流解释在该年报这些页确实不存在（保持缺口） |
+| D1/D2/D3 | 见前几批：逐条断言与证据计数、分析保留与同版投影、候选先验收再比较、单位语义、
+真实 MD&A 正向样本、研究问题计划与两条护栏 |
+| 存疑项验收 | ①整份 71 页年报已扫：核心指标的真实经营解释只有第 3 页收入那句（利润/现金流解释
+确实不存在，带证据）；②目标类补齐**支持原文 + 披露时点**五项核对，真实目标句已冻结；
+③括号式同比按最近指标解析（实机草稿复测正确）；④候选验收采纳改为**非桩**集成测试；
+⑤质量向量分布实测（真实草稿 4–5，上限 10 不构成约束；旧交付稿如实标"无分析"） |
+| D5 第一批 | **记账与管制分离**：不限额度也如实计数（旧实现不限时全是空操作 → 实机账本恒空）；
+`llm_client` **每次请求发送前开票**（stage=llm/backup）、成功/失败/重试/备端点各结算一次、
+预算不足**不发送**并抛 `budget_exhausted`；`WM_TASK_MAX_*` 环境上限（不改全局 0/0/0）
+且**声明上限入账**供审计 |
+| 验证 | test_root_budget 37、test_llm_request_ledger 5（模拟供应商：账本调用数==实收数、
+拒发前不发出、重试与备端点各记一次、取消不开票）、cancel/prompt 85、deploy_manifest 16、
+scenario_checks 17 全绿；三场景复跑全过；**CI 全量 47 文件本地 0 失败（356s）** |
+| 遗留 | D5 剩余：带 `WM_TASK_MAX_*` 的**有界实机**逐条核对（D5 退出标准）；token 记上界非实际
+（需接用量解析）；Redis 并发压测未做；场景夹具下质量向量未知。D6：真人五项评分与试用记录 |
 | 人工验收 | **未做**（研究员五项 0–2 评分 ≥8/10 → D 内部试用） |
 
 ## F3-C / C3（已完成，证据见 `docs/evidence/c3_brief_shape_20260920.md`）
