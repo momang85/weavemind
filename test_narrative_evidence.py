@@ -570,6 +570,23 @@ class TestBuild(unittest.TestCase):
         self.assertIn(ne.KIND_RISK, data["missing_kinds"],
                       "新闻摘要不得把'风险因素'从缺口里抹掉")
 
+    def test_wrong_subject_document_listed_once_with_reason(self):
+        """错主体材料按**文档**记一次（同页多条记录不重复列出），并写明不适用原因。"""
+        self._write("fetch_snapshot.json", [
+            {"title": "贵州茅台酒股份有限公司2024年年度报告",
+             "url": "https://static.cninfo.com.cn/finalpage/2025-04-25/9.PDF",
+             "text": "第三节 管理层讨论与分析\n\n2024年度营业收入288.76亿元，"
+                     "同比下降12.83%；归母净利润66.73亿元，同比下降33.38%。\n\n"
+                     "七、财务报表附注\n\n现金流量表附注：经营活动现金流量净额46.29亿元。"},
+        ])
+        data = ne.build(self.tid, periods=[2023, 2024], company="洋河股份",
+                        company_id="002304.SZ")
+        excluded = data["excluded"]
+        self.assertEqual(len(excluded), 1,
+                         "同一份材料的多条记录只登记一次（否则简报会把一份写成两份）")
+        self.assertEqual(excluded[0]["validation_status"], "subject_mismatch")
+        self.assertEqual(data["located"], 0, "错主体材料不进证据计数")
+
     def test_extra_docs_are_merged_and_deduped(self):
         self._write("fetch_snapshot.json", [
             {"title": "贵州茅台2024年年度报告", "url": ISSUER_URL, "text": ANNUAL_TEXT},

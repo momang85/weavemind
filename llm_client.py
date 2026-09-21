@@ -490,7 +490,11 @@ def _budget_limits_from_file() -> Any:
 
 
 def _root_budget_for_task():
-    """当前任务的根预算账本；没有任务上下文时返回 None（不记账、不拒绝）。"""
+    """当前任务的根预算账本；没有任务上下文时返回 None（不记账、不拒绝）。
+
+    **跨进程后端必须接上**（与编排器同一个 factory）：主进程与各 Worker 各有一份
+    内存账本时，只接本地计数等于"每个进程各有一份额度"，上限管不住整次运行。
+    """
     tid = get_task_context()
     if not tid:
         return None
@@ -498,11 +502,12 @@ def _root_budget_for_task():
     if cached is not None:
         return cached
     try:
-        from root_budget import RootBudget
+        from root_budget import RootBudget, default_redis_factory
         from workspace import task_workspace
         ws = task_workspace(tid)
         ws.mkdir(parents=True, exist_ok=True)   # 账本落在工作区；首次调用时目录可能还没建
-        b = RootBudget(tid, ws, _budget_limits_from_file())
+        b = RootBudget(tid, ws, _budget_limits_from_file(),
+                       redis_factory=default_redis_factory)
     except Exception as exc:                 # noqa: BLE001 - 账本不可用不阻断调用
         logger.warning("根任务账本不可用（task=%s）：本次不记账：%s",
                        str(tid)[:40], str(exc)[:100])
@@ -2252,24 +2257,51 @@ def call_llm_stream(
     def _attempt(
         base_url: str, api_key: str, request_model: str, endpoint: str,
     ) -> str:
-        """单次流式请求：空响应抛 LLMCallError；成功/失败同步端点健康标记。"""
+        """单次流式请求：空响应抛 LLMCallError；成功/失败同步端点健康标记。
+
+        **一次 `_attempt` = 一次真实供应商请求**，所以票据与调用记录都在这一层：
+        流式此前既不预留也不记录，于是"上限 40 次"对这条路径完全无效（实机：一次
+        运行 8 张 step 票据、7 条调用记录，而真正跑研究的流式请求一次都没进账）。
+        """
+        _stage = "backup" if endpoint == "backup" else "llm"
+        _t0 = time.monotonic()
+        _rb, _ticket = _budget_open(_stage, 1, max_tok, usage=usage or _stage)
         try:
             text = _call_llm_stream_once(
                 base_url, api_key, request_model,
                 system, user, on_chunk, temp, max_tok,
             )
         except Exception as exc:
+            _budget_close(_rb, _ticket, ok=False, max_tokens=max_tok,
+                          note="llm:stream_failed")
             reason = _degradation_reason(exc)
             _mark_endpoint(endpoint, False, reason)
+            _record_llm_call(get_task_context(), stage=usage or _stage, attempt=1,
+                             elapsed_ms=int((time.monotonic() - _t0) * 1000),
+                             input_chars=len(system) + len(user), max_tokens=max_tok,
+                             error_class=type(exc).__name__, end_reason="error",
+                             endpoint=endpoint)
             if isinstance(exc, LLMCallError):
                 raise
             # urllib 超时/连接错误等统一转为 LLMCallError，便于调用方重试
             raise LLMCallError(f"Network error: {exc}") from exc
         if not text.strip():
             # 空响应检测：与 call() 一致，空内容视为端点故障信号
+            _budget_close(_rb, _ticket, ok=False, max_tokens=max_tok,
+                          note="llm:stream_empty")
             _mark_endpoint(endpoint, False, "empty_content")
+            _record_llm_call(get_task_context(), stage=usage or _stage, attempt=1,
+                             elapsed_ms=int((time.monotonic() - _t0) * 1000),
+                             input_chars=len(system) + len(user), max_tokens=max_tok,
+                             error_class="empty_content", end_reason="empty_content",
+                             endpoint=endpoint)
             raise LLMCallError("Empty content in LLM stream response")
+        _budget_close(_rb, _ticket, ok=True, max_tokens=max_tok, note="llm:stream_ok")
         _mark_endpoint(endpoint, True)
+        _record_llm_call(get_task_context(), stage=usage or _stage, attempt=1,
+                         elapsed_ms=int((time.monotonic() - _t0) * 1000),
+                         input_chars=len(system) + len(user), max_tokens=max_tok,
+                         end_reason="ok", endpoint=endpoint)
         return text
 
     # 健康路由（O-29 同 sync 路径）：主端点已不健康且备用健康 → 直接走备用
@@ -2416,7 +2448,18 @@ async def call_llm_async(
             # 端点先过网络策略（协议/凭据/解析后地址边界）：拒绝本机、内网与元数据服务
             url = _endpoint_guard(base_url.rstrip('/') + '/chat/completions')
 
-            data = await _async_chat_once(client, url, payload, headers)
+            # 票据只包住**这一次真实发送**（含下面的所有退出路径）：异步路径此前
+            # 没有预留，Worker 的每一次调用都不进账本，上限对它们无效。
+            _rb, _ticket = _budget_open("llm", attempt, max_tokens,
+                                        usage=_stage or "llm")
+            try:
+                data = await _async_chat_once(client, url, payload, headers)
+            except Exception:
+                _budget_close(_rb, _ticket, ok=False, max_tokens=max_tokens,
+                              note="llm:async_failed")
+                raise
+            _budget_close(_rb, _ticket, ok=True, max_tokens=max_tokens,
+                          note="llm:async_ok")
             usage = data.get("usage") or {}
             _record_usage(
                 usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
@@ -2573,12 +2616,20 @@ async def _async_call_backup(payload: dict, fallback_model: str, expect_json: bo
     }
     b_payload = dict(payload)
     b_payload["model"] = _BACKUP_CFG.get("model") or fallback_model
+    # 备用端点同样要预留/结算（与同步 `_call_backup` 同一口径）：备用也是真实请求
+    _rb, _ticket = _budget_open("backup", 1, int(b_payload.get("max_tokens") or 0))
     try:
         response = await client.post(url, json=b_payload, headers=b_headers)
     except Exception as exc:
+        _budget_close(_rb, _ticket, ok=False,
+                      max_tokens=int(b_payload.get("max_tokens") or 0),
+                      note="llm:backup_failed")
         _mark_endpoint("backup", False)
         raise
     if response.status_code in (401, 402, 403):
+        _budget_close(_rb, _ticket, ok=False,
+                      max_tokens=int(b_payload.get("max_tokens") or 0),
+                      note="llm:backup_auth_error")
         _mark_endpoint("backup", False)
         _mark_auth_error(
             response.status_code,
@@ -2592,6 +2643,9 @@ async def _async_call_backup(payload: dict, fallback_model: str, expect_json: bo
         response.raise_for_status()
         data = response.json()
     except Exception as exc:
+        _budget_close(_rb, _ticket, ok=False,
+                      max_tokens=int(b_payload.get("max_tokens") or 0),
+                      note="llm:backup_failed")
         _mark_endpoint("backup", False)
         raise
     usage = data.get("usage") or {}
@@ -2606,8 +2660,14 @@ async def _async_call_backup(payload: dict, fallback_model: str, expect_json: bo
     _publish_usage_snapshot()
     content = data["choices"][0]["message"]["content"]
     if content is None or not str(content).strip():
+        _budget_close(_rb, _ticket, ok=False,
+                      max_tokens=int(b_payload.get("max_tokens") or 0),
+                      note="llm:backup_empty")
         _mark_endpoint("backup", False)
         raise LLMEmptyResponseError("Backup LLM returned empty content")
+    _budget_close(_rb, _ticket, ok=True,
+                  max_tokens=int(b_payload.get("max_tokens") or 0),
+                  note="llm:backup_ok")
     _mark_endpoint("backup", True)
     # P2-3：async 切换同样回填主端点根因（inherited_unhealthy 兜底）
     _record_task_degradation(

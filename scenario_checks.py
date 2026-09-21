@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
-"""F3-B 退出关卡：三类**固定离线场景**跑真实装配/渲染/导出路径，逐项确定性核对。
+"""F3-B 退出关卡：五类**固定离线场景**跑真实装配/渲染/导出路径，逐项确定性核对。
 
 为什么冻结成场景：单测各自钉一处行为，但"整条链路一起改"时没人保证组合起来还对。
-三份输入（`evals/scenarios/*.json`）覆盖：①正常增长且证据齐全 ②亏损/现金净流出+跨期
-单位不一致 ③缺附注且资料截止不满足；跑法见 `scripts/scenario_run.py`，产物落运行期目录
+五份输入（`evals/scenarios/*.json`）覆盖：①正常增长且证据齐全 ②亏损/现金净流出+跨期
+单位不一致 ③缺附注且资料截止不满足 ④三项同步下降（护栏措辞）⑤错主体/错期间材料被排除
+且不计入证据；跑法见 `scripts/scenario_run.py`，产物落运行期目录
 （`.weavemind/scenarios/`），跨修订可直接比对 manifest。
 
 为什么是模块而不是 `test_*.py`：仓库守卫要求每个 `test_*.py` 都必须出现在 `ci.yml` 里，
@@ -29,7 +30,7 @@ import scenario_run  # noqa: E402
 
 
 def run_all(*, out_root: Path | None = None) -> dict:
-    """跑三份冻结场景，返回 `{name: manifest}`（产物写 `out_root`，默认运行期目录）。"""
+    """跑全部冻结场景，返回 `{name: manifest}`（产物写 `out_root`，默认运行期目录）。"""
     root = Path(out_root) if out_root else scenario_run.OUT_ROOT
     out: dict = {}
     for f in sorted(scenario_run.SCENARIO_DIR.glob("*.json")):
@@ -48,9 +49,10 @@ class TestOfflineScenarios(unittest.TestCase):
     def tearDownClass(cls):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
-    def test_three_scenarios_exist(self):
+    def test_scenarios_exist(self):
         self.assertEqual(sorted(self.manifests),
-                         ["loss_mixed_units", "missing_footnote_asof", "normal_growth"])
+                         ["all_decline", "loss_mixed_units", "missing_footnote_asof",
+                          "normal_growth", "wrong_subject_period"])
 
     def test_each_scenario_meets_its_frozen_expectations(self):
         for name, m in self.manifests.items():

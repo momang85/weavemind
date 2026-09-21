@@ -117,13 +117,49 @@ def limits_from_config(cfg: dict | None = None) -> BudgetLimits:
     )
 
 
+def default_redis_factory():
+    """账本的跨进程后端（Redis）。
+
+    **短超时是刻意的**：账本在预留、收尾、看门狗等热路径上被读，而消息总线用的
+    客户端连接超时是 5 秒（为长连接 pubsub 保留）。Redis 不在时那 5 秒会把一次
+    告警、一次预留拖到秒级（实测：看门狗告警被拖到断言之后才发出）。这里只要
+    0.3s 连接 / 0.5s 读，失败立刻降级为本地账本。
+
+    主进程、Worker、LLM 客户端各建各的账本实例，但**必须共用同一个后端**：只给
+    编排器接后端、LLM 路径退回本地计数时，"每个进程各自 40 次"会一起花掉，
+    上限实际管不住整次运行（实机：一次运行的账本里只剩 step 阶段，供应商请求
+    一次没进共享计数）。
+    """
+    try:
+        import redis as _redis
+        try:
+            from common import _NO_REDIS_RETRY as _noretry
+        except Exception:
+            from redis.backoff import NoBackoff as _NoBackoff
+            from redis.retry import Retry as _Retry
+            _noretry = _Retry(_NoBackoff(), 0)
+        return _redis.Redis(
+            host=os.environ.get("REDIS_HOST", "localhost"),
+            port=int(os.environ.get("REDIS_PORT", "6379")),
+            decode_responses=True,
+            socket_timeout=0.5,
+            socket_connect_timeout=0.3,
+            retry=_noretry,
+        )
+    except Exception as exc:                       # noqa: BLE001 - 缺 redis 就按单进程记
+        logger.warning("预算跨进程后端不可用（按单进程记账）：%s", str(exc)[:100])
+        return None
+
+
 class RootBudget:
     """单根任务的账本：线程安全 + 原子落盘（Redis 可用时跨进程原子预留）。"""
 
     _locks: dict[str, threading.Lock] = {}
     _locks_guard = threading.Lock()
-    # 票据号里的实例标记：即使两个进程各自从 0 计数，票据号也不会撞成同一个
-    _instance_tag = f"{os.getpid():x}-{uuid.uuid4().hex[:4]}"
+    # 票据号里的实例标记：即使两个进程各自从 0 计数，票据号也不会撞成同一个。
+    # 按**账本实例**取（不是按类取）：同一进程里先后开两份账本（恢复、重开、
+    # 测试）各写自己的增量，共用一个标记会让后一份覆盖前一份的计数。
+    _instance_tag = f"{os.getpid():x}-{uuid.uuid4().hex[:4]}"  # 兼容旧引用
     # 跨进程后端健康：**按后端实例缓存**（进程级），失败一次就不再重复付连接超时。
     # 账本在预留/收尾/看门狗等热路径上被读，"每次都探测一次不可达的后端"会把
     # 一次告警、一次预留拖到秒级（实测过）。
@@ -133,6 +169,7 @@ class RootBudget:
     def __init__(self, root_task_id: str, workspace: str | Path,
                  limits: BudgetLimits | None = None, redis_factory=None):
         self.root_task_id = str(root_task_id or "")
+        self._tag = f"{os.getpid():x}-{uuid.uuid4().hex[:4]}"
         self.path = Path(workspace) / "budget_state.json"
         self.limits = limits or BudgetLimits()
         with RootBudget._locks_guard:
@@ -145,6 +182,9 @@ class RootBudget:
         # 跨进程后端是否已**建立**（写路径成功用过一次）。观测读取不建立后端。
         self._established = False
         self.state = self._load()
+        # 增量基线：文件是**多进程合并视图**，本进程只把自己的增量写进 `writers`，
+        # 否则第二次保存会把读进来的别人计数当成自己的再记一遍（重复计数）。
+        self._baseline = self._copy_state(self.state)
         # D5：声明上限入账（审计"这次跑的上限是多少"）——恢复时以磁盘为准，
         # 但本进程传入的上限若不同则更新（配置/环境变了如实反映）
         _declared = {"max_seconds": float(self.limits.max_seconds or 0.0),
@@ -275,23 +315,150 @@ class RootBudget:
         st.rejected_transitions = dict(raw.get("rejected_transitions") or {})
         return st
 
+    _COUNT_KEYS = ("calls_reserved", "calls_settled", "calls_unsettled",
+                   "tokens_reserved", "tokens_settled", "tokens_unsettled")
+    _STAGE_SUM_KEYS = ("reserved", "settled", "unsettled", "tokens",
+                       "tokens_reserved", "refunded")
+
+    @staticmethod
+    def _copy_state(st: "BudgetState") -> "BudgetState":
+        """深拷贝账本状态（增量基线用；dict 字段必须复制，不能共享引用）。"""
+        return BudgetState(
+            started_at=st.started_at,
+            calls_reserved=st.calls_reserved, calls_settled=st.calls_settled,
+            calls_unsettled=st.calls_unsettled,
+            tokens_reserved=st.tokens_reserved, tokens_settled=st.tokens_settled,
+            tokens_unsettled=st.tokens_unsettled, seq=st.seq,
+            ledger_id=st.ledger_id,
+            open_tickets=json.loads(json.dumps(st.open_tickets or {})),
+            unsettled_tickets=json.loads(json.dumps(st.unsettled_tickets or {})),
+            stages=json.loads(json.dumps(st.stages or {})),
+            limits=dict(st.limits or {}),
+            rejected_transitions=json.loads(json.dumps(st.rejected_transitions or {})),
+        )
+
+    def _mine(self) -> dict:
+        """本进程自加载以来的增量快照（只记自己的，供 `writers` 合并）。
+
+        主进程/Worker/评审进程各有一份账本，`budget_state.json` 此前是"后写覆盖"——
+        最后一个保存的进程把自己的视图整份写下去，别的进程记的 llm/backup 阶段计数
+        就消失了（实机：一次运行的文件里只剩 step 阶段，7 次供应商请求全无痕迹）。
+        现在每个进程只写**自己的增量**，文件里的总数由所有进程的增量相加得到。
+        """
+        st, base = self.state, self._baseline
+        counters = {k: int(getattr(st, k) or 0) - int(getattr(base, k) or 0)
+                    for k in self._COUNT_KEYS}
+        stages: dict = {}
+        for name, entry in (st.stages or {}).items():
+            e = entry if isinstance(entry, dict) else {}
+            b = (base.stages or {}).get(name)
+            b = b if isinstance(b, dict) else {}
+            d: dict = {}
+            for k in self._STAGE_SUM_KEYS:
+                v = int(e.get(k) or 0) - int(b.get(k) or 0)
+                if v:
+                    d[k] = v
+            for k in ("open", "last_note", "last_failed", "last_progress",
+                      "last_progress_at", "last_at", "first_at"):
+                if e.get(k) != b.get(k) and e.get(k) is not None:
+                    d[k] = e.get(k)
+            if d:
+                stages[name] = d
+        tag = self._tag
+        tickets = {t: r for t, r in (st.open_tickets or {}).items()
+                   if str(t).endswith(tag)}
+        unsettled = {t: r for t, r in (st.unsettled_tickets or {}).items()
+                     if str(t).endswith(tag)}
+        rejected: dict = {}
+        for kind, entry in (st.rejected_transitions or {}).items():
+            e = entry if isinstance(entry, dict) else {}
+            b = (base.rejected_transitions or {}).get(kind)
+            b = b if isinstance(b, dict) else {}
+            d = {"count": int(e.get("count") or 0) - int(b.get("count") or 0)}
+            if e.get("last") != b.get("last"):
+                d["last"] = e.get("last") or ""
+            if d["count"] or d.get("last"):
+                rejected[kind] = d
+        return {"counters": counters, "stages": stages, "open_tickets": tickets,
+                "unsettled_tickets": unsettled, "rejected_transitions": rejected,
+                "seq": int(st.seq or 0) - int(base.seq or 0)}
+
+    @classmethod
+    def _merge_writers(cls, writers: dict) -> dict:
+        """把各进程的增量快照合并成**整次运行**的视图（计数相加、票据并集）。"""
+        total = {k: 0 for k in cls._COUNT_KEYS}
+        stages: dict = {}
+        open_tickets: dict = {}
+        unsettled: dict = {}
+        rejected: dict = {}
+        seq = 0
+        for snap in (writers or {}).values():
+            if not isinstance(snap, dict):
+                continue
+            for k in cls._COUNT_KEYS:
+                total[k] += int((snap.get("counters") or {}).get(k) or 0)
+            seq = max(seq, int(snap.get("seq") or 0))
+            for name, d in (snap.get("stages") or {}).items():
+                if not isinstance(d, dict):
+                    continue
+                e = stages.setdefault(name, {})
+                for k in cls._STAGE_SUM_KEYS:
+                    if d.get(k):
+                        e[k] = int(e.get(k) or 0) + int(d.get(k) or 0)
+                for k in ("first_at",):
+                    if d.get(k) is not None:
+                        e[k] = min(float(e.get(k) or d[k]), float(d[k]))
+                for k in ("last_at", "last_note", "last_failed", "last_progress",
+                          "last_progress_at"):
+                    if d.get(k) is not None:
+                        e[k] = d[k]
+                # `open` 是本进程的在飞票据列表：并集（不同进程的票据号不重复）
+                if d.get("open"):
+                    e["open"] = list(e.get("open") or []) + list(d["open"])
+            for src, dst in ((snap.get("open_tickets"), open_tickets),
+                             (snap.get("unsettled_tickets"), unsettled)):
+                for t, r in (src or {}).items():
+                    dst.setdefault(t, r)
+            for kind, d in (snap.get("rejected_transitions") or {}).items():
+                if not isinstance(d, dict):
+                    continue
+                e = rejected.setdefault(kind, {"count": 0, "last": ""})
+                e["count"] = int(e.get("count") or 0) + int(d.get("count") or 0)
+                if d.get("last"):
+                    e["last"] = d["last"]
+        return {"counters": total, "stages": stages, "open_tickets": open_tickets,
+                "unsettled_tickets": unsettled, "rejected_transitions": rejected,
+                "seq": seq}
+
     def _save(self) -> None:
+        # 读回磁盘上的 `writers`（同一账本身份才继承）：本进程的增量替换自己的那一份，
+        # 其余进程的原样保留——这样"最后保存的进程"不会再抹掉别人的计数。
+        writers: dict = {}
+        try:
+            disk = json.loads(self.path.read_text(encoding="utf-8")) or {}
+        except Exception:
+            disk = {}
+        if str(disk.get("ledger_id") or "") == str(self.state.ledger_id or ""):
+            writers = dict(disk.get("writers") or {})
+        writers[self._tag] = self._mine()
+        merged = self._merge_writers(writers)
         payload = {
             "root_task_id": self.root_task_id,
             "started_at": self.state.started_at,
-            "calls_reserved": self.state.calls_reserved,
-            "calls_settled": self.state.calls_settled,
-            "calls_unsettled": self.state.calls_unsettled,
-            "tokens_reserved": self.state.tokens_reserved,
-            "tokens_settled": self.state.tokens_settled,
-            "tokens_unsettled": self.state.tokens_unsettled,
-            "seq": self.state.seq,
+            "calls_reserved": merged["counters"]["calls_reserved"],
+            "calls_settled": merged["counters"]["calls_settled"],
+            "calls_unsettled": merged["counters"]["calls_unsettled"],
+            "tokens_reserved": merged["counters"]["tokens_reserved"],
+            "tokens_settled": merged["counters"]["tokens_settled"],
+            "tokens_unsettled": merged["counters"]["tokens_unsettled"],
+            "seq": max(int(self.state.seq or 0), int(merged.get("seq") or 0)),
             "ledger_id": self.state.ledger_id,
-            "open_tickets": self.state.open_tickets,
-            "unsettled_tickets": self.state.unsettled_tickets,
-            "stages": self.state.stages,
-            "limits": self.state.limits,
-            "rejected_transitions": self.state.rejected_transitions,
+            "open_tickets": merged["open_tickets"],
+            "unsettled_tickets": merged["unsettled_tickets"],
+            "stages": merged["stages"],
+            "rejected_transitions": merged["rejected_transitions"],
+            # 逐进程增量（审计用）：总数对不上时能看出是谁记的
+            "writers": writers,
             "limits": {
                 "max_seconds": self.limits.max_seconds,
                 "max_calls": self.limits.max_calls,
@@ -404,7 +571,7 @@ class RootBudget:
             seq = seq_remote if seq_remote is not None else self.state.seq
             self.state.calls_reserved += calls
             self.state.tokens_reserved += tokens
-            ticket = f"{stage}-{seq}-{RootBudget._instance_tag}"
+            ticket = f"{stage}-{seq}-{self._tag}"
             now = time.time()
             self.state.open_tickets[ticket] = {
                 "stage": stage, "at": now, "calls": calls, "tokens": tokens,

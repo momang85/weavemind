@@ -101,7 +101,11 @@ class AsyncWorkerBase(ABC):
                         usage="exec",
                     )),
                 )
-            except Exception:
+            except Exception as exc:
+                # 预算拒发不是"流式失败"：换条路径重试只会再被拒一次，还可能把
+                # "已拒绝"记成两次尝试。原样抛出，让上层按预算终止处理。
+                if getattr(exc, "budget_exhausted", False):
+                    raise
                 pass  # 流式失败 → 回退普通异步调用
         from llm_client import call_llm_async
         result = await call_llm_async(

@@ -1,27 +1,19 @@
 # DeepSeek 执行状态（2026-09-21 更新）
 
-**当前批次**：阶段 D · D1/D2/D3 完成；**D5 第一批完成**（账本贯通到每次真实请求 + 每任务上限
-声明 + 模拟供应商验收），并完成 D1–D3 存疑项验收。证据：`docs/evidence/` 下
-`d1_claim_support_*`、`d2_analysis_retention_and_projection_*`、`d2_candidate_acceptance_and_diff_*`、
-`d3_real_disclosure_and_units_*`、`d5_request_ledger_and_caps_20260921.md`。
+**当前批次**：阶段 D · D1/D2/D3 完成；**D5 第二批完成**（一次有界实机 + 账本逐条核对 +
+核对暴露的三处缺口修复）、**D6 回归包补口**（五场景）、**对外可达面只读安全核对**。
+证据：`docs/evidence/` 下 `d1_claim_support_*`、`d2_analysis_retention_and_projection_*`、
+`d2_candidate_acceptance_and_diff_*`、`d3_real_disclosure_and_units_*`、
+`d5_request_ledger_and_caps_20260921.md`、`d5_live_bounded_run_and_ledger_20260921.md`。
 
 | 层 | 状态 |
 |---|---|
-| D1/D2/D3 | 见前几批：逐条断言与证据计数、分析保留与同版投影、候选先验收再比较、单位语义、
-真实 MD&A 正向样本、研究问题计划与两条护栏 |
-| 存疑项验收 | ①整份 71 页年报已扫：核心指标的真实经营解释只有第 3 页收入那句（利润/现金流解释
-确实不存在，带证据）；②目标类补齐**支持原文 + 披露时点**五项核对，真实目标句已冻结；
-③括号式同比按最近指标解析（实机草稿复测正确）；④候选验收采纳改为**非桩**集成测试；
-⑤质量向量分布实测（真实草稿 4–5，上限 10 不构成约束；旧交付稿如实标"无分析"） |
-| D5 第一批 | **记账与管制分离**：不限额度也如实计数（旧实现不限时全是空操作 → 实机账本恒空）；
-`llm_client` **每次请求发送前开票**（stage=llm/backup）、成功/失败/重试/备端点各结算一次、
-预算不足**不发送**并抛 `budget_exhausted`；`WM_TASK_MAX_*` 环境上限（不改全局 0/0/0）
-且**声明上限入账**供审计 |
-| 验证 | test_root_budget 37、test_llm_request_ledger 5（模拟供应商：账本调用数==实收数、
-拒发前不发出、重试与备端点各记一次、取消不开票）、cancel/prompt 85、deploy_manifest 16、
-scenario_checks 17 全绿；三场景复跑全过；**CI 全量 47 文件本地 0 失败（356s）** |
-| 遗留 | D5 剩余：带 `WM_TASK_MAX_*` 的**有界实机**逐条核对（D5 退出标准）；token 记上界非实际
-（需接用量解析）；Redis 并发压测未做；场景夹具下质量向量未知。D6：真人五项评分与试用记录 |
+| D5 第二批（有界实机） | 声明上限 `WM_TASK_MAX_CALLS=40 / SECONDS=1500`（全局仍 0/0/0），上限入账；`ui-750185076a` 洋河 2023–2024 两年度三项指标，21:05:02 提交 → 21:07:29 `SUCCESS`（**2 分 27 秒**，未触发拒绝）；验收 `overall=pass`（溯源 77%（164/212））、交付 `verified`、主张 40 条（bound 7 / partially_supported 7 / needs_check 26）、研究问题 4 条；费用**未知** |
+| 账本核对（**对不上 → 已修**） | 三处缺口：①LLM 路径建账本**没接跨进程后端**（等于每进程各一份上限）②`call_llm_stream`/`call_llm_async` **无票据、无调用记录**（步骤主路径不入账）③`_save` 整份覆盖（阶段明细被最后写者抹掉）。修法：工厂提为 `root_budget.default_redis_factory` 并共用、流式/异步/备端点每次真实发送开票结算 + 补调用记录、文件改为 `writers` 逐进程增量合并（身份不同不并）；`async_worker_base` 不再把预算拒绝当流式失败吞掉 |
+| D6 回归包 | 场景三份 → **五份**：新增 `all_decline`（全下降 + 覆盖率 110% + 两条护栏 + 研究问题小节）与 `wrong_subject_period`（错主体同句材料不计证据、错期写明原因，`located` 恰好 1）；`scenario_run` 补 `clean_chart_data.json`（用生产同一函数），修正"场景溯源 67% / 实机 100%"的夹具失真，并新增 `brief_contains`/`brief_absent`/`excluded_reasons`/`evidence_located_max` 四个核对键；未采用材料按文档去重 |
+| 安全核对（只读，不宣称安全） | `POST /task`、`GET /api/task/*`、`/files/*`、交付 zip、`net_policy` 五处逐条给证据；两处**低危残留**：工作区内符号链接未 `realpath` 解析（`_safe_workspace_path`/打包）、回环地址免限流（本地开发豁免）；Mimosa 需重跑，`scanner_enobufs` 不得当作安全结论 |
+| 验证 | `test_root_budget` 48 项（新增流式入账/流式拒发/两进程共享上限/合并与不重复计数/身份隔离）；`scenario_checks` 17、`test_offline_delivery` 36、`test_narrative_evidence` 44 全绿；**CI 清单 46 文件本地全绿** |
+| 遗留 | ①修复后的实机账本核对需下一次有界运行复验（本批只做离线）②真实 Redis 多 Worker 并发压力未测 ③检索步骤取回的 PDF 未路由到 PDF 解析通道（本次四类叙事缺口全开的原因，需单独复现 + 用例）④"零可定位证据仍判 verified"是否可接受（计划写"草稿"，实测 `verified`）待裁决 ⑤token 仍记上界非实际用量。D6：真人五项评分与试用记录 |
 | 人工验收 | **未做**（研究员五项 0–2 评分 ≥8/10 → D 内部试用） |
 
 ## F3-C / C3（已完成，证据见 `docs/evidence/c3_brief_shape_20260920.md`）

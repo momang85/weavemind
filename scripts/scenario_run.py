@@ -116,6 +116,41 @@ def _pdf_export_verdict(pdf_path: Path, *, expected_images: int) -> dict:
 
 
 
+def _write_clean_chart_data(proj: Path, financials: dict) -> None:
+    """把结构化财务行并入 `clean_chart_data.json`（与生产 `_remerge_structured_financials` 同法）。
+
+    单实体取顶层 `financials`；对比任务是 `{source: multi_entity, companies: [...]}`，
+    逐实体并入（标签带实体前缀，避免同年同指标互相覆盖）。
+    """
+    from structured_pipeline import StructuredPipelineMixin as _SP
+    clean: dict = {}
+    if str((financials or {}).get("source") or "") == "multi_entity":
+        for ent in (financials or {}).get("companies") or []:
+            if not isinstance(ent, dict):
+                continue
+            md = ent.get("metadata") or {}
+            clean = _SP._merge_structured_financials(
+                clean, ent.get("financials") or [],
+                str((ent.get("raw") or {}).get("url") or ""),
+                entity=str(ent.get("name") or ""),
+                subject=str(ent.get("name") or ""),
+                subject_id=str(md.get("ticker") or md.get("code") or ""),
+                currency=str(md.get("currency") or ""),
+                amount_unit=str(md.get("unit") or ""),
+                source_kind=str(md.get("source") or "multi_entity"))
+    else:
+        md = (financials or {}).get("metadata") or {}
+        clean = _SP._merge_structured_financials(
+            clean, (financials or {}).get("financials") or [],
+            str((financials or {}).get("raw", {}).get("url") or ""),
+            subject=str(md.get("company") or ""),
+            subject_id=str(md.get("ticker") or md.get("code") or ""),
+            currency=str(md.get("currency") or ""),
+            amount_unit=str(md.get("unit") or ""),
+            source_kind=str(md.get("source") or ""))
+    _write(proj / "clean_chart_data.json", clean)
+
+
 def run_scenario(spec: dict, *, out_root: Path = OUT_ROOT) -> dict:
     """跑一个场景，返回 manifest（含确定性核对结果）。"""
     name = str(spec.get("name") or "scenario")
@@ -150,6 +185,13 @@ def run_scenario(spec: dict, *, out_root: Path = OUT_ROOT) -> dict:
         # ① 底稿（真实读侧）
         import working_paper_export as WPX
         wp = WPX.write_working_paper(tid, goal, project="default")
+
+        # ①′ 清洗后的结构化数据（`clean_chart_data.json`）：生产路径由"清洗 → 结构化
+        #    并入"写出，验收的**结构化溯源通道**读它（同比/比率由此可复算）。此前场景
+        #    不写这个文件，正文里的同比与比率只能靠"文档原文里恰好也写着同一个百分数"
+        #    才算可溯源——同一份正文在场景里 67%、在实机里 100%，失败与被测代码无关。
+        #    这里调用**生产同一函数**（`_merge_structured_financials`）补上该通道。
+        _write_clean_chart_data(proj, spec.get("financials") or {})
 
         # ② 叙事证据（真实提取 + 契约校验）
         ev = ne.build(tid, goal=goal, ws_dir=ws)
@@ -260,7 +302,13 @@ def run_scenario(spec: dict, *, out_root: Path = OUT_ROOT) -> dict:
             "acceptance": {"overall": acc.get("overall"),
                            "gaps": list(acc.get("gaps") or [])[:8],
                            "failed_checks": [k for k, c in (acc.get("checks") or {}).items()
-                                             if not c.get("pass") and c.get("counted", True)]},
+                                             if not c.get("pass") and c.get("counted", True)],
+                           # 数字溯源不达标时，**哪几个数字**不可溯源要留在清单里：
+                           # 只记一句"67% 低于阈值"的话，跨修订比对看不出是不是同一批数字
+                           "untraceable": [
+                               str(i.get("raw")) for i in
+                               (((acc.get("checks") or {}).get("number_traceability") or {})
+                                .get("untraceable") or [])][:10]},
             "paper": {"ok": bool(wp.get("ok")), "rows": wp.get("rows"),
                       "derived": wp.get("derived"),
                       "gaps": len(wp.get("gaps") or []),
@@ -278,6 +326,8 @@ def run_scenario(spec: dict, *, out_root: Path = OUT_ROOT) -> dict:
                           for c in (st.get("citations") or [])],
             "findings": findings,
             "coverage_finding": coverage,
+            # D6：正文措辞也要能核对（护栏句/研究问题小节在不在），而不是只看数字与状态
+            "brief": str(res.get("report") or "")[:20000],
             "quality_metrics": sorted({str(q.get("metric")) for q in quality}),
             "audit": audit,
             "charts": charts,
@@ -317,6 +367,10 @@ def _check(manifest: dict, expect: dict) -> dict:
         out["coverage_contains"] = expect["coverage_contains"] in str(manifest.get("coverage_finding") or "")
     if "evidence_located_min" in expect:
         out["evidence_located_min"] = int(manifest["evidence"].get("located") or 0) >= int(expect["evidence_located_min"])
+    if "evidence_located_max" in expect:
+        # 上界用来证明"不适用材料**没有**被算成证据"：错主体文档写了同样的话时，
+        # 只有准入的那份能计数（少了这条就只能看下界，多算一条也测不出来）
+        out["evidence_located_max"] = int(manifest["evidence"].get("located") or 0) <= int(expect["evidence_located_max"])
     if "evidence_missing" in expect:
         out["evidence_missing"] = list(manifest["evidence"].get("missing_labels") or []) == list(expect["evidence_missing"])
     if "evidence_missing_min" in expect:
@@ -324,6 +378,10 @@ def _check(manifest: dict, expect: dict) -> dict:
     if "excluded_reason" in expect:
         out["excluded_reason"] = any(str(e.get("validation_status")) == expect["excluded_reason"]
                                      for e in (manifest["evidence"].get("excluded") or []))
+    if "excluded_reasons" in expect:
+        # 多种不适用原因同时成立（错主体 + 错期间）：逐条都要出现，缺一即未过
+        got = {str(e.get("validation_status")) for e in (manifest["evidence"].get("excluded") or [])}
+        out["excluded_reasons"] = all(str(r) in got for r in expect["excluded_reasons"])
     if "no_yoy_for" in expect:
         got = {m for m in manifest.get("quality_metrics") or [] if m.endswith("_yoy")}
         want_absent = {f"{m}_yoy" for m in expect["no_yoy_for"]}
@@ -338,6 +396,12 @@ def _check(manifest: dict, expect: dict) -> dict:
         out["audit_contains"] = any(expect["audit_contains"] in a for a in manifest.get("audit") or [])
     if "chart_min" in expect:
         out["chart_min"] = len(manifest.get("charts") or []) >= int(expect["chart_min"])
+    if "brief_contains" in expect:
+        text = str(manifest.get("brief") or "")
+        out["brief_contains"] = all(str(k) in text for k in expect["brief_contains"])
+    if "brief_absent" in expect:
+        text = str(manifest.get("brief") or "")
+        out["brief_absent"] = all(str(k) not in text for k in expect["brief_absent"])
     # 导出完整性对**每个**场景都成立（不是场景可选预期）：正文引用的图必须真进 PDF、
     # 表头必须与数据列共用同一列网格。此前只查页数与字符量，三场景分别缺 5/2/4 张图
     # 却一律 pass——"磁盘上有 PNG"不等于"PDF 里有图"。

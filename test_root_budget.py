@@ -763,5 +763,123 @@ class TestRequestLedger(unittest.TestCase):
         self.assertEqual(b.state.calls_settled, 0)
 
 
+    def test_stream_request_is_counted_and_recorded(self):
+        """流式路径也要入账并留下调用记录：此前它既不预留也不记录，上限对它无效。"""
+        p = _Provider()
+        recorded: list[dict] = []
+
+        def _fake_stream_once(base_url, api_key, model, system, user, *a, **k):
+            return p.send(base_url, system, user)
+
+        lc.set_task_context("t-led-6")
+        with _offline(), \
+                mock.patch.object(lc, "_call_llm_stream_once", _fake_stream_once), \
+                mock.patch.object(lc, "_record_llm_call",
+                                  lambda tid, **kw: recorded.append(dict(kw))):
+            out = lc.call_llm_stream("sys", "user text", usage="exec")
+        self.assertTrue(out)
+        self.assertEqual(p.calls, 1, "流式也只发一次")
+        b = self._budget("t-led-6")
+        self.assertEqual(b.snapshot()["stages"]["llm"]["settled"], 1,
+                         "流式请求必须进账本")
+        self.assertEqual([r.get("end_reason") for r in recorded], ["ok"],
+                         "流式请求必须留一条调用形状记录")
+        self.assertEqual(recorded[0].get("stage"), "exec")
+
+    def test_stream_cap_refuses_before_sending(self):
+        os.environ["WM_TASK_MAX_CALLS"] = "1"
+        p = _Provider()
+
+        def _fake_stream_once(base_url, api_key, model, system, user, *a, **k):
+            return p.send(base_url, system, user)
+
+        lc.set_task_context("t-led-7")
+        with _offline(), \
+                mock.patch.object(lc, "_call_llm_stream_once", _fake_stream_once):
+            lc.call_llm_stream("sys", "u1")
+            with self.assertRaises(lc.LLMCallError) as ctx:
+                lc.call_llm_stream("sys", "u2")
+        self.assertTrue(getattr(ctx.exception, "budget_exhausted", False))
+        self.assertEqual(p.calls, 1, "被拒的流式请求供应商从未收到")
+
+    def test_two_workers_share_one_call_cap(self):
+        """跨进程共享额度：两个 Worker（各自新建账本实例）也花不掉同一份上限。
+
+        LLM 路径此前不接跨进程后端，等于"每个进程各有一份 40 次"——上限管不住
+        整次运行。这里用同一个假后端模拟两个进程，第二次必须被拒。
+        """
+        os.environ["WM_TASK_MAX_CALLS"] = "1"
+        kv: dict = {}
+        p = _Provider()
+        c = _client(p)
+        lc.set_task_context("t-led-8")
+        with _offline(), mock.patch.object(rb, "default_redis_factory",
+                                           lambda: _AtomicFakeRedis(kv)):
+            c.call("sys", "u1", expect_json=True)
+            lc._root_budgets.clear()          # 第二个 Worker：新进程、新账本实例
+            with self.assertRaises(lc.LLMCallError) as ctx:
+                c.call("sys", "u2", expect_json=True)
+        self.assertTrue(getattr(ctx.exception, "budget_exhausted", False),
+                        "共享额度用尽必须能识别")
+        self.assertEqual(p.calls, 1, "共享额度用尽后不再发送")
+
+
+class TestWriterMerge(unittest.TestCase):
+    """多进程写同一份账本：后写的进程不得抹掉先写进程的计数。"""
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_merge_"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _ledger(self, **limits):
+        return rb.RootBudget("t-m", self.tmp, rb.BudgetLimits(**limits))
+
+    def test_second_writer_keeps_first_writer_counts(self):
+        a = self._ledger(max_calls=10)
+        t = a.reserve("llm", tokens=100)
+        a.settle(t, tokens=80)
+        b = self._ledger(max_calls=10)
+        t2 = b.reserve("step")
+        b.settle(t2)
+        data = json.loads((self.tmp / "budget_state.json").read_text(encoding="utf-8"))
+        self.assertEqual(data["calls_reserved"], 2, "两次预留都留在文件里")
+        self.assertEqual(data["calls_settled"], 2)
+        self.assertEqual(sorted(data["stages"]), ["llm", "step"],
+                         "阶段明细不得被后写的进程覆盖掉")
+        self.assertEqual(data["stages"]["llm"]["tokens"], 80)
+        self.assertEqual(len(data.get("writers") or {}), 2, "逐进程增量可核对")
+
+    def test_reopened_ledger_does_not_double_count(self):
+        a = self._ledger(max_calls=10)
+        a.settle(a.reserve("llm"), tokens=10)
+        for _ in range(3):
+            again = self._ledger(max_calls=10)
+            again.settle(again.reserve("llm"), tokens=5)
+        data = json.loads((self.tmp / "budget_state.json").read_text(encoding="utf-8"))
+        self.assertEqual(data["calls_reserved"], 4, "重开三次 = 共四次预留")
+        self.assertEqual(data["stages"]["llm"]["tokens"], 10 + 5 * 3)
+
+    def test_writers_are_not_merged_across_ledger_identities(self):
+        """账本身份不同（重新开始的一次运行）时不得把上一轮的计数加进来。"""
+        a = self._ledger(max_calls=10)
+        a.settle(a.reserve("llm"), tokens=10)
+        path = self.tmp / "budget_state.json"
+        old = json.loads(path.read_text(encoding="utf-8"))
+        # 同 id 重新提交：工作区里的旧文件被新一次运行（新账本身份）覆盖
+        new_run = dict(old, ledger_id="other-run", calls_reserved=5, calls_settled=5,
+                       stages={"plan": {"reserved": 5, "settled": 5}},
+                       writers={"dead-beef": {"counters": {"calls_reserved": 5,
+                                                           "calls_settled": 5},
+                                              "stages": {"plan": {"reserved": 5,
+                                                                  "settled": 5}}}})
+        path.write_text(json.dumps(new_run, ensure_ascii=False), encoding="utf-8")
+        b = self._ledger(max_calls=10)          # 读回的是 other-run 那份账
+        b.settle(b.reserve("step"))
+        fresh = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(fresh["ledger_id"], "other-run")
+        self.assertEqual(fresh["calls_reserved"], 6, "本轮 1 次 + 同身份已有的 5 次")
+        self.assertNotIn("llm", fresh["stages"], "上一轮（身份不同）的阶段计数不并入")
+
+
 if __name__ == "__main__":
     unittest.main()

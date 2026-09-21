@@ -848,14 +848,24 @@ def build(task_id: str, *, periods=None, company: str = "", company_id: str = ""
                         "publisher": r.get("publisher") or "",
                         "admission": r.get("admission") or "unknown",
                         "has_location": bool(r.get("has_location"))})
-    excluded = [{"url": r.get("url") or "", "title": r.get("title") or "",
-                 "validation_status": r.get("validation_status") or "",
-                 "admission": r.get("admission") or "",
-                 "document_period": r.get("document_period") or "",
-                 "published_at": r.get("published_at") or "",
-                 "published_precision": r.get("published_precision") or "",
-                 "locator": r.get("locator") or ""}
-                for r in records if r.get("admission") not in ("admitted", "comparison")]
+    # 未采用材料按**文档**去重：同一份 PDF 里多条记录（收入句 + 附注句）会各自带
+    # 同一个不适用原因，逐条列出会让简报把同一份材料写两遍（读者以为有两份）。
+    excluded: list[dict] = []
+    _seen_ex: set = set()
+    for r in records:
+        if r.get("admission") in ("admitted", "comparison"):
+            continue
+        _k = (str(r.get("url") or ""), str(r.get("validation_status") or ""))
+        if _k in _seen_ex:
+            continue
+        _seen_ex.add(_k)
+        excluded.append({"url": r.get("url") or "", "title": r.get("title") or "",
+                         "validation_status": r.get("validation_status") or "",
+                         "admission": r.get("admission") or "",
+                         "document_period": r.get("document_period") or "",
+                         "published_at": r.get("published_at") or "",
+                         "published_precision": r.get("published_precision") or "",
+                         "locator": r.get("locator") or ""})
     payload = {
         "ok": bool(located_records),
         "company": company,

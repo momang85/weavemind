@@ -1371,10 +1371,11 @@ class TestResearchFixedPathOffline(unittest.TestCase):
 
 
 class TestFrozenOfflineScenarios(unittest.TestCase):
-    """F3-B：三份**冻结离线场景**在本套件内跑（CI 门禁要求每个 test_*.py 都在 ci.yml 里，
+    """F3-B：五份**冻结离线场景**在本套件内跑（CI 门禁要求每个 test_*.py 都在 ci.yml 里，
     场景检查做成 `scenario_checks` 模块由这里调用，既进门禁又不新增工作流条目）。
 
-    覆盖：①正常增长且证据齐全 ②亏损/现金净流出 + 跨期单位不一致 ③缺附注且资料截止不满足。
+    覆盖：①正常增长且证据齐全 ②亏损/现金净流出 + 跨期单位不一致 ③缺附注且资料截止不满足
+    ④三项同步下降（覆盖护栏措辞）⑤错主体/错期间材料被排除且不计入证据。
     断言的是场景自带预期（`evals/scenarios/*.json` 的 `expect`）与几条跨场景不变量；
     跑法见 `scripts/scenario_run.py`，产物清单（含 sha256）用于跨修订比对。
     """
@@ -1391,11 +1392,30 @@ class TestFrozenOfflineScenarios(unittest.TestCase):
 
     def test_scenarios_meet_frozen_expectations(self):
         self.assertEqual(sorted(self.manifests),
-                         ["loss_mixed_units", "missing_footnote_asof", "normal_growth"])
+                         ["all_decline", "loss_mixed_units", "missing_footnote_asof",
+                          "normal_growth", "wrong_subject_period"])
         for name, m in self.manifests.items():
             checks = {k: v for k, v in (m.get("checks") or {}).items() if k != "all_passed"}
             failed = [k for k, v in checks.items() if not v]
             self.assertEqual(failed, [], f"{name} 未通过：{failed}；交付={m['delivery']}")
+
+    def test_decline_case_keeps_coverage_guardrail(self):
+        """全下降：覆盖率高**不是**好消息——正文与护栏句都要在。"""
+        dec = self.manifests["all_decline"]
+        self.assertEqual(dec["delivery"]["status"], "verified", dec["delivery"])
+        self.assertIn("高于", dec["coverage_finding"])
+        self.assertIn("不表示回款改善", dec["brief"])
+        self.assertIn("不等于", dec["brief"])
+
+    def test_wrong_subject_and_period_material_is_excluded_not_counted(self):
+        """错主体材料写了同样的话也不算证据：排除原因要写明，条数不得被它抬高。"""
+        w = self.manifests["wrong_subject_period"]
+        reasons = {str(e.get("validation_status")) for e in (w["evidence"]["excluded"] or [])}
+        self.assertIn("subject_mismatch", reasons)
+        self.assertIn("period_before_contract", reasons)
+        # 正文里同一个数字只由**准入**的那份材料计数（错主体那份被排除）
+        self.assertEqual(int(w["evidence"]["located"]), 1)
+        self.assertIn("未采用的材料", w["brief"])
 
     def test_normal_growth_verified_and_loss_case_keeps_honest_gaps(self):
         ok = self.manifests["normal_growth"]
