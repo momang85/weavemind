@@ -6965,6 +6965,221 @@ class TestCandidateAdoption(unittest.TestCase):
                          "重复的同一观察只算一条（计数按独立主张去重）")
 
 
+class TestRealMdnaPositivePath(unittest.TestCase):
+    """D3：**真实年报的经营讨论**必须进入对应指标的解释（合成正例不算数）。
+
+    样本：洋河 2024 年年度报告第 3 页原文（有界抓取、冻结为
+    `evals/real/yanghe_ar2024_mdna_excerpt.json`，带 art_code/披露日/页码/hash）：
+    "白酒行业进入存量竞争阶段……价位段承压较大……积极调整经营策略，应对外部环境的变化……
+    2024 年实现营业收入 288.76 亿元，同比下降 12.83%"。
+    它解释的是**收入**——利润与现金流仍须是缺口（只给收入解释不得扩散）。
+    """
+
+    GOAL = ("研究洋河股份 2023 与 2024 两个年度的营业收入、归母净利润、"
+            "经营活动现金流净额，合并报表口径，数据截至 2025-04-30")
+    ROWS = [
+        {"year": 2023, "report_type": "年报", "revenue": 331.26, "net_profit": 100.16,
+         "operating_cashflow": 61.3, "gross_margin": 75.25, "disclosure_date": "2024-04-27"},
+        {"year": 2024, "report_type": "年报", "revenue": 288.76, "net_profit": 66.73,
+         "operating_cashflow": 46.29, "gross_margin": 73.16, "disclosure_date": "2025-04-29"},
+    ]
+
+    @staticmethod
+    def _excerpt() -> dict:
+        p = (Path(__file__).resolve().parent / "evals" / "real"
+             / "yanghe_ar2024_mdna_excerpt.json")
+        return json.loads(p.read_text(encoding="utf-8"))
+
+    def test_frozen_mdna_excerpt_is_auditable(self):
+        d = self._excerpt()
+        import hashlib
+        self.assertEqual(hashlib.sha256(d["body"].encode("utf-8")).hexdigest(),
+                         d["body_sha256"], "摘录被改动过（hash 不符）")
+        self.assertTrue(d["art_code"].startswith("AN"), d["art_code"])
+        self.assertTrue(d["published_at"], d)
+        self.assertTrue(d["sections"], d)
+        for s in d["sections"]:
+            self.assertIsInstance(s.get("page"), int)
+
+    def test_real_management_explanation_enters_the_brief(self):
+        import facts as F
+        import task_state
+        import working_paper_export as WPX
+        import report_brief
+        fx = self._excerpt()
+        tmp = Path(tempfile.mkdtemp(prefix="wm_mdna_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        old_db = task_state.DB_PATH
+        ws_mod.configure_workspace_root(str(tmp))
+        task_state.DB_PATH = str(tmp / "b.db")
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", old_root)
+        self.addCleanup(setattr, task_state, "DB_PATH", old_db)
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        tid = "real-mdna-01"
+        req = F.parse_research_request(
+            self.GOAL, company="洋河股份", company_id="002304.SZ", market="cn",
+            periods=[2023, 2024], caliber="合并", as_of="2025-04-30",
+            perspective="equity", identity_source="form")
+        task_state.mark_queued(tid, goal=self.GOAL, research_request=req.to_payload(),
+                               db_path=task_state.DB_PATH)
+        proj = ws_mod.task_project_dir(tid, "default")
+        proj.mkdir(parents=True, exist_ok=True)
+        (proj / "financials.json").write_text(json.dumps({
+            "financials": self.ROWS,
+            "metadata": {"source": "eastmoney_ashare", "company": "洋河股份",
+                         "stock_code": "002304.SZ", "currency": "CNY", "unit": "亿元",
+                         "caliber": "合并", "caliber_evidence": "含 PARENTNETPROFIT"},
+            "raw": {"url": "https://datacenter-web.eastmoney.com/api/x", "text": "{}"},
+        }, ensure_ascii=False), encoding="utf-8")
+        (proj / "fetch_snapshot.json").write_text(json.dumps([
+            # 标题用公告接口的原文（"洋河股份:2024年年度报告"）——主体匹配按它判；
+            # 手写全称"江苏洋河酒厂股份有限公司…"会因不含"洋河股份"被判主体不符
+            {"title": fx["title"],
+             "url": f"https://{fx['source_host']}/api/content/ann?art_code={fx['art_code']}",
+             "published_at": fx["published_at"],
+             "text": fx["body"]},
+        ], ensure_ascii=False), encoding="utf-8")
+        WPX.write_working_paper(tid, self.GOAL, project="default")
+        st = report_brief.build_structure(tid, self.GOAL, "")
+        ch = st["change_explanation"]
+        mgmt = ch.get("management") or []
+        self.assertTrue(mgmt, f"真实经营讨论没有进入管理层解释：{ch}")
+        self.assertTrue(any("承压" in str(m.get("text") or "") for m in mgmt),
+                        "管理层解释里没有那段真实披露原文")
+        self.assertTrue(all(m.get("issuer") for m in mgmt), mgmt)
+        unproven = {u.get("label"): u for u in (ch.get("unproven") or [])}
+        self.assertTrue(unproven, ch)
+        # 真实披露解释的是**收入**：收入有解释（带定位），利润与现金流仍是缺口
+        self.assertTrue(unproven["营业收入"].get("has_explanation"),
+                        unproven["营业收入"])
+        self.assertTrue((unproven["营业收入"].get("matched") or {}).get("locator"),
+                        "解释必须带可复核的定位")
+        for label in ("归母净利润", "经营活动现金流净额"):
+            self.assertFalse(unproven[label].get("has_explanation"),
+                             f"{label} 不得因收入解释而标'解释已取得'")
+        texts = [r["text"] for r in st["risks"] if r["kind"] == "unproven_change"]
+        self.assertTrue(any(t.startswith("营业收入") and "解释已取得" in t for t in texts),
+                        texts)
+        self.assertTrue(any(t.startswith("归母净利润") and "尚不能证明" in t for t in texts),
+                        texts)
+        # 该来源被准入为发行人披露（真实年报原文）
+        self.assertTrue(any(c.get("type") == "issuer_annual_report"
+                            for c in st["citations"]), st["citations"])
+
+
+class TestResearchQuestions(unittest.TestCase):
+    """D3：主文最多三个重点，每项含观察/支持证据/推断边界/可执行核查动作。
+
+    两条护栏必须在正文里出现（实机复核点名过）：
+    ① 覆盖率上升同时现金流下降 → 不得写成回款改善；② 总负债下降 ≠ 短期偿债安全。
+    """
+
+    GOAL = ("研究洋河股份 2023 与 2024 两个年度的营业收入、归母净利润、"
+            "经营活动现金流净额，合并报表口径，数据截至 2025-04-30")
+    ROWS = [
+        {"year": 2023, "report_type": "年报", "revenue": 331.26, "net_profit": 100.16,
+         "operating_cashflow": 61.3, "total_liabilities": 177.42,
+         "total_assets": 697.92, "disclosure_date": "2024-04-27"},
+        {"year": 2024, "report_type": "年报", "revenue": 288.76, "net_profit": 66.73,
+         "operating_cashflow": 46.29, "total_liabilities": 156.52,
+         "total_assets": 673.45, "disclosure_date": "2025-04-29"},
+    ]
+
+    def _env(self, *, perspective: str = "equity", with_mdna: bool = False,
+             tid: str = "rq-01"):
+        import facts as F
+        import task_state
+        import working_paper_export as WPX
+        tmp = Path(tempfile.mkdtemp(prefix="wm_rq_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        old_db = task_state.DB_PATH
+        ws_mod.configure_workspace_root(str(tmp))
+        task_state.DB_PATH = str(tmp / "b.db")
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", old_root)
+        self.addCleanup(setattr, task_state, "DB_PATH", old_db)
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        req = F.parse_research_request(
+            self.GOAL, company="洋河股份", company_id="002304.SZ", market="cn",
+            periods=[2023, 2024], caliber="合并", as_of="2025-04-30",
+            perspective=perspective, identity_source="form")
+        task_state.mark_queued(tid, goal=self.GOAL, research_request=req.to_payload(),
+                               db_path=task_state.DB_PATH)
+        proj = ws_mod.task_project_dir(tid, "default")
+        proj.mkdir(parents=True, exist_ok=True)
+        (proj / "financials.json").write_text(json.dumps({
+            "financials": self.ROWS,
+            "metadata": {"source": "eastmoney_ashare", "company": "洋河股份",
+                         "stock_code": "002304.SZ", "currency": "CNY", "unit": "亿元",
+                         "caliber": "合并", "caliber_evidence": "含 PARENTNETPROFIT"},
+            "raw": {"url": "https://datacenter-web.eastmoney.com/api/x", "text": "{}"},
+        }, ensure_ascii=False), encoding="utf-8")
+        if with_mdna:
+            fx = json.loads((Path(__file__).resolve().parent / "evals" / "real"
+                             / "yanghe_ar2024_mdna_excerpt.json").read_text(encoding="utf-8"))
+            (proj / "fetch_snapshot.json").write_text(json.dumps([
+                {"title": fx["title"],
+                 "url": f"https://{fx['source_host']}/api/content/ann?art_code={fx['art_code']}",
+                 "published_at": fx["published_at"], "text": fx["body"]}],
+                ensure_ascii=False), encoding="utf-8")
+        WPX.write_working_paper(tid, self.GOAL, project="default")
+        return tid
+
+    def test_three_questions_each_carry_four_fields(self):
+        import report_brief
+        tid = self._env()
+        st = report_brief.build_structure(tid, self.GOAL, "")
+        qs = st.get("research_questions") or []
+        self.assertEqual(len(qs), 3, [q.get("question") for q in qs])
+        for q in qs:
+            for field in ("question", "observation", "support", "boundary", "next_action"):
+                self.assertTrue(q.get(field), f"{q.get('question')} 缺 {field}")
+            self.assertIn("同比", str(q.get("observation")))
+            self.assertTrue(q["next_action"], q)
+
+    def test_cashflow_guard_is_in_the_boundary_and_render(self):
+        import report_brief
+        tid = self._env(tid="rq-02")
+        st = report_brief.build_structure(tid, self.GOAL, "")
+        cash = [q for q in st["research_questions"]
+                if q.get("metric") == "operating_cashflow"][0]
+        self.assertIn("覆盖", cash["observation"], "覆盖率必须与现金流方向一起呈现")
+        self.assertIn("不表示回款改善", cash["boundary"])
+        md = report_brief.render_brief_markdown(st, "")
+        self.assertIn("## 研究问题与下一步", md)
+        self.assertIn("不表示回款改善", md)
+
+    def test_bank_perspective_adds_known_unknown_and_checklist(self):
+        import report_brief
+        tid = self._env(perspective="bank_corporate", tid="rq-03")
+        st = report_brief.build_structure(tid, self.GOAL, "")
+        bank = [q for q in st["research_questions"] if q.get("metric") == "bank_materials"]
+        self.assertTrue(bank, [q.get("metric") for q in st["research_questions"]])
+        b = bank[0]
+        self.assertIn("总负债", b["observation"])
+        self.assertIn("不等于", b["boundary"])
+        self.assertIn("短期偿债安全", b["boundary"])
+        self.assertIn("债务到期结构与利率", b["next_action"])
+        self.assertIn("受限资金与对外担保", b["next_action"])
+        md = report_brief.render_brief_markdown(st, "")
+        self.assertIn("银行对公视角", md)
+        self.assertIn("不输出授信结论", md)
+
+    def test_real_disclosure_support_lands_on_the_revenue_question(self):
+        """真实年报解释只支持**收入**那一问；利润与现金流仍是"原因待证"。"""
+        import report_brief
+        tid = self._env(with_mdna=True, tid="rq-04")
+        st = report_brief.build_structure(tid, self.GOAL, "")
+        qs = {q.get("metric"): q for q in st["research_questions"]}
+        rev = qs["revenue"]["support"]
+        self.assertTrue(rev.get("has_evidence"), qs["revenue"])
+        self.assertTrue(rev.get("locator"), rev)
+        self.assertIn("承压", rev.get("text") or "")
+        for metric in ("net_profit", "operating_cashflow"):
+            self.assertFalse(qs[metric]["support"].get("has_evidence"),
+                             f"{metric} 不得因收入解释而变成'已支持'：{qs[metric]}")
+            self.assertIn("原因待证", report_brief.render_brief_markdown(st, ""))
+
+
 class TestChangeExplanationGuards(unittest.TestCase):
     """C2-3：文档可准入 ≠ 每句话可证明。
 

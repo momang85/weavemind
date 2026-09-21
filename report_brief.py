@@ -83,6 +83,20 @@ _INFERENCE_BOUNDARY = (
     "未取得同业、行情与关键假设资料，本简报不给出估值或目标价。",
 )
 
+# D3：三个优先研究问题（个体版主文最多三个重点；银行对公版共用同一核心）
+# 每问的边界文案是**护栏**，不是套话：覆盖率的上升常是分母收缩造成的被动结果，
+# 负债下降不等于偿债安全——这两条在实机复核里都点过名。
+_RESEARCH_QUESTIONS: tuple[tuple[str, str, str], ...] = (
+    ("revenue", "收入变化的量价与结构依据",
+     "两期读数只能说明这两期的变化；未取得量价拆分与分部数据前，不判断收入变动的驱动结构"),
+    ("net_profit", "利润降幅与收入差异的分解",
+     "降幅大于收入降幅只能说明毛利线以下存在额外拖累；具体科目（费用/减值/非经常性损益）"
+     "未核实前不归因"),
+    ("operating_cashflow", "现金变化与利润覆盖的关系",
+     "覆盖率上升系利润降幅更大造成的被动结果，**不表示回款改善**；现金绝对规模同期仍在收缩，"
+     "来源结构未核实前不判断现金流质量"),
+)
+
 # 阅读视角 → 需要补充的材料（F2）：两种视角复用同一底稿，但要查的东西不同。
 # 视角由用户声明（契约字段），**不按公司名或机构名推断**。
 PERSPECTIVE_MATERIALS = {
@@ -160,6 +174,8 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
     # 不满足时进风险清单，不靠加长正文掩盖
     quality = analysis_coverage(analysis_text)
     perspective = str(req.get("perspective") or "equity")
+    questions = _research_questions(rows, derived, periods, evidence, citations,
+                                    changes, perspective=perspective)
     risks = _risks(task_id, goal, body, project=project, evidence=evidence,
                    citations=citations, changes=changes, perspective=perspective,
                    citation_gaps=unmapped, unsupported=unsupported,
@@ -188,6 +204,7 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
         "change_explanation": changes,
         "analysis": analysis_text,
         "analysis_quality": quality,
+        "research_questions": questions,
         "citation_gaps": list(unmapped),
         "claims": claims,
         "unsupported_claims": unsupported,
@@ -323,6 +340,72 @@ def _change_explanation(rows, derived, periods, findings, evidence, citations) -
     return {"changes": changes[:3], "management": management,
             "third_party_views": third_party,
             "inference": list(_INFERENCE_BOUNDARY), "unproven": unproven}
+
+
+def _research_questions(rows, derived, periods, evidence, citations, changes, *,
+                        perspective: str = "") -> list[dict]:
+    """D3：研究问题 → 观察 / 支持证据 / 推断边界 / 下一步核查动作（主文最多三问）。
+
+    每问只写四件事：由底稿可复算的**观察**、已取得的**证据定位**（没有就写"未取得、
+    原因待证"）、这条观察**不能说明什么**（边界，含两条实机点名过的护栏）、以及要回答
+    它**还需要什么材料**（可执行动作）。银行对公视角在同一核心上补"已知/未知 + 询问清单"。
+    """
+    by: dict[str, dict] = {}
+    for r in rows:
+        by.setdefault(str(r.get("metric") or ""), {})[int(r.get("year") or 0)] = r
+    d_all = {str(d.get("metric") or ""): d for d in derived}
+    last = periods[-1] if periods else None
+    mgmt_pool = (list(changes.get("management") or [])
+                 + list(changes.get("third_party_views") or []))
+    labels = {"revenue": "营业收入", "net_profit": "归母净利润",
+              "operating_cashflow": "经营活动现金流净额"}
+    out: list[dict] = []
+    for metric, question, boundary in _RESEARCH_QUESTIONS:
+        d = d_all.get(f"{metric}{_YOY_SUFFIX}")
+        v = d.get("value") if d else None
+        if not isinstance(v, (int, float)):
+            continue
+        label = labels.get(metric, metric)
+        cur = (by.get(metric) or {}).get(last) if last else None
+        obs = f"{label}同比{'增长' if v > 0 else '下降' if v < 0 else '持平'} {abs(v):g}%"
+        if cur is not None:
+            obs += f"（{last} 年 {cur.get('value')}{cur.get('unit') or ''}）"
+        if metric == "operating_cashflow":
+            # 覆盖率必须与现金流方向一起看：上升常是分母收缩造成的被动结果
+            cov = d_all.get("cashflow_coverage") or {}
+            cv = cov.get("value")
+            if isinstance(cv, (int, float)):
+                obs += f"；经营现金流对归母净利润的覆盖 {abs(cv):g}%"
+        matched = _match_management_for_metric(mgmt_pool, metric, last)
+        support = {"has_evidence": bool(matched), "locator": "", "source_n": "",
+                   "text": "", "issuer": False}
+        if matched:
+            support.update({"locator": str(matched.get("locator") or ""),
+                            "source_n": str(matched.get("source_n") or ""),
+                            "text": str(matched.get("text") or "")[:120],
+                            "issuer": bool(matched.get("issuer"))})
+        out.append({"metric": metric, "question": question, "observation": obs,
+                    "support": support, "boundary": boundary,
+                    "next_action": list(MATERIALS_BY_METRIC.get(metric, ()))})
+    if str(perspective or "") == "bank_corporate":
+        liab = (by.get("total_liabilities") or {}).get(last) if last else None
+        known: list[str] = []
+        if liab is not None:
+            known.append(f"总负债 {liab.get('value')}{liab.get('unit') or ''}"
+                         f"（{last} 年，期末）")
+        dr = (d_all.get("debt_ratio") or {}).get("value")
+        if isinstance(dr, (int, float)):
+            known.append(f"资产负债率 {abs(dr):g}%")
+        out.append({
+            "metric": "bank_materials",
+            "question": "银行对公视角：债务与回款条件的已知/未知",
+            "observation": "；".join(known) or "未取得负债读数",
+            "support": {"has_evidence": False, "locator": "", "source_n": "",
+                        "text": "", "issuer": False},
+            "boundary": ("总负债下降**不等于**短期偿债安全：需债务到期结构、受限资金与担保"
+                         "材料才能评估；本报告不输出授信结论"),
+            "next_action": list(PERSPECTIVE_MATERIALS.get("bank_corporate", ()))})
+    return out[:4]
 
 
 # 解释与指标的匹配词：一条解释只覆盖它真正谈到的指标（"收入"不得替利润/现金流背书）
@@ -1623,6 +1706,23 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
     else:
         lines.append("- 本次未取得可复算的财务事实（见文末资料缺口）。")
     lines.append("")
+    # D3：研究问题与下一步——主文最多三个重点，每项含观察/支持证据/推断边界/核查动作
+    questions = structure.get("research_questions") or []
+    if questions:
+        lines.append("## 研究问题与下一步")
+        for q in questions:
+            sup = q.get("support") or {}
+            if sup.get("has_evidence"):
+                support = f"支持：{sup.get('locator') or ''}"
+                if sup.get("source_n"):
+                    support += f"（来源 [{sup.get('source_n')}]"
+                    support += "，管理层/发行人披露）" if sup.get("issuer") else "，第三方材料）"
+            else:
+                support = "支持：未取得对应披露，**观察成立、原因待证**"
+            lines.append(f"- **{q.get('question')}**：{q.get('observation')}")
+            lines.append(f"  - {support}；边界：{q.get('boundary')}；"
+                         f"下一步：{'、'.join(q.get('next_action') or []) or '补齐底稿事实'}")
+        lines.append("")
     # 业务背景：公司怎么赚钱（只取与本期变化有关的年报段落，带 [n] 与小节定位）
     lines.append("## 业务背景")
     background = structure.get("background") or []

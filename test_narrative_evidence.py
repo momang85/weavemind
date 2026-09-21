@@ -139,6 +139,44 @@ class TestChangeDemotionTarget(unittest.TestCase):
                                      source="third_party"), ne.KIND_BACKGROUND)
 
 
+class TestRealMdnaCausality(unittest.TestCase):
+    """D3：真实年报的"环境 + 应对"式解释必须被判为因果（否则真实经营讨论进不了解释）。
+
+    实机材料（`evals/real/yanghe_ar2024_mdna_excerpt.json`，有界抓取冻结）：
+    "白酒行业进入存量竞争阶段，市场竞争更加白热化……价位段承压较大……积极调整经营策略，
+    应对外部环境的变化和发展中存在的问题，2024 年实现营业收入 288.76 亿元，同比下降 12.83%"。
+    这句一个旧标记都不命中 → 被降级成"财务附注"，正向分支无真实材料可证。
+    """
+
+    REAL = ("报告期内，白酒行业进入存量竞争阶段，市场竞争更加白热化，公司主力产品集中的"
+            "中端和次高端价位段承压较大，本着科学发展和可持续发展的原则，公司积极调整"
+            "经营策略，应对外部环境的变化和发展中存在的问题，2024 年实现营业收入"
+            " 288.76 亿元，同比下降 12.83%")
+
+    def test_real_mdna_sentence_is_causal_and_classified_as_change(self):
+        self.assertTrue(ne.is_causal(self.REAL), "真实经营讨论被判成非因果")
+        self.assertFalse(ne.is_policy_text(self.REAL))
+        self.assertEqual(
+            ne.classify("经营情况讨论与分析", self.REAL, source="issuer_annual_report"),
+            ne.KIND_CHANGE, "真实 MD&A 段落应归为经营变化解释")
+
+    def test_policy_and_number_only_texts_stay_non_causal(self):
+        policy = ("本公司自 2024 年 1 月 1 日起执行财政部修订后的《企业会计准则第 14 号》，"
+                  "会计政策变更采用追溯调整法，比较期间数据已重述。")
+        self.assertFalse(ne.is_causal(policy), policy)
+        number_only = ("经营活动产生的现金流量净额本期为 46.29 亿元，上期为 61.30 亿元，"
+                       "变动幅度为 -24.49%。")
+        self.assertFalse(ne.is_causal(number_only), number_only)
+
+    def test_real_excerpt_fixture_matches_the_rule(self):
+        """冻结片段必须与生产判据一致（否则夹具会漂移成"合成正例"）。"""
+        p = Path(__file__).resolve().parent / "evals" / "real" / "yanghe_ar2024_mdna_excerpt.json"
+        fx = json.loads(p.read_text(encoding="utf-8"))
+        self.assertTrue(fx["sections"], fx)
+        for s in fx["sections"]:
+            self.assertTrue(ne.is_causal(s["text"]), s["text"][:60])
+
+
 class TestContractApplicability(unittest.TestCase):
     """F2′-1：有字符位置只证明"在某段文本里找到"，不证明主体/期间/资料截止成立。"""
 

@@ -157,6 +157,43 @@ class TestFactRecord(unittest.TestCase):
                          "同值不同主体必须是两条事实（否则底稿会把两家混成一家）")
 
 
+class TestPercentMetricUnits(unittest.TestCase):
+    """比率指标的单位由**指标语义**决定，不继承载荷的金额单位。
+
+    实机缺陷：东财载荷把 `gross_margin`（XSMLL，百分比）与金额字段放在同一个 payload，
+    metadata.unit=亿元 → 底稿写出"毛利率 73.16 亿元"，报告表格与主张绑定都受影响。
+    """
+
+    PAYLOAD = {
+        "financials": [
+            {"year": 2024, "report_type": "年报", "revenue": 288.76, "net_profit": 66.73,
+             "gross_margin": 73.16, "operating_cashflow": 46.29,
+             "disclosure_date": "2025-04-29"},
+        ],
+        "metadata": {"source": "eastmoney_ashare", "company": "洋河股份",
+                     "stock_code": "002304.SZ", "currency": "CNY", "unit": "亿元",
+                     "caliber": "合并"},
+        "raw": {"url": "https://datacenter-web.eastmoney.com/api/x", "text": "{}"},
+    }
+
+    def test_percent_metric_does_not_inherit_amount_unit(self):
+        fs = F.facts_from_financials(self.PAYLOAD)
+        gm = [f for f in fs if f.metric == "gross_margin"]
+        self.assertEqual(len(gm), 1, [f.metric for f in fs])
+        self.assertEqual(gm[0].unit, "%", "毛利率必须是百分比单位")
+        self.assertEqual(gm[0].unit_source, "metric_semantics")
+        self.assertEqual(gm[0].value, 73.16)
+
+    def test_amount_metrics_keep_the_source_unit(self):
+        fs = F.facts_from_financials(self.PAYLOAD)
+        rev = [f for f in fs if f.metric == "revenue"][0]
+        self.assertEqual(rev.unit, "亿元")
+        self.assertEqual(rev.unit_source, "source")
+
+    def test_percent_metric_list_is_explicit(self):
+        self.assertIn("gross_margin", F.PERCENT_METRICS)
+
+
 class TestDerivedFact(unittest.TestCase):
     def test_derived_records_formula_and_inputs(self):
         facts = F.facts_from_financials(SEC_PAYLOAD)

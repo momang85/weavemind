@@ -126,6 +126,12 @@ RATIO_SUBJECT_TYPES: dict[str, tuple[str, ...]] = {
 }
 
 
+# 以**百分比**为单位的指标（不是金额）。来源载荷通常只声明一个整体单位（如"亿元"），
+# 若照抄给这些指标，底稿就会写出"毛利率 73.16 亿元"（实机缺陷：报告表格与主张绑定
+# 都受影响）。单位是**指标的语义**，不继承载荷的金额单位。
+PERCENT_METRICS: tuple[str, ...] = ("gross_margin",)
+
+
 def ratio_applies(metric: str, subject_type: str) -> bool:
     """派生指标是否适用于该研究对象类型；未登记的指标默认两类都适用。
 
@@ -621,6 +627,12 @@ def facts_from_financials(payload: dict, *, source_kind: str = "",
                 # 只有行级能如实表达；缺失仍记 unknown。
                 row_currency = str(row.get("currency") or currency or UNKNOWN)
                 row_unit = str(row.get("unit") or unit or UNKNOWN)
+                unit_source = ("row" if str(row.get("unit") or "")
+                               else ("source" if str(md.get("unit") or "") else UNKNOWN))
+                if key in PERCENT_METRICS:
+                    # 比率指标的单位由**指标语义**决定：载荷只声明金额单位（亿元），
+                    # 照抄会把"毛利率 73.16"写成 73.16 亿元（实机缺陷）
+                    row_unit, unit_source = "%", "metric_semantics"
                 # 披露日期（有就记）：报告期末 ≠ 抓取时间 ≠ 披露时间，三者分开
                 row_disclosed = str(row.get("disclosure_date")
                                     or row.get("disclosed_at")
@@ -632,8 +644,7 @@ def facts_from_financials(payload: dict, *, source_kind: str = "",
                     period=period, period_start=p_start, period_end=p_end,
                     period_type=p_type,
                     currency=row_currency, unit=row_unit,
-                    unit_source=("row" if str(row.get("unit") or "")
-                                 else ("source" if str(md.get("unit") or "") else UNKNOWN)),
+                    unit_source=unit_source,
                     value=row.get(key), raw_value=row.get(key),
                     caliber=caliber,
                     caliber_source=cal_source,
