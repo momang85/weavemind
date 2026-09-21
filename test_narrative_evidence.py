@@ -102,6 +102,43 @@ class TestSectionExtraction(unittest.TestCase):
         self.assertEqual(ne.extract_sections({"url": ISSUER_URL}), [])
 
 
+class TestChangeDemotionTarget(unittest.TestCase):
+    """C2-3 的降级目标按来源分（实机反例：21 财经业绩说明会报道被标"财务附注"）。
+
+    "命中变化关键词但无因果语言"的段落不得当变化原因；降级到哪一类要看文档来源：
+    发行人文件 → 财务附注（数字出处）；第三方新闻/解读 → 业务背景。一律叫"财务附注"
+    会让读者把新闻报道当成报表附注。
+    """
+
+    NEWS_TEXT = ("两大苏酒同日举行业绩说明会：洋河、今世缘如何错位竞争？ 5月13日，"
+                 "今世缘、洋河股份分别召开了2023年度业绩说明会。2023年，洋河股份营收"
+                 "超过331亿元，归母净利润首次突破100亿元。")
+
+    def test_third_party_news_passage_becomes_background(self):
+        recs = ne._paragraph_records(
+            {"title": "两大苏酒同日举行业绩说明会", "url": NEWS_URL, "text": self.NEWS_TEXT},
+            periods=[2023, 2024], company="洋河股份", company_id="002304.SZ",
+            as_of="2025-04-30")
+        kinds = [r["kind"] for r in recs]
+        self.assertIn(ne.KIND_BACKGROUND, kinds)
+        self.assertNotIn(ne.KIND_NOTES, kinds, "新闻稿不得标成财务附注")
+
+    def test_issuer_passage_still_demotes_to_footnote(self):
+        recs = ne._paragraph_records(
+            {"title": "洋河股份2024年年度报告", "url": ISSUER_URL,
+             "text": "报告期内，公司营业收入同比增长 12%，归属于上市公司股东的净利润"
+                     "同比增长 8%。具体口径见财务报表附注。"},
+            periods=[2024], company="洋河股份", company_id="002304.SZ", as_of="2025-04-30")
+        self.assertEqual([r["kind"] for r in recs], [ne.KIND_NOTES])
+
+    def test_unknown_source_keeps_legacy_demotion(self):
+        """不传 source（旧调用形态）沿用旧口径（附注）——改动不改变既有语义。"""
+        text = "公司营业收入同比增长，详见附注。"
+        self.assertEqual(ne.classify("经营情况讨论与分析", text), ne.KIND_NOTES)
+        self.assertEqual(ne.classify("经营情况讨论与分析", text,
+                                     source="third_party"), ne.KIND_BACKGROUND)
+
+
 class TestContractApplicability(unittest.TestCase):
     """F2′-1：有字符位置只证明"在某段文本里找到"，不证明主体/期间/资料截止成立。"""
 

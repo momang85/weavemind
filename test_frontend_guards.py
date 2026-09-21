@@ -506,6 +506,25 @@ class TestExportVersionNamespaces(unittest.TestCase):
         self.assertIn("exportState.package_stale", text)
         self.assertIn("重装配未重建包", text)
 
+    def test_panel_distinguishes_binding_provenance(self):
+        """绑定版本提示必须区分"装配候选留档"与"更早版本需重装配"（实机误报教训）。"""
+        text = (SRC / "components" / "ResearchBriefPanel.tsx").read_text(encoding="utf-8")
+        self.assertIn("structure_version_exists", text)
+        self.assertIn("代码装配候选", text)
+        self.assertIn("勿直接当作交付正文的结论", text)
+
+    def test_panel_shows_plan_review_row(self):
+        """计划评审（Critic）状态必须有页面一行：降级原因 + 结论属于哪一版。"""
+        text = (SRC / "components" / "ResearchBriefPanel.tsx").read_text(encoding="utf-8")
+        self.assertIn("plan_review", text)
+        self.assertIn("计划评审（Critic）", text)
+        self.assertIn("当前版本无评审结论", text)
+        backend = (ROOT / "web_ui.py").read_text(encoding="utf-8")
+        self.assertIn('out["plan_review"]', backend)
+        types = (SRC / "stores" / "types.ts").read_text(encoding="utf-8")
+        self.assertIn("plan_review?:", types)
+        self.assertIn("structure_version_exists?: boolean", types)
+
 
 class TestFilesUrlSegmentEncoding(unittest.TestCase):
     """/files/<tid>/<rel> 的 rel 必须**逐段**编码（浏览器实测教训）。

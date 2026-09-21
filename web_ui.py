@@ -4583,6 +4583,20 @@ def _research_payload(tid: str, ws) -> dict | None:
                     and out.get("structure_version") == machine["version_id"])
         except Exception:
             pass
+        # 结构对象绑定的那一版**在版本库里是否存在、因何被登记**：修订路径按设计交付
+        # "用户编辑版"、代码装配候选留档不交付——这时"结构绑定的是装配候选"不是
+        # "旧版本需要重新装配"，页面文案必须分开（否则会误报成陈旧）。
+        _sv = str(out.get("structure_version") or "")
+        if _sv:
+            _hit = None
+            try:
+                _raw = _json.loads((ws / "report_versions.json").read_text(encoding="utf-8")) or {}
+                _hit = next((v for v in (_raw.get("versions") or {}).values()
+                             if str(v.get("version_id") or "") == _sv), None)
+            except Exception:
+                _hit = None
+            out["structure_version_exists"] = _hit is not None
+            out["structure_version_adopt_reason"] = str((_hit or {}).get("adopt_reason") or "")
         human = {"status": "pending", "approver": "", "at": "", "version_id": ""}
         hp = ws / "human_review.json"
         if hp.exists():
@@ -4596,6 +4610,34 @@ def _research_payload(tid: str, ws) -> dict | None:
             except Exception:
                 pass
         out["review"] = {"machine": machine, "human": human}
+        # 计划评审（Critic）：模板/路由计划不经 Critic → DEGRADED（个人模式放行并如实
+        # 标注、银行模式拒绝继续，见 `_require_review_or_refuse`）。此前该结论只写在
+        # 交付正文抬头的引用块里，页面没有这一行；且"该结论属于哪一版"必须显式——
+        # 修订后新版本不继承旧评审，旧结论不得当成当前版本的评审。
+        plan_review = {"verdict": "NONE", "label": "", "degraded_reason": "",
+                       "required": False, "report_version_id": "", "bound": False}
+        rp = ws / "review_state.json"
+        if rp.exists():
+            try:
+                r = _json.loads(rp.read_text(encoding="utf-8")) or {}
+                plan_review = {"verdict": str(r.get("verdict") or "NONE"),
+                               "label": str(r.get("label") or ""),
+                               "degraded_reason": str(r.get("degraded_reason") or ""),
+                               "required": bool(r.get("required")),
+                               "report_version_id": str(r.get("report_version_id") or ""),
+                               "bound": False}
+            except Exception:
+                pass
+        if plan_review.get("report_version_id") and machine.get("version_id"):
+            try:
+                from report_version import VersionStore as _VS2
+                _cur2 = _VS2(ws, tid).adopted()
+                if _cur2 is not None:
+                    plan_review["bound"] = bool(
+                        str(plan_review["report_version_id"]) == _cur2.identity_id())
+            except Exception:
+                plan_review["bound"] = False
+        out["plan_review"] = plan_review
         if not out:
             return None
         return out

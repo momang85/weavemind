@@ -6130,6 +6130,83 @@ class TestReviewHonestyProjection(unittest.TestCase):
         self.assertEqual((p.get("unsupported_claims") or [])[0]["reason"], "晚于资料截止日")
 
 
+class TestStructureBindingProvenance(unittest.TestCase):
+    """面板绑定版本要能分辨"装配候选（留档不交付）"与"更早版本（需重新装配）"。
+
+    实机反例：修订路径按设计交付"用户编辑版"（fde2f2e9），代码装配候选（8b23aad3）留档；
+    页面却按同一句"修订后需重新装配"提示——而重装配**已经发生过**。区分靠"绑定版本在
+    版本库里是否存在、因何登记"，不是靠猜。
+    """
+
+    def _ws(self, files: dict) -> Path:
+        tmp = Path(tempfile.mkdtemp(prefix="wm_struct_bind_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        for name, payload in files.items():
+            (tmp / name).write_text(json.dumps(payload, ensure_ascii=False),
+                                    encoding="utf-8")
+        return tmp
+
+    def test_assembly_candidate_binding_is_flagged(self):
+        import web_ui
+        ws = self._ws({
+            "report_structure.json": {"version_id": "v-cand", "findings": []},
+            "report_versions.json": {"versions": {"k1": {
+                "version_id": "v-cand", "body": "候选稿",
+                "adopt_reason": "研究简报（代码装配）"}}},
+        })
+        p = web_ui._research_payload("ui-x", ws) or {}
+        self.assertEqual(p.get("structure_version"), "v-cand")
+        self.assertIs(p.get("structure_version_exists"), True)
+        self.assertIn("代码装配", str(p.get("structure_version_adopt_reason") or ""))
+        self.assertIs(p.get("structure_current"), False)
+
+    def test_unknown_structure_version_reports_missing(self):
+        import web_ui
+        ws = self._ws({"report_structure.json": {"version_id": "v-old", "findings": []},
+                       "report_versions.json": {"versions": {}}})
+        p = web_ui._research_payload("ui-x", ws) or {}
+        self.assertIs(p.get("structure_version_exists"), False)
+        self.assertEqual(p.get("structure_version_adopt_reason"), "")
+
+
+class TestPlanReviewProjection(unittest.TestCase):
+    """计划评审（Critic）状态进页面：降级要能看到原因与"属于哪一版"。
+
+    实机：模板/路由计划不经 Critic → review_state.json 记 DEGRADED（个人模式放行并
+    如实标注；银行模式拒绝继续）。此前该结论只写在交付正文抬头，页面没有任何一行；
+    修订后新版本不继承旧评审，旧结论不得显示成当前版本的评审。
+    """
+
+    def _ws(self, review: dict | None) -> Path:
+        tmp = Path(tempfile.mkdtemp(prefix="wm_plan_review_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (tmp / "report_structure.json").write_text(
+            json.dumps({"findings": []}, ensure_ascii=False), encoding="utf-8")
+        if review is not None:
+            (tmp / "review_state.json").write_text(
+                json.dumps(review, ensure_ascii=False), encoding="utf-8")
+        return tmp
+
+    def test_degraded_plan_review_is_projected(self):
+        import web_ui
+        ws = self._ws({"verdict": "DEGRADED", "label": "",
+                       "degraded_reason": "路由模板计划未经过 Critic 评审",
+                       "required": False, "report_version_id": "ident-old"})
+        pr = (web_ui._research_payload("ui-x", ws) or {}).get("plan_review") or {}
+        self.assertEqual(pr.get("verdict"), "DEGRADED")
+        self.assertIn("未经过 Critic", pr.get("degraded_reason") or "")
+        self.assertEqual(pr.get("report_version_id"), "ident-old")
+        # 工作区里没有版本记录 → 不能声称该评审属于当前版本（fail closed）
+        self.assertIs(pr.get("bound"), False)
+
+    def test_no_review_state_reports_none(self):
+        import web_ui
+        ws = self._ws(None)
+        pr = (web_ui._research_payload("ui-x", ws) or {}).get("plan_review") or {}
+        self.assertEqual(pr.get("verdict"), "NONE")
+        self.assertEqual(pr.get("report_version_id"), "")
+
+
 class TestExportVersionNamespaces(unittest.TestCase):
     """导出块同时给两个版本命名空间，且正文版号与复核栏同口径。
 

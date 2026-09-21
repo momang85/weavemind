@@ -200,9 +200,18 @@ export default function ResearchBriefPanel({ taskId, research, exportState, onRe
           )}
           {research.structure_current === false && (
             <div className="text-xs text-amber-400">
-              · 面板（发现/缺口/证据）绑定版本 {String(research.structure_version || '未知').slice(0, 12)}
-              ，与当前版本 {String(rv.machine?.version_id || '未知').slice(0, 12)} 不一致——
-              修订后需重新装配，勿把旧发现当新版
+              {research.structure_version_exists
+                ? <>· 面板（发现/缺口/证据）绑定的是
+                    {String(research.structure_version_adopt_reason || '').includes('代码装配')
+                      ? '代码装配候选' : '另一个版本'}
+                    （{String(research.structure_version || '未知').slice(0, 12)}），
+                    当前交付版本 {String(rv.machine?.version_id || '未知').slice(0, 12)}——
+                    两者不同版：面板结论按该候选稿生成，勿直接当作交付正文的结论
+                  </>
+                : <>· 面板（发现/缺口/证据）绑定版本 {String(research.structure_version || '未知').slice(0, 12)}
+                    ，与当前版本 {String(rv.machine?.version_id || '未知').slice(0, 12)} 不一致——
+                    修订后需重新装配，勿把旧发现当新版
+                  </>}
             </div>
           )}
           {/* 机器通过与人工复核**分开**说：自动重验通过不等于研究员已复核 */}
@@ -210,6 +219,24 @@ export default function ResearchBriefPanel({ taskId, research, exportState, onRe
             <li>· 机器验收：{rv.machine?.overall || '未知'}
               {rv.machine?.version_id ? `（本版 ${String(rv.machine.version_id).slice(0, 12)}` : '（版本未知'}
               {rv.machine?.bound ? '，绑定本版正文）' : '，未绑定本版正文）'}</li>
+            {research.plan_review && (() => {
+              // 计划评审（Critic）：模板/路由计划不经 Critic → 降级；结论属于哪一版要显式
+              const pr = research.plan_review!
+              const label = pr.verdict === 'PASS' ? 'PASS'
+                : pr.verdict === 'DEGRADED' ? '未完成（降级）'
+                : pr.verdict && pr.verdict !== 'NONE' ? pr.verdict : '未执行'
+              const where = pr.report_version_id
+                ? (pr.bound ? '（绑定本版）'
+                            : `（属版本 ${String(pr.report_version_id).slice(0, 12)}，当前版本无评审结论）`)
+                : '（无评审记录）'
+              return (
+                <li className={pr.verdict === 'PASS' ? '' : 'text-amber-400'}>
+                  · 计划评审（Critic）：{label}
+                  {pr.verdict !== 'PASS' && pr.degraded_reason ? `——${pr.degraded_reason}` : ''}
+                  {where}
+                </li>
+              )
+            })()}
             {rv.human?.status === 'recorded'
               ? <li>· 人工复核：{rv.human.approver} 于 {rv.human.at || '时间未记录'} 批准
                   {rv.human.version_id ? `（版本 ${String(rv.human.version_id).slice(0, 12)}）` : ''}</li>

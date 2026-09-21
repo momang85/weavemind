@@ -137,6 +137,16 @@ export interface ResearchBrief {
   /** 面板（结构对象）绑定的版本；与当前选中版本不一致时页面必须提示 */
   structure_version?: string
   structure_current?: boolean
+  /** 绑定版本在版本库里是否存在、因何登记——区分"绑定代码装配候选（修订路径按设计
+   *  交付用户编辑版，候选留档）"与"绑定更早版本（需重新装配）" */
+  structure_version_exists?: boolean
+  structure_version_adopt_reason?: string
+  /** 计划评审（Critic）：模板/路由计划不经 Critic → DEGRADED；bound 表示该结论是否
+   *  属于当前交付版本（修订后新版本不继承旧评审）。 */
+  plan_review?: {
+    verdict?: string; label?: string; degraded_reason?: string
+    required?: boolean; report_version_id?: string; bound?: boolean
+  }
   /** 机器通过与人工复核**分开**：机器一栏是本版绑定的验收结论；人工一栏只有真实
    *  研究员复核后才会是 recorded，缺记录一律 pending（不允许自动填批准）。 */
   review?: {

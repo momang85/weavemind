@@ -357,11 +357,26 @@ def _page_of(char_start: int, page_offsets) -> int | None:
     return page
 
 
-def classify(title: str, body: str = "") -> str | None:
+def _demote_change_target(best_score: int, source: str = "") -> str | None:
+    """"命中变化关键词但无因果语言"的降级目标：发行人文件 → 附注（数字出处）；
+    第三方（新闻/解读）→ 业务背景。不能一律叫"财务附注"——实机里 21 财经的业绩
+    说明会报道被标成财务附注（读者会以为它是报表附注）；它实际是经营背景。
+    来源未知（空串）沿用旧口径（附注）：调用方应尽量把 `source_type` 传进来。
+    """
+    if best_score <= 0:
+        return None
+    if source and "issuer" not in str(source).lower():
+        return KIND_BACKGROUND
+    return KIND_NOTES
+
+
+def classify(title: str, body: str = "", *, source: str = "") -> str | None:
     """按关键词给小节归类；标题命中权重 3、正文（前 200 字）命中权重 1。
 
     C2-3：归为"变化解释"的小节必须有**因果语言**、且不是会计政策套话——标题写着
     "经营情况讨论与分析"、内容却是准则/政策声明的段落不能当变化原因。
+    `source`：文档来源类型（`source_type()` / `document_provenance()` 的值），
+    决定"无因果的变化提及"降级为附注还是业务背景（见 `_demote_change_target`）。
     """
     head = str(title or "")
     lead = str(body or "")[:200]
@@ -377,7 +392,7 @@ def classify(title: str, body: str = "") -> str | None:
         if score > best_score:
             best, best_score = kind, score
     if best == KIND_CHANGE and (is_policy_text(body) or not is_causal(body)):
-        return KIND_NOTES if best_score > 0 else None
+        return _demote_change_target(best_score, source)
     return best
 
 
@@ -435,11 +450,12 @@ def is_policy_text(text: str) -> bool:
     return hits >= 2 or (hits >= 1 and "会计" in body)
 
 
-def _prose_classify(body: str) -> str | None:
+def _prose_classify(body: str, *, source: str = "") -> str | None:
     """段落模式归类：按**散文体关键词**打分（命中数最多者胜，平手按 KIND_ORDER）。
 
     C2-3：命中"变化"关键词不等于解释——会计政策声明、仅重复数字的段落一律**不归为
-    变化解释**（降级为附注；附注也不能当解释用，见 `report_brief._change_explanation`）。
+    变化解释**（降级目标按来源分：发行人文件 → 附注，第三方 → 业务背景，
+    见 `_demote_change_target`；附注也不能当解释用，见 `report_brief._change_explanation`）。
     """
     text = str(body or "")[:400]
     best: str | None = None
@@ -450,8 +466,8 @@ def _prose_classify(body: str) -> str | None:
             best, best_score = kind, score
     if best == KIND_CHANGE and (is_policy_text(text) or not is_causal(text)):
         # 无因果语言 → 只是"提到了变化"；政策套话 → 是编制口径声明。
-        # 两者都退为附注（数字出处），不得作为变化原因进入简报。
-        return KIND_NOTES if best_score > 0 else None
+        # 两者都不得作为变化原因进入简报；降级目标见 _demote_change_target。
+        return _demote_change_target(best_score, source)
     return best
 
 
@@ -471,6 +487,7 @@ def _paragraph_records(doc: dict, *, periods=None, company: str = "",
     url = str(doc.get("url") or "")
     title = str(doc.get("title") or "")
     stype = source_type(url)
+    _prov = document_provenance(doc, company, company_id) or stype
     page_offsets = doc.get("page_offsets")
     years = [str(y) for y in (periods or [])]
     picked: dict[str, list[dict]] = {}
@@ -486,7 +503,7 @@ def _paragraph_records(doc: dict, *, periods=None, company: str = "",
             continue
         if any(k in body for k in _NO_CONTENT_MARKERS):
             continue          # 付费墙/未登录占位："会员可见"不是证据
-        kind = _prose_classify(body)
+        kind = _prose_classify(body, source=_prov)
         if not kind:
             continue
         snip = _snippet(body, snippet_chars)
@@ -537,12 +554,13 @@ def extract_sections(doc: dict, *, periods=None, company: str = "",
     url = str((doc or {}).get("url") or "")
     title = str((doc or {}).get("title") or "")
     stype = source_type(url)
+    _prov = document_provenance(doc, company, company_id) or stype
     years = [str(y) for y in (periods or [])]
     page_offsets = doc.get("page_offsets")
     picked: dict[str, list[dict]] = {}
     seen: set[tuple[str, str]] = set()
     for sec in split_sections(text, page_offsets=page_offsets):
-        kind = classify(sec["title"], sec["body"])
+        kind = classify(sec["title"], sec["body"], source=_prov)
         if not kind:
             continue
         snip = _snippet(sec["body"], snippet_chars)
@@ -727,7 +745,8 @@ def build(task_id: str, *, periods=None, company: str = "", company_id: str = ""
     for s in snips[:20]:
         title = str(s.get("title") or "")
         body = str(s.get("snippet") or "")
-        kind = classify(title, body)
+        _surl = str(s.get("url") or "")
+        kind = classify(title, body, source=source_type(_surl))
         if not kind:
             continue
         url = str(s.get("url") or "")
