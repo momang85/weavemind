@@ -6175,6 +6175,64 @@ class TestExportVersionNamespaces(unittest.TestCase):
         self.assertEqual(out.get("package"), "")
 
 
+class TestBriefAssemblyIdempotence(unittest.TestCase):
+    """二次装配不得把装配器自己的产物再吃回来（实机 ui-31305a2b28 反例）。
+
+    该实机任务经"验收修正→再装配"两轮后：风险清单出现 `……证明****`（模型加粗
+    残留被二次包裹）、同一"变化原因尚不能证明"两行并存、"另有 N 条同类核查项"
+    压缩提示与"待核查主张"头被当成风险、报告标题被当成主张列进⑦待核查块。
+    """
+
+    def test_reassembly_does_not_ingest_own_risk_artifacts(self):
+        import report_brief
+        body = (
+            "# 洋河股份（002304.SZ）2023—2024 年度核心财务指标研究报告\n\n"
+            "## 风险与核查\n"
+            "- **归母净利润的变化原因尚不能证明**\n"
+            "  - 证据：未取得对应附注/管理层讨论证据\n"
+            "- **归母净利润的变化原因尚不能证明**\n"
+            "  - 证据：由模型提出，尚未与底稿或年报证据绑定\n"
+            "- 另有 4 条同类核查项（底稿审计/材料清单）见附录。\n"
+            "- **待核查主张（未与底稿事实绑定）**：\n"
+            "- 洋河股份（002304.SZ）2023—2024 年度核心财务指标研究报告\n"
+            "- **结论边界**：本简报只覆盖上述期间的变化与缺口\n"
+        )
+        changes = {"unproven": [{"label": "归母净利润", "materials": ["利润表附注"],
+                                 "has_explanation": False}]}
+        with mock.patch.object(report_brief, "_located", return_value=[]), \
+             mock.patch("working_paper_export.build_result",
+                        return_value={"gaps": [], "problems": [], "audit": []}):
+            risks = report_brief._risks("ui-x", "研究洋河股份", body,
+                                        changes=changes, citations=[])
+        texts = [r.get("text") or "" for r in risks]
+        unproven = [t for t in texts if "归母净利润的变化原因尚不能证明" in t]
+        self.assertEqual(len(unproven), 1, f"同一风险被重复收录：{texts}")
+        self.assertFalse(any(t.rstrip().endswith("**") for t in texts),
+                         f"加粗残留被二次包裹：{texts}")
+        self.assertFalse(any(t.startswith("另有") for t in texts), texts)
+        self.assertFalse(any("待核查主张" in t for t in texts), texts)
+        self.assertFalse(any("研究报告" in t for t in texts), texts)
+
+    def test_report_title_is_not_a_claim(self):
+        import report_brief
+        body = ("# 洋河股份（002304.SZ）2023—2024 年度核心财务指标研究报告\n\n"
+                "2024 年营业收入 288.76 亿元，较 2023 年 331.26 亿元下降。\n")
+        rows = [{"value": 288.76, "fact_id": "fact-a"},
+                {"value": 331.26, "fact_id": "fact-b"}]
+        claims = report_brief._claims(body, rows, [], [], unsupported=[],
+                                      subject="洋河股份", periods=[2023, 2024])
+        texts = [c.get("text") or "" for c in claims]
+        self.assertFalse(any("研究报告" in t for t in texts), texts)
+        self.assertTrue(any("288.76" in t for t in texts), texts)
+
+    def test_heading_with_unmapped_ref_is_not_unsupported(self):
+        import report_brief
+        text = "# 某年度研究报告 [9]\n2024 年营收下降，原因待查 [9]。\n"
+        items = report_brief._unsupported_claims(text, {})
+        self.assertEqual(len(items), 1)
+        self.assertNotIn("研究报告", items[0].get("sentence") or "")
+
+
 class TestUnsupportedClaimLinkage(unittest.TestCase):
     """C2-1/C2-2/C2-4：结论依赖**未采用来源**时，主张与证据的关联必须留下来。
 

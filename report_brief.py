@@ -482,6 +482,8 @@ def _unsupported_claims(text: str, mapping: dict[int, int], *,
         s = raw.strip()
         if not s:
             continue
+        if s.startswith("#"):
+            continue                      # 标题不是主张（与 _claims 同一规则）
         # 来源清单条目本身不是主张（"2. [标题](url)"里没有 [n] 引用记号，跳过更稳）
         if re.match(r"^\s*\d{1,2}\s*[.、)]\s*[\[(]", s):
             continue
@@ -565,7 +567,9 @@ def _claims(body: str, rows, derived, citations, *,
         s = sent.strip()
         if not s or not _NUM_RE.search(s):
             continue
-        if s.startswith(("#", "|", ">", "-", "*")):
+        if s.lstrip().startswith("#"):
+            continue                      # 标题不是主张（含股票代码/年份，否则会被当成"待核查"）
+        if s.startswith(("|", ">", "-", "*")):
             s = s.lstrip("#|>-* ").strip()
         if "|" in s and s.count("|") >= 2:
             continue                      # 表格行不是主张（模型自写的表由装配器接管）
@@ -713,9 +717,19 @@ def _risks(task_id: str, goal: str, body: str, *, project=None,
                          "需要补充的材料", "需补材料", "出处：", "来源：")
     section = _section_text(body, ("风险", "待核查", "核查"))
     if section:
-        seen_texts: set[str] = set()
+        # 正文 H1（报告标题）：二次装配时它会被当成"风险"吞进来（实机：标题列进
+        # 风险清单）；标题不是风险，按键排除。
+        h1_key = ""
+        m_h1 = re.search(r"^#\s+(.+)$", str(body or ""), flags=re.M)
+        if m_h1:
+            h1_key = _sentence_key(m_h1.group(1))[:120]
+        # 与 ①②③ 已加条目跨来源去重：模型风险小节常会复述"变化原因尚不能证明"，
+        # 二次装配还会把上一轮装配自己的行（压缩提示/待核查头）喂回来——
+        # 不去重会逐轮翻倍（实机：同一风险两行、结尾 **** 逐轮 +3）。
+        seen_texts: set[str] = {_sentence_key(r.get("text") or "")[:120] for r in out}
+        seen_texts.discard("")
         for line in section.splitlines():
-            t = line.strip().lstrip("#-*• ").strip()
+            t = line.strip().lstrip("#-*• ").rstrip("*：: ").strip()
             if not t or len(t) < 6:
                 continue
             if any(t.startswith(p) for p in _SUBITEM_PREFIXES):
@@ -723,8 +737,13 @@ def _risks(task_id: str, goal: str, body: str, *, project=None,
             if any(k in t for k in ("免责声明", "不构成投资建议", "不构成任何投资建议",
                                     "结论边界", "本报告不含")):
                 continue
+            # 装配器自己的产物不是"模型提出的风险"：压缩提示与待核查头。
+            if re.match(r"^另有\s*\d+\s*条同类核查项", t):
+                continue
+            if t.startswith("待核查主张（"):
+                continue
             key = _sentence_key(t)[:120]
-            if key in seen_texts:
+            if not key or key in seen_texts or (h1_key and key == h1_key):
                 continue
             seen_texts.add(key)
             _add("from_report", t,
