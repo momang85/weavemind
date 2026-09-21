@@ -1,12 +1,19 @@
 {
   "name": "all_decline",
   "note": "④ 全下降：收入/利润/现金流三项同步下降，发行人在年报里解释了收入（行业竞争与产品结构），利润与现金流仍未解释。覆盖率升到 110%（利润降得更快）——正是护栏要拦的误读：考'降幅方向'、覆盖读数与两条护栏（覆盖上升不等于回款改善）。材料里只有两处可定位段落（经营讨论 + 附注），业务背景/风险因素如实记缺口。",
-  "review": {"verdict": "PASS", "required": false, "degraded_reason": ""},
+  "review": {
+    "verdict": "PASS",
+    "required": false,
+    "degraded_reason": ""
+  },
   "contract": {
     "company": "示例酒业",
     "company_id": "000777.SZ",
     "market": "cn",
-    "periods": [2023, 2024],
+    "periods": [
+      2023,
+      2024
+    ],
     "caliber": "合并",
     "as_of": "2025-04-30",
     "perspective": "bank_corporate",
@@ -15,29 +22,61 @@
   "goal": "研究示例酒业 2023 与 2024 两个年度的营业收入、归母净利润、经营活动现金流净额，合并报表口径，数据截至 2025-04-30。",
   "financials": {
     "financials": [
-      {"year": 2023, "report_type": "年报", "revenue": 200.0, "net_profit": 60.0,
-       "operating_cashflow": 55.0, "total_assets": 500.0, "total_liabilities": 180.0,
-       "disclosure_date": "2024-04-20"},
-      {"year": 2024, "report_type": "年报", "revenue": 176.0, "net_profit": 40.0,
-       "operating_cashflow": 44.0, "total_assets": 480.0, "total_liabilities": 160.0,
-       "disclosure_date": "2025-04-20"}
+      {
+        "year": 2023,
+        "report_type": "年报",
+        "revenue": 200.0,
+        "net_profit": 60.0,
+        "operating_cashflow": 55.0,
+        "total_assets": 500.0,
+        "total_liabilities": 180.0,
+        "disclosure_date": "2024-04-20"
+      },
+      {
+        "year": 2024,
+        "report_type": "年报",
+        "revenue": 176.0,
+        "net_profit": 40.0,
+        "operating_cashflow": 44.0,
+        "total_assets": 480.0,
+        "total_liabilities": 160.0,
+        "disclosure_date": "2025-04-20"
+      }
     ],
-    "metadata": {"source": "eastmoney_ashare", "company": "示例酒业",
-                 "currency": "CNY", "unit": "亿元", "caliber": "合并",
-                 "caliber_evidence": "含 PARENTNETPROFIT"},
-    "raw": {"url": "https://datacenter-web.eastmoney.com/api/data/v1/get?x=4", "text": "{}"}
+    "metadata": {
+      "source": "eastmoney_ashare",
+      "company": "示例酒业",
+      "currency": "CNY",
+      "unit": "亿元",
+      "caliber": "合并",
+      "caliber_evidence": "含 PARENTNETPROFIT"
+    },
+    "raw": {
+      "url": "https://datacenter-web.eastmoney.com/api/data/v1/get?x=4",
+      "text": "{}"
+    }
   },
   "docs": [
-    {"title": "示例酒业2024年年度报告",
-     "url": "https://static.cninfo.com.cn/finalpage/2025-04-20/7.PDF",
-     "text": "第三节 管理层讨论与分析\n\n一、经营情况讨论与分析\n\n报告期内，白酒行业进入存量竞争阶段，市场竞争更加白热化，公司主力产品所处的次高端价位段承压较大，公司积极调整经营策略，2024 年实现营业收入 176 亿元，同比下降 12%；\n\n七、财务报表附注\n\n现金流量表附注：经营活动现金流量净额 44 亿元，营运资本变动情况见附注。"}
+    {
+      "title": "示例酒业2024年年度报告",
+      "url": "https://static.cninfo.com.cn/finalpage/2025-04-20/7.PDF",
+      "text": "第三节 管理层讨论与分析\n\n一、经营情况讨论与分析\n\n报告期内，白酒行业进入存量竞争阶段，市场竞争更加白热化，公司主力产品所处的次高端价位段承压较大，公司积极调整经营策略，2024 年实现营业收入 176 亿元，同比下降 12%；\n\n七、财务报表附注\n\n现金流量表附注：经营活动现金流量净额 44 亿元，营运资本变动情况见附注。"
+    }
   ],
   "model_body": "# 示例酒业 2023–2024 年度核心财务指标研究报告\n\n## 分析与结论\n\n2024 年营业收入 176 亿元，同比下降 12%；归母净利润 40 亿元，同比下降 33.33%；经营活动现金流净额 44 亿元，同比下降 20%。三项核心指标同步下降，利润降幅最大、收入降幅最小。\n\n变化原因方面：收入下降主要系行业存量竞争与次高端价位段承压所致（见年报经营情况讨论与分析）；利润与现金流的变动构成需核对利润表与现金流量表附注。\n\n风险与结论：两期数据只能说明这两期的变化，不能据此推断长期趋势；不给出估值或目标价。\n",
   "expect": {
     "delivery_status": "verified",
     "coverage_contains": "高于",
-    "brief_contains": ["研究问题与下一步", "不表示回款改善", "不等于"],
+    "brief_contains": [
+      "研究问题与下一步",
+      "不表示回款改善",
+      "不等于"
+    ],
     "evidence_located_min": 2,
-    "chart_min": 3
+    "chart_min": 3,
+    "brief_absent": [
+      "额外拖累",
+      "并非主要来自毛利端"
+    ]
   }
 }

@@ -86,9 +86,12 @@ class TestBaselineClosesLoop(unittest.TestCase):
         self.assertIn("1380", d["formula"])
         self.assertEqual(len(d["derived_from"]), 2, "同比必须带两个输入 fact_id")
         # 三条同比 + 该夹具能算出的同年比率（只有三核心指标 → 净利率、现金流覆盖）
+        # + D1 夜间补修的三条**金额变化**（金额差与利润率变化分开呈现）
         self.assertEqual(set(d["metric"] for d in self.paper.derived),
                          {"revenue_yoy", "net_profit_yoy", "operating_cashflow_yoy",
-                          "net_margin", "cashflow_coverage"})
+                          "net_margin", "cashflow_coverage",
+                          "revenue_change", "net_profit_change",
+                          "operating_cashflow_change"})
 
     def test_derived_values_match_hand_computation(self):
         """派生值必须能手算复现（同比 + 同年比率都算在内）。"""
@@ -101,6 +104,10 @@ class TestBaselineClosesLoop(unittest.TestCase):
             ("net_margin", "2024年"): 174.0 / 1380.0 * 100,
             ("cashflow_coverage", "2023年"): 210.0 / 150.0 * 100,
             ("cashflow_coverage", "2024年"): 231.0 / 174.0 * 100,
+            # 金额变化：本期 − 上期（绝对额，不是百分比）
+            ("revenue_change", "2024年较2023年"): 1380.0 - 1200.0,
+            ("net_profit_change", "2024年较2023年"): 174.0 - 150.0,
+            ("operating_cashflow_change", "2024年较2023年"): 231.0 - 210.0,
         }
         seen = set()
         for d in self.paper.derived:

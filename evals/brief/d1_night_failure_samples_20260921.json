@@ -1,0 +1,279 @@
+{
+  "frozen_at": "2026-09-21",
+  "baseline_commit": "dfe74f1149aa190c007f0480369bc5f7ab9bbe29",
+  "source": "docs/阶段D夜间复核与纠偏_20260921.md §2 P1-A / P1-B",
+  "note": "两个失败样本的原句与最小底稿切片（离线重放用）。旧稿与旧版本历史**保留**，新稿走候选/修订路径；本文件只冻结证据，不覆写任何任务产物。",
+  "facts": {
+    "note": "洋河股份 002304.SZ 2023–2024 的最小底稿切片（与实机 ui-750185076a 的底稿一致：毛利率 73.16%、毛利 211.25 亿元等）。",
+    "rows": [
+      {
+        "metric": "revenue",
+        "year": 2023,
+        "value": 331.26,
+        "unit": "亿元",
+        "caliber": "合并",
+        "fact_id": "fact-frozen-rev-2023"
+      },
+      {
+        "metric": "revenue",
+        "year": 2024,
+        "value": 288.76,
+        "unit": "亿元",
+        "caliber": "合并",
+        "fact_id": "fact-frozen-rev-2024"
+      },
+      {
+        "metric": "net_profit",
+        "year": 2023,
+        "value": 100.16,
+        "unit": "亿元",
+        "caliber": "合并",
+        "fact_id": "fact-frozen-np-2023"
+      },
+      {
+        "metric": "net_profit",
+        "year": 2024,
+        "value": 66.73,
+        "unit": "亿元",
+        "caliber": "合并",
+        "fact_id": "fact-frozen-np-2024"
+      },
+      {
+        "metric": "gross_profit",
+        "year": 2023,
+        "value": 249.26,
+        "unit": "亿元",
+        "caliber": "合并",
+        "fact_id": "fact-frozen-gp-2023"
+      },
+      {
+        "metric": "gross_profit",
+        "year": 2024,
+        "value": 211.25,
+        "unit": "亿元",
+        "caliber": "合并",
+        "fact_id": "fact-frozen-gp-2024"
+      },
+      {
+        "metric": "operating_cashflow",
+        "year": 2023,
+        "value": 61.3,
+        "unit": "亿元",
+        "caliber": "合并",
+        "fact_id": "fact-frozen-cf-2023"
+      },
+      {
+        "metric": "operating_cashflow",
+        "year": 2024,
+        "value": 46.29,
+        "unit": "亿元",
+        "caliber": "合并",
+        "fact_id": "fact-frozen-cf-2024"
+      }
+    ],
+    "derived": [
+      {
+        "metric": "revenue_yoy",
+        "year": 2024,
+        "period": "2024年同比",
+        "value": -12.83,
+        "unit": "%",
+        "derived_from": [
+          "fact-frozen-rev-2023",
+          "fact-frozen-rev-2024"
+        ]
+      },
+      {
+        "metric": "net_profit_yoy",
+        "year": 2024,
+        "period": "2024年同比",
+        "value": -33.38,
+        "unit": "%",
+        "derived_from": [
+          "fact-frozen-np-2023",
+          "fact-frozen-np-2024"
+        ]
+      },
+      {
+        "metric": "operating_cashflow_yoy",
+        "year": 2024,
+        "period": "2024年同比",
+        "value": -24.49,
+        "unit": "%",
+        "derived_from": [
+          "fact-frozen-cf-2023",
+          "fact-frozen-cf-2024"
+        ]
+      },
+      {
+        "metric": "net_margin",
+        "year": 2023,
+        "period": "2023年",
+        "value": 30.24,
+        "unit": "%",
+        "derived_from": [
+          "fact-frozen-np-2023",
+          "fact-frozen-rev-2023"
+        ]
+      },
+      {
+        "metric": "net_margin",
+        "year": 2024,
+        "period": "2024年",
+        "value": 23.11,
+        "unit": "%",
+        "derived_from": [
+          "fact-frozen-np-2024",
+          "fact-frozen-rev-2024"
+        ]
+      },
+      {
+        "metric": "cashflow_coverage",
+        "year": 2023,
+        "period": "2023年",
+        "value": 61.2,
+        "unit": "%",
+        "derived_from": [
+          "fact-frozen-cf-2023",
+          "fact-frozen-np-2023"
+        ]
+      },
+      {
+        "metric": "cashflow_coverage",
+        "year": 2024,
+        "period": "2024年",
+        "value": 69.37,
+        "unit": "%",
+        "derived_from": [
+          "fact-frozen-cf-2024",
+          "fact-frozen-np-2024"
+        ]
+      },
+      {
+        "metric": "net_profit_change",
+        "year": 2024,
+        "period": "2024年较2023年",
+        "value": -33.43,
+        "unit": "亿元",
+        "derived_from": [
+          "fact-frozen-np-2024",
+          "fact-frozen-np-2023"
+        ]
+      },
+      {
+        "metric": "gross_profit_change",
+        "year": 2024,
+        "period": "2024年较2023年",
+        "value": -38.01,
+        "unit": "亿元",
+        "derived_from": [
+          "fact-frozen-gp-2024",
+          "fact-frozen-gp-2023"
+        ]
+      },
+      {
+        "metric": "net_profit_gross_gap_change",
+        "year": 2024,
+        "period": "2024年",
+        "value": 4.58,
+        "unit": "亿元",
+        "derived_from": [
+          "fact-frozen-np-2024",
+          "fact-frozen-np-2023",
+          "fact-frozen-gp-2024",
+          "fact-frozen-gp-2023"
+        ]
+      }
+    ]
+  },
+  "cases": [
+    {
+      "id": "yanghe_margin_attribution",
+      "kind": "adopted_body_attribution",
+      "task_id": "ui-750185076a",
+      "body_version_id": "2aec7d53a5b5f80c1212aa9eecf752429af9b019b8d9a3aadf6fb7f3d06973df",
+      "db_report_sha256": "4b086f73dadead41f19628d6598da57dc7d0b5614ffa2679cc2febd0863365df",
+      "why": "毛利率下降 2.09 个百分点 < 归母净利率下降 7.13 个百分点，被写成『利润下滑并非主要来自毛利端』；而毛利金额减少 38.01 亿元、归母净利减少 33.43 亿元，净差额只有 +4.58 亿元——百分点差不能回答绝对利润下降来自哪里。",
+      "numbers": {
+        "gross_profit": {
+          "2023": 249.26,
+          "2024": 211.25,
+          "change": -38.01
+        },
+        "net_profit": {
+          "2023": 100.16,
+          "2024": 66.73,
+          "change": -33.43
+        },
+        "gap_change": 4.58,
+        "net_margin_pp": -7.13,
+        "gross_margin_pp": -2.09
+      },
+      "bad_sentences": [
+        {
+          "section": "一、概述",
+          "text": "利润降幅显著大于收入降幅，归母净利率由 30.24% 回落至 23.11%，下降 7.13 个百分点，而同期毛利率仅下降 2.09 个百分点，说明利润下滑并非主要来自毛利端，费用、税金或其他损益项目的变动方向需进一步核查。"
+        },
+        {
+          "section": "四、盈利质量",
+          "text": "毛利率降幅（2.09 个百分点）明显小于归母净利率降幅（7.13 个百分点），两者相差约 5.04 个百分点。这一结构差异说明：2024 年利润下滑**并非主要来自毛利端**，更大比例的利润侵蚀发生在毛利以下的环节（费用、税金及附加、其他损益等）。"
+        },
+        {
+          "section": "8.2 结论",
+          "text": "盈利质量方面，归母净利率下降 7.13 个百分点至 23.11%，降幅显著大于毛利率的 2.09 个百分点降幅，利润下滑并非主要来自毛利端。"
+        }
+      ],
+      "bad_assembly_boundary": "降幅大于收入降幅只能说明毛利线以下存在额外拖累；具体科目（费用/减值/非经常性损益）未核实前不归因",
+      "expect": {
+        "bad_sentence_status_not_bound": true,
+        "assembly_absent": [
+          "额外拖累",
+          "并非主要来自毛利端",
+          "利润侵蚀发生在毛利以下"
+        ],
+        "assembly_contains": [
+          "毛利线以下净额变化",
+          "未取得明细前不拆解"
+        ],
+        "gap_change_value": 4.58
+      }
+    },
+    {
+      "id": "normal_growth_decline_guardrail",
+      "kind": "scenario_brief_direction_mismatch",
+      "scenario": "normal_growth",
+      "why": "利润同比 +15.38%、经营现金流 +38.85%（覆盖率 89.11%→107.23% 因现金增长更快而上升），正文却套用下降场景的护栏：『利润降幅更大』『现金绝对规模同期仍在收缩』『不表示回款改善』。",
+      "true_direction": {
+        "revenue_yoy": 15.66,
+        "net_profit_yoy": 15.38,
+        "operating_cashflow_yoy": 38.85,
+        "cashflow_coverage": {
+          "2023": 89.11,
+          "2024": 107.23
+        }
+      },
+      "bad_sentences": [
+        {
+          "section": "研究问题与下一步",
+          "text": "覆盖率上升系利润降幅更大造成的被动结果，**不表示回款改善**；现金绝对规模同期仍在收缩，来源结构未核实前不判断现金流质量"
+        }
+      ],
+      "expect": {
+        "brief_absent": [
+          "不表示回款改善",
+          "仍在收缩",
+          "降幅更大",
+          "额外拖累"
+        ],
+        "brief_contains": [
+          "覆盖率上升系经营现金流增长快于归母净利润"
+        ]
+      }
+    }
+  ],
+  "scenario_gates": {
+    "normal_growth": "brief_absent: 不表示回款改善 / 仍在收缩 / 降幅更大 / 额外拖累 / 并非主要来自毛利端",
+    "all_decline": "brief_absent: 额外拖累 / 并非主要来自毛利端；brief_contains 保留不表示回款改善",
+    "margin_mix": "收入下降 + 毛利率大降 + 毛利以下净额不变：brief_contains 毛利线以下净额变化 + 不表示利润有现金支撑；brief_absent 额外拖累 / 并非主要来自毛利端 / 不表示回款改善"
+  }
+}

@@ -1,16 +1,18 @@
 # DeepSeek 执行状态（2026-09-21 更新）
 
-**当前批次**：阶段 D · D1/D2/D3 完成；**D5 第二批完成**（一次有界实机 + 账本逐条核对 +
-核对暴露的三处缺口修复）、**D6 回归包补口**（五场景）、**对外可达面只读安全核对**。
-证据：`docs/evidence/` 下 `d1_claim_support_*`、`d2_analysis_retention_and_projection_*`、
-`d2_candidate_acceptance_and_diff_*`、`d3_real_disclosure_and_units_*`、
-`d5_request_ledger_and_caps_20260921.md`、`d5_live_bounded_run_and_ledger_20260921.md`。
+**当前批次**：阶段 D · 夜间纠偏**第一小批完成**（结论与完整正文审查：金额变化与利润率变化
+分开、研究问题按方向生成、装配文本进同一主张集合），D5 **更正为"已实现部分路径，退出关卡
+未通过"**（流式回退一票两发、writers 并发落盘、有界任务 fail closed 待第二小批）。证据：
+`docs/evidence/d1_night_correction_batch1_20260921.md` 及此前各批证据。
 
 | 层 | 状态 |
 |---|---|
+| 夜间纠偏第一小批 | 冻结两个失败样本（`evals/brief/d1_night_failure_samples_20260921.json`）；`working_paper` 新增金额变化派生（含 `Δ归母净利 − Δ毛利` 机械核对，算式用四个原始 fact 写出）与标签/适用条件；`report_brief` 研究问题与边界**按场景方向**生成（删掉"毛利线以下存在额外拖累""现金仍在收缩"两条不成立推断；覆盖率按上升/下降/非正三支；负债按升降）；`build_structure` 先生成研究问题再把观察/边界送进 `_claims`（`origin=assembly`、`claim_type=boundary`）；顺带修两个归属缺陷（金额不认同比别名、金额+变化动词试 `_change` 派生）与两处溯源口径（同值重复、负值操作数） |
+| D5（更正） | **已实现部分路径，退出关卡未通过**：一请求一票（415 流式回退一票两发）、`writers` 并发读改写丢增量、显式有界任务在共享账本不可用时应 fail closed——三项待第二小批；此前"已完成"的表述作废 |
+| 验证（第一小批） | 新用例 7 项（冻结样本自证、归因句不得 bound、固定边界无旧推断、方向分支、负利润不套覆盖、差额只作机械核对、装配句进同一主张集合）；场景门 6 个（新增 `margin_mix`：收入 −25% + 毛利率 50%→30% + 毛利以下净额变化 0）；`claims_d1_cases check` 11/11；CI 清单 46 文件本地全绿 |
 | D5 第二批（有界实机） | 声明上限 `WM_TASK_MAX_CALLS=40 / SECONDS=1500`（全局仍 0/0/0），上限入账；`ui-750185076a` 洋河 2023–2024 两年度三项指标，21:05:02 提交 → 21:07:29 `SUCCESS`（**2 分 27 秒**，未触发拒绝）；验收 `overall=pass`（溯源 77%（164/212））、交付 `verified`、主张 40 条（bound 7 / partially_supported 7 / needs_check 26）、研究问题 4 条；费用**未知** |
-| 账本核对（**对不上 → 已修**） | 三处缺口：①LLM 路径建账本**没接跨进程后端**（等于每进程各一份上限）②`call_llm_stream`/`call_llm_async` **无票据、无调用记录**（步骤主路径不入账）③`_save` 整份覆盖（阶段明细被最后写者抹掉）。修法：工厂提为 `root_budget.default_redis_factory` 并共用、流式/异步/备端点每次真实发送开票结算 + 补调用记录、文件改为 `writers` 逐进程增量合并（身份不同不并）；`async_worker_base` 不再把预算拒绝当流式失败吞掉 |
-| D6 回归包 | 场景三份 → **五份**：新增 `all_decline`（全下降 + 覆盖率 110% + 两条护栏 + 研究问题小节）与 `wrong_subject_period`（错主体同句材料不计证据、错期写明原因，`located` 恰好 1）；`scenario_run` 补 `clean_chart_data.json`（用生产同一函数），修正"场景溯源 67% / 实机 100%"的夹具失真，并新增 `brief_contains`/`brief_absent`/`excluded_reasons`/`evidence_located_max` 四个核对键；未采用材料按文档去重 |
+| 账本核对（**对不上 → 部分修复**） | 三处缺口：①LLM 路径建账本**没接跨进程后端**（等于每进程各一份上限）②`call_llm_stream`/`call_llm_async` **无票据、无调用记录**（步骤主路径不入账）③`_save` 整份覆盖（阶段明细被最后写者抹掉）。已修：工厂提为 `root_budget.default_redis_factory` 并共用、流式/异步/备端点每次真实发送开票结算 + 补调用记录、文件改为 `writers` 逐进程增量合并（身份不同不并）；`async_worker_base` 不再把预算拒绝当流式失败吞掉。**未闭合（第二小批）**：一次 415 流式回退仍用同一张票发两次；`writers` 合并的跨进程原子性（读改写竞态）；有界任务在共享后端不可用时的 fail closed |
+| D6 回归包 | 场景三份 → **六份**：`all_decline`（全下降 + 覆盖率 110% + 护栏）、`wrong_subject_period`（错主体同句材料不计证据、错期写明原因，`located` 恰好 1）、`margin_mix`（收入 −25% + 毛利率大降 + 毛利以下净额变化 0，考金额差与利润率差分开）；`scenario_run` 补 `clean_chart_data.json`（用生产同一函数），修正"场景溯源 67% / 实机 100%"的夹具失真，并新增 `brief_contains`/`brief_absent`/`excluded_reasons`/`evidence_located_max` 四个核对键；未采用材料按文档去重 |
 | 安全核对（只读，不宣称安全） | `POST /task`、`GET /api/task/*`、`/files/*`、交付 zip、`net_policy` 五处逐条给证据；两处**低危残留**：工作区内符号链接未 `realpath` 解析（`_safe_workspace_path`/打包）、回环地址免限流（本地开发豁免）；Mimosa 需重跑，`scanner_enobufs` 不得当作安全结论 |
 | 浏览器复核（重启后） | 面板顺序/同版投影（2aec7d53 三处一致）/主张 40 条逐条原因/三行评审（机器 pass 绑定本版、Critic **未完成（降级）**、人工待复核）/6 张图真实加载/PDF 12 页 6 图嵌入 0 占位/研究问题小节渲染全部核对；**发现并修两处**：①页面文案"交付包暂不提供"与后端放行矛盾（`ReportViewer` 硬编码）→ 改为按状态说明 + 新增下载入口；②包早于采纳版本不告警（差 82 秒 < 120 秒阈值）→ `_export_payload` 增补"包 vs 采纳版本落库时间"比较；截图面重启后多次超时（面板首屏 1 张留证，其余以 DOM/接口读数取证） |
 | 验证 | `test_root_budget` 48 项（新增流式入账/流式拒发/两进程共享上限/合并与不重复计数/身份隔离）；`scenario_checks` 17、`test_offline_delivery` 36、`test_narrative_evidence` 44、`test_delivery_chain` 279（新增"包早于采纳版本"用例）、前端 6 个行为测试 + `npm run build` 全绿；**CI 清单 46 文件本地全绿** |

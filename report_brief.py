@@ -84,17 +84,20 @@ _INFERENCE_BOUNDARY = (
 )
 
 # D3：三个优先研究问题（个体版主文最多三个重点；银行对公版共用同一核心）
-# 每问的边界文案是**护栏**，不是套话：覆盖率的上升常是分母收缩造成的被动结果，
-# 负债下降不等于偿债安全——这两条在实机复核里都点过名。
+# 每问的**题目与边界**都按本场景实际算出的方向生成（`_research_questions`），
+# 这里只留不依赖场景事实的通用标题与"只表达推断限制"的边界。
+# 夜间纠偏反例：固定边界把"利润降幅更大→毛利线以下存在额外拖累"和"现金绝对规模
+# 同期仍在收缩"当成通用事实，于是增长场景（利润 +15.38%、现金流 +38.85%）也照写；
+# 而"降幅更大 ⇒ 存在额外拖累"本身不成立——收入与毛利率同时下降就能造成利润降幅
+# 更大，不必存在毛利线以下的额外拖累。边界只写"不能说明什么"，不写未计算的事实。
 _RESEARCH_QUESTIONS: tuple[tuple[str, str, str], ...] = (
     ("revenue", "收入变化的量价与结构依据",
      "两期读数只能说明这两期的变化；未取得量价拆分与分部数据前，不判断收入变动的驱动结构"),
-    ("net_profit", "利润降幅与收入差异的分解",
-     "降幅大于收入降幅只能说明毛利线以下存在额外拖累；具体科目（费用/减值/非经常性损益）"
-     "未核实前不归因"),
+    ("net_profit", "利润变化的分解",
+     "金额变化与利润率变化是两件事：百分点差只能描述利润率结构，不能回答绝对利润"
+     "变化主要来自哪里；未取得毛利以下科目明细前，不把差额归到任何一项费用或损益"),
     ("operating_cashflow", "现金变化与利润覆盖的关系",
-     "覆盖率上升系利润降幅更大造成的被动结果，**不表示回款改善**；现金绝对规模同期仍在收缩，"
-     "来源结构未核实前不判断现金流质量"),
+     "单期比率不构成趋势判断；来源结构未核实前，不判断现金流质量"),
 )
 
 # 阅读视角 → 需要补充的材料（F2）：两种视角复用同一底稿，但要查的东西不同。
@@ -165,17 +168,28 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
                                       rejected=list((audit or {}).get("rejected") or []))
     analysis_text, unmapped = _remap_inline_refs(raw_analysis, ref_map)
     analysis_text = _mark_unsupported(analysis_text, unsupported)
-    claims = _claims(analysis_text, rows, derived, citations, unsupported=unsupported,
-                     subject=str(req.get("company") or req.get("company_id") or ""),
-                     periods=periods, evidence=evidence)
     background = _background(evidence, citations)
     changes = _change_explanation(rows, derived, periods, findings, evidence, citations)
     # D2："有分析"的最低要求（至少一项数据观察 + 意义/局限说明）——读数进结构对象，
     # 不满足时进风险清单，不靠加长正文掩盖
     quality = analysis_coverage(analysis_text)
     perspective = str(req.get("perspective") or "equity")
+    # D1 夜间补修：研究问题**先于**主张检查生成——它的观察与边界也是要审的句子
     questions = _research_questions(rows, derived, periods, evidence, citations,
                                     changes, perspective=perspective)
+    assembly_claims: list[dict] = []
+    for _q in questions:
+        _obs = str(_q.get("observation") or "").strip()
+        if _obs:
+            assembly_claims.append({"text": _obs, "claim_type": "observation"})
+        _bd = str(_q.get("boundary") or "").strip()
+        if _bd:
+            # 边界句单独记类型：纯待查的推断限制既不与"已断言未支持"混算，
+            # 也不因为要提高分数被删掉
+            assembly_claims.append({"text": _bd, "claim_type": "boundary"})
+    claims = _claims(analysis_text, rows, derived, citations, unsupported=unsupported,
+                     subject=str(req.get("company") or req.get("company_id") or ""),
+                     periods=periods, evidence=evidence, assembly=assembly_claims)
     risks = _risks(task_id, goal, body, project=project, evidence=evidence,
                    citations=citations, changes=changes, perspective=perspective,
                    citation_gaps=unmapped, unsupported=unsupported,
@@ -370,12 +384,69 @@ def _research_questions(rows, derived, periods, evidence, citations, changes, *,
         obs = f"{label}同比{'增长' if v > 0 else '下降' if v < 0 else '持平'} {abs(v):g}%"
         if cur is not None:
             obs += f"（{last} 年 {cur.get('value')}{cur.get('unit') or ''}）"
+        q_text = question
+        if metric == "net_profit":
+            # 金额变化与利润率变化**分开呈现**：绝对利润的分解只能用金额差，不能用
+            # 百分点差（夜间反例：毛利率降 2.09pp < 归母净利率降 7.13pp 被写成
+            # "利润下滑并非主要来自毛利端"，而毛利金额实际减少 38.01 亿元）。
+            # 每个值带**它自己那一行**的单位：缺毛利时不能把已有金额差也写成无单位。
+            _np_row = d_all.get("net_profit_change") or {}
+            _gp_row = d_all.get("gross_profit_change") or {}
+            gap = d_all.get("net_profit_gross_gap_change") or {}
+            gv, np_chg, gp_chg = gap.get("value"), _np_row.get("value"), _gp_row.get("value")
+            _nu = str(_np_row.get("unit") or "")
+            _gu2 = str(_gp_row.get("unit") or "")
+            _ggu = str(gap.get("unit") or "")
+            if all(isinstance(x, (int, float)) for x in (np_chg, gp_chg, gv)):
+                obs += (f"；金额变化：归母净利润变化 {np_chg:+g}{_nu}、毛利润变化 "
+                        f"{gp_chg:+g}{_gu2}、毛利线以下净额变化 {gv:+g}{_ggu}"
+                        f"（= Δ归母净利润 − Δ毛利；含费用、税项、非经营性项目与少数股东等，"
+                        f"未取得明细前不拆解到具体科目）")
+                q_text = (question if v < 0 else "利润变化的分解")
+            elif isinstance(np_chg, (int, float)):
+                # 只缺毛利一侧：如实说缺的是哪一半，别把已有的金额差也说成"未取得"
+                obs += (f"；金额变化：归母净利润变化 {np_chg:+g}{_nu}；毛利润同期金额差未取得，"
+                        f"差额尚待拆解")
+            else:
+                obs += "；金额变化：同期金额差未取得，差额尚待拆解"
         if metric == "operating_cashflow":
-            # 覆盖率必须与现金流方向一起看：上升常是分母收缩造成的被动结果
+            # 覆盖率必须与**方向**一起看：上升是被动结果还是现金改善，取决于
+            # 分子分母各自往哪走；任一为负时不套覆盖解释（口径已在比率条件里写死）
             cov = d_all.get("cashflow_coverage") or {}
             cv = cov.get("value")
-            if isinstance(cv, (int, float)):
-                obs += f"；经营现金流对归母净利润的覆盖 {abs(cv):g}%"
+            cov_prev, cov_prev_year = None, None
+            np_val = (by.get("net_profit") or {}).get(last) if last else None
+            cf_val = (by.get("operating_cashflow") or {}).get(last) if last else None
+            for d2 in derived:
+                if (str(d2.get("metric")) == "cashflow_coverage"
+                        and d2.get("year") != last):
+                    cov_prev = d2.get("value")
+                    cov_prev_year = d2.get("year")
+            negative = any(isinstance(x, dict) and isinstance(x.get("value"), (int, float))
+                           and float(x["value"]) <= 0 for x in (np_val, cf_val))
+            if isinstance(cv, (int, float)) and not negative:
+                # 覆盖读数**另起一句**、且每个数值紧跟自己的年份：同句出现两个年度时，
+                # 断言按"不借远处年度"处理（D1 反例 30.24%），会把本期读数判成期间不明
+                obs += f"。经营现金流对归母净利润的覆盖 {last} 年为 {abs(cv):g}%"
+                if isinstance(cov_prev, (int, float)):
+                    direction = "上升" if cv > cov_prev else "下降" if cv < cov_prev else "持平"
+                    _py = f"{cov_prev_year} 年" if cov_prev_year else "上期"
+                    obs += f"（{_py} {abs(cov_prev):g}%，{direction}）"
+                    if direction == "上升" and v < 0:
+                        # 被动成因：现金流本身在降，覆盖率却升 → 分母降得更快。
+                        # 边界句**不带数字**（数字在观察里已可复算）：避免把未标期间的
+                        # 数值塞进推断句，读者也不会把边界句当成"已验证的读数"
+                        boundary = ("覆盖率上升系分母（归母净利润）降得更快造成的被动结果，"
+                                    "**不表示回款改善**；" + boundary)
+                    elif direction == "上升":
+                        boundary = ("覆盖率上升系经营现金流增长快于归母净利润；"
+                                    + boundary)
+                    elif direction == "下降":
+                        boundary = ("覆盖率下降不等于回款恶化：需同时看现金绝对额与"
+                                    "来源结构；" + boundary)
+            elif negative:
+                boundary = ("当期归母净利或经营现金流不为正，该比值**不表示利润有现金"
+                            "支撑**；" + boundary)
         matched = _match_management_for_metric(mgmt_pool, metric, last)
         support = {"has_evidence": bool(matched), "locator": "", "source_n": "",
                    "text": "", "issuer": False}
@@ -384,11 +455,13 @@ def _research_questions(rows, derived, periods, evidence, citations, changes, *,
                             "source_n": str(matched.get("source_n") or ""),
                             "text": str(matched.get("text") or "")[:120],
                             "issuer": bool(matched.get("issuer"))})
-        out.append({"metric": metric, "question": question, "observation": obs,
+        out.append({"metric": metric, "question": q_text, "observation": obs,
                     "support": support, "boundary": boundary,
                     "next_action": list(MATERIALS_BY_METRIC.get(metric, ()))})
     if str(perspective or "") == "bank_corporate":
         liab = (by.get("total_liabilities") or {}).get(last) if last else None
+        liab_prev = ((by.get("total_liabilities") or {}).get(last - 1)
+                     if last else None)
         known: list[str] = []
         if liab is not None:
             known.append(f"总负债 {liab.get('value')}{liab.get('unit') or ''}"
@@ -396,14 +469,23 @@ def _research_questions(rows, derived, periods, evidence, citations, changes, *,
         dr = (d_all.get("debt_ratio") or {}).get("value")
         if isinstance(dr, (int, float)):
             known.append(f"资产负债率 {abs(dr):g}%")
+        # 方向按本场景的读数说：负债**上升**的场景写"下降不等于安全"是另一件事的文案
+        _lv, _lp = (liab or {}).get("value"), (liab_prev or {}).get("value")
+        if isinstance(_lv, (int, float)) and isinstance(_lp, (int, float)):
+            _dir = "下降" if _lv < _lp else "上升" if _lv > _lp else "持平"
+            _head = (f"总负债{_dir}**不等于**短期偿债安全："
+                     if _dir == "下降" else
+                     f"总负债{_dir}也不等于偿债压力加大：")
+        else:
+            _head = "总负债水平**不等于**短期偿债安全："
         out.append({
             "metric": "bank_materials",
             "question": "银行对公视角：债务与回款条件的已知/未知",
             "observation": "；".join(known) or "未取得负债读数",
             "support": {"has_evidence": False, "locator": "", "source_n": "",
                         "text": "", "issuer": False},
-            "boundary": ("总负债下降**不等于**短期偿债安全：需债务到期结构、受限资金与担保"
-                         "材料才能评估；本报告不输出授信结论"),
+            "boundary": (_head + "需债务到期结构、受限资金与担保材料才能评估；"
+                         "本报告不输出授信结论"),
             "next_action": list(PERSPECTIVE_MATERIALS.get("bank_corporate", ()))})
     return out[:4]
 
@@ -483,7 +565,10 @@ def _metrics_table(rows, derived, periods, citations, req, source_url: str = "",
         quality.append({"metric": str(d.get("metric") or ""),
                         "label": str(d.get("metric_label") or d.get("metric") or ""),
                         "period": str(d.get("period") or ""),
-                        "value": d.get("value"), "unit": "%",
+                        "value": d.get("value"),
+                        # 单位取自派生行本身：同比/比率是 %，**金额变化是亿元**——
+                        # 一律写 "%" 会把"毛利减少 38.01 亿元"渲染成"−38.01%"
+                        "unit": str(d.get("unit") or "%"),
                         "formula": str(d.get("formula") or ""),
                         "fact_ids": list(d.get("derived_from") or [])})
     return {"rows": out_rows, "quality": quality,
@@ -680,6 +765,15 @@ _METRIC_ALIASES: tuple[tuple[str, str], ...] = tuple(sorted((
     ("经营现金流同比", "operating_cashflow_yoy"),
     ("营业收入同比", "revenue_yoy"), ("营收同比", "revenue_yoy"),
     ("归母净利润同比", "net_profit_yoy"), ("净利润同比", "net_profit_yoy"),
+    # 金额变化（D1 夜间补修）：名字里带"变化/增减"的才是变化量，别与水平值混用
+    ("经营活动现金流净额变化", "operating_cashflow_change"),
+    ("经营现金流净额变化", "operating_cashflow_change"),
+    ("经营活动现金流变化", "operating_cashflow_change"),
+    ("归母净利润变化", "net_profit_change"), ("净利润变化", "net_profit_change"),
+    ("营业收入变化", "revenue_change"), ("营收变化", "revenue_change"),
+    ("毛利润变化", "gross_profit_change"), ("毛利变化", "gross_profit_change"),
+    ("毛利线以下净额变化", "net_profit_gross_gap_change"),
+    ("毛利线以下净额", "net_profit_gross_gap_change"),
     ("经营现金流对归母净利润的覆盖", "cashflow_coverage"),
     ("经营活动现金流净额对归母净利润的覆盖", "cashflow_coverage"),
     ("现金流对归母净利润的覆盖", "cashflow_coverage"),
@@ -719,6 +813,10 @@ _YOY_PROMOTABLE = ("revenue", "net_profit", "operating_cashflow")
 _CHANGE_WORDS = ("降幅", "跌幅", "增幅", "涨幅", "增速")
 _NEG_CHANGE_WORDS = ("降幅", "跌幅")
 _POS_CHANGE_WORDS = ("增幅", "涨幅", "增速")
+# 金额变化量的判据（紧邻数值 12 字内）：金额本身不是比率，但"减少/增加/同比/较上年"
+# 说明它是变化量 → 试 `<指标>_change` 派生（夜间纠偏 P1-A：金额变化与利润率变化分开）
+_CHANGE_VERBS = ("增加", "减少", "下降", "上升", "增长", "变动", "变化", "同比",
+                 "较上年", "较上期", "净增", "净减")
 
 
 def _unit_class(unit: str) -> str:
@@ -872,13 +970,19 @@ def _assertions_in(sentence: str) -> list[dict]:
         # 指标归属窗口：金额/百分比看数字前 60 字；**百分点差**看整句前缀——
         # "…覆盖由 2023 年的 61.20% 升至 2024 年的 69.37%，上升 8.17 个百分点" 里
         # 指标名离数值较远，60 字窗会截断它、错归到内层的"归母净利润"上。
-        _win = 4000 if _unit_class(unit) == "pp" else 60
+        _uc = _unit_class(unit)
+        _win = 4000 if _uc == "pp" else 60
         head = s[max(0, m.start() - _win):m.start()]
         window = head[-12:]
         # 指标归属：**取离数字最近**的别名（同距离取更长者）——一句里出现多个指标时
         # （"营业收入…净利润…"）必须按就近归属，不能按"窗口里最长的别名"。
+        # 金额数值**不认同比别名**：别名表里"营业收入同比"比"营业收入"更长、结尾更近，
+        # 会把括号里的水平值（"营业收入同比增长 15.66%（2024 年 1741.44亿元）"）错标成
+        # 同比值——金额是水平/变化量，不是百分比。
         best: tuple[int, int, str] | None = None
         for alias, slug in _METRIC_ALIASES:
+            if _uc == "amount" and slug.endswith(_YOY_SUFFIX):
+                continue
             pos = head.rfind(alias)
             if pos < 0:
                 continue
@@ -923,6 +1027,9 @@ def _assertions_in(sentence: str) -> list[dict]:
                     "period": year, "period_ambiguous": ambiguous,
                     "value": value, "unit": unit, "sign": sign,
                     "unit_class": _unit_class(unit), "fact_ids": [],
+                    # 紧邻数值的窗口：金额变化量按"变化动词 + 是否存在 <指标>_change 事实"
+                    # 提升到变化派生（见 `_claims`），窗口随断言一起带走
+                    "window": window,
                     "support_status": "needs_check", "reason": ""})
     return out
 
@@ -978,7 +1085,8 @@ def _is_issuer_record(r: dict) -> bool:
 def _claims(body: str, rows, derived, citations, *,
             unsupported: list[dict] | None = None, subject: str = "",
             periods: list[int] | None = None,
-            evidence: dict | None = None) -> list[dict]:
+            evidence: dict | None = None,
+            assembly: list[dict] | None = None) -> list[dict]:
     """模型正文 → 逐句主张，**每个数字按原子断言逐条对底稿**（D1）。
 
     状态口径（对外固定）：
@@ -991,7 +1099,25 @@ def _claims(body: str, rows, derived, citations, *,
     每条主张携带：结论文本、主体、期间、类型（observation/inference/assumption/
     target_claim/third_party_view/unbound）、`assertions[]`（逐条支持）、`fact_ids`、
     `evidence_ids`（已定位证据片段）、`support_status`、`reason`、`version_id`。
+
+    `assembly`：**装配器自己生成的句子**（研究问题观察、推断边界），逐条
+    `{text, claim_type}`。它们与模型分析同处一个主张集合——此前只审模型分析段，
+    代码写出来的结论（含数字）不在审查范围内（夜间反例 P1-B：装配生成的
+    "利润降幅更大/现金仍在收缩"在增长场景照写且无人审）。`origin="assembly"`
+    让页面能区分"模型写的"与"装配器写的"。
     """
+    _asm: dict[str, dict] = {}
+    for _item in (assembly or []):
+        _t = str((_item or {}).get("text") or "").strip()
+        # 按**切句后的每一句**登记：主张清单是逐句的，一条观察里含两个句号时，
+        # 后半句也要认得出自己来自装配器（否则它会被当成"模型写的句子"）
+        for _part in re.split(r"[。！？!?\n]+", _t):
+            _p = _part.strip()
+            if _p:
+                _asm[_sentence_key(_p)] = _item
+    if _asm:
+        body = (str(body or "") + "\n"
+                + "\n".join(str((i or {}).get("text") or "") for i in (assembly or [])))
     idx = _fact_index(rows, derived)
     unsup_by_sentence: dict[str, list[dict]] = {}
     for u in (unsupported or []):
@@ -1033,22 +1159,32 @@ def _claims(body: str, rows, derived, citations, *,
         assertions = _assertions_in(s) if has_number else []
         if not has_number:
             kind_text = _judgment_kind(s)
+            _asm0 = _asm.get(_sentence_key(s))
+            _boundary = (_asm0 is not None
+                         and str(_asm0.get("claim_type")) == "boundary")
+            if _boundary:
+                kind_text = "boundary"    # 装配器声明的推断边界：只说明"不能得出什么"
             if kind_text is None or len(s) < 12:
                 continue                  # 既无数字又不是判断句：不进主张清单
             cite_ns0 = [int(m.group(1) if m.group(1) else m.group(2))
                         for m in re.finditer(r"\[(?:n\s*=\s*(\d{1,2})|(\d{1,2}))\]", s)]
-            reason0 = ("纯文字判断：需可定位的披露原文或底稿事实支持，本次未取得"
+            reason0 = ("推断边界：本条只说明『不能据此得出什么』，不是事实主张；"
+                       "要升级为解释需可定位的披露原文" if _boundary else
+                       "纯文字判断：需可定位的披露原文或底稿事实支持，本次未取得"
                        if kind_text != "target_claim" else
                        "目标类判断需核对目标年度、目标值或范围、披露时点与实际口径；"
                        "本次未取得发行人披露对该目标的直接支持")
-            out.append({"text": s[:200], "type": kind_text, "claim_type": kind_text,
-                        "fact_ids": [], "evidence_ids": _evidence_ids_for(_sentence_key(s), evidence),
-                        "status": "needs_check", "support_status": "needs_check",
-                        "reason": reason0, "assertions": [],
-                        "subject": str(subject or ""),
-                        "periods": sorted({y for y in years
-                                           if re.search(rf"(?<!\d){y}(?!\d)", s)}),
-                        "citations": cite_ns0, "version_id": ""})
+            _b = {"text": s[:200], "type": kind_text, "claim_type": kind_text,
+                  "fact_ids": [], "evidence_ids": _evidence_ids_for(_sentence_key(s), evidence),
+                  "status": "needs_check", "support_status": "needs_check",
+                  "reason": reason0, "assertions": [],
+                  "subject": str(subject or ""),
+                  "periods": sorted({y for y in years
+                                     if re.search(rf"(?<!\d){y}(?!\d)", s)}),
+                  "citations": cite_ns0, "version_id": ""}
+            if _boundary:
+                _b["origin"] = "assembly"
+            out.append(_b)
             continue
         if not assertions:
             continue                      # 有数字但没有可验证断言（纯年份/计数）：不进清单
@@ -1077,6 +1213,13 @@ def _claims(body: str, rows, derived, citations, *,
             if (a.get("unit_class") in ("pct", "pp") and _base in _YOY_PROMOTABLE
                     and f"{_base}{_YOY_SUFFIX}" in idx):
                 cand_metrics.insert(0, f"{_base}{_YOY_SUFFIX}")
+            elif (a.get("unit_class") == "amount"
+                    and f"{_base}_change" in idx
+                    and any(k in str(a.get("window") or "") for k in _CHANGE_VERBS)):
+                # 金额 + 变化动词（"归母净利润同比减少 33.43 亿元"）：先试**金额变化**派生
+                # ——底稿里变化量是独立事实（net_profit_change），按水平值找会落空，
+                # 于是正确的金额变化被误记成"无底稿支持"（夜间纠偏 P1-A 的同一族问题）
+                cand_metrics.insert(0, f"{_base}_change")
             hit = None
             for mk in cand_metrics:
                 for f in idx.get(mk, []):
@@ -1143,6 +1286,12 @@ def _claims(body: str, rows, derived, citations, *,
                  # 版本号在装配时由 `stamp_structure_version` 盖上（未盖 = 空串，
                  # 页面据此判"结构对象是否属于当前版本"，不拿旧结构冒充新版）
                  "version_id": ""}
+        _hit_asm = _asm.get(_sentence_key(s))
+        if _hit_asm is not None:
+            # 装配器生成的句子：标来源与类型，其余照走同一套断言核对
+            claim["origin"] = "assembly"
+            claim["claim_type"] = str(_hit_asm.get("claim_type") or claim["claim_type"])
+            claim["type"] = claim["claim_type"]
         if hit_u is not None:
             # 未采用来源：不因"数字绑得上底稿"就算支持（结论依赖那份材料）
             claim["status"] = "unsupported"
@@ -1823,11 +1972,26 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
         # 验收按"数字后紧跟完整算式 + 操作数能在来源里对上"判可溯源；写"计算：…"这类
         # 前缀会让它认不到（实机简报曾因此掉到 55% 溯源率）
         lines.append("**同比与比率（可复算）**：")
-        for q in quality:
+        # 金额变化（D1 夜间补修）与同比/比率**分开**：主文只列比率与同比，金额变化连同
+        # 算式放附录（主文的研究问题观察已经给出金额差，附录提供可复算的算式）——
+        # 主文每多一行都会把附录推到第 6 页（C3 版面目标：附录 ≤ 第 5 页）。
+        _change_rows = [q for q in quality
+                        if str(q.get("metric") or "").endswith("_change")]
+        _main_rows = [q for q in quality if q not in _change_rows]
+        for q in _main_rows:
             f = str(q.get("formula") or "").strip()
             expr = _formula_expr(f)
-            lines.append(f"- {q.get('label')} {q.get('period')}：{q.get('value')}%"
+            unit = str(q.get("unit") or "%")
+            lines.append(f"- {q.get('label')} {q.get('period')}：{q.get('value')}{unit}"
                          + (f"（{expr}）" if expr else ""))
+        if _change_rows:
+            lines.append("- 金额变化（与利润率变化分开呈现）见附录『金额变化（可复算）』。")
+            _appendix_extra.append(("### 金额变化（可复算）", [
+                *(f"- {q.get('label')} {q.get('period')}：{q.get('value')}"
+                  f"{q.get('unit') or ''}"
+                  + (f"（{_formula_expr(str(q.get('formula') or ''))}）"
+                     if _formula_expr(str(q.get('formula') or '')) else "")
+                  for q in _change_rows)]))
         conds = _ratio_conditions(quality)
         stype = str(table.get("subject_type") or "")
         if stype == "financial":
@@ -2074,9 +2238,14 @@ def _formula_expr(formula: str) -> str:
 
     验收要求数字后紧跟 `（(1741.44 - 1505.6) / 1505.6 * 100）` 这样的完整算式，
     说明文字混在括号里就认不到。
+
+    算式也可以**以括号开头**：同比的写法是 `(本期 - 上期) / 上期 * 100`，
+    金额变化在任一期为负时写成 `(本期) - (上期)`（负号开头会让"紧贴数字的算式"
+    识别失败，且 `-33.43 - -38.01` 读不出来）。此前只认数字开头，等于把这两类
+    可复算的派生值排除在"可溯源"之外。
     """
     t = str(formula or "")
-    m = re.match(r"\s*([0-9][0-9.,\s*/+\-()]*?)\s*(?:，|,|输入|$)", t)
+    m = re.match(r"\s*([0-9(][0-9.,\s*/+\-()]*?)\s*(?:，|,|输入|$)", t)
     if not m:
         return ""
     expr = m.group(1).strip().rstrip("，,")

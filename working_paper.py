@@ -456,6 +456,65 @@ def build_working_paper(facts: list[Fact], request: ResearchRequest) -> WorkingP
                              inputs=[f0, f1], unit="%", unit_source="derived")
             paper.derived.append(_row(d))
 
+    # 4b) 金额变化（D1 夜间补修）：**绝对额差**与利润率变化是两件事。只用"百分点差"
+    #     回答"绝对利润下降主要来自哪里"会把归因做反（实机反例：毛利率降 2.09 个百分点
+    #     小于归母净利率降 7.13 个百分点 → 正文写成"利润下滑并非主要来自毛利端"，而毛利
+    #     金额实际减少 38.01 亿元、归母净利减少 33.43 亿元）。这里只给**可复算的金额差**，
+    #     归因留给有明细证据的人。
+    _changes: dict[tuple[str, int], Any] = {}
+    for metric in ("revenue", "net_profit", "gross_profit", "operating_cashflow"):
+        per_year = series.get(metric) or {}
+        for prev, cur in zip(years, years[1:]):
+            f0, f1 = per_year.get(prev), per_year.get(cur)
+            if not f0 or not f1 or cur != prev + 1:
+                continue
+            if (not isinstance(f0.value, (int, float))
+                    or not isinstance(f1.value, (int, float))):
+                continue
+            if (str(f0.currency) != str(f1.currency) or str(f0.unit) != str(f1.unit)
+                    or str(f0.caliber) != str(f1.caliber)):
+                # 不同币种/单位/口径的差没有含义：记审计提示，不生成、不猜
+                paper.audit.append({
+                    "kind": PROBLEM_CURRENCY,
+                    "detail": (f"{metric_label(metric)} {prev}→{cur} 的金额变化：两期"
+                               f"币种/单位/口径不一致（{f0.currency}/{f0.unit}/{f0.caliber}"
+                               f" vs {f1.currency}/{f1.unit}/{f1.caliber}）：不计算"),
+                    "fact_ids": [f0.fact_id, f1.fact_id],
+                })
+                continue
+            delta = float(f1.value) - float(f0.value)
+            # 算式以数字或括号开头，报告里才能被"紧贴数字的完整算式"识别（可溯源）
+            _expr = (f"({f1.value}) - ({f0.value})"
+                     if (float(f1.value) < 0 or float(f0.value) < 0)
+                     else f"{f1.value} - {f0.value}")
+            d = derived_fact([f1, f0], f"{metric}_change",
+                             formula=f"{_expr}，输入 {f1.fact_id} / {f0.fact_id}",
+                             value=round(delta, 2), period=f"{cur}年较{prev}年",
+                             inputs=[f1, f0], unit=str(f1.unit or UNKNOWN),
+                             unit_source="derived")
+            paper.derived.append(_row(d))
+            _changes[(metric, cur)] = (f0, f1, d)
+
+    # 4c) 机械核对关系：Δ归母净利 = Δ毛利 + Δ(归母净利 − 毛利)。只作核对，不作归因：
+    #     归母净利（归母口径）与毛利（合并口径）归属层不同，差额含费用、税项、非经营性
+    #     项目与少数股东等——算式用**四个原始事实**写出来，读者可直接复算。
+    for year in years[1:]:
+        np_pair, gp_pair = _changes.get(("net_profit", year)), _changes.get(("gross_profit", year))
+        if not np_pair or not gp_pair:
+            continue
+        (np0, np1, np_d), (gp0, gp1, _gp_d) = np_pair, gp_pair
+        if str(np1.unit) != str(gp1.unit) or str(np0.unit) != str(gp0.unit):
+            continue          # 金额量级不同就不做这条核对（不换算、不猜）
+        gap = float(np_d.value) - (float(gp1.value) - float(gp0.value))
+        _expr = (f"({np1.value} - {np0.value}) - ({gp1.value} - {gp0.value})")
+        d = derived_fact([np1, np0, gp1, gp0], "net_profit_gross_gap_change",
+                         formula=(f"{_expr}，输入 {np1.fact_id} / {np0.fact_id}"
+                                  f" / {gp1.fact_id} / {gp0.fact_id}"),
+                         value=round(gap, 2), period=f"{year}年",
+                         inputs=[np1, np0, gp1, gp0], unit=str(np1.unit or UNKNOWN),
+                         unit_source="derived")
+        paper.derived.append(_row(d))
+
     # 5) 同年比率（报告要有"经济含义"，不能只有绝对数）：净利率、经营现金流对净利润
     #    的覆盖、资产负债率、研发投入强度——全部由**已选事实**算出，带公式与输入
     #    fact_id，可复核。两条纪律（与同比区分开）：
@@ -505,7 +564,8 @@ def build_working_paper(facts: list[Fact], request: ResearchRequest) -> WorkingP
                 continue
             factor = _s_num / _s_den
             ratio = float(num.value) * factor / float(den.value) * 100.0
-            formula = f"{num.value} / {den.value} * 100，输入 {num.fact_id} / {den.fact_id}"
+            formula = (f"{_num_token(num.value)} / {_num_token(den.value)} * 100"
+                       f"，输入 {num.fact_id} / {den.fact_id}")
             if abs(factor - 1.0) > 1e-12:
                 # 换算过程要留在公式里，读者才能复核（不能只给一个变了量级的结果）
                 formula = (f"{num.value}{num.unit} 换算为 {float(num.value) * factor:g}"
@@ -533,6 +593,20 @@ _RATIO_SPECS: tuple[tuple[str, str, str, str], ...] = (
 
 
 _NUM_TOKEN_RE = re.compile(r"\d[\d,]*(?:\.\d+)?")
+
+
+def _num_token(value) -> str:
+    """算式里的操作数写法：负值加括号。
+
+    为什么：报告里的派生行要写成"数字后紧跟完整算式"才算可溯源，而算式以 `-` 开头
+    识别不到（`-15.0 / 150.0 * 100`）；`-15.0 - -38.01` 也读不出来。负值一律写成
+    `(-15.0)`，算式因此始终以数字或括号开头。
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return str(value)
+    return f"({v:g})" if v < 0 else f"{v:g}"
 
 
 def _number_forms(value) -> set[str]:

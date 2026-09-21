@@ -7447,5 +7447,168 @@ class TestRealAnnualReportPositivePath(unittest.TestCase):
         self.assertNotIn("示例", blob)
 
 
+class TestNightCorrectionFailureSamples(unittest.TestCase):
+    """D1 夜间纠偏（P1-A/P1-B）：金额变化与利润率变化分开、护栏跟方向、装配文本进同一主张集合。
+
+    冻结样本见 `evals/brief/d1_night_failure_samples_20260921.json`：
+    - 洋河采纳正文用**百分点差**给绝对利润归因（"利润下滑并非主要来自毛利端"，而毛利
+      金额减少 38.01 亿元、归母净利减少 33.43 亿元，净差额 +4.58 亿元）；
+    - normal_growth 场景利润与现金流双增长，却套下降护栏（"利润降幅更大""仍在收缩"）。
+    断言核对**具体事实/方向/支持状态**，不以"存在某句警示文案"为通过条件。
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.fx = json.loads(
+            (Path(__file__).resolve().parent / "evals" / "brief"
+             / "d1_night_failure_samples_20260921.json").read_text(encoding="utf-8"))
+        cls.rows = cls.fx["facts"]["rows"]
+        cls.derived = cls.fx["facts"]["derived"]
+
+    def _claims_for(self, text):
+        import report_brief
+        return report_brief._claims(text, self.rows, self.derived, [],
+                                    subject="洋河股份", periods=[2023, 2024])
+
+    def test_frozen_numbers_match_the_real_task(self):
+        """冻结切片自证：与实机 ui-750185076a 的底稿读数一致（不是编的样本）。"""
+        by = {(r["metric"], r["year"]): r["value"] for r in self.rows}
+        self.assertEqual(by[("gross_profit", 2024)], 211.25)
+        self.assertEqual(by[("gross_profit", 2023)], 249.26)
+        self.assertEqual(by[("net_profit", 2024)], 66.73)
+        self.assertEqual(by[("net_profit", 2023)], 100.16)
+        d = {x["metric"]: x["value"] for x in self.derived}
+        # 机械核对关系：Δ归母净利 − Δ毛利 = -33.43 - (-38.01) = +4.58
+        self.assertAlmostEqual(d["net_profit_change"], -33.43, places=2)
+        self.assertAlmostEqual(d["gross_profit_change"], -38.01, places=2)
+        self.assertAlmostEqual(d["net_profit_gross_gap_change"], 4.58, places=2)
+
+    def test_margin_attribution_sentences_are_not_bound(self):
+        """正确数字 + 未证因果不得整句 bound（三句都带真数字，结论是推断）。"""
+        for bad in self.fx["cases"][0]["bad_sentences"]:
+            claims = self._claims_for(bad["text"])
+            self.assertTrue(claims, f"该句应进主张清单：{bad['section']}")
+            for c in claims:
+                self.assertNotEqual(
+                    c.get("support_status"), "bound",
+                    f"{bad['section']} 的归因句不得判为已支持：{c.get('text')[:60]}")
+            # 数字本身仍要被逐条核对（不能因为结论错就把数字一起丢掉）
+            self.assertTrue(any(c.get("assertions") for c in claims))
+
+    def test_assembly_absent_phrases_are_gone(self):
+        """装配器不再输出"额外拖累"这类不成立的推断（固定边界里已删除）。
+
+        冻结样本里的旧边界**保留原句**（它是历史证据，不改写）；这里断言的是**当前**的
+        固定边界文案不再含这些短语，且"毛利线以下净额变化"这类按场景计算的句子不在固定文案里。
+        """
+        import report_brief
+        c0 = self.fx["cases"][0]
+        self.assertIn("额外拖累", c0["bad_assembly_boundary"],
+                      "冻结样本必须保留旧句（否则不是失败样本了）")
+        joined = "；".join(b for _m, _q, b in report_brief._RESEARCH_QUESTIONS)
+        for phrase in c0["expect"]["assembly_absent"]:
+            self.assertNotIn(phrase, joined, f"固定边界里不得再出现『{phrase}』")
+        for phrase in c0["expect"]["assembly_contains"]:
+            self.assertNotIn(phrase, joined)          # 这两句是**按场景计算**的，不是固定文案
+
+    def test_direction_aware_questions_and_boundaries(self):
+        """同一组数据两种方向：增长场景不得出现下降护栏，下降场景必须出现被动成因。"""
+        import report_brief
+
+        def _q(np_yoy, cf_yoy, cov_prev, cov_cur):
+            derived = [
+                {"metric": "net_profit_yoy", "year": 2024, "value": np_yoy, "unit": "%"},
+                {"metric": "operating_cashflow_yoy", "year": 2024, "value": cf_yoy, "unit": "%"},
+                {"metric": "cashflow_coverage", "year": 2023, "value": cov_prev, "unit": "%"},
+                {"metric": "cashflow_coverage", "year": 2024, "value": cov_cur, "unit": "%"},
+                {"metric": "net_profit_change", "year": 2024, "value": 114.94, "unit": "亿元"},
+                {"metric": "gross_profit_change", "year": 2024, "value": 90.0, "unit": "亿元"},
+                {"metric": "net_profit_gross_gap_change", "year": 2024, "value": 24.94, "unit": "亿元"},
+            ]
+            rows = [
+                {"metric": "net_profit", "year": 2024, "value": 862.28, "unit": "亿元"},
+                {"metric": "operating_cashflow", "year": 2024, "value": 924.64, "unit": "亿元"},
+            ]
+            return {q["metric"]: q for q in report_brief._research_questions(
+                rows, derived, [2023, 2024], {}, [], {}, perspective="equity")}
+
+        growth = _q(15.38, 38.85, 89.11, 107.23)
+        self.assertIn("增长快于", growth["operating_cashflow"]["boundary"])
+        self.assertNotIn("不表示回款改善", growth["operating_cashflow"]["boundary"])
+        self.assertNotIn("仍在收缩", growth["operating_cashflow"]["boundary"])
+        decline = _q(-33.38, -24.49, 61.2, 69.37)
+        self.assertIn("不表示回款改善", decline["operating_cashflow"]["boundary"])
+        self.assertIn("降得更快", decline["operating_cashflow"]["boundary"])
+        self.assertNotIn("仍在收缩", decline["operating_cashflow"]["boundary"],
+                         "现金降幅与覆盖率方向要分别陈述，不得写成通用事实")
+        # 金额变化与利润率变化分开：观察里给出三个金额（含毛利线以下净额变化）
+        obs = decline["net_profit"]["observation"]
+        self.assertIn("归母净利润变化", obs)
+        self.assertIn("毛利润变化", obs)
+        self.assertIn("毛利线以下净额变化", obs)
+        self.assertIn("+24.94亿元", obs)
+
+    def test_negative_profit_or_cashflow_has_no_coverage_interpretation(self):
+        """零或负利润/负现金流：不套覆盖解释（既有口径条件 + 方向分支都要成立）。"""
+        import report_brief
+        derived = [
+            {"metric": "net_profit_yoy", "year": 2024, "value": -180.0, "unit": "%"},
+            {"metric": "operating_cashflow_yoy", "year": 2024, "value": -30.0, "unit": "%"},
+            {"metric": "cashflow_coverage", "year": 2023, "value": 61.2, "unit": "%"},
+            {"metric": "cashflow_coverage", "year": 2024, "value": 69.37, "unit": "%"},
+        ]
+        rows = [{"metric": "net_profit", "year": 2024, "value": -12.5, "unit": "亿元"},
+                {"metric": "operating_cashflow", "year": 2024, "value": 46.29, "unit": "亿元"}]
+        q = {x["metric"]: x for x in report_brief._research_questions(
+            rows, derived, [2023, 2024], {}, [], {}, perspective="equity")}
+        b = q["operating_cashflow"]["boundary"]
+        self.assertIn("不表示利润有现金支撑", b)
+        self.assertNotIn("不表示回款改善", b)
+        self.assertNotIn("覆盖", q["operating_cashflow"]["observation"].split("。")[-1])
+
+    def test_gap_relation_is_mechanical_not_attribution(self):
+        """差额句只做机械核对：写清口径与"不拆解到具体科目"，不写费用/税项改善。"""
+        import report_brief
+        rows = [{"metric": "net_profit", "year": 2023, "value": 100.16, "unit": "亿元"},
+                {"metric": "net_profit", "year": 2024, "value": 66.73, "unit": "亿元"},
+                {"metric": "gross_profit", "year": 2023, "value": 249.26, "unit": "亿元"},
+                {"metric": "gross_profit", "year": 2024, "value": 211.25, "unit": "亿元"}]
+        derived = [{"metric": "net_profit_yoy", "year": 2024, "value": -33.38, "unit": "%"},
+                   {"metric": "net_profit_change", "year": 2024, "value": -33.43, "unit": "亿元"},
+                   {"metric": "gross_profit_change", "year": 2024, "value": -38.01, "unit": "亿元"},
+                   {"metric": "net_profit_gross_gap_change", "year": 2024, "value": 4.58, "unit": "亿元"}]
+        q = {x["metric"]: x for x in report_brief._research_questions(
+            rows, derived, [2023, 2024], {}, [], {}, perspective="equity")}
+        obs = q["net_profit"]["observation"]
+        self.assertIn("-33.43亿元", obs)
+        self.assertIn("-38.01亿元", obs)
+        self.assertIn("+4.58亿元", obs)
+        self.assertIn("未取得明细前不拆解到具体科目", obs)
+        # "不能回答…主要来自哪里"是**否定归因**的正当表述；这里禁止的是断言式归因措辞
+        for wrong in ("费用改善", "毛利端", "额外拖累", "利润侵蚀", "并非主要来自"):
+            self.assertNotIn(wrong, obs + q["net_profit"]["boundary"])
+
+    def test_assembly_sentences_enter_the_same_claim_set(self):
+        """装配器生成的观察与边界都要进主张集合，且边界单独记类型。"""
+        import report_brief
+        assembly = [{"text": "营业收入 2024 年为 288.76亿元，同比下降 12.83%",
+                     "claim_type": "observation"},
+                    {"text": "两期读数只能说明这两期的变化；未取得量价拆分前不判断驱动结构",
+                     "claim_type": "boundary"}]
+        claims = report_brief._claims("", self.rows, self.derived, [],
+                                      subject="洋河股份", periods=[2023, 2024],
+                                      assembly=assembly)
+        self.assertEqual(len(claims), 2)
+        kinds = {c["claim_type"]: c for c in claims}
+        self.assertIn("observation", kinds)
+        self.assertIn("boundary", kinds)
+        self.assertEqual(kinds["observation"]["origin"], "assembly")
+        self.assertEqual(kinds["observation"]["support_status"], "bound",
+                         "装配观察里的数字都对得上底稿")
+        self.assertEqual(kinds["boundary"]["support_status"], "needs_check",
+                         "边界是推断限制，不是已支持的事实主张")
+        self.assertTrue(str(kinds["boundary"]["reason"]).startswith("推断边界"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

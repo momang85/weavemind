@@ -55,6 +55,15 @@ DERIVED_METRICS: tuple[tuple[str, str], ...] = (
     ("cashflow_coverage", "经营现金流对归母净利润的覆盖"),
     ("debt_ratio", "资产负债率"),
     ("rd_intensity", "研发投入强度"),
+    # D1 夜间补修：**金额变化**（本期 − 上期，绝对值）与利润率变化分开呈现。
+    # 只用"百分点差"回答"绝对利润下降主要来自哪里"会把归因做反（实机反例：
+    # 毛利率降 2.09pp 小于归母净利率降 7.13pp，被写成"利润下滑并非主要来自毛利端"，
+    # 而毛利金额实际减少 38.01 亿元、归母净利减少 33.43 亿元）。
+    ("revenue_change", "营业收入变化"),
+    ("net_profit_change", "归母净利润变化"),
+    ("gross_profit_change", "毛利润变化"),
+    ("operating_cashflow_change", "经营活动现金流净额变化"),
+    ("net_profit_gross_gap_change", "毛利线以下净额变化（Δ归母净利 − Δ毛利）"),
 )
 METRIC_LABELS.update(dict(DERIVED_METRICS))
 
@@ -82,10 +91,18 @@ RATIO_CONDITIONS: dict[str, str] = {
                          "也不表示高于或低于",
     "debt_ratio": "总负债 ÷ 总资产；金融机构负债以存款为主，与其经营模式不可比",
     "rd_intensity": "需公司实际披露研发投入；未披露时不生成（不填零）",
+    "net_profit_gross_gap_change": "Δ归母净利（归母口径）− Δ毛利（合并口径）："
+                                   "两者归属层不同，差额还含费用、税项、非经营性项目与"
+                                   "少数股东等，**只能作机械核对**（Δ归母净利 = Δ毛利 + "
+                                   "Δ(归母净利 − 毛利)），不能据此判断某项费用或损益改善",
 }
 for _m, _ in DERIVED_METRICS:
     if _m.endswith(YOY_SUFFIX):
         RATIO_CONDITIONS[_m] = _YOY_CONDITION
+    elif _m.endswith("_change"):
+        # 金额变化是**同期同口径**的差：两期币种/单位/口径不一致时不生成（不猜）
+        RATIO_CONDITIONS.setdefault(
+            _m, "两期须同币种、同单位、同报表口径；任一不满足则不生成该变化值")
 
 RATIO_SCOPE_NOTE = ("以上比率与同比适用于**非金融企业**的经营简报；"
                     "金融机构作为研究对象时需要独立的指标配置，不得机械套用工业企业的比率。")

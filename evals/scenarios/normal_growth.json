@@ -1,12 +1,19 @@
 {
   "name": "normal_growth",
-  "note": "① 正常增长且证据齐全：两年营收/利润/现金流同向增长，年报正文含经营讨论、附注与风险四类定位。",
-  "review": {"verdict": "PASS", "required": false, "degraded_reason": ""},
+  "note": "① 正常增长且证据齐全：两年营收/利润/现金流同向增长，年报正文含经营讨论、附注与风险四类定位。**夜间纠偏补**：增长场景不得出现下降场景的护栏（『不表示回款改善』『仍在收缩』『降幅更大』）——护栏必须跟着实际方向走。",
+  "review": {
+    "verdict": "PASS",
+    "required": false,
+    "degraded_reason": ""
+  },
   "contract": {
     "company": "贵州茅台",
     "company_id": "600519.SH",
     "market": "cn",
-    "periods": [2023, 2024],
+    "periods": [
+      2023,
+      2024
+    ],
     "caliber": "合并",
     "as_of": "2025-04-30",
     "perspective": "equity",
@@ -15,22 +22,46 @@
   "goal": "研究贵州茅台 2023 与 2024 两个年度的营业收入、归母净利润、经营活动现金流净额，合并报表口径，数据截至 2025-04-30。",
   "financials": {
     "financials": [
-      {"year": 2023, "report_type": "年报", "revenue": 1505.6, "net_profit": 747.34,
-       "operating_cashflow": 665.93, "total_assets": 2727.0, "total_liabilities": 490.43,
-       "disclosure_date": "2024-04-03"},
-      {"year": 2024, "report_type": "年报", "revenue": 1741.44, "net_profit": 862.28,
-       "operating_cashflow": 924.64, "total_assets": 2989.45, "total_liabilities": 569.33,
-       "disclosure_date": "2025-04-03"}
+      {
+        "year": 2023,
+        "report_type": "年报",
+        "revenue": 1505.6,
+        "net_profit": 747.34,
+        "operating_cashflow": 665.93,
+        "total_assets": 2727.0,
+        "total_liabilities": 490.43,
+        "disclosure_date": "2024-04-03"
+      },
+      {
+        "year": 2024,
+        "report_type": "年报",
+        "revenue": 1741.44,
+        "net_profit": 862.28,
+        "operating_cashflow": 924.64,
+        "total_assets": 2989.45,
+        "total_liabilities": 569.33,
+        "disclosure_date": "2025-04-03"
+      }
     ],
-    "metadata": {"source": "eastmoney_ashare", "company": "贵州茅台",
-                 "currency": "CNY", "unit": "亿元", "caliber": "合并",
-                 "caliber_evidence": "含 PARENTNETPROFIT"},
-    "raw": {"url": "https://datacenter-web.eastmoney.com/api/data/v1/get?x=1", "text": "{}"}
+    "metadata": {
+      "source": "eastmoney_ashare",
+      "company": "贵州茅台",
+      "currency": "CNY",
+      "unit": "亿元",
+      "caliber": "合并",
+      "caliber_evidence": "含 PARENTNETPROFIT"
+    },
+    "raw": {
+      "url": "https://datacenter-web.eastmoney.com/api/data/v1/get?x=1",
+      "text": "{}"
+    }
   },
   "docs": [
-    {"title": "贵州茅台2024年年度报告",
-     "url": "https://static.cninfo.com.cn/finalpage/2025-04-03/1.PDF",
-     "text": "第三节 管理层讨论与分析\n\n一、经营情况讨论与分析\n\n2024年度营业收入1741.44亿元，同比增长15.66%，主要系销量增加及产品结构变化所致。\n\n（一）主营业务情况\n\n公司主营业务为茅台酒及系列酒的生产与销售，经营模式为以销定产。\n\n二、可能面对的风险\n\n风险因素：宏观经济波动可能影响高端白酒消费需求。\n\n七、财务报表附注\n\n现金流量表附注：经营活动现金流量净额924.64亿元，营运资本变动情况见附注。"}
+    {
+      "title": "贵州茅台2024年年度报告",
+      "url": "https://static.cninfo.com.cn/finalpage/2025-04-03/1.PDF",
+      "text": "第三节 管理层讨论与分析\n\n一、经营情况讨论与分析\n\n2024年度营业收入1741.44亿元，同比增长15.66%，主要系销量增加及产品结构变化所致。\n\n（一）主营业务情况\n\n公司主营业务为茅台酒及系列酒的生产与销售，经营模式为以销定产。\n\n二、可能面对的风险\n\n风险因素：宏观经济波动可能影响高端白酒消费需求。\n\n七、财务报表附注\n\n现金流量表附注：经营活动现金流量净额924.64亿元，营运资本变动情况见附注。"
+    }
   ],
   "model_body": "# 贵州茅台 2023–2024 年度财务数据\n\n## 分析与结论\n\n营业收入 2024 年为 1741.44亿元，较 2023 年的 1505.6亿元增长 15.66%；归母净利润 862.28亿元，同比增长 15.38%；经营活动现金流净额 924.64亿元，同比增长 38.85%，增速高于收入与利润。\n\n变化原因方面：营业收入变动主要系销量增加及产品结构变化所致（见年报经营情况讨论与分析）；现金流变动的构成需核对现金流量表附注。\n\n风险与结论：两期数据只能说明这两期的变化，不能据此声称长期趋势；未取得同业与行情数据，不给出估值或目标价。\n",
   "expect": {
@@ -38,6 +69,17 @@
     "coverage_contains": "高于",
     "evidence_located_min": 4,
     "evidence_missing": [],
-    "chart_min": 4
+    "chart_min": 4,
+    "brief_absent": [
+      "不表示回款改善",
+      "仍在收缩",
+      "降幅更大",
+      "额外拖累",
+      "并非主要来自毛利端"
+    ],
+    "brief_contains": [
+      "研究问题与下一步",
+      "经营现金流对归母净利润的覆盖"
+    ]
   }
 }

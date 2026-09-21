@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
-"""F3-B 退出关卡：五类**固定离线场景**跑真实装配/渲染/导出路径，逐项确定性核对。
+"""F3-B 退出关卡：六类**固定离线场景**跑真实装配/渲染/导出路径，逐项确定性核对。
 
 为什么冻结成场景：单测各自钉一处行为，但"整条链路一起改"时没人保证组合起来还对。
-五份输入（`evals/scenarios/*.json`）覆盖：①正常增长且证据齐全 ②亏损/现金净流出+跨期
-单位不一致 ③缺附注且资料截止不满足 ④三项同步下降（护栏措辞）⑤错主体/错期间材料被排除
-且不计入证据；跑法见 `scripts/scenario_run.py`，产物落运行期目录
+六份输入（`evals/scenarios/*.json`）覆盖：①正常增长且证据齐全（且**不得**出现下降护栏）
+②亏损/现金净流出+跨期单位不一致 ③缺附注且资料截止不满足 ④三项同步下降（护栏措辞）
+⑤错主体/错期间材料被排除且不计入证据 ⑥收入下降+毛利率大降+毛利以下净额不变（金额差与
+利润率差分开）；跑法见 `scripts/scenario_run.py`，产物落运行期目录
 （`.weavemind/scenarios/`），跨修订可直接比对 manifest。
 
 为什么是模块而不是 `test_*.py`：仓库守卫要求每个 `test_*.py` 都必须出现在 `ci.yml` 里，
@@ -51,8 +52,9 @@ class TestOfflineScenarios(unittest.TestCase):
 
     def test_scenarios_exist(self):
         self.assertEqual(sorted(self.manifests),
-                         ["all_decline", "loss_mixed_units", "missing_footnote_asof",
-                          "normal_growth", "wrong_subject_period"])
+                         ["all_decline", "loss_mixed_units", "margin_mix",
+                          "missing_footnote_asof", "normal_growth",
+                          "wrong_subject_period"])
 
     def test_each_scenario_meets_its_frozen_expectations(self):
         for name, m in self.manifests.items():

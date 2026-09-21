@@ -1,0 +1,45 @@
+{
+  "name": "margin_mix",
+  "note": "⑥ 收入下降 + 毛利率大降 + **毛利以下净额不变**：Δ归母净利 = Δ毛利（差额 0 亿元）——「毛利线以下存在额外拖累」在此可被证伪；同时 2024 年归母净利转负，覆盖倍数不套解释。考金额差与利润率差分开、差额机械核对、负利润护栏。",
+  "review": {"verdict": "PASS", "required": false, "degraded_reason": ""},
+  "contract": {
+    "company": "示例制造",
+    "company_id": "000888.SZ",
+    "market": "cn",
+    "periods": [2023, 2024],
+    "caliber": "合并",
+    "as_of": "2025-04-30",
+    "perspective": "equity",
+    "identity_source": "scenario"
+  },
+  "goal": "研究示例制造 2023 与 2024 两个年度的营业收入、归母净利润、经营活动现金流净额，合并报表口径，数据截至 2025-04-30。",
+  "financials": {
+    "financials": [
+      {"year": 2023, "report_type": "年报", "revenue": 200.0, "net_profit": 40.0,
+       "gross_profit": 100.0, "gross_margin": 50.0, "operating_cashflow": 30.0,
+       "total_assets": 400.0, "total_liabilities": 150.0,
+       "disclosure_date": "2024-04-20"},
+      {"year": 2024, "report_type": "年报", "revenue": 150.0, "net_profit": -15.0,
+       "gross_profit": 45.0, "gross_margin": 30.0, "operating_cashflow": 20.0,
+       "total_assets": 380.0, "total_liabilities": 160.0,
+       "disclosure_date": "2025-04-20"}
+    ],
+    "metadata": {"source": "eastmoney_ashare", "company": "示例制造",
+                 "currency": "CNY", "unit": "亿元", "caliber": "合并",
+                 "caliber_evidence": "含 PARENTNETPROFIT"},
+    "raw": {"url": "https://datacenter-web.eastmoney.com/api/data/v1/get?x=6", "text": "{}"}
+  },
+  "docs": [
+    {"title": "示例制造2024年年度报告",
+     "url": "https://static.cninfo.com.cn/finalpage/2025-04-20/6.PDF",
+     "text": "第三节 管理层讨论与分析\n\n一、经营情况讨论与分析\n\n报告期内，行业需求下行、产品价格竞争加剧，公司2024年度营业收入150亿元，同比下降25%；毛利率由50%降至30%。\n\n七、财务报表附注\n\n现金流量表附注：经营活动现金流量净额20亿元。"}
+  ],
+  "model_body": "# 示例制造 2023–2024 年度核心财务指标研究报告\n\n## 分析与结论\n\n2024 年营业收入 150 亿元，同比下降 25%；归母净利润 -15 亿元（上年 40 亿元），由盈转亏；经营活动现金流净额 20 亿元，同比下降 33.33%。\n\n变化原因方面：收入与毛利率同时下降是本期亏损的直接原因；毛利线以下各科目（费用、税项、减值等）的变动构成未在本次资料中体现，需核对利润表附注。\n\n风险与结论：本期归母净利润为负，经营现金流对归母净利润的覆盖倍数不表示利润有现金支撑；两期数据只能说明这两期的变化，不给出估值或目标价。\n",
+  "expect": {
+    "coverage_contains": "不表示利润有现金支撑",
+    "brief_contains": ["研究问题与下一步", "毛利线以下净额变化", "不表示利润有现金支撑"],
+    "brief_absent": ["额外拖累", "并非主要来自毛利端", "不表示回款改善"],
+    "evidence_located_min": 1,
+    "chart_min": 2
+  }
+}

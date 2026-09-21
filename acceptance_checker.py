@@ -898,7 +898,8 @@ def check_analysis_completeness(report: str, goal: str, task_id: str) -> dict:
     derived_missing: list[str] = []
     for d in derived:
         label = str(d.get("metric_label") or d.get("metric") or "")
-        tag = f"{label} {d.get('period')}（{d.get('value')}%）"
+        tag = (f"{label} {d.get('period')}"
+               f"（{d.get('value')}{d.get('unit') or '%'}）")
         if not _value_seen(d.get("value")):
             derived_missing.append(tag)
         elif not _explained(label, d.get("value"), str(d.get("metric") or "")):
@@ -1083,12 +1084,20 @@ def _semantics_match(records: list[dict], period: str, indicator: str) -> str:
 
 
 def _records_for_value(records: list[dict], token: str) -> list[dict]:
-    """按**数值**取候选来源记录（可能多条：同值不同来源/指标/单位）。"""
+    """按**数值**取候选来源记录（可能多条：同值不同来源/指标/单位）。
+
+    带符号匹配优先；没有命中时按**量级**兜底——正文算式里的操作数常写成正值
+    （"(-15.0) / 150.0 * 100"），而来源里是带符号的 -15.0。方向由正文的负号/方向词
+    与主张层的符号核对负责（与 `_assertion_matches` 同一口径：数值按绝对值比）。
+    """
     try:
         val = float(str(token).replace(",", ""))
     except ValueError:
         return []
-    return [r for r in records if abs(float(r["value"]) - val) <= 1e-9]
+    hit = [r for r in records if abs(float(r["value"]) - val) <= 1e-9]
+    if hit:
+        return hit
+    return [r for r in records if abs(abs(float(r["value"])) - abs(val)) <= 1e-9]
 
 
 def _extract_balanced_expr(window: str) -> str:
@@ -1142,7 +1151,10 @@ def _formula_derived_in_report(num: dict, window: str, records: list[dict],
     if res_cls not in ("amount", "pct"):
         return False, "mismatch"
     candidates = [value, value * 100.0] if res_cls == "pct" else [value]
-    if not any(abs(c - target) <= max(0.005 * abs(c), 0.01) for c in candidates):
+    # 目标值来自报告数字抽取（**符号已被剥离**，"-133.33%" 抽成 133.33），因此按量级比：
+    # 方向由正文的负号/方向词承载，符号核对在主张层（`_assertion_matches`）做
+    if not any(abs(abs(c) - abs(target)) <= max(0.005 * abs(c), 0.01)
+               for c in candidates):
         return False, "mismatch"
 
     toks_roles = _operand_roles(expr)
@@ -1519,6 +1531,26 @@ def check_number_traceability(
                 disclosed.append(item)
             else:
                 untraceable.append(item)
+    # 同一读数在文内**重复出现**（摘要/研究问题的观察句复述派生块的读数）：只要有一个
+    # 出现处给出了算式或来源，其余重复处不再按"不可溯源"扣分——否则把已复算的读数在
+    # 摘要里再说一次反而拉低溯源率（实测：研究问题观察句复述"覆盖 107.23%"被判不可溯源，
+    # 而同一个值在『同比与比率』块里带着完整算式）。反过来说：**任何一处都没有算式/来源**
+    # 的数值仍然全部算不可溯源（门槛不变，不放过编造数字）。
+    _verified_pairs = {(round(abs(float(t.get("value") or 0)), 6), str(t.get("unit") or ""))
+                       for t in traceable}
+    if _verified_pairs:
+        still: list[dict] = []
+        for item in untraceable:
+            _k = (round(abs(float(item.get("value") or 0)), 6), str(item.get("unit") or ""))
+            if _k in _verified_pairs:
+                item["source"] = "same_value_elsewhere"
+                item["derived"] = True
+                item["verified"] = False
+                item["note"] = "同值读数在文内已给出算式/来源（本条为重复出现）"
+                traceable.append(item)
+            else:
+                still.append(item)
+        untraceable = still
     rate = traceable.__len__() / total
     covered_ratio = round(rate, 3)
     disclosed_rate = len(disclosed) / total

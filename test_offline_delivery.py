@@ -1371,11 +1371,12 @@ class TestResearchFixedPathOffline(unittest.TestCase):
 
 
 class TestFrozenOfflineScenarios(unittest.TestCase):
-    """F3-B：五份**冻结离线场景**在本套件内跑（CI 门禁要求每个 test_*.py 都在 ci.yml 里，
+    """F3-B：六份**冻结离线场景**在本套件内跑（CI 门禁要求每个 test_*.py 都在 ci.yml 里，
     场景检查做成 `scenario_checks` 模块由这里调用，既进门禁又不新增工作流条目）。
 
     覆盖：①正常增长且证据齐全 ②亏损/现金净流出 + 跨期单位不一致 ③缺附注且资料截止不满足
-    ④三项同步下降（覆盖护栏措辞）⑤错主体/错期间材料被排除且不计入证据。
+    ④三项同步下降（覆盖护栏措辞）⑤错主体/错期间材料被排除且不计入证据
+    ⑥收入下降 + 毛利率大降 + 毛利以下净额不变（金额差与利润率差分开）。
     断言的是场景自带预期（`evals/scenarios/*.json` 的 `expect`）与几条跨场景不变量；
     跑法见 `scripts/scenario_run.py`，产物清单（含 sha256）用于跨修订比对。
     """
@@ -1392,8 +1393,9 @@ class TestFrozenOfflineScenarios(unittest.TestCase):
 
     def test_scenarios_meet_frozen_expectations(self):
         self.assertEqual(sorted(self.manifests),
-                         ["all_decline", "loss_mixed_units", "missing_footnote_asof",
-                          "normal_growth", "wrong_subject_period"])
+                         ["all_decline", "loss_mixed_units", "margin_mix",
+                          "missing_footnote_asof", "normal_growth",
+                          "wrong_subject_period"])
         for name, m in self.manifests.items():
             checks = {k: v for k, v in (m.get("checks") or {}).items() if k != "all_passed"}
             failed = [k for k, v in checks.items() if not v]
