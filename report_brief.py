@@ -152,7 +152,7 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
     analysis_text = _mark_unsupported(analysis_text, unsupported)
     claims = _claims(analysis_text, rows, derived, citations, unsupported=unsupported,
                      subject=str(req.get("company") or req.get("company_id") or ""),
-                     periods=periods)
+                     periods=periods, evidence=evidence)
     background = _background(evidence, citations)
     changes = _change_explanation(rows, derived, periods, findings, evidence, citations)
     perspective = str(req.get("perspective") or "equity")
@@ -193,6 +193,8 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
                               project=project, ws_dir=ws_dir),
         "evidence": {
             "located": int((evidence or {}).get("located") or 0),
+            # D1：检索摘要只是线索，单独计数——它不补"已取得定位"，也不清除缺失类别
+            "snippet_hints": int((evidence or {}).get("snippet_hints") or 0),
             "missing_labels": list((evidence or {}).get("missing_labels") or []),
             "excluded": list((evidence or {}).get("excluded") or []),
         },
@@ -264,6 +266,7 @@ def _change_explanation(rows, derived, periods, findings, evidence, citations) -
         if cur is not None:
             text += f"（{last} 年 {cur.get('value')}{cur.get('unit') or ''}）"
         changes.append({"metric": metric, "label": label, "yoy": v, "text": text,
+                        "period": last,
                         "fact_ids": list((d or {}).get("derived_from") or [])})
     # 变化幅度大在前（本期最值得关注的先看）
     changes.sort(key=lambda c: -abs(float(c.get("yoy") or 0)))
@@ -292,17 +295,58 @@ def _change_explanation(rows, derived, periods, findings, evidence, citations) -
         # 后者含"经第三方平台转载的年报原文"）；其余（媒体解读/评论）进第三方观点
         is_issuer = (str(r.get("source_type")) == "issuer_annual_report"
                      or str(r.get("document_provenance")) == "issuer_annual_report")
+        item["issuer"] = bool(is_issuer)
         (management if is_issuer else third_party).append(item)
-    unproven = [{"label": c["label"], "materials": list(MATERIALS_BY_METRIC.get(c["metric"], ()))}
+    unproven = [{"metric": c["metric"], "label": c["label"], "yoy": c.get("yoy"),
+                 "period": c.get("period"),
+                 "materials": list(MATERIALS_BY_METRIC.get(c["metric"], ()))}
                 for c in changes[:3]]
     unproven = [u for u in unproven if u["materials"]]
-    # C2-4：解释**已取得**时不得再写"原因尚不能证明"（正常场景第 3 页曾同时出现两句）。
-    # 支持程度逐条标：已取得定性解释 → "解释已取得，贡献程度未核实"；否则才是"尚不能证明"。
+    # C2-4/D1：解释按**指标 + 期间**逐条匹配——只取得"收入因提价增加"时，利润与
+    # 现金流仍是缺口。旧实现写 `bool(management)`，把任何一条解释扩散给全部指标
+    # （实机：只给收入解释，利润/现金流也标"解释已取得"）。
     for u in unproven:
-        u["has_explanation"] = bool(management)
+        matched = _match_management_for_metric(
+            management + third_party, str(u.get("metric") or ""), u.get("period"))
+        u["has_explanation"] = bool(matched)
+        if matched:
+            u["matched"] = {"source_n": matched.get("source_n"),
+                            "locator": matched.get("locator"),
+                            "text": str(matched.get("text") or "")[:120],
+                            "issuer": bool(matched.get("issuer"))}
     return {"changes": changes[:3], "management": management,
             "third_party_views": third_party,
             "inference": list(_INFERENCE_BOUNDARY), "unproven": unproven}
+
+
+# 解释与指标的匹配词：一条解释只覆盖它真正谈到的指标（"收入"不得替利润/现金流背书）
+_EXPLANATION_METRIC_WORDS: dict[str, tuple[str, ...]] = {
+    "revenue": ("营业收入", "营收", "销售收入", "收入", "销量", "量价", "产品结构",
+                "渠道", "提价", "价格"),
+    "net_profit": ("归母净利润", "净利润", "归母净利", "净利率", "利润", "毛利",
+                   "费用", "减值", "非经常性损益", "税金"),
+    "operating_cashflow": ("经营活动现金流", "经营现金流", "现金流量净额", "现金流",
+                           "回款", "收现", "营运资本", "应收", "应付", "存货",
+                           "合同负债", "预收"),
+}
+
+
+def _match_management_for_metric(items: list[dict], metric: str,
+                                 period=None) -> dict | None:
+    """这条指标有没有对应的管理层/第三方解释（按词匹配；期间可证时一并核对）。"""
+    words = _EXPLANATION_METRIC_WORDS.get(str(metric or ""), ())
+    if not words:
+        return None
+    year = period if isinstance(period, int) else None
+    for it in (items or []):
+        text = str(it.get("text") or "")
+        if not any(w in text for w in words):
+            continue
+        doc_period = str(it.get("document_period") or "")
+        if year and doc_period and str(year) not in doc_period:
+            continue                     # 期间明确不符的解释不算（如别年的说明）
+        return dict(it)
+    return None
 
 
 
@@ -535,37 +579,276 @@ def _mark_unsupported(text: str, items: list[dict]) -> str:
     return "".join(_mark_sentence(p) for p in parts)
 
 
+# ── D1：主张 → 原子断言 → 逐条支持 ─────────────────────────────
+# 为什么重写绑定：旧实现把"数值（两位小数）"当唯一键——"2023 净利润 100 万元"会被
+# "2024 收入 100 亿元"支持；一句里混入虚假数字（收入对、利润 999）也照样 bound；
+# 负号被 `_NUM_RE` 丢掉（"-12.83%" 与 "+12.83" 同键）。现在每个数字按
+# **指标 + 期间 + 单位（含换算）+ 符号**逐条对底稿事实；缺必需语义就待核查。
+
+# 指标别名 → 底稿 metric slug（长别名优先：避免"毛利"吃掉"毛利率"、"净利润"吃掉"归母净利率"）
+_METRIC_ALIASES: tuple[tuple[str, str], ...] = tuple(sorted((
+    ("经营活动现金流净额同比", "operating_cashflow_yoy"),
+    ("经营现金流同比", "operating_cashflow_yoy"),
+    ("营业收入同比", "revenue_yoy"), ("营收同比", "revenue_yoy"),
+    ("归母净利润同比", "net_profit_yoy"), ("净利润同比", "net_profit_yoy"),
+    ("经营现金流对归母净利润的覆盖", "cashflow_coverage"),
+    ("现金流对净利润的覆盖", "cashflow_coverage"), ("覆盖倍数", "cashflow_coverage"),
+    ("归母净利率", "net_margin"), ("净利率", "net_margin"),
+    ("资产负债率", "debt_ratio"), ("研发投入强度", "rd_intensity"),
+    ("经营活动产生的现金流量净额", "operating_cashflow"),
+    ("经营活动现金流净额", "operating_cashflow"),
+    ("经营现金流净额", "operating_cashflow"),
+    ("经营活动现金流", "operating_cashflow"), ("经营现金流", "operating_cashflow"),
+    ("归属于母公司股东的净利润", "net_profit"), ("归母净利润", "net_profit"),
+    ("归母净利", "net_profit"), ("净利润", "net_profit"),
+    ("营业收入", "revenue"), ("营收", "revenue"), ("销售收入", "revenue"),
+    ("收入", "revenue"),
+    ("毛利率", "gross_margin"), ("毛利润", "gross_profit"), ("毛利", "gross_profit"),
+    ("经营利润", "operating_profit"), ("营业利润", "operating_profit"),
+    ("总资产", "total_assets"), ("资产总额", "total_assets"),
+    ("总负债", "total_liabilities"), ("负债总额", "total_liabilities"),
+    ("研发投入", "rd_expense"), ("研发费用", "rd_expense"),
+), key=lambda kv: -len(kv[0])))
+
+_NEG_MARKERS = ("下降", "下滑", "减少", "负增长", "净流出", "亏损", "为负", "降低",
+                "回落", "下行", "由正转负")
+_POS_MARKERS = ("增长", "上升", "增加", "净流入", "提高", "提升", "上行", "由负转正")
+_ASSERT_TOKEN_RE = re.compile(
+    r"(?P<sign>[+\-−])?\s*(?P<num>\d[\d,]*(?:\.\d+)?)\s*"
+    r"(?P<unit>万亿|千亿|百亿|亿元|万元|亿|万|元|个百分点|％|%)?")
+_CITATION_MARK_RE = re.compile(r"\[(?:n\s*=\s*\d{1,2}|\d{1,2})\]")
+_LINK_TARGET_RE = re.compile(r"\]\([^)]*\)")
+_YEAR_TOKEN_RE = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
+# 目标值/范围：必须写在"目标/计划/力争/预算"之后，且不能是完成率/进度这类结果词
+_TARGET_HEAD_RE = re.compile(r"(?:目标|计划|力争|预算)")
+_TARGET_ACHIEVEMENT_WORDS = ("完成率", "达成率", "进度", "已完成", "达成情况")
+# 百分比断言优先试同比派生指标的三个核心指标（其余比率指标自带独立 slug）
+_YOY_PROMOTABLE = ("revenue", "net_profit", "operating_cashflow")
+
+
+def _unit_class(unit: str) -> str:
+    """单位类别：amount（金额，可换算）/ pct（%）/ pp（百分点）/ ''（未写）。"""
+    u = str(unit or "").strip()
+    if not u:
+        return ""
+    if "%" in u or "％" in u:
+        return "pp" if "百分点" in u else "pct"
+    try:
+        from facts import amount_scale
+        return "amount" if amount_scale(u) > 0 else ""
+    except Exception:
+        return ""
+
+
+def _amount_in_yuan(value, unit: str) -> float:
+    try:
+        from facts import amount_scale
+        return float(value) * float(amount_scale(unit) or 0.0)
+    except Exception:
+        return 0.0
+
+
+def _metric_label_of(metric: str) -> str:
+    try:
+        from facts import metric_label
+        return str(metric_label(metric) or metric)
+    except Exception:
+        return str(metric or "")
+
+
+def _year_of(row) -> int | None:
+    """事实行的年度：优先 `year`，否则从 `period`（"2024年"）解析。"""
+    try:
+        y = (row or {}).get("year")
+        if isinstance(y, (int, float)) and 1900 < int(y) < 2200:
+            return int(y)
+    except Exception:
+        pass
+    m = _YEAR_TOKEN_RE.search(str((row or {}).get("period") or ""))
+    return int(m.group(0)) if m else None
+
+
+def _fact_index(rows, derived) -> dict[str, list[dict]]:
+    """底稿事实索引：metric → 事实行（带期间/值/单位/口径/fact_id 链）。"""
+    idx: dict[str, list[dict]] = {}
+
+    def _add(r, *, is_derived: bool) -> None:
+        metric = str((r or {}).get("metric") or "")
+        value = (r or {}).get("value")
+        if not metric or not isinstance(value, (int, float)):
+            return
+        fid = str((r or {}).get("fact_id") or "")
+        chain = [str(x) for x in ((r or {}).get("derived_from") or []) if str(x)]
+        idx.setdefault(metric, []).append({
+            "metric": metric, "period": _year_of(r), "value": float(value),
+            "unit": str((r or {}).get("unit") or ""),
+            "caliber": str((r or {}).get("caliber") or ""),
+            "fact_ids": ([fid] if fid else []) + chain,
+            "derived": is_derived})
+
+    for r in list(rows or []):
+        _add(r, is_derived=False)
+    for d in list(derived or []):
+        _add(d, is_derived=True)
+    return idx
+
+
+def _assertion_matches(a: dict, f: dict) -> bool:
+    """断言与事实是否对得上：期间、单位类别（含金额换算）、数值、符号。
+
+    数值按**绝对值**比：正文用方向词（"下降 12.83%"）或显式负号表达符号，事实里存的是
+    带符号值（-12.83）——比大小看量级，方向由符号判定（否则真话也会被判不支持）。
+    """
+    if a.get("period") and f.get("period") and int(a["period"]) != int(f["period"]):
+        return False
+    ua = str(a.get("unit_class") or "")
+    uf = _unit_class(str(f.get("unit") or ""))
+    if ua != uf:
+        return False
+    if ua == "amount":
+        va = _amount_in_yuan(a.get("value"), str(a.get("unit") or ""))
+        vf = _amount_in_yuan(abs(float(f.get("value") or 0)), str(f.get("unit") or ""))
+        if vf == 0.0 or abs(va - vf) > max(1e-6, abs(vf) * 1e-6):
+            return False
+    elif ua in ("pct", "pp"):
+        if abs(float(a.get("value") or 0) - abs(float(f.get("value") or 0))) > 0.011:
+            return False
+    else:
+        return False
+    fv = float(f.get("value") or 0)
+    fsign = 0 if fv == 0 else (-1 if fv < 0 else 1)
+    if fsign and int(a.get("sign") or 1) != fsign:
+        return False
+    return True
+
+
+def _assertions_in(sentence: str) -> list[dict]:
+    """句内数字 → 可单独验证的断言（指标/期间/值/单位/符号）。
+
+    带单位但提不出指标的数字**不丢弃**：标 `needs_check`（未提取到必需语义）——
+    "某个数字命中"不足以让整句升级为已支持。
+    """
+    s = _LINK_TARGET_RE.sub("", _CITATION_MARK_RE.sub("", str(sentence or "")))
+    out: list[dict] = []
+    for m in _ASSERT_TOKEN_RE.finditer(s):
+        raw_num = str(m.group("num") or "")
+        try:
+            value = float(raw_num.replace(",", ""))
+        except Exception:
+            continue
+        unit = str(m.group("unit") or "")
+        if not unit and re.fullmatch(r"(?:19|20)\d{2}", raw_num):
+            continue                       # 裸年份是期间上下文，不是取值
+        head = s[max(0, m.start() - 60):m.start()]
+        window = head[-12:]
+        # 指标归属：**取离数字最近**的别名（同距离取更长者）——一句里出现多个指标时
+        # （"营业收入…净利润…"）必须按就近归属，不能按"窗口里最长的别名"。
+        best: tuple[int, int, str] | None = None
+        for alias, slug in _METRIC_ALIASES:
+            pos = head.rfind(alias)
+            if pos < 0:
+                continue
+            cand = (len(head) - (pos + len(alias)), -len(alias), slug)
+            if best is None or cand < best:
+                best = cand
+        metric = best[2] if best else ""
+        if not metric and not unit:
+            continue                       # 无指标、无单位：不是财务断言（计数/页码等）
+        sign = 1
+        if m.group("sign") in ("-", "−"):
+            sign = -1
+        elif any(k in window for k in _NEG_MARKERS):
+            sign = -1
+        elif any(k in window for k in _POS_MARKERS):
+            sign = 1
+        year = None
+        for ym in _YEAR_TOKEN_RE.finditer(head):
+            year = int(ym.group(0))
+        out.append({"text": str(m.group(0)).strip()[:40], "metric": metric,
+                    "metric_label": _metric_label_of(metric) if metric else "",
+                    "period": year, "value": value, "unit": unit, "sign": sign,
+                    "unit_class": _unit_class(unit), "fact_ids": [],
+                    "support_status": "needs_check", "reason": ""})
+    return out
+
+
+def _target_value_present(sentence: str) -> bool:
+    """句子里有没有**目标值/目标范围**（完成率/进度是结果词，不算目标值）。"""
+    s = str(sentence or "")
+    for m in _TARGET_HEAD_RE.finditer(s):
+        tail = s[m.end():m.end() + 26]
+        if any(w in tail for w in _TARGET_ACHIEVEMENT_WORDS):
+            continue
+        if re.search(r"\d[\d,]*(?:\.\d+)?\s*(?:万亿|千亿|百亿|亿元|万元|亿|万|元|%|％)", tail):
+            return True
+        if re.search(r"\d+\s*[%％]?\s*[—\-~至]\s*\d", tail):
+            return True
+    return False
+
+
+def _evidence_ids_for(sentence_key: str, evidence: dict | None) -> list[str]:
+    """该句引用了哪些**已定位**的证据片段（摘要去标点后的前缀命中）。"""
+    if not sentence_key:
+        return []
+    ids: list[str] = []
+    for r in ((evidence or {}).get("records") or []):
+        if not r.get("has_location"):
+            continue
+        if str(r.get("admission") or "") not in ("admitted", "comparison"):
+            continue
+        probe = _sentence_key(str(r.get("snippet") or ""))[:40]
+        if len(probe) >= 12 and probe in sentence_key:
+            cid = str(r.get("content_hash") or "")
+            if cid and cid not in ids:
+                ids.append(cid)
+    return ids
+
+
 def _claims(body: str, rows, derived, citations, *,
             unsupported: list[dict] | None = None, subject: str = "",
-            periods: list[int] | None = None) -> list[dict]:
-    """模型正文里含数字的句子 → 与底稿值比对绑定（**不要求模型输出 schema**）。
+            periods: list[int] | None = None,
+            evidence: dict | None = None) -> list[dict]:
+    """模型正文 → 逐句主张，**每个数字按原子断言逐条对底稿**（D1）。
 
-    绑不上的主张进"待核查"（`status=needs_check`），既不丢弃也不当作已核实；
-    引用了**未采用来源**的句子单独记 `status=unsupported`（C2-1/C2-2），
-    并带上该来源与未采用原因——"来源清单合规"不等于"结论受支持"。
+    状态口径（对外固定）：
+    - `bound`：句内每条断言都对上了底稿事实（指标/期间/单位换算/符号一致）；
+    - `partially_supported`：部分断言对上、部分没有（"一句正确收入搭虚假利润"即此）；
+    - `unsupported`：断言语义齐全但没有任何底稿事实支持；引用了**未采用来源**的句子
+      也记此状态（并带 `source`），"来源清单合规"不等于结论受支持；
+    - `needs_check`：未提取到必需语义（缺指标名/期间/单位），或纯文字的目标/因果判断。
 
-    每条主张记录可追溯的最小字段：结论文本、主体、期间、类型、支持片段（fact_id 或
-    来源编号）、支持状态；`version_id` 由装配器在本版正文确定后补上（见 structure）。
+    每条主张携带：结论文本、主体、期间、类型（observation/inference/assumption/
+    target_claim/third_party_view/unbound）、`assertions[]`（逐条支持）、`fact_ids`、
+    `evidence_ids`（已定位证据片段）、`support_status`、`reason`、`version_id`。
     """
-    values: dict[str, str] = {}
-    for r in rows:
-        v = r.get("value")
-        if isinstance(v, (int, float)):
-            values[_num_key(v)] = str(r.get("fact_id") or "")
-    for d in derived:
-        v = d.get("value")
-        if isinstance(v, (int, float)):
-            values[_num_key(v)] = ",".join(str(x) for x in (d.get("derived_from") or []))
+    idx = _fact_index(rows, derived)
     unsup_by_sentence: dict[str, list[dict]] = {}
     for u in (unsupported or []):
         key = str(u.get("key") or _sentence_key(u.get("sentence") or ""))
         if key:
             unsup_by_sentence.setdefault(key, []).append(u)
     years = {int(y) for y in (periods or [])}
+    issuer_ns = {int(c.get("n")) for c in (citations or [])
+                 if str(c.get("type")) == "issuer_annual_report"}
+
+    def _judgment_kind(s: str) -> str | None:
+        """无数字句子里仍要进支持清单的判断类型（不能漏出清单）。"""
+        if _is_target_claim(s):
+            return "target_claim"
+        try:
+            import narrative_evidence as _ne
+            if _ne.is_causal(s):
+                return "inference"
+        except Exception:
+            pass
+        if any(k in s for k in ("风险", "不确定性", "承压", "压力")):
+            return "risk"
+        return None
+
     out: list[dict] = []
     for sent in re.split(r"[。！？!?\n]+", str(body or "")):
         s = sent.strip()
-        if not s or not _NUM_RE.search(s):
+        if not s:
             continue
         if s.lstrip().startswith("#"):
             continue                      # 标题不是主张（含股票代码/年份，否则会被当成"待核查"）
@@ -575,11 +858,86 @@ def _claims(body: str, rows, derived, citations, *,
             continue                      # 表格行不是主张（模型自写的表由装配器接管）
         if re.match(r"^\d+\.\s*\[", s) or re.match(r"^[-*]\s*\[", s):
             continue                      # 来源清单条目不是主张
+        has_number = bool(_NUM_RE.search(s))
+        assertions = _assertions_in(s) if has_number else []
+        if not has_number:
+            kind_text = _judgment_kind(s)
+            if kind_text is None or len(s) < 12:
+                continue                  # 既无数字又不是判断句：不进主张清单
+            cite_ns0 = [int(m.group(1) if m.group(1) else m.group(2))
+                        for m in re.finditer(r"\[(?:n\s*=\s*(\d{1,2})|(\d{1,2}))\]", s)]
+            reason0 = ("纯文字判断：需可定位的披露原文或底稿事实支持，本次未取得"
+                       if kind_text != "target_claim" else
+                       "目标类判断需核对目标年度、目标值或范围、披露时点与实际口径；"
+                       "本次未取得发行人披露对该目标的直接支持")
+            out.append({"text": s[:200], "type": kind_text, "claim_type": kind_text,
+                        "fact_ids": [], "evidence_ids": _evidence_ids_for(_sentence_key(s), evidence),
+                        "status": "needs_check", "support_status": "needs_check",
+                        "reason": reason0, "assertions": [],
+                        "subject": str(subject or ""),
+                        "periods": sorted({y for y in years
+                                           if re.search(rf"(?<!\d){y}(?!\d)", s)}),
+                        "citations": cite_ns0, "version_id": ""})
+            continue
+        if not assertions:
+            continue                      # 有数字但没有可验证断言（纯年份/计数）：不进清单
+        # 逐条断言对事实
+        for a in assertions:
+            # 百分比挂在核心指标名后（"营业收入…下降 12.83%"）时，先试它的同比指标——
+            # 底稿里"同比"是独立派生事实（revenue_yoy），按基础指标找会因单位类别不符落空
+            cand_metrics = [str(a.get("metric") or "")]
+            _base = str(a.get("metric") or "")
+            if (a.get("unit_class") in ("pct", "pp") and _base in _YOY_PROMOTABLE
+                    and f"{_base}{_YOY_SUFFIX}" in idx):
+                cand_metrics.insert(0, f"{_base}{_YOY_SUFFIX}")
+            hit = None
+            for mk in cand_metrics:
+                for f in idx.get(mk, []):
+                    if _assertion_matches(a, f):
+                        hit = f
+                        break
+                if hit is not None:
+                    if mk != _base:
+                        a["metric"] = mk
+                        a["metric_label"] = _metric_label_of(mk)
+                    break
+            if hit is not None:
+                a["support_status"] = "supported"
+                a["fact_ids"] = list(hit.get("fact_ids") or [])
+                a["reason"] = ""
+            elif not a.get("metric"):
+                a["support_status"] = "needs_check"
+                a["reason"] = "未提取到指标名，无法与底稿事实对应"
+            elif not a.get("period"):
+                a["support_status"] = "needs_check"
+                a["reason"] = "未标期间，无法与底稿事实对应"
+            elif not a.get("unit_class"):
+                a["support_status"] = "needs_check"
+                a["reason"] = "未标单位，无法与底稿事实对应"
+            else:
+                a["support_status"] = "unsupported"
+                a["reason"] = (f"底稿中没有匹配的事实（{a.get('metric_label') or a.get('metric')}"
+                               f"{('、' + str(a['period']) + '年') if a.get('period') else ''}"
+                               f"、{a.get('value')}{a.get('unit') or ''}）")
         facts: list[str] = []
-        for tok in _NUM_RE.findall(s):
-            fid = values.get(_num_key(tok))
-            if fid and fid not in facts:
-                facts.extend([x for x in fid.split(",") if x])
+        for a in assertions:
+            for fid in (a.get("fact_ids") or []):
+                if fid and fid not in facts:
+                    facts.append(fid)
+        supported = [a for a in assertions if a["support_status"] == "supported"]
+        unsupported_a = [a for a in assertions if a["support_status"] == "unsupported"]
+        incomplete = [a for a in assertions if a["support_status"] == "needs_check"]
+        if supported and not unsupported_a and not incomplete:
+            status = "bound"
+        elif supported:
+            status = "partially_supported"
+        elif unsupported_a:
+            status = "unsupported"
+        else:
+            status = "needs_check"
+        reason = "；".join(
+            f"{a.get('text')}：{a.get('reason')}"
+            for a in (unsupported_a + incomplete))[:200]
         kind = "observation" if facts else "unbound"
         if any(k in s for k in ("可能", "预计", "推测", "或将", "若")):
             kind = "inference" if facts else "unbound"
@@ -587,10 +945,13 @@ def _claims(body: str, rows, derived, citations, *,
             kind = "assumption" if facts else "unbound"
         cite_ns = [int(m.group(1) if m.group(1) else m.group(2))
                    for m in re.finditer(r"\[(?:n\s*=\s*(\d{1,2})|(\d{1,2}))\]", s)]
-        hit = next((u for key, items in unsup_by_sentence.items()
-                    for u in items if key and key in _sentence_key(s)), None)
-        claim = {"text": s[:200], "type": kind,
-                 "fact_ids": facts, "status": "bound" if facts else "needs_check",
+        hit_u = next((u for key, items in unsup_by_sentence.items()
+                      for u in items if key and key in _sentence_key(s)), None)
+        claim = {"text": s[:200], "type": kind, "claim_type": kind,
+                 "fact_ids": facts,
+                 "evidence_ids": _evidence_ids_for(_sentence_key(s), evidence),
+                 "status": status, "support_status": status, "reason": reason,
+                 "assertions": assertions,
                  "subject": str(subject or ""),
                  "periods": sorted({y for y in years
                                     if re.search(rf"(?<!\d){y}(?!\d)", s)}),
@@ -598,24 +959,34 @@ def _claims(body: str, rows, derived, citations, *,
                  # 版本号在装配时由 `stamp_structure_version` 盖上（未盖 = 空串，
                  # 页面据此判"结构对象是否属于当前版本"，不拿旧结构冒充新版）
                  "version_id": ""}
-        if hit is not None:
+        if hit_u is not None:
             # 未采用来源：不因"数字绑得上底稿"就算支持（结论依赖那份材料）
             claim["status"] = "unsupported"
-            claim["reason"] = str(hit.get("reason") or "")
-            claim["source"] = {"url": str(hit.get("url") or ""),
-                               "title": str(hit.get("title") or ""),
-                               "old_n": hit.get("old_n")}
-            claim["type"] = "third_party_view" if "报道" in s or "媒体" in s else kind
+            claim["support_status"] = "unsupported"
+            claim["reason"] = str(hit_u.get("reason") or "")
+            claim["source"] = {"url": str(hit_u.get("url") or ""),
+                               "title": str(hit_u.get("title") or ""),
+                               "old_n": hit_u.get("old_n")}
+            claim["type"] = ("third_party_view" if "报道" in s or "媒体" in s else kind)
+            claim["claim_type"] = claim["type"]
         elif _is_target_claim(s):
-            # C2-3：**目标/达成类**判断不能靠"某篇文章提到"成立——必须核对目标年度、
-            # 目标发布时点与实际数。实机反例：洋河原稿用"2024 年 5%—10% 目标未达成
-            # 这一事实"开展判断，来源却是未采用/期间未标注的第三方材料。
-            issuer_ns = {int(c.get("n")) for c in (citations or [])
-                         if str(c.get("type")) == "issuer_annual_report"}
+            # C2-3/D1：目标类判断逐项核对——目标年度、目标值/范围、披露时点（发行人
+            # 原文支持）、实际口径；缺哪项写哪项，不能靠"某篇文章提到"或"有个年报引用"成立。
+            missing: list[str] = []
+            if not claim["periods"]:
+                missing.append("目标年度")
+            if not _target_value_present(s):
+                missing.append("目标值或目标范围")
             if not (set(cite_ns) & issuer_ns):
+                missing.append("发行人披露对该目标的原文支持")
+            if not any(a.get("metric") for a in assertions):
+                missing.append("实际口径/实际值")
+            if missing:
                 claim["status"] = "needs_check"
+                claim["support_status"] = "needs_check"
                 claim["type"] = "target_claim"
-                claim["reason"] = ("目标类判断需核对目标年度、目标发布时点与实际数；"
+                claim["claim_type"] = "target_claim"
+                claim["reason"] = (f"目标类判断需核对{'、'.join(missing)}；"
                                    "本次未取得发行人披露对该目标的直接支持")
         out.append(claim)
     return out[:40]
@@ -626,14 +997,6 @@ def _is_target_claim(text: str) -> bool:
     s = str(text or "")
     return any(k in s for k in ("目标", "计划完成", "达成", "完成率", "考核指标",
                                 "经营计划", "预算目标"))
-
-
-
-def _num_key(value) -> str:
-    try:
-        return f"{float(str(value).replace(',', '')):.2f}"
-    except Exception:
-        return str(value)
 
 
 # ── 风险与待核查（底稿缺口 + 模型风险小节）──────────────────────
@@ -694,8 +1057,12 @@ def _risks(task_id: str, goal: str, body: str, *, project=None,
     # 一边在缺口里说没有解释（读者会以为整段解释是编的）。
     for u in (changes.get("unproven") or []):
         if u.get("has_explanation"):
+            _m = u.get("matched") or {}
+            _where = ("；".join(x for x in (
+                (f"来源 [{_m.get('source_n')}]" if _m.get("source_n") else ""),
+                str(_m.get("locator") or "")) if x) or "见『变化解释』的管理层/附注说明")
             _add("unproven_change",
-                 f"{u.get('label')}：解释已取得（见『变化解释』的管理层/附注说明），"
+                 f"{u.get('label')}：解释已取得（{_where}），"
                  f"但量价与贡献程度未核实",
                  evidence_note="已取得定性解释；分解到量/价/结构的数据尚未取得",
                  would_change=f"取得{'、'.join(u.get('materials') or [])}后，"

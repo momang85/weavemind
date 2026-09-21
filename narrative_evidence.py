@@ -9,8 +9,11 @@
 三条纪律：
 - **只定位、不编造**：没抓到的类别记为缺口（`missing_kinds`），不用模型知识补；
 - **确定性**：全部由文本与关键词算出，不调用模型（同一输入必得同一输出）；
-- **定位口径诚实**：网页正文没有页码，记"小节路径 + 字符区间"；检索摘要没有正文，
-  记 `has_location=False`，不计入"已取得证据"。
+- **定位口径诚实**（D1 收紧）：网页正文没有页码，记"小节路径 + 字符区间"；
+  检索摘要没有正文，记 `has_location=False` 并只计入 `snippet_hints`（线索）；
+  `located` = **已准入 + 有正文位置 + 按 (url, 片段指纹) 去重**的片段数——
+  摘要不补"已取得定位"的数量，也不清除"某类证据缺失"；同一 URL 已有正文证据时
+  不再登记它的检索摘要（一个 URL 不能靠摘要复制多算覆盖）。
 """
 
 from __future__ import annotations
@@ -750,6 +753,10 @@ def build(task_id: str, *, periods=None, company: str = "", company_id: str = ""
         if not kind:
             continue
         url = str(s.get("url") or "")
+        # D1：同一 URL 已有**带定位**的正文证据时，不再登记它的检索摘要——一个 URL
+        # 不能靠"摘要复制"多算一条覆盖（实机：同一新闻 URL 两条记录，located 被抬到 2）
+        if url and any(str(d.get("url") or "") == url for d in docs):
+            continue
         rec = {
             "kind": kind, "kind_label": KIND_LABELS[kind], "title": title, "url": url,
             "source_type": source_type(url), "publisher": publisher_of(url), "section": "",
@@ -808,10 +815,24 @@ def build(task_id: str, *, periods=None, company: str = "", company_id: str = ""
                    if not r.get("has_location")
                    or r.get("admission") not in ("admitted", "comparison"))
     records = ordered
-    admitted = [r for r in records if r.get("admission") in ("admitted", "comparison")]
+    # D1：`located` 只数**已准入且有可复核正文位置**的片段，并按 (url, 片段指纹) 去重；
+    # 检索摘要（has_location=False）另计 `snippet_hints`，只作线索——
+    # 它既不补"已取得定位"的数量，也不清除"某类证据缺失"。
+    located_records: list[dict] = []
+    _seen_loc: set[tuple[str, str]] = set()
+    for r in records:
+        if not r.get("has_location"):
+            continue
+        if str(r.get("admission") or "") not in ("admitted", "comparison"):
+            continue
+        key = (str(r.get("url") or ""), str(r.get("content_hash") or ""))
+        if key in _seen_loc:
+            continue
+        _seen_loc.add(key)
+        located_records.append(r)
+    snippet_hints = [r for r in records if not r.get("has_location")]
     missing = [k for k in KIND_ORDER
-               if not any(r["kind"] == k and r.get("admission") in ("admitted", "comparison")
-                          for r in records)]
+               if not any(r["kind"] == k for r in located_records)]
     sources: list[dict] = []
     for r in records:
         if not r.get("url") or any(s["url"] == r["url"] for s in sources):
@@ -830,7 +851,7 @@ def build(task_id: str, *, periods=None, company: str = "", company_id: str = ""
                  "locator": r.get("locator") or ""}
                 for r in records if r.get("admission") not in ("admitted", "comparison")]
     payload = {
-        "ok": bool(admitted),
+        "ok": bool(located_records),
         "company": company,
         "company_id": company_id,
         "as_of": as_of,
@@ -842,7 +863,10 @@ def build(task_id: str, *, periods=None, company: str = "", company_id: str = ""
         "sources": sources,
         "excluded": excluded[:12],
         "docs": len(docs),
-        "located": len(admitted),
+        # `located`：已准入 + 有正文位置 + 去重后的**片段数**（不数摘要、不数来源）；
+        # `snippet_hints`：只有检索摘要、没有正文定位的线索数（不计入覆盖）。
+        "located": len(located_records),
+        "snippet_hints": len(snippet_hints),
         "built_at": fetched_at,
     }
     _write(task_id, payload, ws_dir=ws_dir)

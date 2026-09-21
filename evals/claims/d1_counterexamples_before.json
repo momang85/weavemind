@@ -1,0 +1,396 @@
+{
+ "mode": "before",
+ "cases": [
+  {
+   "id": "c1_cross_period_metric_value",
+   "note": "只有 2024 收入 100 亿元：'2023 净利润 100 万元'不得被它支持（跨期/跨指标/跨单位）",
+   "expect": {
+    "statuses": [
+     "unsupported"
+    ],
+    "assertion_statuses": [
+     [
+      "unsupported"
+     ]
+    ],
+    "fact_ids": [
+     []
+    ]
+   },
+   "observed": {
+    "claims": [
+     {
+      "text": "2023 年归母净利润 100 万元",
+      "type": "observation",
+      "status": "bound",
+      "reason": null,
+      "fact_ids": [
+       "fact-rev-2024"
+      ],
+      "assertion_statuses": [],
+      "assertions": []
+     }
+    ]
+   },
+   "ok": false,
+   "mismatch": [
+    "statuses 期望 ['unsupported'] 实得 ['bound']",
+    "assertion_statuses 期望 [['unsupported']] 实得 [[]]",
+    "fact_ids 期望 [[]] 实得 [['fact-rev-2024']]"
+   ]
+  },
+  {
+   "id": "c2_mixed_true_false_same_sentence",
+   "note": "一句里正确收入 + 虚假利润 999：整句不得 bound（部分支持）",
+   "expect": {
+    "statuses": [
+     "partially_supported"
+    ],
+    "assertion_statuses": [
+     [
+      "supported",
+      "unsupported"
+     ]
+    ],
+    "fact_ids": [
+     [
+      "fact-rev-2024"
+     ]
+    ]
+   },
+   "observed": {
+    "claims": [
+     {
+      "text": "2024 年营业收入 100 亿元，归母净利润 999 亿元",
+      "type": "observation",
+      "status": "bound",
+      "reason": null,
+      "fact_ids": [
+       "fact-rev-2024"
+      ],
+      "assertion_statuses": [],
+      "assertions": []
+     }
+    ]
+   },
+   "ok": false,
+   "mismatch": [
+    "statuses 期望 ['partially_supported'] 实得 ['bound']",
+    "assertion_statuses 期望 [['supported', 'unsupported']] 实得 [[]]"
+   ]
+  },
+  {
+   "id": "c3_target_claim_with_issuer_citation",
+   "note": "有年报引用但缺目标值/实际口径：目标类判断必须点名缺口，不能因引用或数字命中通过",
+   "expect": {
+    "statuses": [
+     "needs_check"
+    ],
+    "types": [
+     "target_claim"
+    ],
+    "reason_contains": [
+     [
+      "目标值",
+      "实际口径"
+     ]
+    ]
+   },
+   "observed": {
+    "claims": [
+     {
+      "text": "公司 2024 年经营目标完成率 100% 并已达成 [1]",
+      "type": "observation",
+      "status": "bound",
+      "reason": null,
+      "fact_ids": [
+       "fact-rev-2024"
+      ],
+      "assertion_statuses": [],
+      "assertions": []
+     }
+    ]
+   },
+   "ok": false,
+   "mismatch": [
+    "statuses 期望 ['needs_check'] 实得 ['bound']",
+    "types 期望 ['target_claim'] 实得 ['observation']",
+    "第 1 句 reason 缺 目标值：",
+    "第 1 句 reason 缺 实际口径："
+   ]
+  },
+  {
+   "id": "c4_sign_mismatch",
+   "note": "底稿同比是 -12.83%：正文'下降 12.83%'必须绑定；'增长 12.83%'不得绑定（方向不符）",
+   "expect": {
+    "statuses": [
+     "bound",
+     "unsupported"
+    ],
+    "assertion_statuses": [
+     [
+      "supported"
+     ],
+     [
+      "unsupported"
+     ]
+    ]
+   },
+   "observed": {
+    "claims": [
+     {
+      "text": "2024 年营业收入同比下降 12.83%",
+      "type": "unbound",
+      "status": "needs_check",
+      "reason": null,
+      "fact_ids": [],
+      "assertion_statuses": [],
+      "assertions": []
+     },
+     {
+      "text": "2024 年营业收入同比增长 12.83%",
+      "type": "unbound",
+      "status": "needs_check",
+      "reason": null,
+      "fact_ids": [],
+      "assertion_statuses": [],
+      "assertions": []
+     }
+    ]
+   },
+   "ok": false,
+   "mismatch": [
+    "statuses 期望 ['bound', 'unsupported'] 实得 ['needs_check', 'needs_check']",
+    "assertion_statuses 期望 [['supported'], ['unsupported']] 实得 [[], []]"
+   ]
+  },
+  {
+   "id": "c5_unit_conversion",
+   "note": "单位换算正例（0.01 亿元 = 100 万元）与量级不符反例（20 万元 ≠ 20 亿元）",
+   "expect": {
+    "statuses": [
+     "bound",
+     "unsupported"
+    ],
+    "assertion_statuses": [
+     [
+      "supported"
+     ],
+     [
+      "unsupported"
+     ]
+    ]
+   },
+   "observed": {
+    "claims": [
+     {
+      "text": "2024 年营业收入 0.01 亿元",
+      "type": "unbound",
+      "status": "needs_check",
+      "reason": null,
+      "fact_ids": [],
+      "assertion_statuses": [],
+      "assertions": []
+     },
+     {
+      "text": "2024 年归母净利润 20 万元",
+      "type": "observation",
+      "status": "bound",
+      "reason": null,
+      "fact_ids": [
+       "fact-np-yi"
+      ],
+      "assertion_statuses": [],
+      "assertions": []
+     }
+    ]
+   },
+   "ok": false,
+   "mismatch": [
+    "statuses 期望 ['bound', 'unsupported'] 实得 ['needs_check', 'bound']",
+    "assertion_statuses 期望 [['supported'], ['unsupported']] 实得 [[], []]"
+   ]
+  },
+  {
+   "id": "c6a_real_disclosure_core_metric_positive",
+   "note": "真实年报数字（288.76 亿元、同比 -12.83%）+ 同口径事实：必须绑定",
+   "expect": {
+    "statuses": [
+     "bound"
+    ],
+    "assertion_statuses": [
+     [
+      "supported",
+      "supported"
+     ]
+    ]
+   },
+   "observed": {
+    "claims": [
+     {
+      "text": "2024 年营业收入 288.76 亿元，同比下降 12.83%",
+      "type": "observation",
+      "status": "bound",
+      "reason": null,
+      "fact_ids": [
+       "fact-rev-2024"
+      ],
+      "assertion_statuses": [],
+      "assertions": []
+     }
+    ]
+   },
+   "ok": false,
+   "mismatch": [
+    "assertion_statuses 期望 [['supported', 'supported']] 实得 [[]]"
+   ]
+  },
+  {
+   "id": "c6b_real_disclosure_segment_row_not_total",
+   "note": "年报真实分部行（中高档酒 243.17 亿元、-14.79%）：不得冒充营业收入总额事实",
+   "expect": {
+    "statuses": [
+     "unsupported"
+    ],
+    "not_fact_ids": [
+     "fact-rev-2024"
+    ]
+   },
+   "observed": {
+    "claims": [
+     {
+      "text": "各类产品收入情况如下： 单位：元 营业收入 产品类别 2024 年 同比增减 中高档酒 24,317,191,550.05 -14.79% 普通酒 3,931,104,279.57 -0.49%",
+      "type": "unbound",
+      "status": "needs_check",
+      "reason": null,
+      "fact_ids": [],
+      "assertion_statuses": [],
+      "assertions": []
+     }
+    ]
+   },
+   "ok": false,
+   "mismatch": [
+    "statuses 期望 ['unsupported'] 实得 ['needs_check']"
+   ]
+  },
+  {
+   "id": "c6c_real_disclosure_non_core_metric",
+   "note": "年报真实附注句（前五名经销客户 235,177.00 万元 / 8.15%）：底稿无对应指标 → 待核查并写明原因",
+   "expect": {
+    "statuses": [
+     "needs_check"
+    ],
+    "reason_contains": [
+     [
+      "未提取到指标名"
+     ]
+    ]
+   },
+   "observed": {
+    "claims": [
+     {
+      "text": "2024 年度,公司前五名经销客户的合计销售金额为 235,177.00 万元，占本年度销售总额 8.15%",
+      "type": "unbound",
+      "status": "needs_check",
+      "reason": null,
+      "fact_ids": [],
+      "assertion_statuses": [],
+      "assertions": []
+     }
+    ]
+   },
+   "ok": false,
+   "mismatch": [
+    "第 1 句 reason 缺 未提取到指标名："
+   ]
+  },
+  {
+   "id": "e1_explanation_scope",
+   "note": "只取得收入解释：利润与现金流不得标'解释已取得'",
+   "expect": {
+    "has_explanation": {
+     "营业收入": true,
+     "归母净利润": false,
+     "经营活动现金流净额": false
+    }
+   },
+   "observed": {
+    "management": [
+     {
+      "text": "报告期内营业收入同比下降，主要系公司主动调整产品结构与渠道库存所致。",
+      "source_n": ""
+     }
+    ],
+    "unproven": [
+     {
+      "label": "归母净利润",
+      "has_explanation": true,
+      "matched": null
+     },
+     {
+      "label": "经营活动现金流净额",
+      "has_explanation": true,
+      "matched": null
+     },
+     {
+      "label": "营业收入",
+      "has_explanation": true,
+      "matched": null
+     }
+    ]
+   },
+   "ok": false,
+   "mismatch": [
+    "归母净利润 has_explanation 期望 False 实得 True",
+    "经营活动现金流净额 has_explanation 期望 False 实得 True"
+   ]
+  },
+  {
+   "id": "n1_located_counting",
+   "note": "同一 URL 的检索摘要不重复计数：located 只数已准入且有正文位置的片段",
+   "expect": {
+    "located": 2,
+    "snippet_hints": 1,
+    "missing_labels_contains": [
+     "经营变化解释",
+     "风险因素"
+    ]
+   },
+   "observed": {
+    "located": 3,
+    "snippet_hints": null,
+    "missing_labels": [
+     "业务背景",
+     "经营变化解释"
+    ],
+    "records": [
+     {
+      "kind": "footnote",
+      "has_location": true,
+      "admission": "admitted",
+      "locator": "小节：第三节 管理层讨论与分析 > 一、经营情况讨论与分析（字符 14-59）"
+     },
+     {
+      "kind": "footnote",
+      "has_location": true,
+      "admission": "admitted",
+      "locator": "小节：第三节 管理层讨论与分析 > 七、财务报表附注（字符 59-96）"
+     },
+     {
+      "kind": "risk",
+      "has_location": false,
+      "admission": "admitted",
+      "locator": "检索摘要（未取得正文定位）"
+     }
+    ]
+   },
+   "ok": false,
+   "mismatch": [
+    "located 期望 2 实得 3",
+    "snippet_hints 期望 1 实得 None",
+    "missing_labels 缺 风险因素：['业务背景', '经营变化解释']"
+   ]
+  }
+ ]
+}

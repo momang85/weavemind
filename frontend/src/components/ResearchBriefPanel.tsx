@@ -44,7 +44,8 @@ export default function ResearchBriefPanel({ taskId, research, exportState, onRe
   const rv = research.review || {}
   const claims = research.claims || []
   const unsupported = research.unsupported_claims || []
-  const weakClaims = claims.filter(c => c.status === 'unsupported' || c.status === 'needs_check')
+  const weakClaims = claims.filter(c => c.status === 'unsupported'
+    || c.status === 'needs_check' || c.status === 'partially_supported')
   const hasGaps = evidenceGaps.length + citationGaps.length + unproven.length + requiredGaps.length > 0
 
   const submitRevision = async () => {
@@ -127,6 +128,7 @@ export default function ResearchBriefPanel({ taskId, research, exportState, onRe
       <div className={box}>
         <div className={h}>
           证据（已取得定位 {ev.located ?? 0} 条
+          {ev.snippet_hints ? `；另有 ${ev.snippet_hints} 条检索线索未取得正文定位` : ''}
           {ev.rules_version ? `；校验规则 ${ev.rules_version}` : ''}）
         </div>
         {(ev.excluded || []).length > 0 && (
@@ -186,7 +188,10 @@ export default function ResearchBriefPanel({ taskId, research, exportState, onRe
             <ul className={li}>
               {weakClaims.slice(0, 5).map((c, i) => (
                 <li key={i} className={c.status === 'unsupported' ? 'text-amber-400' : ''}>
-                  · {c.status === 'unsupported' ? '未采用来源' : '待核查'}
+                  · {c.source ? '未采用来源'
+                    : c.status === 'unsupported' ? '无底稿事实支持'
+                    : c.status === 'partially_supported' ? '部分支持（有断言未对上底稿）'
+                    : '待核查'}
                   {c.type === 'target_claim' ? '（目标类判断）' : ''}：{String(c.text || '').slice(0, 60)}
                   {c.reason ? `——${c.reason}` : ''}
                 </li>

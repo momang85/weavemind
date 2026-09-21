@@ -6485,11 +6485,15 @@ class TestUnsupportedClaimLinkage(unittest.TestCase):
         self.assertIn("归母净利润 66.73 亿元", st["analysis"])
 
     def test_explanation_present_is_not_reported_as_missing(self):
-        """C2-4：解释已取得时写"贡献程度未核实"，不得同时宣称"原因尚不能证明"。"""
+        """C2-4/D1：解释按**指标**匹配——只给收入解释时，利润与现金流仍是缺口。
+
+        旧实现 `has_explanation = bool(management)` 把任何一条解释扩散给全部指标
+        （审查反例：只给"收入因提价增加"，利润和现金流也标"解释已取得"）。
+        """
         import report_brief
         tid = self._env(tid="c2-unsup-3")
         proj = ws_mod.task_project_dir(tid, "default")
-        # 补一份**已采用**的年报正文（含经营讨论）→ 管理层解释存在
+        # 补一份**已采用**的年报正文（含经营讨论，只谈收入）→ 管理层解释存在
         (proj / "fetch_snapshot.json").write_text(json.dumps([
             {"title": "洋河股份2024年年度报告",
              "url": "https://static.cninfo.com.cn/finalpage/2025-04-29/1.PDF",
@@ -6505,15 +6509,92 @@ class TestUnsupportedClaimLinkage(unittest.TestCase):
         ch = st["change_explanation"]
         if not ch.get("management"):
             self.skipTest("该夹具未取得管理层解释，另有用例覆盖无解释分支")
-        unproven = ch.get("unproven") or []
-        self.assertTrue(unproven)
-        self.assertTrue(all(u.get("has_explanation") for u in unproven), unproven)
+        unproven = {u.get("label"): u for u in (ch.get("unproven") or [])}
+        self.assertIn("营业收入", unproven)
+        self.assertTrue(unproven["营业收入"].get("has_explanation"),
+                        "收入解释已取得（该段谈的就是收入）")
+        # D1：解释不得扩散——利润与现金流没有被这条解释说明
+        for label in ("归母净利润", "经营活动现金流净额"):
+            self.assertIn(label, unproven)
+            self.assertFalse(unproven[label].get("has_explanation"),
+                             f"{label} 不得因收入解释而标'解释已取得'：{unproven[label]}")
         texts = [r["text"] for r in st["risks"] if r["kind"] == "unproven_change"]
-        self.assertTrue(texts)
-        for t in texts:
-            self.assertIn("解释已取得", t, t)
-            self.assertNotIn("尚不能证明", t, t)
+        self.assertTrue(any("解释已取得" in t for t in texts), texts)
+        self.assertTrue(any("尚不能证明" in t for t in texts), texts)
+        self.assertNotIn("解释已取得", "\n".join(
+            t for t in texts if t.startswith("归母净利润")), texts)
 
+
+
+class TestClaimAssertionSupport(unittest.TestCase):
+    """D1：主张逐条断言支持——三个误绑定反例、正例、解释范围、定位计数（冻结用例重放）。
+
+    审查反例（`docs/阶段D前置审查_报告与交付_20260921.md` P1）：底稿只有"2024 收入
+    100 亿元"时，"2023 净利润 100 万元"仍被 bound；"收入100亿元、利润999亿元"整句
+    bound；"目标完成率100%并已达成"仅凭一个年报引用通过；只给收入解释时利润/现金流
+    也标"解释已取得"；located=2 实际只有 1 条有正文定位。
+    """
+
+    @staticmethod
+    def _cases_module():
+        import importlib.util
+        p = Path(__file__).resolve().parent / "scripts" / "claims_d1_cases.py"
+        spec = importlib.util.spec_from_file_location("claims_d1_cases", p)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_frozen_cases_replay_clean(self):
+        self.assertEqual(self._cases_module().main(["check"]), 0,
+                         "冻结用例（after 期望）必须全部成立")
+
+    def test_frozen_files_record_before_and_after(self):
+        base = Path(__file__).resolve().parent / "evals" / "claims"
+        before = json.loads((base / "d1_counterexamples_before.json").read_text(encoding="utf-8"))
+        after = json.loads((base / "d1_counterexamples_after.json").read_text(encoding="utf-8"))
+        self.assertTrue(before["cases"], "旧读数必须留史")
+        self.assertEqual([c["id"] for c in before["cases"]],
+                         [c["id"] for c in after["cases"]], "新旧读数必须同批用例")
+        self.assertTrue(all(not c["ok"] for c in before["cases"]),
+                        "修复前读数应记录失败（否则反例没复现）")
+        self.assertTrue(all(c["ok"] for c in after["cases"]), "修复后读数应全部成立")
+
+    def test_three_review_counterexamples_inline(self):
+        """审查点名的三条：跨期跨指标同名值 / 混入虚假数字 / 任意年报引用使目标判断通过。"""
+        import report_brief as rb
+        rows = [{"metric": "revenue", "metric_label": "营业收入", "period": "2024年",
+                 "year": 2024, "value": 100.0, "unit": "亿元", "caliber": "合并",
+                 "fact_id": "fact-rev-2024"}]
+        # ① 跨期 + 跨指标 + 跨单位：不得绑定
+        c1 = rb._claims("2023 年归母净利润 100 万元。", rows, [], [])[0]
+        self.assertEqual(c1["status"], "unsupported")
+        self.assertEqual(c1["fact_ids"], [])
+        self.assertEqual(c1["assertions"][0]["support_status"], "unsupported")
+        # ② 一句里正确收入 + 虚假利润 999：部分支持，且只绑收入那条
+        c2 = rb._claims("2024 年营业收入 100 亿元，归母净利润 999 亿元。", rows, [], [])[0]
+        self.assertEqual(c2["status"], "partially_supported")
+        self.assertEqual([a["support_status"] for a in c2["assertions"]],
+                         ["supported", "unsupported"])
+        self.assertEqual(c2["fact_ids"], ["fact-rev-2024"])
+        # ③ 目标类：有年报引用也要点名缺项（目标值/实际口径）
+        cites = [{"n": 1, "type": "issuer_annual_report", "title": "年报", "url": "u"}]
+        c3 = rb._claims("公司 2024 年经营目标完成率 100% 并已达成 [1]。", rows, [], cites)[0]
+        self.assertEqual(c3["type"], "target_claim")
+        self.assertEqual(c3["status"], "needs_check")
+        self.assertIn("目标值", c3["reason"])
+        self.assertIn("实际口径", c3["reason"])
+
+    def test_no_number_judgments_stay_in_the_support_list(self):
+        """纯文字的目标/因果判断不能漏出支持清单（无数字也要有记录与原因）。"""
+        import report_brief as rb
+        claims = rb._claims("公司经营目标尚未披露达成情况，原因需要核实。"
+                            "收入下降主要系产品结构变化所致。", [], [], [])
+        kinds = [c["type"] for c in claims]
+        self.assertIn("target_claim", kinds)
+        self.assertIn("inference", kinds)
+        for c in claims:
+            self.assertEqual(c["status"], "needs_check")
+            self.assertTrue(c["reason"], c)
 
 
 class TestChangeExplanationGuards(unittest.TestCase):
@@ -6573,7 +6654,12 @@ class TestChangeExplanationGuards(unittest.TestCase):
         self.assertNotIn("同比变化幅度见上表", joined, "仅重复数字的附注不得作为变化解释")
 
     def test_target_claim_needs_issuer_support(self):
-        """目标/达成类判断：无发行人披露直接支持时标 needs_check（不是已证事实）。"""
+        """目标/达成类判断：无发行人披露直接支持时标 needs_check，并**点名缺哪一项**。
+
+        D1 起 reason 按缺项写实（目标年度/目标值或范围/发行人披露支持/实际口径），
+        不再是一句固定文案：本夹具的句子有年度（2024）与目标范围（5%—10%），
+        缺的是"发行人披露对该目标的原文支持"与"实际口径"。
+        """
         import report_brief
         t = TestUnsupportedClaimLinkage("test_adopted_source_claims_are_untouched")
         t.setUp()
@@ -6597,7 +6683,9 @@ class TestChangeExplanationGuards(unittest.TestCase):
         targets = [c for c in st["claims"] if c.get("type") == "target_claim"]
         self.assertTrue(targets, st["claims"])
         self.assertEqual(targets[0]["status"], "needs_check")
-        self.assertIn("目标年度", targets[0]["reason"], targets[0])
+        reason = str(targets[0]["reason"])
+        self.assertIn("发行人披露", reason, targets[0])
+        self.assertIn("实际口径", reason, targets[0])
 
 
 class TestRealAnnualReportPositivePath(unittest.TestCase):

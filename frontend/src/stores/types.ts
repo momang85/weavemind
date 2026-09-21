@@ -110,6 +110,8 @@ export interface ResearchBrief {
   }
   evidence?: {
     located?: number
+    /** 只有检索摘要、没有正文定位的线索数（不计入 located，也不清除缺失类别） */
+    snippet_hints?: number
     missing_labels?: string[]
     rules_version?: string
     excluded?: { title?: string; url?: string; validation_status?: string; published_at?: string; locator?: string }[]
@@ -120,16 +122,28 @@ export interface ResearchBrief {
   evidence_locations?: { kind?: string; locator?: string; source_n?: string; text?: string }[]
   charts?: { file: string; type?: string; grade?: string; draft_reason?: string; question?: string; observation?: string }[]
   analysis?: string
-  /** 主张记录（C2-2）：结论/主体/期间/类型/支持状态/来源；与正文、缺口、风险、导出同源。 */
+  /** 主张记录（C2-2/D1）：结论/主体/期间/类型/逐条断言/支持状态/来源；与正文、缺口、风险、导出同源。 */
   claims?: {
     text?: string
     type?: string
+    /** D1：显式类别（与 type 同值：observation/inference/assumption/target_claim/…） */
+    claim_type?: string
+    /** D1：bound | partially_supported | needs_check | unsupported */
     status?: string
+    support_status?: string
     reason?: string
     subject?: string
     periods?: number[]
     citations?: number[]
     fact_ids?: string[]
+    /** D1：该句引用的已定位证据片段指纹 */
+    evidence_ids?: string[]
+    /** D1：原子断言逐条支持（指标/期间/值/单位/符号/支持状态/原因） */
+    assertions?: {
+      text?: string; metric?: string; metric_label?: string; period?: number | null
+      value?: number; unit?: string; fact_ids?: string[]
+      support_status?: string; reason?: string
+    }[]
     source?: { url?: string; title?: string; old_n?: number }
   }[]
   /** 引用了未采用来源的句子（逐句，带原因） */

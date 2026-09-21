@@ -525,6 +525,18 @@ class TestExportVersionNamespaces(unittest.TestCase):
         self.assertIn("plan_review?:", types)
         self.assertIn("structure_version_exists?: boolean", types)
 
+    def test_panel_shows_assertion_level_support(self):
+        """D1：部分支持的主张必须在面板可见，且与"未采用来源/无底稿支持"分开标注。"""
+        text = (SRC / "components" / "ResearchBriefPanel.tsx").read_text(encoding="utf-8")
+        self.assertIn("partially_supported", text, "部分支持未进待核查列表")
+        self.assertIn("部分支持（有断言未对上底稿）", text)
+        self.assertIn("无底稿事实支持", text)
+        self.assertIn("snippet_hints", text, "检索线索未单独显示")
+        types = (SRC / "stores" / "types.ts").read_text(encoding="utf-8")
+        self.assertIn("assertions?:", types)
+        self.assertIn("support_status?:", types)
+        self.assertIn("snippet_hints?:", types)
+
 
 class TestFilesUrlSegmentEncoding(unittest.TestCase):
     """/files/<tid>/<rel> 的 rel 必须**逐段**编码（浏览器实测教训）。

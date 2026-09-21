@@ -119,6 +119,10 @@ def build_result(task_id: str, goal: str, *, project: str | None = None) -> dict
                          "caliber": r.get("caliber"),
                          "caliber_source": r.get("caliber_source"),
                          "caliber_evidence": r.get("caliber_evidence"),
+                         # D1：稳定 fact_id 必须带出来——报告侧主张绑定要按
+                         # "指标/期间/口径/单位"逐条对上底稿事实；没有 id 就只能按数值猜
+                         # （历史反例："2023 净利润 100 万元"被"2024 收入 100 亿元"支持）
+                         "fact_id": r.get("fact_id"),
                          # 字段位置：简报附录要回答"这个数字取自哪个字段"
                          "source_locator": r.get("source_locator")}
                         for r in paper.rows],
@@ -132,6 +136,7 @@ def build_result(task_id: str, goal: str, *, project: str | None = None) -> dict
                             "caliber": r.get("caliber"),
                             "caliber_evidence": r.get("caliber_evidence"),
                             "formula": r.get("formula"),
+                            "fact_id": r.get("fact_id"),
                             "source_locator": r.get("source_locator"),
                             "derived_from": list(r.get("derived_from") or [])}
                            for r in paper.derived],

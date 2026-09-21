@@ -1366,7 +1366,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         except Exception as exc:                 # noqa: BLE001 - 注入失败不拖垮步骤
             logger.warning("叙事证据读取失败（task=%s）：%s", task_id, str(exc)[:140])
             return ""
-        records = [r for r in (data.get("records") or []) if r.get("has_location")]
+        # D1：注入给模型的"已取证据"必须是**已准入 + 有正文位置**的记录——排除项
+        # （错主体/超截止/期间不符）与身份未知的记录不得冒充已取证据（此前只过滤
+        # has_location，excluded 记录会以"已取证据"进入提示词）。
+        records = [r for r in (data.get("records") or [])
+                   if r.get("has_location")
+                   and str(r.get("admission") or "") in ("admitted", "comparison")]
         missing = list(data.get("missing_labels") or [])
         if not records and not missing:
             return ""

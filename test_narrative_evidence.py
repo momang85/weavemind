@@ -482,7 +482,15 @@ class TestBuild(unittest.TestCase):
         self.assertTrue(data["ok"])
         self.assertEqual(data["missing_kinds"], [],
                          "四类都从抓取正文里取得了带定位的证据")
-        self.assertEqual(data["located"], len(data["records"]))
+        # D1：located 只数"已准入 + 有正文位置"的片段（本夹具四类各一条，无摘要记录）
+        self.assertEqual(data["located"], 4)
+        self.assertEqual(data["snippet_hints"], 0)
+        self.assertEqual(
+            data["located"],
+            len([r for r in data["records"]
+                 if r.get("has_location")
+                 and r.get("admission") in ("admitted", "comparison")]),
+            "located 必须能由逐条记录重算")
         self.assertEqual([s["url"] for s in data["sources"]], [ISSUER_URL])
 
     def test_search_snippet_alone_is_not_evidence(self):
@@ -493,9 +501,36 @@ class TestBuild(unittest.TestCase):
         data = ne.build(self.tid, periods=[2024], company="贵州茅台")
         self.assertIn(ne.KIND_RISK, data["missing_kinds"],
                       "只有检索摘要、没有正文定位 → 仍算缺口")
+        # D1：摘要不进 located（哪怕它被判为可准入），只计 snippet_hints
+        self.assertEqual(data["located"], 0)
+        self.assertEqual(data["snippet_hints"], 1)
         snippet_only = [r for r in data["records"] if not r["has_location"]]
         self.assertEqual(len(snippet_only), 1)
         self.assertEqual(snippet_only[0]["locator"], "检索摘要（未取得正文定位）")
+
+    def test_same_url_snippet_does_not_double_count(self):
+        """同一 URL 已有正文证据时，它的检索摘要不再登记——一个 URL 不能靠摘要复制加覆盖。"""
+        doc_text = ("第三节 管理层讨论与分析\n\n一、经营情况讨论与分析\n\n"
+                    "报告期内营业收入同比增长15.66%，主要系销量增加所致。\n\n"
+                    "（一）主营业务情况\n\n公司主营业务为茅台酒及系列酒的生产与销售。\n\n"
+                    "七、财务报表附注\n\n现金流量表附注：经营活动产生的现金流量净额同比增长。")
+        self._write("fetch_snapshot.json", [
+            {"title": "贵州茅台2024年年度报告", "url": ISSUER_URL, "text": doc_text},
+        ])
+        self._write("search_results.json", [
+            {"title": "贵州茅台2024年年度报告", "url": ISSUER_URL,
+             "snippet": "报告期内营业收入1741.44亿元，同比增长15.66%"},
+            {"title": "贵州茅台风险因素提示", "url": NEWS_URL,
+             "snippet": "风险因素：白酒行业景气度波动。"},
+        ])
+        data = ne.build(self.tid, periods=[2023, 2024], company="贵州茅台")
+        self.assertEqual(data["located"], 3, "三条带定位的小节证据（背景/变化解释/附注）")
+        self.assertEqual(data["snippet_hints"], 1, "只剩那条没有正文的新闻摘要")
+        self.assertEqual(
+            [s["url"] for s in data["sources"] if s["url"] == ISSUER_URL], [ISSUER_URL],
+            "来源按 URL 去重后仍是一条")
+        self.assertIn(ne.KIND_RISK, data["missing_kinds"],
+                      "新闻摘要不得把'风险因素'从缺口里抹掉")
 
     def test_extra_docs_are_merged_and_deduped(self):
         self._write("fetch_snapshot.json", [

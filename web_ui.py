@@ -4484,6 +4484,8 @@ def _research_payload(tid: str, ws) -> dict | None:
             }
             out["evidence"] = {
                 "located": int(ev.get("located") or 0),
+                # D1：检索摘要只是线索，单独显示——不补"已取得定位"，也不清除缺失类别
+                "snippet_hints": int(ev.get("snippet_hints") or 0),
                 "missing_labels": list(ev.get("missing_labels") or []),
                 "excluded": [{"title": str(e.get("title") or ""),
                               "url": str(e.get("url") or ""),
@@ -4518,12 +4520,28 @@ def _research_payload(tid: str, ws) -> dict | None:
             # 风险、导出共用同一状态——"来源清单合规"不等于"结论受支持"。
             out["claims"] = [{"text": str(c.get("text") or ""),
                               "type": str(c.get("type") or ""),
+                              "claim_type": str(c.get("claim_type") or c.get("type") or ""),
                               "status": str(c.get("status") or ""),
+                              "support_status": str(c.get("support_status")
+                                                    or c.get("status") or ""),
                               "reason": str(c.get("reason") or ""),
                               "subject": str(c.get("subject") or ""),
                               "periods": list(c.get("periods") or []),
                               "citations": list(c.get("citations") or []),
                               "fact_ids": list(c.get("fact_ids") or []),
+                              "evidence_ids": list(c.get("evidence_ids") or []),
+                              # D1：逐条断言支持（指标/期间/值/单位/支持状态/原因）——
+                              # 页面要能看出"哪一条断言对不上底稿"，不是只看整句状态
+                              "assertions": [{"text": str(a.get("text") or ""),
+                                              "metric": str(a.get("metric") or ""),
+                                              "metric_label": str(a.get("metric_label") or ""),
+                                              "period": a.get("period"),
+                                              "value": a.get("value"),
+                                              "unit": str(a.get("unit") or ""),
+                                              "fact_ids": list(a.get("fact_ids") or []),
+                                              "support_status": str(a.get("support_status") or ""),
+                                              "reason": str(a.get("reason") or "")}
+                                             for a in (c.get("assertions") or [])],
                               "source": c.get("source") or {}}
                              for c in (st.get("claims") or [])]
             out["unsupported_claims"] = [
