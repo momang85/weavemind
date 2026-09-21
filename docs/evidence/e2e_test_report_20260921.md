@@ -1,7 +1,8 @@
 # 全方位端到端测试报告（2026-09-21）
 
-范围：浏览器视觉测试 + 实机洋河任务（`ui-31305a2b28`）+ 离线场景复跑 + 结构检查器复核。
-基线 `ebd2ac5`；本批提交 `4aee354` / `4dc1742` / `29ec71d` / `c18d584` / `d316a25`。
+范围：浏览器视觉测试 + 实机洋河任务（`ui-31305a2b28`）+ 离线场景复跑 + 结构检查器复核 +
+遗留项收口（第二轮，服务重启后复测）。
+基线 `ebd2ac5`；本批提交 `4aee354` / `4dc1742` / `29ec71d` / `c18d584` / `d316a25` / 收口笔（见 §6）。
 时区：正文所有时刻为本地时间（UTC+8）；数据库与工作区文件存 UTC，本报告已换算并逐条对照。
 
 ## 1. 结论摘要
@@ -12,8 +13,12 @@
   修订重验后状态 SUCCESS/verified，验收 pass、0 缺口。
 - 修复后新任务：6 张图全部 1038×644（旧任务是 1038×121366 的异常画布）、PDF 8 页 6/6 图在页内、
   表格列对齐、离线三场景 risks 无伪影无重复。
-- 仍存 **3 个未决/存疑项**（见 §6）：反思重做稿未进交付的取舍、新闻稿被归类为"财务附注"、
-  以及"分析节被节名过滤 + 输出上限耗尽"共同造成的 214 字分析。这三项属策略/口径问题，未擅改。
+- 第一轮遗留的四项在第二轮**全部收口**（§6）：装配候选未采纳的机制查清并按"装配候选留档"如实
+  标注；评审降级确认为设计并补上页面一行（含结论所属版本）；新闻稿误标"财务附注"按来源修好并
+  在实机文档上复验；Mimosa 完整扫描已跑完（46 条静态发现，2 条凭据发现核实为误报，覆盖率
+  partial/inconclusive，**不宣称项目安全**）。
+- 仍存疑三项（§6.5）：反思重做稿取舍（编排层策略）、214 字分析的双成因（节名过滤 + 输出上限
+  耗尽）、调用台账只覆盖编排器侧（预算上限无法事后逐条核对）。
 
 ## 2. 测试范围与方法
 
@@ -128,7 +133,75 @@
    修复：`package_stale`（清单比 zip 新 >120s）如实标注（`29ec71d`）。
    复测：payload `stale:true`，面板显示"重装配未重建包，包可能不含最新修订"。
 
-## 6. 未决/存疑项（未擅改，交决策）
+## 6. 遗留项收口（第二轮：服务重启后复测，14:08 装载新代码）
+
+### 6.1 装配候选未被采纳 → 机制查清 + 页面如实标注
+
+**机制（代码级）**：修订路径 `POST /review/edit` 先对"用户编辑稿"跑验收并采纳（`交付正文采用验收修正版`），
+随后 `assemble_and_verify` 登记代码装配候选并采纳它，但最后 `ensure_body_accepted` 拿到的
+`accept_fn` 是**该次请求预先算好的验收结论**（lambda 返回旧 verdict）——于是它把"验收修正版"
+重新采纳为交付正文（`交付正文采用验收修正版`），装配候选 `8b23aad3` 留档不交付。
+
+**判定**：这是**设计语义**（用户修订不得被重建覆盖，C2-6 的要求），不是缺陷；被丢弃的是"候选稿更干净"
+这一期望，而不是用户编辑。收口动作是让页面说对话，而不是绕过语义去改采纳规则：
+- `_research_payload` 新增 `structure_version_exists` / `structure_version_adopt_reason`（读版本库，
+  区分"绑定的是装配候选"与"绑定的是更早版本"）；
+- 面板文案分三支：绑定未知 → "修订后需重新装配"；绑定代码装配候选 → "两者不同版：面板结论按该
+  候选稿生成，勿直接当作交付正文的结论"；其他 → 原提示；
+- 测试：`TestStructureBindingProvenance`（2 项）+ 前端守卫 `test_panel_distinguishes_binding_provenance`。
+- 实机复测（14:1x，DOM 读数）：`· 面板（发现/缺口/证据）绑定的是代码装配候选（8b23aad32cf1），
+  当前交付版本 fde2f2e9df1e——两者不同版：面板结论按该候选稿生成，勿直接当作交付正文的结论`。
+
+### 6.2 评审降级 → 确认设计 + 补页面一行（含所属版本）
+
+**设计确认**：`_require_review_or_refuse(task_id, "路由模板计划未经过 Critic 评审", plan=steps)`——
+模板/路由计划不经 Critic；个人模式记 `DEGRADED` 放行并如实标注，银行模式拒绝继续（M0-b）。
+已有 `test_review_protocol` 覆盖该策略；本轮实机 `review_state.json` 读数为
+`verdict=DEGRADED / required=false / report_version_id=28a89aab…`。
+
+**补的是什么**：该结论此前只写在交付正文抬头的引用块里，页面**没有任何一行**。现在
+`_research_payload` 输出 `plan_review{verdict,label,degraded_reason,required,report_version_id,bound}`，
+面板在"修改与重验"块渲染一行；`bound=false` 时明写"属版本 X，当前版本无评审结论"（修订后新版本
+不继承旧评审）。测试：`TestPlanReviewProjection`（2 项）+ 前端守卫 `test_panel_shows_plan_review_row`。
+实机复测：`· 计划评审（Critic）：未完成（降级）——路由模板计划未经过 Critic 评审（属版本
+28a89aab9a95，当前版本无评审结论）`。
+
+### 6.3 新闻稿被归类为"财务附注" → 按来源修好并在实机文档上复验
+
+**根因**：C2-3 的降级规则（"命中变化关键词但无因果语言 → 不当变化解释"）把降级目标写死为
+`KIND_NOTES`（财务附注）。实机 21 财经业绩说明会报道的前 400 字命中 `change` 关键词 3 次
+（业绩说明会/营收/净利）、无因果语言 → 被标成"财务附注"。
+
+**修复**：降级目标按来源分——发行人文件（`issuer_annual_report`）→ 财务附注（数字出处）；
+第三方（新闻/解读）→ 业务背景；来源未知（旧调用形态）沿用附注（向后兼容）。
+`classify()` / `_prose_classify()` 新增 `source` 参数，三个调用点传 `source_type()`/`document_provenance()`。
+测试：`TestChangeDemotionTarget`（3 项）。
+
+**实机复验（同一份抓取文档，只读）**：修复前 `footnote/财务附注`；修复后
+`business_background/业务背景`（段落 1，字符 0-2850）；发行人年报样本仍 `footnote`；
+`classify(默认)` 仍 `footnote`、`classify(source='third_party')` → `background`。
+冻结的实机产物 `narrative_evidence.json` **不重写**（它是当时交付的证据，历史保留）；后续运行按新规则分类。
+
+### 6.4 Mimosa 完整扫描（scanner_enobufs 收口）
+
+- 扫描：deep，2026-09-21 14:08:02 起、14:08:16 完成；`scanId=scan-2026-09-21T06-08-16.249Z-3bee2b62df1d`，
+  封印 `sha256:3d2b11b057cfc92914034c6a78cb2af7e142bbbff2e79422064b966b38d7addc`。
+- 发现 **46 条**（36 high / 1 medium / 9 low）：路径穿越 17、SSRF 15、不安全随机数 9、
+  硬编码凭据 2、其他 3（含 `distill 是 path-traversal 入口`、疑似跨文件污点、XML 实体扩展）。
+- 覆盖率自述：`completeness=partial`、`runStatus=inconclusive`、威胁建模 `partial`（0 入口/0 主体）、
+  验证阶段 `investigated=0`；`evidenceBoundary=static_only_no_runtime_execution`、`verdictEffect=none`。
+  依赖：扫 295 个包，离线库命中 1 条告警。
+- 人工核实（本轮）：
+  - 2 条"硬编码凭据"均为**误报**——`frontend/src/components/Login.tsx:95` 是
+    `autoComplete={isSetup ? 'new-password' : 'current-password'}` 的自动填充提示；
+    `scripts/check_secrets.py:55` 是检查脚本里解释误报过滤的**注释**。
+  - 抽检 `web_ui.py:303`（路径穿越）：`os.path.abspath(SHARE_FILE)` 用的是模块常量，非用户输入 → 误报。
+  - 抽检 `workers/web_fetch_worker.py:89`（SSRF）：同文件第 77 行先过
+    `adapters.transport._validate_public_url`（环回/私网/链路本地拒绝）才 `urlopen` → 已有守卫的调用点。
+- **不宣称项目安全**：46 条中 2 条已核实为误报、2 条抽检为误报/已守卫，其余 42 条**未逐条验证**
+  （扫描自述 partial/inconclusive）；后续要么逐条复核，要么在 CI 里加守卫可见的白名单机制。
+
+### 6.5 仍存疑（未动，交决策）
 
 1. **双装配链条的取舍**：报告步骤的验收会装配一次候选稿（设计如此，避免模型被要求补装配器本该写的东西），
    收尾的 `ensure_body_accepted` 又对同一份（可能已装配的）正文再装配一次——**第二次装配就是回食现场**。
@@ -167,20 +240,28 @@
   正文 `report_sha256=fde2f2e9…`；交付 `report_version_id=a3eb6c32…`；manifest `verified`、
   `template_version=default`、`renderer_version=report_pdf/v1`。
 - **来源**：采用 2 条 / 审计 4 条；叙事证据定位 2 条、缺类 `[经营变化解释, 风险因素]`；`rules_version=f3a-1`。
-- **面板（DOM 实测）**：绑定警告（结构 `8b23aad3` vs 当前 `fde2f2e9`）、机器验收 pass（绑定本版）、
-  人工复核待复核、包陈旧提示。
+- **面板（DOM 实测，两轮）**：绑定来源说明（装配候选 `8b23aad3` vs 交付版 `fde2f2e9`）、
+  机器验收 pass（绑定本版）、计划评审（Critic）降级行（属版本 `28a89aab…`，当前版本无评审结论）、
+  人工复核待复核、包陈旧提示——四/五行全部渲染正确。
 - **离线场景**：normal_growth verified（证据 4、缺口 0、图 5）；loss_mixed_units / missing_footnote_asof
   按契约 draft；risks 5/4/7 条，无 `**` 残留、无重复、无装配器伪影。
-- **测试**：`test_delivery_chain` 248、`test_frontend_guards` 42、`scenario_checks` 17、
-  `test_offline_delivery` 32 全绿；前端行为测试 0 fail；`npm run build` 通过。
+- **测试**：`test_delivery_chain` 252、`test_frontend_guards` 44、`test_narrative_evidence` 38、
+  `scenario_checks` 17、`test_offline_delivery` 32 全绿；前端行为测试 0 fail；`npm run build` 通过。
+- **安全扫描（Mimosa，deep）**：46 条静态发现（36 high/1 medium/9 low），封印
+  `sha256:3d2b11b0…`；覆盖率 `partial`/`inconclusive`；2 条凭据发现核实为误报 + 2 条抽检
+  （误报/已守卫），其余未逐条验证；**不宣称项目安全**。
 - **CI**：`4aee354` run 35558815699（11:49:26→11:57:18）success；`c18d584` run 35561348419
-  （12:31:57→12:40:08，覆盖 `4dc1742`/`29ec71d`）success；`d316a25` run 35563702160 写报告时进行中。
+  （12:31:57→12:40:08，覆盖 `4dc1742`/`29ec71d`）success；`d316a25` run 35563702160
+  （13:11:57→13:19:23）success；收口笔见 §6 与推送记录。
 
 ## 9. 未验项与边界
 
-- 采纳正文 `fde2f2e9` 仍带旧渲染伪影（历史版本如实保留）；干净重装配候选 `8b23aad3` 未被采纳
-  （修订路径语义：采纳"用户编辑 + 验收修正"那版）——面板绑定警告如实显示该错位。
-- 评审未完成（降级）：路由模板计划未经 Critic 评审，交付物须人工复核后方可使用。
+- 采纳正文 `fde2f2e9` 仍带旧渲染伪影（历史版本如实保留）；干净重装配候选 `8b23aad3` 按修订路径
+  语义留档不交付（§6.1）——面板已按"装配候选留档"如实说明，不再误报"需重新装配"。
+- 评审未完成（降级）：模板/路由计划不经 Critic（设计），页面已有独立一行；交付物须人工复核后方可使用。
+- 分析节 214 字（§6.5）：节名过滤 + 输出上限耗尽双成因，按"不编造"原样呈现。
+- 调用台账只覆盖编排器侧（5 条），总调用次数与费用不可确知——"≤40 次调用"无法事后逐条核对。
+- Mimosa 46 条静态发现中 42 条未逐条验证；不宣称项目安全。
 - 研究员五项 0–2 评分未做（需真实研究员；不得由执行者填写）。
-- 银行可用性、外部发布未获验收；Mimosa 五次 `scanner_enobufs`，不宣称项目安全。
+- 银行可用性、外部发布未获验收。
 - 本报告不含任何密钥、账号或完整客户提示词；调用台账只含形状字段。
