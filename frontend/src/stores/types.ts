@@ -149,6 +149,10 @@ export interface ResearchBrief {
 export interface ExportState {
   manifest_version_id?: string
   current_version_id?: string
+  /** 正文版号（正文 SHA256，与复核栏"本版"同一口径）——提示"包与当前不同版"用它，
+   *  避免与谱系标识（identity_id）并排出现时看起来像两个"当前版本"。 */
+  package_body_version_id?: string
+  current_body_version_id?: string
   package?: string
   package_generated_at?: string
 }

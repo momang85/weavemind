@@ -470,5 +470,64 @@ class TestRerunRequiresConfirmation(unittest.TestCase):
                          "重跑按钮又变回直接提交（绕过确认）")
 
 
+class TestExportVersionNamespaces(unittest.TestCase):
+    """面板"包与当前不同版"提示必须按正文版号比较（与复核栏同一口径）。
+
+    起因（浏览器实测）：复核栏显示"本版 65ec49d1…"（正文 SHA256），导出行却显示
+    "当前版本 20719ee1…"（谱系标识 identity_id）——同一份正文在同一页出现两个
+    "当前版本"。钉死：面板比较/展示用 package_body_version_id / current_body_version_id，
+    谱系标识只作老后端的回退；后端导出块必须给出这两字段。
+    """
+
+    def test_panel_stale_package_note_prefers_body_version_ids(self):
+        text = (SRC / "components" / "ResearchBriefPanel.tsx").read_text(encoding="utf-8")
+        self.assertIn("package_body_version_id", text, "面板未按正文版号比较包的版本")
+        self.assertIn("current_body_version_id", text, "面板未展示当前正文版号")
+        # 谱系标识只允许作回退（老后端没有新字段时）
+        self.assertIn("|| exportState.manifest_version_id", text)
+        self.assertIn("|| exportState.current_version_id", text)
+
+    def test_export_state_type_declares_body_version_ids(self):
+        text = (SRC / "stores" / "types.ts").read_text(encoding="utf-8")
+        self.assertIn("package_body_version_id?: string", text)
+        self.assertIn("current_body_version_id?: string", text)
+
+    def test_backend_export_block_provides_body_version_ids(self):
+        text = (ROOT / "web_ui.py").read_text(encoding="utf-8")
+        self.assertIn('"package_body_version_id"', text)
+        self.assertIn('"current_body_version_id"', text)
+        self.assertIn("export = _export_payload(tid, _ws, _state)", text,
+                      "任务页导出块未走 _export_payload（字段可能悄悄丢回单一口径）")
+
+
+class TestFilesUrlSegmentEncoding(unittest.TestCase):
+    """/files/<tid>/<rel> 的 rel 必须**逐段**编码（浏览器实测教训）。
+
+    后端 /files 路由不做 URL 解码（`urlparse(self.path).path` 原样使用），
+    整段 encodeURIComponent("charts/chart_1.png") 会把斜杠编成 %2F → 404，
+    结果页正文图表与生成文件下载全部挂掉。钉死：拼 /files URL 时不得对
+    含斜杠的相对路径整体 encodeURIComponent。
+    """
+
+    def test_report_viewer_encodes_files_rel_per_segment(self):
+        text = (SRC / "components" / "ReportViewer.tsx").read_text(encoding="utf-8")
+        self.assertNotIn("encodeURIComponent(raw)}`", text,
+                         "图片链接又变回整段编码（%2F 会 404）")
+        self.assertNotIn("encodeURIComponent(name)", text,
+                         "文件下载链接又变回整段编码（%2F 会 404）")
+        self.assertIn("raw.split('/').map(encodeURIComponent).join('/')", text)
+        self.assertIn("name.split('/').map(encodeURIComponent).join('/')", text)
+
+    def test_report_image_placeholders_extreme_aspect(self):
+        """超高画布（chart_qa.MAX_CANVAS_ASPECT=12 的历史异常产物）不得在页面硬嵌。
+
+        浏览器实测：1038×121366 的旧图按 max-h-[420px] 缩放后只剩 ~3.6px 宽，
+        嵌在页里等于隐形。必须换成如实占位说明（尺寸+原因+可下载）。"""
+        text = (SRC / "components" / "ReportViewer.tsx").read_text(encoding="utf-8")
+        self.assertIn("dims.h / dims.w > 12", text, "缺少与 chart_qa 同阈值的纵横比检查")
+        self.assertIn("图片尺寸异常", text, "超高画布没有如实占位说明")
+        self.assertIn("naturalWidth", text, "未读取图片真实尺寸（onLoad naturalWidth）")
+
+
 if __name__ == "__main__":
     unittest.main()

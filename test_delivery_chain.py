@@ -6130,6 +6130,51 @@ class TestReviewHonestyProjection(unittest.TestCase):
         self.assertEqual((p.get("unsupported_claims") or [])[0]["reason"], "晚于资料截止日")
 
 
+class TestExportVersionNamespaces(unittest.TestCase):
+    """导出块同时给两个版本命名空间，且正文版号与复核栏同口径。
+
+    起因（浏览器实测 ui-f00775cfdf）：复核栏显示"本版 65ec49d1…"（正文 SHA256），
+    导出行却显示"当前版本 20719ee1…"（谱系标识 identity_id）——同一份正文在同
+    一页出现两个"当前版本"，读者无法判断它们指同一版。因此导出块除谱系标识外
+    还必须给正文版号：当前值取自 delivery_state.version_id，包的取自清单
+    body_sha256；缺清单/缺版本记录时留空（fail closed，不编）。
+    """
+
+    def _ws(self, manifest: dict | None, *, with_zip: bool = True) -> Path:
+        tmp = Path(tempfile.mkdtemp(prefix="wm_export_ns_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        if manifest is not None:
+            (tmp / "export_manifest.json").write_text(
+                json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+        if with_zip:
+            (tmp / "deliverables_20260920_104729.zip").write_bytes(b"PK\x05\x06")
+        return tmp
+
+    def test_body_version_ids_alongside_identity_ids(self):
+        import web_ui
+        ws = self._ws({"report_version_id": "ident-old", "body_sha256": "body-old"})
+        out = web_ui._export_payload(
+            "ui-x", ws, {"identity_id": "ident-cur", "version_id": "body-cur"})
+        # 谱系标识保留（向后兼容），正文版号与复核栏同口径
+        self.assertEqual(out.get("manifest_version_id"), "ident-old")
+        self.assertEqual(out.get("current_version_id"), "ident-cur")
+        self.assertEqual(out.get("package_body_version_id"), "body-old")
+        self.assertEqual(out.get("current_body_version_id"), "body-cur")
+        self.assertEqual(out.get("package"), "deliverables_20260920_104729.zip")
+        # 两个命名空间不能混：正文版号不等于谱系标识时才算分开给出
+        self.assertNotEqual(out["current_body_version_id"], out["current_version_id"])
+
+    def test_missing_manifest_or_state_fails_closed(self):
+        import web_ui
+        ws = self._ws(None, with_zip=False)
+        out = web_ui._export_payload("ui-x", ws, None)
+        self.assertEqual(out.get("package_body_version_id"), "")
+        self.assertEqual(out.get("current_body_version_id"), "")
+        self.assertEqual(out.get("manifest_version_id"), "")
+        self.assertEqual(out.get("current_version_id"), "")
+        self.assertEqual(out.get("package"), "")
+
+
 class TestUnsupportedClaimLinkage(unittest.TestCase):
     """C2-1/C2-2/C2-4：结论依赖**未采用来源**时，主张与证据的关联必须留下来。
 

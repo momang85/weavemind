@@ -254,12 +254,16 @@ export default function ResearchBriefPanel({ taskId, research, exportState, onRe
             {exportState.package
               ? <li>· 交付包 {exportState.package}（生成于 {exportState.package_generated_at || '未知时间'}）</li>
               : <li>· 暂无交付包</li>}
-            {exportState.package && exportState.manifest_version_id
-              && exportState.current_version_id
-              && exportState.manifest_version_id !== exportState.current_version_id
-              ? <li className="text-amber-400">· 包生成于 {String(exportState.manifest_version_id).slice(0, 12)}，
-                  当前版本 {String(exportState.current_version_id).slice(0, 12)}——包不含最新修订，请重新导出</li>
-              : null}
+            {exportState.package && (() => {
+              // 版本对比统一用正文版号（与复核栏"本版"同一口径）；
+              // 老后端没有这两个字段时退回谱系标识。
+              const pkgV = exportState.package_body_version_id || exportState.manifest_version_id || ''
+              const curV = exportState.current_body_version_id || exportState.current_version_id || ''
+              return pkgV && curV && pkgV !== curV
+                ? <li className="text-amber-400">· 包生成于 {pkgV.slice(0, 12)}，
+                    当前版本 {curV.slice(0, 12)}——包不含最新修订，请重新导出</li>
+                : null
+            })()}
           </ul>
         </div>
       )}

@@ -2710,6 +2710,34 @@ def _read_export_manifest(tid: str) -> dict:
         return {}
 
 
+def _export_payload(tid: str, ws, state: dict | None) -> dict:
+    """导出与版本绑定信息（F3-B）。只读工作区，缺文件即空，不编造。
+
+    版本号有两个命名空间：`identity_id`（选中身份的谱系标识）与 `version_id`
+    （正文 SHA256，机器验收绑定它）。复核栏展示的是后者，所以这里除谱系标识外
+    同时给出正文版号（`current_body_version_id` / `package_body_version_id`），
+    前端按正文版号提示"包与当前不同版"，避免同一页出现两个"当前版本"。
+    """
+    try:
+        _exp = json.loads((ws / "export_manifest.json").read_text(encoding="utf-8")) or {}
+    except Exception:
+        _exp = {}
+    _zips = sorted((p for p in ws.glob("deliverables_*.zip")),
+                   key=lambda p: p.stat().st_mtime, reverse=True)
+    return {
+        "manifest": _exp or None,
+        "manifest_version_id": str((_exp or {}).get("report_version_id") or ""),
+        "current_version_id": str((state or {}).get("identity_id") or ""),
+        "package_body_version_id": str((_exp or {}).get("body_sha256") or ""),
+        "current_body_version_id": str((state or {}).get("version_id") or ""),
+        "package": (_zips[0].name if _zips else ""),
+        "package_generated_at": (
+            time.strftime("%Y-%m-%d %H:%M",
+                          time.localtime(_zips[0].stat().st_mtime))
+            if _zips else ""),
+    }
+
+
 def _task_pdf_bytes(tid: str) -> bytes:
     """生成任务报告 PDF；无报告/生成失败抛异常（路由转 404）。"""
     data = _get_task_report_data(tid)
@@ -4341,6 +4369,7 @@ def _get_task_page(self, p):
                                     "degraded_reason": _review.get("degraded_reason") or "",
                                     "report_version_id": _review.get("report_version_id") or "",
                                     "required": bool(_review.get("required"))}
+                _state = None
                 if (_ws / "report_versions.json").exists():
                     # B 批：页面与 manifest 共用**同一个读取口径**（delivery_state），
                     # 因此不可能再出现"页面说 verified、清单说 draft"这种自相矛盾。
@@ -4370,19 +4399,7 @@ def _get_task_page(self, p):
                 # 交付包可能生成于**更早**的版本：如实标注"包生成于 vX，当前 vY"，
                 # 不假装包与当前版本同版。
                 try:
-                    _exp = _read_export_manifest(tid)
-                    _zips = sorted((p for p in _ws.glob("deliverables_*.zip")),
-                                   key=lambda p: p.stat().st_mtime, reverse=True)
-                    export = {
-                        "manifest": _exp or None,
-                        "manifest_version_id": str((_exp or {}).get("report_version_id") or ""),
-                        "current_version_id": str((delivery or {}).get("version_id") or ""),
-                        "package": (_zips[0].name if _zips else ""),
-                        "package_generated_at": (
-                            time.strftime("%Y-%m-%d %H:%M",
-                                          time.localtime(_zips[0].stat().st_mtime))
-                            if _zips else ""),
-                    }
+                    export = _export_payload(tid, _ws, _state)
                 except Exception as exc:
                     logger.warning("导出信息读取失败（task=%s）：%s", tid, str(exc)[:120])
                     export = None

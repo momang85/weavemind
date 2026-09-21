@@ -323,6 +323,7 @@ function ReportImage({ src, alt, title, draft, taskId }: {
   src?: string; alt?: string; title?: string; draft?: boolean; taskId?: string | null
 }) {
   const [zoom, setZoom] = useState(false)
+  const [dims, setDims] = useState<{ w: number; h: number } | null>(null)
   useEffect(() => {
     if (!zoom) return
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setZoom(false) }
@@ -335,14 +336,26 @@ function ReportImage({ src, alt, title, draft, taskId }: {
   const name = raw.split('/').pop()?.split('?')[0] || 'chart.png'
   const url = raw.startsWith('http') || raw.startsWith('/')
     ? raw
-    : (taskId ? `/files/${encodeURIComponent(taskId)}/${encodeURIComponent(raw)}` : raw)
+    : (taskId ? `/files/${encodeURIComponent(taskId)}/${raw.split('/').map(encodeURIComponent).join('/')}` : raw)
+  // 与后端 chart_qa.MAX_CANVAS_ASPECT=12 同一阈值：超高画布（历史异常产物，
+  // 如实测 1038×121366）按容器缩放后只剩几像素宽，嵌在页里等于隐形——
+  // 换成如实占位说明，源文件仍可下载。
+  const aspectIssue = dims !== null && dims.w > 0 && dims.h / dims.w > 12
   return (
     <figure className="my-4 rounded-xl border border-slate-800 bg-slate-900/60 p-2">
-      <button type="button" onClick={() => setZoom(true)}
-        title="点击放大（Esc 关闭）" className="block w-full cursor-zoom-in">
-        <img src={url} alt={caption || '报告图表'} loading="lazy"
-          className="mx-auto max-h-[420px] w-auto rounded-lg" />
-      </button>
+      {aspectIssue && dims ? (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-300">
+          图片尺寸异常（{dims.w}×{dims.h}，高宽比 {(dims.h / dims.w).toFixed(1)}），
+          按图表质检规则不在页面嵌入展示；源文件仍可下载。
+        </div>
+      ) : (
+        <button type="button" onClick={() => setZoom(true)}
+          title="点击放大（Esc/遮罩关闭）" className="block w-full cursor-zoom-in">
+          <img src={url} alt={caption || '报告图表'} loading="lazy"
+            onLoad={(e) => setDims({ w: e.currentTarget.naturalWidth, h: e.currentTarget.naturalHeight })}
+            className="mx-auto max-h-[420px] w-auto rounded-lg" />
+        </button>
+      )}
       <figcaption className="mt-2 flex flex-wrap items-center gap-2 px-1 pb-1">
         {draft && (
           <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-xs text-amber-400">草稿级</span>
@@ -827,9 +840,13 @@ export default memo(function ReportViewer() {
     window.alert('服务端导出不可用：已导出**本地未验证副本**（无版本绑定与验收清单，不得当作已通过）。')
   }
 
-  const fileUrl = (name: string) =>
-    taskIdForFiles ? '/files/' + encodeURIComponent(taskIdForFiles) + '/' + encodeURIComponent(name)
-                   : '/files/' + encodeURIComponent(name)
+  const fileUrl = (name: string) => {
+    // 逐段编码：整段 encodeURIComponent 会把 "charts/chart_1.png" 的斜杠编成 %2F，
+    // 而 /files 路由不做 URL 解码 → 404（浏览器实测图片全挂）。
+    const rel = name.split('/').map(encodeURIComponent).join('/')
+    return taskIdForFiles ? '/files/' + encodeURIComponent(taskIdForFiles) + '/' + rel
+                          : '/files/' + rel
+  }
 
   const downloadPDF = async () => {
     if (taskIdForFiles) {
