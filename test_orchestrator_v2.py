@@ -494,6 +494,12 @@ class TestRunIteration(TempWorkspaceCase):
 
         o._reflect = fake_reflect
         o._now_iso = lambda: "t"
+        # D2 起候选在采纳点就跑一次**它自己正文**的验收（`_accept_candidate`）并把结论写进
+        # 验收快照——预置 acceptance_report.json 会被真实结论覆盖。这里把验收桩设成 fail
+        # （同时保留预置文件），考的还是那条不变量：验收未通过不得因反思评分 accept 放行。
+        o._accept_fn_for = lambda t, g: (
+            lambda t2, g2, body: {"_accepted_body": body, "overall": "fail",
+                                  "gaps": ["数字溯源率不足：疑似模型知识未标注"]})
         tmp = tempfile.mkdtemp(prefix="wm_accfail_")
         old_root = ws_mod.WORKSPACE_ROOT
         ws_mod.configure_workspace_root(tmp)
