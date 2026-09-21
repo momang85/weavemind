@@ -1,19 +1,22 @@
 # DeepSeek 执行状态（2026-09-21 更新）
 
-**当前批次**：阶段 D · D1（主张真实性与证据计数）+ **验收轮**（用实机真实产物只读复核，修掉
-复核发现的 3 个实现缺陷）。证据：`docs/evidence/d1_claim_support_20260921.md`；冻结用例
-`evals/claims/d1_counterexamples_{before,after}.json`（before 0/11、after 11/11）；
-可重放脚本 `scripts/claims_d1_cases.py`（before/after/check）。
+**当前批次**：阶段 D · D1 已完成并验收（含实机产物复核修掉 3 处缺陷）；**D2 第一批**：
+分析保留（块级判断）、"有分析"最低要求、同版投影。证据：
+`docs/evidence/d1_claim_support_20260921.md`（D1 + 验收轮）、
+`docs/evidence/d2_analysis_retention_and_projection_20260921.md`（D2）；
+冻结用例 `evals/claims/d1_counterexamples_{before,after}.json`（before 0/11、after 11/11）、
+`evals/brief/d2_analysis_samples.json`（两份实机草稿片段，带 hash）；
+可重放脚本 `scripts/claims_d1_cases.py`、`scripts/d2_freeze_samples.py`。
 
 | 层 | 状态 |
 |---|---|
-| D1 反例（修复前） | c1 跨期跨指标同名值被 bound；c2 同句虚假利润整句 bound；c3 目标判断仅凭年报引用通过；c4 负号被丢；c5 20 万元被 20 亿元支持；e1 收入解释扩散给利润/现金流；n1 located=3 而实际只有 2 条带定位；c7 实机草稿的覆盖率句整句不支持 |
-| D1 修复 | `rows_detail` 补 `fact_id`；`_claims` 逐条断言（就近指标/紧邻年份/单位换算/符号）→ `bound/partially_supported/unsupported/needs_check`，带 `assertions[]`/`evidence_ids`；无数字的目标/因果判断也进清单；目标类逐项点名缺口；解释按指标+期间匹配；`located` 只数已准入+有定位+去重，摘要另计 `snippet_hints`；`[已取证据]` 注入加准入过滤；面板区分"部分支持/无底稿支持" |
-| D1 验收轮（实机只读复核） | 底稿 18 行 + 11 派生行**全部带 fact_id**；实机草稿（891 字）→ 5 条主张：核心指标 6 断言全 supported、覆盖率句已修好、百分点差由两期水平重算支持、跨句年度不借用。复核发现并修：①百分点单位类别失效；②跨句年份误归属；③覆盖率别名漏匹配；④**语义门**（必需语义不全不再尝试匹配，此前期间不明仍按数值绑期）；⑤百分点差改由两期相减复核 |
-| 上游缺陷（D3） | 底稿把"毛利率"单位记成**亿元**（73.16 亿元）→ 比率断言一律不支持（宁可待核查不误绑）；报告表格也会显示成"毛利率 73.16 亿元" |
-| D1 验证 | `check` 11/11；test_delivery_chain **258**、narrative_evidence 39、guards 45、scenario_checks 17、offline_delivery 32、report_quality+report_version 44 全绿；三场景冻结期望全过（normal_growth 仍 located=4）；前端构建通过 |
-| 前一批 | 实机 ui-31305a2b28（15 分 59 秒，上限内）+ 五处修复 + 第二轮四项收口（`4aee354`/`4dc1742`/`29ec71d`/`d316a25`/`a84e24f`）；文档"按字数弃稿"表述已按 `compare_versions` 实测改正 |
-| 遗留 | 真实年报 MD&A 正向解释与底稿单位映射（D3）；当前交付稿的同版投影与候选有效验收（D2）；根任务调用账本与截止（D5）；双装配取舍（编排层待决策）；214 字分析双成因；现采纳正文仍带旧渲染伪影（候选 8b23aad3 按语义留档） |
+| D1（已验收） | 反例 11 项全冻结：跨期跨指标同名值/同句虚假数字/目标判断仅凭引用/负号丢失/单位量级/解释扩散/located 虚高 等；修复后逐条断言（就近指标、紧邻年份、单位换算、符号）、语义门（缺语义不匹配）、百分点差两期重算、located 只数已准入+有定位+去重；实机复核又修 3 处（百分点单位、跨句年份、覆盖率别名） |
+| D2 分析保留 | `_analysis_section` 改块级判断：装配器逐字生成的小节整块丢，其余只丢表格/图片/来源清单行、标题与散文保留；实机草稿保留 214→**581** 字、891→**1235** 字；冻结两份真实草稿片段（带 hash） |
+| D2 有分析 | `analysis_coverage`（≥1 项数据观察 + 意义/局限）进结构对象；不达标进风险清单并点名缺项 |
+| D2 同版投影 | 面板按**当前采纳版本**重建结构（确定性、进程内缓存）；重建不了则 `projection.rebuilt=false` 并隐藏发现/缺口/证据三块；实机读数 `structure_version=fde2f2e9`、`structure_current=true`、面板显示"按当前版本重建；文件结构属 8b23aad3"。验收中发现缓存命中返回形状错误（第二次轮询崩、面板消失）→ 已修 + 回归测试 |
+| 验证 | test_delivery_chain **268**、guards 46、narrative_evidence 39、scenario_checks 17、offline_delivery 32 全绿；三场景复跑全过；前端构建通过；服务 16/16 |
+| 前一批 | 实机 ui-31305a2b28（15 分 59 秒，上限内）+ 五处修复 + 第二轮四项收口（`4aee354`/`4dc1742`/`29ec71d`/`d316a25`/`a84e24f`）；文档"按字数弃稿"表述已改正 |
+| 遗留 | D2 剩余：候选先验收再比较（可解释差异记录）；分析跨块重复未度量。D3：真实 MD&A 正向解释与底稿单位映射（毛利率记为亿元）。D5：根任务调用账本。双装配取舍（编排层待决策）；现采纳正文仍带旧渲染伪影 |
 | 人工验收 | **未做**（研究员五项 0–2 评分 ≥8/10 → D 内部试用） |
 
 ## F3-C / C3（已完成，证据见 `docs/evidence/c3_brief_shape_20260920.md`）
