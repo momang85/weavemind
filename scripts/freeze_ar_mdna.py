@@ -58,6 +58,8 @@ def _sentences_with_causality(text: str) -> list[str]:
 
     判据与生产一致：`narrative_evidence.is_causal`（政策套话/仅复述数字不算），
     并要求句子谈到核心指标——否则"说了原因但没说哪个指标"的句子对不上解释对象。
+    另加 `is_policy_text` 守卫：披露规则/准则说明类句子也会命中"影响"这类词
+    （实测第 71 页的"非经常性损益界定说明"），但它们不是经营变化解释。
     """
     import narrative_evidence as ne
     out: list[str] = []
@@ -67,7 +69,27 @@ def _sentences_with_causality(text: str) -> list[str]:
             continue
         if not any(t in s for t in TOPIC):
             continue
-        if not ne.is_causal(s):
+        if not ne.is_causal(s) or ne.is_policy_text(s):
+            continue
+        out.append(s)
+    return out
+
+
+def _target_sentences(text: str) -> list[str]:
+    """发行人自己披露的**经营目标句**（目标/计划/力争 + 数值或区间）。
+
+    目标类判断的正向样本必须来自发行人原文（D1 未验项）："力争营业收入同比增长 5%-10%"
+    这类句子要能连同披露日与页码一起冻结，供目标分支核对目标年度/目标值/披露时点。
+    """
+    out: list[str] = []
+    for raw in re.split(r"(?<=[。；])", str(text or "")):
+        s = " ".join(raw.split())
+        if len(s) < 12 or len(s) > 300:
+            continue
+        if not any(k in s for k in ("目标", "计划", "力争", "预算")):
+            continue
+        if not re.search(r"\d[\d,]*(?:\.\d+)?\s*(?:万亿|千亿|百亿|亿元|万元|亿|万|元|%|％)", s) \
+                and not re.search(r"\d+\s*[%％]?\s*[—\-~至]\s*\d", s):
             continue
         out.append(s)
     return out
@@ -80,6 +102,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"art_code 形状非法（只接受编号，不接受 URL）：{art[:40]}", file=sys.stderr)
         return 2
     sections: list[dict] = []
+    targets: list[dict] = []
     meta: dict = {}
     total = 0
     for page in range(1, MAX_PAGES + 1):
@@ -102,6 +125,11 @@ def main(argv: list[str] | None = None) -> int:
                 break
             sections.append({"page": page, "text": s})
             total += len(s)
+        # 目标句单独冻结：目标类判断的正向样本必须来自发行人原文
+        if len(targets) < 4:
+            for s in _target_sentences(text):
+                if not any(t["text"] == s for t in targets):
+                    targets.append({"page": page, "text": s})
         if total >= MAX_EXCERPT_CHARS:
             break
         time.sleep(SLEEP_S)
@@ -119,6 +147,8 @@ def main(argv: list[str] | None = None) -> int:
         "pages_scanned": MAX_PAGES,
         "pages_with_hits": sorted({s["page"] for s in sections}),
         "sections": sections,
+        # 发行人自己披露的经营目标句（目标类判断的正向样本）
+        "targets": targets,
         "body": body,
         "body_sha256": hashlib.sha256(body.encode("utf-8")).hexdigest(),
         "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%S"),

@@ -8,6 +8,9 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import contextlib
 import sys
 import tempfile
 import threading
@@ -16,10 +19,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import llm_client as lc
+
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 import root_budget as rb  # noqa: E402
+import workspace as ws_mod  # noqa: E402
 
 
 class _Clock:
@@ -48,12 +54,26 @@ class TestRootBudgetLedger(unittest.TestCase):
         self.tmp = Path(tempfile.mkdtemp(prefix="wm_bud_"))
         self.addCleanup(__import__("shutil").rmtree, self.tmp, ignore_errors=True)
 
-    def test_unlimited_budget_is_noop(self):
+    def test_unlimited_budget_counts_without_refusing(self):
+        """D5：不限额度也**如实计数**（账本要能核对"供应商实际收到多少次请求"），
+        只是从不拒绝；0 仍然是不限（不拿别的配置兜底成硬截止）。
+
+        改前 `reserve` 在不限时直接返回空串、什么都不记——于是实机任务的根账本恒为空，
+        "每次请求都有唯一记录"无从核对（D5 前置审查的 P1）。
+        """
         b = rb.RootBudget("t-1", self.tmp)
         self.assertFalse(b.limited)
-        self.assertEqual(b.reserve("step"), "", "未配置上限时不预留、不落盘")
+        ticket = b.reserve("step", tokens=100)
+        self.assertTrue(ticket, "不限额度也要开票计数")
+        self.assertEqual(b.state.calls_reserved, 1)
+        self.assertEqual(b.exhausted_reason(), "", "不限就是不拒绝")
+        b.settle(ticket, tokens=100)
+        self.assertEqual(b.state.calls_settled, 1)
+        self.assertEqual(b.state.tokens_settled, 100)
+        self.assertEqual(b.state.open_tickets, {}, "结算后不留未结票据")
+        self.assertEqual(b.state.tokens_reserved, 0, "token 预留换成实际用量")
         b.settle("", tokens=100)          # 无票据 → 无副作用
-        self.assertEqual(b.state.calls_reserved, 0)
+        self.assertEqual(b.state.calls_settled, 1)
 
     def test_reserve_then_settle_counts_once(self):
         b = rb.RootBudget("t-1", self.tmp, rb.BudgetLimits(max_calls=3))
@@ -516,7 +536,8 @@ class TestZeroMeansTrulyUnlimited(unittest.TestCase):
             b = o._budget("t-1")
         self.assertFalse(b.limited, "0/0/0 必须是不限，而不是拿 task_timeout 兜底")
         self.assertEqual(b.limits.max_seconds, 0.0)
-        self.assertEqual(b.reserve("plan"), "", "不限额度时不预留")
+        # D5：不限额度也开票计数（账本可核对），但**从不拒绝**
+        self.assertTrue(b.reserve("plan"), "不限额度也要开票计数")
         self.assertEqual(b.exhausted_reason(), "")
 
 
@@ -614,6 +635,132 @@ class TestCancelLatencyIsTwoSeparateClocks(unittest.TestCase):
         o = self._orch("1")
         self.assertEqual(o._cancel_latency("t-1"), {},
                          "拿不到请求时刻就不要编一个时延出来")
+
+
+_ENV_KEYS = ("WM_TASK_MAX_CALLS", "WM_TASK_MAX_SECONDS", "WM_TASK_MAX_TOKENS")
+
+
+class _Provider:
+    """模拟供应商：只数收到的请求（不联网）。"""
+
+    def __init__(self, *, fail_first: int = 0):
+        self.calls = 0
+        self.fail_first = int(fail_first)
+
+    def send(self, *_a, **_k) -> str:
+        self.calls += 1
+        if self.calls <= self.fail_first:
+            raise lc.LLMCallError("模拟供应商 503")
+        return json.dumps({"ok": True})
+
+
+@contextlib.contextmanager
+def _offline():
+    """离线环境：无备用端点、端点判定健康、不热重载、不真等待。"""
+    with mock.patch.object(lc, "_BACKUP_CFG", {}), \
+            mock.patch.object(lc, "_primary_healthy", lambda: True), \
+            mock.patch.object(lc, "_ensure_cfg_fresh"), \
+            mock.patch.object(lc.time, "sleep"):
+        yield
+
+
+def _client(provider: _Provider, *, retries: int = 1):
+    class _C(lc.LLMClient):
+        _MAX_RETRIES = retries
+        _RETRY_BASE = 0
+
+        def _send_request(self, *a, **k):
+            return provider.send(*a, **k)
+
+    return _C()
+
+
+class TestRequestLedger(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_reqled_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(self.tmp))
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", old_root)
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        lc._root_budgets.clear()
+        self.addCleanup(lc.clear_task_context)
+        self.addCleanup(lambda: [os.environ.pop(k, None) for k in _ENV_KEYS])
+
+    def _budget(self, tid: str) -> RootBudget:
+        return rb.RootBudget(tid, ws_mod.task_workspace(tid),
+                          lc._budget_limits_from_file())
+
+    def test_ledger_counts_every_request_even_without_caps(self):
+        p = _Provider()
+        c = _client(p)
+        lc.set_task_context("t-led-1")
+        with _offline():
+            c.call("sys", "u1", expect_json=True)
+            c.call("sys", "u2", expect_json=True)
+        self.assertEqual(p.calls, 2)
+        b = self._budget("t-led-1")
+        self.assertFalse(b.limited, "本用例就是不限额度")
+        self.assertEqual(b.state.calls_settled, 2,
+                         "账本调用数必须与供应商实收数一致")
+        self.assertEqual(b.state.open_tickets, {}, "不留未结票据")
+
+    def test_cap_refuses_before_sending(self):
+        os.environ["WM_TASK_MAX_CALLS"] = "2"
+        p = _Provider()
+        c = _client(p)
+        lc.set_task_context("t-led-2")
+        with _offline():
+            c.call("sys", "u1", expect_json=True)
+            c.call("sys", "u2", expect_json=True)
+            with self.assertRaises(lc.LLMCallError) as ctx:
+                c.call("sys", "u3", expect_json=True)
+        self.assertTrue(getattr(ctx.exception, "budget_exhausted", False),
+                        "预算不足必须是可识别的信号")
+        self.assertEqual(p.calls, 2, "被拒的请求供应商从未收到")
+        self.assertEqual(self._budget("t-led-2").state.calls_settled, 2)
+
+    def test_retries_are_counted_separately(self):
+        p = _Provider(fail_first=1)
+        c = _client(p, retries=2)
+        lc.set_task_context("t-led-3")
+        with _offline():
+            c.call("sys", "u", expect_json=True)
+        self.assertEqual(p.calls, 2, "第一次失败后重试一次")
+        b = self._budget("t-led-3")
+        self.assertEqual(b.state.calls_settled, 2, "两次请求各记一次")
+        self.assertEqual(b.snapshot()["stages"]["llm"]["settled"], 2)
+
+    def test_backup_request_is_counted(self):
+        p = _Provider()
+
+        class _StubClient(lc.LLMClient):
+            def _send_request(self, *a, **k):
+                return p.send(*a, **k)
+
+        c = _client(p)
+        # 显式给出备用端点配置：不依赖环境里的真实备用端点（离线纪律）
+        c._backup_cfg = {"base_url": "https://backup.test/v1", "api_key": "k",
+                         "model": "m"}
+        lc.set_task_context("t-led-4")
+        with _offline(), mock.patch.object(lc, "LLMClient", _StubClient):
+            c._call_backup("sys", "u", 0.0, 512, True)
+        self.assertEqual(p.calls, 1)
+        b = self._budget("t-led-4")
+        self.assertEqual(b.snapshot()["stages"]["backup"]["settled"], 1,
+                         "切到备端点也要入账")
+
+    def test_cancel_before_send_opens_no_ticket(self):
+        p = _Provider()
+        c = _client(p)
+        lc.set_task_context("t-led-5")
+        lc.set_cancel_guard(lambda tid: True)
+        self.addCleanup(lc.set_cancel_guard, None)
+        with _offline(), self.assertRaises(lc.LLMCancelledError):
+            c.call("sys", "u", expect_json=True)
+        self.assertEqual(p.calls, 0)
+        b = self._budget("t-led-5")
+        self.assertEqual(b.state.open_tickets, {}, "取消在发送前：没有在飞票据")
+        self.assertEqual(b.state.calls_settled, 0)
 
 
 if __name__ == "__main__":

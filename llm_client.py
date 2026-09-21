@@ -470,6 +470,80 @@ def _endpoint_guard(url: str) -> str:
 _LLM_CALLS_MAX = 200          # 每任务保留的调用形状条数上限
 
 
+# ── D5：根任务账本（每次**实际供应商请求**入账）────────────────────
+# 为什么放在这里：worker 内部的多次请求（摘要/报告生成）此前只算一张派发票据，
+# 根账本因此对不上供应商实际收到的请求数。账本以"一次请求"为单位开票/结算，
+# 主备切换与重试各记一次；不限额度也如实计数，只有配了上限才会拒绝发送。
+_root_budgets: dict[str, Any] = {}
+
+
+def _budget_limits_from_file() -> Any:
+    """读 `config.json` 的 `system.budget`（与编排器同源）+ `WM_TASK_MAX_*` 环境覆盖。"""
+    from root_budget import limits_from_config
+    cfg: dict = {}
+    try:
+        with open(_CFG_PATH, encoding="utf-8") as fh:
+            cfg = json.load(fh) or {}
+    except Exception:
+        cfg = {}
+    return limits_from_config(cfg)
+
+
+def _root_budget_for_task():
+    """当前任务的根预算账本；没有任务上下文时返回 None（不记账、不拒绝）。"""
+    tid = get_task_context()
+    if not tid:
+        return None
+    cached = _root_budgets.get(tid)
+    if cached is not None:
+        return cached
+    try:
+        from root_budget import RootBudget
+        from workspace import task_workspace
+        ws = task_workspace(tid)
+        ws.mkdir(parents=True, exist_ok=True)   # 账本落在工作区；首次调用时目录可能还没建
+        b = RootBudget(tid, ws, _budget_limits_from_file())
+    except Exception as exc:                 # noqa: BLE001 - 账本不可用不阻断调用
+        logger.warning("根任务账本不可用（task=%s）：本次不记账：%s",
+                       str(tid)[:40], str(exc)[:100])
+        return None
+    _root_budgets[tid] = b
+    return b
+
+
+def _budget_open(stage: str, attempt: int, max_tokens: int, *, usage: str = ""):
+    """发送前开票（`stage`：llm / backup）；**预算不足时不发送**。
+
+    抛带 `budget_exhausted` 标记的错误，调用方据此停止后续尝试而不是重试。
+    """
+    b = _root_budget_for_task()
+    if b is None:
+        return None, ""
+    try:
+        ticket = b.reserve(stage, calls=1, tokens=int(max_tokens or 0),
+                           detail={"usage": str(usage or ""), "attempt": int(attempt)})
+    except Exception as exc:                 # noqa: BLE001 - 含 BudgetExceeded
+        _record_llm_call(get_task_context(), stage=usage or stage, attempt=attempt,
+                         max_tokens=max_tokens, error_class="budget_exceeded",
+                         end_reason="budget_refused")
+        err = LLMCallError(f"根任务预算不足，拒绝发送该请求：{str(exc)[:120]}")
+        setattr(err, "budget_exhausted", True)
+        raise err
+    return b, ticket
+
+
+def _budget_close(b, ticket: str, *, ok: bool, max_tokens: int,
+                  note: str = "") -> None:
+    """结算一次请求。token 记**上界**（本次未取到供应商实际用量，保守记账）。"""
+    if b is None or not ticket:
+        return
+    try:
+        b.settle(ticket, tokens=int(max_tokens or 0), ok=ok,
+                 note=note or ("llm:ok" if ok else "llm:failed"))
+    except Exception:                        # noqa: BLE001 - 结算失败不影响调用结果
+        pass
+
+
 def _record_llm_call(task_id: str, *, stage: str = "", attempt: int = 0,
                      elapsed_ms: int = 0, input_chars: int = 0,
                      max_tokens: int = 0, http_status: int = 0,
@@ -1661,6 +1735,9 @@ class LLMClient:
                                  error_class="budget_exhausted",
                                  end_reason="budget_exhausted")
                 raise exc
+            # D5：发送前开票——**在 try 之外**，预算不足时直接抛给调用方
+            # （放进 try 会被本地的重试处理吞掉，变成一次"端点失败"）
+            _rb, _ticket = _budget_open("llm", attempt, max_tok, usage=usage)
             try:
                 _t = _attempt_timeout()
                 # 无预算时不传 timeout：保持调用形状与改动前一致
@@ -1679,6 +1756,7 @@ class LLMClient:
                                  elapsed_ms=int((time.monotonic() - _t0) * 1000),
                                  input_chars=_input_chars, max_tokens=max_tok,
                                  end_reason="ok")
+                _budget_close(_rb, _ticket, ok=True, max_tokens=max_tok)
                 return result
             except LLMJSONParseError as exc:
                 # JSON 解析失败不重试（格式问题重试没用）
@@ -1686,6 +1764,8 @@ class LLMClient:
                                  elapsed_ms=int((time.monotonic() - _t0) * 1000),
                                  input_chars=_input_chars, max_tokens=max_tok,
                                  error_class="bad_json", end_reason="bad_json")
+                _budget_close(_rb, _ticket, ok=False, max_tokens=max_tok,
+                              note="llm:bad_json")
                 raise
             except Exception as exc:
                 # 思考耗尽（reasoning 模型烧光预算）→ 放大 max_tokens 立即重试，
@@ -1700,6 +1780,9 @@ class LLMClient:
                         "thinking budget exhausted, retry with max_tokens=%d",
                         max_tok,
                     )
+                    # 这次请求已经发出（供应商可能计费）：结算后再放大重试
+                    _budget_close(_rb, _ticket, ok=False, max_tokens=max_tok,
+                                  note="llm:thinking_budget_exhausted")
                     continue
                 _reason = _degradation_reason(exc)
                 _mark_endpoint("primary", False, _reason)
@@ -1712,6 +1795,8 @@ class LLMClient:
                     http_status=_http_status, error_class=_err_class,
                     end_reason="retry" if attempt < self._MAX_RETRIES else "exhausted",
                 )
+                _budget_close(_rb, _ticket, ok=False, max_tokens=max_tok,
+                              note=f"llm:{_err_class or 'failed'}")
                 last_error = exc
                 logger.warning(
                     "LLM call attempt %d/%d failed: %s",
@@ -1771,8 +1856,16 @@ class LLMClient:
             model=self._backup_cfg.get("model") or self.model,
         )
         _bk_kw = {"timeout": timeout} if timeout is not None else {}
-        raw = backup._send_request(system, user, temperature, max_tokens,
-                                   endpoint="backup", **_bk_kw)
+        # D5：备端点的请求同样入账（切流不是"没花钱"）；预算不足时不发送
+        _rb, _ticket = _budget_open("backup", 1, max_tokens)
+        try:
+            raw = backup._send_request(system, user, temperature, max_tokens,
+                                       endpoint="backup", **_bk_kw)
+        except Exception:
+            _budget_close(_rb, _ticket, ok=False, max_tokens=max_tokens,
+                          note="llm:backup_failed")
+            raise
+        _budget_close(_rb, _ticket, ok=True, max_tokens=max_tokens, note="llm:backup_ok")
         _mark_endpoint("backup", True)
         # P2-3：切换发生时把主端点 last_degradation_reason（为空则记
         # inherited_unhealthy）作为根因，避免 llm_degraded 只有 switch 事件

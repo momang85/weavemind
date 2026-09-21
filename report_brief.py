@@ -715,6 +715,10 @@ _TARGET_HEAD_RE = re.compile(r"(?:目标|计划|力争|预算)")
 _TARGET_ACHIEVEMENT_WORDS = ("完成率", "达成率", "进度", "已完成", "达成情况")
 # 百分比断言优先试同比派生指标的三个核心指标（其余比率指标自带独立 slug）
 _YOY_PROMOTABLE = ("revenue", "net_profit", "operating_cashflow")
+# 括号式变化值（"归母净利润的降幅（-33.38%）"）：窗口里出现这些词就按**同比**解析
+_CHANGE_WORDS = ("降幅", "跌幅", "增幅", "涨幅", "增速")
+_NEG_CHANGE_WORDS = ("降幅", "跌幅")
+_POS_CHANGE_WORDS = ("增幅", "涨幅", "增速")
 
 
 def _unit_class(unit: str) -> str:
@@ -891,6 +895,14 @@ def _assertions_in(sentence: str) -> list[dict]:
             sign = -1
         elif any(k in window for k in _POS_MARKERS):
             sign = 1
+        # 括号式变化值（"归母净利润的降幅（-33.38%）"）：窗口里有"降幅/增幅"这类词时，
+        # 该数值是**该指标的同比**而不是水平值——按同比解析并带方向（D3 补）
+        if metric in _YOY_PROMOTABLE and any(k in window for k in _CHANGE_WORDS):
+            metric = f"{metric}{_YOY_SUFFIX}"
+            if any(k in window for k in _NEG_CHANGE_WORDS):
+                sign = -1
+            elif any(k in window for k in _POS_CHANGE_WORDS):
+                sign = 1
         year = None
         ambiguous = False
         years_sent = sorted({int(ym.group(0)) for ym in _YEAR_TOKEN_RE.finditer(s)})
@@ -929,11 +941,15 @@ def _target_value_present(sentence: str) -> bool:
     return False
 
 
-def _evidence_ids_for(sentence_key: str, evidence: dict | None) -> list[str]:
-    """该句引用了哪些**已定位**的证据片段（摘要去标点后的前缀命中）。"""
+def _evidence_matches(sentence_key: str, evidence: dict | None) -> list[dict]:
+    """该句引用了哪些**已定位**的证据片段（摘要去标点后的前缀命中）。
+
+    返回记录本身（不只是 id）：目标类判断还要看"支持原文是不是发行人披露"，
+    以及该披露的发布日/报告期（披露时点）。
+    """
     if not sentence_key:
         return []
-    ids: list[str] = []
+    out: list[dict] = []
     for r in ((evidence or {}).get("records") or []):
         if not r.get("has_location"):
             continue
@@ -941,10 +957,22 @@ def _evidence_ids_for(sentence_key: str, evidence: dict | None) -> list[str]:
             continue
         probe = _sentence_key(str(r.get("snippet") or ""))[:40]
         if len(probe) >= 12 and probe in sentence_key:
-            cid = str(r.get("content_hash") or "")
-            if cid and cid not in ids:
-                ids.append(cid)
+            out.append(r)
+    return out
+
+
+def _evidence_ids_for(sentence_key: str, evidence: dict | None) -> list[str]:
+    ids: list[str] = []
+    for r in _evidence_matches(sentence_key, evidence):
+        cid = str(r.get("content_hash") or "")
+        if cid and cid not in ids:
+            ids.append(cid)
     return ids
+
+
+def _is_issuer_record(r: dict) -> bool:
+    return (str((r or {}).get("source_type")) == "issuer_annual_report"
+            or str((r or {}).get("document_provenance")) == "issuer_annual_report")
 
 
 def _claims(body: str, rows, derived, citations, *,
@@ -1126,15 +1154,39 @@ def _claims(body: str, rows, derived, citations, *,
             claim["type"] = ("third_party_view" if "报道" in s or "媒体" in s else kind)
             claim["claim_type"] = claim["type"]
         elif _is_target_claim(s):
-            # C2-3/D1：目标类判断逐项核对——目标年度、目标值/范围、披露时点（发行人
-            # 原文支持）、实际口径；缺哪项写哪项，不能靠"某篇文章提到"或"有个年报引用"成立。
+            # C2-3/D1/D3：目标类判断逐项核对——目标年度、目标值/范围、发行人披露的
+            # **支持原文**（该句须来自已定位的发行人披露）、**披露时点**（发布日/报告期）、
+            # 实际口径；缺哪项写哪项，不能靠"某篇文章提到"或"有个年报引用"成立。
             missing: list[str] = []
             if not claim["periods"]:
                 missing.append("目标年度")
             if not _target_value_present(s):
                 missing.append("目标值或目标范围")
-            if not (set(cite_ns) & issuer_ns):
+            _matches = _evidence_matches(_sentence_key(s), evidence)
+            _issuer_text = any(_is_issuer_record(r) for r in _matches)
+            _issuer_cited = bool(set(cite_ns) & issuer_ns)
+            if not (_issuer_text or _issuer_cited):
                 missing.append("发行人披露对该目标的原文支持")
+            elif not _issuer_text:
+                missing.append("发行人披露的原文（当前只有引用编号，正文未取到）")
+            # 披露时点：发行人披露要有发布日（或报告期），且报告期不得晚于目标年度
+            if _issuer_text:
+                _ok_time = False
+                for r in _matches:
+                    if not _is_issuer_record(r):
+                        continue
+                    pub = str(r.get("published_at") or "")
+                    dp = str(r.get("document_period") or "")
+                    ty = claim["periods"][-1] if claim["periods"] else None
+                    try:
+                        dp_ok = (not dp) or (ty is None) or int(dp) <= int(ty)
+                    except Exception:
+                        dp_ok = True
+                    if pub and dp_ok:
+                        _ok_time = True
+                        break
+                if not _ok_time:
+                    missing.append("目标披露时点（发布日/报告期不得晚于目标年度）")
             if not any(a.get("metric") for a in assertions):
                 missing.append("实际口径/实际值")
             if missing:
@@ -1144,6 +1196,14 @@ def _claims(body: str, rows, derived, citations, *,
                 claim["claim_type"] = "target_claim"
                 claim["reason"] = (f"目标类判断需核对{'、'.join(missing)}；"
                                    "本次未取得发行人披露对该目标的直接支持")
+            else:
+                # 五项齐备：目标年度 + 目标值/范围 + 发行人披露原文 + 披露时点 + 实际口径
+                claim["type"] = "target_claim"
+                claim["claim_type"] = "target_claim"
+                claim["status"] = "bound"
+                claim["support_status"] = "bound"
+                claim["reason"] = ("目标来自发行人披露原文（含目标年度、目标值/范围与"
+                                   "披露时点），实际口径由底稿断言核对")
         out.append(claim)
     return out[:40]
 

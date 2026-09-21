@@ -6965,6 +6965,31 @@ class TestCandidateAdoption(unittest.TestCase):
                          "重复的同一观察只算一条（计数按独立主张去重）")
 
 
+    def test_real_acceptance_binds_the_candidate_before_comparison(self):
+        """**非桩**：走真实 `accept_for_body`，候选先拿到它自己的验收再被采纳。
+
+        与桩测试的区别：这里验的是"验收对象 = 比较对象 = 采纳对象"这条链在真实
+        装配路径上成立（研究任务的候选会被装配成简报，验收绑到那一版）。
+        """
+        tid, ws = self._env(tid="adopt-real-01")
+        o = self._orch()
+        o._messaging = None                 # 前端推送在裸实例上不可用：置空即可
+        o._accept_iteration = 0
+        raw = ("# 贵州茅台 2023–2024 年度核心财务指标研究报告\n\n"
+               "2024 年营业收入 1741.44 亿元，同比增长 15.66%。"
+               "该变化仅覆盖本期，不能据此推断长期趋势。\n")
+        out = o._adopt_candidate(tid, "", raw, goal=self.GOAL)
+        from report_version import VersionStore
+        v = VersionStore(ws, tid).adopted()
+        self.assertIsNotNone(v)
+        self.assertTrue(v.acceptance_for_this_body(),
+                        f"候选必须拿到它自己的验收：{v.acceptance}")
+        self.assertEqual(out, v.body, "采纳的就是被验收的那一版")
+        self.assertNotEqual(out, raw, "研究任务候选会经装配（验收对象=比较对象）")
+        rec = self._records(ws)[-1]
+        self.assertTrue(rec.get("cand_acceptance"), rec)
+
+
 class TestRealMdnaPositivePath(unittest.TestCase):
     """D3：**真实年报的经营讨论**必须进入对应指标的解释（合成正例不算数）。
 

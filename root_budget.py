@@ -73,12 +73,20 @@ class BudgetState:
     open_tickets: dict = field(default_factory=dict)
     unsettled_tickets: dict = field(default_factory=dict)
     stages: dict = field(default_factory=dict)
+    # D5：这次运行的**声明上限**（0=不限）。写进账本供审计——"这次跑的上限是多少"
+    # 应当是账本里的事实，而不是事后只能靠剩余额度反推。
+    limits: dict = field(default_factory=dict)
     # 被拒绝的迁移（虚构票据 / 重复迁移 / 已取消再结算）——账本自身的问题要看得见
     rejected_transitions: dict = field(default_factory=dict)
 
 
 def limits_from_config(cfg: dict | None = None) -> BudgetLimits:
-    """从 config 的 `system.budget` 段读上限；缺省全为 0（**真正不限**，见 `limited`）。"""
+    """从 config 的 `system.budget` 段读上限；缺省全为 0（**真正不限**，见 `limited`）。
+
+    D5：允许**按运行声明**每任务上限（不改全局 config）——
+    `WM_TASK_MAX_SECONDS / WM_TASK_MAX_CALLS / WM_TASK_MAX_TOKENS` 存在且可解析时
+    覆盖对应维度；有界运行的上限因此是显式声明并可入账审计的。
+    """
     sys_cfg = ((cfg or {}).get("system") or {}) if isinstance(cfg, dict) else {}
     b = sys_cfg.get("budget") or {}
     if not isinstance(b, dict):
@@ -90,10 +98,22 @@ def limits_from_config(cfg: dict | None = None) -> BudgetLimits:
         except (TypeError, ValueError):
             return default
 
+    def _env(key: str) -> float | None:
+        raw = os.environ.get(key, "")
+        if str(raw).strip() == "":
+            return None
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return None
+
+    seconds = _env("WM_TASK_MAX_SECONDS")
+    calls = _env("WM_TASK_MAX_CALLS")
+    tokens = _env("WM_TASK_MAX_TOKENS")
     return BudgetLimits(
-        max_seconds=_num("max_seconds"),
-        max_calls=int(_num("max_calls")),
-        max_tokens=int(_num("max_tokens")),
+        max_seconds=(seconds if seconds is not None else _num("max_seconds")),
+        max_calls=int(calls if calls is not None else _num("max_calls")),
+        max_tokens=int(tokens if tokens is not None else _num("max_tokens")),
     )
 
 
@@ -125,6 +145,14 @@ class RootBudget:
         # 跨进程后端是否已**建立**（写路径成功用过一次）。观测读取不建立后端。
         self._established = False
         self.state = self._load()
+        # D5：声明上限入账（审计"这次跑的上限是多少"）——恢复时以磁盘为准，
+        # 但本进程传入的上限若不同则更新（配置/环境变了如实反映）
+        _declared = {"max_seconds": float(self.limits.max_seconds or 0.0),
+                     "max_calls": int(self.limits.max_calls or 0),
+                     "max_tokens": int(self.limits.max_tokens or 0)}
+        if dict(self.state.limits or {}) != _declared:
+            self.state.limits = _declared
+            self._save()
         if not self.state.ledger_id:
             # 新账本：生成身份并立刻落盘，后续实例（含恢复）读回同一个身份
             self.state.ledger_id = uuid.uuid4().hex[:12]
@@ -243,6 +271,7 @@ class RootBudget:
         st.open_tickets = dict(raw.get("open_tickets") or {})
         st.unsettled_tickets = dict(raw.get("unsettled_tickets") or {})
         st.stages = dict(raw.get("stages") or {})
+        st.limits = dict(raw.get("limits") or {})
         st.rejected_transitions = dict(raw.get("rejected_transitions") or {})
         return st
 
@@ -261,6 +290,7 @@ class RootBudget:
             "open_tickets": self.state.open_tickets,
             "unsettled_tickets": self.state.unsettled_tickets,
             "stages": self.state.stages,
+            "limits": self.state.limits,
             "rejected_transitions": self.state.rejected_transitions,
             "limits": {
                 "max_seconds": self.limits.max_seconds,
@@ -344,22 +374,26 @@ class RootBudget:
     # ── 预留 / 结算 ─────────────────────────────────────────
     def reserve(self, stage: str, *, calls: int = 1, tokens: int = 0,
                 detail: dict | None = None) -> str:
-        """发送前原子预留；不足则抛 `BudgetExceeded`。返回票据号（不限额度时返回空串）。"""
-        if not self.limited:
-            return ""
+        """发送前原子预留；**配置了上限且不足**时抛 `BudgetExceeded`。
+
+        D5：**记账与管制分开**——不配上限也如实计数（账本要能核对"供应商实际收到
+        多少次请求"），上限只决定"是否拒绝"。0 仍然是不限：不拒绝、也不拿别的
+        配置兜底成硬截止。
+        """
         calls = max(1, int(calls or 1))
         tokens = max(0, int(tokens or 0))
         with self._lock:
-            why = self.exhausted_reason()
-            if why:
-                raise BudgetExceeded(why)
-            left = self.remaining()
-            if left["calls"] is not None and left["calls"] < calls:
-                raise BudgetExceeded(
-                    f"根任务剩余调用次数不足（剩 {left['calls']}，需要 {calls}）")
-            if left["tokens"] is not None and tokens and left["tokens"] < tokens:
-                raise BudgetExceeded(
-                    f"根任务剩余 token 不足（剩 {left['tokens']}，需要 {tokens}）")
+            if self.limited:
+                why = self.exhausted_reason()
+                if why:
+                    raise BudgetExceeded(why)
+                left = self.remaining()
+                if left["calls"] is not None and left["calls"] < calls:
+                    raise BudgetExceeded(
+                        f"根任务剩余调用次数不足（剩 {left['calls']}，需要 {calls}）")
+                if left["tokens"] is not None and tokens and left["tokens"] < tokens:
+                    raise BudgetExceeded(
+                        f"根任务剩余 token 不足（剩 {left['tokens']}，需要 {tokens}）")
             # 跨进程原子预留：先加后校验，超了再退回。INCRBY 的返回值是**加完之后**的
             # 计数，所以两个进程不可能都拿到"仍在额度内"的结论（R2 反例：两个实例
             # 各自 reserve 都获准，各自返回同一个票据号）。
@@ -466,7 +500,7 @@ class RootBudget:
         转过去的、可能仍在计费）**不得**再记成 `settled`——两边都记等于把
         "这个调用到底停下没有"藏起来；虚构票据同样拒绝。
         """
-        if not ticket or not self.limited:
+        if not ticket:
             return
         with self._lock:
             if ticket in self.state.unsettled_tickets:
@@ -504,7 +538,7 @@ class RootBudget:
 
     def refund(self, ticket: str, *, note: str = "") -> None:
         """发送前失败 → 退回预留（这次调用没有发生）。"""
-        if not ticket or not self.limited:
+        if not ticket:
             return
         with self._lock:
             rec = self._take_open(ticket)
@@ -536,7 +570,7 @@ class RootBudget:
         凭空写一张 `xxx-inflight` 票据，账面上"取消已入账"，而真正预留的那张
         仍挂在 open 上，随后又被 `finally` 结算成成功，真实状态就再也读不出来了。
         """
-        if not ticket or not self.limited:
+        if not ticket:
             return False
         with self._lock:
             if ticket in self.state.unsettled_tickets:
@@ -574,8 +608,6 @@ class RootBudget:
 
         只动真实存在的票据：没有 open 票据就什么都不做（返回 0），不造票据。
         """
-        if not self.limited:
-            return 0
         with self._lock:
             tickets = [t for t, rec in self.state.open_tickets.items()
                        if str((rec or {}).get("stage") or "") == stage]
@@ -586,7 +618,11 @@ class RootBudget:
         return moved
 
     def note_progress(self, stage: str, detail: dict | None = None) -> None:
-        """记一次**有效进展**（心跳不算）：等待对象、最近有效进展由调用方给出。"""
+        """记一次**有效进展**（心跳不算）：等待对象、最近有效进展由调用方给出。
+
+        只在配置了上限时记录：这是诊断信息（账本核对靠 reserve/settle 的票据），
+        不限额度时每个步骤都写一次文件没有取证价值，只是 I/O。
+        """
         if not self.limited:
             return
         with self._lock:
