@@ -6596,6 +6596,51 @@ class TestClaimAssertionSupport(unittest.TestCase):
             self.assertEqual(c["status"], "needs_check")
             self.assertTrue(c["reason"], c)
 
+    def test_incomplete_semantics_never_bind_by_value(self):
+        """必需语义不全（缺期间/单位/指标）时**不尝试匹配**——不能靠数值命中升级。
+
+        实机复核发现：期间不明确（同句多个年度、数值不紧跟年份）时按数值仍会绑上
+        某一期，这正是误绑机制；现在一律待核查并写明缺哪项。
+        """
+        import report_brief as rb
+        rows = [{"metric": "net_margin", "metric_label": "归母净利率", "period": "2023年",
+                 "year": 2023, "value": 30.24, "unit": "%", "caliber": "合并",
+                 "fact_id": "fact-nm-2023"},
+                {"metric": "net_margin", "metric_label": "归母净利率", "period": "2024年",
+                 "year": 2024, "value": 23.11, "unit": "%", "caliber": "合并",
+                 "fact_id": "fact-nm-2024"}]
+        # 同句两个年度、数值不紧跟年份 → 期间归属不明确
+        c = rb._claims("毛利率由 2023 年的 75.25% 降至 2024 年的 73.16%；"
+                       "归母净利率由 30.24% 降至 23.11%。", rows, [], [])[0]
+        amb = [a for a in c["assertions"] if a.get("period_ambiguous")]
+        self.assertTrue(amb, c["assertions"])
+        for a in amb:
+            self.assertEqual(a["support_status"], "needs_check")
+            self.assertIn("期间归属不明确", a["reason"])
+            self.assertEqual(a["fact_ids"], [])
+        # 整句只有一个年度 → 归属无歧义，可以绑定
+        c2 = rb._claims("2023 年归母净利率 30.24%。", rows, [], [])[0]
+        self.assertEqual(c2["status"], "bound", c2)
+
+    def test_percentage_point_difference_is_recomputed_not_guessed(self):
+        """百分点差没有现成事实，但可由同指标两期水平相减复核；差值不符则不支持。"""
+        import report_brief as rb
+        rows = [{"metric": "debt_ratio", "metric_label": "资产负债率", "period": "2023年",
+                 "year": 2023, "value": 25.42, "unit": "%", "caliber": "合并",
+                 "fact_id": "fact-dr-2023"},
+                {"metric": "debt_ratio", "metric_label": "资产负债率", "period": "2024年",
+                 "year": 2024, "value": 23.24, "unit": "%", "caliber": "合并",
+                 "fact_id": "fact-dr-2024"}]
+        ok = rb._claims("2024 年资产负债率下降 2.18 个百分点。", rows, [], [])[0]
+        a = ok["assertions"][0]
+        self.assertEqual(a["support_status"], "supported", a)
+        self.assertIn("相减复核", a["reason"])
+        self.assertEqual(sorted(a["fact_ids"]), ["fact-dr-2023", "fact-dr-2024"])
+        # 差值不符（正文写 9.99 个百分点）→ 不支持
+        bad = rb._claims("2024 年资产负债率下降 9.99 个百分点。", rows, [], [])[0]
+        self.assertEqual(bad["assertions"][0]["support_status"], "unsupported",
+                         bad["assertions"][0])
+
 
 class TestChangeExplanationGuards(unittest.TestCase):
     """C2-3：文档可准入 ≠ 每句话可证明。

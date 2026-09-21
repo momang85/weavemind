@@ -592,6 +592,8 @@ _METRIC_ALIASES: tuple[tuple[str, str], ...] = tuple(sorted((
     ("营业收入同比", "revenue_yoy"), ("营收同比", "revenue_yoy"),
     ("归母净利润同比", "net_profit_yoy"), ("净利润同比", "net_profit_yoy"),
     ("经营现金流对归母净利润的覆盖", "cashflow_coverage"),
+    ("经营活动现金流净额对归母净利润的覆盖", "cashflow_coverage"),
+    ("现金流对归母净利润的覆盖", "cashflow_coverage"),
     ("现金流对净利润的覆盖", "cashflow_coverage"), ("覆盖倍数", "cashflow_coverage"),
     ("归母净利率", "net_margin"), ("净利率", "net_margin"),
     ("资产负债率", "debt_ratio"), ("研发投入强度", "rd_intensity"),
@@ -627,12 +629,18 @@ _YOY_PROMOTABLE = ("revenue", "net_profit", "operating_cashflow")
 
 
 def _unit_class(unit: str) -> str:
-    """单位类别：amount（金额，可换算）/ pct（%）/ pp（百分点）/ ''（未写）。"""
+    """单位类别：amount（金额，可换算）/ pct（%）/ pp（百分点）/ ''（未写）。
+
+    百分点必须**先判**：它字面不含 %，"个百分点"若走金额分支会得到空类别
+    （实机反例：'下降 2.09 个百分点' 被记成"未标单位"）。
+    """
     u = str(unit or "").strip()
     if not u:
         return ""
+    if "百分点" in u:
+        return "pp"
     if "%" in u or "％" in u:
-        return "pp" if "百分点" in u else "pct"
+        return "pct"
     try:
         from facts import amount_scale
         return "amount" if amount_scale(u) > 0 else ""
@@ -722,6 +730,35 @@ def _assertion_matches(a: dict, f: dict) -> bool:
     return True
 
 
+def _pp_recompute_match(a: dict, facts: list[dict]) -> dict | None:
+    """百分点差：底稿没有"百分点"事实，但可由**同指标两期水平相减**复核。
+
+    这是"可重算"支持而不是"数字命中"：只有差值（含方向）与正文一致才算，
+    并把参与相减的两期事实记进 `fact_ids` 与 `recomputed` 说明。
+    """
+    vals = [f for f in (facts or []) if isinstance(f.get("value"), (int, float))]
+    if len(vals) < 2:
+        return None
+    for i in range(len(vals)):
+        for j in range(len(vals)):
+            if i == j:
+                continue
+            diff = float(vals[j]["value"]) - float(vals[i]["value"])
+            if abs(abs(diff) - abs(float(a.get("value") or 0))) > 0.02:
+                continue
+            dsign = 0 if diff == 0 else (-1 if diff < 0 else 1)
+            if dsign and int(a.get("sign") or 1) != dsign:
+                continue
+            ids = [x for x in ((vals[j].get("fact_ids") or []) + (vals[i].get("fact_ids") or []))
+                   if x]
+            return {"metric": a.get("metric"), "period": None, "value": diff,
+                    "unit": "%", "caliber": vals[j].get("caliber") or "",
+                    "fact_ids": ids, "derived": True,
+                    "recomputed": {"from": vals[i].get("period"), "to": vals[j].get("period"),
+                                   "diff": diff}}
+    return None
+
+
 def _assertions_in(sentence: str) -> list[dict]:
     """句内数字 → 可单独验证的断言（指标/期间/值/单位/符号）。
 
@@ -739,7 +776,11 @@ def _assertions_in(sentence: str) -> list[dict]:
         unit = str(m.group("unit") or "")
         if not unit and re.fullmatch(r"(?:19|20)\d{2}", raw_num):
             continue                       # 裸年份是期间上下文，不是取值
-        head = s[max(0, m.start() - 60):m.start()]
+        # 指标归属窗口：金额/百分比看数字前 60 字；**百分点差**看整句前缀——
+        # "…覆盖由 2023 年的 61.20% 升至 2024 年的 69.37%，上升 8.17 个百分点" 里
+        # 指标名离数值较远，60 字窗会截断它、错归到内层的"归母净利润"上。
+        _win = 4000 if _unit_class(unit) == "pp" else 60
+        head = s[max(0, m.start() - _win):m.start()]
         window = head[-12:]
         # 指标归属：**取离数字最近**的别名（同距离取更长者）——一句里出现多个指标时
         # （"营业收入…净利润…"）必须按就近归属，不能按"窗口里最长的别名"。
@@ -762,11 +803,24 @@ def _assertions_in(sentence: str) -> list[dict]:
         elif any(k in window for k in _POS_MARKERS):
             sign = 1
         year = None
+        ambiguous = False
+        years_sent = sorted({int(ym.group(0)) for ym in _YEAR_TOKEN_RE.finditer(s)})
+        near = None
         for ym in _YEAR_TOKEN_RE.finditer(head):
-            year = int(ym.group(0))
+            if len(head) - ym.end() <= 20:       # 年份必须**紧邻**数值（≤20 字）
+                near = int(ym.group(0))
+        if near is not None:
+            year = near
+        elif len(years_sent) == 1:
+            year = years_sent[0]                 # 整句只有一个年度：归属无歧义
+        elif len(years_sent) > 1:
+            # 同句多个年度、数值又不紧跟年份（如"毛利率…降至…；归母净利率由 30.24% 降至
+            # 23.11%"）→ 期间不明确：不借远处年度（实机反例：30.24% 被误记为 2024 年）
+            ambiguous = True
         out.append({"text": str(m.group(0)).strip()[:40], "metric": metric,
                     "metric_label": _metric_label_of(metric) if metric else "",
-                    "period": year, "value": value, "unit": unit, "sign": sign,
+                    "period": year, "period_ambiguous": ambiguous,
+                    "value": value, "unit": unit, "sign": sign,
                     "unit_class": _unit_class(unit), "fact_ids": [],
                     "support_status": "needs_check", "reason": ""})
     return out
@@ -883,6 +937,22 @@ def _claims(body: str, rows, derived, citations, *,
             continue                      # 有数字但没有可验证断言（纯年份/计数）：不进清单
         # 逐条断言对事实
         for a in assertions:
+            # 必需语义不全（缺指标/单位/期间）→ **不尝试匹配**：不能靠"数值命中"升级为
+            # 已支持（百分点差例外：它由两期水平相减重算，本身不需要单一期间）
+            if not a.get("metric"):
+                a["support_status"] = "needs_check"
+                a["reason"] = "未提取到指标名，无法与底稿事实对应"
+                continue
+            if not a.get("unit_class"):
+                a["support_status"] = "needs_check"
+                a["reason"] = "未标单位，无法与底稿事实对应"
+                continue
+            if not a.get("period") and a.get("unit_class") != "pp":
+                a["support_status"] = "needs_check"
+                a["reason"] = ("同句出现多个年度且数值未紧跟年份，期间归属不明确"
+                               if a.get("period_ambiguous")
+                               else "未标期间，无法与底稿事实对应")
+                continue
             # 百分比挂在核心指标名后（"营业收入…下降 12.83%"）时，先试它的同比指标——
             # 底稿里"同比"是独立派生事实（revenue_yoy），按基础指标找会因单位类别不符落空
             cand_metrics = [str(a.get("metric") or "")]
@@ -901,19 +971,16 @@ def _claims(body: str, rows, derived, citations, *,
                         a["metric"] = mk
                         a["metric_label"] = _metric_label_of(mk)
                     break
+            if hit is None and a.get("unit_class") == "pp":
+                # 百分点差没有现成事实，但可由同指标两期水平相减**重算**复核
+                hit = _pp_recompute_match(a, idx.get(str(a.get("metric") or ""), []))
             if hit is not None:
                 a["support_status"] = "supported"
                 a["fact_ids"] = list(hit.get("fact_ids") or [])
-                a["reason"] = ""
-            elif not a.get("metric"):
-                a["support_status"] = "needs_check"
-                a["reason"] = "未提取到指标名，无法与底稿事实对应"
-            elif not a.get("period"):
-                a["support_status"] = "needs_check"
-                a["reason"] = "未标期间，无法与底稿事实对应"
-            elif not a.get("unit_class"):
-                a["support_status"] = "needs_check"
-                a["reason"] = "未标单位，无法与底稿事实对应"
+                _rc = hit.get("recomputed")
+                a["reason"] = (
+                    f"由两期水平值相减复核（{_rc.get('from')}→{_rc.get('to')}，"
+                    f"差 {_rc.get('diff'):+.2f} 个百分点）" if _rc else "")
             else:
                 a["support_status"] = "unsupported"
                 a["reason"] = (f"底稿中没有匹配的事实（{a.get('metric_label') or a.get('metric')}"

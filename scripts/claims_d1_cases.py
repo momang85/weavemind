@@ -49,6 +49,27 @@ REAL_DERIVED = [
      "value": -12.83, "unit": "%", "caliber": "合并",
      "derived_from": ["fact-rev-2023", "fact-rev-2024"]},
 ]
+# 真实年报的比率两期水平（同一份年报的数字，用于百分点差的可重算复核）
+REAL_RATIO_ROWS = [
+    {"metric": "gross_margin", "metric_label": "毛利率", "period": "2023年", "year": 2023,
+     "value": 75.25, "unit": "%", "caliber": "合并", "fact_id": "fact-gm-2023"},
+    {"metric": "gross_margin", "metric_label": "毛利率", "period": "2024年", "year": 2024,
+     "value": 73.16, "unit": "%", "caliber": "合并", "fact_id": "fact-gm-2024"},
+    {"metric": "net_margin", "metric_label": "归母净利率", "period": "2023年", "year": 2023,
+     "value": 30.24, "unit": "%", "caliber": "合并", "fact_id": "fact-nm-2023"},
+    {"metric": "net_margin", "metric_label": "归母净利率", "period": "2024年", "year": 2024,
+     "value": 23.11, "unit": "%", "caliber": "合并", "fact_id": "fact-nm-2024"},
+    {"metric": "cashflow_coverage", "metric_label": "经营现金流对归母净利润的覆盖",
+     "period": "2023年", "year": 2023, "value": 61.2, "unit": "%", "caliber": "合并",
+     "fact_id": "fact-cov-2023"},
+    {"metric": "cashflow_coverage", "metric_label": "经营现金流对归母净利润的覆盖",
+     "period": "2024年", "year": 2024, "value": 69.37, "unit": "%", "caliber": "合并",
+     "fact_id": "fact-cov-2024"},
+    {"metric": "debt_ratio", "metric_label": "资产负债率", "period": "2023年", "year": 2023,
+     "value": 25.42, "unit": "%", "caliber": "合并", "fact_id": "fact-dr-2023"},
+    {"metric": "debt_ratio", "metric_label": "资产负债率", "period": "2024年", "year": 2024,
+     "value": 23.24, "unit": "%", "caliber": "合并", "fact_id": "fact-dr-2024"},
+]
 # 年报原文（摘录页 2/3）里的真实句子/表格行
 REAL_SEGMENT_LINE = ("各类产品收入情况如下： 单位：元 营业收入 产品类别 2024 年 同比增减 "
                      "中高档酒 24,317,191,550.05 -14.79% 普通酒 3,931,104,279.57 -0.49%")
@@ -158,6 +179,25 @@ CASES: list[dict] = [
         "derived": REAL_DERIVED,
         "citations": [],
         "expect": {"statuses": ["needs_check"], "reason_contains": [["未提取到指标名"]]},
+    },
+    {
+        "id": "c7_real_draft_paragraphs",
+        "note": "实机模型草稿真实段落（洋河 2024）：覆盖率别名命中、百分点差由两期水平重算支持、跨句年度不借用",
+        "kind": "claims",
+        "body": ("盈利质量方面，毛利率由 2023 年的 75.25% 降至 2024 年的 73.16%，"
+                 "下降 2.09 个百分点；归母净利率由 30.24% 降至 23.11%，下降 7.13 个百分点。"
+                 "现金流质量方面，经营活动现金流净额对归母净利润的覆盖由 2023 年的 61.20% "
+                 "升至 2024 年的 69.37%，上升 8.17 个百分点。"
+                 "结构方面，资产负债率由 25.42% 降至 23.24%，下降 2.18 个百分点。"),
+        "rows": REAL_RATIO_ROWS,
+        "derived": [],
+        "citations": [],
+        "expect": {"statuses": ["partially_supported", "bound", "partially_supported"],
+                   "assertion_statuses": [
+                       ["supported", "supported", "supported",
+                        "needs_check", "needs_check", "supported"],
+                       ["supported", "supported", "supported"],
+                       ["needs_check", "needs_check", "supported"]]},
     },
     {
         "id": "e1_explanation_scope",

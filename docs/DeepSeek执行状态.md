@@ -1,17 +1,19 @@
 # DeepSeek 执行状态（2026-09-21 更新）
 
-**当前批次**：阶段 D · D1（主张真实性与证据计数）——离线完成，反例冻结、最小修复、定向验证全绿。
-证据：`docs/evidence/d1_claim_support_20260921.md`；冻结用例
-`evals/claims/d1_counterexamples_{before,after}.json`（before 0/10、after 10/10）；
+**当前批次**：阶段 D · D1（主张真实性与证据计数）+ **验收轮**（用实机真实产物只读复核，修掉
+复核发现的 3 个实现缺陷）。证据：`docs/evidence/d1_claim_support_20260921.md`；冻结用例
+`evals/claims/d1_counterexamples_{before,after}.json`（before 0/11、after 11/11）；
 可重放脚本 `scripts/claims_d1_cases.py`（before/after/check）。
 
 | 层 | 状态 |
 |---|---|
-| D1 反例（修复前） | c1 跨期跨指标同名值被 bound；c2 同句虚假利润整句 bound；c3 目标判断仅凭年报引用通过；c4 负号被丢（真话也绑不上）；c5 20 万元被 20 亿元支持；e1 收入解释扩散给利润/现金流；n1 located=3 而实际只有 2 条带定位（且"风险因素"被摘要抹掉） |
-| D1 修复 | `rows_detail` 补 `fact_id`；`_claims` 逐条断言（指标/期间/单位换算/符号）→ `bound/partially_supported/unsupported/needs_check`，带 `assertions[]`/`evidence_ids`；无数字的目标/因果判断也进清单；目标类逐项点名缺口；解释按指标+期间匹配（废除全局 bool）；`located` 只数已准入+有定位+去重，摘要另计 `snippet_hints`；`[已取证据]` 注入加准入过滤；面板区分"部分支持/无底稿支持" |
-| D1 验证 | `check` 10/10；test_delivery_chain 256、narrative_evidence 39、guards 45、scenario_checks 17、offline_delivery 32、report_quality+report_version 44 全绿；三场景冻结期望全过（normal_growth 仍 located=4）；前端构建通过 |
-| 前一批 | 实机 ui-31305a2b28（15 分 59 秒，上限内）+ 五处修复 + 第二轮四项收口（提交 `4aee354`/`4dc1742`/`29ec71d`/`d316a25`/`a84e24f`）；文档"按字数弃稿"表述已按 `compare_versions` 实测改正 |
-| 遗留 | 真实年报 MD&A 正向解释（D3）；当前交付稿的同版投影（D2）；根任务调用账本与截止（D5）；双装配取舍（编排层待决策）；214 字分析双成因；现采纳正文仍带旧渲染伪影（候选 8b23aad3 按语义留档） |
+| D1 反例（修复前） | c1 跨期跨指标同名值被 bound；c2 同句虚假利润整句 bound；c3 目标判断仅凭年报引用通过；c4 负号被丢；c5 20 万元被 20 亿元支持；e1 收入解释扩散给利润/现金流；n1 located=3 而实际只有 2 条带定位；c7 实机草稿的覆盖率句整句不支持 |
+| D1 修复 | `rows_detail` 补 `fact_id`；`_claims` 逐条断言（就近指标/紧邻年份/单位换算/符号）→ `bound/partially_supported/unsupported/needs_check`，带 `assertions[]`/`evidence_ids`；无数字的目标/因果判断也进清单；目标类逐项点名缺口；解释按指标+期间匹配；`located` 只数已准入+有定位+去重，摘要另计 `snippet_hints`；`[已取证据]` 注入加准入过滤；面板区分"部分支持/无底稿支持" |
+| D1 验收轮（实机只读复核） | 底稿 18 行 + 11 派生行**全部带 fact_id**；实机草稿（891 字）→ 5 条主张：核心指标 6 断言全 supported、覆盖率句已修好、百分点差由两期水平重算支持、跨句年度不借用。复核发现并修：①百分点单位类别失效；②跨句年份误归属；③覆盖率别名漏匹配；④**语义门**（必需语义不全不再尝试匹配，此前期间不明仍按数值绑期）；⑤百分点差改由两期相减复核 |
+| 上游缺陷（D3） | 底稿把"毛利率"单位记成**亿元**（73.16 亿元）→ 比率断言一律不支持（宁可待核查不误绑）；报告表格也会显示成"毛利率 73.16 亿元" |
+| D1 验证 | `check` 11/11；test_delivery_chain **258**、narrative_evidence 39、guards 45、scenario_checks 17、offline_delivery 32、report_quality+report_version 44 全绿；三场景冻结期望全过（normal_growth 仍 located=4）；前端构建通过 |
+| 前一批 | 实机 ui-31305a2b28（15 分 59 秒，上限内）+ 五处修复 + 第二轮四项收口（`4aee354`/`4dc1742`/`29ec71d`/`d316a25`/`a84e24f`）；文档"按字数弃稿"表述已按 `compare_versions` 实测改正 |
+| 遗留 | 真实年报 MD&A 正向解释与底稿单位映射（D3）；当前交付稿的同版投影与候选有效验收（D2）；根任务调用账本与截止（D5）；双装配取舍（编排层待决策）；214 字分析双成因；现采纳正文仍带旧渲染伪影（候选 8b23aad3 按语义留档） |
 | 人工验收 | **未做**（研究员五项 0–2 评分 ≥8/10 → D 内部试用） |
 
 ## F3-C / C3（已完成，证据见 `docs/evidence/c3_brief_shape_20260920.md`）

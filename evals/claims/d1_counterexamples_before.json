@@ -306,6 +306,84 @@
    ]
   },
   {
+   "id": "c7_real_draft_paragraphs",
+   "note": "实机模型草稿真实段落（洋河 2024）：覆盖率别名命中、百分点差由两期水平重算支持、跨句年度不借用",
+   "expect": {
+    "statuses": [
+     "partially_supported",
+     "bound",
+     "partially_supported"
+    ],
+    "assertion_statuses": [
+     [
+      "supported",
+      "supported",
+      "supported",
+      "needs_check",
+      "needs_check",
+      "supported"
+     ],
+     [
+      "supported",
+      "supported",
+      "supported"
+     ],
+     [
+      "needs_check",
+      "needs_check",
+      "supported"
+     ]
+    ]
+   },
+   "observed": {
+    "claims": [
+     {
+      "text": "盈利质量方面，毛利率由 2023 年的 75.25% 降至 2024 年的 73.16%，下降 2.09 个百分点；归母净利率由 30.24% 降至 23.11%，下降 7.13 个百分点",
+      "type": "observation",
+      "status": "bound",
+      "reason": null,
+      "fact_ids": [
+       "fact-gm-2023",
+       "fact-gm-2024",
+       "fact-nm-2023",
+       "fact-nm-2024"
+      ],
+      "assertion_statuses": [],
+      "assertions": []
+     },
+     {
+      "text": "现金流质量方面，经营活动现金流净额对归母净利润的覆盖由 2023 年的 61.20% 升至 2024 年的 69.37%，上升 8.17 个百分点",
+      "type": "observation",
+      "status": "bound",
+      "reason": null,
+      "fact_ids": [
+       "fact-cov-2023",
+       "fact-cov-2024"
+      ],
+      "assertion_statuses": [],
+      "assertions": []
+     },
+     {
+      "text": "结构方面，资产负债率由 25.42% 降至 23.24%，下降 2.18 个百分点",
+      "type": "observation",
+      "status": "bound",
+      "reason": null,
+      "fact_ids": [
+       "fact-dr-2023",
+       "fact-dr-2024"
+      ],
+      "assertion_statuses": [],
+      "assertions": []
+     }
+    ]
+   },
+   "ok": false,
+   "mismatch": [
+    "statuses 期望 ['partially_supported', 'bound', 'partially_supported'] 实得 ['bound', 'bound', 'bound']",
+    "assertion_statuses 期望 [['supported', 'supported', 'supported', 'needs_check', 'needs_check', 'supported'], ['supported', 'supported', 'supported'], ['needs_check', 'needs_check', 'supported']] 实得 [[], [], []]"
+   ]
+  },
+  {
    "id": "e1_explanation_scope",
    "note": "只取得收入解释：利润与现金流不得标'解释已取得'",
    "expect": {
