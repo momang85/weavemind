@@ -1,21 +1,21 @@
 # DeepSeek 执行状态（2026-09-21 更新）
 
-**当前批次**：阶段 D · D1 已完成并验收；**D2 两批完成**（分析保留/有分析最低要求/同版投影；
-候选先验收再比较 + 可解释差异记录）。证据：
-`docs/evidence/d1_claim_support_20260921.md`、
-`docs/evidence/d2_analysis_retention_and_projection_20260921.md`、
-`docs/evidence/d2_candidate_acceptance_and_diff_20260921.md`；
-冻结用例 `evals/claims/d1_counterexamples_{before,after}.json`（0/11 → 11/11）、
-`evals/brief/d2_analysis_samples.json`；脚本 `scripts/claims_d1_cases.py`、`scripts/d2_freeze_samples.py`。
+**当前批次**：阶段 D · D1（含验收轮）、D2（两批）已完成；**D3 完成**（单位语义、真实 MD&A
+正向样本、研究问题计划）。证据：`docs/evidence/d1_claim_support_20260921.md`、
+`d2_analysis_retention_and_projection_20260921.md`、`d2_candidate_acceptance_and_diff_20260921.md`、
+`d3_real_disclosure_and_units_20260921.md`；冻结样本 `evals/claims/d1_counterexamples_{before,after}.json`、
+`evals/brief/d2_analysis_samples.json`、`evals/real/yanghe_ar2024_mdna_excerpt.json`；
+脚本 `scripts/claims_d1_cases.py`、`scripts/d2_freeze_samples.py`、`scripts/freeze_ar_mdna.py`。
 
 | 层 | 状态 |
 |---|---|
-| D1（已验收） | 反例 11 项冻结；逐条断言（就近指标、紧邻年份、单位换算、符号）、语义门（缺语义不匹配）、百分点差两期重算、located 只数已准入+有定位+去重；实机复核又修 3 处（百分点单位、跨句年份、覆盖率别名） |
-| D2 分析保留 | `_analysis_section` 块级判断（装配器逐字生成的小节整块丢，其余只丢表格/图片/来源清单行）；实机草稿保留 214→**581**、891→**1235** 字；"有分析"最低要求（≥1 观察 + 意义/局限）进结构对象与风险清单 |
-| D2 同版投影 | 面板按当前采纳版本重建结构（确定性、进程内缓存）；重建不了则隐藏发现/缺口/证据；实机 `structure_current=true`、显示"按当前版本重建；文件结构属 8b23aad3"；验收中修掉缓存命中返回形状错误（第二次轮询崩、面板消失） |
-| D2 候选比较 | `_accept_candidate`：候选先完成**自身正文**验收（修正版即候选，验收对象=比较对象），失败按未知不阻断；`candidate_quality` 质量向量（分析达标/独立观察/未支持结论/重复块，按独立句子去重、上限 10）；`compare_versions` 硬条件相同后按向量判并可解释；差异记录落 `report_quality.jsonl`。连带：采纳点写验收快照 → 反思收敛跟着**当前稿验收**走（原"预置 fail 文件"的用例改为验收桩 fail，不变量保留） |
-| 验证 | test_delivery_chain **271**、task_time_optimization 11、report_quality 32、report_version 18、narrative_evidence 39、guards 46、scenario_checks 17、offline_delivery 32 全绿；三场景复跑全过；前端构建通过；服务 16/16 |
-| 遗留 | D3：真实 MD&A 正向解释与底稿单位映射（毛利率记为亿元）。D5：根任务调用账本与截止（达标前不新增实机）。D6：真人评分与试用。双装配取舍（编排层待决策）；现采纳正文仍带旧渲染伪影 |
+| D1（已验收） | 反例 11 项冻结；逐条断言（就近指标、紧邻年份、单位换算、符号）、语义门、百分点差两期重算、located 只数已准入+有定位+去重；实机复核又修 3 处 |
+| D2 | 分析保留块级判断（实机 214→581、891→1235 字）；"有分析"最低要求；同版投影（面板按当前版本重建，重建失败隐藏）；候选先验收再比较 + 质量向量 + `report_quality.jsonl` 差异记录 |
+| D3 单位语义 | `facts.PERCENT_METRICS`：毛利率一律 `%`/metric_semantics，不继承载荷金额单位（实机读数 73.16 亿元 → 73.16 %） |
+| D3 真实披露 | 分类器补"环境+应对"因果措辞（洋河原文"存量竞争/承压/调整经营策略"此前被判非因果）；`net_policy` 有界抓取并冻结第 3 页真实段落；离线正向：真实解释进入**收入**解释（带定位），利润/现金流仍为缺口 |
+| D3 研究问题 | 三问（收入量价结构 / 利润与收入差异 / 现金与覆盖关系），每问观察+支持证据+推断边界+核查动作；银行视角补"已知/未知 + 询问清单"；护栏入正文（覆盖率上升≠回款改善、负债下降≠偿债安全） |
+| 验证 | CI 全量后端清单 46 文件本地 0 失败（418s）；三场景全过（normal_growth verified）；test_delivery_chain 277、narrative_evidence 42、facts 43、working_paper 61 全绿 |
+| 遗留 | D5：根任务调用账本与截止（达标前不新增实机）。D6：真人五项评分与试用记录（含把真实目标句纳入回归包）。D3 未验：抓取仅前 16 页、利润/现金流解释在该年报这些页确实不存在（保持缺口） |
 | 人工验收 | **未做**（研究员五项 0–2 评分 ≥8/10 → D 内部试用） |
 
 ## F3-C / C3（已完成，证据见 `docs/evidence/c3_brief_shape_20260920.md`）
