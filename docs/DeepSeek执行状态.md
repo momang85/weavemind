@@ -1,22 +1,21 @@
 # DeepSeek 执行状态（2026-09-21 更新）
 
-**当前批次**：阶段 D · D1 已完成并验收（含实机产物复核修掉 3 处缺陷）；**D2 第一批**：
-分析保留（块级判断）、"有分析"最低要求、同版投影。证据：
-`docs/evidence/d1_claim_support_20260921.md`（D1 + 验收轮）、
-`docs/evidence/d2_analysis_retention_and_projection_20260921.md`（D2）；
-冻结用例 `evals/claims/d1_counterexamples_{before,after}.json`（before 0/11、after 11/11）、
-`evals/brief/d2_analysis_samples.json`（两份实机草稿片段，带 hash）；
-可重放脚本 `scripts/claims_d1_cases.py`、`scripts/d2_freeze_samples.py`。
+**当前批次**：阶段 D · D1 已完成并验收；**D2 两批完成**（分析保留/有分析最低要求/同版投影；
+候选先验收再比较 + 可解释差异记录）。证据：
+`docs/evidence/d1_claim_support_20260921.md`、
+`docs/evidence/d2_analysis_retention_and_projection_20260921.md`、
+`docs/evidence/d2_candidate_acceptance_and_diff_20260921.md`；
+冻结用例 `evals/claims/d1_counterexamples_{before,after}.json`（0/11 → 11/11）、
+`evals/brief/d2_analysis_samples.json`；脚本 `scripts/claims_d1_cases.py`、`scripts/d2_freeze_samples.py`。
 
 | 层 | 状态 |
 |---|---|
-| D1（已验收） | 反例 11 项全冻结：跨期跨指标同名值/同句虚假数字/目标判断仅凭引用/负号丢失/单位量级/解释扩散/located 虚高 等；修复后逐条断言（就近指标、紧邻年份、单位换算、符号）、语义门（缺语义不匹配）、百分点差两期重算、located 只数已准入+有定位+去重；实机复核又修 3 处（百分点单位、跨句年份、覆盖率别名） |
-| D2 分析保留 | `_analysis_section` 改块级判断：装配器逐字生成的小节整块丢，其余只丢表格/图片/来源清单行、标题与散文保留；实机草稿保留 214→**581** 字、891→**1235** 字；冻结两份真实草稿片段（带 hash） |
-| D2 有分析 | `analysis_coverage`（≥1 项数据观察 + 意义/局限）进结构对象；不达标进风险清单并点名缺项 |
-| D2 同版投影 | 面板按**当前采纳版本**重建结构（确定性、进程内缓存）；重建不了则 `projection.rebuilt=false` 并隐藏发现/缺口/证据三块；实机读数 `structure_version=fde2f2e9`、`structure_current=true`、面板显示"按当前版本重建；文件结构属 8b23aad3"。验收中发现缓存命中返回形状错误（第二次轮询崩、面板消失）→ 已修 + 回归测试 |
-| 验证 | test_delivery_chain **268**、guards 46、narrative_evidence 39、scenario_checks 17、offline_delivery 32 全绿；三场景复跑全过；前端构建通过；服务 16/16 |
-| 前一批 | 实机 ui-31305a2b28（15 分 59 秒，上限内）+ 五处修复 + 第二轮四项收口（`4aee354`/`4dc1742`/`29ec71d`/`d316a25`/`a84e24f`）；文档"按字数弃稿"表述已改正 |
-| 遗留 | D2 剩余：候选先验收再比较（可解释差异记录）；分析跨块重复未度量。D3：真实 MD&A 正向解释与底稿单位映射（毛利率记为亿元）。D5：根任务调用账本。双装配取舍（编排层待决策）；现采纳正文仍带旧渲染伪影 |
+| D1（已验收） | 反例 11 项冻结；逐条断言（就近指标、紧邻年份、单位换算、符号）、语义门（缺语义不匹配）、百分点差两期重算、located 只数已准入+有定位+去重；实机复核又修 3 处（百分点单位、跨句年份、覆盖率别名） |
+| D2 分析保留 | `_analysis_section` 块级判断（装配器逐字生成的小节整块丢，其余只丢表格/图片/来源清单行）；实机草稿保留 214→**581**、891→**1235** 字；"有分析"最低要求（≥1 观察 + 意义/局限）进结构对象与风险清单 |
+| D2 同版投影 | 面板按当前采纳版本重建结构（确定性、进程内缓存）；重建不了则隐藏发现/缺口/证据；实机 `structure_current=true`、显示"按当前版本重建；文件结构属 8b23aad3"；验收中修掉缓存命中返回形状错误（第二次轮询崩、面板消失） |
+| D2 候选比较 | `_accept_candidate`：候选先完成**自身正文**验收（修正版即候选，验收对象=比较对象），失败按未知不阻断；`candidate_quality` 质量向量（分析达标/独立观察/未支持结论/重复块，按独立句子去重、上限 10）；`compare_versions` 硬条件相同后按向量判并可解释；差异记录落 `report_quality.jsonl`。连带：采纳点写验收快照 → 反思收敛跟着**当前稿验收**走（原"预置 fail 文件"的用例改为验收桩 fail，不变量保留） |
+| 验证 | test_delivery_chain **271**、task_time_optimization 11、report_quality 32、report_version 18、narrative_evidence 39、guards 46、scenario_checks 17、offline_delivery 32 全绿；三场景复跑全过；前端构建通过；服务 16/16 |
+| 遗留 | D3：真实 MD&A 正向解释与底稿单位映射（毛利率记为亿元）。D5：根任务调用账本与截止（达标前不新增实机）。D6：真人评分与试用。双装配取舍（编排层待决策）；现采纳正文仍带旧渲染伪影 |
 | 人工验收 | **未做**（研究员五项 0–2 评分 ≥8/10 → D 内部试用） |
 
 ## F3-C / C3（已完成，证据见 `docs/evidence/c3_brief_shape_20260920.md`）
