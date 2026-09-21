@@ -6851,6 +6851,120 @@ class TestVersionProjection(unittest.TestCase):
         self.assertTrue(second.get("projection"), second)
 
 
+class TestCandidateAdoption(unittest.TestCase):
+    """D2：候选先完成**自身正文**的验收再比较；差异记录落盘（可解释、不含正文）。
+
+    审查要求：不可用空 acceptance 作两个可用稿的"同分"证据；硬条件相同时比较有证据的
+    问题覆盖、未支持结论、分析遗漏与重复（按独立句子去重，不奖励加长）。
+    """
+
+    GOAL = ("研究贵州茅台 2023 与 2024 两个年度的营业收入、归母净利润、"
+            "经营活动现金流净额，合并报表口径，数据截至 2025-04-30")
+    ROWS = [{"year": 2023, "report_type": "年报", "revenue": 1505.6, "net_profit": 747.34,
+             "operating_cashflow": 665.93, "disclosure_date": "2024-04-03"},
+            {"year": 2024, "report_type": "年报", "revenue": 1741.44, "net_profit": 862.28,
+             "operating_cashflow": 924.64, "disclosure_date": "2025-04-03"}]
+
+    def _env(self, tid: str = "adopt-01"):
+        import facts as F
+        import task_state
+        tmp = Path(tempfile.mkdtemp(prefix="wm_adopt_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        old_db = task_state.DB_PATH
+        ws_mod.configure_workspace_root(str(tmp))
+        task_state.DB_PATH = str(tmp / "b.db")
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", old_root)
+        self.addCleanup(setattr, task_state, "DB_PATH", old_db)
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        req = F.parse_research_request(
+            self.GOAL, company="贵州茅台", company_id="600519.SH", market="cn",
+            periods=[2023, 2024], caliber="合并", as_of="2025-04-30",
+            perspective="equity", identity_source="form")
+        task_state.mark_queued(tid, goal=self.GOAL, research_request=req.to_payload(),
+                               db_path=task_state.DB_PATH)
+        proj = ws_mod.task_project_dir(tid, "default")
+        proj.mkdir(parents=True, exist_ok=True)
+        (proj / "financials.json").write_text(json.dumps({
+            "financials": self.ROWS,
+            "metadata": {"source": "eastmoney_ashare", "company": "贵州茅台",
+                         "currency": "CNY", "unit": "亿元", "caliber": "合并",
+                         "caliber_evidence": "含 PARENTNETPROFIT"},
+            "raw": {"url": "https://datacenter-web.eastmoney.com/api/x", "text": "{}"},
+        }, ensure_ascii=False), encoding="utf-8")
+        return tid, ws_mod.task_workspace(tid)
+
+    @staticmethod
+    def _orch():
+        import orchestrator_v2 as ov
+        o = ov.OrchestratorV2.__new__(ov.OrchestratorV2)   # 只测采纳点，不构造编排器
+        o._version_stores = {}
+        return o
+
+    @staticmethod
+    def _records(ws) -> list[dict]:
+        p = ws / "report_quality.jsonl"
+        if not p.exists():
+            return []
+        return [json.loads(ln) for ln in p.read_text(encoding="utf-8").strip().splitlines()]
+
+    def test_candidate_is_accepted_before_comparison(self):
+        tid, ws = self._env()
+        o = self._orch()
+        repaired = ("# 贵州茅台 2023–2024 年度核心财务指标研究报告\n\n"
+                    "2024 年营业收入 1741.44 亿元，同比增长 15.66%。"
+                    "该变化仅覆盖本期，不能据此推断长期趋势。\n")
+        seen: list[str] = []
+
+        def _accept(t, g, body):
+            seen.append(body)
+            return {"_accepted_body": repaired, "overall": "pass", "gaps": []}
+
+        o._accept_fn_for = lambda t, g: _accept
+        out = o._adopt_candidate(tid, "", "候选原始稿（未验收）", goal=self.GOAL)
+        self.assertEqual(seen, ["候选原始稿（未验收）"], "候选必须先验收")
+        self.assertEqual(out, repaired, "采纳的应是**验收修正版**")
+        from report_version import VersionStore
+        adopted = VersionStore(ws, tid).adopted()
+        self.assertIsNotNone(adopted)
+        self.assertEqual(adopted.body, repaired, "选中的版本就是被比较的那一版")
+        recs = self._records(ws)
+        self.assertEqual(len(recs), 1, recs)
+        self.assertTrue(recs[0]["adopted"])
+        self.assertTrue(recs[0]["reason"])
+        self.assertIn("cand_vector", recs[0])
+
+    def test_acceptance_failure_does_not_block_adoption(self):
+        tid, ws = self._env(tid="adopt-02")
+        o = self._orch()
+
+        def _accept(t, g, body):
+            raise RuntimeError("验收器不可用")
+
+        o._accept_fn_for = lambda t, g: _accept
+        out = o._adopt_candidate(tid, "", "候选原始稿", goal=self.GOAL)
+        self.assertEqual(out, "候选原始稿", "验收失败按未知继续，不阻断反思")
+        recs = self._records(ws)
+        self.assertTrue(recs and recs[0]["adopted"], recs)
+
+    def test_quality_vector_decides_when_hard_constraints_tie(self):
+        """两稿硬条件相同：重复块更少、分析达标的一稿胜出（理由可解释）。"""
+        tid, ws = self._env(tid="adopt-03")
+        o = self._orch()
+        o._accept_fn_for = lambda t, g: (lambda t2, g2, body: {"_accepted_body": body})
+        line = "2024 年营业收入 1741.44 亿元，同比增长 15.66%。该变化仅覆盖本期，不能据此推断长期趋势。"
+        cur = f"# 研究\n\n{line}\n\n{line}\n"          # 同一观察重复写两遍（重复块）
+        cand = f"# 研究\n\n{line}\n"
+        out = o._adopt_candidate(tid, cur, cand, goal=self.GOAL)
+        self.assertEqual(out, cand, "重复块更多的一稿不应保留")
+        rec = self._records(ws)[-1]
+        self.assertIn("质量向量更优", rec["reason"])
+        self.assertGreater(rec["cur_vector"]["duplicate_blocks"],
+                           rec["cand_vector"]["duplicate_blocks"], rec)
+        self.assertEqual(rec["cur_vector"]["observations"],
+                         rec["cand_vector"]["observations"],
+                         "重复的同一观察只算一条（计数按独立主张去重）")
+
+
 class TestChangeExplanationGuards(unittest.TestCase):
     """C2-3：文档可准入 ≠ 每句话可证明。
 

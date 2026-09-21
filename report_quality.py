@@ -107,10 +107,115 @@ def accept_rank(overall: str) -> int:
     return 0
 
 
+# 质量向量里"分析观察"的计数上限：超过就不再算优势——避免靠堆砌观察刷分
+_QUALITY_OBS_CAP = 10
+
+
+def candidate_quality(tid: str, goal: str, body: str, *,
+                      project=None) -> dict:
+    """候选正文的**质量向量**（D2）：有证据的问题覆盖、未支持结论、分析遗漏与重复。
+
+    口径与主张记录同源（确定性、离线）：读底稿事实 → 取分析一节 → 逐条断言判支持状态。
+    计数按**独立句子**去重，观察数设上限（`_QUALITY_OBS_CAP`）——不奖励灌水、加图或加长。
+    读不到底稿/正文时返回 `{}`（未知，不参与比较，也不当作好稿）。
+    """
+    try:
+        import report_brief as rb
+        from working_paper_export import chart_rows
+        data = chart_rows(tid, goal, project=project)
+        if not data.get("ok"):
+            return {}
+        rows = list(data.get("rows") or [])
+        derived = list(data.get("derived") or [])
+        analysis = rb._analysis_section(body)
+        if not str(analysis or "").strip():
+            return {"analysis_ok": False, "observations": 0, "claims": 0,
+                    "bound": 0, "partial": 0, "unsupported": 0, "needs_check": 0,
+                    "unsupported_or_unchecked": 0, "duplicate_blocks": 0}
+        cov = rb.analysis_coverage(analysis)
+        claims = rb._claims(analysis, rows, derived, [],
+                            periods=list(data.get("periods") or []))
+        counts = {"bound": 0, "partial": 0, "unsupported": 0, "needs_check": 0}
+        for c in claims:
+            st = str(c.get("status") or "")
+            if st == "partially_supported":
+                counts["partial"] += 1
+            elif st in counts:
+                counts[st] += 1
+            else:
+                counts["needs_check"] += 1
+        # 重复块：分析一节里重复出现的行（规范化后相同且 ≥20 字）。
+        # 注意按**行**而不是按空行分段：`_analysis_section` 的输出不含空行。
+        seen: set[str] = set()
+        dup = 0
+        for ln in str(analysis).splitlines():
+            key = re.sub(r"\s+", "", ln)
+            if len(key) < 20:
+                continue
+            if key in seen:
+                dup += 1
+            else:
+                seen.add(key)
+        return {
+            "analysis_ok": bool(cov.get("ok")),
+            "observations": min(int(cov.get("observations") or 0), _QUALITY_OBS_CAP),
+            "claims": len(claims),
+            "bound": counts["bound"], "partial": counts["partial"],
+            "unsupported": counts["unsupported"], "needs_check": counts["needs_check"],
+            "unsupported_or_unchecked": counts["unsupported"] + counts["needs_check"],
+            "duplicate_blocks": dup,
+        }
+    except Exception:                            # noqa: BLE001 - 向量算不出按未知处理
+        return {}
+
+
+def _quality_tiebreak(cur_q: dict, cand_q: dict) -> tuple[bool, str] | None:
+    """硬条件相同时的质量向量比较；返回 None 表示"向量不可用/无差异"。
+
+    顺序（逐项可解释）：有分析 → 未支持/待核查更少 → 分析观察更多（独立句子、有上限）
+    → 重复块更少。长度始终不参与。
+    """
+    if not (isinstance(cur_q, dict) and isinstance(cand_q, dict) and cur_q and cand_q):
+        return None
+    if bool(cand_q.get("analysis_ok")) != bool(cur_q.get("analysis_ok")):
+        if cand_q.get("analysis_ok"):
+            return True, ("候选稿的分析满足最低要求（数据观察 + 意义/局限），"
+                          "当前稿不满足")
+        return False, ("候选稿的分析不满足最低要求（缺数据观察或意义/局限），"
+                       "保留当前稿")
+    cu = int(cur_q.get("unsupported_or_unchecked") or 0)
+    ca = int(cand_q.get("unsupported_or_unchecked") or 0)
+    if ca != cu:
+        diff = f"未支持/待核查结论 {cu}→{ca}"
+        return (True, f"质量向量更优：{diff}") if ca < cu else (
+            False, f"候选稿的未支持/待核查结论更多（{diff}），保留当前稿")
+    co = int(cur_q.get("observations") or 0)
+    cno = int(cand_q.get("observations") or 0)
+    if cno != co:
+        diff = f"分析观察 {co}→{cno}"
+        return (True, f"质量向量更优：{diff}") if cno > co else (
+            False, f"候选稿的分析观察更少（{diff}），保留当前稿")
+    cd = int(cur_q.get("duplicate_blocks") or 0)
+    cnd = int(cand_q.get("duplicate_blocks") or 0)
+    if cnd != cd:
+        diff = f"重复块 {cd}→{cnd}"
+        return (True, f"质量向量更优：{diff}") if cnd < cd else (
+            False, f"候选稿的重复块更多（{diff}），保留当前稿")
+    return None
+
+
 def compare_versions(cur_text: str, cand_text: str, *,
                      cur_acceptance: dict | None = None,
-                     cand_acceptance: dict | None = None) -> tuple[bool, str]:
-    """候选稿是否**实质优于**当前稿。返回 `(improved, reason)`（reason 可入日志/状态）。"""
+                     cand_acceptance: dict | None = None,
+                     cur_quality: dict | None = None,
+                     cand_quality: dict | None = None) -> tuple[bool, str]:
+    """候选稿是否**实质优于**当前稿。返回 `(improved, reason)`（reason 可入日志/状态）。
+
+    `cur_quality`/`cand_quality`：两稿的**质量向量**（`candidate_quality` 的产出）。
+    硬条件（验收等级/缺口/占位/回抄）相同且两稿都有向量时，按"有分析 → 未支持结论更少
+    → 分析观察更多 → 重复块更少"决定，并把差异写进理由；向量缺失按未知处理，不参与。
+    长度始终不作为改进依据。
+    """
     cur = quality_snapshot(cur_text, cur_acceptance)
     cand = quality_snapshot(cand_text, cand_acceptance)
 
@@ -137,7 +242,16 @@ def compare_versions(cur_text: str, cand_text: str, *,
         return True, "删除了重复需求块（正文更聚焦）"
     if cand["echo"] > cur["echo"]:
         return False, "候选稿重复用户需求块，属篇幅膨胀而非实质改进"
+    # D2：硬条件相同 → 比有证据的质量向量（问题覆盖/未支持结论/分析遗漏与重复）
+    verdict = _quality_tiebreak(cur_quality or {}, cand_quality or {})
+    if verdict is not None:
+        return verdict
     # 全部相同：不做长度替换，保持当前版本（此前"更长即更好"会把纠错稿丢掉）
+    _vec = ""
+    if cur_quality and cand_quality:
+        _vec = (f"、质量向量无差异（观察 {cur_quality.get('observations')}、"
+                f"未支持/待核查 {cur_quality.get('unsupported_or_unchecked')}、"
+                f"重复块 {cur_quality.get('duplicate_blocks')}）")
     return False, (f"硬约束无差异（验收 {cur['overall'] or '未知'}、缺口 {cur['gaps']}、"
-                   f"占位 {cur['placeholders']}），保持当前版本；长度差异"
+                   f"占位 {cur['placeholders']}）{_vec}，保持当前版本；长度差异"
                    f"（{cur['length']} → {cand['length']} 字符）不作为改进依据")

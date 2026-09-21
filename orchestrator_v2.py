@@ -1818,11 +1818,78 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         store.adopt(v, reason="恢复自检查点")
         return body
 
+    def _goal_of(self, task_id: str) -> str:
+        try:
+            import task_state as _ts
+            return str((_ts.read_task(task_id) or {}).get("goal") or "")
+        except Exception:
+            return ""
+
+    def _accept_candidate(self, task_id: str, cand: str, cand_v, goal: str = ""):
+        """D2：候选稿先完成**它自己正文**的验收（含资料/规则指纹绑定），再参与比较。
+
+        为什么必须做：`_adopt_candidate` 原本只登记候选（acceptance 为空），两稿按
+        "未知 vs 未知"并列——空验收不能当作"两稿同分"的证据。验收器可能把正文修成
+        诚实披露版（研究任务还会装配成简报），那就**以那一版作为候选**：验收对象 =
+        比较对象。验收不可用/异常时按"未知"继续，不阻断反思，也不把未知当通过。
+        """
+        goal = goal or self._goal_of(task_id)
+        try:
+            accept = self._accept_fn_for(task_id, goal)
+            res = accept(task_id, goal, cand) or {}
+            accepted = str(res.get("_accepted_body") or cand)
+            if accepted and accepted != cand:
+                store = self._version_store(task_id)
+                _rv, _rf = self._rules_identity(task_id)
+                v = store.record(
+                    accepted,
+                    parent_id=str(getattr(cand_v, "version_id", "") or ""),
+                    sources_fingerprint=self._sources_fingerprint(task_id, accepted),
+                    rules_version=_rv, rules_fingerprint=_rf,
+                    policy_version=REVIEW_POLICY_VERSION)
+                logger.info("候选稿经验收修正后参与比较（task=%s）", task_id)
+                return accepted, (v or cand_v)
+        except Exception as exc:                 # noqa: BLE001 - 验收失败不阻断反思
+            logger.warning("候选稿验收失败（task=%s，按未知比较）：%s",
+                           task_id, str(exc)[:140])
+        store = self._version_store(task_id)
+        return cand, (store.find_by_body(cand) or cand_v)
+
+    def _record_quality_decision(self, task_id: str, cur_v, cand_v, why: str,
+                                 cur_q: dict, cand_q: dict, adopted: bool) -> None:
+        """D2：把选稿的**差异记录**追加到工作区 `report_quality.jsonl`。
+
+        只记版本号、验收结论、理由与质量向量——不含正文、不含提示词，可离线追溯
+        "为什么这一版被采纳/保留"。
+        """
+        try:
+            from workspace import task_workspace as _tws
+            rec = {
+                "at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "task_id": task_id,
+                "cur_version": str(getattr(cur_v, "version_id", "") or ""),
+                "cand_version": str(getattr(cand_v, "version_id", "") or ""),
+                "cur_acceptance": (str(cur_v.acceptance_overall()) if cur_v else ""),
+                "cand_acceptance": (str(cand_v.acceptance_overall()) if cand_v else ""),
+                "reason": str(why or ""),
+                "adopted": bool(adopted),
+                "cur_vector": dict(cur_q or {}),
+                "cand_vector": dict(cand_q or {}),
+            }
+            with (_tws(task_id) / "report_quality.jsonl").open("a", encoding="utf-8") as f:
+                f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        except Exception as exc:                 # noqa: BLE001 - 记录失败不影响采纳
+            logger.warning("选稿差异记录写入失败（task=%s）：%s", task_id, str(exc)[:120])
+
     def _adopt_candidate(self, task_id: str, cur_text: str, cand: str, *,
-                         iteration: int = 0, cancelled: bool = False) -> str:
+                         iteration: int = 0, cancelled: bool = False,
+                         goal: str = "") -> str:
         """**唯一采纳点**：两个反思/重做分支都走这里（M0-a）。
 
-        候选稿先登记成版本；比较时取**两版各自**的验收（缺失即未知，不借用最新那份）；
+        D2：候选稿先完成**它自己正文**的验收（`_accept_candidate`，含资料/规则指纹），
+        再与当前稿比较——空 acceptance 不能作为"两稿同分"的证据。硬条件相同时比
+        **有证据的质量向量**（问题覆盖/未支持结论/分析遗漏与重复，按独立句子去重，
+        不奖励加长）；差异记录写进 `report_quality.jsonl`。
         采纳用 `adopt()` 原子切换；任务已取消/终态时只记迟到拒绝，不覆盖已选中版本。
         返回采纳后应作为 `best_report` 的正文。
         """
@@ -1843,14 +1910,27 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                               iteration=iteration, sources_fingerprint=_src_fp,
                               rules_version=_rules_v, rules_fingerprint=_rules_fp,
                               policy_version=REVIEW_POLICY_VERSION)
+        # D2-3：候选先验收（可能被修成诚实披露版/装配稿——以那一版参与比较）
+        cand_body, cand_v = self._accept_candidate(task_id, cand, cand_v, goal=goal)
+        _goal = goal or self._goal_of(task_id)
+        try:
+            import report_quality as _rq
+            cur_q = (_rq.candidate_quality(task_id, _goal, cur_text)
+                     if str(cur_text or "").strip() else {})
+            cand_q = _rq.candidate_quality(task_id, _goal, cand_body)
+        except Exception as exc:                 # noqa: BLE001 - 向量算不出不阻断比较
+            logger.warning("候选质量向量计算失败（task=%s）：%s", task_id, str(exc)[:120])
+            cur_q, cand_q = {}, {}
         improved, why = compare_versions(
-            cur_text, cand,
+            cur_text, cand_body,
             cur_acceptance=(cur_v.acceptance if cur_v else None),
-            cand_acceptance=cand_v.acceptance)
+            cand_acceptance=cand_v.acceptance,
+            cur_quality=cur_q, cand_quality=cand_q)
+        self._record_quality_decision(task_id, cur_v, cand_v, why, cur_q, cand_q, improved)
         if improved:
             store.adopt(cand_v, reason=why)
             logger.info("版本比较：采用候选稿（%s）", why)
-            return cand
+            return cand_body              # 采纳的是**比较过的那一版**（可能经验收修正）
         logger.info("版本比较：保留当前稿（%s）", why)
         return cur_text
 
@@ -5452,7 +5532,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 # V1/M0-a：按**两版各自的验收**比较，并原子采纳（唯一采纳点）
                 _before_best = best_report
                 best_report = self._adopt_candidate(
-                    task_id, best_report, cand, iteration=iteration,
+                    task_id, best_report, cand, iteration=iteration, goal=goal,
                     cancelled=self._cancel_requested(task_id))
                 _cand_improved = best_report != _before_best
                 self._publish_full_state(task_id, goal, all_steps, completed_all)
@@ -5764,7 +5844,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                         # V1/M0-a：重做后同样走唯一采纳点（各自验收 + 原子切换；取消/终态不覆盖）
                         _before = best_report
                         best_report = self._adopt_candidate(
-                            task_id, best_report, cand, iteration=iteration,
+                            task_id, best_report, cand, iteration=iteration, goal=goal,
                             cancelled=self._cancel_requested(task_id))
                         _cand_improved = best_report != _before
                         _why = "采纳候选稿" if _cand_improved else "保留当前稿（各自验收比较）"

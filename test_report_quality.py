@@ -268,5 +268,76 @@ class TestOfflineCounterexamples(unittest.TestCase):
         self.assertFalse(d[0].get("verified"), "派生值应继承用户输入的'未外部核实'")
 
 
+class TestQualityVectorTiebreak(unittest.TestCase):
+    """D2：硬条件相同时按**有证据的质量向量**决定，长度仍不参与。
+
+    向量口径见 `report_quality.candidate_quality`：分析是否达标、未支持/待核查结论数、
+    分析观察数（独立句子、有上限）、重复块数。审查要求"指标计数按独立问题/主张去重，
+    不奖励灌水、加图或增加字数"——这里用显式向量钉住判定顺序。
+    """
+
+    BASE = "## 分析\n\n2024 年营业收入 288.76 亿元，同比下降 12.83%。该变化仅覆盖本期。\n"
+
+    def _q(self, **kw) -> dict:
+        q = {"analysis_ok": True, "observations": 2, "claims": 3, "bound": 2,
+             "partial": 0, "unsupported": 1, "needs_check": 0,
+             "unsupported_or_unchecked": 1, "duplicate_blocks": 0}
+        q.update(kw)
+        return q
+
+    def test_analysis_ok_wins(self):
+        improved, why = rq.compare_versions(self.BASE, self.BASE,
+                                            cur_quality=self._q(analysis_ok=False),
+                                            cand_quality=self._q())
+        self.assertTrue(improved, why)
+        self.assertIn("最低要求", why)
+        improved2, why2 = rq.compare_versions(self.BASE, self.BASE,
+                                              cur_quality=self._q(),
+                                              cand_quality=self._q(analysis_ok=False))
+        self.assertFalse(improved2, why2)
+        self.assertIn("最低要求", why2)
+
+    def test_fewer_unsupported_conclusions_win(self):
+        improved, why = rq.compare_versions(
+            self.BASE, self.BASE,
+            cur_quality=self._q(unsupported_or_unchecked=3),
+            cand_quality=self._q(unsupported_or_unchecked=1))
+        self.assertTrue(improved, why)
+        self.assertIn("未支持/待核查结论 3→1", why)
+        improved2, why2 = rq.compare_versions(
+            self.BASE, self.BASE,
+            cur_quality=self._q(unsupported_or_unchecked=1),
+            cand_quality=self._q(unsupported_or_unchecked=4))
+        self.assertFalse(improved2, why2)
+
+    def test_more_observations_win(self):
+        improved, why = rq.compare_versions(self.BASE, self.BASE,
+                                            cur_quality=self._q(observations=2),
+                                            cand_quality=self._q(observations=4))
+        self.assertTrue(improved, why)
+        self.assertIn("分析观察 2→4", why)
+
+    def test_duplicate_blocks_lose(self):
+        improved, why = rq.compare_versions(self.BASE, self.BASE,
+                                            cur_quality=self._q(duplicate_blocks=3),
+                                            cand_quality=self._q(duplicate_blocks=0))
+        self.assertTrue(improved, why)
+        self.assertIn("重复块 3→0", why)
+
+    def test_identical_vectors_keep_current_and_mention_length(self):
+        improved, why = rq.compare_versions(self.BASE, self.BASE + "补充" * 20,
+                                            cur_quality=self._q(), cand_quality=self._q())
+        self.assertFalse(improved, why)
+        self.assertIn("质量向量无差异", why)
+        self.assertIn("长度差异", why)
+
+    def test_missing_vectors_keep_old_behaviour(self):
+        """不传向量时行为与旧实现一致（硬约束无差异 → 保持当前）。"""
+        improved, why = rq.compare_versions(self.BASE, self.BASE)
+        self.assertFalse(improved, why)
+        self.assertIn("硬约束无差异", why)
+        self.assertNotIn("质量向量", why)
+
+
 if __name__ == "__main__":
     unittest.main()

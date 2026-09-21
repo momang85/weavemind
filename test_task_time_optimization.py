@@ -280,6 +280,12 @@ class TestReflectionConvergence(unittest.TestCase):
               "result": "# 报告" + "A" * 300} for s in steps],
             False,
         )
+        # D2 起候选在采纳点就跑一次**它自己正文**的验收（`_accept_candidate`）并把结论写进
+        # 验收快照——预置 acceptance_report.json 会被真实结论覆盖。这里把验收桩设成 fail
+        # （同时保留预置文件），考的还是那条不变量：验收未通过不得因"长度不变"提前收敛。
+        o._accept_fn_for = lambda t, g: (
+            lambda t2, g2, body: {"_accepted_body": body, "overall": "fail",
+                                  "gaps": ["数字溯源率不足"]})
         reflected = {"n": 0}
 
         def fake_reflect(goal, report, task_id, all_steps=None, completed_all=None,

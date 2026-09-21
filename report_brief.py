@@ -2027,12 +2027,19 @@ def analysis_coverage(analysis_text: str) -> dict:
     """
     text = str(analysis_text or "")
     observations = 0
+    seen: set[str] = set()
     for sent in re.split(r"[。！？!?\n]+", text):
         s = sent.strip()
         if not s or s.startswith(("#", "|", ">")):
             continue
-        if any(a.get("metric") and a.get("unit_class") for a in _assertions_in(s)):
-            observations += 1
+        if not any(a.get("metric") and a.get("unit_class") for a in _assertions_in(s)):
+            continue
+        # 同一观察重复写多次只算一条（D2：计数按独立问题/主张去重，不奖励堆砌）
+        key = _sentence_key(s)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        observations += 1
     has_meaning = any(k in text for k in ("意义", "说明", "局限", "边界", "适用范围",
                                           "需核查", "不能证明", "不能据此", "推断",
                                           "待核查", "含义", "口径", "仅覆盖"))
