@@ -12,8 +12,9 @@
 | 账本核对（**对不上 → 已修**） | 三处缺口：①LLM 路径建账本**没接跨进程后端**（等于每进程各一份上限）②`call_llm_stream`/`call_llm_async` **无票据、无调用记录**（步骤主路径不入账）③`_save` 整份覆盖（阶段明细被最后写者抹掉）。修法：工厂提为 `root_budget.default_redis_factory` 并共用、流式/异步/备端点每次真实发送开票结算 + 补调用记录、文件改为 `writers` 逐进程增量合并（身份不同不并）；`async_worker_base` 不再把预算拒绝当流式失败吞掉 |
 | D6 回归包 | 场景三份 → **五份**：新增 `all_decline`（全下降 + 覆盖率 110% + 两条护栏 + 研究问题小节）与 `wrong_subject_period`（错主体同句材料不计证据、错期写明原因，`located` 恰好 1）；`scenario_run` 补 `clean_chart_data.json`（用生产同一函数），修正"场景溯源 67% / 实机 100%"的夹具失真，并新增 `brief_contains`/`brief_absent`/`excluded_reasons`/`evidence_located_max` 四个核对键；未采用材料按文档去重 |
 | 安全核对（只读，不宣称安全） | `POST /task`、`GET /api/task/*`、`/files/*`、交付 zip、`net_policy` 五处逐条给证据；两处**低危残留**：工作区内符号链接未 `realpath` 解析（`_safe_workspace_path`/打包）、回环地址免限流（本地开发豁免）；Mimosa 需重跑，`scanner_enobufs` 不得当作安全结论 |
-| 验证 | `test_root_budget` 48 项（新增流式入账/流式拒发/两进程共享上限/合并与不重复计数/身份隔离）；`scenario_checks` 17、`test_offline_delivery` 36、`test_narrative_evidence` 44 全绿；**CI 清单 46 文件本地全绿** |
-| 遗留 | ①修复后的实机账本核对需下一次有界运行复验（本批只做离线）②真实 Redis 多 Worker 并发压力未测 ③检索步骤取回的 PDF 未路由到 PDF 解析通道（本次四类叙事缺口全开的原因，需单独复现 + 用例）④"零可定位证据仍判 verified"是否可接受（计划写"草稿"，实测 `verified`）待裁决 ⑤token 仍记上界非实际用量。D6：真人五项评分与试用记录 |
+| 浏览器复核（重启后） | 面板顺序/同版投影（2aec7d53 三处一致）/主张 40 条逐条原因/三行评审（机器 pass 绑定本版、Critic **未完成（降级）**、人工待复核）/6 张图真实加载/PDF 12 页 6 图嵌入 0 占位/研究问题小节渲染全部核对；**发现并修两处**：①页面文案"交付包暂不提供"与后端放行矛盾（`ReportViewer` 硬编码）→ 改为按状态说明 + 新增下载入口；②包早于采纳版本不告警（差 82 秒 < 120 秒阈值）→ `_export_payload` 增补"包 vs 采纳版本落库时间"比较；截图面重启后多次超时（面板首屏 1 张留证，其余以 DOM/接口读数取证） |
+| 验证 | `test_root_budget` 48 项（新增流式入账/流式拒发/两进程共享上限/合并与不重复计数/身份隔离）；`scenario_checks` 17、`test_offline_delivery` 36、`test_narrative_evidence` 44、`test_delivery_chain` 279（新增"包早于采纳版本"用例）、前端 6 个行为测试 + `npm run build` 全绿；**CI 清单 46 文件本地全绿** |
+| 遗留 | ①修复后的实机账本核对需下一次有界运行复验（本批只做离线）②真实 Redis 多 Worker 并发压力未测 ③检索步骤取回的 PDF 未路由到 PDF 解析通道（本次四类叙事缺口全开的原因，需单独复现 + 用例）④"零可定位证据仍判 verified"是否可接受（计划写"草稿"，实测 `verified`）待裁决 ⑤token 仍记上界非实际用量 ⑥`package_body_version_id` 名不副实（实为"清单正文"，建议正名）。D6：真人五项评分与试用记录 |
 | 人工验收 | **未做**（研究员五项 0–2 评分 ≥8/10 → D 内部试用） |
 
 ## F3-C / C3（已完成，证据见 `docs/evidence/c3_brief_shape_20260920.md`）

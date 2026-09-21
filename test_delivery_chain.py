@@ -6272,6 +6272,36 @@ class TestExportVersionNamespaces(unittest.TestCase):
         self.assertIs(out2.get("package_stale"), False)
 
 
+    def test_package_stale_when_zip_predates_adopted_version(self):
+        """打包在**采纳最终正文之前**跑完 → 包不含最新修订，必须标陈旧。
+
+        实机 ui-750185076a：21:06 打的包、21:07:28 才采纳验收修正版；此时清单还没写，
+        只比"清单 vs 包"永远看不出（差 82 秒 < 120 秒阈值）。
+        """
+        import json as _json
+        import os
+        import time
+        import web_ui
+        ws = self._ws(None, with_zip=False)
+        zip_path = ws / "deliverables_20260920_104729.zip"
+        zip_path.write_bytes(b"PK\x03\x04")          # 包在装配之前
+        old = time.time() - 82
+        os.utime(zip_path, (old, old))
+        (ws / "report_versions.json").write_text(_json.dumps({
+            "selected": "body-cur",
+            "versions": {"body-cur": {"created_at": time.time(), "adopted": True}},
+        }, ensure_ascii=False), encoding="utf-8")
+        out = web_ui._export_payload(
+            "ui-x", ws, {"identity_id": "ident-cur", "version_id": "body-cur"})
+        self.assertIs(out.get("package_stale"), True)
+        # 包比采纳版本更新（同一次装配）→ 不误标
+        fresh = time.time() + 5
+        os.utime(zip_path, (fresh, fresh))
+        out2 = web_ui._export_payload(
+            "ui-x", ws, {"identity_id": "ident-cur", "version_id": "body-cur"})
+        self.assertIs(out2.get("package_stale"), False)
+
+
 class TestBriefAssemblyIdempotence(unittest.TestCase):
     """二次装配不得把装配器自己的产物再吃回来（实机 ui-31305a2b28 反例）。
 

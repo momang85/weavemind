@@ -1375,9 +1375,19 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
             <Package className="w-4 h-4" /> 生成文件 ({report.files.length}) {expandedFiles ? '收起' : '展开'}
           </button>
         )}
+        {report.export?.package && taskIdForFiles ? (
+          <a href={`/files/${encodeURIComponent(taskIdForFiles)}/${encodeURIComponent(report.export.package)}`}
+            download={report.export.package}
+            className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-sm transition-colors">
+            <Package className="w-4 h-4" /> 下载交付包 zip
+          </a>
+        ) : null}
         <span className="basis-full text-xs leading-relaxed text-slate-500">
-          交付包 zip 暂不提供：服务端 /files 只开放 reports、charts、data 三个目录，整体打包需要后端批处理。
-          当前按文件逐个下载——上方"生成文件"列表与正文里的图表都带下载按钮。
+          {report.export?.package
+            ? `交付包 ${report.export.package}（生成于 ${report.export.package_generated_at || '未知时间'}）按登录会话放行下载；`
+              + '包可能早于最近一次修订，正文里的图表与"生成文件"列表始终按当前版本导出。'
+            : '本次任务暂无交付包（打包步骤未产出 deliverables_*.zip）；当前按文件逐个下载——'
+              + '上方"生成文件"列表与正文里的图表都带下载按钮。'}
         </span>
         <span className="basis-full text-xs text-slate-500">复核与分享</span>
         <button onClick={async () => {

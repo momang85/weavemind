@@ -2730,6 +2730,19 @@ def _export_payload(tid: str, ws, state: dict | None) -> dict:
     _generated = float((_exp or {}).get("generated_at") or 0)
     _package_stale = bool(_zip) and bool(_generated) and (
         _generated - _zip.stat().st_mtime > 120)
+    # 还有一路：打包步骤在**采纳最终正文之前**跑完（实机 ui-750185076a：21:06 打的包、
+    # 21:07:28 才采纳验收修正版），此时清单还没写，只比"清单 vs 包"永远看不出。
+    # 拿包与**当前采纳版本**的落库时间比：包更早 → 它装的是更早的正文。
+    _adopted_at = 0.0
+    try:
+        _vs = json.loads((ws / "report_versions.json").read_text(encoding="utf-8")) or {}
+        _sel = str(_vs.get("selected") or "")
+        _rec = (_vs.get("versions") or {}).get(_sel) or {}
+        _adopted_at = float(_rec.get("created_at") or 0)
+    except Exception:
+        _adopted_at = 0.0
+    if bool(_zip) and _adopted_at and _adopted_at - _zip.stat().st_mtime > 1.0:
+        _package_stale = True
     return {
         "manifest": _exp or None,
         "manifest_version_id": str((_exp or {}).get("report_version_id") or ""),
