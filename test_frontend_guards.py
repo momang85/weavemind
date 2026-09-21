@@ -537,6 +537,21 @@ class TestExportVersionNamespaces(unittest.TestCase):
         self.assertIn("support_status?:", types)
         self.assertIn("snippet_hints?:", types)
 
+    def test_panel_gates_blocks_on_version_projection(self):
+        """D2：面板按当前版本重建投影；重建失败必须隐藏发现/缺口/证据三块。"""
+        text = (SRC / "components" / "ResearchBriefPanel.tsx").read_text(encoding="utf-8")
+        self.assertIn("projectionMissing", text)
+        self.assertIn("面板未展示：当前版本的结构未能重建", text)
+        self.assertIn("面板按当前版本", text)
+        # 三个版本相关的块都要被 gate
+        self.assertEqual(text.count("!projectionMissing &&"), 3,
+                         "发现/缺口/证据三块必须都按投影状态 gate")
+        types = (SRC / "stores" / "types.ts").read_text(encoding="utf-8")
+        self.assertIn("projection?:", types)
+        backend = (ROOT / "web_ui.py").read_text(encoding="utf-8")
+        self.assertIn("_projection_for_version", backend)
+        self.assertIn('out["projection"] = projection', backend)
+
 
 class TestFilesUrlSegmentEncoding(unittest.TestCase):
     """/files/<tid>/<rel> 的 rel 必须**逐段**编码（浏览器实测教训）。

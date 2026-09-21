@@ -59,10 +59,11 @@ _VALIDATION_LABELS = {
 }
 
 
-# 与代码装配结果**重复**的小节：整节丢弃（其余小节保留，不再在首个重复标题处截断全文）
-_DUPLICATE_SECTIONS = (
-    "参考来源", "资料来源", "数据来源", "参考文献", "免责声明", "数据时效",
-    "关键数据", "核心指标", "财务对照", "财务数据一览", "图表",
+# 装配器**逐字生成**的小节（参考来源/免责声明等）：模型正文里出现同名小节即整块丢弃，
+# 这是"可证明重复"。其余小节（含"关键数据/核心指标/财务对照"）**不再整节删**——
+# 只丢块内的表格/图片/来源清单行，标题与散文一律保留（D2：标题不能成为删除理由）。
+_ASSEMBLER_OWNED_SECTIONS = (
+    "参考来源", "资料来源", "数据来源", "参考文献", "免责声明",
 )
 
 # 变化解释：**缺口 → 需要补充的材料**（确定性映射）。
@@ -155,10 +156,14 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
                      periods=periods, evidence=evidence)
     background = _background(evidence, citations)
     changes = _change_explanation(rows, derived, periods, findings, evidence, citations)
+    # D2："有分析"的最低要求（至少一项数据观察 + 意义/局限说明）——读数进结构对象，
+    # 不满足时进风险清单，不靠加长正文掩盖
+    quality = analysis_coverage(analysis_text)
     perspective = str(req.get("perspective") or "equity")
     risks = _risks(task_id, goal, body, project=project, evidence=evidence,
                    citations=citations, changes=changes, perspective=perspective,
-                   citation_gaps=unmapped, unsupported=unsupported)
+                   citation_gaps=unmapped, unsupported=unsupported,
+                   analysis_quality=quality)
     charts = _charts(task_id, project=project)
     structure = {
         "scope": {
@@ -182,6 +187,7 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
         "background": background,
         "change_explanation": changes,
         "analysis": analysis_text,
+        "analysis_quality": quality,
         "citation_gaps": list(unmapped),
         "claims": claims,
         "unsupported_claims": unsupported,
@@ -1073,7 +1079,8 @@ def _risks(task_id: str, goal: str, body: str, *, project=None,
            evidence: dict | None = None, citations: list[dict] | None = None,
            changes: dict | None = None, perspective: str = "",
            citation_gaps: list[int] | None = None,
-           unsupported: list[dict] | None = None) -> list[dict]:
+           unsupported: list[dict] | None = None,
+           analysis_quality: dict | None = None) -> list[dict]:
     """风险与核查：**每条风险都要有对应证据、会改变判断的观察条件、要补的材料**。
 
     只有"底稿缺口 + 模型自述"的风险是不完整的（读者无法判断该查什么）；这里为每条
@@ -1210,6 +1217,20 @@ def _risks(task_id: str, goal: str, body: str, *, project=None,
              would_change="改用已采用的来源重述该结论，或取得该材料的可用版本后重验",
              materials=[f"{who}的原文/可核验版本",
                         "或支持该结论的其他已披露材料"])
+    # ⑧ D2："有分析"的最低要求未满足（无数据观察，或缺意义/局限说明）
+    _q = analysis_quality or {}
+    if _q and not _q.get("ok"):
+        _missing = []
+        if not _q.get("observations"):
+            _missing.append("至少一项实际数据观察（指标 + 数值 + 期间）")
+        if not _q.get("has_meaning_or_limit"):
+            _missing.append("该观察的意义或推断边界")
+        _add("analysis_quality",
+             "分析未达最低要求：" + "、".join(_missing) + "（标题、口径声明不计）",
+             evidence_note=(f"分析一节 {_q.get('chars') or 0} 字，"
+                            f"可核验观察 {_q.get('observations') or 0} 条"),
+             would_change="补上数据观察及其意义/局限后，本稿才满足研究质量验收",
+             materials=["该观察对应的底稿事实与来源定位", "说明该观察的适用范围或局限"])
     return out[:12]
 
 
@@ -1940,12 +1961,15 @@ def _brief_section(text: str, heading: str) -> str:
 
 
 def _analysis_section(body: str) -> str:
-    """模型正文 → 分析一节：**只移除与装配结果重复的块**，保留后续解释与结论。
+    """模型正文 → 分析一节：**只移除可证明重复的块**，保留论证、限制与用户修订。
 
-    实机/离线反例：此前在首个 `## 关键数据/财务对照` 标题处**截掉全部后文**，
-    于是"重复表格之后的有效分析"被一起删除（复现读数：保留内容为空串）。
-    现在按节边界处理：重复小节整节丢弃，其余小节原样保留；模型自写的图表行与
-    空标题去掉，避免与装配的图重复。
+    三轮教训叠在这里：
+    1. 最初在首个 `## 关键数据/财务对照` 标题处**截掉全部后文**——表后的有效分析被删光；
+    2. 改为"标题命中关键词就整节丢弃"——模型把同比解读写成"三、核心指标两年对比与
+       逐项解读"也被整节删掉（实机：分析一节只剩 214 字标题与口径声明）；
+    3. 现在按**块级判断**：装配器**自己逐字生成**的小节（参考来源/免责声明等）整块丢；
+       其余小节只丢非散文行（表格、图片、来源清单行），标题与散文一律保留；
+       块内没有散文（只剩表格/图）才整块丢——"标题里有核心指标"不再是删除理由。
     """
     text = str(body or "")
     if not text:
@@ -1959,29 +1983,62 @@ def _analysis_section(body: str) -> str:
         # 工程收尾报告不是分析（"5 个步骤成功"回答不了经营问题）：返回空，
         # 简报会如实写"本次未产出可交付的分析正文"
         return ""
-    keep: list[str] = []
-    skip_section = False
+    # 按标题切块（首块是无标题的开头），逐块判断
+    blocks: list[tuple[str | None, list[str]]] = [(None, [])]
     for line in text.splitlines():
-        stripped = line.strip()
-        if stripped.startswith("#"):
-            title = stripped.lstrip("#").strip()
-            skip_section = any(k in title for k in _DUPLICATE_SECTIONS)
-            if skip_section:
+        if line.strip().startswith("#"):
+            blocks.append((line, []))
+        else:
+            blocks[-1][1].append(line)
+    keep: list[str] = []
+    for title_line, lines in blocks:
+        title = (title_line or "").strip().lstrip("#").strip()
+        if title_line is not None and any(k in title for k in _ASSEMBLER_OWNED_SECTIONS):
+            continue                          # 装配器逐字生成的小节：整块丢（可证明重复）
+        prose: list[str] = []
+        for ln in lines:
+            s = ln.strip()
+            if not s:
                 continue
-            if not title:
-                continue                      # 空标题（模型常见产物）不进正文
-            keep.append(line)
+            if s.startswith("![") and "](" in s:
+                continue                      # 模型重复贴的图由装配器接管
+            if s.startswith("|") and "|" in s:
+                continue                      # 模型自写的表格由装配器接管
+            if re.match(r"^\d{1,2}\s*[.、)]\s*[\[(]", s) or re.match(r"^[-*]\s*\[", s):
+                continue                      # 模型自己的来源清单由装配器接管
+            prose.append(ln)
+        if title_line is not None:
+            if not title or not prose:
+                continue                      # 空标题 / 只剩表格图的块：没有可保留的内容
+            keep.append(title_line)
+        keep.extend(prose)
+    out = "\n".join(keep).strip()
+    if not keep and text.strip():
+        # 全文都是表格/来源清单/工程说明：如实返回空（调用方写"未产出可交付的分析正文"）
+        return ""
+    return out
+
+
+def analysis_coverage(analysis_text: str) -> dict:
+    """"有分析"的最低要求：至少一项**实际数据观察**，且说明其意义/局限。
+
+    标题、口径声明、免责声明都不算（D2）。读数进结构对象与风险清单：
+    没有数据观察或没有意义/局限说明 → 不满足研究质量验收（不靠加长正文掩盖）。
+    """
+    text = str(analysis_text or "")
+    observations = 0
+    for sent in re.split(r"[。！？!?\n]+", text):
+        s = sent.strip()
+        if not s or s.startswith(("#", "|", ">")):
             continue
-        if skip_section:
-            continue
-        if stripped.startswith("![") and "](" in stripped:
-            continue                          # 模型重复贴的图由装配器接管
-        if stripped.startswith("|") and "|" in stripped:
-            continue                          # 模型自写的表格由装配器接管
-        if not keep and stripped.startswith("# "):
-            continue                          # 模型自己的大标题（简报已有标题）
-        keep.append(line)
-    return "\n".join(keep).strip()
+        if any(a.get("metric") and a.get("unit_class") for a in _assertions_in(s)):
+            observations += 1
+    has_meaning = any(k in text for k in ("意义", "说明", "局限", "边界", "适用范围",
+                                          "需核查", "不能证明", "不能据此", "推断",
+                                          "待核查", "含义", "口径", "仅覆盖"))
+    return {"chars": len(text), "observations": observations,
+            "has_meaning_or_limit": bool(has_meaning),
+            "ok": bool(observations >= 1 and has_meaning)}
 
 
 def _disclaimer(structure: dict) -> str:

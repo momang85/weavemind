@@ -148,6 +148,14 @@ export interface ResearchBrief {
   }[]
   /** 引用了未采用来源的句子（逐句，带原因） */
   unsupported_claims?: { sentence?: string; title?: string; url?: string; old_n?: number; reason?: string }[]
+  /** D2：面板投影状态——按当前采纳版本重建（rebuilt=true）或重建失败（隐藏版本相关块） */
+  projection?: {
+    rebuilt?: boolean
+    same_version?: boolean
+    for_version?: string
+    file_version?: string
+    reason?: string
+  }
   /** 面板（结构对象）绑定的版本；与当前选中版本不一致时页面必须提示 */
   structure_version?: string
   structure_current?: boolean

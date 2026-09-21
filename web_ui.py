@@ -4439,21 +4439,86 @@ def _get_task_page(self, p):
         })
         return self._json({"error":"not found"},404)
 
+# D2：结构投影缓存——(task_id, version_id) → 重建出的结构对象；只留最近几条
+_PROJECTION_CACHE: dict[tuple[str, str], dict] = {}
+
+
+def _projection_for_version(tid: str, ws, adopted) -> tuple[dict | None, str]:
+    """D2：为**当前采纳版本**重建只读结构投影（确定性、离线）。
+
+    为什么必须重建：文件里的 `report_structure.json` 可能属于另一版（修订/重装配后），
+    把它的发现摆在当前稿首屏就是"用另一版结论"。这里按采纳正文重算一次；
+    重算不了（缺底稿/契约等）就返回 `(None, 原因)`，由页面隐藏版本相关的块。
+    结果按 (task_id, version_id) 在进程内缓存，避免轮询时反复重算。
+    """
+    vid = str(getattr(adopted, "version_id", "") or "")
+    if not vid:
+        return None, "无采纳版本"
+    key = (str(tid), vid)
+    cached = _PROJECTION_CACHE.get(key)
+    if cached is not None:
+        return cached, ""                    # 命中缓存也必须返回 (结构, 原因) 二元组
+    try:
+        import task_state as _ts
+        goal = str((_ts.read_task(tid) or {}).get("goal") or "")
+        import report_brief as _rb
+        st = _rb.build_structure(tid, goal, str(getattr(adopted, "body", "") or ""),
+                                 ws_dir=ws)
+        if not st:
+            return None, "无法按当前版本重建结构（缺底稿或契约）"
+        # 这份结构就是**当前版本**的投影：绑定该版本号，页面据此判"同版"
+        st["version_id"] = vid
+        _PROJECTION_CACHE[key] = st
+        if len(_PROJECTION_CACHE) > 8:          # 只留最近几条，避免长期驻留
+            for k in list(_PROJECTION_CACHE)[:-8]:
+                _PROJECTION_CACHE.pop(k, None)
+        return st, ""
+    except Exception as exc:
+        logger.warning("结构投影重建失败（task=%s）：%s", tid, str(exc)[:140])
+        return None, f"重建异常：{str(exc)[:80]}"
+
+
 def _research_payload(tid: str, ws) -> dict | None:
-        """研究简报的结构化对象 → 页面字段（F3-B）。只读、缺文件即空，不编造。
+        """研究简报的结构化对象 → 页面字段（F3-B/D2）。只读、缺文件即空，不编造。
 
         数据来源与页面/导出口径一致：`report_structure.json`（代码装配的关键发现/引用缺口/
         证据缺口/字段位置/图表问题）、`narrative_evidence.json`（证据准入与未采用原因）、
         `chart_manifest.json`（图表问题与观察）、`report_versions.json`（同版身份）。
+
+        D2：文件结构不属于当前采纳版本时，按采纳正文**重建投影**（只读、缓存）；重建不了
+        就标 `projection.rebuilt=False` 并清掉版本相关的块——不把另一版的发现摆在首屏。
         """
         import json as _json
         out: dict = {}
+        projection: dict = {}
         sp = ws / "report_structure.json"
+        st: dict = {}
         if sp.exists():
             try:
                 st = _json.loads(sp.read_text(encoding="utf-8")) or {}
             except Exception:
                 st = {}
+        # 采纳版本与文件结构不同版 → 重建（只在能拿到版本时做）
+        try:
+            from report_version import VersionStore as _VS
+            _adopted = _VS(ws, tid).adopted()
+        except Exception:
+            _adopted = None
+        _file_vid = str(st.get("version_id") or "")
+        if _adopted is not None and str(_adopted.version_id or "") != _file_vid:
+            _rebuilt, _why = _projection_for_version(tid, ws, _adopted)
+            projection = {"rebuilt": bool(_rebuilt),
+                          "for_version": str(_adopted.version_id or ""),
+                          "file_version": _file_vid,
+                          "reason": _why}
+            if _rebuilt:
+                st = _rebuilt
+            else:
+                st = {}                          # 重建不了：版本相关的块一律不展示
+        elif _adopted is not None:
+            projection = {"rebuilt": False, "for_version": str(_adopted.version_id or ""),
+                          "file_version": _file_vid, "reason": "", "same_version": True}
+        if st:
             sc = st.get("scope") or {}
             table = st.get("metrics_table") or {}
             ev = st.get("evidence") or {}
@@ -4656,6 +4721,8 @@ def _research_payload(tid: str, ws) -> dict | None:
             except Exception:
                 plan_review["bound"] = False
         out["plan_review"] = plan_review
+        # D2：投影状态（按当前版本重建与否）——页面据此决定是否隐藏版本相关的块
+        out["projection"] = projection
         if not out:
             return None
         return out

@@ -6642,6 +6642,215 @@ class TestClaimAssertionSupport(unittest.TestCase):
                          bad["assertions"][0])
 
 
+class TestAnalysisRetention(unittest.TestCase):
+    """D2：块级判断——只有**可证明重复**的块才丢，标题不再是整节删除的理由。
+
+    实机教训：模型把同比解读写成"三、核心指标两年对比与逐项解读"，旧规则按标题里的
+    "核心指标"整节丢弃 → 交付稿的分析一节只剩 214 字（标题 + 口径声明）。
+    冻结样本取自实机工作区的两份原始草稿（`scripts/d2_freeze_samples.py` 可重抽）。
+    """
+
+    @staticmethod
+    def _samples():
+        p = Path(__file__).resolve().parent / "evals" / "brief" / "d2_analysis_samples.json"
+        return json.loads(p.read_text(encoding="utf-8"))
+
+    def test_frozen_samples_are_auditable(self):
+        data = self._samples()
+        self.assertEqual(len(data["samples"]), 2)
+        import hashlib
+        for s in data["samples"]:
+            self.assertEqual(
+                hashlib.sha256(s["body"].encode("utf-8")).hexdigest(), s["excerpt_sha256"],
+                f"{s['id']} 片段被改动过（hash 不符）")
+            self.assertTrue(s["version_id"], s["id"])
+
+    def test_real_draft_interpretation_survives_block_level_rule(self):
+        """真实草稿：表格与来源清单丢掉，表后的同比解读与限制语句保留。"""
+        import report_brief as rb
+        for s in self._samples()["samples"]:
+            kept = rb._analysis_section(s["body"])
+            self.assertGreater(len(kept), 300, f"{s['id']} 分析一节被删得只剩 {len(kept)} 字")
+            self.assertNotIn("| 指标 |", kept, f"{s['id']} 模型表格未被接管")
+            cov = rb.analysis_coverage(kept)
+            self.assertGreaterEqual(cov["observations"], 3, f"{s['id']} 可核验观察不足：{cov}")
+            self.assertTrue(cov["ok"], f"{s['id']} 未满足'有分析'最低要求：{cov}")
+
+    def test_keyword_titled_prose_section_is_kept(self):
+        """标题含"核心指标/关键数据"的**散文**小节必须保留（旧规则整节删）。"""
+        import report_brief as rb
+        body = ("## 二、关键数据一览\n\n"
+                "| 指标 | 2023 | 2024 |\n|---|---|---|\n| 营业收入 | 331.26亿元 | 288.76亿元 |\n\n"
+                "## 三、核心指标两年对比与逐项解读\n\n"
+                "营业收入同比下降 12.83%，利润降幅更大，说明成本与费用端压力上升；"
+                "上述判断仅覆盖这两期，不能据此推断长期趋势。\n")
+        kept = rb._analysis_section(body)
+        self.assertIn("核心指标两年对比与逐项解读", kept)
+        self.assertIn("营业收入同比下降 12.83%", kept)
+        self.assertIn("不能据此推断长期趋势", kept)
+        self.assertNotIn("| 指标 |", kept, "表格仍由装配器接管")
+
+    def test_assembler_owned_sections_are_dropped_whole(self):
+        """装配器逐字生成的小节（参考来源/免责声明）整块丢——这是可证明重复。"""
+        import report_brief as rb
+        body = ("## 分析\n\n营业收入 288.76 亿元，同比下降 12.83%（见底稿）。\n\n"
+                "## 参考来源\n\n1. [某媒体](https://news.example/a)\n\n"
+                "## 免责声明\n\n本报告由系统自动生成，仅供参考。\n")
+        kept = rb._analysis_section(body)
+        self.assertIn("288.76", kept)
+        self.assertNotIn("参考来源", kept)
+        self.assertNotIn("免责声明", kept)
+
+    def test_table_only_section_is_dropped(self):
+        import report_brief as rb
+        body = ("## 各类产品收入情况\n\n| 产品 | 2024 |\n|---|---|\n| 中高档酒 | 243.17亿元 |\n\n"
+                "## 分析与结论\n\n中高档酒收入同比下降 14.79%，需核对产品结构变化。\n")
+        kept = rb._analysis_section(body)
+        self.assertNotIn("各类产品收入情况", kept, "只剩表格的块没有可保留内容")
+        self.assertIn("需核对产品结构变化", kept)
+
+    def test_analysis_coverage_requires_observation_and_meaning(self):
+        import report_brief as rb
+        only_headings = rb.analysis_coverage("## 一、研究契约与口径说明\n\n> 口径提示：本报告为合并口径。")
+        self.assertFalse(only_headings["ok"])
+        self.assertEqual(only_headings["observations"], 0)
+        with_obs = rb.analysis_coverage("2024 年营业收入 288.76 亿元，同比下降 12.83%。"
+                                        "该降幅仅覆盖本期，不能据此推断长期趋势。")
+        self.assertTrue(with_obs["ok"], with_obs)
+        self.assertGreaterEqual(with_obs["observations"], 1)
+
+    def test_missing_analysis_becomes_a_named_risk(self):
+        """'有分析'未达标 → 风险清单点名缺什么（不靠加长正文掩盖）。"""
+        import report_brief as rb
+        with mock.patch.object(rb, "_located", return_value=[]), \
+             mock.patch("working_paper_export.build_result",
+                        return_value={"gaps": [], "problems": [], "audit": []}):
+            risks = rb._risks("ui-x", "研究某公司", "## 风险与核查\n",
+                              changes={}, citations=[],
+                              analysis_quality={"ok": False, "chars": 20,
+                                                "observations": 0,
+                                                "has_meaning_or_limit": False})
+        items = [r for r in risks if r.get("kind") == "analysis_quality"]
+        self.assertTrue(items, risks)
+        text = items[0]["text"]
+        self.assertIn("实际数据观察", text)
+        self.assertIn("意义或推断边界", text)
+        self.assertTrue(items[0]["materials_needed"])
+
+
+class TestVersionProjection(unittest.TestCase):
+    """D2：面板必须按**当前采纳版本**重建结构投影，重建不了就隐藏（不摆另一版结论）。
+
+    实机反例：采纳正文是 fde2f2e9，而 `report_structure.json` 属于装配候选 8b23aad3——
+    面板把候选稿的发现摆在当前稿首屏；页面只能靠一句"绑定版本不一致"提示。
+    """
+
+    GOAL = ("研究贵州茅台 2023 与 2024 两个年度的营业收入、归母净利润、"
+            "经营活动现金流净额，合并报表口径，数据截至 2025-04-30")
+    ROWS = [{"year": 2023, "report_type": "年报", "revenue": 1505.6, "net_profit": 747.34,
+             "operating_cashflow": 665.93, "disclosure_date": "2024-04-03"},
+            {"year": 2024, "report_type": "年报", "revenue": 1741.44, "net_profit": 862.28,
+             "operating_cashflow": 924.64, "disclosure_date": "2025-04-03"}]
+
+    def _env(self, *, with_financials: bool = True, tid: str = "proj-01"):
+        import facts as F
+        import task_state
+        tmp = Path(tempfile.mkdtemp(prefix="wm_proj_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        old_db = task_state.DB_PATH
+        ws_mod.configure_workspace_root(str(tmp))
+        task_state.DB_PATH = str(tmp / "b.db")
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", old_root)
+        self.addCleanup(setattr, task_state, "DB_PATH", old_db)
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        req = F.parse_research_request(
+            self.GOAL, company="贵州茅台", company_id="600519.SH", market="cn",
+            periods=[2023, 2024], caliber="合并", as_of="2025-04-30",
+            perspective="equity", identity_source="form")
+        task_state.mark_queued(tid, goal=self.GOAL, research_request=req.to_payload(),
+                               db_path=task_state.DB_PATH)
+        proj = ws_mod.task_project_dir(tid, "default")
+        proj.mkdir(parents=True, exist_ok=True)
+        if with_financials:
+            (proj / "financials.json").write_text(json.dumps({
+                "financials": self.ROWS,
+                "metadata": {"source": "eastmoney_ashare", "company": "贵州茅台",
+                             "currency": "CNY", "unit": "亿元", "caliber": "合并",
+                             "caliber_evidence": "含 PARENTNETPROFIT"},
+                "raw": {"url": "https://datacenter-web.eastmoney.com/api/x", "text": "{}"},
+            }, ensure_ascii=False), encoding="utf-8")
+        return tid, ws_mod.task_workspace(tid)
+
+    def _adopt(self, ws, tid: str, body: str) -> str:
+        from report_version import VersionStore
+        store = VersionStore(ws, tid)
+        v = store.record(body, sources_fingerprint="fp-1",
+                         rules_version="t", rules_fingerprint="rf")
+        store.adopt(v, reason="测试采纳")
+        return str(v.version_id)
+
+    def test_panel_rebuilds_projection_for_the_adopted_version(self):
+        import web_ui
+        tid, ws = self._env()
+        adopted_body = ("# 贵州茅台 2023–2024 年度核心财务指标研究报告\n\n"
+                        "2024 年营业收入 1741.44 亿元，同比增长 15.66%。"
+                        "该变化仅覆盖本期，不能据此推断长期趋势。\n")
+        vid = self._adopt(ws, tid, adopted_body)
+        # 文件里的结构属于**另一版**（装配候选）
+        (ws / "report_structure.json").write_text(json.dumps({
+            "version_id": "old-candidate", "findings": [{"text": "候选稿的发现"}],
+            "evidence": {}, "risks": []}, ensure_ascii=False), encoding="utf-8")
+        p = web_ui._research_payload(tid, ws) or {}
+        self.assertEqual(p.get("structure_version"), vid, "面板必须绑定当前采纳版本")
+        self.assertIs(p.get("structure_current"), True)
+        proj = p.get("projection") or {}
+        self.assertIs(proj.get("rebuilt"), True, proj)
+        self.assertEqual(proj.get("file_version"), "old-candidate")
+        # 发现来自**当前版本**的重建（底稿事实），不是候选稿那句
+        texts = [f.get("text") for f in (p.get("findings") or [])]
+        self.assertNotIn("候选稿的发现", texts)
+        self.assertTrue(texts, p.get("findings"))
+
+    def test_rebuild_failure_hides_version_dependent_blocks(self):
+        import web_ui
+        tid, ws = self._env(with_financials=False)     # 没有底稿 → 重建不了
+        vid = self._adopt(ws, tid, "# 某公司研究\n\n营业收入 100 亿元。\n")
+        (ws / "report_structure.json").write_text(json.dumps({
+            "version_id": "old-candidate", "findings": [{"text": "候选稿的发现"}],
+            "evidence": {}, "risks": []}, ensure_ascii=False), encoding="utf-8")
+        p = web_ui._research_payload(tid, ws) or {}
+        proj = p.get("projection") or {}
+        self.assertIs(proj.get("rebuilt"), False, proj)
+        self.assertTrue(proj.get("reason"), proj)
+        self.assertEqual(proj.get("for_version"), vid)
+        # 版本相关的块一律不展示（发现/缺口/证据/主张）
+        self.assertFalse(p.get("findings"), p.get("findings"))
+        self.assertFalse(p.get("gaps"))
+        self.assertFalse(p.get("claims"))
+
+
+    def test_repeated_payload_reads_keep_the_same_projection(self):
+        """连续两次取 payload（页面轮询）都必须拿到同一份投影——缓存命中不能改返回形状。
+
+        实机教训：缓存命中时误返回结构 dict（而非 `(结构, 原因)` 二元组），第二次轮询
+        解包报 "too many values to unpack"，`research` 整体变 None，面板直接消失。
+        """
+        import web_ui
+        tid, ws = self._env(tid="proj-02")
+        vid = self._adopt(ws, tid, "# 某公司研究\n\n营业收入 100 亿元，同比上升。\n")
+        (ws / "report_structure.json").write_text(json.dumps({
+            "version_id": "old-candidate", "findings": [], "evidence": {}, "risks": []},
+            ensure_ascii=False), encoding="utf-8")
+        first = web_ui._research_payload(tid, ws) or {}
+        second = web_ui._research_payload(tid, ws) or {}
+        self.assertEqual(first.get("structure_version"), vid)
+        self.assertEqual(second.get("structure_version"), vid)
+        self.assertIs(second.get("structure_current"), True)
+        self.assertEqual((first.get("projection") or {}).get("rebuilt"),
+                         (second.get("projection") or {}).get("rebuilt"))
+        self.assertTrue(second.get("projection"), second)
+
+
 class TestChangeExplanationGuards(unittest.TestCase):
     """C2-3：文档可准入 ≠ 每句话可证明。
 

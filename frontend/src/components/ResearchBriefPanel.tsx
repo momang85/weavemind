@@ -47,6 +47,12 @@ export default function ResearchBriefPanel({ taskId, research, exportState, onRe
   const weakClaims = claims.filter(c => c.status === 'unsupported'
     || c.status === 'needs_check' || c.status === 'partially_supported')
   const hasGaps = evidenceGaps.length + citationGaps.length + unproven.length + requiredGaps.length > 0
+  // D2：面板是否按**当前采纳版本**重建；重建失败时版本相关的块一律不展示
+  const proj = research.projection
+  const projectionMissing = !!proj && proj.rebuilt === false && !proj.same_version
+  const projectionNote = proj?.rebuilt
+    ? `· 面板按当前版本（${String(proj.for_version || '').slice(0, 12)}）重建；文件结构属 ${String(proj.file_version || '未知').slice(0, 12)}`
+    : ''
 
   const submitRevision = async () => {
     if (!taskId) return
@@ -78,8 +84,21 @@ export default function ResearchBriefPanel({ taskId, research, exportState, onRe
 
   return (
     <div className="space-y-3">
+      {/* D2：投影状态——按当前版本重建（说明来源），或重建失败（隐藏版本相关块） */}
+      {projectionNote && (
+        <div className="text-xs text-slate-500">{projectionNote}</div>
+      )}
+      {projectionMissing && (
+        <div className={`${box} border border-amber-500/30`}>
+          <div className={`${h} text-amber-400`}>面板未展示：当前版本的结构未能重建</div>
+          <div className="text-xs text-amber-300">
+            {proj?.reason || '重建失败'}；为避免把另一版的发现当成当前稿结论，本页隐藏
+            发现/缺口/证据三块。可点下方"修改正文并重验"触发重装配。
+          </div>
+        </div>
+      )}
       {/* ① 关键发现：代码装配、带 fact_id，先给结论 */}
-      {findings.length > 0 && (
+      {!projectionMissing && findings.length > 0 && (
         <div className={box}>
           <div className={h}>关键发现（{findings.length} 条，数字来自底稿）</div>
           <ul className="space-y-1">
@@ -89,7 +108,7 @@ export default function ResearchBriefPanel({ taskId, research, exportState, onRe
       )}
 
       {/* ② 缺口：必需数据 / 证据 / 引用 分开列，不混在一起 */}
-      {hasGaps && (
+      {!projectionMissing && hasGaps && (
         <div className={box}>
           <div className={h}>缺口（分开列：必需数据 / 证据 / 引用）</div>
           {requiredGaps.length > 0 && (
@@ -125,7 +144,7 @@ export default function ResearchBriefPanel({ taskId, research, exportState, onRe
       )}
 
       {/* ③ 证据：准入情况 + 未采用材料（含原因）+ 来源定位 */}
-      <div className={box}>
+      {!projectionMissing && (<div className={box}>
         <div className={h}>
           证据（已取得定位 {ev.located ?? 0} 条
           {ev.snippet_hints ? `；另有 ${ev.snippet_hints} 条检索线索未取得正文定位` : ''}
@@ -164,7 +183,7 @@ export default function ResearchBriefPanel({ taskId, research, exportState, onRe
             ))}</ul>
           </div>
         )}
-      </div>
+      </div>)}
 
       {/* ④ 图表：每张回答一个问题，附数据观察；草稿级不进正文 */}
       {charts.length > 0 && (
