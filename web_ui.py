@@ -2724,17 +2724,24 @@ def _export_payload(tid: str, ws, state: dict | None) -> dict:
         _exp = {}
     _zips = sorted((p for p in ws.glob("deliverables_*.zip")),
                    key=lambda p: p.stat().st_mtime, reverse=True)
+    _zip = _zips[0] if _zips else None
+    # 重装配（如修订重验）会重写清单但**不重建 zip**：清单比包新两分钟以上时，
+    # 清单里的版本号对得上当前也不能说包是当前的（实机：11:56 的包配 12:23 的清单）。
+    _generated = float((_exp or {}).get("generated_at") or 0)
+    _package_stale = bool(_zip) and bool(_generated) and (
+        _generated - _zip.stat().st_mtime > 120)
     return {
         "manifest": _exp or None,
         "manifest_version_id": str((_exp or {}).get("report_version_id") or ""),
         "current_version_id": str((state or {}).get("identity_id") or ""),
         "package_body_version_id": str((_exp or {}).get("body_sha256") or ""),
         "current_body_version_id": str((state or {}).get("version_id") or ""),
-        "package": (_zips[0].name if _zips else ""),
+        "package": (_zip.name if _zip else ""),
         "package_generated_at": (
             time.strftime("%Y-%m-%d %H:%M",
-                          time.localtime(_zips[0].stat().st_mtime))
-            if _zips else ""),
+                          time.localtime(_zip.stat().st_mtime))
+            if _zip else ""),
+        "package_stale": _package_stale,
     }
 
 

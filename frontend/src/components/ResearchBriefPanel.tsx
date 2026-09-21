@@ -264,6 +264,10 @@ export default function ResearchBriefPanel({ taskId, research, exportState, onRe
                     当前版本 {curV.slice(0, 12)}——包不含最新修订，请重新导出</li>
                 : null
             })()}
+            {exportState.package && exportState.package_stale
+              ? <li className="text-amber-400">· 包文件生成于 {exportState.package_generated_at || '未知时间'}，
+                  早于最近一次装配——重装配未重建包，包可能不含最新修订，请重新导出</li>
+              : null}
           </ul>
         </div>
       )}

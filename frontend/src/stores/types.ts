@@ -155,6 +155,9 @@ export interface ExportState {
   current_body_version_id?: string
   package?: string
   package_generated_at?: string
+  /** 重装配重写了清单但没重建 zip（清单比包新两分钟以上）——版本号对得上
+   *  也不能说包是当前的（实机：11:56 的包配 12:23 的清单）。 */
+  package_stale?: boolean
 }
 
 export interface TaskReport {

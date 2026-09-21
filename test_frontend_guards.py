@@ -496,8 +496,15 @@ class TestExportVersionNamespaces(unittest.TestCase):
         text = (ROOT / "web_ui.py").read_text(encoding="utf-8")
         self.assertIn('"package_body_version_id"', text)
         self.assertIn('"current_body_version_id"', text)
+        self.assertIn('"package_stale"', text,
+                      "导出块缺少包陈旧信号（清单重写不重建 zip 时会漏标）")
         self.assertIn("export = _export_payload(tid, _ws, _state)", text,
                       "任务页导出块未走 _export_payload（字段可能悄悄丢回单一口径）")
+
+    def test_panel_shows_stale_package_note(self):
+        text = (SRC / "components" / "ResearchBriefPanel.tsx").read_text(encoding="utf-8")
+        self.assertIn("exportState.package_stale", text)
+        self.assertIn("重装配未重建包", text)
 
 
 class TestFilesUrlSegmentEncoding(unittest.TestCase):

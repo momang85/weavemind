@@ -6174,6 +6174,26 @@ class TestExportVersionNamespaces(unittest.TestCase):
         self.assertEqual(out.get("current_version_id"), "")
         self.assertEqual(out.get("package"), "")
 
+    def test_package_stale_when_manifest_newer_than_zip(self):
+        """重装配重写清单但不重建 zip → 版本号对得上也必须标包陈旧（实机反例）。"""
+        import os
+        import time
+        import web_ui
+        ws = self._ws({"report_version_id": "ident-cur", "body_sha256": "body-cur",
+                       "generated_at": time.time()})
+        zip_path = ws / "deliverables_20260920_104729.zip"
+        old = time.time() - 3600
+        os.utime(zip_path, (old, old))          # 包是一小时前的，清单是刚写的
+        out = web_ui._export_payload(
+            "ui-x", ws, {"identity_id": "ident-cur", "version_id": "body-cur"})
+        self.assertIs(out.get("package_stale"), True)
+        # 清单与包同一次装配（时间接近）→ 不误标
+        fresh = time.time()
+        os.utime(zip_path, (fresh, fresh))
+        out2 = web_ui._export_payload(
+            "ui-x", ws, {"identity_id": "ident-cur", "version_id": "body-cur"})
+        self.assertIs(out2.get("package_stale"), False)
+
 
 class TestBriefAssemblyIdempotence(unittest.TestCase):
     """二次装配不得把装配器自己的产物再吃回来（实机 ui-31305a2b28 反例）。
