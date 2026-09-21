@@ -6245,6 +6245,29 @@ class TestBriefAssemblyIdempotence(unittest.TestCase):
         self.assertFalse(any("研究报告" in t for t in texts), texts)
         self.assertTrue(any("288.76" in t for t in texts), texts)
 
+    def test_model_report_title_under_second_heading_is_not_a_risk(self):
+        """正文有两个标题（简报标题 + 模型报告标题）时，后者也不得进风险清单。
+
+        实机复测：只比对"第一个 H1"的写法仍把模型标题收进 from_report（它出现在
+        『待核查主张』小节里）；现在按**全部标题行**排除。"""
+        import report_brief
+        body = (
+            "# 洋河股份 经营分析简报（2023–2024 年度）\n\n"
+            "## 分析\n"
+            "# 洋河股份（002304.SZ）2023—2024 年度核心财务指标研究报告\n"
+            "> 口径提示：本报告中「归母净利润」为归属于母公司股东的净利润。\n\n"
+            "## 风险与核查\n"
+            "- **待核查主张（未与底稿事实绑定）**：\n"
+            "- 洋河股份（002304.SZ）2023—2024 年度核心财务指标研究报告\n"
+        )
+        with mock.patch.object(report_brief, "_located", return_value=[]), \
+             mock.patch("working_paper_export.build_result",
+                        return_value={"gaps": [], "problems": [], "audit": []}):
+            risks = report_brief._risks("ui-x", "研究洋河股份", body, changes={}, citations=[])
+        texts = [r.get("text") or "" for r in risks]
+        self.assertFalse(any("研究报告" in t for t in texts), texts)
+        self.assertFalse(any("待核查主张" in t for t in texts), texts)
+
     def test_heading_with_unmapped_ref_is_not_unsupported(self):
         import report_brief
         text = "# 某年度研究报告 [9]\n2024 年营收下降，原因待查 [9]。\n"

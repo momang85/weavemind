@@ -717,12 +717,12 @@ def _risks(task_id: str, goal: str, body: str, *, project=None,
                          "需要补充的材料", "需补材料", "出处：", "来源：")
     section = _section_text(body, ("风险", "待核查", "核查"))
     if section:
-        # 正文 H1（报告标题）：二次装配时它会被当成"风险"吞进来（实机：标题列进
-        # 风险清单）；标题不是风险，按键排除。
-        h1_key = ""
-        m_h1 = re.search(r"^#\s+(.+)$", str(body or ""), flags=re.M)
-        if m_h1:
-            h1_key = _sentence_key(m_h1.group(1))[:120]
+        # 标题行不是风险：正文里通常有**多个**标题（简报标题 + 模型自写报告标题，
+        # 后者会出现在"待核查主张"小节里），只比对第一个会把模型标题漏进来
+        # （实机复测：修复后仍剩一条"洋河股份（002304.SZ）…研究报告"）。
+        heading_keys = {_sentence_key(m.group(1))[:120]
+                        for m in re.finditer(r"^#{1,6}\s+(.+)$", str(body or ""), flags=re.M)}
+        heading_keys.discard("")
         # 与 ①②③ 已加条目跨来源去重：模型风险小节常会复述"变化原因尚不能证明"，
         # 二次装配还会把上一轮装配自己的行（压缩提示/待核查头）喂回来——
         # 不去重会逐轮翻倍（实机：同一风险两行、结尾 **** 逐轮 +3）。
@@ -743,7 +743,7 @@ def _risks(task_id: str, goal: str, body: str, *, project=None,
             if t.startswith("待核查主张（"):
                 continue
             key = _sentence_key(t)[:120]
-            if not key or key in seen_texts or (h1_key and key == h1_key):
+            if not key or key in seen_texts or key in heading_keys:
                 continue
             seen_texts.add(key)
             _add("from_report", t,
