@@ -1182,6 +1182,43 @@ class TestProviderRequestReconciliation(unittest.TestCase):
         self.assertIn("settle_unknown_ticket", again.state.rejected_transitions)
 
 
+class TestTokenCounterAccuracy(unittest.TestCase):
+    """D5 夜间补修（实机反例）：共享 token 计数必须等于**实际用量**，不得走负。
+
+    实机 ui-706c5ef4a5：`wm:budget:…:tokens = -63188`——`_take_open` 已退回预留上界，
+    `settle` 又按 (实际−上界) 记了一遍，实际用量被扣两次。计数走负的后果是
+    **配了 `max_tokens` 上限也永远拒不了**（真实门禁失效）。
+    """
+
+    def setUp(self):
+        self.kv: dict = {}
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_tok_"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        os.environ["WM_SINGLE_PROCESS"] = "1"
+        self.addCleanup(lambda: os.environ.pop("WM_SINGLE_PROCESS", None))
+
+    def _bounded(self, **limits):
+        return rb.RootBudget("t-tok", self.tmp, rb.BudgetLimits(**limits),
+                             redis_factory=lambda: _AtomicFakeRedis(self.kv))
+
+    def test_shared_token_counter_equals_actual_usage(self):
+        b = self._bounded(max_tokens=10000)
+        t1 = b.reserve("llm", tokens=1000)
+        b.settle(t1, tokens=400, usage_known=True)          # 实际用了 400
+        t2 = b.reserve("llm", tokens=1000)
+        b.settle(t2, tokens=1000)                           # 没取到用量：记上界
+        key = [k for k in self.kv if k.endswith(":tokens")][0]
+        self.assertEqual(int(self.kv[key]), 1400,
+                         "共享计数 = 实际用量 + 未取到用量的上界（不得走负）")
+
+    def test_token_cap_still_refuses_when_counter_is_accurate(self):
+        b = self._bounded(max_tokens=1000)
+        t = b.reserve("llm", tokens=900)
+        b.settle(t, tokens=900, usage_known=True)
+        with self.assertRaises(rb.BudgetExceeded):
+            b.reserve("llm", tokens=200)                    # 900 + 200 > 1000
+
+
 class TestBoundedFailClosed(unittest.TestCase):
     """D5 夜间补修：显式有界任务在共享账本不可用、无法可靠预留时 **fail closed**。
 

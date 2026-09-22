@@ -7487,6 +7487,36 @@ class TestPackageManifestInsideZip(unittest.TestCase):
         self.assertTrue(man.get("packaged_at"))
 
 
+class TestSourceLabelingUncertaintyGuard(unittest.TestCase):
+    """实机反例：待核查指引句不得被判成"虚假来源标注"。
+
+    ui-706c5ef4a5 的正文写"需核查年报…才能判断经营现金的来源是以销售回款为主还是以
+    其他项目为主"，`来源是` 被当成来源声明 → 虚假标注 1 条 → 整份如实标缺口的交付
+    被降为 draft。判据看整句：明说"要核查才能判断"就不是在声明来源。
+    """
+
+    def test_verification_guidance_is_not_a_source_claim(self):
+        import acceptance_checker as ac
+        text = ("需核查年度报告「合并现金流量表」正文及「财务报表附注—现金流量表补充资料」"
+                "小节，才能判断经营现金的来源是以销售回款为主还是以其他项目为主，"
+                "以及波动主要由哪一环节驱动。")
+        self.assertEqual(ac._extract_source_claims(text), [])
+        self.assertTrue(ac.check_source_labeling(text, {}).get("pass"))
+
+    def test_real_false_label_is_still_caught(self):
+        import acceptance_checker as ac
+        text = "数据来源：某权威机构年度报告。"
+        self.assertEqual(ac._extract_source_claims(text), ["某权威机构年度报告"])
+        self.assertFalse(ac.check_source_labeling(text, {}).get("pass"),
+                         "真正的虚假标注不能被这道守卫放过")
+
+    def test_declared_known_source_still_passes(self):
+        import acceptance_checker as ac
+        text = "数据来源：东方财富数据中心。"
+        self.assertTrue(ac.check_source_labeling(
+            text, {"financials": "https://datacenter-web.eastmoney.com/api"}).get("pass"))
+
+
 class TestResearchStateAndDeterministicCritic(unittest.TestCase):
     """批次3b/3c：研究状态与数字验收分开；确定性计划按配置进统一 Critic。"""
 

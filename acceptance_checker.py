@@ -2120,10 +2120,20 @@ def _extract_source_claims(report: str) -> list[str]:
     被抽成"虚假来源标注"，连代码装配的视角/定位说明也中招。
     """
     claims: list[str] = []
+    # 待核查指引句**不是**来源声明（实机 ui-706c5ef4a5 反例："需核查年报…才能判断经营
+    # 现金的来源是以销售回款为主还是以其他项目为主"被抽成"虚假标注 1 条"，把一份如实
+    # 标缺口的交付判成 draft）。判据看**整句**：句子里明说"要核查才能判断"就不是声明来源。
+    _UNCERTAIN_CTX = ("才能判断", "需核查", "待核查", "需核对", "待核对", "无法判断",
+                      "不作判断", "尚不能", "不能据此", "需补充", "待补充")
     for m in re.finditer(
         r"(?:数据来源|资料来源|来源|引自|出自)\s*(?:[：:]\s*|[为是]\s*)([^。；\n，,|]{2,60})",
         report,
     ):
+        _s0 = max(report.rfind("。", 0, m.start()), report.rfind("\n", 0, m.start())) + 1
+        _s1 = report.find("。", m.end())
+        _sentence = report[_s0:(_s1 + 1) if _s1 > 0 else len(report)]
+        if any(k in _sentence for k in _UNCERTAIN_CTX):
+            continue
         c = m.group(1).strip()
         if not c:
             continue

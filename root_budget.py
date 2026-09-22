@@ -845,7 +845,11 @@ class RootBudget:
             # token：上界换成实际；调用次数不退（这次调用已经发生了）
             upper = int(rec.get("tokens") or 0)
             self.state.tokens_reserved = max(0, self.state.tokens_reserved - upper)
-            self._release_tokens_remote(upper, actual=actual)
+            # `_take_open` 已把预留上界整笔退回共享计数（delta = -U）；这里只补记**实际
+            # 用量**（+A），合起来才是"上界换成实际"。此前两处都按 (A-U) 记，实际用量被
+            # 扣了两遍——共享 token 计数会一路走负，配了 `max_tokens` 也永远拒不了
+            # （实机 ui-706c5ef4a5：`wm:budget:…:tokens = -63188`）。
+            self._release_tokens_remote(0, actual=actual)
             entry = self.state.stages.get(stage)
             if isinstance(entry, dict):
                 entry["open"] = [t for t in (entry.get("open") or [])

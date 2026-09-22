@@ -1820,7 +1820,15 @@ class LLMClient:
                         "thinking budget exhausted, retry with max_tokens=%d",
                         max_tok,
                     )
-                    # 这次请求已经发出（供应商可能计费）：结算后再放大重试
+                    # 这次请求已经发出（供应商可能计费）：结算后再放大重试。
+                    # 调用形状也要留一条——否则"票据数 > 调用记录数"，逐条对账时
+                    # 会以为有一次请求没记账（实机 ui-706c5ef4a5：17 票 / 16 条）
+                    _record_llm_call(
+                        get_task_context(), stage=usage, attempt=attempt,
+                        elapsed_ms=int((time.monotonic() - _t0) * 1000),
+                        input_chars=_input_chars, max_tokens=max_tok,
+                        error_class="thinking_budget_exhausted",
+                        end_reason="thinking_budget_retry")
                     _budget_close(_rb, _ticket, ok=False, max_tokens=max_tok,
                                   note="llm:thinking_budget_exhausted")
                     continue

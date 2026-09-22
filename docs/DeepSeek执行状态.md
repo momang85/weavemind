@@ -1,13 +1,14 @@
 # DeepSeek 执行状态（2026-09-21 更新）
 
-**当前批次**：阶段 D · 夜间纠偏**第一、二小批与第三小批全部完成**（资料侧 + 独立研究状态 + 固定路线 Critic），第四小批的同版交付两项必要项也已落地——①结论与完整正文审查（金额变化与
+**当前批次**：阶段 D · 夜间纠偏**第一至三小批完成、第四小批已跑完一份有界实机**（8 分钟 / 17 次模型请求）（资料侧 + 独立研究状态 + 固定路线 Critic），第四小批的同版交付两项必要项也已落地——①结论与完整正文审查（金额变化与
 利润率变化分开、研究问题按方向生成、装配文本进同一主张集合）②D5 补修（一请求一票、
 跨进程可靠账本、有界任务 fail closed、调度票据与请求分列、上界与实际用量分列）。
 D5 仍标 **"已实现部分路径，退出关卡未通过"**：真实 Redis 并发与修复后实机核对待第四小批。
 证据：`docs/evidence/d1_night_correction_batch1_20260921.md`、
 `docs/evidence/d5_night_correction_batch2_20260921.md`、
 `docs/evidence/d3_night_correction_batch3a_material_20260921.md`、
-`docs/evidence/d3_d4_night_correction_batch3b_4a_20260921.md` 及此前各批证据。
+`docs/evidence/d3_d4_night_correction_batch3b_4a_20260921.md`、
+`docs/evidence/d4_live_bounded_run_and_layout_20260922.md` 及此前各批证据。
 
 | 层 | 状态 |
 |---|---|
@@ -17,6 +18,8 @@ D5 仍标 **"已实现部分路径，退出关卡未通过"**：真实 Redis 并
 | 夜间纠偏第三小批（状态与评审） | ①**独立研究状态** `research_state`（`research_ready`/`research_draft`/`not_applicable` + 原因与读数）：要求经营解释却 `located=0`、关键问题全无依据、或存在已断言未支持的主张 → **研究草稿／待补原始披露**；纯数据核对任务不误判失败。同一份文字进 `research_state.json`、交付说明（MD 与 PDF 封面）、页面负载、导出清单与前端面板；`verified` 语义不变（只表示数字与格式机器验收通过）②**固定研究路线接统一 Critic**：`_review_deterministic_plan` 在 `system.critic=true` 时进同一入口（FAIL 修订并复评），critic 关闭/未给 PASS 一律如实记降级、**绝不写 PASS**；银行执行前 PASS 硬条件不变 |
 | 第四小批（必要项） | ①图注/结论按**数据方向**（三项均下降/均上升/有升有降由 yoy 判定）②交付 zip 内写入 `PACKAGE_MANIFEST.json`（正文/图表 sha256 + 材料指纹 + 规则版本与指纹 + 打包时间）；`_export_payload` 以**包内清单优先**做版本绑定与陈旧判定（时间戳只作辅助） |
 | 验证（第三小批·资料侧） | `test_delivery_chain.TestMaterialSideBatch3` 4 项（查询无样板词且契约查询排第一 / 7 个候选逐一核对 / PDF 不当正文且 hash 正确 / pdf 标记触发解析通道）；CI 清单 46 文件本地全绿 |
+| 第四小批（有界实机，2026-09-22） | `ui-706c5ef4a5`：11:54:59 提交 → 12:02:58 终态（**8 分钟**，模型请求 **17** 次 ≤ 40）；**固定研究路线实机走通 Critic**（第 1 轮 FAIL → 修订 → 第 2 轮 PASS）；账本 `llm:17 + step:13`、`unsettled=0`、无拒绝迁移（批次1/2 修复在实机生效）；交付 `draft`（唯一原因：待核查指引句被误判虚假来源标注）；研究状态=研究草稿（located=0 + 2 条未支持）；包内 manifest 齐全。**对账又查出两处**：①共享 token 计数走负（实际用量被扣两次 → 配 `max_tokens` 也拒不了）②思考预算重试不写调用记录（17 票 / 16 条）——均已修 + 用例 |
+| 报告与版面（实机产物） | 结构完整（简报 → 模型正文 → 附录 10 节）；表格列网格对齐；图注/结论按数据方向（"三项均下降"）；PDF 15 页、6/6 图嵌入、0 占位、0 空白页。**视觉逐页未做**：本机无 PDF 渲染器（无 pymupdf/pypdfium2/pdftoppm），浏览器截图面多次超时——**视觉质量未签收** |
 | 验证（第三小批·状态与评审 / 第四小批必要项） | `test_delivery_chain` 296（新增 6：研究状态三分支、确定性计划进 Critic、critic 关闭如实降级、包内 manifest 与正文 sha）；六场景全过；前端 build 通过；CI 清单 46 文件本地全绿 |
 | 验证（第二小批） | `test_root_budget` **63 项**（新增 15：415 回退两票/cap=1 发送前拦截/异步回退与整链/两进程 80 次与锁释放/重试主备回退逐条对账/调度≠请求/实际用量与上界/未结票据重开可见+重复收尾被拒/多进程无共享账本拒发等）；CI 清单 46 文件本地全绿 |
 | D5 第二批（有界实机） | 声明上限 `WM_TASK_MAX_CALLS=40 / SECONDS=1500`（全局仍 0/0/0），上限入账；`ui-750185076a` 洋河 2023–2024 两年度三项指标，21:05:02 提交 → 21:07:29 `SUCCESS`（**2 分 27 秒**，未触发拒绝）；验收 `overall=pass`（溯源 77%（164/212））、交付 `verified`、主张 40 条（bound 7 / partially_supported 7 / needs_check 26）、研究问题 4 条；费用**未知** |
