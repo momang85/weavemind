@@ -311,10 +311,13 @@ def _is_heading(line: str) -> bool:
     return False
 
 
-def split_sections(text: str, page_offsets=None) -> list[dict]:
-    """按标题行切分正文，返回 `{title, path, body, start, end, page}`。
+def split_sections(text: str, page_offsets=None, chunk_offsets=None) -> list[dict]:
+    """按标题行切分正文，返回 `{title, path, body, start, end, page, chunk}`。
 
     `page_offsets`（PDF 专用）：`[(字符起点, 页码)]`，用于给每个小节标出所在页。
+    `chunk_offsets`（接口片段专用）：`[(字符起点, 片段号)]`——公告文本 API 的
+    `page_index` 返回的是**接口片段**而不是 PDF 实体页，没有页码映射时只能用这个
+    定位（locator 写 `api_chunk K（字符 a-b）`，page 保持空）。
     """
     lines = str(text or "").splitlines()
     out: list[dict] = []
@@ -346,6 +349,7 @@ def split_sections(text: str, page_offsets=None) -> list[dict]:
     for sec in out:
         sec["body"] = "\n".join(sec["lines"]).strip()
         sec["page"] = _page_of(sec["start"], page_offsets)
+        sec["chunk"] = _chunk_of(sec["start"], chunk_offsets)
     return [s for s in out if s["body"] or s["title"]]
 
 
@@ -358,6 +362,17 @@ def _page_of(char_start: int, page_offsets) -> int | None:
         else:
             break
     return page
+
+
+def _chunk_of(char_start: int, chunk_offsets) -> int | None:
+    """字符位置 → 接口片段号（公告文本 API 用；没有片段信息返回 None）。"""
+    chunk = None
+    for start, no in (chunk_offsets or []):
+        if int(char_start) >= int(start):
+            chunk = int(no)
+        else:
+            break
+    return chunk
 
 
 def _demote_change_target(best_score: int, source: str = "") -> str | None:
@@ -524,8 +539,13 @@ def _paragraph_records(doc: dict, *, periods=None, company: str = "",
         if len(bucket) >= max_per_kind:
             continue
         page = _page_of(start, page_offsets)
-        loc = (f"第 {page} 页 · 段落 {n}（字符 {start}-{start + len(raw)}）" if page
-               else f"段落 {n}（字符 {start}-{start + len(raw)}）")
+        chunk = _chunk_of(start, doc.get("chunk_offsets"))
+        if page:
+            loc = f"第 {page} 页 · 段落 {n}（字符 {start}-{start + len(raw)}）"
+        elif chunk:
+            loc = f"api_chunk {chunk} · 段落 {n}（字符 {start}-{start + len(raw)}）"
+        else:
+            loc = f"段落 {n}（字符 {start}-{start + len(raw)}）"
         rec = {
             "kind": kind, "kind_label": KIND_LABELS[kind], "title": title, "url": url,
             "source_type": stype,
@@ -533,6 +553,7 @@ def _paragraph_records(doc: dict, *, periods=None, company: str = "",
             "publisher": publisher_of(url), "section": f"段落 {n}",
             "snippet": snip, "char_start": start, "char_end": start + len(raw),
             "page": page,
+            "chunk": chunk,
             "period_hint": next((y for y in years if y in body), ""),
             "has_location": True, "locator": loc,
             "content_hash": hashlib.sha256(snip.encode("utf-8")).hexdigest()[:16],
@@ -566,9 +587,11 @@ def extract_sections(doc: dict, *, periods=None, company: str = "",
     _prov = document_provenance(doc, company, company_id) or stype
     years = [str(y) for y in (periods or [])]
     page_offsets = doc.get("page_offsets")
+    chunk_offsets = doc.get("chunk_offsets")
     picked: dict[str, list[dict]] = {}
     seen: set[tuple[str, str]] = set()
-    for sec in split_sections(text, page_offsets=page_offsets):
+    for sec in split_sections(text, page_offsets=page_offsets,
+                              chunk_offsets=chunk_offsets):
         kind = classify(sec["title"], sec["body"], source=_prov)
         if not kind:
             continue
@@ -596,6 +619,7 @@ def extract_sections(doc: dict, *, periods=None, company: str = "",
             "char_start": int(sec["start"]),
             "char_end": int(sec["end"]),
             "page": sec.get("page"),
+            "chunk": sec.get("chunk"),
             "period_hint": hint,
             "has_location": True,
             "locator": _locator_text(sec),
@@ -618,10 +642,14 @@ def extract_sections(doc: dict, *, periods=None, company: str = "",
 
 
 def _locator_text(sec: dict) -> str:
-    """定位文本：有页码就写页码（PDF），否则写小节 + 字符区间（网页）。"""
+    """定位文本：有页码写页码（PDF）；有接口片段号写 api_chunk；否则写小节+字符区间。"""
     page = sec.get("page")
     if page:
         return f"第 {page} 页 · 小节：{sec['path']}（字符 {sec['start']}-{sec['end']}）"
+    chunk = sec.get("chunk")
+    if chunk:
+        return (f"api_chunk {chunk} · 小节：{sec['path']}"
+                f"（字符 {sec['start']}-{sec['end']}）")
     return f"小节：{sec['path']}（字符 {sec['start']}-{sec['end']}）"
 
 

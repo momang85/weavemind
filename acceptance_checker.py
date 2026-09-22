@@ -830,6 +830,123 @@ _DIRECTION_WORDS = ("上升", "下降", "提高", "降低", "回落", "走高", 
 _ABS_COMPARE_WORDS = ("大于", "小于", "多于", "少于", "快于", "慢于", "高于", "低于")
 _ABS_CHANGE_WORDS = ("减少", "增加", "下降", "增长", "上升", "下滑")
 _AMOUNT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(亿元|万元|元|亿|万)")
+_PCT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
+# 相对变化比较词：不出现"大于/小于"也可能在解释比率（"分母降得更快，比率才下降"）
+_REL_COMPARE_WORDS = ("更快", "更慢", "快于", "慢于")
+# 机制类驱动：派生读数（哪怕真实）也不能证明机制本身，最多提示待查
+_MECHANISM_DRIVERS = ("固定性费用", "固定费用", "固定成本", "摊薄", "规模效应")
+# 比率 → (分子词, 分母词)：句内百分数归属要靠这些词识别
+_RATIO_PARTS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
+    "debt_ratio": (("负债",), ("资产",)),
+    "gross_margin": (("毛利",), ("收入", "营业收入")),
+    "net_margin": (("净利", "净利润", "归母净利"), ("收入", "营业收入")),
+    "cashflow_coverage": (("现金流", "经营现金流"), ("净利", "净利润", "归母净利")),
+    "rd_intensity": (("研发", "研发投入"), ("收入", "营业收入")),
+}
+
+
+def _derived_is_real(row: dict) -> bool:
+    """派生行算不算可复算证据：要有**有效数值** + 输入事实 + 算式。
+
+    09-23 反例：只有 `{metric: expense_ratio, metric_label: 期间费用率}` 或
+    `{metric: debt_ratio, year: 2023/2024}`（无 value/formula/derived_from）的标签
+    行，既不能证明机制也不能充当比率复算，不构成支持。
+    """
+    val = row.get("value")
+    if val is None or str(val).strip() == "":
+        return False
+    try:
+        float(str(val))
+    except (TypeError, ValueError):
+        return False
+    inputs = str(row.get("derived_from") or "").strip()
+    if inputs in ("", "[]", "None"):
+        return False
+    return bool(str(row.get("formula") or "").strip())
+
+
+def _record_text(rec: dict) -> str:
+    """证据记录正文：抽取记录存 `snippet`，旧记录/快照可能存 `text`。"""
+    return str(rec.get("text") or rec.get("snippet") or "")
+
+
+def _ratio_direction(sentence: str) -> str:
+    """句内比率方向：down / up / ""（未表态）。"""
+    if any(w in sentence for w in ("下降", "降低", "回落", "走低", "减少")):
+        return "down"
+    if any(w in sentence for w in ("上升", "提高", "走高", "增长")):
+        return "up"
+    return ""
+
+
+def _side_faster(sentence: str) -> str:
+    """句内"谁降得更快"的表态：numerator / denominator / ""。"""
+    m = re.search(r"(分子|分母)\s*(?:的|降得|涨得|降|涨)?\s*(?:降幅|涨幅|变化)?\s*更[快慢]",
+                  sentence)
+    if not m:
+        return ""
+    return "numerator" if m.group(1) == "分子" else "denominator"
+
+
+def _ratio_levels(sentence: str, metrics: list[str]) -> tuple[float, float] | None:
+    """句内**该比率自己的两期水平**读数（如"资产负债率由 25.42% 下降至 23.24%"）。
+
+    返回按出现顺序的前两个百分数；不足两个返回 None。比率词自身的字符区间不参与
+    分子/分母归属（"资产负债率"里含"资产/负债"两词，不能当分子分母关键词）。
+    """
+    spans: list[tuple[int, int]] = []
+    for w, m in _RATIO_METRIC_WORDS:
+        if m in metrics:
+            spans.extend((km.start(), km.end()) for km in re.finditer(re.escape(w), sentence))
+    if not spans:
+        return None
+    levels: list[float] = []
+    for pm in _PCT_RE.finditer(sentence):
+        if any(s <= pm.start() < e for s, e in spans):
+            continue
+        for s, e in spans:
+            if 0 <= pm.start() - e <= 20:
+                levels.append(float(pm.group(1)))
+                break
+        if len(levels) >= 2:
+            break
+    return (levels[0], levels[1]) if len(levels) >= 2 else None
+
+
+def _part_percentages(sentence: str, metrics: list[str]) -> tuple[float | None, float | None]:
+    """句内可归属到**该比率自己的**分子/分母的百分数（取最靠近关键词的一个）。
+
+    比率词自身的区间（如"资产负债率"）不参与归属，避免把比率两期水平误认成
+    分子/分母变化；只认百分数**前面**的归属词（"负债降幅11.78%"）。
+    """
+    spans: list[tuple[int, int]] = []
+    for w, m in _RATIO_METRIC_WORDS:
+        if m in metrics:
+            spans.extend((km.start(), km.end()) for km in re.finditer(re.escape(w), sentence))
+    num_words: list[str] = []
+    den_words: list[str] = []
+    for m in metrics:
+        n_w, d_w = _RATIO_PARTS.get(m, ((), ()))
+        num_words.extend(n_w)
+        den_words.extend(d_w)
+
+    def _near(words: list[str]) -> float | None:
+        best: tuple[int, float] | None = None
+        for pm in _PCT_RE.finditer(sentence):
+            if any(s <= pm.start() < e for s, e in spans):
+                continue
+            for w in words:
+                for km in re.finditer(re.escape(w), sentence):
+                    if any(s <= km.start() < e for s, e in spans):
+                        continue          # 比率词内部的"资产/负债"不算归属词
+                    if km.end() > pm.start():
+                        continue          # 只认百分数**前面**的归属词
+                    gap = pm.start() - km.end()
+                    if gap <= 10 and (best is None or gap < best[0]):
+                        best = (gap, float(pm.group(1)))
+        return best[1] if best else None
+
+    return _near(num_words), _near(den_words)
 
 
 def _located_records(evidence: dict | None) -> list[dict]:
@@ -850,17 +967,40 @@ def _driver_support(driver: str, need: str, material_words: tuple[str, ...],
 
     只有两类支持算数：
     - 已准入、带定位的原始披露里**谈到该驱动**（材料词命中记录正文）；
-    - 底稿派生关系里**就是这条驱动**（指标标签命中驱动或材料词）。
-    与驱动无关的派生（revenue_yoy、cashflow_coverage 之类）**不构成支持**。
+    - 底稿派生关系里**就是这条驱动**，且是**真派生**（有有效值、输入事实与算式）。
+
+    09-23 收窄：
+    - 与驱动无关的派生（revenue_yoy、cashflow_coverage 之类）**不构成支持**；
+    - 只有标签没有数值/算式/输入的派生行**不构成支持**（费用率空标签反例）；
+    - 机制类驱动（固定性费用摊薄、规模效应等）**派生读数一律不算支持**——
+      费用率上升本身不能证明"摊薄削弱"机制，最多作为待查提示（见 `_driver_hint`）。
     """
     for r in records:
-        text = str(r.get("text") or "")
+        text = _record_text(r)
         if driver in text or any(w in text for w in material_words):
             return f"原始披露（{str(r.get('locator') or '有定位')}）谈到{driver}"
+    if driver in _MECHANISM_DRIVERS:
+        return ""
     for d in _derived_rows(wp):
+        if not _derived_is_real(d):
+            continue
         label = str(d.get("metric_label") or d.get("metric") or "")
         if driver in label or any(w in label for w in material_words):
-            return f"底稿派生关系（{label}）"
+            return f"底稿派生关系（{label}，可复算）"
+    return ""
+
+
+def _driver_hint(driver: str, material_words: tuple[str, ...],
+                 *, wp: dict | None) -> str:
+    """机制类驱动旁的"待查提示"：有真实费用率派生读数但机制未证实时给出。"""
+    if driver not in _MECHANISM_DRIVERS:
+        return ""
+    for d in _derived_rows(wp):
+        if not _derived_is_real(d):
+            continue
+        label = str(d.get("metric_label") or d.get("metric") or "")
+        if any(w in label for w in material_words):
+            return f"{label} 派生读数只作待查提示，不构成{driver}机制的证明"
     return ""
 
 
@@ -879,9 +1019,10 @@ def _read_working_paper(workspace) -> dict:
 def _read_narrative_evidence(workspace) -> dict:
     """读任务工作区的叙事证据（缺/坏 → 空 dict，不编）。
 
-    没有 `narrative_evidence.json` 时退回**抓取快照**（`project/fetch_snapshot.json`）：
-    验收要判"这条归因有没有对应披露"，而快照就是已取得的原始披露正文——不退回会让
-    引用年报原文的句子被判"缺证"。
+    09-23 收窄：不再把抓取快照里的任意非空 text 直接合成 `admitted/has_location`
+    （抓取成功 ≠ 主体/期间适用或定位充分），也不再用 URL 冒充具体位置。
+    快照记录只有**自带**准入与定位字段时才并入；没有就只是已抓到的原始文本，
+    不进入归因证据集。
     """
     try:
         ws = Path(workspace)
@@ -889,24 +1030,20 @@ def _read_narrative_evidence(workspace) -> dict:
         p = ws / "narrative_evidence.json"
         if p.exists():
             out = json.loads(p.read_text(encoding="utf-8")) or {}
-        # 抓取快照 = 已取得的**原始披露正文**：合并进来，让"引用年报原文的归因"能被
-        # 判为有对应材料（不合并会把它误判成缺证）
         snap_records: list[dict] = []
         for cand in (ws / "project" / "fetch_snapshot.json", ws / "fetch_snapshot.json"):
             if not cand.exists():
                 continue
             items = json.loads(cand.read_text(encoding="utf-8")) or []
             for it in items if isinstance(items, list) else []:
-                if not isinstance(it, dict) or not str(it.get("text") or "").strip():
+                if not isinstance(it, dict):
                     continue
-                snap_records.append({
-                    "text": str(it.get("text") or ""),
-                    "url": str(it.get("url") or ""),
-                    "title": str(it.get("title") or ""),
-                    "has_location": True,
-                    "locator": ("第 %s 页" % it.get("page")
-                                if it.get("page") else str(it.get("url") or "")),
-                    "admission": "admitted"})
+                # 只认记录**自己**声明的准入/定位；缺一项就不算可定位证据
+                if str(it.get("admission") or "") not in ("admitted", "comparison"):
+                    continue
+                if not it.get("has_location") or not str(it.get("locator") or "").strip():
+                    continue
+                snap_records.append(dict(it))
         if snap_records:
             merged = list(out.get("records") or []) + snap_records
             out = dict(out, records=merged)
@@ -929,6 +1066,7 @@ def check_attribution_support(report: str, *, working_paper: dict | None = None,
     records = _located_records(evidence)
     claims: list[dict] = []
     unsupported: list[str] = []
+    hints: list[str] = []
     for s in _sentences(text):
         if not any(v in s for v in _ATTRIBUTION_VERBS):
             continue
@@ -947,30 +1085,43 @@ def check_attribution_support(report: str, *, working_paper: dict | None = None,
         if not ok:
             missing = [d for (d, _n, _w), sup in zip(hits, supports) if not sup]
             unsupported.append(f"{s[:100]}（缺：{'、'.join(missing)} 的材料）")
+            for d, _n, words in hits:
+                if d in missing:
+                    h = _driver_hint(d, words, wp=working_paper)
+                    if h and h not in hints:
+                        hints.append(h)
     details = (f"归因主张 {len(claims)} 条；无对应材料支持 {len(unsupported)} 条"
                if claims else "未发现需要明细支持的肯定性归因")
+    if hints:
+        details += "；" + "；".join(hints)
     return {"pass": not unsupported, "details": details,
-            "claims": claims,
+            "claims": claims, "hints": hints,
             "gaps": [f"缺证归因：{u}" for u in unsupported]}
 
 
 def check_ratio_arithmetic(report: str, *, working_paper: dict | None = None) -> dict:
-    """算术核验：比率变化不得用"绝对额谁减得多"直接解释。
+    """算术核验：比率变化不得用"绝对额谁减得多"或**方向反了**的相对变化来解释。
 
     反例（实机 §5.2）："资产减少24.47亿元大于负债减少20.90亿元"被当作资产负债率
-    下降的直接算术原因。资产 100→90、负债 50→45 时资产减额更大而负债率不变——
+    下降的直接算术原因；资产 100→90、负债 50→45 时资产减额更大而负债率不变——
     比率要按 L/A 或增速比来复算。
 
-    判定：句子同时含①比率词与方向词、②两个绝对额变化与比较词 → 记为一条"绝对额
-    解释比率"的主张；只有当底稿里存在**该比率自己**的两期派生读数（可复算），或句子
-    直接给出两期比率读数时才算通过。与句子无关的派生（如 cashflow_coverage）不算
-    （09-22 晚间反例：任意派生即可放行）。
+    判定（09-23 收窄）：
+    - 句子含①比率词与方向词、②"绝对额减幅比较"或"分子/分母谁更快"的形状 → 记为
+      一条"解释比率变化"的主张；
+    - 通过条件之一：句内给出**该比率自己的**分子/分母相对变化，且方向与所述比率
+      方向一致（比率下降 ⟺ 分子降得更快）；"分母降得更快"与数值相反 → fail；
+    - 通过条件之二：底稿里有**该比率自己的真派生**（有效值 + 输入事实 + 算式）
+      的两期读数或 yoy/change 行；
+    - 无值/无算式/无输入的标签行不算支持（09-23 反例）；与句子无关的派生不算
+      （09-22 晚间反例）；两期比率正确也不能豁免同句里方向相反的原因陈述。
     """
     text = str(report or "")
     derived = _derived_rows(working_paper)
     by_metric: dict[str, set] = {}
     for d in derived:
-        by_metric.setdefault(str(d.get("metric") or ""), set()).add(d.get("year"))
+        if _derived_is_real(d):
+            by_metric.setdefault(str(d.get("metric") or ""), set()).add(d.get("year"))
     bad: list[str] = []
     seen: list[str] = []
     for s in _sentences(text):
@@ -978,20 +1129,46 @@ def check_ratio_arithmetic(report: str, *, working_paper: dict | None = None) ->
             continue
         if not any(w in s for w in _DIRECTION_WORDS):
             continue
-        if not any(w in s for w in _ABS_COMPARE_WORDS):
-            continue
         amounts = _AMOUNT_RE.findall(s)
-        if len(amounts) < 2:
-            continue
-        if not any(w in s for w in _ABS_CHANGE_WORDS):
+        pcts = _PCT_RE.findall(s)
+        has_abs = (len(amounts) >= 2 and any(w in s for w in _ABS_CHANGE_WORDS)
+                   and any(w in s for w in _ABS_COMPARE_WORDS))
+        has_rel = len(pcts) >= 2 and any(w in s for w in _REL_COMPARE_WORDS)
+        if not (has_abs or has_rel):
             continue
         seen.append(s[:160])
-        # 已给出两期比率读数 → 读者可自行复算，不算误释
-        _pct = re.findall(r"(\d+(?:\.\d+)?)\s*%", s)
-        if len(_pct) >= 2:
-            continue
-        # 该比率**自己**有两期派生读数（含同比/变化）才算可复算
         words = [m for w, m in _RATIO_METRIC_WORDS if w in s]
+        direction = _ratio_direction(s)
+        side = _side_faster(s)
+        num_pct, den_pct = _part_percentages(s, words)
+        if num_pct is not None and den_pct is not None:
+            num_faster = abs(num_pct) > abs(den_pct)
+            if side == "numerator" and not num_faster:
+                bad.append(s[:120] + "（句称分子降得更快，与所给百分数相反）")
+                continue
+            if side == "denominator" and num_faster:
+                bad.append(s[:120] + "（句称分母降得更快，与所给百分数相反）")
+                continue
+            if direction == "down" and not num_faster:
+                bad.append(s[:120] + "（比率下降要求分子降得更快，所给百分数相反）")
+                continue
+            if direction == "up" and num_faster:
+                bad.append(s[:120] + "（比率上升要求分母降得更快或分子涨得更多，"
+                                     "所给百分数相反）")
+                continue
+            continue
+        # 句内给出该比率**自己的两期水平**（"由 25.42% 降至 23.24%"）→ 可自行复算
+        levels = _ratio_levels(s, words)
+        if levels is not None:
+            first, second = levels
+            if direction == "down" and first < second:
+                bad.append(s[:120] + "（两期水平与所述下降方向相反）")
+                continue
+            if direction == "up" and first > second:
+                bad.append(s[:120] + "（两期水平与所述上升方向相反）")
+                continue
+            continue
+        # 该比率**自己**的**真派生**读数才算可复算（有值、有算式、有输入事实）
         ok = False
         for m in words:
             years = {y for y in (by_metric.get(m) or set()) if y is not None}
@@ -1001,11 +1178,12 @@ def check_ratio_arithmetic(report: str, *, working_paper: dict | None = None) ->
         if ok:
             continue
         bad.append(s[:120])
-    details = (f"绝对额解释比率的主张 {len(seen)} 条；不可复算 {len(bad)} 条"
+    details = (f"解释比率变化的主张 {len(seen)} 条；不可复算/方向不符 {len(bad)} 条"
                if seen else "未发现用绝对额解释比率变化的句子")
     return {"pass": not bad, "details": details, "claims": seen,
             "gaps": [f"比率算术误释：{b}（比率须按两期水平或增速比复算，"
-                     f"不能用绝对额减幅大小替代）" for b in bad]}
+                     f"不能用绝对额减幅大小替代，也不能与分子/分母实际方向相反）"
+                     for b in bad]}
 
 
 def check_requirement_coverage(goal: str, report_text: str, reqs: dict,

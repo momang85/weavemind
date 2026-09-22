@@ -1456,8 +1456,13 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                                task_id, str(_artifact.get("path") or "")[:120])
                 return False
         elif _artifact:
-            # 旧路径（无 pdf 标记）也带工件时同样复用字节
+            # 旧路径（无 pdf 标记）也带工件时同样复用字节；工件在但读不出/校验失败
+            # 时保留缺口，不得退成 data=None 触发第二次按 URL 下载。
             data = _artifact_bytes(_artifact, task_id)
+            if data is None:
+                logger.warning("PDF 工件不可复用（旧路径，缺失/校验失败，按缺口处理，"
+                               "task=%s）：%s", task_id, str(_artifact.get("path") or "")[:120])
+                return False
         doc = pdf.doc_from_url(url, data=data)
         if not doc:
             logger.info("PDF 证据通道未取得正文（按缺口处理，task=%s）：%s",

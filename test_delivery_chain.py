@@ -7794,6 +7794,28 @@ class TestMaterialSideBatch3(unittest.TestCase):
         # （此前会退成 data=None 交给 doc_from_url，触发第二次下载）
         self.assertEqual(calls, [], "空工件不得触发解析/重抓")
 
+    def test_old_branch_artifact_failure_does_not_refetch_by_url(self):
+        """09-23：无 pdf 标记的旧路径里，工件在但读不出/校验失败 → 保留缺口，不重抓。"""
+        import orchestrator_v2 as o
+        import annual_report_pdf as pdf
+        calls = []
+
+        def _doc(u, title="", *, data=None):
+            calls.append((u, data))
+            return None
+
+        with mock.patch.object(pdf, "doc_from_url", _doc), \
+                mock.patch.object(o.logger, "info"), \
+                mock.patch.object(o.logger, "warning"):
+            ok = o.OrchestratorV2._try_pdf_evidence(
+                "t-old", {"instruction": "抓取该页 https://x.test/a.pdf"},
+                {"result": json.dumps({
+                    "status": "success", "url": "https://x.test/a.pdf", "text": "",
+                    "artifact": {"path": "project/fetched/missing.pdf",
+                                 "sha256": "0" * 64}})})
+        self.assertFalse(ok, "工件不可复用时按缺口处理")
+        self.assertEqual(calls, [], "工件缺失/校验失败不得退成 data=None 走 URL 重抓")
+
 
 class TestNightCorrectionFailureSamples(unittest.TestCase):
     """D1 夜间纠偏（P1-A/P1-B）：金额变化与利润率变化分开、护栏跟方向、装配文本进同一主张集合。
@@ -8336,13 +8358,23 @@ class TestAttributionAndChartBinding(unittest.TestCase):
         # 给出两期比率读数 → 可复算，不算误释
         self.assertTrue(ac.check_ratio_arithmetic(
             "资产负债率由25.42%下降至23.24%，资产减少24.47亿元大于负债减少20.90亿元。")["pass"])
-        # 底稿里有**该比率自己的两期**派生读数 → 可复算，不算误释
-        self.assertTrue(ac.check_ratio_arithmetic(
+        # 09-23 收窄：底稿里只有 metric+year 的**标签行**不算可复算（无值/无算式/无输入）
+        self.assertFalse(ac.check_ratio_arithmetic(
             live, working_paper={"derived": [{"metric": "debt_ratio", "year": 2023},
-                                             {"metric": "debt_ratio", "year": 2024}]})["pass"])
+                                             {"metric": "debt_ratio", "year": 2024}]})["pass"],
+            "无值无算式的两期行不得豁免错误原因")
+        # 该比率**自己的真派生**（有值、有算式、有输入事实）两期读数 → 可复算
+        self.assertTrue(ac.check_ratio_arithmetic(
+            live, working_paper={"derived": [
+                {"metric": "debt_ratio", "year": 2023, "value": "25.42",
+                 "formula": "177.42/697.92*100", "derived_from": "['f1','f2']"},
+                {"metric": "debt_ratio", "year": 2024, "value": "23.24",
+                 "formula": "156.52/673.45*100", "derived_from": "['f3','f4']"}]})["pass"])
         # 只有单期或无关派生 → 仍判误释
         self.assertFalse(ac.check_ratio_arithmetic(
-            live, working_paper={"derived": [{"metric": "debt_ratio", "year": 2024}]})["pass"])
+            live, working_paper={"derived": [
+                {"metric": "debt_ratio", "year": 2024, "value": "23.24",
+                 "formula": "156.52/673.45*100", "derived_from": "['f3','f4']"}]})["pass"])
 
     def test_chart_reference_binds_by_id_not_number(self):
         import acceptance_checker as ac
@@ -8598,10 +8630,23 @@ class TestNightClosureCounterexamples(unittest.TestCase):
         r = ac.check_attribution_support(live, working_paper=unrelated)
         self.assertFalse(r["pass"], "无关派生不得让缺证归因通过")
         self.assertIn("缺证归因", r["gaps"][0])
-        # 对应材料存在时通过：底稿里有该驱动的派生（费用类）
-        ok = ac.check_attribution_support(
-            live, working_paper={"derived": [{"metric": "expense_ratio",
-                                              "metric_label": "期间费用率"}]})
+        # 09-23 反例：只有标签、没有数值/算式/输入的"费用率"派生行不构成支持
+        label_only = {"derived": [{"metric": "expense_ratio", "metric_label": "期间费用率"}]}
+        self.assertFalse(ac.check_attribution_support(live, working_paper=label_only)["pass"],
+                         "空标签派生不得让固定费用归因通过")
+        # 即便费用率是真派生（有值有算式），机制（摊薄）也不能由派生读数证明，只作待查提示
+        real_derived = {"derived": [{"metric": "expense_ratio", "metric_label": "期间费用率",
+                                     "value": "18.2", "formula": "(a-b)/b*100",
+                                     "derived_from": "['f1','f2']"}]}
+        r_hint = ac.check_attribution_support(live, working_paper=real_derived)
+        self.assertFalse(r_hint["pass"], "真派生读数也不能证明固定性费用摊薄机制")
+        self.assertTrue(any("待查提示" in h for h in r_hint.get("hints") or []),
+                        f"应给出待查提示：{r_hint}")
+        # 有效正例：对应披露**摘录 + 定位**（已准入）谈到该驱动
+        ok = ac.check_attribution_support(live, evidence={"records": [
+            {"snippet": "报告期内期间费用率上升，固定性费用未随收入同步下降。",
+             "has_location": True, "locator": "api_chunk 3（字符 120-180）",
+             "admission": "admitted"}]})
         self.assertTrue(ok["pass"], ok)
 
     def test_unrelated_derived_does_not_support_ratio_arithmetic(self):
@@ -8610,10 +8655,75 @@ class TestNightClosureCounterexamples(unittest.TestCase):
         unrelated = {"derived": [{"metric": "cashflow_coverage"}, {"metric": "net_margin"}]}
         self.assertFalse(ac.check_ratio_arithmetic(live, working_paper=unrelated)["pass"],
                          "无关派生不得让比率误释通过")
-        matching = {"derived": [{"metric": "debt_ratio", "year": 2023},
-                                {"metric": "debt_ratio", "year": 2024}]}
+        # 09-23 反例：只有 metric+year、没有 value/formula/derived_from 的两期行不算可复算
+        label_only = {"derived": [{"metric": "debt_ratio", "year": 2023},
+                                  {"metric": "debt_ratio", "year": 2024}]}
+        self.assertFalse(ac.check_ratio_arithmetic(live, working_paper=label_only)["pass"],
+                         "无值无算式的两期行不得豁免错误原因")
+        # 有效正例：该比率**自己的真派生**（有值、有算式、有输入事实）两期读数
+        matching = {"derived": [
+            {"metric": "debt_ratio", "year": 2023, "value": "25.42",
+             "formula": "177.42/697.92*100", "derived_from": "['f1','f2']"},
+            {"metric": "debt_ratio", "year": 2024, "value": "23.24",
+             "formula": "156.52/673.45*100", "derived_from": "['f3','f4']"}]}
         self.assertTrue(ac.check_ratio_arithmetic(live, working_paper=matching)["pass"],
-                        "该比率自己的两期读数才算可复算")
+                        "该比率自己的真派生两期读数才算可复算")
+        # 只有单期或无关派生 → 仍判误释
+        self.assertFalse(ac.check_ratio_arithmetic(
+            live, working_paper={"derived": [
+                {"metric": "debt_ratio", "year": 2024, "value": "23.24",
+                 "formula": "156.52/673.45*100", "derived_from": "['f3','f4']"}]})["pass"])
+
+    def test_ratio_direction_statement_contradicting_numbers_is_caught(self):
+        """09-23 反例：句称"分母降得更快"但所给百分数显示分子降得更快 → 必须 fail。
+
+        两期比率水平正确不能豁免同句里方向相反的原因陈述；"任意两个百分数"也不再
+        自动放行。
+        """
+        import acceptance_checker as ac
+        wrong = "资产负债率下降，负债降幅11.78%、资产3.51%，分母降得更快，比率才下降。"
+        r = ac.check_ratio_arithmetic(wrong, working_paper={})
+        self.assertFalse(r["pass"], "分母更快与数值相反必须查出")
+        self.assertIn("分母降得更快", r["gaps"][0])
+        self.assertTrue(r["claims"], "该句应被识别为解释比率变化的主张")
+        good = "资产负债率下降，负债降幅11.78%、资产3.51%，分子降得更快，比率才下降。"
+        self.assertTrue(ac.check_ratio_arithmetic(good, working_paper={})["pass"],
+                        "方向与数值一致应通过")
+        # 句内给出该比率自己的两期水平 → 可复算；方向与读数相反 → fail
+        self.assertTrue(ac.check_ratio_arithmetic(
+            "资产负债率由25.42%下降至23.24%，资产减少24.47亿元大于负债减少20.90亿元。",
+            working_paper={})["pass"])
+        self.assertFalse(ac.check_ratio_arithmetic(
+            "资产负债率由23.24%下降至25.42%，资产减少24.47亿元大于负债减少20.90亿元。",
+            working_paper={})["pass"])
+
+    def test_fetch_snapshot_does_not_manufacture_admission(self):
+        """09-23：fetch_snapshot 里没有自带准入/定位的记录不得被合成 admitted。"""
+        import acceptance_checker as ac
+        import json as _json
+        import tempfile as _tempfile
+        from pathlib import Path as _Path
+        tmp = _tempfile.mkdtemp(prefix="ws-snap-admit-")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        proj = _Path(tmp) / "project"
+        proj.mkdir(parents=True, exist_ok=True)
+        (proj / "fetch_snapshot.json").write_text(_json.dumps([
+            {"title": "年报摘录", "url": "https://example.com/a.PDF",
+             "text": "报告期内期间费用率上升，固定性费用未随收入同步下降。"},
+            {"title": "自带准入的记录", "url": "https://example.com/b.PDF",
+             "text": "公司主营业务为白酒生产与销售，销售区域覆盖全国。",
+             "admission": "admitted", "has_location": True,
+             "locator": "api_chunk 2（字符 40-90）"},
+        ], ensure_ascii=False), encoding="utf-8")
+        ev = ac._read_narrative_evidence(tmp)
+        recs = ev.get("records") or []
+        self.assertEqual(len(recs), 1, f"只有自带准入的记录才并入：{recs}")
+        self.assertEqual(recs[0].get("admission"), "admitted")
+        self.assertNotIn("第 None 页", str(recs[0].get("locator") or ""))
+        # 归因检查消费该证据：未带准入的抓取文本不能支持归因
+        live = "利润率下降主要来自固定性费用摊薄的削弱。"
+        self.assertFalse(ac.check_attribution_support(live, evidence=ev)["pass"],
+                         "未准入的抓取文本不得支持归因")
 
     def test_chart_alias_mismatch_is_caught(self):
         import acceptance_checker as ac

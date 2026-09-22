@@ -609,6 +609,43 @@ class TestBuild(unittest.TestCase):
         self.assertEqual(a["records"], b["records"], "同一输入必得同一输出")
 
 
+class TestApiChunkLocation(unittest.TestCase):
+    """09-23：公告文本 API 的 `page_index` 是**接口片段**，不是 PDF 实体页。
+
+    没有页码映射时定位只能写 `api_chunk K（字符 a-b）`，不得写"第 N 页"。
+    """
+
+    def test_chunk_offsets_produce_api_chunk_locator(self):
+        import annual_report_pdf as pdf
+        text = ("第三节 管理层讨论与分析\n\n一、经营情况讨论与分析\n\n"
+                "2024年度营业收入1741.44亿元，主要系销量增加及产品结构变化所致。\n")
+        doc = pdf.doc_from_pages("贵州茅台:2024年年度报告", ISSUER_URL, [text])
+        doc["text"] = text
+        doc["chunk_offsets"] = [(0, 3)]
+        doc.pop("page_offsets", None)
+        recs = ne.extract_sections(doc, periods=[2024], company="贵州茅台",
+                                   company_id="600519.SH", as_of="2025-04-30")
+        self.assertTrue(recs, "夹具应产出记录")
+        loc = str(recs[0].get("locator") or "")
+        self.assertIn("api_chunk 3", loc)
+        self.assertNotIn("第 ", loc, "没有页码映射时不得写页码")
+        self.assertEqual(recs[0].get("page"), None)
+        self.assertEqual(recs[0].get("chunk"), 3)
+
+    def test_page_offsets_still_win_when_real_pages_exist(self):
+        """真 PDF 页码映射仍在时照旧写页码（不因本改动回退）。"""
+        import annual_report_pdf as pdf
+        text = ("第三节 管理层讨论与分析\n\n一、经营情况讨论与分析\n\n"
+                "2024年度营业收入1741.44亿元，主要系销量增加及产品结构变化所致。\n")
+        doc = pdf.doc_from_pages("贵州茅台:2024年年度报告", ISSUER_URL, [text, text])
+        doc["text"] = text + "\n" + text
+        doc["page_offsets"] = [(0, 7), (len(text) + 1, 8)]
+        recs = ne.extract_sections(doc, periods=[2024], company="贵州茅台",
+                                   company_id="600519.SH", as_of="2025-04-30")
+        self.assertTrue(recs)
+        self.assertIn("第 7 页", str(recs[0].get("locator") or ""))
+
+
 class TestFetchRoleRouting(unittest.TestCase):
     """研究路径两个抓取步骤：各取所需、不抓重；无候选时明确失败。"""
 

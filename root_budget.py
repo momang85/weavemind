@@ -628,6 +628,18 @@ class RootBudget:
             disk = json.loads(self.path.read_text(encoding="utf-8")) or {}
         except Exception:
             disk = {}
+        # 09-23：初始化没拿到锁时本进程保持**空身份**；等到这次拿到锁再落盘时，
+        # 必须先在锁内重读、**采纳已有身份或建立新身份**，再合并 writers——
+        # 否则空身份与磁盘身份不匹配，旧 writers（别人的计数）会被当成上一轮丢掉，
+        # 并且会把空身份写进账本。空身份一律不普通保存。
+        if not str(self.state.ledger_id or ""):
+            disk_id = str(disk.get("ledger_id") or "")
+            if disk_id:
+                self.state.ledger_id = disk_id
+                self._baseline = self._copy_state(self.state)
+            else:
+                self.state.ledger_id = uuid.uuid4().hex[:12]
+                self._baseline = self._copy_state(self.state)
         if str(disk.get("ledger_id") or "") == str(self.state.ledger_id or ""):
             writers = dict(disk.get("writers") or {})
         writers[self._tag] = self._mine()

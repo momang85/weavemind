@@ -1,37 +1,39 @@
 {
  "art_code": "AN202504281664011244",
  "published_at": "2025-04-29",
+ "location_kind": "api_chunk",
+ "pdf_page_mapping": null,
  "http_requests": 6,
  "elapsed_sec": 7.4,
- "pages": [
+ "chunks": [
   {
-   "page": 2,
-   "raw_sha256": "df84ae3d2a32523948e5f12f1360059c736640574e7a401617285f604675994d",
+   "api_chunk": 2,
+   "text_sha256": "0c5c09c62f1975b00ed0508736d516f63d2a52d65376e15f3889f8d447b2cf66",
    "chars": 5000
   },
   {
-   "page": 3,
-   "raw_sha256": "d4a36924dd12891b0731ab0aee8c3ed339e35929de119a27be90566efd11e196",
+   "api_chunk": 3,
+   "text_sha256": "7117c2ce171b6e305db75310b0b72c421a4d88fca824aefe1fb9153c703a1f02",
    "chars": 5000
   },
   {
-   "page": 4,
-   "raw_sha256": "10f5f97a44327b6ac21dfc0f496b2467de7fb6fee22d3bc830fa1313c10a4af3",
+   "api_chunk": 4,
+   "text_sha256": "4650243e2df10b2ce96edef00b16d8e5252f29f4b8c7a1642c81dd9bf2b88c74",
    "chars": 5000
   },
   {
-   "page": 5,
-   "raw_sha256": "d1ab17b520945133ba3f768d1f67022f9e6e98624f1994abaa588340cc056c21",
+   "api_chunk": 5,
+   "text_sha256": "68b8a4421a1d41aa543e716063fbc7e502d2980618a44f5858a072013ca45a0f",
    "chars": 5000
   },
   {
-   "page": 10,
-   "raw_sha256": "7a56e94c94b01f233671b68e4d5941648b2a563c7613a8d74e71e07c82c832f2",
+   "api_chunk": 10,
+   "text_sha256": "cfc4409d34644077b9a104297e0992702ebf60a8d57b35f81cdd9602019ededb",
    "chars": 5000
   },
   {
-   "page": 11,
-   "raw_sha256": "505e3faed5884ba8b6aae882aeb8d1e1178931bd780aac6a37dc6430e7ebb550",
+   "api_chunk": 11,
+   "text_sha256": "9ebdb1d2f7fafe33aca0b76f592d679436512a89fcdde7a8d1e8e6576253fe13",
    "chars": 5000
   }
  ],
@@ -41,7 +43,23 @@
   "footnote",
   "risk"
  ],
+ "locator_sample": "api_chunk 2 · 小节：第三节 管理层讨论与分析 > 一、报告期内公司所处行业情况（字符 2744-3025）",
  "revenue_causal_sentences": 0,
+ "revenue_causal_examples": [],
+ "revenue_causal_raw": 1,
+ "revenue_causal_raw_examples": [
+  "加白热化，公司主力产品集中的中端和次高端价位段承压较大，本着科学发展和可持续发展的原则，公司积极调整经营策略，应对外部环境的变化和发展中存在的问题，2024 年实现营业收入 288.76 亿元，同比下"
+ ],
+ "revenue_causal_unclassified": 1,
+ "revenue_causal_unclassified_examples": [
+  {
+   "api_chunk": 3,
+   "path": "第三节 管理层讨论与分析 > 四、主营业务分析 > 1、概述",
+   "char_start": 9607,
+   "char_end": 10820,
+   "text": "加白热化，公司主力产品集中的中端和次高端价位段承压较大，本着科学发展和可持续发展的原则，公司积极调整经营策略，应对外部环境的变化和发展中存在的问题，2024 年实现营业收入 288.76 亿元，同比下"
+  }
+ ],
  "missing_kinds": [
   "经营变化解释"
  ]

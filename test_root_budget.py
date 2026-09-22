@@ -1521,6 +1521,54 @@ class TestNightClosureBudgetBranches(unittest.TestCase):
             b.reserve("llm")
         self.assertIn("待对账", str(ctx.exception))
 
+    def test_lock_recovery_adopts_peer_identity_and_keeps_writers(self):
+        """09-23：初始化拿锁 False → 后续 _save 拿锁 True 时，先在锁内重读并**采纳**
+        另一进程已建立的身份，再合并 writers；不得写空身份、不得丢旧 writers/计数。
+        """
+        os.environ.pop("WM_SINGLE_PROCESS", None)
+        path = self.tmp / "budget_state.json"
+        calls = {"n": 0}
+        peer = {
+            "root_task_id": "t-rec", "started_at": 1.0, "ledger_id": "peer-run",
+            "calls_reserved": 3, "calls_settled": 2, "calls_unsettled": 1,
+            "tokens_reserved": 0, "tokens_settled": 0, "tokens_unsettled": 0,
+            "tokens_actual": 0, "tokens_unknown_calls": 0, "seq": 3,
+            "open_tickets": {}, "unsettled_tickets": {}, "rejected_transitions": {},
+            "stages": {"llm": {"reserved": 3, "settled": 2}},
+            "writers": {"peer-tag": {"counters": {"calls_reserved": 3,
+                                                  "calls_settled": 2,
+                                                  "calls_unsettled": 1},
+                                     "stages": {"llm": {"reserved": 3, "settled": 2}}}}}
+
+        @contextlib.contextmanager
+        def _flaky_lock(p, timeout=None):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                # 第二次拿锁前：另一进程已建立账本（身份 + 它的 writers/计数）
+                Path(p).write_text(json.dumps(peer, ensure_ascii=False), encoding="utf-8")
+            yield calls["n"] > 1          # 第一次 False（初始化），之后 True
+
+        kv: dict = {}
+        with mock.patch.object(rb, "cross_process_file_lock", _flaky_lock):
+            b = rb.RootBudget("t-rec", self.tmp, rb.BudgetLimits(max_calls=5),
+                              redis_factory=lambda: _AtomicFakeRedis(kv),
+                              multiprocess=True)
+        self.assertGreaterEqual(calls["n"], 2, "初始化与后续保存各拿一次锁")
+        disk = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(disk["ledger_id"], "peer-run",
+                         "空身份必须采纳磁盘上已有身份，不得写空")
+        self.assertEqual(b.state.ledger_id, "peer-run")
+        self.assertIn("peer-tag", disk.get("writers") or {},
+                      "旧 writers（别人的增量）不得被空身份丢掉")
+        self.assertGreaterEqual(disk["calls_reserved"], 3, "旧计数保留")
+        # 再存一次：身份稳定、计数不重复叠加
+        b._save()
+        again = json.loads(path.read_text(encoding="utf-8"))
+        self.assertEqual(again["ledger_id"], "peer-run")
+        self.assertIn("peer-tag", again.get("writers") or {})
+        self.assertEqual(again["calls_reserved"], disk["calls_reserved"],
+                         "同一份增量重复保存不得翻倍")
+
     def test_async_stream_fallback_records_two_shapes(self):
         """异步 415 回退：两次发送各一条调用形状记录（此前只有票据没有记录）。"""
         import asyncio
