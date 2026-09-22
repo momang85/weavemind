@@ -72,34 +72,47 @@ class WebFetchWorker(AsyncWorkerBase):
         if not urls:
             return json.dumps({"status": "failed", "error": "No URL found in instruction"}, ensure_ascii=False)
         url = urls[0]
-        # SSRF 防护：目标必须过公网地址校验（环回/私网/链路本地拒绝），
-        # 抓取内容会回灌任务与报告，不能放任指向内网的 URL
-        from adapters.transport import _validate_public_url
-        if not _validate_public_url(url):
-            return json.dumps(
-                {"status": "failed", "error": "blocked by SSRF guard: non-public URL"},
-                ensure_ascii=False,
-            )
+        # 批次3-2：抓取走**现有文档接入契约**（`net_policy.fetch_document`）——
+        # 协议/主机/解析后 IP 边界校验、**连接使用已验 IP**（防 DNS rebinding）、
+        # 不跟随重定向、字节上限与审计都在那一层；本 worker 不再自己发裸请求。
+        # SSRF 防护（环回/私网/链路本地拒绝）因此与搜索抓取同源，不留两套。
         try:
-            # 中文等非 ASCII 字符的 IRI → 百分号编码（否则 urllib 抛 ascii 编码错误）
-            req = urllib.request.Request(
-                _encode_iri(url),
-                headers={"User-Agent": "Mozilla/5.0 (compatible; WeaveMind/1.0)"},
-            )
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                html = resp.read().decode("utf-8", errors="replace")
-            parser = _TextExtractor()
-            parser.feed(html)
-            text = "\n".join(line for line in parser.text().splitlines() if line.strip())[:30000]
-            title = re.search(r"<title[^>]*>([^<]+)</title>", html, re.I)
+            import net_policy
+            resp = net_policy.fetch_document(_encode_iri(url), timeout=30,
+                                             max_bytes=net_policy.MAX_BODY_BYTES)
+        except Exception as exc:                 # noqa: BLE001 - 策略拒绝/抓取失败都如实报
+            return json.dumps({"status": "failed", "error": str(exc)[:300]},
+                              ensure_ascii=False)
+        raw = bytes(resp.get("raw") or b"")
+        ctype = str((resp.get("headers") or {}).get("content-type") or "")
+        # **PDF 不当文本**：此前把字节按 UTF-8 解码成乱码再截 30000 字符，证据层拿到的是
+        # "有正文"的假象却提不出任何小节（实机 ui-750185076a）。这里按 MIME/魔数识别，
+        # 保留字节 hash 与状态，正文交给现有解析通道（`annual_report_pdf` 走同一策略层
+        # 取字节 + 页码定位），不以截断字节冒充正文。
+        if (b"%PDF-" in raw[:1024]) or ("application/pdf" in ctype.lower()):
+            import hashlib
             return json.dumps({
                 "status": "success",
                 "url": url,
-                "title": title.group(1).strip() if title else "",
-                "text": text,
+                "title": "",
+                "text": "",
+                "pdf": True,
+                "content_type": ctype,
+                "content_bytes": len(raw),
+                "content_hash": hashlib.sha256(raw).hexdigest(),
+                "note": "PDF 材料：正文需经解析通道提取（不以截断字节冒充正文）",
             }, ensure_ascii=False)
-        except Exception as exc:
-            return json.dumps({"status": "failed", "error": str(exc)}, ensure_ascii=False)
+        html = raw.decode("utf-8", errors="replace")
+        parser = _TextExtractor()
+        parser.feed(html)
+        text = "\n".join(line for line in parser.text().splitlines() if line.strip())[:30000]
+        title = re.search(r"<title[^>]*>([^<]+)</title>", html, re.I)
+        return json.dumps({
+            "status": "success",
+            "url": url,
+            "title": title.group(1).strip() if title else "",
+            "text": text,
+        }, ensure_ascii=False)
 
 
 async def amain():

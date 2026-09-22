@@ -816,17 +816,32 @@ class SearchAgent(BaseWorker):
             from adapters.search_quality import _DEFAULT_POLICY
             return _DEFAULT_POLICY
 
+    # 步骤指令里的**显式短查询**行（批次3-1）：编排器从结构化契约（主体/期间/文档类型）
+    # 生成 `[检索查询] …`，检索只按它构造变体——整段任务要求（含样板句）扔给检索器会
+    # 让引擎大面积无结果、候选里没有年报正文（实机 ui-750185076a）。
+
     def _query_variants(self, instruction: str) -> list[str]:
         """生成多个查询变体（关键词组合优先 + 整句 + 定向模板 + 中英混合）。
 
         实现收敛到 `adapters.search_quality.build_query_variants(rich=True)`：
         整句截断、时效年份、财经/A 股定向模板与机构/公司 IR 定向变体原先写死在
         这里，与轻量检索的变体逻辑是两套；现在只有一套，上限与机构白名单可配置。
+
+        指令里带 `[检索查询] …` 时**以它为准**（取该行到行尾）：检索器只该看到
+        主体 + 期间 + 文档类型 + 指标，而不是整段任务要求。
         """
         from adapters.search_quality import build_query_variants
+        import re as _re
         pol = self._search_policy()
-        out = build_query_variants(instruction, policy=pol, rich=True)
-        return out or [str(instruction or "")[:120]]
+        m = _re.search(r"\[检索查询\]\s*(.+)", str(instruction or ""))
+        source = (m.group(1).strip() if m else str(instruction or ""))
+        out = build_query_variants(source, policy=pol, rich=True)
+        if m and source:
+            # 契约短查询**排在最前**：变体列表的第一个会被用来探测存活引擎
+            # （`execute` 里 `qs.pop(0)`），干净查询必须先试
+            _clean = source[:120]
+            out = [_clean] + [v for v in out if v != _clean]
+        return out or [source[:120]]
 
     def _filter_results(self, query: str, results: list[dict],
                         min_score: int | None = None) -> list[dict]:

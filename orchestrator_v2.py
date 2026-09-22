@@ -217,6 +217,45 @@ _FETCH_ROLE_KW = {
               "分部", "notes", "cash flow", "risk factor"),
 }
 
+
+def _candidate_inadmissible(title: str, url: str, contract: dict) -> bool:
+    """候选材料的元数据是否**已证明**不适用（批次3-1：抓取前就排除）。
+
+    用与证据层**同一套判据**（`narrative_evidence` 的主体识别、发布日与文档期解析），
+    不另造一套解析——早排除与晚校验必须同源，否则会出现"抓之前留、抓回来又被排除"。
+
+    只排除元数据能证明的三类，元数据缺失一律**不**在这里排除（标 unknown，允许受限
+    抓取后进一步核实）：
+    - **错主体**：标题里出现别家主体形态的名字且不含本主体/本代码——"江苏洋河集团
+      有限公司"与"洋河股份"是两个主体，集团评级报告不能当上市公司年报
+      （实机 ui-750185076a 抓回的就是这种）；
+    - **晚于资料截至**：URL 里的发布日（含 `20251105` 这种紧凑写法）> `as_of`；
+    - **报告期不在契约期间**：标题里的"20XX年年度报告/年报"不在契约期间内。
+    """
+    try:
+        import narrative_evidence as ne
+    except Exception:                        # noqa: BLE001 - 判据不可用则不排除
+        return False
+    doc = {"title": str(title or ""), "url": str(url or ""), "text": ""}
+    company = str((contract or {}).get("company") or "")
+    code = str((contract or {}).get("company_id") or "")
+    periods = [int(y) for y in ((contract or {}).get("periods") or [])]
+    as_of = str((contract or {}).get("as_of") or "")
+    try:
+        if ne._subject_state(doc, company, code) == "mismatch":
+            return True
+        parts = ne._date_parts(ne._published_at(doc))
+        cut = ne._date_parts(as_of)
+        if parts and cut and parts[1] == "day" and parts[0] > cut[0]:
+            return True
+        dp = ne._doc_period(str(title or ""), str(url or ""))
+        if dp and periods and int(dp) not in periods:
+            return True
+    except Exception:                        # noqa: BLE001 - 解析失败按"未证明"处理
+        return False
+    return False
+
+
 # 叙事证据注入块上限（F2）：条数与单条字数都有界，避免把报告输入撑大
 _NARRATIVE_MAX_RECORDS = 6
 _NARRATIVE_SNIPPET_CHARS = 300
@@ -1211,11 +1250,17 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             f"期间 {span}；报表口径 {request.caliber}；"
             f"资料截至 {request.as_of or '未声明'}；必需指标 {metrics}。"
         )
+        # 检索查询从**结构化契约**生成（批次3-1）：主体法定名称/代码 + 期间 + 文档类型。
+        # 此前把整段任务要求（含"每个数字须能回溯…银行对公视角"这类样板）扔给检索器，
+        # 引擎大面积无结果、候选里一份年报正文都没有（实机 ui-750185076a）。
+        _doc_years = " ".join(f"{y}年年度报告" for y in years) or f"{span}年度报告"
+        _short_query = f"{who} {code} {_doc_years} 营业收入 归母净利润 经营活动现金流净额".strip()
         return [
             {
                 "step_id": "1",
                 "capability": "web_search",
                 "instruction": (
+                    f"[检索查询] {_short_query}\n"
                     f"检索 {who}{code} 的年报与财务数据的权威来源（优先公司公告/交易所/"
                     f"官方年报）；其中至少一条要指向 {span} 的**发行人年报/公告**"
                     f"（经营情况讨论与分析、管理层讨论、财务附注、风险因素），"
@@ -1331,14 +1376,18 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             return False
         url = pdf.url_from_instruction(str(step.get("instruction") or ""))
         head = b""
+        _worker_says_pdf = False
         try:
             parsed = json.loads(str(result.get("result") or ""))
             if isinstance(parsed, dict):
                 url = str(parsed.get("url") or url)
                 head = str(parsed.get("text") or "")[:8].encode("utf-8", "replace")
+                # 批次3-2：抓取 worker 现在按 MIME/魔数识别 PDF 并**不再把字节当正文**
+                # （text 为空、带 pdf/content_hash 标记），触发条件要把这个标记认下来
+                _worker_says_pdf = bool(parsed.get("pdf"))
         except Exception:
             pass
-        if not url or not pdf.looks_like_pdf(url, head):
+        if not url or not (_worker_says_pdf or pdf.looks_like_pdf(url, head)):
             return False
         doc = pdf.doc_from_url(url)
         if not doc:
@@ -2161,7 +2210,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
 
     @staticmethod
     def _pick_fetch_url(items: list, goal: str = "", *, role: str = "",
-                        exclude: tuple = ()) -> str | None:
+                        exclude: tuple = (), contract: dict | None = None) -> str | None:
         """从搜索结果中挑选财务相关度最高的 URL（搜索根因缩小版）。
 
         评分维度：
@@ -2171,7 +2220,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         3) 财务关键词：标题命中 > URL 命中；
         4) **抓取角色**（F2 研究路径）：`annual_report` 优先年报/公告正文页，
            `notes` 优先附注/现金流/风险页——两个抓取步骤各取所需，且排除已抓过的
-           URL（`exclude`），不把同一页抓两遍。"""
+           URL（`exclude`），不把同一页抓两遍；
+        5) **契约提前排除**（批次3-1，`contract`）：标题/URL 已明确错主体（别家上市公司）
+           或发布日/报告期已晚于资料截至、或报告期不在契约期间的候选，**在抓取前**剔除
+           ——此前排除发生在证据校验阶段，那时抓取已经花掉了（实机：抓回一份 2026 年的
+           文章与一份集团评级 PDF，两份都被排除）。元数据缺失的候选**不**在这里排除
+           （标 unknown，允许受限抓取后进一步核实）。"""
         finance_kw = (
             "财报", "年报", "季报", "营收", "净利润", "业绩", "财务", "公告",
             "研报", "复盘", "深度", "投资者关系",
@@ -2209,6 +2263,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 continue
             if role and url in tuple(exclude or ()):
                 continue          # 已抓过的页面不再选（研究路径的第二个抓取步骤）
+            if contract and _candidate_inadmissible(title, url, contract):
+                continue          # 元数据已证明不适用（错主体/晚于截止/期间不符）
             low_t = title.lower()
             low_u = url.lower()
             score = 0
@@ -7001,11 +7057,27 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     prev_json = prev_res
                 if isinstance(prev_json, list):
                     if finance_fetch:
+                        # 研究契约（期间/资料截至/主体）交给候选选择：错主体、晚于
+                        # 资料截至、报告期不在契约期间的材料**在抓取前**剔除
+                        _contract = {}
+                        try:
+                            from working_paper_export import resolve_request
+                            _goal_txt = str((getattr(self, "_task_goals", {}) or {})
+                                            .get(task_id, "") or "")
+                            _req, _c, _src = resolve_request(task_id, _goal_txt, {}, None)
+                            if _req is not None:
+                                _contract = {"company": str(getattr(_req, "company", "") or ""),
+                                             "company_id": str(getattr(_req, "company_id", "") or ""),
+                                             "periods": list(getattr(_req, "periods", []) or []),
+                                             "as_of": str(getattr(_req, "as_of", "") or "")}
+                        except Exception:
+                            _contract = {}
                         best = self._pick_fetch_url(
                             prev_json,
                             str((getattr(self, "_task_goals", {}) or {}).get(task_id, "") or ""),
                             role=fetch_role,
                             exclude=self._fetched_urls(task_id),
+                            contract=_contract,
                         )
                         if best:
                             instr = f"[URL: {best}] " + instr

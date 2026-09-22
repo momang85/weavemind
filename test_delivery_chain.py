@@ -1,5 +1,7 @@
 # -*- coding: utf-8 -*-
 """真实交付链回归测试：搜索相关性过滤、file_io 落盘逻辑、code_execution 命名。"""
+import asyncio
+import hashlib
 import json
 import os
 import re
@@ -5098,24 +5100,21 @@ class TestWebFetchIriEncoding(_TempWorkspace, unittest.TestCase):
         from unittest import mock
         import workers.web_fetch_worker as wf
 
-        class FakeResp:
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                return False
-
-            def read(self):
-                return "<html><title>测试</title><body>正文内容</body></html>".encode("utf-8")
-
         w = wf.WebFetchWorker.__new__(wf.WebFetchWorker)
         captured = {}
 
-        def fake_urlopen(req, timeout=30):
-            captured["url"] = req.full_url
-            return FakeResp()
+        # 批次3-2：抓取已归一到统一文档接入契约（`net_policy.fetch_document`），
+        # 不再自己发裸请求——这里替身该函数，断言 IRI 编码与正文提取仍成立
+        import net_policy
 
-        with mock.patch.object(wf.urllib.request, "urlopen", side_effect=fake_urlopen):
+        def fake_fetch(url, **_kw):
+            captured["url"] = url
+            return {"status": 200, "url": url,
+                    "headers": {"content-type": "text/html; charset=utf-8"},
+                    "text": "", "bytes": 0,
+                    "raw": "<html><title>测试</title><body>正文内容</body></html>".encode("utf-8")}
+
+        with mock.patch.object(net_policy, "fetch_document", side_effect=fake_fetch):
             out = asyncio.run(w.execute("抓取 https://example.com/搜索?q=宁德时代 的页面"))
         d = json.loads(out)
         self.assertEqual(d["status"], "success")
@@ -7445,6 +7444,107 @@ class TestRealAnnualReportPositivePath(unittest.TestCase):
         self.assertIn("江苏洋河", blob)
         self.assertTrue(fx["policy_sections"], "缺真实会计政策小节")
         self.assertNotIn("示例", blob)
+
+
+class TestMaterialSideBatch3(unittest.TestCase):
+    """批次3（资料侧）：短查询来自契约、候选抓取前排除、PDF 不以截断字节冒充正文。
+
+    反例（实机 ui-750185076a）：检索查询是整段任务要求（含样板句）→ 引擎大面积无结果、
+    候选里没有一份年报正文；抓回的材料一份是 2026 年文章（晚于资料截至）、一份是
+    **集团**评级报告 PDF（错主体），两份都是抓完才被排除；PDF 以 UTF-8 乱码进快照。
+    """
+
+    CONTRACT = {"company": "洋河股份", "company_id": "002304.SZ",
+                "periods": [2023, 2024], "as_of": "2025-04-30"}
+
+    def test_search_query_comes_from_contract_not_whole_instruction(self):
+        """`[检索查询]` 行优先：变体里不得出现任务要求样板词，且干净查询排第一。"""
+        import worker_base
+        sa = worker_base.SearchAgent.__new__(worker_base.SearchAgent)
+        sa._strategy_max_sources = 5
+        sa._strategy_blocks = []
+        sa._strategy_boosts = []
+        _q = "[检索查询] 洋河股份 （002304.SZ） 2023年年度报告 2024年年度报告 营业收入 归母净利润 经营活动现金流净额"
+        instr = (_q + chr(10) +
+                 "检索 洋河股份（002304.SZ）的年报与财务数据的权威来源（优先公司公告/交易所/"
+                 "官方年报）；返回含原始 URL 的结果列表。研究契约：期间 2023、2024；"
+                 "资料截至 2025-04-30。阅读重点：银行对公客户研究视角（bank_corporate）。")
+        variants = sa._query_variants(instr)
+        self.assertTrue(variants)
+        self.assertTrue(variants[0].startswith("洋河股份"), variants[:2])
+        blob = " ".join(variants)
+        for boilerplate in ("银行对公", "须能回溯", "bank_corporate", "如实标缺口",
+                            "阅读重点"):
+            self.assertNotIn(boilerplate, blob, "任务要求样板不得进检索查询")
+
+    def test_candidate_excluded_before_fetch(self):
+        """元数据已证明不适用 → 抓取前剔除；正确候选保留；元数据缺失不排除。"""
+        import orchestrator_v2 as o
+        C = self.CONTRACT
+        # 错主体（集团 ≠ 上市公司）
+        self.assertTrue(o._candidate_inadmissible(
+            "江苏洋河集团有限公司 2025 年跟踪评级报告",
+            "http://static.sse.com.cn/disclosure/bond/announcement/company/c/new/2025-06-27/x.pdf", C))
+        # 晚于资料截至（URL 里两种日期写法都要认）
+        self.assertTrue(o._candidate_inadmissible(
+            "洋河股份2025年报解读", "https://finance.sina.cn/2026-04-28/detail-x.d.html", C))
+        self.assertTrue(o._candidate_inadmissible(
+            "某券商研报：白酒行业 2024 年报综述",
+            "https://pdf.dfcfw.com/pdf/H3_AP202511051775675216_1.pdf", C))
+        # 报告期不在契约期间
+        self.assertTrue(o._candidate_inadmissible(
+            "洋河股份2021年年度报告",
+            "https://static.cninfo.com.cn/finalpage/2021-04-28/6.PDF", C))
+        # 别家上市公司
+        self.assertTrue(o._candidate_inadmissible(
+            "贵州茅台酒股份有限公司2024年年度报告",
+            "https://static.cninfo.com.cn/finalpage/2025-04-25/9.PDF", C))
+        # 正例：本主体 + 期间内 + 截止前
+        self.assertFalse(o._candidate_inadmissible(
+            "洋河股份2024年年度报告",
+            "https://static.cninfo.com.cn/finalpage/2025-04-29/8.PDF", C))
+        # 元数据缺失（无标题、URL 无日期）→ 不排除，留给受限抓取后核实
+        self.assertFalse(o._candidate_inadmissible(
+            "投资者关系活动记录", "https://www.cninfo.com.cn/new/disclosure/x.pdf", C))
+
+    def test_pdf_bytes_are_not_passed_off_as_text(self):
+        """抓取 worker：PDF 按魔数识别，text 为空、带字节 hash 与 pdf 标记。"""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "wfw_probe", Path(__file__).resolve().parent / "workers" / "web_fetch_worker.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        # 只验识别判据（不发请求）：把 fetch_document 换成返回 PDF 字节的替身
+        import net_policy
+        pdf_bytes = b"%PDF-1.5" + bytes([0xE2, 0xE3, 0xCF, 0xD3]) + b" 5 0 obj <</Type/Catalog>>"
+        with mock.patch.object(net_policy, "fetch_document",
+                               lambda *a, **k: {"status": 200, "url": a[0],
+                                                "headers": {"content-type": "application/pdf"},
+                                                "text": "", "bytes": len(pdf_bytes),
+                                                "raw": pdf_bytes}):
+            out = asyncio.run(mod.WebFetchWorker.__new__(mod.WebFetchWorker)
+                              .execute("抓取 https://static.cninfo.com.cn/finalpage/2025-04-29/8.PDF"))
+        data = json.loads(out)
+        self.assertEqual(data.get("status"), "success")
+        self.assertTrue(data.get("pdf"))
+        self.assertEqual(data.get("text"), "", "不得把 PDF 字节当正文")
+        self.assertEqual(data.get("content_hash"),
+                         hashlib.sha256(pdf_bytes).hexdigest())
+        self.assertNotIn("%PDF", json.dumps(data, ensure_ascii=False))
+
+    def test_pdf_flag_triggers_the_parsing_channel(self):
+        """`_try_pdf_evidence` 认得 worker 的 pdf 标记（此前只认 .pdf 后缀/字节头）。"""
+        import orchestrator_v2 as o
+        import annual_report_pdf as pdf
+        calls = []
+        with mock.patch.object(pdf, "doc_from_url",
+                               lambda u: calls.append(u) or None),                 mock.patch.object(o.logger, "info"):
+            ok = o.OrchestratorV2._try_pdf_evidence(
+                "t-pdf", {"instruction": "抓取该页"},
+                {"result": json.dumps({"status": "success", "url": "https://x.test/a",
+                                       "pdf": True, "text": ""})})
+        self.assertFalse(ok, "解析不出正文时按缺口处理（返回 False）")
+        self.assertEqual(calls, ["https://x.test/a"], "标记要触发解析通道")
 
 
 class TestNightCorrectionFailureSamples(unittest.TestCase):
