@@ -65,6 +65,9 @@ _VALIDATION_LABELS = {
 _ASSEMBLER_OWNED_SECTIONS = (
     "参考来源", "资料来源", "数据来源", "参考文献", "免责声明",
 )
+# 注意（09-22 晚间）：**不要**把"关键数据一览""缺口说明"按标题整块丢——实测这两节里
+# 夹着同比解读与 [n] 引用，整块丢会删掉有效分析并打断引用清单（两条既有用例当场失败）。
+# 主文收敛只做"表格/图/来源清单行不进正文"（下面的块内过滤）+ 元数据外置 + 完整稿进附录。
 
 # 变化解释：**缺口 → 需要补充的材料**（确定性映射）。
 # 为什么写死一张表：没有营运资本/税费/结算条款证据就推断"回款改善"是编因果
@@ -1912,8 +1915,12 @@ def _host(url: str) -> str:
 # ── 渲染（代码装配的正文）──────────────────────────────────────
 
 
-def render_brief_markdown(structure: dict, body: str = "") -> str:
-    """把结构化对象渲染成**研究简报**正文（关键发现在前，工程内容不进正文）。"""
+def render_brief_markdown(structure: dict, body: str = "",
+                          task_id: str | None = None) -> str:
+    """把结构化对象渲染成**研究简报**正文（关键发现在前，工程内容不进正文）。
+
+    `task_id`：给"完整模型稿另存审计文件"用（结构对象里不带任务身份）；缺省不落盘。
+    """
     sc = structure.get("scope") or {}
     table = structure.get("metrics_table") or {}
     periods = list(table.get("periods") or [])
@@ -2184,6 +2191,17 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
     lines.append("")
     lines.append("## 附录")
     lines.append("")
+    # 主文收敛后，模型完整稿**逐字**另存为交付包里的审计文件（去重不减信息）。
+    # 不把原文贴回附录：模型稿自带 `[n=x]` 引用与它自己的来源清单，贴回来会让
+    # "正文引用 ↔ 文末来源清单"对不上（既有用例当场失败）。
+    _full_model = str(body or "").strip()
+    if _full_model and not _looks_like_brief(_full_model):
+        _saved = _save_full_model_report(task_id, _full_model)
+        lines.append("### 完整模型稿（审计留档）")
+        lines.append("")
+        lines.append(f"- 模型原始正文逐字保存在交付包内：`{_saved}`"
+                     "（去重只影响读者主文，不减信息）")
+        lines.append("")
     # 小节标题用**验收器认的**名称（`## 参考来源`），类型标签写在条目下一行——
     # 条目行必须是纯 `1. [标题](URL)`，否则清单解析不到（实机被记成"缺少参考来源清单"）
     lines.append("## 参考来源")
@@ -2318,6 +2336,26 @@ def _brief_analysis_section(text: str) -> str:
 BRIEF_SECTIONS = ("## 关键发现", "## 业务背景", "## 财务对照", "## 图表", "## 分析",
                   "## 变化解释", "## 风险与核查", "## 附录", "## 参考来源")
 
+
+
+def _save_full_model_report(task_id: str | None, text: str) -> str:
+    """把模型原始正文逐字写入工作区（交付包会带上），返回相对路径。
+
+    读者主文按"问题组织、去掉重复"收敛，但审计要能看到原文；写文件而不是贴回正文，
+    是为了不让模型自带的 `[n=x]` 引用污染装配器的来源清单一致性检查。
+    """
+    rel = "model_report_full.md"
+    try:
+        import workspace
+        proj = workspace.task_project_dir(str(task_id)) if task_id else None
+        if proj is None:
+            return rel
+        p = Path(proj) / rel
+        p.write_text(str(text or ""), encoding="utf-8")
+        return rel
+    except Exception as exc:                     # noqa: BLE001 - 落盘失败只记日志
+        logger.warning("完整模型稿落盘失败（task=%s）：%s", task_id, str(exc)[:120])
+        return rel
 
 def _brief_section(text: str, heading: str) -> str:
     """取简报里 `heading` 一节的内容（到下一个**简报小节**为止）。"""

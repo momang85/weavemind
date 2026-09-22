@@ -646,7 +646,7 @@ def research_candidate_body(task_id: str, goal: str, body: str, *,
                                                 project=project, ws_dir=ws_dir)
         if not structure:
             return None
-        candidate = report_brief.render_brief_markdown(structure, body)
+        candidate = report_brief.render_brief_markdown(structure, body, task_id=task_id)
         return rewrite_report_links(candidate, task_id) or candidate
     except Exception as exc:                     # noqa: BLE001 - 装配失败退回原正文
         logger.warning("研究候选稿装配失败（task=%s，退回原正文）：%s",
@@ -853,7 +853,7 @@ def assemble_and_verify(task_id: str, goal: str, body: str, *,
             structure = report_brief.build_structure(
                 task_id, goal, body, project=project, ws_dir=ws_dir)
             if structure:
-                brief_body = report_brief.render_brief_markdown(structure, body)
+                brief_body = report_brief.render_brief_markdown(structure, body, task_id=task_id)
                 # 链接重写必须在验收**之前**：验收对象就是最终交付的那份字节，
                 # 装配后若再改写链接，记录的验收对象与送达字节就对不上了
                 brief_body = rewrite_report_links(brief_body, task_id)
