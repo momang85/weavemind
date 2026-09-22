@@ -1919,7 +1919,12 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
     periods = list(table.get("periods") or [])
     who = sc.get("company") or "目标公司"
     span = "–".join(str(y) for y in periods) if len(periods) >= 2 else str(periods or "")
-    lines: list[str] = [f"# {who} 经营分析简报（{span} 年度）", ""]
+    lines: list[str] = [f"# {who} 经营分析简报（{span} 年度）", "",
+                        f"**主体**：{who}"
+                        f"{'（' + str(sc.get('company_id')) + '）' if sc.get('company_id') else ''}"
+                        f"　**期间**：{span} 年度"
+                        f"　**口径**：{sc.get('caliber') or '未声明'}"
+                        f"　**资料截止**：{sc.get('as_of') or '未声明'}", ""]
     # 附录延后写入的两块（C3）：口径说明与次要图表不进主文版面
     _appendix_extra: list[tuple[str, list[str]]] = []
     _appendix_charts: list[dict] = []
@@ -2054,18 +2059,29 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
             obs = str(c.get("caption") or c.get("observation") or "").strip()
             head = q or f"{c.get('type') or '图'}"
             tail = f"；{obs}" if obs else ""
-            _cid = str(c.get("chart_id") or "").strip()
+            # 读者正文只留**人可读**的图号/指标/期间/来源；`chart_id` 与绑定字典是
+            # 内部标识，移到附录的图表元数据表（09-22 晚间指令 §3 第三小批）
             _bind = _chart_binding_note(c.get("binding") or {})
-            # 显示时转义下划线：`ratio_net_margin` 会被 Markdown 当成斜体标记
-            # 吞掉下划线（PDF 里渲染成 "rationetmargin"）
-            _id_note = f"［{_cid.replace(chr(95), chr(92) + chr(95))}］" if _cid else ""
-            _bind_note = f"（绑定：{_bind}）" if _bind else ""
-            lines.append(f"图 {i}{_id_note}：{head}{tail}{_bind_note}"
+            _bind_note = f"（{_bind}）" if _bind else ""
+            lines.append(f"图 {i}：{head}{tail}{_bind_note}"
                          "（数据同『财务对照』表与底稿）")
         if rest:
             lines.append("")
             lines.append(f"- 其余 {len(rest)} 张图（含比率分面）见附录『其他图表』。")
             _appendix_charts.extend(rest)
+        # 图表元数据（内部标识）：供审计与引用对齐，不进读者主文
+        _chart_meta = [c for c in charts if str(c.get("chart_id") or "")]
+        if _chart_meta:
+            _appendix_extra.append(("### 图表元数据（内部标识）", [
+                "| 图 | chart_id | 绑定指标 | 单位 | 期间 | 口径 |",
+                "|---|---|---|---|---|---|",
+                *[f"| {i} | `{c.get('chart_id')}` | "
+                  f"{'、'.join(str(x) for x in ((c.get('binding') or {}).get('metric_labels') or [])[:3])} | "
+                  f"{(c.get('binding') or {}).get('unit') or ''} | "
+                  f"{'、'.join(str(y) for y in ((c.get('binding') or {}).get('periods') or []))} | "
+                  f"{(c.get('binding') or {}).get('caliber') or ''} |"
+                  for i, c in enumerate(charts, 1) if str(c.get("chart_id") or "")],
+            ]))
     lines.append("")
     lines.append("## 分析")
     analysis = str(structure.get("analysis") or "").strip() or _analysis_section(body)
