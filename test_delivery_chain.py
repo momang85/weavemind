@@ -7479,13 +7479,16 @@ class TestPackageManifestInsideZip(unittest.TestCase):
         with zipfile.ZipFile(zips[-1]) as z:
             self.assertIn("PACKAGE_MANIFEST.json", z.namelist())
             man = json.loads(z.read("PACKAGE_MANIFEST.json").decode("utf-8"))
-        self.assertEqual(man.get("schema"), "weavemind.package/1")
-        # 包内正文 sha 与**包内字节**一致（不是工作区里"现在"的字节；Windows 换行
-        # 转换会让磁盘字节与内存字符串不同，所以按文件字节算）
+        self.assertEqual(man.get("schema"), "weavemind.package/2")
+        # 09-23：采纳身份与文件 hash 是两个对象——schema 2 不再写"首个 MD 的 hash"
+        # 冒充采纳正文；包内交付 MD 的 hash 走 `delivered_md_sha256`
         import hashlib
-        self.assertEqual(man["body_sha256"],
+        self.assertEqual(man.get("delivered_md_sha256"),
                          hashlib.sha256(
                              (proj / "reports" / "report.md").read_bytes()).hexdigest())
+        self.assertNotIn("body_sha256", man,
+                         "旧字段会把导出文件 hash 误读成采纳正文 hash")
+        self.assertIn("research_body_sha256", man)
         self.assertIn("charts/chart_1.png", man.get("charts") or {})
         self.assertTrue(man.get("packaged_at"))
 
@@ -8578,6 +8581,40 @@ class TestSameVersionDeliveryChain(unittest.TestCase):
         self.assertEqual(str(payload2.get("package_body_version_id")), "",
                          "旧包没有包内清单 → 包内版本未知（空），不借外部清单")
 
+    def test_repack_binds_adopted_version_and_keeps_old_zip(self):
+        """09-23：按当前采纳版本重新打包——包内清单区分采纳身份与文件 hash，自检通过，
+        旧包保留不动（新包是新时间戳文件名）。"""
+        import hashlib
+        import zipfile
+        import delivery_pipeline as dp
+        self._seed(with_manifest=True)
+        ws = ws_mod.task_workspace(self.tid)
+        old_zips = {p.name for p in ws.glob("deliverables_*.zip")}
+        md = "# 交付正文（当前采纳）\n\n正文内容。\n".encode("utf-8")
+        pdf = b"%PDF-1.4 repack"
+        res = dp.repack_adopted(self.tid, md_bytes=md, pdf_bytes=pdf, ws_dir=ws)
+        self.assertTrue(res.get("package"), res)
+        self.assertTrue(all(v == "ok" for v in (res.get("verify") or {}).values()),
+                        f"包内字节自检必须全部一致：{res.get('verify')}")
+        m = res.get("manifest") or {}
+        self.assertEqual(m.get("schema"), "weavemind.package/2")
+        self.assertEqual(m.get("delivered_md_sha256"),
+                         hashlib.sha256(md).hexdigest())
+        self.assertEqual(m.get("pdf_sha256"), hashlib.sha256(pdf).hexdigest())
+        self.assertTrue(str(m.get("research_body_sha256") or ""),
+                        "清单必须带采纳正文身份（陈旧判定用它）")
+        self.assertNotEqual(str(m.get("research_body_sha256")),
+                            str(m.get("delivered_md_sha256")),
+                            "采纳身份与导出文件 hash 是两个对象，不得混用")
+        new_zips = {p.name for p in ws.glob("deliverables_*.zip")} - old_zips
+        self.assertEqual(len(new_zips), 1, "新包一个，旧包保留")
+        with zipfile.ZipFile(ws / res["package"]) as zf:
+            self.assertIn("PACKAGE_MANIFEST.json", zf.namelist())
+            self.assertIn("reports/report.md", zf.namelist())
+            self.assertEqual(zf.read("reports/report.md"), md, "包内 MD 与导出字节一致")
+            pkg = json.loads(zf.read("PACKAGE_MANIFEST.json").decode("utf-8"))
+            self.assertEqual(pkg.get("research_body_sha256"), m.get("research_body_sha256"))
+
 
 class TestNightClosureCounterexamples(unittest.TestCase):
     """09-22 晚间收口：冻结本轮点名的确定性缺口（同值/归因/比率/别名/分母/指纹）。
@@ -8791,6 +8828,21 @@ class TestNightClosureCounterexamples(unittest.TestCase):
                         dict(base, rules_version="R2")):
             self.assertFalse(dp.state_is_current(st, _V(), structure=changed),
                              f"指纹变化必须失效：{changed.get('rules_version')}")
+        # 09-23：失效原因逐项说清——资料变化说资料、规则变化说规则，不统一报"结构≠正文"
+        why_material = dp.staleness_reason(st, _V(), structure=dict(
+            base, evidence={"located": 2, "fingerprint": "ev-B"}))
+        self.assertIn("资料/准入/定位变化", why_material)
+        why_rules = dp.staleness_reason(st, _V(), structure=dict(base, rules_version="R2"))
+        self.assertIn("验收规则版本变化", why_rules)
+        why_contract = dp.staleness_reason(
+            st, _V(), structure=base,
+            contract_wire={"fingerprint": "ctr-B"})
+        self.assertIn("执行契约变化", why_contract)
+        # 按变化后的结构**重建**（同一上下文重算）→ 恢复为当前
+        rebuilt = dp.research_state("night-2", "g", dict(base, rules_version="R2"),
+                                    version=_V())
+        self.assertTrue(dp.state_is_current(
+            rebuilt, _V(), structure=dict(base, rules_version="R2")))
         # 研究任务绑定信息缺失 → 未知/待重验
         no_binding = dict(st, binding={"report_version_id": "ver-1",
                                        "structure_version_id": "body-1"})

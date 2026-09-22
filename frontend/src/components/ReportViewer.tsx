@@ -619,6 +619,9 @@ export default memo(function ReportViewer() {
   const [running, setRunning] = useState<string | null>(null)
   // 报告分享：shareUrl 非空表示该任务已生成分享链接
   const [shareUrl, setShareUrl] = useState<string | null>(null)
+  // 09-23：按当前采纳版本重新导出（无模型、确定性）——旧包保留，新包绑定当前版本
+  const [repacking, setRepacking] = useState(false)
+  const [repackMsg, setRepackMsg] = useState('')
   const [shareLoading, setShareLoading] = useState(false)
   const [shareDialogOpen, setShareDialogOpen] = useState(false)
   const [shareCopied, setShareCopied] = useState(false)
@@ -1382,13 +1385,45 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
             <Package className="w-4 h-4" /> 下载交付包 zip
           </a>
         ) : null}
+        {taskIdForFiles ? (
+          <button
+            onClick={async () => {
+              if (repacking) return
+              setRepacking(true); setRepackMsg('')
+              try {
+                const res = await fetch(`/api/task/${encodeURIComponent(taskIdForFiles)}/package`, {
+                  method: 'POST', headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({}),
+                })
+                const d = await res.json().catch(() => null)
+                if (!res.ok || !d || d.error) {
+                  setRepackMsg(d?.error || `重新导出失败（HTTP ${res.status}）`)
+                } else {
+                  setRepackMsg(
+                    `已生成 ${d.package}（${d.files?.length ?? 0} 个成员，`
+                    + `包内字节自检 ${d.verify_ok ? '全部一致' : '有不一致，见日志'}）`)
+                  await reloadTask(taskIdForFiles)
+                }
+              } catch (e) {
+                setRepackMsg(`重新导出失败：${String(e).slice(0, 120)}`)
+              } finally { setRepacking(false) }
+            }}
+            disabled={repacking}
+            className="flex items-center gap-2 px-4 py-2.5 bg-slate-800 hover:bg-slate-700 disabled:opacity-50 text-slate-300 rounded-lg text-sm transition-colors">
+            <Package className="w-4 h-4" /> {repacking ? '正在重新导出…' : '按当前版本重新导出'}
+          </button>
+        ) : null}
         <span className="basis-full text-xs leading-relaxed text-slate-500">
           {report.export?.package
             ? `交付包 ${report.export.package}（生成于 ${report.export.package_generated_at || '未知时间'}）按登录会话放行下载；`
               + '包可能早于最近一次修订，正文里的图表与"生成文件"列表始终按当前版本导出。'
+              + '修订后用"按当前版本重新导出"生成新包（旧包保留不动）。'
             : '本次任务暂无交付包（打包步骤未产出 deliverables_*.zip）；当前按文件逐个下载——'
               + '上方"生成文件"列表与正文里的图表都带下载按钮。'}
         </span>
+        {repackMsg ? (
+          <span className="basis-full text-xs text-slate-400">{repackMsg}</span>
+        ) : null}
         <span className="basis-full text-xs text-slate-500">复核与分享</span>
         <button onClick={async () => {
           if (!taskIdForFiles) return

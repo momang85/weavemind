@@ -167,45 +167,21 @@ class PackagingWorker(AsyncWorkerBase):
 
     @staticmethod
     def _package_manifest(task: dict, files: list) -> dict:
-        """包内清单：正文/材料/图表/规则的身份 + 打包时间（缺什么就空，不编）。"""
-        import hashlib
+        """包内清单：委托给 `delivery_pipeline.package_manifest`（schema 2）。
+
+        09-23：旧实现把"首个 MD 的字节 hash"写成 `body_sha256`，会被误读成**采纳正文
+        hash**（两者是不同对象）。现在显式区分 `report_version_id` /
+        `research_body_sha256`（采纳身份，陈旧判定用）/ `delivered_md_sha256` /
+        `pdf_sha256` / 逐文件 hash；指纹仍与版本身份同源。
+        """
+        import delivery_pipeline as dp
         ws = Path(str((task or {}).get("workspace") or "")) if task else None
-        out: dict = {"packaged_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                     "schema": "weavemind.package/1"}
-        def _sha(p: Path) -> str:
-            try:
-                return hashlib.sha256(p.read_bytes()).hexdigest()
-            except Exception:
-                return ""
-        # 正文：包里的 reports/*.md（打包时刻的字节）
-        body_hashes = {}
-        for abs_path, arc in files:
-            if str(arc).startswith("reports/") and str(arc).endswith(".md"):
-                body_hashes[str(arc)] = _sha(Path(abs_path))
-        out["bodies"] = body_hashes
-        out["body_sha256"] = next(iter(body_hashes.values()), "")
-        # 图表：包内 charts/*.png
-        out["charts"] = {str(arc): _sha(Path(abs_path))
-                         for abs_path, arc in files if str(arc).startswith("charts/")}
-        # 材料与规则指纹：与版本身份同源（复用既有实现，不另算一套）
-        try:
-            import delivery_pipeline as dp
-            tid = str((task or {}).get("task_id") or "")
-            if ws is not None and tid:
-                body_text = ""
-                for abs_path, arc in files:
-                    if str(arc).startswith("reports/") and str(arc).endswith(".md"):
-                        try:
-                            body_text = Path(abs_path).read_text(encoding="utf-8")
-                        except Exception:
-                            body_text = ""
-                        break
-                out["sources_fingerprint"] = dp.sources_fingerprint(tid, body_text)
-                rv, rf = dp.rules_identity(tid)
-                out["rules_version"], out["rules_fingerprint"] = rv, rf
-        except Exception as exc:                 # noqa: BLE001 - 指纹算不出不阻断打包
-            logger.warning("包内清单指纹计算失败：%s", str(exc)[:120])
-        return out
+        tid = str((task or {}).get("task_id") or "")
+        if ws is None or not tid:
+            # 缺身份就写最小清单（不编字段）
+            return {"packaged_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    "schema": "weavemind.package/2", "files": {}}
+        return dp.package_manifest(tid, ws, files)
 
     def _package(self, proj_path: Path, task: dict) -> str:
         if not proj_path.is_dir():

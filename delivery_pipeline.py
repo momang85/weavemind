@@ -129,6 +129,51 @@ _NON_ASSERTIVE_CLAIM_TYPES = ("boundary", "inference", "assumption")
 _UNPROVEN_STATUSES = ("unsupported", "partially_supported", "needs_check")
 
 
+def staleness_reason(state: dict, version=None, *, structure: dict | None = None,
+                     contract_wire: dict | None = None) -> str:
+    """待重验的**具体原因**：正文不同版 / 结构按旧正文重建 / 资料变化 / 规则变化 / 契约缺失。
+
+    09-23：结构版本号与正文 hash 是不同对象，不能统一误报"结构≠正文"——按实际比对
+    结果逐项说清是哪一类变化，读者才知道该重建什么。
+    """
+    b = (state or {}).get("binding") or {}
+    if not b:
+        return "研究状态没有绑定信息：待重验（需按当前采纳正文重建）"
+    reasons: list[str] = []
+    cur_id = version.identity_id() if version is not None else ""
+    if cur_id and str(b.get("report_version_id") or "") != cur_id:
+        reasons.append(f"研究状态绑定的是旧版正文（{str(b.get('report_version_id') or '')[:12]}），"
+                       f"当前采纳正文是 {cur_id[:12]}")
+    st = structure or {}
+    body_v = str(getattr(version, "version_id", "") or "")
+    if st:
+        _src_body = str(st.get("source_body_sha256") or "")
+        if _src_body:
+            if body_v and _src_body != body_v:
+                reasons.append(f"结构投影按另一版正文重建（来源正文 {_src_body[:12]} ≠ "
+                               f"采纳正文 {body_v[:12]}）")
+        elif str(st.get("version_id") or "") and body_v \
+                and str(st.get("version_id")) != body_v:
+            reasons.append("结构投影没有记录来源正文（旧格式），无法确认它属于当前采纳正文")
+        ev_fp = str((st.get("evidence") or {}).get("fingerprint") or "")
+        if str(b.get("evidence_fingerprint") or "") != ev_fp:
+            reasons.append(f"资料/准入/定位变化（指纹 "
+                           f"{str(b.get('evidence_fingerprint') or '空')[:12]} → "
+                           f"{ev_fp[:12] or '空'}）")
+        if str(b.get("rules_version") or "") != str(st.get("rules_version") or ""):
+            reasons.append(f"验收规则版本变化（{str(b.get('rules_version') or '空')} → "
+                           f"{str(st.get('rules_version') or '空')}）")
+        if not str(b.get("structure_version_id") or ""):
+            reasons.append("绑定里缺结构版本")
+    if not str(b.get("contract_fingerprint") or ""):
+        reasons.append("绑定里缺契约指纹")
+    if contract_wire is not None:
+        cf = str(contract_wire.get("fingerprint") or "")
+        if cf and str(b.get("contract_fingerprint") or "") != cf:
+            reasons.append("执行契约变化")
+    return "；".join(reasons) if reasons else "研究状态与当前正文/资料/规则不同版：待重验"
+
+
 def research_state(task_id: str, goal: str, structure: dict | None, *,
                    ws_dir=None, contract_wire: dict | None = None,
                    version=None) -> dict:
@@ -146,16 +191,26 @@ def research_state(task_id: str, goal: str, structure: dict | None, *,
     """
     st = structure or {}
     binding = _research_binding(st, version, contract_wire=contract_wire)
-    # 结构不属于当前采纳正文（修订/重装/换契约后）→ 待重验：不拿旧结构的计数
-    # 冒充当前正文的研究状态
+    # 投影不属于当前采纳正文（修订/重装/换契约后）→ 待重验：不拿旧结构的计数
+    # 冒充当前正文的研究状态。09-23：按**来源正文**判断（结构记着它是按哪版正文建的），
+    # 旧格式结构才退回版本号比对；原因用 `staleness_reason` 逐项说清。
     _struct_vid = str(st.get("version_id") or "")
     _body_vid = str(getattr(version, "version_id", "") or "")
-    if st and _struct_vid and _body_vid and _struct_vid != _body_vid:
+    _src_body = str(st.get("source_body_sha256") or "")
+    _projection_mismatch = False
+    if st and _body_vid:
+        if _src_body:
+            _projection_mismatch = _src_body != _body_vid
+        elif _struct_vid:
+            _projection_mismatch = _struct_vid != _body_vid
+    if _projection_mismatch:
         return {"state": RESEARCH_DRAFT,
                 "label": _RESEARCH_STATE_LABELS[RESEARCH_DRAFT],
                 "stale": True,
-                "reason": (f"研究状态与采纳正文不是同一版（结构 {_struct_vid[:12]} ≠ "
-                           f"正文 {_body_vid[:12]}）：待重验，计数不作为结论"),
+                "reason": (staleness_reason({"binding": binding}, version,
+                                            structure=st,
+                                            contract_wire=contract_wire)
+                           + "：待重验，计数不作为结论"),
                 "located": int(((st.get("evidence") or {}).get("located")) or 0),
                 "missing_labels": list((st.get("evidence") or {}).get("missing_labels") or []),
                 "unproven_assertions": 0, "unsupported_claims": 0,
@@ -359,6 +414,134 @@ def sources_fingerprint(task_id: str, report_text: str = "") -> str:
         return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
     except Exception:
         return ""
+
+
+def package_manifest(task_id: str, ws, files, *, pdf_name: str = "") -> dict:
+    """包内清单（schema 2）：显式区分**采纳正文**与**导出文件**的身份。
+
+    09-23：不再用"首个 MD 字节 hash"冒充采纳正文 hash（packaging_worker 旧实现），
+    字段分开：
+    - `report_version_id` / `research_body_sha256`：打包时刻的**采纳身份**（陈旧判定用它）；
+    - `delivered_md_sha256`：包内交付 MD 的字节 hash（与页面下载同源的那份）；
+    - `pdf_sha256`：包内 PDF 字节 hash（没有就是空）；
+    - `files`：包内每个成员的字节 hash（含图表/底稿/清单自身之外的全部成员）。
+    """
+    import hashlib as _h
+    from pathlib import Path as _P
+    out: dict = {"packaged_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                 "schema": "weavemind.package/2"}
+    file_hashes: dict[str, str] = {}
+    for abs_path, arc in (files or []):
+        try:
+            file_hashes[str(arc)] = _h.sha256(_P(abs_path).read_bytes()).hexdigest()
+        except Exception:
+            file_hashes[str(arc)] = ""
+    out["files"] = file_hashes
+    # 交付 MD：reports/report.md 优先，否则第一个 reports/*.md
+    _md_candidates = [a for a in file_hashes if str(a).startswith("reports/")
+                      and str(a).endswith(".md")]
+    _md = "reports/report.md" if "reports/report.md" in file_hashes else (
+        sorted(_md_candidates)[0] if _md_candidates else "")
+    out["delivered_md"] = _md
+    out["delivered_md_sha256"] = file_hashes.get(_md, "")
+    _pdf = str(pdf_name or "")
+    if not _pdf:
+        _pdfs = sorted(a for a in file_hashes if str(a).lower().endswith(".pdf"))
+        _pdf = _pdfs[0] if _pdfs else ""
+    out["pdf"] = _pdf
+    out["pdf_sha256"] = file_hashes.get(_pdf, "")
+    out["charts"] = {a: h for a, h in file_hashes.items() if str(a).startswith("charts/")}
+    # 采纳身份（打包时刻）：陈旧判定按它，不按时间戳
+    try:
+        from report_version import VersionStore
+        store = VersionStore(ws, task_id)
+        adopted = store.adopted()
+        out["report_version_id"] = (adopted.identity_id() if adopted is not None else "")
+        out["research_body_sha256"] = str(getattr(adopted, "version_id", "") or "")
+    except Exception as exc:                     # noqa: BLE001 - 身份算不出就留空，不编
+        logger.warning("包内清单：采纳身份读取失败（task=%s）：%s", task_id, str(exc)[:120])
+        out["report_version_id"] = ""
+        out["research_body_sha256"] = ""
+    # 材料与规则指纹：与版本身份同源（复用既有实现，不另算一套）
+    try:
+        body_text = ""
+        if _md:
+            try:
+                for abs_path, arc in (files or []):
+                    if str(arc) == _md:
+                        body_text = _P(abs_path).read_text(encoding="utf-8")
+                        break
+            except Exception:
+                body_text = ""
+        out["sources_fingerprint"] = sources_fingerprint(task_id, body_text)
+        rv, rf = rules_identity(task_id)
+        out["rules_version"], out["rules_fingerprint"] = rv, rf
+    except Exception as exc:                     # noqa: BLE001 - 指纹算不出不阻断打包
+        logger.warning("包内清单指纹计算失败：%s", str(exc)[:120])
+    return out
+
+
+def repack_adopted(task_id: str, *, md_bytes: bytes, pdf_bytes: bytes = b"",
+                   ws_dir=None) -> dict:
+    """按**当前采纳版本**重新打包（无模型、确定性）：新 ZIP + 包内清单。
+
+    - 包内 `reports/report.md` 就是传入的交付 MD 字节（与页面下载同源）；
+    - 清单按 `package_manifest` 的 schema 2 写（采纳身份与文件 hash 分开）；
+    - **旧包不动**（名字带新时间戳；旧包时间与标识都不改）；
+    - 返回包名与清单摘要，调用方据此核对包内字节 hash。
+    """
+    import zipfile as _zf
+    from pathlib import Path as _P
+    ws = _P(ws_dir) if ws_dir else workspace.task_workspace(task_id)
+    store = VersionStore(ws, task_id)
+    adopted = store.adopted()
+    if adopted is None:
+        raise LookupError("该任务没有可打包的采纳版本")
+    reports = ws / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    md_path = reports / "report.md"
+    md_path.write_bytes(bytes(md_bytes))
+    files: list[tuple[_P, str]] = [(md_path, "reports/report.md")]
+    pdf_name = ""
+    if pdf_bytes:
+        pdf_path = reports / "report.pdf"
+        pdf_path.write_bytes(bytes(pdf_bytes))
+        files.append((pdf_path, "reports/report.pdf"))
+        pdf_name = "reports/report.pdf"
+    for name, arc in (("working_paper.json", "working_paper.json"),
+                      ("working_paper.csv", "working_paper.csv")):
+        for cand in (ws / "project" / name, ws / name):
+            if cand.is_file():
+                files.append((cand, arc))
+                break
+    charts_dir = ws / "charts"
+    if charts_dir.is_dir():
+        for p in sorted(charts_dir.glob("*.png")):
+            files.append((p, f"charts/{p.name}"))
+    manifest = package_manifest(task_id, ws, files, pdf_name=pdf_name)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    zip_path = ws / f"deliverables_{ts}.zip"
+    with _zf.ZipFile(zip_path, "w", _zf.ZIP_DEFLATED) as zf:
+        for abs_path, arc in files:
+            zf.write(abs_path, arc)
+        zf.writestr("PACKAGE_MANIFEST.json",
+                    json.dumps(manifest, ensure_ascii=False, indent=1))
+    # 包内字节自检：清单里的每个 hash 都要能在包里复算出来
+    verify: dict[str, str] = {}
+    try:
+        with _zf.ZipFile(zip_path) as zf:
+            for arc, want in (manifest.get("files") or {}).items():
+                if arc not in zf.namelist():
+                    verify[arc] = "missing"
+                    continue
+                got = hashlib.sha256(zf.read(arc)).hexdigest()
+                verify[arc] = "ok" if got == want else "mismatch"
+    except Exception as exc:                     # noqa: BLE001 - 自检失败如实报告
+        verify["__error__"] = str(exc)[:120]
+    return {"package": zip_path.name, "path": str(zip_path),
+            "files": [a for _p, a in files], "manifest": manifest,
+            "verify": verify,
+            "bytes": zip_path.stat().st_size}
 
 
 def with_draft_note(report: str, reason: str) -> str:
@@ -879,6 +1062,30 @@ def assemble_and_verify(task_id: str, goal: str, body: str, *,
         logger.warning("研究简报装配失败（task=%s，退回原正文）：%s", task_id, str(exc)[:160])
     _st, body = ensure_body_accepted(task_id, goal, body, accept_fn=accept_fn,
                                      ws_dir=ws_dir)
+    # 09-23：投影必须与**最终采纳正文**同源。`ensure_body_accepted` 可能换掉采纳正文
+    # （人工修订路径：验收采纳的是用户修订正文，而结构是按装配候选盖的版本号）。
+    # 处理：结构记着自己的来源正文 hash——来源就是当前采纳正文时**重盖版本号**；
+    # 来源是别的正文时按采纳正文**重建投影**。不再用"结构≠正文"一句话糊过去。
+    try:
+        import report_brief as _rb
+        _st_proj = _rb.read_structure(task_id, ws_dir=ws_dir)
+        _adopted_now = store.adopted()
+        _adv = str(getattr(_adopted_now, "version_id", "") or "")
+        if _st_proj is not None and _adv:
+            _src_body = str(_st_proj.get("source_body_sha256") or "")
+            if _src_body and _src_body != _adv:
+                _rebuilt = _rb.build_structure(task_id, goal, body,
+                                               project=project, ws_dir=ws_dir)
+                if _rebuilt:
+                    _rb.stamp_structure_version(_rebuilt, _adv)
+                    _rb.write_structure(task_id, _rebuilt, ws_dir=ws_dir)
+                    logger.info("结构投影按采纳正文重建（task=%s，来源 %s→%s）",
+                                task_id, _src_body[:12], _adv[:12])
+            else:
+                _rb.stamp_structure_version(_st_proj, _adv)
+                _rb.write_structure(task_id, _st_proj, ws_dir=ws_dir)
+    except Exception as exc:                     # noqa: BLE001 - 投影同步失败不阻断交付
+        logger.warning("结构投影与采纳正文同步失败（task=%s）：%s", task_id, str(exc)[:140])
 
     wp = paper if paper is not None else write_working_paper(
         task_id, goal, project=project)
@@ -905,9 +1112,17 @@ def assemble_and_verify(task_id: str, goal: str, body: str, *,
     except Exception:
         _structure_for_state = None
     _state_version = store.adopted()
-    _contract_wire = (contract or {}).get("wire") if isinstance(contract, dict) else None
-    if _contract_wire is None and isinstance(contract, dict):
-        _contract_wire = contract.get("contract")
+    # 契约入参三种形状都要认：封装 `{"wire": {...}}`、`{"contract": {...}}`，以及
+    # **直接给 wire**（扁平 dict）——此前只认前两种，传了扁平 wire 会静默丢契约。
+    _contract_wire = None
+    if isinstance(contract, dict):
+        _contract_wire = contract.get("wire") or contract.get("contract")
+        if not isinstance(_contract_wire, dict) or not _contract_wire:
+            _looks_like_wire = any(
+                k in contract for k in ("company", "company_id", "periods",
+                                        "caliber", "doc_type", "required_metrics",
+                                        "subject_type", "market", "as_of"))
+            _contract_wire = contract if _looks_like_wire else None
     try:
         rstate = research_state(task_id, goal, _structure_for_state, ws_dir=ws_dir,
                                 contract_wire=_contract_wire, version=_state_version)

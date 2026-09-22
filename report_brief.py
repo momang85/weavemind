@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -237,11 +238,53 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
             "snippet_hints": int((evidence or {}).get("snippet_hints") or 0),
             "missing_labels": list((evidence or {}).get("missing_labels") or []),
             "excluded": list((evidence or {}).get("excluded") or []),
+            # 09-23：资料指纹由**实际证据记录**（来源/准入/定位/正文摘要）算出——
+            # 资料内容、准入状态或定位变化都会改变它；不掺正文（正文另由版本号绑定），
+            # 这样失效原因能区分"资料变化"与"正文不同版"。
+            "fingerprint": _material_fingerprint(evidence),
         },
         "audit": audit,
     }
     structure["version_id"] = ""
+    # 投影的**来源正文**：修订/重装后据此判断"结构是按哪一版正文建的"
+    structure["source_body_sha256"] = hashlib.sha256(
+        str(body or "").encode("utf-8")).hexdigest()
+    try:
+        import delivery_pipeline as _dp
+        structure["rules_version"] = str(_dp.rules_identity(task_id)[0])
+        structure["rules_fingerprint"] = str(_dp.rules_identity(task_id)[1])
+    except Exception:
+        structure["rules_version"] = ""
+        structure["rules_fingerprint"] = ""
     return structure
+
+
+def _material_fingerprint(evidence: dict | None) -> str:
+    """资料指纹：只取证据记录本身的身份字段（不含正文），资料变了指纹就变。
+
+    没有记录时也给出非空指纹（"零资料"也是一种资料状态）——否则研究任务会因
+    "指纹为空"永远判待重验，分不清"没有资料"与"没算过"。
+    """
+    ev = evidence or {}
+    parts: list[str] = []
+    for r in (ev.get("records") or []):
+        if not isinstance(r, dict):
+            continue
+        parts.append("|".join([
+            str(r.get("url") or ""),
+            str(r.get("kind") or ""),
+            str(r.get("admission") or ""),
+            str(r.get("locator") or r.get("page") or r.get("chunk") or ""),
+            str(r.get("content_hash") or ""),
+            str(r.get("char_start") or ""), str(r.get("char_end") or ""),
+            "1" if r.get("has_location") else "0",
+        ]))
+    parts.sort()
+    parts.append("located:%s" % int(ev.get("located") or 0))
+    parts.append("hints:%s" % int(ev.get("snippet_hints") or 0))
+    parts.append("missing:%s" % ",".join(sorted(
+        str(x) for x in (ev.get("missing_labels") or []))))
+    return hashlib.sha256("||".join(parts).encode("utf-8")).hexdigest()[:16]
 
 
 # ── 定向取证结果（叙事证据）──────────────────────────────────

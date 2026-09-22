@@ -388,13 +388,17 @@ def _demote_change_target(best_score: int, source: str = "") -> str | None:
     return KIND_NOTES
 
 
-def classify(title: str, body: str = "", *, source: str = "") -> str | None:
+def classify(title: str, body: str = "", *, source: str = "",
+             path: str = "") -> str | None:
     """按关键词给小节归类；标题命中权重 3、正文（前 200 字）命中权重 1。
 
     C2-3：归为"变化解释"的小节必须有**因果语言**、且不是会计政策套话——标题写着
     "经营情况讨论与分析"、内容却是准则/政策声明的段落不能当变化原因。
     `source`：文档来源类型（`source_type()` / `document_provenance()` 的值），
     决定"无因果的变化提及"降级为附注还是业务背景（见 `_demote_change_target`）。
+    `path`：小节路径（父级标题链）。09-23：叶子标题常无类别词（如"1、概述"），
+    但父级写着"主营业务分析/管理层讨论与分析"——正文有因果语言时按变化解释归类，
+    否则收入解释句会因 kind=None 进不了证据集。
     """
     head = str(title or "")
     lead = str(body or "")[:200]
@@ -409,9 +413,27 @@ def classify(title: str, body: str = "", *, source: str = "") -> str | None:
                 score += 1
         if score > best_score:
             best, best_score = kind, score
+    if best is None and path:
+        # 只对"概述/分析类叶子 + 具体分析父级"生效：父级用**具体**分析小节名
+        # （主营业务分析/经营分析…），不用泛章节名"管理层讨论与分析"——否则
+        # "市值管理制度""质量回报双提升"这类同章节的合规小节也会被归成变化解释。
+        segs = [s for s in str(path).split(" > ") if s]
+        parent = segs[-2] if len(segs) >= 2 else ""
+        leaf = head
+        if parent and any(kw in parent for kw in _CHANGE_PARENT_KEYWORDS) \
+                and any(kw in leaf for kw in _CHANGE_LEAF_KEYWORDS) \
+                and is_causal(body) and not is_policy_text(body):
+            return KIND_CHANGE
     if best == KIND_CHANGE and (is_policy_text(body) or not is_causal(body)):
         return _demote_change_target(best_score, source)
     return best
+
+
+# 叶子标题是"概述/分析"这类泛称、且父级是**具体**分析小节时，正文有因果语言才算
+# 变化解释（09-23：实机 api_chunk 3 的"四、主营业务分析 > 1、概述"装着发行人收入解释）
+_CHANGE_PARENT_KEYWORDS = ("主营业务分析", "经营分析", "财务状况分析", "经营情况讨论与分析",
+                           "经营情况回顾", "业绩变动", "收入变动", "利润变动")
+_CHANGE_LEAF_KEYWORDS = ("概述", "分析", "回顾", "小结", "情况说明", "经营情况")
 
 
 def _snippet(body: str, limit: int = SNIPPET_CHARS) -> str:
@@ -592,7 +614,8 @@ def extract_sections(doc: dict, *, periods=None, company: str = "",
     seen: set[tuple[str, str]] = set()
     for sec in split_sections(text, page_offsets=page_offsets,
                               chunk_offsets=chunk_offsets):
-        kind = classify(sec["title"], sec["body"], source=_prov)
+        kind = classify(sec["title"], sec["body"], source=_prov,
+                        path=str(sec.get("path") or ""))
         if not kind:
             continue
         snip = _snippet(sec["body"], snippet_chars)

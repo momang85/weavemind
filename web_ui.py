@@ -2659,8 +2659,7 @@ def _write_export_manifest(tid: str, body: str, pdf_bytes: bytes = b"",
     # 注意两个不同对象：验收对象是**研究正文**（version.body），导出的是**交付文档**
     # （交付说明 + 研究正文 + 注记）。这里用 `delivery_state` 一次算清：
     # 选中版本 + 本版验收 + 持久化评审事实 + 可重算的研究硬门槛 + **同一版本**的交付记录。
-    from delivery_pipeline import (delivery_state, read_research_state,
-                                   state_is_current)
+    from delivery_pipeline import delivery_state
     state = delivery_state(tid, body, ws_dir=task_workspace(tid))
     status = str(state.get("status") or DELIVERY_UNKNOWN)
     draft_reason = str(state.get("draft_reason") or "")
@@ -2669,10 +2668,9 @@ def _write_export_manifest(tid: str, body: str, pdf_bytes: bytes = b"",
     # C-5（09-22 复核）：**实际清单文件里**要带研究状态与它的绑定对象（本次实机清单
     # 没有 research_state，只有接口包装字段）。绑定不属于当前采纳正文时标 stale，
     # 页面/PDF/正文/清单因此读的是同一份绑定。
-    _rstate = read_research_state(tid, ws_dir=task_workspace(tid)) or {}
-    if _rstate:
-        _rstate = dict(_rstate)
-        _rstate["stale"] = not state_is_current(_rstate, ver)
+    # 09-23：与页面/PDF 共用 `_research_state_for`（含结构/资料/规则/契约四路校验与
+    # 逐项失效原因），不再只比正文版本号。
+    _rstate = _research_state_for(tid, task_workspace(tid)) or {}
     manifest = {
         "report_version_id": ver.identity_id(),
         "body_sha256": ver.version_id,
@@ -2729,7 +2727,8 @@ def _research_state_for(tid: str, ws) -> dict | None:
     （旧记录本来可能没有它）。
     """
     try:
-        from delivery_pipeline import read_research_state, state_is_current
+        from delivery_pipeline import (read_research_state, staleness_reason,
+                                       state_is_current)
         st = read_research_state(tid, ws_dir=str(ws)) or None
         if not st:
             return None
@@ -2746,6 +2745,17 @@ def _research_state_for(tid: str, ws) -> dict | None:
         st["stale"] = not state_is_current(
             st, store.adopted(), structure=_structure, contract_wire=_ctr,
             require_binding=bool(_structure))
+        if st["stale"]:
+            # 09-23：失效原因逐项说清（正文不同版/结构按旧正文重建/资料变化/规则变化/
+            # 契约缺失），不统一误报"结构≠正文"
+            try:
+                _why = staleness_reason(
+                    st, store.adopted(), structure=_structure, contract_wire=_ctr)
+                st["stale_reason"] = _why
+                if _why:
+                    st["reason"] = _why + "：待重验，计数不作为结论"
+            except Exception:
+                pass
         return st
     except Exception:
         return None
@@ -2812,8 +2822,11 @@ def _export_payload(tid: str, ws, state: dict | None) -> dict:
         _adopted_at = 0.0
     if bool(_zip) and _adopted_at and _adopted_at - _zip.stat().st_mtime > 1.0:
         _package_stale = True
-    # 包内清单的正文 sha 与当前采纳正文不同 → 陈旧（**内容标识**，比时间戳精确）
-    _pkg_body = str(_pkg_manifest.get("body_sha256") or "")
+    # 包内清单的**采纳正文** sha 与当前采纳正文不同 → 陈旧（内容标识，比时间戳精确）。
+    # 09-23：清单 schema 2 把采纳身份与文件 hash 分开——读 `research_body_sha256`，
+    # 兼容旧包的 `body_sha256`（旧字段语义是"首个 MD 的 hash"，只在没有新字段时兜底）。
+    _pkg_body = str(_pkg_manifest.get("research_body_sha256")
+                    or _pkg_manifest.get("body_sha256") or "")
     _cur_body = str((state or {}).get("version_id") or "")
     if _pkg_body and _cur_body and _pkg_body != _cur_body:
         _package_stale = True
@@ -2822,8 +2835,12 @@ def _export_payload(tid: str, ws, state: dict | None) -> dict:
         "manifest_version_id": str((_exp or {}).get("report_version_id") or ""),
         "current_version_id": str((state or {}).get("identity_id") or ""),
         # 包内清单优先：它记的是**打包时刻**的正文/材料/图表身份
-        "package_body_version_id": str(_pkg_manifest.get("body_sha256")
+        "package_body_version_id": str(_pkg_manifest.get("research_body_sha256")
+                                       or _pkg_manifest.get("body_sha256")
                                        or (_exp or {}).get("body_sha256") or ""),
+        "package_report_version_id": str(_pkg_manifest.get("report_version_id") or ""),
+        "package_delivered_md_sha256": str(_pkg_manifest.get("delivered_md_sha256") or ""),
+        "package_pdf_sha256": str(_pkg_manifest.get("pdf_sha256") or ""),
         "package_sources_fingerprint": str(_pkg_manifest.get("sources_fingerprint") or ""),
         "package_rules_fingerprint": str(_pkg_manifest.get("rules_fingerprint") or ""),
         "package_charts": dict(_pkg_manifest.get("charts") or {}),
@@ -4819,10 +4836,11 @@ def _research_payload(tid: str, ws) -> dict | None:
         # D2：投影状态（按当前版本重建与否）——页面据此决定是否隐藏版本相关的块
         out["projection"] = projection
         # 批次3b：研究状态（与数字机器验收分开的一条轴）——页面与导出清单同源读文件，
-        # 缺文件即"未知"，不编
+        # 缺文件即"未知"，不编。
+        # 09-23：走 `_research_state_for`（读时两端对绑定 + 失效原因逐项说清），
+        # 不再直接回读文件里的旧 stale/reason（否则页面显示的是写盘那一刻的判断）。
         try:
-            from delivery_pipeline import read_research_state
-            out["research_state"] = read_research_state(tid, ws_dir=str(ws)) or None
+            out["research_state"] = _research_state_for(tid, ws) or None
         except Exception:
             out["research_state"] = None
         if not out:
@@ -5186,14 +5204,28 @@ def _post_task_review_edit(self, p, body, admin):
 
         # C-5：人工修订也是**新版本**——研究状态按同一绑定对象重建（修订后旧计数
         # 不再沿用；结构不属于新正文时按"待重验"显示）
+        #
+        # 09-23：契约与**读端同源**——从任务记录解析（`_contract_wire_for`），不再只
+        # 回读旧 research_state.binding.contract（旧记录本来可能没有它，或已被改）。
+        # 任务记录解析不出时才退回绑定里的契约原文，并在日志里说明来源。
         _ctr_wire = None
         try:
-            from delivery_pipeline import read_research_state as _rrs
-            _prev = _rrs(tid, ws_dir=str(task_workspace(tid))) or {}
-            _w = (_prev.get("binding") or {}).get("contract")
-            _ctr_wire = {"wire": dict(_w)} if isinstance(_w, dict) and _w else None
+            _w = _contract_wire_for(tid)
+            if isinstance(_w, dict) and _w:
+                _ctr_wire = {"wire": dict(_w), "source": "task_record"}
         except Exception:
             _ctr_wire = None
+        if _ctr_wire is None:
+            try:
+                from delivery_pipeline import read_research_state as _rrs
+                _prev = _rrs(tid, ws_dir=str(task_workspace(tid))) or {}
+                _w = (_prev.get("binding") or {}).get("contract")
+                _ctr_wire = ({"wire": dict(_w), "source": "old_binding"}
+                             if isinstance(_w, dict) and _w else None)
+            except Exception:
+                _ctr_wire = None
+        if _ctr_wire is None:
+            logger.info("修订重验：任务记录与旧绑定都没有契约（task=%s）", tid)
         asm = assemble_and_verify(tid, goal, new_body, wrapper=wrapper,
                                   accept_fn=lambda t, g, b: verdict or None,
                                   ws_dir=task_workspace(tid),
@@ -5267,6 +5299,74 @@ def _post_task_review_edit(self, p, body, admin):
     except Exception as exc:
         logger.warning("修订失败（task=%s）：%s", tid, str(exc)[:200])
         return self._json({"error": f"修订失败：{str(exc)[:200]}"}, 500)
+
+
+def _post_task_package(self, p, body, admin):
+    """POST /api/task/<id>/package：按**当前采纳版本**重新打包（无模型、确定性）。
+
+    09-23：修订/重装配后旧 ZIP 会陈旧，页面需要一条正常"重新导出"动作。本接口：
+    - 交付 MD 与 PDF 走**页面下载的同一路径**（`_task_markdown_export` / `_task_pdf_bytes`），
+      包内字节因此与页面/清单同源；
+    - 新包写入任务工作区（新时间戳文件名），**旧包不动**（时间/标识都不改）；
+    - 包内清单 schema 2：`report_version_id` / `research_body_sha256`（采纳身份）与
+      `delivered_md_sha256` / `pdf_sha256` / 逐文件 hash 分开；
+    - 打包后**复算包内字节 hash** 并回报（verify），不一致如实报错，不假成功。
+    """
+    if not (p.startswith("/api/task/") and p.endswith("/package")):
+        return None
+    tid = p[len("/api/task/"):].rsplit("/package", 1)[0].strip()
+    if not tid:
+        return self._json({"error": "task_id required"}, 400)
+    if not _task_exists(tid):
+        return self._json({"error": "task not found"}, 404)
+    import task_state as _ts
+    row = {}
+    try:
+        row = _ts.read_task(tid) or {}
+    except Exception:
+        row = {}
+    if str(row.get("status") or "").upper() in ("CANCELLED", "FAILED"):
+        return self._json({"error": "任务已终态，不重新打包"}, 409)
+    ws = task_workspace(tid)
+    try:
+        md_bytes, _manifest = _task_markdown_export(tid)
+    except LookupError:
+        return self._json({"error": "该任务没有可导出的交付正文"}, 404)
+    except Exception as exc:
+        return self._json({"error": f"交付正文导出失败：{str(exc)[:160]}"}, 500)
+    pdf_bytes = b""
+    pdf_error = ""
+    try:
+        pdf_bytes = _task_pdf_bytes(tid)
+    except Exception as exc:                     # noqa: BLE001 - PDF 失败不阻断打包
+        pdf_error = str(exc)[:160]
+    try:
+        from delivery_pipeline import repack_adopted
+        result = repack_adopted(tid, md_bytes=md_bytes, pdf_bytes=pdf_bytes, ws_dir=ws)
+    except Exception as exc:
+        logger.warning("重新打包失败（task=%s）：%s", tid, str(exc)[:200])
+        return self._json({"error": f"重新打包失败：{str(exc)[:200]}"}, 500)
+    bad = {k: v for k, v in (result.get("verify") or {}).items() if v != "ok"}
+    return self._json({
+        "status": "ok" if not bad else "mismatch",
+        "task_id": tid,
+        "package": result.get("package"),
+        "bytes": result.get("bytes"),
+        "files": result.get("files"),
+        "manifest": {
+            "schema": (result.get("manifest") or {}).get("schema"),
+            "report_version_id": (result.get("manifest") or {}).get("report_version_id"),
+            "research_body_sha256": (result.get("manifest") or {}).get("research_body_sha256"),
+            "delivered_md_sha256": (result.get("manifest") or {}).get("delivered_md_sha256"),
+            "pdf_sha256": (result.get("manifest") or {}).get("pdf_sha256"),
+            "sources_fingerprint": (result.get("manifest") or {}).get("sources_fingerprint"),
+            "rules_version": (result.get("manifest") or {}).get("rules_version"),
+        },
+        "verify": result.get("verify"),
+        "verify_ok": not bad,
+        "pdf_error": pdf_error,
+        "note": "旧包保留不动；页面按采纳身份判断新旧包，本次新包已绑定当前采纳正文",
+    })
 
 
 def _post_task_cancel(self, p, body, admin):
@@ -6021,6 +6121,7 @@ _POST_ROUTES = [
     (lambda self, p: self.path == "/task", _post_task),
     (lambda self, p: self.path == "/api/memory/delete", _post_memory_delete),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/review/edit"), _post_task_review_edit),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/package"), _post_task_package),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/cancel"), _post_task_cancel),
     (lambda self, p: self.path == "/api/plan/confirm", _post_plan_confirm),
     (lambda self, p: self.path == "/api/step/confirm", _post_step_confirm),
