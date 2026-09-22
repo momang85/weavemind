@@ -625,39 +625,206 @@ def derive_requirements(goal: str, capabilities=None) -> dict:
     }
 
 
+def _read_chart_manifest(workspace) -> list[dict]:
+    """读任务工作区的图表清单（缺/坏 → 空列表，不编）。
+
+    交付路径与生成路径两处都找：`charts/chart_manifest.json`（交付用，与图同目录）
+    优先，其次 `project/chart_manifest.json`（渲染脚本工作目录），最后工作区根。
+    """
+    try:
+        ws = Path(workspace)
+        for cand in (ws / "charts" / "chart_manifest.json",
+                     ws / "project" / "chart_manifest.json",
+                     ws / "chart_manifest.json"):
+            if not cand.exists():
+                continue
+            data = json.loads(cand.read_text(encoding="utf-8")) or {}
+            items = [c for c in (data.get("charts") or []) if isinstance(c, dict)]
+            if items:
+                return items
+        return []
+    except Exception:
+        return []
+
+
+def _chart_ref_span(text: str) -> list[tuple[int, int, int]]:
+    """正文里的图引用：`图 3` 与 `chart_3` 两种写法都要认。
+
+    实机反例：正文写"现金覆盖关系，如图chart_5所示"，而 chart_5 实际是资产负债率——
+    只认"图N"形状会整条漏检（09-22 晚间复核 P1）。
+    """
+    spans: list[tuple[int, int, int]] = []
+    for m in re.finditer(r"图\s*(\d{1,2})", text):
+        spans.append((m.start(), m.end(), int(m.group(1))))
+    for m in re.finditer(r"chart[_\-\s]*(\d{1,2})", text, re.I):
+        spans.append((m.start(), m.end(), int(m.group(1))))
+    spans.sort()
+    return spans
+
+
+def _chart_topic_tokens(chart: dict) -> set[str]:
+    """图表绑定的**主题词**：从指标标签里切出可识别的名词片段。
+
+    "经营现金流对归母净利润的覆盖" → {经营现金流, 归母净利润, 覆盖}；这样"现金覆盖关系"
+    这种口语说法能对上覆盖图，而"资产负债率"不会对上它（09-22 晚间反例：chart_5 被说成
+    现金覆盖）。
+    """
+    b = chart.get("binding") or {}
+    labels = [str(x) for x in (b.get("metric_labels") or [])] \
+        + [str(x) for x in (b.get("metrics") or [])]
+    out: set[str] = set()
+    for lab in labels:
+        lab = lab.strip()
+        if not lab:
+            continue
+        out.add(lab)
+        for part in re.split(r"[对与和的及/、,，]|(?<=[\u4e00-\u9fff])的", lab):
+            part = part.strip()
+            if len(part) >= 2:
+                out.add(part)
+    # 去掉纯英文 slug（ratio_xxx 这类内部标识不是读者词）
+    return {t for t in out if not re.fullmatch(r"[a-z_\-]+", t)}
+
+
+def _relax_topic(token: str) -> str:
+    """主题词的**放宽形**：剥掉常见前缀/后缀（营业收入→收入、归母净利润→净利润）。"""
+    t = str(token or "")
+    for pre in ("经营活动", "经营", "归母", "营业", "母公司"):
+        if t.startswith(pre) and len(t) > len(pre) + 1:
+            t = t[len(pre):]
+    for suf in ("净额", "总额", "合计", "同比", "增速"):
+        if t.endswith(suf) and len(t) > len(suf) + 1:
+            t = t[: -len(suf)]
+    return t
+
+
+# "别的图主题词"里不参与判定的通用词：几乎每句财务叙述都会出现，命中不构成错配证据
+_GENERIC_TOPIC_TOKENS = frozenset({
+    "收入", "利润", "现金流", "净利润", "净额", "经营", "同比", "增长", "下降",
+})
+
+
+def check_chart_references(report: str, charts: list[dict] | None = None) -> dict:
+    """图文错配核验：正文的图引用（`图N` / `chart_N`）必须与对应图的**绑定指标**一致。
+
+    编号只是显示结果（重排/缺图/增删都会让旧编号指向别的图）。实机反例：正文对
+    图2–6 依次称规模、同比、毛利率/净利率、现金覆盖、杠杆，而实际对应同比、净利率、
+    现金覆盖、杠杆、研发强度；换成 `chart_N` 别名后同样错位（chart_5 被说成现金覆盖，
+    实际是资产负债率）。
+
+    判定（只认**正向证据**，不因"没写指标名"就判失败）：
+    - 引用所在句子里出现该图的主题词 → 对齐；
+    - 没有本图主题词、却出现**别的图**的主题词 → 错配（说的是另一张图的内容）；
+    - 引用指向不存在的图号 → 明示缺口（未知指向）；
+    - 句子里没有任何主题词（装配图注刻意不写指标名）→ 无法判定，计数不判失败。
+    图表清单缺失时按"无法核验"通过并说明（不猜）。
+    """
+    items = [c for c in (charts or []) if isinstance(c, dict)]
+    text = str(report or "")
+    refs = _chart_ref_span(text)
+    if not items or not refs:
+        return {"pass": True,
+                "details": ("图表清单缺失，无法核验图文对应" if refs and not items
+                            else "正文未引用图表"),
+                "refs": [], "unverifiable": 0, "unknown": 0, "gaps": []}
+
+    topics = {i: _chart_topic_tokens(c) for i, c in enumerate(items)}
+    bad: list[str] = []
+    seen: list[dict] = []
+    unverifiable = 0
+    unknown = 0
+    for start, end, n in refs:
+        if n < 1 or n > len(items):
+            unknown += 1
+            bad.append(f"正文引用了不存在的图 {n}（清单只有 {len(items)} 张）")
+            continue
+        own = topics.get(n - 1) or set()
+        if not own:
+            continue                     # 该图没有绑定块（旧清单）→ 不判
+        own_relaxed = set(own) | {_relax_topic(t) for t in own}
+        # 窗口：引用前 24 字 + 其后到**句末或下一个引用**为止（最多 120 字）。
+        # 取太宽会把邻句的指标词吞进来，把对齐的正文误判成错配。
+        after = text[end:end + 120]
+        stop = len(after)
+        for m in re.finditer(r"[。\n；;]", after):
+            stop = min(stop, m.start())
+            break
+        nxt = [s0 for s0, _e, _n in refs if s0 > end]
+        if nxt:
+            stop = min(stop, max(0, nxt[0] - end))
+        after = after[:stop]
+        ctx = text[max(0, start - 24): end] + after
+        seen.append({"n": n, "chart_id": str(items[n - 1].get("chart_id") or ""),
+                     "file": str(items[n - 1].get("file") or ""),
+                     "topics": sorted(own)})
+        if any(t and t in ctx for t in own_relaxed):
+            continue                     # 说的是本图的指标 → 对齐
+        others = {t for i, ts in topics.items() if i != n - 1 for t in ts}
+        # 别的图同样要认"放宽形"（"归母净利率" → "净利率"），否则正文用简称指别的图
+        # 时判不出错配（本用例第一版即如此）
+        others |= {_relax_topic(t) for t in others}
+        others -= own_relaxed
+        others = {t for t in others if t not in _GENERIC_TOPIC_TOKENS}
+        hit = sorted(t for t in others if t in ctx)
+        if hit:
+            bad.append(f"图 {n}（{items[n - 1].get('file') or ''}）绑定的是"
+                       f"{'、'.join(sorted(own)[:3])}，正文该处说的是"
+                       f"「{ctx.strip()[:40]}」（命中其它图主题词 {'、'.join(hit[:2])}）")
+        else:
+            unverifiable += 1            # 句子里没有任何主题词 → 无法判定
+    details = (f"按编号引用 {len(seen)} 处；与绑定不符 {len(bad)} 处"
+               f"；无法判定 {unverifiable} 处；未知指向 {unknown} 处"
+               if seen or unknown else "正文未引用图表")
+    return {"pass": not bad, "details": details, "refs": seen,
+            "unverifiable": unverifiable, "unknown": unknown,
+            "gaps": [f"图文错配：{b}——引用请按 chart_id 对齐" for b in bad]}
+
+
 # ── C-1（09-22 复核）：归因与算术分开核验 ─────────────────────────────
 # 数字正确不证明"主要来自"；边界附语不能洗掉前句的肯定判断。两条检查都只看
 # **句子自身**：不因相邻的"未取得明细/待查"而豁免，也不因数字可复算而放行归因。
+# 09-22 晚间收口：支持关系必须**逐条对应**（同一主张 → 该主张所需的材料/算式），
+# 不允许"有任意材料就通过"。
 
 # 归因动词：把某个变化**肯定地**归到某个驱动因素上
 _ATTRIBUTION_VERBS = (
     "主要来自", "主要系", "主要由于", "主要原因是", "主要是因为", "归因于",
     "系由", "源于", "所致", "带动", "拖累", "导致", "使得",
 )
-# 需要明细才能成立的驱动因素 → 需要哪类材料（用于缺口文案）
-_ATTRIBUTION_DRIVERS: tuple[tuple[str, str], ...] = (
-    ("固定性费用", "费用性质与明细（销售/管理/研发费用）"),
-    ("固定费用", "费用性质与明细（销售/管理/研发费用）"),
-    ("固定成本", "成本结构明细（营业成本/费用拆分）"),
-    ("摊薄", "费用性质与明细（销售/管理/研发费用）"),
-    ("规模效应", "成本与费用明细"),
-    ("产品结构", "分产品/分渠道的收入与毛利明细"),
-    ("量价", "销量与单价拆分"),
-    ("减值", "资产减值明细"),
-    ("非经常性损益", "非经常性损益明细"),
-    ("税率", "所得税与递延税项明细"),
-    ("少数股东", "少数股东损益明细"),
-    ("营运资本", "应收/应付/存货明细"),
-    ("回款", "销售收现与应收账款明细"),
+# 需要明细才能成立的驱动因素 → (驱动词, 所需材料描述, 材料词)
+_ATTRIBUTION_DRIVERS: tuple[tuple[str, str, tuple[str, ...]], ...] = (
+    ("固定性费用", "费用性质与明细（销售/管理/研发费用）", ("费用", "期间费用", "销售费用", "管理费用", "研发费用", "费用率")),
+    ("固定费用", "费用性质与明细（销售/管理/研发费用）", ("费用", "期间费用", "销售费用", "管理费用", "研发费用", "费用率")),
+    ("固定成本", "成本结构明细（营业成本/费用拆分）", ("成本", "营业成本", "成本结构")),
+    ("摊薄", "费用性质与明细（销售/管理/研发费用）", ("费用", "费用率", "固定成本")),
+    ("规模效应", "成本与费用明细", ("成本", "费用")),
+    ("产品结构", "分产品/分渠道的收入与毛利明细", ("产品结构", "分产品", "分渠道", "高档酒", "中高档")),
+    ("量价", "销量与单价拆分", ("销量", "单价", "量价", "吨价")),
+    ("减值", "资产减值明细", ("减值", "资产减值", "信用减值")),
+    ("非经常性损益", "非经常性损益明细", ("非经常性损益", "投资收益", "公允价值")),
+    ("税率", "所得税与递延税项明细", ("所得税", "税率", "递延")),
+    ("少数股东", "少数股东损益明细", ("少数股东",)),
+    ("营运资本", "应收/应付/存货明细", ("应收", "应付", "存货", "营运资本")),
+    ("回款", "销售收现与应收账款明细", ("回款", "收现", "应收账款")),
 )
 # 明确写成假设/待查的内容不是"肯定归因"（不扣分）
 _ATTRIBUTION_HEDGES = ("假设", "假如", "可能", "预计", "推测", "或将", "若",
                        "待查", "待核", "需核查", "未取得", "尚不能", "不能判断",
-                       "不排除", "有待")
+                       "不排除", "有待", "无法判定", "不归因", "不把差额归到")
 
-# 比率词与方向词（算术检查用）
-_RATIO_WORDS = ("资产负债率", "毛利率", "净利率", "归母净利率", "覆盖率",
-                "负债率", "占比", "周转率")
+# 比率词 → 底稿里的派生指标（算术核验要**对应**到该比率自己的两期读数）
+_RATIO_METRIC_WORDS: tuple[tuple[str, str], ...] = (
+    ("资产负债率", "debt_ratio"),
+    ("负债率", "debt_ratio"),
+    ("毛利率", "gross_margin"),
+    ("归母净利率", "net_margin"),
+    ("净利率", "net_margin"),
+    ("覆盖率", "cashflow_coverage"),
+    ("覆盖倍数", "cashflow_coverage"),
+    ("研发投入强度", "rd_intensity"),
+    ("研发强度", "rd_intensity"),
+)
+_RATIO_WORDS = tuple(w for w, _ in _RATIO_METRIC_WORDS)
 _DIRECTION_WORDS = ("上升", "下降", "提高", "降低", "回落", "走高", "走低", "持平")
 # 绝对额比较词：用"谁减得多"解释比率变化
 _ABS_COMPARE_WORDS = ("大于", "小于", "多于", "少于", "快于", "慢于", "高于", "低于")
@@ -665,154 +832,126 @@ _ABS_CHANGE_WORDS = ("减少", "增加", "下降", "增长", "上升", "下滑")
 _AMOUNT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(亿元|万元|元|亿|万)")
 
 
+def _located_records(evidence: dict | None) -> list[dict]:
+    ev = evidence or {}
+    return [r for r in (ev.get("records") or [])
+            if isinstance(r, dict) and r.get("has_location")
+            and str(r.get("admission") or "") in ("admitted", "comparison")]
+
+
+def _derived_rows(working_paper: dict | None) -> list[dict]:
+    return [d for d in ((working_paper or {}).get("derived") or [])
+            if isinstance(d, dict)]
+
+
+def _driver_support(driver: str, need: str, material_words: tuple[str, ...],
+                    *, wp: dict | None, records: list[dict]) -> str:
+    """该驱动因素**自己**有没有支持（返回支持描述，无支持返回空串）。
+
+    只有两类支持算数：
+    - 已准入、带定位的原始披露里**谈到该驱动**（材料词命中记录正文）；
+    - 底稿派生关系里**就是这条驱动**（指标标签命中驱动或材料词）。
+    与驱动无关的派生（revenue_yoy、cashflow_coverage 之类）**不构成支持**。
+    """
+    for r in records:
+        text = str(r.get("text") or "")
+        if driver in text or any(w in text for w in material_words):
+            return f"原始披露（{str(r.get('locator') or '有定位')}）谈到{driver}"
+    for d in _derived_rows(wp):
+        label = str(d.get("metric_label") or d.get("metric") or "")
+        if driver in label or any(w in label for w in material_words):
+            return f"底稿派生关系（{label}）"
+    return ""
+
+
 def _read_working_paper(workspace) -> dict:
     """读任务工作区的底稿（缺/坏 → 空 dict，不编）。"""
     try:
-        p = Path(workspace) / "project" / "working_paper.json"
-        if not p.exists():
-            return {}
-        return json.loads(p.read_text(encoding="utf-8")) or {}
+        ws = Path(workspace)
+        for cand in (ws / "project" / "working_paper.json", ws / "working_paper.json"):
+            if cand.exists():
+                return json.loads(cand.read_text(encoding="utf-8")) or {}
+        return {}
     except Exception:
         return {}
 
 
 def _read_narrative_evidence(workspace) -> dict:
-    """读任务工作区的叙事证据（缺/坏 → 空 dict，不编）。"""
+    """读任务工作区的叙事证据（缺/坏 → 空 dict，不编）。
+
+    没有 `narrative_evidence.json` 时退回**抓取快照**（`project/fetch_snapshot.json`）：
+    验收要判"这条归因有没有对应披露"，而快照就是已取得的原始披露正文——不退回会让
+    引用年报原文的句子被判"缺证"。
+    """
     try:
-        p = Path(workspace) / "narrative_evidence.json"
-        if not p.exists():
-            return {}
-        return json.loads(p.read_text(encoding="utf-8")) or {}
+        ws = Path(workspace)
+        out: dict = {}
+        p = ws / "narrative_evidence.json"
+        if p.exists():
+            out = json.loads(p.read_text(encoding="utf-8")) or {}
+        # 抓取快照 = 已取得的**原始披露正文**：合并进来，让"引用年报原文的归因"能被
+        # 判为有对应材料（不合并会把它误判成缺证）
+        snap_records: list[dict] = []
+        for cand in (ws / "project" / "fetch_snapshot.json", ws / "fetch_snapshot.json"):
+            if not cand.exists():
+                continue
+            items = json.loads(cand.read_text(encoding="utf-8")) or []
+            for it in items if isinstance(items, list) else []:
+                if not isinstance(it, dict) or not str(it.get("text") or "").strip():
+                    continue
+                snap_records.append({
+                    "text": str(it.get("text") or ""),
+                    "url": str(it.get("url") or ""),
+                    "title": str(it.get("title") or ""),
+                    "has_location": True,
+                    "locator": ("第 %s 页" % it.get("page")
+                                if it.get("page") else str(it.get("url") or "")),
+                    "admission": "admitted"})
+        if snap_records:
+            merged = list(out.get("records") or []) + snap_records
+            out = dict(out, records=merged)
+        return out
     except Exception:
         return {}
 
 
-
-def _read_chart_manifest(workspace) -> list[dict]:
-    """读任务工作区的图表清单（缺/坏 → 空列表，不编）。"""
-    try:
-        p = Path(workspace) / "project" / "chart_manifest.json"
-        if not p.exists():
-            p = Path(workspace) / "chart_manifest.json"
-        if not p.exists():
-            return []
-        data = json.loads(p.read_text(encoding="utf-8")) or {}
-        return [c for c in (data.get("charts") or []) if isinstance(c, dict)]
-    except Exception:
-        return []
-
-
-def check_chart_references(report: str, charts: list[dict] | None = None) -> dict:
-    """图文错配核验：正文里的"图N"必须与第 N 张图的**绑定指标**一致。
-
-    编号只是显示结果（重排/缺图/增删都会让旧编号指向别的图）。实机反例：正文对
-    图2–6 依次称规模、同比、毛利率/净利率、现金覆盖、杠杆，而实际对应同比、净利率、
-    现金覆盖、杠杆、研发强度——图能显示不等于引用正确。
-
-    判定（只认**正向证据**，不因"没写指标名"就判失败）：
-    - 引用附近的窗口里出现第 N 张图绑定的指标词 → 对齐；
-    - 没出现本图指标、却出现**别的图**的指标词 → 错配（说明的是另一张图的内容）；
-    - 窗口里没有任何绑定指标词（装配图注刻意不写指标名）→ 无法判定，跳过并计数。
-    图表清单缺失时按"无法核验"通过并说明（不猜）。
-    """
-    items = [c for c in (charts or []) if isinstance(c, dict)]
-    text = str(report or "")
-    refs = list(re.finditer(r"图\s*(\d{1,2})", text))
-    if not items or not refs:
-        return {"pass": True,
-                "details": ("图表清单缺失，无法核验图文对应" if refs and not items
-                            else "正文未按编号引用图表"),
-                "refs": [], "unverifiable": 0, "gaps": []}
-
-    def _words_of(chart: dict) -> list[str]:
-        b = chart.get("binding") or {}
-        out = [str(x) for x in (b.get("metric_labels") or [])]
-        out += [str(x) for x in (b.get("metrics") or [])]
-        return [w for w in out if w]
-
-    def _norm(w: str) -> set[str]:
-        return {w, w.replace("归母", ""), w.replace("经营活动", ""),
-                w.replace("经营", ""), w.replace("净额", "")} - {""}
-
-    def _hit(ctx: str, words: list[str]) -> bool:
-        return any(c and c in ctx for w in words for c in _norm(w))
-
-    chart_words = {i: _words_of(c) for i, c in enumerate(items)}
-    bad: list[str] = []
-    seen: list[dict] = []
-    unverifiable = 0
-    for m in refs:
-        n = int(m.group(1))
-        if n < 1 or n > len(items):
-            continue                     # 引用了不存在的编号：由"缺图"另判
-        words = chart_words.get(n - 1) or []
-        if not words:
-            continue                     # 该图没有绑定块（旧清单）→ 不判
-        # 窗口只取该引用自己的那一小段：到下一个 `图N` 之前、最多 120 字
-        _after = text[m.end(): m.end() + 120]
-        _nxt = re.search(r"图\s*\d{1,2}", _after)
-        if _nxt:
-            _after = _after[:_nxt.start()]
-        ctx = text[max(0, m.start() - 8): m.end()] + _after
-        seen.append({"n": n, "chart_id": str(items[n - 1].get("chart_id") or ""),
-                     "file": str(items[n - 1].get("file") or ""), "words": words})
-        if _hit(ctx, words):
-            continue                     # 说的是本图的指标 → 对齐
-        others = [w for i, ws in chart_words.items() if i != n - 1 for w in ws]
-        if _hit(ctx, others):
-            bad.append(f"图 {n}（{items[n - 1].get('file') or ''}）绑定的是"
-                       f"{'、'.join(words[:3])}，正文该处说的是"
-                       f"「{ctx.strip()[:40]}」")
-        else:
-            unverifiable += 1            # 窗口里没有任何绑定指标词 → 无法判定
-    details = (f"按编号引用 {len(seen)} 处；与绑定不符 {len(bad)} 处"
-               f"；无法判定 {unverifiable} 处"
-               if seen else "正文未按编号引用图表")
-    return {"pass": not bad, "details": details, "refs": seen,
-            "unverifiable": unverifiable,
-            "gaps": [f"图文错配：{b}——引用请按 chart_id 对齐" for b in bad]}
-
-
 def check_attribution_support(report: str, *, working_paper: dict | None = None,
                               evidence: dict | None = None) -> dict:
-    """归因核验：肯定性归因必须有所需材料/可复算关系支持。
+    """归因核验：肯定性归因必须有所需材料/可复算关系支持，且**逐条对应**。
 
     - 句子里出现归因动词 + 需要明细的驱动因素 → 记为一条归因主张；
-    - 有 `working_paper` 里的**派生关系**（同比/比率变化）或 `evidence` 里带定位的
-      解释支持 → 通过；
-    - 否则记缺口（缺证归因），**不因相邻的"未取得明细"边界句而豁免**；
+    - 该驱动因素要在**已准入的原始披露**里被谈到，或底稿里有**对应**的派生关系；
+    - 与驱动无关的派生（任意同比/其它比率）不算支持（09-22 晚间反例：固定费用归因
+      靠一条 `revenue_yoy` 就通过）；
     - 明确写成假设/待查（`_ATTRIBUTION_HEDGES`）的内容不算肯定归因。
     """
     text = str(report or "")
-    wp = working_paper or {}
-    derived = [str((d or {}).get("metric") or "") for d in (wp.get("derived") or [])]
-    ev = evidence or {}
-    located = [r for r in (ev.get("records") or [])
-               if r.get("has_location")
-               and str(r.get("admission") or "") in ("admitted", "comparison")]
-    has_management = bool(located)
+    records = _located_records(evidence)
     claims: list[dict] = []
     unsupported: list[str] = []
     for s in _sentences(text):
         if not any(v in s for v in _ATTRIBUTION_VERBS):
             continue
-        drivers = [d for d, _need in _ATTRIBUTION_DRIVERS if d in s]
-        if not drivers:
+        hits = [(d, need, words) for d, need, words in _ATTRIBUTION_DRIVERS if d in s]
+        if not hits:
             continue
         if any(h in s for h in _ATTRIBUTION_HEDGES):
             continue                     # 已明确写成假设/待查 → 不是肯定归因
-        needs = sorted({need for d, need in _ATTRIBUTION_DRIVERS if d in s})
-        # 支持来源：带定位的经营解释（真实披露）或底稿里可复算的派生关系
-        supported = has_management or bool(derived)
-        claims.append({"text": s[:160], "drivers": drivers, "needs": needs,
-                       "supported": supported})
-        if not supported:
-            unsupported.append(s[:120])
-    details = (f"归因主张 {len(claims)} 条；无材料支持 {len(unsupported)} 条"
+        supports = [_driver_support(d, need, words, wp=working_paper, records=records)
+                    for d, need, words in hits]
+        needs = sorted({need for _d, need, _w in hits})
+        ok = all(supports)
+        claims.append({"text": s[:160], "drivers": [d for d, _n, _w in hits],
+                       "needs": needs, "supported": ok,
+                       "support": [x for x in supports if x]})
+        if not ok:
+            missing = [d for (d, _n, _w), sup in zip(hits, supports) if not sup]
+            unsupported.append(f"{s[:100]}（缺：{'、'.join(missing)} 的材料）")
+    details = (f"归因主张 {len(claims)} 条；无对应材料支持 {len(unsupported)} 条"
                if claims else "未发现需要明细支持的肯定性归因")
     return {"pass": not unsupported, "details": details,
-            "claims": claims, "gaps": [f"缺证归因：{u}（未取得所需明细）"
-                                       for u in unsupported]}
+            "claims": claims,
+            "gaps": [f"缺证归因：{u}" for u in unsupported]}
 
 
 def check_ratio_arithmetic(report: str, *, working_paper: dict | None = None) -> dict:
@@ -823,14 +962,15 @@ def check_ratio_arithmetic(report: str, *, working_paper: dict | None = None) ->
     比率要按 L/A 或增速比来复算。
 
     判定：句子同时含①比率词与方向词、②两个绝对额变化与比较词 → 记为一条"绝对额
-    解释比率"的主张；只有当底稿里存在该比率的**可复算派生关系**（两期水平可算）时
-    才算通过，否则记缺口。句子若同时给出两期比率读数，视为已复算。
+    解释比率"的主张；只有当底稿里存在**该比率自己**的两期派生读数（可复算），或句子
+    直接给出两期比率读数时才算通过。与句子无关的派生（如 cashflow_coverage）不算
+    （09-22 晚间反例：任意派生即可放行）。
     """
     text = str(report or "")
-    wp = working_paper or {}
-    derived = [str((d or {}).get("metric") or "") for d in (wp.get("derived") or [])]
-    ratio_derived = any(("ratio" in m or "margin" in m or "coverage" in m)
-                        for m in derived)
+    derived = _derived_rows(working_paper)
+    by_metric: dict[str, set] = {}
+    for d in derived:
+        by_metric.setdefault(str(d.get("metric") or ""), set()).add(d.get("year"))
     bad: list[str] = []
     seen: list[str] = []
     for s in _sentences(text):
@@ -850,7 +990,15 @@ def check_ratio_arithmetic(report: str, *, working_paper: dict | None = None) ->
         _pct = re.findall(r"(\d+(?:\.\d+)?)\s*%", s)
         if len(_pct) >= 2:
             continue
-        if ratio_derived:
+        # 该比率**自己**有两期派生读数（含同比/变化）才算可复算
+        words = [m for w, m in _RATIO_METRIC_WORDS if w in s]
+        ok = False
+        for m in words:
+            years = {y for y in (by_metric.get(m) or set()) if y is not None}
+            if len(years) >= 2 or f"{m}_yoy" in by_metric or f"{m}_change" in by_metric:
+                ok = True
+                break
+        if ok:
             continue
         bad.append(s[:120])
     details = (f"绝对额解释比率的主张 {len(seen)} 条；不可复算 {len(bad)} 条"
@@ -1026,6 +1174,43 @@ def _section_text(report: str, keywords: tuple[str, ...]) -> str:
         out.append(line)
     return "\n".join(out).strip()
 
+
+
+def _promotion_key(report: str, item: dict) -> tuple:
+    """同值提升的键：数值（含符号）+ 单位 + **指标** + **期间**。
+
+    数值相同而指标/期间不同的两条读数不是同一事实：`归母净利率 25%` 不能替
+    `资产负债率 25%` 背书（架构复核 P1-1）。指标取数字所在子句里**离它最近**的
+    指标词（`_indicator_near`），期间取同一子句里的年份。
+    """
+    raw = str(item.get("raw") or "")
+    pos = int(item.get("pos") or 0)
+    clause = _clause_of(report, pos, pos + len(raw))
+    val = float(item.get("value") or 0)
+    sign = "-" if val < 0 else ""
+    metric = _indicator_near(clause, max(0, len(clause) - len(raw))) or ""
+    year = ""
+    m = re.search(r"(?<!\d)((?:19|20)\d{2})(?!\d)", clause)
+    if m:
+        year = m.group(1)
+    return (round(abs(val), 6), sign, str(item.get("unit") or ""), metric, year)
+
+
+def _promotion_seed_ok(item: dict) -> bool:
+    """该读数能否充当"同值提升"的证据源。
+
+    - 被提升来的（`same_value_elsewhere`）不能再提升别人（单跳，避免链式背书）；
+    - 指标/期间未绑定的算式结果（`semantics_unverified`）不行：算式只能证明"这个数
+      等于那两个数相除"，不能证明它就是那个指标；
+    - 已披露的模型知识（`disclosed`）不行——它本身就没被独立核实。
+    """
+    if str(item.get("source") or "") == "same_value_elsewhere":
+        return False
+    if item.get("semantics_unverified"):
+        return False
+    if item.get("disclosed"):
+        return False
+    return True
 
 def _binding_tokens(metric: str, label: str) -> tuple[str, ...]:
     """该指标在正文里的**绑定词**：数值必须与这些词之一同句，才算"讲到了这个指标"。
@@ -1816,16 +2001,23 @@ def check_number_traceability(
     # 提升只在**同一主体**内成立：键里带主体（数字所在子句写明的公司），并再判一次主体
     # 冲突——跨公司同值（"宁德时代营收 100 亿元"已溯源 → "比亚迪营收 100 亿元"不得借此
     # 提升）必须保持不可溯源（架构复核 P1：同值不能覆盖已发现的冲突）。
+    # 提升键必须绑定**完整事实身份**（架构复核 P1-1）：主体 + 指标 + 期间 + 单位 + 数值
+    # 符号。只按 (数值, 单位) 会让"归母净利率 25%"替"资产负债率 25%""现金覆盖率 25%"
+    # 背书——三者指标不同，同值不构成同一事实。
     _verified_pairs: dict[tuple, str] = {}
     for t in traceable:
-        _k = (round(abs(float(t.get("value") or 0)), 6), str(t.get("unit") or ""))
+        if not _promotion_seed_ok(t):
+            # 自身"指标/期间未绑定"（semantics_unverified）或本身就是被提升来的项：
+            # 不得充当提升其它项的证据（未知不能变成别人的支持）
+            continue
+        _k = _promotion_key(report, t)
         _pos = int(t.get("pos") or 0)
         _subj = _promotion_subject(_clause_of(report, _pos, _pos + len(str(t.get("raw") or ""))))
         _verified_pairs.setdefault(_k, _subj or "")
     if _verified_pairs:
         still: list[dict] = []
         for item in untraceable:
-            _k = (round(abs(float(item.get("value") or 0)), 6), str(item.get("unit") or ""))
+            _k = _promotion_key(report, item)
             _pos = int(item.get("pos") or 0)
             _i_subj = _promotion_subject(
                 _clause_of(report, _pos, _pos + len(str(item.get("raw") or ""))))

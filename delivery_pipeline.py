@@ -77,8 +77,14 @@ def _research_binding(structure: dict | None, version=None, *,
 
 
 def state_is_current(state: dict, version=None, *, structure: dict | None = None,
-                     contract_wire: dict | None = None) -> bool:
-    """已落盘的研究状态是否仍绑定在**当前**这一版（正文/结构/契约）。"""
+                     contract_wire: dict | None = None,
+                     require_binding: bool = False) -> bool:
+    """已落盘的研究状态是否仍绑定在**当前**这一版（正文/结构/资料/规则/契约）。
+
+    `require_binding=True`（研究任务）时，绑定信息缺失即视为**未知/待重验**：
+    只加字段不校验等于没绑定（09-22 晚间复核 P1——实物 binding 里 `contract=null`、
+    证据/规则指纹为空却 stale=false）。
+    """
     if bool((state or {}).get("stale")):
         return False                     # 已判定待重验：不再当作当前状态
     b = (state or {}).get("binding") or {}
@@ -91,8 +97,22 @@ def state_is_current(state: dict, version=None, *, structure: dict | None = None
     if structure is not None:
         if str(b.get("structure_version_id") or "") != str(structure.get("version_id") or ""):
             return False
+        # 资料/规则任一变化 → 失效（同一正文配不同资料不是同一个研究结论）
+        ev = (structure.get("evidence") or {})
+        if str(b.get("evidence_fingerprint") or "") != str(ev.get("fingerprint") or ""):
+            return False
+        if str(b.get("rules_version") or "") != str(structure.get("rules_version") or ""):
+            return False
     if contract_wire is not None:
         if str(b.get("contract_fingerprint") or "") != str(contract_wire.get("fingerprint") or ""):
+            return False
+    if require_binding:
+        # 研究任务：契约指纹必须有值；结构与资料身份缺失同样按未知处理
+        if not str(b.get("contract_fingerprint") or ""):
+            return False
+        if not str(b.get("structure_version_id") or ""):
+            return False
+        if not str(b.get("evidence_fingerprint") or ""):
             return False
     return True
 
@@ -100,6 +120,9 @@ def state_is_current(state: dict, version=None, *, structure: dict | None = None
 # 契约未声明必需指标时的默认必答三问（收入/利润/现金）。**不把** `bank_materials`
 # 这类"待查材料清单"算进必答问题：它只表示还要什么材料，不是已回答的问题。
 DEFAULT_MANDATORY_METRICS = ("revenue", "net_profit", "operating_cashflow")
+_MANDATORY_LABELS = {"revenue": "收入变化的量价与结构依据",
+                     "net_profit": "利润变化的分解",
+                     "operating_cashflow": "现金变化与利润覆盖的关系"}
 # 明确写成假设/推断/核查问题的内容不按"未证实肯定结论"扣分（语义角色判定，
 # 不看状态名，也不靠豁免某个 boundary 字符串）
 _NON_ASSERTIVE_CLAIM_TYPES = ("boundary", "inference", "assumption")
@@ -157,11 +180,17 @@ def research_state(task_id: str, goal: str, structure: dict | None, *,
 
     mandatory_metrics = _mandatory_metrics(contract_wire)
     by_metric = {str(q.get("metric") or ""): q for q in questions}
-    mandatory = [by_metric[m] for m in mandatory_metrics if m in by_metric]
+    # 分母来自**契约**（默认收入/利润/现金三问）：结构里缺条目是**缺口**，
+    # 不能因为"输出里恰好只有一条"就把分母缩成 1（09-22 晚间复核 P1）
+    mandatory = [by_metric.get(m) or {"metric": m, "question": _MANDATORY_LABELS.get(m, m),
+                                      "support": {}, "missing_entry": True}
+                 for m in mandatory_metrics]
     optional = [q for q in questions
                 if str(q.get("metric") or "") not in mandatory_metrics]
 
     def _supported(q: dict) -> bool:
+        if q.get("missing_entry"):
+            return False                 # 结构里根本没有这条必答问题 → 未支持
         sup = q.get("support") or {}
         return bool(sup.get("has_evidence")) and bool(str(sup.get("locator") or "").strip())
 
@@ -177,6 +206,7 @@ def research_state(task_id: str, goal: str, structure: dict | None, *,
         "mandatory_total": len(mandatory),
         "mandatory_questions": [{"metric": q.get("metric"), "question": q.get("question"),
                                  "supported": _supported(q),
+                                 "missing_entry": bool(q.get("missing_entry")),
                                  "locator": str((q.get("support") or {}).get("locator") or "")}
                                 for q in mandatory],
         "optional_questions": [{"metric": q.get("metric"), "question": q.get("question"),
@@ -199,8 +229,10 @@ def research_state(task_id: str, goal: str, structure: dict | None, *,
                           for q in unsupported_mandatory)
         reasons.append(f"必答问题缺可定位依据（{len(unsupported_mandatory)}/"
                        f"{len(mandatory)}）：{labels}")
-    if not mandatory:
-        reasons.append("契约必答问题在结构里没有对应条目（无法裁决，按草稿处理）")
+    if any(q.get("missing_entry") for q in mandatory):
+        miss = "、".join(str(q.get("question") or q.get("metric"))
+                        for q in mandatory if q.get("missing_entry"))
+        reasons.append(f"结构里没有这些必答问题的条目（按缺口记）：{miss}")
     if unproven:
         reasons.append(f"{len(unproven)} 条肯定结论处于未证实状态"
                        f"（未支持/部分支持/待核查）")

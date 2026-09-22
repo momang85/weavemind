@@ -296,15 +296,24 @@ class RootBudget:
             # 新账本：身份必须在**跨进程锁内**确定。两个进程同时启动时，先拿锁的写身份，
             # 后拿锁的必须**采纳**它——否则各写各的身份，`writers` 合并时"身份不同不并"，
             # 对方的增量会被当成上一轮丢掉（并发复现：两进程各预留 40 次，快照只剩 40）。
-            with cross_process_file_lock(self.path):
-                disk = self._load()          # 锁内重读：可能已有别人刚写的身份
-                if disk.ledger_id:
-                    self.state = disk        # 采纳已有账本（含它的计数）
+            #
+            # 09-22 晚间复核：初始化同样要**检查锁的 got**——拿不到锁还写，等于无锁覆盖，
+            # 并且会凭空造一个竞争身份（内存探针：锁返回 False 仍写 1 次、生成 ledger_id、
+            # persist_uncertain=False）。拿不到锁时：不写、不生成新身份（保持空身份，
+            # 由下一次拿到锁的初始化或本进程后续保存补齐）、标记落盘不确定 →
+            # 有界多进程任务据此拒绝新付费请求。
+            with cross_process_file_lock(self.path) as _got:
+                if not _got:
+                    self._persist_note("账本初始化未取到落盘锁（本次不写、不生成身份）")
                 else:
-                    self.state.ledger_id = uuid.uuid4().hex[:12]
-                self._baseline = self._copy_state(self.state)
-                self._apply_declared_limits()
-                self._save_locked()
+                    disk = self._load()      # 锁内重读：可能已有别人刚写的身份
+                    if disk.ledger_id:
+                        self.state = disk    # 采纳已有账本（含它的计数）
+                    else:
+                        self.state.ledger_id = uuid.uuid4().hex[:12]
+                    self._baseline = self._copy_state(self.state)
+                    self._apply_declared_limits()
+                    self._save_locked()
         # D5：声明上限入账（审计"这次跑的上限是多少"）——恢复时以磁盘为准，
         # 但本进程传入的上限若不同则更新（配置/环境变了如实反映）
         if self._apply_declared_limits():

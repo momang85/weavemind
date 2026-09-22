@@ -2723,8 +2723,10 @@ def _read_export_manifest(tid: str) -> dict:
 def _research_state_for(tid: str, ws) -> dict | None:
     """研究状态（页面/导出清单/正文注记同源）；缺文件返回 None（未知，不编）。
 
-    C-5：读取时**再对一次绑定**——落盘状态若不属于当前采纳版本（人工修订、重装、
-    契约变化），页面显示"待重验"，不沿用旧计数。
+    C-5 + 09-22 晚间复核：读取时**在两端对绑定**——正文版本、当前结构（含资料/规则
+    指纹）与**任务记录里的契约**都要一致；任一不一致或绑定信息缺失（研究任务）
+    显示"待重验"，不沿用旧计数。契约从任务真实记录解析，**不回读旧 state 的 binding**
+    （旧记录本来可能没有它）。
     """
     try:
         from delivery_pipeline import read_research_state, state_is_current
@@ -2733,9 +2735,33 @@ def _research_state_for(tid: str, ws) -> dict | None:
             return None
         from report_version import VersionStore
         store = VersionStore(ws, tid)
+        _structure = None
+        try:
+            import report_brief as _rb
+            _structure = _rb.read_structure(tid, ws_dir=str(ws))
+        except Exception:
+            _structure = None
+        _ctr = _contract_wire_for(tid)
         st = dict(st)
-        st["stale"] = not state_is_current(st, store.adopted())
+        st["stale"] = not state_is_current(
+            st, store.adopted(), structure=_structure, contract_wire=_ctr,
+            require_binding=bool(_structure))
         return st
+    except Exception:
+        return None
+
+
+def _contract_wire_for(tid: str) -> dict | None:
+    """从任务记录解析执行契约（研究任务才有）；解析不出返回 None，不猜。"""
+    try:
+        import task_state as _ts
+        from facts import ResearchRequest
+        from execution_contract import ExecutionContract
+        raw = (_ts.read_task(tid) or {}).get("research_request") or {}
+        req = ResearchRequest.from_payload(raw)
+        if req is None:
+            return None
+        return ExecutionContract.from_request(req).to_wire()
     except Exception:
         return None
 

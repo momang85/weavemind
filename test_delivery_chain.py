@@ -5631,9 +5631,12 @@ class TestResearchBriefAssembly(unittest.TestCase):
         import delivery_pipeline as dp
         import task_state
         tid, _ = self._env()
-        # 模型稿**故意不写免责声明与来源清单**（那两项由装配器给出）
+        # 模型稿**故意不写免责声明与来源清单**（那两项由装配器给出）；
+        # 归因写成"原因待补"：本夹具没有分产品/量价材料，缺证归因会被判缺口
+        # （09-22 晚间收口后的语义），与本用例要验的"验收对象是装配稿"无关
         body = ("# 报告\n\n## 分析与结论\n\n营业收入同比增长 15.66%，"
-                "归因于销量与产品结构变化。" + "补充说明。" * 20 + "\n")
+                "同比变化由底稿复算；具体原因待补原始披露后判定。"
+                + "补充说明。" * 20 + "\n")
         res = dp.accept_for_body(tid, self.GOAL, body, trigger="报告步骤")
         self.assertIsNotNone(res)
         self.assertEqual(res.get("overall"), "pass", res.get("gaps"))
@@ -7787,9 +7790,9 @@ class TestMaterialSideBatch3(unittest.TestCase):
                 {"result": json.dumps({"status": "success", "url": "https://x.test/a",
                                        "pdf": True, "text": ""})})
         self.assertFalse(ok, "解析不出正文时按缺口处理（返回 False）")
-        self.assertEqual([c[0] for c in calls], ["https://x.test/a"], "标记要触发解析通道")
-        # 没有工件引用时 data 为 None（旧 worker 的兼容路径：解析通道自己取字节）
-        self.assertIsNone(calls[0][1])
+        # 09-22 晚间复核：worker 说 PDF 但没给工件 → **保留缺口**，不调解析通道
+        # （此前会退成 data=None 交给 doc_from_url，触发第二次下载）
+        self.assertEqual(calls, [], "空工件不得触发解析/重抓")
 
 
 class TestNightCorrectionFailureSamples(unittest.TestCase):
@@ -8316,8 +8319,12 @@ class TestAttributionAndChartBinding(unittest.TestCase):
         # 明确写成假设/待查 → 不算肯定归因
         self.assertTrue(ac.check_attribution_support(
             "利润率变化可能来自固定性费用摊薄的削弱（假设，待费用明细核实）。")["pass"])
-        # 有带定位的真实披露 → 通过
-        ev = {"records": [{"has_location": True, "admission": "admitted"}]}
+        # 有带定位的真实披露**且谈到该驱动** → 通过；只"有记录"不算
+        bare = {"records": [{"has_location": True, "admission": "admitted", "text": ""}]}
+        self.assertFalse(ac.check_attribution_support(live, evidence=bare)["pass"],
+                         "记录没谈到该驱动，不构成对应支持")
+        ev = {"records": [{"has_location": True, "admission": "admitted",
+                           "text": "报告期内期间费用率上升，固定性费用未随收入同步下降"}]}
         self.assertTrue(ac.check_attribution_support(live, evidence=ev)["pass"])
 
     def test_ratio_change_not_explained_by_absolute_deltas(self):
@@ -8329,9 +8336,13 @@ class TestAttributionAndChartBinding(unittest.TestCase):
         # 给出两期比率读数 → 可复算，不算误释
         self.assertTrue(ac.check_ratio_arithmetic(
             "资产负债率由25.42%下降至23.24%，资产减少24.47亿元大于负债减少20.90亿元。")["pass"])
-        # 底稿里有该比率的派生关系 → 不算误释
+        # 底稿里有**该比率自己的两期**派生读数 → 可复算，不算误释
         self.assertTrue(ac.check_ratio_arithmetic(
-            live, working_paper={"derived": [{"metric": "debt_ratio"}]})["pass"])
+            live, working_paper={"derived": [{"metric": "debt_ratio", "year": 2023},
+                                             {"metric": "debt_ratio", "year": 2024}]})["pass"])
+        # 只有单期或无关派生 → 仍判误释
+        self.assertFalse(ac.check_ratio_arithmetic(
+            live, working_paper={"derived": [{"metric": "debt_ratio", "year": 2024}]})["pass"])
 
     def test_chart_reference_binds_by_id_not_number(self):
         import acceptance_checker as ac
@@ -8534,6 +8545,147 @@ class TestSameVersionDeliveryChain(unittest.TestCase):
         payload2 = web_ui._export_payload(self.tid, ws, {"version_id": "x" * 8})
         self.assertEqual(str(payload2.get("package_body_version_id")), "",
                          "旧包没有包内清单 → 包内版本未知（空），不借外部清单")
+
+
+class TestNightClosureCounterexamples(unittest.TestCase):
+    """09-22 晚间收口：冻结本轮点名的确定性缺口（同值/归因/比率/别名/分母/指纹）。
+
+    反例全部来自复核方在生产函数上的内存探针：
+    1. 来源只有"净利润10亿元、营业收入40亿元"，正文写"归母净利率25%（10/40*100）；
+       资产负债率25%；现金覆盖率25%" → 后两项**不得**被同值提升（指标不同不是同一事实）；
+    2. 无关派生（revenue_yoy / cashflow_coverage）不得让缺证归因、绝对额解释比率通过；
+    3. 契约必答三问只给一条有依据的收入问题 → 必须是 1/3、草稿，不能 ready 1/1；
+    4. 只改资料/规则指纹 → 状态必须失配（不再 current）；
+    5. `chart_N` 别名错位要能被查出（chart_5 被说成现金覆盖）。
+    """
+
+    def test_same_value_across_metrics_is_not_promoted(self):
+        import acceptance_checker as ac
+        from test_acceptance_adversarial import _mk_env, _DISCLAIMER
+        report = (
+            "# 洋河股份2024年报核心指标\n\n## 核心指标\n\n"
+            "归母净利率 25%（10/40*100）；资产负债率 25%；现金覆盖率 25%。\n\n"
+            "## 数据时效\n\n数据截至 2024-12-31 年度报告披露日，日终更新。\n\n"
+            "## 参考来源\n\n1. [洋河股份2024年报：净利润10亿元]"
+            "(https://finance.sina.com.cn/a/1)\n\n" + _DISCLAIMER
+        )
+        tmp = _mk_env("night-same", [{
+            "title": "洋河股份2024年报：净利润10亿元、营业收入40亿元_新浪财经",
+            "url": "https://finance.sina.com.cn/a/1",
+            "snippet": "洋河股份2024年净利润10亿元，营业收入40亿元。",
+        }])
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        old = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(tmp)
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", old)
+        r = ac.run_acceptance("night-same", "分析洋河股份2024年报核心指标", report,
+                              ws_mod.task_workspace("night-same"))
+        tr = r["checks"]["number_traceability"]
+        self.assertFalse(tr["pass"], "跨指标同值不得提升")
+        promoted = [t for t in (tr.get("traceable") or [])
+                    if t.get("source") == "same_value_elsewhere"]
+        self.assertEqual(promoted, [], f"仍有同值提升：{promoted}")
+        # 该条自身是 semantics_unverified 的算式结果，不得充当提升证据
+        self.assertEqual(len(tr.get("untraceable") or []), 2,
+                         f"两个无关 25% 应判不可溯源：{tr.get('untraceable')}")
+
+    def test_unrelated_derived_does_not_support_attribution(self):
+        import acceptance_checker as ac
+        live = ("报告期内净利率降幅大于毛利率降幅，主要来自收入规模下降对固定性费用摊薄的削弱。"
+                "进一步拆分原因未体现，费用明细未取得。")
+        unrelated = {"derived": [{"metric": "revenue_yoy"}, {"metric": "net_profit_yoy"},
+                                 {"metric": "cashflow_coverage"}]}
+        r = ac.check_attribution_support(live, working_paper=unrelated)
+        self.assertFalse(r["pass"], "无关派生不得让缺证归因通过")
+        self.assertIn("缺证归因", r["gaps"][0])
+        # 对应材料存在时通过：底稿里有该驱动的派生（费用类）
+        ok = ac.check_attribution_support(
+            live, working_paper={"derived": [{"metric": "expense_ratio",
+                                              "metric_label": "期间费用率"}]})
+        self.assertTrue(ok["pass"], ok)
+
+    def test_unrelated_derived_does_not_support_ratio_arithmetic(self):
+        import acceptance_checker as ac
+        live = "资产负债率下降，主要因为资产减少24.47亿元大于负债减少20.90亿元。"
+        unrelated = {"derived": [{"metric": "cashflow_coverage"}, {"metric": "net_margin"}]}
+        self.assertFalse(ac.check_ratio_arithmetic(live, working_paper=unrelated)["pass"],
+                         "无关派生不得让比率误释通过")
+        matching = {"derived": [{"metric": "debt_ratio", "year": 2023},
+                                {"metric": "debt_ratio", "year": 2024}]}
+        self.assertTrue(ac.check_ratio_arithmetic(live, working_paper=matching)["pass"],
+                        "该比率自己的两期读数才算可复算")
+
+    def test_chart_alias_mismatch_is_caught(self):
+        import acceptance_checker as ac
+        # 清单按**显示编号**排列（下标 N-1 就是"图 N"）：与真实清单同形
+        charts = [
+            {"file": "chart_1.png", "chart_id": "core_scale",
+             "binding": {"metric_labels": ["营业收入", "归母净利润"]}},
+            {"file": "chart_2.png", "chart_id": "yoy_growth",
+             "binding": {"metric_labels": ["营业收入同比", "归母净利润同比"]}},
+            {"file": "chart_3.png", "chart_id": "ratio_net_margin",
+             "binding": {"metric_labels": ["归母净利率"]}},
+            {"file": "chart_4.png", "chart_id": "ratio_cashflow_coverage",
+             "binding": {"metric_labels": ["经营现金流对归母净利润的覆盖"]}},
+            {"file": "chart_5.png", "chart_id": "ratio_debt_ratio",
+             "binding": {"metric_labels": ["资产负债率"]}},
+            {"file": "chart_6.png", "chart_id": "ratio_rd_intensity",
+             "binding": {"metric_labels": ["研发投入强度"]}},
+        ]
+        bad = "现金覆盖关系，如图 chart_5 所示；资产负债率两期变化，如图 chart_6 所示。"
+        r = ac.check_chart_references(bad, charts)
+        self.assertFalse(r["pass"], "chart_N 别名错位必须查出")
+        self.assertTrue(any("覆盖" in g for g in r["gaps"]), r["gaps"])
+        ok = "现金覆盖关系，如图 chart_4 所示；资产负债率两期变化，如图 chart_5 所示。"
+        self.assertTrue(ac.check_chart_references(ok, charts)["pass"], "正确指向应通过")
+        # 指向不存在的图 → 明示缺口
+        unknown = ac.check_chart_references("如图 chart_9 所示。", charts[:3])
+        self.assertFalse(unknown["pass"])
+        self.assertGreaterEqual(unknown["unknown"], 1)
+
+    def test_contract_mandatory_denominator_is_not_shrunk(self):
+        import delivery_pipeline as dp
+        st = {"scope": {"periods": [2023, 2024]},
+              "evidence": {"located": 2, "missing_labels": []},
+              "research_questions": [{"metric": "revenue", "question": "收入变化",
+                                      "support": {"has_evidence": True,
+                                                  "locator": "第 3 页"}}],
+              "claims": []}
+        out = dp.research_state("night-1", "g", st)
+        self.assertEqual(out["state"], dp.RESEARCH_DRAFT)
+        self.assertEqual(out["mandatory_total"], 3, "分母来自契约")
+        self.assertEqual(out["mandatory_supported"], 1)
+        self.assertTrue(any(q.get("missing_entry") for q in out["mandatory_questions"]))
+        self.assertIn("结构里没有这些必答问题的条目", out["reason"])
+
+    def test_fingerprint_change_invalidates_state(self):
+        import delivery_pipeline as dp
+
+        class _V:
+            def identity_id(self):
+                return "ver-1"
+
+            version_id = "body-1"
+
+        base = {"scope": {"periods": [2023, 2024]}, "version_id": "body-1",
+                "evidence": {"located": 2, "fingerprint": "ev-A"},
+                "rules_version": "R1",
+                "research_questions": [
+                    {"metric": m, "support": {"has_evidence": True, "locator": "第 3 页"}}
+                    for m in ("revenue", "net_profit", "operating_cashflow")],
+                "claims": []}
+        st = dp.research_state("night-2", "g", base, version=_V())
+        self.assertTrue(dp.state_is_current(st, _V(), structure=base))
+        # 只改资料指纹 / 只改规则版本 → 均失配
+        for changed in (dict(base, evidence={"located": 2, "fingerprint": "ev-B"}),
+                        dict(base, rules_version="R2")):
+            self.assertFalse(dp.state_is_current(st, _V(), structure=changed),
+                             f"指纹变化必须失效：{changed.get('rules_version')}")
+        # 研究任务绑定信息缺失 → 未知/待重验
+        no_binding = dict(st, binding={"report_version_id": "ver-1",
+                                       "structure_version_id": "body-1"})
+        self.assertFalse(dp.state_is_current(no_binding, _V(), structure=base,
+                                             require_binding=True))
 
 
 if __name__ == "__main__":

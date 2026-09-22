@@ -1485,6 +1485,86 @@ class TestBoundedFailClosed(unittest.TestCase):
         self.assertTrue(b.snapshot()["persist_uncertain"], "仍要如实标记")
 
 
+class TestNightClosureBudgetBranches(unittest.TestCase):
+    """09-22 晚间收口：账本初始化不得无锁写；异步 415 回退两条记录；空工件不重抓。"""
+
+    def setUp(self):
+        os.environ['WM_SINGLE_PROCESS'] = '1'
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_night_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(self.tmp))
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", old_root)
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        lc._root_budgets.clear()
+        self.addCleanup(lc.clear_task_context)
+        self.addCleanup(lambda: [os.environ.pop(k, None) for k in _ENV_KEYS])
+
+    def test_init_without_lock_does_not_write_or_forge_identity(self):
+        """初始化拿不到落盘锁：不写、不生成身份、标记不确定（有界任务据此拒发）。"""
+        os.environ.pop("WM_SINGLE_PROCESS", None)
+
+        @contextlib.contextmanager
+        def _no_lock(_path, timeout=None):
+            yield False
+
+        kv: dict = {}
+        with mock.patch.object(rb, "cross_process_file_lock", _no_lock):
+            # 共享后端可用（否则先被"共享账本不可用"那条拒绝，验不到本分支）
+            b = rb.RootBudget("t-init", self.tmp, rb.BudgetLimits(max_calls=5),
+                              redis_factory=lambda: _AtomicFakeRedis(kv),
+                              multiprocess=True)
+        self.assertFalse((self.tmp / "budget_state.json").exists(),
+                         "拿不到锁不得写账本")
+        self.assertEqual(b.state.ledger_id, "", "不得生成竞争身份")
+        self.assertTrue(b._persist_uncertain, "必须标记落盘不确定")
+        with self.assertRaises(rb.BudgetExceeded) as ctx:
+            b.reserve("llm")
+        self.assertIn("待对账", str(ctx.exception))
+
+    def test_async_stream_fallback_records_two_shapes(self):
+        """异步 415 回退：两次发送各一条调用形状记录（此前只有票据没有记录）。"""
+        import asyncio
+        sends = []
+        recs: list[dict] = []
+
+        def _rec(_tid, **kw):
+            recs.append(dict(kw))
+
+        fake = _FallbackAsyncClient(sends)
+        lc.set_task_context("t-async-rec")
+        with _offline(), mock.patch.object(lc, "_record_llm_call", _rec), \
+                mock.patch.object(lc, "_stream_enabled", lambda: True):
+            data = asyncio.run(lc._async_chat_once(
+                fake, "https://api.example/v1/chat/completions",
+                {"max_tokens": 128}, {}))
+        self.assertTrue(data)
+        self.assertEqual(sends, ["stream", "nonstream"])
+        self.assertEqual([r.get("end_reason") for r in recs], ["stream_fallback_ok"],
+                         "回退那次发送必须留一条形状记录")
+        snap = rb.RootBudget("t-async-rec", ws_mod.task_workspace("t-async-rec"),
+                             lc._budget_limits_from_file()).snapshot()
+        self.assertEqual(snap["stages"]["llm"]["settled"], 1)
+
+    def test_pdf_worker_without_artifact_keeps_gap_without_refetch(self):
+        """worker 说 PDF 但工件为空/缺失 → 保留缺口，**不得**退成按 URL 重抓。"""
+        import orchestrator_v2 as o
+        import annual_report_pdf as pdf
+        calls = []
+
+        def _doc(*a, **k):
+            calls.append((a, k))
+            raise AssertionError("空工件时不得走解析/重抓")
+
+        with mock.patch.object(pdf, "doc_from_url", _doc), \
+                mock.patch.object(o.logger, "warning"):
+            ok = o.OrchestratorV2._try_pdf_evidence(
+                "t-pdfgap", {"instruction": "抓取该页"},
+                {"result": json.dumps({"status": "success", "url": "https://x.test/a",
+                                       "pdf": True, "text": "", "artifact": {}})})
+        self.assertFalse(ok, "按缺口处理（返回 False）")
+        self.assertEqual(calls, [], "不得调用解析通道（那会触发第二次下载）")
+
+
 class TestWriterMerge(unittest.TestCase):
     """多进程写同一份账本：后写的进程不得抹掉先写进程的计数。"""
 

@@ -2708,16 +2708,26 @@ async def _async_chat_once(client, url: str, payload: dict, headers: dict,
     if fell_back:
         _fb_rb, _fb_ticket = _budget_open(
             "llm", 1, int(payload.get("max_tokens") or 0), usage="llm:stream_fallback")
+    _t_fb = time.monotonic()
+    _fb_in = len(str(payload.get("messages") or ""))
     try:
         response = await client.post(url, json=_with_stream(payload, False),
                                      headers=headers)
         response.raise_for_status()
         data = response.json()
-    except Exception:
+    except Exception as exc:
         if _fb_ticket:
             _budget_close(_fb_rb, _fb_ticket,
                           max_tokens=int(payload.get("max_tokens") or 0),
                           ok=False, note="llm:nonstream_failed")
+            # 逐次记录：回退那次发送失败也要留一条形状（否则"票据数 > 调用记录数"，
+            # 逐条对账时会以为有一次请求没记账）
+            _record_llm_call(get_task_context(), stage="llm", attempt=1,
+                             elapsed_ms=int((time.monotonic() - _t_fb) * 1000),
+                             input_chars=_fb_in,
+                             max_tokens=int(payload.get("max_tokens") or 0),
+                             error_class=type(exc).__name__,
+                             end_reason="stream_fallback_failed")
         raise
     if _fb_ticket:
         _usage = (data.get("usage") or {}) if isinstance(data, dict) else {}
@@ -2726,6 +2736,12 @@ async def _async_chat_once(client, url: str, payload: dict, headers: dict,
                       ok=True, note="llm:nonstream_ok",
                       actual_tokens=(int(_usage.get("completion_tokens") or 0)
                                      if _usage else None))
+        # 回退成功那次同样逐次记录（异步路径此前只开票不记录）
+        _record_llm_call(get_task_context(), stage="llm", attempt=1,
+                         elapsed_ms=int((time.monotonic() - _t_fb) * 1000),
+                         input_chars=_fb_in,
+                         max_tokens=int(payload.get("max_tokens") or 0),
+                         end_reason="stream_fallback_ok")
     if info is not None:
         info["fell_back"] = bool(fell_back)
     return data

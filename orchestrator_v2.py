@@ -1441,15 +1441,23 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         if not url or not (_worker_says_pdf or pdf.looks_like_pdf(url, head)):
             return False
         # 批次B-4：解析消费**抓取时存下的同一份字节**（工件 + hash 校验），不再按 URL
-        # 重抓一次——重抓的字节可能与已取证的不同，且多一次对外请求。工件缺失或
-        # 校验不符时如实按缺口处理，不用"再抓一次"把问题掩盖过去。
+        # 重抓一次——重抓的字节可能与已取证的不同，且多一次对外请求。
+        # 09-22 晚间复核：抓取 worker 说"这是 PDF"但工件为空（保存失败/旧版 worker）时，
+        # 同样**保留缺口**——此前会退成 data=None 交给 doc_from_url，触发第二次下载。
         data = None
-        if _artifact:
+        if _worker_says_pdf:
+            if not _artifact:
+                logger.warning("PDF 工件缺失（保存失败），保留缺口不重抓（task=%s）：%s",
+                               task_id, url[:100])
+                return False
             data = _artifact_bytes(_artifact, task_id)
             if data is None:
                 logger.warning("PDF 工件不可复用（缺失/校验失败，按缺口处理，task=%s）：%s",
                                task_id, str(_artifact.get("path") or "")[:120])
                 return False
+        elif _artifact:
+            # 旧路径（无 pdf 标记）也带工件时同样复用字节
+            data = _artifact_bytes(_artifact, task_id)
         doc = pdf.doc_from_url(url, data=data)
         if not doc:
             logger.info("PDF 证据通道未取得正文（按缺口处理，task=%s）：%s",

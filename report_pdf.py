@@ -596,6 +596,30 @@ def _resolve_image_src(src: str, workspace: os.PathLike | None) -> str | None:
 
 # ─────────────────────────── PDF 构建 ───────────────────────────
 
+# 数学符号归一：Unicode 减号（U+2212）等在中文字体里常缺字形，PDF 里显示成方框/丢失
+# （实机：第 1/6 页机械核对式"（= Δ归母净利润 □ Δ毛利…"）。公式符号必须可读，
+# 因此统一映射到 ASCII 等价字符——这些字符在所有字体里都有字形。
+_MATH_SYMBOL_MAP = {
+    "\u2212": "-",    # MINUS SIGN
+    "\uff0d": "-",    # FULLWIDTH HYPHEN-MINUS
+    "\u2010": "-",    # HYPHEN
+    "\u2011": "-",    # NON-BREAKING HYPHEN
+    "\u2013": "-",    # EN DASH
+    "\u2014": "-",    # EM DASH
+    "\u00a0": " ",    # NBSP（断行异常的一个来源）
+    "\u2009": " ",    # THIN SPACE
+    "\u202f": " ",    # NARROW NBSP
+}
+
+
+def normalize_math_symbols(text: str) -> str:
+    """把易缺字形的数学/排版符号换成 ASCII 等价字符（可读性优先）。"""
+    out = str(text or "")
+    for k, v in _MATH_SYMBOL_MAP.items():
+        out = out.replace(k, v)
+    return out
+
+
 def _escape_text(text: str) -> bytes:
     """标准字体（无嵌入 TTF）的文本字符串转义（Latin-1 近似）。"""
     out = bytearray()
@@ -955,8 +979,26 @@ class _PDFBuilder:
         ).encode()
         self.cursor_y = y_bottom - BODY_SIZE
 
+    # 数字 token：折行时不得在数字内部断开（"23.24%" 被拆成 "23" / ".24%" 会让读数
+    # 失真，实机第 1 页即如此）。断开点若落在数字/小数/百分号/单位之间，就往前退到
+    # 该 token 之前整段换行。
+    _NUM_TOKEN_RE = re.compile(r"[0-9][0-9,\.]*%?")
+
+    def _safe_break(self, cur: str) -> int:
+        """在 cur 里选一个安全断点（返回保留长度）：不切断数字 token。"""
+        m = None
+        for m in self._NUM_TOKEN_RE.finditer(cur):
+            pass
+        if m is None:
+            return len(cur)
+        start, end = m.span()
+        if end < len(cur):
+            return len(cur)          # 最后一个数字 token 已结束，正常断
+        # 断点落在数字 token 中间：退到该 token 起点（起点为 0 时只能硬断）
+        return start if start > 0 else len(cur)
+
     def _wrap(self, text: str, size: float, max_w: float) -> list[str]:
-        """按字符宽度折行（中文/英文混排）。"""
+        """按字符宽度折行（中文/英文混排），数字 token 不拆开。"""
         if not text:
             return [""]
         lines: list[str] = []
@@ -970,17 +1012,66 @@ class _PDFBuilder:
             if self._text_width(trial, size) <= max_w or not cur:
                 cur = trial
             else:
-                lines.append(cur)
-                cur = ch
+                cut = self._safe_break(cur)
+                if cut < len(cur):
+                    lines.append(cur[:cut].rstrip())
+                    cur = cur[cut:] + ch
+                else:
+                    lines.append(cur)
+                    cur = ch
         if cur or not lines:
             lines.append(cur)
         return lines
 
-    def _render_block(self, block: dict, workspace: os.PathLike | None) -> None:
+    def _image_display_height(self, src: str, workspace: os.PathLike | None) -> float:
+        """图片按可用宽度缩放后的显示高度（拿不到就按占位框高度）。"""
+        fp = _resolve_image_src(src, workspace)
+        if not fp:
+            return 12.0 * 2 + 16 + 6
+        try:
+            with open(fp, "rb") as f:
+                data = f.read()
+        except Exception:
+            return 12.0 * 2 + 16 + 6
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            parsed = _png_to_rgb(data)
+            if not parsed:
+                return 12.0 * 2 + 16 + 6
+            w, h = parsed[0], parsed[1]
+        else:
+            info = _jpeg_info(data)
+            if not info:
+                return 12.0 * 2 + 16 + 6
+            w, h = info
+        if not w or not h:
+            return 12.0 * 2 + 16 + 6
+        scale = min(1.0, USABLE_W / float(w))
+        dh = float(h) * scale
+        if dh > USABLE_H:
+            return 12.0 * 2 + 16 + 6      # 畸形图按占位框处理
+        return dh + BODY_SIZE + 4
+
+    def _next_block_need(self, nxt: dict | None,
+                         workspace: os.PathLike | None = None) -> float:
+        """下一块至少需要多少高度（用于标题随内容，避免页末孤行）。"""
+        if not nxt:
+            return BODY_SIZE * 2.4
+        t = str(nxt.get("type") or "")
+        if t == "image":
+            return self._image_display_height(str(nxt.get("src") or ""), workspace)
+        if t == "table":
+            rows = nxt.get("rows") or []
+            return min(len(rows) + 1, 4) * (BODY_SIZE * 1.6)
+        return BODY_SIZE * 2.4
+
+    def _render_block(self, block: dict, workspace: os.PathLike | None,
+                      nxt: dict | None = None) -> None:
         btype = block.get("type")
         if btype == "heading":
             size = _HEADING_SIZES.get(int(block.get("level") or 1), BODY_SIZE)
-            self._ensure_space(size * 1.9)
+            # 标题后必须放得下**下一块**（图片按图片高度），否则换页——不留"标题在
+            # 页末、内容在下一页"的孤行（实机第 2 页末的"图表"标题）
+            self._ensure_space(size * 1.9 + self._next_block_need(nxt, workspace))
             self.cursor_y -= size * 0.55
             self._draw_text(MARGIN_L, str(block.get("text") or ""), size,
                             (0.08, 0.13, 0.24))
@@ -1206,6 +1297,8 @@ def markdown_to_pdf(
     workspace: os.PathLike | None = None,
 ) -> bytes:
     """把任务报告 Markdown 转成 PDF 字节流（标题 + 正文 + 表格 + 图表）。"""
+    # 公式符号先归一：Unicode 减号等在 PDF 里会显示成方框/丢失（实机第 1/6 页机械核对式）
+    markdown = normalize_math_symbols(markdown)
     font = _load_font()
     builder = _PDFBuilder(font)
     # 标题
@@ -1236,8 +1329,9 @@ def markdown_to_pdf(
             if _norm_title(str(blk.get("text") or "")) == want:
                 blocks = blocks[:i] + blocks[i + 1:]
             break
-    for block in blocks:
-        builder._render_block(block, workspace)
+    for i, block in enumerate(blocks):
+        builder._render_block(block, workspace,
+                              blocks[i + 1] if i + 1 < len(blocks) else None)
     return builder.finish()
 
 

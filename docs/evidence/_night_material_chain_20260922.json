@@ -1,0 +1,48 @@
+{
+ "art_code": "AN202504281664011244",
+ "published_at": "2025-04-29",
+ "http_requests": 6,
+ "elapsed_sec": 7.4,
+ "pages": [
+  {
+   "page": 2,
+   "raw_sha256": "df84ae3d2a32523948e5f12f1360059c736640574e7a401617285f604675994d",
+   "chars": 5000
+  },
+  {
+   "page": 3,
+   "raw_sha256": "d4a36924dd12891b0731ab0aee8c3ed339e35929de119a27be90566efd11e196",
+   "chars": 5000
+  },
+  {
+   "page": 4,
+   "raw_sha256": "10f5f97a44327b6ac21dfc0f496b2467de7fb6fee22d3bc830fa1313c10a4af3",
+   "chars": 5000
+  },
+  {
+   "page": 5,
+   "raw_sha256": "d1ab17b520945133ba3f768d1f67022f9e6e98624f1994abaa588340cc056c21",
+   "chars": 5000
+  },
+  {
+   "page": 10,
+   "raw_sha256": "7a56e94c94b01f233671b68e4d5941648b2a563c7613a8d74e71e07c82c832f2",
+   "chars": 5000
+  },
+  {
+   "page": 11,
+   "raw_sha256": "505e3faed5884ba8b6aae882aeb8d1e1178931bd780aac6a37dc6430e7ebb550",
+   "chars": 5000
+  }
+ ],
+ "located_records": 7,
+ "kinds": [
+  "business_background",
+  "footnote",
+  "risk"
+ ],
+ "revenue_causal_sentences": 0,
+ "missing_kinds": [
+  "经营变化解释"
+ ]
+}
