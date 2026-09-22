@@ -88,6 +88,26 @@ export default function ResearchBriefPanel({ taskId, research, exportState, onRe
       {projectionNote && (
         <div className="text-xs text-slate-500">{projectionNote}</div>
       )}
+      {/* 批次3b：研究状态——**与数字机器验收分开**：verified 只说数字与格式通过 */}
+      {research.research_state?.state
+        && research.research_state.state !== 'not_applicable' && (
+        <div className={`${box} ${research.research_state.state === 'research_draft'
+          ? 'border border-amber-500/30' : ''}`}>
+          <div className={`${h} ${research.research_state.state === 'research_draft'
+            ? 'text-amber-400' : 'text-emerald-400'}`}>
+            研究状态：{research.research_state.label || research.research_state.state}
+          </div>
+          <ul className={li}>
+            <li>· {research.research_state.reason || '未提供原因'}</li>
+            <li>· 带定位披露 {research.research_state.located ?? 0} 条；
+              关键问题缺依据 {research.research_state.questions_without_support ?? 0} 个；
+              未支持主张 {research.research_state.unsupported_claims ?? 0} 条</li>
+            {research.research_state.state === 'research_draft' && (
+              <li className="text-amber-300">· 本条说的是**研究**是否就绪，不改变数字与格式的机器验收结论</li>
+            )}
+          </ul>
+        </div>
+      )}
       {projectionMissing && (
         <div className={`${box} border border-amber-500/30`}>
           <div className={`${h} text-amber-400`}>面板未展示：当前版本的结构未能重建</div>

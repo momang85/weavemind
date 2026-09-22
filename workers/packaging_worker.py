@@ -5,6 +5,7 @@ file_io 的落盘目录）为基础，只打包时间窗口内的新文件，避
 的陈旧产物混入交付包。
 """
 
+import json
 import logging
 import os
 import sys
@@ -164,6 +165,48 @@ class PackagingWorker(AsyncWorkerBase):
                         len(excluded), ", ".join(sorted(set(excluded))[:8]))
         return files
 
+    @staticmethod
+    def _package_manifest(task: dict, files: list) -> dict:
+        """包内清单：正文/材料/图表/规则的身份 + 打包时间（缺什么就空，不编）。"""
+        import hashlib
+        ws = Path(str((task or {}).get("workspace") or "")) if task else None
+        out: dict = {"packaged_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                     "schema": "weavemind.package/1"}
+        def _sha(p: Path) -> str:
+            try:
+                return hashlib.sha256(p.read_bytes()).hexdigest()
+            except Exception:
+                return ""
+        # 正文：包里的 reports/*.md（打包时刻的字节）
+        body_hashes = {}
+        for abs_path, arc in files:
+            if str(arc).startswith("reports/") and str(arc).endswith(".md"):
+                body_hashes[str(arc)] = _sha(Path(abs_path))
+        out["bodies"] = body_hashes
+        out["body_sha256"] = next(iter(body_hashes.values()), "")
+        # 图表：包内 charts/*.png
+        out["charts"] = {str(arc): _sha(Path(abs_path))
+                         for abs_path, arc in files if str(arc).startswith("charts/")}
+        # 材料与规则指纹：与版本身份同源（复用既有实现，不另算一套）
+        try:
+            import delivery_pipeline as dp
+            tid = str((task or {}).get("task_id") or "")
+            if ws is not None and tid:
+                body_text = ""
+                for abs_path, arc in files:
+                    if str(arc).startswith("reports/") and str(arc).endswith(".md"):
+                        try:
+                            body_text = Path(abs_path).read_text(encoding="utf-8")
+                        except Exception:
+                            body_text = ""
+                        break
+                out["sources_fingerprint"] = dp.sources_fingerprint(tid, body_text)
+                rv, rf = dp.rules_identity(tid)
+                out["rules_version"], out["rules_fingerprint"] = rv, rf
+        except Exception as exc:                 # noqa: BLE001 - 指纹算不出不阻断打包
+            logger.warning("包内清单指纹计算失败：%s", str(exc)[:120])
+        return out
+
     def _package(self, proj_path: Path, task: dict) -> str:
         if not proj_path.is_dir():
             raise RuntimeError(f"Project path not found: {proj_path}")
@@ -180,9 +223,14 @@ class PackagingWorker(AsyncWorkerBase):
             # 交付包放进任务自己的成果文件夹，方便整体移动
             out_dir = Path(str(task["workspace"]))
         zip_path = out_dir / f"deliverables_{ts}.zip"
+        # 批次4：包内携带**真实 manifest**（关联正文/材料/图表/规则 hash）——下载与陈旧
+        # 判定按**包内标识**对照当前采纳版，而不是靠文件时间戳（时间戳只作辅助）
+        manifest = self._package_manifest(task, files)
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for abs_path, arc_name in files:
                 zf.write(abs_path, arc_name)
+            zf.writestr("PACKAGE_MANIFEST.json",
+                        json.dumps(manifest, ensure_ascii=False, indent=1))
 
         names = [a for _, a in files]
         return (

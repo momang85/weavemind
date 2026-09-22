@@ -37,6 +37,118 @@ logger = logging.getLogger(__name__)
 SEPARATOR = "\n\n---\n\n"
 WRAPPER_FILE = "delivery_wrapper.md"      # 交付说明（分隔符之前的部分），供修订时逐字节复用
 REVIEW_STATE_FILE = "review_state.json"
+RESEARCH_STATE_FILE = "research_state.json"
+
+# 研究状态（批次3b）：**与数字机器验收分开**的另一条轴。`verified` 只说"数字与格式
+# 机器验收通过"；研究是否就绪要看关键问题有没有带定位的依据、重要推断可否复核、
+# 有没有事实矛盾。两者可以同时出现（数字 pass + 研究草稿），不许互相冒充。
+RESEARCH_READY = "research_ready"
+RESEARCH_DRAFT = "research_draft"
+RESEARCH_NOT_APPLICABLE = "not_applicable"
+
+_RESEARCH_STATE_LABELS = {
+    RESEARCH_READY: "研究就绪（关键问题有带定位依据）",
+    RESEARCH_DRAFT: "研究草稿／待补原始披露",
+    RESEARCH_NOT_APPLICABLE: "不适用（非研究任务或无需叙事）",
+}
+
+
+def research_state(task_id: str, goal: str, structure: dict | None, *,
+                   ws_dir=None) -> dict:
+    """按任务契约判定**研究状态**（与 `verified` 分开的一条轴）。
+
+    判据（指令 §3 第三小批 item 5）：
+    - 研究就绪：关键问题**有可定位依据**（`evidence.located > 0`，且不是全部问题都只
+      有读数没有依据），且没有"已断言但未支持"的主张；
+    - 研究草稿／待补原始披露：要求经营解释却**没有一条带定位的原始披露**（located=0），
+      或关键问题全部无依据、或存在未支持主张；
+    - 不适用：非研究任务（无结构对象），或契约不要求叙事（单期/纯数据核对）。
+    """
+    st = structure or {}
+    if not st:
+        return {"state": RESEARCH_NOT_APPLICABLE,
+                "label": _RESEARCH_STATE_LABELS[RESEARCH_NOT_APPLICABLE],
+                "reason": "非研究任务（无结构化研究契约）", "located": 0,
+                "missing_labels": [], "unsupported_claims": 0,
+                "questions_without_support": 0, "requires_narrative": False}
+    scope = st.get("scope") or {}
+    periods = list(scope.get("periods") or [])
+    questions = list(st.get("research_questions") or [])
+    ev = st.get("evidence") or {}
+    located = int(ev.get("located") or 0)
+    missing = list(ev.get("missing_labels") or [])
+    claims = list(st.get("claims") or [])
+    unsupported = [c for c in claims
+                   if str(c.get("support_status")) == "unsupported"
+                   and str(c.get("claim_type")) != "boundary"]
+    no_support = [q for q in questions
+                  if str(q.get("metric")) != "bank_materials"
+                  and not (q.get("support") or {}).get("has_evidence")]
+    requires_narrative = len(periods) >= 2 or bool(questions)
+    if not requires_narrative:
+        return {"state": RESEARCH_NOT_APPLICABLE,
+                "label": _RESEARCH_STATE_LABELS[RESEARCH_NOT_APPLICABLE],
+                "reason": "契约不要求经营解释（单期或纯数据核对）",
+                "located": located, "missing_labels": missing,
+                "unsupported_claims": len(unsupported),
+                "questions_without_support": len(no_support),
+                "requires_narrative": False}
+    reasons: list[str] = []
+    if located <= 0:
+        reasons.append("没有一条带正文定位的原始披露（located=0）")
+    if questions and len(no_support) == len(questions):
+        reasons.append("全部关键问题都只观察到读数、没有可定位依据")
+    if unsupported:
+        reasons.append(f"{len(unsupported)} 条已断言的主张没有底稿/披露支持")
+    if reasons:
+        return {"state": RESEARCH_DRAFT,
+                "label": _RESEARCH_STATE_LABELS[RESEARCH_DRAFT],
+                "reason": "；".join(reasons)[:200],
+                "located": located, "missing_labels": missing,
+                "unsupported_claims": len(unsupported),
+                "questions_without_support": len(no_support),
+                "requires_narrative": True}
+    return {"state": RESEARCH_READY,
+            "label": _RESEARCH_STATE_LABELS[RESEARCH_READY],
+            "reason": (f"带定位披露 {located} 条；关键问题 "
+                       f"{len(questions) - len(no_support)}/{len(questions)} 有依据；"
+                       "无未支持主张"),
+            "located": located, "missing_labels": missing,
+            "unsupported_claims": 0, "questions_without_support": len(no_support),
+            "requires_narrative": True}
+
+
+def write_research_state(task_id: str, payload: dict, *, ws_dir=None) -> None:
+    """落盘研究状态（页面/导出清单读它；缺文件即"未知"，不编）。"""
+    try:
+        import json as _json
+        p = Path(_ws(task_id, ws_dir)) / RESEARCH_STATE_FILE
+        p.write_text(_json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception as exc:                     # noqa: BLE001 - 写不进去不影响交付
+        logger.warning("研究状态落盘失败（task=%s）：%s", task_id, str(exc)[:120])
+
+
+def read_research_state(task_id: str, *, ws_dir=None) -> dict:
+    try:
+        import json as _json
+        p = Path(_ws(task_id, ws_dir)) / RESEARCH_STATE_FILE
+        if not p.exists():
+            return {}
+        return _json.loads(p.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+
+def research_state_note(state: dict) -> str:
+    """研究状态写进交付说明（Markdown 与 PDF 封面共用同一段文字）。"""
+    st = str((state or {}).get("state") or "")
+    if not st or st == RESEARCH_NOT_APPLICABLE:
+        return ""
+    label = str((state or {}).get("label") or st)
+    reason = str((state or {}).get("reason") or "")
+    extra = ("（数字与格式的机器验收不因此改变；本条说的是**研究**是否就绪）"
+             if st == RESEARCH_DRAFT else "")
+    return f"> **研究状态：{label}**——{reason}{extra}"
 
 # 自动注记块（草稿/评审/硬门槛）：修订重装时必须先剥掉旧的，否则会把上一版失败说明
 # 带进新稿——"不得继续拿旧失败说明判断新稿"。
@@ -638,6 +750,23 @@ def assemble_and_verify(task_id: str, goal: str, body: str, *,
         write_review_facts(task_id, facts, ws_dir=ws_dir)
 
     notes: list[str] = []
+    # 批次3b：研究状态（与数字机器验收分开的一条轴）——在验收/硬门槛之前算，注记进交付
+    # 说明（MD 与 PDF 封面共用），文件落盘供页面与导出清单读
+    _structure_for_state = None
+    try:
+        import report_brief as _rb
+        _structure_for_state = _rb.read_structure(task_id, ws_dir=ws_dir)
+    except Exception:
+        _structure_for_state = None
+    try:
+        rstate = research_state(task_id, goal, _structure_for_state, ws_dir=ws_dir)
+        write_research_state(task_id, rstate, ws_dir=ws_dir)
+        _rstate_note = research_state_note(rstate)
+        if _rstate_note:
+            notes.append(_rstate_note)
+    except Exception as exc:                     # noqa: BLE001 - 研究状态算不出来不阻断交付
+        rstate = {}
+        logger.warning("研究状态判定失败（task=%s）：%s", task_id, str(exc)[:120])
     # C3：**装配说明不进正文**——"研究简报由代码装配（关键数据/来源/声明）"是工程说明，
     # 读者要的是结论与证据；它改为写进任务详情（structure 的 assembly_note）与日志。
     if brief_note:
@@ -692,6 +821,7 @@ def assemble_and_verify(task_id: str, goal: str, body: str, *,
         "accepted_body_matches": bool(version is not None
                                       and version.acceptance_for_this_body()),
         "delivered_sha256": entry.get("delivered_sha256", ""),
+        "research_state": rstate,
         "paper": wp,
     }
 

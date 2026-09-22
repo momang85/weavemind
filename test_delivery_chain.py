@@ -7446,6 +7446,137 @@ class TestRealAnnualReportPositivePath(unittest.TestCase):
         self.assertNotIn("示例", blob)
 
 
+class TestPackageManifestInsideZip(unittest.TestCase):
+    """批次4：交付包内携带真实 manifest（正文/材料/图表/规则 hash），陈旧判定按包内标识。"""
+
+    def test_zip_carries_manifest_with_body_and_chart_hashes(self):
+        import importlib.util
+        import time
+        import zipfile
+        tmp = Path(tempfile.mkdtemp(prefix="wm_pkg_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        proj = tmp / "project"
+        (proj / "reports").mkdir(parents=True)
+        (proj / "charts").mkdir(parents=True)
+        body_text = "# 报告" + chr(10) + "正文"
+        (proj / "reports" / "report.md").write_text(body_text, encoding="utf-8")
+        (proj / "charts" / "chart_1.png").write_bytes(
+            bytes([0x89]) + b"PNG" + b"x" * 8)
+        (proj / "main.py").write_text("print(1)", encoding="utf-8")
+        spec = importlib.util.spec_from_file_location(
+            "pkg_probe", Path(__file__).resolve().parent / "workers" / "packaging_worker.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        w = mod.PackagingWorker.__new__(mod.PackagingWorker)
+        res = w._sync_package("打包", {"workspace": str(tmp), "simple": True,
+                                       "task_id": "t-pkg", "task_start_ts": time.time()})
+        self.assertIn("[PACKAGED]", res)
+        zips = sorted(tmp.glob("deliverables_*.zip"))
+        self.assertTrue(zips)
+        with zipfile.ZipFile(zips[-1]) as z:
+            self.assertIn("PACKAGE_MANIFEST.json", z.namelist())
+            man = json.loads(z.read("PACKAGE_MANIFEST.json").decode("utf-8"))
+        self.assertEqual(man.get("schema"), "weavemind.package/1")
+        # 包内正文 sha 与**包内字节**一致（不是工作区里"现在"的字节；Windows 换行
+        # 转换会让磁盘字节与内存字符串不同，所以按文件字节算）
+        import hashlib
+        self.assertEqual(man["body_sha256"],
+                         hashlib.sha256(
+                             (proj / "reports" / "report.md").read_bytes()).hexdigest())
+        self.assertIn("charts/chart_1.png", man.get("charts") or {})
+        self.assertTrue(man.get("packaged_at"))
+
+
+class TestResearchStateAndDeterministicCritic(unittest.TestCase):
+    """批次3b/3c：研究状态与数字验收分开；确定性计划按配置进统一 Critic。"""
+
+    def test_research_draft_when_no_located_disclosure(self):
+        """要求经营解释却 located=0 → 研究草稿（不改变数字机器验收结论）。"""
+        import delivery_pipeline as dp
+        st = {"scope": {"periods": [2023, 2024]},
+              "evidence": {"located": 0, "missing_labels": ["业务背景", "财务附注"]},
+              "research_questions": [{"metric": "revenue",
+                                      "support": {"has_evidence": False}}],
+              "claims": []}
+        out = dp.research_state("t-rs-1", "研究示例公司 2023 与 2024 年度", st)
+        self.assertEqual(out["state"], dp.RESEARCH_DRAFT)
+        self.assertIn("located=0", out["reason"])
+        self.assertIn("不因此改变", dp.research_state_note(out))
+
+    def test_research_ready_keeps_numeric_acceptance_separate(self):
+        """有带定位披露 + 无未支持主张 → 研究就绪；未支持主张则降为草稿。"""
+        import delivery_pipeline as dp
+        base = {"scope": {"periods": [2023, 2024]},
+                "evidence": {"located": 3, "missing_labels": []},
+                "research_questions": [{"metric": "revenue",
+                                        "support": {"has_evidence": True}}],
+                "claims": []}
+        self.assertEqual(dp.research_state("t-rs-2", "g", base)["state"],
+                         dp.RESEARCH_READY)
+        bad = dict(base, claims=[{"support_status": "unsupported",
+                                  "claim_type": "observation"}])
+        self.assertEqual(dp.research_state("t-rs-3", "g", bad)["state"],
+                         dp.RESEARCH_DRAFT)
+        # 边界句（claim_type=boundary）不算"已断言未支持"
+        ok = dict(base, claims=[{"support_status": "unsupported",
+                                 "claim_type": "boundary"}])
+        self.assertEqual(dp.research_state("t-rs-4", "g", ok)["state"],
+                         dp.RESEARCH_READY)
+
+    def test_not_applicable_for_non_research_task(self):
+        import delivery_pipeline as dp
+        self.assertEqual(dp.research_state("t-rs-5", "g", None)["state"],
+                         dp.RESEARCH_NOT_APPLICABLE)
+        single = {"scope": {"periods": [2024]}, "evidence": {"located": 0},
+                  "research_questions": [], "claims": []}
+        self.assertEqual(dp.research_state("t-rs-6", "g", single)["state"],
+                         dp.RESEARCH_NOT_APPLICABLE)
+
+    def test_deterministic_plan_goes_through_critic_when_enabled(self):
+        """`system.critic=true` 时确定性计划进同一审查入口；不补造 PASS。"""
+        import orchestrator_v2 as o
+        orc = o.OrchestratorV2.__new__(o.OrchestratorV2)
+        orc._critic_enabled = True
+        orc._messaging = None
+        orc._now_iso = lambda: "2026-09-21T00:00:00Z"
+        seen: list = []
+
+        def _fake_review(goal, steps, task_id):
+            seen.append((goal, list(steps), task_id))
+            orc._review_state(task_id)["verdict"] = "PASS"
+            return steps
+
+        orc._review_plan = _fake_review
+        orc._review_state = lambda tid: {}
+        steps = [{"step_id": "1", "capability": "web_search", "instruction": "x"}]
+        with mock.patch("orchestrator_v2.push_progress"):
+            out = orc._review_deterministic_plan(
+                "t-cr-1", "研究洋河股份", steps,
+                reason="路由模板计划未经过 Critic 评审")
+        self.assertEqual(seen and seen[0][2], "t-cr-1", "必须真的调用评审")
+        self.assertEqual(out, steps)
+
+    def test_deterministic_plan_degrades_when_critic_disabled(self):
+        """critic 关闭时如实记降级（个人模式继续），不写 PASS。"""
+        import orchestrator_v2 as o
+        orc = o.OrchestratorV2.__new__(o.OrchestratorV2)
+        orc._critic_enabled = False
+        orc._messaging = None
+        orc._now_iso = lambda: "2026-09-21T00:00:00Z"
+        orc._review_is_required = lambda: False
+        marks: list = []
+        orc._review_mark_degraded = lambda tid, reason, plan=None: marks.append(reason)
+        orc._review_state = lambda tid: {}
+        steps = [{"step_id": "1", "capability": "web_search", "instruction": "x"}]
+        with mock.patch("orchestrator_v2.push_progress"):
+            out = orc._review_deterministic_plan(
+                "t-cr-2", "g", steps,
+                reason="路由模板计划未经过 Critic 评审")
+        self.assertEqual(out, steps)
+        self.assertTrue(marks, "必须如实记降级原因")
+        self.assertIn("critic 已关闭", marks[0])
+
+
 class TestMaterialSideBatch3(unittest.TestCase):
     """批次3（资料侧）：短查询来自契约、候选抓取前排除、PDF 不以截断字节冒充正文。
 

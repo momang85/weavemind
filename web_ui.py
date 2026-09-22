@@ -2710,6 +2710,15 @@ def _read_export_manifest(tid: str) -> dict:
         return {}
 
 
+def _research_state_for(tid: str, ws) -> dict | None:
+    """研究状态（页面/导出清单同源）；缺文件返回 None（未知，不编）。"""
+    try:
+        from delivery_pipeline import read_research_state
+        return read_research_state(tid, ws_dir=str(ws)) or None
+    except Exception:
+        return None
+
+
 def _export_payload(tid: str, ws, state: dict | None) -> dict:
     """导出与版本绑定信息（F3-B）。只读工作区，缺文件即空，不编造。
 
@@ -2725,6 +2734,19 @@ def _export_payload(tid: str, ws, state: dict | None) -> dict:
     _zips = sorted((p for p in ws.glob("deliverables_*.zip")),
                    key=lambda p: p.stat().st_mtime, reverse=True)
     _zip = _zips[0] if _zips else None
+    # 批次4：包内真实 manifest（`PACKAGE_MANIFEST.json`）——下载与陈旧判定按**包内标识**
+    # 对照当前采纳版；时间戳只作辅助。包内没有清单（旧包）就退回清单文件/时间戳。
+    _pkg_manifest: dict = {}
+    if _zip is not None:
+        try:
+            import zipfile as _zf
+            with _zf.ZipFile(_zip) as _z:
+                if "PACKAGE_MANIFEST.json" in _z.namelist():
+                    _pkg_manifest = json.loads(
+                        _z.read("PACKAGE_MANIFEST.json").decode("utf-8")) or {}
+        except Exception as exc:
+            logger.warning("包内清单读取失败（%s）：%s", _zip.name, str(exc)[:120])
+            _pkg_manifest = {}
     # 重装配（如修订重验）会重写清单但**不重建 zip**：清单比包新两分钟以上时，
     # 清单里的版本号对得上当前也不能说包是当前的（实机：11:56 的包配 12:23 的清单）。
     _generated = float((_exp or {}).get("generated_at") or 0)
@@ -2743,11 +2765,22 @@ def _export_payload(tid: str, ws, state: dict | None) -> dict:
         _adopted_at = 0.0
     if bool(_zip) and _adopted_at and _adopted_at - _zip.stat().st_mtime > 1.0:
         _package_stale = True
+    # 包内清单的正文 sha 与当前采纳正文不同 → 陈旧（**内容标识**，比时间戳精确）
+    _pkg_body = str(_pkg_manifest.get("body_sha256") or "")
+    _cur_body = str((state or {}).get("version_id") or "")
+    if _pkg_body and _cur_body and _pkg_body != _cur_body:
+        _package_stale = True
     return {
         "manifest": _exp or None,
         "manifest_version_id": str((_exp or {}).get("report_version_id") or ""),
         "current_version_id": str((state or {}).get("identity_id") or ""),
-        "package_body_version_id": str((_exp or {}).get("body_sha256") or ""),
+        # 包内清单优先：它记的是**打包时刻**的正文/材料/图表身份
+        "package_body_version_id": str(_pkg_manifest.get("body_sha256")
+                                       or (_exp or {}).get("body_sha256") or ""),
+        "package_sources_fingerprint": str(_pkg_manifest.get("sources_fingerprint") or ""),
+        "package_rules_fingerprint": str(_pkg_manifest.get("rules_fingerprint") or ""),
+        "package_charts": dict(_pkg_manifest.get("charts") or {}),
+        "package_manifest": _pkg_manifest or None,
         "current_body_version_id": str((state or {}).get("version_id") or ""),
         "package": (_zip.name if _zip else ""),
         "package_generated_at": (
@@ -2755,6 +2788,8 @@ def _export_payload(tid: str, ws, state: dict | None) -> dict:
                           time.localtime(_zip.stat().st_mtime))
             if _zip else ""),
         "package_stale": _package_stale,
+        # 批次3b：导出清单与页面/正文同源显示研究状态（verified 只代表数字与格式机器验收）
+        "research_state": _research_state_for(tid, ws),
     }
 
 
@@ -4736,6 +4771,13 @@ def _research_payload(tid: str, ws) -> dict | None:
         out["plan_review"] = plan_review
         # D2：投影状态（按当前版本重建与否）——页面据此决定是否隐藏版本相关的块
         out["projection"] = projection
+        # 批次3b：研究状态（与数字机器验收分开的一条轴）——页面与导出清单同源读文件，
+        # 缺文件即"未知"，不编
+        try:
+            from delivery_pipeline import read_research_state
+            out["research_state"] = read_research_state(tid, ws_dir=str(ws)) or None
+        except Exception:
+            out["research_state"] = None
         if not out:
             return None
         return out

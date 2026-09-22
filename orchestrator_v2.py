@@ -4238,6 +4238,40 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             task_id, "恢复的计划没有仍有效的评审 PASS", plan=plan)
         return False
 
+    def _review_deterministic_plan(self, task_id: str, goal: str,
+                                   steps: list[dict], *, reason: str) -> list[dict]:
+        """确定性计划（模板/路由/固定研究步骤）按**配置**走统一 Critic 审查。
+
+        批次3c（指令 §3 第三小批 item 7）：固定研究路线不得因"模板路由"直接跳过评审；
+        `system.critic=true` 时进同一入口（`_review_plan`：FAIL 修订一次并复评，超时/异常
+        按"评审未完成"处置）。**不补造评审**：Critic 关闭或调用失败时，如实记降级
+        （个人模式继续、银行模式拒绝），绝不写 PASS。
+        """
+        if not self._critic_enabled:
+            self._require_review_or_refuse(
+                task_id, "critic 已关闭（system.critic=false），本计划没有评审",
+                plan=steps)
+            return steps
+        try:
+            reviewed = self._review_plan(goal, steps, task_id)
+        except ReviewRequiredError:
+            # 银行口径：必需评审未完成 → 拒绝继续（`_review_plan` 内已处置）
+            raise
+        except Exception as exc:                     # noqa: BLE001 - 评审异常按未完成处置
+            logger.warning("确定性计划评审异常（task=%s）：%s", task_id, str(exc)[:140])
+            self._review_unavailable(task_id, f"评审异常：{str(exc)[:120]}", steps,
+                                     self._review_is_required())
+            return steps
+        _st = self._review_state(task_id)
+        if str(_st.get("verdict") or "") == "PASS":
+            logger.info("确定性计划经 Critic 评审 PASS（task=%s）", task_id)
+            return reviewed or steps
+        if str(_st.get("verdict") or "") in ("FAIL", "DEGRADED", "ERROR", ""):
+            # 复评仍未通过 / 评审未完成：如实记降级（银行口径在 `_review_plan` 内已拒绝）
+            self._require_review_or_refuse(
+                task_id, str(_st.get("degraded_reason") or reason), plan=reviewed or steps)
+        return reviewed or steps
+
     def _require_review_or_refuse(self, task_id: str, reason: str,
                                   *, plan: list[dict] | None = None) -> None:
         """按身份模式统一处置"必需评审未完成"：银行拒绝，个人记降级。"""
@@ -5363,9 +5397,10 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 steps = self._normalize_steps(template_steps)
                 steps = self._ensure_report_step(steps, task_id)
                 used_template = True
-                # M0-b：模板计划同样受评审策略约束
-                self._require_review_or_refuse(
-                    task_id, "模板计划未经过 Critic 评审", plan=steps)
+                # 批次3c：确定性计划在**配置要求评审**时也进统一审查入口
+                # （`system.critic=true`）；critic 关闭时沿用既有策略（银行拒绝/个人降级）
+                steps = self._review_deterministic_plan(
+                    task_id, goal, steps, reason="模板计划未经过 Critic 评审")
             else:
                 routed = self._route_template(goal, task_id)
                 if routed:
@@ -5376,9 +5411,10 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     steps = self._normalize_steps(routed)
                     steps = self._ensure_report_step(steps, task_id)
                     used_template = True
-                    # M0-b：路由到模板同样是"没有 Critic 评审"的计划
-                    self._require_review_or_refuse(
-                        task_id, "路由模板计划未经过 Critic 评审", plan=steps)
+                    # 批次3c：路由模板（含固定研究步骤）同样进统一审查入口
+                    steps = self._review_deterministic_plan(
+                        task_id, goal, steps,
+                        reason="路由模板计划未经过 Critic 评审")
                 else:
                     try:
                         from llm_client import LLMUnavailableError

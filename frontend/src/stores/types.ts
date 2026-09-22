@@ -158,6 +158,17 @@ export interface ResearchBrief {
   }
   /** 面板（结构对象）绑定的版本；与当前选中版本不一致时页面必须提示 */
   structure_version?: string
+  /** 批次3b：研究状态（与数字机器验收分开的一条轴）。 */
+  research_state?: {
+    state?: string
+    label?: string
+    reason?: string
+    located?: number
+    missing_labels?: string[]
+    unsupported_claims?: number
+    questions_without_support?: number
+    requires_narrative?: boolean
+  } | null
   structure_current?: boolean
   /** 绑定版本在版本库里是否存在、因何登记——区分"绑定代码装配候选（修订路径按设计
    *  交付用户编辑版，候选留档）"与"绑定更早版本（需重新装配）" */

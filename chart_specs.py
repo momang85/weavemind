@@ -311,11 +311,17 @@ def financial_research_specs(rows: list[dict], derived: list[dict], *,
         yoy_by_metric = {str(d.get("metric") or ""): d.get("value")
                          for d in derived
                          if str(d.get("metric") or "").endswith("_yoy")}
+        # 方向由**数据**判定（批次4）：三项全降时不得写"有升有降"（实机 ui-750185076a
+        # 的图 1 就写错了）；口径与结论都从 yoy 读数算出来，图注/结论一致
         ups = [v for v in yoy_by_metric.values() if isinstance(v, (int, float))]
         if ups and all(v > 0 for v in ups):
             top = max(yoy_by_metric.items(), key=lambda kv: kv[1])
             conclusion = (f"两期核心指标均上升，{metric_label(top[0])}增幅最大"
                           f"（{top[1]:g}%）；分项同比见同比增速图")
+        elif ups and all(v < 0 for v in ups):
+            bottom = min(yoy_by_metric.items(), key=lambda kv: kv[1])
+            conclusion = (f"两期核心指标均下降，{metric_label(bottom[0])}降幅最大"
+                          f"（{bottom[1]:g}%）；分项同比见同比增速图")
         elif ups:
             conclusion = "两期核心指标有升有降，分项同比见同比增速图"
         else:
@@ -325,7 +331,11 @@ def financial_research_specs(rows: list[dict], derived: list[dict], *,
             "conclusion": conclusion,
             # 图注（报告正文用）**不带数字**：正文里的数字必须可溯源，图注里的
             # 同比/百分点若单列一处就成"不可溯源数字"（实测把溯源率从 ~100% 拉到 69%）
-            "caption": "两期核心指标规模对比（升/降方向见图中标注）",
+            "caption": ("两期核心指标规模对比（"
+                        + ("三项均下降" if ups and all(v < 0 for v in ups)
+                           else "三项均上升" if ups and all(v > 0 for v in ups)
+                           else "有升有降")
+                        + "，方向见图中标注）"),
             "type": "grouped_bar",
             "title": f"{who}{periods[0]} vs {periods[-1]} 核心指标对比（{unit or '原值'}）",
             "x_axis_title": "核心指标",
