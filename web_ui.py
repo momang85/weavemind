@@ -2864,9 +2864,20 @@ def _task_pdf_bytes(tid: str) -> bytes:
         raise LookupError("report not found")
     from report_pdf import markdown_to_pdf
     body = str(data["report"])
+    # 09-23：PDF 抬头不得是整段任务指令（研究简报的读者抬头用正文一级标题；
+    # 没有一级标题才退回截断后的目标）。
+    title = ""
+    for ln in body.split("\n"):
+        s = ln.strip()
+        if s.startswith("# "):
+            title = s[2:].strip()
+            break
+    if not title:
+        goal = str(data.get("goal") or "任务报告")
+        title = goal[:60] + ("…" if len(goal) > 60 else "")
     pdf = markdown_to_pdf(
         body,
-        title=str(data.get("goal") or "任务报告"),
+        title=title,
         workspace=task_workspace(tid),
     )
     # M0-a：导出即写清单（各文件 hash + 绑定的报告版本 + 草稿判定）

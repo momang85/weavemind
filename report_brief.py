@@ -2240,11 +2240,19 @@ def render_brief_markdown(structure: dict, body: str = "",
     _full_model = str(body or "").strip()
     if _full_model and not _looks_like_brief(_full_model):
         _saved = _save_full_model_report(task_id, _full_model)
-        lines.append("### 完整模型稿（审计留档）")
-        lines.append("")
-        lines.append(f"- 模型原始正文逐字保存在交付包内：`{_saved}`"
-                     "（去重只影响读者主文，不减信息）")
-        lines.append("")
+        if _saved:
+            lines.append("### 完整模型稿（审计留档）")
+            lines.append("")
+            lines.append(f"- 模型原始正文逐字保存在交付包内：`audit/{_saved}`"
+                         "（按内容 hash 命名，不覆盖历史；去重只影响读者主文，不减信息）")
+            lines.append("")
+        else:
+            # 落盘/校验失败：不得声称"逐字保存在交付包内"
+            lines.append("### 完整模型稿（审计留档）")
+            lines.append("")
+            lines.append("- 完整模型稿本次**未能落盘校验通过**，未进入交付包；"
+                         "读者主文为去重后的版本，审计原文需从任务工作区另行导出。")
+            lines.append("")
     # 小节标题用**验收器认的**名称（`## 参考来源`），类型标签写在条目下一行——
     # 条目行必须是纯 `1. [标题](URL)`，否则清单解析不到（实机被记成"缺少参考来源清单"）
     lines.append("## 参考来源")
@@ -2382,23 +2390,36 @@ BRIEF_SECTIONS = ("## 关键发现", "## 业务背景", "## 财务对照", "## �
 
 
 def _save_full_model_report(task_id: str | None, text: str) -> str:
-    """把模型原始正文逐字写入工作区（交付包会带上），返回相对路径。
+    """把模型原始正文逐字写入工作区（**按内容 hash 命名**），返回相对路径或空串。
 
     读者主文按"问题组织、去掉重复"收敛，但审计要能看到原文；写文件而不是贴回正文，
     是为了不让模型自带的 `[n=x]` 引用污染装配器的来源清单一致性检查。
+
+    09-23：文件名带内容 hash（`model_report_full_<sha16>.md`）——固定名会覆盖历史版本；
+    写完**校验存在与 hash**，失败返回空串（调用方不得再宣称"逐字保存在交付包内"）。
     """
-    rel = "model_report_full.md"
     try:
+        import hashlib
         import workspace
+        body = str(text or "")
+        if not body.strip():
+            return ""
+        sha16 = hashlib.sha256(body.encode("utf-8")).hexdigest()[:16]
+        rel = f"model_report_full_{sha16}.md"
         proj = workspace.task_project_dir(str(task_id)) if task_id else None
         if proj is None:
-            return rel
+            return ""
         p = Path(proj) / rel
-        p.write_text(str(text or ""), encoding="utf-8")
+        if not p.exists():
+            p.write_text(body, encoding="utf-8")
+        got = p.read_text(encoding="utf-8")
+        if hashlib.sha256(got.encode("utf-8")).hexdigest()[:16] != sha16:
+            logger.warning("完整模型稿校验失败（task=%s，hash 不符）", task_id)
+            return ""
         return rel
     except Exception as exc:                     # noqa: BLE001 - 落盘失败只记日志
         logger.warning("完整模型稿落盘失败（task=%s）：%s", task_id, str(exc)[:120])
-        return rel
+        return ""
 
 def _brief_section(text: str, heading: str) -> str:
     """取简报里 `heading` 一节的内容（到下一个**简报小节**为止）。"""

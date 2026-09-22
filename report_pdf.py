@@ -985,17 +985,27 @@ class _PDFBuilder:
     _NUM_TOKEN_RE = re.compile(r"[0-9][0-9,\.]*%?")
 
     def _safe_break(self, cur: str) -> int:
-        """在 cur 里选一个安全断点（返回保留长度）：不切断数字 token。"""
+        """在 cur 里选一个安全断点（返回保留长度）：不切断数字 token，也不把负号留在行尾。
+
+        09-23 实机：`（-12.83%）` 在行尾断成 `（-` + `12.83%）`——负号与数字分家。
+        """
         m = None
         for m in self._NUM_TOKEN_RE.finditer(cur):
             pass
         if m is None:
+            if cur.endswith("-"):
+                return len(cur) - 1 if len(cur) > 1 else len(cur)
             return len(cur)
         start, end = m.span()
         if end < len(cur):
             return len(cur)          # 最后一个数字 token 已结束，正常断
         # 断点落在数字 token 中间：退到该 token 起点（起点为 0 时只能硬断）
-        return start if start > 0 else len(cur)
+        if start <= 0:
+            return len(cur)
+        # 数字前面紧跟负号（-12.83 / −12.83）：负号跟着数字一起走，不留行尾
+        if cur[start - 1] in ("-", "−"):
+            return start - 1 if start - 1 > 0 else len(cur)
+        return start
 
     def _wrap(self, text: str, size: float, max_w: float) -> list[str]:
         """按字符宽度折行（中文/英文混排），数字 token 不拆开。"""
@@ -1013,6 +1023,11 @@ class _PDFBuilder:
                 cur = trial
             else:
                 cut = self._safe_break(cur)
+                # 收尾标点不留行首（"…）。" 的句号被甩到下一行）：断点后紧跟收尾标点时
+                # 把它一起留在本行
+                while (cut < len(cur) and cur[cut] in "。，、；：）】」”』!.?,;:)]"
+                       and self._text_width(cur[:cut + 1], size) <= max_w * 1.06):
+                    cut += 1
                 if cut < len(cur):
                     lines.append(cur[:cut].rstrip())
                     cur = cur[cut:] + ch
@@ -1299,6 +1314,10 @@ def markdown_to_pdf(
     """把任务报告 Markdown 转成 PDF 字节流（标题 + 正文 + 表格 + 图表）。"""
     # 公式符号先归一：Unicode 减号等在 PDF 里会显示成方框/丢失（实机第 1/6 页机械核对式）
     markdown = normalize_math_symbols(markdown)
+    # 标题用同一套归一：否则正文 H1 里的 en dash 被归一成 '-' 而 title 参数没有，
+    # "封面标题与正文首个标题重复时跳过"的判断会失配 → 标题印两遍
+    if title:
+        title = normalize_math_symbols(str(title))
     font = _load_font()
     builder = _PDFBuilder(font)
     # 标题

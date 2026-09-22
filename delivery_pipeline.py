@@ -518,6 +518,13 @@ def repack_adopted(task_id: str, *, md_bytes: bytes, pdf_bytes: bytes = b"",
     if charts_dir.is_dir():
         for p in sorted(charts_dir.glob("*.png")):
             files.append((p, f"charts/{p.name}"))
+    # 完整模型稿（审计留档，按内容 hash 命名）：存在的每一版都进包（不覆盖历史）
+    for cand_dir in (ws / "project", ws):
+        if not cand_dir.is_dir():
+            continue
+        for p in sorted(cand_dir.glob("model_report_full_*.md")):
+            files.append((p, f"audit/{p.name}"))
+        break
     manifest = package_manifest(task_id, ws, files, pdf_name=pdf_name)
     ts = time.strftime("%Y%m%d_%H%M%S")
     zip_path = ws / f"deliverables_{ts}.zip"
@@ -1218,19 +1225,41 @@ def read_wrapper(task_id: str, delivered: str = "", old_body: str = "") -> tuple
 
     返回 `(wrapper, 来源说明)`；来源说明会写进交付物，便于人工判断这份修订是
     在什么基础上装配的。
+
+    09-23：研究任务的读者主文不该顶着整段任务指令——落盘的 wrapper 若就是原始任务
+    指令（长文且带"阅读重点/每个数字须能回溯"这类提示语），换成一句面向读者的抬头；
+    任务指令仍在任务页与审计记录里可查，不减信息。
     """
     p = workspace.task_workspace(task_id) / WRAPPER_FILE
+    wrapper = ""
+    source = "derived"
     try:
         if p.exists():
-            return p.read_text(encoding="utf-8").strip("\n"), "stored"
+            wrapper = p.read_text(encoding="utf-8").strip("\n")
+            source = "stored"
     except Exception:
         pass
-    text = str(delivered or "")
-    if old_body and old_body in text:
-        text = text.replace(old_body, "", 1)
-    elif SEPARATOR in text:
-        text = text.split(SEPARATOR, 1)[0]
-    return strip_auto_notes(text), "derived"
+    if not wrapper:
+        text = str(delivered or "")
+        if old_body and old_body in text:
+            text = text.replace(old_body, "", 1)
+        elif SEPARATOR in text:
+            text = text.split(SEPARATOR, 1)[0]
+        wrapper = strip_auto_notes(text)
+    if _looks_like_task_instruction(wrapper):
+        return ("> 本文件为公司研究简报；完整任务指令、检索与工程细节见任务页与审计记录。\n"
+                "> 每个数字的来源与算式见文末附录（可复算底稿）。", source)
+    return wrapper, source
+
+
+def _looks_like_task_instruction(text: str) -> bool:
+    """交付说明是不是"整段任务指令"（研究任务把它移出读者主文）。"""
+    t = str(text or "")
+    if len(t) < 200:
+        return False
+    markers = ("阅读重点", "每个数字须能回溯", "bank_corporate", "研究契约",
+               "缺证据的如实标缺口", "生成研究目标")
+    return any(m in t for m in markers)
 
 
 # ── 读取口径（页面 / 导出 / manifest 共用）──────────────────
