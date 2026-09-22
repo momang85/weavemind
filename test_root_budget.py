@@ -248,11 +248,21 @@ class TestBudgetExhaustionStopsRun(unittest.TestCase):
     """预算耗尽要**停下来**：只拒绝单次派发会让重试/重做循环每 2 秒空转一次。"""
 
     def test_dispatch_records_task_level_flag(self):
-        """预算已耗尽时派发被拒，并置运行级标记（供收尾/迭代循环停止）。"""
+        """预算已耗尽时派发被拒，并置运行级标记（供收尾/迭代循环停止）。
+
+        **单进程语义**（`WM_SINGLE_PROCESS=1`）：本用例测的是"额度用尽后拒派发"这条
+        路径；多进程语义下、共享账本不可用时是另一条路径（fail closed，见
+        `TestBoundedFailClosed`）。不声明就会依赖运行环境有没有 Redis（CI 无 Redis 时
+        会走 fail closed，本地有 Redis 时走额度路径——同一份用例两种行为）。
+        """
+        import os as _os
         import threading
         import tempfile
         from unittest import mock
         from orchestrator_v2 import OrchestratorV2
+
+        _os.environ["WM_SINGLE_PROCESS"] = "1"
+        self.addCleanup(_os.environ.pop, "WM_SINGLE_PROCESS", None)
 
         tmp = Path(tempfile.mkdtemp(prefix="wm_bud4_"))
         self.addCleanup(__import__("shutil").rmtree, tmp, ignore_errors=True)

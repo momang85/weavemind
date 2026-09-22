@@ -705,7 +705,7 @@ class RootBudget:
                 # 就是 3 倍额度）。无模型的离线检查/工作台读取不受影响（它们不 reserve）。
                 if self._bounded_requires_shared() and not self._shared_available():
                     raise BudgetExceeded(
-                        "显式有界任务要求跨进程共享计数，但共享账本（Redis）不可用："
+                        "显式有界任务的预算要求跨进程共享计数，但共享账本（Redis）不可用："
                         "拒绝新付费请求（不得按每进程一份上限继续）")
                 why = self.exhausted_reason()
                 if why:
