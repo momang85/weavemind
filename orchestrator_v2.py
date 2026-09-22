@@ -3871,7 +3871,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             self._task_budgets = budgets
         b = budgets.get(task_id)
         if b is None:
-            from root_budget import RootBudget, limits_from_config
+            from root_budget import (RootBudget, limits_from_config,
+                                     multiprocess_default)
             try:
                 cfg = self._load_cfg_snapshot()
             except Exception:
@@ -3881,7 +3882,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             # 时间上限——于是"我把预算都设成 0（不限）"实际得到的是"600 秒硬截止"，
             # 账本里记的上限和配置写的不是一回事。
             b = RootBudget(task_id, task_workspace(task_id), limits,
-                           redis_factory=self._budget_redis_factory)
+                           redis_factory=self._budget_redis_factory,
+                           multiprocess=multiprocess_default())
             budgets[task_id] = b
         return b
 

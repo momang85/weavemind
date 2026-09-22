@@ -1290,8 +1290,16 @@ class TestResearchFixedPathOffline(unittest.TestCase):
     # ── 根预算共享 ───────────────────────────────────────────
 
     def test_root_budget_refuses_dispatch_but_keeps_facts(self):
-        """根预算耗尽：不得再派发步骤；预载（不发 LLM）不占预算，事实仍留底稿。"""
+        """根预算耗尽：不得再派发步骤；预载（不发 LLM）不占预算，事实仍留底稿。
+
+        单进程语义（`WM_SINGLE_PROCESS=1`）：本用例是离线单进程；生产的多进程语义下，
+        显式有界任务在共享账本不可用时是 **fail closed**（见 `test_root_budget.
+        TestBoundedFailClosed`），不是"用掉额度再拒派发"。
+        """
+        import os as _os
         import root_budget as rb
+        _os.environ["WM_SINGLE_PROCESS"] = "1"
+        self.addCleanup(_os.environ.pop, "WM_SINGLE_PROCESS", None)
         self._seed_contract()
         o = self._orch("timeout")
         o._structured_data_preload = self._preload_writer(_research_financials())

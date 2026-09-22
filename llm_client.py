@@ -502,12 +502,14 @@ def _root_budget_for_task():
     if cached is not None:
         return cached
     try:
-        from root_budget import RootBudget, default_redis_factory
+        from root_budget import (RootBudget, default_redis_factory,
+                                 multiprocess_default)
         from workspace import task_workspace
         ws = task_workspace(tid)
         ws.mkdir(parents=True, exist_ok=True)   # 账本落在工作区；首次调用时目录可能还没建
         b = RootBudget(tid, ws, _budget_limits_from_file(),
-                       redis_factory=default_redis_factory)
+                       redis_factory=default_redis_factory,
+                       multiprocess=multiprocess_default())
     except Exception as exc:                 # noqa: BLE001 - 账本不可用不阻断调用
         logger.warning("根任务账本不可用（task=%s）：本次不记账：%s",
                        str(tid)[:40], str(exc)[:100])
@@ -538,15 +540,36 @@ def _budget_open(stage: str, attempt: int, max_tokens: int, *, usage: str = ""):
 
 
 def _budget_close(b, ticket: str, *, ok: bool, max_tokens: int,
-                  note: str = "") -> None:
-    """结算一次请求。token 记**上界**（本次未取到供应商实际用量，保守记账）。"""
+                  note: str = "", actual_tokens: int | None = None) -> None:
+    """结算一次请求。
+
+    `actual_tokens` 给了就记**供应商实际用量**（`usage_known=True`）；没给就记
+    **预留上界**并计一次"用量未知"——未知用量不填 0（否则"没取到用量"会被读成
+    "这次没花钱"），上界与实际在账本里分开累计。
+    """
     if b is None or not ticket:
         return
     try:
-        b.settle(ticket, tokens=int(max_tokens or 0), ok=ok,
-                 note=note or ("llm:ok" if ok else "llm:failed"))
+        if actual_tokens is None:
+            b.settle(ticket, tokens=int(max_tokens or 0), ok=ok,
+                     note=note or ("llm:ok" if ok else "llm:failed"))
+        else:
+            b.settle(ticket, tokens=max(0, int(actual_tokens)), ok=ok,
+                     usage_known=True,
+                     note=note or ("llm:ok" if ok else "llm:failed"))
     except Exception:                        # noqa: BLE001 - 结算失败不影响调用结果
         pass
+
+
+def _is_budget_refusal(exc: Exception) -> bool:
+    """是否是**预算拒发**（不是端点故障）。
+
+    拒发意味着"这次请求没有发生"：不得重试（重试等于再发一次）、不得切备用端点、
+    不得把它当成端点不健康记一笔。实机形态：流式被拒（415）→ 回退非流式时预算已用尽
+    （cap=1）→ 拒发；若按端点失败处理，外层会重试并**再发一次流式请求**，
+    上限就又被绕过了。
+    """
+    return bool(getattr(exc, "budget_exhausted", False))
 
 
 def _record_llm_call(task_id: str, *, stage: str = "", attempt: int = 0,
@@ -1743,6 +1766,7 @@ class LLMClient:
             # D5：发送前开票——**在 try 之外**，预算不足时直接抛给调用方
             # （放进 try 会被本地的重试处理吞掉，变成一次"端点失败"）
             _rb, _ticket = _budget_open("llm", attempt, max_tok, usage=usage)
+            self._last_usage = None       # 本次尝试的实际用量（由 _send_request 填）
             try:
                 _t = _attempt_timeout()
                 # 无预算时不传 timeout：保持调用形状与改动前一致
@@ -1761,7 +1785,11 @@ class LLMClient:
                                  elapsed_ms=int((time.monotonic() - _t0) * 1000),
                                  input_chars=_input_chars, max_tokens=max_tok,
                                  end_reason="ok")
-                _budget_close(_rb, _ticket, ok=True, max_tokens=max_tok)
+                _usage = getattr(self, "_last_usage", None) or {}
+                _budget_close(
+                    _rb, _ticket, ok=True, max_tokens=max_tok,
+                    actual_tokens=(int(_usage.get("completion_tokens") or 0)
+                                   if _usage else None))
                 return result
             except LLMJSONParseError as exc:
                 # JSON 解析失败不重试（格式问题重试没用）
@@ -1773,6 +1801,13 @@ class LLMClient:
                               note="llm:bad_json")
                 raise
             except Exception as exc:
+                if _is_budget_refusal(exc):
+                    # 回退/重试被预算拒发：这次发送**没有发生**，立即停手——重试等于
+                    # 再发一次（上限会被绕过）。外层票覆盖的第一次发送已真实发生，按失败结算。
+                    _budget_close(_rb, _ticket, ok=False, max_tokens=max_tok,
+                                  note="llm:fallback_budget_refused")
+                    logger.warning("LLM 预算拒发，停止重试/切端点（usage=%s）", usage)
+                    raise
                 # 思考耗尽（reasoning 模型烧光预算）→ 放大 max_tokens 立即重试，
                 # 不计入端点失败（不是端点故障）
                 if (
@@ -1957,6 +1992,8 @@ class LLMClient:
                     raise
                 logger.warning("流式请求被拒（%s），回退非流式", describe_error(exc))
             else:
+                if _info.get("usage"):
+                    self._last_usage = dict(_info["usage"])
                 text = str(text or "").strip()
                 if not text:
                     # 与下面非流式分支同判据：思考烧光预算（content 空 + length）
@@ -1974,13 +2011,25 @@ class LLMClient:
             # 非流式响应的 socket 读超时：模型计算/生成期间无数据到达即触发。
             # 长文生成（glm 类慢模型实测单次 60-75s，长文 >300s）会被默认 60s
             # 误杀，默认放宽到 600，可用 LLM_REQUEST_TIMEOUT 环境变量覆盖；
-            # 探测类调用显式传短超时（timeout 参数）
+            # 探测类调用显式传短 timeout（timeout 参数）
             timeout = float(
                 timeout if timeout is not None
                 else os.environ.get("LLM_REQUEST_TIMEOUT", "600") or 600
             )
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                response_data = json.loads(resp.read().decode("utf-8"))
+            # D5 夜间补修：**流式被拒后的这次非流式回退是第二次真实发送**，必须单独开票。
+            # 只靠调用方那一张票会让"一次票据发两次请求"（415 回退路径）；cap=1 时
+            # 第二次发送必须在**发送前**被拒（下面 _budget_open 抛 budget_exhausted）。
+            _fb_rb, _fb_ticket = _budget_open(
+                "llm", 1, max_tokens, usage="llm:stream_fallback")
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    response_data = json.loads(resp.read().decode("utf-8"))
+            except Exception:
+                _budget_close(_fb_rb, _fb_ticket, ok=False, max_tokens=max_tokens,
+                              note="llm:nonstream_failed")
+                raise
+            _budget_close(_fb_rb, _fb_ticket, ok=True, max_tokens=max_tokens,
+                          note="llm:nonstream_ok")
         except urllib.error.HTTPError as exc:
             error_body = exc.read().decode("utf-8", errors="replace")
             if exc.code in (401, 402, 403):
@@ -2016,9 +2065,10 @@ class LLMClient:
                 raise exc
             raise LLMCallError("Empty content in LLM response")
 
-        # 记录用量
+        # 记录用量（同时留给调用方按**实际用量**结算票据）
         usage = response_data.get("usage", {})
         if usage:
+            self._last_usage = dict(usage)
             _record_usage(
                 usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
                 model=model or self.model, endpoint=self.base_url,
@@ -2266,10 +2316,11 @@ def call_llm_stream(
         _stage = "backup" if endpoint == "backup" else "llm"
         _t0 = time.monotonic()
         _rb, _ticket = _budget_open(_stage, 1, max_tok, usage=usage or _stage)
+        _info: dict = {}
         try:
             text = _call_llm_stream_once(
                 base_url, api_key, request_model,
-                system, user, on_chunk, temp, max_tok,
+                system, user, on_chunk, temp, max_tok, out=_info,
             )
         except Exception as exc:
             _budget_close(_rb, _ticket, ok=False, max_tokens=max_tok,
@@ -2296,7 +2347,10 @@ def call_llm_stream(
                              error_class="empty_content", end_reason="empty_content",
                              endpoint=endpoint)
             raise LLMCallError("Empty content in LLM stream response")
-        _budget_close(_rb, _ticket, ok=True, max_tokens=max_tok, note="llm:stream_ok")
+        _usage = _info.get("usage") or {}
+        _budget_close(_rb, _ticket, ok=True, max_tokens=max_tok, note="llm:stream_ok",
+                      actual_tokens=(int(_usage.get("completion_tokens") or 0)
+                                     if _usage else None))
         _mark_endpoint(endpoint, True)
         _record_llm_call(get_task_context(), stage=usage or _stage, attempt=1,
                          elapsed_ms=int((time.monotonic() - _t0) * 1000),
@@ -2331,7 +2385,11 @@ def call_llm_stream(
     # 主端点请求：失败后切备用重发一次
     try:
         return _attempt(client.base_url, client.api_key, model, "primary")
-    except LLMCallError:
+    except LLMCallError as exc:
+        if _is_budget_refusal(exc):
+            # 预算拒发：这次请求没有发生，切备用等于再发一次（上限会被绕过）
+            logger.warning("LLM 预算拒发，不切备用（stream, usage=%s）", usage)
+            raise
         if not backup_cfg:
             raise
         try:
@@ -2458,8 +2516,11 @@ async def call_llm_async(
                 _budget_close(_rb, _ticket, ok=False, max_tokens=max_tokens,
                               note="llm:async_failed")
                 raise
+            _usage = data.get("usage") or {}
             _budget_close(_rb, _ticket, ok=True, max_tokens=max_tokens,
-                          note="llm:async_ok")
+                          note="llm:async_ok",
+                          actual_tokens=(int(_usage.get("completion_tokens") or 0)
+                                         if _usage else None))
             usage = data.get("usage") or {}
             _record_usage(
                 usage.get("prompt_tokens", 0), usage.get("completion_tokens", 0),
@@ -2600,10 +2661,27 @@ async def _async_chat_once(client, url: str, payload: dict, headers: dict) -> di
                 raise
             logger.warning("流式请求被拒（HTTP %s），回退非流式",
                            exc.response.status_code)
-    response = await client.post(url, json=_with_stream(payload, False),
-                                 headers=headers)
-    response.raise_for_status()
-    return response.json()
+    # D5 夜间补修：**流式被拒后的非流式回退是第二次真实发送**，单独开票。
+    # 调用方（`call_llm_async`）那张票只覆盖第一次发送；这里再开一张，cap 用尽时
+    # 在**发送前**抛 budget_exhausted（不吞、不重试）。
+    _fb_rb, _fb_ticket = _budget_open("llm", 1, int(payload.get("max_tokens") or 0),
+                                      usage="llm:stream_fallback")
+    try:
+        response = await client.post(url, json=_with_stream(payload, False),
+                                     headers=headers)
+        response.raise_for_status()
+        data = response.json()
+    except Exception:
+        _budget_close(_fb_rb, _fb_ticket,
+                      max_tokens=int(payload.get("max_tokens") or 0),
+                      ok=False, note="llm:nonstream_failed")
+        raise
+    _usage = (data.get("usage") or {}) if isinstance(data, dict) else {}
+    _budget_close(_fb_rb, _fb_ticket, max_tokens=int(payload.get("max_tokens") or 0),
+                  ok=True, note="llm:nonstream_ok",
+                  actual_tokens=(int(_usage.get("completion_tokens") or 0)
+                                 if _usage else None))
+    return data
 
 
 async def _async_call_backup(payload: dict, fallback_model: str, expect_json: bool):
