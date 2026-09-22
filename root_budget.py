@@ -122,7 +122,13 @@ INFLIGHT_SETTLE_SECONDS = float(
 
 @dataclass
 class BudgetLimits:
-    """根任务预算上限；0 表示该维度不限。"""
+    """根任务预算上限；0 表示该维度不限。
+
+    口径（09-22 复核 A-4）：`max_calls` 扣的是**所有已预留票据**——含 `step` 步骤调度、
+    `llm`/`backup` 供应商请求、`plan`/`review` 等阶段，不是"供应商实际收到多少次请求"。
+    两者分开展示（`snapshot()["provider_requests"]` 与 `["steps_dispatched"]`），
+    核对时不得把票据数当成供应商请求数，也不得据此放宽任何上限。
+    """
 
     max_seconds: float = 0.0
     max_calls: int = 0
@@ -155,6 +161,9 @@ class BudgetState:
     limits: dict = field(default_factory=dict)
     # 被拒绝的迁移（虚构票据 / 重复迁移 / 已取消再结算）——账本自身的问题要看得见
     rejected_transitions: dict = field(default_factory=dict)
+    # 落盘可信度：上一次落盘没能可信完成（锁超时/写失败）。断点恢复时继承，
+    # 同一账本继续按"未知状态"处理，直到对账把它清掉。
+    persist_uncertain: bool = False
 
 
 def limits_from_config(cfg: dict | None = None) -> BudgetLimits:
@@ -273,7 +282,13 @@ class RootBudget:
         self._redis_failed = False
         # 跨进程后端是否已**建立**（写路径成功用过一次）。观测读取不建立后端。
         self._established = False
+        # 落盘可信度：拿不到落盘锁或写失败时置 True（有界多进程任务据此拒绝新付费请求）
+        self._persist_uncertain = False
         self.state = self._load()
+        # 上一轮落盘不确定（锁超时/写失败）：同一账本继续按"未知状态"处理——
+        # 断点恢复不能把"数字可能不是全部事实"这一事实洗掉，直到对账清掉它。
+        if self.state.persist_uncertain:
+            self._persist_uncertain = True
         # 增量基线：文件是**多进程合并视图**，本进程只把自己的增量写进 `writers`，
         # 否则第二次保存会把读进来的别人计数当成自己的再记一遍（重复计数）。
         self._baseline = self._copy_state(self.state)
@@ -450,6 +465,7 @@ class RootBudget:
         st.stages = dict(raw.get("stages") or {})
         st.limits = dict(raw.get("limits") or {})
         st.rejected_transitions = dict(raw.get("rejected_transitions") or {})
+        st.persist_uncertain = bool(raw.get("persist_uncertain"))
         return st
 
     _COUNT_KEYS = ("calls_reserved", "calls_settled", "calls_unsettled",
@@ -475,6 +491,7 @@ class RootBudget:
             stages=json.loads(json.dumps(st.stages or {})),
             limits=dict(st.limits or {}),
             rejected_transitions=json.loads(json.dumps(st.rejected_transitions or {})),
+            persist_uncertain=bool(st.persist_uncertain),
         )
 
     def _mine(self) -> dict:
@@ -570,14 +587,31 @@ class RootBudget:
                 "unsettled_tickets": unsettled, "rejected_transitions": rejected,
                 "seq": seq}
 
-    def _save(self) -> None:
-        # 整段"读 writers → 合并 → 写 tmp → replace"必须在**跨进程锁**内完成：
-        # 只有进程内锁时，两个进程会读到同一份旧快照、各自合并、互相覆盖（成功预留两次，
-        # 最终快照只剩一次——协作审查在内存文件系统里确定性复现）。
-        with cross_process_file_lock(self.path):
-            self._save_locked()
+    def _save(self) -> bool:
+        """落盘一次；返回**是否可信地写成功**（拿不到锁或写失败 → False）。
 
-    def _save_locked(self) -> None:
+        整段"读 writers → 合并 → 写 tmp → replace"必须在**跨进程锁**内完成：
+        只有进程内锁时，两个进程会读到同一份旧快照、各自合并、互相覆盖（成功预留两次，
+        最终快照只剩一次——协作审查在内存文件系统里确定性复现）。
+
+        拿不到锁时**不写**：锁超时说明有别的进程正在读改写，这时照写就是无锁覆盖，
+        会把对方刚写进去的增量抹掉。宁可这次快照少记自己的增量（共享计数仍是真源），
+        也不能破坏别人的账。
+        """
+        with cross_process_file_lock(self.path) as got:
+            if not got:
+                self._persist_note("落盘锁等待超时（本次不写，避免无锁覆盖其他进程的增量）")
+                return False
+            return self._save_locked()
+
+    def _persist_note(self, why: str) -> None:
+        """记录一次"落盘结果不可信"；只提示一次，避免刷日志。"""
+        if not self._persist_uncertain:
+            logger.warning("预算账本落盘状态不确定（task=%s）：%s；"
+                           "有界多进程任务将拒绝新付费请求", self.root_task_id, why)
+        self._persist_uncertain = True
+
+    def _save_locked(self) -> bool:
         # 读回磁盘上的 `writers`（同一账本身份才继承）：本进程的增量替换自己的那一份，
         # 其余进程的原样保留——这样"最后保存的进程"不会再抹掉别人的计数。
         writers: dict = {}
@@ -589,7 +623,29 @@ class RootBudget:
             writers = dict(disk.get("writers") or {})
         writers[self._tag] = self._mine()
         merged = self._merge_writers(writers)
-        payload = {
+        # 落盘不可信是**账本级**的事实：任一进程（含磁盘上记着的）报过不确定，
+        # 后来的进程不能把它改回"可信"——否则一次锁超时会被下一次成功写入洗掉。
+        persist_uncertain = bool(self._persist_uncertain
+                                 or (disk.get("persist_uncertain")
+                                     if str(disk.get("ledger_id") or "")
+                                     == str(self.state.ledger_id or "") else False))
+        try:
+            payload = self._payload(merged, writers, persist_uncertain)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self.path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
+                           encoding="utf-8")
+            os.replace(tmp, self.path)
+            return True
+        except Exception as exc:
+            # 序列化失败与写盘失败同等对待：账本没能落地 → 状态不确定
+            self._persist_note(f"写入失败（{str(exc)[:80]}）")
+            logger.warning("预算账本落盘失败（task=%s）：%s", self.root_task_id, str(exc)[:100])
+            return False
+
+    def _payload(self, merged: dict, writers: dict, persist_uncertain: bool) -> dict:
+        """账本快照的完整内容（写盘前可再校验/序列化）。"""
+        return {
             "root_task_id": self.root_task_id,
             "started_at": self.state.started_at,
             "calls_reserved": merged["counters"]["calls_reserved"],
@@ -613,16 +669,11 @@ class RootBudget:
                 "max_calls": self.limits.max_calls,
                 "max_tokens": self.limits.max_tokens,
             },
+            # 落盘可信度：True 表示本次进程至少有一次"该写没写成"（锁超时/写失败）。
+            # 有界多进程任务据此拒绝新付费请求，收尾核对时也据此判断快照是否可信。
+            "persist_uncertain": persist_uncertain,
             "updated_at": time.time(),
         }
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
-                           encoding="utf-8")
-            os.replace(tmp, self.path)
-        except Exception as exc:
-            logger.warning("预算账本落盘失败（task=%s）：%s", self.root_task_id, str(exc)[:100])
 
     # ── 查询 ────────────────────────────────────────────────
     @property
@@ -699,14 +750,22 @@ class RootBudget:
         calls = max(1, int(calls or 1))
         tokens = max(0, int(tokens or 0))
         with self._lock:
+            needs_shared = bool(self.limited and self._bounded_requires_shared())
             if self.limited:
                 # 显式有界任务（配了任一上限）+ 多进程语义 + 共享计数不可用 →
                 # **fail closed**：不能"静默退成每个进程各一份上限"（那样 3 个 Worker
                 # 就是 3 倍额度）。无模型的离线检查/工作台读取不受影响（它们不 reserve）。
-                if self._bounded_requires_shared() and not self._shared_available():
+                if needs_shared and not self._shared_available():
                     raise BudgetExceeded(
                         "显式有界任务的预算要求跨进程共享计数，但共享账本（Redis）不可用："
                         "拒绝新付费请求（不得按每进程一份上限继续）")
+                # 共享账本读得到、但本地落盘已经不可信（拿不到落盘锁或写入失败）：
+                # 计数可能已被覆盖/丢失，此时"还剩多少额度"无从判断——同样拒绝，
+                # 而不是拿一个可能是错的剩余额度继续花。
+                if needs_shared and self._persist_uncertain:
+                    raise BudgetExceeded(
+                        "预算账本落盘状态不确定（共享计数可读但本地落盘失败或未取到锁）："
+                        "拒绝新付费请求，未知状态待对账")
                 why = self.exhausted_reason()
                 if why:
                     raise BudgetExceeded(why)
@@ -721,6 +780,12 @@ class RootBudget:
             # 计数，所以两个进程不可能都拿到"仍在额度内"的结论（R2 反例：两个实例
             # 各自 reserve 都获准，各自返回同一个票据号）。
             seq_remote = self._reserve_remote(calls, tokens)
+            if needs_shared and seq_remote is None:
+                # 前面探到共享账本可用，这里却没能预留：多半是"加完计数才失败"，
+                # 共享计数可能已被改动——不能按本地计数继续（那等于每进程一份额度）。
+                self._persist_note("共享账本预留未成功返回（结果不确定）")
+                raise BudgetExceeded(
+                    "共享账本预留失败（结果不确定）：拒绝新付费请求，未知状态待对账")
             # 本地字段只记"本进程预留了多少"（文件是快照）；跨进程的总额度判断
             # 一律走 `calls_committed()`/`tokens_committed()` 读共享计数
             self.state.seq += 1
@@ -741,8 +806,30 @@ class RootBudget:
             entry["reserved"] = int(entry.get("reserved") or 0) + calls
             entry["tokens_reserved"] = int(entry.get("tokens_reserved") or 0) + tokens
             entry["last_at"] = now
-            self._save()
+            if not self._save() and needs_shared:
+                # 落盘不可信：这次预留**作废**（请求不发出），并把共享计数改回原样，
+                # 之后所有付费请求一律拒绝（"还剩多少额度"已无从判断）。
+                # 无界任务不受影响：没有上限可越，继续按本地+共享计数如实记。
+                self._undo_reservation_locked(ticket, stage, calls, tokens)
+                raise BudgetExceeded(
+                    "预算账本落盘失败（结果不确定）：拒绝新付费请求，未知状态待对账")
         return ticket
+
+    def _undo_reservation_locked(self, ticket: str, stage: str,
+                                 calls: int, tokens: int) -> None:
+        """撤销一次刚做、但没能可信落盘的预留（必须在 `self._lock` 内调用）。"""
+        self.state.open_tickets.pop(ticket, None)
+        self.state.calls_reserved = max(0, self.state.calls_reserved - calls)
+        self.state.tokens_reserved = max(0, self.state.tokens_reserved - tokens)
+        entry = self.state.stages.get(stage)
+        if isinstance(entry, dict):
+            entry["reserved"] = max(0, int(entry.get("reserved") or 0) - calls)
+            entry["tokens_reserved"] = max(0, int(entry.get("tokens_reserved") or 0)
+                                          - tokens)
+        # 共享计数按"请求没发生"改回：这次没有发出任何请求，额度不该被占
+        self._release_calls_remote(calls)
+        self._release_tokens_remote(tokens)
+        self._persist_note("预留后落盘失败，已撤销该次预留")
 
     def _reserve_remote(self, calls: int, tokens: int):
         """Redis 原子预留；返回票据序号（不可用时返回 None，走本地计数）。"""
@@ -1007,6 +1094,9 @@ class RootBudget:
         return {
             "root_task_id": self.root_task_id,
             "elapsed_sec": round(self.elapsed(), 1),
+            # 落盘可信度：True = 本进程至少有一次该写的快照没写成（锁超时/写失败），
+            # 快照数字可能不是全部事实；有界多进程任务此时已停止发新付费请求。
+            "persist_uncertain": bool(self._persist_uncertain or self.state.persist_uncertain),
             # reserved = **共享**已发出调用数（跨进程时含其它进程的预留）；
             # local_reserved = 本进程预留数（文件快照口径），两者并列不混淆
             "calls": {"reserved": self.calls_committed(),
@@ -1037,6 +1127,16 @@ class RootBudget:
             "limits": {"max_seconds": self.limits.max_seconds,
                        "max_calls": self.limits.max_calls,
                        "max_tokens": self.limits.max_tokens},
+            # 口径声明（机器可读）：`max_calls` 扣的是**所有已预留票据**（含步骤调度），
+            # 不是"供应商实际收到多少次请求"。核对供应商请求数看 `provider_requests`，
+            # 核对步骤派发看 `steps_dispatched`——三者不得互相冒充。
+            "count_basis": {"max_calls": "all_reserved_tickets",
+                            "provider_requests": "stages:llm+backup",
+                            "steps_dispatched": "stages:step"},
+            # token 三项独立：预留上界 / 实际用量 / 未取到用量（不互相折算）
+            "token_basis": {"open_upper": "reserved_upper_bound",
+                            "actual": "provider_reported_usage",
+                            "unknown_calls": "usage_not_readable"},
             "stages": stages,
             "open_tickets": {t: dict(rec) for t, rec in self.state.open_tickets.items()},
             "unsettled_tickets": {t: dict(rec)

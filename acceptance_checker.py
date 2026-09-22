@@ -625,6 +625,241 @@ def derive_requirements(goal: str, capabilities=None) -> dict:
     }
 
 
+# ── C-1（09-22 复核）：归因与算术分开核验 ─────────────────────────────
+# 数字正确不证明"主要来自"；边界附语不能洗掉前句的肯定判断。两条检查都只看
+# **句子自身**：不因相邻的"未取得明细/待查"而豁免，也不因数字可复算而放行归因。
+
+# 归因动词：把某个变化**肯定地**归到某个驱动因素上
+_ATTRIBUTION_VERBS = (
+    "主要来自", "主要系", "主要由于", "主要原因是", "主要是因为", "归因于",
+    "系由", "源于", "所致", "带动", "拖累", "导致", "使得",
+)
+# 需要明细才能成立的驱动因素 → 需要哪类材料（用于缺口文案）
+_ATTRIBUTION_DRIVERS: tuple[tuple[str, str], ...] = (
+    ("固定性费用", "费用性质与明细（销售/管理/研发费用）"),
+    ("固定费用", "费用性质与明细（销售/管理/研发费用）"),
+    ("固定成本", "成本结构明细（营业成本/费用拆分）"),
+    ("摊薄", "费用性质与明细（销售/管理/研发费用）"),
+    ("规模效应", "成本与费用明细"),
+    ("产品结构", "分产品/分渠道的收入与毛利明细"),
+    ("量价", "销量与单价拆分"),
+    ("减值", "资产减值明细"),
+    ("非经常性损益", "非经常性损益明细"),
+    ("税率", "所得税与递延税项明细"),
+    ("少数股东", "少数股东损益明细"),
+    ("营运资本", "应收/应付/存货明细"),
+    ("回款", "销售收现与应收账款明细"),
+)
+# 明确写成假设/待查的内容不是"肯定归因"（不扣分）
+_ATTRIBUTION_HEDGES = ("假设", "假如", "可能", "预计", "推测", "或将", "若",
+                       "待查", "待核", "需核查", "未取得", "尚不能", "不能判断",
+                       "不排除", "有待")
+
+# 比率词与方向词（算术检查用）
+_RATIO_WORDS = ("资产负债率", "毛利率", "净利率", "归母净利率", "覆盖率",
+                "负债率", "占比", "周转率")
+_DIRECTION_WORDS = ("上升", "下降", "提高", "降低", "回落", "走高", "走低", "持平")
+# 绝对额比较词：用"谁减得多"解释比率变化
+_ABS_COMPARE_WORDS = ("大于", "小于", "多于", "少于", "快于", "慢于", "高于", "低于")
+_ABS_CHANGE_WORDS = ("减少", "增加", "下降", "增长", "上升", "下滑")
+_AMOUNT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(亿元|万元|元|亿|万)")
+
+
+def _read_working_paper(workspace) -> dict:
+    """读任务工作区的底稿（缺/坏 → 空 dict，不编）。"""
+    try:
+        p = Path(workspace) / "project" / "working_paper.json"
+        if not p.exists():
+            return {}
+        return json.loads(p.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+
+def _read_narrative_evidence(workspace) -> dict:
+    """读任务工作区的叙事证据（缺/坏 → 空 dict，不编）。"""
+    try:
+        p = Path(workspace) / "narrative_evidence.json"
+        if not p.exists():
+            return {}
+        return json.loads(p.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+
+
+def _read_chart_manifest(workspace) -> list[dict]:
+    """读任务工作区的图表清单（缺/坏 → 空列表，不编）。"""
+    try:
+        p = Path(workspace) / "project" / "chart_manifest.json"
+        if not p.exists():
+            p = Path(workspace) / "chart_manifest.json"
+        if not p.exists():
+            return []
+        data = json.loads(p.read_text(encoding="utf-8")) or {}
+        return [c for c in (data.get("charts") or []) if isinstance(c, dict)]
+    except Exception:
+        return []
+
+
+def check_chart_references(report: str, charts: list[dict] | None = None) -> dict:
+    """图文错配核验：正文里的"图N"必须与第 N 张图的**绑定指标**一致。
+
+    编号只是显示结果（重排/缺图/增删都会让旧编号指向别的图）。实机反例：正文对
+    图2–6 依次称规模、同比、毛利率/净利率、现金覆盖、杠杆，而实际对应同比、净利率、
+    现金覆盖、杠杆、研发强度——图能显示不等于引用正确。
+
+    判定（只认**正向证据**，不因"没写指标名"就判失败）：
+    - 引用附近的窗口里出现第 N 张图绑定的指标词 → 对齐；
+    - 没出现本图指标、却出现**别的图**的指标词 → 错配（说明的是另一张图的内容）；
+    - 窗口里没有任何绑定指标词（装配图注刻意不写指标名）→ 无法判定，跳过并计数。
+    图表清单缺失时按"无法核验"通过并说明（不猜）。
+    """
+    items = [c for c in (charts or []) if isinstance(c, dict)]
+    text = str(report or "")
+    refs = list(re.finditer(r"图\s*(\d{1,2})", text))
+    if not items or not refs:
+        return {"pass": True,
+                "details": ("图表清单缺失，无法核验图文对应" if refs and not items
+                            else "正文未按编号引用图表"),
+                "refs": [], "unverifiable": 0, "gaps": []}
+
+    def _words_of(chart: dict) -> list[str]:
+        b = chart.get("binding") or {}
+        out = [str(x) for x in (b.get("metric_labels") or [])]
+        out += [str(x) for x in (b.get("metrics") or [])]
+        return [w for w in out if w]
+
+    def _norm(w: str) -> set[str]:
+        return {w, w.replace("归母", ""), w.replace("经营活动", ""),
+                w.replace("经营", ""), w.replace("净额", "")} - {""}
+
+    def _hit(ctx: str, words: list[str]) -> bool:
+        return any(c and c in ctx for w in words for c in _norm(w))
+
+    chart_words = {i: _words_of(c) for i, c in enumerate(items)}
+    bad: list[str] = []
+    seen: list[dict] = []
+    unverifiable = 0
+    for m in refs:
+        n = int(m.group(1))
+        if n < 1 or n > len(items):
+            continue                     # 引用了不存在的编号：由"缺图"另判
+        words = chart_words.get(n - 1) or []
+        if not words:
+            continue                     # 该图没有绑定块（旧清单）→ 不判
+        # 窗口只取该引用自己的那一小段：到下一个 `图N` 之前、最多 120 字
+        _after = text[m.end(): m.end() + 120]
+        _nxt = re.search(r"图\s*\d{1,2}", _after)
+        if _nxt:
+            _after = _after[:_nxt.start()]
+        ctx = text[max(0, m.start() - 8): m.end()] + _after
+        seen.append({"n": n, "chart_id": str(items[n - 1].get("chart_id") or ""),
+                     "file": str(items[n - 1].get("file") or ""), "words": words})
+        if _hit(ctx, words):
+            continue                     # 说的是本图的指标 → 对齐
+        others = [w for i, ws in chart_words.items() if i != n - 1 for w in ws]
+        if _hit(ctx, others):
+            bad.append(f"图 {n}（{items[n - 1].get('file') or ''}）绑定的是"
+                       f"{'、'.join(words[:3])}，正文该处说的是"
+                       f"「{ctx.strip()[:40]}」")
+        else:
+            unverifiable += 1            # 窗口里没有任何绑定指标词 → 无法判定
+    details = (f"按编号引用 {len(seen)} 处；与绑定不符 {len(bad)} 处"
+               f"；无法判定 {unverifiable} 处"
+               if seen else "正文未按编号引用图表")
+    return {"pass": not bad, "details": details, "refs": seen,
+            "unverifiable": unverifiable,
+            "gaps": [f"图文错配：{b}——引用请按 chart_id 对齐" for b in bad]}
+
+
+def check_attribution_support(report: str, *, working_paper: dict | None = None,
+                              evidence: dict | None = None) -> dict:
+    """归因核验：肯定性归因必须有所需材料/可复算关系支持。
+
+    - 句子里出现归因动词 + 需要明细的驱动因素 → 记为一条归因主张；
+    - 有 `working_paper` 里的**派生关系**（同比/比率变化）或 `evidence` 里带定位的
+      解释支持 → 通过；
+    - 否则记缺口（缺证归因），**不因相邻的"未取得明细"边界句而豁免**；
+    - 明确写成假设/待查（`_ATTRIBUTION_HEDGES`）的内容不算肯定归因。
+    """
+    text = str(report or "")
+    wp = working_paper or {}
+    derived = [str((d or {}).get("metric") or "") for d in (wp.get("derived") or [])]
+    ev = evidence or {}
+    located = [r for r in (ev.get("records") or [])
+               if r.get("has_location")
+               and str(r.get("admission") or "") in ("admitted", "comparison")]
+    has_management = bool(located)
+    claims: list[dict] = []
+    unsupported: list[str] = []
+    for s in _sentences(text):
+        if not any(v in s for v in _ATTRIBUTION_VERBS):
+            continue
+        drivers = [d for d, _need in _ATTRIBUTION_DRIVERS if d in s]
+        if not drivers:
+            continue
+        if any(h in s for h in _ATTRIBUTION_HEDGES):
+            continue                     # 已明确写成假设/待查 → 不是肯定归因
+        needs = sorted({need for d, need in _ATTRIBUTION_DRIVERS if d in s})
+        # 支持来源：带定位的经营解释（真实披露）或底稿里可复算的派生关系
+        supported = has_management or bool(derived)
+        claims.append({"text": s[:160], "drivers": drivers, "needs": needs,
+                       "supported": supported})
+        if not supported:
+            unsupported.append(s[:120])
+    details = (f"归因主张 {len(claims)} 条；无材料支持 {len(unsupported)} 条"
+               if claims else "未发现需要明细支持的肯定性归因")
+    return {"pass": not unsupported, "details": details,
+            "claims": claims, "gaps": [f"缺证归因：{u}（未取得所需明细）"
+                                       for u in unsupported]}
+
+
+def check_ratio_arithmetic(report: str, *, working_paper: dict | None = None) -> dict:
+    """算术核验：比率变化不得用"绝对额谁减得多"直接解释。
+
+    反例（实机 §5.2）："资产减少24.47亿元大于负债减少20.90亿元"被当作资产负债率
+    下降的直接算术原因。资产 100→90、负债 50→45 时资产减额更大而负债率不变——
+    比率要按 L/A 或增速比来复算。
+
+    判定：句子同时含①比率词与方向词、②两个绝对额变化与比较词 → 记为一条"绝对额
+    解释比率"的主张；只有当底稿里存在该比率的**可复算派生关系**（两期水平可算）时
+    才算通过，否则记缺口。句子若同时给出两期比率读数，视为已复算。
+    """
+    text = str(report or "")
+    wp = working_paper or {}
+    derived = [str((d or {}).get("metric") or "") for d in (wp.get("derived") or [])]
+    ratio_derived = any(("ratio" in m or "margin" in m or "coverage" in m)
+                        for m in derived)
+    bad: list[str] = []
+    seen: list[str] = []
+    for s in _sentences(text):
+        if not any(w in s for w in _RATIO_WORDS):
+            continue
+        if not any(w in s for w in _DIRECTION_WORDS):
+            continue
+        if not any(w in s for w in _ABS_COMPARE_WORDS):
+            continue
+        amounts = _AMOUNT_RE.findall(s)
+        if len(amounts) < 2:
+            continue
+        if not any(w in s for w in _ABS_CHANGE_WORDS):
+            continue
+        seen.append(s[:160])
+        # 已给出两期比率读数 → 读者可自行复算，不算误释
+        _pct = re.findall(r"(\d+(?:\.\d+)?)\s*%", s)
+        if len(_pct) >= 2:
+            continue
+        if ratio_derived:
+            continue
+        bad.append(s[:120])
+    details = (f"绝对额解释比率的主张 {len(seen)} 条；不可复算 {len(bad)} 条"
+               if seen else "未发现用绝对额解释比率变化的句子")
+    return {"pass": not bad, "details": details, "claims": seen,
+            "gaps": [f"比率算术误释：{b}（比率须按两期水平或增速比复算，"
+                     f"不能用绝对额减幅大小替代）" for b in bad]}
+
+
 def check_requirement_coverage(goal: str, report_text: str, reqs: dict,
                                nt: dict, sources: dict | None,
                                source_list: dict | None = None) -> dict:
@@ -1363,6 +1598,45 @@ def _subject_of(text: str) -> str:
         return ""
 
 
+# 提升用的主体键：`_subject_of` 对**裸专名**给不出公司（实测"宁德时代/比亚迪"都返回空），
+# 于是再取子句开头的专名片段并排除指标/期间/中性词——跨公司同值必须被挡住，而
+# "研究问题复述派生块"这类**两侧都没写主体**的重复仍可提升。
+_SUBJECT_STOPWORDS = ("收入", "营收", "净利润", "净利", "利润", "现金流", "覆盖", "净利率",
+                      "毛利率", "毛利", "负债", "资产", "研发", "同比", "增长率", "增速",
+                      "公司", "本公司", "报告期", "经营", "指标", "数据", "亿元", "万元")
+
+
+# 发布者/媒体词不是主体（来源行常以"新浪财经 洋河股份…"开头）：这类 token 不能当
+# 主体键，否则会把"报告写洋河、来源行以新浪开头"误判成主体冲突（假阴性）。
+_MEDIA_TOKENS = ("新浪", "财经", "证券", "资讯", "新闻", "网", "社", "报", "中心",
+                 "数据", "研究", "报告", "平台", "官方", "网页", "首页", "登录",
+                 "年报", "公告", "季报", "披露", "统计")
+
+
+def _promotion_subject(text: str, *, lexical: bool = True) -> str:
+    """去重/冲突判定用的**主体键**（取不到返回空串 = 未知）。
+
+    先用 `_subject_of`（公司后缀/代码）；它对**裸专名**（"宁德时代/比亚迪"）给不出
+    公司（实测），于是再取开头的专名片段，并排除指标词与发布者词——跨公司同值必须
+    被挡住（架构复核 P1），而"两侧都没写主体"的重复仍算同一读数。
+    """
+    s = _subject_of(text)
+    if s:
+        return s
+    if not lexical:
+        return ""
+    m = re.match(r"\s*[（(【\[]?([一-鿿]{2,12}|[A-Za-z][A-Za-z0-9.\-]{1,15})",
+                 str(text or ""))
+    if not m:
+        return ""
+    tok = m.group(1)
+    if any(w in tok for w in _SUBJECT_STOPWORDS):
+        return ""
+    if any(w in tok for w in _MEDIA_TOKENS):
+        return ""
+    return tok
+
+
 def _subjects_conflict(report_subject: str, source_subject: str) -> bool:
     """主体冲突：两边都已知、且互不包含才算冲突。"""
     a = str(report_subject or "").strip()
@@ -1396,7 +1670,9 @@ def _subject_conflict_for(n: dict, report: str, goal: str, source_text: str,
     # 只用**紧邻数字的子句**里写明的公司：不拿任务目标兜底。
     # 目标兜底会把"多实体对比报告"和"代码/全称别名不一致"误判成主体冲突（假阴性），
     # 而架构复核明确要求不能靠收紧把真话否掉。子句提不出主体 → 视为未知 → 不冲突。
-    report_subject = _subject_of(_clause_of(str(report or ""), pos, pos + len(raw)))
+    # 报告侧主体：`_subject_of` 取不到时用词法键——"比亚迪2024年营业收入100亿元"
+    # 这类裸专名必须能参与冲突判定，否则跨公司同值会被判成可溯源（架构复核 P1）。
+    report_subject = _promotion_subject(_clause_of(str(report or ""), pos, pos + len(raw)))
     if not report_subject:
         return False
     # 定位"包含这个数字的那一行"：候选串可能带空格/单位差异（"6000.0 亿元" vs
@@ -1409,7 +1685,7 @@ def _subject_conflict_for(n: dict, report: str, goal: str, source_text: str,
         line = _line_with(source_text, needle)
         if not line:
             continue
-        src_subject = _subject_of(line)
+        src_subject = _promotion_subject(line)
         if src_subject and _subjects_conflict(report_subject, src_subject):
             return True
     return False
@@ -1495,7 +1771,8 @@ def check_number_traceability(
                         continue
                     hit = k
                     break
-        item = {"raw": n["raw"], "value": n["value"], "unit": n["unit"]}
+        item = {"raw": n["raw"], "value": n["value"], "unit": n["unit"],
+                "pos": n.get("pos")}
         if not hit and clean_text and _arithmetic_derived_from_clean(n, clean_text):
             hit = "derived_computed"
         # V1：报告内写明的**完整公式**（紧邻数字），且操作数能按值+单位+指标/期间联合匹配
@@ -1536,13 +1813,25 @@ def check_number_traceability(
     # 摘要里再说一次反而拉低溯源率（实测：研究问题观察句复述"覆盖 107.23%"被判不可溯源，
     # 而同一个值在『同比与比率』块里带着完整算式）。反过来说：**任何一处都没有算式/来源**
     # 的数值仍然全部算不可溯源（门槛不变，不放过编造数字）。
-    _verified_pairs = {(round(abs(float(t.get("value") or 0)), 6), str(t.get("unit") or ""))
-                       for t in traceable}
+    # 提升只在**同一主体**内成立：键里带主体（数字所在子句写明的公司），并再判一次主体
+    # 冲突——跨公司同值（"宁德时代营收 100 亿元"已溯源 → "比亚迪营收 100 亿元"不得借此
+    # 提升）必须保持不可溯源（架构复核 P1：同值不能覆盖已发现的冲突）。
+    _verified_pairs: dict[tuple, str] = {}
+    for t in traceable:
+        _k = (round(abs(float(t.get("value") or 0)), 6), str(t.get("unit") or ""))
+        _pos = int(t.get("pos") or 0)
+        _subj = _promotion_subject(_clause_of(report, _pos, _pos + len(str(t.get("raw") or ""))))
+        _verified_pairs.setdefault(_k, _subj or "")
     if _verified_pairs:
         still: list[dict] = []
         for item in untraceable:
             _k = (round(abs(float(item.get("value") or 0)), 6), str(item.get("unit") or ""))
-            if _k in _verified_pairs:
+            _pos = int(item.get("pos") or 0)
+            _i_subj = _promotion_subject(
+                _clause_of(report, _pos, _pos + len(str(item.get("raw") or ""))))
+            _v_subj = _verified_pairs.get(_k) or ""
+            _conflict = bool(_i_subj and _v_subj and _subjects_conflict(_i_subj, _v_subj))
+            if _k in _verified_pairs and not _conflict:
                 item["source"] = "same_value_elsewhere"
                 item["derived"] = True
                 item["verified"] = False
@@ -2120,21 +2409,29 @@ def _extract_source_claims(report: str) -> list[str]:
     被抽成"虚假来源标注"，连代码装配的视角/定位说明也中招。
     """
     claims: list[str] = []
-    # 待核查指引句**不是**来源声明（实机 ui-706c5ef4a5 反例："需核查年报…才能判断经营
-    # 现金的来源是以销售回款为主还是以其他项目为主"被抽成"虚假标注 1 条"，把一份如实
-    # 标缺口的交付判成 draft）。判据看**整句**：句子里明说"要核查才能判断"就不是声明来源。
-    _UNCERTAIN_CTX = ("才能判断", "需核查", "待核查", "需核对", "待核对", "无法判断",
-                      "不作判断", "尚不能", "不能据此", "需补充", "待补充")
+    # 待核查指引句**不是**来源声明，但豁免只看**声明片段本身**，不看整句：上一版按整句判
+    # （句内任意位置出现"需核查"就豁免）→ 在真声明尾巴上补一句"，需核查现金流明细"或换行
+    # 加同一句，虚假来源标注就被放过（架构复核 P1 反例）。判据：显式归属词（数据来源/
+    # 资料来源/引自/出自）一律算声明；裸"来源"只在片段**像来源名**（含年报/公告/官网/数据/
+    # 中心/网/社/报…或 URL）且**不像判断句**（为主/还是/是否/判断…）时才算声明。
+    _SRC_NAME_HINTS = ("年报", "年度报告", "季报", "半年报", "公告", "官网", "官方网站",
+                       "报告", "研究", "数据", "中心", "交易所", "网站", "网", "社", "报",
+                       "局", "部", "公司", "平台", "披露", "文件", "http", "PDF", "pdf")
+    _JUDGE_WORDS = ("为主", "还是", "是否", "判断", "需核查", "待核查", "才能", "无法",
+                    "不明确", "待定", "存疑", "未知")
     for m in re.finditer(
-        r"(?:数据来源|资料来源|来源|引自|出自)\s*(?:[：:]\s*|[为是]\s*)([^。；\n，,|]{2,60})",
+        r"(数据来源|资料来源|来源|引自|出自)\s*(?:[：:]\s*|[为是]\s*)([^。；\n，,|]{2,60})",
         report,
     ):
-        _s0 = max(report.rfind("。", 0, m.start()), report.rfind("\n", 0, m.start())) + 1
-        _s1 = report.find("。", m.end())
-        _sentence = report[_s0:(_s1 + 1) if _s1 > 0 else len(report)]
-        if any(k in _sentence for k in _UNCERTAIN_CTX):
-            continue
-        c = m.group(1).strip()
+        _head, _frag = m.group(1), m.group(2).strip()
+        if _head == "来源":
+            _looks_src = any(k in _frag for k in _SRC_NAME_HINTS)
+            _looks_judge = any(k in _frag for k in _JUDGE_WORDS)
+            if _looks_judge and not _looks_src:
+                continue      # "…的来源是以销售回款为主还是…"：在判断来源构成，不是声明来源
+            if not _looks_src:
+                continue      # 裸"来源"又不含来源名特征：歧义 → 不判（原行为：跳过）
+        c = _frag
         if not c:
             continue
         # 泛化诚实表述（"公开财经报道"这类）不是具体来源名：剥掉引导字后交给
@@ -2872,6 +3169,34 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace,
     checks["analysis_completeness"] = check_analysis_completeness(
         report_text, goal, task_id,
     )
+    # C-1（09-22 复核）：**归因与算术**与"数字正确"分开核验。数字可复算不证明
+    # "主要来自"；边界附语也不洗掉前句的肯定判断。两者在 financial/research 档
+    # 计入缺口（其它档只展示，不改既有判定）。
+    try:
+        _wp = _read_working_paper(workspace)
+    except Exception:
+        _wp = {}
+    try:
+        _ev = _read_narrative_evidence(workspace)
+    except Exception:
+        _ev = {}
+    checks["attribution_support"] = check_attribution_support(
+        report_text, working_paper=_wp, evidence=_ev)
+    checks["ratio_arithmetic"] = check_ratio_arithmetic(
+        report_text, working_paper=_wp)
+    try:
+        _charts = _read_chart_manifest(workspace)
+    except Exception:
+        _charts = []
+    checks["chart_references"] = check_chart_references(report_text, _charts)
+    for _k in ("attribution_support", "ratio_arithmetic", "chart_references"):
+        checks[_k]["applicable"] = domain in ("financial", "research")
+        checks[_k]["counted"] = domain in ("financial", "research")
+        if not checks[_k]["counted"]:
+            checks[_k]["raw_pass"] = checks[_k].get("pass")
+            checks[_k]["pass"] = True
+            checks[_k]["details"] = (
+                f"不适用于 {domain} 域（非财务/研究任务的归因与比率口径）")
     gaps = []
     _req_gap_msgs: list[str] = []
     for _key, _c in checks.items():

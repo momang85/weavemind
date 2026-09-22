@@ -1833,6 +1833,26 @@ def _source_number(citations: list[dict], company_id: str) -> str:
 # ── 图表（只取发布级）──────────────────────────────────────────
 
 
+def _chart_binding_note(binding: dict) -> str:
+    """图表绑定摘要：指标/单位/期间/口径（正文引用据此核对，不靠编号）。"""
+    if not isinstance(binding, dict) or not binding:
+        return ""
+    labels = [str(x) for x in (binding.get("metric_labels") or []) if str(x)]
+    if not labels:
+        labels = [str(x) for x in (binding.get("metrics") or []) if str(x)]
+    parts = []
+    if labels:
+        parts.append("、".join(labels[:4]))
+    if binding.get("unit"):
+        parts.append(f"单位 {binding['unit']}")
+    periods = [int(y) for y in (binding.get("periods") or [])]
+    if periods:
+        parts.append("期间 " + "、".join(str(y) for y in periods))
+    if binding.get("caliber"):
+        parts.append(f"口径 {binding['caliber']}")
+    return "；".join(parts)
+
+
 def _charts(task_id: str, *, project=None) -> list[dict]:
     try:
         proj = workspace.task_project_dir(task_id, project) if project \
@@ -1854,6 +1874,10 @@ def _charts(task_id: str, *, project=None) -> list[dict]:
             continue          # 检索统计图（词频/域名分布）不进研究简报
         if f:
             out.append({"file": f, "type": str(c.get("type") or ""),
+                        # C-2：稳定语义身份 + 绑定（指标/单位/期间/口径）——编号只是
+                        # 显示结果，正文引用按 chart_id 对齐
+                        "chart_id": str(c.get("chart_id") or ""),
+                        "binding": dict(c.get("binding") or {}),
                         "keywords": list(c.get("keywords") or []),
                         "section_hint": str(c.get("section_hint") or ""),
                         "question": str(c.get("question") or ""),
@@ -2030,7 +2054,14 @@ def render_brief_markdown(structure: dict, body: str = "") -> str:
             obs = str(c.get("caption") or c.get("observation") or "").strip()
             head = q or f"{c.get('type') or '图'}"
             tail = f"；{obs}" if obs else ""
-            lines.append(f"图 {i}：{head}{tail}（数据同『财务对照』表与底稿）")
+            _cid = str(c.get("chart_id") or "").strip()
+            _bind = _chart_binding_note(c.get("binding") or {})
+            # 显示时转义下划线：`ratio_net_margin` 会被 Markdown 当成斜体标记
+            # 吞掉下划线（PDF 里渲染成 "rationetmargin"）
+            _id_note = f"［{_cid.replace(chr(95), chr(92) + chr(95))}］" if _cid else ""
+            _bind_note = f"（绑定：{_bind}）" if _bind else ""
+            lines.append(f"图 {i}{_id_note}：{head}{tail}{_bind_note}"
+                         "（数据同『财务对照』表与底稿）")
         if rest:
             lines.append("")
             lines.append(f"- 其余 {len(rest)} 张图（含比率分面）见附录『其他图表』。")

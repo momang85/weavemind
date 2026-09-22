@@ -2659,12 +2659,20 @@ def _write_export_manifest(tid: str, body: str, pdf_bytes: bytes = b"",
     # 注意两个不同对象：验收对象是**研究正文**（version.body），导出的是**交付文档**
     # （交付说明 + 研究正文 + 注记）。这里用 `delivery_state` 一次算清：
     # 选中版本 + 本版验收 + 持久化评审事实 + 可重算的研究硬门槛 + **同一版本**的交付记录。
-    from delivery_pipeline import delivery_state
+    from delivery_pipeline import (delivery_state, read_research_state,
+                                   state_is_current)
     state = delivery_state(tid, body, ws_dir=task_workspace(tid))
     status = str(state.get("status") or DELIVERY_UNKNOWN)
     draft_reason = str(state.get("draft_reason") or "")
     aligned = state.get("aligned")
     final_sha = str(state.get("delivered_sha256") or "")
+    # C-5（09-22 复核）：**实际清单文件里**要带研究状态与它的绑定对象（本次实机清单
+    # 没有 research_state，只有接口包装字段）。绑定不属于当前采纳正文时标 stale，
+    # 页面/PDF/正文/清单因此读的是同一份绑定。
+    _rstate = read_research_state(tid, ws_dir=task_workspace(tid)) or {}
+    if _rstate:
+        _rstate = dict(_rstate)
+        _rstate["stale"] = not state_is_current(_rstate, ver)
     manifest = {
         "report_version_id": ver.identity_id(),
         "body_sha256": ver.version_id,
@@ -2680,6 +2688,8 @@ def _write_export_manifest(tid: str, body: str, pdf_bytes: bytes = b"",
         "review_valid": bool(state.get("review_valid")),
         "hard_fail": str(state.get("hard_fail") or ""),
         "working_paper": paper_meta,
+        # 研究状态（含绑定对象）：清单自己记下来，页面读清单也能判是否待重验
+        "research_state": (_rstate or None),
         "renderer_version": "report_pdf/v1",
         "template_version": "default",
         "files": files,
@@ -2711,10 +2721,21 @@ def _read_export_manifest(tid: str) -> dict:
 
 
 def _research_state_for(tid: str, ws) -> dict | None:
-    """研究状态（页面/导出清单同源）；缺文件返回 None（未知，不编）。"""
+    """研究状态（页面/导出清单/正文注记同源）；缺文件返回 None（未知，不编）。
+
+    C-5：读取时**再对一次绑定**——落盘状态若不属于当前采纳版本（人工修订、重装、
+    契约变化），页面显示"待重验"，不沿用旧计数。
+    """
     try:
-        from delivery_pipeline import read_research_state
-        return read_research_state(tid, ws_dir=str(ws)) or None
+        from delivery_pipeline import read_research_state, state_is_current
+        st = read_research_state(tid, ws_dir=str(ws)) or None
+        if not st:
+            return None
+        from report_version import VersionStore
+        store = VersionStore(ws, tid)
+        st = dict(st)
+        st["stale"] = not state_is_current(st, store.adopted())
+        return st
     except Exception:
         return None
 
@@ -5137,9 +5158,20 @@ def _post_task_review_edit(self, p, body, admin):
             accept_error = str(exc)[:200]
             verdict = {}
 
+        # C-5：人工修订也是**新版本**——研究状态按同一绑定对象重建（修订后旧计数
+        # 不再沿用；结构不属于新正文时按"待重验"显示）
+        _ctr_wire = None
+        try:
+            from delivery_pipeline import read_research_state as _rrs
+            _prev = _rrs(tid, ws_dir=str(task_workspace(tid))) or {}
+            _w = (_prev.get("binding") or {}).get("contract")
+            _ctr_wire = {"wire": dict(_w)} if isinstance(_w, dict) and _w else None
+        except Exception:
+            _ctr_wire = None
         asm = assemble_and_verify(tid, goal, new_body, wrapper=wrapper,
                                   accept_fn=lambda t, g, b: verdict or None,
-                                  ws_dir=task_workspace(tid))
+                                  ws_dir=task_workspace(tid),
+                                  contract=_ctr_wire)
         refreshed = store.adopted() or nv
         # 投影同步：正文 + 验收摘要 + 状态（页面顶部读的就是这三处）
         from task_state import update_delivery_projection

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import re
 import sys
@@ -13,6 +14,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import db_paths
 from async_worker_base import AsyncWorkerBase, AsyncRegistry, AsyncMessaging
+
+logger = logging.getLogger(__name__)
 
 
 def _encode_iri(url: str) -> str:
@@ -35,6 +38,34 @@ def _encode_iri(url: str) -> str:
         return urlunsplit((parts.scheme, parts.netloc, path, query, parts.fragment))
     except Exception:
         return url
+
+
+def _store_bytes(task: dict | None, raw: bytes, digest: str) -> dict:
+    """把抓到的原始字节存成**可复用工件**，返回工件引用（含 hash 与大小）。
+
+    存到任务工作区的 `project/fetched/<sha16>.<ext>`：解析通道按这个引用读同一份
+    字节，不再按 URL 重抓（重抓的字节可能与已取证的不同，且多一次对外请求）。
+    拿不到工作区路径（旧派发/单测）时返回空 dict——调用方按"无工件"处理，
+    不静默丢字节，也不冒充"已保存"。
+    """
+    try:
+        import hashlib
+        from pathlib import Path
+        ws = str((task or {}).get("workspace") or "")
+        if not ws:
+            return {}
+        base = Path(ws) / "project" / "fetched"
+        base.mkdir(parents=True, exist_ok=True)
+        name = f"{digest[:16]}.pdf"
+        path = base / name
+        if not path.exists() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            path.write_bytes(raw)
+        rel = f"project/fetched/{name}"
+        return {"path": rel, "abs_path": str(path), "sha256": digest,
+                "bytes": len(raw)}
+    except Exception as exc:                     # noqa: BLE001 - 存字节失败只记日志
+        logger.warning("PDF 原始字节落工件失败：%s", str(exc)[:120])
+        return {}
 
 
 class _TextExtractor(HTMLParser):
@@ -65,8 +96,9 @@ class _TextExtractor(HTMLParser):
 
 class WebFetchWorker(AsyncWorkerBase):
     _class_capabilities = ["web_fetch"]
+    _needs_task = True          # 需要任务载荷（PDF 原始字节要落到任务工作区工件目录）
 
-    async def execute(self, instruction: str) -> str:
+    async def execute(self, instruction: str, task: dict | None = None) -> str:
         urls = re.findall(r'https?://[^\s<>"\']+', instruction)
         urls = [re.sub(r"[),.;\]}>]+$", "", u) for u in urls]
         if not urls:
@@ -91,6 +123,8 @@ class WebFetchWorker(AsyncWorkerBase):
         # 取字节 + 页码定位），不以截断字节冒充正文。
         if (b"%PDF-" in raw[:1024]) or ("application/pdf" in ctype.lower()):
             import hashlib
+            digest = hashlib.sha256(raw).hexdigest()
+            artifact = _store_bytes(task, raw, digest)
             return json.dumps({
                 "status": "success",
                 "url": url,
@@ -99,7 +133,9 @@ class WebFetchWorker(AsyncWorkerBase):
                 "pdf": True,
                 "content_type": ctype,
                 "content_bytes": len(raw),
-                "content_hash": hashlib.sha256(raw).hexdigest(),
+                "content_hash": digest,
+                # 工件引用：解析通道按它读**同一份字节**（不再按 URL 重抓一次）
+                "artifact": artifact,
                 "note": "PDF 材料：正文需经解析通道提取（不以截断字节冒充正文）",
             }, ensure_ascii=False)
         html = raw.decode("utf-8", errors="replace")

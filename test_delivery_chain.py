@@ -7534,24 +7534,101 @@ class TestResearchStateAndDeterministicCritic(unittest.TestCase):
         self.assertIn("不因此改变", dp.research_state_note(out))
 
     def test_research_ready_keeps_numeric_acceptance_separate(self):
-        """有带定位披露 + 无未支持主张 → 研究就绪；未支持主张则降为草稿。"""
+        """必答三问逐项有依据 + 无未证实肯定结论 → 就绪；缺一项即草稿。
+
+        09-22 复核 C-3/C-4：就绪按**契约必答问题**逐项裁决（默认收入/利润/现金），
+        一条背景证据不能替三问凑分；银行材料清单只作可选问题独列。
+        """
         import delivery_pipeline as dp
+
+        def _q(metric, ok=True):
+            return {"metric": metric,
+                    "support": {"has_evidence": ok,
+                                "locator": "第 3 页" if ok else ""}}
+
         base = {"scope": {"periods": [2023, 2024]},
                 "evidence": {"located": 3, "missing_labels": []},
-                "research_questions": [{"metric": "revenue",
-                                        "support": {"has_evidence": True}}],
+                "research_questions": [_q("revenue"), _q("net_profit"),
+                                       _q("operating_cashflow")],
                 "claims": []}
-        self.assertEqual(dp.research_state("t-rs-2", "g", base)["state"],
-                         dp.RESEARCH_READY)
+        ready = dp.research_state("t-rs-2", "g", base)
+        self.assertEqual(ready["state"], dp.RESEARCH_READY)
+        self.assertEqual(ready["mandatory_total"], 3)
+        self.assertEqual(ready["mandatory_supported"], 3)
+        # 三问只支持两问 → 草稿（不用 2/3 宣称研究完成）
+        two = dict(base, research_questions=[_q("revenue"), _q("net_profit"),
+                                             _q("operating_cashflow", ok=False)])
+        out2 = dp.research_state("t-rs-2b", "g", two)
+        self.assertEqual(out2["state"], dp.RESEARCH_DRAFT)
+        self.assertIn("1/3", out2["reason"])   # 只有 1 项缺依据，如实写 1/3
+        # 未证实肯定结论 → 草稿
         bad = dict(base, claims=[{"support_status": "unsupported",
                                   "claim_type": "observation"}])
         self.assertEqual(dp.research_state("t-rs-3", "g", bad)["state"],
                          dp.RESEARCH_DRAFT)
-        # 边界句（claim_type=boundary）不算"已断言未支持"
-        ok = dict(base, claims=[{"support_status": "unsupported",
-                                 "claim_type": "boundary"}])
-        self.assertEqual(dp.research_state("t-rs-4", "g", ok)["state"],
-                         dp.RESEARCH_READY)
+        # 部分支持/待核查同样不算就绪（语义角色：观察类主张）
+        partial = dict(base, claims=[{"support_status": "partially_supported",
+                                      "claim_type": "observation"}])
+        self.assertEqual(dp.research_state("t-rs-3b", "g", partial)["state"],
+                         dp.RESEARCH_DRAFT)
+        # 边界句与明确写成假设/推断的内容不算"未证实肯定结论"
+        for kind in ("boundary", "inference", "assumption"):
+            ok = dict(base, claims=[{"support_status": "unsupported",
+                                     "claim_type": kind}])
+            self.assertEqual(dp.research_state("t-rs-4", "g", ok)["state"],
+                             dp.RESEARCH_READY, kind)
+
+    def test_bank_materials_are_optional_not_counted_as_answered(self):
+        """银行材料清单只表示待查材料：不参与必答分子分母，不出现"1/4 有依据"。"""
+        import delivery_pipeline as dp
+        st = {"scope": {"periods": [2023, 2024]},
+              "evidence": {"located": 1, "missing_labels": ["财务附注"]},
+              "research_questions": [
+                  {"metric": "revenue", "question": "收入变化",
+                   "support": {"has_evidence": False, "locator": ""}},
+                  {"metric": "net_profit", "question": "利润变化",
+                   "support": {"has_evidence": False, "locator": ""}},
+                  {"metric": "operating_cashflow", "question": "现金变化",
+                   "support": {"has_evidence": False, "locator": ""}},
+                  {"metric": "bank_materials", "question": "银行对公视角",
+                   "support": {"has_evidence": False, "locator": ""}},
+              ],
+              "claims": []}
+        out = dp.research_state("t-rs-6", "研究示例公司 2023 与 2024 年度", st)
+        self.assertEqual(out["state"], dp.RESEARCH_DRAFT,
+                         "银行材料不得把三问凑成就绪")
+        self.assertEqual(out["mandatory_total"], 3)
+        self.assertEqual(out["mandatory_supported"], 0)
+        self.assertEqual([q["metric"] for q in out["optional_questions"]],
+                         ["bank_materials"])
+        self.assertNotIn("1/4", str(out.get("reason")))
+
+    def test_state_binding_marks_stale_after_revision(self):
+        """状态绑定采纳正文：结构版本与正文不同 → 待重验，不沿用旧计数。"""
+        import delivery_pipeline as dp
+
+        class _V:
+            def identity_id(self):
+                return "ver-2"
+
+            version_id = "body-2"
+
+        st = {"scope": {"periods": [2023, 2024]},
+              "version_id": "body-1",                 # 结构属于**上一版**正文
+              "evidence": {"located": 3, "missing_labels": []},
+              "research_questions": [
+                  {"metric": m, "support": {"has_evidence": True, "locator": "第 3 页"}}
+                  for m in ("revenue", "net_profit", "operating_cashflow")],
+              "claims": []}
+        out = dp.research_state("t-rs-7", "g", st, version=_V())
+        self.assertEqual(out["state"], dp.RESEARCH_DRAFT)
+        self.assertTrue(out["stale"], "结构不属于当前正文时必须标待重验")
+        self.assertEqual(out["binding"]["report_version_id"], "ver-2")
+        self.assertEqual(out["binding"]["structure_version_id"], "body-1")
+        self.assertFalse(dp.state_is_current(out, _V()))
+        st2 = dict(st, version_id="body-2")
+        out2 = dp.research_state("t-rs-8", "g", st2, version=_V())
+        self.assertTrue(dp.state_is_current(out2, _V()))
 
     def test_not_applicable_for_non_research_task(self):
         import delivery_pipeline as dp
@@ -7698,14 +7775,21 @@ class TestMaterialSideBatch3(unittest.TestCase):
         import orchestrator_v2 as o
         import annual_report_pdf as pdf
         calls = []
-        with mock.patch.object(pdf, "doc_from_url",
-                               lambda u: calls.append(u) or None),                 mock.patch.object(o.logger, "info"):
+
+        def _doc(u, title="", *, data=None):
+            calls.append((u, data))
+            return None
+
+        with mock.patch.object(pdf, "doc_from_url", _doc), \
+                mock.patch.object(o.logger, "info"):
             ok = o.OrchestratorV2._try_pdf_evidence(
                 "t-pdf", {"instruction": "抓取该页"},
                 {"result": json.dumps({"status": "success", "url": "https://x.test/a",
                                        "pdf": True, "text": ""})})
         self.assertFalse(ok, "解析不出正文时按缺口处理（返回 False）")
-        self.assertEqual(calls, ["https://x.test/a"], "标记要触发解析通道")
+        self.assertEqual([c[0] for c in calls], ["https://x.test/a"], "标记要触发解析通道")
+        # 没有工件引用时 data 为 None（旧 worker 的兼容路径：解析通道自己取字节）
+        self.assertIsNone(calls[0][1])
 
 
 class TestNightCorrectionFailureSamples(unittest.TestCase):
@@ -7869,6 +7953,587 @@ class TestNightCorrectionFailureSamples(unittest.TestCase):
         self.assertEqual(kinds["boundary"]["support_status"], "needs_check",
                          "边界是推断限制，不是已支持的事实主张")
         self.assertTrue(str(kinds["boundary"]["reason"]).startswith("推断边界"))
+
+
+class TestExecutionContractThroughReviewAndDispatch(unittest.TestCase):
+    """批次B：资料契约（主体/代码/期间/as_of/文档类型）穿过 Critic 修订到实际派发。
+
+    实机 ui-706c5ef4a5 的三处证据：
+    1. 派发给 SearchAgent 的指令里**没有** `[检索查询]`——Critic 用模型修订计划时
+       把那一行丢了；
+    2. 引擎实际收到的 query 是整段任务要求 + 历史经验 + 技能教训的拼接，含
+       "每个数字须能回溯/阅读重点/银行对公视角"等样板；
+    3. 历史教训要求"搜索关键词必须包含 2025年三季报"，另有 2026——与 2023–2024 契约冲突。
+
+    本用例用**当时那一版修订稿的形状**做离线集成反例：只替身模型回包与传输边界，
+    `_review_plan` / `_apply_contract_to_plan` / `_dispatch` / `_query_variants`
+    本体照常跑，断言"实际送到检索端的是什么"。
+    """
+
+    # 实机那一版修订稿的形状：模型重写的指令，没有 `[检索查询]`，期间是错的
+    REVISED_STEPS = [
+        {"step_id": "1", "capability": "web_search",
+         "instruction": ("检索洋河股份 2023 与 2024 两个年度的营业收入、归母净利润、"
+                         "经营活动现金流净额，每个数字须能回溯到来源位置并可重算；"
+                         "阅读重点：银行对公客户研究视角（bank_corporate）。"
+                         "\n在web_search步骤中，明确要求搜索关键词必须包含'2025年三季报'，"
+                         "并通过设置时间范围确保结果属于2025年三季度；2026年展望一并检索。"),
+         "timeout": 180},
+        {"step_id": "2", "capability": "web_fetch",
+         "instruction": "抓取洋河股份年报正文页并保留小节标题与原始 URL。", "timeout": 300},
+        {"step_id": "3", "capability": "report_generator",
+         "instruction": "生成洋河股份研究报告。", "timeout": 900},
+    ]
+    # 样板要求（不得出现在送给检索端的 query 里）
+    BOILERPLATE = ("每个数字须能回溯", "阅读重点", "bank_corporate", "银行对公客户研究视角")
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_contract_"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self._old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(self.tmp))
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", self._old_root)
+
+    def _request(self):
+        from facts import CORE_METRICS, ResearchRequest
+        return ResearchRequest(
+            goal=("研究洋河股份 2023 与 2024 两个年度的营业收入、归母净利润、"
+                  "经营活动现金流净额，合并报表口径，数据截至 2025-04-30。"
+                  "每个数字须能回溯到来源位置并可重算；阅读重点：银行对公客户研究视角"
+                  "（bank_corporate）。"),
+            company="洋河股份", company_id="002304.SZ", market="cn",
+            periods=[2023, 2024], caliber="合并", as_of="2025-04-30",
+            required_metrics=[m for m, _ in CORE_METRICS],
+            perspective="bank_corporate",
+        )
+
+    def _contract(self):
+        from execution_contract import ExecutionContract
+        return ExecutionContract.from_request(self._request())
+
+    def _orch_with_contract(self, task_id="t-contract"):
+        from test_orchestrator_v2 import make_orch
+        o = make_orch()
+        o._task_contracts = {task_id: self._contract()}
+        return o
+
+    # ── 修订后重建 ──────────────────────────────────────────
+    def test_revised_plan_is_rebuilt_from_contract(self):
+        o = self._orch_with_contract()
+        plan, repairs = o._apply_contract_to_plan("t-contract", self.REVISED_STEPS)
+        self.assertTrue(repairs, "修订稿必须被按契约重建（有修复记录）")
+        s1 = plan[0]
+        self.assertTrue(o._task_contract("t-contract").matches(s1.get("contract")),
+                        "研究步骤必须带本契约（结构化字段）")
+        lines = [ln for ln in s1["instruction"].splitlines()
+                 if ln.strip().startswith("[检索查询]")]
+        self.assertEqual(len(lines), 2, f"按年度各一条短查询：{lines}")
+        self.assertIn("2023年年度报告", lines[0])
+        self.assertIn("2024年年度报告", lines[1])
+        for ln in lines:
+            self.assertNotIn("2025", ln, "契约外年份不得进入检索查询")
+        self.assertEqual(o._contract_violations("t-contract", plan), [],
+                         "重建后不变量必须成立")
+
+    def test_conflicting_query_is_a_violation(self):
+        c = self._contract()
+        bad = [{"step_id": "1", "capability": "web_search",
+                "instruction": "[检索查询] 洋河股份 2025年三季报 营收",
+                "contract": c.to_wire()}]
+        self.assertTrue(c.violations(bad), "查询行含冲突期间必须判违规")
+        # 指令正文里的历史提示**不**判违规（由 mark_inapplicable 标注，不删历史）
+        body_only = [{"step_id": "1", "capability": "web_search",
+                      "instruction": ("[检索查询] 洋河股份（002304.SZ） 2023年年度报告\n"
+                                      "历史教训：必须包含2025年三季报"),
+                      "contract": c.to_wire()}]
+        self.assertEqual(c.violations(body_only), [])
+
+    def test_review_revision_rebuilds_then_reviews_the_rebuilt_plan(self):
+        """FAIL → 修订 → PASS：复评评的是**重建后**的计划，PASS 绑在契约之上。"""
+        o = self._orch_with_contract()
+        reviewed: list[list[dict]] = []
+
+        def _review(goal, steps, task_id, plan_id, round_no, bank):
+            reviewed.append([dict(s) for s in steps])
+            st = o._review_state(task_id)
+            if len(reviewed) == 1:
+                st["verdict"] = "FAIL"
+                return {"verdict": "FAIL", "suggestions": ["补齐检索步骤的年份"]}
+            st["verdict"] = "PASS"
+            o._review_bind_pass(task_id, steps)
+            return {"verdict": "PASS", "scores": {}}
+
+        o._request_plan_review = _review
+        o._revise_plan = lambda *a, **k: [dict(s) for s in self.REVISED_STEPS]
+        out = o._review_plan("研究洋河股份", [{"step_id": "1", "capability": "web_search",
+                                              "instruction": "检索"}], "t-contract")
+        self.assertEqual(len(reviewed), 2, "初评 + 复评各一次")
+        # 复评看到的是重建后的计划：有契约字段、有按年短查询、无冲突期间
+        second = reviewed[1]
+        self.assertTrue(o._task_contract("t-contract").matches(second[0].get("contract")))
+        self.assertIn("[检索查询] 洋河股份（002304.SZ） 2023年年度报告",
+                      second[0]["instruction"])
+        # 最终返回的计划同样带契约，且 PASS 绑定在这一版上
+        self.assertTrue(o.review_passed_for("t-contract", out),
+                        "PASS 必须绑定在重建后的这一版计划上")
+
+    # ── 派发端 ──────────────────────────────────────────────
+    def test_dispatch_carries_contract_and_refuses_conflicting_query(self):
+        pushed: list[dict] = []
+
+        class _R:
+            def lpush(self, key, value):
+                pushed.append(json.loads(value))
+
+        o = self._orch_with_contract("t-disp")
+        o._new_redis_sync = lambda: _R()
+        o._find_agent = lambda cap: "fake-search"
+        o._cancel_requested = lambda tid: False
+        o._track_inflight = lambda *a, **k: None
+        o._wait_step_result = lambda *a, **k: _ok_outcome()
+        o._budget_reserve = lambda *a, **k: "step-1"
+        o._budget = lambda tid: _NoBudget()
+        o._task_simple = {"t-disp": True}
+        o._task_starts = {"t-disp": 0.0}
+        step = dict(self.REVISED_STEPS[0])
+        step["contract"] = {"version": 1, "fingerprint": "stale"}   # 陈旧指纹
+        res = o._dispatch(step, "t-disp")
+        self.assertEqual(res.get("status"), "SUCCESS")
+        self.assertEqual(len(pushed), 1)
+        payload = pushed[0]
+        self.assertIn("contract", payload, "契约必须随派发下发（结构化字段）")
+        self.assertEqual(payload["contract"]["fingerprint"],
+                         self._contract().fingerprint())
+        lines = [ln for ln in payload["instruction"].splitlines()
+                 if ln.strip().startswith("[检索查询]")]
+        self.assertEqual(len(lines), 2)
+        for ln in lines:
+            self.assertNotIn("2025年三季报", ln)
+        # 送到检索端的 query（SearchAgent 真跑的那一段）不含样板与冲突期间
+        variants = self._variants(payload)
+        joined = "\n".join(variants)
+        for token in self.BOILERPLATE:
+            self.assertNotIn(token, joined, f"样板要求不得进入检索 query：{token}")
+        self.assertNotIn("2025年三季报", joined)
+        self.assertNotIn("2026", joined, f"契约外年份不得进入检索 query：{variants}")
+        self.assertIn("2023年年度报告", variants[0], "干净短查询必须排在最前")
+
+    def test_dispatch_refuses_step_whose_query_conflicts(self):
+        o = self._orch_with_contract("t-disp2")
+        pushed: list[dict] = []
+
+        class _R:
+            def lpush(self, key, value):
+                pushed.append(json.loads(value))
+
+        o._new_redis_sync = lambda: _R()
+        o._find_agent = lambda cap: "fake-search"
+        o._cancel_requested = lambda tid: False
+        c = self._contract()
+
+        class _BrokenContract(type(c)):
+            """契约重建失败（如实现异常/版本不兼容）→ 必须拒发，不得带着陈旧契约发出。"""
+
+            def apply_to_steps(self, steps):
+                raise RuntimeError("契约重建失败（用例注入）")
+
+        o._task_contracts["t-disp2"] = _BrokenContract(**c.identity())
+        o._track_inflight = lambda *a, **k: None
+        o._budget_reserve = lambda *a, **k: "step-1"
+        o._budget = lambda tid: _NoBudget()
+        o._task_simple = {"t-disp2": True}
+        o._task_starts = {"t-disp2": 0.0}
+        step = {"step_id": "9", "capability": "web_search",
+                "instruction": "[检索查询] 洋河股份 2024年年度报告 营收",
+                "contract": {"version": 1, "fingerprint": "stale"}}
+        res = o._dispatch(step, "t-disp2")
+        self.assertEqual(res.get("status"), "FAILED")
+        self.assertIn("契约", str(res.get("result")))
+        self.assertEqual(pushed, [], "违反契约的步骤不得派发")
+
+    def _variants(self, payload: dict) -> list[str]:
+        """让 SearchAgent 真的算一遍检索变体（不联网）。"""
+        from execution_contract import ExecutionContract
+        from worker_base import SearchAgent
+        w = SearchAgent.__new__(SearchAgent)
+        w._contract = ExecutionContract.from_wire(payload["contract"])
+        return w._query_variants(payload["instruction"])
+
+
+def _ok_outcome():
+    from orchestrator_v2 import WAIT_RESULT, WaitOutcome
+    return WaitOutcome(WAIT_RESULT, result={"status": "SUCCESS", "result": "ok"})
+
+
+class _NoBudget:
+    """预算替身：所有迁移都是空操作（本用例只验契约与派发载荷）。"""
+
+    def reserve(self, *a, **k):
+        return "t"
+
+    def settle(self, *a, **k):
+        pass
+
+    def refund(self, *a, **k):
+        pass
+
+    def mark_unsettled(self, *a, **k):
+        return True
+
+    def note_progress(self, *a, **k):
+        pass
+
+
+class TestStoredMaterialChainClosure(unittest.TestCase):
+    """批次B-5：用**已存真实年报材料**闭合"取得→解析→定位→对应问题→报告"。
+
+    材料：`evals/real/yanghe_ar2024_excerpt.json`（东财公告文本 API 的按页摘录，
+    art_code/披露日/页码齐备，一字未改）。链路各段消费**同一份已存字节**：
+    - 取得：真实摘录文本装进真 PDF 容器，字节落成工件（带 sha256）；
+    - 解析：`doc_from_url(..., data=<工件字节>)` 必须不再按 URL 重抓（本用例把
+      `fetch_bytes` 打成"一调就失败"，重抓即报错）；
+    - 定位：切分出的记录带真实页码与主体/期间准入结论；
+    - 对应问题：真实披露解释的是**收入**，利润与现金流仍是缺口（不得扩散）；
+    - 无材料时：输出具体失败原因与待查材料，不用检索摘要/自媒体冒充原披露。
+    """
+
+    GOAL = ("研究洋河股份 2023 与 2024 两个年度的营业收入、归母净利润、"
+            "经营活动现金流净额，合并报表口径，数据截至 2025-04-30")
+
+    @staticmethod
+    def _material() -> dict:
+        p = (Path(__file__).resolve().parent / "evals" / "real"
+             / "yanghe_ar2024_excerpt.json")
+        return json.loads(p.read_text(encoding="utf-8"))
+
+    def _pdf_bytes(self) -> bytes:
+        """把真实摘录文本装进真 PDF 容器（本仓库自带写出器，不联网）。
+
+        两份已存材料都要装进去：行业/业务/风险摘录（`yanghe_ar2024_excerpt.json`）
+        与经营讨论原文（`yanghe_ar2024_mdna_excerpt.json`，含"2024 年实现营业收入
+        288.76 亿元，同比下降 12.83%"）——后者才是**解释收入变化**的那段披露。
+        """
+        import report_pdf
+        m = self._material()
+        mdna = json.loads((Path(__file__).resolve().parent / "evals" / "real"
+                           / "yanghe_ar2024_mdna_excerpt.json").read_text(encoding="utf-8"))
+        parts = [f"## {s['title']}\n\n{s['text']}" for s in m["sections"]]
+        parts.append(mdna["body"])
+        return report_pdf.markdown_to_pdf("\n\n".join(parts), title=m["title"])
+
+    def setUp(self):
+        import task_state
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_chain_"))
+        self._old_root = ws_mod.WORKSPACE_ROOT
+        self._old_db = task_state.DB_PATH
+        ws_mod.configure_workspace_root(str(self.tmp))
+        task_state.DB_PATH = str(self.tmp / "chain.db")
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", self._old_root)
+        self.addCleanup(setattr, task_state, "DB_PATH", self._old_db)
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+
+    def _store_artifact(self, tid: str, data: bytes) -> dict:
+        import hashlib
+        ws = ws_mod.task_workspace(tid)
+        base = Path(ws) / "project" / "fetched"
+        base.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256(data).hexdigest()
+        path = base / f"{digest[:16]}.pdf"
+        path.write_bytes(data)
+        return {"path": f"project/fetched/{path.name}", "abs_path": str(path),
+                "sha256": digest, "bytes": len(data)}
+
+    def test_parse_consumes_stored_bytes_without_refetch(self):
+        import annual_report_pdf as pdf
+        from orchestrator_v2 import _artifact_bytes
+        m = self._material()
+        data = self._pdf_bytes()
+        art = self._store_artifact("chain-1", data)
+        self.assertEqual(_artifact_bytes(art, "chain-1"), data, "取回同一份字节")
+        # 篡改 → hash 不符必须拒绝复用
+        Path(art["abs_path"]).write_bytes(data + b" ")
+        self.assertIsNone(_artifact_bytes(art, "chain-1"))
+        Path(art["abs_path"]).write_bytes(data)
+        # 解析：`fetch_bytes` 打成"一调就失败"——重抓即报错，证明消费的是已存字节
+        with mock.patch.object(pdf, "fetch_bytes",
+                               side_effect=AssertionError("不得按 URL 重抓")):
+            doc = pdf.doc_from_url(m["url"], data=_artifact_bytes(art, "chain-1"))
+        self.assertTrue(doc and doc.get("text"), "已存字节必须能解析出正文")
+        self.assertTrue(doc.get("page_offsets"), "必须建立页偏移（定位用）")
+        self.assertIn("288.76", doc["text"], "解析出的正文必须含真实数字")
+        self.assertIn("12.83", doc["text"], "真实降幅必须在正文里")
+        # 越界工件路径一律拒绝（抓取字节不得被任意路径冒用）
+        self.assertIsNone(_artifact_bytes({"path": "../../etc/passwd"}, "chain-1"))
+
+    def test_located_records_map_to_questions_and_leave_others_as_gaps(self):
+        import annual_report_pdf as pdf
+        import narrative_evidence as ne
+        m = self._material()
+        art = self._store_artifact("chain-2", self._pdf_bytes())
+        doc = pdf.doc_from_url(m["url"], data=Path(art["abs_path"]).read_bytes())
+        doc["published_at"] = m["published_at"]
+        payload = ne.build("chain-2", periods=[2023, 2024], company="洋河股份",
+                           company_id="002304.SZ", as_of="2025-04-30",
+                           extra_docs=[doc])
+        located = [r for r in payload["records"]
+                   if r.get("has_location")
+                   and str(r.get("admission") or "") in ("admitted", "comparison")]
+        self.assertTrue(located, f"真实年报正文没有定位到记录：{payload.get('excluded')}")
+        self.assertTrue(any(int((r.get("page") or 0)) >= 1 for r in located),
+                        "定位必须带真实页码")
+        # 真实披露只解释了收入：不得因此产生利润/现金流的经营解释
+        kinds = {str(r.get("kind") or "") for r in located}
+        self.assertNotIn("operating_cashflow", kinds, kinds)
+        self.assertTrue(payload.get("missing_labels"),
+                        "未覆盖的问题必须作为**待查材料**列出，而不是沉默")
+
+    def test_no_material_reports_reason_and_pending_material(self):
+        import narrative_evidence as ne
+        payload = ne.build("chain-3", periods=[2023, 2024], company="洋河股份",
+                           company_id="002304.SZ", as_of="2025-04-30")
+        self.assertFalse(payload.get("ok"))
+        self.assertEqual(payload.get("located"), 0)
+        self.assertEqual(payload.get("docs"), 0)
+        self.assertTrue(payload.get("missing_labels"),
+                        "无材料时必须给出**待查材料**清单，而不是沉默")
+
+
+class TestAttributionAndChartBinding(unittest.TestCase):
+    """批次C-1/C-2：归因与算术分开核验；图引用绑定稳定 chart_id。
+
+    反例取自 09-22 实机采纳正文：§3.3 固定费用缺证归因（后接"未体现"边界句不得豁免）、
+    §5.2 用绝对额减幅解释资产负债率变化、模型正文对图2–6 的指标说法与实际图错位。
+    """
+
+    def test_attribution_without_material_is_a_gap(self):
+        import acceptance_checker as ac
+        live = ("报告期内利润率下降主要来自收入规模下降对固定性费用摊薄的削弱。"
+                "进一步拆分原因未体现，费用明细未取得。")
+        r = ac.check_attribution_support(live)
+        self.assertFalse(r["pass"], "缺证归因不得因后接边界句而通过")
+        self.assertEqual(len(r["claims"]), 1)
+        self.assertIn("缺证归因", r["gaps"][0])
+        # 明确写成假设/待查 → 不算肯定归因
+        self.assertTrue(ac.check_attribution_support(
+            "利润率变化可能来自固定性费用摊薄的削弱（假设，待费用明细核实）。")["pass"])
+        # 有带定位的真实披露 → 通过
+        ev = {"records": [{"has_location": True, "admission": "admitted"}]}
+        self.assertTrue(ac.check_attribution_support(live, evidence=ev)["pass"])
+
+    def test_ratio_change_not_explained_by_absolute_deltas(self):
+        import acceptance_checker as ac
+        live = "资产负债率下降，主要因为资产减少24.47亿元大于负债减少20.90亿元。"
+        r = ac.check_ratio_arithmetic(live)
+        self.assertFalse(r["pass"], "绝对额减幅大小不能替代比率复算")
+        self.assertIn("比率算术误释", r["gaps"][0])
+        # 给出两期比率读数 → 可复算，不算误释
+        self.assertTrue(ac.check_ratio_arithmetic(
+            "资产负债率由25.42%下降至23.24%，资产减少24.47亿元大于负债减少20.90亿元。")["pass"])
+        # 底稿里有该比率的派生关系 → 不算误释
+        self.assertTrue(ac.check_ratio_arithmetic(
+            live, working_paper={"derived": [{"metric": "debt_ratio"}]})["pass"])
+
+    def test_chart_reference_binds_by_id_not_number(self):
+        import acceptance_checker as ac
+        charts = [
+            {"file": "chart_1.png", "chart_id": "core_scale",
+             "binding": {"metric_labels": ["营业收入", "归母净利润"]}},
+            {"file": "chart_2.png", "chart_id": "yoy_growth",
+             "binding": {"metric_labels": ["营业收入", "归母净利润"]}},
+            {"file": "chart_3.png", "chart_id": "ratio_net_margin",
+             "binding": {"metric_labels": ["归母净利率"]}},
+        ]
+        ok = "图 1 展示营业收入与归母净利润两期规模对比；图 3 给出归母净利率两期变化。"
+        self.assertTrue(ac.check_chart_references(ok, charts)["pass"])
+        bad = "图 2 给出毛利率与净利率两期变化；图 3 展示营业收入同比增速。"
+        r = ac.check_chart_references(bad, charts)
+        self.assertFalse(r["pass"])
+        self.assertIn("图文错配", r["gaps"][0])
+        # 清单缺失时不猜（按无法核验通过并说明）
+        self.assertTrue(ac.check_chart_references(ok, [])["pass"])
+
+    def test_specs_carry_stable_ids_and_direction_consistent_wording(self):
+        """规格自带 chart_id/绑定；同比全为负时不得写"增幅最大"。"""
+        import chart_specs as cs
+        rows = [{"year": 2023, "metric": "revenue", "metric_label": "营业收入",
+                 "value": 331.26, "unit": "亿元"},
+                {"year": 2024, "metric": "revenue", "metric_label": "营业收入",
+                 "value": 288.76, "unit": "亿元"},
+                {"year": 2023, "metric": "net_profit", "metric_label": "归母净利润",
+                 "value": 100.16, "unit": "亿元"},
+                {"year": 2024, "metric": "net_profit", "metric_label": "归母净利润",
+                 "value": 66.73, "unit": "亿元"}]
+        derived = [{"metric": "revenue_yoy", "metric_label": "营业收入同比",
+                    "value": -12.83, "unit": "%", "year": 2024},
+                   {"metric": "net_profit_yoy", "metric_label": "归母净利润同比",
+                    "value": -33.38, "unit": "%", "year": 2024},
+                   {"metric": "net_margin", "metric_label": "归母净利率",
+                    "value": 30.24, "unit": "%", "year": 2023},
+                   {"metric": "net_margin", "metric_label": "归母净利率",
+                    "value": 23.11, "unit": "%", "year": 2024}]
+        specs = cs.financial_research_specs(
+            rows, derived, unit="亿元", company="洋河股份", caliber="合并",
+            periods=[2023, 2024],
+            core_metrics=["revenue", "net_profit"])
+        ids = [str(s.get("chart_id") or "") for s in specs]
+        self.assertEqual(ids[0], cs.CHART_ID_CORE_SCALE)
+        self.assertEqual(ids[1], cs.CHART_ID_YOY_GROWTH)
+        self.assertIn(cs.ratio_chart_id("net_margin"), ids)
+        for s in specs:
+            self.assertTrue(s.get("binding"), s)
+            self.assertEqual(s["binding"]["chart_id"], s["chart_id"])
+            self.assertTrue(s["binding"]["periods"])
+        yoy = specs[1]
+        self.assertNotIn("增幅最大", yoy["conclusion"],
+                         f"同比全为负不得写增幅最大：{yoy['conclusion']}")
+        self.assertIn("降幅最小", yoy["conclusion"])
+        self.assertIn("降幅最大", yoy["conclusion"])
+
+
+
+
+class TestSameVersionDeliveryChain(unittest.TestCase):
+    """批次D-1：修订 → 状态失效/重验 → 导出 → ZIP 内容 → 陈旧提示 的一条离线链。
+
+    这次实机暴露的三件事，都要在同一条链上断言：
+    1. 修订（人工复核）产生**新版本**，旧研究状态不再沿用（绑定失配 → 待重验）；
+    2. 导出清单**文件本体**里带 research_state 与它的绑定对象（不是只有接口包装字段）；
+    3. 旧 ZIP 明确陈旧；缺 `PACKAGE_MANIFEST.json` 的旧包**版本未知**，不得从外部
+       最新清单借一个"包内版本"。
+    """
+
+    # 正文与来源成对：这是**能被确定性验收通过**的诚实样本（改一处就要同时改来源，
+    # 否则验收判 draft，装配会保留旧正文，链上就看不到"修订产生新版本"）
+    GOAL = "贵州茅台2024年报核心财务数据"
+    BODY = ("# 贵州茅台2024年报核心财务数据\n\n## 核心指标\n\n"
+            "| 指标 | 数值 | 来源 |\n|---|---|---|\n"
+            "| 营业收入 | 1741亿元 | [1] |\n| 净利润 | 862亿元 | [1] |\n\n"
+            "## 图表\n\n![chart_1.png](charts/chart_1.png)\n\n"
+            "图 1［core_scale］：核心指标规模对比\n\n"
+            "## 数据时效\n\n数据截至 2024-12-31 年度报告披露日，来源为公开财经报道，"
+            "日终更新。\n\n"
+            "## 参考来源\n\n1. [贵州茅台2024年报：营收1741亿元]"
+            "(https://finance.sina.com.cn/a/1)\n\n"
+            "## 免责声明\n\n本报告由织光 AI 自动生成，仅供参考，不构成任何投资建议；"
+            "数据来源于公开渠道，可能存在延迟或误差；据此操作风险自担。\n")
+
+    def setUp(self):
+        import task_state
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_samever_"))
+        self._old_root = ws_mod.WORKSPACE_ROOT
+        self._old_db = task_state.DB_PATH
+        ws_mod.configure_workspace_root(str(self.tmp))
+        task_state.DB_PATH = str(self.tmp / "samever.db")
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", self._old_root)
+        self.addCleanup(setattr, task_state, "DB_PATH", self._old_db)
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.tid = "samever-1"
+
+    def _seed(self, *, with_manifest: bool = True) -> Path:
+        """建工作区：正文 + 一张图 + 一个**旧**交付包（可选包内清单）。"""
+        import time as _time
+        import task_state
+        import zipfile
+        from report_version import VersionStore
+        task_state.mark_queued(self.tid, goal=self.GOAL, db_path=task_state.DB_PATH)
+        ws = ws_mod.task_workspace(self.tid)
+        proj = ws_mod.task_project_dir(self.tid)
+        proj.mkdir(parents=True, exist_ok=True)
+        (ws / "charts").mkdir(parents=True, exist_ok=True)
+        (ws / "charts" / "chart_1.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"x" * 32)
+        # 来源（数字溯源要命中它，否则验收判 draft）
+        (proj / "search_results.json").write_text(json.dumps([{
+            "title": "贵州茅台2024年报：营收1741亿元_新浪财经",
+            "url": "https://finance.sina.com.cn/a/1",
+            "snippet": "贵州茅台2024年营收1741亿元，净利润862亿元。",
+        }], ensure_ascii=False), encoding="utf-8")
+        (proj / "chart_manifest.json").write_text(json.dumps({"charts": [
+            {"file": "chart_1.png", "chart_id": "core_scale",
+             "binding": {"chart_id": "core_scale", "metric_labels": ["营业收入"],
+                         "unit": "亿元", "periods": [2023, 2024], "caliber": "合并"},
+             "grade": "publish", "question": "两期核心指标规模对比如何？",
+             "observation": "两期核心指标均下降", "type": "grouped_bar"},
+        ]}, ensure_ascii=False), encoding="utf-8")
+        store = VersionStore(ws, self.tid)
+        v1 = store.record(self.BODY)
+        store.adopt(v1, reason="首次交付")
+        zpath = ws / "deliverables_20260101_000000.zip"
+        with zipfile.ZipFile(zpath, "w") as z:
+            z.writestr("reports/report.md", "# 旧版正文")
+            if with_manifest:
+                z.writestr("PACKAGE_MANIFEST.json", json.dumps({
+                    "schema": "weavemind.package/1",
+                    "body_sha256": "deadbeef" * 8,
+                    "packaged_at": _time.time() - 3600,
+                }, ensure_ascii=False))
+        return zpath
+
+    def _revision(self, body: str):
+        from delivery_pipeline import accept_for_body, assemble_and_verify
+        ws = ws_mod.task_workspace(self.tid)
+        verdict = accept_for_body(self.tid, self.GOAL, body, trigger="离线链用例",
+                                  prefer_body=True, ws_dir=ws) or {}
+        return assemble_and_verify(self.tid, self.GOAL, body, wrapper="# 交付说明",
+                                   accept_fn=lambda t, g, b: verdict or None,
+                                   ws_dir=ws), verdict
+
+    def test_revision_invalidates_state_and_export_carries_binding(self):
+        from delivery_pipeline import read_research_state, state_is_current
+        from report_version import VersionStore
+        import web_ui
+        self._seed()
+        asm1, _ = self._revision(self.BODY)
+        st1 = read_research_state(self.tid, ws_dir=str(ws_mod.task_workspace(self.tid)))
+        self.assertTrue(st1.get("binding"), st1)
+        self.assertTrue(state_is_current(
+            st1, VersionStore(ws_mod.task_workspace(self.tid), self.tid).adopted()))
+        # 修订 → 新版本：旧状态不再绑定当前版本（待重验）
+        # 修订：补一段核查结论（数字与来源不变 → 仍通过验收，但正文是新的一版）
+        new_body = self.BODY.replace(
+            "## 数据时效",
+            "## 核查结论\n\n利润与收入的差异原因未取得明细，不归因到任何具体费用项"
+            "（待核查）。\n\n## 数据时效")
+        asm2, _ = self._revision(new_body)
+        store = VersionStore(ws_mod.task_workspace(self.tid), self.tid)
+
+        class _Other:
+            """另一版正文（身份不同）：旧状态对它必须失配——不沿用旧计数。"""
+
+            def identity_id(self):
+                return "other-version-identity"
+
+            version_id = "other-body"
+
+        self.assertFalse(state_is_current(st1, _Other()),
+                         "旧研究状态对另一版正文必须失配（不沿用旧计数）")
+        st2 = read_research_state(self.tid, ws_dir=str(ws_mod.task_workspace(self.tid)))
+        self.assertEqual(str((st2.get("binding") or {}).get("report_version_id")),
+                         store.adopted().identity_id(),
+                         "重建后的状态必须绑定新的采纳正文")
+        man = web_ui._write_export_manifest(self.tid, str(asm2.get("report") or ""),
+                                            b"%PDF-1.4 stub")
+        self.assertTrue(man.get("research_state"), "清单文件里必须有研究状态")
+        self.assertEqual(str((man["research_state"].get("binding") or {})
+                             .get("report_version_id")),
+                         str(man.get("report_version_id")),
+                         "清单与状态必须指向同一版本")
+
+    def test_old_zip_is_flagged_stale_and_unknown_without_manifest(self):
+        import web_ui
+        self._seed(with_manifest=True)
+        self._revision(self.BODY)
+        ws = ws_mod.task_workspace(self.tid)
+        payload = web_ui._export_payload(self.tid, ws, {"version_id": "x" * 8})
+        self.assertTrue(payload.get("package_stale"), payload)
+        self.assertEqual(str(payload.get("package_body_version_id")), "deadbeef" * 8,
+                         "有包内清单时按包内标识比对")
+        # 缺包内清单的旧包：版本未知，不得借用外部清单
+        (ws / "deliverables_20260101_000000.zip").unlink()
+        self._seed(with_manifest=False)
+        self._revision(self.BODY)
+        payload2 = web_ui._export_payload(self.tid, ws, {"version_id": "x" * 8})
+        self.assertEqual(str(payload2.get("package_body_version_id")), "",
+                         "旧包没有包内清单 → 包内版本未知（空），不借外部清单")
 
 
 if __name__ == "__main__":

@@ -218,6 +218,36 @@ _FETCH_ROLE_KW = {
 }
 
 
+def _artifact_bytes(artifact: dict, task_id: str) -> bytes | None:
+    """读回抓取时保存的 PDF 原始字节并校验 hash（不符/缺失返回 None）。
+
+    工件路径以任务工作区为界：只接受工作区内的相对路径（绝对路径必须落在工作区内），
+    越界一律拒绝——抓取通道的字节不能被别的任务或任意路径冒用。
+    """
+    try:
+        import hashlib
+        from pathlib import Path
+        ws = Path(task_workspace(task_id)).resolve()
+        rel = str(artifact.get("path") or "").strip()
+        abs_hint = str(artifact.get("abs_path") or "").strip()
+        cand = (ws / rel) if rel else Path(abs_hint)
+        cand = cand.resolve()
+        if ws != cand and ws not in cand.parents:
+            logger.warning("PDF 工件路径越界，拒绝读取：%s", str(cand)[:140])
+            return None
+        if not cand.is_file():
+            return None
+        data = cand.read_bytes()
+        want = str(artifact.get("sha256") or "")
+        if want and hashlib.sha256(data).hexdigest() != want:
+            logger.warning("PDF 工件 hash 不符（期望 %s）：%s", want[:16], str(cand)[:120])
+            return None
+        return data
+    except Exception as exc:                     # noqa: BLE001 - 读取失败按不可用处理
+        logger.warning("PDF 工件读取失败：%s", str(exc)[:120])
+        return None
+
+
 def _candidate_inadmissible(title: str, url: str, contract: dict) -> bool:
     """候选材料的元数据是否**已证明**不适用（批次3-1：抓取前就排除）。
 
@@ -673,6 +703,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         self._task_simple: dict[str, bool] = {}
         self._task_sources: dict[str, list[str]] = {}
         self._task_goals: dict[str, str] = {}
+        # 执行契约（主体/代码/期间/as_of/口径/文档类型/必需指标）：规划、Critic 修订、
+        # 派发三处共用同一份，检索查询由它生成，指纹在派发时复核
+        self._task_contracts: dict[str, object] = {}
         # P2-5 结构化预载命中时记录 resolver 的 market/name/code 与候选列表，
         # 报告生成时在 [结构化财务数据] 段标注数据源选择依据
         self._task_market_resolution: dict[str, dict] = {}
@@ -1227,7 +1260,22 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             return None
         if source != "stored" or not research_shaped(request):
             return None
-        return self._research_steps(request)
+        steps = self._research_steps(request)
+        # 执行契约按任务留存：Critic 修订稿、反思重做稿与派发都从它重建/复核
+        # （`[检索查询]` 只是它生成的一行文本，模型删掉那行不影响契约本身）
+        try:
+            from execution_contract import ExecutionContract
+            self._task_contracts[task_id] = ExecutionContract.from_request(request)
+        except Exception as exc:
+            logger.warning("执行契约构建失败（task=%s）：%s", task_id, str(exc)[:140])
+        return steps
+
+    def _task_contract(self, task_id: str):
+        """本任务的执行契约（无则 None）；缺失时返回 None，不猜。"""
+        try:
+            return (getattr(self, "_task_contracts", {}) or {}).get(task_id)
+        except Exception:
+            return None
 
     @staticmethod
     def _research_steps(request) -> list[dict]:
@@ -1377,6 +1425,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         url = pdf.url_from_instruction(str(step.get("instruction") or ""))
         head = b""
         _worker_says_pdf = False
+        _artifact: dict = {}
         try:
             parsed = json.loads(str(result.get("result") or ""))
             if isinstance(parsed, dict):
@@ -1385,11 +1434,23 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 # 批次3-2：抓取 worker 现在按 MIME/魔数识别 PDF 并**不再把字节当正文**
                 # （text 为空、带 pdf/content_hash 标记），触发条件要把这个标记认下来
                 _worker_says_pdf = bool(parsed.get("pdf"))
+                if isinstance(parsed.get("artifact"), dict):
+                    _artifact = dict(parsed["artifact"])
         except Exception:
             pass
         if not url or not (_worker_says_pdf or pdf.looks_like_pdf(url, head)):
             return False
-        doc = pdf.doc_from_url(url)
+        # 批次B-4：解析消费**抓取时存下的同一份字节**（工件 + hash 校验），不再按 URL
+        # 重抓一次——重抓的字节可能与已取证的不同，且多一次对外请求。工件缺失或
+        # 校验不符时如实按缺口处理，不用"再抓一次"把问题掩盖过去。
+        data = None
+        if _artifact:
+            data = _artifact_bytes(_artifact, task_id)
+            if data is None:
+                logger.warning("PDF 工件不可复用（缺失/校验失败，按缺口处理，task=%s）：%s",
+                               task_id, str(_artifact.get("path") or "")[:120])
+                return False
+        doc = pdf.doc_from_url(url, data=data)
         if not doc:
             logger.info("PDF 证据通道未取得正文（按缺口处理，task=%s）：%s",
                         task_id, url[:100])
@@ -3739,9 +3800,50 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             revised = self._revise_plan(goal, plan, suggestions, task_id)
             if not revised:
                 return self._review_unavailable(task_id, "评审 FAIL 且修订未产出计划", plan, bank)
+            # 修订稿必须**重新接受契约约束**：模型替换步骤时会丢掉 `[检索查询]` 行
+            # 并把历史提示/样板写回指令（实机 ui-706c5ef4a5：修订后的派发无短查询，
+            # 引擎收到"2025年三季报"这类与契约冲突的期间）。这里按契约重建查询行，
+            # 校验不变量；复评评的是**重建后**的这一版，PASS 因此绑定在契约之上。
+            revised, _repairs = self._apply_contract_to_plan(task_id, revised)
+            bad = self._contract_violations(task_id, revised)
+            if bad:
+                logger.warning("修订稿违反执行契约（task=%s）：%s", task_id, bad[:3])
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "review", "agent": "critic",
+                               "message": f"修订稿违反执行契约，按未完成评审处置：{bad[:2]}",
+                               "timestamp": self._now_iso()})
+                return self._review_unavailable(
+                    task_id, f"修订稿违反执行契约：{bad[0]}", plan, bank)
+            if _repairs:
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "review", "agent": "critic",
+                               "message": f"修订稿按契约重建检索查询（{len(_repairs)} 处）",
+                               "timestamp": self._now_iso()})
             plan = list(revised)
             st["rounds"] = round_no
         return plan
+
+    def _apply_contract_to_plan(self, task_id: str,
+                                steps: list[dict]) -> tuple[list[dict], list[str]]:
+        """按本任务的执行契约重建计划（无契约时原样返回，不猜）。"""
+        contract = self._task_contract(task_id)
+        if contract is None:
+            return list(steps or []), []
+        try:
+            return contract.apply_to_steps(steps)
+        except Exception as exc:                 # noqa: BLE001 - 重建失败不静默放行
+            logger.error("契约重建失败（task=%s）：%s", task_id, str(exc)[:150])
+            return list(steps or []), [f"契约重建失败：{str(exc)[:80]}"]
+
+    def _contract_violations(self, task_id: str, steps: list[dict]) -> list[str]:
+        contract = self._task_contract(task_id)
+        if contract is None:
+            return []
+        try:
+            return contract.violations(steps)
+        except Exception as exc:                 # noqa: BLE001
+            logger.error("契约校验失败（task=%s）：%s", task_id, str(exc)[:150])
+            return [f"契约校验异常：{str(exc)[:80]}"]
 
     def _request_plan_review(self, goal: str, steps: list[dict], task_id: str,
                              plan_id: str, round_no: int, bank: bool) -> dict | None:
@@ -4349,6 +4451,46 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         """Send one step to a worker and wait for result."""
         capability = step.get("capability", "")
         instruction = step.get("instruction", "")
+        # 派发复核：执行契约的**指纹**必须与任务当前契约一致；不一致（或研究步骤
+        # 缺契约）时按契约重建指令，而不是把可能带着别的主体/期间的查询发出去。
+        contract_wire = None
+        _contract = self._task_contract(task_id)
+        if _contract is not None:
+            if not _contract.matches(step.get("contract")):
+                try:
+                    _fixed, _ = _contract.apply_to_steps([step])
+                except Exception as exc:             # noqa: BLE001 - 重建失败即拒发
+                    logger.error("契约重建失败，拒绝派发步骤 %s：%s",
+                                 step.get("step_id"), str(exc)[:150])
+                    push_progress(self._messaging, task_id, "log",
+                                  {"type": "error", "agent": capability,
+                                   "message": f"拒绝派发：契约重建失败 {str(exc)[:80]}",
+                                   "timestamp": self._now_iso()})
+                    return {"task_id": step.get("step_id", ""), "status": "FAILED",
+                            "result": f"契约重建失败，未派发：{str(exc)[:120]}"}
+                if not _fixed or not _contract.matches(_fixed[0].get("contract")):
+                    logger.error("契约重建未生效，拒绝派发步骤 %s", step.get("step_id"))
+                    return {"task_id": step.get("step_id", ""), "status": "FAILED",
+                            "result": "契约重建未生效，未派发（不带着陈旧契约发出）"}
+                step = _fixed[0]
+                instruction = step.get("instruction", instruction)
+                logger.warning("派发前按契约重建步骤 %s（指纹不一致）", step.get("step_id"))
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "info", "agent": capability,
+                               "message": f"步骤 {step.get('step_id')} 契约指纹不一致，"
+                                          f"已按契约重建检索查询",
+                               "timestamp": self._now_iso()})
+            contract_wire = step.get("contract") or _contract.to_wire()
+            # 研究步骤的最后一道闸：查询行里出现契约外期间就不派发（宁停不脏发）
+            if capability in ("web_search", "web_fetch"):
+                _bad = _contract.violations([dict(step, contract=contract_wire)])
+                if _bad:
+                    logger.error("拒绝派发违反契约的步骤 %s：%s", step.get("step_id"), _bad[:2])
+                    push_progress(self._messaging, task_id, "log",
+                                  {"type": "error", "agent": capability,
+                                   "message": f"拒绝派发：{_bad[0]}", "timestamp": self._now_iso()})
+                    return {"task_id": step.get("step_id", ""), "status": "FAILED",
+                            "result": f"步骤违反执行契约，未派发：{_bad[0]}"}
         # 步骤信封：为每个 Worker 补齐 角色/受众/输出要求/质量标准
         # （反思重做、重规划步骤同样经过本单点，保证提示词一致性）
         try:
@@ -4442,6 +4584,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             "step_deadline": time.time() + timeout,
             "workspace": str(task_workspace(task_id)),
             "simple": bool(self._task_simple.get(task_id, False)),
+            # 执行契约随派发下发（结构化字段）：Worker 的检索查询由它生成，不依赖
+            # 指令里可被模型删掉的一行 `[检索查询]`
+            **({"contract": contract_wire} if contract_wire else {}),
             # 目标文本随派发下发：打包步骤据此判断"预载数据是否为交付物"
             # （预载的行情/结构化数据默认不进交付包，除非目标明确要数据文件）
             "goal": str(
@@ -5438,9 +5583,18 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                                 "steps": [], "report": str(exc)}
             # 模板路径：把历史经验作为额外上下文注入首步骤，让框架可复用
             if memory_context and used_template and steps:
+                _mem = memory_context[:1000]
+                _ctr = self._task_contract(task_id)
+                if _ctr is not None:
+                    # 历史经验里的期间多半来自别的任务（实机：宁德时代/腾讯/美联储，
+                    # 2025–2026）。保留框架与教训，但把与本次契约冲突的期间标注"不适用"
+                    # ——旧经验不得覆盖本次契约，也不整库删除。
+                    _mem, _hits = _ctr.mark_inapplicable(_mem)
+                    if _hits:
+                        logger.info("历史经验标注不适用（task=%s）：%s", task_id, _hits[:4])
                 steps[0]["instruction"] = (
                     f"历史经验（来自相似任务，可复用框架/数据/结论）：\n"
-                    f"{memory_context[:1000]}\n\n原始指令：{steps[0]['instruction']}"
+                    f"{_mem}\n\n原始指令：{steps[0]['instruction']}"
                 )
             steps = self._wire_report_deps(steps)
             steps = self._wire_search_fetch_deps(steps)
@@ -5495,8 +5649,17 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 steps = self._ensure_package_step(steps)
                 steps = self._break_cycles(steps)
                 steps = self._inject_goal_into_steps(steps, goal)
-                steps = self._inject_skills(steps, goal)
+                steps = self._inject_skills(steps, goal, self._task_contract(task_id))
                 steps = self._enforce_no_web_scrape_code(steps, goal, task_id)
+                # 派发前**再按契约重建一次**：上面的注入（目标/技能/历史教训）会改写
+                # 步骤指令，可能把"最新季度/2025年三季报"这类与契约冲突的文本带回来。
+                # 契约重建是幂等的，重建后送进 dispatch 的查询只可能来自契约。
+                steps, _c_repairs = self._apply_contract_to_plan(task_id, steps)
+                if _c_repairs:
+                    push_progress(self._messaging, task_id, "log",
+                                  {"type": "info", "agent": "orchestrator",
+                                   "message": f"派发前按执行契约重建（{len(_c_repairs)} 处）",
+                                   "timestamp": self._now_iso()})
                 if not steps:
                     push_progress(self._messaging, task_id, "task_complete",
                                   {"status": "FAILED", "summary": "Empty plan confirmed, task cancelled"})
@@ -5985,7 +6148,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             steps = self._ensure_package_step(steps)
             steps = self._break_cycles(steps)
             steps = self._inject_goal_into_steps(steps, goal)
-            steps = self._inject_skills(steps, goal)
+            steps = self._inject_skills(steps, goal, self._task_contract(task_id))
+            # 反思追加/替换的步骤同样要接受契约约束（与确认路径一致，幂等）
+            steps, _r_repairs = self._apply_contract_to_plan(task_id, steps)
+            if _r_repairs:
+                logger.info("反思步骤按契约重建（task=%s）：%s", task_id, _r_repairs[:3])
             # V1.2 checkpoint：反思产出下一轮步骤后保存（崩溃后从新轮开始）
             self._save_checkpoint(task_id, self._checkpoint_payload(
                 task_id, goal, project, all_steps, completed_all,
@@ -6132,10 +6299,13 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 "degraded_reason": str(_rv.get("degraded_reason") or ""),
                 "required": bool(self._review_is_required()),
             }
+            _ctr = self._task_contract(task_id)
             _asm = assemble_and_verify(
                 task_id, goal, detail, wrapper=delivery, project=project,
                 paper=_wp, accept_fn=self._accept_fn_for(task_id, goal),
-                review_facts=_review_facts)
+                review_facts=_review_facts,
+                # C-5：研究状态按契约必答问题裁决，并绑定契约指纹
+                contract=({"wire": _ctr.to_wire()} if _ctr is not None else None))
             report = _asm["report"]
             write_wrapper(task_id, delivery)
             self._delivery(task_id)["hard_fail"] = str(_asm.get("hard_fail") or "")
@@ -7370,9 +7540,15 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 s["instruction"] += market_suffix
         return steps
 
-    def _inject_skills(self, steps: list[dict], goal: str) -> list[dict]:
+    def _inject_skills(self, steps: list[dict], goal: str,
+                       contract=None) -> list[dict]:
         """Skill 渐进式披露：按目标/能力命中 skill，注入 description+质量标准+反模式
-        （对标标准 3.5，只给标准不给全文工作流）。"""
+        （对标标准 3.5，只给标准不给全文工作流）。
+
+        有执行契约时：技能/历史教训里与本次契约冲突的期间表述**标注"本次不适用"**
+        （保留原文，不删历史库）——否则旧教训会覆盖本次契约（实机 ui-706c5ef4a5：
+        历史教训要求"搜索关键词必须包含 2025年三季报"，而契约期间是 2023–2024）。
+        """
         try:
             from skill_registry import (
                 get_lessons, get_skill_standards, match_skills, skill_applies,
@@ -7404,6 +7580,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     f"{x.get('issue', '')}→{x.get('fix', '')[:120]}"
                     for x in lessons
                 )
+            if contract is not None:
+                block, hits_period = contract.mark_inapplicable(block)
+                if hits_period:
+                    logger.info("技能/历史教训标注不适用（task 契约期间 %s）：%s",
+                                list(getattr(contract, "periods", ()) or []),
+                                hits_period[:4])
             s["instruction"] = f"{s['instruction']}\n\n{block}"
         return steps
 

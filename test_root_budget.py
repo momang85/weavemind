@@ -1175,6 +1175,14 @@ class TestProviderRequestReconciliation(unittest.TestCase):
         self.assertEqual(snap["steps_dispatched"], 1)
         self.assertEqual(snap["provider_requests"]["settled"], 0,
                          "步骤调度不等于供应商请求")
+        # 口径必须写在快照里（机器可读），否则"17 票"会被读成 17 个供应商请求
+        self.assertEqual(snap["count_basis"]["max_calls"], "all_reserved_tickets")
+        self.assertEqual(snap["count_basis"]["provider_requests"], "stages:llm+backup")
+        self.assertEqual(snap["calls"]["reserved"], 1,
+                         "max_calls 口径 = 所有预留票据（含 step）")
+        # 结算时没给用量 → 照实记"未取到用量"一次（不填 0 冒充已知）
+        self.assertEqual(snap["tokens"]["unknown_calls"], 1)
+        self.assertEqual(snap["token_basis"]["actual"], "provider_reported_usage")
 
     def test_open_ticket_survives_restart_for_reconciliation(self):
         """崩溃后仍能识别"已发出未结算"的请求（票据在文件里，重开可见）。"""
@@ -1190,6 +1198,132 @@ class TestProviderRequestReconciliation(unittest.TestCase):
         again.settle(ticket, tokens=512)          # 重复收尾 → 拒绝、不重记
         self.assertEqual(again.state.calls_settled, 1)
         self.assertIn("settle_unknown_ticket", again.state.rejected_transitions)
+
+
+class TestOneSendOneTicket(unittest.TestCase):
+    """09-22 复核冻结反例（P1）：**每次实际发送恰好一张票、一份 usage**。
+
+    复核表（`docs/阶段D实机复核与下一批指令_20260922.md` P1）记录的三种形态：
+    | 普通非流式 usage=5        | 1 次发送 | 曾经 2 票、用量记 10、仅 1 条记录 |
+    | 普通非流式 cap=1          | 0 次发送 | 曾经第一次发送就被额外开票拒掉，却留下已结算票 |
+    | 流式 415 → 非流式成功     | 2 次发送 | 曾经 2 票却把成功 usage 记两遍、未知用量记 0、形状仅 1 条 |
+
+    这里全部禁网（只打桩传输层），并且**不替换 `_send_request`**——回退逻辑必须真的跑。
+    """
+
+    def setUp(self):
+        os.environ["WM_SINGLE_PROCESS"] = "1"   # 离线单测：单进程语义
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_onesend_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(self.tmp))
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", old_root)
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        lc._root_budgets.clear()
+        self.addCleanup(lc.clear_task_context)
+        self.addCleanup(lambda: [os.environ.pop(k, None) for k in _ENV_KEYS])
+
+    def _snap(self, tid):
+        return rb.RootBudget(tid, ws_mod.task_workspace(tid),
+                             lc._budget_limits_from_file()).snapshot()
+
+    def _stub(self, sends, *, completion_tokens=5, fail=None):
+        """打桩传输层：记录每次真实发送，返回固定 usage 的响应。"""
+        def _fake_urlopen(req, timeout=None):
+            sends.append("nonstream")
+            if fail:
+                raise fail
+
+            class _Resp:
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_e):
+                    return False
+
+                def read(self):
+                    return json.dumps({
+                        "choices": [{"message": {"content": "ok"}}],
+                        "usage": {"prompt_tokens": 7,
+                                  "completion_tokens": completion_tokens},
+                    }).encode()
+
+            return _Resp()
+        return _fake_urlopen
+
+    def _shapes(self):
+        """捕获调用形状记录（离线无 Redis，直接记在内存里）。"""
+        recs: list[dict] = []
+
+        def _rec(_tid, **kw):
+            recs.append(dict(kw))
+
+        return recs, mock.patch.object(lc, "_record_llm_call", _rec)
+
+    def test_plain_nonstream_is_one_send_one_ticket(self):
+        sends = []
+        recs, patched = self._shapes()
+        lc.set_task_context("t-one-1")
+        c = lc.LLMClient()
+        with _offline(), patched, \
+                mock.patch.object(lc, "_stream_enabled", lambda: False), \
+                mock.patch.object(urllib.request, "urlopen", self._stub(sends)):
+            out = c.call("sys", "u", expect_json=False)
+        self.assertTrue(out)
+        self.assertEqual(sends, ["nonstream"], "普通非流式只发一次")
+        snap = self._snap("t-one-1")
+        self.assertEqual(snap["provider_requests"]["reserved"], 1)
+        self.assertEqual(snap["provider_requests"]["settled"], 1)
+        self.assertEqual(snap["tokens"]["actual"], 5, "实际用量只记一次")
+        self.assertEqual(snap["tokens"]["unknown_calls"], 0, "这次拿到了 usage")
+        self.assertEqual([r.get("end_reason") for r in recs], ["ok"],
+                         "一次发送一条调用形状记录")
+
+    def test_cap_one_allows_first_nonstream_and_blocks_second(self):
+        os.environ["WM_TASK_MAX_CALLS"] = "1"
+        sends = []
+        lc.set_task_context("t-one-2")
+        c = lc.LLMClient()
+        with _offline(), \
+                mock.patch.object(lc, "_stream_enabled", lambda: False), \
+                mock.patch.object(urllib.request, "urlopen", self._stub(sends)):
+            c.call("sys", "u1", expect_json=False)          # 第一次：允许
+            self.assertEqual(sends, ["nonstream"])
+            with self.assertRaises(lc.LLMCallError) as ctx:
+                c.call("sys", "u2", expect_json=False)      # 第二次：发送前拒
+        self.assertTrue(getattr(ctx.exception, "budget_exhausted", False))
+        self.assertEqual(sends, ["nonstream"], "被拒的第二次从未发出")
+        b = rb.RootBudget("t-one-2", ws_mod.task_workspace("t-one-2"),
+                          lc._budget_limits_from_file())
+        self.assertEqual(b.state.calls_settled, 1)
+        self.assertEqual(b.state.open_tickets, {},
+                         "不许留下没发送却已结算的票")
+
+    def test_stream_415_fallback_keeps_usage_once_and_unknown_unknown(self):
+        sends = []
+        recs, patched = self._shapes()
+
+        def _fake_stream_once(*_a, **_k):
+            sends.append("stream")
+            raise lc.LLMCallError("HTTP 415: Unsupported Media Type")
+
+        lc.set_task_context("t-one-3")
+        c = lc.LLMClient()
+        with _offline(), patched, \
+                mock.patch.object(lc, "_stream_enabled", lambda: True), \
+                mock.patch.object(lc, "_call_llm_stream_once", _fake_stream_once), \
+                mock.patch.object(urllib.request, "urlopen", self._stub(sends)):
+            out = c.call("sys", "u", expect_json=False)
+        self.assertTrue(out)
+        self.assertEqual(sends, ["stream", "nonstream"], "两次真实发送")
+        snap = self._snap("t-one-3")
+        self.assertEqual(snap["provider_requests"]["settled"], 2, "两次发送两张票")
+        self.assertEqual(snap["tokens"]["actual"], 5,
+                         "成功那次的 usage 只归它自己的票（不得记两遍）")
+        self.assertEqual(snap["tokens"]["unknown_calls"], 1,
+                         "415 那次没有 usage → 保持未知（不填 0）")
+        self.assertEqual([r.get("end_reason") for r in recs],
+                         ["stream_fallback_ok", "ok"],
+                         "每次发送各留一条调用形状记录")
 
 
 class TestTokenCounterAccuracy(unittest.TestCase):
@@ -1275,6 +1409,80 @@ class TestBoundedFailClosed(unittest.TestCase):
         b = rb.RootBudget("t-fc2", self.tmp, rb.BudgetLimits(),
                           redis_factory=None, multiprocess=True)
         self.assertTrue(b.reserve("llm"))
+
+    # ── 共享账本"读成功、写失败"（09-22 复核 P1 反例） ──────────────
+    def test_write_failure_after_successful_shared_read_refuses(self):
+        """假后端 GET 成功、随后落盘失败：不得转为本地成功，必须拒发并撤销该次预留。"""
+        os.environ.pop("WM_SINGLE_PROCESS", None)
+        kv: dict = {}
+        b = self._bounded(multiprocess=True,
+                          redis_factory=lambda: _AtomicFakeRedis(kv))
+        t0 = b.reserve("llm")                  # 第一次正常（共享计数 1）
+        b.settle(t0, tokens=5, usage_known=True)
+        key = b._keys()["calls"]
+        self.assertEqual(int(kv[key]), 1)
+        with mock.patch.object(rb.RootBudget, "_payload",
+                               side_effect=RuntimeError("序列化失败")):
+            with self.assertRaises(rb.BudgetExceeded) as ctx:
+                b.reserve("llm")
+        self.assertIn("拒绝新付费请求", str(ctx.exception))
+        self.assertIn("待对账", str(ctx.exception))
+        self.assertEqual(int(kv[key]), 1, "没发出的请求不得占共享额度")
+        self.assertEqual(b.state.calls_reserved, 1, "本地计数撤销这次预留")
+        self.assertEqual(b.state.open_tickets, {}, "不留未发出的票")
+        self.assertTrue(b._persist_uncertain)
+
+    def test_lock_timeout_is_not_a_lock_free_overwrite(self):
+        """落盘锁超时：不写（不得无锁覆盖），有界多进程任务拒发新付费请求。"""
+        os.environ.pop("WM_SINGLE_PROCESS", None)
+        kv: dict = {}
+        b = self._bounded(multiprocess=True,
+                          redis_factory=lambda: _AtomicFakeRedis(kv))
+        b.reserve("llm")
+        path = self.tmp / "budget_state.json"
+        before = path.read_text(encoding="utf-8")
+
+        @contextlib.contextmanager
+        def _no_lock(_path, timeout=None):
+            yield False
+
+        with mock.patch.object(rb, "cross_process_file_lock", _no_lock):
+            with self.assertRaises(rb.BudgetExceeded) as ctx:
+                b.reserve("llm")
+        self.assertEqual(path.read_text(encoding="utf-8"), before,
+                         "拿不到锁时不得无锁覆盖账本")
+        self.assertIn("待对账", str(ctx.exception))
+
+    def test_uncertainty_is_persisted_and_inherited_on_restart(self):
+        """不确定状态写进账本；断点恢复（同一账本）继续拒发，不被下一次成功写洗掉。"""
+        os.environ.pop("WM_SINGLE_PROCESS", None)
+        kv: dict = {}
+        b = self._bounded(multiprocess=True,
+                          redis_factory=lambda: _AtomicFakeRedis(kv))
+        with mock.patch.object(rb.RootBudget, "_payload",
+                               side_effect=RuntimeError("boom")):
+            with self.assertRaises(rb.BudgetExceeded):
+                b.reserve("llm")
+        b._save()                              # 之后一次"能写成"的落盘
+        raw = json.loads((self.tmp / "budget_state.json").read_text(encoding="utf-8"))
+        self.assertTrue(raw.get("persist_uncertain"),
+                        "不确定是账本级事实，不能被后来的成功写入洗掉")
+        again = self._bounded(multiprocess=True,
+                              redis_factory=lambda: _AtomicFakeRedis(kv))
+        with self.assertRaises(rb.BudgetExceeded) as ctx:
+            again.reserve("llm")
+        self.assertIn("待对账", str(ctx.exception))
+        self.assertTrue(again.snapshot()["persist_uncertain"])
+
+    def test_unbounded_task_keeps_usable_report_on_write_failure(self):
+        """不配上限：落盘失败照常发（保留可用报告与只读工作台），但标记不确定。"""
+        os.environ.pop("WM_SINGLE_PROCESS", None)
+        b = rb.RootBudget("t-fc3", self.tmp, rb.BudgetLimits(),
+                          redis_factory=None, multiprocess=True)
+        with mock.patch.object(rb.RootBudget, "_payload",
+                               side_effect=RuntimeError("boom")):
+            self.assertTrue(b.reserve("llm"), "无上限任务不因落盘失败被拒")
+        self.assertTrue(b.snapshot()["persist_uncertain"], "仍要如实标记")
 
 
 class TestWriterMerge(unittest.TestCase):

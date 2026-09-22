@@ -205,6 +205,68 @@ def acceptance_checker_sources(ws):
     return ac._collect_sources(ws)
 
 
+class TestAcceptanceBypassNarrowed(_AdversarialBase):
+    """09-22 复核冻结反例：两处"新增豁免"必须收窄（原检查不得被绕过）。
+
+    反例来自架构复核表（`docs/阶段D实机复核与下一批指令_20260922.md` P1）：
+    1) 同值不得跨主体提升溯源——来源只有宁德时代营收100亿元，正文另称比亚迪、
+       腾讯各100亿元，后两条必须仍判冲突（溯源 1/3，整体 fail）；
+    2) 来源声明尾部追加"需核查"不能豁免已经声称的来源——"数据来源：X，需核查…"
+       仍要检查 X，同时真正的"需核查……才能判断"句不得被误判。
+    """
+
+    _SRC_ONE = [{
+        "title": "宁德时代2024年营业收入100亿元_新浪财经",
+        "url": "https://finance.sina.com.cn/c/3",
+        "snippet": "宁德时代2024年营业收入100亿元。",
+    }]
+
+    def test_same_value_is_not_promoted_across_subjects(self):
+        report = (
+            "# 同业营收对比\n\n## 营收规模\n\n"
+            "宁德时代2024年营业收入为100亿元。比亚迪2024年营业收入为100亿元。"
+            "腾讯2024年营业收入为100亿元。\n\n"
+            "## 数据时效\n\n数据截至 2024-12-31 年度报告披露日，日终更新。\n\n"
+            "## 参考来源\n\n1. [宁德时代2024年年度报告](https://finance.sina.com.cn/c/3)\n\n"
+            + _DISCLAIMER
+        )
+        r = self._run("adv-promote", "分析宁德时代2024年报营收", report, self._SRC_ONE)
+        tr = r["checks"]["number_traceability"]
+        self.assertEqual(r["overall"], "fail")
+        self.assertFalse(tr["pass"])
+        # 只有"宁德时代"那一条可溯源（同值不因数值相等而提升到另外两家）
+        self.assertEqual(len(tr.get("traceable") or []), 1)
+        self.assertEqual(len(tr.get("untraceable") or []), 2)
+        self.assertIn("33%", str(tr.get("details")), tr.get("details"))
+
+    def test_check_suggestion_suffix_does_not_exempt_source_claim(self):
+        """来源声明本身仍被检查：追加"需核查"（逗号句内、换行无句号两种写法）。"""
+        from acceptance_checker import _extract_source_claims
+        for tail in ("，需核查现金流明细。", "\n需核查现金流明细"):
+            body = ("# 现金流结构\n\n## 结论\n\n经营活动现金流以销售回款为主。\n\n"
+                    f"数据来源：洋河股份2024年年报{tail}\n\n"
+                    "## 数据时效\n\n数据截至 2024-12-31。\n\n" + _DISCLAIMER)
+            r = self._run("adv-srctail", "分析洋河股份2024年报现金流", body, None)
+            self.assertEqual(_extract_source_claims(body), ["洋河股份2024年年报"])
+            self.assertFalse(r["checks"]["source_labeling"]["pass"],
+                             f"尾加核查建议不得豁免来源声明（tail={tail!r}）")
+
+    def test_genuine_need_check_phrasing_is_not_flagged(self):
+        """正例防误伤：真正的"需核查……才能判断"是判断句，不是来源声明。"""
+        from acceptance_checker import _extract_source_claims
+        body = ("# 现金流结构\n\n## 结论\n\n现金流结构需结合附注才能判断，"
+                "来源是以销售回款为主还是以其他项目为主。\n\n"
+                "## 数据时效\n\n数据截至 2024-12-31。\n\n" + _DISCLAIMER)
+        self.assertEqual(_extract_source_claims(body), [])
+        r = self._run("adv-needcheck", "分析洋河股份2024年报现金流", body, [{
+            "title": "洋河股份2024年报_新浪财经",
+            "url": "https://finance.sina.com.cn/d/4",
+            "snippet": "洋河股份2024年报。",
+        }])
+        self.assertTrue(r["checks"]["source_labeling"]["pass"],
+                        f"判断句被误判为来源声明：{r['checks']['source_labeling']}")
+
+
 class TestAcceptanceHonestBaseline(_AdversarialBase):
     """反例防误伤：合规报告必须通过（规则收紧时的回归网）。"""
 

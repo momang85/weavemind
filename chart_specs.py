@@ -254,6 +254,34 @@ def verify_specs_against_text(specs: list[dict], text: str) -> tuple[list[dict],
     return kept_specs, dropped_rows
 
 
+# ── 稳定图表身份与绑定（09-22 复核 C-2）─────────────────────────────
+# 编号（chart_2.png / "图 2"）只是**显示结果**：重排、缺图、增删都会让它指向别的图。
+# 语义身份用稳定 `chart_id`（如 `yoy_growth`、`ratio_net_margin`），并把该图绑定的
+# 指标/单位/期间/口径一并写进规格与清单——正文引用按 id 对齐，编号变了也不会错配。
+CHART_ID_CORE_SCALE = "core_scale"
+CHART_ID_YOY_GROWTH = "yoy_growth"
+CHART_ID_RATIO_PREFIX = "ratio_"
+
+
+def ratio_chart_id(metric: str) -> str:
+    return f"{CHART_ID_RATIO_PREFIX}{str(metric or '').strip()}"
+
+
+def chart_binding(chart_id: str, *, metrics, unit: str = "", periods=None,
+                  caliber: str = "", subject: str = "",
+                  metric_labels=None) -> dict:
+    """图表绑定块：这张图**语义上**是什么（供正文引用与错配核验）。"""
+    return {
+        "chart_id": str(chart_id or ""),
+        "metrics": [str(m) for m in (metrics or [])],
+        "metric_labels": [str(m) for m in (metric_labels or [])],
+        "unit": str(unit or ""),
+        "periods": [int(y) for y in (periods or [])],
+        "caliber": str(caliber or ""),
+        "subject": str(subject or ""),
+    }
+
+
 def financial_research_specs(rows: list[dict], derived: list[dict], *,
                              unit: str = "", source: str = "",
                              company: str = "", caliber: str = "",
@@ -327,6 +355,13 @@ def financial_research_specs(rows: list[dict], derived: list[dict], *,
         else:
             conclusion = "两期核心指标规模对比，数值见图注"
         specs.append({
+            "chart_id": CHART_ID_CORE_SCALE,
+            "binding": chart_binding(
+                CHART_ID_CORE_SCALE,
+                metrics=sorted({str(r.get("metric") or "") for r in core_rows}),
+                metric_labels=sorted({str(r.get("metric_label")
+                                       or metric_label(r.get("metric"))) for r in core_rows}),
+                unit=unit, periods=periods, caliber=caliber, subject=company),
             "question": f"{who}{periods[0]} 与 {periods[-1]} 三个核心指标的规模对比如何？",
             "conclusion": conclusion,
             # 图注（报告正文用）**不带数字**：正文里的数字必须可溯源，图注里的
@@ -363,11 +398,27 @@ def financial_research_specs(rows: list[dict], derived: list[dict], *,
         best = max(yoy_rows, key=lambda d: d["value"])
         worst = min(yoy_rows, key=lambda d: d["value"])
         last_year = periods[-1] if periods else ""
+
+        # 措辞必须与**方向**一致：同比全为负时，最大的那个是"降幅最小"，不是"增幅最大"
+        # （实机 chart_2：−12.83% 被写成"增幅最大"）。
+        def _yoy_phrase(d: dict, *, top: bool) -> str:
+            v = d["value"]
+            label = metric_label(d.get("metric"))
+            if v >= 0:
+                return f"{label} 增幅最大（{v:g}%）" if top                     else f"{label} 增幅最小（{v:g}%）"
+            return f"{label} 降幅最小（{v:g}%）" if top                 else f"{label} 降幅最大（{v:g}%）"
+
         specs.append({
+            "chart_id": CHART_ID_YOY_GROWTH,
+            "binding": chart_binding(
+                CHART_ID_YOY_GROWTH,
+                metrics=[str(d.get("metric") or "") for d in yoy_rows],
+                metric_labels=[str(d.get("metric_label")
+                                   or metric_label(d.get("metric"))) for d in yoy_rows],
+                unit="%", periods=periods, caliber=caliber, subject=company),
             "question": f"{who}{last_year} 年各核心指标同比增速是多少？",
-            "conclusion": (f"{metric_label(best.get('metric'))} 增幅最大"
-                           f"（{best['value']:g}%），"
-                           f"{metric_label(worst.get('metric'))} 最低（{worst['value']:g}%）"),
+            "conclusion": (f"{_yoy_phrase(best, top=True)}，"
+                           f"{_yoy_phrase(worst, top=False)}"),
             "type": "bar",
             "caption": "各核心指标同比增速（升/降方向见图中标注）",
             "title": f"{who}{last_year} 年核心指标同比增速（%）",
@@ -427,6 +478,10 @@ def financial_research_specs(rows: list[dict], derived: list[dict], *,
             else:
                 observation += "；当期经营现金流低于归母净利润（<100%）"
         specs.append({
+            "chart_id": ratio_chart_id(metric),
+            "binding": chart_binding(
+                ratio_chart_id(metric), metrics=[metric], metric_labels=[label],
+                unit="%", periods=periods, caliber=caliber, subject=company),
             "question": f"{who}{label} {periods[0]} 与 {periods[-1]} 两期变化如何？",
             "conclusion": observation,
             "caption": f"{label}两期{'上升' if delta > 0 else '下降' if delta < 0 else '持平'}"

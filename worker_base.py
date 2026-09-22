@@ -179,6 +179,10 @@ class BaseWorker(ABC):
         worker.run()
     """
 
+    # 本次任务的执行契约（`_process_task` 从派发载荷装入）。类级默认 None：
+    # 直接调用 `execute()` 的场景（离线检查/单测）按"无契约"走指令文本路径。
+    _contract = None
+
     # 心跳间隔（秒）
     _HEARTBEAT_INTERVAL: float = 10.0
     # 任务拉取超时（秒）
@@ -470,6 +474,21 @@ class BaseWorker(ABC):
             logger.warning("'%s' task '%s' has empty instruction.", self.agent_id, task_id)
             self._publish_failure(task_id, "Empty instruction")
             return
+
+        # 执行契约（派发载荷里的结构化字段）：检索查询由它生成，不依赖指令文本
+        # （指令可被模型修订/技能注入改写，结构化字段不会）。结构不对就按"无契约"
+        # 处理——退回指令里的 `[检索查询]` 行，而不是拿半个契约去检索。
+        self._contract = None
+        _wire = task.get("contract")
+        if isinstance(_wire, dict) and _wire:
+            try:
+                from execution_contract import ExecutionContract
+                self._contract = ExecutionContract.from_wire(_wire)
+            except Exception as exc:                 # noqa: BLE001
+                logger.warning("'%s' 派发契约不可用，按无契约处理：%s",
+                               self.agent_id, str(exc)[:120])
+        if _wire and self._contract is None:
+            logger.warning("'%s' 派发契约版本/结构不识别，按无契约处理", self.agent_id)
 
         try:
             # 调用子类的 execute 方法
@@ -827,21 +846,63 @@ class SearchAgent(BaseWorker):
         整句截断、时效年份、财经/A 股定向模板与机构/公司 IR 定向变体原先写死在
         这里，与轻量检索的变体逻辑是两套；现在只有一套，上限与机构白名单可配置。
 
-        指令里带 `[检索查询] …` 时**以它为准**（取该行到行尾）：检索器只该看到
-        主体 + 期间 + 文档类型 + 指标，而不是整段任务要求。
+        **查询来源的优先级**（批次B）：
+        1. 派发载荷里的执行契约（`self._contract`）——结构化字段，模型删不掉；
+           按年度生成短查询，逐条作为变体；
+        2. 指令里的 `[检索查询] …` 行（旧路径兼容）；
+        3. 整段指令（兜底，仅在两者都没有时）。
+
+        变体里出现契约外期间（如 2025三季报/2026）时**直接剔除**并记日志：那是
+        历史提示/技能教训混进来的串，送给引擎只会污染候选（实机 ui-706c5ef4a5）。
         """
         from adapters.search_quality import build_query_variants
         import re as _re
         pol = self._search_policy()
-        m = _re.search(r"\[检索查询\]\s*(.+)", str(instruction or ""))
-        source = (m.group(1).strip() if m else str(instruction or ""))
-        out = build_query_variants(source, policy=pol, rich=True)
-        if m and source:
-            # 契约短查询**排在最前**：变体列表的第一个会被用来探测存活引擎
-            # （`execute` 里 `qs.pop(0)`），干净查询必须先试
-            _clean = source[:120]
-            out = [_clean] + [v for v in out if v != _clean]
-        return out or [source[:120]]
+        contract = getattr(self, "_contract", None)
+        sources: list[str] = []
+        if contract is not None:
+            try:
+                sources = [q for q in contract.queries() if q]
+            except Exception as exc:                 # noqa: BLE001 - 契约异常退回文本路径
+                logger.warning("执行契约查询生成失败，退回指令文本：%s", str(exc)[:120])
+                sources = []
+        m = None
+        if not sources:
+            m = _re.search(r"\[检索查询\]\s*(.+)", str(instruction or ""))
+            sources = [m.group(1).strip()] if (m and m.group(1).strip()) else []
+        if not sources:
+            sources = [str(instruction or "")[:120]]
+
+        out: list[str] = []
+        for src in sources:
+            # 契约短查询本身排最前（保持契约里的年度顺序）：变体列表的第一个会被用来
+            # 探测存活引擎（`execute` 里 `qs.pop(0)`），干净查询必须先试
+            out.append(src[:120])
+            out.extend(build_query_variants(src, policy=pol, rich=True))
+        # 去重且保序
+        seen: set[str] = set()
+        uniq = [v for v in out if v and not (v in seen or seen.add(v))]
+        if contract is not None:
+            uniq, dropped = self._drop_conflicting_queries(contract, uniq)
+            if dropped:
+                logger.warning("检索变体剔除契约外期间：%s", dropped[:3])
+        return uniq or [sources[0][:120]]
+
+    @staticmethod
+    def _drop_conflicting_queries(contract, variants: list[str]) -> tuple[list[str], list[str]]:
+        """剔除含契约外期间的变体（保留原文记录，不静默丢弃）。"""
+        kept: list[str] = []
+        dropped: list[str] = []
+        for v in variants:
+            try:
+                hits = contract.conflicting_periods(v)
+            except Exception:                        # noqa: BLE001
+                hits = []
+            if hits:
+                dropped.append(f"{v[:60]}（{hits[:2]}）")
+                continue
+            kept.append(v)
+        return kept, dropped
 
     def _filter_results(self, query: str, results: list[dict],
                         min_score: int | None = None) -> list[dict]:

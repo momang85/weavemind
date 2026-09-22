@@ -53,24 +53,100 @@ _RESEARCH_STATE_LABELS = {
 }
 
 
-def research_state(task_id: str, goal: str, structure: dict | None, *,
-                   ws_dir=None) -> dict:
-    """按任务契约判定**研究状态**（与 `verified` 分开的一条轴）。
+def _research_binding(structure: dict | None, version=None, *,
+                      contract_wire: dict | None = None) -> dict:
+    """研究状态的**绑定对象**：正文版本 + 结构版本 + 资料/规则/契约指纹。
 
-    判据（指令 §3 第三小批 item 5）：
-    - 研究就绪：关键问题**有可定位依据**（`evidence.located > 0`，且不是全部问题都只
-      有读数没有依据），且没有"已断言但未支持"的主张；
-    - 研究草稿／待补原始披露：要求经营解释却**没有一条带定位的原始披露**（located=0），
-      或关键问题全部无依据、或存在未支持主张；
-    - 不适用：非研究任务（无结构对象），或契约不要求叙事（单期/纯数据核对）。
+    页面、正文、PDF、导出清单读到的必须是同一份绑定（C-5）：修订或验收改稿后，
+    结构对象、资料集、规则任一变化都会让指纹不同——此时状态按"待重验"显示，
+    而不是沿用旧计数。
     """
     st = structure or {}
+    ev = st.get("evidence") or {}
+    return {
+        "report_version_id": (version.identity_id() if version is not None else ""),
+        "body_sha256": str(getattr(version, "version_id", "") or ""),
+        "structure_version_id": str(st.get("version_id") or ""),
+        "evidence_fingerprint": str(ev.get("fingerprint") or ""),
+        "rules_version": str(st.get("rules_version") or ""),
+        "contract_fingerprint": str((contract_wire or {}).get("fingerprint") or ""),
+        # 契约原文（wire）：修订重装时按它重建同一份契约，页面也能直接展示
+        # 主体/期间/口径——不留"只存指纹、重建时无从下手"的缺口
+        "contract": (dict(contract_wire) if contract_wire else None),
+    }
+
+
+def state_is_current(state: dict, version=None, *, structure: dict | None = None,
+                     contract_wire: dict | None = None) -> bool:
+    """已落盘的研究状态是否仍绑定在**当前**这一版（正文/结构/契约）。"""
+    if bool((state or {}).get("stale")):
+        return False                     # 已判定待重验：不再当作当前状态
+    b = (state or {}).get("binding") or {}
+    if not b:
+        return False
+    if not str(b.get("report_version_id") or ""):
+        return False
+    if version is not None and str(b.get("report_version_id")) != version.identity_id():
+        return False
+    if structure is not None:
+        if str(b.get("structure_version_id") or "") != str(structure.get("version_id") or ""):
+            return False
+    if contract_wire is not None:
+        if str(b.get("contract_fingerprint") or "") != str(contract_wire.get("fingerprint") or ""):
+            return False
+    return True
+
+
+# 契约未声明必需指标时的默认必答三问（收入/利润/现金）。**不把** `bank_materials`
+# 这类"待查材料清单"算进必答问题：它只表示还要什么材料，不是已回答的问题。
+DEFAULT_MANDATORY_METRICS = ("revenue", "net_profit", "operating_cashflow")
+# 明确写成假设/推断/核查问题的内容不按"未证实肯定结论"扣分（语义角色判定，
+# 不看状态名，也不靠豁免某个 boundary 字符串）
+_NON_ASSERTIVE_CLAIM_TYPES = ("boundary", "inference", "assumption")
+_UNPROVEN_STATUSES = ("unsupported", "partially_supported", "needs_check")
+
+
+def research_state(task_id: str, goal: str, structure: dict | None, *,
+                   ws_dir=None, contract_wire: dict | None = None,
+                   version=None) -> dict:
+    """按**契约必答问题**逐项裁决研究状态（与 `verified` 分开的一条轴）。
+
+    判据（09-22 复核 §3-C-3/4/5）：
+    - **必答问题**：契约声明的必需指标（缺省收入/利润/现金三问）逐项有可定位、
+      可审的依据（`support.has_evidence` 且带定位）才算有依据；缺一项就不就绪。
+      银行材料清单等只作**可选问题**独列，不参与分子分母，不用"1/3、1/4"宣称完成；
+    - **肯定结论**：语义角色是观察/目标主张的主张，若 support_status 处于
+      unsupported / partially_supported / needs_check，则不算就绪（数字正确不证明
+      结论成立）；明确写成假设、核查问题、推断边界的内容不扣分；
+    - **绑定**：状态绑定最终采纳正文 + 结构版本 + 契约指纹；结构不属于当前正文时
+      返回"待重验"，不沿用旧计数。
+    """
+    st = structure or {}
+    binding = _research_binding(st, version, contract_wire=contract_wire)
+    # 结构不属于当前采纳正文（修订/重装/换契约后）→ 待重验：不拿旧结构的计数
+    # 冒充当前正文的研究状态
+    _struct_vid = str(st.get("version_id") or "")
+    _body_vid = str(getattr(version, "version_id", "") or "")
+    if st and _struct_vid and _body_vid and _struct_vid != _body_vid:
+        return {"state": RESEARCH_DRAFT,
+                "label": _RESEARCH_STATE_LABELS[RESEARCH_DRAFT],
+                "stale": True,
+                "reason": (f"研究状态与采纳正文不是同一版（结构 {_struct_vid[:12]} ≠ "
+                           f"正文 {_body_vid[:12]}）：待重验，计数不作为结论"),
+                "located": int(((st.get("evidence") or {}).get("located")) or 0),
+                "missing_labels": list((st.get("evidence") or {}).get("missing_labels") or []),
+                "unproven_assertions": 0, "unsupported_claims": 0,
+                "mandatory_supported": 0, "mandatory_total": 0,
+                "optional_questions": [], "requires_narrative": True,
+                "binding": binding}
     if not st:
         return {"state": RESEARCH_NOT_APPLICABLE,
                 "label": _RESEARCH_STATE_LABELS[RESEARCH_NOT_APPLICABLE],
                 "reason": "非研究任务（无结构化研究契约）", "located": 0,
-                "missing_labels": [], "unsupported_claims": 0,
-                "questions_without_support": 0, "requires_narrative": False}
+                "missing_labels": [], "unproven_assertions": 0,
+                "mandatory_supported": 0, "mandatory_total": 0,
+                "optional_questions": [], "requires_narrative": False,
+                "binding": binding}
     scope = st.get("scope") or {}
     periods = list(scope.get("periods") or [])
     questions = list(st.get("research_questions") or [])
@@ -78,44 +154,73 @@ def research_state(task_id: str, goal: str, structure: dict | None, *,
     located = int(ev.get("located") or 0)
     missing = list(ev.get("missing_labels") or [])
     claims = list(st.get("claims") or [])
-    unsupported = [c for c in claims
-                   if str(c.get("support_status")) == "unsupported"
-                   and str(c.get("claim_type")) != "boundary"]
-    no_support = [q for q in questions
-                  if str(q.get("metric")) != "bank_materials"
-                  and not (q.get("support") or {}).get("has_evidence")]
+
+    mandatory_metrics = _mandatory_metrics(contract_wire)
+    by_metric = {str(q.get("metric") or ""): q for q in questions}
+    mandatory = [by_metric[m] for m in mandatory_metrics if m in by_metric]
+    optional = [q for q in questions
+                if str(q.get("metric") or "") not in mandatory_metrics]
+
+    def _supported(q: dict) -> bool:
+        sup = q.get("support") or {}
+        return bool(sup.get("has_evidence")) and bool(str(sup.get("locator") or "").strip())
+
+    unsupported_mandatory = [q for q in mandatory if not _supported(q)]
+    unproven = [c for c in claims
+                if str(c.get("claim_type") or "") not in _NON_ASSERTIVE_CLAIM_TYPES
+                and str(c.get("support_status") or "") in _UNPROVEN_STATUSES]
     requires_narrative = len(periods) >= 2 or bool(questions)
+
+    common = {
+        "located": located, "missing_labels": missing,
+        "mandatory_supported": len(mandatory) - len(unsupported_mandatory),
+        "mandatory_total": len(mandatory),
+        "mandatory_questions": [{"metric": q.get("metric"), "question": q.get("question"),
+                                 "supported": _supported(q),
+                                 "locator": str((q.get("support") or {}).get("locator") or "")}
+                                for q in mandatory],
+        "optional_questions": [{"metric": q.get("metric"), "question": q.get("question"),
+                                "supported": _supported(q)} for q in optional],
+        "unproven_assertions": len(unproven),
+        "unsupported_claims": len(unproven),
+        "requires_narrative": requires_narrative,
+        "binding": binding,
+    }
     if not requires_narrative:
         return {"state": RESEARCH_NOT_APPLICABLE,
                 "label": _RESEARCH_STATE_LABELS[RESEARCH_NOT_APPLICABLE],
-                "reason": "契约不要求经营解释（单期或纯数据核对）",
-                "located": located, "missing_labels": missing,
-                "unsupported_claims": len(unsupported),
-                "questions_without_support": len(no_support),
-                "requires_narrative": False}
+                "reason": "契约不要求经营解释（单期或纯数据核对）", **common}
+
     reasons: list[str] = []
     if located <= 0:
         reasons.append("没有一条带正文定位的原始披露（located=0）")
-    if questions and len(no_support) == len(questions):
-        reasons.append("全部关键问题都只观察到读数、没有可定位依据")
-    if unsupported:
-        reasons.append(f"{len(unsupported)} 条已断言的主张没有底稿/披露支持")
+    if unsupported_mandatory:
+        labels = "、".join(str(q.get("question") or q.get("metric"))
+                          for q in unsupported_mandatory)
+        reasons.append(f"必答问题缺可定位依据（{len(unsupported_mandatory)}/"
+                       f"{len(mandatory)}）：{labels}")
+    if not mandatory:
+        reasons.append("契约必答问题在结构里没有对应条目（无法裁决，按草稿处理）")
+    if unproven:
+        reasons.append(f"{len(unproven)} 条肯定结论处于未证实状态"
+                       f"（未支持/部分支持/待核查）")
     if reasons:
         return {"state": RESEARCH_DRAFT,
                 "label": _RESEARCH_STATE_LABELS[RESEARCH_DRAFT],
-                "reason": "；".join(reasons)[:200],
-                "located": located, "missing_labels": missing,
-                "unsupported_claims": len(unsupported),
-                "questions_without_support": len(no_support),
-                "requires_narrative": True}
+                "reason": "；".join(reasons)[:220], **common}
     return {"state": RESEARCH_READY,
             "label": _RESEARCH_STATE_LABELS[RESEARCH_READY],
-            "reason": (f"带定位披露 {located} 条；关键问题 "
-                       f"{len(questions) - len(no_support)}/{len(questions)} 有依据；"
-                       "无未支持主张"),
-            "located": located, "missing_labels": missing,
-            "unsupported_claims": 0, "questions_without_support": len(no_support),
-            "requires_narrative": True}
+            "reason": (f"带定位披露 {located} 条；必答问题 "
+                       f"{len(mandatory)}/{len(mandatory)} 逐项有可定位依据；"
+                       f"无未证实肯定结论"), **common}
+
+
+def _mandatory_metrics(contract_wire: dict | None) -> tuple[str, ...]:
+    """契约声明的必答指标；未声明时用默认三问（收入/利润/现金）。"""
+    wire = contract_wire or {}
+    metrics = [str(m) for m in (wire.get("required_metrics") or [])]
+    keep = tuple(m for m in metrics if m in DEFAULT_MANDATORY_METRICS)
+    return keep or DEFAULT_MANDATORY_METRICS
 
 
 def write_research_state(task_id: str, payload: dict, *, ws_dir=None) -> None:
@@ -690,7 +795,8 @@ def assemble_and_verify(task_id: str, goal: str, body: str, *,
                         wrapper: str = "", project: str | None = None,
                         accept_fn=None, extra_notes=(),
                         paper: dict | None = None,
-                        review_facts: dict | None = None, ws_dir=None) -> dict:
+                        review_facts: dict | None = None, ws_dir=None,
+                        contract: dict | None = None) -> dict:
     """按固定顺序装配交付正文、判定状态并记录交付 hash。
 
     顺序（编排器收尾与 web_ui 修订必须逐字节一致）：
@@ -700,6 +806,9 @@ def assemble_and_verify(task_id: str, goal: str, body: str, *,
     `review_facts`：编排器传它**本次运行**的评审结论（内存态），本函数在版本定下来之后
     把它连同 `report_version_id` 落盘——这样"PASS 属于哪一版"是事实而不是推断；
     不传则读工作区里已有的评审事实（人工修订走这条：没有针对新版的 PASS）。
+
+    `contract`：执行契约（wire 或 `{"wire": ...}`）——研究状态按它的必答问题逐项裁决，
+    并把契约指纹写进状态的绑定对象（C-5）。
     """
     store = VersionStore(_ws(task_id, ws_dir), task_id)
     # F1：研究任务改用**代码装配的研究简报**作为交付正文（关键发现/财务对照/图表/
@@ -752,14 +861,24 @@ def assemble_and_verify(task_id: str, goal: str, body: str, *,
     notes: list[str] = []
     # 批次3b：研究状态（与数字机器验收分开的一条轴）——在验收/硬门槛之前算，注记进交付
     # 说明（MD 与 PDF 封面共用），文件落盘供页面与导出清单读
+    #
+    # C-5（09-22 复核）：状态必须绑定**最终采纳正文**。`ensure_body_accepted` 可能已经
+    # 换掉采纳正文，而结构对象可能是上一版留下的（本次实机：结构与采纳正文确为不同
+    # hash）——因此这里带上采纳版本与契约指纹，结构版本与采纳正文不一致时按"待重验"
+    # 显示，不沿用旧计数。
     _structure_for_state = None
     try:
         import report_brief as _rb
         _structure_for_state = _rb.read_structure(task_id, ws_dir=ws_dir)
     except Exception:
         _structure_for_state = None
+    _state_version = store.adopted()
+    _contract_wire = (contract or {}).get("wire") if isinstance(contract, dict) else None
+    if _contract_wire is None and isinstance(contract, dict):
+        _contract_wire = contract.get("contract")
     try:
-        rstate = research_state(task_id, goal, _structure_for_state, ws_dir=ws_dir)
+        rstate = research_state(task_id, goal, _structure_for_state, ws_dir=ws_dir,
+                                contract_wire=_contract_wire, version=_state_version)
         write_research_state(task_id, rstate, ws_dir=ws_dir)
         _rstate_note = research_state_note(rstate)
         if _rstate_note:

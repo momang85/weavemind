@@ -315,6 +315,11 @@ def _norm_title(text: str) -> str:
 
 def _inline_plain(text: str) -> str:
     """把内联 Markdown 语法剥掉，保留可读纯文本。"""
+    # 转义下划线先换成占位符：`\_` 必须在剥斜体**之前**保护，否则
+    # `ratio\_net\_margin` 会被 `_..._` 斜体规则吞掉两个下划线
+    # （实测渲染成 "rationetmargin"）
+    _ESC_US = "\x00"
+    text = text.replace("\\_", _ESC_US)
     text = re.sub(r"!\[([^\]]*)\]\([^)]+\)", r"\1", text)
     text = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", text)
     text = re.sub(r"`([^`]+)`", r"\1", text)
@@ -322,6 +327,9 @@ def _inline_plain(text: str) -> str:
     text = re.sub(r"__([^_]+)__", r"\1", text)
     text = re.sub(r"\*([^*]+)\*", r"\1", text)
     text = re.sub(r"_([^_]+)_", r"\1", text)
+    # 转义过的下划线（`\_`）在剥完斜体后还原成字面下划线：否则 `ratio_net_margin`
+    # 这类稳定标识会被当成斜体标记吞掉（实测渲染成 "rationetmargin"）
+    text = text.replace(_ESC_US, "_")
     text = text.replace("&nbsp;", " ").replace("&amp;", "&")
     text = text.replace("&lt;", "<").replace("&gt;", ">")
     return text.strip()
