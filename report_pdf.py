@@ -1122,6 +1122,10 @@ class _PDFBuilder:
                 self._ensure_space(BODY_SIZE * 1.62 * max(1, len(lines)))
                 first = True
                 for line in lines:
+                    # R2：**逐行**查空间——超长列表项可跨页续排。离线条目整项只在开头
+                    # 查一次空间，多出来的行被画到页面下边界之外（离线生产渲染探针：
+                    # 一个超长列表项有 1010 个非空白字符落在页外）。
+                    self._ensure_space(BODY_SIZE * 1.62)
                     if first:
                         self._draw_text(
                             MARGIN_L, marker + line, BODY_SIZE,
@@ -1137,7 +1141,7 @@ class _PDFBuilder:
             self.cursor_y -= BODY_SIZE * 0.3
         elif btype == "code":
             lines = str(block.get("text") or "").split("\n")
-            self._ensure_space(CODE_SIZE * 1.55 * len(lines) + 12)
+            self._ensure_space(CODE_SIZE * 1.55 * min(len(lines), 3) + 12)
             self.page_content += (
                 f"q {0.95} {0.95} {0.97} rg "
                 f"{MARGIN_L:.2f} {self.cursor_y - 4:.2f} "
@@ -1146,6 +1150,8 @@ class _PDFBuilder:
             self.cursor_y -= 10
             for line in lines:
                 for sub in self._wrap(line, CODE_SIZE, USABLE_W - 12):
+                    # R2：代码块同样逐行查空间（可跨页续排，不再画到页外）
+                    self._ensure_space(CODE_SIZE * 1.55)
                     self._draw_text(
                         MARGIN_L + 8, sub, CODE_SIZE, (0.22, 0.25, 0.30),
                     )

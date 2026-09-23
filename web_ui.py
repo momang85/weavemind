@@ -5394,8 +5394,26 @@ def _post_task_package(self, p, body, admin):
     except Exception as exc:                     # noqa: BLE001 - PDF 失败不阻断打包
         pdf_error = str(exc)[:160]
     try:
-        snap = export_snapshot(tid, ws_dir=ws, delivered_text=delivered,
-                               md_bytes=md_bytes, pdf_bytes=pdf_bytes)
+        _row = _ts.read_task(tid) or {}
+    except Exception:
+        _row = {}
+    try:
+        # R2：受保护读取——正文与采纳版本一起取；正文若不是该版渲染结果，
+        # 快照直接拒绝（version changed → 409），不把旧正文贴上新身份
+        snap = export_snapshot(tid, ws_dir=ws, delivered_text=delivered, md_bytes=md_bytes,
+                               pdf_bytes=pdf_bytes, goal=str(_row.get("goal") or ""))
+    except RuntimeError as exc:
+        if "binding unverified" in str(exc):
+            return self._json({
+                "error": ("交付正文无法证明属于当前采纳版本（缺交付登记且无法按采纳正文"
+                          "重渲染）；请先重新装配/重验该版本，再导出"),
+                "retry": True}, 409)
+        if "version changed" in str(exc):
+            return self._json({
+                "error": "导出期间发生修订（交付正文与采纳版本不一致），未生成新包；请重试",
+                "retry": True}, 409)
+        logger.warning("导出快照失败（task=%s）：%s", tid, str(exc)[:200])
+        return self._json({"error": f"导出快照失败：{str(exc)[:160]}"}, 500)
     except LookupError:
         return self._json({"error": "该任务没有可导出的交付正文"}, 404)
     except Exception as exc:
@@ -5437,6 +5455,7 @@ def _post_task_package(self, p, body, admin):
             "sources_fingerprint": (result.get("manifest") or {}).get("sources_fingerprint"),
             "rules_version": (result.get("manifest") or {}).get("rules_version"),
             "rules_fingerprint": (result.get("manifest") or {}).get("rules_fingerprint"),
+            "logic_fingerprint": (result.get("manifest") or {}).get("logic_fingerprint"),
         },
         "verify": result.get("verify"),
         "verify_ok": not bad,
@@ -5445,7 +5464,8 @@ def _post_task_package(self, p, body, admin):
         "frozen_members": len((result.get("manifest") or {}).get("frozen") or {}),
         "pdf_error": pdf_error,
         "note": ("旧包保留不动；包内正文/PDF/底稿/图表/引用证据全部取自同一次导出快照，"
-                 "清单按写入字节复算并对照快照 hash；磁盘后续变化只在 drift 里报告"),
+                 "清单按写入字节复算并对照快照 hash；校验通过才原子发布（失败不产生新包），"
+                 "磁盘后续变化只在 drift 里报告"),
     })
 
 

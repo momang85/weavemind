@@ -278,6 +278,13 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
         "audit": audit,
     }
     structure["version_id"] = ""
+    # R2：判定逻辑指纹（逐问题评估/规则表/验收规则源码）——与规则指纹一起参与失效判定，
+    # 改了逻辑就不该继续判"当前"
+    try:
+        import delivery_pipeline as _dp
+        structure["logic_fingerprint"] = _dp.logic_fingerprint()
+    except Exception:                            # noqa: BLE001 - 取不到就留空（按缺失处理）
+        structure["logic_fingerprint"] = ""
     # 投影的**来源正文**：修订/重装后据此判断"结构是按哪一版正文建的"
     structure["source_body_sha256"] = hashlib.sha256(
         str(body or "").encode("utf-8")).hexdigest()

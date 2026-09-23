@@ -72,6 +72,8 @@ def _research_binding(structure: dict | None, version=None, *,
         # 09-23：规则**指纹**也要进绑定并参与比较——只比版本标签时，
         # 规则内容变了但版本号没动（rules_version 不变、fingerprint 变）仍会判 current
         "rules_fingerprint": str(st.get("rules_fingerprint") or ""),
+        # R2：判定逻辑（逐问题评估/规则表/验收规则源码）的指纹——改了逻辑就不该继续判"当前"
+        "logic_fingerprint": str(st.get("logic_fingerprint") or ""),
         "contract_fingerprint": str((contract_wire or {}).get("fingerprint") or ""),
         # 契约原文（wire）：修订重装时按它重建同一份契约，页面也能直接展示
         # 主体/期间/口径——不留"只存指纹、重建时无从下手"的缺口
@@ -108,6 +110,9 @@ def state_is_current(state: dict, version=None, *, structure: dict | None = None
             return False
         # 09-23：规则**指纹**也要比——版本标签没动、内容变了同样失效
         if str(b.get("rules_fingerprint") or "") != str(structure.get("rules_fingerprint") or ""):
+            return False
+        # R2：判定逻辑源码变化同样失效（新逻辑可能改变同一个问题的结论）
+        if str(b.get("logic_fingerprint") or "") != str(structure.get("logic_fingerprint") or ""):
             return False
     if contract_wire is not None:
         if str(b.get("contract_fingerprint") or "") != str(contract_wire.get("fingerprint") or ""):
@@ -166,6 +171,10 @@ def staleness_reason(state: dict, version=None, *, structure: dict | None = None
             reasons.append(f"资料/准入/定位变化（指纹 "
                            f"{str(b.get('evidence_fingerprint') or '空')[:12]} → "
                            f"{ev_fp[:12] or '空'}）")
+        _lf, _lf_cur = (str(b.get("logic_fingerprint") or ""),
+                        str(st.get("logic_fingerprint") or ""))
+        if _lf != _lf_cur:
+            reasons.append(f"判定逻辑变化（指纹 {_lf[:12] or '空'} → {_lf_cur[:12] or '空'}）")
         if str(b.get("rules_version") or "") != str(st.get("rules_version") or ""):
             reasons.append(f"验收规则版本变化（{str(b.get('rules_version') or '空')} → "
                            f"{str(st.get('rules_version') or '空')}）")
@@ -415,7 +424,12 @@ def read_acceptance_summary(task_id: str) -> dict | None:
 
 
 def rules_identity(task_id: str) -> tuple[str, str]:
-    """本次验收的规则版本与指纹（供版本身份使用）。"""
+    """本次验收的规则版本与指纹（供版本身份使用）。
+
+    R2：返回的指纹里并入**判定逻辑身份**（逐问题评估模块与验收规则的源码指纹）——
+    只认"未更新的版本标签"会让改了语义规则的代码继续用旧绑定（复核反例：
+    rules_version 不变、rules_fingerprint 变了仍判 current）。
+    """
     summary = read_acceptance_summary(task_id)
     if summary and (summary.get("rules_version") or summary.get("rules_fingerprint")):
         return str(summary.get("rules_version") or ""), str(summary.get("rules_fingerprint") or "")
@@ -424,6 +438,26 @@ def rules_identity(task_id: str) -> tuple[str, str]:
         return str(ACCEPTANCE_RULES_VERSION), str(rules_fingerprint())
     except Exception:
         return "", ""
+
+
+def logic_fingerprint() -> str:
+    """判定/渲染逻辑的源码指纹：这些文件改了，任何绑定都不该继续判"当前"。
+
+    覆盖：逐问题评估（`question_assessment.py`）、规则表与装配（`report_brief.py`）、
+    验收规则（`acceptance_checker.py`）。文件名+内容一起哈希（改名也算变化）。
+    """
+    import hashlib as _h
+    from pathlib import Path as _P
+    root = _P(__file__).resolve().parent
+    h = _h.sha256()
+    for name in ("question_assessment.py", "report_brief.py", "acceptance_checker.py"):
+        p = root / name
+        try:
+            h.update(name.encode("utf-8"))
+            h.update(p.read_bytes())
+        except Exception:                        # noqa: BLE001 - 读不到就跳过（不编内容）
+            h.update(b"<missing>")
+    return h.hexdigest()[:16]
 
 
 def sources_fingerprint(task_id: str, report_text: str = "") -> str:
@@ -609,13 +643,16 @@ def _disk_drift(ws, frozen: dict) -> dict:
 
 
 def export_snapshot(task_id: str, *, ws_dir=None, delivered_text: str = "",
-                    md_bytes: bytes = b"", pdf_bytes: bytes = b"") -> dict:
+                    md_bytes: bytes = b"", pdf_bytes: bytes = b"",
+                    goal: str = "") -> dict:
     """导出用**一次不可变快照**：采纳身份 + 正文 + 资料/规则指纹 + 逐成员字节。
 
     09-23：重包各环节此前各自重读"当前版本"——生产探针里 MD 取 A、修订切 B、PDF 取 B，
     仍返回 ok/verify_ok=true（文件自检只能证明写入字节未坏，证明不了语义同版）。
-    这里把身份/正文/指纹连同**底稿、图表、审计稿、引用证据的字节**一次性捕获，
-    MD/PDF/底稿/清单都由它生成；调用方在发布前再核对一次采纳身份，变了就拒绝发布（409）。
+    R2：再加一条**受保护读取**——正文必须能证明是由**这一版**正文渲染出来的：
+    交付正文取自页面/任务库时可能与版本库不同步（复核探针：包内正文 A + 身份 B 仍自检绿），
+    这里用生产渲染入口把采纳正文重渲一次，交付正文必须与它一致（外壳可包住它）；
+    对不上就抛 `RuntimeError("version changed")`，由调用方 409 重试，不静默混版。
     """
     from pathlib import Path as _P
     ws = _P(ws_dir) if ws_dir else workspace.task_workspace(task_id)
@@ -623,7 +660,50 @@ def export_snapshot(task_id: str, *, ws_dir=None, delivered_text: str = "",
     adopted = store.adopted()
     if adopted is None:
         raise LookupError("该任务没有可导出的采纳版本")
+    body_text = str(getattr(adopted, "body", "") or "")
     text = str(delivered_text or "")
+    # R2（受保护读取）：交付正文必须能证明属于**这一版**。两条证据任一成立即可：
+    #   ① 版本库的交付登记（装配时记下的 delivered_sha256 + 对应当前身份 + aligned）；
+    #   ② 生产渲染入口能把采纳正文渲成交付正文（外壳可包住它）。
+    # 都对不上 → version changed（调用方 409 重试），不把旧正文贴上新身份。
+    binding_verified = False
+    if text:
+        try:
+            for d in reversed(store.deliveries()):
+                if str(d.get("report_version_id") or "") != adopted.identity_id():
+                    continue
+                if not d.get("aligned"):
+                    continue
+                if str(d.get("delivered_sha256") or "") == body_hash(text):
+                    binding_verified = True
+                else:
+                    raise RuntimeError("version changed")
+                break
+        except RuntimeError:
+            raise
+        except Exception as exc:                 # noqa: BLE001 - 登记读不到就退到渲染核对
+            logger.warning("导出快照：交付登记读取失败（task=%s）：%s", task_id, str(exc)[:120])
+    _rendered = ""
+    try:
+        if goal:
+            _rendered = research_candidate_body(task_id, goal, body_text, ws_dir=ws) or ""
+    except Exception as exc:                     # noqa: BLE001 - 渲染失败不阻断，但记日志
+        logger.warning("导出快照：按采纳正文重渲染失败（task=%s）：%s", task_id, str(exc)[:120])
+    if _rendered:
+        _n = lambda s: "".join(str(s).split())   # noqa: E731 - 只用于包含判断
+        _same = (_n(_rendered) in _n(text)) or (_n(text) in _n(_rendered)) if text else False
+        if text and not _same and not binding_verified:
+            # 交付正文不是这一版正文渲染出来的（期间有修订或读到了旧投影）
+            raise RuntimeError("version changed")
+        if _same:
+            binding_verified = True
+        if not text:
+            text = _rendered
+            binding_verified = True
+    if text and not binding_verified:
+        # 两条证据都不成立：**fail closed**——宁可不导出，也不把无法证明归属的正文
+        # 贴上当前身份（复核探针的缺陷正是"包内正文 A + 身份 B"仍自检绿）。
+        raise RuntimeError("binding unverified")
     if not md_bytes and text:
         md_bytes = text.encode("utf-8")
     payload = _freeze_payload(task_id, ws, md_bytes=md_bytes, pdf_bytes=pdf_bytes)
@@ -641,10 +721,15 @@ def export_snapshot(task_id: str, *, ws_dir=None, delivered_text: str = "",
     return {
         "report_version_id": adopted.identity_id(),
         "body_sha256": str(getattr(adopted, "version_id", "") or ""),
+        "body_text_sha256": body_hash(body_text),
+        "delivered_sha256": body_hash(text) if text else "",
+        # 未知依赖不伪装成已验证：两条绑定证据都没有时如实标 False（页面/清单可见）
+        "binding_verified": bool(binding_verified),
         "delivered_text": text,
         "sources_fingerprint": sources_fingerprint(task_id, text),
         "rules_version": rv,
         "rules_fingerprint": rf,
+        "logic_fingerprint": logic_fingerprint(),
         "evidence_fingerprint": ev_fp,
         "charts": charts,
         "payload": payload,
@@ -686,8 +771,11 @@ def _manifest_from_frozen(frozen: dict, *, snap: dict, ws=None,
     out["sources_fingerprint"] = str(snap.get("sources_fingerprint") or "")
     out["rules_version"] = str(snap.get("rules_version") or "")
     out["rules_fingerprint"] = str(snap.get("rules_fingerprint") or "")
+    out["logic_fingerprint"] = str(snap.get("logic_fingerprint") or "")
     out["evidence_fingerprint"] = str(snap.get("evidence_fingerprint") or "")
     out["snapshot_captured_at"] = float(snap.get("captured_at") or 0.0)
+    out["binding_verified"] = bool(snap.get("binding_verified"))
+    out["delivered_sha256"] = str(snap.get("delivered_sha256") or "")
     out["frozen"] = dict(want)
     if ws is not None:
         out["drift"] = _disk_drift(ws, frozen)
@@ -720,6 +808,9 @@ def repack_adopted(task_id: str, *, md_bytes: bytes = b"", pdf_bytes: bytes = b"
     reports.mkdir(parents=True, exist_ok=True)
     if snap:
         if str(snap.get("report_version_id") or "") != adopted.identity_id():
+            raise RuntimeError("version changed")
+        if str(snap.get("body_sha256") or "") != str(
+                getattr(adopted, "version_id", "") or ""):
             raise RuntimeError("version changed")
         frozen = {str(arc): bytes(blob)
                   for arc, blob in (snap.get("payload") or {}).items()}
@@ -780,11 +871,11 @@ def repack_adopted(task_id: str, *, md_bytes: bytes = b"", pdf_bytes: bytes = b"
             zf.writestr(arc, blob)
         zf.writestr("PACKAGE_MANIFEST.json",
                     json.dumps(manifest, ensure_ascii=False, indent=1))
-    _os.replace(tmp_path, zip_path)          # 原子发布
-    # 自检：包内字节 vs 清单 hash，**再对一次快照 hash**（两版内容不得混进同一包）
+    # R2：**先校验再发布**——在临时包上复算字节 hash（并对快照 hash），失败就删掉临时包
+    # 报错；校验通过的包才原子替换上线。"先发布后自检"会把坏包暴露在下载列表里。
     verify: dict[str, str] = {}
     try:
-        with _zf.ZipFile(zip_path) as zf:
+        with _zf.ZipFile(tmp_path) as zf:
             for arc, want in (manifest.get("files") or {}).items():
                 if arc not in zf.namelist():
                     verify[arc] = "missing"
@@ -797,6 +888,15 @@ def repack_adopted(task_id: str, *, md_bytes: bytes = b"", pdf_bytes: bytes = b"
                 verify[arc] = "ok" if (not _fz or _fz == got) else "snapshot_mismatch"
     except Exception as exc:                     # noqa: BLE001 - 自检失败如实报告
         verify["__error__"] = str(exc)[:120]
+    if any(v != "ok" for v in verify.values()):
+        try:
+            tmp_path.unlink()
+        except Exception:                        # noqa: BLE001 - 清理失败不影响报错
+            pass
+        return {"package": "", "path": "", "files": [a for a, _b in members],
+                "manifest": manifest, "verify": verify, "bytes": 0,
+                "error": "发布前校验未通过，未上线新包（旧包保持可用）"}
+    _os.replace(tmp_path, zip_path)          # 原子发布（校验已通过）
     return {"package": zip_path.name, "path": str(zip_path),
             "files": [a for a, _b in members], "manifest": manifest,
             "verify": verify,

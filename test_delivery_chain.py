@@ -8814,6 +8814,7 @@ class TestSameVersionDeliveryChain(unittest.TestCase):
         import delivery_pipeline as dp
         self._seed(with_manifest=True)
         ws = ws_mod.task_workspace(self.tid)
+        self._register_delivery("# A\n")
         snap = dp.export_snapshot(self.tid, ws_dir=ws, delivered_text="# A\n")
         # 期间发生修订：采纳版本换成 B
         from report_version import VersionStore
@@ -8825,6 +8826,7 @@ class TestSameVersionDeliveryChain(unittest.TestCase):
                               snapshot=snap)
         self.assertIn("version changed", str(ctx.exception))
         # 快照身份取自当前采纳版本
+        self._register_delivery("# B\n")
         snap2 = dp.export_snapshot(self.tid, ws_dir=ws, delivered_text="# B\n")
         self.assertEqual(snap2.get("body_sha256"), v_b.version_id)
         res = dp.repack_adopted(self.tid, md_bytes=b"# B\n", pdf_bytes=b"", ws_dir=ws,
@@ -8877,6 +8879,7 @@ class TestSameVersionDeliveryChain(unittest.TestCase):
         (ws / "narrative_evidence.json").write_text(
             json.dumps(material_a, ensure_ascii=False), encoding="utf-8")
         md = "# 交付正文（A）\n".encode("utf-8")
+        self._register_delivery("# 交付正文（A）\n")
         snap = dp.export_snapshot(self.tid, ws_dir=ws, delivered_text="# 交付正文（A）\n",
                                   md_bytes=md, pdf_bytes=b"%PDF-A")
         self.assertEqual(snap["frozen"]["charts/chart_1.png"],
@@ -8916,12 +8919,122 @@ class TestSameVersionDeliveryChain(unittest.TestCase):
         # 同样如实报告；关键断言是**包内那份来自快照时刻的资料**
         self.assertEqual(drift.get("evidence/citation_evidence.json"), "missing_on_disk")
 
+    def _register_delivery(self, text: str) -> None:
+        """按生产口径登记交付正文（`assemble_and_verify` 会写这条记录）。
+
+        R2 后 `export_snapshot` 要求交付正文能证明属于当前采纳版本：登记是两条证据
+        之一；测试里显式登记，避免把"没有登记"当成"绑定成立"。
+        """
+        from report_version import VersionStore
+        ws = ws_mod.task_workspace(self.tid)
+        store = VersionStore(ws, self.tid)
+        adopted = store.adopted()
+        store.record_delivery(str(text),
+                              accepted_body=str(getattr(adopted, "body", "") or ""),
+                              ok=True)
+
+    def test_snapshot_rejects_delivered_body_from_another_version(self):
+        """R2 反例：读到旧交付正文 A 之后采纳切成 B → 快照必须拒绝（不把旧正文贴新身份）。
+
+        复核探针：读交付 A 后切采纳 B，仍 HTTP200/verify_ok=true 而包内正文 A、身份 B。
+        现在两条绑定证据（版本库交付登记 / 生产渲染核对）都不成立即 **fail closed**；
+        登记对得上（`record_delivery`，装配时正常会写）才允许导出，并标 binding_verified。
+        """
+        import delivery_pipeline as dp
+        self._seed(with_manifest=True)
+        ws = ws_mod.task_workspace(self.tid)
+        from report_version import VersionStore
+        store = VersionStore(ws, self.tid)
+        v_b = store.record("# 新版正文（B）\n\n正文内容。\n")
+        store.adopt(v_b, reason="并发修订（测试）")
+        # B 版装配后已登记交付（生产路径会写）：旧正文 A 与登记不符 → version changed
+        store.record_delivery("# 新版正文（B）\n\n（装配后的交付外壳）\n",
+                              accepted_body=str(v_b.body or ""), ok=True)
+        with self.assertRaises(RuntimeError) as ctx:
+            dp.export_snapshot(self.tid, ws_dir=ws, delivered_text="# 旧正文（A）\n",
+                               goal=self.GOAL)
+        self.assertIn("version changed", str(ctx.exception))
+        # 未登记的正文 vs 已登记的 B → 同样拒绝（不给"随便一段"贴身份）
+        with self.assertRaises(RuntimeError) as ctx2:
+            dp.export_snapshot(self.tid, ws_dir=ws,
+                               delivered_text="随便一段没有登记过的正文\n",
+                               goal=self.GOAL)
+        self.assertIn("version changed", str(ctx2.exception))
+        # 两条证据都没有（登记为空 + 无渲染入口）→ fail closed（binding unverified）
+        with mock.patch.object(VersionStore, "deliveries", lambda self: []):
+            with self.assertRaises(RuntimeError) as ctx3:
+                dp.export_snapshot(self.tid, ws_dir=ws,
+                                   delivered_text="随便一段没有登记过的正文\n",
+                                   goal="非研究工作台任务（无渲染入口）")
+        self.assertIn("binding unverified", str(ctx3.exception))
+        # 交付登记与当前身份一致 → 允许导出，并标 binding_verified
+        delivered = "# 新版正文（B）\n\n正文内容。（装配后的交付外壳）\n"
+        store.record_delivery(delivered, accepted_body=str(v_b.body or ""), ok=True)
+        snap = dp.export_snapshot(self.tid, ws_dir=ws, delivered_text=delivered,
+                                  goal=self.GOAL)
+        self.assertEqual(snap.get("report_version_id"), v_b.identity_id())
+        self.assertTrue(snap.get("binding_verified"))
+        self.assertTrue(snap.get("body_text_sha256"))
+        self.assertIn("reports/report.md", snap.get("payload") or {})
+
+    def test_publish_verification_failure_keeps_old_package(self):
+        """R2：发布前校验失败 → 不产生新包、旧包保持可用（不再先上线后自检）。"""
+        import delivery_pipeline as dp
+        self._seed(with_manifest=True)
+        ws = ws_mod.task_workspace(self.tid)
+        before = {p.name for p in ws.glob("deliverables_*.zip")}
+        self._register_delivery("# 正文\n")
+        snap = dp.export_snapshot(self.tid, ws_dir=ws, delivered_text="# 正文\n",
+                                  goal=self.GOAL)
+        real = dp._manifest_from_frozen
+
+        def _bad(frozen, **kw):
+            m = real(frozen, **kw)
+            m["files"] = dict(m.get("files") or {})
+            m["files"]["reports/report.md"] = "0" * 64     # 故意写错的期望值
+            return m
+
+        with mock.patch.object(dp, "_manifest_from_frozen", _bad):
+            res = dp.repack_adopted(self.tid, ws_dir=ws, snapshot=snap)
+        self.assertEqual(res.get("package"), "")
+        self.assertIn("未上线", str(res.get("error") or ""))
+        self.assertTrue(any(v != "ok" for v in (res.get("verify") or {}).values()))
+        after = {p.name for p in ws.glob("deliverables_*.zip")}
+        self.assertEqual(after, before, "校验失败不得产生新包，旧包保持")
+        self.assertEqual(len(list(ws.glob(".*.tmp"))), 0, "临时包必须清掉")
+
+    def test_logic_fingerprint_change_invalidates_state(self):
+        """R2：判定逻辑源码指纹变了 → 绑定不得继续判"当前"。"""
+        import delivery_pipeline as dp
+        st = {"version_id": "body-1", "rules_version": "R1", "rules_fingerprint": "fp-1",
+              "logic_fingerprint": "old-logic",
+              "evidence": {"located": 2, "fingerprint": "ev-A"},
+              "research_questions": [], "claims": []}
+
+        class _V:
+            def identity_id(self):
+                return "ver-1"
+
+            version_id = "body-1"
+
+        state = {"binding": {"report_version_id": "ver-1", "structure_version_id": "body-1",
+                             "evidence_fingerprint": "ev-A", "rules_version": "R1",
+                             "rules_fingerprint": "fp-1", "logic_fingerprint": "old-logic",
+                             "contract_fingerprint": "cf-1"}}
+        self.assertTrue(dp.state_is_current(state, _V(), structure=st,
+                                            require_binding=True))
+        st2 = dict(st, logic_fingerprint="new-logic")
+        self.assertFalse(dp.state_is_current(state, _V(), structure=st2,
+                                            require_binding=True))
+        self.assertIn("判定逻辑变化", dp.staleness_reason(state, _V(), structure=st2))
+
     def test_snapshot_keeps_version_identity_and_rejects_interleaving(self):
         """项2：包内清单的身份/指纹全部取自快照；快照后换版 → 拒绝发布。"""
         import delivery_pipeline as dp
         self._seed(with_manifest=True)
         ws = ws_mod.task_workspace(self.tid)
         md = "# 快照正文\n".encode("utf-8")
+        self._register_delivery("# 快照正文\n")
         snap = dp.export_snapshot(self.tid, ws_dir=ws, delivered_text="# 快照正文\n",
                                   md_bytes=md)
         res = dp.repack_adopted(self.tid, ws_dir=ws, snapshot=snap)

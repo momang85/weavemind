@@ -366,6 +366,19 @@ class TestPdfPagination(unittest.TestCase):
                                 f"有文字画在页脚线以下/页外：min_y={min(ys)}")
         self.assertGreaterEqual(pdf.count(b"/Type /Page"), 2, "长内容应分页")
 
+    def test_long_list_item_does_not_run_off_the_page(self):
+        """R2：列表项与代码块同样逐行检查空间（离线探针：超长列表项 1010 字符越界）。"""
+        import report_pdf
+        long_item = ("- " + "该条观察需要跨页续排，不能画到纸外；" * 80 + "\n")
+        md = ("# 标题\n\n## 风险与核查\n\n" + long_item
+              + "\n```\n" + "code line\n" * 60 + "```\n")
+        pdf = report_pdf.markdown_to_pdf(md, title="标题", workspace=None)
+        ys = self._text_ys(pdf)
+        self.assertTrue(ys)
+        self.assertGreaterEqual(min(ys), 20.0,
+                                f"列表/代码块有文字画在页脚线以下/页外：min_y={min(ys)}")
+        self.assertGreaterEqual(pdf.count(b"/Type /Page"), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
