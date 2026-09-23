@@ -2745,11 +2745,37 @@ def _research_state_for(tid: str, ws) -> dict | None:
         st["stale"] = not state_is_current(
             st, store.adopted(), structure=_structure, contract_wire=_ctr,
             require_binding=bool(_structure))
+        # 09-23：还要核对**当前**资料/规则身份——结构尚未重建时，旧状态与旧结构里的
+        # 两份旧指纹彼此相同，只比它们会漏掉"资料/规则已更新"（指令 §E）
+        if not st["stale"]:
+            _b = st.get("binding") or {}
+            try:
+                import report_brief as _rb
+                import narrative_evidence as _ne
+                _ev = _ne.read(tid, ws_dir=str(ws)) or {}
+                _cur_ev = _rb._material_fingerprint(_ev)
+                if _cur_ev and str(_b.get("evidence_fingerprint") or "") != _cur_ev:
+                    st["stale"] = True
+                    st["stale_reason"] = (f"资料/准入/定位变化（当前资料指纹 {_cur_ev[:12]} ≠ "
+                                          f"绑定 {str(_b.get('evidence_fingerprint') or '空')[:12]}）")
+            except Exception:
+                pass
+        if not st["stale"]:
+            _b = st.get("binding") or {}
+            try:
+                from delivery_pipeline import rules_identity as _ri
+                _rv, _rf = _ri(tid)
+                if _rf and str(_b.get("rules_fingerprint") or "") != _rf:
+                    st["stale"] = True
+                    st["stale_reason"] = (f"验收规则内容变化（当前指纹 {_rf[:12]} ≠ "
+                                          f"绑定 {str(_b.get('rules_fingerprint') or '空')[:12]}）")
+            except Exception:
+                pass
         if st["stale"]:
             # 09-23：失效原因逐项说清（正文不同版/结构按旧正文重建/资料变化/规则变化/
             # 契约缺失），不统一误报"结构≠正文"
             try:
-                _why = staleness_reason(
+                _why = st.get("stale_reason") or staleness_reason(
                     st, store.adopted(), structure=_structure, contract_wire=_ctr)
                 st["stale_reason"] = _why
                 if _why:
@@ -5339,21 +5365,44 @@ def _post_task_package(self, p, body, admin):
     if str(row.get("status") or "").upper() in ("CANCELLED", "FAILED"):
         return self._json({"error": "任务已终态，不重新打包"}, 409)
     ws = task_workspace(tid)
+    # E：**一次不可变快照**——采纳身份 + 交付正文 + 资料/规则指纹 + 图表 hash 一次性捕获，
+    # MD/PDF/底稿/清单都由它生成；期间发生修订则拒绝发布（409），不静默混版。
+    from delivery_pipeline import export_snapshot, repack_adopted
     try:
-        md_bytes, _manifest = _task_markdown_export(tid)
+        data = _get_task_report_data(tid)
+        delivered = str((data or {}).get("report") or "")
+        if not delivered.strip():
+            return self._json({"error": "该任务没有可导出的交付正文"}, 404)
+        snap = export_snapshot(tid, ws_dir=ws, delivered_text=delivered)
     except LookupError:
         return self._json({"error": "该任务没有可导出的交付正文"}, 404)
     except Exception as exc:
-        return self._json({"error": f"交付正文导出失败：{str(exc)[:160]}"}, 500)
+        return self._json({"error": f"导出快照失败：{str(exc)[:160]}"}, 500)
+    md_bytes = delivered.encode("utf-8")
     pdf_bytes = b""
     pdf_error = ""
     try:
-        pdf_bytes = _task_pdf_bytes(tid)
+        # PDF 从**同一份快照正文**渲染（不再各自重读"当前版本"）
+        from report_pdf import markdown_to_pdf
+        title = ""
+        for ln in delivered.split("\n"):
+            s = ln.strip()
+            if s.startswith("# "):
+                title = s[2:].strip()
+                break
+        pdf_bytes = markdown_to_pdf(delivered, title=title or "任务报告", workspace=ws)
     except Exception as exc:                     # noqa: BLE001 - PDF 失败不阻断打包
         pdf_error = str(exc)[:160]
     try:
-        from delivery_pipeline import repack_adopted
-        result = repack_adopted(tid, md_bytes=md_bytes, pdf_bytes=pdf_bytes, ws_dir=ws)
+        result = repack_adopted(tid, md_bytes=md_bytes, pdf_bytes=pdf_bytes, ws_dir=ws,
+                                snapshot=snap)
+    except RuntimeError as exc:
+        if "version changed" in str(exc):
+            return self._json({
+                "error": "导出期间发生修订（采纳版本已变），未生成新包；请重试",
+                "retry": True}, 409)
+        logger.warning("重新打包失败（task=%s）：%s", tid, str(exc)[:200])
+        return self._json({"error": f"重新打包失败：{str(exc)[:200]}"}, 500)
     except Exception as exc:
         logger.warning("重新打包失败（task=%s）：%s", tid, str(exc)[:200])
         return self._json({"error": f"重新打包失败：{str(exc)[:200]}"}, 500)
@@ -5364,6 +5413,15 @@ def _post_task_package(self, p, body, admin):
         "package": result.get("package"),
         "bytes": result.get("bytes"),
         "files": result.get("files"),
+        "snapshot": {
+            "report_version_id": snap.get("report_version_id"),
+            "research_body_sha256": snap.get("body_sha256"),
+            "sources_fingerprint": snap.get("sources_fingerprint"),
+            "rules_version": snap.get("rules_version"),
+            "rules_fingerprint": snap.get("rules_fingerprint"),
+            "evidence_fingerprint": snap.get("evidence_fingerprint"),
+            "captured_at": snap.get("captured_at"),
+        },
         "manifest": {
             "schema": (result.get("manifest") or {}).get("schema"),
             "report_version_id": (result.get("manifest") or {}).get("report_version_id"),
@@ -5372,11 +5430,12 @@ def _post_task_package(self, p, body, admin):
             "pdf_sha256": (result.get("manifest") or {}).get("pdf_sha256"),
             "sources_fingerprint": (result.get("manifest") or {}).get("sources_fingerprint"),
             "rules_version": (result.get("manifest") or {}).get("rules_version"),
+            "rules_fingerprint": (result.get("manifest") or {}).get("rules_fingerprint"),
         },
         "verify": result.get("verify"),
         "verify_ok": not bad,
         "pdf_error": pdf_error,
-        "note": "旧包保留不动；页面按采纳身份判断新旧包，本次新包已绑定当前采纳正文",
+        "note": "旧包保留不动；包由一次快照生成（MD/PDF/底稿/清单同一版本与资料）",
     })
 
 

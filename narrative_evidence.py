@@ -767,6 +767,24 @@ def _contract_hint(task_id: str, goal: str = "") -> tuple[list[int], str, str, s
     return [], "", "", ""
 
 
+
+def _chunk_offsets_of(docs) -> list:
+    """把各文档的 `chunk_offsets` 汇总成一张表（同一份合并文档只留最长的那张）。
+
+    记录里的 char_start/end 相对**该文档**的合并正文；本函数返回 [[起点, 片段号], …]，
+    供引用证据换算"段内偏移"。没有片段信息的文档不产出条目。
+    """
+    best: list = []
+    for d in (docs or []):
+        co = d.get("chunk_offsets") if isinstance(d, dict) else None
+        if not co:
+            continue
+        norm = [[int(a), int(b)] for a, b in co if isinstance(a, (int, float)) or True]
+        if len(norm) > len(best):
+            best = norm
+    return best
+
+
 def build(task_id: str, *, periods=None, company: str = "", company_id: str = "",
           as_of: str = "", goal: str = "", ws_dir=None, project=None,
           extra_docs=None) -> dict:
@@ -934,6 +952,10 @@ def build(task_id: str, *, periods=None, company: str = "", company_id: str = ""
         # `snippet_hints`：只有检索摘要、没有正文定位的线索数（不计入覆盖）。
         "located": len(located_records),
         "snippet_hints": len(snippet_hints),
+        # 09-23 F：接口片段映射（文档偏移 → 片段号）。公告文本 API 的 page_index 是
+        # **片段**不是 PDF 页；记录里的 char_start/end 是**合并文档偏移**，靠这张表
+        # 才能回到"第几段、段内第几字"（引用证据包用得到）。
+        "chunk_offsets": _chunk_offsets_of(docs),
         "built_at": fetched_at,
     }
     _write(task_id, payload, ws_dir=ws_dir)

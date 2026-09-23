@@ -606,7 +606,11 @@ class TestBuild(unittest.TestCase):
         ])
         a = ne.build(self.tid, periods=[2023, 2024], company="贵州茅台")
         b = ne.build(self.tid, periods=[2023, 2024], company="贵州茅台")
-        self.assertEqual(a["records"], b["records"], "同一输入必得同一输出")
+        # 逐字比对**内容字段**：`fetched_at` 是构建时刻（跨秒会不同），不算内容
+        strip = lambda recs: [{k: v for k, v in r.items() if k != "fetched_at"}
+                              for r in recs]
+        self.assertEqual(strip(a["records"]), strip(b["records"]), "同一输入必得同一输出")
+        self.assertEqual(a.get("chunk_offsets"), b.get("chunk_offsets"))
 
 
 class TestApiChunkLocation(unittest.TestCase):

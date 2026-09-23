@@ -1079,6 +1079,21 @@ class _PDFBuilder:
             return min(len(rows) + 1, 4) * (BODY_SIZE * 1.6)
         return BODY_SIZE * 2.4
 
+    def _draw_wrapped(self, text: str, size: float, color: tuple, *,
+                      x: float | None = None, indent: float = 0.0,
+                      line_gap: float | None = None) -> None:
+        """逐行绘制并按**每行**检查剩余空间：长段落可拆到下一页。
+
+        09-23 实机：首页结论段只在段首 `_ensure_space` 一次，随后逐行画到底——
+        141 个非空白字符落在页面下边界之外（文本抽取读得到、人眼看不到）。
+        """
+        gap = size * 1.62 if line_gap is None else line_gap
+        x0 = MARGIN_L if x is None else x
+        for line in self._wrap(str(text or ""), size, USABLE_W - indent):
+            self._ensure_space(gap + size * 0.7)
+            self._draw_text(x0 + indent, line, size, color)
+            self.cursor_y -= gap
+
     def _render_block(self, block: dict, workspace: os.PathLike | None,
                       nxt: dict | None = None) -> None:
         btype = block.get("type")
@@ -1092,12 +1107,8 @@ class _PDFBuilder:
                             (0.08, 0.13, 0.24))
             self.cursor_y -= size * 1.35
         elif btype == "para":
-            self._ensure_space(BODY_SIZE * 1.7)
-            for line in self._wrap(
-                str(block.get("text") or ""), BODY_SIZE, USABLE_W,
-            ):
-                self._draw_text(MARGIN_L, line, BODY_SIZE, (0.10, 0.10, 0.12))
-                self.cursor_y -= BODY_SIZE * 1.62
+            self._draw_wrapped(str(block.get("text") or ""), BODY_SIZE,
+                               (0.10, 0.10, 0.12))
             self.cursor_y -= BODY_SIZE * 0.45
         elif btype == "list":
             for idx, item in enumerate(block.get("items") or []):
@@ -1141,13 +1152,11 @@ class _PDFBuilder:
                     self.cursor_y -= CODE_SIZE * 1.55
             self.cursor_y -= 6
         elif btype == "quote":
-            self._ensure_space(BODY_SIZE * 1.7)
+            # 09-23：quote 与 para 同类缺陷——只在段首查一次空间，长引用会画到页外。
+            # 逐行查空间（引用块可跨页续画）。
             for line in block.get("lines") or []:
-                for sub in self._wrap(str(line), BODY_SIZE, USABLE_W - 14):
-                    self._draw_text(
-                        MARGIN_L + 14, sub, BODY_SIZE, (0.35, 0.36, 0.40),
-                    )
-                    self.cursor_y -= BODY_SIZE * 1.55
+                self._draw_wrapped(str(line), BODY_SIZE, (0.35, 0.36, 0.40),
+                                   indent=14, line_gap=BODY_SIZE * 1.55)
             self.cursor_y -= BODY_SIZE * 0.3
         elif btype == "table":
             self._render_table(block.get("rows") or [])

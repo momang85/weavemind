@@ -8615,6 +8615,73 @@ class TestSameVersionDeliveryChain(unittest.TestCase):
             pkg = json.loads(zf.read("PACKAGE_MANIFEST.json").decode("utf-8"))
             self.assertEqual(pkg.get("research_body_sha256"), m.get("research_body_sha256"))
 
+    def test_export_snapshot_rejects_interleaved_revision(self):
+        """09-23 E：快照取自 A、期间修订切到 B → 拒绝发布（不静默混版）。"""
+        import delivery_pipeline as dp
+        self._seed(with_manifest=True)
+        ws = ws_mod.task_workspace(self.tid)
+        snap = dp.export_snapshot(self.tid, ws_dir=ws, delivered_text="# A\n")
+        # 期间发生修订：采纳版本换成 B
+        from report_version import VersionStore
+        store = VersionStore(ws, self.tid)
+        v_b = store.record("# B\n\n另一版正文。")
+        store.adopt(v_b, reason="并发修订（测试）")
+        with self.assertRaises(RuntimeError) as ctx:
+            dp.repack_adopted(self.tid, md_bytes=b"# A\n", pdf_bytes=b"", ws_dir=ws,
+                              snapshot=snap)
+        self.assertIn("version changed", str(ctx.exception))
+        # 快照身份取自当前采纳版本
+        snap2 = dp.export_snapshot(self.tid, ws_dir=ws, delivered_text="# B\n")
+        self.assertEqual(snap2.get("body_sha256"), v_b.version_id)
+        res = dp.repack_adopted(self.tid, md_bytes=b"# B\n", pdf_bytes=b"", ws_dir=ws,
+                                snapshot=snap2)
+        self.assertTrue(all(v == "ok" for v in (res.get("verify") or {}).values()),
+                        res.get("verify"))
+
+    def test_same_second_repacks_do_not_overwrite(self):
+        """09-23 E：同秒两次重包 → 两个包（唯一包名 + 原子发布），互不覆盖。"""
+        import delivery_pipeline as dp
+        self._seed(with_manifest=True)
+        ws = ws_mod.task_workspace(self.tid)
+        before = {p.name for p in ws.glob("deliverables_*.zip")}
+        r1 = dp.repack_adopted(self.tid, md_bytes=b"# one\n", pdf_bytes=b"", ws_dir=ws)
+        r2 = dp.repack_adopted(self.tid, md_bytes=b"# two\n", pdf_bytes=b"", ws_dir=ws)
+        self.assertNotEqual(r1["package"], r2["package"], "同秒重包必须是两个不同的包名")
+        after = {p.name for p in ws.glob("deliverables_*.zip")} - before
+        self.assertEqual(after, {r1["package"], r2["package"]})
+        for r in (r1, r2):
+            self.assertTrue(all(v == "ok" for v in (r.get("verify") or {}).values()),
+                            r.get("verify"))
+        self.assertEqual(len(list(ws.glob(".*.tmp"))), 0, "不得留下临时包文件")
+
+    def test_rules_fingerprint_change_invalidates_state(self):
+        """09-23 E：rules_version 不变、rules_fingerprint 变了 → 必须待重验。"""
+        import delivery_pipeline as dp
+
+        class _V:
+            def identity_id(self):
+                return "ver-1"
+
+            version_id = "body-1"
+
+        base = {"scope": {"periods": [2023, 2024]}, "version_id": "body-1",
+                "source_body_sha256": "body-1",
+                "evidence": {"located": 2, "fingerprint": "ev-A"},
+                "rules_version": "R1", "rules_fingerprint": "RF-1",
+                "research_questions": [
+                    {"metric": m, "support": {"has_evidence": True, "locator": "api_chunk 3"}}
+                    for m in ("revenue", "net_profit", "operating_cashflow")],
+                "claims": []}
+        st = dp.research_state("night-rf", "g", base, version=_V())
+        self.assertTrue(dp.state_is_current(st, _V(), structure=base))
+        changed = dict(base, rules_fingerprint="RF-2")     # 版本标签不动、内容变了
+        self.assertFalse(dp.state_is_current(st, _V(), structure=changed),
+                         "规则指纹变化必须失效")
+        why = dp.staleness_reason(st, _V(), structure=changed)
+        self.assertIn("验收规则内容变化", why)
+        self.assertEqual(str((st.get("binding") or {}).get("rules_fingerprint")), "RF-1",
+                         "绑定里要保存真实规则指纹")
+
 
 class TestNightClosureCounterexamples(unittest.TestCase):
     """09-22 晚间收口：冻结本轮点名的确定性缺口（同值/归因/比率/别名/分母/指纹）。

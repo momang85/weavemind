@@ -339,5 +339,34 @@ class TestQualityVectorTiebreak(unittest.TestCase):
         self.assertNotIn("质量向量", why)
 
 
+class TestPdfPagination(unittest.TestCase):
+    """09-23：长段落必须**逐行**检查剩余空间——首版 PDF 有 141 个非空白字符落在页下边界外。
+
+    判定用内容流里的文字定位（`1 0 0 1 x y Tm`）：正文文字不得画在页脚线以下；
+    长结论段应拆到下一页而不是画到纸外。
+    """
+
+    def _text_ys(self, pdf: bytes) -> list:
+        import re as _re
+        return [float(m.group(1))
+                for m in _re.finditer(rb"1 0 0 1 [\d.]+ (-?[\d.]+) Tm", pdf)]
+
+    def test_long_paragraph_does_not_run_off_the_page(self):
+        import report_pdf
+        long_para = ("结论：" + "本次资料足以刻画客户收入、利润与经营现金流的变化方向，"
+                     "但不足以支撑任何偿债能力结论；" * 40)
+        md = ("# 标题\n\n## 结论\n\n" + long_para + "\n\n"
+              "> " + "引用块同样要逐行换页，不能画到纸外；" * 30 + "\n")
+        pdf = report_pdf.markdown_to_pdf(md, title="标题", workspace=None)
+        ys = self._text_ys(pdf)
+        self.assertTrue(ys, "PDF 内容流里应有文字定位")
+        self.assertGreaterEqual(min(ys), 20.0,
+                                f"有文字画在页下边界外：min_y={min(ys)}")
+        body_ys = [y for y in ys if y < 40]
+        self.assertLessEqual(len(body_ys), 2,
+                             "页脚线以下只允许页脚（长段落/长引用必须拆页）")
+        self.assertGreaterEqual(pdf.count(b"/Type /Page"), 2, "长内容应分页")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -69,6 +69,9 @@ def _research_binding(structure: dict | None, version=None, *,
         "structure_version_id": str(st.get("version_id") or ""),
         "evidence_fingerprint": str(ev.get("fingerprint") or ""),
         "rules_version": str(st.get("rules_version") or ""),
+        # 09-23：规则**指纹**也要进绑定并参与比较——只比版本标签时，
+        # 规则内容变了但版本号没动（rules_version 不变、fingerprint 变）仍会判 current
+        "rules_fingerprint": str(st.get("rules_fingerprint") or ""),
         "contract_fingerprint": str((contract_wire or {}).get("fingerprint") or ""),
         # 契约原文（wire）：修订重装时按它重建同一份契约，页面也能直接展示
         # 主体/期间/口径——不留"只存指纹、重建时无从下手"的缺口
@@ -102,6 +105,9 @@ def state_is_current(state: dict, version=None, *, structure: dict | None = None
         if str(b.get("evidence_fingerprint") or "") != str(ev.get("fingerprint") or ""):
             return False
         if str(b.get("rules_version") or "") != str(structure.get("rules_version") or ""):
+            return False
+        # 09-23：规则**指纹**也要比——版本标签没动、内容变了同样失效
+        if str(b.get("rules_fingerprint") or "") != str(structure.get("rules_fingerprint") or ""):
             return False
     if contract_wire is not None:
         if str(b.get("contract_fingerprint") or "") != str(contract_wire.get("fingerprint") or ""):
@@ -163,6 +169,11 @@ def staleness_reason(state: dict, version=None, *, structure: dict | None = None
         if str(b.get("rules_version") or "") != str(st.get("rules_version") or ""):
             reasons.append(f"验收规则版本变化（{str(b.get('rules_version') or '空')} → "
                            f"{str(st.get('rules_version') or '空')}）")
+        elif str(b.get("rules_fingerprint") or "") != str(st.get("rules_fingerprint") or ""):
+            # 版本标签没动、规则内容变了（09-23：此前只比标签，这种情形仍判 current）
+            reasons.append(f"验收规则内容变化（指纹 "
+                           f"{str(b.get('rules_fingerprint') or '空')[:12]} → "
+                           f"{str(st.get('rules_fingerprint') or '空')[:12]}）")
         if not str(b.get("structure_version_id") or ""):
             reasons.append("绑定里缺结构版本")
     if not str(b.get("contract_fingerprint") or ""):
@@ -481,15 +492,62 @@ def package_manifest(task_id: str, ws, files, *, pdf_name: str = "") -> dict:
     return out
 
 
+def export_snapshot(task_id: str, *, ws_dir=None, delivered_text: str = "") -> dict:
+    """导出用**一次不可变快照**：采纳身份 + 正文 + 资料/规则指纹 + 图表清单。
+
+    09-23：重包各环节此前各自重读"当前版本"——生产探针里 MD 取 A、修订切 B、PDF 取 B，
+    仍返回 ok/verify_ok=true（文件自检只能证明写入字节未坏，证明不了语义同版）。
+    这里把身份/正文/指纹/图表一次性捕获，MD/PDF/底稿/清单都由它生成；调用方在发布前
+    再核对一次采纳身份，变了就拒绝发布（409），不静默混版。
+    """
+    from pathlib import Path as _P
+    ws = _P(ws_dir) if ws_dir else workspace.task_workspace(task_id)
+    store = VersionStore(ws, task_id)
+    adopted = store.adopted()
+    if adopted is None:
+        raise LookupError("该任务没有可导出的采纳版本")
+    charts: dict[str, str] = {}
+    charts_dir = ws / "charts"
+    if charts_dir.is_dir():
+        for p in sorted(charts_dir.glob("*.png")):
+            try:
+                charts[p.name] = hashlib.sha256(p.read_bytes()).hexdigest()
+            except Exception:
+                charts[p.name] = ""
+    rv, rf = rules_identity(task_id)
+    ev_fp = ""
+    try:
+        import report_brief as _rb
+        st = _rb.read_structure(task_id, ws_dir=ws) or {}
+        ev_fp = str((st.get("evidence") or {}).get("fingerprint") or "")
+    except Exception:
+        ev_fp = ""
+    return {
+        "report_version_id": adopted.identity_id(),
+        "body_sha256": str(getattr(adopted, "version_id", "") or ""),
+        "delivered_text": str(delivered_text or ""),
+        "sources_fingerprint": sources_fingerprint(task_id, delivered_text),
+        "rules_version": rv,
+        "rules_fingerprint": rf,
+        "evidence_fingerprint": ev_fp,
+        "charts": charts,
+        "captured_at": time.time(),
+    }
+
+
 def repack_adopted(task_id: str, *, md_bytes: bytes, pdf_bytes: bytes = b"",
-                   ws_dir=None) -> dict:
+                   ws_dir=None, snapshot: dict | None = None) -> dict:
     """按**当前采纳版本**重新打包（无模型、确定性）：新 ZIP + 包内清单。
 
     - 包内 `reports/report.md` 就是传入的交付 MD 字节（与页面下载同源）；
     - 清单按 `package_manifest` 的 schema 2 写（采纳身份与文件 hash 分开）；
-    - **旧包不动**（名字带新时间戳；旧包时间与标识都不改）；
-    - 返回包名与清单摘要，调用方据此核对包内字节 hash。
+    - **旧包不动**（名字带新时间戳 + 随机后缀；旧包时间与标识都不改）；
+    - `snapshot`（`export_snapshot` 的结果）传入时，清单直接用快照身份，不再重读版本库；
+      发布前复核采纳身份未变，变了抛 `RuntimeError("version changed")`（不静默混版）；
+    - 落盘走**临时文件 + 原子替换**，同秒两次重包不会互相覆盖。
     """
+    import os as _os
+    import uuid as _uuid
     import zipfile as _zf
     from pathlib import Path as _P
     ws = _P(ws_dir) if ws_dir else workspace.task_workspace(task_id)
@@ -497,6 +555,10 @@ def repack_adopted(task_id: str, *, md_bytes: bytes, pdf_bytes: bytes = b"",
     adopted = store.adopted()
     if adopted is None:
         raise LookupError("该任务没有可打包的采纳版本")
+    snap = dict(snapshot or {})
+    if snap:
+        if str(snap.get("report_version_id") or "") != adopted.identity_id():
+            raise RuntimeError("version changed")
     reports = ws / "reports"
     reports.mkdir(parents=True, exist_ok=True)
     md_path = reports / "report.md"
@@ -525,15 +587,32 @@ def repack_adopted(task_id: str, *, md_bytes: bytes, pdf_bytes: bytes = b"",
         for p in sorted(cand_dir.glob("model_report_full_*.md")):
             files.append((p, f"audit/{p.name}"))
         break
+    # 引用证据（最小载荷）：已准入、实际使用的摘录 + 定位 + 文本 hash（F）
+    ev_file = _write_citation_evidence(task_id, ws)
+    if ev_file is not None:
+        files.append((ev_file, f"evidence/{ev_file.name}"))
     manifest = package_manifest(task_id, ws, files, pdf_name=pdf_name)
+    if snap:
+        # 用快照身份覆盖（清单不重读版本库）
+        manifest["report_version_id"] = str(snap.get("report_version_id") or "")
+        manifest["research_body_sha256"] = str(snap.get("body_sha256") or "")
+        manifest["sources_fingerprint"] = str(snap.get("sources_fingerprint") or "")
+        manifest["rules_version"] = str(snap.get("rules_version") or "")
+        manifest["rules_fingerprint"] = str(snap.get("rules_fingerprint") or "")
+        manifest["evidence_fingerprint"] = str(snap.get("evidence_fingerprint") or "")
+    # 发布前最后复核：身份没变才发布（变了说明期间发生修订 → 不静默混版）
+    if str(store.adopted().identity_id()) != str(manifest.get("report_version_id") or ""):
+        raise RuntimeError("version changed")
     ts = time.strftime("%Y%m%d_%H%M%S")
-    zip_path = ws / f"deliverables_{ts}.zip"
-    with _zf.ZipFile(zip_path, "w", _zf.ZIP_DEFLATED) as zf:
+    name = f"deliverables_{ts}_{_uuid.uuid4().hex[:6]}.zip"
+    zip_path = ws / name
+    tmp_path = ws / f".{name}.tmp"
+    with _zf.ZipFile(tmp_path, "w", _zf.ZIP_DEFLATED) as zf:
         for abs_path, arc in files:
             zf.write(abs_path, arc)
         zf.writestr("PACKAGE_MANIFEST.json",
                     json.dumps(manifest, ensure_ascii=False, indent=1))
-    # 包内字节自检：清单里的每个 hash 都要能在包里复算出来
+    _os.replace(tmp_path, zip_path)          # 原子发布
     verify: dict[str, str] = {}
     try:
         with _zf.ZipFile(zip_path) as zf:
@@ -549,6 +628,88 @@ def repack_adopted(task_id: str, *, md_bytes: bytes, pdf_bytes: bytes = b"",
             "files": [a for _p, a in files], "manifest": manifest,
             "verify": verify,
             "bytes": zip_path.stat().st_size}
+
+
+def _write_citation_evidence(task_id: str, ws) -> "Path | None":
+    """包内最小引用证据：已准入、带定位的摘录 + 坐标口径 + 文本 hash。
+
+    F：报告正文承诺了"定位说明"，包里却只有工作区路径——离线解包后应能凭
+    source/locator/text hash 取回同一摘录。只写**实际采用**的记录，不搬整个快照。
+    """
+    import json as _json
+    from pathlib import Path as _P
+    try:
+        import narrative_evidence as _ne
+        payload = _ne.read(task_id, ws_dir=ws) or {}
+        recs = [r for r in (payload.get("records") or [])
+                if isinstance(r, dict) and r.get("has_location")
+                and str(r.get("admission") or "") in ("admitted", "comparison")]
+        if not recs:
+            return None
+        out = {
+            "schema": "weavemind.citation_evidence/1",
+            "task_id": task_id,
+            "location_kind": "api_chunk" if any(r.get("chunk") for r in recs) else "char_range",
+            "chunk_offsets": payload.get("chunk_offsets") or [],
+            "note": ("定位口径：`locator` 里的字符区间是**合并文档偏移**（本任务为多段公告"
+                     "文本拼接，每段 5000 字符，段起止见 `chunk_offsets`）；`chunk` 是该"
+                     "偏移落在的接口片段号，`chunk_char_start/end` 为**段内**偏移。"
+                     "没有 PDF 页码映射时不写页码。离线解包后可用 url + locator + "
+                     "text_sha256 取回同一条摘录。"),
+            "records": [{
+                "kind": r.get("kind"), "title": r.get("title"), "url": r.get("url"),
+                "locator": r.get("locator"), "chunk": r.get("chunk"),
+                "doc_char_start": r.get("char_start"), "doc_char_end": r.get("char_end"),
+                "chunk_char_start": _chunk_local(r, payload.get("chunk_offsets"))[0],
+                "chunk_char_end": _chunk_local(r, payload.get("chunk_offsets"))[1],
+                "crosses_chunk": _chunk_local(r, payload.get("chunk_offsets"))[2],
+                "text": str(r.get("snippet") or r.get("text") or ""),
+                "text_sha256": hashlib.sha256(
+                    str(r.get("snippet") or r.get("text") or "").encode("utf-8")).hexdigest(),
+                "content_hash": r.get("content_hash"),
+                "admission": r.get("admission"),
+            } for r in recs],
+        }
+        p = ws / "project" / "citation_evidence.json"
+        p.write_text(_json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
+        return p
+    except Exception as exc:                     # noqa: BLE001 - 证据写不出不阻断打包
+        logger.warning("引用证据生成失败（task=%s）：%s", task_id, str(exc)[:120])
+        return None
+
+
+def _chunk_start(doc_offset, chunk_offsets) -> int | None:
+    """文档偏移 → 所在片段的**段起点**（用于换算段内偏移）。"""
+    start = None
+    for pos, _no in (chunk_offsets or []):
+        if int(doc_offset) >= int(pos):
+            start = int(pos)
+        else:
+            break
+    return start
+
+
+def _chunk_local(rec: dict, chunk_offsets) -> tuple[int | None, int | None, bool]:
+    """(段内起点, 段内终点, 是否跨片段)：两段偏移都相对**起点所在片段**。
+
+    跨片段的区间不能只报一个段内终点（会读成"段内 3996-194"这种倒挂数字）——
+    用 `crosses_chunk=True` 标明，终点按起点片段计（可能 > 段长，如实反映跨段）。
+    """
+    try:
+        cs = int(rec.get("char_start"))
+        ce = int(rec.get("char_end"))
+    except Exception:
+        return None, None, False
+    start = _chunk_start(cs, chunk_offsets)
+    if start is None:
+        return None, None, False
+    nxt = None
+    for pos, _no in (chunk_offsets or []):
+        if int(pos) > start:
+            nxt = int(pos)
+            break
+    crosses = bool(nxt is not None and ce > nxt)
+    return cs - start, ce - start, crosses
 
 
 def with_draft_note(report: str, reason: str) -> str:
