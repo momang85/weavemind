@@ -42,11 +42,11 @@ def main() -> int:
         print("产物里没有可用片段", file=sys.stderr)
         return 2
     parts, offsets, pos = [], [], 0
-    for ck, text in chunks:
-        offsets.append([pos, ck])
-        parts.append(text)
-        pos += len(text) + 1
-    merged_text = "\n".join(parts)
+    # 项4：合并走 `narrative_evidence.merge_chunks`——片段号跳号处插入显式缺口标记，
+    # 合并文本不再假装连续（此前片段 5 的尾巴直接接片段 10 的开头，摘录与文本 hash
+    # 都会被当成"一段连续原文"）。
+    import narrative_evidence as ne
+    merged_text, offsets, gaps = ne.merge_chunks(sorted(chunks, key=lambda x: x[0]))
     url = str(data["pages"][0]["url"])
     doc_item = {
         "title": str(data.get("notice_title_meta") or "洋河股份:2024年年度报告"),
@@ -54,6 +54,8 @@ def main() -> int:
         "text": merged_text,
         # 接口片段偏移（不是 PDF 页码）：定位写 api_chunk
         "chunk_offsets": offsets,
+        # 片段跳号处 = 合并文本的缺口（跨缺口摘录必须标明"非连续原文"）
+        "chunk_gaps": gaps,
         "chunk_size": int(data.get("chunk_size") or 5000),
         "location_kind": "api_chunk",
         "art_code": data.get("art_code"),
@@ -61,6 +63,7 @@ def main() -> int:
         "fetched_at": str(data.get("fetched_at") or ""),
         "re_admitted_from": "evals/real/yanghe_ar2024_pages_20260922.json（离线重入，无新 HTTP）",
     }
+    print("缺口:", gaps)
     snap_path = proj / "fetch_snapshot.json"
     try:
         items = json.loads(snap_path.read_text(encoding="utf-8")) if snap_path.exists() else []

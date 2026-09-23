@@ -5365,24 +5365,24 @@ def _post_task_package(self, p, body, admin):
     if str(row.get("status") or "").upper() in ("CANCELLED", "FAILED"):
         return self._json({"error": "任务已终态，不重新打包"}, 409)
     ws = task_workspace(tid)
-    # E：**一次不可变快照**——采纳身份 + 交付正文 + 资料/规则指纹 + 图表 hash 一次性捕获，
-    # MD/PDF/底稿/清单都由它生成；期间发生修订则拒绝发布（409），不静默混版。
+    # E/项2：**一次不可变快照**——采纳身份 + 交付正文 + 资料/规则指纹 + 逐成员字节
+    # （底稿/图表/审计稿/引用证据）一次性捕获，MD/PDF/清单都由它生成；期间发生修订则
+    # 拒绝发布（409），不静默混版。快照捕获的字节就是包内字节（打包不再重读磁盘）。
     from delivery_pipeline import export_snapshot, repack_adopted
     try:
         data = _get_task_report_data(tid)
         delivered = str((data or {}).get("report") or "")
         if not delivered.strip():
             return self._json({"error": "该任务没有可导出的交付正文"}, 404)
-        snap = export_snapshot(tid, ws_dir=ws, delivered_text=delivered)
     except LookupError:
         return self._json({"error": "该任务没有可导出的交付正文"}, 404)
     except Exception as exc:
-        return self._json({"error": f"导出快照失败：{str(exc)[:160]}"}, 500)
+        return self._json({"error": f"交付正文读取失败：{str(exc)[:160]}"}, 500)
     md_bytes = delivered.encode("utf-8")
     pdf_bytes = b""
     pdf_error = ""
     try:
-        # PDF 从**同一份快照正文**渲染（不再各自重读"当前版本"）
+        # PDF 从**同一份交付正文**渲染（不再各自重读"当前版本"）
         from report_pdf import markdown_to_pdf
         title = ""
         for ln in delivered.split("\n"):
@@ -5394,8 +5394,14 @@ def _post_task_package(self, p, body, admin):
     except Exception as exc:                     # noqa: BLE001 - PDF 失败不阻断打包
         pdf_error = str(exc)[:160]
     try:
-        result = repack_adopted(tid, md_bytes=md_bytes, pdf_bytes=pdf_bytes, ws_dir=ws,
-                                snapshot=snap)
+        snap = export_snapshot(tid, ws_dir=ws, delivered_text=delivered,
+                               md_bytes=md_bytes, pdf_bytes=pdf_bytes)
+    except LookupError:
+        return self._json({"error": "该任务没有可导出的交付正文"}, 404)
+    except Exception as exc:
+        return self._json({"error": f"导出快照失败：{str(exc)[:160]}"}, 500)
+    try:
+        result = repack_adopted(tid, ws_dir=ws, snapshot=snap)
     except RuntimeError as exc:
         if "version changed" in str(exc):
             return self._json({
@@ -5434,8 +5440,12 @@ def _post_task_package(self, p, body, admin):
         },
         "verify": result.get("verify"),
         "verify_ok": not bad,
+        # 项2：快照之后磁盘上变过的成员（只报告；包内内容一律取自快照字节）
+        "drift": (result.get("manifest") or {}).get("drift") or {},
+        "frozen_members": len((result.get("manifest") or {}).get("frozen") or {}),
         "pdf_error": pdf_error,
-        "note": "旧包保留不动；包由一次快照生成（MD/PDF/底稿/清单同一版本与资料）",
+        "note": ("旧包保留不动；包内正文/PDF/底稿/图表/引用证据全部取自同一次导出快照，"
+                 "清单按写入字节复算并对照快照 hash；磁盘后续变化只在 drift 里报告"),
     })
 
 

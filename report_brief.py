@@ -219,6 +219,9 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
         "metrics_table": table,
         "findings": findings,
         "background": background,
+        # 项3：发行人披露的量价/结构事实（销售量、分产品/分地区/分销售模式构成）——
+        # 确定性抽取 + 带算式的推算；没有就 `ok=False`，正文照实写"未取得"
+        "volume_price": dict((evidence or {}).get("volume_price") or {}),
         "change_explanation": changes,
         "analysis": analysis_text,
         "analysis_quality": quality,
@@ -315,11 +318,39 @@ def _located(evidence: dict | None, kind: str, limit: int = 3) -> list[dict]:
     return out[:limit]
 
 
+def _abridge(text: str, limit: int = 160) -> str:
+    """长段原文压到一句（在句末切开）：读者要的是判断，不是整页原文。
+
+    项3：年报段落整段贴出会挤占版面、重复数字，也掩掉结论。保留首句到句末，
+    余下以『……（节选）』标明，出处定位仍在（要原文按 locator 取）。
+    """
+    s = " ".join(str(text or "").split())
+    if len(s) <= limit:
+        return s
+    cut = s[:limit]
+    idx = max(cut.rfind(c) for c in "。；;.")
+    if idx >= limit // 2:
+        return cut[: idx + 1] + "……（节选，原文见出处定位）"
+    return cut.rstrip() + "……（节选，原文见出处定位）"
+
+
+def _is_composition_table(text: str) -> bool:
+    """整段贴出的**收入构成原始表**：已由『量价与结构』结构化呈现，背景里不再重复。"""
+    s = " ".join(str(text or "").split())
+    if s.startswith("单位：元") and ("划分类型" in s or "按销售模式" in s or "分地区" in s):
+        return True
+    return ("按销售模式" in s and "批发经销" in s and "线上直销" in s
+            and s.count("同比增减") >= 2)
+
+
 def _background(evidence: dict | None, citations: list[dict]) -> list[dict]:
     """业务背景：只取**与本期变化有关的年报段落**（公司怎么赚钱、产品/客户/成本驱动）。"""
     out: list[dict] = []
     for r in _located(evidence, "business_background"):
-        out.append({"text": str(r.get("snippet") or ""),
+        text = str(r.get("snippet") or "")
+        if _is_composition_table(text):
+            continue                     # 收入构成原始表 → 由『量价与结构』块呈现
+        out.append({"text": _abridge(text),
                     "source_n": _citation_n(citations, str(r.get("url") or "")),
                     "locator": str(r.get("locator") or "")})
     return out
@@ -388,15 +419,40 @@ def _change_explanation(rows, derived, periods, findings, evidence, citations) -
     # C2-4/D1：解释按**指标 + 期间**逐条匹配——只取得"收入因提价增加"时，利润与
     # 现金流仍是缺口。旧实现写 `bool(management)`，把任何一条解释扩散给全部指标
     # （实机：只给收入解释，利润/现金流也标"解释已取得"）。
+    # 09-23（项1）：判据与『研究问题』逐问支持**同源**——只有 `match_kind=explanation`
+    # 才算"解释已取得"；`background`（行业/市场语境）与 `reading`（只复述读数）如实写
+    # "未取得该指标变化的解释"。旧实现写 `bool(matched)`，于是背景/读数也让风险章节标
+    # "解释已取得"，与同一份正文里"原因待证"自相矛盾（复核实机点名）。
     for u in unproven:
         matched = _match_management_for_metric(
             management + third_party, str(u.get("metric") or ""), u.get("period"))
-        u["has_explanation"] = bool(matched)
+        _kind = str((matched or {}).get("match_kind") or "")
+        u["has_explanation"] = _kind == "explanation"
         if matched:
             u["matched"] = {"source_n": matched.get("source_n"),
                             "locator": matched.get("locator"),
                             "text": str(matched.get("text") or "")[:120],
-                            "issuer": bool(matched.get("issuer"))}
+                            "issuer": bool(matched.get("issuer")),
+                            "match_kind": _kind}
+    # 每个片段**到底解释了哪项指标的变化**：与逐问题/风险条目用同一条判据，
+    # 供『变化解释』块如实标注（读者不至于把行业背景读成"原因已说明"）。
+    for it in management + third_party:
+        kinds = {metric: str((_match_management_for_metric([it], metric, None) or {})
+                             .get("match_kind") or "")
+                 for metric in _EXPLANATION_METRIC_WORDS}
+        it["explains"] = [label for metric, label in _CHANGE_METRIC_LABELS.items()
+                          if kinds.get(metric) == "explanation"]
+        it["background_for"] = [label for metric, label in _CHANGE_METRIC_LABELS.items()
+                                if kinds.get(metric) == "background"]
+    # 项3：收入有**发行人披露的量价/结构数据**时，风险条目既不说"没有材料"也不说
+    # "解释已取得"——量价/结构已取得（可复算），贡献度与管理层定量说明仍未拆分。
+    _vp_ev = (evidence or {}).get("volume_price") or {}
+    if _vp_ev.get("ok"):
+        for u in unproven:
+            if str(u.get("metric")) == "revenue":
+                u["structure_evidence"] = {
+                    "locator": str(_vp_ev.get("locator") or ""),
+                    "source_n": str(_vp_ev.get("source_n") or "")}
     return {"changes": changes[:3], "management": management,
             "third_party_views": third_party,
             "inference": list(_INFERENCE_BOUNDARY), "unproven": unproven}
@@ -503,19 +559,52 @@ def _research_questions(rows, derived, periods, evidence, citations, changes, *,
                             "text": str(matched.get("text") or "")[:120],
                             "issuer": bool(matched.get("issuer")),
                             "kind": _kind})
-            # 09-23：只有**真正解释该指标**的片段才算"原因已支持"；行业/市场背景只作
-            # 初步背景依据（可出现在问题里，但明确不是量价/结构解释）；纯读数不算支持
+            # 09-23（项1）：只有**真正解释该指标**的片段才算"原因已支持"。行业/市场
+            # 背景与纯读数**都不计入**必答问题的已支持数（复核实机：收入只拿到行业
+            # 背景，却被算成必答 2/3 里的那一项），只作"已取材料"如实列出。
             if _kind == "explanation":
                 support["has_evidence"] = True
             elif _kind == "background":
-                support["has_evidence"] = True
                 support["background_only"] = True
+                support["reading"] = (f"{support['locator'] or '有材料'} "
+                                      f"仅行业/市场背景，不构成该指标变化的量价/结构解释")
             else:
                 support["reading"] = (f"{support['locator'] or '有材料'} 只含读数/背景，"
                                       f"不构成原因支持")
         out.append({"metric": metric, "question": q_text, "observation": obs,
                     "support": support, "boundary": boundary,
                     "next_action": list(MATERIALS_BY_METRIC.get(metric, ()))})
+    # 项3：收入问题的支持以**发行人披露的量价/结构数据**为准（已有材料时不写"原因待证"）：
+    # 销量、分产品/分地区/分销售模式构成直接回答"收入变化的量价与结构依据"。
+    # 定性原因（管理层怎么说）与结构数据分开标注：结构数据 = 已取得，因果贡献度 = 未拆分。
+    _vp = (evidence or {}).get("volume_price") or {}
+    if _vp.get("ok"):
+        for q in out:
+            if str(q.get("metric")) != "revenue":
+                continue
+            _bits = []
+            _vol = next((f for f in (_vp.get("facts") or [])
+                         if str(f.get("label")) == "白酒销售量（吨）"), None)
+            if _vol and isinstance(_vol.get("yoy"), (int, float)):
+                _bits.append(f"白酒销售量同比 {_vol['yoy']:g}%")
+            _rev = next((f for f in (_vp.get("facts") or [])
+                         if str(f.get("label")) == "白酒（元）"), None)
+            if _rev and isinstance(_rev.get("yoy"), (int, float)):
+                _bits.append(f"白酒收入同比 {_rev['yoy']:g}%")
+            _d = next((d for d in (_vp.get("derived") or [])
+                       if str(d.get("label")) == "白酒吨价（推算）"), None)
+            if _d and isinstance(_d.get("yoy"), (int, float)):
+                _bits.append(f"吨价推算同比 {_d['yoy']:g}%")
+            q["support"] = {
+                "has_evidence": True, "kind": "structure", "structure": True,
+                "locator": str(_vp.get("locator") or ""),
+                "source_n": str(_vp.get("source_n") or ""),
+                "text": "；".join(_bits),
+                "issuer": True,
+            }
+            q["boundary"] = ("量价/结构数据来自发行人披露的收入构成与产量销量表；"
+                             "各因素（量、价、结构）的**贡献度**未拆分，管理层的定性"
+                             "说明也未给出；" + str(q.get("boundary") or ""))
     if str(perspective or "") == "bank_corporate":
         liab = (by.get("total_liabilities") or {}).get(last) if last else None
         liab_prev = ((by.get("total_liabilities") or {}).get(last - 1)
@@ -558,6 +647,9 @@ _EXPLANATION_METRIC_WORDS: dict[str, tuple[str, ...]] = {
                            "回款", "收现", "营运资本", "应收", "应付", "存货",
                            "合同负债", "预收"),
 }
+# 变化解释块用的指标标签（键与 `_RESEARCH_QUESTIONS` / 逐问支持一致）
+_CHANGE_METRIC_LABELS = {"revenue": "营业收入", "net_profit": "归母净利润",
+                         "operating_cashflow": "经营活动现金流净额"}
 
 
 def _match_management_for_metric(items: list[dict], metric: str,
@@ -838,6 +930,39 @@ def _unsupported_claims(text: str, mapping: dict[int, int], *,
     return out
 
 
+_SENT_SPLIT_RE = re.compile(r"(?<=[。！？!?])|\n")
+_CITE_ONLY_RE = re.compile(r"\s*(?:\[(?:n\s*=\s*\d{1,2}|\d{1,2})\]\s*)+")
+
+
+def _sentence_spans(text: str) -> list[tuple[int, int]]:
+    """句子的**字符区间**（保留换行与空行位置）：改一句不动全文其它字节。
+
+    `_sentences` 只返回切好的句子（换行被丢掉）——用它把文本拼回去会把标题行与
+    下一段粘成一行（"## 结论2024 年…"），结论/风险小节从此认不出来（实测：
+    `analysis_completeness` 从"覆盖完整"变成"结论缺"）。标记只该改命中的那句。
+    """
+    s = str(text or "")
+    spans: list[tuple[int, int]] = []
+    pos = 0
+    for m in _SENT_SPLIT_RE.finditer(s):
+        end = m.end() if m.group(0) != "\n" else m.start()
+        if end > pos:
+            spans.append((pos, end))
+        pos = m.start() + len(m.group(0))
+        if m.group(0) == "\n":
+            pos = m.start() + 1
+    if pos < len(s):
+        spans.append((pos, len(s)))
+    # 紧跟句末标点的引用记号（"[3]"）留在该句里（与 `_sentences` 同规则）
+    merged: list[tuple[int, int]] = []
+    for a, b in spans:
+        if merged and _CITE_ONLY_RE.fullmatch(s[a:b] or ""):
+            merged[-1] = (merged[-1][0], b)
+            continue
+        merged.append((a, b))
+    return merged
+
+
 def _mark_unsupported(text: str, items: list[dict]) -> str:
     """把"本句引用未采用来源"标到**该句**上（不是末尾免责声明）。"""
     if not items:
@@ -848,10 +973,14 @@ def _mark_unsupported(text: str, items: list[dict]) -> str:
         if key:
             by_sentence.setdefault(key, []).append(it)
 
-    def _mark_sentence(raw: str) -> str:
+    def _mark_sentence(raw: str, after: str = "") -> str:
         s = raw.strip()
         key = _sentence_key(s)
         if not s or not key or key not in by_sentence:
+            return raw
+        # 已标过的不重复加：标记可能落在**紧跟的引用记号**后面（"…来源。[7]〔待核查…〕"），
+        # 所以连窗口一起看——多轮装配不叠加同一条标记。
+        if _UNSUPPORTED_MARK in s + str(after or "")[:120]:
             return raw
         # 标记里**不写来源标题**：标题常含数字（"21财经"），正文新增的读数会变成
         # "不可溯源数字"被验收拦下；来源身份与 URL 记在结构对象/风险清单/面板里。
@@ -868,8 +997,17 @@ def _mark_unsupported(text: str, items: list[dict]) -> str:
             return s[: m.start()] + note + m.group(1) + raw[len(raw.rstrip()):]
         return s + note + raw[len(raw.rstrip()):]
 
-    parts = _sentences(text)
-    return "".join(_mark_sentence(p) for p in parts)
+    spans = _sentence_spans(text)
+    if not spans:
+        return text
+    out: list[str] = []
+    prev = 0
+    for a, b in spans:
+        out.append(text[prev:a])
+        out.append(_mark_sentence(text[a:b], text[b:b + 120]))
+        prev = b
+    out.append(text[prev:])
+    return "".join(out)
 
 
 # ── D1：主张 → 原子断言 → 逐条支持 ─────────────────────────────
@@ -1531,7 +1669,7 @@ def _risks(task_id: str, goal: str, body: str, *, project=None,
 
     # ② 年报里明确列示的风险（带小节定位）——这是"有证据的风险"
     for r in _located(evidence, "risk", 3):
-        _add("evidence_risk", str(r.get("snippet") or ""),
+        _add("evidence_risk", _abridge(str(r.get("snippet") or ""), 160),
              evidence_note=(f"来源 [{_citation_n(citations, str(r.get('url') or ''))}]"
                             f" {r.get('locator')}"),
              would_change="若该风险出现缓释或加剧的公开证据（年报/公告更新），需修订判断",
@@ -1540,18 +1678,50 @@ def _risks(task_id: str, goal: str, body: str, *, project=None,
     # ③ 变化解释里还没能证明的部分 → 需要补充的材料。
     # C2-4：区分"解释已取得、贡献程度未核实"与"原因尚不能证明"——不能一边给解释
     # 一边在缺口里说没有解释（读者会以为整段解释是编的）。
+    # 09-23（项1）：三个状态**同一条判据**（`matched.match_kind`）——背景与读数
+    # 只能写"未取得该指标变化的解释"，不得写成"解释已取得"（与逐问支持一致）。
     for u in (changes.get("unproven") or []):
+        _m = u.get("matched") or {}
+        _where = ("；".join(x for x in (
+            (f"来源 [{_m.get('source_n')}]" if _m.get("source_n") else ""),
+            str(_m.get("locator") or "")) if x) or "见『变化解释』的管理层/附注说明")
+        _kind = str(_m.get("match_kind") or "")
         if u.get("has_explanation"):
-            _m = u.get("matched") or {}
-            _where = ("；".join(x for x in (
-                (f"来源 [{_m.get('source_n')}]" if _m.get("source_n") else ""),
-                str(_m.get("locator") or "")) if x) or "见『变化解释』的管理层/附注说明")
             _add("unproven_change",
                  f"{u.get('label')}：解释已取得（{_where}），"
                  f"但量价与贡献程度未核实",
                  evidence_note="已取得定性解释；分解到量/价/结构的数据尚未取得",
                  would_change=f"取得{'、'.join(u.get('materials') or [])}后，"
                              "若显示的贡献结构与本期变化方向不一致，需修订解释",
+                 materials=list(u.get("materials") or []))
+        elif u.get("structure_evidence"):
+            # 量价/结构数据已由发行人披露取得（销量、分产品/分地区/分销售模式），
+            # 但"各因素各贡献多少"仍未拆分——不把它写成"解释已取得"，也不写成"没有材料"
+            _se = u.get("structure_evidence") or {}
+            _kind_cn = {"background": "行业/市场背景", "reading": "读数型表述",
+                        "explanation": "定性解释"}.get(_kind, "背景类表述")
+            _add("unproven_change",
+                 f"{u.get('label')}：已取得量价/结构数据（{_se.get('locator') or '见『量价与结构』'}），"
+                 f"但各因素贡献度未拆分；定性原因仍只有{_kind_cn}",
+                 evidence_note="发行人披露的量价与结构数据已准入；贡献度分解与管理层定量说明未取得",
+                 would_change=f"取得{'、'.join(u.get('materials') or [])}并给出各因素贡献后，"
+                             "若贡献结构与本期量价/结构数据方向不一致，需修订解释",
+                 materials=list(u.get("materials") or []))
+        elif _kind == "background":
+            _add("unproven_change",
+                 f"{u.get('label')}：未取得该指标变化的解释；"
+                 f"仅有行业/市场背景（{_where}），不构成量价/结构解释",
+                 evidence_note="已取材料只有行业/市场语境，未单独说明该指标变化原因",
+                 would_change=f"取得{'、'.join(u.get('materials') or [])}后，"
+                             "若显示的原因与本期变化方向不一致，需修订解释",
+                 materials=list(u.get("materials") or []))
+        elif _kind == "reading":
+            _add("unproven_change",
+                 f"{u.get('label')}：未取得该指标变化的解释；"
+                 f"已取材料只含该指标读数（{_where}）",
+                 evidence_note="已取材料只复述该指标数值，不含原因说明",
+                 would_change=f"取得{'、'.join(u.get('materials') or [])}后，"
+                             "若显示的原因与本期变化方向不一致，需修订解释",
                  materials=list(u.get("materials") or []))
         else:
             _add("unproven_change", f"{u.get('label')}的变化原因尚不能证明",
@@ -2078,17 +2248,96 @@ def render_brief_markdown(structure: dict, body: str = "",
                 if sup.get("source_n"):
                     support += f"（来源 [{sup.get('source_n')}]"
                     support += "，管理层/发行人披露）" if sup.get("issuer") else "，第三方材料）"
-                if sup.get("background_only"):
-                    support += "——**初步背景依据**（行业/市场语境），不构成该指标变化的"
-                    support += "量价/结构解释"
+                if sup.get("structure"):
+                    support += "——**量价/结构数据**（发行人披露，见『量价与结构』）"
             else:
                 support = "支持：未取得对应披露，**观察成立、原因待证**"
-                if sup.get("reading"):
+                if sup.get("background_only"):
+                    # 行业/市场背景是"已取材料"不是"原因支持"（项1：不计入必答已支持）
+                    support += (f"（已取材料：{sup.get('locator') or '有行业/市场段落'}"
+                                f"——**初步背景依据**（行业/市场语境），"
+                                f"不构成该指标变化的量价/结构解释）")
+                elif sup.get("reading"):
                     # 有材料但只含读数/背景：如实列出，不冒充原因支持
                     support += f"（已取材料：{sup.get('reading')}）"
             lines.append(f"- **{q.get('question')}**：{q.get('observation')}")
             lines.append(f"  - {support}；边界：{q.get('boundary')}；"
                          f"下一步：{'、'.join(q.get('next_action') or []) or '补齐底稿事实'}")
+        lines.append("")
+    # 项3：量价与结构——把已取得的销量/渠道/地区披露做成**能读的分析**（此前只把原始
+    # 表格当业务背景整段贴出：重复数字、长段原文、读不出结论）。所有数字来自发行人
+    # 披露原文，推算项带算式与边界；没有对应披露时整块不出现（不填零、不编）。
+    vp = structure.get("volume_price") or {}
+    if vp.get("ok"):
+        facts = [f for f in (vp.get("facts") or []) if isinstance(f, dict)]
+        _vol_rows = [f for f in facts if str(f.get("group")) == "实物量"]
+        _comp_rows = [f for f in facts if str(f.get("group")) != "实物量"]
+
+        def _n(v, digits: int = 2) -> str:
+            try:
+                return f"{float(v):,.{digits}f}"
+            except (TypeError, ValueError):
+                return "—"
+
+        lines.append("## 量价与结构（发行人披露）")
+        if _vol_rows:
+            lines.append("| 实物量 | 2024 | 2023 | 同比 |")
+            lines.append("|---|---|---|---|")
+            for f in _vol_rows:
+                lines.append(f"| {f.get('label')} | {_n(f.get('cur'))} | {_n(f.get('prev'))} "
+                             f"| {f.get('yoy'):+g}% |")
+        if _comp_rows:
+            lines.append("")
+            lines.append("| 收入构成 | 2024（元） | 2023（元） | 同比 | 2024 占比 |")
+            lines.append("|---|---|---|---|---|")
+            for f in _comp_rows:
+                share = (f"{f.get('share_cur'):g}%" if isinstance(f.get("share_cur"),
+                                                                  (int, float)) else "—")
+                lines.append(f"| {f.get('group')}·{str(f.get('label')).replace('（元）', '')} "
+                             f"| {_n(f.get('cur'), 2)} | {_n(f.get('prev'), 2)} "
+                             f"| {f.get('yoy'):+g}% | {share} |")
+        for d in (vp.get("derived") or []):
+            if not isinstance(d, dict):
+                continue
+            _cur = d.get("cur")
+            _txt = (f"- **{d.get('label')}**：{_n(_cur, 0) if str(d.get('unit')) == '元/吨' else (_cur if _cur is not None else '—')}"
+                    f"{d.get('unit') or ''}")
+            if d.get("prev") is not None:
+                _txt += (f"（上期 {_n(d.get('prev'), 0)}"
+                         f"{d.get('unit') or ''}）" if str(d.get("unit")) == "元/吨"
+                         else f"（上期 {d.get('prev')}{d.get('unit') or ''}）")
+            if isinstance(d.get("yoy"), (int, float)) and str(d.get("unit")) == "元/吨":
+                _txt += f"，同比 {d['yoy']:+g}%"
+            if d.get("formula"):
+                _txt += f"（算式：{d.get('formula')}）"
+            if d.get("note"):
+                _txt += f"——{d.get('note')}"
+            lines.append(_txt)
+        # 直观关系：把三个披露读数放到同一句里（不引入新数字）
+        _rel = []
+        _rev = next((f for f in _comp_rows if str(f.get("label")) == "白酒（元）"), None)
+        _vrow = next((f for f in _vol_rows if str(f.get("label")) == "白酒销售量（吨）"), None)
+        if _rev and _vrow and isinstance(_rev.get("yoy"), (int, float)) \
+                and isinstance(_vrow.get("yoy"), (int, float)):
+            _dir = "小于" if abs(_rev["yoy"]) < abs(_vrow["yoy"]) else "大于"
+            _rel.append(f"白酒收入降幅（{_rev['yoy']:g}%）{_dir}销售量降幅"
+                        f"（{_vrow['yoy']:g}%），差额指向吨价变动（推算见上）")
+        _inv = next((f for f in _vol_rows if str(f.get("label")) == "白酒库存量（吨）"), None)
+        if _inv and isinstance(_inv.get("yoy"), (int, float)) and _inv["yoy"] > 0:
+            _rel.append(f"库存量上升（{_inv['yoy']:g}%）与销售量下降并存，"
+                        f"渠道与成品库存的消化需要后续期间数据检验")
+        if _rel:
+            lines.append("")
+            for t in _rel:
+                lines.append(f"- {t}")
+        if vp.get("boundary"):
+            lines.append("")
+            _bnd = "；".join(str(b).rstrip("。；;") for b in vp["boundary"] if str(b).strip())
+            lines.append(f"**边界**：{_bnd}。")
+        if vp.get("locator"):
+            _src = f"（来源 [{vp.get('source_n')}]）" if vp.get("source_n") else ""
+            lines.append("")
+            lines.append(f"- 出处：{vp.get('locator')}{_src}")
         lines.append("")
     # 业务背景：公司怎么赚钱（只取与本期变化有关的年报段落，带 [n] 与小节定位）
     lines.append("## 业务背景")
@@ -2234,9 +2483,20 @@ def render_brief_markdown(structure: dict, body: str = "",
     if management:
         for e in management:
             n = f"[{e.get('source_n')}]" if e.get("source_n") else ""
-            lines.append(f"- {e.get('text')}{n}")
+            lines.append(f"- {_abridge(e.get('text'), 200)}{n}")
             if e.get("locator"):
                 lines.append(f"  - 出处：{e.get('locator')}")
+            # 归属：这段**到底解释了哪项指标**（与逐问支持、风险条目同一条判据）
+            expl = list(e.get("explains") or [])
+            bg = list(e.get("background_for") or [])
+            if expl:
+                line = f"  - 归属：该段解释了 {'、'.join(expl)} 的变化（定性）"
+            else:
+                line = "  - 归属：该段未单独解释上述变化的哪一项（不构成原因支持）"
+            if bg and not expl:
+                line = (f"  - 归属：该段只提供 {'、'.join(bg)} 的行业/市场背景，"
+                        f"不构成原因支持")
+            lines.append(line + "；是否算「原因已取得」以『研究问题与下一步』逐问支持为准。")
     else:
         lines.append("- 未取得与上述变化对应的管理层讨论或附注段落，"
                      "原因**未在本次资料中体现**（需补充材料见下）。")
@@ -2247,7 +2507,7 @@ def render_brief_markdown(structure: dict, body: str = "",
         for e in third:
             n = f"[{e.get('source_n')}]" if e.get("source_n") else ""
             pub = f"（{e.get('publisher')}）" if e.get("publisher") else ""
-            lines.append(f"- {e.get('text')}{n}{pub}")
+            lines.append(f"- {_abridge(e.get('text'), 200)}{n}{pub}")
             if e.get("locator"):
                 lines.append(f"  - 出处：{e.get('locator')}")
     lines.append("")

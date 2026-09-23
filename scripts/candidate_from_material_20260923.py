@@ -50,21 +50,28 @@ def main() -> int:
     # 直接喂进去会"简报套简报"（实测 18,174 字符、两份关键发现）。这里只抽出
     # 渲染器**不会**自己生成的两块（结论、数据时效）作为分析输入；关键发现/研究问题/
     # 业务背景/财务对照/图表/风险与核查/附录/参考来源都由结构重生成。
-    def _block(text: str, heading: str, stops: tuple[str, ...]) -> str:
+    def _block(text: str, heading: str, stops: tuple[str, ...] = ()) -> str:
+        """取 heading 到**下一个二级标题**之间的内容（stops 只作额外兜底）。
+
+        实机反例：按固定 stops 取"数据时效"，会把正文里紧随其后的整段『变化解释』
+        一起带进分析输入，渲染出来就是**两份变化解释**（一份未缩短的旧文 + 一份代码
+        新渲染）。这里统一在下一个 `## ` 处截断。
+        """
         i = text.find(heading)
         if i < 0:
             return ""
-        j = len(text)
+        rest_start = i + len(heading)
+        rest = text[rest_start:]
+        m = re.search(r"\n##\s", rest)
+        j = rest_start + (m.start() if m else len(rest))
         for s in stops:
-            k = text.find(s, i + len(heading))
+            k = text.find(s, rest_start)
             if 0 <= k < j:
                 j = k
         return text[i:j].strip("\n")
 
-    conclusion = _block(body, "## 结论", ("## 数据时效", "## 财务对照", "## 图表",
-                                          "## 风险与核查", "## 附录"))
-    timeliness = _block(body, "## 数据时效", ("## 财务对照", "## 图表", "## 风险与核查",
-                                              "## 附录"))
+    conclusion = _block(body, "## 结论")
+    timeliness = _block(body, "## 数据时效")
     title = next((l.strip()[2:].strip() for l in body.split("\n")
                   if l.strip().startswith("# ")), "公司研究简报")
     analysis_input = "\n\n".join(x for x in (conclusion, timeliness) if x)

@@ -613,6 +613,177 @@ class TestBuild(unittest.TestCase):
         self.assertEqual(a.get("chunk_offsets"), b.get("chunk_offsets"))
 
 
+class TestChunkGapContinuity(unittest.TestCase):
+    """项4：片段跳号 = 合并文本的**缺口**；跨缺口摘录不得当作连续原文。
+
+    复核实机：取到片段 2、3、4、5、10、11（6–9 没取），合并时 5 的尾巴直接接 10 的
+    开头——摘录、字符区间与文本 hash 都被读成"一段连续披露"。修复后：跳号处插显式
+    缺口标记，跨缺口的记录带 `crosses_gap`/`missing_chunks`，定位写明"非连续原文"。
+    """
+
+    def test_merge_chunks_inserts_gap_marker_and_keeps_offsets_consistent(self):
+        a, b = "甲公司营业收入同比下降13.01%。" * 2, "报告期内公司治理结构完善。" * 3
+        text, offsets, gaps = ne.merge_chunks([(5, a), (10, b)])
+        self.assertIn("资料缺口", text)
+        self.assertIn("6–9", text)
+        self.assertEqual([no for _pos, no in offsets], [5, 10])
+        self.assertEqual([g.get("after_chunk") for g in gaps], [5])
+        self.assertEqual(gaps[0].get("missing"), [6, 7, 8, 9])
+        # 偏移与文本一致：第二段起点就是第二段本身
+        self.assertEqual(text[offsets[1][0]:offsets[1][0] + len(b)], b)
+        # 缺口标记位于两段之间（不是末尾补一句）
+        self.assertLess(offsets[0][0] + len(a), offsets[1][0])
+        self.assertIn("资料缺口", text[offsets[0][0] + len(a):offsets[1][0]])
+
+    def test_contiguous_chunks_get_no_marker(self):
+        text, offsets, gaps = ne.merge_chunks([(2, "甲" * 20), (3, "乙" * 20)])
+        self.assertNotIn("资料缺口", text)
+        self.assertEqual(gaps, [])
+        self.assertEqual([g for g in ne.chunk_gaps(offsets)], [])
+
+    def test_record_crossing_gap_is_flagged_not_continuous(self):
+        """一个小节从片段 5 里开始、到片段 10 里结束 → 必须标 crosses_gap。"""
+        long_body = ("本公司主营业务收入同比下降，主要系销量下降及产品结构调整所致。"
+                     "分产品看，白酒收入下降，红酒收入下降；分地区看，省外降幅更大。") * 2
+        text, offsets, gaps = ne.merge_chunks([(5, "四、主营业务分析\n\n" + long_body),
+                                               (10, "报告期内公司治理结构完善，股东大会"
+                                                    "运作规范，内部控制持续健全。")])
+        doc = {"title": "洋河股份:2024年年度报告", "url": ISSUER_URL, "text": text,
+               "chunk_offsets": offsets, "chunk_gaps": gaps}
+        recs = ne.extract_sections(doc, periods=[2024], company="贵州茅台",
+                                   company_id="600519.SH", as_of="2025-04-30")
+        cross = [r for r in recs if r.get("crosses_gap")]
+        self.assertTrue(cross, [r.get("locator") for r in recs])
+        self.assertEqual(cross[0].get("missing_chunks"), [6, 7, 8, 9])
+        self.assertIn("跨缺失片段", str(cross[0].get("locator")))
+        self.assertIn("非连续原文", str(cross[0].get("locator")))
+
+    def test_payload_and_citation_evidence_expose_gaps(self):
+        """叙事证据载荷与包内引用证据都要带上缺口清单与逐条 crosses_gap。"""
+        import delivery_pipeline as dp
+        tmp = Path(tempfile.mkdtemp(prefix="wm_gap_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        _orig = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        self.addCleanup(ws_mod.configure_workspace_root, str(_orig))
+        tid = "gap-1"
+        text, offsets, gaps = ne.merge_chunks([(5, "五、风险因素\n\n" +
+                                                "宏观经济波动风险：行业需求与政策存在不确定性。" * 3),
+                                               (10, "六、公司治理\n\n公司治理结构完善。")])
+        proj = Path(tmp) / tid / "project"
+        proj.mkdir(parents=True, exist_ok=True)
+        (proj / "fetch_snapshot.json").write_text(json.dumps([{
+            "title": "贵州茅台:2024年年度报告", "url": ISSUER_URL,
+            "text": text, "chunk_offsets": offsets, "chunk_gaps": gaps,
+        }], ensure_ascii=False), encoding="utf-8")
+        payload = ne.build(tid, periods=[2024], company="贵州茅台", company_id="600519.SH",
+                           as_of="2025-04-30")
+        self.assertEqual([g.get("missing") for g in (payload.get("chunk_gaps") or [])],
+                         [[6, 7, 8, 9]])
+        ev = dp.citation_evidence_payload(tid, material=payload)
+        self.assertIsNotNone(ev)
+        self.assertTrue(ev.get("chunk_gaps"), ev)
+        recs = [r for r in (payload.get("records") or []) if r.get("crosses_gap")]
+        if recs and ev.get("records"):
+            flagged = [r for r in ev["records"] if r.get("crosses_gap")]
+            self.assertTrue(flagged, ev["records"][0])
+            self.assertEqual(flagged[0].get("missing_chunks"), [6, 7, 8, 9])
+
+
+class TestVolumePriceExtraction(unittest.TestCase):
+    """项3：把已取得的销量/收入构成披露抽成可分析的事实（确定性、不编数）。
+
+    实机材料里有三张表都含"省内/省外"（营业收入构成、营业成本构成、分地区毛利率），
+    只有**营业收入构成**那张是 `值 占比 值 占比 同比` 五列。按列型匹配才不会把成本
+    数（12,748,484,435.48）当成收入（13,031,872,833.19）。
+    """
+
+    DOC = """洋河股份:2024年年度报告
+
+第三节 管理层讨论与分析
+
+二、报告期内公司从事的主要业务
+
+1、主要产品的生产量、销售量、库存量
+
+    产品类别            项目              2024 年              2023 年              同比增减
+
+                      销售量(吨)          139,076.05            166,154.73              -16.30%
+
+      白酒          生产量(吨)          145,494.73            158,834.29              -8.40%
+
+                      库存量(吨)            45,594.72            39,176.04              16.38%
+
+四、主营业务分析
+
+（1） 营业收入构成
+
+ 分产品
+
+ 白酒              28,175,707,878.18        97.57%  32,389,581,931.71        97.78%          -13.01%
+
+ 红酒                  72,587,951.44          0.26%      99,854,764.34          0.30%          -27.31%
+
+ 分地区
+
+ 省内              13,031,872,833.19        45.13%  14,675,188,393.55        44.30%          -11.20%
+
+ 省外              15,844,424,160.37        54.87%  18,451,089,157.96        55.70%          -14.13%
+
+ 分销售模式
+
+ 批发经销          27,854,167,407.45        96.46%  32,052,628,760.26        96.76%          -13.10%
+
+ 线上直销            394,128,422.17          1.37%      436,807,935.79          1.24%           -9.77%
+
+ 分地区（营业成本构成）
+
+ 省内        12,748,484,435.48  3,254,113,271.23  74.47%        -11.43%        -9.91%        -0.43%
+"""
+
+    def _vp(self):
+        doc = {"title": "洋河股份:2024年年度报告", "url": ISSUER_URL, "text": self.DOC,
+               "chunk_offsets": [[0, 3]]}
+        return ne.extract_volume_price([doc], periods=[2023, 2024])
+
+    def test_facts_come_from_the_income_composition_table(self):
+        vp = self._vp()
+        self.assertTrue(vp.get("ok"), vp)
+        by = {f["label"]: f for f in vp["facts"]}
+        self.assertAlmostEqual(by["白酒销售量（吨）"]["cur"], 139076.05, places=2)
+        self.assertAlmostEqual(by["白酒销售量（吨）"]["yoy"], -16.30, places=2)
+        self.assertAlmostEqual(by["白酒库存量（吨）"]["yoy"], 16.38, places=2)
+        self.assertAlmostEqual(by["白酒（元）"]["cur"], 28175707878.18, places=2)
+        self.assertAlmostEqual(by["白酒（元）"]["share_cur"], 97.57, places=2)
+        # 同一标签出现在成本表里时不得串行：省内取收入表的 13,031,872,833.19
+        self.assertAlmostEqual(by["省内（元）"]["cur"], 13031872833.19, places=2)
+        self.assertAlmostEqual(by["省内（元）"]["yoy"], -11.20, places=2)
+        self.assertAlmostEqual(by["省外（元）"]["yoy"], -14.13, places=2)
+        self.assertAlmostEqual(by["线上直销（元）"]["yoy"], -9.77, places=2)
+        for f in vp["facts"]:
+            self.assertIn("api_chunk 3", str(f.get("locator") or ""))
+            self.assertTrue(f.get("text_sha256"), f)
+
+    def test_derived_price_and_structure_gaps_carry_formulas(self):
+        vp = self._vp()
+        d = {x["label"]: x for x in vp["derived"]}
+        ton = d["白酒吨价（推算）"]
+        self.assertAlmostEqual(ton["cur"], 202592, delta=2)
+        self.assertAlmostEqual(ton["yoy"], 3.93, places=2)
+        self.assertIn("28175707878.18", ton["formula"])
+        self.assertAlmostEqual(d["省外与省内收入降幅差"]["cur"], -2.93, places=2)
+        self.assertAlmostEqual(d["线上直销与批发经销降幅差"]["cur"], 3.33, places=2)
+        self.assertTrue(any("推算" in b for b in vp["boundary"]), vp["boundary"])
+
+    def test_without_disclosure_it_reports_not_ok(self):
+        vp = ne.extract_volume_price([{"title": "新闻", "url": NEWS_URL,
+                                      "text": "公司营收下降，行业竞争加剧。"}],
+                                     periods=[2023, 2024])
+        self.assertFalse(vp.get("ok"))
+        self.assertEqual(vp.get("facts"), [])
+        self.assertTrue(vp.get("reason"))
+
+
 class TestApiChunkLocation(unittest.TestCase):
     """09-23：公告文本 API 的 `page_index` 是**接口片段**，不是 PDF 实体页。
 

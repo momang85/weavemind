@@ -492,13 +492,101 @@ def package_manifest(task_id: str, ws, files, *, pdf_name: str = "") -> dict:
     return out
 
 
-def export_snapshot(task_id: str, *, ws_dir=None, delivered_text: str = "") -> dict:
-    """导出用**一次不可变快照**：采纳身份 + 正文 + 资料/规则指纹 + 图表清单。
+def _freeze_payload(task_id: str, ws, *, md_bytes: bytes = b"",
+                    pdf_bytes: bytes = b"") -> dict:
+    """快照时刻把**要进包的成员按字节冻结**（正文/PDF/底稿/图表/审计稿/引用证据）。
+
+    09-23（项2）：此前快照只记图表 hash，打包时按名字重读磁盘——版本检查通过
+    （采纳身份没变）**不代表整包同版**：期间重渲染的图、改写的底稿、重跑的证据
+    文件照样被装进去，清单还给它们记上"当前"hash。这里一次性读成字节，打包只用
+    这些字节；磁盘后来变了只在 `drift` 里如实报告，不改包内内容。
+    """
+    from pathlib import Path as _P
+    ws = _P(ws)
+    payload: dict[str, bytes] = {}
+    if md_bytes:
+        payload["reports/report.md"] = bytes(md_bytes)
+    if pdf_bytes:
+        payload["reports/report.pdf"] = bytes(pdf_bytes)
+    for name, arc in (("working_paper.json", "working_paper.json"),
+                      ("working_paper.csv", "working_paper.csv")):
+        for cand in (ws / "project" / name, ws / name):
+            if cand.is_file():
+                try:
+                    payload[arc] = cand.read_bytes()
+                except Exception as exc:         # noqa: BLE001 - 读不到就不进包，不编
+                    logger.warning("快照：底稿读取失败（%s）：%s", arc, str(exc)[:100])
+                break
+    charts_dir = ws / "charts"
+    if charts_dir.is_dir():
+        for p in sorted(charts_dir.glob("*.png")):
+            try:
+                payload[f"charts/{p.name}"] = p.read_bytes()
+            except Exception as exc:             # noqa: BLE001
+                logger.warning("快照：图表读取失败（%s）：%s", p.name, str(exc)[:100])
+    for cand_dir in (ws / "project", ws):
+        if not cand_dir.is_dir():
+            continue
+        for p in sorted(cand_dir.glob("model_report_full_*.md")):
+            try:
+                payload[f"audit/{p.name}"] = p.read_bytes()
+            except Exception as exc:             # noqa: BLE001
+                logger.warning("快照：审计稿读取失败（%s）：%s", p.name, str(exc)[:100])
+        break
+    # 引用证据：用**快照时刻**读到的那份资料生成一次并冻结字节——打包不再重读，
+    # 资料在导出期间被重跑也不会让包内证据与正文错版。
+    try:
+        import narrative_evidence as _ne
+        material = _ne.read(task_id, ws_dir=ws) or {}
+        ev = citation_evidence_payload(task_id, material=material)
+        if ev is not None:
+            payload["evidence/citation_evidence.json"] = json.dumps(
+                ev, ensure_ascii=False, indent=1).encode("utf-8")
+    except Exception as exc:                     # noqa: BLE001 - 证据生成不了不阻断导出
+        logger.warning("快照：引用证据生成失败（task=%s）：%s", task_id, str(exc)[:120])
+    return payload
+
+
+def _disk_drift(ws, frozen: dict) -> dict:
+    """快照之后磁盘上变过的成员（只报告，不改包内内容）。"""
+    from pathlib import Path as _P
+    ws = _P(ws)
+    out: dict[str, str] = {}
+    for arc, blob in (frozen or {}).items():
+        arc = str(arc)
+        if arc.startswith("reports/"):
+            continue                     # 正文/PDF 由导出动作本身写出，不算漂移
+        name = arc.split("/", 1)[1] if "/" in arc else arc
+        cands: list = []
+        if arc.startswith("charts/"):
+            cands = [ws / "charts" / name]
+        elif arc.startswith("audit/"):
+            cands = [ws / "project" / name, ws / name]
+        elif arc.startswith("evidence/"):
+            cands = [ws / "project" / name, ws / name]
+        else:
+            cands = [ws / "project" / name, ws / name]
+        p = next((c for c in cands if c.is_file()), None)
+        if p is None:
+            out[arc] = "missing_on_disk"
+            continue
+        try:
+            if hashlib.sha256(p.read_bytes()).hexdigest() != \
+                    hashlib.sha256(bytes(blob)).hexdigest():
+                out[arc] = "changed_on_disk"
+        except Exception as exc:                 # noqa: BLE001 - 读不到按未知处理
+            out[arc] = f"unreadable:{str(exc)[:40]}"
+    return out
+
+
+def export_snapshot(task_id: str, *, ws_dir=None, delivered_text: str = "",
+                    md_bytes: bytes = b"", pdf_bytes: bytes = b"") -> dict:
+    """导出用**一次不可变快照**：采纳身份 + 正文 + 资料/规则指纹 + 逐成员字节。
 
     09-23：重包各环节此前各自重读"当前版本"——生产探针里 MD 取 A、修订切 B、PDF 取 B，
     仍返回 ok/verify_ok=true（文件自检只能证明写入字节未坏，证明不了语义同版）。
-    这里把身份/正文/指纹/图表一次性捕获，MD/PDF/底稿/清单都由它生成；调用方在发布前
-    再核对一次采纳身份，变了就拒绝发布（409），不静默混版。
+    这里把身份/正文/指纹连同**底稿、图表、审计稿、引用证据的字节**一次性捕获，
+    MD/PDF/底稿/清单都由它生成；调用方在发布前再核对一次采纳身份，变了就拒绝发布（409）。
     """
     from pathlib import Path as _P
     ws = _P(ws_dir) if ws_dir else workspace.task_workspace(task_id)
@@ -506,14 +594,10 @@ def export_snapshot(task_id: str, *, ws_dir=None, delivered_text: str = "") -> d
     adopted = store.adopted()
     if adopted is None:
         raise LookupError("该任务没有可导出的采纳版本")
-    charts: dict[str, str] = {}
-    charts_dir = ws / "charts"
-    if charts_dir.is_dir():
-        for p in sorted(charts_dir.glob("*.png")):
-            try:
-                charts[p.name] = hashlib.sha256(p.read_bytes()).hexdigest()
-            except Exception:
-                charts[p.name] = ""
+    text = str(delivered_text or "")
+    if not md_bytes and text:
+        md_bytes = text.encode("utf-8")
+    payload = _freeze_payload(task_id, ws, md_bytes=md_bytes, pdf_bytes=pdf_bytes)
     rv, rf = rules_identity(task_id)
     ev_fp = ""
     try:
@@ -522,28 +606,75 @@ def export_snapshot(task_id: str, *, ws_dir=None, delivered_text: str = "") -> d
         ev_fp = str((st.get("evidence") or {}).get("fingerprint") or "")
     except Exception:
         ev_fp = ""
+    frozen = {arc: hashlib.sha256(blob).hexdigest() for arc, blob in payload.items()}
+    # charts 与包内清单同口径：键是**包内成员路径**（charts/chart_1.png），不是文件名
+    charts = {arc: h for arc, h in frozen.items() if arc.startswith("charts/")}
     return {
         "report_version_id": adopted.identity_id(),
         "body_sha256": str(getattr(adopted, "version_id", "") or ""),
-        "delivered_text": str(delivered_text or ""),
-        "sources_fingerprint": sources_fingerprint(task_id, delivered_text),
+        "delivered_text": text,
+        "sources_fingerprint": sources_fingerprint(task_id, text),
         "rules_version": rv,
         "rules_fingerprint": rf,
         "evidence_fingerprint": ev_fp,
         "charts": charts,
+        "payload": payload,
+        "frozen": frozen,
         "captured_at": time.time(),
     }
 
 
-def repack_adopted(task_id: str, *, md_bytes: bytes, pdf_bytes: bytes = b"",
+def _manifest_from_frozen(frozen: dict, *, snap: dict, ws=None,
+                          pdf_name: str = "") -> dict:
+    """包内清单（schema 2）：**按实际写入的字节**算 hash，身份取自快照。
+
+    快照里记的 `frozen` 与写入字节不一致 → 抛 `RuntimeError("snapshot drift")`：
+    宁可不发布，也不把两版内容装进同一个包。
+    """
+    out: dict = {"packaged_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                 "schema": "weavemind.package/2"}
+    hashes = {str(arc): hashlib.sha256(bytes(blob)).hexdigest()
+              for arc, blob in (frozen or {}).items()}
+    want = {str(a): str(h) for a, h in (snap.get("frozen") or {}).items()}
+    drift = {a: hashes.get(a) for a, h in want.items() if hashes.get(a) != h}
+    if drift:
+        raise RuntimeError("snapshot drift")
+    out["files"] = hashes
+    _md_candidates = [a for a in hashes if a.startswith("reports/")
+                      and a.endswith(".md")]
+    _md = ("reports/report.md" if "reports/report.md" in hashes else (
+        sorted(_md_candidates)[0] if _md_candidates else ""))
+    out["delivered_md"] = _md
+    out["delivered_md_sha256"] = hashes.get(_md, "")
+    _pdf = str(pdf_name or "")
+    if not _pdf:
+        _pdf = "reports/report.pdf" if "reports/report.pdf" in hashes else ""
+    out["pdf"] = _pdf
+    out["pdf_sha256"] = hashes.get(_pdf, "")
+    out["charts"] = {a: h for a, h in hashes.items() if a.startswith("charts/")}
+    out["report_version_id"] = str(snap.get("report_version_id") or "")
+    out["research_body_sha256"] = str(snap.get("body_sha256") or "")
+    out["sources_fingerprint"] = str(snap.get("sources_fingerprint") or "")
+    out["rules_version"] = str(snap.get("rules_version") or "")
+    out["rules_fingerprint"] = str(snap.get("rules_fingerprint") or "")
+    out["evidence_fingerprint"] = str(snap.get("evidence_fingerprint") or "")
+    out["snapshot_captured_at"] = float(snap.get("captured_at") or 0.0)
+    out["frozen"] = dict(want)
+    if ws is not None:
+        out["drift"] = _disk_drift(ws, frozen)
+    return out
+
+
+def repack_adopted(task_id: str, *, md_bytes: bytes = b"", pdf_bytes: bytes = b"",
                    ws_dir=None, snapshot: dict | None = None) -> dict:
     """按**当前采纳版本**重新打包（无模型、确定性）：新 ZIP + 包内清单。
 
-    - 包内 `reports/report.md` 就是传入的交付 MD 字节（与页面下载同源）；
-    - 清单按 `package_manifest` 的 schema 2 写（采纳身份与文件 hash 分开）；
+    - `snapshot`（`export_snapshot` 的结果）传入时：**整包只用快照里冻结的字节**
+      （正文/PDF/底稿/图表/审计稿/引用证据），不重读磁盘；清单按写入字节算 hash，
+      并带上 `frozen`（快照 hash）与 `drift`（快照后磁盘变过的成员，只报告）；
+    - 无快照（旧调用）时按名字从工作区读数——`packaging_worker` 的既有入口不变；
     - **旧包不动**（名字带新时间戳 + 随机后缀；旧包时间与标识都不改）；
-    - `snapshot`（`export_snapshot` 的结果）传入时，清单直接用快照身份，不再重读版本库；
-      发布前复核采纳身份未变，变了抛 `RuntimeError("version changed")`（不静默混版）；
+    - 发布前复核采纳身份未变，变了抛 `RuntimeError("version changed")`（不静默混版）；
     - 落盘走**临时文件 + 原子替换**，同秒两次重包不会互相覆盖。
     """
     import os as _os
@@ -556,50 +687,58 @@ def repack_adopted(task_id: str, *, md_bytes: bytes, pdf_bytes: bytes = b"",
     if adopted is None:
         raise LookupError("该任务没有可打包的采纳版本")
     snap = dict(snapshot or {})
+    reports = ws / "reports"
+    reports.mkdir(parents=True, exist_ok=True)
     if snap:
         if str(snap.get("report_version_id") or "") != adopted.identity_id():
             raise RuntimeError("version changed")
-    reports = ws / "reports"
-    reports.mkdir(parents=True, exist_ok=True)
-    md_path = reports / "report.md"
-    md_path.write_bytes(bytes(md_bytes))
-    files: list[tuple[_P, str]] = [(md_path, "reports/report.md")]
-    pdf_name = ""
-    if pdf_bytes:
-        pdf_path = reports / "report.pdf"
-        pdf_path.write_bytes(bytes(pdf_bytes))
-        files.append((pdf_path, "reports/report.pdf"))
-        pdf_name = "reports/report.pdf"
-    for name, arc in (("working_paper.json", "working_paper.json"),
-                      ("working_paper.csv", "working_paper.csv")):
-        for cand in (ws / "project" / name, ws / name):
-            if cand.is_file():
-                files.append((cand, arc))
-                break
-    charts_dir = ws / "charts"
-    if charts_dir.is_dir():
-        for p in sorted(charts_dir.glob("*.png")):
-            files.append((p, f"charts/{p.name}"))
-    # 完整模型稿（审计留档，按内容 hash 命名）：存在的每一版都进包（不覆盖历史）
-    for cand_dir in (ws / "project", ws):
-        if not cand_dir.is_dir():
-            continue
-        for p in sorted(cand_dir.glob("model_report_full_*.md")):
-            files.append((p, f"audit/{p.name}"))
-        break
-    # 引用证据（最小载荷）：已准入、实际使用的摘录 + 定位 + 文本 hash（F）
-    ev_file = _write_citation_evidence(task_id, ws)
-    if ev_file is not None:
-        files.append((ev_file, f"evidence/{ev_file.name}"))
-    manifest = package_manifest(task_id, ws, files, pdf_name=pdf_name)
-    if snap:
-        # 用快照身份覆盖（清单不重读版本库）
-        manifest["report_version_id"] = str(snap.get("report_version_id") or "")
-        manifest["research_body_sha256"] = str(snap.get("body_sha256") or "")
-        manifest["sources_fingerprint"] = str(snap.get("sources_fingerprint") or "")
-        manifest["rules_version"] = str(snap.get("rules_version") or "")
-        manifest["rules_fingerprint"] = str(snap.get("rules_fingerprint") or "")
-        manifest["evidence_fingerprint"] = str(snap.get("evidence_fingerprint") or "")
+        frozen = {str(arc): bytes(blob)
+                  for arc, blob in (snap.get("payload") or {}).items()}
+        if not frozen.get("reports/report.md"):
+            if not md_bytes:
+                raise LookupError("快照里没有交付正文")
+            frozen["reports/report.md"] = bytes(md_bytes)
+        if pdf_bytes and not frozen.get("reports/report.pdf"):
+            frozen["reports/report.pdf"] = bytes(pdf_bytes)
+        # 工作区副本仍写出（页面下载读它），但**包内内容只认快照字节**
+        (reports / "report.md").write_bytes(frozen["reports/report.md"])
+        if frozen.get("reports/report.pdf"):
+            (reports / "report.pdf").write_bytes(frozen["reports/report.pdf"])
+        manifest = _manifest_from_frozen(frozen, snap=snap, ws=ws)
+        members: list[tuple[str, bytes]] = list(frozen.items())
+    else:
+        mdb = bytes(md_bytes)
+        (reports / "report.md").write_bytes(mdb)
+        files: list[tuple[_P, str]] = [(reports / "report.md", "reports/report.md")]
+        pdf_name = ""
+        if pdf_bytes:
+            (reports / "report.pdf").write_bytes(bytes(pdf_bytes))
+            files.append((reports / "report.pdf", "reports/report.pdf"))
+            pdf_name = "reports/report.pdf"
+        for name, arc in (("working_paper.json", "working_paper.json"),
+                          ("working_paper.csv", "working_paper.csv")):
+            for cand in (ws / "project" / name, ws / name):
+                if cand.is_file():
+                    files.append((cand, arc))
+                    break
+        charts_dir = ws / "charts"
+        if charts_dir.is_dir():
+            for p in sorted(charts_dir.glob("*.png")):
+                files.append((p, f"charts/{p.name}"))
+        # 完整模型稿（审计留档，按内容 hash 命名）：存在的每一版都进包（不覆盖历史）
+        for cand_dir in (ws / "project", ws):
+            if not cand_dir.is_dir():
+                continue
+            for p in sorted(cand_dir.glob("model_report_full_*.md")):
+                files.append((p, f"audit/{p.name}"))
+            break
+        manifest = package_manifest(task_id, ws, files, pdf_name=pdf_name)
+        members = []
+        for abs_path, arc in files:
+            try:
+                members.append((arc, _P(abs_path).read_bytes()))
+            except Exception as exc:             # noqa: BLE001 - 读不到编不出，如实抛
+                raise RuntimeError(f"打包读取失败：{arc}：{str(exc)[:80]}") from exc
     # 发布前最后复核：身份没变才发布（变了说明期间发生修订 → 不静默混版）
     if str(store.adopted().identity_id()) != str(manifest.get("report_version_id") or ""):
         raise RuntimeError("version changed")
@@ -608,11 +747,12 @@ def repack_adopted(task_id: str, *, md_bytes: bytes, pdf_bytes: bytes = b"",
     zip_path = ws / name
     tmp_path = ws / f".{name}.tmp"
     with _zf.ZipFile(tmp_path, "w", _zf.ZIP_DEFLATED) as zf:
-        for abs_path, arc in files:
-            zf.write(abs_path, arc)
+        for arc, blob in members:
+            zf.writestr(arc, blob)
         zf.writestr("PACKAGE_MANIFEST.json",
                     json.dumps(manifest, ensure_ascii=False, indent=1))
     _os.replace(tmp_path, zip_path)          # 原子发布
+    # 自检：包内字节 vs 清单 hash，**再对一次快照 hash**（两版内容不得混进同一包）
     verify: dict[str, str] = {}
     try:
         with _zf.ZipFile(zip_path) as zf:
@@ -621,26 +761,32 @@ def repack_adopted(task_id: str, *, md_bytes: bytes, pdf_bytes: bytes = b"",
                     verify[arc] = "missing"
                     continue
                 got = hashlib.sha256(zf.read(arc)).hexdigest()
-                verify[arc] = "ok" if got == want else "mismatch"
+                if got != want:
+                    verify[arc] = "mismatch"
+                    continue
+                _fz = (snap.get("frozen") or {}).get(arc)
+                verify[arc] = "ok" if (not _fz or _fz == got) else "snapshot_mismatch"
     except Exception as exc:                     # noqa: BLE001 - 自检失败如实报告
         verify["__error__"] = str(exc)[:120]
     return {"package": zip_path.name, "path": str(zip_path),
-            "files": [a for _p, a in files], "manifest": manifest,
+            "files": [a for a, _b in members], "manifest": manifest,
             "verify": verify,
             "bytes": zip_path.stat().st_size}
 
 
-def _write_citation_evidence(task_id: str, ws) -> "Path | None":
-    """包内最小引用证据：已准入、带定位的摘录 + 坐标口径 + 文本 hash。
+def citation_evidence_payload(task_id: str, *, material: dict | None = None) -> dict | None:
+    """包内最小引用证据的**内容**：已准入、带定位的摘录 + 坐标口径 + 文本 hash。
 
     F：报告正文承诺了"定位说明"，包里却只有工作区路径——离线解包后应能凭
     source/locator/text hash 取回同一摘录。只写**实际采用**的记录，不搬整个快照。
+    `material`（叙事证据载荷）传入时**按它生成**——导出快照据此把资料冻结成一份，
+    打包不再重读工作区（项2）。
     """
-    import json as _json
-    from pathlib import Path as _P
     try:
-        import narrative_evidence as _ne
-        payload = _ne.read(task_id, ws_dir=ws) or {}
+        if material is None:
+            import narrative_evidence as _ne
+            material = _ne.read(task_id) or {}
+        payload = material or {}
         recs = [r for r in (payload.get("records") or [])
                 if isinstance(r, dict) and r.get("has_location")
                 and str(r.get("admission") or "") in ("admitted", "comparison")]
@@ -651,10 +797,13 @@ def _write_citation_evidence(task_id: str, ws) -> "Path | None":
             "task_id": task_id,
             "location_kind": "api_chunk" if any(r.get("chunk") for r in recs) else "char_range",
             "chunk_offsets": payload.get("chunk_offsets") or [],
+            "chunk_gaps": payload.get("chunk_gaps") or [],
             "note": ("定位口径：`locator` 里的字符区间是**合并文档偏移**（本任务为多段公告"
-                     "文本拼接，每段 5000 字符，段起止见 `chunk_offsets`）；`chunk` 是该"
-                     "偏移落在的接口片段号，`chunk_char_start/end` 为**段内**偏移。"
-                     "没有 PDF 页码映射时不写页码。离线解包后可用 url + locator + "
+                     "文本拼接，每段 5000 字符，段起止见 `chunk_offsets`，缺失片段见 "
+                     "`chunk_gaps`）；`chunk` 是该偏移落在的接口片段号，"
+                     "`chunk_char_start/end` 为**段内**偏移。没有 PDF 页码映射时不写页码。"
+                     "`crosses_gap=true` 的摘录**跨缺失片段**（非连续原文），"
+                     "文本里带『资料缺口』标记。离线解包后可用 url + locator + "
                      "text_sha256 取回同一条摘录。"),
             "records": [{
                 "kind": r.get("kind"), "title": r.get("title"), "url": r.get("url"),
@@ -663,6 +812,8 @@ def _write_citation_evidence(task_id: str, ws) -> "Path | None":
                 "chunk_char_start": _chunk_local(r, payload.get("chunk_offsets"))[0],
                 "chunk_char_end": _chunk_local(r, payload.get("chunk_offsets"))[1],
                 "crosses_chunk": _chunk_local(r, payload.get("chunk_offsets"))[2],
+                "crosses_gap": bool(r.get("crosses_gap")),
+                "missing_chunks": list(r.get("missing_chunks") or []),
                 "text": str(r.get("snippet") or r.get("text") or ""),
                 "text_sha256": hashlib.sha256(
                     str(r.get("snippet") or r.get("text") or "").encode("utf-8")).hexdigest(),
@@ -670,7 +821,20 @@ def _write_citation_evidence(task_id: str, ws) -> "Path | None":
                 "admission": r.get("admission"),
             } for r in recs],
         }
-        p = ws / "project" / "citation_evidence.json"
+        return out
+    except Exception as exc:                     # noqa: BLE001 - 证据生成不了不阻断
+        logger.warning("引用证据生成失败（task=%s）：%s", task_id, str(exc)[:120])
+        return None
+
+
+def _write_citation_evidence(task_id: str, ws) -> "Path | None":
+    """把引用证据写到工作区（旧入口；快照路径直接用 `citation_evidence_payload`）。"""
+    import json as _json
+    try:
+        out = citation_evidence_payload(task_id)
+        if out is None:
+            return None
+        p = Path(ws) / "project" / "citation_evidence.json"
         p.write_text(_json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
         return p
     except Exception as exc:                     # noqa: BLE001 - 证据写不出不阻断打包

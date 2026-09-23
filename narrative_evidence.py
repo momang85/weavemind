@@ -375,6 +375,87 @@ def _chunk_of(char_start: int, chunk_offsets) -> int | None:
     return chunk
 
 
+# 合并文本里标记"此处缺片段"的行：跨缺口拼接不得当连续原文，读者/抽取器都要看得见
+GAP_MARKER_TMPL = ("\n\n【资料缺口：此处缺接口片段 {missing}（原文未取得），"
+                   "以下内容与上一段**不连续**】\n\n")
+
+
+def chunk_gaps(chunk_offsets) -> list[dict]:
+    """片段跳号 → 缺口清单：`{after_chunk, missing: [...], doc_offset}`。
+
+    09-23（项4）：公告文本 API 按 `page_index` 取片段，取到的片段号可能不连续
+    （实机：2、3、4、5、10、11——6–9 没取）。合并时若把 5 的尾巴和 10 的开头直接
+    接上，得到的"连续原文"其实是两段拼接，摘录、字符区间与文本 hash 都会被误读。
+    这里把跳号显式列出来，供插标记、标记录与引用证据使用。
+    """
+    out: list[dict] = []
+    prev_no = None
+    prev_start = None
+    for start, no in (chunk_offsets or []):
+        try:
+            start_i, no_i = int(start), int(no)
+        except (TypeError, ValueError):
+            continue
+        if prev_no is not None and no_i - prev_no > 1:
+            out.append({"after_chunk": prev_no,
+                        "missing": list(range(prev_no + 1, no_i)),
+                        "doc_offset": start_i, "prev_offset": prev_start})
+        prev_no, prev_start = no_i, start_i
+    return out
+
+
+def merge_chunks(chunks, *, gap_marker: bool = True) -> tuple[str, list, list]:
+    """把 `[(片段号, 文本)]` 合并成一份文档：返回 `(文本, chunk_offsets, 缺口)`。
+
+    片段号跳号处**插入显式缺口标记**（默认），使合并文本本身不再假装连续；
+    偏移表与实际文本严格一致（标记计入偏移，`text[offset:]` 就是该片段的开头）。
+    """
+    buf: list[str] = []
+    offsets: list[list[int]] = []
+    pos = 0
+    prev_no = None
+    for no, text in (chunks or []):
+        try:
+            no_i = int(no)
+        except (TypeError, ValueError):
+            continue
+        body = str(text or "")
+        if prev_no is not None and no_i - prev_no > 1:
+            missing = (f"{prev_no + 1}–{no_i - 1}" if no_i - prev_no > 2
+                       else str(prev_no + 1))
+            sep = GAP_MARKER_TMPL.format(missing=missing) if gap_marker else "\n"
+            buf.append(sep)
+            pos += len(sep)
+        offsets.append([pos, no_i])
+        buf.append(body)
+        buf.append("\n")
+        pos += len(body) + 1
+        prev_no = no_i
+    text = "".join(buf)
+    return text, offsets, chunk_gaps(offsets)
+
+
+def _span_gap(char_start: int, char_end: int, gaps) -> list[int]:
+    """区间是否跨缺口；返回被跨过的缺失片段号（空列表 = 不跨）。"""
+    out: list[int] = []
+    for g in (gaps or []):
+        try:
+            off = int(g.get("doc_offset"))
+        except (TypeError, ValueError):
+            continue
+        if int(char_start) < off <= int(char_end):
+            out.extend(int(x) for x in (g.get("missing") or []))
+    return out
+
+
+def _gap_note(missing) -> str:
+    if not missing:
+        return ""
+    nums = sorted({int(x) for x in missing})
+    span = f"{nums[0]}–{nums[-1]}" if len(nums) > 1 else str(nums[0])
+    return f"（跨缺失片段 {span}，为分段摘录、非连续原文）"
+
+
 def _demote_change_target(best_score: int, source: str = "") -> str | None:
     """"命中变化关键词但无因果语言"的降级目标：发行人文件 → 附注（数字出处）；
     第三方（新闻/解读）→ 业务背景。不能一律叫"财务附注"——实机里 21 财经的业绩
@@ -562,12 +643,14 @@ def _paragraph_records(doc: dict, *, periods=None, company: str = "",
             continue
         page = _page_of(start, page_offsets)
         chunk = _chunk_of(start, doc.get("chunk_offsets"))
+        _missing = _span_gap(start, start + len(raw), chunk_gaps(doc.get("chunk_offsets")))
         if page:
             loc = f"第 {page} 页 · 段落 {n}（字符 {start}-{start + len(raw)}）"
         elif chunk:
             loc = f"api_chunk {chunk} · 段落 {n}（字符 {start}-{start + len(raw)}）"
         else:
             loc = f"段落 {n}（字符 {start}-{start + len(raw)}）"
+        loc += _gap_note(_missing)
         rec = {
             "kind": kind, "kind_label": KIND_LABELS[kind], "title": title, "url": url,
             "source_type": stype,
@@ -578,6 +661,8 @@ def _paragraph_records(doc: dict, *, periods=None, company: str = "",
             "chunk": chunk,
             "period_hint": next((y for y in years if y in body), ""),
             "has_location": True, "locator": loc,
+            "crosses_gap": bool(_missing),
+            "missing_chunks": _missing,
             "content_hash": hashlib.sha256(snip.encode("utf-8")).hexdigest()[:16],
             "fetched_at": str(doc.get("fetched_at") or ""),
             "extraction": "paragraph",
@@ -629,6 +714,8 @@ def extract_sections(doc: dict, *, periods=None, company: str = "",
         if len(bucket) >= max_per_kind:
             continue
         hint = next((y for y in years if y in (sec["path"] + snip)), "")
+        _missing = _span_gap(int(sec["start"]), int(sec["end"]),
+                             chunk_gaps(doc.get("chunk_offsets")))
         rec = {
             "kind": kind,
             "kind_label": KIND_LABELS[kind],
@@ -645,7 +732,9 @@ def extract_sections(doc: dict, *, periods=None, company: str = "",
             "chunk": sec.get("chunk"),
             "period_hint": hint,
             "has_location": True,
-            "locator": _locator_text(sec),
+            "locator": _locator_text(sec) + _gap_note(_missing),
+            "crosses_gap": bool(_missing),
+            "missing_chunks": _missing,
             "content_hash": hashlib.sha256(snip.encode("utf-8")).hexdigest()[:16],
             "fetched_at": str(doc.get("fetched_at") or ""),
         }
@@ -783,6 +872,211 @@ def _chunk_offsets_of(docs) -> list:
         if len(norm) > len(best):
             best = norm
     return best
+
+
+def _chunk_gaps_of(docs) -> list:
+    """各文档片段跳号处的缺口清单（与 `_chunk_offsets_of` 同源、同一份文档口径）。"""
+    for d in (docs or []):
+        if not isinstance(d, dict):
+            continue
+        co = d.get("chunk_offsets")
+        if co and len(co) == len(_chunk_offsets_of(docs)):
+            gaps = d.get("chunk_gaps") if isinstance(d.get("chunk_gaps"), list) else None
+            return list(gaps) if gaps is not None else chunk_gaps(co)
+    return []
+
+
+# ── 量价与结构（发行人披露的实物量 + 收入构成）────────────────────
+# 项3：已取得的年报片段里有销售量/生产量/库存量与分产品/分地区/分销售模式构成，
+# 但此前只把原始表格当"业务背景"整段贴出（重复数字、长段原文、读不出结论）。
+# 这里确定性抽成结构化事实 + 带算式的推算，供正文形成"量价与结构"分析。
+_VP_VOLUME_LABELS = ("销售量", "生产量", "库存量")
+_VP_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("分产品", ("白酒", "红酒", "其他")),
+    ("分地区", ("省内", "省外")),
+    ("分销售模式", ("批发经销", "线上直销")),
+)
+_VP_TOL = 0.5          # 同义行去重容差（百分比）
+
+
+def _vp_tokens(line: str) -> list[tuple[str, float]]:
+    """行内数字（含百分号）→ `[(类型, 值)]`；百分号单独标出，便于按位置取同比。"""
+    out: list[tuple[str, float]] = []
+    for m in re.finditer(r"-?\d[\d,]*(?:\.\d+)?\s*%?", str(line or "")):
+        tok = m.group(0).replace(" ", "")
+        try:
+            if tok.endswith("%"):
+                out.append(("%", float(tok[:-1].replace(",", ""))))
+            else:
+                out.append(("n", float(tok.replace(",", ""))))
+        except ValueError:
+            continue
+    return out
+
+
+def _vp_line_for(text: str, label: str, *, group_after: int = -1) -> dict | None:
+    """找**收入构成表**里的那一行：`label 本期值 占比 上期值 占比 同比`。
+
+    年报里有好几张表都带"省内/省外/白酒"字样（成本构成、毛利率分地区、经销商数量），
+    只有"营业收入构成"那张是 `n % n % %` 五列。按**列型**匹配（而不是"含标签就行"）
+    才不会从成本表里抽出成本数（实机反例：省内抽成了 12,748,484,435.48 的营业成本）。
+    """
+    pos = 0
+    for raw in str(text or "").splitlines():
+        line = raw
+        start = text.find(line, pos)
+        pos = start + len(line) if start >= 0 else pos
+        if label not in line:
+            continue
+        if not re.match(rf"^\s*\*{{0,2}}{re.escape(label)}[\s（(]", line):
+            continue
+        tk = _vp_tokens(line)
+        kinds = "".join("n" if k == "n" else "%" for k, _v in tk)
+        if kinds != "n%n%%":                       # 营业收入构成表：五列
+            continue
+        nums = [val for _k, val in tk]
+        return {"label": label, "cur": nums[0], "share_cur": nums[1], "prev": nums[2],
+                "share_prev": nums[3], "yoy": nums[4],
+                "line": " ".join(line.split()), "char_start": start,
+                "char_end": start + len(line)}
+    return None
+
+
+def _vp_line_volume(text: str, label: str) -> dict | None:
+    """实物量表：`产品类别 项目 2024 2023 同比`（项目行为 销售量(吨) 等）。"""
+    pos = 0
+    for raw in str(text or "").splitlines():
+        line = raw
+        start = text.find(line, pos)
+        pos = start + len(line) if start >= 0 else pos
+        if label not in line:
+            continue
+        if not re.search(rf"{re.escape(label)}\s*[（(]", line):
+            continue
+        tk = _vp_tokens(line)
+        nums = [v for _k, v in tk]
+        if len(nums) < 3:
+            continue
+        return {"label": label, "cur": nums[0], "prev": nums[1], "yoy": nums[2],
+                "line": " ".join(line.split()), "char_start": start,
+                "char_end": start + len(line)}
+    return None
+
+
+def extract_volume_price(docs, *, periods=None) -> dict:
+    """从已准入的年报/公告正文抽"量价与结构"事实（确定性、离线、不编数）。
+
+    返回 `{ok, facts, derived, boundary, locator, source_n, url, title, text_sha256}`；
+    没有对应披露时 `ok=False`（调用方据此照实显示"未取得"，不填零）。
+    """
+    years = [int(y) for y in (periods or [])]
+    best: dict | None = None
+    for d in (docs or []):
+        if not isinstance(d, dict) or not str(d.get("text") or "").strip():
+            continue
+        text = str(d.get("text") or "")
+        hits = sum(text.count(k) for k in ("销售量", "分产品", "分地区", "批发经销"))
+        if hits and (best is None or hits > best.get("_hits", 0)):
+            best = {"doc": d, "_hits": hits}
+    if not best:
+        return {"ok": False, "facts": [], "derived": [], "boundary": [],
+                "locator": "", "source_n": "", "url": "", "title": "",
+                "text_sha256": "", "reason": "未取得量价/结构披露（销售量或收入构成）"}
+    doc = best["doc"]
+    text = str(doc.get("text") or "")
+    sections = split_sections(text, page_offsets=doc.get("page_offsets"),
+                              chunk_offsets=doc.get("chunk_offsets"))
+    gaps = chunk_gaps(doc.get("chunk_offsets"))
+
+    def _loc(start: int, end: int) -> str:
+        sec = None
+        for s in sections:
+            if int(s.get("start", 0)) <= start < int(s.get("end", 0)):
+                sec = s
+                break
+        chunk = _chunk_of(start, doc.get("chunk_offsets"))
+        where = f"小节：{sec['path']}" if sec else "正文"
+        note = _gap_note(_span_gap(start, end, gaps))
+        if chunk:
+            return f"api_chunk {chunk} · {where}（字符 {start}-{end}）{note}"
+        return f"{where}（字符 {start}-{end}）{note}"
+
+    facts: list[dict] = []
+    for label in _VP_VOLUME_LABELS:
+        row = _vp_line_volume(text, label)
+        if not row:
+            continue
+        facts.append({"group": "实物量", "label": f"白酒{label}（吨）",
+                      "unit": "吨", "cur": row["cur"], "prev": row["prev"],
+                      "yoy": row["yoy"], "line": row["line"],
+                      "locator": _loc(row["char_start"], row["char_end"]),
+                      "text_sha256": hashlib.sha256(
+                          row["line"].encode("utf-8")).hexdigest()})
+    for group, labels in _VP_GROUPS:
+        for label in labels:
+            row = _vp_line_for(text, label)
+            if not row:
+                continue
+            facts.append({"group": group, "label": f"{label}（元）", "unit": "元",
+                          "cur": row["cur"], "prev": row.get("prev"),
+                          "share_cur": row.get("share_cur"),
+                          "share_prev": row.get("share_prev"), "yoy": row["yoy"],
+                          "line": row["line"],
+                          "locator": _loc(row["char_start"], row["char_end"]),
+                          "text_sha256": hashlib.sha256(
+                              row["line"].encode("utf-8")).hexdigest()})
+    if not facts:
+        return {"ok": False, "facts": [], "derived": [], "boundary": [],
+                "locator": "", "source_n": "", "url": str(doc.get("url") or ""),
+                "title": str(doc.get("title") or ""), "text_sha256": "",
+                "reason": "候选中未找到销售量/收入构成行"}
+    by_label = {f["label"]: f for f in facts}
+    derived: list[dict] = []
+
+    def _f(key):
+        return by_label.get(key) or {}
+
+    vol = _f("白酒销售量（吨）")
+    rev = _f("白酒（元）")
+    if vol.get("cur") and rev.get("cur") and vol.get("prev") and rev.get("prev"):
+        p_cur = rev["cur"] / vol["cur"]
+        p_prev = rev["prev"] / vol["prev"]
+        derived.append({
+            "label": "白酒吨价（推算）", "unit": "元/吨",
+            "cur": round(p_cur), "prev": round(p_prev),
+            "yoy": round((p_cur / p_prev - 1) * 100, 2),
+            "formula": (f"({rev['cur']} / {vol['cur']})，上期 "
+                        f"({rev['prev']} / {vol['prev']})"),
+            "note": "发行人未直接披露吨价，这是用分产品收入与销量推算的口径"})
+    ins, out = _f("省内（元）"), _f("省外（元）")
+    if isinstance(ins.get("yoy"), (int, float)) and isinstance(out.get("yoy"), (int, float)):
+        derived.append({"label": "省外与省内收入降幅差", "unit": "个百分点",
+                        "cur": round(out["yoy"] - ins["yoy"], 2),
+                        "note": f"省外 {out['yoy']:g}% vs 省内 {ins['yoy']:g}%"})
+    wm, ol = _f("批发经销（元）"), _f("线上直销（元）")
+    if isinstance(wm.get("yoy"), (int, float)) and isinstance(ol.get("yoy"), (int, float)):
+        derived.append({"label": "线上直销与批发经销降幅差", "unit": "个百分点",
+                        "cur": round(ol["yoy"] - wm["yoy"], 2),
+                        "note": f"线上直销 {ol['yoy']:g}% vs 批发经销 {wm['yoy']:g}%"})
+    boundary = [
+        "吨价为**推算**（分子为分产品白酒收入、分母为白酒销售量）；发行人未直接披露"
+        "吨价，也未拆分量、价、结构各自的贡献。",
+        "销售量为**实物量（吨）**，收入还含红酒与其他业务：收入降幅与销量降幅的差"
+        "不能全额当作价格效应。",
+        "分产品/分地区/分销售模式为发行人披露的收入构成，`占比`为 2024 年结构；"
+        "两期比较未含价格口径（含税/不含税）说明。",
+        "以上事实来自公告接口片段（api_chunk）；片段跳号处为未取得的原文区间，"
+        "跨缺口摘录按分段拼接标注。",
+    ]
+    sample = facts[0]
+    return {
+        "ok": True, "facts": facts, "derived": derived, "boundary": boundary,
+        "locator": sample.get("locator") or "", "source_n": "",
+        "url": str(doc.get("url") or ""), "title": str(doc.get("title") or ""),
+        "text_sha256": sample.get("text_sha256") or "",
+        "chunk_offsets": doc.get("chunk_offsets") or [],
+        "chunk_gaps": gaps,
+    }
 
 
 def build(task_id: str, *, periods=None, company: str = "", company_id: str = "",
@@ -956,6 +1250,13 @@ def build(task_id: str, *, periods=None, company: str = "", company_id: str = ""
         # **片段**不是 PDF 页；记录里的 char_start/end 是**合并文档偏移**，靠这张表
         # 才能回到"第几段、段内第几字"（引用证据包用得到）。
         "chunk_offsets": _chunk_offsets_of(docs),
+        # 09-23（项4）：片段跳号 = 合并文本里的**缺口**（取到的片段号不连续）。
+        # 缺口两侧的"连续原文"是拼接结果：引用证据与摘录都要标明，报告不得把它
+        # 当成一段连续披露来读。
+        "chunk_gaps": _chunk_gaps_of(docs),
+        # 项3：量价与结构（发行人披露的实物量 + 收入构成）——确定性抽取，供正文
+        # 形成"量价/结构"分析；没有对应披露时 ok=False（不填零、不编）。
+        "volume_price": extract_volume_price(docs, periods=years),
         "built_at": fetched_at,
     }
     _write(task_id, payload, ws_dir=ws_dir)

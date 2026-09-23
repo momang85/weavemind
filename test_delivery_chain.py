@@ -7106,19 +7106,32 @@ class TestRealMdnaPositivePath(unittest.TestCase):
         self.assertTrue(all(m.get("issuer") for m in mgmt), mgmt)
         unproven = {u.get("label"): u for u in (ch.get("unproven") or [])}
         self.assertTrue(unproven, ch)
-        # 真实披露解释的是**收入**：收入有解释（带定位），利润与现金流仍是缺口
-        self.assertTrue(unproven["营业收入"].get("has_explanation"),
-                        unproven["营业收入"])
+        # 项1：这段真实披露只提供**行业/市场背景**（同子句里没有该指标变化的因果
+        # 语言），因此收入**不**标"解释已取得"——判据与逐问支持同源；定位仍须带出。
+        self.assertEqual((unproven["营业收入"].get("matched") or {}).get("match_kind"),
+                         "background", unproven["营业收入"])
+        self.assertFalse(unproven["营业收入"].get("has_explanation"),
+                         unproven["营业收入"])
         self.assertTrue((unproven["营业收入"].get("matched") or {}).get("locator"),
-                        "解释必须带可复核的定位")
+                        "背景片段也要带可复核的定位")
         for label in ("归母净利润", "经营活动现金流净额"):
             self.assertFalse(unproven[label].get("has_explanation"),
-                             f"{label} 不得因收入解释而标'解释已取得'")
+                             f"{label} 不得因收入段的背景而标'解释已取得'")
         texts = [r["text"] for r in st["risks"] if r["kind"] == "unproven_change"]
-        self.assertTrue(any(t.startswith("营业收入") and "解释已取得" in t for t in texts),
-                        texts)
-        self.assertTrue(any(t.startswith("归母净利润") and "尚不能证明" in t for t in texts),
-                        texts)
+        _rev_risk = [t for t in texts if t.startswith("营业收入")][0]
+        self.assertIn("未取得该指标变化的解释", _rev_risk)
+        self.assertIn("行业/市场背景", _rev_risk)
+        self.assertNotIn("解释已取得", _rev_risk)
+        # 逐问支持与风险条目同一条判据：背景不等于"必答已支持"
+        qs = {q.get("metric"): q for q in st["research_questions"]}
+        self.assertFalse(qs["revenue"]["support"].get("has_evidence"))
+        self.assertTrue(qs["revenue"]["support"].get("background_only"))
+        # 变化解释块标注归属：该段未单独解释哪一项指标
+        mgmt_note = [m.get("explains") for m in mgmt]
+        self.assertTrue(all(x == [] for x in mgmt_note), mgmt_note)
+        md = report_brief.render_brief_markdown(st, "")
+        self.assertIn("未取得该指标变化的解释", md)
+        self.assertNotIn("解释已取得", md)
         # 该来源被准入为发行人披露（真实年报原文）
         self.assertTrue(any(c.get("type") == "issuer_annual_report"
                             for c in st["citations"]), st["citations"])
@@ -7221,20 +7234,146 @@ class TestResearchQuestions(unittest.TestCase):
         self.assertIn("银行对公视角", md)
         self.assertIn("不输出授信结论", md)
 
-    def test_real_disclosure_support_lands_on_the_revenue_question(self):
-        """真实年报解释只支持**收入**那一问；利润与现金流仍是"原因待证"。"""
+    def test_background_alone_does_not_support_the_revenue_question(self):
+        """项1：只有行业/市场背景时，收入问题**不计入必答已支持**，风险章节也不得
+        写"解释已取得"。
+
+        实机反例：收入只拿到"行业进入存量竞争、公司调整经营策略"这一段，必答却显示
+        2/3（收入算已支持），而同一份正文的风险章节又写"归母净利润：解释已取得"。
+        背景与读数只能作"已取材料"，判据与风险条目同源。
+        """
+        import delivery_pipeline
         import report_brief
         tid = self._env(with_mdna=True, tid="rq-04")
         st = report_brief.build_structure(tid, self.GOAL, "")
         qs = {q.get("metric"): q for q in st["research_questions"]}
         rev = qs["revenue"]["support"]
-        self.assertTrue(rev.get("has_evidence"), qs["revenue"])
+        self.assertFalse(rev.get("has_evidence"), qs["revenue"])
+        self.assertTrue(rev.get("background_only"), rev)
+        self.assertIn("仅行业/市场背景", rev.get("reading") or "")
         self.assertTrue(rev.get("locator"), rev)
-        self.assertIn("承压", rev.get("text") or "")
+        md = report_brief.render_brief_markdown(st, "")
+        self.assertIn("原因待证", md)
+        self.assertIn("初步背景依据", md)
+        self.assertNotIn("解释已取得", md)
         for metric in ("net_profit", "operating_cashflow"):
             self.assertFalse(qs[metric]["support"].get("has_evidence"),
-                             f"{metric} 不得因收入解释而变成'已支持'：{qs[metric]}")
-            self.assertIn("原因待证", report_brief.render_brief_markdown(st, ""))
+                             f"{metric} 不得因收入段的背景而变成'已支持'：{qs[metric]}")
+        # 必答分子：三问都没有解释类依据 → 0/3（此前把背景算成已支持）
+        ver = delivery_pipeline.research_state(tid, self.GOAL, st)
+        self.assertEqual(ver["mandatory_total"], 3)
+        self.assertEqual(ver["mandatory_supported"], 0, ver["reason"])
+        self.assertIn("必答问题缺可定位依据（3/3）", ver["reason"])
+
+    def test_mark_unsupported_keeps_line_structure(self):
+        """待核查标记只改命中的那句：标题/空行/未命中句逐字节不动。
+
+        反例（本轮实测）：`_mark_unsupported` 用 `_sentences` 切完再拼回，换行被丢掉，
+        "## 结论" 与下一段粘成 "## 结论2024 年…" —— 结论小节从此认不出来，
+        `analysis_completeness` 由"覆盖完整"变成"结论缺"。
+        """
+        import report_brief as rb
+        text = ("## 结论\n第一句没问题。\n\n第二句引用了未采用来源。[7]\n\n"
+                "## 数据时效\n- 甲\n- 乙\n")
+        items = [{"sentence": "第二句引用了未采用来源。[7]", "reason": "来源未准入"}]
+        out = rb._mark_unsupported(text, items)
+        self.assertIn("## 结论\n第一句没问题。\n\n第二句引用了未采用来源。", out)
+        self.assertIn("## 数据时效\n- 甲\n- 乙\n", out)
+        self.assertIn("〔待核查：本句引用的来源未采用", out)
+        # 未命中 → 逐字节不变
+        self.assertEqual(rb._mark_unsupported(text, []), text)
+        # 重复标记不叠加
+        self.assertEqual(rb._mark_unsupported(out, items), out)
+
+    def test_risk_section_wording_follows_match_kind(self):
+        """项1：风险条目的三态措辞只由 `match_kind` 决定（背景/读数/解释）。"""
+        import report_brief
+        for kind, want, extra in (("background", "未取得该指标变化的解释", "行业/市场背景"),
+                                  ("reading", "只含该指标读数", ""),
+                                  ("explanation", "解释已取得", "量价与贡献程度未核实")):
+            changes = {"unproven": [{
+                "metric": "net_profit", "label": "归母净利润", "yoy": -33.38,
+                "period": 2024, "materials": ["毛利率构成"],
+                "has_explanation": kind == "explanation",
+                "matched": {"source_n": "2", "locator": "api_chunk 3（字符 9607-10820）",
+                            "text": "……", "issuer": True, "match_kind": kind}}]}
+            risks = report_brief._risks("t-risk", "研究洋河股份 2023 与 2024 年度指标",
+                                        "", changes=changes)
+            texts = [r["text"] for r in risks if r.get("kind") == "unproven_change"]
+            self.assertTrue(texts, f"{kind} 没有生成风险条目")
+            self.assertIn(want, texts[0], f"{kind} 的措辞不对：{texts[0]}")
+            if extra:
+                self.assertIn(extra, texts[0], f"{kind} 缺少 {extra}")
+            if kind != "explanation":
+                self.assertNotIn("解释已取得", texts[0], f"{kind} 不得写'解释已取得'")
+
+    VP_TEXT = (
+        "第三节 管理层讨论与分析\n\n"
+        "二、报告期内公司从事的主要业务\n\n"
+        "1、主要产品的生产量、销售量、库存量\n\n"
+        "    产品类别            项目              2024 年              2023 年              同比增减\n\n"
+        "                      销售量(吨)          139,076.05            166,154.73              -16.30%\n\n"
+        "      白酒          生产量(吨)          145,494.73            158,834.29              -8.40%\n\n"
+        "                      库存量(吨)            45,594.72            39,176.04              16.38%\n\n"
+        "四、主营业务分析\n\n（1） 营业收入构成\n\n 分产品\n\n"
+        " 白酒              28,175,707,878.18        97.57%  32,389,581,931.71        97.78%          -13.01%\n\n"
+        " 分地区\n\n"
+        " 省内              13,031,872,833.19        45.13%  14,675,188,393.55        44.30%          -11.20%\n\n"
+        " 省外              15,844,424,160.37        54.87%  18,451,089,157.96        55.70%          -14.13%\n\n"
+        " 分销售模式\n\n"
+        " 批发经销          27,854,167,407.45        96.46%  32,052,628,760.26        96.76%          -13.10%\n\n"
+        " 线上直销            394,128,422.17          1.37%      436,807,935.79          1.24%           -9.77%\n")
+
+    def test_volume_price_supports_revenue_question_and_is_rendered(self):
+        """项3：已取得销量/渠道/地区数据 → 收入问题按量价/结构支持，正文形成分析。
+
+        同时保证：① 风险条目对收入说"已取得量价/结构数据、贡献度未拆分"（既不写
+        "解释已取得"也不写"没有材料"）；② 收入构成原始表不再当业务背景整段贴出
+        （重复数字与长段原文都减少）；③ 必答分子按结构依据算，仍是 1/3。
+        """
+        import delivery_pipeline
+        import report_brief
+        tid = self._env(with_mdna=True, tid="rq-vp")
+        proj = ws_mod.task_project_dir(tid, "default")
+        docs = json.loads((proj / "fetch_snapshot.json").read_text(encoding="utf-8"))
+        docs.append({
+            "title": "洋河股份:2024年年度报告",
+            "url": "https://np-cnotice-stock.eastmoney.com/api/content/ann"
+                   "?art_code=AN202504281664011244&page_index=4",
+            "published_at": "2025-04-28", "text": self.VP_TEXT,
+            "chunk_offsets": [[0, 4]]})
+        (proj / "fetch_snapshot.json").write_text(
+            json.dumps(docs, ensure_ascii=False), encoding="utf-8")
+        st = report_brief.build_structure(tid, self.GOAL, "")
+        vp = st.get("volume_price") or {}
+        self.assertTrue(vp.get("ok"), vp)
+        qs = {q.get("metric"): q for q in st["research_questions"]}
+        rev = qs["revenue"]["support"]
+        self.assertTrue(rev.get("has_evidence"), rev)
+        self.assertTrue(rev.get("structure"), rev)
+        self.assertEqual(rev.get("kind"), "structure")
+        self.assertIn("api_chunk", str(rev.get("locator") or ""))
+        self.assertIn("销售量", str(rev.get("text") or ""))
+        self.assertIn("贡献度", qs["revenue"]["boundary"])
+        # 风险条目：量价/结构已取得（不写"解释已取得"，也不写"尚不能证明"）
+        texts = [r["text"] for r in st["risks"] if r["kind"] == "unproven_change"]
+        _rev_risk = [t for t in texts if t.startswith("营业收入")][0]
+        self.assertIn("已取得量价/结构数据", _rev_risk)
+        self.assertNotIn("解释已取得", _rev_risk)
+        # 必答：收入按结构支持、利润/现金仍缺；总额仍是 1/3
+        ver = delivery_pipeline.research_state(tid, self.GOAL, st)
+        self.assertEqual(ver["mandatory_total"], 3)
+        self.assertEqual(ver["mandatory_supported"], 1, ver["reason"])
+        md = report_brief.render_brief_markdown(st, "")
+        self.assertIn("## 量价与结构（发行人披露）", md)
+        self.assertIn("139,076.05", md)
+        self.assertIn("28,175,707,878.18", md)
+        self.assertIn("白酒吨价（推算）", md)
+        self.assertIn("推算", md)
+        self.assertNotIn("单位：元 划分类型", md, "原始构成表不得再当业务背景整段贴出")
+        # 长段原文被压到一句（节选标注）
+        for b in (st.get("background") or []):
+            self.assertLessEqual(len(str(b.get("text") or "")), 220, b)
 
 
 class TestChangeExplanationGuards(unittest.TestCase):
@@ -8653,6 +8792,100 @@ class TestSameVersionDeliveryChain(unittest.TestCase):
             self.assertTrue(all(v == "ok" for v in (r.get("verify") or {}).values()),
                             r.get("verify"))
         self.assertEqual(len(list(ws.glob(".*.tmp"))), 0, "不得留下临时包文件")
+
+    def test_snapshot_freezes_charts_working_paper_and_evidence_bytes(self):
+        """项2：快照后磁盘上的图表/底稿/引用证据被改写 → 包内仍是**快照字节**。
+
+        复核反例：版本检查通过（采纳身份没变）**不代表整包同版**——图表、底稿、引用
+        证据此前在打包时按名字重读磁盘，导出期间被重渲染/重跑就会进包，清单还给
+        这些"新字节"记上 hash，读者拿到的是两版内容的混合物。冻结后：包内 = 快照，
+        磁盘变化只在 `drift` 里如实报告。
+        """
+        import hashlib
+        import zipfile
+        import delivery_pipeline as dp
+        self._seed(with_manifest=True)
+        ws = ws_mod.task_workspace(self.tid)
+        proj = ws / "project"
+        charts = ws / "charts"
+        (proj / "working_paper.json").write_text('{"facts": ["A"]}', encoding="utf-8")
+        material_a = {
+            "records": [{"kind": "change_explanation",
+                         "title": "洋河股份:2024年年度报告",
+                         "url": "https://np-cnotice-stock.eastmoney.com/api/content/ann?art_code=AN1",
+                         "locator": "api_chunk 3（字符 10-40）", "chunk": 3,
+                         "has_location": True, "admission": "admitted",
+                         "snippet": "收入下降系销量下降所致。",
+                         "char_start": 10, "char_end": 40, "content_hash": "ab12"}],
+            "chunk_offsets": [[0, 3]], "located": 1,
+        }
+        (ws / "narrative_evidence.json").write_text(
+            json.dumps(material_a, ensure_ascii=False), encoding="utf-8")
+        md = "# 交付正文（A）\n".encode("utf-8")
+        snap = dp.export_snapshot(self.tid, ws_dir=ws, delivered_text="# 交付正文（A）\n",
+                                  md_bytes=md, pdf_bytes=b"%PDF-A")
+        self.assertEqual(snap["frozen"]["charts/chart_1.png"],
+                         hashlib.sha256((charts / "chart_1.png").read_bytes()).hexdigest())
+        # 快照之后：磁盘上的图表/底稿/资料全部被改写（重渲染 / 重跑 / 重写）
+        (charts / "chart_1.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"NEW-CHART")
+        (proj / "working_paper.json").write_text('{"facts": ["B"]}', encoding="utf-8")
+        material_b = dict(material_a)
+        material_b["records"] = [dict(material_a["records"][0],
+                                      snippet="另一版资料（快照后被重跑）。",
+                                      locator="api_chunk 11（字符 9-20）")]
+        (ws / "narrative_evidence.json").write_text(
+            json.dumps(material_b, ensure_ascii=False), encoding="utf-8")
+        res = dp.repack_adopted(self.tid, ws_dir=ws, snapshot=snap)
+        self.assertTrue(all(v == "ok" for v in (res.get("verify") or {}).values()),
+                        res.get("verify"))
+        m = res.get("manifest") or {}
+        self.assertEqual(m.get("files", {}).get("charts/chart_1.png"),
+                         snap["frozen"]["charts/chart_1.png"],
+                         "包内图表必须是快照字节")
+        self.assertEqual(m.get("charts", {}).get("charts/chart_1.png"),
+                         snap["frozen"]["charts/chart_1.png"])
+        with zipfile.ZipFile(ws / res["package"]) as zf:
+            self.assertEqual(zf.read("charts/chart_1.png"), snap["payload"]["charts/chart_1.png"])
+            self.assertIn('"A"', zf.read("working_paper.json").decode("utf-8"),
+                          "底稿必须是快照字节")
+            ev = json.loads(zf.read("evidence/citation_evidence.json").decode("utf-8"))
+            self.assertEqual(ev["records"][0]["text"], "收入下降系销量下降所致。",
+                             "引用证据必须来自快照时刻的资料，不是重跑后的")
+            self.assertEqual(ev["records"][0]["text_sha256"],
+                             hashlib.sha256("收入下降系销量下降所致。".encode("utf-8")).hexdigest())
+        # 磁盘变化如实报告（只报告，不改包内内容）
+        drift = (m.get("drift") or {})
+        self.assertEqual(drift.get("charts/chart_1.png"), "changed_on_disk")
+        self.assertEqual(drift.get("working_paper.json"), "changed_on_disk")
+        # 引用证据由快照从资料生成、只在包内（工作区没有同名文件）= 磁盘缺失，
+        # 同样如实报告；关键断言是**包内那份来自快照时刻的资料**
+        self.assertEqual(drift.get("evidence/citation_evidence.json"), "missing_on_disk")
+
+    def test_snapshot_keeps_version_identity_and_rejects_interleaving(self):
+        """项2：包内清单的身份/指纹全部取自快照；快照后换版 → 拒绝发布。"""
+        import delivery_pipeline as dp
+        self._seed(with_manifest=True)
+        ws = ws_mod.task_workspace(self.tid)
+        md = "# 快照正文\n".encode("utf-8")
+        snap = dp.export_snapshot(self.tid, ws_dir=ws, delivered_text="# 快照正文\n",
+                                  md_bytes=md)
+        res = dp.repack_adopted(self.tid, ws_dir=ws, snapshot=snap)
+        m = res.get("manifest") or {}
+        self.assertEqual(m.get("report_version_id"), snap["report_version_id"])
+        self.assertEqual(m.get("research_body_sha256"), snap["body_sha256"])
+        self.assertEqual(m.get("rules_fingerprint"), snap["rules_fingerprint"])
+        self.assertEqual(m.get("frozen", {}).get("reports/report.md"),
+                         snap["frozen"]["reports/report.md"])
+        self.assertGreater(m.get("snapshot_captured_at") or 0, 0)
+        self.assertNotIn("reports/report.md", m.get("drift") or {},
+                         "正文由导出本身写出，不算磁盘漂移")
+        # 快照后修订换版 → 同一快照不得再发布
+        from report_version import VersionStore
+        store = VersionStore(ws, self.tid)
+        v_b = store.record("# 另一版\n\nB。\n")
+        store.adopt(v_b, reason="并发修订（测试）")
+        with self.assertRaises(RuntimeError):
+            dp.repack_adopted(self.tid, ws_dir=ws, snapshot=snap)
 
     def test_rules_fingerprint_change_invalidates_state(self):
         """09-23 E：rules_version 不变、rules_fingerprint 变了 → 必须待重验。"""
