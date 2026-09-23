@@ -24,6 +24,7 @@
 校验通过才原子上线（失败不产生新包、旧包保持），绑定新增 `logic_fingerprint`（判定逻辑
 源码指纹）参与失效判定，长列表与代码块改为逐行换页（离线探针的 1010 字符越界已修）。
 证据：`docs/evidence/r2_export_snapshot_integrity_20260923.md`。
+R2 退出（实机正常页面）：修订采纳 `aac5d6415bff`（父 `6f2c004d1b52`，验收 pass）→ 重新导出 `deliverables_20260923_230558_3d22ce.zip`（17 成员逐哈希一致、`binding_verified=True`、跨缺口记录标 after_gap、包内 PDF 12 页 0 越界、MD 与任务库送达正文逐字节相同）。
 
 **上一轮（保留）**：阶段 D · **09-23 实机复核四项**。
 项1：风险章节与逐问支持**同一条判据**（`match_kind`）——只有 explanation 才写"解释已取得"，
