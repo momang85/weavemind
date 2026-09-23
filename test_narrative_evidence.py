@@ -641,22 +641,34 @@ class TestChunkGapContinuity(unittest.TestCase):
         self.assertEqual(gaps, [])
         self.assertEqual([g for g in ne.chunk_gaps(offsets)], [])
 
-    def test_record_crossing_gap_is_flagged_not_continuous(self):
-        """一个小节从片段 5 里开始、到片段 10 里结束 → 必须标 crosses_gap。"""
+    def test_record_crossing_gap_is_split_not_continuous(self):
+        """R1：缺口是硬边界——跨缺口的小节必须**断开**，不继承缺口前的标题。
+
+        旧行为是"拼成一条证据再标 crosses_gap"；复查要求"跨缺口不能合成单条证据"，
+        因此这里断言：不存在跨缺口记录；缺口后的续段自带"（续：缺片段 6–9）"。
+        """
         long_body = ("本公司主营业务收入同比下降，主要系销量下降及产品结构调整所致。"
                      "分产品看，白酒收入下降，红酒收入下降；分地区看，省外降幅更大。") * 2
         text, offsets, gaps = ne.merge_chunks([(5, "四、主营业务分析\n\n" + long_body),
-                                               (10, "报告期内公司治理结构完善，股东大会"
-                                                    "运作规范，内部控制持续健全。")])
-        doc = {"title": "洋河股份:2024年年度报告", "url": ISSUER_URL, "text": text,
+                                               (10, "报告期内公司主营业务与经营模式未发生变化，"
+                                                    "公司治理结构完善，股东大会运作规范。")])
+        doc = {"title": "贵州茅台:2024年年度报告", "url": ISSUER_URL, "text": text,
                "chunk_offsets": offsets, "chunk_gaps": gaps}
         recs = ne.extract_sections(doc, periods=[2024], company="贵州茅台",
                                    company_id="600519.SH", as_of="2025-04-30")
-        cross = [r for r in recs if r.get("crosses_gap")]
-        self.assertTrue(cross, [r.get("locator") for r in recs])
-        self.assertEqual(cross[0].get("missing_chunks"), [6, 7, 8, 9])
-        self.assertIn("跨缺失片段", str(cross[0].get("locator")))
-        self.assertIn("非连续原文", str(cross[0].get("locator")))
+        self.assertTrue(recs)
+        self.assertFalse([r for r in recs if r.get("crosses_gap")],
+                         "缺口处已断开，不应再有跨缺口的合成证据")
+        cont = [r for r in recs if r.get("after_gap")]
+        self.assertTrue(cont, [r.get("locator") for r in recs])
+        self.assertEqual(cont[0].get("missing_chunks"), [6, 7, 8, 9])
+        self.assertIn("续：缺片段 6–9", str(cont[0].get("section")))
+        self.assertIn("上接缺口", str(cont[0].get("locator")))
+        # 缺口前的段落**不**再吞掉缺口后的内容（字符区间止于缺口）
+        _pre = [r for r in recs if not r.get("after_gap")][0]
+        self.assertLessEqual(int(_pre["char_end"]), int(offsets[1][0]))
+        # 分段信息随记录带出（逐段可回溯）
+        self.assertTrue(cont[0].get("segments"), cont[0])
 
     def test_payload_and_citation_evidence_expose_gaps(self):
         """叙事证据载荷与包内引用证据都要带上缺口清单与逐条 crosses_gap。"""

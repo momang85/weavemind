@@ -6551,10 +6551,13 @@ class TestUnsupportedClaimLinkage(unittest.TestCase):
             self.assertFalse(unproven[label].get("has_explanation"),
                              f"{label} 不得因收入解释而标'解释已取得'：{unproven[label]}")
         texts = [r["text"] for r in st["risks"] if r["kind"] == "unproven_change"]
-        self.assertTrue(any("解释已取得" in t for t in texts), texts)
+        # R1 措辞：管理层归因写成"发行人说法，非独立证实"（不再用旧"解释已取得"）
+        self.assertTrue(any("管理层明确归因" in t and "发行人说法" in t for t in texts),
+                        texts)
         self.assertTrue(any("尚不能证明" in t for t in texts), texts)
-        self.assertNotIn("解释已取得", "\n".join(
-            t for t in texts if t.startswith("归母净利润")), texts)
+        self.assertNotIn("解释已取得", "\n".join(texts), texts)
+        _rev = [t for t in texts if t.startswith("营业收入")][0]
+        self.assertIn("定量分解覆盖", _rev)
 
 
 
@@ -7259,11 +7262,17 @@ class TestResearchQuestions(unittest.TestCase):
         for metric in ("net_profit", "operating_cashflow"):
             self.assertFalse(qs[metric]["support"].get("has_evidence"),
                              f"{metric} 不得因收入段的背景而变成'已支持'：{qs[metric]}")
-        # 必答分子：三问都没有解释类依据 → 0/3（此前把背景算成已支持）
+        # R1：必答分子 = **回答完成（分解覆盖充分）**；三问都只有背景/读数 → 0/3。
         ver = delivery_pipeline.research_state(tid, self.GOAL, st)
         self.assertEqual(ver["mandatory_total"], 3)
         self.assertEqual(ver["mandatory_supported"], 0, ver["reason"])
-        self.assertIn("必答问题缺可定位依据（3/3）", ver["reason"])
+        self.assertEqual(ver.get("mandatory_partial", 0), 0, ver["reason"])
+        self.assertIn("必答问题未完成（3/3）", ver["reason"])
+        # 逐问题评估对象进结构且与展示同源
+        a = (st.get("question_assessments") or {}).get("revenue") or {}
+        self.assertEqual(a.get("kind"), "background")
+        self.assertFalse(a.get("answered"))
+        self.assertEqual(a.get("coverage"), "none")
 
     def test_mark_unsupported_keeps_line_structure(self):
         """待核查标记只改命中的那句：标题/空行/未命中句逐字节不动。
@@ -7285,18 +7294,42 @@ class TestResearchQuestions(unittest.TestCase):
         # 重复标记不叠加
         self.assertEqual(rb._mark_unsupported(out, items), out)
 
-    def test_risk_section_wording_follows_match_kind(self):
-        """项1：风险条目的三态措辞只由 `match_kind` 决定（背景/读数/解释）。"""
+    def test_risk_section_wording_follows_assessment_kind(self):
+        """R1：风险条目的措辞只由**逐问题评估**的 `assessment_kind` 决定（一处判定多处读取）。
+
+        六种材料各写各的话：管理层归因（注明发行人说法）、分解覆盖、背景、明确否认/
+        未披露、不确定/未来（待复核）、仅读数；未取得则写"尚不能证明"。
+        """
         import report_brief
-        for kind, want, extra in (("background", "未取得该指标变化的解释", "行业/市场背景"),
-                                  ("reading", "只含该指标读数", ""),
-                                  ("explanation", "解释已取得", "量价与贡献程度未核实")):
+        cases = (
+            ("management_cause", "管理层明确归因", "发行人说法"),
+            ("decomposition", "已取得量价/结构数据", "分解覆盖"),
+            ("background", "未取得该指标变化的解释", "行业/市场背景"),
+            ("negation", "明确否认", ""),
+            ("not_disclosed", "未披露", ""),
+            ("tentative", "待复核", ""),
+            ("hypothesis", "待复核", ""),
+            ("observation", "只含该指标读数", ""),
+            # 旧结构兼容：有 legacy match_kind=reading → 折算成"仅读数"文案
+            ("legacy-reading", "只含该指标读数", ""),
+            # 完全没有材料 → "尚不能证明"
+            ("", "尚不能证明", ""))
+        for kind, want, extra in cases:
+            if kind in ("", "legacy-reading"):
+                matched = ({"match_kind": "reading", "locator": "api_chunk 3"} if kind
+                           else {})
+            else:
+                matched = {"source_n": "2", "locator": "api_chunk 3（字符 9607-10820）",
+                           "text": "……", "issuer": True, "match_kind": "reading"}
             changes = {"unproven": [{
                 "metric": "net_profit", "label": "归母净利润", "yoy": -33.38,
-                "period": 2024, "materials": ["毛利率构成"],
-                "has_explanation": kind == "explanation",
-                "matched": {"source_n": "2", "locator": "api_chunk 3（字符 9607-10820）",
-                            "text": "……", "issuer": True, "match_kind": kind}}]}
+                "period": 2024, "materials": ["毛利率构成"], "coverage": "partial",
+                "assessment_kind": "" if kind in ("", "legacy-reading") else kind,
+                "assessment_label": {"negation": "明确否认某原因",
+                                     "not_disclosed": "明确未披露原因",
+                                     "tentative": "不确定表述",
+                                     "hypothesis": "未来/假设表述"}.get(kind, ""),
+                "matched": matched}]}
             risks = report_brief._risks("t-risk", "研究洋河股份 2023 与 2024 年度指标",
                                         "", changes=changes)
             texts = [r["text"] for r in risks if r.get("kind") == "unproven_change"]
@@ -7304,7 +7337,7 @@ class TestResearchQuestions(unittest.TestCase):
             self.assertIn(want, texts[0], f"{kind} 的措辞不对：{texts[0]}")
             if extra:
                 self.assertIn(extra, texts[0], f"{kind} 缺少 {extra}")
-            if kind != "explanation":
+            if kind != "management_cause":
                 self.assertNotIn("解释已取得", texts[0], f"{kind} 不得写'解释已取得'")
 
     VP_TEXT = (
@@ -7325,11 +7358,12 @@ class TestResearchQuestions(unittest.TestCase):
         " 线上直销            394,128,422.17          1.37%      436,807,935.79          1.24%           -9.77%\n")
 
     def test_volume_price_supports_revenue_question_and_is_rendered(self):
-        """项3：已取得销量/渠道/地区数据 → 收入问题按量价/结构支持，正文形成分析。
+        """项3/R1：已取得销量/渠道/地区数据 → 收入问题按**分解覆盖**记（部分）。
 
-        同时保证：① 风险条目对收入说"已取得量价/结构数据、贡献度未拆分"（既不写
-        "解释已取得"也不写"没有材料"）；② 收入构成原始表不再当业务背景整段贴出
-        （重复数字与长段原文都减少）；③ 必答分子按结构依据算，仍是 1/3。
+        同时保证：① 风险条目对收入说"已取得量价/结构数据、分解覆盖部分"（既不写
+        "解释已取得"也不写"没有材料"）；② 收入构成原始表不再当业务背景整段贴出；
+        ③ 覆盖三档：量价材料只闭合一部分（价未披露、渠道/地区表与总营收范围未闭合），
+        因此**不**提升为"回答完成"（R1：不用"有材料"冒充完成）。
         """
         import delivery_pipeline
         import report_brief
@@ -7349,27 +7383,32 @@ class TestResearchQuestions(unittest.TestCase):
         self.assertTrue(vp.get("ok"), vp)
         qs = {q.get("metric"): q for q in st["research_questions"]}
         rev = qs["revenue"]["support"]
-        self.assertTrue(rev.get("has_evidence"), rev)
-        self.assertTrue(rev.get("structure"), rev)
-        self.assertEqual(rev.get("kind"), "structure")
+        self.assertEqual(rev.get("kind"), "decomposition", rev)
+        self.assertEqual(rev.get("coverage"), "partial", rev)
+        self.assertFalse(rev.get("answered"), rev)
         self.assertIn("api_chunk", str(rev.get("locator") or ""))
-        self.assertIn("销售量", str(rev.get("text") or ""))
-        self.assertIn("贡献度", qs["revenue"]["boundary"])
+        self.assertIn("量", str(rev.get("material_note") or ""))
+        a = (st.get("question_assessments") or {}).get("revenue") or {}
+        self.assertTrue(a.get("has_decomposition"))
+        self.assertEqual(a.get("kind"), "decomposition")
         # 风险条目：量价/结构已取得（不写"解释已取得"，也不写"尚不能证明"）
         texts = [r["text"] for r in st["risks"] if r["kind"] == "unproven_change"]
         _rev_risk = [t for t in texts if t.startswith("营业收入")][0]
         self.assertIn("已取得量价/结构数据", _rev_risk)
+        self.assertIn("部分", _rev_risk)
         self.assertNotIn("解释已取得", _rev_risk)
-        # 必答：收入按结构支持、利润/现金仍缺；总额仍是 1/3
+        # 必答：部分覆盖计入 partial，不算完成（旧口径会写成 1/3 已支持）
         ver = delivery_pipeline.research_state(tid, self.GOAL, st)
         self.assertEqual(ver["mandatory_total"], 3)
-        self.assertEqual(ver["mandatory_supported"], 1, ver["reason"])
+        self.assertEqual(ver["mandatory_supported"], 0, ver["reason"])
+        self.assertEqual(ver.get("mandatory_partial"), 1, ver["reason"])
+        self.assertIn("部分覆盖 1 项", ver["reason"])
         md = report_brief.render_brief_markdown(st, "")
         self.assertIn("## 量价与结构（发行人披露）", md)
         self.assertIn("139,076.05", md)
         self.assertIn("28,175,707,878.18", md)
         self.assertIn("白酒吨价（推算）", md)
-        self.assertIn("推算", md)
+        self.assertIn("分解覆盖（部分）", md)
         self.assertNotIn("单位：元 划分类型", md, "原始构成表不得再当业务背景整段贴出")
         # 长段原文被压到一句（节选标注）
         for b in (st.get("background") or []):
@@ -7679,10 +7718,11 @@ class TestResearchStateAndDeterministicCritic(unittest.TestCase):
         self.assertIn("不因此改变", dp.research_state_note(out))
 
     def test_research_ready_keeps_numeric_acceptance_separate(self):
-        """必答三问逐项有依据 + 无未证实肯定结论 → 就绪；缺一项即草稿。
+        """必答三问**分解覆盖充分** + 无未证实肯定结论 → 就绪；缺一项即草稿。
 
-        09-22 复核 C-3/C-4：就绪按**契约必答问题**逐项裁决（默认收入/利润/现金），
-        一条背景证据不能替三问凑分；银行材料清单只作可选问题独列。
+        09-22 复核 C-3/C-4 的契约分母不变；R1 收紧分子：只有 `question_assessments`
+        里 coverage=full（分解覆盖充分）才算完成——旧结构只有 has_evidence 的按
+        "部分覆盖"折算（有材料 ≠ 回答完成）。
         """
         import delivery_pipeline as dp
 
@@ -7691,21 +7731,36 @@ class TestResearchStateAndDeterministicCritic(unittest.TestCase):
                     "support": {"has_evidence": ok,
                                 "locator": "第 3 页" if ok else ""}}
 
+        _full = {m: {"kind": "decomposition", "coverage": "full", "answered": True,
+                     "kind_label": "分解覆盖充分"}
+                 for m in ("revenue", "net_profit", "operating_cashflow")}
         base = {"scope": {"periods": [2023, 2024]},
                 "evidence": {"located": 3, "missing_labels": []},
                 "research_questions": [_q("revenue"), _q("net_profit"),
                                        _q("operating_cashflow")],
+                "question_assessments": _full,
                 "claims": []}
         ready = dp.research_state("t-rs-2", "g", base)
         self.assertEqual(ready["state"], dp.RESEARCH_READY)
         self.assertEqual(ready["mandatory_total"], 3)
         self.assertEqual(ready["mandatory_supported"], 3)
-        # 三问只支持两问 → 草稿（不用 2/3 宣称研究完成）
-        two = dict(base, research_questions=[_q("revenue"), _q("net_profit"),
-                                             _q("operating_cashflow", ok=False)])
+        # 旧结构（无逐问题评估）：有材料只算部分覆盖 → 草稿
+        legacy = dict(base)
+        legacy.pop("question_assessments")
+        lg = dp.research_state("t-rs-2-legacy", "g", legacy)
+        self.assertEqual(lg["state"], dp.RESEARCH_DRAFT)
+        self.assertEqual(lg["mandatory_supported"], 0)
+        self.assertEqual(lg.get("mandatory_partial"), 3)
+        # 三问只两问分解覆盖 → 草稿（不用 2/3 宣称研究完成）
+        _two = dict(_full)
+        _two["operating_cashflow"] = {"kind": "observation", "coverage": "none",
+                                      "answered": False, "kind_label": "观察可验证（仅读数）"}
+        two = dict(base, question_assessments=_two,
+                   research_questions=[_q("revenue"), _q("net_profit"),
+                                       _q("operating_cashflow", ok=False)])
         out2 = dp.research_state("t-rs-2b", "g", two)
         self.assertEqual(out2["state"], dp.RESEARCH_DRAFT)
-        self.assertIn("1/3", out2["reason"])   # 只有 1 项缺依据，如实写 1/3
+        self.assertIn("1/3", out2["reason"])   # 只有 1 项未完成，如实写 1/3
         # 未证实肯定结论 → 草稿
         bad = dict(base, claims=[{"support_status": "unsupported",
                                   "claim_type": "observation"}])
@@ -9150,7 +9205,9 @@ class TestNightClosureCounterexamples(unittest.TestCase):
         out = dp.research_state("night-1", "g", st)
         self.assertEqual(out["state"], dp.RESEARCH_DRAFT)
         self.assertEqual(out["mandatory_total"], 3, "分母来自契约")
-        self.assertEqual(out["mandatory_supported"], 1)
+        # R1：旧结构只有 has_evidence（无逐问题评估）→ 按"部分覆盖"折算，不算完成
+        self.assertEqual(out["mandatory_supported"], 0)
+        self.assertEqual(out.get("mandatory_partial"), 1)
         self.assertTrue(any(q.get("missing_entry") for q in out["mandatory_questions"]))
         self.assertIn("结构里没有这些必答问题的条目", out["reason"])
 

@@ -254,13 +254,31 @@ def research_state(task_id: str, goal: str, structure: dict | None, *,
     optional = [q for q in questions
                 if str(q.get("metric") or "") not in mandatory_metrics]
 
-    def _supported(q: dict) -> bool:
-        if q.get("missing_entry"):
-            return False                 # 结构里根本没有这条必答问题 → 未支持
-        sup = q.get("support") or {}
-        return bool(sup.get("has_evidence")) and bool(str(sup.get("locator") or "").strip())
+    # R1：研究状态读**逐问题评估**（与问题区/风险区同源）。`coverage` 三档：
+    # full（分解覆盖充分，才算"回答完成"）/ partial（有材料但未闭合）/ none。
+    # 旧结构（无 question_assessments）按旧口径折算成 partial，不假装"完成"。
+    assessments = {str(k): v for k, v in (st.get("question_assessments") or {}).items()
+                   if isinstance(v, dict)}
 
-    unsupported_mandatory = [q for q in mandatory if not _supported(q)]
+    def _coverage(q: dict) -> str:
+        if q.get("missing_entry"):
+            return "none"                # 结构里根本没有这条必答问题 → 未覆盖
+        a = assessments.get(str(q.get("metric") or "")) or {}
+        if a:
+            if a.get("answered"):
+                return "full"
+            return str(a.get("coverage") or "none")
+        sup = q.get("support") or {}
+        if sup.get("has_evidence") and str(sup.get("locator") or "").strip():
+            return "partial"
+        return "none"
+
+    def _kind_label(q: dict) -> str:
+        a = assessments.get(str(q.get("metric") or "")) or {}
+        return str(a.get("kind_label") or (q.get("support") or {}).get("kind_label") or "")
+
+    unsupported_mandatory = [q for q in mandatory if _coverage(q) != "full"]
+    partial_mandatory = [q for q in mandatory if _coverage(q) == "partial"]
     unproven = [c for c in claims
                 if str(c.get("claim_type") or "") not in _NON_ASSERTIVE_CLAIM_TYPES
                 and str(c.get("support_status") or "") in _UNPROVEN_STATUSES]
@@ -268,15 +286,23 @@ def research_state(task_id: str, goal: str, structure: dict | None, *,
 
     common = {
         "located": located, "missing_labels": missing,
+        # `mandatory_supported` = **回答完成**（分解覆盖充分）；部分覆盖单列，
+        # 不用"有材料"冒充完成（R1 退出条件：不沿用旧 1/3 宣传）。
         "mandatory_supported": len(mandatory) - len(unsupported_mandatory),
+        "mandatory_partial": len(partial_mandatory),
         "mandatory_total": len(mandatory),
         "mandatory_questions": [{"metric": q.get("metric"), "question": q.get("question"),
-                                 "supported": _supported(q),
+                                 "supported": _coverage(q) == "full",
+                                 "coverage": _coverage(q),
+                                 "material_kind": _kind_label(q),
                                  "missing_entry": bool(q.get("missing_entry")),
-                                 "locator": str((q.get("support") or {}).get("locator") or "")}
+                                 "locator": str((q.get("support") or {}).get("locator")
+                                                or (assessments.get(str(q.get("metric") or ""))
+                                                    or {}).get("locator") or "")}
                                 for q in mandatory],
         "optional_questions": [{"metric": q.get("metric"), "question": q.get("question"),
-                                "supported": _supported(q)} for q in optional],
+                                "supported": _coverage(q) == "full",
+                                "coverage": _coverage(q)} for q in optional],
         "unproven_assertions": len(unproven),
         "unsupported_claims": len(unproven),
         "requires_narrative": requires_narrative,
@@ -293,8 +319,11 @@ def research_state(task_id: str, goal: str, structure: dict | None, *,
     if unsupported_mandatory:
         labels = "、".join(str(q.get("question") or q.get("metric"))
                           for q in unsupported_mandatory)
-        reasons.append(f"必答问题缺可定位依据（{len(unsupported_mandatory)}/"
-                       f"{len(mandatory)}）：{labels}")
+        _p = (f"（其中部分覆盖 {len(partial_mandatory)} 项："
+              + "、".join(f"{q.get('question')}[{_kind_label(q) or '材料'}]"
+                          for q in partial_mandatory) + "）") if partial_mandatory else ""
+        reasons.append(f"必答问题未完成（{len(unsupported_mandatory)}/"
+                       f"{len(mandatory)}）：{labels}{_p}")
     if any(q.get("missing_entry") for q in mandatory):
         miss = "、".join(str(q.get("question") or q.get("metric"))
                         for q in mandatory if q.get("missing_entry"))
@@ -309,7 +338,7 @@ def research_state(task_id: str, goal: str, structure: dict | None, *,
     return {"state": RESEARCH_READY,
             "label": _RESEARCH_STATE_LABELS[RESEARCH_READY],
             "reason": (f"带定位披露 {located} 条；必答问题 "
-                       f"{len(mandatory)}/{len(mandatory)} 逐项有可定位依据；"
+                       f"{len(mandatory)}/{len(mandatory)} 完成（分解覆盖充分）；"
                        f"无未证实肯定结论"), **common}
 
 
@@ -797,23 +826,30 @@ def citation_evidence_payload(task_id: str, *, material: dict | None = None) -> 
             "task_id": task_id,
             "location_kind": "api_chunk" if any(r.get("chunk") for r in recs) else "char_range",
             "chunk_offsets": payload.get("chunk_offsets") or [],
+            # R1：逐文档映射——每条引用按**它自己那份文档**换算段内偏移，
+            # 不共用"最长的那张表"（多文档时 B 文档会被按 A 的片段号换算而错位）。
+            "chunk_offsets_by_doc": payload.get("chunk_offsets_by_doc")
+            or _chunk_maps_from_records(recs, payload.get("chunk_offsets") or []),
             "chunk_gaps": payload.get("chunk_gaps") or [],
+            "chunk_gaps_by_doc": payload.get("chunk_gaps_by_doc") or {},
             "note": ("定位口径：`locator` 里的字符区间是**合并文档偏移**（本任务为多段公告"
-                     "文本拼接，每段 5000 字符，段起止见 `chunk_offsets`，缺失片段见 "
-                     "`chunk_gaps`）；`chunk` 是该偏移落在的接口片段号，"
-                     "`chunk_char_start/end` 为**段内**偏移。没有 PDF 页码映射时不写页码。"
-                     "`crosses_gap=true` 的摘录**跨缺失片段**（非连续原文），"
-                     "文本里带『资料缺口』标记。离线解包后可用 url + locator + "
-                     "text_sha256 取回同一条摘录。"),
+                     "文本拼接，每段 5000 字符，段起止见 `chunk_offsets_by_doc[url]`，"
+                     "缺失片段见 `chunk_gaps_by_doc[url]`）；`chunk` 是该偏移落在的接口"
+                     "片段号，`chunk_char_start/end` 为**段内**偏移（按该记录自己的文档"
+                     "换算）。没有 PDF 页码映射时不写页码。`after_gap` 表示该摘录位于"
+                     "缺口之后（与缺口前内容**不连续**，标题不继承）。离线解包后可用 "
+                     "url + locator + text_sha256 取回同一条摘录。"),
             "records": [{
                 "kind": r.get("kind"), "title": r.get("title"), "url": r.get("url"),
                 "locator": r.get("locator"), "chunk": r.get("chunk"),
                 "doc_char_start": r.get("char_start"), "doc_char_end": r.get("char_end"),
-                "chunk_char_start": _chunk_local(r, payload.get("chunk_offsets"))[0],
-                "chunk_char_end": _chunk_local(r, payload.get("chunk_offsets"))[1],
-                "crosses_chunk": _chunk_local(r, payload.get("chunk_offsets"))[2],
+                "chunk_char_start": _chunk_local(r, _map_for(r, payload))[0],
+                "chunk_char_end": _chunk_local(r, _map_for(r, payload))[1],
+                "crosses_chunk": _chunk_local(r, _map_for(r, payload))[2],
                 "crosses_gap": bool(r.get("crosses_gap")),
+                "after_gap": bool(r.get("after_gap")),
                 "missing_chunks": list(r.get("missing_chunks") or []),
+                "segments": list(r.get("segments") or []),
                 "text": str(r.get("snippet") or r.get("text") or ""),
                 "text_sha256": hashlib.sha256(
                     str(r.get("snippet") or r.get("text") or "").encode("utf-8")).hexdigest(),
@@ -840,6 +876,25 @@ def _write_citation_evidence(task_id: str, ws) -> "Path | None":
     except Exception as exc:                     # noqa: BLE001 - 证据写不出不阻断打包
         logger.warning("引用证据生成失败（task=%s）：%s", task_id, str(exc)[:120])
         return None
+
+
+def _map_for(rec: dict, payload: dict) -> list:
+    """该记录**自己那份文档**的片段映射（缺则退回全局表，并如实如此）。"""
+    by_doc = payload.get("chunk_offsets_by_doc") or {}
+    url = str(rec.get("url") or "")
+    if url and isinstance(by_doc.get(url), list) and by_doc[url]:
+        return by_doc[url]
+    return payload.get("chunk_offsets") or []
+
+
+def _chunk_maps_from_records(recs, fallback_map) -> dict:
+    """没有逐文档表时（旧载荷）：按记录的 url 分组复用全局表，避免静默错配。"""
+    out: dict = {}
+    for r in recs or []:
+        url = str(r.get("url") or "")
+        if url and url not in out:
+            out[url] = list(fallback_map or [])
+    return out
 
 
 def _chunk_start(doc_offset, chunk_offsets) -> int | None:

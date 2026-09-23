@@ -178,9 +178,36 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
     # 不满足时进风险清单，不靠加长正文掩盖
     quality = analysis_coverage(analysis_text)
     perspective = str(req.get("perspective") or "equity")
+    # R1：**评估一次**，问题区/风险区/研究状态/候选比较共用（不再各判一次）
+    _last = periods[-1] if periods else None
+    _mgmt_pool = (list(changes.get("management") or [])
+                  + list(changes.get("third_party_views") or []))
+    assessments = _question_assessments(_mgmt_pool, background, evidence, last=_last)
+    # 逐问题评估进**变化解释**：风险条目的三态与问题区读同一份判定
+    for u in (changes.get("unproven") or []):
+        a = assessments.get(str(u.get("metric") or "")) or {}
+        u["assessment_kind"] = str(a.get("kind") or "")
+        u["assessment_label"] = str(a.get("kind_label") or "")
+        u["assessment_reason"] = str(a.get("reason") or "")
+        u["coverage"] = str(a.get("coverage") or "none")
+        u["has_explanation"] = bool(a.get("has_management_cause"))
+        if a.get("locator"):
+            u["matched"] = {"source_n": str(a.get("source_n") or ""),
+                            "locator": str(a.get("locator") or ""),
+                            "text": str(a.get("text") or "")[:120],
+                            "issuer": bool(a.get("issuer")),
+                            "match_kind": ("explanation" if a.get("has_management_cause")
+                                           else "background" if a.get("has_background")
+                                           else "reading")}
+        if a.get("has_decomposition"):
+            u["structure_evidence"] = {"locator": str(a.get("locator") or ""),
+                                       "source_n": str(a.get("source_n") or ""),
+                                       "coverage": str(a.get("coverage") or "partial"),
+                                       "note": str(a.get("material_note") or "")}
     # D1 夜间补修：研究问题**先于**主张检查生成——它的观察与边界也是要审的句子
     questions = _research_questions(rows, derived, periods, evidence, citations,
-                                    changes, perspective=perspective)
+                                    changes, perspective=perspective,
+                                    assessments=assessments)
     assembly_claims: list[dict] = []
     for _q in questions:
         _obs = str(_q.get("observation") or "").strip()
@@ -226,6 +253,8 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
         "analysis": analysis_text,
         "analysis_quality": quality,
         "research_questions": questions,
+        # R1：逐问题评估的**唯一权威**结果（问题区/风险区/研究状态/候选比较共用）
+        "question_assessments": assessments,
         "citation_gaps": list(unmapped),
         "claims": claims,
         "unsupported_claims": unsupported,
@@ -444,22 +473,15 @@ def _change_explanation(rows, derived, periods, findings, evidence, citations) -
                           if kinds.get(metric) == "explanation"]
         it["background_for"] = [label for metric, label in _CHANGE_METRIC_LABELS.items()
                                 if kinds.get(metric) == "background"]
-    # 项3：收入有**发行人披露的量价/结构数据**时，风险条目既不说"没有材料"也不说
-    # "解释已取得"——量价/结构已取得（可复算），贡献度与管理层定量说明仍未拆分。
-    _vp_ev = (evidence or {}).get("volume_price") or {}
-    if _vp_ev.get("ok"):
-        for u in unproven:
-            if str(u.get("metric")) == "revenue":
-                u["structure_evidence"] = {
-                    "locator": str(_vp_ev.get("locator") or ""),
-                    "source_n": str(_vp_ev.get("source_n") or "")}
+    # 风险条目里的"已取得量价/结构数据""解释已取得"三态由 `build_structure` 的
+    # **逐问题评估**统一回填（R1：一次评估，多处读取；此处不再自行判断）。
     return {"changes": changes[:3], "management": management,
             "third_party_views": third_party,
             "inference": list(_INFERENCE_BOUNDARY), "unproven": unproven}
 
 
 def _research_questions(rows, derived, periods, evidence, citations, changes, *,
-                        perspective: str = "") -> list[dict]:
+                        perspective: str = "", assessments: dict | None = None) -> list[dict]:
     """D3：研究问题 → 观察 / 支持证据 / 推断边界 / 下一步核查动作（主文最多三问）。
 
     每问只写四件事：由底稿可复算的**观察**、已取得的**证据定位**（没有就写"未取得、
@@ -551,7 +573,9 @@ def _research_questions(rows, derived, periods, evidence, citations, changes, *,
                             "支撑**；" + boundary)
         matched = _match_management_for_metric(mgmt_pool, metric, last)
         support = {"has_evidence": False, "locator": "", "source_n": "",
-                   "text": "", "issuer": False, "kind": "", "reading": ""}
+                   "text": "", "issuer": False, "kind": "", "reading": "",
+                   "coverage": "none"}
+        matched = _match_management_for_metric(mgmt_pool, metric, last)
         if matched:
             _kind = str(matched.get("match_kind") or "reading")
             support.update({"locator": str(matched.get("locator") or ""),
@@ -562,8 +586,11 @@ def _research_questions(rows, derived, periods, evidence, citations, changes, *,
             # 09-23（项1）：只有**真正解释该指标**的片段才算"原因已支持"。行业/市场
             # 背景与纯读数**都不计入**必答问题的已支持数（复核实机：收入只拿到行业
             # 背景，却被算成必答 2/3 里的那一项），只作"已取材料"如实列出。
+            # 09-23 晚间（R1）：判定统一到 `question_assessment`（否定/未披露/不确定/
+            # 未来与逗号因果都在那里处理），并在下面用**同一次评估**覆盖 support。
             if _kind == "explanation":
                 support["has_evidence"] = True
+                support["coverage"] = "partial"
             elif _kind == "background":
                 support["background_only"] = True
                 support["reading"] = (f"{support['locator'] or '有材料'} "
@@ -571,40 +598,41 @@ def _research_questions(rows, derived, periods, evidence, citations, changes, *,
             else:
                 support["reading"] = (f"{support['locator'] or '有材料'} 只含读数/背景，"
                                       f"不构成原因支持")
+        _a = (assessments or {}).get(metric) or {}
+        if _a:
+            support.update({
+                "kind": _a.get("kind") or support.get("kind") or "",
+                "kind_label": _a.get("kind_label") or "",
+                "coverage": _a.get("coverage") or "none",
+                "answered": bool(_a.get("answered")),
+                "reason": _a.get("reason") or "",
+                "span": _a.get("span") or "",
+                "flags": dict(_a.get("flags") or {}),
+                "material_note": _a.get("material_note") or "",
+            })
+            if _a.get("locator"):
+                support["locator"] = str(_a.get("locator") or "")
+                support["source_n"] = str(_a.get("source_n") or support.get("source_n") or "")
+                support["text"] = str(_a.get("text") or support.get("text") or "")[:160]
+                support["issuer"] = bool(_a.get("issuer"))
+            # 回答完成 = 分解覆盖充分；管理层归因只是"发行人说法"，不提升为完成
+            support["has_evidence"] = bool(_a.get("coverage") != "none")
+            support["has_management_cause"] = bool(_a.get("has_management_cause"))
+            support["has_decomposition"] = bool(_a.get("has_decomposition"))
+            support["has_background"] = bool(_a.get("has_background"))
+            support["has_observation"] = bool(_a.get("has_observation"))
+            # 边界随材料更新：已有分解材料时，不再写"未取得量价/分部数据"（那是旧状态）
+            if _a.get("kind") == "decomposition":
+                boundary = ("量价/结构数据来自发行人披露的收入构成与产量销量表；"
+                            "各因素（量、价、结构）的**贡献度**未拆分，"
+                            "管理层的定量说明也未给出；" + str(boundary or ""))
         out.append({"metric": metric, "question": q_text, "observation": obs,
                     "support": support, "boundary": boundary,
+                    "assessment": _a,
                     "next_action": list(MATERIALS_BY_METRIC.get(metric, ()))})
-    # 项3：收入问题的支持以**发行人披露的量价/结构数据**为准（已有材料时不写"原因待证"）：
-    # 销量、分产品/分地区/分销售模式构成直接回答"收入变化的量价与结构依据"。
-    # 定性原因（管理层怎么说）与结构数据分开标注：结构数据 = 已取得，因果贡献度 = 未拆分。
-    _vp = (evidence or {}).get("volume_price") or {}
-    if _vp.get("ok"):
-        for q in out:
-            if str(q.get("metric")) != "revenue":
-                continue
-            _bits = []
-            _vol = next((f for f in (_vp.get("facts") or [])
-                         if str(f.get("label")) == "白酒销售量（吨）"), None)
-            if _vol and isinstance(_vol.get("yoy"), (int, float)):
-                _bits.append(f"白酒销售量同比 {_vol['yoy']:g}%")
-            _rev = next((f for f in (_vp.get("facts") or [])
-                         if str(f.get("label")) == "白酒（元）"), None)
-            if _rev and isinstance(_rev.get("yoy"), (int, float)):
-                _bits.append(f"白酒收入同比 {_rev['yoy']:g}%")
-            _d = next((d for d in (_vp.get("derived") or [])
-                       if str(d.get("label")) == "白酒吨价（推算）"), None)
-            if _d and isinstance(_d.get("yoy"), (int, float)):
-                _bits.append(f"吨价推算同比 {_d['yoy']:g}%")
-            q["support"] = {
-                "has_evidence": True, "kind": "structure", "structure": True,
-                "locator": str(_vp.get("locator") or ""),
-                "source_n": str(_vp.get("source_n") or ""),
-                "text": "；".join(_bits),
-                "issuer": True,
-            }
-            q["boundary"] = ("量价/结构数据来自发行人披露的收入构成与产量销量表；"
-                             "各因素（量、价、结构）的**贡献度**未拆分，管理层的定性"
-                             "说明也未给出；" + str(q.get("boundary") or ""))
+    # 项3/R1：收入问题的支持由**逐问题评估**（`assessments`）决定：发行人披露的
+    # 量价/结构数据算"分解覆盖"（部分或完整），背景与读数只作已取材料。
+    # 旧的"直接看 volume_price 就给支持"的分支已删除——避免第二套判断。
     if str(perspective or "") == "bank_corporate":
         liab = (by.get("total_liabilities") or {}).get(last) if last else None
         liab_prev = ((by.get("total_liabilities") or {}).get(last - 1)
@@ -654,13 +682,13 @@ _CHANGE_METRIC_LABELS = {"revenue": "营业收入", "net_profit": "归母净利�
 
 def _match_management_for_metric(items: list[dict], metric: str,
                                  period=None) -> dict | None:
-    """这条指标有没有对应的管理层/第三方解释（按词匹配；期间可证时一并核对）。
+    """这条指标有没有对应的管理层/第三方解释（逐问题评估的**薄包装**）。
 
-    09-23：返回值带 `match_kind`——
-    - `explanation`：片段里**同一子句**内既出现该指标词、又有因果语言（真正解释该指标）；
-    - `reading`：只谈到该指标（水平/变化读数、行业背景），**不构成原因支持**。
-    优先返回 explanation；只有 reading 时也返回（调用方据此如实显示"有读数、原因待证"）。
+    判定逻辑统一在 `question_assessment`（否定/未披露/不确定/未来/逗号因果都在那里）；
+    这里只保留历史调用形状：返回 `match_kind` ∈ explanation/background/reading，
+    并带 `match_reason` / `match_span` 供展示与复核。
     """
+    import question_assessment as _qa
     words = _EXPLANATION_METRIC_WORDS.get(str(metric or ""), ())
     if not words:
         return None
@@ -674,13 +702,43 @@ def _match_management_for_metric(items: list[dict], metric: str,
         doc_period = str(it.get("document_period") or "")
         if year and doc_period and str(year) not in doc_period:
             continue                     # 期间明确不符的解释不算（如别年的说明）
-        if _explains_metric_change(text, metric):
-            return dict(it, match_kind="explanation")
-        if background is None and _background_for_metric(text, metric):
-            background = dict(it, match_kind="background")
+        res = _qa.assess_text(text, metric, period=year, metric_words=words)
+        kind = res.get("kind")
+        if kind == _qa.KIND_MANAGEMENT:
+            return dict(it, match_kind="explanation", match_reason=res.get("reason") or "",
+                        match_span=res.get("span") or "")
+        if kind == _qa.KIND_BACKGROUND and background is None:
+            background = dict(it, match_kind="background",
+                              match_reason=res.get("reason") or "",
+                              match_span=res.get("span") or "")
         if reading is None:
-            reading = dict(it, match_kind="reading")
+            reading = dict(it, match_kind="reading",
+                           match_reason=res.get("reason") or "",
+                           match_span=res.get("span") or "")
     return background or reading
+
+
+def _question_assessments(mgmt_pool, background, evidence, *, last) -> dict:
+    """逐问题评估（唯一权威）：问题区 / 风险区 / 研究状态 / 候选比较都读这一份。
+
+    输入是**同一批材料**（管理层/第三方披露、业务背景、定量分解）；评估一次，
+    不再让各处按关键词各判一次（根因一）。
+    """
+    import question_assessment as _qa
+    vp = (evidence or {}).get("volume_price") or {}
+    decomp = {}
+    if vp.get("ok"):
+        decomp = {"coverage": str(vp.get("coverage") or "partial"),
+                  "note": str(vp.get("summary") or ""),
+                  "locator": str(vp.get("locator") or ""),
+                  "reason": "发行人披露的量价/结构数据已准入（量/结构已取得；价与范围见缺口）"}
+    out: dict = {}
+    for metric, _question, _boundary in _RESEARCH_QUESTIONS:
+        out[metric] = _qa.assess_question(
+            metric, items=list(mgmt_pool or []), background_items=list(background or []),
+            period=last, decomposition=(decomp if metric == "revenue" else None),
+            has_observations=True)
+    return out
 
 
 # 因果语言（子句级）：解释该指标变化时才用得上
@@ -1676,59 +1734,65 @@ def _risks(task_id: str, goal: str, body: str, *, project=None,
              materials=["最新年报/公告中的风险因素章节", "相关事项的进展公告"])
 
     # ③ 变化解释里还没能证明的部分 → 需要补充的材料。
-    # C2-4：区分"解释已取得、贡献程度未核实"与"原因尚不能证明"——不能一边给解释
-    # 一边在缺口里说没有解释（读者会以为整段解释是编的）。
-    # 09-23（项1）：三个状态**同一条判据**（`matched.match_kind`）——背景与读数
-    # 只能写"未取得该指标变化的解释"，不得写成"解释已取得"（与逐问支持一致）。
+    # R1：条目文案只由**逐问题评估**（`u["assessment_kind"]`）决定，风险区与问题区
+    # 不可能再各说一套（复核实机：正文说"原因待证"、风险区说"解释已取得"）。
     for u in (changes.get("unproven") or []):
         _m = u.get("matched") or {}
         _where = ("；".join(x for x in (
             (f"来源 [{_m.get('source_n')}]" if _m.get("source_n") else ""),
             str(_m.get("locator") or "")) if x) or "见『变化解释』的管理层/附注说明")
-        _kind = str(_m.get("match_kind") or "")
-        if u.get("has_explanation"):
+        _ak = str(u.get("assessment_kind") or "")
+        if not _ak:
+            # 兼容旧结构（09-23 晚间之前落盘的结构）：按旧 match_kind 折算一次
+            _ak = {"explanation": "management_cause", "background": "background",
+                   "reading": "observation"}.get(str(_m.get("match_kind") or ""), "")
+        _cov = {"full": "完整", "partial": "部分", "none": "无"}.get(
+            str(u.get("coverage") or "none"), "无")
+        _mats = "、".join(u.get("materials") or [])
+        _would = (f"取得{_mats}后，若显示的原因与本期变化方向不一致，需修订解释"
+                  if _mats else "取得对应材料后修订解释")
+        if _ak == "management_cause":
             _add("unproven_change",
-                 f"{u.get('label')}：解释已取得（{_where}），"
-                 f"但量价与贡献程度未核实",
-                 evidence_note="已取得定性解释；分解到量/价/结构的数据尚未取得",
-                 would_change=f"取得{'、'.join(u.get('materials') or [])}后，"
-                             "若显示的贡献结构与本期变化方向不一致，需修订解释",
-                 materials=list(u.get("materials") or []))
-        elif u.get("structure_evidence"):
-            # 量价/结构数据已由发行人披露取得（销量、分产品/分地区/分销售模式），
-            # 但"各因素各贡献多少"仍未拆分——不把它写成"解释已取得"，也不写成"没有材料"
+                 f"{u.get('label')}：管理层明确归因（**发行人说法，非独立证实**）"
+                 f"（{_where}）；定量分解覆盖：{_cov}",
+                 evidence_note="已取得发行人定性归因；分解到量/价/结构的数据见『量价与结构』",
+                 would_change=_would, materials=list(u.get("materials") or []))
+        elif _ak == "decomposition" or u.get("structure_evidence"):
             _se = u.get("structure_evidence") or {}
-            _kind_cn = {"background": "行业/市场背景", "reading": "读数型表述",
-                        "explanation": "定性解释"}.get(_kind, "背景类表述")
             _add("unproven_change",
-                 f"{u.get('label')}：已取得量价/结构数据（{_se.get('locator') or '见『量价与结构』'}），"
-                 f"但各因素贡献度未拆分；定性原因仍只有{_kind_cn}",
-                 evidence_note="发行人披露的量价与结构数据已准入；贡献度分解与管理层定量说明未取得",
-                 would_change=f"取得{'、'.join(u.get('materials') or [])}并给出各因素贡献后，"
-                             "若贡献结构与本期量价/结构数据方向不一致，需修订解释",
-                 materials=list(u.get("materials") or []))
-        elif _kind == "background":
+                 f"{u.get('label')}：已取得量价/结构数据"
+                 f"（{_se.get('locator') or _where}），分解覆盖：{_cov}"
+                 f"{'（' + str(_se.get('note')) + '）' if _se.get('note') else ''}",
+                 evidence_note="发行人披露的量价与结构数据已准入；各因素贡献度未拆分",
+                 would_change=_would, materials=list(u.get("materials") or []))
+        elif _ak == "background":
             _add("unproven_change",
                  f"{u.get('label')}：未取得该指标变化的解释；"
-                 f"仅有行业/市场背景（{_where}），不构成量价/结构解释",
+                 f"仅有行业/市场背景（{_where}），不计回答完成",
                  evidence_note="已取材料只有行业/市场语境，未单独说明该指标变化原因",
-                 would_change=f"取得{'、'.join(u.get('materials') or [])}后，"
-                             "若显示的原因与本期变化方向不一致，需修订解释",
-                 materials=list(u.get("materials") or []))
-        elif _kind == "reading":
+                 would_change=_would, materials=list(u.get("materials") or []))
+        elif _ak in ("negation", "not_disclosed"):
+            _add("unproven_change",
+                 f"{u.get('label')}：{u.get('assessment_label') or '材料明确否认/未披露原因'}"
+                 f"（{_where}）",
+                 evidence_note=str(u.get("assessment_reason") or "材料本身就否定了原因或说明未披露"),
+                 would_change=_would, materials=list(u.get("materials") or []))
+        elif _ak in ("tentative", "hypothesis"):
+            _add("unproven_change",
+                 f"{u.get('label')}：{u.get('assessment_label') or '不确定/未来表述'}"
+                 f"（{_where}）——**待复核**，不作原因",
+                 evidence_note=str(u.get("assessment_reason") or "不确定或指向未来，不构成原因"),
+                 would_change=_would, materials=list(u.get("materials") or []))
+        elif _ak == "observation":
             _add("unproven_change",
                  f"{u.get('label')}：未取得该指标变化的解释；"
                  f"已取材料只含该指标读数（{_where}）",
                  evidence_note="已取材料只复述该指标数值，不含原因说明",
-                 would_change=f"取得{'、'.join(u.get('materials') or [])}后，"
-                             "若显示的原因与本期变化方向不一致，需修订解释",
-                 materials=list(u.get("materials") or []))
+                 would_change=_would, materials=list(u.get("materials") or []))
         else:
             _add("unproven_change", f"{u.get('label')}的变化原因尚不能证明",
                  evidence_note="未取得对应附注/管理层讨论证据",
-                 would_change=f"取得{'、'.join(u.get('materials') or [])}后，"
-                             "若显示的原因与本期变化方向不一致，需修订解释",
-                 materials=list(u.get("materials") or []))
+                 would_change=_would, materials=list(u.get("materials") or []))
 
     # ④ 模型正文里的风险小节（原样带出，但标注"由模型提出、需取得证据"）。
     # 结论与免责声明不是风险：它们是收尾陈述，列成风险只会稀释真正要查的事项。
@@ -2237,28 +2301,44 @@ def render_brief_markdown(structure: dict, body: str = "",
     else:
         lines.append("- 本次未取得可复算的财务事实（见文末资料缺口）。")
     lines.append("")
-    # D3：研究问题与下一步——主文最多三个重点，每项含观察/支持证据/推断边界/核查动作
+    # D3/R1：研究问题与下一步——每项含观察、**材料分类与覆盖**、推断边界、核查动作。
+    # 材料分类只读逐问题评估结果（`support.kind`），问题区不再自行判断。
     questions = structure.get("research_questions") or []
     if questions:
         lines.append("## 研究问题与下一步")
         for q in questions:
             sup = q.get("support") or {}
-            if sup.get("has_evidence"):
-                support = f"支持：{sup.get('locator') or ''}"
-                if sup.get("source_n"):
-                    support += f"（来源 [{sup.get('source_n')}]"
-                    support += "，管理层/发行人披露）" if sup.get("issuer") else "，第三方材料）"
-                if sup.get("structure"):
-                    support += "——**量价/结构数据**（发行人披露，见『量价与结构』）"
+            kind = str(sup.get("kind") or "")
+            cov = {"full": "完整", "partial": "部分", "none": "无"}.get(
+                str(sup.get("coverage") or "none"), "无")
+            loc = str(sup.get("locator") or "")
+            src = f"来源 [{sup.get('source_n')}]" if sup.get("source_n") else ""
+            where = "；".join(x for x in (src, loc) if x)
+            if kind == "decomposition":
+                support = (f"材料：**分解覆盖（{cov}）**"
+                           f"{'：' + str(sup.get('material_note')) if sup.get('material_note') else ''}"
+                           + (f"（{where}）" if where else ""))
+            elif kind == "management_cause":
+                support = (f"材料：管理层明确归因（**发行人说法，非独立证实**）"
+                           + (f"（{where}）" if where else "")
+                           + f"；定量分解覆盖：{cov}")
+            elif kind == "background":
+                support = (f"材料：仅行业/市场背景"
+                           + (f"（{where}）" if where else "")
+                           + "——**初步背景依据**，不计回答完成")
+            elif kind in ("negation", "not_disclosed"):
+                support = (f"材料：{sup.get('kind_label') or '明确否认/未披露原因'}"
+                           + (f"（{where}）" if where else ""))
+            elif kind in ("tentative", "hypothesis"):
+                support = (f"材料：{sup.get('kind_label') or '不确定/未来表述'}"
+                           + (f"（{where}）" if where else "") + "——**待复核**，不作原因")
+            elif kind == "observation":
+                support = ("材料：仅读数/观察"
+                           + (f"（{where}）" if where else "")
+                           + "，不构成原因支持")
             else:
-                support = "支持：未取得对应披露，**观察成立、原因待证**"
-                if sup.get("background_only"):
-                    # 行业/市场背景是"已取材料"不是"原因支持"（项1：不计入必答已支持）
-                    support += (f"（已取材料：{sup.get('locator') or '有行业/市场段落'}"
-                                f"——**初步背景依据**（行业/市场语境），"
-                                f"不构成该指标变化的量价/结构解释）")
-                elif sup.get("reading"):
-                    # 有材料但只含读数/背景：如实列出，不冒充原因支持
+                support = "材料：未取得对应披露，**观察成立、原因待证**"
+                if sup.get("reading"):
                     support += f"（已取材料：{sup.get('reading')}）"
             lines.append(f"- **{q.get('question')}**：{q.get('observation')}")
             lines.append(f"  - {support}；边界：{q.get('boundary')}；"

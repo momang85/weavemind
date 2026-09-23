@@ -318,15 +318,33 @@ def split_sections(text: str, page_offsets=None, chunk_offsets=None) -> list[dic
     `chunk_offsets`（接口片段专用）：`[(字符起点, 片段号)]`——公告文本 API 的
     `page_index` 返回的是**接口片段**而不是 PDF 实体页，没有页码映射时只能用这个
     定位（locator 写 `api_chunk K（字符 a-b）`，page 保持空）。
+
+    R1：**缺口标记是硬边界**——缺口两侧的内容不是连续原文，跨缺口的小节必须断开，
+    且不继承缺口前的标题（否则"研发投入"标题会一直延续到另一处不相干内容上，
+    复核实机点名过）。断开后的第二节在 path 上标"(续：缺片段 6–9)"。
     """
     lines = str(text or "").splitlines()
     out: list[dict] = []
     cur: dict | None = None
     parents: dict[int, str] = {}
+    gap_note = ""
+    gap_seen = False
     offset = 0
     for raw in lines:
         line = str(raw or "").strip()
         step = len(str(raw or "")) + 1          # +1：行尾换行符
+        if "【资料缺口" in line:
+            # 缺口是硬边界：当前小节就此结束，标题栈清空（缺口后的内容不得继承
+            # 缺口前的标题），下一节在 path 上标出它是缺口之后的续段。
+            if cur is not None:
+                cur["end"] = offset
+                out.append(cur)
+                cur = None
+            parents.clear()
+            _m = re.search(r"缺接口片段\s*([^（(]{1,20})", line)
+            gap_note = (_m.group(1).strip() if _m else "").strip()
+            offset += step
+            continue
         level = _heading_level(line) if _is_heading(line) else None
         if level is not None:
             if cur is not None:
@@ -339,9 +357,21 @@ def split_sections(text: str, page_offsets=None, chunk_offsets=None) -> list[dic
                 parents.pop(k, None)
             path = " > ".join(parents[k] for k in sorted(parents))
             cur = {"title": title, "path": path, "lines": [],
-                   "start": offset, "end": offset}
+                   "start": offset, "end": offset,
+                   # 缺口后的第一节在 path 上标出来；**其后所有节**也记住"上接缺口"
+                   # （标题不继承，引用证据要能说明这一段的上文被截断过）
+                   "gap_before": (gap_note if not gap_seen else ""),
+                   "gap_before_missing": _missing_list(gap_note) if gap_note else []}
+            if gap_note:
+                gap_seen = True
         elif cur is not None:
             cur["lines"].append(line)
+        elif gap_note:
+            # 缺口之后、下一个标题之前：作为**续段**单独成节（不继承缺口前的标题）
+            cur = {"title": "", "path": f"（续：缺片段 {gap_note}）", "lines": [line],
+                   "start": offset, "end": offset, "gap_before": gap_note,
+                   "gap_before_missing": _missing_list(gap_note)}
+            gap_seen = True
         offset += step
     if cur is not None:
         cur["end"] = offset
@@ -350,7 +380,38 @@ def split_sections(text: str, page_offsets=None, chunk_offsets=None) -> list[dic
         sec["body"] = "\n".join(sec["lines"]).strip()
         sec["page"] = _page_of(sec["start"], page_offsets)
         sec["chunk"] = _chunk_of(sec["start"], chunk_offsets)
+        if sec.get("gap_before"):
+            if not str(sec["path"]).startswith("（续："):
+                sec["path"] = f"{sec['path']}（续：缺片段 {sec['gap_before']}）"
+            sec["gap_before_missing"] = _missing_list(sec["gap_before"])
     return [s for s in out if s["body"] or s["title"]]
+
+
+def _missing_list(note: str) -> list:
+    """缺口标记（"6–9" / "6"）→ 缺失片段号列表。"""
+    t = str(note or "").replace("–", "-").replace("—", "-")
+    nums = [int(x) for x in re.findall(r"\d+", t)]
+    if len(nums) >= 2 and nums[0] <= nums[1]:
+        return list(range(nums[0], nums[1] + 1))
+    return nums
+
+
+def _record_segments(*, doc: dict, start: int, end: int) -> list:
+    """该摘录落在哪些**连续片段**里：`[{chunk, doc_start, doc_end, chunk_local_start}]`。
+
+    R1：位置、正文与 hash 属于同一份文档；片段列表让读者能逐段回到原文，
+    也便于离线复核"这段到底是哪几段、段内哪个区间"。
+    """
+    co = (doc or {}).get("chunk_offsets") or []
+    out: list[dict] = []
+    for i, (pos, no) in enumerate(co):
+        nxt = int(co[i + 1][0]) if i + 1 < len(co) else None
+        seg_start, seg_end = max(int(pos), start), (min(nxt, end) if nxt else end)
+        if seg_end <= seg_start:
+            continue
+        out.append({"chunk": int(no), "doc_start": seg_start, "doc_end": seg_end,
+                    "chunk_local_start": seg_start - int(pos)})
+    return out
 
 
 def _page_of(char_start: int, page_offsets) -> int | None:
@@ -436,14 +497,18 @@ def merge_chunks(chunks, *, gap_marker: bool = True) -> tuple[str, list, list]:
 
 
 def _span_gap(char_start: int, char_end: int, gaps) -> list[int]:
-    """区间是否跨缺口；返回被跨过的缺失片段号（空列表 = 不跨）。"""
+    """区间是否**真的**跨缺口；返回被跨过的缺失片段号（空列表 = 不跨）。
+
+    边界只差一个换行不算跨：缺口标记后的续段常常从标记行末尾的下一个字符开始，
+    那不是"缺口两侧都有内容"。
+    """
     out: list[int] = []
     for g in (gaps or []):
         try:
             off = int(g.get("doc_offset"))
         except (TypeError, ValueError):
             continue
-        if int(char_start) < off <= int(char_end):
+        if int(char_start) + 1 < off <= int(char_end):
             out.extend(int(x) for x in (g.get("missing") or []))
     return out
 
@@ -716,6 +781,7 @@ def extract_sections(doc: dict, *, periods=None, company: str = "",
         hint = next((y for y in years if y in (sec["path"] + snip)), "")
         _missing = _span_gap(int(sec["start"]), int(sec["end"]),
                              chunk_gaps(doc.get("chunk_offsets")))
+        _after_gap = list(sec.get("gap_before_missing") or [])
         rec = {
             "kind": kind,
             "kind_label": KIND_LABELS[kind],
@@ -732,9 +798,16 @@ def extract_sections(doc: dict, *, periods=None, company: str = "",
             "chunk": sec.get("chunk"),
             "period_hint": hint,
             "has_location": True,
-            "locator": _locator_text(sec) + _gap_note(_missing),
+            # 缺口前的内容与缺口后**不是连续原文**：跨缺口标记 crosses_gap；
+            # 缺口之后的续段另标 after_gap（标题不继承，path 里已注明）。
+            "locator": (_locator_text(sec) + _gap_note(_missing)
+                        + (_gap_note(_after_gap).replace("跨缺失片段", "上接缺口")
+                           if _after_gap else "")),
             "crosses_gap": bool(_missing),
-            "missing_chunks": _missing,
+            "after_gap": bool(_after_gap),
+            "missing_chunks": sorted(set(_missing) | set(_after_gap)),
+            "segments": _record_segments(doc=doc, start=int(sec["start"]),
+                                         end=int(sec["end"])),
             "content_hash": hashlib.sha256(snip.encode("utf-8")).hexdigest()[:16],
             "fetched_at": str(doc.get("fetched_at") or ""),
         }
@@ -884,6 +957,46 @@ def _chunk_gaps_of(docs) -> list:
             gaps = d.get("chunk_gaps") if isinstance(d.get("chunk_gaps"), list) else None
             return list(gaps) if gaps is not None else chunk_gaps(co)
     return []
+
+
+def _chunk_maps_of(docs) -> dict:
+    """**逐文档**的片段映射：`{url: [[起点, 片段号], …]}`。
+
+    R1：多文档各用自己的映射，不能共用"最长的那张表"——否则 B 文档的偏移会按 A 文档
+    的片段号换算，引用证据里的"第几段、段内第几字"就整体错位（复核点名的根因二残留）。
+    """
+    out: dict = {}
+    for d in (docs or []):
+        if not isinstance(d, dict):
+            continue
+        co = d.get("chunk_offsets")
+        if not co:
+            continue
+        url = str(d.get("url") or "")
+        if not url:
+            continue
+        try:
+            out[url] = [[int(a), int(b)] for a, b in co]
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _chunk_gaps_maps_of(docs) -> dict:
+    """逐文档的缺口清单：`{url: [{after_chunk, missing, doc_offset}, …]}`。"""
+    out: dict = {}
+    for d in (docs or []):
+        if not isinstance(d, dict):
+            continue
+        co = d.get("chunk_offsets")
+        if not co:
+            continue
+        url = str(d.get("url") or "")
+        if not url:
+            continue
+        gaps = d.get("chunk_gaps")
+        out[url] = [dict(g) for g in gaps] if isinstance(gaps, list) else chunk_gaps(co)
+    return out
 
 
 # ── 量价与结构（发行人披露的实物量 + 收入构成）────────────────────
@@ -1069,8 +1182,27 @@ def extract_volume_price(docs, *, periods=None) -> dict:
         "跨缺口摘录按分段拼接标注。",
     ]
     sample = facts[0]
+    # 覆盖是"部分"：量（销量/生产量/库存量）与结构（分产品/分地区/分销售模式）已取得，
+    # 但**价未被发行人披露**（吨价是我们推算的），且渠道/地区表小计与总营收**范围未闭合**
+    # （R3 复核：小计约 282.483 亿元 vs 总营收 288.76 亿元，差额不自行命名为"其他业务"）。
+    _cov_note = ("量（销售量/生产量/库存量）与结构（分产品/分地区/分销售模式）已取得；"
+                 "价无发行人披露口径（吨价为推算）；分销售模式/分地区表小计与营业收入"
+                 "总额范围未闭合，差额未取得说明")
+    _scope = {"product_total": None, "scope_note": _cov_note}
+    try:
+        _rev = next((f for f in facts if str(f.get("label")) == "白酒（元）"), None)
+        _red = next((f for f in facts if str(f.get("label")) == "红酒（元）"), None)
+        _oth = next((f for f in facts if str(f.get("label")) == "其他（元）"), None)
+        if _rev and _red and _oth:
+            _scope["product_total"] = round(
+                (_rev["cur"] + _red["cur"] + _oth["cur"]) / 1e8, 4)
+    except Exception:
+        pass
     return {
         "ok": True, "facts": facts, "derived": derived, "boundary": boundary,
+        "coverage": "partial",
+        "summary": _cov_note,
+        "scope": _scope,
         "locator": sample.get("locator") or "", "source_n": "",
         "url": str(doc.get("url") or ""), "title": str(doc.get("title") or ""),
         "text_sha256": sample.get("text_sha256") or "",
@@ -1250,10 +1382,13 @@ def build(task_id: str, *, periods=None, company: str = "", company_id: str = ""
         # **片段**不是 PDF 页；记录里的 char_start/end 是**合并文档偏移**，靠这张表
         # 才能回到"第几段、段内第几字"（引用证据包用得到）。
         "chunk_offsets": _chunk_offsets_of(docs),
+        # R1：逐文档映射（多文档各用各的）；跨缺口摘录已在记录层分段标注
+        "chunk_offsets_by_doc": _chunk_maps_of(docs),
         # 09-23（项4）：片段跳号 = 合并文本里的**缺口**（取到的片段号不连续）。
         # 缺口两侧的"连续原文"是拼接结果：引用证据与摘录都要标明，报告不得把它
         # 当成一段连续披露来读。
         "chunk_gaps": _chunk_gaps_of(docs),
+        "chunk_gaps_by_doc": _chunk_gaps_maps_of(docs),
         # 项3：量价与结构（发行人披露的实物量 + 收入构成）——确定性抽取，供正文
         # 形成"量价/结构"分析；没有对应披露时 ok=False（不填零、不编）。
         "volume_price": extract_volume_price(docs, periods=years),
