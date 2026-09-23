@@ -362,10 +362,13 @@ class TestPdfPagination(unittest.TestCase):
         self.assertTrue(ys, "PDF 内容流里应有文字定位")
         self.assertGreaterEqual(min(ys), 20.0,
                                 f"有文字画在页下边界外：min_y={min(ys)}")
+        # 页脚线以下只允许**每页一行页脚**（字号/换行在 CI 与本地不同 → 页数不同，
+        # 不能用固定阈值；按页数算上限）
+        pages = pdf.count(b"/Type /Page")
         body_ys = [y for y in ys if y < 40]
-        self.assertLessEqual(len(body_ys), 2,
-                             "页脚线以下只允许页脚（长段落/长引用必须拆页）")
-        self.assertGreaterEqual(pdf.count(b"/Type /Page"), 2, "长内容应分页")
+        self.assertLessEqual(len(body_ys), pages + 1,
+                             f"页脚线以下出现正文（页数 {pages}，页脚行 {len(body_ys)}）")
+        self.assertGreaterEqual(pages, 2, "长内容应分页")
 
 
 if __name__ == "__main__":
