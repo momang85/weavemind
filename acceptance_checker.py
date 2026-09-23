@@ -833,6 +833,9 @@ _AMOUNT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*(亿元|万元|元|亿|万)")
 _PCT_RE = re.compile(r"(\d+(?:\.\d+)?)\s*%")
 # 相对变化比较词：不出现"大于/小于"也可能在解释比率（"分母降得更快，比率才下降"）
 _REL_COMPARE_WORDS = ("更快", "更慢", "快于", "慢于")
+# 带符号变化词：把百分数识别成增长还是下降（"负债增长20%" / "负债降幅11.78%"）
+_CHANGE_UP_WORDS = ("增长", "增加", "上升", "上涨", "提高", "升幅", "涨幅")
+_CHANGE_DOWN_WORDS = ("下降", "减少", "降低", "下滑", "回落", "降幅", "减幅")
 # 机制类驱动：派生读数（哪怕真实）也不能证明机制本身，最多提示待查
 _MECHANISM_DRIVERS = ("固定性费用", "固定费用", "固定成本", "摊薄", "规模效应")
 # 比率 → (分子词, 分母词)：句内百分数归属要靠这些词识别
@@ -870,13 +873,31 @@ def _record_text(rec: dict) -> str:
     return str(rec.get("text") or rec.get("snippet") or "")
 
 
-def _ratio_direction(sentence: str) -> str:
-    """句内比率方向：down / up / ""（未表态）。"""
-    if any(w in sentence for w in ("下降", "降低", "回落", "走低", "减少")):
-        return "down"
-    if any(w in sentence for w in ("上升", "提高", "走高", "增长")):
-        return "up"
-    return ""
+def _ratio_direction(sentence: str, metrics: list[str] | None = None) -> str:
+    """句内**该比率自己**的方向：down / up / ""（未表态）。
+
+    09-23：只在比率词**附近**找方向词——"资产负债率上升，负债增长5%、资产下降5%"里
+    分母的"下降"会把整句带偏，按整句判会读成"下降"。
+    """
+    window = 14
+    near = ""
+    if metrics:
+        for w, m in _RATIO_METRIC_WORDS:
+            if m not in metrics:
+                continue
+            for km in re.finditer(re.escape(w), sentence):
+                near += sentence[km.end():km.end() + window]
+    target = near or sentence
+    # 取**最先出现**的方向词：窗口里既有"上升"（比率自己的方向）又有"下降"（分母变化）
+    # 时，先出现的才是比率方向
+    best: tuple[int, str] | None = None
+    for words_, tag in ((("下降", "降低", "回落", "走低", "减少"), "down"),
+                        (("上升", "提高", "走高", "增长"), "up")):
+        for w in words_:
+            i = target.find(w)
+            if i >= 0 and (best is None or i < best[0]):
+                best = (i, tag)
+    return best[1] if best else ""
 
 
 def _side_faster(sentence: str) -> str:
@@ -888,11 +909,37 @@ def _side_faster(sentence: str) -> str:
     return "numerator" if m.group(1) == "分子" else "denominator"
 
 
-def _ratio_levels(sentence: str, metrics: list[str]) -> tuple[float, float] | None:
+def _part_pct_positions(sentence: str, metrics: list[str]) -> set[int]:
+    """被认成分子/分母变化的百分数位置（带符号优先，其次无符号归属）。"""
+    num_words, den_words = _part_words(metrics)
+    words = list(num_words) + list(den_words)
+    out: set[int] = set()
+    for pm in _PCT_RE.finditer(sentence):
+        if _in_ratio_span(sentence, metrics, pm.start()):
+            continue
+        for w in words:
+            hit = False
+            for km in re.finditer(re.escape(w), sentence):
+                if _in_ratio_span(sentence, metrics, km.start()):
+                    continue
+                if km.end() > pm.start():
+                    continue
+                if pm.start() - km.end() <= 10:
+                    hit = True
+                    break
+            if hit:
+                out.add(pm.start())
+                break
+    return out
+
+
+def _ratio_levels(sentence: str, metrics: list[str],
+                  exclude: set[int] | None = None) -> tuple[float, float] | None:
     """句内**该比率自己的两期水平**读数（如"资产负债率由 25.42% 下降至 23.24%"）。
 
     返回按出现顺序的前两个百分数；不足两个返回 None。比率词自身的字符区间不参与
-    分子/分母归属（"资产负债率"里含"资产/负债"两词，不能当分子分母关键词）。
+    分子/分母归属（"资产负债率"里含"资产/负债"两词，不能当分子分母关键词）；
+    `exclude` 里已认成分子/分母变化的百分数不算水平读数。
     """
     spans: list[tuple[int, int]] = []
     for w, m in _RATIO_METRIC_WORDS:
@@ -902,6 +949,8 @@ def _ratio_levels(sentence: str, metrics: list[str]) -> tuple[float, float] | No
         return None
     levels: list[float] = []
     for pm in _PCT_RE.finditer(sentence):
+        if exclude and pm.start() in exclude:
+            continue
         if any(s <= pm.start() < e for s, e in spans):
             continue
         for s, e in spans:
@@ -919,25 +968,16 @@ def _part_percentages(sentence: str, metrics: list[str]) -> tuple[float | None, 
     比率词自身的区间（如"资产负债率"）不参与归属，避免把比率两期水平误认成
     分子/分母变化；只认百分数**前面**的归属词（"负债降幅11.78%"）。
     """
-    spans: list[tuple[int, int]] = []
-    for w, m in _RATIO_METRIC_WORDS:
-        if m in metrics:
-            spans.extend((km.start(), km.end()) for km in re.finditer(re.escape(w), sentence))
-    num_words: list[str] = []
-    den_words: list[str] = []
-    for m in metrics:
-        n_w, d_w = _RATIO_PARTS.get(m, ((), ()))
-        num_words.extend(n_w)
-        den_words.extend(d_w)
+    num_words, den_words = _part_words(metrics)
 
     def _near(words: list[str]) -> float | None:
         best: tuple[int, float] | None = None
         for pm in _PCT_RE.finditer(sentence):
-            if any(s <= pm.start() < e for s, e in spans):
+            if _in_ratio_span(sentence, metrics, pm.start()):
                 continue
             for w in words:
                 for km in re.finditer(re.escape(w), sentence):
-                    if any(s <= km.start() < e for s, e in spans):
+                    if _in_ratio_span(sentence, metrics, km.start()):
                         continue          # 比率词内部的"资产/负债"不算归属词
                     if km.end() > pm.start():
                         continue          # 只认百分数**前面**的归属词
@@ -947,6 +987,63 @@ def _part_percentages(sentence: str, metrics: list[str]) -> tuple[float | None, 
         return best[1] if best else None
 
     return _near(num_words), _near(den_words)
+
+
+def _part_words(metrics: list[str]) -> tuple[list[str], list[str]]:
+    num_words: list[str] = []
+    den_words: list[str] = []
+    for m in metrics:
+        n_w, d_w = _RATIO_PARTS.get(m, ((), ()))
+        num_words.extend(n_w)
+        den_words.extend(d_w)
+    return num_words, den_words
+
+
+def _in_ratio_span(sentence: str, metrics: list[str], pos: int) -> bool:
+    for w, m in _RATIO_METRIC_WORDS:
+        if m in metrics:
+            for km in re.finditer(re.escape(w), sentence):
+                if km.start() <= pos < km.end():
+                    return True
+    return False
+
+
+def _part_signed_changes(sentence: str, metrics: list[str]) -> tuple[float | None, float | None]:
+    """句内分子/分母的**带符号**变化率（%）："负债降幅11.78%"→-11.78，"负债增长20%"→+20。
+
+    识别不出变化方向（只写"资产3.51%"）时返回 None——调用方退回"按降幅大小"的旧判定，
+    不能拿无符号幅度套方向。
+    """
+    num_words, den_words = _part_words(metrics)
+
+    def _one(words: list[str]) -> float | None:
+        best: tuple[int, float] | None = None
+        for pm in _PCT_RE.finditer(sentence):
+            if _in_ratio_span(sentence, metrics, pm.start()):
+                continue
+            for w in words:
+                for km in re.finditer(re.escape(w), sentence):
+                    if _in_ratio_span(sentence, metrics, km.start()):
+                        continue
+                    if km.end() > pm.start():
+                        continue
+                    gap = pm.start() - km.end()
+                    if gap > 10:
+                        continue
+                    seg = sentence[km.end():pm.start()]
+                    sign = 0
+                    if any(x in seg for x in _CHANGE_UP_WORDS):
+                        sign = 1
+                    elif any(x in seg for x in _CHANGE_DOWN_WORDS):
+                        sign = -1
+                    if sign == 0:
+                        continue
+                    val = sign * float(pm.group(1))
+                    if best is None or gap < best[0]:
+                        best = (gap, val)
+        return best[1] if best else None
+
+    return _one(num_words), _one(den_words)
 
 
 def _located_records(evidence: dict | None) -> list[dict]:
@@ -1131,16 +1228,52 @@ def check_ratio_arithmetic(report: str, *, working_paper: dict | None = None) ->
             continue
         amounts = _AMOUNT_RE.findall(s)
         pcts = _PCT_RE.findall(s)
+        words0 = [m for w, m in _RATIO_METRIC_WORDS if w in s]
+        num_g0, den_g0 = _part_signed_changes(s, words0)
         has_abs = (len(amounts) >= 2 and any(w in s for w in _ABS_CHANGE_WORDS)
                    and any(w in s for w in _ABS_COMPARE_WORDS))
-        has_rel = len(pcts) >= 2 and any(w in s for w in _REL_COMPARE_WORDS)
+        # 09-23：带符号的分子/分母相对变化（"负债增长20%、资产增长10%"）本身就是
+        # 解释比率的形状——没有"更快/大于"这类比较词也要查（等速、跨零反例此前漏检）
+        has_rel = len(pcts) >= 2 and (
+            any(w in s for w in _REL_COMPARE_WORDS)
+            or (num_g0 is not None and den_g0 is not None))
         if not (has_abs or has_rel):
             continue
         seen.append(s[:160])
-        words = [m for w, m in _RATIO_METRIC_WORDS if w in s]
-        direction = _ratio_direction(s)
+        words = words0
+        direction = _ratio_direction(s, words)
         side = _side_faster(s)
-        num_pct, den_pct = _part_percentages(s, words)
+        # 09-23：先看**带符号**变化——(1+gN)/(1+gD) 才是比率方向（同增/同降/反向/等速
+        # 都适用）；"谁更快"按**幅度**比（|gN| vs |gD|）。基期非正/分母跨零不套捷径。
+        num_g, den_g = num_g0, den_g0
+        _inapplicable = False
+        if num_g is not None and den_g is not None:
+            if num_g > -100 and den_g > -100:
+                ratio_up = (1 + num_g / 100.0) > (1 + den_g / 100.0)
+                ratio_down = (1 + num_g / 100.0) < (1 + den_g / 100.0)
+                bigger = abs(num_g) > abs(den_g)
+                if side == "numerator" and not bigger:
+                    bad.append(s[:120] + "（句称分子变化更快，与所给百分数相反）")
+                    continue
+                if side == "denominator" and bigger:
+                    bad.append(s[:120] + "（句称分母变化更快，与所给百分数相反）")
+                    continue
+                if direction == "down" and not ratio_down:
+                    bad.append(s[:120] + "（(1+分子变化)/(1+分母变化) 与所述下降方向不符）")
+                    continue
+                if direction == "up" and not ratio_up:
+                    bad.append(s[:120] + "（(1+分子变化)/(1+分母变化) 与所述上升方向不符）")
+                    continue
+                continue
+            _inapplicable = True     # 跨零/基期非正：幅度捷径不适用
+        if _inapplicable:
+            num_pct = den_pct = None
+        else:
+            num_pct, den_pct = _part_percentages(s, words)
+        # 已被认成分子/分母变化的百分数**不能**再当"比率两期水平"（跨零反例：10%、120%
+        # 是分子分母变化，被误读成 25.42%→23.24% 那样的水平读数）
+        _parts_identified = ((num_g is not None or den_g is not None)
+                             or (num_pct is not None or den_pct is not None))
         if num_pct is not None and den_pct is not None:
             num_faster = abs(num_pct) > abs(den_pct)
             if side == "numerator" and not num_faster:
@@ -1157,8 +1290,10 @@ def check_ratio_arithmetic(report: str, *, working_paper: dict | None = None) ->
                                      "所给百分数相反）")
                 continue
             continue
-        # 句内给出该比率**自己的两期水平**（"由 25.42% 降至 23.24%"）→ 可自行复算
-        levels = _ratio_levels(s, words)
+        # 句内给出该比率**自己的两期水平**（"由 25.42% 降至 23.24%"）→ 可自行复算；
+        # 已被认成分子/分母变化的那些百分数不算水平读数（跨零反例：10%/120%）
+        levels = _ratio_levels(s, words,
+                               exclude=_part_pct_positions(s, words))
         if levels is not None:
             first, second = levels
             if direction == "down" and first < second:
@@ -1176,6 +1311,10 @@ def check_ratio_arithmetic(report: str, *, working_paper: dict | None = None) ->
                 ok = True
                 break
         if ok:
+            continue
+        if _inapplicable:
+            bad.append(s[:120] + "（分子/分母变化跨零或基期非正，比率方向不能按幅度捷径"
+                                  "判断，且句内没有可复算的两期水平或底稿派生）")
             continue
         bad.append(s[:120])
     details = (f"解释比率变化的主张 {len(seen)} 条；不可复算/方向不符 {len(bad)} 条"

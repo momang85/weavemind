@@ -494,13 +494,25 @@ def _research_questions(rows, derived, periods, evidence, citations, changes, *,
                 boundary = ("当期归母净利或经营现金流不为正，该比值**不表示利润有现金"
                             "支撑**；" + boundary)
         matched = _match_management_for_metric(mgmt_pool, metric, last)
-        support = {"has_evidence": bool(matched), "locator": "", "source_n": "",
-                   "text": "", "issuer": False}
+        support = {"has_evidence": False, "locator": "", "source_n": "",
+                   "text": "", "issuer": False, "kind": "", "reading": ""}
         if matched:
+            _kind = str(matched.get("match_kind") or "reading")
             support.update({"locator": str(matched.get("locator") or ""),
                             "source_n": str(matched.get("source_n") or ""),
                             "text": str(matched.get("text") or "")[:120],
-                            "issuer": bool(matched.get("issuer"))})
+                            "issuer": bool(matched.get("issuer")),
+                            "kind": _kind})
+            # 09-23：只有**真正解释该指标**的片段才算"原因已支持"；行业/市场背景只作
+            # 初步背景依据（可出现在问题里，但明确不是量价/结构解释）；纯读数不算支持
+            if _kind == "explanation":
+                support["has_evidence"] = True
+            elif _kind == "background":
+                support["has_evidence"] = True
+                support["background_only"] = True
+            else:
+                support["reading"] = (f"{support['locator'] or '有材料'} 只含读数/背景，"
+                                      f"不构成原因支持")
         out.append({"metric": metric, "question": q_text, "observation": obs,
                     "support": support, "boundary": boundary,
                     "next_action": list(MATERIALS_BY_METRIC.get(metric, ()))})
@@ -550,11 +562,19 @@ _EXPLANATION_METRIC_WORDS: dict[str, tuple[str, ...]] = {
 
 def _match_management_for_metric(items: list[dict], metric: str,
                                  period=None) -> dict | None:
-    """这条指标有没有对应的管理层/第三方解释（按词匹配；期间可证时一并核对）。"""
+    """这条指标有没有对应的管理层/第三方解释（按词匹配；期间可证时一并核对）。
+
+    09-23：返回值带 `match_kind`——
+    - `explanation`：片段里**同一子句**内既出现该指标词、又有因果语言（真正解释该指标）；
+    - `reading`：只谈到该指标（水平/变化读数、行业背景），**不构成原因支持**。
+    优先返回 explanation；只有 reading 时也返回（调用方据此如实显示"有读数、原因待证"）。
+    """
     words = _EXPLANATION_METRIC_WORDS.get(str(metric or ""), ())
     if not words:
         return None
     year = period if isinstance(period, int) else None
+    reading: dict | None = None
+    background: dict | None = None
     for it in (items or []):
         text = str(it.get("text") or "")
         if not any(w in text for w in words):
@@ -562,8 +582,61 @@ def _match_management_for_metric(items: list[dict], metric: str,
         doc_period = str(it.get("document_period") or "")
         if year and doc_period and str(year) not in doc_period:
             continue                     # 期间明确不符的解释不算（如别年的说明）
-        return dict(it)
-    return None
+        if _explains_metric_change(text, metric):
+            return dict(it, match_kind="explanation")
+        if background is None and _background_for_metric(text, metric):
+            background = dict(it, match_kind="background")
+        if reading is None:
+            reading = dict(it, match_kind="reading")
+    return background or reading
+
+
+# 因果语言（子句级）：解释该指标变化时才用得上
+_CAUSAL_MARKERS = ("因", "由于", "系", "带动", "拖累", "所致", "导致", "使得", "受",
+                   "承压", "缘于", "来自", "来源于")
+# 行业/市场背景词：只作"初步背景依据"，不构成该指标的因果解释
+_BACKGROUND_MARKERS = ("行业", "市场", "竞争", "环境", "需求", "政策", "消费", "价位段",
+                       "价格带", "库存", "渠道", "景气", "承压", "宏观", "周期")
+_CLAUSE_SPLIT_RE = re.compile(r"[。；;，,、\n]")
+
+
+def _explains_metric_change(text: str, metric: str) -> bool:
+    """该片段里有没有**解释该指标变化**的子句（同子句含该指标词 + 因果语言）。
+
+    09-23 反例："2024年营业收入因销量下降而下降，净利润66.73亿元，同比下降33.37%。"
+    ——整句含"净利润"也有"因"，但因果在收入那个子句里：按子句归属后，净利润只有读数，
+    不能当利润变化的原因支持。
+    """
+    words = _EXPLANATION_METRIC_WORDS.get(str(metric or ""), ())
+    if not words:
+        return False
+    for clause in _CLAUSE_SPLIT_RE.split(str(text or "")):
+        c = clause.strip()
+        if not c or not any(w in c for w in words):
+            continue
+        if any(k in c for k in _CAUSAL_MARKERS):
+            return True
+    return False
+
+
+def _background_for_metric(text: str, metric: str) -> bool:
+    """该片段是否给出**该指标的初步背景**（行业/市场语境，相邻子句内）。
+
+    只作"初步背景依据"：可出现在必答问题里，但**不能**当成量价/结构等因果解释。
+    归属按子句窗口（指标子句 ± 1 个相邻子句）——这样同一段里别的指标的读数
+    不会顺手拿到背景支持。
+    """
+    words = _EXPLANATION_METRIC_WORDS.get(str(metric or ""), ())
+    if not words:
+        return False
+    clauses = [c.strip() for c in _CLAUSE_SPLIT_RE.split(str(text or ""))]
+    for i, c in enumerate(clauses):
+        if not c or not any(w in c for w in words):
+            continue
+        window = clauses[max(0, i - 1): i + 2]
+        if any(any(k in w for k in _BACKGROUND_MARKERS) for w in window if w):
+            return True
+    return False
 
 
 
@@ -2005,8 +2078,14 @@ def render_brief_markdown(structure: dict, body: str = "",
                 if sup.get("source_n"):
                     support += f"（来源 [{sup.get('source_n')}]"
                     support += "，管理层/发行人披露）" if sup.get("issuer") else "，第三方材料）"
+                if sup.get("background_only"):
+                    support += "——**初步背景依据**（行业/市场语境），不构成该指标变化的"
+                    support += "量价/结构解释"
             else:
                 support = "支持：未取得对应披露，**观察成立、原因待证**"
+                if sup.get("reading"):
+                    # 有材料但只含读数/背景：如实列出，不冒充原因支持
+                    support += f"（已取材料：{sup.get('reading')}）"
             lines.append(f"- **{q.get('question')}**：{q.get('observation')}")
             lines.append(f"  - {support}；边界：{q.get('boundary')}；"
                          f"下一步：{'、'.join(q.get('next_action') or []) or '补齐底稿事实'}")

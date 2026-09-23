@@ -8711,6 +8711,55 @@ class TestNightClosureCounterexamples(unittest.TestCase):
                 {"metric": "debt_ratio", "year": 2024, "value": "23.24",
                  "formula": "156.52/673.45*100", "derived_from": "['f3','f4']"}]})["pass"])
 
+    def test_ratio_growth_and_mixed_scenarios_follow_signed_changes(self):
+        """09-23：比率方向按 (1+gN)/(1+gD) 判——同增/同降/反向/等速各一组正反例。
+
+        旧实现只按"降幅大小"比较：同增场景把"分子涨得更快→比率上升"判错，把"上升"
+        改"下降"反而通过（正误颠倒）。基期非正/分母跨零不套捷径。
+        """
+        import acceptance_checker as ac
+        cases = [
+            ("资产负债率上升，负债增长20%、资产增长10%，分子涨得更快。", True),
+            ("资产负债率下降，负债增长20%、资产增长10%，分子涨得更快。", False),
+            ("资产负债率下降，负债增长10%、资产增长20%，分母涨得更快。", True),
+            ("资产负债率下降，负债下降20%、资产下降10%，分子降得更快。", True),
+            ("资产负债率下降，负债下降10%、资产下降20%，分母降得更快。", False),
+            ("资产负债率上升，负债增长5%、资产下降5%，分子增长、分母下降。", True),
+            ("资产负债率上升，负债增长10%、资产增长10%。", False),
+            ("资产负债率上升，负债增长10%、资产下降120%。", False),
+            ("资产负债率由25.42%上升至27.10%，负债增长10%、资产下降120%。", True),
+        ]
+        for text, want in cases:
+            got = ac.check_ratio_arithmetic(text, working_paper={})["pass"]
+            self.assertEqual(got, want, f"{text} → {got}（期望 {want}）")
+
+    def test_profit_reason_not_supported_by_revenue_cause_or_readings(self):
+        """09-23：同段的收入因果与净利润读数不得给利润问"已支持"。
+
+        指令反例："2024年营业收入因销量下降而下降，净利润66.73亿元，同比下降33.37%。"
+        ——收入那一问是 explanation；净利润只有读数 → reading（不构成支持）。
+        """
+        import report_brief as rb
+        items = [{"text": "2024年营业收入因销量下降而下降，净利润66.73亿元，同比下降33.37%。",
+                  "locator": "api_chunk 3", "document_period": "2024"}]
+        self.assertEqual(rb._match_management_for_metric(items, "revenue", 2024).get("match_kind"),
+                         "explanation")
+        self.assertEqual(rb._match_management_for_metric(items, "net_profit", 2024).get("match_kind"),
+                         "reading")
+        self.assertIsNone(rb._match_management_for_metric(items, "operating_cashflow", 2024))
+        # 行业/市场背景算"初步背景依据"（可出现在问题里，但不是因果解释）
+        bg = [{"text": "报告期内白酒行业进入存量竞争阶段，市场竞争更加白热化，"
+                       "公司主力产品集中的中端和次高端价位段承压较大，"
+                       "2024 年实现营业收入 288.76 亿元，同比下降 12.83%。",
+               "locator": "api_chunk 3", "document_period": "2024"}]
+        m = rb._match_management_for_metric(bg, "revenue", 2024)
+        self.assertEqual(m.get("match_kind"), "background")
+        # 真实解释句仍算 explanation
+        real = [{"text": "归母净利润同比下降主要由于销售费用率上升所致。",
+                 "locator": "api_chunk 4", "document_period": "2024"}]
+        self.assertEqual(rb._match_management_for_metric(real, "net_profit", 2024)
+                         .get("match_kind"), "explanation")
+
     def test_ratio_direction_statement_contradicting_numbers_is_caught(self):
         """09-23 反例：句称"分母降得更快"但所给百分数显示分子降得更快 → 必须 fail。
 
