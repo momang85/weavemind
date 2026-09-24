@@ -404,6 +404,44 @@ class TestFilesVisibilityPolicy(unittest.TestCase):
         self.assertFalse(web_ui._files_visible_rel("project/x.py", True),
                          "project/ 向来不放行，保持不变")
 
+    def test_authed_can_download_both_package_name_shapes(self):
+        """交付包文件名有两种形状，白名单必须两种都放行。
+
+        任务流水线出 `deliverables_<8位日期>_<6位时刻>.zip`；页面"按当前版本重新导出"
+        为避免同秒撞名会再拼 `_<6位十六进制>`——只认纯数字会把重新导出的包挡在门外
+        （页面「下载交付包 zip」恒 404，实机已复现）。
+        """
+        import web_ui
+        for rel in ("deliverables_20260924_185945_3a152d.zip",
+                    "deliverables_20260923_134027_e79e09.zip",
+                    "deliverables_20260920_104729.zip",
+                    "export_manifest.json"):
+            self.assertTrue(web_ui._files_visible_rel(rel, True),
+                            f"登录用户应能下载 {rel}")
+        # 形状仍受约束：非这两种命名一律不放行（含伪装后缀与路径穿越）
+        for rel in ("deliverables.zip", "deliverables_latest.zip",
+                    "deliverables_20260924_185945_3A152D.zip",
+                    "deliverables_20260924_185945_3a152d.zip.exe",
+                    "deliverables_20260924_185945_3a152d/../export_manifest.json",
+                    "../deliverables_20260924_185945_3a152d.zip"):
+            self.assertFalse(web_ui._files_visible_rel(rel, True),
+                             f"不该放行 {rel}")
+        # 匿名（分享链接持有者）仍然拿不到包
+        self.assertFalse(web_ui._files_visible_rel(
+            "deliverables_20260924_185945_3a152d.zip", False))
+
+    def test_package_name_shape_follows_the_writers(self):
+        """白名单形状要跟**写入方**一致：改命名就得改这里，否则下载又断。"""
+        import web_ui
+        src_pipeline = Path("delivery_pipeline.py").read_text(encoding="utf-8")
+        src_worker = Path("workers/packaging_worker.py").read_text(encoding="utf-8")
+        self.assertIn('name = f"deliverables_{ts}_{_uuid.uuid4().hex[:6]}.zip"',
+                      src_pipeline)     # 重新导出：时间戳 + 十六进制后缀
+        self.assertIn('f"deliverables_{ts}.zip"', src_worker)  # 任务流水线：只有时间戳
+        for sample in ("deliverables_20260924_185945.zip",
+                       "deliverables_20260924_185945_0f0f0f.zip"):
+            self.assertTrue(web_ui._FILES_AUTHED_ROOT_RE.match(sample), sample)
+
     def test_handler_uses_policy(self):
         src = Path("web_ui.py").read_text(encoding="utf-8")
         self.assertIn("_files_visible_rel(relative, authed)", src)

@@ -3830,7 +3830,12 @@ _FILES_PUBLIC_FILES = ("data/ranking.csv",)
 _FILES_AUTHED_PREFIXES = ("reports/", "charts/", "data/")
 # F3-B：交付包与导出清单落在**工作区根目录**，此前不在白名单 → 包根本下不来。
 # 只对登录用户放行，且限定文件名形状（路径穿越仍由 _safe_workspace_path 兜底）。
-_FILES_AUTHED_ROOT_RE = re.compile(r"^(deliverables_[0-9_]+\.zip|export_manifest\.json)$")
+# 形状按**两个写入方**的实际命名：任务流水线 packaging_worker 出
+# `deliverables_<8位日期>_<6位时刻>.zip`，"按当前版本重新导出"（delivery_pipeline
+# .repack_adopted）为避免同秒撞名会再加 `_<6位十六进制>`——只放行纯数字版本
+# 会让带后缀的包（页面重新导出的那些）取不到，下载链接恒 404。
+_FILES_AUTHED_ROOT_RE = re.compile(
+    r"^(deliverables_[0-9]{8}_[0-9]{6}(_[0-9a-f]{6})?\.zip|export_manifest\.json)$")
 
 
 def _files_visible_rel(relative: str, authed: bool) -> bool:
