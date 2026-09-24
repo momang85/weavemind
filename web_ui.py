@@ -2832,9 +2832,22 @@ def _export_payload(tid: str, ws, state: dict | None) -> dict:
             _pkg_manifest = {}
     # 重装配（如修订重验）会重写清单但**不重建 zip**：清单比包新两分钟以上时，
     # 清单里的版本号对得上当前也不能说包是当前的（实机：11:56 的包配 12:23 的清单）。
+    # 但"清单比包新"本身不是陈旧证据：**下载 Markdown/PDF 也会重写清单**
+    # （`_write_export_manifest` 每次导出都盖新的 `generated_at`，实机 18:59 的包
+    # 配 19:09 的清单，包其实是当前的）。所以时间顺序只当初筛，再用**身份**确认：
+    # 清单记的正文/报告版本与包内清单一致 → 只是渲染，不判陈旧；
+    # 身份不一致、或旧包没有身份可对（包内无清单）→ 仍判陈旧。
     _generated = float((_exp or {}).get("generated_at") or 0)
+    _pkg_body_id = str(_pkg_manifest.get("research_body_sha256")
+                       or _pkg_manifest.get("body_sha256") or "")
+    _pkg_ver_id = str(_pkg_manifest.get("report_version_id") or "")
+    _mf_body_id = str((_exp or {}).get("body_sha256") or "")
+    _mf_ver_id = str((_exp or {}).get("report_version_id") or "")
+    _same_identity = bool(
+        (_mf_body_id and _pkg_body_id and _mf_body_id == _pkg_body_id)
+        or (_mf_ver_id and _pkg_ver_id and _mf_ver_id == _pkg_ver_id))
     _package_stale = bool(_zip) and bool(_generated) and (
-        _generated - _zip.stat().st_mtime > 120)
+        _generated - _zip.stat().st_mtime > 120) and not _same_identity
     # 还有一路：打包步骤在**采纳最终正文之前**跑完（实机 ui-750185076a：21:06 打的包、
     # 21:07:28 才采纳验收修正版），此时清单还没写，只比"清单 vs 包"永远看不出。
     # 拿包与**当前采纳版本**的落库时间比：包更早 → 它装的是更早的正文。

@@ -6303,6 +6303,60 @@ class TestExportVersionNamespaces(unittest.TestCase):
             "ui-x", ws, {"identity_id": "ident-cur", "version_id": "body-cur"})
         self.assertIs(out2.get("package_stale"), False)
 
+    def test_manifest_rewritten_by_download_is_not_package_staleness(self):
+        """下载 Markdown/PDF 会重写导出清单（盖新 generated_at），包并不因此陈旧。
+
+        实机反例 ui-706c5ef4a5：18:59 重新导出的包配 19:09 的清单（下载报告时写的），
+        只比时间就会让页面冒出"包可能不含最新修订"；而包内清单的正文/报告身份与清单
+        一致，说明那次写清单只是渲染，不是重装配。
+        """
+        import json as _json
+        import os
+        import time
+        import zipfile
+        import web_ui
+        ws = Path(tempfile.mkdtemp(prefix="wm_export_dl_"))
+        self.addCleanup(shutil.rmtree, ws, ignore_errors=True)
+        name = "deliverables_20260924_185945_3a152d.zip"
+        with zipfile.ZipFile(ws / name, "w") as z:
+            z.writestr("PACKAGE_MANIFEST.json", _json.dumps({
+                "report_version_id": "ident-cur",
+                "research_body_sha256": "body-cur"}, ensure_ascii=False))
+        old = time.time() - 600
+        os.utime(ws / name, (old, old))            # 包是十分钟前的
+        manifest = {"report_version_id": "ident-cur", "body_sha256": "body-cur",
+                    "generated_at": time.time()}   # 清单是刚写的（下载触发）
+        (ws / "export_manifest.json").write_text(
+            _json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+        out = web_ui._export_payload(
+            "ui-x", ws, {"identity_id": "ident-cur", "version_id": "body-cur"})
+        self.assertIs(out.get("package_stale"), False)
+        # 真的重装配过（清单身份与包不同）→ 仍标陈旧
+        manifest.update({"report_version_id": "ident-other",
+                         "body_sha256": "body-other"})
+        (ws / "export_manifest.json").write_text(
+            _json.dumps(manifest, ensure_ascii=False), encoding="utf-8")
+        out2 = web_ui._export_payload(
+            "ui-x", ws, {"identity_id": "ident-cur", "version_id": "body-cur"})
+        self.assertIs(out2.get("package_stale"), True)
+
+    def test_legacy_package_without_manifest_still_uses_timestamps(self):
+        """旧包（包内没有 PACKAGE_MANIFEST）没有身份可对 → 退回时间顺序判陈旧。"""
+        import os
+        import time
+        import web_ui
+        ws = self._ws(None, with_zip=False)
+        zip_path = ws / "deliverables_20260920_104729.zip"
+        zip_path.write_bytes(b"PK\x05\x06")
+        old = time.time() - 3600
+        os.utime(zip_path, (old, old))
+        (ws / "export_manifest.json").write_text(json.dumps({
+            "report_version_id": "ident-cur", "body_sha256": "body-cur",
+            "generated_at": time.time()}, ensure_ascii=False), encoding="utf-8")
+        out = web_ui._export_payload(
+            "ui-x", ws, {"identity_id": "ident-cur", "version_id": "body-cur"})
+        self.assertIs(out.get("package_stale"), True)
+
 
 class TestBriefAssemblyIdempotence(unittest.TestCase):
     """二次装配不得把装配器自己的产物再吃回来（实机 ui-31305a2b28 反例）。
