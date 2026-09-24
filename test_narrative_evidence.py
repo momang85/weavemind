@@ -704,11 +704,12 @@ class TestChunkGapContinuity(unittest.TestCase):
 
 
 class TestVolumePriceExtraction(unittest.TestCase):
-    """项3：把已取得的销量/收入构成披露抽成可分析的事实（确定性、不编数）。
+    """R3：把已取得的量价/结构披露按**组**抽成事实（确定性、不编数、可回溯）。
 
-    实机材料里有三张表都含"省内/省外"（营业收入构成、营业成本构成、分地区毛利率），
-    只有**营业收入构成**那张是 `值 占比 值 占比 同比` 五列。按列型匹配才不会把成本
-    数（12,748,484,435.48）当成收入（13,031,872,833.19）。
+    - 构成表里有三处"省内/省外"（营业收入构成 / 成本构成 / 地区毛利率），只有
+      `值 占比 值 占比 同比` 五列那张是收入构成；按列型与组取行，才不吃成本数；
+    - 每组含它自己的「其他」行 → 组内与**表内**「营业收入合计」分别闭合
+      （只取主打行会误报"范围未闭合"）。
     """
 
     DOC = """洋河股份:2024年年度报告
@@ -731,11 +732,23 @@ class TestVolumePriceExtraction(unittest.TestCase):
 
 （1） 营业收入构成
 
+                                单位：元
+
+ 营业收入合计      28,876,296,993.56          100%  33,126,277,551.51          100%          -12.83%
+
+ 分行业
+
+ 酒类行业          28,248,295,829.62        97.83%  32,489,436,696.05        98.08%          -13.05%
+
+ 其他业务            628,001,163.94          2.17%      636,840,855.46          1.92%           -1.39%
+
  分产品
 
  白酒              28,175,707,878.18        97.57%  32,389,581,931.71        97.78%          -13.01%
 
  红酒                  72,587,951.44          0.26%      99,854,764.34          0.30%          -27.31%
+
+ 其他                628,001,163.94          2.17%      636,840,855.46          1.92%           -1.39%
 
  分地区
 
@@ -749,6 +762,8 @@ class TestVolumePriceExtraction(unittest.TestCase):
 
  线上直销            394,128,422.17          1.37%      436,807,935.79          1.24%           -9.77%
 
+ 其他                628,001,163.94          2.17%      636,840,855.46          1.92%           -1.39%
+
  分地区（营业成本构成）
 
  省内        12,748,484,435.48  3,254,113,271.23  74.47%        -11.43%        -9.91%        -0.43%
@@ -759,23 +774,43 @@ class TestVolumePriceExtraction(unittest.TestCase):
                "chunk_offsets": [[0, 3]]}
         return ne.extract_volume_price([doc], periods=[2023, 2024])
 
+    def _row(self, vp, group, row_label):
+        for f in vp["facts"]:
+            if f.get("group") == group and f.get("row_label") == row_label:
+                return f
+        raise AssertionError(f"缺少 {group}·{row_label}：{[ (f['group'], f['row_label']) for f in vp['facts'] ]}")
+
     def test_facts_come_from_the_income_composition_table(self):
         vp = self._vp()
         self.assertTrue(vp.get("ok"), vp)
-        by = {f["label"]: f for f in vp["facts"]}
-        self.assertAlmostEqual(by["白酒销售量（吨）"]["cur"], 139076.05, places=2)
-        self.assertAlmostEqual(by["白酒销售量（吨）"]["yoy"], -16.30, places=2)
-        self.assertAlmostEqual(by["白酒库存量（吨）"]["yoy"], 16.38, places=2)
-        self.assertAlmostEqual(by["白酒（元）"]["cur"], 28175707878.18, places=2)
-        self.assertAlmostEqual(by["白酒（元）"]["share_cur"], 97.57, places=2)
-        # 同一标签出现在成本表里时不得串行：省内取收入表的 13,031,872,833.19
-        self.assertAlmostEqual(by["省内（元）"]["cur"], 13031872833.19, places=2)
-        self.assertAlmostEqual(by["省内（元）"]["yoy"], -11.20, places=2)
-        self.assertAlmostEqual(by["省外（元）"]["yoy"], -14.13, places=2)
-        self.assertAlmostEqual(by["线上直销（元）"]["yoy"], -9.77, places=2)
+        vol = self._row(vp, "实物量", "白酒销售量")
+        self.assertAlmostEqual(vol["cur"], 139076.05, places=2)
+        self.assertAlmostEqual(vol["yoy"], -16.30, places=2)
+        self.assertAlmostEqual(self._row(vp, "实物量", "白酒库存量")["yoy"], 16.38, places=2)
+        self.assertAlmostEqual(self._row(vp, "分产品", "白酒")["cur"],
+                               28175707878.18, places=2)
+        self.assertAlmostEqual(self._row(vp, "分产品", "白酒")["share_cur"], 97.57, places=2)
+        # 成本表里的同名行不得串进来：收入构成表的省内是 13,031,872,833.19
+        self.assertAlmostEqual(self._row(vp, "分地区", "省内")["cur"],
+                               13031872833.19, places=2)
+        self.assertAlmostEqual(self._row(vp, "分地区", "省外")["yoy"], -14.13, places=2)
+        self.assertAlmostEqual(self._row(vp, "分销售模式", "线上直销")["yoy"], -9.77, places=2)
+        # 每组都有自己的「其他」行（分销售模式的 其他 = 628,001,163.94）
+        self.assertAlmostEqual(self._row(vp, "分销售模式", "其他")["cur"],
+                               628001163.94, places=2)
+        self.assertEqual(str(vp.get("total", {}).get("row_label")), "营业收入合计")
         for f in vp["facts"]:
             self.assertIn("api_chunk 3", str(f.get("locator") or ""))
             self.assertTrue(f.get("text_sha256"), f)
+
+    def test_groups_close_against_the_in_table_total(self):
+        vp = self._vp()
+        groups = {g["group"]: g for g in vp["scope"]["groups"]}
+        self.assertEqual(sorted(groups), ["分产品", "分地区", "分行业", "分销售模式"])
+        for name, g in groups.items():
+            self.assertTrue(g["closed"], f"{name} 应与表内合计闭合：{g}")
+            self.assertLessEqual(abs(g["delta"]), 1.0)
+        self.assertTrue(vp["scope"]["all_closed"])
 
     def test_derived_price_and_structure_gaps_carry_formulas(self):
         vp = self._vp()
@@ -1040,4 +1075,42 @@ class TestQuestionAssessment(unittest.TestCase):
         self.assertTrue(a["span"])
         self.assertIn("未", a["kind_label"])
 
+class TestEvidenceCacheIdentity(unittest.TestCase):
+    """R3：读到旧缓存必须**标陈旧或重建**（资料更新后判断不能还用旧缓存）。"""
 
+    def test_stale_cache_is_rebuilt_on_material_change(self):
+        import report_brief as rb
+        tmp = Path(tempfile.mkdtemp(prefix="wm_cache_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        _orig = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        self.addCleanup(ws_mod.configure_workspace_root, str(_orig))
+        tid = "cache-1"
+        proj = tmp / tid / "project"
+        proj.mkdir(parents=True, exist_ok=True)
+        snap = proj / "fetch_snapshot.json"
+        snap.write_text(json.dumps([{
+            "title": "贵州茅台:2024年年度报告", "url": ISSUER_URL,
+            "text": ANNUAL_TEXT}], ensure_ascii=False), encoding="utf-8")
+        # 第一次：按当前资料建缓存
+        first = rb._evidence(tid)
+        self.assertIsNotNone(first)
+        self.assertTrue(first.get("snapshot_sha256"))
+        loc1 = int(first.get("located") or 0)
+        # 资料变化（追加一段发行人披露）→ 缓存必须重建，而不是沿用
+        snap.write_text(json.dumps([{
+            "title": "贵州茅台:2024年年度报告", "url": ISSUER_URL,
+            "text": ANNUAL_TEXT + "\n\n四、主营业务分析\n\n报告期内营业收入同比增长，"
+                                 "主要系销量增加及产品结构变化所致，销量与渠道结构见下表。\n"}],
+            ensure_ascii=False), encoding="utf-8")
+        again = rb._evidence(tid)
+        self.assertIsNotNone(again)
+        self.assertEqual(str(again.get("snapshot_sha256")),
+                         ne.material_input_sha256(tid))
+        self.assertNotEqual(str(again.get("snapshot_sha256")),
+                            str(first.get("snapshot_sha256")))
+        self.assertGreaterEqual(int(again.get("located") or 0), loc1)
+
+
+if __name__ == "__main__":
+    unittest.main()

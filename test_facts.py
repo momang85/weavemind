@@ -494,3 +494,95 @@ class TestResearchRequestSanitizer(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+class TestOperatingFacts(unittest.TestCase):
+    """R3：量价/结构事实进底稿——带维度、原表行列定位、单位写实、组内闭合。
+
+    纪律：产品/渠道/地区是**重叠维度**，只组内闭合、不相加；实物量与收入单位不同，
+    不做跨单位相除后当"价格"（吨价另立**推算**事实并标注非披露价格）。
+    """
+
+    MATERIAL = {"as_of": "2025-04-30",
+                "volume_price": {
+                    "ok": True, "url": "https://x/annual", "text_sha256": "abc123",
+                    "total": {"row_label": "营业收入合计", "cur": 28876296993.56},
+                    "facts": [
+                        {"group": "实物量", "row_label": "白酒销售量", "label": "实物量·白酒销售量（吨）",
+                         "unit": "吨", "cur": 139076.05, "prev": 166154.73, "yoy": -16.30,
+                         "line": "销售量(吨) 139,076.05 166,154.73 -16.30%",
+                         "locator": "api_chunk 3 · 小节：产量与库存量（字符 1-80）", "text_sha256": "t1"},
+                        {"group": "分产品", "row_label": "白酒", "label": "分产品·白酒（元）",
+                         "unit": "元", "cur": 28175707878.18, "prev": 32389581931.71,
+                         "share_cur": 97.57, "yoy": -13.01,
+                         "line": "白酒 28,175,707,878.18 97.57% 32,389,581,931.71 97.78% -13.01%",
+                         "locator": "api_chunk 4 · 小节：营业收入构成（字符 2-60）", "text_sha256": "t2"},
+                        {"group": "分产品", "row_label": "红酒", "label": "分产品·红酒（元）",
+                         "unit": "元", "cur": 25810899.00, "prev": 34643485.86,
+                         "share_cur": 0.09, "yoy": -25.50,
+                         "line": "红酒 25,810,899.00 0.09% 34,643,485.86 0.12% -25.50%",
+                         "locator": "api_chunk 4 · 小节：营业收入构成（字符 61-100）", "text_sha256": "t2b"},
+                        {"group": "分产品", "row_label": "其他", "label": "分产品·其他（元）",
+                         "unit": "元", "cur": 700527915.38, "prev": 599273419.73, "share_cur": 2.43,
+                         "yoy": 16.90, "line": "其他 700,527,915.38 2.43% 599,273,419.73 2.07% 16.90%",
+                         "locator": "api_chunk 4 · 小节：营业收入构成（字符 61-110）", "text_sha256": "t3"},
+                        # 分销售模式**缺**「其他」行 → 该组范围无法闭合（缺行不当零、差额不自行命名）
+                        {"group": "分销售模式", "row_label": "批发经销", "label": "分销售模式·批发经销（元）",
+                         "unit": "元", "cur": 27854167407.45, "prev": 32052628760.26,
+                         "share_cur": 96.46, "yoy": -13.10,
+                         "line": "批发经销 27,854,167,407.45 96.46% 32,052,628,760.26 96.76% -13.10%",
+                         "locator": "api_chunk 4 · 小节：营业收入构成（字符 111-160）", "text_sha256": "t4"},
+                    ]}}
+
+    def _request(self):
+        import facts as F
+        req = F.parse_research_request(
+            "研究某公司 2023 与 2024 两个年度的营业收入、归母净利润、经营活动现金流净额，"
+            "合并报表口径，数据截至 2025-04-30",
+            company="某公司", company_id="000001.SZ", market="cn",
+            periods=[2023, 2024], caliber="合并", as_of="2025-04-30")
+        self.assertIsNotNone(req)
+        return F, req
+
+    def test_operating_facts_carry_dimensions_units_and_table_locator(self):
+        F, req = self._request()
+        got, notes = F.facts_from_operating(self.MATERIAL, req,
+                                           total_revenue_yuan=28876296993.56)
+        self.assertTrue(got)
+        by = {(f.metric, f.period): f for f in got}
+        vol = by[("sales_volume_baijiu", "2024年")]
+        self.assertEqual(vol.unit, "吨")
+        self.assertEqual(vol.source_locator["dimensions"], {"product": "白酒",
+                                                            "measure": "白酒销售量"})
+        self.assertIn("产量与库存量", vol.source_locator["locator"])
+        self.assertEqual(vol.caliber, "合并")
+        prod = by[("revenue_product_baijiu", "2024年")]
+        self.assertEqual(prod.unit, "元")
+        self.assertEqual(prod.source_locator["dimensions"], {"product": "白酒"})
+        self.assertEqual(prod.source_locator["table"]["row_label"], "白酒")
+        # 吨价是**推算**事实：带公式与输入，措辞标明非披露价格
+        price = by[("baijiu_unit_revenue", "2024年")]
+        self.assertIn("推算", price.metric_label)
+        self.assertTrue(price.formula)
+        self.assertTrue(price.derived_from)
+        self.assertAlmostEqual(float(price.value),
+                               round(28175707878.18 / 139076.05, 2), places=2)
+        # 组内闭合：分产品闭合（白酒+其他≈合计）；分销售模式缺「其他」→ 未闭合、口径留在表格档
+        g = {n["group"]: n for n in notes}
+        self.assertTrue(g["分产品"]["closed"])
+        self.assertFalse(g["分销售模式"]["closed"])
+        self.assertIn("缺行不当作零", g["分销售模式"]["note"])
+        closed = [f for f in got if f.metric == "revenue_product_baijiu"]
+        open_ = [f for f in got if f.metric == "revenue_channel_wholesale"]
+        self.assertEqual(closed[0].caliber, "合并")
+        self.assertNotEqual(open_[0].caliber, "合并",
+                            "未闭合的组不得按合并口径入认证")
+
+    def test_no_material_returns_empty(self):
+        F, req = self._request()
+        got, notes = F.facts_from_operating({"volume_price": {"ok": False}}, req)
+        self.assertEqual(got, [])
+        self.assertEqual(notes, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

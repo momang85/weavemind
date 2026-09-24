@@ -852,6 +852,21 @@ def _read_json(path: Path):
         return None
 
 
+def material_input_sha256(task_id: str, project=None) -> str:
+    """资料输入（fetch_snapshot.json）的内容 hash：缓存身份的一部分（R3）。
+
+    读到旧缓存必须能判断"它是不是按当前资料算的"——只比文件存在与否不够。
+    """
+    try:
+        proj = _project_dir(task_id, project)
+        p = Path(proj) / "fetch_snapshot.json"
+        if not p.is_file():
+            return ""
+        return hashlib.sha256(p.read_bytes()).hexdigest()
+    except Exception:                            # noqa: BLE001 - 读不到按空（会在读侧重建）
+        return ""
+
+
 def _read_inputs(task_id: str, project=None) -> tuple[list[dict], list[dict]]:
     """工作区里的抓取正文与检索摘要（后者无正文定位，只作提示）。"""
     proj = _project_dir(task_id, project)
@@ -1076,6 +1091,67 @@ def _vp_line_volume(text: str, label: str) -> dict | None:
     return None
 
 
+# 营业收入构成表的**组**：表里每组自己列行（含"其他"行），组内闭合才有意义
+_VP_COMPOSITION_HEADS = ("分行业", "分产品", "分地区", "分销售模式")
+
+
+def _vp_parse_row(line: str, *, label: str = "") -> dict | None:
+    """解析构成表一行：`标签 本期值 本期占比 上期值 上期占比 同比`（五列）。"""
+    s = str(line or "").strip()
+    m = re.match(r"^(\*\*)?([^\d\s][^\d]*?)(\*\*)?\s+(\S.*)$", s)
+    lab = str(label or (m.group(2).strip() if m else "")).strip()
+    if not lab:
+        return None
+    tk = _vp_tokens(s)
+    kinds = "".join("n" if k == "n" else "%" for k, _v in tk)
+    if kinds != "n%n%%":
+        return None
+    nums = [val for _k, val in tk]
+    return {"row_label": lab, "cur": nums[0], "share_cur": nums[1],
+            "prev": nums[2], "share_prev": nums[3], "yoy": nums[4],
+            "line": " ".join(s.split())}
+
+
+def _vp_composition(text: str) -> dict:
+    """把『（1）营业收入构成』表按组切开：`{"total": row, "groups": {组: [行, …]}}`。"""
+    lines = str(text or "").splitlines()
+    start = None
+    for i, ln in enumerate(lines):
+        if "营业收入构成" in ln:
+            start = i
+            break
+    if start is None:
+        return {}
+    out: dict = {"total": None, "groups": {}}
+    cur = ""
+    offset = sum(len(str(x)) + 1 for x in lines[:start])      # 表头行的起点
+    for raw in lines[start:start + 160]:
+        s = str(raw or "").strip()
+        step = len(str(raw or "")) + 1
+        if s.startswith("（2）") or s.startswith("(2)"):
+            break
+        if s.startswith("营业收入合计"):
+            row = _vp_parse_row(raw, label="营业收入合计")
+            if row:
+                row.update({"char_start": offset, "char_end": offset + len(str(raw or ""))})
+                out["total"] = row
+            cur = ""
+            offset += step
+            continue
+        if s in _VP_COMPOSITION_HEADS:
+            cur = s
+            out["groups"].setdefault(cur, [])
+            offset += step
+            continue
+        if cur:
+            row = _vp_parse_row(raw)
+            if row:
+                row.update({"char_start": offset, "char_end": offset + len(str(raw or ""))})
+                out["groups"][cur].append(row)
+        offset += step
+    return out
+
+
 def extract_volume_price(docs, *, periods=None) -> dict:
     """从已准入的年报/公告正文抽"量价与结构"事实（确定性、离线、不编数）。
 
@@ -1119,18 +1195,21 @@ def extract_volume_price(docs, *, periods=None) -> dict:
         row = _vp_line_volume(text, label)
         if not row:
             continue
-        facts.append({"group": "实物量", "label": f"白酒{label}（吨）",
+        facts.append({"group": "实物量", "row_label": f"白酒{label}",
+                      "label": f"实物量·白酒{label}（吨）",
                       "unit": "吨", "cur": row["cur"], "prev": row["prev"],
                       "yoy": row["yoy"], "line": row["line"],
                       "locator": _loc(row["char_start"], row["char_end"]),
                       "text_sha256": hashlib.sha256(
                           row["line"].encode("utf-8")).hexdigest()})
-    for group, labels in _VP_GROUPS:
-        for label in labels:
-            row = _vp_line_for(text, label)
-            if not row:
-                continue
-            facts.append({"group": group, "label": f"{label}（元）", "unit": "元",
+    # 收入构成表：**按组取行**（每组含它自己的"其他"行）——组内闭合才有意义；
+    # 只取"批发经销+线上直销"会漏掉表里已披露的"其他"，从而误报"范围未闭合"。
+    comp = _vp_composition(text)
+    total_row = comp.get("total") or None
+    for group, rows in (comp.get("groups") or {}).items():
+        for row in rows:
+            facts.append({"group": group, "row_label": str(row["row_label"]),
+                          "label": f"{group}·{row['row_label']}（元）", "unit": "元",
                           "cur": row["cur"], "prev": row.get("prev"),
                           "share_cur": row.get("share_cur"),
                           "share_prev": row.get("share_prev"), "yoy": row["yoy"],
@@ -1143,14 +1222,15 @@ def extract_volume_price(docs, *, periods=None) -> dict:
                 "locator": "", "source_n": "", "url": str(doc.get("url") or ""),
                 "title": str(doc.get("title") or ""), "text_sha256": "",
                 "reason": "候选中未找到销售量/收入构成行"}
-    by_label = {f["label"]: f for f in facts}
+    def _f(group: str, row_label: str) -> dict:
+        for f in facts:
+            if f["group"] == group and f["row_label"] == row_label:
+                return f
+        return {}
+
     derived: list[dict] = []
-
-    def _f(key):
-        return by_label.get(key) or {}
-
-    vol = _f("白酒销售量（吨）")
-    rev = _f("白酒（元）")
+    vol = _f("实物量", "白酒销售量")
+    rev = _f("分产品", "白酒")
     if vol.get("cur") and rev.get("cur") and vol.get("prev") and rev.get("prev"):
         p_cur = rev["cur"] / vol["cur"]
         p_prev = rev["prev"] / vol["prev"]
@@ -1161,12 +1241,12 @@ def extract_volume_price(docs, *, periods=None) -> dict:
             "formula": (f"({rev['cur']} / {vol['cur']})，上期 "
                         f"({rev['prev']} / {vol['prev']})"),
             "note": "发行人未直接披露吨价，这是用分产品收入与销量推算的口径"})
-    ins, out = _f("省内（元）"), _f("省外（元）")
+    ins, out = _f("分地区", "省内"), _f("分地区", "省外")
     if isinstance(ins.get("yoy"), (int, float)) and isinstance(out.get("yoy"), (int, float)):
         derived.append({"label": "省外与省内收入降幅差", "unit": "个百分点",
                         "cur": round(out["yoy"] - ins["yoy"], 2),
                         "note": f"省外 {out['yoy']:g}% vs 省内 {ins['yoy']:g}%"})
-    wm, ol = _f("批发经销（元）"), _f("线上直销（元）")
+    wm, ol = _f("分销售模式", "批发经销"), _f("分销售模式", "线上直销")
     if isinstance(wm.get("yoy"), (int, float)) and isinstance(ol.get("yoy"), (int, float)):
         derived.append({"label": "线上直销与批发经销降幅差", "unit": "个百分点",
                         "cur": round(ol["yoy"] - wm["yoy"], 2),
@@ -1176,19 +1256,39 @@ def extract_volume_price(docs, *, periods=None) -> dict:
         "吨价，也未拆分量、价、结构各自的贡献。",
         "销售量为**实物量（吨）**，收入还含红酒与其他业务：收入降幅与销量降幅的差"
         "不能全额当作价格效应。",
-        "分产品/分地区/分销售模式为发行人披露的收入构成，`占比`为 2024 年结构；"
+        "分行业/分产品/分地区/分销售模式为发行人披露的收入构成，`占比`为 2024 年结构；"
+        "各组**分别**与表内「营业收入合计」闭合（本材料四组均闭合），跨组不相加；"
         "两期比较未含价格口径（含税/不含税）说明。",
         "以上事实来自公告接口片段（api_chunk）；片段跳号处为未取得的原文区间，"
         "跨缺口摘录按分段拼接标注。",
     ]
     sample = facts[0]
-    # 覆盖是"部分"：量（销量/生产量/库存量）与结构（分产品/分地区/分销售模式）已取得，
-    # 但**价未被发行人披露**（吨价是我们推算的），且渠道/地区表小计与总营收**范围未闭合**
-    # （R3 复核：小计约 282.483 亿元 vs 总营收 288.76 亿元，差额不自行命名为"其他业务"）。
-    _cov_note = ("量（销售量/生产量/库存量）与结构（分产品/分地区/分销售模式）已取得；"
-                 "价无发行人披露口径（吨价为推算）；分销售模式/分地区表小计与营业收入"
-                 "总额范围未闭合，差额未取得说明")
-    _scope = {"product_total": None, "scope_note": _cov_note}
+    # 覆盖是"部分"：量（销量/生产量/库存量）与结构（分行业/分产品/分地区/分销售模式）
+    # 已取得；**价没有披露口径**（吨价是按分产品收入÷销售量推算的）。
+    # 每个组**各自**与表内"营业收入合计"闭合校验（含该组自己的"其他"行）——
+    # 只取"批发经销+线上直销"会漏掉表里已披露的"其他"，从而误报"范围未闭合"。
+    _cov_note = ("量（销售量/生产量/库存量）与结构（分行业/分产品/分地区/分销售模式）"
+                 "已取得（每组含表内「其他」行，与营业收入合计闭合）；价无披露口径"
+                 "（吨价为推算，非披露价格）")
+    _total = dict(total_row or {})
+    _scope = {"total": _total, "groups": [], "product_total": None, "scope_note": _cov_note}
+    for group, rows in (comp.get("groups") or {}).items():
+        sub = float(sum(r["cur"] for r in rows))
+        _g = {"group": group, "rows": [str(r["row_label"]) for r in rows],
+              "subtotal": sub, "total": (float(_total.get("cur")) if _total.get("cur") else None),
+              "closed": False, "delta": None, "ratio": None, "note": ""}
+        if _g["total"]:
+            _d = sub - _g["total"]
+            _r = abs(_d) / _g["total"]
+            _g.update({"delta": _d, "ratio": round(_r, 6), "closed": _r <= 0.005})
+            _g["note"] = (f"{group}组 {len(rows)} 行合计与表内营业收入合计"
+                          f"{'闭合' if _g['closed'] else '**未闭合**'}"
+                          f"（相差 {_d:,.0f} 元，{_r:.4%}）"
+                          + ("" if _g["closed"] else "：差额未取得说明，不自行归类"))
+        else:
+            _g["note"] = f"{group}组已取得 {len(rows)} 行，缺表内合计，范围无法校验"
+        _scope["groups"].append(_g)
+    _scope["all_closed"] = bool(_scope["groups"]) and all(g["closed"] for g in _scope["groups"])
     try:
         _rev = next((f for f in facts if str(f.get("label")) == "白酒（元）"), None)
         _red = next((f for f in facts if str(f.get("label")) == "红酒（元）"), None)
@@ -1203,6 +1303,7 @@ def extract_volume_price(docs, *, periods=None) -> dict:
         "coverage": "partial",
         "summary": _cov_note,
         "scope": _scope,
+        "total": _total,
         "locator": sample.get("locator") or "", "source_n": "",
         "url": str(doc.get("url") or ""), "title": str(doc.get("title") or ""),
         "text_sha256": sample.get("text_sha256") or "",
@@ -1381,6 +1482,8 @@ def build(task_id: str, *, periods=None, company: str = "", company_id: str = ""
         # 09-23 F：接口片段映射（文档偏移 → 片段号）。公告文本 API 的 page_index 是
         # **片段**不是 PDF 页；记录里的 char_start/end 是**合并文档偏移**，靠这张表
         # 才能回到"第几段、段内第几字"（引用证据包用得到）。
+        # R3：记录"这份缓存是按哪份资料算的"——读侧据此判陈旧并重建
+        "snapshot_sha256": material_input_sha256(task_id, project),
         "chunk_offsets": _chunk_offsets_of(docs),
         # R1：逐文档映射（多文档各用各的）；跨缺口摘录已在记录层分段标注
         "chunk_offsets_by_doc": _chunk_maps_of(docs),

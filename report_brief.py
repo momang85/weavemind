@@ -103,6 +103,31 @@ _RESEARCH_QUESTIONS: tuple[tuple[str, str, str], ...] = (
     ("operating_cashflow", "现金变化与利润覆盖的关系",
      "单期比率不构成趋势判断；来源结构未核实前，不判断现金流质量"),
 )
+# R3：关键判断的"意义"与逐问题资料计划的固定措辞（与问题同键；不因数据好看而放宽）
+_JUDGMENT_MEANING = {
+    "revenue": "决定后续所有经营判断的分母：收入是量、价、结构三者共同作用的结果，"
+               "不拆开就分不清是需求走弱、结构下移还是主动调整。",
+    "net_profit": "决定盈利质量与可持续性：降幅是否由毛利端造成、还是被费用/税项/"
+                  "非经营性项目放大，直接改变对客户偿债与分红能力的看法。",
+    "operating_cashflow": "决定利润的现金含量与短期偿付基础：利润率与覆盖率的机械关系"
+                          "容易被读成「回款改善」，需要现金来源结构才能判断。",
+}
+_PLAN_WANT = {
+    "revenue": "确认收入下降的**量、价、结构**来源，以及各来源对降幅的贡献",
+    "net_profit": "确认利润降幅中**毛利端与毛利线以下**各占多少",
+    "operating_cashflow": "确认经营现金流变化的**来源结构**（收现、营运资本、税费）",
+}
+_PLAN_IMPACT = {
+    "revenue": "若量降价升，则判断偏向主动结构调整；若量价同降且库存上升，"
+               "则偏向需求与渠道压力，风险语境随之改变",
+    "net_profit": "若主要是毛利端，客户盈利受产品结构驱动；若主要是毛利线以下，"
+                  "则需要查费用、减值或非经常性项目，'暂时性'判断要改写",
+    "operating_cashflow": "若现金下降来自营运资本占用增加，回款质量下降；"
+                          "若来自税费/结算节奏，短期偿付判断不变",
+}
+_BANK_PRIORITY = ("债务到期结构与利率", "受限资金与对外担保", "授信与用信情况",
+                  "主要客户与回款条款", "实际控制人与关联交易")
+
 
 # 阅读视角 → 需要补充的材料（F2）：两种视角复用同一底稿，但要查的东西不同。
 # 视角由用户声明（契约字段），**不按公司名或机构名推断**。
@@ -330,12 +355,26 @@ def _material_fingerprint(evidence: dict | None) -> str:
 
 
 def _evidence(task_id: str, *, ws_dir=None) -> dict | None:
-    """读叙事证据（年报/公告正文的小节定位）；没落盘时按契约重算一次（幂等、不联网）。"""
+    """读叙事证据（年报/公告正文的小节定位）；没落盘时按契约重算一次（幂等、不联网）。
+
+    R3：**读到旧缓存必须标陈旧或重建**——缓存里记着它按哪份 `fetch_snapshot.json`
+    算（`snapshot_sha256`）；与当前资料不符（或旧格式没有该字段）时按当前资料重建，
+    避免"资料已更新、判断还用旧缓存"（实机：新增公告片段后研究状态不更新）。
+    """
     try:
         import narrative_evidence as ne
         data = ne.read(task_id, ws_dir=ws_dir)
-        if data is None:
-            data = ne.build(task_id, ws_dir=ws_dir)
+        cur = ne.material_input_sha256(task_id)
+        stale = bool(data is not None and cur
+                     and str(data.get("snapshot_sha256") or "") != cur)
+        legacy = bool(data is not None and cur and not data.get("snapshot_sha256"))
+        if data is None or stale or legacy:
+            fresh = ne.build(task_id, ws_dir=ws_dir)
+            if isinstance(fresh, dict):
+                if stale or legacy:
+                    logger.info("叙事证据缓存陈旧（task=%s，%s）：已按当前资料重建",
+                                task_id, "资料变化" if stale else "旧格式无资料指纹")
+                data = fresh
         return data if isinstance(data, dict) else None
     except Exception as exc:                     # noqa: BLE001 - 证据缺失不拖垮简报
         logger.warning("叙事证据读取失败（task=%s）：%s", task_id, str(exc)[:140])
@@ -630,12 +669,23 @@ def _research_questions(rows, derived, periods, evidence, citations, changes, *,
             support["has_observation"] = bool(_a.get("has_observation"))
             # 边界随材料更新：已有分解材料时，不再写"未取得量价/分部数据"（那是旧状态）
             if _a.get("kind") == "decomposition":
-                boundary = ("量价/结构数据来自发行人披露的收入构成与产量销量表；"
-                            "各因素（量、价、结构）的**贡献度**未拆分，"
-                            "管理层的定量说明也未给出；" + str(boundary or ""))
+                # 已有分解材料：不再保留"未取得量价拆分与分部数据"这类过期边界
+                boundary = ("量价/结构数据来自发行人披露的收入构成与产量销量表（各组与表内"
+                            "「营业收入合计」分别闭合）；各因素（量、价、结构）的**贡献度**"
+                            "未拆分，管理层的定量说明也未给出；吨价为推算、不等于披露价格，"
+                            "也不能单独证明提价")
         out.append({"metric": metric, "question": q_text, "observation": obs,
                     "support": support, "boundary": boundary,
                     "assessment": _a,
+                    "meaning": str(_JUDGMENT_MEANING.get(metric) or ""),
+                    "plan": {
+                        "want": str(_PLAN_WANT.get(metric) or q_text),
+                        "can_answer": (str(_a.get("kind_label") or "无相关材料")
+                                       + (f"（覆盖：{ {'full': '完整', 'partial': '部分', 'none': '无'}.get(str(_a.get('coverage') or 'none'), '无') }）")),
+                        "missing": "、".join(MATERIALS_BY_METRIC.get(metric, ())),
+                        "next_material": "、".join(MATERIALS_BY_METRIC.get(metric, ())),
+                        "impact": str(_PLAN_IMPACT.get(metric) or ""),
+                    },
                     "next_action": list(MATERIALS_BY_METRIC.get(metric, ()))})
     # 项3/R1：收入问题的支持由**逐问题评估**（`assessments`）决定：发行人披露的
     # 量价/结构数据算"分解覆盖"（部分或完整），背景与读数只作已取材料。
@@ -2300,11 +2350,39 @@ def render_brief_markdown(structure: dict, body: str = "",
                  f"采用来源 {sc.get('adopted_sources', 0)} 条"
                  f"（未采用 {sc.get('audit_sources', 0)} 条留在内部审计）。")
     lines.append("")
+    # R3：**首屏先给二至三个关键判断**（观察/意义/依据/边界/下一步），完整逐问明细在
+    # 紧随其后的『研究问题与下一步』；两处不重复打印同一组观察。
+    questions = structure.get("research_questions") or []
+    _picks = [q for q in questions if str(q.get("metric")) in ("revenue", "net_profit",
+                                                               "operating_cashflow")][:3]
+    if _picks:
+        lines.append("## 关键判断与下一步")
+        for q in _picks:
+            sup = q.get("support") or {}
+            a = q.get("assessment") or {}
+            cov = {"full": "完整", "partial": "部分", "none": "无"}.get(
+                str(sup.get("coverage") or "none"), "无")
+            loc = str(sup.get("locator") or "")
+            src = f"来源 [{sup.get('source_n')}]" if sup.get("source_n") else ""
+            where = "；".join(x for x in (src, loc) if x) or "见『研究问题与下一步』的逐问明细"
+            lines.append(f"- **{q.get('observation')}**")
+            lines.append(f"  - 意义：{q.get('meaning') or '——'}")
+            _kl = str(a.get("kind_label") or "未取得")
+            if str(a.get("kind")) == "decomposition":
+                _kl = "量价/结构数据（分解覆盖）"
+            lines.append(f"  - 依据：{_kl}；覆盖：{cov}；{where}")
+            lines.append(f"  - 边界：{q.get('boundary')}")
+            lines.append(f"  - 下一步：{'、'.join((q.get('plan') or {}).get('next_material', '').split('、')[:3]) or '补齐底稿事实'}"
+                         f"（补到后会怎样改变判断见附录『逐问题资料计划』）")
+        lines.append("")
     lines.append("## 关键发现")
     findings = structure.get("findings") or []
     if findings:
-        for f in findings:
+        for f in findings[:3]:
             lines.append(f"- {f.get('text')}")
+        if len(findings) > 3:
+            lines.append(f"- 其余 {len(findings) - 3} 项读数与全部同比/比率见『财务对照』与"
+                         f"『同比与比率（可复算）』（本节不重复）。")
     else:
         lines.append("- 本次未取得可复算的财务事实（见文末资料缺口）。")
     lines.append("")
@@ -2347,7 +2425,11 @@ def render_brief_markdown(structure: dict, body: str = "",
                 support = "材料：未取得对应披露，**观察成立、原因待证**"
                 if sup.get("reading"):
                     support += f"（已取材料：{sup.get('reading')}）"
-            lines.append(f"- **{q.get('question')}**：{q.get('observation')}")
+            _obs = str(q.get("observation") or "")
+            _short = _obs.split("（")[0].strip() if "（" in _obs else _obs
+            if len(_short) > 60:
+                _short = _short[:60].rstrip()
+            lines.append(f"- **{q.get('question')}**：{_short}（完整读数见『关键发现』）")
             lines.append(f"  - {support}；边界：{q.get('boundary')}；"
                          f"下一步：{'、'.join(q.get('next_action') or []) or '补齐底稿事实'}")
         lines.append("")
@@ -2360,6 +2442,12 @@ def render_brief_markdown(structure: dict, body: str = "",
         _vol_rows = [f for f in facts if str(f.get("group")) == "实物量"]
         _comp_rows = [f for f in facts if str(f.get("group")) != "实物量"]
 
+        def _vf(group: str, row_label: str) -> dict:
+            for f in facts:
+                if str(f.get("group")) == group and str(f.get("row_label")) == row_label:
+                    return f
+            return {}
+
         def _n(v, digits: int = 2) -> str:
             try:
                 return f"{float(v):,.{digits}f}"
@@ -2371,18 +2459,24 @@ def render_brief_markdown(structure: dict, body: str = "",
             lines.append("| 实物量 | 2024 | 2023 | 同比 |")
             lines.append("|---|---|---|---|")
             for f in _vol_rows:
-                lines.append(f"| {f.get('label')} | {_n(f.get('cur'))} | {_n(f.get('prev'))} "
+                _rl = str(f.get("row_label") or f.get("label") or "").replace("实物量·", "")
+                lines.append(f"| {_rl} | {_n(f.get('cur'))} | {_n(f.get('prev'))} "
                              f"| {f.get('yoy'):+g}% |")
         if _comp_rows:
             lines.append("")
-            lines.append("| 收入构成 | 2024（元） | 2023（元） | 同比 | 2024 占比 |")
+            lines.append("| 收入构成（发行人披露） | 2024（元） | 2023（元） | 同比 | 2024 占比 |")
             lines.append("|---|---|---|---|---|")
             for f in _comp_rows:
                 share = (f"{f.get('share_cur'):g}%" if isinstance(f.get("share_cur"),
                                                                   (int, float)) else "—")
-                lines.append(f"| {f.get('group')}·{str(f.get('label')).replace('（元）', '')} "
+                label = str(f.get("row_label") or f.get("label") or "").replace("（元）", "")
+                lines.append(f"| {f.get('group')}·{label} "
                              f"| {_n(f.get('cur'), 2)} | {_n(f.get('prev'), 2)} "
                              f"| {f.get('yoy'):+g}% | {share} |")
+            lines.append("")
+            lines.append(f"- 各组**分别闭合**：每组含表内「其他」行，与「营业收入合计」"
+                         f"逐组校验；未闭合的组按表格口径展示、不并入合计"
+                         f"（本材料四组均闭合）。")
         for d in (vp.get("derived") or []):
             if not isinstance(d, dict):
                 continue
@@ -2402,14 +2496,14 @@ def render_brief_markdown(structure: dict, body: str = "",
             lines.append(_txt)
         # 直观关系：把三个披露读数放到同一句里（不引入新数字）
         _rel = []
-        _rev = next((f for f in _comp_rows if str(f.get("label")) == "白酒（元）"), None)
-        _vrow = next((f for f in _vol_rows if str(f.get("label")) == "白酒销售量（吨）"), None)
+        _rev = _vf("分产品", "白酒")
+        _vrow = _vf("实物量", "白酒销售量")
         if _rev and _vrow and isinstance(_rev.get("yoy"), (int, float)) \
                 and isinstance(_vrow.get("yoy"), (int, float)):
             _dir = "小于" if abs(_rev["yoy"]) < abs(_vrow["yoy"]) else "大于"
             _rel.append(f"白酒收入降幅（{_rev['yoy']:g}%）{_dir}销售量降幅"
                         f"（{_vrow['yoy']:g}%），差额指向吨价变动（推算见上）")
-        _inv = next((f for f in _vol_rows if str(f.get("label")) == "白酒库存量（吨）"), None)
+        _inv = _vf("实物量", "白酒库存量")
         if _inv and isinstance(_inv.get("yoy"), (int, float)) and _inv["yoy"] > 0:
             _rel.append(f"库存量上升（{_inv['yoy']:g}%）与销售量下降并存，"
                         f"渠道与成品库存的消化需要后续期间数据检验")
@@ -2425,7 +2519,15 @@ def render_brief_markdown(structure: dict, body: str = "",
             _src = f"（来源 [{vp.get('source_n')}]）" if vp.get("source_n") else ""
             lines.append("")
             lines.append(f"- 出处：{vp.get('locator')}{_src}")
-        lines.append("")
+        # R3：附录·逐问题资料计划（想确认什么/能回答什么/缺什么/补哪张表/补到后会怎样）
+    _plans = [(q, q.get("plan") or {}) for q in (structure.get("research_questions") or [])]
+    if any(p for _q, p in _plans):
+        _appendix_extra.append(("### 逐问题资料计划", [
+            *(f"- **{q.get('question')}**：想确认 {p.get('want')}；现有证据"
+              f"{p.get('can_answer')}；缺 {p.get('missing')}；"
+              f"下一步补 {p.get('next_material')}；补到后的影响：{p.get('impact')}"
+              for q, p in _plans if p)]))
+    lines.append("")
     # 业务背景：公司怎么赚钱（只取与本期变化有关的年报段落，带 [n] 与小节定位）
     lines.append("## 业务背景")
     background = structure.get("background") or []
@@ -2558,9 +2660,10 @@ def render_brief_markdown(structure: dict, body: str = "",
     changes = structure.get("change_explanation") or {}
     rows_ch = changes.get("changes") or []
     if rows_ch:
+        # R3：同一组观察不在多处重复打印——首屏『关键判断与下一步』与『关键发现』已给读数
         lines.append("**发生了什么（数据观察）**：")
-        for c in rows_ch:
-            lines.append(f"- {c.get('text')}")
+        lines.append("- 变化读数见开头『关键判断与下一步』与『关键发现』（本节只讲解释与边界，"
+                     "不重复数字）。")
     else:
         lines.append("- 本次未取得可复算的同比，无法说明变化（见文末资料缺口）。")
     management = changes.get("management") or []

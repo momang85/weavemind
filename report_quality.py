@@ -111,6 +111,63 @@ def accept_rank(overall: str) -> int:
 _QUALITY_OBS_CAP = 10
 
 
+# ── R3：候选质量向量消费**逐问题评估**与准入证据 ──────────────────────
+# 契约必答问题（分母来自契约，不因候选稿删掉问题而缩小）
+_MANDATORY = ("revenue", "net_profit", "operating_cashflow")
+_METRIC_TOKENS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("营业收入", ("营业收入", "营收")),
+    ("归母净利润", ("归母净利润", "净利润")),
+    ("经营活动现金流净额", ("经营活动现金流净额", "经营现金流净额")),
+    ("毛利率", ("毛利率",)),
+    ("归母净利率", ("归母净利率",)),
+    ("资产负债率", ("资产负债率",)),
+    ("现金覆盖", ("现金覆盖", "现金流对归母净利润的覆盖")),
+)
+_NUM_WITH_UNIT = re.compile(r"(-?\d[\d,]*(?:\.\d+)?)\s*(亿元|万元|元|%|吨)")
+
+
+def _material_assessments(tid: str) -> dict:
+    """材料侧的逐问题评估（**与候选正文无关**）：删掉正文里的问题不会缩小分母。"""
+    try:
+        import report_brief as rb
+        st = rb.read_structure(tid) or {}
+        return dict(st.get("question_assessments") or {})
+    except Exception:                            # noqa: BLE001 - 读不到按未知
+        return {}
+
+
+def _contradictions(text: str) -> int:
+    """跨章节自相矛盾：同一指标+单位在文内出现**不同数值**的次数（保守判定）。
+
+    只比同单位、已规范化的数值；同一值重复出现不算矛盾。仅作**比较用**的计数，
+    不参与验收结论（验收另有 claim/溯源检查）。
+    """
+    body = str(text or "")
+    groups: dict[tuple[str, str, str], set] = {}
+    for marker, tokens in _METRIC_TOKENS:
+        for m in re.finditer("|".join(re.escape(t) for t in tokens), body):
+            window = body[m.end(): m.end() + 60]
+            for num in _NUM_WITH_UNIT.finditer(window):
+                key = (marker, num.group(2),
+                       "value" if num.group(2) not in ("%",) else "pct")
+                try:
+                    val = round(float(num.group(1).replace(",", "")), 4)
+                except ValueError:
+                    continue
+                groups.setdefault(key, set()).add(val)
+    return sum(1 for vals in groups.values() if len(vals) > 1)
+
+
+def _facts_missing(tid: str, goal: str, body: str) -> int:
+    """信息保留：底稿必需事实/派生读数在正文里缺了几项（复用验收器的完整度检查）。"""
+    try:
+        from acceptance_checker import check_analysis_completeness
+        res = check_analysis_completeness(str(body or ""), goal, tid)
+        return int(res.get("facts_missing") or 0) + int(res.get("derived_missing") or 0)
+    except Exception:                            # noqa: BLE001 - 算不出按未知（0）
+        return 0
+
+
 def candidate_quality(tid: str, goal: str, body: str, *,
                       project=None) -> dict:
     """候选正文的**质量向量**（D2）：有证据的问题覆盖、未支持结论、分析遗漏与重复。
@@ -156,8 +213,24 @@ def candidate_quality(tid: str, goal: str, body: str, *,
                 dup += 1
             else:
                 seen.add(key)
+        # R3：契约问题的**有据覆盖**（分母来自契约；材料侧评估，与正文无关）
+        assessments = _material_assessments(tid)
+        answered = partial = 0
+        for metric in _MANDATORY:
+            a = assessments.get(metric) or {}
+            if a.get("answered"):
+                answered += 1
+            elif str(a.get("coverage") or "none") == "partial":
+                partial += 1
         return {
             "analysis_ok": bool(cov.get("ok")),
+            # 先看的几项（R3 顺序）：有据覆盖 → 矛盾 → 信息保留，再谈重复/观察数
+            "answered_questions": answered,
+            "partial_questions": partial,
+            "unanswered_questions": max(0, len(_MANDATORY) - answered - partial),
+            "coverage_total": len(_MANDATORY),
+            "contradictions": _contradictions(body),
+            "facts_missing": _facts_missing(tid, goal, body),
             "observations": min(int(cov.get("observations") or 0), _QUALITY_OBS_CAP),
             "claims": len(claims),
             "bound": counts["bound"], "partial": counts["partial"],
@@ -183,6 +256,27 @@ def _quality_tiebreak(cur_q: dict, cand_q: dict) -> tuple[bool, str] | None:
                           "当前稿不满足")
         return False, ("候选稿的分析不满足最低要求（缺数据观察或意义/局限），"
                        "保留当前稿")
+    # R3 顺序：① 有据覆盖更多 ② 跨章节矛盾更少 ③ 信息保留更全 ④ 未支持结论更少
+    # ⑤ 重复更少 ⑥ 观察更多（有上限）。**观察句数不再是"更优"的来源**——
+    # 多写几句观察不足以赢过"多答一个契约问题"。
+    ca_ = int(cand_q.get("answered_questions") or 0)
+    cu_ = int(cur_q.get("answered_questions") or 0)
+    if ca_ != cu_:
+        diff = f"契约问题有据覆盖 {cu_}/{cur_q.get('coverage_total') or 3}→{ca_}/{cand_q.get('coverage_total') or 3}"
+        return (True, f"质量向量更优：{diff}") if ca_ > cu_ else (
+            False, f"候选稿的有据覆盖更少（{diff}），保留当前稿")
+    cc = int(cand_q.get("contradictions") or 0)
+    cuc = int(cur_q.get("contradictions") or 0)
+    if cc != cuc:
+        diff = f"跨章节矛盾 {cuc}→{cc}"
+        return (True, f"质量向量更优：{diff}") if cc < cuc else (
+            False, f"候选稿的跨章节矛盾更多（{diff}），保留当前稿")
+    cf = int(cand_q.get("facts_missing") or 0)
+    cuf = int(cur_q.get("facts_missing") or 0)
+    if cf != cuf:
+        diff = f"底稿事实缺失 {cuf}→{cf}"
+        return (True, f"质量向量更优：{diff}") if cf < cuf else (
+            False, f"候选稿丢掉了必须保留的事实（{diff}），保留当前稿")
     cu = int(cur_q.get("unsupported_or_unchecked") or 0)
     ca = int(cand_q.get("unsupported_or_unchecked") or 0)
     if ca != cu:

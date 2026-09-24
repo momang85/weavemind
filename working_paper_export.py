@@ -102,7 +102,30 @@ def build_result(task_id: str, goal: str, *, project: str | None = None) -> dict
 
     request, candidates, request_source = resolve_request(task_id, goal, md, resolution)
     facts = _facts.facts_from_financials(payload)
-    paper = build_working_paper(facts, request)
+    # R3：把已准入年报片段里的**量价/结构**事实并入底稿（含产品/渠道/地区维度、
+    # 原表行列定位、组内合计闭合校验）。缺材料时为空，不填零、不编。
+    op_facts: list = []
+    scope_notes: list = []
+    try:
+        import narrative_evidence as _ne
+        material = _ne.read(task_id) or {}
+        _periods = [int(y) for y in (getattr(request, "periods", None) or [])]
+        _last = max(_periods) if _periods else None
+        _total = None
+        if _last is not None:
+            for _f in facts:
+                if (str(getattr(_f, "metric", "")) == "revenue"
+                        and str(getattr(_f, "period", "")) == f"{_last}年"):
+                    try:
+                        _total = float(_f.value) * 1e8        # 亿元 → 元（与年报表同单位）
+                    except (TypeError, ValueError):
+                        _total = None
+                    break
+        op_facts, scope_notes = _facts.facts_from_operating(
+            material, request, total_revenue_yuan=_total)
+    except Exception as exc:                     # noqa: BLE001 - 经营事实是增强，不拖垮主线
+        logger.warning("经营维度事实并入失败（task=%s）：%s", task_id, str(exc)[:140])
+    paper = build_working_paper(list(facts) + list(op_facts), request)
     return {
         "ok": True,
         "request": request.as_dict(),
@@ -140,6 +163,26 @@ def build_result(task_id: str, goal: str, *, project: str | None = None) -> dict
                             "source_locator": r.get("source_locator"),
                             "derived_from": list(r.get("derived_from") or [])}
                            for r in paper.derived],
+        # R3：经营维度事实（产品/渠道/地区 + 实物量 + 推算）+ 组内闭合说明
+        "operating_detail": [{"metric": r.get("metric"),
+                              "metric_label": r.get("metric_label"),
+                              "period": r.get("period"),
+                              "value": r.get("value"),
+                              "unit": r.get("unit"),
+                              "caliber": r.get("caliber"),
+                              "caliber_evidence": r.get("caliber_evidence"),
+                              "dimensions": ((r.get("source_locator") or {})
+                                             .get("dimensions") or {}),
+                              "table": ((r.get("source_locator") or {})
+                                        .get("table") or {}),
+                              "locator": ((r.get("source_locator") or {})
+                                          .get("locator") or ""),
+                              "fact_id": r.get("fact_id"),
+                              "verify_state": r.get("verify_state"),
+                              "formula": r.get("formula") or ""}
+                             for r in paper.rows
+                             if str(r.get("metric") or "") in _facts.OPERATING_METRICS],
+        "scope_notes": scope_notes,
         "rows": len(paper.rows), "derived": len(paper.derived),
         "gaps": paper.gaps, "problems": [p.as_dict() for p in paper.problems],
         "audit": paper.audit,

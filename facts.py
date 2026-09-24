@@ -67,6 +67,243 @@ DERIVED_METRICS: tuple[tuple[str, str], ...] = (
 )
 METRIC_LABELS.update(dict(DERIVED_METRICS))
 
+# R3：经营维度指标——来自年报"产量/销量/库存"与"营业收入构成"表的**分维度**事实。
+# 每个维度组分别闭合（产品/渠道/地区**不相加**）；单位按披露写实（吨 / 元）。
+OPERATING_LABELS: tuple[tuple[str, str], ...] = (
+    ("sales_volume_baijiu", "白酒销售量（吨）"),
+    ("production_volume_baijiu", "白酒生产量（吨）"),
+    ("inventory_volume_baijiu", "白酒库存量（吨）"),
+    ("revenue_product_baijiu", "分产品·白酒收入"),
+    ("revenue_product_hongjiu", "分产品·红酒收入"),
+    ("revenue_product_other", "分产品·其他收入"),
+    ("revenue_region_jiangsu", "分地区·省内收入"),
+    ("revenue_region_outside", "分地区·省外收入"),
+    ("revenue_channel_wholesale", "分销售模式·批发经销收入"),
+    ("revenue_channel_online", "分销售模式·线上直销收入"),
+    ("revenue_industry_liquor", "分行业·酒类行业收入"),
+    ("revenue_industry_other", "分行业·其他业务收入"),
+    ("revenue_channel_other", "分销售模式·其他收入"),
+    ("revenue_total_reported", "营业收入合计（表内）"),
+    ("baijiu_unit_revenue", "白酒吨价（推算，非披露价格）"),
+)
+METRIC_LABELS.update(dict(OPERATING_LABELS))
+# 经营维度指标的 slug 集合（读侧判断“这条是不是经营维度事实”）
+OPERATING_METRICS = frozenset(m for m, _label in OPERATING_LABELS)
+
+# 抽取器的 (组, 行标签) → 底稿指标 slug（一一对应；抽取器只认披露原表，不改口径）。
+# 按**组**取行：每组都有自己的「其他」行，只取主打行会漏掉表内已披露的部分。
+_OPERATING_SLUGS: dict[tuple[str, str], tuple[str, str]] = {
+    ("实物量", "白酒销售量"): ("sales_volume_baijiu", "吨"),
+    ("实物量", "白酒生产量"): ("production_volume_baijiu", "吨"),
+    ("实物量", "白酒库存量"): ("inventory_volume_baijiu", "吨"),
+    ("分行业", "酒类行业"): ("revenue_industry_liquor", "元"),
+    ("分行业", "其他业务"): ("revenue_industry_other", "元"),
+    ("分产品", "白酒"): ("revenue_product_baijiu", "元"),
+    ("分产品", "红酒"): ("revenue_product_hongjiu", "元"),
+    ("分产品", "其他"): ("revenue_product_other", "元"),
+    ("分地区", "省内"): ("revenue_region_jiangsu", "元"),
+    ("分地区", "省外"): ("revenue_region_outside", "元"),
+    ("分销售模式", "批发经销"): ("revenue_channel_wholesale", "元"),
+    ("分销售模式", "线上直销"): ("revenue_channel_online", "元"),
+    ("分销售模式", "其他"): ("revenue_channel_other", "元"),
+}
+# 维度组：组内闭合校验用（各自对上表内"营业收入合计"）
+_OPERATING_GROUPS: dict[str, tuple[str, ...]] = {
+    "分行业": ("revenue_industry_liquor", "revenue_industry_other"),
+    "分产品": ("revenue_product_baijiu", "revenue_product_hongjiu",
+               "revenue_product_other"),
+    "分地区": ("revenue_region_jiangsu", "revenue_region_outside"),
+    "分销售模式": ("revenue_channel_wholesale", "revenue_channel_online",
+                   "revenue_channel_other"),
+}
+_SCOPE_TOL = 0.005          # 合计与营业收入总额的相对容差（0.5%）
+
+
+def _operating_dimensions(group: str, label: str) -> dict:
+    """维度标注：产品/渠道/地区分开写（重叠维度不相加）。"""
+    item = label.replace("（元）", "").replace("（吨）", "")
+    if group == "分产品":
+        return {"product": item}
+    if group == "分地区":
+        return {"region": item}
+    if group == "分行业":
+        return {"industry": item}
+    if group == "分销售模式":
+        return {"channel": item}
+    if group == "实物量":
+        return {"product": "白酒", "measure": item}
+    return {"item": item}
+
+
+def facts_from_operating(material: dict | None, request=None, *,
+                         total_revenue_yuan: float | None = None,
+                         ) -> tuple[list[Fact], list[dict]]:
+    """把已准入年报片段里的**量价/结构**事实写进底稿（R3）。
+
+    返回 `(facts, scope_notes)`。范围与单位纪律（复核点名）：
+
+    - **分别闭合**：分产品/分地区/分销售模式各自与营业收入总额比对；只有闭合的组
+      才按"合并"口径入认证（未闭合的组如实记"表格口径"并带差额说明，**差额不自行
+      命名"其他业务"**）；
+    - **单位写实**：实物量是吨、收入是元，不做跨单位相除后当"价格"；
+      "白酒吨价"单列**推算**事实并标注非披露价格；
+    - **维度不相加**：产品/渠道/地区是重叠维度，只各组内闭合，不跨组相加。
+    """
+    vp = dict((material or {}).get("volume_price") or {})
+    facts: list[Fact] = []
+    scope_notes: list[dict] = []
+    if not vp.get("ok"):
+        return facts, scope_notes
+    entity = str(getattr(request, "company", "") or "") or str(
+        (material or {}).get("company") or "")
+    entity_id = str(getattr(request, "company_id", "") or "") or str(
+        (material or {}).get("company_id") or "")
+    market = str(getattr(request, "market", "") or "")
+    url = str(vp.get("url") or "")
+    src_hash = str(vp.get("text_sha256") or "")
+    published = str((material or {}).get("as_of") or "")
+    years = [int(y) for y in (getattr(request, "periods", None) or [])]
+    last = max(years) if years else None
+    values: dict[str, dict[int, float]] = {}
+    for f in (vp.get("facts") or []):
+        group = str(f.get("group") or "")
+        row_label = str(f.get("row_label") or f.get("label") or "")
+        slug = _OPERATING_SLUGS.get((group, row_label))
+        if not slug:
+            continue
+        metric, unit = slug
+        row = {"dimensions": _operating_dimensions(group, row_label),
+               "table": {"group": group, "row_label": row_label,
+                         "fields": ["2024", "2023", "同比"]},
+               "locator": str(f.get("locator") or ""),
+               "line": str(f.get("line") or "")[:200],
+               "text_sha256": str(f.get("text_sha256") or ""),
+               "share_cur": f.get("share_cur"), "share_prev": f.get("share_prev")}
+        _cal = str(getattr(request, "caliber", "") or "") or "合并"
+        for year, key in ((last, "cur"), ((last - 1) if last else None, "prev")):
+            val = f.get(key)
+            if year is None or not isinstance(val, (int, float)):
+                continue
+            values.setdefault(metric, {})[year] = float(val)
+            facts.append(Fact(
+                fact_id=make_fact_id(entity_id, entity, metric, f"{year}年", _cal),
+                entity=entity, entity_id=entity_id,
+                metric=metric, metric_label=metric_label(metric),
+                period=f"{year}年", period_type="年报",
+                currency=("CNY" if unit == "元" else UNKNOWN), unit=unit,
+                unit_source="row",
+                value=val, raw_value=val,
+                # 闭合校验通过前先按"表格口径"记（未闭合的组留在这一档，只展示）
+                caliber=(f"{group}表口径" if group else UNKNOWN),
+                caliber_source="row",
+                caliber_evidence=(f"年报『{group}』表，行「{row['table']['row_label']}」"
+                                  f"（原表行列定位见 locator）"),
+                market=market, disclosed_at=published,
+                source_url=url, source_hash=src_hash,
+                source_locator=dict(row, kind="annual_report_table"),
+                verify_state=VERIFY_UNVERIFIED, extracted_by="annual_report_table",
+            ))
+    # 表内合计（营业收入合计）：既作组内闭合的权威基准，也是可复核的披露读数
+    _tot = dict(vp.get("total") or {})
+    if _tot.get("cur") is not None and last is not None:
+        facts.append(Fact(
+            fact_id=make_fact_id(entity_id, entity, "revenue_total_reported",
+                                 f"{last}年", str(getattr(request, "caliber", "") or "")),
+            entity=entity, entity_id=entity_id,
+            metric="revenue_total_reported",
+            metric_label=metric_label("revenue_total_reported"),
+            period=f"{last}年", period_type="年报", currency="CNY", unit="元",
+            unit_source="row", value=_tot.get("cur"), raw_value=_tot.get("cur"),
+            caliber=str(getattr(request, "caliber", "") or ""), caliber_source="row",
+            caliber_evidence="年报「营业收入构成」表：营业收入合计行",
+            market=market, disclosed_at=published,
+            source_url=url, source_hash=src_hash,
+            source_locator={"kind": "annual_report_table", "table": {
+                "group": "表合计", "row_label": "营业收入合计"},
+                "locator": str(_tot.get("locator") or ""),
+                "text_sha256": str(_tot.get("text_sha256") or "")},
+            verify_state=VERIFY_UNVERIFIED, extracted_by="annual_report_table"))
+    total = _tot.get("cur") if _tot.get("cur") is not None else total_revenue_yuan
+    for group, metrics in _OPERATING_GROUPS.items():
+        present = {m: values.get(m, {}).get(last) for m in metrics}
+        if all(v is None for v in present.values()):
+            continue
+        missing = [m for m, v in present.items() if v is None]
+        subtotal = float(sum(v for v in present.values() if v is not None))
+        note = {"group": group, "subtotal": subtotal, "total_revenue": total,
+                "closed": False, "delta": None, "ratio": None, "note": "",
+                "missing_rows": [metric_label(m) for m in missing]}
+        if missing:
+            # 缺行**不当零**：范围无法闭合，如实说明（该组留在表格口径）
+            note["note"] = (f"{group}组缺 {'、'.join(note['missing_rows'])}："
+                            f"已取得 {len(present) - len(missing)}/{len(metrics)} 行，"
+                            f"范围无法闭合（缺行不当作零）")
+            scope_notes.append(note)
+            continue
+        if isinstance(total, (int, float)) and total:
+            delta = subtotal - float(total)
+            ratio = abs(delta) / float(total)
+            note["delta"] = delta
+            note["ratio"] = round(ratio, 6)
+            if ratio <= _SCOPE_TOL:
+                note["closed"] = True
+                note["note"] = (f"{group}组与表内营业收入合计闭合"
+                                f"（相差 {delta:,.0f} 元，{ratio:.4%}）：按合并口径入认证")
+            else:
+                note["note"] = (f"{group}表小计 {subtotal / 1e8:.3f} 亿元，与表内营业收入合计 "
+                                f"{float(total) / 1e8:.2f} 亿元相差 {delta / 1e8:.3f} 亿元"
+                                f"（{ratio:.2%}）：**范围未闭合**，差额未取得说明，"
+                                f"不自行归类为任何科目；该组按表格口径展示，不并入合计")
+        else:
+            note["note"] = (f"{group}表已取得小计 {subtotal / 1e8:.3f} 亿元；"
+                            f"缺营业收入总额，范围无法校验")
+        scope_notes.append(note)
+        if note["closed"]:
+            for f in facts:
+                if f.metric in metrics:
+                    f.caliber = str(getattr(request, "caliber", "") or "合并")
+                    f.caliber_evidence = str(note["note"])
+    for f in facts:                              # 实物量：吨，与收入表不同单位
+        if f.unit == "吨":
+            f.caliber = str(getattr(request, "caliber", "") or "合并")
+            f.caliber_evidence = "年报『产量与库存量』表（实物量，单位：吨）"
+    rev = values.get("revenue_product_baijiu", {}).get(last)
+    vol = values.get("sales_volume_baijiu", {}).get(last)
+    if isinstance(rev, (int, float)) and isinstance(vol, (int, float)) and vol:
+        price = rev / vol
+        base_rev = values.get("revenue_product_baijiu", {}).get(last - 1) if last else None
+        base_vol = values.get("sales_volume_baijiu", {}).get(last - 1) if last else None
+        formula = f"{rev:,.2f} / {vol:,.2f}"
+        if isinstance(base_rev, (int, float)) and isinstance(base_vol, (int, float)) and base_vol:
+            _prev_price = base_rev / base_vol
+            formula += (f"；上期 {base_rev:,.2f} / {base_vol:,.2f}"
+                        f"（{(price / _prev_price - 1) * 100:+.2f}%）")
+        facts.append(Fact(
+            fact_id=make_fact_id(entity_id, entity, "baijiu_unit_revenue", f"{last}年",
+                                 str(getattr(request, "caliber", "") or "")),
+            entity=entity, entity_id=entity_id,
+            metric="baijiu_unit_revenue", metric_label=metric_label("baijiu_unit_revenue"),
+            period=f"{last}年", period_type="年报", currency="CNY", unit="元/吨",
+            unit_source="derived",
+            value=round(price, 2), raw_value=round(price, 2),
+            caliber=str(getattr(request, "caliber", "") or ""),
+            caliber_source="derived",
+            caliber_evidence=("**推算**：分产品白酒收入 ÷ 白酒销售量（分别来自"
+                              "『分产品』表与『产量与库存量』表）；发行人未直接披露吨价，"
+                              "该值不等于披露价格，也不能单独证明提价"),
+            market=market, disclosed_at=published,
+            source_url=url, source_hash=src_hash,
+            source_locator={"kind": "derived_from_annual_report",
+                            "inputs": ["revenue_product_baijiu", "sales_volume_baijiu"]},
+            verify_state=VERIFY_UNVERIFIED, extracted_by="derived",
+            formula=formula,
+            derived_from=[make_fact_id(entity_id, entity, "revenue_product_baijiu",
+                                       f"{last}年", ""),
+                          make_fact_id(entity_id, entity, "sales_volume_baijiu",
+                                       f"{last}年", "")],
+        ))
+    return facts, scope_notes
+
 # 同比类派生（`<metric>_yoy`）：报告里必须写成"同比/增速"，不能只说"变化"
 YOY_SUFFIX = "_yoy"
 

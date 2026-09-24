@@ -7274,6 +7274,71 @@ class TestResearchQuestions(unittest.TestCase):
         self.assertFalse(a.get("answered"))
         self.assertEqual(a.get("coverage"), "none")
 
+    def test_new_material_only_improves_its_own_question(self):
+        """R3：新证据只改善**对应**问题，不扩散（分产品/渠道/地区数据 → 只动收入问）。"""
+        import report_brief
+        tid = self._env(with_mdna=True, tid="rq-spread")
+        before = report_brief.build_structure(tid, self.GOAL, "")
+        _b = {q.get("metric"): (q.get("assessment") or {}) for q in before["research_questions"]}
+        proj = ws_mod.task_project_dir(tid, "default")
+        docs = json.loads((proj / "fetch_snapshot.json").read_text(encoding="utf-8"))
+        docs.append({
+            "title": "洋河股份:2024年年度报告",
+            "url": "https://np-cnotice-stock.eastmoney.com/api/content/ann"
+                   "?art_code=AN202504281664011244&page_index=4",
+            "published_at": "2025-04-28", "text": self.VP_TEXT,
+            "chunk_offsets": [[0, 4]]})
+        (proj / "fetch_snapshot.json").write_text(
+            json.dumps(docs, ensure_ascii=False), encoding="utf-8")
+        after = report_brief.build_structure(tid, self.GOAL, "")
+        _a = {q.get("metric"): (q.get("assessment") or {}) for q in after["research_questions"]}
+        self.assertEqual(_b["revenue"].get("coverage"), "none")
+        self.assertEqual(_a["revenue"].get("coverage"), "partial")
+        self.assertTrue(_a["revenue"].get("has_decomposition"))
+        for metric in ("net_profit", "operating_cashflow"):
+            self.assertEqual(str(_a[metric].get("coverage") or "none"),
+                             str(_b[metric].get("coverage") or "none"),
+                             f"{metric} 的覆盖不得因收入资料而变化")
+            self.assertEqual(str(_a[metric].get("kind") or ""),
+                             str(_b[metric].get("kind") or ""),
+                             f"{metric} 的材料类别不得因收入资料而变化")
+            self.assertFalse(_a[metric].get("has_decomposition"))
+
+    def test_first_screen_judgments_and_question_plans(self):
+        """R3：首屏 2–3 个关键判断（观察/意义/依据/边界/下一步）+ 附录逐问题资料计划。"""
+        import report_brief
+        tid = self._env(tid="rq-screen")
+        st = report_brief.build_structure(tid, self.GOAL, "")
+        md = report_brief.render_brief_markdown(st, "")
+        self.assertIn("## 关键判断与下一步", md)
+        i_judge = md.index("## 关键判断与下一步")
+        i_facts = md.index("## 关键发现")
+        self.assertLess(i_judge, i_facts, "关键判断必须在事实清单之前（首屏）")
+        head = md[i_judge:i_facts]
+        self.assertGreaterEqual(head.count("- **"), 2, head[:200])
+        for field in ("意义：", "依据：", "边界：", "下一步："):
+            self.assertIn(field, head)
+        self.assertIn("### 逐问题资料计划", md)
+        plan = md[md.index("### 逐问题资料计划"):]
+        for field in ("想确认", "现有证据", "缺 ", "下一步补", "补到后的影响"):
+            self.assertIn(field, plan)
+        # 结构对象带 meaning/plan（页面/候选比较读同一份）
+        q = st["research_questions"][0]
+        self.assertTrue(q.get("meaning"))
+        self.assertTrue((q.get("plan") or {}).get("impact"))
+
+    def test_observations_not_repeated_across_blocks(self):
+        """R3：同一组观察不在四个章节重复打印（变化解释处只留指引）。"""
+        import report_brief
+        tid = self._env(tid="rq-dedup")
+        st = report_brief.build_structure(tid, self.GOAL, "")
+        md = report_brief.render_brief_markdown(st, "")
+        needle = "同比下降 33.38%（2024 年 66.73亿元）"
+        self.assertLessEqual(md.count(needle), 2, f"同一观察重复打印 {md.count(needle)} 次")
+        seg = md[md.index("## 变化解释"):md.index("## 风险与核查")]
+        self.assertNotIn(needle, seg, "变化解释块不再重复读数")
+        self.assertIn("**发生了什么（数据观察）**", seg)
+
     def test_mark_unsupported_keeps_line_structure(self):
         """待核查标记只改命中的那句：标题/空行/未命中句逐字节不动。
 

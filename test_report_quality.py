@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import sys
+import shutil
 import unittest
 from pathlib import Path
 
@@ -378,6 +379,81 @@ class TestPdfPagination(unittest.TestCase):
         self.assertGreaterEqual(min(ys), 20.0,
                                 f"列表/代码块有文字画在页脚线以下/页外：min_y={min(ys)}")
         self.assertGreaterEqual(pdf.count(b"/Type /Page"), 2)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+class TestQualityVectorOrder(unittest.TestCase):
+    """R3：候选比较先看"有据覆盖/矛盾/信息保留"，再看重复与观察句数。
+
+    固定反例（不许胜出）：候选多写 8 句观察，但契约问题一个有据覆盖都没增加；
+    正向：候选少写观察但多答一个契约问题 → 胜出。
+    """
+
+    BODY = "# 报告\n\n## 分析\n\n观察。\n"
+
+    def test_more_observations_does_not_beat_answered_questions(self):
+        import report_quality as rq
+        cur = {"analysis_ok": True, "answered_questions": 1, "coverage_total": 3,
+               "partial_questions": 1, "unanswered_questions": 1, "contradictions": 0,
+               "facts_missing": 0, "unsupported_or_unchecked": 0, "observations": 2,
+               "duplicate_blocks": 0}
+        cand = dict(cur, answered_questions=0, observations=10)
+        improved, why = rq.compare_versions(self.BODY, self.BODY,
+                                            cur_quality=cur, cand_quality=cand)
+        self.assertFalse(improved, why)
+        self.assertIn("有据覆盖更少", why)
+        cand2 = dict(cur, answered_questions=2, observations=1)
+        improved2, why2 = rq.compare_versions(self.BODY, self.BODY,
+                                              cur_quality=cur, cand_quality=cand2)
+        self.assertTrue(improved2, why2)
+        self.assertIn("有据覆盖", why2)
+
+    def test_contradictions_and_retention_come_before_observations(self):
+        import report_quality as rq
+        base = {"analysis_ok": True, "answered_questions": 1, "coverage_total": 3,
+                "contradictions": 0, "facts_missing": 0, "unsupported_or_unchecked": 0,
+                "observations": 5, "duplicate_blocks": 0}
+        got = rq._quality_tiebreak(base, dict(base, contradictions=2, observations=9))
+        self.assertIsNotNone(got)
+        self.assertFalse(got[0])
+        self.assertIn("矛盾", got[1])
+        got2 = rq._quality_tiebreak(base, dict(base, facts_missing=3))
+        self.assertIsNotNone(got2)
+        self.assertFalse(got2[0])
+        self.assertIn("必须保留", got2[1])
+        got3 = rq._quality_tiebreak(base, dict(base, observations=8))
+        self.assertIsNotNone(got3)
+        self.assertTrue(got3[0])
+
+    def test_candidate_quality_reads_material_assessments(self):
+        """分母来自契约：材料侧评估决定 answered/partial/unanswered。"""
+        import json as _json
+        import tempfile
+        import report_quality as rq
+        import workspace as ws_mod
+        tmp = Path(tempfile.mkdtemp(prefix="wm_rq_vec_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", old_root)
+        tid = "rqvec-1"
+        proj = ws_mod.task_project_dir(tid)
+        proj.mkdir(parents=True, exist_ok=True)
+        (ws_mod.task_workspace(tid) / "report_structure.json").write_text(_json.dumps({
+            "question_assessments": {
+                "revenue": {"kind": "decomposition", "coverage": "partial",
+                            "answered": False},
+                "net_profit": {"kind": "observation", "coverage": "none",
+                               "answered": False},
+                "operating_cashflow": {"kind": "management_cause",
+                                       "coverage": "partial", "answered": False},
+            },
+        }, ensure_ascii=False), encoding="utf-8")
+        a = rq._material_assessments(tid)
+        self.assertEqual(len(a), 3)
+        self.assertEqual(str(a["operating_cashflow"].get("coverage")), "partial")
 
 
 if __name__ == "__main__":
