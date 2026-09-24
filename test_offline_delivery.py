@@ -1403,6 +1403,9 @@ class TestFrozenOfflineScenarios(unittest.TestCase):
         self.assertEqual(sorted(self.manifests),
                          ["all_decline", "loss_mixed_units", "margin_mix",
                           "missing_footnote_asof", "normal_growth",
+                          # R4 冻结样本（预期写在场景文件里：资料较充分 / 资料不足 / 银行作为研究对象）
+                          "r4_bank_subject", "r4_insufficient_evidence",
+                          "r4_sufficient_second_company",
                           "wrong_subject_period"])
         for name, m in self.manifests.items():
             checks = {k: v for k, v in (m.get("checks") or {}).items() if k != "all_passed"}
