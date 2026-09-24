@@ -340,50 +340,6 @@ class TestQualityVectorTiebreak(unittest.TestCase):
         self.assertNotIn("质量向量", why)
 
 
-class TestPdfPagination(unittest.TestCase):
-    """09-23：长段落必须**逐行**检查剩余空间——首版 PDF 有 141 个非空白字符落在页下边界外。
-
-    判定用内容流里的文字定位（`1 0 0 1 x y Tm`）：正文文字不得画在页脚线以下；
-    长结论段应拆到下一页而不是画到纸外。
-    """
-
-    def _text_ys(self, pdf: bytes) -> list:
-        import re as _re
-        return [float(m.group(1))
-                for m in _re.finditer(rb"1 0 0 1 [\d.]+ (-?[\d.]+) Tm", pdf)]
-
-    def test_long_paragraph_does_not_run_off_the_page(self):
-        import report_pdf
-        long_para = ("结论：" + "本次资料足以刻画客户收入、利润与经营现金流的变化方向，"
-                     "但不足以支撑任何偿债能力结论；" * 40)
-        md = ("# 标题\n\n## 结论\n\n" + long_para + "\n\n"
-              "> " + "引用块同样要逐行换页，不能画到纸外；" * 30 + "\n")
-        pdf = report_pdf.markdown_to_pdf(md, title="标题", workspace=None)
-        ys = self._text_ys(pdf)
-        self.assertTrue(ys, "PDF 内容流里应有文字定位")
-        # 回归判据：不得有文字画到**页外**（实机缺陷是 y=-46.6pt 的正文），
-        # 也不得低于页脚线（页脚在 MARGIN_B*0.45≈25.2pt）
-        self.assertGreaterEqual(min(ys), 20.0,
-                                f"有文字画在页脚线以下/页外：min_y={min(ys)}")
-        self.assertGreaterEqual(pdf.count(b"/Type /Page"), 2, "长内容应分页")
-
-    def test_long_list_item_does_not_run_off_the_page(self):
-        """R2：列表项与代码块同样逐行检查空间（离线探针：超长列表项 1010 字符越界）。"""
-        import report_pdf
-        long_item = ("- " + "该条观察需要跨页续排，不能画到纸外；" * 80 + "\n")
-        md = ("# 标题\n\n## 风险与核查\n\n" + long_item
-              + "\n```\n" + "code line\n" * 60 + "```\n")
-        pdf = report_pdf.markdown_to_pdf(md, title="标题", workspace=None)
-        ys = self._text_ys(pdf)
-        self.assertTrue(ys)
-        self.assertGreaterEqual(min(ys), 20.0,
-                                f"列表/代码块有文字画在页脚线以下/页外：min_y={min(ys)}")
-        self.assertGreaterEqual(pdf.count(b"/Type /Page"), 2)
-
-
-if __name__ == "__main__":
-    unittest.main()
-
 class TestQualityVectorOrder(unittest.TestCase):
     """R3：候选比较先看"有据覆盖/矛盾/信息保留"，再看重复与观察句数。
 
@@ -428,7 +384,7 @@ class TestQualityVectorOrder(unittest.TestCase):
         self.assertTrue(got3[0])
 
     def test_candidate_quality_reads_material_assessments(self):
-        """分母来自契约：材料侧评估决定 answered/partial/unanswered。"""
+        """分母来自契约：材料侧评估决定 answered/partial/unanswered（删正文不缩小分母）。"""
         import json as _json
         import tempfile
         import report_quality as rq
@@ -454,6 +410,113 @@ class TestQualityVectorOrder(unittest.TestCase):
         a = rq._material_assessments(tid)
         self.assertEqual(len(a), 3)
         self.assertEqual(str(a["operating_cashflow"].get("coverage")), "partial")
+
+
+class TestPdfPagination(unittest.TestCase):
+    """09-23：长段落必须**逐行**检查剩余空间——首版 PDF 有 141 个非空白字符落在页下边界外。
+
+    判定用内容流里的文字定位（`1 0 0 1 x y Tm`）：正文文字不得画在页脚线以下；
+    长结论段应拆到下一页而不是画到纸外。
+    """
+
+    def _text_ys(self, pdf: bytes) -> list:
+        import re as _re
+        return [float(m.group(1))
+                for m in _re.finditer(rb"1 0 0 1 [\d.]+ (-?[\d.]+) Tm", pdf)]
+
+    def test_long_paragraph_does_not_run_off_the_page(self):
+        import report_pdf
+        long_para = ("结论：" + "本次资料足以刻画客户收入、利润与经营现金流的变化方向，"
+                     "但不足以支撑任何偿债能力结论；" * 40)
+        md = ("# 标题\n\n## 结论\n\n" + long_para + "\n\n"
+              "> " + "引用块同样要逐行换页，不能画到纸外；" * 30 + "\n")
+        pdf = report_pdf.markdown_to_pdf(md, title="标题", workspace=None)
+        ys = self._text_ys(pdf)
+        self.assertTrue(ys, "PDF 内容流里应有文字定位")
+        # 回归判据：不得有文字画到**页外**（实机缺陷是 y=-46.6pt 的正文），
+        # 也不得低于页脚线（页脚在 MARGIN_B*0.45≈25.2pt）
+        self.assertGreaterEqual(min(ys), 20.0,
+                                f"有文字画在页脚线以下/页外：min_y={min(ys)}")
+        self.assertGreaterEqual(pdf.count(b"/Type /Page"), 2, "长内容应分页")
+
+    def test_long_list_item_does_not_run_off_the_page(self):
+        """R2：列表项与代码块同样逐行检查空间（离线探针：超长列表项 1010 字符越界）。"""
+        import report_pdf
+        long_item = ("- " + "该条观察需要跨页续排，不能画到纸外；" * 80 + "\n")
+        md = ("# 标题\n\n## 风险与核查\n\n" + long_item
+              + "\n```\n" + "code line\n" * 60 + "```\n")
+        pdf = report_pdf.markdown_to_pdf(md, title="标题", workspace=None)
+        ys = self._text_ys(pdf)
+        self.assertTrue(ys)
+        self.assertGreaterEqual(min(ys), 20.0,
+                                f"列表/代码块有文字画在页脚线以下/页外：min_y={min(ys)}")
+        self.assertGreaterEqual(pdf.count(b"/Type /Page"), 2)
+
+
+
+class TestContradictionDetector(unittest.TestCase):
+    """R4：跨章节矛盾检测要**保守**（宁缺勿错）——它是候选比较用的计数，不是验收结论。"""
+
+    def test_units_and_attribution_cases(self):
+        import report_quality as rq
+        cases = [
+            # (文本, 期望冲突数, 说明)
+            ("归母净利润 862.28亿元；归母净利润变化 +114.94亿元。", 0, "水平值 vs 变化量"),
+            ("2024 年营业收入 1741.44亿元。2023 年营业收入 1505.6亿元。", 0, "同指标不同年度"),
+            ("2024 年营业收入 1741.44亿元。2024 年营业收入 9999亿元。", 1, "同指标同期不同值=真矛盾"),
+            ("| 营业收入 | 1505.6亿元 | 1741.44亿元 | 合并 |", 0, "表格行（年份在表头）"),
+            ("经营现金流对归母净利润的覆盖 2024 年为 107.23%（2023 年 89.11%）", 0,
+             "长短语归属：覆盖率不归净利润"),
+            ("归母净利润 84.53亿元。液体乳销售量同比下降8.16%。", 0, "实物量不是财务读数"),
+            ("归属于上市公司股东的净利润 84.53亿元，经营活动产生的现金流量净额90.0亿元。", 0,
+             "指标别名不串行"),
+            ("2024 年营业收入同比 -8.19%。2024 年营业收入同比下降 8.20%。", 0,
+             "发行人四舍五入 vs 复算（百分点零头）"),
+            ("2024 年营业收入 176.0亿元。2024 年营业收入 176 亿元。", 0, "同一数值的写法差异"),
+        ]
+        for text, want, why in cases:
+            self.assertEqual(rq._contradictions(text), want, f"{why}：{text}")
+
+
+class TestScenarioCheckKeys(unittest.TestCase):
+    """R4：场景核对的 R4 键（覆盖/矛盾/信息保留/批准/请求数）按清单语义工作。"""
+
+    def _check(self, manifest, expect):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "scenario_run", str(Path(__file__).resolve().parent / "scripts"
+                                / "scenario_run.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod._check(manifest, expect)
+
+    def test_r4_keys(self):
+        m = {"delivery": {"status": "verified"},
+             "assessments": {"revenue": {"coverage": "partial"},
+                             "net_profit": {"coverage": "none"}},
+             "contradictions": 0, "facts_missing": 0,
+             "approval": {"migrated": False}, "llm_requests": 0,
+             "quality_metrics": ["revenue_yoy", "net_profit_yoy"],
+             "pdf_parse": {"verdict": "pass"},
+             "pdf_export": {"images": {"ok": True, "placeholders": 0}, "tables": []}}
+        out = self._check(m, {"coverage_expect": {"revenue": "partial"},
+                              "contradictions_zero": True, "facts_missing_leq": 0,
+                              "approval_not_migrated": True, "requests_zero": True,
+                              "no_ratio_metrics": ["debt_ratio"]})
+        for k in ("coverage_expect", "contradictions_zero", "facts_missing_leq",
+                  "approval_not_migrated", "requests_zero", "no_ratio_metrics"):
+            self.assertTrue(out.get(k), (k, out))
+        # 反例：覆盖对不上 / 有矛盾 / 批准被迁移 / 发了请求 → 逐项为 False
+        bad = self._check(m, {"coverage_expect": {"revenue": "full"},
+                             "contradictions_zero": True, "facts_missing_leq": 0,
+                             "approval_not_migrated": True, "requests_zero": True})
+        self.assertFalse(bad.get("coverage_expect"))
+        m2 = dict(m, contradictions=2, approval={"migrated": True}, llm_requests=3)
+        out2 = self._check(m2, {"contradictions_zero": True, "approval_not_migrated": True,
+                               "requests_zero": True})
+        self.assertFalse(out2.get("contradictions_zero"))
+        self.assertFalse(out2.get("approval_not_migrated"))
+        self.assertFalse(out2.get("requests_zero"))
 
 
 if __name__ == "__main__":

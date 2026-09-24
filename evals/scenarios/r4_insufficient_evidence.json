@@ -1,0 +1,70 @@
+{
+ "name": "r4_insufficient_evidence",
+ "note": "R4③ 资料不足：缺 2024 经营现金流、无正文可定位——必须照常出稿并写明具体缺口，不得靠『统一拒绝所有报告』满足零错误。",
+ "review": {
+  "verdict": "PASS",
+  "required": false,
+  "degraded_reason": ""
+ },
+ "contract": {
+  "company": "伊利股份",
+  "company_id": "600887.SH",
+  "market": "cn",
+  "periods": [
+   2023,
+   2024
+  ],
+  "caliber": "合并",
+  "as_of": "2025-04-30",
+  "perspective": "equity",
+  "identity_source": "scenario"
+ },
+ "goal": "研究伊利股份 2023、2024 年度的营业收入、归母净利润、经营活动现金流净额，合并报表口径，数据截至 2025-04-30。",
+ "financials": {
+  "financials": [
+   {
+    "year": 2023,
+    "report_type": "年报",
+    "revenue": 1313.1,
+    "net_profit": 104.29,
+    "operating_cashflow": 117.0,
+    "total_assets": 1400.0,
+    "total_liabilities": 750.0,
+    "disclosure_date": "2024-04-30"
+   },
+   {
+    "year": 2024,
+    "report_type": "年报",
+    "revenue": 1205.5,
+    "net_profit": 84.53,
+    "total_assets": 1450.0,
+    "total_liabilities": 800.0,
+    "disclosure_date": "2025-04-29"
+   }
+  ],
+  "metadata": {
+   "source": "eastmoney_ashare",
+   "company": "伊利股份",
+   "currency": "CNY",
+   "unit": "亿元",
+   "caliber": "合并",
+   "caliber_evidence": "含 PARENTNETPROFIT"
+  },
+  "raw": {
+   "url": "https://datacenter-web.eastmoney.com/api/data/v1/get?x=1",
+   "text": "{}"
+  }
+ },
+ "docs": [],
+ "expect": {
+  "evidence_missing_min": 3,
+  "brief_contains": [
+   "原因待证",
+   "缺口",
+   "关键判断与下一步"
+  ],
+  "facts_missing_leq": 0,
+  "requests_zero": true
+ },
+ "model_body": "# 伊利股份 2023–2024 年度经营分析\n\n## 分析与结论\n\n营业收入 2024 年为 1205.5亿元，较 2023 年的 1313.1亿元下降 8.20%；归母净利润 84.53亿元，同比下降 18.95%。**经营活动现金流净额 2024 年未取得**（底稿缺该事实）：本稿不推断其水平与变化方向，也不判断利润的现金支撑与短期偿付能力，需补现金流量表或附注后再评。\n\n变化原因方面：本次资料未取得可定位的发行人解释（无年报正文），收入与利润变化的原因**待证**；缺口清单见文末『风险与核查』。\n\n风险与结论：两期数据只能说明这两期的变化，不能据此声称长期趋势；未取得同业与行情数据，不给出估值或目标价。\n"
+}

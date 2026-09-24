@@ -153,6 +153,8 @@ def _write_clean_chart_data(proj: Path, financials: dict) -> None:
 
 def run_scenario(spec: dict, *, out_root: Path = OUT_ROOT) -> dict:
     """跑一个场景，返回 manifest（含确定性核对结果）。"""
+    import time as _time
+    _t0 = _time.time()
     name = str(spec.get("name") or "scenario")
     contract = spec.get("contract") or {}
     goal = str(spec.get("goal") or "")
@@ -331,6 +333,27 @@ def run_scenario(spec: dict, *, out_root: Path = OUT_ROOT) -> dict:
             "quality_metrics": sorted({str(q.get("metric")) for q in quality}),
             "audit": audit,
             "charts": charts,
+            # R4：逐问题覆盖、跨章节矛盾、信息保留、人工复核状态、模型请求数与耗时
+            "assessments": {k: {"kind": v.get("kind"), "coverage": v.get("coverage"),
+                                "answered": bool(v.get("answered")),
+                                "kind_label": v.get("kind_label")}
+                            for k, v in (st.get("question_assessments") or {}).items()},
+            "contradictions": _contradictions_of(str(res.get("report") or "")),
+            "acceptance": {"overall": acc.get("overall"),
+                           "failed_checks": sorted(
+                               k for k, v in (acc.get("checks") or {}).items()
+                               if isinstance(v, dict) and v.get("pass") is False
+                               and v.get("counted", True)),
+                           "gaps": list(acc.get("gaps") or [])[:5]},
+            "facts_missing": int(((acc.get("checks") or {}).get("analysis_completeness") or {})
+                                 .get("facts_missing") or 0)
+            + int(((acc.get("checks") or {}).get("analysis_completeness") or {})
+                  .get("derived_missing") or 0),
+            "approval": {"human": ("待复核" if "人工复核：待复核" in str(res.get("report") or "")
+                                   else "已记录"),
+                         "migrated": bool("人工复核：已通过" in str(res.get("report") or ""))},
+            "llm_requests": _llm_request_count(ws),
+            "duration_seconds": round(_time.time() - _t0, 2),
             "render_log": render_log,
             "pdf_note": pdf_note,
             # 引用图数取自**本场景的图表清单**（不是磁盘上的 PNG 数）：正文引用了
@@ -355,6 +378,30 @@ def run_scenario(spec: dict, *, out_root: Path = OUT_ROOT) -> dict:
         task_state.DB_PATH = old_db
         shutil.rmtree(tmp, ignore_errors=True)
 
+
+
+def _llm_request_count(ws: Path) -> int:
+    """该任务的**实际模型请求数**：`llm_calls.jsonl` 条数（无则 0）。
+
+    R4 用它验收"无模型的编辑/重验/重包 = 0 请求"。
+    """
+    for cand in (ws / "llm_calls.jsonl", ws / "project" / "llm_calls.jsonl"):
+        try:
+            if cand.is_file():
+                return sum(1 for line in cand.read_text(encoding="utf-8").splitlines()
+                           if line.strip())
+        except Exception:                        # noqa: BLE001 - 读不到按 0（另有证据）
+            return 0
+    return 0
+
+
+def _contradictions_of(text: str) -> int:
+    """跨章节自相矛盾计数（复用 report_quality 的保守判定）。"""
+    try:
+        import report_quality as rq
+        return int(rq._contradictions(str(text or "")))
+    except Exception:                            # noqa: BLE001 - 算不出按 0
+        return 0
 
 def _check(manifest: dict, expect: dict) -> dict:
     """场景预期 → 确定性核对（数字/单位/引用/图表/缺口/版本）。"""
@@ -392,6 +439,23 @@ def _check(manifest: dict, expect: dict) -> dict:
     if "revenue_yoy_present" in expect:
         out["revenue_yoy_present"] = ("revenue_yoy" in (manifest.get("quality_metrics") or [])) \
             == bool(expect["revenue_yoy_present"])
+    if "coverage_expect" in expect:
+        got = {k: str((v or {}).get("coverage") or "none")
+               for k, v in (manifest.get("assessments") or {}).items()}
+        out["coverage_expect"] = all(got.get(k) == v
+                                     for k, v in dict(expect["coverage_expect"]).items())
+    if expect.get("contradictions_zero"):
+        out["contradictions_zero"] = int(manifest.get("contradictions") or 0) == 0
+    if "facts_missing_leq" in expect:
+        out["facts_missing_leq"] = (int(manifest.get("facts_missing") or 0)
+                                    <= int(expect["facts_missing_leq"]))
+    if expect.get("approval_not_migrated"):
+        out["approval_not_migrated"] = not bool((manifest.get("approval") or {}).get("migrated"))
+    if expect.get("requests_zero"):
+        out["requests_zero"] = int(manifest.get("llm_requests") or 0) == 0
+    if "no_ratio_metrics" in expect:
+        got = set(manifest.get("quality_metrics") or [])
+        out["no_ratio_metrics"] = not (got & set(expect["no_ratio_metrics"]))
     if "audit_contains" in expect:
         out["audit_contains"] = any(expect["audit_contains"] in a for a in manifest.get("audit") or [])
     if "chart_min" in expect:

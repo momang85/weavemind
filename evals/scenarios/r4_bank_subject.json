@@ -1,0 +1,81 @@
+{
+ "name": "r4_bank_subject",
+ "note": "R4④ 银行作为**研究对象**：企业口径质量比率不生成，输出适用性说明与银行专用指标缺口；不套用一般企业的现金覆盖/杠杆解释。",
+ "review": {
+  "verdict": "PASS",
+  "required": false,
+  "degraded_reason": ""
+ },
+ "contract": {
+  "company": "招商银行",
+  "company_id": "600036.SH",
+  "market": "cn",
+  "periods": [
+   2023,
+   2024
+  ],
+  "caliber": "合并",
+  "as_of": "2025-04-30",
+  "perspective": "equity",
+  "identity_source": "scenario"
+ },
+ "goal": "研究招商银行 2023、2024 年度的营业收入、归母净利润、经营活动现金流净额，合并报表口径，数据截至 2025-04-30。",
+ "financials": {
+  "financials": [
+   {
+    "year": 2023,
+    "report_type": "年报",
+    "revenue": 3391.23,
+    "net_profit": 1466.02,
+    "operating_cashflow": 3200.0,
+    "total_assets": 110285.0,
+    "total_liabilities": 101000.0,
+    "disclosure_date": "2024-03-20"
+   },
+   {
+    "year": 2024,
+    "report_type": "年报",
+    "revenue": 3375.65,
+    "net_profit": 1483.91,
+    "operating_cashflow": 3300.0,
+    "total_assets": 118000.0,
+    "total_liabilities": 108000.0,
+    "disclosure_date": "2025-03-25"
+   }
+  ],
+  "metadata": {
+   "source": "eastmoney_ashare",
+   "company": "招商银行",
+   "currency": "CNY",
+   "unit": "亿元",
+   "caliber": "合并",
+   "caliber_evidence": "含 PARENTNETPROFIT"
+  },
+  "raw": {
+   "url": "https://datacenter-web.eastmoney.com/api/data/v1/get?x=1",
+   "text": "{}"
+  }
+ },
+ "docs": [
+  {
+   "title": "招商银行2024年年度报告",
+   "url": "https://static.cninfo.com.cn/finalpage/2025-03-25/3.PDF",
+   "text": "招商银行2024年年度报告\n\n第三节 管理层讨论与分析\n\n一、经营情况讨论与分析\n\n报告期内本集团实现营业收入3,375.65亿元，同比下降0.48%，主要受净息差收窄影响。\n\n（三）可能面对的风险\n\n风险因素：宏观经济波动、资产质量下行、净息差持续收窄等。\n"
+  }
+ ],
+ "expect": {
+  "delivery_status": "verified",
+  "no_ratio_metrics": [
+   "net_margin",
+   "cashflow_coverage",
+   "debt_ratio",
+   "rd_intensity"
+  ],
+  "brief_contains": [
+   "金融机构",
+   "不呈现"
+  ],
+  "requests_zero": true
+ },
+ "model_body": "# 招商银行 2023–2024 年度经营分析（银行作为研究对象）\n\n## 分析与结论\n\n营业收入 2024 年为 3375.65亿元，较 2023 年的 3391.23亿元下降 0.48%；归母净利润 1483.91亿元，同比增长 1.22%。\n\n研究对象适用性：本行属**金融机构**，企业口径的质量比率（归母净利率、经营现金流覆盖、资产负债率、研发强度）**不呈现**——负债以存款为主、利润表结构不同，这些比率对银行不成立；银行需专用指标（净息差、不良与拨备、资本充足率等），当前版本未配置，因此本次输出适用性缺口而不套用一般企业的现金覆盖与杠杆解释。\n\n变化原因方面：营业收入变动主要受净息差收窄影响（见年报经营情况讨论与分析）；资产质量与息差的定量证据需补银行专用指标与附注。\n\n风险与结论：两期数据只能说明这两期的变化，不能据此声称长期趋势；不给出估值或目标价，也不输出授信结论。\n"
+}

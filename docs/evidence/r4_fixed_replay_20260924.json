@@ -1,0 +1,110 @@
+{
+ "generated_at": "2026-09-24T09:59:29",
+ "note": "R4 固定样本回放：预期在场景文件里冻结（实现前写死）；本脚本只读、不改预期；费用未知保持未知；无模型的编辑/重验/重包以实际请求数 0 验收。",
+ "cases": [
+  {
+   "case": "r4_bank_subject",
+   "kind": "fixed_scenario",
+   "exit_code": 0,
+   "wall_seconds": 7.8,
+   "verdict": "pass",
+   "failed_checks": [],
+   "delivery": "verified",
+   "acceptance_overall": "pass",
+   "acceptance_failed": [],
+   "coverage": {
+    "revenue": "none",
+    "net_profit": "none",
+    "operating_cashflow": "none"
+   },
+   "located": 2,
+   "missing_labels": [
+    "业务背景",
+    "财务附注"
+   ],
+   "contradictions": 0,
+   "facts_missing": 4,
+   "llm_requests": 0,
+   "brief_chars": 7445,
+   "stdout_tail": "场景 1 个全部通过"
+  },
+  {
+   "case": "r4_insufficient_evidence",
+   "kind": "fixed_scenario",
+   "exit_code": 0,
+   "wall_seconds": 10.6,
+   "verdict": "pass",
+   "failed_checks": [],
+   "delivery": "draft",
+   "acceptance_overall": "pass",
+   "acceptance_failed": [],
+   "coverage": {
+    "revenue": "none",
+    "net_profit": "none",
+    "operating_cashflow": "none"
+   },
+   "located": 0,
+   "missing_labels": [
+    "业务背景",
+    "经营变化解释",
+    "财务附注",
+    "风险因素"
+   ],
+   "contradictions": 0,
+   "facts_missing": 0,
+   "llm_requests": 0,
+   "brief_chars": 7090,
+   "stdout_tail": "场景 1 个全部通过"
+  },
+  {
+   "case": "r4_sufficient_second_company",
+   "kind": "fixed_scenario",
+   "exit_code": 0,
+   "wall_seconds": 11.7,
+   "verdict": "pass",
+   "failed_checks": [],
+   "delivery": "verified",
+   "acceptance_overall": "pass",
+   "acceptance_failed": [],
+   "coverage": {
+    "revenue": "partial",
+    "net_profit": "none",
+    "operating_cashflow": "none"
+   },
+   "located": 3,
+   "missing_labels": [
+    "财务附注"
+   ],
+   "contradictions": 0,
+   "facts_missing": 0,
+   "llm_requests": 0,
+   "brief_chars": 10572,
+   "stdout_tail": "场景 1 个全部通过"
+  },
+  {
+   "case": "ui-706c5ef4a5",
+   "kind": "user_revision",
+   "verdict": "pass",
+   "checks": {
+    "report_present": true,
+    "approval_not_migrated": true,
+    "same_version_export": true,
+    "requests_zero_after_revision": true,
+    "delivery_bound_to_adopted": true
+   },
+   "identity": "14c8ac9989681c471cc601f15a9682ae2c5a1634e56488e56291344c23f4d9f7",
+   "body_sha16": "6228c7467bf1a7ee",
+   "package": "deliverables_20260924_092225_2a9922.zip",
+   "package_identity": "14c8ac9989681c471cc601f15a9682ae2c5a1634e56488e56291344c23f4d9f7",
+   "llm_requests": 16,
+   "recorded_review_version": "60781cdc76e74029",
+   "last_llm_call_ts": 1790049774.8998833,
+   "report_mtime": 1790212945.030011
+  }
+ ],
+ "summary": {
+  "total": 4,
+  "pass": 4,
+  "fail": []
+ }
+}

@@ -1,0 +1,83 @@
+{
+ "name": "r4_sufficient_second_company",
+ "note": "R4② 第二家非金融公司、资料较充分：量价/结构表齐全，按组分别闭合；预期：交付 verified、必需事实不缺、无跨章节矛盾、0 模型请求。",
+ "review": {
+  "verdict": "PASS",
+  "required": false,
+  "degraded_reason": ""
+ },
+ "contract": {
+  "company": "伊利股份",
+  "company_id": "600887.SH",
+  "market": "cn",
+  "periods": [
+   2023,
+   2024
+  ],
+  "caliber": "合并",
+  "as_of": "2025-04-30",
+  "perspective": "equity",
+  "identity_source": "scenario"
+ },
+ "goal": "研究伊利股份 2023、2024 年度的营业收入、归母净利润、经营活动现金流净额，合并报表口径，数据截至 2025-04-30。",
+ "financials": {
+  "financials": [
+   {
+    "year": 2023,
+    "report_type": "年报",
+    "revenue": 1313.1,
+    "net_profit": 104.29,
+    "operating_cashflow": 117.0,
+    "total_assets": 1400.0,
+    "total_liabilities": 750.0,
+    "disclosure_date": "2024-04-30"
+   },
+   {
+    "year": 2024,
+    "report_type": "年报",
+    "revenue": 1205.5,
+    "net_profit": 84.53,
+    "operating_cashflow": 90.0,
+    "total_assets": 1450.0,
+    "total_liabilities": 800.0,
+    "disclosure_date": "2025-04-29"
+   }
+  ],
+  "metadata": {
+   "source": "eastmoney_ashare",
+   "company": "伊利股份",
+   "currency": "CNY",
+   "unit": "亿元",
+   "caliber": "合并",
+   "caliber_evidence": "含 PARENTNETPROFIT"
+  },
+  "raw": {
+   "url": "https://datacenter-web.eastmoney.com/api/data/v1/get?sortColumns=REPORT_DATE&reportName=RPT_F10_FINANCE_MAINFINADATA&columns=ALL&filter=%28SECURITY_CODE%3D%22600887%22%29",
+   "text": "{}"
+  }
+ },
+ "docs": [
+  {
+   "title": "伊利股份2024年年度报告",
+   "url": "https://static.cninfo.com.cn/finalpage/2025-04-29/2.PDF",
+   "text": "伊利股份2024年年度报告\n\n第三节 管理层讨论与分析\n\n一、经营情况讨论与分析\n\n2024年度实现营业收入1,205.5亿元，同比下降8.20%，主要系国内乳制品需求偏弱、渠道去库存所致；归属于上市公司股东的净利润84.53亿元，经营活动产生的现金流量净额90.0亿元。液体乳销售量同比下降8.16%，期末库存量同比上升14.81%。\n\n二、报告期内公司从事的主要业务\n\n1、主要产品的销售量、库存量\n\n    产品类别            项目              2024 年              2023 年              同比增减\n\n                      销售量(吨)        9,000,000.00          9,800,000.00              -8.16%\n\n                      库存量(吨)          620,000.00            540,000.00              14.81%\n\n四、主营业务分析\n\n（1） 营业收入构成\n\n 分产品\n\n 液体乳          86.27%          86.82%          -8.77%\n\n 奶粉及奶制品      12.44%          12.03%          -5.06%\n\n 其他                  1.29%            1.15%           2.65%\n\n（三）可能面对的风险\n\n风险因素：原奶价格波动、行业需求恢复不及预期、渠道库存去化周期延长等。\n"
+  }
+ ],
+ "expect": {
+  "delivery_status": "verified",
+  "facts_missing_leq": 0,
+  "contradictions_zero": true,
+  "requests_zero": true,
+  "evidence_located_min": 3,
+  "coverage_expect": {
+   "revenue": "partial"
+  },
+  "brief_contains": [
+   "关键判断与下一步",
+   "逐问题资料计划",
+   "量价与结构",
+   "分别闭合"
+  ]
+ },
+ "model_body": "# 伊利股份 2023–2024 年度经营分析\n\n## 分析与结论\n\n营业收入、归母净利润与经营活动现金流净额三项核心指标（数值与同比见『关键发现』与『财务对照』表，均由底稿给出并带算式）。量价与结构方面，液体乳销售量同比下降，生产量同向下降，而期末库存量同比上升——**销量下降与发行人库存上升并存**，但**不能据此推断渠道压货或终端需求走弱**（需渠道库存与终端动销数据）。分产品销售中液体乳降幅大于奶粉及奶制品；分销售模式中经销降幅大于直营；各维度分别与表内营业收入合计闭合，跨维度不相加。\n\n可比价格方面：发行人未直接披露吨价，本报告不作\"提价\"判断；量、价、结构各自对降幅的贡献度未拆分。\n\n变化原因方面：营业收入变动主要系国内乳制品需求偏弱、渠道去库存所致（见年报经营情况讨论与分析），属发行人说法、非独立证实。\n\n风险与结论：两期数据只能说明这两期的变化，不能据此声称长期趋势；未取得同业与行情数据，不给出估值或目标价；现金流变动的构成需核对现金流量表附注。\n"
+}

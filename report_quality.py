@@ -117,12 +117,15 @@ _MANDATORY = ("revenue", "net_profit", "operating_cashflow")
 _METRIC_TOKENS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("营业收入", ("营业收入", "营收")),
     ("归母净利润", ("归母净利润", "净利润")),
-    ("经营活动现金流净额", ("经营活动现金流净额", "经营现金流净额")),
+    ("经营活动现金流净额", ("经营活动现金流净额", "经营现金流净额",
+                            "经营活动产生的现金流量净额", "经营活动现金流量净额")),
     ("毛利率", ("毛利率",)),
     ("归母净利率", ("归母净利率",)),
     ("资产负债率", ("资产负债率",)),
     ("现金覆盖", ("现金覆盖", "现金流对归母净利润的覆盖")),
 )
+# 变化量线索词：数值前的窗口里出现即按"变化量"分组（与水平值分开，避免误判矛盾）
+_CHANGE_HINTS = ("变化", "增减", "Δ", "同比", "较上", "较年", "增幅", "降幅", "差额")
 _NUM_WITH_UNIT = re.compile(r"(-?\d[\d,]*(?:\.\d+)?)\s*(亿元|万元|元|%|吨)")
 
 
@@ -137,24 +140,58 @@ def _material_assessments(tid: str) -> dict:
 
 
 def _contradictions(text: str) -> int:
-    """跨章节自相矛盾：同一指标+单位在文内出现**不同数值**的次数（保守判定）。
+    """跨章节自相矛盾：同一指标+期间+单位在文内出现**不同数值**的组数（保守判定）。
 
-    只比同单位、已规范化的数值；同一值重复出现不算矛盾。仅作**比较用**的计数，
-    不参与验收结论（验收另有 claim/溯源检查）。
+    归属规则：每个数值算给**它前面最近的那个指标词**（"经营现金流对归母净利润的覆盖
+    2023 年：89.11%" 里的 89.11% 属于"现金覆盖"，不属于"归母净利润"）；水平值与变化量
+    分开（"归母净利润 862.28亿元" 与 "归母净利润变化 +114.94亿元" 不是矛盾）；
+    期间进键（同指标不同年度的水平值不是矛盾）。仅作**比较用**计数，不参与验收结论。
     """
     body = str(text or "")
-    groups: dict[tuple[str, str, str], set] = {}
-    for marker, tokens in _METRIC_TOKENS:
-        for m in re.finditer("|".join(re.escape(t) for t in tokens), body):
-            window = body[m.end(): m.end() + 60]
-            for num in _NUM_WITH_UNIT.finditer(window):
-                key = (marker, num.group(2),
-                       "value" if num.group(2) not in ("%",) else "pct")
-                try:
-                    val = round(float(num.group(1).replace(",", "")), 4)
-                except ValueError:
-                    continue
-                groups.setdefault(key, set()).add(val)
+    tokens: list[tuple[int, int, str]] = []      # (起, 止, 指标)
+    for marker, words in _METRIC_TOKENS:
+        for m in re.finditer("|".join(re.escape(w) for w in words), body):
+            tokens.append((m.start(), m.end(), marker))
+    tokens.sort()
+    groups: dict[tuple, set] = {}
+    # 表格行跳过：`| 指标 | 2023 | 2024 |` 的年份在表头，行内多值并列不是矛盾
+    _line_starts = {m.start() for m in re.finditer(r"(?m)^\s*\|", body)}
+    _tbl_ranges = [(m.start(), m.end()) for m in re.finditer(r"(?m)^\s*\|.*$", body)]
+    _VOL_WORDS = ("销售量", "生产量", "库存量", "吨")
+    for num in _NUM_WITH_UNIT.finditer(body):
+        if any(a <= num.start() < b for a, b in _tbl_ranges):
+            continue
+        # 归属给**结束位置最靠后**且在数值之前的指标词（长短语优先：`现金流对归母净利润
+        # 的覆盖` 比 `归母净利润` 更具体——按开始位置排序会让后者错误覆盖前者）
+        owner = None
+        for start, end, marker in tokens:
+            if end <= num.start() and (owner is None or end > owner[0]):
+                owner = (end, marker)
+        if owner is None or num.start() - owner[0] > 40:
+            continue                             # 指标词太远：不归属（宁缺勿错）
+        end, marker = owner
+        # 水平值 / 变化量：数值前的窗口（不超过 24 字，别把上一句的词算进来）
+        pre = body[max(0, end - 16): num.start()]
+        if any(w in pre for w in _VOL_WORDS):
+            continue                             # 实物量（吨）不是财务指标读数
+        kind = ("change" if any(h in pre for h in _CHANGE_HINTS) else "level")
+        yrs = re.findall(r"(20\d{2})\s*年", pre)
+        year = yrs[-1] if yrs else ""
+        unit = num.group(2)
+        key = (marker, unit, kind if unit != "%" else "pct", year)
+        try:
+            val = round(float(num.group(1).replace(",", "")), 2)
+        except ValueError:
+            continue
+        # 同一数值的写法差异（"176" vs "176.0"）不是矛盾；百分比符号差异
+        # （"下降 25%" vs "-25.0%"）按**方向词**统一成负号再比
+        if unit == "%" and val > 0 and any(
+                w in body[max(0, end - 12): num.start()]
+                for w in ("下降", "降幅", "下滑", "减少", "负增长")):
+            val = -val
+        if unit == "%":
+            val = round(val, 1)                  # 百分点零头（发行人四舍五入 vs 复算）不算矛盾
+        groups.setdefault(key, set()).add(val)
     return sum(1 for vals in groups.values() if len(vals) > 1)
 
 
