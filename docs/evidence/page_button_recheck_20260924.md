@@ -67,9 +67,20 @@
 - `GET /files/ui-706c5ef4a5/deliverables_20260924_185945_3a152d.zip` → 200，
   5,621,827 字节，`sha256=a21fe35b3148027b…`（= 磁盘包字节）。
 
-## 4. 本次页面复核发现并修复的两个缺陷
+## 4. 面板其余项（同一页面，逐项读字段）
 
-### 4.1 「下载交付包 zip」对重新导出的包恒 404
+| 项 | 页面/接口事实 |
+|---|---|
+| 面板顺序 | 研究状态 → 关键发现 → 缺口（必需数据/证据/引用）→ 证据定位 → 字段位置 → 图表 → 修改与重验 → 导出 |
+| 同版投影 | `research.projection = {file_version: b1ea5c59…, for_version: b1ea5c59…, rebuilt: false, same_version: true}`；`structure_current: true` |
+| 三行结论 | 机器验收 `{overall: pass, bound: true, version_id: b1ea5c59…}`／计划评审 PASS（属 `60781cdc76e7`）／人工复核 `status: pending` |
+| 主张与断言分开 | `claims` 11 条，其中弱主张单独列出（"部分支持"/"待核查"/"未采用来源"分标签），未删句只标注 |
+| 正文图表真实加载 | 页内 6 张图 `complete && naturalWidth>0`（1038×644），0 张失败；`chart_1.png` 服务字节 `sha256=b7ca8b122c6b55f6…` = 包内 `frozen` 值 |
+| 数字可信度（验收器） | 226 个数字：引用 206、计算 7、模型知识 0、不可溯源 13；数字溯源率 94%、金额溯源率 100% |
+
+## 5. 本次页面复核发现并修复的两个缺陷
+
+### 5.1 「下载交付包 zip」对重新导出的包恒 404
 
 `web_ui._FILES_AUTHED_ROOT_RE` 只认 `deliverables_[0-9_]+\.zip`，而
 `delivery_pipeline.repack_adopted`（页面「按当前版本重新导出」）为避免同秒撞名生成的
@@ -90,7 +101,7 @@
 `test_financial_chain.TestFilesVisibilityPolicy` 新增两条（两种形状可下 + 形状仍受约束 +
 白名单与写入方命名对齐）。提交 `06f7190`。
 
-### 4.2 下载报告会让页面误报"包不含最新修订"
+### 5.2 下载报告会让页面误报"包不含最新修订"
 
 `_write_export_manifest` 在**每次下载 Markdown/PDF** 时也会重写 `export_manifest.json`
 并盖新的 `generated_at`；`_export_payload` 的陈旧初筛只看"清单比包新两分钟以上"，
@@ -110,7 +121,7 @@
 
 修复后同一页面复核：`package_stale=false`，导出块无琥珀提示，包下载 200。
 
-## 5. 测试与回归
+## 6. 测试与回归
 
 ```
 REDIS_PORT=6399 python -m unittest test_financial_chain   # 36 OK（新增 2 例）
@@ -121,7 +132,7 @@ REDIS_PORT=6399 python -m unittest test_auth_audit test_frontend_guards   # 61 O
 服务在修复后重启两次（`stop → deps --fix → start`，各 16/16 存活）；浏览器会话在重启后
 仍为 `momang · 管理员`（会话落 SQLite，不因重启失效）。
 
-## 6. 未验项（如实列出）
+## 7. 未验项（如实列出）
 
 - **真人研究员评分**仍未进行（`docs/evidence/r4_scoring_handoff_20260924.md` 的 6 步交接、
   评分表待填）；页面上的「人工复核：待复核」正是这一状态，机器验收 pass 不代表已复核。
