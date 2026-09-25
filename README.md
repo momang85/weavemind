@@ -292,6 +292,22 @@ python setup_wizard.py
 
 织光采用模块化 Python 应用、独立 Worker 和 React 工作台。Redis 负责消息与队列，SQLite 保存运行记录，文件工作区保存产物，ChromaDB 支撑记忆检索。
 
+```mermaid
+flowchart TB
+    UI[React 工作台] <--> API[web_ui API]
+    API <--> DB[(SQLite<br/>任务 / 会话 / 审计)]
+    API <--> MEM[(ChromaDB<br/>记忆检索)]
+    API --> ORCH[orchestrator_v2<br/>计划与预算]
+    ORCH <--> Q[(Redis<br/>队列与消息)]
+    Q <--> W[Workers<br/>检索 / 抓取 / 摘要 / 分析 / 执行 / 报告]
+    ORCH --> WS[任务工作区<br/>事实 / 底稿 / 图表 / 证据]
+    WS --> LV[验收与版本<br/>acceptance_checker / report_version]
+    LV --> DP[delivery_pipeline<br/>冻结快照 + 交付包]
+    DP --> API
+```
+
+读图要点：**事实与产物落在文件工作区**，所以正文、底稿、图表、证据可以逐字节核对；**验收与交付各自独立成层**，因此"文件完整"与"研究已回答"是两条不同的结论。
+
 | 层次 | 主要代码 | 职责 |
 |---|---|---|
 | 工作台与 API | [frontend/](frontend/)、[web_ui.py](web_ui.py) | 任务、计划、研究状态、修订、下载与配置；React / TypeScript / Vite / Zustand |

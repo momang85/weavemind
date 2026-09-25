@@ -291,6 +291,22 @@ Authentication, `admin` / `viewer` roles, operation auditing, and restricted rep
 
 WeaveMind uses a modular Python application, separate Workers, and a React workbench. Redis handles messaging and queues, SQLite stores runtime records, the file workspace stores artifacts, and ChromaDB supports memory retrieval.
 
+```mermaid
+flowchart TB
+    UI[React workbench] <--> API[web_ui API]
+    API <--> DB[(SQLite<br/>tasks / sessions / audit)]
+    API <--> MEM[(ChromaDB<br/>memory retrieval)]
+    API --> ORCH[orchestrator_v2<br/>plans and budgets]
+    ORCH <--> Q[(Redis<br/>queues and messaging)]
+    Q <--> W[Workers<br/>search / fetch / summarize / analyze / execute / report]
+    ORCH --> WS[Task workspace<br/>facts / working papers / charts / evidence]
+    WS --> LV[Validation and versions<br/>acceptance_checker / report_version]
+    LV --> DP[delivery_pipeline<br/>frozen snapshot + delivery package]
+    DP --> API
+```
+
+Reading the diagram: **facts and artifacts live in the file workspace**, which is why the report, working papers, charts, and evidence can be checked byte by byte; **validation and delivery are separate layers**, which is why “the files are complete” and “the research questions are answered” are two different conclusions.
+
 | Layer | Main code | Responsibility |
 |---|---|---|
 | Workbench and API | [frontend/](frontend/), [web_ui.py](web_ui.py) | Tasks, plans, research status, revisions, downloads, and configuration; React / TypeScript / Vite / Zustand |
