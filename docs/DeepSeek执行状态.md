@@ -69,6 +69,22 @@ PDF 14 页 0 越界、旧包 9 个全部保留）。**复核中查出并修掉�
 `test_delivery_chain` 343 OK）。证据：`docs/evidence/page_button_recheck_20260924.md`。
 未验：真人评分（页面照实显示"人工复核：待复核"）、真实 Redis 多进程并发、主文 14 页未达软目标。
 
+**新手安装受阻的指引补口（09-25）**：按实机截图（Python 3.13 机器上 `start.bat` 停在
+`[4/6] Dependencies`：依赖 0/14、镜像报 `No matching distribution found for aiosqlite`、
+默认源超时，便携 Redis 4 个源 326 秒全失败）修三处会让新手白跑的坑：
+① 依赖失败报告只给一行错误——现在直接附 4 步排查（确认通道 → 换 `WM_PIP_INDEX_URL` 镜像
+→ 分小批装、chromadb 单独装 → 离线 wheels），部署指南新增
+「5.3 依赖装不上时的排查与离线安装」+ FAQ 9.6 + 环境变量表补齐 `WM_PIP_INDEX_URL`/
+`WM_NO_AUTO_DOWNLOAD`/`WM_REDIS_*`/`SKIP_REDIS_CHECK`；
+② `SKIP_REDIS_CHECK=1` 此前只有 launcher 预检认，照着指引设了仍被 `start.bat` 的闸门挡住
+——依赖自检（`--fix` 与只报告两种模式）现在也认，且打印代价（消息总线不可用、worker 与队列
+不会工作）；
+③ 三处指引把 tporadowski/redis（Redis 5.x）列为可选方案，与"需 ≥6（RESP3/HELLO）"
+自相矛盾，照做会"启动即崩、日志报 unknown command HELLO"——改为 Memurai / redis-windows
+并写明不能用；便携包体积说明由"约 5MB"更正为实际约 14MB。
+用例：`test_redis_acquisition` 新增 5 例（跳过开关 4 例 + 不再推荐 Redis 5 构建）、
+`test_p0.TestPipMirrorPolicy` 新增 2 例（失败报告带可执行步骤、指引镜像与默认源不漂移）。
+
 **上一轮（保留）**：阶段 D · **09-23 实机复核四项**。
 项1：风险章节与逐问支持**同一条判据**（`match_kind`）——只有 explanation 才写"解释已取得"，
 行业/市场背景与读数如实写"未取得该指标变化的解释"，且背景**不计入**必答分子；
