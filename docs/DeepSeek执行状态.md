@@ -1,6 +1,31 @@
-# DeepSeek 执行状态（2026-09-23 晚间更新 · R1）
+# DeepSeek 执行状态（2026-09-26 更新 · 新人不友好专项 N0/N1）
 
-**当前批次**：阶段 D 后半程 · **R1 统一研究判断与证据连续性**（指令
+**当前批次**：新人使用专项 N · **N0 收尾 + N1 首批**（指令
+`docs/新人一键启动与首次研究体验_20260925.md`；N0→N1→N2→N3→N4 顺序推进）。
+本轮先收尾无沙箱研究路径小批（`f884db3`，已推送 CI 绿）并纠偏两处，再做 N1 首批四项行为修复。
+
+- **变更文件**：`launcher.py`（实例复用/三层就绪/端口单一来源/`url`、`readiness` 子命令）、
+  `task_intent.py`（新增 `wants_code_deliverable`）、`orchestrator_v2.py`（交付守门改调意图模块、
+  修复轮提示去掉 restricted）、`dep_check.py`（沙箱出路去掉 restricted、报告加沙箱行）、
+  `start.bat`（取实际端口打开浏览器）、`test_startup_readiness.py`、`test_p0.py`、
+  `test_orchestrator_v2.py`。
+- **验证**：`test_startup_readiness` 20 OK（新增 10 例）、`test_orchestrator_v2`+`test_setup_wizard`
+  +`test_deploy_manifest` 144 OK、`test_p0` 407 OK（含评测闸门）、`test_delivery_chain` 343 OK。
+  实机：启动 16/16；三层就绪打印"工作台 HTTP 200 @8080 / 研究能力就绪（Redis 8、5 项必需 Worker
+  心跳新鲜）/ 代码隔离不可用"；**第二次 `launcher.py start` 复用实例，16 个 PID 前后逐项相同**。
+- **已知限制**：进程归属校验在无 psutil 时的回退路径（tasklist/wmic）在中文控制台会因 GBK 解码
+  失败返回空 → 可能把"已在运行"误判成未运行；端口"超时 vs 拒绝"未区分语义；N1 其余条目
+  （配置统一、安装状态失效与恢复、脱敏诊断导出、暖启动不重复探测）与 N2/N3/N4 未做。
+- **下一步**：N1 其余条目 → N2 Windows 最小便携运行包 → N3 页面首启引导 → N4 验收矩阵。
+  证据：`docs/evidence/n0_n1_single_start_and_readiness_20260926.md`；
+  N0 无沙箱路径：`docs/evidence/no_docker_research_path_20260925.md`。
+- 本轮未新增付费模型调用，未改模型/权限/模板/配置，未自动提交样例任务。
+
+## 归档批次（R1–R4 与更早）
+
+### R1（2026-09-23 晚间）：统一研究判断与证据连续性
+
+**批次**（归档）：阶段 D 后半程 · **R1**（指令
 `docs/阶段D系统收敛与研究效能提升_20260923.md`）。
 新增 `question_assessment.py`：给定指标判定材料类别（分解覆盖/管理层归因[发行人说法]/
 观察/背景/明确否认/未披露/不确定/未来），因果必须是短语或构式且**只算在它所在子句**，

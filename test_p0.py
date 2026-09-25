@@ -7788,6 +7788,30 @@ class TestInjectionRelevance(unittest.TestCase):
         self.assertTrue(has_chart_intent("输出 ASCII 柱状图"))
         self.assertFalse(has_chart_intent("计算合计与均值"))
 
+    def test_code_deliverable_intent_avoids_research_wording(self):
+        """交付守门判"要不要代码"必须看**交付物名词**，不能看裸动词或裸"代码"。
+
+        实机误判：交付守门按宽关键词（"编写""代码"）判，于是
+        「编写洋河股份研究报告」「研究股票代码 002304」这类研究目标被当成"要求生成程序"，
+        交付包没有 HTML/PY/JS 就判贯通测试失败并进修复轮。
+        """
+        from task_intent import wants_code_deliverable
+        for goal in ("编写洋河股份 2023 与 2024 年度研究报告",
+                     "研究股票代码 002304 的经营表现，输出分析报告",
+                     "研究基金代码 510300 的净值变化",
+                     "就代码质量问题写一段说明，附来源标注"):
+            self.assertFalse(wants_code_deliverable(goal), goal)
+        for goal in ("用 Python 编写一个可直接运行的命令行小程序",
+                     "写一个单文件 HTML 小游戏",
+                     "实现一个爬虫脚本并跑通",
+                     "写一个销售统计脚本，输出 ASCII 柱状图"):
+            self.assertTrue(wants_code_deliverable(goal), goal)
+
+    def test_delivery_gate_delegates_to_intent_module(self):
+        """交付守门复用既有意图模块（不另造全局关键词表）。"""
+        src = Path("orchestrator_v2.py").read_text(encoding="utf-8")
+        self.assertIn("from task_intent import wants_code_deliverable", src)
+
 
 class TestPhaseProgressAndWatchdog(unittest.TestCase):
     """统一阶段进度源 + 阶段看门狗。

@@ -5258,17 +5258,17 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
     # 历史反例（实机）——研究类目标的图表步骤曾被规划成 code_execution，于是交付守门要求
     # "交付包里必须有 HTML/PY/JS"，而这类任务本来就只该交付报告，直接判贯通测试失败并
     # 进入修复轮（修复步又是 code_execution，本机没有容器隔离时白跑两轮）。
-    _CODE_GOAL_KEYS = (
-        "写一个", "写个", "编写", "实现一个", "代码", "脚本", "程序", "可运行",
-        "命令行", "cli", "爬虫", "算法", "html", "网页", "小工具", "脚本文件",
-        "python", "javascript", "game", "游戏",
-    )
-
+    # 判定复用 `task_intent.wants_code_deliverable`（既有意图模块），不另造全局关键词表：
+    # "编写洋河研究报告"、"研究股票代码 002304" 都不算要代码，只有交付物本身是
+    # 脚本/程序/网页/可运行文件时才算。
     @classmethod
     def _goal_wants_code(cls, goal: str) -> bool:
         """目标是否要求生成代码/脚本/程序/可运行文件（决定交付是否必须有代码产物）。"""
-        g = str(goal or "").lower()
-        return any(k in g for k in cls._CODE_GOAL_KEYS)
+        try:
+            from task_intent import wants_code_deliverable
+            return bool(wants_code_deliverable(goal))
+        except Exception:
+            return False
 
     @staticmethod
     def _sandbox_blocker() -> str:
@@ -6256,9 +6256,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                                       "出路：① 安装并启动 Docker 后构建沙箱镜像 "
                                       "（docker build -f Dockerfile.sandbox -t "
                                       "weavimind-code-sandbox:latest .）；"
-                                      "② 本机试用可显式设 CODE_EXECUTION_SANDBOX=restricted"
-                                      "（无操作系统级隔离）；"
-                                      "③ 让任务不生成代码步骤（研究类任务默认如此）。"
+                                      "② 让任务不生成代码步骤（研究类任务默认如此）。"
+                                      "不要用关闭隔离来解决（restricted/none 只能由操作者显式选择）。"
                                       "其余能力（检索/结构化数据/图表/报告/交付）不受影响。",
                            "timestamp": self._now_iso()})
         while (e2e_results and not any(r.get("ok") for r in e2e_results)

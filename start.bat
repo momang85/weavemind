@@ -190,14 +190,21 @@ if errorlevel 1 (
     exit /b 1
 )
 
+REM Ask the launcher for the real URL instead of hardcoding 8080: WEB_PORT (or the
+REM config file) may point elsewhere, and opening the wrong port looks like a dead app.
+set "WM_URL="
+for /f "usebackq delims=" %%u in (`%PY% launcher.py url 2^>nul`) do set "WM_URL=%%u"
+if not defined WM_URL set "WM_URL=http://localhost:8080"
+
 echo.
 echo   ============================================
-echo     Ready.  http://localhost:8080
+echo     Ready.  %WM_URL%
 echo     Stop:   stop.bat
 echo     Status: %PY% launcher.py status
+echo     Health: %PY% launcher.py readiness
 echo   ============================================
 echo.
-start "" "http://localhost:8080"
+start "" "%WM_URL%"
 call :pause_if_interactive
 exit /b 0
 

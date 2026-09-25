@@ -19,7 +19,12 @@
 from __future__ import annotations
 
 import ast
+import json
+import os
+import shutil
 import socket
+import sys
+import tempfile
 import time
 import unittest
 from pathlib import Path
@@ -99,8 +104,10 @@ class TestCodeSandboxIsVisibleBeforeTasks(unittest.TestCase):
         self.assertTrue(rep["ok"], "沙箱不可用不得阻塞启动")
         self.assertFalse(rep["ready"])
         self.assertIn("docker", rep["detail"])
-        self.assertIn("CODE_EXECUTION_SANDBOX=restricted", rep["detail"], "要给出路")
-        self.assertIn("Dockerfile.sandbox", rep["detail"])
+        self.assertIn("Dockerfile.sandbox", rep["detail"], "要给出恢复隔离的出路")
+        self.assertIn("不生成代码步骤", rep["detail"])
+        # 不把"关闭隔离"当作新人出路（架构指令：不得自动降级、不推荐 restricted）
+        self.assertNotIn("CODE_EXECUTION_SANDBOX=restricted", rep["detail"])
         # 报告里能看到这一行，且用中性标记（不是 [!!] 失败）
         text = dep_check.format_report({
             "python": {"ok": True, "detail": "Python 3.13"},
@@ -124,10 +131,254 @@ class TestCodeSandboxIsVisibleBeforeTasks(unittest.TestCase):
         self.assertTrue(rep["ready"])
         self.assertIn("容器隔离已就绪", rep["detail"])
 
-    def test_launcher_startup_prints_the_note(self):
+    def test_launcher_prints_three_layer_readiness(self):
+        """启动/状态输出必须给三层状态，而不是只给"N/N 进程存活"。"""
         src = Path("launcher.py").read_text(encoding="utf-8")
+        self.assertIn("def readiness_report(", src)
+        self.assertIn("def print_readiness(", src)
+        self.assertIn("研究能力：就绪", src)
+        self.assertIn("研究能力：未就绪", src)
         self.assertIn("代码执行：容器隔离不可用", src)
-        self.assertIn("isolation_note()", src)
+        self.assertIn("print_readiness(readiness_report(), quiet=False)", src)
+
+
+class TestSingleInstanceReuse(unittest.TestCase):
+    """重复启动必须**复用**已在运行的实例（N1 首批：此前无条件停旧服务，会杀掉进行中的任务）。"""
+
+    def _ready_stub(self):
+        return {"workbench": {"ok": True, "detail": "HTTP 200 @ 8080", "port": 8080,
+                              "url": "http://localhost:8080"},
+                "research": {"ok": True, "redis": True, "redis_major": 8, "missing": [],
+                             "stale": [], "orchestrator": True, "required": []},
+                "code_sandbox": {"ok": False, "note": "", "execution_available": False,
+                                 "isolation_required": True, "reason": "docker 不可用"},
+                "port": 8080, "url": "http://localhost:8080", "ready": True}
+
+    def test_second_start_reuses_instead_of_stopping(self):
+        import launcher
+        with mock.patch.object(launcher, "_load_config", return_value={}), \
+                mock.patch.object(launcher, "_read_pids",
+                                  return_value={"services": {"webui": 11, "orchestrator": 22}}), \
+                mock.patch.object(launcher, "_is_alive", return_value=True), \
+                mock.patch.object(launcher, "_pid_owns_project", return_value=True), \
+                mock.patch.object(launcher, "stop_services") as stop, \
+                mock.patch.object(launcher, "_spawn_service") as spawn, \
+                mock.patch.object(launcher, "readiness_report",
+                                  return_value=self._ready_stub()), \
+                mock.patch.dict(os.environ, {"WM_FORCE_RESTART": "0"}), \
+                mock.patch("builtins.print"):
+            out = launcher.start_services()
+        self.assertTrue(out.get("reused"), "第二次启动应复用实例")
+        stop.assert_not_called()
+        spawn.assert_not_called()
+        self.assertEqual(out["url"], "http://localhost:8080")
+
+    def test_force_restart_env_keeps_old_behaviour(self):
+        """WM_FORCE_RESTART=1（显式重启）仍按原路径停旧起新。"""
+        import launcher
+        services = [("webui", [sys.executable, "webui.py"], launcher.BASE_DIR, None)]
+        with mock.patch.object(launcher, "_load_config", return_value={}), \
+                mock.patch.object(launcher, "_read_pids",
+                                  return_value={"services": {"webui": 11}}), \
+                mock.patch.object(launcher, "_is_alive", return_value=True), \
+                mock.patch.object(launcher, "_pid_owns_project", return_value=True), \
+                mock.patch.object(launcher, "build_services", return_value=services), \
+                mock.patch.object(launcher, "stop_services", return_value=["webui"]) as stop, \
+                mock.patch.object(launcher, "_spawn_service", return_value=999) as spawn, \
+                mock.patch.object(launcher, "verify_services",
+                                  return_value={"total": 1, "alive": 1, "down": [],
+                                                "never_started": [], "waited": 0}), \
+                mock.patch.object(launcher, "readiness_report",
+                                  return_value=self._ready_stub()), \
+                mock.patch.object(launcher, "_ensure_redis_available"), \
+                mock.patch.object(launcher, "_wait_redis_ready", return_value=True), \
+                mock.patch.object(launcher, "_write_pids"), \
+                mock.patch.dict(os.environ, {"WM_FORCE_RESTART": "1"}), \
+                mock.patch("builtins.print"):
+            out = launcher.start_services()
+        stop.assert_called_once()
+        spawn.assert_called_once()
+        self.assertNotIn("reused", out)
+
+    def test_recycled_pid_is_not_our_instance(self):
+        """PID 文件里的进程已被系统回收给别的进程（归属校验失败）→ 不算本实例在运行。"""
+        import launcher
+        with mock.patch.object(launcher, "_read_pids",
+                               return_value={"services": {"webui": 4242}}), \
+                mock.patch.object(launcher, "_is_alive", return_value=True), \
+                mock.patch.object(launcher, "_pid_owns_project", return_value=False):
+            state = launcher.instance_state()
+        self.assertFalse(state["running"])
+        self.assertEqual(state["stale"], {"webui": 4242})
+
+
+class TestSpawnFailureAccounting(unittest.TestCase):
+    """spawn 失败的服务必须计入总数与失败清单（此前少启动一个反而显示"15/15 存活"）。"""
+
+    def test_spawn_failure_counts_as_down(self):
+        import launcher
+        with mock.patch.object(launcher, "_read_pids",
+                               return_value={"services": {"a": 1}, "failed": ["b"]}), \
+                mock.patch.object(launcher, "_is_alive", return_value=True), \
+                mock.patch.dict(os.environ, {"WM_START_VERIFY_WAIT": "0"}), \
+                mock.patch("builtins.print") as out:
+            summary = launcher.verify_services(quiet=False)
+        self.assertEqual(summary["total"], 2, "未启动的服务也要计入总数")
+        self.assertEqual(summary["alive"], 1)
+        self.assertIn("b", summary["never_started"])
+        self.assertEqual([name for _pid, name in summary["down"]], ["b"])
+        printed = " ".join(str(c) for c in out.call_args_list)
+        self.assertIn("未启动", printed, "要说明是未启动而不是不存在")
+
+    def test_recorded_spawn_failures_round_trip(self):
+        """start_services 记录 spawn 失败 → pids 文件里能读回来（不静默丢）。"""
+        import launcher
+        tmp = tempfile.mkdtemp(prefix="wm_pids_")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        fake = Path(tmp) / "pids.json"
+        services = [("ok-svc", [sys.executable, "webui.py"], launcher.BASE_DIR, None),
+                    ("bad-svc", [sys.executable, "gone.py"], launcher.BASE_DIR, None)]
+        with mock.patch.object(launcher, "PID_FILE", fake), \
+                mock.patch.object(launcher, "_load_config", return_value={}), \
+                mock.patch.object(launcher, "_read_pids", return_value={"services": {}}), \
+                mock.patch.object(launcher, "build_services", return_value=services), \
+                mock.patch.object(launcher, "stop_services", return_value=[]), \
+                mock.patch.object(launcher, "_spawn_service",
+                                  side_effect=[111, None]), \
+                mock.patch.object(launcher, "verify_services",
+                                  return_value={"total": 2, "alive": 1, "down": [(0, "bad-svc")],
+                                                "never_started": ["bad-svc"], "waited": 0}), \
+                mock.patch.object(launcher, "readiness_report",
+                                  return_value={"workbench": {"ok": True, "detail": "x", "port": 8080,
+                                                              "url": "http://localhost:8080"},
+                                                "research": {"ok": True, "redis": True,
+                                                             "redis_major": 8, "missing": [],
+                                                             "stale": [], "orchestrator": True,
+                                                             "required": []},
+                                                "code_sandbox": {"ok": False, "note": "",
+                                                                 "execution_available": False,
+                                                                 "isolation_required": True,
+                                                                 "reason": "x"},
+                                                "port": 8080, "url": "http://localhost:8080",
+                                                "ready": True}), \
+                mock.patch.object(launcher, "_ensure_redis_available"), \
+                mock.patch.object(launcher, "_wait_redis_ready", return_value=True), \
+                mock.patch("builtins.print"):
+            launcher.start_services()
+        recorded = json.loads(fake.read_text(encoding="utf-8"))
+        self.assertEqual(recorded["services"], {"ok-svc": 111})
+        self.assertEqual(recorded["failed"], ["bad-svc"])
+
+
+class TestResearchReadiness(unittest.TestCase):
+    """存活 ≠ 可研究：工作台能打开但研究能力未就绪时必须如实说未就绪（N1）。"""
+
+    def _patch(self, *, http_ok=True, redis_ok=True, major=8, beats=None,
+               orchestrator=True, port=8080):
+        import launcher
+        beats = beats if beats is not None else {
+            c: 5.0 for c in launcher.RESEARCH_REQUIRED_CAPABILITIES}
+        return [
+            mock.patch.dict(os.environ, {"WEB_PORT": str(port)}, clear=False),
+            mock.patch.object(launcher, "_redis_reachable", return_value=redis_ok),
+            mock.patch.object(launcher, "_registry_heartbeats", return_value=beats),
+            mock.patch.object(launcher, "instance_state",
+                              return_value={"running": orchestrator, "services":
+                                            ({"orchestrator": 5} if orchestrator else {}),
+                                            "stale": {}, "port": port,
+                                            "url": f"http://localhost:{port}"}),
+            mock.patch.object(launcher, "_redis_min_major", return_value=6),
+        ]
+
+    def test_ready_when_all_layers_ok(self):
+        import launcher
+        import urllib.request
+        patchers = self._patch()
+        for p in patchers:
+            p.start()
+            self.addCleanup(p.stop)
+        with mock.patch.object(urllib.request, "urlopen") as u:
+            u.return_value.__enter__.return_value.status = 200
+            rep = launcher.readiness_report()
+        self.assertTrue(rep["ready"])
+        self.assertTrue(rep["research"]["ok"])
+        self.assertIn("8080", rep["workbench"]["url"])
+
+    def test_workbench_up_but_orchestrator_missing_is_not_ready(self):
+        import launcher
+        import urllib.request
+        patchers = self._patch(orchestrator=False)
+        for p in patchers:
+            p.start()
+            self.addCleanup(p.stop)
+        with mock.patch.object(urllib.request, "urlopen") as u, \
+                mock.patch("builtins.print") as out:
+            u.return_value.__enter__.return_value.status = 200
+            rep = launcher.readiness_report()
+            launcher.print_readiness(rep, quiet=False)
+        self.assertTrue(rep["workbench"]["ok"], "工作台可访问")
+        self.assertFalse(rep["research"]["ok"], "编排器不在 → 研究未就绪")
+        self.assertFalse(rep["ready"])
+        printed = " ".join(str(c) for c in out.call_args_list)
+        self.assertIn("未就绪", printed)
+        self.assertNotIn("可研究", printed, "未就绪时不得宣称可研究")
+
+    def test_missing_worker_capability_blocks_research(self):
+        import launcher
+        import urllib.request
+        beats = {c: 1.0 for c in launcher.RESEARCH_REQUIRED_CAPABILITIES
+                 if c != "report_generator"}
+        patchers = self._patch(beats=beats)
+        for p in patchers:
+            p.start()
+            self.addCleanup(p.stop)
+        with mock.patch.object(urllib.request, "urlopen") as u:
+            u.return_value.__enter__.return_value.status = 200
+            rep = launcher.readiness_report()
+        self.assertFalse(rep["research"]["ok"])
+        self.assertIn("report_generator", rep["research"]["missing"])
+
+    def test_stale_heartbeat_blocks_research(self):
+        import launcher
+        import urllib.request
+        beats = {c: 1.0 for c in launcher.RESEARCH_REQUIRED_CAPABILITIES}
+        beats["web_search"] = launcher.HEARTBEAT_MAX_AGE_SEC + 30
+        patchers = self._patch(beats=beats)
+        for p in patchers:
+            p.start()
+            self.addCleanup(p.stop)
+        with mock.patch.object(urllib.request, "urlopen") as u:
+            u.return_value.__enter__.return_value.status = 200
+            rep = launcher.readiness_report()
+        self.assertFalse(rep["research"]["ok"])
+        self.assertIn("web_search", rep["research"]["stale"])
+
+    def test_non_default_port_is_used_by_url_and_probe(self):
+        """非默认 WEB_PORT：URL、探测地址、就绪输出必须是同一个端口。"""
+        import launcher
+        import urllib.request
+        patchers = self._patch(port=8123)
+        for p in patchers:
+            p.start()
+            self.addCleanup(p.stop)
+        seen = {}
+
+        def fake_urlopen(url, timeout=None):
+            seen["url"] = url
+            cm = mock.MagicMock()
+            cm.__enter__.return_value.status = 200
+            return cm
+
+        with mock.patch.object(urllib.request, "urlopen", side_effect=fake_urlopen), \
+                mock.patch("builtins.print"):
+            rep = launcher.readiness_report()
+        self.assertEqual(launcher.web_port(), 8123)
+        self.assertTrue(rep["url"].endswith(":8123"))
+        self.assertIn(":8123", seen["url"], "就绪探测必须打在实际端口上")
+
+
+if __name__ == "__main__":
+    unittest.main()
 
 
 class TestNoUnretriedRedisClients(unittest.TestCase):

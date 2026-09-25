@@ -636,6 +636,22 @@ def start_services() -> dict:
     except Exception as exc:
         logger.warning("沙箱状态检查失败（代码执行会被拒绝）：%s", str(exc)[:120])
 
+    # 重复启动必须**复用**已在本实例上运行的服务：此前无条件 stop_services，
+    # 第二次双击会把正在跑的研究任务一起杀掉（N1 首批修复）。
+    _force = os.environ.get("WM_FORCE_RESTART", "0") == "1"
+    state = instance_state()
+    if state["running"] and not _force:
+        logger.info("本实例已在运行（%d 个服务），复用而不重启：%s",
+                    len(state["services"]), state["url"])
+        print(import_cli_text().msg(
+            f"  [OK] 已在运行（{len(state['services'])} 个服务）：{state['url']}"
+            "——已复用本实例，不重启、不打断进行中的任务",
+            f"  [OK] Already running ({len(state['services'])} services): {state['url']}"
+            " - reusing this instance (no restart, running tasks untouched)"))
+        print_readiness(readiness_report(), quiet=False)
+        return {"reused": True, "services": state["services"], "port": state["port"],
+                "url": state["url"]}
+
     logger.info("Stopping previous services (if any)...")
     stopped = stop_services(stop_portable_redis=False)
     if stopped:
@@ -644,24 +660,22 @@ def start_services() -> dict:
     _wait_redis_ready()
 
     services = build_services(cfg)
-    pids: dict = {"services": {}}
+    pids: dict = {"services": {}, "failed": []}
     for name, argv, cwd, out_path in services:
         pid = _spawn_service(name, argv, cwd, out_path)
         if pid:
             pids["services"][name] = pid
             logger.info("[%s] started pid=%s", name, pid)
         else:
+            # spawn 失败必须进清单：此前只打日志、不记账，导致"16/16 存活"
+            # 实际只统计了启动成功的那些（少一个反而看起来全绿）。
+            pids["failed"].append(name)
             logger.error("[%s] failed to start", name)
 
     _write_pids(pids)
     # 消息里的端口必须反映实际监听端口：此前写死 8080，用户用 WEB_PORT 改了端口
     # 仍被提示 8080（WEB_PORT 本身是被尊重的），实测新环境因此走错端口。
-    _web_port = os.environ.get("WEB_PORT", "8080")
-    front_url = (
-        f"http://localhost:{_web_port}"
-        if (BASE_DIR / "frontend" / "dist" / "index.html").exists()
-        else "http://localhost:5173"
-    )
+    front_url = web_url()
     # 启动后校验：给子进程一点时间完成 import/连接，然后核对实际存活。
     # 秒退服务在此暴露（此前只打印 started，用户看到"成功"却无服务）。
     summary = verify_services(quiet=False)
@@ -677,14 +691,219 @@ def start_services() -> dict:
                 "  Startup verification failed (WM_START_STRICT=1): see logs/ and retry.",
             ))
             sys.exit(1)
+    # 三层就绪：工作台可访问 / 研究能力就绪 / 代码隔离可用——进程数不能代表"可研究"。
+    print_readiness(readiness_report(), quiet=False)
     logger.info("All services started. WebUI: %s  Frontend: %s", front_url, front_url)
     return pids
+
+
+# 研究必需能力（对应 AgentRegistry.capabilities）——缺任一项即"研究能力未就绪"。
+# 依据一次公司研究的实际链路：检索 → 抓取 → 摘要 → 出报告 → 打包。
+# `data_analyzer` / `file_io` / `code_execution` 不在必需项里：图表由进程内
+# charts_pipeline 渲染，代码执行是可选能力（本机没有容器隔离时会被拒绝）。
+RESEARCH_REQUIRED_CAPABILITIES = ("web_search", "web_fetch", "content_summary",
+                                  "report_generator", "package")
+HEARTBEAT_MAX_AGE_SEC = 180.0
+
+
+def _redis_min_major() -> int:
+    """Redis 兼容下限（与 `dep_check.REDIS_MIN_MAJOR` 同源，避免两处漂移）。"""
+    try:
+        import dep_check
+        return int(dep_check.REDIS_MIN_MAJOR)
+    except Exception:
+        return 6
+
+
+def _registry_heartbeats() -> dict[str, float]:
+    """能力 → 最近心跳年龄（秒）。读不到注册表时返回空 dict（按未就绪处理）。"""
+    import sqlite3
+    from datetime import datetime, timezone
+    db = os.environ.get("WEAVEMIND_DB") or str(BASE_DIR / "agents.db")
+    out: dict[str, float] = {}
+    now = datetime.now(timezone.utc)
+    try:
+        con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=3)
+        con.row_factory = sqlite3.Row
+        rows = con.execute("SELECT capabilities, last_heartbeat FROM agents").fetchall()
+        con.close()
+    except Exception:
+        return {}
+    for r in rows:
+        caps = [c.strip().split(":")[0] for c in str(r["capabilities"] or "").split(",")]
+        hb = str(r["last_heartbeat"] or "").strip()
+        try:
+            ts = datetime.strptime(hb, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+            age = max(0.0, (now - ts).total_seconds())
+        except Exception:
+            age = float("inf")
+        for cap in caps:
+            if cap:
+                out[cap] = min(out.get(cap, float("inf")), age)
+    return out
+
+
+def readiness_report(*, http_timeout: float = 3.0) -> dict:
+    """三层状态：工作台可访问 / 研究能力就绪 / 代码隔离可用。
+
+    为什么不能只看"N/N 服务存活"：PID 存活、端口响应、进程数都不能代表**能提交研究任务**。
+    研究能力要求 Redis 可达且版本兼容（≥6，redis-py 8 用 RESP3）、注册表里研究必需能力的
+    心跳新鲜、编排器进程存活。任何一层不成立都不得对外宣称"可研究"。
+    """
+    port = web_port()
+    # ① 工作台：后端在**实际端口**上响应
+    workbench = {"ok": False, "detail": "", "port": port, "url": web_url(port)}
+    try:
+        import urllib.request
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{port}/api/health", timeout=http_timeout) as resp:
+            code = int(getattr(resp, "status", 0) or 0)
+            workbench["ok"] = 200 <= code < 300
+            workbench["detail"] = f"HTTP {code} @ {port}"
+    except Exception as exc:
+        workbench["detail"] = f"未响应（{str(exc)[:80]}）@ {port}"
+
+    # ② 研究能力
+    host = os.environ.get("REDIS_HOST", "localhost")
+    try:
+        rport = int(os.environ.get("REDIS_PORT", "6379") or 6379)
+    except Exception:
+        rport = 6379
+    redis_ok = _redis_reachable(host, rport)
+    major = None
+    if redis_ok:
+        try:
+            import dep_check
+            major = dep_check._redis_server_version(host, rport)
+        except Exception:
+            major = None
+    beats = _registry_heartbeats()
+    missing = [c for c in RESEARCH_REQUIRED_CAPABILITIES if c not in beats]
+    stale = [c for c in RESEARCH_REQUIRED_CAPABILITIES
+             if c in beats and beats[c] > HEARTBEAT_MAX_AGE_SEC]
+    orchestrator = "orchestrator" in (instance_state()["services"] or {})
+    _min_major = _redis_min_major()
+    redis_compatible = bool(redis_ok and (major is None or major >= _min_major))
+    research_ok = bool(redis_compatible and not missing and not stale and orchestrator)
+    research = {"ok": research_ok, "redis": redis_ok, "redis_major": major,
+                "missing": missing, "stale": stale, "orchestrator": orchestrator,
+                "required": list(RESEARCH_REQUIRED_CAPABILITIES)}
+
+    # ③ 代码隔离（可选能力：研究类任务不需要它）
+    sandbox = {"ok": False, "note": "", "execution_available": False}
+    try:
+        from code_sandbox import isolation_ready, isolation_required, sandbox_status
+        st = sandbox_status()
+        sandbox = {"ok": bool(st.get("isolation_ready")),
+                   "note": st.get("isolation_note") or "",
+                   "execution_available": bool(st.get("execution_available")),
+                   "isolation_required": bool(isolation_required()),
+                   "reason": st.get("isolation_reason") or ""}
+    except Exception as exc:
+        sandbox = {"ok": False, "note": f"沙箱状态未知（{str(exc)[:60]}）",
+                   "execution_available": False, "isolation_required": True, "reason": ""}
+    return {"workbench": workbench, "research": research, "code_sandbox": sandbox,
+            "port": port, "url": web_url(port), "ready": bool(workbench["ok"] and research_ok)}
+
+
+def print_readiness(rep: dict, quiet: bool = False) -> None:
+    """打印三层就绪状态。失败不得显示"可研究"（只打印当前步骤与下一步）。"""
+    if quiet:
+        return
+    t = import_cli_text().msg
+    wb, rs, sb = rep["workbench"], rep["research"], rep["code_sandbox"]
+    print(f"  [{'OK' if wb['ok'] else '!!'}] "
+          + t(f"工作台：{wb['detail']}", f"Workbench: {wb['detail']}"))
+    if rs["ok"]:
+        print("  [OK] " + t(
+            f"研究能力：就绪（Redis {rs['redis_major'] or '版本未知'}、"
+            f"编排器与 {len(rs['required'])} 项必需 Worker 心跳新鲜）",
+            "Research: ready (Redis, orchestrator and required workers heartbeating)"))
+    else:
+        why = []
+        if not rs["redis"]:
+            why.append(t("Redis 不可达", "Redis unreachable"))
+        elif rs["redis_major"] is not None and rs["redis_major"] < _redis_min_major():
+            why.append(t(f"Redis {rs['redis_major']} 版本过低（需 ≥{_redis_min_major()}）",
+                         f"Redis {rs['redis_major']} too old"))
+        if rs["missing"]:
+            why.append(t("缺少能力：" + ", ".join(rs["missing"]),
+                         "missing capabilities: " + ", ".join(rs["missing"])))
+        if rs["stale"]:
+            why.append(t("心跳过期：" + ", ".join(rs["stale"]),
+                         "stale heartbeats: " + ", ".join(rs["stale"])))
+        if not rs["orchestrator"]:
+            why.append(t("编排器未存活", "orchestrator not running"))
+        print("  [!!] " + t("研究能力：未就绪——" + "；".join(why),
+                            "Research: NOT ready - " + "; ".join(why)))
+        print("       " + t("下一步：查看 logs/ 里未就绪服务的日志后重试；"
+                            "工作台可打开不等于能提交研究任务。",
+                            "Next: check logs/ for the unhealthy service and retry."))
+    if sb.get("execution_available") and not sb.get("ok"):
+        print("  [--] " + t(f"代码执行：{sb['note']}",
+                            f"Code execution: {sb['note']}"))
+    elif sb.get("ok"):
+        print("  [OK] " + t(f"代码执行：{sb['note']}", f"Code execution: {sb['note']}"))
+    else:
+        print("  [--] " + t(
+            f"代码执行：容器隔离不可用（{sb.get('reason') or '原因未知'}）——"
+            "涉及代码执行的步骤会被拒绝；检索/结构化数据/图表/报告/交付不受影响。",
+            "Code execution: container isolation unavailable - code steps will be refused."))
+
+
+def web_port() -> int:
+    """Web 端口的**唯一来源**：WEB_PORT 环境变量（config.json 的 `web.port` 作默认值）。
+
+    start.bat、就绪探测、提示消息、打开浏览器都必须用它——此前 start.bat 里硬写
+    8080，用户改过端口就会打开错误的页面。
+    """
+    cfg = _load_config()
+    web_cfg = cfg.get("web") if isinstance(cfg.get("web"), dict) else {}
+    raw = os.environ.get("WEB_PORT") or (web_cfg or {}).get("port") or 8080
+    try:
+        port = int(str(raw).strip())
+    except Exception:
+        port = 8080
+    return port if 0 < port < 65536 else 8080
+
+
+def web_url(port: int | None = None) -> str:
+    """工作台地址（后端端口；前端产物缺失时后端会给出回退状态页）。"""
+    return f"http://localhost:{port or web_port()}"
+
+
+def _pid_owns_project(pid: int) -> bool:
+    """该 PID 是否确实是本项目的服务进程（避免 PID 复用被误认成"实例在跑"）。"""
+    try:
+        return any(int(p) == int(pid) for p, _cmd in _scan_residual_processes())
+    except Exception:
+        return False
+
+
+def instance_state() -> dict:
+    """本实例状态：PID 文件里仍存活**且归属校验通过**的服务。
+
+    重复双击要复用这个实例而不是停掉它；归属校验保证不会把别人的进程当成自己的。
+    """
+    pids = _read_pids().get("services") or {}
+    alive: dict = {}
+    stale: dict = {}
+    for name, pid in pids.items():
+        try:
+            ok = bool(_is_alive(pid) and _pid_owns_project(pid))
+        except Exception:
+            ok = False
+        (alive if ok else stale)[name] = pid
+    return {"running": bool(alive), "services": alive, "stale": stale,
+            "port": web_port(), "url": web_url()}
 
 
 def verify_services(quiet: bool = True) -> dict:
     """启动后校验：等待若干秒后统计服务实际存活情况。
 
-    返回 {total, alive, down:[(pid, name)], waited}；不等严格模式也会如实打印。"""
+    返回 {total, alive, down:[(pid, name)], never_started:[name], waited}；
+    不等严格模式也会如实打印。**spawn 失败的服务计入 total 与 down**——此前只统计
+    启动成功的那些，少启动一个反而显示"15/15 存活"。"""
     try:
         wait = float(os.environ.get("WM_START_VERIFY_WAIT", "8") or 8)
     except Exception:
@@ -692,7 +911,9 @@ def verify_services(quiet: bool = True) -> dict:
     wait = max(0.0, min(wait, 60.0))
     if wait:
         time.sleep(wait)
-    services = _read_pids().get("services", {})
+    recorded = _read_pids()
+    services = recorded.get("services", {})
+    never_started = [str(n) for n in (recorded.get("failed") or [])]
     down: list[tuple[int, str]] = []
     alive = 0
     for name, pid in services.items():
@@ -703,32 +924,21 @@ def verify_services(quiet: bool = True) -> dict:
                 down.append((pid, name))
         except Exception:
             down.append((pid, name))
-    summary = {"total": len(services), "alive": alive, "down": down, "waited": wait}
+    down.extend((0, name) for name in never_started)
+    total = len(services) + len(never_started)
+    summary = {"total": total, "alive": alive, "down": down,
+               "never_started": never_started, "waited": wait}
     if not quiet or down:
         ok = not down
+        detail = ", ".join(
+            (f"{name}（未启动）" if pid == 0 else name) for pid, name in down[:6])
         line = import_cli_text().msg(
-            f"  [{ 'OK' if ok else '!!' }] 启动校验：{alive}/{len(services)} 服务存活"
-            + ("" if ok else "；未存活：" + ", ".join(n for _, n in down[:6])),
-            f"  [{ 'OK' if ok else '!!' }] Startup check: {alive}/{len(services)} alive"
-            + ("" if ok else "; down: " + ", ".join(n for _, n in down[:6])),
+            f"  [{ 'OK' if ok else '!!' }] 启动校验：{alive}/{total} 服务存活"
+            + ("" if ok else "；未存活：" + detail),
+            f"  [{ 'OK' if ok else '!!' }] Startup check: {alive}/{total} alive"
+            + ("" if ok else "; down: " + detail),
         )
         print(line)
-        # 代码执行沙箱状态：本机没有容器隔离时，涉及代码执行的步骤会被拒绝执行——
-        # 提前说清，免得用户在任务里跑十几分钟才发现（研究类任务不需要它）。
-        try:
-            from code_sandbox import isolation_note, isolation_ready, isolation_required
-            if isolation_required() and not isolation_ready()[0]:
-                print(import_cli_text().msg(
-                    "  [--] 代码执行：容器隔离不可用，涉及代码执行的步骤会被拒绝"
-                    "（检索/结构化数据/图表/报告/交付不受影响）。出路见 docs/部署指南.md",
-                    "  [--] Code execution: container isolation unavailable; code steps "
-                    "will be refused (search/structured data/charts/report/delivery are "
-                    "unaffected). See docs/部署指南.md"))
-            else:
-                print(import_cli_text().msg(f"  [OK] 代码执行：{isolation_note()}",
-                                            f"  [OK] Code execution: {isolation_note()}"))
-        except Exception:
-            pass
     return summary
 
 
@@ -791,7 +1001,6 @@ def _supervise_once(
             if state["restart_counts"].get(name):
                 state["restart_counts"][name] = 0
             continue
-
         # 进程不存在：按连续失败次数决定重启或隔离
         fail_count = state["restart_counts"].get(name, 0)
         if fail_count >= SUPERVISE_MAX_RESTARTS:
@@ -808,6 +1017,11 @@ def _supervise_once(
         state["restart_counts"][name] = fail_count + 1
         if new_pid:
             pids.setdefault("services", {})[name] = new_pid
+            # 重启成功即从"未启动"清单里移除，否则 verify_services 会一直把它算作失败
+            try:
+                pids["failed"] = [n for n in (pids.get("failed") or []) if n != name]
+            except Exception:
+                pass
             changed = True
             logger.info(
                 "supervise: 重启服务 %s pid=%s（连续第 %d 次）",
@@ -913,6 +1127,9 @@ def print_status() -> None:
             "run `python launcher.py restart`.",
         ))
     print(f"Redis: {_redis_source()}")
+    # 进程数不等于"可研究"：状态里同时给三层就绪与**实际端口**（N1）
+    print(f"URL: {web_url()}")
+    print_readiness(readiness_report(), quiet=False)
 
 
 def _run_dependency_check(fix: bool, fatal: bool) -> None:
@@ -970,6 +1187,14 @@ def main() -> None:
             logger.info("No running services recorded in %s", PID_FILE)
     elif action == "status":
         print_status()
+    elif action == "url":
+        # 启动脚本与页面共用同一端口来源：`python launcher.py url` 打印实际地址，
+        # start.bat 据此打开浏览器（此前脚本里硬写 8080）。
+        print(web_url())
+    elif action == "readiness":
+        _rep = readiness_report()
+        print_readiness(_rep, quiet=False)
+        sys.exit(0 if _rep["ready"] else 1)
     elif action == "restart":
         _run_dependency_check(fix=True, fatal=True)
         _check_redis_or_exit()

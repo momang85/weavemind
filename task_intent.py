@@ -136,6 +136,49 @@ def has_chart_intent(text: str) -> bool:
     return _hit(text, _CHART_WORDS)
 
 
+# ── 代码交付物意图（交付守门用：这份目标要不要"可运行的代码"） ───────────────
+# 判据按**交付物名词**，不按裸动词或裸"代码"：
+#   · "编写洋河研究报告" —— 编写的是报告，不是程序；把"编写"当信号会误判
+#   · "研究股票代码 002304" —— "股票代码"是标识符，不是代码交付物
+#   · "用 Python 写一个可直接运行的命令行小程序" —— 程序/可运行/命令行，正例
+_CODE_ARTIFACT_WORDS = (
+    "脚本", "程序", "小程序", "命令行", "cli", "爬虫", "可运行", "能运行",
+    "html", "网页", "小游戏", "游戏程序", "单文件", ".py", ".html", ".js",
+    "python 代码", "代码文件", "函数实现", "算法实现", "代码实现",
+)
+# "写/实现 + 代码类名词"的构式：动词与名词都要出现，且名词必须是交付物。
+# 名词里**不含裸"代码"**——"就代码质量问题写一段说明"的交付物是说明，不是程序；
+# 真要交付代码时用户会写"代码文件""python 代码""脚本""程序"等（见上面的交付物名词）。
+_CODE_WRITE_VERBS = ("写", "编写", "实现", "做一个", "做个", "生成")
+_CODE_NOUNS = ("脚本", "程序", "小程序", "代码文件", "网页", "html",
+               "游戏", "爬虫", "命令行工具", "工具脚本")
+# 把"代码"当标识符的搭配：命中即认为该处的"代码"不是交付物
+_CODE_IDENTIFIER_PATTERNS = (
+    "股票代码", "证券代码", "基金代码", "科目代码", "行业代码", "产品代码",
+    "代码为", "代码是", "代码：", "代码:", "代码（", "代码(",
+)
+
+
+def wants_code_deliverable(goal: str) -> bool:
+    """该目标是否要求交付**可运行的代码**（脚本/程序/网页/可运行文件）。
+
+    用于交付守门：只有这类目标才要求交付包里出现 HTML/PY/JS 文件。
+    研究、财报、调研、写作类目标即便正文里提到"代码"（股票代码）或"编写"
+    （编写报告），也不算。
+    """
+    g = str(goal or "").lower()
+    if not g:
+        return False
+    if _hit(g, _CODE_ARTIFACT_WORDS):
+        return True
+    if not _hit(g, _CODE_WRITE_VERBS):
+        return False
+    stripped = g
+    for pat in _CODE_IDENTIFIER_PATTERNS:
+        stripped = stripped.replace(pat, "")
+    return _hit(stripped, _CODE_NOUNS)
+
+
 def is_relevant(text: str, name: str = "", content_head: str = "") -> bool:
     """某工作区文件是否与本步相关。
 
