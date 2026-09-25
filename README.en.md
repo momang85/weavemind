@@ -1,313 +1,373 @@
 <div align="center">
 
-# WeaveMind · ZhiGuang
+# ZhiGuang 织光 · WeaveMind
 
-**A verifiable listed-company research workbench: every number traces back to a source position and is recomputable.**
+**Turn company disclosures into research you can substantiate, recalculate, and revise.**
 
-[![CI](https://github.com/momang85/weavemind/actions/workflows/ci.yml/badge.svg)](https://github.com/momang85/weavemind/actions)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
-[![Docker](https://img.shields.io/badge/docker-ready-2496ED.svg)](docker-compose.yml)
+A listed-company research workbench for independent researchers and small investment research teams
 
-English · [中文](README.md)
+[![CI](https://github.com/momang85/weavemind/actions/workflows/ci.yml/badge.svg)](https://github.com/momang85/weavemind/actions/workflows/ci.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Stage: Research Preview](https://img.shields.io/badge/Stage-Research_Preview-orange)](#current-progress-and-validation-boundaries)
+
+[中文](README.md) · English
+
+[Features](#features) · [Use cases](#who-it-is-for) · [Quick start](#quick-start) · [Architecture](#architecture) · [Documentation](#documentation)
 
 </div>
 
-![WeaveMind hero demo](docs/hero-demo.gif)
+WeaveMind organizes work around a company research draft: define the company, reporting periods, and information cutoff date; assemble financial and operating facts; calculate checkable metrics; assess which questions the evidence can answer; and deliver the report, working papers, charts, and evidence package. Researchers can inspect sources, revise the text, rerun checks, and export the corresponding version.
 
-> The demo asset was recorded on an earlier version and shows the generic multi-agent
-> workshop. The first-screen promise is now the verifiable listed-company research
-> workbench described below; the asset is to be re-recorded.
+The current focus is **operating performance research across two reporting periods for non-financial A-share listed companies**. The aim is to reduce the time spent assembling and repeatedly checking materials, leaving researchers more time for judgment. Bank investment research and corporate client research are later controlled-pilot applications of the same core capabilities.
 
-**Focus: a verifiable listed-company research workbench.** Give it a company and a period;
-get a research write-up, a recomputable working paper, and a gap list — **every number in the
-report must trace back to a source position and be recomputable**, and anything that cannot be
-recomputed must be labelled "unverified / insufficient source" rather than glossed over.
+> **This is a research preview.** Revision and delivery have been recorded on a real task. Cross-company reliability, value to human researchers, and production deployment at banks remain unverified. Passing machine checks, having a complete set of files, and answering the research questions are distinct states, shown separately in the workbench.
 
-Multi-agent orchestration, memory and strategy evolution are *mechanisms* (every plan step is
-editable and replayable), no longer the first-screen promise.
+### At a glance
 
-Traceability varies enormously by sample, so we disclose it **sample by sample** instead of
-folding it into a "stable range" or an average:
+| Question | Answer today |
+|---|---|
+| What is it | Turns public disclosures into **checkable** research deliverables: report ＋ recalculable working papers ＋ source locations ＋ evidence package |
+| Who it is for | Drafting and verification work by independent researchers, analysts, and small research teams |
+| Why it can be checked | Numbers carry sources and formulas, gaps stay explicit, and the delivery package carries per-file hashes and version binding |
+| Where it stands | Research preview: a real task has run end to end through revise → revalidate → same-version export; human scoring and cross-company repeatability are pending |
+| What it does not do | Automated trading or credit decisions, target prices, or return promises |
 
-| Sample | Number traceability | Amount traceability | Note / source |
+## Features
+
+| Feature | What it helps with |
+|---|---|
+| **Research scope carried through the workflow** | Company, ticker, periods, reporting basis, and cutoff date travel with the task, reducing the risk of mixing companies or years during retrieval and generation |
+| **Facts stored separately from calculations** | Facts retain their entity, period, unit, and source; derived metrics retain formulas and inputs for recalculation in CSV / JSON working papers |
+| **Evidence assessed question by question** | Distinguishes quantitative decomposition, the issuer's explanations, data observations, background, and hypotheses; relevant material does not automatically mean a question has been answered |
+| **Gaps become a follow-up plan** | Identifies what is missing, which materials to obtain, and which judgment each gap affects; missing facts are not filled with zeros or turned into complete conclusions |
+| **Researchers retain editorial control** | Revisions create a new version and rerun checks while preserving earlier versions; a review of an old version does not automatically apply to the new one |
+| **Deliverables bound to the adopted version** | Reports, PDFs, working papers, and evidence are packaged from a snapshot with file hashes and version information, making delivery consistency easier to check |
+
+Multi-Worker orchestration, memory retrieval, and model routing support this workflow. They are implementation mechanisms; the product's value ultimately depends on whether its research drafts are useful and easy to review.
+
+### How this differs from “ask a model to write the report”
+
+| Step | Common approach | What WeaveMind does | Where you can check it |
 |---|---|---|---|
-| A-share activity daily (repo's own claim) | 85% (206/241) | — | Structured financial chain hit; report-period data on disk in `financials.json`, numbers recomputable |
-| WBD US task (independent, 2026-09-14) | 8% (3/37), 18 model-knowledge figures | 0% (0/17) | Root cause: structured financials were not wired to that target; see [新手实测报告](docs/新手实测报告_20260914.md) |
-| Legendary Pictures task (independent, 2026-09-14) | 0 verifiable numbers, 15 data-missing placeholders | — | Same report |
-| Financial task (trial run, 2026-09-12) | 46% | 53% (12 placeholders) | Reproduced twice on the same goal; see [试运行报告](docs/试运行报告_20260912.md) |
+| Numbers | Written into the text as they are generated | Facts and formulas are stored **first** in working papers; the report cites them | `working_paper.csv/json`, appendix “field locations and calculation notes” |
+| Sources | One link at the end of a sentence | Excerpt, section, and character range are recorded; jumps between excerpts are marked as non-continuous | `evidence/citation_evidence.json`, the “evidence” panel |
+| Strength of claims | Uniform wording throughout | Quantitative decomposition / issuer statements / observations / background / hypotheses are kept apart | Per-question “support: …” lines and the header research status |
+| Missing material | Skipped, or filled in with prose | Turned into a **list of materials to obtain** and which judgment each gap affects | Appendix “per-question material plan”, “risks and checks” |
+| Researcher edits | Overwrite the text | New version, revalidation, earlier versions preserved | Version records, same-version notice in the export block |
+| Delivery | A single Markdown file | Frozen snapshot ＋ per-file hashes ＋ in-package manifest | `PACKAGE_MANIFEST.json` |
 
-**These samples differ in period, rules and goal — they cannot be combined into one "quality
-range".** Likewise a **fixed synthetic fixture** (amount traceability 0.833 > 0.70 threshold)
-only proves the chain and the gate are connected; it says nothing about live fetching or
-real-report quality.
+Each row can be checked in the artifacts: whether a **claim** holds is the researcher's call, but “where does this number come from, does the formula work, is the material sufficient” does not require trusting the model.
 
-**The one-line difference**: other agents forget what they did — WeaveMind **sees, remembers, and evolves**.
+## Who it is for
 
-> ⭐ If WeaveMind helps you, give it a **Star** so more people can see this AI team.
+| Users | Work worth trying | Current scope |
+|---|---|---|
+| Independent researchers, analysts, and consultants | Annual-report reading, comparisons across two periods, research drafts, and checks of facts and formulas | Primary trial users; public information supports human research |
+| Small investment research teams and private fund research teams | Handing over reports together with working papers, aligning reporting bases, and tracking open questions | Suitable for exploring a controlled trial; team permissions and collaboration outcomes need separate validation |
+| Bank investment researchers and corporate client researchers | Reviewing client operating performance from public information, preparing interview questions, and listing additional materials needed | A later pilot direction; internal bank data and production deployment have not been accepted |
+| Financial tool developers | Extending facts, sources, validation, and delivery; connecting their own models or data | MIT-licensed source code for local development and deployment |
 
----
+The initial scope is assistance with company research. Automated trading, automated credit decisions, target-price generation, and promises of investment returns are outside the current product scope. Testing which metrics apply to a bank as a **research subject** does not validate deployment for a bank as a **customer**.
 
-## 📰 Recent milestones
+## From research question to deliverable
 
-- **Cancel a running task**: one click stops it; the orchestrator winds down at the next dispatch boundary instead of burning quota in a fail→retry→replan loop
-- **Single source of truth for task state**: the orchestrator is the only writer, with a submit acknowledgement — no more "UI says submitted, the task never existed"
-- **Memory degrades gracefully**: when the Embedding endpoint is out of quota or down, retrieval falls back to keyword search; writes that fail are queued and replayed after recovery
-- **Financial data chain unlocked**: report-period aware fetching (annual/interim/quarterly) for both A-shares and HK, so gross margin and operating cash flow are available and traceable back to the on-disk `financials.json`
-- **Share scope tightened**: a share link exposes only the report and the charts it references, not the whole task workspace (raw search results, fetch snapshots, deliverable archives)
-- **Endpoint probing & CI hardened**: the connectivity probe no longer mistakes a reasoning model's empty `content` for an unreachable endpoint, and CI tests no longer drift with the public endpoint's state
-
----
-
-## ✨ Why WeaveMind
-
-Agent frameworks make you assemble everything yourself. WeaveMind hands you a **ready-made AI team**:
-
-- 🧑‍💼 **Out of the box**: clone → add one API key → start working (Windows / macOS / Linux / Docker)
-- 👀 **See it happen**: live progress, task tree, agent topology, "what it remembers", evolution replay — all visualized
-- 🧠 **It remembers**: ChromaDB long-term memory; new tasks automatically reuse past successful strategies
-- 💬 **It converses**: keep asking in the same session, switch between historical sessions anytime
-- ✏️ **It listens**: reorder / delete / add steps after planning, then confirm and execute
-- 🔁 **It self-improves**: automatic acceptance review after tasks; gaps trigger extra iteration steps
-- 🧬 **It self-evolves**: strategy mutation → tournament → safety red lines → human-approved deployment
-
-## 🆚 Comparison
-
-| Capability | **WeaveMind** | Single-agent chat | AutoGPT / Manus | DIY framework (CrewAI…) |
-|---|---|---|---|---|
-| Parallel DAG execution across workers | ✅ Built-in | ❌ | ⚠️ Partial | Build it yourself |
-| Full visualization (task tree / topology / live) | ✅ Built-in | ❌ | ❌ | Build it yourself |
-| Long-term memory + strategy reuse | ✅ ChromaDB | ❌ | ⚠️ Weak | Integrate yourself |
-| Editable plan, confirm before execution | ✅ Built-in | ❌ | ❌ | Build it yourself |
-| Self-iteration (review → add steps) | ✅ Built-in | ❌ | ⚠️ Partial | Build it yourself |
-| **Strategy self-evolution (tournament)** | ✅ Unique | ❌ | ❌ | ❌ |
-| One-command start (Win/macOS/Linux/Docker) | ✅ | — | ⚠️ | ❌ |
-| Local execution, data stays private | ✅ | ❌ Cloud | ❌ Cloud | ✅ |
-| Code sandbox (secret stripping / timeout / isolation) | ✅ Built-in | ❌ | ⚠️ | Build it yourself |
-
-## 🚀 30-second quick start
-
-**Prerequisites**: Python 3.10+ (no Node needed — the built frontend ships with the repo; the first start auto-downloads a portable Redis on Windows). All you need to bring is an OpenAI-compatible LLM API key.
-
-```bash
-# 1. Clone
-git clone https://github.com/momang85/weavemind.git && cd weavemind
-
-# 2. Configure (the first start opens a guided prompt; you can also do it later on the Settings page)
-#    It asks: provider (SiliconFlow/DeepSeek/OpenAI/custom) -> API key -> model -> optional Embedding,
-#    and tests the connection on the spot. Manual configuration still works:
-cp config.example.json config.json   # fill in your LLM API key
-
-# 3. Install deps and start (pick one, see "Install & Run" below)
-pip install -r requirements.txt
-bash start.sh                        # start.bat on Windows / docker compose up --build -d
-
-# 4. Open http://localhost:8080 and type:
-#    "Research the 2026 global industrial AI vision market and write a board-level
-#     report with architecture diagram and ROI estimates"
-#    (5173 is the `npm run dev` port; normal use does not need Node)
+```mermaid
+flowchart LR
+    A[Research scope] --> B[Sources and working papers]
+    B --> C[Evidence and draft]
+    C --> D[Revise and revalidate]
+    D --> E[Versioned delivery]
 ```
 
-You will see: the plan tree generate in real time → multiple workers working in parallel →
-every step turning green one by one → the reviewer finding gaps → the next iteration →
-the final report. No coding required.
+1. **Define the scope**: choose the company and periods, and specify the reporting basis, information cutoff date, audience, and questions to answer. Review and edit the plan before execution if needed.
+2. **Inspect materials and working papers**: review key facts, calculation inputs, and evidence locations; check that entities, periods, and units match.
+3. **Read the research status**: consider machine checks, question coverage, and human review together. Address evidence gaps when materials are insufficient.
+4. **Revise the report**: use “Edit report and revalidate” (「修改正文并重验」) to submit the researcher's judgments and wording, then inspect the new version's results.
+5. **Export the deliverables**: use “Re-export the current version” (「按当前版本重新导出」) to download Markdown, PDF, or the delivery package, and check the version notice.
 
-## 🎯 Core demos
+Every step on that chain leaves a record, so a change anywhere in it can be detected:
 
-### Self-iteration mode
-
-![Self-iteration](docs/demo-iteration.svg)
-
-Tasks flow through **execute → acceptance review → add steps** until accepted or
-`max_iterations` is reached:
-
-1. The planner generates a plan and executes it (independent steps run in parallel);
-2. An LLM reviews the deliverable against the user goal;
-3. On failure it outputs gaps and next steps, entering the next iteration automatically;
-4. On acceptance the final report is produced, and the frontend shows an "Iteration N" badge per round.
-
-### Editable plans
-
-Check **"confirm plan first"** when submitting: the planner pauses and waits for you to
-reorder / delete steps, or add new ones (pick a capability + instruction) at the bottom.
-**Confirm & execute** runs your edited plan; **cancel** or a timeout
-(`plan_confirm_timeout`, default 300 s) aborts it.
-
-### Memory & evolution visualization
-
-The "Memory & Evolution" page turns invisible accumulation into visible assets:
-
-- **Memory store**: recent conversations (what it did) + successful strategies (what it learned, expandable)
-- **System self-description**: an LLM writes a publishable self-description based on real memory, one-click copy
-- **Evolution tournament replay**: winners, stability, leaderboard, per-task rankings and review scores
-
-### Conversation & imported context
-
-- Submitting a task creates a session; the next input is treated as an **additional
-  requirement** for the same session, and the planner carries prior requirements/results.
-- The **Import context** panel lets you paste background, references, URLs, or constraints
-  that travel with the task and stay in the session.
-
-## Feature highlights
-
-- LLM planning → parallel multi-worker DAG → best-deliverable auto-selection as final report
-- 10 dedicated workers: search, web fetch, content summary, code sandbox (secret stripping),
-  data loading, EDA, model training, report generation, packaging, file I/O
-- Long-term memory (ChromaDB): inject relevant experience before tasks, consolidate strategies after
-- Conversation context, historical sessions, quick re-run
-- Critic plan review, failure retry + single-step replanning, worker guardian self-healing
-- Search fails → automatic fallback to direct LLM generation (generation-first orchestration)
-- Dual-LLM failover (`backup` config), DuckDuckGo → Bing → mock search fallback
-- Web console: live progress, task tree, agent topology, health, history, online config, LLM usage
-
-## Install & Run
-
-### Option A: Windows one-click
-
-```bat
-start.bat   :: start (Redis + all services + frontend, opens browser)
-stop.bat    :: stop
+```mermaid
+flowchart LR
+    R[Researcher edits text] --> V[New version + revalidation]
+    V --> S[Frozen snapshot<br/>report / PDF / working papers / charts / evidence]
+    S --> H[Per-file hashes + version and logic fingerprints]
+    H --> Z[Delivery package zip]
+    Z --> D[Page download matches package bytes]
 ```
 
-On first run `start.bat` runs `pip install -r requirements.txt` and automatically builds
-the frontend (`npm install && npm run build`) when `frontend/dist` is missing (Node.js 18+
-required; without Node it starts with a built-in fallback page).
+### A first task to try
 
-### Option B: Linux / macOS one-click
+```text
+Research the operating performance of Yanghe (002304.SZ) for 2023–2024.
+Use consolidated statements, an information cutoff date of 2025-04-30,
+and independent researchers as the intended audience.
 
-```bash
-bash start.sh    # requires Python 3.10+ and Docker (for Redis)
-bash stop.sh
+Focus on these questions:
+1. How far can changes in revenue be explained by sales volume, price, or mix?
+2. Which direct disclosures or reproducible calculations explain changes in profit?
+3. Which additional notes are needed to explain changes in operating cash flow?
+
+Separate data observations, issuer statements, calculations, and judgments
+that still need verification.
+Deliver a research brief, recalculable working papers, source locations,
+and a list of additional materials organized by question.
+Keep evidence gaps explicit. Do not infer channel stuffing, end demand,
+or debt-servicing safety when the supporting evidence is missing.
 ```
 
-> **Python versions**: 3.10–3.14 are supported. The official `pygame` package has no
-> Python 3.14 wheel yet, but **pygame-ce 2.5.6+ fully supports 3.10–3.14** (drop-in
-> replacement, import name is still `pygame`). Run
-> `pip install -r requirements-games.txt` (optional) to enable pygame game execution.
-> The system auto-detects: pygame when available, otherwise turtle / single-file HTML.
+This is an example research request, not a guarantee that all materials will be available. New tasks use models and external data sources according to your configuration. Runtime and cost depend on source availability, models, retries, and task scope.
 
-### Option C: Docker Compose (recommended, no local Python/Node)
+### Deliverables
+
+| Artifact | Purpose |
+|---|---|
+| Research report and PDF | Key observations, supporting evidence, limits of interpretation, and follow-up research questions |
+| `working_paper.csv` / `working_paper.json` | Financial and operating facts, derived calculations, requested reporting basis, and gaps for recalculation and further processing |
+| Charts | Show comparable data and changes for review alongside the report |
+| `evidence/citation_evidence.json` | Retrieved source excerpts, locations, and information about missing excerpt context |
+| `PACKAGE_MANIFEST.json` | Package member hashes, report version, and binding information for checking file consistency |
+| Version and audit records | Preserve traceable relationships between revisions, adoption, and historical drafts |
+
+Artifacts depend on the task and available materials. Without structured financial data, the system does not present an empty working paper as a complete delivery. An evidence package does not necessarily contain every original document; a source location may refer to an API excerpt rather than a PDF page. Matching hashes prove that bytes match, not that a source or conclusion is correct.
+
+Composition of one real delivery package (Yanghe task, 2026-09-24, 17 members):
+
+| Member | Count | Purpose |
+|---|---|---|
+| `reports/report.md`, `reports/report.pdf` | 2 | Delivered report and typeset version (same report version) |
+| `working_paper.json`, `working_paper.csv` | 2 | Recalculable working papers: facts, formulas, gaps |
+| `charts/*.png` | 6 | Charts on the same reporting basis as the report |
+| `audit/model_report_full_*.md` | 5 | Verbatim model drafts, named by content hash, never overwritten |
+| `evidence/citation_evidence.json` | 1 | Source excerpts, locations, and missing-excerpt context |
+| `PACKAGE_MANIFEST.json` | 1 | Per-member hashes, report version, binding, and drift record |
+
+Within one export, the Markdown and PDF downloaded from the page are **byte-identical** to the members of the same name inside the package. Changes that did not make it into the package are recorded as `drift` rather than silently ignored.
+
+## Current progress and validation boundaries
+
+The following is a **sample snapshot dated 2026-09-24**. It describes the scope of validation, not a quality guarantee across tasks.
+
+| Validation target | Recorded result | Still to validate |
+|---|---|---|
+| Revision and download on the real Yanghe task | Editing, revalidation, and re-export completed through the normal UI; hashes matched for all 16 frozen payloads among 17 package members | Review time and practical value for independent researchers |
+| Numeric checks on the same version | Of 226 numeric items, 206 were classified as cited, 7 as calculated, and 13 as untraceable; numeric traceability was 94%, monetary-amount traceability 100% | These are machine-rule classifications, not factual accuracy or overall research quality |
+| Research status by question | None of the three required questions was fully answered; the revenue question was partially covered, and the report remained a research draft | Sufficient evidence for questions such as profit drivers and cash-flow sources |
+| PDF delivery | 14 pages; the record reported no characters outside page boundaries | The short-main-text reading target has not been met; this is not a full manual layout review |
+| R4 fixed replay | 4/4 passed, covering relatively sufficient materials, insufficient materials, a bank as the research subject, and a user revision | Passing preconfigured scenario data does not replace ingestion validation using a real second company's annual report |
+
+Evidence: [UI and download verification](docs/evidence/page_button_recheck_20260924.md) · [Operating facts and candidate selection](docs/evidence/r3_operating_facts_and_selection_20260924.md) · [Fixed replay](docs/evidence/r4_fixed_samples_20260924.md). Traceability rates from different dates, rule sets, or tasks are not combined into an average score.
+
+Where those numbers fall (the same machine classification of 226 numeric items):
+
+```text
+cited      206  ██████████████████████████████   91%
+calculated   7  █                                 3%
+model knowledge 0                                 0%
+untraceable 13  ██                                6%
+────────────────────────────────────────────────────
+traceable total 213 / 226 = 94%   monetary amounts 69 / 69 = 100%
+```
+
+Longer bar means a larger share: *cited* means the number resolves to a source location, *calculated* means it can be reproduced from a working-paper formula, *untraceable* means neither, and those items are listed one by one in the UI. This is **machine-rule traceability**, not factual accuracy.
+
+Human researcher scoring and full validation with real Redis processes, multiple workers, and concurrent revision/export have not been completed. These results do not establish bank production readiness or a service-level commitment.
+
+### Data and market coverage
+
+| Coverage | Current status |
+|---|---|
+| Non-financial A-share listed companies | The primary research and validation path; real samples remain limited, and API availability and reporting-period completeness must be checked for each task |
+| Hong Kong and US equities | Related adapters exist in the repository; their presence does not establish reliable live retrieval or research delivery, and live US-equity retrieval still lacks validation |
+| Banks and other financial institutions | Boundary cases prevent inappropriate use of general corporate ratios; specialized metrics and analytical depth still need expansion |
+| News, macroeconomics, and cryptoassets | Related adapters remain available as extensions, outside the current quality commitment for listed-company research |
+
+## Quick start
+
+| Path | Best for | Entry point |
+|---|---|---|
+| Windows one-click | Fastest local trial | `.\start.bat` (below) |
+| Linux / macOS one-click | Fastest local trial | `bash start.sh` |
+| Docker Compose | Servers, no local Python | `docker compose up --build -d` |
+| Manual install | Custom environments, development, restricted networks | [Deployment guide](docs/部署指南.md) §5 (including [troubleshooting and offline install](docs/部署指南.md#53-依赖装不上时的排查与离线安装)) |
+
+All four paths use the same backend and artifact layout; the sections below give the details and known limitations of each.
+
+### Prerequisites
+
+- **Models**: access to an OpenAI-compatible API or your own compatible service. Prepare the API endpoint, model name, and any required keys. Embeddings can be configured separately.
+- **Local runtime**: Python 3.11 is recommended, matching the current backend CI / Docker environment. Redis 6+ is a required queue and messaging dependency.
+- **Frontend**: the repository tracks the `frontend/dist` build. Node is not needed when using that build. Editing frontend source or rebuilding missing artifacts requires Node.js and npm; Node 22.6+ is recommended for development.
+- **Docker runtime**: Docker Engine / Desktop and Compose. The image installs Python dependencies and builds the frontend; Compose starts Redis alongside the application.
+
+The first installation may need to download dependencies, frontend packages, or Redis. Setup time depends on your environment and network.
 
 ```bash
-cp .env.example .env        # at least set LLM_API_KEY
+git clone https://github.com/momang85/weavemind.git
+cd weavemind
+```
+
+### Windows
+
+Run in PowerShell:
+
+```powershell
+.\start.bat
+```
+
+The script checks and installs missing dependencies and can launch the configuration wizard on the first run. If Redis is missing, it attempts to obtain a portable version. To isolate Python dependencies, use a virtual environment and `launcher.py` as described in the [deployment guide](docs/部署指南.md).
+
+### Linux / macOS
+
+```bash
+bash start.sh
+```
+
+Redis must already be installed or available as a local service. For a custom remote Redis instance, set the `REDIS_HOST` / `REDIS_PORT` environment variables **before startup**, then run `python launcher.py start` directly. Changing only the address in `config.json` may fail the early Redis check. The presence of platform scripts does not mean that all operating-system versions have received equivalent testing.
+
+### Docker Compose
+
+Copy [.env.example](.env.example) to `.env`, provide a real `LLM_API_KEY`, and check `LLM_BASE_URL`, `LLM_MODEL`, and the embedding configuration. Then run:
+
+```bash
 docker compose up --build -d
-# open http://localhost:8080 · stop: docker compose down
+docker compose ps
 ```
 
-### Option D: Manual install
+The current Compose configuration exposes the workbench on host port `8080`; Redis is available only within the Compose network. The `app_data` and `redis_data` named volumes retain their mounted data. Three current limitations matter before using this configuration:
+
+- `/app/config.json` is not separately persisted. Back up administrator and UI settings before recreating the container; the data volumes do not cover all configuration.
+- The image does not provide a separate code-execution sandbox, so steps requiring `code_execution` are rejected. The workbench and workflows that do not require code execution can be used.
+- Chinese PDFs require a compatible Chinese TrueType font. The current Dockerfile does not install one; custom deployments can configure `WEAVEMIND_PDF_FONT`.
+
+See the [deployment guide](docs/部署指南.md) for details. The current image and mounts are defined in [Dockerfile](Dockerfile) and [docker-compose.yml](docker-compose.yml).
+
+### Sign in, check status, and stop
+
+Open **http://localhost:8080**. Create an administrator account through the page on the first visit, or preset it with `WEAVEMIND_ADMIN_PASSWORD` as described in the deployment guide. There is no fixed default administrator password.
+
+For a local installation, run these commands in the same Python environment used to start the application:
 
 ```bash
-python -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-cd frontend && npm install && npm run build && cd .. # or npm run dev for dev mode
-cp config.example.json config.json                   # fill in real API keys
-python launcher.py                                   # start
-python launcher.py stop                              # stop
-python launcher.py status                            # status
+python launcher.py status
+python launcher.py deps
+python launcher.py stop
 ```
 
-> Dev mode: http://localhost:5173 · production/Docker: http://localhost:8080
+`deps` only checks dependencies. Use `python launcher.py deps --fix` to install missing dependencies automatically. For Docker:
 
-## Configuration
-
-Real config lives in `config.json` (gitignored, never committed):
-
-```json
-{
-  "llm": { "api_key": "...", "base_url": "...", "model": "..." },
-  "planner": { "model": "...", "base_url": "...", "api_key": "..." },
-  "backup": { "api_key": "...", "base_url": "...", "model": "..." },
-  "embedding": { "api_key": "...", "base_url": "...", "model": "BAAI/bge-large-zh-v1.5" },
-  "redis": { "host": "localhost", "port": 6379 },
-  "system": {
-    "task_timeout": 300, "max_retry": 2, "replan_depth": 2,
-    "critic": true, "critic_timeout": 30,
-    "max_steps": 8, "max_parallel": 3, "max_iterations": 2,
-    "stall_timeout": 300, "plan_confirm_timeout": 300, "scheduler": false
-  }
-}
+```bash
+docker compose logs --tail=100 app
+docker compose down
 ```
 
-Template: `config.example.json`; Docker mode uses `.env` (`LLM_API_KEY` etc.).
+`docker compose down` retains named data volumes by default. The configuration persistence limitation described above still applies.
 
-- **Model tiering**: `llm` = execution model (workers), `planner` = dedicated more stable model
-- **Dual-source failover**: `backup` switches automatically when the main endpoint fails
-- **Plan self-check**: a missing report/summary step gets auto-added (`report_generator`)
-- **Task templates**: pick "data analysis pipeline / industry research / board report" in the
-  console for deterministic steps that skip planning (`templates.json`)
-- **Result caching**: submit the same goal with `cache_ttl_min` to hit cached successful results
-- `scheduler=true` enables daily 03:00 auto-evolution
+## Configuration and data destinations
+
+| Configuration | Purpose |
+|---|---|
+| `llm` | Execution model used by Workers |
+| `llm.model_roles` | Model mappings by role; these may take precedence over the general `llm.model`, so check that each mapped model is available from your service |
+| `planner` | Planning model, configurable separately from the execution model |
+| `backup` | Fallback model endpoint; confirm the service destination before use |
+| `embedding` | Vector model for memory retrieval; inspect runtime status for the actual fallback behavior |
+| `redis` | Message-queue connection settings |
+| `system` | Runtime settings such as task time limits, step counts, retries, parallelism, plan confirmation, and iteration |
+
+For the first local configuration, prefer the wizard:
+
+```bash
+python setup_wizard.py
+```
+
+Check role-specific models after completing the wizard. If copying [config.example.json](config.example.json) manually, review placeholder values for execution, planning, fallback, and embedding models; filling in a single key is not sufficient. Preserve existing configuration rather than overwriting it.
+
+The local launcher uses `config.json` and does not automatically read `.env`. Compose uses the environment variables declared in [.env.example](.env.example). The application can run and save artifacts on your own machine, but remote LLMs, embedding services, search services, and data APIs still receive the relevant requests. **Local deployment does not mean offline operation or that all data stays on the machine.** Configure model roles, data destinations, and call costs for your use case.
+
+Authentication, `admin` / `viewer` roles, operation auditing, and restricted report sharing are present. Multiple-project organization and these basic features do not replace the tenant isolation, fine-grained authorization, data-egress controls, and independent operational validation required for a bank deployment.
 
 ## Architecture
 
-| Component | Role |
-| --- | --- |
-| `orchestrator_v2.py` | Orchestrator: plan → parallel DAG → self-iteration; retry/replan; plan confirmation |
-| `common.py` | Redis messaging/queues, SQLite/Redis dual registry (thread-safe) |
-| `llm_client.py` | LLM calls (sync/async, JSON tolerance, usage stats, failover) |
-| `memory_manager.py` | ChromaDB long-term memory (inject + consolidate + visualize) |
-| `worker_base.py` / `async_worker_base.py` | Sync/async worker base (heartbeat, kill listener) |
-| `workers/` | 10 dedicated workers (incl. web fetch, code sandbox) |
-| `web_ui.py` | Backend API: tasks/sessions/memory/evolution/metrics; serves frontend in production |
-| `worker_guardian.py` | Worker guardian: heartbeat monitoring, process-level revival |
-| `evolution_sandbox.py` | Strategy evolution: mutate → tournament → red lines → deployment request |
-| `frontend/` | React + Vite + Tailwind console (tasks, chat, topology, health, memory & evolution, history, settings) |
+WeaveMind uses a modular Python application, separate Workers, and a React workbench. Redis handles messaging and queues, SQLite stores runtime records, the file workspace stores artifacts, and ChromaDB supports memory retrieval.
 
-## Data flow
+| Layer | Main code | Responsibility |
+|---|---|---|
+| Workbench and API | [frontend/](frontend/), [web_ui.py](web_ui.py) | Tasks, plans, research status, revisions, downloads, and configuration; React / TypeScript / Vite / Zustand |
+| Research scope and execution | [execution_contract.py](execution_contract.py), [orchestrator_v2.py](orchestrator_v2.py), [workers/](workers/) | Carry research constraints, plan steps with dependencies, and execute steps in parallel where possible |
+| Sources and facts | [adapters/](adapters/), [narrative_evidence.py](narrative_evidence.py), [facts.py](facts.py) | Acquire materials, check applicability, and preserve facts, source locations, and continuity information |
+| Working papers and question assessment | [working_paper.py](working_paper.py), [question_assessment.py](question_assessment.py) | Deterministic calculations, gap recording, and evidence assessment for each question |
+| Report text and validation | [report_brief.py](report_brief.py), [acceptance_checker.py](acceptance_checker.py), [report_quality.py](report_quality.py) | Assemble research drafts, run machine checks, and compare candidate quality |
+| Versions and delivery | [report_version.py](report_version.py), [delivery_pipeline.py](delivery_pipeline.py), [report_pdf.py](report_pdf.py) | Revisions and adoption, version binding, frozen snapshots, PDFs, and delivery packages |
+| Models and runtime control | [llm_client.py](llm_client.py), [root_budget.py](root_budget.py), [launcher.py](launcher.py) | Model calls, usage and budget records, and service management |
+| Memory and extensions | [memory_manager.py](memory_manager.py), [mcp_client.py](mcp_client.py), [tool_dispatch.py](tool_dispatch.py) | Historical retrieval and tool connections; capabilities such as strategy evolution remain extension research directions |
 
-```text
-user goal -> plan (LLM + memory + critic) -> [optional] plan confirm/edit
-        -> parallel DAG execution (Redis queues -> workers)
-        -> acceptance review -> append steps if gaps -> iterate
-        -> final deliverable report -> history + strategy consolidation + live frontend
-```
+### Three distinct status indicators
 
-## Testing
+| Status | Decided by | What it looks at | Passing does **not** mean |
+|---|---|---|---|
+| Machine validation | Fixed rules | Numbers, source claims, delivery completeness | That conclusions are correct or materials sufficient |
+| Research status | Per-question evidence assessment | Whether required questions are answered and where the gaps are | That the wording is final |
+| Human review | A researcher | Whether this specific version was reviewed and approved | That a plan review equals researcher approval |
+
+A report with complete files and passing machine checks can still be a research draft. After editing the text, rerun validation and regenerate the delivery package.
+
+## Development and validation
+
+Frontend development:
 
 ```bash
-python smoke_test.py             # quick end-to-end smoke (services must be running)
-python smoke_test.py --pipeline  # full data pipeline
-python test_common.py            # base library unit tests (fakeredis)
-python test_orchestrator_v2.py   # orchestrator regression (scheduling/iteration/capability)
-python test_delivery_chain.py    # delivery chain regression (search/file/code/package)
-python verification_suite.py     # edge-case verification suite
+npm ci --prefix frontend
+npm run dev --prefix frontend
 ```
 
-GitHub Actions CI runs backend compile/unit tests and the frontend build automatically.
+The development page is usually available at `http://localhost:5173` and still requires the backend service. To build the production frontend:
 
-## Roadmap
+```bash
+npm run build --prefix frontend
+```
 
-- [x] Parallel DAG execution, failure retry/replan, worker guardian
-- [x] Conversation context, historical sessions, quick view/re-run
-- [x] Self-iteration mode, editable plans
-- [x] Memory & evolution visualization (self-description, tournament replay)
-- [x] Plugin / MCP compatibility (mcp_lite built-in MCP server + mcp_client third-party MCP + tool_dispatch routing)
-- [x] Scenario template library (4 handcrafted templates + auto-* consolidation from acceptance passes)
-- [x] Multi-user auth & audit logs (admin/viewer roles, operation audit, initial admin bootstrap, deployment docs)
-- [x] Container-level code-execution isolation (required by default; when isolation is unavailable the step is refused instead of falling back to host execution) + one-click report sharing (read-only public links with optional password & expiry)
+After installing backend dependencies, choose existing regressions relevant to your changes:
+
+```bash
+python test_facts.py
+python test_working_paper.py
+python test_question_assessment.py
+python test_report_version.py
+python test_delivery_chain.py
+```
+
+See the [CI workflow](.github/workflows/ci.yml) for the full check configuration. `requirements-runtime.lock` locks runtime dependencies for Linux x86_64 / Python 3.11 and is used by CI / Docker. `requirements.lock` is a full environment snapshot that includes training dependencies; it should not be the default installation list for ordinary runtime use. End-to-end tests with real models and data sources are recorded separately from offline tests. Passing preconfigured samples does not validate real source ingestion.
+
+## Next phase
+
+1. **Demonstrate research value**: obtain human researcher scores on the current version, recording review time, key revisions, and willingness to use it again.
+2. **Demonstrate repeatability across companies**: use another company's real annual report to test ingestion, reporting basis, calculations, and question-level answers, retaining cases with both sufficient and insufficient evidence.
+3. **Improve readability and runtime reliability**: shorten the main text, move evidence into appendices, and validate real multiprocess operation and concurrent revision/export.
+4. **Enter a controlled bank pilot**: validate identity and authorization, data egress, audit and approval, deployment recovery, and business workflows before assessing internal data and production use.
+
+Progress is governed by acceptance gates; completed code or test counts do not establish phase completion. See the [long-term plan for individuals and banks](docs/长期代码规划_个体与银行_20260915.md). Future capabilities in that plan are not claims of current implementation.
+
+## Documentation
+
+| Topic | Entry point |
+|---|---|
+| Installation, deployment, and operations | [Deployment guide](docs/部署指南.md) |
+| Dependencies or Redis will not install | [Deployment guide 5.3](docs/部署指南.md#53-依赖装不上时的排查与离线安装) |
+| Verified UI and delivery workflow | [2026-09-24 UI verification](docs/evidence/page_button_recheck_20260924.md) |
+| Evidence classification and question coverage | [Unified question assessment](docs/evidence/r1_unified_assessment_20260923.md) |
+| Version and delivery snapshots | [Export integrity](docs/evidence/r2_export_snapshot_integrity_20260923.md) |
+| Scope of offline validation | [Fixed-sample record](docs/evidence/r4_fixed_samples_20260924.md) |
+| How to evaluate a research draft | [Researcher scorecard](docs/研究员评分表_F3_20260920.md) |
+| Standalone report-number checks | [Traceability-check API](docs/API_溯源体检_verify.md) |
+| Architectural direction and implementation progress | [Chief architect instructions](docs/总架构师执行指令.md), [DeepSeek execution status](docs/DeepSeek执行状态.md) |
+
+Historical test and planning documents remain in `docs/`. Check dates, code versions, and the distinction between “implemented,” “validated,” and “pending validation” when reading them. Most linked project documents are currently in Chinese.
 
 ## Contributing
 
-Any contribution is welcome: open issues, improve workers, add tests, write docs.
-Before developing, run `python test_common.py` and `npm run build` to make sure nothing breaks.
+Use [Issues](https://github.com/momang85/weavemind/issues) to submit reproducible problems, de-identified research samples, or usage feedback. Include the company and periods, expected judgment, actual result, and relevant version when reporting a problem. Do not include keys, personal information, or internal materials you are not authorized to share.
 
-## Known limitations
+Contributions should prioritize fact and source quality, report readability, the revision experience, and repeatable validation. Run regressions relevant to your changes, and include build validation for frontend changes.
 
-- Plan stability for complex goals depends on the chosen model; configure a stronger
-  model in the `planner` section if needed.
-- Logs rotate at 5 MB × 3 in `logs/`; `priority_router.py` and `auto_scaler.py` are kept
-  but not yet wired into the main pipeline.
-- Traceability is disclosed **sample by sample** on the first screen; the samples
-  differ in period, rules and goal, so they are deliberately **not** combined into a
-  stable range or average. A fixed synthetic fixture (amount traceability 0.833) only
-  proves the chain is wired, not live-fetch or real-report quality.
-- Number traceability binds the **adjacent clause's** subject: a figure whose neighbouring
-  clause names another company is rejected. Binding against a subject declared only in the
-  report title/document is **not** implemented — see
-  `test_acceptance_adversarial.py::test_known_gap_number_subject_mismatch`.
-- Secrets and local data are never committed (`config.json`, `.env`, `agents.db*`,
-  `chroma_memory*`, logs are all gitignored).
-
-## License
-
-[MIT](LICENSE)
+The code is released under the [MIT License](LICENSE). Third-party data and model services remain subject to their own terms.
