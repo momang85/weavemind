@@ -598,12 +598,20 @@ DEFAULT_PIP_MIRROR = "https://pypi.tuna.tsinghua.edu.cn/simple"
 # （镜像 / 默认源）可能同时失败——失败报告直接给出下一步，不让人去翻文档。
 PIP_HINT = f"""\
 安装失败时按顺序排查（国内网络 / 安全软件常见）：
+      0) 先看清用的是哪个 shell：下面按 **cmd** 写。PowerShell 里
+         `set X=Y` 不是设环境变量、`%X%` 不会被展开、`::` 不是注释，
+         要写成 `$env:X = "Y"`（见第 2 步的两种写法）。
       1) 先确认通道本身：python -m pip install -U pip -i {DEFAULT_PIP_MIRROR}
-         报错若是 403 / 超时 / DNS，先放行安全软件（会拦 pip 的 TLS）或设置/清空代理再重试；
-      2) 换镜像后重跑：set WM_PIP_INDEX_URL=<镜像> 再 python dep_check.py --fix
+         报错若是 403 / 超时 / DNS，先放行安全软件（会拦 pip 的 TLS）或设置/清空代理再重试
+         （cmd: set HTTPS_PROXY=… ｜ PowerShell: $env:HTTPS_PROXY = "…"；清空即等号后留空）；
+      2) 换镜像后重跑（cmd 与 PowerShell 各一行，任选其一）：
+           cmd:        set WM_PIP_INDEX_URL=<镜像>
+           PowerShell: $env:WM_PIP_INDEX_URL = "<镜像>"
+         然后 python dep_check.py --fix
          常用镜像：清华 {DEFAULT_PIP_MIRROR} ｜ 阿里 mirrors.aliyun.com/pypi/simple
                  ｜ 腾讯 mirrors.cloud.tencent.com/pypi/simple ｜ 中科大 mirrors.ustc.edu.cn/pypi/simple
-      3) 分小批装（14 个包一条命令时，任何一个解析失败都会整批失败）：
+      3) 分小批装（14 个包一条命令时，任何一个解析失败都会整批失败；也可以直接把
+         镜像地址写在 -i 后面，不用先设环境变量）：
          python -m pip install redis aiosqlite httpx -i <镜像> --timeout 120 --retries 5
          python -m pip install chromadb -i <镜像> --timeout 120 --retries 5
          （chromadb 依赖重、几十 MB，慢是正常的）
@@ -696,6 +704,7 @@ keep it on port 6379):
   1) Memurai (Redis-compatible Windows service, free developer edition): https://www.memurai.com
   2) redis-windows (Redis 8.x Windows builds): github.com/redis-windows/redis-windows
   3) WSL2 / Linux: sudo apt install redis-server && sudo service redis-server start
+Commands below use cmd syntax (set X=Y); in PowerShell write $env:X = "Y".
 Or point at a Redis elsewhere: set REDIS_HOST=<host> & set REDIS_PORT=<port>, or skip
 the check with SKIP_REDIS_CHECK=1 (Redis is the message bus - workers and the task queue
 will not work; use it only to look at the UI or to install dependencies first).
@@ -707,6 +716,9 @@ See the deployment guide in docs/ (section 5.1).
 REDIS_HINT = """\
 Redis 未运行且无法自动获取。按"最省事优先"试这几步：
 
+  0) 下面的 `set X=Y` 按 **cmd** 写。在 PowerShell 里它不是设环境变量、`%X%` 也不会展开，
+     要写成 `$env:X = "Y"`（例：$env:WM_REDIS_MIRROR_BASE = "https://ghproxy.net"）。
+
   1) 先用系统已装的（推荐，不用联网）：
      - Windows 服务版：Memurai（https://www.memurai.com，Redis 7 兼容）装上即用
      - WSL2 / Linux：sudo apt install redis-server && sudo service redis-server start
@@ -715,15 +727,17 @@ Redis 未运行且无法自动获取。按"最省事优先"试这几步：
 
   2) 下载慢/超时（国内网络常见）：换镜像或把包放到本机
      a. 指定镜像源后重跑（会依次尝试，60s 预算）：
-          set WM_REDIS_MIRROR_BASE=https://ghproxy.net
+          cmd: set WM_REDIS_MIRROR_BASE=https://ghproxy.net
+          PowerShell: $env:WM_REDIS_MIRROR_BASE = "https://ghproxy.net"
      b. 或者手动下载 zip（约 14MB，来自 redis-windows 的 release）后放到
           {_zip_dir}/redis-windows.zip
         再重跑——**已存在的合法 zip 会直接复用，不再联网**。
      c. 有官方 release 页给出的 sha256 时，建议固定摘要再下载：
-          set WM_REDIS_ZIP_SHA256=<官方 release 的 sha256>
+          cmd: set WM_REDIS_ZIP_SHA256=<官方 release 的 sha256>
+          PowerShell: $env:WM_REDIS_ZIP_SHA256 = "<sha256>"
         （镜像只是转发，固定摘要才能真正校验内容；未固定时日志会打印实际摘要便于对账）
 
-  3) 把 Redis 放在别的机器/端口：
+  3) 把 Redis 放在别的机器/端口（cmd 写法；PowerShell 换成 $env:REDIS_HOST / $env:REDIS_PORT）：
           set REDIS_HOST=<host>  &  set REDIS_PORT=<port>
      或者显式跳过检查（依赖自检与启动预检都认这个开关）：
           set SKIP_REDIS_CHECK=1

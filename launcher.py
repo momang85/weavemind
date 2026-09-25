@@ -118,7 +118,8 @@ REDIS_SETUP_HINT = """\
 发布的是 Redis 5.x，装上去会"启动即崩、日志报 unknown command HELLO"，不要用它。
 详见 docs/部署指南.md「无 Docker 的完整路径」；也可用 REDIS_HOST/REDIS_PORT
 指向其它机器上的 Redis，或用 SKIP_REDIS_CHECK=1 跳过本检查（依赖自检也认这个开关，
-但消息总线不可用：worker 与任务队列不会工作）。"""
+但消息总线不可用：worker 与任务队列不会工作）。
+环境变量按 cmd 写（set X=Y）；PowerShell 里写 $env:X = "Y"。"""
 
 
 def _redis_reachable(host: str, port: int, timeout: float = 2.0) -> bool:

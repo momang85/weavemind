@@ -7078,6 +7078,9 @@ class TestPipMirrorPolicy(unittest.TestCase):
         self.assertIn("pip download -r requirements.txt -d wheels", out)
         self.assertIn("--no-index --find-links=wheels", out)
         self.assertIn("docs/部署指南.md", out)
+        # PowerShell 用户必须能照抄（set X=Y / %X% 在那里不生效，实测踩坑）
+        self.assertIn("$env:WM_PIP_INDEX_URL", out)
+        self.assertIn("PowerShell", out)
 
     def test_pip_hint_mirror_matches_the_default_used_by_the_installer(self):
         """指引里让人试的镜像必须就是代码里的默认源（两处不许漂移）。"""

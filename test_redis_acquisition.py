@@ -243,6 +243,18 @@ class TestGuidanceIsActionable(unittest.TestCase):
         self.assertIn("Redis 6", self.hint)
         self.assertIn("HELLO", self.hint)
 
+    def test_hints_cover_powershell_syntax(self):
+        """`set X=Y` 是 cmd 语法，贴进 PowerShell 不会设成环境变量。
+
+        实测踩坑：用户把指引里的 `set WM_PIP_INDEX_URL=...` 与 `%WM_PIP_INDEX_URL%`
+        原样贴进 PowerShell，pip 把它当成**本地路径**（`Location '.../redis/' is ignored`），
+        看起来像网络不通，其实那一轮根本没联网。指引必须同时给出 PowerShell 写法。
+        """
+        launcher_src = (ROOT / "launcher.py").read_text(encoding="utf-8")
+        for text in (self.hint, launcher_src):
+            self.assertIn("PowerShell", text)
+            self.assertIn("$env:", text)
+
     def test_hints_do_not_recommend_a_redis5_build(self):
         """tporadowski/redis 是 Redis 5.x，与"需 Redis ≥6"自相矛盾，只能当反例出现。
 
