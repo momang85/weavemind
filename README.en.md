@@ -58,6 +58,18 @@ Multi-Worker orchestration, memory retrieval, and model routing support this wor
 
 Each row can be checked in the artifacts: whether a **claim** holds is the researcher's call, but “where does this number come from, does the formula work, is the material sufficient” does not require trusting the model.
 
+### Gaps are a plan, not a footnote
+
+For the same real task (Yanghe, 2026-09-24), three questions, the report does not answer “analyzed”; it gives per-question coverage and the materials to obtain:
+
+| Research question | Evidence on hand | Still missing | How the judgment changes once obtained |
+|---|---|---|---|
+| What volume, price, or mix explains the revenue change | Partial decomposition: disclosed volume, channel, and regional revenue, each group **closing separately** | Volume/price split, major customers, changes in sales model | Volume down with price up → deliberate mix shift; volume and price both down with inventory up → demand and channel pressure |
+| What decomposes the profit change | Observations only (coverage: none) | Gross-margin composition, period expenses, non-recurring items, minority interests | Mostly gross-margin side → product mix; mostly below gross margin → expenses, impairments, or non-recurring items |
+| What drives the cash change relative to profit | No relevant material (coverage: none) | Cash-flow notes, working-capital changes, taxes and settlement terms | Driven by working capital → collection quality declined; driven by tax or settlement timing → short-term repayment view unchanged |
+
+This structure appears in the report appendix (“per-question material plan”) and item by item in the UI; gaps are not rounded up into “essentially complete”.
+
 ## Who it is for
 
 | Users | Work worth trying | Current scope |
