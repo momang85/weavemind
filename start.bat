@@ -148,7 +148,11 @@ echo   [4/6] Dependencies
 if errorlevel 1 (
     echo   ERROR: required dependencies are still missing ^(see report above^).
     echo   Manual fallback: %PY% -m pip install -r requirements.txt
+    echo   Dependency install guide: docs\  ^(deployment guide, section 5.3^)
     echo   Redis install guide: docs\  ^(deployment guide, section 5.1^)
+    echo   Tip: set WM_PIP_INDEX_URL=<mirror> to switch the pip mirror, or
+    echo        set SKIP_REDIS_CHECK=1 to skip the Redis check for now
+    echo        ^(workers and the task queue will NOT work without Redis^).
     call :pause_if_interactive
     exit /b 1
 )

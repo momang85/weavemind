@@ -107,14 +107,18 @@ REDIS_SETUP_HINT = """\
 无法连接 Redis（{host}:{port}）——织光的消息总线/任务队列依赖它，服务无法启动。
 
 无需 Docker 的三种方案（任选其一，装好保持 6379 端口后重跑本命令）：
-  1) Memurai（Redis 兼容的 Windows 服务，开发者版免费）：https://www.memurai.com
-  2) tporadowski/redis（Redis 5.x Windows 移植版）：GitHub 搜 tporadowski/redis，
-     解压后双击 redis-server.exe，或 redis-server.exe --service-install 注册服务
+  1) Memurai（Redis 兼容的 Windows 服务，开发者版免费，Redis 7 兼容）：https://www.memurai.com
+  2) redis-windows（Redis 8.x 的 Windows 构建，与自动获取的便携版同源）：
+     GitHub 搜 redis-windows/redis-windows，Releases 下载 zip 解压后双击
+     redis-server.exe，或 redis-server.exe --service-install 注册服务
   3) WSL2：wsl --install 后 sudo apt install redis-server && sudo service redis-server start
   或使用 Docker 方式：docker run -d --name zhiguan-redis -p 6379:6379 redis:7-alpine
-详见 docs/部署指南.md「无 Docker 的 Redis 方案」；也可用 REDIS_HOST/REDIS_PORT
-指向其它机器上的 Redis，或用 SKIP_REDIS_CHECK=1 跳过本检查。
-"""
+
+注意：Redis 需 >= 6（本项目用 redis-py 8 的 RESP3/HELLO 握手）。tporadowski/redis
+发布的是 Redis 5.x，装上去会"启动即崩、日志报 unknown command HELLO"，不要用它。
+详见 docs/部署指南.md「无 Docker 的完整路径」；也可用 REDIS_HOST/REDIS_PORT
+指向其它机器上的 Redis，或用 SKIP_REDIS_CHECK=1 跳过本检查（依赖自检也认这个开关，
+但消息总线不可用：worker 与任务队列不会工作）。"""
 
 
 def _redis_reachable(host: str, port: int, timeout: float = 2.0) -> bool:

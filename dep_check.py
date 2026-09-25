@@ -76,7 +76,7 @@ DOWNLOAD_HOSTS = (
     "github-releases.githubusercontent.com",      # 同一资源域的旧名
     "codeload.github.com",
 ) + MIRROR_HOSTS
-MAX_DOWNLOAD_BYTES = 60 * 1024 * 1024  # 60MB（Redis zip 约 5MB）
+MAX_DOWNLOAD_BYTES = 60 * 1024 * 1024  # 60MB（Redis zip 约 14MB）
 _UA = "WeaveMind-DepCheck/1.0"
 
 # 依赖清单：模块名 → (pip 包名, 级别, 用途)
@@ -590,10 +590,47 @@ def pip_install(packages: list[str], timeout: int = 600) -> tuple[bool, str]:
     return False, f"{detail}（可设 WM_PIP_INDEX_URL 指定可用镜像）"
 
 
+# pip 镜像默认值：既用于安装（WM_PIP_INDEX_URL），也写进失败指引，
+# 避免"代码里的默认源"和"指引里让人试的源"各说各话。
+DEFAULT_PIP_MIRROR = "https://pypi.tuna.tsinghua.edu.cn/simple"
+
+# pip 装不上时的可执行指引：国内网络与装过安全软件的机器上，两条通道
+# （镜像 / 默认源）可能同时失败——失败报告直接给出下一步，不让人去翻文档。
+PIP_HINT = f"""\
+安装失败时按顺序排查（国内网络 / 安全软件常见）：
+      1) 先确认通道本身：python -m pip install -U pip -i {DEFAULT_PIP_MIRROR}
+         报错若是 403 / 超时 / DNS，先放行安全软件（会拦 pip 的 TLS）或设置/清空代理再重试；
+      2) 换镜像后重跑：set WM_PIP_INDEX_URL=<镜像> 再 python dep_check.py --fix
+         常用镜像：清华 {DEFAULT_PIP_MIRROR} ｜ 阿里 mirrors.aliyun.com/pypi/simple
+                 ｜ 腾讯 mirrors.cloud.tencent.com/pypi/simple ｜ 中科大 mirrors.ustc.edu.cn/pypi/simple
+      3) 分小批装（14 个包一条命令时，任何一个解析失败都会整批失败）：
+         python -m pip install redis aiosqlite httpx -i <镜像> --timeout 120 --retries 5
+         python -m pip install chromadb -i <镜像> --timeout 120 --retries 5
+         （chromadb 依赖重、几十 MB，慢是正常的）
+      4) 离线兜底：在能上网、Python 版本一致的机器上
+           python -m pip download -r requirements.txt -d wheels -i <镜像>
+         把 wheels 目录拷过来：python -m pip install --no-index --find-links=wheels -r requirements.txt
+      详见 docs/部署指南.md「依赖装不上时的排查与离线安装」。"""
+
+PIP_HINT_EN = f"""\
+Installation failed. Try, in order (common with restricted networks):
+      1) Check the channel itself: python -m pip install -U pip -i {DEFAULT_PIP_MIRROR}
+         On 403/timeout/DNS errors, allow your security software through (it can break
+         pip's TLS) or fix/clear the proxy setting, then retry;
+      2) Switch mirror and rerun: set WM_PIP_INDEX_URL=<mirror> then python dep_check.py --fix
+      3) Install in small batches (one failing requirement fails the whole command):
+         python -m pip install redis aiosqlite httpx -i <mirror> --timeout 120 --retries 5
+         python -m pip install chromadb -i <mirror> --timeout 120 --retries 5
+      4) Fully offline: on a machine with the same Python version
+           python -m pip download -r requirements.txt -d wheels -i <mirror>
+         copy the wheels directory over and run
+           python -m pip install --no-index --find-links=wheels -r requirements.txt
+      See the deployment guide in docs/."""
+
+
 def _pip_mirror() -> str:
     """镜像地址（默认清华源）；非法/关闭/非公网时返回空串表示只用默认源。"""
-    raw = str(os.environ.get(
-        "WM_PIP_INDEX_URL", "https://pypi.tuna.tsinghua.edu.cn/simple") or "").strip()
+    raw = str(os.environ.get("WM_PIP_INDEX_URL", DEFAULT_PIP_MIRROR) or "").strip()
     if not raw or raw.lower() in ("off", "0", "none", "no"):
         return ""
     try:
@@ -659,6 +696,9 @@ keep it on port 6379):
   1) Memurai (Redis-compatible Windows service, free developer edition): https://www.memurai.com
   2) redis-windows (Redis 8.x Windows builds): github.com/redis-windows/redis-windows
   3) WSL2 / Linux: sudo apt install redis-server && sudo service redis-server start
+Or point at a Redis elsewhere: set REDIS_HOST=<host> & set REDIS_PORT=<port>, or skip
+the check with SKIP_REDIS_CHECK=1 (Redis is the message bus - workers and the task queue
+will not work; use it only to look at the UI or to install dependencies first).
 NOTE: Redis 6+ is REQUIRED - this project uses redis-py 8 (RESP3/HELLO), which
 Redis 5 does not support (services would crash at startup with "unknown command HELLO").
 See the deployment guide in docs/ (section 5.1).
@@ -668,16 +708,15 @@ REDIS_HINT = """\
 Redis 未运行且无法自动获取。按"最省事优先"试这几步：
 
   1) 先用系统已装的（推荐，不用联网）：
-     - Windows 服务版：Memurai（https://www.memurai.com）装上即用，
-       或 tporadowski/redis 解压后执行
-         redis-server.exe --service-install
+     - Windows 服务版：Memurai（https://www.memurai.com，Redis 7 兼容）装上即用
      - WSL2 / Linux：sudo apt install redis-server && sudo service redis-server start
      - 已有 Docker：docker run -d --name zhiguan-redis -p 6379:6379 redis:7-alpine
+     （tporadowski/redis 发布的是 Redis 5.x，本项目**不能用**——见下面版本说明）
 
   2) 下载慢/超时（国内网络常见）：换镜像或把包放到本机
      a. 指定镜像源后重跑（会依次尝试，60s 预算）：
           set WM_REDIS_MIRROR_BASE=https://ghproxy.net
-     b. 或者手动下载 zip（约 5MB，来自 redis-windows 的 release）后放到
+     b. 或者手动下载 zip（约 14MB，来自 redis-windows 的 release）后放到
           {_zip_dir}/redis-windows.zip
         再重跑——**已存在的合法 zip 会直接复用，不再联网**。
      c. 有官方 release 页给出的 sha256 时，建议固定摘要再下载：
@@ -686,7 +725,10 @@ Redis 未运行且无法自动获取。按"最省事优先"试这几步：
 
   3) 把 Redis 放在别的机器/端口：
           set REDIS_HOST=<host>  &  set REDIS_PORT=<port>
-     或者临时跳过本检查：set SKIP_REDIS_CHECK=1
+     或者显式跳过检查（依赖自检与启动预检都认这个开关）：
+          set SKIP_REDIS_CHECK=1
+       注意：这是**放弃** Redis，不是"降级运行"——消息总线没了，worker 与任务队列
+       不会工作，只适合先看界面或先装依赖；装好 Redis 后请去掉这个变量。
 
 注意：需要 **Redis 6 及以上**——本项目用的 redis-py 8 默认 RESP3（HELLO 命令），
 Redis 5 不支持，会表现为"服务启动即崩、日志报 unknown command HELLO"。
@@ -862,8 +904,34 @@ FIREWALL_HINT = """\
 """
 
 
+def redis_skip_requested() -> bool:
+    """SKIP_REDIS_CHECK=1：显式跳过 Redis 检查（与 launcher 的启动预检同一个开关）。
+
+    为什么依赖自检也要认：`start.bat` 的 [4/6] 步是**闸门**，不认这个开关时，
+    用户照着失败指引 `set SKIP_REDIS_CHECK=1` 仍然被"必需依赖缺失"挡住，只能绕过
+    start.bat 直接起 launcher——指引给了一条走不通的路。
+    两处语义保持一致：显式设 1 即视为通过；区别是这里**打印警告**，不静默跳过。
+    """
+    return str(os.environ.get("SKIP_REDIS_CHECK", "0")).strip() == "1"
+
+
+def _redis_skipped_result() -> dict:
+    """跳过 Redis 检查时的统一结果（打印代价，绝不静默）。"""
+    print(_t("      [!!] 已按 SKIP_REDIS_CHECK=1 跳过 Redis 检查：Redis 是消息总线，"
+             "跳过不是「降级运行」——worker 与任务队列不会工作，只适合先看界面/先装依赖。",
+             "      [!] Redis check skipped (SKIP_REDIS_CHECK=1): the message bus is "
+             "unavailable, so workers and the task queue will not work."), flush=True)
+    return {"ok": True, "action": "skipped",
+            "detail": _t("已按 SKIP_REDIS_CHECK=1 跳过 Redis 检查（消息总线不可用："
+                         "worker 与任务队列不会工作；装好 Redis 后请去掉该变量）",
+                         "Redis check skipped (SKIP_REDIS_CHECK=1); remove it once Redis "
+                         "is installed")}
+
+
 def ensure_redis(auto: bool = True, wait_sec: float = 12.0) -> dict:
     """确保 Redis 可用：已运行→通过；否则按平台获取并启动。"""
+    if redis_skip_requested():
+        return _redis_skipped_result()
     host = _env_host()
     port = _env_port()
     if redis_ping("", port):
@@ -921,9 +989,9 @@ def ensure_redis(auto: bool = True, wait_sec: float = 12.0) -> dict:
                     "detail": _t(f"Redis 缺失且自动下载已关闭。\n{REDIS_HINT}",
                                  f"Redis missing and auto-download disabled.\n{REDIS_HINT_EN}")}
         zip_path = DOWNLOAD_DIR / "redis-windows.zip"
-        print(_t("      正在获取便携版 Redis（约 5MB；依次尝试镜像与官方源，"
+        print(_t("      正在获取便携版 Redis（约 14MB；依次尝试镜像与官方源，"
                  "总预算 60s，可用 WM_REDIS_FETCH_BUDGET 调整）…",
-                 "      fetching portable Redis (~5MB; trying mirrors then the "
+                 "      fetching portable Redis (~14MB; trying mirrors then the "
                  "official source, 60s budget)..."), flush=True)
         t0 = time.time()
         ok, msg, used = fetch_portable_redis(zip_path)
@@ -970,6 +1038,9 @@ def ensure_all(auto: bool = True, include_optional: bool = True) -> dict:
         pkgs = check_packages()  # 复检
     if auto:
         redis_result = ensure_redis(auto=True)
+    elif redis_skip_requested():
+        # 只报告模式也要认同一个开关：否则 `deps`（不带 --fix）仍会判"缺失必需项"
+        redis_result = _redis_skipped_result()
     else:
         reachable = redis_ping()
         redis_result = {"ok": reachable, "action": "checked",
@@ -1021,6 +1092,7 @@ def format_report(rep: dict) -> str:
     if ins.get("failed"):
         lines.append("       " + t(f"安装失败：{', '.join(ins['failed'])}（{ins.get('detail', '')}）",
                                   f"install failed: {', '.join(ins['failed'])} ({ins.get('detail', '')})"))
+        lines.append("       " + _t(PIP_HINT, PIP_HINT_EN))
     lines.append(f"  [{'OK' if rep['redis']['ok'] else '!!'}] {rep['redis']['detail']}")
     lines.append(f"  [{'OK' if rep['frontend']['ok'] else '-'}] {rep['frontend']['detail']}")
     if rep.get("migration"):

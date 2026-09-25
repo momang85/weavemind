@@ -243,6 +243,20 @@ class TestGuidanceIsActionable(unittest.TestCase):
         self.assertIn("Redis 6", self.hint)
         self.assertIn("HELLO", self.hint)
 
+    def test_hints_do_not_recommend_a_redis5_build(self):
+        """tporadowski/redis 是 Redis 5.x，与"需 Redis ≥6"自相矛盾，只能当反例出现。
+
+        实测后果：照着一键指引装它，服务"启动即崩、日志报 unknown command HELLO"。
+        依赖自检与启动预检两处文案都要带这个告诫，避免又被当成"任选其一"的方案。
+        """
+        launcher_src = (ROOT / "launcher.py").read_text(encoding="utf-8")
+        for text in (self.hint, launcher_src):
+            self.assertIn("tporadowski", text)
+            self.assertIn("Redis 5", text, "要点明它是 Redis 5.x")
+            self.assertTrue("不能用" in text or "不要用" in text,
+                            "必须明确说不能用，而不是作为方案列出")
+            self.assertIn("6", text)
+
     def test_offline_zip_path_is_the_real_runtime_dir(self):
         """指引里的落地路径必须与代码实际读取的目录一致（跨平台可跑）。
 
@@ -262,6 +276,59 @@ class TestFetchBudgetDefault(unittest.TestCase):
     def test_default_budget_is_60s(self):
         src = (ROOT / "dep_check.py").read_text(encoding="utf-8")
         self.assertIn('WM_REDIS_FETCH_BUDGET", "60"', src)
+
+
+class TestRedisSkipSwitch(unittest.TestCase):
+    """SKIP_REDIS_CHECK=1 必须真的能让**依赖自检**放行（start.bat 的 [4/6] 是闸门）。
+
+    失败指引让用户设这个开关，但此前只有 launcher 的启动预检认它：照做的人在
+    start.bat 里仍被"必需依赖缺失"挡住，只能绕过 start.bat 直接起 launcher。
+    语义与 launcher 一致（显式设 1 即跳过），差别是这里必须**打印代价**，不静默。
+    """
+
+    def _env_without_skip(self):
+        return {k: v for k, v in os.environ.items() if k != "SKIP_REDIS_CHECK"}
+
+    def test_skip_passes_and_says_what_it_costs(self):
+        import contextlib
+        import io as _io
+        buf = _io.StringIO()
+        with mock.patch.dict(os.environ, {"SKIP_REDIS_CHECK": "1"}):
+            with contextlib.redirect_stdout(buf):
+                res = dc.ensure_redis(auto=True)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(res["action"], "skipped")
+        printed = buf.getvalue()
+        self.assertIn("SKIP_REDIS_CHECK", printed, "跳过必须打印，不静默")
+        self.assertIn("worker", printed, "要说清代价：worker/队列不可用")
+
+    def test_skip_does_not_try_to_download(self):
+        """跳过时不应再走下载（新手常没有可用通道，白等 60 秒预算）。"""
+        with mock.patch.dict(os.environ, {"SKIP_REDIS_CHECK": "1"}), \
+                mock.patch.object(dc, "fetch_portable_redis",
+                                  side_effect=AssertionError("不应发起下载")), \
+                mock.patch.object(dc, "redis_ping", lambda *a, **k: False), \
+                mock.patch("builtins.print"):
+            res = dc.ensure_redis(auto=True)
+        self.assertTrue(res["ok"])
+
+    def test_without_skip_missing_redis_still_fails(self):
+        with mock.patch.dict(os.environ, self._env_without_skip(), clear=True), \
+                mock.patch.dict(os.environ, {"WM_NO_AUTO_DOWNLOAD": "1"}), \
+                mock.patch.object(dc, "redis_ping", lambda *a, **k: False), \
+                mock.patch.object(dc, "_system_redis_exe", lambda: None), \
+                mock.patch.object(dc, "_usable_portable_redis", lambda: None), \
+                mock.patch("builtins.print"):
+            res = dc.ensure_redis(auto=True)
+        self.assertFalse(res["ok"], "没设开关时必须照旧失败")
+
+    def test_report_only_mode_also_honours_the_switch(self):
+        with mock.patch.dict(os.environ, {"SKIP_REDIS_CHECK": "1"}), \
+                mock.patch.object(dc, "_migrate_legacy_runtime_dir", lambda: None), \
+                mock.patch("builtins.print"):
+            rep = dc.ensure_all(auto=False)
+        self.assertTrue(rep["redis"]["ok"], rep["redis"])
+        self.assertEqual(rep["redis"]["action"], "skipped")
 
 
 if __name__ == "__main__":

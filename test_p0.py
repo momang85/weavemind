@@ -7049,6 +7049,44 @@ class TestPipMirrorPolicy(unittest.TestCase):
         self.assertTrue(ok)
         self.assertEqual(calls, [""], "关闭镜像时只尝试默认源")
 
+    def test_failure_report_carries_actionable_pip_steps(self):
+        """装不上时，失败报告本身要给出下一步（换镜像 / 分小批 / 离线 wheel）。
+
+        实测：新手卡在"14 个包一条命令、两条通道都失败"时，报告只写了
+        `ERROR: No matching distribution found for aiosqlite` 和"可设
+        WM_PIP_INDEX_URL"——知道开关却不知道装什么、怎么装。
+        """
+        import dep_check
+        rep = {
+            "python": {"ok": True, "detail": "Python 3.13"},
+            "packages": {"ready": 0, "total": 14, "missing_required":
+                         [{"package": "redis", "why": "消息总线"}],
+                         "missing_optional": []},
+            "install": {"installed": [], "failed": ["redis", "chromadb"],
+                        "detail": "镜像失败：ERROR: No matching distribution found for aiosqlite"},
+            "redis": {"ok": False, "detail": "Redis 未运行"},
+            "frontend": {"ok": True, "detail": "前端产物已就绪"},
+            "migration": None,
+            "ok": False,
+        }
+        out = dep_check.format_report(rep)
+        self.assertIn("安装失败：", out)
+        self.assertIn("WM_PIP_INDEX_URL", out)
+        self.assertIn(dep_check.DEFAULT_PIP_MIRROR, out)
+        self.assertIn("mirrors.aliyun.com/pypi/simple", out)
+        self.assertIn("chromadb", out, "要点名单独装的重依赖")
+        self.assertIn("pip download -r requirements.txt -d wheels", out)
+        self.assertIn("--no-index --find-links=wheels", out)
+        self.assertIn("docs/部署指南.md", out)
+
+    def test_pip_hint_mirror_matches_the_default_used_by_the_installer(self):
+        """指引里让人试的镜像必须就是代码里的默认源（两处不许漂移）。"""
+        import dep_check
+        self.assertIn(dep_check.DEFAULT_PIP_MIRROR, dep_check.PIP_HINT)
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("WM_PIP_INDEX_URL", None)
+            self.assertEqual(dep_check._pip_mirror(), dep_check.DEFAULT_PIP_MIRROR)
+
 
 class TestDownloadSafety(unittest.TestCase):
     """安全约束：仅 https、host 白名单、拒绝环回/私网/保留地址。"""
