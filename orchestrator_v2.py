@@ -511,11 +511,17 @@ Rules:
 5. All steps MUST strictly follow the user's goal topic; never generalize to other domains
 6. Search is NOT a mandatory information source: code, documents, summaries and reports can be produced directly by content_summary / code_execution from model knowledge. Use web_search ONLY when the goal explicitly requires up-to-date external facts (market data, news, current prices, real repos)
 7. NEVER chain repeated searches: at most one web_search/web_fetch pair per plan; if external info is unavailable, later steps must fall back to direct generation instead of searching again
-8. code_execution ONLY generates and runs Python scripts (or a single self-contained HTML file). JavaScript / multi-file frontend projects must be restructured into a single Python script or single HTML file; do NOT plan separate .js modules
+8. code_execution ONLY generates and runs Python scripts (or a single self-contained HTML file). JavaScript / multi-file frontend projects must be restructured into a single Python script or single HTML file; do NOT plan separate .js modules.
+   Plan code_execution ONLY when the goal explicitly asks for code / a script / a program / a runnable file.
+   Research, financial-report and investigation goals must NOT contain code_execution steps: charts and
+   analysis are rendered in-process by data_analyzer, and code steps need a container sandbox that a local
+   machine may not have (the whole task then fails at the delivery gate).
 9. depends_on must NOT form cycles; each step may only depend on steps that come before it in execution order
 10. 当任务涉及"报告/分析/研报/调研"时：必须保留所有搜索结果的原始 URL，并把 URL 列表传给 report_generator；
     报告步骤的指令必须包含"将图表嵌入报告"和"在报告末尾标注每条数据的来源链接"
-11. 若目标明确要求"图表/可视化/趋势图/plot/chart"，计划必须包含 data_analyzer 或 code_execution 图表生成步骤
+11. 若目标明确要求"图表/可视化/趋势图/plot/chart"，计划必须包含 **data_analyzer** 图表步骤——
+    图表由进程内渲染（charts_pipeline），**不要**用 code_execution 生成图表：
+    研究类目标里出现代码步骤会把任务拖进容器沙箱依赖，本机没有隔离时整条链会失败
 12. 每个步骤的 instruction 必须以"验收：..."结尾，写明可验证的完成标准
     （如"验收：生成 main.py 且能运行并输出结果"），禁止无验收点的空泛指令
 13. 步骤可带 "mode": "pipeline"|"parallel"|"human_in_loop"：
@@ -5248,6 +5254,37 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 continue
         return False
 
+    # 目标是否**明确要求代码交付物**。判据取目标文本，不取"计划里恰好有 code_execution 步骤"：
+    # 历史反例（实机）——研究类目标的图表步骤曾被规划成 code_execution，于是交付守门要求
+    # "交付包里必须有 HTML/PY/JS"，而这类任务本来就只该交付报告，直接判贯通测试失败并
+    # 进入修复轮（修复步又是 code_execution，本机没有容器隔离时白跑两轮）。
+    _CODE_GOAL_KEYS = (
+        "写一个", "写个", "编写", "实现一个", "代码", "脚本", "程序", "可运行",
+        "命令行", "cli", "爬虫", "算法", "html", "网页", "小工具", "脚本文件",
+        "python", "javascript", "game", "游戏",
+    )
+
+    @classmethod
+    def _goal_wants_code(cls, goal: str) -> bool:
+        """目标是否要求生成代码/脚本/程序/可运行文件（决定交付是否必须有代码产物）。"""
+        g = str(goal or "").lower()
+        return any(k in g for k in cls._CODE_GOAL_KEYS)
+
+    @staticmethod
+    def _sandbox_blocker() -> str:
+        """代码执行沙箱此刻是否拦着（返回原因；可用则返回空串）。
+
+        仅默认/显式 docker 模式且隔离不可用时非空——此时任何 code_execution 步骤都会被
+        拒绝执行，重复派发（含修复轮）只会再失败一次。
+        """
+        try:
+            from code_sandbox import isolation_ready, isolation_required
+            if isolation_required() and not isolation_ready()[0]:
+                return isolation_ready()[1] or "容器隔离不可用"
+        except Exception:
+            return ""
+        return ""
+
 
     # ── Main Loop ──
     def _start_phase_monitor(self, task_id: str,
@@ -6191,21 +6228,41 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             used_template=used_template,
         ))
         delivery, e2e_results = self._build_delivery_summary(task_id, goal, all_steps, completed_all)
-        # 代码交付守门：任务要求生成代码，但最终交付包没有 HTML/PY/JS 文件
-        # （例如步骤被降级成文本摘要）→ 视为贯通测试失败，进入修复轮；
+        # 代码交付守门：**目标要求生成代码**（写程序/脚本/可运行文件），但最终交付包没有
+        # HTML/PY/JS 文件（例如步骤被降级成文本摘要）→ 视为贯通测试失败，进入修复轮；
         # 修复仍无代码交付物时任务如实标记失败，避免"只剩报告"的假成功。
+        # 判据是**目标**而不是"计划里有没有 code_execution 步骤"：研究类目标的图表步骤
+        # 历史上被规划成 code_execution，会让"只该交付报告"的任务被误判缺代码。
         has_code_steps = any(
             s.get("capability") == "code_execution" for s in all_steps
         )
-        if has_code_steps and not self._delivery_has_code_files(all_steps, completed_all):
+        if (has_code_steps and self._goal_wants_code(goal)
+                and not self._delivery_has_code_files(all_steps, completed_all)):
             e2e_results = [{
                 "name": "(无代码交付物)", "type": "file", "ok": False,
                 "detail": "任务要求生成代码，但交付包中没有 HTML/PY/JS 文件",
             }]
         # 任务级失败修复循环：交付物全部未通过可运行性验证时，带失败原因自动重做（最多 2 轮）
+        # 沙箱不可用时**不进修复轮**：修复步本身是 code_execution，隔离不可用会被拒绝执行，
+        # 跑满两轮只是把十几分钟烧掉（实机：中国平安任务 2 成功/6 失败空转）。改为一条可操作提示。
         _max_repair = 2
         _repair = 0
-        while e2e_results and not any(r.get("ok") for r in e2e_results) and _repair < _max_repair:
+        _sandbox_blocker = self._sandbox_blocker()
+        if _sandbox_blocker and e2e_results and not any(r.get("ok") for r in e2e_results):
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "error", "agent": "orchestrator",
+                           "message": f"跳过交付修复轮：代码执行沙箱不可用（{_sandbox_blocker}），"
+                                      "修复步骤需要在隔离环境里运行，重复派发只会再失败一次。"
+                                      "出路：① 安装并启动 Docker 后构建沙箱镜像 "
+                                      "（docker build -f Dockerfile.sandbox -t "
+                                      "weavimind-code-sandbox:latest .）；"
+                                      "② 本机试用可显式设 CODE_EXECUTION_SANDBOX=restricted"
+                                      "（无操作系统级隔离）；"
+                                      "③ 让任务不生成代码步骤（研究类任务默认如此）。"
+                                      "其余能力（检索/结构化数据/图表/报告/交付）不受影响。",
+                           "timestamp": self._now_iso()})
+        while (e2e_results and not any(r.get("ok") for r in e2e_results)
+               and _repair < _max_repair and not _sandbox_blocker):
             _repair += 1
             failures = [
                 f"{r.get('name')}（{r.get('type')}）：{r.get('detail', '')}"

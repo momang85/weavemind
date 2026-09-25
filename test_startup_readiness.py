@@ -80,6 +80,56 @@ class TestLauncherWaitsForRedis(unittest.TestCase):
         self.assertNotIn("_ensure_redis_available()\n    time.sleep(2)", src)
 
 
+class TestCodeSandboxIsVisibleBeforeTasks(unittest.TestCase):
+    """代码执行沙箱状态必须**在跑任务之前**就能看到。
+
+    实机代价：新手机器没有 Docker，容器隔离不可用 → 任务里所有 code_execution 步骤被
+    拒绝执行（默认要求隔离，不退到宿主解释器），十几分钟后才从失败步骤详情里看出原因。
+    所以依赖自检报告与启动校验都要打印这一行；且它**不是启动阻塞项**（研究类任务不需要
+    代码执行，其余能力照常）。
+    """
+
+    def test_dep_check_reports_unavailable_isolation_without_blocking(self):
+        import dep_check
+        st = {"mode": "docker", "isolation_ready": False,
+              "isolation_reason": "docker 不可用（CLI 缺失或守护进程未响应）",
+              "execution_available": False, "isolation_note": "要求容器隔离但当前不可用"}
+        with mock.patch("code_sandbox.sandbox_status", lambda: st):
+            rep = dep_check.check_code_sandbox()
+        self.assertTrue(rep["ok"], "沙箱不可用不得阻塞启动")
+        self.assertFalse(rep["ready"])
+        self.assertIn("docker", rep["detail"])
+        self.assertIn("CODE_EXECUTION_SANDBOX=restricted", rep["detail"], "要给出路")
+        self.assertIn("Dockerfile.sandbox", rep["detail"])
+        # 报告里能看到这一行，且用中性标记（不是 [!!] 失败）
+        text = dep_check.format_report({
+            "python": {"ok": True, "detail": "Python 3.13"},
+            "packages": {"ready": 14, "total": 14, "missing_required": [],
+                         "missing_optional": []},
+            "install": {"installed": [], "failed": []},
+            "redis": {"ok": True, "detail": "Redis 已运行"},
+            "frontend": {"ok": True, "detail": "前端产物已就绪"},
+            "code_sandbox": rep, "migration": None, "ok": True,
+        })
+        self.assertIn("容器隔离不可用", text)
+        self.assertIn("[--]", text)
+
+    def test_ready_isolation_reports_ok(self):
+        import dep_check
+        st = {"mode": "docker", "isolation_ready": True, "isolation_reason": "",
+              "execution_available": True,
+              "isolation_note": "容器隔离已就绪（docker：断网 / 只读系统盘 / 仅挂载任务工作区）"}
+        with mock.patch("code_sandbox.sandbox_status", lambda: st):
+            rep = dep_check.check_code_sandbox()
+        self.assertTrue(rep["ready"])
+        self.assertIn("容器隔离已就绪", rep["detail"])
+
+    def test_launcher_startup_prints_the_note(self):
+        src = Path("launcher.py").read_text(encoding="utf-8")
+        self.assertIn("代码执行：容器隔离不可用", src)
+        self.assertIn("isolation_note()", src)
+
+
 class TestNoUnretriedRedisClients(unittest.TestCase):
     """同一缺陷家族的全仓守卫：`redis.Redis(...)` 必须显式关掉 redis-py 内建重试。
 

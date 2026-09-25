@@ -85,6 +85,23 @@ PDF 14 页 0 越界、旧包 9 个全部保留）。**复核中查出并修掉�
 用例：`test_redis_acquisition` 新增 5 例（跳过开关 4 例 + 不再推荐 Redis 5 构建）、
 `test_p0.TestPipMirrorPolicy` 新增 2 例（失败报告带可执行步骤、指引镜像与默认源不漂移）。
 
+**无 Docker 也能跑完研究类任务（09-25）**：新手实机（Python 3.13、无 Docker）跑研究任务时，
+计划里的图表步骤被规划成 `code_execution` → 默认要求容器隔离、隔离不可用即拒绝执行 →
+代码交付守门判"无代码交付物" → 修复轮（修复步同样是 `code_execution`）→ 空转十几分钟。
+先确认事实：**只有 `code_execution` 需要 Docker**，图表由 `charts_pipeline` /
+`data_analyzer` 进程内渲染（开发机同样没有 docker，真实交付的 6 张图就是这么出的）。
+改动：① 规划规则——图表必须用 `data_analyzer`、明确不许用 `code_execution` 画图，
+`code_execution` 只用于目标明确要求代码的任务；② 代码交付守门改按**目标**判
+（新增 `_goal_wants_code`），研究类目标不再被误判缺代码；③ 隔离不可用时**不进交付修复轮**，
+推一条可操作提示（三条出路）；④ 沙箱状态前移到依赖自检报告与启动校验（中性标记、不阻塞启动）。
+安全默认值未放宽（默认仍要求容器隔离、隔离不可用仍拒绝执行）。
+证据：`docs/evidence/no_docker_research_path_20260925.md`。用例：`test_orchestrator_v2`
+新增 5 例、`test_startup_readiness` 新增 3 例；`test_orchestrator_v2`+`test_startup_readiness`
++`test_setup_wizard` 118 OK、`test_delivery_chain` 343 OK、`test_p0` 405 OK。
+未验：规划规则是提示词而非硬约束（仍可能产出代码步骤，由守门与修复轮跳过兜底）；
+沙箱镜像自动构建未做（有 Docker 的机器仍需手动 build 一次）；"搜索无候选 URL → `web_fetch`
+判失败 → 下游链式阻断"（实机非上市主体那一次）未处理。
+
 **上一轮（保留）**：阶段 D · **09-23 实机复核四项**。
 项1：风险章节与逐问支持**同一条判据**（`match_kind`）——只有 explanation 才写"解释已取得"，
 行业/市场背景与读数如实写"未取得该指标变化的解释"，且背景**不计入**必答分子；

@@ -1657,6 +1657,66 @@ class TestArtifactWhitelistInjection(unittest.TestCase):
         self.assertNotIn("产物文件", instr)
 
 
+class TestDockerFreeResearchPath(unittest.TestCase):
+    """研究类任务不该因为本机没有 Docker 而失败（实机：新手无 Docker 跑研究任务空转十几分钟）。
+
+    三处判据：
+    1) 图表步骤只能落在 data_analyzer（进程内渲染），不许落到 code_execution——
+       后者需要容器沙箱，本机没有隔离时被拒绝执行，还会把交付守门拖进修复轮；
+    2) 交付守门要求"交付包里有代码文件"的条件是**目标要求代码**，不是"计划里恰好有
+       code_execution 步骤"；
+    3) 隔离不可用时**不进修复轮**（修复步本身是 code_execution，重复派发只会再失败）。
+    """
+
+    def test_planner_never_plans_charts_as_code(self):
+        prompt = orchestrator_v2.PLANNER_SYSTEM
+        self.assertNotIn("data_analyzer 或 code_execution", prompt,
+                         "图表步骤不能再把 code_execution 当选项")
+        self.assertIn("data_analyzer** 图表步骤", prompt)
+        self.assertIn("不要**用 code_execution 生成图表", prompt)
+        # code_execution 的适用面收敛到"目标明确要求代码"
+        self.assertIn("ONLY when the goal explicitly asks for code", prompt)
+        self.assertIn("must NOT contain code_execution steps", prompt)
+
+    def test_goal_wants_code_judges_by_goal_not_by_plan(self):
+        for goal in ("研究洋河股份 2023 与 2024 两个年度的营业收入、归母净利润，"
+                     "生成含图表与来源标注的分析报告",
+                     "用两句话说明毛利率与净利润的区别",
+                     "检索并总结贵州茅台近三年渠道改革公开资料"):
+            self.assertFalse(OrchestratorV2._goal_wants_code(goal), goal)
+        for goal in ("用 Python 写一个可直接运行的命令行小程序，读取内置示例数据",
+                     "写一个单文件 HTML 小游戏",
+                     "实现一个爬虫脚本并跑通"):
+            self.assertTrue(OrchestratorV2._goal_wants_code(goal), goal)
+
+    def test_delivery_gate_uses_the_goal(self):
+        src = Path("orchestrator_v2.py").read_text(encoding="utf-8")
+        self.assertIn("has_code_steps and self._goal_wants_code(goal)", src,
+                      "代码交付守门必须按目标判，否则研究任务被误判缺代码")
+
+    def test_sandbox_blocker_reports_unavailable_isolation(self):
+        with mock.patch("code_sandbox.isolation_required", lambda: True), \
+                mock.patch("code_sandbox.isolation_ready",
+                           lambda: (False, "docker 不可用（CLI 缺失或守护进程未响应）")):
+            self.assertIn("docker", OrchestratorV2._sandbox_blocker())
+        # 隔离可用 → 不拦
+        with mock.patch("code_sandbox.isolation_required", lambda: True), \
+                mock.patch("code_sandbox.isolation_ready", lambda: (True, "")):
+            self.assertEqual(OrchestratorV2._sandbox_blocker(), "")
+        # 显式非隔离模式（操作者选择）→ 不拦：代码能跑，只是没有隔离
+        with mock.patch("code_sandbox.isolation_required", lambda: False), \
+                mock.patch("code_sandbox.isolation_ready",
+                           lambda: (False, "操作者显式选择 restricted")):
+            self.assertEqual(OrchestratorV2._sandbox_blocker(), "")
+
+    def test_repair_loop_is_skipped_when_sandbox_is_unavailable(self):
+        src = Path("orchestrator_v2.py").read_text(encoding="utf-8")
+        self.assertIn("_sandbox_blocker = self._sandbox_blocker()", src)
+        self.assertIn("and not _sandbox_blocker", src,
+                      "隔离不可用时不得进入修复轮（修复步也是 code_execution）")
+        self.assertIn("跳过交付修复轮：代码执行沙箱不可用", src)
+
+
 class TestBackfillChartManifest(TempWorkspaceCase):
     """多实体任务交付缺口回归：make_charts 语义图也必须进入 chart_manifest.json。"""
 

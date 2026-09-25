@@ -713,6 +713,22 @@ def verify_services(quiet: bool = True) -> dict:
             + ("" if ok else "; down: " + ", ".join(n for _, n in down[:6])),
         )
         print(line)
+        # 代码执行沙箱状态：本机没有容器隔离时，涉及代码执行的步骤会被拒绝执行——
+        # 提前说清，免得用户在任务里跑十几分钟才发现（研究类任务不需要它）。
+        try:
+            from code_sandbox import isolation_note, isolation_ready, isolation_required
+            if isolation_required() and not isolation_ready()[0]:
+                print(import_cli_text().msg(
+                    "  [--] 代码执行：容器隔离不可用，涉及代码执行的步骤会被拒绝"
+                    "（检索/结构化数据/图表/报告/交付不受影响）。出路见 docs/部署指南.md",
+                    "  [--] Code execution: container isolation unavailable; code steps "
+                    "will be refused (search/structured data/charts/report/delivery are "
+                    "unaffected). See docs/部署指南.md"))
+            else:
+                print(import_cli_text().msg(f"  [OK] 代码执行：{isolation_note()}",
+                                            f"  [OK] Code execution: {isolation_note()}"))
+        except Exception:
+            pass
     return summary
 
 

@@ -1040,6 +1040,43 @@ def ensure_redis(auto: bool = True, wait_sec: float = 12.0) -> dict:
                          + FIREWALL_HINT.replace("%PROGRAM%", str(redis_exe)))}
 
 
+def check_code_sandbox() -> dict:
+    """代码执行沙箱状态（只报告，不改配置、不阻塞启动）。
+
+    为什么放进依赖自检：默认要求容器隔离，本机隔离不可用时任何 `code_execution` 步骤
+    都会被拒绝执行（不会退到宿主解释器跑模型生成的代码）。用户应当**在跑任务之前**就看到
+    这件事，而不是等任务跑十几分钟、从失败步骤的详情里才发现。
+    研究类任务不需要代码执行，所以这里**不作为启动阻塞项**（ok 恒为 True）。
+    """
+    try:
+        from code_sandbox import sandbox_status
+        st = sandbox_status()
+    except Exception as exc:                     # noqa: BLE001 - 只报告
+        return {"ok": True, "mode": "unknown", "ready": False,
+                "detail": _t(f"沙箱状态未知（{str(exc)[:60]}）", "sandbox status unknown"),
+                "status": None}
+    ready = bool(st.get("isolation_ready"))
+    exec_ok = bool(st.get("execution_available"))
+    mode = str(st.get("mode") or "?")
+    if ready:
+        detail = _t(f"容器隔离已就绪（{mode}）：模型生成的代码在容器里运行",
+                    f"container isolation ready ({mode})")
+    elif exec_ok:
+        detail = _t(f"已显式选择 {mode}：代码可执行，但**没有操作系统级隔离**",
+                    f"explicit mode {mode}: code runs without OS-level isolation")
+    else:
+        detail = _t(
+            f"容器隔离不可用（{st.get('isolation_reason') or '原因未知'}）："
+            "涉及代码执行的步骤会被拒绝，其余能力（检索/结构化数据/图表/报告/交付）不受影响。\n"
+            "       出路：① 安装并启动 Docker 后构建沙箱镜像 "
+            "（docker build -f Dockerfile.sandbox -t weavimind-code-sandbox:latest .）；\n"
+            "             ② 本机试用可显式设 CODE_EXECUTION_SANDBOX=restricted（无隔离）；\n"
+            "             ③ 让任务不生成代码步骤（研究类任务默认如此）。",
+            "container isolation unavailable: code steps will be refused; "
+            "other capabilities are unaffected")
+    return {"ok": True, "mode": mode, "ready": ready, "detail": detail, "status": st}
+
+
 def ensure_all(auto: bool = True, include_optional: bool = True) -> dict:
     """完整自检 + 修复：Python 版本 / 依赖包 / Redis / 前端。"""
     migration = _migrate_legacy_runtime_dir()
@@ -1062,6 +1099,7 @@ def ensure_all(auto: bool = True, include_optional: bool = True) -> dict:
                                    else _t(f"Redis 不可达。\n{REDIS_HINT}",
                                            f"Redis unreachable.\n{REDIS_HINT_EN}"))}
     frontend = check_frontend()
+    sandbox = check_code_sandbox()
     ok = bool(py["ok"] and not pkgs["missing_required"] and redis_result["ok"])
     return {
         "python": py,
@@ -1069,6 +1107,7 @@ def ensure_all(auto: bool = True, include_optional: bool = True) -> dict:
         "install": install_result,
         "redis": redis_result,
         "frontend": frontend,
+        "code_sandbox": sandbox,
         "migration": migration,
         "ok": ok,
     }
@@ -1109,6 +1148,10 @@ def format_report(rep: dict) -> str:
         lines.append("       " + _t(PIP_HINT, PIP_HINT_EN))
     lines.append(f"  [{'OK' if rep['redis']['ok'] else '!!'}] {rep['redis']['detail']}")
     lines.append(f"  [{'OK' if rep['frontend']['ok'] else '-'}] {rep['frontend']['detail']}")
+    _sb = rep.get("code_sandbox") or {}
+    if _sb.get("detail"):
+        # 沙箱不是启动阻塞项（研究类任务不需要代码执行），所以用中性标记而不是 [!!]
+        lines.append(f"  [{'OK' if _sb.get('ready') else '--'}] {_sb['detail']}")
     if rep.get("migration"):
         lines.append("       " + t(f"运行时目录迁移：{rep['migration']}",
                                   f"runtime dir migration: {rep['migration']}"))
