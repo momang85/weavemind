@@ -3662,6 +3662,51 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             "skip_execute": not pending,
         }
 
+    def _search_retry_instruction(self, step: dict, attempt: int, issue: str,
+                                  goal: str, retry_qs_seen: set, task_id: str) -> str:
+        """web_search 重试指令：把"请换查询词"换成**可执行的结构化下一批查询**。
+
+        同关键词重搜必然得到同样结果，而只追加一句"请换词"时模型/Worker 仍会优先用契约
+        查询（专项 §3-9）。这里由契约生成下一批（主体、期间、文档类型、截止都不变，只换
+        资料面），Worker 见到 `[重试检索查询]` 行就只打这一批；计划用尽时如实说"没有新
+        查询"，不假装有换词方案（也不允许换契约外的主体/期间）。
+        """
+        from execution_contract import RETRY_MARK
+        base_instr = re.sub(r"(?m)^\s*\[重试检索查询\].*$\n?",
+                            "", str(step.get("instruction", "")))
+        retry_block = ""
+        contract = self._task_contract(task_id)
+        if contract is not None:
+            try:
+                retry_block = contract.retry_query_line(tried=retry_qs_seen)
+            except Exception as exc:                 # noqa: BLE001
+                logger.warning("结构化重试查询生成失败（step=%s）：%s",
+                               step.get("step_id"), str(exc)[:120])
+        if retry_block:
+            retry_qs_seen.update(
+                ln.split(RETRY_MARK, 1)[1].strip()
+                for ln in retry_block.splitlines() if RETRY_MARK in ln)
+            plan_text = ("本次只使用下面这批新查询（按执行契约生成，主体/期间/截止不变）：\n"
+                         f"{retry_block}\n")
+        elif self._is_market_goal(goal):
+            plan_text = "本次按下方行情定向查询执行；禁止原样重复上次查询。"
+        else:
+            plan_text = ("本轮没有可用的新查询（结构化重试计划已用尽）："
+                         "不得原样重复上次查询，也不得换用契约外的主体/期间。")
+        return (
+            f"{base_instr}\n\n"
+            f"【搜索重试 {attempt}】上次查询未获得有效结果；"
+            + plan_text
+            + (
+                f"\n【行情目标换词】{_MARKET_SEARCH_SUFFIX.strip()}"
+                if self._is_market_goal(goal) else ""
+            )
+            + (
+                f"\n【输出契约校验失败】{issue}，请修正输出格式后重新执行。"
+                if issue else ""
+            )
+        )
+
     def _replan_step(self, goal: str, step: dict, error: str, task_id: str) -> dict | None:
         """步骤失败后，让 LLM 提出一个替代步骤（方案 A：同目标换实现）。
         失败诊断 + 结构化源优先：金融任务搜索/抓取失败 → 先转向已注入的
@@ -7767,6 +7812,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         issue = ("" if str(result.get("status")) == "CANCELLED"
                  else self._contract_issue(goal, step, result))
         tried: list[str] = []
+        # 本步已给出的结构化重试查询：重试之间不重复交同一批（专项 §5 补查重试的真正输入）
+        retry_qs_seen: set = set()
         while (result.get("status") == "FAILED" or issue) and attempt < self._max_retry:
             # 取消：不再重试/重规划（失败重试循环是实测最爱烧额度的地方）
             if self._cancel_requested(task_id):
@@ -7783,22 +7830,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             time.sleep(2)
             amended = dict(step)
             if step.get("capability") == "web_search":
-                # 搜索重试必须更换策略：同一关键词重复搜只会得到同样结果
-                amended["instruction"] = (
-                    f"{step.get('instruction', '')}\n\n"
-                    f"【搜索重试 {attempt}】上次查询未获得有效结果；"
-                    "本次必须更换查询词组合/增加限定条件"
-                    "（如 site: 官方域名、具体年份、具体指标词），"
-                    "禁止原样重复上次查询。"
-                    + (
-                        f"\n【行情目标换词】{_MARKET_SEARCH_SUFFIX.strip()}"
-                        if self._is_market_goal(goal) else ""
-                    )
-                    + (
-                        f"\n【输出契约校验失败】{issue}，请修正输出格式后重新执行。"
-                        if issue else ""
-                    )
-                )
+                amended["instruction"] = self._search_retry_instruction(
+                    step, attempt, issue, goal, retry_qs_seen, task_id)
             elif issue:
                 amended["instruction"] = (
                     f"{step.get('instruction', '')}\n\n"

@@ -27,6 +27,8 @@ DOC_TYPE_QUARTERLY = "季度报告"
 
 # 契约块在指令里的标记（幂等重建时先剥旧的，再加新的）
 QUERY_MARK = "[检索查询]"
+# 结构化重试计划的查询行：优先于上面的常规查询行（上一批查询已被证明打不出结果）
+RETRY_MARK = "[重试检索查询]"
 CONTRACT_MARK = "[研究契约]"
 
 # 期间词：与"年度报告"契约冲突的其它报告期（历史教训里常见）
@@ -190,9 +192,42 @@ class ExecutionContract:
             out.append(f"{head}{metric_part}".strip())
         return out
 
+    def retry_query_line(self, *, tried=(), limit: int = 4) -> str:
+        """指令里的重试查询块；没有新查询时返回空串（编排器据此不假装有换词方案）。"""
+        return "\n".join(f"{RETRY_MARK} {q}"
+                         for q in self.retry_queries(tried=tried, limit=limit))
+
     def query_line(self) -> str:
         """指令里的查询块（多行，每行一条按年短查询）。"""
         return "\n".join(f"{QUERY_MARK} {q}" for q in self.queries())
+
+    # 结构化重试的资料面：主体/期间/文档类型/截止都不动，只换"要哪一份资料"。
+    RETRY_FACETS = ("经营情况讨论与分析", "主要财务指标", "公告", "全文")
+
+    def retry_queries(self, *, tried=(), limit: int = 4) -> list[str]:
+        """下一批检索查询（结构化重试计划），`RETRY_MARK` 前缀交给 Worker 采用。
+
+        为什么要有这个方法（专项 §5"补查重试的真正输入"）：检索失败/零召回后如果只是把
+        同一批查询再打一遍，引擎返回的结果必然一样；此前编排器只在指令尾追加一句"请换
+        查询词"，模型改不动实际查询。这里按**契约字段**换资料面——MD&A 正文 / 指标底稿 /
+        公告 / 原件全文——逐条排除 `tried` 里已出现过的字符串，既不猜模型给的词，也不靠放松
+        相关性阈值去凑候选；期间外年份仍然不可能出现（全部由 `self.periods` 生成）。
+        """
+        who = self.label()
+        years = list(self.periods) or [None]
+        used = {str(t or "").strip() for t in (tried or ())}
+        out: list[str] = []
+        limit = max(1, int(limit))
+        for y in years:                      # 先按期间铺开，再换资料面：每个期间都能拿到重试查询
+            head = f"{who} {y}年{self.doc_type}" if y else f"{who} {self.doc_type}"
+            for facet in self.RETRY_FACETS:
+                q = f"{head} {facet}".strip()
+                if q in used or q in out:
+                    continue
+                out.append(q)
+                if len(out) >= limit:
+                    return out
+        return out
 
     def contract_line(self) -> str:
         """指令里的契约块：主体/期间/口径/as_of/文档类型/必需指标（以此为准）。"""

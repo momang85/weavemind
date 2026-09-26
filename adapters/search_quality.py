@@ -114,10 +114,71 @@ AUTHORITY_INDUSTRY = (
 
 # ddgs text 引擎全集（backend 参数按名过滤）。auto 模式每次查询都会尝试全部引擎，
 # 而环境内 wikipedia/google 等可能 100% 超时，每次白等 5s×N——引擎清单因此可配。
+# 清单只表达**偏好顺序**；某个名字在当前 ddgs 版本里是否还启用，一律问
+# `ddg_text_backends()`（注册表），不靠这份清单断言可用性。
 DDG_ENGINES = (
     "brave", "duckduckgo", "google", "grokipedia", "mojeek",
     "startpage", "wikipedia", "yahoo", "yandex",
 )
+
+
+def ddg_text_backends() -> tuple:
+    """ddgs 当前版本**真正启用**的 text 后端名（只读库，不发请求）。
+
+    为什么要读注册表而不是照清单打后端名：ddgs 9.16 把可用后端做成自动发现的
+    `ddgs.engines.ENGINES`（按类属性 `disabled` 过滤，例如包内 `bing`/`yandex`
+    已停用），类上既没有 `get_available_backends` 也没有 `BACKENDS`。照旧清单打一个
+    已停用的名字时，`DDGS._get_engines` 会**静默回落 auto**
+    （`if not instances: return self._get_engines(category, "auto")`）——即专项 §5
+    明令禁止的全引擎重扫：包内实测 `backend="yandex"` 白等 32 秒后 ConnectError。
+
+    返回空元组 = **读不到注册表**（版本未知），不是"没有可用后端"：两者必须分开。
+    """
+    try:
+        from ddgs.engines import ENGINES  # type: ignore
+
+        names = tuple(sorted(str(k) for k in ((ENGINES or {}).get("text") or {})))
+        if names:
+            return names
+    except Exception:
+        pass
+    # 更早的版本把后端表挂在 DDGS 类上
+    try:
+        from ddgs import DDGS
+
+        for attr in ("get_available_backends", "available_backends"):
+            fn = getattr(DDGS, attr, None)
+            if callable(fn):
+                got = fn()
+                if got:
+                    return tuple(sorted(str(x) for x in got))
+        val = getattr(DDGS, "BACKENDS", None)
+        if val:
+            return tuple(sorted(str(x) for x in val))
+    except Exception:
+        pass
+    return ()
+
+
+def select_ddg_backend(order=None) -> tuple:
+    """选一个 ddgs 备后端，返回 `(后端名, 依据)`，依据 ∈ registry / policy / none。
+
+    - `registry`：策略清单 ∩ 注册表命中——可用性已核实，可以打；
+    - `policy`：注册表读不到（版本未知），按清单顺序取首个，**未核实**；
+    - `none`：注册表可读但清单里的后端一个都不在（引擎改名/停用）——返回空名，
+      调用方**不发请求**：任何无效名字都会触发 ddgs 的静默 auto 重扫。
+
+    空名不等于"搜索不可用"：主通道（Bing HTML）与结构化源不受影响，只是不再拿
+    ddgs 当备后端，调用方据此给出可操作提示（可用清单随 `ddg_text_backends()`）。
+    """
+    wanted = tuple(order) if order else tuple(current_policy().engines or DDG_ENGINES)
+    available = ddg_text_backends()
+    if not available:
+        return (str(wanted[0]), "policy") if wanted else ("", "none")
+    for name in wanted:
+        if str(name) in available:
+            return str(name), "registry"
+    return "", "none"
 
 # 调研类目标追加的机构定向域名（原先写死在 worker_base 的查询变体里）
 RESEARCH_DOMAINS = (

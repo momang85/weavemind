@@ -1322,6 +1322,56 @@ class TestDispatchContractRetry(unittest.TestCase):
         self.assertEqual(res["status"], "FAILED")
         self.assertTrue(res.get("contract_violation"))
 
+    def test_search_retry_carries_structured_new_queries(self):
+        """S1 补查重试：搜索重试要真的换查询——由契约生成下一批，而不是只加一句提示。"""
+        import orchestrator_v2 as ov2
+        from execution_contract import ExecutionContract, RETRY_MARK
+
+        o = self._make_o()
+        o._task_contracts = {"t-sq-plan": ExecutionContract(
+            company="洋河股份", company_id="002304.SZ", market="A股",
+            periods=(2024,), as_of="2025-04-30")}
+        instrs = []
+
+        def dispatch(step, task_id):
+            instrs.append(step.get("instruction", ""))
+            return {"task_id": step["step_id"], "status": "FAILED", "result": "无结果"}
+
+        o._dispatch = dispatch
+        o._replan_step = lambda goal, step, error, task_id: None
+        step = {"step_id": "1", "capability": "web_search",
+                "instruction": "检索洋河股份年度报告", "timeout": 60}
+        with mock.patch.object(ov2.time, "sleep"):
+            res = o._dispatch_step_safe("调研洋河股份 2024 年度报告", step, "t-sq-plan",
+                                        {"replan_used": 0})
+        self.assertEqual(res["status"], "FAILED")
+        self.assertEqual(len(instrs), 2, "失败后必须重试一次")
+        self.assertNotIn(RETRY_MARK, instrs[0])
+        self.assertIn(RETRY_MARK, instrs[1])
+        self.assertIn("经营情况讨论与分析", instrs[1])
+        self.assertIn("2024年年度报告", instrs[1])
+
+    def test_search_retry_without_contract_says_no_plan(self):
+        """没有契约就不假装有换词方案（也不许换契约外主体/期间）。"""
+        import orchestrator_v2 as ov2
+        from execution_contract import RETRY_MARK
+
+        o = self._make_o()
+        instrs = []
+
+        def dispatch(step, task_id):
+            instrs.append(step.get("instruction", ""))
+            return {"task_id": step["step_id"], "status": "FAILED", "result": "无结果"}
+
+        o._dispatch = dispatch
+        o._replan_step = lambda goal, step, error, task_id: None
+        step = {"step_id": "1", "capability": "web_search",
+                "instruction": "检索", "timeout": 60}
+        with mock.patch.object(ov2.time, "sleep"):
+            o._dispatch_step_safe("调研某公司年度报告", step, "t-sq-none", {"replan_used": 0})
+        self.assertNotIn(RETRY_MARK, instrs[1])
+        self.assertIn("没有可用的新查询", instrs[1])
+
     def test_search_irrelevant_triggers_retry_with_market_query(self):
         import orchestrator_v2 as ov2
 

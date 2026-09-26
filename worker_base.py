@@ -839,8 +839,13 @@ class SearchAgent(BaseWorker):
     # 生成 `[检索查询] …`，检索只按它构造变体——整段任务要求（含样板句）扔给检索器会
     # 让引擎大面积无结果、候选里没有年报正文（实机 ui-750185076a）。
 
-    def _search_budget(self):
-        """任务级检索预算：总墙钟与提供方调用次数共用同一条截止线（专项 §5）。"""
+    def _search_budget(self, allowance: int | None = None, wall_left: float | None = None):
+        """任务级检索预算：总墙钟与提供方调用次数共用同一条截止线（专项 §5）。
+
+        `allowance` / `wall_left` 由任务级台账（`_search_ledger`）给出余额：编排器的重试是
+        **新派发**，各给一份默认额度会把一个任务的总调用量放大成"重试次数 × 6"。台账在
+        Redis 上按任务累计，因此重试只拿到余额；余额为 0 时调用方直接不发请求。
+        """
         from adapters.search_runner import (
             DEFAULT_DEADLINE_SECONDS, DEFAULT_MAX_CALLS, SearchBudget)
         try:
@@ -852,33 +857,106 @@ class SearchAgent(BaseWorker):
             calls = int(os.environ.get("WM_SEARCH_MAX_CALLS", "") or DEFAULT_MAX_CALLS)
         except Exception:
             calls = DEFAULT_MAX_CALLS
+        if allowance is not None:
+            calls = min(calls, int(allowance))
+        if wall_left is not None:
+            secs = min(secs, max(0.1, float(wall_left)))
         return SearchBudget(max_calls=calls, deadline_seconds=secs)
 
-    def _available_backends(self) -> tuple:
-        """ddgs 实际可用后端 ∩ 策略引擎清单，保持策略顺序。
+    # ── 任务级检索台账（跨派发共享；只记次数与首次检索时刻）──────────────────
+    _SEARCH_LEDGER_FIELD_USED = "used"
+    _SEARCH_LEDGER_FIELD_STARTED = "started"
+    _SEARCH_LEDGER_TTL = 7200
 
-        为什么必须取交集：包内 ddgs 9.16 已不含 yandex，而策略清单首位就是它——
-        照着清单打会先白等几十秒才失败（S0 实测 32 秒）。
+    def _search_ledger_key(self) -> str:
+        ctx = getattr(self, "_current_ctx", None)
+        task_id = str(getattr(ctx, "root_task_id", "") or "") or str(
+            getattr(ctx, "dispatch_id", "") or "")
+        return f"search_ledger:{task_id}" if task_id else ""
+
+    def _search_ledger(self) -> tuple[int, float]:
+        """(本任务已用的检索调用次数, 首次检索的时刻)；读不到按 (0, 0.0) 处理。
+
+        读不到不等于"没花过"——那是"不知道"，所以台账读失败时只降级为"按默认额度走"
+        （与旧行为一致），不会伪造出"余额充足"以外的结论。
         """
-        advertised: tuple = ()
+        key = self._search_ledger_key()
+        if not key:
+            return 0, 0.0
         try:
-            from ddgs import DDGS
-            for attr in ("get_available_backends", "available_backends"):
-                fn = getattr(DDGS, attr, None)
-                if callable(fn):
-                    got = fn()
-                    if got:
-                        advertised = tuple(str(x) for x in got)
-                        break
-            if not advertised:
-                val = getattr(DDGS, "BACKENDS", None)
-                advertised = tuple(str(x) for x in val) if val else ()
+            raw = self._messaging._redis.hgetall(key) or {}
+
+            def _pick(field: str):
+                # Redis 客户端可能给 bytes 键（未开 decode_responses），两种都认
+                for k, v in (raw.items() if isinstance(raw, dict) else ()):
+                    if str(k).endswith(field):
+                        try:
+                            return int(v)
+                        except (TypeError, ValueError):
+                            return float(v)
+                return None
+
+            if isinstance(raw, dict):
+                return int(_pick(self._SEARCH_LEDGER_FIELD_USED) or 0), float(
+                    _pick(self._SEARCH_LEDGER_FIELD_STARTED) or 0)
+        except Exception as exc:                     # noqa: BLE001
+            logger.warning("检索台账读取失败（按默认额度继续）：%s", str(exc)[:120])
+        return 0, 0.0
+
+    def _record_search_ledger(self, used: int) -> None:
+        """把本次派发实际发出的调用次数记进任务台账（best-effort，失败只记日志）。"""
+        key = self._search_ledger_key()
+        if not key or used <= 0:
+            return
+        try:
+            r = self._messaging._redis
+            r.hincrby(key, self._SEARCH_LEDGER_FIELD_USED, int(used))
+            r.hsetnx(key, self._SEARCH_LEDGER_FIELD_STARTED, time.time())
+            r.expire(key, self._SEARCH_LEDGER_TTL)
+        except Exception as exc:                     # noqa: BLE001
+            logger.warning("检索台账写入失败（不阻塞检索）：%s", str(exc)[:120])
+
+    def _search_allowance(self) -> tuple[int, float]:
+        """本次派发可用的 (调用次数余额, 墙钟余额秒)：任务级上限 − 前序派发已用。"""
+        from adapters.search_runner import (
+            DEFAULT_DEADLINE_SECONDS, DEFAULT_MAX_CALLS)
+        try:
+            total_calls = int(os.environ.get("WM_SEARCH_MAX_CALLS", "")
+                              or DEFAULT_MAX_CALLS)
         except Exception:
-            advertised = ()
-        wanted = tuple(_ddg_engines())
-        if not advertised:
-            return wanted
-        return tuple(e for e in wanted if e in advertised)
+            total_calls = DEFAULT_MAX_CALLS
+        try:
+            total_secs = float(os.environ.get("WM_SEARCH_DEADLINE_SECONDS", "")
+                               or DEFAULT_DEADLINE_SECONDS)
+        except Exception:
+            total_secs = DEFAULT_DEADLINE_SECONDS
+        used, started = self._search_ledger()
+        left_calls = max(0, total_calls - int(used))
+        left_secs = total_secs
+        if started:
+            left_secs = max(0.0, total_secs - max(0.0, time.time() - started))
+        return left_calls, left_secs
+
+    def _ddg_backend(self) -> tuple:
+        """`(ddgs 备后端名, 依据)`：registry=已核实可用；policy=注册表读不到（未核实）；
+        none=清单里的后端在当前 ddgs 版本里一个都没启用——返回空名，**不发请求**。
+
+        为什么不能照清单直接打：ddgs 的 `_get_engines` 遇到不在注册表里的后端名会
+        静默回落 auto（全引擎重扫）。包内实测 `backend="yandex"`（9.16 已停用）
+        白等 32 秒才 ConnectError，正是这条回落路径。
+        """
+        from adapters.search_quality import ddg_text_backends, select_ddg_backend
+
+        name, basis = select_ddg_backend(_ddg_engines())
+        if not name:
+            logger.warning(
+                "no policy ddgs backend enabled in this ddgs build (%s); "
+                "ddgs left out of this task's search providers",
+                ",".join(ddg_text_backends()) or "registry unreadable",
+            )
+        elif basis == "policy":
+            logger.warning("ddgs backend registry unreadable; using %r unverified", name)
+        return name, basis
 
     def _provider_specs(self) -> list:
         """提供方规格：Bing 主 + ddgs 单备后端（都是显式单一后端，从不 auto）。
@@ -887,9 +965,9 @@ class SearchAgent(BaseWorker):
         出结果、而包内清单首位引擎已失效。因此把实践证明可用的排在前面，且只带一个备后端。
         """
         specs = [{"provider": "bing", "backend": "www.bing.com"}]
-        backends = self._available_backends()
-        if backends:
-            specs.append({"provider": "ddgs", "backend": backends[0]})
+        name, _basis = self._ddg_backend()
+        if name:
+            specs.append({"provider": "ddgs", "backend": name})
         # 冷却中的提供方跳过（跨任务的健康记忆；真零结果不进冷却，见 _mark_engine 调用处）
         return [s for s in specs
                 if _engine_healthy("bing" if s["provider"] == "bing" else "ddg")]
@@ -924,13 +1002,19 @@ class SearchAgent(BaseWorker):
         """
         from adapters.search_runner import run_search
         self._load_active_strategy()
+        # 任务级台账：重试/重做派发只拿余额（专项 §5"任务持有一次检索预算，贯穿编排重试"）
+        left_calls, left_secs = self._search_allowance()
+        if left_calls <= 0 or left_secs <= 0:
+            logger.warning("任务级检索预算已用完（余额 %d 次 / %.0f 秒），本次不发请求",
+                           left_calls, left_secs)
+            return json.dumps([])
         variants = self._query_variants(instruction) or [instruction[:120]]
         specs = self._provider_specs()
         if not specs:
             # 全部提供方都在冷却期：不发新请求（没有新条件就不重复同类尝试，专项 §5）
             logger.warning("all search providers cooling down; no request issued")
             return json.dumps([])
-        budget = self._search_budget()
+        budget = self._search_budget(allowance=left_calls, wall_left=left_secs)
         max_results = max(1, int(self._strategy_max_sources))
         collected: list = []
 
@@ -939,9 +1023,18 @@ class SearchAgent(BaseWorker):
             if provider == "bing":
                 return self._search_bing(q)
             from ddgs import DDGS
-            with DDGS(timeout=max(3.0, min(float(wait), 8.0))) as ddgs:
-                rows = list(ddgs.text(q, backend=backend,
-                                      max_results=max_results * 2))
+            from adapters.search_runner import is_empty_result_error
+            try:
+                with DDGS(timeout=max(3.0, min(float(wait), 8.0))) as ddgs:
+                    rows = list(ddgs.text(q, backend=backend,
+                                          max_results=max_results * 2))
+            except Exception as exc:  # noqa: BLE001
+                # "No results found." = 引擎跑完但零命中，不是后端故障：
+                # 当异常抛出去会被记成 parse_error 并熔断（专项 §5）
+                if is_empty_result_error(exc):
+                    logger.info("ddgs %s：查询完成但零命中（不熔断）", backend)
+                    return []
+                raise
             out: list = []
             for r in rows:
                 if not isinstance(r, dict):
@@ -962,37 +1055,83 @@ class SearchAgent(BaseWorker):
         outcome = run_search(variants, call_provider=_invoke, providers=specs,
                              budget=budget, max_results=max_results * 2)
         _add(outcome.items)
-        # 引擎健康：单变体异常不得把引擎标成健康（旧实现探测异常没同步置 error）
-        for spec in specs:
-            name = "bing" if spec["provider"] == "bing" else "ddg"
-            err = outcome.errors.get(spec["provider"])
-            got = bool(collected) if spec["provider"] == "bing" else any(
-                str(it.get("engine") or "").startswith("duckduckgo") for it in collected)
-            _mark_engine(name, bool(got) or not err)
+        passes = [outcome]
         logger.info("search outcome: %s", json.dumps(outcome.as_dict(), ensure_ascii=False))
 
         out = self._emit_payload(instruction, collected)
         if out:
-            return out
-        # 有界重试：只对暂时性失败退避一次，且必须还有剩余预算（不换关键词硬刷）
-        if outcome.retryable and not budget.expired():
+            return self._finish_search(out, specs, collected, passes, budget)
+        # 第二次尝试的**唯一**理由是"有还没打过的查询"。契约在时由契约生成结构化下一批
+        # （主体/期间/文档类型/截止不变，只换资料面），并排除已打出去的 (提供方,后端,查询)
+        # 组合——专项 §5："契约存在时不能再次提交相同 query/provider 组合"。无契约时沿用
+        # 旧行为：只有暂时性失败才退避重打一次。
+        contract = getattr(self, "_contract", None)
+        retry_variants = self._retry_variants(contract, outcome)
+        if retry_variants and not budget.expired():
+            logger.warning("Search empty (%s); retrying with %d structured new queries",
+                           outcome.status, len(retry_variants))
+            outcome2 = run_search(retry_variants, call_provider=_invoke, providers=specs,
+                                  budget=budget, max_results=max_results * 2,
+                                  exclude_keys=outcome.tried_keys)
+            _add(outcome2.items)
+            passes.append(outcome2)
+            logger.info("search retry outcome: %s",
+                        json.dumps(outcome2.as_dict(), ensure_ascii=False))
+            out = self._emit_payload(instruction, collected)
+            if out:
+                return self._finish_search(out, specs, collected, passes, budget)
+        elif contract is None and outcome.retryable and not budget.expired():
             logger.warning("Search transient failure (%s); one bounded retry after %.0fs",
                            outcome.status, _SEARCH_RETRY_BACKOFF)
             time.sleep(min(_SEARCH_RETRY_BACKOFF, max(0.0, budget.time_left())))
             if not budget.expired():
                 outcome2 = run_search(variants, call_provider=_invoke, providers=specs,
-                                      budget=budget, max_results=max_results * 2)
+                                      budget=budget, max_results=max_results * 2,
+                                      exclude_keys=outcome.tried_keys)
                 _add(outcome2.items)
+                passes.append(outcome2)
                 logger.info("search retry outcome: %s",
                             json.dumps(outcome2.as_dict(), ensure_ascii=False))
                 out = self._emit_payload(instruction, collected)
                 if out:
-                    return out
+                    return self._finish_search(out, specs, collected, passes, budget)
         # 全部失败/无结果：诚实返回空列表（不再用 Mock 假数据）。
         # 空列表会被输出契约标记 → 编排器据此判定本步无可用来源（不再拖下游）。
         logger.warning("Search empty (%s); engine health: %s",
                        outcome.status, get_engine_health())
-        return json.dumps([])
+        return self._finish_search(json.dumps([]), specs, collected, passes, budget)
+
+    def _finish_search(self, payload, specs, collected, passes, budget):
+        """检索收尾：引擎健康 + 任务级台账（本次派发实际发出去几次）。"""
+        self._mark_search_health(specs, collected, passes)
+        self._record_search_ledger(budget.used)
+        return payload
+
+    def _retry_variants(self, contract, outcome) -> list:
+        """下一批查询：契约生成的结构化重试计划；无契约返回空（不改查询纪律）。"""
+        if contract is None:
+            return []
+        try:
+            tried = sorted({str(q) for (_p, _b, q) in (outcome.tried_keys or ())})
+            return list(contract.retry_queries(tried=tried))
+        except Exception as exc:                     # noqa: BLE001
+            logger.warning("结构化重试查询生成失败，按无重试处理：%s", str(exc)[:140])
+            return []
+
+    def _mark_search_health(self, specs, collected, passes) -> None:
+        """引擎健康：任一轮成功即算可用；"每轮都失败"才记失败。
+
+        为什么不能在首轮就判：单变体异常不得把引擎标成健康，但**真零结果也不得熔断**——
+        零命中在 `run_search` 里是"完成"，不进错误表，所以这里只看错误表与产出。
+        """
+        for spec in specs:
+            name = "bing" if spec["provider"] == "bing" else "ddg"
+            errs = [p.errors.get(spec["provider"]) for p in passes
+                    if p.errors.get(spec["provider"])]
+            got = bool(collected) if spec["provider"] == "bing" else any(
+                str(it.get("engine") or "").startswith("duckduckgo") for it in collected)
+            _mark_engine(name, bool(got) or not errs)
+
 
     def _query_variants(self, instruction: str) -> list[str]:
         """生成多个查询变体（关键词组合优先 + 整句 + 定向模板 + 中英混合）。
@@ -1007,6 +1146,10 @@ class SearchAgent(BaseWorker):
         2. 指令里的 `[检索查询] …` 行（旧路径兼容）；
         3. 整段指令（兜底，仅在两者都没有时）。
 
+        **例外**：指令里带 `[重试检索查询] …` 行时只打这一批（S1 补查重试）：那是编排器
+        按同一契约生成的**结构化下一批**（换资料面，不动主体/期间/截止），回落到上一批
+        已证明打不出结果的查询就等于原地重试。
+
         变体里出现契约外期间（如 2025三季报/2026）时**直接剔除**并记日志：那是
         历史提示/技能教训混进来的串，送给引擎只会污染候选（实机 ui-706c5ef4a5）。
         """
@@ -1014,8 +1157,14 @@ class SearchAgent(BaseWorker):
         import re as _re
         pol = self._search_policy()
         contract = getattr(self, "_contract", None)
+        text = str(instruction or "")
+        retry_lines = [q.strip() for q in _re.findall(r"\[重试检索查询\]\s*(.+)", text)]
+        retry_lines = [q for q in retry_lines if q]
         sources: list[str] = []
-        if contract is not None:
+        if retry_lines:
+            logger.info("采用结构化重试查询 %d 条（上一批已证明无结果）", len(retry_lines))
+            sources = retry_lines
+        elif contract is not None:
             try:
                 sources = [q for q in contract.queries() if q]
             except Exception as exc:                 # noqa: BLE001 - 契约异常退回文本路径
@@ -1023,10 +1172,10 @@ class SearchAgent(BaseWorker):
                 sources = []
         m = None
         if not sources:
-            m = _re.search(r"\[检索查询\]\s*(.+)", str(instruction or ""))
+            m = _re.search(r"\[检索查询\]\s*(.+)", text)
             sources = [m.group(1).strip()] if (m and m.group(1).strip()) else []
         if not sources:
-            sources = [str(instruction or "")[:120]]
+            sources = [text[:120]]
 
         out: list[str] = []
         for src in sources:

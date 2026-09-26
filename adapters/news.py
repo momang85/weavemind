@@ -77,8 +77,8 @@ def fetch_news(query: str) -> dict | None:
 def fetch_news_fallback(query: str, max_results: int = 6) -> dict | None:
     """通用文本检索兜底（境内网络下 Google News RSS 常不可达）。
 
-    走 adapters.text_search.web_text_search：Bing HTML → ddgs 逐引擎探测
-    （yandex 等境内可达引擎优先）。返回与 fetch_news 同构的
+    走 adapters.text_search.web_text_search：Bing HTML 主 + 一个有界 ddgs 备后端
+    （后端 = 策略清单 ∩ ddgs 注册表实际启用）。返回与 fetch_news 同构的
     {source, query, items[{title, link, published}], metadata}，source 如实
     标注实际引擎；失败返回 None（调用方诚实降级为 model_knowledge）。
     """

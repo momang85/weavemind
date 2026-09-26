@@ -119,6 +119,11 @@ def classify_error(exc: BaseException) -> str:
         return "policy_blocked"
     if "challenge" in text or "captcha" in text:
         return "challenge"
+    # "查询完成了但一条也没找到"不是故障（专项 §4：必须能与"没完成查询"分开）。
+    # ddgs 在引擎跑完且无结果时抛 `DDGSException("No results found.")`；包内实测
+    # `backend=brave` 8 秒后正是这条——按 parse_error 记会把它当后端故障误熔断。
+    if "no results found" in text or "no result" in text:
+        return "no_results"
     return "parse_error"
 
 
@@ -275,34 +280,47 @@ def probe_search_html(budget: Budget) -> dict:
 
 
 def probe_search_sdk(budget: Budget) -> dict:
-    """搜索通道②：DDGS SDK（**单后端、单次调用**，固定健康查询；不 auto 全扫、不走多引擎阶梯）。
+    """搜索通道②：DDGS SDK（**单后端、单次调用**，固定健康查询；不 auto 全扫）。
 
-    为什么直接调 SDK 而不是 `text_search._search_ddg`：后者内部是"逐个引擎试到有结果"的阶梯
-    （包内实测一次调用 90 秒），会把诊断自己的 60 秒预算冲穿，也复现了要收敛的那个放大模式。
-    这里只打一个后端、一次调用，并如实标注 ddgs 隐藏的 HTTP 次数。
+    为什么直接调 SDK 而不是 `text_search._search_ddg`：探测要**固定**一个后端看清它自己的
+    耗时与错误，而生产路径会按预算在有界执行器里选提供方。这里只打一个后端、一次调用，
+    并如实标注 ddgs 隐藏的 HTTP 次数。
     """
     t0 = time.monotonic()
     try:
         from adapters import text_search
-        engines = tuple(getattr(text_search, "_DDG_ENGINES", ()) or ())
+        # 与生产同源：S1 之后 worker 与轻量路径都用"策略清单 ∩ ddgs 注册表实际启用"的首个后端，
+        # 不用清单首位——包内 9.16 已停用 yandex，打无效名字会让 ddgs 静默回落 auto 全扫
+        engine = text_search._first_available_engine()
+        advertised = _advertised_backends()
+        basis = _backend_basis()
+        watch = {"advertised": advertised, "basis": basis}
     except Exception as exc:
         return _probe_record("search_sdk", status=classify_error(exc), provider="ddgs",
                              reason=str(exc), elapsed=time.monotonic() - t0,
                              http_unknown=True)
-    engine = engines[0] if engines else ""
+    if not engine:
+        return _probe_record("search_sdk", status="not_configured", provider="ddgs",
+                             reason="策略清单在当前 ddgs 版本里没有启用的后端"
+                                    f"（实际启用：{','.join(advertised) or '注册表读不到'}）；"
+                                    "不发请求（无效后端名会触发 auto 全扫）",
+                             elapsed=time.monotonic() - t0, http_unknown=True,
+                             extra=watch)
     try:
         budget.take()
     except RuntimeError as exc:
         return _probe_record("search_sdk", status="not_configured", provider="ddgs",
                              backend=engine, reason=str(exc),
-                             elapsed=time.monotonic() - t0, http_unknown=True)
+                             elapsed=time.monotonic() - t0, http_unknown=True,
+                             extra=watch)
     wait = max(3.0, min(budget.time_left(), 8.0))
     try:
         from ddgs import DDGS
     except Exception as exc:
         return _probe_record("search_sdk", status="missing_dependency", provider="ddgs",
                              backend=engine, reason=str(exc),
-                             elapsed=time.monotonic() - t0, http_unknown=True)
+                             elapsed=time.monotonic() - t0, http_unknown=True,
+                             extra=watch)
     try:
         with DDGS(timeout=wait) as ddgs:
             results = list(ddgs.text(PUBLIC_SAMPLE, backend=engine, max_results=5))
@@ -311,14 +329,36 @@ def probe_search_sdk(budget: Budget) -> dict:
         rec = _probe_record("search_sdk", status="ok" if n else "no_results",
                             provider="ddgs", backend=engine, items=n, elapsed=elapsed,
                             http_unknown=True,
-                            reason="" if n else "SDK returned zero items")
+                            reason="" if n else "SDK returned zero items",
+                            extra=watch)
         return _budget_check(rec, budget, elapsed)
     except Exception as exc:
         elapsed = time.monotonic() - t0
         rec = _probe_record("search_sdk", status=classify_error(exc), provider="ddgs",
                             backend=engine, reason=str(exc), elapsed=elapsed,
-                            http_unknown=True)
+                            http_unknown=True, extra=watch)
         return _budget_check(rec, budget, elapsed)
+
+
+def _advertised_backends() -> list:
+    """ddgs 当前版本真正启用的 text 后端（读 `ddgs.engines.ENGINES` 注册表，不发请求）。"""
+    try:
+        from adapters.search_quality import ddg_text_backends
+
+        return list(ddg_text_backends())
+    except Exception:
+        return []
+
+
+def _backend_basis() -> str:
+    """生产选择后端的依据：registry（已核实）/ policy（注册表读不到，未核实）/ none。"""
+    try:
+        from adapters import text_search  # noqa: F401  (确认生产模块可导入)
+        from adapters.search_quality import select_ddg_backend
+
+        return str(select_ddg_backend()[1])
+    except Exception:
+        return "unknown"
 
 
 def probe_structured(budget: Budget) -> dict:

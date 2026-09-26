@@ -45,6 +45,7 @@ class SearchOutcome:
     backend: str = ""
     errors: dict = field(default_factory=dict)      # provider -> 错误类别（首次/最严重）
     queries_tried: list = field(default_factory=list)
+    tried_keys: set = field(default_factory=set)    # 本轮**已打出去**的 (提供方,后端,查询)
 
     def to_legacy_items(self) -> list:
         """兼容层：旧输出契约是 JSON 数组（`[{title,url,snippet}...]`）。"""
@@ -57,7 +58,9 @@ class SearchOutcome:
             "reason": self.reason, "retryable": self.retryable,
             "provider": self.provider, "backend": self.backend,
             "errors": dict(self.errors), "queries_tried": list(self.queries_tried),
+            "submitted": len(self.tried_keys or ()),
         }
+
 
 
 class SearchBudget:
@@ -105,6 +108,17 @@ def _classify(exc: BaseException) -> str:
 # 可重试类别：暂时性失败才允许一次退避重试（遵守截止，不换关键词硬刷）
 RETRYABLE = ("timeout", "dns_error", "proxy_error", "rate_limited")
 
+# ddgs 在"引擎跑完了但一条也没找到"时也抛异常（`DDGSException("No results found.")`）。
+# 那不是提供方故障：调用方应把它当**完成但零命中**（返回空列表），否则真零结果会被
+# 记成 parse_error，进而被当作后端故障熔断——专项 §5 明确要求"真零结果不熔断"。
+_EMPTY_RESULT_MARKERS = ("no results found", "no result found")
+
+
+def is_empty_result_error(exc: BaseException) -> bool:
+    """该异常是否只表示"查询完成、零命中"（而不是没完成查询）。"""
+    text = f"{type(exc).__name__}: {exc}".lower()
+    return any(m in text for m in _EMPTY_RESULT_MARKERS)
+
 
 def dedupe_queries(queries) -> list[str]:
     """查询去重（保持顺序、去空白、去完全相同项）。"""
@@ -126,12 +140,17 @@ def run_search(
     budget: SearchBudget | None = None,
     max_results: int = 6,
     enough: int = 3,
+    exclude_keys=(),
 ) -> SearchOutcome:
     """按预算跑一轮检索。
 
     `call_provider(provider, backend, query, wait) -> list[dict]` 由调用方注入
     （worker 注入 ddgs/Bing 的真实调用；测试注入替身）。**不传 backend=None**：
     每个提供方只用显式指定的单一后端，避免 auto 全引擎串行。
+
+    `exclude_keys`：**已经打出去过**的 `(提供方, 后端, 查询)` 组合（取自上一轮
+    `outcome.tried_keys`）。任务内的重试因此不可能把同一组合再提交一次——专项 §5
+    "契约存在时不能再次提交相同 query/provider 组合"。
     """
     budget = budget or SearchBudget()
     outcome = SearchOutcome(provider=providers[0].get("provider", "") if providers else "",
@@ -140,7 +159,8 @@ def run_search(
     queries = dedupe_queries(queries)
     collected: list[dict] = []
     seen_urls: set[str] = set()
-    tried: set[tuple[str, str, str]] = set()
+    tried: set[tuple[str, str, str]] = set(exclude_keys or ())
+    submitted: set[tuple[str, str, str]] = set()
     any_call_ok = False
     dominant_error = ""
 
@@ -151,7 +171,6 @@ def run_search(
             key = (provider, backend, query)
             if key in tried:
                 continue                      # 去重：同 (查询,后端) 不重复提交
-            tried.add(key)
             if budget.expired():
                 outcome.reason = "检索预算用尽（到点或到次数），停止继续尝试"
                 break
@@ -159,6 +178,8 @@ def run_search(
                 wait = budget.take()
             except RuntimeError:
                 break
+            tried.add(key)
+            submitted.add(key)
             outcome.attempts += 1
             outcome.queries_tried.append(query)
             try:
@@ -166,6 +187,10 @@ def run_search(
                 any_call_ok = True
             except Exception as exc:           # noqa: BLE001 - 单提供方失败不终止整轮
                 cls = _classify(exc)
+                if cls == "no_results":
+                    # 查询完成但零命中：记"完成"，不进错误表（否则真零结果会被熔断）
+                    any_call_ok = True
+                    continue
                 outcome.errors.setdefault(provider, cls)
                 dominant_error = dominant_error or cls
                 if cls in RETRYABLE:
@@ -183,7 +208,9 @@ def run_search(
         if len(collected) >= max_results or budget.expired():
             break
 
+    outcome.tried_keys = submitted
     outcome.items = collected[:max_results]
+
     outcome.elapsed = time.monotonic() - t0
     if collected:
         outcome.status = "ok" if len(collected) >= enough else "partial"

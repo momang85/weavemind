@@ -5,8 +5,7 @@ Google News RSS 在境内网络不可达，ddgs 的 auto 后端又会串行尝�
 （yahoo/wikipedia 等常超时，单个查询白等数十秒）。本模块提供轻量检索链：
 
 1. Bing HTML（无 API Key，实测境内可达且快）；
-2. ddgs 按引擎顺序探测（yandex 等境内可达引擎优先），首个出结果的引擎
-   即收敛，不白等已知死引擎；
+2. ddgs **单后端单次**调用（后端 = 策略清单 ∩ ddgs 实际启用的注册表，S1）；
 3. 全部失败返回空列表（调用方诚实降级为 model_knowledge）。
 
 与 worker_base.SearchAgent 的检索链同源思路，但独立轻量实现——不引入
@@ -36,11 +35,6 @@ _BING_BLOCK_RE = re.compile(r'<li class="b_algo".*?</li>', re.S)
 # 检索仅允许固定外网主机（Bing 搜索页），查询词只作为参数编码进 URL，
 # 杜绝用户输入影响请求目标主机（SSRF 防御：协议 + 主机双白名单）。
 _ALLOWED_FETCH_HOSTS = ("www.bing.com",)
-# 引擎探测顺序：境内可达（yandex）优先，其余按通用可用性排序
-_DDG_ENGINES = (
-    "yandex", "brave", "duckduckgo", "mojeek", "startpage",
-    "yahoo", "google", "wikipedia", "grokipedia",
-)
 
 
 def _fetch_bing_html(query: str) -> str:
@@ -101,32 +95,23 @@ def _search_bing(query: str, max_results: int) -> list[dict]:
 
 
 def _first_available_engine() -> str:
-    """策略清单 ∩ ddgs 实际可用后端的第一个（读库不发请求）。
+    """与 worker 同源的后端选择：策略清单 ∩ ddgs 实际启用的注册表（只读库，不发请求）。
 
-    包内 ddgs 9.16 已不含 yandex，而清单首位就是它——照清单打会先白等几十秒（S0 实测）。
+    S0 实测：包内 ddgs 9.16 已停用 yandex，而旧清单首位就是它——照清单打不只是白等
+    32 秒，而是**静默回落 auto**（全引擎重扫，专项 §5 禁止）。这里的返回值是
+    "可以安全打出去的后端名"，拿不到就返回空串让调用方**不发请求**。
     """
-    advertised: tuple = ()
-    try:
-        from ddgs import DDGS
-        for attr in ("get_available_backends", "available_backends"):
-            fn = getattr(DDGS, attr, None)
-            if callable(fn):
-                got = fn()
-                if got:
-                    advertised = tuple(str(x) for x in got)
-                    break
-        if not advertised:
-            val = getattr(DDGS, "BACKENDS", None)
-            advertised = tuple(str(x) for x in val) if val else ()
-    except Exception:
-        advertised = ()
-    wanted = tuple(_DDG_ENGINES)
-    if not advertised:
-        return wanted[0] if wanted else ""
-    for eng in wanted:
-        if eng in advertised:
-            return eng
-    return ""
+    from adapters.search_quality import ddg_text_backends, select_ddg_backend
+
+    name, basis = select_ddg_backend()
+    if not name:
+        logger.warning(
+            "no policy ddgs backend enabled in this ddgs build (%s); skipping ddgs",
+            ",".join(ddg_text_backends()) or "registry unreadable",
+        )
+    elif basis == "policy":
+        logger.warning("ddgs backend registry unreadable; using %r unverified", name)
+    return name
 
 
 def _search_ddg(query: str, max_results: int, timeout: float) -> list[dict]:
@@ -134,10 +119,21 @@ def _search_ddg(query: str, max_results: int, timeout: float) -> list[dict]:
     from ddgs import DDGS
 
     engine = _first_available_engine()
+    if not engine:
+        # 空/未启用后端名会让 ddgs 静默回落 auto（全引擎重扫 32 秒+），宁可不发请求
+        return []
+    from adapters.search_runner import is_empty_result_error
     out: list[dict] = []
-    with DDGS(timeout=max(3.0, float(timeout))) as ddgs:
-        rows = list(ddgs.text(str(query or ""), backend=engine,
-                              max_results=max_results))
+    try:
+        with DDGS(timeout=max(3.0, float(timeout))) as ddgs:
+            rows = list(ddgs.text(str(query or ""), backend=engine,
+                                  max_results=max_results))
+    except Exception as exc:  # noqa: BLE001
+        if is_empty_result_error(exc):
+            logger.info("ddgs %s：查询完成但零命中（不是后端故障）", engine)
+            return []
+        raise
+
     for r in rows:
         if not isinstance(r, dict):
             continue
