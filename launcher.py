@@ -235,6 +235,34 @@ def _wait_redis_ready(timeout: float | None = None) -> bool:
         time.sleep(0.5)
 
 
+def _portable_redis_owned_here(port: int) -> bool:
+    """此刻监听在该端口上的 Redis，是不是**本实例启动的**那一个。
+
+    依据本实例自己的两条记录：`runtime_ports.json` 里的 redis 端口 + `.weavimind/redis.pid`
+    （我们启动便携 Redis 时写的 PID），并要求该 PID 此刻确为 redis-server 进程。
+    """
+    try:
+        saved = int(_read_runtime_ports().get("redis") or 0)
+    except Exception:
+        saved = 0
+    if saved != int(port):
+        return False
+    try:
+        import dep_check
+        pid = int(dep_check.REDIS_PID_FILE.read_text(encoding="utf-8").strip())
+    except Exception:
+        return False
+    if pid <= 0 or not _is_alive(pid):
+        return False
+    try:
+        import psutil
+        proc = psutil.Process(pid)
+        blob = f"{proc.name()} {' '.join(proc.cmdline() or [])}".lower()
+        return "redis-server" in blob
+    except Exception:
+        return False
+
+
 def _start_own_redis(port: int, reason: str = "") -> None:
     """启动**本实例自己的**便携 Redis（必要时让位到空闲端口），并把地址发布给子进程。
 
@@ -277,9 +305,17 @@ def _ensure_redis_available() -> None:
     if _redis_reachable(host, port):
         major = _redis_major(host, port)
         if major is None or major >= _redis_min_major():
-            return
-        reason = (f"端口 {port} 上的 Redis 主版本为 {major}，"
-                  f"低于本项目要求的 {_redis_min_major()}")
+            # 兼容且是本实例自己的 → 沿用；用户显式配置的外部 Redis → 尊重（已验证兼容）。
+            if explicit or _portable_redis_owned_here(port):
+                return
+            # 默认端口上跑着**别人的** Redis（另一个织光实例、系统服务、Docker 容器）：
+            # 绝不复用。共用一台 Redis = 共用 pub/sub 总线与任务队列，实测两个实例会
+            # 同时执行同一个任务，一个实例的余额不足还会把另一个实例的任务标成 FAILED。
+            reason = (f"端口 {port} 上的 Redis 不是本实例启动的（共用会让两个实例的"
+                      f"任务互相串台）")
+        else:
+            reason = (f"端口 {port} 上的 Redis 主版本为 {major}，"
+                      f"低于本项目要求的 {_redis_min_major()}")
     elif not _port_is_free(port):
         reason = f"端口 {port} 已被其它程序占用（该端口不是 Redis）"
     if not reason:
@@ -1372,6 +1408,15 @@ def runtime_identity() -> str:
     return "source:unknown"
 
 
+def _config_looks_placeholder(*values: str) -> bool:
+    """配置里是否还有模板占位符（YOUR_API_KEY 之类）——有就不算"已配置"。"""
+    try:
+        from setup_wizard import looks_placeholder
+    except Exception:
+        return False
+    return any(looks_placeholder(v) for v in values)
+
+
 def effective_config() -> dict:
     """在依赖/Redis 检查**之前**形成统一有效值（端口 / Redis 目标 / 数据库 / 配置状态）。
 
@@ -1395,7 +1440,10 @@ def effective_config() -> dict:
         "redis_host": host,
         "redis_port": rport,
         "db": os.environ.get("WEAVEMIND_DB") or str(BASE_DIR / "agents.db"),
-        "config_complete": bool(api_key and base_url and model),
+        # 占位符不算"已配置"（模板/示例里的 YOUR_API_KEY 之类），否则配置缺失会被
+        # 判成完整、首启引导不再出现，任务提交后才在鉴权上失败。
+        "config_complete": bool(api_key and base_url and model
+                                and not _config_looks_placeholder(api_key, base_url, model)),
         "model": model,
         "base_url": base_url,
         "frontend_dist": (BASE_DIR / "frontend" / "dist" / "index.html").exists(),

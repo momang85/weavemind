@@ -242,6 +242,43 @@ class TestInteractiveFlow(_Tmp):
         self.cfg_path.write_text(json.dumps({"redis": {"port": 6391}}), encoding="utf-8")
         self.assertEqual(w._base_config(self.cfg_path)["redis"]["port"], 6391)
 
+    def test_placeholder_config_is_not_complete(self):
+        """模板占位符不算"已配置"——否则首启引导会隐藏、任务提交后才鉴权失败。
+
+        为什么现在会碰到：config.json 缺失时配置回退到随包模板（config.example.json），
+        模板里的 api_key 就是 YOUR_API_KEY。
+        """
+        import web_ui
+        self.assertTrue(w.looks_placeholder("YOUR_API_KEY"))
+        self.assertTrue(w.looks_placeholder("https://your-endpoint.example/v1"))
+        self.assertFalse(w.looks_placeholder("sk-" + "a" * 24))
+        self.assertFalse(web_ui._llm_config_complete({
+            "llm": {"api_key": "YOUR_API_KEY", "base_url": "https://api.deepseek.com/v1",
+                    "model": "deepseek-chat"}}))
+        self.assertTrue(web_ui._llm_config_complete({
+            "llm": {"api_key": "sk-" + "a" * 24, "base_url": "https://api.deepseek.com/v1",
+                    "model": "deepseek-chat"}}))
+        self.assertFalse(web_ui._llm_config_complete({"llm": {}}))
+
+    def test_missing_config_falls_back_to_the_shipped_template(self):
+        """config.json 缺失时回退到随包模板，而不是硬编码 stub。
+
+        此前回退到 stub：运行包方式的新手实例丢了模板默认值——计划评审
+        （system.critic）被关掉、任务超时 90 秒、任务预算 0（=不限）。
+        """
+        import web_ui
+        tpl = self.cfg_path.parent / "config.example.json"
+        tpl.write_text(json.dumps({"llm": {"api_key": "YOUR_API_KEY"},
+                                   "system": {"critic": True, "task_timeout": 300}}),
+                       encoding="utf-8")
+        self.assertFalse(self.cfg_path.exists())
+        with mock.patch.object(web_ui, "CONFIG_PATH", str(self.cfg_path)), \
+                mock.patch.object(web_ui, "CONFIG_TEMPLATE_PATH", str(tpl)):
+            cfg = web_ui._load_config()
+        self.assertTrue((cfg.get("system") or {}).get("critic"),
+                        "缺 config.json 时应拿到模板里的产品默认值")
+        self.assertEqual((cfg.get("system") or {}).get("task_timeout"), 300)
+
     def test_bad_placeholder_key_is_asked_again(self):
         code, _ = self._run(f"1\n\nYOUR_API_KEY\n{KEY_B}\n\n2\n")
         self.assertEqual(code, 0)

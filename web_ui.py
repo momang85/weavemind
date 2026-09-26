@@ -36,6 +36,9 @@ REDIS_PORT = int(os.environ.get("REDIS_PORT", "6379"))
 DB_PATH = db_paths.resolve_db_path()
 PORT = int(os.environ.get("WEB_PORT", "8080"))
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
+# 随包模板：config.json 不存在时的回退来源（保证新手实例拿到产品默认值而不是空壳）
+CONFIG_TEMPLATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                    "config.example.json")
 PROJECT_DIR = os.path.join(tempfile.gettempdir(), "agent_workspace", "project")
 
 # 任务实时态**缓存**（非真源）：事实层由 task_history 投影提供
@@ -557,7 +560,40 @@ def _get_conversation(conv_id):
 def _load_config():
     try:
         with open(CONFIG_PATH,"r",encoding="utf-8") as f: return json.load(f)
-    except Exception: return {"llm":{"api_key":"","base_url":"","model":""},"redis":{"host":"localhost","port":6379},"system":{"task_timeout":90}}
+    except Exception:
+        pass
+    # config.json 不存在时回退到**随包模板**（config.example.json）：此前回退到一个
+    # 硬编码最小 stub，于是"运行包方式"的新手实例丢了模板里的产品默认值——
+    # 计划评审（system.critic）被关掉、任务超时 90 秒、任务预算 0（=不限），
+    # 与文档口径和源码方式（复制模板为 config.json）不一致。
+    try:
+        with open(CONFIG_TEMPLATE_PATH, "r", encoding="utf-8") as f:
+            tpl = json.load(f)
+        if isinstance(tpl, dict) and tpl:
+            return tpl
+    except Exception:
+        pass
+    return {"llm":{"api_key":"","base_url":"","model":""},"redis":{"host":"localhost","port":6379},"system":{"task_timeout":90}}
+
+def _llm_config_complete(cfg: dict) -> bool:
+    """llm 段是否真的填过（占位符不算）。
+
+    为什么需要单独一个函数：config.json 缺失时配置回退到随包模板，模板里
+    `api_key` 是 `YOUR_API_KEY` 这类占位符——只做非空判断会把"没配置"当成
+    "配置完整"，首启引导（N3）不再显示，用户提交任务后才在鉴权上失败。
+    """
+    llm = cfg.get("llm") if isinstance(cfg.get("llm"), dict) else {}
+    api_key = str(llm.get("api_key") or os.environ.get("LLM_API_KEY") or "").strip()
+    base_url = str(llm.get("base_url") or os.environ.get("LLM_BASE_URL") or "").strip()
+    model = str(llm.get("model") or os.environ.get("LLM_MODEL") or "").strip()
+    if not (api_key and base_url and model):
+        return False
+    try:
+        from setup_wizard import looks_placeholder
+    except Exception:
+        return True
+    return not any(looks_placeholder(v) for v in (api_key, base_url, model))
+
 
 def _save_config(cfg):
     # 与现有配置合并，避免前端表单未携带的段（如 embedding）被覆盖丢失
@@ -3793,12 +3829,7 @@ def _get_bootstrap(self, p):
         # 只暴露布尔状态：**不含**任何密钥、地址或模型名，公开接口不泄漏配置内容。
         info = {"setup_required": not _users_initialized()}
         try:
-            cfg = _load_config() or {}
-            llm = cfg.get("llm") if isinstance(cfg.get("llm"), dict) else {}
-            info["config_complete"] = bool(
-                str(llm.get("api_key") or os.environ.get("LLM_API_KEY") or "").strip()
-                and str(llm.get("base_url") or os.environ.get("LLM_BASE_URL") or "").strip()
-                and str(llm.get("model") or os.environ.get("LLM_MODEL") or "").strip())
+            info["config_complete"] = _llm_config_complete(_load_config() or {})
         except Exception:
             info["config_complete"] = False
         try:

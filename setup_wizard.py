@@ -66,6 +66,16 @@ def _looks_placeholder(value: str, example: str = "") -> bool:
     return any(h in low for h in _PLACEHOLDER_HINTS)
 
 
+def looks_placeholder(value: str, example: str = "") -> bool:
+    """公开入口：供 launcher/web_ui 判断"配置是否真的填过"（模板占位符不算填过）。
+
+    为什么需要：config.json 缺失时配置回退到模板，模板里 `llm.api_key` 是
+    `YOUR_API_KEY` 这类占位符——只做非空判断会把"没配置"当成"配置完整"，
+    于是首启引导不显示、任务提交后才在鉴权上失败。
+    """
+    return _looks_placeholder(value, example)
+
+
 def validate_base_url(url: str) -> tuple[bool, str]:
     """只接受 http/https 且带 host 的地址。"""
     from urllib.parse import urlparse

@@ -4,9 +4,10 @@
     "base_url": "https://api.siliconflow.cn/v1",
     "model": "deepseek-ai/DeepSeek-V3",
     "model_roles": {
-      "planner": "deepseek-chat",
-      "exec": "deepseek-v4-flash",
-      "judge": "deepseek-chat"
+      "_comment": "按用途分级路由（planner/exec/judge）。留空即跟随主模型——首次只选一个服务/模型时，角色必须与之一致，不能继承模板里、该端点可能并不提供的模型名；要分级再显式填。",
+      "planner": "",
+      "exec": "",
+      "judge": ""
     },
     "task_budget": {
       "_comment": "任务级 LLM 预算熔断：任一维度为 0 表示不限制。超限后该任务 LLM 调用抛错终止，防止失控任务无限烧配额。可用环境变量 LLM_TASK_BUDGET_CALLS / LLM_TASK_BUDGET_SECONDS / LLM_TASK_BUDGET_USD 覆盖。",
@@ -28,14 +29,16 @@
     "conversation_dedup_hours": 24
   },
   "planner": {
-    "model": "deepseek-ai/DeepSeek-V3",
-    "base_url": "https://api.siliconflow.cn/v1",
-    "api_key": "YOUR_PLANNER_API_KEY"
+    "_comment": "规划专用端点。留空即复用主端点——首次配置只填主端点时，这里不能留着模板里的其它厂商地址与占位密钥（否则规划/评审会打到不存在的端点）。",
+    "model": "",
+    "base_url": "",
+    "api_key": ""
   },
   "backup": {
-    "api_key": "YOUR_BACKUP_API_KEY",
-    "base_url": "https://api.siliconflow.cn/v1",
-    "model": "deepseek-ai/DeepSeek-V3"
+    "_comment": "备用端点：主端点连续失败或余额不足时自动切换。留空即无兜底。",
+    "api_key": "",
+    "base_url": "",
+    "model": ""
   },
   "users": {
     "admin": {

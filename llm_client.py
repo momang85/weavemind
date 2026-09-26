@@ -103,6 +103,15 @@ def get_task_context() -> str:
         return ""
 
 
+def _looks_like_placeholder(*values: str) -> bool:
+    """配置值里是否还有模板占位符（YOUR_API_KEY 之类）——有就不算"配过"。"""
+    try:
+        from setup_wizard import looks_placeholder
+    except Exception:
+        return False
+    return any(looks_placeholder(v) for v in values)
+
+
 def _apply_cfg_to_env() -> None:
     """把 config.json 的 llm/embedding/backup 段重新应用到 os.environ。
     修复"前端改端点，后端进程仍用旧端点"：各进程在调用前按 mtime 热重载。"""
@@ -119,11 +128,12 @@ def _apply_cfg_to_env() -> None:
         os.environ["LLM_BASE_URL"] = str(llm["base_url"])
     if llm.get("model"):
         os.environ["LLM_MODEL"] = str(llm["model"])
-    # B1：模型分级路由表（缺省回退 llm.model）
+    # B1：模型分级路由表（缺省回退 llm.model）。跳过 `_comment` 之类下划线开头的
+    # 说明键：它们不是角色，留在表里只会被当成"某个角色配了模型"。
     _MODEL_ROLES_CFG = {
         str(k): str(v)
         for k, v in (llm.get("model_roles") or {}).items()
-        if v
+        if v and not str(k).startswith("_")
     }
     emb = cfg.get("embedding") or {}
     if emb.get("api_key"):
@@ -133,14 +143,22 @@ def _apply_cfg_to_env() -> None:
     if emb.get("model"):
         os.environ["EMBEDDING_MODEL"] = str(emb["model"])
     b = cfg.get("backup") or {}
-    _BACKUP_CFG = dict(b) if b.get("base_url") and b.get("api_key") else {}
+    # 占位符不算"配了备用端点"：config.json 缺失时配置回退到随包模板，模板里 backup 段
+    # 是 YOUR_API_KEY 这类占位符——照旧当"已配置"会去探测它（设置页显示"备用 unauthorized"）
+    # 并在主端点失败时把请求路由到一个不存在的备用端点（白多一次失败请求）。
+    _BACKUP_CFG = dict(b) if (b.get("base_url") and b.get("api_key")
+                              and not _looks_like_placeholder(b.get("base_url"),
+                                                              b.get("api_key"))) else {}
     pl = cfg.get("planner") or {}
-    if pl.get("base_url"):
+    # 与 backup 同口径：占位符不算"配了规划专用端点"。config.json 缺失时配置回退到
+    # 随包模板，模板里 planner 段曾是别的厂商地址 + YOUR_PLANNER_API_KEY——照旧注入
+    # 环境变量会让规划/评审打到不存在的端点（实测评审因此降级为"系统不可用"）。
+    if (pl.get("base_url") and pl.get("api_key")
+            and not _looks_like_placeholder(pl.get("base_url"), pl.get("api_key"))):
         os.environ["PLANNER_LLM_BASE_URL"] = str(pl["base_url"])
-    if pl.get("api_key"):
         os.environ["PLANNER_LLM_API_KEY"] = str(pl["api_key"])
-    if pl.get("model"):
-        os.environ["PLANNER_LLM_MODEL"] = str(pl["model"])
+        if pl.get("model"):
+            os.environ["PLANNER_LLM_MODEL"] = str(pl["model"])
 
 
 def _ensure_cfg_fresh() -> None:
@@ -1550,7 +1568,7 @@ _LLM_CFG = _load_llm_config()
 _MODEL_ROLES_CFG = {
     str(k): str(v)
     for k, v in (_LLM_CFG.get("model_roles") or {}).items()
-    if v
+    if v and not str(k).startswith("_")
 }
 
 

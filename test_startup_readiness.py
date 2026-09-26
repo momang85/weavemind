@@ -432,6 +432,21 @@ class TestStartupController(unittest.TestCase):
             eff = launcher.effective_config()
         self.assertFalse(eff["config_complete"])
 
+    def test_effective_config_treats_placeholders_as_incomplete(self):
+        """模板占位符（YOUR_API_KEY 之类）不算配置完整。
+
+        config.json 缺失时配置回退到随包模板；只做非空判断会让"没配置"看起来像
+        "配置完整"，首启引导不再出现、任务提交后才在鉴权上失败。
+        """
+        import launcher
+        tpl_llm = {"api_key": "YOUR_API_KEY", "base_url": "https://api.deepseek.com/v1",
+                   "model": "deepseek-chat"}
+        with mock.patch.object(launcher, "_load_config", return_value={"llm": tpl_llm}), \
+                mock.patch.object(launcher, "_apply_env"), \
+                mock.patch.dict(os.environ, {}, clear=True):
+            eff = launcher.effective_config()
+        self.assertFalse(eff["config_complete"], "占位符必须算未配置")
+
     def test_instance_lock_second_holder_is_reported(self):
         import launcher
         tmp = Path(tempfile.mkdtemp(prefix="wm_lock_"))
@@ -925,6 +940,63 @@ class TestPortConflictsDoNotTakeOverOtherServices(unittest.TestCase):
                 self.assertIn("errors=", window,
                               f"{name}: 有一处 text=True 未配 errors='replace'（子进程输出"
                               f"按 UTF-8 解码会在读线程里抛异常）：…{window[:120]}")
+
+    def test_foreign_compatible_redis_is_never_reused(self):
+        """默认端口上是别人的 Redis（另一个织光实例/系统服务）→ 本实例另起自己的。
+
+        为什么必须隔离：`orchestrator:main` 是 Redis pub/sub，**每个订阅者都收到每条任务**。
+        实测两个实例共用一个 Redis 时，同一条任务被两个实例同时执行；一个实例的端点余额
+        不足，还会把另一个实例的任务状态写成 FAILED（共享的是同一份 task state）。
+        """
+        import launcher as L
+        ports_file = self._tmp_ports_file()
+        with mock.patch.object(L, "RUNTIME_PORTS_FILE", ports_file), \
+                mock.patch.object(L, "_redis_reachable", return_value=True), \
+                mock.patch.object(L, "_redis_major", return_value=8), \
+                mock.patch.object(L, "_portable_redis_owned_here", return_value=False), \
+                mock.patch.object(L, "_port_is_free", side_effect=lambda p: int(p) != 6379), \
+                mock.patch("dep_check.ensure_redis",
+                           return_value={"ok": True, "action": "started", "detail": "ok"}), \
+                mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch("builtins.print"):
+            L._ensure_redis_available()
+            self.assertEqual(os.environ.get("REDIS_PORT"), "6380",
+                             "别人的 Redis 不得复用：本实例要自己的总线")
+        self.assertEqual(json.loads(ports_file.read_text(encoding="utf-8"))["redis"], 6380)
+
+    def test_own_redis_is_reused_on_restart(self):
+        """本实例自己启动的便携 Redis（pid 与端口都对得上）→ 沿用，不重复起。"""
+        import launcher as L
+        with mock.patch.object(L, "_redis_reachable", return_value=True), \
+                mock.patch.object(L, "_redis_major", return_value=8), \
+                mock.patch.object(L, "_portable_redis_owned_here", return_value=True), \
+                mock.patch("dep_check.ensure_redis") as ensure, \
+                mock.patch.dict(os.environ, {}, clear=True):
+            L._ensure_redis_available()
+        ensure.assert_not_called()
+
+    def test_explicit_external_redis_is_still_respected(self):
+        """显式配置的 Redis（自装 Memurai / 远端）照旧复用——那是用户的选择。"""
+        import launcher as L
+        with mock.patch.object(L, "_redis_reachable", return_value=True), \
+                mock.patch.object(L, "_redis_major", return_value=8), \
+                mock.patch.object(L, "_portable_redis_owned_here", return_value=False), \
+                mock.patch("dep_check.ensure_redis") as ensure, \
+                mock.patch.dict(os.environ, {"REDIS_PORT": "6379"}, clear=True):
+            L._ensure_redis_available()
+        ensure.assert_not_called()
+
+    def test_owned_check_requires_pid_and_port_to_match(self):
+        import launcher as L
+        ports_file = self._tmp_ports_file()
+        ports_file.write_text(json.dumps({"redis": 6380}), encoding="utf-8")
+        with mock.patch.object(L, "RUNTIME_PORTS_FILE", ports_file), \
+                mock.patch.object(L, "_is_alive", return_value=True):
+            self.assertFalse(L._portable_redis_owned_here(6379), "端口对不上不算自己的")
+        ports_file.write_text(json.dumps({"redis": 6379}), encoding="utf-8")
+        with mock.patch.object(L, "RUNTIME_PORTS_FILE", ports_file), \
+                mock.patch.object(L, "_is_alive", return_value=False):
+            self.assertFalse(L._portable_redis_owned_here(6379), "PID 已死不算自己的")
 
     def test_redis_target_follows_persisted_port_only_when_reachable(self):
         import launcher as L
