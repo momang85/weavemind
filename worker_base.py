@@ -45,14 +45,14 @@ def _ddg_engines() -> tuple:
         return tuple(current_policy().engines or _DDG_ENGINES)
     except Exception:
         return _DDG_ENGINES
-# 异常消息里的 URL → 引擎名（ddgs 异常含失败引擎的 URL）
+# 异常消息里的 URL → 引擎名（ddgs 异常含失败引擎的 URL；按域名子串匹配）
 _DDG_URL_HINTS = (
     ("wikipedia.org", "wikipedia"),
     ("grokipedia.com", "grokipedia"),
     ("google.com", "google"),
-    ("search.brave.com", "brave"),
+    ("brave.com", "brave"),
     ("startpage.com", "startpage"),
-    ("search.yahoo.com", "yahoo"),
+    ("yahoo.com", "yahoo"),
     ("duckduckgo.com", "duckduckgo"),
     ("mojeek.com", "mojeek"),
     ("yandex.com", "yandex"),
@@ -839,6 +839,161 @@ class SearchAgent(BaseWorker):
     # 生成 `[检索查询] …`，检索只按它构造变体——整段任务要求（含样板句）扔给检索器会
     # 让引擎大面积无结果、候选里没有年报正文（实机 ui-750185076a）。
 
+    def _search_budget(self):
+        """任务级检索预算：总墙钟与提供方调用次数共用同一条截止线（专项 §5）。"""
+        from adapters.search_runner import (
+            DEFAULT_DEADLINE_SECONDS, DEFAULT_MAX_CALLS, SearchBudget)
+        try:
+            secs = float(os.environ.get("WM_SEARCH_DEADLINE_SECONDS", "")
+                         or DEFAULT_DEADLINE_SECONDS)
+        except Exception:
+            secs = DEFAULT_DEADLINE_SECONDS
+        try:
+            calls = int(os.environ.get("WM_SEARCH_MAX_CALLS", "") or DEFAULT_MAX_CALLS)
+        except Exception:
+            calls = DEFAULT_MAX_CALLS
+        return SearchBudget(max_calls=calls, deadline_seconds=secs)
+
+    def _available_backends(self) -> tuple:
+        """ddgs 实际可用后端 ∩ 策略引擎清单，保持策略顺序。
+
+        为什么必须取交集：包内 ddgs 9.16 已不含 yandex，而策略清单首位就是它——
+        照着清单打会先白等几十秒才失败（S0 实测 32 秒）。
+        """
+        advertised: tuple = ()
+        try:
+            from ddgs import DDGS
+            for attr in ("get_available_backends", "available_backends"):
+                fn = getattr(DDGS, attr, None)
+                if callable(fn):
+                    got = fn()
+                    if got:
+                        advertised = tuple(str(x) for x in got)
+                        break
+            if not advertised:
+                val = getattr(DDGS, "BACKENDS", None)
+                advertised = tuple(str(x) for x in val) if val else ()
+        except Exception:
+            advertised = ()
+        wanted = tuple(_ddg_engines())
+        if not advertised:
+            return wanted
+        return tuple(e for e in wanted if e in advertised)
+
+    def _provider_specs(self) -> list:
+        """提供方规格：Bing 主 + ddgs 单备后端（都是显式单一后端，从不 auto）。
+
+        S0 事实：Bing HTML 两侧环境都可用且快（0.5s）；ddgs 首个可用后端在源码环境 2.9s
+        出结果、而包内清单首位引擎已失效。因此把实践证明可用的排在前面，且只带一个备后端。
+        """
+        specs = [{"provider": "bing", "backend": "www.bing.com"}]
+        backends = self._available_backends()
+        if backends:
+            specs.append({"provider": "ddgs", "backend": backends[0]})
+        # 冷却中的提供方跳过（跨任务的健康记忆；真零结果不进冷却，见 _mark_engine 调用处）
+        return [s for s in specs
+                if _engine_healthy("bing" if s["provider"] == "bing" else "ddg")]
+
+    def _emit_payload(self, instruction: str, collected: list):
+        """严格相关性优先；为空时放宽一档并如实记 warning（不放宽到"任意候选"）。"""
+        seen: set = set()
+        uniq: list = []
+        for it in collected:
+            u = str((it or {}).get("url") or "").strip()
+            if u and u not in seen:
+                seen.add(u)
+                uniq.append(it)
+        strict = self._filter_results(instruction, uniq)
+        if strict:
+            return json.dumps(strict[:10], ensure_ascii=False, indent=2)
+        relaxed = self._filter_results(instruction, uniq, min_score=1)
+        if relaxed:
+            logger.warning("Strict filter empty; %d results kept with relaxed threshold",
+                           len(relaxed))
+            return json.dumps(relaxed[:10], ensure_ascii=False, indent=2)
+        return None
+
+    def _execute_bounded(self, instruction: str) -> str:
+        """有界检索（S1）：一个预算、一条截止线、Bing 主 + 至多一个 ddgs 备后端。
+
+        与旧实现（9 引擎 × 多变体 × 二轮 × 编排重试）的区别：
+        - **不再 auto 全扫**：全失败不回落 `backend=None`（那会串行扫全部引擎）；
+        - **不回炉两轮**：至多一次有界重试，且受同一截止线约束；
+        - **真零结果 ≠ 后端故障**：零命中照实返回，不触发熔断；
+        - 结果协议（status/attempts/elapsed/reason…）写进日志，对外仍是 JSON 数组（兼容层）。
+        """
+        from adapters.search_runner import run_search
+        self._load_active_strategy()
+        variants = self._query_variants(instruction) or [instruction[:120]]
+        specs = self._provider_specs()
+        if not specs:
+            # 全部提供方都在冷却期：不发新请求（没有新条件就不重复同类尝试，专项 §5）
+            logger.warning("all search providers cooling down; no request issued")
+            return json.dumps([])
+        budget = self._search_budget()
+        max_results = max(1, int(self._strategy_max_sources))
+        collected: list = []
+
+        def _invoke(provider: str, backend: str, q: str, wait: float) -> list:
+            """单提供方单后端调用（显式后端，绝不 auto）。"""
+            if provider == "bing":
+                return self._search_bing(q)
+            from ddgs import DDGS
+            with DDGS(timeout=max(3.0, min(float(wait), 8.0))) as ddgs:
+                rows = list(ddgs.text(q, backend=backend,
+                                      max_results=max_results * 2))
+            out: list = []
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                title = str(r.get("title") or "").strip()
+                href = str(r.get("href") or "").strip()
+                if title and href.startswith("http"):
+                    out.append({"title": title, "url": href,
+                                "snippet": str(r.get("body") or ""),
+                                "engine": f"duckduckgo:{backend}"})
+            return out
+
+        def _add(items) -> None:
+            for it in items or []:
+                if isinstance(it, dict) and str(it.get("url") or "").strip():
+                    collected.append(it)
+
+        outcome = run_search(variants, call_provider=_invoke, providers=specs,
+                             budget=budget, max_results=max_results * 2)
+        _add(outcome.items)
+        # 引擎健康：单变体异常不得把引擎标成健康（旧实现探测异常没同步置 error）
+        for spec in specs:
+            name = "bing" if spec["provider"] == "bing" else "ddg"
+            err = outcome.errors.get(spec["provider"])
+            got = bool(collected) if spec["provider"] == "bing" else any(
+                str(it.get("engine") or "").startswith("duckduckgo") for it in collected)
+            _mark_engine(name, bool(got) or not err)
+        logger.info("search outcome: %s", json.dumps(outcome.as_dict(), ensure_ascii=False))
+
+        out = self._emit_payload(instruction, collected)
+        if out:
+            return out
+        # 有界重试：只对暂时性失败退避一次，且必须还有剩余预算（不换关键词硬刷）
+        if outcome.retryable and not budget.expired():
+            logger.warning("Search transient failure (%s); one bounded retry after %.0fs",
+                           outcome.status, _SEARCH_RETRY_BACKOFF)
+            time.sleep(min(_SEARCH_RETRY_BACKOFF, max(0.0, budget.time_left())))
+            if not budget.expired():
+                outcome2 = run_search(variants, call_provider=_invoke, providers=specs,
+                                      budget=budget, max_results=max_results * 2)
+                _add(outcome2.items)
+                logger.info("search retry outcome: %s",
+                            json.dumps(outcome2.as_dict(), ensure_ascii=False))
+                out = self._emit_payload(instruction, collected)
+                if out:
+                    return out
+        # 全部失败/无结果：诚实返回空列表（不再用 Mock 假数据）。
+        # 空列表会被输出契约标记 → 编排器据此判定本步无可用来源（不再拖下游）。
+        logger.warning("Search empty (%s); engine health: %s",
+                       outcome.status, get_engine_health())
+        return json.dumps([])
+
     def _query_variants(self, instruction: str) -> list[str]:
         """生成多个查询变体（关键词组合优先 + 整句 + 定向模板 + 中英混合）。
 
@@ -977,148 +1132,9 @@ class SearchAgent(BaseWorker):
             })
         return results
 
-    def execute(self, instruction: str) -> str:
-        """多查询变体 × 多源搜索：DuckDuckGo → Bing，合并去重，
-        严格过滤为空时放宽阈值再试，全部源不可用才 mock。"""
-        logger.info("SearchAgent searching: %s", instruction)
-        self._load_active_strategy()
-        variants = self._query_variants(instruction) or [instruction[:120]]
-        collected: list[dict] = []
-        seen_urls: set[str] = set()
-
-        def _add(results) -> None:
-            items = results if isinstance(results, list) else [results]
-            for r in items:
-                if not isinstance(r, dict):
-                    continue
-                u = str(r.get("url") or "")
-                if u and u not in seen_urls:
-                    seen_urls.add(u)
-                    collected.append(r)
-
-        def _collect_ddg() -> tuple[bool, bool]:
-            """返回 (是否新增结果, 是否出错)。
-
-            任务级引擎健康缓存：ddgs auto 后端每次查询都尝试全部 9 个引擎，
-            环境内 wikipedia/google 等 100% 超时（每个白等 timeout 秒）。
-            用首个变体对各引擎单独探测，收集存活引擎；后续变体通过
-            backend 参数只走存活引擎，同一任务不再重复白等已知死引擎。
-            """
-            added = False
-            error = False
-            try:
-                from ddgs import DDGS
-                with DDGS(timeout=4) as ddgs:
-                    qs = list(variants)
-                    alive: list[str] | None = None
-                    if qs:
-                        # 探测：首个变体逐引擎查询，记录存活引擎与结果
-                        q0 = qs.pop(0)
-                        alive = []
-                        for eng in _ddg_engines():
-                            try:
-                                results = ddgs.text(
-                                    q0, backend=eng,
-                                    max_results=self._strategy_max_sources,
-                                )
-                                for r in results:
-                                    if isinstance(r, dict):
-                                        _add({
-                                            "title": r.get("title", ""),
-                                            "url": r.get("href", ""),
-                                            "snippet": r.get("body", ""),
-                                        })
-                                        added = True
-                                if results:
-                                    alive.append(eng)
-                            except Exception as e:
-                                logger.warning("DDG probe %s failed: %s", eng, str(e)[:60])
-                        if not alive:
-                            alive = None  # 全部失败 → 回退 auto 行为
-                    # 其余变体：只走存活引擎
-                    for q in qs:
-                        try:
-                            kwargs: dict = {"max_results": self._strategy_max_sources}
-                            if alive is not None:
-                                kwargs["backend"] = ",".join(alive)
-                            for r in ddgs.text(q, **kwargs):
-                                if isinstance(r, dict):
-                                    _add({
-                                        "title": r.get("title", ""),
-                                        "url": r.get("href", ""),
-                                        "snippet": r.get("body", ""),
-                                    })
-                                    added = True
-                                else:
-                                    logger.warning("DDG returned non-dict item: %r", str(r)[:80])
-                        except Exception as e:
-                            dead = _ddg_engine_from_error(str(e))
-                            if dead and alive is not None:
-                                alive = [e for e in alive if e not in dead]
-                                logger.warning(
-                                    "DDG query '%s' failed; alive engines: %s",
-                                    q[:40], alive,
-                                )
-                            else:
-                                logger.warning("DDG query '%s' failed: %s", q[:40], e)
-                            error = True
-                return added, error
-            except Exception as e:
-                logger.warning("DuckDuckGo unavailable: %s", e)
-                return added, True
-
-        def _collect_bing() -> tuple[bool, bool]:
-            added = False
-            error = False
-            for q in variants:
-                try:
-                    _add(self._search_bing(q))
-                    added = True
-                except Exception as e:
-                    logger.warning("Bing query '%s' failed: %s", q[:40], e)
-                    error = True
-            return added, error
-
-        def _run_pass() -> None:
-            """跑一轮健康引擎（跳过冷却中引擎），并按结果更新健康状态。"""
-            if _engine_healthy("ddg"):
-                added, err = _collect_ddg()
-                _mark_engine("ddg", added or not err)
-            if _engine_healthy("bing"):
-                added, err = _collect_bing()
-                _mark_engine("bing", added or not err)
-
-        def _emit() -> str | None:
-            strict = self._filter_results(instruction, collected)
-            if strict:
-                return json.dumps(strict[:10], ensure_ascii=False, indent=2)
-            relaxed = self._filter_results(instruction, collected, min_score=1)
-            if relaxed:
-                logger.warning(
-                    "Strict filter empty; %d results kept with relaxed threshold",
-                    len(relaxed),
-                )
-                return json.dumps(relaxed[:10], ensure_ascii=False, indent=2)
-            return None
-
-        _run_pass()
-        out = _emit()
-        if out:
-            return out
-        # 失败重试（对标 ReAct）：短暂退避后对健康引擎再跑一轮
-        logger.warning(
-            "Search first pass yielded nothing; retrying after %.0fs",
-            _SEARCH_RETRY_BACKOFF,
-        )
-        time.sleep(_SEARCH_RETRY_BACKOFF)
-        _run_pass()
-        out = _emit()
-        if out:
-            return out
-        # 全部失败/无结果：诚实返回空列表（不再用 Mock 假数据）。
-        # 空列表会被输出契约标记 → 编排器带错误重试 → 反思驱动重检索。
-        logger.warning("Search empty after retry; engine health: %s", get_engine_health())
-        return json.dumps([])
+    # 检索入口：有界执行器（S1）。旧的多引擎探测 + `alive=None → auto` + 二轮重试
+    # 已移除——实机"检索 9 分钟 / 12 查询 / 31 次尝试"就是它放大的（专项 §5、S0 证据）。
+    execute = _execute_bounded
 
 
 # ============================================================================

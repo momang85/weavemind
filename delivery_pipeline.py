@@ -1383,18 +1383,29 @@ def accept_for_body(task_id: str, goal: str, body: str = "", *,
             import os
             if os.environ.get("URL_HEALTH_CHECK", "1") != "0":
                 from acceptance_checker import extract_source_list
-                from adapters.url_health import check_urls
+                from adapters.url_health import check_urls, is_definitely_gone
                 src_urls = [e.get("url") for e in extract_source_list(report) if e.get("url")]
                 if src_urls:
-                    dead = [u for u, st in check_urls(src_urls).items() if st == "dead"]
-                    if dead:
-                        hint = f"来源链接失效: {len(dead)} 条"
+                    states = check_urls(src_urls)
+                    # 只有 404/410 算"链接失效"；403/429/超时/DNS/策略拒绝属于"当前访问不到"，
+                    # 如实分列，不写成失效（专项 §5：暂时不可访问保留原因，不算已取得证据）。
+                    gone = [u for u, st in states.items() if is_definitely_gone(st)]
+                    unverified = [u for u, st in states.items()
+                                  if str(st) in ("inaccessible", "unknown", "policy_blocked")]
+                    if gone or unverified:
+                        hint = f"来源链接失效: {len(gone)} 条" if gone else ""
+                        parts = []
+                        if gone:
+                            parts.append(f"{hint}（404/410）")
+                        if unverified:
+                            parts.append(f"当前访问不到（保留为未验证来源）: {len(unverified)} 条")
                         result.setdefault("checks", {})["url_health"] = {
-                            "pass": True, "hint": True,
-                            "details": hint + "（仅提示，不影响验收结论）",
-                            "dead_count": len(dead), "dead_urls": dead[:10],
+                            "pass": True, "hint": bool(gone),
+                            "details": "；".join(parts) + "（仅提示，不影响验收结论）",
+                            "dead_count": len(gone), "dead_urls": gone[:10],
+                            "unverified_count": len(unverified),
                         }
-                        if hint not in result.get("gaps", []):
+                        if gone and hint not in result.get("gaps", []):
                             result.setdefault("gaps", []).append(hint)
         except Exception:
             pass

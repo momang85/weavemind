@@ -100,81 +100,91 @@ def _search_bing(query: str, max_results: int) -> list[dict]:
     return out
 
 
+def _first_available_engine() -> str:
+    """策略清单 ∩ ddgs 实际可用后端的第一个（读库不发请求）。
+
+    包内 ddgs 9.16 已不含 yandex，而清单首位就是它——照清单打会先白等几十秒（S0 实测）。
+    """
+    advertised: tuple = ()
+    try:
+        from ddgs import DDGS
+        for attr in ("get_available_backends", "available_backends"):
+            fn = getattr(DDGS, attr, None)
+            if callable(fn):
+                got = fn()
+                if got:
+                    advertised = tuple(str(x) for x in got)
+                    break
+        if not advertised:
+            val = getattr(DDGS, "BACKENDS", None)
+            advertised = tuple(str(x) for x in val) if val else ()
+    except Exception:
+        advertised = ()
+    wanted = tuple(_DDG_ENGINES)
+    if not advertised:
+        return wanted[0] if wanted else ""
+    for eng in wanted:
+        if eng in advertised:
+            return eng
+    return ""
+
+
 def _search_ddg(query: str, max_results: int, timeout: float) -> list[dict]:
-    """ddgs 逐引擎探测：首个出结果的引擎收敛，只走已存活引擎。"""
+    """ddgs **单后端单次**调用（S1）：不再逐引擎阶梯，也不再回落 auto。"""
     from ddgs import DDGS
 
+    engine = _first_available_engine()
     out: list[dict] = []
-    with DDGS(timeout=timeout) as ddgs:
-        for eng in _DDG_ENGINES:
-            try:
-                results = list(
-                    ddgs.text(
-                        str(query or ""), backend=eng, max_results=max_results,
-                    ),
-                )
-            except Exception as exc:
-                logger.debug(
-                    "text_search ddg engine %s failed: %s",
-                    eng, str(exc)[:80],
-                )
-                continue
-            if not results:
-                continue
-            for r in results:
-                if not isinstance(r, dict):
-                    continue
-                title = str(r.get("title") or "").strip()
-                href = str(r.get("href") or "").strip()
-                if title and href.startswith("http"):
-                    out.append({
-                        "title": title,
-                        "url": href,
-                        "snippet": str(r.get("body") or ""),
-                        "engine": f"duckduckgo:{eng}",
-                    })
-            break  # 本引擎出结果即收敛，不再试后续引擎
+    with DDGS(timeout=max(3.0, float(timeout))) as ddgs:
+        rows = list(ddgs.text(str(query or ""), backend=engine,
+                              max_results=max_results))
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        title = str(r.get("title") or "").strip()
+        href = str(r.get("href") or "").strip()
+        if title and href.startswith("http"):
+            out.append({
+                "title": title,
+                "url": href,
+                "snippet": str(r.get("body") or ""),
+                "engine": f"duckduckgo:{engine}",
+            })
     return out
 
 
 def web_text_search(query: str, max_results: int = 6, timeout: float = 3) -> list[dict]:
-    """轻量文本检索：Bing（含引号精确变体）→ ddg 引擎探测合并。
+    """轻量文本检索：收敛到**同一个有界执行器**（S1），Bing 主 + ddgs 单备后端。
 
-    查询先经 search_quality 预处理（去指令包装/提取关键词），中文
-    长目标不再原样直塞引擎；结果统一相关性计分 + 权威域加权排序，
-    与主题无关的条目（如"固态硬盘"之于"固态电池"）被滤除。
-    全部失败返回空列表（不抛）。"""
+    与 worker 同一条纪律：一个预算（次数 + 截止）、不 auto 全扫、真零结果不触发熔断、
+    同一 (查询, 后端) 不重复提交。查询先经 search_quality 预处理，结果统一计分排序；
+    全部失败返回空列表（不抛），并如实标注原因由调用方决定。
+    """
+    import os as _os
+
+    from adapters.search_runner import SearchBudget, run_search
+
     q = str(query or "").strip()
     if not q:
         return []
     variants = build_query_variants(q) or [q]
-    collected: list[dict] = []
-    seen: set[str] = set()
+    try:
+        calls = int(_os.environ.get("WM_SEARCH_MAX_CALLS", "") or 6)
+    except Exception:
+        calls = 6
+    budget = SearchBudget(max_calls=calls,
+                          deadline_seconds=float(timeout or 3.0) * 2)
+    specs = [{"provider": "bing", "backend": "www.bing.com"}]
+    engine = _first_available_engine()
+    if engine:
+        specs.append({"provider": "ddgs", "backend": engine})
 
-    def _add(items) -> None:
-        for it in items or []:
-            if not isinstance(it, dict):
-                continue
-            u = str(it.get("url") or "")
-            if u and u not in seen:
-                seen.add(u)
-                collected.append(it)
+    def _call(provider: str, backend: str, text: str, wait: float) -> list[dict]:
+        if provider == "bing":
+            return _search_bing(text, max_results * 2)
+        return _search_ddg(text, max_results * 2, min(float(wait), 8.0))
 
-    # Bing 主变体；相关结果不足 3 条时追加带引号变体（每变体 ≤1 次请求）
-    for v in variants[:2]:
-        try:
-            _add(_search_bing(v, max_results * 2))
-        except Exception as exc:
-            logger.warning("text_search bing failed: %s", exc)
-        if len(score_results(q, collected)) >= 3 or len(variants) <= 1:
-            break
-    # ddg 引擎探测合并：Bing 相关结果不足时补充（yandex 等境内可达
-    # 引擎）；门槛按"计分后相关条数"判定——Bing 常灌入大量主题不符
-    # 的条目（如固态硬盘），原始条数充足不代表相关条数充足
-    if len(score_results(q, collected)) < max_results:
-        try:
-            _add(_search_ddg(q, max_results * 2, timeout))
-        except Exception as exc:
-            logger.warning("text_search ddg failed: %s", exc)
-    ranked = score_results(q, collected)
+    outcome = run_search(variants, call_provider=_call, providers=specs,
+                         budget=budget, max_results=max_results)
+    ranked = score_results(q, outcome.to_legacy_items())
     return ranked[:max_results]

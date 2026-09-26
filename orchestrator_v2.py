@@ -483,14 +483,25 @@ def filter_dead_search_results(parsed: list, timeout: float = 4) -> tuple[list, 
         ]
         if not src_urls:
             return parsed, 0
-        from adapters.url_health import check_urls
+        from adapters.url_health import check_urls, is_definitely_gone
         health = check_urls(src_urls, timeout=timeout)
+        # 只剔除 **404/410（明确失效）** 的候选；403/429/DNS/超时/策略拒绝一律保留原条目
+        # （专项 §5：暂时访问不到不能当作已取得证据，也不能当作已失效而删掉）。
         kept = [
             it for it in parsed
-            if health.get(
-                str((it or {}).get("url") or "").strip(), "alive",
-            ) != "dead"
+            if not is_definitely_gone(
+                health.get(str((it or {}).get("url") or "").strip(), "unknown"))
         ]
+        unverified = [
+            str((it or {}).get("url") or "").strip() for it in kept
+            if str(health.get(str((it or {}).get("url") or "").strip(), "")) in
+            ("inaccessible", "unknown", "policy_blocked")
+        ]
+        if unverified:
+            logger.info(
+                "web_search candidates kept but unverified (%d): %s",
+                len(unverified), ", ".join(u[:80] for u in unverified[:3]),
+            )
         return kept, len(parsed) - len(kept)
     except Exception as exc:
         logger.warning("web_search dead-link filter failed: %s", exc)
@@ -6878,6 +6889,26 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 return {"task_id": step["step_id"], "status": "FAILED",
                         "result": f"Blocked by: {blocked}",
                         "elapsed_sec": round(time.time() - step_start, 1)}
+            # S1：无候选 URL 就**不派发**抓取步骤。
+            # 旧行为：照常派发 → worker 报 "No URL found in instruction" → 下游
+            # "Blocked by failed dependency" 连锁失败，还白占一次抓取调用。
+            # 现在直接判失败并写明原因（本轮抓取调用数 = 0），让下游按"待补资料"处理。
+            if step.get("capability") == "web_fetch":
+                _urls_in_instr = re.findall(
+                    r"https?://[^\s<>\"'）)】\]]+", str(step.get("instruction") or ""))
+                if not _urls_in_instr:
+                    push_progress(self._messaging, task_id, "log",
+                                  {"type": "replan", "agent": "orchestrator",
+                                   "message": f"Step {step['step_id']}: 无候选 URL，"
+                                              "跳过抓取（检索未产出可用来源）",
+                                   "timestamp": self._now_iso()})
+                    logger.warning(
+                        "web_fetch step %s skipped: no candidate URL in instruction",
+                        step["step_id"])
+                    return {"task_id": step["step_id"], "status": "FAILED",
+                            "result": "无候选 URL（检索未产出可用来源），已跳过抓取；"
+                                      "需补资料或换检索词后重试",
+                            "elapsed_sec": round(time.time() - step_start, 1)}
             # 人机协作（对标标准 3.2 human_in_loop）：高风险步骤执行前等人工确认
             if str(step.get("mode")) == "human_in_loop":
                 if not self._wait_step_confirm(task_id, step):
@@ -6958,19 +6989,36 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 except Exception:
                     parsed = None
                 if isinstance(parsed, list):
-                    # 2c 死链治理：累计引用/落盘前剔除明确 dead 的链接，
-                    # 减少报告"来源链接失效"（探测异常静默放行，不伤任务主线）
+                    _raw_count = len(parsed)
+                    # 候选治理（S1）：只剔除 404/410 明确失效的条目；403/429/DNS/超时/策略拒绝
+                    # 一律保留原条目与原因（暂时访问不到 ≠ 已失效，更 ≠ 已取得证据）。
                     parsed, _dropped = filter_dead_search_results(parsed)
                     if _dropped:
                         logger.info(
                             "web_search dead-link filter for %s: dropped %d/%d results",
-                            task_id, _dropped, _dropped + len(parsed),
+                            task_id, _dropped, _raw_count,
                         )
                         # 过滤结果回写 step 结果：下游 _inject_step_context
                         # 会把 result 原文喂给 LLM，不回写则正文引用仍是
                         # 含死链的旧列表（报告来源与落盘清单两套 URL）
                         result["result"] = json.dumps(
                             parsed, ensure_ascii=False,
+                        )
+                    if _raw_count and not parsed:
+                        # 过滤后为空不得保持 SUCCESS（专项 §5）：候选全部 404/410 时
+                        # 这一步实际没有可用来源，如实判失败并写明原因，交给下游按
+                        # "待补资料"处理，而不是拿空列表继续跑出假成功。
+                        result["status"] = "FAILED"
+                        result["result"] = (
+                            f"检索到的 {_raw_count} 条候选全部为 404/410（明确失效），"
+                            "本步无可用来源；需要补资料或换检索词后重试"
+                        )
+                        with lock:
+                            has_failure = True
+                        logger.warning(
+                            "web_search step emptied by dead-link filter for %s "
+                            "(%d candidates all 404/410) -> FAILED",
+                            task_id, _raw_count,
                         )
                     with self._task_sources_lock:
                         bucket = self._task_sources.setdefault(task_id, [])

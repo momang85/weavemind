@@ -1059,9 +1059,23 @@ class TestResearchFixedPathOffline(unittest.TestCase):
                                          "result": RESEARCH_REPORT_BODY}))
             return ("k", json.dumps({
                 "task_id": step_id, "status": "SUCCESS",
-                "result": ("搜索结果：贵州茅台2024年营业收入1741.44亿元，"
-                           "归母净利润862.28亿元。"
-                           "来源：https://finance.sina.com.cn/a/1")}))
+                # 真实 worker 的搜索输出是 **JSON 数组**（元素含 url）。替身此前返回一段
+                # 字符串，研究路径的"角色化抓取"（`_pick_fetch_url` 只认列表）就取不到
+                # 候选 URL——S1 起无候选不再派发抓取步骤，替身失真会直接打断这条链。
+                "result": json.dumps([{
+                    "title": "贵州茅台2024年年度报告",
+                    "url": "https://finance.sina.com.cn/a/1",
+                    "snippet": ("搜索结果：贵州茅台2024年营业收入1741.44亿元，"
+                                "归母净利润862.28亿元。"),
+                    "engine": "bing",
+                }, {
+                    # 第二个候选：定向取证的第二个抓取步骤要求"与步骤 2 不同的一页"，
+                    # 真实检索本来就会返回多条候选（替身只给 1 条时那一步必然取不到）
+                    "title": "贵州茅台2024年年度报告：财务报表附注与风险因素",
+                    "url": "https://static.cninfo.com.cn/finalpage/2025-04-03/2.PDF",
+                    "snippet": "财务报表附注、现金流量表附注与风险因素",
+                    "engine": "bing",
+                }], ensure_ascii=False)}))
 
         return _pop
 

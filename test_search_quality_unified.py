@@ -329,5 +329,116 @@ class TestSearchDiagnostics(unittest.TestCase):
         self.assertEqual(rec["content_type"], "application/pdf")
 
 
+class TestBoundedSearchRunner(unittest.TestCase):
+    """S1 有界检索执行器：共享预算、不 auto 重扫、零结果≠故障、去重、结果协议（全离线）。"""
+
+    def setUp(self):
+        from adapters import search_runner as sr
+        self.sr = sr
+        self.specs = [{"provider": "bing", "backend": "www.bing.com"},
+                      {"provider": "ddgs", "backend": "yandex"}]
+
+    def _item(self, i):
+        return {"title": f"t{i}", "url": f"https://e.example/{i}", "snippet": "s"}
+
+    def test_call_budget_caps_attempts(self):
+        """调用次数上限是硬闸：3 变体 × 2 提供方也只能打 2 次。"""
+        calls = []
+
+        def call(provider, backend, q, wait):
+            calls.append((provider, backend, q))
+            return [self._item(len(calls))]
+
+        out = self.sr.run_search(["q1", "q2", "q3"], call_provider=call,
+                                 providers=self.specs,
+                                 budget=self.sr.SearchBudget(max_calls=2,
+                                                             deadline_seconds=30),
+                                 max_results=10)
+        self.assertEqual(out.attempts, 2)
+        self.assertEqual(len(calls), 2)
+        self.assertIn(out.status, ("ok", "partial"))
+
+    def test_short_deadline_can_stop_the_whole_run(self):
+        """短 deadline 能中止整个执行：到点后不再发新请求。"""
+        import time as _t
+        calls = []
+
+        def call(provider, backend, q, wait):
+            calls.append(q)
+            _t.sleep(0.05)
+            return []
+
+        out = self.sr.run_search(["q1", "q2", "q3", "q4"], call_provider=call,
+                                 providers=self.specs,
+                                 budget=self.sr.SearchBudget(max_calls=99,
+                                                             deadline_seconds=0.12),
+                                 max_results=10)
+        self.assertLess(len(calls), 8, "到点后不得继续尝试")
+        self.assertTrue(out.attempts <= 8)
+
+    def test_never_falls_back_to_auto_backend(self):
+        """全失败也不得回落 auto（backend=None）——那会串行扫全部引擎。"""
+        seen = []
+
+        def call(provider, backend, q, wait):
+            seen.append(backend)
+            raise TimeoutError("timed out")
+
+        out = self.sr.run_search(["q1", "q2"], call_provider=call, providers=self.specs,
+                                 budget=self.sr.SearchBudget(max_calls=6, deadline_seconds=30),
+                                 max_results=10)
+        self.assertTrue(all(b for b in seen), f"出现空后端（auto）：{seen}")
+        self.assertEqual(out.status, "timeout")
+        self.assertTrue(out.retryable, "暂时性失败才可重试")
+
+    def test_zero_results_is_not_a_backend_failure(self):
+        """真零结果记 no_results（不是故障类），也不可重试。"""
+        def call(provider, backend, q, wait):
+            return []
+
+        out = self.sr.run_search(["q1"], call_provider=call, providers=self.specs,
+                                 budget=self.sr.SearchBudget(max_calls=6,
+                                                             deadline_seconds=30),
+                                 max_results=10)
+        self.assertEqual(out.status, "no_results")
+        self.assertFalse(out.retryable)
+        self.assertIn("零命中", out.reason)
+
+    def test_parse_error_is_not_retryable(self):
+        def call(provider, backend, q, wait):
+            raise ValueError("bad payload")
+
+        out = self.sr.run_search(["q1"], call_provider=call, providers=self.specs,
+                                 budget=self.sr.SearchBudget(max_calls=6, deadline_seconds=30),
+                                 max_results=10)
+        self.assertEqual(out.status, "parse_error")
+        self.assertFalse(out.retryable, "非暂时性失败不该触发重试")
+
+    def test_dedupes_query_provider_pairs(self):
+        calls = []
+
+        def call(provider, backend, q, wait):
+            calls.append((provider, backend, q))
+            return []
+
+        self.sr.run_search(["q1", "q1", " q1 ", "q2"], call_provider=call,
+                           providers=self.specs,
+                           budget=self.sr.SearchBudget(max_calls=20, deadline_seconds=30),
+                           max_results=10)
+        self.assertEqual(len(calls), len(set(calls)), f"存在重复提交：{calls}")
+
+    def test_partial_and_legacy_compat_layer(self):
+        def call(provider, backend, q, wait):
+            return [self._item(1)]        # 只有 1 条，少于 enough=3
+
+        out = self.sr.run_search(["q1"], call_provider=call, providers=self.specs,
+                                 budget=self.sr.SearchBudget(max_calls=6, deadline_seconds=30),
+                                 max_results=10, enough=3)
+        self.assertEqual(out.status, "partial")
+        self.assertEqual(out.to_legacy_items(), out.items, "旧数组契约要有兼容层")
+        payload = json.dumps(out.to_legacy_items(), ensure_ascii=False)
+        self.assertTrue(payload.startswith("["))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

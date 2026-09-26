@@ -679,7 +679,9 @@ class TestP1WorkflowModes(unittest.TestCase):
         }
         steps = [{
             "step_id": "1", "capability": "web_fetch",
-            "instruction": "抓取页面\n验收：已抓取",
+            # S1：抓取步骤要有候选 URL。旧 fixture 是"没有 URL 的抓取"，真实环境里
+            # worker 只会回 "No URL found in instruction"；无候选时编排器现在不派发它。
+            "instruction": "抓取页面 https://example.com/page\n验收：已抓取",
             "depends_on": [], "mode": "human_in_loop",
         }]
         results, failed = o._execute_steps(steps, "t", "目标")
@@ -6397,100 +6399,80 @@ class TestNewDataAdapters(unittest.TestCase):
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
 
-    # ── V1.2 竞品启示：URL 存活校验（全部 mock，不联网）──
+    # ── S1：URL 状态分类（reachable/not_found/inaccessible/unknown/policy_blocked）──
+    # 请求一律走 net_policy.fetch_document（策略校验 + 已验 IP + 不跟随重定向），
+    # 所以这里 mock 它，而不是 mock urllib。
 
-    def test_url_health_200_alive(self):
+    def test_url_health_200_reachable(self):
         from adapters import url_health
 
-        class FakeResp:
-            status = 200
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                return False
-
-        with mock.patch.object(
-            url_health.urllib.request, "urlopen",
-            return_value=FakeResp(),
-        ):
+        with mock.patch("net_policy.fetch_document",
+                        return_value={"status": 200, "text": "", "bytes": 0}):
             out = url_health.check_urls(["https://example.com/ok"])
-        self.assertEqual(out, {"https://example.com/ok": "alive"})
+        self.assertEqual(out, {"https://example.com/ok": "reachable"})
 
-    def test_url_health_404_dead_with_retry(self):
-        import urllib.error
+    def test_url_health_404_is_the_only_definitely_gone(self):
         from adapters import url_health
 
-        calls = {"n": 0}
-
-        def boom(*a, **k):
-            calls["n"] += 1
-            raise urllib.error.HTTPError(
-                "https://example.com/404", 404, "Not Found", {}, None,
-            )
-
-        with mock.patch.object(
-            url_health.urllib.request, "urlopen", side_effect=boom,
-        ):
+        with mock.patch("net_policy.fetch_document",
+                        return_value={"status": 404, "text": "", "bytes": 0}):
             out = url_health.check_urls(["https://example.com/404"])
-        self.assertEqual(out, {"https://example.com/404": "dead"})
-        self.assertEqual(calls["n"], 2, "失败应重试 1 次")
+        self.assertEqual(out, {"https://example.com/404": "not_found"})
+        self.assertTrue(url_health.is_definitely_gone("not_found"))
+        for state in ("inaccessible", "unknown", "policy_blocked"):
+            self.assertFalse(url_health.is_definitely_gone(state))
+            self.assertTrue(url_health.is_unverified(state))
 
-    def test_url_health_timeout_dead(self):
+    def test_url_health_403_and_429_are_inaccessible_not_gone(self):
+        """403/429 保留候选：暂时访问不到不等于链接失效（专项 §5）。"""
+        from adapters import url_health
+
+        for code in (403, 429):
+            with mock.patch("net_policy.fetch_document",
+                            return_value={"status": code, "text": "", "bytes": 0}):
+                out = url_health.check_urls(["https://example.com/x"])
+            self.assertEqual(out, {"https://example.com/x": "inaccessible"}, code)
+            self.assertFalse(url_health.is_definitely_gone("inaccessible"))
+            # 保留候选：不可据此剔除
+            self.assertTrue(url_health.is_unverified("inaccessible"))
+
+    def test_url_health_timeout_is_unknown_not_dead(self):
+        """超时归 unknown（状态未知），不得判成失效——旧实现把它判 dead 并删候选。"""
         import socket
         from adapters import url_health
 
-        def boom(*a, **k):
-            raise socket.timeout("timed out")
-
-        with mock.patch.object(
-            url_health.urllib.request, "urlopen", side_effect=boom,
-        ):
+        with mock.patch("net_policy.fetch_document",
+                        side_effect=socket.timeout("timed out")):
             out = url_health.check_urls(["https://example.com/slow"])
-        self.assertEqual(out, {"https://example.com/slow": "dead"})
+        self.assertEqual(out, {"https://example.com/slow": "unknown"})
+        self.assertFalse(url_health.is_definitely_gone("unknown"))
 
-    def test_url_health_head_405_falls_back_to_get(self):
-        import urllib.error
+    def test_url_health_policy_rejection_blocks_fetch(self):
+        """策略拒绝（私网/解析失败）→ policy_blocked：不抓取，也不改走直连。"""
         from adapters import url_health
+        import net_policy
 
-        methods = []
-
-        class FakeResp:
-            status = 200
-
-            def __enter__(self):
-                return self
-
-            def __exit__(self, *a):
-                return False
-
-        def fake_urlopen(req, timeout=5):
-            methods.append(req.get_method())
-            if req.get_method() == "HEAD":
-                raise urllib.error.HTTPError(
-                    req.full_url, 405, "Method Not Allowed", {}, None,
-                )
-            return FakeResp()
-
-        with mock.patch.object(
-            url_health.urllib.request, "urlopen", side_effect=fake_urlopen,
-        ):
-            out = url_health.check_urls(["https://example.com/get"])
-        self.assertEqual(out, {"https://example.com/get": "alive"})
-        self.assertEqual(methods, ["HEAD", "GET"])
+        with mock.patch("net_policy.fetch_document",
+                        side_effect=net_policy.NetworkPolicyError("policy: blocked")):
+            out = url_health.check_urls(["https://example.com/blocked"])
+        self.assertEqual(out, {"https://example.com/blocked": "policy_blocked"})
 
     def test_url_health_skips_non_http_and_dedupes(self):
         from adapters import url_health
 
-        with mock.patch.object(
-            url_health.urllib.request, "urlopen",
-            side_effect=AssertionError("不应发起请求"),
-        ):
+        calls = []
+
+        def fake_fetch(url, **kw):
+            calls.append(url)
+            raise AssertionError("本用例只关心目标筛选")
+
+        with mock.patch("net_policy.fetch_document", side_effect=fake_fetch):
             out = url_health.check_urls(
                 ["ftp://example.com/a", "not-a-url", "", "https://example.com/a", "https://example.com/a"],
             )
-        self.assertEqual(out, {"https://example.com/a": "dead"})
+        # 非 http(s) 与空串被跳过；重复项只探测一次
+        self.assertEqual(calls, ["https://example.com/a"])
+        self.assertEqual(out, {"https://example.com/a": "unknown"})
 
 
 class TestFinancialRoutingFix(unittest.TestCase):

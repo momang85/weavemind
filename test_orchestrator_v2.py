@@ -1466,7 +1466,7 @@ class TestV12ReportFormatAndUrlHealth(unittest.TestCase):
             o._now_iso = lambda: "t"
             with mock.patch.object(
                 url_health, "check_urls",
-                return_value={"https://dead.example/a": "dead"},
+                return_value={"https://dead.example/a": "not_found"},
             ):
                 result = o._run_acceptance_check("t-v12-url", "分析腾讯股票行情")
             self.assertIsNotNone(result)
@@ -1476,6 +1476,16 @@ class TestV12ReportFormatAndUrlHealth(unittest.TestCase):
             self.assertEqual(
                 result["checks"]["url_health"]["dead_count"], 1,
             )
+            # S1：403/429/超时等"当前访问不到"不算失效，只如实计数
+            with mock.patch.object(
+                url_health, "check_urls",
+                return_value={"https://dead.example/a": "inaccessible"},
+            ):
+                result2 = o._run_acceptance_check("t-v12-url", "分析腾讯股票行情")
+            self.assertNotIn("来源链接失效", result2["gaps"],
+                             "访问不到不得写成链接失效")
+            self.assertEqual(result2["checks"]["url_health"]["dead_count"], 0)
+            self.assertEqual(result2["checks"]["url_health"]["unverified_count"], 1)
         finally:
             ws_mod.WORKSPACE_ROOT = old_root
             shutil.rmtree(tmp, ignore_errors=True)
@@ -1531,30 +1541,42 @@ class TestV12ReportFormatAndUrlHealth(unittest.TestCase):
             ws_mod.WORKSPACE_ROOT = old_root
             shutil.rmtree(tmp, ignore_errors=True)
 
-    def test_filter_dead_search_results_drops_dead(self):
-        """2c：web_search 结果落盘前剔除明确 dead 的 URL，保留 alive。"""
+    def test_filter_dead_search_results_keeps_unverifiable_candidates(self):
+        """S1：只剔除 404/410（明确失效）；403/429/超时/未知/策略拒绝保留候选与原因。
+
+        旧行为把 403/429/超时一律判 dead 并删除候选——搜索刚找到的材料被本机环境
+        （代理、限流、抖动）再次清空，报告还把"访问不到"写成"链接失效"。
+        """
         from adapters import url_health
         from orchestrator_v2 import filter_dead_search_results
 
         parsed = [
-            {"url": "https://alive.example/a", "title": "t1"},
-            {"url": "https://dead.example/b", "title": "t2"},
-            {"url": "https://gone.example/c", "title": "t3"},
+            {"url": "https://ok.example/a", "title": "t1"},
+            {"url": "https://gone.example/b", "title": "t2"},
+            {"url": "https://forbidden.example/c", "title": "t3"},
+            {"url": "https://slow.example/d", "title": "t4"},
+            {"url": "https://unknown.example/e", "title": "t5"},
+            {"url": "https://private.example/f", "title": "t6"},
             {"title": "无 URL 条目应保留"},
         ]
         with mock.patch.object(
             url_health, "check_urls",
             return_value={
-                "https://alive.example/a": "alive",
-                "https://dead.example/b": "dead",
-                "https://gone.example/c": "dead",
+                "https://ok.example/a": "reachable",
+                "https://gone.example/b": "not_found",
+                "https://forbidden.example/c": "inaccessible",
+                "https://slow.example/d": "inaccessible",
+                "https://unknown.example/e": "unknown",
+                "https://private.example/f": "policy_blocked",
             },
         ):
             kept, dropped = filter_dead_search_results(parsed)
-        self.assertEqual(dropped, 2)
+        self.assertEqual(dropped, 1, "只有 404/410 该被剔除")
         self.assertEqual(
             [it.get("url") for it in kept],
-            ["https://alive.example/a", None],
+            ["https://ok.example/a", "https://forbidden.example/c",
+             "https://slow.example/d", "https://unknown.example/e",
+             "https://private.example/f", None],
         )
 
     def test_filter_dead_search_results_silent_on_error(self):

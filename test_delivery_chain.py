@@ -1485,7 +1485,10 @@ class TestSearchRevisionFlow(unittest.TestCase):
 
         steps = [
             {"step_id": "1", "capability": "web_search", "instruction": "搜索开源项目", "timeout": 60},
-            {"step_id": "2", "capability": "web_fetch", "instruction": "获取代码", "depends_on": ["1"], "timeout": 60},
+            # S1：抓取步骤带上 URL。旧 fixture 是"没有 URL 的抓取"，真实环境里 worker 只会回
+            # "No URL found in instruction" 并把下游拖成 Blocked；无候选时编排器现在不派发它。
+            {"step_id": "2", "capability": "web_fetch",
+             "instruction": "获取代码 https://example.com/repo", "depends_on": ["1"], "timeout": 60},
         ]
         results, failed = o._execute_steps(steps, "test-task", "写一个愤怒的小鸟")
 

@@ -1,26 +1,33 @@
-# DeepSeek 执行状态（2026-09-26 更新 · 搜索网络专项 S0 已交）
+# DeepSeek 执行状态（2026-09-26 更新 · 搜索网络专项 S0+S1 已交）
 
 **当前批次**：搜索网络与金融资料获取专项（指令 `docs/搜索网络与金融资料获取专项_20260926.md`）
-**S0 同 Worker 环境诊断**。交付物：运行包 `dist/weavemind-2026.09.26.9-win-x64.zip`
-（sha256 `b2a80be0c38870367c2806de3372a0efe7d44af55e6a68bbe52487cbd240f9c9`）。
+**S0 同 Worker 环境诊断 + S1 有界搜索与真实结果协议**。
 
-- **新工具 `search_diag.py`**：离线事实 + 一次有界公开探测（≤6 次调用、≤60 秒、无重试、无模型），
-  且**不新建请求点**（全部调用项目既有通道：Bing、ddgs、东财结构化、cninfo、transport 文档下载），
-  因此继承既有网络边界。输出只到 stdout（人类可读表格或 JSON），不写文件。
-- **两环境事实表**（同机同时刻）：Bing HTML 两侧都可用（10 条、0.5s）；东财结构化两侧都可用
-  （1 行）；**ddgs 单后端调用在包内 32 秒后 `parse_error`（ConnectError→google）、源码 2.9 秒返回
-  5 条**；cninfo 披露通道未启用；"已知公开披露文件"取回的是**公告查看页 HTML 而非 PDF**。
-  依赖差异：`ddgs 9.14.4→9.16.0`、`bs4 源码有/包内缺`、urllib3/redis/lxml/certifi 小版本差；
-  两侧代理环境变量都未设置。
-- **查实**：包内默认引擎清单首位（yandex）不可用且要 32 秒才失败；轻量路径 `_search_ddg` 是
-  9 引擎阶梯（包内实测**一次调用 90 秒**，复现了 21:00 那次的检索放大）。这三条正是 S1 的收敛对象。
-- **诊断工具自身修掉两处**：预算改为调用后核对耗时（超预算改判 timeout 并标 `overrun_budget`）；
-  探测不再走多引擎阶梯，改为单后端单次 SDK 调用。
-- **本批网络请求范围**：源码环境 4 次 + 包内环境 4 次公开请求（合计 ≤8，均为固定公开样例；
-  无付费调用、无模型调用、无客户数据）。未做全后端探测。
-- **未验**：真实 Redis 5、物理断网、另一台干净机器（沿用前批，未重开）；S1 的 60 秒/6 次预算
-  尚未落到生产检索路径（S0 只诊断不改生产行为）。
-- 证据：`docs/evidence/s0_worker_env_diag_20260926.md`。
+- **S0（`search_diag.py`，新）**：离线事实 + 一次有界公开探测（≤6 次调用、≤60 秒、无重试、无模型），
+  不新建请求点（全走项目既有通道）。两环境事实表：Bing 两侧可用（10 条/0.5s）；东财结构化两侧可用；
+  **ddgs 单后端调用在包内 32 秒后 parse_error（ConnectError→google）、源码 2.9 秒返回 5 条**；
+  cninfo 披露通道未启用；"已知公开披露文件"取回的是公告查看页 HTML 而非 PDF。
+  依赖差异：`ddgs 9.14.4→9.16.0`、`bs4 源码有/包内缺`。证据 `docs/evidence/s0_worker_env_diag_20260926.md`。
+- **S1 三入口收敛成一个执行器**（`adapters/search_runner.py`，新）：一个预算（`WM_SEARCH_MAX_CALLS=6`
+  + `WM_SEARCH_DEADLINE_SECONDS=60` 共用一条截止线）、显式单后端（从不 auto 全扫）、
+  (查询,后端) 去重、结果协议 `status/items/attempts/elapsed/reason/retryable/provider/backend`
+  + 旧数组兼容层。worker 与轻量路径都改走它；引擎取"策略清单 ∩ ddgs 实际可用"（包内首位失效即被跳过）。
+- **候选与步骤状态**：`url_health` 改五态（`reachable/not_found/inaccessible/unknown/policy_blocked`，
+  请求走 `net_policy.fetch_document`）；编排器只剔 404/410、其余保留候选并记原因；
+  过滤后为空不再保持 SUCCESS；**无候选 URL 不派发抓取**（抓取调用数 0）；交付侧只有 404/410 写"链接失效"。
+- **验收**：连接全失败不走 auto、真零结果不熔断、单变体异常不标健康、短 deadline 可中止、
+  403/429 保留候选、404/410 明确失效、过滤后空结果不保持成功、无候选 fetch 调用 0、无新模型调用——
+  逐条对应单测（`test_search_quality_unified.TestBoundedSearchRunner` 7 例 + S0 诊断 8 例、
+  `test_p0` URL 健康 6 例、`test_orchestrator_v2` 候选保留 1 例）。
+- **被调整的既有断言**（专项要求"修复必须调整行为预期"）：`test_p0` 的 `alive/dead`+重试+HEAD 降级
+  断言重写为五态；`test_orchestrator_v2` 只剔 404/410；两处 `web_fetch` fixture 补候选 URL；
+  `test_offline_delivery` 的搜索替身改为真实 JSON 数组 + 两个候选（替身失真会直接打断角色化抓取）。
+- **本批网络请求范围**：S0 诊断 8 次公开请求（源码 4 + 包内 4，固定公开样例）；S1 全部为离线单测。
+  无付费调用、无模型调用、无客户数据；未改模型/权限/`templates.json`；未购买新搜索 API。
+- **未验**：S2（网络通道一致性、代理/直连显式区分、transport raw socket 回落）与 S3（A 股披露发现闭环）
+  未动；`_replan_step` 的换词提示路径未改（去重只做在执行器）；**S1 后未跑真机端到端**（授权的一次
+  付费任务已用掉）；包内环境对 S1 的复验需重建运行包后跑 smoke（S4 验收矩阵）。
+- 证据：`docs/evidence/s0_worker_env_diag_20260926.md`、`docs/evidence/s1_bounded_search_20260926.md`。
 
 ## 归档批次（中国平安复跑、N4 场景复验、N0–N4、R1–R4 与更早）
 
