@@ -90,6 +90,10 @@ python -m unittest test_orchestrator_v2 test_delivery_chain   # 420 OK
 
 ### 7.1 复验读数（包内解释器，`dist/weavemind-2026.09.26.13-win-x64`）
 
+包身份：`weavemind-2026.09.26.13-win-x64.zip`，sha256
+`22eabe9ab9c651ad174c21eaa6185e326f548095c36cba8f574979ea12a59423`（291,475,723 字节，
+构建自检 secrets=0 / dev_paths=0；干净机器仍未验，见 N4）。
+
 ```
 pkg ddgs     : 9.16.0
 registry     : ('brave', 'duckduckgo', 'google', 'grokipedia', 'mojeek',
