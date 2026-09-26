@@ -206,5 +206,128 @@ class TestPolicyIsConfigurable(unittest.TestCase):
         self.assertEqual(len(out), 3)
 
 
+class TestSearchDiagnostics(unittest.TestCase):
+    """S0 同环境诊断：错误分类、有界预算、脱敏与"零结果≠故障"的区分（全离线）。"""
+
+    def setUp(self):
+        import search_diag
+        self.d = search_diag
+
+    def test_error_taxonomy_distinguishes_cause(self):
+        """类别必须能分开"正常没找到"与"根本没完成查询"（专项 §4）。"""
+        import io as _io
+        import socket
+        import ssl
+        import urllib.error
+
+        def _http_err(code, msg):
+            # fp 用 BytesIO：避免 HTTPError 携带临时文件（ResourceWarning）
+            return urllib.error.HTTPError("u", code, msg, {}, _io.BytesIO(b""))
+
+        cases = [
+            (_http_err(401, "unauthorized"), "auth_error"),
+            (_http_err(403, "forbidden"), "policy_blocked"),
+            (_http_err(429, "slow down"), "rate_limited"),
+            (_http_err(404, "gone"), "not_found"),
+            (ModuleNotFoundError("No module named 'ddgs'"), "missing_dependency"),
+            (socket.gaierror("getaddrinfo failed"), "dns_error"),
+            (ssl.SSLError("certificate verify failed"), "tls_error"),
+            (TimeoutError("timed out"), "timeout"),
+            (RuntimeError("proxy connect failed"), "proxy_error"),
+        ]
+        for exc, want in cases:
+            self.assertEqual(self.d.classify_error(exc), want, f"{exc!r} 应归 {want}")
+        # 零结果不是异常，但类别表里必须存在，且不能被归成 timeout/parse_error
+        self.assertIn("no_results", self.d.ERROR_CLASSES)
+        self.assertIn("no_relevant_results", self.d.ERROR_CLASSES)
+
+    def test_budget_is_shared_between_calls_and_deadline(self):
+        b = self.d.Budget(calls=2, seconds=30)
+        self.assertFalse(b.expired())
+        b.take()
+        b.take()
+        self.assertTrue(b.expired(), "次数用尽即不可再发请求")
+        with self.assertRaises(RuntimeError):
+            b.take()
+        # 短 deadline 能中止：等待到期后 take 直接抛
+        b2 = self.d.Budget(calls=5, seconds=0.05)
+        import time as _t
+        _t.sleep(0.08)
+        self.assertTrue(b2.expired())
+        with self.assertRaises(RuntimeError):
+            b2.take()
+
+    def test_challenge_page_is_not_counted_as_ok(self):
+        self.assertTrue(self.d.looks_like_challenge("<html>请输入验证码</html>"))
+        self.assertTrue(self.d.looks_like_challenge("Please complete the security check"))
+        self.assertFalse(self.d.looks_like_challenge("<html><li class='b_algo'>…</li></html>"))
+
+    def test_offline_mode_sends_no_request(self):
+        with mock.patch.object(self.d, "probe_search_html") as p1, \
+                mock.patch.object(self.d, "probe_search_sdk") as p2, \
+                mock.patch.object(self.d, "probe_structured") as p3, \
+                mock.patch.object(self.d, "probe_document") as p4:
+            facts = self.d.run_diagnostics(network=False)
+        for p in (p1, p2, p3, p4):
+            p.assert_not_called()
+        self.assertEqual(facts["probes"], [])
+        self.assertIn("runtime_identity", facts)
+
+    def test_facts_never_contain_credentials(self):
+        """事实表不得带出密钥/代理凭据：只允许布尔与版本号。"""
+        secret = "sk-" + "z" * 24
+        with mock.patch("launcher._load_config",
+                        return_value={"llm": {"api_key": secret, "base_url": "https://x/v1"},
+                                      "search_api_key": secret}), \
+                mock.patch.dict("os.environ", {"HTTP_PROXY": "http://user:pw@proxy:8080"}):
+            facts = self.d.environment_facts()
+        blob = json.dumps(facts, ensure_ascii=False)
+        self.assertNotIn(secret, blob)
+        self.assertNotIn("user:pw", blob)
+        self.assertNotIn("proxy:8080", blob)
+        self.assertTrue(facts["config"]["llm_key_set"], "只报是否设置，不报值")
+        self.assertTrue(facts["proxy_env_present"]["HTTP_PROXY"])
+
+    def test_search_probe_classifies_failures_and_zero_results(self):
+        """探测把异常映射成类别、把"HTTP200 但无结果块"记成 no_results，不混为一谈。"""
+        from adapters import text_search
+        with mock.patch.object(text_search, "_fetch_bing_html",
+                               side_effect=TimeoutError("timed out")):
+            rec = self.d.probe_search_html(self.d.Budget())
+        self.assertEqual(rec["status"], "timeout")
+        with mock.patch.object(text_search, "_fetch_bing_html", return_value="<html>空页</html>"):
+            rec = self.d.probe_search_html(self.d.Budget())
+        self.assertEqual(rec["status"], "no_results")
+        with mock.patch.object(text_search, "_fetch_bing_html",
+                               return_value='<li class="b_algo"><h2>t</h2></li>' * 3):
+            rec = self.d.probe_search_html(self.d.Budget())
+        self.assertEqual(rec["status"], "ok")
+        self.assertEqual(rec["items"], 3)
+        with mock.patch.object(text_search, "_fetch_bing_html",
+                               return_value="<html>请输入验证码</html>"):
+            rec = self.d.probe_search_html(self.d.Budget())
+        self.assertEqual(rec["status"], "challenge", "验证码页不得算 ok")
+
+    def test_document_probe_reports_what_came_back(self):
+        """取回 HTML 查看页要记 kind=html，不是 parse_error——候选不是 PDF ≠ 通道故障。"""
+        with mock.patch("adapters.transport.get_via_urllib",
+                        return_value="<html><body>notice viewer</body></html>"), \
+                mock.patch.object(self.d, "_frozen_document_url",
+                                  return_value=("https://data.eastmoney.com/notices/detail/x.html",
+                                                "洋河股份:2024年年度报告")):
+            rec = self.d.probe_document(self.d.Budget())
+        self.assertEqual(rec["status"], "ok")
+        self.assertEqual(rec["kind"], "html")
+        self.assertFalse(rec["is_pdf"])
+        self.assertIn("不是 PDF", rec["reason"])
+        with mock.patch("adapters.transport.get_via_urllib",
+                        return_value="%PDF-1.7\nbody"), \
+                mock.patch.object(self.d, "_frozen_document_url",
+                                  return_value=("https://data.eastmoney.com/x.pdf", "t")):
+            rec = self.d.probe_document(self.d.Budget())
+        self.assertTrue(rec["is_pdf"])
+        self.assertEqual(rec["content_type"], "application/pdf")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
