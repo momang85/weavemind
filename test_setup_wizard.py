@@ -400,31 +400,50 @@ class TestProbeConfiguredMode(_Tmp):
 
 
 class TestStartupScriptWiring(unittest.TestCase):
-    """启动脚本必须真的会调用引导，且不破坏既有 bat 约束。"""
+    """启动脚本保持**薄入口**：整链交给 launcher 的统一控制器（N1）。
 
-    def test_start_bat_calls_wizard_on_failure(self):
+    设计变更（架构指令 §3）：start.bat / start.sh 不再各自维护"配置闸门 + Redis 探测 +
+    依赖安装"三套并行逻辑，只调用 `launcher.py up`；首次配置由控制器交给
+    setup_wizard，且非交互环境不得进入问答。
+    """
+
+    def test_start_bat_is_a_thin_entry_to_the_controller(self):
         src = Path("start.bat").read_text(encoding="ascii")
-        self.assertIn("setup_wizard.py", src)
-        self.assertIn("call :check_config", src)
-        self.assertIn("if defined WM_NONINTERACTIVE goto :config_fail", src,
-                      "自动化场景不得进入交互问答")
-        self.assertIn(":check_config", src)
-        # 引导必须发生在启动服务之前（用启动步骤标记比较，launcher.py 字样在文件中多次出现）
-        self.assertLess(src.index("setup_wizard.py"), src.index("Starting services"))
+        self.assertIn("launcher.py up", src, "启动脚本必须调用统一控制器")
+        self.assertIn("launcher.py url", src, "打开浏览器要用实际端口")
+        # 不再并行维护安装逻辑（这些都在控制器里）
+        self.assertNotIn("dep_check.py --fix", src)
+        self.assertNotIn("setup_wizard.py", src, "首次配置由控制器处理")
+        self.assertNotIn('" --probe', src, "正常启动不自动做消耗额度的连通性探针")
+        # 失败时给唯一可执行动作：脱敏诊断
+        self.assertIn("launcher.py diagnostics", src)
 
-    def test_start_sh_has_config_gate(self):
+    def test_start_sh_is_a_thin_entry_to_the_controller(self):
         src = Path("start.sh").read_text(encoding="utf-8")
-        self.assertIn("setup_wizard.py --check", src)
-        self.assertIn("setup_wizard.py", src)
+        self.assertIn("launcher.py up", src)
+        self.assertIn("launcher.py url", src)
+        self.assertNotIn("dep_check.py --fix", src)
+        self.assertNotIn("docker run", src, "正常启动不主动拉起 Docker 容器")
         self.assertIn("WM_NONINTERACTIVE", src)
-        self.assertLess(src.index("setup_wizard.py"), src.index('"$PY" launcher.py'))
 
-    def test_start_bat_rechecks_endpoint_after_dependencies(self):
-        """依赖装好后要复查端点：引导阶段的探测可能因缺依赖被跳过。"""
-        src = Path("start.bat").read_text(encoding="ascii")
-        self.assertIn('setup_wizard.py" --probe', src)
-        # 复查必须在依赖步骤之后（依赖装好探测才有意义）
-        self.assertLess(src.index("dep_check.py --fix"), src.index('" --probe'))
+    def test_controller_owns_config_wizard_and_dependency_check(self):
+        """控制器里：依赖检查 → 配置（不完整则引导）→ 启动服务，顺序不能反。"""
+        src = Path("launcher.py").read_text(encoding="utf-8")
+        body = src[src.index("def startup_controller("):]
+        i_deps = body.index("_run_dependency_check(fix=True")
+        i_wizard = body.index("setup_wizard.py")
+        i_start = body.index("start_services()")
+        self.assertLess(i_deps, i_wizard, "先备依赖再引导配置")
+        self.assertLess(i_wizard, i_start, "引导必须在启动服务之前")
+        self.assertIn('os.environ.get("WM_NONINTERACTIVE")', body,
+                      "自动化场景不得进入交互问答")
+
+    def test_normal_launch_does_not_start_other_software(self):
+        """正常启动不得自动拉起 Docker Desktop（架构指令 §3）。"""
+        for name in ("start.bat", "start.sh"):
+            src = Path(name).read_text(encoding="utf-8", errors="replace")
+            self.assertNotIn("Docker Desktop.exe", src)
+            self.assertNotIn("Starting Docker Desktop", src)
 
     def test_python_candidates_are_verified_not_just_located(self):
         """解释器必须"验过才采用"，不能只靠 where 找到就认。

@@ -430,6 +430,10 @@ class TestNoDockerDoesNotBlockStartup(_SandboxTest):
             return 4321
 
         with mock.patch.object(code_sandbox, "docker_available", return_value=False), \
+                mock.patch.object(launcher, "instance_state",
+                                  return_value={"running": False, "services": {},
+                                                "stale": {}, "port": 8080,
+                                                "url": "http://localhost:8080"}), \
                 mock.patch.object(launcher, "stop_services", return_value=[]), \
                 mock.patch.object(launcher, "_ensure_redis_available"), \
                 mock.patch.object(launcher, "_write_pids"), \
@@ -439,6 +443,21 @@ class TestNoDockerDoesNotBlockStartup(_SandboxTest):
                 mock.patch.object(launcher, "_spawn_service", side_effect=fake_spawn), \
                 mock.patch.object(launcher, "verify_services",
                                   return_value={"total": 1, "alive": 1, "down": []}), \
+                mock.patch.object(launcher, "readiness_report",
+                                  return_value={"workbench": {"ok": True, "detail": "x",
+                                                              "port": 8080,
+                                                              "url": "http://localhost:8080"},
+                                                "research": {"ok": True, "redis": True,
+                                                             "redis_major": 8, "missing": [],
+                                                             "stale": [], "orchestrator": True,
+                                                             "required": []},
+                                                "code_sandbox": {"ok": False, "note": "",
+                                                                 "execution_available": False,
+                                                                 "isolation_required": True,
+                                                                 "reason": "docker 不可用"},
+                                                "port": 8080, "url": "http://localhost:8080",
+                                                "ready": True}), \
+                mock.patch.object(launcher, "print_readiness"), \
                 mock.patch.object(launcher.time, "sleep"), \
                 mock.patch.dict(os.environ):
             pids = launcher.start_services()          # 不得抛 SystemExit

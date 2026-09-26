@@ -57,135 +57,17 @@ call :pause_if_interactive
 exit /b 1
 :python_ok
 
-REM ---- [2/6] Config ----
-echo   [2/6] Config
-call :check_config
-if not errorlevel 1 goto :config_ok
-
-REM Missing/incomplete config: hand over to the guided setup (interactive only).
-if defined WM_NONINTERACTIVE goto :config_fail
-echo   config.json is missing or incomplete - starting guided setup...
-REM -u: unbuffered, so a prompt/crash is never swallowed. Absolute path: immune
-REM to a changed working directory. Exit code is surfaced for troubleshooting.
-%PY% -u "%~dp0setup_wizard.py"
-if errorlevel 1 echo   guided setup exited with code %errorlevel% ^(python=%PY%^)
-call :check_config
-if not errorlevel 1 goto :config_ok
-
-:config_fail
-if not exist config.json (
-    echo   ERROR: config.json not found. First run:
-    echo          copy config.example.json config.json
-    echo   then fill in llm.api_key / base_url / model.
-) else (
-    echo   ERROR: config.json exists but llm.api_key / base_url / model is incomplete.
-)
-echo   Tip: run "%PY% -u setup_wizard.py" in a terminal for a guided prompt.
-if not defined WM_NONINTERACTIVE (
+REM ---- Config, dependencies, Redis, services and readiness ----
+REM One controller owns the whole sequence (launcher.py up): effective config first,
+REM then dependency check, then services, then a three-layer readiness verdict.
+REM No Docker Desktop auto-start here: a normal launch must not start other software
+REM (Redis is prepared by the dependency check, which can fetch a portable build).
+%PY% launcher.py up
+set "WM_UP_RC=%errorlevel%"
+if not %WM_UP_RC%==0 (
     echo.
-    echo   Press Y to open a separate console window for the guided setup.
-    choice /c YN /t 15 /d N >nul
-    if not errorlevel 2 start "WeaveMind guided setup" cmd /k %PY% -u "%~dp0setup_wizard.py"
-)
-call :pause_if_interactive
-exit /b 1
-:config_ok
-
-REM ---- [3/6] Redis ----
-echo   [3/6] Redis
-REM Three-stage probe: local Redis first (skip Docker), then Docker, else guide.
-REM NOTE: keep the probe on ONE line. cmd.exe cannot pass a multi-line quoted
-REM argument to "python -c"; the following lines would be executed as commands
-REM ("'try:' is not recognized ...") and the script would abort here.
-REM Honor REDIS_PORT when set: probing a hardcoded 6379 would claim "local Redis
-REM detected" while the services are pointed at a different port.
-if not defined REDIS_PORT set "REDIS_PORT=6379"
-%PY% -c "import os,socket,sys; p=int(os.environ.get('REDIS_PORT') or 6379); s=socket.create_connection(('127.0.0.1',p),2); s.sendall(b'PING\r\n'); sys.exit(0 if s.recv(64).startswith(b'+PONG') else 1)" >nul 2>&1
-if not errorlevel 1 (
-    echo        Local Redis detected on port %REDIS_PORT%, skip Docker
-    goto redis_ok
-)
-docker info >nul 2>&1
-if errorlevel 1 goto redis_no_docker
-docker ps --filter name=zhiguan --format "{{.Names}}" 2>nul | findstr zhiguan >nul && (
-    echo        Docker Redis already running
-) || (
-    docker start zhiguan-redis >nul 2>&1 || docker run -d --name zhiguan-redis -p 6379:6379 redis:7-alpine >nul 2>&1
-    echo        Docker Redis started
-)
-goto redis_ok
-
-:redis_no_docker
-echo        No local Redis and Docker engine is not running.
-if exist "C:\Program Files\Docker\Docker\Docker Desktop.exe" (
-    echo        Starting Docker Desktop ^(waiting up to 90s^)...
-    start "" "C:\Program Files\Docker\Docker\Docker Desktop.exe"
-) else if exist "%LOCALAPPDATA%\Docker\Docker Desktop.exe" (
-    echo        Starting Docker Desktop ^(waiting up to 90s^)...
-    start "" "%LOCALAPPDATA%\Docker\Docker Desktop.exe"
-) else (
-    echo   NOTE: Docker Desktop not found. Redis is the only hard dependency;
-    echo         Python-side dependency check will try to fetch a portable
-    echo         Redis automatically ^(see step 4^).
-    goto redis_ok
-)
-set /a _redis_wait=0
-:redis_wait_loop
-ping -n 6 127.0.0.1 >nul
-docker info >nul 2>&1
-if not errorlevel 1 goto redis_ok
-set /a _redis_wait+=5
-if %_redis_wait% LSS 90 goto redis_wait_loop
-echo   WARNING: Docker Desktop not ready in 90s; continuing ^(step 4 will try
-echo            the local/portable Redis path^).
-goto redis_ok
-
-:redis_ok
-
-REM ---- [4/6] Dependencies (self-check + auto-fetch missing pieces) ----
-echo   [4/6] Dependencies
-%PY% dep_check.py --fix
-if errorlevel 1 (
-    echo   ERROR: required dependencies are still missing ^(see report above^).
-    echo   Manual fallback: %PY% -m pip install -r requirements.txt
-    echo   Dependency install guide: docs\  ^(deployment guide, section 5.3^)
-    echo   Redis install guide: docs\  ^(deployment guide, section 5.1^)
-    echo   Tip: set WM_PIP_INDEX_URL=<mirror> to switch the pip mirror, or
-    echo        set SKIP_REDIS_CHECK=1 to skip the Redis check for now
-    echo        ^(workers and the task queue will NOT work without Redis^).
-    call :pause_if_interactive
-    exit /b 1
-)
-
-REM Guided setup runs at [2/6], before dependencies exist here, so its live probe
-REM is skipped in that case. Now that the dependencies are installed, re-check the
-REM configured endpoint once (non-fatal: a bad key must not block startup).
-echo   [4/6] Endpoint check
-%PY% -u "%~dp0setup_wizard.py" --probe
-
-REM ---- [5/6] Frontend ----
-echo   [5/6] Frontend
-if exist frontend\dist\index.html (
-    echo        dist exists, skip build
-    goto frontend_done
-)
-where node >nul 2>nul
-if errorlevel 1 (
-    echo        Node.js not found; web UI will show a built-in status page
-    goto frontend_done
-)
-echo        Building frontend ^(first run^)...
-pushd frontend
-call npm install --no-audit --no-fund
-call npm run build
-popd
-:frontend_done
-
-REM ---- [6/6] Start services (PID-managed) ----
-echo   [6/6] Starting services...
-%PY% launcher.py
-if errorlevel 1 (
-    echo   ERROR: services failed to start ^(see log above^).
+    echo   NOT READY - see the lines above for the one next action.
+    echo   Diagnostics ^(redacted, stays local^): %PY% launcher.py diagnostics diag.txt
     call :pause_if_interactive
     exit /b 1
 )
@@ -207,6 +89,7 @@ echo.
 start "" "%WM_URL%"
 call :pause_if_interactive
 exit /b 0
+
 
 :try_python
 REM %~1 = candidate command (e.g. "py -3"). Accept it only when it really runs

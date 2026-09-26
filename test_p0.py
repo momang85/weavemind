@@ -7381,6 +7381,10 @@ class TestLauncherCrossDevice(unittest.TestCase):
             return []
 
         with mock.patch.object(launcher, "stop_services", side_effect=_fake_stop), \
+                mock.patch.object(launcher, "instance_state",
+                                  return_value={"running": False, "services": {},
+                                                "stale": {}, "port": 8080,
+                                                "url": "http://localhost:8080"}), \
                 mock.patch.object(launcher, "_ensure_redis_available") as m_ensure, \
                 mock.patch.object(launcher, "_write_pids"), \
                 mock.patch.object(launcher, "build_services", return_value=[]), \

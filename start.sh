@@ -29,98 +29,35 @@ else
     exit 1
 fi
 
-# [0/6] Config（首次运行引导：缺少/不完整时进入交互问答）
-# 此前 *nix 侧没有任何 config 闸门——新手会一路启动到"任务失败"才发现没配 key。
-if "$PY" setup_wizard.py --check >/dev/null 2>&1; then
-    echo "[0/6] Config OK"
-else
-    if [ "${WM_NONINTERACTIVE:-0}" = "1" ]; then
-        echo "  ERROR: config.json 缺失或 llm.api_key / base_url / model 未填。"
-        echo "  非交互环境请手动执行：cp config.example.json config.json 并填写 llm.*"
-        exit 1
-    fi
-    echo "[0/6] Config - 首次配置引导"
-    if ! "$PY" setup_wizard.py; then
-        echo "  ERROR: 配置未完成，已退出。修好后重跑 bash start.sh 即可。"
-        exit 1
-    fi
-fi
-
-# [1/6] Redis
-echo "[1/6] Redis..."
-# 三级探测（与 start.bat 对齐）：本机 6379 已有 Redis → 跳过 Docker；
-# 否则走 Docker 容器；两者都不可用时给出原生安装指引
-if "$PY" -c "import socket,sys
-try:
-    s=socket.create_connection(('127.0.0.1',6379),2); s.sendall(b'PING\r\n')
-    sys.exit(0 if s.recv(64).startswith(b'+PONG') else 1)
-except Exception:
-    sys.exit(1)" >/dev/null 2>&1; then
-    echo "  Local Redis detected at 127.0.0.1:6379, skip Docker"
-elif command -v docker >/dev/null 2>&1; then
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -q zhiguan-redis; then
-        echo "  Redis already running (docker)"
-    else
-        docker rm -f zhiguan-redis 2>/dev/null || true
-        docker run -d --name zhiguan-redis -p 6379:6379 redis:7-alpine
-        echo "  Redis started (docker)"
-    fi
-    sleep 2
-else
-    echo "  提示：未找到 Docker 也未检测到本机 Redis，交由第 2 步依赖自检"
-    echo "        尝试自动获取（便携版 / 系统 redis-server）。"
-fi
-
-# [2/6] Dependencies（自检 + 自动补齐：缺包自动装、Redis 缺失自动获取）
-echo "[2/6] Dependencies..."
-if ! "$PY" dep_check.py --fix; then
-    echo "  ERROR: 必需依赖未就绪（见上方报告）。"
-    echo "  可手动处理：$PY -m pip install -r requirements.txt"
-    echo "  Redis 安装见 docs/ 部署指南（5.1 节）"
+# ---- 统一启动控制器（与 Windows 侧同一套：launcher.py up） ----
+# 检查运行包 → 依赖 → 配置 → 服务 → 三层就绪；失败只给一个可执行的下一步。
+# 这里不再各自维护 config 闸门 / Redis 探测 / 依赖安装三套逻辑。
+"$PY" launcher.py up || {
+    echo ""
+    echo "  未就绪——请按上面给出的下一步处理。"
+    echo "  脱敏诊断（仅本地）：$PY launcher.py diagnostics diag.txt"
     exit 1
-fi
+}
 
-# [3/6] Frontend (首次运行自动构建；仓库已带构建产物时可跳过)
-echo "[3/6] Frontend..."
-if [ -f frontend/dist/index.html ]; then
-    echo "  dist exists, skip build"
-else
-    if command -v node >/dev/null 2>&1; then
-        echo "  Building frontend (first run)..."
-        (cd frontend && npm install --no-audit --no-fund && npm run build) || echo "  WARNING: frontend build failed, will use fallback page"
-    else
-        echo "  WARNING: Node.js not found; web UI will show a built-in status page"
-    fi
-fi
-
-# [4/6] Start all services (PID-managed, 会先清理旧进程)
-echo "[4/6] Starting services..."
-"$PY" launcher.py
-
-# [5/6] Frontend URL
-if [ -f frontend/dist/index.html ]; then
-    FRONT_URL="http://localhost:8080"
-else
-    FRONT_URL="http://localhost:8080"
-fi
+URL="$("$PY" launcher.py url 2>/dev/null || echo http://localhost:8080)"
 echo ""
 echo "============================================"
-echo "  织光系统已启动！"
-echo "  Web 前端: ${FRONT_URL}"
+echo "  织光系统已启动"
+echo "  Web 前端: ${URL}"
 echo "  停止: $PY launcher.py stop   （或 bash stop.sh）"
-echo "  状态: $PY launcher.py status"
+echo "  状态: $PY launcher.py status     健康: $PY launcher.py readiness"
 echo "============================================"
 echo ""
 
-# [6/6] 可选：自动打开浏览器（macOS: open / Linux: xdg-open / WSL: cmd.exe start）
+# 可选：自动打开浏览器（macOS: open / Linux: xdg-open / WSL: cmd.exe start）
 if [ "${WM_NONINTERACTIVE:-0}" != "1" ]; then
     if command -v open >/dev/null 2>&1; then
-        open "${FRONT_URL}" 2>/dev/null || true
+        open "${URL}" 2>/dev/null || true
     elif command -v xdg-open >/dev/null 2>&1; then
-        xdg-open "${FRONT_URL}" 2>/dev/null || true
+        xdg-open "${URL}" 2>/dev/null || true
     elif command -v cmd.exe >/dev/null 2>&1; then
-        cmd.exe /c start "" "${FRONT_URL}" 2>/dev/null || true
+        cmd.exe /c start "" "${URL}" 2>/dev/null || true
     else
-        echo "  （未找到浏览器打开命令，请手动访问 ${FRONT_URL}）"
+        echo "  （未找到浏览器打开命令，请手动访问 ${URL}）"
     fi
 fi

@@ -1,24 +1,24 @@
-# DeepSeek 执行状态（2026-09-26 更新 · 新人不友好专项 N0/N1）
+# DeepSeek 执行状态（2026-09-26 更新 · 新人专项 N1 完成）
 
-**当前批次**：新人使用专项 N · **N0 收尾 + N1 首批**（指令
-`docs/新人一键启动与首次研究体验_20260925.md`；N0→N1→N2→N3→N4 顺序推进）。
-本轮先收尾无沙箱研究路径小批（`f884db3`，已推送 CI 绿）并纠偏两处，再做 N1 首批四项行为修复。
+**当前批次**：新人使用专项 N · **N1 统一启动与恢复**（指令
+`docs/新人一键启动与首次研究体验_20260925.md`；N0 与 N1 首批见提交 `6715543`）。
+`start.bat` / `start.sh` 收敛为薄入口，整链交给 `launcher.py up`：
 
-- **变更文件**：`launcher.py`（实例复用/三层就绪/端口单一来源/`url`、`readiness` 子命令）、
-  `task_intent.py`（新增 `wants_code_deliverable`）、`orchestrator_v2.py`（交付守门改调意图模块、
-  修复轮提示去掉 restricted）、`dep_check.py`（沙箱出路去掉 restricted、报告加沙箱行）、
-  `start.bat`（取实际端口打开浏览器）、`test_startup_readiness.py`、`test_p0.py`、
-  `test_orchestrator_v2.py`。
-- **验证**：`test_startup_readiness` 20 OK（新增 10 例）、`test_orchestrator_v2`+`test_setup_wizard`
-  +`test_deploy_manifest` 144 OK、`test_p0` 407 OK（含评测闸门）、`test_delivery_chain` 343 OK。
-  实机：启动 16/16；三层就绪打印"工作台 HTTP 200 @8080 / 研究能力就绪（Redis 8、5 项必需 Worker
-  心跳新鲜）/ 代码隔离不可用"；**第二次 `launcher.py start` 复用实例，16 个 PID 前后逐项相同**。
-- **已知限制**：进程归属校验在无 psutil 时的回退路径（tasklist/wmic）在中文控制台会因 GBK 解码
-  失败返回空 → 可能把"已在运行"误判成未运行；端口"超时 vs 拒绝"未区分语义；N1 其余条目
-  （配置统一、安装状态失效与恢复、脱敏诊断导出、暖启动不重复探测）与 N2/N3/N4 未做。
-- **下一步**：N1 其余条目 → N2 Windows 最小便携运行包 → N3 页面首启引导 → N4 验收矩阵。
-  证据：`docs/evidence/n0_n1_single_start_and_readiness_20260926.md`；
-  N0 无沙箱路径：`docs/evidence/no_docker_research_path_20260925.md`。
+- **变更文件**：`launcher.py`（`startup_controller` 状态机、`effective_config` 统一有效配置、
+  `acquire_instance_lock` 单实例锁、`startup_state.json` 断点恢复与身份失效、
+  `diagnostics_report` 脱敏诊断、`url`/`up`/`diagnostics` 子命令）、`start.bat`、`start.sh`、
+  `test_startup_readiness.py`、`test_setup_wizard.py`、`test_p0.py`、`test_sandbox_isolation.py`。
+- **验证**：`test_startup_readiness` 33 OK（新增 10 例控制器用例）、`test_p0` 407 OK（含评测闸门）、
+  `test_setup_wizard` 36 OK、`test_sandbox_isolation` 24 OK、`test_orchestrator_v2`+`test_delivery_chain`
+  全绿。实机：`launcher.py up` 打印运行包/依赖（上轮已验证、未重复联网）/配置/工作台 200/研究能力就绪
+  并 exit 0；`launcher.py diagnostics` 输出脱敏诊断（假密钥用例断言不出现）。
+- **顺带修掉**：测试隔离缺陷——控制器用例没 mock 依赖步骤，真在测试端口拉起了便携 Redis 并留在后台
+  （污染后续用例）；另两处直接调用真实 `start_services` 的旧用例改为先固定 `instance_state`。
+- **已知限制**：干净环境未验（等 N2/N4）；端口"超时 vs 拒绝"未区分；无 psutil 时归属校验回退路径
+  在中文控制台解码失败；前端缺失仍走后端回退页（N3）；"选择离线包"交互未做。
+- **下一步**：N2 Windows 最小便携运行包（可重定位 Python + 依赖 + Redis + 前端 + 中文字体 +
+  清单与 SHA256，干净环境未验需如实标注）→ N3 页面首启引导 → N4 验收矩阵。
+  证据：`docs/evidence/n1_startup_controller_20260926.md`、`n0_n1_single_start_and_readiness_20260926.md`。
 - 本轮未新增付费模型调用，未改模型/权限/模板/配置，未自动提交样例任务。
 
 ## 归档批次（R1–R4 与更早）

@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -1132,6 +1133,333 @@ def print_status() -> None:
     print_readiness(readiness_report(), quiet=False)
 
 
+# ── N1：统一启动控制器（状态机 + 单实例锁 + 断点恢复 + 脱敏诊断） ─────────────
+# 目标：新人只点一个入口，且任何失败只给**一个可执行的下一步**。
+# 状态取值（对外只显示当前步骤与下一步；技术详情可展开）：
+#   checking_runtime → preparing_deps → awaiting_config → starting_services
+#   → waiting_ready → research_ready ／ limited_experience（能看不能研究）／ failed
+STARTUP_STATES = ("checking_runtime", "preparing_deps", "awaiting_config",
+                  "starting_services", "waiting_ready", "research_ready",
+                  "limited_experience", "failed")
+STARTUP_STATE_FILE = PID_DIR / "startup_state.json"
+INSTANCE_LOCK_FILE = PID_DIR / "instance.lock"
+
+
+def runtime_identity() -> str:
+    """运行包身份：便携包清单版本 → VERSION 文件 → git 短哈希 → 源码运行标记。
+
+    用于"包版本变化可以触发迁移/修复，但不能覆盖用户配置或历史"：
+    身份变化即让已完成步骤的缓存失效（重新检查），身份不变则复用已验证结论。
+    """
+    for name in ("package_manifest.json", "run_package_manifest.json"):
+        p = BASE_DIR / name
+        try:
+            if p.exists():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                ver = str(data.get("version") or data.get("package_version") or "").strip()
+                if ver:
+                    return f"package:{ver}"
+        except Exception:
+            pass
+    try:
+        vf = BASE_DIR / "VERSION"
+        if vf.exists():
+            ver = vf.read_text(encoding="utf-8").strip()
+            if ver:
+                return f"version:{ver}"
+    except Exception:
+        pass
+    try:
+        import subprocess as _sp
+        out = _sp.run(["git", "rev-parse", "--short", "HEAD"], cwd=str(BASE_DIR),
+                      capture_output=True, text=True, timeout=5)
+        if out.returncode == 0 and out.stdout.strip():
+            return f"git:{out.stdout.strip()}"
+    except Exception:
+        pass
+    return "source:unknown"
+
+
+def effective_config() -> dict:
+    """在依赖/Redis 检查**之前**形成统一有效值（端口 / Redis 目标 / 数据库 / 配置状态）。
+
+    此前 config.json 只在 `start_services()` 里映射进环境变量，而脚本层的 Redis 探测
+    已经按默认 6379 跑过——改了 redis.port 的用户会被探测"本机没有 Redis"。
+    """
+    cfg = _load_config()
+    _apply_env(cfg)                      # config.json → 环境变量（不覆盖已设）
+    llm = cfg.get("llm") if isinstance(cfg.get("llm"), dict) else {}
+    api_key = str(llm.get("api_key") or os.environ.get("LLM_API_KEY") or "").strip()
+    base_url = str(llm.get("base_url") or os.environ.get("LLM_BASE_URL") or "").strip()
+    model = str(llm.get("model") or os.environ.get("LLM_MODEL") or "").strip()
+    host = os.environ.get("REDIS_HOST", "localhost")
+    try:
+        rport = int(os.environ.get("REDIS_PORT", "6379") or 6379)
+    except Exception:
+        rport = 6379
+    return {
+        "port": web_port(),
+        "url": web_url(),
+        "redis_host": host,
+        "redis_port": rport,
+        "db": os.environ.get("WEAVEMIND_DB") or str(BASE_DIR / "agents.db"),
+        "config_complete": bool(api_key and base_url and model),
+        "model": model,
+        "base_url": base_url,
+        "frontend_dist": (BASE_DIR / "frontend" / "dist" / "index.html").exists(),
+        "identity": runtime_identity(),
+        "python": sys.version.split()[0],
+    }
+
+
+def _read_startup_state() -> dict:
+    try:
+        return json.loads(STARTUP_STATE_FILE.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+
+def _write_startup_state(state: dict) -> None:
+    try:
+        STARTUP_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        state = dict(state)
+        state["updated_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        STARTUP_STATE_FILE.write_text(
+            json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception as exc:
+        logging.getLogger(__name__).warning("启动状态写入失败：%s", str(exc)[:120])
+
+
+def completed_steps(identity: str) -> dict:
+    """身份未变时返回已验证完成的步骤（断点恢复；身份变化即整体失效）。"""
+    st = _read_startup_state()
+    if str(st.get("identity") or "") != str(identity or ""):
+        return {}
+    return dict(st.get("steps") or {})
+
+
+def mark_step(identity: str, name: str, ok: bool, detail: str = "") -> None:
+    st = _read_startup_state()
+    if str(st.get("identity") or "") != str(identity or ""):
+        st = {"identity": identity, "steps": {}}
+    st.setdefault("steps", {})[name] = {
+        "ok": bool(ok), "detail": str(detail)[:300],
+        "at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+    _write_startup_state(st)
+
+
+def acquire_instance_lock() -> dict:
+    """单实例锁：第二次双击（或启动中再次双击）复用同一实例、显示同一进度。
+
+    原子创建 + 持有者存活校验；持有者已死或锁过期则接管（避免崩溃后永久锁死）。
+    """
+    me = os.getpid()
+    for attempt in (1, 2):
+        try:
+            fd = os.open(str(INSTANCE_LOCK_FILE), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump({"pid": me, "state": "starting",
+                           "at": time.time()}, f)
+            return {"acquired": True, "pid": me, "state": "starting"}
+        except FileExistsError:
+            try:
+                info = json.loads(INSTANCE_LOCK_FILE.read_text(encoding="utf-8")) or {}
+            except Exception:
+                info = {}
+            holder = int(info.get("pid") or 0)
+            age = time.time() - float(info.get("at") or 0)
+            alive = False
+            try:
+                alive = bool(holder) and _is_alive(holder)
+            except Exception:
+                alive = False
+            if alive and age < 6 * 3600:
+                return {"acquired": False, "pid": holder,
+                        "state": str(info.get("state") or "running"), "age": age}
+            try:
+                INSTANCE_LOCK_FILE.unlink()
+            except Exception:
+                pass
+            if attempt == 2:
+                return {"acquired": False, "pid": holder, "state": "stale"}
+        except Exception as exc:
+            return {"acquired": True, "pid": me, "state": "unlocked",
+                    "warning": str(exc)[:120]}
+    return {"acquired": False, "pid": 0, "state": "unknown"}
+
+
+def release_instance_lock(state: str = "running") -> None:
+    """释放（或改状态）单实例锁：只处理本进程持有的锁。"""
+    try:
+        info = json.loads(INSTANCE_LOCK_FILE.read_text(encoding="utf-8")) or {}
+        if int(info.get("pid") or 0) != os.getpid():
+            return
+        if state == "running":
+            INSTANCE_LOCK_FILE.unlink()
+        else:
+            info["state"] = state
+            INSTANCE_LOCK_FILE.write_text(json.dumps(info, ensure_ascii=False),
+                                          encoding="utf-8")
+    except Exception:
+        pass
+
+
+_SECRET_PATTERNS = (
+    # Authorization 头：整行剩余部分一律替换（不能只吃掉 "Bearer" 一个词）
+    (re.compile(r"(?i)authorization\s*[:=]\s*\S.*$", re.M), "Authorization: <redacted>"),
+    (re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._\-]{8,}"), "Bearer <redacted>"),
+    # key/token/secret 赋值
+    (re.compile(r"(?i)(api[_-]?key|token|secret)\"?\s*[:=]\s*\"?[^\"\s,}]+"),
+     r"\1: <redacted>"),
+    (re.compile(r"sk-[A-Za-z0-9]{8,}"), "<redacted>"),
+)
+
+
+def redact_secrets(text: str) -> str:
+    """脱敏：密钥、Authorization、Bearer token 一律替换（诊断导出前必过）。"""
+    out = str(text or "")
+    for pat, repl in _SECRET_PATTERNS:
+        out = pat.sub(repl, out)
+    return out
+
+
+def diagnostics_report(tail_lines: int = 40) -> str:
+    """脱敏诊断（版本 / 步骤与错误类别 / 日志尾部）：不含密钥、研究正文与私人文件。
+
+    只读本仓库 logs/ 下的日志尾部，并按正则脱敏；不自动上传任何内容。
+    """
+    cfg = effective_config()
+    state = _read_startup_state()
+    rep = readiness_report()
+    lines = ["织光诊断（本地生成，未上传）", "=" * 40,
+             f"时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
+             f"运行身份：{cfg['identity']}　Python：{cfg['python']}",
+             f"工作台：{rep['url']}（{'可访问' if rep['workbench']['ok'] else '未响应'}）",
+             f"研究能力：{'就绪' if rep['research']['ok'] else '未就绪'}"
+             + (f"（缺 {', '.join(rep['research']['missing'])}）"
+                if rep['research']['missing'] else ""),
+             f"代码隔离：{'就绪' if rep['code_sandbox'].get('ok') else '不可用'}"
+             f"（{rep['code_sandbox'].get('reason') or rep['code_sandbox'].get('note') or ''}）",
+             f"配置：{'完整' if cfg['config_complete'] else '不完整（缺模型/密钥）'}"
+             f"　前端产物：{'有' if cfg['frontend_dist'] else '缺'}",
+             f"Redis：{cfg['redis_host']}:{cfg['redis_port']}",
+             f"启动步骤：{json.dumps(state.get('steps') or {}, ensure_ascii=False)[:400]}",
+             "", "日志尾部（已脱敏）："]
+    for fn in sorted(os.listdir(LOG_DIR)) if LOG_DIR.exists() else []:
+        if not fn.endswith(".log"):
+            continue
+        p = LOG_DIR / fn
+        try:
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                tail = f.readlines()[-tail_lines:]
+        except Exception:
+            continue
+        lines.append(f"--- logs/{fn} ---")
+        for ln in tail:
+            ln = ln.rstrip()
+            if re.search(r"(?i)(api_key|authorization|bearer|sk-)", ln):
+                ln = redact_secrets(ln)
+            lines.append(ln)
+    return "\n".join(lines)
+
+
+def startup_controller(*, allow_config_wizard: bool = True) -> dict:
+    """统一启动控制器：检查运行包 → 准备依赖 → 等待首次配置 → 启动服务 → 等待就绪。
+
+    返回 {state, steps, url, detail}；state ∈ STARTUP_STATES。
+    任何失败只给**一个**可执行的下一步（不反复自动重试同类动作）。
+    """
+    t = import_cli_text().msg
+    steps: list[tuple[str, bool, str]] = []
+
+    def step(label: str, ok: bool, detail: str = "") -> None:
+        steps.append((label, ok, detail))
+        print(f"  [{'OK' if ok else '!!'}] {label}：{detail}" if detail
+              else f"  [{'OK' if ok else '!!'}] {label}")
+
+    lock = acquire_instance_lock()
+    if not lock.get("acquired"):
+        detail = t(f"本实例已在运行（pid={lock.get('pid')}，状态 {lock.get('state')}）；"
+                   f"复用同一实例，不重复启动",
+                   f"instance already running (pid={lock.get('pid')})")
+        step(t("实例", "Instance"), True, detail)
+        print_readiness(readiness_report(), quiet=False)
+        return {"state": "research_ready" if readiness_report()["ready"]
+                else "limited_experience", "steps": steps,
+                "url": web_url(), "detail": detail}
+
+    try:
+        cfg = effective_config()
+        step(t("运行包", "Runtime"),
+             True, f"{cfg['identity']}　Python {cfg['python']}")
+
+        done = completed_steps(cfg["identity"])
+        # ② 依赖（身份未变且上轮已验证 → 复用结论，不重复联网）
+        if done.get("deps", {}).get("ok") and os.environ.get("WM_SKIP_VERIFIED_DEPS") != "0":
+            step(t("依赖", "Dependencies"), True,
+                 t("上轮已验证就绪（未重复联网安装）", "verified in a previous run (no reinstall)"))
+        else:
+            _run_dependency_check(fix=True, fatal=False)
+            mark_step(cfg["identity"], "deps", True, "checked")
+            step(t("依赖", "Dependencies"), True, t("已检查并补齐缺失项", "checked / missing installed"))
+
+        # ③ 配置（不完整就交给引导；不消耗模型额度做探针）
+        if not cfg["config_complete"]:
+            step(t("配置", "Configuration"), False,
+                 t("模型/密钥不完整：先完成引导再启动", "model/key incomplete: run the wizard first"))
+            if allow_config_wizard and os.environ.get("WM_NONINTERACTIVE") != "1":
+                try:
+                    import subprocess as _sp
+                    _sp.run([sys.executable, str(BASE_DIR / "setup_wizard.py")],
+                            cwd=str(BASE_DIR))
+                    cfg = effective_config()
+                except Exception as exc:
+                    logging.getLogger(__name__).warning("引导启动失败：%s", str(exc)[:120])
+            if not cfg["config_complete"]:
+                mark_step(cfg["identity"], "config", False, "incomplete")
+                release_instance_lock("failed")
+                return {"state": "awaiting_config", "steps": steps, "url": cfg["url"],
+                        "detail": t("完成模型配置后再次运行本入口（或打开页面引导）",
+                                    "finish model configuration and run this entry again")}
+        step(t("配置", "Configuration"), True,
+             f"{cfg['model']} @ {cfg['base_url']}")
+
+        # ④ 启动服务（内部会复用已运行实例）
+        mark_step(cfg["identity"], "config", True, cfg["model"])
+        step(t("服务", "Services"), True, t("启动/复用中（详见下方逐项校验）",
+                                            "starting/reusing (see checks below)"))
+        start_services()
+
+        # ⑤ 就绪
+        rep = readiness_report()
+        print_readiness(rep, quiet=False)
+        if rep["ready"]:
+            step(t("可研究", "Research ready"), True,
+                 t("工作台可访问、研究能力就绪", "workbench up and research capabilities ready"))
+            release_instance_lock("running")
+            return {"state": "research_ready", "steps": steps, "url": rep["url"],
+                    "detail": t("打开工作台开始研究", "open the workbench and start")}
+        if rep["workbench"]["ok"]:
+            step(t("受限体验", "Limited"), False,
+                 t("工作台可访问但研究能力未就绪（见上）", "workbench up, research not ready"))
+            release_instance_lock("limited")
+            return {"state": "limited_experience", "steps": steps, "url": rep["url"],
+                    "detail": t("按上面未就绪项处理后重试；此时不要提交研究任务",
+                                "fix the items above and retry; do not submit research yet")}
+        step(t("失败", "Failed"), False, t("工作台未响应", "workbench not responding"))
+        release_instance_lock("failed")
+        return {"state": "failed", "steps": steps, "url": rep["url"],
+                "detail": t("查看 logs/ 后重试；诊断：python launcher.py diagnostics",
+                            "check logs/ and retry; diagnostics: python launcher.py diagnostics")}
+    except Exception as exc:
+        logging.getLogger(__name__).error("启动控制器异常：%s", str(exc)[:200])
+        step(t("失败", "Failed"), False, str(exc)[:160])
+        release_instance_lock("failed")
+        return {"state": "failed", "steps": steps, "url": web_url(),
+                "detail": t("查看 logs/ 后重试；诊断：python launcher.py diagnostics",
+                            "check logs/ and retry; diagnostics: python launcher.py diagnostics")}
+
+
 def _run_dependency_check(fix: bool, fatal: bool) -> None:
     """启动前依赖自检（缺失自动补齐）；fatal=True 时必需项缺失即退出。
 
@@ -1191,6 +1519,20 @@ def main() -> None:
         # 启动脚本与页面共用同一端口来源：`python launcher.py url` 打印实际地址，
         # start.bat 据此打开浏览器（此前脚本里硬写 8080）。
         print(web_url())
+    elif action == "up":
+        # 统一启动控制器：检查运行包 → 依赖 → 配置 → 服务 → 就绪（新人入口只调它）
+        result = startup_controller()
+        print(f"  URL: {result.get('url') or web_url()}")
+        sys.exit(0 if result.get("state") in ("research_ready", "limited_experience") else 1)
+    elif action == "diagnostics":
+        out_path = sys.argv[2] if len(sys.argv) > 2 else ""
+        text = diagnostics_report()
+        if out_path:
+            Path(out_path).write_text(text, encoding="utf-8")
+            print(import_cli_text().msg(f"已写入脱敏诊断：{out_path}（未上传）",
+                                        f"redacted diagnostics written: {out_path}"))
+        else:
+            print(text)
     elif action == "readiness":
         _rep = readiness_report()
         print_readiness(_rep, quiet=False)

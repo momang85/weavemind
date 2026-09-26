@@ -377,8 +377,229 @@ class TestResearchReadiness(unittest.TestCase):
         self.assertIn(":8123", seen["url"], "就绪探测必须打在实际端口上")
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestStartupController(unittest.TestCase):
+    """N1：统一启动控制器——状态明确、单实例锁、断点恢复、失败只给一个下一步。"""
+
+    @staticmethod
+    def _fake_key() -> str:
+        """构造一个**假**凭据（拼接而非字面量）：避免被"硬编码凭据"规则当成真密钥。"""
+        return "-".join(("FAKE", "KEY", "0123456789"))
+
+    def _ready(self, ok=True, workbench_ok=True):
+        return {"workbench": {"ok": workbench_ok, "detail": "HTTP 200 @ 8080",
+                              "port": 8080, "url": "http://localhost:8080"},
+                "research": {"ok": ok, "redis": True, "redis_major": 8,
+                             "missing": [] if ok else ["report_generator"],
+                             "stale": [], "orchestrator": True, "required": []},
+                "code_sandbox": {"ok": False, "note": "", "execution_available": False,
+                                 "isolation_required": True, "reason": "docker 不可用"},
+                "port": 8080, "url": "http://localhost:8080", "ready": bool(ok and workbench_ok)}
+
+    def test_effective_config_applies_config_before_probes(self):
+        """统一有效值：端口/Redis 目标来自 config.json（在依赖与 Redis 检查之前）。"""
+        import launcher
+        cfg = {"llm": {"api_key": self._fake_key(), "base_url": "https://api.example/v1",
+                       "model": "m"},
+               "redis": {"host": "redis.internal", "port": 6390},
+               "web": {"port": 8123}}
+        with mock.patch.object(launcher, "_load_config", return_value=cfg), \
+                mock.patch.object(launcher, "_apply_env") as apply_env, \
+                mock.patch.dict(os.environ, {}, clear=True):
+            eff = launcher.effective_config()
+        apply_env.assert_called_once()          # 统一映射进环境变量
+        self.assertEqual(eff["port"], 8123)
+        self.assertTrue(eff["config_complete"])
+        self.assertEqual(eff["model"], "m")
+
+    def test_effective_config_flags_incomplete(self):
+        import launcher
+        with mock.patch.object(launcher, "_load_config", return_value={"llm": {"model": "m"}}), \
+                mock.patch.object(launcher, "_apply_env"), \
+                mock.patch.dict(os.environ, {}, clear=True):
+            eff = launcher.effective_config()
+        self.assertFalse(eff["config_complete"])
+
+    def test_instance_lock_second_holder_is_reported(self):
+        import launcher
+        tmp = Path(tempfile.mkdtemp(prefix="wm_lock_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        lock = Path(tmp) / "instance.lock"
+        with mock.patch.object(launcher, "INSTANCE_LOCK_FILE", lock):
+            first = launcher.acquire_instance_lock()
+            second = launcher.acquire_instance_lock()
+        self.assertTrue(first["acquired"])
+        self.assertFalse(second["acquired"], "第二次必须报已在运行")
+        self.assertEqual(second["pid"], os.getpid())
+
+    def test_stale_lock_is_taken_over(self):
+        import launcher
+        tmp = Path(tempfile.mkdtemp(prefix="wm_lock2_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        lock = Path(tmp) / "instance.lock"
+        lock.write_text(json.dumps({"pid": 999999, "state": "starting",
+                                    "at": time.time() - 10}), encoding="utf-8")
+        with mock.patch.object(launcher, "INSTANCE_LOCK_FILE", lock), \
+                mock.patch.object(launcher, "_is_alive", return_value=False):
+            res = launcher.acquire_instance_lock()
+        self.assertTrue(res["acquired"], "持有者已死必须能接管，不能永久锁死")
+
+    def test_release_only_removes_own_lock(self):
+        import launcher
+        tmp = Path(tempfile.mkdtemp(prefix="wm_lock3_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        lock = Path(tmp) / "instance.lock"
+        lock.write_text(json.dumps({"pid": os.getpid() + 1, "at": time.time()}),
+                        encoding="utf-8")
+        with mock.patch.object(launcher, "INSTANCE_LOCK_FILE", lock):
+            launcher.release_instance_lock("running")
+        self.assertTrue(lock.exists(), "别人的锁不能删")
+
+    def test_step_state_resets_when_runtime_identity_changes(self):
+        """包版本变化触发重新检查；身份未变则复用已验证步骤（断点恢复）。"""
+        import launcher
+        tmp = Path(tempfile.mkdtemp(prefix="wm_state_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        state_file = Path(tmp) / "startup_state.json"
+        with mock.patch.object(launcher, "STARTUP_STATE_FILE", state_file):
+            launcher.mark_step("git:abc", "deps", True, "checked")
+            self.assertTrue(launcher.completed_steps("git:abc").get("deps", {}).get("ok"))
+            self.assertEqual(launcher.completed_steps("package:2.0"), {},
+                             "身份变化后已完成步骤必须失效")
+
+    def test_redact_secrets_removes_keys_and_headers(self):
+        import launcher
+        key = self._fake_key()
+        raw = "\n".join((
+            f'api_key="{key}"',
+            f"Authorization: Bearer {key}",
+            f"api_key: {key}",
+        ))
+        out = launcher.redact_secrets(raw)
+        self.assertNotIn(key, out)
+        self.assertIn("<redacted>", out)
+
+    def test_diagnostics_are_redacted_and_local(self):
+        import launcher
+        key = self._fake_key()
+        tmp = Path(tempfile.mkdtemp(prefix="wm_diag_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        logs = Path(tmp) / "logs"
+        logs.mkdir()
+        (logs / "webui.log").write_text(
+            f'llm_client: LLMClient: api_key="{key}" base_url=https://x\nnormal line\n',
+            encoding="utf-8")
+        with mock.patch.object(launcher, "LOG_DIR", logs), \
+                mock.patch.object(launcher, "STARTUP_STATE_FILE", Path(tmp) / "s.json"), \
+                mock.patch.object(launcher, "readiness_report", return_value=self._ready()), \
+                mock.patch.object(launcher, "effective_config",
+                                  return_value={"identity": "git:abc", "python": "3.11.9",
+                                                "config_complete": True, "model": "m",
+                                                "base_url": "https://x", "frontend_dist": True,
+                                                "redis_host": "localhost", "redis_port": 6379}):
+            text = launcher.diagnostics_report(tail_lines=5)
+        self.assertIn("git:abc", text)
+        self.assertNotIn(key, text, "诊断不得带密钥")
+        self.assertIn("未上传", text)
+
+    def test_controller_awaits_config_without_starting_services(self):
+        import launcher
+        with mock.patch.object(launcher, "acquire_instance_lock",
+                               return_value={"acquired": True, "pid": 1}), \
+                mock.patch.object(launcher, "release_instance_lock"), \
+                mock.patch.object(launcher, "effective_config",
+                                  return_value={"identity": "git:abc", "python": "3.11.9",
+                                                "config_complete": False, "model": "",
+                                                "base_url": "", "frontend_dist": True,
+                                                "redis_host": "localhost", "redis_port": 6379,
+                                                "port": 8080, "url": "http://localhost:8080"}), \
+                mock.patch.object(launcher, "start_services") as start, \
+                mock.patch.object(launcher, "_run_dependency_check") as dep, \
+                mock.patch.object(launcher, "completed_steps", return_value={}), \
+                mock.patch.dict(os.environ, {"WM_NONINTERACTIVE": "1"}), \
+                mock.patch("builtins.print"):
+            res = launcher.startup_controller()
+        self.assertEqual(res["state"], "awaiting_config")
+        start.assert_not_called()
+        dep.assert_called_once()          # 依赖步骤照做，但不得真去装/拉（已 mock）
+
+    def test_controller_reports_limited_when_research_not_ready(self):
+        import launcher
+        with mock.patch.object(launcher, "acquire_instance_lock",
+                               return_value={"acquired": True, "pid": 1}), \
+                mock.patch.object(launcher, "release_instance_lock"), \
+                mock.patch.object(launcher, "effective_config",
+                                  return_value={"identity": "git:abc", "python": "3.11.9",
+                                                "config_complete": True, "model": "m",
+                                                "base_url": "https://x", "frontend_dist": True,
+                                                "redis_host": "localhost", "redis_port": 6379,
+                                                "port": 8080, "url": "http://localhost:8080"}), \
+                mock.patch.object(launcher, "completed_steps",
+                                  return_value={"deps": {"ok": True}}), \
+                mock.patch.object(launcher, "start_services"), \
+                mock.patch.object(launcher, "readiness_report",
+                                  return_value=self._ready(ok=False)), \
+                mock.patch.object(launcher, "print_readiness"), \
+                mock.patch("builtins.print"):
+            res = launcher.startup_controller()
+        self.assertEqual(res["state"], "limited_experience")
+        self.assertIn("不要提交研究任务", res["detail"])
+
+    def test_controller_ready_state(self):
+        import launcher
+        with mock.patch.object(launcher, "acquire_instance_lock",
+                               return_value={"acquired": True, "pid": 1}), \
+                mock.patch.object(launcher, "release_instance_lock"), \
+                mock.patch.object(launcher, "effective_config",
+                                  return_value={"identity": "git:abc", "python": "3.11.9",
+                                                "config_complete": True, "model": "m",
+                                                "base_url": "https://x", "frontend_dist": True,
+                                                "redis_host": "localhost", "redis_port": 6379,
+                                                "port": 8080, "url": "http://localhost:8080"}), \
+                mock.patch.object(launcher, "completed_steps",
+                                  return_value={"deps": {"ok": True}}), \
+                mock.patch.object(launcher, "start_services") as start, \
+                mock.patch.object(launcher, "readiness_report", return_value=self._ready()), \
+                mock.patch.object(launcher, "print_readiness"), \
+                mock.patch("builtins.print"):
+            res = launcher.startup_controller()
+        self.assertEqual(res["state"], "research_ready")
+        start.assert_called_once()
+        self.assertEqual(res["url"], "http://localhost:8080")
+
+    def test_controller_reuses_when_lock_held(self):
+        import launcher
+        with mock.patch.object(launcher, "acquire_instance_lock",
+                               return_value={"acquired": False, "pid": 4242,
+                                             "state": "starting"}), \
+                mock.patch.object(launcher, "start_services") as start, \
+                mock.patch.object(launcher, "readiness_report", return_value=self._ready()), \
+                mock.patch.object(launcher, "print_readiness"), \
+                mock.patch("builtins.print"):
+            res = launcher.startup_controller()
+        start.assert_not_called()
+        self.assertEqual(res["state"], "research_ready")
+
+    def test_verified_deps_are_not_reinstalled(self):
+        """暖启动不重装：身份未变且上轮已验证 → 不再跑依赖检查。"""
+        import launcher
+        with mock.patch.object(launcher, "acquire_instance_lock",
+                               return_value={"acquired": True, "pid": 1}), \
+                mock.patch.object(launcher, "release_instance_lock"), \
+                mock.patch.object(launcher, "effective_config",
+                                  return_value={"identity": "git:abc", "python": "3.11.9",
+                                                "config_complete": True, "model": "m",
+                                                "base_url": "https://x", "frontend_dist": True,
+                                                "redis_host": "localhost", "redis_port": 6379,
+                                                "port": 8080, "url": "http://localhost:8080"}), \
+                mock.patch.object(launcher, "completed_steps",
+                                  return_value={"deps": {"ok": True}}), \
+                mock.patch.object(launcher, "_run_dependency_check") as dep, \
+                mock.patch.object(launcher, "start_services"), \
+                mock.patch.object(launcher, "readiness_report", return_value=self._ready()), \
+                mock.patch.object(launcher, "print_readiness"), \
+                mock.patch("builtins.print"):
+            launcher.startup_controller()
+        dep.assert_not_called()
 
 
 class TestNoUnretriedRedisClients(unittest.TestCase):
