@@ -582,5 +582,53 @@ class TestFilesUrlSegmentEncoding(unittest.TestCase):
         self.assertIn("naturalWidth", text, "未读取图片真实尺寸（onLoad naturalWidth）")
 
 
+class TestFirstRunGuide(unittest.TestCase):
+    """N3 前端守卫：首次使用引导必须**不越界**（不自动提交、不代替真实配置、演示标注常在）。
+
+    CI 的前端作业只做构建、没有 JS 测试运行器，所以沿用本文件的做法：源码级断言。
+    """
+
+    def setUp(self):
+        self.guide = (SRC / "components" / "FirstRunGuide.tsx").read_text(encoding="utf-8")
+        self.console = (SRC / "pages" / "TaskConsole.tsx").read_text(encoding="utf-8")
+
+    def test_guide_is_mounted_on_the_console(self):
+        self.assertIn("FirstRunGuide", self.console)
+        self.assertIn("firstRun.configComplete", self.console)
+        self.assertIn("firstRun.demoAvailable", self.console)
+
+    def test_console_only_reads_public_booleans(self):
+        """引导只读 bootstrap 的布尔状态：不得把密钥/地址/模型名带进前端。"""
+        for leak in ("api_key", "base_url"):
+            self.assertNotIn(leak, self.console, f"控制台不应出现配置字段：{leak}")
+
+    def test_demo_is_labelled_and_read_only(self):
+        # 演示横幅必须**始终**渲染（不能只在展开时提示），文案来自后端
+        self.assertIn("data-demo-banner", self.guide)
+        self.assertIn("非本次实时生成", self.guide)
+        self.assertIn("/api/demo/brief", self.guide)
+        # 演示路径不得提交任务
+        self.assertNotIn("fetch('/task'", self.guide)
+        self.assertNotIn("fetch(`/task", self.guide)
+
+    def test_first_task_is_prefilled_not_submitted(self):
+        self.assertIn("onPrefillGoal", self.guide)
+        self.assertIn("不自动提交", self.guide)
+
+    def test_reading_results_explainer_has_all_three_states(self):
+        for text in ("机器验收", "问题覆盖", "人工复核"):
+            self.assertIn(text, self.guide, f"读结果一步缺少：{text}")
+        self.assertIn("逐问题资料计划", self.guide)
+        self.assertIn("重新导出", self.guide)
+
+    def test_guide_does_not_collect_secrets_itself(self):
+        """密钥只能走既有配置入口；引导不得自建密钥输入框。"""
+        for field in ("apiKey", "api_key", "password"):
+            self.assertNotIn(field, self.guide, f"引导不得自建密钥输入：{field}")
+        # 配置入口走既有设置页（由挂载方给出跳转，不在引导里自造配置界面）
+        self.assertIn("onGoSettings", self.guide)
+        self.assertIn("'/settings'", self.console)
+
+
 if __name__ == "__main__":
     unittest.main()

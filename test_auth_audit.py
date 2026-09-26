@@ -371,6 +371,45 @@ class TestAuthAudit(unittest.TestCase):
         # 新管理员可登录
         self.assertIsNotNone(self._login("boss", "boss12345"))
 
+    def test_bootstrap_exposes_first_run_flags_without_secrets(self):
+        """N3 首次引导要的两个布尔：模型配置是否完整、有没有内置演示。
+
+        公开接口只给布尔状态——**不得**回显密钥、地址或模型名。
+        """
+        self._write_config({"llm": {"api_key": "FAKE-KEY-0123456789",
+                                    "base_url": "https://api.example/v1",
+                                    "model": "demo-model"}})
+        d = self._req("/api/auth/bootstrap").json_body()
+        self.assertTrue(d["config_complete"])
+        self.assertEqual(set(d.keys()) - {"setup_required", "config_complete", "demo_available"},
+                         set(), "bootstrap 不得增加其他字段")
+        # 配置不完整时如实为 False
+        self._write_config({"llm": {"model": "demo-model"}})
+        self.assertFalse(self._req("/api/auth/bootstrap").json_body()["config_complete"])
+
+    def test_demo_brief_is_public_readonly_and_labelled(self):
+        """内置演示：公开只读、必须带"非本次实时生成"标注、不写任何统计。"""
+        h = self._req("/api/demo/brief")
+        self.assertEqual(h._status, 200, h.json_body())
+        d = h.json_body()
+        self.assertTrue(d["available"])
+        self.assertIn("非本次实时生成", d["note"])
+        self.assertIn("不写入", d["note"])
+        self.assertIn("内置演示", d["title"])
+        self.assertIn("演示", d["markdown"])
+        # 只读：写操作一律不接受（未鉴权 401 / 无路由 404 / 方法不允许 405 都可）
+        r = self._req("/api/demo/brief", "POST", {})
+        self.assertIn(r._status, (401, 403, 404, 405), "演示简报不得接受写操作")
+
+    def test_demo_brief_missing_file_reports_unavailable(self):
+        import web_ui as _w
+        from pathlib import Path as _P
+        with mock.patch.object(_w, "_demo_brief_path",
+                               lambda: _P("does-not-exist") / "demo_brief.md"):
+            h = self._req("/api/demo/brief")
+        self.assertEqual(h._status, 404)
+        self.assertFalse(h.json_body()["available"])
+
     def test_logout_cookie_and_expiry(self):
         self._seed_users()
         token = self._login("admin", "admin123")

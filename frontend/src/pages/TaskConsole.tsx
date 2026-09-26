@@ -6,6 +6,7 @@ import StepInspector from '../components/StepInspector'
 import SubmitPanel from '../components/console/SubmitPanel'
 import PlanPanel from '../components/console/PlanPanel'
 import ConsoleSideTabs from '../components/console/ConsoleSideTabs'
+import FirstRunGuide from '../components/FirstRunGuide'
 import { clearLastTask, readLastTask, saveLastTask, shouldResume } from '../lib/lastTask'
 import type { TaskNode, ConversationMessage, TaskReport } from '../stores/types'
 import type { ResearchFields } from '../lib/researchGoal'
@@ -321,6 +322,19 @@ export default function TaskConsole() {
 
   const isRunning = status === 'running'
 
+  // N3：首次使用引导的公开状态（是否已配置模型、是否有内置演示）。
+  // 只读`/api/auth/bootstrap`的布尔字段——不含密钥、地址或模型名。
+  const [firstRun, setFirstRun] = useState({ configComplete: true, demoAvailable: false })
+  useEffect(() => {
+    fetch('/api/auth/bootstrap')
+      .then(r => r.json())
+      .then(d => setFirstRun({
+        configComplete: d?.config_complete !== false,
+        demoAvailable: !!d?.demo_available,
+      }))
+      .catch(() => {})
+  }, [])
+
   // 交付节奏：近 N 次已完成任务的平均耗时（无样本时明说未知，不给假预期）；
   // 运行中显示已运行时长，每 30s 走一次，避免看着不动以为卡死
   const [nowTick, setNowTick] = useState(() => Date.now())
@@ -348,6 +362,13 @@ export default function TaskConsole() {
 
   return (
     <div className="max-w-7xl mx-auto space-y-6">
+      {/* N3：首次使用引导——模型未配置时默认展开，配好后可随时折叠查看 */}
+      <FirstRunGuide
+        configComplete={firstRun.configComplete}
+        demoAvailable={firstRun.demoAvailable}
+        onPrefillGoal={prefillGoal}
+        onGoSettings={() => { window.location.href = '/settings' }} />
+
       <SubmitPanel
         key={taskId || 'idle'}
         goal={goal} setGoal={setGoal}

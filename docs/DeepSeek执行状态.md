@@ -1,32 +1,26 @@
-# DeepSeek 执行状态（2026-09-26 更新 · 新人专项 N2 完成）
+# DeepSeek 执行状态（2026-09-26 更新 · 新人专项 N3 完成）
 
-**当前批次**：新人使用专项 N · **N2 Windows 最小便携运行包**（指令
-`docs/新人一键启动与首次研究体验_20260925.md` §4；N0/N1 见 `6715543`、`e81dcf3`）。
-新增构建器 `scripts/build_run_package.py`，已产出**本地候选包**：
-`weavemind-2026.09.26-win-x64.zip`（291.7 MB，sha256 `28ce59f7…`；解压 23,984 文件 ≈1.1 GB），
-内含可重定位 Python **3.11.9**、**108 个** Windows 运行依赖（`requirements-runtime-win.lock`）、
-已构建前端、便携 Redis（离线复用入口）、`package_manifest.json`（逐文件 SHA256，
-应用据其识别运行身份 `package:2026.09.26`）。
+**当前批次**：新人使用专项 N · **N3 浏览器内首次引导**（指令
+`docs/新人一键启动与首次研究体验_20260925.md` §5；N0–N2 见 `6715543`、`e81dcf3`、`e858f0f`）。
+新增任务控制台顶部的**首次使用引导**（五步：先体验或配置 → 一次配置 → 账户与数据位置 →
+首个研究任务 → 怎么读结果），模型未配置时默认展开；新增公开只读的内置演示：
 
-- **变更文件**：`scripts/build_run_package.py`（新）、`scripts/make_lock.py`（`--out`：
-  Windows 锁不再覆盖 Linux 锁）、`dep_check.py`（下载白名单加裸域名 `python.org`）、
-  `requirements-runtime-win.lock`（新）、`docs/新人运行包构建说明.md`（新）、
-  `docs/evidence/n2_run_package_20260926.md`（新）、`test_deploy_manifest.py`（新增 10 例）。
-- **验证**：包内解释器执行 `ssl/sqlite3` → Python 3.11.9 / OpenSSL 3.0.13 / SQLite 3.45.1；
-  应用与第三方导入（task_intent、question_assessment、net_policy、code_sandbox、dep_check、
-  jieba、pandas、matplotlib、chromadb、redis、aiosqlite、httpx、psutil）全部成功；
-  秘密扫描与构建机绝对路径扫描 **0 命中**；包内无 `config.json/agents.db/models/logs`。
-  `test_deploy_manifest` 25 OK（含构建器 10 例）。
-- **构建中修掉的真问题**：① 生成 Windows 锁覆盖 Linux 锁（已恢复并加 `--out`）；
-  ② 白名单要写裸域名（校验器剥 `www.`）；③ `._pth` 整份重写导致包内解释器起不来
-  （改为保留原行 + 追加，并断言标准库 zip）；④ 清单误带 `models/`（15 GB 模型文件）与
-  `workers/*.log`（含构建机路径）。
-- **已知限制**：**干净环境未验**（`clean_env_verified=false`，属 N4）；解压约 1.1 GB
-  （kubernetes/scipy/onnxruntime 等可再裁剪，本轮不裁）；中文字体用系统字体、未随包分发；
-  未做签名/安装器/自动更新。构建只产出本地候选包，未发布 Release、未上传数据。
-- **下一步**：N3 浏览器首次引导（演示与真实分开、一次配置、首个研究任务、教读者读结果，
-  不自动提交付费样例）→ N4 新人路径验收矩阵（干净环境）。
-  证据：`docs/evidence/n2_run_package_20260926.md`、`n1_startup_controller_20260926.md`。
+- **变更文件**：`web_ui.py`（`bootstrap` 增补 `config_complete`/`demo_available` 两个布尔、
+  新增 `GET /api/demo/brief` 并加入公开 GET 白名单）、`demo/demo_brief.md`（合成数据演示，
+  正文自带"非本次实时生成"标注）、`frontend/src/components/FirstRunGuide.tsx`（新）、
+  `frontend/src/pages/TaskConsole.tsx`（挂载 + 只读两个布尔）、`frontend/dist/*`（重建产物）、
+  `test_auth_audit.py`（+3 例）、`test_frontend_guards.py`（+6 例）。
+- **交互边界**：演示只走只读接口且横幅**常驻**；示例目标只"填入提交框"不提交；配置入口指向
+  既有设置页（引导不自建密钥输入）；连通性测试仍由用户点击触发；未改 `templates.json`、
+  未扩市场/适配器、未自动提交任何付费样例。
+- **验证**：`GET /api/auth/bootstrap` 返回两个布尔；`GET /api/demo/brief` 返回 1173 字符演示
+  且标注齐备；重建后的 `TaskConsole-*.js` 内含引导三处文案（确已进入被伺服的前端）。
+  `test_auth_audit` 18 OK、`test_frontend_guards` 52 OK。
+- **未验**：**浏览器内交互未由我验证**——服务重启后会话在旧标签页，新标签页只到登录页，
+  我不持有凭据也不猜密码；这一步留 N4 真人路径验收，不写成"已通过"。
+- **下一步**：N4 新人路径验收矩阵（干净环境、中文与空格路径、移动目录、断网恢复等——
+  干净环境未验的项如实标注）。
+  证据：`docs/evidence/n3_first_run_guide_20260926.md`。
 - 本轮未新增付费模型调用，未改模型/权限/模板/配置。
 
 ## 归档批次（R1–R4 与更早）

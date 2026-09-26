@@ -3129,9 +3129,9 @@ class Handler(BaseHTTPRequestHandler):
         return session
 
     def _is_public_get(self, path: str) -> bool:
-        """GET 白名单：公开分享页、健康检查、引导状态、前端静态资源。
+        """GET 白名单：公开分享页、健康检查、引导状态、内置演示、前端静态资源。
         /files/<task_id>/... 仅在任务已生成分享链接时公开（供分享页图片/附件使用）。"""
-        if path in ("", "/", "/api/health", "/api/auth/bootstrap"):
+        if path in ("", "/", "/api/health", "/api/auth/bootstrap", "/api/demo/brief"):
             return True
         if path.startswith("/share/"):
             return True
@@ -3788,8 +3788,53 @@ def _get_health(self, p):
 
 def _get_bootstrap(self, p):
     if p == "/api/auth/bootstrap":
-        # 公开引导状态：前端据此判断显示“创建初始管理员”还是登录表单
-        return self._json({"setup_required": not _users_initialized()})
+        # 公开引导状态：前端据此判断显示"创建初始管理员"还是登录表单，
+        # 以及首次使用引导（N3）该显示哪一步。
+        # 只暴露布尔状态：**不含**任何密钥、地址或模型名，公开接口不泄漏配置内容。
+        info = {"setup_required": not _users_initialized()}
+        try:
+            cfg = _load_config() or {}
+            llm = cfg.get("llm") if isinstance(cfg.get("llm"), dict) else {}
+            info["config_complete"] = bool(
+                str(llm.get("api_key") or os.environ.get("LLM_API_KEY") or "").strip()
+                and str(llm.get("base_url") or os.environ.get("LLM_BASE_URL") or "").strip()
+                and str(llm.get("model") or os.environ.get("LLM_MODEL") or "").strip())
+        except Exception:
+            info["config_complete"] = False
+        try:
+            info["demo_available"] = _demo_brief_path().exists()
+        except Exception:
+            info["demo_available"] = False
+        return self._json(info)
+
+
+def _demo_brief_path():
+    """内置演示简报路径（合成数据，与真实资料接入严格分开）。"""
+    from pathlib import Path
+    return Path(os.path.dirname(os.path.abspath(__file__))) / "demo" / "demo_brief.md"
+
+
+def _get_demo_brief(self, p):
+    """GET /api/demo/brief：内置演示简报（公开、只读）。
+
+    演示是**合成数据**，必须一直带着"非本次实时生成"的标注；本接口不写任何统计，
+    也不触发任何模型调用（因此不会被当成一次真实研究）。
+    """
+    if p != "/api/demo/brief":
+        return
+    path = _demo_brief_path()
+    if not path.exists():
+        return self._json({"available": False, "note": "内置演示未随包提供"}, 404)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except Exception as exc:
+        return self._json({"available": False, "error": str(exc)[:120]}, 500)
+    return self._json({
+        "available": True,
+        "title": "内置演示简报（合成数据）",
+        "note": "内置演示：非本次实时生成，不代表真实研究结果；不写入任何研究统计",
+        "markdown": text,
+    })
 
 def _get_audit(self, p):
     if p == "/api/audit":
@@ -6191,6 +6236,7 @@ def _post_scheduled_jobs(self, p, body, admin):
 _GET_ROUTES = [
     (lambda self, p: p == "/api/health", _get_health),
     (lambda self, p: p == "/api/auth/bootstrap", _get_bootstrap),
+    (lambda self, p: p == "/api/demo/brief", _get_demo_brief),
     (lambda self, p: p == "/api/audit", _get_audit),
     (lambda self, p: p == "/", _get_root),
     (lambda self, p: p == "/api/status", _get_status),
