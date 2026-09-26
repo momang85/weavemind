@@ -19,6 +19,26 @@ logger = logging.getLogger(__name__)
 
 GOOGLE_NEWS_RSS = "https://news.google.com/rss/search"
 
+# 最近一次失败的统一诊断类别（专项 §6：新闻通道也输出同一类别表）。
+# 只记类别与时间，不含任何响应内容；供页面/日志解释"这条新闻为什么没来"。
+_LAST_FAILURE: dict = {"category": "", "at": 0.0, "channel": ""}
+
+
+def _record_failure(exc: Exception, channel: str) -> str:
+    """记录失败类别（与 net_policy/search_diag 同一套命名），返回该类别。"""
+    try:
+        from net_policy import classify_network_error
+        kind = classify_network_error(exc)
+    except Exception:
+        kind = type(exc).__name__
+    _LAST_FAILURE.update({"category": kind, "at": time.time(), "channel": channel})
+    return kind
+
+
+def last_error() -> dict:
+    """最近一次新闻获取失败的 `{category, at, channel}`（没有失败则为空类别）。"""
+    return dict(_LAST_FAILURE)
+
 
 def parse_news_rss(xml_text: str, query: str = "") -> dict | None:
     """解析 Google News RSS XML → 标题/链接/时间列表。"""
@@ -70,7 +90,8 @@ def fetch_news(query: str) -> dict | None:
         resp.raise_for_status()
         return parse_news_rss(resp.text, query)
     except Exception as exc:
-        logger.warning("Google News RSS fetch failed: %s", exc)
+        kind = _record_failure(exc, "google_news_rss")
+        logger.warning("Google News RSS fetch failed（类别=%s）：%s", kind, exc)
         return None
 
 
@@ -114,5 +135,6 @@ def fetch_news_fallback(query: str, max_results: int = 6) -> dict | None:
             },
         }
     except Exception as exc:
-        logger.warning("text search fallback failed: %s", exc)
+        kind = _record_failure(exc, "text_search_fallback")
+        logger.warning("text search fallback failed（类别=%s）：%s", kind, exc)
         return None

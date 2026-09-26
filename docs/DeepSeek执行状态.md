@@ -1,7 +1,30 @@
-# DeepSeek 执行状态（2026-09-27 更新 · 搜索网络专项 S0+S1 已交，含 S1 包内复验补口）
+# DeepSeek 执行状态（2026-09-27 更新 · 专项 S0+S1 已交，S2 上半在办）
 
-**当前批次**：搜索网络与金融资料获取专项（指令 `docs/搜索网络与金融资料获取专项_20260926.md`）
-**S0 同 Worker 环境诊断 + S1 有界搜索与真实结果协议**（09-27 依包内实测补口，见下）。
+**当前批次**：搜索网络与金融资料获取专项（指令 `docs/搜索网络与金融资料获取专项_20260926.md`）。
+
+## S2 上半：网络通道一致性（2026-09-27，证据 `docs/evidence/s2_network_egress_20260927.md`）
+
+- **出口方式显式化**：`net_policy.connection_mode()` 三态 `inherit / direct / proxy_required`
+  （`WM_CONTENT_FETCH_MODE` 或 `config.json network.content_fetch.mode`，非法值按 inherit 并记日志）；
+  `proxy_settings()` 脱敏报告环境代理；`direct` 模式由 launcher 启动时清理本进程代理变量
+  （只删代理变量、不改系统设置，子进程继承）。
+- **代理失败不落直连**（专项 §6 核心）：`dual_channel_get` 遇到代理层失败改抛
+  `ProxyEgressError`（类别 `proxy_error`），**socket 直连次数 0**；"配了代理且失败在连接
+  阶段"经 `URLError.reason` 判定，"已建连后被重置"不算，避免误伤第二通道。
+- **socket 通道改走已验 IP**：`net_policy.connect_validated` 连校验时解析出的那个 IP
+  （消除"校验后改指内网"窗口），TLS 系统 CA + 正确 SNI，http/https 按 scheme 处理。
+- **内容抓取出口如实标注**：`fetch_document` 结果带 `egress="direct_pinned"`；`proxy_required`
+  模式下**拒绝**（本版本经代理出口明确不支持），不静默改道。
+- **同一套诊断类别**：`net_policy.classify_network_error`；各源错误对象带 `.category`；
+  PDF 下载与新闻 RSS 记类别（`news.last_error()`）；`search_diag.classify_error` 先判代理层。
+- **验收**：代理失败直连 0（替身断言）、源站失败仍走第二通道、407/拒连判定不误伤、
+  TLS 校验未关（源码守卫）、内网/跳转内网仍拒、公网正例仍通、回环工作台未受影响、
+  `proxy_required` 拒绝而非改道。测试：`test_net_policy` 33 例（新增 11）、
+  `test_p0`+`test_startup_readiness`+`test_deploy_manifest`+`test_delivery_chain` 834 例全绿。
+- **未验**：全离线单测；代理在线/离线两种真机出口未验；包内复验待下次重建运行包；
+  `health_registry` 状态语义与实例身份（专项 §6 第 4 条）留 S2 下半。
+
+## 已交批次：S0 + S1（含包内复验补口，2026-09-26/27）
 
 - **S0（`search_diag.py`，新）**：离线事实 + 一次有界公开探测（≤6 次调用、≤60 秒、无重试、无模型），
   不新建请求点（全走项目既有通道）。两环境事实表：Bing 两侧可用（10 条/0.5s）；东财结构化两侧可用；
@@ -15,40 +38,19 @@
 - **候选与步骤状态**：`url_health` 改五态（`reachable/not_found/inaccessible/unknown/policy_blocked`，
   请求走 `net_policy.fetch_document`）；编排器只剔 404/410、其余保留候选并记原因；
   过滤后为空不再保持 SUCCESS；**无候选 URL 不派发抓取**（抓取调用数 0）；交付侧只有 404/410 写"链接失效"。
-- **S1 补口（09-27，包内实测驱动；证据 `s1_bounded_search_20260926.md` 第 7 节）**：
-  1. **ddgs 后端可用性改问注册表**：9.16 把可用后端放在 `ddgs.engines.ENGINES`（按类属性 `disabled`
-     过滤，包内 `bing`/`yandex` 已停用），类上没有 `get_available_backends`/`BACKENDS`；旧探测落空后
-     回落清单首位 `yandex`，而**不在注册表里的后端名会让 ddgs 静默回落 auto**（全引擎重扫，正是 §5
-     禁止的放大）。现在 `adapters.search_quality.ddg_text_backends()/select_ddg_backend()` 是唯一入口
-     （worker / `adapters/text_search` / `search_diag` 三处统一），拿不到可打后端就**不发请求**。
-  2. **零结果不再当故障**：ddgs 的 `No results found.` 归 `no_results`（`search_diag.classify_error`
-     + `search_runner.is_empty_result_error`），调用方按"完成但零命中"返回空列表——不再记 parse_error、
-     不再熔断（§5"真零结果不熔断"）。
-  3. **任务级检索预算**：Redis 台账按根任务累计已用次数与首次检索时刻，重试/重做派发只拿余额
-     （余额 0 时一次请求都不发），不再"重试次数 × 6"。
-  4. **补查重试真的换查询**：契约新增 `retry_queries()/retry_query_line()`（主体、期间、文档类型、截止
-     不变，只换资料面：MD&A 正文/指标底稿/公告/全文）；执行器跨轮 `exclude_keys` 去重；worker 见
-     `[重试检索查询]` 行只打这批；编排器重试指令携带新查询，计划用尽时如实写"本轮没有可用的新查询"。
-- **包内复验读数**（运行包 `2026.09.26.13`，包内解释器）：ddgs 注册表
-  `brave/duckduckgo/google/grokipedia/mojeek/startpage/wikipedia/yahoo`（无 yandex），生产选中 `brave`
-  （registry 依据）；`search_diag` 包内一次有界探测：Bing 10 条/0.52s、ddgs `no_results`/8.05s、
-  东财结构化 1 条/0.42s、公告查看页 HTML 0.16s（仍非 PDF 直链）、预算用 4/6 次。
-- **验收**：连接全失败不走 auto、真零结果不熔断、单变体异常不标健康、短 deadline 可中止、
-  403/429 保留候选、404/410 明确失效、过滤后空结果不保持成功、无候选 fetch 调用 0、无新模型调用、
-  跨轮不重复提交同一 (查询,后端)、任务级预算用尽不发请求——逐条对应单测
-  （`test_search_quality_unified`：执行器/S0 诊断/注册表三态/结构化重试/任务级台账；
-  `test_p0` URL 健康；`test_orchestrator_v2` 候选保留 + 重试指令携带新查询）。
-- **被调整的既有断言**（专项要求"修复必须调整行为预期"）：`test_p0` 的 `alive/dead`+重试+HEAD 降级
-  断言重写为五态；`test_orchestrator_v2` 只剔 404/410；两处 `web_fetch` fixture 补候选 URL；
-  `test_offline_delivery` 的搜索替身改为真实 JSON 数组 + 两个候选（替身失真会直接打断角色化抓取）。
-- **本批网络请求范围**：S0 与包内复验共 16 次公开请求（源码 4 + 包内 .9 4 + 包内 .12 4 +
-  包内 .13 4；全部是固定公开样例的有界探测，无重试、无模型）；其余全部离线单测。
-  无付费调用、无模型调用、无客户数据；未改模型/权限/`templates.json`；未买搜索 API。
-- **未验**：S2（网络通道一致性、代理/直连显式区分、transport raw socket 回落）与 S3（A 股披露发现闭环）
-  未动；`_replan_step` 的"换实现"分支（改用结构化数据/模型知识）仍未改，它不发检索；任务级墙钟只累计
-  在检索阶段（60 秒），URL 校验与抓取各按自身超时，未与检索台账合并；**未跑真机端到端**（授权的一次
-  付费任务已用掉）；干净机器与物理断网照旧未验。
-- 证据：`docs/evidence/s0_worker_env_diag_20260926.md`、`docs/evidence/s1_bounded_search_20260926.md`。
+- **S1 补口（包内实测驱动）**：① ddgs 后端可用性改问 `ddgs.engines.ENGINES` 注册表
+  （无效后端名会让 ddgs 静默回落 auto 全引擎重扫），三处调用点统一，拿不到就不发请求；
+  ② ddgs 的 `No results found.` 归 `no_results`（完成但零命中），不再记 parse_error 熔断；
+  ③ **任务级检索预算**：Redis 台账按根任务累计次数与首次检索时刻，重试/重做派发只拿余额；
+  ④ **补查重试真的换查询**：契约 `retry_queries()`（主体/期间/文档类型/截止不变，只换资料面）
+  + 执行器跨轮 `exclude_keys` 去重 + worker `[重试检索查询]` 只打新批 + 编排器重试指令携带新查询。
+- **包内复验读数**（运行包 `2026.09.26.13`，zip sha256 `22eabe9a…9423`）：注册表
+  `brave/duckduckgo/google/grokipedia/mojeek/startpage/wikipedia/yahoo`（无 yandex），生产选中
+  `brave`；`search_diag`：Bing 10 条/0.48s、ddgs `no_results`/8.05s、东财 1 条/0.28s、
+  公告查看页 0.16s（仍非 PDF 直链），预算用 4/6 次。
+- **未验（S0/S1 范围）**：S3（A 股披露发现闭环）未动；`_replan_step` 的"换实现"分支未改；
+  任务级台账按根任务共享 6 次/60 秒（多检索步骤先到先得，放宽改两个环境变量），
+  并行派发可能低估一轮；**未跑真机端到端**；干净机器与物理断网照旧未验。
 
 ## 归档批次（中国平安复跑、N4 场景复验、N0–N4、R1–R4 与更早）
 

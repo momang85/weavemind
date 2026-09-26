@@ -56,6 +56,182 @@ class FetchError(RuntimeError):
     """抓取在执行层失败（连接、TLS、超时、响应过大）——与策略拒绝区分开。"""
 
 
+# ── 出口方式（S2：显式区分继承代理 / 明确直连，不由异常分支擅自切换）──────
+# inherit        跟随部署环境代理设置（默认；urllib 通道吃 HTTP(S)_PROXY）
+# direct         明确不走代理（urllib 通道显式清空代理表）
+# proxy_required 要求内容抓取必须经代理出口——本版本**明确不支持**：代理侧自行解析域名，
+#                与"校验与连接共用同一个已验 IP"冲突，故宁可拒绝也不静默改道直连
+CONTENT_FETCH_MODES = ("inherit", "direct", "proxy_required")
+PROXY_EGRESS_SUPPORTED = False
+_MODE_ENV = "WM_CONTENT_FETCH_MODE"
+_config_cache: dict = {"mtime": None, "mode": ""}
+
+
+def proxy_egress_supported() -> bool:
+    """内容抓取能否经代理出口（其余接口不适用）。本版本为 False，且是显式声明。"""
+    return bool(PROXY_EGRESS_SUPPORTED)
+
+
+_PROXY_ENV_NAMES = ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy",
+                    "ALL_PROXY", "all_proxy")
+
+
+def apply_direct_mode_env() -> list:
+    """`direct` 模式下让本进程不再使用环境代理（**启动时调用一次**）。
+
+    为什么放在启动时改环境、而不是每个请求里判断：urllib 只认环境里的代理设置，
+    逐请求分支既要改十几处调用点，也容易漏掉新增的适配器。启动时一次性决定"本进程
+    继承部署代理还是明确直连"，对进程内所有既有调用点（含将来新增的）一致生效；
+    只删代理变量，不动别的环境；返回被清理的变量名（**不含值**）供启动报告显示。
+    """
+    if connection_mode() != "direct":
+        return []
+    cleared = []
+    for name in _PROXY_ENV_NAMES:
+        if os.environ.pop(name, None) is not None:
+            cleared.append(name)
+    if cleared:
+        logger.warning("内容抓取配置为 direct：已清理本进程环境代理 %s（不改系统设置）",
+                       ",".join(cleared))
+    return cleared
+
+
+def _config_content_fetch_mode() -> str:
+    """config.json 的 `network.content_fetch.mode`（读不到回空串，不猜）。"""
+    try:
+        path = Path(_CONFIG_PATH)
+        mtime = path.stat().st_mtime if path.exists() else 0.0
+        if _config_cache["mtime"] == mtime:
+            return _config_cache["mode"]
+        mode = ""
+        if mtime:
+            data = json.loads(path.read_text(encoding="utf-8")) or {}
+            raw = ((data.get("network") or {}).get("content_fetch") or {}).get("mode")
+            mode = str(raw or "").strip().lower()
+        _config_cache.update({"mtime": mtime, "mode": mode})
+        return mode
+    except Exception:
+        return ""
+
+
+def connection_mode() -> str:
+    """内容抓取的出口方式：`inherit`（跟随部署环境代理设置，默认）或 `direct`（明确不走代理）。
+
+    只认显式配置：环境变量 `WM_CONTENT_FETCH_MODE` 优先于 `config.json` 的
+    `network.content_fetch.mode`；非法值按 `inherit` 处理并记日志——不把"读不到配置"
+    当成"用户要求直连"。
+    """
+    for source, raw in (("env", os.environ.get(_MODE_ENV, "")),
+                        ("config", _config_content_fetch_mode())):
+        mode = str(raw or "").strip().lower()
+        if not mode:
+            continue
+        if mode in CONTENT_FETCH_MODES:
+            return mode
+        logger.warning("内容抓取出口方式取值非法（%s=%r），按 inherit 处理", source, mode)
+    return "inherit"
+
+
+def proxy_settings() -> dict:
+    """当前部署环境的代理设置（**脱敏**：只回 host:port，不带用户凭据）。
+
+    只读环境变量，不发请求；用于诊断与页面显示"当前出口是继承代理还是直连"。
+    """
+    out: dict = {"configured": False, "hosts": []}
+    for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
+                 "ALL_PROXY", "all_proxy"):
+        raw = str(os.environ.get(name, "") or "").strip()
+        if not raw:
+            continue
+        parts = urllib.parse.urlsplit(raw if "://" in raw else f"http://{raw}")
+        target = parts.hostname or ""
+        if target:
+            target = f"{target}:{parts.port}" if parts.port else target
+        if target and target not in out["hosts"]:
+            out["hosts"].append(target)
+        out["configured"] = True
+    return out
+
+
+def _exception_chain(exc: BaseException) -> list:
+    """异常链（含 `__cause__`/`__context__`/`URLError.reason`），用于判定失败发生在哪一层。
+
+    必须走 `reason`：urllib 把底层连接错误装在 `URLError.reason` 里（不是 `__cause__`），
+    只看异常链会把"代理拒连"读成一个没有细节的 `URLError`。
+    """
+    out: list = []
+    seen: set = set()
+    queue = [exc]
+    while queue and len(out) < 10:
+        cur = queue.pop(0)
+        if cur is None or id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        out.append(cur)
+        for nxt in (getattr(cur, "__cause__", None),
+                    getattr(cur, "__context__", None),
+                    getattr(cur, "reason", None)):
+            if isinstance(nxt, BaseException):
+                queue.append(nxt)
+    return out
+
+
+def _is_connect_stage_failure(exc: BaseException) -> bool:
+    """失败是否发生在**连接建立阶段**（而不是"已建连、正在说 HTTP 时断了"）。
+
+    只认连接类错误：拒连、代理地址解析失败、连接/读取超时。已经拿到 HTTP 状态、或已建连
+    但被对端重置（`RemoteDisconnected`/连接重置）都不算——那说明请求确实出去了，归到源站
+    侧更诚实，也不会白白掐掉第二条通道。
+    """
+    import http.client as _http
+    chain = _exception_chain(exc)
+    if any(isinstance(e, (_http.HTTPException, urllib.error.HTTPError)) for e in chain):
+        return False
+    if any(isinstance(e, ConnectionResetError) for e in chain):
+        return False
+    return any(isinstance(e, (ConnectionRefusedError, socket.gaierror,
+                              socket.timeout, TimeoutError)) for e in chain)
+
+
+def is_proxy_failure(exc: BaseException) -> bool:
+    """该失败是否发生在**代理层**——是则调用方不得降级为直连（专项 §6）。
+
+    判定：HTTP 407；异常文本含 proxy；**配置了代理且失败在连接阶段**（链上没有任何
+    HTTP 状态错误、也不是已建连后被重置）。第三条是主力：代理进程没起来时，urllib 抛的是
+    `URLError(ConnectionRefusedError(...))`，文本里根本没有 "proxy" 字样——此时代码连的
+    是代理而不是源站，按代理失败归类比按源站失败归类更诚实。
+    """
+    chain = _exception_chain(exc)
+    for e in chain:
+        if isinstance(e, urllib.error.HTTPError) and int(getattr(e, "code", 0) or 0) == 407:
+            return True
+    text = " ".join(f"{type(e).__name__}: {e}" for e in chain).lower()
+    if "proxy" in text:
+        return True
+    if not proxy_settings()["configured"]:
+        return False
+    return _is_connect_stage_failure(exc)
+
+
+def classify_network_error(exc: BaseException) -> str:
+    """网络异常 → 与专项 §4 同一套诊断类别（代理失败单列 `proxy_error`）。"""
+    if is_proxy_failure(exc):
+        return "proxy_error"
+    try:
+        import search_diag
+        return search_diag.classify_error(exc)
+    except Exception:
+        name = type(exc).__name__
+        text = f"{name}: {exc}".lower()
+        if isinstance(exc, (ModuleNotFoundError, ImportError)):
+            return "missing_dependency"
+        if "timed out" in text or "timeout" in text:
+            return "timeout"
+        if "getaddrinfo" in text or "nodename" in text:
+            return "dns_error"
+        return "parse_error"
+
+
 @dataclass(frozen=True)
 class Decision:
     ok: bool
@@ -278,6 +454,23 @@ def require_service(endpoint_id: str, operation: str = "") -> str:
     return d.url
 
 
+def fetch_text(url: str, *, timeout: float | None = None, encoding: str = "utf-8",
+               max_bytes: int | None = None, headers: dict | None = None) -> str:
+    """`fetch_document` 的文本形态（按调用方给的 encoding 解码）。
+
+    给"明确直连"的适配器用：它们本来直接调 urllib（会吃掉环境代理），改调本函数即
+    走同一条已验 IP 通道，不需要各自再拼请求。
+    """
+    got = fetch_document(url, timeout=timeout, max_bytes=max_bytes, headers=headers)
+    return bytes(got.get("raw") or b"").decode(encoding, errors="replace")
+
+
+def connect_validated(ip: str, port: int, host: str, scheme: str,
+                      timeout: float) -> socket.socket:
+    """连接到 `validate_public_url` 给出的**已验 IP**（供各传输通道复用同一条路径）。"""
+    return _connect_pinned(ip, port, host, scheme, timeout)
+
+
 # ── 受约束的抓取通道 ─────────────────────────────────────────────
 
 def _connect_pinned(ip: str, port: int, host: str, scheme: str, timeout: float) -> socket.socket:
@@ -293,9 +486,25 @@ def fetch_document(url: str, *, timeout: float | None = None,
                    max_bytes: int | None = None, headers: dict | None = None) -> dict:
     """抓取内容派生 URL：先严格校验，再用**已验 IP** 连接；不跟随重定向。
 
-    返回 `{"status","url","headers","text","bytes"}`；策略拒绝抛 `NetworkPolicyError`，
-    执行失败（含重定向、超限、超时）抛 `FetchError`。请求不携带任何调用方凭据。
+    返回 `{"status","url","headers","text","bytes","egress"}`；策略拒绝抛
+    `NetworkPolicyError`，执行失败（含重定向、超限、超时）抛 `FetchError`。
+    请求不携带任何调用方凭据。
+
+    出口方式（专项 §6）：本通道**用已验 IP 直连，经代理出口在本版本不支持**——代理侧
+    自行解析域名，与"校验与连接共用同一个已验 IP"冲突。因此：
+
+    - `inherit`（默认）且环境里配了代理 → 结果里显式标 `egress="direct_pinned"`，并记日志
+      说明"未使用环境代理"；不假装请求走了代理；
+    - `direct` → 同上（直连是操作者明确选的）；
+    - `proxy_required` → **拒绝**（`NetworkPolicyError`），不静默改道直连：这是"做不到时
+      明确不支持该路径"的落地方式。
+
+    即：**本通道从不因代理不可用而改走直连，也从不把直连说成代理**。
     """
+    if connection_mode() == "proxy_required" and not proxy_egress_supported():
+        raise NetworkPolicyError(
+            "内容抓取要求经代理出口，但本版本不支持该路径（代理侧自行解析域名，"
+            "无法保证校验与连接使用同一个已验 IP）；请改用 direct 或 inherit")
     decision = validate_public_url(url)
     audit_decision(decision, action="fetch_document")
     if not decision.ok:
@@ -309,6 +518,13 @@ def fetch_document(url: str, *, timeout: float | None = None,
         path = f"{path}?{parts.query}"
     budget = float(timeout or DEFAULT_TIMEOUT)
     cap = int(max_bytes or MAX_BODY_BYTES)
+    mode = connection_mode()
+    proxy = proxy_settings()
+    egress = "direct_pinned"
+    if proxy["configured"] and mode != "direct":
+        logger.info("内容抓取走已验 IP 直连（本版本不支持经代理出口）；环境代理=%s 未使用",
+                    ",".join(proxy["hosts"]) or "?")
+
 
     last_error = ""
     for ip in decision.resolved:
@@ -368,7 +584,8 @@ def fetch_document(url: str, *, timeout: float | None = None,
         if "charset=" in ctype:
             charset = ctype.split("charset=")[-1].split(";")[0].strip() or "utf-8"
         return {"status": status, "url": url, "headers": resp_headers,
-                "bytes": len(body), "raw": body, "text": body.decode(charset, "replace")}
+                "bytes": len(body), "raw": body, "egress": egress,
+                "text": body.decode(charset, "replace")}
     raise FetchError(last_error or "连接失败")
 
 

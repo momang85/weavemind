@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import os
 import socket
 import sys
 import unittest
@@ -230,6 +231,149 @@ class TestFetchDocumentTransport(unittest.TestCase):
             with self.assertRaises(net_policy.NetworkPolicyError):
                 net_policy.fetch_document("http://10.0.0.1/steal")
         conn.assert_not_called()
+
+
+class TestEgressPolicy(unittest.TestCase):
+    """S2：出口方式显式区分 + 代理失败不降级直连（专项 §6）。
+
+    控制流全用替身，不发真实请求；代理通过环境变量构造。
+    """
+
+    def setUp(self):
+        patcher = mock.patch.dict("os.environ", {}, clear=False)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        for name in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy",
+                     "ALL_PROXY", "all_proxy", "WM_CONTENT_FETCH_MODE"):
+            os.environ.pop(name, None)
+
+    def test_mode_defaults_to_inherit_and_validates_values(self):
+        self.assertEqual(net_policy.connection_mode(), "inherit")
+        os.environ["WM_CONTENT_FETCH_MODE"] = "direct"
+        self.assertEqual(net_policy.connection_mode(), "direct")
+        os.environ["WM_CONTENT_FETCH_MODE"] = "something-else"
+        self.assertEqual(net_policy.connection_mode(), "inherit",
+                         "非法取值按 inherit，不猜用户想要直连")
+
+    def test_proxy_settings_reports_host_without_credentials(self):
+        os.environ["HTTPS_PROXY"] = "http://alice:s3cr3t@127.0.0.1:7897"
+        got = net_policy.proxy_settings()
+        self.assertTrue(got["configured"])
+        self.assertEqual(got["hosts"], ["127.0.0.1:7897"])
+        self.assertNotIn("s3cr3t", json.dumps(got))
+        self.assertNotIn("alice", json.dumps(got))
+
+    def test_proxy_failure_detection(self):
+        import urllib.error
+        self.assertTrue(net_policy.is_proxy_failure(_fake_http_error(407)),
+                        "407 是代理层失败")
+        os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7897"
+        refused = urllib.error.URLError(ConnectionRefusedError(10061, "refused"))
+        self.assertTrue(net_policy.is_proxy_failure(refused),
+                        "配了代理且连接阶段失败 → 按代理失败归类"
+                        "（代理没起来，不是源站不可达）")
+        os.environ.pop("HTTPS_PROXY", None)
+        self.assertFalse(net_policy.is_proxy_failure(refused),
+                         "没配代理时同样的失败不是代理问题")
+        self.assertFalse(net_policy.is_proxy_failure(ValueError("bad payload")))
+
+    def test_classify_network_error_marks_proxy(self):
+        import urllib.error
+        os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7897"
+        exc = urllib.error.URLError(ConnectionRefusedError(10061, "refused"))
+        self.assertEqual(net_policy.classify_network_error(exc), "proxy_error")
+
+    def test_proxy_required_mode_is_declared_unsupported(self):
+        os.environ["WM_CONTENT_FETCH_MODE"] = "proxy_required"
+        with mock.patch("net_policy._connect_pinned") as connect:
+            with self.assertRaises(net_policy.NetworkPolicyError) as ctx:
+                net_policy.fetch_document("https://93.184.216.34/a.pdf")
+            connect.assert_not_called()
+        self.assertIn("不支持", str(ctx.exception))
+
+    def test_direct_mode_clears_process_proxy_env(self):
+        os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7897"
+        self.assertEqual(net_policy.apply_direct_mode_env(), [], "inherit 模式不动环境")
+        os.environ["WM_CONTENT_FETCH_MODE"] = "direct"
+        cleared = net_policy.apply_direct_mode_env()
+        self.assertIn("HTTPS_PROXY", cleared)
+        self.assertNotIn("HTTPS_PROXY", os.environ)
+
+    def test_public_content_url_positive_case(self):
+        """正例不受影响：公网 IP 字面量（无需 DNS）仍放行。"""
+        decision = net_policy.validate_public_url("https://93.184.216.34/a.pdf")
+        self.assertTrue(decision.ok, decision.reason)
+
+    def test_tls_verification_is_never_disabled(self):
+        """TLS 失败不改校验：源码里不得出现关闭校验的写法（专项 §6）。
+
+        禁用写法按片段拼出来，免得这条断言自己变成"含禁用写法"的文件。
+        """
+        banned = ("verify" + "=False",
+                  "CERT_" + "NONE",
+                  "_create_unverified_" + "context",
+                  "check_hostname" + " = False",
+                  "check_hostname" + "=False")
+        for rel in ("net_policy.py", "adapters/transport.py",
+                    "adapters/news.py", "annual_report_pdf.py"):
+            text = (ROOT / rel).read_text(encoding="utf-8")
+            for token in banned:
+                self.assertNotIn(token, text, f"{rel} 出现关闭 TLS 校验的写法：{token}")
+
+
+def _fake_http_error(code: int):
+    """构造一个带状态码的 HTTPError（不联网）。"""
+    import urllib.error
+    return urllib.error.HTTPError("https://example.com/x", code, "err", {}, None)
+
+
+class TestTransportEgress(unittest.TestCase):
+    """传输层出口纪律：代理失败不得降级直连（专项 §6 最小验收）。"""
+
+    def setUp(self):
+        from adapters import transport
+        self.transport = transport
+
+    def _run(self, exc, *, proxy=True):
+        calls = {"socket": 0}
+        env = {"HTTPS_PROXY": "http://127.0.0.1:7897"} if proxy else {}
+
+        def _fake_socket(*_a, **_k):
+            calls["socket"] += 1
+            return "body"
+
+        with mock.patch.dict("os.environ", env, clear=False), \
+                mock.patch.object(self.transport, "get_via_urllib", side_effect=exc), \
+                mock.patch.object(self.transport, "get_via_socket",
+                                  side_effect=_fake_socket):
+            try:
+                return self.transport.dual_channel_get("https://example.com/a",
+                                                       source="test"), calls, None
+            except Exception as err:                 # noqa: BLE001 - 断言用
+                return None, calls, err
+
+    def test_proxy_failure_never_falls_back_to_direct(self):
+        import urllib.error
+        exc = urllib.error.URLError(ConnectionRefusedError(10061, "refused"))
+        out, calls, err = self._run(exc, proxy=True)
+        self.assertIsNone(out)
+        self.assertEqual(calls["socket"], 0, "代理失败后直连次数必须为 0")
+        self.assertIsInstance(err, self.transport.ProxyEgressError)
+        self.assertEqual(err.category, "proxy_error")
+
+    def test_origin_failure_still_uses_the_second_channel(self):
+        import http.client
+        out, calls, err = self._run(http.client.RemoteDisconnected("closed"),
+                                    proxy=True)
+        self.assertEqual(out, "body", "源站侧失败仍走第二通道（未改变既有行为）")
+        self.assertEqual(calls["socket"], 1)
+        self.assertIsNone(err)
+
+    def test_proxy_error_classifies_for_adapters(self):
+        import urllib.error
+        exc = urllib.error.URLError(ConnectionRefusedError(10061, "refused"))
+        _out, _calls, err = self._run(exc, proxy=True)
+        self.assertEqual(self.transport.classify_error(err), "proxy_error")
 
 
 class TestLegacyValidatorDelegation(unittest.TestCase):

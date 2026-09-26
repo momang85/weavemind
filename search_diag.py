@@ -89,7 +89,13 @@ class Budget:
 
 
 def classify_error(exc: BaseException) -> str:
-    """异常 → 专项类别表。判不出来时归 parse_error（不假装成 timeout/no_results）。"""
+    """异常 → 专项类别表。判不出来时归 parse_error（不假装成 timeout/no_results）。
+
+    代理层失败先判（专项 §6）：环境里配了代理、而失败发生在连接阶段时必须记
+    `proxy_error`——否则会被读成"站点不可用"，把用户侧出口问题误诊为资料源问题。
+    """
+    if _proxy_failure(exc):
+        return "proxy_error"
     name = type(exc).__name__
     text = f"{name}: {exc}".lower()
     if isinstance(exc, (ModuleNotFoundError, ImportError)):
@@ -125,6 +131,15 @@ def classify_error(exc: BaseException) -> str:
     if "no results found" in text or "no result" in text:
         return "no_results"
     return "parse_error"
+
+
+def _proxy_failure(exc: BaseException) -> bool:
+    """是否代理层失败（判定规则收敛在 net_policy，这里只做安全调用）。"""
+    try:
+        from net_policy import is_proxy_failure
+        return bool(is_proxy_failure(exc))
+    except Exception:
+        return False
 
 
 def looks_like_challenge(body_head: str) -> bool:

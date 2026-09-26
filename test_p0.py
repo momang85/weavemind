@@ -6179,6 +6179,20 @@ class TestNewDataAdapters(unittest.TestCase):
         with mock.patch.object(text_search, "web_text_search", return_value=[]):
             self.assertIsNone(fetch_news_fallback("无结果"))
 
+    def test_news_failure_records_unified_category(self):
+        """S2：新闻通道失败也要给出统一诊断类别（代理/超时/策略各自可辨）。"""
+        import urllib.error
+
+        from adapters import news
+
+        with mock.patch.dict("os.environ", {"HTTPS_PROXY": "http://127.0.0.1:7897"}), \
+                mock.patch("requests.get",
+                           side_effect=urllib.error.URLError(
+                               ConnectionRefusedError(10061, "refused"))):
+            self.assertIsNone(news.fetch_news("固态电池"))
+        self.assertEqual(news.last_error()["category"], "proxy_error")
+        self.assertEqual(news.last_error()["channel"], "google_news_rss")
+
     def test_text_search_bing_parse_canned(self):
         """2a：Bing HTML 解析（含 /ck/a 跳转解码）→ 结果列表。"""
         from adapters import text_search

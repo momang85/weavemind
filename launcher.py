@@ -1770,6 +1770,15 @@ def main() -> None:
 
     action = sys.argv[1] if len(sys.argv) > 1 else "start"
     if action == "start":
+        # 出口方式（专项 §6）：direct 模式下先清掉本进程的环境代理，再起子进程——
+        # 子进程继承已清理的环境，因此"明确直连"对全部服务一致生效（不改系统设置）。
+        try:
+            import net_policy
+            cleared = net_policy.apply_direct_mode_env()
+            if cleared:
+                logger.warning("内容抓取直连模式：已清理环境代理 %s", ",".join(cleared))
+        except Exception as exc:                     # noqa: BLE001 - 配置问题不阻塞启动
+            logger.warning("出口方式初始化失败（按继承代理继续）：%s", str(exc)[:120])
         _run_dependency_check(fix=True, fatal=True)
         _check_redis_or_exit()
         if os.environ.get("WEAVEMIND_SUPERVISE", "0") == "1":

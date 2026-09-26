@@ -85,7 +85,15 @@ def fetch_bytes(url: str, *, timeout: int = 30, max_bytes: int = MAX_BYTES) -> b
             return None
         return data
     except Exception as exc:                     # noqa: BLE001 - 受限/失败按缺口处理
-        logger.warning("PDF 下载失败（%s）：%s", str(url)[:100], str(exc)[:120])
+        # 类别与其它通道同表（专项 §6）：代理/超时/DNS/策略拒绝各自可辨，页面与日志才能
+        # 说清"是下载失败还是这个来源本来就不给"。这里只记类别与原因，不改失败处置。
+        try:
+            from net_policy import classify_network_error
+            kind = classify_network_error(exc)
+        except Exception:
+            kind = type(exc).__name__
+        logger.warning("PDF 下载失败（类别=%s，%s）：%s", kind, str(url)[:100],
+                       str(exc)[:120])
         return None
 
 
