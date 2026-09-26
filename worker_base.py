@@ -106,14 +106,24 @@ def get_engine_health() -> dict:
 
 
 def _publish_health_snapshot(messaging) -> None:
-    """把引擎健康快照写入 Redis（TTL 120s），供 web_ui / metrics 跨进程读取。"""
+    """把引擎健康快照写入 Redis（TTL 120s），供 web_ui / metrics 跨进程读取。
+
+    带上实例身份与观测时刻：读取方据此判断快照是不是本实例的新鲜读数（专项 §6）——
+    缺元信息的快照会被按"不知道"处理，不再默认显示为健康。
+    """
     try:
         r = getattr(messaging, "redis", None) or getattr(messaging, "_redis", None)
         if r is None:
             return
+        payload = dict(get_engine_health())
+        try:
+            from health_registry import snapshot_meta
+            payload.update(snapshot_meta())
+        except Exception:
+            pass
         r.set(
             "search_engine_health",
-            json.dumps(get_engine_health(), ensure_ascii=False),
+            json.dumps(payload, ensure_ascii=False),
             ex=120,
         )
     except Exception:

@@ -164,11 +164,13 @@ type ReqEntry = {
   env_name: string; default: any; value: any; configured: boolean
   api_key_set: boolean; source: string; health: string
   health_ok: boolean | null; health_reason: string
+  health_state?: string | null; health_stale?: boolean; health_checked_at?: number
 }
 type ReqSection = { key: string; label: string; note: string; entries: ReqEntry[] }
 type ReqPayload = {
   sections: ReqSection[]; health: any[]; balance: any; budget: any
-  missing_required: string[]; degraded: string[]; test_targets: string[]
+  missing_required: string[]; degraded: string[]; unknown_health?: string[]
+  test_targets: string[]
 }
 
 const STATUS_BADGE: Record<string, { text: string; cls: string }> = {
@@ -193,8 +195,24 @@ function healthBadge(entry: ReqEntry) {
   }
   if (entry.health_ok === false) {
     const reason = entry.health_reason || ''
+    // 状态来自 health_registry：unknown = 没有观测证据（无快照/已过期/来自别的实例），
+    // 不能显示成"异常"，也不能显示成"正常"——两者都会误导排查方向。
+    if (entry.health_state === 'unknown') {
+      return {
+        text: entry.health_stale ? '读数过期' : '未检查',
+        cls: 'bg-slate-700/40 text-slate-300',
+        title: reason || '暂无该依赖的观测快照（未检查或已过期）',
+      }
+    }
     const quota = /402|insufficient|balance|credit|额度|余额/i.test(reason)
     return { text: quota ? '欠费/额度不足' : '异常', cls: 'bg-red-500/15 text-red-400', title: reason }
+  }
+  if (entry.health_state === 'degraded') {
+    return {
+      text: '降级',
+      cls: 'bg-amber-500/15 text-amber-400',
+      title: entry.health_reason || '部分能力不可用，其余仍可用',
+    }
   }
   // 未配置的可选项不显示"正常"（那只是进程内默认状态，不代表真的可用）
   if (entry.health_ok === true && entry.health && entry.configured) {

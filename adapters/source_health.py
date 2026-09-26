@@ -109,8 +109,16 @@ def _publish_snapshot() -> None:
             decode_responses=True, socket_connect_timeout=2, socket_timeout=2,
             retry=_NO_REDIS_RETRY,
         )
+        payload = dict(get_health())
+        try:
+            # 快照元信息（实例身份 + 观测时刻）：没有它，读取方会把"别的实例/过期"的读数
+            # 当成本实例的实时健康（专项 §6）；键名与 health_registry 对齐，下划线开头。
+            from health_registry import snapshot_meta
+            payload.update(snapshot_meta())
+        except Exception:
+            pass
         client.set("wm:source:health",
-                   json.dumps(get_health(), ensure_ascii=False), ex=600)
+                   json.dumps(payload, ensure_ascii=False), ex=600)
     except Exception:
         pass
 

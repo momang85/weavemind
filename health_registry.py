@@ -8,7 +8,16 @@
 是**两个进程**——`/api/status` 读不到编排侧的进程内状态（如行情适配器熔断）。
 
 统一字段（每个依赖一条）：
-    {name, ok, reason, since, source_process, detail}
+    {name, state, ok, reason, since, source_process, instance, checked_at, stale, detail}
+
+`state` 是权威判定，`ok` 仅为旧调用方保留（`ok = state ∈ {available, degraded}`）：
+
+- `available`   ：有证据表明可用；
+- `degraded`    ：可用但有已知降级（如备用端点不可用、部分源熔断）——**部分可用不等于全不可用**；
+- `unavailable` ：有证据表明不可用/未就绪；
+- `unknown`     ：**没有证据**（无快照、快照过期、快照来自别的实例）——不得显示为可用。
+
+后两条都能让页面变红：把"没快照"读成"健康"正是专项 §6 要修的那个假绿。
 """
 
 from __future__ import annotations
@@ -27,10 +36,22 @@ _NAME_PLANNER = "planner"
 _NAME_MCP = "mcp"
 _NAME_LORA = "lora"
 
+# 状态语义（专项 §6）：缺快照与过期都不能是绿色可用
+STATE_AVAILABLE = "available"
+STATE_DEGRADED = "degraded"
+STATE_UNAVAILABLE = "unavailable"
+STATE_UNKNOWN = "unknown"
+STATES = (STATE_AVAILABLE, STATE_DEGRADED, STATE_UNAVAILABLE, STATE_UNKNOWN)
+# 快照有效期：跨进程快照是"观测"，不是"实时"；超过这个时长按过期（unknown）处理
+SNAPSHOT_TTL_SECONDS = float(os.environ.get("WM_HEALTH_SNAPSHOT_TTL", "") or 300)
+
 # 跨进程快照键（由拥有该状态的进程写入）
 SEARCH_HEALTH_KEY = "search_engine_health"
 SOURCE_HEALTH_KEY = "wm:source:health"
 EMBED_HEALTH_KEY = "wm:embed:health"
+# 快照自带的元信息键（下划线开头；旧读取方按"非 dict 值"忽略即可）
+META_INSTANCE = "_instance"
+META_CHECKED_AT = "_checked_at"
 
 
 def _redis_get(key: str) -> dict:
@@ -56,16 +77,87 @@ def _redis_get(key: str) -> dict:
         return {}
 
 
+def instance_id() -> str:
+    """本实例标识：`WM_INSTANCE_ID` 优先，否则由工作区根目录 + 端口指纹生成。
+
+    为什么要它：运行包实例与源码实例可能共用一台 Redis（历史上确实串过任务），
+    健康快照是"某个进程观测到的状态"——不带实例身份的快照会让 A 实例拿 B 实例的读数
+    当自己的健康度。指纹只取路径与端口，不含用户名等信息。
+    """
+    explicit = str(os.environ.get("WM_INSTANCE_ID", "") or "").strip()
+    if explicit:
+        return explicit
+    try:
+        import hashlib
+        root = os.environ.get("WM_WORKSPACE_ROOT", "") or ""
+        if not root:
+            try:
+                import workspace
+                root = str(getattr(workspace, "WORKSPACE_ROOT", "") or "")
+            except Exception:
+                root = os.path.dirname(os.path.abspath(__file__))
+        port = os.environ.get("WEB_PORT", "") or os.environ.get("REDIS_PORT", "")
+        raw = f"{os.path.abspath(root)}|{port}".encode("utf-8", "replace")
+        return "inst-" + hashlib.sha256(raw).hexdigest()[:10]
+    except Exception:
+        return "inst-unknown"
+
+
+def snapshot_meta(checked_at: float | None = None) -> dict:
+    """写快照时附带的元信息（实例身份 + 观测时刻）。"""
+    return {META_INSTANCE: instance_id(),
+            META_CHECKED_AT: float(checked_at if checked_at is not None else time.time())}
+
+
+def split_snapshot(data: dict) -> tuple[dict, str, float]:
+    """拆快照 → `(条目表, 实例, 观测时刻)`；缺元信息的旧快照按"实例未知、时刻为 0"处理。"""
+    body = {k: v for k, v in (data or {}).items() if not str(k).startswith("_")}
+    inst = str((data or {}).get(META_INSTANCE) or "")
+    try:
+        checked = float((data or {}).get(META_CHECKED_AT) or 0.0)
+    except (TypeError, ValueError):
+        checked = 0.0
+    return body, inst, checked
+
+
+def snapshot_freshness(checked_at: float, *, ttl: float | None = None,
+                       inst: str = "") -> tuple[bool, str]:
+    """快照是否新鲜可用 → `(fresh, 问题说明)`；问题非空时按 unknown 处理。"""
+    if inst and inst != instance_id():
+        return False, f"快照来自其它实例（{inst}），本实例（{instance_id()}）没有观测"
+    if not checked_at:
+        return False, "快照未带观测时刻（旧格式），无法判断新鲜度"
+    age = max(0.0, time.time() - float(checked_at))
+    limit = float(ttl if ttl is not None else SNAPSHOT_TTL_SECONDS)
+    if age > limit:
+        return False, f"快照已过期（{int(age)} 秒前，上限 {int(limit)} 秒）"
+    return True, ""
+
+
 def _entry(name: str, ok: bool, reason: str = "", since: float = 0.0,
-           detail: str = "") -> dict:
-    return {
+           detail: str = "", *, state: str = "", checked_at: float | None = None,
+           stale: bool = False) -> dict:
+    """统一的健康条目。`state` 未显式给出时按 `ok` 折算，避免旧调用点写出非法状态。"""
+    if state not in STATES:
+        state = STATE_AVAILABLE if ok else STATE_UNAVAILABLE
+    entry = {
         "name": name,
-        "ok": bool(ok),
+        "state": state,
+        "ok": state in (STATE_AVAILABLE, STATE_DEGRADED),
         "reason": str(reason or "")[:200],
         "since": float(since or 0.0),
         "source_process": "webui" if _in_webui() else "orchestrator",
+        "instance": instance_id(),
+        "checked_at": float(checked_at if checked_at is not None else time.time()),
+        "stale": bool(stale),
         "detail": str(detail or "")[:300],
     }
+    return entry
+
+
+def _unknown_entry(name: str, reason: str, detail: str = "") -> dict:
+    """没证据就是没证据：无快照 / 过期 / 来自别的实例 —— 一律 unknown，不显示为可用。"""
+    return _entry(name, False, reason, detail=detail, state=STATE_UNKNOWN)
 
 
 def _in_webui() -> bool:
@@ -99,40 +191,71 @@ def probe_llm() -> dict:
 
 
 def probe_search() -> dict:
-    """搜索引擎健康（worker 写 Redis 快照，webui 也能读到）。"""
+    """搜索引擎健康（worker 写 Redis 快照，webui 也能读到）。
+
+    快照必须**新鲜且属于本实例**：无快照 / 过期 / 来自别的实例一律 `unknown`——此前这三
+    种情况都返回绿色（专项 §6"缺快照和过期不能绿色可用"）。单个引擎坏 = `degraded`
+    （还有可用引擎），全坏才 `unavailable`。
+    """
     data = _redis_get(SEARCH_HEALTH_KEY)
     if not data:
-        return _entry(_NAME_SEARCH, True, "无快照（视为未知）", detail="no snapshot")
-    engines = {k: v for k, v in data.items() if isinstance(v, dict)}
+        return _unknown_entry(_NAME_SEARCH, "无快照（未观测到，非健康）", detail="no snapshot")
+    engines, inst, checked = split_snapshot(data)
+    fresh, why = snapshot_freshness(checked, inst=inst)
+    if not fresh:
+        return _unknown_entry(_NAME_SEARCH, why, detail=f"engines={len(engines)}")
+    engines = {k: v for k, v in engines.items() if isinstance(v, dict)}
+    if not engines:
+        return _unknown_entry(_NAME_SEARCH, "快照为空（没有引擎记录）")
     unhealthy = [k for k, v in engines.items() if not v.get("healthy", True)]
-    return _entry(
-        _NAME_SEARCH, not unhealthy,
-        "" if not unhealthy else "引擎不健康：" + ", ".join(unhealthy),
-        detail=", ".join(
-            f"{k}={'ok' if v.get('healthy', True) else 'down'}" for k, v in engines.items()
-        ),
+    detail = ", ".join(
+        f"{k}={'ok' if v.get('healthy', True) else 'down'}" for k, v in engines.items()
     )
+    if not unhealthy:
+        return _entry(_NAME_SEARCH, True, "", detail=detail, checked_at=checked,
+                      state=STATE_AVAILABLE)
+    state = STATE_UNAVAILABLE if len(unhealthy) == len(engines) else STATE_DEGRADED
+    return _entry(_NAME_SEARCH, state == STATE_DEGRADED,
+                  "引擎不健康：" + ", ".join(unhealthy), detail=detail,
+                  checked_at=checked, state=state)
 
 
 def probe_market_source() -> dict:
-    """行情适配器熔断状态（跨进程快照优先，缺失时回退本进程）。"""
+    """行情适配器熔断状态（跨进程快照优先，缺失时回退本进程）。
+
+    与搜索同理：快照过期/异实例 = `unknown`；部分源熔断 = `degraded`（研究仍可做，
+    只是少一路行情），全部熔断才 `unavailable`。
+    """
     data = _redis_get(SOURCE_HEALTH_KEY)
+    checked = 0.0
+    inst = ""
+    if data:
+        data, inst, checked = split_snapshot(data)
+        fresh, why = snapshot_freshness(checked, inst=inst)
+        if not fresh:
+            return _unknown_entry(_NAME_SOURCE, why, detail=f"sources={len(data)}")
     if not data:
         try:
             from adapters.source_health import get_health
             data = get_health() or {}
         except Exception:
             data = {}
+        checked = time.time()          # 本进程读数：就是刚刚观测的
     if not data:
-        return _entry(_NAME_SOURCE, True, "无快照（视为未知）", detail="no snapshot")
+        return _unknown_entry(_NAME_SOURCE, "无快照（未观测到，非健康）", detail="no snapshot")
     cooling = [
         f"{name}({info.get('reason') or 'cooling'})"
         for name, info in data.items()
         if isinstance(info, dict) and info.get("cooldown_until", 0) > time.time()
     ]
-    return _entry(_NAME_SOURCE, not cooling,
-                  "" if not cooling else "熔断冷却：" + ", ".join(cooling),
-                  detail=f"{len(data)} 个数据源")
+    detail = f"{len(data)} 个数据源"
+    if not cooling:
+        return _entry(_NAME_SOURCE, True, "", detail=detail, checked_at=checked,
+                      state=STATE_AVAILABLE)
+    state = STATE_UNAVAILABLE if len(cooling) >= len(data) else STATE_DEGRADED
+    return _entry(_NAME_SOURCE, state == STATE_DEGRADED,
+                  "熔断冷却：" + ", ".join(cooling), detail=detail,
+                  checked_at=checked, state=state)
 
 
 def probe_embedding() -> dict:
@@ -414,11 +537,25 @@ def snapshot() -> list[dict]:
         try:
             out.append(probe())
         except Exception as exc:
-            out.append(_entry(getattr(probe, "__name__", "unknown"), True,
-                              f"probe failed: {str(exc)[:80]}"))
+            out.append(_unknown_entry(getattr(probe, "__name__", "unknown"),
+                                      f"探测失败：{str(exc)[:80]}"))
     return out
 
 
+def degraded_items() -> list[dict]:
+    """可用但有降级的依赖（页面应按"部分可用"展示，不当作全部不可用）。"""
+    return [item for item in snapshot() if item.get("state") == STATE_DEGRADED]
+
+
+def unknown_items() -> list[dict]:
+    """没有观测证据的依赖（无快照 / 过期 / 异实例）——不得显示为可用。"""
+    return [item for item in snapshot() if item.get("state") == STATE_UNKNOWN]
+
+
 def unhealthy() -> list[dict]:
-    """仅返回不健康的依赖（供告警/横幅使用）。"""
-    return [item for item in snapshot() if not item.get("ok")]
+    """仅返回不可用的依赖（供告警/横幅使用）：`unavailable` 与 `unknown` 都算。
+
+    `unknown` 也算：把"没快照"读成健康正是要修的假绿；`degraded` 不算——它仍可用。
+    """
+    return [item for item in snapshot()
+            if item.get("state") in (STATE_UNAVAILABLE, STATE_UNKNOWN)]

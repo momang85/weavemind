@@ -1,4 +1,4 @@
-# DeepSeek 执行状态（2026-09-27 更新 · 专项 S0+S1 已交，S2 上半在办）
+# DeepSeek 执行状态（2026-09-27 更新 · 专项 S0+S1 已交，S2 上下两半已交）
 
 **当前批次**：搜索网络与金融资料获取专项（指令 `docs/搜索网络与金融资料获取专项_20260926.md`）。
 
@@ -21,8 +21,25 @@
   TLS 校验未关（源码守卫）、内网/跳转内网仍拒、公网正例仍通、回环工作台未受影响、
   `proxy_required` 拒绝而非改道。测试：`test_net_policy` 33 例（新增 11）、
   `test_p0`+`test_startup_readiness`+`test_deploy_manifest`+`test_delivery_chain` 834 例全绿。
-- **未验**：全离线单测；代理在线/离线两种真机出口未验；包内复验待下次重建运行包；
-  `health_registry` 状态语义与实例身份（专项 §6 第 4 条）留 S2 下半。
+- **未验**：全离线单测；代理在线/离线两种真机出口未验；包内复验待下次重建运行包。
+
+## S2 下半：健康状态语义与快照实例身份（2026-09-27，证据 `docs/evidence/s2_health_states_20260927.md`）
+
+- **状态四态**：`health_registry` 每条依赖新增 `state ∈ available/degraded/unavailable/unknown`
+  （`ok` 降为兼容视图 = available|degraded），并带 `instance` / `checked_at` / `stale`。
+- **假绿修掉**：`probe_search` / `probe_market_source` 此前"无快照 → ok=True"；现在无快照、
+  快照过期（默认 300 秒，`WM_HEALTH_SNAPSHOT_TTL` 可调）、快照来自**别的实例**一律 `unknown`
+  且非绿。部分源坏 = `degraded`（仍可用），全坏 = `unavailable`。
+- **实例身份**：快照自带 `_instance`/`_checked_at`（两个发布点：worker 搜索健康、行情源健康）；
+  `instance_id()` 取 `WM_INSTANCE_ID` 或"工作区根 + 端口"指纹，防运行包/源码实例互串。
+- **页面**：`/api/config/requirements` 增加 `health_state`/`health_stale`/`health_checked_at`
+  与 `unknown_health`；设置页徽章四态（未检查 / 读数过期 / 降级 / 异常），`frontend/dist` 同版重建。
+- **验收**：缺快照/过期/异实例均非绿；一个可选源坏 = 降级而非全不可用；`unhealthy()` 收
+  `unavailable+unknown`、`degraded` 单列（新增 `degraded_items()`/`unknown_items()`）。
+  测试：`test_p0` 新增 4 例（含字段一致性），连同 `test_frontend_guards`/`test_settings_requirements`/
+  `test_startup_readiness` 共 543 例全绿。
+- **未做/未验**：`web_ui.source_health` 旧字段与统一 `dependencies` 的同源收敛、S4 首屏
+  "资料获取能力"视图未做；未在运行页面用真实快照看过四态；包内复验待下次重建包。
 
 ## 已交批次：S0 + S1（含包内复验补口，2026-09-26/27）
 

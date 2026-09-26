@@ -5946,7 +5946,7 @@ def _get_config_requirements(self, p):
         budget = {}
 
     sections_out = []
-    missing_required, degraded = [], []
+    missing_required, degraded, unknown_health = [], [], []
     for section in settings_schema.SECTIONS:
         entries_out = []
         for entry in section.get("entries", []):
@@ -5976,6 +5976,10 @@ def _get_config_requirements(self, p):
                 "source": resolved.get("source", "default"),
                 "health": item.get("health", ""),
                 "health_ok": health_item.get("ok") if health_item else None,
+                "health_state": health_item.get("state") if health_item else None,
+                "health_stale": bool(health_item.get("stale")) if health_item else False,
+                "health_checked_at": (health_item.get("checked_at") or 0.0)
+                                     if health_item else 0.0,
                 "health_reason": (health_item.get("reason") or health_item.get("detail") or "")
                                  if health_item else "",
             })
@@ -5983,6 +5987,8 @@ def _get_config_requirements(self, p):
                 missing_required.append(item["path"])
             if health_item and health_item.get("ok") is False:
                 degraded.append(item["path"])
+                if health_item.get("state") == "unknown":
+                    unknown_health.append(item["path"])
         sections_out.append({
             "key": section["key"], "label": section.get("label", section["key"]),
             "note": section.get("note", ""), "entries": entries_out,
@@ -5994,6 +6000,7 @@ def _get_config_requirements(self, p):
         "budget": budget,
         "missing_required": missing_required,
         "degraded": degraded,
+        "unknown_health": unknown_health,
         "test_targets": sorted(settings_schema.testable_targets().keys()),
     })
 

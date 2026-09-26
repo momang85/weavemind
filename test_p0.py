@@ -8014,9 +8014,58 @@ class TestHealthRegistryAndAlertDedupe(unittest.TestCase):
             f"注册表应覆盖全部外部依赖，实际 {names}")
         for it in items:
             self.assertTrue(
-                {"name", "ok", "reason", "since", "source_process", "detail"} <= set(it),
+                {"name", "state", "ok", "reason", "since", "source_process",
+                 "instance", "checked_at", "stale", "detail"} <= set(it),
                 f"{it['name']} 字段不齐：{sorted(it)}")
             self.assertIsInstance(it["ok"], bool)
+            self.assertIn(it["state"], health_registry.STATES)
+            self.assertEqual(it["ok"], it["state"] in ("available", "degraded"),
+                             "ok 只是 state 的兼容视图（degraded 仍可用）")
+
+    def test_no_snapshot_is_unknown_not_healthy(self):
+        """S2：缺快照不得显示为可用（此前 ok=True 的假绿）。"""
+        import health_registry
+        with mock.patch.object(health_registry, "_redis_get", return_value={}),                 mock.patch.object(health_registry, "_config_section", return_value={}):
+            search = health_registry.probe_search()
+            source = health_registry.probe_market_source()
+        for entry in (search, source):
+            self.assertEqual(entry["state"], health_registry.STATE_UNKNOWN)
+            self.assertFalse(entry["ok"], "没观测到 ≠ 健康")
+
+    def test_stale_snapshot_is_unknown_and_other_instance_too(self):
+        import health_registry
+        fresh = {"brave": {"healthy": True}}
+        fresh.update(health_registry.snapshot_meta())
+        self.assertEqual(health_registry.probe_search.__call__ and
+                         health_registry.split_snapshot(fresh)[1],
+                         health_registry.instance_id())
+        # 过期：把观测时刻推到 TTL 之前
+        expired = dict(fresh, **{health_registry.META_CHECKED_AT:
+                                 time.time() - 10 * health_registry.SNAPSHOT_TTL_SECONDS})
+        with mock.patch.object(health_registry, "_redis_get", return_value=expired):
+            self.assertEqual(health_registry.probe_search()["state"],
+                             health_registry.STATE_UNKNOWN)
+        # 异实例：快照写着别的实例
+        other = dict(fresh, **{health_registry.META_INSTANCE: "inst-someone-else"})
+        with mock.patch.object(health_registry, "_redis_get", return_value=other):
+            entry = health_registry.probe_search()
+        self.assertEqual(entry["state"], health_registry.STATE_UNKNOWN)
+        self.assertIn("其它实例", entry["reason"])
+
+    def test_partial_failure_is_degraded_not_unavailable(self):
+        """某一路引擎/源坏掉 = 部分可用，不得说成整体不可用（专项 §6）。"""
+        import health_registry
+        snap = {"brave": {"healthy": True}, "mojeek": {"healthy": False}}
+        snap.update(health_registry.snapshot_meta())
+        with mock.patch.object(health_registry, "_redis_get", return_value=snap):
+            entry = health_registry.probe_search()
+        self.assertEqual(entry["state"], health_registry.STATE_DEGRADED)
+        self.assertTrue(entry["ok"], "degraded 仍可用")
+        all_down = {"brave": {"healthy": False}, "mojeek": {"healthy": False}}
+        all_down.update(health_registry.snapshot_meta())
+        with mock.patch.object(health_registry, "_redis_get", return_value=all_down):
+            self.assertEqual(health_registry.probe_search()["state"],
+                             health_registry.STATE_UNAVAILABLE)
 
     def test_probe_failure_degrades_not_raises(self):
         """单个探针异常不得炸掉整张表（逐条降级为"状态不可读"）。"""
@@ -8029,12 +8078,21 @@ class TestHealthRegistryAndAlertDedupe(unittest.TestCase):
         self.assertTrue(all("name" in it for it in items))
 
     def test_unhealthy_filters_only_failing(self):
+        """不可用与未知都算不健康；degraded（部分可用）不算。"""
         import health_registry
         fake = [
-            {"name": "a", "ok": True}, {"name": "b", "ok": False},
+            {"name": "a", "ok": True, "state": "available"},
+            {"name": "b", "ok": False, "state": "unavailable"},
+            {"name": "c", "ok": False, "state": "unknown"},
+            {"name": "d", "ok": True, "state": "degraded"},
         ]
         with mock.patch.object(health_registry, "snapshot", return_value=fake):
-            self.assertEqual([i["name"] for i in health_registry.unhealthy()], ["b"])
+            self.assertEqual([i["name"] for i in health_registry.unhealthy()],
+                             ["b", "c"])
+            self.assertEqual([i["name"] for i in health_registry.degraded_items()],
+                             ["d"])
+            self.assertEqual([i["name"] for i in health_registry.unknown_items()],
+                             ["c"])
 
     def test_alert_dedupe_same_message_once(self):
         import web_ui
