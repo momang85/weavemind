@@ -461,7 +461,11 @@ class TestRunPackageBuilder(unittest.TestCase):
         rel = {p.relative_to(ROOT).as_posix() for p in files}
         for must in ("web_ui.py", "launcher.py", "dep_check.py", "start.bat",
                      "frontend/dist/index.html", "templates.json",
-                     "config.example.json"):
+                     "config.example.json", "skills", "validators"):
+            if must in ("skills", "validators"):
+                self.assertTrue(any(r.startswith(must + "/") for r in rel),
+                                f"运行包缺少必需目录：{must}")
+                continue
             self.assertIn(must, rel, f"运行包缺少必需部件：{must}")
         for bad in ("config.json", "agents.db", "requirements.lock"):
             self.assertNotIn(bad, rel, f"本机数据/开发物不得进包：{bad}")
@@ -474,6 +478,14 @@ class TestRunPackageBuilder(unittest.TestCase):
         self.assertFalse([r for r in rel if r.startswith("test_")], "测试文件不得进包")
         self.assertFalse([r for r in rel if r.startswith("docs/evidence/")])
         self.assertFalse([r for r in rel if "__pycache__" in r])
+
+    def test_prompts_is_optional_like_the_dockerfile(self):
+        """`prompts/` 只装自迭代 overrides（已 gitignore，干净检出里没有）——
+        构建器必须"有就带上、没有跳过"，不能因为干净检出缺它而失败（CI 曾因此报红）。"""
+        self.assertIn("prompts", self.b.OPTIONAL_SOURCES)
+        self.assertNotIn("prompts", self.b.REQUIRED_SOURCES)
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("不拷 prompts/", dockerfile, "口径要与 Dockerfile 一致")
 
     def test_heavy_directories_are_denied_by_policy(self):
         """策略清单本身要挡住重型目录（防止清单又长出 models/ 这类条目）。"""

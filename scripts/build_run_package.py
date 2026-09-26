@@ -46,11 +46,13 @@ DEFAULT_INDEX = "https://mirrors.aliyun.com/pypi/simple/"
 PLATFORM = "win_amd64"
 DEFAULT_REDIS_SHA256 = "4e8f2f956ed92feadf3f64b4e137ed34026438821e692e7ae22c9bba5976607a"
 
-# 包内必须存在的运行部件（缺一即构建失败：宁缺毋滥，不交付半成品）
+# 包内必须存在的运行部件（缺一即构建失败：宁缺毋滥，不交付半成品）。
+# 注意：这里只能列**受版本控制**的目录——`prompts/` 只装自迭代产出的 overrides.json
+# （已 gitignore，干净检出里不存在，Dockerfile 也刻意不拷），所以它属下面的可选清单。
 REQUIRED_SOURCES = (
     "web_ui.py", "orchestrator_v2.py", "launcher.py", "dep_check.py", "common.py",
     "worker_base.py", "workers", "adapters", "charts_pipeline", "structured_pipeline",
-    "prompts", "skills", "validators",
+    "skills", "validators",
     "report_brief.py", "report_version.py", "delivery_pipeline.py", "report_pdf.py",
     "working_paper.py", "facts.py", "question_assessment.py", "acceptance_checker.py",
     "report_quality.py", "task_intent.py", "code_sandbox.py", "net_policy.py",
@@ -58,6 +60,8 @@ REQUIRED_SOURCES = (
     "memory_manager.py", "start.bat", "stop.bat", "frontend/dist", "config.example.json",
     "requirements.txt", "templates.json",
 )
+# 有就带上、没有也不算缺（与 Dockerfile 的口径一致）：缺失项会写进构建报告
+OPTIONAL_SOURCES = ("prompts",)
 # 明确**不**进包的东西（本机数据、模型权重与开发物）。
 # `models/` 曾在首轮实测里被清单带进包（15GB 模型文件），是本条清单存在的直接原因。
 FORBIDDEN_IN_PACKAGE = (
@@ -131,13 +135,19 @@ def fetch(url: str, dest: Path, *, sha256_pin: str = "", timeout: int = 120) -> 
 
 
 def source_files(root: Path) -> list[Path]:
-    """显式清单：应用源码 + 前端产物 + 启动脚本（排除测试/本机数据/开发物）。"""
+    """显式清单：应用源码 + 前端产物 + 启动脚本（排除测试/本机数据/开发物）。
+
+    必需项缺失即报错；可选项目录（如 `prompts/`：只装自迭代 overrides，干净检出里没有）
+    有就带上、没有跳过——与 Dockerfile 的口径一致。
+    """
     root = Path(root).resolve()
     picked: list[Path] = []
     seen: set[Path] = set()
-    for name in REQUIRED_SOURCES:
+    for name in REQUIRED_SOURCES + OPTIONAL_SOURCES:
         p = root / name
         if not p.exists():
+            if name in OPTIONAL_SOURCES:
+                continue
             raise RuntimeError(f"缺少必需部件：{name}")
         candidates = [p] if p.is_file() else [q for q in sorted(p.rglob("*")) if q.is_file()]
         for sub in candidates:
