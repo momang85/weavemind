@@ -1,25 +1,33 @@
-# DeepSeek 执行状态（2026-09-26 更新 · 新人专项 N1 完成）
+# DeepSeek 执行状态（2026-09-26 更新 · 新人专项 N2 完成）
 
-**当前批次**：新人使用专项 N · **N1 统一启动与恢复**（指令
-`docs/新人一键启动与首次研究体验_20260925.md`；N0 与 N1 首批见提交 `6715543`）。
-`start.bat` / `start.sh` 收敛为薄入口，整链交给 `launcher.py up`：
+**当前批次**：新人使用专项 N · **N2 Windows 最小便携运行包**（指令
+`docs/新人一键启动与首次研究体验_20260925.md` §4；N0/N1 见 `6715543`、`e81dcf3`）。
+新增构建器 `scripts/build_run_package.py`，已产出**本地候选包**：
+`weavemind-2026.09.26-win-x64.zip`（291.7 MB，sha256 `28ce59f7…`；解压 23,984 文件 ≈1.1 GB），
+内含可重定位 Python **3.11.9**、**108 个** Windows 运行依赖（`requirements-runtime-win.lock`）、
+已构建前端、便携 Redis（离线复用入口）、`package_manifest.json`（逐文件 SHA256，
+应用据其识别运行身份 `package:2026.09.26`）。
 
-- **变更文件**：`launcher.py`（`startup_controller` 状态机、`effective_config` 统一有效配置、
-  `acquire_instance_lock` 单实例锁、`startup_state.json` 断点恢复与身份失效、
-  `diagnostics_report` 脱敏诊断、`url`/`up`/`diagnostics` 子命令）、`start.bat`、`start.sh`、
-  `test_startup_readiness.py`、`test_setup_wizard.py`、`test_p0.py`、`test_sandbox_isolation.py`。
-- **验证**：`test_startup_readiness` 33 OK（新增 10 例控制器用例）、`test_p0` 407 OK（含评测闸门）、
-  `test_setup_wizard` 36 OK、`test_sandbox_isolation` 24 OK、`test_orchestrator_v2`+`test_delivery_chain`
-  全绿。实机：`launcher.py up` 打印运行包/依赖（上轮已验证、未重复联网）/配置/工作台 200/研究能力就绪
-  并 exit 0；`launcher.py diagnostics` 输出脱敏诊断（假密钥用例断言不出现）。
-- **顺带修掉**：测试隔离缺陷——控制器用例没 mock 依赖步骤，真在测试端口拉起了便携 Redis 并留在后台
-  （污染后续用例）；另两处直接调用真实 `start_services` 的旧用例改为先固定 `instance_state`。
-- **已知限制**：干净环境未验（等 N2/N4）；端口"超时 vs 拒绝"未区分；无 psutil 时归属校验回退路径
-  在中文控制台解码失败；前端缺失仍走后端回退页（N3）；"选择离线包"交互未做。
-- **下一步**：N2 Windows 最小便携运行包（可重定位 Python + 依赖 + Redis + 前端 + 中文字体 +
-  清单与 SHA256，干净环境未验需如实标注）→ N3 页面首启引导 → N4 验收矩阵。
-  证据：`docs/evidence/n1_startup_controller_20260926.md`、`n0_n1_single_start_and_readiness_20260926.md`。
-- 本轮未新增付费模型调用，未改模型/权限/模板/配置，未自动提交样例任务。
+- **变更文件**：`scripts/build_run_package.py`（新）、`scripts/make_lock.py`（`--out`：
+  Windows 锁不再覆盖 Linux 锁）、`dep_check.py`（下载白名单加裸域名 `python.org`）、
+  `requirements-runtime-win.lock`（新）、`docs/新人运行包构建说明.md`（新）、
+  `docs/evidence/n2_run_package_20260926.md`（新）、`test_deploy_manifest.py`（新增 10 例）。
+- **验证**：包内解释器执行 `ssl/sqlite3` → Python 3.11.9 / OpenSSL 3.0.13 / SQLite 3.45.1；
+  应用与第三方导入（task_intent、question_assessment、net_policy、code_sandbox、dep_check、
+  jieba、pandas、matplotlib、chromadb、redis、aiosqlite、httpx、psutil）全部成功；
+  秘密扫描与构建机绝对路径扫描 **0 命中**；包内无 `config.json/agents.db/models/logs`。
+  `test_deploy_manifest` 25 OK（含构建器 10 例）。
+- **构建中修掉的真问题**：① 生成 Windows 锁覆盖 Linux 锁（已恢复并加 `--out`）；
+  ② 白名单要写裸域名（校验器剥 `www.`）；③ `._pth` 整份重写导致包内解释器起不来
+  （改为保留原行 + 追加，并断言标准库 zip）；④ 清单误带 `models/`（15 GB 模型文件）与
+  `workers/*.log`（含构建机路径）。
+- **已知限制**：**干净环境未验**（`clean_env_verified=false`，属 N4）；解压约 1.1 GB
+  （kubernetes/scipy/onnxruntime 等可再裁剪，本轮不裁）；中文字体用系统字体、未随包分发；
+  未做签名/安装器/自动更新。构建只产出本地候选包，未发布 Release、未上传数据。
+- **下一步**：N3 浏览器首次引导（演示与真实分开、一次配置、首个研究任务、教读者读结果，
+  不自动提交付费样例）→ N4 新人路径验收矩阵（干净环境）。
+  证据：`docs/evidence/n2_run_package_20260926.md`、`n1_startup_controller_20260926.md`。
+- 本轮未新增付费模型调用，未改模型/权限/模板/配置。
 
 ## 归档批次（R1–R4 与更早）
 

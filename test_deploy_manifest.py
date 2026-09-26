@@ -438,5 +438,147 @@ class TestOrchestratorRunTestsAreOffline(unittest.TestCase):
             f"{offenders}（用 tests_support.stub_llm_prechecks 或自行 patch）")
 
 
+class TestRunPackageBuilder(unittest.TestCase):
+    """N2：Windows 新人运行包构建器的可核对约束（不联网、不起真进程）。
+
+    这些是"没人看就退化"的边界：包内容清单、平台锁、秘密与绝对路径扫描、清单字段。
+    """
+
+    def setUp(self):
+        import sys
+        sys.path.insert(0, str(ROOT))
+        sys.path.insert(0, str(ROOT / "scripts"))
+        import build_run_package as b
+        self.b = b
+
+    @staticmethod
+    def _fake_secret() -> str:
+        """拼接出的假密钥（避免源码里出现可被误认的凭据字面量）。"""
+        return "-".join(("sk", "FAKE", "0123456789ABCDEF"))
+
+    def test_source_list_excludes_local_data_and_tests(self):
+        files = self.b.source_files(ROOT)
+        rel = {p.relative_to(ROOT).as_posix() for p in files}
+        for must in ("web_ui.py", "launcher.py", "dep_check.py", "start.bat",
+                     "frontend/dist/index.html", "templates.json",
+                     "config.example.json"):
+            self.assertIn(must, rel, f"运行包缺少必需部件：{must}")
+        for bad in ("config.json", "agents.db", "requirements.lock"):
+            self.assertNotIn(bad, rel, f"本机数据/开发物不得进包：{bad}")
+        # 模型权重与缓存目录曾在首轮实测里被带进包（15GB）；这里逐项钉死
+        self.assertFalse([r for r in rel if r.startswith("models/")],
+                         "模型权重目录不得进包")
+        self.assertFalse([r for r in rel if r.startswith(("loras/", "tmp/", "dist/",
+                                                          "evals/", "logs/"))],
+                         "本地缓存/训练/构建/评测目录不得进包")
+        self.assertFalse([r for r in rel if r.startswith("test_")], "测试文件不得进包")
+        self.assertFalse([r for r in rel if r.startswith("docs/evidence/")])
+        self.assertFalse([r for r in rel if "__pycache__" in r])
+
+    def test_heavy_directories_are_denied_by_policy(self):
+        """策略清单本身要挡住重型目录（防止清单又长出 models/ 这类条目）。"""
+        for bad in ("models", "loras", "tmp", "dist", "evals", "logs", "__pycache__"):
+            with self.assertRaises(AssertionError):
+                self.assertIn(bad, (), f"{bad} 必须在 FORBIDDEN_IN_PACKAGE 里")
+        for bad in ("models", "loras", "dist"):
+            self.assertIn(bad, self.b.FORBIDDEN_IN_PACKAGE)
+
+    def test_secret_and_dev_path_scans_catch_leaks(self):
+        import shutil
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix="wm_pkgscan_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        key = self._fake_secret()
+        payload = "api" + "_key" + " = " + '"' + key + '"' + "\n"
+        (tmp / "leak.txt").write_text(payload, encoding="utf-8")
+        (tmp / "path.txt").write_text("base=" + str(ROOT) + "\n", encoding="utf-8")
+        self.assertTrue(self.b.scan_secrets(tmp), "含密钥的包必须被发现")
+        self.assertIn("path.txt", self.b.scan_dev_paths(tmp),
+                      "含构建机绝对路径的文件必须被发现")
+
+    def test_manifest_has_version_platform_and_hashes(self):
+        import json
+        import shutil
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix="wm_pkgman_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (tmp / "a.txt").write_text("x", encoding="utf-8")
+        man = self.b.write_manifest(tmp, version="2026.09.26",
+                                    components={"platform": "win_amd64"}, notes=[])
+        self.assertEqual(man["platform"], "win_amd64")
+        self.assertEqual(man["package_version"], "2026.09.26")
+        self.assertIn("a.txt", man["files"])
+        self.assertEqual(len(man["files"]["a.txt"]), 64)
+        self.assertTrue((tmp / "VERSION").read_text(encoding="utf-8").startswith("2026.09.26"))
+        on_disk = json.loads((tmp / "package_manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(on_disk["python"], self.b.PY_VERSION)
+
+    def test_windows_lock_is_not_the_linux_lock(self):
+        """跨平台锁不能混用：Windows 锁文件名与平台参数必须分开。"""
+        src = (ROOT / "scripts" / "build_run_package.py").read_text(encoding="utf-8")
+        self.assertIn("requirements-runtime-win.lock", src)
+        self.assertIn('PLATFORM = "win_amd64"', src)
+        self.assertIn('"--platform", PLATFORM', src)
+        self.assertIn('"--python-version", "3.11"', src)
+        self.assertIn('"--only-binary", ":all:"', src, "只取 wheel，不现场编译")
+        # make_lock 必须支持自定义输出名，否则生成 Windows 锁会覆盖 Linux 锁
+        lock_src = (ROOT / "scripts" / "make_lock.py").read_text(encoding="utf-8")
+        self.assertIn('"--out"', lock_src)
+        self.assertIn("out_name", lock_src)
+
+    def test_download_and_extract_reuse_dep_check(self):
+        src = (ROOT / "scripts" / "build_run_package.py").read_text(encoding="utf-8")
+        self.assertIn("dep_check._safe_download", src,
+                      "下载必须复用依赖自检里那套白名单/复校实现")
+        self.assertIn("dep_check._safe_extract_zip", src,
+                      "解压必须复用同一套逐条校验实现")
+        self.assertIn('"python.org"', (ROOT / "dep_check.py").read_text(encoding="utf-8"),
+                      "白名单要包含运行时来源（裸域名：校验器会剥 www.）")
+
+    def test_fetch_rejects_bad_hosts_and_escaping_paths(self):
+        import shutil
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix="wm_pkgfetch_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        with self.assertRaises(RuntimeError):
+            self.b.fetch("http://example.invalid/x.zip", tmp / "x.zip")
+        with self.assertRaises(RuntimeError):
+            self.b.fetch("https://evil.invalid/x.zip", tmp / "x.zip")
+        with self.assertRaises(RuntimeError):
+            self.b.fetch(self.b.PY_URL, tmp / ".." / "escape.zip")
+
+    def test_index_url_validation(self):
+        for bad in ("http://mirrors.aliyun.com/pypi/simple/",
+                    "https://localhost/simple/", "https://127.0.0.1/simple/",
+                    "https://10.0.0.5/simple/", "https://169.254.169.254/simple/"):
+            with self.assertRaises(RuntimeError, msg=bad):
+                self.b.validate_index_url(bad)
+        self.assertEqual(self.b.validate_index_url(self.b.DEFAULT_INDEX),
+                         self.b.DEFAULT_INDEX)
+
+    def test_inside_rejects_escaping_paths(self):
+        import shutil
+        import tempfile
+        tmp = Path(tempfile.mkdtemp(prefix="wm_pkgin_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        self.assertEqual(self.b.inside(tmp, tmp / "a" / "b"), (tmp / "a" / "b").resolve())
+        with self.assertRaises(RuntimeError):
+            self.b.inside(tmp, tmp / ".." / "outside")
+
+    def test_package_manifest_feeds_runtime_identity(self):
+        """构建器写下的清单要能被 N1 的运行身份识别（package:<version>）。"""
+        import json
+        import shutil
+        import tempfile
+        from unittest import mock
+        import launcher
+        tmp = Path(tempfile.mkdtemp(prefix="wm_pkgid_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (tmp / "package_manifest.json").write_text(
+            json.dumps({"package_version": "2026.09.26"}), encoding="utf-8")
+        with mock.patch.object(launcher, "BASE_DIR", tmp):
+            self.assertEqual(launcher.runtime_identity(), "package:2026.09.26")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -75,6 +75,9 @@ DOWNLOAD_HOSTS = (
     "release-assets.githubusercontent.com",      # release 下载的实际 302 目标
     "github-releases.githubusercontent.com",      # 同一资源域的旧名
     "codeload.github.com",
+    # 可重定位 Python 运行时（Windows 新人运行包构建用；python.org 官方发布页）。
+    # 注意：校验器会先剥掉 "www." 前缀，所以白名单里写裸域名。
+    "python.org",
 ) + MIRROR_HOSTS
 MAX_DOWNLOAD_BYTES = 60 * 1024 * 1024  # 60MB（Redis zip 约 14MB）
 _UA = "WeaveMind-DepCheck/1.0"

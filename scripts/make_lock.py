@@ -103,21 +103,33 @@ def _resolve_runtime(root: Path, platform: str, py_version: str,
 
 
 def write_runtime_lock(root: Path, platform: str, py_version: str,
-                       index_url: str | None) -> int:
+                       index_url: str | None, out_name: str = "requirements-runtime.lock") -> int:
+    """生成运行闭包锁。
+
+    `out_name` 可改：**平台不同必须写不同文件**——此前固定写
+    `requirements-runtime.lock`，用 `--platform win_amd64` 生成 Windows 锁时会把
+    Linux（manylinux）锁覆盖掉，CI/镜像随后按 Windows 锁安装。Windows 新人运行包
+    用 `--out requirements-runtime-win.lock`。
+    """
     try:
         pins, sdist_only = _resolve_runtime(root, platform, py_version, index_url)
     except Exception as exc:
         print(f"生成运行依赖锁失败: {exc}")
         return 1
-    out = root / "requirements-runtime.lock"
+    if not out_name or "/" in out_name or "\\" in out_name or ".." in out_name:
+        print(f"输出文件名非法：{out_name!r}")
+        return 1
+    out = root / out_name
     header = (
         "# 运行依赖锁（由 scripts/make_lock.py --runtime 生成，勿手改）\n"
         f"# 生成时间：{datetime.now(timezone.utc).isoformat()}\n"
         f"# 目标平台：{platform} / cp{py_version.replace('.', '')}\n"
-        "# 用法：pip install -r requirements-runtime.lock\n"
-        "# 重新生成：python scripts/make_lock.py --runtime\n"
+        f"# 用法：pip install -r {out_name}\n"
+        f"# 重新生成：python scripts/make_lock.py --runtime --platform {platform}\n"
         "# 说明：这是 requirements.txt 的运行闭包，解析时要求目标平台存在 wheel；\n"
-        "#       整机训练快照在 requirements.lock，两者不可互换。\n"
+        "#       整机训练快照在 requirements.lock，两者不可互换；\n"
+        "#       平台不同的锁写在不同文件里（Linux → requirements-runtime.lock，\n"
+        "#       Windows → requirements-runtime-win.lock），不要互相覆盖。\n"
     )
     body = "\n".join(f"{n}=={v}" for n, v in sorted(set(pins), key=lambda x: x[0].lower()))
     out.write_text(header + body + "\n", encoding="utf-8")
@@ -135,11 +147,14 @@ def main() -> int:
                     help=f"目标 Python 版本（默认 {DEFAULT_PYTHON_VERSION}）")
     ap.add_argument("--index-url", default=None,
                     help="可选：解析使用的包索引（国内网络可传镜像地址）")
+    ap.add_argument("--out", default="requirements-runtime.lock",
+                    help="输出文件名（平台不同请写不同文件，勿覆盖 Linux 锁）")
     args = ap.parse_args()
 
     root = Path(__file__).resolve().parent.parent
     if args.runtime:
-        return write_runtime_lock(root, args.platform, args.python_version, args.index_url)
+        return write_runtime_lock(root, args.platform, args.python_version,
+                                  args.index_url, out_name=args.out)
 
     out = root / "requirements.lock"
     try:
