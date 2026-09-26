@@ -39,6 +39,9 @@ BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.json"
 PID_DIR = BASE_DIR / ".weavemind"
 PID_FILE = PID_DIR / "pids.json"
+# 本实例实际使用的端口（Web / Redis）：默认端口被别的程序占用时会让位到空闲端口，
+# 让位结果必须落盘，否则 `launcher.py url`、子进程、页面各算各的。
+RUNTIME_PORTS_FILE = PID_DIR / "runtime_ports.json"
 LOG_DIR = BASE_DIR / "logs"
 
 _CREATE_NO_WINDOW = 0x08000000 if os.name == "nt" else 0
@@ -102,6 +105,22 @@ def _apply_env(cfg: dict) -> None:
     os.environ["WEAVEMIND_DB"] = db_file
     os.environ.setdefault("REGISTRY_DB", db_file)
     os.environ.setdefault("AGENTS_DB", db_file)
+    _publish_loopback_no_proxy()
+
+
+def _publish_loopback_no_proxy() -> None:
+    """把回环地址追加进 NO_PROXY/no_proxy：本机内部请求不该被代理接管。
+
+    为什么必要：企业/校园网常设 HTTP_PROXY，子进程对 127.0.0.1/localhost 的调用
+    （健康检查、内部回环请求）也会被送去代理——实测死代理下出现"服务在跑却报
+    工作台未响应"。只追加回环项，不覆盖用户已有的排除列表，也不改外部请求的代理。
+    """
+    want = ("localhost", "127.0.0.1", "::1")
+    for name in ("NO_PROXY", "no_proxy"):
+        current = [x.strip() for x in str(os.environ.get(name) or "").split(",") if x.strip()]
+        missing = [w for w in want if w not in current]
+        if missing:
+            os.environ[name] = ",".join(current + missing)
 
 
 REDIS_SETUP_HINT = """\
@@ -142,16 +161,43 @@ def _redis_reachable(host: str, port: int, timeout: float = 2.0) -> bool:
     return False
 
 
-def _check_redis_or_exit() -> None:
-    """启动前 Redis 预检：不可达则打印明确指引并退出（避免"打印 started 后
-    各服务静默崩溃"）。SKIP_REDIS_CHECK=1 可跳过。"""
-    if os.environ.get("SKIP_REDIS_CHECK", "0") == "1":
-        return
+def _redis_target() -> tuple[str, int]:
+    """本实例要连的 Redis 地址：显式配置 → 上一轮让位后的实际端口 → 默认 6379。
+
+    让位端口只在"那儿确实有一个可达的 Redis"时才继续生效（否则实例停止后会把
+    状态/就绪检查指向一个空端口）。
+    """
     host = os.environ.get("REDIS_HOST", "localhost")
     try:
         port = int(os.environ.get("REDIS_PORT", "6379") or 6379)
     except Exception:
         port = 6379
+    if str(os.environ.get("REDIS_PORT") or "").strip():
+        return host, port
+    try:
+        saved = int(_read_runtime_ports().get("redis") or 0)
+    except Exception:
+        saved = 0
+    if saved and saved != port and _redis_reachable(host, saved):
+        return host, saved
+    return host, port
+
+
+def _redis_major(host: str, port: int) -> int | None:
+    """正在运行的 Redis 主版本（INFO server 探测，不依赖 redis 包）。"""
+    try:
+        import dep_check
+        return dep_check.redis_major_version(host, port)
+    except Exception:
+        return None
+
+
+def _check_redis_or_exit() -> None:
+    """启动前 Redis 预检：不可达则打印明确指引并退出（避免"打印 started 后
+    各服务静默崩溃"）。SKIP_REDIS_CHECK=1 可跳过。"""
+    if os.environ.get("SKIP_REDIS_CHECK", "0") == "1":
+        return
+    host, port = _redis_target()
     if _redis_reachable(host, port):
         return
     logging.getLogger(__name__).error("Redis unreachable at %s:%s", host, port)
@@ -167,11 +213,7 @@ def _wait_redis_ready(timeout: float | None = None) -> bool:
     MessagingClient 会在启动期连不上 Redis 而进入重试风暴、静默挂住——表现为
     "启动校验 15/16、orchestrator 未存活"且它的日志停在 AgentRegistry 之后没有任何进展。
     """
-    host = os.environ.get("REDIS_HOST", "localhost")
-    try:
-        port = int(os.environ.get("REDIS_PORT", "6379") or 6379)
-    except Exception:
-        port = 6379
+    host, port = _redis_target()
     try:
         budget = float(timeout if timeout is not None
                        else (os.environ.get("WM_REDIS_READY_WAIT", "20") or 20))
@@ -193,30 +235,70 @@ def _wait_redis_ready(timeout: float | None = None) -> bool:
         time.sleep(0.5)
 
 
+def _start_own_redis(port: int, reason: str = "") -> None:
+    """启动**本实例自己的**便携 Redis（必要时让位到空闲端口），并把地址发布给子进程。
+
+    绝不停用/接管别人的 Redis：端口上是别人的实例时只让位，不动对方进程。
+    """
+    log = logging.getLogger(__name__)
+    t = import_cli_text().msg
+    if reason:
+        print(t(f"  [--] {reason}：本实例改用 127.0.0.1:{port} 的自带 Redis（不接管该进程）",
+                f"  [--] {reason}: this instance uses its own Redis on 127.0.0.1:{port}"))
+    try:
+        from dep_check import ensure_redis
+        result = ensure_redis(auto=True, port=port)
+    except Exception as exc:
+        log.warning("Redis 复核失败：%s", str(exc)[:150])
+        _check_redis_or_exit()
+        return
+    if not result.get("ok"):
+        print(result.get("detail", ""))
+        sys.exit(1)
+    os.environ["REDIS_PORT"] = str(port)
+    if not str(os.environ.get("REDIS_HOST") or "").strip():
+        os.environ["REDIS_HOST"] = "127.0.0.1"
+    _write_runtime_ports(redis=port)
+    log.info("Redis 复核：%s", result.get("detail", ""))
+
+
 def _ensure_redis_available() -> None:
     """启动前的 Redis 再确认：停掉上一轮服务后，若 Redis 已不可达则自动补齐。
 
     预检（`_check_redis_or_exit`）发生在停服之前，而 stop 会收尾本项目启动的便携
-    Redis；此处在真正拉起服务前复核一次，避免"服务全起在无 Redis 的环境里"。"""
-    host = os.environ.get("REDIS_HOST", "localhost")
-    try:
-        port = int(os.environ.get("REDIS_PORT", "6379") or 6379)
-    except Exception:
-        port = 6379
+    Redis；此处在真正拉起服务前复核一次，避免"服务全起在无 Redis 的环境里"。
+
+    端口冲突（别人的程序占着）或版本不兼容（Redis 5 不支持 RESP3/HELLO）时：
+    用户显式指定端口 → 如实报错；否则本实例让位到空闲端口起自己的便携 Redis。
+    """
+    host, port = _redis_target()
+    explicit = bool(str(os.environ.get("REDIS_PORT") or "").strip())
+    reason = ""
     if _redis_reachable(host, port):
+        major = _redis_major(host, port)
+        if major is None or major >= _redis_min_major():
+            return
+        reason = (f"端口 {port} 上的 Redis 主版本为 {major}，"
+                  f"低于本项目要求的 {_redis_min_major()}")
+    elif not _port_is_free(port):
+        reason = f"端口 {port} 已被其它程序占用（该端口不是 Redis）"
+    if not reason:
+        _start_own_redis(port)
         return
-    try:
-        from dep_check import ensure_redis
-        result = ensure_redis(auto=True)
-        logging.getLogger(__name__).info("Redis 复核：%s", result.get("detail", ""))
-        if not result.get("ok"):
-            print(result.get("detail", ""))
-            sys.exit(1)
-    except SystemExit:
-        raise
-    except Exception as exc:
-        logging.getLogger(__name__).warning("Redis 复核失败：%s", str(exc)[:150])
-        _check_redis_or_exit()
+    if explicit:
+        print(import_cli_text().msg(
+            f"Redis 不可用：{reason}。REDIS_PORT/config.json 已显式指定该端口，"
+            f"不自动改端口——请释放该端口、或改配置指向可用的 Redis。",
+            f"Redis unusable: {reason}. The port is explicitly configured; "
+            f"free it or point the config at a usable Redis."))
+        sys.exit(1)
+    alt = _first_free_port(port + 1)
+    if not alt:
+        print(import_cli_text().msg(
+            f"Redis 不可用：{reason}，且附近没有空闲端口可用。",
+            f"Redis unusable: {reason}, and no free port nearby."))
+        sys.exit(1)
+    _start_own_redis(alt, reason=reason)
 
 
 def _read_pids() -> dict:
@@ -270,6 +352,9 @@ def _is_alive(pid: int) -> bool:
                 ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
                 text=True,
                 timeout=10,
+                # Windows 工具按控制台代码页（中文系统是 GBK）输出；UTF-8 模式下
+                # 解码会在线程里抛 UnicodeDecodeError（打印一堆吓人的栈，PID 判断失效）。
+                errors="replace",
             )
             return f'"{pid}"' in out
         except Exception:
@@ -660,6 +745,11 @@ def start_services() -> dict:
     _ensure_redis_available()
     _wait_redis_ready()
 
+    # Web 端口必须在拉起子进程**之前**定下来：默认端口被占用时让位到空闲端口，
+    # 并把实际端口发布给所有子进程（webui 读 WEB_PORT）与后续的 url/就绪探测。
+    _web = resolve_web_port()
+    os.environ["WEB_PORT"] = str(_web)
+
     services = build_services(cfg)
     pids: dict = {"services": {}, "failed": []}
     for name, argv, cwd, out_path in services:
@@ -756,7 +846,11 @@ def readiness_report(*, http_timeout: float = 3.0) -> dict:
     workbench = {"ok": False, "detail": "", "port": port, "url": web_url(port)}
     try:
         import urllib.request
-        with urllib.request.urlopen(
+        # 回环探测必须绕开代理：企业/校园网常设 HTTP_PROXY，代理会把 127.0.0.1 的
+        # 请求也接走（实测死代理下"服务在跑却报工作台未响应"）。这里显式不走代理，
+        # 与下面的 NO_PROXY 发布双保险。
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(
                 f"http://127.0.0.1:{port}/api/health", timeout=http_timeout) as resp:
             code = int(getattr(resp, "status", 0) or 0)
             workbench["ok"] = 200 <= code < 300
@@ -765,19 +859,9 @@ def readiness_report(*, http_timeout: float = 3.0) -> dict:
         workbench["detail"] = f"未响应（{str(exc)[:80]}）@ {port}"
 
     # ② 研究能力
-    host = os.environ.get("REDIS_HOST", "localhost")
-    try:
-        rport = int(os.environ.get("REDIS_PORT", "6379") or 6379)
-    except Exception:
-        rport = 6379
+    host, rport = _redis_target()
     redis_ok = _redis_reachable(host, rport)
-    major = None
-    if redis_ok:
-        try:
-            import dep_check
-            major = dep_check._redis_server_version(host, rport)
-        except Exception:
-            major = None
+    major = _redis_major(host, rport) if redis_ok else None
     beats = _registry_heartbeats()
     missing = [c for c in RESEARCH_REQUIRED_CAPABILITIES if c not in beats]
     stale = [c for c in RESEARCH_REQUIRED_CAPABILITIES
@@ -852,12 +936,65 @@ def print_readiness(rep: dict, quiet: bool = False) -> None:
             "Code execution: container isolation unavailable - code steps will be refused."))
 
 
-def web_port() -> int:
-    """Web 端口的**唯一来源**：WEB_PORT 环境变量（config.json 的 `web.port` 作默认值）。
+def _read_runtime_ports() -> dict:
+    try:
+        data = json.loads(RUNTIME_PORTS_FILE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
 
-    start.bat、就绪探测、提示消息、打开浏览器都必须用它——此前 start.bat 里硬写
-    8080，用户改过端口就会打开错误的页面。
-    """
+
+def _write_runtime_ports(**updates) -> None:
+    data = _read_runtime_ports()
+    data.update(updates)
+    data["at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+    try:
+        RUNTIME_PORTS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        RUNTIME_PORTS_FILE.write_text(
+            json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception as exc:
+        logging.getLogger(__name__).warning("端口状态写入失败：%s", str(exc)[:120])
+
+
+def _port_is_free(port: int) -> bool:
+    """该端口此刻能否在本机回环上监听（只看能否占用，不判断占用者是谁）。"""
+    import socket as _socket
+    sock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+    try:
+        sock.bind(("127.0.0.1", int(port)))
+        return True
+    except OSError:
+        return False
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+
+def _first_free_port(start: int, count: int = 20) -> int:
+    """从 start 起找第一个空闲端口；找不到返回 0。"""
+    for cand in range(int(start), int(start) + max(1, int(count))):
+        if 0 < cand < 65536 and _port_is_free(cand):
+            return cand
+    return 0
+
+
+def _webui_owned_here() -> bool:
+    """本实例的 webui 子进程是否存活（判断端口占用者是不是自己）。"""
+    pids = _read_pids().get("services") or {}
+    try:
+        pid = int(pids.get("webui") or 0)
+    except Exception:
+        return False
+    try:
+        return bool(pid) and _is_alive(pid) and _pid_owns_project(pid)
+    except Exception:
+        return False
+
+
+def _preferred_web_port() -> int:
+    """用户期望的端口：WEB_PORT 环境变量 → config.json 的 web.port → 8080。"""
     cfg = _load_config()
     web_cfg = cfg.get("web") if isinstance(cfg.get("web"), dict) else {}
     raw = os.environ.get("WEB_PORT") or (web_cfg or {}).get("port") or 8080
@@ -866,6 +1003,61 @@ def web_port() -> int:
     except Exception:
         port = 8080
     return port if 0 < port < 65536 else 8080
+
+
+def _web_port_is_explicit() -> bool:
+    """端口是不是用户显式指定的（显式指定不自动让位，只如实报告冲突）。"""
+    if str(os.environ.get("WEB_PORT") or "").strip():
+        return True
+    cfg = _load_config()
+    web_cfg = cfg.get("web") if isinstance(cfg.get("web"), dict) else {}
+    return bool((web_cfg or {}).get("port"))
+
+
+def resolve_web_port() -> int:
+    """启动前解析 Web 端口：默认端口被别的程序占用时，本实例让位到空闲端口。
+
+    "让位"而不是"报错退出"：8080 是极常见的默认端口，别的软件（或另一个织光实例）
+    先占着时，新人拿到的应该是一个能打开的工作台。让位结果写入 runtime_ports.json，
+    使 `launcher.py url`、webui 子进程与浏览器打开的是同一个端口。
+    """
+    preferred = _preferred_web_port()
+    if _web_port_is_explicit():
+        if not _port_is_free(preferred) and not _webui_owned_here():
+            logging.getLogger(__name__).warning(
+                "WEB_PORT/config.json 指定的端口 %d 已被占用：请换端口或先停掉占用它的程序",
+                preferred)
+        return preferred
+    if _port_is_free(preferred) or _webui_owned_here():
+        if _read_runtime_ports().get("web") not in (None, preferred):
+            _write_runtime_ports(web=preferred)
+        return preferred
+    alt = _first_free_port(preferred + 1)
+    if not alt:
+        return preferred
+    logging.getLogger(__name__).info(
+        "端口 %d 已被其它程序占用，本实例改用 %d（不接管对方进程）", preferred, alt)
+    _write_runtime_ports(web=alt, preferred=preferred)
+    return alt
+
+
+def web_port() -> int:
+    """Web 端口的**唯一来源**：显式配置 → 上一轮让位后的实际端口 → 默认端口。
+
+    start.bat、就绪探测、提示消息、打开浏览器都必须用它——此前 start.bat 里硬写
+    8080，用户改过端口就会打开错误的页面。让位端口只在"本实例确实跑在它上面"时
+    才继续生效，实例停止后自动回到用户期望的端口。
+    """
+    preferred = _preferred_web_port()
+    if _web_port_is_explicit():
+        return preferred
+    try:
+        saved = int(_read_runtime_ports().get("web") or 0)
+    except Exception:
+        saved = 0
+    if saved and saved != preferred and _webui_owned_here():
+        return saved
+    return preferred
 
 
 def web_url(port: int | None = None) -> str:
@@ -1172,7 +1364,7 @@ def runtime_identity() -> str:
     try:
         import subprocess as _sp
         out = _sp.run(["git", "rev-parse", "--short", "HEAD"], cwd=str(BASE_DIR),
-                      capture_output=True, text=True, timeout=5)
+                      capture_output=True, text=True, timeout=5, errors="replace")
         if out.returncode == 0 and out.stdout.strip():
             return f"git:{out.stdout.strip()}"
     except Exception:
@@ -1363,6 +1555,28 @@ def diagnostics_report(tail_lines: int = 40) -> str:
     return "\n".join(lines)
 
 
+def _interactive_console() -> bool:
+    """当前是否有**真正的**可交互控制台（管道/重定向/NUL 下不进入问答式引导）。
+
+    Windows 上 `sys.stdin.isatty()` 不可靠：重定向到 NUL 也返回 True（NUL 是字符
+    设备），于是自动化场景仍会进入问答式引导并立刻撞 EOF。用 GetConsoleMode 判断
+    句柄是不是控制台——真正的双击窗口为真，管道/文件/NUL 为假。
+    """
+    if os.environ.get("WM_NONINTERACTIVE"):
+        return False
+    try:
+        if os.name == "nt":
+            import ctypes
+            import msvcrt
+            handle = msvcrt.get_osfhandle(sys.stdin.fileno())
+            mode = ctypes.c_uint()
+            return bool(ctypes.windll.kernel32.GetConsoleMode(
+                ctypes.c_void_p(handle), ctypes.byref(mode)))
+        return bool(sys.stdin and sys.stdin.isatty())
+    except Exception:
+        return False
+
+
 def startup_controller(*, allow_config_wizard: bool = True) -> dict:
     """统一启动控制器：检查运行包 → 准备依赖 → 等待首次配置 → 启动服务 → 等待就绪。
 
@@ -1389,6 +1603,7 @@ def startup_controller(*, allow_config_wizard: bool = True) -> dict:
                 "url": web_url(), "detail": detail}
 
     try:
+        resolve_web_port()
         cfg = effective_config()
         step(t("运行包", "Runtime"),
              True, f"{cfg['identity']}　Python {cfg['python']}")
@@ -1407,7 +1622,8 @@ def startup_controller(*, allow_config_wizard: bool = True) -> dict:
         if not cfg["config_complete"]:
             step(t("配置", "Configuration"), False,
                  t("模型/密钥不完整：先完成引导再启动", "model/key incomplete: run the wizard first"))
-            if allow_config_wizard and os.environ.get("WM_NONINTERACTIVE") != "1":
+            if (allow_config_wizard and os.environ.get("WM_NONINTERACTIVE") != "1"
+                    and _interactive_console()):
                 try:
                     import subprocess as _sp
                     _sp.run([sys.executable, str(BASE_DIR / "setup_wizard.py")],
@@ -1416,11 +1632,21 @@ def startup_controller(*, allow_config_wizard: bool = True) -> dict:
                 except Exception as exc:
                     logging.getLogger(__name__).warning("引导启动失败：%s", str(exc)[:120])
             if not cfg["config_complete"]:
+                # 配置未完成也要把工作台拉起来：页面里有首启引导与内置演示，
+                # 新人不必先回到终端——但研究能力仍未就绪，状态如实报 awaiting_config。
                 mark_step(cfg["identity"], "config", False, "incomplete")
-                release_instance_lock("failed")
-                return {"state": "awaiting_config", "steps": steps, "url": cfg["url"],
-                        "detail": t("完成模型配置后再次运行本入口（或打开页面引导）",
-                                    "finish model configuration and run this entry again")}
+                step(t("配置", "Configuration"), False,
+                     t("模型/密钥待填写：打开工作台按首启引导完成（演示可直接看）",
+                       "model/key pending: finish it in the workbench first-run guide"))
+                start_services()
+                rep = readiness_report()
+                print_readiness(rep, quiet=False)
+                release_instance_lock("limited")
+                return {"state": "awaiting_config", "steps": steps, "url": rep["url"],
+                        "detail": t(f"打开 {rep['url']} 完成模型配置；"
+                                    f"研究能力在配置完成前不对外宣称就绪",
+                                    f"open {rep['url']} to finish setup; research is not "
+                                    f"advertised as ready before that")}
         step(t("配置", "Configuration"), True,
              f"{cfg['model']} @ {cfg['base_url']}")
 
@@ -1523,7 +1749,10 @@ def main() -> None:
         # 统一启动控制器：检查运行包 → 依赖 → 配置 → 服务 → 就绪（新人入口只调它）
         result = startup_controller()
         print(f"  URL: {result.get('url') or web_url()}")
-        sys.exit(0 if result.get("state") in ("research_ready", "limited_experience") else 1)
+        # awaiting_config 也是"打开页面继续"的正常状态：工作台已起、引导在页面里，
+        # 不是失败——失败（failed）才让入口走诊断分支。
+        sys.exit(0 if result.get("state") in ("research_ready", "limited_experience",
+                                              "awaiting_config") else 1)
     elif action == "diagnostics":
         out_path = sys.argv[2] if len(sys.argv) > 2 else ""
         text = diagnostics_report()

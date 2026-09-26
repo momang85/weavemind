@@ -376,13 +376,25 @@ class TestAuthAudit(unittest.TestCase):
 
         公开接口只给布尔状态——**不得**回显密钥、地址或模型名。
         """
-        self._write_config({"llm": {"api_key": "FAKE-KEY-0123456789",
+        fake_key = "-".join(("FAKE", "KEY", "0123456789"))
+        self._write_config({"llm": {"api_key": fake_key,
                                     "base_url": "https://api.example/v1",
                                     "model": "demo-model"}})
         d = self._req("/api/auth/bootstrap").json_body()
         self.assertTrue(d["config_complete"])
-        self.assertEqual(set(d.keys()) - {"setup_required", "config_complete", "demo_available"},
+        self.assertEqual(set(d.keys()) - {"setup_required", "config_complete",
+                                          "demo_available", "code_execution"},
                          set(), "bootstrap 不得增加其他字段")
+        # N4 场景 8：代码执行隔离状态只给布尔 + 既有说明文案，不得带路径/凭据
+        ce = d["code_execution"]
+        if ce is not None:
+            self.assertEqual(set(ce.keys()),
+                             {"isolation_ready", "isolation_required",
+                              "execution_available", "note"})
+            self.assertIsInstance(ce["isolation_ready"], bool)
+            blob = json.dumps(ce, ensure_ascii=False)
+            for leak in (fake_key, "api.example", "demo-model", ":\\", "/home/"):
+                self.assertNotIn(leak, blob, f"代码执行状态不得泄漏：{leak}")
         # 配置不完整时如实为 False
         self._write_config({"llm": {"model": "demo-model"}})
         self.assertFalse(self._req("/api/auth/bootstrap").json_body()["config_complete"])

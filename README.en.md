@@ -198,12 +198,18 @@ Human researcher scoring and full validation with real Redis processes, multiple
 
 | Path | Best for | Entry point |
 |---|---|---|
-| Windows one-click | Fastest local trial | `.\start.bat` (below) |
+| **Windows run package** (no dev environment) | Newcomers who just want to use it | Unzip `weavemind-<version>-win-x64.zip` → double-click `start.bat`. Bundles Python, dependencies, Redis and the built frontend: no system Python, Node or Docker required |
+| Windows one-click (source) | Fastest local trial, code changes | `.\start.bat` (below) |
 | Linux / macOS one-click | Fastest local trial | `bash start.sh` |
 | Docker Compose | Servers, no local Python | `docker compose up --build -d` |
 | Manual install | Custom environments, development, restricted networks | [Deployment guide](docs/部署指南.md) §5 (including [troubleshooting and offline install](docs/部署指南.md#53-依赖装不上时的排查与离线安装)) |
 
 All four paths use the same backend and artifact layout; the sections below give the details and known limitations of each.
+
+> Verification scope, stated honestly: the one-click path **has been run end to end in a scrubbed
+> environment** (no system Python/Node/Docker, Chinese + spaces in the path), plus port-conflict and
+> process-level network-cut drills. A separate truly clean machine, a physical network cut and a real
+> Redis 5 install remain **unverified**. See [新人上手指南](docs/新人上手指南.md) (Chinese).
 
 ### Prerequisites
 

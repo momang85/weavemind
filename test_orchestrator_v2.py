@@ -1716,6 +1716,58 @@ class TestDockerFreeResearchPath(unittest.TestCase):
                       "隔离不可用时不得进入修复轮（修复步也是 code_execution）")
         self.assertIn("跳过交付修复轮：代码执行沙箱不可用", src)
 
+    def _unavailable_sandbox(self):
+        return (mock.patch("code_sandbox.isolation_required", lambda: True),
+                mock.patch("code_sandbox.isolation_ready",
+                           lambda: (False, "docker 不可用（CLI 缺失或守护进程未响应）")))
+
+    def test_sandbox_notice_is_emitted_before_code_steps_run(self):
+        """场景 8：计划含 code_execution 且隔离不可用时，**执行前**就说明白，且不降级。
+
+        此前只有"修复轮被跳过"的事后日志：用户要等到任务跑完才从失败步骤里发现
+        代码步骤根本执行不了（实机：等了十几分钟）。
+        """
+        steps = [{"step_id": "1", "capability": "code_execution"},
+                 {"step_id": "2", "capability": "report_generator"}]
+        req, ready = self._unavailable_sandbox()
+        with req, ready, mock.patch("orchestrator_v2.push_progress") as push, \
+                mock.patch.object(OrchestratorV2, "_now_iso", return_value="t"):
+            orch = OrchestratorV2.__new__(OrchestratorV2)
+            orch._messaging = object()
+            orch._announce_sandbox_before_code("task-1", steps)
+            orch._announce_sandbox_before_code("task-1", steps)   # 同一任务不刷屏
+        self.assertEqual(push.call_count, 1, "同一任务只提示一次")
+        payload = push.call_args[0][3]
+        self.assertIn("code_execution", payload["message"])
+        self.assertIn("不会退到宿主环境运行", payload["message"])
+        self.assertIn("不要用关闭隔离来解决", payload["message"])
+        self.assertIsNone(steps[0].get("status"), "提示不得改动步骤状态（无自动降级）")
+
+    def test_no_sandbox_notice_for_research_only_plans(self):
+        """研究类计划（没有代码步骤）不该被这条提示打扰。"""
+        req, ready = self._unavailable_sandbox()
+        with req, ready, mock.patch("orchestrator_v2.push_progress") as push:
+            orch = OrchestratorV2.__new__(OrchestratorV2)
+            orch._messaging = object()
+            orch._announce_sandbox_before_code("t", [{"capability": "web_search"},
+                                                     {"capability": "report_generator"}])
+        push.assert_not_called()
+
+    def test_no_sandbox_notice_when_isolation_is_ready(self):
+        steps = [{"step_id": "1", "capability": "code_execution"}]
+        with mock.patch("code_sandbox.isolation_required", lambda: True), \
+                mock.patch("code_sandbox.isolation_ready", lambda: (True, "")), \
+                mock.patch("orchestrator_v2.push_progress") as push:
+            orch = OrchestratorV2.__new__(OrchestratorV2)
+            orch._messaging = object()
+            orch._announce_sandbox_before_code("t", steps)
+        push.assert_not_called()
+
+    def test_notice_is_wired_into_the_execution_path(self):
+        src = Path("orchestrator_v2.py").read_text(encoding="utf-8")
+        self.assertIn("self._announce_sandbox_before_code(task_id, steps)", src,
+                      "提示必须挂在执行步骤之前，而不是事后日志里")
+
 
 class TestBackfillChartManifest(TempWorkspaceCase):
     """多实体任务交付缺口回归：make_charts 语义图也必须进入 chart_manifest.json。"""

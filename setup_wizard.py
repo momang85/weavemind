@@ -194,6 +194,24 @@ def load_template() -> dict:
             "redis": {"host": "localhost", "port": 6379}, "system": {}}
 
 
+def _base_config(target: Path) -> dict:
+    """写盘基底：**已有 config.json 优先**（保留 redis/system 与用户设过的高级项），
+    否则用模板。
+
+    为什么不能只用模板：引导只为 llm/planner/backup 提问，若以模板为基底写盘，
+    用户此前手工设过的 `redis.port`、`system.*`、高级模型角色等会被静默清掉——
+    架构要求"保留用户主动设置的高级选项"。
+    """
+    try:
+        if Path(target).exists():
+            data = json.loads(Path(target).read_text(encoding="utf-8"))
+            if isinstance(data, dict) and data:
+                return data
+    except Exception:
+        pass
+    return load_template()
+
+
 def _interactive() -> bool:
     """是否进入问答流程。
 
@@ -388,8 +406,8 @@ def run_interactive(force: bool = False, path: Path | None = None) -> int:
             if not str(again).strip().lower().startswith("n"):
                 return run_interactive(force=True, path=target)
 
-    # 6) 写盘
-    cfg = build_config(load_template(), base_url=base_url, api_key=api_key,
+    # 6) 写盘（基底是已有配置：只改引导问到的字段，不动用户设过的其它项）
+    cfg = build_config(_base_config(target), base_url=base_url, api_key=api_key,
                        model=model, embedding=embedding)
     written = write_config(cfg, target)
     print()

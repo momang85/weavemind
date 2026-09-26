@@ -59,6 +59,9 @@ REQUIRED_SOURCES = (
     "setup_wizard.py", "cli_text.py", "logging_setup.py", "db_paths.py", "workspace.py",
     "memory_manager.py", "start.bat", "stop.bat", "frontend/dist", "config.example.json",
     "requirements.txt", "templates.json",
+    # 内置演示简报：无密钥的新人在页面里唯一能看的东西（N3 首启引导第一步）。
+    # 漏掉它时页面显示"内置演示未随包提供"，而新人此时没有别的可看。
+    "demo",
 )
 # 有就带上、没有也不算缺（与 Dockerfile 的口径一致）：缺失项会写进构建报告
 OPTIONAL_SOURCES = ("prompts",)
@@ -230,6 +233,62 @@ def scan_dev_paths(tree: Path) -> list[str]:
     return hits
 
 
+START_HERE_NAME = "运行说明.txt"
+
+START_HERE_TEMPLATE = """\
+织光 WeaveMind 运行包 {version}（Windows x64）——从这里开始
+====================================================
+
+1. 双击 start.bat（唯一入口）
+   首次启动会自动准备 Redis、检查依赖并拉起服务，然后打开浏览器工作台。
+   不需要命令行，也不需要另装 Python、Node 或 Docker。
+
+2. 浏览器里完成首次配置
+   选择模型服务、填入自己的密钥，然后就能提交研究任务。
+   没有密钥也能先看内置演示：页面会一直标注"内置演示，不是本次实时生成"。
+
+3. 停止：双击 stop.bat
+   只停止本运行包启动的服务与自带 Redis；系统里或别处安装的 Redis 不会被改动。
+
+4. 出问题怎么办
+   - 先看本目录 logs\\ 下最新的日志；
+   - 或执行 runtime\\python.exe launcher.py diagnostics diag.txt
+     生成脱敏诊断（不含密钥、不会上传），按提示处理后再双击 start.bat；
+   - 端口被别的程序占用时，本实例会自动改用空闲端口，并在控制台写明用的是哪个。
+
+5. 目录说明
+   start.bat / stop.bat   启动与停止
+   runtime\\               自带的 Python {py} 运行环境（不要删）
+   frontend\\              已构建的前端产物（不需要 Node）
+   .weavemind\\            本实例状态：Redis、端口、启动记录（不要手工改）
+   logs\\                  运行日志
+   config.json            首次配置后生成，里面有密钥：不要外传、不要提交
+
+6. 没有 Docker 也能用
+   容器隔离不可用时只有"代码执行"类步骤会被拒绝；公司研究、图表、报告、
+   交付下载都不受影响。不要为了"能用"去关闭隔离。
+{extras}"""
+
+
+def write_start_here(pkg: Path, *, version: str, report: dict) -> dict:
+    """写入新人运行说明（包根目录；UTF-8 BOM 便于记事本直接打开）。
+
+    解压后第一眼要能知道"双击哪个文件、接下来干什么"——此前包根目录只有源码清单，
+    新人只能靠猜。内容随构建事实变化（Redis/字体是否随包），不写死。
+    """
+    steps = report.get("steps") or {}
+    extras: list[str] = []
+    if (steps.get("redis") or {}).get("missing"):
+        extras.append("\n注意：本包未附便携 Redis 压缩包，首次启动需要联网获取 Redis。\n")
+    if not (steps.get("font") or {}).get("bundled"):
+        extras.append("\n说明：中文字体使用系统自带（Windows 自带中文字体），未随包分发字体文件。\n")
+    text = START_HERE_TEMPLATE.format(version=version, py=PY_VERSION,
+                                      extras="".join(extras))
+    target = inside(pkg, pkg / START_HERE_NAME)
+    target.write_text(text, encoding="utf-8-sig")
+    return {"name": START_HERE_NAME, "sha256": sha256_file(target)}
+
+
 def write_manifest(pkg: Path, *, version: str, components: dict, notes: list[str]) -> dict:
     files = {}
     for p in sorted(Path(pkg).rglob("*")):
@@ -277,7 +336,11 @@ def prepare_runtime(pkg: Path, cache: Path, *, sha_pin: str, offline: bool) -> d
     stdlib_zip = f"python{PY_VERSION.split('.')[0]}{PY_VERSION.split('.')[1]}.zip"
     keep = [ln for ln in pth.read_text(encoding="utf-8").splitlines()
             if ln.strip() and not ln.strip().lower().startswith("import ")]
-    for extra in (stdlib_zip, ".", "Lib\\site-packages"):
+    # `..` = 运行包根目录。**必须有**：带 ._pth 的解释器是"隔离模式"，不会像普通
+    # Python 那样把脚本所在目录加进 sys.path——只写 site-packages 时，`python
+    # launcher.py` 会在 `import db_paths` 上直接 ModuleNotFoundError（实测：包内
+    # 验证通过、真机双击却立刻失败，因为验证只试了第三方包）。
+    for extra in (stdlib_zip, ".", "Lib\\site-packages", ".."):
         if extra not in keep:
             keep.append(extra)
     pth.write_text("\n".join(keep + ["import site"]) + "\n", encoding="utf-8")
@@ -397,14 +460,22 @@ def _count_dist_infos(site_packages: Path) -> int:
 
 
 def verify_in_package(pkg: Path) -> dict:
-    """用**包内解释器**验证：关键导入 + SSL/SQLite（可迁移性最低要求）。"""
+    """用**包内解释器**验证：关键导入 + SSL/SQLite（可迁移性最低要求）。
+
+    必须同时导入**项目模块**（如 db_paths）：只验证第三方包时，"包根不在 sys.path"
+    这类致命问题会被漏掉——实测包内验证全绿、真机双击 start.bat 立刻
+    `ModuleNotFoundError: No module named 'db_paths'`。
+    """
     py = inside(pkg, Path(pkg) / "runtime" / "python.exe")
     if not py.exists():
         return {"ok": False, "detail": "包内没有 runtime/python.exe（非 Windows 构建机？）"}
     code = ("import ssl, sqlite3, json, sys;"
             "import redis, aiosqlite, httpx;"
+            "import db_paths, cli_text, task_intent;"
             "print(json.dumps({'python': sys.version.split()[0],"
-            " 'openssl': ssl.OPENSSL_VERSION, 'sqlite': sqlite3.sqlite_version}))")
+            " 'openssl': ssl.OPENSSL_VERSION, 'sqlite': sqlite3.sqlite_version,"
+            " 'project_root_on_path': any(p for p in sys.path if p.rstrip('\\\\/')"
+            " and __import__('os').path.isfile(__import__('os').path.join(p, 'launcher.py')))}))")
     env = dict(os.environ)
     env.pop("PYTHONPATH", None)
     env.pop("PYTHONHOME", None)
@@ -508,7 +579,10 @@ def build(args) -> int:
         report["steps"]["font"] = {"bundled": None,
                                    "note": "使用系统字体（Windows 自带中文字体）；Docker 路径仍缺字体"}
 
-    # ⑦ 扫描与验证
+    # ⑦ 新人运行说明（包根目录，双击 start.bat 之前先看到它）
+    report["steps"]["start_here"] = write_start_here(pkg, version=version, report=report)
+
+    # ⑧ 扫描与验证
     report["secrets"] = scan_secrets(pkg)
     report["dev_paths"] = scan_dev_paths(pkg)
     report["verify"] = verify_in_package(pkg) if not args.skip_verify else {"skipped": True}
@@ -521,7 +595,7 @@ def build(args) -> int:
                     "frontend": inside(pkg, Path(pkg) / "frontend" / "dist" / "index.html").exists(),
                     "font": report["steps"]["font"].get("bundled")},
         notes=report["notes"])
-    # ⑧ 打包 zip
+    # ⑨ 打包 zip
     zip_path = inside(out_dir, out_dir / f"{pkg.name}.zip")
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
         for p in sorted(pkg.rglob("*")):

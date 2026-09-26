@@ -436,7 +436,7 @@ def _system_redis_exe() -> Path | None:
     for svc in ("Memurai", "Redis", "memurai", "redis"):
         try:
             proc = subprocess.run(["sc", "qc", svc], capture_output=True, text=True,
-                                  timeout=8)
+                                  timeout=8, errors="replace")
         except Exception:
             continue
         if proc.returncode != 0:
@@ -471,7 +471,7 @@ def _redis_version_of(exe: Path) -> int:
     """跑一次 `--version` 取主版本号；失败返回 0（= 不可用）。"""
     try:
         proc = subprocess.run([str(exe), "--version"], capture_output=True, text=True,
-                              timeout=8)
+                              timeout=8, errors="replace")
     except Exception:
         return 0
     import re as _re
@@ -670,7 +670,7 @@ def _pip_install_once(packages: list[str], timeout: int = 600,
     cmd += list(packages)
     try:
         proc = subprocess.run(cmd, shell=False, capture_output=True, text=True,
-                              timeout=timeout)
+                              timeout=timeout, errors="replace")
         if proc.returncode == 0:
             return True, f"已安装：{', '.join(packages)}"
         tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-1:] or [""]
@@ -859,7 +859,7 @@ def _redis_binary_version(exe: Path) -> int | None:
     """读取 redis-server 主版本号（--version，不绑定端口）；失败返回 None。"""
     try:
         proc = subprocess.run([str(exe), "--version"], shell=False,
-                              capture_output=True, text=True, timeout=8)
+                              capture_output=True, text=True, timeout=8, errors="replace")
         text = f"{proc.stdout} {proc.stderr}"
         import re as _re
         m = _re.search(r"v=(\d+)\.", text) or _re.search(r"(\d+)\.\d+\.\d+", text)
@@ -945,12 +945,23 @@ def _redis_skipped_result() -> dict:
                          "is installed")}
 
 
-def ensure_redis(auto: bool = True, wait_sec: float = 12.0) -> dict:
-    """确保 Redis 可用：已运行→通过；否则按平台获取并启动。"""
+def redis_major_version(host: str = "", port: int = 0,
+                        timeout: float = 2.0) -> int | None:
+    """正在运行的 Redis 主版本（公开入口，供 launcher 的就绪/冲突判断复用）。"""
+    return _redis_server_version(host, port, timeout)
+
+
+def ensure_redis(auto: bool = True, wait_sec: float = 12.0,
+                 port: int | None = None) -> dict:
+    """确保 Redis 可用：已运行→通过；否则按平台获取并启动。
+
+    `port` 显式给出时用它（launcher 在默认端口被占用/不兼容时让位到空闲端口），
+    否则按 REDIS_PORT 环境变量解析。
+    """
     if redis_skip_requested():
         return _redis_skipped_result()
     host = _env_host()
-    port = _env_port()
+    port = _valid_port(port if port else _env_port())
     if redis_ping("", port):
         major = _redis_server_version(host, port)
         if major is None or major >= REDIS_MIN_MAJOR:

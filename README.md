@@ -194,12 +194,18 @@ flowchart LR
 
 | 方式 | 适合 | 入口 |
 |---|---|---|
-| Windows 一键 | 本机快速试用 | `.\start.bat`（见下文） |
+| **Windows 运行包**（不装开发环境） | 只想用起来的新人 | 解压 `weavemind-<版本>-win-x64.zip` → 双击 `start.bat`；包内自带 Python/依赖/Redis/前端，不需要系统 Python、Node、Docker |
+| Windows 源码一键 | 本机快速试用、要改代码 | `.\start.bat`（见下文） |
 | Linux / macOS 一键 | 本机快速试用 | `bash start.sh` |
 | Docker Compose | 服务器、免本地 Python | `docker compose up --build -d` |
 | 手动安装 | 自定义环境、二次开发、内网机器 | [部署指南](docs/部署指南.md) §5（含[依赖装不上时的排查与离线安装](docs/部署指南.md#53-依赖装不上时的排查与离线安装)） |
 
 四种方式共用同一套后端与产物目录；下面的小节给出各自的细节与已知边界。
+新人的完整路径（该走哪条、看到什么、出错怎么办、验证到什么程度）见
+[新人上手指南](docs/新人上手指南.md)。
+
+> 一键启动的验证范围如实说明：**净化环境（无系统 Python/Node/Docker、中文+空格路径）已实跑通过**，
+> 端口冲突与进程级断网演练通过；**另装一台真正的干净机器**、物理断网与真实 Redis 5 仍属未验。
 
 ### 准备环境
 
@@ -217,13 +223,16 @@ cd weavemind
 
 ### Windows
 
-在 PowerShell 中运行：
+解压运行包后**双击 `start.bat`** 即可（自带运行时）；从源码启动时在 PowerShell 中运行：
 
 ```powershell
 .\start.bat
 ```
 
-脚本检查并补装依赖，首次运行可进入配置引导；缺少 Redis 时会尝试获取便携版本。需要隔离 Python 依赖时，可按[部署指南](docs/部署指南.md)使用虚拟环境与 `launcher.py`。
+脚本探测解释器（运行包优先用包内 `runtime\python.exe`）后交给统一控制器 `launcher.py up`：
+先形成有效配置，再检查/补齐依赖与 Redis，然后启动服务并给出三层就绪判定
+（工作台可访问 / 研究能力就绪 / 代码隔离可用）。首次运行可在终端引导或页面首启引导里完成配置；
+缺少 Redis 时会尝试获取便携版本。需要隔离 Python 依赖时，可按[部署指南](docs/部署指南.md)使用虚拟环境与 `launcher.py`。
 
 > 卡在依赖或 Redis 上（国内网络、装了安全软件的机器常见）：见部署指南
 > 「5.3 依赖装不上时的排查与离线安装」——换 pip 镜像（`WM_PIP_INDEX_URL`）、

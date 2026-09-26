@@ -467,6 +467,8 @@ class TestRunPackageBuilder(unittest.TestCase):
                                 f"运行包缺少必需目录：{must}")
                 continue
             self.assertIn(must, rel, f"运行包缺少必需部件：{must}")
+        # 内置演示简报：无密钥的新人在页面里唯一能看的东西（缺了页面会说"未随包提供"）
+        self.assertIn("demo/demo_brief.md", rel, "运行包缺少内置演示简报")
         for bad in ("config.json", "agents.db", "requirements.lock"):
             self.assertNotIn(bad, rel, f"本机数据/开发物不得进包：{bad}")
         # 模型权重与缓存目录曾在首轮实测里被带进包（15GB）；这里逐项钉死
@@ -478,6 +480,54 @@ class TestRunPackageBuilder(unittest.TestCase):
         self.assertFalse([r for r in rel if r.startswith("test_")], "测试文件不得进包")
         self.assertFalse([r for r in rel if r.startswith("docs/evidence/")])
         self.assertFalse([r for r in rel if "__pycache__" in r])
+
+    def test_packaged_runtime_puts_the_package_root_on_sys_path(self):
+        """带 ._pth 的解释器是隔离模式：不加 `..`，`python launcher.py` 立刻
+        ModuleNotFoundError（实测：包内验证通过、真机双击失败）。"""
+        src = (ROOT / "scripts" / "build_run_package.py").read_text(encoding="utf-8")
+        self.assertIn('"Lib\\\\site-packages", ".."', src,
+                      "._pth 必须把运行包根目录（..）加进 sys.path")
+        self.assertIn("import db_paths, cli_text, task_intent;", src,
+                      "包内验证必须导入项目模块，不能只试第三方包")
+
+    def test_start_here_instructions_are_written_into_the_package(self):
+        """包根目录必须有新人说明：解压后第一眼知道"双击哪个文件、接下来干什么"。
+
+        此前包根目录只有 150+ 个源码文件，新人只能靠猜（N4 场景 1 的入口体验）。
+        说明文本必须随构建事实变化，且不得出现本机绝对路径/密钥。
+        """
+        import tempfile
+        b = self.b
+        tmp = Path(tempfile.mkdtemp(prefix="wm_pkg_"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        pkg = tmp / "weavemind-2026.09.26-win-x64"
+        pkg.mkdir()
+        report = {"steps": {"redis": {"sha256": "x"}, "font": {"bundled": None}}}
+        info = b.write_start_here(pkg, version="2026.09.26", report=report)
+        target = pkg / info["name"]
+        self.assertTrue(target.exists(), "运行说明必须真的写进包里")
+        text = target.read_text(encoding="utf-8-sig")
+        for must in ("start.bat", "stop.bat", "runtime", "launcher.py diagnostics",
+                     "2026.09.26", "Docker"):
+            self.assertIn(must, text, f"运行说明缺少关键信息：{must}")
+        self.assertNotIn(str(ROOT).replace("\\", "/"), text.replace("\\", "/"),
+                         "运行说明不得带构建机绝对路径")
+        self.assertEqual(b.scan_secrets(pkg), [], "运行说明不得命中秘密扫描")
+        self.assertEqual(b.scan_dev_paths(pkg), [], "运行说明不得命中绝对路径扫描")
+        self.assertEqual(info["sha256"], b.sha256_file(target))
+
+    def test_start_here_flags_a_missing_bundled_redis(self):
+        """未随包附 Redis 压缩包时，说明里必须写明"首次启动需要联网"。"""
+        import tempfile
+        b = self.b
+        tmp = Path(tempfile.mkdtemp(prefix="wm_pkg2_"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(tmp, ignore_errors=True))
+        pkg = tmp / "pkg"
+        pkg.mkdir()
+        b.write_start_here(pkg, version="v", report={"steps": {"redis": {"missing": True},
+                                                              "font": {"bundled": None}}})
+        text = (pkg / b.START_HERE_NAME).read_text(encoding="utf-8-sig")
+        self.assertIn("联网获取 Redis", text)
 
     def test_prompts_is_optional_like_the_dockerfile(self):
         """`prompts/` 只装自迭代 overrides（已 gitignore，干净检出里没有）——

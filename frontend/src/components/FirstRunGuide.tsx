@@ -16,6 +16,8 @@ import { Compass, BookOpen, KeyRound, PlayCircle, ClipboardList, ChevronDown, Ch
 type Props = {
   configComplete: boolean
   demoAvailable: boolean
+  /** 代码执行隔离状态（只读布尔 + 既有说明文案；提交任务前就要能看到） */
+  codeExecution?: { isolation_ready: boolean; isolation_required: boolean; execution_available: boolean; note: string } | null
   /** 把示例目标填进提交框（不提交） */
   onPrefillGoal?: (goal: string) => void
   /** 引导里"去配置"滚动到设置区 */
@@ -34,7 +36,7 @@ const SAMPLE_GOAL =
 const box = 'bg-slate-900 border border-slate-800 rounded-xl p-4'
 const li = 'text-xs text-slate-400 leading-relaxed'
 
-export default function FirstRunGuide({ configComplete, demoAvailable, onPrefillGoal, onGoSettings }: Props) {
+export default function FirstRunGuide({ configComplete, demoAvailable, codeExecution, onPrefillGoal, onGoSettings }: Props) {
   const [open, setOpen] = useState<string | null>(configComplete ? null : 'start')
   const [demo, setDemo] = useState<{ markdown: string; note: string } | null>(null)
   const [demoError, setDemoError] = useState('')
@@ -78,6 +80,18 @@ export default function FirstRunGuide({ configComplete, demoAvailable, onPrefill
           {configComplete ? '模型已配置，可直接提交研究任务' : '先把模型配好，或用内置演示先看交付形态'}
         </span>
       </div>
+
+      {/* N4 场景 8：代码执行能力在**提交任务之前**说明白——否则用户要等任务跑完，
+          才从失败步骤里发现含代码的步骤根本执行不了。不提供"关闭隔离"这条出路。 */}
+      {codeExecution && codeExecution.isolation_required && !codeExecution.isolation_ready && (
+        <div data-code-execution-notice
+          className="rounded-lg border border-slate-700 bg-slate-950/60 px-3 py-2 text-xs text-slate-400">
+          <span className="text-slate-300">代码执行：本机没有可用的容器隔离</span>
+          {codeExecution.note ? `（${codeExecution.note}）` : ''}——
+          含"生成并运行代码"的步骤会被拒绝执行，也不会退到本机运行；公司研究、图表、报告与交付下载
+          <span className="text-slate-300">不受影响</span>。请不要用"关闭隔离"来解决。
+        </div>
+      )}
 
       <Step id="start" icon={PlayCircle} title="① 先体验，或先配置">
         <p className={li}>

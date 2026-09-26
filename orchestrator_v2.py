@@ -5285,6 +5285,37 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             return ""
         return ""
 
+    def _announce_sandbox_before_code(self, task_id: str, steps: list[dict]) -> None:
+        """计划里含代码执行步骤、而本机容器隔离不可用时，**在执行前**说明白。
+
+        不降级、不静默跳过：用户应当在等待执行之前就知道这些步骤会被拒绝，
+        以及两条真实出路（装 Docker 构建沙箱镜像 / 让任务不含代码步骤）。
+        同一任务只提示一次，避免每轮刷屏。
+        """
+        try:
+            if getattr(self, "_sandbox_notice_sent", False):
+                return
+            if not any(s.get("capability") == "code_execution" for s in (steps or [])):
+                return
+            blocker = self._sandbox_blocker()
+            if not blocker:
+                return
+            self._sandbox_notice_sent = True
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "warning", "agent": "orchestrator",
+                           "message": f"本机没有可用的代码执行隔离（{blocker}）：计划里的 "
+                                      "code_execution 步骤会被拒绝执行，也不会退到宿主环境运行。"
+                                      "出路：① 安装并启动 Docker 后构建沙箱镜像"
+                                      "（docker build -f Dockerfile.sandbox -t "
+                                      "weavimind-code-sandbox:latest .）；"
+                                      "② 让任务不含代码步骤（公司研究默认如此）。"
+                                      "不要用关闭隔离来解决（restricted/none 只能由操作者显式选择）。",
+                           "timestamp": self._now_iso()})
+            logger.warning("任务 %s 的计划含 code_execution，但容器隔离不可用：%s",
+                           task_id, blocker)
+        except Exception as exc:                       # noqa: BLE001 - 提示失败不影响执行
+            logger.debug("沙箱前置提示发送失败：%s", str(exc)[:120])
+
 
     # ── Main Loop ──
     def _start_phase_monitor(self, task_id: str,
@@ -5800,6 +5831,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 _phase_stop.set()
                 return self._finish_cancelled(task_id, goal, last_steps)
             if not skip_execute:
+                self._announce_sandbox_before_code(task_id, steps)
                 iter_results, iter_failed = self._execute_steps(steps, task_id, goal)
                 # 执行途中被取消：立刻收尾，不再进入反思/重做（否则会继续花额度）
                 if self._cancel_requested(task_id):

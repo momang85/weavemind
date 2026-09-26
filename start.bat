@@ -25,6 +25,11 @@ echo.
 REM ---- [1/6] Locate a Python interpreter ----
 echo   [1/6] Python
 set "PY="
+REM A run package carries its own interpreter in runtime\. Put it first: a clean
+REM machine may have no Python at all, and a broken or incompatible system Python
+REM must not run our services. The marker check rejects a damaged bundle, so the
+REM candidate search below still works for source checkouts.
+if exist "%~dp0runtime\python.exe" call :try_bundled_runtime
 REM Try candidates in order and only accept one that actually RUNS a script.
 REM Why verification matters: on Windows "where python" also matches the
 REM Microsoft Store placeholder alias, which executes nothing and prints
@@ -40,6 +45,7 @@ where python3 >nul 2>&1 && call :try_python "python3"
 :python_ready
 if not defined PY goto :python_missing
 echo        Using: %PY%
+if defined WM_BUNDLED_RUNTIME echo        Source: packaged runtime (%~dp0runtime\python.exe)
 goto :python_ok
 
 :python_missing
@@ -98,6 +104,16 @@ REM Checking the marker (not just the exit code) matters: a placeholder alias
 REM may exit 0 while running nothing at all.
 %~1 -c "import sys;assert sys.version_info>=(3,10);print('WMPYOK')" 2>nul | findstr /c:"WMPYOK" >nul
 if not errorlevel 1 set "PY=%~1"
+exit /b 0
+
+:try_bundled_runtime
+REM Packaged interpreter first on PATH, so "where python" resolves to it. Accepted
+REM only after the same marker check as any other candidate.
+"%~dp0runtime\python.exe" -c "import sys;assert sys.version_info>=(3,10);print('WMPYOK')" 2>nul | findstr /c:"WMPYOK" >nul
+if not errorlevel 1 (
+    set "PATH=%~dp0runtime;%PATH%"
+    set "WM_BUNDLED_RUNTIME=1"
+)
 exit /b 0
 
 :check_config

@@ -324,13 +324,19 @@ export default function TaskConsole() {
 
   // N3：首次使用引导的公开状态（是否已配置模型、是否有内置演示）。
   // 只读`/api/auth/bootstrap`的布尔字段——不含密钥、地址或模型名。
-  const [firstRun, setFirstRun] = useState({ configComplete: true, demoAvailable: false })
+  // N4 场景 8：`code_execution` 也是布尔+既有说明，用于提交任务前说明代码步骤会被拒绝。
+  const [firstRun, setFirstRun] = useState<{
+    configComplete: boolean
+    demoAvailable: boolean
+    codeExecution: { isolation_ready: boolean; isolation_required: boolean; execution_available: boolean; note: string } | null
+  }>({ configComplete: true, demoAvailable: false, codeExecution: null })
   useEffect(() => {
     fetch('/api/auth/bootstrap')
       .then(r => r.json())
       .then(d => setFirstRun({
         configComplete: d?.config_complete !== false,
         demoAvailable: !!d?.demo_available,
+        codeExecution: d?.code_execution || null,
       }))
       .catch(() => {})
   }, [])
@@ -366,6 +372,7 @@ export default function TaskConsole() {
       <FirstRunGuide
         configComplete={firstRun.configComplete}
         demoAvailable={firstRun.demoAvailable}
+        codeExecution={firstRun.codeExecution}
         onPrefillGoal={prefillGoal}
         onGoSettings={() => { window.location.href = '/settings' }} />
 

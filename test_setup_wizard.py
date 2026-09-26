@@ -214,6 +214,34 @@ class TestInteractiveFlow(_Tmp):
         cfg = json.loads(self.cfg_path.read_text(encoding="utf-8"))
         self.assertEqual(cfg["llm"]["base_url"], "http://127.0.0.1:11434/v1")
 
+    def test_guided_setup_keeps_existing_advanced_settings(self):
+        """引导只为 llm/planner/backup 提问：用户设过的 redis/system 高级项必须保留。
+
+        此前写盘基底是**模板**：一份不完整的 config.json 走完引导后，用户手工设过的
+        `redis.port`、`system.*` 会被静默清掉（架构要求"保留用户主动设置的高级选项"）。
+        """
+        self.cfg_path.write_text(json.dumps({
+            "llm": {"model": "old-model"},
+            "redis": {"host": "redis.internal", "port": 6390},
+            "system": {"supervise_interval": 45},
+        }), encoding="utf-8")
+        code, _ = self._run(f"1\n\n{KEY_A}\n\n2\n")
+        self.assertEqual(code, 0)
+        cfg = json.loads(self.cfg_path.read_text(encoding="utf-8"))
+        self.assertEqual(cfg["llm"]["api_key"], KEY_A)
+        self.assertEqual(cfg["redis"]["port"], 6390, "引导不得清掉已有的 redis 配置")
+        self.assertEqual(cfg["redis"]["host"], "redis.internal")
+        self.assertEqual(cfg["system"]["supervise_interval"], 45)
+
+    def test_base_config_falls_back_to_template(self):
+        """没有可解析的 config.json 时才用模板；损坏文件不得让引导崩掉。"""
+        missing = self.cfg_path.parent / "nope.json"
+        self.assertIn("llm", w._base_config(missing))
+        self.cfg_path.write_text("{ not json", encoding="utf-8")
+        self.assertIn("llm", w._base_config(self.cfg_path))
+        self.cfg_path.write_text(json.dumps({"redis": {"port": 6391}}), encoding="utf-8")
+        self.assertEqual(w._base_config(self.cfg_path)["redis"]["port"], 6391)
+
     def test_bad_placeholder_key_is_asked_again(self):
         code, _ = self._run(f"1\n\nYOUR_API_KEY\n{KEY_B}\n\n2\n")
         self.assertEqual(code, 0)
@@ -444,6 +472,21 @@ class TestStartupScriptWiring(unittest.TestCase):
             src = Path(name).read_text(encoding="utf-8", errors="replace")
             self.assertNotIn("Docker Desktop.exe", src)
             self.assertNotIn("Starting Docker Desktop", src)
+
+    def test_start_and_stop_prefer_the_packaged_runtime(self):
+        """运行包自带的解释器必须优先——干净机器上没有系统 Python（N4 场景 1）。
+
+        此前 start.bat/stop.bat 只探测系统 python/py -3/python3：便携包里的
+        runtime\\python.exe 完全没被用到。在干净机器上会停在 "[1/6] Python" 报错；
+        在开发机上更隐蔽——静默改用宿主 Python，跑的不是包内依赖。
+        """
+        for name in ("start.bat", "stop.bat"):
+            src = Path(name).read_text(encoding="ascii")
+            self.assertIn(r"runtime\python.exe", src, f"{name} 未使用包内解释器")
+            self.assertIn(":try_bundled_runtime", src, f"{name} 缺少包内解释器探测")
+            self.assertLess(src.index("call :try_bundled_runtime"), src.index("where python"),
+                            f"{name}: 包内解释器必须先于系统候选")
+            self.assertIn("WMPYOK", src, f"{name}: 包内解释器同样要验过才采用")
 
     def test_python_candidates_are_verified_not_just_located(self):
         """解释器必须"验过才采用"，不能只靠 where 找到就认。

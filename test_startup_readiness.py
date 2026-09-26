@@ -290,6 +290,18 @@ class TestResearchReadiness(unittest.TestCase):
             mock.patch.object(launcher, "_redis_min_major", return_value=6),
         ]
 
+    @staticmethod
+    def _patch_health_probe(*, status: int = 200):
+        """就绪探测走 `build_opener(ProxyHandler({})).open(...)`（回环不走代理）。
+
+        因此要 patch `build_opener`，只 patch `urlopen` 会漏掉真实网络调用。
+        """
+        cm = mock.MagicMock()
+        cm.__enter__.return_value.status = status
+        opener = mock.MagicMock()
+        opener.open.return_value = cm
+        return mock.patch("urllib.request.build_opener", return_value=opener)
+
     def test_ready_when_all_layers_ok(self):
         import launcher
         import urllib.request
@@ -297,8 +309,7 @@ class TestResearchReadiness(unittest.TestCase):
         for p in patchers:
             p.start()
             self.addCleanup(p.stop)
-        with mock.patch.object(urllib.request, "urlopen") as u:
-            u.return_value.__enter__.return_value.status = 200
+        with self._patch_health_probe():
             rep = launcher.readiness_report()
         self.assertTrue(rep["ready"])
         self.assertTrue(rep["research"]["ok"])
@@ -306,14 +317,12 @@ class TestResearchReadiness(unittest.TestCase):
 
     def test_workbench_up_but_orchestrator_missing_is_not_ready(self):
         import launcher
-        import urllib.request
         patchers = self._patch(orchestrator=False)
         for p in patchers:
             p.start()
             self.addCleanup(p.stop)
-        with mock.patch.object(urllib.request, "urlopen") as u, \
+        with self._patch_health_probe(), \
                 mock.patch("builtins.print") as out:
-            u.return_value.__enter__.return_value.status = 200
             rep = launcher.readiness_report()
             launcher.print_readiness(rep, quiet=False)
         self.assertTrue(rep["workbench"]["ok"], "工作台可访问")
@@ -332,8 +341,7 @@ class TestResearchReadiness(unittest.TestCase):
         for p in patchers:
             p.start()
             self.addCleanup(p.stop)
-        with mock.patch.object(urllib.request, "urlopen") as u:
-            u.return_value.__enter__.return_value.status = 200
+        with self._patch_health_probe():
             rep = launcher.readiness_report()
         self.assertFalse(rep["research"]["ok"])
         self.assertIn("report_generator", rep["research"]["missing"])
@@ -347,8 +355,7 @@ class TestResearchReadiness(unittest.TestCase):
         for p in patchers:
             p.start()
             self.addCleanup(p.stop)
-        with mock.patch.object(urllib.request, "urlopen") as u:
-            u.return_value.__enter__.return_value.status = 200
+        with self._patch_health_probe():
             rep = launcher.readiness_report()
         self.assertFalse(rep["research"]["ok"])
         self.assertIn("web_search", rep["research"]["stale"])
@@ -369,7 +376,13 @@ class TestResearchReadiness(unittest.TestCase):
             cm.__enter__.return_value.status = 200
             return cm
 
-        with mock.patch.object(urllib.request, "urlopen", side_effect=fake_urlopen), \
+        # 就绪探测用 build_opener(ProxyHandler({})).open(...)：回环探测显式不走代理
+        # （企业网常设 HTTP_PROXY，否则"服务在跑却报工作台未响应"）。
+        fake_opener = mock.MagicMock()
+        fake_opener.open.side_effect = fake_urlopen
+        with mock.patch.object(urllib.request, "build_opener",
+                               return_value=fake_opener), \
+                mock.patch.object(urllib.request, "urlopen", side_effect=fake_urlopen), \
                 mock.patch("builtins.print"):
             rep = launcher.readiness_report()
         self.assertEqual(launcher.web_port(), 8123)
@@ -501,11 +514,18 @@ class TestStartupController(unittest.TestCase):
         self.assertNotIn(key, text, "诊断不得带密钥")
         self.assertIn("未上传", text)
 
-    def test_controller_awaits_config_without_starting_services(self):
+    def test_controller_awaits_config_but_still_opens_the_workbench(self):
+        """配置不完整时：不把新人丢在控制台——工作台照起，引导在页面里继续。
+
+        此前该分支直接返回 awaiting_config 且**不启动服务**，于是双击入口的人
+        只看到一个控制台就结束了；N3 的页面首启引导与内置演示根本没机会出现。
+        研究能力在配置完成前不得对外宣称就绪（状态仍如实报 awaiting_config）。
+        """
         import launcher
         with mock.patch.object(launcher, "acquire_instance_lock",
                                return_value={"acquired": True, "pid": 1}), \
-                mock.patch.object(launcher, "release_instance_lock"), \
+                mock.patch.object(launcher, "release_instance_lock") as release, \
+                mock.patch.object(launcher, "resolve_web_port", return_value=8080), \
                 mock.patch.object(launcher, "effective_config",
                                   return_value={"identity": "git:abc", "python": "3.11.9",
                                                 "config_complete": False, "model": "",
@@ -515,18 +535,55 @@ class TestStartupController(unittest.TestCase):
                 mock.patch.object(launcher, "start_services") as start, \
                 mock.patch.object(launcher, "_run_dependency_check") as dep, \
                 mock.patch.object(launcher, "completed_steps", return_value={}), \
+                mock.patch.object(launcher, "readiness_report",
+                                  return_value=self._ready(ok=False)), \
+                mock.patch.object(launcher, "print_readiness"), \
                 mock.patch.dict(os.environ, {"WM_NONINTERACTIVE": "1"}), \
                 mock.patch("builtins.print"):
             res = launcher.startup_controller()
         self.assertEqual(res["state"], "awaiting_config")
-        start.assert_not_called()
+        start.assert_called_once()        # 工作台照起：页面引导与演示要能打开
         dep.assert_called_once()          # 依赖步骤照做，但不得真去装/拉（已 mock）
+        release.assert_called_once()      # 释放实例锁，别把状态卡在"启动中"
+        self.assertNotEqual(release.call_args[0][0] if release.call_args[0] else "running",
+                            "running", "配置未完成不得把实例标成 running")
+
+    def test_controller_skips_wizard_when_console_is_not_interactive(self):
+        """非交互（管道/CI）下不进入问答式引导，避免卡在等输入。"""
+        import launcher
+        with mock.patch.object(launcher, "acquire_instance_lock",
+                               return_value={"acquired": True, "pid": 1}), \
+                mock.patch.object(launcher, "release_instance_lock"), \
+                mock.patch.object(launcher, "resolve_web_port", return_value=8080), \
+                mock.patch.object(launcher, "effective_config",
+                                  return_value={"identity": "git:abc", "python": "3.11.9",
+                                                "config_complete": False, "model": "",
+                                                "base_url": "", "frontend_dist": True,
+                                                "redis_host": "localhost", "redis_port": 6379,
+                                                "port": 8080, "url": "http://localhost:8080"}), \
+                mock.patch.object(launcher, "start_services"), \
+                mock.patch.object(launcher, "_run_dependency_check"), \
+                mock.patch.object(launcher, "completed_steps", return_value={}), \
+                mock.patch.object(launcher, "readiness_report",
+                                  return_value=self._ready(ok=False)), \
+                mock.patch.object(launcher, "print_readiness"), \
+                mock.patch.object(launcher, "_interactive_console", return_value=False), \
+                mock.patch("subprocess.run") as run, \
+                mock.patch.dict(os.environ, {}, clear=False), \
+                mock.patch("builtins.print"):
+            os.environ.pop("WM_NONINTERACTIVE", None)
+            launcher.startup_controller()
+        for call in run.call_args_list:
+            argv = call[0][0] if call[0] else []
+            self.assertNotIn("setup_wizard.py", " ".join(str(a) for a in argv),
+                             "非交互控制台不得启动问答式引导")
 
     def test_controller_reports_limited_when_research_not_ready(self):
         import launcher
         with mock.patch.object(launcher, "acquire_instance_lock",
                                return_value={"acquired": True, "pid": 1}), \
                 mock.patch.object(launcher, "release_instance_lock"), \
+                mock.patch.object(launcher, "resolve_web_port", return_value=8080), \
                 mock.patch.object(launcher, "effective_config",
                                   return_value={"identity": "git:abc", "python": "3.11.9",
                                                 "config_complete": True, "model": "m",
@@ -549,6 +606,7 @@ class TestStartupController(unittest.TestCase):
         with mock.patch.object(launcher, "acquire_instance_lock",
                                return_value={"acquired": True, "pid": 1}), \
                 mock.patch.object(launcher, "release_instance_lock"), \
+                mock.patch.object(launcher, "resolve_web_port", return_value=8080), \
                 mock.patch.object(launcher, "effective_config",
                                   return_value={"identity": "git:abc", "python": "3.11.9",
                                                 "config_complete": True, "model": "m",
@@ -646,6 +704,239 @@ class TestNoUnretriedRedisClients(unittest.TestCase):
             bad, [],
             "这些 Redis 客户端没关内建重试：Redis 不可达时会从 2 秒失败退化成数十秒挂死"
             "（用 common._NO_REDIS_RETRY 或同款本地常量传 retry=）：" + ", ".join(bad))
+
+
+class TestPortConflictsDoNotTakeOverOtherServices(unittest.TestCase):
+    """场景 5（N4 矩阵）：端口冲突与 Redis 5 —— 不接管/不停用别人的服务，页面与子进程一致。
+
+    真实场景：8080 被别的软件（或另一个织光实例）占着、6379 上跑着别人的 Redis 5。
+    要求是"明确兼容性判断 + 本实例让位到空闲端口 + 页面与子进程地址一致"，
+    而不是报错退出、更不是杀掉对方进程。
+    """
+
+    def _tmp_ports_file(self) -> Path:
+        tmp = Path(tempfile.mkdtemp(prefix="wm_ports_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        return tmp / "runtime_ports.json"
+
+    def test_port_is_free_detects_a_real_listener(self):
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        sock.listen(1)
+        port = sock.getsockname()[1]
+        self.addCleanup(sock.close)
+        self.assertFalse(launcher._port_is_free(port), "有监听时不得判定为空闲")
+        sock.close()
+        self.assertTrue(launcher._port_is_free(port), "关闭后应恢复空闲")
+
+    def test_default_web_port_moves_to_a_free_port_and_persists(self):
+        import launcher as L
+        ports_file = self._tmp_ports_file()
+        with mock.patch.object(L, "RUNTIME_PORTS_FILE", ports_file), \
+                mock.patch.object(L, "_preferred_web_port", return_value=8080), \
+                mock.patch.object(L, "_web_port_is_explicit", return_value=False), \
+                mock.patch.object(L, "_webui_owned_here", return_value=False), \
+                mock.patch.object(L, "_port_is_free", side_effect=lambda p: int(p) != 8080):
+            port = L.resolve_web_port()
+        self.assertEqual(port, 8081, "默认端口被占用时应让位到下一个空闲端口")
+        self.assertEqual(json.loads(ports_file.read_text(encoding="utf-8"))["web"], 8081,
+                         "让位结果必须落盘：url/子进程/页面要看到同一个端口")
+
+    def test_explicit_web_port_is_reported_not_silently_changed(self):
+        import launcher as L
+        ports_file = self._tmp_ports_file()
+        with mock.patch.object(L, "RUNTIME_PORTS_FILE", ports_file), \
+                mock.patch.object(L, "_preferred_web_port", return_value=8080), \
+                mock.patch.object(L, "_web_port_is_explicit", return_value=True), \
+                mock.patch.object(L, "_webui_owned_here", return_value=False), \
+                mock.patch.object(L, "_port_is_free", return_value=False):
+            port = L.resolve_web_port()
+        self.assertEqual(port, 8080, "用户显式指定的端口不自动改（只如实报告冲突）")
+        self.assertFalse(ports_file.exists(), "不让位就不该写端口状态")
+
+    def test_web_port_follows_the_shift_only_while_this_instance_runs(self):
+        import launcher as L
+        ports_file = self._tmp_ports_file()
+        ports_file.write_text(json.dumps({"web": 8081, "preferred": 8080}), encoding="utf-8")
+        with mock.patch.object(L, "RUNTIME_PORTS_FILE", ports_file), \
+                mock.patch.object(L, "_preferred_web_port", return_value=8080), \
+                mock.patch.object(L, "_web_port_is_explicit", return_value=False):
+            with mock.patch.object(L, "_webui_owned_here", return_value=True):
+                self.assertEqual(L.web_port(), 8081, "本实例还在跑：沿用实际端口")
+            with mock.patch.object(L, "_webui_owned_here", return_value=False):
+                self.assertEqual(L.web_port(), 8080, "实例已停：回到用户期望的端口")
+
+    def test_start_services_publishes_the_resolved_port_to_children(self):
+        """子进程（webui 读 WEB_PORT）必须拿到让位后的端口，否则页面与后端不一致。"""
+        import launcher as L
+        ready = {"workbench": {"ok": True, "detail": "HTTP 200 @ 8123", "port": 8123,
+                               "url": "http://localhost:8123"},
+                 "research": {"ok": True, "redis": True, "redis_major": 8, "missing": [],
+                              "stale": [], "orchestrator": True, "required": []},
+                 "code_sandbox": {"ok": False, "note": "", "execution_available": False},
+                 "port": 8123, "url": "http://localhost:8123", "ready": True}
+        with mock.patch.object(L, "_load_config", return_value={}), \
+                mock.patch.object(L, "_apply_env"), \
+                mock.patch.object(L, "instance_state",
+                                  return_value={"running": False, "services": {}, "stale": {},
+                                                "port": 8080, "url": "http://localhost:8080"}), \
+                mock.patch.object(L, "stop_services", return_value=[]), \
+                mock.patch.object(L, "_ensure_redis_available"), \
+                mock.patch.object(L, "_wait_redis_ready", return_value=True), \
+                mock.patch.object(L, "resolve_web_port", return_value=8123), \
+                mock.patch.object(L, "_spawn_service", return_value=4321) as spawn, \
+                mock.patch.object(L, "_write_pids"), \
+                mock.patch.object(L, "verify_services",
+                                  return_value={"total": 1, "alive": 1, "down": [],
+                                                "never_started": [], "waited": 0}), \
+                mock.patch.object(L, "readiness_report", return_value=ready), \
+                mock.patch.object(L, "print_readiness"), \
+                mock.patch.dict(os.environ, {}, clear=True):
+            L.start_services()
+            self.assertEqual(os.environ.get("WEB_PORT"), "8123",
+                             "让位端口必须发布给子进程（_spawn_service 传 os.environ）")
+        self.assertTrue(spawn.called)
+
+    def test_busy_non_redis_port_moves_this_instance_to_a_free_port(self):
+        import launcher as L
+        ports_file = self._tmp_ports_file()
+        with mock.patch.object(L, "RUNTIME_PORTS_FILE", ports_file), \
+                mock.patch.object(L, "_redis_reachable", return_value=False), \
+                mock.patch.object(L, "_port_is_free", side_effect=lambda p: int(p) != 6379), \
+                mock.patch("dep_check.ensure_redis",
+                           return_value={"ok": True, "action": "started", "detail": "ok"}), \
+                mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch("builtins.print"):
+            L._ensure_redis_available()
+            self.assertEqual(os.environ.get("REDIS_PORT"), "6380",
+                             "6379 被别的程序占用时，本实例应改用空闲端口")
+            self.assertEqual(os.environ.get("REDIS_HOST"), "127.0.0.1")
+        self.assertEqual(json.loads(ports_file.read_text(encoding="utf-8"))["redis"], 6380)
+
+    def test_redis5_on_the_port_moves_this_instance_and_never_stops_it(self):
+        """6379 上是别人的 Redis 5：不兼容 → 本实例另起，且绝不调用任何停止动作。"""
+        import launcher as L
+        ports_file = self._tmp_ports_file()
+        with mock.patch.object(L, "RUNTIME_PORTS_FILE", ports_file), \
+                mock.patch.object(L, "_redis_reachable", return_value=True), \
+                mock.patch.object(L, "_redis_major", return_value=5), \
+                mock.patch.object(L, "_port_is_free", side_effect=lambda p: int(p) != 6379), \
+                mock.patch("dep_check.ensure_redis",
+                           return_value={"ok": True, "action": "started", "detail": "ok"}), \
+                mock.patch("dep_check._stop_recorded_redis") as stop_other, \
+                mock.patch.dict(os.environ, {}, clear=True), \
+                mock.patch("builtins.print"):
+            L._ensure_redis_available()
+            self.assertEqual(os.environ.get("REDIS_PORT"), "6380")
+        stop_other.assert_not_called()
+
+    def test_explicit_redis_port_reports_instead_of_shifting(self):
+        """显式配了 REDIS_PORT（如指向别的机器）：不可用就明确失败，不偷偷改地址。"""
+        import launcher as L
+        with mock.patch.object(L, "_redis_reachable", return_value=True), \
+                mock.patch.object(L, "_redis_major", return_value=5), \
+                mock.patch.dict(os.environ, {"REDIS_PORT": "6379"}, clear=True), \
+                mock.patch("builtins.print"):
+            with self.assertRaises(SystemExit):
+                L._ensure_redis_available()
+
+    def test_interactive_console_is_false_for_pipes_and_nul(self):
+        """Windows 上 isatty 对 NUL 也报 True → 必须用 GetConsoleMode 判真控制台。
+
+        实测：`cmd /c start.bat < /dev/null` 下 isatty=True，控制器因此仍进入
+        问答式引导并撞 EOF（自动化/CI 场景）。
+        """
+        import launcher as L
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("WM_NONINTERACTIVE", None)
+            if os.name == "nt":
+                with mock.patch("msvcrt.get_osfhandle", side_effect=OSError("no console")):
+                    self.assertFalse(L._interactive_console())
+            else:
+                with mock.patch.object(sys, "stdin", None):
+                    self.assertFalse(L._interactive_console())
+        with mock.patch.dict(os.environ, {"WM_NONINTERACTIVE": "1"}, clear=False):
+            self.assertFalse(L._interactive_console(), "WM_NONINTERACTIVE 一律不提问")
+
+    def test_loopback_health_probe_ignores_the_proxy(self):
+        """有 HTTP_PROXY（企业网常态）时，回环健康检查必须绕开代理。
+
+        实测：设了死代理后 `launcher.py up` 报"工作台未响应 @ 8080"，而服务其实
+        正常在跑——代理把 127.0.0.1 的请求也接走了。这里起一个真实回环服务，
+        在死代理环境里跑就绪探测。
+        """
+        import launcher as L
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class _H(BaseHTTPRequestHandler):
+            def do_GET(self):                                   # noqa: N802
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b'{"status":"ok"}')
+
+            def log_message(self, *a):                          # 静音
+                return
+
+        srv = ThreadingHTTPServer(("127.0.0.1", 0), _H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        self.addCleanup(srv.shutdown)
+        dead = "http://127.0.0.1:9"
+        with mock.patch.object(L, "web_port", return_value=port), \
+                mock.patch.object(L, "_registry_heartbeats", return_value={}), \
+                mock.patch.object(L, "_redis_reachable", return_value=False), \
+                mock.patch.dict(os.environ, {"HTTP_PROXY": dead, "http_proxy": dead,
+                                             "HTTPS_PROXY": dead, "https_proxy": dead}):
+            rep = L.readiness_report(http_timeout=3.0)
+        self.assertTrue(rep["workbench"]["ok"],
+                        f"回环探测被代理接走了：{rep['workbench']['detail']}")
+
+    def test_no_proxy_is_extended_with_loopback_without_clobbering(self):
+        import launcher as L
+        # Windows 的环境变量名大小写不敏感（NO_PROXY 与 no_proxy 是同一个），
+        # 断言只看合并后的值，不假定哪个大小写生效。
+        with mock.patch.dict(os.environ, {"NO_PROXY": "example.com,10.0.0.0/8"}, clear=False):
+            L._publish_loopback_no_proxy()
+            value = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+            self.assertIn("example.com", value, "不得覆盖用户已有的排除项")
+            self.assertIn("10.0.0.0/8", value)
+            for want in ("localhost", "127.0.0.1", "::1"):
+                self.assertIn(want, value)
+            before = value
+            L._publish_loopback_no_proxy()
+            self.assertEqual(os.environ.get("NO_PROXY") or os.environ.get("no_proxy"),
+                             before, "重复调用不得叠加")
+
+    def test_windows_tool_output_is_decoded_with_replace(self):
+        """Windows 工具按控制台代码页输出（中文系统 GBK）：`text=True` 必须配 `errors="replace"`。
+
+        实测：中文系统上 `launcher.py deps --fix` 打出 4 段 UnicodeDecodeError 栈
+        （subprocess 读线程解码失败），`_is_alive` 的 PID 判断也随之失效——
+        对新人是"一启动就报错"的观感，实际只是解码没兜底。
+        """
+        import re as _re
+        root = Path(__file__).resolve().parent
+        for name in ("launcher.py", "dep_check.py"):
+            src = (root / name).read_text(encoding="utf-8")
+            for m in _re.finditer(r"text=True", src):
+                window = src[m.start():m.start() + 220]
+                self.assertIn("errors=", window,
+                              f"{name}: 有一处 text=True 未配 errors='replace'（子进程输出"
+                              f"按 UTF-8 解码会在读线程里抛异常）：…{window[:120]}")
+
+    def test_redis_target_follows_persisted_port_only_when_reachable(self):
+        import launcher as L
+        ports_file = self._tmp_ports_file()
+        ports_file.write_text(json.dumps({"redis": 6380}), encoding="utf-8")
+        with mock.patch.object(L, "RUNTIME_PORTS_FILE", ports_file), \
+                mock.patch.dict(os.environ, {}, clear=True):
+            with mock.patch.object(L, "_redis_reachable", return_value=True):
+                self.assertEqual(L._redis_target(), ("localhost", 6380))
+            with mock.patch.object(L, "_redis_reachable", return_value=False):
+                self.assertEqual(L._redis_target(), ("localhost", 6379),
+                                 "让位端口上没有 Redis 时不得继续指向它")
 
 
 if __name__ == "__main__":

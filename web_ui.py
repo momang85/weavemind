@@ -3805,6 +3805,20 @@ def _get_bootstrap(self, p):
             info["demo_available"] = _demo_brief_path().exists()
         except Exception:
             info["demo_available"] = False
+        # 代码执行隔离状态：让页面在**提交任务之前**就说明"含代码的步骤会被拒绝"，
+        # 而不是等任务跑十几分钟、从失败步骤里才发现（N4 场景 8）。
+        # 只暴露布尔与既有说明文案，不含路径/凭据。
+        try:
+            from code_sandbox import isolation_required, sandbox_status
+            st = sandbox_status()
+            info["code_execution"] = {
+                "isolation_ready": bool(st.get("isolation_ready")),
+                "isolation_required": bool(isolation_required()),
+                "execution_available": bool(st.get("execution_available")),
+                "note": str(st.get("isolation_note") or "")[:200],
+            }
+        except Exception:
+            info["code_execution"] = None
         return self._json(info)
 
 

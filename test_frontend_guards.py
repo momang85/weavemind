@@ -629,6 +629,23 @@ class TestFirstRunGuide(unittest.TestCase):
         self.assertIn("onGoSettings", self.guide)
         self.assertIn("'/settings'", self.console)
 
+    def test_code_execution_state_is_shown_before_submitting(self):
+        """N4 场景 8：隔离不可用时，页面要在**提交任务之前**说明代码步骤会被拒绝。
+
+        只读布尔+既有说明文案（不含路径/凭据）；并且不得把"关闭隔离"当出路——
+        这条纪律在页面上同样成立，否则新人会照做。
+        """
+        self.assertIn("data-code-execution-notice", self.guide)
+        self.assertIn("codeExecution", self.console)
+        self.assertIn("d?.code_execution", self.console)
+        self.assertIn("isolation_ready", self.guide)
+        self.assertIn("不会退到本机运行", self.guide)
+        self.assertIn("不受影响", self.guide)
+        notice_start = self.guide.index("data-code-execution-notice")
+        notice = self.guide[notice_start:notice_start + 700]
+        self.assertIn("不要", notice, "提示里必须明确不要用关闭隔离来解决")
+        self.assertNotIn("api_key", self.guide)
+
 
 if __name__ == "__main__":
     unittest.main()
