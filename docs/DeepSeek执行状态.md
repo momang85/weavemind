@@ -5,6 +5,27 @@ H0 之后的阶段标准仍是 `docs/真实研究闭环与阶段D收口_20260927
 已交的 C0/C1/C2 与 N/S 批次不重跑；便携包缺 S3 的事实如实保留（重建在 C4）。
 C0 三提交已交（`5107ac0`/`e5c5607`/`bac62c6`）。
 
+## 运行环境缺陷修复：便携 Redis 落盘目录（已交 `35b83ac`，证据 `docs/evidence/redis_dir_misconf_20260927.md`）
+
+- **症状**：16 个服务都在跑，但**一个任务都提交不了**；`PING` 直接回 MISCONF。
+- **根因**：便携 Redis（msys2 构建）启动时**没给 `--dir`**，于是拿进程 CWD 当 `dir`，
+  msys2 把它报成 `/portable/Redis-…` 这种 POSIX 形态 → Windows 上 `bgsave` 永远失败 →
+  `stop-writes-on-bgsave-error=yes` 进入 MISCONF → **所有写命令被拒**。
+  `dir` 在 Redis 8 是 **protected config**（`CONFIG SET` 报 can't set protected config），
+  运行期改不了，只能启动时给对。
+- **修复**：`dep_check._redis_start_argv` 显式追加 `--dir <正斜杠绝对路径>` +
+  `--dbfilename dump.rdb`；数据目录取数据根下 `redis/`，**非 ASCII 路径退到
+  `%LOCALAPPDATA%/WeaveMind/redis`**（msys2 对中文命令行参数不可靠）；新增
+  `verify_redis_persistence` **启动后自检**（dir 是否符合预期 + 真跑一次 BGSAVE 看
+  `rdb_last_bgsave_status`），不通过就在启动时打印原因与可执行建议。
+- **本机实例只做了应急解封**：`CONFIG SET stop-writes-on-bgsave-error no` → `PING/PONG`、
+  读写恢复正常、`/api/health` HTTP 200；但 **RDB 仍落不了盘**（dir 改不了），
+  **需在正常终端重启一次 Redis 才真正修好**。本会话起不了新的 msys2 Redis
+  （`NtCreateDirectoryObject … 0xC0000022`，与 `--dir` 指哪儿无关），先停再起会让应用彻底无 Redis，
+  故未停。
+- **诊断经验**：redis-py 6 连接时会发 `CLIENT SETINFO`（改服务器状态），MISCONF 下**连 PING 都失败**；
+  诊断这类实例必须用**裸 RESP**（脚本在 `.tmp/`，不进库）。
+
 ## C3 收口：新人可行动状态统一（已交，提交 `ad683f1`，证据 `docs/evidence/c3_newcomer_states_20260927.md`）
 
 - **六态映射**（`actionable_state.classify_task`）：未接收 / 待消费 / 执行中 / 待材料 /
