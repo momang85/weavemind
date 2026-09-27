@@ -27,6 +27,98 @@ def _make_zip(path: Path) -> None:
         zf.writestr("Redis-x64/redis-server.exe", b"MZ fake")
 
 
+class TestRedisDataDirAndPersistence(unittest.TestCase):
+    """实测缺陷回归：便携 Redis 不给 `--dir` 时，RDB 落不了盘 → MISCONF 挡掉所有写命令。
+
+    症状是"16 个服务都在跑，但一个任务都提交不了"，而且 `dir` 是 Redis 8 的 protected
+    config，运行期改不了——只能在启动参数里给对，所以这里把启动参数与启动后自检都钉住。
+    """
+
+    def test_argv_carries_explicit_dir_when_given(self):
+        argv = dc._redis_start_argv(Path("redis-server.exe"), 6379,
+                                   Path("C:/data/redis"))
+        self.assertIn("--dir", argv)
+        i = argv.index("--dir")
+        self.assertEqual(argv[i + 1], "C:/data/redis")
+        self.assertEqual(argv[i + 2:i + 4], ["--dbfilename", "dump.rdb"])
+        # 反斜杠路径要转成正斜杠（msys2 版对反斜杠解析不可靠）
+        argv2 = dc._redis_start_argv(Path("r.exe"), 6379, Path(r"C:\x\y"))
+        self.assertEqual(argv2[argv2.index("--dir") + 1], "C:/x/y")
+
+    def test_argv_without_dir_is_unchanged(self):
+        """不传 data_dir 时保持旧参数形态（向后兼容，便于单独诊断）。"""
+        argv = dc._redis_start_argv(Path("redis-server.exe"), 6379)
+        self.assertNotIn("--dir", argv)
+        self.assertEqual(argv[:3], ["redis-server.exe", "--port", "6379"])
+
+    def test_data_dir_follows_data_root(self):
+        with mock.patch.dict(os.environ, {"WEAVEMIND_DATA_DIR": tempfile.gettempdir()}):
+            d = dc._redis_data_dir()
+        self.assertTrue(str(d).replace("\\", "/").endswith("/redis"), d)
+
+    def test_data_dir_defaults_under_runtime_dir(self):
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("WEAVEMIND_DATA_DIR", None)
+            d = dc._redis_data_dir()
+        # 仓库路径含非 ASCII 时退到纯 ASCII 位置（msys2 对非 ASCII 参数不可靠）
+        try:
+            str(dc.REDIS_DIR / "data").encode("ascii")
+            ascii_repo = True
+        except UnicodeEncodeError:
+            ascii_repo = False
+        if ascii_repo:
+            self.assertEqual(d, dc.REDIS_DIR / "data")
+        else:
+            self.assertEqual(d, Path(os.environ.get("LOCALAPPDATA") or Path.home())
+                             / "WeaveMind" / "redis")
+            str(d).encode("ascii")       # 退路必须是纯 ASCII
+
+    def test_ascii_fallback_is_used_when_repo_path_is_non_ascii(self):
+        """反例：把数据根指到含中文的目录 → 必须退到 ASCII 位置，而不是照给 Redis。"""
+        cjk = tempfile.mkdtemp(prefix="wm_redis_cjk_") + "\\中文目录"
+        with mock.patch.dict(os.environ, {"WEAVEMIND_DATA_DIR": cjk}):
+            d = dc._redis_data_dir()
+        try:
+            str(d).encode("ascii")
+        except UnicodeEncodeError:
+            self.fail(f"含中文的数据根必须退到 ASCII 位置，实际给了 {d}")
+
+    def test_persistence_check_flags_wrong_dir(self):
+        """dir 不是我们给的那个 → 明确报错（这正是当初 `/portable/…` 的情形）。"""
+        with mock.patch.object(dc, "_redis_inline") as inline:
+            inline.return_value = "$8\r\ndir\r\n$34\r\n/portable/Redis-x64-msys2\r\n"
+            ok, why = dc.verify_redis_persistence(6379, Path("C:/data/redis"))
+        self.assertFalse(ok)
+        self.assertIn("/portable/Redis-x64-msys2", why)
+        self.assertIn("落盘目录不对", why)
+
+    def test_persistence_check_passes_when_bgsave_ok(self):
+        def fake(host, port, command, timeout=2.0):
+            if command.startswith("CONFIG GET dir"):
+                return "$19\r\ndir\r\n$17\r\nC:/data/redis\r\n"
+            if command.startswith("INFO persistence"):
+                return "rdb_last_bgsave_status:ok\r\nrdb_bgsave_in_progress:0\r\n"
+            return "+Background saving started\r\n"
+
+        with mock.patch.object(dc, "_redis_inline", side_effect=fake):
+            ok, why = dc.verify_redis_persistence(6379, Path("C:/data/redis"))
+        self.assertTrue(ok, why)
+        self.assertIn("通过", why)
+
+    def test_persistence_check_reports_failed_bgsave_with_actionable_hint(self):
+        """bgsave 失败要给出**可执行**建议（中文路径就换 WEAVEMIND_DATA_DIR）。"""
+        def fake(host, port, command, timeout=2.0):
+            if command.startswith("CONFIG GET dir"):
+                return "$19\r\ndir\r\n$17\r\nC:/data/redis\r\n"
+            return "rdb_last_bgsave_status:err\r\nrdb_bgsave_in_progress:0\r\n"
+
+        with mock.patch.object(dc, "_redis_inline", side_effect=fake):
+            ok, why = dc.verify_redis_persistence(6379, Path("C:/data/redis"))
+        self.assertFalse(ok)
+        self.assertIn("err", why)
+        self.assertIn("WEAVEMIND_DATA_DIR", why)
+
+
 class TestSourceOrder(unittest.TestCase):
     """顺序：用户显式 → 用户镜像 → 内置镜像 → 官方 GitHub（官方兜底）。"""
 
@@ -173,6 +265,10 @@ class TestSystemRedisPreference(unittest.TestCase):
                               lambda argv, log, cwd=None: mock.Mock(pid=4242)),
             mock.patch.object(dc, "_write_redis_pid", lambda pid: None),
             mock.patch.object(dc, "_wait_redis", lambda h, p, w: True),
+            # 落盘自检必须也替身掉：否则会去连**真实存在**的 Redis（本机环境耦合），
+            # 在 CI 上则变成一次无谓的连接失败。
+            mock.patch.object(dc, "verify_redis_persistence",
+                              lambda port, d, **k: (True, "自检替身")),
             mock.patch.object(dc, "_publish_redis_host_env", lambda a: None),
             mock.patch.object(dc, "redis_ping", lambda h, p: False),
             mock.patch.object(dc, "_usable_portable_redis", lambda: None),
