@@ -90,6 +90,8 @@ jobs:
         run: python test_offline_delivery.py
       - name: "Narrative evidence: annual-report sections, locations, fetch roles (F2)"
         run: python test_narrative_evidence.py
+      - name: "Per-question assessment: material classes, negation/hypothesis, coverage (R1)"
+        run: python test_question_assessment.py
       - name: Deploy manifest & lock guards
         run: python test_deploy_manifest.py
       - name: Task state tests
