@@ -324,5 +324,240 @@ class TestSubmitIdentityComesFromSession(unittest.TestCase):
         self.assertIn('user_id=str(admin.get("user") or "")', src)
 
 
+class TestSubmitIdempotencyAndTimeline(unittest.TestCase):
+    """C3/H3：持久化收执、幂等提交、实例归属与提交时间线。
+
+    反例（原指令 §3.4）：`web_ui` 每次提交都生成新 UUID，编排器也不看身份——
+    重复提交（双击/超时重试/重放）会变成**第二次真实执行**；而收执只有一条
+    120 秒 TTL 的 Redis 键，事后无法回答"请求到没到、谁收的、卡在哪一段"。
+    """
+
+    def setUp(self):
+        tmp = Path(tempfile.mkdtemp(prefix="wm_idem_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        self.db = str(tmp / "agents.db")
+        _mk_db(self.db)
+        self.redis = mock.MagicMock()
+        self.redis.get.return_value = None
+        self.orch = type("O", (), {"_redis": self.redis})()
+
+    def _accept(self, task_id: str, key: str = "", events=None):
+        from orchestrator_v2 import accept_task_request
+        data = {"task_id": task_id, "goal": "研究目标", "idempotency_key": key,
+                "submit_events": events or []}
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            ok, reason = accept_task_request(self.orch, data)
+        return ok, reason, data
+
+    def test_same_key_creates_exactly_one_task(self):
+        """反例：同幂等键提交两次 → 只登记一个任务、不再执行第二次。"""
+        ok1, _r1, d1 = self._accept("ui-a1", key="k-1")
+        ok2, _r2, d2 = self._accept("ui-a2", key="k-1")
+        self.assertTrue(ok1)
+        self.assertTrue(ok2, "重复提交不算失败：应回 accepted（去重）")
+        self.assertNotIn("_effective_task_id", d1)
+        self.assertEqual(d2.get("_effective_task_id"), "ui-a1",
+                         "第二次必须指向已有任务，调用方据此跳过执行")
+        # 第二次的收执指明去重
+        ack2 = str(self.redis.setex.call_args.args[2])
+        self.assertTrue(ack2.startswith("accepted:dedup:"), ack2)
+        self.assertIn("ui-a1", ack2)
+        # 任务库只有一行
+        con = sqlite3.connect(self.db)
+        try:
+            rows = con.execute("SELECT task_id FROM task_history").fetchall()
+        finally:
+            con.close()
+        self.assertEqual([r[0] for r in rows], ["ui-a1"],
+                         f"同幂等键不得产生第二个任务：{rows}")
+
+    def test_different_keys_create_two_tasks(self):
+        """不同幂等键是两次真实提交（不能把用户主动再跑一次当成重复）。"""
+        self._accept("ui-b1", key="k-a")
+        self._accept("ui-b2", key="k-b")
+        con = sqlite3.connect(self.db)
+        try:
+            n = con.execute("SELECT COUNT(*) FROM task_history").fetchone()[0]
+        finally:
+            con.close()
+        self.assertEqual(n, 2)
+
+    def test_no_key_keeps_previous_behaviour(self):
+        """没有幂等键时行为与之前一致（不去重）——不改变既有调用方语义。"""
+        ok1, _r1, d1 = self._accept("ui-c1")
+        ok2, _r2, d2 = self._accept("ui-c2")
+        self.assertTrue(ok1 and ok2)
+        self.assertNotIn("_effective_task_id", d1)
+        self.assertNotIn("_effective_task_id", d2)
+
+    def test_timeline_records_five_stages_with_instance(self):
+        """时间线要能回答"收到/持久化/发布/消费"各发生在何时、由哪个实例。"""
+        events = [{"event": "received", "ts": 1000.0, "instance": "inst-x"},
+                  {"event": "published", "ts": 1001.0, "instance": "inst-x"}]
+        self._accept("ui-d1", key="k-d", events=events)
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            tl = task_state.read_submit_timeline("ui-d1")
+        names = [e.get("event") for e in tl]
+        for want in ("received", "published", "persisted", "consumed"):
+            self.assertIn(want, names, f"时间线缺 {want}：{names}")
+        self.assertEqual(tl[0]["ts"], 1000.0, "请求自带时刻要原样保留")
+        self.assertTrue(all(e.get("instance") for e in tl), tl)
+        con = sqlite3.connect(self.db)
+        try:
+            owner = con.execute("SELECT accepted_by FROM task_history"
+                                " WHERE task_id=?", ("ui-d1",)).fetchone()[0]
+        finally:
+            con.close()
+        self.assertTrue(str(owner or "").strip(), "要记下这条任务由哪个实例实例化")
+
+    def test_receipt_survives_restart_and_is_queryable(self):
+        """接收后进程重启：收执与幂等键仍在库里可查（不再只靠会过期的 Redis 键）。"""
+        self._accept("ui-e1", key="k-e")
+        # 模拟重启：重新解析库路径后再读（收执、幂等键、时间线都要还在）
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            found = task_state.find_by_idempotency("k-e")
+            row = task_state.read_task("ui-e1")
+            timeline = task_state.read_submit_timeline("ui-e1")
+        self.assertEqual(str(found.get("task_id")), "ui-e1")
+        self.assertEqual(str(row.get("task_id")), "ui-e1")
+        self.assertTrue(timeline, "收执时间线必须随任务行持久化，不能只活在 Redis 键里")
+        self.assertIn("persisted", [e.get("event") for e in timeline])
+
+    def test_rejected_write_records_no_fake_acceptance(self):
+        """库不可写：收执必须是 rejected，且不得留下"已消费"的假时间线。"""
+        bad = tempfile.mkdtemp(prefix="wm_idem_bad_")
+        self.addCleanup(shutil.rmtree, bad, ignore_errors=True)
+        from orchestrator_v2 import accept_task_request
+        with mock.patch.object(task_state, "DB_PATH", bad):
+            ok, reason = accept_task_request(self.orch,
+                                            {"task_id": "ui-f1", "goal": "g",
+                                             "idempotency_key": "k-f"})
+        self.assertFalse(ok)
+        self.assertIn("登记失败", reason)
+        ack = str(self.redis.setex.call_args.args[2])
+        self.assertTrue(ack.startswith("rejected:"), ack)
+
+
+class TestReceiptRecovery(unittest.TestCase):
+    """C3/H3b：先落收执再触发工作；未消费的收执在启动时被捡回来（且只执行一次）。
+
+    反例：编排器没起来（或在崩溃窗口里）时 pub/sub 的消息丢了，旧实现什么都不剩——
+    只有一条 120 秒后过期的 Redis 键，用户看到超时却查不到任何东西。
+    """
+
+    def setUp(self):
+        tmp = Path(tempfile.mkdtemp(prefix="wm_recv_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        self.db = str(tmp / "agents.db")
+        _mk_db(self.db)
+        self.redis = mock.MagicMock()
+        self.redis.get.return_value = None
+        self.orch = type("O", (), {"_redis": self.redis})()
+
+    def test_mark_received_writes_received_status_and_timeline(self):
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            ok = task_state.mark_received(
+                "ui-r1", "研究目标", idempotency_key="k1", instance="inst-a",
+                submit_events=[{"event": "published", "ts": 5.0, "instance": "inst-a"}])
+            row = task_state.read_task("ui-r1")
+            tl = task_state.read_submit_timeline("ui-r1")
+        self.assertTrue(ok)
+        self.assertEqual(row["status"], "RECEIVED", "收执状态必须是 RECEIVED（待消费）")
+        names = [e.get("event") for e in tl]
+        self.assertIn("published", names, "请求自带的时刻要保留")
+        self.assertIn("received", names)
+        self.assertEqual(
+            str(task_state.find_by_idempotency("k1", self.db)["task_id"]), "ui-r1")
+
+    def test_promote_is_the_single_execution_right_arbiter(self):
+        """同一收执只允许被推进一次——这是"不重复执行"的裁决点。"""
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            task_state.mark_received("ui-r2", "目标", idempotency_key="k2")
+            first = task_state.promote_received("ui-r2", instance="inst-a")
+            second = task_state.promote_received("ui-r2", instance="inst-b")
+            row = task_state.read_task("ui-r2")
+        self.assertEqual(first, "promoted", "第一次推进者获得执行权")
+        self.assertEqual(second, "already", "第二次必须报 already（不得重复执行）")
+        self.assertEqual(row["status"], "QUEUED")
+
+    def test_promote_absent_when_no_receipt(self):
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            self.assertEqual(task_state.promote_received("ui-none"), "absent")
+
+    def test_mark_queued_promotes_receipt_without_pk_conflict(self):
+        """收执行已存在时，登记必须**推进**它（旧实现 INSERT 会主键冲突 → 登记失败）。"""
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            task_state.mark_received("ui-r3", "目标", idempotency_key="k3")
+            ok = task_state.mark_queued("ui-r3", "目标", idempotency_key="k3",
+                                        instance="inst-a", db_path=self.db)
+            row = task_state.read_task("ui-r3")
+        self.assertTrue(ok, "收执已存在时登记不得失败")
+        self.assertEqual(row["status"], "QUEUED")
+        self.assertEqual(row["accepted_by"], "inst-a")
+
+    def test_mark_queued_never_downgrades_a_running_task(self):
+        """已经在跑/已终结的任务不得被"登记"改回 QUEUED。"""
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            task_state.mark_received("ui-r4", "目标")
+            task_state.promote_received("ui-r4")
+            task_state.mark_running("ui-r4")
+            task_state.mark_queued("ui-r4", "目标", db_path=self.db)
+            row = task_state.read_task("ui-r4")
+        self.assertEqual(row["status"], "RUNNING", "不得把 RUNNING 改回 QUEUED")
+
+    def test_list_received_excludes_consumed_and_filters_by_age(self):
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            task_state.mark_received("ui-r5", "目标甲")
+            task_state.mark_received("ui-r6", "目标乙")
+            task_state.promote_received("ui-r6")           # 这条已被消费
+            fresh = task_state.list_received(older_than=0)
+            stale = task_state.list_received(older_than=600)
+        self.assertEqual([r["task_id"] for r in fresh], ["ui-r5"], fresh)
+        self.assertEqual([r["task_id"] for r in stale], [],
+                         "太新的收执不抢（那条消息自己会推进）")
+
+    def test_accept_promotes_receipt_then_skips_second_time(self):
+        """消息路径：推进收执后执行；已被推进过则只回执、不执行第二遍。"""
+        from orchestrator_v2 import accept_task_request
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            task_state.mark_received("ui-r7", "目标", idempotency_key="k7")
+            d1: dict = {"task_id": "ui-r7", "goal": "目标", "idempotency_key": "k7"}
+            ok1, _ = accept_task_request(self.orch, d1)
+            d2: dict = {"task_id": "ui-r7", "goal": "目标", "idempotency_key": "k7"}
+            ok2, _ = accept_task_request(self.orch, d2)
+            row = task_state.read_task("ui-r7")
+        self.assertTrue(ok1 and ok2)
+        self.assertFalse(d1.get("_skip_run"), "第一次要执行")
+        self.assertTrue(d2.get("_skip_run"), "第二次必须跳过执行")
+        self.assertEqual(row["status"], "QUEUED")
+
+    def test_resume_received_runs_stale_receipts_once(self):
+        """启动恢复：把"收执已落库但从未消费"的任务捡回来执行（只一次）。"""
+        import orchestrator_v2
+        calls: list = []
+
+        class _FakeThread:
+            def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+                calls.append({"target": target, "args": args, "kwargs": kwargs or {}})
+
+            def start(self):
+                pass
+
+        with mock.patch.object(task_state, "DB_PATH", self.db), \
+                mock.patch.object(orchestrator_v2.threading, "Thread", _FakeThread):
+            task_state.mark_received("ui-r8", "目标", user="u1", project="p1")
+            # 阈值 600 秒：刚落的收执不算"陈旧"，避免抢正在飞的那条消息
+            n0 = orchestrator_v2.resume_received_tasks(self.orch, older_than=600)
+            n1 = orchestrator_v2.resume_received_tasks(self.orch, older_than=0)
+            n2 = orchestrator_v2.resume_received_tasks(self.orch, older_than=0)
+            row = task_state.read_task("ui-r8")
+        self.assertEqual(n0, 0, "太新的收执不该被恢复")
+        self.assertEqual(n1, 1, "未消费的收执要被捡起来")
+        self.assertEqual(n2, 0, "恢复过一次后不得重复执行")
+        self.assertEqual(len(calls), 1, calls)
+        self.assertEqual(calls[0]["args"][1], "ui-r8")
+        self.assertEqual(row["status"], "QUEUED")
+
+
 if __name__ == "__main__":
     unittest.main()
