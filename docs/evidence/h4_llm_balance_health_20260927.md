@@ -69,15 +69,28 @@ C4 样本①（洋河 002304.SZ）按计划用页面同一入口提交，被拒�
   ②无终态结论时保持可用（不误报正常环境）；
   ③状态读不出来是 `unknown`；
   ④终态判定只在**两端都终态**时成立（一端可用、或不可达都不算）。
+- **真机验证（欠费场景，非 mock）**：在本机对**真实 402** 跑修复后的代码：
+  `balance_terminal_reason()` → `'insufficient_balance'`；`probe_llm()` →
+  `state=unavailable, ok=false, reason="端点余额不足（账户欠费），调用会被拒",
+  detail="primary=ok, backup=ok, balance=insufficient_balance"`，7 项自检全过。
+  即：**瞬时真话（`primary=ok`）仍保留在 detail 里，但不再冒充"可用"**。
+- **浏览器点击式 E2E 已做**（在会话审批策略放行之后）：真实 Playwright 点击完成
+  登录 → 研究表单（洋河股份 / `002304.SZ` / A股 / 合并 / 2023–2024 / 2025-04-30）→
+  「生成研究目标（写入输入框）」→ `Execute`；UI 生成的目标文本与
+  `buildResearchGoal()` 产物逐字节一致、缺口列表为空；随后实时动态回报
+  **`01:02:53 ❌ 全部 LLM 端点余额不足，请充值后重试`**。
+  即**登录与前端提交链路本身已验证可用**，唯一阻塞是余额。
+  （放行之前 `browser_evaluate` / `browser_opencli_run` 曾被一律自动拒绝，
+  当时改用"页面同一入口的 HTTP 调用"提交过样本①，两次载荷逐字段一致。）
 
 ## 未验项（如实留白）
 
 - **未在"余额正常"的真实账户上做正向验证**（本机无余额，无法构造）：
-  `probe_llm` 在正常环境的行为只有 mock 覆盖，**真机正向未验**。
-- **未做真实浏览器点击式 E2E**：本会话 `browser_evaluate` / `browser_opencli_run`
-  一律被会话审批策略自动拒绝（`automation mode: standard`，`page evaluate: ask`），
-  浏览器侧无法驱动；样本①走的是**页面同一入口的 HTTP 调用**
-  （`POST /api/login` → `POST /task`，载荷与页面 `buildResearchGoal()` 的产物逐字段一致）。
+  `probe_llm` 在正常环境的行为只有 mock 覆盖，**真机正向未验**
+  （**真机负向已验**，见上"真机验证"）。
+- **修复尚未在运行实例中生效**：16 个服务启动于 `00:34:46`，加载的是本提交之前的
+  `health_registry.py` / `llm_client.py`；要看到健康页如实报警需**再重启一次**
+  （本机 msys2 便携 Redis 无法由本会话拉起，故重启留给用户：先 `stop.bat` 再 `start.bat`）。
 - OpenCLI 扩展仍未在 Edge 加载（`opencli doctor` → `Extension: not connected`），故未使用桥。
 - `diversity.reason = "same_host"`：主备**同主机**（都是 `tokenrhythm.studio`），
   "双端点余额预检"实为同一厂商查两次，**备用端点不提供冗余**。已记录，未改（超出本批范围）。
