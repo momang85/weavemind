@@ -1,9 +1,32 @@
-# DeepSeek 执行状态（2026-09-27 更新 · Harness 接续：H0 已交，H1 在办）
+# DeepSeek 执行状态（2026-09-27 更新 · Harness 接续：H1 已交，H2 在办）
 
 **当前批次**：`docs/Harness接续执行指令_20260927.md`（基线 2519d9a）**H0→H1→H2→H3**；
 H0 之后的阶段标准仍是 `docs/真实研究闭环与阶段D收口_20260927.md` 的 C0→C4。
 已交的 C0/C1/C2 与 N/S 批次不重跑；便携包缺 S3 的事实如实保留（重建在 C4）。
 C0 三提交已交（`5107ac0`/`e5c5607`/`bac62c6`）。
+
+## H1 剩余截止落到实际请求（已交，提交 `5c2e158`，证据 `docs/evidence/h1_deadline_propagation_20260927.md`）
+
+- **关闭 C0-2 §4 三个留存缺口**：Bing 固定 `timeout=12`（轻量链）/`timeout=15`（worker 链）
+  与 ddgs `max(3.0, …)` 下限全部改为 **`provider_timeout()` = min(提供方上限, 剩余时间)**，
+  不再做任何下限抬升；默认仍是 **6 次/60 秒**，未放宽。
+- **受控的可终止边界**：Bing 走新 `read_with_deadline()`——按块读取、**块间**查同一墙钟截止
+  （socket timeout 只管单次操作，慢速分块响应能远超它），到点抛 `TimeoutError` 停止读取；
+  ddgs 是同步 SDK、不可取消，因此给它抬高**可行下限** `PROVIDER_MIN_WAIT["ddgs"]=1.0`。
+  执行器在 `budget.take()` **之前**判下限：不够就**一个请求都不发**、也不消耗额度
+  （`refused_calls` 记账并归 `timeout`）。一律不新起"超时后继续出网"的后台线程。
+- **离线反例 4 条**（均在 CI 覆盖文件 `test_search_quality_unified.py`）：
+  超时不越界 / 慢读取在块间被切断 / 低于可行下限零请求零消耗 / 截止后零新请求。
+- **验证**：`test_search_quality_unified` 63 例 → 62 OK（唯一 error 是沙箱拒写临时目录，
+  与 H1 无关）；`test_p0 -k bing -k text_search -k ddg` 4 例 OK。替身签名等价调整 3 处。
+- **未验**：真实出网路径的截止表现（本批全部离线替身，未发真实检索）；
+  **健康 Redis 上的双进程并发预占**——本机 Redis 处于 MISCONF 拒写，私有 Redis 在沙箱内
+  无法启动（msys2 `NtCreateDirectoryObject 0xC0000022`），按"环境不具备 → 未验"记录，
+  不以顺序假对象替代。现有 Redis 上双进程实测到的是"预占失败 → 本次零额度"的 fail-closed 行为。
+- **顺带发现（非本批范围，需运维决定）**：运行中的 Redis `dir` 被配成 msys2 风格路径
+  `/portable/Redis-8.10.1-Windows-x64-msys2` → bgsave 恒失败 → `stop-writes-on-bgsave-error=yes`
+  使**所有写命令被拒**（实测 `SET` 报 MISCONF）。影响 `LPUSH task_queue:*`、结果回传、
+  状态落库与检索台账，即**当前实例无法接受新任务**。本批不重启服务、不改其配置，仅报告。
 
 ## H0 提交防护与 C2 测试门禁（已交，提交 `8a44f85`，证据 `docs/evidence/h0_commit_guard_20260927.md`）
 
