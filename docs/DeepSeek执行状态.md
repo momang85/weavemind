@@ -4,6 +4,44 @@
 H0 之后的阶段标准仍是 `docs/真实研究闭环与阶段D收口_20260927.md` 的 C0→C4。
 已交的 C0/C1/C2 与 N/S 批次不重跑。C0 三提交已交（`5107ac0`/`e5c5607`/`bac62c6`）。
 
+## 🔴 当前阻塞：C4 三份样本跑不了——LLM 账户余额耗尽（证据 `docs/evidence/h4_llm_balance_health_20260927.md`）
+
+- **现象**：用**真实浏览器点击**（Playwright，登录→研究表单→提交）跑样本①洋河 `002304.SZ`，
+  实时动态报 `❌ 全部 LLM 端点余额不足，请充值后重试`（服务端 503）。
+  任务**未创建、未执行、无任何产物**。UI 生成的目标文本与页面
+  `buildResearchGoal()` 产物逐字节一致，契约字段齐备（`cn`/`合并`/`equity`/2023-2024/2025-04-30、无缺口）。
+- **实测**：强制重探 0.2 秒返回；原始异常
+  `HTTP 402 {"code":"INSUFFICIENT_BALANCE","message":"余额不足","data":{"retryAfterSeconds":12}}`；
+  主备同主机 `tokenrhythm.studio`；92 秒内每 10 秒探一次 **10/10 失败**，
+  `retryAfterSeconds` 是每分钟滚动窗口 → **不是限流，是余额/额度真的耗尽，无自愈窗口**。
+- **下一步**：先给该账户充值，**不需要再改代码**（三份样本的契约与入口都已就绪）。
+- **附带发现（未改）**：`diversity.reason="same_host"`——主备端点同主机，"双端点余额预检"
+  实为同一厂商查两次，**备用端点不提供冗余**。
+
+### 顺手修掉的假绿：欠费时健康页报"可用"
+
+- **症状**：同一份 `/api/status` 里，`llm` 项写 `state=available / detail=primary=ok, backup=ok`，
+  而 `llm_health.balance` 写主备均 `insufficient_balance`、`llm_warning` 为空——两个信号互相矛盾，
+  这正是"环境看起来正常"的原因。
+- **根因**：`health_registry.probe_llm()` 只看 `_endpoint_health[*].healthy`，而它是**带失败阈值**的
+  瞬时状态（实测欠费时仍是 `healthy=true, fails=1`）；异常分支还回 `ok=True`（读不到也说可用）。
+- **修复（只动诊断面）**：新增 `llm_client.balance_terminal_reason()`（两端**都**终态才返回原因，
+  只读缓存结论）；`probe_llm()` 合并该结论（有它就不再报可用，`detail` 追加 `balance=`，
+  `healthy` 仍如实保留），异常分支改为 `_unknown_entry`。
+- **明确没改（属门禁，交用户决定）**：`_post_task` 余额预检语义不变；`_BALANCE_COOLDOWN = 600s` 不变
+  ——**代价：充值后最长要等 10 分钟才恢复接单**。
+- **验证**：`test_p0` 416 项（+4 新增）/ `test_actionable_state` 31 / `test_settings_requirements` 26 /
+  `test_sandbox_isolation` 24 / `test_startup_readiness` 57，**逐文件全绿**。
+- **未验项**：没有余额正常的账户可做正向验证，`probe_llm` 在正常环境的行为**仅 mock 覆盖**。
+
+### 环境侧复验（用户操作后）
+
+- 16 个服务**真重启**：`00:34:34` 停（含便携 Redis）→ `00:34:46` 全部拉起
+  （此前 `start.bat` 会被启动器"本实例已在运行…复用而不重启"挡掉，**必须先 `stop.bat`**）；
+- Playwright `chromium-1243` 在盘、`browser_evaluate` / `browser_recipe_run` 可用
+  （会话审批策略已放行）→ **浏览器点击式路径可用**；
+- OpenCLI 桥**仍未通**（`opencli doctor` → `Extension: not connected`），本路线不需要它。
+
 ## C4 进行中：便携包已重建，真实样本与真人评分未做（提交 `761291b`/`c581fa4`，证据 `docs/evidence/c4_run_package_20260927.md`）
 
 - **便携包重建一次**（C4 第 1 条，C0–C3 稳定后）：`dist/weavemind-2026.09.27.2-win-x64.zip`，

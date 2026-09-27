@@ -168,26 +168,54 @@ def _in_webui() -> bool:
         return False
 
 
+# 余额/鉴权终态失败的用户可读说明（判定在 llm_client.balance_terminal_reason）
+_BALANCE_TERMINAL_LABEL = {
+    "insufficient_balance": "端点余额不足（账户欠费），调用会被拒",
+    "unauthorized": "端点鉴权失败（密钥无效或无权限）",
+}
+
+
 def probe_llm() -> dict:
-    """LLM 端点（进程内健康状态 + 余额探测结果）。"""
+    """LLM 端点（进程内健康状态 + 余额探测结果）。
+
+    `healthy` 是带失败阈值的**瞬时**状态：实测账户欠费时它仍是 `healthy=true, fails=1`，
+    只按它判定就会把"欠费"报成"可用"——同一份 `/api/status` 里 `llm` 项写"可用"、
+    `llm_health.balance` 写 `insufficient_balance`，用户据此以为环境正常（正是
+    C3"统一健康信号"要防的假绿）。因此把余额/鉴权**终态**结论合并进来：有它就不报可用。
+
+    另外，状态读不出来时按 **unknown** 返回（此前回 `ok=True`，等于"读不到也说可用"）。
+    """
     try:
-        from llm_client import get_endpoint_health, get_endpoint_warning
+        from llm_client import (
+            balance_terminal_reason, get_endpoint_health, get_endpoint_warning,
+        )
         health = get_endpoint_health() or {}
         primary = health.get("primary") or {}
         backup = health.get("backup") or {}
         ok = bool(primary.get("healthy")) or bool(backup.get("healthy"))
         reason = get_endpoint_warning() or ""
+        # 终态失败（欠费/鉴权）不是抖动，healthy 的阈值也不会反映它
+        try:
+            terminal = balance_terminal_reason()
+        except Exception:
+            terminal = ""
+        if terminal:
+            ok = False
+            reason = reason or _BALANCE_TERMINAL_LABEL.get(
+                terminal, f"端点不可用：{terminal}")
         if not ok:
             reason = reason or "主备端点均不健康"
         since = max(
             float(primary.get("last_degradation_ts") or 0.0),
             float(backup.get("last_degradation_ts") or 0.0),
         )
-        return _entry(_NAME_LLM, ok, reason, since,
-                      detail=f"primary={'ok' if primary.get('healthy') else 'down'},"
-                             f" backup={'ok' if backup.get('healthy') else 'down'}")
+        detail = (f"primary={'ok' if primary.get('healthy') else 'down'},"
+                  f" backup={'ok' if backup.get('healthy') else 'down'}")
+        if terminal:
+            detail += f", balance={terminal}"
+        return _entry(_NAME_LLM, ok, reason, since, detail=detail)
     except Exception as exc:
-        return _entry(_NAME_LLM, True, f"状态不可读：{str(exc)[:80]}")
+        return _unknown_entry(_NAME_LLM, f"状态不可读：{str(exc)[:80]}")
 
 
 def probe_search() -> dict:

@@ -8061,6 +8061,65 @@ class TestHealthRegistryAndAlertDedupe(unittest.TestCase):
             self.assertEqual(entry["state"], health_registry.STATE_UNKNOWN)
             self.assertFalse(entry["ok"], "没观测到 ≠ 健康")
 
+    def test_llm_insufficient_balance_is_not_reported_available(self):
+        """账户欠费时 llm 项不得报"可用"（healthy 阈值掩盖了终态失败）。
+
+        实测：`/api/status` 的 `llm` 项写 `state=available, detail=primary=ok,backup=ok`，
+        而同一响应的 `llm_health.balance` 写 `insufficient_balance`——两个信号互相矛盾，
+        用户据此以为环境正常。`healthy` 带失败阈值（实测欠费时仍是 healthy=true, fails=1），
+        所以终态余额结论必须参与判定。
+        """
+        import health_registry
+        healthy = {"primary": {"healthy": True, "fails": 1},
+                   "backup": {"healthy": True, "fails": 1}}
+        with mock.patch("llm_client.get_endpoint_health", return_value=healthy), \
+                mock.patch("llm_client.balance_terminal_reason",
+                           return_value="insufficient_balance"):
+            entry = health_registry.probe_llm()
+        self.assertEqual(entry["state"], health_registry.STATE_UNAVAILABLE)
+        self.assertFalse(entry["ok"])
+        self.assertIn("余额", entry["reason"])
+        self.assertIn("balance=insufficient_balance", entry["detail"])
+
+    def test_llm_without_terminal_balance_stays_available(self):
+        """没有终态结论时保持原语义：健康即可用（不把正常环境误报为坏）。"""
+        import health_registry
+        healthy = {"primary": {"healthy": True}, "backup": {"healthy": True}}
+        with mock.patch("llm_client.get_endpoint_health", return_value=healthy), \
+                mock.patch("llm_client.balance_terminal_reason", return_value=""):
+            entry = health_registry.probe_llm()
+        self.assertEqual(entry["state"], health_registry.STATE_AVAILABLE)
+        self.assertTrue(entry["ok"])
+        self.assertEqual(entry["reason"], "")
+
+    def test_llm_state_unreadable_is_unknown_not_available(self):
+        """读不到状态 → unknown（此前回 ok=True，等于"读不到也说可用"）。"""
+        import health_registry
+        with mock.patch("llm_client.get_endpoint_health",
+                        side_effect=RuntimeError("boom")):
+            entry = health_registry.probe_llm()
+        self.assertEqual(entry["state"], health_registry.STATE_UNKNOWN)
+        self.assertFalse(entry["ok"], "读不到 ≠ 可用")
+
+    def test_balance_terminal_reason_only_when_all_endpoints_terminal(self):
+        """终态判定：两端都终态才算；一端可用、或不可达（可能自愈）都不算。"""
+        import llm_client
+        cases = [
+            ({"primary": {"reason": "insufficient_balance"},
+              "backup": {"reason": "insufficient_balance"}}, "insufficient_balance"),
+            ({"primary": {"reason": "unauthorized"},
+              "backup": {"reason": "unauthorized"}}, "unauthorized"),
+            ({"primary": {"reason": "insufficient_balance"},
+              "backup": {"reason": "ok"}}, ""),
+            ({"primary": {"reason": "unreachable"},
+              "backup": {"reason": "unreachable"}}, ""),
+            ({}, ""),
+        ]
+        for status, expected in cases:
+            with mock.patch("llm_client.get_balance_status", return_value=status):
+                self.assertEqual(llm_client.balance_terminal_reason(), expected,
+                                 f"输入 {status}")
+
     def test_stale_snapshot_is_unknown_and_other_instance_too(self):
         import health_registry
         fresh = {"brave": {"healthy": True}}

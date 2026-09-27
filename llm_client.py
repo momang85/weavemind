@@ -986,6 +986,32 @@ def get_balance_status(use_cache: bool = True) -> dict:
     return {k: dict(v) for k, v in result.items()}
 
 
+def balance_terminal_reason() -> str:
+    """主/备端点**都**处于终态失败（欠费/鉴权）时返回该原因，否则返回空串。
+
+    为什么必须单列这条结论：端点健康里的 `healthy` 是**带失败阈值的瞬时**状态，
+    实测账户欠费时它仍是 `healthy=true, fails=1`——只看它就会把"欠费"报成"可用"
+    （同一份 `/api/status` 里 `llm` 项写"可用"、`llm_health.balance` 写
+    `insufficient_balance`，两信号互相矛盾）。而终态失败不会在几十秒内自愈：
+    实测同一 402 在 92 秒内 10/10 复现，`retryAfterSeconds` 只是每分钟重置的滚动窗口。
+
+    只读缓存结论（`use_cache=True`）：调用方是健康页/状态页，不该为它额外打端点；
+    `/api/status` 本就会读同一份缓存，两边因此不会各说各话。
+    """
+    try:
+        status = get_balance_status() or {}
+    except Exception:
+        return ""
+    reasons = {
+        str((status.get(ep) or {}).get("reason") or "")
+        for ep in ("primary", "backup")
+    }
+    # 空串（未探测到）与 unreachable（可能自愈）都不算终态，不参与升级判定
+    if reasons and reasons <= set(_BALANCE_TERMINAL_REASONS):
+        return sorted(reasons)[0]
+    return ""
+
+
 def endpoint_hosts() -> dict[str, str]:
     """主/备端点主机名（小写，含端口前域名）。"""
     def _host(url: str) -> str:
