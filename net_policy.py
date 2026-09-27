@@ -72,28 +72,17 @@ def proxy_egress_supported() -> bool:
     return bool(PROXY_EGRESS_SUPPORTED)
 
 
-_PROXY_ENV_NAMES = ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy",
-                    "ALL_PROXY", "all_proxy")
+def require_egress_ok() -> None:
+    """内容抓取的入口守卫：`proxy_required` 但本版本不支持经代理出口 → **拒绝**。
 
-
-def apply_direct_mode_env() -> list:
-    """`direct` 模式下让本进程不再使用环境代理（**启动时调用一次**）。
-
-    为什么放在启动时改环境、而不是每个请求里判断：urllib 只认环境里的代理设置，
-    逐请求分支既要改十几处调用点，也容易漏掉新增的适配器。启动时一次性决定"本进程
-    继承部署代理还是明确直连"，对进程内所有既有调用点（含将来新增的）一致生效；
-    只删代理变量，不动别的环境；返回被清理的变量名（**不含值**）供启动报告显示。
+    每个内容入口（HTML/PDF/原始披露）都要在**发请求之前**调它（指令 §4-C0.3）：
+    否则禁网环境里"必须代理但没代理"仍会直连下载一次——实机反例就是 PDF 那条。
+    非 `proxy_required` 模式返回 None（不改动任何设置）。
     """
-    if connection_mode() != "direct":
-        return []
-    cleared = []
-    for name in _PROXY_ENV_NAMES:
-        if os.environ.pop(name, None) is not None:
-            cleared.append(name)
-    if cleared:
-        logger.warning("内容抓取配置为 direct：已清理本进程环境代理 %s（不改系统设置）",
-                       ",".join(cleared))
-    return cleared
+    if connection_mode() == "proxy_required" and not proxy_egress_supported():
+        raise NetworkPolicyError(
+            "内容抓取要求经代理出口，但本版本不支持该路径（代理侧自行解析域名，"
+            "无法保证校验与连接使用同一个已验 IP）；请改用 direct 或 inherit")
 
 
 def _config_content_fetch_mode() -> str:
@@ -115,7 +104,8 @@ def _config_content_fetch_mode() -> str:
 
 
 def connection_mode() -> str:
-    """内容抓取的出口方式：`inherit`（跟随部署环境代理设置，默认）或 `direct`（明确不走代理）。
+    """内容抓取的出口方式：`inherit`（跟随部署环境代理设置，默认）/ `direct`（明确不走代理）
+    / `proxy_required`（要求经代理出口——本版本明确不支持，见 `require_egress_ok`）。
 
     只认显式配置：环境变量 `WM_CONTENT_FETCH_MODE` 优先于 `config.json` 的
     `network.content_fetch.mode`；非法值按 `inherit` 处理并记日志——不把"读不到配置"
@@ -133,10 +123,7 @@ def connection_mode() -> str:
 
 
 def proxy_settings() -> dict:
-    """当前部署环境的代理设置（**脱敏**：只回 host:port，不带用户凭据）。
-
-    只读环境变量，不发请求；用于诊断与页面显示"当前出口是继承代理还是直连"。
-    """
+    """当前部署环境的代理设置（**脱敏**：只回 host:port，不带用户凭据）。"""
     out: dict = {"configured": False, "hosts": []}
     for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy",
                  "ALL_PROXY", "all_proxy"):
@@ -154,11 +141,8 @@ def proxy_settings() -> dict:
 
 
 def _exception_chain(exc: BaseException) -> list:
-    """异常链（含 `__cause__`/`__context__`/`URLError.reason`），用于判定失败发生在哪一层。
-
-    必须走 `reason`：urllib 把底层连接错误装在 `URLError.reason` 里（不是 `__cause__`），
-    只看异常链会把"代理拒连"读成一个没有细节的 `URLError`。
-    """
+    """异常链（含 `__cause__`/`__context__`/`URLError.reason`）：urllib 把底层连接错误装在
+    `URLError.reason` 里，只看 `__cause__` 会把"代理拒连"读成没有细节的 URLError。"""
     out: list = []
     seen: set = set()
     queue = [exc]
@@ -177,11 +161,9 @@ def _exception_chain(exc: BaseException) -> list:
 
 
 def _is_connect_stage_failure(exc: BaseException) -> bool:
-    """失败是否发生在**连接建立阶段**（而不是"已建连、正在说 HTTP 时断了"）。
+    """失败是否发生在**连接建立阶段**（不是"已建连、正在说 HTTP 时断了"）。
 
-    只认连接类错误：拒连、代理地址解析失败、连接/读取超时。已经拿到 HTTP 状态、或已建连
-    但被对端重置（`RemoteDisconnected`/连接重置）都不算——那说明请求确实出去了，归到源站
-    侧更诚实，也不会白白掐掉第二条通道。
+    已拿到 HTTP 状态、或已建连后被重置都不算——那说明请求确实出去了，归源站侧更诚实。
     """
     import http.client as _http
     chain = _exception_chain(exc)
@@ -196,10 +178,9 @@ def _is_connect_stage_failure(exc: BaseException) -> bool:
 def is_proxy_failure(exc: BaseException) -> bool:
     """该失败是否发生在**代理层**——是则调用方不得降级为直连（专项 §6）。
 
-    判定：HTTP 407；异常文本含 proxy；**配置了代理且失败在连接阶段**（链上没有任何
-    HTTP 状态错误、也不是已建连后被重置）。第三条是主力：代理进程没起来时，urllib 抛的是
-    `URLError(ConnectionRefusedError(...))`，文本里根本没有 "proxy" 字样——此时代码连的
-    是代理而不是源站，按代理失败归类比按源站失败归类更诚实。
+    判定：HTTP 407；异常文本含 proxy；**配置了代理且失败在连接阶段**（链上没有 HTTP 状态
+    错误、也不是已建连后被重置）。第三条是主力：代理进程没起来时 urllib 抛的是
+    `URLError(ConnectionRefusedError(...))`，文本里根本没有 "proxy" 字样。
     """
     chain = _exception_chain(exc)
     for e in chain:
@@ -211,6 +192,19 @@ def is_proxy_failure(exc: BaseException) -> bool:
     if not proxy_settings()["configured"]:
         return False
     return _is_connect_stage_failure(exc)
+
+
+def proxy_settings_report() -> dict:
+    """诊断用：报告当前出口方式与（脱敏的）代理设置，**不修改任何环境**。
+
+    只报不动的理由（指令 §4-C0.3）：内容下载不得为了自己的出口去清理整进程代理配置，
+    那会连带改变其它服务的出口。要"明确直连"就设 `WM_CONTENT_FETCH_MODE=direct`，
+    由各内容入口按 mode 执行。
+    """
+    proxy = proxy_settings()
+    return {"mode": connection_mode(), "proxy_configured": bool(proxy["configured"]),
+            "proxy_hosts": list(proxy["hosts"]),
+            "proxy_egress_supported": proxy_egress_supported()}
 
 
 def classify_network_error(exc: BaseException) -> str:
@@ -501,10 +495,7 @@ def fetch_document(url: str, *, timeout: float | None = None,
 
     即：**本通道从不因代理不可用而改走直连，也从不把直连说成代理**。
     """
-    if connection_mode() == "proxy_required" and not proxy_egress_supported():
-        raise NetworkPolicyError(
-            "内容抓取要求经代理出口，但本版本不支持该路径（代理侧自行解析域名，"
-            "无法保证校验与连接使用同一个已验 IP）；请改用 direct 或 inherit")
+    require_egress_ok()
     decision = validate_public_url(url)
     audit_decision(decision, action="fetch_document")
     if not decision.ok:

@@ -291,13 +291,27 @@ class TestEgressPolicy(unittest.TestCase):
             connect.assert_not_called()
         self.assertIn("不支持", str(ctx.exception))
 
-    def test_direct_mode_clears_process_proxy_env(self):
+    def test_egress_is_reported_but_process_env_is_never_mutated(self):
+        """内容下载不得清理整进程代理（指令 §4-C0.3）：只报告，不动环境。"""
         os.environ["HTTPS_PROXY"] = "http://127.0.0.1:7897"
-        self.assertEqual(net_policy.apply_direct_mode_env(), [], "inherit 模式不动环境")
+        report = net_policy.proxy_settings_report()
+        self.assertEqual(report["mode"], "inherit")
+        self.assertTrue(report["proxy_configured"])
+        self.assertEqual(report["proxy_hosts"], ["127.0.0.1:7897"])
+        self.assertIn("HTTPS_PROXY", os.environ, "不得为内容下载清掉进程代理")
         os.environ["WM_CONTENT_FETCH_MODE"] = "direct"
-        cleared = net_policy.apply_direct_mode_env()
-        self.assertIn("HTTPS_PROXY", cleared)
-        self.assertNotIn("HTTPS_PROXY", os.environ)
+        self.assertEqual(net_policy.proxy_settings_report()["mode"], "direct")
+        self.assertIn("HTTPS_PROXY", os.environ, "direct 模式也只改判定，不改环境")
+        self.assertFalse(hasattr(net_policy, "apply_direct_mode_env"),
+                         "清环境的旧接口已移除（它会连带改变其它服务出口）")
+
+    def test_require_egress_ok_refuses_only_proxy_required(self):
+        net_policy.require_egress_ok()                 # inherit：不拒绝
+        os.environ["WM_CONTENT_FETCH_MODE"] = "direct"
+        net_policy.require_egress_ok()                 # direct：不拒绝
+        os.environ["WM_CONTENT_FETCH_MODE"] = "proxy_required"
+        with self.assertRaises(net_policy.NetworkPolicyError):
+            net_policy.require_egress_ok()
 
     def test_public_content_url_positive_case(self):
         """正例不受影响：公网 IP 字面量（无需 DNS）仍放行。"""
@@ -361,13 +375,40 @@ class TestTransportEgress(unittest.TestCase):
         self.assertIsInstance(err, self.transport.ProxyEgressError)
         self.assertEqual(err.category, "proxy_error")
 
-    def test_origin_failure_still_uses_the_second_channel(self):
+    def test_origin_failure_without_proxy_still_uses_the_second_channel(self):
+        """没有代理参与时，源站侧失败仍走第二通道（既有反爬降级行为不变）。"""
+        import http.client
+        out, calls, err = self._run(http.client.RemoteDisconnected("closed"),
+                                    proxy=False)
+        self.assertEqual(out, "body")
+        self.assertEqual(calls["socket"], 1)
+        self.assertIsNone(err)
+
+    def test_proxy_in_effect_blocks_fallback_even_after_connect(self):
+        """反例（§3.3）：配了代理时 `RemoteDisconnected` 也不得触发 socket 直连。"""
         import http.client
         out, calls, err = self._run(http.client.RemoteDisconnected("closed"),
                                     proxy=True)
-        self.assertEqual(out, "body", "源站侧失败仍走第二通道（未改变既有行为）")
-        self.assertEqual(calls["socket"], 1)
-        self.assertIsNone(err)
+        self.assertIsNone(out)
+        self.assertEqual(calls["socket"], 0, "代理在生效时不得落直连")
+        self.assertIsInstance(err, self.transport.ProxyEgressError)
+
+    def test_proxy_required_refuses_before_any_request(self):
+        """反例（§3.3）：必须代理但无代理时，PDF/HTML 入口一次请求都不许发。"""
+        import urllib.error
+        calls = {"n": 0}
+
+        def _urlopen(*_a, **_k):
+            calls["n"] += 1
+            raise urllib.error.URLError("should not be reached")
+
+        with mock.patch.dict("os.environ",
+                             {"WM_CONTENT_FETCH_MODE": "proxy_required"}),                 mock.patch("urllib.request.urlopen", side_effect=_urlopen):
+            with self.assertRaises(Exception):
+                self.transport.get_via_urllib("https://example.com/a")
+            with self.assertRaises(Exception):
+                self.transport.dual_channel_get("https://example.com/a")
+        self.assertEqual(calls["n"], 0, "拒绝必须发生在发请求之前")
 
     def test_proxy_error_classifies_for_adapters(self):
         import urllib.error

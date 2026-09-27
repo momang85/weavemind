@@ -3,6 +3,20 @@
 **当前批次**：`docs/真实研究闭环与阶段D收口_20260927.md`（基线 453f958）**C0→C1→C2→C3→C4**。
 已交 N/S 批次不重跑；便携包缺 S3 的事实如实保留（重建在 C4）。
 
+## C0-3 统一出口覆盖（已交，证据 `docs/evidence/c0_3_egress_coverage_20260927.md`）
+
+- **每个内容入口执行 mode**：新增 `net_policy.require_egress_ok()`，在 `get_via_urllib` /
+  `get_via_socket` / `dual_channel_get` **发请求之前**调用——`proxy_required` 且不支持经代理出口
+  时直接拒绝（反例"必须代理但没代理仍下载 1 次"关闭，urlopen 调用数 0）。
+- **建连后断开不落直连**：`dual_channel_get` 判断"代理是否在生效"，在生效时**任何** urllib 失败
+  （含 `RemoteDisconnected`）都抛 `ProxyEgressError`；代理不参与时第二通道照旧。
+- **不为内容下载清理整进程代理**：删除 launcher 的 `apply_direct_mode_env()`，改为
+  `proxy_settings_report()` **只报告**（requested mode / 代理是否生效 / 脱敏 host / 是否支持代理出口）。
+- 保留公网校验、跳转校验、DNS 绑定与 TLS 验证不动；验证 `test_net_policy`+`test_p0`
+  +`test_startup_readiness`+`test_delivery_chain`+`test_search_quality_unified` 共 911 例 OK。
+- 未验：真实代理在线/离线真机抓取（本批为替身）；`direct` 模式下 `get_via_urllib` 仍走 urllib
+  （逐请求改通道未做，理由与出路写在证据文档）。
+
 ## C0-2 根检索预算（已交，证据 `docs/evidence/c0_2_root_search_budget_20260927.md`）
 
 - **首次请求前**原子预占次数并按根起点落时刻（`HINCRBY used` + `HSETNX started`）；剩余墙钟从

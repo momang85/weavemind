@@ -139,6 +139,7 @@ def get_via_urllib(
     GBK 响应（新浪/腾讯）传 encoding="gbk"。
     """
     url = _throttle_and_rewrite(url)
+    _require_egress_ok()
     # SSRF 防护：校验紧邻请求点（协议/主机/IP 边界）
     if not _validate_public_url(url):
         raise RuntimeError(f"blocked URL by SSRF guard: {url[:120]}")
@@ -162,6 +163,7 @@ def get_via_socket(
     """
     url = _throttle_and_rewrite(url)
     from net_policy import connect_validated, validate_public_url
+    _require_egress_ok()
     decision = validate_public_url(url)
     if not decision.ok:
         raise RuntimeError(f"blocked URL by SSRF guard: {decision.reason}")
@@ -232,6 +234,8 @@ def dual_channel_get(
     本机直出"，改抛 `ProxyEgressError`（类别 `proxy_error`）交回调用方，由用户/管理员在
     已有配置入口处理（换代理、改 `WM_CONTENT_FETCH_MODE`），不在异常分支里替用户改出口。
     """
+    _require_egress_ok()
+    proxy_in_effect = _proxy_in_effect()
     try:
         return get_via_urllib(url, timeout=timeout, encoding=encoding, headers=headers)
     except ProxyEgressError:
@@ -242,10 +246,13 @@ def dual_channel_get(
             "%s fetch attempt %d failed: urllib: %s",
             source, attempt, urllib_reason,
         )
-        if _is_proxy_failure(exc):
-            logger.warning("%s 代理层失败：不降级直连（专项 §6）", source)
+        # 配置了代理（inherit）时，**任何** urllib 失败都不降级直连——包括"已建连后断开"
+        # （`RemoteDisconnected`）：那时代码本应经代理出去，改走直连等于换出口（指令 §4-C0.3）。
+        # 只有代理不参与（direct / 未配代理）时才允许用第二条通道。
+        if proxy_in_effect or _is_proxy_failure(exc):
+            logger.warning("%s 代理在生效或代理层失败：不降级直连（指令 §4-C0.3）", source)
             raise ProxyEgressError(
-                f"代理层失败，未降级直连：{urllib_reason}") from exc
+                f"代理在生效，未降级直连：{urllib_reason}") from exc
     try:
         return get_via_socket(url, timeout=timeout, encoding=encoding, headers=headers)
     except Exception as exc:
@@ -260,6 +267,26 @@ def dual_channel_get(
             _attach_category(err, exc)
             raise err from exc
         raise RuntimeError(f"{source} fetch failed: {reason}") from exc
+
+
+def _require_egress_ok() -> None:
+    """内容入口的出口守卫：`proxy_required` 且不支持经代理 → 抛错（发请求之前）。"""
+    try:
+        from net_policy import require_egress_ok
+        require_egress_ok()
+    except ImportError:
+        return
+    except Exception:
+        raise
+
+
+def _proxy_in_effect() -> bool:
+    """当前内容请求是否经由代理（inherit + 环境里配了代理）。"""
+    try:
+        from net_policy import connection_mode, proxy_settings
+        return connection_mode() != "direct" and bool(proxy_settings()["configured"])
+    except Exception:
+        return False
 
 
 def _is_proxy_failure(exc: BaseException) -> bool:
