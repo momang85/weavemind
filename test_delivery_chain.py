@@ -7575,7 +7575,9 @@ class TestChangeExplanationGuards(unittest.TestCase):
         import report_brief
         t = TestUnsupportedClaimLinkage("test_adopted_source_claims_are_untouched")
         t.setUp()
-        self.addCleanup(lambda: None)
+        # 借用的实例要把它的清理跑完（工作区根与任务库路径都在它上面覆写过）：
+        # 不跑就泄漏到后续用例，同进程跑多个文件时会把"任务库指向同一个文件"断言弄脏。
+        self.addCleanup(t.doCleanups)
         tid = t._env(tid="c2-guard-1")
         proj = ws_mod.task_project_dir(tid, "default")
         (proj / "fetch_snapshot.json").write_text(json.dumps([
@@ -7603,6 +7605,7 @@ class TestChangeExplanationGuards(unittest.TestCase):
         import report_brief
         t = TestUnsupportedClaimLinkage("test_adopted_source_claims_are_untouched")
         t.setUp()
+        self.addCleanup(t.doCleanups)
         tid = t._env(tid="c2-guard-2")
         body = ("## 分析\n\n"
                 "经媒体报道，2024 年 5%—10% 的增长目标未达成，说明渠道调整尚未见效。[2]\n\n"
@@ -9618,6 +9621,524 @@ class TestDisclosureIngest(unittest.TestCase):
         kept = di.pick_official_candidates(cands, company=fx["company"],
                                            company_code=fx["company_id"], period="2024")
         self.assertEqual([c["title"] for c in kept], ["洋河股份:2024年年度报告"])
+
+
+# ── C1：补材料入口（网页/HTTP → 编排器 → 原始内容 → 证据快照 → 底稿）──────
+#
+# 这一组的重点是**不让测试只调用摄取 helper**：请求从 HTTP 入口进，经投递与编排器
+# 处理器（`handle_add_material`，生产同一条函数）落到资料快照与证据，再沿身份
+# （材料 id / 原件 hash / 正文 hash / 快照 hash）逐环核对。
+
+class _MatHandler:
+    """HTTP handler 替身：只实现 `_json`（收集响应）与 `_client_ip`。"""
+
+    def __init__(self, path: str):
+        self.path = path
+        self.responses: list[tuple] = []
+
+    def _json(self, payload, status=200):
+        self.responses.append((payload, status))
+        return payload
+
+    def _client_ip(self):
+        return "127.0.0.1"
+
+    @property
+    def last(self):
+        return self.responses[-1] if self.responses else (None, None)
+
+
+class _FakeMessaging:
+    """进度通道替身（`push_progress` 只用到 publish）。"""
+
+    def __init__(self):
+        self.events: list[tuple] = []
+
+    def publish(self, channel, payload):
+        self.events.append((channel, payload))
+
+    def close(self):
+        pass
+
+
+class _FakeRedis:
+    """最小 Redis 替身：收执键、待办集合、投递记录。"""
+
+    def __init__(self):
+        self.values: dict = {}
+        self.sets: dict = {}
+        self.published: list[tuple] = []
+
+    def sadd(self, key, val):
+        self.sets.setdefault(key, set()).add(val)
+        return 1
+
+    def srem(self, key, val):
+        self.sets.get(key, set()).discard(val)
+        return 1
+
+    def smembers(self, key):
+        return set(self.sets.get(key, set()))
+
+    def delete(self, *keys):
+        for k in keys:
+            self.values.pop(k, None)
+
+    def publish(self, channel, payload):
+        self.published.append((channel, json.loads(payload)))
+        return 1
+
+    def get(self, key):
+        return self.values.get(key)
+
+    def setex(self, key, ttl, value):
+        self.values[key] = value
+        return True
+
+
+class _LoopRedis(_FakeRedis):
+    """把 publish 变成"编排器消费"：复刻 `main()` 循环里 add_material 分支的四步
+    （handle_add_material → 写收执键 → 移除待办集合），让 HTTP 入口的收执等待在离线
+    测试里也走真实形状——而不是让用例跳过入口直接调 helper。"""
+
+    def __init__(self, orch):
+        super().__init__()
+        self.orch = orch
+
+    def publish(self, channel, payload):
+        msg = json.loads(payload)
+        if str(msg.get("type") or "") != "add_material":
+            return super().publish(channel, payload)
+        self.published.append((channel, msg))
+        result = self.orch.handle_add_material(msg)
+        mid = str(msg.get("material_id") or "")
+        self.setex(f"material_ack:{mid}", 600,
+                   json.dumps(result, ensure_ascii=False))
+        self.srem("material_pending_tasks", str(msg.get("task_id") or ""))
+        return 1
+
+
+class _IntakeOrch:
+    """编排器侧最小替身：只提供 `handle_add_material` 用到的协作对象。
+
+    真正的 `OrchestratorV2` 需要 Redis/模型一整套运行时；这里替换掉的是**运行环境**，
+    不是被测逻辑——被测的是同一个未绑定函数 `OrchestratorV2.handle_add_material`。
+    """
+
+    def __init__(self):
+        self._messaging = _FakeMessaging()
+        self.recycled: list[dict] = []
+
+    def _now_iso(self):
+        return "2026-09-27T00:00:00"
+
+    def _recycle_fetch_into_clean(self, task_id, goal, result):
+        # 清洗回灌（图表/摘要）在 web_fetch 链上有专门用例；这里只记录它被调用过，
+        # 以及它收到的正文——材料正文必须与准入后的正文是同一份
+        try:
+            self.recycled.append(json.loads(str((result or {}).get("result") or "{}")))
+        except Exception:
+            self.recycled.append({})
+
+
+def _unbound_intake_handler():
+    """生产实现：`OrchestratorV2.handle_add_material` 的未绑定函数。"""
+    import orchestrator_v2
+    return orchestrator_v2.OrchestratorV2.handle_add_material
+
+
+class _MaterialCase(unittest.TestCase):
+    """补材料用例的公共装置：隔离工作区 + 任务记录 + HTTP 入口替身。"""
+
+    @staticmethod
+    def _frozen() -> dict:
+        p = (Path(__file__).resolve().parent / "evals" / "real"
+             / "yanghe_ar2024_pages_20260922.json")
+        return json.loads(p.read_text(encoding="utf-8"))
+
+    def _envelope_bytes(self) -> bytes:
+        """冻结的洋河公告文本 → **文档信封**（保留接口片段偏移：定位仍是 api_chunk）。"""
+        import narrative_evidence as ne
+        fx = self._frozen()
+        chunks = [(int(p["api_chunk"]), str(p.get("text") or ""))
+                  for p in fx["pages"] if p.get("text")]
+        text, offsets, gaps = ne.merge_chunks(sorted(chunks, key=lambda x: x[0]))
+        return json.dumps({
+            "title": str(fx.get("notice_title_meta") or "洋河股份:2024年年度报告"),
+            "url": str(fx["pages"][0]["url"]), "text": text,
+            "chunk_offsets": offsets, "chunk_gaps": gaps,
+            "chunk_size": int(fx.get("chunk_size") or 5000),
+            "location_kind": "api_chunk",
+            "art_code": fx.get("art_code"), "published_at": fx.get("published_at"),
+        }, ensure_ascii=False).encode("utf-8")
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_c1_"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self._old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(self.tmp))
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", self._old_root)
+        self.task_id = "c1-material"
+        self.row = {
+            "task_id": self.task_id,
+            "goal": ("研究洋河股份 2023 与 2024 两个年度的营业收入、归母净利润、"
+                     "经营活动现金流净额，合并报表口径，数据截至 2025-04-30"),
+            "status": "SUCCESS", "user": "momang",
+            "research_request": {"goal": "", "company": "洋河股份",
+                                 "company_id": "002304.SZ", "market": "cn",
+                                 "periods": [2023, 2024], "caliber": "合并",
+                                 "as_of": "2025-04-30",
+                                 "required_metrics": ["revenue", "net_profit",
+                                                      "operating_cashflow"]},
+        }
+        import task_state as _ts
+        pat = mock.patch.object(_ts, "read_task", lambda tid, *a, **k: dict(self.row))
+        pat.start()
+        self.addCleanup(pat.stop)
+        # 编排器替身：补材料处理逻辑绑到生产函数上
+        self.orch = _IntakeOrch()
+        self.orch.handle_add_material = _unbound_intake_handler().__get__(
+            self.orch, type(self.orch))
+
+    def _post(self, body: dict, redis=None, user="momang"):
+        """从 **HTTP 入口**提交补材料请求（与网页调用同一条函数）。"""
+        import web_ui
+        h = _MatHandler(f"/api/task/{self.task_id}/material")
+        with mock.patch.object(web_ui, "_task_exists", lambda tid: True), \
+                mock.patch.object(web_ui, "_redis_ready", lambda *a, **k: True), \
+                mock.patch.object(web_ui, "_new_redis", lambda: redis), \
+                mock.patch.object(web_ui, "audit_log", lambda *a, **k: None):
+            web_ui._post_task_material(h, h.path, body, {"user": user})
+        return h.last
+
+    def _snapshot(self) -> list[dict]:
+        p = ws_mod.task_project_dir(self.task_id) / "fetch_snapshot.json"
+        return json.loads(p.read_text(encoding="utf-8")) if p.is_file() else []
+
+
+class TestMaterialEntryChain(_MaterialCase):
+    """正常入口 → 编排器 → 原始内容 → 证据快照：能沿身份逐环核对。"""
+
+    def test_upload_flows_through_http_and_orchestrator_into_evidence(self):
+        import base64 as b64
+        import material_intake as mi
+        import narrative_evidence as ne
+        from adapters import disclosure_ingest as di
+
+        redis = _LoopRedis(self.orch)
+        raw = self._envelope_bytes()
+        payload, status = self._post({
+            "kind": "file", "filename": "yanghe_ar2024.json",
+            "content_type": "application/json",
+            "title": "洋河股份:2024年年度报告",
+            "data": b64.b64encode(raw).decode("ascii")}, redis=redis)
+
+        self.assertEqual(status, 200, payload)
+        self.assertEqual(payload["intake"]["status"], di.ADMITTED, payload)
+        # 投递的确实是编排器消息（而不是在 web 进程里把活干了）
+        self.assertEqual(redis.published[0][1]["type"], "add_material")
+        self.assertEqual(redis.published[0][1]["material_id"], payload["material_id"])
+
+        mid = str(payload["material_id"])
+        # 1. 原始内容：原件字节落盘，hash 与记录一致
+        meta = mi.load(self.task_id, mid)
+        raw_file = mi.raw_path(self.task_id, meta)
+        self.assertTrue(raw_file.is_file())
+        self.assertEqual(meta["raw_sha256"],
+                         hashlib.sha256(raw_file.read_bytes()).hexdigest())
+        self.assertEqual(meta["channel"], mi.CHANNEL_UPLOAD)
+        # 2. 同一证据快照：材料正文并入 fetch_snapshot.json，身份字段齐备
+        snap = self._snapshot()
+        self.assertEqual(len(snap), 1, snap)
+        doc = snap[0]
+        self.assertEqual(doc["material_id"], mid)
+        self.assertEqual(doc["source_class"], "user_file", "上传材料不得升为官方披露")
+        self.assertEqual(doc["raw_sha256"], meta["raw_sha256"])
+        self.assertEqual(doc["text_sha256"], di.document_hash(doc))
+        self.assertEqual(doc["date_basis"], "source_field:published_at",
+                         "材料自带 published_at 时以来源字段为依据")
+        self.assertEqual(doc["disclosed_at"], "2025-04-29")
+        # 3. 证据：快照 hash 对上，定位仍是 api_chunk（不写成 PDF 页码）
+        ev = ne.read(self.task_id) or {}
+        snapshot_file = ws_mod.task_project_dir(self.task_id) / "fetch_snapshot.json"
+        self.assertEqual(ev.get("snapshot_sha256"),
+                         hashlib.sha256(snapshot_file.read_bytes()).hexdigest())
+        located = [r for r in (ev.get("records") or []) if r.get("has_location")]
+        self.assertTrue(located, "冻结公告文本必须产出带定位的证据")
+        self.assertTrue(any(r.get("chunk") is not None for r in located),
+                        "公告文本接口片段的定位必须是 api_chunk")
+        self.assertTrue(any("api_chunk" in str(r.get("locator") or "") for r in located))
+        # 4. 回灌：清洗链收到的正文与准入正文是同一份
+        self.assertTrue(self.orch.recycled and self.orch.recycled[0].get("text"))
+        self.assertEqual(self.orch.recycled[0]["text"], doc["text"])
+        # 5. 结论与待办：交付正文没有被顺手改写，模型重生成挂待办
+        self.assertTrue(payload["refresh"].get("stale"))
+        kinds = [p.get("kind") for p in (payload["refresh"].get("pending") or [])]
+        self.assertEqual(kinds, ["model_regeneration"], payload["refresh"])
+
+    def test_same_material_twice_is_idempotent(self):
+        """同一份材料重复提交：一条记录、一次取件、不进两次资料集。"""
+        import base64 as b64
+        import material_intake as mi
+        raw = self._envelope_bytes()
+        body = {"kind": "file", "filename": "yanghe_ar2024.json",
+                "content_type": "application/json",
+                "data": b64.b64encode(raw).decode("ascii")}
+        first, s1 = self._post(dict(body), redis=_LoopRedis(self.orch))
+        second, s2 = self._post(dict(body), redis=_LoopRedis(self.orch))
+        self.assertEqual((s1, s2), (200, 200))
+        self.assertEqual(first["material_id"], second["material_id"])
+        self.assertTrue(second["duplicate"])
+        self.assertEqual(len(self._snapshot()), 1, "同一材料不得在资料集里出现两次")
+        idx = mi.status(self.task_id)
+        self.assertEqual(idx["count"], 1, idx)
+
+    def test_owner_mismatch_is_refused(self):
+        """任务记录里有提交者：别人不能往里加材料。"""
+        redis = _LoopRedis(self.orch)
+        payload, status = self._post({
+            "kind": "file", "filename": "x.json", "content_type": "application/json",
+            "data": "e30="}, redis=redis, user="someone-else")
+        self.assertEqual(status, 403, payload)
+        self.assertFalse(redis.published, "被拒的请求不得投递")
+        self.assertFalse(self._snapshot(), "被拒的请求不得改动资料集")
+
+    def test_local_channel_is_marked_as_local_not_web_upload(self):
+        """本地调试读文件与网页上传在记录里分开，不互相冒充。"""
+        import base64 as b64
+        import material_intake as mi
+        raw = self._envelope_bytes()
+        payload, status = self._post({
+            "kind": "file", "filename": "yanghe_ar2024.json",
+            "content_type": "application/json", "channel": mi.CHANNEL_LOCAL,
+            "data": b64.b64encode(raw).decode("ascii")},
+            redis=_LoopRedis(self.orch))
+        self.assertEqual(status, 200, payload)
+        meta = mi.load(self.task_id, str(payload["material_id"]))
+        self.assertEqual(meta["channel"], mi.CHANNEL_LOCAL)
+        self.assertIn("本地调试", meta["channel_label"])
+
+    def test_not_obtained_material_never_enters_the_snapshot(self):
+        """直链取件失败 → 未取得：资料集不动，也不说成"已进入研究"。"""
+        import material_intake as mi
+        redis = _LoopRedis(self.orch)
+        with mock.patch.object(mi, "_fetch_link",
+                               side_effect=OSError("connection reset")):
+            payload, status = self._post({
+                "kind": "link", "url": "https://www.cninfo.com.cn/new/disclosure/x",
+                "title": "洋河股份:2024年年度报告"}, redis=redis)
+        self.assertEqual(status, 409, payload)
+        self.assertEqual(payload["intake"]["status"], mi.STATE_FETCH_FAILED)
+        self.assertFalse(self._snapshot(), "未取得正文的材料不得进资料集")
+        meta = mi.load(self.task_id, str(payload["material_id"]))
+        self.assertEqual(meta["status"], mi.STATE_FETCH_FAILED)
+        self.assertIn("connection reset", meta["reason"])
+
+
+class TestMaterialRefreshKeepsHumanText(_MaterialCase):
+    """补材料只重做确定性下游：证据与结构重算，交付正文与用户文字保持原样。"""
+
+    def _seed_research_task(self):
+        """造一个"已有底稿与采纳版本"的研究任务（真实适配器行的形状）。"""
+        import working_paper_export  # noqa: F401 - 确保底稿模块可用
+        proj = ws_mod.task_project_dir(self.task_id)
+        proj.mkdir(parents=True, exist_ok=True)
+        snap = {"financials": [
+            {"year": 2023, "report_type": "年报", "caliber": "合并",
+             "report_date": "2023-12-31", "disclosure_date": "2024-04-20",
+             "revenue": 3312.6, "net_profit": 1001.6, "operating_cashflow": 612.6},
+            {"year": 2024, "report_type": "年报", "caliber": "合并",
+             "report_date": "2024-12-31", "disclosure_date": "2025-04-29",
+             "revenue": 2887.6, "net_profit": 666.6, "operating_cashflow": 663.6}],
+            "metadata": {"source": "eastmoney_ashare", "company": "洋河股份",
+                         "stock_code": "002304", "currency": "CNY", "unit": "亿元"},
+            "raw": {"url": "https://example.invalid/financials/002304.json",
+                    "text": "{\"data\": []}"}}
+        (proj / "financials.json").write_text(
+            json.dumps(snap, ensure_ascii=False), encoding="utf-8")
+        from report_version import VersionStore
+        store = VersionStore(ws_mod.task_workspace(self.task_id), self.task_id)
+        body = ("# 洋河股份研究简报\n\n## 分析\n"
+                "公司 2024 年营业收入同比下降，主要受白酒消费场景变化影响。\n")
+        version = store.record(body)
+        store.adopt(version, reason="测试基线")
+        return store
+
+    def test_refresh_rebuilds_structure_and_keeps_delivered_body(self):
+        import base64 as b64
+        store = self._seed_research_task()
+        before = store.adopted()
+        self.assertIsNotNone(before, "基线版本必须已采纳")
+
+        raw = self._envelope_bytes()
+        payload, status = self._post({
+            "kind": "file", "filename": "yanghe_ar2024.json",
+            "content_type": "application/json",
+            "data": b64.b64encode(raw).decode("ascii")},
+            redis=_LoopRedis(self.orch))
+        self.assertEqual(status, 200, payload)
+
+        after = store.adopted()
+        self.assertEqual(after.version_id, before.version_id,
+                         "补材料不得改写交付正文（人工/模型正文保持原样）")
+        self.assertEqual(after.body, before.body)
+        st = ws_mod.task_workspace(self.task_id) / "report_structure.json"
+        self.assertTrue(st.is_file(), "结构（评估）必须按新材料重装配")
+        structure = json.loads(st.read_text(encoding="utf-8"))
+        self.assertEqual(structure.get("version_id"), before.version_id,
+                         "结构必须绑定当前采纳正文")
+        self.assertTrue(str((structure.get("evidence") or {}).get("fingerprint") or ""),
+                        "结构要带上本次资料指纹")
+        self.assertTrue((payload.get("refresh") or {}).get("pending"))
+
+    def test_second_refresh_without_change_is_not_a_false_pending(self):
+        """同一份正文重复摄取不得产生假待办：身份没变就如实说"无需重验"。
+
+        "待办"意味着"正文必须重做"——无变化时也报待办，等于让操作者白跑一轮（甚至
+        触发一次付费重生成）。这里用同一身份连做两次刷新做反例。
+        """
+        import base64 as b64
+        import material_intake as mi
+        raw = self._envelope_bytes()
+        payload, status = self._post({
+            "kind": "file", "filename": "yanghe_ar2024.json",
+            "content_type": "application/json",
+            "data": b64.b64encode(raw).decode("ascii")},
+            redis=_LoopRedis(self.orch))
+        self.assertEqual(status, 200, payload)
+        self.assertTrue(payload["refresh"].get("stale"), "首次摄取确实改变了资料集身份")
+        before = mi.identity_snapshot(self.task_id)
+        # 同一份正文、同一来源类别再来一次
+        again = mi.refresh(task_id=self.task_id, goal=self.row["goal"], previous=before)
+        self.assertTrue(again.get("ok"), again)
+        self.assertFalse(again["stale"], again)
+        self.assertEqual(again["pending"], [], "身份未变时不得产生待办")
+        self.assertTrue(str(again.get("note") or ""), "要说明为什么无需重验")
+
+    def test_rules_change_forces_readmission_not_reuse(self):
+        """规则版本变了 → 旧 `admitted` 不复用（"规则改变要重验旧缓存"的落点）。"""
+        import base64 as b64
+        import material_intake as mi
+        from adapters import disclosure_ingest as di
+        redis = _LoopRedis(self.orch)
+        raw = self._envelope_bytes()
+        payload, status = self._post({
+            "kind": "file", "filename": "yanghe_ar2024.json",
+            "content_type": "application/json",
+            "data": b64.b64encode(raw).decode("ascii")}, redis=redis)
+        self.assertEqual(status, 200, payload)
+        mid = str(payload["material_id"])
+        meta = mi.load(self.task_id, mid)
+        self.assertEqual(meta["rules_version"], di.admission_rules_version())
+
+        calls: list[str] = []
+        real_ingest = di.ingest
+
+        def _spy(doc, **kw):
+            calls.append("ingest")
+            return real_ingest(doc, **kw)
+
+        with mock.patch.object(di, "ingest", _spy):
+            # 同一规则版本：复用结论，不重跑判据
+            same = mi.admit(task_id=self.task_id, mid=mid, company="洋河股份",
+                            company_code="002304.SZ", periods=[2023, 2024],
+                            as_of="2025-04-30")
+            self.assertTrue(same.get("reused"), same)
+            self.assertEqual(calls, [], "规则未变时不得重跑准入")
+            # 规则版本变化：必须重判（旧 admitted 不作数）
+            with mock.patch.object(di, "admission_rules_version", lambda: "adm-99/f3a-9"):
+                changed = mi.admit(task_id=self.task_id, mid=mid, company="洋河股份",
+                                   company_code="002304.SZ", periods=[2023, 2024],
+                                   as_of="2025-04-30")
+            self.assertFalse(changed.get("reused"), changed)
+            self.assertEqual(calls, ["ingest"], "规则变化必须重跑准入判据")
+            self.assertEqual((mi.load(self.task_id, mid) or {}).get("rules_version"),
+                             "adm-99/f3a-9")
+
+
+class TestMaterialAdmissionRules(_MaterialCase):
+    """上传材料的判据：错主体/错误页/容器/上限——与自动检索同一条链。"""
+
+    def _upload(self, text: str, *, filename="material.txt", title="材料",
+                channel=None, redis=None, declared=""):
+        import base64 as b64
+        body = {"kind": "file", "filename": filename, "content_type": "text/plain",
+                "title": title, "data": b64.b64encode(text.encode("utf-8")).decode("ascii")}
+        if declared:
+            body["declared_disclosed_at"] = declared
+        if channel:
+            body["channel"] = channel
+        return self._post(body, redis=redis or _LoopRedis(self.orch))
+
+    def test_body_subject_mismatch_is_rejected(self):
+        """标题写洋河、正文是别家年报 → 主体不符（标题不能当正文）。
+
+        正文里出现**能被识别的另一家公司名**时判 `subject_mismatch`；只出现一个
+        识别不出的公司简称时只能判 `subject_unknown`——两者含义不同，不能混。
+        """
+        from adapters import disclosure_ingest as di
+        text = ("贵州茅台酒股份有限公司2024年年度报告\n第三节 管理层讨论与分析\n"
+                "本报告期营业收入、归母净利润、经营活动产生的现金流量净额均有变化。\n" * 40)
+        payload, status = self._upload(text, title="洋河股份:2024年年度报告",
+                                       declared="2025-04-29")
+        self.assertEqual(status, 409, payload)
+        self.assertEqual(payload["intake"]["reason"], di.REJECT_SUBJECT)
+        self.assertFalse(self._snapshot(), "未准入的正文不得进资料集")
+
+    def test_error_page_upload_is_rejected(self):
+        from adapters import disclosure_ingest as di
+        payload, status = self._upload("Access denied. Request rejected.\n" * 40,
+                                       title="洋河股份:2024年年度报告",
+                                       declared="2025-04-29")
+        self.assertEqual(status, 409, payload)
+        self.assertEqual(payload["intake"]["reason"], di.REJECT_ERROR_PAGE)
+
+    def test_archive_and_binary_are_refused_before_admission(self):
+        import base64 as b64
+        zip_bytes = b"PK\x03\x04" + b"\x00" * 200
+        payload, status = self._post({
+            "kind": "file", "filename": "年报.zip",
+            "data": b64.b64encode(zip_bytes).decode("ascii")})
+        self.assertEqual(status, 400, payload)
+        self.assertIn("压缩", payload["error"])
+        payload2, status2 = self._post({
+            "kind": "file", "filename": "x.bin", "content_type": "application/octet-stream",
+            "data": b64.b64encode(b"\x00\x01\x02\x03" * 40).decode("ascii")})
+        self.assertEqual(status2, 400, payload2)
+
+    def test_metric_states_separate_not_disclosed_from_not_located(self):
+        """逐指标状态：查阅范围内没有该指标 → 说"未披露"（带范围），不是笼统"缺"。"""
+        import material_intake as mi
+        text = ("洋河股份2024年年度报告\n第一节 重要提示\n"
+                "本公司董事会保证年度报告内容真实准确完整。\n" * 20
+                + "第三节 管理层讨论与分析\n报告期内营业收入同比增长。\n" * 20)
+        payload, status = self._upload(text, title="洋河股份:2024年年度报告",
+                                       declared="2025-04-29")
+        self.assertEqual(status, 200, payload)
+        states = payload["intake"]["metric_states"]
+        self.assertEqual(states["revenue"]["state"], "present_in_scope", states)
+        self.assertEqual(states["net_profit"]["state"], "not_disclosed_in_scope", states)
+        self.assertEqual(states["operating_cashflow"]["state"],
+                         "not_disclosed_in_scope", states)
+        meta = mi.load(self.task_id, str(payload["material_id"]))
+        scope = meta.get("read_scope") or {}
+        self.assertTrue(scope.get("parsed_ranges"))
+        self.assertTrue(scope.get("unparsed_ranges"),
+                        "未解析范围必须显式列出（首节未被选为证据）")
+
+    def test_evidence_picks_the_metric_section_not_the_first_five(self):
+        """承载小节排在第 8 节时也必须被选中（"只截前五节"会正好漏掉它）。"""
+        head = "".join(f"第{i}节 说明{i}\n本节与财务指标无关的内容。\n" for i in range(2, 8))
+        text = ("洋河股份2024年年度报告\n第一节 重要提示\n本公司保证报告真实。\n"
+                + head
+                + "\n第8节 管理层讨论与分析\n报告期内，公司营业收入同比增长，"
+                  "主要系产品结构升级；归母净利润同比增加。\n")
+        payload, status = self._upload(text, title="洋河股份:2024年年度报告",
+                                       declared="2025-04-29")
+        self.assertEqual(status, 200, payload)
+        paths = [e["path"] for e in (payload["verdict"].get("evidence") or [])]
+        self.assertTrue(any("管理层讨论" in p for p in paths),
+                        f"承载收入/利润的小节必须入选：{paths}")
 
 
 if __name__ == "__main__":

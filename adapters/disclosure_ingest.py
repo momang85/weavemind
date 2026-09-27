@@ -25,10 +25,29 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# 准入规则版本：判据一变，旧材料与旧缓存的 `admitted` **不得复用**（专项 C1）。
+# 取值随判据语义递增：`adm-1` = S3 初版；`adm-2` = C0-1 统一日期/主体/完整性判据。
+VERSION = "adm-2"
+
 # 摄取结论
 ADMITTED = "admitted"
 REJECTED = "rejected"
 UNAVAILABLE = "unavailable"
+
+# 逐指标的证据状态：三种"没有"含义完全不同，合并成一个"缺"会让报告说不清手里有什么。
+# "在列明的材料范围内未披露"是一句**有前提的否定**——必须先有实际查阅范围才成立。
+METRIC_PRESENT = "present_in_scope"
+METRIC_NOT_LOCATED = "obtained_not_located"
+METRIC_NOT_DISCLOSED = "not_disclosed_in_scope"
+METRIC_NOT_OBTAINED = "not_obtained"
+METRIC_UNKNOWN = "scope_unknown"
+METRIC_STATE_LABEL = {
+    METRIC_PRESENT: "材料范围内已定位到承载小节",
+    METRIC_NOT_LOCATED: "已取得正文但未定位到该指标的承载小节",
+    METRIC_NOT_DISCLOSED: "在列明的查阅范围内未出现该指标",
+    METRIC_NOT_OBTAINED: "未取得正文",
+    METRIC_UNKNOWN: "无法判定（缺该指标词表）",
+}
 
 # 拒绝原因（每条都要能对上一句人话）
 REJECT_NOT_OFFICIAL = "not_official_source"
@@ -126,9 +145,12 @@ def _parse_calendar_date(text: str) -> tuple[str, str]:
 def _declared_disclosure(doc: dict) -> tuple[str, str, str]:
     """披露/公告日 → `(日期, 精度, 依据)`；拿不到证据就是 `("", "", "")`。
 
-    依据只认两类（专项 §3.2）：**来源字段**（`disclosed_at`/`published_at`/
-    `notice_date`）与**已知来源格式**的 URL（公告文本 art_code、路径里的
-    `YYYY-MM-DD`）。任意查询参数不再当证据——`?asof=2020-01-01` 曾经能冒充披露日。
+    依据只认三类（专项 §3.2）：**来源字段**（`disclosed_at`/`published_at`/
+    `notice_date`）、**已知来源格式**的 URL（公告文本 art_code、路径里的
+    `YYYY-MM-DD`）、以及**操作者对自备材料的声明**（`operator_disclosed_at`）。
+    任意查询参数不再当证据——`?asof=2020-01-01` 曾经能冒充披露日。
+    来源字段与 URL 格式都属于"材料自己带来的证据"，优先；声明日期只在两者都没有时
+    才用，且依据如实写 `operator_declared`——不得记成 `source_field` 冒充来源证据。
     精度要一起返回：日级才允许用于截至判断。
     """
     for key in ("disclosed_at", "published_at", "notice_date"):
@@ -142,10 +164,16 @@ def _declared_disclosure(doc: dict) -> tuple[str, str, str]:
         val = _published_at(doc) or ""
     except Exception:
         val = ""
-    if not val:
-        return "", "", ""
-    norm, prec = _parse_calendar_date(val)
-    return (norm, prec, "source_url_format") if norm else ("", "", "")
+    if val:
+        norm, prec = _parse_calendar_date(val)
+        if norm:
+            return norm, prec, "source_url_format"
+    declared = str((doc or {}).get("operator_disclosed_at") or "").strip()[:10]
+    if declared:
+        norm, prec = _parse_calendar_date(declared)
+        if norm:
+            return norm, prec, "operator_declared"
+    return "", "", ""
 
 
 def discover(company: str, company_code: str = "", periods=(), doc_type: str = "年度报告") -> dict:
@@ -220,15 +248,137 @@ def pick_official_candidates(candidates, *, company: str, company_code: str = ""
     return keep
 
 
+def admission_rules_version() -> str:
+    """准入规则版本（含证据规则版本）：材料与缓存按它对账，变了就必须重验。
+
+    只比"文件在不在"是不够的：同一份正文在旧判据下 `admitted`、在新判据下应当被拒，
+    这种差异必须能被读侧发现，而不是沿用旧结论。
+    """
+    try:
+        import narrative_evidence as _ne
+        ev = str(getattr(_ne, "RULES_VERSION", "") or "")
+    except Exception:                            # noqa: BLE001 - 取不到按本模块版本
+        ev = ""
+    return f"{VERSION}/{ev}" if ev else VERSION
+
+
+def _metric_words(metric: str) -> tuple[str, ...]:
+    """指标 → 承载词表。**复用** `report_brief._EXPLANATION_METRIC_WORDS`（同一张表），
+    拿不到时退到 `facts.METRIC_LABELS` 的中文标签；两处都没有则返回空元组
+    （调用方按"无法判定"处理，不得当成"未披露"）。
+    """
+    words = ()
+    try:
+        from report_brief import _EXPLANATION_METRIC_WORDS
+        words = tuple(_EXPLANATION_METRIC_WORDS.get(str(metric)) or ())
+    except Exception:                            # noqa: BLE001
+        words = ()
+    if words:
+        return words
+    try:
+        from facts import METRIC_LABELS
+        lab = str(METRIC_LABELS.get(str(metric)) or "").strip()
+    except Exception:                            # noqa: BLE001
+        lab = ""
+    return (lab,) if lab else ()
+
+
+def _state_payload(state: str, *, matched: str = "", sections: int = 0) -> dict:
+    return {"state": state, "label": METRIC_STATE_LABEL.get(state, state),
+            "matched": matched, "section_count": int(sections or 0)}
+
+
+def evidence_by_question(text: str, sections, *, metrics=(), limit: int = 8
+                          ) -> tuple[list[dict], dict]:
+    """按研究问题挑**承载证据的小节** → `(选中小节, 逐指标状态)`。
+
+    为什么不能只截前五节：年报的前几节通常是封面、释义、公司简介，收入/利润/现金的
+    管理层讨论在其后——照前五节交给问题评估，等于"已取得材料"看起来覆盖了三个问题，
+    实际一条都没定位到。这里逐指标找承载小节，选不中时如实区分：
+    正文里有该指标词但落在没有标题的段落里 → `已取得但未定位`；
+    整份查阅范围内都没有该指标词 → `在列明的材料范围内未披露`。
+    """
+    body = str(text or "")
+    secs = [s for s in (sections or []) if isinstance(s, dict)]
+    picked: dict[tuple[int, int], dict] = {}
+    states: dict[str, dict] = {}
+    for metric in (metrics or ()):
+        words = _metric_words(metric)
+        if not words:
+            states[str(metric)] = _state_payload(METRIC_UNKNOWN)
+            continue
+        best: dict | None = None
+        best_hits = 0
+        for sec in secs:
+            seg = str(sec.get("body") or body[int(sec.get("start") or 0):
+                                             int(sec.get("end") or 0)])
+            hits = sum(seg.count(w) for w in words)
+            if hits > best_hits:
+                best, best_hits = sec, hits
+        if best is not None:
+            key = (int(best.get("start") or 0), int(best.get("end") or 0))
+            picked[key] = best
+            states[str(metric)] = _state_payload(METRIC_PRESENT, sections=best_hits)
+            continue
+        anywhere = next((w for w in words if w in body), "")
+        states[str(metric)] = _state_payload(
+            METRIC_NOT_LOCATED if anywhere else METRIC_NOT_DISCLOSED,
+            matched=anywhere)
+    # 命中指标的小节按出现顺序排在前面，其余小节按位置补齐到上限（顺序稳定、可复现）
+    chosen = [picked[k] for k in sorted(picked)]
+    for sec in secs:
+        if len(chosen) >= max(1, int(limit)):
+            break
+        key = (int(sec.get("start") or 0), int(sec.get("end") or 0))
+        if key in picked:
+            continue
+        picked[key] = sec
+        chosen.append(sec)
+    return chosen[:max(1, int(limit))], states
+
+
+def read_scope(text_len: int, selected, *, truncated: bool = False,
+               truncation_reason: str = "") -> dict:
+    """实际查阅范围：已解析小节的字符区间 + 其补集（未解析范围）。
+
+    没有这张表，"未取得"与"看过但没写"就分不开——报告只能含糊说"资料不足"。
+    """
+    spans = sorted([int(s.get("start") or 0), int(s.get("end") or 0)]
+                   for s in (selected or []) if int(s.get("end") or 0) > int(s.get("start") or 0))
+    merged: list[list[int]] = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    unread: list[list[int]] = []
+    pos = 0
+    for start, end in merged:
+        if start > pos:
+            unread.append([pos, start])
+        pos = max(pos, end)
+    total = int(text_len or 0)
+    if pos < total:
+        unread.append([pos, total])
+    return {"text_chars": total, "parsed_ranges": merged, "unparsed_ranges": unread,
+            "truncated": bool(truncated),
+            "truncation_reason": str(truncation_reason or "")}
+
+
 def ingest(doc: dict, *, company: str, company_code: str = "", periods=(),
            as_of: str = "", provenance: str = PROVENANCE_AUTO,
-           doc_type: str = "年度报告", section_limit: int = 5) -> dict:
+           doc_type: str = "年度报告", section_limit: int = 5,
+           section_pick: str = "head", metrics=()) -> dict:
     """一份原始披露 → 准入结论 + 可定位证据。
 
     `doc`：`{title, url, text, page_offsets|chunk_offsets, disclosed_at?}`（取件由调用方用
     既有通道完成）。返回：
     - 准入：`{status: admitted, provenance, provenance_label, doc, evidence, cutoff, hash}`
     - 拒绝：`{status: rejected, reason, detail}`（含 `may_use_as_background` 标记）
+
+    `section_pick="questions"` 时按 `metrics` 挑**承载证据的小节**（不截前 N 节），
+    并给出 `metric_states` / `read_scope`：三问各自有没有落点、实际查阅了哪些字符区间、
+    哪些范围没解析，都要能被读侧核对。
     """
     from narrative_evidence import (document_provenance, publisher_of, source_type,
                                     split_sections, _subject_state)
@@ -303,12 +453,18 @@ def ingest(doc: dict, *, company: str, company_code: str = "", periods=(),
 
     sections = split_sections(text, page_offsets=doc.get("page_offsets"),
                               chunk_offsets=doc.get("chunk_offsets"))
+    metric_states: dict = {}
+    if str(section_pick) == "questions":
+        selected, metric_states = evidence_by_question(
+            text, sections, metrics=metrics, limit=max(1, int(section_limit)))
+    else:
+        selected = sections[:max(1, int(section_limit))]
     evidence = [{
         "title": str(sec.get("title") or "")[:80],
         "path": str(sec.get("path") or "")[:120],
         "start": int(sec.get("start") or 0), "end": int(sec.get("end") or 0),
         "page": sec.get("page"), "chunk": sec.get("chunk"),
-    } for sec in sections[:max(1, int(section_limit))]]
+    } for sec in selected]
 
     # 来源类别：**不因标题是年报或用户直链就升为官方**（专项 C0-1）
     if official:
@@ -327,6 +483,12 @@ def ingest(doc: dict, *, company: str, company_code: str = "", periods=(),
         "cutoff": cutoff,
         "evidence": evidence,
         "section_count": len(sections),
+        "metric_states": metric_states,
+        "read_scope": read_scope(
+            len(text), selected,
+            truncated=bool(doc.get("truncated")),
+            truncation_reason=str(doc.get("truncation_reason") or "")),
+        "rules_version": admission_rules_version(),
         "hash": document_hash(doc),
         "note": "证据坐标为字符区间 + 页码/接口片段；正文 hash 与本次取件内容绑定",
     }
