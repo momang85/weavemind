@@ -353,6 +353,23 @@ SUBJECT_TYPE_LABELS = {"non_financial": "非金融企业", "financial": "金融�
 _FINANCIAL_NAME_HINTS = ("银行", "证券", "保险", "信托", "基金管理", "期货", "金融租赁",
                          "消费金融", "财务公司", "金融控股", "AMC")
 
+# 主体类型的**确认状态**：只有用户声明才算确认，名称线索是建议，其余是未确认。
+# 含义（专项 C2）：未确认时企业口径的比率与解释性结论都不得当作"已适用"——
+# "名称提示只能给建议，未知不能自动通过非金融专用比率"。
+SUBJECT_CONFIRMED = "confirmed"
+SUBJECT_SUGGESTED = "suggested"
+SUBJECT_UNCONFIRMED = "unconfirmed"
+
+
+def subject_type_state(subject_type: str, source: str = "") -> str:
+    """`(类型, 判定来源)` → 确认状态（声明=确认；名称线索=建议；其余=未确认）。"""
+    src = str(source or "")
+    if src == "declared":
+        return SUBJECT_CONFIRMED
+    if src == "name_hint":
+        return SUBJECT_SUGGESTED
+    return SUBJECT_UNCONFIRMED
+
 
 def subject_type_of(declared: str = "", company: str = "",
                     company_id: str = "") -> tuple[str, str]:

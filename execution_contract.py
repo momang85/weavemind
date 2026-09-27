@@ -120,9 +120,30 @@ class ExecutionContract:
             "required_metrics": list(self.required_metrics),
             "perspective": self.perspective,
             "subject_type": self.subject_type,
+            # C2：固定问题集随契约落盘（题目/类型/所需证据），页面与装配读同一份
+            "questions": self.questions(),
         }
 
     # ── 身份 ────────────────────────────────────────────────
+    def questions(self) -> list[dict]:
+        """任务创建时固定的问题集（最多三问）——类型与证据要求随契约一起版本化。
+
+        由 `question_assessment.question_set` 生成（题目/边界来自报告侧同一份定义），
+        因此"这个问题要什么证据"在提交时就定下来，装配与页面读的是同一份。
+        """
+        try:
+            from question_assessment import question_set
+            return question_set(self.required_metrics, perspective=self.perspective,
+                                subject_type=self.subject_type)
+        except Exception:                        # noqa: BLE001 - 生成失败不拖垮契约
+            return []
+
+    def question_identity(self) -> list[list[str]]:
+        """参与指纹的问题身份投影：`[[metric, question_type], …]`（排序后可比对）。"""
+        rows = [[str(q.get("metric") or ""), str(q.get("question_type") or "")]
+                for q in self.questions()]
+        return sorted(r for r in rows if r[0])
+
     def identity(self) -> dict:
         """参与指纹的身份字段（顺序无关的规范投影）。"""
         return {
@@ -139,7 +160,14 @@ class ExecutionContract:
         }
 
     def fingerprint(self) -> str:
-        payload = json.dumps(self.identity(), ensure_ascii=False, sort_keys=True)
+        """契约指纹：身份字段 + **问题集**（指标 + 类型）。
+
+        `identity()` 保持"能当构造参数用"的纯字段投影（测试与调用方会拿它重建契约），
+        因此问题集单独并入指纹载荷——问题集变了，指纹就变，旧绑定不再判"当前"。
+        """
+        payload = json.dumps({"identity": self.identity(),
+                              "questions": self.question_identity()},
+                             ensure_ascii=False, sort_keys=True)
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def matches(self, wire) -> bool:

@@ -1188,6 +1188,285 @@ def _vp_composition(text: str) -> dict:
     return out
 
 
+# ── 利润端分解（毛利端 + 期间费用）──────────────────────────────
+#
+# 利润问题问的是"变化的分解"，判据表要求三个组成部分各自有量化披露：
+# 毛利端（收入/成本/毛利率）、期间费用、税项与非经常性损益。三类都能在年报正文里
+# 以**可核对的表行**出现，因此按行解析、按行给定位；缺哪一类就如实缺。
+_GPL_GROUP_KEYS = (("销售模式", "销售模式"), ("渠道", "销售渠道"), ("产品", "产品"),
+                   ("地区", "地区"), ("行业", "行业"))
+_GPL_GROUP_ORDER = ("销售模式", "产品", "地区", "行业", "销售渠道")
+
+
+def _gpl_canonical_group(line: str) -> str:
+    """分组标题行 → 规范组名（"按地区分"/"分产品"/"按产品类别" 都归到同一组）。"""
+    s = str(line or "").strip()
+    if not s or re.search(r"\d", s) or not re.match(r"^(按|分)", s):
+        return ""
+    for key, name in _GPL_GROUP_KEYS:
+        if key in s:
+            return name
+    return ""
+
+
+def _gpl_parse_line(s: str) -> dict | None:
+    """毛利率表的一行 → `{label, revenue, cost, gm_pct, rev_yoy, cost_yoy, gm_pp}`。
+
+    两种真实排版都要认：`收入 同比 成本 同比 毛利率 同比`（七列）与
+    `收入 成本 毛利率 收入同比 成本同比 毛利率同比`（六列）。**按匹配到的正则**决定字段
+    归属——不能靠"第 2 个捕获里有没有 %"去猜（捕获组本身不含 %）。
+    """
+    m = _GPL_REVC_RE.match(s)
+    if m:
+        g = m.groups()
+        label = g[0].strip()
+        return ({"label": label, "is_total": ("合计" in label) or ("小计" in label),
+                 "revenue": _num(g[1]), "rev_yoy": _num(g[2]), "cost": _num(g[3]),
+                 "cost_yoy": _num(g[4]), "gm_pct": _num(g[5]), "gm_pp": _num(g[6])}
+                if label else None)
+    m = _GPL_SIX_RE.match(s)
+    if not m:
+        return None
+    g = m.groups()
+    label = g[0].strip()
+    if not label:
+        return None
+    return {"label": label, "is_total": ("合计" in label) or ("小计" in label),
+            "revenue": _num(g[1]), "cost": _num(g[2]), "gm_pct": _num(g[3]),
+            "rev_yoy": _num(g[4]), "cost_yoy": _num(g[5]), "gm_pp": _num(g[6])}
+_GPL_STOP_HINTS = ("公司主营业务数据统计口径", "前五名", "研发投入", "适用 不适用",
+                   "□适用")
+_GPL_EXPENSE_LABELS = ("销售费用", "管理费用", "研发费用", "财务费用")
+_GPL_TAX_LABELS = ("税金及附加", "所得税费用", "非经常性损益", "少数股东损益")
+_GPL_PAIR_RE = re.compile(
+    r"^([^\d\s][^\d]{1,20}?)\s+(-?[\d,]+\.\d{2})\s+(-?[\d,]+\.\d{2})\s+(-?\d+\.\d+)%")
+_GPL_REVC_RE = re.compile(
+    r"^([^\d\s][^\d]{1,20}?)\s+(-?[\d,]+\.\d{2})\s+(-?\d+\.\d+)%\s+(-?[\d,]+\.\d{2})"
+    r"\s+(-?\d+\.\d+)%\s+(-?\d+\.\d+)%\s+(-?\d+\.\d+)%")
+_GPL_SIX_RE = re.compile(
+    r"^([^\d\s][^\d]{1,20}?)\s+(-?[\d,]+\.\d{2})\s+(-?[\d,]+\.\d{2})\s+(-?\d+\.\d+)%"
+    r"\s+(-?\d+\.\d+)%\s+(-?\d+\.\d+)%\s+(-?\d+\.\d+)%")
+
+
+def _num(text) -> float | None:
+    try:
+        return float(str(text).replace(",", ""))
+    except Exception:                            # noqa: BLE001 - 解析不出按缺
+        return None
+
+
+def _yoy_from(cur, prev) -> float | None:
+    if not isinstance(cur, (int, float)) or not isinstance(prev, (int, float)) or not prev:
+        return None
+    return round((cur / prev - 1) * 100, 2)
+
+
+def _prev_from_yoy(cur, yoy_pct) -> float | None:
+    """本期值与同比 → 上期值（派生量，公式随事实一起记录，不冒充披露值）。"""
+    if not isinstance(cur, (int, float)) or not isinstance(yoy_pct, (int, float)):
+        return None
+    factor = 1 + yoy_pct / 100.0
+    if abs(factor) < 1e-9:
+        return None
+    return round(cur / factor, 2)
+
+
+def extract_profit_decomposition(docs, *, periods=None) -> dict:
+    """从已准入年报正文抽**利润端分解**（确定性、离线、不编数）。
+
+    返回 `{ok, groups, expenses, components, derived, boundary, locator, url, title}`；
+    三个组成部分（毛利端 / 期间费用 / 税项与非经常性损益）逐一给绑定状态——
+    利润问题的完成判据读 `components`，不读任何自报覆盖。
+    """
+    years = [int(y) for y in (periods or ())]
+    best: dict | None = None
+    for d in (docs or []):
+        if not isinstance(d, dict) or not str(d.get("text") or "").strip():
+            continue
+        text = str(d.get("text") or "")
+        hits = sum(text.count(k) for k in ("毛利率", "销售费用", "管理费用", "营业成本"))
+        if hits and (best is None or hits > best.get("_hits", 0)):
+            best = {"doc": d, "_hits": hits}
+    if not best:
+        return {"ok": False, "groups": [], "expenses": [], "derived": [], "boundary": [],
+                "components": [], "locator": "", "url": "", "title": "",
+                "reason": "未取得利润端明细（毛利率表或期间费用行）"}
+    doc = best["doc"]
+    text = str(doc.get("text") or "")
+    sections = split_sections(text, page_offsets=doc.get("page_offsets"),
+                              chunk_offsets=doc.get("chunk_offsets"))
+    gaps = chunk_gaps(doc.get("chunk_offsets"))
+
+    def _loc(start: int, end: int) -> str:
+        return _span_locator(doc, sections, gaps, start, end)
+
+    lines = text.splitlines()
+    offsets: list[int] = []
+    pos = 0
+    for raw in lines:
+        offsets.append(pos)
+        pos += len(str(raw or "")) + 1
+
+    groups: dict[str, list[dict]] = {}
+    closed: dict[str, float] = {}                # 组 → 表内小计/合计（闭合校验用）
+    cur_group = ""
+    expenses: list[dict] = []
+    tax_rows: list[dict] = []
+    in_gross_table = False
+    for i, raw in enumerate(lines):
+        s = str(raw or "").strip()
+        if not s:
+            continue
+        if any(h in s for h in _GPL_STOP_HINTS):
+            in_gross_table = False
+            continue
+        if "营业成本" in s and "毛利率" in s and "营业收入" in s:
+            in_gross_table = True
+            continue
+        head = _gpl_canonical_group(s)
+        if head:
+            cur_group = head
+            in_gross_table = True
+            continue
+        m_pair = _GPL_PAIR_RE.match(s)
+        if m_pair:
+            label = m_pair.group(1).strip()
+            cur, prev, yoy = (_num(m_pair.group(2)), _num(m_pair.group(3)),
+                              _num(m_pair.group(4)))
+            row = {"label": label, "cur": cur, "prev": prev, "yoy": yoy,
+                   "line": " ".join(s.split()),
+                   "locator": _loc(offsets[i], offsets[i] + len(str(raw or "")))}
+            if label in _GPL_EXPENSE_LABELS:
+                expenses.append(row)
+            elif label in _GPL_TAX_LABELS:
+                tax_rows.append(row)
+            continue
+        gross_row = _gpl_parse_line(s)
+        if gross_row and in_gross_table and cur_group:
+            if gross_row.get("is_total"):
+                # 表内小计/合计：只用来做闭合校验，不作为分组行参与求和
+                closed[cur_group] = gross_row.get("revenue")
+                continue
+            gross_row.update({"line": " ".join(s.split()),
+                              "locator": _loc(offsets[i], offsets[i] + len(str(raw or "")))})
+            # 同一行可能在两张表里各出现一次：合并字段，缺项由后出现的补齐
+            bucket = groups.setdefault(cur_group, [])
+            prev_row = next((r for r in bucket
+                             if r.get("label") == gross_row["label"]), None)
+            if prev_row is not None:
+                for k, v in gross_row.items():
+                    if prev_row.get(k) in (None, "") and v not in (None, ""):
+                        prev_row[k] = v
+            else:
+                bucket.append(gross_row)
+
+    def _complete(rows) -> bool:
+        return bool(rows) and all(
+            isinstance(r.get("revenue"), (int, float)) and isinstance(r.get("cost"), (int, float))
+            and isinstance(r.get("rev_yoy"), (int, float))
+            and isinstance(r.get("cost_yoy"), (int, float)) for r in rows)
+
+    def _sums(rows) -> tuple[float, float, float, float]:
+        rev = sum(r["revenue"] for r in rows)
+        cost = sum(r["cost"] for r in rows)
+        rev_prev = sum(_prev_from_yoy(r["revenue"], r["rev_yoy"]) or 0 for r in rows)
+        cost_prev = sum(_prev_from_yoy(r["cost"], r["cost_yoy"]) or 0 for r in rows)
+        return rev, cost, rev_prev, cost_prev
+
+    # 推导只能取**一组**（各组是同一笔收入的不同切法，跨组相加会重复计入）：
+    # 取第一组"行完整 + 有表内小计且闭合"的组；一组都不闭合就不给推导值。
+    chosen = ""
+    for name in _GPL_GROUP_ORDER:
+        rows = groups.get(name) or []
+        if name not in closed or not _complete(rows):
+            continue
+        rev, _c, _rp, _cp = _sums(rows)
+        base = closed.get(name) or 0
+        if base and abs(rev - base) / base <= 0.005:
+            chosen = name
+            break
+    gross = groups.get(chosen) or []
+    derived: list[dict] = []
+    if gross and expenses:
+        rev_cur, cost_cur, rev_prev, cost_prev = _sums(gross)
+        if rev_cur and cost_cur and rev_prev and cost_prev:
+            gp_cur, gp_prev = rev_cur - cost_cur, rev_prev - cost_prev
+            derived.append({
+                "label": f"毛利额（按{chosen}分组合计）", "unit": "元",
+                "cur": round(gp_cur), "prev": round(gp_prev),
+                "yoy": _yoy_from_yoy_abs(gp_cur, gp_prev),
+                "formula": (f"Σ(收入−成本)，取自「按{chosen}」组 "
+                            f"{'、'.join(str(r['label']) for r in gross)}；上期由披露同比反推"),
+                "note": "毛利额是**推导量**：收入与成本取自发行人毛利率表，上期由披露同比反推"})
+    if expenses:
+        e_cur = sum(r["cur"] for r in expenses if isinstance(r.get("cur"), float))
+        e_prev = sum(r["prev"] for r in expenses if isinstance(r.get("prev"), float))
+        derived.append({
+            "label": "期间费用合计", "unit": "元", "cur": round(e_cur),
+            "prev": round(e_prev), "yoy": _yoy_from_yoy_abs(e_cur, e_prev),
+            "formula": "销售/管理/研发/财务费用逐行相加（各自有定位）",
+            "note": "各费用行取自年报费用明细；正负号按披露原样相加"})
+    comps = [
+        {"component": "毛利端",
+         "state": "bound" if gross else "missing",
+         "locator": (gross[0].get("locator") if gross else ""),
+         "note": (f"按「{chosen}」组 {len(gross)} 行收入/成本/毛利率（表内小计闭合）"
+                  if gross else "未找到可闭合的毛利率表分组")},
+        {"component": "期间费用",
+         "state": "bound" if len(expenses) >= 2 else "missing",
+         "locator": (expenses[0].get("locator") if expenses else ""),
+         "note": (f"{len(expenses)} 行本期/上期费用" if expenses else "未找到期间费用行")},
+        {"component": "税项与非经常性损益",
+         "state": "bound" if tax_rows else "missing",
+         "locator": (tax_rows[0].get("locator") if tax_rows else ""),
+         "note": (f"{len(tax_rows)} 行" if tax_rows
+                  else "未取得税金及附加/所得税/非经常性损益/少数股东损益明细")},
+    ]
+    boundary = [
+        "毛利额与期间费用合计是**推导量**（收入、成本、各费用行取自披露，上期由同比反推）；"
+        "不是发行人直接披露的利润分解。",
+        "毛利端只取**一组**切法（" + (chosen or "（无可闭合组）") + "）：各分组是同一笔收入的"
+        "不同切法，跨组相加会重复计入，因此不做跨组合计。",
+        "毛利线以下只覆盖期间费用；税金及附加、所得税、非经常性损益与少数股东损益"
+        "未取得时不把差额归到任何一项（专项 C2：定性归因不得冒充量化分解）。",
+    ]
+    if years:
+        boundary.append(f"本材料对应报告期 {'、'.join(str(y) for y in years)}；"
+                        "跨年比较未含口径变更说明。")
+    return {"ok": bool(gross or expenses), "groups": groups, "expenses": expenses,
+            "tax_rows": tax_rows, "derived": derived, "boundary": boundary,
+            "components": comps,
+            "locator": (gross[0].get("locator") if gross else
+                        (expenses[0].get("locator") if expenses else "")),
+            "url": str(doc.get("url") or ""), "title": str(doc.get("title") or "")}
+
+
+def _yoy_from_yoy_abs(cur, prev) -> float | None:
+    return _yoy_from(cur, prev)
+
+
+def _span_locator(doc: dict, sections, gaps, start: int, end: int,
+                  *, with_page: bool = True) -> str:
+    """字符区间 → 可核对的定位串（小节路径 + api_chunk/页码 + 跨缺口标注）。
+
+    行级定位（毛利用表行、费用行）都用这一个实现，避免两份相似的拼接。
+    """
+    sec = None
+    for s in (sections or []):
+        if int(s.get("start", 0)) <= start < int(s.get("end", 0)):
+            sec = s
+            break
+    chunk = _chunk_of(start, doc.get("chunk_offsets"))
+    where = f"小节：{sec['path']}" if sec else "正文"
+    note = _gap_note(_span_gap(start, end, gaps or []))
+    if chunk:
+        return f"api_chunk {chunk} · {where}（字符 {start}-{end}）{note}"
+    page = _page_of(start, doc.get("page_offsets")) if with_page else None
+    if page:
+        return f"第 {page} 页 · {where}（字符 {start}-{end}）{note}"
+    return f"{where}（字符 {start}-{end}）{note}"
+
+
 def extract_volume_price(docs, *, periods=None) -> dict:
     """从已准入的年报/公告正文抽"量价与结构"事实（确定性、离线、不编数）。
 
@@ -1214,17 +1493,7 @@ def extract_volume_price(docs, *, periods=None) -> dict:
     gaps = chunk_gaps(doc.get("chunk_offsets"))
 
     def _loc(start: int, end: int) -> str:
-        sec = None
-        for s in sections:
-            if int(s.get("start", 0)) <= start < int(s.get("end", 0)):
-                sec = s
-                break
-        chunk = _chunk_of(start, doc.get("chunk_offsets"))
-        where = f"小节：{sec['path']}" if sec else "正文"
-        note = _gap_note(_span_gap(start, end, gaps))
-        if chunk:
-            return f"api_chunk {chunk} · {where}（字符 {start}-{end}）{note}"
-        return f"{where}（字符 {start}-{end}）{note}"
+        return _span_locator(doc, sections, gaps, start, end, with_page=False)
 
     facts: list[dict] = []
     for label in _VP_VOLUME_LABELS:
@@ -1338,6 +1607,21 @@ def extract_volume_price(docs, *, periods=None) -> dict:
         "ok": True, "facts": facts, "derived": derived, "boundary": boundary,
         "coverage": "partial",
         "summary": _cov_note,
+        # 逐组成部分的**绑定状态**（C2 判据表读它，不读上面的自报 coverage）：
+        # 量/结构已绑定且有定位；价只有推算，未取得发行人价格口径 → missing。
+        "components": [
+            {"component": "量",
+             "state": "bound" if _f("实物量", "白酒销售量").get("cur") else "missing",
+             "locator": _f("实物量", "白酒销售量").get("locator") or "",
+             "note": "销售量/生产量/库存量（实物量）"},
+            {"component": "结构",
+             "state": "bound" if _scope.get("all_closed") else "missing",
+             "locator": str((_scope.get("groups") or [{}])[0].get("note") or ""),
+             "note": "收入构成各组与表内「营业收入合计」"
+                     + ("闭合" if _scope.get("all_closed") else "未闭合或未取得合计")},
+            {"component": "价", "state": "missing", "locator": "",
+             "note": "发行人未披露价格口径；吨价为推算，不算披露价格"},
+        ],
         "scope": _scope,
         "total": _total,
         "locator": sample.get("locator") or "", "source_n": "",
@@ -1531,6 +1815,9 @@ def build(task_id: str, *, periods=None, company: str = "", company_id: str = ""
         # 项3：量价与结构（发行人披露的实物量 + 收入构成）——确定性抽取，供正文
         # 形成"量价/结构"分析；没有对应披露时 ok=False（不填零、不编）。
         "volume_price": extract_volume_price(docs, periods=years),
+        # C2：利润端分解（毛利端 + 期间费用 + 税项/非经常性）——利润问题的完成判据
+        # 读它的 `components`（逐组成部分绑定状态），不读任何自报覆盖。
+        "profit_decomposition": extract_profit_decomposition(docs, periods=years),
         "built_at": fetched_at,
     }
     _write(task_id, payload, ws_dir=ws_dir)

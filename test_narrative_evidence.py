@@ -1056,14 +1056,32 @@ class TestQuestionAssessment(unittest.TestCase):
         self.assertEqual(a["coverage"], "partial")
         self.assertFalse(a["answered"])
 
-    def test_decomposition_answered_only_when_full(self):
-        a = qa.assess_question("revenue", decomposition={
-            "coverage": "partial", "note": "量与结构已取得；价未披露", "locator": "api_chunk 4"})
+    def test_decomposition_answered_only_when_components_bound(self):
+        """分解类问题的完成判据：**组成部分逐项绑定**才算 full。
+
+        C2 起覆盖由判据表按组成部分算出（`QUESTION_RULES` / `_coverage_by_rule`），
+        **材料载荷自报的 `coverage="full"` 不作数**——否则自报就能把问题判成完成。
+        """
+        declared = qa.assess_question("revenue", decomposition={
+            "coverage": "full", "note": "量、价、结构闭合", "locator": "api_chunk 4"})
+        self.assertEqual(declared["coverage"], "none", declared)
+        self.assertFalse(declared["answered"], "自报 full 不得提升为完成")
+        a = qa.assess_question(
+            "revenue",
+            components=[{"component": "量", "state": "bound", "locator": "api_chunk 3"},
+                        {"component": "结构", "state": "bound", "locator": "api_chunk 3"},
+                        {"component": "价", "state": "missing"}],
+            decomposition={"note": "量与结构已取得；价未披露", "locator": "api_chunk 3"})
         self.assertTrue(a["has_decomposition"])
         self.assertEqual(a["coverage"], "partial")
         self.assertFalse(a["answered"])
-        b = qa.assess_question("revenue", decomposition={
-            "coverage": "full", "note": "量、价、结构闭合", "locator": "api_chunk 4"})
+        self.assertIn("价", str(a.get("coverage_reason") or ""), a)
+        b = qa.assess_question(
+            "revenue",
+            components=[{"component": "量", "state": "bound"},
+                        {"component": "结构", "state": "bound"},
+                        {"component": "价", "state": "bound"}],
+            decomposition={"note": "量、价、结构闭合", "locator": "api_chunk 4"})
         self.assertEqual(b["coverage"], "full")
         self.assertTrue(b["answered"])
 

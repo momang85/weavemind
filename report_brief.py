@@ -103,20 +103,50 @@ _RESEARCH_QUESTIONS: tuple[tuple[str, str, str], ...] = (
     ("operating_cashflow", "现金变化与利润覆盖的关系",
      "单期比率不构成趋势判断；来源结构未核实前，不判断现金流质量"),
 )
-# R3：关键判断的"意义"与逐问题资料计划的固定措辞（与问题同键；不因数据好看而放宽）
+# R3：关键判断的"意义"与逐问题资料计划的固定措辞（与问题同键；不因数据好看而放宽）。
+# 方向词由**同一事实对象**（两期值）填 `{change}`——实机反例：平安样本三项都增长，
+# 固定文案却写"收入下降/降幅"（专项 C2：方向与单位取同一事实对象）。
 _JUDGMENT_MEANING = {
     "revenue": "决定后续所有经营判断的分母：收入是量、价、结构三者共同作用的结果，"
                "不拆开就分不清是需求走弱、结构下移还是主动调整。",
-    "net_profit": "决定盈利质量与可持续性：降幅是否由毛利端造成、还是被费用/税项/"
+    "net_profit": "决定盈利质量与可持续性：{change}是否由毛利端造成、还是被费用/税项/"
                   "非经营性项目放大，直接改变对客户偿债与分红能力的看法。",
     "operating_cashflow": "决定利润的现金含量与短期偿付基础：利润率与覆盖率的机械关系"
                           "容易被读成「回款改善」，需要现金来源结构才能判断。",
 }
 _PLAN_WANT = {
-    "revenue": "确认收入下降的**量、价、结构**来源，以及各来源对降幅的贡献",
-    "net_profit": "确认利润降幅中**毛利端与毛利线以下**各占多少",
+    "revenue": "确认收入{change}的**量、价、结构**来源，以及各来源对{change}的贡献",
+    "net_profit": "确认利润{change}中**毛利端与毛利线以下**各占多少",
     "operating_cashflow": "确认经营现金流变化的**来源结构**（收现、营运资本、税费）",
 }
+
+
+def _metric_direction(cur, prev) -> str:
+    """两期值 → 方向措辞（**单一事实对象**决定；负基数不用百分比方向）。
+
+    `cur`/`prev` 是该指标两期的底稿行（含 `value`）。任一为负时，百分比方向没有
+    可比含义：只说"由负转正/由正转负/两期同为负"，不写"下降/上升"。
+    """
+    cv = (cur or {}).get("value")
+    pv = (prev or {}).get("value")
+    if not (isinstance(cv, (int, float)) and isinstance(pv, (int, float))):
+        return ""
+    if cv <= 0 or pv <= 0:
+        if pv <= 0 < cv:
+            return "由负转正"
+        if cv <= 0 < pv:
+            return "由正转负"
+        return "两期同为负"
+    return "上升" if cv > pv else "下降" if cv < pv else "持平"
+
+
+def _change_noun(direction: str) -> str:
+    """方向 → 名词：降幅/增幅；说不清方向时只说"变化"（不猜）。"""
+    return {"下降": "降幅", "上升": "增幅"}.get(str(direction or ""), "变化")
+
+
+def _fill_direction(template: str, direction: str) -> str:
+    return str(template or "").replace("{change}", _change_noun(direction))
 _PLAN_IMPACT = {
     "revenue": "若量降价升，则判断偏向主动结构调整；若量价同降且库存上升，"
                "则偏向需求与渠道压力，风险语境随之改变",
@@ -125,6 +155,9 @@ _PLAN_IMPACT = {
     "operating_cashflow": "若现金下降来自营运资本占用增加，回款质量下降；"
                           "若来自税费/结算节奏，短期偿付判断不变",
 }
+# 金融主体没有专用规则时**只留可核查原始事实**（专项 C2：不套通用企业式解释）
+FINANCIAL_SUBJECT_MATERIALS = ("财务报表及附注原文（两期同口径）", "口径说明与合并范围",
+                               "管理层讨论与分析原文")
 _BANK_PRIORITY = ("债务到期结构与利率", "受限资金与对外担保", "授信与用信情况",
                   "主要客户与回款条款", "实际控制人与关联交易")
 
@@ -168,20 +201,25 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
     derived = list(data.get("derived") or [])
     # A1：**研究对象类型**（可判定适用性）与阅读视角分开——bank_corporate 只是读者目标
     try:
-        from facts import subject_type_of
+        from facts import subject_type_of, subject_type_state
         subject_type, type_source = subject_type_of(
             declared=str(req.get("subject_type") or ""),
             company=str(req.get("company") or ""),
             company_id=str(req.get("company_id") or ""))
+        type_state = subject_type_state(subject_type, type_source)
     except Exception:
-        subject_type, type_source = "unknown", ""
+        subject_type, type_source, type_state = "unknown", "", "unconfirmed"
+    # C2：类型未确认（无声明）时，企业口径比率与解释性结论都不当"已适用"，
+    # 补材料建议也要先要类型确认——不按公司名默认成非金融企业。
+    type_confirmed = (type_state == "confirmed")
     evidence = _evidence(task_id, ws_dir=ws_dir)
     citations, audit = _collect_citations(task_id, goal, body, data,
                                           evidence=evidence, ws_dir=ws_dir)
     table = _metrics_table(rows, derived, periods, citations, req,
                            source_url=str(data.get("source_url") or ""),
-                           subject_type=subject_type)
-    findings = _findings(rows, derived, periods, subject_type=subject_type)
+                           subject_type=subject_type, confirmed=type_confirmed)
+    findings = _findings(rows, derived, periods, subject_type=subject_type,
+                         confirmed=type_confirmed)
     # 引用重编号：模型正文里的 `[n]` 是它**自己清单**的编号，装配后编号会变；
     # 按 URL 建立"旧编号 → 新编号"映射并逐处重写，映射不到的去编号并记缺口
     body_sources = _body_source_list(body)
@@ -207,7 +245,8 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
     _last = periods[-1] if periods else None
     _mgmt_pool = (list(changes.get("management") or [])
                   + list(changes.get("third_party_views") or []))
-    assessments = _question_assessments(_mgmt_pool, background, evidence, last=_last)
+    assessments = _question_assessments(_mgmt_pool, background, evidence, last=_last,
+                                        rows=rows, derived=derived)
     # 逐问题评估进**变化解释**：风险条目的三态与问题区读同一份判定
     for u in (changes.get("unproven") or []):
         a = assessments.get(str(u.get("metric") or "")) or {}
@@ -232,7 +271,9 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
     # D1 夜间补修：研究问题**先于**主张检查生成——它的观察与边界也是要审的句子
     questions = _research_questions(rows, derived, periods, evidence, citations,
                                     changes, perspective=perspective,
-                                    assessments=assessments)
+                                    assessments=assessments,
+                                    subject_type=subject_type,
+                                    type_confirmed=type_confirmed)
     assembly_claims: list[dict] = []
     for _q in questions:
         _obs = str(_q.get("observation") or "").strip()
@@ -527,7 +568,8 @@ def _change_explanation(rows, derived, periods, findings, evidence, citations) -
 
 
 def _research_questions(rows, derived, periods, evidence, citations, changes, *,
-                        perspective: str = "", assessments: dict | None = None) -> list[dict]:
+                        perspective: str = "", assessments: dict | None = None,
+                        subject_type: str = "", type_confirmed: bool = True) -> list[dict]:
     """D3：研究问题 → 观察 / 支持证据 / 推断边界 / 下一步核查动作（主文最多三问）。
 
     每问只写四件事：由底稿可复算的**观察**、已取得的**证据定位**（没有就写"未取得、
@@ -547,13 +589,20 @@ def _research_questions(rows, derived, periods, evidence, citations, changes, *,
     for metric, question, boundary in _RESEARCH_QUESTIONS:
         d = d_all.get(f"{metric}{_YOY_SUFFIX}")
         v = d.get("value") if d else None
-        if not isinstance(v, (int, float)):
-            continue
         label = labels.get(metric, metric)
         cur = (by.get(metric) or {}).get(last) if last else None
-        obs = f"{label}同比{'增长' if v > 0 else '下降' if v < 0 else '持平'} {abs(v):g}%"
-        if cur is not None:
-            obs += f"（{last} 年 {cur.get('value')}{cur.get('unit') or ''}）"
+        prev = (by.get(metric) or {}).get((last - 1) if last else 0)
+        _dir0 = _metric_direction(cur, prev)
+        if not isinstance(v, (int, float)):
+            # 同比算不出（负基数等）时**不出这一问**：底稿已把它记成"不可算"的
+            # 底稿问题（`已写明：同比不具可比含义，应分别描述亏损/转正与绝对额变化`），
+            # 主文再加一问会把 PDF 分页推到多一页近似空白页（冻结场景反例），
+            # 方向措辞与绝对额表示在底稿与缺口里如实给出。见证据文档"未验/未做"。
+            continue
+        else:
+            obs = f"{label}同比{'增长' if v > 0 else '下降' if v < 0 else '持平'} {abs(v):g}%"
+            if cur is not None:
+                obs += f"（{last} 年 {cur.get('value')}{cur.get('unit') or ''}）"
         q_text = question
         if metric == "net_profit":
             # 金额变化与利润率变化**分开呈现**：绝对利润的分解只能用金额差，不能用
@@ -572,7 +621,8 @@ def _research_questions(rows, derived, periods, evidence, citations, changes, *,
                         f"{gp_chg:+g}{_gu2}、毛利线以下净额变化 {gv:+g}{_ggu}"
                         f"（= Δ归母净利润 − Δ毛利；含费用、税项、非经营性项目与少数股东等，"
                         f"未取得明细前不拆解到具体科目）")
-                q_text = (question if v < 0 else "利润变化的分解")
+                q_text = (question if (isinstance(v, (int, float)) and v < 0)
+                          else "利润变化的分解")
             elif isinstance(np_chg, (int, float)):
                 # 只缺毛利一侧：如实说缺的是哪一半，别把已有的金额差也说成"未取得"
                 obs += (f"；金额变化：归母净利润变化 {np_chg:+g}{_nu}；毛利润同期金额差未取得，"
@@ -602,7 +652,7 @@ def _research_questions(rows, derived, periods, evidence, citations, changes, *,
                     direction = "上升" if cv > cov_prev else "下降" if cv < cov_prev else "持平"
                     _py = f"{cov_prev_year} 年" if cov_prev_year else "上期"
                     obs += f"（{_py} {abs(cov_prev):g}%，{direction}）"
-                    if direction == "上升" and v < 0:
+                    if direction == "上升" and isinstance(v, (int, float)) and v < 0:
                         # 被动成因：现金流本身在降，覆盖率却升 → 分母降得更快。
                         # 边界句**不带数字**（数字在观察里已可复算）：避免把未标期间的
                         # 数值塞进推断句，读者也不会把边界句当成"已验证的读数"
@@ -667,26 +717,49 @@ def _research_questions(rows, derived, periods, evidence, citations, changes, *,
             support["has_decomposition"] = bool(_a.get("has_decomposition"))
             support["has_background"] = bool(_a.get("has_background"))
             support["has_observation"] = bool(_a.get("has_observation"))
-            # 边界随材料更新：已有分解材料时，不再写"未取得量价/分部数据"（那是旧状态）
-            if _a.get("kind") == "decomposition":
+            # 边界随材料更新：已有分解材料时，不再写"未取得量价/分部数据"（那是旧状态）。
+            # **按指标分别写**——边界句说的是该问题缺什么，别把收入的量价边界盖到现金上
+            # （现金的"覆盖率高不表示回款改善"护栏必须留着）。
+            if metric == "revenue" and _a.get("has_decomposition"):
                 # 已有分解材料：不再保留"未取得量价拆分与分部数据"这类过期边界
                 boundary = ("量价/结构数据来自发行人披露的收入构成与产量销量表（各组与表内"
                             "「营业收入合计」分别闭合）；各因素（量、价、结构）的**贡献度**"
                             "未拆分，管理层的定量说明也未给出；吨价为推算、不等于披露价格，"
                             "也不能单独证明提价")
+            elif metric == "net_profit" and _a.get("has_decomposition"):
+                _pd_cov = str(_a.get("coverage_reason") or "")
+                boundary = ("毛利端与期间费用取自发行人毛利率表与费用明细（各自有定位）："
+                            "毛利额为**推导量**（上期由披露同比反推），各分组是同一笔收入的"
+                            "不同切法、不做跨组合计；" + (_pd_cov or "")
+                            + "；税项与非经常性损益未取得前，不把差额归到任何一项")
+        # 方向来自**同一事实对象**（该指标两期底稿行），意义/计划/观察三处共用
+        _dir_word = _metric_direction((by.get(metric) or {}).get(last),
+                                      (by.get(metric) or {}).get((last - 1) if last else 0))
+        # C2：补材料建议按**主体类型确认状态**给——未确认时先要类型；
+        # 金融主体没有专用规则时只留可核查原始事实（不套企业口径的量价/毛利/渠道）
+        _next_mats = list(MATERIALS_BY_METRIC.get(metric, ()))
+        _want = _fill_direction(str(_PLAN_WANT.get(metric) or q_text), _dir_word)
+        if str(subject_type) == "financial":
+            _next_mats = list(FINANCIAL_SUBJECT_MATERIALS)
+            _want = f"保留可核查原始事实（{label}两期口径与附注原文），本版本不套企业口径分解"
+        if not type_confirmed:
+            _next_mats = ["确认研究对象类型（金融 / 非金融）"] + _next_mats
         out.append({"metric": metric, "question": q_text, "observation": obs,
+                    "change_direction": _dir_word,
                     "support": support, "boundary": boundary,
                     "assessment": _a,
-                    "meaning": str(_JUDGMENT_MEANING.get(metric) or ""),
+                    "subject_type_confirmed": bool(type_confirmed),
+                    "meaning": _fill_direction(str(_JUDGMENT_MEANING.get(metric) or ""),
+                                               _dir_word),
                     "plan": {
-                        "want": str(_PLAN_WANT.get(metric) or q_text),
+                        "want": _want,
                         "can_answer": (str(_a.get("kind_label") or "无相关材料")
                                        + (f"（覆盖：{ {'full': '完整', 'partial': '部分', 'none': '无'}.get(str(_a.get('coverage') or 'none'), '无') }）")),
-                        "missing": "、".join(MATERIALS_BY_METRIC.get(metric, ())),
-                        "next_material": "、".join(MATERIALS_BY_METRIC.get(metric, ())),
+                        "missing": "、".join(_next_mats),
+                        "next_material": "、".join(_next_mats),
                         "impact": str(_PLAN_IMPACT.get(metric) or ""),
                     },
-                    "next_action": list(MATERIALS_BY_METRIC.get(metric, ()))})
+                    "next_action": _next_mats})
     # 项3/R1：收入问题的支持由**逐问题评估**（`assessments`）决定：发行人披露的
     # 量价/结构数据算"分解覆盖"（部分或完整），背景与读数只作已取材料。
     # 旧的"直接看 volume_price 就给支持"的分支已删除——避免第二套判断。
@@ -775,25 +848,94 @@ def _match_management_for_metric(items: list[dict], metric: str,
     return background or reading
 
 
-def _question_assessments(mgmt_pool, background, evidence, *, last) -> dict:
+def _series_state(rows, metric, last) -> dict:
+    """某指标的**两期同口径事实** → 组成部分状态（C2 判据表读 `state`）。
+
+    "同口径"不靠猜：两期取自**同一来源**（同 source_url）或标注了同一个已知口径才算；
+    只有一期、来源不同、口径不同，或数值缺失 → `missing`（不许用一期充两期）。
+    """
+    want = int(last or 0)
+    by_year: dict[int, dict] = {}
+    for r in (rows or []):
+        if str(r.get("metric") or "") != str(metric):
+            continue
+        try:
+            y = int(r.get("year") or 0)
+        except Exception:                        # noqa: BLE001 - 期间不可解析即忽略
+            y = 0
+        if y:
+            by_year[y] = r
+    cur, prev = by_year.get(want), by_year.get(want - 1)
+    vals = [(cur or {}).get("value"), (prev or {}).get("value")]
+    if not all(isinstance(v, (int, float)) for v in vals):
+        return {"state": "missing", "locator": "",
+                "note": f"{metric} 两期事实不完整（{want} 与 {want - 1}）"}
+    calibers = {str((r or {}).get("caliber") or "") for r in (cur, prev)}
+    known = {c for c in calibers if c and c != "unknown"}
+    same_source = bool(str((cur or {}).get("source_url") or "")) and (
+        str((cur or {}).get("source_url")) == str((prev or {}).get("source_url")))
+    if not (known or same_source):
+        return {"state": "missing", "locator": "",
+                "note": f"{metric} 两期口径不同或来源不同，不能当同口径序列"}
+    return {"state": "bound",
+            "locator": str((cur or {}).get("fact_id") or ""),
+            "note": (f"{want} 与 {want - 1} 两期"
+                     + (f"同口径（{'、'.join(sorted(known))}）" if known else "同来源"))}
+
+
+def _question_components(metric: str, *, evidence, rows, last) -> list[dict]:
+    """逐问题的**组成部分绑定状态**（问题判据读它；不由材料自报覆盖决定）。
+
+    - 收入：量/结构/价 取自量价分解（结构组闭合才算取得）；
+    - 利润：毛利端/期间费用/税项与非经常性 取自利润端分解；
+    - 现金：两条序列（经营现金流净额、归母净利润）的两期同口径事实是否绑定。
+    """
+    ev = evidence or {}
+    if str(metric) == "revenue":
+        vp = ev.get("volume_price") or {}
+        return [dict(c) for c in (vp.get("components") or []) if isinstance(c, dict)]
+    if str(metric) == "net_profit":
+        pd = ev.get("profit_decomposition") or {}
+        return [dict(c) for c in (pd.get("components") or []) if isinstance(c, dict)]
+    if str(metric) == "operating_cashflow":
+        return [
+            dict(_series_state(rows, "operating_cashflow", last),
+                 component="经营现金流净额（两期）"),
+            dict(_series_state(rows, "net_profit", last),
+                 component="归母净利润（两期）"),
+        ]
+    return []
+
+
+def _question_assessments(mgmt_pool, background, evidence, *, last, rows=(),
+                          derived=()) -> dict:
     """逐问题评估（唯一权威）：问题区 / 风险区 / 研究状态 / 候选比较都读这一份。
 
-    输入是**同一批材料**（管理层/第三方披露、业务背景、定量分解）；评估一次，
-    不再让各处按关键词各判一次（根因一）。
+    输入是**同一批材料**（管理层/第三方披露、业务背景、定量分解）与**同一批事实**
+    （两期读数）；评估一次，不再让各处按关键词各判一次（根因一）。覆盖由问题类型的
+    判据表算出（`question_assessment.QUESTION_RULES`），材料自报覆盖不作数。
     """
     import question_assessment as _qa
-    vp = (evidence or {}).get("volume_price") or {}
-    decomp = {}
-    if vp.get("ok"):
-        decomp = {"coverage": str(vp.get("coverage") or "partial"),
-                  "note": str(vp.get("summary") or ""),
-                  "locator": str(vp.get("locator") or ""),
-                  "reason": "发行人披露的量价/结构数据已准入（量/结构已取得；价与范围见缺口）"}
+    ev = evidence or {}
+    vp = ev.get("volume_price") or {}
+    pd = ev.get("profit_decomposition") or {}
     out: dict = {}
     for metric, _question, _boundary in _RESEARCH_QUESTIONS:
+        comps = _question_components(metric, evidence=evidence, rows=rows, last=last)
+        decomp: dict = {}
+        if metric == "revenue" and vp.get("ok"):
+            decomp = {"note": str(vp.get("summary") or ""),
+                      "locator": str(vp.get("locator") or ""),
+                      "reason": "发行人披露的量价/结构数据已准入（量与结构已取得；价见缺口）"}
+        elif metric == "net_profit" and pd.get("ok"):
+            decomp = {"note": "；".join(
+                          f"{str(d.get('label') or '')}：{d.get('cur')}→{d.get('prev')}"
+                          for d in (pd.get("derived") or [])),
+                      "locator": str(pd.get("locator") or ""),
+                      "reason": "发行人披露的毛利率表与费用明细已准入（毛利端与期间费用已取得）"}
         out[metric] = _qa.assess_question(
             metric, items=list(mgmt_pool or []), background_items=list(background or []),
-            period=last, decomposition=(decomp if metric == "revenue" else None),
+            period=last, decomposition=decomp or None, components=comps,
             has_observations=True)
     return out
 
@@ -851,16 +993,22 @@ def _background_for_metric(text: str, metric: str) -> bool:
 
 
 def _metrics_table(rows, derived, periods, citations, req, source_url: str = "",
-                   subject_type: str = "") -> dict:
+                   subject_type: str = "", confirmed: bool = True) -> dict:
     """指标 × 期间 的对照表 + 同比/比率列（数值、口径、来源编号）。
 
     A1：质量比率按**研究对象类型**判定适用性——金融机构不生成企业口径比率
     （净利率/现金覆盖/资产负债率/研发强度），只保留同比这类两期变化对照。
+    C2：类型未由用户确认时（`confirmed=False`），比率仍算出但**不当"已适用"**——
+    行上标 `applicable: null` 与待确认原因，解释性结论另由 `_findings` 的同一开关把关。
     """
     try:
-        from facts import ratio_applies
+        from facts import RATIO_SUBJECT_TYPES as _RATIO_TYPES, ratio_applies
     except Exception:
+        _RATIO_TYPES = {}
         ratio_applies = lambda m, st: True          # noqa: E731 - 退化时不误删
+    # 只在**非金融**一侧登记的指标：类型未确认时它们不得标"适用"
+    # （同比类对两类都适用，不能跟着一起标不适用）
+    _nonfin_only = {m for m, types in _RATIO_TYPES.items() if "financial" not in types}
     by_metric: dict[str, dict] = {}
     for r in rows:
         m = str(r.get("metric") or "")
@@ -888,25 +1036,36 @@ def _metrics_table(rows, derived, periods, citations, req, source_url: str = "",
     for d in derived:
         if not ratio_applies(str(d.get("metric") or ""), subject_type):
             continue          # A1：金融机构不生成企业口径比率（同比类仍保留）
-        quality.append({"metric": str(d.get("metric") or ""),
-                        "label": str(d.get("metric_label") or d.get("metric") or ""),
-                        "period": str(d.get("period") or ""),
-                        "value": d.get("value"),
-                        # 单位取自派生行本身：同比/比率是 %，**金额变化是亿元**——
-                        # 一律写 "%" 会把"毛利减少 38.01 亿元"渲染成"−38.01%"
-                        "unit": str(d.get("unit") or "%"),
-                        "formula": str(d.get("formula") or ""),
-                        "fact_ids": list(d.get("derived_from") or [])})
+        _m = str(d.get("metric") or "")
+        _row = {"metric": _m,
+                "label": str(d.get("metric_label") or _m),
+                "period": str(d.get("period") or ""),
+                "value": d.get("value"),
+                # 单位取自派生行本身：同比/比率是 %，**金额变化是亿元**——
+                # 一律写 "%" 会把"毛利减少 38.01 亿元"渲染成"−38.01%"
+                "unit": str(d.get("unit") or "%"),
+                "formula": str(d.get("formula") or ""),
+                "fact_ids": list(d.get("derived_from") or [])}
+        if not confirmed and _m in _nonfin_only:
+            # 类型未确认：数值照给（可核对），但**不标适用**——企业口径比率要等确认
+            _row["applicable"] = None
+            _row["applicable_note"] = "研究对象类型未确认，企业口径比率暂不适用"
+        quality.append(_row)
     return {"rows": out_rows, "quality": quality,
             "periods": list(periods),
             "subject_type": subject_type,
+            # C2：类型未确认时比率不当"已适用"；确认状态随表带出供页面/导出同源显示
+            "subject_type_confirmed": bool(confirmed),
+            "ratio_applicability": ("confirmed" if confirmed else "unconfirmed"),
             "columns": ["指标", "上期", "本期", "同比", "口径", "来源"]}
 
 
-def _findings(rows, derived, periods, subject_type: str = "") -> list[dict]:
+def _findings(rows, derived, periods, subject_type: str = "",
+              confirmed: bool = True) -> list[dict]:
     """由数字算出的**观察**（不是模型写的），每条带 fact_id 便于复核。
 
     A1：覆盖倍数按派生读数判 低于/相当/高于；金融机构不生成企业口径的质量结论。
+    C2：类型未由用户确认时**同样不生成**该质量结论（未确认不等于非金融）。
     """
     try:
         from facts import ratio_applies
@@ -939,9 +1098,11 @@ def _findings(rows, derived, periods, subject_type: str = "") -> list[dict]:
         out.append({"text": text, "fact_ids": [f for f in facts if f]})
     # 质量比率：覆盖倍数按**校验过、单位统一**的派生读数判 低于/相当/高于（A1）；
     # 金融机构不生成企业口径的质量结论（该结论依赖"利润→现金流"的企业逻辑）
+    # 覆盖倍数是**两个已绑定事实之间的关系**（不是非金融专用比率）：类型未确认时照给，
+    # 但结论只到"关系可复算"——质量判断仍由边界句挡住（"来源结构未核实前不判断质量"）。
     cov = next((d for d in derived if d.get("metric") == "cashflow_coverage"
-                and d.get("year") == last and ratio_applies("cashflow_coverage",
-                                                            subject_type)), None)
+                and d.get("year") == last
+                and ratio_applies("cashflow_coverage", subject_type)), None)
     np_cur = (by.get("net_profit") or {}).get(last) if last else None
     cf_cur = (by.get("operating_cashflow") or {}).get(last) if last else None
     if cov is not None:
@@ -2370,6 +2531,8 @@ def render_brief_markdown(structure: dict, body: str = "",
             _kl = str(a.get("kind_label") or "未取得")
             if str(a.get("kind")) == "decomposition":
                 _kl = "量价/结构数据（分解覆盖）"
+            # C2：证据性质进**结构对象**（页面/导出清单读 question_assessments 的 rule），
+            # 主文这一行保持原样——PDF 分页对正文行数敏感，不加行（见证据文档）
             lines.append(f"  - 依据：{_kl}；覆盖：{cov}；{where}")
             lines.append(f"  - 边界：{q.get('boundary')}")
             lines.append(f"  - 下一步：{'、'.join((q.get('plan') or {}).get('next_material', '').split('、')[:3]) or '补齐底稿事实'}"

@@ -328,8 +328,10 @@ def research_state(task_id: str, goal: str, structure: dict | None, *,
     if unsupported_mandatory:
         labels = "、".join(str(q.get("question") or q.get("metric"))
                           for q in unsupported_mandatory)
+        # 括号里写**覆盖程度**，不写材料类别标签——"分解覆盖充分"这类类名跟在"部分覆盖"
+        # 后面自相矛盾（C2：完成度与材料类别分开说，页面上两处也各说各的）。
         _p = (f"（其中部分覆盖 {len(partial_mandatory)} 项："
-              + "、".join(f"{q.get('question')}[{_kind_label(q) or '材料'}]"
+              + "、".join(f"{q.get('question')}[已取得部分构成]"
                           for q in partial_mandatory) + "）") if partial_mandatory else ""
         reasons.append(f"必答问题未完成（{len(unsupported_mandatory)}/"
                        f"{len(mandatory)}）：{labels}{_p}")

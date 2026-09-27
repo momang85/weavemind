@@ -7215,8 +7215,28 @@ class TestResearchQuestions(unittest.TestCase):
          "total_assets": 673.45, "disclosure_date": "2025-04-29"},
     ]
 
+    # C2 反例夹具：三项**都增长**（实机平安样本的形态）——固定文案若写"下降/降幅"
+    # 就是与事实相反；另一组基数为负，百分比方向没有可比含义。
+    GROWTH_ROWS = [
+        {"year": 2023, "report_type": "年报", "revenue": 288.76, "net_profit": 66.73,
+         "operating_cashflow": 46.29, "total_liabilities": 156.52,
+         "total_assets": 673.45, "disclosure_date": "2024-04-27"},
+        {"year": 2024, "report_type": "年报", "revenue": 331.26, "net_profit": 100.16,
+         "operating_cashflow": 61.3, "total_liabilities": 177.42,
+         "total_assets": 697.92, "disclosure_date": "2025-04-29"},
+    ]
+    NEGATIVE_ROWS = [
+        {"year": 2023, "report_type": "年报", "revenue": 100.0, "net_profit": -10.0,
+         "operating_cashflow": -5.0, "total_liabilities": 80.0,
+         "total_assets": 200.0, "disclosure_date": "2024-04-27"},
+        {"year": 2024, "report_type": "年报", "revenue": 120.0, "net_profit": 8.0,
+         "operating_cashflow": 6.0, "total_liabilities": 90.0,
+         "total_assets": 210.0, "disclosure_date": "2025-04-29"},
+    ]
+
     def _env(self, *, perspective: str = "equity", with_mdna: bool = False,
-             tid: str = "rq-01"):
+             tid: str = "rq-01", rows=None, company: str = "", code: str = "",
+             declared: str = ""):
         import facts as F
         import task_state
         import working_paper_export as WPX
@@ -7229,17 +7249,19 @@ class TestResearchQuestions(unittest.TestCase):
         self.addCleanup(setattr, task_state, "DB_PATH", old_db)
         self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
         req = F.parse_research_request(
-            self.GOAL, company="洋河股份", company_id="002304.SZ", market="cn",
-            periods=[2023, 2024], caliber="合并", as_of="2025-04-30",
-            perspective=perspective, identity_source="form")
+            self.GOAL, company=company or "洋河股份", company_id=code or "002304.SZ",
+            market="cn", periods=[2023, 2024], caliber="合并", as_of="2025-04-30",
+            perspective=perspective, subject_type=declared, identity_source="form")
         task_state.mark_queued(tid, goal=self.GOAL, research_request=req.to_payload(),
                                db_path=task_state.DB_PATH)
         proj = ws_mod.task_project_dir(tid, "default")
         proj.mkdir(parents=True, exist_ok=True)
         (proj / "financials.json").write_text(json.dumps({
-            "financials": self.ROWS,
-            "metadata": {"source": "eastmoney_ashare", "company": "洋河股份",
-                         "stock_code": "002304.SZ", "currency": "CNY", "unit": "亿元",
+            "financials": list(rows if rows is not None else self.ROWS),
+            "metadata": {"source": "eastmoney_ashare",
+                         "company": company or "洋河股份",
+                         "stock_code": code or "002304.SZ", "currency": "CNY",
+                         "unit": "亿元",
                          "caliber": "合并", "caliber_evidence": "含 PARENTNETPROFIT"},
             "raw": {"url": "https://datacenter-web.eastmoney.com/api/x", "text": "{}"},
         }, ensure_ascii=False), encoding="utf-8")
@@ -7254,6 +7276,55 @@ class TestResearchQuestions(unittest.TestCase):
         WPX.write_working_paper(tid, self.GOAL, project="default")
         return tid
 
+    def test_direction_wording_follows_the_facts_not_fixed_copy(self):
+        """方向措辞取**同一事实对象**：三项都增长时不得写"下降/降幅"（实机平安反例：
+        +12.6%/+47.79%/+6.12% 的正文却写"降幅""收入下降"）。"""
+        import report_brief
+        tid = self._env(tid="rq-grown", rows=self.GROWTH_ROWS)
+        st = report_brief.build_structure(tid, self.GOAL, "")
+        qs = {q.get("metric"): q for q in st.get("research_questions") or []}
+        self.assertEqual(qs["revenue"].get("change_direction"), "上升")
+        self.assertEqual(qs["net_profit"].get("change_direction"), "上升")
+        self.assertIn("增幅", str(qs["revenue"]["plan"].get("want") or ""))
+        self.assertNotIn("降幅", str(qs["revenue"]["plan"].get("want") or ""))
+        self.assertNotIn("降幅", str(qs["net_profit"].get("meaning") or ""))
+        md = report_brief.render_brief_markdown(st, "")
+        head = md[md.index("## 关键判断与下一步"):md.index("## 关键发现")]
+        self.assertNotIn("降幅", head, head[:200])
+        self.assertNotIn("收入下降", head, head[:200])
+
+    def test_negative_base_has_no_percentage_direction(self):
+        """基数为负：只说"由负转正/两期同为负"，不套百分比方向（负基数上的同比
+        没有方向含义）。"""
+        import report_brief
+        tid = self._env(tid="rq-neg", rows=self.NEGATIVE_ROWS)
+        st = report_brief.build_structure(tid, self.GOAL, "")
+        from report_brief import _metric_direction, _change_noun
+        # 方向措辞本身由两期值决定：负基数不给百分比方向
+        self.assertEqual(_metric_direction({"value": 8.0}, {"value": -10.0}), "由负转正")
+        self.assertEqual(_metric_direction({"value": 5.0}, {"value": 3.0}), "上升")
+        self.assertEqual(_metric_direction({"value": -5.0}, {"value": -3.0}), "两期同为负")
+        self.assertEqual(_change_noun("由负转正"), "变化")
+        # 同比不可算时**不出这一问**（底稿已把它记成"不可算"的底稿问题），
+        # 主文因此不会出现与事实相反的方向词
+        questions = {q.get("metric") for q in st.get("research_questions") or []}
+        self.assertNotIn("net_profit", questions)
+        md = report_brief.render_brief_markdown(st, "")
+        self.assertNotIn("利润降幅", md)
+        self.assertIn("基期为负", md, "底稿问题要如实写出来")
+
+    def test_key_points_carry_evidence_nature(self):
+        """首屏每个重点都要写**证据性质**（发行人说法 vs 计算自披露数值）。"""
+        import report_brief
+        tid = self._env(tid="rq-nature")
+        st = report_brief.build_structure(tid, self.GOAL, "")
+        md = report_brief.render_brief_markdown(st, "")
+        # 证据性质在**结构对象**里逐问带出（页面/导出清单读它；主文不加行）
+        st_assess = st.get("question_assessments") or {}
+        natures = {str((v.get("rule") or {}).get("nature") or "")
+                   for v in st_assess.values()}
+        self.assertIn("计算自披露数值（非独立核实）", natures, natures)
+
     def test_three_questions_each_carry_four_fields(self):
         import report_brief
         tid = self._env()
@@ -7265,6 +7336,54 @@ class TestResearchQuestions(unittest.TestCase):
                 self.assertTrue(q.get(field), f"{q.get('question')} 缺 {field}")
             self.assertIn("同比", str(q.get("observation")))
             self.assertTrue(q["next_action"], q)
+
+    def test_subject_type_applicability_four_fixed_cases(self):
+        """四个固定适用性用例（C2）：中国平安 / 仅代码 601318.SH / 未知主体 /
+        银行对公视角研究非金融公司——检查派生指标、补材料建议与导出，不只禁一个比率。"""
+        import facts as F
+        import report_brief
+        cases = [
+            # (声明类型, 名称, 代码, 视角, 期望类型, 期望确认, 期望"确认类型"在下一步里)
+            ("", "中国平安", "601318.SH", "equity", "unknown", False, True),
+            ("", "", "601318.SH", "equity", "unknown", False, True),
+            ("financial", "", "601318.SH", "equity", "financial", True, False),
+            ("non_financial", "洋河股份", "002304.SZ", "bank_corporate",
+             "non_financial", True, False),
+        ]
+        for i, (declared, name, code, persp, want_type, want_conf, want_ask) in enumerate(cases):
+            tid = f"rq-app-{i}"
+            # 建任务（契约里带该用例的主体/类型）+ 财务 + 底稿
+            self._env(tid=tid, perspective=persp, company=name, code=code,
+                      declared=declared)
+            goal = self.GOAL
+            st = report_brief.build_structure(tid, goal, "")
+            mt = (st or {}).get("metrics_table") or {}
+            self.assertEqual(mt.get("subject_type"), want_type, (declared, name, code))
+            self.assertEqual(bool(mt.get("subject_type_confirmed")), want_conf,
+                             (declared, name, code))
+            ratios = [r["metric"] for r in (mt.get("quality") or [])]
+            if want_type == "financial":
+                self.assertNotIn("net_margin", ratios,
+                                 "金融机构不得生成企业口径比率")
+                self.assertIn("revenue_yoy", ratios, "同比类两期对照要保留")
+            else:
+                self.assertIn("net_margin", ratios)
+            # 未确认类型的比率不得标"已适用"：行上标 applicable=None + 原因
+            _nm = [r for r in (mt.get("quality") or []) if r["metric"] == "net_margin"]
+            for r in _nm:
+                if want_conf:
+                    break
+                self.assertIsNone(r.get("applicable"), r)
+                self.assertIn("未确认", str(r.get("applicable_note") or ""))
+            q0 = (st.get("research_questions") or [{}])[0]
+            _na = list(q0.get("next_action") or [])
+            self.assertEqual(("确认研究对象类型（金融 / 非金融）" in _na), want_ask,
+                             (declared, name, code, _na))
+            _want = str((q0.get("plan") or {}).get("want") or "")
+            if want_type == "financial":
+                self.assertIn("原始事实", _want, _want)
+                self.assertNotIn("量、价、结构", _want, "金融机构不套企业口径分解")
+
 
     def test_cashflow_guard_is_in_the_boundary_and_render(self):
         import report_brief
@@ -7316,15 +7435,26 @@ class TestResearchQuestions(unittest.TestCase):
         self.assertIn("原因待证", md)
         self.assertIn("初步背景依据", md)
         self.assertNotIn("解释已取得", md)
-        for metric in ("net_profit", "operating_cashflow"):
-            self.assertFalse(qs[metric]["support"].get("has_evidence"),
-                             f"{metric} 不得因收入段的背景而变成'已支持'：{qs[metric]}")
-        # R1：必答分子 = **回答完成（分解覆盖充分）**；三问都只有背景/读数 → 0/3。
+        self.assertFalse(qs["net_profit"]["support"].get("has_evidence"),
+                         f"利润问题不得因收入段的背景而变成'已支持'：{qs['net_profit']}")
+        # C2：现金问题的判据是**两条序列的关系**（判据表 relation），依据是绑定事实，
+        # 与背景材料无关——这里另跑一遍"没有这份背景材料"的同一夹具，断言判定不变。
+        _tid2 = self._env(with_mdna=False, tid="rq-04b")
+        _st2 = report_brief.build_structure(_tid2, self.GOAL, "")
+        _cash_a = (st.get("question_assessments") or {}).get("operating_cashflow") or {}
+        _cash_b = (_st2.get("question_assessments") or {}).get("operating_cashflow") or {}
+        self.assertEqual(_cash_a.get("question_type"), "relation")
+        self.assertEqual(_cash_a.get("coverage"), _cash_b.get("coverage"),
+                         "背景材料的有无不得改变现金问题的判定")
+        self.assertEqual(_cash_a.get("kind"), _cash_b.get("kind"))
+        # R1：必答分子 = **回答完成**；收入/利润这两问只有背景/读数 → 未完成，
+        # 现金按两期事实判 → 已完成（1/3 完成，2/3 未完成）。
         ver = delivery_pipeline.research_state(tid, self.GOAL, st)
         self.assertEqual(ver["mandatory_total"], 3)
-        self.assertEqual(ver["mandatory_supported"], 0, ver["reason"])
+        self.assertEqual(ver["mandatory_supported"], 1, ver["reason"])
         self.assertEqual(ver.get("mandatory_partial", 0), 0, ver["reason"])
-        self.assertIn("必答问题未完成（3/3）", ver["reason"])
+        self.assertIn("必答问题未完成（2/3）", ver["reason"])
+        self.assertIn("收入变化的量价与结构依据", ver["reason"])
         # 逐问题评估对象进结构且与展示同源
         a = (st.get("question_assessments") or {}).get("revenue") or {}
         self.assertEqual(a.get("kind"), "background")
@@ -7519,10 +7649,11 @@ class TestResearchQuestions(unittest.TestCase):
         self.assertIn("已取得量价/结构数据", _rev_risk)
         self.assertIn("部分", _rev_risk)
         self.assertNotIn("解释已取得", _rev_risk)
-        # 必答：部分覆盖计入 partial，不算完成（旧口径会写成 1/3 已支持）
+        # 必答：部分覆盖计入 partial，不算完成（旧口径会写成 1/3 已支持）；
+        # C2 起现金问题按两期事实的关系判为完成（与本材料无关）→ 完成 1、部分 1。
         ver = delivery_pipeline.research_state(tid, self.GOAL, st)
         self.assertEqual(ver["mandatory_total"], 3)
-        self.assertEqual(ver["mandatory_supported"], 0, ver["reason"])
+        self.assertEqual(ver["mandatory_supported"], 1, ver["reason"])
         self.assertEqual(ver.get("mandatory_partial"), 1, ver["reason"])
         self.assertIn("部分覆盖 1 项", ver["reason"])
         md = report_brief.render_brief_markdown(st, "")
