@@ -8077,6 +8077,128 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             error_snippet=str(result.get("result") or "")[:200],
         )
 
+    # ── 补材料（C1）：取件 → 准入 → 并入资料快照 → 确定性重做 ────────────
+
+    def handle_add_material(self, data: dict) -> dict:
+        """处理一条补材料请求，返回可写进收执键的结果。
+
+        为什么在编排器里做：取件要走既有内容通道，资料快照是编排器与 worker 共用的
+        那一份（`project/fetch_snapshot.json`），要重做的证据/结构/底稿也都是任务的产物。
+        网页提交方只保存原件与投递请求，不直接改资料集。
+
+        三条纪律：未准入的正文**不进**资料集；重做只做确定性部分（模型重生成留待办）；
+        任何一步失败都如实返回失败，不把"已保存原件"说成"已进入研究"。
+        """
+        import material_intake as mi
+        import task_state as _ts
+        task_id = str((data or {}).get("task_id") or "")
+        mid = str((data or {}).get("material_id") or "")
+        if not task_id or not mid:
+            return {"ok": False, "detail": "缺少 task_id 或 material_id"}
+        row: dict = {}
+        try:
+            row = _ts.read_task(task_id) or {}
+        except Exception as exc:                 # noqa: BLE001 - 读不到就按无契约处理
+            logger.warning("补材料：读取任务失败（task=%s）：%s", task_id, str(exc)[:140])
+            row = {}
+        goal = str(row.get("goal") or "")
+        company = company_code = as_of = ""
+        periods: list[int] = []
+        metrics: list[str] = []
+        try:
+            from working_paper_export import resolve_request
+            req, _cand, _src = resolve_request(task_id, goal, {}, None)
+            if req is not None:
+                company = str(req.company or "")
+                company_code = str(req.company_id or "")
+                as_of = str(req.as_of or "")
+                periods = [int(y) for y in (req.periods or [])]
+                metrics = [str(m) for m in (req.required_metrics or [])]
+        except Exception as exc:                 # noqa: BLE001 - 契约读不到：判据按未知
+            logger.warning("补材料：读取研究契约失败（task=%s）：%s", task_id, str(exc)[:140])
+
+        def _say(message: str, level: str = "info") -> None:
+            try:
+                push_progress(self._messaging, task_id, "log",
+                              {"type": level, "agent": "orchestrator",
+                               "message": message, "timestamp": self._now_iso()})
+            except Exception:                    # noqa: BLE001 - 进度推送失败不影响摄取
+                pass
+
+        _say(f"补材料：开始摄取 {mid}")
+        # 摄取前的身份指纹：摄取后据此判"到底有没有实质变化"（避免假待办）
+        before_identity = {}
+        try:
+            before_identity = mi.identity_snapshot(task_id)
+        except Exception as exc:             # noqa: BLE001 - 取不到按保守处理
+            logger.info("补材料：摄取前身份指纹失败（task=%s）：%s", task_id, str(exc)[:120])
+        out = mi.admit(task_id=task_id, mid=mid, company=company,
+                       company_code=company_code, periods=periods, as_of=as_of,
+                       metrics=metrics, goal=goal)
+        if not out.get("ok"):
+            detail = str(out.get("detail") or out.get("reason") or out.get("status") or "")
+            _say(f"补材料：未准入或未取得（{out.get('status')}）——{detail}", "error")
+            return dict(out, attached=False, refreshed=False)
+        verdict = out.get("verdict") or {}
+        _say("补材料：已准入（" + str(verdict.get("provenance_label") or "")
+             + f"），小节 {int(verdict.get('section_count') or 0)} 个")
+
+        attached = mi.attach(task_id=task_id, mid=mid)
+        out["attach"] = attached
+        if not attached.get("ok"):
+            _say("补材料：写入资料快照失败——" + str(attached.get("error") or "")[:160], "error")
+            return dict(out, attached=False, refreshed=False)
+        _say(f"补材料：已并入资料快照（{int(attached.get('docs') or 0)} 篇）")
+
+        # 上传/抓到的正文并入清洗输入，财务数字进图表与摘要（与 web_fetch 回灌同一条链）
+        try:
+            doc = mi.load_doc(task_id, mid)
+            if doc:
+                self._recycle_fetch_into_clean(
+                    task_id, goal, {"result": json.dumps(doc, ensure_ascii=False)})
+        except Exception as exc:                 # noqa: BLE001 - 回灌失败不改准入结论
+            logger.warning("补材料：清洗回灌失败（task=%s）：%s", task_id, str(exc)[:150])
+
+        refresh = mi.refresh(task_id=task_id, goal=goal, previous=before_identity)
+        mi.record_refresh(task_id, mid, refresh)
+        out["refresh"] = refresh
+        out["attached"] = True
+        out["refreshed"] = bool(refresh.get("ok"))
+        # 提交方要看的逐指标状态与证据条数：从准入结论里摊平到顶层（页面直接读）
+        out["metric_states"] = dict(verdict.get("metric_states") or {})
+        out["evidence_count"] = len(verdict.get("evidence") or [])
+        loc = int((refresh.get("evidence") or {}).get("located") or 0)
+        _say(f"补材料：证据已重建（可定位 {loc} 条）；正文需按新材料重生成时另行授权")
+        return out
+
+    def resume_pending_materials(self, task_ids=()) -> list[dict]:
+        """把"已保存但未摄取"的材料补做一遍（编排器启动时调用）。
+
+        进程在摄取途中退出时，材料会停在 `pending_intake`/`fetch_failed`；重做走同一条
+        摄取链，**原件已落盘的直接读字节**，不重复发已经成功过的请求。
+        """
+        import material_intake as mi
+        out: list[dict] = []
+        for task_id in list(task_ids or ()):
+            try:
+                pending = mi.pending_materials(task_id)
+            except Exception as exc:             # noqa: BLE001
+                logger.warning("补材料恢复：读取待办失败（task=%s）：%s", task_id, str(exc)[:140])
+                continue
+            for item in pending:
+                mid = str(item.get("material_id") or "")
+                if not mid:
+                    continue
+                logger.info("补材料恢复：task=%s material=%s status=%s", task_id, mid,
+                            item.get("status"))
+                try:
+                    out.append(dict(self.handle_add_material(
+                        {"type": "add_material", "task_id": task_id, "material_id": mid}),
+                        task_id=task_id, material_id=mid))
+                except Exception as exc:         # noqa: BLE001 - 单条失败不影响其余
+                    logger.warning("补材料恢复失败（task=%s/%s）：%s", task_id, mid, str(exc)[:150])
+        return out
+
     @staticmethod
     def _diagnosis_for_step(task_id: str, step_id: str):
         """取某步骤最新失败诊断（无则 None）。"""
@@ -8203,6 +8325,17 @@ def main():
         pass
     orch = OrchestratorV2()
 
+    # C1 局部恢复：停在"已保存未摄取"的材料在启动时补做一遍（原件已落盘的读字节，
+    # 不重复发已经成功过的请求）
+    try:
+        pend = [m.decode() if isinstance(m, bytes) else str(m)
+                for m in (r.smembers("material_pending_tasks") or [])]
+        if pend:
+            logger.info("补材料恢复：发现 %d 个任务有未摄取材料", len(pend))
+            orch.resume_pending_materials([p for p in pend if p])
+    except Exception as exc:                     # noqa: BLE001 - 扫描失败不挡启动
+        logger.warning("补材料恢复扫描失败：%s", str(exc)[:150])
+
     logger.info("OrchestratorV2 listening on orchestrator:main")
     ps = r.pubsub()
     ps.subscribe("orchestrator:main")
@@ -8212,6 +8345,32 @@ def main():
             continue
         try:
             data = json.loads(msg["data"])
+            # 补材料请求（C1）：与任务请求同一条通道，但**由编排器做摄取**——
+            # 网页提交方只保存原件并投递，不直接改资料集。收执键让提交方知道结果。
+            if str(data.get("type") or "") == "add_material":
+                _tid = str(data.get("task_id") or "")
+                _mid = str(data.get("material_id") or "")
+
+                def _run_material(_d, _t=_tid, _m=_mid):
+                    try:
+                        result = orch.handle_add_material(_d)
+                    except Exception as e:       # noqa: BLE001 - 异常也要落收执
+                        logger.error("补材料失败：%s", str(e)[:200])
+                        result = {"ok": False, "detail": str(e)[:200]}
+                    try:
+                        orch._redis.setex(f"material_ack:{_m}", 600,
+                                          json.dumps(result, ensure_ascii=False))
+                    except Exception as exc:     # noqa: BLE001
+                        logger.error("补材料收执键写入失败（%s）：%s", _m, str(exc)[:150])
+                    try:
+                        orch._redis.srem("material_pending_tasks", _t)
+                    except Exception:            # noqa: BLE001
+                        pass
+
+                logger.info("Task %s add_material received: %s", _tid, _mid)
+                threading.Thread(target=_run_material, args=(dict(data),),
+                                 daemon=True).start()
+                continue
             task_id = data.get("task_id", "")
             goal = data.get("goal", "")
             context = data.get("context", "")

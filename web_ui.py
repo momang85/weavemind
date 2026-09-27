@@ -4004,6 +4004,26 @@ def _get_task_working_paper(self, p):
             return self._json({"error": "read failed"}, 500)
 
 
+def _get_task_materials(self, p):
+    """补材料清单（C1）：身份、状态、逐指标状态与查阅范围。
+
+    登录即可访问（viewer 允许）。读的是材料模块的同一份口径（`material_intake`），
+    页面不另算一遍——否则"页面说已准入、证据里没有"这类分叉无法避免。
+    """
+    if not (p.startswith("/api/task/") and p.endswith("/materials")):
+        return None
+    tid = p[len("/api/task/"):].rsplit("/materials", 1)[0].strip()
+    if not tid:
+        return self._json({"error": "task_id required"}, 400)
+    try:
+        import material_intake as _mi
+        out = _mi.status(tid)
+        out["task_id"] = tid
+        return self._json(out)
+    except Exception as exc:                     # noqa: BLE001
+        return self._json({"error": f"读取材料清单失败：{str(exc)[:160]}"}, 500)
+
+
 def _get_task_acceptance(self, p):
     """任务验收详情：**以选中版本的绑定验收为准**（B 批）。
 
@@ -5446,6 +5466,145 @@ def _post_task_review_edit(self, p, body, admin):
         return self._json({"error": f"修订失败：{str(exc)[:200]}"}, 500)
 
 
+def _post_task_material(self, p, body, admin):
+    """POST /api/task/<id>/material：补材料入口（披露直链 / 上传文件）。
+
+    body：
+      - 直链：`{"kind": "link", "url": "...", "title"?, "declared_disclosed_at"?}`
+      - 上传：`{"kind": "file", "filename": "...", "data": "<base64>", "title"?,
+                "declared_disclosed_at"?}`（`local_file` 供本地调试脚本用，网页不发它）
+
+    分工：本入口只做**鉴权 + 任务归属 + 上限体检 + 保存原件**，随后把请求投递给编排器；
+    取件、准入、并入资料快照、重做证据/结构/底稿都在编排器里（`handle_add_material`）。
+    这样"网页上传"与"本地调试读文件"走同一条摄取链但通道可辨，且服务端不提供任何
+    "按路径读文件"的入口。
+    """
+    if not (p.startswith("/api/task/") and p.endswith("/material")):
+        return None
+    import material_intake as _mi
+    tid = p[len("/api/task/"):].rsplit("/material", 1)[0].strip()
+    if not tid:
+        return self._json({"error": "task_id required"}, 400)
+    if not _task_exists(tid):
+        return self._json({"error": "task not found"}, 404)
+    import task_state as _ts
+    row = {}
+    try:
+        row = _ts.read_task(tid) or {}
+    except Exception:
+        row = {}
+    # 任务所有权：任务记录里有提交者时，只有本人能往里加材料（无人记录的旧任务不设卡）
+    owner = str(row.get("user") or "").strip()
+    me = str((admin or {}).get("user") or "").strip()
+    if owner and me and owner != me:
+        return self._json({"error": "只能为自己提交的任务补材料"}, 403)
+    # 运行中的任务不接补材料：抓取回灌正在写资料快照，同时改会互相覆盖
+    try:
+        if _ts.is_running(tid):
+            return self._json(
+                {"error": "任务正在运行；等它收尾或先停止后再补材料（避免与抓取同时改资料集）"}, 409)
+    except Exception:                            # noqa: BLE001 - 读不到状态就不挡
+        pass
+    if not _redis_ready():
+        return self._json({"error": "Redis 未连接，无法投递补材料请求"}, 503)
+    kind = str(body.get("kind") or "").strip().lower()
+    channel = _mi.CHANNEL_UPLOAD if kind == "file" else _mi.CHANNEL_LINK
+    if str(body.get("channel") or "") == _mi.CHANNEL_LOCAL:
+        # 本地调试脚本读文件后按字节提交：通道如实记 local_file，不冒充网页上传
+        if str(self._client_ip() or "") not in ("127.0.0.1", "::1", "localhost"):
+            return self._json({"error": "本地通道仅限回环调用"}, 403)
+        channel = _mi.CHANNEL_LOCAL
+    declared = str(body.get("declared_disclosed_at") or "").strip()[:10]
+    raw = b""
+    if channel == _mi.CHANNEL_LINK:
+        url = str(body.get("url") or "").strip()
+        if not url:
+            return self._json({"error": "直链材料缺少 url"}, 400)
+    else:
+        data = str(body.get("data") or "")
+        if not data:
+            return self._json({"error": "文件材料缺少 data（base64）"}, 400)
+        try:
+            raw = base64.b64decode(data, validate=False)
+        except Exception:
+            return self._json({"error": "data 不是合法 base64"}, 400)
+        if len(raw) > _mi.MAX_BYTES:
+            return self._json(
+                {"error": f"文件超过单件上限（{len(raw)} > {_mi.MAX_BYTES} 字节）"}, 413)
+        url = str(body.get("url") or "").strip()
+    saved = _mi.store(
+        task_id=tid, channel=channel, raw=raw, url=url,
+        filename=str(body.get("filename") or ""),
+        content_type=str(body.get("content_type") or ""),
+        title=str(body.get("title") or ""), period=str(body.get("period") or ""),
+        doc_type=str(body.get("doc_type") or "年度报告"),
+        note=str(body.get("note") or ""), declared_disclosed_at=declared)
+    if not saved.get("ok"):
+        return self._json({"error": str(saved.get("error") or "材料保存失败")}, 400)
+    mid = str(saved["material_id"])
+    duplicate = bool(saved.get("duplicate"))
+    material = saved.get("material") or {}
+    if duplicate and str(material.get("status")) == _mi.STATE_ADMITTED:
+        # 同一份材料已准入过：不重复摄取，直接把结论告诉提交方
+        return self._json({"status": "ok", "task_id": tid, "material_id": mid,
+                           "duplicate": True, "intake": {"status": _mi.STATE_ADMITTED},
+                           "material": material,
+                           "note": "该材料已在资料集中（按身份去重，未重复摄取）"})
+    ack_key = f"material_ack:{mid}"
+    try:
+        r = _new_redis()
+        r.sadd("material_pending_tasks", tid)
+        r.delete(ack_key)
+        r.publish("orchestrator:main", json.dumps({
+            "type": "add_material", "task_id": tid, "material_id": mid,
+            "channel": channel, "user_id": me,
+        }, ensure_ascii=False))
+    except Exception as exc:
+        logger.warning("补材料投递失败（task=%s）：%s", tid, str(exc)[:160])
+        return self._json({"error": "补材料请求投递失败（原件已保存，可稍后重试）"}, 503)
+    deadline = time.time() + float(os.environ.get("WM_MATERIAL_ACK_TIMEOUT", "20") or 20)
+    result = None
+    while time.time() < deadline:
+        try:
+            got = r.get(ack_key)
+        except Exception:
+            got = None
+        if got:
+            try:
+                result = json.loads(got if isinstance(got, str) else got.decode("utf-8"))
+            except Exception:
+                result = None
+            break
+        time.sleep(0.2)
+    audit_log(me, self._client_ip(), "task.material", target=tid,
+              result="ok" if (result or {}).get("ok") else "pending",
+              detail=f"{channel}:{mid}")
+    if not isinstance(result, dict):
+        # 收执没到：原件已保存，编排器启动/接上后会补做（不假成功）
+        return self._json({
+            "status": "saved_pending_intake", "task_id": tid, "material_id": mid,
+            "channel": channel, "intake": {"status": _mi.STATE_PENDING},
+            "error": "编排器未在时限内回执；原件已保存，待编排器恢复后自动摄取",
+        }, 503)
+    return self._json({
+        "status": "ok" if result.get("ok") else "rejected",
+        "task_id": tid, "material_id": mid, "channel": channel, "duplicate": duplicate,
+        "intake": {
+            "status": str(result.get("status") or ""),
+            "reason": str(result.get("reason") or ""),
+            "detail": str(result.get("detail") or ""),
+            "reused": bool(result.get("reused")),
+            "evidence_count": int(result.get("evidence_count") or 0),
+            "metric_states": result.get("metric_states") or {},
+        },
+        "verdict": result.get("verdict") or {},
+        "attach": result.get("attach") or {},
+        "refresh": result.get("refresh") or {},
+        "note": ("已准入的正文并入资料快照，证据/结构/底稿按同一快照重做；"
+                 "正文重新生成需另行授权"),
+    }, 200 if result.get("ok") else 409)
+
+
 def _post_task_package(self, p, body, admin):
     """POST /api/task/<id>/package：按**当前采纳版本**重新打包（无模型、确定性）。
 
@@ -6306,6 +6465,7 @@ _GET_ROUTES = [
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/working_paper.csv"), _get_task_working_paper_file),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/working_paper.json"), _get_task_working_paper_file),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/report.md"), _get_task_markdown),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/materials"), _get_task_materials),
     (lambda self, p: p == "/api/config", _get_config),
     (lambda self, p: p == "/api/config/requirements", _get_config_requirements),
     (lambda self, p: p == "/api/users", _get_users),
@@ -6337,6 +6497,7 @@ _POST_ROUTES = [
     (lambda self, p: self.path == "/task", _post_task),
     (lambda self, p: self.path == "/api/memory/delete", _post_memory_delete),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/review/edit"), _post_task_review_edit),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/material"), _post_task_material),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/package"), _post_task_package),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/cancel"), _post_task_cancel),
     (lambda self, p: self.path == "/api/plan/confirm", _post_plan_confirm),
