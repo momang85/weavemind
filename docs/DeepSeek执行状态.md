@@ -38,6 +38,10 @@
   `unavailable+unknown`、`degraded` 单列（新增 `degraded_items()`/`unknown_items()`）。
   测试：`test_p0` 新增 4 例（含字段一致性），连同 `test_frontend_guards`/`test_settings_requirements`/
   `test_startup_readiness` 共 543 例全绿。
+- **运行实例**：系统重启后已按 `deps --fix` → `start` 起回 16/16（便携 Redis v8、单实例），
+  服务启动晚于 S2b 提交、服务端主包与本批产物同名 ⇒ 后端前端均为新代码；实测搜索/行情健康
+  快照尚无（首次检索/用行情后才发布）⇒ 页面这两项应显示"未检查"而非绿色——正是本批语义。
+  真机页面四态渲染需登录（sessions 表为空、admin 密码不在执行者手上，未伪造会话）。
 - **未做/未验**：`web_ui.source_health` 旧字段与统一 `dependencies` 的同源收敛、S4 首屏
   "资料获取能力"视图未做；未在运行页面用真实快照看过四态（需重启服务）。
 - **包内复验（2026-09-27，运行包 `2026.09.27.1`，zip sha256 `0443a425…8f74`）**：
