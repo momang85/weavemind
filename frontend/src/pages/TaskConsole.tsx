@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo } from 'react'
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react'
 import { useTaskStore } from '../stores/useTaskStore'
 import { useTaskLive } from '../stores/useTaskLive'
 import ReportViewer from '../components/ReportViewer'
@@ -8,10 +8,24 @@ import PlanPanel from '../components/console/PlanPanel'
 import ConsoleSideTabs from '../components/console/ConsoleSideTabs'
 import FirstRunGuide from '../components/FirstRunGuide'
 import { clearLastTask, readLastTask, saveLastTask, shouldResume } from '../lib/lastTask'
+import { resolveSubmissionKey } from '../lib/submissionKey'
 import type { TaskNode, ConversationMessage, TaskReport } from '../stores/types'
 import type { ResearchFields } from '../lib/researchGoal'
 
 type Tab = 'live' | 'context' | 'results' | 'materials'
+
+/** C3/H3b：一次提交尝试的幂等键。
+ *
+ * 服务端按它去重：同一键的重复请求只创建一个任务、只执行一次。浏览器在
+ * 127.0.0.1/localhost 下属安全上下文，优先用 `crypto.randomUUID()`；不可用时退回
+ * 时间戳 + 随机数（仍然唯一到足够区分"同一次提交"）。 */
+function newSubmissionKey(): string {
+  try {
+    const c = (globalThis as any).crypto
+    if (c && typeof c.randomUUID === 'function') return 'sub-' + c.randomUUID()
+  } catch { /* 退回下面的实现 */ }
+  return 'sub-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12)
+}
 
 /** 任务控制台（T11c 拆分后的薄编排页）：
  * 提交区/计划面板/右侧三栏各自独立组件；本页只保留任务生命周期编排。 */
@@ -48,6 +62,8 @@ export default function TaskConsole() {
   const [importMsg, setImportMsg] = useState<{ name: string; note: string }[]>([])
   // P0-1：SUCCESS_WITH_ISSUES 的验收缺口明细（按任务缓存，点击展开）
   const [gapsFor, setGapsFor] = useState<Record<string, string[]>>({})
+  // C3/H3b：同一次提交的幂等键（重复点击/失败重试复用；成功后清空）
+  const pendingSubmission = useRef<{ sig: string; key: string } | null>(null)
   // 交付节奏提示的数据源（ETA 用历史样本，已运行时长用 startedAt）
   const startedAt = useTaskStore(s => s.startedAt)
   const systemStatus = useTaskStore(s => s.systemStatus)
@@ -191,6 +207,15 @@ export default function TaskConsole() {
       if (userContext.trim()) body.context = userContext.trim()
       // A 批：研究契约随任务提交（提交时落库）——底稿只读它，抓取元数据不作数
       if (fields) body.research_request = fields
+      // C3/H3b：幂等键——**同一次提交**的重复请求（双击、失败后重试）复用同一个键，
+      // 服务端据此只创建一个任务、只执行一次；成功或改题后换新键，
+      // 所以"用户主动再跑一次"仍是新任务（不把正常重跑当成重复）。
+      const picked = resolveSubmissionKey(pendingSubmission.current, {
+        goal: g, project, conversationId: activeConversationId || '',
+        confirmMode, templateName, context: userContext, fields,
+      }, newSubmissionKey)
+      pendingSubmission.current = picked.pending
+      body.idempotency_key = picked.key
       const res = await fetch('/task', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -203,6 +228,12 @@ export default function TaskConsole() {
         return
       }
       const tid = data.task_id
+      // 提交已被接收：清掉待重试的键，后续再点就是一次新的提交
+      pendingSubmission.current = null
+      if (data.deduplicated) {
+        addLog({ timestamp: new Date().toISOString(), type: 'info', agent: 'orchestrator',
+                 message: '重复提交已合并到任务 ' + tid + '（未新建、未重复执行）' })
+      }
       startTask(tid)
       // D17：新任务重置过期 UI（步骤检查器/验收缺口缓存）
       setSelectedStep(null)
