@@ -1196,11 +1196,21 @@ def _system_status():
             dependencies = health_registry.snapshot()
         except Exception:
             dependencies = []
+        # C3/H4：**唯一一份**健康视图 + 新人可行动原因。`dependencies`/`source_health`
+        # 两个键保留为兼容别名（老调用方/页面仍在读），但"同一件事"只在这里表述一次：
+        # 旧 source_health 只在依赖快照未覆盖该源时才补条目，且未知/过期/异实例不算绿。
+        try:
+            import actionable_state as _as
+            health = _as.unified_health(dependencies, source_health)
+        except Exception as exc:
+            logging.getLogger("web_ui").warning("统一健康视图失败：%s", str(exc)[:120])
+            health = {"items": [], "summary": {}, "ok": False, "causes": []}
         return {
             "agents": agents,
             "llm_health": llm_health,
             "llm_warning": llm_warning,
             "embedding_health": embedding_health,
+            "health": health,
             "dependencies": dependencies,
             "search_health": search_health,
             "source_health": source_health,
@@ -4093,6 +4103,45 @@ def _get_task_materials(self, p):
         return self._json({"error": f"读取材料清单失败：{str(exc)[:160]}"}, 500)
 
 
+def _get_task_actionable(self, p):
+    """C3：单个任务的**新人可行动状态**（轻量端点，只返回状态/一句话/一个入口）。
+
+    为什么单独给端点而不塞进 `/api/task/<id>`：任务页首屏那份 payload 很大
+    （步骤/日志/研究简报/导出清单），而"我现在该做什么"需要在状态变化时快速刷新。
+    口径与任务页里的 `actionable` 字段**同一份实现**（`actionable_state`），不另算。
+    """
+    if not (p.startswith("/api/task/") and p.endswith("/actionable")):
+        return None
+    tid = p[len("/api/task/"):].rsplit("/actionable", 1)[0].strip()
+    if not tid:
+        return self._json({"error": "task_id required"}, 400)
+    try:
+        import actionable_state as _as
+        import task_state as _ts_act
+        row = _ts_act.read_task(tid)
+        timeline = _ts_act.read_submit_timeline(tid) if row else []
+        material_pending = False
+        try:
+            if _redis_ready():
+                material_pending = bool(
+                    _new_redis().sismember("material_pending_tasks", tid))
+        except Exception:                         # noqa: BLE001
+            material_pending = False
+        causes: list = []
+        try:
+            import health_registry
+            health = _as.unified_health(health_registry.snapshot())
+            causes = health.get("causes") or []
+        except Exception:                         # noqa: BLE001
+            causes = []
+        out = _as.classify_task(row=row, timeline=timeline,
+                                material_pending=material_pending, causes=causes)
+        out["task_id"] = tid
+        return self._json(out)
+    except Exception as exc:                     # noqa: BLE001
+        return self._json({"error": f"读取可行动状态失败：{str(exc)[:160]}"}, 500)
+
+
 def _get_task_acceptance(self, p):
     """任务验收详情：**以选中版本的绑定验收为准**（B 批）。
 
@@ -4758,9 +4807,29 @@ def _get_task_page(self, p):
                     export = None
             except Exception as exc:
                 logger.warning("状态补充字段读取失败（task=%s）：%s", tid, str(exc)[:120])
+            # C3/H4：新人可行动状态——"未接收/待消费/执行中/待材料/明确失败/已完成"
+            # 一个状态配一个入口，避免用户看得出没成功、看不出该做什么。
+            try:
+                import actionable_state as _as
+                import task_state as _ts_tl
+                _causes = health.get("causes") if isinstance(health, dict) else []
+                _mp = False
+                try:
+                    if _redis_ready():
+                        _mp = bool(_new_redis().sismember("material_pending_tasks", tid))
+                except Exception:                     # noqa: BLE001
+                    _mp = False
+                actionable = _as.classify_task(
+                    row=data, timeline=_ts_tl.read_submit_timeline(tid),
+                    material_pending=_mp, causes=_causes or [])
+            except Exception as exc:
+                logging.getLogger("web_ui").warning("可行动状态计算失败（%s）：%s",
+                                                    tid, str(exc)[:120])
+                actionable = None
             return self._json({
             "task_id": tid,
             "status": data.get("status", "PENDING"),
+            "actionable": actionable,
             "phase": data.get("phase") or "",
             "goal": data.get("goal", ""),
             "steps": data.get("steps") or [],
@@ -6539,6 +6608,7 @@ _GET_ROUTES = [
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/working_paper.json"), _get_task_working_paper_file),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/report.md"), _get_task_markdown),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/materials"), _get_task_materials),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/actionable"), _get_task_actionable),
     (lambda self, p: p == "/api/config", _get_config),
     (lambda self, p: p == "/api/config/requirements", _get_config_requirements),
     (lambda self, p: p == "/api/users", _get_users),

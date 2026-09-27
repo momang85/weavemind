@@ -9,6 +9,7 @@ import ConsoleSideTabs from '../components/console/ConsoleSideTabs'
 import FirstRunGuide from '../components/FirstRunGuide'
 import { clearLastTask, readLastTask, saveLastTask, shouldResume } from '../lib/lastTask'
 import { resolveSubmissionKey } from '../lib/submissionKey'
+import { actionIntent, actionableTone, shouldShowActionable } from '../lib/actionable'
 import type { TaskNode, ConversationMessage, TaskReport } from '../stores/types'
 import type { ResearchFields } from '../lib/researchGoal'
 
@@ -64,6 +65,8 @@ export default function TaskConsole() {
   const [gapsFor, setGapsFor] = useState<Record<string, string[]>>({})
   // C3/H3b：同一次提交的幂等键（重复点击/失败重试复用；成功后清空）
   const pendingSubmission = useRef<{ sig: string; key: string } | null>(null)
+  // C3：后端给的可行动状态（未接收/待消费/执行中/待材料/明确失败/已完成）
+  const [actionable, setActionable] = useState<any | null>(null)
   // 交付节奏提示的数据源（ETA 用历史样本，已运行时长用 startedAt）
   const startedAt = useTaskStore(s => s.startedAt)
   const systemStatus = useTaskStore(s => s.systemStatus)
@@ -176,6 +179,22 @@ export default function TaskConsole() {
 
   useEffect(() => { loadRecentTasks() }, [loadRecentTasks])
 
+  // C3：可行动状态——"我现在该做什么"。状态变化或换任务时刷新一次轻量端点
+  // （`/api/task/<id>/actionable`），不把大 payload 拉回来。
+  useEffect(() => {
+    if (!currentTaskId) { setActionable(null); return }
+    let alive = true
+    ;(async () => {
+      try {
+        const res = await fetch('/api/task/' + encodeURIComponent(currentTaskId) + '/actionable')
+        if (!res.ok) { if (alive) setActionable(null); return }
+        const data = await res.json()
+        if (alive) setActionable(data && data.state ? data : null)
+      } catch { if (alive) setActionable(null) }
+    })()
+    return () => { alive = false }
+  }, [currentTaskId, status, revision])
+
   // 当前任务完成后刷新会话消息
   useEffect(() => {
     if (status === 'completed' && activeConversationId) {
@@ -257,6 +276,14 @@ export default function TaskConsole() {
     }
   }, [goal, project, status, demoMode, activeConversationId, confirmMode, templateName, userContext,
       startTask, addLog, setActiveConversation])
+
+  // C3：可行动提示上的按钮 → 具体动作（切标签 / 跳设置或健康页 / 重新提交）
+  const onActionableAction = useCallback(() => {
+    const intent = actionIntent(actionable?.action)
+    if (intent.kind === 'switch-tab') setTab(intent.tab)
+    else if (intent.kind === 'navigate') window.location.assign(intent.to)
+    else if (intent.kind === 'retry') submit(lastGoal || goal)
+  }, [actionable, submit, lastGoal, goal])
 
   // 「改为修改目标」：把目标填回提交框并滚回提交区，不自动提交
   const prefillGoal = useCallback((g: string) => {
@@ -420,6 +447,32 @@ export default function TaskConsole() {
         lastGoal={lastGoal} reportSummary={report?.summary} status={status}
         taskId={taskId} etaText={etaText} elapsedText={elapsedText}
         onSubmit={submit} onNewConversation={newConversation} />
+
+      {/* C3：一句话说清"现在是什么状态、你该做什么"。未知/等材料这类中性状态
+          不给绿色（读成"一切正常"是最容易误导新人的地方）。 */}
+      {shouldShowActionable(actionable) && (
+        <div className={
+          'rounded-lg border px-4 py-3 text-sm flex flex-wrap items-center gap-3 '
+          + (actionableTone(actionable?.state) === 'bad'
+            ? 'border-red-800 bg-red-950/40 text-red-200'
+            : actionableTone(actionable?.state) === 'warn'
+              ? 'border-amber-800 bg-amber-950/30 text-amber-100'
+              : actionableTone(actionable?.state) === 'ok'
+                ? 'border-emerald-800 bg-emerald-950/30 text-emerald-100'
+                : 'border-slate-700 bg-slate-900/60 text-slate-200')
+        }>
+          <span className="font-medium">[{String(actionable?.label || '')}]</span>
+          <span className="flex-1 min-w-[16rem]">{String(actionable?.message || '')}</span>
+          {actionIntent(actionable?.action).kind !== 'none' && (
+            <button
+              type="button"
+              onClick={onActionableAction}
+              className="px-3 py-1 rounded border border-current/40 hover:bg-white/10 shrink-0">
+              {String(actionable?.action_label || '处理')}
+            </button>
+          )}
+        </div>
+      )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 min-h-[400px]">
         <PlanPanel

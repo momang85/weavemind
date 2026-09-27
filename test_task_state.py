@@ -36,7 +36,9 @@ class TestTaskStateProjector(unittest.TestCase):
         self.assertEqual(
             set(added),
             {"acceptance_json", "rules_fingerprint", "phase", "updated_at",
-             "research_request_json"},      # A 批：研究契约在提交时落库
+             "research_request_json",       # A 批：研究契约在提交时落库
+             "idempotency_key", "submit_timeline_json", "accepted_by"},
+            # C3：幂等键 + 提交时间线 + 实例归属（收执要有身份、可对账、可去重）
         )
         self.assertEqual(task_state.ensure_schema(self.db), [],
                          "重复调用不得重复加列（幂等）")
