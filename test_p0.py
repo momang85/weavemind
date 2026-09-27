@@ -8025,7 +8025,9 @@ class TestHealthRegistryAndAlertDedupe(unittest.TestCase):
     def test_no_snapshot_is_unknown_not_healthy(self):
         """S2：缺快照不得显示为可用（此前 ok=True 的假绿）。"""
         import health_registry
-        with mock.patch.object(health_registry, "_redis_get", return_value={}),                 mock.patch.object(health_registry, "_config_section", return_value={}):
+        # 同时清掉进程内回退：`source_health` 的进程内字典会被同批其它用例写脏，
+        # 那样测到的就不是"没有快照"这条路径了。
+        with mock.patch.object(health_registry, "_redis_get", return_value={}),                 mock.patch.object(health_registry, "_config_section", return_value={}),                 mock.patch("adapters.source_health.get_health", return_value={}):
             search = health_registry.probe_search()
             source = health_registry.probe_market_source()
         for entry in (search, source):

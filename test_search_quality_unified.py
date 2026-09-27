@@ -112,38 +112,57 @@ class TestEnglishResultsSurviveMixedQuery(unittest.TestCase):
 
 
 class TestAuthorityDomainBoundaries(unittest.TestCase):
-    """权威域只看 hostname，且按域/子域/标签边界匹配（专项 §3-10）。
+    """权威域只看 hostname，且只认**完整域及其受控子域**（C0-1：专项 §3.2）。
 
-    旧实现是 `needle in url` 的整串子串匹配：查询参数、路径片段都能伪造权威——
-    `https://example.org/?origin=cninfo.com.cn` 会被算作官方域并拿到加权与
-    `authoritative` 标记，报告引用优先级因此可被一个链接参数左右。
+    两轮收窄，两轮都有实机反例：
+    ① 旧实现 `needle in url` 的整串子串匹配 → `?origin=cninfo.com.cn` 可伪造权威；
+    ② 中间版本改片段匹配 → `cninfo-fake.org`、`eastmoney-fake.org`、`ir.evil.org`
+       这类仿冒域名又能拿到官方加权。现在条目必须是完整域，命中 = 主机名等于它或是它的
+       子域；`ir.`/`investor.` 这类通用标签不再参与匹配（发行人 IR 要进官方档就登记
+       完整主机名，例如 `ir.example.com`）。
     """
 
     CASES = (
-        # (url, 条目标签, 是否命中)
-        ("https://www.cninfo.com.cn/new/a", "cninfo", True),
-        ("https://example.org/?origin=cninfo.com.cn", "cninfo", False),
-        ("https://example.org/path/cninfo.com.cn/x", "cninfo", False),
-        ("https://notcninfo.org/a", "cninfo", False),
-        ("https://www.hkexnews.hk/x", "hkex", True),
-        ("https://ir.example.com/x", "ir.", True),
-        ("https://investor.example.com/x", "investor.", True),
-        ("https://blog.csdn.net/x", "csdn", True),
+        # (url, 条目, 是否命中)
+        ("https://www.cninfo.com.cn/new/a", "cninfo.com.cn", True),
+        ("https://static.cninfo.com.cn/a.pdf", "cninfo.com.cn", True),
+        ("https://cninfo-fake.org/a", "cninfo.com.cn", False),
+        ("https://cninfo.com.cn.evil.org/a", "cninfo.com.cn", False),
+        ("https://example.org/?origin=cninfo.com.cn", "cninfo.com.cn", False),
+        ("https://example.org/path/cninfo.com.cn/x", "cninfo.com.cn", False),
+        ("https://www.hkexnews.hk/x", "hkexnews.hk", True),
+        ("https://hkexnews.hk.evil.org/x", "hkexnews.hk", False),
         ("https://www.sse.com.cn/x", "sse.com.cn", True),
         ("https://sse.com.cn.evil.org/x", "sse.com.cn", False),
-        ("https://finance.sina.com.cn/x", "sina", True),
-        ("https://datacenter-web.eastmoney.com/api", "eastmoney", True),
-        ("https://eastmoney.evil.org/x", "eastmoney", False),
+        ("https://datacenter-web.eastmoney.com/api", "eastmoney.com", True),
+        ("https://eastmoney-fake.org/x", "eastmoney.com", False),
+        ("https://eastmoney.evil.org/x", "eastmoney.com", False),
+        ("https://www.10jqka.com.cn/x", "10jqka.com.cn", True),
+        ("https://finance.sina.com.cn/x", "sina.com.cn", True),
+        ("https://baike.baidu.com/item/x", "baidu.com", True),
         ("https://www.gov.cn/x", "gov.cn", True),
         ("https://fakegov.cn.evil.org/x", "gov.cn", False),
-        ("https://baike.baidu.com/item/x", "baidu", True),
-        ("https://www.10jqka.com.cn/x", "10jqka", True),
+        # 通用标签不再匹配；登记成完整主机名的 IR 才命中
+        ("https://ir.evil.org/x", "ir.", False),
+        ("https://ir.example.com/x", "ir.", False),
+        ("https://ir.example.com/x", "ir.example.com", True),
+        ("https://www.cninfo.com.cn/x", "cninfo", False),
     )
 
     def test_hostname_boundary_matching(self):
         for url, needle, want in self.CASES:
             with self.subTest(url=url, needle=needle):
                 self.assertEqual(sq._domain_hits(url, needle), want)
+
+    def test_fragment_entries_do_not_match_authority_lists(self):
+        """清单里不允许再出现片段式条目（否则仿冒域名又能命中）。"""
+        for name in ("AUTHORITY_OFFICIAL", "AUTHORITY_GOOD", "AUTHORITY_JUNK",
+                     "AUTHORITY_INDUSTRY"):
+            for entry in getattr(sq, name):
+                with self.subTest(list=name, entry=entry):
+                    self.assertIn(".", str(entry), f"{name} 仍有片段式条目：{entry}")
+                    self.assertFalse(str(entry).endswith("."),
+                                     f"{name} 仍有标签式条目：{entry}")
 
     def test_query_parameter_cannot_forge_authority(self):
         """参数里塞官方域：不得拿到 authoritative 标记，也不得加官方权重。"""

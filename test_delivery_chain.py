@@ -5908,7 +5908,7 @@ class TestResearchBriefAssembly(unittest.TestCase):
              "text": ("一、经营情况讨论与分析\n\n"
                       "本公司2026年度营业收入891.75亿元，主要系系列酒销量增加所致。\n")},
             {"title": "白酒行业2027年展望_某媒体",
-             "url": "https://news.example/2027/outlook",
+             "url": "https://news.example/2027-01-15/outlook",
              "text": ("一、经营情况讨论与分析\n\n"
                       "贵州茅台2027年经营情况讨论：预计营业收入将保持增长。\n")},
         ], ensure_ascii=False), encoding="utf-8")
@@ -9557,7 +9557,7 @@ class TestDisclosureIngest(unittest.TestCase):
         self.assertEqual(out["reason"], di.REJECT_AFTER_CUTOFF, out)
 
     def test_cutoff_requires_day_precision(self):
-        """路径里的年份是**报告期**，不能当披露年：精度不足就不成立截至。"""
+        """路径里的年份是**报告期**，不能当披露年：无从取到日期即不成立截至（C0-1）。"""
         from adapters import disclosure_ingest as di
         fx, doc = self._doc()
         plain = {k: v for k, v in doc.items() if k != "published_at"}
@@ -9566,11 +9566,18 @@ class TestDisclosureIngest(unittest.TestCase):
                         periods=[fx["period"]], as_of="2025-04-30")
         self.assertEqual(out["reason"], di.REJECT_CUTOFF_UNKNOWN, out)
         self.assertTrue(out["may_use_as_background"], "材料仍可作背景")
-        # 不宣称截至日时允许准入，但精度如实记录
+        # 月精度同样不足以成立截至（精度另记，不冒充已核实日期）
+        month = dict(plain, url="https://news.example/2025-03/review")
+        self.assertEqual(di.ingest(
+            month, company=fx["company"], company_code=fx["company_id"],
+            periods=[fx["period"]], as_of="2025-04-30")["reason"],
+            di.REJECT_CUTOFF_UNKNOWN)
+        # 不宣称截至日时允许准入，但日期与精度如实记录（此处无日期证据 → 空）
         ok = di.ingest(plain, company=fx["company"], company_code=fx["company_id"],
                        periods=[fx["period"]])
         self.assertEqual(ok["status"], di.ADMITTED)
-        self.assertEqual(ok["cutoff"]["precision"], "year")
+        self.assertEqual(ok["cutoff"]["precision"], "")
+        self.assertEqual(ok["cutoff"]["basis"], "")
 
     def test_third_party_mirror_of_the_report_itself_is_allowed(self):
         """第三方平台转载**原始报告**（标题即报告、主体命中）走同一准入流程。"""

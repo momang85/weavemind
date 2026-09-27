@@ -147,23 +147,59 @@ def _doc_period(title: str, url: str = "") -> str:
 
 
 def _published_at(doc: dict) -> str:
-    """发布日：**只看 URL 路径里的日期**（取不到返回空串，缺发布日记 unknown）。
+    """发布日：只认**已知来源格式**的 URL 证据（取不到返回空串，缺发布日记 unknown）。
 
     报告期不是发布日期：标题里的年份（"2024年年度报告"）是**报告期**，不能当发布日
     （实机反例：没有发布日的文档被推成"年初"，于是晚于资料截止的文档照样 applicable）。
-    文档期与发布日分别记录；只有年月/只有年份时精度另记，由校验按保守方式处理。
+
+    C0-1 收窄（专项 §3.2）：解析范围限定在**路径**与**具名公告标识参数**，不再扫整个 URL——
+    任意查询参数（`?asof=2020-01-01`）曾被当披露日；也不再把路径里孤立的一年当发布年
+    （那通常是报告期）。只认两种：公告编号 `AN<yyyymmdd>…`（路径或 `art_code`/`notice_id`
+    这类具名参数）、路径段 `YYYY-MM-DD`（或 `/YYYY/MM/DD`）。
     """
     url = str(doc.get("url") or "")
-    m = _PUB_DATE_RE.search(url)
+    if not url:
+        return ""
+    try:
+        from urllib.parse import parse_qs, urlsplit
+        parts = urlsplit(url)
+        path, query = str(parts.path or ""), str(parts.query or "")
+    except Exception:
+        return ""
+    # 已知编号：AN = 公告（art_code），AP = 东财研报（如 H3_AP202511051775675216_1.pdf）。
+    # 边界用"非字母数字"而不是 \b：下划线分隔（H3_AP…）时 \b 不成立。
+    code_re = r"(?:^|[^A-Za-z0-9])A[NP]((?:19|20)\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\d*"
+    m = re.search(code_re, path)
     if m:
-        return m.group(0).replace("年", "-").replace("月", "-").rstrip("-.")
-    m = _PUB_COMPACT_RE.search(url)
-    if m:                                    # 202603011438… → 2026-03-01（东财等常见写法）
-        s = m.group(0)
-        return f"{s[:4]}-{s[4:6]}-{s[6:8]}"
-    m = _PUB_YEAR_PATH_RE.search(url)
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    m = re.search(r"/((?:19|20)\d{2})[-/](\d{1,2})[-/](\d{1,2})(?=[/.\-_]|$)", path)
     if m:
-        return m.group(1)
+        y, mo, d = m.group(1), int(m.group(2)), int(m.group(3))
+        return f"{y}-{mo:02d}-{d:02d}"
+    # 紧凑日精度：路径段里独立的 YYYYMMDD（如 /20250429/、/20250429143800）
+    m = re.search(r"[/.\-_]((?:19|20)\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\d*(?=[/.\-_]|$)",
+                  path)
+    if m:
+        return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
+    # 月精度：路径段里独立的 YYYY-MM（不再接受"裸年份"——路径里的单一年份通常是报告期）
+    m = re.search(r"[/.\-_]((?:19|20)\d{2})[-/](\d{1,2})(?=[/.\-_]|$)", path)
+    if m:
+        # 如实返回"YYYY-MM"，**不补月初**：补零会让下游按日精度处理（实机教训：
+        # 补成 2025-03-01 后精度被读成 day，月精度材料因此绕过"精度不足不成立截至"）
+        return f"{m.group(1)}-{int(m.group(2)):02d}"
+    # 具名公告标识参数（只认这几个键名；其它参数一律不当日期证据）
+    try:
+        params = parse_qs(query, keep_blank_values=False)
+    except Exception:
+        params = {}
+    for key in ("art_code", "artCode", "notice_id", "noticeId", "announcementId"):
+        val = str((params.get(key) or [""])[0] or "")
+        if not val:
+            continue
+        m = re.search(code_re, val) or re.match(
+            r"^((?:19|20)\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])", val)
+        if m:
+            return f"{m.group(1)}-{m.group(2)}-{m.group(3)}"
     return ""
 
 

@@ -79,21 +79,33 @@ _GAMBLING_KEYWORDS = (
 )
 _JUNK_TITLES = ("google", "bing", "microsoft", "登录", "403", "404")
 
-# ── 权威域分级 ─────────────────────────────────────────────────────
-# 官方 IR/交易所（对齐 orchestrator._pick_fetch_url 的 official_domains）
+# ── 权威域分级（C0-1：只认**完整域 + 其受控子域**，不再用域名片段）────
+# 为什么改：片段式匹配（"cninfo"/"eastmoney"/"ir."）会让 `cninfo-fake.org`、
+# `eastmoney-fake.org`、`ir.evil.org` 这类仿冒域名拿到官方加权（专项 §3.2）。
+# 现在每条都是完整域：命中 = 主机名等于它，**或**是它的子域（受控子域）。
+# 发行人 IR 若要走官方档，请登记**完整主机名**（如 `ir.example.com`）到
+# config.json 的 `system.search_quality.authority_official_domains`，
+# 不靠 `ir.` 这样的通用标签推断。
 AUTHORITY_OFFICIAL = (
-    "ir.", "investor.", "hkex", "eastmoney", "10jqka",
-    "cninfo", "sse.com.cn", "szse.cn",
+    "cninfo.com.cn",    # 巨潮资讯（深交所指定披露平台）
+    "sse.com.cn",       # 上交所
+    "szse.cn",          # 深交所
+    "bse.cn",           # 北交所
+    "hkexnews.hk",      # 港交所披露易
+    "hkex.com.hk",
+    "sec.gov",          # 美国 SEC EDGAR
+    "csrc.gov.cn",      # 证监会
 )
-# 权威财经媒体（对齐 _pick_fetch_url 的 good_domains）
+# 权威财经门户/媒体与**聚合源**（聚合源不算官方：专项 §7"聚合源不可改标官方"）
 AUTHORITY_GOOD = (
-    "sina", "163.com", "21jingji", "yicai", "cls.cn", "finance",
-    "stock", "xueqiu", "snowball", "pedaily",
+    "eastmoney.com", "10jqka.com.cn", "sina.com.cn", "163.com", "cls.cn",
+    "yicai.com", "21jingji.com", "xueqiu.com", "snowball.com.cn",
+    "pedaily.cn", "stcn.com", "hexun.com",
 )
-# 内容社区/杂页（对齐 _pick_fetch_url 的 junk_domains）
+# 内容社区/杂页
 AUTHORITY_JUNK = (
-    "zhihu.com", "zhengxianling", "baidu",
-    "toutiao", "csdn", "alishui", "sgpjbg",
+    "zhihu.com", "baidu.com", "toutiao.com", "csdn.net",
+    "zhengxianling.com", "alishui.com", "sgpjbg.com",
 )
 # 中文行业研究/官方统计站点（新增：行业调研任务权威信息少的主因是
 # 检索未对这些站点加权，报告只能退化为"基于模型知识"）
@@ -535,53 +547,28 @@ def is_garbage_result(title: str, url: str, snip: str = "",
 
 
 def _domain_hits(url: str, needle: str) -> bool:
-    """URL 是否命中该域：**只看 hostname**，并按域/子域/标签边界匹配。
+    """URL 是否命中该域：**只看 hostname**，且只认完整域及其受控子域（C0-1）。
 
-    旧实现是整串子串匹配（`needle in url`），于是
-    `https://example.org/?origin=cninfo.com.cn` 也会被算作官方域（专项 §3-10）：
-    查询参数、路径片段、甚至锚点都能伪造权威加权与 `authoritative` 标记。
-    现在先取 hostname，再按条目的形态匹配：
+    旧实现是整串子串匹配（`needle in url`），先被查询参数伪造
+    （`?origin=cninfo.com.cn`），改片段匹配后又被仿冒域名绕过
+    （`cninfo-fake.org`、`eastmoney-fake.org`、`ir.evil.org`）。
+    现在：条目必须是**完整域**，命中 = 主机名等于它或是它的子域；
+    发行人 IR 要进官方档就登记完整主机名，不靠 `ir.` 这类通用标签推断。
 
-    - 完整域（`sse.com.cn`）：主机名等于它或是**它的子域**；
-    - 标签前缀（`ir.`、`investor.`）：主机名以该标签开头；
-    - 单标签（`cninfo`、`hkex`、`eastmoney`）：**可注册域**（eTLD+1）的某个标签
-      以它开头——这样 `www.cninfo.com.cn`、`hkexnews.hk` 照旧命中，
-      而 `notcninfo.org`、`eastmoney.evil.org` 这类仿冒域名不再算权威。
+    单标签/带点前缀（`ir.`、`cninfo`）一律不参与匹配——返回 False 而不是模糊匹配。
     """
     try:
         host = (urllib.parse.urlsplit(str(url or "")).hostname or "").lower().rstrip(".")
     except Exception:
         return False
-    d = str(needle or "").strip().lower()
+    d = str(needle or "").strip().lower().strip(".")
     if not host or not d:
         return False
-    if d.startswith("*."):
+    if d.startswith("*."):                       # 显式通配：等价于受控子域
         d = d[2:]
-    if d.endswith("."):
-        return host.startswith(d)
-    if "." in d:
-        return host == d or host.endswith("." + d)
-    return any(label.startswith(d) for label in _registrable_labels(host))
-
-
-# 常见的二级公共后缀：判断"可注册域"时要多取一段
-_SECOND_LEVEL = {
-    "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn", "ac.cn",
-    "co.uk", "org.uk", "com.hk", "com.tw", "co.jp", "com.au",
-}
-
-
-def _registrable_labels(host: str) -> list[str]:
-    """主机名的"可注册域"标签（近似 eTLD+1；不引入公共后缀表）。
-
-    只用于权威加权这类启发式判断——不是安全边界（准入另有硬闸）。
-    """
-    labels = [x for x in str(host or "").split(".") if x]
-    if len(labels) <= 2:
-        return labels
-    if ".".join(labels[-2:]) in _SECOND_LEVEL:
-        return labels[-3:]
-    return labels[-2:]
+    if "." not in d or d.endswith("."):
+        return False                             # 片段或 `ir.` 这类标签：不匹配
+    return host == d or host.endswith("." + d)
 
 
 def score_results(query: str, results: list[dict], min_score: int | None = None,

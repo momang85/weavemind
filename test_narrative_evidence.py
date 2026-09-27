@@ -197,7 +197,7 @@ class TestContractApplicability(unittest.TestCase):
             "https://static.cninfo.com.cn/finalpage/2027-04-01/999.PDF",
             "一、经营情况讨论与分析\n\n本公司2026年度营业收入891.75亿元，主要系系列酒销量增加所致。\n")
         third_2027 = self._recs(
-            "白酒行业2027年展望_某媒体", "https://news.example/2027/outlook",
+            "白酒行业2027年展望_某媒体", "https://news.example/2027-01-15/outlook",
             "一、经营情况讨论与分析\n\n贵州茅台2027年经营情况讨论：预计营业收入将保持增长。\n")
         for recs in (wuliangye, third_2027):
             self.assertTrue(recs)
@@ -227,20 +227,28 @@ class TestContractApplicability(unittest.TestCase):
         self.assertFalse(any(r["excluded"] for r in recs))
 
     def test_month_or_year_precision_dates_are_not_admitted(self):
-        """A3：仅知年月/年份不能断言"未晚于资料截止"——不得虚构月初/年初据此通过。"""
+        """A3：仅知年月不能断言"未晚于资料截止"；裸年份路径不再当发布日期（C0-1）。
+
+        年份的反例来自专项 §3.2：`/report/2024` 这类路径里的单一年份通常是**报告期**，
+        拿它当发布年会让"截至日成立"凭空成立，所以现在只认日期形状的路径段
+        （`YYYY-MM` / `YYYY-MM-DD` / `YYYYMMDD` / 公告编号）与来源字段。
+        """
         month = self._recs(
             "贵州茅台2024年报解读_某媒体", "https://news.example/2025-03/review",
             "一、经营情况讨论与分析\n\n贵州茅台2024年营业收入1741.44亿元。\n")
-        year = self._recs(
+        year_only = self._recs(
             "贵州茅台2024年报解读_某媒体", "https://news.example/2025/review",
             "一、经营情况讨论与分析\n\n贵州茅台2024年营业收入1741.44亿元。\n")
-        for recs in (month, year):
+        for recs in (month, year_only):
             self.assertTrue(recs)
             self.assertTrue(all(r["admission"] == "unknown" for r in recs), recs)
-            self.assertTrue(all(r["published_precision"] in ("month", "year") for r in recs))
-        # 月份精度参与排序，但**精度另记**，不冒充已核实日期
+        # 存储值按既有 `_norm_date` 补到月初（排序可比），但**精度另记为 month**，
+        # 不得据它成立截至——补零后的字符串一旦被读成日精度，月精度材料就会绕过 A3 闸
         self.assertEqual(month[0]["published_at"], "2025-03-01")
         self.assertEqual(month[0]["published_precision"], "month")
+        # 裸年份不再产出日期：精度未知，同样不成立截至
+        self.assertEqual(year_only[0]["published_at"], "")
+        self.assertEqual(year_only[0]["published_precision"], "")
 
     def test_full_date_after_the_cutoff_is_excluded(self):
         """A3 反例：资料截止 2025-04-15，文档发布 2025-04-20 → 必须排除。"""

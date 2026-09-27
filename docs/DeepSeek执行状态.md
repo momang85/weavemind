@@ -1,5 +1,18 @@
-# DeepSeek 执行状态（2026-09-27 更新 · 专项 S0/S1/S2 已交，S3 上半已交）
+# DeepSeek 执行状态（2026-09-27 更新 · 09-27 架构行动 C0 在办；S0/S1/S2 已交、S3 上半已交）
 
+**当前批次**：`docs/真实研究闭环与阶段D收口_20260927.md`（基线 453f958）**C0→C1→C2→C3→C4**。
+已交 N/S 批次不重跑；便携包缺 S3 的事实如实保留（重建在 C4）。
+
+## C0-1 统一资料准入（已交，证据 `docs/evidence/c0_1_admission_unification_20260927.md`）
+
+- 关掉 §3.2 全部反例：`2025-00-99` 不再准入、`2025/04/29` 正常识别（真实日历 + 精度 + 依据）；
+  URL 只认具名公告标识与日期形状路径段（`?asof=` 不再当证据），裸年份不再当发布年；
+  正文主体判定取代标题判定（标题洋河/正文茅台 → `subject_mismatch`）；错误页（`Access denied`）
+  拒收；权威域改"完整域 + 受控子域"（`cninfo-fake.org`/`eastmoney-fake.org`/`ir.evil.org` 不再命中）；
+  准入带 `source_class`（官方披露/第三方镜像/用户文件），不因标题或用户直链升为官方。
+- 验证：`test_search_quality_unified`+`test_narrative_evidence`+`test_delivery_chain`+`test_facts`
+  +`test_working_paper`+`test_p0` 共 990 例 OK；被调整的断言与 fixture 逐条写在证据文档。
+- 未做：C0-2 根检索预算、C0-3 出口覆盖；新旧两条链路主体判定窗口的彻底同源（留 C1 接线）。
 ## S3 上半：A 股原始披露摄取窄闭环（2026-09-27，证据 `docs/evidence/s3_disclosure_ingest_20260927.md`）
 
 - **披露日纪律（专项 §3-8 必修）**：`facts.py` 不再用报告期末顶替公告日（此前
