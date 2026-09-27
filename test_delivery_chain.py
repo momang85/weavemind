@@ -7337,6 +7337,27 @@ class TestResearchQuestions(unittest.TestCase):
             self.assertIn("同比", str(q.get("observation")))
             self.assertTrue(q["next_action"], q)
 
+    def test_criteria_table_and_contract_question_set(self):
+        """判据表覆盖四类问题；问题集随契约版本化（`test_question_assessment.py`
+        有完整版；本文件保留最小回归，便于该文件尚未进 CI 时也能守住）。"""
+        import question_assessment as qa
+        for qtype in (qa.QTYPE_NUMERIC_CHANGE, qa.QTYPE_ISSUER_EXPLANATION,
+                      qa.QTYPE_QUANT_DECOMPOSITION, qa.QTYPE_RELATION):
+            rule = qa.QUESTION_RULES.get(qtype) or {}
+            for key in ("need", "nature", "full", "partial", "none"):
+                self.assertTrue(str(rule.get(key) or "").strip(), (qtype, key))
+        self.assertEqual(qa.question_type_of("operating_cashflow"), qa.QTYPE_RELATION)
+        self.assertLessEqual(len(qa.question_set()), 3)
+        from execution_contract import ExecutionContract
+        c = ExecutionContract(company="洋河股份", company_id="002304.SZ",
+                              required_metrics=("revenue", "net_profit",
+                                                "operating_cashflow"))
+        self.assertEqual(len(c.to_wire().get("questions") or []), 3)
+        self.assertNotEqual(c.fingerprint(),
+                            ExecutionContract(company="洋河股份", company_id="002304.SZ",
+                                              required_metrics=("revenue",)).fingerprint(),
+                            "问题集变了指纹必须变")
+
     def test_subject_type_applicability_four_fixed_cases(self):
         """四个固定适用性用例（C2）：中国平安 / 仅代码 601318.SH / 未知主体 /
         银行对公视角研究非金融公司——检查派生指标、补材料建议与导出，不只禁一个比率。"""
