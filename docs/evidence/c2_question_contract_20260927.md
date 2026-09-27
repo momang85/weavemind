@@ -57,8 +57,10 @@
 
 ## 6. 验证与文件
 
-- 判据表/类型/契约问题集/确定性：新增 `test_question_assessment.py`（18 例；**该文件已在架构师
-  未提交的 `ci.yml` 里挂上**，本批不代其提交；本地按 CI 口径单跑通过）。
+- 判据表/类型/契约问题集/确定性：新增 `test_question_assessment.py`（20 例；本地按 CI 口径单跑通过）。
+  当时工作区 `ci.yml` 里已存在一步指向该文件的**既有未提交改动**——作者未核实其来源，按既有改动
+  记录，不归为"架构师改动"；本批未接管其提交。H0 已把该步骤精确纳入 `8a44f85`（此前已提交的
+  CI 不含它：HEAD 46 步 → 纳入后 47 步；仅暂存本批 hunk，未使用 `git add .`）。
 - 装配与表达：`test_delivery_chain`（四用例、方向措辞、负基数、证据性质、覆盖计数）、
   `test_narrative_evidence`（判据表驱动的分解 full/partial、自报 full 不作数）。
 - 冻结场景：`test_offline_delivery` 全场景通过（含 `pdf_parseable`）。

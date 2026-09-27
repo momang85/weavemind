@@ -1,7 +1,30 @@
-# DeepSeek 执行状态（2026-09-27 更新 · 09-27 架构行动 C1 在办；S0/S1/S2 已交、S3 上半已交）
+# DeepSeek 执行状态（2026-09-27 更新 · Harness 接续：H0 已交，H1 在办）
 
-**当前批次**：`docs/真实研究闭环与阶段D收口_20260927.md`（基线 453f958）**C0→C1→C2→C3→C4**。
-已交 N/S 批次不重跑；便携包缺 S3 的事实如实保留（重建在 C4）。C0 三提交已交（`5107ac0`/`e5c5607`/`bac62c6`）。
+**当前批次**：`docs/Harness接续执行指令_20260927.md`（基线 2519d9a）**H0→H1→H2→H3**；
+H0 之后的阶段标准仍是 `docs/真实研究闭环与阶段D收口_20260927.md` 的 C0→C4。
+已交的 C0/C1/C2 与 N/S 批次不重跑；便携包缺 S3 的事实如实保留（重建在 C4）。
+C0 三提交已交（`5107ac0`/`e5c5607`/`bac62c6`）。
+
+## H0 提交防护与 C2 测试门禁（已交，提交 `8a44f85`，证据 `docs/evidence/h0_commit_guard_20260927.md`）
+
+- **配置备份忽略补口**：`.gitignore` 增加 `config.json.bak.*`。旧两条模式（`config.json.bak`、
+  `config.json.*.bak`）都匹配不到 `config.json.bak.<tag>-<timestamp>` 形态，故 09-20 那个
+  含密钥备份一直以 `??` 挂在未跟踪区。修后本机 **7 个** `config.json*.bak` 逐条 `git check-ignore`
+  **全部忽略**；`git log --all -- 'config.json.bak*'` **无任何记录**（从未入库）→ 按指令
+  **不轮换密钥**、不删除/移动任何备份、未读/未打印任何密钥值。
+- **C2 测试进 CI**：`ci.yml` 纳入 `test_question_assessment.py` 步骤。核对口径：
+  **已提交 CI 47 步 == 跟踪的 47 个 `test_*.py`**，双向差集为空（无指向不存在文件、无漏跑）。
+  该步骤原为工作区一处**既有未提交改动**（来源未核实，不记为架构师改动），本批按 H0.2 精确接续。
+- **暂存纪律**：先确认暂存区为空；只暂存 `.gitignore` 本批 hunk + `ci.yml` 该步骤 hunk。
+  `.gitignore` 的 `dump.rdb`（**09-19 既有改动**）仍未暂存；`templates.json`、
+  `evals/cases/auto_grown.json`、4 处 docs 脏改、`dist/`、`_trial_*`×6、`probe_batchA.py`、
+  `trial_tasks.json`、`worker_base.py.log`、`agents.db` 一律未动。未用 `git add .`。
+- **文档更正（H0.3）**：`c2_question_contract` §6 把该 `ci.yml` 改动写成"架构师未提交"→ 改为
+  来源未核实的既有改动，并把 18 例更正为 20 例（本批实测 `Ran 20 tests OK`）；
+  `n4_scenario_drills` §9 已过时的"指向不存在的 `test_question_assessment.py`"一并更正；
+  `c1_material_entry` §2 "别人的未提交工作"改为"既有未提交工作，来源未核实"。
+- **未验**：远端 CI 仍是 46 步（本批未推送）；未重跑全仓（用 `git check-ignore` 逐条与 CI
+  文件集双向差集作证据）。清理日志/备份/数据库/临时物**不属本批**。
 
 ## C1 补材料入口接入编排（已交，证据 `docs/evidence/c1_material_entry_20260927.md`）
 

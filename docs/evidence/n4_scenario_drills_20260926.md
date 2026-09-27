@@ -234,7 +234,9 @@ cmd /c start.bat
   `test_auth_audit`（bootstrap 的 `code_execution` 形状与不泄漏）扩展 1 例；
   `test_setup_wizard`（引导保留已有高级配置、基底回退）2 例。
 - 本机 CI 平价跑法：ci.yml 列出的 46 个测试文件逐个跑，全部 OK
-  （本地 ci.yml 有一行未提交改动指向不存在的 `test_question_assessment.py`，不属本批，未提交）。
+  （当时工作区 `ci.yml` 另有一处**既有未提交改动**，指向尚不存在的 `test_question_assessment.py`，
+  来源未核实，按既有改动记录，不归为"架构师改动"、不属本批。该测试文件后由 C2 建立并提交；
+  H0 已把该 CI 步骤一并纳入 `8a44f85`，现为 47 步）。
 
 ## 10. 未验与已知边界（照实）
 
