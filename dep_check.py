@@ -914,12 +914,23 @@ def _redis_data_dir() -> Path:
 
 
 def _redis_start_argv(exe_path: Path, port: int,
-                      data_dir: Path | None = None) -> list[str]:
+                      data_dir: Path | None = None,
+                      ephemeral: bool = False) -> list[str]:
     """便携 Redis 启动参数：默认只绑本机回环（IPv6 用 - 前缀，绑不上不报错）。
 
     只绑回环 → 不对局域网暴露，也不会触发 Windows 防火墙的入站放行询问。
+
     `data_dir` 非空时显式写 `--dir`（msys2 版必须给，否则 RDB 落不了盘，见
     `_redis_data_dir` 的说明）；一律用正斜杠，避免 msys2 把反斜杠路径解错。
+
+    `ephemeral=True`（**只对便携版**）：不启用快照，并让"保存失败"永远不锁写入。
+    实测教训（logs/redis.log）：msys2 便携版在本机 **RDB 保存不可靠**——后台保存的
+    fork 子进程要么 `fork: Resource temporarily unavailable`（0xC0000142），要么
+    `Failed opening the temp RDB file … Permission denied`；而
+    `stop-writes-on-bgsave-error=yes` 一旦因此触发，就会**拒掉所有写命令**（连 PING
+    都回 MISCONF），表现为"服务都在跑但一个任务都提交不了"。
+    便携 Redis 在这里只承担总线/队列/缓存，**持久事实在 SQLite 与工作区**，
+    所以按设计不存快照；用户若要持久化，应使用系统/外部 Redis（那条路径不加这些开关）。
     """
     argv = [str(exe_path), "--port", str(port)]
     bind = redis_bind_addr()
@@ -929,6 +940,9 @@ def _redis_start_argv(exe_path: Path, port: int,
     if data_dir is not None:
         argv.extend(["--dir", str(data_dir).replace("\\", "/"),
                      "--dbfilename", "dump.rdb"])
+    if ephemeral:
+        argv.extend(["--save", "", "--appendonly", "no",
+                     "--stop-writes-on-bgsave-error", "no"])
     return argv
 
 
@@ -957,45 +971,26 @@ def _redis_inline(host: str, port: int, command: str,
     return b"".join(chunks).decode("utf-8", "replace")
 
 
-def verify_redis_persistence(port: int, expect_dir: Path, *,
-                             host: str = "127.0.0.1",
-                             wait_sec: float = 8.0) -> tuple[bool, str]:
-    """启动后自检：`dir` 是不是我们给的那个 + **bgsave 是否真能落盘**。
+def verify_redis_writable(port: int, *, host: str = "127.0.0.1") -> tuple[bool, str]:
+    """启动后自检：**写命令是否真的能过**（这才是应用需要的性质）。
 
-    为什么必须自检：`dir` 给错时 Redis 不会拒绝启动，而是先正常服务、等第一次
-    `bgsave` 失败后进入 MISCONF，**从那一刻起所有写命令被拒**——用户遇到的是
-    "提交任务失败"，很难追到 Redis 的落盘目录上。这里启动后立刻验一次，
-    验不过就把原因和可执行建议一起报出来。
+    为什么不验 bgsave：便携版**按设计**不存快照（见 `_redis_start_argv`），拿 bgsave
+    判健康只会误报。真正要守住的是"写不能因为保存失败被锁死"——这一条由
+    `--stop-writes-on-bgsave-error no` 保证，并由本探针当场验证。
     """
-    want = str(expect_dir).replace("\\", "/").rstrip("/")
-    got_raw = _redis_inline(host, port, "CONFIG GET dir")
-    got = ""
-    for line in got_raw.splitlines():
-        if line.strip().startswith("/") or (len(line) > 1 and line[1] == ":"):
-            got = line.strip().replace("\\", "/").rstrip("/")
-    if got and want and got.lower() != want.lower():
-        return False, (f"Redis 的 dir 是 {got}，但我们给的是 {want}"
-                       "（落盘目录不对，bgsave 会失败并把写命令全挡掉）")
-    _redis_inline(host, port, "BGSAVE")
-    deadline = time.time() + wait_sec
-    status = ""
-    while time.time() < deadline:
-        info = _redis_inline(host, port, "INFO persistence")
-        for line in info.splitlines():
-            if line.startswith("rdb_last_bgsave_status:"):
-                status = line.split(":", 1)[1].strip()
-            if line.startswith("rdb_bgsave_in_progress:"):
-                in_progress = line.split(":", 1)[1].strip()
-                if in_progress in ("1", "True"):
-                    status = ""                   # 还在存，继续等
-        if status == "ok":
-            return True, f"落盘自检通过（dir={got or want}）"
-        if status and status != "ok":
-            break
-        time.sleep(0.5)
-    return False, (f"落盘自检失败（rdb_last_bgsave_status={status or '未知'}，"
-                   f"dir={got or want}）；写命令会在首次 bgsave 失败后被全部拒绝。"
-                   "若路径含中文/空格，可把 WEAVEMIND_DATA_DIR 指到纯 ASCII 目录后重启")
+    key = "wm:startup:probe"
+    setr = _redis_inline(host, port, f"SET {key} 1")
+    getr = _redis_inline(host, port, f"GET {key}")
+    _redis_inline(host, port, f"DEL {key}")
+    if not str(setr).strip().startswith("+OK"):
+        return False, (f"Redis 写命令被拒（SET 返回 {str(setr)[:90]}）——"
+                       "应用无法接受任务；见 logs/redis.log 的保存错误")
+    if "1" not in str(getr):
+        return False, f"Redis 写后可读校验失败（GET 返回 {str(getr)[:60]}）"
+    save_cfg = _redis_inline(host, port, "CONFIG GET save")
+    mode = "不存快照（便携版按设计）" if "save\r\n\r\n" in save_cfg or "$0\r\n\r\n" in save_cfg \
+        else "按配置存快照"
+    return True, f"写命令自检通过；持久化模式：{mode}"
 
 
 def _publish_redis_host_env(bind: str) -> None:
@@ -1089,7 +1084,12 @@ def ensure_redis(auto: bool = True, wait_sec: float = 12.0,
             _write_redis_pid(proc.pid)
             if _wait_redis("", port, wait_sec):
                 _publish_redis_host_env(redis_bind_addr())
+                _w_ok, _w_why = verify_redis_writable(port)
+                if not _w_ok:
+                    print(_t(f"      警告：{_w_why}", f"      warning: {_w_why}"),
+                          flush=True)
                 return {"ok": True, "action": "started",
+                        "writable_ok": _w_ok, "writable_detail": _w_why,
                         "detail": _t(f"已启动本机 redis-server（pid={proc.pid}，绑定 {redis_bind_addr()}）",
                                       f"started system redis-server (pid={proc.pid}, bind {redis_bind_addr()})")}
             return {"ok": False, "action": "failed",
@@ -1120,13 +1120,12 @@ def ensure_redis(auto: bool = True, wait_sec: float = 12.0,
         _write_redis_pid(proc.pid)
         if _wait_redis("", port, wait_sec):
             _publish_redis_host_env(redis_bind_addr())
-            _persist_ok, _persist_why = ((True, "") if data_dir is None else
-                                         verify_redis_persistence(port, data_dir))
+            _persist_ok, _persist_why = verify_redis_writable(port)
             if not _persist_ok:
                 print(_t(f"      警告：{_persist_why}",
                          f"      warning: {_persist_why}"), flush=True)
             return {"ok": True, "action": "started_system",
-                    "persistence_ok": _persist_ok, "persistence_detail": _persist_why,
+                    "writable_ok": _persist_ok, "writable_detail": _persist_why,
                     "detail": _t(f"已启动系统已装的 Redis（pid={proc.pid}，{sys_redis}）",
                                  f"started system-installed Redis (pid={proc.pid}, {sys_redis})")}
     redis_exe = _usable_portable_redis()
@@ -1158,22 +1157,22 @@ def ensure_redis(auto: bool = True, wait_sec: float = 12.0,
                     "detail": _t(f"解压后未找到可用 {REDIS_BIN}（{PORTABLE_DIR}）\n{REDIS_HINT}",
                                  f"no usable {REDIS_BIN} after extract ({PORTABLE_DIR})\n{REDIS_HINT_EN}")}
         _ = used
-    proc = _spawn_background(_redis_start_argv(redis_exe, port, data_dir),
+    proc = _spawn_background(_redis_start_argv(redis_exe, port, data_dir,
+                                               ephemeral=True),
                              LOG_DIR / "redis.log", cwd=redis_exe.parent)
     _write_redis_pid(proc.pid)
     if _wait_redis("", port, wait_sec):
         _publish_redis_host_env(redis_bind_addr())
-        _persist_ok, _persist_why = ((True, "") if data_dir is None else
-                                     verify_redis_persistence(port, data_dir))
+        _persist_ok, _persist_why = verify_redis_writable(port)
         if not _persist_ok:
             print(_t(f"      警告：{_persist_why}", f"      warning: {_persist_why}"),
                   flush=True)
         return {"ok": True, "action": "started",
-                "persistence_ok": _persist_ok, "persistence_detail": _persist_why,
+                "writable_ok": _persist_ok, "writable_detail": _persist_why,
                 "detail": _t(f"已启动便携版 Redis（pid={proc.pid}，绑定 {redis_bind_addr()}，"
-                             f"数据目录 {data_dir or redis_exe.parent}，{redis_exe.parent}）",
+                             f"数据目录 {data_dir or redis_exe.parent}，不存快照，{redis_exe.parent}）",
                           f"started portable Redis (pid={proc.pid}, bind {redis_bind_addr()},"
-                          f" dir {data_dir or redis_exe.parent}, {redis_exe.parent})")}
+                          f" dir {data_dir or redis_exe.parent}, no snapshots, {redis_exe.parent})")}
     return {"ok": False, "action": "failed",
             "detail": _t(f"Redis 已启动但探测失败（pid={proc.pid}，见 logs/redis.log）\n"
                          + FIREWALL_HINT.replace("%PROGRAM%", str(redis_exe)),

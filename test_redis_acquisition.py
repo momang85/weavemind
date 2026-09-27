@@ -83,40 +83,49 @@ class TestRedisDataDirAndPersistence(unittest.TestCase):
         except UnicodeEncodeError:
             self.fail(f"含中文的数据根必须退到 ASCII 位置，实际给了 {d}")
 
-    def test_persistence_check_flags_wrong_dir(self):
-        """dir 不是我们给的那个 → 明确报错（这正是当初 `/portable/…` 的情形）。"""
-        with mock.patch.object(dc, "_redis_inline") as inline:
-            inline.return_value = "$8\r\ndir\r\n$34\r\n/portable/Redis-x64-msys2\r\n"
-            ok, why = dc.verify_redis_persistence(6379, Path("C:/data/redis"))
-        self.assertFalse(ok)
-        self.assertIn("/portable/Redis-x64-msys2", why)
-        self.assertIn("落盘目录不对", why)
+    def test_portable_argv_disables_snapshots_and_write_lockout(self):
+        """便携版按设计不存快照，并让"保存失败"永不锁写入（本机 msys2 保存不可靠）。
 
-    def test_persistence_check_passes_when_bgsave_ok(self):
+        实测（logs/redis.log）：后台保存的 fork 子进程要么 0xC0000142，要么
+        `Failed opening the temp RDB file … Permission denied`；而
+        `stop-writes-on-bgsave-error=yes` 一旦触发就把**所有写命令**禁掉。
+        """
+        argv = dc._redis_start_argv(Path("r.exe"), 6379, Path("C:/d"), ephemeral=True)
+        self.assertEqual(argv[argv.index("--save") + 1], "",
+                         "便携版必须关掉自动快照")
+        self.assertEqual(argv[argv.index("--appendonly") + 1], "no")
+        self.assertEqual(argv[argv.index("--stop-writes-on-bgsave-error") + 1], "no",
+                         "保存失败不得再锁死写命令")
+        # 系统/外部 Redis 不加这些开关（那条路径的持久化归用户自己管）
+        plain = dc._redis_start_argv(Path("r.exe"), 6379, Path("C:/d"))
+        self.assertNotIn("--save", plain)
+        self.assertNotIn("--stop-writes-on-bgsave-error", plain)
+
+    def test_writable_check_passes_on_ok_write(self):
         def fake(host, port, command, timeout=2.0):
-            if command.startswith("CONFIG GET dir"):
-                return "$19\r\ndir\r\n$17\r\nC:/data/redis\r\n"
-            if command.startswith("INFO persistence"):
-                return "rdb_last_bgsave_status:ok\r\nrdb_bgsave_in_progress:0\r\n"
-            return "+Background saving started\r\n"
+            if command.startswith("SET"):
+                return "+OK\r\n"
+            if command.startswith("GET"):
+                return "$1\r\n1\r\n"
+            if command.startswith("CONFIG GET save"):
+                return "$4\r\nsave\r\n$0\r\n\r\n"
+            return "+OK\r\n"
 
         with mock.patch.object(dc, "_redis_inline", side_effect=fake):
-            ok, why = dc.verify_redis_persistence(6379, Path("C:/data/redis"))
+            ok, why = dc.verify_redis_writable(6379)
         self.assertTrue(ok, why)
-        self.assertIn("通过", why)
+        self.assertIn("不存快照", why, "要如实说明便携版的持久化模式")
 
-    def test_persistence_check_reports_failed_bgsave_with_actionable_hint(self):
-        """bgsave 失败要给出**可执行**建议（中文路径就换 WEAVEMIND_DATA_DIR）。"""
-        def fake(host, port, command, timeout=2.0):
-            if command.startswith("CONFIG GET dir"):
-                return "$19\r\ndir\r\n$17\r\nC:/data/redis\r\n"
-            return "rdb_last_bgsave_status:err\r\nrdb_bgsave_in_progress:0\r\n"
+    def test_writable_check_flags_misconf_lockout(self):
+        """反例：写被拒（正是 MISCONF 锁写的表现）→ 必须报出来并指向日志。"""
+        misconf = ("-MISCONF Redis is configured to save RDB snapshots, but it's currently "
+                   "unable to persist to disk.\r\n")
 
-        with mock.patch.object(dc, "_redis_inline", side_effect=fake):
-            ok, why = dc.verify_redis_persistence(6379, Path("C:/data/redis"))
+        with mock.patch.object(dc, "_redis_inline", return_value=misconf):
+            ok, why = dc.verify_redis_writable(6379)
         self.assertFalse(ok)
-        self.assertIn("err", why)
-        self.assertIn("WEAVEMIND_DATA_DIR", why)
+        self.assertIn("写命令被拒", why)
+        self.assertIn("logs/redis.log", why)
 
 
 class TestSourceOrder(unittest.TestCase):
@@ -265,10 +274,10 @@ class TestSystemRedisPreference(unittest.TestCase):
                               lambda argv, log, cwd=None: mock.Mock(pid=4242)),
             mock.patch.object(dc, "_write_redis_pid", lambda pid: None),
             mock.patch.object(dc, "_wait_redis", lambda h, p, w: True),
-            # 落盘自检必须也替身掉：否则会去连**真实存在**的 Redis（本机环境耦合），
+            # 写命令自检必须也替身掉：否则会去连**真实存在**的 Redis（本机环境耦合），
             # 在 CI 上则变成一次无谓的连接失败。
-            mock.patch.object(dc, "verify_redis_persistence",
-                              lambda port, d, **k: (True, "自检替身")),
+            mock.patch.object(dc, "verify_redis_writable",
+                              lambda port, **k: (True, "自检替身")),
             mock.patch.object(dc, "_publish_redis_host_env", lambda a: None),
             mock.patch.object(dc, "redis_ping", lambda h, p: False),
             mock.patch.object(dc, "_usable_portable_redis", lambda: None),
