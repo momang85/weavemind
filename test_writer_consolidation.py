@@ -143,6 +143,69 @@ class TestSubmitHandshake(unittest.TestCase):
         self.assertIn("拒绝", str(ctx.exception))
         self.assertIn("DB 不可写", str(ctx.exception))
 
+    # ── C3/H3：幂等键 ────────────────────────────────────────────────────────
+
+    def _seed_key(self, task_id: str, key: str) -> None:
+        """在任务库预置一条带幂等键的任务（模拟"上一次提交已经成功"）。"""
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            task_state.mark_queued(task_id, "目标", idempotency_key=key,
+                                   db_path=self.db)
+
+    def test_known_idempotency_key_does_not_publish_again(self):
+        """反例：同幂等键重复提交 → 直接复用已有任务，**连发布都不做**。"""
+        import web_ui
+        self._seed_key("ui-old", "k-dup")
+        fake = self._fake_redis("accepted")
+        with mock.patch.object(web_ui, "_redis_ready", return_value=True), \
+                mock.patch.object(web_ui, "_new_redis", return_value=fake), \
+                mock.patch.object(web_ui, "DB_PATH", self.db), \
+                mock.patch.object(task_state, "DB_PATH", self.db):
+            result = web_ui._publish_task("目标", idempotency_key="k-dup")
+        self.assertEqual(result["task_id"], "ui-old", "必须复用已有任务")
+        self.assertTrue(result.get("deduplicated"))
+        fake.publish.assert_not_called()
+        self.assertEqual(len(self._task_rows()), 1, "不得新建第二个任务")
+
+    def test_dedup_ack_returns_existing_task(self):
+        """两个提交竞争时先落库者赢：编排器收执 `accepted:dedup:<id>`。"""
+        import web_ui
+        fake = self._fake_redis("accepted:dedup:ui-winner")
+        with mock.patch.object(web_ui, "_redis_ready", return_value=True), \
+                mock.patch.object(web_ui, "_new_redis", return_value=fake), \
+                mock.patch.object(web_ui, "DB_PATH", self.db), \
+                mock.patch.dict("os.environ", {"WM_SUBMIT_ACK_TIMEOUT": "0.6"}):
+            result = web_ui._publish_task("目标", idempotency_key="k-race")
+        self.assertEqual(result["task_id"], "ui-winner")
+        self.assertTrue(result.get("deduplicated"))
+
+    def test_payload_carries_key_and_submit_timeline(self):
+        """请求要带幂等键与"收到/发布"时刻，编排器一次落库（不再自造时刻）。"""
+        import web_ui
+        fake = self._fake_redis("accepted")
+        with mock.patch.object(web_ui, "_redis_ready", return_value=True), \
+                mock.patch.object(web_ui, "_new_redis", return_value=fake), \
+                mock.patch.object(web_ui, "DB_PATH", self.db), \
+                mock.patch.dict("os.environ", {"WM_SUBMIT_ACK_TIMEOUT": "0.6"}):
+            web_ui._publish_task("目标", idempotency_key="k-ev")
+        payload = json.loads(fake.publish.call_args.args[1])
+        self.assertEqual(payload["idempotency_key"], "k-ev")
+        names = [e.get("event") for e in payload["submit_events"]]
+        self.assertEqual(names, ["received", "published"], names)
+        self.assertTrue(all(e.get("ts") for e in payload["submit_events"]))
+
+    def test_without_key_behaviour_unchanged(self):
+        """没有幂等键时保持原样：不查库、不带键、每次都是新任务。"""
+        import web_ui
+        fake = self._fake_redis("accepted")
+        with mock.patch.object(web_ui, "_redis_ready", return_value=True), \
+                mock.patch.object(web_ui, "_new_redis", return_value=fake), \
+                mock.patch.object(web_ui, "DB_PATH", self.db), \
+                mock.patch.dict("os.environ", {"WM_SUBMIT_ACK_TIMEOUT": "0.6"}):
+            result = web_ui._publish_task("目标")
+        self.assertFalse(result.get("deduplicated"))
+        payload = json.loads(fake.publish.call_args.args[1])
+        self.assertEqual(payload["idempotency_key"], "")
+
 
 class TestFinalizeAndCrashFallback(unittest.TestCase):
     def setUp(self):

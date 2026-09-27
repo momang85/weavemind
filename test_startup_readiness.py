@@ -1011,5 +1011,78 @@ class TestPortConflictsDoNotTakeOverOtherServices(unittest.TestCase):
                                  "让位端口上没有 Redis 时不得继续指向它")
 
 
+class TestOrchestratorOwnership(unittest.TestCase):
+    """C3/H3：同一 Redis 上只允许一个编排器消费任务通道。
+
+    反例（原指令 §3.4）：两个编排器订阅同一条 `orchestrator:main` 时，
+    pub/sub 是广播——同一条任务请求被**执行两次**（重复付费、重复写库）。
+    """
+
+    class _R:
+        """最小 Redis 替身：只需 set(nx)/get/ttl/setex。"""
+
+        def __init__(self, owner=None, hb_ttl=-2):
+            self.owner = owner
+            self.hb_ttl = hb_ttl
+            self.sets = []
+
+        def set(self, k, v, nx=False):
+            self.sets.append((k, v, nx))
+            if nx and self.owner is not None:
+                return None
+            self.owner = v
+            return True
+
+        def get(self, k):
+            return self.owner
+
+        def ttl(self, k):
+            return self.hb_ttl
+
+        def setex(self, k, ttl, v):
+            self.hb_ttl = ttl
+            return True
+
+    def test_first_claim_wins(self):
+        from orchestrator_v2 import claim_orchestrator_ownership
+        ok, why = claim_orchestrator_ownership(self._R(), instance="inst-a")
+        self.assertTrue(ok, why)
+
+    def test_same_instance_can_restart(self):
+        from orchestrator_v2 import claim_orchestrator_ownership
+        r = self._R(owner="inst-a", hb_ttl=20)
+        ok, why = claim_orchestrator_ownership(r, instance="inst-a")
+        self.assertTrue(ok, why)
+
+    def test_second_live_instance_is_refused(self):
+        """别的实例还在跑（心跳新鲜）→ 明确拒绝，不默默重复消费。"""
+        from orchestrator_v2 import claim_orchestrator_ownership
+        r = self._R(owner="inst-other", hb_ttl=25)
+        ok, why = claim_orchestrator_ownership(r, instance="inst-b")
+        self.assertFalse(ok, why)
+        self.assertIn("inst-other", why)
+        self.assertIn("不允许两个编排器", why)
+
+    def test_dead_owner_is_taken_over(self):
+        """上一位持有者心跳已过期（崩溃/重启）→ 允许接管。"""
+        from orchestrator_v2 import claim_orchestrator_ownership
+        r = self._R(owner="inst-dead", hb_ttl=-2)
+        ok, why = claim_orchestrator_ownership(r, instance="inst-c")
+        self.assertTrue(ok, why)
+        self.assertEqual(r.owner, "inst-c", "接管后归属要落到本实例")
+
+    def test_redis_failure_does_not_block_startup(self):
+        """归属认领失败只记日志（可见性问题，不阻断启动）。"""
+        from orchestrator_v2 import claim_orchestrator_ownership
+
+        class _Bad:
+            def set(self, *a, **k):
+                raise RuntimeError("redis down")
+
+        ok, why = claim_orchestrator_ownership(_Bad(), instance="inst-d")
+        self.assertTrue(ok, "认领失败不得阻断启动")
+        self.assertIn("未确认", why)
+
+
 if __name__ == "__main__":
     unittest.main()

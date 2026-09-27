@@ -129,7 +129,124 @@ def _add_missing_columns(con: sqlite3.Connection) -> list[str]:
         con.execute(
             "ALTER TABLE task_history ADD COLUMN research_request_json TEXT DEFAULT ''")
         added.append("research_request_json")
+    if "idempotency_key" not in existing:
+        # C3/H3：幂等键。同一键的重复提交（双击、超时重试、代理重放）只产生一个任务。
+        con.execute(
+            "ALTER TABLE task_history ADD COLUMN idempotency_key TEXT DEFAULT ''")
+        added.append("idempotency_key")
+    if "submit_timeline_json" not in existing:
+        # C3/H3：提交时间线（收到/持久化/发布/消费/开始），含实例与代码版本。
+        con.execute(
+            "ALTER TABLE task_history ADD COLUMN submit_timeline_json TEXT DEFAULT ''")
+        added.append("submit_timeline_json")
+    if "accepted_by" not in existing:
+        # C3/H3：实例归属——这条任务由哪个实例实例化，用于拒绝重复消费。
+        con.execute(
+            "ALTER TABLE task_history ADD COLUMN accepted_by TEXT DEFAULT ''")
+        added.append("accepted_by")
     return added
+
+
+# 提交时间线：事件名 → 说明（读者/页面按同一套命名读，不再各处自造）
+SUBMIT_EVENTS = ("received", "persisted", "published", "consumed", "started",
+                 "deduplicated", "rejected")
+_SUBMIT_TIMELINE_MAX = 40
+
+
+def record_submit_event(task_id: str, event: str, *, instance: str = "",
+                        code_version: str = "", detail: str = "",
+                        ts: float | None = None, db_path: str | None = None) -> bool:
+    """把一条提交时间线事件**追加**到任务行（C3/H3）。
+
+    "收到请求 → 持久化 → 发布 → 消费 → 开始"必须能按时间与实例对账：只靠一条
+    会过期的 Redis 收执键，事后无法回答"请求到没到、是谁收的、卡在哪一段"。
+    追加在一条 JSON 列里（读少写少，不另建表），最多保留最后 40 条。
+    """
+    if not task_id:
+        return False
+    entry = {"event": str(event or "")[:32], "ts": round(float(ts if ts is not None
+                                                             else time.time()), 3),
+             "instance": str(instance or "")[:64],
+             "code_version": str(code_version or "")[:40],
+             "detail": str(detail or "")[:200]}
+    try:
+        con = _connect(db_path)
+        try:
+            _add_missing_columns(con)
+            row = con.execute(
+                "SELECT submit_timeline_json FROM task_history WHERE task_id=?",
+                (task_id,)).fetchone()
+            if row is None:
+                return False
+            try:
+                items = json.loads(row[0] or "[]")
+            except Exception:
+                items = []
+            if not isinstance(items, list):
+                items = []
+            items.append(entry)
+            con.execute(
+                "UPDATE task_history SET submit_timeline_json=?, updated_at=CURRENT_TIMESTAMP"
+                " WHERE task_id=?", (json.dumps(items[-_SUBMIT_TIMELINE_MAX:],
+                                                ensure_ascii=False), task_id))
+            con.commit()
+            return True
+        finally:
+            con.close()
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("任务 %s 提交时间线写入失败：%s", task_id, str(exc)[:160])
+        return False
+
+
+def read_submit_timeline(task_id: str, db_path: str | None = None) -> list[dict]:
+    """读提交时间线（读不到返回空列表，不抛）。"""
+    try:
+        con = _connect(db_path)
+        try:
+            _add_missing_columns(con)
+            row = con.execute(
+                "SELECT submit_timeline_json FROM task_history WHERE task_id=?",
+                (task_id,)).fetchone()
+        finally:
+            con.close()
+    except Exception:
+        return []
+    if not row:
+        return []
+    try:
+        items = json.loads(row[0] or "[]")
+    except Exception:
+        return []
+    return [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
+
+
+def find_by_idempotency(idempotency_key: str,
+                        db_path: str | None = None) -> dict | None:
+    """按幂等键找**已存在**的任务（最近的优先）。找不到返回 None。
+
+    用途有两个：提交前查一次（避免重复发布），以及编排器收执时再查一次
+    （两个提交竞争时，先落库的那个赢）。
+    """
+    key = str(idempotency_key or "").strip()
+    if not key:
+        return None
+    try:
+        con = _connect(db_path)
+        try:
+            _add_missing_columns(con)
+            row = con.execute(
+                "SELECT task_id,status,phase,project FROM task_history"
+                " WHERE idempotency_key=? ORDER BY rowid DESC LIMIT 1",
+                (key,)).fetchone()
+        finally:
+            con.close()
+    except Exception:
+        return None
+    if not row:
+        return None
+    return {"task_id": str(row[0] or ""), "status": str(row[1] or ""),
+            "phase": str(row[2] or ""), "project": str(row[3] or ""),
+            "idempotency_key": key}
 
 
 def ensure_schema(db_path: str | None = None) -> list[str]:
@@ -176,10 +293,26 @@ def derive_status(step_statuses=None, acceptance: dict | None = None,
     return SUCCESS
 
 
+def _norm_submit_event(ev) -> dict | None:
+    """提交时间线事件规范化（字段与长度上限统一在一处）。"""
+    if not isinstance(ev, dict) or not ev.get("event"):
+        return None
+    try:
+        ts = float(ev.get("ts") if ev.get("ts") is not None else time.time())
+    except (TypeError, ValueError):
+        ts = time.time()
+    return {"event": str(ev.get("event"))[:32], "ts": round(ts, 3),
+            "instance": str(ev.get("instance") or "")[:64],
+            "code_version": str(ev.get("code_version") or "")[:40],
+            "detail": str(ev.get("detail") or "")[:200]}
+
+
 def mark_queued(task_id: str, goal: str, project: str = "default",
                 conversation_id: str = "", parent_task_id: str = "",
                 context: str = "", user: str = "",
                 research_request: dict | None = None,
+                idempotency_key: str = "", instance: str = "",
+                code_version: str = "", submit_events: list | None = None,
                 db_path: str | None = None) -> bool:
     """登记排队中的任务（提交时调用）。返回是否**真的写入成功**。
 
@@ -190,6 +323,10 @@ def mark_queued(task_id: str, goal: str, project: str = "default",
     `research_request`：研究契约（公司/市场/两期/口径/截至日/来源要求/预算）。
     **在提交时先落库**，后续底稿只读它——抓取到的公司名/代码只能作为候选比对，
     不能反过来改写用户请求（否则请求会被数据源决定）。
+
+    C3/H3 新增：`idempotency_key`（重复提交只算一个任务）、`instance`/`code_version`
+    （实例归属，写入 `accepted_by`）、`submit_events`（收到的请求自带的
+    received/published 时刻，与本次 persisted 一起落到同一列，便于事后对账）。
     """
     request_json = ""
     if isinstance(research_request, dict) and research_request:
@@ -198,6 +335,11 @@ def mark_queued(task_id: str, goal: str, project: str = "default",
         except Exception as exc:
             logger.warning("任务 %s 研究契约无法序列化（按空处理）：%s", task_id, str(exc)[:120])
             request_json = ""
+    events = [e for e in (_norm_submit_event(x) for x in (submit_events or [])) if e]
+    events.append(_norm_submit_event({
+        "event": "persisted", "instance": instance, "code_version": code_version,
+        "detail": "task_history 落库成功（队列已登记）"}) or {})
+    timeline_json = json.dumps(events[-_SUBMIT_TIMELINE_MAX:], ensure_ascii=False)
     try:
         con = _connect(db_path)
         try:
@@ -206,10 +348,13 @@ def mark_queued(task_id: str, goal: str, project: str = "default",
             con.execute(
                 "INSERT INTO task_history"
                 "(task_id,goal,status,project,conversation_id,parent_task_id,context,user,"
-                " phase,research_request_json)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                " phase,research_request_json,idempotency_key,submit_timeline_json,"
+                " accepted_by)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (task_id, goal, QUEUED, project, conversation_id,
-                 parent_task_id, context, user, "排队", request_json),
+                 parent_task_id, context, user, "排队", request_json,
+                 str(idempotency_key or "").strip(), timeline_json,
+                 str(instance or "")[:64]),
             )
             con.commit()
             return True

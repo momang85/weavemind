@@ -2563,6 +2563,7 @@ def _publish_task(
     prefix: str = "ui",
     report_confirm: bool = False,
     research_request: dict | None = None,
+    idempotency_key: str = "",
 ) -> dict:
     """核心提交通道：把请求交给编排器并等待**收执**。
 
@@ -2573,16 +2574,43 @@ def _publish_task(
     超时/被拒直接抛错（HTTP 侧转 503 并说明原因）。
 
     内存 `_task_results` 也不再建骨架：它已降级为纯缓存，由监听器在收到消息时创建。
+
+    C3/H3 新增：
+    - `idempotency_key`：同一键的重复提交（双击/超时重试/重放）**只产生一个任务**。
+      先查一次已存在的任务直接返回（连发布都不做）；两个提交竞争时由编排器侧再查一次，
+      先落库者赢，收执回 `accepted:dedup:<已有 id>`。
+    - 请求自带 `received`/`published` 时刻（连同编排器侧 persisted/consumed/started）
+      落到任务行的提交时间线，用于事后对账"卡在哪一段"。
+    - 收执超时不再一律说"任务未被创建"：先查任务库，若收执已落库则如实报"已收执待消费"。
     """
     if not _redis_ready():
         raise RuntimeError("Redis 未连接，任务无法派发")
     project = _safe_project(project)
+    idem = str(idempotency_key or "").strip()
+    if idem:
+        # 幂等前置检查：已有同键任务就直接复用，不发布、不新建（不产生第二次付费执行）
+        try:
+            import task_state as _ts_chk
+            existing = _ts_chk.find_by_idempotency(idem)
+        except Exception:                             # noqa: BLE001
+            existing = None
+        if existing and existing.get("task_id"):
+            return {"task_id": str(existing["task_id"]),
+                    "conversation_id": conversation_id,
+                    "status": str(existing.get("status") or "QUEUED"),
+                    "project": project, "deduplicated": True}
     tid = f"{prefix}-" + uuid.uuid4().hex[:10]
     r = _new_redis()
     try:
         r.delete(f"task_ack:{tid}")
     except Exception:
         pass
+    received_at = time.time()
+    try:
+        import health_registry as _hr
+        _instance = _hr.instance_id()
+    except Exception:                                 # noqa: BLE001
+        _instance = ""
     r.publish("orchestrator:main", json.dumps({
         "task_id": tid,
         "goal": goal,
@@ -2597,8 +2625,17 @@ def _publish_task(
         "parent_task_id": parent_task_id,
         # 研究契约：**提交时**随请求下发并在登记时落库（底稿只读它，抓取元数据只作候选）
         "research_request": dict(research_request or {}),
+        # C3/H3：幂等键 + 提交时间线的前两段（收到/发布），由编排器一次落库
+        "idempotency_key": idem,
+        "submit_events": [
+            {"event": "received", "ts": received_at, "instance": _instance,
+             "detail": "web_ui 收到提交请求"},
+            {"event": "published", "ts": time.time(), "instance": _instance,
+             "detail": "已发布到 orchestrator:main，等待收执"},
+        ],
     }, ensure_ascii=False))
-    # 等待收执：编排器登记成功后写 task_ack:{tid} = accepted / rejected:原因
+    # 等待收执：编排器登记成功后写 task_ack:{tid} = accepted / accepted:dedup:<id>
+    # / rejected:原因
     try:
         timeout = max(0.5, float(os.environ.get("WM_SUBMIT_ACK_TIMEOUT", "5") or 5))
     except Exception:
@@ -2614,12 +2651,28 @@ def _publish_task(
             break
         time.sleep(0.05)
     if not ack:
+        # 收执没等到：先查任务库——收执可能已落库（编排器慢/收执键写入失败），
+        # 那就不该说"任务未被创建"（会把已存在的任务说成不存在，用户重复提交）
+        try:
+            import task_state as _ts_to
+            row = _ts_to.read_task(tid)
+        except Exception:                             # noqa: BLE001
+            row = {}
+        if row and str(row.get("task_id") or "") == tid:
+            return {"task_id": tid, "conversation_id": conversation_id,
+                    "status": str(row.get("status") or "QUEUED"),
+                    "project": project, "ack_pending_consume": True}
         raise RuntimeError(
             f"编排器未在 {timeout:.0f}s 内接收任务（服务未启动或正在重启）；"
             "任务未被创建，请确认 `python launcher.py status` 中 orchestrator 在线"
         )
     if not ack.startswith("accepted"):
         raise RuntimeError(f"编排器拒绝该任务：{ack.split(':', 1)[-1] or '未知原因'}")
+    if ack.startswith("accepted:dedup:"):
+        # 幂等键命中已有任务：返回原任务，明确标记去重（不新建、不执行第二次）
+        return {"task_id": ack.split(":", 2)[2] or tid,
+                "conversation_id": conversation_id,
+                "status": "QUEUED", "project": project, "deduplicated": True}
     return {"task_id": tid, "conversation_id": conversation_id,
             "status": "QUEUED", "project": project}
 
@@ -5222,6 +5275,10 @@ def _post_task(self, p, body, admin):
                 user_id=str(admin.get("user") or ""),
                 report_confirm=report_confirm,
                 research_request=_sanitize_research_request(body.get("research_request")),
+                # C3/H3 幂等键：优先请求体，其次 `Idempotency-Key` 头（标准做法）。
+                # 客户端重试必须复用同一个键；没有键时行为与之前完全一致（不去重）。
+                idempotency_key=(str(body.get("idempotency_key") or "")
+                                 or str(self.headers.get("Idempotency-Key") or "")),
             )
             tid = submitted["task_id"]
         except RuntimeError as exc:

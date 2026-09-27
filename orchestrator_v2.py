@@ -8265,6 +8265,79 @@ def _group_financial_rows(rows) -> dict:
 # Standalone listener (drop-in replacement)
 # ─────────────────────────────────────────────
 
+def _set_task_ack(orch, task_id: str, value: str) -> None:
+    """写收执键（120 秒 TTL）。写不进去只记日志——提交方会按超时处理。"""
+    try:
+        orch._redis.setex(f"task_ack:{task_id}", 120, value)
+    except Exception as exc:                          # noqa: BLE001
+        logger.error("任务 %s 收执键写入失败：%s（提交方会超时判为失败）",
+                     task_id, str(exc)[:150])
+
+
+def _instance_identity() -> tuple[str, str]:
+    """(实例标识, 代码版本)——实例归属与时间线共用同一套取值。"""
+    try:
+        import health_registry as _hr
+        inst = _hr.instance_id()
+    except Exception:                                 # noqa: BLE001
+        inst = ""
+    ver = str(os.environ.get("WM_CODE_VERSION", "") or "")
+    if not ver:
+        try:
+            import code_version as _cv                     # 可选模块
+            ver = str(_cv.current() or "")
+        except Exception:                             # noqa: BLE001
+            ver = ""
+    return inst, ver
+
+
+# 编排器归属：`orchestrator:owner` 存实例标识，`orchestrator:owner:hb` 是心跳。
+OWNER_KEY = "orchestrator:owner"
+OWNER_HB_KEY = "orchestrator:owner:hb"
+OWNER_HB_TTL = 30
+
+
+def claim_orchestrator_ownership(r, *, instance: str = "") -> tuple[bool, str]:
+    """认领"本 Redis 上唯一的编排器"。返回 `(是否可以继续启动, 说明)`。
+
+    规则（显式，不靠运气）：
+    - 没人在用 → `SETNX` 认领成功；
+    - 已在用的是**自己**（重启）→ 续期即可；
+    - 已在用的是**别的实例**且心跳新鲜（<30 秒）→ **拒绝启动**：两个编排器订阅同一个
+      `orchestrator:main` 会把同一条请求执行两次；
+    - 已在用的是别的实例但心跳已过期（对方崩溃）→ 允许接管并记日志。
+
+    认领失败（Redis 不可写等）时**不阻断启动**：这是可见性问题，不是安全问题；
+    但会如实记日志，且时间线里仍会写下本实例标识。
+    """
+    inst = instance or _instance_identity()[0] or "unknown"
+    try:
+        got = bool(r.set(OWNER_KEY, inst, nx=True))
+        if not got:
+            cur = r.get(OWNER_KEY)
+            cur = cur.decode() if isinstance(cur, bytes) else str(cur or "")
+            if cur == inst:
+                got = True
+            else:
+                hb = r.get(OWNER_HB_KEY)
+                fresh = False
+                try:
+                    fresh = bool(hb) and int(r.ttl(OWNER_HB_KEY)) > 0
+                except Exception:                     # noqa: BLE001
+                    fresh = bool(hb)
+                if fresh:
+                    return False, (f"已有编排器实例 {cur or '未知'} 在运行"
+                                   f"（心跳 {r.ttl(OWNER_HB_KEY)}s 内）；"
+                                   "同一 Redis 上不允许两个编排器消费同一条任务通道")
+                logger.warning("接管编排器归属：上一实例 %s 心跳已过期", cur or "未知")
+                r.set(OWNER_KEY, inst)
+        r.setex(OWNER_HB_KEY, OWNER_HB_TTL, inst)
+        return True, f"本实例 {inst} 持有编排器归属"
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("编排器归属认领失败（不阻断启动）：%s", str(exc)[:150])
+        return True, f"归属未确认（{str(exc)[:60]}），按单实例继续"
+
+
 def accept_task_request(orch, data: dict) -> tuple[bool, str]:
     """接收一条任务请求：登记 QUEUED（唯一写者）+ 写收执键。
 
@@ -8274,14 +8347,38 @@ def accept_task_request(orch, data: dict) -> tuple[bool, str]:
     判定依据是 `task_state.mark_queued()` 的**返回值**，不是异常：该函数此前
     内部吞掉一切异常并正常返回，靠 except 区分 accepted/rejected 的分支永不触发，
     于是任务库不可写时提交方仍拿到 accepted（界面显示成功、现实里没有任务）。
+
+    C3/H3 新增两条：
+    - **幂等**：带 `idempotency_key` 的请求，若该键已有任务，则**不登记、不执行**，
+      收执写 `accepted:dedup:<已有任务 id>`，并把 `data["_effective_task_id"]` 指向
+      已有任务（调用方据此跳过第二次执行）。两个提交竞争时先落库者赢。
+    - **实例归属与时间线**：登记行记 `accepted_by`＝本实例，时间线记
+      received/published（请求自带时刻）+ persisted + consumed。
     """
     task_id = str(data.get("task_id") or "")
     goal = str(data.get("goal") or "")
     if not task_id:
         return False, "缺少 task_id"
+    instance, code_version = _instance_identity()
+    idem = str(data.get("idempotency_key") or "").strip()
+    events = data.get("submit_events") if isinstance(data.get("submit_events"), list) else []
     ok, reason = True, ""
+    effective_id = task_id
     try:
         import task_state as _ts
+        if idem:
+            existing = _ts.find_by_idempotency(idem)
+            if existing and existing.get("task_id"):
+                effective_id = str(existing["task_id"])
+                _ts.record_submit_event(
+                    effective_id, "deduplicated", instance=instance,
+                    code_version=code_version,
+                    detail=f"幂等键 {idem} 重复提交（提交 id {task_id}），不重复执行")
+                data["_effective_task_id"] = effective_id
+                _set_task_ack(orch, task_id, f"accepted:dedup:{effective_id}")
+                logger.info("Task %s 幂等键命中已有任务 %s：不登记、不执行",
+                            task_id, effective_id)
+                return True, ""
         wrote = _ts.mark_queued(
             task_id, goal,
             project=str(data.get("project") or "default"),
@@ -8292,20 +8389,20 @@ def accept_task_request(orch, data: dict) -> tuple[bool, str]:
             # 研究契约在**提交时**落库：底稿只读它，抓取元数据不得反向决定研究对象
             research_request=(data.get("research_request")
                               if isinstance(data.get("research_request"), dict) else None),
+            idempotency_key=idem, instance=instance, code_version=code_version,
+            submit_events=events,
         )
         if not wrote:
             ok, reason = False, "登记失败：任务库不可写（详见编排器日志）"
+        else:
+            _ts.record_submit_event(
+                task_id, "consumed", instance=instance, code_version=code_version,
+                detail="编排器已收到该请求并登记为 QUEUED")
     except Exception as exc:
         ok, reason = False, f"登记失败：{str(exc)[:120]}"
-    try:
-        orch._redis.setex(
-            f"task_ack:{task_id}", 120,
-            "accepted" if ok else f"rejected:{reason}")
-    except Exception as exc:
-        logger.error("任务 %s 收执键写入失败：%s（提交方会超时判为失败）",
-                     task_id, str(exc)[:150])
+    _set_task_ack(orch, task_id, "accepted" if ok else f"rejected:{reason}")
     if ok:
-        logger.info("Task %s accepted (queued)", task_id)
+        logger.info("Task %s accepted (queued) by %s", task_id, instance or "unknown")
     else:
         logger.error("Task %s rejected: %s", task_id, reason)
     return ok, reason
@@ -8337,6 +8434,15 @@ def main():
         logger.warning("补材料恢复扫描失败：%s", str(exc)[:150])
 
     logger.info("OrchestratorV2 listening on orchestrator:main")
+    # C3/H3 实例归属：同一 Redis 上只允许**一个**编排器消费 orchestrator:main。
+    # pub/sub 是广播语义——两个编排器都会收到同一条任务请求，各自执行一次
+    # （重复付费、重复写库）。所以这里显式认领；已有别的活实例就**明确拒绝启动**，
+    # 而不是默默重复消费。上一位持有者没有心跳（崩溃/重启）时允许接管。
+    _owner_ok, _owner_why = claim_orchestrator_ownership(r)
+    if not _owner_ok:
+        logger.error("拒绝启动：%s", _owner_why)
+        return 2
+    logger.info("编排器实例归属：%s", _owner_why)
     ps = r.pubsub()
     ps.subscribe("orchestrator:main")
 
@@ -8382,7 +8488,18 @@ def main():
             # 并写收执键让提交方知道请求已被接收（pub/sub 本身无回执；
             # 编排器不在时消息静默丢失，收执键能把这个事实变成"提交失败"）
             if goal and goal != "EVOLUTION_TRIGGER":
-                accept_task_request(orch, data)
+                _accepted, _why = accept_task_request(orch, data)
+                # C3/H3 幂等：幂等键命中已有任务时**不重复执行**——收执已回给提交方，
+                # 它拿到的 effective id 指向原任务（重复点击/重放不得变成第二次付费执行）
+                _effective = str(data.get("_effective_task_id") or task_id)
+                if _effective and _effective != task_id:
+                    logger.info("Task %s 与已有任务 %s 同幂等键：跳过本次执行",
+                                task_id, _effective)
+                    continue
+                if not _accepted:
+                    # 登记失败：不执行（否则会出现"界面失败但实际在跑"的反向幽灵任务）
+                    logger.error("Task %s 未被接收（%s）：不启动执行", task_id, _why)
+                    continue
 
             if goal == "EVOLUTION_TRIGGER":
                 push_progress(orch._messaging, task_id, "log",
@@ -8406,6 +8523,16 @@ def main():
             # Run task in background thread
             def _run_task(tid, g, ctx, ar, tpl_steps, uid, proj, rc):
                 try:
+                    # C3/H3 时间线：记"开始"（实例+代码版本），使 收到→持久化→发布→
+                    # 消费→开始 五段可对账；即便随后 run() 提前返回也能看出已开始
+                    try:
+                        import task_state as _ts_start
+                        _inst_s, _ver_s = _instance_identity()
+                        _ts_start.record_submit_event(
+                            tid, "started", instance=_inst_s, code_version=_ver_s,
+                            detail="执行线程已开始运行")
+                    except Exception:                 # noqa: BLE001
+                        pass
                     result = orch.run(
                         tid, g, ctx, auto_run=ar, template_steps=tpl_steps,
                         user_id=uid, project=proj, report_confirm=rc,
