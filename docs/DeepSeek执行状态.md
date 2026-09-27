@@ -39,7 +39,12 @@
   测试：`test_p0` 新增 4 例（含字段一致性），连同 `test_frontend_guards`/`test_settings_requirements`/
   `test_startup_readiness` 共 543 例全绿。
 - **未做/未验**：`web_ui.source_health` 旧字段与统一 `dependencies` 的同源收敛、S4 首屏
-  "资料获取能力"视图未做；未在运行页面用真实快照看过四态；包内复验待下次重建包。
+  "资料获取能力"视图未做；未在运行页面用真实快照看过四态（需重启服务）。
+- **包内复验（2026-09-27，运行包 `2026.09.27.1`，zip sha256 `0443a425…8f74`）**：
+  死代理（`127.0.0.1:9`）下 `dual_channel_get` 抛 `ProxyEgressError` 且 **socket 直连 0 次**；
+  无代理时 Bing 抓取正例 ok（99.4KB）；`WM_CONTENT_FETCH_MODE=direct` 清理环境代理后仍可抓取
+  （98.7KB）；包内健康四态与前端徽章文案同版就位；`search_diag` 有界探测（Bing 10 条/0.48s、
+  ddgs `no_results`/8.09s、东财 1 条、公告查看页 0.38s，预算 4/6）证明 S1 检索路径未被 S2 打断。
 
 ## 已交批次：S0 + S1（含包内复验补口，2026-09-26/27）
 

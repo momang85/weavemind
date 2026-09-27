@@ -57,8 +57,25 @@ python -m unittest test_startup_readiness test_deploy_manifest   # 回环/启动
 - **未做**：直接调 `get_via_urllib` 的适配器（东财、resolver、PDF 下载）在 `direct` 模式下
   仍走 urllib（其代理环境已由 launcher 启动时清理，故实际仍是直连）；若将来要逐请求判定，
   需把这些调用点改到双通道入口。
-- **未验**：本批全部为离线单测（替身控制流，无真实外网）；**代理在线/离线两种真机出口未验**
-  （开发机的代理时好时坏，且用户授权的一次付费任务已用掉）。包内（运行包）复验需要重建运行
-  包后跑 `search_diag.py`——按批次约定在下一批一起做，不在本批宣称已验。
+- **未验（已补，见第 5 节）**：本批代码为离线单测（替身控制流）；真机出口的包内复验在
+  第 5 节补上（运行包 `2026.09.27.1`）。
 - `proxy_required` 模式当前**只有拒绝语义**（无代理出口实现）；这是"做不到时明确不支持"
   的落地，不是可用功能。
+
+## 5. 包内复验（运行包 `2026.09.27.1`，包内解释器）
+
+包身份：`weavemind-2026.09.27.1-win-x64.zip`，sha256
+`0443a425aca8a30a7ea2779304b1d3d4f8c4ac02376d7bbf05572c2cb42c8f74`（291,423,676 字节，
+构建自检 secrets=0 / dev_paths=0；干净机器仍未验）。
+
+| 复验项 | 做法（包内解释器，真 urllib） | 读数 |
+|---|---|---|
+| **代理失败后直连次数 0** | 设 `HTTP(S)_PROXY=http://127.0.0.1:9`（保留端口，立即拒连）后调 `dual_channel_get`；给 `get_via_socket` 加计数 | 抛 `ProxyEgressError`（`category=proxy_error`），**socket 调用 0 次**；日志明确写"代理层失败：不降级直连" |
+| 正常公开资料正例不受影响 | 无代理环境抓 Bing 搜索页 | ok，99,408 字节 |
+| 明确直连模式可用 | `WM_CONTENT_FETCH_MODE=direct` + 同样的死代理环境 | `apply_direct_mode_env` 清理 `HTTP_PROXY,HTTPS_PROXY`；`proxy_settings` 变为未配置；抓取仍 ok（98,659 字节）——**明确直连不受环境代理影响** |
+| 健康状态语义 | `health_registry.snapshot()` | `search`/`market_source` = `unknown` 且 `ok=False`（无快照）；`llm/embedding/planner/mcp/lora` = `available`；`code_sandbox` = `unavailable`（docker 不在） |
+| 前端四态随包 | 包内 `frontend/dist` 产物 | `Settings-*.js` 含"未检查""读数过期"字样（与源码同版） |
+| S1 检索路径未被 S2 改动打断 | 包内 `search_diag.py` 有界探测（≤6 次调用） | Bing 10 条/0.48s、ddgs `no_results`/8.09s、东财 1 条/0.66s、公告查看页 0.38s，预算用 4/6 次——与 S1 复验同形 |
+
+本批新增公开请求：3 次（正例 1、direct 模式 1、`search_diag` 4 次中的 4 次按该脚本自报预算口径
+计入；其中 ddgs 的 HTTP 次数按惯例记"未知"）。无模型调用、无付费调用、未改用户设置。
