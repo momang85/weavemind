@@ -998,11 +998,17 @@ class SearchAgent(BaseWorker):
 
         S0 事实：Bing HTML 两侧环境都可用且快（0.5s）；ddgs 首个可用后端在源码环境 2.9s
         出结果、而包内清单首位引擎已失效。因此把实践证明可用的排在前面，且只带一个备后端。
+
+        `min_wait` 交给执行器做发请求前的可行下限判定（H1）：低于它就不发、不消耗额度。
         """
-        specs = [{"provider": "bing", "backend": "www.bing.com"}]
+        from adapters.search_runner import provider_min_wait
+
+        specs = [{"provider": "bing", "backend": "www.bing.com",
+                  "min_wait": provider_min_wait("bing")}]
         name, _basis = self._ddg_backend()
         if name:
-            specs.append({"provider": "ddgs", "backend": name})
+            specs.append({"provider": "ddgs", "backend": name,
+                          "min_wait": provider_min_wait("ddgs")})
         # 冷却中的提供方跳过（跨任务的健康记忆；真零结果不进冷却，见 _mark_engine 调用处）
         return [s for s in specs
                 if _engine_healthy("bing" if s["provider"] == "bing" else "ddg")]
@@ -1058,13 +1064,19 @@ class SearchAgent(BaseWorker):
         collected: list = []
 
         def _invoke(provider: str, backend: str, q: str, wait: float) -> list:
-            """单提供方单后端调用（显式后端，绝不 auto）。"""
+            """单提供方单后端调用（显式后端，绝不 auto）。
+
+            剩余截止必须落到**请求自己的参数**上（H1）：Bing 走 `_search_bing(..., wait)`
+            （内部按块读取、块间查截止），ddgs 走 `provider_timeout("ddgs", wait)`——
+            两者都不再有固定 12/15 秒或 `max(3.0, …)` 的下限抬升。
+            """
+            from adapters.search_runner import provider_timeout
             if provider == "bing":
-                return self._search_bing(q)
+                return self._search_bing(q, timeout=wait)
             from ddgs import DDGS
             from adapters.search_runner import is_empty_result_error
             try:
-                with DDGS(timeout=max(3.0, min(float(wait), 8.0))) as ddgs:
+                with DDGS(timeout=provider_timeout("ddgs", wait)) as ddgs:
                     rows = list(ddgs.text(q, backend=backend,
                                           max_results=max_results * 2))
             except Exception as exc:  # noqa: BLE001
@@ -1274,19 +1286,31 @@ class SearchAgent(BaseWorker):
         from adapters.search_quality import is_garbage_result
         return is_garbage_result(title, url, snip)
 
-    def _search_bing(self, query: str) -> list[dict]:
-        """备用搜索源：Bing HTML 结果解析（无需 API Key）。"""
+    def _search_bing(self, query: str, timeout=None) -> list[dict]:
+        """备用搜索源：Bing HTML 结果解析（无需 API Key）。
+
+        `timeout` 是本次请求自己的墙钟上限（调用方把剩余预算传进来）。旧的固定 15 秒
+        在剩余预算更小时等于没有硬截止；现在按 `provider_timeout("bing", …)` 取
+        `min(提供方上限, 剩余时间)`，并按块读取、块间查同一个截止线（H1）。
+        """
         import re as _re
+        import time as _time
         import urllib.parse
         import urllib.request
 
+        from adapters.search_runner import provider_timeout, read_with_deadline
+
+        secs = provider_timeout("bing", timeout)
+        if secs <= 0:
+            raise TimeoutError("no remaining budget for bing search")
+        deadline = _time.monotonic() + secs
         url = "https://www.bing.com/search?q=" + urllib.parse.quote(query) + "&setlang=zh-hans"
         req = urllib.request.Request(url, headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                           "(KHTML, like Gecko) Chrome/120 Safari/537.36",
         })
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            html = resp.read().decode("utf-8", errors="replace")
+        with urllib.request.urlopen(req, timeout=secs) as resp:
+            html = read_with_deadline(resp, deadline).decode("utf-8", errors="replace")
         results: list[dict] = []
         for block in _re.findall(r'<li class="b_algo".*?</li>', html, _re.S)[:5]:
             m_title = _re.search(r'<h2[^>]*>(.*?)</h2>', block, _re.S)

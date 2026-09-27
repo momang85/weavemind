@@ -51,6 +51,7 @@ class SearchOutcome:
     tried_keys: set = field(default_factory=set)    # 本轮**已打出去**的 (提供方,后端,查询)
     overrun_calls: int = 0                          # 超预算返回的调用数（结果不计入）
     overrun_seconds: float = 0.0                    # 最严重一次超出多少秒
+    refused_calls: int = 0                          # 因剩余时间低于可行下限而**没发出去**的请求数
 
     def to_legacy_items(self) -> list:
         """兼容层：旧输出契约是 JSON 数组（`[{title,url,snippet}...]`）。"""
@@ -66,6 +67,7 @@ class SearchOutcome:
             "submitted": len(self.tried_keys or ()),
             "overrun_calls": self.overrun_calls,
             "overrun_seconds": self.overrun_seconds,
+            "refused_calls": self.refused_calls,
         }
 
 
@@ -118,6 +120,59 @@ def _classify(exc: BaseException) -> str:
 RETRYABLE = ("timeout", "dns_error", "proxy_error", "rate_limited")
 # 超预算容差：调度抖动允许的秒数；超过即判"超时返回"，结果不计入
 OVERRUN_TOLERANCE = 0.25
+
+# ── 受控的可终止边界（H1）────────────────────────────────────────────────────
+# 同步 SDK / urllib 没法中途取消，所以剩余截止必须落到**请求自己的参数**上：
+# 1) 本次请求的超时 = min(提供方上限, 剩余时间)——**不加任何下限**。任何高于剩余时间的
+#    下限（旧的 Bing 固定 12/15s、ddgs 的 `max(3.0, …)`）都等于没有硬截止；
+# 2) 剩余时间低于该提供方的可行下限时**不发请求**（明确拒绝这条无法取消的有界路径），
+#    而不是发出去再等它超时返回，更不起"超时后继续出网"的后台线程。
+MIN_VIABLE_CALL_SECONDS = 0.05
+PROVIDER_TIMEOUT_CAPS = {"bing": 12.0, "ddgs": 8.0}
+# 可行下限只给**无法取消**的提供方抬高：ddgs 是同步 SDK，剩余不到 1 秒时发出去只会
+# 超预算返回；Bing 走 read_with_deadline（块间可切断），所以不抬下限、只用 MIN_VIABLE。
+PROVIDER_MIN_WAIT = {"ddgs": 1.0}
+
+
+def provider_timeout(provider: str, wait) -> float:
+    """本次请求自己的超时：`min(提供方上限, 剩余时间)`，**不做下限抬升**。"""
+    cap = float(PROVIDER_TIMEOUT_CAPS.get(str(provider), 8.0))
+    try:
+        left = float(wait)
+    except (TypeError, ValueError):
+        left = cap
+    return max(0.0, min(cap, left))
+
+
+def provider_min_wait(provider: str, declared=None) -> float:
+    """该提供方**可行**的剩余时间下限；低于它就不发请求（含提供方自己声明的下限）。"""
+    if declared not in (None, ""):
+        try:
+            return max(MIN_VIABLE_CALL_SECONDS, float(declared))
+        except (TypeError, ValueError):
+            pass
+    return max(MIN_VIABLE_CALL_SECONDS,
+               float(PROVIDER_MIN_WAIT.get(str(provider), MIN_VIABLE_CALL_SECONDS)))
+
+
+def read_with_deadline(resp, deadline: float, chunk: int = 65536) -> bytes:
+    """按块读取响应，并在**块间**检查同一个墙钟截止；到点即停止读取。
+
+    socket timeout 只管单次操作，慢速分块响应可以每块都小于 timeout、整体却远超截止
+    （"慢读取"反例）。这里给出真正的总墙钟边界，不新起线程：到点抛 `TimeoutError`，
+    由调用方按超时如实记账，不再继续读。
+    """
+    buf: list[bytes] = []
+    while True:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("read deadline exceeded (slow response body)")
+        block = resp.read(chunk)
+        if not block:
+            break
+        buf.append(block)
+    return b"".join(buf)
+
+
 # 启动前的预占/状态变量
 
 # ddgs 在"引擎跑完了但一条也没找到"时也抛异常（`DDGSException("No results found.")`）。
@@ -187,6 +242,18 @@ def run_search(
             if budget.expired():
                 outcome.reason = "检索预算用尽（到点或到次数），停止继续尝试"
                 break
+            # 受控的可终止边界：剩余时间不够这个提供方跑一次，就**一个请求都不发**
+            # （同时不消耗调用额度），而不是发出去再靠 socket 超时兜底。
+            min_wait = provider_min_wait(provider, spec.get("min_wait"))
+            left = budget.time_left()
+            if left < min_wait:
+                outcome.refused_calls += 1
+                outcome.reason = outcome.reason or (
+                    f"剩余 {left:.2f}s 低于 {provider} 可行下限 {min_wait:.2f}s，"
+                    f"拒绝发出该请求（同步调用无法取消）")
+                logger.warning("provider %s 剩余 %.2fs < 可行下限 %.2fs，本次不发请求",
+                               provider, left, min_wait)
+                continue
             try:
                 wait = budget.take()
             except RuntimeError:
@@ -248,6 +315,11 @@ def run_search(
         outcome.status = "timeout"
         outcome.reason = (f"{outcome.overrun_calls} 次调用超预算返回（最多超出 "
                           f"{outcome.overrun_seconds}s），结果不计入")
+    elif outcome.refused_calls:
+        # 到点后没有再发请求：这不是"查询失败"，是**按截止拒绝出发**——如实记 timeout
+        outcome.status = "timeout"
+        outcome.reason = outcome.reason or (
+            f"{outcome.refused_calls} 次请求因剩余时间低于可行下限被拒绝，未发出")
     else:
         outcome.status = dominant_error or "parse_error"
         outcome.reason = outcome.reason or f"全部提供方未完成查询（{outcome.errors}）"

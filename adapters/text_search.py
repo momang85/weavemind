@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import logging
 import re
+import time
 import urllib.parse
 import urllib.request
 
@@ -37,8 +38,15 @@ _BING_BLOCK_RE = re.compile(r'<li class="b_algo".*?</li>', re.S)
 _ALLOWED_FETCH_HOSTS = ("www.bing.com",)
 
 
-def _fetch_bing_html(query: str) -> str:
-    """抓取 Bing 搜索页 HTML。目标主机白名单固定，仅查询参数动态。"""
+def _fetch_bing_html(query: str, timeout=None) -> str:
+    """抓取 Bing 搜索页 HTML。目标主机白名单固定，仅查询参数动态。
+
+    `timeout` 是**本次请求自己的墙钟上限**（调用方把剩余预算传进来）；不给时用提供方上限。
+    socket timeout 只管单次操作，慢速分块响应能远超它——因此正文按块读取、块间检查同一个
+    截止线（`read_with_deadline`），到点即停止读取并关闭响应，不再继续出网。
+    """
+    from adapters.search_runner import provider_timeout, read_with_deadline
+
     url = (
         "https://www.bing.com/search?q="
         + urllib.parse.quote(str(query or ""))
@@ -47,14 +55,18 @@ def _fetch_bing_html(query: str) -> str:
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme != "https" or parsed.hostname not in _ALLOWED_FETCH_HOSTS:
         raise ValueError(f"disallowed fetch host: {parsed.hostname!r}")
+    secs = provider_timeout("bing", timeout)
+    if secs <= 0:
+        raise TimeoutError("no remaining budget for bing fetch")
+    deadline = time.monotonic() + secs
     req = urllib.request.Request(url, headers={"User-Agent": _UA})
-    with urllib.request.urlopen(req, timeout=12) as resp:
-        return resp.read().decode("utf-8", errors="replace")
+    with urllib.request.urlopen(req, timeout=secs) as resp:
+        return read_with_deadline(resp, deadline).decode("utf-8", errors="replace")
 
 
-def _search_bing(query: str, max_results: int) -> list[dict]:
+def _search_bing(query: str, max_results: int, timeout=None) -> list[dict]:
     """Bing HTML 结果解析（无 API Key）。返回 [{title,url,snippet,engine}]。"""
-    html = _fetch_bing_html(query)
+    html = _fetch_bing_html(query, timeout)
     out: list[dict] = []
     for block in _BING_BLOCK_RE.findall(html)[: max_results * 2]:
         m_title = re.search(r"<h2[^>]*>(.*?)</h2>", block, re.S)
@@ -115,8 +127,15 @@ def _first_available_engine() -> str:
 
 
 def _search_ddg(query: str, max_results: int, timeout: float) -> list[dict]:
-    """ddgs **单后端单次**调用（S1）：不再逐引擎阶梯，也不再回落 auto。"""
+    """ddgs **单后端单次**调用（S1）：不再逐引擎阶梯，也不再回落 auto。
+
+    `timeout` 服从调用方给的剩余时间（`provider_timeout`），**不再有 3 秒下限**——
+    高于剩余时间的下限等于没有硬截止（指令 §3.3）。ddgs 是同步 SDK、不能中途取消，
+    所以可行下限由执行器在发请求前把关（`PROVIDER_MIN_WAIT["ddgs"]`）。
+    """
     from ddgs import DDGS
+
+    from adapters.search_runner import provider_timeout
 
     engine = _first_available_engine()
     if not engine:
@@ -125,7 +144,7 @@ def _search_ddg(query: str, max_results: int, timeout: float) -> list[dict]:
     from adapters.search_runner import is_empty_result_error
     out: list[dict] = []
     try:
-        with DDGS(timeout=max(3.0, float(timeout))) as ddgs:
+        with DDGS(timeout=provider_timeout("ddgs", timeout)) as ddgs:
             rows = list(ddgs.text(str(query or ""), backend=engine,
                                   max_results=max_results))
     except Exception as exc:  # noqa: BLE001
@@ -158,7 +177,7 @@ def web_text_search(query: str, max_results: int = 6, timeout: float = 3) -> lis
     """
     import os as _os
 
-    from adapters.search_runner import SearchBudget, run_search
+    from adapters.search_runner import SearchBudget, provider_min_wait, run_search
 
     q = str(query or "").strip()
     if not q:
@@ -170,15 +189,17 @@ def web_text_search(query: str, max_results: int = 6, timeout: float = 3) -> lis
         calls = 6
     budget = SearchBudget(max_calls=calls,
                           deadline_seconds=float(timeout or 3.0) * 2)
-    specs = [{"provider": "bing", "backend": "www.bing.com"}]
+    specs = [{"provider": "bing", "backend": "www.bing.com",
+              "min_wait": provider_min_wait("bing")}]
     engine = _first_available_engine()
     if engine:
-        specs.append({"provider": "ddgs", "backend": engine})
+        specs.append({"provider": "ddgs", "backend": engine,
+                      "min_wait": provider_min_wait("ddgs")})
 
     def _call(provider: str, backend: str, text: str, wait: float) -> list[dict]:
         if provider == "bing":
-            return _search_bing(text, max_results * 2)
-        return _search_ddg(text, max_results * 2, min(float(wait), 8.0))
+            return _search_bing(text, max_results * 2, wait)
+        return _search_ddg(text, max_results * 2, wait)
 
     outcome = run_search(variants, call_provider=_call, providers=specs,
                          budget=budget, max_results=max_results)

@@ -1454,7 +1454,7 @@ class TestP2EngineHealth(unittest.TestCase):
         sa._strategy_blocks = []
         sa._strategy_boosts = []
         sa._load_active_strategy = lambda: None
-        sa._search_bing = lambda q: (_ for _ in ()).throw(RuntimeError("bing down"))
+        sa._search_bing = lambda q, timeout=None: (_ for _ in ()).throw(RuntimeError("bing down"))
         wb._ENGINE_HEALTH.clear()
         old_backoff = wb._SEARCH_RETRY_BACKOFF
         wb._SEARCH_RETRY_BACKOFF = 0
@@ -4914,7 +4914,7 @@ class TestP2ChartFallback(unittest.TestCase):
         sa._messaging = SimpleNamespace(_redis=_Ledger())
         sa._current_ctx = SimpleNamespace(root_task_id="t-bing-exec",
                                           dispatch_id="t-bing-exec-d1")
-        sa._search_bing = lambda q: [{
+        sa._search_bing = lambda q, timeout=None: [{
             "title": "特斯拉 2026 年财报",
             "url": "https://ir.tesla.com/q2-2026",
             "snippet": "总营收 250 亿美元，净利润 30 亿美元",

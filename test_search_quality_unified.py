@@ -643,6 +643,73 @@ class TestBoundedSearchRunner(unittest.TestCase):
         self.assertTrue(self.sr.is_empty_result_error(RuntimeError("No results found.")))
         self.assertFalse(self.sr.is_empty_result_error(RuntimeError("Connection refused")))
 
+    # ── H1：剩余截止落到请求自己的参数上，到点零新请求，慢读取真正被切断 ──────────
+
+    def test_provider_timeout_never_exceeds_remaining(self):
+        """反例（H1）：固定 12/15 秒与 ddgs 的 `max(3.0, …)` 都不得越过剩余时间。"""
+        self.assertEqual(self.sr.provider_timeout("bing", 0.4), 0.4)
+        self.assertEqual(self.sr.provider_timeout("ddgs", 0.4), 0.4,
+                         "ddgs 的 3 秒下限必须去掉，否则短预算形同虚设")
+        self.assertEqual(self.sr.provider_timeout("bing", 600), 12.0,
+                         "剩余富余时仍用提供方上限，不放大")
+        self.assertEqual(self.sr.provider_timeout("ddgs", 600), 8.0)
+        self.assertEqual(self.sr.provider_timeout("bing", 0.0), 0.0)
+
+    def test_slow_body_read_stops_at_deadline(self):
+        """慢读取反例：每块都小于 socket timeout，整体却超截止 → 在块间切断读取。
+
+        这是"超时返回后丢弃结果"之外的**真实停止**路径：读取本身被截止线停止。
+        """
+        class _SlowResp:
+            def __init__(self):
+                self.reads = 0
+
+            def read(self, n):
+                self.reads += 1
+                time.sleep(0.05)
+                return b"x" * 10
+
+        resp = _SlowResp()
+        with self.assertRaises(TimeoutError):
+            self.sr.read_with_deadline(resp, time.monotonic() + 0.12)
+        self.assertLess(resp.reads, 6, f"到点后必须停止读取，实际读了 {resp.reads} 次")
+
+    def test_refuses_to_issue_below_provider_floor(self):
+        """剩余时间低于该提供方可行下限：一个请求都不发，且不消耗调用额度。"""
+        calls = []
+
+        def call(provider, backend, q, wait):
+            calls.append(provider)
+            return []
+
+        specs = [{"provider": "ddgs", "backend": "brave", "min_wait": 5.0}]
+        budget = self.sr.SearchBudget(max_calls=3, deadline_seconds=1.0)
+        out = self.sr.run_search(["q1"], call_provider=call, providers=specs,
+                                 budget=budget, max_results=10)
+        self.assertEqual(calls, [], "低于可行下限不得发出请求")
+        self.assertEqual(out.refused_calls, 1)
+        self.assertEqual(out.attempts, 0)
+        self.assertEqual(budget.used, 0, "拒绝出发不得消耗调用额度")
+        self.assertEqual(out.status, "timeout", "拒绝出发是超时类，不是查询失败")
+        self.assertEqual(out.as_dict()["refused_calls"], 1)
+
+    def test_no_new_request_after_deadline(self):
+        """慢调用返回后不得再发新请求（截止后零新请求）。"""
+        calls = []
+
+        def call(provider, backend, q, wait):
+            calls.append(q)
+            time.sleep(0.12)                     # 单次就超过整个截止
+            return []
+
+        budget = self.sr.SearchBudget(max_calls=99, deadline_seconds=0.1)
+        out = self.sr.run_search(["q1", "q2", "q3"], call_provider=call,
+                                 providers=[{"provider": "bing", "backend": "b"}],
+                                 budget=budget, max_results=10)
+        self.assertEqual(calls, ["q1"], f"截止后不得再发请求：{calls}")
+        self.assertEqual(out.attempts, 1)
+        self.assertEqual(out.status, "timeout")
+
 
 class TestStructuredRetryQueries(unittest.TestCase):
     """S1 补查重试的真正输入：下一批查询由契约结构化生成，且不重复已打过的组合。"""
@@ -798,7 +865,7 @@ class TestTaskScopedSearchBudget(unittest.TestCase):
         sa._provider_specs = lambda: [{"provider": "bing", "backend": "www.bing.com"}]
         calls = []
 
-        def _bing(q):
+        def _bing(q, timeout=None):
             calls.append(q)
             return []
 
