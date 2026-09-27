@@ -51,10 +51,12 @@
 
 ```
 python -m unittest test_search_quality_unified
-# Ran 63 tests → 62 OK；唯一 error 是 §6 的沙箱拒写临时目录（与 H1 无关）
+# 默认跑法 Ran 63 tests → 62 OK；唯一 error 是沙箱拒写 mkdtemp 目录（见 §6，已用脚手架跑通 63/63）
 # 新增 4 条 + C0-2 既有的 overrun/remaining-time/short-deadline 等全部通过
 python -m unittest test_p0 -k bing -k text_search -k ddg
 # Ran 4 tests OK
+python .tmp/run_tests.py test_search_quality_unified test_p0
+# 63 OK / 412 OK（脚手架绕开 mkdtemp 只读限制，见 §6）
 ```
 
 **替身签名调整（不是放宽判据）**：`_search_bing` 现在接收剩余时间，三处注入替身原先只收一个
@@ -105,8 +107,17 @@ msys2 风格路径，不是合法 Windows 路径，bgsave 必然失败；再加�
 - **未做**：`sina_ranking.py:150` 的 `timeout=15` 属排行链路，不在本批的有界检索范围。
 - **未做**：ddgs 内部 12/15 秒等第三方默认值无法从外部收窄，只保证**我们传给它的 timeout**
   不越界；其内部重试行为不在本项目控制内（如实记录，不假称绝对）。
-- **沙箱限制导致未跑的 2 条既有用例**（与 H1 无关，属环境）：
+- **沙箱限制曾挡住 2 条既有用例，已查明根因并用本地脚手架跑通**（H2 批次一并处理）：
+  本会话沙箱把 `tempfile.mkdtemp()` 建的目录视为只读——mkdtemp 用 `mode=0o700`，
+  而 `os.mkdir` 用默认 mode 可写（实测：`os.mkdir+write` OK、`makedirs+write` OK、
+  `mkdtemp+write` PermissionError）。因此
   `test_search_quality_unified.TestPolicyIsConfigurable.test_current_policy_reads_config_file_and_reloads`
   与 `test_p0.TestScheduledJobAlertRetry.test_failure_triggers_daily_bounded_resubmit`
-  都在 `tempfile.mkdtemp()` 目录里写文件时被沙箱拒绝（`PermissionError [Errno 13]`），
-  与代码改动无关；本批不扩权，记录为环境受限。
+  在默认跑法下报 `PermissionError [Errno 13]`，与代码改动无关。
+  用一次性本地脚手架 `.tmp/run_tests.py`（**不进库**，`.tmp/` 已 gitignore；只在运行期把
+  `mkdtemp` 换成默认 mode 的等价实现，未改项目文件、未扩权、未改测试语义）复跑：
+  - `test_search_quality_unified` → **63 例 OK**（不再有那条 error）；
+  - `test_p0` → **412 例 OK**；
+  - `test_search_quality_unified.TestPolicyIsConfigurable` 10 例 OK、
+    `test_p0.TestScheduledJobAlertRetry` 4 例 OK。
+  CI（ubuntu）无此限制，按原样运行。原记录为"环境受限未跑"，现更正为**已跑通**。
