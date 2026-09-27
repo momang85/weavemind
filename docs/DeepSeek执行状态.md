@@ -23,8 +23,19 @@ C0 三提交已交（`5107ac0`/`e5c5607`/`bac62c6`）。
   **需在正常终端重启一次 Redis 才真正修好**。本会话起不了新的 msys2 Redis
   （`NtCreateDirectoryObject … 0xC0000022`，与 `--dir` 指哪儿无关），先停再起会让应用彻底无 Redis，
   故未停。
+- **修订（同一日，用户重启后复验，提交 `e282090`）**：`dir` 的修复**确实生效**
+  （重启后已是 ASCII 目录），但 `BGSAVE` 仍失败——`logs/redis.log` 显示本机
+  **msys2 便携版 RDB 保存不可靠**（fork 子进程 `0xC0000142`／临时 RDB 文件 Permission denied）。
+  于是改为：便携版 `--save "" --appendonly no --stop-writes-on-bgsave-error no`
+  （**不存快照 + 保存失败永不锁写**），系统/外部 Redis 不加这些开关；
+  自检从"验 bgsave"改为 **`verify_redis_writable`**（SET/GET/DEL 探针 + 报告持久化模式）。
+  **代价明确**：便携 Redis 现在不落盘（丢的只是可重建的运行态；台账/产物在 SQLite 与工作区）——
+  此前"以为有 RDB"是**假持久化**，比明确不持久更危险。
+  本机实例已就地 `CONFIG SET save ""` + `stop-writes=no` 稳定下来。
 - **诊断经验**：redis-py 6 连接时会发 `CLIENT SETINFO`（改服务器状态），MISCONF 下**连 PING 都失败**；
   诊断这类实例必须用**裸 RESP**（脚本在 `.tmp/`，不进库）。
+- **顺带实测**：重启后的新 Redis 里唯一的键是 `orchestrator:owner`——H3a 的**实例归属认领
+  在真实环境生效**。
 
 ## C3 收口：新人可行动状态统一（已交，提交 `ad683f1`，证据 `docs/evidence/c3_newcomer_states_20260927.md`）
 

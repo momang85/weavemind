@@ -55,8 +55,8 @@
   `fatal error - NtCreateDirectoryObject(\BaseNamedObjects\msys-2.0S5-…): 0xC0000022`（拒绝访问），
   且与 `--dir` 指哪儿无关（中文/ASCII 路径都试过）。**先停再起**会让应用彻底没有 Redis，
   风险大于收益，因此没停。
-- 用户侧恢复方式：**在正常（非本会话）终端重启一次 Redis**（或 `stop.bat` + `start.bat`）。
-  修好的启动参数会带上显式 `--dir`，并在启动后自检落盘；自检不通过会打印原因与建议。
+- 用户侧恢复方式：重启一次 Redis 即可（`stop.bat` + `start.bat`）。**注意**：本节结论已被
+  §7 修订——只修 `dir` 不够，重启后仍需"不存快照 + 不锁写"，见 §7。
 
 ## 5. 验证
 
@@ -67,9 +67,57 @@
 | `test_p0` 相关 | `redis_start_argv` 与"start 不先杀别人的 Redis"用例 OK |
 | 实机（只读） | `CONFIG SET stop-writes-on-bgsave-error no` 后 `PING/PONG`、`SET/GET/DEL` 正常；`GET /api/health` **HTTP 200**；`GET /api/status` 需登录（未伪造会话） |
 
-## 6. 遗留
+## 7. 修订（同日，用户重启后复验）：**只修 `dir` 不够**，便携版改为按设计不存快照
 
-- 本机 Redis 需要**在正常终端重启一次**才算真正修好（本会话起不了 msys2 Redis）。
-- `.tmp/` 下的诊断脚本（裸 RESP 客户端、目录实验、解封脚本、真库探针）**不进库**，
-  需要复查时可重跑；其中"用裸 RESP 而不是 redis-py 连 MISCONF 实例"这条经验建议保留。
-- Docker/compose 路径用的是容器内 Redis，不受本缺陷影响（不受 Windows msys2 限制）。
+用户按要求重启 Redis 后复验，结论推翻了 §3/§4 的"给对 `dir` 即可"：
+
+**`dir` 的修复确实生效了**——`CONFIG GET dir` 已变为
+`/cygdrive/c/Users/ding0/AppData/Local/WeaveMind/redis`（正是我加的 ASCII 退路），
+但**`BGSAVE` 仍然失败**。`logs/redis.log` 给出两层真因：
+
+```
+-1914266367 [main] redis-server 1653 dofork: child -1 - forked process 28940 died
+  unexpectedly, retry 0, exit code 0xC0000142, errno 11
+1653:M # Can't save in background: fork: Resource temporarily unavailable
+...
+987:C # Failed opening the temp RDB file temp-987.rdb (in server root dir
+  /cygdrive/c/Users/ding0/AppData/Local/WeaveMind/redis) for saving: Permission denied
+986:M # Background saving error
+```
+
+即本机 **msys2 便携版的 RDB 保存不可靠**：后台保存的 fork 子进程要么
+`0xC0000142`（DLL 初始化失败 / fork 仿真失败），要么在 `dir` 里建临时 RDB 文件被拒。
+只要 `stop-writes-on-bgsave-error=yes`，这个失败就会把**所有写命令**锁死。
+换句话说：**只要还在期待它写 RDB，这个问题就会以不同形式复发**。
+
+**因此修订为**（提交 `e282090`）：
+
+- 便携版启动参数加 `--save ""`（不存快照）、`--appendonly no`、
+  `--stop-writes-on-bgsave-error no`（**保存失败永不锁写入**）；`--dir` 保留
+  （将来若启用快照，目录也是对的）。
+- **系统/外部 Redis 不加**这些开关——那条路径的持久化归用户自己管。
+- 自检由"验 bgsave"改为 **`verify_redis_writable`**（`SET`/`GET`/`DEL` 探针 +
+  如实报告持久化模式）：便携版按设计不存快照，再拿 bgsave 判健康只会误报；
+  真正要守住的是"写命令当下可用、且不会被保存失败锁死"。
+- 便携 Redis 的定位写进注释与启动提示：**只承担总线/队列/缓存，持久事实在 SQLite 与工作区**；
+  需要持久化请用系统/外部 Redis。
+
+**本机运行实例已就地稳定**：`CONFIG SET save ""`（周期性失败保存停止，日志里每 6 秒一次的
+`Can't save in background` 不再出现）+ `stop-writes-on-bgsave-error no`；
+`PING/SET/GET/DEL` 正常，`DBSIZE` 正常。重启后这些也会由修好的启动参数自动带上。
+
+**代价（明确写清）**：便携 Redis 现在**不落盘**。应用重启/机器重启会丢 Redis 里的内容
+（队列、任务快照、健康快照、搜索账本、通知去重标记）——这些本来就是可重建的运行态
+（任务台账/产物在 SQLite 与工作区）；通知去重标记丢失最多导致同一条通知重复一次。
+此前"以为有 RDB"的状态是**假的持久化**，比明确不持久更危险。
+
+**顺带实测**：重启后的新 Redis 里唯一的键是 `orchestrator:owner`——H3a 的**实例归属认领
+在真实环境里生效**（本机验证的第一个 C3 机制）。
+
+## 8. 验证（修订后）
+
+| 项 | 结果 |
+|---|---|
+| `test_redis_acquisition`（含新增"便携版必须关快照与锁写""写自检通过/被拒"） | **31 OK** |
+| `test_deploy_manifest` / `test_startup_readiness` / `test_p0` | 30 / **57** / **412** OK |
+| 实机（只读 + 一次 SET/GET/DEL 探针） | `PING→PONG`；`save=""`；`stop-writes=no`；写正常 |
