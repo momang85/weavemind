@@ -2611,6 +2611,27 @@ def _publish_task(
         _instance = _hr.instance_id()
     except Exception:                                 # noqa: BLE001
         _instance = ""
+    # C3/H3b：**先落收执，再触发工作**。编排器不在、或在崩溃窗口里时，这条请求现在会以
+    # RECEIVED（待消费）留在任务库里并可被启动恢复捡起，而不是只剩一条会过期的 Redis 键、
+    # 让用户看到超时却什么都查不到。落库失败就**不发布**：不制造"幽灵成功"。
+    _events = [
+        {"event": "received", "ts": received_at, "instance": _instance,
+         "detail": "web_ui 收到提交请求"},
+        {"event": "published", "ts": time.time(), "instance": _instance,
+         "detail": "已发布到 orchestrator:main，等待收执"},
+    ]
+    try:
+        import task_state as _ts_recv
+        _received_ok = _ts_recv.mark_received(
+            tid, goal, project=project, conversation_id=conversation_id,
+            parent_task_id=parent_task_id, context=context, user=user_id,
+            research_request=dict(research_request or {}),
+            idempotency_key=idem, instance=_instance, submit_events=_events)
+    except Exception as exc:                          # noqa: BLE001
+        _received_ok = False
+        logging.getLogger("web_ui").warning("收执落库异常：%s", str(exc)[:150])
+    if not _received_ok:
+        raise RuntimeError("任务收执无法落库（任务库不可写）；未派发，请检查数据目录权限")
     r.publish("orchestrator:main", json.dumps({
         "task_id": tid,
         "goal": goal,
@@ -2625,14 +2646,9 @@ def _publish_task(
         "parent_task_id": parent_task_id,
         # 研究契约：**提交时**随请求下发并在登记时落库（底稿只读它，抓取元数据只作候选）
         "research_request": dict(research_request or {}),
-        # C3/H3：幂等键 + 提交时间线的前两段（收到/发布），由编排器一次落库
+        # C3/H3b：幂等键 + 提交时间线的前两段（收到/发布）随请求下发
         "idempotency_key": idem,
-        "submit_events": [
-            {"event": "received", "ts": received_at, "instance": _instance,
-             "detail": "web_ui 收到提交请求"},
-            {"event": "published", "ts": time.time(), "instance": _instance,
-             "detail": "已发布到 orchestrator:main，等待收执"},
-        ],
+        "submit_events": _events,
     }, ensure_ascii=False))
     # 等待收执：编排器登记成功后写 task_ack:{tid} = accepted / accepted:dedup:<id>
     # / rejected:原因

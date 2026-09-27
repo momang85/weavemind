@@ -104,12 +104,18 @@ class TestSubmitHandshake(unittest.TestCase):
         finally:
             con.close()
 
-    def test_accepted_returns_queued_and_writes_nothing(self):
+    def test_accepted_writes_only_the_receipt_not_queued(self):
+        """C3/H3b：提交方**先落收执**（RECEIVED＝待消费），但 QUEUED 仍由编排器独占。
+
+        旧断言是"webui 一行都不写"，那是"编排器收到消息才登记"的必然结果——
+        代价是编排器没起来时请求什么都不剩（只有会过期的 Redis 键），用户查不到任何东西。
+        """
         import web_ui
         fake = self._fake_redis("accepted")
         with mock.patch.object(web_ui, "_redis_ready", return_value=True), \
                 mock.patch.object(web_ui, "_new_redis", return_value=fake), \
                 mock.patch.object(web_ui, "DB_PATH", self.db), \
+                mock.patch.object(task_state, "DB_PATH", self.db), \
                 mock.patch.dict("os.environ", {"WM_SUBMIT_ACK_TIMEOUT": "0.6"}):
             result = web_ui._publish_task("目标", conversation_id="conv-1")
         self.assertEqual(result["status"], "QUEUED")
@@ -117,19 +123,43 @@ class TestSubmitHandshake(unittest.TestCase):
         payload = json.loads(fake.publish.call_args.args[1])
         self.assertEqual(payload["conversation_id"], "conv-1", "会话关系随请求下发")
         self.assertIn("parent_task_id", payload)
-        self.assertEqual(self._task_rows(), [], "webui 不再登记 QUEUED（编排器是唯一写者）")
+        rows = self._task_rows()
+        self.assertEqual(len(rows), 1, f"应只有一条收执行：{rows}")
+        self.assertEqual(rows[0][1], "RECEIVED", "提交方只写收执，不得替编排器写 QUEUED")
+        self.assertNotIn("QUEUED", [r[1] for r in rows])
 
-    def test_timeout_raises_and_writes_nothing(self):
+    def test_timeout_with_persisted_receipt_reports_pending_consume(self):
+        """收执已落库但没等到回执：如实报"已收执待消费"，不再谎报"任务未被创建"。
+
+        那句谎话会把用户引向重复提交；现在这条收执留在 RECEIVED，启动恢复会捡起来跑。
+        """
         import web_ui
         fake = self._fake_redis("")
         with mock.patch.object(web_ui, "_redis_ready", return_value=True), \
                 mock.patch.object(web_ui, "_new_redis", return_value=fake), \
                 mock.patch.object(web_ui, "DB_PATH", self.db), \
+                mock.patch.object(task_state, "DB_PATH", self.db), \
+                mock.patch.dict("os.environ", {"WM_SUBMIT_ACK_TIMEOUT": "0.3"}):
+            result = web_ui._publish_task("目标")
+        self.assertTrue(result.get("ack_pending_consume"), result)
+        self.assertEqual(result["status"], "RECEIVED")
+        rows = self._task_rows()
+        self.assertEqual([r[1] for r in rows], ["RECEIVED"],
+                         "超时不得留下假 QUEUED/终态（收执可恢复，不是幽灵任务）")
+
+    def test_unwritable_receipt_raises_and_does_not_publish(self):
+        """收执落不了库就不发布：不制造"界面成功、现实里什么都没有"。"""
+        import web_ui
+        fake = self._fake_redis("accepted")
+        with mock.patch.object(web_ui, "_redis_ready", return_value=True), \
+                mock.patch.object(web_ui, "_new_redis", return_value=fake), \
+                mock.patch.object(web_ui, "DB_PATH", self.db), \
+                mock.patch.object(task_state, "mark_received", return_value=False), \
                 mock.patch.dict("os.environ", {"WM_SUBMIT_ACK_TIMEOUT": "0.3"}):
             with self.assertRaises(RuntimeError) as ctx:
                 web_ui._publish_task("目标")
-        self.assertIn("编排器未在", str(ctx.exception))
-        self.assertEqual(self._task_rows(), [], "超时不得留下幽灵任务行")
+        self.assertIn("收执", str(ctx.exception))
+        fake.publish.assert_not_called()
 
     def test_rejected_raises_with_reason(self):
         import web_ui
@@ -137,6 +167,7 @@ class TestSubmitHandshake(unittest.TestCase):
         with mock.patch.object(web_ui, "_redis_ready", return_value=True), \
                 mock.patch.object(web_ui, "_new_redis", return_value=fake), \
                 mock.patch.object(web_ui, "DB_PATH", self.db), \
+                mock.patch.object(task_state, "DB_PATH", self.db), \
                 mock.patch.dict("os.environ", {"WM_SUBMIT_ACK_TIMEOUT": "0.6"}):
             with self.assertRaises(RuntimeError) as ctx:
                 web_ui._publish_task("目标")
@@ -173,6 +204,7 @@ class TestSubmitHandshake(unittest.TestCase):
         with mock.patch.object(web_ui, "_redis_ready", return_value=True), \
                 mock.patch.object(web_ui, "_new_redis", return_value=fake), \
                 mock.patch.object(web_ui, "DB_PATH", self.db), \
+                mock.patch.object(task_state, "DB_PATH", self.db), \
                 mock.patch.dict("os.environ", {"WM_SUBMIT_ACK_TIMEOUT": "0.6"}):
             result = web_ui._publish_task("目标", idempotency_key="k-race")
         self.assertEqual(result["task_id"], "ui-winner")
@@ -185,6 +217,7 @@ class TestSubmitHandshake(unittest.TestCase):
         with mock.patch.object(web_ui, "_redis_ready", return_value=True), \
                 mock.patch.object(web_ui, "_new_redis", return_value=fake), \
                 mock.patch.object(web_ui, "DB_PATH", self.db), \
+                mock.patch.object(task_state, "DB_PATH", self.db), \
                 mock.patch.dict("os.environ", {"WM_SUBMIT_ACK_TIMEOUT": "0.6"}):
             web_ui._publish_task("目标", idempotency_key="k-ev")
         payload = json.loads(fake.publish.call_args.args[1])
@@ -200,6 +233,7 @@ class TestSubmitHandshake(unittest.TestCase):
         with mock.patch.object(web_ui, "_redis_ready", return_value=True), \
                 mock.patch.object(web_ui, "_new_redis", return_value=fake), \
                 mock.patch.object(web_ui, "DB_PATH", self.db), \
+                mock.patch.object(task_state, "DB_PATH", self.db), \
                 mock.patch.dict("os.environ", {"WM_SUBMIT_ACK_TIMEOUT": "0.6"}):
             result = web_ui._publish_task("目标")
         self.assertFalse(result.get("deduplicated"))
@@ -233,13 +267,19 @@ class TestFinalizeAndCrashFallback(unittest.TestCase):
         self.assertEqual(row["rules_fingerprint"], "abc12345")
 
     def test_wrapper_covers_early_return_and_exception_paths(self):
-        """提前 return 与异常都由 _run_task 兜底落库（单一收口点）。"""
+        """提前 return 与异常都由 `run_and_finalize` 兜底落库（单一收口点）。
+
+        C3/H3b 起该收口点从 main() 内的闭包 `_run_task` 提为模块级函数，
+        以便"消息路径"与"启动恢复路径"共用同一实现（两条路径都必须兜底落库）。
+        """
         src = Path("orchestrator_v2.py").read_text(encoding="utf-8")
-        i = src.index("def _run_task(tid, g, ctx, ar, tpl_steps, uid, proj, rc):")
-        block = src[i:i + 1600]
+        i = src.index("def run_and_finalize(orch, tid: str, goal: str, context: str = \"\", *,")
+        block = src[i:i + 2000]
         self.assertIn("orch._finalize_task(", block)
         self.assertGreaterEqual(block.count("orch._finalize_task("), 2,
                                 "try 与 except 两条路径都要落库")
+        # 消息路径与启动恢复路径都走这一处（不得再有第二份内联实现）
+        self.assertIn("target=run_and_finalize", src)
 
     def test_crash_fallback_respects_age_guard(self):
         task_state.mark_queued("ui-run", "目标", db_path=self.db)

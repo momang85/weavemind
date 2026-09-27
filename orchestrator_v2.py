@@ -8338,6 +8338,96 @@ def claim_orchestrator_ownership(r, *, instance: str = "") -> tuple[bool, str]:
         return True, f"归属未确认（{str(exc)[:60]}），按单实例继续"
 
 
+def run_and_finalize(orch, tid: str, goal: str, context: str = "", *,
+                     auto_run: bool = True, template_steps=None, user_id: str = "",
+                     project: str = "default", report_confirm: bool = False) -> None:
+    """跑一个任务并把结果兜底落库（消息路径与"启动恢复"路径共用同一实现）。
+
+    兜底落库的必要性：`run()` 内有 6 个提前 return（余额不足/端点不可用/规划失败等），
+    它们各自 push 了 task_complete 但未必走到主终态；这里是唯一能覆盖全部返回路径
+    与异常路径的单点。
+    """
+    try:
+        # C3/H3b 时间线：记"开始"（实例+代码版本），使 收到→持久化→发布→消费→开始
+        # 五段可对账；即便随后 run() 提前返回也能看出已开始
+        try:
+            import task_state as _ts_start
+            _inst_s, _ver_s = _instance_identity()
+            _ts_start.record_submit_event(
+                tid, "started", instance=_inst_s, code_version=_ver_s,
+                detail="执行线程已开始运行")
+        except Exception:                             # noqa: BLE001
+            pass
+        result = orch.run(
+            tid, goal, context, auto_run=auto_run, template_steps=template_steps,
+            user_id=user_id, project=project, report_confirm=report_confirm,
+        )
+        result["project"] = project
+        orch._finalize_task(
+            tid, goal, str(result.get("status") or "FAILED"),
+            report=str(result.get("report") or ""),
+            steps=result.get("steps") or [],
+            acceptance=result.get("acceptance") or {},
+        )
+        orch._messaging.publish("orchestrator:response", result)
+    except Exception as e:                            # noqa: BLE001
+        logger.error("Task %s failed: %s", tid, e)
+        orch._finalize_task(tid, goal, "FAILED", report=str(e))
+        orchestrator_messaging_publish_failed(orch, tid, str(e), project)
+
+
+def orchestrator_messaging_publish_failed(orch, tid: str, err: str, project: str) -> None:
+    """失败也发一条响应（抽出来只为让上面的异常分支短一行）。"""
+    try:
+        orch._messaging.publish("orchestrator:response",
+                                {"task_id": tid, "status": "FAILED",
+                                 "report": err, "project": project})
+    except Exception:                                 # noqa: BLE001
+        pass
+
+
+def resume_received_tasks(orch, *, older_than: float = 10.0, limit: int = 20) -> int:
+    """启动恢复：把**已收执但从未被消费**的任务捡起来执行（C3/H3b）。
+
+    覆盖的真实场景：网页提交成功、收执已落库，但编排器当时没起来（或在崩溃窗口里），
+    pub/sub 的消息已经丢了。旧行为下这条请求什么都不剩；现在它留在 `RECEIVED`，
+    由本函数原子推进（`promote_received`）后执行——**谁推进成功谁执行**，
+    因此与"消息恰好也在路上"的情况不会重复执行同一条请求。
+
+    `older_than` 默认 10 秒：避开"刚刚提交、消息正在飞"的那几秒（那条消息自己会推进）。
+    返回本次恢复的任务数。
+    """
+    import task_state as _ts
+    try:
+        rows = _ts.list_received(older_than=older_than, limit=limit)
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("收执恢复扫描失败：%s", str(exc)[:150])
+        return 0
+    if not rows:
+        return 0
+    inst, ver = _instance_identity()
+    started = 0
+    for row in rows:
+        tid = str(row.get("task_id") or "")
+        if not tid:
+            continue
+        verdict = _ts.promote_received(tid, instance=inst, code_version=ver)
+        if verdict != "promoted":
+            logger.info("收执恢复：任务 %s 已被消费（%s），跳过", tid, verdict)
+            continue
+        logger.warning("收执恢复：任务 %s 收执超过 %.0fs 未被消费，重新执行"
+                       "（goal=%s）", tid, older_than, str(row.get("goal") or "")[:60])
+        threading.Thread(
+            target=run_and_finalize,
+            args=(orch, tid, str(row.get("goal") or ""), str(row.get("context") or "")),
+            kwargs={"user_id": str(row.get("user_id") or ""),
+                    "project": str(row.get("project") or "default")},
+            daemon=True,
+        ).start()
+        started += 1
+    return started
+
+
 def accept_task_request(orch, data: dict) -> tuple[bool, str]:
     """接收一条任务请求：登记 QUEUED（唯一写者）+ 写收执键。
 
@@ -8368,7 +8458,7 @@ def accept_task_request(orch, data: dict) -> tuple[bool, str]:
         import task_state as _ts
         if idem:
             existing = _ts.find_by_idempotency(idem)
-            if existing and existing.get("task_id"):
+            if existing and existing.get("task_id") and str(existing["task_id"]) != task_id:
                 effective_id = str(existing["task_id"])
                 _ts.record_submit_event(
                     effective_id, "deduplicated", instance=instance,
@@ -8379,25 +8469,37 @@ def accept_task_request(orch, data: dict) -> tuple[bool, str]:
                 logger.info("Task %s 幂等键命中已有任务 %s：不登记、不执行",
                             task_id, effective_id)
                 return True, ""
-        wrote = _ts.mark_queued(
-            task_id, goal,
-            project=str(data.get("project") or "default"),
-            conversation_id=str(data.get("conversation_id") or ""),
-            parent_task_id=str(data.get("parent_task_id") or ""),
-            context=str(data.get("context") or ""),
-            user=str(data.get("user_id") or ""),
-            # 研究契约在**提交时**落库：底稿只读它，抓取元数据不得反向决定研究对象
-            research_request=(data.get("research_request")
-                              if isinstance(data.get("research_request"), dict) else None),
-            idempotency_key=idem, instance=instance, code_version=code_version,
-            submit_events=events,
-        )
-        if not wrote:
-            ok, reason = False, "登记失败：任务库不可写（详见编排器日志）"
+        # C3/H3b：提交方已落收执（RECEIVED）时，**推进它**是唯一的执行权裁决点。
+        # "already" = 已被"启动恢复"或另一个实例推进过 → 绝不重复执行。
+        verdict = _ts.promote_received(task_id, instance=instance,
+                                       code_version=code_version)
+        if verdict == "promoted":
+            logger.info("Task %s 收执已消费（RECEIVED → QUEUED）", task_id)
+        elif verdict == "already":
+            data["_skip_run"] = True
+            _set_task_ack(orch, task_id, "accepted")
+            logger.info("Task %s 收执已被消费过：跳过本次执行", task_id)
+            return True, ""
         else:
-            _ts.record_submit_event(
-                task_id, "consumed", instance=instance, code_version=code_version,
-                detail="编排器已收到该请求并登记为 QUEUED")
+            wrote = _ts.mark_queued(
+                task_id, goal,
+                project=str(data.get("project") or "default"),
+                conversation_id=str(data.get("conversation_id") or ""),
+                parent_task_id=str(data.get("parent_task_id") or ""),
+                context=str(data.get("context") or ""),
+                user=str(data.get("user_id") or ""),
+                # 研究契约在**提交时**落库：底稿只读它，抓取元数据不得反向决定研究对象
+                research_request=(data.get("research_request")
+                                  if isinstance(data.get("research_request"), dict) else None),
+                idempotency_key=idem, instance=instance, code_version=code_version,
+                submit_events=events,
+            )
+            if not wrote:
+                ok, reason = False, "登记失败：任务库不可写（详见编排器日志）"
+            else:
+                _ts.record_submit_event(
+                    task_id, "consumed", instance=instance, code_version=code_version,
+                    detail="编排器已收到该请求并登记为 QUEUED")
     except Exception as exc:
         ok, reason = False, f"登记失败：{str(exc)[:120]}"
     _set_task_ack(orch, task_id, "accepted" if ok else f"rejected:{reason}")
@@ -8443,6 +8545,14 @@ def main():
         logger.error("拒绝启动：%s", _owner_why)
         return 2
     logger.info("编排器实例归属：%s", _owner_why)
+    # C3/H3b 启动恢复：把"已收执但从未被消费"的请求捡回来执行（pub/sub 的消息已丢，
+    # 但收执在库里）。放在订阅之前：先恢复旧的，再开始接新的。
+    try:
+        _resumed = resume_received_tasks(orch)
+        if _resumed:
+            logger.warning("启动恢复：重新执行 %d 条未被消费的收执", _resumed)
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("启动恢复失败（不挡启动）：%s", str(exc)[:150])
     ps = r.pubsub()
     ps.subscribe("orchestrator:main")
 
@@ -8496,6 +8606,10 @@ def main():
                     logger.info("Task %s 与已有任务 %s 同幂等键：跳过本次执行",
                                 task_id, _effective)
                     continue
+                if data.get("_skip_run"):
+                    # 收执已被"启动恢复"消费过：只回执，不再跑第二遍
+                    logger.info("Task %s 收执已消费：跳过本次执行", task_id)
+                    continue
                 if not _accepted:
                     # 登记失败：不执行（否则会出现"界面失败但实际在跑"的反向幽灵任务）
                     logger.error("Task %s 未被接收（%s）：不启动执行", task_id, _why)
@@ -8520,47 +8634,14 @@ def main():
                 threading.Thread(target=_run_evo, daemon=True).start()
                 continue
 
-            # Run task in background thread
-            def _run_task(tid, g, ctx, ar, tpl_steps, uid, proj, rc):
-                try:
-                    # C3/H3 时间线：记"开始"（实例+代码版本），使 收到→持久化→发布→
-                    # 消费→开始 五段可对账；即便随后 run() 提前返回也能看出已开始
-                    try:
-                        import task_state as _ts_start
-                        _inst_s, _ver_s = _instance_identity()
-                        _ts_start.record_submit_event(
-                            tid, "started", instance=_inst_s, code_version=_ver_s,
-                            detail="执行线程已开始运行")
-                    except Exception:                 # noqa: BLE001
-                        pass
-                    result = orch.run(
-                        tid, g, ctx, auto_run=ar, template_steps=tpl_steps,
-                        user_id=uid, project=proj, report_confirm=rc,
-                    )
-                    result["project"] = proj
-                    # 兜底落库：run() 内有 6 个提前 return（余额不足/端点不可用/
-                    # 规划失败等），它们各自 push 了 task_complete 但未必走到主终态；
-                    # 这里是唯一能覆盖全部返回路径与异常路径的单点。
-                    orch._finalize_task(
-                        tid, g, str(result.get("status") or "FAILED"),
-                        report=str(result.get("report") or ""),
-                        steps=result.get("steps") or [],
-                        acceptance=result.get("acceptance") or {},
-                    )
-                    orch._messaging.publish("orchestrator:response", result)
-                except Exception as e:
-                    logger.error("Task %s failed: %s", tid, e)
-                    orch._finalize_task(tid, g, "FAILED", report=str(e))
-                    orch._messaging.publish("orchestrator:response",
-                                            {"task_id": tid, "status": "FAILED",
-                                             "report": str(e), "project": proj})
+            # Run task in background thread（与"启动恢复"共用同一实现）
             threading.Thread(
-                target=_run_task,
-                args=(
-                    task_id, goal, context, auto_run,
-                    data.get("template_steps"), data.get("user_id", ""),
-                    project, report_confirm,
-                ),
+                target=run_and_finalize,
+                args=(orch, task_id, goal, context),
+                kwargs={"auto_run": auto_run,
+                        "template_steps": data.get("template_steps"),
+                        "user_id": data.get("user_id", ""),
+                        "project": project, "report_confirm": report_confirm},
                 daemon=True,
             ).start()
 

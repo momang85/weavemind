@@ -55,6 +55,11 @@ DB_PATH = _db_paths.resolve_db_path()
 
 # 状态词表（项目此前只有常用 4 值的 TaskStatus 枚举且未被编排链路使用；
 # 这里显式区分"排队"与"运行"，终结状态沿用既有词表以免破坏前端映射）
+#
+# C3/H3b：`RECEIVED` = **已收执但还没被消费**。提交方先把收执落库再触发工作，
+# 于是"请求到了但编排器没起来/崩了"是一个**可查、可恢复**的状态，
+# 而不是一条 120 秒后消失的 Redis 键（旧行为：用户只看到超时，无法判断发生了什么）。
+RECEIVED = "RECEIVED"
 QUEUED = "QUEUED"
 RUNNING = "RUNNING"
 SUCCESS = "SUCCESS"
@@ -220,6 +225,137 @@ def read_submit_timeline(task_id: str, db_path: str | None = None) -> list[dict]
     return [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
 
 
+def mark_received(task_id: str, goal: str, *, project: str = "default",
+                  conversation_id: str = "", parent_task_id: str = "",
+                  context: str = "", user: str = "",
+                  research_request: dict | None = None,
+                  idempotency_key: str = "", instance: str = "",
+                  code_version: str = "", submit_events: list | None = None,
+                  db_path: str | None = None) -> bool:
+    """**提交方**先落一条收执行（C3/H3b）：状态 `RECEIVED`，表示"收到了，还没被消费"。
+
+    为什么由提交方写：指令要求"先保存可追踪收执，再触发工作"。原来是编排器收到消息
+    才登记——编排器没起来/在崩溃窗口里，这条请求就**什么都不剩**（只有一条会过期的
+    Redis 键），用户看到超时，无从判断是没到、到了没跑、还是跑了失败。
+
+    只写**收执**这一个状态：QUEUED 及之后的所有迁移仍由编排器独占
+    （`mark_queued` / `mark_running` / `record_completion`）。
+    同一 task_id 重复写视为幂等（返回 True，不覆盖已有行）。
+    """
+    request_json = ""
+    if isinstance(research_request, dict) and research_request:
+        try:
+            request_json = json.dumps(research_request, ensure_ascii=False)
+        except Exception:
+            request_json = ""
+    events = [e for e in (_norm_submit_event(x) for x in (submit_events or [])) if e]
+    events.append(_norm_submit_event({
+        "event": "received", "instance": instance, "code_version": code_version,
+        "detail": "收执已落库（等待编排器消费）"}) or {})
+    timeline_json = json.dumps(events[-_SUBMIT_TIMELINE_MAX:], ensure_ascii=False)
+    try:
+        con = _connect(db_path)
+        try:
+            _add_missing_columns(con)
+            con.execute(
+                "INSERT OR IGNORE INTO task_history"
+                "(task_id,goal,status,project,conversation_id,parent_task_id,context,user,"
+                " phase,research_request_json,idempotency_key,submit_timeline_json,"
+                " accepted_by)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (task_id, goal, RECEIVED, project, conversation_id, parent_task_id,
+                 context, user, "待消费", request_json,
+                 str(idempotency_key or "").strip(), timeline_json, ""),
+            )
+            con.commit()
+            return True
+        finally:
+            con.close()
+    except Exception as exc:                          # noqa: BLE001
+        logger.error("任务 %s 收执落库失败：%s", task_id, str(exc)[:200])
+        return False
+
+
+def promote_received(task_id: str, *, instance: str = "", code_version: str = "",
+                     db_path: str | None = None) -> str:
+    """把 `RECEIVED` 收执**原子地**推进到 `QUEUED`（谁赢谁执行）。
+
+    返回 `"promoted"`（本次赢得执行权）/ `"already"`（已被别人推进，**不要重复执行**）
+    / `"absent"`（没有收执行——老路径或直接调用编排器的场景）。
+
+    `UPDATE ... WHERE status='RECEIVED'` 是唯一的裁决点：网页提交的消息与
+    "启动时恢复未消费收执"两条路径同时存在时，只有一个能把 RECEIVED 改成 QUEUED，
+    因此同一条请求不会被执行两次。
+    """
+    try:
+        con = _connect(db_path)
+        try:
+            _add_missing_columns(con)
+            cur = con.execute(
+                "UPDATE task_history SET status=?, phase=?, accepted_by=?,"
+                " updated_at=CURRENT_TIMESTAMP"
+                " WHERE task_id=? AND status=?",
+                (QUEUED, "排队", str(instance or "")[:64], task_id, RECEIVED))
+            won = int(cur.rowcount or 0) > 0
+            con.commit()
+        finally:
+            con.close()
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("任务 %s 收执推进失败：%s", task_id, str(exc)[:160])
+        return "absent"
+    if won:
+        record_submit_event(task_id, "consumed", instance=instance,
+                            code_version=code_version,
+                            detail="编排器已消费该收执并登记为 QUEUED", db_path=db_path)
+        return "promoted"
+    row = read_task(task_id, db_path)
+    return "already" if row else "absent"
+
+
+def list_received(*, older_than: float = 0.0, limit: int = 50,
+                  db_path: str | None = None) -> list[dict]:
+    """列出**已收执但从未被消费**的任务（C3/H3b 启动恢复用）。
+
+    `older_than`：只取落库超过这么多秒的（默认 0 = 全部）。调用方用一个小阈值
+    避开"刚刚提交、正在飞"的那几秒。
+    """
+    out: list[dict] = []
+    try:
+        con = _connect(db_path)
+        try:
+            _add_missing_columns(con)
+            rows = con.execute(
+                "SELECT task_id,goal,project,conversation_id,parent_task_id,context,"
+                " user,research_request_json,idempotency_key,"
+                " CAST(strftime('%s','now') AS INTEGER)"
+                " - CAST(strftime('%s',created_at) AS INTEGER) AS age"
+                " FROM task_history WHERE status=? ORDER BY rowid ASC LIMIT ?",
+                (RECEIVED, int(limit))).fetchall()
+        finally:
+            con.close()
+    except Exception:                                 # noqa: BLE001
+        return []
+    for r in rows:
+        try:
+            age = float(r[9] or 0)
+        except (TypeError, ValueError):
+            age = 0.0
+        if age < float(older_than):
+            continue
+        req: dict = {}
+        try:
+            req = json.loads(r[7] or "{}")
+        except Exception:
+            req = {}
+        out.append({"task_id": str(r[0] or ""), "goal": str(r[1] or ""),
+                    "project": str(r[2] or "default"),
+                    "conversation_id": str(r[3] or ""),
+                    "parent_task_id": str(r[4] or ""), "context": str(r[5] or ""),
+                    "user_id": str(r[6] or ""), "research_request": req,
+                    "idempotency_key": str(r[8] or ""), "age": age})
+    return out
+
+
 def find_by_idempotency(idempotency_key: str,
                         db_path: str | None = None) -> dict | None:
     """按幂等键找**已存在**的任务（最近的优先）。找不到返回 None。
@@ -345,6 +481,27 @@ def mark_queued(task_id: str, goal: str, project: str = "default",
         try:
             # 编排器可能先于 web_ui 初始化库；缺列会让写入静默失败
             _add_missing_columns(con)
+            # C3/H3b：提交方可能已经落了收执行（RECEIVED）——那就**推进**它，
+            # 不能 INSERT（主键冲突会变成"登记失败"）也不能 REPLACE（会抹掉收执时间线）。
+            # 只允许从 RECEIVED/QUEUED 推进，绝不把 RUNNING/终态改回 QUEUED。
+            row = con.execute("SELECT status FROM task_history WHERE task_id=?",
+                              (task_id,)).fetchone()
+            if row is not None:
+                cur_status = str(row[0] or "")
+                if cur_status in (RECEIVED, QUEUED):
+                    con.execute(
+                        "UPDATE task_history SET status=?, phase=?, accepted_by=?,"
+                        " updated_at=CURRENT_TIMESTAMP WHERE task_id=?",
+                        (QUEUED, "排队", str(instance or "")[:64], task_id))
+                    con.commit()
+                    record_submit_event(
+                        task_id, "persisted", instance=instance,
+                        code_version=code_version,
+                        detail=f"收执推进为 QUEUED（原状态 {cur_status}）", db_path=db_path)
+                else:
+                    # 已经在跑或已终结：登记视为幂等成功，但**不改状态**
+                    logger.info("任务 %s 已处于 %s，登记按幂等处理", task_id, cur_status)
+                return True
             con.execute(
                 "INSERT INTO task_history"
                 "(task_id,goal,status,project,conversation_id,parent_task_id,context,user,"
