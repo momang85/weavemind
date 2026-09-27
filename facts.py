@@ -730,10 +730,12 @@ class Fact:
     # 空口径配空证据 = 未声明；有口径必须有证据，否则审核人无从复核。
     caliber_source: str = ""
     caliber_evidence: str = ""
-    # 主体所在市场（cn/hk/us）与披露日期：前者是主体标识的一部分（A′1），
-    # 后者是"截至日能否成立"的证据（A′4，与期末 period_end、抓取时间分开记）
+    # 主体所在市场（cn/hk/us）与三个日期：市场是主体标识的一部分（A′1）；
+    # 期末 period_end、披露日 disclosed_at、获取日 retrieved_at 三者**分开记**（A′4）——
+    # 缺失一律留空（未知），不允许任何一方顶替另一方
     market: str = ""
     disclosed_at: str = ""
+    retrieved_at: str = ""
     source_url: str = ""
     source_hash: str = ""
     source_locator: dict = field(default_factory=dict)
@@ -887,10 +889,15 @@ def facts_from_financials(payload: dict, *, source_kind: str = "",
                     # 比率指标的单位由**指标语义**决定：载荷只声明金额单位（亿元），
                     # 照抄会把"毛利率 73.16"写成 73.16 亿元（实机缺陷）
                     row_unit, unit_source = "%", "metric_semantics"
-                # 披露日期（有就记）：报告期末 ≠ 抓取时间 ≠ 披露时间，三者分开
+                # 披露日期：**只认来源声明的**披露/公告日；缺失就是未知。
+                # 不许用报告期末（report_date）顶替（专项 §3-8）：期末基本都早于/等于
+                # 截至日，拿它兜底会让"截至该日这份数据已可用"在没有证据的情况下静默成立，
+                # 底稿 A′4 的"时点未核实"闸因此形同虚设（改前正是如此）。
                 row_disclosed = str(row.get("disclosure_date")
-                                    or row.get("disclosed_at")
-                                    or row.get("report_date") or "").strip()[:10]
+                                    or row.get("disclosed_at") or "").strip()[:10]
+                # 获取日：与期末、披露日分开记（来源声明了才记；来源不声明就是未知）
+                row_retrieved = str(row.get("retrieved_at") or md.get("retrieved_at")
+                                    or "").strip()[:10]
                 facts.append(Fact(
                     fact_id=make_fact_id(entity_id, entity, key, period, caliber),
                     entity=entity, entity_id=entity_id,
@@ -905,6 +912,7 @@ def facts_from_financials(payload: dict, *, source_kind: str = "",
                     caliber_evidence=cal_evidence,
                     market=md_market,
                     disclosed_at=row_disclosed,
+                    retrieved_at=row_retrieved,
                     source_url=url, source_hash=snap,
                     source_locator={
                         "kind": "structured_field",
