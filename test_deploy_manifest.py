@@ -438,6 +438,64 @@ class TestOrchestratorRunTestsAreOffline(unittest.TestCase):
             f"{offenders}（用 tests_support.stub_llm_prechecks 或自行 patch）")
 
 
+class TestCodeVersion(unittest.TestCase):
+    """C4：实例/时间线要能回答"这条请求被**哪份代码**处理了"。
+
+    反例：服务是长驻进程，改了代码没重启就仍在跑旧版本；此前只能靠"我记得重启过"。
+    """
+
+    def _fake_repo(self, *, head: str, ref: str = "refs/heads/main",
+                   sha: str = "a" * 40, git_file: bool = False):
+        """造一个最小 .git：目录形态，或 worktree 的 `.git` 文件（`gitdir:` 指向别处）。"""
+        import shutil
+        import tempfile
+        root = Path(tempfile.mkdtemp(prefix="wm_codever_"))
+        self.addCleanup(shutil.rmtree, root, ignore_errors=True)
+        if git_file:
+            gitdir = root / "realgit"
+            gitdir.mkdir(parents=True, exist_ok=True)
+            (root / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+        else:
+            gitdir = root / ".git"
+            gitdir.mkdir(parents=True, exist_ok=True)
+        (gitdir / "HEAD").write_text(head, encoding="utf-8")
+        if sha:
+            p = gitdir / ref
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(sha + "\n", encoding="utf-8")
+        return root
+
+    def _load(self, base: Path):
+        import importlib
+        import code_version
+        importlib.reload(code_version)
+        code_version.BASE_DIR = base
+        return code_version
+
+    def test_no_git_returns_empty(self):
+        import tempfile
+        cv = self._load(Path(tempfile.mkdtemp(prefix="wm_nogit_")))
+        self.assertEqual(cv.current(), "", "没有 .git 时必须如实返回空（包内就是这种情形）")
+
+    def test_reads_head_ref_short_sha(self):
+        cv = self._load(self._fake_repo(head="ref: refs/heads/main", sha="b" * 40))
+        self.assertEqual(cv.current(with_dirty=False), "b" * 7)
+
+    def test_detached_head_is_read_directly(self):
+        cv = self._load(self._fake_repo(head="c" * 40, sha=""))
+        self.assertEqual(cv.current(with_dirty=False), "c" * 7)
+
+    def test_worktree_gitdir_file_is_followed(self):
+        cv = self._load(self._fake_repo(head="ref: refs/heads/main", sha="d" * 40,
+                                       git_file=True))
+        self.assertEqual(cv.current(with_dirty=False), "d" * 7)
+
+    def test_describe_says_unknown_when_missing(self):
+        import tempfile
+        cv = self._load(Path(tempfile.mkdtemp(prefix="wm_nogit2_")))
+        self.assertIn("未知", cv.describe())
+
+
 class TestScoringHandoffSameVersion(unittest.TestCase):
     """C4：评分交接单必须**自动引用当前版本**，且旧包不得被当成可评分。
 
