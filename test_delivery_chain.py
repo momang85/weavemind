@@ -7293,9 +7293,9 @@ class TestResearchQuestions(unittest.TestCase):
         self.assertNotIn("降幅", head, head[:200])
         self.assertNotIn("收入下降", head, head[:200])
 
-    def test_negative_base_has_no_percentage_direction(self):
-        """基数为负：只说"由负转正/两期同为负"，不套百分比方向（负基数上的同比
-        没有方向含义）。"""
+    def test_negative_base_keeps_question_with_absolute_change(self):
+        """H2（纠正 C2 的取舍）：基数为负时**问题不消失**——保留问题身份与分母，
+        改说绝对变化 + 可比性限制；不给百分比方向，也不靠删题迁就 PDF 分页。"""
         import report_brief
         tid = self._env(tid="rq-neg", rows=self.NEGATIVE_ROWS)
         st = report_brief.build_structure(tid, self.GOAL, "")
@@ -7305,25 +7305,60 @@ class TestResearchQuestions(unittest.TestCase):
         self.assertEqual(_metric_direction({"value": 5.0}, {"value": 3.0}), "上升")
         self.assertEqual(_metric_direction({"value": -5.0}, {"value": -3.0}), "两期同为负")
         self.assertEqual(_change_noun("由负转正"), "变化")
-        # 同比不可算时**不出这一问**（底稿已把它记成"不可算"的底稿问题），
-        # 主文因此不会出现与事实相反的方向词
-        questions = {q.get("metric") for q in st.get("research_questions") or []}
-        self.assertNotIn("net_profit", questions)
+        # 同比不可算**不再是删题理由**：问题身份、分母、绝对变化与限制都要在
+        qs = {q.get("metric"): q for q in st.get("research_questions") or []}
+        self.assertIn("net_profit", qs, "同比不可算不构成删题理由（H2）")
+        q = qs["net_profit"]
+        self.assertFalse(q.get("yoy_computable"), q)
+        self.assertIn("绝对变化", str(q.get("observation")), q.get("observation"))
+        self.assertIn("不具可比含义", str(q.get("observation")), q.get("observation"))
+        self.assertIn("不给出百分比方向", str(q.get("boundary")), q.get("boundary"))
+        self.assertTrue(q.get("retained_reason"), "要写明为什么保留这一问")
+        # 评估分母保持三问，不因删题缩小
+        self.assertEqual(len(st.get("question_assessments") or {}), 3)
         md = report_brief.render_brief_markdown(st, "")
         self.assertNotIn("利润降幅", md)
         self.assertIn("基期为负", md, "底稿问题要如实写出来")
 
     def test_key_points_carry_evidence_nature(self):
-        """首屏每个重点都要写**证据性质**（发行人说法 vs 计算自披露数值）。"""
+        """首屏每个重点都要写**证据性质**，且必须出现在读者实际读到的正文里
+        （页面/Markdown/PDF/ZIP 同源；仅放结构字段不算交付——H2）。"""
         import report_brief
         tid = self._env(tid="rq-nature")
         st = report_brief.build_structure(tid, self.GOAL, "")
         md = report_brief.render_brief_markdown(st, "")
-        # 证据性质在**结构对象**里逐问带出（页面/导出清单读它；主文不加行）
         st_assess = st.get("question_assessments") or {}
         natures = {str((v.get("rule") or {}).get("nature") or "")
                    for v in st_assess.values()}
         self.assertIn("计算自披露数值（非独立核实）", natures, natures)
+        self.assertIn("证据性质", md, "正文必须能看到证据性质，不能只在结构字段里")
+        self.assertIn("计算自披露数值（非独立核实）", md, md[:400])
+
+    def test_two_consecutive_assemblies_are_stable(self):
+        """H2：同一输入连续装配两次必须稳定（C2 §5 残留项：此前只有评估级断言）。
+
+        正文逐字节一致、问题与风险的数量/类别一致——装配器不得把工程诊断回收成业务风险
+        （`from_report` 只允许"由模型提出"的条目），也不得两次给出不同风险集合。
+        """
+        import report_brief
+        tid = self._env(tid="rq-stable")
+        st1 = report_brief.build_structure(tid, self.GOAL, "")
+        st2 = report_brief.build_structure(tid, self.GOAL, "")
+        self.assertEqual(report_brief.render_brief_markdown(st1, ""),
+                         report_brief.render_brief_markdown(st2, ""),
+                         "同一输入两次装配的正文必须逐字节一致")
+        self.assertEqual(
+            [(q.get("metric"), q.get("observation"), q.get("boundary"))
+             for q in st1.get("research_questions") or []],
+            [(q.get("metric"), q.get("observation"), q.get("boundary"))
+             for q in st2.get("research_questions") or []],
+            "问题身份与措辞不得抖动")
+        self.assertEqual(
+            [(r.get("kind"), r.get("text")) for r in st1.get("risks") or []],
+            [(r.get("kind"), r.get("text")) for r in st2.get("risks") or []],
+            "业务风险的数量与类别不得抖动")
+        self.assertEqual(len(st1.get("question_assessments") or {}),
+                         len(st2.get("question_assessments") or {}))
 
     def test_three_questions_each_carry_four_fields(self):
         import report_brief

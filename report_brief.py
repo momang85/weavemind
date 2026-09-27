@@ -593,12 +593,29 @@ def _research_questions(rows, derived, periods, evidence, citations, changes, *,
         cur = (by.get(metric) or {}).get(last) if last else None
         prev = (by.get(metric) or {}).get((last - 1) if last else 0)
         _dir0 = _metric_direction(cur, prev)
+        _cv = (cur or {}).get("value")
+        _pv = (prev or {}).get("value")
+        _cu = str((cur or {}).get("unit") or "")
+        _pu = str((prev or {}).get("unit") or "")
+
+        def _amt(x, unit):
+            return f"{x:g}{unit}" if isinstance(x, (int, float)) else "未取得"
+
+        _retained_reason = ""
         if not isinstance(v, (int, float)):
-            # 同比算不出（负基数等）时**不出这一问**：底稿已把它记成"不可算"的
-            # 底稿问题（`已写明：同比不具可比含义，应分别描述亏损/转正与绝对额变化`），
-            # 主文再加一问会把 PDF 分页推到多一页近似空白页（冻结场景反例），
-            # 方向措辞与绝对额表示在底稿与缺口里如实给出。见证据文档"未验/未做"。
-            continue
+            # H2（纠正 C2 §5 的取舍）：同比算不出（基期为负/为零）时**问题不消失**——
+            # 保留问题身份与分母，改说**绝对变化 + 可比性限制 + 未完成原因**。
+            # 此前用 `continue` 把整问删掉，等于让"同比不可算"变成"这个问题不存在"；
+            # 分页问题改为修布局（本问仍走同一套紧凑两行格式，不新增正文行）。
+            obs = (f"{label} {_amt(_pv, _pu)}（{last - 1 if last else '—'} 年）→ "
+                   f"{_amt(_cv, _cu)}（{last} 年）")
+            if isinstance(_cv, (int, float)) and isinstance(_pv, (int, float)):
+                obs += f"，绝对变化 {_cv - _pv:+g}{_cu or _pu}"
+            obs += "；两期存在非正值，同比（百分比）不具可比含义，本问不给百分比方向"
+            boundary = ("基期为负/为零时同比没有可比含义，本问**不给出百分比方向**，"
+                        "只按绝对额与由负转正/同负表述；" + boundary)
+            _retained_reason = ("同比不可算（基期非正）**不构成删题理由**：本问保留在必答"
+                                "问题里并保留分母，未完成原因见依据与下一步")
         else:
             obs = f"{label}同比{'增长' if v > 0 else '下降' if v < 0 else '持平'} {abs(v):g}%"
             if cur is not None:
@@ -746,6 +763,8 @@ def _research_questions(rows, derived, periods, evidence, citations, changes, *,
             _next_mats = ["确认研究对象类型（金融 / 非金融）"] + _next_mats
         out.append({"metric": metric, "question": q_text, "observation": obs,
                     "change_direction": _dir_word,
+                    "yoy_computable": isinstance(v, (int, float)),
+                    "retained_reason": _retained_reason,
                     "support": support, "boundary": boundary,
                     "assessment": _a,
                     "subject_type_confirmed": bool(type_confirmed),
@@ -2531,9 +2550,17 @@ def render_brief_markdown(structure: dict, body: str = "",
             _kl = str(a.get("kind_label") or "未取得")
             if str(a.get("kind")) == "decomposition":
                 _kl = "量价/结构数据（分解覆盖）"
-            # C2：证据性质进**结构对象**（页面/导出清单读 question_assessments 的 rule），
-            # 主文这一行保持原样——PDF 分页对正文行数敏感，不加行（见证据文档）
-            lines.append(f"  - 依据：{_kl}；覆盖：{cov}；{where}")
+            # H2：证据性质（发行人说法 / 计算自披露数值）必须进**读者实际读到的正文**，
+            # 不能只放结构字段。这里**加在既有那一行里**（不新增正文行）——PDF 分页对
+            # 行数敏感，改布局而不是删掉性质说明。没有材料时如实说"尚未取得可判定的
+            # 证据"，不把"该类问题需要什么性质的证据"冒充成"已有这种证据"。
+            _nature = str(((a.get("rule") or {}).get("nature")) or "")
+            if _nature:
+                _nature_txt = (f"；证据性质：{_nature}" if str(sup.get("coverage") or "none") != "none"
+                               else "；证据性质：尚未取得可判定的证据")
+            else:
+                _nature_txt = ""
+            lines.append(f"  - 依据：{_kl}；覆盖：{cov}；{where}{_nature_txt}")
             lines.append(f"  - 边界：{q.get('boundary')}")
             lines.append(f"  - 下一步：{'、'.join((q.get('plan') or {}).get('next_material', '').split('、')[:3]) or '补齐底稿事实'}"
                          f"（补到后会怎样改变判断见附录『逐问题资料计划』）")
@@ -2592,8 +2619,20 @@ def render_brief_markdown(structure: dict, body: str = "",
             _short = _obs.split("（")[0].strip() if "（" in _obs else _obs
             if len(_short) > 60:
                 _short = _short[:60].rstrip()
+            # H2：读者实际读到的这一节也要有证据性质（同上一节，加在既有行内不加行）；
+            # 无材料时不把"该问需要什么性质"写成"已有该性质证据"。
+            _q_nature = str((((q.get("assessment") or {}).get("rule") or {})
+                             .get("nature")) or "")
+            if _q_nature:
+                _n_txt = (f"；证据性质：{_q_nature}"
+                          if str(sup.get("coverage") or "none") != "none"
+                          else "；证据性质：尚未取得可判定的证据")
+            else:
+                _n_txt = ""
+            _retained = str(q.get("retained_reason") or "")
+            _r_txt = f"；说明：{_retained}" if _retained else ""
             lines.append(f"- **{q.get('question')}**：{_short}（完整读数见『关键发现』）")
-            lines.append(f"  - {support}；边界：{q.get('boundary')}；"
+            lines.append(f"  - {support}{_n_txt}；边界：{q.get('boundary')}{_r_txt}；"
                          f"下一步：{'、'.join(q.get('next_action') or []) or '补齐底稿事实'}")
         lines.append("")
     # 项3：量价与结构——把已取得的销量/渠道/地区披露做成**能读的分析**（此前只把原始
