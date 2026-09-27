@@ -438,6 +438,59 @@ class TestOrchestratorRunTestsAreOffline(unittest.TestCase):
             f"{offenders}（用 tests_support.stub_llm_prechecks 或自行 patch）")
 
 
+class TestScoringHandoffSameVersion(unittest.TestCase):
+    """C4：评分交接单必须**自动引用当前版本**，且旧包不得被当成可评分。
+
+    反例（09-24 复核）：交接文档手抄版本号与 ZIP 链接，任务一改版就指向旧包，
+    研究员按旧链接评分——分数绑在一个不是当前稿的包上。
+    """
+
+    @staticmethod
+    def _info(*, identity="id-new", zip_version="id-new", has_zip=True):
+        info = {"task_id": "ui-x", "identity_id": identity, "row": {},
+                "ws": "C:/tmp", "version_id": "v" * 64}
+        if has_zip:
+            info["zip"] = Path("deliverables_x.zip")
+            info["zip_version_id"] = zip_version
+        else:
+            info["zip"] = None
+        return info
+
+    def _same_version(self):
+        import sys
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from scoring_handoff import same_version
+        return same_version
+
+    def test_same_version_is_yes(self):
+        verdict, why = self._same_version()(self._info())
+        self.assertEqual(verdict, "yes", why)
+
+    def test_stale_package_is_no_and_says_not_scoreable(self):
+        same_version = self._same_version()
+        info = self._info(identity="id-new", zip_version="id-old")
+        verdict, why = same_version(info)
+        self.assertEqual(verdict, "no")
+        self.assertIn("不可用于评分", why)
+        # 渲染出来也必须带这句警告，不能只藏在返回值里
+        import sys
+        sys.path.insert(0, str(ROOT / "scripts"))
+        from scoring_handoff import render
+        info.update({"zip_name": "deliverables_x.zip", "zip_sha256": "a" * 64,
+                     "zip_bytes": 1, "zip_mtime": 0.0})
+        text = render(info)
+        self.assertIn("不同版", text)
+        self.assertIn("请不要", text)
+
+    def test_missing_package_or_manifest_is_unknown_not_yes(self):
+        same_version = self._same_version()
+        self.assertEqual(same_version(self._info(has_zip=False))[0], "unknown")
+        self.assertEqual(same_version(self._info(zip_version=""))[0], "unknown")
+
+    def test_no_adopted_version_is_unknown(self):
+        self.assertEqual(self._same_version()(self._info(identity=""))[0], "unknown")
+
+
 class TestRunPackageBuilder(unittest.TestCase):
     """N2：Windows 新人运行包构建器的可核对约束（不联网、不起真进程）。
 
