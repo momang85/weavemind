@@ -13,7 +13,6 @@
 
 from __future__ import annotations
 
-import os
 import re
 from pathlib import Path
 
@@ -79,8 +78,29 @@ def _dirty() -> bool:
         return False
 
 
+def describe() -> str:
+    """给日志/时间线用的一行说明（未知时如实说未知）。"""
+    ver = current()
+    return ver if ver else "版本未知（无 .git 或读取失败）"
+
+
+# 进程内缓存：**加载的代码在进程生命周期内不会变**，而 `_instance_identity()` 会被
+# 每条任务请求与每次启动恢复调用——不缓存就会每条请求都起一次 `git status` 子进程
+# （实测还会连带影响测试里对 `threading.Thread` 的打桩：subprocess 用它读管道）。
+_CACHE: str | None = None
+
+
 def current(*, with_dirty: bool = True) -> str:
-    """短 HEAD（+dirty）；取不到返回空串。"""
+    """短 HEAD（+dirty）；取不到返回空串。首次调用后缓存（见上）。"""
+    global _CACHE
+    if _CACHE is None:
+        _CACHE = _compute()
+    if with_dirty:
+        return _CACHE
+    return _CACHE.split("+", 1)[0]
+
+
+def _compute() -> str:
     git_dir = _git_dir()
     if git_dir is None:
         return ""
@@ -88,21 +108,13 @@ def current(*, with_dirty: bool = True) -> str:
     if not sha:
         return ""
     short = sha[:7]
-    if with_dirty:
-        try:
-            if _dirty():
-                short += "+dirty"
-        except Exception:                             # noqa: BLE001
-            pass
+    try:
+        if _dirty():
+            short += "+dirty"
+    except Exception:                                 # noqa: BLE001
+        pass
     return short
-
-
-def describe() -> str:
-    """给日志/时间线用的一行说明（未知时如实说未知）。"""
-    ver = current()
-    return ver if ver else "版本未知（无 .git 或读取失败）"
 
 
 if __name__ == "__main__":                            # 便于人工核对
     print(describe())
-    _ = os.environ

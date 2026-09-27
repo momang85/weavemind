@@ -544,7 +544,12 @@ class TestReceiptRecovery(unittest.TestCase):
                 pass
 
         with mock.patch.object(task_state, "DB_PATH", self.db), \
-                mock.patch.object(orchestrator_v2.threading, "Thread", _FakeThread):
+                mock.patch.object(orchestrator_v2.threading, "Thread", _FakeThread), \
+                mock.patch.object(orchestrator_v2, "_instance_identity",
+                                  lambda: ("inst-test", "ver-test")):
+            # `_instance_identity` 也要打桩：它会去读 `.git`（`code_version`），
+            # 而 subprocess 内部用 `threading.Thread` 读管道——上面把 Thread 换成替身
+            # 后，git 的读取线程也会被记进来，断言"只起了一个执行线程"就会误判。
             task_state.mark_received("ui-r8", "目标", user="u1", project="p1")
             # 阈值 600 秒：刚落的收执不算"陈旧"，避免抢正在飞的那条消息
             n0 = orchestrator_v2.resume_received_tasks(self.orch, older_than=600)
