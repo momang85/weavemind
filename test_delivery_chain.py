@@ -10126,6 +10126,54 @@ class TestMaterialAdmissionRules(_MaterialCase):
         self.assertTrue(scope.get("unparsed_ranges"),
                         "未解析范围必须显式列出（首节未被选为证据）")
 
+    def test_pdf_page_limit_is_enforced_before_admission(self):
+        """页数上限要**在准入之前**拦下：401 页的 PDF 不能先进资料集再谈定位。"""
+        import base64 as b64
+        import material_intake as mi
+        try:
+            import io
+
+            from pypdf import PdfReader, PdfWriter
+        except Exception:                        # noqa: BLE001 - 无解析器则跳过页数检查
+            self.skipTest("pypdf 不可用，页数检查按跳过（与实现一致）")
+        writer = PdfWriter()
+        for _ in range(mi.MAX_PAGES + 1):
+            writer.add_blank_page(width=200, height=200)
+        buf = io.BytesIO()
+        writer.write(buf)
+        big = buf.getvalue()
+        self.assertEqual(len(PdfReader(io.BytesIO(big)).pages), mi.MAX_PAGES + 1)
+        payload, status = self._post({
+            "kind": "file", "filename": "年报.pdf", "content_type": "application/pdf",
+            "data": b64.b64encode(big).decode("ascii")})
+        self.assertEqual(status, 400, payload)
+        self.assertIn("页数", payload["error"])
+        self.assertFalse(self._snapshot(), "超页数的 PDF 不得进资料集")
+
+    def test_materials_endpoint_reports_identity_for_the_page(self):
+        """页面读的清单接口要与服务同源：状态、身份 hash、逐指标状态、待办都在。"""
+        import base64 as b64
+        import web_ui
+        raw = self._envelope_bytes()
+        payload, status = self._post({
+            "kind": "file", "filename": "yanghe_ar2024.json",
+            "content_type": "application/json",
+            "data": b64.b64encode(raw).decode("ascii")},
+            redis=_LoopRedis(self.orch))
+        self.assertEqual(status, 200, payload)
+        h = _MatHandler(f"/api/task/{self.task_id}/materials")
+        web_ui._get_task_materials(h, h.path)
+        body, code = h.last
+        self.assertEqual(code, 200, body)
+        self.assertEqual(body["count"], 1, body)
+        item = body["materials"][0]
+        self.assertEqual(item["status"], "admitted")
+        self.assertEqual(item["material_id"], payload["material_id"])
+        self.assertTrue(item["raw_sha256"] and item["text_sha256"], item)
+        self.assertTrue(item["read_scope"].get("parsed_ranges"), item)
+        self.assertEqual(sorted(item["metric_states"]),
+                         ["net_profit", "operating_cashflow", "revenue"], item)
+
     def test_evidence_picks_the_metric_section_not_the_first_five(self):
         """承载小节排在第 8 节时也必须被选中（"只截前五节"会正好漏掉它）。"""
         head = "".join(f"第{i}节 说明{i}\n本节与财务指标无关的内容。\n" for i in range(2, 8))
