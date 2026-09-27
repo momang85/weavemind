@@ -1,9 +1,56 @@
-# DeepSeek 执行状态（2026-09-27 更新 · Harness 接续：H3a 已交，C3 续办）
+# DeepSeek 执行状态（2026-09-27 更新 · Harness 接续：H3b 已交，C3 续办）
 
 **当前批次**：`docs/Harness接续执行指令_20260927.md`（基线 2519d9a）**H0→H1→H2→H3**；
 H0 之后的阶段标准仍是 `docs/真实研究闭环与阶段D收口_20260927.md` 的 C0→C4。
 已交的 C0/C1/C2 与 N/S 批次不重跑；便携包缺 S3 的事实如实保留（重建在 C4）。
 C0 三提交已交（`5107ac0`/`e5c5607`/`bac62c6`）。
+
+## H3b 收执先落库 + 启动恢复 + 网页幂等键（已交，证据 `docs/evidence/h3b_receipt_recovery_20260927.md`）
+
+- **先落收执再触发工作**：新增状态 `RECEIVED`（待消费）。网页在发布**之前**把收执写进
+  任务库（`mark_received`，含 received/published 时刻与实例）；落库失败**不发布**并抛错。
+  旧行为是"编排器收到消息才登记"——编排器没起来或落在崩溃窗口里时，请求只剩一条
+  120 秒 TTL 的 Redis 键，用户看到超时却查不到任何东西。
+- **执行权单一裁决**：`promote_received()` 用 `UPDATE … WHERE status='RECEIVED'` 决定
+  谁执行（`promoted`/`already`/`absent`）。消息路径与"启动恢复"路径共用它，
+  同一条请求因此**不会被执行两次**；已被推进过的消息只回执、不执行。
+- **启动恢复**：`resume_received_tasks(older_than=10)` 在订阅之前把"收执已落库但从未
+  消费"的任务捡回来执行（阈值 10 秒避开正在飞的那条消息）。`mark_queued` 遇到已有
+  收执行改为**推进**（不再主键冲突），且**绝不把 RUNNING/终态改回 QUEUED**。
+- **网页幂等键**：新增纯函数 `frontend/src/lib/submissionKey.ts`——同一提交意图的重复
+  点击/失败重试复用同一个键（服务端只建一个任务），成功后或改题换新键（主动再跑一次
+  仍是新任务）。`frontend/dist` 干净重建。
+- **收口点提取**：把 main() 内联的 `_run_task` 提为模块级 `run_and_finalize`，
+  消息路径与恢复路径共用（避免两份兜底落库实现）。
+- **验证**：`test_task_persistence`+`test_writer_consolidation`+归属用例 **94 例 OK**；
+  按项目约定与 CI 口径**逐文件**跑：`test_startup_readiness` **57 OK**、
+  `test_delivery_chain` **373 OK**、`test_p0` **412 OK**；
+  前端 `node --test` **51 例全过**、`tsc -b` 通过、`test_frontend_guards` **53 例 OK**。
+- **被改断言 3 处（非放宽判据，逐条理由见证据 §3）**：①"webui 一行都不写"→
+  "只写一条 `RECEIVED`，不得写 QUEUED"；②超时用例由"必须抛错且无行"→
+  "如实返回 `ack_pending_consume` + 恰好一条 RECEIVED"；③源码文本断言由内联
+  `_run_task` 改指模块级 `run_and_finalize`。
+- **未做**：新人可行动状态统一（未接收/待消费/执行中/待材料/明确失败合成一张表）、
+  "两实例同 Redis 不重复处理"的真实双进程复验、真实 UI 端到端演练（同键重复提交只跑
+  一次 / 提交后杀编排器再启动自动恢复）；C4 全部未开始。
+
+### 回归与事故记录（本轮自查，照实留痕）
+
+- **单进程全量跑的 4 个失败＝基线一致，非本批回归**：为确认不是自己改坏的，另开
+  `2519d9a`（本会话开始前）的 git worktree 用**完全相同**的单进程全量命令跑了一遍——
+  本会话 1101 例得 2 failures + 2 errors，基线 1076 例得到**完全相同的 2 failures + 2 errors**
+  （两个 metrics 指标聚合用例 FAIL、图表渲染与"新进程读同一库"两例 ERROR）。
+  性质：**跨文件同进程的测试隔离问题**，不是产品缺陷，**不影响 CI**——CI 与 `AGENTS.md`
+  都是"一个文件一个进程"，按该口径逐文件跑时这 4 项全部通过。已定位触发者：
+  `test_startup_readiness` 与指标两例同进程即复现，单跑通过；**根因未定位**
+  （`db_paths.resolve_db_path()` 实测不缓存，"路径被缓存"假设已排除）。是否立项修留给架构师。
+- **测试曾误写真库（已修复）**：H3b 第一版测试里有若干 `_publish_task` 用例只重定向了
+  `web_ui.DB_PATH`、没重定向 `task_state.DB_PATH`，新加的"先落收执"于是写进了
+  **真实的 `agents.db`**（7 条 `RECEIVED`，13:59:43–14:00:01，两条带测试幂等键
+  `k-ev`/`k-race`）。危害：污染用户任务历史，并让上述指标用例在**全量组合**下失败。
+  处置：按**精确 task_id** 删除这 7 行（未用状态/时间通配），真库 `526 → 519` 行、
+  `RECEIVED` 归零；并给全部 8 处 `_publish_task` 调用点补上 `task_state.DB_PATH` 重定向。
+  备份/日志/**数据库文件本身**未删除、未移动。
 
 ## H3a 持久化收执 + 幂等提交 + 实例归属（已交，提交 `afb2f34`，证据 `docs/evidence/h3a_receipt_idempotency_20260927.md`）
 
