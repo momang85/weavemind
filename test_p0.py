@@ -4887,6 +4887,33 @@ class TestP2ChartFallback(unittest.TestCase):
         sa._strategy_blocks = []
         sa._strategy_boosts = []
         sa._load_active_strategy = lambda: None
+        # C0-2：检索要过任务级台账（首次请求前预占），因此这里给最小可用的假台账
+        class _Ledger:
+            def __init__(self):
+                self.h = {}
+
+            def hgetall(self, k):
+                return dict(self.h.get(k, {}))
+
+            def hincrby(self, k, f, n):
+                d = self.h.setdefault(k, {})
+                d[f] = int(d.get(f, 0)) + int(n)
+                return d[f]
+
+            def hsetnx(self, k, f, v):
+                d = self.h.setdefault(k, {})
+                if f in d:
+                    return 0
+                d[f] = v
+                return 1
+
+            def expire(self, k, ttl):
+                return 1
+
+        from types import SimpleNamespace
+        sa._messaging = SimpleNamespace(_redis=_Ledger())
+        sa._current_ctx = SimpleNamespace(root_task_id="t-bing-exec",
+                                          dispatch_id="t-bing-exec-d1")
         sa._search_bing = lambda q: [{
             "title": "特斯拉 2026 年财报",
             "url": "https://ir.tesla.com/q2-2026",

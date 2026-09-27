@@ -884,50 +884,80 @@ class SearchAgent(BaseWorker):
             getattr(ctx, "dispatch_id", "") or "")
         return f"search_ledger:{task_id}" if task_id else ""
 
-    def _search_ledger(self) -> tuple[int, float]:
-        """(本任务已用的检索调用次数, 首次检索的时刻)；读不到按 (0, 0.0) 处理。
+    def _ledger_pick(self, raw, field: str):
+        """从 HGETALL 结果里取字段（Redis 可能给 bytes 键，两种都认）。"""
+        for k, v in (raw.items() if isinstance(raw, dict) else ()):
+            if str(k).endswith(field):
+                try:
+                    return int(v)
+                except (TypeError, ValueError):
+                    try:
+                        return float(v)
+                    except (TypeError, ValueError):
+                        return None
+        return None
 
-        读不到不等于"没花过"——那是"不知道"，所以台账读失败时只降级为"按默认额度走"
-        （与旧行为一致），不会伪造出"余额充足"以外的结论。
-        """
+    def _search_ledger_read(self) -> tuple[int, float, bool]:
+        """(已用次数, 起点时刻, 台账可读)。**不可读**与"零使用"必须分开：读不到不许发新额度。"""
         key = self._search_ledger_key()
         if not key:
-            return 0, 0.0
+            return 0, 0.0, False
         try:
             raw = self._messaging._redis.hgetall(key) or {}
-
-            def _pick(field: str):
-                # Redis 客户端可能给 bytes 键（未开 decode_responses），两种都认
-                for k, v in (raw.items() if isinstance(raw, dict) else ()):
-                    if str(k).endswith(field):
-                        try:
-                            return int(v)
-                        except (TypeError, ValueError):
-                            return float(v)
-                return None
-
-            if isinstance(raw, dict):
-                return int(_pick(self._SEARCH_LEDGER_FIELD_USED) or 0), float(
-                    _pick(self._SEARCH_LEDGER_FIELD_STARTED) or 0)
+            return (int(self._ledger_pick(raw, self._SEARCH_LEDGER_FIELD_USED) or 0),
+                    float(self._ledger_pick(raw, self._SEARCH_LEDGER_FIELD_STARTED) or 0.0),
+                    True)
         except Exception as exc:                     # noqa: BLE001
-            logger.warning("检索台账读取失败（按默认额度继续）：%s", str(exc)[:120])
-        return 0, 0.0
+            logger.warning("检索台账读取失败：%s", str(exc)[:120])
+            return 0, 0.0, False
 
-    def _record_search_ledger(self, used: int) -> None:
-        """把本次派发实际发出的调用次数记进任务台账（best-effort，失败只记日志）。"""
+    def _reserve_search_calls(self, want: int, *, total_calls: int,
+                              total_secs: float) -> tuple[int, float, str]:
+        """首次请求**之前**原子预占次数并落下起点；返回 `(本次可用次数, 剩余秒, 说明)`。
+
+        为什么必须预占（指令 §3.3 反例）：跑完才写台账时，首轮耗 59 秒只用 1 次，
+        下一派发仍按"整份额度"发 5 次/60 秒——次数与墙钟都对不上。预占把两件事都钉在
+        **首次请求**这一刻：`HSETNX started` 只写一次（根任务起点），`HINCRBY used`
+        给并发派发定序（先占者得额度，超额回滚），未用额度收尾时按实数退回。
+
+        台账不可读或不可写 → 返回可用 0、说明原因（**不因为读不到而获得新额度**）。
+        """
         key = self._search_ledger_key()
-        if not key or used <= 0:
-            return
+        want = max(0, int(want))
+        if not key or want <= 0:
+            return 0, 0.0, "无任务身份/无需额度"
         try:
             r = self._messaging._redis
-            r.hincrby(key, self._SEARCH_LEDGER_FIELD_USED, int(used))
-            r.hsetnx(key, self._SEARCH_LEDGER_FIELD_STARTED, time.time())
+            now = time.time()
+            taken = int(r.hincrby(key, self._SEARCH_LEDGER_FIELD_USED, want))
+            r.hsetnx(key, self._SEARCH_LEDGER_FIELD_STARTED, now)
             r.expire(key, self._SEARCH_LEDGER_TTL)
+            if taken > int(total_calls):
+                r.hincrby(key, self._SEARCH_LEDGER_FIELD_USED, -(taken - int(total_calls)))
+            granted = max(0, int(total_calls) - (taken - want))
+            granted = min(granted, want)
+            raw = r.hgetall(key) or {}
+            started = float(self._ledger_pick(raw, self._SEARCH_LEDGER_FIELD_STARTED) or now)
         except Exception as exc:                     # noqa: BLE001
-            logger.warning("检索台账写入失败（不阻塞检索）：%s", str(exc)[:120])
+            logger.warning("检索额度预占失败（本次不发请求）：%s", str(exc)[:120])
+            return 0, 0.0, f"台账预占失败：{str(exc)[:60]}"
+        left = max(0.0, float(total_secs) - max(0.0, now - started))
+        return granted, left, ""
 
-    def _search_allowance(self) -> tuple[int, float]:
-        """本次派发可用的 (调用次数余额, 墙钟余额秒)：任务级上限 − 前序派发已用。"""
+    def _release_search_calls(self, unused: int) -> None:
+        """收尾：把预占但没真正发出的额度退回（best-effort，失败只记日志）。"""
+        key = self._search_ledger_key()
+        unused = int(unused)
+        if not key or unused <= 0:
+            return
+        try:
+            self._messaging._redis.hincrby(
+                key, self._SEARCH_LEDGER_FIELD_USED, -unused)
+        except Exception as exc:                     # noqa: BLE001
+            logger.warning("检索额度退回失败：%s", str(exc)[:120])
+
+    def _search_ledger_limits(self) -> tuple[int, float]:
+        """任务级上限：默认 6 次 provider 调用 / 60 秒（指令明确不放宽）。"""
         from adapters.search_runner import (
             DEFAULT_DEADLINE_SECONDS, DEFAULT_MAX_CALLS)
         try:
@@ -940,12 +970,7 @@ class SearchAgent(BaseWorker):
                                or DEFAULT_DEADLINE_SECONDS)
         except Exception:
             total_secs = DEFAULT_DEADLINE_SECONDS
-        used, started = self._search_ledger()
-        left_calls = max(0, total_calls - int(used))
-        left_secs = total_secs
-        if started:
-            left_secs = max(0.0, total_secs - max(0.0, time.time() - started))
-        return left_calls, left_secs
+        return max(1, total_calls), max(1.0, total_secs)
 
     def _ddg_backend(self) -> tuple:
         """`(ddgs 备后端名, 依据)`：registry=已核实可用；policy=注册表读不到（未核实）；
@@ -1012,19 +1037,23 @@ class SearchAgent(BaseWorker):
         """
         from adapters.search_runner import run_search
         self._load_active_strategy()
-        # 任务级台账：重试/重做派发只拿余额（专项 §5"任务持有一次检索预算，贯穿编排重试"）
-        left_calls, left_secs = self._search_allowance()
-        if left_calls <= 0 or left_secs <= 0:
-            logger.warning("任务级检索预算已用完（余额 %d 次 / %.0f 秒），本次不发请求",
-                           left_calls, left_secs)
-            return json.dumps([])
         variants = self._query_variants(instruction) or [instruction[:120]]
         specs = self._provider_specs()
         if not specs:
             # 全部提供方都在冷却期：不发新请求（没有新条件就不重复同类尝试，专项 §5）
             logger.warning("all search providers cooling down; no request issued")
             return json.dumps([])
-        budget = self._search_budget(allowance=left_calls, wall_left=left_secs)
+        # 任务级预算：**首次请求之前**原子预占次数并落下根起点（指令 §3.3）——
+        # 预占失败即不发请求；剩余墙钟按根起点算，不由"首轮跑完的时刻"起算。
+        total_calls, total_secs = self._search_ledger_limits()
+        want = max(1, int(self._strategy_max_sources) + 1)
+        granted, left_secs, why = self._reserve_search_calls(
+            min(want, total_calls), total_calls=total_calls, total_secs=total_secs)
+        if granted <= 0 or left_secs <= 0:
+            logger.warning("任务级检索预算不可用（%s；额度 %d 次 / 剩余 %.0f 秒），本次不发请求",
+                           why or "已用尽", granted, left_secs)
+            return json.dumps([])
+        budget = self._search_budget(allowance=granted, wall_left=left_secs)
         max_results = max(1, int(self._strategy_max_sources))
         collected: list = []
 
@@ -1112,9 +1141,12 @@ class SearchAgent(BaseWorker):
         return self._finish_search(json.dumps([]), specs, collected, passes, budget)
 
     def _finish_search(self, payload, specs, collected, passes, budget):
-        """检索收尾：引擎健康 + 任务级台账（本次派发实际发出去几次）。"""
+        """检索收尾：引擎健康 + 把**预占但没真正发出**的额度退回（指令 §3.3）。"""
         self._mark_search_health(specs, collected, passes)
-        self._record_search_ledger(budget.used)
+        try:
+            self._release_search_calls(max(0, int(budget.max_calls) - int(budget.used)))
+        except Exception:                            # noqa: BLE001
+            pass
         return payload
 
     def _retry_variants(self, contract, outcome) -> list:

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -603,6 +604,41 @@ class TestBoundedSearchRunner(unittest.TestCase):
         self.assertEqual(out.errors, {}, "零命中不是后端故障，不该进错误表")
         self.assertFalse(out.retryable)
 
+    def test_overrun_result_is_not_counted_as_success(self):
+        """反例（指令 §3.3）：0.1 秒预算、provider 跑 0.35 秒返回，不得记 ok。
+
+        同步 SDK 没法中途取消，但超预算返回的条目不许入库，并如实记超时次数与超出量。
+        """
+        import time as _t
+
+        def call(provider, backend, q, wait):
+            _t.sleep(0.35)
+            return [{"title": "t", "url": "https://e.example/1", "snippet": "s"}]
+
+        out = self.sr.run_search(["q1"], call_provider=call, providers=self.specs,
+                                 budget=self.sr.SearchBudget(max_calls=2,
+                                                             deadline_seconds=0.1),
+                                 max_results=10)
+        self.assertEqual(out.items, [], "超预算返回的结果不得计入")
+        self.assertEqual(out.overrun_calls, 1)
+        self.assertGreater(out.overrun_seconds, 0.0)
+        self.assertEqual(out.status, "timeout", "超时返回不得记成 ok/no_results")
+
+    def test_provider_receives_the_remaining_time(self):
+        """provider 拿到的 wait 必须服从剩余时间（不再有 1 秒下限掩盖短预算）。"""
+        seen = []
+
+        def call(provider, backend, q, wait):
+            seen.append(round(wait, 2))
+            return []
+
+        budget = self.sr.SearchBudget(max_calls=3, deadline_seconds=0.3)
+        out = self.sr.run_search(["q1", "q2", "q3"], call_provider=call,
+                                 providers=self.specs, budget=budget, max_results=10)
+        self.assertTrue(seen)
+        self.assertTrue(all(w <= 0.35 for w in seen), seen)
+        self.assertLessEqual(out.attempts, 3)
+
     def test_empty_result_error_detector_matches_only_zero_hits(self):
         self.assertTrue(self.sr.is_empty_result_error(RuntimeError("No results found.")))
         self.assertFalse(self.sr.is_empty_result_error(RuntimeError("Connection refused")))
@@ -714,20 +750,49 @@ class TestTaskScopedSearchBudget(unittest.TestCase):
         self._env.start()
         self.addCleanup(self._env.stop)
 
-    def test_first_dispatch_gets_the_full_allowance(self):
-        self.assertEqual(self._sa()._search_allowance(), (6, 60.0))
+    def _reserve(self, sa, want=6):
+        calls, secs = sa._search_ledger_limits()
+        return sa._reserve_search_calls(want, total_calls=calls, total_secs=secs)
+
+    def test_first_dispatch_reserves_full_allowance(self):
+        granted, left, why = self._reserve(self._sa())
+        self.assertEqual((granted, why), (6, ""))
+        self.assertLessEqual(left, 60.0)
 
     def test_retry_dispatch_gets_only_the_remainder(self):
         sa = self._sa()
-        sa._record_search_ledger(4)
-        left_calls, left_secs = sa._search_allowance()
-        self.assertEqual(left_calls, 2, "重试派发只拿余额")
-        self.assertLessEqual(left_secs, 60.0)
+        first = self._reserve(sa, 6)
+        self.assertEqual(first[0], 6)
+        sa._release_search_calls(6 - 4)          # 首轮只花了 4 次，退回 2
+        granted, _left, _why = self._reserve(sa, 6)
+        self.assertEqual(granted, 2, "重试派发只拿余额")
+
+    def test_deadline_counts_from_first_reservation(self):
+        """反例（指令 §3.3）：起点必须在**首次预占**时落下，不是首轮跑完才记。
+
+        模拟：首次预占后把 started 回拨 59 秒 → 下一次预占的剩余墙钟应约 1 秒，
+        而不是"又一份 60 秒"。
+        """
+        sa = self._sa()
+        self._reserve(sa, 1)
+        key = sa._search_ledger_key()
+        sa._messaging._redis.h[key]["started"] = time.time() - 59.0
+        _granted, left, _why = self._reserve(sa, 6)
+        self.assertLessEqual(left, 2.0, f"剩余墙钟应从首次预占起算，实际 {left}")
+
+    def test_concurrent_reservations_never_exceed_the_cap(self):
+        """两个同根派发并发预占：总量不得超上限（HINCRBY 定序 + 超额回滚）。"""
+        a, b = self._sa("t-both"), self._sa("t-both")
+        b._messaging = a._messaging                # 共用同一份台账（同一台 Redis）
+        ga, _l1, _w1 = self._reserve(a, 6)
+        gb, _l2, _w2 = self._reserve(b, 6)
+        self.assertEqual(ga, 6)
+        self.assertEqual(gb, 0, "额度已被先占者用光，后者不得再拿")
+        self.assertLessEqual(ga + gb, 6)
 
     def test_exhausted_task_budget_issues_no_request(self):
         sa = self._sa()
-        sa._record_search_ledger(6)
-        self.assertEqual(sa._search_allowance()[0], 0)
+        self._reserve(sa, 6)
         sa._load_active_strategy = lambda: None
         sa._query_variants = lambda instr: ["洋河股份 2024年年度报告"]
         sa._provider_specs = lambda: [{"provider": "bing", "backend": "www.bing.com"}]
@@ -743,22 +808,36 @@ class TestTaskScopedSearchBudget(unittest.TestCase):
 
     def test_budget_capped_by_remainder(self):
         sa = self._sa()
-        sa._record_search_ledger(5)
-        calls, secs = sa._search_allowance()
-        self.assertEqual(sa._search_budget(allowance=calls, wall_left=secs).max_calls, 1)
+        self._reserve(sa, 5)
+        granted, left, _why = self._reserve(sa, 6)
+        self.assertEqual(granted, 1)
+        self.assertEqual(sa._search_budget(allowance=granted, wall_left=left).max_calls, 1)
 
-    def test_ledger_failure_degrades_to_default_allowance(self):
-        """台账读不到 = "不知道"，按默认额度走（不伪造结论，也不阻塞检索）。"""
+    def test_unused_reservation_is_returned(self):
+        """预占 6、实际只用 1 → 退回 5，后续派发还能拿到 5（不泄漏额度）。"""
+        sa = self._sa()
+        self._reserve(sa, 6)
+        sa._release_search_calls(5)
+        granted, _left, _why = self._reserve(sa, 6)
+        self.assertEqual(granted, 5)
+
+    def test_ledger_failure_grants_no_new_quota(self):
+        """台账不可读/不可写 = "不知道"，**不发新额度**（指令 §3.3 明确要求）。
+
+        旧行为是"读不到就按默认额度走"——那等于台账一坏就有无限额度。
+        """
         from types import SimpleNamespace
         sa = self._sa()
         sa._messaging = SimpleNamespace(_redis=None)
-        self.assertEqual(sa._search_allowance(), (6, 60.0))
+        granted, left, why = self._reserve(sa, 6)
+        self.assertEqual((granted, left), (0, 0.0))
+        self.assertIn("失败", why)
 
     def test_ledger_is_per_task(self):
         a, b = self._sa("t-a"), self._sa("t-b")
-        a._record_search_ledger(6)
-        self.assertEqual(a._search_allowance()[0], 0)
-        self.assertEqual(b._search_allowance()[0], 6, "台账不得跨任务串")
+        self._reserve(a, 6)
+        self.assertEqual(self._reserve(a, 6)[0], 0)
+        self.assertEqual(self._reserve(b, 6)[0], 6, "台账不得跨任务串")
 
 
 if __name__ == "__main__":

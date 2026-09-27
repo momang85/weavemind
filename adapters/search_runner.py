@@ -18,8 +18,11 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 # 新人默认：检索阶段总墙钟 ≤60 秒、提供方调用 ≤6 次（专项 §5）
 DEFAULT_DEADLINE_SECONDS = 60.0
@@ -46,6 +49,8 @@ class SearchOutcome:
     errors: dict = field(default_factory=dict)      # provider -> 错误类别（首次/最严重）
     queries_tried: list = field(default_factory=list)
     tried_keys: set = field(default_factory=set)    # 本轮**已打出去**的 (提供方,后端,查询)
+    overrun_calls: int = 0                          # 超预算返回的调用数（结果不计入）
+    overrun_seconds: float = 0.0                    # 最严重一次超出多少秒
 
     def to_legacy_items(self) -> list:
         """兼容层：旧输出契约是 JSON 数组（`[{title,url,snippet}...]`）。"""
@@ -59,6 +64,8 @@ class SearchOutcome:
             "provider": self.provider, "backend": self.backend,
             "errors": dict(self.errors), "queries_tried": list(self.queries_tried),
             "submitted": len(self.tried_keys or ()),
+            "overrun_calls": self.overrun_calls,
+            "overrun_seconds": self.overrun_seconds,
         }
 
 
@@ -84,7 +91,9 @@ class SearchBudget:
         if self.expired():
             raise RuntimeError("search budget exhausted")
         self.used += 1
-        return max(1.0, self.time_left())
+        # 不再有 1.0 秒下限：短预算（如 0.1 秒）必须如实传给 provider，
+        # 否则"剩 0.05 秒也给 1 秒"等于没有硬截止（指令 §3.3 反例）
+        return max(0.05, self.time_left())
 
 
 def _classify(exc: BaseException) -> str:
@@ -107,6 +116,9 @@ def _classify(exc: BaseException) -> str:
 
 # 可重试类别：暂时性失败才允许一次退避重试（遵守截止，不换关键词硬刷）
 RETRYABLE = ("timeout", "dns_error", "proxy_error", "rate_limited")
+# 超预算容差：调度抖动允许的秒数；超过即判"超时返回"，结果不计入
+OVERRUN_TOLERANCE = 0.25
+# 启动前的预占/状态变量
 
 # ddgs 在"引擎跑完了但一条也没找到"时也抛异常（`DDGSException("No results found.")`）。
 # 那不是提供方故障：调用方应把它当**完成但零命中**（返回空列表），否则真零结果会被
@@ -162,6 +174,7 @@ def run_search(
     tried: set[tuple[str, str, str]] = set(exclude_keys or ())
     submitted: set[tuple[str, str, str]] = set()
     any_call_ok = False
+    overran = False
     dominant_error = ""
 
     for query in queries:
@@ -182,9 +195,9 @@ def run_search(
             submitted.add(key)
             outcome.attempts += 1
             outcome.queries_tried.append(query)
+            t_call = time.monotonic()
             try:
                 items = call_provider(provider, backend, query, wait) or []
-                any_call_ok = True
             except Exception as exc:           # noqa: BLE001 - 单提供方失败不终止整轮
                 cls = _classify(exc)
                 if cls == "no_results":
@@ -196,6 +209,18 @@ def run_search(
                 if cls in RETRYABLE:
                     outcome.retryable = True
                 continue
+            elapsed_call = time.monotonic() - t_call
+            # **真实停止**（指令 §3.3）：同步 SDK 没法中途取消，但"超时返回的结果"不许
+            # 当成功——超预算返回的条目一律不入库，并如实记超时次数与超出量。
+            if elapsed_call > wait + OVERRUN_TOLERANCE or budget.time_left() <= 0:
+                outcome.overrun_calls += 1
+                outcome.overrun_seconds = round(
+                    max(outcome.overrun_seconds, elapsed_call - wait), 3)
+                overran = True
+                logger.warning("provider %s 超预算返回（%.2fs > %.2fs），本条不计入结果",
+                               provider, elapsed_call, wait)
+                continue
+            any_call_ok = True                  # 预算内正常返回才记"完成"
             for it in items:
                 if not isinstance(it, dict):
                     continue
@@ -219,6 +244,10 @@ def run_search(
     elif any_call_ok:
         outcome.status = "no_results"
         outcome.reason = outcome.reason or "查询成功但零命中（正常没找到，不是后端故障）"
+    elif outcome.overrun_calls:
+        outcome.status = "timeout"
+        outcome.reason = (f"{outcome.overrun_calls} 次调用超预算返回（最多超出 "
+                          f"{outcome.overrun_seconds}s），结果不计入")
     else:
         outcome.status = dominant_error or "parse_error"
         outcome.reason = outcome.reason or f"全部提供方未完成查询（{outcome.errors}）"

@@ -3,6 +3,18 @@
 **当前批次**：`docs/真实研究闭环与阶段D收口_20260927.md`（基线 453f958）**C0→C1→C2→C3→C4**。
 已交 N/S 批次不重跑；便携包缺 S3 的事实如实保留（重建在 C4）。
 
+## C0-2 根检索预算（已交，证据 `docs/evidence/c0_2_root_search_budget_20260927.md`）
+
+- **首次请求前**原子预占次数并按根起点落时刻（`HINCRBY used` + `HSETNX started`）；剩余墙钟从
+  首次预占起算，不再"首轮跑完才记"；预占失败/台账不可读 → **本次零额度**（旧行为是"读不到按默认
+  额度走"，等于台账一坏就无限额度）；未用预占按实际发出数退回；bytes/str 键都认。
+- **真实停止**：`take()` 去掉 1 秒下限（短预算如实传给 provider）；调用超预算返回 → 结果**不入库**、
+  记 `overrun_calls/overrun_seconds`、无产出时状态 `timeout`（不再假 ok）。
+- 默认 **6 次/60 秒不放宽**；验证 `test_search_quality_unified`+`test_p0`+`test_offline_delivery`
+  +`test_delivery_chain` 共 855 例 OK。
+- 未验：多**进程**真实并发（本批为同进程双 agent 共享假台账）；Bing 12/15 秒与 DDGS 3 秒下限的
+  内部超时收窄留下一批；C0-3 出口覆盖未做。
+
 ## C0-1 统一资料准入（已交，证据 `docs/evidence/c0_1_admission_unification_20260927.md`）
 
 - 关掉 §3.2 全部反例：`2025-00-99` 不再准入、`2025/04/29` 正常识别（真实日历 + 精度 + 依据）；
