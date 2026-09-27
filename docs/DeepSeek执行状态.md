@@ -1,4 +1,24 @@
-# DeepSeek 执行状态（2026-09-27 更新 · 专项 S0+S1 已交，S2 上下两半已交）
+# DeepSeek 执行状态（2026-09-27 更新 · 专项 S0/S1/S2 已交，S3 上半已交）
+
+## S3 上半：A 股原始披露摄取窄闭环（2026-09-27，证据 `docs/evidence/s3_disclosure_ingest_20260927.md`）
+
+- **披露日纪律（专项 §3-8 必修）**：`facts.py` 不再用报告期末顶替公告日（此前
+  `disclosure_date or disclosed_at or report_date`），缺失即留空；新增 `retrieved_at`（获取日）。
+  底稿 A′4 的"时点未核实"闸因此真正生效——期末一般 ≤ 截至日，兜底会让闸静默放行。
+- **权威域判定（专项 §3-10）**：`_domain_hits` 从整串子串匹配改为**只看 hostname** 的
+  域/子域/标签边界匹配（`?origin=cninfo.com.cn`、`eastmoney.evil.org` 不再算权威）。
+- **摄取层 `adapters/disclosure_ingest.py`（新）**：`discover()`（巨潮未连通即如实不可用 +
+  正当出路）/ `pick_official_candidates()`（纯函数筛候选）/ `ingest()`（主体、期间、截止
+  三道校验 + 证据定位 + 正文 hash；`provenance` 区分自动检索/人工直链/人工取得文件）。
+- **验收**：洋河冻结样本（公告文本 API 真实取件）→ admitted + api_chunk 定位 + hash 绑定；
+  错主体/错期/晚于截止/披露日未知或精度不足分别拒绝（后两者可作背景但不得当已核验时点证据）；
+  点评类文章拒为 `not_official_source`；巨潮发现如实 `unavailable`。测试：新增
+  `test_delivery_chain.TestDisclosureIngest` 9 例 + 权威域 18 例 + facts 2 例，共 1059 例全绿。
+- **未闭合（照实）**：指令要的"第二家非金融公司真机取证"未完成——两次有界检索（项目自己的
+  检索通道）均**零候选**，即发现链路本身没闭合；按"同类失败不再轮询"停手。两条正当出路：
+  操作者给官方直链，或打通巨潮/经批准的替代官方列表源（`discover()` 已留分支）。
+- **未做**：摄取层尚未接进编排器/抓取 worker 的在线路径；无上传端点（只支持直链/本地文件）；
+  港股 HKEX 与美股 SEC 的同类路径仍属扩展边界，SEC 的 filed/accn 版本保留仍缺。
 
 **当前批次**：搜索网络与金融资料获取专项（指令 `docs/搜索网络与金融资料获取专项_20260926.md`）。
 

@@ -111,6 +111,55 @@ class TestEnglishResultsSurviveMixedQuery(unittest.TestCase):
         self.assertEqual(len(sq.score_results("新能源汽车市场", weak, min_score=1)), 1)
 
 
+class TestAuthorityDomainBoundaries(unittest.TestCase):
+    """权威域只看 hostname，且按域/子域/标签边界匹配（专项 §3-10）。
+
+    旧实现是 `needle in url` 的整串子串匹配：查询参数、路径片段都能伪造权威——
+    `https://example.org/?origin=cninfo.com.cn` 会被算作官方域并拿到加权与
+    `authoritative` 标记，报告引用优先级因此可被一个链接参数左右。
+    """
+
+    CASES = (
+        # (url, 条目标签, 是否命中)
+        ("https://www.cninfo.com.cn/new/a", "cninfo", True),
+        ("https://example.org/?origin=cninfo.com.cn", "cninfo", False),
+        ("https://example.org/path/cninfo.com.cn/x", "cninfo", False),
+        ("https://notcninfo.org/a", "cninfo", False),
+        ("https://www.hkexnews.hk/x", "hkex", True),
+        ("https://ir.example.com/x", "ir.", True),
+        ("https://investor.example.com/x", "investor.", True),
+        ("https://blog.csdn.net/x", "csdn", True),
+        ("https://www.sse.com.cn/x", "sse.com.cn", True),
+        ("https://sse.com.cn.evil.org/x", "sse.com.cn", False),
+        ("https://finance.sina.com.cn/x", "sina", True),
+        ("https://datacenter-web.eastmoney.com/api", "eastmoney", True),
+        ("https://eastmoney.evil.org/x", "eastmoney", False),
+        ("https://www.gov.cn/x", "gov.cn", True),
+        ("https://fakegov.cn.evil.org/x", "gov.cn", False),
+        ("https://baike.baidu.com/item/x", "baidu", True),
+        ("https://www.10jqka.com.cn/x", "10jqka", True),
+    )
+
+    def test_hostname_boundary_matching(self):
+        for url, needle, want in self.CASES:
+            with self.subTest(url=url, needle=needle):
+                self.assertEqual(sq._domain_hits(url, needle), want)
+
+    def test_query_parameter_cannot_forge_authority(self):
+        """参数里塞官方域：不得拿到 authoritative 标记，也不得加官方权重。"""
+        forged = {"title": "洋河股份 2024年年度报告 营业收入",
+                  "url": "https://example.org/?origin=cninfo.com.cn",
+                  "snippet": "洋河股份 2024年年度报告 营业收入 归母净利润"}
+        real = {"title": "洋河股份 2024年年度报告", "url": "https://www.cninfo.com.cn/a",
+                "snippet": "洋河股份 2024年年度报告 营业收入"}
+        out = sq.score_results("洋河股份 2024年年度报告", [forged, real])
+        by_url = {r["url"]: r for r in out}
+        self.assertIn(real["url"], by_url)
+        self.assertFalse(by_url[forged["url"]].get("authoritative"),
+                         "查询参数里的官方域名不得把普通站点变成权威源")
+        self.assertTrue(by_url[real["url"]].get("authoritative"))
+
+
 class TestPolicyIsConfigurable(unittest.TestCase):
     """阈值/词表/引擎清单/变体上限来自配置，默认值与迁移前一致。"""
 

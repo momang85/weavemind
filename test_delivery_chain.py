@@ -9491,5 +9491,127 @@ class TestNightClosureCounterexamples(unittest.TestCase):
                                              require_binding=True))
 
 
+class TestDisclosureIngest(unittest.TestCase):
+    """S3 窄闭环：原始披露摄取——主体/期间/截止校验与可定位证据（离线冻结样本）。
+
+    素材：洋河 2024 年年度报告原文的有界取件（东财公告文本 API，接口片段定位，
+    `evals/real/yanghe_ar2024_pages_20260922.json`）。只用**已冻结的真实文本**，
+    不发网络请求：摄取层的判定与定位在真实文本形状上复验。
+    """
+
+    @staticmethod
+    def _frozen() -> dict:
+        p = (Path(__file__).resolve().parent / "evals" / "real"
+             / "yanghe_ar2024_pages_20260922.json")
+        return json.loads(p.read_text(encoding="utf-8"))
+
+    def _doc(self):
+        fx = self._frozen()
+        pages = fx["pages"]
+        text = "\n".join(str(p["text"]) for p in pages)
+        offsets, pos = [], 0
+        for p in pages:
+            offsets.append((pos, int(p.get("api_chunk") or 0)))
+            pos += len(str(p["text"])) + 1
+        doc = {"title": fx["notice_title_meta"], "url": pages[0]["url"], "text": text,
+               "chunk_offsets": offsets, "published_at": fx["published_at"]}
+        return fx, doc
+
+    def test_real_frozen_report_is_admitted_with_locatable_evidence(self):
+        from adapters import disclosure_ingest as di
+        fx, doc = self._doc()
+        out = di.ingest(doc, company=fx["company"], company_code=fx["company_id"],
+                        periods=[fx["period"]], as_of="2025-04-30",
+                        provenance=di.PROVENANCE_MANUAL_URL)
+        self.assertEqual(out["status"], di.ADMITTED, out)
+        self.assertEqual(out["provenance_label"], "人工提供的官方直链")
+        self.assertEqual(out["cutoff"]["verdict"], "within", out["cutoff"])
+        self.assertEqual(out["cutoff"]["disclosed_at"], "2025-04-29")
+        self.assertTrue(out["evidence"], "必须给出可定位证据")
+        self.assertTrue(all(e["chunk"] is not None for e in out["evidence"]),
+                        "公告文本接口片段必须给出 api_chunk 坐标")
+        self.assertEqual(out["hash"], di.document_hash(doc), "证据要绑定正文 hash")
+
+    def test_wrong_subject_is_rejected(self):
+        from adapters import disclosure_ingest as di
+        fx, doc = self._doc()
+        out = di.ingest(doc, company="贵州茅台", company_code="600519.SH",
+                        periods=[fx["period"]], as_of="2025-04-30")
+        self.assertEqual(out["status"], di.REJECTED)
+        self.assertEqual(out["reason"], di.REJECT_SUBJECT)
+
+    def test_wrong_period_is_rejected_even_though_text_mentions_it(self):
+        """年报正文里满是**对比年**：只有标题里的报告期才算期间证据。"""
+        from adapters import disclosure_ingest as di
+        fx, doc = self._doc()
+        self.assertIn("2023", doc["text"][:5000], "样本正文确实提到上一年（对比年）")
+        out = di.ingest(doc, company=fx["company"], company_code=fx["company_id"],
+                        periods=[2023], as_of="2025-04-30")
+        self.assertEqual(out["reason"], di.REJECT_PERIOD, out)
+
+    def test_after_cutoff_is_rejected(self):
+        from adapters import disclosure_ingest as di
+        fx, doc = self._doc()
+        out = di.ingest(doc, company=fx["company"], company_code=fx["company_id"],
+                        periods=[fx["period"]], as_of="2024-01-01")
+        self.assertEqual(out["reason"], di.REJECT_AFTER_CUTOFF, out)
+
+    def test_cutoff_requires_day_precision(self):
+        """路径里的年份是**报告期**，不能当披露年：精度不足就不成立截至。"""
+        from adapters import disclosure_ingest as di
+        fx, doc = self._doc()
+        plain = {k: v for k, v in doc.items() if k != "published_at"}
+        plain["url"] = "https://www.cninfo.com.cn/report/2024"
+        out = di.ingest(plain, company=fx["company"], company_code=fx["company_id"],
+                        periods=[fx["period"]], as_of="2025-04-30")
+        self.assertEqual(out["reason"], di.REJECT_CUTOFF_UNKNOWN, out)
+        self.assertTrue(out["may_use_as_background"], "材料仍可作背景")
+        # 不宣称截至日时允许准入，但精度如实记录
+        ok = di.ingest(plain, company=fx["company"], company_code=fx["company_id"],
+                       periods=[fx["period"]])
+        self.assertEqual(ok["status"], di.ADMITTED)
+        self.assertEqual(ok["cutoff"]["precision"], "year")
+
+    def test_third_party_mirror_of_the_report_itself_is_allowed(self):
+        """第三方平台转载**原始报告**（标题即报告、主体命中）走同一准入流程。"""
+        from adapters import disclosure_ingest as di
+        fx, doc = self._doc()
+        out = di.ingest(doc, company=fx["company"], company_code=fx["company_id"],
+                        periods=[fx["period"]], as_of="2025-04-30",
+                        provenance=di.PROVENANCE_AUTO)
+        self.assertEqual(out["status"], di.ADMITTED)
+        self.assertEqual(out["provenance_label"], "自动检索取得")
+
+    def test_commentary_article_is_not_original_disclosure(self):
+        from adapters import disclosure_ingest as di
+        fx, doc = self._doc()
+        out = di.ingest(dict(doc, url="https://blog.example.com/x",
+                             title="洋河股份2024年业绩点评"),
+                        company=fx["company"], company_code=fx["company_id"],
+                        periods=[fx["period"]], as_of="2025-04-30")
+        self.assertEqual(out["reason"], di.REJECT_NOT_OFFICIAL, out)
+
+    def test_cninfo_discovery_is_explicitly_unavailable(self):
+        """巨潮未连通 → 如实说不可用，并给出正当出路（不伪造公告列表）。"""
+        from adapters import disclosure_ingest as di
+        out = di.discover("洋河股份", "002304.SZ", [2024])
+        self.assertEqual(out["status"], di.UNAVAILABLE)
+        self.assertIn("未连通", out["reason"])
+        self.assertTrue(out["next_steps"])
+
+    def test_candidate_picker_keeps_official_and_drops_commentary(self):
+        from adapters import disclosure_ingest as di
+        fx, _doc = self._doc()
+        pages = fx["pages"]
+        cands = [
+            {"title": "洋河股份:2024年年度报告", "url": pages[0]["url"]},
+            {"title": "洋河股份2024年报点评", "url": "https://blog.example.com/x"},
+            {"title": "贵州茅台2024年年度报告", "url": "https://www.cninfo.com.cn/a"},
+        ]
+        kept = di.pick_official_candidates(cands, company=fx["company"],
+                                           company_code=fx["company_id"], period="2024")
+        self.assertEqual([c["title"] for c in kept], ["洋河股份:2024年年度报告"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

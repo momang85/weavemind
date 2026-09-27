@@ -401,11 +401,30 @@ class TestCaliberEvidence(unittest.TestCase):
         self.assertEqual(facts[0].disclosed_at, "2025-04-03")
         self.assertEqual(facts[0].period_end, "2024-12-31")
 
-    def test_period_end_fallback_is_recorded(self):
-        """没有公告日期的来源：回落到报告期末（已知弱点，见证据文档）。"""
+    def test_period_end_never_stands_in_for_disclosure_date(self):
+        """没有公告日期的来源：披露日**留空**（未知），不拿报告期末顶替（专项 §3-8）。
+
+        为什么必须这样：期末一般早于/等于截止日，拿它兜底会让"截至该日这份数据已可用"
+        在没证据时静默成立——底稿 A′4 的"时点未核实"闸因此形同虚设。期末自己的记录不受
+        影响（仍在 period_end）；三个日期分开保存，获取日也照实记。
+        """
         facts = F.facts_from_financials(self._payload(
             row_extra={"report_date": "2024-12-31"}))
-        self.assertEqual(facts[0].disclosed_at, "2024-12-31")
+        self.assertEqual(facts[0].disclosed_at, "",
+                         "披露日未知就必须是空，不能回落成期末")
+        self.assertEqual(facts[0].period_end, "2024-12-31", "期末照旧记录")
+
+    def test_retrieved_at_recorded_separately_from_period_end(self):
+        """获取日与期末、披露日分开记：来源声明了才记，没声明就是空。"""
+        facts = F.facts_from_financials(self._payload(row_extra={
+            "report_date": "2024-12-31", "disclosure_date": "2025-04-03",
+            "retrieved_at": "2026-09-27"}))
+        self.assertEqual(facts[0].period_end, "2024-12-31")
+        self.assertEqual(facts[0].disclosed_at, "2025-04-03")
+        self.assertEqual(facts[0].retrieved_at, "2026-09-27")
+        bare = F.facts_from_financials(self._payload(
+            row_extra={"report_date": "2024-12-31"}))
+        self.assertEqual(bare[0].retrieved_at, "", "来源没声明获取日就是未知")
 
 
 class TestPerspectiveAndRatioConditions(unittest.TestCase):

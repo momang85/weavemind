@@ -57,7 +57,9 @@ FINANCE_TOOL_REGISTRY = [
         "description": (
             "美股公司 SEC 年报/财报查询（EDGAR 免费公开 API，无需账号）：按公司名/代码解析 CIK，"
             "返回最近 N 年（默认 12 年）年报的营收/净利润/毛利/总资产/经营现金流等核心指标。"
-            "数据源：SEC EDGAR (data.sec.gov)，公共数据无使用限制，需遵守 10 req/s 限速。"
+            "数据源：SEC EDGAR (data.sec.gov)。公开数据，但访问须遵守 SEC 的公平访问政策"
+            "（合计不超过 10 请求/秒，并以可识别的 User-Agent 声明身份）——不是"
+            "“无使用限制”。引用时按 SEC 原始披露标注，并保留 filed/accn 版本信息。"
         ),
         "parameters": {"instruction": "公司名或代码，如 'Apple' 或 'AAPL'，可附年份范围"},
         "returns": "JSON：{\"status\": \"success|failed\", \"company\": \"\", \"cik\": \"\", \"annuals\": [{year,revenue,net_income,...}]}",
@@ -67,7 +69,9 @@ FINANCE_TOOL_REGISTRY = [
         "name": "finance_macro",
         "description": (
             "宏观经济指标查询（FRED 免费公开 CSV 接口，无需账号）：支持 GDP/CPI/失业率/"
-            "联邦基金利率/PMI 等常见指标，返回近 5 年月度/季度序列。数据源：FRED (fred.stlouisfed.org)。"
+            "联邦基金利率/PMI 等常见指标，返回近 5 年月度/季度序列。数据源：FRED "
+            "(fred.stlouisfed.org)；按其使用条款引用并标注来源（该接口为聚合二次发布，"
+            "官方口径以发布机构原始统计为准）。"
         ),
         "parameters": {"instruction": "指标名，如 '美国CPI同比' 或 '联邦基金利率'"},
         "returns": "JSON：{\"status\": \"success|failed\", \"indicator\": \"\", \"series\": [{date,value}], \"source\": \"FRED\"}",

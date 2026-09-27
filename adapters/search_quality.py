@@ -30,6 +30,7 @@ import os
 import re
 import threading
 import time
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -91,7 +92,7 @@ AUTHORITY_GOOD = (
 )
 # 内容社区/杂页（对齐 _pick_fetch_url 的 junk_domains）
 AUTHORITY_JUNK = (
-    "blog.csdn", "zhihu.com", "zhengxianling", "cp.baidu",
+    "zhihu.com", "zhengxianling", "baidu",
     "toutiao", "csdn", "alishui", "sgpjbg",
 )
 # 中文行业研究/官方统计站点（新增：行业调研任务权威信息少的主因是
@@ -534,8 +535,53 @@ def is_garbage_result(title: str, url: str, snip: str = "",
 
 
 def _domain_hits(url: str, needle: str) -> bool:
-    u = str(url or "").lower()
-    return needle.lower() in u
+    """URL 是否命中该域：**只看 hostname**，并按域/子域/标签边界匹配。
+
+    旧实现是整串子串匹配（`needle in url`），于是
+    `https://example.org/?origin=cninfo.com.cn` 也会被算作官方域（专项 §3-10）：
+    查询参数、路径片段、甚至锚点都能伪造权威加权与 `authoritative` 标记。
+    现在先取 hostname，再按条目的形态匹配：
+
+    - 完整域（`sse.com.cn`）：主机名等于它或是**它的子域**；
+    - 标签前缀（`ir.`、`investor.`）：主机名以该标签开头；
+    - 单标签（`cninfo`、`hkex`、`eastmoney`）：**可注册域**（eTLD+1）的某个标签
+      以它开头——这样 `www.cninfo.com.cn`、`hkexnews.hk` 照旧命中，
+      而 `notcninfo.org`、`eastmoney.evil.org` 这类仿冒域名不再算权威。
+    """
+    try:
+        host = (urllib.parse.urlsplit(str(url or "")).hostname or "").lower().rstrip(".")
+    except Exception:
+        return False
+    d = str(needle or "").strip().lower()
+    if not host or not d:
+        return False
+    if d.startswith("*."):
+        d = d[2:]
+    if d.endswith("."):
+        return host.startswith(d)
+    if "." in d:
+        return host == d or host.endswith("." + d)
+    return any(label.startswith(d) for label in _registrable_labels(host))
+
+
+# 常见的二级公共后缀：判断"可注册域"时要多取一段
+_SECOND_LEVEL = {
+    "com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn", "ac.cn",
+    "co.uk", "org.uk", "com.hk", "com.tw", "co.jp", "com.au",
+}
+
+
+def _registrable_labels(host: str) -> list[str]:
+    """主机名的"可注册域"标签（近似 eTLD+1；不引入公共后缀表）。
+
+    只用于权威加权这类启发式判断——不是安全边界（准入另有硬闸）。
+    """
+    labels = [x for x in str(host or "").split(".") if x]
+    if len(labels) <= 2:
+        return labels
+    if ".".join(labels[-2:]) in _SECOND_LEVEL:
+        return labels[-3:]
+    return labels[-2:]
 
 
 def score_results(query: str, results: list[dict], min_score: int | None = None,

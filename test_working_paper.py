@@ -32,11 +32,12 @@ FIXTURE_COMPANY = "示例制造股份有限公司"
 FIXTURE_CODE = "000001.SZ"
 BASELINE_PAYLOAD = {
     "financials": [
+        # 期末与公告日分开写（A′4）：披露日不再从 report_date 兜底
         {"year": 2023, "report_type": "年报", "caliber": "合并",
-         "report_date": "2024-04-20",          # 披露日：截至日证据（A′4）
+         "report_date": "2023-12-31", "disclosure_date": "2024-04-20",
          "revenue": 1200.0, "net_profit": 150.0, "operating_cashflow": 210.0},
         {"year": 2024, "report_type": "年报", "caliber": "合并",
-         "report_date": "2025-04-20",
+         "report_date": "2024-12-31", "disclosure_date": "2025-04-20",
          "revenue": 1380.0, "net_profit": 174.0, "operating_cashflow": 231.0},
     ],
     "metadata": {"source": "eastmoney", "company": FIXTURE_COMPANY,
@@ -280,10 +281,14 @@ class TestPaperExport(unittest.TestCase):
 # docs/evidence/real_data_chain_20260917.md。真实网络抓取本身不进 CI（网络不可控）。
 REAL_SNAPSHOT = {
     "financials": [
-        {"year": 2023, "report_type": "年报", "report_date": "2024-04-02",
-         "revenue": 1505.6, "net_profit": 747.34, "operating_cashflow": 665.93},
-        {"year": 2024, "report_type": "年报", "report_date": "2025-04-02",
-         "revenue": 1741.44, "net_profit": 862.28, "operating_cashflow": 924.64},
+        # 与东财 A 股行同形状：report_date 是**报告期末**，公告日在 disclosure_date
+        # （三个日期分开记；披露日缺失时不得用期末顶替，见 facts 的 A′4 纪律）
+        {"year": 2023, "report_type": "年报", "report_date": "2023-12-31",
+         "disclosure_date": "2024-04-02", "revenue": 1505.6,
+         "net_profit": 747.34, "operating_cashflow": 665.93},
+        {"year": 2024, "report_type": "年报", "report_date": "2024-12-31",
+         "disclosure_date": "2025-04-02", "revenue": 1741.44,
+         "net_profit": 862.28, "operating_cashflow": 924.64},
     ],
     "metadata": {"source": "eastmoney_ashare", "company": "贵州茅台",
                  "stock_code": "600519", "currency": "CNY", "unit": "亿元",
@@ -528,7 +533,8 @@ class TestBatchAPrimeMatrix(unittest.TestCase):
             periods=[2023, 2024], identity_source="form", **base)
 
     def _maotai(self, **row_over):
-        rows = [dict(r, caliber="合并", report_date="2024-04-02" if r["year"] == 2023
+        rows = [dict(r, caliber="合并",
+                     disclosure_date="2024-04-02" if r["year"] == 2023
                      else "2025-04-02") for r in REAL_SNAPSHOT["financials"]]
         for r in rows:
             r.update(row_over)
@@ -592,7 +598,8 @@ class TestBatchAPrimeMatrix(unittest.TestCase):
             for year, d in ((2023, "2024-04-02"), (2024, "2025-04-02")):
                 for c in calibers:
                     rows.append({"year": year, "report_type": "年报", "caliber": c,
-                                 "report_date": d,
+                                 "report_date": f"{year}-12-31",      # 期末
+                                 "disclosure_date": d,                 # 公告日
                                  "revenue": 1505.6 if year == 2023 else 1741.44,
                                  "net_profit": 747.34 if year == 2023 else 862.28,
                                  "operating_cashflow": 665.93 if year == 2023 else 924.64})
@@ -613,7 +620,8 @@ class TestBatchAPrimeMatrix(unittest.TestCase):
 
     def test_same_caliber_different_value_conflicts_same_value_agrees(self):
         """同口径异值 → 冲突；同口径同值异来源 → 视为一致（来源全部记录在案）。"""
-        rows = [dict(r, caliber="合并", report_date="2024-04-02" if r["year"] == 2023
+        rows = [dict(r, caliber="合并",
+                     disclosure_date="2024-04-02" if r["year"] == 2023
                      else "2025-04-02") for r in REAL_SNAPSHOT["financials"]]
         conflict = {"financials": rows + [{"year": 2024, "report_type": "年报",
                                           "caliber": "合并", "report_date": "2025-04-02",
@@ -641,7 +649,7 @@ class TestBatchAPrimeMatrix(unittest.TestCase):
         payload = {"companies": [
             {"metadata": dict(REAL_SNAPSHOT["metadata"], company="贵州茅台", market="cn"),
              "financials": [dict(r, caliber="合并",
-                                 report_date="2024-04-02" if r["year"] == 2023
+                                 disclosure_date="2024-04-02" if r["year"] == 2023
                                  else "2025-04-02")
                             for r in REAL_SNAPSHOT["financials"]],
              "raw": dict(REAL_SNAPSHOT["raw"])},
@@ -676,10 +684,14 @@ class TestBatchAPrimeMatrix(unittest.TestCase):
         self.assertFalse(paper.ok)
 
     def test_missing_disclosure_date_is_unverified(self):
-        """没有披露/可用日期 → 标"时点未核实"，不得宣称目标达成。"""
+        """没有披露/可用日期 → 标"时点未核实"，不得宣称目标达成。
+
+        注意去掉的是 `disclosure_date`（公告日）；`report_date`（期末）留着也不该救回
+        截至日成立——这一年正是专项 §3-8 要修掉的"期末冒充披露日"。
+        """
         payload = self._maotai()
         for r in payload["financials"]:
-            r.pop("report_date", None)
+            r.pop("disclosure_date", None)
         paper = W.build_working_paper(F.facts_from_financials(payload), self._req())
         self.assertIn(W.PROBLEM_AS_OF, {p.kind for p in paper.problems})
         self.assertFalse(paper.ok)
@@ -700,7 +712,8 @@ class TestDocumentSubjectScopeMatrix(unittest.TestCase):
     """A′3 的四条漏检场景（架构指令表格），逐条对号。"""
 
     def setUp(self):
-        rows = [dict(r, caliber="合并", report_date="2024-04-02" if r["year"] == 2023
+        rows = [dict(r, caliber="合并",
+                     disclosure_date="2024-04-02" if r["year"] == 2023
                      else "2025-04-02") for r in REAL_SNAPSHOT["financials"]]
         self.req = F.parse_research_request(
             "研究贵州茅台 2023 与 2024 两个年度的营业收入、归母净利润、"
