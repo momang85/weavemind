@@ -11,7 +11,7 @@ import { clearLastTask, readLastTask, saveLastTask, shouldResume } from '../lib/
 import type { TaskNode, ConversationMessage, TaskReport } from '../stores/types'
 import type { ResearchFields } from '../lib/researchGoal'
 
-type Tab = 'live' | 'context' | 'results'
+type Tab = 'live' | 'context' | 'results' | 'materials'
 
 /** 任务控制台（T11c 拆分后的薄编排页）：
  * 提交区/计划面板/右侧三栏各自独立组件；本页只保留任务生命周期编排。 */

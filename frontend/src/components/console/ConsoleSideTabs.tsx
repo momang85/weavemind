@@ -1,13 +1,14 @@
 import { memo, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { MessagesSquare, FolderOpen, Activity, Eye, RefreshCw } from 'lucide-react'
+import { MessagesSquare, FolderOpen, Activity, Eye, RefreshCw, Paperclip } from 'lucide-react'
 import LiveActivity from '../LiveActivity'
+import MaterialPanel from './MaterialPanel'
 import { Alert, EmptyState, StatusBadge } from '../ui'
 import { normalizeDeliverySummary } from '../../lib/format'
 
-type Tab = 'live' | 'context' | 'results'
+type Tab = 'live' | 'context' | 'results' | 'materials'
 
-/** 右侧三栏：实时动态 / 对话上下文 / 项目结果（TaskConsole 拆分 T11c）。
+/** 右侧四栏：实时动态 / 对话上下文 / 项目结果 / 补材料（TaskConsole 拆分 T11c）。
  * 步骤级流式输出轮询（/api/task/{id}/stream）随本组件生命周期收敛。 */
 export default memo(function ConsoleSideTabs({
   tab, setTab, taskId, isRunning,
@@ -89,12 +90,13 @@ export default memo(function ConsoleSideTabs({
         </div>,
         document.body,
       )}
-      {/* 标签页：实时动态 / 对话上下文 / 项目结果 */}
+      {/* 标签页：实时动态 / 对话上下文 / 项目结果 / 补材料 */}
       <div className="flex border-b border-slate-800 shrink-0">
         {([
           { key: 'live', label: '实时动态', icon: Activity },
           { key: 'context', label: '对话', icon: MessagesSquare },
           { key: 'results', label: '项目结果', icon: FolderOpen },
+          { key: 'materials', label: '补材料', icon: Paperclip },
         ] as { key: Tab; label: string; icon: any }[]).map(t => (
           <button key={t.key} onClick={() => setTab(t.key)}
             className={`flex-1 flex items-center justify-center gap-1.5 py-2.5 text-xs transition-colors ${
@@ -172,6 +174,10 @@ export default memo(function ConsoleSideTabs({
               </div>
             ))}
           </div>
+        )}
+
+        {tab === 'materials' && (
+          <MaterialPanel taskId={taskId} disabled={isRunning} />
         )}
 
         {tab === 'results' && (
