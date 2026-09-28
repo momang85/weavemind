@@ -85,3 +85,38 @@ _pdf = _pdfs[0] if _pdfs else ""          # ← 取包内**任意** PDF，按字
   `/api/task/<id>/deliverables` + 页面下载按钮跑一遍看实际表现（含视觉核验）。
 - "根据选中正文冻结同版报告与证据附件"尚未做；旧包**未删除、未覆盖**（按指令保留为失败证据）。
 - 原始披露 PDF 冒充研究报告 PDF 这件事，**还没有任何拦截**（本轮只确认了它存在）。
+
+## 真机验证闭环（重启后实测，2026-09-28 11:30）
+
+服务重启（加载本批代码）后，对冻结样本 `ui-a06a005c9b` 实测：
+
+**① 判决读出旧包问题**（`GET /api/task/ui-a06a005c9b/deliverables` → `delivery_identity`）：
+
+```
+package_stale            : true
+package                  : deliverables_20260928_012445.zip  (生成于 2026-09-28 01:24)
+package_body_version_id  : ""            ← 身份为空
+package_report_version_id: ""
+current_body_version_id  : e3d4d0a8bcbdb499de510ef547a42e68739d2e60b3a13da0012d51d85f499149
+current_version_id       : 02b6106f74295f050d6e05a906dfd1dc18e06f33802ff6caff509d43d67e2ba0
+package_pdf_sha256       : 436928c6acaac79332794412514d191c7e60451e2c093e91a954aebfbde379a2  ← 原始年报
+note                     : 该包不是当前采纳正文生成的版本…请重新导出后再对外交付
+```
+
+`current_body_version_id` / `current_version_id` 与架构师给出的 `e3d4d0a8…` / `02b6106f…`
+**逐字对上**，说明判决读的是同一份采纳身份，不是另算一套。
+
+**② 同版冻结**（`POST /api/task/ui-a06a005c9b/package`，无模型、确定性）：
+新包 `deliverables_20260928_113032_a6d5ec.zip`，5,636,352 字节，`status=ok`、`verify_ok=true`；
+manifest：`report_version_id 02b6106f…`、`research_body_sha256 e3d4d0a8…`、
+`delivered_md_sha256 a54db15c…`、**`pdf_sha256 ff24b160…`（不再是原始年报）**、
+`sources_fingerprint 95509ee8…`。`drift` 如实报 `evidence/citation_evidence.json: missing_on_disk`。
+
+**③ 判决随之翻正**：重打包后再读 `delivery_identity` → `package_stale **false**`、
+`package_body_version_id == current_body_version_id`、`package_report_version_id == current_version_id`、
+`package_pdf_sha256 ff24b160…`、`note ""`。
+
+**④ 旧包逐字节未动**：`deliverables_20260928_012445.zip` 仍 4,060,767 字节、
+sha256 `6072d9390ec79de7…`（与重打包前一致）——按指令保留为失败证据，未覆盖未删除。
+
+**仍未做**：页面**视觉核验**（开 SPA 点进该任务看它怎么显示这两个包）。
