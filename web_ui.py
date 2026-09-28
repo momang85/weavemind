@@ -4251,10 +4251,58 @@ def _get_task_acceptance_timeline(self, p):
         except Exception:
             return self._json({"error": "read failed"}, 500)
 
+def _task_export_verdict(tid: str) -> dict:
+    """给**下载方**的最小判决：这个包是不是当前采纳正文生成的版本。
+
+    P0-f：`/deliverables` 原来只回文件列表，任何消费者（页面/脚本/外部）都**无法判断**
+    拿到的是不是当前交付——"缺绑定/过时包不能冒充当前交付"在下载链上因此没有落点。
+    判决本身早就算好了（`_export_payload`），这里只是把它接出来，不改任何门禁：
+    **不拦下载**，只让"这是不是当前版本"变成可读事实。
+
+    读不到就如实说读不到（`package_stale: None` + `error`），**绝不让下载链因此报错**。
+    """
+    try:
+        from task_workspace import task_workspace
+        _ws = task_workspace(tid)
+        _report = ""
+        try:
+            _report = str((_get_task_report_data(tid) or {}).get("report") or "")
+        except Exception:                             # noqa: BLE001
+            _report = ""
+        _state = None
+        try:
+            if (_ws / "report_versions.json").exists():
+                from delivery_pipeline import delivery_state
+                _state = delivery_state(tid, _report, ws_dir=_ws)
+        except Exception:                             # noqa: BLE001
+            _state = None
+        exp = _export_payload(tid, _ws, _state) or {}
+        _stale = bool(exp.get("package_stale"))
+        return {
+            "package": exp.get("package") or "",
+            "package_generated_at": exp.get("package_generated_at") or "",
+            "package_stale": _stale,
+            "package_body_version_id": exp.get("package_body_version_id") or "",
+            "package_report_version_id": exp.get("package_report_version_id") or "",
+            "current_body_version_id": exp.get("current_body_version_id") or "",
+            "current_version_id": exp.get("current_version_id") or "",
+            "package_pdf_sha256": exp.get("package_pdf_sha256") or "",
+            "note": ("该包不是当前采纳正文生成的版本（或清单身份为空无法证明同版），"
+                     "请重新导出后再对外交付" if _stale else ""),
+        }
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("交付身份判决读取失败（task=%s）：%s", tid, str(exc)[:120])
+        return {"package_stale": None,
+                "error": f"交付身份判决不可读：{str(exc)[:120]}"}
+
+
 def _get_task_deliverables(self, p):
     if p.startswith("/api/task/") and p.endswith("/deliverables"):
         tid = p.split("/api/task/")[-1].rsplit("/deliverables", 1)[0]
-        return self._json({"files": _task_deliverables(tid)})
+        # P0-f：连同**判决**一起回。只给文件列表 = 让消费者自己猜是不是当前版本，
+        # 正是"过时包冒充当前交付"得以发生的地方。
+        return self._json({"files": _task_deliverables(tid),
+                           "delivery_identity": _task_export_verdict(tid)})
 
 def _get_task_usage(self, p):
     if p.startswith("/api/task/") and p.endswith("/usage"):
