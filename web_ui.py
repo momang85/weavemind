@@ -2597,18 +2597,6 @@ def _publish_task(
         raise RuntimeError("Redis 未连接，任务无法派发")
     project = _safe_project(project)
     idem = str(idempotency_key or "").strip()
-    if idem:
-        # 幂等前置检查：已有同键任务就直接复用，不发布、不新建（不产生第二次付费执行）
-        try:
-            import task_state as _ts_chk
-            existing = _ts_chk.find_by_idempotency(idem)
-        except Exception:                             # noqa: BLE001
-            existing = None
-        if existing and existing.get("task_id"):
-            return {"task_id": str(existing["task_id"]),
-                    "conversation_id": conversation_id,
-                    "status": str(existing.get("status") or "QUEUED"),
-                    "project": project, "deduplicated": True}
     tid = f"{prefix}-" + uuid.uuid4().hex[:10]
     r = _new_redis()
     try:
@@ -2630,17 +2618,33 @@ def _publish_task(
         {"event": "published", "ts": time.time(), "instance": _instance,
          "detail": "已发布到 orchestrator:main，等待收执"},
     ]
+    # P0-d：查重与落收执走**同一个原子裁决**（`claim_receipt`）。
+    # 旧实现是"先 find_by_idempotency 查一次、再 mark_received 落收执"两步——两个并发
+    # 提交可以各落一行收执，端到端"同键只发一条消息"因此并不成立（本次修复的正是它）。
     try:
         import task_state as _ts_recv
-        _received_ok = _ts_recv.mark_received(
+        _verdict, _ref = _ts_recv.claim_receipt(
             tid, goal, project=project, conversation_id=conversation_id,
             parent_task_id=parent_task_id, context=context, user=user_id,
             research_request=dict(research_request or {}),
             idempotency_key=idem, instance=_instance, submit_events=_events)
     except Exception as exc:                          # noqa: BLE001
-        _received_ok = False
-        logging.getLogger("web_ui").warning("收执落库异常：%s", str(exc)[:150])
-    if not _received_ok:
+        logging.getLogger("web_ui").warning("收执原子裁决异常：%s", str(exc)[:150])
+        _verdict, _ref = "error", ""
+    if _verdict == "duplicate":
+        # 同作用域同键**同内容**：复用既有任务，**不发布第二条消息**（不重复付费执行）
+        try:
+            _row = _ts_recv.read_task(_ref) or {}
+        except Exception:                             # noqa: BLE001
+            _row = {}
+        return {"task_id": _ref, "conversation_id": conversation_id,
+                "status": str(_row.get("status") or "QUEUED"),
+                "project": project, "deduplicated": True}
+    if _verdict == "conflict":
+        # 同作用域同键但**内容不同**：明确冲突，不发布（否则会执行一个与键不符的请求）
+        raise RuntimeError(
+            "同一幂等键的重复提交内容不一致（键被复用）；已拒绝，未派发")
+    if _verdict != "created":
         raise RuntimeError("任务收执无法落库（任务库不可写）；未派发，请检查数据目录权限")
     r.publish("orchestrator:main", json.dumps({
         "task_id": tid,

@@ -54,14 +54,37 @@
 
 `python test_task_persistence.py` → **45 项 OK**（39 + 6）。
 
-## 未验项（本条的剩余部分 = P0-d 第 2 小批）
+## P0-d(2) 已闭合：发布侧改走同一裁决（同一提交只发一条消息）
 
-- **发布侧尚未改用同一裁决**：`web_ui._publish_task` 仍在生成自己的 `task_id` 后调
-  `mark_received`。因此"同键重复提交**只发一条 Redis 消息**"这件事目前仍靠编排器
-  里那次（**不带作用域**的）`find_by_idempotency` 兜底，**不是**由本裁决直接保证。
-  要闭合需把 `_publish_task` 切成 `claim_receipt`：`duplicate` → 复用既有 id 并回
-  `deduplicated`，`conflict` → 明确报错，`error` → 拒绝且不发布。
-- **编排器侧的 `find_by_idempotency` 仍是全局的**（未带作用域），与提交侧的作用域
-  语义尚未统一 —— 同属第 2 小批。
-- 未做**跨进程**并发验证（两线程同进程已验；跨进程要起第二个进程连同一个库）。
-- 未做真实 Redis 上的"双击/重放"演练；**未跑任何付费整链**。
+上一版留下的最大缺口（"`web_ui._publish_task` 仍先查后插，端到端只发一条消息靠编排器
+里那次不带作用域的兜底"）**已修**：
+
+- `_publish_task` 删除"先 `find_by_idempotency` 查一次"的前置检查，改为**先 `claim_receipt`
+  再决定是否发布**：
+  - `created` → 用本进程生成的 `task_id` 发布（收执已在同一事务里落好）；
+  - `duplicate` → **直接复用既有任务、不发布**（返回 `deduplicated: True`）；
+  - `conflict` → 抛 `RuntimeError("同一幂等键的重复提交内容不一致（键被复用）；已拒绝，未派发")`；
+  - `error` → 抛 `RuntimeError("任务收执无法落库…")`，不发布。
+- **兼容规则**：`claim_receipt` 的按键匹配同时接受 `idem_scope` 为空的行（旧实现或
+  `mark_queued` 等其它写入路径落的），因为那些行的历史语义就是**全局按键去重**；
+  且这类行**指纹也为空**，内容判不出来时**保守判 `duplicate`**（复用、绝不重复执行），
+  而不是判冲突把用户的正常重试挡掉。新落的行两者都有值 → 按作用域严格隔离。
+
+新增/更新用例（`test_writer_consolidation.TestSubmitHandshake`）：
+- `test_known_idempotency_key_does_not_publish_again`（既有）→ 仍绿：复用既有任务、
+  `fake.publish.assert_not_called()`、库里仍只有 1 行；
+- `test_conflicting_key_raises_and_does_not_publish`（新）→ 冲突抛错且**不发布**；
+- `test_unwritable_receipt_raises_and_does_not_publish`（更新）→ 打桩从旧的
+  `mark_received` 换成 `claim_receipt → ("error","")`，**场景与断言不变**
+  （落不了收执就报错、不发布）。
+
+`python test_writer_consolidation.py` → **58 项 OK**（57 + 1）。
+
+## 仍然未验（如实留白）
+
+- **编排器侧 `find_by_idempotency` 仍是全局的**（未带作用域）：提交侧已按作用域严格裁决，
+  但编排器收到消息后的二次查重还是按键全局比对。在当前流程下这不会造成重复执行
+  （同一次提交带的是同一个 `task_id`，走的是 `promote_received` 那条裁决），
+  但两处语义尚未完全统一。
+- 未做**跨进程**并发验证（同进程两线程已验）；未在真实 Redis 上做"双击/重放"演练；
+  **本轮未跑任何付费整链**。

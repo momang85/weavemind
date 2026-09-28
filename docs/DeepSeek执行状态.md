@@ -24,10 +24,15 @@
   `created`、库里只有 1 行；换用户/换工作区各自独立；冲突不落第二行）。
 - **回归**：`test_p0` **416 OK**、`test_writer_consolidation` **57 OK**、
   `test_startup_readiness` **61 OK**。
-- **未验项（= P0-d 第 2 小批）**：**发布侧尚未改用同一裁决**——`web_ui._publish_task`
-  仍生成自己的 task_id 后调 `mark_received`，所以"同键只发一条消息"目前仍靠编排器里那次
-  **不带作用域**的 `find_by_idempotency` 兜底；编排器侧查重也仍是全局的。未做跨进程并发
-  验证；未跑付费整链。
+- **P0-d(2) 已闭合**：`web_ui._publish_task` 删除"先查后插"的前置检查，改为**先 `claim_receipt`
+  再决定是否发布**——`created` 才发布；`duplicate` 复用既有任务**且不发布**；
+  `conflict`/`error` 抛错且不发布。兼容规则：`idem_scope` 为空的行（旧实现/`mark_queued` 落的）
+  仍参与全局按键匹配，且因指纹为空**保守判 duplicate**（复用、绝不重复执行）。
+  新增用例"冲突不得发布"，并把"落不了收执要报错且不发布"的打桩从旧 `mark_received`
+  换成 `claim_receipt`（场景与断言不变）→ `test_writer_consolidation` **58 项 OK**。
+- **仍余一项未统一**：编排器侧 `find_by_idempotency` 仍是**全局**比对（未带作用域）；
+  当前流程下不造成重复执行（同一提交带同一 `task_id`，走 `promote_received` 裁决），
+  但两处语义尚未完全一致。未做跨进程并发验证；未跑付费整链。
 
 ## P0-c 已交：恢复覆盖「已 QUEUED 但从未开始」的崩溃窗口（证据 `docs/evidence/p0c_queued_crash_window_20260928.md`）
 

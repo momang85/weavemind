@@ -318,20 +318,30 @@ def claim_receipt(task_id: str, goal: str, *, project: str = "default",
         con.isolation_level = None                    # 自己管事务，用显式 BEGIN IMMEDIATE
         con.execute("BEGIN IMMEDIATE")                # ← 写锁：查+插 串行化
         if key:
+            # 兼容规则（P0-d）：**没有作用域/指纹的行**（旧实现或其它写入路径落的）按
+            # "作用域未知、内容未知"处理——它们的历史语义就是**全局按键去重**，
+            # 所以仍然参与匹配；内容判不出来时保守判 `duplicate`（复用、绝不重复执行），
+            # 而不是判冲突把用户的正常重试挡掉。新落的行两者都有值，按作用域严格隔离。
             row = con.execute(
                 "SELECT task_id, request_fingerprint FROM task_history"
-                " WHERE idem_scope=? AND idempotency_key=? LIMIT 1",
-                (scope, key)).fetchone()
+                " WHERE idempotency_key=?"
+                "   AND (idem_scope=? OR idem_scope='' OR idem_scope IS NULL)"
+                " LIMIT 1",
+                (key, scope)).fetchone()
             if row:
                 existing_id = str(row[0] or "")
-                same = str(row[1] or "") == fp
+                existing_fp = str(row[1] or "")
                 con.execute("COMMIT")
-                if same:
-                    return "duplicate", existing_id
-                logger.warning("幂等键冲突：作用域 %s 的键 %s 已属于任务 %s，"
-                               "但本次请求内容不同 → 明确冲突（不执行）",
-                               scope, key, existing_id)
-                return "conflict", existing_id
+                if existing_fp and existing_fp != fp:
+                    logger.warning("幂等键冲突：作用域 %s 的键 %s 已属于任务 %s，"
+                                   "但本次请求内容不同 → 明确冲突（不执行）",
+                                   scope, key, existing_id)
+                    return "conflict", existing_id
+                if not existing_fp:
+                    logger.warning("幂等键 %s 命中一条**无指纹**的旧收执（任务 %s）："
+                                   "内容无法比对，按重复处理（复用、不重复执行）",
+                                   key, existing_id)
+                return "duplicate", existing_id
         dup = con.execute("SELECT task_id FROM task_history WHERE task_id=? LIMIT 1",
                           (task_id,)).fetchone()
         if dup:

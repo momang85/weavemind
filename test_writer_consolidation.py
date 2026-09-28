@@ -159,11 +159,27 @@ class TestSubmitHandshake(unittest.TestCase):
         with mock.patch.object(web_ui, "_redis_ready", return_value=True), \
                 mock.patch.object(web_ui, "_new_redis", return_value=fake), \
                 mock.patch.object(web_ui, "DB_PATH", self.db), \
-                mock.patch.object(task_state, "mark_received", return_value=False), \
+                mock.patch.object(task_state, "claim_receipt",
+                                  return_value=("error", "")), \
                 mock.patch.dict("os.environ", {"WM_SUBMIT_ACK_TIMEOUT": "0.3"}):
             with self.assertRaises(RuntimeError) as ctx:
                 web_ui._publish_task("目标")
         self.assertIn("收执", str(ctx.exception))
+        fake.publish.assert_not_called()
+
+    def test_conflicting_key_raises_and_does_not_publish(self):
+        """P0-d：同作用域同键但**内容不同** → 明确拒绝、不发布（不得执行与键不符的请求）。"""
+        import web_ui
+        fake = self._fake_redis("accepted")
+        with mock.patch.object(web_ui, "_redis_ready", return_value=True), \
+                mock.patch.object(web_ui, "_new_redis", return_value=fake), \
+                mock.patch.object(web_ui, "DB_PATH", self.db), \
+                mock.patch.object(task_state, "claim_receipt",
+                                  return_value=("conflict", "ui-existing")), \
+                mock.patch.dict("os.environ", {"WM_SUBMIT_ACK_TIMEOUT": "0.3"}):
+            with self.assertRaises(RuntimeError) as ctx:
+                web_ui._publish_task("目标", idempotency_key="k-conflict")
+        self.assertIn("幂等键", str(ctx.exception))
         fake.publish.assert_not_called()
 
     def test_rejected_raises_with_reason(self):
