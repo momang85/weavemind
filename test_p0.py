@@ -3202,6 +3202,161 @@ class TestAcceptanceChecker(unittest.TestCase):
         self.assertFalse(_derived_traceable({"value": "55.0", "unit": "%"}, clean))
         self.assertFalse(_derived_traceable({"value": "2800", "unit": "亿元"}, clean))
 
+    def test_locator_metadata_is_separate_from_content_numbers(self):
+        """定位元数据（字符区间/页码/信用代码）不进分母，单列账报出。
+
+        真机反例（洋河股份 2023–2024，2026-09-28）：装配器自己写的「（字符 9536-9573）」
+        被当成"需要溯源的财务数字"，并被列进"不可溯源示例"——读起来像报告里有查不到
+        出处的数字，其实是导航标注。这里同时断言**紧邻的内容数字仍在分母里**。
+        """
+        from acceptance_checker import extract_financial_numbers, metadata_numbers
+
+        report = ("营业收入 288.76亿元（第 11 页 · 字符 9536-9573）；"
+                  "统一社会信用代码 9132000074557990XP；§api_chunk 12")
+        vals = [(n["value"], n["unit"]) for n in extract_financial_numbers(report)]
+        self.assertIn(("288.76", "亿元"), vals)
+        self.assertNotIn(("9536", ""), vals)
+        self.assertNotIn(("9573", ""), vals)
+        self.assertNotIn(("9132000074557990", ""), vals)
+        got = {n["value"] for n in metadata_numbers(report)}
+        self.assertIn("9536", got)
+        self.assertIn("9573", got)
+        # 分母/支持分别列账：明细里写明"有这些、为什么不算数"
+        from acceptance_checker import check_number_traceability
+        r = check_number_traceability(report, {"search_results": "营业收入 288.76亿元"})
+        self.assertEqual(r["metadata_count"], len(metadata_numbers(report)))
+        self.assertIn("定位元数据", r["details"])
+
+    def test_bare_number_keeps_boundary_after_thousands_separator(self):
+        """无单位大数：来源写千分位且与相邻数字连排时仍要匹配，且不得跨值误配。
+
+        `_norm` 会把 "139,076.05 166,154.73" 去空白粘成 "139076.05166154.73"，
+        词边界判定因此全部失败——真机样本 43 个数字属于这一类，全部被判"不可溯源"。
+        """
+        from acceptance_checker import check_number_traceability
+
+        src = {"fetch_snapshot": "白酒销售量(吨) 139,076.05 166,154.73 -16.30%"}
+        ok = check_number_traceability("白酒销售量 139076.05 吨。", src)
+        self.assertEqual(ok["unverifiable_count"], 0, ok["details"])
+        # 反向：相邻那一列的值不能被"借"过来（边界必须真的是边界）
+        bad = check_number_traceability("白酒销售量 139076 吨。", src)
+        self.assertEqual(bad["unverifiable_count"], 1, bad["details"])
+
+    def test_workpaper_channel_admits_only_recomputable_rows(self):
+        """底稿通道的准入门槛：派生行必须**同时**有算式与输入 fact_id。
+
+        没有算式 = 不可复算，没有 `derived_from` = 指不回披露：两种都不进来源，
+        免得把"底稿里恰好有个同值"当成可溯源（那是自证，不是溯源）。
+        """
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from acceptance_checker import _collect_sources
+
+        with tempfile.TemporaryDirectory() as td:
+            proj = Path(td) / "project"
+            proj.mkdir(parents=True)
+            (proj / "working_paper.json").write_text(json.dumps({
+                "rows": [{"fact_id": "fact-1", "metric": "revenue", "metric_label": "营业收入",
+                          "period": "2024年", "value": 288.76, "unit": "亿元",
+                          "source_locator": "第 11 页"}],
+                "derived": [
+                    {"metric": "net_profit_change", "metric_label": "归母净利润变化",
+                     "period": "2024年较2023年", "value": -33.43, "unit": "亿元",
+                     "formula": "66.73 - 100.16", "derived_from": ["fact-a", "fact-b"]},
+                    {"metric": "ghost", "metric_label": "无算式派生", "value": 12345.0,
+                     "unit": "亿元", "derived_from": ["fact-a"]},
+                    {"metric": "ghost2", "metric_label": "无输入派生", "value": 54321.0,
+                     "unit": "亿元", "formula": "1 + 1"},
+                ],
+            }, ensure_ascii=False), encoding="utf-8")
+            src = _collect_sources(td)
+
+        self.assertIn("workpaper_rows", src)
+        self.assertIn("workpaper_derived", src)
+        self.assertIn("33.43亿元", src["workpaper_derived"])
+        self.assertNotIn("12345", src["workpaper_derived"])
+        self.assertNotIn("54321", src["workpaper_derived"])
+        self.assertIn("288.76亿元", src["workpaper_rows"])
+
+    def test_scale_forms_and_two_period_delta(self):
+        """量纲换算 / 小数位 / 正负号 / 两期差额都是"同一个数的不同写法"，不是不同事实。"""
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from acceptance_checker import _collect_sources, check_number_traceability
+
+        with tempfile.TemporaryDirectory() as td:
+            proj = Path(td) / "project"
+            proj.mkdir(parents=True)
+            (proj / "working_paper.json").write_text(json.dumps({
+                "rows": [
+                    {"fact_id": "f1", "metric": "revenue_industry", "metric_label": "分行业·酒类",
+                     "period": "2024年", "value": 28248295829.62, "unit": "元",
+                     "source_locator": "第 11 页"},
+                    {"fact_id": "f2", "metric": "total_assets", "metric_label": "总资产",
+                     "period": "2023年", "value": 697.92, "unit": "亿元",
+                     "source_locator": "第 9 页"},
+                    {"fact_id": "f3", "metric": "total_assets", "metric_label": "总资产",
+                     "period": "2024年", "value": 673.45, "unit": "亿元",
+                     "source_locator": "第 9 页"},
+                ],
+                "derived": [],
+            }, ensure_ascii=False), encoding="utf-8")
+            # 元 → 亿元（三位小数写法 + 两位小数写法都要认）
+            r1 = check_number_traceability("分行业酒类收入 282.48亿元。", _collect_sources(td))
+            self.assertEqual(r1["unverifiable_count"], 0, r1["details"])
+            # 两期差额："总资产…减少 24.47 亿元"（正文不带负号，方向由方向词承载）
+            r2 = check_number_traceability("总资产减少 24.47亿元。", _collect_sources(td))
+            self.assertEqual(r2["unverifiable_count"], 0, r2["details"])
+            # 反向：不给 2023 那一期，差额就无从算起 → 仍判不可溯源（门槛不放水）
+            (proj / "working_paper.json").write_text(json.dumps({
+                "rows": [{"fact_id": "f3", "metric": "total_assets", "metric_label": "总资产",
+                          "period": "2024年", "value": 673.45, "unit": "亿元",
+                          "source_locator": "第 9 页"}],
+                "derived": [],
+            }, ensure_ascii=False), encoding="utf-8")
+            r3 = check_number_traceability("总资产减少 24.47亿元。", _collect_sources(td))
+            self.assertEqual(r3["unverifiable_count"], 1, r3["details"])
+
+    def test_workpaper_hits_count_as_computed(self):
+        """命中底稿派生行记"计算"不记"引用"——不能拿自己算的数冒充外部来源。"""
+        import json
+        import tempfile
+        from pathlib import Path
+
+        from acceptance_checker import _collect_sources, check_number_traceability
+
+        with tempfile.TemporaryDirectory() as td:
+            proj = Path(td) / "project"
+            proj.mkdir(parents=True)
+            (proj / "working_paper.json").write_text(json.dumps({
+                "rows": [],
+                "derived": [{"metric": "net_profit_change", "metric_label": "归母净利润变化",
+                             "period": "2024年较2023年", "value": -33.43, "unit": "亿元",
+                             "formula": "66.73 - 100.16", "derived_from": ["fact-a", "fact-b"]}],
+            }, ensure_ascii=False), encoding="utf-8")
+            r = check_number_traceability("归母净利润变化 -33.43亿元。", _collect_sources(td))
+        self.assertEqual(r["unverifiable_count"], 0, r["details"])
+        self.assertEqual(r["cited_count"], 0)
+        self.assertEqual(r["computed_count"], 1)
+        hit = r["traceable"][0]
+        self.assertEqual(hit["source"], "workpaper_derived")
+        self.assertTrue(hit["derived"])
+        self.assertFalse(hit.get("verified", True))
+
+    def test_subject_guard_still_blocks_cross_company_value(self):
+        """护栏回归：跨公司同值不得因本轮改动变成"可溯源"（架构复核 P1）。"""
+        from acceptance_checker import _promotion_subject, _subjects_conflict
+
+        a = _promotion_subject("比亚迪2024年营业收入100亿元")
+        b = _promotion_subject("宁德时代营收 1741 亿元")
+        self.assertTrue(a and b)
+        self.assertTrue(_subjects_conflict(a, b))
+        self.assertFalse(_subjects_conflict("洋河股份", "洋河股份合并报表口径下的营业收入"))
+
     def test_acceptance_gap_report(self):
         """缺口报告结构：checks/gaps/overall。"""
         import tempfile

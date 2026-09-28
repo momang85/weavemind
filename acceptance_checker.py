@@ -197,17 +197,62 @@ def _norm(s: str) -> str:
     return re.sub(r"\.0+(?=\D|$)", "", s)  # 1152.0亿 → 1152亿，避免小数写法差异
 
 
+def _bare_norm(s: str) -> str:
+    """只去掉**千分位**逗号，保留空白——无单位数字匹配专用。
+
+    `_norm` 把空白一并删掉，会把披露表里**相邻的两列数字粘成一个 token**：
+    "139,076.05 166,154.73" → "139076.05166154.73"。`_bare_match` 的词边界判定
+    （前/后不是数字字母点）因此必然失败，于是**无单位的大数全部被判「不可溯源」**。
+    真机样本（洋河股份 2023–2024，2026-09-28）实测：406 个数字里 43 个属于这一类，
+    而它们逐字出现在**已取到的年报快照**里——只是写作 `139,076.05`。这是**匹配器的
+    假失败**，不是研究质量缺陷；反过来它会把溯源率压到阈值以下、触发无效重做。
+    """
+    return re.sub(r"[,\uFF0C]", "", str(s or ""))
+
+
+def locator_metadata_spans(text: str) -> list[tuple[int, int]]:
+    """**定位元数据**的字符区间：字符区间标注 / 片段号 / 页码 / 统一社会信用代码。
+
+    这些数字不是报告的研究内容，而是**装配器自己写的导航标注**（"（字符 9536-9573）"、
+    "api_chunk 12"、"第 139 页"、信用代码 `9132000074557990XP`）。把它们算进"需要
+    溯源的财务数字"分母里，等于让**系统自己的定位串**去拉低溯源率——真机样本
+    （洋河股份 2023–2024，2026-09-28）里这一类共 30 处，其中 9536/9573/7532/7601
+    被列进"不可溯源示例"，读起来像"报告里有查不到出处的数字"，其实是定位串。
+
+    区间只覆盖**标注本身**：`（字符 9536-9573）` 落在区内，紧随其后的正文数字不在。
+    """
+    t = str(text or "")
+    pats = (
+        r"字符\s*\d{1,8}\s*[-–—~至]\s*\d{1,8}",     # （字符 9536-9573）
+        r"字符\s*\d{1,8}",                          # 单点字符位
+        r"api_chunk\s*[:：]?\s*\d{1,6}",             # api_chunk 12
+        r"第\s*\d{1,4}\s*页",                        # 第 139 页
+        r"(?<![0-9A-Z])[0-9A-HJ-NP-RTUWXY]{18}(?![0-9A-Z])",   # 统一社会信用代码
+    )
+    spans: list[tuple[int, int]] = []
+    for p in pats:
+        spans.extend(m.span() for m in re.finditer(p, t))
+    return spans
+
+
+def _is_locator_metadata(pos: int, spans: list[tuple[int, int]]) -> bool:
+    return any(s <= pos < e for s, e in spans)
+
+
 def extract_financial_numbers(text: str) -> list[dict]:
     """从正文提取需要溯源的财务数字：
     - 带单位（亿/万/美元/元/%）的数字
     - 无单位但 ≥4 位有效数字的大数（如 1383）
-    排除：纯年份（19xx/20xx）、URL 内的数字、无单位的个位数。"""
+    排除：纯年份（19xx/20xx）、URL 内的数字、无单位的个位数、**定位元数据**
+    （见 `locator_metadata_spans`：字符区间/片段号/页码/信用代码不计入分母）。"""
     t = str(text or "")
     # 屏蔽图片引用/文件路径/任务 ID（报告内嵌图表路径含 ui-xxxx，会被误当数字）
     t = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", t)          # ![name](path)
     t = re.sub(r"[A-Za-z]:\\[^\s]*", " ", t)             # C:\...\路径
     t = re.sub(r"/tasks/ui-[a-z0-9]+/[^\s]*", " ", t)    # /tasks/ui-xxx/...
     url_spans = [m.span() for m in re.finditer(r"https?://\S+", t)]
+    # 定位元数据区间在**屏蔽之后**计算：位置与下面的 finditer 同一坐标系
+    loc_spans = locator_metadata_spans(t)
 
     def in_url(pos: int) -> bool:
         return any(s <= pos < e for s, e in url_spans)
@@ -217,6 +262,8 @@ def extract_financial_numbers(text: str) -> list[dict]:
         pos = m.start()
         if in_url(pos):
             continue
+        if _is_locator_metadata(pos, loc_spans):
+            continue        # 定位串不是内容数字：单列账（见 metadata_numbers）
         value_raw = m.group(1)
         unit_big = m.group(2) or ""
         unit_small = m.group(3) or ""
@@ -240,6 +287,26 @@ def extract_financial_numbers(text: str) -> list[dict]:
             "pos": pos,
         })
     return nums
+
+
+def metadata_numbers(text: str) -> list[dict]:
+    """被 `extract_financial_numbers` 排除的**定位元数据**数字（单列账用）。
+
+    只用于在验收明细里如实写出"分母里本来有这些、为什么不算数"，不参与溯源率。
+    """
+    t = str(text or "")
+    t = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", t)
+    t = re.sub(r"[A-Za-z]:\\[^\s]*", " ", t)
+    t = re.sub(r"/tasks/ui-[a-z0-9]+/[^\s]*", " ", t)
+    spans = locator_metadata_spans(t)
+    out: list[dict] = []
+    for m in _NUM_UNIT_RE.finditer(t):
+        if _is_locator_metadata(m.start(), spans):
+            out.append({"value": m.group(1).replace(",", ""),
+                        "unit": (m.group(2) or "") + (m.group(3) or ""),
+                        "raw": m.group(0).strip(), "pos": m.start()})
+    return out
+
 
 
 def _candidates(num: dict) -> list[str]:
@@ -292,6 +359,202 @@ def _units_equivalent(a: str, b: str) -> bool:
         return any((x == g) or (len(g) >= 2 and g in x) for g in grp)
 
     return any(_in_group(a, grp) and _in_group(b, grp) for grp in _CURRENCY_UNIT_GROUPS)
+
+
+def _one_scale_form(v: float, u: str) -> list[str]:
+    out: list[str] = []
+    if u in ("元", "万元", "亿元", "美元", "万美元", "亿美元"):
+        _base = 1.0
+        if u.endswith("亿元") or u == "亿":
+            _base = 1e8
+        elif u.endswith("万元") or u == "万":
+            _base = 1e4
+        _yuan = v * _base                       # 折算成"元/美元"
+        for d in (2, 3, 4):
+            out.append(f"{_yuan / 1e8:.{d}f}亿元")
+            out.append(f"{_yuan / 1e4:.{d}f}万元")
+        for d in (0, 2):
+            out.append(f"{_yuan:.{d}f}元")
+        out.append(f"{v:g}{u}")                  # 42.5亿元 —— 正文常比底稿少写一位小数
+    else:
+        for d in (0, 2, 3):
+            out.append(f"{v:.{d}f}{u}")
+        out.append(f"{v:g}{u}")                  # 61.2% —— 写作本身的小数位，不是 61% 也不是 61.20%
+        if float(v).is_integer():
+            out.append(f"{v:,g}{u}")
+        if u.endswith("%"):
+            # 百分比 ↔ 倍数：正文写"每 1 元净利润对应现金净流入 0.612 元"时，
+            # 说的是同一个量（61.2%），只是换了读法。
+            out.append(f"{v / 100:.3f}")
+    return out
+
+
+def _scale_forms(value, unit: str) -> list[str]:
+    """同一个数的多种**等价写法**（元 / 万元 / 亿元 × 2~4 位小数 + 千分位 + 正负号）。
+
+    报告正文按读者口径写"282.48亿元"，底稿存的是 28248295829.62 元；0.999 亿元
+    这种三位小数的写法用两位舍入会变成 1.00；"下降 42.50 亿元"与底稿的
+    `-42.5 亿元`是**同一个事实**（方向由正文的方向词承载，抽取时符号被剥离——
+    与 `_formula_derived_in_report` 的既有约定一致）。这些是**同一个数的不同写法**，
+    不是不同事实：量纲换算、小数位与符号书写不构成"不可溯源"。
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return []
+    u = str(unit or "")
+    out = _one_scale_form(v, u)
+    if v:
+        out += _one_scale_form(abs(v), u)
+    out.append(f"{v:g}")
+    return [s for s in dict.fromkeys(out) if s]
+
+
+def _workpaper_source_texts(workspace) -> dict[str, str]:
+    """本次任务**自己的落盘产物** → 溯源来源：底稿（working_paper.json）与叙事证据。
+
+    为什么需要这条通道：正文里的派生读数（"-33.43亿元"、"覆盖 69.37%"、"毛利额
+    20920103385"）是**底稿算出来的**——它们既不逐字出现在披露快照里（年报写
+    `139,076.05`、报告写 `139076.05`；`69.37%` 是两次相除的结果），也不在东财
+    结构化数据里。此前这些一律被判"不可溯源"，把溯源率压到阈值以下
+    （真机样本洋河股份 2023–2024，2026-09-28：52%），触发**无效重做**。
+
+    准入条件（不是装饰，缺一不进来源）：
+    - 底稿**明细行**：必须有 `fact_id` 与非空 `source_locator`/`source_url`（可回到披露）；
+    - 底稿**派生行**：必须**同时**有非空 `formula`（算式）与 `derived_from`（输入 fact_id）
+      ——即"它自己可复算、且指向输入事实"；
+    - 叙事证据事实：必须有非空 `locator`（已定位到披露的字符区间/小节）。
+
+    通道名分开记（`workpaper_rows` / `workpaper_derived` / `located_facts`），
+    验收明细里"引用"与"计算"因此分得开：派生行命中记**计算**，不冒充引用来源。
+    """
+    ws = Path(workspace)
+    out: dict[str, str] = {}
+
+    wp: dict = {}
+    for cand in (ws / "project" / "working_paper.json", ws / "working_paper.json"):
+        try:
+            if cand.exists():
+                wp = json.loads(cand.read_text(encoding="utf-8")) or {}
+                break
+        except Exception:                        # noqa: BLE001 - 坏底稿不参与，不编
+            wp = {}
+    if isinstance(wp, dict) and wp:
+        rows_txt: list[str] = []
+        _pairs: list[tuple[str, dict, dict]] = []      # 符合准入门槛的同期对（算 Δ 用）
+        _by_metric: dict[str, list[dict]] = {}
+        for r in (wp.get("rows") or []):
+            if not isinstance(r, dict):
+                continue
+            if not str(r.get("fact_id") or "").strip():
+                continue
+            if not (str(r.get("source_locator") or "").strip()
+                    or str(r.get("source_url") or "").strip()):
+                continue
+            head = (f"{r.get('entity') or ''} {r.get('metric_label') or r.get('metric') or ''} "
+                    f"{r.get('period') or ''}")
+            for form in _scale_forms(r.get("value"), str(r.get("unit") or "")):
+                rows_txt.append(f"{head} {form} {form}")
+            _by_metric.setdefault(str(r.get("metric") or ""), []).append(r)
+        if rows_txt:
+            out["workpaper_rows"] = "\n".join(rows_txt)
+        # 同期两行的**差额**：正文写"总资产…减少 24.47 亿元"这类读数，是两个已定位
+        # 明细行相减的结果；底稿只给水平值，差额因此曾一律判"不可溯源"（真机样本里
+        # 40.82/24.47/20.90/1.83/27,078.68 等 7 个值、12 处）。只对**两期都过了
+        # 准入门槛**的同指标行算差，且差额进 `workpaper_derived`（记"计算"不记"引用"）。
+        for metric, rs in _by_metric.items():
+            if len(rs) < 2 or not metric:
+                continue
+            rs = sorted(rs, key=lambda x: str(x.get("period") or ""))
+            for a, b in zip(rs, rs[1:]):
+                va, vb = a.get("value"), b.get("value")
+                if not isinstance(va, (int, float)) or not isinstance(vb, (int, float)):
+                    continue
+                unit = str(b.get("unit") or a.get("unit") or "")
+                if _value_scale(unit) != _value_scale(str(a.get("unit") or "")):
+                    continue        # 两期单位量纲不同（如 元 vs 吨）不算同一指标的差
+                _pairs.append((f"{b.get('metric_label') or metric} 同期差额"
+                               f"（{a.get('period')}→{b.get('period')}）",
+                               {"value": vb - va, "unit": unit}, b))
+
+        der_txt: list[str] = []
+        n_derived = 0
+        for d in (wp.get("derived") or []):
+            if not isinstance(d, dict):
+                continue
+            if not str(d.get("formula") or "").strip():
+                continue        # 无算式 = 不可复算，不进来源
+            if not (d.get("derived_from") or []):
+                continue        # 无输入 fact_id = 指不回披露，不进来源
+            n_derived += 1
+            head = (f"{d.get('entity') or ''} {d.get('metric_label') or d.get('metric') or ''} "
+                    f"{d.get('period') or ''}")
+            for form in _scale_forms(d.get("value"), str(d.get("unit") or "")):
+                der_txt.append(f"{head} {form} {form}")
+        for head, delta, _src in _pairs:
+            for form in _scale_forms(delta.get("value"), str(delta.get("unit") or "")):
+                der_txt.append(f"{head} {form} {form}")
+        if der_txt:
+            # 派生行数写进文本头，便于人工核对"这条通道吃进了多少条派生事实"
+            out["workpaper_derived"] = (
+                f"底稿派生 {n_derived} 条 + 同指标两期差额 {len(_pairs)} 条\n"
+                + "\n".join(der_txt))
+
+    try:
+        ne_path = ws / "narrative_evidence.json"
+        ne = json.loads(ne_path.read_text(encoding="utf-8")) if ne_path.exists() else {}
+    except Exception:                            # noqa: BLE001
+        ne = {}
+    if isinstance(ne, dict) and ne:
+        loc_txt: list[str] = []
+
+        def _emit(rec: dict, *, label: str = "") -> None:
+            # 定位要求在**行本身或它的算式**上：派发行的定位挂在其输入行上
+            # （`formula` 写明输入，输入行各自带 locator 并单独 emit），
+            # 因此"有算式"与"有 locator"同等算已定位；两者都没有才不算可溯源。
+            if not (str(rec.get("locator") or "").strip()
+                    or str(rec.get("formula") or "").strip()):
+                return
+            unit = str(rec.get("unit") or "")
+            head = f"{label or rec.get('label') or rec.get('component') or ''}"
+            # 同一行里**不同键的单位不同**：`yoy`/`share_*` 是百分比，行单位是吨/元。
+            # 用行单位去格式化它们会生成"16.3吨"这种不存在的写法，同比读数因而全部落空。
+            for key in ("cur", "prev", "yoy", "share_cur", "share_prev"):
+                if rec.get(key) is None:
+                    continue
+                _u = ("%" if key.startswith("yoy") or key.startswith("share") else unit)
+                for form in _scale_forms(rec.get(key), _u):
+                    loc_txt.append(f"{head} {form} {form}")
+            # 两期差额（"销量减少 27,078.68 吨"）：由同一条已定位事实的两期读数相减
+            _c, _p = rec.get("cur"), rec.get("prev")
+            if isinstance(_c, (int, float)) and isinstance(_p, (int, float)):
+                for form in _scale_forms(_c - _p, unit):
+                    loc_txt.append(f"{head} 两期差额 {form} {form}")
+
+        vp = ne.get("volume_price") or {}
+        for f in (vp.get("facts") or []):
+            if isinstance(f, dict):
+                _emit(f, label=str(f.get("label") or ""))
+        for d in (vp.get("derived") or []):
+            if isinstance(d, dict):
+                _emit(d, label=str(d.get("label") or ""))
+        pd = ne.get("profit_decomposition") or {}
+        for key in ("groups", "expenses", "tax_rows"):
+            v = pd.get(key)
+            for grp in (v.values() if isinstance(v, dict) else (v or [])):
+                for r in (grp if isinstance(grp, list) else [grp]):
+                    if isinstance(r, dict):
+                        _emit(r, label=str(r.get("label") or ""))
+        for d in (pd.get("derived") or []):
+            if isinstance(d, dict):
+                _emit(d, label=str(d.get("label") or ""))
+        if loc_txt:
+            out["located_facts"] = "\n".join(loc_txt)
+    return out
+
+
+# 由**本次任务自己的底稿/已定位事实**得出的来源通道：命中它们记"计算"，不记"引用"。
+_DERIVED_SOURCE_KEYS = ("workpaper_derived",)
 
 
 def _collect_sources(workspace) -> dict[str, str]:
@@ -386,6 +649,11 @@ def _collect_sources(workspace) -> dict[str, str]:
     except Exception as exc:
         # 静默会让"该源为空"与"解析失败"无法区分 → 溯源率假性下降查不出原因
         logger.warning("financials.json 解析失败，该源不参与溯源：%s", str(exc)[:150])
+    # 本次任务自己的底稿与已定位事实（见 `_workpaper_source_texts` 的准入条件）
+    try:
+        src.update(_workpaper_source_texts(ws))
+    except Exception as exc:                     # noqa: BLE001 - 通道异常不得拖垮验收
+        logger.warning("底稿/定位事实来源构建失败，该通道不参与溯源：%s", str(exc)[:150])
     return src
 
 
@@ -2115,20 +2383,30 @@ _MEDIA_TOKENS = ("新浪", "财经", "证券", "资讯", "新闻", "网", "社",
                  "年报", "公告", "季报", "披露", "统计")
 
 
-def _promotion_subject(text: str, *, lexical: bool = True) -> str:
+def _promotion_subject(text: str, *, lexical: bool = True, goal: str = "") -> str:
     """去重/冲突判定用的**主体键**（取不到返回空串 = 未知）。
 
     先用 `_subject_of`（公司后缀/代码）；它对**裸专名**（"宁德时代/比亚迪"）给不出
     公司（实测），于是再取开头的专名片段，并排除指标词与发布者词——跨公司同值必须
     被挡住（架构复核 P1），而"两侧都没写主体"的重复仍算同一读数。
+
+    `goal` 目前**不参与**判定：这里只保留参数位。见下方"已知误判"。
     """
     s = _subject_of(text)
     if s:
+        # 已知误判（2026-09-28 实测，未修）：`_subject_of` 对**中文散文**也会给出
+        # 6 字前缀——"需进一步取得利润表分项明细方可解释" → "需进一步取得"；
+        # 该键与真公司名（"洋河股份"）互不包含 → 判"主体冲突" → 本可溯源的数字被否。
+        # 同族：`_MEDIA_TOKENS` 里的单字（"报""网""社"）会让"洋河股份合并报表口径下的"
+        # 这类**含真公司名**的子句被整条丢掉。真机样本因此丢掉 56 处命中
+        # （底稿派生通道 25 / 已定位事实通道 14 / 快照 9 …）。
+        # 修它等于改**跨公司同值**这道护栏，必须单独一批做（带语料级回归），
+        # 本轮不动：现状偏"保守"（少数诚实命中被否），方向安全。
         return s
     if not lexical:
         return ""
-    m = re.match(r"\s*[（(【\[]?([一-鿿]{2,12}|[A-Za-z][A-Za-z0-9.\-]{1,15})",
-                 str(text or ""))
+    raw = str(text or "")
+    m = re.match(r"\s*[（(【\[]?([一-鿿]{2,12}|[A-Za-z][A-Za-z0-9.\-]{1,15})", raw)
     if not m:
         return ""
     tok = m.group(1)
@@ -2174,7 +2452,8 @@ def _subject_conflict_for(n: dict, report: str, goal: str, source_text: str,
     # 而架构复核明确要求不能靠收紧把真话否掉。子句提不出主体 → 视为未知 → 不冲突。
     # 报告侧主体：`_subject_of` 取不到时用词法键——"比亚迪2024年营业收入100亿元"
     # 这类裸专名必须能参与冲突判定，否则跨公司同值会被判成可溯源（架构复核 P1）。
-    report_subject = _promotion_subject(_clause_of(str(report or ""), pos, pos + len(raw)))
+    report_subject = _promotion_subject(_clause_of(str(report or ""), pos, pos + len(raw)),
+                                        goal=goal)
     if not report_subject:
         return False
     # 定位"包含这个数字的那一行"：候选串可能带空格/单位差异（"6000.0 亿元" vs
@@ -2220,6 +2499,9 @@ def check_number_traceability(
             "untraceable": [],
         }
     src_norm = {k: _norm(v) for k, v in sources.items() if v}
+    # 无单位大数的匹配必须**保留空白**：`_norm` 会把披露表里相邻两列数字粘成一个
+    # token（"139,076.05 166,154.73"），词边界判定随之全部失败（见 `_bare_norm`）。
+    src_bare = {k: _bare_norm(v) for k, v in sources.items() if v}
     # 主体抽取要用**未归一化**的原文：`_norm` 会去掉换行，行内的实体前缀就取不到了
     src_raw = {k: str(v) for k, v in sources.items() if v}
     clean_text = sources.get("clean_chart_data") or ""
@@ -2265,7 +2547,7 @@ def check_number_traceability(
                     hit = k
                     break
             else:
-                for k, st in src_norm.items():
+                for k, st in src_bare.items():
                     if not _bare_match(n["value"], st):
                         continue
                     if subject_check and _subject_conflict_for(
@@ -2288,11 +2570,19 @@ def check_number_traceability(
                 hit = "derived_computed"
         if hit:
             item["source"] = hit
-            item["derived"] = hit in ("derived_from_clean", "derived_computed")
+            item["derived"] = (hit in ("derived_from_clean", "derived_computed")
+                               or hit in _DERIVED_SOURCE_KEYS)
             if hit == "user_material":
                 # 与用户提供的材料一致：**是来源**，但真实性未经独立核实
                 item["user_provided"] = True
                 item["verified"] = False
+            if hit in _DERIVED_SOURCE_KEYS:
+                # 命中底稿派生行：数值与**本任务底稿**的派生事实一致，且该事实自带算式与
+                # 输入 fact_id（准入条件见 `_workpaper_source_texts`）。数值可复核，
+                # 但它是**自己算的**，不是外部来源引用——分开记，不冒充"引用"。
+                item["arithmetic_ok"] = True
+                item["verified"] = False
+                item["note"] = "与底稿派生事实一致（带算式与输入 fact_id）"
             if hit == "derived_computed":
                 # 派生值的四类结论**分开输出**（不得合并成"已验证"）：
                 # 数值可追溯 + 算术正确 已成立；指标/期间可能仍未绑定；外部核实继承用户输入。
@@ -2352,6 +2642,9 @@ def check_number_traceability(
     rate = traceable.__len__() / total
     covered_ratio = round(rate, 3)
     disclosed_rate = len(disclosed) / total
+    # 分母/支持**分别列账**：分母（total）只含内容数字；装配器自己写的定位串
+    # （字符区间/片段号/页码/信用代码）单列 metadata_count，不进分子也不进分母。
+    meta_nums = metadata_numbers(report)
     # 细分：财务金额（亿/万/元/美元单位）与 其他数字（%等）分开统计
     amounts = [n for n in nums if any(u in n["unit"] for u in ("亿", "万", "元", "美元"))]
     traceable_keys = {(t.get("value"), t.get("unit")) for t in traceable}
@@ -2376,7 +2669,11 @@ def check_number_traceability(
     else:
         passed = rate >= threshold or total < 3
     # B2 三档分类：引用值 / 计算值（算术可验证）/ 模型知识（已披露标注）
-    _computed = [t for t in traceable if t.get("source") == "derived_computed"]
+    # "计算"含三类：文内公式自证（derived_computed）、clean 数据派生（derived_from_clean）、
+    # **底稿派生行**（workpaper_derived，带算式与输入 fact_id）。三者都不是"引用外部来源"。
+    _computed = [t for t in traceable
+                 if t.get("source") in ("derived_computed", "derived_from_clean")
+                 or t.get("source") in _DERIVED_SOURCE_KEYS]
     _cited = [t for t in traceable if t not in _computed]
     # V1：用户材料单独计数（不再与"模型知识"混为一谈，也不算"不可溯源"）
     _user_input = [t for t in traceable if t.get("user_provided")]
@@ -2385,6 +2682,8 @@ def check_number_traceability(
         + f"数字溯源率 {rate:.0%}（{len(traceable)}/{total}）"
         + f"；引用 {len(_cited)} / 计算 {len(_computed)} / 模型知识 {len(disclosed)}"
         + f"；财务金额溯源率 {amount_rate:.0%}（{amount_ok}/{len(amounts)}）"
+        + (f"；定位元数据 {len(meta_nums)} 个不计入分母（字符区间/片段号/页码/信用代码）"
+           if meta_nums else "")
         + (f"；域={domain}" if domain else "")
         + (f"；结构化数据覆盖 {len(traceable)}/{total}" if "structured_data" in src_norm else "")
         + (f"；已披露（模型知识标注）{disclosed_rate:.0%}（{len(disclosed)}）" if disclosed else "")
@@ -2397,6 +2696,8 @@ def check_number_traceability(
         "domain": domain or "",
         "threshold": round(float(threshold), 3),
         "total_count": total,
+        "metadata_count": len(meta_nums),
+        "metadata_excluded": meta_nums[:10],
         "traceable_count": len(traceable),
         "covered_ratio": covered_ratio,
         "unverifiable_count": len(untraceable),
