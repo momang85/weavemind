@@ -533,6 +533,13 @@ class BaseWorker(ABC):
             "status": status,
             "result": result,
         }
+        # P1-c②：检索真值作为**兄弟字段**上行——`result` 仍是 JSON 数组（旧边界不动），
+        # 但"查询完成但零命中"与"根本没完成查询"从此跨层可分。
+        # 放兄弟字段而不是塞进 `result`：现有消费者按数组解析 `result`（4 处），
+        # 改形状会连带改掉它们，而这里只需要"说出来"。
+        _ss = getattr(self, "_search_status", None)
+        if isinstance(_ss, dict) and _ss.get("status"):
+            message["search_status"] = _ss
         # L01：结果回显身份上下文，否则上游只能看到派发 id，
         # 步骤/派发级归属（花了多少、属于哪一步）无从重建。
         ctx = getattr(self, "_current_ctx", None)
@@ -1032,6 +1039,39 @@ class SearchAgent(BaseWorker):
             return json.dumps(relaxed[:10], ensure_ascii=False, indent=2)
         return None
 
+    def _record_search_status(self, status: str, reason: str = "", *,
+                              retryable: bool = False, attempts: int = 0,
+                              queries=(), providers=(), elapsed: float = 0.0,
+                              outcome=None, refused_calls: int = 0) -> dict:
+        """把本次检索的**真值**记成结构化状态（P1-c②：状态跨层不丢）。
+
+        为什么必须结构化：`_execute_bounded` 的四条出口（提供方冷却 / 预算不可用 /
+        重试后仍空 / 真零命中）此前**都**返回 `json.dumps([])`，外层只看到"成功、空数组"，
+        再由编排器反复判失败——"查询完成但零命中"与"根本没完成查询"在跨层时不可分。
+        这里记的字段全部来自**真实执行**：
+
+        - `attempts`：`run_search` 记的**真实发出的提供方调用数**（不是 dispatch 次数，
+          也不是重试轮数——不凭四次 dispatch 推断四次外部请求）；
+        - `queries`：实际送出去的查询串（`outcome.queries_tried`）；
+        - `refused_calls`：因剩余时间低于可行下限而**没发出去**的请求数。
+
+        兼容：`execute()` 的返回值**仍是 JSON 数组**（旧边界不动），结构化状态作为
+        **兄弟字段**随 worker 结果消息一起上行（见 `_publish_result`）。
+        """
+        payload = {"status": str(status), "reason": str(reason or "")[:200],
+                   "retryable": bool(retryable), "attempts": int(attempts or 0),
+                   "queries": [str(q) for q in (queries or ()) if str(q or "").strip()],
+                   "providers": [str(p) for p in (providers or ())],
+                   "refused_calls": int(refused_calls or 0),
+                   "elapsed": round(float(elapsed or 0.0), 2)}
+        if outcome is not None:
+            try:
+                payload["outcome"] = outcome.as_dict()
+            except Exception:                    # noqa: BLE001 - 状态记录失败不改处置
+                pass
+        self._search_status = payload
+        return payload
+
     def _execute_bounded(self, instruction: str) -> str:
         """有界检索（S1）：一个预算、一条截止线、Bing 主 + 至多一个 ddgs 备后端。
 
@@ -1042,12 +1082,32 @@ class SearchAgent(BaseWorker):
         - 结果协议（status/attempts/elapsed/reason…）写进日志，对外仍是 JSON 数组（兼容层）。
         """
         from adapters.search_runner import run_search
+        import re as _re_retry
+        self._search_status = {}
+        # **明确停**（P1-c②）：编排器说"重试计划已用尽"时必须停下来，不得回退到契约
+        # 常规查询（上一批已证明打不出结果），更不得拿整段指令当查询。
+        # 位置在发请求之前：停就是真的停，不消耗额度、不出网。
+        _retry_lines = [q.strip() for q in
+                        _re_retry.findall(r"\[重试检索查询\]\s*(.+)", str(instruction or ""))]
+        try:
+            from execution_contract import NO_NEW_QUERY_MARK
+        except Exception:                        # noqa: BLE001
+            NO_NEW_QUERY_MARK = "[无新查询]"
+        if NO_NEW_QUERY_MARK in str(instruction or "") and not _retry_lines:
+            logger.warning("结构化重试计划已用尽：本次不发检索请求，也不回退契约查询")
+            self._record_search_status(
+                "stopped_no_new_queries",
+                "编排器已声明没有可用的新查询（结构化重试计划用尽）：不回退到上一批查询")
+            return json.dumps([])
         self._load_active_strategy()
         variants = self._query_variants(instruction) or [instruction[:120]]
         specs = self._provider_specs()
         if not specs:
             # 全部提供方都在冷却期：不发新请求（没有新条件就不重复同类尝试，专项 §5）
             logger.warning("all search providers cooling down; no request issued")
+            self._record_search_status(
+                "providers_cooling", "全部提供方都在冷却期：本次未发出任何检索请求",
+                retryable=True)
             return json.dumps([])
         # 任务级预算：**首次请求之前**原子预占次数并落下根起点（指令 §3.3）——
         # 预占失败即不发请求；剩余墙钟按根起点算，不由"首轮跑完的时刻"起算。
@@ -1058,6 +1118,10 @@ class SearchAgent(BaseWorker):
         if granted <= 0 or left_secs <= 0:
             logger.warning("任务级检索预算不可用（%s；额度 %d 次 / 剩余 %.0f 秒），本次不发请求",
                            why or "已用尽", granted, left_secs)
+            self._record_search_status(
+                "refused_budget",
+                f"任务级检索预算不可用：{why or '已用尽'}（额度 {granted} 次 / 剩余 {left_secs:.0f} 秒）",
+                queries=variants[:3])
             return json.dumps([])
         budget = self._search_budget(allowance=granted, wall_left=left_secs)
         max_results = max(1, int(self._strategy_max_sources))
@@ -1111,6 +1175,12 @@ class SearchAgent(BaseWorker):
 
         out = self._emit_payload(instruction, collected)
         if out:
+            self._record_search_status(
+                "ok", f"取得 {len(collected)} 条候选", attempts=outcome.attempts,
+                queries=outcome.queries_tried,
+                providers=[str(s.get("provider") or "") for s in specs],
+                elapsed=getattr(outcome, "elapsed", 0.0), outcome=outcome,
+                refused_calls=outcome.refused_calls)
             return self._finish_search(out, specs, collected, passes, budget)
         # 第二次尝试的**唯一**理由是"有还没打过的查询"。契约在时由契约生成结构化下一批
         # （主体/期间/文档类型/截止不变，只换资料面），并排除已打出去的 (提供方,后端,查询)
@@ -1130,6 +1200,14 @@ class SearchAgent(BaseWorker):
                         json.dumps(outcome2.as_dict(), ensure_ascii=False))
             out = self._emit_payload(instruction, collected)
             if out:
+                self._record_search_status(
+                    "ok", f"重试后取得 {len(collected)} 条候选",
+                    attempts=outcome.attempts + outcome2.attempts,
+                    queries=list(outcome.queries_tried) + list(outcome2.queries_tried),
+                    providers=[str(s.get("provider") or "") for s in specs],
+                    elapsed=getattr(outcome, "elapsed", 0.0) + getattr(outcome2, "elapsed", 0.0),
+                    outcome=outcome2,
+                    refused_calls=outcome.refused_calls + outcome2.refused_calls)
                 return self._finish_search(out, specs, collected, passes, budget)
         elif contract is None and outcome.retryable and not budget.expired():
             logger.warning("Search transient failure (%s); one bounded retry after %.0fs",
@@ -1145,11 +1223,33 @@ class SearchAgent(BaseWorker):
                             json.dumps(outcome2.as_dict(), ensure_ascii=False))
                 out = self._emit_payload(instruction, collected)
                 if out:
+                    self._record_search_status(
+                        "ok", f"重试后取得 {len(collected)} 条候选",
+                        attempts=outcome.attempts + outcome2.attempts,
+                        queries=list(outcome.queries_tried) + list(outcome2.queries_tried),
+                        providers=[str(s.get("provider") or "") for s in specs],
+                        outcome=outcome2,
+                        refused_calls=outcome.refused_calls + outcome2.refused_calls)
                     return self._finish_search(out, specs, collected, passes, budget)
         # 全部失败/无结果：诚实返回空列表（不再用 Mock 假数据）。
         # 空列表会被输出契约标记 → 编排器据此判定本步无可用来源（不再拖下游）。
+        # **但"空"不是一种状态**（P1-c②）：零命中（no_results，查询完成）与
+        # timeout/rate_limited/refused_calls（未完成）必须分开报，否则外层只能
+        # 把两者都读成"成功但没结果"，再由编排反复判失败。
         logger.warning("Search empty (%s); engine health: %s",
                        outcome.status, get_engine_health())
+        _st = str(outcome.status or "") or "no_results"
+        _head = ("查询完成但零命中" if _st == "no_results"
+                 else f"检索未完成：{_st}")
+        _final = self._record_search_status(
+            _st, _head + (f"；{outcome.reason}" if outcome.reason else ""),
+            retryable=bool(outcome.retryable),
+            attempts=outcome.attempts, queries=outcome.queries_tried,
+            providers=[str(s.get("provider") or "") for s in specs],
+            elapsed=getattr(outcome, "elapsed", 0.0), outcome=outcome,
+            refused_calls=outcome.refused_calls)
+        logger.info("search status payload: %s",
+                    json.dumps(_final, ensure_ascii=False))
         return self._finish_search(json.dumps([]), specs, collected, passes, budget)
 
     def _finish_search(self, payload, specs, collected, passes, budget):

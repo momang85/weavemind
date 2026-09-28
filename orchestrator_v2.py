@@ -3714,7 +3714,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         elif self._is_market_goal(goal):
             plan_text = "本次按下方行情定向查询执行；禁止原样重复上次查询。"
         else:
-            plan_text = ("本轮没有可用的新查询（结构化重试计划已用尽）："
+            # P1-c②：**明确停**要有机器可读的标记。此前只有这句中文说明，Worker 读不出来，
+            # 于是"自然回退"到上一批已证明打不出结果的契约查询上——换词的那一轮等于原地
+            # 重试。`NO_NEW_QUERY_MARK` 让 Worker 在**发请求之前**就停下来（不出网、不耗额度）。
+            from execution_contract import NO_NEW_QUERY_MARK
+            plan_text = (f"{NO_NEW_QUERY_MARK} 本轮没有可用的新查询（结构化重试计划已用尽）："
                          "不得原样重复上次查询，也不得换用契约外的主体/期间。")
         return (
             f"{base_instr}\n\n"
@@ -4570,13 +4574,24 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     logger.error("契约重建未生效，拒绝派发步骤 %s", step.get("step_id"))
                     return {"task_id": step.get("step_id", ""), "status": "FAILED",
                             "result": "契约重建未生效，未派发（不带着陈旧契约发出）"}
-                step = _fixed[0]
+                # 写回**调用方持有的那个 step 对象**（P1-c①：持久保存规范计划）。
+                # 此前只做 `step = _fixed[0]`（局部变量）——本次派发用的是重建后的指令，
+                # 但计划里那一份仍是旧的：`_publish_full_state` 推给页面的、checkpointer
+                # 落盘的、以及下一次派发读到的都是旧指令，于是**每次派发都要重建一遍**。
+                # 原地更新 = 计划对象（被推给前端/写进检查点/后续派发共用的那一份）从此
+                # 就是规范计划；派发路径与展示路径不会再各说一套。
+                try:
+                    step.clear()
+                    step.update(_fixed[0])
+                except Exception as exc:                 # noqa: BLE001 - 写回失败不阻断派发
+                    logger.warning("规范计划写回失败（step=%s）：%s",
+                                   _fixed[0].get("step_id"), str(exc)[:120])
                 instruction = step.get("instruction", instruction)
                 logger.warning("派发前按契约重建步骤 %s（指纹不一致）", step.get("step_id"))
                 push_progress(self._messaging, task_id, "log",
                               {"type": "info", "agent": capability,
                                "message": f"步骤 {step.get('step_id')} 契约指纹不一致，"
-                                          f"已按契约重建检索查询",
+                                          f"已按契约重建检索查询（并写回计划）",
                                "timestamp": self._now_iso()})
             contract_wire = step.get("contract") or _contract.to_wire()
             # 研究步骤的最后一道闸：查询行里出现契约外期间就不派发（宁停不脏发）
@@ -4855,6 +4870,15 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         return self._wait_step_result(
             task_id, timeout, cancel_task_id).result
 
+    # 检索**未完成**的状态（P1-c②）：这些不是"查询完成但零命中"，而是"根本没查成"。
+    # 与 `adapters.search_runner` 的类别表同源；`no_results` **不在**此列。
+    _SEARCH_INCOMPLETE = ("timeout", "rate_limited", "dns_error", "proxy_error",
+                          "parse_error", "challenge", "backend_down", "no_backend",
+                          "missing_dependency", "http_error")
+    # 我们**自己**没发请求的两种状态：不是提供方的错，不得按提供方故障处置。
+    _SEARCH_NOT_ATTEMPTED = ("refused_budget", "providers_cooling",
+                             "stopped_no_new_queries")
+
     def _normalize_result(self, result: dict) -> dict:
         """识别 Worker 返回中的显式失败标记，避免"假成功"污染结果。
 
@@ -4862,10 +4886,46 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         - 顶层 status 已是 FAILED/ERROR
         - 结果体是结构化 JSON 且 status 标记为 failed/error
           （data_loader / data_analyzer / model_trainer / report_generator 的错误返回）
+
+        P1-c②：检索步骤额外读 `search_status`（Worker 以**兄弟字段**上行），算出一份
+        `search_verdict` 说明"到底发生了什么"，避免把"空数组"一律读成"成功、零命中"：
+
+        - `completed`：查询是否真的跑完了（`no_results` 算跑完；timeout/rate_limited … 不算）；
+        - `zero_hits`：**完成且零命中**——只有这一种才该继续走"无来源"的正常分支；
+        - `attempted`：是否真的发出过请求（预算不可用 / 提供方冷却 / 计划用尽**没有**发）；
+        - `attempts`/`queries`：**真实**发出的调用数与查询串——不凭 dispatch 次数推断。
+
+        **不改顶层 status**：`refused_budget` / `providers_cooling` / `stopped_no_new_queries`
+        是我们自己没发请求，按提供方故障处置会误触发熔断与重规划；`timeout` 这类未完成
+        也不在这里直接改判——把真值**说出来**，由既有的重试/反思路径按原有规则处理。
         """
         status = str(result.get("status", "SUCCESS")).upper()
         if status in ("FAILED", "ERROR"):
             return result
+        _ss = result.get("search_status")
+        if isinstance(_ss, dict) and _ss.get("status"):
+            _st = str(_ss.get("status"))
+            _not_attempted = _st in self._SEARCH_NOT_ATTEMPTED
+            _completed = _st in ("ok", "no_results")
+            result["search_verdict"] = {
+                "status": _st,
+                "reason": str(_ss.get("reason") or "")[:200],
+                "completed": _completed,
+                "zero_hits": _st == "no_results",
+                "attempted": not _not_attempted,
+                "retryable": bool(_ss.get("retryable")),
+                # 真实调用数（不是 dispatch 次数）
+                "attempts": int(_ss.get("attempts") or 0),
+                "refused_calls": int(_ss.get("refused_calls") or 0),
+                "queries": list(_ss.get("queries") or [])[:6],
+            }
+            logger.info(
+                "检索真值（step=%s）：status=%s completed=%s zero_hits=%s attempted=%s "
+                "实际请求 %d 次（未发出 %d 次）%s",
+                result.get("task_id", "?"), _st, _completed, _st == "no_results",
+                not _not_attempted, int(_ss.get("attempts") or 0),
+                int(_ss.get("refused_calls") or 0),
+                f"｜{str(_ss.get('reason') or '')[:100]}" if _ss.get("reason") else "")
         payload = result.get("result")
         if isinstance(payload, dict):
             inner = str(payload.get("status", "")).lower()

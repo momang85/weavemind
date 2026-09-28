@@ -1042,6 +1042,159 @@ class TestTaskScopedSearchBudget(unittest.TestCase):
         self.assertEqual(json.loads(sa._execute_bounded("检索")), [])
         self.assertEqual(calls, [], "任务级预算用完不得再发检索请求")
 
+    # ── P1-c②：空数组不再是一种状态（跨层保真）─────────────────────────────
+
+    def test_zero_hits_and_incomplete_are_distinguishable_cross_layer(self):
+        """"查询完成但零命中"与"根本没查成"跨层必须可分。
+
+        修前四条出口**都**返回 `json.dumps([])`：外层只看到"成功、空数组"，
+        再由编排器反复判失败——原因在跨层时丢掉。现在结构化状态作为**兄弟字段**
+        随 worker 结果消息上行，`result` 仍是数组（旧边界不动）。
+        """
+        from adapters.search_runner import SearchOutcome
+        from types import SimpleNamespace as _NS
+
+        sa = self._sa()
+        sa._load_active_strategy = lambda: None
+        sa._query_variants = lambda instr: ["洋河股份 2024年年度报告"]
+        sa._provider_specs = lambda: [{"provider": "bing", "backend": "www.bing.com"}]
+        sa._search_ledger_limits = lambda: (6, 60.0)
+        sa._reserve_search_calls = lambda *a, **k: (6, 60.0, "")
+        sa._search_budget = lambda **k: _NS(
+            max_calls=6, used=0, expired=lambda: False, time_left=lambda: 60.0)
+        sa._finish_search = lambda payload, *a: payload
+        sa._mark_search_health = lambda *a: None
+        for status, retryable in (("no_results", False), ("timeout", True)):
+            with mock.patch("adapters.search_runner.run_search",
+                            return_value=SearchOutcome(status=status, items=[], attempts=2,
+                                                       retryable=retryable,
+                                                       reason=f"provider {status}",
+                                                       queries_tried=["q1", "q2"])):
+                sa._search_bing = lambda q, timeout=None: []
+                out = sa._execute_bounded("检索")
+        # 最后一次是 timeout：result 仍是数组（兼容边界），状态在兄弟字段里
+            self.assertEqual(json.loads(out), [], "旧边界仍是 JSON 数组")
+            st = sa._search_status
+            self.assertEqual(st["status"], status)
+            self.assertEqual(st["attempts"], 2, "attempts 是真实发出的调用数")
+            self.assertEqual(st["queries"], ["q1", "q2"], "实际查询要带出来")
+            self.assertEqual(st["retryable"], retryable)
+            if status == "no_results":
+                self.assertIn("零命中", st["reason"])
+            else:
+                self.assertIn("未完成", st["reason"])
+
+    def test_status_is_carried_as_sibling_field_on_the_result_message(self):
+        """上行消息里 `result` 保持数组、`search_status` 另开一个字段。"""
+        from types import SimpleNamespace as _NS
+
+        sa = self._sa()
+        sent: list = []
+
+        class _R:
+            def rpush(self, ch, body):
+                sent.append((ch, json.loads(body)))
+
+        sa._messaging = _NS(_redis=_R())
+        sa.agent_id = "search_agent"
+        sa._search_status = {"status": "no_results", "reason": "查询完成但零命中",
+                             "attempts": 3, "queries": ["q"], "retryable": False}
+        sa._publish_result("t-1", "SUCCESS", json.dumps([]))
+        self.assertTrue(sent, "必须真的发布出去")
+        msg = sent[-1][1]
+        self.assertEqual(msg["result"], "[]", "result 不得改形状（旧消费者按数组解析）")
+        self.assertEqual(msg["search_status"]["status"], "no_results")
+        self.assertEqual(msg["search_status"]["attempts"], 3)
+
+    def test_no_new_queries_marker_stops_before_any_request(self):
+        """编排器声明"重试计划已用尽"时：**不发请求、不耗额度**，也不回退契约查询。"""
+        from execution_contract import NO_NEW_QUERY_MARK
+
+        sa = self._sa()
+        calls = []
+        sa._load_active_strategy = lambda: None
+        sa._query_variants = lambda instr: ["洋河股份 2024年年度报告 全文"]
+        sa._provider_specs = lambda: [{"provider": "bing", "backend": "www.bing.com"}]
+        sa._search_bing = lambda q, timeout=None: calls.append(q) or []
+        instr = f"研究洋河股份（002304.SZ）\n{NO_NEW_QUERY_MARK} 本轮没有可用的新查询"
+        self.assertEqual(json.loads(sa._execute_bounded(instr)), [])
+        self.assertEqual(calls, [], "明确停必须发生在发请求之前")
+        self.assertEqual(sa._search_status["status"], "stopped_no_new_queries")
+        self.assertEqual(sa._search_status["attempts"], 0)
+
+    def test_no_new_queries_marker_does_not_block_a_real_retry_batch(self):
+        """反向护栏：真的有重试批次时，标记不得把这一批也停掉。"""
+        from execution_contract import NO_NEW_QUERY_MARK
+
+        sa = self._sa()
+        sa._load_active_strategy = lambda: None
+        sa._query_variants = lambda instr: ["洋河股份（002304.SZ） 2024年年度报告 全文"]
+        sa._provider_specs = lambda: [{"provider": "bing", "backend": "www.bing.com"}]
+        sa._search_ledger_limits = lambda: (6, 60.0)
+        sa._reserve_search_calls = lambda *a, **k: (6, 60.0, "")
+        sa._search_budget = lambda **k: SimpleNamespace(
+            max_calls=6, used=0, expired=lambda: False, time_left=lambda: 60.0)
+        sa._finish_search = lambda payload, *a: payload
+        sa._mark_search_health = lambda *a: None
+        sa._emit_payload = lambda instr, collected: json.dumps(
+            [{"title": "t", "url": "https://x/1"}])
+        from adapters.search_runner import SearchOutcome
+        from types import SimpleNamespace as _NS
+
+        sa = self._sa()
+        sa._load_active_strategy = lambda: None
+        sa._query_variants = lambda instr: ["洋河股份（002304.SZ） 2024年年度报告 全文"]
+        sa._provider_specs = lambda: [{"provider": "bing", "backend": "www.bing.com"}]
+        sa._search_ledger_limits = lambda: (6, 60.0)
+        sa._reserve_search_calls = lambda *a, **k: (6, 60.0, "")
+        sa._search_budget = lambda **k: _NS(
+            max_calls=6, used=0, expired=lambda: False, time_left=lambda: 60.0)
+        sa._finish_search = lambda payload, *a: payload
+        sa._mark_search_health = lambda *a: None
+        sa._emit_payload = lambda instr, collected: json.dumps(
+            [{"title": "t", "url": "https://x/1"}])
+        instr = (f"{NO_NEW_QUERY_MARK} 上一轮说明\n"
+                 "[重试检索查询] 洋河股份（002304.SZ） 2024年年度报告 全文")
+        with mock.patch("adapters.search_runner.run_search",
+                        return_value=SearchOutcome(
+                            status="ok", items=[{"url": "https://x/1"}],
+                            attempts=1, queries_tried=["q"])):
+            out = sa._execute_bounded(instr)
+        self.assertNotEqual(json.loads(out), [], "有重试批次时必须照常检索")
+        self.assertEqual(sa._search_status["status"], "ok")
+
+    def test_orchestrator_marks_verdict_without_forcing_failure(self):
+        """编排器把真值写成 `search_verdict`，但**不改顶层 status**。
+
+        为什么不直接改判 FAILED：`refused_budget`/`providers_cooling`/
+        `stopped_no_new_queries` 是**我们自己没发请求**，按提供方故障处置会误触发熔断与
+        重规划；`timeout` 这类未完成也不在这里改判——把真值说出来，由既有重试/反思路径
+        按原规则处理。测试同时锁住"不凭 dispatch 次数推断请求次数"。
+        """
+        from unittest import mock as _m
+        import orchestrator_v2 as ov
+
+        orch = ov.OrchestratorV2.__new__(ov.OrchestratorV2)
+        for st, want in (("no_results", (True, True, True)),
+                         ("timeout", (False, False, True)),
+                         ("refused_budget", (False, False, False)),
+                         ("providers_cooling", (False, False, False))):
+            r = orch._normalize_result({
+                "task_id": "s1", "status": "SUCCESS", "result": "[]",
+                "search_status": {"status": st, "reason": f"r-{st}", "attempts": 2,
+                                  "queries": ["q"], "retryable": st == "timeout",
+                                  "refused_calls": 1}})
+            v = r["search_verdict"]
+            self.assertEqual(r["status"], "SUCCESS", "顶层 status 不得被本函数改判")
+            self.assertEqual((v["completed"], v["zero_hits"], v["attempted"]), want,
+                             f"{st} 的判定不对：{v}")
+            self.assertEqual(v["attempts"], 2, "attempts 取真值，不由 dispatch 推断")
+            self.assertEqual(v["queries"], ["q"])
+        # 没有 search_status 的普通步骤：不得凭空造 verdict
+        plain = orch._normalize_result({"task_id": "s2", "status": "SUCCESS",
+                                        "result": "ok"})
+        self.assertNotIn("search_verdict", plain)
+
     def test_budget_capped_by_remainder(self):
         sa = self._sa()
         self._reserve(sa, 5)

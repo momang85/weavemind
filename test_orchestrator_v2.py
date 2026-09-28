@@ -1351,6 +1351,74 @@ class TestDispatchContractRetry(unittest.TestCase):
         self.assertIn("经营情况讨论与分析", instrs[1])
         self.assertIn("2024年年度报告", instrs[1])
 
+    def test_dispatch_rebuild_writes_the_canonical_plan_back(self):
+        """P1-c①：派发前的契约重建必须**写回调用方持有的那个 step 对象**。
+
+        此前只做 `step = _fixed[0]`（局部变量）：本次派发用的是重建后的指令，但计划里
+        那一份仍是旧的——`_publish_full_state` 推给页面的、checkpointer 落盘的、以及
+        下一次派发读到的都是旧指令，于是**每次派发都要重建一遍**。这里断言：
+        ① 传入的 step 对象被原地更新成规范计划；② 再派发同一个对象**不再重建**。
+        """
+        import orchestrator_v2 as ov2
+        from execution_contract import ExecutionContract
+
+        o = self._make_o()
+        contract = ExecutionContract(company="洋河股份", company_id="002304.SZ",
+                                     market="A股", periods=(2024,), as_of="2025-04-30")
+        o._task_contracts = {"t-wb": contract}
+        rebuilds = {"n": 0}
+        real_apply = ExecutionContract.apply_to_steps
+
+        def _counting_apply(self, steps):
+            rebuilds["n"] += 1
+            return real_apply(self, steps)
+
+        # 走**真实** `_dispatch`（重建闸门就在里面）；只把"发出去"之后的环节短路：
+        # 找不到 worker → 600s 冷启动窗口，用 sleep 打桩并让 _find_agent 返回 None。
+        o._find_agent = lambda cap: None
+        # 陈旧 wire：指纹不一致 → 走重建分支
+        step = {"step_id": "1", "capability": "web_search",
+                "instruction": "检索洋河股份年度报告", "timeout": 60,
+                "contract": {"version": 0, "fingerprint": "stale"}}
+        with mock.patch.object(ExecutionContract, "apply_to_steps", _counting_apply), \
+                mock.patch.object(ov2, "push_progress"), \
+                mock.patch.object(ov2.time, "sleep"):
+            o._dispatch(step, "t-wb")
+            self.assertEqual(rebuilds["n"], 1, "指纹不一致必须重建一次")
+            self.assertTrue(contract.matches(step.get("contract")),
+                            "**传入的那个 step 对象**必须被写回规范契约")
+            self.assertIn("[检索查询]", step["instruction"], "指令也要写回")
+            _after_first = step["instruction"]
+            # 第二次：同一个对象已经带着当前契约 → 不得再重建
+            o._dispatch(step, "t-wb")
+        self.assertEqual(rebuilds["n"], 1, "写回之后不得每次派发都重建")
+        self.assertEqual(step["instruction"], _after_first, "指令不得再变")
+
+    def test_search_retry_exhaustion_emits_explicit_stop_marker(self):
+        """P1-c②：重试计划用尽时，指令里要带**机器可读**的停止标记。
+
+        此前只有一句中文说明，Worker 读不出来，于是自然回退到上一批已证明打不出结果的
+        契约查询上——换词的那一轮等于原地重试。
+        """
+        from execution_contract import ExecutionContract, NO_NEW_QUERY_MARK
+
+        o = self._make_o()
+        c = ExecutionContract(company="洋河股份", company_id="002304.SZ", market="A股",
+                              periods=(2024,), as_of="2025-04-30")
+        o._task_contracts = {"t-stop": c}
+        step = {"step_id": "1", "capability": "web_search", "instruction": "检索", "timeout": 60}
+        # 把该契约**所有**重试查询都标记成"已打过" → 计划用尽
+        seen = set(c.queries()) | set(c.retry_queries(tried=set()))
+        out = o._search_retry_instruction(step, 2, "", "调研洋河股份 2024 年度报告",
+                                          seen, "t-stop")
+        self.assertIn(NO_NEW_QUERY_MARK, out, f"计划用尽必须带停止标记：{out[-160:]}")
+        self.assertNotIn("[重试检索查询]", out)
+        # 正向：还有新查询时不得带停止标记
+        out2 = o._search_retry_instruction(step, 1, "", "调研洋河股份 2024 年度报告",
+                                           set(c.queries()), "t-stop")
+        self.assertNotIn(NO_NEW_QUERY_MARK, out2)
+        self.assertIn("[重试检索查询]", out2)
+
     def test_search_retry_without_contract_says_no_plan(self):
         """没有契约就不假装有换词方案（也不许换契约外主体/期间）。"""
         import orchestrator_v2 as ov2
