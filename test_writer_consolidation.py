@@ -244,8 +244,51 @@ class TestSubmitHandshake(unittest.TestCase):
         payload = json.loads(fake.publish.call_args.args[1])
         self.assertEqual(payload["idempotency_key"], "k-ev")
         names = [e.get("event") for e in payload["submit_events"]]
-        self.assertEqual(names, ["received", "published"], names)
+        # P0-e：请求里只能带"发布**意图**"，真实 published 要等 r.publish 返回之后由
+        # web_ui 自己补记（否则发布失败时时间线会撒谎）。
+        self.assertEqual(names, ["received", "publish_intent"], names)
         self.assertTrue(all(e.get("ts") for e in payload["submit_events"]))
+
+    def _timeline_of_only_task(self) -> list:
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            rows = self._task_rows()
+            if not rows:
+                return []
+            return [e.get("event")
+                    for e in (task_state.read_submit_timeline(str(rows[0][0])) or [])]
+
+    def test_publish_failure_records_intent_but_not_published(self):
+        """P0-e：发布失败时时间线**只有 publish_intent**，不得出现 published。"""
+        import web_ui
+        fake = self._fake_redis("accepted")
+        fake.publish.side_effect = RuntimeError("redis down")
+        with mock.patch.object(web_ui, "_redis_ready", return_value=True), \
+                mock.patch.object(web_ui, "_new_redis", return_value=fake), \
+                mock.patch.object(web_ui, "DB_PATH", self.db), \
+                mock.patch.object(task_state, "DB_PATH", self.db):
+            with self.assertRaises(RuntimeError) as ctx:
+                web_ui._publish_task("目标", idempotency_key="k-pf")
+        self.assertIn("发布失败", str(ctx.exception))
+        tl = self._timeline_of_only_task()
+        self.assertIn("publish_intent", tl, f"失败也要留下意图痕迹：{tl}")
+        self.assertNotIn("published", tl, f"发布失败不得记『已发布成功』：{tl}")
+
+    def test_published_is_recorded_only_after_real_publish(self):
+        """P0-e：published 必须在 `r.publish` 返回**之后**落库，且排在意图之后。"""
+        import web_ui
+        fake = self._fake_redis("accepted")
+        with mock.patch.object(web_ui, "_redis_ready", return_value=True), \
+                mock.patch.object(web_ui, "_new_redis", return_value=fake), \
+                mock.patch.object(web_ui, "DB_PATH", self.db), \
+                mock.patch.object(task_state, "DB_PATH", self.db), \
+                mock.patch.dict("os.environ", {"WM_SUBMIT_ACK_TIMEOUT": "0.6"}):
+            web_ui._publish_task("目标", idempotency_key="k-ev2")
+        fake.publish.assert_called_once()
+        tl = self._timeline_of_only_task()
+        self.assertIn("publish_intent", tl, tl)
+        self.assertIn("published", tl, tl)
+        self.assertLess(tl.index("publish_intent"), tl.index("published"),
+                        f"意图必须排在真实发布之前：{tl}")
 
     def test_without_key_behaviour_unchanged(self):
         """没有幂等键时保持原样：不查库、不带键、每次都是新任务。"""

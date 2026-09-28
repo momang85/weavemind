@@ -8,6 +8,24 @@
 `docs/evidence/c4_samples_run_20260927.md` 那份"当前余额耗尽"已随用户充值**解除**（保留为历史，
 不再周期探测余额）。
 
+## P0-e 已交：时间线区分「发布意图」与「确实发布」（证据 `docs/evidence/p0e_timeline_stages_20260928.md`）
+
+- **缺陷**：`_publish_task` 在调用 `r.publish` **之前**就把 `published`（"已发布到
+  orchestrator:main"）写进收执——发布抛错或进程在两步之间死掉时，**时间线在撒谎**，
+  事后无法区分"没发出去"与"发出去了没被消费"。
+- **修复**：事件词表新增 **`publish_intent`**；落收执只带 `received` + `publish_intent`
+  （下发编排器的 `submit_events` 同）；`r.publish` 包 try/except——失败**不记 published**、
+  抛错（收执保留 RECEIVED 交给 P0-c 的恢复）；成功后才由 web_ui 补记真实 `published`。
+  对账口径变为四段可分：`publish_intent → published → consumed → started`。
+- **验证**：`test_writer_consolidation` **60 项 OK**（+2：失败时**有意图、无 published**；
+  成功时 `published` 必在 `publish_intent` **之后**）；既有用例的下发事件断言更新为
+  `["received","publish_intent"]`。
+- **回归**：`test_p0` **416 OK**、`test_delivery_chain` **373 OK**、`test_startup_readiness` **61 OK**。
+- **未验项**：未在真实 Redis 上制造发布失败观察时间线与恢复联动（失败路径为单测覆盖）；
+  时间线是"读-改-写"，web_ui 补记 `published` 与编排器写 `consumed` **理论上有丢更新窗口**
+  （本批未改并发写协议，如实记录）；编排器侧 `find_by_idempotency` 仍是**全局**比对；
+  未做跨进程并发验证；未跑付费整链。
+
 ## P0-d 已交：同作用域幂等键**原子**绑定唯一任务（证据 `docs/evidence/p0d_atomic_idempotency_20260928.md`）
 
 - **缺陷**：旧路径"先 `find_by_idempotency` 查、再 `mark_received` 插"是两步无互斥 →

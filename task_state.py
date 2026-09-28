@@ -165,8 +165,10 @@ def _add_missing_columns(con: sqlite3.Connection) -> list[str]:
 
 
 # 提交时间线：事件名 → 说明（读者/页面按同一套命名读，不再各处自造）
-SUBMIT_EVENTS = ("received", "persisted", "published", "consumed", "started",
-                 "deduplicated", "rejected")
+# P0-e：`publish_intent`（打算发布）与 `published`（**确实**发布成功）必须分开——
+# 旧实现把"已发布成功"在发布**之前**就写进时间线，发布失败时时间线在撒谎。
+SUBMIT_EVENTS = ("received", "persisted", "publish_intent", "published", "consumed",
+                 "started", "deduplicated", "rejected")
 _SUBMIT_TIMELINE_MAX = 40
 
 

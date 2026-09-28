@@ -2615,8 +2615,10 @@ def _publish_task(
     _events = [
         {"event": "received", "ts": received_at, "instance": _instance,
          "detail": "web_ui 收到提交请求"},
-        {"event": "published", "ts": time.time(), "instance": _instance,
-         "detail": "已发布到 orchestrator:main，等待收执"},
+        # P0-e：这里只能记**意图**。真正发布成功要等 r.publish 返回之后再记——
+        # 旧实现在发布之前就写"已发布成功"，发布失败时时间线在撒谎。
+        {"event": "publish_intent", "ts": time.time(), "instance": _instance,
+         "detail": "准备发布到 orchestrator:main"},
     ]
     # P0-d：查重与落收执走**同一个原子裁决**（`claim_receipt`）。
     # 旧实现是"先 find_by_idempotency 查一次、再 mark_received 落收执"两步——两个并发
@@ -2646,24 +2648,40 @@ def _publish_task(
             "同一幂等键的重复提交内容不一致（键被复用）；已拒绝，未派发")
     if _verdict != "created":
         raise RuntimeError("任务收执无法落库（任务库不可写）；未派发，请检查数据目录权限")
-    r.publish("orchestrator:main", json.dumps({
-        "task_id": tid,
-        "goal": goal,
-        "project": project,
-        "context": context,
-        "auto_run": auto_run,
-        "template_steps": template_steps,
-        "user_id": user_id,
-        "report_confirm": bool(report_confirm),
-        # 会话/父子关系随请求下发：编排器是唯一写库者，缺了这两项它无法落列
-        "conversation_id": conversation_id,
-        "parent_task_id": parent_task_id,
-        # 研究契约：**提交时**随请求下发并在登记时落库（底稿只读它，抓取元数据只作候选）
-        "research_request": dict(research_request or {}),
-        # C3/H3b：幂等键 + 提交时间线的前两段（收到/发布）随请求下发
-        "idempotency_key": idem,
-        "submit_events": _events,
-    }, ensure_ascii=False))
+    try:
+        r.publish("orchestrator:main", json.dumps({
+            "task_id": tid,
+            "goal": goal,
+            "project": project,
+            "context": context,
+            "auto_run": auto_run,
+            "template_steps": template_steps,
+            "user_id": user_id,
+            "report_confirm": bool(report_confirm),
+            # 会话/父子关系随请求下发：编排器是唯一写库者，缺了这两项它无法落列
+            "conversation_id": conversation_id,
+            "parent_task_id": parent_task_id,
+            # 研究契约：**提交时**随请求下发并在登记时落库（底稿只读它，抓取元数据只作候选）
+            "research_request": dict(research_request or {}),
+            # C3/H3b：幂等键 + 提交时间线的前两段（收到/发布意图）随请求下发
+            "idempotency_key": idem,
+            "submit_events": _events,
+        }, ensure_ascii=False))
+    except Exception as exc:                          # noqa: BLE001
+        # 发布失败：**不记 published**（时间线只留 publish_intent，如实反映"没发出去"）。
+        # 收执仍在库里（RECEIVED），启动/周期恢复会把它捡起来。
+        logging.getLogger("web_ui").error("任务 %s 发布失败（收执保留，等待恢复）：%s",
+                                          tid, str(exc)[:150])
+        raise RuntimeError(f"任务发布失败（收执已保留，将自动重试）：{str(exc)[:80]}") from exc
+    # P0-e：发布**确实成功之后**才记 published（与 publish_intent 分开对账）
+    try:
+        import task_state as _ts_pub
+        _ts_pub.record_submit_event(
+            tid, "published", instance=_instance,
+            detail="已发布到 orchestrator:main，等待收执")
+    except Exception as exc:                          # noqa: BLE001
+        logging.getLogger("web_ui").warning("published 事件落库失败（%s）：%s",
+                                            tid, str(exc)[:120])
     # 等待收执：编排器登记成功后写 task_ack:{tid} = accepted / accepted:dedup:<id>
     # / rejected:原因
     try:
