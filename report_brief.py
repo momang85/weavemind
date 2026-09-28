@@ -493,15 +493,31 @@ def _abridge(text: str, limit: int = 160) -> str:
 
     项3：年报段落整段贴出会挤占版面、重复数字，也掩掉结论。保留首句到句末，
     余下以『……（节选）』标明，出处定位仍在（要原文按 locator 取）。
+
+    C 批：**不得把数字截断在中间**。实测反例：`本期资本公积减少378,003.53` 被截成
+    `…减少378,003.…`，报告的"数字可信度"于是把 `378,003` 判成不可溯源——原文里明明有，
+    是摘录自己把它砍成了半个数。截断点若落在数字（含千分位/小数点）内部，退到该数字之前。
     """
     s = " ".join(str(text or "").split())
     if len(s) <= limit:
         return s
     cut = s[:limit]
-    idx = max(cut.rfind(c) for c in "。；;.")
+    # 句末候选：中文句号/分号恒算；半角句点**只有不在数字内部时**才算
+    # （`930,146,459.` 里那个点是小数点，不是句末——认了它就会把数截成半个）。
+    idxs = [cut.rfind(c) for c in "。；;"]
+    for _m in re.finditer(r"\.(?!\d)", cut):
+        _i = _m.start()
+        if _i > 0 and not cut[_i - 1].isdigit():
+            idxs.append(_i)
+    idx = max(idxs) if idxs else -1
     if idx >= limit // 2:
         return cut[: idx + 1] + "……（节选，原文见出处定位）"
-    return cut.rstrip() + "……（节选，原文见出处定位）"
+    cut = cut.rstrip()
+    # 退到数字边界：`…378,003` / `…378,0` / `…378,003.5` 一律退到数字开头
+    m = re.search(r"[\d][\d,\.]*$", cut)
+    if m:
+        cut = cut[: m.start()].rstrip()
+    return cut + "……（节选，原文见出处定位）"
 
 
 def _is_composition_table(text: str) -> bool:

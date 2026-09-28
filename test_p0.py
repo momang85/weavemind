@@ -3501,6 +3501,64 @@ class TestAcceptanceChecker(unittest.TestCase):
         self.assertTrue(_subjects_conflict(a, b))
         self.assertFalse(_subjects_conflict("洋河股份", "洋河股份合并报表口径下的营业收入"))
 
+    def test_section_title_prefix_is_not_a_subject(self):
+        """C 批反例：小节标题式前缀被当主体 → 本可复算的派生金额被判不可溯源。
+
+        实机：子句 `金额变化：归母净利润变化 -33.43亿元、毛利润变化 -38.01亿元…`
+        → 旧实现取到主体键 "金额变化" → 与事实主体"洋河股份"互不包含 → 33.43 被否，
+        而同一句里的 38.01/4.58 因切分恰好没取到前缀而通过（同句同族不同命）。
+        """
+        from acceptance_checker import _promotion_subject, _shares_entity
+
+        self.assertEqual(_promotion_subject("金额变化：归母净利润变化 -33.43亿元、毛利润变化"), "")
+        # 老实说"没写主体"才不否决；不得把散文片段当主体（那会大面积误拒）
+        self.assertEqual(_promotion_subject("**营业收入同比下降 12.83%（2024 年 288.76亿元）**"), "")
+        self.assertEqual(_promotion_subject("下表逐行覆盖全部必需指标与系统给出的派生指标"), "")
+        # 表格行不承载主体（主体在表头/上文）
+        self.assertEqual(_promotion_subject(
+            "| 分行业·酒类行业收入 | 32489436696.05元 | 合并 | [1] |"), "")
+        # 真主体照旧取到，"金额变化：" 后面跟公司名时护栏仍然生效
+        self.assertEqual(_promotion_subject("洋河股份 营业收入 288.76亿元"), "洋河股份")
+        self.assertTrue(_shares_entity("宁德时代", "宁德时代2024年营业收入100亿元"))
+
+    def test_derived_amount_in_a_section_title_clause_is_traceable(self):
+        """同一条派生事实在"小节标题式子句"里也要能对上（33.43 的形状）。"""
+        from acceptance_checker import _match_derived_fact
+
+        fact = {"value": -33.42999999999999, "unit": "亿元", "subject": "洋河股份",
+                "formula": "66.73 - 100.16",
+                "inputs": ["fact-addeafbdbc0161b2", "fact-70eca7c472298ee3"]}
+        clause = ("归母净利润同比下降 33.38%（2024 年 66.73亿元）；"
+                  "金额变化：归母净利润变化 -33.43亿元、毛利润变化 -38.01亿元")
+        report = "前言。" + clause
+        pos = report.index("33.43亿元")
+        n = {"raw": "33.43亿元", "value": "33.43", "unit": "亿元", "pos": pos}
+        self.assertEqual(
+            _match_derived_fact(n, report, [fact],
+                                goal="研究洋河股份 2023 与 2024 年的营业收入"), "workpaper_derived")
+        # 跨公司子句照旧不得借用
+        other = "前言。宁德时代2024年营业收入增长 -33.43亿元"
+        n2 = {"raw": "33.43亿元", "value": "33.43", "unit": "亿元",
+              "pos": other.index("33.43亿元")}
+        self.assertIsNone(_match_derived_fact(n2, other, [fact],
+                                              goal="研究洋河股份 2023 与 2024 年的营业收入"))
+
+    def test_abridged_quote_never_cuts_a_number_in_half(self):
+        """C 批反例：摘录把 `378,003.53` 截成 `378,003.…` → 报告里的数字被判不可溯源。"""
+        import re as _re
+        import report_brief as rb
+
+        text = ("单位：元 项目 期初余额 本期增加 本期减少 期末余额 资本溢价 "
+                "930,494,463.31 378,003.53 930,116,459.78 其他资本公积 30,000.00 "
+                "30,000.00 合计 930,524,463.31 378,003.53 930,146,459.78 "
+                "其他说明，包括本期增减变动情况、变动原因说明：本期资本公积减少378,003.53")
+        out = rb._abridge(text, limit=160)
+        self.assertIn("……（节选，原文见出处定位）", out)
+        self.assertFalse(_re.search(r"\d[\d,]*\.…", out), f"数字被截断：{out[-40:]!r}")
+        # 正常散文仍在句末切开
+        prose = rb._abridge("第一句结束。第二句很长" + "字" * 200, limit=40)
+        self.assertTrue(prose.startswith("第一句结束。"), prose)
+
     def test_acceptance_gap_report(self):
         """缺口报告结构：checks/gaps/overall。"""
         import tempfile

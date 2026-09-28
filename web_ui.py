@@ -6386,10 +6386,21 @@ def _post_task_candidate_adopt(self, p, body, admin):
         assemble = assemble_and_verify(
             tid, str(row.get("goal") or ""), str(getattr(cand, "body", "") or ""),
             accept_fn=(lambda t, g, b: verdict or None) if verdict else None,
-            ws_dir=ws, contract=_ctr) or {}
+            ws_dir=ws, contract=_ctr,
+            # 采纳的这一版**就是**交付正文：不再按工作区重装配（那会把它换成另一份字节，
+            # 交付登记随之与采纳身份对不上 → 导出 409）。
+            assemble_body_as_is=True) or {}
     except Exception as exc:                     # noqa: BLE001 - 投影失败如实报，不假成功
         logger.warning("候选采纳后交付投影装配失败（task=%s）：%s", tid, str(exc)[:160])
         assemble = {"status": "assemble_failed", "reason": str(exc)[:160]}
+    # 采纳后的**权威版本态**：先读出来，后面的重验判定与交付投影都以它为准。
+    # （09-28：投影块此前写在这行之前 → `after` 未定义 → NameError 被 except 吞掉，
+    # 投影一次都没写成，导出因此一直判"交付正文与采纳版本不一致"。）
+    try:
+        store2 = VersionStore(ws, tid)
+        after = _version_public(store2.adopted())
+    except Exception:                            # noqa: BLE001
+        after = cand_pub
     try:
         from task_state import update_delivery_projection
         _acc = {
@@ -6400,11 +6411,16 @@ def _post_task_candidate_adopt(self, p, body, admin):
             "report_sha256": str((after.get("acceptance") or {}).get("report_sha256") or ""),
             "version_bound": bool(after.get("acceptance_for_this_body")),
         }
-        update_delivery_projection(
+        _projected = update_delivery_projection(
             tid, report=str(assemble.get("report") or ""), acceptance=_acc,
-            status="")
-    except Exception as exc:                     # noqa: BLE001
-        logger.info("候选采纳后交付投影写入失败（task=%s）：%s", tid, str(exc)[:140])
+            status="",
+            # 失败任务上采纳候选后，交付正文确实换了：允许写正文/验收（**不写状态**）。
+            allow_terminal=True)
+        if not _projected:
+            logger.warning("候选采纳后交付投影未写入（task=%s）：正文与采纳版本可能不一致",
+                           tid)
+    except Exception as exc:                     # noqa: BLE001 - 如实报，不假成功
+        logger.warning("候选采纳后交付投影写入失败（task=%s）：%s", tid, str(exc)[:160])
     hr_after = ""
     try:
         hr_after = hashlib.sha256(hr_path.read_bytes()).hexdigest() if hr_path.is_file() else ""
@@ -6416,11 +6432,6 @@ def _post_task_candidate_adopt(self, p, body, admin):
         delivery = delivery_state(tid, str(getattr(cand, "body", "") or ""), ws_dir=ws) or {}
     except Exception:                            # noqa: BLE001
         delivery = {}
-    try:
-        store2 = VersionStore(ws, tid)
-        after = _version_public(store2.adopted())
-    except Exception:                            # noqa: BLE001
-        after = cand_pub
     audit_log(me, self._client_ip(), "task.candidate.adopt", target=tid, result="ok",
               detail=f"{ident[:16]} -> {cand_pub.get('version_id', '')[:12]}")
     # 重验是否**落在刚采纳的那个身份上**：不以"跑了验收"为准，以绑定结果为准。

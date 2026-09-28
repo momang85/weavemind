@@ -1530,7 +1530,8 @@ def assemble_and_verify(task_id: str, goal: str, body: str, *,
                         accept_fn=None, extra_notes=(),
                         paper: dict | None = None,
                         review_facts: dict | None = None, ws_dir=None,
-                        contract: dict | None = None) -> dict:
+                        contract: dict | None = None,
+                        assemble_body_as_is: bool = False) -> dict:
     """按固定顺序装配交付正文、判定状态并记录交付 hash。
 
     顺序（编排器收尾与 web_ui 修订必须逐字节一致）：
@@ -1543,6 +1544,13 @@ def assemble_and_verify(task_id: str, goal: str, body: str, *,
 
     `contract`：执行契约（wire 或 `{"wire": ...}`）——研究状态按它的必答问题逐项裁决，
     并把契约指纹写进状态的绑定对象（C-5）。
+
+    `assemble_body_as_is`：**认这份正文就是交付正文，不再按工作区重装配一遍**。
+    默认 False（编排器收尾/人工修订沿用旧行为：先代码装配简报再判状态）。候选采纳走 True：
+    候选本来就是装配器（`build_structure`+`render_brief_markdown`）的产物，再来一次会把它
+    重写成另一份字节（实测：采纳版 13309 字 vs 重装配 8038 字），于是
+    `record_delivery(accepted_body=…)` 记的不是采纳版 → 导出守卫判"version changed"，
+    用户会看到"采纳了却导不出来"。
     """
     store = VersionStore(_ws(task_id, ws_dir), task_id)
     # F1：研究任务改用**代码装配的研究简报**作为交付正文（关键发现/财务对照/图表/
@@ -1551,7 +1559,8 @@ def assemble_and_verify(task_id: str, goal: str, body: str, *,
     brief_note = ""
     try:
         import report_brief
-        if report_brief.is_research_task(task_id, goal, ws_dir=ws_dir):
+        if (not assemble_body_as_is) and report_brief.is_research_task(
+                task_id, goal, ws_dir=ws_dir):
             structure = report_brief.build_structure(
                 task_id, goal, body, project=project, ws_dir=ws_dir)
             if structure:
