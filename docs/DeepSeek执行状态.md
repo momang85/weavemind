@@ -1,4 +1,4 @@
-# DeepSeek 执行状态（2026-09-28 更新 · P0 全部交、P1 五项已交 · C3 只算部分 · C4 未过）
+# DeepSeek 执行状态（2026-09-28 更新 · P0 全部交、P1 七项已交 · C3 只算部分 · C4 未过）
 
 **当前批次**：`docs/DSH真实样本复核与下一批执行_20260928.md`（基线 `65a6b62`），
 先 P0（重复执行与恢复断点）→ P1（计算与溯源）→ P1（检索协议）→ P1（补材料闭环与 actionable）。
@@ -8,7 +8,7 @@
 `docs/evidence/c4_samples_run_20260927.md` 那份"当前余额耗尽"已随用户充值**解除**（保留为历史，
 不再周期探测余额）。
 
-## P1 本轮已交（5 项，各自带证据文档；全部离线复算，未跑付费整链）
+## P1 本轮已交（7 项，各自带证据文档；全部离线复算，未跑付费整链）
 
 | 项 | 提交 | 一句话 | 证据 |
 |---|---|---|---|
@@ -19,6 +19,7 @@
 | **P1-e** 取件拒收分因 | `a0780e3` | HTTP 状态 / Content-Type / `not_pdf` / 截断 / 损坏 / 真扫描件各自可辨；只有真扫描件才建议 OCR；字节通道二进制往返、SSRF 拦下零请求、代理失败不降级直连 | `p1e_pdf_reject_taxonomy_20260928.md` |
 | **P1-c①** 契约重建吞查询 | `3a84b3c` | 反例逐字复现（4 条重试查询 → 0 条）后修复：契约内保留、契约外拒绝；重建幂等 | `p1c1_contract_rebuild_queries_20260928.md` |
 | **P1-c③** 块间查时钟 ≠ 中断阻塞 | `69ddc04` | 单次 read 用光预算并返回 EOF 时不再当"读完"；剩余时间落到 socket；EOF 越界即超时 | `p1c3_read_deadline_20260928.md` |
+| **P1-c②** 状态跨层丢失 | `764ce20` | `[]` 不再是一种状态：四条出口各记真值（`attempts` 是**真实发出的调用数**）；`search_status` 作 `result` 的**兄弟字段**上行，编排器算 `search_verdict{completed, zero_hits, attempted}`；`[无新查询]` 让 Worker 在**发请求之前**停（不回退契约查询）；`_dispatch` 的重建结果**原地写回**计划对象 | `p1c2_cross_layer_status_20260928.md` |
 
 > **P1-c③ 是补交**：它的实现与 4 条用例被分开在两处——用例随 `3a84b3c` 入库而实现留在工作区，
 > 那一版 HEAD 上的 `test_search_quality_unified` **会红**。发现后立即补交（`69ddc04`），
@@ -27,36 +28,79 @@
 **P1-b 的行为口径变化（明说）**：未改任何阈值/门禁参数，但归因倒置的结论现在会进
 `unsupported`（原来可能 `partially_supported`），因此**可能**让某份交付从"就绪"变"草稿"。
 
+**P1-c② 的口径边界（明说）**：`_normalize_result` **刻意不改顶层 status**——
+`refused_budget`/`providers_cooling`/`stopped_no_new_queries` 是**我们自己没发请求**，
+按提供方故障处置会误触发熔断与重规划；`timeout` 这类也不在那里改判，只把真值说出来。
+
 **回归**：本轮各批合计 `test_delivery_chain` / `test_offline_delivery` / `test_p0` /
 `test_root_budget` / `test_startup_readiness` / `test_search_quality_unified` /
 `test_orchestrator_v2` / `test_net_policy` / `test_narrative_evidence` /
 `test_question_assessment` / `test_acceptance_adversarial` / `test_financial_chain` /
 `test_fact_fidelity` / `test_report_quality` / `test_us_chain` / `test_facts` /
 `test_review_edit_api` / `test_task_projection` / `test_writer_consolidation` 全绿
-（单批最多 974 项一次跑完 OK）。
+（单批最多 **1164 项**一次跑完 OK，1 skipped）。
+
+## P1-d 剩下的一半：按新材料生成**候选正文**入口 —— 已定位到接线点（**未实现**）
+
+这一项**没有开始写代码**，但把"接在哪、缺什么"查清了，下一次不必重新摸索。
+
+**现状**：补材料链已经通到证据，且**刻意停在正文之前**——
+`orchestrator_v2.handle_add_material()`（`orchestrator_v2.py:8165`）在最后一行的原话是：
+
+```python
+_say(f"补材料：证据已重建（可定位 {loc} 条）；正文需按新材料重生成时另行授权")
+```
+
+**这就是那条"另行授权"的接缝**。配套事实（都已核实）：
+
+- 材料入口 `POST /api/task/<id>/material`（`web_ui._post_task_material`，web_ui.py:5711）
+  只做鉴权/归属/体检/存原件，随后投递给编排器；`GET /api/task/<id>/materials` 给清单。
+- "只重做确定性部分"已实现（`material_intake.refresh`）：证据/结构/底稿会重建，
+  **正文不会**——因为正文要模型重生成，属付费动作。
+- "新候选需显式采纳、旧批准不继承"**已有地基**：`report_version.VersionStore.record()`
+  建版本、`adopt()` 才置为采用版；`report_version` 已有 `identity_id`/`adopted()`/
+  `selected_needs_reverify()`，采纳是**显式动作**，旧版 PASS 不会自动迁移到新版本
+  （`test_review_edit_api.test_old_review_pass_does_not_migrate_to_the_new_version` 已锁）。
+- 幂等/恢复的前置条件（§5 说的"第一批幂等/恢复修完后接线"）**已满足**：P0-a~P0-f 全交。
+
+**要实现的东西（6 条，逐条可测）**：
+
+1. `OrchestratorV2.handle_regenerate_candidate(data)`：要求"确有新材料已并入"
+   （读 `material_intake` 的 refresh 记录），否则 `{ok: false, status: "no_new_material"}`；
+2. 返回**影响步骤**（只列依赖新材料的那些：`report_generator`／最终正文步骤）、
+   材料 id、**契约版本与指纹**、`budget_snapshot` 与"本次是否获准付费生成"；
+3. **同一次动作只生成一个候选**：以 (材料指纹, 契约指纹, 证据身份) 为幂等键，
+   重复调用返回同一个候选，不新建第二个；
+4. **只重做依赖步骤**，旧工件与**人工文字**保留（人工修订版在 VersionStore 里是独立版本，
+   不得被候选覆盖）；
+5. 候选写进 `VersionStore` 但**不 adopt**，返回
+   `{requires_explicit_adoption: true, adopted: false, old_approval_inherited: false}`；
+6. HTTP 入口（`POST /api/task/<id>/candidate`）+ 页面按钮。
+   **按指令本轮不新增付费生成**：默认走"冻结输出/provider 替身"的确定性装配，
+   真正调用模型需显式授权参数且本轮不接线。
+
+**本批停在这里的理由**：它要动正文装配 + 版本 + HTTP 三层，且 6 条各需自己的用例
+（含"UI→执行处理器"贯穿）；半做会留下一个"看起来有入口、实际会烧额度或覆盖人工文字"的
+功能，比不做更糟。**没有写任何 stub 代码**，以免下次误以为已接线。
 
 ## P1 尚未做完（逐条给出处与"为什么没半做"）
 
-1. **P1-c② 状态跨层丢失**（§4 第二条）**未做**。现状：`worker_base.SearchAgent.execute`
-   **就是** `_execute_bounded`（`worker_base.py:1352`），返回值直接进 `result["result"]`；
-   四条出口（提供方冷却 / 预算不可用 / 无结果 / 重试后仍空）都返回 `json.dumps([])`——
-   **"完成但零命中"与"根本没完成查询"在跨层时不可分**，外层记 SUCCESS 再由编排反复判失败。
-   要求：结构化 `status/reason/retryable/attempts` + 实际查询，**兼容数组只留在旧边界**，
-   且 `attempts` 必须是**真实发出的调用数**（不是 dispatch 次数）。
-   **未半做的理由**：它同时决定 P1-c① 的"无新查询时明确停"——`_execute_bounded:1046` 的
-   `_query_variants(...) or [instruction[:120]]` 让"返回空"退化成"拿整段指令当查询"，
-   比回退原查询更差；两件必须一起改，否则"停"只能写进日志、外层照记 SUCCESS。
-2. **P1-c① 的"持久保存规范计划"未做**：`orchestrator_v2._dispatch:4573` 是
-   `step = _fixed[0]`——重建结果只落**局部派发载荷**，没写回计划/状态。
-   要动计划持久化路径，并配"重启后读回的指令与派发时一致"的回归。
+1. ~~**P1-c② 状态跨层丢失**~~ —— **已交（`764ce20`）**。未覆盖的部分见证据文档：
+   `result` 的形状**没有**改成结构化对象（严格读法是"内层结构化、边界转数组"；本批是
+   "数组照旧 + 兄弟字段"，因为 4 处消费者按数组解析）；未新增"实际停止/清理时间分账"字段；
+   未做"重启后把检查点里的指令读回来与派发时逐字比对"的恢复演练。
+2. ~~**P1-c① 的"持久保存规范计划"**~~ —— **已交（`764ce20`）**：`_dispatch` 的重建结果
+   改为**原地写回调用方持有的那个 step 对象**（它正是 `_publish_full_state` 推给页面、
+   `all_steps` 里被持久化的那一份）；用例走**真实** `_dispatch`，断言第二次不再重建。
+   **仍未做**："重启后把检查点里的指令读回来与派发时逐字比对"的**恢复演练**（需要一次
+   真实恢复，本批只做到"写回计划对象"这一步）。
 3. **P1-c① 的待裁决口径**：`conflicting_periods` 允许 `as_of` 年份（既有语义），
    故"洋河股份 … 2025年年度报告 全文"按契约自己的定义算"契约内"。本轮与 `violations()`
    同一把尺，**没有**另立更严口径。若认为重试批次应只允许 `periods` 内年份，请裁决。
 4. **P1-d 的另一半"补材料后按新材料生成候选正文入口"未做**（§5 第二条）：
-   只修了 `/actionable` 的根因（NameError）。候选正文入口需要"展示材料/契约版本、
-   影响步骤、现有预算与授权；同一次动作只生成一个候选；旧工件与人工文字保留；
-   新候选需显式采纳、旧批准不继承"——按指令**先用冻结输出/provider 替身贯穿 UI 到
-   执行处理器**，不新增付费生成。
+   只修了 `/actionable` 的根因（NameError）。**接线点与 6 条要求见上文专节**——
+   接缝就是 `handle_add_material` 最后那句"正文需按新材料重生成时另行授权"。
+   **没有写任何 stub 代码**。
 5. **`_promotion_subject` 误判（P1-a 残留 19 处的成因）未修**：实测
    `_subject_of("需进一步取得利润表分项明细方可解释")` → `"需进一步取得"`，
    `_MEDIA_TOKENS` 含单字"报"会把"洋河股份合并报表口径下的…"整条丢掉；因此丢掉 56 处命中。
