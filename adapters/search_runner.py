@@ -155,21 +155,70 @@ def provider_min_wait(provider: str, declared=None) -> float:
                float(PROVIDER_MIN_WAIT.get(str(provider), MIN_VIABLE_CALL_SECONDS)))
 
 
-def read_with_deadline(resp, deadline: float, chunk: int = 65536) -> bytes:
-    """按块读取响应，并在**块间**检查同一个墙钟截止；到点即停止读取。
+def _bound_single_read(resp, seconds: float) -> bool:
+    """把**剩余时间**落到响应自己的 socket 上，让**单次** `read()` 也在预算内。
+
+    `read_with_deadline` 原来只在**块间**查时钟——而"块间有空档"这个前提不总成立：
+    一次 `read()` 本身就可能把预算用光（连接卡住、慢速连续字节、服务端迟迟不发）。
+    传剩余时间只是**必要条件**（真正可终止要有可中断的边界）：能设就设，设不了
+    如实返回 False，由调用方按"这个提供方在这条路径上不可终止"处置。
+
+    尽力而为的路径链：`resp.fp.raw._sock` → `resp.fp.raw` → `resp.fp` → `resp`。
+    """
+    seconds = max(float(seconds), 1e-3)          # 0 表示非阻塞，会把正常读变成空转
+    for attrs in (("fp", "raw", "_sock"), ("fp", "raw"), ("fp",), ()):
+        obj = resp
+        for a in attrs:
+            obj = getattr(obj, a, None)
+            if obj is None:
+                break
+        if obj is None:
+            continue
+        fn = getattr(obj, "settimeout", None)
+        if not callable(fn):
+            continue
+        try:
+            fn(seconds)
+            return True
+        except Exception:                        # noqa: BLE001 - 换下一条路径
+            continue
+    return False
+
+
+def read_with_deadline(resp, deadline: float, chunk: int = 65536,
+                       *, clock=time.monotonic) -> bytes:
+    """按块读取响应，并在**块间**与**块内**都守住同一个墙钟截止；到点即停止读取。
 
     socket timeout 只管单次操作，慢速分块响应可以每块都小于 timeout、整体却远超截止
     （"慢读取"反例）。这里给出真正的总墙钟边界，不新起线程：到点抛 `TimeoutError`，
     由调用方按超时如实记账，不再继续读。
+
+    **块内**也要守（2026-09-28 反例）：只在块间查时钟时，若**第一次** `read()` 本身就把
+    预算用光（实测：预算 0.02 秒、单次 read 耗 0.12 秒）并恰好返回 EOF，循环会直接
+    `break` 并把空正文当**成功**返回——"到点停"变成"返回后才说停"。因此：
+
+    - 每次读之前把**剩余时间**设到响应自己的 socket 上（单次读的硬边界，尽力而为）；
+    - 每次读**之后**再查一次时钟：超了就抛 `TimeoutError`，
+      **EOF 也不例外**（EOF 越界不是"读完了"，是"没读完就到点了"）。
     """
     buf: list[bytes] = []
     while True:
-        if time.monotonic() >= deadline:
+        remain = float(deadline) - clock()
+        if remain <= 0:
             raise TimeoutError("read deadline exceeded (slow response body)")
+        _bound_single_read(resp, remain)
         block = resp.read(chunk)
+        over = clock() >= float(deadline)
         if not block:
+            if over:
+                # EOF **越界**：不能当成"正常读完"
+                raise TimeoutError("read deadline exceeded at EOF "
+                                   "(body ended after the deadline)")
             break
         buf.append(block)
+        if over:
+            # 已经读过截止还拿到了数据：正文不完整，不得当成功返回
+            raise TimeoutError("read deadline exceeded (slow response body)")
     return b"".join(buf)
 
 
