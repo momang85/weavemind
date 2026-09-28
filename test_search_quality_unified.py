@@ -674,6 +674,105 @@ class TestBoundedSearchRunner(unittest.TestCase):
             self.sr.read_with_deadline(resp, time.monotonic() + 0.12)
         self.assertLess(resp.reads, 6, f"到点后必须停止读取，实际读了 {resp.reads} 次")
 
+    def test_single_read_overrunning_the_deadline_is_not_reported_as_success(self):
+        """块内反例（2026-09-28 复核 §4③）：**一次 read 就用光预算**不得算成功。
+
+        实测反例：预算 0.02 秒、单次 read 耗 0.12 秒、返回 EOF —— 旧实现只在块间查时钟，
+        循环直接 break 并把**空正文**当成功返回，"到点停"变成"返回后才说停"。
+        EOF 越界不是"读完了"，是"没读完就到点了"。
+        """
+
+        class _OneSlowEof:
+            def __init__(self, delay, body=b""):
+                self.delay = delay
+                self.body = body
+                self.reads = 0
+
+            def read(self, n):
+                self.reads += 1
+                if self.reads > 1:
+                    return b""
+                time.sleep(self.delay)
+                return self.body
+
+        # ① 单次 read 超时且返回 EOF：必须抛，不得把空正文当"正常读完"
+        resp = _OneSlowEof(0.12)
+        with self.assertRaises(TimeoutError) as cm:
+            self.sr.read_with_deadline(resp, time.monotonic() + 0.02)
+        self.assertIn("EOF", str(cm.exception))
+        self.assertEqual(resp.reads, 1, "到点后不得再发起第二次读")
+
+        # ② 单次 read 超时且**返回了数据**：正文不完整，同样不得当成功返回
+        resp2 = _OneSlowEof(0.12, b"partial-body")
+        with self.assertRaises(TimeoutError):
+            self.sr.read_with_deadline(resp2, time.monotonic() + 0.02)
+
+        # ③ 正向：预算充足时正常读完（含 EOF）不受影响
+        class _FastResp:
+            def __init__(self):
+                self.chunks = [b"abc", b"def", b""]
+
+            def read(self, n):
+                return self.chunks.pop(0)
+
+        self.assertEqual(self.sr.read_with_deadline(_FastResp(), time.monotonic() + 5.0),
+                         b"abcdef")
+
+    def test_remaining_time_is_applied_to_the_single_read(self):
+        """单次读必须有**自己的**边界：剩余时间要落到响应自己的 socket 上。
+
+        只传剩余时间给调用方是不够的（"传剩余时间只是必要条件"）——这里断言剩余时间
+        确实被设到了 socket 上，且超短预算下不会把 timeout 设成 0（0 = 非阻塞空转）。
+        """
+        class _Sock:
+            def __init__(self):
+                self.timeouts = []
+
+            def settimeout(self, v):
+                self.timeouts.append(v)
+
+        class _Raw:
+            def __init__(self, sock):
+                self._sock = sock
+
+        class _Fp:
+            def __init__(self, raw):
+                self.raw = raw
+
+        class _Resp:
+            def __init__(self, sock):
+                self.fp = _Fp(_Raw(sock))
+                self._done = False
+
+            def read(self, n):
+                if self._done:
+                    return b""
+                self._done = True
+                return b"body"
+
+        sock = _Sock()
+        self.assertEqual(self.sr.read_with_deadline(_Resp(sock), time.monotonic() + 3.0),
+                         b"body")
+        self.assertTrue(sock.timeouts, "剩余时间必须设到 socket 上")
+        self.assertGreater(sock.timeouts[0], 0, "不得把 timeout 设成 0（非阻塞）")
+        self.assertLessEqual(sock.timeouts[0], 3.0)
+
+    def test_unboundable_response_is_still_stopped_at_the_deadline(self):
+        """响应对象没有可设超时的 socket 时：块间/块内时钟检查仍然是硬边界。"""
+        class _NoSocket:
+            def __init__(self):
+                self.reads = 0
+
+            def read(self, n):
+                self.reads += 1
+                time.sleep(0.05)
+                return b"more"
+
+        resp = _NoSocket()
+        with self.assertRaises(TimeoutError):
+            self.sr.read_with_deadline(resp, time.monotonic() + 0.06)
+        self.assertLess(resp.reads, 5, f"仍须在截止处停止，实际读了 {resp.reads} 次")
+
     def test_refuses_to_issue_below_provider_floor(self):
         """剩余时间低于该提供方可行下限：一个请求都不发，且不消耗调用额度。"""
         calls = []
@@ -767,6 +866,76 @@ class TestStructuredRetryQueries(unittest.TestCase):
         self.assertTrue(got)
         self.assertIn("经营情况讨论与分析", got[0],
                       "带 [重试检索查询] 行时只打这批新查询，不回落到常规契约查询")
+
+    # ── P1-c①：契约重建不得吞掉重试查询 ──────────────────────────────────────
+
+    def _rebuilt_with_retry(self, n_retry=4, extra=()):
+        """复现编排器的真实顺序：apply → 追加重试批次 → 再次 apply（缺失/陈旧 wire）。"""
+        c = self._contract()
+        out, _ = c.apply_to_steps([{"step_id": "s1", "capability": "web_search",
+                                    "instruction": "检索相关权威来源"}])
+        instr = out[0]["instruction"]
+        block = c.retry_query_line(tried=set())
+        lines = block.splitlines()[:n_retry] if n_retry else []
+        lines += list(extra)
+        appended = (instr + "\n\n【搜索重试 1】上次查询未获得有效结果；\n"
+                    + "\n".join(lines) + "\n")
+        out2, reps = c.apply_to_steps([dict(out[0], instruction=appended)])
+        return c, out2[0]["instruction"], reps
+
+    def test_contract_rebuild_keeps_in_contract_retry_queries(self):
+        """反例复现（2026-09-28 复核 §4①）：附 4 条重试查询，重建后必须还是 4 条。
+
+        旧实现 `_strip_contract_marks` 用 `split(CONTRACT_MARK)[0]` 把契约标记之后的
+        **全部内容**截断——而重试批次恰恰追加在指令末尾，于是 4 条变 **0 条**，
+        Worker 见不到重试行就自然回退到契约原查询：换了查询词的那一轮等于原地重试。
+        """
+        import re as _re
+        _c, instr, reps = self._rebuilt_with_retry(4)
+        n_retry = len(_re.findall(r"(?m)^\s*\[重试检索查询\]", instr))
+        self.assertEqual(n_retry, 4, f"重试批次不得被重建吞掉：{reps}")
+        self.assertIn("【搜索重试 1】", instr, "重试提示也要活过重建")
+        self.assertEqual(len(_re.findall(r"(?m)^\s*\[检索查询\]", instr)), 1,
+                         "契约查询仍然只有契约生成的那一条")
+        self.assertTrue(any("保留契约内重试查询 4 条" in r for r in reps), reps)
+
+    def test_contract_rebuild_rejects_out_of_contract_retry_queries(self):
+        """契约外查询（换主体）必须被**拒绝并记明理由**，不能因为"是重试"就放过。"""
+        import re as _re
+        _c, instr, reps = self._rebuilt_with_retry(
+            1, extra=["[重试检索查询] 比亚迪 2024年年度报告 全文"])
+        kept = _re.findall(r"(?m)^\s*\[重试检索查询\]\s*(.+)", instr)
+        self.assertEqual(len(kept), 1, f"契约外查询必须被拒：{reps}")
+        self.assertNotIn("比亚迪", " ".join(kept))
+        self.assertTrue(any("拒绝契约外重试查询" in r for r in reps), reps)
+        self.assertTrue(any("洋河股份" in r or "契约主体" in r for r in reps), reps)
+
+    def test_contract_rebuild_is_idempotent(self):
+        """重建必须**幂等**：反复重建不得让契约行/装配句/重试批次增生成多份。"""
+        import re as _re
+        c, instr2, _ = self._rebuilt_with_retry(4)
+        o3, _ = c.apply_to_steps([dict({"step_id": "s1", "capability": "web_search",
+                                       "instruction": instr2})])
+        instr3 = o3[0]["instruction"]
+        o4, _ = c.apply_to_steps(o3)
+        instr4 = o4[0]["instruction"]
+        self.assertEqual(instr3, instr2, "第二次重建不得改变指令")
+        self.assertEqual(instr4, instr3, "第三次重建不得改变指令")
+        self.assertEqual(instr4.count("[研究契约]"), 1)
+        self.assertEqual(instr4.count("的年度报告与财务数据的权威来源"), 1)
+        self.assertEqual(len(_re.findall(r"(?m)^\s*\[重试检索查询\]", instr4)), 4)
+
+    def test_query_in_contract_judges_subject_and_period(self):
+        """契约内外判据：主体与期间两条，都由契约字段算出（不看模型自述）。"""
+        c = self._contract()
+        self.assertTrue(c.query_in_contract("洋河股份（002304.SZ） 2024年年度报告 全文")[0])
+        ok, why = c.query_in_contract("比亚迪 2024年年度报告 全文")
+        self.assertFalse(ok)
+        self.assertIn("主体", why)
+        ok2, why2 = c.query_in_contract("洋河股份（002304.SZ） 2023年年度报告 全文")
+        self.assertFalse(ok2, "契约期间只有 2024，2023 属契约外")
+        self.assertIn("期间", why2)
+        self.assertFalse(c.query_in_contract("")[0])
 
     def test_worker_without_contract_keeps_query_discipline(self):
         sa = _sa()

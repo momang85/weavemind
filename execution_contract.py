@@ -318,8 +318,14 @@ class ExecutionContract:
     def apply_to_steps(self, steps: list[dict]) -> tuple[list[dict], list[str]]:
         """把契约**结构化地**写回每个步骤，并重建检索查询行。
 
-        幂等：先剥掉旧的 `[检索查询]` 行与契约块，再加当前的——这样 Critic 修订稿、
+        幂等：先剥掉旧的 `[检索查询]` 行与契约行，再加当前的——这样 Critic 修订稿、
         反思重做稿、恢复重放的计划拿到的是同一份契约，不会带着上一版的查询走。
+
+        **重试批次必须活过重建**（P1-c①）：`[重试检索查询]` 是编排器按同一契约生成的
+        "换了资料面"的下一批查询，重建时逐条过 `query_in_contract`——契约内的保留、
+        契约外的拒绝并记进修复记录。若整批都在契约外，新的指令里就不含重试行，
+        Worker 据此回退契约查询是**正确**的（没有可用的新查询）；而"契约内明明有、
+        却被重建吞掉"才是本地修掉的缺陷。
 
         返回 (步骤, 修复记录)。**不修改调用方传入的对象**（返回新列表/新字典）。
         """
@@ -334,15 +340,78 @@ class ExecutionContract:
             s["contract"] = wire
             if str(s.get("capability") or "") in self._RESEARCH_CAPS:
                 old = str(s.get("instruction") or "")
+                # 取出重试批次（在剥离之前）——剥离会去掉契约行，重试行本该保留，
+                # 但先取出来才能逐条做契约校验并在重建后原样放回
+                _retry_old = self.retry_queries_in(old)
                 stripped, removed = self._strip_contract_marks(old)
                 if removed:
                     repairs.append(f"{s.get('step_id')}: 剥离旧契约标记 {len(removed)} 处")
+                _keep_retry: list[str] = []
+                _drop_retry: list[str] = []
+                for q in _retry_old:
+                    _ok, _why = self.query_in_contract(q)
+                    (_keep_retry if _ok else _drop_retry).append(q if _ok else f"{q}（{_why}）")
+                # 旧的 `[重试检索查询]` 行**一律先摘掉**：批次整体按上面校验过的集合重建，
+                # 否则被拒的契约外查询会留在 stripped 里跟着指令一起发出去（实测漏网）。
+                if _retry_old:
+                    stripped = "\n".join(
+                        ln for ln in stripped.splitlines()
+                        if not ln.strip().startswith(RETRY_MARK))
+                if _keep_retry:
+                    repairs.append(
+                        f"{s.get('step_id')}: 保留契约内重试查询 {len(_keep_retry)} 条")
+                if _drop_retry:
+                    repairs.append(
+                        f"{s.get('step_id')}: 拒绝契约外重试查询 {len(_drop_retry)} 条"
+                        f"：{_drop_retry[0][:60]}")
                 new = self._build_instruction(stripped, s)
+                if _keep_retry:
+                    new = (f"{new}\n" + "\n".join(f"{RETRY_MARK} {q}" for q in _keep_retry))
                 if new != old:
                     s["instruction"] = new
                     repairs.append(f"{s.get('step_id')}: 按契约重建检索查询")
             out.append(s)
         return out, repairs
+
+    def query_in_contract(self, q: str) -> tuple[bool, str]:
+        """该查询是否落在本契约内 → `(是否保留, 原因)`（P1-c①：保留契约内、拒绝契约外）。
+
+        "契约内"两条判据，都由契约字段算出（不看模型自述）：
+
+        1. 不与契约期间冲突——沿用 `conflicting_periods`（契约外年份 + 与 `doc_type`
+           不符的报告期词）；
+        2. 提到了本主体（简称 / 代码 / 全称之一）——"换主体"与"换资料面"是两件事，
+           重试只允许换资料面（`retry_queries` 只改 facet）。
+
+        重试批次里的查询据此**逐条保留或拒绝**：不能因为是"重试"就放过契约外主体/期间。
+        """
+        s = str(q or "").strip()
+        if not s:
+            return False, "空查询"
+        hits = self.conflicting_periods(s)
+        if hits:
+            return False, f"含契约外期间 {'、'.join(hits[:3])}"
+        subjects = [str(t) for t in (self.label(), self.company, self.company_id)
+                    if str(t or "").strip()]
+        if subjects and not any(t in s for t in subjects):
+            return False, f"未提到契约主体（{subjects[0]}）"
+        return True, ""
+
+    def retry_queries_in(self, text: str) -> list[str]:
+        """从指令文本里取出 `[重试检索查询]` 行（保序、去重、去空白）。
+
+        重建指令时必须**先取出来再重建**——否则契约标记处的截断会把整批重试查询
+        连同"重试 N"提示一起吞掉（2026-09-28 反例：附 4 条重试查询，重建后 0 条）。
+        """
+        out: list[str] = []
+        for line in str(text or "").splitlines():
+            s = line.strip()
+            if not s.startswith(RETRY_MARK):
+                continue
+            q = s.split(RETRY_MARK, 1)[1].strip()
+            if q and q not in out:
+                out.append(q)
+        return out
 
     @staticmethod
     def _strip_contract_marks(text: str) -> tuple[str, list[str]]:
@@ -350,6 +419,12 @@ class ExecutionContract:
 
         模型修订稿里的标记可能出现在行内（"检索… [检索查询] …"），也可能整行就是它；
         两种都要处理：整行是标记 → 丢该行，行内出现 → 只丢掉标记及其后的同段内容。
+
+        **`[研究契约]` 只丢它自己那一行**（2026-09-28 修正）：契约块是**单行**
+        （见 `contract_line()`），此前用 `body.split(CONTRACT_MARK)[0]` 把标记之后的
+        **全部内容**一并截断——而编排器的`[重试检索查询]`批次恰恰追加在指令**末尾**，
+        于是"重建"把整批新查询（和"重试 N"提示）吞掉，Worker 见不到重试行就**自然回退
+        到契约原查询**：换了查询词的那一轮等于原地重试。
         """
         removed: list[str] = []
         keep: list[str] = []
@@ -365,12 +440,21 @@ class ExecutionContract:
                 if head:
                     keep.append(head)
                 continue
+            if stripped.startswith(CONTRACT_MARK):
+                # 契约行**整行丢掉**：它的全部内容都由 `contract_line()` 生成，
+                # `_build_instruction` 会重新写一份。保留其后的"正文"会让每次重建
+                # 都多积累一份契约正文（实测三次重建后 3 份）。
+                removed.append(CONTRACT_MARK)
+                continue
+            if CONTRACT_MARK in line:
+                # 行内契约标记（历史写法）：只切掉标记及其后同段，保留标记之前的内容
+                head = line.split(CONTRACT_MARK, 1)[0].rstrip()
+                removed.append(CONTRACT_MARK)
+                if head:
+                    keep.append(head)
+                continue
             keep.append(line)
-        body = "\n".join(keep)
-        if CONTRACT_MARK in body:
-            body = body.split(CONTRACT_MARK)[0].rstrip()
-            removed.append(CONTRACT_MARK)
-        return body, removed
+        return "\n".join(keep), removed
 
     def _build_instruction(self, body: str, step: dict) -> str:
         cap = str(step.get("capability") or "")
@@ -390,6 +474,16 @@ class ExecutionContract:
                 f"（年份、金额、币种、单位、报表口径）；主链接失败则换备用链接。"
             )
         tail = body.strip()
+        # **幂等**（P1-c①）：`head` 是装配器自己写的，重建时必须先摘掉旧的再加一次。
+        # 此前无条件前置，每次重建都多出一份——实测"检索 洋河股份…的权威来源"这句在
+        # 三次重建后出现 4 次，指令越滚越长。只摘**不含查询行**的那部分（查询行已由
+        # `_strip_contract_marks` 处理），逐份移除。
+        if tail:
+            _hp = "\n".join(ln for ln in head.splitlines()
+                            if ln.strip() and not ln.strip().startswith(QUERY_MARK)).strip()
+            while _hp and _hp in tail:
+                tail = tail.replace(_hp, "", 1).strip()
+            tail = tail.strip("\n")
         out = f"{head}\n{self.contract_line()}"
         return f"{out}\n{tail}" if tail else out
 
