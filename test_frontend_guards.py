@@ -393,6 +393,21 @@ class TestReportPageWiring(unittest.TestCase):
         self.assertIn("slice(0, 24)", self.text)
         self.assertIn("slice(0, 32)", self.text)
 
+    def test_top_stats_labels_period_and_unit(self):
+        """C 批：结论卡必须**写明期间**并带单位来源，不得裸取首数值列。
+
+        反例（冻结样本）：表头 `指标 | 2023 | 2024 | 口径 | 来源`，裸取第 1 列 →
+        置顶卡片显示的是 **2023**（较旧那期）且不带年份，读起来像"当前值"。
+        """
+        for token in ("periodOfHeader", "topStatsPeriods", "topStatsUnit",
+                      "reportUnitOf", "topStatsOfTable"):
+            self.assertIn(token, self.text, f"结论卡的期间/单位口径缺少 {token}")
+        # 卡片标题里带期间（`指标 · 2024年`），最新期间排前
+        self.assertIn("`${name} · ${p}`", self.text)
+        self.assertIn("sort(", self.text)
+        # 分享页字幕里说明期间与单位（两边口径一致）
+        self.assertIn("表内单位", self.text)
+
     def test_chart_figure_features(self):
         self.assertIn("草稿级", self.text, "缺少草稿图标签")
         self.assertIn("Escape", self.text, "图表放大缺 Esc 关闭")

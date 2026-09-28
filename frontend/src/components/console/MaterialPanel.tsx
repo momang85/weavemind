@@ -56,6 +56,12 @@ export default function MaterialPanel({ taskId, disabled }: { taskId: string | n
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<{ kind: 'ok' | 'warn' | 'err'; text: string } | null>(null)
   const [cand, setCand] = useState<any>(null)
+  // C 批：候选闭环——预览（正文 + 与当前稿比较 + 证据缺口）→ 显式采纳 → 重验
+  const [prev, setPrev] = useState<any>(null)
+  const [adopted, setAdopted] = useState<any>(null)
+  const [showBody, setShowBody] = useState(false)
+  const [adoptArmed, setAdoptArmed] = useState(false)
+  const [op, setOp] = useState<string>('')
 
   const load = useCallback(async () => {
     if (!taskId) { setItems([]); return }
@@ -123,7 +129,7 @@ export default function MaterialPanel({ taskId, disabled }: { taskId: string | n
   // 候选**不采纳**：旧交付与人工文字原样保留，采纳是另一个显式动作。
   const genCandidate = async () => {
     if (!taskId) return
-    setBusy(true); setMsg(null); setCand(null)
+    setBusy(true); setMsg(null); setCand(null); setPrev(null); setAdopted(null); setOp('')
     try {
       const res = await fetch(`/api/task/${taskId}/candidate`, {
         method: 'POST',
@@ -146,8 +152,11 @@ export default function MaterialPanel({ taskId, disabled }: { taskId: string | n
         setMsg({ kind: 'warn', text: '还没有已并入的新材料：先添加材料并等它准入。' })
       } else if (d.status === 'paid_not_authorized') {
         setMsg({ kind: 'warn', text: d.error || '本轮不新增付费生成。' })
-      } else if (res.status === 503) {
-        setMsg({ kind: 'warn', text: d.error || '编排器未回执：没有生成任何候选，可稍后重试。' })
+      } else if (d.status === 'pending') {
+        // 超时 = **结果未知**：给 operation id 与查回入口，不谎称"没有生成"
+        setOp(String(d.operation_id ?? ''))
+        setMsg({ kind: 'warn',
+                 text: `${d.error || '本次结果未知'}\noperation id：${d.operation_id ?? '—'}` })
       } else {
         setMsg({ kind: 'err', text: d.error || d.detail || d.status || '未能生成候选正文' })
       }
@@ -156,6 +165,97 @@ export default function MaterialPanel({ taskId, disabled }: { taskId: string | n
     } finally {
       setBusy(false); load()
     }
+  }
+
+  /** 查回一次候选操作的结果（超时/刷新后仍能查到；查不到 ≠ 没生成）。 */
+  const queryOp = async (operationId?: string) => {
+    if (!taskId) return
+    setBusy(true)
+    try {
+      const q = operationId ? `?operation_id=${encodeURIComponent(operationId)}` : ''
+      const res = await fetch(`/api/task/${taskId}/candidate${q}`)
+      const d = await res.json()
+      if (res.ok && d.ok) {
+        setCand(d)
+        setMsg({ kind: 'ok', text: `已查回该操作的结果：${
+          d.created === false ? '此前已生成（复用同一个候选）' : '已生成候选'}。` })
+      } else {
+        setMsg({ kind: d.status === 'unknown' ? 'warn' : 'err',
+                 text: d.error || `查回失败（${d.status ?? res.status}）` })
+      }
+    } catch (e: any) {
+      setMsg({ kind: 'err', text: `查回失败：${e?.message ?? e}` })
+    } finally { setBusy(false) }
+  }
+
+  /** 预览候选：候选**正文** + 与当前采纳稿的**结构化比较** + 证据缺口（只读）。 */
+  const previewCandidate = async (identity?: string) => {
+    if (!taskId) return
+    setBusy(true); setMsg(null)
+    try {
+      const id = identity || String(cand?.candidate_identity_id ?? '')
+      const q = id ? `?identity=${encodeURIComponent(id)}` : ''
+      const res = await fetch(`/api/task/${taskId}/candidate/preview${q}`)
+      const d = await res.json()
+      if (res.ok) {
+        setPrev(d)
+        const c = d.comparison ?? {}
+        setMsg({ kind: 'ok',
+                 text: `候选预览（只读，未采纳）：与当前稿相比改动 ${c.changed_lines ?? 0} 行`
+                   + `（+${c.added_lines ?? 0}/-${c.removed_lines ?? 0}）；`
+                   + `人工分析节${c.analysis_section_preserved ? '原样保留' : '**未保留**'}。` })
+      } else {
+        setMsg({ kind: 'err', text: d.error || d.status || '预览失败' })
+      }
+    } catch (e: any) {
+      setMsg({ kind: 'err', text: `预览失败：${e?.message ?? e}` })
+    } finally { setBusy(false) }
+  }
+
+  /** **显式采纳**：两步确认——第一次点击只是"上膛"，看清将要发生什么；第二次才真的提交。
+   *
+   *  为什么不用 `window.confirm`：原生弹窗既挡住页面上的身份/比较信息（用户是"盲确认"），
+   *  也无法被自动化验收点击（脚本环境里 confirm 默认被拒 → 采纳永远走不到）。
+   */
+  const adoptArm = () => {
+    const identity = String(prev?.candidate?.identity_id ?? cand?.candidate_identity_id ?? '')
+    if (!identity) {
+      setMsg({ kind: 'warn', text: '先预览候选，确认要采纳的那一版。' })
+      return
+    }
+    setAdoptArmed(true)
+  }
+
+  const adoptCandidate = async () => {
+    const identity = String(prev?.candidate?.identity_id ?? cand?.candidate_identity_id ?? '')
+    if (!taskId || !identity) {
+      setMsg({ kind: 'warn', text: '先预览候选，确认要采纳的那一版。' })
+      return
+    }
+    setBusy(true); setMsg(null)
+    try {
+      const res = await fetch(`/api/task/${taskId}/candidate/adopt`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ identity, confirm: true }),
+      })
+      const d = await res.json()
+      if (res.ok && d.ok) {
+        setAdopted(d); setAdoptArmed(false)
+        const r = d.reverify ?? {}
+        setMsg({ kind: 'ok',
+                 text: `${d.changed ? '已采纳' : '这个身份已是当前选中版本（未重复采纳）'}：`
+                   + `${String(d.adopted?.version_id ?? '').slice(0, 12)}…\n`
+                   + `对该身份重验：${r.overall || '（未知）'}`
+                   + `${r.covers_adopted_identity ? '' : '（未绑到该身份，按待重验处理）'}\n`
+                   + `人工复核文件${d.human_review_untouched ? '未被改动' : '**被改动了（异常）**'}；`
+                   + `旧批准未继承。${d.next?.note ?? ''}` })
+        await previewCandidate(identity)
+      } else {
+        setMsg({ kind: 'err', text: d.error || d.status || '采纳失败' })
+      }
+    } catch (e: any) {
+      setMsg({ kind: 'err', text: `采纳失败：${e?.message ?? e}` })
+    } finally { setBusy(false); load() }
   }
 
   const admittedCount = items.filter(m => m.status === 'admitted').length
@@ -217,18 +317,29 @@ export default function MaterialPanel({ taskId, disabled }: { taskId: string | n
             className="px-3 py-1.5 rounded bg-violet-500/15 border border-violet-500/30 text-violet-300 disabled:opacity-40">
             生成候选正文
           </button>
+          <button onClick={() => previewCandidate()}
+            disabled={disabled || busy || !taskId}
+            className="px-3 py-1.5 rounded bg-slate-800 border border-slate-700 text-slate-200 disabled:opacity-40">
+            预览/比较候选
+          </button>
+          <button onClick={() => queryOp(op || undefined)}
+            disabled={disabled || busy || !taskId}
+            className="px-3 py-1.5 rounded bg-slate-800 border border-slate-700 text-slate-300 disabled:opacity-40"
+            title="按 operation id 查回上次候选操作的结果；不传则查最近一次">
+            查回上次操作
+          </button>
           {admittedCount === 0 && (
             <span className="text-slate-600">还没有已准入的材料</span>
           )}
           {busy && <span className="text-slate-500 inline-flex items-center gap-1">
-            <RefreshCw className="w-3.5 h-3.5 animate-spin" /> 装配中…</span>}
+            <RefreshCw className="w-3.5 h-3.5 animate-spin" /> 处理中…</span>}
         </div>
         {cand && (
           <div className="rounded-lg border border-violet-500/30 bg-violet-500/10 text-violet-200 px-2 py-1.5 space-y-1">
             <div>
               候选 {String(cand.candidate_version_id ?? '').slice(0, 12)}…
               {cand.acceptance?.overall ? ` · 本候选验收：${cand.acceptance.overall}` : ''}
-              {' · '}未采纳（需显式采纳）
+              {' · '}{cand.adopted || prev?.is_adopted ? '已采纳' : '未采纳（需显式采纳）'}
             </div>
             <div className="text-violet-300/80">
               影响步骤 {(cand.affected_steps ?? []).map((s: any) => s.step_id || s.capability).join('、') || '—'}
@@ -241,6 +352,111 @@ export default function MaterialPanel({ taskId, disabled }: { taskId: string | n
                 候选缺口：{(cand.acceptance.gaps ?? []).slice(0, 3).join('；')}
               </div>
             )}
+            {cand.prior_failure?.status && (
+              <div className="text-amber-300">
+                原任务状态：{cand.prior_failure.status}（{cand.prior_failure.phase || '—'}）——
+                {String(cand.prior_failure.detail ?? '').slice(0, 80)}
+                <div className="text-amber-300/70">
+                  原失败记录未被修改；候选是新版本，不代表任务已成功。
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* C 批：预览 → 比较 → 显式采纳（闭环）。采纳是按钮 + 二次确认，绝不自动。 */}
+        {prev && (
+          <div className="rounded-lg border border-slate-700 bg-slate-900/70 px-2 py-2 space-y-2">
+            <div className="text-slate-300">
+              候选预览（只读）：
+              <span className="text-slate-500"> 身份 {String(prev.candidate?.identity_id ?? '').slice(0, 16)}…</span>
+              {prev.is_adopted
+                ? <span className="ml-2 text-emerald-400">已是当前选中版本</span>
+                : <span className="ml-2 text-amber-300">未采纳</span>}
+            </div>
+            <div className="text-slate-400">
+              与当前稿比较：改动 {(prev.comparison?.changed_lines ?? 0)} 行
+              （+{prev.comparison?.added_lines ?? 0}/-{prev.comparison?.removed_lines ?? 0}）；
+              字节 {prev.comparison?.adopted_bytes ?? 0} → {prev.comparison?.candidate_bytes ?? 0}；
+              人工分析节{prev.comparison?.analysis_section_preserved
+                ? <span className="text-emerald-400"> 原样保留</span>
+                : <span className="text-amber-300"> 未保留（需人工确认）</span>}
+            </div>
+            {(prev.candidate?.acceptance?.gaps ?? []).length > 0 && (
+              <div className="text-amber-300">
+                证据缺口：{(prev.candidate.acceptance.gaps ?? []).slice(0, 5).join('；')}
+              </div>
+            )}
+            {(prev.comparison?.diff_head ?? []).length > 0 && (
+              <pre className="max-h-40 overflow-auto rounded bg-slate-950 border border-slate-800 p-2 text-xs leading-5 text-slate-400">
+                {(prev.comparison.diff_head ?? []).join('\n')}
+                {prev.comparison.diff_truncated ? '\n…（差异过长，已截断）' : ''}
+              </pre>
+            )}
+            <div className="flex items-center gap-2 flex-wrap">
+              <button onClick={() => setShowBody(v => !v)}
+                className="px-2 py-1 rounded border border-slate-700 text-slate-300">
+                {showBody ? '收起候选正文' : '查看候选正文'}
+              </button>
+              {!prev.is_adopted && !adoptArmed && (
+                <button onClick={adoptArm} disabled={disabled || busy}
+                  className="px-3 py-1.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-emerald-300 disabled:opacity-40">
+                  采纳这一版…
+                </button>
+              )}
+              <span className="text-slate-500">
+                采纳后对该身份重验；人工复核仍由你单独完成，机器不代写。
+              </span>
+            </div>
+            {adoptArmed && !prev.is_adopted && (
+              <div className="rounded border border-emerald-500/40 bg-emerald-500/10 text-emerald-200 px-2 py-2 space-y-1">
+                <div>确认采纳这一版作为交付正文？这会切换交付的选中版本。</div>
+                <div className="text-emerald-300/80">
+                  身份 {String(prev.candidate?.identity_id ?? '').slice(0, 20)}…
+                  · 与当前稿改动 {prev.comparison?.changed_lines ?? 0} 行
+                  · 候选验收 {prev.candidate?.acceptance?.overall || '（未知）'}
+                </div>
+                <div className="text-emerald-300/80">
+                  旧版与人工文字保留在版本库；人工复核（human_review）不继承、不改写；
+                  采纳**不等于**验收通过——重验结论会如实显示。
+                </div>
+                <div className="flex items-center gap-2">
+                  <button onClick={adoptCandidate} disabled={disabled || busy}
+                    className="px-3 py-1.5 rounded bg-emerald-500/25 border border-emerald-400/50 text-emerald-100 disabled:opacity-40">
+                    确认采纳（不可自动完成）
+                  </button>
+                  <button onClick={() => setAdoptArmed(false)}
+                    className="px-2 py-1 rounded border border-slate-600 text-slate-300">
+                    取消
+                  </button>
+                </div>
+              </div>
+            )}
+            {showBody && (
+              <pre className="max-h-80 overflow-auto rounded bg-slate-950 border border-slate-800 p-2 text-xs leading-5 text-slate-300 whitespace-pre-wrap">
+                {String(prev.body ?? '')}
+              </pre>
+            )}
+          </div>
+        )}
+
+        {adopted && (
+          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/10 text-emerald-200 px-2 py-1.5 space-y-1">
+            <div>
+              已采纳 {String(adopted.adopted?.version_id ?? '').slice(0, 12)}…
+              （此前选中 {String(adopted.previous?.version_id ?? '').slice(0, 12)}…）
+            </div>
+            <div className="text-emerald-300/80">
+              对该身份重验：{adopted.reverify?.overall || '（未知）'}
+              {adopted.reverify?.covers_adopted_identity ? '' : ' · 未绑到该身份，按待重验处理'}
+              {(adopted.reverify?.gaps ?? []).length > 0
+                ? `；缺口：${(adopted.reverify.gaps ?? []).slice(0, 3).join('；')}` : ''}
+            </div>
+            <div className="text-emerald-300/80">
+              人工复核文件{adopted.human_review_untouched ? '未被改动' : '被改动了（异常，请核对）'}；
+              旧批准未继承；采纳本身不等于验证通过。
+              {adopted.next?.export ? ` 下一步：${adopted.next.export}` : ''}
+            </div>
           </div>
         )}
       </div>

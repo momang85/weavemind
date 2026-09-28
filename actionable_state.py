@@ -74,6 +74,9 @@ ACTION_TARGETS = {
 # 依赖健康里的名称 → 新人视角的原因类别
 _MODEL_NAMES = ("llm", "planner")
 _SOURCE_NAMES = ("search", "market_source", "embedding")
+# `health_registry._NAME_SANDBOX` 同名（容器隔离/Docker）：只有任务真的含
+# `code_execution` 步骤时，它才与这次失败有关
+_NAME_SANDBOX_LOCAL = "code_sandbox"
 
 # 未配置类的措辞（health_registry/settings 的占位符判定沿用既有词）
 _UNCONFIGURED_HINTS = ("未配置", "placeholder", "yOUR_API_KEY".lower(), "占位", "缺 api_key")
@@ -169,17 +172,20 @@ def classify_task(*, row=None, timeline=(), material_pending: bool = False,
                         ACTION_ADD_MATERIAL)
         return _out(STATE_RUNNING, "正在执行；可以离开页面，进度会在回到页面后恢复",
                     ACTION_WAIT)
-    if status in ("FAILED", "CANCELLED"):
-        # 失败时优先指向"能修的那个原因"（模型未配置 → 去设置；源不可用 → 健康页）
-        first = causes[0] if causes else {}
-        action = str(first.get("action") or ACTION_RETRY)
-        msg = "任务明确失败"
-        if first.get("message"):
-            msg += f"：{first['message']}"
-        else:
-            msg += "；先看任务详情里的失败步骤，再决定重试还是补材料"
-            action = ACTION_VIEW_DETAILS
-        return _out(STATE_FAILED, msg, action)
+    if status == "CANCELLED":
+        # 取消**不是**失败：没有"失败步骤/失败原因"可看，指向"重新提交"才有意义。
+        out = _out(STATE_FAILED,
+                   "任务已被取消（不是失败）：已完成步骤的产物还在，重新提交或补材料后重跑",
+                   ACTION_RETRY if not material_pending else ACTION_ADD_MATERIAL)
+        out["cancelled"] = True
+        return out
+    if status == "FAILED":
+        picked = _failure_action(row, causes)
+        if picked:
+            return _out(STATE_FAILED, picked["message"], picked["action"])
+        return _out(STATE_FAILED,
+                    "任务明确失败；先看任务详情里的失败步骤，再决定重试还是补材料",
+                    ACTION_VIEW_DETAILS)
     if status in ("SUCCESS", "SUCCESS_WITH_ISSUES"):
         return _out(STATE_DONE, "已完成；请人工复核后再采用（机器验收不等于研究通过）",
                     ACTION_VIEW_DETAILS)
@@ -187,6 +193,87 @@ def classify_task(*, row=None, timeline=(), material_pending: bool = False,
     return _out(STATE_NOT_RECEIVED,
                 f"状态无法识别（{status or '空'}）；按未接收处理，请不要据此认为任务在跑",
                 ACTION_VIEW_DETAILS)
+
+
+# ── 失败原因 → 行动：由**任务自己落库的失败事实**决定 ──────────────────────────
+#
+# 反例（09-28 实测，任务 `ui-29e8ca73b5`）：任务失败在"没有任何可定位的原始披露
+# （located=0）"，而失败提示指向的是全局健康列表的**第一条**（`code_sandbox` 容器
+# 隔离不可用）——用户被引去装 Docker，与这次失败毫无关系。
+# 判据只能来自任务自身：`phase` / `report`（终态摘要与失败说明）/ 失败步骤的 error；
+# 全局健康原因降为**兜底**，并且只允许"这个任务真的用到的依赖"进来。
+_MATERIAL_HINTS = (
+    "缺原始披露", "待补原始披露", "无原始披露", "located=0", "资料缺口",
+    "补资料", "补材料", "无候选 url", "检索未产出可用来源", "没有可用来源",
+    "未取得原始", "缺少原始",
+)
+_MODEL_HINTS = ("未配置", "placeholder", "占位", "api key", "api_key")
+_SOURCE_HINTS = ("检索失败", "搜索源", "资料源", "抓取失败", "全部来源不可用")
+_SANDBOX_HINTS = ("容器隔离", "沙箱", "sandbox", "隔离不可用")
+
+
+def _failure_text(row) -> str:
+    """任务**自己**的失败事实（phase + 终态 report + 失败步骤的 error），小写。"""
+    row = row if isinstance(row, dict) else {}
+    parts = [str(row.get("phase") or ""), str(row.get("report") or "")]
+    for s in (row.get("steps") or []):
+        if not isinstance(s, dict):
+            continue
+        st = str(s.get("status") or "").upper()
+        if st and st not in ("FAILED", "ERROR", "BLOCKED"):
+            continue
+        parts.append(f"{s.get('capability') or ''} {s.get('error') or ''} "
+                     f"{s.get('result') or ''}")
+    return " ".join(parts).lower()
+
+
+def _step_capabilities(row) -> set:
+    return {str(s.get("capability") or "") for s in (row.get("steps") or [])
+            if isinstance(s, dict)}
+
+
+def _hit(text: str, hints) -> bool:
+    return any(h.lower() in text for h in hints)
+
+
+def _failure_action(row, causes) -> dict | None:
+    """失败任务该给哪个入口 → `{action, message, source}`；判不出来返回 None。
+
+    优先级：**任务自己的失败事实** > 与本任务实际依赖相关的健康原因。
+    两条都不成立就不猜（调用方给"看任务详情"）。
+    """
+    row = row if isinstance(row, dict) else {}
+    text = _failure_text(row)
+    # ① 任务自己的失败事实
+    if _hit(text, _MATERIAL_HINTS):
+        return {"action": ACTION_ADD_MATERIAL, "source": "task_failure_fact",
+                "message": ("任务失败在**缺原始披露**上（不是环境问题）："
+                            "补上原始材料后会按同一快照重做，然后可生成候选正文")}
+    if _hit(text, _SANDBOX_HINTS):
+        return {"action": ACTION_OPEN_HEALTH, "source": "task_failure_fact",
+                "message": ("任务失败在**代码步骤的容器隔离**上：按失败说明装好沙箱镜像"
+                            "或让任务不含代码步骤")}
+    if _hit(text, _MODEL_HINTS):
+        return {"action": ACTION_OPEN_SETTINGS, "source": "task_failure_fact",
+                "message": "任务失败在**模型未配置/不可用**上：填好 API Key 与端点后重试"}
+    if _hit(text, _SOURCE_HINTS):
+        return {"action": ACTION_OPEN_HEALTH, "source": "task_failure_fact",
+                "message": "任务失败在**资料源不可用**上：先看健康页，或直接补上原始材料"}
+    # ② 兜底：健康原因——但只认**与本任务实际依赖相关**的那条
+    caps = _step_capabilities(row)
+    for c in causes or ():
+        if not isinstance(c, dict):
+            continue
+        name = str(c.get("name") or "")
+        if name == _NAME_SANDBOX_LOCAL and "code_execution" not in caps:
+            continue                      # 任务里没有代码步骤 → 沙箱与它无关
+        if not (name in _MODEL_NAMES or name in _SOURCE_NAMES
+                or name == _NAME_SANDBOX_LOCAL):
+            continue                      # 认不出的依赖不拿来解释这次失败
+        action = str(c.get("action") or ACTION_OPEN_HEALTH)
+        msg = f"任务明确失败：{c.get('message') or name}"
+        return {"action": action, "message": msg, "source": "dependency_health"}
+    return None
 
 
 def unified_health(dependencies=(), market_sources=None) -> dict:

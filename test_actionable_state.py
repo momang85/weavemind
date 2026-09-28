@@ -77,6 +77,69 @@ class TestTaskClassification(unittest.TestCase):
         out2 = A.classify_task(row={"task_id": "t1", "status": "SUCCESS_WITH_ISSUES"})
         self.assertEqual(out2["state"], A.STATE_DONE)
 
+    def test_failure_action_comes_from_the_task_own_facts_not_the_first_health_item(self):
+        """C 批反例：失败在"缺原始披露"，提示却指向**无关的 Docker**。
+
+        实测任务 `ui-29e8ca73b5`：终态 report 写着"研究草稿／待补原始披露（located=0）"，
+        而全局健康列表第一条是 `code_sandbox`（容器隔离不可用，unavailable 排最前）——
+        旧实现取 `causes[0]` 就把用户引去装 Docker。
+        """
+        row = {
+            "task_id": "ui-29e8ca73b5", "status": "FAILED", "phase": "完成",
+            "report": ("# 交付结果\n> **未验收草稿：分析未完成**\n"
+                       "> **研究状态：研究草稿／待补原始披露**——没有一条带正文定位的"
+                       "原始披露（located=0）"),
+            "steps": [{"step_id": "1", "capability": "web_search", "status": "FAILED",
+                       "error": "检索未产出可用来源；需补资料后重试"},
+                      {"step_id": "4", "capability": "report_generator",
+                       "status": "SUCCESS"}],
+        }
+        causes = A.health_causes([_dep("code_sandbox", "unavailable",
+                                       reason="容器隔离不可用")])
+        out = A.classify_task(row=row, causes=causes)
+        self.assertEqual(out["action"], A.ACTION_ADD_MATERIAL, out)
+        self.assertEqual(out["target"], "materials")
+        self.assertIn("缺原始披露", out["message"])
+        self.assertNotIn("Docker", out["message"])
+        # 健康原因仍然如实列出（只是**不再拿它当这次失败的原因**）
+        self.assertTrue(out["causes"])
+
+    def test_sandbox_cause_only_when_the_task_really_has_code_steps(self):
+        """沙箱/Docker 只有在任务**真的含** `code_execution` 步骤时才算它的原因。"""
+        causes = A.health_causes([_dep("code_sandbox", "unavailable",
+                                       reason="容器隔离不可用")])
+        no_code = {"task_id": "t1", "status": "FAILED", "phase": "完成",
+                   "report": "Task failed: 未知",
+                   "steps": [{"step_id": "1", "capability": "web_search",
+                              "status": "FAILED", "error": ""}]}
+        out = A.classify_task(row=no_code, causes=causes)
+        self.assertNotIn("code_sandbox", out["message"])
+        with_code = dict(no_code, steps=[{"step_id": "3", "capability": "code_execution",
+                                          "status": "FAILED", "error": ""}])
+        out2 = A.classify_task(row=with_code, causes=causes)
+        self.assertEqual(out2["action"], A.ACTION_OPEN_HEALTH)
+        self.assertIn("code_sandbox", out2["message"])
+
+    def test_task_own_facts_win_over_health_list(self):
+        """模型未配置写在任务自己的失败事实里时，去设置——即使健康首条是 Docker。"""
+        causes = A.health_causes([_dep("code_sandbox", "unavailable", reason="隔离不可用")])
+        row = {"task_id": "t1", "status": "FAILED", "phase": "完成",
+               "report": "> **未验收草稿**\n错误：API Key 未配置（占位符）",
+               "steps": [{"step_id": "1", "capability": "web_search",
+                          "status": "FAILED", "error": "API Key 未配置"}]}
+        out = A.classify_task(row=row, causes=causes)
+        self.assertEqual(out["action"], A.ACTION_OPEN_SETTINGS)
+        self.assertEqual(out["target"], "/settings")
+
+    def test_cancelled_is_not_reported_as_a_failure_with_steps(self):
+        """取消与失败分开说：取消没有"失败步骤"可看，出口是重新提交。"""
+        out = A.classify_task(row={"task_id": "t1", "status": "CANCELLED"})
+        self.assertEqual(out["state"], A.STATE_FAILED)      # 不是"已完成"
+        self.assertTrue(out.get("cancelled"))
+        self.assertEqual(out["action"], A.ACTION_RETRY)
+        self.assertIn("取消", out["message"])
+        self.assertNotIn("失败步骤", out["message"])
+
     def test_every_state_has_label_and_action_label(self):
         rows = [None, {"task_id": "t", "status": "RECEIVED"},
                 {"task_id": "t", "status": "RUNNING"}, {"task_id": "t", "status": "FAILED"},

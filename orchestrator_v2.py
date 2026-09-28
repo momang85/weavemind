@@ -668,6 +668,69 @@ class _BudgetScope:
         return False
 
 
+def _material_fingerprint(rec: dict) -> str:
+    """一条已并入材料的身份串（候选幂等键用同一套取法，避免两处口径不同）。
+
+    取不到内容 hash 时退到 `material_id`——**绝不**退到"空串"，否则两条身份不明的
+    材料会被算成同一份，幂等键就失去了分辨力。
+    """
+    rec = rec if isinstance(rec, dict) else {}
+    return str(rec.get("raw_sha256") or rec.get("content_sha256")
+               or rec.get("sha256") or rec.get("material_id") or "")
+
+
+def _version_identity_fields(v) -> dict:
+    """版本 → 幂等键里的身份字段。
+
+    `identity_id` 在 `ReportVersion` 上是**方法**（`identity_id()`），不是属性——
+    09-28 复核反例：调用方写 `str(getattr(cand, "identity_id", "") or "")`，拿到的是
+    `<bound method ReportVersion.identity_id of ReportVersion(body="…正文…")>`：
+    字段既不是身份，还把**交付正文**夹带进了接口响应。这里统一调用，拿不到就空串。
+    """
+    out = {"version_id": "", "identity_id": "", "sources_fingerprint": "",
+           "rules_fingerprint": ""}
+    if v is None:
+        return out
+    for name in ("version_id", "sources_fingerprint", "rules_fingerprint"):
+        out[name] = str(getattr(v, name, "") or "")
+    fn = getattr(v, "identity_id", "")
+    try:
+        got = fn() if callable(fn) else str(fn or "")
+    except Exception:                            # noqa: BLE001 - 算不出身份就留空，不编
+        got = ""
+    out["identity_id"] = str(got or "")
+    return out
+
+
+def _prior_failure(row) -> dict:
+    """任务行里**已经存在**的失败事实（候选正文不得掩盖它）。
+
+    只读不写：`FAILED` 任务上补材料后生成候选，是"在失败之后又做了一步"，不是
+    "失败被撤销"。页面要能同时看到"原来为什么失败"和"现在有这个候选"。
+    """
+    row = row if isinstance(row, dict) else {}
+    status = str(row.get("status") or "").upper()
+    if status not in ("FAILED", "CANCELLED"):
+        return {}
+    report = str(row.get("report") or "")
+    # 失败**原因**优先：跳过标题/分隔线（`# 交付结果` 不是原因），并优先取含
+    # 失败语义词的那一行（"研究草稿／待补原始披露"这类）。
+    why_words = ("失败", "未通过", "未完成", "缺", "待补", "错误", "异常", "failed")
+    first, fallback = "", ""
+    for line in report.splitlines():
+        line = line.strip().lstrip("> ").replace("**", "").strip()
+        if not line or line.startswith("#") or line.startswith("---"):
+            continue
+        if not fallback:
+            fallback = line
+        if any(w in line.lower() for w in why_words):
+            first = line
+            break
+    return {"status": status, "phase": str(row.get("phase") or ""),
+            "detail": (first or fallback)[:240], "audit_preserved": True,
+            "note": "原失败记录未被本操作修改；候选是新版本，不代表任务已成功"}
+
+
 class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
     def __init__(self):
         # Load config.json for LLM settings (if env not set)
@@ -8298,8 +8361,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
            **不调用模型**。请求里带 `allow_paid` 时**明确拒绝**并说明原因，
            不悄悄降级成确定性装配（那会让调用方以为模型重生成过了）。
         2. **必须有已并入的新材料**：没有就返回 `no_new_material`，不凭空造候选。
-        3. **同一次动作只生成一个候选**：幂等键 =（材料身份 + 契约指纹 + 当前采纳版本），
-           重复调用返回同一个候选并标 `created: false`。
+        3. **同一次动作只生成一个候选**：幂等键 =（**全部**已并入材料身份 + 契约指纹 +
+           采纳版本 identity + **有效规则**身份），重复调用返回同一个候选并标 `created: false`。
+           09-28 复核反例：旧键只取**最后一份**材料 + 采纳版**正文 hash**，于是
+           "规则改了""采纳版换了证据快照（同正文）""早期那份材料的并入记录变了"
+           三种情况下键都不动 → 返回"已生成过，复用"，把**stale 候选**当成新动作的结果。
         4. **只重做依赖新材料的步骤**：返回 `affected_steps`（产出正文的那些），
            供页面显示"这次动了哪几步"；旧工件（交付包/PDF/底稿/图表）一个都不动。
         5. **候选不采纳**：只 `VersionStore.record()`，**不** `adopt()`，
@@ -8363,11 +8429,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     "detail": ("没有已并入资料集的新材料（需要 material_intake 的准入 + "
                                "并入快照 + refresh 成功）；先走 POST /api/task/<id>/material"),
                     "materials_seen": len(index)}
-        # 索引按保存顺序追加：取最后一条 = 最新并入的那份
+        # `latest`/`mid`/`mat_fp` 只用于**回显**"这次是冲着哪份新材料来的"；
+        # 幂等键用的是 `merged` 全集（见下面的 key_basis），不是这一份。
         latest = merged[-1]
         mid = str(latest.get("material_id") or "")
-        mat_fp = str(latest.get("raw_sha256") or latest.get("content_sha256")
-                     or latest.get("sha256") or mid)
+        mat_fp = _material_fingerprint(latest)
 
         from report_version import VersionStore
         store = VersionStore(ws, task_id)
@@ -8375,16 +8441,38 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         contract_wire = self._candidate_contract_wire(task_id, row)
         ctr_fp = str((contract_wire or {}).get("fingerprint") or "") or \
             str(row.get("contract_fingerprint") or "")
+        # 有效规则身份：候选正文的版本身份里就有它（`identity_id` = 正文+来源+规则），
+        # 幂等键若不含它，"规则变了但正文没变"就会被当成"同一个动作"而拒绝重建。
+        try:
+            from delivery_pipeline import rules_identity as _rules_identity
+            rules_v, rules_fp = _rules_identity(task_id)
+        except Exception as exc:                 # noqa: BLE001 - 读不到就如实报错，不猜
+            return {"ok": False, "status": "error",
+                    "detail": f"读取有效规则身份失败：{str(exc)[:160]}"}
+        # 幂等键的**完整依据**：材料集合（全部，不只最后一份）+ 契约 + 采纳版 identity
+        # + 有效规则。每一份材料的指纹都进键——"非最后一份材料的并入记录变了"同样是
+        # 新的证据快照，必须重建而不是复用旧候选。
+        key_basis = {
+            "materials": sorted(
+                ({"material_id": str(m.get("material_id") or ""),
+                  "fingerprint": _material_fingerprint(m),
+                  "attached": bool(m.get("attached")),
+                  "refresh_ok": bool((m.get("refresh") or {}).get("ok"))}
+                 for m in merged),
+                key=lambda x: x["material_id"]),
+            "contract": ctr_fp,
+            "adopted": _version_identity_fields(current),
+            "rules": {"version": str(rules_v or ""), "fingerprint": str(rules_fp or "")},
+        }
         key = hashlib.sha256(json.dumps(
-            {"material": mat_fp, "contract": ctr_fp,
-             "adopted": str(getattr(current, "version_id", "") or "")},
-            ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:32]
+            key_basis, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:32]
 
         state = self._read_candidate_state(ws)
         if str(state.get("key") or "") == key and state.get("candidate_version_id"):
             return dict(state, ok=True, task_id=task_id, material_id=mid,
                         created=False,
-                        note="同名材料与契约下已生成过候选：直接复用，未新建第二个")
+                        note=("同一套依据（全部已并入材料 + 契约 + 采纳版身份 + 有效规则）"
+                              "下已生成过候选：直接复用，未新建第二个"))
 
         # ④ 影响步骤：只有产出交付正文的那些依赖新材料（旧工件不动）
         affected = [{"step_id": str(s.get("step_id") or ""),
@@ -8407,7 +8495,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 logger.info("候选正文：取当前版本分析节失败（task=%s）：%s",
                             task_id, str(exc)[:120])
         try:
-            from delivery_pipeline import (rewrite_report_links, rules_identity,
+            from delivery_pipeline import (rewrite_report_links,
                                            sources_fingerprint)
             structure = _rb.build_structure(task_id, goal, analysis, ws_dir=ws)
             if not structure:
@@ -8416,10 +8504,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             cand_body = _rb.render_brief_markdown(structure, analysis, task_id=task_id)
             cand_body = rewrite_report_links(cand_body, task_id)
             _src_fp = sources_fingerprint(task_id, cand_body)
-            _rules_v, _rules_fp = rules_identity(task_id)
+            # 用**上面读到的同一份**规则身份（不能在这里重读一次：两次读到不同的值，
+            # 记录进版本身份的规则与幂等键里的规则就不是同一个东西了）
             cand = store.record(
                 cand_body, sources_fingerprint=_src_fp,
-                rules_version=_rules_v, rules_fingerprint=_rules_fp,
+                rules_version=rules_v, rules_fingerprint=rules_fp,
                 parent_id=str(getattr(current, "version_id", "") or ""))
         except Exception as exc:                 # noqa: BLE001 - 装配失败如实返回
             logger.warning("候选正文装配失败（task=%s）：%s", task_id, str(exc)[:160])
@@ -8429,11 +8518,15 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             return {"ok": False, "status": "assembly_failed",
                     "detail": "候选装配未返回版本记录"}
 
-        # 验收：best-effort（对**候选正文**跑，不采纳、不改任何采纳指针）
+        # 验收：best-effort（对**候选正文**跑，不采纳、不改任何采纳指针）。
+        # `verify_body_as_is=True`：结论必须是对**这个候选身份**的，不能让装配器拿去
+        # 重写成另一份正文再验收（否则页面上的"候选缺口"说的不是这份候选）。
         acc: dict = {}
         try:
             from delivery_pipeline import accept_for_body
-            verdict = accept_for_body(task_id, goal, cand_body, ws_dir=ws)
+            verdict = accept_for_body(task_id, goal, cand_body,
+                                      trigger="候选正文验收", verify_body_as_is=True,
+                                      ws_dir=ws)
             if isinstance(verdict, dict):
                 acc = {"overall": str(verdict.get("overall") or ""),
                        "gaps": list(verdict.get("gaps") or [])[:6],
@@ -8446,17 +8539,34 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             budget = self.budget_snapshot(task_id)
         except Exception:                        # noqa: BLE001
             budget = {}
+        cand_ids = _version_identity_fields(cand)
+        adopted_ids = _version_identity_fields(current)
+        # 原失败审计：在**失败任务**上补材料后生成候选时，如实回报"这个任务原来是失败的"，
+        # 且**不修改**那条失败记录（本 handler 从不写任务行）。候选是新版本，不代表
+        # 原失败已被撤销、也不代表任务已成功。
+        prior = _prior_failure(row)
         out = {
             "ok": True, "status": "candidate_ready", "task_id": task_id,
             "material_id": mid, "created": True, "key": key,
-            "candidate_version_id": str(getattr(cand, "version_id", "") or ""),
-            "candidate_identity_id": str(getattr(cand, "identity_id", "") or ""),
-            "parent_version_id": str(getattr(current, "version_id", "") or ""),
+            "candidate_version_id": cand_ids["version_id"],
+            "candidate_identity_id": cand_ids["identity_id"],
+            "candidate_sources_fingerprint": cand_ids["sources_fingerprint"],
+            "parent_version_id": adopted_ids["version_id"],
             "adopted": False, "requires_explicit_adoption": True,
             "old_approval_inherited": False,
-            "adopted_version_untouched": str(getattr(current, "version_id", "") or ""),
+            "adopted_version_untouched": adopted_ids["version_id"],
             "contract_fingerprint": ctr_fp,
             "material_fingerprint": mat_fp,
+            "basis": {
+                "materials_merged": len(merged),
+                "material_ids": [str(m.get("material_id") or "") for m in merged],
+                "contract_fingerprint": ctr_fp,
+                "adopted_identity_id": adopted_ids["identity_id"],
+                "rules": {"version": str(rules_v or ""),
+                          "fingerprint": str(rules_fp or "")},
+                "key_sha256_32": key,
+            },
+            "prior_failure": prior,
             "affected_steps": affected,
             "stopped_steps": [{"step_id": str(s.get("step_id") or ""),
                                "capability": str(s.get("capability") or "")}
@@ -9362,6 +9472,11 @@ def main():
                                   "detail": str(e)[:200]}
                     try:
                         orch._redis.setex(_k, 600,
+                                          json.dumps(result, ensure_ascii=False))
+                        # 稳定指针：调用方拿不到本次回执（页面关了 / 请求超时）时，
+                        # 仍能按任务查回**最近一次**候选操作的结果——"结果未知"必须
+                        # 是可查询的未知，而不是只能重提交。
+                        orch._redis.setex(f"candidate_ack:{_t}:latest", 600,
                                           json.dumps(result, ensure_ascii=False))
                     except Exception as exc:     # noqa: BLE001
                         logger.error("候选收执键写入失败（%s）：%s", _k, str(exc)[:150])

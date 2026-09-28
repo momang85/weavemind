@@ -1984,6 +1984,105 @@ def _report_parse_disclaimer(md: str) -> tuple[str, str | None]:
     return rest, text
 
 
+_PERIOD_HEADER_RE = re.compile(r"^(20\d{2})\s*(?:年|年度|年报|A|H[12]|Q[1-4])?$")
+
+
+def _period_of_header(cell) -> str:
+    """表头单元格 → 期间标签（`2024`/`2024年` → `2024年`）；不是期间列返回空串。
+
+    只看表头**自己**是不是一个年份列：`2024（元）` 也算（括号里只是计量单位），
+    但 `同比`/`口径`/`来源`/`指标` 一律不算。
+    """
+    c = str(cell or "").strip().replace("**", "").strip()
+    c = re.sub(r"[（(][^）)]*[）)]", "", c)          # 去掉计量单位括号
+    c = re.sub(r"\s+", "", c)
+    m = _PERIOD_HEADER_RE.match(c)
+    return f"{m.group(1)}年" if m else ""
+
+
+def _parse_md_tables(md: str, max_rows: int = 4) -> list[list[list[str]]]:
+    """Markdown → 表格列表（每表表头 + 最多 `max_rows` 行数据）。"""
+    tables: list[list[list[str]]] = []
+    cur: list[list[str]] = []
+    for line in str(md or "").split("\n"):
+        t = line.strip()
+        if not t.startswith("|"):
+            if cur:
+                tables.append(cur)
+                cur = []
+            continue
+        cells = [c.strip() for c in t.strip("|").split("|")]
+        if all(not c or set(c) <= {"-", ":", "—"} for c in cells):
+            continue
+        if not cur:
+            cur = [cells]
+        elif len(cur) <= max_rows:
+            cur.append(cells)
+    if cur:
+        tables.append(cur)
+    return tables
+
+
+def _report_unit_of(md: str) -> str:
+    """正文里声明的金额单位（`单位：亿元`）；读不到就是空串，不猜。"""
+    m = re.search(r"单位\s*[:：]\s*([^\s；;，,）)]{1,8})", str(md or ""))
+    return str(m.group(1)).strip() if m else ""
+
+
+def _pick_period_table(tables):
+    """选中要展示的表 → `(table, source)`：优先表头含「指标」的财务对照表。
+
+    旧实现取**正文第一张表**：研究简报里『实物量（吨）』排在『财务对照』之前，
+    分享页的"结论卡片"于是显示吨位——数字没错、**卡片名与内容不符**（与前端
+    `ReportViewer` 同口径，两边必须一起改）。
+    """
+    for t in tables or ():
+        if t and any("指标" in str(h) for h in (t[0] or [])):
+            return t, "metrics"
+    if tables:
+        return tables[0], "first_table"
+    return [], "none"
+
+
+def _top_stats_of_table(table, *, max_cards: int = 8) -> tuple[list[dict], list[str]]:
+    """表 → 结论卡 `[{k, v}]` 与用到的期间列表（**明确年份**，不裸取首数值列）。
+
+    反例（冻结样本，09-28 复核）：『财务对照』表头是 `指标 | 2023 | 2024 | 口径 | 来源`，
+    旧实现取"第 0/1 列" → 卡片显示的是 **2023**（较旧那期）的读数，且**不带年份**，
+    置顶看起来像"当前值"。现在：期间列按年份**从新到旧**取，每张卡的标题里写明期间。
+    """
+    if not table:
+        return [], []
+    hdr = table[0] or []
+    rows = table[1:] or []
+    if not hdr or not rows:
+        return [], []
+    k_idx = next((i for i, h in enumerate(hdr) if "指标" in str(h) or "数值" in str(h)), 0)
+    period_cols = [(i, _period_of_header(h)) for i, h in enumerate(hdr)]
+    period_cols = [(i, p) for i, p in period_cols if p and i != k_idx]
+    periods = [p for _i, p in period_cols]
+    if period_cols:
+        # 最新的期间排在最前（研究期是"当前研究期"，旧值不得无标签置顶）
+        period_cols.sort(key=lambda ip: ip[1], reverse=True)
+        periods = [p for _i, p in period_cols]
+        out: list[dict] = []
+        for r in rows:
+            name = str(r[k_idx])[:24] if len(r) > k_idx else ""
+            for i, p in period_cols:
+                if len(r) > i and str(r[i]).strip() and str(r[i]).strip() != "—":
+                    out.append({"k": f"{name} · {p}", "v": str(r[i])[:32]})
+                    if len(out) >= max_cards:
+                        return out, periods
+        return out, periods
+    # 没有可识别的期间列：退回"指标 + 第一个非指标列"，由调用方如实标注来源
+    v_idx = next((i for i, h in enumerate(hdr) if "数值" in str(h)), min(1, len(hdr) - 1))
+    if v_idx == k_idx:
+        v_idx = min(k_idx + 1, len(hdr) - 1)
+    return ([{"k": str(r[k_idx])[:24] if len(r) > k_idx else "",
+              "v": str(r[v_idx])[:32]}
+             for r in rows if len(r) > v_idx and str(r[v_idx]).strip()], [])
+
+
 def _share_page_structured(md: str, task_id: str = "") -> dict:
     """解析报告结构化元素，供分享页渲染（与前端 ReportViewer 等价）。
 
@@ -1996,34 +2095,12 @@ def _share_page_structured(md: str, task_id: str = "") -> dict:
         md = str(md or "")
     body, sources, _sec = _report_parse_sources(md)
     body, disclaimer = _report_parse_disclaimer(body)
-    # D2：首张 Markdown 表格的前 4 行（指标/数值/来源列）→ TOP 结论卡片
-    top_stats: list[dict] = []
-    rows: list[list[str]] = []
-    header: list[str] = []
-    for line in str(md).split("\n"):
-        t = line.strip()
-        if not t.startswith("|"):
-            if header:
-                break
-            continue
-        cells = [c.strip() for c in t.strip("|").split("|")]
-        if all(not c or set(c) <= {"-", ":", "—"} for c in cells):
-            continue
-        if not header:
-            header = cells
-            continue
-        rows.append(cells)
-        if len(rows) >= 4:
-            break
-    if header and rows:
-        k_i = next((i for i, h in enumerate(header) if "指标" in h or "数值" in h), 0)
-        v_i = next((i for i, h in enumerate(header) if "数值" in h), min(1, len(header) - 1))
-        for r in rows:
-            if len(r) > v_i and str(r[v_i]).strip():
-                top_stats.append({
-                    "k": str(r[k_i])[:24] if len(r) > k_i else "",
-                    "v": str(r[v_i])[:32],
-                })
+    # D2：『财务对照』表（指标 × 期间 × 口径 × 来源）→ 结论卡片；
+    # C 批：期间必须**写明**（卡片标题里带年份）、最新期间排在前面，不再裸取首数值列。
+    _tables = _parse_md_tables(md, max_rows=4)
+    _chosen, _src = _pick_period_table(_tables)
+    top_stats, _periods = _top_stats_of_table(_chosen)
+    _unit = _report_unit_of(md)
     traceability: dict = {}
     if task_id:
         try:
@@ -2048,6 +2125,11 @@ def _share_page_structured(md: str, task_id: str = "") -> dict:
         "disclaimer": disclaimer,
         "body": body,
         "top_stats": top_stats,
+        # C 批：结论卡的来源/期间/单位一起返回——页面据此如实标注，
+        # 不把"正文第一张表"说成"结论"，也不把旧期间的无标签读数置顶。
+        "top_stats_source": _src,
+        "top_stats_periods": _periods,
+        "top_stats_unit": _unit,
         "traceability": traceability,
     }
 
@@ -2353,9 +2435,19 @@ def _share_page_html(title: str, created_at: str, body_html: str,
     # 结构化区块（数据时效卡 / 目录 / 来源卡片 / 免责声明）
     structured_html = ""
     parts: list[str] = []
-    # D2：TOP 结论卡片（首表前 4 行）
+    # D2：TOP 结论卡片（『财务对照』表前 4 行 × 期间，期间写进卡片标题）
     top_stats = st.get("top_stats") or []
     if top_stats:
+        _per = "、".join(st.get("top_stats_periods") or [])
+        _u = str(st.get("top_stats_unit") or "")
+        if st.get("top_stats_source") == "metrics":
+            _note = "取自正文『财务对照』表（指标 × 期间"
+            _note += f"：{_per}" if _per else ""
+            _note += " × 口径 × 来源）"
+            _note += f"；表内单位 {_u}（行内自带单位的以其为准）" if _u else ""
+        else:
+            _note = ("正文里没有『财务对照』表：以下为正文第一张表的前 4 行，"
+                     "未判定为结论")
         cards = "".join(
             '<div class="stat-card"><div class="stat-k">'
             f"{html.escape(s.get('k', ''))}</div>"
@@ -2364,6 +2456,8 @@ def _share_page_html(title: str, created_at: str, body_html: str,
             for s in top_stats
         )
         parts.append(f'<div class="stats-row">{cards}</div>')
+        parts.append('<p style="margin:8px 0 0;font-size:12px;opacity:.72">'
+                     f"{html.escape(_note)}</p>")
     # D2：数据溯源区块（来源数 / 可溯源率 / CSV 下载）
     trace = st.get("traceability") or {}
     sources_n = len(st.get("sources") or [])
@@ -5854,14 +5948,19 @@ def _post_task_candidate(self, p, body, admin):
     装配与版本登记都在编排器里（`handle_regenerate_candidate`），因此网页与本地
     调试走同一条装配路径。
 
-    四条纪律（写进响应，页面据此显示）：
+    五条纪律（写进响应，页面据此显示）：
     - **不新增付费生成**：确定性装配（不调用模型）；请求带 `allow_paid` 会被**拒绝**，
       不悄悄降级（见编排器 handler）；
-    - **同一次动作只生成一个候选**：编排器按（材料身份 + 契约指纹 + 当前采纳版）幂等，
-      重复调用返回同一个候选（`created: false`）；
+    - **同一次动作只生成一个候选**：编排器按（**全部**已并入材料 + 契约指纹 +
+      采纳版 identity + 有效规则）幂等，重复调用返回同一个候选（`created: false`）；
     - **候选不采纳**：只登记新版本，旧采纳版本与人工文字原样保留；
       `requires_explicit_adoption=true`、`old_approval_inherited=false`；
-    - 失败方向：编排器未回执 → 503 且**不假成功**（没有候选就是没有候选）。
+    - **终态分两种**：`CANCELLED` 拒绝（取消没有可恢复的失败原因）；`FAILED`
+      **允许**——失败后补材料正是这个入口存在的理由，材料到底补齐没补齐由编排器裁决
+      （没有已并入的新材料 → `no_new_material`）；原失败记录不被修改，只在响应里
+      以 `prior_failure` 如实回报；
+    - 失败方向：**状态读不出来 ≠ 没有这一行**——读失败一律 503 不投递；
+      回执超时是**结果未知**（`pending` + 稳定 `operation_id`），不声称"没有生成"。
     """
     if not (p.startswith("/api/task/") and p.endswith("/candidate")):
         return None
@@ -5871,24 +5970,35 @@ def _post_task_candidate(self, p, body, admin):
     if not _task_exists(tid):
         return self._json({"error": "task not found"}, 404)
     import task_state as _ts_cand
-    row = {}
-    try:
-        row = _ts_cand.read_task(tid) or {}
-    except Exception:
-        row = {}
+    # 09-28 复核反例：这里先前用 `read_task`（异常吞成 `{}`）→ 读失败时 owner 为空、
+    # 状态为空，于是**归属校验与终态校验一起被跳过**，请求照投。改读严格版：
+    # 读不出来就明确 503，不"放行"，也不假装任务不存在。
+    row, verdict = _ts_cand.read_task_checked(tid)
+    if verdict == "error":
+        return self._json({
+            "status": "state_unreadable", "task_id": tid, "retryable": True,
+            "error": "任务状态读取失败（任务库暂不可用）；本次**未投递**，可稍后重试",
+        }, 503)
+    if verdict == "not_found":
+        return self._json({"error": "task not found"}, 404)
     owner = str(row.get("user") or "").strip()
     me = str((admin or {}).get("user") or "").strip()
     if owner and me and owner != me:
         return self._json({"error": "只能为自己提交的任务生成候选正文"}, 403)
-    if str(row.get("status") or "").upper() in ("CANCELLED", "FAILED"):
-        return self._json({"error": "任务已终态，不得再生成候选正文"}, 409)
-    # 运行中不生成：装配会读证据/底稿，与正在跑的任务同时写会互相覆盖
-    try:
-        if _ts_cand.is_running(tid):
-            return self._json(
-                {"error": "任务正在运行；等它收尾或先停止后再生成候选正文"}, 409)
-    except Exception:                            # noqa: BLE001 - 读不到状态就不挡
-        pass
+    status = str(row.get("status") or "").upper()
+    if status == "CANCELLED":
+        return self._json({
+            "status": "cancelled", "task_id": tid,
+            "error": ("任务已被**取消**（与失败不同：取消没有可恢复的失败原因）。"
+                      "重新提交任务后再补材料；本次未投递"),
+        }, 409)
+    # 运行态：用**同一次**已校验读到的行判断（不再第二次读库——第二次读失败先前被
+    # `except: pass` 吞掉，等于没有这道闸门）。
+    if status in ("RUNNING", "QUEUED", "PENDING", "QRUNNING"):
+        return self._json({
+            "status": "task_running", "task_id": tid,
+            "error": "任务正在运行（或还在队列里等执行）；等它收尾后再生成候选正文",
+        }, 409)
     if not _redis_ready():
         return self._json({"error": "Redis 未连接，无法投递候选生成请求"}, 503)
     allow_paid = bool((body or {}).get("allow_paid"))
@@ -5899,10 +6009,13 @@ def _post_task_candidate(self, p, body, admin):
             "error": "本轮授权不新增付费生成：模型重生成未接线。"
                      "去掉 allow_paid 可走确定性装配（不调用模型、不消耗额度）",
         }, 409)
-    ack_key = f"candidate_ack:{tid}:{uuid.uuid4().hex[:8]}"
+    # 稳定 operation id：调用方给了就用它（重试同一个 operation → 拿回同一次结果，
+    # 而不是又发起一次），没给就现生成一个并**回显**给调用方。
+    op_id = str((body or {}).get("request_id") or "").strip() or uuid.uuid4().hex[:12]
+    ack_key = f"candidate_ack:{tid}:{op_id}"
+    query_hint = f"/api/task/{tid}/candidate?operation_id={op_id}"
     try:
         r = _new_redis()
-        r.delete(ack_key)
         r.publish("orchestrator:main", json.dumps({
             "type": "regenerate_candidate", "task_id": tid, "ack_key": ack_key,
             "material_id": str((body or {}).get("material_id") or ""),
@@ -5929,11 +6042,422 @@ def _post_task_candidate(self, p, body, admin):
               result="ok" if (result or {}).get("ok") else "pending",
               detail=str((result or {}).get("status") or "no_ack"))
     if not isinstance(result, dict):
+        # 超时 = **结果未知**，不是"没有生成任何候选"：装配可能仍在跑、也可能已经
+        # 失败并把回执写在别处。给稳定 operation id + 查询入口，不误导、不假成功。
         return self._json({
-            "status": "pending", "task_id": tid,
-            "error": "编排器未在时限内回执；没有生成任何候选（不假成功），可稍后重试",
+            "status": "pending", "task_id": tid, "operation_id": op_id,
+            "request_id": op_id, "retryable": True, "result_unknown": True,
+            "query": query_hint, "receipt_ttl_sec": 600,
+            "error": ("编排器未在时限内回执：**本次结果未知**（可能仍在装配，也可能已失败）。"
+                      "用 operation_id 查回结果，或稍后重试；重试请带上同一个 request_id，"
+                      "以免重复发起"),
         }, 503)
-    return self._json(result, 200 if result.get("ok") else 409)
+    out = dict(result)
+    out.setdefault("operation_id", op_id)
+    out.setdefault("request_id", op_id)
+    out["query"] = query_hint
+    return self._json(out, 200 if result.get("ok") else 409)
+
+
+def _get_task_candidate(self, p):
+    """GET /api/task/<id>/candidate[?operation_id=…]：查回候选生成操作的结果。
+
+    为什么要有这条只读入口：候选装配在编排器后台线程里跑，投递方（浏览器）可能超时、
+    刷新或直接关掉页面。没有查询入口时，"结果未知"只能靠**重新提交**来消除——那正是
+    重复动作与重复候选的来源。这里按稳定 operation id（或最近一次）把收执读回来。
+    """
+    # 分派器只把 `urlparse(...).path` 传进来（查询串已被剥掉），所以这里读 `self.path`
+    raw = str(getattr(self, "path", "") or p)
+    base, _, qs = raw.partition("?")
+    base = urlparse(base).path or base
+    tid = base[len("/api/task/"):].rsplit("/candidate", 1)[0].strip()
+    if not tid:
+        return self._json({"error": "task_id required"}, 400)
+    op = ""
+    for kv in (qs or "").split("&"):
+        k, _, v = kv.partition("=")
+        if k == "operation_id":
+            op = unquote(v or "").strip()
+    if not _task_exists(tid):
+        return self._json({"error": "task not found"}, 404)
+    if not _redis_ready():
+        return self._json({"status": "unavailable", "task_id": tid,
+                           "error": "Redis 未连接，暂时查不到操作结果"}, 503)
+    key = f"candidate_ack:{tid}:{op}" if op else f"candidate_ack:{tid}:latest"
+    try:
+        got = _new_redis().get(key)
+    except Exception as exc:
+        return self._json({"status": "unavailable", "task_id": tid,
+                           "error": f"读取操作结果失败：{str(exc)[:160]}"}, 503)
+    if not got:
+        # 没查到 ≠ 没生成：回执有 TTL，`latest` 只保证最近一次
+        return self._json({
+            "status": "unknown", "task_id": tid, "operation_id": op,
+            "receipt_ttl_sec": 600,
+            "error": ("没有查到这个操作的回执（可能已过保留期，或本次操作从未投递）。"
+                      "回执保留 600 秒；旧操作请以版本库与页面上的候选列表为准"),
+        }, 404)
+    try:
+        data = json.loads(got if isinstance(got, str) else got.decode("utf-8"))
+    except Exception:
+        return self._json({"status": "unreadable", "task_id": tid,
+                           "error": "回执内容无法解析"}, 500)
+    if not isinstance(data, dict):
+        return self._json({"status": "unreadable", "task_id": tid,
+                           "error": "回执内容形状不对"}, 500)
+    out = dict(data)
+    out.setdefault("operation_id", op)
+    out["queried_operation_id"] = op
+    return self._json(out, 200 if data.get("ok") else 409)
+
+
+def _candidate_state_of(tid: str) -> dict:
+    """读候选状态文件（候选**不是**交付，所以它不写交付投影，单独一份）。"""
+    try:
+        import orchestrator_v2 as _ov2
+        p = task_workspace(tid) / _ov2.OrchestratorV2.CANDIDATE_STATE_FILE
+        if p.is_file():
+            data = json.loads(p.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+    except Exception as exc:                     # noqa: BLE001
+        logger.info("候选状态读取失败（task=%s）：%s", tid, str(exc)[:120])
+    return {}
+
+
+def _version_public(v) -> dict:
+    """版本记录 → 对外形状（**只读、不夹带正文**；正文单独一个字段给预览）。
+
+    `identity_id` 是**方法**：09-28 复核反例里被当成属性 `str()` 过，结果接口里出现
+    `<bound method … of ReportVersion(body="…正文…")>` ——既不是身份、又泄漏正文。
+    """
+    if v is None:
+        return {}
+    fn = getattr(v, "identity_id", "")
+    try:
+        ident = fn() if callable(fn) else str(fn or "")
+    except Exception:                            # noqa: BLE001
+        ident = ""
+    acc = dict(getattr(v, "acceptance", {}) or {})
+    try:
+        for_this = bool(v.acceptance_for_this_body())
+    except Exception:                            # noqa: BLE001
+        for_this = False
+    return {
+        "version_id": str(getattr(v, "version_id", "") or ""),
+        "identity_id": str(ident or ""),
+        "root_task_id": str(getattr(v, "root_task_id", "") or ""),
+        "parent_id": str(getattr(v, "parent_id", "") or ""),
+        "created_at": float(getattr(v, "created_at", 0.0) or 0.0),
+        "sources_fingerprint": str(getattr(v, "sources_fingerprint", "") or ""),
+        "rules_version": str(getattr(v, "rules_version", "") or ""),
+        "rules_fingerprint": str(getattr(v, "rules_fingerprint", "") or ""),
+        "bytes": len(str(getattr(v, "body", "") or "").encode("utf-8")),
+        "acceptance": acc,
+        "acceptance_for_this_body": for_this,
+        "acceptance_needs_reverify": bool(
+            getattr(v, "acceptance_needs_reverify", lambda: False)()),
+        "identity_drifted": bool(getattr(v, "identity_drifted", lambda: False)()),
+    }
+
+
+def _candidate_resolve(tid: str, ident: str):
+    """按 identity（或 version_id，或"最近一次候选"）取候选版本记录 → `(v, how)`。"""
+    from report_version import VersionStore
+    store = VersionStore(task_workspace(tid), tid)
+    ident = str(ident or "").strip()
+    if ident:
+        v = store.find_identity(ident)
+        if v is not None:
+            return v, "identity"
+        v = store.get(ident)
+        return (v, "version_id") if v is not None else (None, "not_found")
+    state = _candidate_state_of(tid)
+    for key, how in ((str(state.get("candidate_identity_id") or ""), "state_identity"),
+                     (str(state.get("candidate_version_id") or ""), "state_version")):
+        if not key:
+            continue
+        v = store.find_identity(key) or store.get(key)
+        if v is not None:
+            return v, how
+    return None, "no_candidate"
+
+
+def _candidate_compare(cand_body: str, adopted_body: str) -> dict:
+    """候选 vs 当前采纳稿：**结构化比较**（不是给用户看两坨正文自己找差别）。"""
+    import difflib
+    a = str(adopted_body or "")
+    b = str(cand_body or "")
+    al, bl = a.splitlines(), b.splitlines()
+    sm = difflib.SequenceMatcher(None, al, bl)
+    added = removed = 0
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if tag in ("replace", "delete"):
+            removed += i2 - i1
+        if tag in ("replace", "insert"):
+            added += j2 - j1
+    diff = list(difflib.unified_diff(al, bl, fromfile="当前采纳稿", tofile="候选稿",
+                                     lineterm="", n=2))
+    # 人工写下的分析节是否被候选原样保留（候选必须**吞不掉**人工文字）
+    analysis_adopted = analysis_cand = ""
+    try:
+        import report_brief as _rb
+        analysis_adopted = _rb._analysis_section(a) or ""
+        analysis_cand = _rb._analysis_section(b) or ""
+    except Exception:                            # noqa: BLE001 - 取不到就按"未知"处理
+        pass
+    return {
+        "identical": a == b,
+        "adopted_bytes": len(a.encode("utf-8")),
+        "candidate_bytes": len(b.encode("utf-8")),
+        "added_lines": added, "removed_lines": removed,
+        "changed_lines": added + removed,
+        "analysis_section_chars_adopted": len(analysis_adopted),
+        "analysis_section_chars_candidate": len(analysis_cand),
+        "analysis_section_preserved": bool(analysis_adopted)
+        and analysis_adopted.strip() == analysis_cand.strip(),
+        "diff_head": diff[:200],
+        "diff_truncated": len(diff) > 200,
+    }
+
+
+def _get_task_candidate_preview(self, p):
+    """GET /api/task/<id>/candidate/preview[?identity=…]：候选正文**预览 + 与当前稿比较**。
+
+    只读：不改采纳指针、不跑验收、不写盘——它回答"这个候选到底写了什么、和现在的交付
+    差在哪里、缺什么证据"，让"采纳"成为一个**看得见内容**的显式动作，而不是盲点按钮。
+    """
+    raw = str(getattr(self, "path", "") or p)
+    base, _, qs = raw.partition("?")
+    base = urlparse(base).path or base
+    tid = base[len("/api/task/"):].rsplit("/candidate/preview", 1)[0].strip()
+    if not tid:
+        return self._json({"error": "task_id required"}, 400)
+    if not _task_exists(tid):
+        return self._json({"error": "task not found"}, 404)
+    ident = ""
+    for kv in (qs or "").split("&"):
+        k, _, v = kv.partition("=")
+        if k in ("identity", "identity_id", "version_id"):
+            ident = unquote(v or "").strip()
+    try:
+        from report_version import VersionStore
+        store = VersionStore(task_workspace(tid), tid)
+        cand, how = _candidate_resolve(tid, ident)
+        adopted = store.adopted()
+    except Exception as exc:                     # noqa: BLE001
+        return self._json({"error": f"读取候选版本失败：{str(exc)[:160]}"}, 500)
+    if cand is None:
+        return self._json({
+            "status": "no_candidate", "task_id": tid, "resolved_by": how,
+            "error": ("没有找到这个候选版本（可能还没生成，或 identity 不属于本任务）。"
+                      "先按新材料生成候选正文，再预览"),
+        }, 404)
+    cand_body = str(getattr(cand, "body", "") or "")
+    adopted_body = str(getattr(adopted, "body", "") or "")
+    state = _candidate_state_of(tid)
+    cpub, apub = _version_public(cand), _version_public(adopted)
+    already = bool(apub.get("identity_id")) and apub.get("identity_id") == cpub.get("identity_id")
+    return self._json({
+        "status": "candidate_preview", "task_id": tid, "resolved_by": how,
+        "candidate": cpub,
+        "adopted": apub,
+        "is_adopted": already,
+        "requires_explicit_adoption": not already,
+        "body": cand_body,
+        "comparison": _candidate_compare(cand_body, adopted_body),
+        "prior_failure": state.get("prior_failure") or {},
+        "basis": state.get("basis") or {},
+        "affected_steps": state.get("affected_steps") or [],
+        "stopped_steps": state.get("stopped_steps") or [],
+        "generation": state.get("generation") or {},
+        "adopt_endpoint": f"/api/task/{tid}/candidate/adopt",
+        "export_endpoint": f"/api/task/{tid}/package",
+        "note": ("只读预览：候选**未采纳**。采纳是另一个显式动作，且采纳后仍需重验；"
+                 "人工复核（human_review）由真人单独完成，机器不代写"),
+    }, 200)
+
+
+def _post_task_candidate_adopt(self, p, body, admin):
+    """POST /api/task/<id>/candidate/adopt：**显式采纳**某个候选身份 → 对该身份重验。
+
+    三条纪律：
+    1. **必须显式**：`confirm` 不为 true 一律 400（没有"顺手采纳"这条路径）；
+    2. **只采纳指定的那个身份**：按 identity（或 version_id）精确取版本，取不到就 404，
+       不接受"采纳最新那个"这种含糊语义；
+    3. **旧人工批准不继承**：不碰 `human_review.json`（本函数只写版本库的选中指针），
+       并在响应里**如实报出**它有没有被改动；采纳也**不等于**验证通过——重验结论原样回报。
+    """
+    if not (p.startswith("/api/task/") and p.endswith("/candidate/adopt")):
+        return None
+    tid = p[len("/api/task/"):].rsplit("/candidate/adopt", 1)[0].strip()
+    if not tid:
+        return self._json({"error": "task_id required"}, 400)
+    if not _task_exists(tid):
+        return self._json({"error": "task not found"}, 404)
+    import task_state as _ts_ad
+    row, verdict = _ts_ad.read_task_checked(tid)
+    if verdict == "error":
+        return self._json({"status": "state_unreadable", "task_id": tid, "retryable": True,
+                           "error": "任务状态读取失败；本次**未采纳**，可稍后重试"}, 503)
+    if verdict == "not_found":
+        return self._json({"error": "task not found"}, 404)
+    me = str((admin or {}).get("user") or "").strip()
+    owner = str(row.get("user") or "").strip()
+    if owner and me and owner != me:
+        return self._json({"error": "只能采纳自己提交的任务的候选正文"}, 403)
+    if (body or {}).get("allow_paid"):
+        return self._json({"status": "paid_not_authorized", "task_id": tid,
+                           "error": "采纳不调用模型；本轮授权不新增付费生成"}, 409)
+    if (body or {}).get("confirm") is not True:
+        return self._json({
+            "status": "explicit_confirmation_required", "task_id": tid,
+            "error": ("显式采纳需要 `confirm: true`（采纳会改变交付选中版本，"
+                      "不能由「顺手点一下」或机器自动完成）"),
+        }, 400)
+    ident = str((body or {}).get("identity") or (body or {}).get("identity_id")
+                or (body or {}).get("version_id") or "").strip()
+    if not ident:
+        return self._json({"status": "identity_required", "task_id": tid,
+                           "error": "必须给出要采纳的候选 identity（不接受「采纳最新那个」）"}, 400)
+    ws = task_workspace(tid)
+    hr_path = ws / "human_review.json" if hasattr(ws, "joinpath") else None
+    hr_before = ""
+    try:
+        hr_before = hashlib.sha256(hr_path.read_bytes()).hexdigest() if hr_path.is_file() else ""
+    except Exception:                            # noqa: BLE001
+        hr_before = ""
+    try:
+        from report_version import VersionStore
+        store = VersionStore(ws, tid)
+        cand, how = _candidate_resolve(tid, ident)
+        adopted_before = store.adopted()
+    except Exception as exc:                     # noqa: BLE001
+        return self._json({"error": f"读取版本库失败：{str(exc)[:160]}"}, 500)
+    if cand is None:
+        return self._json({"status": "not_found", "task_id": tid,
+                           "error": f"没有这个身份对应的版本：{ident[:24]}…"}, 404)
+    cand_pub = _version_public(cand)
+    adopted_pub_before = _version_public(adopted_before)
+    # 已经是这个身份：**不重复采纳**（选中指针本来就对），但下面的重验与交付投影同步
+    # 仍然要跑——"选中指针已对、交付正文/登记却还是旧版"是实测过的真实状态
+    # （导出会判"交付正文与采纳版本不一致"），这一步顺手把它修好。
+    already = adopted_pub_before.get("identity_id") == cand_pub.get("identity_id")
+    if not already:
+        try:
+            ok = bool(store.adopt(cand, reason="候选正文显式采纳（页面动作）"))
+        except Exception as exc:                 # noqa: BLE001
+            return self._json({"error": f"采纳失败：{str(exc)[:160]}"}, 500)
+        if not ok:
+            return self._json({"status": "adopt_failed", "task_id": tid,
+                               "error": "版本库没有接受这次采纳；选中指针未改变"}, 409)
+    # 对该身份重验（确定性验收；不调用模型）：采纳**不等于**通过，结论原样回报。
+    # `verify_body_as_is=True` 是关键：验收对象必须**就是**刚采纳的这个身份，不能让
+    # 装配器把它重写成另一份正文再验收（那样 `report_sha256` 与采纳身份对不上，
+    # 该版仍是"证据未知"，"对该身份重验"就成了空话）。
+    reverify: dict = {}
+    verdict: dict = {}
+    try:
+        from delivery_pipeline import accept_for_body
+        v = accept_for_body(tid, str(row.get("goal") or ""),
+                            str(getattr(cand, "body", "") or ""),
+                            trigger="候选采纳后重验", verify_body_as_is=True, ws_dir=ws)
+        if isinstance(v, dict):
+            verdict = v
+            reverify = {"ran": True, "overall": str(v.get("overall") or ""),
+                        "gaps": list(v.get("gaps") or [])[:8],
+                        "report_sha256": str(v.get("report_sha256") or "")}
+    except Exception as exc:                     # noqa: BLE001 - 重验失败如实说，不假通过
+        logger.warning("候选采纳后重验失败（task=%s）：%s", tid, str(exc)[:160])
+        reverify = {"ran": False, "error": str(exc)[:160]}
+    # **交付投影同步**（与人工修订同一条装配路径）：采纳只改选中指针还不够——
+    # 交付正文（`reports/report.md`）、交付登记（`record_delivery`）与页面顶部投影
+    # 都要跟着这个身份走，否则导出会判定"交付正文与采纳版本不一致"（实测 409
+    # 「导出期间发生修订」）——"采纳了却导不出来"的闭环缺口就出在这一步。
+    assemble: dict = {}
+    try:
+        from delivery_pipeline import assemble_and_verify
+        _ctr = None
+        try:
+            _w = (row.get("contract") or {})
+            if isinstance(_w, dict) and _w:
+                _ctr = {"wire": dict(_w), "source": "task_record"}
+        except Exception:                        # noqa: BLE001
+            _ctr = None
+        assemble = assemble_and_verify(
+            tid, str(row.get("goal") or ""), str(getattr(cand, "body", "") or ""),
+            accept_fn=(lambda t, g, b: verdict or None) if verdict else None,
+            ws_dir=ws, contract=_ctr) or {}
+    except Exception as exc:                     # noqa: BLE001 - 投影失败如实报，不假成功
+        logger.warning("候选采纳后交付投影装配失败（task=%s）：%s", tid, str(exc)[:160])
+        assemble = {"status": "assemble_failed", "reason": str(exc)[:160]}
+    try:
+        from task_state import update_delivery_projection
+        _acc = {
+            "overall": str((after.get("acceptance") or {}).get("overall") or ""),
+            "gaps": list((after.get("acceptance") or {}).get("gaps") or [])[:8],
+            "rules_version": str(after.get("rules_version") or ""),
+            "rules_fingerprint": str(after.get("rules_fingerprint") or ""),
+            "report_sha256": str((after.get("acceptance") or {}).get("report_sha256") or ""),
+            "version_bound": bool(after.get("acceptance_for_this_body")),
+        }
+        update_delivery_projection(
+            tid, report=str(assemble.get("report") or ""), acceptance=_acc,
+            status="")
+    except Exception as exc:                     # noqa: BLE001
+        logger.info("候选采纳后交付投影写入失败（task=%s）：%s", tid, str(exc)[:140])
+    hr_after = ""
+    try:
+        hr_after = hashlib.sha256(hr_path.read_bytes()).hexdigest() if hr_path.is_file() else ""
+    except Exception:                            # noqa: BLE001
+        hr_after = ""
+    delivery: dict = {}
+    try:
+        from delivery_pipeline import delivery_state
+        delivery = delivery_state(tid, str(getattr(cand, "body", "") or ""), ws_dir=ws) or {}
+    except Exception:                            # noqa: BLE001
+        delivery = {}
+    try:
+        store2 = VersionStore(ws, tid)
+        after = _version_public(store2.adopted())
+    except Exception:                            # noqa: BLE001
+        after = cand_pub
+    audit_log(me, self._client_ip(), "task.candidate.adopt", target=tid, result="ok",
+              detail=f"{ident[:16]} -> {cand_pub.get('version_id', '')[:12]}")
+    # 重验是否**落在刚采纳的那个身份上**：不以"跑了验收"为准，以绑定结果为准。
+    covers = bool(after.get("acceptance_for_this_body"))
+    reverify["covers_adopted_identity"] = covers
+    reverify["bound_version_id"] = str(
+        ((after.get("acceptance") or {}).get("report_sha256") or ""))
+    if reverify.get("ran") and not covers:
+        reverify["note"] = ("验收跑过了，但没有绑到刚采纳的这个身份（该版仍按"
+                            "「证据未知/待重验」处理）——不要把 reverify.overall 当成"
+                            "这一版的结论")
+    return self._json({
+        "ok": True, "status": ("already_adopted" if already else "adopted"),
+        "task_id": tid, "changed": (not already),
+        "note": ("这个身份已经是当前选中版本；未重复采纳、未改任何指针"
+                 if already else "已切换选中版本到该身份"),
+        "resolved_by": how,
+        "adopted": after,
+        "previous": adopted_pub_before,
+        "identity_verified": bool(after.get("identity_id") == cand_pub.get("identity_id")),
+        "reverify": reverify,
+        "delivery_assembly": {"status": str(assemble.get("status") or ""),
+                              "reason": str(assemble.get("reason") or "")[:200]},
+        "delivery": {k: delivery.get(k) for k in
+                     ("state", "label", "verified", "draft_only", "note")
+                     if k in delivery},
+        "human_review_untouched": bool(hr_before == hr_after),
+        "human_review_sha256_before": hr_before[:16],
+        "human_review_sha256_after": hr_after[:16],
+        "old_approval_inherited": False,
+        "verified_by_this_action": False,
+        "next": {
+            "export": f"POST /api/task/{tid}/package",
+            "note": ("采纳只改变了**选中版本**；交付是否可发布仍按该版自己的验收与"
+                     "真人复核判定。重验结论见 reverify，不通过就是不通过"),
+        },
+    }, 200)
 
 
 def _post_task_package(self, p, body, admin):
@@ -5955,13 +6479,23 @@ def _post_task_package(self, p, body, admin):
     if not _task_exists(tid):
         return self._json({"error": "task not found"}, 404)
     import task_state as _ts
-    row = {}
-    try:
-        row = _ts.read_task(tid) or {}
-    except Exception:
-        row = {}
-    if str(row.get("status") or "").upper() in ("CANCELLED", "FAILED"):
-        return self._json({"error": "任务已终态，不重新打包"}, 409)
+    # C 批：打包闸门与候选入口**同一套判据**——CANCELLED 拒绝（没有可交付的东西）、
+    # 运行中拒绝（正文还会变）、**FAILED 允许**（失败后补材料并显式采纳的那一版正是
+    # 要导出的东西；包内清单里如实记着采纳身份与 hash，交付状态仍是"未验收草稿"）。
+    # 旧实现一律"任务已终态"拒绝 → 候选能采纳却导不出来，闭环断在最后一步。
+    row, verdict = _ts.read_task_checked(tid)
+    if verdict == "error":
+        return self._json({"status": "state_unreadable", "task_id": tid, "retryable": True,
+                           "error": "任务状态读取失败；本次**未打包**，可稍后重试"}, 503)
+    if verdict == "not_found":
+        return self._json({"error": "task not found"}, 404)
+    _st = str(row.get("status") or "").upper()
+    if _st == "CANCELLED":
+        return self._json({"status": "cancelled",
+                           "error": "任务已被取消，不重新打包（取消没有可交付的正文）"}, 409)
+    if _st in ("RUNNING", "QUEUED", "PENDING", "QRUNNING"):
+        return self._json({"status": "task_running",
+                           "error": "任务正在运行；正文还会变，等它收尾后再打包"}, 409)
     ws = task_workspace(tid)
     # E/项2：**一次不可变快照**——采纳身份 + 交付正文 + 资料/规则指纹 + 逐成员字节
     # （底稿/图表/审计稿/引用证据）一次性捕获，MD/PDF/清单都由它生成；期间发生修订则
@@ -6819,6 +7353,8 @@ _GET_ROUTES = [
     (lambda self, p: p.startswith("/api/conversations/"), _get_conversation_detail),
     (lambda self, p: p.startswith("/api/share/"), _get_share_data),
     (lambda self, p: p.startswith("/share/"), _get_share_page),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/candidate/preview"), _get_task_candidate_preview),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/candidate"), _get_task_candidate),
     (lambda self, p: p.startswith("/task/") and p.endswith("/report"), _get_task_report),
     (lambda self, p: p.startswith("/task/"), _get_task_page),
 ]
@@ -6830,6 +7366,7 @@ _POST_ROUTES = [
     (lambda self, p: self.path == "/api/memory/delete", _post_memory_delete),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/review/edit"), _post_task_review_edit),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/material"), _post_task_material),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/candidate/adopt"), _post_task_candidate_adopt),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/candidate"), _post_task_candidate),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/package"), _post_task_package),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/cancel"), _post_task_cancel),

@@ -133,6 +133,13 @@ export default function TaskConsole() {
         useTaskStore.setState({ currentTaskId: running.task_id })
         saveLastTask(running.task_id)   // 与提交路径一致：刷新后仍能恢复跟踪
       } else {
+        // C 批（09-28）实机反例：从会话打开**已结束**的任务时，这里只回放计划/日志，
+        // **从不设置 currentTaskId** → 页面上的"可行动状态"（`/api/task/<id>/actionable`）
+        // 与补材料面板都拿不到任务 id：接口明明返回 `{state:"failed",
+        // action:"add_material"}`（实测 ui-c5loop-1），用户却看不到"该做什么"。
+        // 用户是**明确点开会话**进来的，绑定这一条任务才对：这样"失败后该做什么"
+        // 能显示、补材料/交付面板也指着同一个任务（终态任务不吃实时通道的重活）。
+        useTaskStore.setState({ currentTaskId: targetId })
         fetch('/task/' + targetId).then(r => r.json()).then((d: any) => {
           if (!d || d.error) return
           if (Array.isArray(d.steps) && d.steps.length > 0) {
@@ -181,19 +188,28 @@ export default function TaskConsole() {
 
   // C3：可行动状态——"我现在该做什么"。状态变化或换任务时刷新一次轻量端点
   // （`/api/task/<id>/actionable`），不把大 payload 拉回来。
+  //
+  // C 批（09-28）实机反例：页面**根本不显示**这条提示——接口明明返回
+  // `{state:"failed", action:"add_material", …}`（实测 ui-c5loop-1），页面却一片空白。
+  // 根因是这里的取数竞态：依赖里带着 `revision`，而 `revision` 随实时同步频繁变化，
+  // 每次变化都会把**上一次还没回来的请求**标记成"已失效"，于是结果永远落不了地
+  // （`alive=false` 时既不设值也不置空）。现在改为：只在**换任务/状态变化**时取数，
+  // 并用自增序号做"只认最后一次请求"，不再因为无关的重渲染丢掉结果。
+  const actionableSeq = useRef(0)
   useEffect(() => {
     if (!currentTaskId) { setActionable(null); return }
-    let alive = true
+    const seq = ++actionableSeq.current
+    const tid = currentTaskId
     ;(async () => {
       try {
-        const res = await fetch('/api/task/' + encodeURIComponent(currentTaskId) + '/actionable')
-        if (!res.ok) { if (alive) setActionable(null); return }
+        const res = await fetch('/api/task/' + encodeURIComponent(tid) + '/actionable')
+        if (seq !== actionableSeq.current) return
+        if (!res.ok) { setActionable(null); return }
         const data = await res.json()
-        if (alive) setActionable(data && data.state ? data : null)
-      } catch { if (alive) setActionable(null) }
+        setActionable(data && data.state ? data : null)
+      } catch { if (seq === actionableSeq.current) setActionable(null) }
     })()
-    return () => { alive = false }
-  }, [currentTaskId, status, revision])
+  }, [currentTaskId, status])
 
   // 当前任务完成后刷新会话消息
   useEffect(() => {

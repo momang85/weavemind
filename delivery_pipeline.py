@@ -1338,8 +1338,16 @@ def research_candidate_body(task_id: str, goal: str, body: str, *,
 
 def accept_for_body(task_id: str, goal: str, body: str = "", *,
                     trigger: str = "报告步骤", prefer_body: bool = True,
-                    hooks: dict | None = None, ws_dir=None) -> dict | None:
+                    hooks: dict | None = None, ws_dir=None,
+                    verify_body_as_is: bool = False) -> dict | None:
     """对**指定正文**跑确定性验收，并把结论绑到该正文所属的版本。
+
+    `verify_body_as_is`：**认这份正文就是验收对象，不再用装配器重写一遍**。
+    默认 False（沿用旧行为：先装配最终候选稿再验收）。凡"要证明的就是**这一个身份**"
+    的场合（采纳后重验、对候选正文自己验收）必须置 True——否则验收跑在装配器重写后的
+    另一份正文上，结论与身份对不上（实测：采纳版正文 `e3d4d0a8…` 重装配后变成
+    `429801667d…`，"毛利额…：20920103385→24728464886"被改写成
+    "上期 247.28 亿元 → 本期 209.20 亿元（-38.08 亿元）"，两版数字不同、验收对象不同）。
 
     `hooks`（都可选，编排器用它保持既有行为）：
     - `cancelled()`：返回 True 则跳过（取消是终态，不再产生副作用）；
@@ -1368,7 +1376,8 @@ def accept_for_body(task_id: str, goal: str, body: str = "", *,
         # F2′-3：研究任务的**模型草稿**先装配最终候选稿，再对**同一版**验收——代码负责的
         # 声明/编号/链接不触发整稿模型重生成（否则验收会要求模型重做装配器的工作）。
         # 人工修订重验（trigger="人工修订重验"）不得替换用户正文：那会丢掉他的改动。
-        if str(trigger or "") != "人工修订重验":
+        # 同理，"验证的就是这一个身份"（`verify_body_as_is`）时不得替换。
+        if not verify_body_as_is and str(trigger or "") != "人工修订重验":
             candidate = research_candidate_body(task_id, goal, report,
                                                 project=None, ws_dir=ws_dir)
             if candidate and candidate != report:

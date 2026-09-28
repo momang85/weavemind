@@ -258,16 +258,89 @@ interface TopStat { k: string; v: string }
  *  `none`=正文没有可提取的表。 */
 export type TopStatsSource = 'metrics' | 'first_table' | 'none'
 
+/** 结论卡解析结果：数值卡 + 来源 + **用到的期间** + 表内单位。
+ *
+ *  期间与单位必须一起返回：卡片只给一个读数而不说这是哪一期，读者会把旧值当成
+ *  当前值（实机反例：冻结样本『财务对照』表头是 `指标 | 2023 | 2024 | …`，
+ *  裸取第 1 列 → 置顶显示的是 **2023** 的读数，且不带年份）。
+ */
+export interface TopStatsResult {
+  stats: TopStat[]
+  source: TopStatsSource
+  periods: string[]
+  unit: string
+}
+
+const PERIOD_HEADER_RE = /^(20\d{2})\s*(?:年|年度|年报|A|H[12]|Q[1-4])?$/
+
+/** 表头单元格 → 期间标签（`2024`/`2024年` → `2024年`）；不是期间列返回空串。 */
+export function periodOfHeader(cell: unknown): string {
+  const c = String(cell ?? '').trim().replace(/\*\*/g, '')
+    .replace(/[（(][^）)]*[）)]/g, '').replace(/\s+/g, '')
+  const m = PERIOD_HEADER_RE.exec(c)
+  return m ? `${m[1]}年` : ''
+}
+
+/** 正文里声明的金额单位（`单位：亿元`）；读不到就是空串，不猜。 */
+export function reportUnitOf(md: string): string {
+  const m = /单位\s*[:：]\s*([^\s；;，,）)]{1,8})/.exec(String(md || ''))
+  return m ? m[1].trim() : ''
+}
+
+/** 表 → 结论卡：**明确年份**、最新期间在前，不裸取首数值列。
+ *
+ *  旧实现取"第 0/1 列"：`指标 | 2023 | 2024 | 口径 | 来源` 的第一数值列是 **2023**
+ *  （较旧那期），无标签置顶看起来像当前值。现在每张卡的标题写明期间，
+ *  期间列按年份从新到旧排；没有可识别期间列时才退回"指标 + 第一非指标列"。
+ */
+export function topStatsOfTable(
+  table: string[][], maxCards = 8,
+): { stats: TopStat[]; periods: string[] } {
+  const hdr = (table && table[0]) || []
+  const rows = (table || []).slice(1)
+  if (!hdr.length || !rows.length) return { stats: [], periods: [] }
+  let kIdx = hdr.findIndex(h => h.includes('指标') || h.includes('数值'))
+  if (kIdx < 0) kIdx = 0
+  let periodCols = hdr
+    .map((h, i): [number, string] => [i, periodOfHeader(h)])
+    .filter(([i, p]) => !!p && i !== kIdx)
+  if (periodCols.length) {
+    periodCols = [...periodCols].sort((a, b) => (a[1] < b[1] ? 1 : a[1] > b[1] ? -1 : 0))
+    const periods = periodCols.map(([, p]) => p)
+    const stats: TopStat[] = []
+    for (const r of rows) {
+      const name = (r.length > kIdx ? r[kIdx] : '').slice(0, 24)
+      for (const [i, p] of periodCols) {
+        const v = r.length > i ? String(r[i] ?? '').trim() : ''
+        if (v && v !== '—') {
+          stats.push({ k: `${name} · ${p}`, v: v.slice(0, 32) })
+          if (stats.length >= maxCards) return { stats, periods }
+        }
+      }
+    }
+    return { stats, periods }
+  }
+  let vIdx = hdr.findIndex(h => h.includes('数值'))
+  if (vIdx < 0) vIdx = Math.min(1, hdr.length - 1)
+  if (vIdx === kIdx) vIdx = Math.min(kIdx + 1, hdr.length - 1)
+  return {
+    stats: rows
+      .filter(r => r.length > vIdx && String(r[vIdx] ?? '').trim())
+      .map(r => ({ k: (r.length > kIdx ? r[kIdx] : '').slice(0, 24),
+                   v: String(r[vIdx]).slice(0, 32) })),
+    periods: [],
+  }
+}
+
 /** 正文表格 → 结论卡（键截 24 字、值截 32 字）。
  *
- *  与分享页 `web_ui._share_page_structured` 同口径：列取表头含"指标"/"数值"者，
- *  缺省第 0/1 列。**但表格不再"只取第一张"**：研究简报里『实物量（吨）』『收入构成（元）』
- *  排在『财务对照（指标×期间×口径×来源）』之前，于是"结论速览"曾把 **吨位**当成结论
- *  显示（实机截图：白酒销售量/生产量/库存量）——数字没错、**卡片名与内容不符**。
- *  现在：优先取表头含"指标"的那张（=财务对照）；取不到才退回第一张，
- *  并由调用方按 `source` 如实标注来源，不把任何一张表都说成"结论"。
+ *  与分享页 `web_ui._share_page_structured` 同口径：**优先取表头含"指标"的那张**
+ *  （=财务对照）；取不到才退回第一张，并由调用方按 `source` 如实标注来源，
+ *  不把任何一张表都说成"结论"。研究简报里『实物量（吨）』『收入构成（元）』排在
+ *  『财务对照』之前，于是"结论速览"曾把 **吨位**当成结论显示（实机截图：白酒销售量/
+ *  生产量/库存量）——数字没错、**卡片名与内容不符**。
  */
-export function parseTopStatsWithSource(md: string): { stats: TopStat[]; source: TopStatsSource } {
+export function parseTopStatsWithSource(md: string): TopStatsResult {
   const tables: string[][][] = []
   let cur: string[][] = []
   let header: string[] = []
@@ -283,22 +356,14 @@ export function parseTopStatsWithSource(md: string): { stats: TopStat[]; source:
     if (!header.length) { header = cells; cur = [cells] } else if (cur.length < 5) cur.push(cells)
   }
   if (cur.length) tables.push(cur)
-  if (!tables.length) return { stats: [], source: 'none' }
+  const unit = reportUnitOf(md)
+  if (!tables.length) return { stats: [], source: 'none', periods: [], unit }
   const metrics = tables.find(t => (t[0] || []).some(h => h.includes('指标')))
   const chosen = metrics || tables[0]
-  const hdr = chosen[0] || []
-  const rows = chosen.slice(1)
-  if (!hdr.length || !rows.length) return { stats: [], source: 'none' }
-  const kFind = hdr.findIndex(h => h.includes('指标') || h.includes('数值'))
-  const vFind = hdr.findIndex(h => h.includes('数值'))
-  const kIdx = kFind >= 0 ? kFind : 0
-  const vIdx = vFind >= 0 ? vFind : Math.min(1, hdr.length - 1)
-  return {
-    stats: rows
-      .filter(r => r.length > vIdx && r[vIdx].trim())
-      .map(r => ({ k: (r.length > kIdx ? r[kIdx] : '').slice(0, 24), v: r[vIdx].slice(0, 32) })),
-    source: metrics ? 'metrics' : 'first_table',
-  }
+  const res = topStatsOfTable(chosen)
+  if (!res.stats.length && !metrics) return { stats: [], source: 'none', periods: [], unit }
+  return { stats: res.stats, source: metrics ? 'metrics' : 'first_table',
+           periods: res.periods, unit }
 }
 
 /** 兼容包装：只要统计值（旧调用方）。 */
@@ -812,7 +877,8 @@ export default memo(function ReportViewer() {
       // 结论卡：优先取正文『财务对照』表（表头含"指标"）；退回首表时由 source 如实标注
       ...(() => {
         const r = parseTopStatsWithSource(rawMd)
-        return { topStats: r.stats, topStatsSource: r.source }
+        return { topStats: r.stats, topStatsSource: r.source,
+                 topStatsPeriods: r.periods, topStatsUnit: r.unit }
       })(),
     }
   }, [report])
@@ -824,7 +890,7 @@ export default memo(function ReportViewer() {
   // 验收器统计（与报告页可信度卡同一份数据；未加载时为 null，渲染端据此显示"未知"而非 0）
   const accTrace = accData?.checks?.number_traceability || null
   const { freshness, sourcesResult, disclaimerResult, bodyMd, toc, sourceItems,
-          topStats, topStatsSource } = parsed!
+          topStats, topStatsSource, topStatsPeriods, topStatsUnit } = parsed!
 
   const scrollToHeading = (id: string) => scrollToId(id)
 
@@ -964,7 +1030,11 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
             </span>
             <span className="text-xs text-slate-500">
               {topStatsSource === 'metrics'
-                ? '取自报告正文『财务对照』表前 4 行（指标 × 期间 × 口径 × 来源）'
+                ? `取自报告正文『财务对照』表（指标 × 期间${
+                    topStatsPeriods.length ? `：${topStatsPeriods.join('、')}` : ''
+                  } × 口径 × 来源）${
+                    topStatsUnit ? `；表内单位 ${topStatsUnit}（行内自带单位的以其为准）` : ''
+                  }`
                 : '报告正文里没有『财务对照』表：这里原样列出第一张表前 4 行，未判定为结论'}
             </span>
           </div>

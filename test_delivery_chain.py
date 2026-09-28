@@ -10225,6 +10225,13 @@ class _MaterialCase(unittest.TestCase):
         pat = mock.patch.object(_ts, "read_task", lambda tid, *a, **k: dict(self.row))
         pat.start()
         self.addCleanup(pat.stop)
+        # C-1：候选/采纳入口改读**严格版**（读失败不再伪装成"没有这一行"）：
+        # 替身必须同时覆盖它，否则用例会去查真库（`not_found` → 404）。
+        pat2 = mock.patch.object(
+            _ts, "read_task_checked",
+            lambda tid, *a, **k: (dict(self.row), "found"))
+        pat2.start()
+        self.addCleanup(pat2.stop)
         # 编排器替身：补材料处理逻辑绑到生产函数上
         self.orch = _IntakeOrch()
         self.orch.handle_add_material = _unbound_intake_handler().__get__(
@@ -10269,6 +10276,35 @@ class _MaterialCase(unittest.TestCase):
     def _snapshot(self) -> list[dict]:
         p = ws_mod.task_project_dir(self.task_id) / "fetch_snapshot.json"
         return json.loads(p.read_text(encoding="utf-8")) if p.is_file() else []
+
+    # C 批：候选闭环的三条只读/显式入口（预览、采纳、操作查回）
+    def _preview(self, query: str = "", user="momang"):
+        import web_ui
+        h = _MatHandler(f"/api/task/{self.task_id}/candidate/preview{query}")
+        with mock.patch.object(web_ui, "_task_exists", lambda tid: True), \
+                mock.patch.object(web_ui, "audit_log", lambda *a, **k: None):
+            web_ui._get_task_candidate_preview(h, h.path)
+        return h.last
+
+    def _query_op(self, query: str = "", redis=None, user="momang"):
+        import web_ui
+        h = _MatHandler(f"/api/task/{self.task_id}/candidate{query}")
+        with mock.patch.object(web_ui, "_task_exists", lambda tid: True), \
+                mock.patch.object(web_ui, "_redis_ready", lambda *a, **k: True), \
+                mock.patch.object(web_ui, "_new_redis", lambda: redis), \
+                mock.patch.object(web_ui, "audit_log", lambda *a, **k: None):
+            web_ui._get_task_candidate(h, h.path)
+        return h.last
+
+    def _adopt(self, payload: dict, user="momang", redis=None):
+        import web_ui
+        h = _MatHandler(f"/api/task/{self.task_id}/candidate/adopt")
+        with mock.patch.object(web_ui, "_task_exists", lambda tid: True), \
+                mock.patch.object(web_ui, "_redis_ready", lambda *a, **k: True), \
+                mock.patch.object(web_ui, "_new_redis", lambda: redis), \
+                mock.patch.object(web_ui, "audit_log", lambda *a, **k: None):
+            web_ui._post_task_candidate_adopt(h, h.path, payload, {"user": user})
+        return h.last
 
 
 class TestCandidateEntryChain(_MaterialCase):
@@ -10473,6 +10509,316 @@ class TestCandidateEntryChain(_MaterialCase):
             self.row["status"] = "SUCCESS"
         self.assertFalse(any(m[1].get("type") == "regenerate_candidate"
                              for m in redis.published), "被拒的请求不得投递")
+
+    # ── C 批（09-28 下午增量复核）：候选闭环 ────────────────────────────────
+
+    def test_c1_failed_task_with_materials_can_still_get_a_candidate(self):
+        """C-1：`FAILED` 不再一律 409——失败后补材料正是这个入口的理由。
+
+        原失败记录**必须保留**（响应里如实回报 prior_failure），
+        `CANCELLED` 另算（见下一条）。
+        """
+        self._seed_adopted()
+        redis = _LoopRedis(self.orch)
+        self._intake(redis)
+        self.row["status"] = "FAILED"
+        self.row["phase"] = "完成"
+        self.row["report"] = ("# 交付结果\n> **研究状态：研究草稿／待补原始披露**"
+                              "——没有一条带正文定位的原始披露（located=0）")
+        payload, status = self._post_candidate({}, redis=redis)
+        self.assertEqual(status, 200, payload)
+        self.assertTrue(payload["ok"], payload)
+        self.assertEqual(payload["status"], "candidate_ready")
+        self.assertTrue(payload["created"])
+        # 原失败审计如实回报，且没有被这次操作改写
+        pf = payload.get("prior_failure") or {}
+        self.assertEqual(pf.get("status"), "FAILED")
+        self.assertTrue(pf.get("audit_preserved"))
+        self.assertIn("待补原始披露", str(pf.get("detail") or ""))
+        self.assertIn("不代表任务已成功", str(pf.get("note") or ""))
+        self.assertEqual(str(self.row.get("status")), "FAILED", "任务行不得被候选操作改写")
+
+    def test_c1_cancelled_and_running_and_unreadable_are_refused(self):
+        """C-1：入口闸门按**终态种类**分开，读不出来不等于没有这一行。"""
+        import task_state as _ts
+        import web_ui
+        redis = _FakeRedis()
+        # ① CANCELLED：取消没有可恢复的失败原因 → 拒绝
+        self.row["status"] = "CANCELLED"
+        p, s = self._post_candidate({}, redis=redis)
+        self.assertEqual((s, p.get("status")), (409, "cancelled"), p)
+        # ② RUNNING：装配会与正在跑的任务抢同一份证据/底稿 → 拒绝，且**不投递**
+        self.row["status"] = "RUNNING"
+        p2, s2 = self._post_candidate({}, redis=redis)
+        self.assertEqual((s2, p2.get("status")), (409, "task_running"), p2)
+        # ③ 读失败：明确 503（不投递），不得当成"没有这一行"或直接放行
+        h = _MatHandler(f"/api/task/{self.task_id}/candidate")
+        with mock.patch.object(_ts, "read_task_checked", lambda *a, **k: ({}, "error")), \
+                mock.patch.object(web_ui, "_task_exists", lambda tid: True), \
+                mock.patch.object(web_ui, "_redis_ready", lambda *a, **k: True), \
+                mock.patch.object(web_ui, "_new_redis", lambda: redis), \
+                mock.patch.object(web_ui, "audit_log", lambda *a, **k: None):
+            web_ui._post_task_candidate(h, h.path, {}, {"user": "momang"})
+        p3, s3 = h.last
+        self.assertEqual((s3, p3.get("status")), (503, "state_unreadable"), p3)
+        self.assertTrue(p3.get("retryable"))
+        self.assertFalse(any(m[1].get("type") == "regenerate_candidate"
+                             for m in redis.published), "以上三种都不得投递")
+
+    def test_c2_candidate_identity_is_an_identity_not_a_bound_method(self):
+        """C-2：`candidate_identity_id` 必须是身份串，不是 `<bound method …>`。
+
+        修前反例：`str(getattr(cand, "identity_id", "") or "")` 把方法对象 `str()` 进
+        响应——既不是身份，又把**交付正文**（`ReportVersion(body="…")` 的 repr）夹带出去。
+        """
+        self._seed_adopted("正文里的人工段：LOCAL-SECRET-MARKER-1234。")
+        redis = _LoopRedis(self.orch)
+        self._intake(redis)
+        payload, status = self._post_candidate({}, redis=redis)
+        self.assertEqual(status, 200, payload)
+        ident = str(payload.get("candidate_identity_id") or "")
+        self.assertEqual(len(ident), 64, f"必须是 64 位身份：{ident[:80]!r}")
+        self.assertTrue(re.fullmatch(r"[0-9a-f]{64}", ident), ident)
+        self.assertNotIn("bound method", ident)
+        self.assertNotIn("ReportVersion", ident)
+        self.assertNotIn("LOCAL-SECRET-MARKER", ident, "响应不得夹带正文")
+        # 身份与版本库里的键一致（可对账）
+        store = self._store()
+        self.assertIsNotNone(store.find_identity(ident),
+                             "身份必须能在版本库里按 identity 查到")
+
+    def test_c3_idempotency_key_binds_the_whole_basis(self):
+        """C-3：幂等键 =（**全部**已并入材料 + 契约 + 采纳版 identity + 有效规则）。
+
+        三种"依据变了但旧键不动"的反例都必须重建，而不是返回 stale 候选：
+        ① 有效规则变了；② 采纳版换了证据快照（正文相同 → version_id 相同）；
+        ③ 非最后一份材料的并入记录变了。
+        """
+        self._seed_adopted()
+        redis = _LoopRedis(self.orch)
+        self._intake(redis)
+        base, s0 = self._post_candidate({}, redis=redis)
+        self.assertEqual(s0, 200, base)
+        key0 = str(base.get("key") or "")
+        self.assertTrue(key0)
+
+        # ① 有效规则变了
+        import delivery_pipeline as dp
+        with mock.patch.object(dp, "rules_identity", lambda tid: ("r-9", "rf-9")):
+            p1, s1 = self._post_candidate({}, redis=redis)
+        self.assertEqual(s1, 200, p1)
+        self.assertTrue(p1.get("created"), "规则变了必须重建候选")
+        self.assertNotEqual(p1.get("key"), key0)
+
+        # ② 采纳版 identity 变了（同正文 → version_id 不变）
+        store = self._store()
+        v2 = store.record("第一版交付正文（含人工写下的分析段）。",
+                          sources_fingerprint="另一套证据快照",
+                          rules_version="r1", rules_fingerprint="rf1")
+        store.adopt(v2, reason="换证据快照")
+        p2, s2 = self._post_candidate({}, redis=redis)
+        self.assertEqual(s2, 200, p2)
+        self.assertTrue(p2.get("created"), "采纳版换证据快照后必须重建")
+        self.assertNotEqual(p2.get("key"), key0)
+
+        # ③ 非最后一份已并入材料变了（末尾那份不变 → 旧键会看不出差别）
+        import material_intake as mi
+        real_index = mi.read_index(self.task_id)
+        real_load = mi.load
+        ghost = {"status": mi.STATE_ADMITTED, "material_id": "ghost-material",
+                 "raw_sha256": "ghost-sha-1"}
+        with mock.patch.object(mi, "read_index", lambda tid: [ghost] + list(real_index)), \
+                mock.patch.object(mi, "load",
+                                  lambda tid, mid: ({"refresh": {"ok": True},
+                                                     "attached": True}
+                                                    if mid == "ghost-material"
+                                                    else real_load(tid, mid))):
+            p3, s3 = self._post_candidate({}, redis=redis)
+        self.assertEqual(s3, 200, p3)
+        self.assertTrue(p3.get("created"), "材料集合变了必须重建")
+        self.assertNotEqual(p3.get("key"), key0)
+        self.assertEqual((p3.get("basis") or {}).get("materials_merged"), 2)
+
+    def test_c4_timeout_is_result_unknown_with_a_stable_operation_id(self):
+        """C-4：回执超时 = **结果未知**，不是"没有生成任何候选"；operation 可查、可重试。
+
+        修前反例：响应写死"没有生成任何候选（不假成功）"（对未知结果下了结论），
+        且 ack 键每次随机、调用方无从查询——只能重复提交。
+        """
+        import web_ui
+        redis = _FakeRedis()                     # 永不回执
+        h = _MatHandler(f"/api/task/{self.task_id}/candidate")
+        with mock.patch.object(web_ui, "_task_exists", lambda tid: True), \
+                mock.patch.object(web_ui, "_redis_ready", lambda *a, **k: True), \
+                mock.patch.object(web_ui, "_new_redis", lambda: redis), \
+                mock.patch.object(web_ui, "audit_log", lambda *a, **k: None), \
+                mock.patch.object(web_ui, "time", mock.Mock(
+                    time=mock.Mock(side_effect=[0, 0, 61]), sleep=lambda s: None)):
+            web_ui._post_task_candidate(h, h.path, {}, {"user": "momang"})
+        payload, status = h.last
+        self.assertEqual(status, 503, payload)
+        self.assertEqual(payload.get("status"), "pending")
+        self.assertTrue(payload.get("result_unknown"))
+        self.assertNotIn("没有生成任何候选", str(payload.get("error") or ""),
+                         "结果未知时不得声称没生成")
+        op = str(payload.get("operation_id") or "")
+        self.assertTrue(op)
+        self.assertIn(op, str(payload.get("query") or ""))
+        sent = [m[1] for m in redis.published if m[1].get("type") == "regenerate_candidate"]
+        self.assertEqual(len(sent), 1)
+        self.assertTrue(str(sent[0].get("ack_key") or "").endswith(op),
+                        f"投递用的收执键必须绑定同一个 operation：{sent[0].get('ack_key')}")
+
+        # 带同一个 request_id 重试 → **同一个** operation（收执键一致，可查回那次结果）
+        redis2 = _FakeRedis()
+        h2 = _MatHandler(f"/api/task/{self.task_id}/candidate")
+        with mock.patch.object(web_ui, "_task_exists", lambda tid: True), \
+                mock.patch.object(web_ui, "_redis_ready", lambda *a, **k: True), \
+                mock.patch.object(web_ui, "_new_redis", lambda: redis2), \
+                mock.patch.object(web_ui, "audit_log", lambda *a, **k: None), \
+                mock.patch.object(web_ui, "time", mock.Mock(
+                    time=mock.Mock(side_effect=[0, 0, 61]), sleep=lambda s: None)):
+            web_ui._post_task_candidate(h2, h2.path, {"request_id": op}, {"user": "momang"})
+        again = [m[1] for m in redis2.published
+                 if m[1].get("type") == "regenerate_candidate"]
+        self.assertEqual(str(again[0].get("ack_key")), str(sent[0].get("ack_key")))
+        self.assertEqual(h2.last[0].get("operation_id"), op)
+
+    def test_c4_query_route_reads_the_receipt_back(self):
+        """C-4：只读查询入口按 operation id（或最近一次）把收执读回来。
+
+        "查不到"必须与"没生成"分开说：回执有 TTL，查不到只是查不到。
+        """
+        redis = _FakeRedis()
+        redis.values[f"candidate_ack:{self.task_id}:op-1"] = json.dumps(
+            {"ok": True, "status": "candidate_ready", "candidate_version_id": "v" * 64,
+             "candidate_identity_id": "i" * 64}, ensure_ascii=False)
+        redis.values[f"candidate_ack:{self.task_id}:latest"] = json.dumps(
+            {"ok": True, "status": "candidate_ready"}, ensure_ascii=False)
+        p, s = self._query_op("?operation_id=op-1", redis=redis)
+        self.assertEqual(s, 200, p)
+        self.assertEqual(p.get("operation_id"), "op-1")
+        self.assertEqual(p.get("candidate_version_id"), "v" * 64)
+        p2, s2 = self._query_op("", redis=redis)
+        self.assertEqual(s2, 200, p2)
+        self.assertEqual(p2.get("queried_operation_id"), "")
+        p3, s3 = self._query_op("?operation_id=op-none", redis=redis)
+        self.assertEqual((s3, p3.get("status")), (404, "unknown"), p3)
+        self.assertIn("没有查到这个操作的回执", str(p3.get("error") or ""))
+        self.assertNotIn("没有生成", str(p3.get("error") or ""))
+
+    def test_c5_preview_shows_body_comparison_and_gaps(self):
+        """C-5①：预览——候选**正文**、与当前稿的**结构化比较**、证据缺口，一次看全。
+
+        只读：预览不得改采纳指针、不得新增版本。
+        """
+        seed = self._seed_adopted("第一版交付正文（含人工写下的分析段：KEEPME）。")
+        redis = _LoopRedis(self.orch)
+        self._intake(redis)
+        gen, sg = self._post_candidate({}, redis=redis)
+        self.assertEqual(sg, 200, gen)
+        before = len(self._store()._load().get("versions") or {})
+        p, s = self._preview()
+        self.assertEqual(s, 200, p)
+        self.assertEqual(p.get("status"), "candidate_preview")
+        self.assertEqual((p.get("candidate") or {}).get("identity_id"),
+                         gen.get("candidate_identity_id"))
+        self.assertIn("288.76", str(p.get("body") or ""), "预览必须给出候选正文本身")
+        cmp_ = p.get("comparison") or {}
+        self.assertFalse(cmp_.get("identical"), "候选与当前采纳稿必然不同")
+        self.assertGreater(int(cmp_.get("changed_lines") or 0), 0)
+        self.assertTrue(cmp_.get("analysis_section_preserved"),
+                        "人工写下的分析节必须被候选原样保留")
+        self.assertGreater(len(cmp_.get("diff_head") or []), 0, "要给出可读的差异片段")
+        self.assertFalse(p.get("is_adopted"))
+        self.assertTrue(p.get("requires_explicit_adoption"))
+        self.assertIn("acceptance", p.get("candidate") or {})
+        after = len(self._store()._load().get("versions") or {})
+        self.assertEqual(after, before, "预览不得新增版本")
+        self.assertEqual(self._store().adopted().version_id, seed.version_id,
+                         "预览不得改采纳指针")
+
+    def test_c5_explicit_adopt_then_reverify_and_export(self):
+        """C-5②③：显式采纳 → 对该身份重验 → 指向导出；旧人工批准不继承、不自动采纳。"""
+        seed = self._seed_adopted("第一版交付正文（含人工写下的分析段：KEEPME）。")
+        redis = _LoopRedis(self.orch)
+        self._intake(redis)
+        gen, _ = self._post_candidate({}, redis=redis)
+        ident = str(gen["candidate_identity_id"])
+
+        # ① 不显式确认 → 400，且没动采纳指针
+        p0, s0 = self._adopt({"identity": ident})
+        self.assertEqual((s0, p0.get("status")), (400, "explicit_confirmation_required"), p0)
+        self.assertEqual(self._store().adopted().version_id, seed.version_id)
+        # ② 不给身份 → 400（不接受"采纳最新那个"）
+        p1, s1 = self._adopt({"confirm": True})
+        self.assertEqual((s1, p1.get("status")), (400, "identity_required"), p1)
+        # ③ 付费路径保持拒绝
+        p2, s2 = self._adopt({"confirm": True, "identity": ident, "allow_paid": True})
+        self.assertEqual((s2, p2.get("status")), (409, "paid_not_authorized"), p2)
+        # ④ 显式采纳
+        hr = ws_mod.task_workspace(self.task_id) / "human_review.json"
+        hr.write_text(json.dumps({"decision": "人工早先的批准（不得被继承）"},
+                                 ensure_ascii=False), encoding="utf-8")
+        hr_before = hashlib.sha256(hr.read_bytes()).hexdigest()
+        p3, s3 = self._adopt({"confirm": True, "identity": ident})
+        self.assertEqual(s3, 200, p3)
+        self.assertEqual(p3.get("status"), "adopted")
+        self.assertTrue(p3.get("changed"))
+        self.assertEqual((p3.get("adopted") or {}).get("identity_id"), ident)
+        self.assertTrue(p3.get("identity_verified"))
+        self.assertEqual((p3.get("previous") or {}).get("version_id"), seed.version_id)
+        self.assertEqual(self._store().adopted().identity_id(), ident,
+                         "采纳指针必须指向这个身份")
+        # 旧人工批准：文件原样、明确不继承
+        self.assertTrue(p3.get("human_review_untouched"))
+        self.assertEqual(hashlib.sha256(hr.read_bytes()).hexdigest(), hr_before)
+        self.assertFalse(p3.get("old_approval_inherited"))
+        self.assertFalse(p3.get("verified_by_this_action"),
+                         "采纳本身不等于验证通过")
+        # 重验确实跑了，结论原样回报（通过与否都以验收器为准）
+        rev = p3.get("reverify") or {}
+        self.assertTrue(rev.get("ran"), rev)
+        self.assertIn("overall", rev)
+        # **重验必须落在刚采纳的那个身份上**：否则"对该身份重验"是空话
+        # （修前实测：验收对象被装配器重写成另一份正文，report_sha256 与采纳身份对不上）
+        self.assertTrue(rev.get("covers_adopted_identity"), rev)
+        self.assertEqual(str(rev.get("report_sha256") or ""),
+                         str((p3.get("adopted") or {}).get("version_id") or ""))
+        self.assertTrue((p3.get("adopted") or {}).get("acceptance_for_this_body"),
+                        "重验后采纳版应带着**本版**验收（身份可证明）")
+        self.assertIn("package", json.dumps(p3.get("next") or {}, ensure_ascii=False))
+        # ⑤ 采纳后预览显示"已采纳"，重复采纳是幂等空操作
+        pv, sv = self._preview()
+        self.assertEqual(sv, 200, pv)
+        self.assertTrue(pv.get("is_adopted"))
+        self.assertFalse(pv.get("requires_explicit_adoption"))
+        p4, s4 = self._adopt({"confirm": True, "identity": ident})
+        self.assertEqual(s4, 200, p4)
+        self.assertEqual(p4.get("status"), "already_adopted")
+        self.assertFalse(p4.get("changed"))
+
+    def test_c5_adopt_refuses_unknown_identity_and_other_users(self):
+        """C-5：采纳的失败方向——身份不存在 404、别人的任务 403，都不改指针。"""
+        seed = self._seed_adopted()
+        p1, s1 = self._adopt({"confirm": True, "identity": "0" * 64})
+        self.assertEqual((s1, p1.get("status")), (404, "not_found"), p1)
+        p2, s2 = self._adopt({"confirm": True, "identity": "0" * 64}, user="someone-else")
+        self.assertEqual(s2, 403, p2)
+        self.assertEqual(self._store().adopted().version_id, seed.version_id)
+        # 状态读不出来 → 503，不采纳
+        import task_state as _ts
+        import web_ui
+        h = _MatHandler(f"/api/task/{self.task_id}/candidate/adopt")
+        with mock.patch.object(_ts, "read_task_checked", lambda *a, **k: ({}, "error")), \
+                mock.patch.object(web_ui, "_task_exists", lambda tid: True), \
+                mock.patch.object(web_ui, "audit_log", lambda *a, **k: None):
+            web_ui._post_task_candidate_adopt(h, h.path,
+                                              {"confirm": True, "identity": "0" * 64},
+                                              {"user": "momang"})
+        p3, s3 = h.last
+        self.assertEqual((s3, p3.get("status")), (503, "state_unreadable"), p3)
+        self.assertEqual(self._store().adopted().version_id, seed.version_id)
 
 
 class TestMaterialEntryChain(_MaterialCase):
