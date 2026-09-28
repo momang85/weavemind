@@ -168,6 +168,44 @@ class TestWebuiProjectionFirst(unittest.TestCase):
         self.assertEqual(captured["data"]["steps"], [{"step_id": "1"}])
         self.assertEqual(captured["data"]["acceptance"]["gaps"], ["缺来源"])
 
+    def test_actionable_state_is_not_silently_none(self):
+        """P1-d：`actionable` 不得因未定义变量被吞成 None（"该做什么"永远不显示）。
+
+        实测缺口：`_get_task_page` 里读 `health.get("causes")`，而 `health` **从未在
+        该函数里定义** → 每次调用 NameError → 被 except 吞成一条 warning →
+        `actionable` 恒为 `None`。这里走**真实** `_get_task_page`，并且断言健康视图
+        给出的原因（`causes`）确实进了分类输入——否则"任务原因驱动"只是名义上的。
+        """
+        import actionable_state
+        import web_ui
+        captured = {}
+        task = {
+            "task_id": "t-act", "status": "SUCCESS_WITH_ISSUES", "goal": "目标",
+            "steps": [], "report": "正文", "logs": [], "project": "default",
+            "revision": False, "acceptance": {"overall": "pass", "gaps": []},
+            "llm_degraded": None,
+        }
+        seen = {}
+
+        def _classify(**kw):
+            seen.update(kw)
+            return {"state": "待材料", "reason": "缺关键事实"}
+
+        causes = [{"name": "redis", "state": "degraded", "detail": "连不上"}]
+        with mock.patch.object(web_ui, "_task_results", {}), \
+                mock.patch("task_state.merge_projection", return_value=task), \
+                mock.patch("actionable_state.unified_health",
+                           return_value={"items": [], "summary": {}, "ok": False,
+                                         "causes": causes}), \
+                mock.patch("actionable_state.classify_task", side_effect=_classify):
+            web_ui._get_task_page(self._fake_handler(captured), "/task/t-act")
+        self.assertIsNotNone(captured["data"].get("actionable"),
+                             "actionable 不得恒为 None")
+        self.assertEqual(captured["data"]["actionable"]["state"], "待材料")
+        self.assertEqual(seen.get("causes"), causes,
+                         "健康视图的原因必须进分类输入（任务原因驱动）")
+        self.assertIs(actionable_state.classify_task, actionable_state.classify_task)
+
     def test_merge_progress_message_handles_acceptance_and_warning(self):
         """此前 acceptance / warning 两类推送没有分支，整条消息被静默丢弃。"""
         import web_ui

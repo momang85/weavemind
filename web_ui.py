@@ -4899,7 +4899,20 @@ def _get_task_page(self, p):
             try:
                 import actionable_state as _as
                 import task_state as _ts_tl
-                _causes = health.get("causes") if isinstance(health, dict) else []
+                # P1-d：此处此前直接引用 `health`——而 `health` **从未在本函数里定义**
+                # （模块级也没有这个名字）→ 每次调用都 `NameError` → 被下面的 except
+                # 吞成一条 warning → `actionable` **恒为 None**，"该做什么"永远不显示。
+                # 实测：`test_review_edit_api` / `test_task_projection` 走真实
+                # `_get_task_page` 时逐条打印"可行动状态计算失败（b-exc）：name 'health'
+                # is not defined"。与 `/api/health`（`_get_health`）取**同一份**统一视图，
+                # 避免两处口径不同；健康视图取不到只降级 causes，不阻断任务页。
+                _causes: list = []
+                try:
+                    import health_registry as _hr
+                    _hv = _as.unified_health(_hr.snapshot())
+                    _causes = _hv.get("causes") or []
+                except Exception as exc:          # noqa: BLE001 - 不阻断任务页
+                    logger.warning("健康原因读取失败（task=%s）：%s", tid, str(exc)[:120])
                 _mp = False
                 try:
                     if _redis_ready():
