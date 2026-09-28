@@ -1,4 +1,4 @@
-# DeepSeek 执行状态（2026-09-28 更新 · C3 只算部分（恢复与并发未验收）· C4 未过）
+# DeepSeek 执行状态（2026-09-28 更新 · P0 全部交、P1 四项已交 · C3 只算部分 · C4 未过）
 
 **当前批次**：`docs/DSH真实样本复核与下一批执行_20260928.md`（基线 `65a6b62`），
 先 P0（重复执行与恢复断点）→ P1（计算与溯源）→ P1（检索协议）→ P1（补材料闭环与 actionable）。
@@ -7,6 +7,60 @@
 本轮**不新增付费整跑、不降阈值、不改用户设置/门禁/模型/代理、不清理真库**；
 `docs/evidence/c4_samples_run_20260927.md` 那份"当前余额耗尽"已随用户充值**解除**（保留为历史，
 不再周期探测余额）。
+
+## P1 本轮已交（4 项，各自带证据文档；全部离线复算，未跑付费整链）
+
+| 项 | 提交 | 一句话 | 证据 |
+|---|---|---|---|
+| P0-f 页面层结论 | `3ec1366` | 旧包在 UI 层从不展示；身份判断落在下载链接口 | `p0f_delivery_identity_20260928.md` |
+| **P1-a** 数字溯源四处**假失败** | `ed60e07` | 冻结样本溯源率 **52% → 94%**（阈值 0.7 未动）：定位元数据单列账；无单位大数边界；底稿派生行沿公式/输入 fact_id 准入（记"计算"不记"引用"）；量纲/小数位/正负号/两期差额 | `p1a_number_traceability_20260928.md` |
+| **P1-b** 正确计算 ≠ 正确解释 | `126186c` | 派生读数标年份/单位/时间正序；"利润侵蚀主要发生在毛利线以下"与底稿 `+4.58 亿元` 符号相反 → 判 `unsupported` 并点明"不能用利润率差替代金额归因" | `p1b_correct_calc_vs_correct_reading_20260928.md` |
+| **P1-d(根因)** `/actionable` 恒为 None | `375479e` | `_get_task_page` 读了一个**从未定义**的 `health` → 每次 NameError 被吞 → "该做什么"从来没显示过 | 提交信息（本轮无单独文档） |
+| **P1-e** 取件拒收分因 | `a0780e3` | HTTP 状态 / Content-Type / `not_pdf` / 截断 / 损坏 / 真扫描件各自可辨；只有真扫描件才建议 OCR；字节通道二进制往返、SSRF 拦下零请求、代理失败不降级直连 | `p1e_pdf_reject_taxonomy_20260928.md` |
+| **P1-c①** 契约重建吞查询 | `3a84b3c` | 反例逐字复现（4 条重试查询 → 0 条）后修复：契约内保留、契约外拒绝；重建幂等 | `p1c1_contract_rebuild_queries_20260928.md` |
+
+**P1-b 的行为口径变化（明说）**：未改任何阈值/门禁参数，但归因倒置的结论现在会进
+`unsupported`（原来可能 `partially_supported`），因此**可能**让某份交付从"就绪"变"草稿"。
+
+**回归**：本轮各批合计 `test_delivery_chain` / `test_offline_delivery` / `test_p0` /
+`test_root_budget` / `test_startup_readiness` / `test_search_quality_unified` /
+`test_orchestrator_v2` / `test_net_policy` / `test_narrative_evidence` /
+`test_question_assessment` / `test_acceptance_adversarial` / `test_financial_chain` /
+`test_fact_fidelity` / `test_report_quality` / `test_us_chain` / `test_facts` /
+`test_review_edit_api` / `test_task_projection` / `test_writer_consolidation` 全绿
+（单批最多 974 项一次跑完 OK）。
+
+## P1 尚未做完（逐条给出处与"为什么没半做"）
+
+1. **P1-c② 状态跨层丢失**（§4 第二条）**未做**。现状：`worker_base.SearchAgent.execute`
+   **就是** `_execute_bounded`（`worker_base.py:1352`），返回值直接进 `result["result"]`；
+   四条出口（提供方冷却 / 预算不可用 / 无结果 / 重试后仍空）都返回 `json.dumps([])`——
+   **"完成但零命中"与"根本没完成查询"在跨层时不可分**，外层记 SUCCESS 再由编排反复判失败。
+   要求：结构化 `status/reason/retryable/attempts` + 实际查询，**兼容数组只留在旧边界**，
+   且 `attempts` 必须是**真实发出的调用数**（不是 dispatch 次数）。
+   **未半做的理由**：它同时决定 P1-c① 的"无新查询时明确停"——`_execute_bounded:1046` 的
+   `_query_variants(...) or [instruction[:120]]` 让"返回空"退化成"拿整段指令当查询"，
+   比回退原查询更差；两件必须一起改，否则"停"只能写进日志、外层照记 SUCCESS。
+2. **P1-c① 的"持久保存规范计划"未做**：`orchestrator_v2._dispatch:4573` 是
+   `step = _fixed[0]`——重建结果只落**局部派发载荷**，没写回计划/状态。
+   要动计划持久化路径，并配"重启后读回的指令与派发时一致"的回归。
+3. **P1-c① 的待裁决口径**：`conflicting_periods` 允许 `as_of` 年份（既有语义），
+   故"洋河股份 … 2025年年度报告 全文"按契约自己的定义算"契约内"。本轮与 `violations()`
+   同一把尺，**没有**另立更严口径。若认为重试批次应只允许 `periods` 内年份，请裁决。
+4. **P1-d 的另一半"补材料后按新材料生成候选正文入口"未做**（§5 第二条）：
+   只修了 `/actionable` 的根因（NameError）。候选正文入口需要"展示材料/契约版本、
+   影响步骤、现有预算与授权；同一次动作只生成一个候选；旧工件与人工文字保留；
+   新候选需显式采纳、旧批准不继承"——按指令**先用冻结输出/provider 替身贯穿 UI 到
+   执行处理器**，不新增付费生成。
+5. **`_promotion_subject` 误判（P1-a 残留 19 处的成因）未修**：实测
+   `_subject_of("需进一步取得利润表分项明细方可解释")` → `"需进一步取得"`，
+   `_MEDIA_TOKENS` 含单字"报"会把"洋河股份合并报表口径下的…"整条丢掉；因此丢掉 56 处命中。
+   这是**跨公司同值护栏**的判据本身，改它要单独一批 + 语料级回归；现状偏保守（少数诚实
+   命中被否），方向安全。已把证据写进 `acceptance_checker._promotion_subject` 注释。
+6. **页面层视觉核验（截图）未做**：需要浏览器会话（登录 → 进任务 → 展开简报面板）。
+   本轮只做到"读接口 + 真实产物"，没有做任何"我看了页面"的陈述。
+7. **第二家公司原文、`clean_env_verified`、推送 CI、真人 F3 五项 ≥8/10** —— 仍缺，
+   与上一批结论一致。
 
 ## P0 收口：三处遗留全部闭合（证据见 P0-d/P0-e 两份文档的"补完"节）
 
