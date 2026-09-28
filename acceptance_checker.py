@@ -389,6 +389,247 @@ def _one_scale_form(v: float, u: str) -> list[str]:
     return out
 
 
+def _amount_unit_scale(unit: str) -> float:
+    """金额单位的**量纲**（元=1、万元=1e4、亿元=1e8）；非金额单位返回 0。
+
+    与 `_value_scale` 的区别：这里只认**纯金额单位**——`元/吨` 是单价，
+    不能与 `元` 视作同一量纲（09-28 下午复核 B-2 明说）。
+    """
+    u = str(unit or "").strip()
+    return {"元": 1.0, "万元": 1e4, "亿元": 1e8, "万美元": 1e4, "亿美元": 1e8,
+            "港元": 1.0, "万港元": 1e4, "亿港元": 1e8}.get(u, 0.0)
+
+
+def _eval_arith(expr: str) -> float | None:
+    """**受控**四则运算求值（AST 白名单，禁用 eval）。
+
+    只允许 数字 / 括号 / `+ - * /` / 一元负号；出现任何函数调用、属性、下标、
+    比较、幂运算等一律返回 None（= 不可复算，按未知处理，不猜）。
+    """
+    import ast as _ast
+    try:
+        tree = _ast.parse(str(expr or ""), mode="eval")
+    except Exception:                            # noqa: BLE001
+        return None
+
+    def _ev(node):
+        if isinstance(node, _ast.Expression):
+            return _ev(node.body)
+        if isinstance(node, _ast.Constant):
+            if isinstance(node.value, bool) or not isinstance(node.value, (int, float)):
+                raise ValueError("非数值常量")
+            return float(node.value)
+        if isinstance(node, _ast.UnaryOp) and isinstance(node.op, _ast.USub):
+            return -_ev(node.operand)
+        if isinstance(node, _ast.UnaryOp) and isinstance(node.op, _ast.UAdd):
+            return _ev(node.operand)
+        if isinstance(node, _ast.BinOp):
+            left, right = _ev(node.left), _ev(node.right)
+            if isinstance(node.op, _ast.Add):
+                return left + right
+            if isinstance(node.op, _ast.Sub):
+                return left - right
+            if isinstance(node.op, _ast.Mult):
+                return left * right
+            if isinstance(node.op, _ast.Div):
+                if right == 0:
+                    raise ValueError("除以零")
+                return left / right
+        raise ValueError(f"不允许的表达式节点：{type(node).__name__}")
+
+    try:
+        val = _ev(tree)
+    except Exception:                            # noqa: BLE001
+        return None
+    return val if isinstance(val, float) and val == val and abs(val) != float("inf") else None
+
+
+def _formula_expr_and_inputs(formula: str) -> tuple[str, list[str]]:
+    """`"66.73 - 100.16，输入 fact-a / fact-b"` → `("66.73 - 100.16", [fact-a, fact-b])`。"""
+    s = str(formula or "")
+    m = re.split(r"[，,;；]\s*输入\s*", s, maxsplit=1)
+    expr = m[0].strip()
+    ids: list[str] = []
+    if len(m) > 1:
+        ids = [x.strip() for x in re.split(r"[/、,，\s]+", m[1]) if x.strip()]
+    return expr, ids
+
+
+def _operands_with_roles(expr: str) -> list[tuple[float, bool]]:
+    """表达式里的数值字面量 → `[(值, 是否换算常量)]`。
+
+    "换算常量"指 `* 100` / `/ 100`（百分比换算）与最后一个 `- 1` / `+ 1`（同比系数）——
+    它们是**读法转换**，不是财务输入。真实底稿里 `"46.29 / 66.73 * 100"` 的 `100`
+    就不该被要求"对得上某个输入"（否则合法的覆盖率派生会被判不可复算）。
+    其余字面量都必须是真输入。
+    """
+    import ast as _ast
+    try:
+        tree = _ast.parse(str(expr or ""), mode="eval")
+    except Exception:                            # noqa: BLE001
+        return []
+    out: list[tuple[float, bool]] = []
+
+    def _const(node):
+        return node.value if isinstance(node, _ast.Constant) and isinstance(
+            node.value, (int, float)) and not isinstance(node.value, bool) else None
+
+    def _walk(node, *, root: bool = False):
+        if isinstance(node, _ast.Expression):
+            return _walk(node.body, root=True)
+        if isinstance(node, _ast.UnaryOp):
+            inner = _const(node.operand)
+            if inner is not None:
+                v = -float(inner) if isinstance(node.op, _ast.USub) else float(inner)
+                out.append((v, False))
+            else:
+                _walk(node.operand, root=root)
+            return
+        if isinstance(node, _ast.BinOp):
+            left, right = node.left, node.right
+            lc, rc = _const(left), _const(right)
+            _scale = isinstance(node.op, (_ast.Mult, _ast.Div))
+            _shift = isinstance(node.op, (_ast.Add, _ast.Sub))
+            if lc is not None:
+                out.append((float(lc), bool(_scale and float(lc) == 100.0)))
+            else:
+                _walk(left, root=False)
+            if rc is not None:
+                # 末尾 `-1`/`+1` 只在**最外层**算换算；嵌套里的 1 仍按输入要求
+                out.append((float(rc), bool((_scale and float(rc) == 100.0)
+                                            or (_shift and root and abs(float(rc)) == 1.0))))
+            else:
+                _walk(right, root=False)
+            return
+        c = _const(node)
+        if c is not None:
+            out.append((float(c), False))
+
+    _walk(tree)
+    return out
+
+
+def _close(a: float, b: float, *, rel: float = 0.005, abs_tol: float = 0.01) -> bool:
+    try:
+        return abs(float(a) - float(b)) <= max(abs(float(b)) * rel, abs_tol)
+    except (TypeError, ValueError):
+        return False
+
+
+def _same_dimension(a: dict, b: dict, *, check_metric: bool = True) -> str:
+    """两行是否**同一维度** → 空串表示一致。
+
+    `check_metric=False` 用于**算式派生**：算式本身就可以组合不同指标
+    （真实链条 `(66.73-100.16) - (211.25-249.26)` 是"归母净利变化 − 毛利变化"，
+    指标本来就不同）。跨指标组合的**合法性由算式与输入共同定义**，不由"指标必须同名"。
+    差额（同期两行相减）则**必须同指标**，否则就是 B-2 那种跨公司/跨指标乱配。
+    """
+    checks = [("entity", "主体"), ("currency", "币种"), ("caliber", "报表口径")]
+    if check_metric:
+        checks.insert(1, ("metric", "指标"))
+    for key, label in checks:
+        va, vb = str(a.get(key) or ""), str(b.get(key) or "")
+        if va and vb and va != vb:
+            return f"{label}不一致（{va} vs {vb}）"
+        if bool(va) != bool(vb):
+            return f"{label}缺失（一方未标）"     # 缺元数据按**未知**，不当兼容
+    sa, sb = _amount_unit_scale(a.get("unit")), _amount_unit_scale(b.get("unit"))
+    if sa and sb and abs(sa - sb) > 1e-9:
+        return f"金额量纲不一致（{a.get('unit')} vs {b.get('unit')}）"
+    if bool(sa) != bool(sb):
+        return f"单位量纲缺失（{a.get('unit')} vs {b.get('unit')}）"
+    return ""
+
+
+def _verify_derived_row(d: dict, inputs: dict) -> tuple[bool, str]:
+    """派生行能否**真正复算** → `(通过?, 原因)`（09-28 下午复核 B：禁止数值互借）。
+
+    四关，任一不过就不作为来源：
+
+    1. **逐输入 ID 存在**（`derived_from` 全部能在底稿明细行里找到）；
+    2. **公式可受控求值**（白名单四则运算，禁 eval）；
+    3. **复算值 ≈ 记录值**（相对 0.5% / 绝对 0.01 容差）；
+    4. **维度一致**：全部输入同主体/指标/币种/金额量纲/口径，且期间非空；
+       且公式里的每个数值字面量都要对得上某个输入的值（挡住"公式与输入无关"）。
+    """
+    ids = [str(x) for x in (d.get("derived_from") or []) if str(x or "").strip()]
+    if not ids:
+        return False, "无输入 fact_id"
+    missing = [i for i in ids if i not in inputs]
+    if missing:
+        return False, f"输入不存在：{missing[:2]}"
+    expr, _ids_in_formula = _formula_expr_and_inputs(str(d.get("formula") or ""))
+    if not expr:
+        return False, "无算式"
+    val = _eval_arith(expr)
+    if val is None:
+        return False, "算式不可受控求值"
+    try:
+        want = float(d.get("value"))
+    except (TypeError, ValueError):
+        return False, "记录值不是数"
+    if not _close(val, want):
+        return False, f"复算不符（算式={val:g}，记录={want:g}）"
+    rows = [inputs[i] for i in ids]
+    base = rows[0]
+    for other in rows[1:]:
+        # 算式派生**不要求同指标**（跨指标组合是算式定义的），但主体/币种/量纲/口径必须一致
+        why = _same_dimension(base, other, check_metric=False)
+        if why:
+            return False, why
+    if any(not str(r.get("period") or "").strip() for r in rows):
+        return False, "输入期间缺失"
+    # 公式里的每个数值字面量都要对得上某个输入的值（换算常量除外）：
+    # 挡住"公式与输入无关"（反例：formula="1+1" 而输入是 66.73/100.16）
+    _ops = _operands_with_roles(expr)
+    if not _ops:
+        return False, "算式里没有可核对的字面量"
+    if not any((not conv) and any(_close(op, r.get("value")) for r in rows)
+               for op, conv in _ops):
+        return False, "算式与输入对不上"
+    for op, conv in _ops:
+        if conv:
+            continue
+        if not any(_close(op, r.get("value")) for r in rows):
+            return False, f"算式里的 {op:g} 与任何输入都对不上"
+    return True, ""
+
+
+def _group_for_diff(inputs: dict) -> dict[str, list[dict]]:
+    """按 **(主体, 指标, 币种, 金额量纲, 口径)** 分组——差额只在同维度内算。
+
+    反例（B-2）：按 `metric` 聚合会把"宁德时代 2023"与"比亚迪 2024"配成一对，
+    生成一个无主体的差额，然后被**别的公司**的数字借走。
+    """
+    out: dict[str, list[dict]] = {}
+    for r in (inputs or {}).values():
+        unit = str(r.get("unit") or "")
+        key = "|".join([str(r.get("entity") or ""), str(r.get("metric") or ""),
+                        str(r.get("currency") or ""), f"{_amount_unit_scale(unit):g}",
+                        str(r.get("caliber") or "")])
+        out.setdefault(key, []).append(r)
+    return out
+
+
+# 结构化来源通道：值仍是**字符串**（`sources` 的契约），但语义是结构化载荷——
+# 不参与任何"数字出现在来源文本里"的匹配（否则 JSON 里的数字会被当文本命中，
+# 跨公司借用就又回来了）。匹配走 `_match_derived_fact` 的 (值, 单位, 主体) 三关。
+DERIVED_FACTS_KEY = "workpaper_derived_facts_json"
+_STRUCTURED_SOURCE_KEYS = (DERIVED_FACTS_KEY,)
+
+
+def _derived_facts_of(sources: dict) -> list[dict]:
+    """从来源里取出结构化派生事实（坏 JSON 按空处理，不猜）。"""
+    raw = str((sources or {}).get(DERIVED_FACTS_KEY) or "")
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except Exception:                            # noqa: BLE001
+        return []
+    return [f for f in data if isinstance(f, dict)] if isinstance(data, list) else []
+
+
 def _scale_forms(value, unit: str) -> list[str]:
     """同一个数的多种**等价写法**（元 / 万元 / 亿元 × 2~4 位小数 + 千分位 + 正负号）。
 
@@ -441,8 +682,8 @@ def _workpaper_source_texts(workspace) -> dict[str, str]:
             wp = {}
     if isinstance(wp, dict) and wp:
         rows_txt: list[str] = []
-        _pairs: list[tuple[str, dict, dict]] = []      # 符合准入门槛的同期对（算 Δ 用）
-        _by_metric: dict[str, list[dict]] = {}
+        # 明细行 = **准入的输入**：有 fact_id + 定位。按 fact_id 建索引（复算要用）。
+        _inputs: dict[str, dict] = {}
         for r in (wp.get("rows") or []):
             if not isinstance(r, dict):
                 continue
@@ -451,54 +692,78 @@ def _workpaper_source_texts(workspace) -> dict[str, str]:
             if not (str(r.get("source_locator") or "").strip()
                     or str(r.get("source_url") or "").strip()):
                 continue
+            _inputs[str(r["fact_id"])] = r
             head = (f"{r.get('entity') or ''} {r.get('metric_label') or r.get('metric') or ''} "
                     f"{r.get('period') or ''}")
             for form in _scale_forms(r.get("value"), str(r.get("unit") or "")):
                 rows_txt.append(f"{head} {form} {form}")
-            _by_metric.setdefault(str(r.get("metric") or ""), []).append(r)
         if rows_txt:
             out["workpaper_rows"] = "\n".join(rows_txt)
+        # 同期两行的**差额**改由下面按 (主体,指标,币种,量纲,口径) 分组的结构化事实处理
+        # （09-28 下午复核 B-2：按 metric 聚合会跨公司配对，生成无主体差额被别的公司借走）。
+
+        der_facts: list[dict] = []
+        n_derived = 0
+        for d in (wp.get("derived") or []):
+            if not isinstance(d, dict):
+                continue
+            _ok, _why = _verify_derived_row(d, _inputs)
+            if not _ok:
+                # **不复算不进来源**（09-28 下午复核 B-1）：此前只查"公式/输入 ID 非空"，
+                # 于是 `formula="1+1"`、`value=999`、`derived_from=["missing-a","missing-b"]`
+                # 照样进"计算"通道、把 999 判成可溯源。逐条复算 + 逐输入存在 + 维度一致。
+                logger.info("底稿派生行未通过复算，不作为来源（%s）：%s",
+                            str(d.get("metric") or "")[:40], _why[:120])
+                continue
+            n_derived += 1
+            der_facts.append({
+                "kind": "derived",
+                "subject": str(d.get("entity") or ""),
+                "metric": str(d.get("metric") or ""),
+                "period": str(d.get("period") or ""),
+                "value": float(d.get("value")),
+                "unit": str(d.get("unit") or ""),
+                "currency": str(d.get("currency") or ""),
+                "caliber": str(d.get("caliber") or ""),
+                "formula": str(d.get("formula") or ""),
+                "inputs": [str(x) for x in (d.get("derived_from") or [])],
+            })
         # 同期两行的**差额**：正文写"总资产…减少 24.47 亿元"这类读数，是两个已定位
-        # 明细行相减的结果；底稿只给水平值，差额因此曾一律判"不可溯源"（真机样本里
-        # 40.82/24.47/20.90/1.83/27,078.68 等 7 个值、12 处）。只对**两期都过了
-        # 准入门槛**的同指标行算差，且差额进 `workpaper_derived`（记"计算"不记"引用"）。
-        for metric, rs in _by_metric.items():
-            if len(rs) < 2 or not metric:
+        # 明细行相减的结果。差额同样**必须可复算**（两期都在、同主体/指标/单位/币种/口径），
+        # 且以**结构化**事实参与匹配——不能按 metric 聚合后丢主体（B-2 反例：
+        # 宁德时代 2023 与比亚迪 2024 的"同 metric"差额被洋河的数字借走）。
+        for _subj, rs in _group_for_diff(_inputs).items():
+            if len(rs) < 2:
                 continue
             rs = sorted(rs, key=lambda x: str(x.get("period") or ""))
             for a, b in zip(rs, rs[1:]):
                 va, vb = a.get("value"), b.get("value")
                 if not isinstance(va, (int, float)) or not isinstance(vb, (int, float)):
                     continue
-                unit = str(b.get("unit") or a.get("unit") or "")
-                if _value_scale(unit) != _value_scale(str(a.get("unit") or "")):
-                    continue        # 两期单位量纲不同（如 元 vs 吨）不算同一指标的差
-                _pairs.append((f"{b.get('metric_label') or metric} 同期差额"
-                               f"（{a.get('period')}→{b.get('period')}）",
-                               {"value": vb - va, "unit": unit}, b))
-
-        der_txt: list[str] = []
-        n_derived = 0
-        for d in (wp.get("derived") or []):
-            if not isinstance(d, dict):
-                continue
-            if not str(d.get("formula") or "").strip():
-                continue        # 无算式 = 不可复算，不进来源
-            if not (d.get("derived_from") or []):
-                continue        # 无输入 fact_id = 指不回披露，不进来源
-            n_derived += 1
-            head = (f"{d.get('entity') or ''} {d.get('metric_label') or d.get('metric') or ''} "
-                    f"{d.get('period') or ''}")
-            for form in _scale_forms(d.get("value"), str(d.get("unit") or "")):
-                der_txt.append(f"{head} {form} {form}")
-        for head, delta, _src in _pairs:
-            for form in _scale_forms(delta.get("value"), str(delta.get("unit") or "")):
-                der_txt.append(f"{head} {form} {form}")
-        if der_txt:
-            # 派生行数写进文本头，便于人工核对"这条通道吃进了多少条派生事实"
-            out["workpaper_derived"] = (
-                f"底稿派生 {n_derived} 条 + 同指标两期差额 {len(_pairs)} 条\n"
-                + "\n".join(der_txt))
+                _why = _same_dimension(a, b)
+                if _why:
+                    continue
+                der_facts.append({
+                    "kind": "period_diff",
+                    "subject": str(b.get("entity") or ""),
+                    "metric": str(b.get("metric") or ""),
+                    "period": f"{a.get('period')}→{b.get('period')}",
+                    "value": float(vb) - float(va),
+                    "unit": str(b.get("unit") or a.get("unit") or ""),
+                    "currency": str(b.get("currency") or ""),
+                    "caliber": str(b.get("caliber") or ""),
+                    "formula": f"{vb} - {va}",
+                    "inputs": [str(a.get("fact_id") or ""), str(b.get("fact_id") or "")],
+                })
+        if der_facts:
+            # 结构化事实**不转成文本**：文本通道会丢主体，跨公司数字就能互相借（B-2）。
+            # 但 `sources` 的契约是 `dict[str, str]`（多处直接对值做正则），所以这里
+            # 序列化成 JSON **字符串**——并在所有文本匹配通道里显式排除它
+            # （见 `_STRUCTURED_SOURCE_KEYS`），否则 JSON 里的数字又会被当文本命中。
+            out["workpaper_derived_digest"] = (
+                f"底稿派生复算通过 {n_derived} 条 + 可复算同期差额 "
+                f"{sum(1 for f in der_facts if f['kind'] == 'period_diff')} 条")
+            out[DERIVED_FACTS_KEY] = json.dumps(der_facts, ensure_ascii=False)
 
     try:
         ne_path = ws / "narrative_evidence.json"
@@ -555,6 +820,72 @@ def _workpaper_source_texts(workspace) -> dict[str, str]:
 
 # 由**本次任务自己的底稿/已定位事实**得出的来源通道：命中它们记"计算"，不记"引用"。
 _DERIVED_SOURCE_KEYS = ("workpaper_derived",)
+
+
+def _shares_entity(a: str, b: str, *, min_len: int = 3) -> bool:
+    """两串是否共享一个 ≥3 字的中文专名片段（用来判"说的是同一家"）。
+
+    3 字起：2 字片段（"分析""取得"）在中文里碰撞太多。只在**能与任务目标对齐**的场景用：
+    目标是"分析洋河股份…"时，报告子句里那串散文前缀只要含有"洋河股"就认作同一主体。
+    """
+    a2, b2 = str(a or ""), str(b or "")
+    for n in range(min(8, len(a2)), min_len - 1, -1):
+        for i in range(len(a2) - n + 1):
+            seg = a2[i:i + n]
+            if seg in b2 and not any(w in seg for w in _SUBJECT_STOPWORDS):
+                return True
+    return False
+
+
+def _match_derived_fact(n: dict, report: str, facts: list[dict],
+                        *, goal: str = "") -> str | None:
+    """报告里的数字能否对上某条**复算通过**的派生事实 → 命中标记或 None。
+
+    三条同时成立才算命中（09-28 下午复核 B）：
+
+    1. **值 + 量纲**一致（容差 0.5%/0.01，与复算同一把尺；元/万元/亿元同量纲等价）。
+       按**绝对值**比：报告数字抽取时符号已被剥离，方向由正文的负号/方向词承载
+       （与 `_formula_derived_in_report` 的既有约定一致）；
+    2. **主体**不冲突：事实自带 `subject`；报告侧取该数字**所在子句**的主体键。
+       报告键为空（子句没写公司名）→ 不据此拒绝；两侧都有值时，要求互相包含，
+       或与**任务目标**共享专名片段（子句常是一整句散文，开头那串字并不是公司名）。
+       真正的跨公司句子（"宁德时代2024年营业收入100亿元"）与目标不共享实体 → **拒绝**。
+    3. 事实必须带 `formula` 与非空 `inputs`（由 `_verify_derived_row` 保证）。
+
+    返回 `"workpaper_derived"`（记"计算"）或 None。
+    """
+    try:
+        v = float(n.get("value"))
+    except (TypeError, ValueError):
+        return None
+    unit = str(n.get("unit") or "")
+    scale = _amount_unit_scale(unit) or (1.0 if unit.endswith("%") else 0.0)
+    if not scale:
+        return None
+    clause = _clause_of(str(report or ""), int(n.get("pos") or 0),
+                        int(n.get("pos") or 0) + len(str(n.get("raw") or "")))
+    rep_subject = _promotion_subject(clause)
+    for f in facts:
+        try:
+            fv = float(f.get("value"))
+        except (TypeError, ValueError):
+            continue
+        f_scale = _amount_unit_scale(str(f.get("unit") or "")) or (
+            1.0 if str(f.get("unit") or "").endswith("%") else 0.0)
+        if not f_scale or abs(f_scale - scale) > 1e-9:
+            continue
+        if not _close(abs(v) * scale, abs(fv) * f_scale):
+            continue
+        f_subject = str(f.get("subject") or "")
+        if rep_subject and f_subject:
+            _agree = (rep_subject == f_subject or rep_subject in f_subject
+                      or f_subject in rep_subject
+                      or _shares_entity(rep_subject, f_subject)
+                      or (goal and _shares_entity(rep_subject, str(goal))))
+            if not _agree:
+                continue                   # **主体不符 → 不得借用**
+        return "workpaper_derived"
+    return None
 
 
 def _collect_sources(workspace) -> dict[str, str]:
@@ -798,8 +1129,8 @@ def _collect_source_records(clean_text: str, user_text: str, sources: dict | Non
                         "period": _period_near(_clause, _at_in_clause),
                         "indicator": _indicator_near(_clause, _at_in_clause)})
     for k, v in (sources or {}).items():
-        if k in ("clean_chart_data", "user_material"):
-            continue        # 已单独处理，避免把 JSON 文本当记录源
+        if k in ("clean_chart_data", "user_material") or k in _STRUCTURED_SOURCE_KEYS:
+            continue        # 已单独处理 / 结构化通道：不把 JSON 文本当记录源
         for token, unit in re.findall(
                 r"(\d[\d,]*(?:\.\d+)?)\s*(万亿|千亿|百亿|亿美元|亿港元|万美元|万港元|亿|万元|万|元|港元|美元|%)", str(v or "")):
             try:
@@ -2498,12 +2829,16 @@ def check_number_traceability(
             "traceable": [],
             "untraceable": [],
         }
-    src_norm = {k: _norm(v) for k, v in sources.items() if v}
+    # 结构化通道（派生事实 JSON）不进文本匹配：它的数字不该被当"出现在来源里"
+    src_norm = {k: _norm(v) for k, v in sources.items()
+                if v and k not in _STRUCTURED_SOURCE_KEYS}
     # 无单位大数的匹配必须**保留空白**：`_norm` 会把披露表里相邻两列数字粘成一个
     # token（"139,076.05 166,154.73"），词边界判定随之全部失败（见 `_bare_norm`）。
-    src_bare = {k: _bare_norm(v) for k, v in sources.items() if v}
+    src_bare = {k: _bare_norm(v) for k, v in sources.items()
+                if v and k not in _STRUCTURED_SOURCE_KEYS}
     # 主体抽取要用**未归一化**的原文：`_norm` 会去掉换行，行内的实体前缀就取不到了
-    src_raw = {k: str(v) for k, v in sources.items() if v}
+    src_raw = {k: str(v) for k, v in sources.items()
+               if v and k not in _STRUCTURED_SOURCE_KEYS}
     clean_text = sources.get("clean_chart_data") or ""
     # V1：用户材料本身是**来源**（不证明内容真实），但必须**分通道**处理：
     # clean_chart_data 是结构化 JSON，任何文本拼接都会让结构化解析失败
@@ -2511,11 +2846,20 @@ def check_number_traceability(
     user_text = str((sources or {}).get("user_material") or "")
     # 公式核验的来源记录（结构化记录 + 用户材料里带单位的数字），不拼成一段文本
     source_records = _collect_source_records(clean_text, user_text, sources)
+    # B（09-28 下午复核）：底稿派生事实**结构化**参与匹配——(值, 单位, 主体) 三条都要对。
+    # 它们不进 `src_norm` 文本通道：转成字符串会**丢主体**，别的公司的数字就能借走
+    # （反例 B-2：宁德时代 2023 与比亚迪 2024 的差额被"洋河股份"的数字命中）。
+    _derived_facts = _derived_facts_of(sources)
     traceable: list[dict] = []
     untraceable: list[dict] = []
     disclosed: list[dict] = []
     for n in nums:
         hit = None
+        # ① 结构化派生事实（复算通过的那些）：值 + 单位 + **主体**都要对得上
+        if _derived_facts:
+            _hit_fact = _match_derived_fact(n, report, _derived_facts, goal=goal)
+            if _hit_fact is not None:
+                hit = _hit_fact
         if clean_text:
             # clean_chart_data 命中**同样要过主体归属**：此前它优先接受并直接定案，
             # 绕过了后面的子句主体筛选——于是"clean 里是 B 公司的数字"也能给

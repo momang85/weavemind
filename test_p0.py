@@ -3243,10 +3243,11 @@ class TestAcceptanceChecker(unittest.TestCase):
         self.assertEqual(bad["unverifiable_count"], 1, bad["details"])
 
     def test_workpaper_channel_admits_only_recomputable_rows(self):
-        """底稿通道的准入门槛：派生行必须**同时**有算式与输入 fact_id。
+        """底稿通道的准入门槛（09-28 下午 B 收紧）：派生行必须**真的能复算**。
 
-        没有算式 = 不可复算，没有 `derived_from` = 指不回披露：两种都不进来源，
-        免得把"底稿里恰好有个同值"当成可溯源（那是自证，不是溯源）。
+        要求三件同时成立：`formula` 可受控求值、`derived_from` 的输入**都存在于明细行**、
+        复算值与记录值一致。只查"非空"会让 `formula="1+1"`、`value=999`、
+        输入全是 `missing-*` 的伪造行进"计算"通道。
         """
         import json
         import tempfile
@@ -3258,27 +3259,44 @@ class TestAcceptanceChecker(unittest.TestCase):
             proj = Path(td) / "project"
             proj.mkdir(parents=True)
             (proj / "working_paper.json").write_text(json.dumps({
-                "rows": [{"fact_id": "fact-1", "metric": "revenue", "metric_label": "营业收入",
-                          "period": "2024年", "value": 288.76, "unit": "亿元",
-                          "source_locator": "第 11 页"}],
+                "rows": [
+                    {"fact_id": "fact-a", "entity": "洋河股份", "metric": "net_profit",
+                     "metric_label": "归母净利润", "period": "2023年", "value": 100.16,
+                     "unit": "亿元", "currency": "CNY", "caliber": "合并",
+                     "source_locator": "第 11 页"},
+                    {"fact_id": "fact-b", "entity": "洋河股份", "metric": "net_profit",
+                     "metric_label": "归母净利润", "period": "2024年", "value": 66.73,
+                     "unit": "亿元", "currency": "CNY", "caliber": "合并",
+                     "source_locator": "第 11 页"},
+                ],
                 "derived": [
                     {"metric": "net_profit_change", "metric_label": "归母净利润变化",
                      "period": "2024年较2023年", "value": -33.43, "unit": "亿元",
-                     "formula": "66.73 - 100.16", "derived_from": ["fact-a", "fact-b"]},
+                     "entity": "洋河股份", "currency": "CNY", "caliber": "合并",
+                     "formula": "66.73 - 100.16，输入 fact-b / fact-a",
+                     "derived_from": ["fact-b", "fact-a"]},
                     {"metric": "ghost", "metric_label": "无算式派生", "value": 12345.0,
-                     "unit": "亿元", "derived_from": ["fact-a"]},
+                     "unit": "亿元", "entity": "洋河股份",
+                     "derived_from": ["fact-a"]},
                     {"metric": "ghost2", "metric_label": "无输入派生", "value": 54321.0,
-                     "unit": "亿元", "formula": "1 + 1"},
+                     "unit": "亿元", "entity": "洋河股份", "formula": "1 + 1"},
+                    {"metric": "ghost3", "metric_label": "伪造派生", "value": 999.0,
+                     "unit": "亿元", "entity": "洋河股份", "formula": "1+1",
+                     "derived_from": ["missing-a", "missing-b"]},
                 ],
             }, ensure_ascii=False), encoding="utf-8")
             src = _collect_sources(td)
 
         self.assertIn("workpaper_rows", src)
-        self.assertIn("workpaper_derived", src)
-        self.assertIn("33.43亿元", src["workpaper_derived"])
-        self.assertNotIn("12345", src["workpaper_derived"])
-        self.assertNotIn("54321", src["workpaper_derived"])
-        self.assertIn("288.76亿元", src["workpaper_rows"])
+        from acceptance_checker import _derived_facts_of
+        facts = [f for f in _derived_facts_of(src) if f["kind"] == "derived"]
+        metrics = {f["metric"] for f in facts}
+        self.assertIn("net_profit_change", metrics, "可复算的派生行必须进结构化事实")
+        # 三条不合格的都不许进：无算式 / 无输入 / 输入不存在（公式也不成立）
+        self.assertNotIn("ghost", metrics)
+        self.assertNotIn("ghost2", metrics)
+        self.assertNotIn("ghost3", metrics)
+        self.assertIn("100.16亿元", src["workpaper_rows"])
 
     def test_scale_forms_and_two_period_delta(self):
         """量纲换算 / 小数位 / 正负号 / 两期差额都是"同一个数的不同写法"，不是不同事实。"""
@@ -3322,7 +3340,12 @@ class TestAcceptanceChecker(unittest.TestCase):
             self.assertEqual(r3["unverifiable_count"], 1, r3["details"])
 
     def test_workpaper_hits_count_as_computed(self):
-        """命中底稿派生行记"计算"不记"引用"——不能拿自己算的数冒充外部来源。"""
+        """命中底稿派生行记"计算"不记"引用"——不能拿自己算的数冒充外部来源。
+
+        B（下午复核）之后还要**真的能复算**：输入 fact_id 必须存在于明细行、算式必须
+        求得出记录值。所以夹具里补上两条明细行（此前用不存在的 `fact-a/b`，
+        那是"只查非空"的旧契约，现在正确地判不可复算）。
+        """
         import json
         import tempfile
         from pathlib import Path
@@ -3333,12 +3356,24 @@ class TestAcceptanceChecker(unittest.TestCase):
             proj = Path(td) / "project"
             proj.mkdir(parents=True)
             (proj / "working_paper.json").write_text(json.dumps({
-                "rows": [],
+                "rows": [
+                    {"fact_id": "fact-a", "entity": "洋河股份", "metric": "net_profit",
+                     "metric_label": "归母净利润", "period": "2023年", "value": 100.16,
+                     "unit": "亿元", "currency": "CNY", "caliber": "合并",
+                     "source_locator": "第 11 页"},
+                    {"fact_id": "fact-b", "entity": "洋河股份", "metric": "net_profit",
+                     "metric_label": "归母净利润", "period": "2024年", "value": 66.73,
+                     "unit": "亿元", "currency": "CNY", "caliber": "合并",
+                     "source_locator": "第 11 页"},
+                ],
                 "derived": [{"metric": "net_profit_change", "metric_label": "归母净利润变化",
                              "period": "2024年较2023年", "value": -33.43, "unit": "亿元",
-                             "formula": "66.73 - 100.16", "derived_from": ["fact-a", "fact-b"]}],
+                             "entity": "洋河股份", "currency": "CNY", "caliber": "合并",
+                             "formula": "66.73 - 100.16，输入 fact-b / fact-a",
+                             "derived_from": ["fact-b", "fact-a"]}],
             }, ensure_ascii=False), encoding="utf-8")
-            r = check_number_traceability("归母净利润变化 -33.43亿元。", _collect_sources(td))
+            r = check_number_traceability("洋河股份归母净利润变化 -33.43亿元。",
+                                          _collect_sources(td))
         self.assertEqual(r["unverifiable_count"], 0, r["details"])
         self.assertEqual(r["cited_count"], 0)
         self.assertEqual(r["computed_count"], 1)
@@ -3346,6 +3381,115 @@ class TestAcceptanceChecker(unittest.TestCase):
         self.assertEqual(hit["source"], "workpaper_derived")
         self.assertTrue(hit["derived"])
         self.assertFalse(hit.get("verified", True))
+
+    # ── B（09-28 下午复核）：计算溯源必须真正复算，禁止数值互借 ──────────────
+
+    def _wp_sources(self, rows, derived):
+        """建一个只含底稿的工作区并取来源（隔离复现用）。"""
+        import json as _json
+        import tempfile as _tf
+        from pathlib import Path as _P
+
+        from acceptance_checker import _collect_sources
+        td = _tf.mkdtemp(prefix="wm_b_")
+        self.addCleanup(__import__("shutil").rmtree, td, ignore_errors=True)
+        proj = _P(td) / "project"
+        proj.mkdir(parents=True, exist_ok=True)
+        (proj / "working_paper.json").write_text(
+            _json.dumps({"rows": rows, "derived": derived}, ensure_ascii=False),
+            encoding="utf-8")
+        return _collect_sources(td)
+
+    def _trace(self, rows, derived, report):
+        from acceptance_checker import check_number_traceability
+        return check_number_traceability(report, self._wp_sources(rows, derived),
+                                         domain="financial",
+                                         goal="分析洋河股份2023-2024年报")
+
+    def test_forged_derived_row_is_not_a_source(self):
+        """B-1 反例：`formula="1+1"`、`value=999`、输入 ID 全不存在 → 不得进计算通道。
+
+        修前只查"公式/输入 ID 非空"，于是伪造行让"洋河 999 亿元"100% 溯源通过。
+        """
+        r = self._trace([], [{
+            "metric": "ghost", "metric_label": "幽灵派生", "period": "2024年",
+            "value": 999, "unit": "亿元", "entity": "洋河股份",
+            "formula": "1+1", "derived_from": ["missing-a", "missing-b"]}],
+            "洋河股份 2024 年收入增加 999 亿元。")
+        self.assertEqual(r["traceable_count"], 0, r["details"])
+        self.assertEqual(r["computed_count"], 0, "伪造行不得计入『计算』")
+        self.assertEqual(r["unverifiable_count"], 1)
+
+    def test_cross_company_rows_do_not_form_a_borrowable_difference(self):
+        """B-2 反例：跨公司"同 metric"不得配成差额，更不得被别的公司借走。
+
+        按 metric 聚合会把"宁德时代 2023"与"比亚迪 2024"配成一对，生成一个**无主体**
+        的差额 100，于是"洋河股份…增加 100 亿元"命中计算通道。
+        """
+        r = self._trace([
+            {"fact_id": "f1", "entity": "宁德时代", "metric": "revenue",
+             "metric_label": "营业收入", "period": "2023年", "value": 100,
+             "unit": "亿元", "currency": "CNY", "caliber": "合并", "source_locator": "p"},
+            {"fact_id": "f2", "entity": "比亚迪", "metric": "revenue",
+             "metric_label": "营业收入", "period": "2024年", "value": 200,
+             "unit": "亿元", "currency": "CNY", "caliber": "合并", "source_locator": "p"}],
+            [], "洋河股份 2024 年收入增加 100 亿元。")
+        self.assertEqual(r["traceable_count"], 0, r["details"])
+
+    def test_derived_mutations_all_fail_and_real_chain_passes(self):
+        """公式 / 值 / 输入 ID / 主体 / 币种 / 单位 **分别变异都必须失败**；
+        真实链条（-33.43 / -38.01 / +4.58）继续可复算。
+
+        断言落在**结构化派生事实**上（`_derived_facts` 里的 `derived` 类）而不是"整句可溯源"：
+        同一对数还能构成合法的**两期差额**事实，句子可溯源并不代表伪造的派生行被采信了。
+        """
+        base_rows = [
+            {"fact_id": "n23", "entity": "洋河股份", "metric": "net_profit",
+             "metric_label": "归母净利润", "period": "2023年", "value": 249.26,
+             "unit": "亿元", "currency": "CNY", "caliber": "合并", "source_locator": "p"},
+            {"fact_id": "n24", "entity": "洋河股份", "metric": "net_profit",
+             "metric_label": "归母净利润", "period": "2024年", "value": 211.25,
+             "unit": "亿元", "currency": "CNY", "caliber": "合并", "source_locator": "p"},
+        ]
+        good = {"metric": "net_profit_change", "metric_label": "归母净利润变化",
+                "period": "2024年较2023年", "value": -38.01, "unit": "亿元",
+                "entity": "洋河股份", "currency": "CNY", "caliber": "合并",
+                "formula": "211.25 - 249.26，输入 n24 / n23",
+                "derived_from": ["n24", "n23"]}
+
+        def _derived_facts(derived, rows=None):
+            from acceptance_checker import _derived_facts_of
+            src = self._wp_sources(rows if rows is not None else base_rows, [derived])
+            return [f for f in _derived_facts_of(src) if f["kind"] == "derived"]
+
+        self.assertEqual(len(_derived_facts(good)), 1, "真实算式必须复算通过")
+        # ① 公式变异（算式与输入无关）
+        self.assertEqual(_derived_facts(dict(good, formula="1+1，输入 n24 / n23")), [])
+        # ② 值变异（记录值与复算不符）
+        self.assertEqual(_derived_facts(dict(good, value=-99.0)), [])
+        # ③ 输入 ID 变异（不存在）
+        self.assertEqual(_derived_facts(dict(good, derived_from=["n24", "nope"],
+                                             formula="211.25 - 249.26，输入 n24 / nope")), [])
+        # ④ 主体变异（输入分属不同公司 → 主体不一致）
+        self.assertEqual(_derived_facts(dict(good), rows=[
+            dict(base_rows[0], entity="比亚迪"), dict(base_rows[1], entity="宁德时代")]), [])
+        # ⑤ 币种变异
+        self.assertEqual(_derived_facts(dict(good), rows=[
+            dict(base_rows[0], currency="USD"), base_rows[1]]), [])
+        # ⑥ 单位量纲变异（亿元 vs 万元）
+        self.assertEqual(_derived_facts(dict(good), rows=[
+            dict(base_rows[0], unit="万元"), base_rows[1]]), [])
+        # ⑦ 缺算法（无算式）
+        self.assertEqual(_derived_facts(dict(good, formula="")), [])
+
+    def test_unboundable_formula_is_unknown_not_traceable(self):
+        """禁用任意求值：函数调用/幂/下标一律按"不可复算"处理，不当作通过。"""
+        from acceptance_checker import _eval_arith
+        for bad in ("__import__('os').system('x')", "2 ** 10", "abs(-1)",
+                    "[1,2][0]", "1 if 1 else 2", "open('x')"):
+            self.assertIsNone(_eval_arith(bad), f"不得求值：{bad}")
+        self.assertAlmostEqual(_eval_arith("(66.73 - 100.16) - (211.25 - 249.26)"),
+                               4.58, places=6)
 
     def test_subject_guard_still_blocks_cross_company_value(self):
         """护栏回归：跨公司同值不得因本轮改动变成"可溯源"（架构复核 P1）。"""

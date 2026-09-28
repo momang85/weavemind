@@ -1063,29 +1063,48 @@ def _gross_line_attributions(text: str) -> list[str]:
     return out
 
 
-def _gross_line_conflict(text: str, gap_value) -> str:
-    """归因方向与底稿的"毛利线以下净额变化"符号**相反**时，返回写明理由的字符串。
+def _gross_line_conflict(text: str, gap_value, gross_change=None) -> str:
+    """归因方向与底稿**金额贡献**相反时，返回写明理由的字符串（09-28 下午复核 B-3 改判据）。
 
-    `net_profit_gross_gap_change = Δ归母净利 − Δ毛利`：
-    - **< 0**：毛利线以下合计**加大**了利润下滑 → 归因"往下走"成立；
-    - **> 0**：毛利线以下合计是**净缓冲** → 归因"主要往下走"与底稿方向相反。
+    判据是**比较两侧的金额贡献绝对值**，不是看差额的符号：
 
-    只做**机械核对**（符号比对），不替读者判断归因本身对不对；底稿没有这个事实时不表态。
+    - 毛利端贡献 = `Δ毛利`（`gross_profit_change`）
+    - 毛利线以下贡献 = `gap = Δ归母净利 − Δ毛利`（`net_profit_gross_gap_change`）
+    - 说"主要来自毛利端"成立 ⟺ `|Δ毛利| > |gap|`；说"主要发生在毛利线以下"成立 ⟺ 反之。
+
+    **旧判据错在哪**：拿 `gap < 0`（"毛利线以下是净拖累"）当成了"主因在毛利线以下"。
+    纯函数反例：净利降 101、毛利降 100 → gap = −1，毛利端贡献了 100/101 ≈ 99% 的降幅，
+    "利润下滑主要来自毛利端"完全正确，旧实现却判它 `unsupported`。
+
+    **证据不足保持未知**：拿不到 `Δ毛利`，或两侧贡献几乎相当（相差 < 2%）时不表态。
+    率变化（毛利率/净利率的百分点差）另列，不能替代金额归因。
     """
     if not isinstance(gap_value, (int, float)):
         return ""
     gap = float(gap_value)
-    if gap == 0:
+    sides = _gross_line_attributions(text)
+    if not sides:
         return ""
-    for side in _gross_line_attributions(text):
-        if side == "below" and gap > 0:
-            return (f"归因方向与底稿相反：底稿「毛利线以下净额变化」为 {gap:+g} 亿元"
-                    f"（毛利线以下是**净缓冲**，不是主要拖累），句中断言把利润变化主要归到"
-                    f"毛利线以下。**金额归因不能用利润率差替代**（毛利率降幅小于净利率降幅，"
+    if not isinstance(gross_change, (int, float)):
+        return ""            # 没有毛利金额 → 说不出谁是主因（证据不足，不判冲突）
+    gp = float(gross_change)
+    _a, _b = abs(gp), abs(gap)
+    if _a == 0 and _b == 0:
+        return ""
+    if abs(_a - _b) <= 0.02 * max(_a, _b):
+        return ""            # 两侧贡献相当：不判主因
+    main_below = _b > _a
+    for side in sides:
+        if side == "below" and not main_below:
+            return (f"归因方向与底稿相反：按**金额贡献**，毛利端 {gp:+g} 亿元（|{_a:g}|）"
+                    f"大于毛利线以下 {gap:+g} 亿元（|{_b:g}|）——降幅主要发生在毛利线上，"
+                    f"句中断言把利润变化主要归到毛利线以下。"
+                    f"**金额归因不能用利润率差替代**（毛利率降幅小于净利率降幅，"
                     f"不等于毛利线以下在金额上拖累更多）")
-        if side == "above" and gap < 0:
-            return (f"归因方向与底稿相反：底稿「毛利线以下净额变化」为 {gap:+g} 亿元"
-                    f"（毛利线以下合计**加大**了利润下滑），句中断言把利润变化主要归到毛利端。")
+        if side == "above" and main_below:
+            return (f"归因方向与底稿相反：按**金额贡献**，毛利线以下 {gap:+g} 亿元"
+                    f"（|{_b:g}|）大于毛利端 {gp:+g} 亿元（|{_a:g}|）——"
+                    f"句中断言把利润变化主要归到毛利端。")
     return ""
 
 
@@ -1975,7 +1994,8 @@ def _claims(body: str, rows, derived, citations, *,
         # P1-b：**正确计算 ≠ 正确解释**。数字全对得上，但把利润变化归到毛利线错误的一侧时，
         # 不得判 `bound`——底稿的「毛利线以下净额变化」符号就是这句话的机械反例。
         # 放在未采用来源/目标类判定**之前**：矛盾是更强的结论，不被后面的分支覆盖掉。
-        _glc = _gross_line_conflict(s, _derived_value.get("net_profit_gross_gap_change"))
+        _glc = _gross_line_conflict(s, _derived_value.get("net_profit_gross_gap_change"),
+                                    _derived_value.get("gross_profit_change"))
         if _glc and claim.get("support_status") in ("bound", "partially_supported"):
             claim["status"] = "unsupported"
             claim["support_status"] = "unsupported"

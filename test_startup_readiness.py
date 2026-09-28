@@ -1018,6 +1018,29 @@ class TestOrchestratorOwnership(unittest.TestCase):
     pub/sub 是广播——同一条任务请求被**执行两次**（重复付费、重复写库）。
     """
 
+    def setUp(self):
+        """每条用例前后都保存/恢复**进程级** `_OWNER_STATE`。
+
+        它是模块级单例：认领/拒绝都会改它，而"曾经持有过 + 现在没有"会让
+        **后续无关用例**里的任务被判成"被取代的旧持有者"（实测：`test_offline_delivery`
+        的正常落库被误拦、交付状态变 unknown）。测试之间必须互不污染。
+        """
+        import orchestrator_v2 as _ov2
+        self._ov2 = _ov2
+        with _ov2._OWNER_LOCK:
+            self._saved_owner = dict(_ov2._OWNER_STATE)
+        with _ov2._OWNER_LOCK:
+            _ov2._OWNER_STATE.clear()
+            _ov2._OWNER_STATE.update({"token": "", "instance": "", "held": False,
+                                      "reason": "未认领", "renewed_at": 0.0,
+                                      "renewed_mono": 0.0, "gen": 0,
+                                      "ever_held": False})
+
+    def tearDown(self):
+        with self._ov2._OWNER_LOCK:
+            self._ov2._OWNER_STATE.clear()
+            self._ov2._OWNER_STATE.update(self._saved_owner)
+
     class _R:
         """最小 Redis 替身：建模**带 TTL 的租约**（eval 三合一 / get）。
 
@@ -1080,6 +1103,152 @@ class TestOrchestratorOwnership(unittest.TestCase):
         self.assertIn("inst-other", why)
         self.assertIn("不允许两个编排器", why)
         self.assertFalse(ownership_held(), "被拒绝时闸门必须是关的")
+
+    # ── A-3（09-28 下午复核）：租约丢失要有本地有效期与派发/落库闸门 ──────────
+
+    def test_stale_lease_is_not_held_after_the_local_validity_window(self):
+        """反例：**续租时间过期一小时**却仍报 `held=True`。
+
+        `ownership_held()` 原来只读那个布尔量：续租线程死掉、进程被挂起、Redis 长时间
+        不可达之后，它会一直停在 True，而真实租约早就过期、别人可能已经接管——
+        "入口检查"因此形同虚设。现在用**单调钟**算本地有效期（TTL + 宽限）。
+        """
+        import orchestrator_v2 as ov2
+        with self._env():
+            r = self._R()
+            ov2.claim_orchestrator_ownership(r, instance="inst-stale")
+            self.assertTrue(ov2.ownership_held())
+            # 把"最后一次成功续租"推到一小时前（模拟续租线程已死）
+            with ov2._OWNER_LOCK:
+                ov2._OWNER_STATE["renewed_mono"] = ov2.time.monotonic() - 3600.0
+            self.assertFalse(ov2.ownership_held(),
+                             "本地有效期已过必须判失租（不能只看布尔量）")
+            self.assertTrue(ov2.ownership_lost(),
+                            "曾经持有、现在失去 → 落库闸门要能识别")
+            lease = ov2.ownership_lease()
+            self.assertFalse(lease["valid"])
+            self.assertGreater(lease["age"], ov2.OWNER_HB_TTL + ov2.OWNER_LEASE_GRACE)
+
+    def test_lease_lost_is_not_the_same_as_never_held(self):
+        """从未持有（单机直跑/Redis 不可用）**不等于**失租——不能因此拦住落库。"""
+        import orchestrator_v2 as ov2
+        with self._env():
+            with ov2._OWNER_LOCK:
+                ov2._OWNER_STATE.update({"held": False, "ever_held": False,
+                                         "renewed_mono": 0.0})
+            self.assertFalse(ov2.ownership_held())
+            self.assertFalse(ov2.ownership_lost(),
+                             "从没持有过不该触发落库闸门（否则单机部署会卡在 RUNNING）")
+
+    def test_dispatch_is_refused_when_the_task_start_lease_was_superseded(self):
+        """A-3：入口闸门管"新任务"，**已启动任务**的后续步骤必须另有闸门。
+
+        场景：任务在持有者 A 名下启动（`started` 事件记了 A 的指纹），随后租约被 B
+        接管；A 进程里这条任务还在跑 → 它的后续派发必须被拒（旧持有者不得继续产生
+        有效结果，也不能继续花钱）。
+        """
+        import orchestrator_v2 as ov2
+        import task_state as ts_m
+        from orchestrator_v2 import OrchestratorV2
+        with self._env():
+            # 本进程**没有**租约（held=False），任务启动时记的是"别人"的指纹
+            o = object.__new__(OrchestratorV2)
+            sent: list = []
+            o._messaging = type("M", (), {
+                "publish": lambda s, ch, payload: sent.append((ch, payload))})()
+            o._now_iso = lambda: "t"
+            o._new_redis_sync = lambda: (_ for _ in ()).throw(
+                AssertionError("被取代后不得再发任何请求"))
+            with mock.patch.object(ov2, "_task_start_owner", return_value="deadbeefdeadbeef"):
+                out = o._dispatch({"step_id": "s1", "capability": "web_search",
+                                   "instruction": "检索"}, "t-lost")
+            self.assertEqual(out["status"], "FAILED")
+            self.assertIn("租约", out["result"])
+            self.assertIn("拒绝派发", str(sent))
+            # 反向：任务是在**本进程**名下启动的（指纹相同）→ 闸门不得触发
+            with mock.patch.object(ov2, "_task_start_owner",
+                                   return_value=ov2._owner_fingerprint()):
+                self.assertEqual(ov2._lease_superseded("t-mine"), "",
+                                 "同指纹不得判成被取代")
+            # 反向：任务启动时**没有**租约概念（旧行/单机直跑）→ 不拦
+            with mock.patch.object(ov2, "_task_start_owner", return_value=""):
+                self.assertEqual(ov2._lease_superseded("t-legacy"), "",
+                                 "没有启动指纹的旧行不得被拦（否则单机部署会卡住）")
+        self.assertIsNotNone(ts_m)
+
+    def test_finalize_is_refused_when_the_task_start_lease_was_superseded(self):
+        """A-3 落库闸门：迟到结果不得覆盖新 owner；已取消是终态不得被覆盖。"""
+        import orchestrator_v2 as ov2
+        from orchestrator_v2 import OrchestratorV2
+        with self._env():
+            o = object.__new__(OrchestratorV2)
+            called: list = []
+            with mock.patch("task_state.read_task", return_value={"status": "RUNNING"}), \
+                    mock.patch("task_state.record_completion",
+                               side_effect=lambda *a, **k: called.append(a) or True), \
+                    mock.patch.object(ov2, "_task_start_owner",
+                                      return_value="deadbeefdeadbeef"):
+                o._finalize_task("t-late", "目标", "SUCCESS", report="迟到结果")
+            self.assertEqual(called, [], "被取代的旧持有者不得落终态")
+        with self._env():
+            o2 = object.__new__(OrchestratorV2)
+            called2: list = []
+            with mock.patch("task_state.read_task", return_value={"status": "CANCELLED"}), \
+                    mock.patch("task_state.record_completion",
+                               side_effect=lambda *a, **k: called2.append(a) or True), \
+                    mock.patch.object(ov2, "_task_start_owner", return_value=""):
+                o2._finalize_task("t-cancel", "目标", "SUCCESS", report="迟到结果")
+            self.assertEqual(called2, [], "已取消是终态，不得被迟到结果覆盖")
+
+    def test_dead_owner_is_taken_over(self):
+        """本类多数用例直接改进程级 `_OWNER_STATE`：用上下文管理器做保存/恢复。"""
+        import contextlib
+        import orchestrator_v2 as ov2
+
+        @contextlib.contextmanager
+        def _cm():
+            with ov2._OWNER_LOCK:
+                saved = dict(ov2._OWNER_STATE)
+            try:
+                with ov2._OWNER_LOCK:
+                    ov2._OWNER_STATE.clear()
+                    ov2._OWNER_STATE.update({"token": "", "instance": "", "held": False,
+                                             "reason": "未认领", "renewed_at": 0.0,
+                                             "renewed_mono": 0.0, "gen": 0,
+                                             "ever_held": False})
+                yield
+            finally:
+                with ov2._OWNER_LOCK:
+                    ov2._OWNER_STATE.clear()
+                    ov2._OWNER_STATE.update(saved)
+        return _cm()
+
+    def _env(self):
+        """A-3 用例会直接改进程级 `_OWNER_STATE`：用上下文管理器做保存/恢复。
+
+        不恢复的话，"曾经持有过"这类状态会**粘**到同一进程里后续无关用例上
+        （实测：`test_offline_delivery` 的正常落库会被误拦）。
+        """
+        import contextlib
+        import orchestrator_v2 as ov2
+
+        @contextlib.contextmanager
+        def _cm():
+            with ov2._OWNER_LOCK:
+                saved = dict(ov2._OWNER_STATE)
+            try:
+                with ov2._OWNER_LOCK:
+                    ov2._OWNER_STATE.clear()
+                    ov2._OWNER_STATE.update({"token": "", "instance": "", "held": False,
+                                             "reason": "未认领", "renewed_at": 0.0,
+                                             "renewed_mono": 0.0, "gen": 0,
+                                             "ever_held": False})
+                yield
+            finally:
+                with ov2._OWNER_LOCK:
+                    ov2._OWNER_STATE.clear()
+                    ov2._OWNER_STATE.update(saved)
+        return _cm()
 
     def test_dead_owner_is_taken_over(self):
         """上一位持有者租约已过期（崩溃/重启）→ 允许接管。"""

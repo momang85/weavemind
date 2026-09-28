@@ -180,12 +180,17 @@ _SUBMIT_TIMELINE_MAX = 40
 
 def record_submit_event(task_id: str, event: str, *, instance: str = "",
                         code_version: str = "", detail: str = "",
+                        owner: str = "",
                         ts: float | None = None, db_path: str | None = None) -> bool:
     """把一条提交时间线事件**追加**到任务行（C3/H3）。
 
     "收到请求 → 持久化 → 发布 → 消费 → 开始"必须能按时间与实例对账：只靠一条
     会过期的 Redis 收执键，事后无法回答"请求到没到、是谁收的、卡在哪一段"。
     追加在一条 JSON 列里（读少写少，不另建表），最多保留最后 40 条。
+
+    `owner`：该事件的**持有者指纹**（令牌的 sha256 前 16 位；不落明文令牌）。
+    `started` 事件带它，是为了让"迟到的旧结果不得覆盖新 owner"可判——见
+    `orchestrator_v2._lease_superseded`。
     """
     if not task_id:
         return False
@@ -194,6 +199,8 @@ def record_submit_event(task_id: str, event: str, *, instance: str = "",
              "instance": str(instance or "")[:64],
              "code_version": str(code_version or "")[:40],
              "detail": str(detail or "")[:200]}
+    if owner:
+        entry["owner"] = str(owner)[:32]
     try:
         con = _connect(db_path)
         try:
@@ -476,12 +483,13 @@ def promote_received(task_id: str, *, instance: str = "", code_version: str = ""
         return "promoted"
     # 没推进成功 → 分清"行在但不是 RECEIVED"（already）与"真的没有行"（absent）。
     # 读也失败时同样报 error：读不出来不等于没有收执，不得据此放行重复执行。
-    try:
-        row = read_task(task_id, db_path)
-    except Exception as exc:                          # noqa: BLE001
-        logger.error("任务 %s 收执状态读取失败（报 error）：%s", task_id, str(exc)[:160])
+    # 注意必须用 `read_task_checked`：`read_task` 把异常吞成 `{}`，
+    # 用它会让下面的 except 变成死代码、DB 故障被当成"缺行"（09-28 下午复核反例）。
+    _row, _verdict = read_task_checked(task_id, db_path)
+    if _verdict == "error":
+        logger.error("任务 %s 收执状态读取失败（报 error）：不当作缺行", task_id)
         return "error"
-    return "already" if row else "absent"
+    return "already" if _verdict == "found" else "absent"
 
 
 def list_received(*, older_than: float = 0.0, limit: int = 50,
@@ -500,7 +508,8 @@ def list_received(*, older_than: float = 0.0, limit: int = 50,
                 "SELECT task_id,goal,project,conversation_id,parent_task_id,context,"
                 " user,research_request_json,idempotency_key,"
                 " CAST(strftime('%s','now') AS INTEGER)"
-                " - CAST(strftime('%s',created_at) AS INTEGER) AS age"
+                " - CAST(strftime('%s',created_at) AS INTEGER) AS age,"
+                " run_options_json"
                 " FROM task_history WHERE status=? ORDER BY rowid ASC LIMIT ?",
                 (RECEIVED, int(limit))).fetchall()
         finally:
@@ -519,11 +528,19 @@ def list_received(*, older_than: float = 0.0, limit: int = 50,
             req = json.loads(r[7] or "{}")
         except Exception:
             req = {}
+        # A-4：RECEIVED 恢复同样要带出**原请求**的运行选项（QUEUED 路径已补，这条漏了）。
+        # 丢失的后果：用户明确选了"不自动执行/要确认计划"，崩溃恢复后退回默认值。
+        ropts: dict = {}
+        try:
+            ropts = json.loads(r[10] or "{}")
+        except Exception:                             # noqa: BLE001
+            ropts = {}
         out.append({"task_id": str(r[0] or ""), "goal": str(r[1] or ""),
                     "project": str(r[2] or "default"),
                     "conversation_id": str(r[3] or ""),
                     "parent_task_id": str(r[4] or ""), "context": str(r[5] or ""),
                     "user_id": str(r[6] or ""), "research_request": req,
+                    "run_options": ropts if isinstance(ropts, dict) else {},
                     "idempotency_key": str(r[8] or ""), "age": age})
     return out
 
@@ -776,20 +793,26 @@ def mark_queued(task_id: str, goal: str, project: str = "default",
 
 
 def mark_running(task_id: str, phase: str = "执行", db_path: str | None = None) -> bool:
-    """标记进入执行（排队 → 运行），让历史/状态接口能区分两种阶段。
+    """把 `QUEUED`/`PENDING` **原子地**推进到 `RUNNING`；返回**是否赢得启动权**。
 
-    返回是否写入成功；失败只记日志不回抛（阶段推进不该拖垮任务执行）。
+    语义（09-28 下午复核 A-2 修正）：返回值 = `UPDATE … WHERE status IN (QUEUED,PENDING)`
+    的**真实受影响行数 > 0**。此前 `commit` 后无条件 `return True`：两份相同的 QUEUED
+    扫描快照依次恢复，两边都报成功并各自建线程 → 同一任务被执行两次。
+    "写成功"与"我赢得了这一行"是两件事，只有后者才能起线程。
+
+    写失败（异常）仍返回 False（不抛）：阶段推进不该拖垮任务执行，但**调用方据此跳过**。
     """
     try:
         con = _connect(db_path)
         try:
-            con.execute(
+            cur = con.execute(
                 "UPDATE task_history SET status=?, phase=?, updated_at=CURRENT_TIMESTAMP"
                 " WHERE task_id=? AND status IN (?,?)",
                 (RUNNING, phase, task_id, QUEUED, "PENDING"),
             )
+            won = int(cur.rowcount or 0) > 0
             con.commit()
-            return True
+            return won
         finally:
             con.close()
     except Exception as exc:
@@ -944,8 +967,15 @@ def record_completion(task_id: str, *, goal: str = "", status: str = "",
         return False
 
 
-def read_task(task_id: str, db_path: str | None = None) -> dict:
-    """统一读取（含解析后的 acceptance 与 phase）。"""
+def read_task_checked(task_id: str, db_path: str | None = None) -> tuple[dict, str]:
+    """严格读取任务行 → `(row, verdict)`，`verdict ∈ {"found","not_found","error"}`。
+
+    与 `read_task` 的区别只有一条、但很关键：**读失败不伪装成"没有这一行"**。
+    `read_task` 把任何异常都吞成 `{}` 是刻意的（大多数调用方只需要"有没有内容"，
+    读不到就按空处理），但**执行权裁决**不能用它——那样"数据库读不出来"会被当成
+    "没有收执"，调用方据此走旧路径，把一条正在 RUNNING 的任务再启动一次
+    （09-28 下午复核反例：UPDATE 未命中后第二次读取临时失败 → `absent` → 仍放行）。
+    """
     try:
         con = _connect(db_path)
         try:
@@ -954,11 +984,17 @@ def read_task(task_id: str, db_path: str | None = None) -> dict:
             ).fetchone()
         finally:
             con.close()
-    except Exception:
-        return {}
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("任务 %s 读取失败（报 error，不当作缺行）：%s",
+                       task_id, str(exc)[:160])
+        return {}, "error"
     if not row:
-        return {}
-    out = dict(row)
+        return {}, "not_found"
+    return _shape_row(dict(row)), "found"
+
+
+def _shape_row(out: dict) -> dict:
+    """行 → 对外形状（解析 acceptance / research_request；解析失败按空，不抛）。"""
     raw = out.get("acceptance_json") or ""
     try:
         out["acceptance"] = json.loads(raw) if raw else {}
@@ -971,6 +1007,15 @@ def read_task(task_id: str, db_path: str | None = None) -> dict:
     except Exception:
         out["research_request"] = {}
     return out
+
+
+def read_task(task_id: str, db_path: str | None = None) -> dict:
+    """统一读取（含解析后的 acceptance 与 phase）。**读不到与读失败都返回 `{}`**。
+
+    需要区分二者时用 `read_task_checked`（执行权裁决必须区分）。
+    """
+    row, _verdict = read_task_checked(task_id, db_path)
+    return row
 
 
 def is_running(task_id: str, db_path: str | None = None) -> bool:

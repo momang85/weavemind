@@ -8575,24 +8575,38 @@ class TestNightCorrectionFailureSamples(unittest.TestCase):
     def test_gross_line_attribution_matching_the_workpaper_is_not_flagged(self):
         """反向护栏：方向**与底稿一致**时不得误标（不能把真话也说成矛盾）。
 
-        底稿差额 +4.58 → 毛利线以下是净缓冲，所以"下滑主要来自毛利端"与底稿**一致**；
-        底稿差额 -4.58 → "侵蚀主要发生在毛利线以下"才一致。两个方向各测一次。
+        B-3 之后判据是**金额贡献比较**（|Δ毛利| vs |毛利线以下净额|），所以两个方向各测一次：
+        `gap=+4.58 / Δ毛利=-38.01` → 主因在毛利线**上**；`gap=-38.01 / Δ毛利=+4.58` → 在**下**。
+        拿不到 Δ毛利 或两侧相当 → **不表态**（证据不足保持未知）。
         """
         import report_brief
 
+        # 主因在毛利线上：说"主要来自毛利端"与底稿一致 → 不标
         self.assertEqual(
-            report_brief._gross_line_conflict("利润下滑主要来自毛利端，费用端相对稳定", 4.58), "")
+            report_brief._gross_line_conflict("利润下滑主要来自毛利端，费用端相对稳定",
+                                              4.58, -38.01), "")
+        # 主因在毛利线下：说"侵蚀主要发生在毛利线以下"与底稿一致 → 不标
         self.assertEqual(
-            report_brief._gross_line_conflict("利润侵蚀主要发生在毛利线以下", -4.58), "")
+            report_brief._gross_line_conflict("利润侵蚀主要发生在毛利线以下",
+                                              -38.01, 4.58), "")
+        # 两个方向各自的反例必须被标出来
         self.assertTrue(
-            report_brief._gross_line_conflict("利润下滑主要来自毛利端，费用端相对稳定", -4.58))
+            report_brief._gross_line_conflict("利润下滑主要来自毛利端，费用端相对稳定",
+                                              -38.01, 4.58))
+        self.assertTrue(
+            report_brief._gross_line_conflict("利润侵蚀主要发生在毛利线以下",
+                                              4.58, -38.01))
+        # 证据不足：没有 Δ毛利 → 不表态（旧判据会在这里凭 gap 符号误判）
+        self.assertEqual(
+            report_brief._gross_line_conflict("利润下滑主要来自毛利端", -1.0, None), "")
+        # 两侧贡献相当（相差 < 2%）→ 不判主因
+        self.assertEqual(
+            report_brief._gross_line_conflict("利润下滑主要来自毛利端", -50.0, -50.0), "")
         # 口径/来源说明不是归因，不得被当成归因句
         for _ok in ("毛利端与期间费用取自发行人毛利率表与费用明细（各自有定位）",
                     "毛利额为**推导量**（上期由披露同比反推），各分组是同一笔收入的不同切法",
                     "未取得明细前不拆解到具体科目"):
-            self.assertEqual(report_brief._gross_line_conflict(_ok, 4.58), "", _ok)
-        # 底稿没有这个事实时不表态
-        self.assertEqual(report_brief._gross_line_conflict("利润侵蚀主要发生在毛利线以下", None), "")
+            self.assertEqual(report_brief._gross_line_conflict(_ok, 4.58, -38.01), "", _ok)
 
     def test_gross_line_attribution_negative_phrasing_flips_side(self):
         """否定式要翻面：冻结样本里的"**并非**主要来自毛利端"= 归因在毛利线以下。"""
@@ -8604,12 +8618,16 @@ class TestNightCorrectionFailureSamples(unittest.TestCase):
             report_brief._gross_line_attributions("利润下滑并非主要来自毛利端，"
                                                   "更大比例的利润侵蚀发生在毛利以下的环节"),
             ["below", "below"])
-        # 逐子句都要看：前半句一致、后半句矛盾时仍要抓到矛盾
+        # 逐子句都要看：前半句一致、后半句矛盾时仍要抓到矛盾（主因在毛利线上）
         self.assertTrue(report_brief._gross_line_conflict(
-            "毛利端表现稳健，利润侵蚀主要发生在毛利线以下", 4.58))
+            "毛利端表现稳健，利润侵蚀主要发生在毛利线以下", 4.58, -38.01))
         # 裸"非"不得触发翻面（"非经常性损益"是科目名）
         self.assertEqual(report_brief._gross_line_attributions(
             "非经常性损益与毛利端共同影响利润降幅"), ["above"])
+        # B-3：净利降 101 / 毛利降 100（gap=-1）→ 毛利端是金额主因，
+        # "主要来自毛利端"**不得**被判成与底稿相反
+        self.assertEqual(report_brief._gross_line_conflict("利润下滑主要来自毛利端",
+                                                          -1.0, -100.0), "")
 
     def test_derived_pair_text_labels_years_and_units(self):
         """P1-b：派生成对读数必须**标年份、带单位、时间正序**、并给出带符号变化量。

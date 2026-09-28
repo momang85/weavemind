@@ -514,13 +514,18 @@ class TestReceiptRecovery(unittest.TestCase):
         self.assertNotEqual(verdict, "absent", "异常不得伪装成缺行")
 
     def test_promote_read_error_also_reports_error(self):
-        """推进未成功且**读**也失败时同样报 error：读不出来 ≠ 没有收执，不得据此放行。"""
+        """推进未成功且**读**也失败时同样报 error：读不出来 ≠ 没有收执，不得据此放行。
+
+        打桩点从 `read_task` 改为 `_connect`（09-28 下午 A-1）：`promote_received`
+        现在走 `read_task_checked`，patch `read_task` 已经拦不到它了——而且**真实缺陷
+        正是"没人替它抛异常"**：`read_task` 自己会把异常吞成 `{}`。
+        """
         with mock.patch.object(task_state, "DB_PATH", self.db):
             task_state.mark_received("ui-r8b", "目标")
             task_state.promote_received("ui-r8b")      # → QUEUED
             task_state.mark_running("ui-r8b")          # → RUNNING（已不是 RECEIVED，走读分支）
-            with mock.patch.object(task_state, "read_task",
-                                   side_effect=RuntimeError("read down")):
+            with mock.patch.object(task_state, "_connect",
+                                   side_effect=self._connect_ok_then_fail()):
                 verdict = task_state.promote_received("ui-r8b", instance="inst-a")
         self.assertEqual(verdict, "error")
 
@@ -562,6 +567,121 @@ class TestReceiptRecovery(unittest.TestCase):
         self.assertTrue(ok, "收执已存在时登记不得失败")
         self.assertEqual(row["status"], "QUEUED")
         self.assertEqual(row["accepted_by"], "inst-a")
+
+    # ── A 批（09-28 下午复核）：重复执行残余的隔离反例 ──────────────────────
+
+    def _connect_ok_then_fail(self):
+        """返回一个 `_connect` 替身：**第一次**成功，之后全部抛异常。
+
+        用来精确复现架构师的反例：UPDATE 已执行（第一次连接），随后"第二次读取"
+        临时失败。注意这里**不 patch `read_task`** —— 生产里没有人替它抛异常，
+        它自己会把异常吞成 `{}`，这才是缺陷所在。
+        """
+        real = task_state._connect
+        calls = {"n": 0}
+
+        def _c(*a, **k):
+            calls["n"] += 1
+            if calls["n"] > 1:
+                raise RuntimeError("database is locked (second read)")
+            return real(*a, **k)
+
+        return _c
+
+    def test_second_read_failure_does_not_grant_execution_right(self):
+        """A-1 反例：UPDATE 未命中后**第二次读取失败**，不得判成 `absent`。
+
+        `read_task` 把所有异常吞成 `{}`，于是 `promote_received` 的 `except` 是死代码，
+        DB 读不出来被当成"没有这一行"，调用方据此走旧路径 → 一条正在 RUNNING 的任务
+        再次被启动。数据库不可读不能取得执行权。
+        """
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            task_state.mark_received("ui-a1", "目标", idempotency_key="ka1")
+            task_state.promote_received("ui-a1")       # → QUEUED
+            task_state.mark_running("ui-a1")           # → RUNNING（UPDATE 必然未命中）
+            with mock.patch.object(task_state, "_connect",
+                                   side_effect=self._connect_ok_then_fail()):
+                verdict = task_state.promote_received("ui-a1", instance="inst-b")
+        self.assertEqual(verdict, "error",
+                         "读不出来 ≠ 没有收执；二次读故障必须报 error")
+        self.assertNotEqual(verdict, "absent", "不得让二次读故障冒充缺行")
+        # 端到端：编排器不得因此接受并再次执行
+        from orchestrator_v2 import accept_task_request
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            with mock.patch.object(task_state, "_connect",
+                                   side_effect=self._connect_ok_then_fail()):
+                ok, reason = accept_task_request(
+                    self.orch, {"task_id": "ui-a1", "goal": "目标"})
+        self.assertFalse(ok, f"二次读故障时不得报 accepted：{reason}")
+
+    def test_mark_running_reports_the_real_winner(self):
+        """A-2 反例：`mark_running` 必须以**真实受影响行数**报告是否赢得启动权。
+
+        当前它 `commit` 后无条件 `return True`：两份相同的 QUEUED 扫描快照依次恢复，
+        两边都返回成功并各自建线程 → 同一任务被执行两次。
+        """
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            task_state.mark_received("ui-a2", "目标", idempotency_key="ka2")
+            task_state.promote_received("ui-a2")            # → QUEUED
+            first = task_state.mark_running("ui-a2", phase="恢复执行")
+            second = task_state.mark_running("ui-a2", phase="恢复执行")
+        self.assertTrue(first, "第一次必须报告赢得启动权")
+        self.assertFalse(second, "同一 QUEUED 的第二次认领必须报告未赢得（否则双跑）")
+
+    def test_two_scan_snapshots_do_not_both_start_a_thread(self):
+        """A-2 端到端：两份相同快照依次恢复 → 只允许一个线程起来。"""
+        import orchestrator_v2 as ov2
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            task_state.mark_received("ui-a2b", "目标", idempotency_key="ka2b")
+            task_state.promote_received("ui-a2b")
+            snapshot = task_state.list_unstarted_queued(older_than=0)
+        self.assertEqual([r["task_id"] for r in snapshot], ["ui-a2b"],
+                         "扫描快照必须含该行（否则反例不成立）")
+        started: list = []
+        with mock.patch.object(task_state, "DB_PATH", self.db), \
+                mock.patch.object(task_state, "list_unstarted_queued",
+                                  side_effect=[snapshot, snapshot]), \
+                mock.patch.object(ov2.threading, "Thread",
+                                  side_effect=lambda **k: type(
+                                      "T", (), {"start": lambda s: started.append(k)})()):
+            n1 = ov2.resume_unstarted_queued(self.orch, older_than=0)
+            n2 = ov2.resume_unstarted_queued(self.orch, older_than=0)
+        self.assertEqual(n1, 1, "第一份快照应当恢复 1 条")
+        self.assertEqual(n2, 0, "第二份快照不得再启动同一条任务")
+        self.assertEqual(len(started), 1, f"只允许起一个执行线程，实际 {len(started)}")
+
+    def test_received_resume_keeps_run_options(self):
+        """A-4 反例：RECEIVED 恢复必须带上**原请求**的运行选项（QUEUED 已补，RECEIVED 仍丢）。
+
+        丢失的后果：用户提交时明确选了"不自动执行/要确认计划"，崩溃恢复后变成默认值。
+        """
+        import orchestrator_v2 as ov2
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            # 走**生产路径** `claim_receipt`（web_ui 就是这样落的收执）
+            verdict, _ref = task_state.claim_receipt(
+                "ui-a4", "目标", idempotency_key="ka4",
+                run_options={"auto_run": False, "template_steps": ["s1"],
+                             "report_confirm": True})
+            self.assertEqual(verdict, "created")
+            rows = task_state.list_received(older_than=0)
+        self.assertEqual([r["task_id"] for r in rows], ["ui-a4"])
+        self.assertEqual(rows[0].get("run_options"),
+                         {"auto_run": False, "template_steps": ["s1"],
+                          "report_confirm": True},
+                         "扫描结果必须带出原运行选项")
+        captured: list = []
+        with mock.patch.object(task_state, "DB_PATH", self.db), \
+                mock.patch.object(ov2.threading, "Thread",
+                                  side_effect=lambda **k: type(
+                                      "T", (), {"start": lambda s: captured.append(k)})()):
+            n = ov2.resume_received_tasks(self.orch, older_than=0)
+        self.assertEqual(n, 1)
+        kwargs = captured[0]["kwargs"]
+        self.assertFalse(kwargs.get("auto_run", True),
+                         "明确 False 不得被恢复成 True")
+        self.assertTrue(kwargs.get("report_confirm"),
+                        "明确 True 不得被恢复成 False")
+        self.assertEqual(kwargs.get("template_steps"), ["s1"])
 
     def test_mark_queued_never_downgrades_a_running_task(self):
         """已经在跑/已终结的任务不得被"登记"改回 QUEUED。"""
