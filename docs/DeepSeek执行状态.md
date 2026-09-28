@@ -1,8 +1,30 @@
-# DeepSeek 执行状态（2026-09-27 更新 · Harness 接续：C3 已收口，C4 进行中）
+# DeepSeek 执行状态（2026-09-28 更新 · C3 只算部分（恢复与并发未验收）· C4 未过）
 
-**当前批次**：`docs/Harness接续执行指令_20260927.md`（基线 2519d9a）**H0→H1→H2→H3**；
-H0 之后的阶段标准仍是 `docs/真实研究闭环与阶段D收口_20260927.md` 的 C0→C4。
-已交的 C0/C1/C2 与 N/S 批次不重跑。C0 三提交已交（`5107ac0`/`e5c5607`/`bac62c6`）。
+**当前批次**：`docs/DSH真实样本复核与下一批执行_20260928.md`（基线 `65a6b62`），
+先 P0（重复执行与恢复断点）→ P1（计算与溯源）→ P1（检索协议）→ P1（补材料闭环与 actionable）。
+上一批 `docs/Harness接续执行指令_20260927.md`（基线 2519d9a）的 H0/H2 成果保留、H1 仍有缺口。
+**C3 改称"部分实现、恢复与并发未验收"**，不再标"已收口"；C4 样本有真实材料与产物但**未毕业**。
+本轮**不新增付费整跑、不降阈值、不改用户设置/门禁/模型/代理、不清理真库**；
+`docs/evidence/c4_samples_run_20260927.md` 那份"当前余额耗尽"已随用户充值**解除**（保留为历史，
+不再周期探测余额）。
+
+## P0-a 已交：收执裁决区分「异常」与「缺行」（证据 `docs/evidence/p0a_receipt_verdict_20260928.md`）
+
+- **缺陷**：`task_state.promote_received()` 遇**数据库异常**返回 `"absent"` → 调用方走旧路径
+  `mark_queued`，于是一条**正在 RUNNING** 的任务遇一次连接异常仍回 accepted 且无 `_skip_run`，
+  允许再次启动；收执仍在库却被当成"老路径请求"，绕过唯一执行权裁决点。
+- **修复**：裁决分四种 `promoted` / `already` / `absent` / `error`（`absent` 语义保留，只把异常摘出来；
+  推进未中而**读**也失败同样报 `error`——读不出来 ≠ 没有收执）；
+  `accept_task_request` 新增 `error` 分支：**拒绝执行、不落回旧路径**，回执
+  `rejected:receipt_error`，收执留在 RECEIVED 等下次恢复。
+- **验证**：`test_task_persistence` **36 项 OK**（+5 新增；3 项既有断言从旧原因串更新为新契约，
+  场景与强度不变，只是"更靠前被拒"）。
+- **顺带修掉假 ERROR**：测试里 `subprocess.run(text=True)` 未钉编码 → 本机 GBK + 非 ASCII 路径
+  下 `UnicodeDecodeError` 让断言退化成 `TypeError`；修 3 处（含 `test_delivery_chain.py` 1 处）。
+  连带发现：`test_startup_readiness` 的编码守卫**只扫产品码**，测试文件同类缺陷无人拦（未修）。
+- **回归**：`test_startup_readiness` **57 OK**、`test_delivery_chain` **373 OK**。
+- **未验项**：未做真实 Redis 双进程验证；**P0-b（租约）/P0-c（QUEUED 崩溃窗口）/P0-d（同键并发
+  原子绑定）/P0-e（时间线分段）尚未实施**，故"同键并发只留一个可执行收执"**仍未验证**。
 
 ## C4 真实样本已开跑：①洋河两次 + ②补材料恢复（证据 `docs/evidence/c4_samples_run_20260927.md`）
 

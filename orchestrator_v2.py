@@ -8480,6 +8480,14 @@ def accept_task_request(orch, data: dict) -> tuple[bool, str]:
             _set_task_ack(orch, task_id, "accepted")
             logger.info("Task %s 收执已被消费过：跳过本次执行", task_id)
             return True, ""
+        elif verdict == "error":
+            # 数据库异常**不是**"没有收执"：拒绝本次执行、保留恢复状态，
+            # 绝不落回 `mark_queued` 旧路径——那会把正在 RUNNING 的任务再次启动。
+            # 收执仍在 RECEIVED，下次启动恢复会再试。
+            ok, reason = False, "收执推进失败：任务库异常（已拒绝执行，保留恢复状态）"
+            _set_task_ack(orch, task_id, "rejected:receipt_error")
+            logger.error("Task %s 收执推进异常：拒绝执行（不落回旧路径）", task_id)
+            return ok, reason
         else:
             wrote = _ts.mark_queued(
                 task_id, goal,

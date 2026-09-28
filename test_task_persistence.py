@@ -117,7 +117,8 @@ class TestDbPathResolution(unittest.TestCase):
                 full.update(env)
                 proc = subprocess.run(
                     [sys.executable, "-c", code], cwd=str(ROOT), env=full,
-                    capture_output=True, text=True, timeout=120)
+                    capture_output=True, text=True, encoding="utf-8",
+                    errors="replace", timeout=120)
                 self.assertEqual(proc.returncode, 0, proc.stderr[-400:])
                 module_path, resolved = json.loads(proc.stdout.strip().splitlines()[-1])
                 self.assertEqual(module_path, resolved,
@@ -202,7 +203,8 @@ class TestRegistrationFailureIsHonest(_BadDbMixin, unittest.TestCase):
         with mock.patch.object(task_state, "DB_PATH", self.bad_db):
             ok, reason = accept_task_request(orch, {"task_id": "ui-x", "goal": "g"})
         self.assertFalse(ok, "任务库不可写时不得回 accepted（否则界面显示成功、现实里无任务）")
-        self.assertIn("登记失败", reason)
+        self.assertIn("收执推进失败", reason,
+                      "库不可写必须在**收执裁决点**被拒（P0-a 后不再回落旧路径）")
         ack = str(redis.setex.call_args.args[2])
         self.assertTrue(ack.startswith("rejected:"), f"收执必须是 rejected：{ack}")
 
@@ -282,7 +284,8 @@ class TestDataRootBoundaries(unittest.TestCase):
         base = {k: v for k, v in os.environ.items() if k not in self._OVERRIDE_VARS}
         base.update(env)
         proc = subprocess.run([sys.executable, "-c", self._CODE], cwd=str(ROOT),
-                              env=base, capture_output=True, text=True, timeout=300)
+                              env=base, capture_output=True, text=True,
+                              encoding="utf-8", errors="replace", timeout=300)
         self.assertEqual(proc.returncode, 0, proc.stderr[-500:])
         return json.loads(proc.stdout.strip().splitlines()[-1])
 
@@ -433,7 +436,7 @@ class TestSubmitIdempotencyAndTimeline(unittest.TestCase):
                                             {"task_id": "ui-f1", "goal": "g",
                                              "idempotency_key": "k-f"})
         self.assertFalse(ok)
-        self.assertIn("登记失败", reason)
+        self.assertIn("收执推进失败", reason)
         ack = str(self.redis.setex.call_args.args[2])
         self.assertTrue(ack.startswith("rejected:"), ack)
 
@@ -483,6 +486,58 @@ class TestReceiptRecovery(unittest.TestCase):
     def test_promote_absent_when_no_receipt(self):
         with mock.patch.object(task_state, "DB_PATH", self.db):
             self.assertEqual(task_state.promote_received("ui-none"), "absent")
+
+    def test_promote_db_error_is_error_not_absent(self):
+        """数据库异常**不是**"没有收执"。
+
+        此前异常返回 `absent`，调用方据此走旧路径 → 一条正在 RUNNING 的任务会被
+        再次启动（内存反例）。异常必须是独立的 `error` 裁决，绝不伪装成缺行。
+        """
+        with mock.patch.object(task_state, "DB_PATH", self.db), \
+                mock.patch.object(task_state, "_connect",
+                                  side_effect=RuntimeError("database is locked")):
+            verdict = task_state.promote_received("ui-r8", instance="inst-a")
+        self.assertEqual(verdict, "error")
+        self.assertNotEqual(verdict, "absent", "异常不得伪装成缺行")
+
+    def test_promote_read_error_also_reports_error(self):
+        """推进未成功且**读**也失败时同样报 error：读不出来 ≠ 没有收执，不得据此放行。"""
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            task_state.mark_received("ui-r8b", "目标")
+            task_state.promote_received("ui-r8b")      # → QUEUED
+            task_state.mark_running("ui-r8b")          # → RUNNING（已不是 RECEIVED，走读分支）
+            with mock.patch.object(task_state, "read_task",
+                                   side_effect=RuntimeError("read down")):
+                verdict = task_state.promote_received("ui-r8b", instance="inst-a")
+        self.assertEqual(verdict, "error")
+
+    def test_promote_already_for_running_task(self):
+        """任务已在跑时同一请求再次到达 → `already`（不得再次启动）。"""
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            task_state.mark_received("ui-r9", "目标")
+            task_state.promote_received("ui-r9")
+            task_state.mark_running("ui-r9")
+            verdict = task_state.promote_received("ui-r9")
+            row = task_state.read_task("ui-r9")
+        self.assertEqual(verdict, "already")
+        self.assertEqual(row["status"], "RUNNING", "不得把 RUNNING 改回 QUEUED")
+
+    def test_accept_refuses_and_keeps_recovery_state_on_receipt_error(self):
+        """推进异常 → 拒绝本次执行、**不置 skip**、收执仍是 RECEIVED（等下次恢复）。
+
+        内存反例：一次连接异常后仍返回 accepted 且无 skip → 允许再次启动任务。
+        """
+        from orchestrator_v2 import accept_task_request
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            task_state.mark_received("ui-r10", "目标", idempotency_key="k10")
+            data = {"task_id": "ui-r10", "goal": "目标", "idempotency_key": "k10"}
+            with mock.patch.object(task_state, "promote_received", return_value="error"):
+                ok, reason = accept_task_request(self.orch, data)
+            row = task_state.read_task("ui-r10")
+        self.assertFalse(ok, "收执推进异常时不得报 accepted")
+        self.assertNotIn("_skip_run", data, "异常路径不得被当成『已消费』")
+        self.assertIn("收执推进失败", reason)
+        self.assertEqual(row["status"], "RECEIVED", "恢复状态必须保留")
 
     def test_mark_queued_promotes_receipt_without_pk_conflict(self):
         """收执行已存在时，登记必须**推进**它（旧实现 INSERT 会主键冲突 → 登记失败）。"""

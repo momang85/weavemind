@@ -5245,7 +5245,8 @@ class TestFinancialResearchCharts(unittest.TestCase):
         (Path(tmp) / "chart_data.json").write_text(
             json.dumps({"charts": specs}, ensure_ascii=False), encoding="utf-8")
         proc = subprocess.run([sys.executable, "render_charts.py"], cwd=tmp,
-                              capture_output=True, text=True, timeout=600)
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=600)
         self.assertEqual(proc.returncode, 0, proc.stderr[:400])
         out = proc.stdout
         self.assertIn(f"total={len(specs)} skipped=0", out, out[:400])

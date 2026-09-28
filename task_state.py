@@ -280,8 +280,14 @@ def promote_received(task_id: str, *, instance: str = "", code_version: str = ""
                      db_path: str | None = None) -> str:
     """把 `RECEIVED` 收执**原子地**推进到 `QUEUED`（谁赢谁执行）。
 
-    返回 `"promoted"`（本次赢得执行权）/ `"already"`（已被别人推进，**不要重复执行**）
-    / `"absent"`（没有收执行——老路径或直接调用编排器的场景）。
+    返回四种裁决（**异常不是"缺行"**）：
+    - `"promoted"`：本次赢得执行权；
+    - `"already"`：行存在但已不是 RECEIVED（别人推进过，含 RUNNING/终态）
+      → **不要重复执行**；
+    - `"absent"`：**确实没有这一行**（老路径或直接调用编排器的场景）；
+    - `"error"`：**数据库异常**——不是"没有收执"。调用方必须**拒绝本次执行并保留
+      恢复状态**，绝不能靠异常回退到旧路径：那会把一条正在 RUNNING 的任务再次启动
+      （内存反例：一次连接异常 → 返回 accepted 且无 skip → 允许再次执行）。
 
     `UPDATE ... WHERE status='RECEIVED'` 是唯一的裁决点：网页提交的消息与
     "启动时恢复未消费收执"两条路径同时存在时，只有一个能把 RECEIVED 改成 QUEUED，
@@ -301,14 +307,21 @@ def promote_received(task_id: str, *, instance: str = "", code_version: str = ""
         finally:
             con.close()
     except Exception as exc:                          # noqa: BLE001
-        logger.warning("任务 %s 收执推进失败：%s", task_id, str(exc)[:160])
-        return "absent"
+        logger.error("任务 %s 收执推进失败（报 error，不回退旧路径）：%s",
+                     task_id, str(exc)[:160])
+        return "error"
     if won:
         record_submit_event(task_id, "consumed", instance=instance,
                             code_version=code_version,
                             detail="编排器已消费该收执并登记为 QUEUED", db_path=db_path)
         return "promoted"
-    row = read_task(task_id, db_path)
+    # 没推进成功 → 分清"行在但不是 RECEIVED"（already）与"真的没有行"（absent）。
+    # 读也失败时同样报 error：读不出来不等于没有收执，不得据此放行重复执行。
+    try:
+        row = read_task(task_id, db_path)
+    except Exception as exc:                          # noqa: BLE001
+        logger.error("任务 %s 收执状态读取失败（报 error）：%s", task_id, str(exc)[:160])
+        return "error"
     return "already" if row else "absent"
 
 
