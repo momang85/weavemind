@@ -695,5 +695,100 @@ class TestReceiptRecovery(unittest.TestCase):
         self.assertEqual(row["status"], "QUEUED", "也不得把行改成 RUNNING")
 
 
+class TestAtomicIdempotencyScope(unittest.TestCase):
+    """P0-d：查重与落收执合成**原子裁决**，作用域绑定可信用户/工作区/操作。
+
+    反例（指令 §2 第 1 条）：两个并发请求各落一行 RECEIVED；消费 A 映射到 B 后
+    库里留下 A，启动恢复又执行 A —— 同一份提交被执行两次。
+    """
+
+    def setUp(self):
+        tmp = Path(tempfile.mkdtemp(prefix="wm_idem_scope_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        self.db = str(tmp / "agents.db")
+        _mk_db(self.db)
+
+    def test_create_then_same_payload_is_duplicate(self):
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            v1, id1 = task_state.claim_receipt("ui-s1", "研究目标", user="u1",
+                                               project="p1", idempotency_key="k1")
+            v2, id2 = task_state.claim_receipt("ui-s2", "研究目标", user="u1",
+                                               project="p1", idempotency_key="k1")
+        self.assertEqual(v1, "created")
+        self.assertEqual(id1, "ui-s1")
+        self.assertEqual(v2, "duplicate", "同作用域同键同内容 = 重试，复用既有任务")
+        self.assertEqual(id2, "ui-s1", "必须指向**既有**任务，而不是新落的那条")
+
+    def test_same_key_different_payload_is_conflict(self):
+        """同键不同内容 → 明确冲突（拒绝执行），且**不落第二行**。"""
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            v1, _ = task_state.claim_receipt("ui-s3", "研究目标甲", user="u1",
+                                             project="p1", idempotency_key="k2")
+            v2, ref = task_state.claim_receipt("ui-s4", "研究目标乙", user="u1",
+                                               project="p1", idempotency_key="k2")
+            rows = task_state.find_by_idempotency("k2", self.db)
+        self.assertEqual(v1, "created")
+        self.assertEqual(v2, "conflict")
+        self.assertEqual(ref, "ui-s3", "冲突要指出既有任务")
+        self.assertEqual(str(rows["task_id"]), "ui-s3", "不得落第二行")
+
+    def test_same_key_different_user_is_a_different_scope(self):
+        """不同用户自造的同一个键**不得互相顶掉**（作用域含可信用户）。"""
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            v1, _ = task_state.claim_receipt("ui-s5", "甲的目标", user="alice",
+                                             project="p1", idempotency_key="k3")
+            v2, id2 = task_state.claim_receipt("ui-s6", "乙的目标", user="bob",
+                                               project="p1", idempotency_key="k3")
+        self.assertEqual(v1, "created")
+        self.assertEqual(v2, "created", "换用户就是另一个作用域，各自独立")
+        self.assertEqual(id2, "ui-s6")
+
+    def test_same_key_different_project_is_a_different_scope(self):
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            v1, _ = task_state.claim_receipt("ui-s7", "目标", user="u1",
+                                             project="p1", idempotency_key="k4")
+            v2, _ = task_state.claim_receipt("ui-s8", "目标", user="u1",
+                                             project="p2", idempotency_key="k4")
+        self.assertEqual((v1, v2), ("created", "created"))
+
+    def test_concurrent_same_key_creates_exactly_one_row(self):
+        """**并发**同键：只允许一行、只有一方拿到 created（旧实现会各落一行）。"""
+        import threading
+        results: list = []
+        barrier = threading.Barrier(2)
+
+        def _worker(tid):
+            barrier.wait()
+            try:
+                results.append(task_state.claim_receipt(
+                    tid, "同一个目标", user="u1", project="p1",
+                    idempotency_key="k-race", db_path=self.db))
+            except Exception as exc:                  # noqa: BLE001
+                results.append(("raised", str(exc)[:60]))
+
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            ts = [threading.Thread(target=_worker, args=(f"ui-c{i}",)) for i in (1, 2)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join(timeout=30)
+            rows = task_state.list_received(older_than=0, db_path=self.db)
+        created = [r for r in results if r[0] == "created"]
+        self.assertEqual(len(created), 1, f"只允许一方拿到 created，实际 {results}")
+        self.assertEqual(len(rows), 1, f"同一 (作用域,键) 只允许一行，实际 {rows}")
+        others = [r[0] for r in results if r[0] != "created"]
+        self.assertTrue(all(o in ("duplicate", "error") for o in others),
+                        f"其余只能是 duplicate/error，实际 {results}")
+
+    def test_mark_received_refuses_on_conflict(self):
+        """兼容层：冲突时 `mark_received` 必须回 False（这条请求没落库）。"""
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            self.assertTrue(task_state.mark_received("ui-s9", "目标甲", user="u1",
+                                                     project="p1", idempotency_key="k5"))
+            ok = task_state.mark_received("ui-s10", "目标乙", user="u1",
+                                          project="p1", idempotency_key="k5")
+        self.assertFalse(ok, "同键不同内容不得假装落库成功")
+
+
 if __name__ == "__main__":
     unittest.main()

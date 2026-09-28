@@ -8,6 +8,27 @@
 `docs/evidence/c4_samples_run_20260927.md` 那份"当前余额耗尽"已随用户充值**解除**（保留为历史，
 不再周期探测余额）。
 
+## P0-d 已交：同作用域幂等键**原子**绑定唯一任务（证据 `docs/evidence/p0d_atomic_idempotency_20260928.md`）
+
+- **缺陷**：旧路径"先 `find_by_idempotency` 查、再 `mark_received` 插"是两步无互斥 →
+  两个并发请求**各落一行 RECEIVED**；消费 A 映射到 B 后库里留下 A，启动恢复又执行 A
+  （同一份提交执行两次、重复付费）。且查重**不带作用域**：不同用户自造的键撞车时，
+  一方的提交会被判成另一方的重复而丢弃。
+- **修复**：新增 `task_state.claim_receipt()`——查重与落收执合成一个 `BEGIN IMMEDIATE`
+  事务，返回 `created` / `duplicate`（同作用域同键**同内容**）/ `conflict`（同键**不同内容**，
+  明确冲突）/ `error`（不落库不执行）；作用域 = **可信用户|工作区|操作**（`user` 取会话身份，
+  不接受请求体自报）；内容指纹 = 目标+项目+研究契约（不含会话/上下文，避免把重试误判成冲突）；
+  新增 `idem_scope`/`request_fingerprint` 两列；`mark_received` 改走同一裁决并保留旧布尔契约
+  （**conflict → False**，不假装成功）；**历史重复行不删**（保留审计）。
+- **验证**：`test_task_persistence` **45 项 OK**（+6，含**两线程并发同键** → 只有 1 方拿到
+  `created`、库里只有 1 行；换用户/换工作区各自独立；冲突不落第二行）。
+- **回归**：`test_p0` **416 OK**、`test_writer_consolidation` **57 OK**、
+  `test_startup_readiness` **61 OK**。
+- **未验项（= P0-d 第 2 小批）**：**发布侧尚未改用同一裁决**——`web_ui._publish_task`
+  仍生成自己的 task_id 后调 `mark_received`，所以"同键只发一条消息"目前仍靠编排器里那次
+  **不带作用域**的 `find_by_idempotency` 兜底；编排器侧查重也仍是全局的。未做跨进程并发
+  验证；未跑付费整链。
+
 ## P0-c 已交：恢复覆盖「已 QUEUED 但从未开始」的崩溃窗口（证据 `docs/evidence/p0c_queued_crash_window_20260928.md`）
 
 - **缺陷**：`promote_received` 把 RECEIVED→QUEUED 之后、执行线程起来之前崩溃 → 该行是

@@ -149,6 +149,18 @@ def _add_missing_columns(con: sqlite3.Connection) -> list[str]:
         con.execute(
             "ALTER TABLE task_history ADD COLUMN accepted_by TEXT DEFAULT ''")
         added.append("accepted_by")
+    if "idem_scope" not in existing:
+        # P0-d：幂等作用域（可信用户|工作区|操作）——键只在作用域内唯一，
+        # 避免两个用户自造的键互相顶掉。
+        con.execute(
+            "ALTER TABLE task_history ADD COLUMN idem_scope TEXT DEFAULT ''")
+        added.append("idem_scope")
+    if "request_fingerprint" not in existing:
+        # P0-d：请求内容指纹——同键同内容 = 重试（duplicate），
+        # 同键不同内容 = **冲突**（conflict，拒绝执行）。
+        con.execute(
+            "ALTER TABLE task_history ADD COLUMN request_fingerprint TEXT DEFAULT ''")
+        added.append("request_fingerprint")
     return added
 
 
@@ -225,6 +237,134 @@ def read_submit_timeline(task_id: str, db_path: str | None = None) -> list[dict]
     return [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
 
 
+def receipt_scope(*, user: str = "", project: str = "default",
+                  operation: str = "task.submit") -> str:
+    """幂等作用域：**可信用户 + 工作区(项目) + 操作**。
+
+    为什么必须有作用域：只用 `idempotency_key` 去重时，两个**不同用户**的键撞车
+    （客户端自造键、短键、时间戳键）会互相顶掉——A 的提交被判成 B 的重复提交而丢弃。
+    作用域把"谁、在哪个工作区、做什么"绑进裁决，键只在这个作用域内唯一。
+    `user` 必须来自**会话身份**（网页提交方已按 `admin["user"]` 取），不接受请求体自报。
+    """
+    return "|".join((str(user or "").strip(), str(project or "default").strip(),
+                     str(operation or "").strip()))
+
+
+def request_fingerprint(goal: str, *, project: str = "default",
+                        research_request: dict | None = None) -> str:
+    """请求内容指纹：判定"同键**是否同一个请求**"。
+
+    只取**决定研究是什么**的字段（目标 + 项目 + 研究契约）；不含 `conversation_id` /
+    `parent_task_id` / `context`——那些是会话与提示，重试时本来就可能不同，
+    算进去会把正常重试误判成冲突。
+    """
+    import hashlib
+    req = research_request if isinstance(research_request, dict) else {}
+    try:
+        payload = json.dumps({
+            "goal": str(goal or "").strip(),
+            "project": str(project or "default").strip(),
+            "research_request": req,
+        }, ensure_ascii=False, sort_keys=True)
+    except Exception:                                 # noqa: BLE001
+        payload = f"{goal}|{project}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+
+
+def claim_receipt(task_id: str, goal: str, *, project: str = "default",
+                  conversation_id: str = "", parent_task_id: str = "",
+                  context: str = "", user: str = "",
+                  research_request: dict | None = None,
+                  idempotency_key: str = "", operation: str = "task.submit",
+                  instance: str = "", code_version: str = "",
+                  submit_events: list | None = None,
+                  db_path: str | None = None) -> tuple[str, str]:
+    """**原子**裁决"这条请求的收执归谁"：查重与落收执合成一个事务。
+
+    返回 `(verdict, 关联任务 id)`：
+
+    | verdict | 含义 | 调用方义务 |
+    |---|---|---|
+    | `created` | 本次落了新收执 | **拥有**这次请求，继续发布/执行 |
+    | `duplicate` | 同作用域同键**且内容相同** | 复用既有任务，**不重复发布/执行** |
+    | `conflict` | 同作用域同键但**内容不同** | **明确冲突**，拒绝执行并如实回报 |
+    | `error` | 数据库异常 | 不落库、不执行（保留恢复状态） |
+
+    为什么必须原子（`BEGIN IMMEDIATE`）：旧实现是"先 `find_by_idempotency` 查、
+    再 `INSERT`"两步——两个并发请求可以**各落一行 RECEIVED**；随后消费 A 映射到 B，
+    库里留下 A，启动恢复又执行 A，同一份提交被执行两次（重复付费）。
+    写锁把"查 + 插"变成串行裁决，同一 `(scope, key)` 只可能有一行。
+
+    无幂等键时行为与旧路径一致：总是落一条新收执（`created`）。
+    """
+    request_json = ""
+    if isinstance(research_request, dict) and research_request:
+        try:
+            request_json = json.dumps(research_request, ensure_ascii=False)
+        except Exception:                             # noqa: BLE001
+            request_json = ""
+    key = str(idempotency_key or "").strip()
+    scope = receipt_scope(user=user, project=project, operation=operation)
+    fp = request_fingerprint(goal, project=project, research_request=research_request) if key else ""
+    events = [e for e in (_norm_submit_event(x) for x in (submit_events or [])) if e]
+    events.append(_norm_submit_event({
+        "event": "received", "instance": instance, "code_version": code_version,
+        "detail": "收执已落库（等待编排器消费）"}) or {})
+    timeline_json = json.dumps(events[-_SUBMIT_TIMELINE_MAX:], ensure_ascii=False)
+    con = None
+    try:
+        con = _connect(db_path)
+        _add_missing_columns(con)
+        con.isolation_level = None                    # 自己管事务，用显式 BEGIN IMMEDIATE
+        con.execute("BEGIN IMMEDIATE")                # ← 写锁：查+插 串行化
+        if key:
+            row = con.execute(
+                "SELECT task_id, request_fingerprint FROM task_history"
+                " WHERE idem_scope=? AND idempotency_key=? LIMIT 1",
+                (scope, key)).fetchone()
+            if row:
+                existing_id = str(row[0] or "")
+                same = str(row[1] or "") == fp
+                con.execute("COMMIT")
+                if same:
+                    return "duplicate", existing_id
+                logger.warning("幂等键冲突：作用域 %s 的键 %s 已属于任务 %s，"
+                               "但本次请求内容不同 → 明确冲突（不执行）",
+                               scope, key, existing_id)
+                return "conflict", existing_id
+        dup = con.execute("SELECT task_id FROM task_history WHERE task_id=? LIMIT 1",
+                          (task_id,)).fetchone()
+        if dup:
+            existing_id = str(dup[0] or "")
+            con.execute("COMMIT")
+            return "duplicate", existing_id
+        con.execute(
+            "INSERT INTO task_history"
+            "(task_id,goal,status,project,conversation_id,parent_task_id,context,user,"
+            " phase,research_request_json,idempotency_key,submit_timeline_json,"
+            " accepted_by,idem_scope,request_fingerprint)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (task_id, goal, RECEIVED, project, conversation_id, parent_task_id,
+             context, user, "待消费", request_json, key, timeline_json, "",
+             scope, fp))
+        con.execute("COMMIT")
+        return "created", task_id
+    except Exception as exc:                          # noqa: BLE001
+        logger.error("任务 %s 收执原子裁决失败（不落库、不执行）：%s", task_id, str(exc)[:200])
+        try:
+            if con is not None:
+                con.execute("ROLLBACK")
+        except Exception:                             # noqa: BLE001
+            pass
+        return "error", ""
+    finally:
+        try:
+            if con is not None:
+                con.close()
+        except Exception:                             # noqa: BLE001
+            pass
+
+
 def mark_received(task_id: str, goal: str, *, project: str = "default",
                   conversation_id: str = "", parent_task_id: str = "",
                   context: str = "", user: str = "",
@@ -242,39 +382,19 @@ def mark_received(task_id: str, goal: str, *, project: str = "default",
     （`mark_queued` / `mark_running` / `record_completion`）。
     同一 task_id 重复写视为幂等（返回 True，不覆盖已有行）。
     """
-    request_json = ""
-    if isinstance(research_request, dict) and research_request:
-        try:
-            request_json = json.dumps(research_request, ensure_ascii=False)
-        except Exception:
-            request_json = ""
-    events = [e for e in (_norm_submit_event(x) for x in (submit_events or [])) if e]
-    events.append(_norm_submit_event({
-        "event": "received", "instance": instance, "code_version": code_version,
-        "detail": "收执已落库（等待编排器消费）"}) or {})
-    timeline_json = json.dumps(events[-_SUBMIT_TIMELINE_MAX:], ensure_ascii=False)
-    try:
-        con = _connect(db_path)
-        try:
-            _add_missing_columns(con)
-            con.execute(
-                "INSERT OR IGNORE INTO task_history"
-                "(task_id,goal,status,project,conversation_id,parent_task_id,context,user,"
-                " phase,research_request_json,idempotency_key,submit_timeline_json,"
-                " accepted_by)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (task_id, goal, RECEIVED, project, conversation_id, parent_task_id,
-                 context, user, "待消费", request_json,
-                 str(idempotency_key or "").strip(), timeline_json, ""),
-            )
-            con.commit()
-            return True
-        finally:
-            con.close()
-    except Exception as exc:                          # noqa: BLE001
-        logger.error("任务 %s 收执落库失败：%s", task_id, str(exc)[:200])
+    # P0-d：查重与落收执走**同一个原子裁决**（claim_receipt），不再"先查后插"。
+    verdict, _ref = claim_receipt(
+        task_id, goal, project=project, conversation_id=conversation_id,
+        parent_task_id=parent_task_id, context=context, user=user,
+        research_request=research_request, idempotency_key=idempotency_key,
+        instance=instance, code_version=code_version,
+        submit_events=submit_events, db_path=db_path)
+    # 兼容旧布尔契约：created/duplicate 都表示"收执在库"；
+    # conflict（同键不同内容）与 error 表示**这条请求没落库**，必须如实返回 False。
+    if verdict == "conflict":
+        logger.error("任务 %s 因幂等键冲突被拒绝落库（同作用域同键但内容不同）", task_id)
         return False
-
+    return verdict in ("created", "duplicate")
 
 def promote_received(task_id: str, *, instance: str = "", code_version: str = "",
                      db_path: str | None = None) -> str:
