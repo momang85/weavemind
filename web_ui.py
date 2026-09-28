@@ -2629,6 +2629,10 @@ def _publish_task(
             tid, goal, project=project, conversation_id=conversation_id,
             parent_task_id=parent_task_id, context=context, user=user_id,
             research_request=dict(research_request or {}),
+            # P0-c(2)：运行选项随收执落库，崩溃恢复时按**原请求**执行
+            run_options={"auto_run": bool(auto_run),
+                         "template_steps": template_steps,
+                         "report_confirm": bool(report_confirm)},
             idempotency_key=idem, instance=_instance, submit_events=_events)
     except Exception as exc:                          # noqa: BLE001
         logging.getLogger("web_ui").warning("收执原子裁决异常：%s", str(exc)[:150])

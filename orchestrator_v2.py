@@ -8626,11 +8626,16 @@ def resume_unstarted_queued(orch, *, older_than: float = 120.0, limit: int = 20)
             continue
         logger.warning("崩溃窗口恢复：任务 %s 登记后从未开始（%.0fs），重新执行（goal=%s）",
                        tid, float(row.get("age") or 0), str(row.get("goal") or "")[:60])
+        _opts = row.get("run_options") if isinstance(row.get("run_options"), dict) else {}
         threading.Thread(
             target=run_and_finalize,
             args=(orch, tid, str(row.get("goal") or ""), str(row.get("context") or "")),
             kwargs={"user_id": str(row.get("user_id") or ""),
-                    "project": str(row.get("project") or "default")},
+                    "project": str(row.get("project") or "default"),
+                    # P0-c(2)：按**原请求**的运行选项恢复，不退回默认值
+                    "auto_run": bool(_opts.get("auto_run", True)),
+                    "template_steps": _opts.get("template_steps"),
+                    "report_confirm": bool(_opts.get("report_confirm", False))},
             daemon=True,
         ).start()
         started += 1
@@ -8703,7 +8708,13 @@ def accept_task_request(orch, data: dict) -> tuple[bool, str]:
     try:
         import task_state as _ts
         if idem:
-            existing = _ts.find_by_idempotency(idem)
+            # P0-d 补完：编排器侧查重也走**同一作用域**（此前是全局按键比对，
+            # 与提交侧语义不一致：换用户/换工作区的同键会被误判成重复）。
+            existing = _ts.find_by_idempotency(
+                idem, scope=_ts.receipt_scope(
+                    user=str(data.get("user_id") or ""),
+                    project=str(data.get("project") or "default"),
+                    operation="task.submit"))
             if existing and existing.get("task_id") and str(existing["task_id"]) != task_id:
                 effective_id = str(existing["task_id"])
                 _ts.record_submit_event(

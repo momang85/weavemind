@@ -678,6 +678,48 @@ class TestReceiptRecovery(unittest.TestCase):
         self.assertEqual([r["task_id"] for r in rows], [],
                          "有 started 事件就不是『从未开始』")
 
+    def test_unstarted_queued_carries_original_run_options(self):
+        """P0-c(2)：运行选项随收执落库，恢复时按**原请求**执行（不退默认值）。"""
+        import orchestrator_v2
+        calls: list = []
+        with mock.patch.object(task_state, "DB_PATH", self.db), \
+                mock.patch.object(orchestrator_v2.threading, "Thread",
+                                  self._fake_thread(calls)):
+            task_state.claim_receipt(
+                "ui-q4", "目标", user="u1", project="p1", idempotency_key="kq4",
+                run_options={"auto_run": False,
+                             "template_steps": [{"capability": "web_search"}],
+                             "report_confirm": True})
+            task_state.promote_received("ui-q4")
+            n = orchestrator_v2.resume_unstarted_queued(self.orch, older_than=0)
+        self.assertEqual(n, 1)
+        kw = calls[0]["kwargs"]
+        self.assertFalse(kw["auto_run"], "『先确认计划』的意图必须保留")
+        self.assertTrue(kw["report_confirm"], "报告确认必须保留")
+        self.assertEqual(kw["template_steps"], [{"capability": "web_search"}],
+                         "模板步骤必须保留")
+
+    def test_timeline_append_is_not_lost_between_two_writers(self):
+        """P0-e 补完：时间线是读-改-写，两个写者并发**不得互相覆盖**（丢更新）。"""
+        import threading
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            task_state.mark_received("ui-tl", "目标")
+            barrier = threading.Barrier(2)
+
+            def _w(name):
+                barrier.wait()
+                task_state.record_submit_event("ui-tl", name, detail=name)
+
+            ts = [threading.Thread(target=_w, args=(n,))
+                  for n in ("published", "consumed")]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join(timeout=30)
+            names = [e.get("event") for e in task_state.read_submit_timeline("ui-tl")]
+        self.assertIn("published", names, f"两个写者的事件都要留下：{names}")
+        self.assertIn("consumed", names, f"两个写者的事件都要留下：{names}")
+
     def test_unstarted_queued_requires_ownership(self):
         """未持有归属 → 不得恢复执行（与 accept 同一条闸门）。"""
         import orchestrator_v2

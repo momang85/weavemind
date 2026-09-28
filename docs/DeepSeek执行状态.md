@@ -8,6 +8,26 @@
 `docs/evidence/c4_samples_run_20260927.md` 那份"当前余额耗尽"已随用户充值**解除**（保留为历史，
 不再周期探测余额）。
 
+## P0 收口：三处遗留全部闭合（证据见 P0-d/P0-e 两份文档的"补完"节）
+
+1. **编排器侧查重改为带作用域**：`find_by_idempotency(..., scope=...)`（关键字参数，
+   保位置兼容），`accept_task_request` 传 `receipt_scope(user, project, "task.submit")`，
+   匹配规则与 `claim_receipt` **完全一致**（同作用域 + 作用域为空的历史行）。
+2. **P0-c(2) 运行选项落库**：新增 `run_options_json` 列，`claim_receipt` 收
+   `auto_run`/`template_steps`/`report_confirm` 并落库，`list_unstarted_queued` 带出，
+   `resume_unstarted_queued` 按**原请求**恢复（不退默认值）——崩溃恢复不再把
+   "先确认计划""模板步骤""报告确认"悄悄丢掉。
+3. **时间线并发写不再丢更新**：`record_submit_event` 的"读-改-写"改为
+   `BEGIN IMMEDIATE` 写锁事务（原实现两个写者会互相覆盖）。
+
+**验证**：`test_task_persistence` **47 项 OK**（+2：恢复携带原运行选项；
+两个写者并发追加**两个事件都保留**）、`test_writer_consolidation` **60 OK**、
+`test_p0` **416 OK**、`test_delivery_chain` **373 OK**、`test_startup_readiness` **61 OK**。
+
+**仍属未验（不是未修的代码问题）**：跨进程并发、真实 Redis 上的发布失败/双击演练、
+真实崩溃演练——都需要第二个进程或停用户服务，按指令"真实 Redis 验证只用隔离前缀、
+不杀用户服务；不可用则明确未验"，本轮只做单进程并发与替身覆盖。
+
 ## P0-e 已交：时间线区分「发布意图」与「确实发布」（证据 `docs/evidence/p0e_timeline_stages_20260928.md`）
 
 - **缺陷**：`_publish_task` 在调用 `r.publish` **之前**就把 `published`（"已发布到

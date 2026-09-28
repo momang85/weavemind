@@ -161,6 +161,12 @@ def _add_missing_columns(con: sqlite3.Connection) -> list[str]:
         con.execute(
             "ALTER TABLE task_history ADD COLUMN request_fingerprint TEXT DEFAULT ''")
         added.append("request_fingerprint")
+    if "run_options_json" not in existing:
+        # P0-c(2)：运行选项（auto_run / template_steps / report_confirm）**随收执落库**，
+        # 否则崩溃恢复时只能按默认值执行——原请求"先确认计划"或"用模板步骤"的意图会丢。
+        con.execute(
+            "ALTER TABLE task_history ADD COLUMN run_options_json TEXT DEFAULT ''")
+        added.append("run_options_json")
     return added
 
 
@@ -192,10 +198,16 @@ def record_submit_event(task_id: str, event: str, *, instance: str = "",
         con = _connect(db_path)
         try:
             _add_missing_columns(con)
+            # P0-e 补完：时间线是"读-改-写"，两个写者（web_ui 补记 published、
+            # 编排器写 consumed/started/deduplicated）并发时会**互相覆盖**（丢更新）。
+            # 用写锁事务把"读 + 追加 + 写回"串行化：后到者读到的是前者刚写的结果。
+            con.isolation_level = None
+            con.execute("BEGIN IMMEDIATE")
             row = con.execute(
                 "SELECT submit_timeline_json FROM task_history WHERE task_id=?",
                 (task_id,)).fetchone()
             if row is None:
+                con.execute("ROLLBACK")
                 return False
             try:
                 items = json.loads(row[0] or "[]")
@@ -208,8 +220,14 @@ def record_submit_event(task_id: str, event: str, *, instance: str = "",
                 "UPDATE task_history SET submit_timeline_json=?, updated_at=CURRENT_TIMESTAMP"
                 " WHERE task_id=?", (json.dumps(items[-_SUBMIT_TIMELINE_MAX:],
                                                 ensure_ascii=False), task_id))
-            con.commit()
+            con.execute("COMMIT")
             return True
+        except Exception:
+            try:
+                con.execute("ROLLBACK")
+            except Exception:                         # noqa: BLE001
+                pass
+            raise
         finally:
             con.close()
     except Exception as exc:                          # noqa: BLE001
@@ -277,6 +295,7 @@ def claim_receipt(task_id: str, goal: str, *, project: str = "default",
                   conversation_id: str = "", parent_task_id: str = "",
                   context: str = "", user: str = "",
                   research_request: dict | None = None,
+                  run_options: dict | None = None,
                   idempotency_key: str = "", operation: str = "task.submit",
                   instance: str = "", code_version: str = "",
                   submit_events: list | None = None,
@@ -305,6 +324,14 @@ def claim_receipt(task_id: str, goal: str, *, project: str = "default",
             request_json = json.dumps(research_request, ensure_ascii=False)
         except Exception:                             # noqa: BLE001
             request_json = ""
+    # P0-c(2)：运行选项随收执落库——崩溃恢复要按**原请求**执行（"先确认计划"/模板步骤/
+    # 报告确认），不能悄悄退回默认值。
+    run_options_json = ""
+    if isinstance(run_options, dict) and run_options:
+        try:
+            run_options_json = json.dumps(run_options, ensure_ascii=False)
+        except Exception:                             # noqa: BLE001
+            run_options_json = ""
     key = str(idempotency_key or "").strip()
     scope = receipt_scope(user=user, project=project, operation=operation)
     fp = request_fingerprint(goal, project=project, research_request=research_request) if key else ""
@@ -354,11 +381,11 @@ def claim_receipt(task_id: str, goal: str, *, project: str = "default",
             "INSERT INTO task_history"
             "(task_id,goal,status,project,conversation_id,parent_task_id,context,user,"
             " phase,research_request_json,idempotency_key,submit_timeline_json,"
-            " accepted_by,idem_scope,request_fingerprint)"
-            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " accepted_by,idem_scope,request_fingerprint,run_options_json)"
+            " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (task_id, goal, RECEIVED, project, conversation_id, parent_task_id,
              context, user, "待消费", request_json, key, timeline_json, "",
-             scope, fp))
+             scope, fp, run_options_json))
         con.execute("COMMIT")
         return "created", task_id
     except Exception as exc:                          # noqa: BLE001
@@ -525,7 +552,8 @@ def list_unstarted_queued(*, older_than: float = 120.0, limit: int = 20,
                 "SELECT task_id,goal,project,conversation_id,parent_task_id,context,"
                 " user,research_request_json,idempotency_key,submit_timeline_json,"
                 " CAST(strftime('%s','now') AS INTEGER)"
-                " - CAST(strftime('%s',updated_at) AS INTEGER) AS age"
+                " - CAST(strftime('%s',updated_at) AS INTEGER) AS age,"
+                " run_options_json"
                 " FROM task_history WHERE status=? ORDER BY rowid ASC LIMIT ?",
                 (QUEUED, int(limit))).fetchall()
         finally:
@@ -553,21 +581,32 @@ def list_unstarted_queued(*, older_than: float = 120.0, limit: int = 20,
             req = json.loads(r[7] or "{}")
         except Exception:                             # noqa: BLE001
             req = {}
+        # P0-c(2)：把原请求的运行选项一起带出去，恢复时按原样执行
+        ropts: dict = {}
+        try:
+            ropts = json.loads(r[11] or "{}")
+        except Exception:                             # noqa: BLE001
+            ropts = {}
         out.append({"task_id": str(r[0] or ""), "goal": str(r[1] or ""),
                     "project": str(r[2] or "default"),
                     "conversation_id": str(r[3] or ""),
                     "parent_task_id": str(r[4] or ""), "context": str(r[5] or ""),
                     "user_id": str(r[6] or ""), "research_request": req,
+                    "run_options": ropts if isinstance(ropts, dict) else {},
                     "idempotency_key": str(r[8] or ""), "age": age})
     return out
 
 
-def find_by_idempotency(idempotency_key: str,
-                        db_path: str | None = None) -> dict | None:
+def find_by_idempotency(idempotency_key: str, db_path: str | None = None,
+                        *, scope: str = "") -> dict | None:
     """按幂等键找**已存在**的任务（最近的优先）。找不到返回 None。
 
     用途有两个：提交前查一次（避免重复发布），以及编排器收执时再查一次
     （两个提交竞争时，先落库的那个赢）。
+
+    `scope`（P0-d 补完）：传入 `receipt_scope(...)` 时，匹配规则与 `claim_receipt`
+    **完全一致**——同作用域的行，外加"作用域为空"的历史行（旧实现落的，其语义本就是
+    全局按键去重）。不传 scope 则保持旧的全局匹配（兼容既有调用点）。
     """
     key = str(idempotency_key or "").strip()
     if not key:
@@ -576,10 +615,18 @@ def find_by_idempotency(idempotency_key: str,
         con = _connect(db_path)
         try:
             _add_missing_columns(con)
-            row = con.execute(
-                "SELECT task_id,status,phase,project FROM task_history"
-                " WHERE idempotency_key=? ORDER BY rowid DESC LIMIT 1",
-                (key,)).fetchone()
+            if scope:
+                row = con.execute(
+                    "SELECT task_id,status,phase,project FROM task_history"
+                    " WHERE idempotency_key=?"
+                    "   AND (idem_scope=? OR idem_scope='' OR idem_scope IS NULL)"
+                    " ORDER BY rowid DESC LIMIT 1",
+                    (key, str(scope))).fetchone()
+            else:
+                row = con.execute(
+                    "SELECT task_id,status,phase,project FROM task_history"
+                    " WHERE idempotency_key=? ORDER BY rowid DESC LIMIT 1",
+                    (key,)).fetchone()
         finally:
             con.close()
     except Exception:
