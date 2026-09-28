@@ -58,6 +58,27 @@ if _cur_body and _pkg_manifest and not _pkg_body:
 `test_package_manifest_with_empty_identity_is_stale`：用真 zip 装入 schema 在、身份为空的
 清单 → 判陈旧；尚无采纳正文时不误标）。两条既有"不误标"用例**仍绿**。
 
+## 已落地（2）：原始披露 PDF 不再冒充研究报告 PDF
+
+**根因**（`delivery_pipeline.py:525-528`，旧版清单构造器）：
+
+```python
+_pdfs = sorted(a for a in file_hashes if str(a).lower().endswith(".pdf"))
+_pdf = _pdfs[0] if _pdfs else ""          # ← 取包内**任意** PDF，按字母序
+```
+
+`sorted()` 下 `fetched/436928c6acaac793.pdf`（原始年报）**排在** `reports/report.pdf`
+前面 —— 所以"研究报告 PDF"位被原始披露占走。schema 2 的构造器（同文件 767 行）
+**本来是对的**：`_pdf = "reports/report.pdf" if "reports/report.pdf" in hashes else ""`。
+旧构造器与它口径不一致。
+
+**修法**：旧构造器对齐 schema 2 的口径——只认 `reports/report.pdf`，没有就**如实留空**，
+并写 `pdf_missing_reason` 说明"包内没有研究报告 PDF；原始披露 PDF 不占该位置"，
+让读者能区分"没有报告 PDF"与"忘了放"。
+
+**验证**：`test_delivery_chain` **374 OK**、`test_offline_delivery` **34 OK**、
+`test_p0` **416 OK**。
+
 ## 仍然未做到的
 
 - **页面是否真的拦截该旧包，尚未实测**：本批只读到了判定逻辑，还没沿

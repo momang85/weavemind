@@ -522,10 +522,20 @@ def package_manifest(task_id: str, ws, files, *, pdf_name: str = "") -> dict:
     out["delivered_md_sha256"] = file_hashes.get(_md, "")
     _pdf = str(pdf_name or "")
     if not _pdf:
-        _pdfs = sorted(a for a in file_hashes if str(a).lower().endswith(".pdf"))
-        _pdf = _pdfs[0] if _pdfs else ""
+        # P0-f：这里**不能**取包内任意 PDF。实测样本 ui-a06a005c9b 的清单里
+        # `pdf_sha256` 就是原始年报 `fetched/436928c6acaac793.pdf` —— 因为旧写法
+        # `sorted(任意 .pdf)[0]` 下，`fetched/…` 按字母序排在 `reports/report.pdf` 前面，
+        # 于是**原始披露 PDF 冒充了研究报告 PDF** 被交付出去。
+        # 研究报告 PDF 的位置只认 `reports/report.pdf`；没有就如实留空（不拿别的顶上）。
+        # 与 schema 2 构造器（本文件 `_pdf = "reports/report.pdf" if … else ""`）同一口径。
+        _pdf = "reports/report.pdf" if "reports/report.pdf" in file_hashes else ""
     out["pdf"] = _pdf
     out["pdf_sha256"] = file_hashes.get(_pdf, "")
+    if not _pdf:
+        # 说明为什么空：调用方/读者据此区分"没有报告 PDF"与"忘了放"
+        out["pdf_missing_reason"] = (
+            "包内没有研究报告 PDF（reports/report.pdf）；"
+            "原始披露 PDF 不占该位置")
     out["charts"] = {a: h for a, h in file_hashes.items() if str(a).startswith("charts/")}
     # 采纳身份（打包时刻）：陈旧判定按它，不按时间戳
     try:
