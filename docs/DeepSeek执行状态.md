@@ -8,6 +8,26 @@
 `docs/evidence/c4_samples_run_20260927.md` 那份"当前余额耗尽"已随用户充值**解除**（保留为历史，
 不再周期探测余额）。
 
+## P0-c 已交：恢复覆盖「已 QUEUED 但从未开始」的崩溃窗口（证据 `docs/evidence/p0c_queued_crash_window_20260928.md`）
+
+- **缺陷**：`promote_received` 把 RECEIVED→QUEUED 之后、执行线程起来之前崩溃 → 该行是
+  **QUEUED**，而旧恢复只扫 RECEIVED，**永久漏掉**（任务卡在"排队中"，既不执行也不失败）；
+  且只有启动时扫一次，运行期崩溃覆盖不到。
+- **修复**：新增 `task_state.list_unstarted_queued()`（判据是**时间线里没有 `started`**，
+  不是猜）+ `orchestrator_v2.resume_unstarted_queued()`（执行权复用 `mark_running` 的原子
+  `UPDATE … WHERE status IN (QUEUED,'PENDING')`，谁改成 RUNNING 谁执行）+
+  `start_recovery_loop(60s, 每轮每类 20 条)` 有界周期恢复；启动时也扫一次。
+  与 accept/收执恢复**共用同一条派发闸门**（未持有归属 → 不恢复、不改状态）。
+- **不重复收费**：恢复走正常执行路径，证据/快照按既有幂等规则复用，不新建付费调用。
+- **验证**：`test_task_persistence` **39 项 OK**（+3）；其中反例断言先证明该行
+  **不在** `list_received`（旧恢复确实看不见它）。
+- **回归**：`test_startup_readiness` **61 OK**、`test_writer_consolidation` **57 OK**、
+  `test_p0` **416 OK**、`test_orchestrator_v2` **79 OK**。
+- **未验项**：**保留原请求的 `auto_run`/`template_steps`/`report_confirm` 未做**——
+  这三个字段当前**没有落库**，需加 `run_options_json` 列并从 `_publish_task` 一路写下来
+  （P0-c 第 2 小批）；未做真实崩溃演练与多轮周期扫描长时间观察；
+  **P0-d/P0-e 未实施，"同键并发只留一个可执行收执"仍未验证**。
+
 ## P0-b 已交：实例归属改为真实租约（证据 `docs/evidence/p0b_owner_lease_20260928.md`）
 
 - **三个洞**：①心跳只在认领时写一次（30 秒后过期 → **A 还活着 B 就能接管**）；

@@ -631,6 +631,69 @@ class TestReceiptRecovery(unittest.TestCase):
         self.assertEqual(calls[0]["args"][1], "ui-r8")
         self.assertEqual(row["status"], "QUEUED")
 
+    def _fake_thread(self, calls):
+        class _FakeThread:
+            def __init__(self, target=None, args=(), kwargs=None, daemon=None):
+                calls.append({"target": target, "args": args, "kwargs": kwargs or {}})
+
+            def start(self):
+                pass
+
+        return _FakeThread
+
+    def test_unstarted_queued_crash_window_is_recovered_once(self):
+        """P0-c：`RECEIVED→QUEUED` 之后、线程起来之前崩溃 → 旧恢复（只扫 RECEIVED）永久漏掉。
+
+        这类行状态是 QUEUED，只有"没有 started 事件"能把它和正在跑的行区分开。
+        执行权由 `mark_running` 的原子 UPDATE 裁决，所以只执行一次。
+        """
+        import orchestrator_v2
+        calls: list = []
+        with mock.patch.object(task_state, "DB_PATH", self.db), \
+                mock.patch.object(orchestrator_v2.threading, "Thread",
+                                  self._fake_thread(calls)):
+            task_state.mark_received("ui-q1", "目标", user="u1", project="p1")
+            task_state.promote_received("ui-q1")          # → QUEUED，但没有 started
+            self.assertEqual(
+                [r["task_id"] for r in task_state.list_received(older_than=0)], [],
+                "它已经不是 RECEIVED 了：只扫 RECEIVED 的旧恢复看不见它")
+            n0 = orchestrator_v2.resume_unstarted_queued(self.orch, older_than=600)
+            n1 = orchestrator_v2.resume_unstarted_queued(self.orch, older_than=0)
+            n2 = orchestrator_v2.resume_unstarted_queued(self.orch, older_than=0)
+            row = task_state.read_task("ui-q1")
+        self.assertEqual(n0, 0, "太新的 QUEUED 不抢（给正常路径时间）")
+        self.assertEqual(n1, 1, "登记后从未开始的任务要被捡回来")
+        self.assertEqual(n2, 0, "已被认领（RUNNING）后不得重复执行")
+        self.assertEqual(len(calls), 1, calls)
+        self.assertEqual(calls[0]["args"][1], "ui-q1")
+        self.assertEqual(row["status"], "RUNNING", "认领后必须是 RUNNING（执行权已归本实例）")
+
+    def test_unstarted_queued_skips_rows_that_already_started(self):
+        """已经写过 started 的 QUEUED 不在候选里（它可能正在跑，不能抢）。"""
+        with mock.patch.object(task_state, "DB_PATH", self.db):
+            task_state.mark_received("ui-q2", "目标")
+            task_state.promote_received("ui-q2")
+            task_state.record_submit_event("ui-q2", "started", detail="已开始")
+            rows = task_state.list_unstarted_queued(older_than=0)
+        self.assertEqual([r["task_id"] for r in rows], [],
+                         "有 started 事件就不是『从未开始』")
+
+    def test_unstarted_queued_requires_ownership(self):
+        """未持有归属 → 不得恢复执行（与 accept 同一条闸门）。"""
+        import orchestrator_v2
+        calls: list = []
+        with mock.patch.object(task_state, "DB_PATH", self.db), \
+                mock.patch.object(orchestrator_v2.threading, "Thread",
+                                  self._fake_thread(calls)), \
+                mock.patch.object(orchestrator_v2, "ownership_held", return_value=False):
+            task_state.mark_received("ui-q3", "目标")
+            task_state.promote_received("ui-q3")
+            n = orchestrator_v2.resume_unstarted_queued(self.orch, older_than=0)
+            row = task_state.read_task("ui-q3")
+        self.assertEqual(n, 0, "未持有归属不得恢复")
+        self.assertEqual(calls, [], "不得起任何执行线程")
+        self.assertEqual(row["status"], "QUEUED", "也不得把行改成 RUNNING")
+
 
 if __name__ == "__main__":
     unittest.main()

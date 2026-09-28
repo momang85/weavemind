@@ -369,6 +369,67 @@ def list_received(*, older_than: float = 0.0, limit: int = 50,
     return out
 
 
+def list_unstarted_queued(*, older_than: float = 120.0, limit: int = 20,
+                          db_path: str | None = None) -> list[dict]:
+    """列出"已登记 `QUEUED` 但**从未开始执行**"的任务（P0-c 崩溃窗口恢复）。
+
+    覆盖的窗口：`promote_received` 把 RECEIVED→QUEUED 之后、执行线程真正起来之前
+    进程崩了。这类行状态是 **QUEUED**，而旧恢复只扫 RECEIVED —— 于是它**永久漏掉**：
+    任务卡在"排队中"，既没人执行也不会失败，用户永远等不到结果。
+
+    "未开始"的判据用**时间线**（有没有 `started` 事件），不是靠猜：
+    `run_and_finalize` 一进线程就写 `started`，所以"没有 started 的 QUEUED"= 确实没跑过。
+    正在跑的行是 RUNNING，一并不在候选里。
+
+    `older_than` 默认 120 秒：给正常路径（消息驱动）足够时间把行推进到 RUNNING，
+    避免和"刚登记、消息正在飞"的那几秒抢同一个任务。
+    """
+    out: list[dict] = []
+    try:
+        con = _connect(db_path)
+        try:
+            _add_missing_columns(con)
+            rows = con.execute(
+                "SELECT task_id,goal,project,conversation_id,parent_task_id,context,"
+                " user,research_request_json,idempotency_key,submit_timeline_json,"
+                " CAST(strftime('%s','now') AS INTEGER)"
+                " - CAST(strftime('%s',updated_at) AS INTEGER) AS age"
+                " FROM task_history WHERE status=? ORDER BY rowid ASC LIMIT ?",
+                (QUEUED, int(limit))).fetchall()
+        finally:
+            con.close()
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("未开始 QUEUED 扫描失败：%s", str(exc)[:160])
+        return []
+    for r in rows:
+        try:
+            age = float(r[10] or 0)
+        except (TypeError, ValueError):
+            age = 0.0
+        if age < float(older_than):
+            continue
+        try:
+            events = json.loads(r[9] or "[]")
+        except Exception:                             # noqa: BLE001
+            events = []
+        if not isinstance(events, list):
+            events = []
+        if any(isinstance(e, dict) and str(e.get("event")) == "started" for e in events):
+            continue                                  # 已经开始过（可能在跑），不抢
+        req: dict = {}
+        try:
+            req = json.loads(r[7] or "{}")
+        except Exception:                             # noqa: BLE001
+            req = {}
+        out.append({"task_id": str(r[0] or ""), "goal": str(r[1] or ""),
+                    "project": str(r[2] or "default"),
+                    "conversation_id": str(r[3] or ""),
+                    "parent_task_id": str(r[4] or ""), "context": str(r[5] or ""),
+                    "user_id": str(r[6] or ""), "research_request": req,
+                    "idempotency_key": str(r[8] or ""), "age": age})
+    return out
+
+
 def find_by_idempotency(idempotency_key: str,
                         db_path: str | None = None) -> dict | None:
     """按幂等键找**已存在**的任务（最近的优先）。找不到返回 None。

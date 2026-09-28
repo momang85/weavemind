@@ -8588,6 +8588,85 @@ def resume_received_tasks(orch, *, older_than: float = 10.0, limit: int = 20) ->
     return started
 
 
+def resume_unstarted_queued(orch, *, older_than: float = 120.0, limit: int = 20) -> int:
+    """P0-c 崩溃窗口恢复：捡回"已登记 QUEUED 但**从未开始**"的任务。
+
+    覆盖的窗口：`promote_received` 把 RECEIVED→QUEUED 之后、执行线程起来之前进程崩了。
+    这类行状态是 QUEUED，而只扫 RECEIVED 的旧恢复**永久漏掉**它——任务卡在"排队中"，
+    既没人执行也不会失败。
+
+    执行权裁决复用 `mark_running` 的原子 `UPDATE … WHERE status IN (QUEUED,'PENDING')`：
+    **只有把 QUEUED 改成 RUNNING 的那一方执行**，所以"周期扫描"与"消息恰好也在路上"
+    不会重复跑同一条请求。
+
+    外部请求是否已经发出**无法确定**时，这里不额外收费：`run_and_finalize` 走的是
+    正常执行路径，证据/快照按既有幂等规则复用，不新建第二次付费调用。
+    """
+    import task_state as _ts
+    if not ownership_held():
+        logger.warning("未开始 QUEUED 恢复跳过：本实例未持有编排器归属（停止新派发）")
+        return 0
+    try:
+        rows = _ts.list_unstarted_queued(older_than=older_than, limit=limit)
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("未开始 QUEUED 扫描失败：%s", str(exc)[:150])
+        return 0
+    started = 0
+    for row in rows:
+        tid = str(row.get("task_id") or "")
+        if not tid:
+            continue
+        try:
+            won = bool(_ts.mark_running(tid, phase="恢复执行"))
+        except Exception as exc:                      # noqa: BLE001
+            logger.error("未开始 QUEUED 认领失败（%s）：%s", tid, str(exc)[:120])
+            continue
+        if not won:
+            logger.info("未开始 QUEUED：任务 %s 已被他人认领，跳过", tid)
+            continue
+        logger.warning("崩溃窗口恢复：任务 %s 登记后从未开始（%.0fs），重新执行（goal=%s）",
+                       tid, float(row.get("age") or 0), str(row.get("goal") or "")[:60])
+        threading.Thread(
+            target=run_and_finalize,
+            args=(orch, tid, str(row.get("goal") or ""), str(row.get("context") or "")),
+            kwargs={"user_id": str(row.get("user_id") or ""),
+                    "project": str(row.get("project") or "default")},
+            daemon=True,
+        ).start()
+        started += 1
+    return started
+
+
+def start_recovery_loop(orch, *, interval: float = 60.0, limit: int = 20) -> threading.Thread:
+    """有界周期恢复：每 `interval` 秒扫一次，**每轮每类最多 `limit` 条**。
+
+    为什么要有界周期而不是只在启动时扫一次：崩溃可能发生在启动之后（运行期崩线程/
+    被 guardian 重启），一次性扫描覆盖不到；而无限量扫描会在积压时一次拉起几百个任务
+    把端点和磁盘打爆。所以是"周期 + 分页上限"。
+    """
+    iv = float(interval or 60.0)
+
+    def _loop() -> None:
+        while True:
+            time.sleep(iv)
+            try:
+                n = resume_received_tasks(orch, older_than=10.0, limit=limit)
+                if n:
+                    logger.warning("周期恢复：捡回 %d 条未消费收执", n)
+            except Exception as exc:                  # noqa: BLE001
+                logger.warning("周期恢复（收执）失败：%s", str(exc)[:150])
+            try:
+                n = resume_unstarted_queued(orch, older_than=120.0, limit=limit)
+                if n:
+                    logger.warning("周期恢复：捡回 %d 条未开始的 QUEUED", n)
+            except Exception as exc:                  # noqa: BLE001
+                logger.warning("周期恢复（未开始 QUEUED）失败：%s", str(exc)[:150])
+
+    th = threading.Thread(target=_loop, daemon=True, name="receipt-recovery")
+    th.start()
+    return th
+
+
 def accept_task_request(orch, data: dict) -> tuple[bool, str]:
     """接收一条任务请求：登记 QUEUED（唯一写者）+ 写收执键。
 
@@ -8722,7 +8801,9 @@ def main():
     logger.info("编排器实例归属：%s", _owner_why)
     # P0-b 租约续租：旧实现只在认领时写一次心跳，30 秒后 TTL 到期 → A 还活着 B 就能接管。
     start_owner_lease_renewal(r)
-    # C3/H3b 启动恢复：把"已收执但从未被消费"的请求捡回来执行（pub/sub 的消息已丢，
+    # P0-c 有界周期恢复：崩溃可能发生在启动**之后**，一次性扫描覆盖不到；
+    # 每轮每类最多 20 条，避免积压时一次拉起几百个任务把端点打爆。
+    start_recovery_loop(orch)    # C3/H3b 启动恢复：把"已收执但从未被消费"的请求捡回来执行（pub/sub 的消息已丢，
     # 但收执在库里）。放在订阅之前：先恢复旧的，再开始接新的。
     try:
         _resumed = resume_received_tasks(orch)
@@ -8730,6 +8811,13 @@ def main():
             logger.warning("启动恢复：重新执行 %d 条未被消费的收执", _resumed)
     except Exception as exc:                          # noqa: BLE001
         logger.warning("启动恢复失败（不挡启动）：%s", str(exc)[:150])
+    # P0-c：还要覆盖"已 QUEUED 但从未开始"的崩溃窗口（promote 后、线程起来前崩）
+    try:
+        _requeued = resume_unstarted_queued(orch)
+        if _requeued:
+            logger.warning("启动恢复：重新执行 %d 条登记后从未开始的任务", _requeued)
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("未开始 QUEUED 启动恢复失败（不挡启动）：%s", str(exc)[:150])
     ps = r.pubsub()
     ps.subscribe("orchestrator:main")
 
