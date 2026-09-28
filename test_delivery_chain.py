@@ -6278,6 +6278,42 @@ class TestExportVersionNamespaces(unittest.TestCase):
         self.assertIs(out2.get("package_stale"), False)
 
 
+    def test_package_manifest_with_empty_identity_is_stale(self):
+        """P0-f 反例：包内**有清单但身份为空** → 不得冒充当前交付（实机样本反例）。
+
+        `ui-a06a005c9b` 的旧包 `deliverables_20260928_012445.zip`：清单 schema 在，
+        但 `report_version_id` 与 `research_body_sha256` 都为空，包内正文 6179 字节
+        （`178a4a85…`）≠ 磁盘当前 20892 字节（`35f37f00…`），`pdf` 位指向原始年报。
+        旧逻辑只在 `_pkg_body` 非空时才比身份 → 这种包只能靠时间戳侥幸被抓。
+
+        注意与"包内**读不到**清单"区分：后者不是"身份为空"，不得据此判陈旧
+        （既有 `test_package_stale_*` 的"不误标"断言正是这种情况）。
+        """
+        import json as _json
+        import os
+        import time
+        import zipfile
+        import web_ui
+        ws = self._ws({"generated_at": time.time()}, with_zip=False)
+        zp = ws / "deliverables_20260920_104729.zip"
+        with zipfile.ZipFile(zp, "w") as zf:
+            zf.writestr("PACKAGE_MANIFEST.json", _json.dumps({
+                "schema": "weavemind.package/2",
+                "report_version_id": "",
+                "research_body_sha256": "",
+                "delivered_md_sha256": "178a4a85",
+                "pdf_sha256": "436928c6",
+            }, ensure_ascii=False))
+        fresh = time.time()
+        os.utime(zp, (fresh, fresh))
+        out = web_ui._export_payload(
+            "ui-x", ws, {"identity_id": "ident-cur", "version_id": "body-cur"})
+        self.assertIs(out.get("package_stale"), True,
+                      "包内有清单却无身份 = 无法证明属于当前版本，必须判陈旧")
+        # 尚无采纳正文 → 没有可比对象，不误标
+        out2 = web_ui._export_payload("ui-x", ws, {"identity_id": "", "version_id": ""})
+        self.assertIs(out2.get("package_stale"), False)
+
     def test_package_stale_when_zip_predates_adopted_version(self):
         """打包在**采纳最终正文之前**跑完 → 包不含最新修订，必须标陈旧。
 

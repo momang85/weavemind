@@ -36,22 +36,29 @@ A/B 两路**时间戳**侥幸被抓；一旦时间对齐，它就会被当成当
 而这正是"缺绑定/过时包不能冒充当前交付"要防的事。
 `web_ui.py` 里已加注释记录该缺口（见 `_export_payload` 内 "P0-f 待补" 段）。
 
-## 尝试过的修法与其失败（如实记录，不硬推）
+## 修法（已落地）：只在"包内**有**清单但身份为空"时判陈旧
 
-修法：`if _cur_body and not _pkg_body: _package_stale = True`（没有身份可对 = 无法证明
-属于当前版本）。
+上一版修法 `if _cur_body and not _pkg_body: stale = True` **打破两条既有"不误标"用例**。
+读懂夹具后原因清楚了：`TestExportVersionNamespaces._ws()` 写的是**导出清单**
+`export_manifest.json`（即 `_exp`），而**包内清单** `_pkg_manifest` 要从 zip 里读；
+那两个夹具的 zip 是空壳 `b"PK\x05\x06"` → `_pkg_manifest = {}` → `_pkg_body` 为空。
+于是我的规则把"**包内读不到清单**"也当成了"身份为空"，连带把它们的"不误标"断言打破。
 
-**结果：打破两条既有用例的"不误标"断言**——
-`TestExportVersionNamespaces.test_package_stale_when_manifest_newer_than_zip` 与
-`test_package_stale_when_zip_predates_adopted_version` 的后半段都断言
-`package_stale is False`。这说明它们的夹具把身份放在了我没读清的位置
-（`self._ws(...)` 写的是哪一份清单、`_exp` 与 `_pkg_manifest` 各来自哪里尚未读懂）。
+**"包内没有清单"与"包内有清单但身份为空"是两件事**，判据必须分开：
 
-**处理：已回退该规则与新增用例，主干恢复绿（`test_delivery_chain` 373 项 OK）**，
-只保留定位注释。**下一步必须先读懂这两个夹具**，再决定修法落在哪一路
-（是"身份为空即陈旧"，还是"包内清单与导出清单身份必须一致才算同版"）。
+```python
+if _cur_body and _pkg_manifest and not _pkg_body:
+    _package_stale = True
+```
 
-## 未验项（本批尚未做到的）
+- 包内**读不到清单**（`_pkg_manifest` 为空）→ 不是"身份为空"，不据此判陈旧（保持既有行为）；
+- 包内**有清单但身份字段为空** → 无法证明属于当前版本 → 存在采纳正文时判陈旧。
+
+**验证**：`test_delivery_chain` **374 项 OK**（+1 新用例
+`test_package_manifest_with_empty_identity_is_stale`：用真 zip 装入 schema 在、身份为空的
+清单 → 判陈旧；尚无采纳正文时不误标）。两条既有"不误标"用例**仍绿**。
+
+## 仍然未做到的
 
 - **页面是否真的拦截该旧包，尚未实测**：本批只读到了判定逻辑，还没沿
   `/api/task/<id>/deliverables` + 页面下载按钮跑一遍看实际表现（含视觉核验）。
