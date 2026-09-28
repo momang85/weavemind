@@ -228,12 +228,23 @@ def chart_rows(task_id: str, goal: str, *, project: str | None = None) -> dict:
     derived = [dict(d, year=_year(d.get("period")))
                for d in (res.get("derived_detail") or [])
                if _keep(str(d.get("period") or ""))]
-    unit = ""
-    for r in rows:
-        u = str(r.get("unit") or "").strip()
-        if u:
-            unit = u
-            break
+    # 表头单位只能取自**金额类**指标行，且不挑一个冒充全表（P1：标签不得说谎）。
+    # 旧实现取"第一行有单位的"——底稿里还可能有实物量（吨）与单价（元/吨）行，
+    # 谁先出现就把整个报告的单位写成"吨"：真机样本里洋河简报表头写着「单位：吨」，
+    # 而全文金额都是亿元。数字没错，标签错，读者据此换算就全错。
+    # 优先按**契约必需指标**判（金额口径以它们为准）；判不出来时留空，
+    # 正文照实写"见表中标注"——不猜。
+    _AMOUNT_UNITS = {"元", "万元", "亿元", "万美元", "亿美元", "港元", "万港元"}
+
+    def _amount_unit_of(rs) -> str:
+        seen = {str(r.get("unit") or "").strip() for r in rs}
+        seen = {u for u in seen if u in _AMOUNT_UNITS}
+        return next(iter(seen)) if len(seen) == 1 else ""
+
+    _required = [str(m) for m in ((request or {}).get("required_metrics") or [])]
+    unit = _amount_unit_of([r for r in rows
+                            if str(r.get("metric") or "") in _required]) \
+        or _amount_unit_of(rows)
     src_label, src_url = _source_labels(task_id, project)
     return {
         "ok": bool(rows or derived), "rows": rows, "derived": derived,

@@ -8254,6 +8254,247 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         _say(f"补材料：证据已重建（可定位 {loc} 条）；正文需按新材料重生成时另行授权")
         return out
 
+    # 产出**交付正文**的能力：补材料后只有这些步骤依赖"新材料"
+    _BODY_CAPABILITIES = ("report_generator", "content_summary")
+    CANDIDATE_STATE_FILE = "candidate_state.json"
+
+    def handle_regenerate_candidate(self, data: dict) -> dict:
+        """按**已并入的新材料**生成一份**候选正文**（不采纳、不覆盖人工文字）。
+
+        设计要点（每条都有用例）：
+
+        1. **不新增付费生成**：本入口默认走**确定性装配**（同一套
+           `report_brief` 装配器）——把重建后的证据/底稿重新装配成正文，
+           **不调用模型**。请求里带 `allow_paid` 时**明确拒绝**并说明原因，
+           不悄悄降级成确定性装配（那会让调用方以为模型重生成过了）。
+        2. **必须有已并入的新材料**：没有就返回 `no_new_material`，不凭空造候选。
+        3. **同一次动作只生成一个候选**：幂等键 =（材料身份 + 契约指纹 + 当前采纳版本），
+           重复调用返回同一个候选并标 `created: false`。
+        4. **只重做依赖新材料的步骤**：返回 `affected_steps`（产出正文的那些），
+           供页面显示"这次动了哪几步"；旧工件（交付包/PDF/底稿/图表）一个都不动。
+        5. **候选不采纳**：只 `VersionStore.record()`，**不** `adopt()`，
+           也不写交付投影与 `reports/report.md` ——旧采纳版本与人工文字原样保留。
+        6. **旧批准不继承**：候选是全新版本（`parent_id` 指向当前采纳版），
+           它自带自己的验收结论；旧 PASS 属于旧版本，不迁移。
+        """
+        import hashlib
+        import material_intake as mi
+        import task_state as _ts
+        from workspace import task_workspace
+
+        task_id = str((data or {}).get("task_id") or "")
+        if not task_id:
+            return {"ok": False, "status": "bad_request", "detail": "缺少 task_id"}
+        if (data or {}).get("allow_paid"):
+            # 本轮授权不含"新增付费生成"：明确拒绝，且**不**降级成确定性装配
+            return {"ok": False, "status": "paid_not_authorized",
+                    "detail": "本轮授权不新增付费生成：模型重生成未接线；"
+                              "去掉 allow_paid 可走确定性装配（不调用模型）"}
+        ws = task_workspace(task_id)
+        row: dict = {}
+        try:
+            row = _ts.read_task(task_id) or {}
+        except Exception as exc:                 # noqa: BLE001
+            logger.warning("候选正文：读取任务失败（task=%s）：%s", task_id, str(exc)[:140])
+        goal = str(row.get("goal") or "")
+
+        # ③ 幂等键要用的三样：材料身份 / 契约指纹 / 当前采纳版本
+        try:
+            index = mi.read_index(task_id)
+        except Exception as exc:                 # noqa: BLE001
+            return {"ok": False, "status": "error",
+                    "detail": f"读取材料清单失败：{str(exc)[:160]}"}
+        # "已并入"= 准入通过 + 已并入资料快照 + 确定性重做（refresh）成功。
+        # `refresh` 记录**不在清单条目里**（`_entry_of` 只放不随解析变化的身份与结论），
+        # 所以逐条回读该材料的 meta——清单条目本身不足以判断"有没有真的并入"。
+        merged: list[dict] = []
+        for item in index:
+            if str(item.get("status")) != mi.STATE_ADMITTED:
+                continue
+            meta = {}
+            try:
+                meta = mi.load(task_id, str(item.get("material_id") or "")) or {}
+            except Exception as exc:             # noqa: BLE001 - 读不到就当未并入
+                logger.info("候选正文：读取材料记录失败（%s）：%s",
+                            item.get("material_id"), str(exc)[:120])
+            if not (meta.get("refresh") or {}).get("ok"):
+                continue
+            if not (meta.get("attached") or item.get("attached")):
+                continue
+            rec = dict(item)
+            rec["refresh"] = dict(meta.get("refresh") or {})
+            rec["attached"] = bool(meta.get("attached") or item.get("attached"))
+            merged.append(rec)
+        want_mid = str((data or {}).get("material_id") or "")
+        if want_mid:
+            merged = [m for m in merged if str(m.get("material_id") or "") == want_mid]
+        if not merged:
+            return {"ok": False, "status": "no_new_material",
+                    "detail": ("没有已并入资料集的新材料（需要 material_intake 的准入 + "
+                               "并入快照 + refresh 成功）；先走 POST /api/task/<id>/material"),
+                    "materials_seen": len(index)}
+        # 索引按保存顺序追加：取最后一条 = 最新并入的那份
+        latest = merged[-1]
+        mid = str(latest.get("material_id") or "")
+        mat_fp = str(latest.get("raw_sha256") or latest.get("content_sha256")
+                     or latest.get("sha256") or mid)
+
+        from report_version import VersionStore
+        store = VersionStore(ws, task_id)
+        current = store.adopted()
+        contract_wire = self._candidate_contract_wire(task_id, row)
+        ctr_fp = str((contract_wire or {}).get("fingerprint") or "") or \
+            str(row.get("contract_fingerprint") or "")
+        key = hashlib.sha256(json.dumps(
+            {"material": mat_fp, "contract": ctr_fp,
+             "adopted": str(getattr(current, "version_id", "") or "")},
+            ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:32]
+
+        state = self._read_candidate_state(ws)
+        if str(state.get("key") or "") == key and state.get("candidate_version_id"):
+            return dict(state, ok=True, task_id=task_id, material_id=mid,
+                        created=False,
+                        note="同名材料与契约下已生成过候选：直接复用，未新建第二个")
+
+        # ④ 影响步骤：只有产出交付正文的那些依赖新材料（旧工件不动）
+        affected = [{"step_id": str(s.get("step_id") or ""),
+                     "capability": str(s.get("capability") or ""),
+                     "reason": "产出交付正文：依赖新材料重建后的证据与底稿"}
+                    for s in (row.get("steps") or [])
+                    if str(s.get("capability") or "") in self._BODY_CAPABILITIES]
+        if not affected:
+            affected = [{"step_id": "", "capability": "report_generator",
+                         "reason": "产出交付正文：依赖新材料重建后的证据与底稿"}]
+
+        # ⑤ 确定性装配（不采纳）：分析文字沿用**当前采纳版**的那一节（人工文字保留）
+        import report_brief as _rb
+        base_body = str(getattr(current, "body", "") or "")
+        analysis = ""
+        if base_body:
+            try:
+                analysis = _rb._analysis_section(base_body) or ""
+            except Exception as exc:             # noqa: BLE001 - 取不到就按空分析装配
+                logger.info("候选正文：取当前版本分析节失败（task=%s）：%s",
+                            task_id, str(exc)[:120])
+        try:
+            from delivery_pipeline import (rewrite_report_links, rules_identity,
+                                           sources_fingerprint)
+            structure = _rb.build_structure(task_id, goal, analysis, ws_dir=ws)
+            if not structure:
+                return {"ok": False, "status": "assembly_failed",
+                        "detail": "按新材料重建研究结构失败（未产出候选）"}
+            cand_body = _rb.render_brief_markdown(structure, analysis, task_id=task_id)
+            cand_body = rewrite_report_links(cand_body, task_id)
+            _src_fp = sources_fingerprint(task_id, cand_body)
+            _rules_v, _rules_fp = rules_identity(task_id)
+            cand = store.record(
+                cand_body, sources_fingerprint=_src_fp,
+                rules_version=_rules_v, rules_fingerprint=_rules_fp,
+                parent_id=str(getattr(current, "version_id", "") or ""))
+        except Exception as exc:                 # noqa: BLE001 - 装配失败如实返回
+            logger.warning("候选正文装配失败（task=%s）：%s", task_id, str(exc)[:160])
+            return {"ok": False, "status": "assembly_failed",
+                    "detail": f"候选正文装配失败：{str(exc)[:160]}"}
+        if cand is None:
+            return {"ok": False, "status": "assembly_failed",
+                    "detail": "候选装配未返回版本记录"}
+
+        # 验收：best-effort（对**候选正文**跑，不采纳、不改任何采纳指针）
+        acc: dict = {}
+        try:
+            from delivery_pipeline import accept_for_body
+            verdict = accept_for_body(task_id, goal, cand_body, ws_dir=ws)
+            if isinstance(verdict, dict):
+                acc = {"overall": str(verdict.get("overall") or ""),
+                       "gaps": list(verdict.get("gaps") or [])[:6],
+                       "report_sha256": str(verdict.get("report_sha256") or "")}
+        except Exception as exc:                 # noqa: BLE001 - 验收失败不影响候选成立
+            logger.info("候选正文验收失败（task=%s）：%s", task_id, str(exc)[:140])
+            acc = {"overall": "", "gaps": [], "error": str(exc)[:160]}
+
+        try:
+            budget = self.budget_snapshot(task_id)
+        except Exception:                        # noqa: BLE001
+            budget = {}
+        out = {
+            "ok": True, "status": "candidate_ready", "task_id": task_id,
+            "material_id": mid, "created": True, "key": key,
+            "candidate_version_id": str(getattr(cand, "version_id", "") or ""),
+            "candidate_identity_id": str(getattr(cand, "identity_id", "") or ""),
+            "parent_version_id": str(getattr(current, "version_id", "") or ""),
+            "adopted": False, "requires_explicit_adoption": True,
+            "old_approval_inherited": False,
+            "adopted_version_untouched": str(getattr(current, "version_id", "") or ""),
+            "contract_fingerprint": ctr_fp,
+            "material_fingerprint": mat_fp,
+            "affected_steps": affected,
+            "stopped_steps": [{"step_id": str(s.get("step_id") or ""),
+                               "capability": str(s.get("capability") or "")}
+                              for s in (row.get("steps") or [])
+                              if str(s.get("capability") or "") not in self._BODY_CAPABILITIES],
+            "generation": {"mode": "deterministic_assembly", "paid": False,
+                           "model_called": False},
+            "budget": budget,
+            "acceptance": acc,
+            "candidate_bytes": len(cand_body.encode("utf-8")),
+        }
+        self._write_candidate_state(ws, {k: v for k, v in out.items()
+                                         if k != "budget"})
+        _say = None
+        try:
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "info", "agent": "orchestrator",
+                           "message": (f"候选正文已生成（不采纳）："
+                                       f"{out['candidate_version_id'][:12]}，"
+                                       f"影响步骤 {len(affected)} 个；"
+                                       f"需显式采纳后才会成为交付"),
+                           "timestamp": self._now_iso()})
+        except Exception:                        # noqa: BLE001
+            pass
+        return out
+
+    def _candidate_contract_wire(self, task_id: str, row: dict) -> dict:
+        """候选幂等键要用的契约 wire：任务记录 → 旧绑定，两处都读不到就空。"""
+        try:
+            wire = (row or {}).get("contract") or {}
+            if isinstance(wire, dict) and wire:
+                return dict(wire)
+        except Exception:                        # noqa: BLE001
+            pass
+        try:
+            from delivery_pipeline import read_research_state
+            prev = read_research_state(task_id) or {}
+            w = (prev.get("binding") or {}).get("contract")
+            if isinstance(w, dict) and w:
+                return dict(w)
+        except Exception:                        # noqa: BLE001
+            pass
+        c = self._task_contract(task_id)
+        try:
+            return c.to_wire() if c is not None else {}
+        except Exception:                        # noqa: BLE001
+            return {}
+
+    def _read_candidate_state(self, ws) -> dict:
+        """读"这个 (材料, 契约, 采纳版) 组合是否已生成过候选"（坏文件按未生成处理）。"""
+        try:
+            p = Path(ws) / self.CANDIDATE_STATE_FILE
+            if p.is_file():
+                data = json.loads(p.read_text(encoding="utf-8"))
+                return data if isinstance(data, dict) else {}
+        except Exception as exc:                 # noqa: BLE001
+            logger.info("候选状态读取失败（按未生成处理）：%s", str(exc)[:120])
+        return {}
+
+    def _write_candidate_state(self, ws, payload: dict) -> None:
+        """记下候选身份——幂等键靠它，**不**记进交付投影（候选不是交付）。"""
+        try:
+            p = Path(ws) / self.CANDIDATE_STATE_FILE
+            p.write_text(json.dumps(payload, ensure_ascii=False, indent=1),
+                         encoding="utf-8")
+        except Exception as exc:                 # noqa: BLE001 - 写不进去不假成功
+            logger.warning("候选状态写入失败：%s", str(exc)[:140])
+
     def resume_pending_materials(self, task_ids=()) -> list[dict]:
         """把"已保存但未摄取"的材料补做一遍（编排器启动时调用）。
 
@@ -8944,6 +9185,29 @@ def main():
 
                 logger.info("Task %s add_material received: %s", _tid, _mid)
                 threading.Thread(target=_run_material, args=(dict(data),),
+                                 daemon=True).start()
+                continue
+            # 按新材料生成**候选正文**（P1-d）：同一条通道、同一套收执键模式。
+            # 确定性装配（不调用模型、不新增付费生成）；候选**不采纳**。
+            if str(data.get("type") or "") == "regenerate_candidate":
+                _tid = str(data.get("task_id") or "")
+                _ck = str(data.get("ack_key") or f"candidate_ack:{_tid}")
+
+                def _run_candidate(_d, _t=_tid, _k=_ck):
+                    try:
+                        result = orch.handle_regenerate_candidate(_d)
+                    except Exception as e:       # noqa: BLE001 - 异常也要落收执
+                        logger.error("候选正文生成失败：%s", str(e)[:200])
+                        result = {"ok": False, "status": "error",
+                                  "detail": str(e)[:200]}
+                    try:
+                        orch._redis.setex(_k, 600,
+                                          json.dumps(result, ensure_ascii=False))
+                    except Exception as exc:     # noqa: BLE001
+                        logger.error("候选收执键写入失败（%s）：%s", _k, str(exc)[:150])
+
+                logger.info("Task %s regenerate_candidate received", _tid)
+                threading.Thread(target=_run_candidate, args=(dict(data),),
                                  daemon=True).start()
                 continue
             task_id = data.get("task_id", "")

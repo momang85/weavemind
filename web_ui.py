@@ -5847,6 +5847,95 @@ def _post_task_material(self, p, body, admin):
     }, 200 if result.get("ok") else 409)
 
 
+def _post_task_candidate(self, p, body, admin):
+    """POST /api/task/<id>/candidate：按**已并入的新材料**生成**候选正文**（P1-d）。
+
+    分工与补材料一致：本入口只做**鉴权 + 归属 + 运行态检查 + 投递**，
+    装配与版本登记都在编排器里（`handle_regenerate_candidate`），因此网页与本地
+    调试走同一条装配路径。
+
+    四条纪律（写进响应，页面据此显示）：
+    - **不新增付费生成**：确定性装配（不调用模型）；请求带 `allow_paid` 会被**拒绝**，
+      不悄悄降级（见编排器 handler）；
+    - **同一次动作只生成一个候选**：编排器按（材料身份 + 契约指纹 + 当前采纳版）幂等，
+      重复调用返回同一个候选（`created: false`）；
+    - **候选不采纳**：只登记新版本，旧采纳版本与人工文字原样保留；
+      `requires_explicit_adoption=true`、`old_approval_inherited=false`；
+    - 失败方向：编排器未回执 → 503 且**不假成功**（没有候选就是没有候选）。
+    """
+    if not (p.startswith("/api/task/") and p.endswith("/candidate")):
+        return None
+    tid = p[len("/api/task/"):].rsplit("/candidate", 1)[0].strip()
+    if not tid:
+        return self._json({"error": "task_id required"}, 400)
+    if not _task_exists(tid):
+        return self._json({"error": "task not found"}, 404)
+    import task_state as _ts_cand
+    row = {}
+    try:
+        row = _ts_cand.read_task(tid) or {}
+    except Exception:
+        row = {}
+    owner = str(row.get("user") or "").strip()
+    me = str((admin or {}).get("user") or "").strip()
+    if owner and me and owner != me:
+        return self._json({"error": "只能为自己提交的任务生成候选正文"}, 403)
+    if str(row.get("status") or "").upper() in ("CANCELLED", "FAILED"):
+        return self._json({"error": "任务已终态，不得再生成候选正文"}, 409)
+    # 运行中不生成：装配会读证据/底稿，与正在跑的任务同时写会互相覆盖
+    try:
+        if _ts_cand.is_running(tid):
+            return self._json(
+                {"error": "任务正在运行；等它收尾或先停止后再生成候选正文"}, 409)
+    except Exception:                            # noqa: BLE001 - 读不到状态就不挡
+        pass
+    if not _redis_ready():
+        return self._json({"error": "Redis 未连接，无法投递候选生成请求"}, 503)
+    allow_paid = bool((body or {}).get("allow_paid"))
+    if allow_paid:
+        # 明确回绝而不是静默走确定性路径：调用方必须知道"模型没有重生成"
+        return self._json({
+            "status": "paid_not_authorized", "task_id": tid,
+            "error": "本轮授权不新增付费生成：模型重生成未接线。"
+                     "去掉 allow_paid 可走确定性装配（不调用模型、不消耗额度）",
+        }, 409)
+    ack_key = f"candidate_ack:{tid}:{uuid.uuid4().hex[:8]}"
+    try:
+        r = _new_redis()
+        r.delete(ack_key)
+        r.publish("orchestrator:main", json.dumps({
+            "type": "regenerate_candidate", "task_id": tid, "ack_key": ack_key,
+            "material_id": str((body or {}).get("material_id") or ""),
+            "user_id": me,
+        }, ensure_ascii=False))
+    except Exception as exc:
+        logger.warning("候选生成投递失败（task=%s）：%s", tid, str(exc)[:160])
+        return self._json({"error": "候选生成请求投递失败，可稍后重试"}, 503)
+    deadline = time.time() + float(os.environ.get("WM_CANDIDATE_ACK_TIMEOUT", "60") or 60)
+    result = None
+    while time.time() < deadline:
+        try:
+            got = r.get(ack_key)
+        except Exception:
+            got = None
+        if got:
+            try:
+                result = json.loads(got if isinstance(got, str) else got.decode("utf-8"))
+            except Exception:
+                result = None
+            break
+        time.sleep(0.2)
+    audit_log(me, self._client_ip(), "task.candidate", target=tid,
+              result="ok" if (result or {}).get("ok") else "pending",
+              detail=str((result or {}).get("status") or "no_ack"))
+    if not isinstance(result, dict):
+        return self._json({
+            "status": "pending", "task_id": tid,
+            "error": "编排器未在时限内回执；没有生成任何候选（不假成功），可稍后重试",
+        }, 503)
+    return self._json(result, 200 if result.get("ok") else 409)
+
+
 def _post_task_package(self, p, body, admin):
     """POST /api/task/<id>/package：按**当前采纳版本**重新打包（无模型、确定性）。
 
@@ -6741,6 +6830,7 @@ _POST_ROUTES = [
     (lambda self, p: self.path == "/api/memory/delete", _post_memory_delete),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/review/edit"), _post_task_review_edit),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/material"), _post_task_material),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/candidate"), _post_task_candidate),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/package"), _post_task_package),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/cancel"), _post_task_cancel),
     (lambda self, p: self.path == "/api/plan/confirm", _post_plan_confirm),

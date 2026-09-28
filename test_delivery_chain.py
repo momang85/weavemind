@@ -10083,7 +10083,18 @@ class _LoopRedis(_FakeRedis):
 
     def publish(self, channel, payload):
         msg = json.loads(payload)
-        if str(msg.get("type") or "") != "add_material":
+        _t = str(msg.get("type") or "")
+        if _t == "regenerate_candidate":
+            # 复刻 `main()` 里 regenerate_candidate 分支：处理 → 写收执键
+            self.published.append((channel, msg))
+            try:
+                result = self.orch.handle_regenerate_candidate(msg)
+            except Exception as exc:             # noqa: BLE001 - 与生产同形状
+                result = {"ok": False, "status": "error", "detail": str(exc)[:200]}
+            self.setex(str(msg.get("ack_key") or f"candidate_ack:{msg.get('task_id')}"),
+                       600, json.dumps(result, ensure_ascii=False))
+            return 1
+        if _t != "add_material":
             return super().publish(channel, payload)
         self.published.append((channel, msg))
         result = self.orch.handle_add_material(msg)
@@ -10121,6 +10132,31 @@ def _unbound_intake_handler():
     """生产实现：`OrchestratorV2.handle_add_material` 的未绑定函数。"""
     import orchestrator_v2
     return orchestrator_v2.OrchestratorV2.handle_add_material
+
+
+def _unbound_candidate_handler():
+    """生产实现：`OrchestratorV2.handle_regenerate_candidate` 的未绑定函数。
+
+    与补材料用例同一条纪律：替换掉的是**运行环境**（Redis/模型/budget），
+    不是被测逻辑——被测的是生产里同一个未绑定函数。
+    """
+    import orchestrator_v2
+    return orchestrator_v2.OrchestratorV2.handle_regenerate_candidate
+
+
+def _unbound_candidate_contract_wire():
+    import orchestrator_v2
+    return orchestrator_v2.OrchestratorV2._candidate_contract_wire
+
+
+def _unbound_candidate_read_state():
+    import orchestrator_v2
+    return orchestrator_v2.OrchestratorV2._read_candidate_state
+
+
+def _unbound_candidate_write_state():
+    import orchestrator_v2
+    return orchestrator_v2.OrchestratorV2._write_candidate_state
 
 
 class _MaterialCase(unittest.TestCase):
@@ -10175,6 +10211,31 @@ class _MaterialCase(unittest.TestCase):
         self.orch = _IntakeOrch()
         self.orch.handle_add_material = _unbound_intake_handler().__get__(
             self.orch, type(self.orch))
+        # 候选正文：同样绑生产函数（幂等键/装配/版本登记都是被测逻辑）
+        self.orch.handle_regenerate_candidate = _unbound_candidate_handler().__get__(
+            self.orch, type(self.orch))
+        self.orch._candidate_contract_wire = _unbound_candidate_contract_wire().__get__(
+            self.orch, type(self.orch))
+        self.orch._read_candidate_state = _unbound_candidate_read_state().__get__(
+            self.orch, type(self.orch))
+        self.orch._write_candidate_state = _unbound_candidate_write_state().__get__(
+            self.orch, type(self.orch))
+        import orchestrator_v2 as _ov2
+        self.orch._BODY_CAPABILITIES = _ov2.OrchestratorV2._BODY_CAPABILITIES
+        self.orch.CANDIDATE_STATE_FILE = _ov2.OrchestratorV2.CANDIDATE_STATE_FILE
+        self.orch._task_contract = lambda tid: None
+        self.orch.budget_snapshot = lambda tid: {"calls_left": 3, "seconds_left": 42.0}
+
+    def _post_candidate(self, body: dict, redis=None, user="momang"):
+        """从 **HTTP 入口**提交候选正文生成请求（与网页调用同一条函数）。"""
+        import web_ui
+        h = _MatHandler(f"/api/task/{self.task_id}/candidate")
+        with mock.patch.object(web_ui, "_task_exists", lambda tid: True), \
+                mock.patch.object(web_ui, "_redis_ready", lambda *a, **k: True), \
+                mock.patch.object(web_ui, "_new_redis", lambda: redis), \
+                mock.patch.object(web_ui, "audit_log", lambda *a, **k: None):
+            web_ui._post_task_candidate(h, h.path, body, {"user": user})
+        return h.last
 
     def _post(self, body: dict, redis=None, user="momang"):
         """从 **HTTP 入口**提交补材料请求（与网页调用同一条函数）。"""
@@ -10190,6 +10251,209 @@ class _MaterialCase(unittest.TestCase):
     def _snapshot(self) -> list[dict]:
         p = ws_mod.task_project_dir(self.task_id) / "fetch_snapshot.json"
         return json.loads(p.read_text(encoding="utf-8")) if p.is_file() else []
+
+
+class TestCandidateEntryChain(_MaterialCase):
+    """P1-d：按**已并入的新材料**生成候选正文 —— HTTP 入口 → 编排器 → 版本库。
+
+    每条断言对应架构师给的一条要求，全部走**同一条生产函数**（未绑定 handler
+    + 生产装配器），只有运行环境是替身（Redis/模型/budget）。
+    """
+
+    def setUp(self):
+        super().setUp()
+        # 计划里既有产出正文的步骤、也有不依赖新材料的步骤——用来验证"只重做依赖步骤"
+        self.row["steps"] = [
+            {"step_id": "s1", "capability": "web_search", "instruction": "检索"},
+            {"step_id": "s2", "capability": "data_analyzer", "instruction": "清洗"},
+            {"step_id": "s3", "capability": "report_generator", "instruction": "写正文"},
+        ]
+        self.row["contract"] = {"version": 1, "fingerprint": "ctr-fp-1"}
+        # 真实研究任务的资料面还有**结构化财务**（底稿没有它就不产出——`write_working_paper`
+        # 明确"不编一份空底稿"）。补上两期，让"补材料 → refresh → 底稿 → 装配候选"
+        # 这条链在离线用例里也是完整的，而不是靠跳过环节凑出成功。
+        proj = ws_mod.task_project_dir(self.task_id)
+        Path(proj).mkdir(parents=True, exist_ok=True)
+        (Path(proj) / "financials.json").write_text(json.dumps({
+            "metadata": {"company": "洋河股份", "code": "002304.SZ", "market": "cn",
+                         "unit": "亿元"},
+            "financials": [
+                {"year": 2023, "report_type": "年报", "revenue": 331.26,
+                 "net_profit": 100.16, "gross_profit": 249.26,
+                 "operating_cashflow": 61.30, "total_assets": 697.92,
+                 "total_liabilities": 177.42},
+                {"year": 2024, "report_type": "年报", "revenue": 288.76,
+                 "net_profit": 66.73, "gross_profit": 211.25,
+                 "operating_cashflow": 46.29, "total_assets": 673.45,
+                 "total_liabilities": 156.52},
+            ],
+        }, ensure_ascii=False), encoding="utf-8")
+
+    def _store(self):
+        from report_version import VersionStore
+        return VersionStore(ws_mod.task_workspace(self.task_id), self.task_id)
+
+    def _seed_adopted(self, text="第一版交付正文（含人工写下的分析段）。"):
+        """先放一个**已采纳**版本：才能验证"候选不采纳、旧版与人工文字原样保留"。"""
+        store = self._store()
+        v = store.record(text, sources_fingerprint="seed-src",
+                         rules_version="r1", rules_fingerprint="rf1")
+        store.adopt(v, reason="seed")
+        return v
+
+    def _intake(self, redis):
+        import base64 as b64
+        raw = self._envelope_bytes()
+        return self._post({"kind": "file", "filename": "yanghe_ar2024.json",
+                           "content_type": "application/json",
+                           "title": "洋河股份:2024年年度报告",
+                           "data": b64.b64encode(raw).decode("ascii")}, redis=redis)
+
+    def test_candidate_is_generated_but_not_adopted(self):
+        """① 候选生成成功；② **不采纳**；③ 旧采纳版本与人工文字原样保留。"""
+        seed = self._seed_adopted()
+        redis = _LoopRedis(self.orch)
+        payload, status = self._intake(redis)
+        self.assertEqual(status, 200, payload)
+
+        payload2, status2 = self._post_candidate({}, redis=redis)
+        self.assertEqual(status2, 200, payload2)
+        self.assertTrue(payload2.get("ok"), payload2)
+        self.assertEqual(payload2["status"], "candidate_ready")
+        # ② 候选**不采纳**
+        self.assertFalse(payload2["adopted"])
+        self.assertTrue(payload2["requires_explicit_adoption"])
+        self.assertFalse(payload2["old_approval_inherited"])
+        # ③ 采纳指针没动、人工文字还在
+        store = self._store()
+        now = store.adopted()
+        self.assertIsNotNone(now)
+        self.assertEqual(now.version_id, seed.version_id, "候选不得改变采纳版本")
+        self.assertIn("人工写下的分析段", now.body)
+        # 候选确实是**另一个**版本，且父指针指向当前采纳版
+        self.assertNotEqual(payload2["candidate_version_id"], seed.version_id)
+        self.assertEqual(payload2["parent_version_id"], seed.version_id)
+        self.assertEqual(payload2["adopted_version_untouched"], seed.version_id)
+        self.assertGreater(int(payload2.get("candidate_bytes") or 0), 0)
+        # 候选是**按新材料重建**的简报（不是旧正文的拷贝）：带上结构化财务的读数，
+        # 且**保留了人工写下的那段分析文字**（人工文字不得被候选吞掉）
+        cand = store.get(payload2["candidate_version_id"])
+        self.assertIsNotNone(cand)
+        self.assertIn("288.76", cand.body, "候选应含新资料集重算出的读数")
+        self.assertIn("洋河股份", cand.body)
+        self.assertIn("人工写下的分析段", cand.body, "人工文字必须保留")
+        self.assertNotEqual(cand.body, now.body, "候选必须是重新装配的正文")
+        # 候选自带验收结论（对候选正文跑），旧 PASS 属旧版本、不迁移
+        self.assertFalse(payload2["old_approval_inherited"])
+        self.assertIn("overall", payload2.get("acceptance") or {})
+        # 投递的确实是编排器消息（而不是在 web 进程里把活干了）
+        self.assertEqual(redis.published[-1][1]["type"], "regenerate_candidate")
+
+    def test_candidate_is_idempotent_per_material_and_contract(self):
+        """④ 同一次动作只生成一个候选：重复调用复用，不新建第二个。"""
+        self._seed_adopted()
+        redis = _LoopRedis(self.orch)
+        self._intake(redis)
+        p1, s1 = self._post_candidate({}, redis=redis)
+        self.assertEqual(s1, 200, p1)
+        self.assertTrue(p1["created"])
+        before = len(self._store()._load().get("versions") or {})
+        p2, s2 = self._post_candidate({}, redis=redis)
+        self.assertEqual(s2, 200, p2)
+        self.assertFalse(p2["created"], "重复调用不得新建候选")
+        self.assertEqual(p2["candidate_version_id"], p1["candidate_version_id"])
+        after = len(self._store()._load().get("versions") or {})
+        self.assertEqual(after, before, "版本库里不得多出第二个候选")
+
+    def test_no_new_material_is_rejected(self):
+        """⑤ 没有已并入的新材料 → 明确拒绝，不凭空造候选。"""
+        self._seed_adopted()
+        redis = _LoopRedis(self.orch)
+        payload, status = self._post_candidate({}, redis=redis)
+        self.assertEqual(status, 409, payload)
+        self.assertFalse(payload.get("ok"))
+        self.assertEqual(payload["status"], "no_new_material")
+        self.assertIn("material", str(payload.get("detail") or ""))
+
+    def test_paid_generation_is_refused_not_silently_downgraded(self):
+        """⑥ 本轮不新增付费生成：`allow_paid` **明确拒绝**，且不悄悄走确定性装配。"""
+        self._seed_adopted()
+        redis = _LoopRedis(self.orch)
+        self._intake(redis)
+        before = len(self._store()._load().get("versions") or {})
+        payload, status = self._post_candidate({"allow_paid": True}, redis=redis)
+        self.assertEqual(status, 409, payload)
+        self.assertEqual(payload["status"], "paid_not_authorized")
+        after = len(self._store()._load().get("versions") or {})
+        self.assertEqual(after, before, "被拒的请求不得留下候选")
+        self.assertIn("确定性装配", str(payload.get("error") or ""))
+        self.assertFalse(any(m[1].get("type") == "regenerate_candidate"
+                             for m in redis.published),
+                         "被拒的请求不得投递给编排器")
+
+    def test_affected_steps_budget_and_generation_mode_are_reported(self):
+        """⑦ 展示影响步骤 / 未动步骤 / 预算 / 生成方式（确定性与否要能看出来）。"""
+        self._seed_adopted()
+        redis = _LoopRedis(self.orch)
+        self._intake(redis)
+        payload, status = self._post_candidate({}, redis=redis)
+        self.assertEqual(status, 200, payload)
+        aff = {s["step_id"] for s in payload["affected_steps"]}
+        stop = {s["step_id"] for s in payload["stopped_steps"]}
+        self.assertEqual(aff, {"s3"}, f"只有产出正文的步骤依赖新材料：{payload['affected_steps']}")
+        self.assertEqual(stop, {"s1", "s2"}, "检索/清洗步骤不得被重做")
+        self.assertFalse(payload["generation"]["paid"])
+        self.assertFalse(payload["generation"]["model_called"])
+        self.assertEqual(payload["generation"]["mode"], "deterministic_assembly")
+        self.assertEqual(payload["budget"].get("calls_left"), 3)
+        self.assertEqual(payload["contract_fingerprint"], "ctr-fp-1")
+        self.assertTrue(payload["material_fingerprint"])
+
+    def test_brief_header_unit_is_the_amount_unit_not_a_tonnage_row(self):
+        """简报的「单位」必须是**金额单位**，不能取到实物量行的"吨"。
+
+        旧实现取"第一行有单位的"：底稿里还有销售量（吨）与吨价（元/吨）行，谁先出现
+        就把整个报告的单位写成"吨"——数字没错、**标签错**，读者据此换算全错。
+        这个夹具（补材料带来的量价/结构事实 + 结构化财务）正是**会触发它**的资料面。
+        """
+        from working_paper_export import chart_rows
+
+        redis = _LoopRedis(self.orch)
+        payload, status = self._intake(redis)
+        self.assertEqual(status, 200, payload)
+        # 触发条件确实在：刷新后的底稿里同时有"吨"与金额行
+        wp = json.loads((ws_mod.task_project_dir(self.task_id)
+                         / "working_paper.json").read_text(encoding="utf-8"))
+        units = {str(r.get("unit") or "") for r in (wp.get("rows") or [])}
+        self.assertIn("吨", units, f"该资料面必须有实物量行才能验证这个反例：{units}")
+        data = chart_rows(self.task_id, self.row["goal"])
+        self.assertEqual(data.get("unit"), "亿元",
+                         f"表头单位必须取金额口径，实际 {data.get('unit')!r}（行单位 {units}）")
+        # 端到端：装配出来的简报表头也必须是亿元
+        import report_brief
+        structure = report_brief.build_structure(
+            self.task_id, self.row["goal"], "",
+            ws_dir=ws_mod.task_workspace(self.task_id))
+        self.assertTrue(structure)
+        md = report_brief.render_brief_markdown(structure, "", task_id=self.task_id)
+        self.assertIn("单位：亿元", md)
+        self.assertNotIn("单位：吨", md)
+
+    def test_http_entry_refuses_other_users_and_terminal_tasks(self):
+        """⑧ 入口鉴权：别人的任务 403；终态任务 409（都不投递）。"""
+        self._seed_adopted()
+        redis = _LoopRedis(self.orch)
+        self._intake(redis)
+        p403, s403 = self._post_candidate({}, redis=redis, user="someone-else")
+        self.assertEqual(s403, 403, p403)
+        self.row["status"] = "CANCELLED"
+        try:
+            p409, s409 = self._post_candidate({}, redis=redis)
+            self.assertEqual(s409, 409, p409)
+        finally:
+            self.row["status"] = "SUCCESS"
+        self.assertFalse(any(m[1].get("type") == "regenerate_candidate"
+                             for m in redis.published), "被拒的请求不得投递")
 
 
 class TestMaterialEntryChain(_MaterialCase):
