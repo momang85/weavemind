@@ -386,6 +386,80 @@ class TestPdfEvidence(unittest.TestCase):
         self.assertIsNone(pdf.doc_from_url("https://x.com/a.pdf", data=b"%PDF-1.4\n\n"))
         self.assertEqual(pdf.pages_text(b"not a pdf"), [])
 
+    def test_reject_reason_separates_http_type_corrupt_and_scan(self):
+        """P1-e：拒收要能分清"取回的不是 PDF / 被截断 / 损坏 / 真扫描件"。
+
+        此前四者共用一句"PDF 无可提取文本（扫描件或受保护）"——读者据此会去**换来源**，
+        而真正该做的可能是**重下**（截断）或**重试**（损坏）。这里逐类断言判据。
+        """
+        import annual_report_pdf as pdf
+
+        # ① 取回的不是 PDF：WAF 挑战页 / JSON（985 字节那种"看着有内容"的响应）
+        for raw, want in ((b"<!DOCTYPE html><html><body>403 Forbidden</body></html>", "not_pdf"),
+                          (b'{"error":"rate limited","code":429}', "not_pdf"),
+                          (b"PK\x03\x04zip-not-pdf", "not_pdf")):
+            kind, detail = pdf.classify_pdf_bytes(raw)
+            self.assertEqual(kind, want, detail)
+            self.assertIn(str(len(raw)), detail)
+        self.assertEqual(pdf.classify_pdf_bytes(b"")[0], "empty")
+        self.assertEqual(pdf.classify_pdf_bytes(None)[0], "empty")
+
+        # ② 有 %PDF- 头但没有 %%EOF：**下载被截断**（可重下），不是扫描件
+        kind, detail = pdf.classify_pdf_bytes(b"%PDF-1.4\n1 0 obj\n<<>>\nendobj\n")
+        self.assertEqual(kind, "truncated", detail)
+        self.assertIn("EOF", detail)
+
+        # ③ 有头有尾 → 交给解析器（此处内容损坏 → corrupt，不是"扫描件"）
+        kind, _ = pdf.classify_pdf_bytes(b"%PDF-1.4\nbody\n%%EOF\n")
+        self.assertEqual(kind, "pdf")
+        _, perr = pdf.pages_text_ex(b"%PDF-1.4\nbody\n%%EOF\n")
+        self.assertEqual(perr, "corrupt")
+
+        # ④ 真扫描件：解析得出页、但可提取文本不足 → scanned_no_text（与损坏分开）
+        seen: list[tuple[str, str]] = []
+        self.assertIsNone(pdf.doc_from_url(
+            "https://x.com/a.pdf", data=b"%PDF-1.4\nx\n%%EOF\n",
+            on_reject=lambda k, d: seen.append((k, d))))
+        self.assertEqual([k for k, _ in seen], ["corrupt"], seen)
+
+        # ⑤ 下载层失败（fetch_bytes 返回 None）→ fetch_failed，不与解析类混为一谈
+        with mock.patch.object(pdf, "fetch_bytes", return_value=None):
+            seen2: list[tuple[str, str]] = []
+            self.assertIsNone(pdf.doc_from_url(
+                "https://x.com/a.pdf", on_reject=lambda k, d: seen2.append((k, d))))
+        self.assertEqual([k for k, _ in seen2], ["fetch_failed"], seen2)
+
+    def test_scanned_pdf_reports_no_text_layer_not_corruption(self):
+        """真扫描件（解析成功、无文本层）必须报 `scanned_no_text`，不能报成损坏。"""
+        import annual_report_pdf as pdf
+
+        class _Page:
+            def extract_text(self):
+                return ""
+
+        class _Reader:
+            is_encrypted = False
+
+            @property
+            def pages(self):
+                return [_Page(), _Page()]
+
+        seen: list[tuple[str, str]] = []
+        with mock.patch("pypdf.PdfReader", return_value=_Reader()):
+            self.assertIsNone(pdf.doc_from_url(
+                "https://x.com/a.pdf", data=b"%PDF-1.4\nx\n%%EOF\n",
+                on_reject=lambda k, d: seen.append((k, d))))
+        self.assertEqual([k for k, _ in seen], ["scanned_no_text"], seen)
+        self.assertIn("重下无用", seen[0][1])
+
+    def test_reject_callback_failure_does_not_change_outcome(self):
+        """回调是"报告原因"用的：它自己抛异常不得改变拒收结论。"""
+        import annual_report_pdf as pdf
+        with self.assertLogs("annual_report_pdf", level="WARNING"):
+            self.assertIsNone(pdf.doc_from_url(
+                "https://x.com/a.pdf", data=b"<html>x</html>",
+                on_reject=lambda k, d: (_ for _ in ()).throw(RuntimeError("cb"))))
+
     def test_url_from_instruction_reads_the_url_hint(self):
         import annual_report_pdf as pdf
         instr = "抓取年报 [URL: https://www.sse.com.cn/a/2024.pdf] 保留正文"

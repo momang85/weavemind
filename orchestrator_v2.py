@@ -1480,15 +1480,38 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 logger.warning("PDF 工件不可复用（旧路径，缺失/校验失败，按缺口处理，"
                                "task=%s）：%s", task_id, str(_artifact.get("path") or "")[:120])
                 return False
-        doc = pdf.doc_from_url(url, data=data)
+        # P1-e：拒收要分因——"取回的不是 PDF（HTML/JSON）" / "下载被截断" /
+        # "文件损坏或受保护" / "真扫描件无文本层" 是**四种不同的事**，处置也不同
+        # （换来源 / 重下 / 重试 / 换来源且别重试）。此前四者共用一句
+        # "PDF 无可提取文本（扫描件或受保护）"，读者据此会去换来源，
+        # 而真正该做的可能是重下。类别落进**该步骤的 result**（页面与日志据此显示）。
+        _reject: dict = {}
+
+        def _note_reject(kind: str, detail: str) -> None:
+            _reject.update({"kind": kind, "detail": detail})
+
+        doc = pdf.doc_from_url(url, data=data, on_reject=_note_reject)
         if not doc:
-            logger.info("PDF 证据通道未取得正文（按缺口处理，task=%s）：%s",
-                        task_id, url[:100])
+            _kind = str(_reject.get("kind") or "unknown")
+            logger.info("PDF 证据通道未取得正文（类别=%s，按缺口处理，task=%s）：%s —— %s",
+                        _kind, task_id, url[:100], str(_reject.get("detail") or "")[:160])
+            try:
+                result["pdf_evidence"] = {"ok": False, "url": url,
+                                          "reject_kind": _kind,
+                                          "reject_detail": str(_reject.get("detail") or "")[:200]}
+            except Exception:                    # noqa: BLE001 - 记录失败不改处置
+                pass
             return False
         ok = pdf.append_snapshot(task_id, doc)
         if ok:
             logger.info("PDF 证据通道：%s（%d 页，%d 字符）", url[:80],
                         len(doc.get("page_offsets") or []), len(doc.get("text") or ""))
+        try:
+            result["pdf_evidence"] = {"ok": bool(ok), "url": url,
+                                      "pages": len(doc.get("page_offsets") or []),
+                                      "chars": len(doc.get("text") or "")}
+        except Exception:                        # noqa: BLE001
+            pass
         return ok
 
     @staticmethod

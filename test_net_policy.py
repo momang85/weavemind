@@ -341,6 +341,148 @@ def _fake_http_error(code: int):
     return urllib.error.HTTPError("https://example.com/x", code, "err", {}, None)
 
 
+class _FakeResp:
+    """假的 urlopen 响应：够 `get_bytes_via_urllib` 用（状态/头/分段 read）。"""
+
+    def __init__(self, body: bytes, *, status: int = 200, headers: dict | None = None):
+        self._body = bytes(body)
+        self._pos = 0
+        self.status = status
+        self.code = status
+        self.headers = dict(headers or {})
+
+    def read(self, n: int = -1):
+        if n is None or n < 0:
+            out = self._body[self._pos:]
+            self._pos = len(self._body)
+            return out
+        # 模拟真实流：一次 read(n) 不一定返回 n 字节，但也**不做无谓的多次**
+        out = self._body[self._pos:self._pos + n]
+        self._pos += len(out)
+        return out
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+class TestByteChannelMetadata(unittest.TestCase):
+    """P1-e：取字节的通道必须带回**状态/类型/字节数**，且二进制往返无损。
+
+    没有这些元信息时，"985 字节取件"到底是 HTTP 403 的 HTML 错误页、Content-Type 不对、
+    下载被截断，还是真扫描件，从日志上完全分不出来——处置方式却各不相同。
+    """
+
+    def setUp(self):
+        from adapters import transport
+        self.transport = transport
+
+    def _call(self, resp, url="https://example.com/a.pdf", **kw):
+        with mock.patch.object(self.transport, "_throttle_and_rewrite", lambda u: u), \
+                mock.patch.object(self.transport, "_require_egress_ok", lambda: None), \
+                mock.patch.object(self.transport, "_validate_public_url", return_value=True), \
+                mock.patch.object(self.transport.urllib.request, "urlopen",
+                                  return_value=resp):
+            return self.transport.get_bytes_via_urllib(url, **kw)
+
+    def test_binary_round_trip_and_metadata(self):
+        """PDF 是二进制：0x80-0xFF 必须原样带回（此前走 latin-1 文本往返）。"""
+        body = b"%PDF-1.7\n" + bytes(range(256)) + b"\n%%EOF\n"
+        r = self._call(_FakeResp(body, headers={"Content-Type": "application/pdf"}))
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["data"], body)
+        self.assertEqual(r["status"], 200)
+        self.assertEqual(r["content_type"], "application/pdf")
+        self.assertEqual(r["body_bytes"], len(body))
+        self.assertFalse(r["over_limit"])
+
+    def test_http_error_returns_status_and_body_size_without_raising(self):
+        """403 的 985 字节 HTML 页：**不抛**，状态与体积都要报出来。"""
+        import urllib.error
+        err = urllib.error.HTTPError(
+            "https://example.com/a.pdf", 403, "Forbidden",
+            {"Content-Type": "text/html; charset=utf-8"}, None)
+        # 恰好 985 字节的错误页（"985 字节取件"就是这种形状）
+        _body = b"<html>" + b"x" * (985 - len(b"<html>") - len(b"</html>")) + b"</html>"
+        self.assertEqual(len(_body), 985)
+        err.read = lambda n=-1: _body
+        r = self._call(err)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["status"], 403)
+        self.assertEqual(r["error_kind"], "http_error")
+        self.assertEqual(r["body_bytes"], 985)
+
+    def test_redirect_is_not_followed(self):
+        r = self._call(_FakeResp(b"", status=302, headers={"Location": "https://evil/x"}))
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error_kind"], "http_redirect")
+
+    def test_byte_limit_truncates_the_read_and_flags_it(self):
+        """上限必须**按上限读**（不多读进内存），并如实标记 over_limit。"""
+        body = b"%PDF-1.7\n" + b"a" * 5000
+        r = self._call(_FakeResp(body), max_bytes=1000)
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error_kind"], "too_large")
+        self.assertTrue(r["over_limit"])
+        self.assertEqual(len(r["data"]), 1000)
+
+    def test_chunked_transfer_encoding_is_recorded(self):
+        """chunked 由 http.client 透明解块；是否 chunked 记下来备查。"""
+        r = self._call(_FakeResp(b"%PDF-1.7\nx\n%%EOF\n",
+                                 headers={"Content-Type": "application/pdf",
+                                          "Transfer-Encoding": "chunked"}))
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["transfer_encoding"], "chunked")
+
+    def test_ssrf_guard_blocks_before_any_request(self):
+        """校验紧邻请求点：被 SSRF 守卫拦下时**不得**发出任何请求。"""
+        called = {"n": 0}
+
+        def _fake_urlopen(*_a, **_k):
+            called["n"] += 1
+            return _FakeResp(b"")
+
+        with mock.patch.object(self.transport, "_throttle_and_rewrite", lambda u: u), \
+                mock.patch.object(self.transport, "_require_egress_ok", lambda: None), \
+                mock.patch.object(self.transport, "_validate_public_url", return_value=False), \
+                mock.patch.object(self.transport.urllib.request, "urlopen", _fake_urlopen):
+            r = self.transport.get_bytes_via_urllib("http://169.254.169.254/latest/meta-data/")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error_kind"], "ssrf_blocked")
+        self.assertEqual(called["n"], 0, "被守卫拦下后不得发请求")
+
+    def test_proxy_error_is_reported_and_never_falls_back_direct(self):
+        """代理失败单列 `proxy_error`；本函数**只有一条通道**，不存在直连降级。"""
+        import urllib.error
+        exc = urllib.error.URLError(ConnectionRefusedError(10061, "refused"))
+        with mock.patch.object(self.transport, "_throttle_and_rewrite", lambda u: u), \
+                mock.patch.object(self.transport, "_require_egress_ok", lambda: None), \
+                mock.patch.object(self.transport, "_validate_public_url", return_value=True), \
+                mock.patch.dict("os.environ",
+                                {"HTTPS_PROXY": "http://127.0.0.1:7897"}, clear=False), \
+                mock.patch.object(self.transport.urllib.request, "urlopen", side_effect=exc), \
+                mock.patch.object(self.transport, "get_via_socket") as sock:
+            r = self.transport.get_bytes_via_urllib("https://example.com/a.pdf")
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["error_kind"], "proxy_error")
+        self.assertFalse(sock.called, "字节通道不得降级到第二条通道")
+
+    def test_egress_blocked_before_request(self):
+        """egress 未放行（离线/受限）时同样不发请求，类别由 net_policy 给出。"""
+        called = {"n": 0}
+        with mock.patch.object(self.transport, "_throttle_and_rewrite", lambda u: u), \
+                mock.patch.object(self.transport, "_require_egress_ok",
+                                  side_effect=RuntimeError("离线测试不得联网")), \
+                mock.patch.object(self.transport.urllib.request, "urlopen",
+                                  side_effect=lambda *a, **k: called.__setitem__("n", 1)):
+            r = self.transport.get_bytes_via_urllib("https://example.com/a.pdf")
+        self.assertFalse(r["ok"])
+        self.assertTrue(r["error_kind"])
+        self.assertEqual(called["n"], 0)
+
+
 class TestTransportEgress(unittest.TestCase):
     """传输层出口纪律：代理失败不得降级直连（专项 §6 最小验收）。"""
 
@@ -409,6 +551,28 @@ class TestTransportEgress(unittest.TestCase):
             with self.assertRaises(Exception):
                 self.transport.dual_channel_get("https://example.com/a")
         self.assertEqual(calls["n"], 0, "拒绝必须发生在发请求之前")
+
+    def test_byte_channel_also_refuses_before_any_request_when_proxy_required(self):
+        """同一道出口纪律也管**字节通道**：`proxy_required` 下一次请求都不许发。
+
+        该通道把失败**类别化返回**（不抛），所以"没发请求"这件事必须单独断言——
+        否则一个把异常吞掉的实现会看起来"很稳"，实际已经绕过了出口约束。
+        """
+        calls = {"n": 0}
+
+        def _urlopen(*_a, **_k):
+            calls["n"] += 1
+            raise RuntimeError("should not be reached")
+
+        with mock.patch.dict("os.environ",
+                             {"WM_CONTENT_FETCH_MODE": "proxy_required"}), \
+                mock.patch("urllib.request.urlopen", side_effect=_urlopen):
+            r = self.transport.get_bytes_via_urllib(
+                "https://proxy-required-probe.invalid/a.pdf",
+                headers={"User-Agent": "wm-test"})
+        self.assertFalse(r["ok"])
+        self.assertEqual(calls["n"], 0, "拒绝必须发生在发请求之前")
+        self.assertTrue(r["error_kind"], r)
 
     def test_proxy_error_classifies_for_adapters(self):
         import urllib.error

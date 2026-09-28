@@ -148,6 +148,91 @@ def get_via_urllib(
         return resp.read().decode(encoding, errors="replace")
 
 
+def get_bytes_via_urllib(
+    url: str,
+    *,
+    timeout: int = 25,
+    max_bytes: int | None = None,
+    headers: dict | None = None,
+) -> dict:
+    """通道 1 的**二进制 + 元信息**变体（P1-e）。
+
+    与 `get_via_urllib` 走**同一条**通道、同一套前置校验（`_throttle_and_rewrite` +
+    `_require_egress_ok` + `_validate_public_url`），差别只有两点：
+    1. **不解码成文本**——PDF 是二进制，按 latin-1↔utf-8 往返会丢信息；
+    2. **把响应元信息带出来**（状态码 / Content-Type / Transfer-Encoding / 实际字节数），
+       因为"没取到内容"必须能分清是 **HTTP 状态**（403/404/302）还是**类型**
+       （text/html）还是**字节上限**，而不是一律归成"解析失败"。
+
+    返回（**不抛**，由调用方按 kind 处置）::
+
+        {"ok", "status", "content_type", "transfer_encoding", "body_bytes",
+         "data", "over_limit", "error_kind", "error"}
+
+    - `max_bytes` 给定时**按上限截断读取**（多读 1 字节以判超限），不把超大响应整个读进内存；
+    - 非 2xx **不抛异常**：错误页正文照样取回（"985 字节取回"往往就是一张 403/302 的
+      HTML 页），状态码单独报出。3xx 不跟随——与 raw socket 通道语义一致（防重定向到别处）；
+    - chunked 由 `http.client` 透明解块；是否 chunked 记在 `transfer_encoding` 里备查。
+    """
+    out: dict = {"ok": False, "status": None, "content_type": "",
+                 "transfer_encoding": "", "body_bytes": 0, "data": b"",
+                 "over_limit": False, "error_kind": "", "error": ""}
+    _limited = int(max_bytes) if max_bytes else 0
+    try:
+        url = _throttle_and_rewrite(url)
+        _require_egress_ok()
+        if not _validate_public_url(url):
+            out.update({"error_kind": "ssrf_blocked",
+                        "error": f"blocked URL by SSRF guard: {url[:120]}"})
+            return out
+        req = urllib.request.Request(url, headers=headers or BROWSER_HEADERS)
+        try:
+            resp = urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as exc:
+            # 非 2xx：**不抛**。状态与响应体都要留下（错误页可能正是问题本身）
+            resp = exc
+        with resp:
+            status = int(getattr(resp, "status", None) or getattr(resp, "code", 0) or 0)
+            hdrs = getattr(resp, "headers", None)
+            ctype = str(hdrs.get("Content-Type") or "") if hdrs else ""
+            tenc = str(hdrs.get("Transfer-Encoding") or "") if hdrs else ""
+            read_n = (_limited + 1) if _limited else -1
+            try:
+                raw = resp.read(read_n) if read_n >= 0 else resp.read()
+            except Exception as exc:             # noqa: BLE001 - 读一半断开
+                out.update({"status": status, "content_type": ctype,
+                            "transfer_encoding": tenc, "error_kind": "read_error",
+                            "error": f"{type(exc).__name__}: {str(exc)[:120]}"})
+                return out
+        raw = bytes(raw or b"")
+        over = bool(_limited and len(raw) > _limited)
+        if over:
+            raw = raw[:_limited]
+        out.update({"status": status, "content_type": ctype, "transfer_encoding": tenc,
+                    "body_bytes": len(raw), "data": raw, "over_limit": over})
+        if status and status >= 400:
+            out.update({"error_kind": "http_error", "error": f"HTTP {status}"})
+            return out
+        if status and 300 <= status < 400:
+            out.update({"error_kind": "http_redirect",
+                        "error": f"HTTP {status}（不跟随重定向）"})
+            return out
+        if over:
+            out.update({"error_kind": "too_large",
+                        "error": f"响应超过字节上限 {_limited}"})
+            return out
+        out["ok"] = True
+        return out
+    except Exception as exc:                     # noqa: BLE001 - 连接层失败按类别报出
+        try:
+            from net_policy import classify_network_error
+            _kind = classify_network_error(exc)
+        except Exception:
+            _kind = type(exc).__name__
+        out.update({"error_kind": _kind, "error": f"{type(exc).__name__}: {str(exc)[:160]}"})
+        return out
+
+
 def get_via_socket(
     url: str,
     timeout: int = 25,
