@@ -8,7 +8,7 @@
 `docs/evidence/c4_samples_run_20260927.md` 那份"当前余额耗尽"已随用户充值**解除**（保留为历史，
 不再周期探测余额）。
 
-## P1 本轮已交（7 项，各自带证据文档；全部离线复算，未跑付费整链）
+## P1 本轮已交（9 项，各自带证据文档；全部离线复算，未跑付费整链）
 
 | 项 | 提交 | 一句话 | 证据 |
 |---|---|---|---|
@@ -20,6 +20,8 @@
 | **P1-c①** 契约重建吞查询 | `3a84b3c` | 反例逐字复现（4 条重试查询 → 0 条）后修复：契约内保留、契约外拒绝；重建幂等 | `p1c1_contract_rebuild_queries_20260928.md` |
 | **P1-c③** 块间查时钟 ≠ 中断阻塞 | `69ddc04` | 单次 read 用光预算并返回 EOF 时不再当"读完"；剩余时间落到 socket；EOF 越界即超时 | `p1c3_read_deadline_20260928.md` |
 | **P1-c②** 状态跨层丢失 | `764ce20` | `[]` 不再是一种状态：四条出口各记真值（`attempts` 是**真实发出的调用数**）；`search_status` 作 `result` 的**兄弟字段**上行，编排器算 `search_verdict{completed, zero_hits, attempted}`；`[无新查询]` 让 Worker 在**发请求之前**停（不回退契约查询）；`_dispatch` 的重建结果**原地写回**计划对象 | `p1c2_cross_layer_status_20260928.md` |
+| **P1-d** 按新材料生成候选正文入口 | `fd46427` | `POST /api/task/<id>/candidate` → `handle_regenerate_candidate`：确定性装配（不调用模型）、**不采纳**、按（材料+契约+采纳版）幂等、只重做产出正文的步骤、旧工件与人工文字保留、`allow_paid` 明确 409 | `p1d_candidate_entry_20260928.md` |
+| **页面层视觉核验**（遗留项） | `c407483` | 登录后开冻结样本逐面**截图判读**，看到并修掉 3 处**单测抓不到**的渲染层缺陷（字面星号 ×3 处、「结论速览」把吨位当结论） | `page_visual_check_20260928.md` |
 
 > **P1-c③ 是补交**：它的实现与 4 条用例被分开在两处——用例随 `3a84b3c` 入库而实现留在工作区，
 > 那一版 HEAD 上的 `test_search_quality_unified` **会红**。发现后立即补交（`69ddc04`），
@@ -40,48 +42,34 @@
 `test_review_edit_api` / `test_task_projection` / `test_writer_consolidation` 全绿
 （单批最多 **1164 项**一次跑完 OK，1 skipped）。
 
-## P1-d 剩下的一半：按新材料生成**候选正文**入口 —— 已定位到接线点（**未实现**）
+## P1-d 已交：按新材料生成**候选正文**入口（证据 `docs/evidence/p1d_candidate_entry_20260928.md`）
 
-这一项**没有开始写代码**，但把"接在哪、缺什么"查清了，下一次不必重新摸索。
+那条"另行授权"的接缝**已接上**：补材料链此前刻意停在正文之前
+（`handle_add_material()` 最后一句原话："正文需按新材料重生成时另行授权"），
+现在 `POST /api/task/<id>/candidate` → `OrchestratorV2.handle_regenerate_candidate()`
+把那句接上了。六条要求逐条落实 + 各带用例：
 
-**现状**：补材料链已经通到证据，且**刻意停在正文之前**——
-`orchestrator_v2.handle_add_material()`（`orchestrator_v2.py:8165`）在最后一行的原话是：
+1. 展示**材料/契约版本、影响步骤、预算与授权**：响应带 material/contract 指纹、
+   `affected_steps`/`stopped_steps`/`budget`/`generation{mode,paid,model_called}`/`acceptance`；
+2. **同一次动作只生成一个候选**：幂等键 =（材料身份 + 契约指纹 + **当前采纳版本**），
+   命中即复用并标 `created:false`（用例断言版本库**不多出**第二个）；
+3. **只重做依赖新材料的步骤**：只有产出正文的能力进 `affected_steps`，检索/清洗进 `stopped_steps`；
+4. **旧工件与人工文字保留**：只 `VersionStore.record()`，**不** adopt、不写交付投影、
+   不覆盖 `reports/report.md`；候选由**当前采纳版的分析节**重新装配（人工那段仍在候选里）；
+5. **新候选需显式采纳、旧批准不继承**：`adopted:false` / `requires_explicit_adoption` /
+   `old_approval_inherited:false` / `parent_version_id`=当前采纳版；验收对**候选正文**跑；
+6. **不新增付费生成**：默认确定性装配（`model_called:false`）；带 `allow_paid` →
+   **409 `paid_not_authorized`**，且**不投递、不落候选**（不悄悄降级）。
 
-```python
-_say(f"补材料：证据已重建（可定位 {loc} 条）；正文需按新材料重生成时另行授权")
-```
+"已并入"的判据（实测修正）：`read_index()` 的条目**不带 `refresh`**，
+所以逐条回读该材料 meta：准入 **且** 已并入快照 **且** `refresh.ok`。
 
-**这就是那条"另行授权"的接缝**。配套事实（都已核实）：
+**页面按钮已加并真机复看**（`frontend/src/components/console/MaterialPanel.tsx`）：
+「按新材料生成候选正文」区块 + 按钮 + 前置条件提示；`frontend/dist` 已重建，
+`web_ui.DIST_DIR` 指向它，刷新即生效。
 
-- 材料入口 `POST /api/task/<id>/material`（`web_ui._post_task_material`，web_ui.py:5711）
-  只做鉴权/归属/体检/存原件，随后投递给编排器；`GET /api/task/<id>/materials` 给清单。
-- "只重做确定性部分"已实现（`material_intake.refresh`）：证据/结构/底稿会重建，
-  **正文不会**——因为正文要模型重生成，属付费动作。
-- "新候选需显式采纳、旧批准不继承"**已有地基**：`report_version.VersionStore.record()`
-  建版本、`adopt()` 才置为采用版；`report_version` 已有 `identity_id`/`adopted()`/
-  `selected_needs_reverify()`，采纳是**显式动作**，旧版 PASS 不会自动迁移到新版本
-  （`test_review_edit_api.test_old_review_pass_does_not_migrate_to_the_new_version` 已锁）。
-- 幂等/恢复的前置条件（§5 说的"第一批幂等/恢复修完后接线"）**已满足**：P0-a~P0-f 全交。
-
-**要实现的东西（6 条，逐条可测）**：
-
-1. `OrchestratorV2.handle_regenerate_candidate(data)`：要求"确有新材料已并入"
-   （读 `material_intake` 的 refresh 记录），否则 `{ok: false, status: "no_new_material"}`；
-2. 返回**影响步骤**（只列依赖新材料的那些：`report_generator`／最终正文步骤）、
-   材料 id、**契约版本与指纹**、`budget_snapshot` 与"本次是否获准付费生成"；
-3. **同一次动作只生成一个候选**：以 (材料指纹, 契约指纹, 证据身份) 为幂等键，
-   重复调用返回同一个候选，不新建第二个；
-4. **只重做依赖步骤**，旧工件与**人工文字**保留（人工修订版在 VersionStore 里是独立版本，
-   不得被候选覆盖）；
-5. 候选写进 `VersionStore` 但**不 adopt**，返回
-   `{requires_explicit_adoption: true, adopted: false, old_approval_inherited: false}`；
-6. HTTP 入口（`POST /api/task/<id>/candidate`）+ 页面按钮。
-   **按指令本轮不新增付费生成**：默认走"冻结输出/provider 替身"的确定性装配，
-   真正调用模型需显式授权参数且本轮不接线。
-
-**本批停在这里的理由**：它要动正文装配 + 版本 + HTTP 三层，且 6 条各需自己的用例
-（含"UI→执行处理器"贯穿）；半做会留下一个"看起来有入口、实际会烧额度或覆盖人工文字"的
-功能，比不做更糟。**没有写任何 stub 代码**，以免下次误以为已接线。
+**仍未接线**：模型重生成（`allow_paid` 明确 409）；未新增采纳端点（沿用既有
+`VersionStore.adopt()`，`/review/edit` 那条路径）。
 
 ## P1 尚未做完（逐条给出处与"为什么没半做"）
 
@@ -97,19 +85,23 @@ _say(f"补材料：证据已重建（可定位 {loc} 条）；正文需按新材
 3. **P1-c① 的待裁决口径**：`conflicting_periods` 允许 `as_of` 年份（既有语义），
    故"洋河股份 … 2025年年度报告 全文"按契约自己的定义算"契约内"。本轮与 `violations()`
    同一把尺，**没有**另立更严口径。若认为重试批次应只允许 `periods` 内年份，请裁决。
-4. **P1-d 的另一半"补材料后按新材料生成候选正文入口"未做**（§5 第二条）：
-   只修了 `/actionable` 的根因（NameError）。**接线点与 6 条要求见上文专节**——
-   接缝就是 `handle_add_material` 最后那句"正文需按新材料重生成时另行授权"。
-   **没有写任何 stub 代码**。
+4. ~~**P1-d 的另一半"补材料后按新材料生成候选正文入口"**~~ —— **已交（`fd46427`）**，
+   六条要求逐条落实并各带用例；页面按钮已加并**真机复看**。**仍未接线**：模型重生成
+   （`allow_paid` 明确 409）、未新增采纳端点（沿用既有 `VersionStore.adopt()`）。
 5. **`_promotion_subject` 误判（P1-a 残留 19 处的成因）未修**：实测
    `_subject_of("需进一步取得利润表分项明细方可解释")` → `"需进一步取得"`，
    `_MEDIA_TOKENS` 含单字"报"会把"洋河股份合并报表口径下的…"整条丢掉；因此丢掉 56 处命中。
    这是**跨公司同值护栏**的判据本身，改它要单独一批 + 语料级回归；现状偏保守（少数诚实
    命中被否），方向安全。已把证据写进 `acceptance_checker._promotion_subject` 注释。
-6. **页面层视觉核验（截图）未做**：需要浏览器会话（登录 → 进任务 → 展开简报面板）。
-   本轮只做到"读接口 + 真实产物"，没有做任何"我看了页面"的陈述。
+6. ~~**页面层视觉核验（截图）**~~ —— **已做（`c407483`）**：登录 → 开冻结样本 → 逐面截图判读，
+   **看到并修掉 3 处单测抓不到的渲染层缺陷**（字面星号 ×3 处、「结论速览」把吨位当结论）。
+   仍留着的一类：**步骤指令区**里的 `**` 是原样展示发给 worker 的指令文本（逐字展示是"如实"，
+   改它等于改提示词），**没有**一并改掉，不算渲染缺陷。
 7. **第二家公司原文、`clean_env_verified`、推送 CI、真人 F3 五项 ≥8/10** —— 仍缺，
    与上一批结论一致。
+8. **`working_paper_export` 表头单位**（`fd46427` 顺带修）：旧实现取"第一行有单位的"，
+   行序一变就把全表单位写成"吨"。**已更正定性**（`88c6976`）：这是**夹具复现的潜在缺陷**，
+   冻结样本 `ui-a06a005c9b` 的 `scope.unit` 实测为 `亿元`（财务行在前），当时没踩到。
 
 ## P0 收口：三处遗留全部闭合（证据见 P0-d/P0-e 两份文档的"补完"节）
 
