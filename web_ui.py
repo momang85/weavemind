@@ -3010,6 +3010,14 @@ def _export_payload(tid: str, ws, state: dict | None) -> dict:
     _cur_body = str((state or {}).get("version_id") or "")
     if _pkg_body and _cur_body and _pkg_body != _cur_body:
         _package_stale = True
+    # P0-f 待补（已定位、未落地）：包内**有**清单却**身份为空**这一路没人管——
+    # 本样本 ui-a06a005c9b 的旧包即如此（`report_version_id` 与 `research_body_sha256`
+    # 都空，包内正文 6179 字节 hash `178a4a85…` ≠ 磁盘当前 20892 字节 `35f37f00…`，
+    # 且 `pdf` 位指向原始年报）。它现在只能靠"时间戳早于采纳版本"侥幸被判陈旧。
+    # 直接的修法（`_cur_body and not _pkg_body → stale`）会打破
+    # `test_package_stale_when_manifest_newer_than_zip` 与
+    # `test_package_stale_when_zip_predates_adopted_version` 两条"不误标"断言，
+    # 说明它们的夹具把身份放在了我没读清的位置——须先读懂夹具再落地，不硬推。
     return {
         "manifest": _exp or None,
         "manifest_version_id": str((_exp or {}).get("report_version_id") or ""),
