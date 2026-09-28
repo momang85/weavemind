@@ -45,6 +45,11 @@ class TestAcceptTaskRequest(unittest.TestCase):
         self.redis = mock.MagicMock()
         self.redis.setex = mock.MagicMock()
         self.orch = type("O", (), {"_redis": self.redis})()
+        # P0-b：本类测"登记/收执"这条链，不测派发闸门
+        # （闸门由 test_startup_readiness.TestOrchestratorOwnership 覆盖）→ 声明持有归属。
+        _own = mock.patch("orchestrator_v2.ownership_held", return_value=True)
+        _own.start()
+        self.addCleanup(_own.stop)
 
     def test_accepts_and_writes_ack(self):
         from orchestrator_v2 import accept_task_request

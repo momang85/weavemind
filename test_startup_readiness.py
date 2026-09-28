@@ -1019,69 +1019,140 @@ class TestOrchestratorOwnership(unittest.TestCase):
     """
 
     class _R:
-        """最小 Redis 替身：只需 set(nx)/get/ttl/setex。"""
+        """最小 Redis 替身：建模**带 TTL 的租约**（eval 三合一 / get）。
 
-        def __init__(self, owner=None, hb_ttl=-2):
+        `lease_alive` 表示"当前持有者的租约是否仍在有效期内"——续租由实现负责，
+        替身只回答"过期没有"，这样才测得出"心跳只写一次"这类洞。
+        """
+
+        def __init__(self, owner=None, lease_alive=False, legacy_no_lease=False):
             self.owner = owner
-            self.hb_ttl = hb_ttl
-            self.sets = []
+            self.lease_alive = lease_alive
+            self.legacy_no_lease = legacy_no_lease
+            self.evals = []
 
-        def set(self, k, v, nx=False):
-            self.sets.append((k, v, nx))
-            if nx and self.owner is not None:
-                return None
-            self.owner = v
-            return True
+        def eval(self, script, numkeys, key, token, ttl_ms):
+            self.evals.append((key, token, ttl_ms))
+            if "PTTL" in script:                     # 遗留无租约键的接管脚本
+                if self.legacy_no_lease:
+                    self.owner = token
+                    self.lease_alive = True
+                    self.legacy_no_lease = False
+                    return 1
+                return 0
+            if self.owner is None or not self.lease_alive:
+                self.owner = token               # 空租约或已过期 → 认领/接管
+                self.lease_alive = True
+                return 1
+            return 1 if self.owner == token else 0   # 自己的 → 续期；别人的活租约 → 拒绝
 
         def get(self, k):
-            return self.owner
-
-        def ttl(self, k):
-            return self.hb_ttl
-
-        def setex(self, k, ttl, v):
-            self.hb_ttl = ttl
-            return True
+            return self.owner if self.lease_alive else None
 
     def test_first_claim_wins(self):
-        from orchestrator_v2 import claim_orchestrator_ownership
-        ok, why = claim_orchestrator_ownership(self._R(), instance="inst-a")
-        self.assertTrue(ok, why)
-
-    def test_same_instance_can_restart(self):
-        from orchestrator_v2 import claim_orchestrator_ownership
-        r = self._R(owner="inst-a", hb_ttl=20)
+        from orchestrator_v2 import claim_orchestrator_ownership, ownership_held
+        r = self._R()
         ok, why = claim_orchestrator_ownership(r, instance="inst-a")
         self.assertTrue(ok, why)
+        self.assertTrue(ownership_held(), "认领成功后闸门必须打开")
+        self.assertTrue(str(r.owner).startswith("inst-a:"),
+                        "租约里必须写**每进程唯一令牌**（实例名 + pid + 随机串）")
+
+    def test_same_instance_name_in_another_process_is_refused(self):
+        """同名实例**不再**是放行理由（指令 §2.3）。
+
+        两个进程完全可能配成同一个实例名（同机两份拷贝/同配置跑两次）。旧实现
+        `cur == inst` 即放行，于是 B 把 A 的**活租约**当成"我自己的旧租约"，
+        两个编排器同时消费 orchestrator:main；令牌不同就必须走"是否过期"这一条。
+        """
+        from orchestrator_v2 import claim_orchestrator_ownership
+        r = self._R(owner="inst-a:111:aaaaaa", lease_alive=True)
+        ok, why = claim_orchestrator_ownership(r, instance="inst-a")
+        self.assertFalse(ok, "同名但不同进程不得顶掉活租约")
+        self.assertIn("不允许两个编排器", why)
 
     def test_second_live_instance_is_refused(self):
-        """别的实例还在跑（心跳新鲜）→ 明确拒绝，不默默重复消费。"""
-        from orchestrator_v2 import claim_orchestrator_ownership
-        r = self._R(owner="inst-other", hb_ttl=25)
+        """别的实例租约仍在有效期内 → 明确拒绝，不默默重复消费。"""
+        from orchestrator_v2 import claim_orchestrator_ownership, ownership_held
+        r = self._R(owner="inst-other:222:bbbbbb", lease_alive=True)
         ok, why = claim_orchestrator_ownership(r, instance="inst-b")
         self.assertFalse(ok, why)
         self.assertIn("inst-other", why)
         self.assertIn("不允许两个编排器", why)
+        self.assertFalse(ownership_held(), "被拒绝时闸门必须是关的")
 
     def test_dead_owner_is_taken_over(self):
-        """上一位持有者心跳已过期（崩溃/重启）→ 允许接管。"""
-        from orchestrator_v2 import claim_orchestrator_ownership
-        r = self._R(owner="inst-dead", hb_ttl=-2)
+        """上一位持有者租约已过期（崩溃/重启）→ 允许接管。"""
+        from orchestrator_v2 import claim_orchestrator_ownership, ownership_held
+        r = self._R(owner="inst-dead:333:cccccc", lease_alive=False)
         ok, why = claim_orchestrator_ownership(r, instance="inst-c")
         self.assertTrue(ok, why)
-        self.assertEqual(r.owner, "inst-c", "接管后归属要落到本实例")
+        self.assertTrue(str(r.owner).startswith("inst-c:"), "接管后租约要落到本进程令牌")
+        self.assertTrue(ownership_held())
 
-    def test_redis_failure_does_not_block_startup(self):
-        """归属认领失败只记日志（可见性问题，不阻断启动）。"""
-        from orchestrator_v2 import claim_orchestrator_ownership
+    def test_redis_failure_does_not_block_startup_but_stops_dispatch(self):
+        """认领异常：**不阻断启动**（可见性），但**停止新派发**（安全性）。"""
+        from orchestrator_v2 import claim_orchestrator_ownership, ownership_held
 
         class _Bad:
-            def set(self, *a, **k):
+            def eval(self, *a, **k):
+                raise RuntimeError("redis down")
+
+            def get(self, *a, **k):
                 raise RuntimeError("redis down")
 
         ok, why = claim_orchestrator_ownership(_Bad(), instance="inst-d")
         self.assertTrue(ok, "认领失败不得阻断启动")
         self.assertIn("未确认", why)
+        self.assertFalse(ownership_held(),
+                         "归属未知时闸门必须关闭：证明不了唯一执行权就不派发")
+
+    def test_legacy_owner_key_without_ttl_is_migrated(self):
+        """旧实现写的归属键**没有 TTL**：不迁移的话新实现会**永久拒绝启动**。
+
+        旧代码是 `r.set(OWNER_KEY, inst)`（无过期），那个键永远在，也没有任何存活信息。
+        新实现要求"活租约"才算被占，所以必须有一条只覆盖"无 TTL 键"的原子迁移路径。
+        """
+        from orchestrator_v2 import claim_orchestrator_ownership, ownership_held
+        r = self._R(owner="inst-old:1:ffffff", lease_alive=True, legacy_no_lease=True)
+        ok, why = claim_orchestrator_ownership(r, instance="inst-new")
+        self.assertTrue(ok, why)
+        self.assertIn("接管遗留键", why)
+        self.assertTrue(str(r.owner).startswith("inst-new:"), "迁移后租约归本进程")
+        self.assertTrue(ownership_held())
+
+    def test_renew_requires_still_owning_the_lease(self):
+        """续租必须带令牌比对：被接管之后旧持有者不能再给自己续命。"""
+        from orchestrator_v2 import claim_orchestrator_ownership, renew_orchestrator_ownership
+        r = self._R()
+        claim_orchestrator_ownership(r, instance="inst-e")
+        self.assertTrue(renew_orchestrator_ownership(r), "自己持有时应能续期")
+        r.owner = "inst-f:444:dddddd"           # 被他人接管
+        self.assertFalse(renew_orchestrator_ownership(r), "已被接管不得续期成功")
+
+    def test_release_only_deletes_own_lease(self):
+        from orchestrator_v2 import claim_orchestrator_ownership, release_orchestrator_ownership
+
+        class _R2(self._R):
+            def eval(self, script, numkeys, key, token, *rest):
+                return 1 if self.owner == token else 0
+
+        r = _R2(owner="someone-else:555:eeeeee", lease_alive=True)
+        claim_orchestrator_ownership(r, instance="inst-g")     # 活租约 → 认领失败
+        self.assertFalse(release_orchestrator_ownership(r), "不得误删他人的租约")
+        self.assertEqual(r.owner, "someone-else:555:eeeeee")
+
+    def test_dispatch_gate_blocks_accept_and_resume_when_not_held(self):
+        """未持有归属 → accept 明确拒绝、resume 不捡任何任务（都不执行）。"""
+        from orchestrator_v2 import accept_task_request, resume_received_tasks
+        redis = mock.MagicMock()
+        orch = type("O", (), {"_redis": redis})()
+        with mock.patch("orchestrator_v2.ownership_held", return_value=False):
+            ok, reason = accept_task_request(orch, {"task_id": "t-1", "goal": "g"})
+            self.assertFalse(ok, "未持有归属不得接收任务")
+            self.assertIn("未持有编排器归属", reason)
+            self.assertEqual(resume_received_tasks(orch), 0,
+                             "未持有归属不得恢复执行任何收执")
 
 
 if __name__ == "__main__":

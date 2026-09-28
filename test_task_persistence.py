@@ -189,6 +189,11 @@ class _BadDbMixin:
         super().setUp()
         self.bad_db = tempfile.mkdtemp(prefix="wm_bad_db_")
         self.addCleanup(shutil.rmtree, self.bad_db, ignore_errors=True)
+        # P0-b：本类测的是"库不可写要如实拒绝"，不测派发闸门
+        # （闸门由 TestOrchestratorOwnership 专门覆盖）→ 显式声明持有归属。
+        _own = mock.patch("orchestrator_v2.ownership_held", return_value=True)
+        _own.start()
+        self.addCleanup(_own.stop)
 
 
 class TestRegistrationFailureIsHonest(_BadDbMixin, unittest.TestCase):
@@ -343,6 +348,10 @@ class TestSubmitIdempotencyAndTimeline(unittest.TestCase):
         self.redis = mock.MagicMock()
         self.redis.get.return_value = None
         self.orch = type("O", (), {"_redis": self.redis})()
+        # P0-b：本类测幂等/时间线，不测派发闸门 → 显式声明持有归属。
+        _own = mock.patch("orchestrator_v2.ownership_held", return_value=True)
+        _own.start()
+        self.addCleanup(_own.stop)
 
     def _accept(self, task_id: str, key: str = "", events=None):
         from orchestrator_v2 import accept_task_request
@@ -456,6 +465,10 @@ class TestReceiptRecovery(unittest.TestCase):
         self.redis = mock.MagicMock()
         self.redis.get.return_value = None
         self.orch = type("O", (), {"_redis": self.redis})()
+        # P0-b：本类测收执/恢复，不测派发闸门 → 显式声明持有归属。
+        _own = mock.patch("orchestrator_v2.ownership_held", return_value=True)
+        _own.start()
+        self.addCleanup(_own.stop)
 
     def test_mark_received_writes_received_status_and_timeline(self):
         with mock.patch.object(task_state, "DB_PATH", self.db):

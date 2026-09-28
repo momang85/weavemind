@@ -8291,51 +8291,207 @@ def _instance_identity() -> tuple[str, str]:
     return inst, ver
 
 
-# 编排器归属：`orchestrator:owner` 存实例标识，`orchestrator:owner:hb` 是心跳。
+# 编排器归属：`orchestrator:owner` 存**每进程唯一的持有令牌**，TTL 即租约。
+# `:hb` 键只为兼容旧版本保留（旧实现把心跳写在那里），新实现不再依赖它。
 OWNER_KEY = "orchestrator:owner"
 OWNER_HB_KEY = "orchestrator:owner:hb"
 OWNER_HB_TTL = 30
 
+_OWNER_LOCK = threading.Lock()
+_OWNER_STATE: dict = {"token": "", "instance": "", "held": False,
+                      "reason": "未认领", "renewed_at": 0.0}
 
-def claim_orchestrator_ownership(r, *, instance: str = "") -> tuple[bool, str]:
-    """认领"本 Redis 上唯一的编排器"。返回 `(是否可以继续启动, 说明)`。
+# 认领/续期/拒绝三合一。为什么必须原子：GET 判空再 SET 之间存在窗口，
+# 两个进程可同时判"没人持有"并各自认领成功 → 两个编排器消费同一条通道。
+_OWNER_CLAIM_LUA = """
+local cur = redis.call('GET', KEYS[1])
+if not cur then
+  redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+  return 1
+end
+if cur == ARGV[1] then
+  redis.call('PEXPIRE', KEYS[1], ARGV[2])
+  return 1
+end
+return 0
+"""
 
-    规则（显式，不靠运气）：
-    - 没人在用 → `SETNX` 认领成功；
-    - 已在用的是**自己**（重启）→ 续期即可；
-    - 已在用的是**别的实例**且心跳新鲜（<30 秒）→ **拒绝启动**：两个编排器订阅同一个
-      `orchestrator:main` 会把同一条请求执行两次；
-    - 已在用的是别的实例但心跳已过期（对方崩溃）→ 允许接管并记日志。
+# 释放：只删自己的租约（别人的不得误删）
+_OWNER_RELEASE_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
 
-    认领失败（Redis 不可写等）时**不阻断启动**：这是可见性问题，不是安全问题；
-    但会如实记日志，且时间线里仍会写下本实例标识。
+# 接管**遗留的无租约归属键**：旧实现 `SET owner inst` 不带 TTL，那个键永远不会过期，
+# 也没有任何存活信息。若不迁移，新实现会把它当成"别人的活租约"→ 编排器**永久拒绝启动**。
+# 仅当它确实没有过期时间（PTTL == -1）时才原子覆盖；有租约的一律不动。
+_OWNER_LEGACY_TAKEOVER_LUA = """
+if redis.call('PTTL', KEYS[1]) == -1 then
+  redis.call('SET', KEYS[1], ARGV[1], 'PX', ARGV[2])
+  return 1
+end
+return 0
+"""
+
+
+def _owner_token(instance: str) -> str:
+    """**每进程唯一**的持有令牌：实例名 + pid + 随机串。
+
+    为什么不能只看实例名（旧实现 `cur == inst` 即放行）：两个进程完全可能配成同一个
+    实例名（同一台机两份拷贝、同一份配置跑两次、容器里挂同一个数据目录），
+    于是 B 会把 A 的**活租约**当成"我自己的旧租约"而认领成功 → 两个编排器同时消费
+    `orchestrator:main`，同一条任务被执行两次。令牌含 pid 与随机串，进程间必然不同。
+    """
+    return f"{instance}:{os.getpid()}:{os.urandom(6).hex()}"
+
+
+def claim_orchestrator_ownership(r, *, instance: str = "",
+                                 token: str = "") -> tuple[bool, str]:
+    """认领「本 Redis 上唯一的编排器」租约。返回 `(是否可以继续启动, 说明)`。
+
+    规则（原子，不靠运气）：
+    - 无人持有 → 认领成功，写入本进程令牌并带 TTL（**租约**，不是只写一次的心跳）；
+    - 持有者**就是本令牌** → 续期（同一进程重复调用幂等）；
+    - 持有者是**别人**且租约未过期 → **拒绝启动**（两个编排器会重复执行同一条请求）；
+    - 持有者是别人但**租约已过期**（对方崩溃/被杀，不再续期）→ 允许接管。
+
+    「同名实例」不再是放行理由：令牌不同就必须走"是否过期"这一条。
+
+    认领遇到 **Redis 异常**时：**不阻断启动**（那是可见性问题），但把状态记为
+    **未持有**——`ownership_held()` 为假会让 `accept_task_request` /
+    `resume_received_tasks` **停止新派发**（那是安全问题：证明不了唯一执行权就不执行）。
     """
     inst = instance or _instance_identity()[0] or "unknown"
+    tok = token or _owner_token(inst)
     try:
-        got = bool(r.set(OWNER_KEY, inst, nx=True))
-        if not got:
+        got = int(r.eval(_OWNER_CLAIM_LUA, 1, OWNER_KEY, tok,
+                         int(OWNER_HB_TTL * 1000)) or 0)
+    except Exception as exc:                          # noqa: BLE001
+        with _OWNER_LOCK:
+            _OWNER_STATE.update({"token": tok, "instance": inst, "held": False,
+                                 "reason": f"归属未确认（{str(exc)[:60]}）",
+                                 "renewed_at": 0.0})
+        logger.warning("编排器归属认领失败（不阻断启动，但**停止新派发**）：%s",
+                       str(exc)[:150])
+        return True, f"归属未确认（{str(exc)[:60]}），已停止新派发"
+    if got != 1:
+        # 区分"别人的活租约"与"旧实现遗留的无租约键"（后者无 TTL、无存活信息）。
+        legacy = False
+        try:
+            legacy = bool(int(r.eval(_OWNER_LEGACY_TAKEOVER_LUA, 1, OWNER_KEY, tok,
+                                     int(OWNER_HB_TTL * 1000)) or 0))
+        except Exception:                             # noqa: BLE001
+            legacy = False
+        if legacy:
+            logger.warning("接管遗留的无租约归属键（旧实现不写 TTL，无法表达存活）"
+                           "→ 已写入本进程租约")
+            with _OWNER_LOCK:
+                _OWNER_STATE.update({"token": tok, "instance": inst, "held": True,
+                                     "reason": f"本实例 {inst} 持有编排器归属（接管遗留键）",
+                                     "renewed_at": time.time()})
+            return True, f"本实例 {inst} 持有编排器归属（接管遗留键）"
+        cur = ""
+        try:
             cur = r.get(OWNER_KEY)
             cur = cur.decode() if isinstance(cur, bytes) else str(cur or "")
-            if cur == inst:
-                got = True
-            else:
-                hb = r.get(OWNER_HB_KEY)
-                fresh = False
-                try:
-                    fresh = bool(hb) and int(r.ttl(OWNER_HB_KEY)) > 0
-                except Exception:                     # noqa: BLE001
-                    fresh = bool(hb)
-                if fresh:
-                    return False, (f"已有编排器实例 {cur or '未知'} 在运行"
-                                   f"（心跳 {r.ttl(OWNER_HB_KEY)}s 内）；"
-                                   "同一 Redis 上不允许两个编排器消费同一条任务通道")
-                logger.warning("接管编排器归属：上一实例 %s 心跳已过期", cur or "未知")
-                r.set(OWNER_KEY, inst)
-        r.setex(OWNER_HB_KEY, OWNER_HB_TTL, inst)
-        return True, f"本实例 {inst} 持有编排器归属"
+        except Exception:                             # noqa: BLE001
+            cur = ""
+        holder = (cur.split(":")[0] if cur else "") or "未知"
+        with _OWNER_LOCK:
+            _OWNER_STATE.update({"token": tok, "instance": inst, "held": False,
+                                 "reason": f"已有编排器实例 {holder} 持有活租约",
+                                 "renewed_at": 0.0})
+        return False, (f"已有编排器实例 {holder} 在运行（租约 {OWNER_HB_TTL}s 内）；"
+                       "同一 Redis 上不允许两个编排器消费同一条任务通道")
+    with _OWNER_LOCK:
+        _OWNER_STATE.update({"token": tok, "instance": inst, "held": True,
+                             "reason": f"本实例 {inst} 持有编排器归属",
+                             "renewed_at": time.time()})
+    logger.info("编排器归属：本实例 %s 持有租约（令牌 …%s，TTL %ss）",
+                inst, tok[-6:], OWNER_HB_TTL)
+    return True, f"本实例 {inst} 持有编排器归属"
+
+
+def renew_orchestrator_ownership(r, *, token: str = "") -> bool:
+    """续租：**只有租约仍是自己的**才延长（原子），否则如实置为失租。
+
+    为什么续租必须带令牌比对：旧实现只 `SETEX` 一个心跳键，谁都能续——被接管之后
+    旧持有者还能给自己"续命"，两个进程都以为自己持有。
+    """
+    with _OWNER_LOCK:
+        tok = str(token or _OWNER_STATE.get("token") or "")
+    if not tok:
+        return False
+    try:
+        got = int(r.eval(_OWNER_CLAIM_LUA, 1, OWNER_KEY, tok,
+                         int(OWNER_HB_TTL * 1000)) or 0)
     except Exception as exc:                          # noqa: BLE001
-        logger.warning("编排器归属认领失败（不阻断启动）：%s", str(exc)[:150])
-        return True, f"归属未确认（{str(exc)[:60]}），按单实例继续"
+        with _OWNER_LOCK:
+            _OWNER_STATE.update({"held": False, "renewed_at": 0.0,
+                                 "reason": f"续租失败（{str(exc)[:60]}）→ 停止新派发"})
+        logger.error("编排器续租失败：停止新派发（%s）", str(exc)[:150])
+        return False
+    ok = got == 1
+    with _OWNER_LOCK:
+        _OWNER_STATE.update({
+            "held": bool(ok), "renewed_at": time.time() if ok else 0.0,
+            "reason": ("本实例持有编排器归属" if ok
+                       else "租约已过期或被他人接管 → 停止新派发")})
+    if not ok:
+        logger.error("编排器归属已失：停止新派发（旧持有者不得继续产生有效结果）")
+    return ok
+
+
+def ownership_held() -> bool:
+    """本进程当前是否**确实持有**活租约（派发闸门）。"""
+    with _OWNER_LOCK:
+        return bool(_OWNER_STATE.get("held"))
+
+
+def ownership_state() -> dict:
+    """归属状态快照（只暴露令牌尾 6 位，不把整串令牌写进日志/接口）。"""
+    with _OWNER_LOCK:
+        snap = dict(_OWNER_STATE)
+    snap["token_tail"] = str(snap.pop("token", "") or "")[-6:]
+    return snap
+
+
+def release_orchestrator_ownership(r) -> bool:
+    """优雅退出时释放租约（仅当租约仍是自己的，不误删接管者的）。"""
+    with _OWNER_LOCK:
+        tok = str(_OWNER_STATE.get("token") or "")
+        _OWNER_STATE.update({"held": False, "reason": "已释放"})
+    if not tok:
+        return False
+    try:
+        return bool(int(r.eval(_OWNER_RELEASE_LUA, 1, OWNER_KEY, tok) or 0))
+    except Exception:                                 # noqa: BLE001
+        return False
+
+
+def start_owner_lease_renewal(r, *, interval: float = 0.0) -> threading.Thread:
+    """后台续租线程：每 TTL/3 续一次；失租则停止派发并尝试重新认领。
+
+    旧实现的洞：心跳只在认领时写一次，30 秒后 TTL 到期——A 还活着，B 就能"接管"，
+    两个编排器同时消费同一条通道。
+    """
+    iv = float(interval or max(3.0, OWNER_HB_TTL / 3.0))
+
+    def _loop() -> None:
+        while True:
+            time.sleep(iv)
+            if renew_orchestrator_ownership(r):
+                continue
+            try:
+                claim_orchestrator_ownership(r)
+            except Exception:                         # noqa: BLE001
+                pass
+
+    th = threading.Thread(target=_loop, daemon=True, name="owner-lease-renewal")
+    th.start()
+    return th
 
 
 def run_and_finalize(orch, tid: str, goal: str, context: str = "", *,
@@ -8398,6 +8554,10 @@ def resume_received_tasks(orch, *, older_than: float = 10.0, limit: int = 20) ->
     返回本次恢复的任务数。
     """
     import task_state as _ts
+    # P0-b 派发闸门：证明不了唯一执行权就**不执行**（旧持有者不得继续产生有效结果）
+    if not ownership_held():
+        logger.warning("收执恢复跳过：本实例未持有编排器归属（停止新派发）")
+        return 0
     try:
         rows = _ts.list_received(older_than=older_than, limit=limit)
     except Exception as exc:                          # noqa: BLE001
@@ -8449,6 +8609,13 @@ def accept_task_request(orch, data: dict) -> tuple[bool, str]:
     goal = str(data.get("goal") or "")
     if not task_id:
         return False, "缺少 task_id"
+    # P0-b 派发闸门：未持有活租约（失租/归属未知）时**停止新派发**。
+    # 返回值是"是否接收"，所以这里必须回 False —— 提交方据此拿到 rejected，
+    # 而不是界面显示成功、实际没人执行。
+    if not ownership_held():
+        _set_task_ack(orch, task_id, "rejected:no_ownership")
+        logger.error("Task %s 拒绝：本实例未持有编排器归属（停止新派发）", task_id)
+        return False, "本实例未持有编排器归属：已停止新派发（避免重复执行）"
     instance, code_version = _instance_identity()
     idem = str(data.get("idempotency_key") or "").strip()
     events = data.get("submit_events") if isinstance(data.get("submit_events"), list) else []
@@ -8553,6 +8720,8 @@ def main():
         logger.error("拒绝启动：%s", _owner_why)
         return 2
     logger.info("编排器实例归属：%s", _owner_why)
+    # P0-b 租约续租：旧实现只在认领时写一次心跳，30 秒后 TTL 到期 → A 还活着 B 就能接管。
+    start_owner_lease_renewal(r)
     # C3/H3b 启动恢复：把"已收执但从未被消费"的请求捡回来执行（pub/sub 的消息已丢，
     # 但收执在库里）。放在订阅之前：先恢复旧的，再开始接新的。
     try:

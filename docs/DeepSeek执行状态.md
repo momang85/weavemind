@@ -8,6 +8,28 @@
 `docs/evidence/c4_samples_run_20260927.md` 那份"当前余额耗尽"已随用户充值**解除**（保留为历史，
 不再周期探测余额）。
 
+## P0-b 已交：实例归属改为真实租约（证据 `docs/evidence/p0b_owner_lease_20260928.md`）
+
+- **三个洞**：①心跳只在认领时写一次（30 秒后过期 → **A 还活着 B 就能接管**）；
+  ②`cur == inst` 即放行 → **同名实例**的两个进程互相当成"自己的旧租约"；
+  ③认领异常 fail-open "按单实例继续" → 证明不了唯一执行权仍派发。
+- **修复**：每进程唯一令牌（`实例名:pid:随机`）；认领/续期/拒绝**三合一 Lua 原子**；
+  租约（TTL）取代一次性心跳 + 后台续租线程；**续租必须带令牌比对**（被接管后不得续命）；
+  新增派发闸门 `ownership_held()`——`accept_task_request` 回 `rejected:no_ownership`、
+  `resume_received_tasks` 返回 0；认领异常仍不阻断启动但**闸门关闭、停止新派发**。
+- **顺带挡下一个真实运维陷阱**：旧实现 `SET owner inst` **不带 TTL**，那个键永不失效 →
+  新实现会把它当"别人的活租约"而**永久拒绝启动**；加 `_OWNER_LEGACY_TAKEOVER_LUA`
+  **仅当 `PTTL == -1`** 时原子接管。
+- **验证**：`TestOrchestratorOwnership` **9 项 OK**（含"同名实例必须被拒""被接管不得续期"
+  "遗留无 TTL 键可迁移""闸门关闭时不接收也不恢复"）。闸门波及的 4 个 `setUp` 显式声明
+  "本实例持有归属"（那些用例测收执/幂等/时间线，不测闸门）。
+- **回归**：`test_startup_readiness` **61 OK**、`test_task_persistence` **36 OK**、
+  `test_writer_consolidation` **57 OK**、`test_p0` **416 OK**。
+- **未验项**：**本机应用整个处于停止状态**（无 python 进程、6379/8080 未监听）→
+  遗留键迁移与跨租期两进程互斥**只有单测覆盖，真实 Redis 未验**（按指令"不可用则明确未验"）；
+  未接优雅退出的 release 调用点（靠 TTL 过期接管兜底）；
+  **P0-c/d/e 未实施，"同键并发只留一个可执行收执"仍未验证**。
+
 ## P0-a 已交：收执裁决区分「异常」与「缺行」（证据 `docs/evidence/p0a_receipt_verdict_20260928.md`）
 
 - **缺陷**：`task_state.promote_received()` 遇**数据库异常**返回 `"absent"` → 调用方走旧路径
