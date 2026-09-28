@@ -4262,7 +4262,9 @@ def _task_export_verdict(tid: str) -> dict:
     读不到就如实说读不到（`package_stale: None` + `error`），**绝不让下载链因此报错**。
     """
     try:
-        from task_workspace import task_workspace
+        # `task_workspace` 已在本模块顶部导入（`from workspace import ...`）——
+        # 之前这里写成 `from task_workspace import task_workspace`（模块名错），
+        # 导入即失败并被本函数的兜底吞掉，于是判决**永远是"不可读"**（形同虚设）。
         _ws = task_workspace(tid)
         _report = ""
         try:

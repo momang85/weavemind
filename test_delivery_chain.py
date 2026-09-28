@@ -6314,6 +6314,47 @@ class TestExportVersionNamespaces(unittest.TestCase):
         out2 = web_ui._export_payload("ui-x", ws, {"identity_id": "", "version_id": ""})
         self.assertIs(out2.get("package_stale"), False)
 
+    def test_deliverables_verdict_reports_stale_package(self):
+        """P0-f：`/deliverables` 的交付身份判决必须真的能读出"过时"。
+
+        `_task_export_verdict` 是下载链的判决出口（此前只有文件列表，消费者无从判断
+        拿到的是不是当前版本）。这里走**真实路径**：真工作区 + 真 zip（清单身份为空）
+        + 打桩的采纳状态，断言判决为陈旧并附上"请重新导出"的说明。
+        """
+        import json as _json
+        import os
+        import time
+        import zipfile
+        import web_ui
+        ws = self._ws(None, with_zip=False)
+        (ws / "report_versions.json").write_text("{}", encoding="utf-8")
+        zp = ws / "deliverables_20260920_104729.zip"
+        with zipfile.ZipFile(zp, "w") as zf:
+            zf.writestr("PACKAGE_MANIFEST.json", _json.dumps({
+                "schema": "weavemind.package/2",
+                "report_version_id": "",
+                "research_body_sha256": "",
+            }, ensure_ascii=False))
+        fresh = time.time()
+        os.utime(zp, (fresh, fresh))
+        with mock.patch("web_ui.task_workspace", return_value=ws), \
+                mock.patch("delivery_pipeline.delivery_state",
+                           return_value={"version_id": "body-cur"}), \
+                mock.patch.object(web_ui, "_get_task_report_data", return_value={}):
+            out = web_ui._task_export_verdict("ui-x")
+        self.assertIs(out.get("package_stale"), True, out)
+        self.assertIn("重新导出", str(out.get("note") or ""))
+        self.assertEqual(out.get("current_body_version_id"), "body-cur")
+
+    def test_deliverables_verdict_fails_closed_without_raising(self):
+        """判决读不到 → 如实说读不到，**绝不抛异常**（不得让下载链被判决拖垮）。"""
+        import web_ui
+        with mock.patch("web_ui.task_workspace",
+                        side_effect=RuntimeError("ws gone")):
+            out = web_ui._task_export_verdict("ui-x")
+        self.assertIsNone(out.get("package_stale"), out)
+        self.assertIn("不可读", str(out.get("error") or ""))
+
     def test_package_stale_when_zip_predates_adopted_version(self):
         """打包在**采纳最终正文之前**跑完 → 包不含最新修订，必须标陈旧。
 
