@@ -1436,6 +1436,9 @@ def extract_profit_decomposition(docs, *, periods=None) -> dict:
     return {"ok": bool(gross or expenses), "groups": groups, "expenses": expenses,
             "tax_rows": tax_rows, "derived": derived, "boundary": boundary,
             "components": comps,
+            # 本材料对应的报告期：调用方（正文装配）据此给派生读数**标年份**。
+            # 只放在 boundary 文案里不够——正文渲染时无从可靠解析。
+            "periods": list(years),
             "locator": (gross[0].get("locator") if gross else
                         (expenses[0].get("locator") if expenses else "")),
             "url": str(doc.get("url") or ""), "title": str(doc.get("title") or "")}

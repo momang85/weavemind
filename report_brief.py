@@ -121,6 +121,60 @@ _PLAN_WANT = {
 }
 
 
+def _amount_text(value, unit: str, *, signed: bool = False) -> str:
+    """按**本报告的记账单位**写一个量：金额（元/万元/亿美元…）折算成亿元两位小数。
+
+    报告全文的金额口径是"亿元 + 两位小数"（财务对照表、关键发现、观察句都一样）；
+    底稿里的派生行存的是**元**。直接拼原始值会写出 `20920103385` 这种既无单位、
+    读者也无法判断量纲的数。非金额单位（个百分点、元/吨、%）原样带单位。
+    返回空串表示"值不可用"——调用方据此如实写"未取得"，不填零。
+    """
+    if not isinstance(value, (int, float)):
+        return ""
+    u = str(unit or "")
+    if u in ("元", "yuan", "RMB"):
+        return f"{value / 1e8:+.2f} 亿元" if signed else f"{value / 1e8:.2f} 亿元"
+    if not u:
+        return f"{value:+g}" if signed else f"{value:g}"
+    return f"{value:+g}{u}" if signed else f"{value:g}{u}"
+
+
+def _derived_pair_text(d: dict, *, periods=()) -> str:
+    """派生成对读数的**可核对**写法：时间正序 + 单位随行 + 变化量带符号。
+
+    真机反例（采用稿 `reports/report.md`，洋河股份 2023–2024）：
+        毛利额（按销售模式分组合计）：20920103385→24728464886；
+        期间费用合计：6934875260→6681605162
+    三处毛病：① **无单位**（读者不知是元还是万元）；② 箭头是"本期→上期"（时间倒序），
+    读起来却像从 209 涨到 247——把 −38.01 亿元的**下降**读成了增长；
+    ③ 期间费用那一对同理，69.35 亿→66.82 亿实际是**上升**。
+
+    改成：`毛利额（按销售模式分组合计）：2023 年 247.28 亿元 → 2024 年 209.20 亿元
+    （-38.08 亿元）`。年份取自**材料自己声明的报告期**（`extract_profit_decomposition`
+    的 `periods`），不靠调用方猜；取不到年份时退成"上期/本期"，方向仍然明确。
+    """
+    label = str(d.get("label") or "")
+    cur, prev = d.get("cur"), d.get("prev")
+    unit = str(d.get("unit") or "")
+    ys = sorted({int(y) for y in (periods or [])
+                 if str(y).strip().isdigit()}) if periods else []
+    prev_y = f"{min(ys)} 年" if len(ys) >= 2 else "上期"
+    cur_y = f"{max(ys)} 年" if ys else "本期"
+    c_txt = _amount_text(cur, unit)
+    p_txt = _amount_text(prev, unit)
+    if not p_txt:
+        # 单值派生行（如"省外与省内收入降幅差"——它本身就是两地之差，不是两期配对）：
+        # 如实写单值，不硬凑成"两期"、也不写"未取得"（那会把一个已取得的读数说成缺）。
+        return f"{label}：{c_txt}" if c_txt else f"{label}：未取得"
+    if not c_txt:
+        return f"{label}：{prev_y} {p_txt} → {cur_y} 未取得"
+    txt = f"{label}：{prev_y} {p_txt} → {cur_y} {c_txt}"
+    delta = _amount_text(cur - prev, unit, signed=True)
+    if delta:
+        txt += f"（{delta}）"
+    return txt
+
+
 def _metric_direction(cur, prev) -> str:
     """两期值 → 方向措辞（**单一事实对象**决定；负基数不用百分比方向）。
 
@@ -948,7 +1002,7 @@ def _question_assessments(mgmt_pool, background, evidence, *, last, rows=(),
                       "reason": "发行人披露的量价/结构数据已准入（量与结构已取得；价见缺口）"}
         elif metric == "net_profit" and pd.get("ok"):
             decomp = {"note": "；".join(
-                          f"{str(d.get('label') or '')}：{d.get('cur')}→{d.get('prev')}"
+                          _derived_pair_text(d, periods=pd.get("periods"))
                           for d in (pd.get("derived") or [])),
                       "locator": str(pd.get("locator") or ""),
                       "reason": "发行人披露的毛利率表与费用明细已准入（毛利端与期间费用已取得）"}
@@ -965,7 +1019,74 @@ _CAUSAL_MARKERS = ("因", "由于", "系", "带动", "拖累", "所致", "导致
 # 行业/市场背景词：只作"初步背景依据"，不构成该指标的因果解释
 _BACKGROUND_MARKERS = ("行业", "市场", "竞争", "环境", "需求", "政策", "消费", "价位段",
                        "价格带", "库存", "渠道", "景气", "承压", "宏观", "周期")
-_CLAUSE_SPLIT_RE = re.compile(r"[。；;，,、\n]")
+_CLAUSE_SPLIT_RE = re.compile(r"[。；;，,、\n]+")
+
+
+# ── 毛利线上下：金额归因的正确性（正确计算 ≠ 正确解释）─────────────────
+# 真机反例（采用稿 `reports/report.md` 结论段，洋河股份 2023–2024）：
+#   "…盈利质量指标（归母净利率 −7.13 个百分点、毛利率 −2.09 个百分点）同步走弱，
+#     **利润侵蚀主要发生在毛利线以下**…"
+# 这句话是**用利润率差替代金额科目归因**：毛利率降 2.09pp < 归母净利率降 7.13pp，
+# 于是"下面降得多"。但按**金额**：毛利润减少 38.01 亿元、归母净利润减少 33.43 亿元
+# → 毛利线以下净额变化 = −33.43 − (−38.01) = **+4.58 亿元（净缓冲）**。
+# 侵蚀发生在**毛利线上**，句子说反了。而底稿里就有这个符号（`net_profit_gross_gap_change`），
+# 数字全对得上 → 整句照旧判 `bound`：**计算正确掩盖了解释错误**。
+_GROSS_LINE_BELOW = ("毛利线以下", "毛利线之下", "毛利以下", "毛利线下方")
+_GROSS_LINE_ABOVE = ("毛利端", "毛利线以上", "毛利线之上", "毛利以上", "毛利线上")
+# 只认**归因/变化**措辞；"毛利端与期间费用取自发行人毛利率表"这类口径/来源说明不算归因
+_GROSS_ATTRIB_MARKERS = ("主要", "主因", "驱动", "拖累", "侵蚀", "降幅", "跌幅", "下滑",
+                         "恶化", "贡献", "发生在", "来自于", "归因")
+# 否定式要**翻面**："利润下滑**并非**主要来自毛利端" 说的是"主要来自毛利线以下"。
+# 不用裸"非"：它会命中"非经常性损益"。
+_GROSS_NEGATIONS = ("并非", "并不是", "不是", "并不", "不属于", "不主要", "非主要", "而非")
+
+
+def _gross_line_attributions(text: str) -> list[str]:
+    """句中对"利润变化发生在毛利线**哪一侧**"的归因断言列表（按子句，否定式已翻面）。
+
+    按**子句**判定：同一子句里既有毛利线某一侧、又有归因/变化措辞才算归因句。
+    这样"毛利端与期间费用取自发行人毛利率表（各自有定位）"不会误判成"归因在毛利端"。
+    逐子句都要看：一句里可以同时出现"并非主要来自毛利端"与"侵蚀发生在毛利以下"。
+    """
+    out: list[str] = []
+    for clause in _CLAUSE_SPLIT_RE.split(str(text or "")):
+        c = clause.strip()
+        if not c or not any(v in c for v in _GROSS_ATTRIB_MARKERS):
+            continue
+        neg = any(n in c for n in _GROSS_NEGATIONS)
+        below = any(w in c for w in _GROSS_LINE_BELOW)
+        above = any(w in c for w in _GROSS_LINE_ABOVE)
+        if below and not above:
+            out.append("above" if neg else "below")
+        elif above and not below:
+            out.append("below" if neg else "above")
+    return out
+
+
+def _gross_line_conflict(text: str, gap_value) -> str:
+    """归因方向与底稿的"毛利线以下净额变化"符号**相反**时，返回写明理由的字符串。
+
+    `net_profit_gross_gap_change = Δ归母净利 − Δ毛利`：
+    - **< 0**：毛利线以下合计**加大**了利润下滑 → 归因"往下走"成立；
+    - **> 0**：毛利线以下合计是**净缓冲** → 归因"主要往下走"与底稿方向相反。
+
+    只做**机械核对**（符号比对），不替读者判断归因本身对不对；底稿没有这个事实时不表态。
+    """
+    if not isinstance(gap_value, (int, float)):
+        return ""
+    gap = float(gap_value)
+    if gap == 0:
+        return ""
+    for side in _gross_line_attributions(text):
+        if side == "below" and gap > 0:
+            return (f"归因方向与底稿相反：底稿「毛利线以下净额变化」为 {gap:+g} 亿元"
+                    f"（毛利线以下是**净缓冲**，不是主要拖累），句中断言把利润变化主要归到"
+                    f"毛利线以下。**金额归因不能用利润率差替代**（毛利率降幅小于净利率降幅，"
+                    f"不等于毛利线以下在金额上拖累更多）")
+        if side == "above" and gap < 0:
+            return (f"归因方向与底稿相反：底稿「毛利线以下净额变化」为 {gap:+g} 亿元"
+                    f"（毛利线以下合计**加大**了利润下滑），句中断言把利润变化主要归到毛利端。")
+    return ""
 
 
 def _explains_metric_change(text: str, metric: str) -> bool:
@@ -1671,6 +1792,13 @@ def _claims(body: str, rows, derived, citations, *,
         body = (str(body or "") + "\n"
                 + "\n".join(str((i or {}).get("text") or "") for i in (assembly or [])))
     idx = _fact_index(rows, derived)
+    # 派生读数按指标索引：毛利线上下归因的机械核对读它（`net_profit_gross_gap_change`）
+    _derived_value: dict[str, float] = {}
+    for _d in (derived or []):
+        _m = str(_d.get("metric") or "")
+        _v = _d.get("value")
+        if _m and isinstance(_v, (int, float)):
+            _derived_value[_m] = float(_v)
     unsup_by_sentence: dict[str, list[dict]] = {}
     for u in (unsupported or []):
         key = str(u.get("key") or _sentence_key(u.get("sentence") or ""))
@@ -1844,6 +1972,14 @@ def _claims(body: str, rows, derived, citations, *,
             claim["origin"] = "assembly"
             claim["claim_type"] = str(_hit_asm.get("claim_type") or claim["claim_type"])
             claim["type"] = claim["claim_type"]
+        # P1-b：**正确计算 ≠ 正确解释**。数字全对得上，但把利润变化归到毛利线错误的一侧时，
+        # 不得判 `bound`——底稿的「毛利线以下净额变化」符号就是这句话的机械反例。
+        # 放在未采用来源/目标类判定**之前**：矛盾是更强的结论，不被后面的分支覆盖掉。
+        _glc = _gross_line_conflict(s, _derived_value.get("net_profit_gross_gap_change"))
+        if _glc and claim.get("support_status") in ("bound", "partially_supported"):
+            claim["status"] = "unsupported"
+            claim["support_status"] = "unsupported"
+            claim["reason"] = _glc
         if hit_u is not None:
             # 未采用来源：不因"数字绑得上底稿"就算支持（结论依赖那份材料）
             claim["status"] = "unsupported"

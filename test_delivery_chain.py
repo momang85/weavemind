@@ -8545,6 +8545,117 @@ class TestNightCorrectionFailureSamples(unittest.TestCase):
         for wrong in ("费用改善", "毛利端", "额外拖累", "利润侵蚀", "并非主要来自"):
             self.assertNotIn(wrong, obs + q["net_profit"]["boundary"])
 
+    def test_gross_line_attribution_against_the_workpaper_is_marked_contradicted(self):
+        """P1-b：**正确计算 ≠ 正确解释**——归因方向与底稿符号相反时不得只判"部分支持"。
+
+        采用稿（`reports/report.md` 结论段，2026-09-28 实读）原句：
+
+            盈利质量指标（归母净利率 −7.13 个百分点、毛利率 −2.09 个百分点）同步走弱，
+            利润侵蚀主要发生在毛利线以下
+
+        这是**用利润率差替代金额科目归因**：按金额，毛利润减少 38.01 亿元、归母净利润
+        减少 33.43 亿元 → 毛利线以下净额变化 **+4.58 亿元（净缓冲）**，侵蚀在毛利线**上**。
+        修前该句判 `partially_supported`（数字部分对上，句子中心的倒置不可见）；
+        修后必须是 `unsupported`，且理由里点出底稿读数与"不能用利润率差替代"。
+        """
+        text = ("2023→2024 年度，洋河股份合并报表口径下的营业收入、归母净利润、"
+                "经营活动现金流净额三项核心指标同步下降，其中归母净利润降幅最大"
+                "（-33.38%），盈利质量指标（归母净利率 -7.13 个百分点、毛利率 -2.09 "
+                "个百分点）同步走弱，利润侵蚀主要发生在毛利线以下；现金流覆盖度由 "
+                "61.20% 升至 69.37%，资产负债率由 25.42% 降至 23.24%。")
+        claims = self._claims_for(text)
+        self.assertTrue(claims)
+        c = claims[0]
+        self.assertNotEqual(c["support_status"], "bound")
+        self.assertEqual(c["support_status"], "unsupported",
+                         f"归因方向与底稿相反应判 unsupported：{c.get('reason')}")
+        self.assertIn("+4.58", str(c.get("reason")), c.get("reason"))
+        self.assertIn("利润率差", str(c.get("reason")), c.get("reason"))
+
+    def test_gross_line_attribution_matching_the_workpaper_is_not_flagged(self):
+        """反向护栏：方向**与底稿一致**时不得误标（不能把真话也说成矛盾）。
+
+        底稿差额 +4.58 → 毛利线以下是净缓冲，所以"下滑主要来自毛利端"与底稿**一致**；
+        底稿差额 -4.58 → "侵蚀主要发生在毛利线以下"才一致。两个方向各测一次。
+        """
+        import report_brief
+
+        self.assertEqual(
+            report_brief._gross_line_conflict("利润下滑主要来自毛利端，费用端相对稳定", 4.58), "")
+        self.assertEqual(
+            report_brief._gross_line_conflict("利润侵蚀主要发生在毛利线以下", -4.58), "")
+        self.assertTrue(
+            report_brief._gross_line_conflict("利润下滑主要来自毛利端，费用端相对稳定", -4.58))
+        # 口径/来源说明不是归因，不得被当成归因句
+        for _ok in ("毛利端与期间费用取自发行人毛利率表与费用明细（各自有定位）",
+                    "毛利额为**推导量**（上期由披露同比反推），各分组是同一笔收入的不同切法",
+                    "未取得明细前不拆解到具体科目"):
+            self.assertEqual(report_brief._gross_line_conflict(_ok, 4.58), "", _ok)
+        # 底稿没有这个事实时不表态
+        self.assertEqual(report_brief._gross_line_conflict("利润侵蚀主要发生在毛利线以下", None), "")
+
+    def test_gross_line_attribution_negative_phrasing_flips_side(self):
+        """否定式要翻面：冻结样本里的"**并非**主要来自毛利端"= 归因在毛利线以下。"""
+        import report_brief
+
+        self.assertEqual(report_brief._gross_line_attributions("利润下滑并非主要来自毛利端"),
+                         ["below"])
+        self.assertEqual(
+            report_brief._gross_line_attributions("利润下滑并非主要来自毛利端，"
+                                                  "更大比例的利润侵蚀发生在毛利以下的环节"),
+            ["below", "below"])
+        # 逐子句都要看：前半句一致、后半句矛盾时仍要抓到矛盾
+        self.assertTrue(report_brief._gross_line_conflict(
+            "毛利端表现稳健，利润侵蚀主要发生在毛利线以下", 4.58))
+        # 裸"非"不得触发翻面（"非经常性损益"是科目名）
+        self.assertEqual(report_brief._gross_line_attributions(
+            "非经常性损益与毛利端共同影响利润降幅"), ["above"])
+
+    def test_derived_pair_text_labels_years_and_units(self):
+        """P1-b：派生成对读数必须**标年份、带单位、时间正序**、并给出带符号变化量。
+
+        真机反例：`毛利额（按销售模式分合组合计）：20920103385→24728464886` ——
+        无单位；箭头是"本期→上期"（时间倒序），读起来像从 209 涨到 247，
+        把 -38.08 亿元的**下降**读成了增长。
+        """
+        import report_brief
+
+        gross = {"label": "毛利额（按销售模式分组合计）", "unit": "元",
+                 "cur": 20920103385, "prev": 24728464886}
+        txt = report_brief._derived_pair_text(gross, periods=[2023, 2024])
+        self.assertIn("2023 年 247.28 亿元", txt)
+        self.assertIn("2024 年 209.20 亿元", txt)
+        self.assertIn("-38.08 亿元", txt)
+        self.assertNotIn("20920103385", txt)
+        # 期间费用那一对时间上是**上升**，不能被写成下降
+        exp = {"label": "期间费用合计", "unit": "元", "cur": 6934875260, "prev": 6681605162}
+        txt2 = report_brief._derived_pair_text(exp, periods=[2023, 2024])
+        self.assertIn("+2.53 亿元", txt2)
+        # 取不到年份时退成"上期/本期"，方向仍然明确（不猜年份）
+        txt3 = report_brief._derived_pair_text(gross, periods=[])
+        self.assertIn("上期 247.28 亿元 → 本期 209.20 亿元", txt3)
+        # 单值派生行（两地降幅差）如实写单值，不硬凑"两期"、也不说"未取得"
+        one = {"label": "省外与省内收入降幅差", "unit": "个百分点", "cur": -2.93}
+        self.assertEqual(report_brief._derived_pair_text(one, periods=[2023, 2024]),
+                         "省外与省内收入降幅差：-2.93个百分点")
+        # 值缺失时如实说缺，不填零
+        self.assertIn("未取得", report_brief._derived_pair_text(
+            {"label": "毛利额", "unit": "元", "cur": None, "prev": 1}, periods=[2023, 2024]))
+
+    def test_profit_decomposition_declares_its_periods(self):
+        """材料必须自带报告期：正文据它给派生读数标年份，不靠调用方猜。"""
+        import narrative_evidence as ne
+
+        doc = {"title": "年报", "url": "https://x/1", "text": (
+            "分销售模式 2024年 2023年 同比增减\n"
+            "批发经销 27854167407.45 32052628760.26 -13.10%\n"
+            "营业收入 28876296993.56 33125534523.11 -12.83%\n"
+            "营业成本 营业成本 毛利率 营业收入 营业成本 毛利率\n"
+            "销售费用 6934875260.00 6681605162.00 3.79%\n")}
+        pd = ne.extract_profit_decomposition([doc], periods=[2023, 2024])
+        self.assertIn("periods", pd)
+        self.assertEqual(list(pd["periods"]), [2023, 2024])
+
     def test_assembly_sentences_enter_the_same_claim_set(self):
         """装配器生成的观察与边界都要进主张集合，且边界单独记类型。"""
         import report_brief
