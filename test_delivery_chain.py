@@ -10412,9 +10412,10 @@ class TestCandidateEntryChain(_MaterialCase):
     def test_brief_header_unit_is_the_amount_unit_not_a_tonnage_row(self):
         """简报的「单位」必须是**金额单位**，不能取到实物量行的"吨"。
 
-        旧实现取"第一行有单位的"：底稿里还有销售量（吨）与吨价（元/吨）行，谁先出现
+        旧实现取"第一行有单位的"：底稿里还有销售量（吨）与吨价（元/吨）行，**行序一变**
         就把整个报告的单位写成"吨"——数字没错、**标签错**，读者据此换算全错。
-        这个夹具（补材料带来的量价/结构事实 + 结构化财务）正是**会触发它**的资料面。
+        这个夹具（补材料带来的量价/结构事实排在结构化财务行之前）正是**会触发它**的资料面；
+        冻结样本 `ui-a06a005c9b` 财务行在前，所以当时没踩到。
         """
         from working_paper_export import chart_rows
 
