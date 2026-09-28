@@ -253,32 +253,57 @@ function parseDisclaimer(md: string): DisclaimerResult {
 
 interface TopStat { k: string; v: string }
 
-/** 正文首张 Markdown 表格的前 4 行 → 结论卡。
+/** 结论卡的**来源**：`metrics`=报告正文的『财务对照』表（表头含"指标"）；
+ *  `first_table`=退回到正文里第一张表（**未必是财务/结论表**，标签必须如实说明）；
+ *  `none`=正文没有可提取的表。 */
+export type TopStatsSource = 'metrics' | 'first_table' | 'none'
+
+/** 正文表格 → 结论卡（键截 24 字、值截 32 字）。
+ *
  *  与分享页 `web_ui._share_page_structured` 同口径：列取表头含"指标"/"数值"者，
- *  缺省第 0/1 列；键截 24 字、值截 32 字。无表返回空数组（由调用方决定降级展示）。 */
-export function parseTopStats(md: string): TopStat[] {
+ *  缺省第 0/1 列。**但表格不再"只取第一张"**：研究简报里『实物量（吨）』『收入构成（元）』
+ *  排在『财务对照（指标×期间×口径×来源）』之前，于是"结论速览"曾把 **吨位**当成结论
+ *  显示（实机截图：白酒销售量/生产量/库存量）——数字没错、**卡片名与内容不符**。
+ *  现在：优先取表头含"指标"的那张（=财务对照）；取不到才退回第一张，
+ *  并由调用方按 `source` 如实标注来源，不把任何一张表都说成"结论"。
+ */
+export function parseTopStatsWithSource(md: string): { stats: TopStat[]; source: TopStatsSource } {
+  const tables: string[][][] = []
+  let cur: string[][] = []
   let header: string[] = []
-  const rows: string[][] = []
   for (const line of md.split('\n')) {
     const t = line.trim()
     if (!t.startsWith('|')) {
-      if (header.length) break
+      if (cur.length) { tables.push(cur); cur = [] }
+      header = []
       continue
     }
     const cells = t.replace(/^\|+|\|+$/g, '').split('|').map(c => c.trim())
     if (cells.every(c => !c || /^[-:\s—]*$/.test(c))) continue
-    if (!header.length) { header = cells; continue }
-    rows.push(cells)
-    if (rows.length >= 4) break
+    if (!header.length) { header = cells; cur = [cells] } else if (cur.length < 5) cur.push(cells)
   }
-  if (!header.length || !rows.length) return []
-  const kFind = header.findIndex(h => h.includes('指标') || h.includes('数值'))
-  const vFind = header.findIndex(h => h.includes('数值'))
+  if (cur.length) tables.push(cur)
+  if (!tables.length) return { stats: [], source: 'none' }
+  const metrics = tables.find(t => (t[0] || []).some(h => h.includes('指标')))
+  const chosen = metrics || tables[0]
+  const hdr = chosen[0] || []
+  const rows = chosen.slice(1)
+  if (!hdr.length || !rows.length) return { stats: [], source: 'none' }
+  const kFind = hdr.findIndex(h => h.includes('指标') || h.includes('数值'))
+  const vFind = hdr.findIndex(h => h.includes('数值'))
   const kIdx = kFind >= 0 ? kFind : 0
-  const vIdx = vFind >= 0 ? vFind : Math.min(1, header.length - 1)
-  return rows
-    .filter(r => r.length > vIdx && r[vIdx].trim())
-    .map(r => ({ k: (r.length > kIdx ? r[kIdx] : '').slice(0, 24), v: r[vIdx].slice(0, 32) }))
+  const vIdx = vFind >= 0 ? vFind : Math.min(1, hdr.length - 1)
+  return {
+    stats: rows
+      .filter(r => r.length > vIdx && r[vIdx].trim())
+      .map(r => ({ k: (r.length > kIdx ? r[kIdx] : '').slice(0, 24), v: r[vIdx].slice(0, 32) })),
+    source: metrics ? 'metrics' : 'first_table',
+  }
+}
+
+/** 兼容包装：只要统计值（旧调用方）。 */
+export function parseTopStats(md: string): TopStat[] {
+  return parseTopStatsWithSource(md).stats
 }
 
 /** "补充图表（未达发布标准）"章节下的图片地址集合 —— 这些图不是发布级，需标"草稿级"。 */
@@ -784,8 +809,11 @@ export default memo(function ReportViewer() {
       bodyMd,
       toc,
       sourceItems: sourcesResult.sources?.items ?? [],
-      // 结论卡取自正文首表（与分享页同口径；无表则空数组，由渲染端降级到验收数字）
-      topStats: parseTopStats(rawMd),
+      // 结论卡：优先取正文『财务对照』表（表头含"指标"）；退回首表时由 source 如实标注
+      ...(() => {
+        const r = parseTopStatsWithSource(rawMd)
+        return { topStats: r.stats, topStatsSource: r.source }
+      })(),
     }
   }, [report])
 
@@ -795,7 +823,8 @@ export default memo(function ReportViewer() {
   const rate = s.totalSteps > 0 ? Math.round((s.successSteps / s.totalSteps) * 100) : 100
   // 验收器统计（与报告页可信度卡同一份数据；未加载时为 null，渲染端据此显示"未知"而非 0）
   const accTrace = accData?.checks?.number_traceability || null
-  const { freshness, sourcesResult, disclaimerResult, bodyMd, toc, sourceItems, topStats } = parsed!
+  const { freshness, sourcesResult, disclaimerResult, bodyMd, toc, sourceItems,
+          topStats, topStatsSource } = parsed!
 
   const scrollToHeading = (id: string) => scrollToId(id)
 
@@ -925,13 +954,19 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
 
   return (
     <div id="report-viewer" className="animate-fade-in space-y-5 scroll-mt-6">
-      {/* F3a 结论卡：报告正文首表前 4 行（与分享页同口径）；无表时降级到验收器数字统计 */}
+      {/* F3a 数据卡：优先取正文『财务对照』表（表头含"指标"）；退回首表时如实标注来源 */}
       {topStats.length > 0 ? (
         <div className="rounded-xl border border-cyan-500/20 bg-slate-900 p-4">
           <div className="mb-3 flex flex-wrap items-center gap-2">
             <Award className="h-4 w-4 text-cyan-400" />
-            <span className="text-sm font-semibold text-cyan-400">结论速览</span>
-            <span className="text-xs text-slate-500">取自报告正文首表前 4 行</span>
+            <span className="text-sm font-semibold text-cyan-400">
+              {topStatsSource === 'metrics' ? '关键数据速览' : '正文首表前 4 行'}
+            </span>
+            <span className="text-xs text-slate-500">
+              {topStatsSource === 'metrics'
+                ? '取自报告正文『财务对照』表前 4 行（指标 × 期间 × 口径 × 来源）'
+                : '报告正文里没有『财务对照』表：这里原样列出第一张表前 4 行，未判定为结论'}
+            </span>
           </div>
           <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
             {topStats.map((it, i) => (
@@ -946,7 +981,7 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
         <div className="rounded-xl border border-slate-800 bg-slate-900 p-4">
           <div className="mb-3 flex flex-wrap items-center gap-2">
             <ScrollText className="h-4 w-4 text-slate-400" />
-            <span className="text-sm font-semibold text-slate-300">结论速览</span>
+            <span className="text-sm font-semibold text-slate-300">验收器统计</span>
             <span className="text-xs text-slate-500">
               报告正文没有可提取的表格，以下为验收器统计（非报告结论）
             </span>

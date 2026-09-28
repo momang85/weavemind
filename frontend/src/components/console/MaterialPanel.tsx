@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Link2, Upload, RefreshCw, AlertTriangle, CheckCircle2 } from 'lucide-react'
+import { Link2, Upload, RefreshCw, AlertTriangle, CheckCircle2, FileText } from 'lucide-react'
 
 /**
  * 补材料面板（C1）：披露直链 / 上传文件 → 正常入口摄取 → 同一证据快照。
@@ -55,6 +55,7 @@ export default function MaterialPanel({ taskId, disabled }: { taskId: string | n
   const [declared, setDeclared] = useState('')
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState<{ kind: 'ok' | 'warn' | 'err'; text: string } | null>(null)
+  const [cand, setCand] = useState<any>(null)
 
   const load = useCallback(async () => {
     if (!taskId) { setItems([]); return }
@@ -118,10 +119,51 @@ export default function MaterialPanel({ taskId, disabled }: { taskId: string | n
                    title: title.trim(), declared_disclosed_at: declared, data: b64 })
   }
 
+  // 「按新材料生成候选正文」：走**确定性装配**（不调用模型、不消耗额度）。
+  // 候选**不采纳**：旧交付与人工文字原样保留，采纳是另一个显式动作。
+  const genCandidate = async () => {
+    if (!taskId) return
+    setBusy(true); setMsg(null); setCand(null)
+    try {
+      const res = await fetch(`/api/task/${taskId}/candidate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      })
+      const d = await res.json()
+      if (res.ok && d.ok) {
+        setCand(d)
+        const aff = (d.affected_steps ?? []).map((s: any) => s.step_id || s.capability).filter(Boolean)
+        setMsg({
+          kind: 'ok',
+          text: `${d.created ? '已生成' : '已存在同一个候选（未重复生成）'}：`
+            + `版本 ${String(d.candidate_version_id ?? '').slice(0, 12)}…\n`
+            + `影响步骤 ${aff.length} 个（${aff.join('、') || '—'}）；其余步骤未重做。\n`
+            + `生成方式：确定性装配（未调用模型、未消耗额度）。\n`
+            + `候选未采纳：旧交付与人工文字保留，需显式采纳后才会成为交付。`,
+        })
+      } else if (d.status === 'no_new_material') {
+        setMsg({ kind: 'warn', text: '还没有已并入的新材料：先添加材料并等它准入。' })
+      } else if (d.status === 'paid_not_authorized') {
+        setMsg({ kind: 'warn', text: d.error || '本轮不新增付费生成。' })
+      } else if (res.status === 503) {
+        setMsg({ kind: 'warn', text: d.error || '编排器未回执：没有生成任何候选，可稍后重试。' })
+      } else {
+        setMsg({ kind: 'err', text: d.error || d.detail || d.status || '未能生成候选正文' })
+      }
+    } catch (e: any) {
+      setMsg({ kind: 'err', text: `请求失败：${e?.message ?? e}` })
+    } finally {
+      setBusy(false); load()
+    }
+  }
+
+  const admittedCount = items.filter(m => m.status === 'admitted').length
+
   return (
     <div className="space-y-3 text-xs">
       <div className="text-slate-400">
-        补充原始披露：给直链（由服务取件）或上传文件。材料经**同一准入判据**（主体/期间/
+        补充原始披露：给直链（由服务取件）或上传文件。材料经同一准入判据（主体/期间/
         披露日/正文完整性）后并入资料快照，证据、底稿与报告读的是同一份快照。
       </div>
 
@@ -157,6 +199,50 @@ export default function MaterialPanel({ taskId, disabled }: { taskId: string | n
           上限：单件 3 MiB、PDF ≤ 400 页；不接受压缩包。上市公司的披露日以材料自带日期为准，
           自填日期只作声明依据（会如实标注）。
         </div>
+      </div>
+
+      <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-3 space-y-2">
+        <div className="flex items-center gap-2 text-slate-300">
+          <FileText className="w-3.5 h-3.5 text-violet-400" /> 按新材料生成候选正文
+        </div>
+        <div className="text-slate-500">
+          用已并入的新材料重新装配正文（<span className="text-slate-400">确定性装配</span>：
+          不调用模型、不消耗检索或生成额度）。同一次动作只生成一个候选；候选
+          <span className="text-slate-400">不采纳</span>——旧交付、人工文字与旧批准都保留，
+          需你显式采纳后才会成为交付。只重做产出正文的步骤，检索/清洗不重跑。
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <button onClick={genCandidate}
+            disabled={disabled || busy || admittedCount === 0 || !taskId}
+            className="px-3 py-1.5 rounded bg-violet-500/15 border border-violet-500/30 text-violet-300 disabled:opacity-40">
+            生成候选正文
+          </button>
+          {admittedCount === 0 && (
+            <span className="text-slate-600">还没有已准入的材料</span>
+          )}
+          {busy && <span className="text-slate-500 inline-flex items-center gap-1">
+            <RefreshCw className="w-3.5 h-3.5 animate-spin" /> 装配中…</span>}
+        </div>
+        {cand && (
+          <div className="rounded-lg border border-violet-500/30 bg-violet-500/10 text-violet-200 px-2 py-1.5 space-y-1">
+            <div>
+              候选 {String(cand.candidate_version_id ?? '').slice(0, 12)}…
+              {cand.acceptance?.overall ? ` · 本候选验收：${cand.acceptance.overall}` : ''}
+              {' · '}未采纳（需显式采纳）
+            </div>
+            <div className="text-violet-300/80">
+              影响步骤 {(cand.affected_steps ?? []).map((s: any) => s.step_id || s.capability).join('、') || '—'}
+              ；未重做 {(cand.stopped_steps ?? []).length} 个
+              {cand.budget && (cand.budget.calls_left !== undefined
+                ? ` · 剩余检索额度 ${cand.budget.calls_left} 次` : '')}
+            </div>
+            {(cand.acceptance?.gaps ?? []).length > 0 && (
+              <div className="text-amber-300">
+                候选缺口：{(cand.acceptance.gaps ?? []).slice(0, 3).join('；')}
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {msg && (

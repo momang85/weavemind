@@ -409,7 +409,7 @@ function ResearchQuickForm({ disabled, onReady }: {
               生成研究目标（写入输入框）
             </button>
             <span className="text-xs text-slate-500">
-              只拼目标，不自动提交；表格与年度/口径会作为**结构化契约**随任务提交；
+              只拼目标，不自动提交；表格与年度/口径会作为<span className="text-slate-400">结构化契约</span>随任务提交；
               三个核心指标：营业收入 / 归母净利润 / 经营活动现金流净额
             </span>
           </div>

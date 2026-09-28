@@ -103,7 +103,7 @@ export default function ResearchBriefPanel({ taskId, research, exportState, onRe
               关键问题缺依据 {research.research_state.questions_without_support ?? 0} 个；
               未支持主张 {research.research_state.unsupported_claims ?? 0} 条</li>
             {research.research_state.state === 'research_draft' && (
-              <li className="text-amber-300">· 本条说的是**研究**是否就绪，不改变数字与格式的机器验收结论</li>
+              <li className="text-amber-300">· 本条说的是<span className="text-amber-200">研究</span>是否就绪，不改变数字与格式的机器验收结论</li>
             )}
           </ul>
         </div>
@@ -321,7 +321,7 @@ export default function ResearchBriefPanel({ taskId, research, exportState, onRe
         <div className={box}>
           <div className={h}>导出</div>
           <ul className={li}>
-            <li>· Markdown / PDF 按**当前版本**导出（响应头带版本号）</li>
+            <li>· Markdown / PDF 按<span className="text-slate-300">当前版本</span>导出（响应头带版本号）</li>
             {exportState.package
               ? <li>· 交付包 {exportState.package}（生成于 {exportState.package_generated_at || '未知时间'}）</li>
               : <li>· 暂无交付包</li>}
