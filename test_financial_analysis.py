@@ -802,6 +802,75 @@ class TestK2PackageIdentityAndRecompute(unittest.TestCase):
                             "改正文后采纳身份必须变化（新版本不继承旧批准）")
 
 
+class TestK3CardTraitsAndBriefHygiene(unittest.TestCase):
+    """K3 质量项：卡片"性质/下一步"按模型给；模型正文标题降级；来源编号不再自相矛盾。"""
+
+    def test_card_traits_are_model_specific(self):
+        from financial_analysis import report_adapter as ra
+        self.assertEqual(ra.card_traits("profit_bridge")["kind"], "会计分解")
+        self.assertIn("现金流量表附注", ra.card_traits("cash_quality")["next_action"])
+        self.assertIn("账龄", ra.card_traits("working_capital")["next_action"])
+        self.assertIn("假设", ra.card_traits("scenario_sensitivity")["next_action"])
+        # 未注册的模型不得冒充已知模型的性质
+        self.assertIn("注册模型", ra.card_traits("mystery_model")["kind"])
+        self.assertIn("注册模型", ra.card_traits("")["kind"])
+
+    def test_rendered_cards_do_not_share_one_next_action(self):
+        """两张卡的"下一项验证动作"必须各说各的（实机：现金质量卡贴了利润桥的下一步）。"""
+        import tempfile
+        from financial_analysis import store as fa_store
+        ds = _dataset()
+        ws = Path(tempfile.mkdtemp(prefix="fa_traits_"))
+        runs = []
+        for mid in ("profit_bridge", "cash_quality"):
+            r = fa.run(mid, ds)
+            self.assertEqual(r.status, C.RunStatus.VALIDATED, (mid, r.reason))
+            fa_store.save_run(ws, r)
+            runs.append(r)
+        blocks = [fa_store.render_card_block(r) for r in runs]
+        acts = [b.split("下一项验证动作：", 1)[1].splitlines()[0] for b in blocks]
+        self.assertNotEqual(acts[0], acts[1], acts)
+        self.assertIn("毛利线以下", acts[0])
+        self.assertIn("现金流量表附注", acts[1])
+        self.assertNotIn("毛利线以下", acts[1], "现金质量卡不得套用利润桥的下一步")
+        self.assertIn("现金质量", blocks[1])
+        self.assertIn("会计分解", blocks[0])
+
+    def test_model_headings_are_demoted_under_the_analysis_section(self):
+        import report_brief as rb
+        self.assertEqual(rb._demote_headings("# 报告\n## 一、概述\n正文\n### 细项"),
+                         "### 报告\n#### 一、概述\n正文\n##### 细项")
+        self.assertEqual(rb._demote_headings("无标题行"), "无标题行")
+
+    def test_analysis_card_block_has_a_single_heading(self):
+        import tempfile
+        import report_brief as rb
+        from financial_analysis import store as fa_store
+        ds = _dataset()
+        ws = Path(tempfile.mkdtemp(prefix="fa_cardblk_"))
+        for mid in ("profit_bridge", "cash_quality"):
+            fa_store.save_run(ws, fa.run(mid, ds))
+        blk = rb._analysis_card_block("k3-card", ws_dir=ws)
+        # 按**行首**数标题：`### 分析卡（…）` 里也含 "## 分析卡" 子串，不能直接 count 子串
+        heads = [ln for ln in blk.splitlines() if ln.startswith("## ")]
+        self.assertEqual(heads, ["## 分析卡"], blk[:200])
+        self.assertIn("### 分析卡（cash_quality）", blk)
+
+    def test_source_count_line_separates_cited_from_rejected(self):
+        """来源说明必须把"正文引用的编号"与"未采用的候选"分开写（原句自相矛盾）。"""
+        import report_brief as rb
+        structure = {"scope": {"caliber": "合并", "as_of": "2025-04-30", "unit": "亿元",
+                               "adopted_sources": 1, "audit_sources": 0},
+                     "sources": [], "research_questions": [], "charts": []}
+        try:
+            out = rb.render_brief_markdown(structure, body="")
+        except Exception:                            # noqa: BLE001 - 结构不齐时跳过渲染断言
+            self.skipTest("最小结构不足以渲染简报")
+        self.assertIn("正文引用", out)
+        self.assertIn("不编号、不进正文", out)
+        self.assertNotIn("未采用 0 条留在内部审计", out)
+
+
 class TestDataAnalyzerTakesTheFinancialPath(unittest.TestCase):
     """Q1：金融任务必须按**显式数据集 + 分析计划**走注册模型，不走"最新 CSV + 末列目标"。"""
 

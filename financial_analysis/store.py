@@ -375,8 +375,15 @@ def render_card_block(run: ModelRun) -> str:
 
     outs = list(run.outputs or ())
     lines = [CARD_HEADING, ""]
+    _kind = ""
+    try:
+        from .report_adapter import card_traits
+        _kind = str(card_traits(run.model_id).get("kind") or "")
+    except Exception:                                  # noqa: BLE001 - 性质取不到就留空
+        _kind = ""
     lines.append(f"> 运行 run={run.run_id[:12]}（模型 {run.model_id} {run.model_version}；"
-                 f"数据集 {run.dataset_hash[:12]}；参数 {run.params_hash}；"
+                 + (f"性质 {_kind}；" if _kind else "")
+                 + f"数据集 {run.dataset_hash[:12]}；参数 {run.params_hash}；"
                  f"验证 {'通过' if (run.validation or {}).get('ok') else '未通过'}）")
     for o in outs:
         card = analysis_card(run, o.output_id)

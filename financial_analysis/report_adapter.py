@@ -24,6 +24,49 @@ def _signed(value: float | None, unit: str = "亿元") -> str:
     return f"{value:+,.2f}{unit}"
 
 
+# 卡片的**性质与下一步按模型给**（K3，2026-09-30）：此前"下一项验证动作"与"性质"对所有
+# 模型都是一句话——现金质量/情景的卡上写着"取得毛利线以下的利润表明细"，读者据此去补
+# 的材料跟这张卡要回答的问题无关（实机 `ui-603f626cbe` 的 cash_quality 卡）。
+_CARD_TRAITS: dict[str, dict[str, str]] = {
+    "profit_bridge": {
+        "kind": "会计分解",
+        "meaning": ("会计恒等式分解只说明金额构成；是否构成业务原因需要另行证据，"
+                    "算术校验不等于因果支持"),
+        "next_action": ("取得「毛利线以下」的利润表明细（费用/税项/投资收益/少数股东），"
+                        "再判断这一段由哪些项目构成"),
+    },
+    "cash_quality": {
+        "kind": "现金质量（观察比率）",
+        "meaning": ("经营现金流与归母净利润归属层不同：这是**观察比率**，不是现金流量表"
+                    "调节恒等式；差额里含营运资本变动、折旧摊销、减值等非现金项"),
+        "next_action": ("取得现金流量表附注（折旧摊销、营运资本变动、减值）与收款结算条款，"
+                        "再判断差额由哪些项目构成"),
+    },
+    "working_capital": {
+        "kind": "营运资金占用",
+        "meaning": "占款天数只说明周转快慢，不说明可回收性；账龄与坏账计提要另取证据",
+        "next_action": "取得应收/应付/存货的账龄与减值计提明细，再判断占款质量",
+    },
+    "scenario_sensitivity": {
+        "kind": "条件情景（假设成立时）",
+        "meaning": ("情景是**假设成立时**的条件推算：不显示发生概率，也不显示预测置信区间；"
+                    "假设由使用者设定，未披露的参数不得当成事实"),
+        "next_action": ("明确每条假设的来源与区间（谁设定、依据什么），"
+                        "并对最敏感的那一项做区间对照"),
+    },
+}
+_CARD_TRAITS_FALLBACK = {
+    "kind": "注册模型分析",
+    "meaning": "结论只在这份输入与这组假设下成立；换数据或换参数都会产生新的运行",
+    "next_action": "按模型说明补齐输入，或在面板上改假设后复算对照",
+}
+
+
+def card_traits(model_id: str) -> dict:
+    """该模型的卡片性质/意义/下一步（未注册的模型给通用文案，不冒充已知模型）。"""
+    return dict(_CARD_TRAITS.get(str(model_id or ""), _CARD_TRAITS_FALLBACK))
+
+
 def analysis_card(run, output_id: str = "") -> dict:
     """一张卡：字段齐备、性质明确、每个数字带 `output_id`。"""
     if run.status != RunStatus.VALIDATED:
@@ -45,8 +88,9 @@ def analysis_card(run, output_id: str = "") -> dict:
     named = "、".join(f"{c.get('label')} {_signed(c.get('value'), out.unit)}" for c in comps)
     unexplained = [c for c in comps if "未解释" in str(c.get("label") or "")
                    or "以下" in str(c.get("label") or "")]
+    traits = card_traits(run.model_id)
     return {
-        "kind": "会计分解",
+        "kind": traits["kind"],
         "status": run.status,
         "run_id": run.run_id,
         "output_id": out.output_id,
@@ -70,8 +114,7 @@ def analysis_card(run, output_id: str = "") -> dict:
                      "“观察成立、原因待证”**，不得把毛利率的百分点差当成金额归因"),
             "items": [c.get("label") for c in unexplained],
         },
-        "meaning": ("会计恒等式分解只说明金额构成；是否构成业务原因需要另行证据，"
-                    "算术校验不等于因果支持"),
+        "meaning": traits["meaning"],
         "assumptions": list(out.assumptions),
         "limits": list(out.limits),
         "reproduction": {
@@ -80,8 +123,7 @@ def analysis_card(run, output_id: str = "") -> dict:
             "dataset_hash": run.dataset_hash, "params_hash": run.params_hash,
             "validation": run.validation.get("checks") if run.validation else {},
         },
-        "next_action": ("取得「毛利线以下」的利润表明细（费用/税项/投资收益/少数股东），"
-                        "再判断这一段由哪些项目构成"),
+        "next_action": traits["next_action"],
     }
 
 

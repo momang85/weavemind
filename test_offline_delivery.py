@@ -1043,6 +1043,15 @@ class TestResearchFixedPathOffline(unittest.TestCase):
         from unittest import mock
         import material_intake as mi
         import orchestrator_v2 as ov
+        from adapters import cninfo
+
+        # orgId 映射是**进程级缓存**：同进程里先跑过别的用例时，替身 fetch 就轮不到它了
+        # （多文件同进程运行会踩到——本项目按"每文件一进程"跑，这里仍显式清一次，
+        #  让用例与运行顺序无关）
+        try:
+            cninfo.reset_cache()
+        except Exception:                        # noqa: BLE001 - 清缓存失败不影响用例
+            pass
 
         fetch = self._official_fetch(announcements)
         # 类属性是**取件钩子**（生产为 None → 真通道）；替身要包成 staticmethod，

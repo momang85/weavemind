@@ -13,6 +13,12 @@ import { Calculator, Download, GitCompare, RotateCcw, ShieldCheck, TriangleAlert
 type RunOutput = {
   output_id?: string; metric?: string; label?: string
   value?: number; unit?: string; output_period?: string; formula?: string
+  inputs?: string[]
+  basis?: {
+    fact_id?: string; metric?: string; period?: string; value?: number; unit?: string
+    caliber?: string; currency?: string; source_url?: string; derived_from?: string[]
+    formula_version?: string; verify_state?: string; resolved?: boolean
+  }[]
 }
 type Run = {
   run_id?: string; model_id?: string; status?: string; validation_ok?: boolean
@@ -150,11 +156,46 @@ export default function AnalysisWorkbenchPanel({ taskId, onAdopted }: {
         </div>
       )}
       {card && (
-        <div className="text-xs text-slate-300">
+        <div className="text-xs text-slate-300 space-y-1">
           <div className="text-slate-400">分析卡（已验证运行）</div>
           <div className="font-mono">
             {card.title}：{fmt(card.value, card.unit || '')}（run={String(card.run_id || '').slice(0, 12)}）
           </div>
+          {/* 原始依据：卡上的读数由哪些**包内观察**算出来（fact_id/期间/值/单位/口径/来源）。
+              取不到就写"未解析到观察"，不编来源。 */}
+          {(() => {
+            const cur = (state?.runs || []).find((r) => r.run_id === card.run_id)
+            const outs = cur?.outputs || []
+            const rows = outs.flatMap((o) => (o.basis || []).map((b) => ({ o, b })))
+            if (!rows.length) return null
+            return (
+              <details className="text-slate-400">
+                <summary className="cursor-pointer">原始依据（{rows.length} 条观察，可回溯）</summary>
+                <table className="mt-1 w-full text-left font-mono">
+                  <thead className="text-slate-500">
+                    <tr><th>指标</th><th>期间</th><th>值</th><th>口径</th><th>fact_id</th><th>来源</th></tr>
+                  </thead>
+                  <tbody>
+                    {rows.slice(0, 12).map(({ o, b }, i) => (
+                      <tr key={`${o.output_id}-${i}`}>
+                        <td>{b.metric || '—'}</td>
+                        <td>{b.period || '—'}</td>
+                        <td>{fmt(b.value, b.unit || '')}</td>
+                        <td>{b.caliber || '—'}</td>
+                        <td title={b.fact_id || ''}>{String(b.fact_id || '').slice(0, 12)}</td>
+                        <td className="truncate max-w-[16rem]" title={b.source_url || ''}>
+                          {b.resolved === false ? '未解析到观察' : (b.source_url || '—')}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {outs[0]?.formula && (
+                  <div className="mt-1 text-slate-500">算式：{outs[0].formula}</div>
+                )}
+              </details>
+            )
+          })()}
         </div>
       )}
       {state?.ok && (

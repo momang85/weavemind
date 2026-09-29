@@ -2701,9 +2701,15 @@ def render_brief_markdown(structure: dict, body: str = "",
     # 时效声明也必须是代码给的（模型不写也不能因此丢分）
     lines.append(f"> 报表口径：{sc.get('caliber') or '未声明'}；"
                  f"数据时效：截至 {sc.get('as_of') or '未声明'}；"
-                 f"单位：{sc.get('unit') or '见表中标注'}；"
-                 f"采用来源 {sc.get('adopted_sources', 0)} 条"
-                 f"（未采用 {sc.get('audit_sources', 0)} 条留在内部审计）。")
+                 f"单位：{sc.get('unit') or '见表中标注'}。")
+    # 来源编号说明（K3，2026-09-30）：此前写"采用来源 N 条（未采用 M 条留在内部审计）"，
+    # 与正文里的 `[n]` 编号对不上读者会以为矛盾。现在把**两件事分开写**：
+    # 正文引用的是编号清单（[1]…[N]，见『参考来源』），候选材料里没采用的只是一个数量，
+    # 明确"不编号、不进正文"。
+    lines.append(f"> 来源：正文引用 **{sc.get('adopted_sources', 0)}** 条"
+                 f"（编号见『参考来源』）；另有 "
+                 f"{sc.get('audit_sources', 0)} 条候选材料未采用（不编号、不进正文，"
+                 "只留在内部审计）。")
     lines.append("")
     # R3：**首屏先给二至三个关键判断**（观察/意义/依据/边界/下一步），完整逐问明细在
     # 紧随其后的『研究问题与下一步』；两处不重复打印同一组观察。
@@ -3029,6 +3035,13 @@ def render_brief_markdown(structure: dict, body: str = "",
     lines.append("")
     lines.append("## 分析")
     analysis = str(structure.get("analysis") or "").strip() or _analysis_section(body)
+    # **模型正文的标题降两级后再放进 `## 分析`**（K3，2026-09-30 实机 ui-603f626cbe）：
+    # 模型稿自带 `# 报告标题` 与 `## 一、概述/二、关键数据一览`，原样插入会与简报自己的
+    # `#`/`##` 平级——同一份交付里出现第二个一级标题、以及看起来"重复"的同名小节。
+    # 这里**只改层级、不动内容**：分析论证、边界与修订一字未删（不靠截断改善篇幅）。
+    # 放在这个装配点而不是 `_analysis_section` 里：`structure["analysis"]` 可能来自
+    # 别的入口（例如已是简报形态时走 `_brief_analysis_section`），两条路都要降级一次。
+    analysis = _demote_headings(analysis)
     lines.append(analysis if analysis else
                  "> 本次未产出可交付的分析正文（数据与底稿已保留，见文末）。")
     lines.append("")
@@ -3316,7 +3329,16 @@ def _analysis_card_block(task_id: str, *, ws_dir=None) -> str:
         main = [r for r in runs if not str(r.model_id).startswith("ratio:")]
         if not main:
             return ""
-        blocks = [_fa_store.render_card_block(r) for r in main[:2]]
+        # 多张卡**只出一个 `## 分析卡` 标题**（K3 实机：同一份交付里出现两个同名 `##`，
+        # 读者会以为重复装配）；每张卡降一级 `###` 并写明模型，便于按模型对照。
+        blocks: list[str] = []
+        for idx, r in enumerate(main[:2]):
+            block = _fa_store.render_card_block(r)
+            body = block.split("\n", 1)[1] if "\n" in block else ""
+            if idx == 0:
+                blocks.append(block.rstrip())
+            else:
+                blocks.append(f"### 分析卡（{r.model_id}）\n{body.rstrip()}")
         return "\n".join(blocks).rstrip() + "\n"
     except Exception as exc:                     # noqa: BLE001 - 渲染不出就不加这一节
         logger.warning("分析卡渲染失败（task=%s）：%s", task_id, str(exc)[:140])
@@ -3371,6 +3393,22 @@ def _brief_section(text: str, heading: str) -> str:
         if j >= 0:
             cut = min(cut, j)
     return rest[:cut].strip()
+
+
+def _demote_heading(line: str, *, levels: int = 2) -> str:
+    """标题降级：`# 标题` → `### 标题`（最多六级，不越界）。只改层级，不动文字。"""
+    s = str(line or "")
+    stripped = s.lstrip()
+    if not stripped.startswith("#"):
+        return s
+    hashes = len(stripped) - len(stripped.lstrip("#"))
+    return "#" * min(6, hashes + max(0, int(levels))) + stripped[hashes:]
+
+
+def _demote_headings(text: str, *, levels: int = 2) -> str:
+    """整段文本里的标题统一降级（逐行；非标题行原样保留）。"""
+    return "\n".join(_demote_heading(ln, levels=levels)
+                     for ln in str(text or "").splitlines())
 
 
 def _analysis_section(body: str) -> str:

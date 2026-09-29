@@ -24,11 +24,16 @@
 > 旧包 `81047fdf…` 标 historical（采纳 `f585edbf…`），冻结新包含 PDF/6 图/底稿/7 运行/3 输入
 > → **7/7 离线复算一致**（dataset_hash 与实机一致）；`ui-fa2cb73e59` 同样 7/7；旧包原地保留。
 >
-> **K3 分析工作台**（`e7deafe`）：`GET /analysis` + `POST /analysis/recompute`（新运行、
+> **K3 分析工作台**（`e7deafe` + 质量项）：`GET /analysis`（含**原始依据**：每个输出挂上它
+> 消费的包内观察 fact_id/期间/值/单位/口径/来源）+ `POST /analysis/recompute`（新运行、
 > 不自动采纳、参数越界 400、不适用如实说明）+ `POST /analysis/adopt`（只收已验证运行、走同一条
-> 装配路径）；页面新增 `AnalysisWorkbenchPanel`（分析卡→改假设→复算→前后对比→采纳→导出当前包）。
+> 装配路径）；页面新增 `AnalysisWorkbenchPanel`（分析卡→原始依据→改假设→复算→前后对比→采纳→导出当前包）。
 > 顺手修掉两处"改了不生效"：scenario 的声明参数名与 compute/gold 读取名不一致、`runner.run`
 > 未把参数交给独立验证（一改假设就 gold 判失败）。
+> **质量项（同资料新旧对照，`ui-603f626cbe`）**：一级标题 2→1、重复 `分析卡` 标题 2→0、
+> 卡片性质与"下一项验证动作"按模型各说各的（此前两张卡同一句、且都是利润桥那句）、
+> 来源说明把"正文引用编号"与"未采用候选"分开写（不再自相矛盾）、**散文内容丢失 0 行**
+> （只改层级与措辞，不截断分析）。读数 `docs/evidence/k3_quality_compare_ui-603f626cbe.json`。
 >
 > **门槛**：全量核对（CI 同源、每文件一进程）**53/53**；前端 `tsc --noEmit`、`npm run build`、
 > node 行为测试 60/60 全过。

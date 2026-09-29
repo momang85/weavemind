@@ -1,0 +1,44 @@
+{
+ "task_id": "ui-603f626cbe",
+ "adopted_identity": "f585edbf9e2aa35401ff3178bcbbbc4695c8aa26edeaad6855052b1514c9e06e",
+ "old": {
+  "chars": 12044,
+  "h1": 2,
+  "h2": 16,
+  "h3": 10,
+  "headings_total": 28,
+  "duplicate_headings": {
+   "分析卡": 2
+  },
+  "prose_lines": 26,
+  "duplicate_prose_lines": 0,
+  "duplicate_prose_sample": [],
+  "source_line": "采用来源 1 条",
+  "reference_entries": 1,
+  "gaps_mentioned": 34,
+  "cards": 2,
+  "next_actions": [
+   "取得「毛利线以下」的利润表明细（费用/税项/投资收益/少数股东），再判断这一段由哪些项目构成",
+   "取得「毛利线以下」的利润表明细（费用/税项/投资收益/少数股东），再判断这一段由哪些项目构成"
+  ]
+ },
+ "new": {
+  "chars": 11900,
+  "h1": 1,
+  "h2": 12,
+  "h3": 12,
+  "headings_total": 28,
+  "duplicate_headings": {},
+  "prose_lines": 25,
+  "duplicate_prose_lines": 0,
+  "duplicate_prose_sample": [],
+  "source_line": "正文引用 **1** 条",
+  "reference_entries": 1,
+  "gaps_mentioned": 32,
+  "cards": 3,
+  "next_actions": [
+   "取得「毛利线以下」的利润表明细（费用/税项/投资收益/少数股东），再判断这一段由哪些项目构成",
+   "取得现金流量表附注（折旧摊销、营运资本变动、减值）与收款结算条款，再判断差额由哪些项目构成"
+  ]
+ }
+}

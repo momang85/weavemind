@@ -5663,12 +5663,24 @@ def _analysis_workbench(tid: str) -> dict:
         out["reason"] = f"分析包不可用：{str(exc)[:120]}"
         return out
     inputs = fa_store.load_inputs(ws)
+    # **原始依据索引**（K3 明文要求"查看分析卡**和原始依据**"）：把包内观察按 fact_id 索引，
+    # 供每个输出挂上它实际消费的观察（fact_id/期间/值/单位/口径/来源/血缘），
+    # 读者能顺着卡走到原始观察，而不是只看到一句结论。
+    _obs_by_fact: dict[str, dict] = {}
+    try:
+        _ds_blob = ((inputs.get("dataset") or {}).get("dataset") or {})
+        for o in (_ds_blob.get("observations") or ()):
+            if isinstance(o, dict) and o.get("fact_id"):
+                _obs_by_fact[str(o["fact_id"])] = o
+    except Exception as exc:                        # noqa: BLE001 - 索引建不出不影响其它字段
+        logger.warning("原始依据索引构建失败（task=%s）：%s", tid, str(exc)[:120])
     out["inputs"] = {
         "present": sorted(fa_store.input_payload_bytes(ws)),
         "dataset_hash": str((inputs.get("dataset") or {}).get("dataset_hash") or ""),
         "dataset_source": (inputs.get("context") or {}).get("dataset_source") or {},
         "contract": (inputs.get("context") or {}).get("contract") or {},
         "recomputable": bool((inputs.get("dataset") or {}).get("dataset")),
+        "observations": len(_obs_by_fact),
     }
     if not out["inputs"]["recomputable"]:
         out["reason"] = ("该任务没有可复算输入（analysis/dataset.json）："
@@ -5703,7 +5715,17 @@ def _analysis_workbench(tid: str) -> dict:
                          "value": o.get("value"), "unit": str(o.get("unit") or ""),
                          "output_period": str(o.get("output_period") or ""),
                          "formula": str(o.get("formula") or ""),
-                         "inputs": list(o.get("inputs") or [])}
+                         "inputs": list(o.get("inputs") or []),
+                         # 原始依据：这条输出的每个输入 fact 在**包内观察**里的样子
+                         # （取不到就留空占位——不编来源）
+                         "basis": [
+                             {k: _obs_by_fact.get(str(fid), {}).get(k) for k in
+                              ("fact_id", "metric", "period", "value", "unit", "caliber",
+                               "currency", "source_url", "source_hash", "derived_from",
+                               "formula_version", "verify_state", "note")}
+                             | {"resolved": str(fid) in _obs_by_fact}
+                             for fid in (o.get("inputs") or ())[:8]
+                         ]}
                         for o in (r.get("outputs") or ())],
             "assumptions": list(r.get("assumptions") or ()) if isinstance(
                 r.get("assumptions"), (list, tuple)) else [],
