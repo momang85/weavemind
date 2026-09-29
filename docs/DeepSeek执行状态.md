@@ -52,6 +52,18 @@
 > 全量扫描另行报告。② 巨潮"接口未连通"（`adapters/cninfo.py` 旧 docstring、
 > `disclosure_ingest.discover()` 旧实现与对应用例）已按实机更正。
 >
+> **推送与 CI**：`a441c0d`/`116ae65` 已推送到 `origin/main`；**CI 全绿**
+> （run `36559669470`：backend 9m38s ✓ / clean-env-e2e ✓ / docker-image ✓ / frontend ✓）。
+> 仓库自 09-27 起 CI 一直是红的（长期未推 + 两个与本次无关的环境假设），本批把它跑绿了。
+> CI 顺带抓出**两个我自己写的环境依赖**（本地全绿、Linux/UTC 才现形）：
+> ① 披露日按宿主时区换算 → UTC 机器退回一天（`2025-04-17 != 2025-04-18`）：改为
+> **交易所本地时区 UTC+8**，并补"时区无关"用例；② 租约测试假设单调钟 > 1 小时
+> （CI runner 刚开机，`monotonic()-3600` 变负数 → `age=None` → `NoneType > int`）：
+> 改为**固定时钟**造过期租约，并另写一个"把小钟压到 12.5 秒"的复现脚本验证环境无关。
+> **`clean-env-e2e` 首次通过**——"干净机同包完整链"这条待办由 CI 覆盖。
+> 全量扫描（一文件一进程）：52 个文件改动后 52/52 OK（`test_deploy_manifest` 需先
+> `git add` 新文件——它正是为"目录被 .gitignore 吞掉"设的闸门，本轮先红后绿）。
+>
 > **未验/缺口**：取件 30s 上限对 4–5 MB 年报偏紧（三一/洋河首次取件超时，重试一次成功；
 > 现在**明确重试并留痕**，不再悄悄降级到摘要）；上交所公告查询仍 200+空数组；港股
 > `00700.HK` 仍 `URLError 10061`；`Observation` 仍未承载 `derived_from`；
@@ -66,8 +78,8 @@
 > `material_intake` 直链取件全部准入 + 忠实替身下旧实现必失败。
 > **全量扫描（一文件一进程）**：52 个文件，改动后 **52/52 OK**（其中 `test_deploy_manifest`
 > 需先 `git add` 新文件——它自己就是为"目录被 .gitignore 吞掉"设的闸门，本轮先红后绿）。
-> **推送**：`87eb855` 已推送到 `origin/main`（token 已含 `workflow` scope，用户已办），
-> `main...origin/main` 无领先/落后；GitHub Actions 因仓库长期未推而首次跑上本批提交。
+> **推送**：`116ae65` 已推送到 `origin/main`（token 已含 `workflow` scope，用户已办），
+> `main...origin/main` 无领先/落后。
 >
 > ## 历史（`e033a6d` 及以前，按日期保留）
 >
