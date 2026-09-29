@@ -72,6 +72,7 @@ class Budget:
         self.calls_left = int(calls)
         self.deadline = time.monotonic() + float(seconds)
         self.used = 0
+        self.refused = 0
 
     def time_left(self) -> float:
         return max(0.0, self.deadline - time.monotonic())
@@ -86,6 +87,10 @@ class Budget:
         self.calls_left -= 1
         self.used += 1
         return max(1.0, min(self.time_left(), 20.0))
+
+    def take_refused(self) -> None:
+        """记一次"按截止拒绝出发"：**不消耗额度**（没发请求就不该记账）。"""
+        self.refused += 1
 
 
 def classify_error(exc: BaseException) -> str:
@@ -240,18 +245,24 @@ def environment_facts() -> dict:
     }
 
 
-def _budget_check(rec: dict, budget: Budget, elapsed: float) -> dict:
+def _budget_check(rec: dict, budget: Budget, elapsed: float,
+                  *, allowance: float | None = None) -> dict:
     """单次探测超时即如实标注：诊断自己也不许把"跑超了"写成正常。
 
     实测教训：包内 ddgs 一次调用 90 秒，冲穿了 60 秒预算，后续探测全部拿不到时间。
     所以每次调用后核对实际耗时，超了就改判 timeout 并把原因写清楚。
+
+    `allowance`：本次调用**被允许**的秒数（`min(剩余, 提供方上限)`）。同步 SDK 没法中途
+    取消，"回来晚了"只能事后如实记账——但绝不能记成正常返回（Q0：DDGS 卡住不得读成成功）。
     """
-    allowance = budget.time_left()
-    if elapsed > MAX_SECONDS or (budget.expired() and elapsed > 8.0):
+    allowance = budget.time_left() if allowance is None else float(allowance)
+    over = (elapsed > MAX_SECONDS or (budget.expired() and elapsed > 8.0)
+            or elapsed > allowance + 0.25)
+    if over:
         rec = dict(rec)
         rec["status"] = "timeout"
-        rec["reason"] = (f"单次调用耗时 {elapsed:.1f}s，超出本轮诊断预算"
-                         f"（≤{MAX_SECONDS:.0f}s / 剩余 {allowance:.1f}s）；"
+        rec["reason"] = (f"单次调用耗时 {elapsed:.1f}s，超出本次允许 {allowance:.1f}s"
+                         f"（本轮预算 ≤{MAX_SECONDS:.0f}s / 剩余 {budget.time_left():.1f}s）；"
                          f"原状态 {rec.get('status')}")
         rec["overran_budget"] = True
     return rec
@@ -271,12 +282,26 @@ def _probe_record(channel: str, *, status: str, host: str = "", provider: str = 
 
 
 def probe_search_html(budget: Budget) -> dict:
-    """搜索通道①：Bing HTML（项目既有函数，固定主机白名单）。"""
+    """搜索通道①：Bing HTML（项目既有函数，固定主机白名单）。
+
+    **诊断也不得抬高剩余预算**（Q0 复核）：本轮的剩余时间当**上限**传下去；剩余时间低于
+    该提供方可行下限就**一个请求都不发**（记 `refused_budget`），而不是让固定的
+    12/15 秒默认值把诊断拖过预算。
+    """
+    from adapters.search_runner import provider_min_wait, provider_timeout
+    left = budget.time_left()
+    floor = provider_min_wait("bing")
+    if left < floor:
+        budget.take_refused()
+        return _probe_record("search_html", status="refused_budget", host="www.bing.com",
+                             reason=(f"剩余 {left:.2f}s 低于 bing 可行下限 {floor:.2f}s："
+                                     f"拒绝发出该请求（不留后台出网）"))
     t0 = time.monotonic()
     try:
         budget.take()
         from adapters import text_search
-        html = text_search._fetch_bing_html(PUBLIC_SAMPLE)
+        html = text_search._fetch_bing_html(
+            PUBLIC_SAMPLE, timeout=provider_timeout("bing", left))
         blocks = len(text_search._BING_BLOCK_RE.findall(html or ""))
         if looks_like_challenge(str(html or "")[:2000]):
             return _probe_record("search_html", status="challenge", host="www.bing.com",
@@ -321,6 +346,21 @@ def probe_search_sdk(budget: Budget) -> dict:
                                     "不发请求（无效后端名会触发 auto 全扫）",
                              elapsed=time.monotonic() - t0, http_unknown=True,
                              extra=watch)
+    from adapters.search_runner import provider_min_wait
+    # **不得抬高剩余预算**（Q0 复核）：旧实现 `max(3.0, min(left, 8.0))` 在只剩 0.5s 时
+    # 也会打一次最长 3 秒的同步 SDK 调用——诊断自己把预算冲穿，后续探测全没时间。
+    # 现在的口径与生产执行器一致：剩余时间当上限；低于可行下限就**一个请求都不发**
+    # （也不占额度：拒绝发生在 `budget.take()` **之前**）。
+    left = budget.time_left()
+    floor = provider_min_wait("ddgs")
+    if left < floor:
+        budget.take_refused()
+        return _probe_record("search_sdk", status="refused_budget", provider="ddgs",
+                             backend=engine,
+                             reason=(f"剩余 {left:.2f}s 低于 ddgs 可行下限 {floor:.2f}s："
+                                     f"拒绝发出该请求（同步 SDK 无法中途取消）"),
+                             http_unknown=True, extra=watch)
+    wait = min(left, 8.0)
     try:
         budget.take()
     except RuntimeError as exc:
@@ -328,7 +368,6 @@ def probe_search_sdk(budget: Budget) -> dict:
                              backend=engine, reason=str(exc),
                              elapsed=time.monotonic() - t0, http_unknown=True,
                              extra=watch)
-    wait = max(3.0, min(budget.time_left(), 8.0))
     try:
         from ddgs import DDGS
     except Exception as exc:
@@ -346,13 +385,13 @@ def probe_search_sdk(budget: Budget) -> dict:
                             http_unknown=True,
                             reason="" if n else "SDK returned zero items",
                             extra=watch)
-        return _budget_check(rec, budget, elapsed)
+        return _budget_check(rec, budget, elapsed, allowance=wait)
     except Exception as exc:
         elapsed = time.monotonic() - t0
         rec = _probe_record("search_sdk", status=classify_error(exc), provider="ddgs",
                             backend=engine, reason=str(exc), elapsed=elapsed,
                             http_unknown=True, extra=watch)
-        return _budget_check(rec, budget, elapsed)
+        return _budget_check(rec, budget, elapsed, allowance=wait)
 
 
 def _advertised_backends() -> list:

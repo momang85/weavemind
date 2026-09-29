@@ -855,6 +855,133 @@ class TestBoundedSearchRunner(unittest.TestCase):
                         f"总截止未被执行：预算 {budget}s，实际 {elapsed:.4f}s")
         self.assertTrue(resp.closed, "到点必须放掉连接（不再继续出网）")
 
+    def test_chunked_slow_head_is_bounded_on_a_real_http_response(self):
+        """Q0 反例：**真实** `http.client.HTTPResponse` 的 chunked 慢分块头。
+
+        分块头由 `HTTPResponse._get_chunk_left() → fp.readline()` 读取，而 `readline`
+        是**一次调用、内部连续 recv 直到换行**——只在 `read1` 返回之后查钟，等于让分块头
+        自己决定何时返回。改前实测（预算 0.02s）：
+
+        | 形状 | 改前 | 现在 |
+        |---|---|---|
+        | 分块头 6 字节、每 5ms 一字节 | 0.0269s | 0.0218s |
+        | 分块头 6 字节、每 20ms 一字节 | **0.1022s** | 0.0203s |
+        | 分块头 60 字节、每 5ms 一字节 | **0.3182s** | 0.0217s |
+
+        只检测 `read1` 存在、或只把剩余时间传给 socket，都挡不住这种形状。
+        """
+        import http.client
+        import socket
+        import threading
+
+        def _run(chunk_line: bytes, drip: float) -> float:
+            srv, cli = socket.socketpair()
+            self.addCleanup(srv.close)
+            self.addCleanup(cli.close)
+            srv.sendall(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+            resp = http.client.HTTPResponse(cli)
+            resp.begin()
+            payload = chunk_line + b"x" * 31 + b"\r\n0\r\n\r\n"
+
+            def _feed():
+                try:
+                    for i in range(len(payload)):
+                        time.sleep(drip)
+                        srv.sendall(payload[i:i + 1])
+                except Exception:                      # noqa: BLE001
+                    pass
+                finally:
+                    try:
+                        srv.shutdown(socket.SHUT_WR)
+                    except Exception:                  # noqa: BLE001
+                        pass
+
+            threading.Thread(target=_feed, daemon=True).start()
+            budget = 0.02
+            t0 = time.monotonic()
+            with self.assertRaises(TimeoutError):
+                self.sr.read_with_deadline(resp, t0 + budget)
+            return time.monotonic() - t0
+
+        for name, chunk, drip in (("短分块头 6B@20ms", b"1f\r\n", 0.02),
+                                  ("长分块头 60B@5ms", b"1f;" + b"e" * 53 + b"\r\n", 0.005)):
+            elapsed = _run(chunk, drip)
+            self.assertLess(elapsed, 0.02 + 0.05,
+                            f"{name}：总截止未被执行，用时 {elapsed:.4f}s（预算 0.02s）")
+
+    def test_wrapping_the_response_stream_does_not_lose_prefetched_body(self):
+        """套截止线**不能丢数据**：`begin()` 可能已把正文预读进缓冲，必须照样读全。
+
+        （包装是从**原 fp** 读、不是绕过它读 socket；这条用例守住那个选择。）
+        """
+        import http.client
+        import socket
+
+        body = b"hello world"
+        cases = (
+            ("content-length 同包到达",
+             b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(body), body),
+            ("chunked 完整体",
+             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n",
+             b"5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"),
+        )
+        for name, head, payload in cases:
+            srv, cli = socket.socketpair()
+            self.addCleanup(srv.close)
+            self.addCleanup(cli.close)
+            srv.sendall(head + payload)               # 头与体一个包发出 → 预读
+            resp = http.client.HTTPResponse(cli)
+            resp.begin()
+            got = self.sr.read_with_deadline(resp, time.monotonic() + 3.0)
+            self.assertEqual(got, body, name)
+
+    def test_diagnostics_never_raise_the_remaining_budget(self):
+        """Q0：诊断也不得抬高剩余预算，低于可行下限**一个请求都不发**（且不占额度）。
+
+        反例：`search_diag.probe_search_sdk` 旧实现 `max(3.0, min(left, 8.0))`——
+        只剩 0.5s 时照样打一次最长 3 秒的同步 SDK 调用，把后面的探测全挤掉。
+        """
+        import search_diag as sd
+        from adapters.search_runner import provider_min_wait
+
+        b = sd.Budget(calls=6, seconds=60.0)
+        b.deadline = time.monotonic() + 0.4          # < ddgs 下限 1.0s
+        calls_before = b.calls_left
+        sdk = sd.probe_search_sdk(b)
+        self.assertEqual(sdk["status"], "refused_budget", sdk)
+        self.assertEqual(b.refused, 1)
+        self.assertEqual(b.calls_left, calls_before, "没发请求就不该消耗额度")
+        html = sd.probe_search_html(b)
+        self.assertEqual(html["status"], "refused_budget", html)
+        self.assertEqual(b.calls_left, calls_before)
+        # 剩余时间够时：SDK 超时 = min(剩余, 8)，不得被抬到 3 秒下限以上
+        import types
+        seen = {}
+
+        class _FakeDDGS:
+            def __init__(self, timeout=None):
+                seen["timeout"] = timeout
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def text(self, *a, **k):
+                return [{"title": "t", "href": "http://e.example/1", "body": "b"}]
+
+        mod = types.ModuleType("ddgs")
+        mod.DDGS = _FakeDDGS
+        with mock.patch.dict("sys.modules", {"ddgs": mod}):
+            b2 = sd.Budget(calls=6, seconds=60.0)
+            b2.deadline = time.monotonic() + 3.0
+            rec = sd.probe_search_sdk(b2)
+        self.assertEqual(rec["status"], "ok", rec)
+        self.assertLessEqual(seen["timeout"], 3.0,
+                             f"SDK 超时不得高于剩余时间：{seen['timeout']}")
+        self.assertGreaterEqual(seen["timeout"], provider_min_wait("ddgs"))
+
     def test_refuses_to_issue_below_provider_floor(self):
         """剩余时间低于该提供方可行下限：一个请求都不发，且不消耗调用额度。"""
         calls = []

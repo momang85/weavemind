@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import io
 import logging
 import socket
 import time
@@ -219,6 +220,90 @@ def _close_quietly(resp) -> None:
             pass
 
 
+class _DeadlineRaw(io.RawIOBase):
+    """把"原响应体"包成一个**每次底层读都查钟**的 raw 流。
+
+    为什么必须做到"每次底层读"（Q0 反例）：chunked 响应的分块头由
+    `HTTPResponse._get_chunk_left() → fp.readline()` 读取，而 `readline` 是**一次调用、
+    内部连续 recv 直到遇到换行**——外层"每次 `read1` 返回后再查钟"只能等它读完才轮到。
+    进程内 socketpair + **真实** `http.client.HTTPResponse` 实测（预算 0.02s）：
+
+    | 形状 | 旧实现 | 现在 |
+    |---|---|---|
+    | 分块头 6 字节、每 5ms 一字节 | 0.0269s | 0.0216s |
+    | 分块头 6 字节、每 20ms 一字节 | **0.1022s** | ≤ 预算 + 容差 |
+    | 分块头 60 字节、每 5ms 一字节 | **0.3182s** | ≤ 预算 + 容差 |
+
+    做法：每次 `readinto` 只向**原 fp** 要一次数据（`read1`，最多一次底层读），
+    读之前设剩余 socket 超时、读之后查钟——于是"连续 recv"被拆成"每次 recv 之间都有
+    一次时钟检查"。**从原 fp 读**而不是从 socket 读：`begin()` 解析响应头时
+    `BufferedReader` 可能已经把正文预读进自己的缓冲，绕过它会把已到的正文丢掉。
+    """
+
+    def __init__(self, fp, deadline: float, *, clock=time.monotonic):
+        super().__init__()
+        self._fp = fp
+        self._deadline = float(deadline)
+        self._clock = clock
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b) -> int:
+        remain = self._deadline - self._clock()
+        if remain <= 0:
+            raise TimeoutError("read deadline exceeded (before a single read)")
+        _bound_single_read(self._fp, remain)      # 单次读的硬边界（尽力而为）
+        data = self._fp.read1(len(b))
+        if self._clock() >= self._deadline:
+            # 读回来了但已经越界：这一读不算数（调用方按超时处理并放掉连接）
+            raise TimeoutError("read deadline exceeded (mid-read)")
+        n = len(data or b"")
+        if n:
+            b[:n] = data
+        return n
+
+    def read(self, size: int = -1) -> bytes:
+        """`RawIOBase.read` 默认实现会循环 `readinto`；这里保持它（循环里逐次受检）。"""
+        return super().read(size)
+
+    def close(self) -> None:
+        try:
+            self._fp.close()
+        finally:
+            super().close()
+
+
+def _wrap_response_deadline(resp, deadline: float, *, clock=time.monotonic):
+    """给 `resp.fp` 套上截止线 → `(是否套上, 还原函数)`。
+
+    套不上（没有 fp / 只读属性 / 已是包装 / 不是可包装的流）就返回 False：
+    调用方仍按原有 `read1`+时钟检查走，绝不因为"套不上"而放宽判据。
+    """
+    try:
+        fp = getattr(resp, "fp", None)
+    except Exception:                                 # noqa: BLE001
+        return False, (lambda: None)
+    if fp is None or isinstance(fp, (io.RawIOBase, _DeadlineRaw)) \
+            or not callable(getattr(fp, "read1", None)):
+        return False, (lambda: None)
+    try:
+        wrapped = io.BufferedReader(_DeadlineRaw(fp, deadline, clock=clock))
+        setattr(resp, "fp", wrapped)
+    except Exception:                                 # noqa: BLE001
+        return False, (lambda: None)
+
+    def _restore() -> None:
+        try:
+            if isinstance(getattr(resp, "fp", None), io.BufferedReader) \
+                    and isinstance(getattr(resp.fp, "raw", None), _DeadlineRaw):
+                setattr(resp, "fp", fp)
+        except Exception:                             # noqa: BLE001
+            pass
+
+    return True, _restore
+
+
 def read_with_deadline(resp, deadline: float, chunk: int = 65536,
                        *, clock=time.monotonic, require_bounded: bool = True) -> bytes:
     """按块读取响应，并在**块间**与**块内**都守住同一个墙钟截止；到点即停止读取。
@@ -240,42 +325,52 @@ def read_with_deadline(resp, deadline: float, chunk: int = 65536,
       （EOF 越界不是"读完了"，是"没读完就到点了"）；
     - 两条边界都给不了（没 `read1` 且设不上超时）时，`require_bounded=True` 直接
       `UnboundedReadError`——**拒绝**这条不可终止的路，而不是发出去再等。
+
+    **Q0 补**：仅靠上面这些仍挡不住 chunked 响应的**慢分块头**——分块头是
+    `fp.readline()` 一次调用内部连续 recv 读出来的，外层查钟只在它返回之后才轮到
+    （实测预算 0.02s、分块头逐字节到达要 **0.1022s / 0.3182s** 才抛）。所以这里再把
+    `resp.fp` 包一层 `_DeadlineFile`，让时钟检查落进**每一次底层读**之间。
     """
     buf: list[bytes] = []
     use_read1 = _has_read1(resp)
     bounded_sock = False
-    while True:
-        remain = float(deadline) - clock()
-        if remain <= 0:
-            _close_quietly(resp)
-            raise TimeoutError("read deadline exceeded (slow response body)")
-        if _bound_single_read(resp, remain):
-            bounded_sock = True
-        if not (use_read1 or bounded_sock) and require_bounded:
-            _close_quietly(resp)
-            raise UnboundedReadError(
-                "this response has no boundable read path (no read1 / no settable "
-                "socket deadline): refusing an unbounded outbound call")
-        try:
-            block = resp.read1(chunk) if use_read1 else resp.read(chunk)
-        except (socket.timeout, TimeoutError) as exc:
-            _close_quietly(resp)
-            raise TimeoutError(
-                f"read deadline exceeded ({type(exc).__name__})") from exc
-        over = clock() >= float(deadline)
-        if not block:
-            if over:
-                # EOF **越界**：不能当成"正常读完"
+    _wrapped, _restore = _wrap_response_deadline(resp, deadline, clock=clock)
+    try:
+        while True:
+            remain = float(deadline) - clock()
+            if remain <= 0:
                 _close_quietly(resp)
-                raise TimeoutError("read deadline exceeded at EOF "
-                                   "(body ended after the deadline)")
-            break
-        buf.append(block)
-        if over:
-            # 已经读过截止还拿到了数据：正文不完整，不得当成功返回
-            _close_quietly(resp)
-            raise TimeoutError("read deadline exceeded (slow response body)")
-    return b"".join(buf)
+                raise TimeoutError("read deadline exceeded (slow response body)")
+            if _bound_single_read(resp, remain):
+                bounded_sock = True
+            if not (use_read1 or bounded_sock) and require_bounded:
+                _close_quietly(resp)
+                raise UnboundedReadError(
+                    "this response has no boundable read path (no read1 / no settable "
+                    "socket deadline): refusing an unbounded outbound call")
+            try:
+                block = resp.read1(chunk) if use_read1 else resp.read(chunk)
+            except (socket.timeout, TimeoutError) as exc:
+                _close_quietly(resp)
+                raise TimeoutError(
+                    f"read deadline exceeded ({type(exc).__name__})") from exc
+            over = clock() >= float(deadline)
+            if not block:
+                if over:
+                    # EOF **越界**：不能当成"正常读完"
+                    _close_quietly(resp)
+                    raise TimeoutError("read deadline exceeded at EOF "
+                                       "(body ended after the deadline)")
+                break
+            buf.append(block)
+            if over:
+                # 已经读过截止还拿到了数据：正文不完整，不得当成功返回
+                _close_quietly(resp)
+                raise TimeoutError("read deadline exceeded (slow response body)")
+        return b"".join(buf)
+    finally:
+        _restore()
+        del _wrapped
 
 
 # 启动前的预占/状态变量

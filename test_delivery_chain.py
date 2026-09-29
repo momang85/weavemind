@@ -8742,6 +8742,67 @@ class TestPeriodVersusDisclosureSemantics(unittest.TestCase):
         # 纯资料截止日语境不算期间冲突
         self.assertEqual(c.conflicting_periods("资料截至 2025-04-30 的合并报表"), [])
 
+    def test_canonical_half_year_report_name_conflicts_with_an_annual_contract(self):
+        """Q0 反例：**正式名**「半年度报告」从年度契约里漏过去（口语简称"半年报"却在列）。
+
+        实测（审查复核）：`2024年半年度报告` 通过年度契约文本检查——年份在 `periods` 里，
+        而期间词表只有"半年报"。文本层是**辅助**判据，但它是查询准入与"不适用"标注的入口，
+        漏掉正式名等于让半年度材料冒充年度期间。
+        """
+        c = self._contract()
+        for bad in ("洋河股份2024年半年度报告 全文", "洋河股份 2024年半年度报告",
+                    "洋河股份2024年中期报告", "公司披露 2024 年半年度报告"):
+            hits = c.conflicting_periods(bad)
+            self.assertTrue(hits, f"正式名未被判冲突：{bad}")
+            self.assertFalse(c.query_in_contract(bad)[0], bad)
+        # 正式名在列之后，口语简称仍照旧冲突
+        self.assertTrue(c.conflicting_periods("洋河股份2024年半年报"))
+
+    def test_inverted_report_word_before_the_year_conflicts(self):
+        """Q0 反例：**倒装**（报告期词在前、年份在后）`年度报告2025公告` 漏过年度契约。
+
+        旧实现只看"年份**后面**"的报告期词，倒装写法因此整条放行。判据要求**紧邻**，
+        且年份后若是"年X月"这类日期则那一年是披露时间（合法）——
+        所以 `2024年度报告2025年4月公告` 仍然放行。
+        """
+        c = self._contract()
+        self.assertTrue(c.conflicting_periods("洋河股份 年度报告2025公告"),
+                        "倒装年份未被判冲突")
+        self.assertFalse(c.query_in_contract("洋河股份 年度报告2025公告")[0])
+        self.assertTrue(c.conflicting_periods("洋河股份 半年度报告2024"))
+        # 反向正例：披露语境与目标期间都不受影响
+        for good in ("洋河股份2024年度报告，2025年4月披露",
+                     "洋河股份2024年度报告2025年4月公告",
+                     "洋河股份 2024 年年度报告（2025 年 4 月 28 日披露）",
+                     "年度报告2024"):
+            self.assertEqual(c.conflicting_periods(good), [], good)
+
+    def test_hard_boundary_is_structured_ingestion_not_the_text_hint(self):
+        """Q0：期间/类型的**硬边界**在结构化摄取，文本检查只是辅助。
+
+        `disclosure_ingest` 用**文档自己的**报告期（标题里的"2024年年度报告"）判定；
+        半年度/倒装标题取不到报告期 → 按 `period_unknown` 拒绝（fail-closed），
+        而不是"正文里出现过 2024 就算 2024 年年度报告"。
+        """
+        from adapters import disclosure_ingest as di
+        from narrative_evidence import _doc_period
+        base = {"title": "洋河股份2024年年度报告", "url": "https://www.cninfo.com.cn/x.pdf",
+                "text": "洋河股份 2024 年年度报告 营业收入 288.76 亿元", "pages": 1,
+                "published_at": "2025-04-28", "official": True}
+        for title in ("洋河股份2024年半年度报告", "洋河股份 年度报告2025公告"):
+            self.assertEqual(_doc_period(title), "",
+                             f"半年度/倒装标题不得被读成年度报告期：{title}")
+            out = di.ingest(dict(base, title=title), company="洋河股份",
+                            company_code="002304.SZ", periods=[2023, 2024],
+                            as_of="2025-04-30")
+            self.assertEqual(out["status"], di.REJECTED, out)
+            self.assertIn(out["reason"], (di.REJECT_PERIOD_UNKNOWN, di.REJECT_PERIOD), out)
+        # 正例：报告期 2024 + 次年披露日 → 仍按年度契约通过期间与截止
+        self.assertEqual(_doc_period("洋河股份2024年年度报告"), "2024")
+        out = di.ingest(dict(base), company="洋河股份", company_code="002304.SZ",
+                        periods=[2023, 2024], as_of="2025-04-30")
+        self.assertNotIn(out["status"], (di.REJECTED,), out)
+
 
 class TestExecutionContractThroughReviewAndDispatch(unittest.TestCase):
     """批次B：资料契约（主体/代码/期间/as_of/文档类型）穿过 Critic 修订到实际派发。
