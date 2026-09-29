@@ -1,11 +1,14 @@
 # DeepSeek 执行状态
 
-> ## 当前账（2026-09-29 · HEAD `a8359c2`）——**只这一段是当前状态**
+> ## 当前账（2026-09-29 · HEAD `3903945`）——**只这一段是当前状态**
 >
-> **基线**：Q0 前 `5fe791e`；本批三个提交 `046f3b2`（派生输出语义/正文匹配/位置对齐）→
-> `523d4c6`（旧 owner 失租闸门）→ `a8359c2`（检索总截止 + 资料期间）。
-> 三个提交各自带证据：`docs/evidence/q0_derived_output_semantics_20260929.md`、
-> `q0_owner_lease_gate_20260929.md`、`q0_search_deadline_and_period_20260929.md`。
+> **基线**：Q0 前 `5fe791e`；本批六个提交
+> `046f3b2`（派生输出语义/正文匹配/位置对齐）→ `523d4c6`（旧 owner 失租闸门）→
+> `a8359c2`（检索总截止 + 资料期间）→ `4bc8834`/`d4d3946`（证据账更正）→
+> `3903945`（Q1 包：冻结数据集 + 利润桥接）。证据：
+> `docs/evidence/q0_derived_output_semantics_20260929.md`、`q0_owner_lease_gate_20260929.md`、
+> `q0_search_deadline_and_period_20260929.md`、`q0_ci_and_second_company_20260929.md`、
+> `q1_frozen_dataset_and_profit_bridge_20260929.md`。
 >
 > ### CI 状态（**更正**：本仓库**有** CI，不是"没配"）
 >
@@ -33,8 +36,14 @@
 >   → **0.0203s/0.0217s**；`search_diag` 不再抬预算（低于下限零请求、不占额度）。
 > - **Q0-④**：正式名「半年度报告」与倒装「年度报告2025公告」改判冲突；次年披露正例仍放行；
 >   硬边界在结构化摄取（`disclosure_ingest` 按文档自身报告期判定）。
+> - **Q1 第一片**（`3903945`）：`financial_analysis/` 十个文件——冻结数据集（冲突值不择一、
+>   真实零与缺失分开、非年度期间不组年度对）、注册表（唯一入口 + 算子白名单）、
+>   利润桥接（Δ归母净利 = Δ毛利 + Δ毛利线以下，闭合差精确 0）、独立验证（Decimal 手算金样
+>   + 恒等式 + 禁百分点替代）、分析卡/图（共用 run_id）。真机冻结样本只读复算：
+>   dataset_hash `56c2c9dd…`、run `validated`、**-33.43 / -38.01 / +4.58 亿元**。
 > - 定向套件：`test_delivery_chain` 403、`test_p0` 434、`test_search_quality_unified` 80、
 >   `test_startup_readiness` 68、`test_offline_delivery` 34、`test_orchestrator_v2` 81、
+>   `test_financial_analysis` **28**、`test_deploy_manifest` 39（CI 48→49 步 == 49 个测试文件）、
 >   `test_r0_boundaries` 47、`test_narrative_evidence` 68、`test_financial_chain` 36 —— 逐文件 OK。
 >
 > ### 未验（**不是**"只剩环境项"，逐条说清）
@@ -53,11 +62,18 @@
 > 6. 真实外网检索路径的截止表现（本轮全部进程内替身）；DDGS 同步 SDK 卡住仍只能事前拒绝+事后记账；
 >    `urlopen` 响应头阶段的总截止未改。
 > 7. C3 仍"部分实现"、C4 仍未毕业（银行门禁/人审/发布均未变）。
+> 8. **Q1 端到端同版绑定未做**：分析卡/图在包内共用 `run_id`，但
+>    `report_brief`/`delivery_pipeline`/冻结包还**没有**消费
+>    `financial_analysis.report_adapter.delivery_binding()`；`data_analyzer_worker`
+>    也还没按显式数据集/分析计划调用本包（架构要求取消"猜最新 CSV/目标列"的金融路径）。
 >
 > ### 下一步
 >
-> Q0 剩余只有"第二家公司真实资料（正常入口、确定性摄取）"，随后按文件推进 **Q1**：
-> `financial_analysis/` 最小契约 → 冻结数据集 → 注册模型 → 独立验证 → 利润分析卡/图 → 同版交付。
+> ① 把 `delivery_binding()` 接进成稿与冻结包（页面/图/底稿/正文/ZIP 同一次运行）；
+> ② `data_analyzer_worker` 改按显式数据集+分析计划调用 `financial_analysis`；
+> ③ Q2 的现金质量/营运资本/条件情景三族模型与第二个真实公司（本环境四条正常入口取不到，
+>    需要官方直链或人工文件）；
+> ④ 第二家公司真实资料到手前，Q2 的"两个真实公司"门槛**不得**宣称满足。
 > 统计模型（Q4）仅设计。
 >
 > ---
