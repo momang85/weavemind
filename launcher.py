@@ -1320,6 +1320,45 @@ def _pids_file_state() -> str:
         return "corrupt"
 
 
+def print_queues() -> None:
+    """打印**服务名 → 注册名 → 队列键**的对应关系（运维/探针用）。
+
+    为什么要这条命令（2026-09-29 实机踩到）：三者**不同名**——
+    服务名 `worker-web-fetch`（`pids.json`）、注册名 `webfetchworker`（`agents` 表）、
+    队列键 `task_queue:webfetchworker`（`worker_base`/`async_worker_base` 的消费键）。
+    外部想给某个 worker 投一条任务时，只能靠猜，猜错的表现是"任务躺在队列里没人取"，
+    看起来像 worker 挂了。这里把关系一次说清：**注册表是权威**（服务名只是进程标签）。
+    """
+    import db_paths
+    print("服务名（pids.json） → 注册名 / 能力 / 状态 / 最近心跳 → 队列键")
+    rows: list[tuple[str, str, str, str, str]] = []
+    try:
+        import sqlite3
+        con = sqlite3.connect(str(db_paths.resolve_db_path()))
+        try:
+            for agent_id, caps, status, hb in con.execute(
+                    "SELECT agent_id, capabilities, status, last_heartbeat FROM agents"
+                    " ORDER BY agent_id"):
+                rows.append((str(agent_id), str(caps or ""), str(status or ""),
+                             str(hb or ""), f"task_queue:{agent_id}"))
+        finally:
+            con.close()
+    except Exception as exc:                                    # noqa: BLE001
+        print(f"  读取注册表失败：{type(exc).__name__}: {exc}")
+        return
+    if not rows:
+        print("  注册表为空（服务还没注册？）")
+        return
+    for agent_id, caps, status, hb, queue in rows:
+        print(f"  {caps or '-':<18} 注册名={agent_id:<22} 状态={status:<12}"
+              f" 心跳={hb} 队列={queue}")
+    services = (_read_pids().get("services") or {}) if _pids_file_state() == "ok" else {}
+    if services:
+        print("  当前运行的服务标签：" + "、".join(sorted(services)))
+    print("  提示：给某个 worker 投任务用**队列键**；讨论进程用**服务标签**。"
+          " 结果在 `task_result:<task_id>`（Redis 列表 + 同名 pubsub 频道）。")
+
+
 def print_status() -> None:
     state = _pids_file_state()
     if state != "ok":
@@ -1792,6 +1831,9 @@ def main() -> None:
             logger.info("No running services recorded in %s", PID_FILE)
     elif action == "status":
         print_status()
+    elif action == "queues":
+        # 服务名/注册名/队列键三者不同名，外部投任务前先看这个（别再猜）
+        print_queues()
     elif action == "url":
         # 启动脚本与页面共用同一端口来源：`python launcher.py url` 打印实际地址，
         # start.bat 据此打开浏览器（此前脚本里硬写 8080）。

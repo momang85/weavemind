@@ -1,85 +1,53 @@
 # DeepSeek 执行状态
 
-> ## 当前账（2026-09-29 夜 · HEAD `e033a6d`+A2）——**只这一段是当前状态**
+> ## 当前账（2026-09-29 深夜 · HEAD `5f8c8b2` + 问题收口批）
 >
-> **先修自己造成的回归（最重要的一条）**：`net_policy.fetch_document` 在 A1 重做里
-> "读之前就把 socket 关了"（旧的预读+`finally` 关闭顺序留在 `http.client` 解析之下）
-> → 真机恒报 `WinError 10038`，**补材料直链、web_fetch/data_loader worker、url_health
-> 全在这条通道上**。离线全绿是因为替身 `close()` 是空操作、`makefile` 交完整副本。
-> 修法：不预读、不提前关；替身改成**生命周期忠实**（关后即报 10038、共用游标）——
-> 旧实现上该用例必失败（已用 `git stash` 现场复现），新实现 `test_net_policy` **50 OK**。
-> 顺带补上"多地址重试**共用一条根截止**（不续期）"，并给 `fetch_document` 加
-> `method/body`（只为公告查询这种 POST 表单端点，出域/已验 IP/不带凭据/不跟随跳转一视同仁）。
-> 真机：`fetch_document` 取回 cninfo 证券索引 200 / 592391 字节 / 6258 条。
+> **本批（"解决发现的问题"）**：
+> ① **取件时间预算按通道分**：`transfer_limits` 增 `TEXT_TIMEOUT` 30s / `DOWNLOAD_TIMEOUT`
+> 120s（可环境变量覆盖）；材料直链、`annual_report_pdf.fetch_bytes`、`web_fetch` worker
+> （按 URL 判 PDF）统一改用。**实机证据**：运行中 `webfetchworker` 取三一 2024 年报
+> 返回的原文是 `读取超时（总截止 29.9824s）`——旧码会立刻 `WinError 10038`，
+> 说明修复后的代码在跑，且 30s 确实太紧。
+> ② **更正一条我自己写错的记录**：先前记"外部探针投任务无回执、队列未被消费"是**错的**。
+> 真实情况：正确队列键是 `task_queue:webfetchworker`（**服务标签≠注册名≠队列键**），
+> 那条被消费了；结果落在 Redis 列表 `task_result:<task_id>`，我只等 pubsub 才没读到。
+> 新增 `python launcher.py queues` 按注册表打印"能力→注册名→心跳→队列键"，
+> 外部探针不必再猜。
+> ③ **港股 `00700.HK` 撤回原结论**：复测 200 / 243025 字节 / 96 行，适配器原样调用取回
+> 12 年（最新 2025：收入 7517.66 亿元）——`URLError 10061` 已不成立。
+> `push2.eastmoney.com` 仍 `RemoteDisconnected`（报价链路，年报用不到；
+> `quote.eastmoney.com` 200）。
+> ④ **上交所公告查询明确不打通**：4 种参数（宽查询/只加日期/年报+日期/深市对照）
+> 全部 `total=0` 且 `pageSize` 回显 10（请求写 25）→ 不是被我们的过滤筛空，是这条
+> 匿名 GET 契约不可用；不再盲试，沪市公司走巨潮。
+> ⑤ **血缘进观察**：`Observation.derived_from/formula_version` 随观察进数据集**并计入
+> 观察指纹**（改血缘=换观察），`is_derived` 供读侧识别。
+> ⑥ **亏损公司情景模型改判"不适用"**：基期毛利率 ≤ 0 时明确 `not_applicable`（附理由），
+> 不再以 `validation_failed` 出门——京蓝 2020 实测由"验证失败"变为"模型不适用"。
+> ⑦ **主要会计数据 5 列 3 年的列映射不做猜测**：列数多于年份时新增原因码
+> `adjustment_variants_or_ratio_column` 把"调整前后/变动率列"与普通列错分开报；
+> 同样四个指标从审计过的三张报表取到（三一/洋河/京蓝实测均齐备）。
+> 定向：`test_transport_deadline` 15、`test_startup_readiness` 69、
+> `test_annual_financial_tables` 28、`test_financial_analysis` 66、`test_cninfo_discovery` 31、
+> `test_net_policy` 50 全 OK；证据 `docs/evidence/a2_official_discovery_20260929.md` §8–§10。
 >
-> **A2 官方发现链（本批主交付）**：
-> ① **更正 09-07 结论**——巨潮公告查询不是被挡，是 `stock` 缺 orgId（裸代码静默回
-> `totalAnnouncement: 0`）：`POST /new/hisAnnouncement/query` 实机 600031 取回 4 条、
-> 000711 取回 17 条；orgId 来自 `new/data/szse_stock.json`（200/592391 字节/6258 条，
-> 含沪深全部 A 股；`sse_stock.json` 404）。**交叉验证**：发现链自己找出的京蓝 2020 年报
-> （更正后）直链与用户此前给过的 URL **逐字符一致**。
-> ② `adapters/source_registry.py`：来源按**端点**注册（`upstream_family/access_method/
-> authority/supported_materials/license_scope/capability/budget/health_source/verified`），
-> 巨潮三条端点分开记账；原因码词表统一（`not_implemented/auth_required/rate_limited/
-> network_error/policy_blocked/protocol_error/schema_changed/empty_result/
-> irrelevant_result/parse_rejected/unknown_cause`）。
-> ③ `discover()` 返回可行动缺口（`reason_code` + `next_steps` + 候选 `why`/`language`）；
-> 候选策略显式化：报告期倒序 → 中文 → 正文 → 原版 → 同披露日**最早优先**
-> （反例：洋河 2024 年报同时有中文正文与**英文版**，只看"最新"会挑到英文版）。
-> ④ 抽取器认三种真实版面（**同一版代码、不按公司分支**）：行项目前缀（`一、`/`其中：`/
-> `减：`）、附注列引用（`七、54`）、折行标签（1–2 行续行，续行**不得含数字**）、
-> 期末/期初列头（年份取报表日期行）、分页重复表头（表内向上找）、单位标注只在报表开头；
-> 同名**非报表**（`合并利润表影响`、`首次执行新收入准则调整年初财务报表`）明确不取。
-> 反例仍拒绝：被排版截断的数（`1,279,570,42` / `9.23`）不得当折行金额；年初列不占本年格。
-> `test_annual_financial_tables` **28 OK**。
-> ⑤ 修复"真实年报同时有合并/母公司 → 所有模型报缺输入"：口径**显式化**
-> （`primary_caliber`：有合并用合并；只有一种口径才默认；同一口径内两个值仍不任选），
-> `test_financial_analysis` **63 OK**。
-> ⑥ **A2 退出条件达成**：三一重工 600031.SH（第二家公司）经正常入口完成
-> 发现→导入→准入→事实（34 条）→数据集（38 观察，两期，gaps 空）→**4/4 注册模型 validated**；
-> 洋河（不同布局）同样 4/4，且利润桥/现金质量/情景数字与 Q1 **冻结样本逐位一致**
-> （−33.43/−38.01/+4.58 亿元；−20.44 亿元/69.36%；80.32 亿元/2.89 亿元·pp）
-> ——两条互不相干的取数路径得到同一组数。京蓝（反例）3 validated + 1
-> `validation_failed`（情景方向判据对亏损公司不适用，如实标失败不改判据）；
-> 更正稿在 `as_of=2021-12-31` 被拒 `after_cutoff`、`as_of=2025-12-31` admitted，
-> `until=2021-12-31` 的窗口里只有原版 → 原版/更正版并存、互不覆盖。
-> 证据 `docs/evidence/a2_official_discovery_20260929.md`；脚本
-> `scripts/a2_official_chain_20260929.py`（确定性链路零 LLM；本轮外网 12 次公开请求）。
+> **仍未解决（需要人或需要研究侧决定，不假装已解决）**：
+> - **真人 F3 五项复核 ≥8/10**：必须真人做，代理侧不得代标；
+> - **亏损期情景方向判据**是否单列：研究侧决定（本批只把它如实归到"不适用"）；
+> - **主要会计数据单元格级列映射**：不做猜测映射，靠审计报表兜底（这是**选择**不是遗漏）；
+> - **`Observation` 血缘之外的溯源**：`report_version`/交付包侧是否要一并带 `derived_from`，
+>   待下一批（本批只到数据集与观察）；
+> - **上交所端点**：不打通（有巨潮替代），不是"待修"；
+> - **页面"改假设→复算→采纳→导出"**：Q2/Q3 的 UI 工作，未做。
 >
-> **本批顺带更正的两条旧账**：① 09-29 白天那批声称"`test_delivery_chain` 403 OK"是
-> **A1 重做之前**的读数——重做后该文件 1 处真失败（旧替身没 `read1`，被"不可终止读"
-> 正确拒绝），另有 `test_task_state` 一处**陈旧期望**（schema 后来加了 3 列）。两处都已修，
-> 全量扫描另行报告。② 巨潮"接口未连通"（`adapters/cninfo.py` 旧 docstring、
-> `disclosure_ingest.discover()` 旧实现与对应用例）已按实机更正。
+> **已由 CI 覆盖**：`clean-env-e2e`（干净机同包完整链）在 CI 通过——原待办由 CI 承接。
 >
-> **推送与 CI**：`a441c0d`/`116ae65` 已推送到 `origin/main`；**CI 全绿**
-> （run `36559669470`：backend 9m38s ✓ / clean-env-e2e ✓ / docker-image ✓ / frontend ✓）。
-> 仓库自 09-27 起 CI 一直是红的（长期未推 + 两个与本次无关的环境假设），本批把它跑绿了。
-> CI 顺带抓出**两个我自己写的环境依赖**（本地全绿、Linux/UTC 才现形）：
-> ① 披露日按宿主时区换算 → UTC 机器退回一天（`2025-04-17 != 2025-04-18`）：改为
-> **交易所本地时区 UTC+8**，并补"时区无关"用例；② 租约测试假设单调钟 > 1 小时
-> （CI runner 刚开机，`monotonic()-3600` 变负数 → `age=None` → `NoneType > int`）：
-> 改为**固定时钟**造过期租约，并另写一个"把小钟压到 12.5 秒"的复现脚本验证环境无关。
-> **`clean-env-e2e` 首次通过**——"干净机同包完整链"这条待办由 CI 覆盖。
-> 全量扫描（一文件一进程）：52 个文件改动后 52/52 OK（`test_deploy_manifest` 需先
-> `git add` 新文件——它正是为"目录被 .gitignore 吞掉"设的闸门，本轮先红后绿）。
+> ## 历史（`5f8c8b2` 及以前，按日期保留）
 >
-> **未验/缺口**：取件 30s 上限对 4–5 MB 年报偏紧（三一/洋河首次取件超时，重试一次成功；
-> 现在**明确重试并留痕**，不再悄悄降级到摘要）；上交所公告查询仍 200+空数组；港股
-> `00700.HK` 仍 `URLError 10061`；`Observation` 仍未承载 `derived_from`；
-> 主要会计数据 5 列 3 年（调整后/调整前/变动%）的列映射仍需单元格级解析；
-> 亏损公司情景判据是否单列需研究侧决定。
-> **实机（运行中实例）**：已 `launcher.py stop` → `start` 重启，16/16 服务存活、工作台
-> HTTP 200、研究能力就绪（便携 Redis 6379）——重启即加载本批修复。**但外部探针没打通**：
-> 往 `task_queue:worker-web-fetch` 与 `task_queue:webfetchworker` 各投一条抓取任务，
-> 120s 无回执、队列未被消费；`agents` 表注册名/心跳（10:46）与新实例对不上，
-> **服务名≠注册名≠队列键**。这条**不写成"实机 worker 验证通过"**，登记为运维缺口待查。
-> 抓取通道的生产证据仍是：真机 `fetch_document` 取索引 592 KB + 三份年报 PDF 经
-> `material_intake` 直链取件全部准入 + 忠实替身下旧实现必失败。
-> **全量扫描（一文件一进程）**：52 个文件，改动后 **52/52 OK**（其中 `test_deploy_manifest`
-> 需先 `git add` 新文件——它自己就是为"目录被 .gitignore 吞掉"设的闸门，本轮先红后绿）。
-> **推送**：`116ae65` 已推送到 `origin/main`（token 已含 `workflow` scope，用户已办），
-> `main...origin/main` 无领先/落后。
+> **A2（`87eb855`…`5f8c8b2`）**：官方发现链打通（更正 09-07 结论）、来源按端点注册、
+> 抽取器认三种真实版面、口径显式化、三家公司真机链（三一 4/4 模型 validated、
+> 洋河与冻结样本逐位一致、京蓝重述纪律）；同时修回 A1 自伤回归（取件通道恒失败）。
+> 证据 `docs/evidence/a2_official_discovery_20260929.md`。CI 全绿（run `36559669470`）。
 >
 > ## 历史（`e033a6d` 及以前，按日期保留）
 >

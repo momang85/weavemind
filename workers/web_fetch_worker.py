@@ -110,7 +110,11 @@ class WebFetchWorker(AsyncWorkerBase):
         # SSRF 防护（环回/私网/链路本地拒绝）因此与搜索抓取同源，不留两套。
         try:
             import net_policy
-            resp = net_policy.fetch_document(_encode_iri(url), timeout=30,
+            import transfer_limits
+            from annual_report_pdf import looks_like_pdf
+            resp = net_policy.fetch_document(_encode_iri(url),
+                                             timeout=transfer_limits.timeout_of(
+                                                 "download" if looks_like_pdf(url) else "text"),
                                              max_bytes=net_policy.MAX_BODY_BYTES)
         except Exception as exc:                 # noqa: BLE001 - 策略拒绝/抓取失败都如实报
             return json.dumps({"status": "failed", "error": str(exc)[:300]},

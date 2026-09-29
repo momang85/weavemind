@@ -199,7 +199,7 @@ def doc_from_pages(title: str, url: str, pages: list[str]) -> dict:
             "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
 
 
-def fetch_bytes(url: str, *, timeout: int = 30, max_bytes: int = MAX_BYTES,
+def fetch_bytes(url: str, *, timeout: int = 0, max_bytes: int = MAX_BYTES,
                 meta: dict | None = None) -> bytes | None:
     """下载 PDF 字节（复用**既有**公网校验抓取通道；超限或受限返回 None，不抛）。
 
@@ -213,7 +213,8 @@ def fetch_bytes(url: str, *, timeout: int = 30, max_bytes: int = MAX_BYTES,
     """
     try:
         from adapters.transport import get_bytes_via_urllib
-        res = get_bytes_via_urllib(url, timeout=timeout, max_bytes=max_bytes)
+        res = get_bytes_via_urllib(url, timeout=int(timeout or transfer_limits.timeout_of("download")),
+                               max_bytes=max_bytes)
     except Exception as exc:                     # noqa: BLE001 - 通道不可用按缺口处理
         try:
             from net_policy import classify_network_error

@@ -245,6 +245,42 @@ class TestCapacityPolicyIsCentralised(unittest.TestCase):
         self.assertTrue(tl.within("upload", 1024))
         self.assertFalse(tl.within("upload", tl.UPLOAD_MAX_BYTES + 1))
 
+    # ── 2026-09-29 实机：时间预算也要按通道分（30s 下 4–5 MB 年报必然超时）──
+
+    def test_download_budget_is_wider_than_text_but_still_bounded(self):
+        import transfer_limits as tl
+        self.assertGreater(tl.timeout_of("download"), tl.timeout_of("text"),
+                           "披露文件下载要比正文抓取宽（大文件 + 慢站点）")
+        self.assertLessEqual(tl.timeout_of("download"), 600.0, "放宽不等于无上限")
+        self.assertIn("披露文件下载", tl.timeout_explain("download"))
+
+    def test_callers_use_the_download_budget(self):
+        """调用点不许再各自硬写 30s：材料直链 / PDF 取字节 / web_fetch worker 同源。"""
+        from pathlib import Path
+        root = Path(__file__).resolve().parent
+        mi_src = (root / "material_intake.py").read_text(encoding="utf-8")
+        self.assertIn('timeout_of("download")', mi_src,
+                      "材料直链取件必须用下载通道的总截止")
+        arp_src = (root / "annual_report_pdf.py").read_text(encoding="utf-8")
+        self.assertIn('timeout_of("download")', arp_src)
+        wf_src = (root / "workers" / "web_fetch_worker.py").read_text(encoding="utf-8")
+        self.assertIn("timeout_of(", wf_src, "web_fetch worker 按 URL 类型选通道")
+        self.assertNotIn("timeout=30,", wf_src, "不再硬写 30s")
+
+    def test_env_override_applies_to_timeouts(self):
+        import importlib
+        import os
+        import unittest.mock as mock
+        import transfer_limits as tl
+        with mock.patch.dict(os.environ, {"WEAVEMIND_DOWNLOAD_TIMEOUT": "7"}):
+            reloaded = importlib.reload(tl)
+            try:
+                self.assertEqual(reloaded.timeout_of("download"), 7.0)
+            finally:
+                os.environ.pop("WEAVEMIND_DOWNLOAD_TIMEOUT", None)
+                importlib.reload(reloaded)
+        self.assertGreater(tl.timeout_of("download"), 7.0)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=1)

@@ -140,14 +140,37 @@ SOURCES: dict[str, dict] = {
         "license_scope": "public_disclosure_cite_with_source",
         "license_note": "与巨潮镜像同一份披露时只计一次事实来源",
         "capability": "unverified",
-        "blocked_reason": IRRELEVANT_RESULT,
-        "budget": {"timeout_s": 25, "max_bytes": 2 * 1024 * 1024, "calls_per_task": 1},
+        "blocked_reason": EMPTY_RESULT,
+        "budget": {"timeout_s": 25, "max_bytes": 2 * 1024 * 1024, "calls_per_task": 0},
         "health_source": "sse_bulletin_query",
         "params_contract": "sse-queryCompanyBulletinNew-v1",
         "verified": "2026-09-29",
         "verified_evidence": "docs/evidence/a2_official_discovery_20260929.md",
-        "verified_note": ("实机：200 但 pageHelp.data 为空数组（本批未定原因：可能参数/Referer/"
-                          "接口停用）——不写成「交易所封了我们」，先当作未打通"),
+        "verified_note": ("实机 4 种参数（宽查询 / 只加日期 / 年报+日期 / 深市代码对照）"
+                          "全部 status=200 且 total=0、pageSize 回显 10（请求写的是 25）"
+                          "→ **不是被我们的过滤条件筛空**，而是这条匿名 GET 契约打不通。"
+                          "不再盲试参数：沪市公司改走巨潮（已实测可用）"),
+    },
+    "eastmoney_hk_annual": {
+        "label": "东方财富·港股主要财务指标",
+        "upstream_family": "eastmoney",
+        "access_method": "http_get_json",
+        "authority": "third_party_structured",
+        "authority_basis": "第三方结构化数据（派生），用前先看口径与披露日",
+        "supported_materials": ("结构化财务指标",),
+        "license_scope": "public_web_reference",
+        "license_note": "公开网页接口；按既有预算取用，不声称再分发授权",
+        "capability": "available",
+        "budget": {"timeout_s": 25, "max_bytes": 4 * 1024 * 1024, "calls_per_task": 2},
+        "health_source": "eastmoney_hk",
+        "params_contract": "eastmoney-datacenter-v1(filter=裸代码)",
+        "verified": "2026-09-29",
+        "verified_evidence": "docs/evidence/a2_official_discovery_20260929.md",
+        "verified_note": ("实机 00700.HK：200 / 243025 字节 / 96 行；适配器原样调用 12 年、"
+                          "最新 2025 年（收入 7517.66 亿元）→ **此前记的 `URLError 10061` "
+                          "已不成立**（取件通道修复后复测通过）。报价主机 "
+                          "`push2.eastmoney.com` 仍 `RemoteDisconnected`（另一条链路，"
+                          "年报研究用不到；`quote.eastmoney.com` 200 可用）"),
     },
 }
 

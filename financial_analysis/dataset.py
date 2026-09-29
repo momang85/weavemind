@@ -79,6 +79,9 @@ def _observation_of(row: dict, *, as_of: str, restatement: str) -> Observation:
         restatement=str(_attr(row, "restatement") or restatement),
         source_url=str(_attr(row, "source_url") or ""),
         source_hash=str(_attr(row, "source_hash") or ""),
+        derived_from=tuple(str(x) for x in (_attr(row, "derived_from", ()) or ())
+                           if str(x).strip()),
+        formula_version=str(_attr(row, "formula_version") or ""),
         verify_state=str(_attr(row, "verify_state") or ""),
         note=note,
     )

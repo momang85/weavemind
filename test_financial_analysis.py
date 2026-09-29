@@ -179,6 +179,51 @@ class TestDatasetFreeze(unittest.TestCase):
         got = {o.metric: o.value for o in run.outputs}
         self.assertAlmostEqual(got["net_profit_change"], -33.43, places=2)
 
+    # ── 2026-09-29：血缘随观察走；亏损期情景判"不适用"而不是"验证失败" ──────────
+
+    def test_derived_lineage_survives_freezing(self):
+        """`derived_from`/`formula_version` 必须随观察一起进数据集（此前只到抽取器就丢）。"""
+        rows = list(_two_period_rows())
+        gp = [r for r in rows if r["metric"] == "gross_profit"]
+        src = [r["fact_id"] for r in rows if r["metric"] in ("revenue", "operating_cost")]
+        for r in gp:
+            r["derived_from"] = src
+            r["formula_version"] = "gross_profit_v1"
+        ds = _dataset(rows)
+        obs = ds.get("gross_profit", "2024年")
+        self.assertTrue(obs.is_derived)
+        self.assertEqual(tuple(obs.derived_from), tuple(src))
+        self.assertEqual(obs.formula_version, "gross_profit_v1")
+
+    def test_lineage_is_part_of_the_observation_fingerprint(self):
+        """改血缘 = 换了一份观察：指纹要变（数值不变也不许悄悄改）。"""
+        def _rows(lineage):
+            return [_row("revenue", "2024年", 100.0),
+                    _row("operating_cost", "2024年", 60.0),
+                    dict(_row("gross_profit", "2024年", 40.0),
+                         derived_from=lineage, formula_version="gross_profit_v1")]
+
+        a = _dataset(_rows(["fact-a", "fact-b"])).get("gross_profit", "2024年")
+        b = _dataset(_rows(["fact-a"])).get("gross_profit", "2024年")
+        self.assertEqual(a.value, b.value)
+        self.assertEqual(a.derived_from, ("fact-a", "fact-b"))
+        self.assertNotEqual(a.observation_hash, b.observation_hash)
+
+    def test_negative_gross_margin_is_not_applicable_not_a_validation_failure(self):
+        """亏损期：情景模型的"增长⇒利润改善"方向假设不成立 → 明确判**不适用**。
+
+        实机反例：京蓝 2020（毛利率 −0.78%、归母净利 −23.55 亿）此前只会得到
+        `validation_failed: ['scenario_direction']`——看起来像模型跑错了。
+        """
+        rows = [_row("revenue", "2024年", 1_158_320_511.62),
+                _row("gross_profit", "2024年", -9_068_492.11),
+                _row("net_profit", "2024年", -2_354_850_607.11)]
+        ds = _dataset(rows)
+        run = fa.run("scenario_sensitivity", ds)
+        self.assertEqual(run.status, C.RunStatus.NOT_APPLICABLE, run.reason)
+        self.assertIn("毛利率为负", str(run.reason))
+        self.assertEqual(run.outputs, (), "不适用不得产出数字")
+
 
 def _dataset_rows_with(*, mutate=(), restatement=""):
     rows = _two_period_rows(mutate=mutate)

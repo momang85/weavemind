@@ -449,13 +449,15 @@ def store(*, task_id: str, channel: str, raw: bytes = b"", url: str = "",
 
 # ── 取件与准入 ─────────────────────────────────────────────
 
-def _fetch_link(url: str, *, timeout: float = 30.0) -> dict:
+def _fetch_link(url: str, *, timeout: float | None = None) -> dict:
     """直链取件：走**既有内容通道**（策略校验/已验 IP/出口模式都在 `net_policy` 那层）。
 
     本模块不新增请求点，也不自己判域名——安全边界只有一处。
     """
     import net_policy
-    resp = net_policy.fetch_document(url, timeout=timeout)
+    # 披露文件下载用**下载通道的**总截止（默认 120s）：30s 下 4–5 MB 年报会超时
+    resp = net_policy.fetch_document(
+        url, timeout=float(timeout or transfer_limits.timeout_of("download")))
     return {"raw": bytes(resp.get("raw") or b""),
             "content_type": str((resp.get("headers") or {}).get("content-type") or ""),
             "status": int(resp.get("status") or 0),

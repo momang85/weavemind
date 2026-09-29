@@ -139,34 +139,59 @@ supported_materials / license_scope / capability / budget / health_source / veri
    需要研究侧决定（不属工程侧擅自修改）。
 6. CI 与推送：本地全量扫描 52 个文件另行报告；本批改动未推送前不得声称 CI 绿。
 
-## 8. 本轮真实请求预算（外网）
+## 8. 实机（运行中实例）：**探针其实成功了**，是我读错了 —— 如实更正
+
+本批改动落地后重启了运行实例（`launcher.py stop` → `start`，启动前确认真库未结算任务为 0）：
+
+- `launcher.py status`：**16/16 services alive**；工作台 HTTP 200；"研究能力：就绪
+  （Redis 8、编排器与 5 项必需 Worker 心跳新鲜）"；便携 Redis 端口 6379。
+- 服务已用当前工作树（含本批修复）重新加载：旧进程全部退出（stop 后残留 0）。
+
+**更正（同一天更早的记录）**：先前写"外部探针投任务 120 秒无回执、队列未被消费"，**结论错了**。
+
+1. 我投错了队列键：三者**不同名**——服务标签 `worker-web-fetch`（`pids.json`）、
+   注册名 `webfetchworker`（`agents` 表）、消费键 `task_queue:webfetchworker`。
+   两条里**正确键那条被消费了**（事后 `LLEN=0`）。
+2. 结果落在 Redis 列表 **`task_result:<task_id>`**（同名 pubsub 频道也有）——不是"没有回执"，
+   是我只等 pubsub、没读那个键。
+3. 读出来的原文（本批最有价值的实机证据之一）：
+
+   ```json
+   {"task_id": "live-a2-fetch-probe", "agent_id": "webfetchworker", "status": "SUCCESS",
+    "result": "{\"status\": \"failed\", \"error\": \"读取超时（总截止 29.9824s）：
+                read deadline exceeded (TimeoutError)\"}"}
+   ```
+
+   ① **运行中的进程跑的是修好的代码**：旧码会立刻报 `WinError 10038`，这里是"按 30s 总截止
+   读到超时"，说明解析确实在开着连接按截止线读；② **30s 对 5.3 MB 年报太紧**——
+   实机把它顶出来了，见 §9 第一行。
+
+**顺带修掉的运维缺口**：新增 `python launcher.py queues`，按**注册表**打印
+"能力 → 注册名 → 状态/心跳 → 队列键"，并提示结果去处，外部探针不必再猜键名。
+
+## 9. 发现的问题逐条处理（本轮）
+
+| 问题 | 处理 | 证据 |
+|---|---|---|
+| 取件 30s 对 4–5 MB 年报太紧（实机首次必超时） | `transfer_limits` 增**按通道时间预算**：正文 30s / 披露下载 120s（可环境变量覆盖）；材料直链、`annual_report_pdf.fetch_bytes`、`web_fetch` worker（按 URL 判 PDF）统一改用它 | `test_transport_deadline` 15 OK（+3 新用例） |
+| 服务名≠注册名≠队列键，外部探针靠猜 | 新增 `launcher.py queues`；并更正上一条记录 | `test_startup_readiness` 69 OK（+1 新用例） |
+| 港股 `00700.HK` `URLError 10061`（原因未定） | **复测已通**：`datacenter-web` DNS 8 地址、TCP 连通、200 / 243025 字节 / 96 行；适配器原样调用取回 12 年（最新 2025：收入 7517.66 亿元）→ 原结论撤回。`push2.eastmoney.com` 仍 `RemoteDisconnected`（另一条链路，年报用不到；`quote.eastmoney.com` 200） | 见 §8 探针读数；注册表 `eastmoney_hk_annual=available` |
+| 上交所公告查询 200 + 空数组 | **4 种参数全 total=0**（宽查询/只加日期/年报+日期/深市对照），`pageSize` 回显 10（请求写 25）→ **不是被我们的过滤筛空**，是这条匿名 GET 契约打不通；不再盲试，沪市公司走巨潮（已实测可用） | 注册表 `sse_bulletin_query=unverified`，原因码 `empty_result` |
+| `Observation` 不承载 `derived_from`（血缘只进一半） | 观察新增 `derived_from`/`formula_version`，随观察进数据集**并计入观察指纹**（改血缘=换观察），`is_derived` 供读侧识别 | `test_financial_analysis` 66 OK（+2 新用例） |
+| 亏损公司情景模型报"验证失败"，看着像模型错了 | 基期毛利率 ≤ 0 时**明确判 `not_applicable`**（附理由：方向假设不成立），不再以验证失败出门；亏损专用判据留研究侧 | 同上（+1 新用例） |
+| 主要会计数据 5 列 3 年（调整后/调整前/变动%） | **不做猜测性列映射**（同期两个值宁可不取）：列数多于年份时新增原因码 `adjustment_variants_or_ratio_column`；同样四个指标从**审计过的三张报表**取到（三家实测齐备） | `test_annual_financial_tables` 28 OK |
+
+## 10. 本轮真实请求预算（外网）
 
 | 用途 | 次数 |
 |---|---|
 | cninfo 证券索引 | 1（进程内缓存 6h） |
 | 公告查询（3 家 + `until` 对照 1 + 候选复核若干） | 6 |
 | 年报 PDF 取件（3 家，含 2 次超时重试） | 5 |
+| 港股复测（datacenter-web 1 + 报价主机 2） | 3 |
+| 上交所查询（4 种参数对照） | 4 |
+| 运行中 worker 队列探针 | 1 |
 | 本地/替身测试 | 0 次外网 |
 
-合计 **12 次公开请求**，全部走 `net_policy`（已验 IP 直连、不跟随跳转、不带凭据、总截止 + 字节上限）。
-
-## 9. 实机（运行中实例）状态：重启成功，外部探针**未**打通 —— 如实记
-
-本批改动落地后重启了运行实例（`launcher.py stop` → `start`，启动前确认真库未结算任务为 0）：
-
-- `launcher.py status`：**16/16 services alive**；工作台 HTTP 200；"研究能力：就绪
-  （Redis 8、编排器与 5 项必需 Worker 心跳新鲜）"；便携 Redis 端口 6379。
-- **能说的**：服务已用当前工作树（含本批修复）重新加载——Python 启动时读源码，
-  旧进程已全部退出（stop 后残留 0）。
-- **不能说的**：我**没有**取得"运行中 worker 消费队列并回执"的证据。外部探针往
-  `task_queue:worker-web-fetch` 与 `task_queue:webfetchworker` 各投一条抓取任务，
-  120 秒内都没有回执；Redis 里那两条队列也没被消费。观察到的现象：
-  `agents` 表里的注册名（`webfetchworker`）与 `last_heartbeat`（10:46，**早于本次重启**）
-  对不上新实例，launcher 的服务名（`worker-web-fetch`）也只存在于 `pids.json`。
-  **即"服务名 / 注册名 / 队列键"三者不同名**，外部无法从名字推出队列键。
-  这是一条运维可用性缺口，登记待查（不属本批，不猜结论）。
-- 因此本文件第 0 节的抓取通道修复，其**生产路径证据**是：① 真机 `fetch_document` 取回
-  cninfo 证券索引 200/592391 字节；② 三份年报 PDF 经 `material_intake` 直链取件
-  （走同一条 `net_policy.fetch_document`）全部落盘并准入；③ 忠实替身下旧实现必失败。
-  这三条都不依赖"运行中 worker 队列"。
+合计 **20 次公开请求**，全部走 `net_policy`（已验 IP 直连、不跟随跳转、不带凭据、总截止 + 字节上限）。
 

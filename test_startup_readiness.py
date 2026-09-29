@@ -1146,6 +1146,27 @@ class TestOrchestratorOwnership(unittest.TestCase):
                 self.assertGreater(lease["age"], ov2.OWNER_HB_TTL)
                 self.assertLess(lease["expires_in"], 0.0)
 
+    def test_queue_keys_are_derived_from_the_registered_agent_id(self):
+        """服务名≠注册名≠队列键：`launcher.py queues` 必须按**注册表**给队列键。
+
+        实机踩到（2026-09-29）：往 `task_queue:worker-web-fetch`（服务标签）投任务没人取，
+        正确键是 `task_queue:webfetchworker`（注册名）。外部探针只能靠猜——这条命令
+        把这个对应关系说清，避免再把"投错队列"当成"worker 挂了"。
+        """
+        import contextlib
+        import io
+        import launcher
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            launcher.print_queues()
+        out = buf.getvalue()
+        self.assertIn("队列", out)
+        for line in out.splitlines():
+            if "注册名=" in line:
+                agent = line.split("注册名=")[1].split()[0]
+                self.assertIn(f"task_queue:{agent}", line,
+                              "队列键必须由注册名推导，不能用服务标签")
+
     def test_lease_lost_is_not_the_same_as_never_held(self):
         """从未持有（单机直跑/Redis 不可用）**不等于**失租——不能因此拦住落库。"""
         import orchestrator_v2 as ov2

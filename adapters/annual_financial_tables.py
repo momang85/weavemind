@@ -510,8 +510,21 @@ def extract(doc: dict, *, company: str = "", company_code: str = "",
             i += 1
             continue
         if len(vals) > len(years):
-            _reject(slug, "column_mismatch", i,
-                    f"金额多于表头列数（{len(vals)} > {len(years)}）：不截断，按拒绝处理")
+            # 列比年份多，两种常见成因分开报（都是**拒绝**，但读者要知道该去补什么）：
+            # ① 同一年的"调整后/调整前"两列 + 一个变动率列（主要会计数据表，三一实测：
+            #    2024/2023/2022 三个年份对 4 个金额 + 1 个变动率）；
+            # ② 其它列映射问题（表头跨行没拼全等）。
+            # 说明：这两类都**不做猜测性列映射**——同一指标同期两个值宁可不要，
+            # 也不要挑一个；同样的四个指标都能从审计过的三张报表里取到（三一/洋河/京蓝实测）。
+            _ratio_or_variant = bool(
+                re.search(r"调整[前后]|新准则|原准则", " ".join(
+                    lines[j] for j in range(max(0, (hidx if hidx >= 0 else i) - 6), i + 1)))
+                or re.search(r"增减|变动|\(%\)|（%）", " ".join(
+                    lines[j] for j in range(max(0, (hidx if hidx >= 0 else i) - 6), i + 1))))
+            _reject(slug, "adjustment_variants_or_ratio_column" if _ratio_or_variant
+                    else "column_mismatch", i,
+                    f"金额多于表头列数（{len(vals)} > {len(years)}）：不截断、不猜列归属，"
+                    f"按拒绝处理（表头 {years}）")
             i += 1
             continue
         page = page_of(doc, line_offset(doc, lines, i))

@@ -29,8 +29,19 @@ def _env_int(name: str, default: int) -> int:
     return v if v > 0 else default
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = str(os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        v = float(raw)
+    except (TypeError, ValueError):
+        return default
+    return v if v > 0 else default
+
+
 # 网页/文件上传（材料入口）：3 MiB ——新人上传的正文/PDF 通常远小于此
-UPLOAD_MAX_BYTES = _env_int("WEAVEMIND_UPLOAD_MAX_BYTES", 3 * _MIB)
+UPLOAD_MAX_BYTES = _env_int("WEAVIMIND_UPLOAD_MAX_BYTES", 3 * _MIB)
 # 直链下载 PDF：30 MB —— A 股年报正文常在 5–15 MB
 DOWNLOAD_MAX_BYTES = _env_int("WEAVEMIND_DOWNLOAD_MAX_BYTES", 30 * _MIB)
 # 正文类抓取（HTML/JSON）：8 MiB
@@ -40,11 +51,25 @@ BINARY_MAX_BYTES = _env_int("WEAVEMIND_BINARY_MAX_BYTES", 64 * _MIB)
 # PDF 解析页数上限（超长年报：给出明确错误，而不是解析到内存爆掉）
 PDF_MAX_PAGES = _env_int("WEAVEMIND_PDF_MAX_PAGES", 1200)
 
+# ── 时间预算也要**按通道**分（2026-09-29 实机）───────────────────────────────
+# 反例：材料直链取件用 30s 上限去下 4–5 MB 年报，三一/洋河的**第一次**取件都超时
+# （运行中 webfetch worker 的实测原文：`读取超时（总截止 29.9824s）`），
+# 只有重试才成功——把"站点慢/文件大"记成"材料不合格"是不对的。
+# 因此：正文类 30s（快失败，不要卡住页面）；**披露文件下载 120s**（大文件 + 慢站点）；
+# 两者都仍是**明确上限**，可用环境变量覆盖，且共用同一条根截止语义（不续期）。
+TEXT_TIMEOUT = _env_float("WEAVEMIND_TEXT_TIMEOUT", 30.0)
+DOWNLOAD_TIMEOUT = _env_float("WEAVEMIND_DOWNLOAD_TIMEOUT", 120.0)
+
 _LABELS = {
     "upload": ("材料上传", UPLOAD_MAX_BYTES),
     "download": ("披露文件下载", DOWNLOAD_MAX_BYTES),
     "text": ("正文抓取", TEXT_MAX_BYTES),
     "binary": ("二进制抓取", BINARY_MAX_BYTES),
+}
+_TIMEOUTS = {
+    "download": ("披露文件下载", DOWNLOAD_TIMEOUT),
+    "text": ("正文抓取", TEXT_TIMEOUT),
+    "binary": ("二进制抓取", DOWNLOAD_TIMEOUT),
 }
 
 
@@ -60,3 +85,15 @@ def within(kind: str, size: int) -> bool:
         return int(size) <= int(cap)
     except (TypeError, ValueError):
         return False
+
+
+def timeout_of(kind: str) -> float:
+    """该通道的**总截止**（秒）：披露文件下载比正文抓取宽，但都是明确上限。"""
+    _, seconds = _TIMEOUTS.get(str(kind), ("正文抓取", TEXT_TIMEOUT))
+    return float(seconds)
+
+
+def timeout_explain(kind: str) -> str:
+    """超时说明（含秒数与入口名）——与容量说明同一处口径。"""
+    label, seconds = _TIMEOUTS.get(str(kind), ("正文抓取", TEXT_TIMEOUT))
+    return f"{label}总截止 {seconds:g}s（可用环境变量覆盖）"

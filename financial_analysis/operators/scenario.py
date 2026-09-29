@@ -114,6 +114,16 @@ def compute(dataset, params: dict | None = None) -> dict:
         raise NotComputable(f"基期收入非正（{rev.value}{rev.unit}）：比率型情景不适用")
     base = {"revenue": float(rev.value), "gross_profit": float(gp.value),
             "net_profit": float(np_.value), "margin": float(_d(gp.value) / _d(rev.value))}
+    if base["margin"] <= 0:
+        # 基期毛利率非正 ⇒ "收入增长/毛利率改善 ⇒ 利润改善"这个**方向假设**不成立
+        # （毛利率为负时，收入越大毛利越负）。实机反例：京蓝 2020（毛利率 −0.78%、
+        # 归母净利 −23.55 亿），情景模型算出"上行情景更差"，被 `scenario_direction`
+        # 独立验证判失败——验证没错，是**这个模型对亏损公司不适用**。
+        # 所以在这里就如实判 `not_applicable`，而不是让它以一个"验证失败"的样子出门：
+        # 读者要能一眼分清"模型跑错了"与"模型不适用"。
+        raise NotApplicable(
+            f"基期毛利率为负（{base['margin']:.2%}）：增长/毛利率改善⇒利润改善的方向假设"
+            "不成立，情景模型对亏损期不适用（需要亏损专用的方向判据，属研究侧决定）")
     unit = str(np_.unit or "")
     q = lambda x: float(Decimal(str(x)).quantize(Decimal("0.01")))          # noqa: E731
 

@@ -84,6 +84,12 @@ class Observation:
     restatement: str = ""            # 重述批次/版本（未重述留空）
     source_url: str = ""
     source_hash: str = ""
+    # 血缘：派生观察的输入事实 id（如毛利 = 营业收入 − 营业成本）。
+    # 此前只有抽取器输出里带着 `derived_from`，冻结成观察时就丢了——"这个数是算出来的"
+    # 这件事在数据集与输出里都看不见。现在随观察一起走，并**计入观察 hash**：
+    # 血缘是溯源信息，改它就等于换了一份观察，不能让它不参与指纹。
+    derived_from: tuple[str, ...] = ()
+    formula_version: str = ""
     verify_state: str = ""
     note: str = ""
 
@@ -96,12 +102,17 @@ class Observation:
         return self.money_scale > 0
 
     @property
+    def is_derived(self) -> bool:
+        return bool(self.derived_from)
+
+    @property
     def observation_hash(self) -> str:
         return _hash({
             "fact_id": self.fact_id, "metric": self.metric, "period": self.period,
             "value": _canonical(self.value), "unit": self.unit, "currency": self.currency,
             "caliber": self.caliber, "entity_id": self.entity_id,
             "restatement": self.restatement, "source_hash": self.source_hash,
+            "derived_from": list(self.derived_from), "formula_version": self.formula_version,
             "state": self.state, "schema": SCHEMA_VERSION,
         })
 
