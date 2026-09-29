@@ -1,9 +1,43 @@
 # DeepSeek 执行状态
 
-> ## 当前账（2026-09-29 夜 · K0 可信输入与取件边界，已提交待接 K1）
+> ## 当前账（2026-09-30 凌晨 · **K0→K1→K2→K3 全部执行完毕**）
 >
-> 依据 `docs/阶段Q增量验收与产品闭环推进_20260929夜.md`（验收裁决：部分通过）。
-> **本批不做付费整跑、不新增外网请求**（缓存回放 + 本地 socketpair 反例）。
+> 依据 `docs/阶段Q增量验收与产品闭环推进_20260929夜.md`；**无付费整跑、无新数据订阅**。
+> 证据 `docs/evidence/k0_trusted_input_20260929.md`、`docs/evidence/k1_k2_k3_closure_20260930.md`。
+>
+> **K0 可信输入与取件边界**（`26cd761` / `f2ac12f`）：口径不回退、算子独立校验报表范围、
+> `financials` 退路绑研究契约；抽取器六类静默错数（空存货借科目、期初期末倒年、完整日期截年、
+> 跨表借单位、美元标 CNY、冲突收入仍派生）全部先复现旧读数再修；缓存回放三家公司**逐位一致**；
+> 响应头吃根截止（实测预算 0.2s：旧 0.483s / 新 0.242s）、字节通道总截止、有界解压、
+> 上传默认 3 MiB→30 MiB 且变量名正式名生效。
+>
+> **K1 官方资料进正常研究任务**（`d2f002c`）：`_official_discovery_intake` 与预载同位置调用
+> `disclosure_ingest.discover`（契约公司/期间、`until=as_of`）→ 取件 → 准入 → 并入
+> `fetch_snapshot` → 重建叙事证据；结论落盘 `official_discovery.json`。离线正例：located 0→4
+> 且指向 cninfo、`missing_labels` 四类全缺→空、现金问题 full、收入 partial、利润分解**如实仍 none**；
+> 反例（无年报 / 取件失败）如实记原因码+next_steps，且**不产生证据**。
+> **未做付费 API 端到端实机**（额度未确认），API 路径与用例同走 `run()`。
+>
+> **K2 同版可复算交付**（`6d06557`）：包内新增 `analysis/{dataset,plan,context}.json` + 清单
+> `analysis_inputs`；`package_statuses/current_package` 按**包内身份**判 current/historical
+> （时间戳不参与身份判定）；验收脚本拆成默认只读 + `--export`。实机：`ui-603f626cbe`
+> 旧包 `81047fdf…` 标 historical（采纳 `f585edbf…`），冻结新包含 PDF/6 图/底稿/7 运行/3 输入
+> → **7/7 离线复算一致**（dataset_hash 与实机一致）；`ui-fa2cb73e59` 同样 7/7；旧包原地保留。
+>
+> **K3 分析工作台**（`e7deafe`）：`GET /analysis` + `POST /analysis/recompute`（新运行、
+> 不自动采纳、参数越界 400、不适用如实说明）+ `POST /analysis/adopt`（只收已验证运行、走同一条
+> 装配路径）；页面新增 `AnalysisWorkbenchPanel`（分析卡→改假设→复算→前后对比→采纳→导出当前包）。
+> 顺手修掉两处"改了不生效"：scenario 的声明参数名与 compute/gold 读取名不一致、`runner.run`
+> 未把参数交给独立验证（一改假设就 gold 判失败）。
+>
+> **门槛**：全量核对（CI 同源、每文件一进程）**53/53**；前端 `tsc --noEmit`、`npm run build`、
+> node 行为测试 60/60 全过。
+>
+> **仍未解决（不假装已解决）**：真人 F3 五项 ≥8/10（**必须真人**）；干净 Windows 一键启动/
+> 完整交付（`clean-env-e2e` 是 ubuntu+固定模型替身烟测，不能替代）；`000711-corrected` 正文
+> 缓存缺失（更正稿基线无法离线复验）；`launcher.py status` 探活端口 8081 与实际 8080 的小不一致。
+>
+> ## 前账（2026-09-29 夜 · K0 可信输入与取件边界）
 >
 > **K0-a 可信模型输入**（`26cd761`）：
 > ① `AnalysisDataset.get/require` 口径**不回退**（显式"合并"缺项不再拿唯一那条母公司值），

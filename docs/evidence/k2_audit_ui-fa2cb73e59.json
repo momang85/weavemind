@@ -1,0 +1,242 @@
+{
+ "task_id": "ui-fa2cb73e59",
+ "workspace": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-fa2cb73e59",
+ "materialize": {
+  "ok": true,
+  "status": "partial",
+  "runs": 7,
+  "dataset_source": {
+   "kind": "working_paper",
+   "file": "working_paper.json",
+   "label": "worker:working_paper.json"
+  },
+  "inputs": [
+   "analysis/context.json",
+   "analysis/dataset.json",
+   "analysis/plan.json"
+  ]
+ },
+ "before": {
+  "adopted_identity": "e5ae7ff61046738559398d500eff480a84ac4fa0f847349a5c5b718e8ef14b66",
+  "has_current": false,
+  "current": "",
+  "packages": [
+   {
+    "name": "deliverables_20260929_214007.zip",
+    "status": "historical",
+    "identity": "242b1e7b39ab04dc3e6b085c5a758e72f1a703da8123bd19030bfc180def2da9",
+    "bytes": 715622,
+    "reason": "包内身份 242b1e7b39ab != 当前采纳 e5ae7ff61046：历史/过期包，不得当当前稿下载"
+   }
+  ]
+ },
+ "after": {
+  "adopted_identity": "e5ae7ff61046738559398d500eff480a84ac4fa0f847349a5c5b718e8ef14b66",
+  "has_current": true,
+  "current": "deliverables_20260930_004010_092fdb.zip",
+  "note": "",
+  "packages": [
+   {
+    "name": "deliverables_20260929_214007.zip",
+    "status": "historical",
+    "identity": "242b1e7b39ab04dc3e6b085c5a758e72f1a703da8123bd19030bfc180def2da9",
+    "bytes": 715622,
+    "reason": "包内身份 242b1e7b39ab != 当前采纳 e5ae7ff61046：历史/过期包，不得当当前稿下载"
+   },
+   {
+    "name": "deliverables_20260930_004010_092fdb.zip",
+    "status": "current",
+    "identity": "e5ae7ff61046738559398d500eff480a84ac4fa0f847349a5c5b718e8ef14b66",
+    "bytes": 5622747,
+    "reason": ""
+   }
+  ]
+ },
+ "frozen_zip": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-fa2cb73e59\\deliverables_20260930_004010_092fdb.zip",
+ "current_zip": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-fa2cb73e59\\deliverables_20260930_004010_092fdb.zip",
+ "package": {
+  "name": "deliverables_20260930_004010_092fdb.zip",
+  "bytes": 5622747,
+  "identity": "e5ae7ff61046738559398d500eff480a84ac4fa0f847349a5c5b718e8ef14b66",
+  "body_sha256": "9840d2adcdb6cfa5cd6a91cfd3a6bcccc508bef0d4aafc7adcfe437124dc5b8d",
+  "has_pdf": true,
+  "has_paper": true,
+  "charts": 6,
+  "analysis_runs": 7,
+  "analysis_validated": 7,
+  "analysis_inputs_present": [
+   "analysis/context.json",
+   "analysis/dataset.json",
+   "analysis/plan.json"
+  ],
+  "dataset_hash": "f34114d9e4118ecfe0e2a78d05546d00b114ac4be1bc032e609a064e7808f1c6",
+  "dataset_source": {
+   "kind": "working_paper",
+   "file": "working_paper.json",
+   "label": "worker:working_paper.json"
+  },
+  "contract": {
+   "entity": "贵州茅台",
+   "entity_id": "600519.SH",
+   "periods": [
+    "2023年",
+    "2024年"
+   ],
+   "as_of": "2025-04-30",
+   "caliber": "合并"
+  },
+  "recomputable": true,
+  "files_checked": 16,
+  "names": [
+   "PACKAGE_MANIFEST.json",
+   "analysis/analysis_runs.json",
+   "analysis/context.json",
+   "analysis/dataset.json",
+   "analysis/plan.json",
+   "audit/model_report_full_4ace214f110a9011.md",
+   "audit/model_report_full_4d2f88057169815b.md",
+   "charts/chart_1.png",
+   "charts/chart_2.png",
+   "charts/chart_3.png",
+   "charts/chart_4.png",
+   "charts/chart_5.png",
+   "charts/chart_6.png",
+   "reports/report.md",
+   "reports/report.pdf",
+   "working_paper.csv",
+   "working_paper.json"
+  ]
+ },
+ "recompute": [
+  {
+   "ok": true,
+   "run_id": "eed3f0a5f37f709bd41affebf505dd921bce85dfdd1099e0f053a745279cbf02",
+   "model_id": "profit_bridge",
+   "status": "validated",
+   "dataset_hash": "f34114d9e4118ecfe0e2a78d05546d00b114ac4be1bc032e609a064e7808f1c6",
+   "mismatches": [],
+   "outputs": [
+    {
+     "output_id": "eed3f0a5f37f-00-net_profit_change",
+     "value": 114.94,
+     "unit": "亿元"
+    },
+    {
+     "output_id": "eed3f0a5f37f-01-gross_profit_change",
+     "value": 212.84,
+     "unit": "亿元"
+    },
+    {
+     "output_id": "eed3f0a5f37f-02-below_gross_line_change",
+     "value": -97.9,
+     "unit": "亿元"
+    }
+   ]
+  },
+  {
+   "ok": true,
+   "run_id": "b6909bc0e9b0930ef866c4291c4ffb1a7954cd48778f68f9a3f61b8a49deb01e",
+   "model_id": "cash_quality",
+   "status": "validated",
+   "dataset_hash": "f34114d9e4118ecfe0e2a78d05546d00b114ac4be1bc032e609a064e7808f1c6",
+   "mismatches": [],
+   "outputs": [
+    {
+     "output_id": "b6909bc0e9b0-00-cfo_minus_profit",
+     "value": 62.36,
+     "unit": "亿元"
+    },
+    {
+     "output_id": "b6909bc0e9b0-01-cashflow_coverage",
+     "value": 107.23,
+     "unit": "%"
+    }
+   ]
+  },
+  {
+   "ok": true,
+   "run_id": "c63bd3e1e220efe29087a678445fb876819199e11121f68460d238e85b1d610f",
+   "model_id": "scenario_sensitivity",
+   "status": "validated",
+   "dataset_hash": "f34114d9e4118ecfe0e2a78d05546d00b114ac4be1bc032e609a064e7808f1c6",
+   "mismatches": [],
+   "outputs": [
+    {
+     "output_id": "c63bd3e1e220-00-scenario_net_profit",
+     "value": 959.12,
+     "unit": "亿元"
+    },
+    {
+     "output_id": "c63bd3e1e220-01-scenario_sensitivity",
+     "value": 17.41,
+     "unit": "亿元"
+    }
+   ]
+  },
+  {
+   "ok": true,
+   "run_id": "7f1e53db084dc22b5854df5a",
+   "model_id": "ratio:net_margin",
+   "status": "validated",
+   "dataset_hash": "f34114d9e4118ecfe0e2a78d05546d00b114ac4be1bc032e609a064e7808f1c6",
+   "mismatches": [],
+   "outputs": [
+    {
+     "output_id": "7f1e53db084d-00-net_margin",
+     "value": 49.52,
+     "unit": "%"
+    }
+   ]
+  },
+  {
+   "ok": true,
+   "run_id": "3a52d1a9d7eb2f3942138ae9",
+   "model_id": "ratio:cashflow_coverage",
+   "status": "validated",
+   "dataset_hash": "f34114d9e4118ecfe0e2a78d05546d00b114ac4be1bc032e609a064e7808f1c6",
+   "mismatches": [],
+   "outputs": [
+    {
+     "output_id": "3a52d1a9d7eb-00-cashflow_coverage",
+     "value": 107.23,
+     "unit": "%"
+    }
+   ]
+  },
+  {
+   "ok": true,
+   "run_id": "c96f30512dd0e855d8a8ca79",
+   "model_id": "ratio:debt_ratio",
+   "status": "validated",
+   "dataset_hash": "f34114d9e4118ecfe0e2a78d05546d00b114ac4be1bc032e609a064e7808f1c6",
+   "mismatches": [],
+   "outputs": [
+    {
+     "output_id": "c96f30512dd0-00-debt_ratio",
+     "value": 19.04,
+     "unit": "%"
+    }
+   ]
+  },
+  {
+   "ok": true,
+   "run_id": "bcd6a9eff78e7ec6efa0dcbf",
+   "model_id": "ratio:rd_intensity",
+   "status": "validated",
+   "dataset_hash": "f34114d9e4118ecfe0e2a78d05546d00b114ac4be1bc032e609a064e7808f1c6",
+   "mismatches": [],
+   "outputs": [
+    {
+     "output_id": "bcd6a9eff78e-00-rd_intensity",
+     "value": 0.4,
+     "unit": "%"
+    }
+   ]
+  }
+ ],
+ "recompute_summary": {
+  "runs": 7,
+  "ok": 7,
+  "failed": []
+ }
+}
