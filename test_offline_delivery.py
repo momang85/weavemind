@@ -985,6 +985,208 @@ class TestResearchFixedPathOffline(unittest.TestCase):
         task_state.mark_queued(self.tid, goal=RESEARCH_GOAL,
                                research_request=payload, db_path=self.db)
 
+    # ── K1：官方披露发现接进正常研究任务（离线；发现/取件都在请求边界替身）──
+
+    @staticmethod
+    def _official_fetch(announcements):
+        """官方接口替身（形状与巨潮一致）：orgId 映射 GET + 公告查询 POST。
+
+        `announcements` 为 None 时表示"查询成功但没有年报"（缺料反例）。
+        """
+        import urllib.parse
+
+        def _fetch(url=None, *args, **kw):
+            url = str(url or (args[0] if args else ""))
+            body = kw.get("body") or (args[1] if len(args) > 1 else "")
+            if "szse_stock.json" in url:
+                payload = {"stockList": [
+                    {"code": "600519", "orgId": "gssh0600519", "zwjc": "贵州茅台",
+                     "pinyin": "gzmt", "category": "A股"}]}
+                return {"status": 200, "raw": json.dumps(payload).encode("utf-8")}
+            params = dict(urllib.parse.parse_qsl(str(body or "")))
+            assert params.get("stock", "").startswith("600519,"), params
+            return {"status": 200, "raw": json.dumps({
+                "totalAnnouncement": len(announcements or ()),
+                "announcements": list(announcements or ()),
+            }).encode("utf-8")}
+
+        return _fetch
+
+    _OFFICIAL_URL = "http://static.cninfo.com.cn/finalpage/2025-04-03/1223.PDF"
+    _OFFICIAL_BODY = (
+        "贵州茅台酒股份有限公司2024年年度报告\n\n"
+        "第三节 管理层讨论与分析\n\n"
+        "一、经营情况讨论与分析\n\n"
+        "2024年度实现营业收入1741.44亿元，同比增长15.66%；归属于上市公司股东的"
+        "净利润862.28亿元，同比增长15.38%；经营活动产生的现金流量净额924.64亿元，"
+        "同比增长38.85%。2023年度营业收入1505.60亿元、归母净利润747.34亿元、"
+        "经营活动现金流净额665.93亿元。\n\n"
+        "报告期内营业收入变动主要系销量增加及产品结构变化所致；归母净利润变动与"
+        "营业收入变动基本同步；经营活动现金流净额增加主要系销售商品收到的现金增加。\n\n"
+        "二、主营业务情况\n\n"
+        "公司主营业务为茅台酒及系列酒的生产与销售，经营模式以销定产，销售模式以"
+        "直销与批发代理并行。\n\n"
+        "三、可能面对的风险\n\n"
+        "风险因素：宏观经济波动可能影响高端白酒消费需求；行业政策与税收政策变化"
+        "存在不确定性。\n\n"
+        "七、财务报表附注\n\n"
+        "现金流量表附注：经营活动产生的现金流量净额924.64亿元，主要系销售商品收到"
+        "的现金增加所致。应收账款与存货明细见附注；主要会计政策未发生变更。\n\n"
+    )
+
+    def _official_doc(self):
+        return {"title": "贵州茅台2024年年度报告", "url": self._OFFICIAL_URL,
+                "text": self._OFFICIAL_BODY, "page_offsets": [(0, 1), (200, 2)]}
+
+    def _patch_official_chain(self, announcements, *, admit_ok=True):
+        """把发现链的两端替换掉：接口用替身、准入用**已缓存正文**（不联网、不解析 PDF）。"""
+        from unittest import mock
+        import material_intake as mi
+        import orchestrator_v2 as ov
+
+        fetch = self._official_fetch(announcements)
+        # 类属性是**取件钩子**（生产为 None → 真通道）；替身要包成 staticmethod，
+        # 否则 `self._discovery_fetch` 会把实例当第一个参数传进去（实机踩过）。
+        p1 = mock.patch.object(ov.OrchestratorV2, "_discovery_fetch",
+                               staticmethod(fetch))
+        p1.start()
+        self.addCleanup(p1.stop)
+        if not admit_ok:
+            p2 = mock.patch.object(
+                mi, "admit",
+                lambda **kw: {"ok": False, "material_id": kw.get("mid", ""),
+                              "status": "rejected", "reason": "fetch_failed",
+                              "detail": "注入的取件失败",
+                              "verdict": {"status": "rejected", "reason": "fetch_failed"}})
+            p2.start()
+            self.addCleanup(p2.stop)
+            return fetch
+        doc = self._official_doc()
+
+        def _admit(**kw):
+            return {"ok": True, "material_id": kw.get("mid", ""), "status": "admitted",
+                    "verdict": {"status": "admitted", "reason": "", "detail": "",
+                                "doc": dict(doc), "hash": "official-fixture-hash",
+                                "provenance": "official_discovery",
+                                "source_class": "official_disclosure",
+                                "cutoff": {"disclosed_at": "2025-04-03",
+                                           "as_of": kw.get("as_of") or "",
+                                           "verdict": "within"}},
+                    "metric_states": {}}
+
+        p2 = mock.patch.object(mi, "admit", _admit)
+        p2.start()
+        self.addCleanup(p2.stop)
+        p3 = mock.patch.object(mi, "load_doc", lambda *a, **k: dict(doc))
+        p3.start()
+        self.addCleanup(p3.stop)
+        return fetch
+
+    def _discovery_artifact(self):
+        p = ws_mod.task_project_dir(self.tid, "default") / "official_discovery.json"
+        return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
+
+    _ANN_2024 = {"announcementTitle": "2024年年度报告", "adjunctUrl": "finalpage/2025-04-03/1223.PDF",
+                 "announcementTime": 1743638400000, "secCode": "600519", "secName": "贵州茅台",
+                 "announcementId": "1223", "adjunctSize": 5200}
+    _ANN_2023 = {"announcementTitle": "2023年年度报告", "adjunctUrl": "finalpage/2024-04-03/900.PDF",
+                 "announcementTime": 1712102400000, "secCode": "600519", "secName": "贵州茅台",
+                 "announcementId": "900", "adjunctSize": 4900}
+
+    def test_official_discovery_reaches_the_normal_research_task(self):
+        """正例：官方发现 → 取件 → 准入 → **原件定位与问题覆盖**都在正常任务里发生。
+
+        判据不止 `located>0`（K1 明文要求）：必答问题的**语义支持**必须变多，且正文/交付里
+        能看到官方原文的来源域名——只把材料存下来不算完成。
+        """
+        self._seed_contract()
+        self._patch_official_chain([self._ANN_2024, self._ANN_2023])
+        o = self._orch("timeout", critic=True)
+        o._structured_data_preload = self._preload_writer(_research_financials())
+        # 搜索/抓取全部失败：这份交付**只能**靠官方原件（"不继续优先堆搜索引擎"）
+        o._brpop_with_deadline = self._brpop(fail_steps=("1", "2", "2b"))
+        o._replan_depth = 0
+        with mock.patch("orchestrator_v2.push_progress"):
+            res = o.run(self.tid, RESEARCH_GOAL, auto_run=True)
+        # ① 发现/取件/准入的结论落盘
+        art = self._discovery_artifact()
+        self.assertEqual(art.get("status"), "admitted", art)
+        self.assertTrue(art.get("admit", {}).get("ok"), art.get("admit"))
+        self.assertIn("cninfo", str(art.get("candidates", [{}])[0].get("url") or art))
+        self.assertEqual(art.get("contract", {}).get("company_code"), "600519.SH")
+        # ② 原文进了同一任务的证据存储（带定位，且指向官方 URL）
+        ev = json.loads((ws_mod.task_workspace(self.tid) / "narrative_evidence.json")
+                        .read_text(encoding="utf-8"))
+        located = [r for r in ev["records"] if r.get("has_location")]
+        self.assertTrue(located, ev.get("records"))
+        self.assertTrue(any("cninfo" in str(r.get("url") or "") for r in located),
+                        "定位必须指向官方原件 URL")
+        # ③ 问题覆盖真的变了（看**逐问题的语义支持**，不是只有 located 计数）：
+        #    材料齐全度从"四类全缺"变成不缺；现金问题拿到 full；收入问题从 none 变 partial。
+        rs = json.loads((ws_mod.task_workspace(self.tid) / "research_state.json")
+                        .read_text(encoding="utf-8"))
+        self.assertGreaterEqual(int(rs.get("located") or 0), 4, rs)
+        self.assertEqual(list(rs.get("missing_labels") or []), [], rs)
+        _q = {str(x.get("metric")): x for x in (rs.get("mandatory_questions") or [])}
+        self.assertTrue(_q.get("operating_cashflow", {}).get("supported"), _q)
+        self.assertNotEqual(_q.get("revenue", {}).get("coverage"), "none", _q)
+        # 原文没覆盖到的（利润分解）如实保持 none —— 不因为"跑过发现链"就抬成已支持
+        self.assertFalse(_q.get("net_profit", {}).get("supported"), _q)
+        # ④ 交付正文带上研究状态（三态分离：机器可交付 ≠ 研究 ready）
+        body = str(res.get("final_report") or "")
+        self.assertIn("研究状态", body, body[:300])
+        self.assertIn("cninfo", body + json.dumps(ev, ensure_ascii=False), "要能回到官方原件")
+
+    def test_official_discovery_gap_is_an_actionable_draft(self):
+        """反例：官方接口**没有可用年报** → 如实记原因码与下一步，交付是资料不足草稿。
+
+        不得因为"跑过发现链"就当资料齐备：状态、原因与恢复入口都要落盘可见。
+        """
+        self._seed_contract()
+        self._patch_official_chain([])
+        o = self._orch("timeout", critic=True)
+        o._structured_data_preload = self._preload_writer(_research_financials())
+        o._brpop_with_deadline = self._brpop(fail_steps=("1", "2", "2b"))
+        o._replan_depth = 0
+        with mock.patch("orchestrator_v2.push_progress"):
+            res = o.run(self.tid, RESEARCH_GOAL, auto_run=True)
+        art = self._discovery_artifact()
+        self.assertEqual(art.get("status"), "no_candidates", art)
+        self.assertTrue(art.get("reason_code"), art)
+        self.assertTrue(art.get("next_steps"), "缺料必须给可行动的恢复入口")
+        rs = json.loads((ws_mod.task_workspace(self.tid) / "research_state.json")
+                        .read_text(encoding="utf-8"))
+        self.assertEqual(rs.get("located"), 0)
+        self.assertLessEqual(int(rs.get("mandatory_supported") or 0), 1, rs)
+        self.assertTrue(rs.get("missing_labels"), rs)
+        # 交付侧：架构裁决允许"技术校验通过 + 资料不足"的草稿下载——verified 只是**技术
+        # 交付校验**，不等于研究通过；因此这里断言的是**研究状态如实为草稿**、且交付物
+        # 里写明资料缺口（不是断言技术状态为 draft，那会与裁决相反）。
+        body = str(res.get("final_report") or "")
+        self.assertEqual(rs.get("state"), "research_draft", rs)
+        self.assertIn("研究状态", body, body[:300])
+        self.assertTrue(("缺口" in body) or ("未取得" in body), body[:400])
+
+    def test_official_discovery_fetch_failure_keeps_the_gap(self):
+        """发现命中但取件失败 → 原因如实记（不当作已取得原文）。"""
+        self._seed_contract()
+        self._patch_official_chain([self._ANN_2024], admit_ok=False)
+        o = self._orch("timeout", critic=True)
+        o._structured_data_preload = self._preload_writer(_research_financials())
+        o._brpop_with_deadline = self._brpop(fail_steps=("1", "2", "2b"))
+        o._replan_depth = 0
+        with mock.patch("orchestrator_v2.push_progress"):
+            o.run(self.tid, RESEARCH_GOAL, auto_run=True)
+        art = self._discovery_artifact()
+        self.assertFalse(art.get("admit", {}).get("ok"), art)
+        self.assertIn("fetch_failed", json.dumps(art.get("admit") or {}, ensure_ascii=False))
+        self.assertNotEqual(art.get("status"), "admitted", art)
+        self.assertFalse((ws_mod.task_workspace(self.tid) / "narrative_evidence.json").exists()
+                         and json.loads((ws_mod.task_workspace(self.tid)
+                                         / "narrative_evidence.json").read_text(
+                                             encoding="utf-8")).get("records"),
+                         "取件失败不得产生证据记录")
+
     def _analysis_reply(self, tid: str) -> dict:
         """分析步（3a）的回包：**直接走真 worker 的金融分支**（确定性、零模型调用）。
 

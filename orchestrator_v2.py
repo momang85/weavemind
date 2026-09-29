@@ -5922,6 +5922,10 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         preloaded = None
         if resumed is None:
             preloaded = self._structured_data_preload(task_id, goal, project)
+            # K1（2026-09-29 夜验收）：**官方披露发现 → 取件 → 准入**接进正常研究任务。
+            # 与预载同位置（规划之前、确定性、不发 LLM）：事实与原文必须在报告与分析
+            # 之前就进同一任务工作区，否则"有没有原文"就只能靠搜索引擎的结果碰运气。
+            self._official_discovery_intake(task_id, goal, project)
         # 1. Plan（模板步骤直接采用，否则 LLM 规划）——恢复路径跳过规划
         used_template = False
         if resumed is None:
@@ -8102,6 +8106,199 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                             task_id, str(wp.get("reason") or "没有结构化财务"))
         except Exception as exc:                 # noqa: BLE001 - 前置失败不阻断派发
             logger.warning("分析步前置底稿异常（task=%s）：%s", task_id, str(exc)[:140])
+
+    def _official_discovery_intake(self, task_id: str, goal: str,
+                                   project: str | None = None) -> dict:
+        """官方披露发现 → 取件 → 准入（K1，确定性、零 LLM、失败只记缺口）。
+
+        为什么在这里（2026-09-29 夜验收：`disclosure_ingest.discover` 生产调用缺失）：
+        发现链一直只有 A2 脚本与测试在用，正常任务里没有候选，于是"研究质量"实际取决于
+        搜索引擎碰巧给不给年报正文。这里按**任务契约**（公司/代码/期间/as_of）直接问官方
+        公告接口，命中的原件走**同一条**取件与准入通道（`material_intake` → `net_policy`），
+        准入后的正文并入 `fetch_snapshot.json` 并重建叙事证据——之后的问题覆盖、分析、
+        候选稿与导出读的就是它。
+
+    约定：
+        - 只对**落库研究契约**生效（`source == "stored"`）；其它任务直接 `status=not_applicable`；
+        - `until=as_of`：历史时点研究只看"当时已披露"的版本（更正/重述稿不得穿越回去）；
+        - 每个任务**最多准入 1 份**正文（按 `prefer_body_candidates` 排序），失败时按顺序
+          再试候选，候选数与下载次数都受本次调用预算约束（不循环、不重跑整任务）；
+        - 任何异常都不抛出：写 `official_discovery.json` 如实记录状态/原因码/下一步。
+        """
+        out: dict = {"status": "not_applicable", "reason_code": "no_contract",
+                     "reason": "没有落库研究契约：不做官方发现", "next_steps": [],
+                     "contract": {}, "candidates": [], "material": {}, "admit": {},
+                     "located": 0}
+        try:
+            from adapters import disclosure_ingest as di
+            from working_paper_export import resolve_request
+        except Exception as exc:                 # noqa: BLE001 - 适配层不可用按缺口记
+            out.update({"status": "unavailable", "reason_code": "adapter_unavailable",
+                        "reason": f"官方发现适配层不可读：{str(exc)[:120]}"})
+            self._write_discovery_artifact(task_id, project, out)
+            return out
+        try:
+            payload_probe = task_project_dir(task_id, project) / "financials.json"
+            md: dict = {}
+            if payload_probe.exists():
+                try:
+                    _pl = json.loads(payload_probe.read_text(encoding="utf-8"))
+                    md = dict((_pl or {}).get("metadata") or {})
+                except Exception:                # noqa: BLE001 - 元数据只是线索
+                    md = {}
+            request, _cands, source = resolve_request(task_id, goal, md, None)
+        except Exception as exc:                 # noqa: BLE001
+            out.update({"status": "unavailable", "reason_code": "contract_read_failed",
+                        "reason": f"研究契约读取失败：{str(exc)[:120]}"})
+            self._write_discovery_artifact(task_id, project, out)
+            return out
+        company = str(getattr(request, "company", "") or "")
+        code = str(getattr(request, "company_id", "") or "")
+        periods = tuple(int(p) for p in (getattr(request, "periods", None) or [])
+                        if str(p).strip().isdigit())
+        as_of = str(getattr(request, "as_of", "") or "")
+        if source != "stored" or not (company or code) or len(periods) < 1:
+            out.update({"status": "not_applicable", "reason_code": "no_contract",
+                        "reason": ("没有落库研究契约（公司/期间）" if source != "stored"
+                                   else "契约缺公司或期间"),
+                        "next_steps": ["用表单提交研究请求（落库契约）后再跑"]})
+            self._write_discovery_artifact(task_id, project, out)
+            return out
+        out["contract"] = {"company": company, "company_code": code,
+                           "periods": list(periods), "as_of": as_of, "source": source}
+        try:
+            got = di.discover(company, code, periods, doc_type="年度报告",
+                              until=as_of, fetch=self._discovery_fetch)
+        except Exception as exc:                 # noqa: BLE001 - 发现失败按缺口记
+            out.update({"status": "unavailable", "reason_code": "discover_failed",
+                        "reason": f"官方发现异常：{str(exc)[:140]}"})
+            self._write_discovery_artifact(task_id, project, out)
+            self._push_discovery_progress(task_id, out)
+            return out
+        for k in ("contract_version", "params", "probe", "authority", "upstream_family",
+                  "access_method"):
+            if k in got:
+                out[k] = got[k]
+        out["status"] = str(got.get("status") or "unavailable")
+        out["reason_code"] = str(got.get("reason_code") or "")
+        out["reason"] = str(got.get("reason") or "")
+        out["next_steps"] = list(got.get("next_steps") or [])
+        candidates = di.prefer_body_candidates(got.get("candidates") or ())
+        out["candidates"] = [
+            {"title": str(c.get("title") or "")[:120], "url": str(c.get("url") or ""),
+             "period": str(c.get("period") or ""), "version": str(c.get("version") or ""),
+             "is_summary": bool(c.get("is_summary")),
+             "disclosed_at": str(c.get("disclosed_at") or ""),
+             "why": str(c.get("why") or "")[:160]}
+            for c in candidates[:4]]
+        if not candidates:
+            self._write_discovery_artifact(task_id, project, out)
+            self._push_discovery_progress(task_id, out)
+            return out
+        # 取件 + 准入：按偏好顺序试，**上限 2 次**（一次任务一份正文即可，多年报在同一份里）。
+        # 另有总墙钟上限与取消检查：站点极慢时不把任务预算吃光（"共用根预算"的落地）。
+        _deadline = time.monotonic() + 240.0
+        for cand in candidates[:2]:
+            if self._cancel_requested(task_id):
+                out["reason"] = (out.get("reason") or "") + "；用户已取消，停止取件"
+                break
+            if time.monotonic() > _deadline:
+                out["reason"] = (out.get("reason") or "") + "；官方取件超过总墙钟上限，停止"
+                break
+            try:
+                import material_intake as mi
+                stored = mi.store(task_id=task_id, channel=mi.CHANNEL_LINK,
+                                  url=str(cand.get("url") or ""),
+                                  title=str(cand.get("title") or ""),
+                                  period=str(cand.get("period") or ""),
+                                  doc_type="年度报告",
+                                  declared_disclosed_at=str(cand.get("disclosed_at") or ""),
+                                  provenance=di.PROVENANCE_DISCOVERY,
+                                  note=f"官方发现（{got.get('contract') or ''}）",
+                                  project=project)
+            except Exception as exc:             # noqa: BLE001
+                out["material"] = {"ok": False, "error": str(exc)[:140]}
+                continue
+            out["material"] = {"ok": bool(stored.get("ok")),
+                              "material_id": stored.get("material_id") or "",
+                              "duplicate": bool(stored.get("duplicate")),
+                              "error": str(stored.get("error") or "")[:140]}
+            if not stored.get("ok"):
+                continue
+            mid = str(stored.get("material_id") or "")
+            try:
+                import material_intake as mi
+                verdict = mi.admit(task_id=task_id, mid=mid, company=company,
+                                   company_code=code, periods=periods, as_of=as_of,
+                                   goal=goal, doc_type="年度报告", project=project)
+            except Exception as exc:             # noqa: BLE001
+                out["admit"] = {"ok": False, "reason": f"准入异常：{str(exc)[:140]}"}
+                continue
+            _v = dict((verdict or {}).get("verdict") or verdict or {})
+            out["admit"] = {"ok": bool(verdict.get("ok")),
+                            "status": str(_v.get("status") or verdict.get("status") or ""),
+                            "reason": str(_v.get("reason") or verdict.get("reason") or "")[:160],
+                            "detail": str(_v.get("detail") or verdict.get("detail") or "")[:200],
+                            "cutoff": _v.get("cutoff") or {},
+                            "provenance": str(_v.get("provenance") or ""),
+                            "source_class": str(_v.get("source_class") or ""),
+                            "text_hash": str(_v.get("hash") or "")[:32],
+                            "metric_states": verdict.get("metric_states") or {}}
+            if not verdict.get("ok"):
+                continue
+            # 原文进**同一任务**的文档快照 + 重建叙事证据（报告/问题覆盖据此）
+            try:
+                import material_intake as mi
+                import narrative_evidence as ne
+                doc = mi.load_doc(task_id, mid, project=project) or {}
+                if doc:
+                    try:
+                        import annual_report_pdf as _arp
+                        _arp.append_snapshot(task_id, doc, project=project)
+                    except Exception as exc:     # noqa: BLE001 - 并入失败不阻断证据重建
+                        logger.warning("官方原件并入快照失败（task=%s）：%s",
+                                       task_id, str(exc)[:120])
+                    ev = ne.build(task_id, goal=goal, ws_dir=None, project=project) or {}
+                    out["located"] = int(ev.get("located") or 0)
+            except Exception as exc:             # noqa: BLE001
+                logger.warning("官方原件证据重建失败（task=%s）：%s", task_id, str(exc)[:140])
+            out["status"] = "admitted"
+            out["reason"] = ""
+            out["next_steps"] = []
+            break
+        self._write_discovery_artifact(task_id, project, out)
+        self._push_discovery_progress(task_id, out)
+        return out
+
+    # 官方发现的取件钩子：测试可注入替身（生产为 None → 走 net_policy 真通道）
+    _discovery_fetch = None
+
+    def _push_discovery_progress(self, task_id: str, out: dict) -> None:
+        """把官方发现的结果写进任务日志（页面/历史可见"为什么没有原文"）。"""
+        _label = {"admitted": "官方原件已准入",
+                  "no_candidates": "官方接口没有可用年报正文",
+                  "unavailable": "官方接口暂不可用",
+                  "not_applicable": "无研究契约，未做官方发现"}.get(
+                      str(out.get("status") or ""), str(out.get("status") or ""))
+        _msg = _label
+        if out.get("reason"):
+            _msg += f"：{out['reason']}"
+        if out.get("admit", {}).get("detail"):
+            _msg += f"（{str(out['admit']['detail'])[:120]}）"
+        if out.get("next_steps"):
+            _msg += "；下一步：" + "；".join(str(x) for x in out["next_steps"][:3])
+        push_progress(self._messaging, task_id, "log",
+                      {"type": "info", "agent": "orchestrator", "message": _msg,
+                       "timestamp": self._now_iso()})
+
+    @staticmethod
+    def _write_discovery_artifact(task_id: str, project: str | None, out: dict) -> None:
+        """把发现/取件/准入结论落盘（`project/official_discovery.json`），页面与验收可读。"""
+        try:
+            p = task_project_dir(task_id, project) / "official_discovery.json"
+            p.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
+        except Exception as exc:                 # noqa: BLE001 - 落盘失败不影响任务
+            logger.warning("官方发现结论落盘失败（task=%s）：%s", task_id, str(exc)[:120])
 
     def _dispatch_step_safe(self, goal: str, step: dict, task_id: str, state: dict) -> dict:
         """派发单步：失败自动重试，重试仍失败则尝试单步重规划。
