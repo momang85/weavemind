@@ -1,14 +1,16 @@
 # DeepSeek 执行状态
 
-> ## 当前账（2026-09-29 · HEAD `3903945`）——**只这一段是当前状态**
+> ## 当前账（2026-09-29 · HEAD `447b04f`+Q2第一批）——**只这一段是当前状态**
 >
-> **基线**：Q0 前 `5fe791e`；本批六个提交
+> **基线**：Q0 前 `5fe791e`；Q0 五个提交
 > `046f3b2`（派生输出语义/正文匹配/位置对齐）→ `523d4c6`（旧 owner 失租闸门）→
-> `a8359c2`（检索总截止 + 资料期间）→ `4bc8834`/`d4d3946`（证据账更正）→
-> `3903945`（Q1 包：冻结数据集 + 利润桥接）。证据：
+> `a8359c2`（检索总截止 + 资料期间）→ `4bc8834`/`d4d3946`（证据账更正）；Q1 两个提交
+> `3903945`（包：冻结数据集 + 利润桥接）→ `447b04f`（同版绑定 + data_analyzer 金融路径）；
+> Q2 第一批（三族模型）。证据：
 > `docs/evidence/q0_derived_output_semantics_20260929.md`、`q0_owner_lease_gate_20260929.md`、
 > `q0_search_deadline_and_period_20260929.md`、`q0_ci_and_second_company_20260929.md`、
-> `q1_frozen_dataset_and_profit_bridge_20260929.md`。
+> `q1_frozen_dataset_and_profit_bridge_20260929.md`、
+> `q1_delivery_binding_and_worker_20260929.md`、`q2_model_families_20260929.md`。
 >
 > ### CI 状态（**更正**：本仓库**有** CI，不是"没配"）
 >
@@ -43,8 +45,17 @@
 >   dataset_hash `56c2c9dd…`、run `validated`、**-33.43 / -38.01 / +4.58 亿元**。
 > - 定向套件：`test_delivery_chain` 403、`test_p0` 434、`test_search_quality_unified` 80、
 >   `test_startup_readiness` 68、`test_offline_delivery` 34、`test_orchestrator_v2` 81、
->   `test_financial_analysis` **28**、`test_deploy_manifest` 39（CI 48→49 步 == 49 个测试文件）、
->   `test_r0_boundaries` 47、`test_narrative_evidence` 68、`test_financial_chain` 36 —— 逐文件 OK。
+>   `test_financial_analysis` **57**、`test_deploy_manifest` 39（CI 48→49 步 == 49 个测试文件）、
+>   `test_r0_boundaries` 47、`test_narrative_evidence` 68、`test_financial_chain` 36、
+>   `test_report_quality` 39、`test_task_projection` 19 —— 逐文件 OK。
+> - **Q1 同版绑定 + worker 金融路径**（`447b04f`）：运行记录落盘/身份块/正文↔运行核对
+>   （`financial_analysis/store.py`）；正文 `## 分析卡`、清单 `analysis_runs`、ZIP 内
+>   `analysis/analysis_runs.json` 三者指向同一次运行（端到端用例：清单 hash 与包内字节相符、
+>   包内正文含 run 标记、对包内正文再核对 ok）；`data_analyzer` 有金融底稿时走
+>   "冻结数据集→计划→注册模型→落盘运行"，不再猜最新 CSV/末列目标。
+> - **Q2 第一批**：现金质量（−20.44 亿元 / 覆盖率 69.37%，非正利润不给覆盖率）、
+>   营运资本（真实样本缺 4 个 slug → **拒绝并列出补料清单**；夹具验证 8.0 亿元 / 16.43 天、
+>   写明期末口径）、条件情景（基准复现基期差额 0、单因素敏感度 2.89 亿元/pp、方向检查通过）。
 >
 > ### 未验（**不是**"只剩环境项"，逐条说清）
 >
@@ -69,12 +80,12 @@
 >
 > ### 下一步
 >
-> ① 把 `delivery_binding()` 接进成稿与冻结包（页面/图/底稿/正文/ZIP 同一次运行）；
-> ② `data_analyzer_worker` 改按显式数据集+分析计划调用 `financial_analysis`；
-> ③ Q2 的现金质量/营运资本/条件情景三族模型与第二个真实公司（本环境四条正常入口取不到，
->    需要官方直链或人工文件）；
-> ④ 第二家公司真实资料到手前，Q2 的"两个真实公司"门槛**不得**宣称满足。
-> 统计模型（Q4）仅设计。
+> ① 抽取器补 `accounts_receivable`/`inventory`/`accounts_payable`/`operating_cost`
+>    （营运资本在真实样本上目前必然拒绝，缺口已登记）；
+> ② 页面上的"改假设→复算→采纳→导出"（Q2 退出条件之一）；
+> ③ 图从声明变成像素（CJK 字体 + 既有 PDF 渲染口径）；
+> ④ 第二个真实公司（需官方直链或人工文件）；到手前 Q2 的"两个真实公司"门槛**不得**宣称满足；
+> ⑤ 统计模型（Q4）仅设计。
 >
 > ---
 >

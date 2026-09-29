@@ -74,11 +74,12 @@ class DataAnalyzerWorker(AsyncWorkerBase):
         ok_runs = [r for r in runs if r["status"] == fa.RunStatus.VALIDATED]
         adopted_ok = [r for r in runs if r["model_id"] in
                       {a.model_id for a in plan.adopted} and r["status"] == fa.RunStatus.VALIDATED]
-        # 状态如实（三档，不看"顺带算出的比率"）：请求的模型一个都用不上 → failed；
-        # 全过 → success；过了一部分 → partial。缺输入/不适用**不是**成功。
+        # 状态如实（三档）：请求的模型一个都用不上 → failed；全过**且没有被拒绝的模型**
+        # → success；其余（部分过、或有模型因缺输入被拒）→ partial —— 缺输入/不适用
+        # 不是成功，读者必须看到缺口。
         if not plan.adopted or not adopted_ok:
             status = "failed"
-        elif len(adopted_ok) == len(plan.adopted):
+        elif len(adopted_ok) == len(plan.adopted) and not plan.rejected:
             status = "success"
         else:
             status = "partial"

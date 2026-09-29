@@ -341,7 +341,9 @@ class TestCoreHasNoModelCalls(unittest.TestCase):
 
     def test_registry_is_the_only_way_in(self):
         self.assertIn("profit_bridge_v1", fa.registry.operators())
-        self.assertEqual([m.model_id for m in fa.specs()], ["profit_bridge"])
+        self.assertEqual([m.model_id for m in fa.specs()],
+                         ["profit_bridge", "cash_quality", "working_capital",
+                          "scenario_sensitivity"])
 
 
 class TestAnalysisRunStore(unittest.TestCase):
@@ -579,10 +581,15 @@ class TestDataAnalyzerTakesTheFinancialPath(unittest.TestCase):
             instruction, {"workspace": str(self.ws)})))
 
     def test_financial_task_runs_registered_models_and_stores_runs(self):
-        self._write_working_paper()
+        # 四族输入齐备的夹具（含应收/存货/应付/营业成本）→ 四个模型全部采用并验证通过
+        self._write_working_paper(_wc_rows())
         got = self._execute("分析本期归母净利润的变化由哪些金额项构成 [研究契约]")
         self.assertEqual(got["mode"], "financial")
-        self.assertEqual(got["status"], "success")
+        self.assertEqual(got["status"], "success", got["plan"]["rejected"])
+        self.assertEqual(got["plan"]["adopted"],
+                         ["profit_bridge", "cash_quality", "working_capital",
+                          "scenario_sensitivity"])
+        self.assertEqual(got["plan"]["rejected"], [])
         self.assertEqual(got["dataset"]["entity_id"], "002304.SZ")
         self.assertIn("profit_bridge", got["plan"]["adopted"])
         self.assertNotIn("target", got, "金融路径不得再给'末列当目标'的结论")
@@ -604,7 +611,8 @@ class TestDataAnalyzerTakesTheFinancialPath(unittest.TestCase):
         got = self._execute("分析利润变化 [研究契约]")
         self.assertEqual(got["mode"], "financial", "缺输入也不得回退到 CSV 猜测")
         # 初筛就缺输入 → 进计划的**拒绝清单**（带缺什么），不生成 run；状态不得报 success
-        self.assertEqual(got["status"], "failed", got["status"])
+        # （其他模型照跑 → partial：缺口必须让读者看见，而不是被"其他都过了"盖掉）
+        self.assertEqual(got["status"], "partial", got["status"])
         rej = got["plan"]["rejected"]
         self.assertTrue(rej, rej)
         item = [r for r in rej if r.get("model_id") == "profit_bridge"][0]
@@ -615,6 +623,15 @@ class TestDataAnalyzerTakesTheFinancialPath(unittest.TestCase):
         # 顺带算出的比率仍然如实记录（它们真的验证通过了）
         self.assertTrue(all(r["status"] == C.RunStatus.VALIDATED for r in got["runs"]))
 
+    def test_partial_status_when_a_family_is_rejected_for_missing_inputs(self):
+        """核心指标齐备但没有占款字段：三族跑通、营运资本被拒 → `partial`（缺口可见）。"""
+        self._write_working_paper()
+        got = self._execute("分析利润、现金质量与占款 [研究契约]")
+        self.assertEqual(got["status"], "partial", got["status"])
+        self.assertEqual([r["model_id"] for r in got["plan"]["rejected"]], ["working_capital"])
+        self.assertTrue(all(r["status"] == C.RunStatus.VALIDATED for r in got["runs"]),
+                        "被采用的模型都必须是通过验证的")
+
     def test_non_financial_workspace_keeps_the_generic_eda_path(self):
         """没有本次任务的金融底稿时，原有 EDA 路径一字不变（不误伤通用数据任务）。"""
         got = self._execute("帮我做一下数据探索")
@@ -622,6 +639,126 @@ class TestDataAnalyzerTakesTheFinancialPath(unittest.TestCase):
         self.assertEqual(got.get("status"), "failed")
         self.assertFalse((self.ws / "analysis_runs.json").exists(),
                          "非金融任务不得写分析运行记录")
+
+
+def _wc_rows():
+    """营运资本夹具：现役事实层还没有应收/存货/应付这些 slug，用夹具验证"数据到位就能算"。"""
+    rows = _two_period_rows()
+    for metric, v23, v24, unit in (("accounts_receivable", 10.0, 13.0, "亿元"),
+                                   ("inventory", 20.0, 26.0, "亿元"),
+                                   ("accounts_payable", 8.0, 9.0, "亿元"),
+                                   ("operating_cost", 80.0, 77.51, "亿元")):
+        rows.append(_row(metric, "2023年", v23, unit=unit))
+        rows.append(_row(metric, "2024年", v24, unit=unit))
+    return rows
+
+
+class TestCashQualityAndWorkingCapitalAndScenario(unittest.TestCase):
+    """Q2 三族模型的注册、独立验证与**缺输入就拒绝**（不凑数）。"""
+
+    def _ds(self, rows=None, **kw):
+        return _dataset(rows, **kw)
+
+    # ── 现金质量 ──
+    def test_cash_quality_on_real_numbers(self):
+        run = fa.run("cash_quality", self._ds())
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        got = {o.metric: o.value for o in run.outputs}
+        self.assertAlmostEqual(got["cfo_minus_profit"], -20.44, places=2)   # 46.29 - 66.73
+        self.assertAlmostEqual(got["cashflow_coverage"], 69.37, places=2)   # 46.29/66.73
+        self.assertTrue(run.validation["checks"]["cash_quality_sign"]["ok"])
+
+    def test_cash_quality_refuses_coverage_when_profit_is_not_positive(self):
+        rows = _dataset_rows_with(mutate=(("net_profit", "2024年", {"value": -5.0}),))
+        run = fa.run("cash_quality", self._ds(rows))
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        self.assertNotIn("cashflow_coverage", {o.metric for o in run.outputs},
+                         "归母净利非正时不得给覆盖率")
+        self.assertIn("非正", " ".join(run.outputs[0].limits))
+
+    def test_cash_quality_converts_units_explicitly(self):
+        rows = _dataset_rows_with(mutate=(("operating_cashflow", "2024年",
+                                           {"value": 462900.0, "unit": "万元"}),))
+        run = fa.run("cash_quality", self._ds(rows))
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        self.assertAlmostEqual(
+            {o.metric: o.value for o in run.outputs}["cfo_minus_profit"], -20.44, places=2)
+
+    # ── 营运资本 ──
+    def test_working_capital_is_refused_when_the_slugs_do_not_exist(self):
+        """真实事实层还没有应收/存货/应付：必须**明确拒绝**并给出要补的指标。"""
+        run = fa.run("working_capital", self._ds())
+        self.assertEqual(run.status, C.RunStatus.MISSING_INPUT, run.reason)
+        self.assertIn("accounts_receivable", run.reason)
+        plan = fa.compile_plan("占款增加在哪里", self._ds())
+        rej = [r for r in plan.rejected if r["model_id"] == "working_capital"][0]
+        self.assertIn("accounts_receivable", rej["missing"])
+        self.assertIn("operating_cost", rej["missing"])
+
+    def test_working_capital_computes_and_discloses_closing_balance_posture(self):
+        run = fa.run("working_capital", self._ds(_wc_rows()))
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        got = {o.metric: o.value for o in run.outputs}
+        # 手算：占款变化 = Δ应收 3 + Δ存货 6 − Δ应付 1 = 8（金样口径逐项复核）
+        self.assertAlmostEqual(got["working_capital_occupation_change"], 8.0, places=2)
+        self.assertAlmostEqual(got["receivable_days"], 13.0 / 288.76 * 365, places=2)
+        self.assertTrue(run.validation["checks"]["posture_disclosed"]["ok"])
+        self.assertIn("期末口径", " ".join(run.outputs[0].assumptions))
+
+    def test_working_capital_zero_denominator_gives_not_computable(self):
+        rows = _wc_rows()
+        for r in rows:
+            if r["metric"] == "revenue" and r["period"] == "2024年":
+                r["value"] = 0.0
+        run = fa.run("working_capital", self._ds(rows))
+        self.assertEqual(run.status, C.RunStatus.NOT_COMPUTABLE, run.reason)
+        self.assertIn("分母非正", run.reason)
+
+    # ── 条件情景 ──
+    def test_scenario_reproduces_the_base_period_and_ranks_sensitivity(self):
+        run = fa.run("scenario_sensitivity", self._ds(),
+                     params={"revenue_growth": 0.03, "gross_margin_delta": -0.01})
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        base = [c for c in run.outputs[0].components if str(c["label"]).startswith("基准")][0]
+        self.assertAlmostEqual(base["value"], 66.73, places=2, msg="基准必须复现基期")
+        self.assertEqual(run.outputs[0].diagnostics["base_reproduction_gap"], "0")
+        self.assertTrue(run.validation["checks"]["base_reproduction"]["ok"])
+        self.assertTrue(run.validation["checks"]["scenario_direction"]["ok"])
+        sens = run.outputs[1]
+        self.assertEqual(sens.components[0]["label"], "毛利率 +1pp",
+                         "本样本上毛利率最敏感（2.89 亿元/pp）")
+        self.assertIn("使用者设定", " ".join(run.outputs[0].assumptions))
+        self.assertIn("不显示", run.outputs[0].diagnostics["no_probability"])
+
+    def test_scenario_out_of_bounds_params_fail_closed(self):
+        run = fa.run("scenario_sensitivity", self._ds(),
+                     params={"revenue_growth": 3.0})
+        self.assertEqual(run.status, C.RunStatus.NOT_APPLICABLE, run.reason)
+        self.assertIn("超出允许范围", run.reason)
+
+    def test_scenario_refuses_non_positive_base_revenue(self):
+        rows = _dataset_rows_with(mutate=(("revenue", "2024年", {"value": 0.0}),))
+        run = fa.run("scenario_sensitivity", self._ds(rows))
+        self.assertEqual(run.status, C.RunStatus.NOT_COMPUTABLE, run.reason)
+
+    # ── 注册表与计划 ──
+    def test_registry_lists_four_families_and_each_has_an_operator(self):
+        self.assertEqual([m.model_id for m in fa.specs()],
+                         ["profit_bridge", "cash_quality", "working_capital",
+                          "scenario_sensitivity"])
+        self.assertEqual(set(fa.registry.operators()),
+                         {"profit_bridge_v1", "cash_quality_v1", "working_capital_v1",
+                          "scenario_v1"})
+        for m in fa.specs():
+            self.assertIn(m.operator, fa.registry.operators())
+            self.assertTrue(m.limits, f"{m.model_id} 必须带限制")
+
+    def test_plan_adopts_three_families_on_the_real_shape(self):
+        plan = fa.compile_plan("利润、现金质量、占款与情景", self._ds())
+        self.assertEqual([a.model_id for a in plan.adopted],
+                         ["profit_bridge", "cash_quality", "scenario_sensitivity"])
+        self.assertEqual([r["model_id"] for r in plan.rejected], ["working_capital"])
+        self.assertEqual(plan.rejected[0]["reason"], "缺输入")
 
 
 class TestRealFrozenSampleChain(unittest.TestCase):

@@ -12,8 +12,13 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from .contracts import State, _canonical
+from .contracts import State, _canonical, _money_scale
 from .registry import OPERATORS
+
+
+def _amount_scale(unit: str) -> float:
+    """金额量纲（与契约同一实现，避免两套换算规则）。"""
+    return _money_scale(unit)
 
 
 def _tolerance(spec) -> Decimal:
@@ -57,19 +62,60 @@ def validate_output(spec, dataset, payload: dict) -> dict:
         outs = payload.get("outputs") or []
         first = outs[0] if outs else {}
         comps = first.get("components") or []
-        total = sum(Decimal(str(c.get("value") or 0)) for c in comps)
         base = Decimal(str(first.get("value") or 0))
-        _add("identity", _close(total, base, _tolerance(spec)),
-             f"贡献项合计 {total} vs 总量 {base}")
+        if not comps:
+            # 没有分解项的输出（如差额/覆盖率）："合计=总量"这条不适用，如实说明
+            _add("identity", True, "该输出没有分解项，不适用合计核对")
+        else:
+            total = sum(Decimal(str(c.get("value") or 0)) for c in comps)
+            _add("identity", _close(total, base, _tolerance(spec)),
+                 f"贡献项合计 {total} vs 总量 {base}")
     if "unit" in wanted:
-        units = {str(o.get("unit") or "") for o in (payload.get("outputs") or [])}
-        _add("unit", len(units) == 1 and "" not in units, f"输出单位不一致：{sorted(units)}")
+        # 单位检查的**正确形状**：每个输出都要有单位；所有**金额**输出的量纲要一致。
+        # 不能要求"全模型只有一个单位"——差额（亿元）+ 覆盖率（%）本来就该同时出现。
+        outs = payload.get("outputs") or []
+        unnamed = [str(o.get("metric")) for o in outs if not str(o.get("unit") or "")]
+        scales = {_amount_scale(str(o.get("unit") or "")) for o in outs
+                  if _amount_scale(str(o.get("unit") or "")) > 0}
+        ok = not unnamed and len(scales) <= 1
+        _add("unit", ok,
+             f"缺单位的输出：{unnamed}" if unnamed
+             else (f"金额输出量纲不一致：{sorted(scales)}" if len(scales) > 1
+                   else f"单位齐备（金额量纲 {sorted(scales) or ['无金额输出']}）"))
     if "no_pp_substitution" in wanted:
         # 金额桥**不得**把"百分点差"当金额项：任一贡献项的单位不能是百分比
         pct = [c for o in (payload.get("outputs") or [])
                for c in (o.get("components") or []) if str(c.get("unit") or "").endswith("%")]
         _add("no_pp_substitution", not pct,
              "" if not pct else f"金额桥里出现百分比贡献项：{[c['label'] for c in pct]}")
+    if "cash_quality_sign" in wanted:
+        # 归母净利非正时**不得**出现覆盖率读数（负/零分母没有可比含义）
+        diag = payload.get("diagnostics") or {}
+        has_cov = any(str(o.get("metric")) == "cashflow_coverage"
+                      for o in (payload.get("outputs") or []))
+        skipped = bool(diag.get("coverage_skipped"))
+        _add("cash_quality_sign", (not has_cov) if skipped else has_cov,
+             str(diag.get("coverage_skipped") or "分母为正 → 覆盖率已给出"))
+    if "posture_disclosed" in wanted:
+        # 期末口径必须写明（不得让读者以为是平均余额）
+        diag = payload.get("diagnostics") or {}
+        posture = str(diag.get("posture") or "")
+        assumed = " ".join(payload.get("assumptions") or ())
+        _add("posture_disclosed",
+             posture in ("closing_balance", "average_balance")
+             and ("期末" in assumed or "平均" in assumed),
+             f"posture={posture or '未标'}")
+    if "base_reproduction" in wanted:
+        # 情景的基准必须复现基期（参数全 0 → 差额 0）
+        diag = payload.get("diagnostics") or {}
+        gap = str(diag.get("base_reproduction_gap") or "")
+        _add("base_reproduction", gap not in ("", "None") and Decimal(gap) == 0,
+             f"基准复现差额 {gap or '未提供'}")
+    if "scenario_direction" in wanted:
+        # 单因素方向：收入升→利润升、毛利率降→利润降（做反了立刻发现）
+        diag = payload.get("diagnostics") or {}
+        _add("scenario_direction", bool(diag.get("direction_ok")),
+             "收入 +5% 应为升、毛利率 -1pp 应为降")
     failed = [k for k, v in checks.items() if not v["ok"]]
     return {"ok": not failed, "checks": checks, "failed": failed}
 
