@@ -994,8 +994,12 @@ class TestFetchRoleRouting(unittest.TestCase):
             caliber="合并", as_of="2025-04-30", identity_source="form")
         steps = OrchestratorV2._research_steps(req)
         caps = [s["capability"] for s in steps]
+        # 分析步（3a data_analyzer）在解释之后、成稿之前：注册模型必须在报告前跑完
+        # （2026-09-29 付费整跑实机：缺这一步时正文只剩数据与底稿，交付硬门槛如实拦下整单）
         self.assertEqual(caps, ["web_search", "web_fetch", "web_fetch",
-                                "content_summary", "report_generator"])
+                                "content_summary", "data_analyzer", "report_generator"])
+        self.assertLess(caps.index("data_analyzer"), caps.index("report_generator"),
+                        "分析必须先于成稿")
         fetch_ids = [s["step_id"] for s in steps if s["capability"] == "web_fetch"]
         self.assertEqual(fetch_ids, ["2", "2b"])
         self.assertIn("年报", steps[1]["instruction"])
