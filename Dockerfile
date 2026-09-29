@@ -20,6 +20,8 @@ COPY workers/ ./workers/
 COPY charts_pipeline/ ./charts_pipeline/
 COPY structured_pipeline/ ./structured_pipeline/
 COPY adapters/ ./adapters/
+# 金融分析包（Q1）：data_analyzer 的金融路径与会话都 import 它（缺了金融任务必失败）
+COPY financial_analysis/ ./financial_analysis/
 COPY validators/ ./validators/
 COPY skills/ ./skills/
 COPY evals/ ./evals/

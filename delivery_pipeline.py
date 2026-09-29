@@ -564,6 +564,8 @@ def package_manifest(task_id: str, ws, files, *, pdf_name: str = "") -> dict:
         out["rules_version"], out["rules_fingerprint"] = rv, rf
     except Exception as exc:                     # noqa: BLE001 - 指纹算不出不阻断打包
         logger.warning("包内清单指纹计算失败：%s", str(exc)[:120])
+    # 分析运行身份（Q1）：与快照路径同一构造器，两路清单口径一致
+    out["analysis_runs"] = analysis_binding(ws)
     return out
 
 
@@ -619,7 +621,39 @@ def _freeze_payload(task_id: str, ws, *, md_bytes: bytes = b"",
                 ev, ensure_ascii=False, indent=1).encode("utf-8")
     except Exception as exc:                     # noqa: BLE001 - 证据生成不了不阻断导出
         logger.warning("快照：引用证据生成失败（task=%s）：%s", task_id, str(exc)[:120])
+    # 分析运行（Q1）：把"正文/图引用的是哪一次运行"按**字节**冻结进包。
+    # 没有运行记录就不放这个文件（不制造空文件、不改既有包的内容清单）。
+    _analysis = analysis_payload_bytes(ws)
+    if _analysis:
+        payload["analysis/analysis_runs.json"] = _analysis
     return payload
+
+
+def analysis_payload_bytes(ws) -> bytes | None:
+    """工作区里的分析运行记录（`financial_analysis.store`）→ 进包的字节。
+
+    读不到/没装这个包都返回 `None`：交付链不因为"分析包不可用"而失败。
+    """
+    try:
+        from financial_analysis import store as _fa_store
+    except Exception:                            # noqa: BLE001
+        return None
+    try:
+        return _fa_store.payload_bytes(Path(ws))
+    except Exception as exc:                     # noqa: BLE001
+        logger.warning("快照：分析运行记录读取失败：%s", str(exc)[:100])
+        return None
+
+
+def analysis_binding(ws) -> dict:
+    """交付清单里的分析身份块（无运行时返回空块，键仍然存在，便于核对"没有"与"没读"）。"""
+    try:
+        from financial_analysis import store as _fa_store
+        runs = _fa_store.load_runs(Path(ws))
+        return _fa_store.binding_summary(runs)
+    except Exception as exc:                     # noqa: BLE001
+        return {"schema": "weavemind.analysis_runs/1", "count": 0, "validated": 0,
+                "runs": [], "error": str(exc)[:120]}
 
 
 def _disk_drift(ws, frozen: dict) -> dict:
@@ -789,6 +823,8 @@ def _manifest_from_frozen(frozen: dict, *, snap: dict, ws=None,
     out["binding_verified"] = bool(snap.get("binding_verified"))
     out["delivered_sha256"] = str(snap.get("delivered_sha256") or "")
     out["frozen"] = dict(want)
+    out["analysis_runs"] = analysis_binding(ws) if ws is not None else {
+        "schema": "weavemind.analysis_runs/1", "count": 0, "validated": 0, "runs": []}
     if ws is not None:
         out["drift"] = _disk_drift(ws, frozen)
     return out
@@ -857,6 +893,16 @@ def repack_adopted(task_id: str, *, md_bytes: bytes = b"", pdf_bytes: bytes = b"
         if charts_dir.is_dir():
             for p in sorted(charts_dir.glob("*.png")):
                 files.append((p, f"charts/{p.name}"))
+        # 分析运行记录（Q1）：有才进包（与快照路径同一路径名，便于两路核对一致）
+        _analysis = analysis_payload_bytes(ws)
+        if _analysis:
+            _ana_path = ws / "analysis" / "analysis_runs.json"
+            try:
+                _ana_path.parent.mkdir(parents=True, exist_ok=True)
+                _ana_path.write_bytes(_analysis)
+                files.append((_ana_path, "analysis/analysis_runs.json"))
+            except Exception as exc:             # noqa: BLE001 - 写不出就不进包
+                logger.warning("打包：分析运行记录落盘失败：%s", str(exc)[:100])
         # 完整模型稿（审计留档，按内容 hash 命名）：存在的每一版都进包（不覆盖历史）
         for cand_dir in (ws / "project", ws):
             if not cand_dir.is_dir():

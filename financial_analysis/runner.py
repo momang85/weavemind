@@ -16,7 +16,7 @@ from .contracts import (
     AnalysisPlan, MissingInput, ModelRun, NotApplicable, NotComputable, PlanItem,
     RunStatus, ValidatedOutput, _hash,
 )
-from .registry import OPERATORS, available_for, ratio_specs, spec
+from .registry import OPERATORS, available_for, ratio_specs, spec, specs
 from .validation import validate_output
 
 
@@ -55,10 +55,24 @@ def compile_plan(question: str, dataset, *, prefer=()) -> AnalysisPlan:
             continue
         adopted.append(PlanItem(model_id=mid, question=m.question,
                                 reason=f"输入齐备（{', '.join(need)}）"))
-    for mid in ("profit_bridge",):
-        if mid not in avail and not any(r["model_id"] == mid for r in rejected):
-            rejected.append({"model_id": mid, "reason": "输入不齐备或期间不足两期",
-                             "needs": ["net_profit×2", "gross_profit×2"]})
+    # 其余**已注册**模型：逐个说明为什么没被采用（缺哪些指标 / 期间不够 / 不适用）——
+    # 不能只写一句"输入不齐备"，那对"该补什么材料"没有帮助。
+    _periods = [p for p in (dataset.manifest.periods or ()) if p]
+    for m in specs():
+        if any(a.model_id == m.model_id for a in adopted) \
+                or any(r["model_id"] == m.model_id for r in rejected):
+            continue
+        missing = sorted({i.metric for i in m.inputs
+                          if dataset.get(i.metric,
+                                         dataset.period_at(i.period_offset)) is None})
+        if missing:
+            reason = "缺输入"
+        elif len(_periods) < 2:
+            reason = "期间不足两期（两期桥接需要一个以上的年度期间）"
+        else:
+            reason = "当前数据形态不适用"
+        rejected.append({"model_id": m.model_id, "reason": reason, "missing": missing,
+                         "needs": [f"{i.metric}@{i.period_offset}" for i in m.inputs]})
     return AnalysisPlan(question=str(question or ""), dataset_hash=dataset.dataset_hash,
                         adopted=tuple(adopted), rejected=tuple(rejected))
 

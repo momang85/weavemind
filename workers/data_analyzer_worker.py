@@ -18,6 +18,87 @@ class DataAnalyzerWorker(AsyncWorkerBase):
     _class_capabilities = ["data_analyzer"]
     _needs_task = True
 
+    # ── 金融任务：按**显式数据集 + 分析计划**走注册模型（不猜最新 CSV、不猜末列）──────
+    _FINANCIAL_MARKERS = ("[研究契约]", "归母净利", "营业收入", "经营现金流", "financial_analysis")
+
+    @staticmethod
+    def _financial_workspace(ws: Path):
+        """工作区里是否有**本次任务自己的**金融事实（底稿）。
+
+        判据只看文件是否存在：`project/working_paper.json` 是现役研究链落盘的事实底稿，
+        而"最新 CSV / 末列目标"那套猜测恰好是审查要求取消的路径（Q1）。
+        """
+        for cand in (Path(ws) / "project" / "working_paper.json",
+                     Path(ws) / "working_paper.json"):
+            if cand.is_file():
+                return cand
+        return None
+
+    def _run_financial(self, ws: Path, instruction: str, task: dict) -> dict:
+        """冻结数据集 → 编译计划 → 跑注册模型 → 落盘运行记录（确定性、零模型调用）。"""
+        import financial_analysis as fa
+        from financial_analysis import store as fa_store
+
+        obj = json.loads(self._financial_workspace(ws).read_text(encoding="utf-8"))
+        ds = fa.freeze_from_working_paper(
+            obj, source_label=f"worker:{self._financial_workspace(ws).name}",
+            required_metrics=("revenue", "net_profit", "gross_profit", "operating_cashflow"),
+            available_models=[m.model_id for m in fa.specs()])
+        plan = fa.compile_plan(str(instruction or ""), ds, prefer=("profit_bridge",))
+        runs, cards, specs = [], [], []
+        for item in plan.adopted:
+            run = fa.run(item.model_id, ds, params=item.params, question=item.question)
+            fa_store.save_run(ws, run)
+            runs.append({"run_id": run.run_id, "model_id": run.model_id,
+                         "status": run.status, "reason": run.reason,
+                         "validation_ok": bool((run.validation or {}).get("ok")),
+                         "outputs": [{"output_id": o.output_id, "metric": o.metric,
+                                      "value": o.value, "unit": o.unit,
+                                      "output_period": o.output_period}
+                                     for o in run.outputs]})
+            if run.status == fa.RunStatus.VALIDATED and run.outputs:
+                cards.append(fa.analysis_card(run, run.outputs[0].output_id))
+                specs.append(fa.chart_spec(run, run.outputs[0].output_id))
+        # 同年比率：同样走注册算子（零分母 not_computable，不产出数字）
+        for label, num, den, _desc in fa.runner.known_ratios():
+            rr = fa.ratio_run(label, num, den, ds)
+            if rr.status == fa.RunStatus.VALIDATED:
+                fa_store.save_run(ws, rr)
+                runs.append({"run_id": rr.run_id, "model_id": rr.model_id,
+                             "status": rr.status, "reason": rr.reason,
+                             "validation_ok": True,
+                             "outputs": [{"output_id": o.output_id, "metric": o.metric,
+                                          "value": o.value, "unit": o.unit,
+                                          "output_period": o.output_period}
+                                         for o in rr.outputs]})
+        ok_runs = [r for r in runs if r["status"] == fa.RunStatus.VALIDATED]
+        adopted_ok = [r for r in runs if r["model_id"] in
+                      {a.model_id for a in plan.adopted} and r["status"] == fa.RunStatus.VALIDATED]
+        # 状态如实（三档，不看"顺带算出的比率"）：请求的模型一个都用不上 → failed；
+        # 全过 → success；过了一部分 → partial。缺输入/不适用**不是**成功。
+        if not plan.adopted or not adopted_ok:
+            status = "failed"
+        elif len(adopted_ok) == len(plan.adopted):
+            status = "success"
+        else:
+            status = "partial"
+        return {
+            "status": status,
+            "mode": "financial",
+            "dataset_hash": ds.dataset_hash,
+            "dataset": {"entity": ds.manifest.entity, "entity_id": ds.manifest.entity_id,
+                        "periods": list(ds.manifest.periods),
+                        "usable": ds.manifest.usable, "observations": ds.manifest.observations,
+                        "gaps": list(ds.manifest.gaps), "conflicts": list(ds.manifest.conflicts)},
+            "plan": {"adopted": [a.model_id for a in plan.adopted],
+                     "rejected": list(plan.rejected)},
+            "runs": runs,
+            "cards": cards,
+            "chart_specs": specs,
+            "note": ("金融任务走显式数据集与注册模型（冻结数据集→分析计划→独立验证→"
+                     "运行记录），不用“最新 CSV/末列当目标”的猜测路径"),
+        }
+
     @staticmethod
     def _load_frame(fpath: Path) -> pd.DataFrame:
         """读取数据文件：CSV 直读；JSON（structured_data.json）按
@@ -57,6 +138,13 @@ class DataAnalyzerWorker(AsyncWorkerBase):
                 data_dir.mkdir(parents=True, exist_ok=True)
             # Find data path from instruction or use latest CSV in workspace
             import re
+            ws_path = Path(ws)
+            # **金融任务优先**（Q1）：工作区有本次任务自己的金融底稿时，必须按显式数据集 +
+            # 分析计划走注册模型——"最新 CSV + 末列当目标"那条猜测路径不适用于金融任务
+            # （两期财报不是通用 EDA 数据集，末列也不是预测目标）。
+            if self._financial_workspace(ws_path) is not None:
+                return json.dumps(self._run_financial(ws_path, instruction, task or {}),
+                                  ensure_ascii=False)
             paths = re.findall(
                 r'[A-Za-z]:[\\/][^\s,]+\.(?:csv|xlsx|json)|/tmp/[^\s,]+\.(?:csv|xlsx|json)',
                 instruction,

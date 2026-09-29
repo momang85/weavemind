@@ -344,6 +344,286 @@ class TestCoreHasNoModelCalls(unittest.TestCase):
         self.assertEqual([m.model_id for m in fa.specs()], ["profit_bridge"])
 
 
+class TestAnalysisRunStore(unittest.TestCase):
+    """运行记录的落盘与身份块：跨进程读回来必须逐字段一致（含元组字段）。"""
+
+    def setUp(self):
+        import tempfile
+        self.ws = Path(tempfile.mkdtemp(prefix="fa_store_"))
+
+    def _run(self):
+        return fa.run("profit_bridge", _dataset())
+
+    def test_round_trip_preserves_identity_and_outputs(self):
+        from financial_analysis import store
+        run = self._run()
+        store.save_run(self.ws, run)
+        back = store.model_runs(self.ws)
+        self.assertEqual(len(back), 1)
+        got = back[0]
+        self.assertEqual(got.run_id, run.run_id)
+        self.assertEqual(got.dataset_hash, run.dataset_hash)
+        self.assertEqual(got.status, run.status)
+        self.assertEqual(len(got.outputs), len(run.outputs))
+        self.assertEqual(got.outputs[0].inputs, run.outputs[0].inputs, "元组字段要原样回来")
+        self.assertEqual(got.outputs[0].output_hash, run.outputs[0].output_hash)
+        self.assertEqual(got.outputs[0].components, run.outputs[0].components)
+
+    def test_same_run_id_is_updated_not_duplicated(self):
+        from financial_analysis import store
+        run = self._run()
+        store.save_run(self.ws, run)
+        store.save_run(self.ws, run)
+        self.assertEqual(len(store.load_runs(self.ws)), 1, "同一次运行不得落两份")
+
+    def test_payload_is_none_when_there_is_nothing_to_bind(self):
+        from financial_analysis import store
+        self.assertIsNone(store.payload_bytes(self.ws), "没有运行就不制造空文件")
+        summary = store.binding_summary([])
+        self.assertEqual((summary["count"], summary["runs"]), (0, []))
+
+    def test_binding_summary_carries_hashes_not_prose(self):
+        from financial_analysis import store
+        run = self._run()
+        store.save_run(self.ws, run)
+        blk = store.binding_summary(store.load_runs(self.ws))
+        self.assertEqual(blk["validated"], 1)
+        item = blk["runs"][0]
+        self.assertEqual(item["run_id"], run.run_id)
+        self.assertEqual(item["dataset_hash"], run.dataset_hash)
+        self.assertTrue(item["validation_ok"])
+        self.assertEqual(item["outputs"][0]["output_hash"],
+                         run.outputs[0].output_hash)
+        self.assertNotIn("formula", json.dumps(blk), "身份块只放身份与 hash")
+
+
+class TestCardBodyBinding(unittest.TestCase):
+    """正文分析卡 ↔ 落盘运行：同 run、同数值才算绑定。"""
+
+    def setUp(self):
+        import tempfile
+        self.ws = Path(tempfile.mkdtemp(prefix="fa_bind_"))
+        from financial_analysis import store
+        self.store = store
+        self.run = fa.run("profit_bridge", _dataset())
+        store.save_run(self.ws, self.run)
+        self.block = store.render_card_block(self.run)
+
+    def test_rendered_card_verifies_against_the_stored_run(self):
+        body = "# 简报\n\n## 分析\n\n（略）\n\n" + self.block + "\n## 变化解释\n（略）\n"
+        got = self.store.verify_body_binding(self.ws, body)
+        self.assertTrue(got["ok"], got["problems"])
+        self.assertEqual(got["run_ids"], [self.run.run_id[:12]])
+        self.assertTrue(all(o["value_ok"] for o in got["outputs"]))
+        self.assertEqual(len(got["outputs"]), len(self.run.outputs))
+
+    def test_card_without_any_output_tag_is_reported(self):
+        body = "## 分析卡\n\n> 运行 run=" + self.run.run_id[:12] + "（模型 profit_bridge）\n"
+        got = self.store.verify_body_binding(self.ws, body)
+        self.assertFalse(got["ok"])
+        self.assertTrue(any("没有任何 output 标识" in p for p in got["problems"]),
+                        got["problems"])
+
+    def test_body_referencing_an_unknown_run_is_reported(self):
+        body = "## 分析卡\n\n> 运行 run=deadbeefcafe（模型 x）\n- 读数：-33.43 亿元　output " \
+               + self.run.outputs[0].output_id + "\n"
+        got = self.store.verify_body_binding(self.ws, body)
+        self.assertFalse(got["ok"])
+        self.assertTrue(any("不是同一次" in p or "没有这次运行" in p for p in got["problems"]),
+                        got["problems"])
+
+    def test_body_with_a_different_number_is_reported(self):
+        """卡里把 -33.43 写成 -30.00 → 正文与运行不是同一版。"""
+        bad = self.block.replace("-33.43", "-30.00")
+        self.assertNotEqual(bad, self.block)
+        got = self.store.verify_body_binding(self.ws, bad)
+        self.assertFalse(got["ok"])
+        self.assertTrue(any("不是同一版" in p for p in got["problems"]), got["problems"])
+
+    def test_unvalidated_run_must_not_reach_the_body(self):
+        import dataclasses
+        from financial_analysis import store
+        broken = dataclasses.replace(self.run, status=C.RunStatus.VALIDATION_FAILED)
+        ws2 = Path(self.ws) / "w2"
+        ws2.mkdir()
+        store.save_run(ws2, broken)
+        body = "## 分析卡\n\n" + store.render_card_block(broken)
+        got = store.verify_body_binding(ws2, body)
+        self.assertFalse(got["ok"])
+        self.assertTrue(any("未通过验证" in p for p in got["problems"]), got["problems"])
+
+    def test_body_without_a_card_is_not_failed(self):
+        got = self.store.verify_body_binding(self.ws, "# 简报\n\n## 分析\n（没有分析卡）\n")
+        self.assertTrue(got["ok"])
+        self.assertEqual(got["run_ids"], [])
+        self.assertIn("无分析卡区块", got["note"])
+
+
+class TestReportAndPackageBindTheSameRun(unittest.TestCase):
+    """端到端：正文分析卡 / 交付清单 / ZIP 指向**同一次运行**。"""
+
+    def setUp(self):
+        import tempfile
+        self.ws = Path(tempfile.mkdtemp(prefix="fa_pkg_"))
+        self.task_id = "ui-fa-pkg"
+        from financial_analysis import store
+        self.store = store
+        import report_version
+        self.rv = report_version
+        self.run = fa.run("profit_bridge", _dataset())
+
+    def _body(self):
+        card = self.store.render_card_block(self.run)
+        structure = {"scope": {"company": "洋河股份", "company_id": "002304.SZ",
+                               "periods": [2023, 2024], "caliber": "合并",
+                               "as_of": "2025-04-30", "unit": "亿元"},
+                     "analysis": "（模型分析正文）", "analysis_card": card}
+        import report_brief
+        return report_brief.render_brief_markdown(structure, body="")
+
+    def test_report_body_carries_a_verifiable_card(self):
+        body = self._body()
+        self.assertIn("## 分析卡", body)
+        self.assertIn(self.run.outputs[0].output_id, body)
+        self.assertIn(f"run={self.run.run_id[:12]}", body)
+        self.store.save_run(self.ws, self.run)
+        got = self.store.verify_body_binding(self.ws, body)
+        self.assertTrue(got["ok"], got["problems"])
+
+    def test_report_without_runs_has_no_card_section(self):
+        """既有交付（没跑过分析包）正文不得多出小节。"""
+        import report_brief
+        body = report_brief.render_brief_markdown(
+            {"scope": {"company": "洋河股份", "periods": [2023, 2024]},
+             "analysis": "（模型分析正文）"}, body="")
+        self.assertNotIn("## 分析卡", body)
+
+    def test_brief_structure_picks_up_the_card_from_the_workspace(self):
+        """`build_structure` 的接缝：工作区有已验证运行 → 结构里带分析卡；没有 → 空串。"""
+        import dataclasses
+        import report_brief
+        from financial_analysis import store
+        self.assertEqual(report_brief._analysis_card_block(self.task_id,
+                                                           ws_dir=self.ws), "")
+        store.save_run(self.ws, self.run)
+        blk = report_brief._analysis_card_block(self.task_id, ws_dir=self.ws)
+        self.assertIn(f"run={self.run.run_id[:12]}", blk)
+        self.assertIn(self.run.outputs[0].output_id, blk)
+        # 未通过验证的运行不得进正文
+        ws3 = Path(self.ws) / "w3"
+        ws3.mkdir()
+        store.save_run(ws3, dataclasses.replace(self.run,
+                                                status=C.RunStatus.VALIDATION_FAILED))
+        self.assertEqual(report_brief._analysis_card_block(self.task_id, ws_dir=ws3), "")
+
+    def test_zip_manifest_and_body_share_one_run(self):
+        import hashlib
+        import zipfile
+        import delivery_pipeline
+        self.store.save_run(self.ws, self.run)
+        body = self._body()
+        store_rv = self.rv.VersionStore(self.ws, self.task_id)
+        v = store_rv.record(body)
+        self.assertTrue(store_rv.adopt(v))
+        out = delivery_pipeline.repack_adopted(self.task_id, md_bytes=body.encode("utf-8"),
+                                               ws_dir=self.ws)
+        zip_path = Path(out["zip"]) if isinstance(out, dict) and out.get("zip") else None
+        if zip_path is None:
+            for key in ("path", "zip_path", "name"):
+                if isinstance(out, dict) and out.get(key):
+                    zip_path = Path(str(out[key]))
+                    break
+        self.assertIsNotNone(zip_path, f"repack 没给出包路径：{out}")
+        with zipfile.ZipFile(zip_path) as zf:
+            names = zf.namelist()
+            self.assertIn("analysis/analysis_runs.json", names,
+                          "ZIP 必须带上运行记录（页面/图/正文同源的那一份）")
+            manifest = json.loads(zf.read("PACKAGE_MANIFEST.json").decode("utf-8"))
+            blob = zf.read("analysis/analysis_runs.json")
+            self.assertEqual(
+                manifest["files"]["analysis/analysis_runs.json"],
+                hashlib.sha256(blob).hexdigest(), "清单 hash 必须覆盖运行记录字节")
+        self.assertEqual(manifest["analysis_runs"]["runs"][0]["run_id"], self.run.run_id)
+        self.assertEqual(manifest["analysis_runs"]["validated"], 1)
+        # 包内正文就是这份正文 → 卡与清单指向同一次运行
+        with zipfile.ZipFile(zip_path) as zf:
+            packaged_body = zf.read(manifest["delivered_md"]).decode("utf-8")
+        self.assertIn(f"run={self.run.run_id[:12]}", packaged_body)
+        self.assertTrue(self.store.verify_body_binding(self.ws, packaged_body)["ok"])
+
+
+class TestDataAnalyzerTakesTheFinancialPath(unittest.TestCase):
+    """Q1：金融任务必须按**显式数据集 + 分析计划**走注册模型，不走"最新 CSV + 末列目标"。"""
+
+    def setUp(self):
+        import tempfile
+        self.ws = Path(tempfile.mkdtemp(prefix="fa_worker_"))
+        (self.ws / "project").mkdir(parents=True, exist_ok=True)
+
+    def _write_working_paper(self, rows=None):
+        wp = {"request": {"company": "洋河股份", "company_id": "002304.SZ", "market": "cn",
+                          "periods": [2023, 2024], "caliber": "合并", "as_of": "2025-04-30"},
+              "rows": rows if rows is not None else _two_period_rows(), "derived": []}
+        (self.ws / "project" / "working_paper.json").write_text(
+            json.dumps(wp, ensure_ascii=False), encoding="utf-8")
+
+    def _worker(self):
+        from workers.data_analyzer_worker import DataAnalyzerWorker
+        return DataAnalyzerWorker(agent_id="dataanalyzerworker",
+                                  capabilities=["data_analyzer"], registry=None,
+                                  messaging=None)
+
+    def _execute(self, instruction):
+        import asyncio
+        return json.loads(asyncio.run(self._worker().execute(
+            instruction, {"workspace": str(self.ws)})))
+
+    def test_financial_task_runs_registered_models_and_stores_runs(self):
+        self._write_working_paper()
+        got = self._execute("分析本期归母净利润的变化由哪些金额项构成 [研究契约]")
+        self.assertEqual(got["mode"], "financial")
+        self.assertEqual(got["status"], "success")
+        self.assertEqual(got["dataset"]["entity_id"], "002304.SZ")
+        self.assertIn("profit_bridge", got["plan"]["adopted"])
+        self.assertNotIn("target", got, "金融路径不得再给'末列当目标'的结论")
+        bridge = [r for r in got["runs"] if r["model_id"] == "profit_bridge"]
+        self.assertEqual(len(bridge), 1)
+        self.assertEqual(bridge[0]["status"], C.RunStatus.VALIDATED)
+        self.assertTrue(bridge[0]["validation_ok"])
+        vals = {o["metric"]: o["value"] for o in bridge[0]["outputs"]}
+        self.assertAlmostEqual(vals["net_profit_change"], -33.43, places=2)
+        # 运行记录已落盘（交付链据此把正文/清单/ZIP 绑到同一次运行）
+        stored = json.loads((self.ws / "analysis_runs.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(stored["runs"]), len(got["runs"]))
+        self.assertEqual(got["cards"][0]["kind"], "会计分解")
+        self.assertEqual(got["chart_specs"][0]["run_id"], bridge[0]["run_id"])
+
+    def test_missing_input_still_takes_the_financial_path(self):
+        rows = [r for r in _two_period_rows() if r["metric"] != "gross_profit"]
+        self._write_working_paper(rows)
+        got = self._execute("分析利润变化 [研究契约]")
+        self.assertEqual(got["mode"], "financial", "缺输入也不得回退到 CSV 猜测")
+        # 初筛就缺输入 → 进计划的**拒绝清单**（带缺什么），不生成 run；状态不得报 success
+        self.assertEqual(got["status"], "failed", got["status"])
+        rej = got["plan"]["rejected"]
+        self.assertTrue(rej, rej)
+        item = [r for r in rej if r.get("model_id") == "profit_bridge"][0]
+        self.assertEqual(item["reason"], "缺输入")
+        self.assertIn("gross_profit", item["missing"])
+        self.assertEqual([r for r in got["runs"] if r["model_id"] == "profit_bridge"], [],
+                         "缺输入的模型不得产出（也不得假装算过）")
+        # 顺带算出的比率仍然如实记录（它们真的验证通过了）
+        self.assertTrue(all(r["status"] == C.RunStatus.VALIDATED for r in got["runs"]))
+
+    def test_non_financial_workspace_keeps_the_generic_eda_path(self):
+        """没有本次任务的金融底稿时，原有 EDA 路径一字不变（不误伤通用数据任务）。"""
+        got = self._execute("帮我做一下数据探索")
+        self.assertNotEqual(got.get("mode"), "financial")
+        self.assertEqual(got.get("status"), "failed")
+        self.assertFalse((self.ws / "analysis_runs.json").exists(),
+                         "非金融任务不得写分析运行记录")
+
+
 class TestRealFrozenSampleChain(unittest.TestCase):
     """真机冻结样本上跑同一条链（样本不在仓库里就跳过，不伪造数据）。"""
 

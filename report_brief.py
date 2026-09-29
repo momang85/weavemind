@@ -371,6 +371,9 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
         "volume_price": dict((evidence or {}).get("volume_price") or {}),
         "change_explanation": changes,
         "analysis": analysis_text,
+        # Q1：分析卡（来自**已验证的**金融分析运行）。工作区里有运行记录才渲染；
+        # 没有就留空 → 正文不出现这一节（既有交付一字不变）。
+        "analysis_card": _analysis_card_block(task_id, ws_dir=ws_dir),
         "analysis_quality": quality,
         "research_questions": questions,
         # R1：逐问题评估的**唯一权威**结果（问题区/风险区/研究状态/候选比较共用）
@@ -3029,6 +3032,11 @@ def render_brief_markdown(structure: dict, body: str = "",
     lines.append(analysis if analysis else
                  "> 本次未产出可交付的分析正文（数据与底稿已保留，见文末）。")
     lines.append("")
+    # 分析卡（Q1）：只消费**已验证输出**，每个读数带 output 标识与 run —— 有运行记录才出现，
+    # 既有交付（没有跑过金融分析包）正文一字不变。
+    _card = str(structure.get("analysis_card") or "").strip()
+    if _card:
+        lines.append(_card if _card.endswith("\n") else _card + "\n")
     # 变化解释：发生了什么 → 管理层/附注怎么解释 → 能推断到哪一步 → 还不能证明什么
     lines.append("## 变化解释")
     changes = structure.get("change_explanation") or {}
@@ -3288,7 +3296,31 @@ def _brief_analysis_section(text: str) -> str:
 
 # 简报自己的小节标题（顺序即渲染顺序）：取某一节时按这张表收尾
 BRIEF_SECTIONS = ("## 关键发现", "## 业务背景", "## 财务对照", "## 图表", "## 分析",
-                  "## 变化解释", "## 风险与核查", "## 附录", "## 参考来源")
+                  "## 分析卡", "## 变化解释", "## 风险与核查", "## 附录", "## 参考来源")
+
+
+def _analysis_card_block(task_id: str, *, ws_dir=None) -> str:
+    """读取该任务的**已验证**金融分析运行并渲染分析卡区块（没有就返回空串）。
+
+    只读工作区里的 `analysis_runs.json`（由 `financial_analysis.store` 落盘、
+    `data_analyzer` 的金融路径写入）；运行未通过验证的一律不渲染——正文不消费未验证读数。
+    """
+    try:
+        import workspace as _ws_mod
+        from financial_analysis import store as _fa_store
+        ws = Path(ws_dir) if ws_dir is not None else _ws_mod.task_workspace(task_id)
+        runs = _fa_store.validated_runs(ws)
+        if not runs:
+            return ""
+        # 图表类运行（比率）不单独出卡：卡是"结论级"的，比率读数留在底稿/表格里
+        main = [r for r in runs if not str(r.model_id).startswith("ratio:")]
+        if not main:
+            return ""
+        blocks = [_fa_store.render_card_block(r) for r in main[:2]]
+        return "\n".join(blocks).rstrip() + "\n"
+    except Exception as exc:                     # noqa: BLE001 - 渲染不出就不加这一节
+        logger.warning("分析卡渲染失败（task=%s）：%s", task_id, str(exc)[:140])
+        return ""
 
 
 
