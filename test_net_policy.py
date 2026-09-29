@@ -562,7 +562,11 @@ class TestByteChannelMetadata(unittest.TestCase):
         self.assertFalse(r["over_limit"])
 
     def test_http_error_returns_status_and_body_size_without_raising(self):
-        """403 的 985 字节 HTML 页：**不抛**，状态与体积都要报出来。"""
+        """403 的 985 字节 HTML 页：**不抛**，状态与体积都要报出来。
+
+        替身要给**两条读路径**（`read` / `read1`）：真实 `HTTPError` 两者都有，只打桩
+        `read` 会让"优先用 read1"的实现读到空缓冲（替身失真）。
+        """
         import urllib.error
         err = urllib.error.HTTPError(
             "https://example.com/a.pdf", 403, "Forbidden",
@@ -570,12 +574,47 @@ class TestByteChannelMetadata(unittest.TestCase):
         # 恰好 985 字节的错误页（"985 字节取件"就是这种形状）
         _body = b"<html>" + b"x" * (985 - len(b"<html>") - len(b"</html>")) + b"</html>"
         self.assertEqual(len(_body), 985)
-        err.read = lambda n=-1: _body
-        r = self._call(err)
+        _cur = {"i": 0}
+
+        def _read(n=-1):
+            data = _body[_cur["i"]:] if n is None or n < 0 else _body[_cur["i"]:_cur["i"] + n]
+            _cur["i"] += len(data)
+            return data
+
+        err.read = _read
+        err.read1 = _read
+        r = self._call(err, max_bytes=30 * 1024 * 1024)
         self.assertFalse(r["ok"])
         self.assertEqual(r["status"], 403)
         self.assertEqual(r["error_kind"], "http_error")
         self.assertEqual(r["body_bytes"], 985)
+
+    def test_unboundable_read_without_a_cap_is_refused_not_guessed(self):
+        """既无字节上限、响应对象又给不出**任何**可设超时的读路径 → 拒绝那次读取。
+
+        这是全仓一致的"不可保证有界的外呼不发出"纪律：状态/类型/原因照实报，
+        不假装读到了正文（生产调用总会带 `max_bytes`，所以错误页正文照读）。
+        """
+
+        class _NoBound:
+            status = 403
+            headers = {"Content-Type": "text/html"}
+            fp = None
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self, n=-1):
+                return b"<html>should not be read</html>"
+
+        r = self._call(_NoBound())
+        self.assertFalse(r["ok"])
+        self.assertEqual(r["status"], 403)
+        self.assertEqual(r["error_kind"], "unbounded_read_refused")
+        self.assertEqual(r["body_bytes"], 0, "拒绝时不得留下半份正文冒充读完了")
 
     def test_redirect_is_not_followed(self):
         r = self._call(_FakeResp(b"", status=302, headers={"Location": "https://evil/x"}))

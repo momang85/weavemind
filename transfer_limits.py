@@ -40,8 +40,30 @@ def _env_float(name: str, default: float) -> float:
     return v if v > 0 else default
 
 
-# 网页/文件上传（材料入口）：3 MiB ——新人上传的正文/PDF 通常远小于此
-UPLOAD_MAX_BYTES = _env_int("WEAVIMIND_UPLOAD_MAX_BYTES", 3 * _MIB)
+def _env_int_alias(names: tuple[str, ...], default: int) -> int:
+    """按顺序读环境变量，第一个非空且合法的生效（用于**改名后兼容旧名**）。"""
+    for name in names:
+        raw = str(os.environ.get(name) or "").strip()
+        if not raw:
+            continue
+        try:
+            v = int(float(raw))
+        except (TypeError, ValueError):
+            continue
+        if v > 0:
+            return v
+    return default
+
+
+# 网页/文件上传（材料入口）：30 MiB —— 与披露下载同一量级（K0-c）。
+# 实机反例：4–5 MiB 的年报从"材料恢复"入口被 3 MiB 上限拒绝（同一份文件在下载入口
+# 却进得来）。仍是**明确上限**，可用环境变量覆盖。
+#
+# 变量名：正式名是 `WEAVEMIND_UPLOAD_MAX_BYTES`；旧代码把它拼成了
+# `WEAVIMIND_UPLOAD_MAX_BYTES`（少一个 E）。**两个都认**，正式名优先——
+# 已经照旧名配过的部署不因改名失效（不删用户的既有配置）。
+UPLOAD_MAX_BYTES = _env_int_alias(
+    ("WEAVEMIND_UPLOAD_MAX_BYTES", "WEAVIMIND_UPLOAD_MAX_BYTES"), 30 * _MIB)
 # 直链下载 PDF：30 MB —— A 股年报正文常在 5–15 MB
 DOWNLOAD_MAX_BYTES = _env_int("WEAVEMIND_DOWNLOAD_MAX_BYTES", 30 * _MIB)
 # 正文类抓取（HTML/JSON）：8 MiB

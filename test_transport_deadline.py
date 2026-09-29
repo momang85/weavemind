@@ -19,6 +19,7 @@ import socket
 import threading
 import time
 import unittest
+from unittest import mock
 
 from adapters import search_runner as sr
 from adapters import transport as tr
@@ -183,6 +184,35 @@ class TestNetPolicyChunkedAndDeadline(unittest.TestCase):
         self.assertLess(time.monotonic() - t0, 1.5, "总截止未执行")
         self.assertIn("超时", str(ctx.exception))
 
+    def test_slow_response_header_cannot_outrun_the_root_deadline(self):
+        """**慢状态行/头**也吃根截止（K0-c 实机反例：50ms 预算实耗 525ms）。
+
+        `begin()` 里是 `fp.readline()` 连续 recv：只有把截止线包进头解析的每一次底层读，
+        预算才真的成立——否则"头还没读完"就永远等下去。
+        """
+        head = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n\r\n"
+        payload = head + b"hi"
+        t0 = time.monotonic()
+        with self.assertRaises(net_policy.FetchError) as ctx:
+            net_policy._read_http_response(self._serve(payload, drip=0.06),
+                                          url="http://x/y", egress="direct",
+                                          cap=1_000_000, budget=0.2)
+        elapsed = time.monotonic() - t0
+        # 头自己就要 0.5s+（8 字节/60ms）：能在这个容差内返回，说明**头解析也被截止线管着**
+        self.assertLess(elapsed, 0.35, f"根截止 0.2s，实耗 {elapsed:.3f}s（头没被截止）")
+        self.assertIn("超时", str(ctx.exception), str(ctx.exception))
+
+    def test_bounded_gzip_stops_before_inflating_everything(self):
+        """压缩炸弹：**解压过程中**就查上限，不是解完整包再检查（K0-c 静态反例）。"""
+        bomb = gzip.compress(b"\0" * (4 * 1024 * 1024))     # 压缩后 ~4 KiB
+        self.assertLess(len(bomb), 64 * 1024, "夹具前提：压缩体本身在上限之内")
+        payload = (b"HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\n"
+                   b"Content-Length: %d\r\n\r\n" % len(bomb)) + bomb
+        with self.assertRaises(net_policy.FetchError) as ctx:
+            net_policy._read_http_response(self._serve(payload), url="http://x/y",
+                                          egress="direct", cap=64 * 1024, budget=5.0)
+        self.assertIn("解压后超过上限", str(ctx.exception))
+
     def test_redirect_not_followed_and_cap_enforced(self):
         payload = b"HTTP/1.1 302 Found\r\nLocation: http://elsewhere/\r\nContent-Length: 0\r\n\r\n"
         with self.assertRaises(net_policy.FetchError) as ctx:
@@ -212,18 +242,40 @@ class TestTransportChannelsHonourTotalDeadline(unittest.TestCase):
             self.addCleanup(p.stop)
 
     def test_text_channel_stops_at_the_deadline(self):
-        """文本通道有总截止；**字节通道本批未闭合**（它只有 socket 超时 + 大小上限，
-        保留既有"截断 + over_limit"契约，见证据"未交付"一节）。"""
+        """文本通道有总截止（字节通道见下一条，本轮已补齐）。"""
         t0 = time.monotonic()
         with self.assertRaises(Exception) as ctx:
             tr.get_via_urllib(self.srv.url("/slow"), timeout=1)
         self.assertLess(time.monotonic() - t0, 3.0, "总截止未执行（慢体）")
         self.assertIn("deadline", str(ctx.exception).lower())
 
+    def test_binary_channel_stops_at_the_deadline(self):
+        """**字节通道也有总截止**（K0-c）：慢体不得把一次 `read` 拖到对端结束。
+
+        保留既有契约：`over_limit` 与"截断到上限"语义不变（下一条 `too_large` 用例）。
+        """
+        t0 = time.monotonic()
+        out = tr.get_bytes_via_urllib(self.srv.url("/slow"), timeout=1, max_bytes=10 ** 6)
+        elapsed = time.monotonic() - t0
+        self.assertFalse(out["ok"], out)
+        self.assertEqual(out["error_kind"], "read_timeout", out)
+        self.assertLess(elapsed, 3.0, f"总截止未执行（慢体）：{elapsed:.2f}s")
+
     def test_binary_channel_reports_too_large(self):
         out = tr.get_bytes_via_urllib(self.srv.url("/big"), timeout=5, max_bytes=100)
         self.assertFalse(out["ok"])
         self.assertEqual(out["error_kind"], "too_large", out)
+
+    def test_annual_report_pdf_entry_uses_the_bounded_byte_channel(self):
+        """验的是**实际入口**（`annual_report_pdf.fetch_bytes`），不只是 helper。"""
+        import annual_report_pdf as arp
+        meta: dict = {}
+        with mock.patch.object(tr, "get_bytes_via_urllib",
+                               wraps=tr.get_bytes_via_urllib) as spy:
+            data = arp.fetch_bytes(self.srv.url("/chunked"), meta=meta)
+        self.assertTrue(spy.called, "PDF 取字节必须走有界字节通道")
+        self.assertTrue(data and data.startswith(b"%PDF"), data[:20])
+        self.assertEqual(meta.get("status"), 200)
 
 
 class TestCapacityPolicyIsCentralised(unittest.TestCase):
@@ -231,16 +283,32 @@ class TestCapacityPolicyIsCentralised(unittest.TestCase):
         import transfer_limits as tl
         import material_intake as mi
         import annual_report_pdf as arp
-        self.assertEqual(tl.UPLOAD_MAX_BYTES, 3 * 1024 * 1024)
+        # K0-c：上传与披露下载**同一量级**（30 MiB）——4–5 MiB 年报从材料恢复入口
+        # 不再被 3 MiB 上限拒绝（同一份文件在下载入口却进得来，是同一个"不一致"）
+        self.assertEqual(tl.UPLOAD_MAX_BYTES, 30 * 1024 * 1024)
         self.assertEqual(tl.DOWNLOAD_MAX_BYTES, 30 * 1024 * 1024)
         self.assertEqual(mi.MAX_BYTES, tl.UPLOAD_MAX_BYTES, "上传上限必须来自单一来源")
         self.assertEqual(arp.MAX_BYTES, tl.DOWNLOAD_MAX_BYTES, "下载上限必须来自单一来源")
         self.assertEqual(mi.MAX_PAGES, tl.PDF_MAX_PAGES)
+        # 4–5 MiB 的年报必须能进（本轮实机样本量级）
+        self.assertTrue(tl.within("upload", 5 * 1024 * 1024))
+
+    def test_upload_env_name_accepts_documented_and_legacy_spelling(self):
+        """正式名 `WEAVEMIND_UPLOAD_MAX_BYTES` 生效；旧拼写（少一个 E）仍兼容。"""
+        import importlib
+        import os
+        import transfer_limits as tl
+        for env, want in (("WEAVEMIND_UPLOAD_MAX_BYTES", 7 * 1024 * 1024),
+                          ("WEAVIMIND_UPLOAD_MAX_BYTES", 9 * 1024 * 1024)):
+            with mock.patch.dict(os.environ, {env: str(want)}, clear=False):
+                mod = importlib.reload(tl)
+                self.assertEqual(mod.UPLOAD_MAX_BYTES, want, env)
+        importlib.reload(tl)                     # 还原（模块级常量按导入时读环境）
 
     def test_explain_is_specific(self):
         import transfer_limits as tl
         msg = tl.explain("upload")
-        self.assertIn("3 MiB", msg)
+        self.assertIn("30 MiB", msg)
         self.assertIn("材料上传", msg)
         self.assertTrue(tl.within("upload", 1024))
         self.assertFalse(tl.within("upload", tl.UPLOAD_MAX_BYTES + 1))

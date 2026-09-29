@@ -295,6 +295,14 @@ def _wrap_response_deadline(resp, deadline: float, *, clock=time.monotonic):
     if fp is None or isinstance(fp, (io.RawIOBase, _DeadlineRaw)) \
             or not callable(getattr(fp, "read1", None)):
         return False, (lambda: None)
+    # 已经包过截止线（如 `net_policy` 在 `begin()` 之前先包了头解析）→ 不重复套一层：
+    # 两层都查同一个绝对截止，套两次只是白白多一层缓冲。
+    try:
+        inner = getattr(fp, "raw", None)
+        if isinstance(inner, _DeadlineRaw):
+            return True, (lambda: None)
+    except Exception:                                 # noqa: BLE001 - 判断失败按未包处理
+        pass
     try:
         wrapped = io.BufferedReader(_DeadlineRaw(fp, deadline, clock=clock))
         setattr(resp, "fp", wrapped)

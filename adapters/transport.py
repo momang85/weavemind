@@ -157,6 +157,67 @@ def get_via_urllib(
                                       encoding, errors="replace")
 
 
+def _read_bounded_bytes(resp, *, deadline: float, limit: int,
+                        chunk: int = 65536) -> tuple[bytes, bool, str]:
+    """字节通道的**有界读取** → `(字节, 是否超限, 错误类别)`。
+
+    与文本通道（`search_runner.read_with_deadline`）同一套边界：单次读用 `read1`、
+    每次读之前把剩余时间设到响应自己的 socket 上、读之后再查钟。区别只在这里**保留
+    字节通道既有的契约**——读满 `limit + 1` 就停并标 `over_limit`（供 PDF 拒收分因用），
+    而不是抛 `ResponseTooLarge`。
+
+    K0-c（2026-09-29 夜验收）：此前这里直接 `resp.read(n)`，时间边界只有 socket 超时——
+    "慢滴"响应可以让一次 `read` 连续 recv 到对端结束，总截止形同虚设。
+    """
+    import socket as _socket
+
+    from adapters.search_runner import _bound_single_read, _close_quietly, _has_read1
+
+    buf: list[bytes] = []
+    total = 0
+    use_read1 = _has_read1(resp)
+    bounded_sock = False
+    while True:
+        remain = float(deadline) - _time.monotonic()
+        if remain <= 0:
+            _close_quietly(resp)
+            return b"".join(buf), False, "read_timeout"
+        if _bound_single_read(resp, remain):
+            bounded_sock = True
+        if not (use_read1 or bounded_sock):
+            if limit:
+                # 两条边界都给不了、但**调用方给了字节上限**：退回"一次受限读取"——
+                # 这是 urllib 的 `HTTPError` 包装对象的形状（错误页正文要有诊断价值，
+                # "985 字节的 403 HTML" 是常见读数）。它仍是**体积有界**的；只是这类
+                # 对象没有可设超时的 socket，时间边界只能靠上层。
+                try:
+                    raw = resp.read(limit + 1)
+                except Exception as exc:             # noqa: BLE001
+                    return b"", False, f"{type(exc).__name__}"
+                raw = bytes(raw or b"")
+                return raw[:limit], len(raw) > limit, ""
+            _close_quietly(resp)
+            return b"".join(buf), False, "unbounded_read_refused"
+        want = int(chunk)
+        if limit:
+            want = max(1, min(want, limit + 1 - total))
+        try:
+            block = resp.read1(want) if use_read1 else resp.read(want)
+        except (_socket.timeout, TimeoutError):
+            _close_quietly(resp)
+            return b"".join(buf), False, "read_timeout"
+        except Exception as exc:                     # noqa: BLE001 - 读一半断开
+            _close_quietly(resp)
+            return b"".join(buf), False, f"{type(exc).__name__}"
+        if not block:
+            return b"".join(buf), False, ""
+        buf.append(block)
+        total += len(block)
+        if limit and total > limit:
+            _close_quietly(resp)
+            return b"".join(buf), True, ""
+
+
 def get_bytes_via_urllib(
     url: str,
     *,
@@ -206,15 +267,20 @@ def get_bytes_via_urllib(
             ctype = str(hdrs.get("Content-Type") or "") if hdrs else ""
             tenc = str(hdrs.get("Transfer-Encoding") or "") if hdrs else ""
             # 字节通道保留既有契约（**截断到上限 + over_limit 标记**，供 PDF 拒收分因用），
-            # 因此这里仍按 `_limited + 1` 读；它的**时间**边界仍只有 socket 超时
-            # ——"总截止"这条本批只加在文本通道（见 A1 证据：字节通道时间边界未闭合）。
-            read_n = (_limited + 1) if _limited else -1
-            try:
-                raw = resp.read(read_n) if read_n >= 0 else resp.read()
-            except Exception as exc:             # noqa: BLE001 - 读一半断开
+            # **时间**边界改用与文本通道同源的"总截止 + 单次读"（K0-c）：此前只有 socket
+            # 超时，慢滴响应能把一次 read 拖到对端结束。
+            _deadline = _time.monotonic() + float(timeout or 0 or 25)
+            # 传 `_limited`（函数内部按"读满 limit + 1 即停"处理），保持截断语义
+            read_n = _limited if _limited else 0
+            raw, _over, _rerr = _read_bounded_bytes(resp, deadline=_deadline, limit=read_n)
+            if _rerr:
                 out.update({"status": status, "content_type": ctype,
-                            "transfer_encoding": tenc, "error_kind": "read_error",
-                            "error": f"{type(exc).__name__}: {str(exc)[:120]}"})
+                            "transfer_encoding": tenc, "error_kind": _rerr,
+                            "body_bytes": len(raw or b""), "data": bytes(raw or b""),
+                            "error": (f"读取超时（总截止 {float(timeout or 0 or 25):g}s）"
+                                      if _rerr == "read_timeout"
+                                      else f"{_rerr}: 读取中断"),
+                            "over_limit": bool(_over)})
                 return out
         raw = bytes(raw or b"")
         over = bool(_limited and len(raw) > _limited)

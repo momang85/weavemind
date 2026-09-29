@@ -586,6 +586,33 @@ def fetch_document(url: str, *, timeout: float | None = None,
     raise FetchError(last_error or "连接失败")
 
 
+def _gunzip_bounded(raw: bytes, cap: int) -> bytes:
+    """有界 gunzip：逐块解压，任一时刻的输出都不超过 `cap`（超了抛 FetchError）。
+
+    为什么不能用 `gzip.decompress`：它先把整包解开再让调用方检查上限——压缩炸弹
+    （几 MiB 压出几 GiB）会在检查之前就把内存吃掉。`zlib.decompressobj(16+MAX_WBITS)`
+    用 `max_length` 限制**单次**产出，循环累加并在每次之后查上限。
+    """
+    import zlib
+
+    obj = zlib.decompressobj(16 + zlib.MAX_WBITS)
+    out: list[bytes] = []
+    total = 0
+    data = raw
+    while data:
+        chunk = obj.decompress(data, max(1, cap + 1 - total))
+        data = obj.unconsumed_tail
+        total += len(chunk)
+        if total > cap:
+            raise FetchError(f"解压后超过上限 {cap} 字节（已在解压过程中停止）")
+        out.append(chunk)
+    tail = obj.flush()
+    if total + len(tail) > cap:
+        raise FetchError(f"解压后超过上限 {cap} 字节（收尾阶段）")
+    out.append(tail)
+    return b"".join(out)
+
+
 def _read_http_response(sock, *, url: str, egress: str, cap: int, budget: float) -> dict:
     """把已连上的 socket 读成一个 HTTP 响应（**成熟实现**，不再手拆头）。
 
@@ -599,13 +626,23 @@ def _read_http_response(sock, *, url: str, egress: str, cap: int, budget: float)
     """
     import http.client
 
-    from adapters.search_runner import ResponseTooLarge, read_with_deadline
+    from adapters.search_runner import (
+        ResponseTooLarge, _close_quietly, _wrap_response_deadline, read_with_deadline,
+    )
 
     deadline = time.monotonic() + float(budget)
     resp = http.client.HTTPResponse(sock)
+    # **响应头也吃同一条截止线**（K0-c，2026-09-29 夜验收）：`begin()` 解析状态行/头时是
+    # `fp.readline()` 连续 recv，socket 超时只按"单次操作"算——慢头（每 5ms 一字节）能把
+    # 50ms 预算拖到 525ms。先把 `resp.fp` 包一层，让时钟检查落进**头解析的每一次底层读**。
+    _wrapped, _restore = _wrap_response_deadline(resp, deadline)
     try:
         resp.begin()
+    except (TimeoutError, socket.timeout) as exc:
+        _close_quietly(resp)
+        raise FetchError(f"读取超时（总截止 {budget:g}s，响应头未读完）：{str(exc)[:80]}")
     except Exception as exc:                          # noqa: BLE001
+        _close_quietly(resp)
         raise FetchError(f"响应解析失败：{type(exc).__name__}: {str(exc)[:120]}")
     status = int(getattr(resp, "status", 0) or 0)
     hdrs = {str(k).lower(): str(v) for k, v in (resp.getheaders() or [])}
@@ -620,11 +657,10 @@ def _read_http_response(sock, *, url: str, egress: str, cap: int, budget: float)
     except Exception as exc:                          # noqa: BLE001
         raise FetchError(f"读取失败：{type(exc).__name__}: {str(exc)[:120]}")
     if str(hdrs.get("content-encoding") or "").lower() == "gzip":
+        # **有界解压**（K0-c）：`gzip.decompress` 会先把整包解开再让我们检查上限——
+        # 一个 8 MiB 的压缩炸弹能先展开成几 GB。这里逐块解、每块都查上限，超了立刻停。
         try:
-            import gzip
-            body = gzip.decompress(body)
-            if len(body) > cap:
-                raise FetchError(f"解压后超过上限 {cap} 字节")
+            body = _gunzip_bounded(body, cap)
         except FetchError:
             raise
         except Exception as exc:                      # noqa: BLE001
