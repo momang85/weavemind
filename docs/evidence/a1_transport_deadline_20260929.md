@@ -59,3 +59,37 @@ gzip、非 2xx（状态 + 错误页正文都留下）、200+`success:false`（�
 3. 重定向/多次地址尝试/重试是否共用根截止与剩余额度：本批只确认 3xx 不跟随，**未**改多地址预算分配。
 4. 上传/下载上限**对用户可见的页面提示**未做（只在错误信息里）。
 5. A2（官方披露/IR 实际链接发现与正常文件导入）未开始。
+
+---
+
+# 更正：本批**只交付了两件**，传输层接线已回退（同一日，HEAD `96d4699` 之后）
+
+上面 §1 的三条"已修"**不能算数**：本批把 `transport`/`net_policy` 的改动提交后，
+`test_net_policy` 出现 **5 failures + 4 errors**（假 socket 没有 `makefile`、
+部分假响应不是完整 HTTP 响应形状、字节通道语义改变），`test_search_quality_unified`
+另有 1 处受模块状态影响的抖动。按"不靠改测试到通过"的纪律，**两个模块已用
+`git checkout 27d2dee -- net_policy.py adapters/transport.py` 回退**，`test_net_policy` 恢复 **45 OK**。
+
+## 本批**已交付**（独立验证过）
+
+1. `transfer_limits.py`：上传 3 MiB / 下载 30 MiB / 正文 8 MiB / 二进制 64 MiB /
+   PDF 页数 1200 的**单一来源**（环境变量可覆盖）；`material_intake.MAX_BYTES` 与
+   `annual_report_pdf.MAX_BYTES` 都指向它；`explain(kind)` 给含数字与入口名的说明。
+2. `read_with_deadline(..., max_bytes=…)`：超限抛 `ResponseTooLarge`（与"超时"分开，
+   不再整段读进内存）；chunked 由 `http.client` 解开（用例逐字节比对）。
+   定向 `test_transport_deadline` **6 OK**。
+
+## 本批**未交付**（仍然是缺陷，下批重做）
+
+| 缺陷 | 现状 | 重做时要先解决什么 |
+|---|---|---|
+| `adapters/transport.py:147/201` 的 `resp.read()` 无总截止 | **未修**（代码回到基线） | `test_net_policy.TestByteChannelMetadata` 的假响应要给 `read1` 与可设超时的 socket 链；或把"不可保证有界"作为**拒绝**语义同步进该用例 |
+| `net_policy.fetch_document` 手拆头 → **chunked 正文损坏 PDF** | **未修** | `test_net_policy.TestFetchDocumentTransport` 的 3 个假 socket 要提供 `makefile`（`http.client` 需要），且 302/200 的 payload 要满足 `HTTPResponse.begin()` 的 EOF/长度语义；先补这些替身再改生产代码 |
+| 墙钟/单调钟混用导致总截止失效 | 作为**实现细节**已定位（`started=time.time()` + `read_with_deadline` 用 `monotonic`），修复随上一行一起做 | 同上 |
+
+## 顺带修掉的测试自身缺陷
+
+`test_search_quality_unified.test_diagnostics_never_raise_the_remaining_budget` 原先依赖
+真实墙钟与模块级 `PROVIDER_MIN_WAIT` 状态：**单跑通过、整文件跑失败**。现在把"剩余时间"与
+"可行下限"都钉住（`mock.patch`），结果与用例顺序无关。这不是产品缺陷，是我的用例写得
+不确定；整文件跑已 **80 OK**。

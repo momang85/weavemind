@@ -15,7 +15,9 @@
 > **A0 剩余**：合并口径的 2020 应收账款/存货仍是拒绝（按 A0 属正确行为，需更可靠的单元格解析）；
 > `Observation` 尚未承载 `derived_from`（血缘只进了一半）。
 >
-> **A1（本轮）**：传输边界三个真实缺陷已修并离线验证（`docs/evidence/a1_transport_deadline_20260929.md`）：
+> **A1（本轮，**部分交付**）**：只有两件落地——容量策略单一来源（`transfer_limits.py`）与
+> `read_with_deadline(max_bytes=…)`；**传输层接线（transport 总截止 / net_policy chunked）已回退**
+> （打红 5 个既有 `test_net_policy` 用例，按纪律不靠改测试通过）。原文如下（**仅记录当时意图**）（`docs/evidence/a1_transport_deadline_20260929.md`）：
 > ① `transport` 两个通道的 `resp.read()` 无总截止 → 改走 `read_with_deadline`（+默认字节上限）；
 > ② `net_policy.fetch_document` **手拆响应头且不认 chunked**（分块框架会混进 PDF）→ 换
 > `http.client.HTTPResponse`（成熟解析 + 透明解块 + gzip），**保留**已验 IP 直连/3xx 不跟随/不带凭据；

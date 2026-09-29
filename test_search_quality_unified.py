@@ -944,14 +944,23 @@ class TestBoundedSearchRunner(unittest.TestCase):
         import search_diag as sd
         from adapters.search_runner import provider_min_wait
 
+        # 用**固定剩余时间**而不是真墙钟：这条用例验的是"低于可行下限就不发请求"，
+        # 与机器快慢/前后用例无关（实测：整文件跑时墙钟写法会受前面用例影响而抖动）。
         b = sd.Budget(calls=6, seconds=60.0)
-        b.deadline = time.monotonic() + 0.4          # < ddgs 下限 1.0s
         calls_before = b.calls_left
-        sdk = sd.probe_search_sdk(b)
+        # 同时钉住**可行下限**：整文件跑时前面的用例会改 `PROVIDER_MIN_WAIT` 之类的模块状态，
+        # 只钉时间不钉下限会让"该拒绝"变成"发了一次请求"（实测整文件跑与单跑结果不同）。
+        _floor = mock.patch("adapters.search_runner.provider_min_wait",
+                            side_effect=lambda p, declared=None: 1.0)
+        _floor.start()
+        self.addCleanup(_floor.stop)
+        with mock.patch.object(sd.Budget, "time_left", return_value=0.4):
+            sdk = sd.probe_search_sdk(b)
         self.assertEqual(sdk["status"], "refused_budget", sdk)
         self.assertEqual(b.refused, 1)
         self.assertEqual(b.calls_left, calls_before, "没发请求就不该消耗额度")
-        html = sd.probe_search_html(b)
+        with mock.patch.object(sd.Budget, "time_left", return_value=0.4):
+            html = sd.probe_search_html(b)
         self.assertEqual(html["status"], "refused_budget", html)
         self.assertEqual(b.calls_left, calls_before)
         # 剩余时间够时：SDK 超时 = min(剩余, 8)，不得被抬到 3 秒下限以上
