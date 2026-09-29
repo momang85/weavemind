@@ -3559,6 +3559,153 @@ class TestAcceptanceChecker(unittest.TestCase):
         prose = rb._abridge("第一句结束。第二句很长" + "字" * 200, limit=40)
         self.assertTrue(prose.startswith("第一句结束。"), prose)
 
+    # ── Q0：派生输出的**语义**契约（输入→算子→输出）──────────────────────────
+
+    @staticmethod
+    def _mk(fid, metric, period, value, unit="亿元", ent="洋河股份",
+            cur="CNY", cal="合并"):
+        return {"fact_id": fid, "entity": ent, "metric": metric, "period": period,
+                "value": value, "unit": unit, "currency": cur, "caliber": cal}
+
+    def test_derived_output_metadata_forgery_is_rejected(self):
+        """Q0 反例①：**输入彼此一致、复算也对**，但输出自称另一个主体/期间/单位/币种/口径。
+
+        旧 `_verify_derived_row` 只核输入之间与算术：输入的比亚迪/2024/亿元/CNY/合并，
+        输出可以自称洋河/2020/%/USD/母公司而返回 True；随后正文匹配又按这个假身份放行，
+        等于同一批输入被拿去支持另一个主体、另一个指标、另一个期间。
+        """
+        from acceptance_checker import _verify_derived_row, _derived_output_contract
+        row = {"entity": "洋河股份", "metric": "net_margin", "period": "2020年",
+               "value": 200.0, "unit": "%", "currency": "USD", "caliber": "母公司",
+               "formula": "100 + 100", "derived_from": ["f1", "f2"]}
+        inputs = {
+            "f1": self._mk("f1", "revenue", "2024年", 100.0, ent="比亚迪"),
+            "f2": self._mk("f2", "net_profit", "2024年", 100.0, ent="比亚迪"),
+        }
+        ok, why = _verify_derived_row(row, inputs)
+        self.assertFalse(ok, "输出主体与输入不符仍被放行 = 伪造身份可进来源")
+        self.assertIn("主体", why)
+        # 逐条：每个被伪造的字段单独也要拦住（用同一批真实输入）
+        real = {"f1": self._mk("f1", "revenue", "2024年", 288.76),
+                "f2": self._mk("f2", "net_profit", "2024年", 66.73)}
+        base = {"entity": "洋河股份", "metric": "net_margin", "period": "2024年",
+                "value": 23.11, "unit": "%", "currency": "CNY", "caliber": "合并",
+                "formula": "66.73 / 288.76 * 100", "derived_from": ["f2", "f1"]}
+        self.assertEqual(_verify_derived_row(base, real), (True, ""),
+                         "真形状（净利率 2024）必须仍然通过")
+        for field, bad in (("currency", "USD"), ("caliber", "母公司"),
+                           ("period", "2020年"), ("unit", "亿元"),
+                           ("metric", "revenue_change"), ("entity", "比亚迪")):
+            mutated = dict(base, **{field: bad})
+            ok2, why2 = _verify_derived_row(mutated, real)
+            self.assertFalse(ok2, f"输出 {field}={bad} 被改后仍通过：{why2}")
+        # 输入未标而输出自称 → 同样是"凭空声明"
+        unk = {"f1": self._mk("f1", "revenue", "2024年", 288.76, cur=""),
+               "f2": self._mk("f2", "net_profit", "2024年", 66.73, cur="")}
+        self.assertFalse(_verify_derived_row(base, unk)[0])
+        self.assertIn("凭空", _derived_output_contract(base, list(unk.values()),
+                                                       "66.73 / 288.76 * 100"))
+
+    def test_derived_output_rules_match_the_real_working_paper_shapes(self):
+        """产出侧四类真实形状必须全部通过（同比/金额变化/比率/复合），且规则表不漂移。
+
+        `_RATIO_METRIC_INPUTS` 是校验侧的副本：与 `working_paper._RATIO_SPECS`
+        不一致就会把合法比率判成"没有规则"（误拒）或放过错分子分母（假通过）。
+        """
+        from acceptance_checker import _verify_derived_row, _RATIO_METRIC_INPUTS
+        from working_paper import _RATIO_SPECS
+        self.assertEqual({m: (n, d) for m, n, d, _ in _RATIO_SPECS},
+                         dict(_RATIO_METRIC_INPUTS),
+                         "校验侧的比率规则表与产出侧 _RATIO_SPECS 不一致")
+        cases = [
+            ("revenue_yoy", {"entity": "洋河股份", "metric": "revenue_yoy",
+                             "period": "2024年同比", "value": -12.83, "unit": "%",
+                             "currency": "CNY", "caliber": "合并",
+                             "formula": "(288.76 - 331.26) / 331.26 * 100",
+                             "derived_from": ["a", "b"]},
+             {"a": self._mk("a", "revenue", "2023年", 331.26),
+              "b": self._mk("b", "revenue", "2024年", 288.76)}),
+            ("net_profit_change", {"entity": "洋河股份", "metric": "net_profit_change",
+                                   "period": "2024年较2023年", "value": -33.43,
+                                   "unit": "亿元", "currency": "CNY", "caliber": "合并",
+                                   "formula": "66.73 - 100.16", "derived_from": ["c", "d"]},
+             {"c": self._mk("c", "net_profit", "2024年", 66.73),
+              "d": self._mk("d", "net_profit", "2023年", 100.16)}),
+            ("cashflow_coverage", {"entity": "洋河股份", "metric": "cashflow_coverage",
+                                   "period": "2024年", "value": 69.37, "unit": "%",
+                                   "currency": "CNY", "caliber": "合并",
+                                   "formula": "46.29 / 66.73 * 100",
+                                   "derived_from": ["e", "f"]},
+             {"e": self._mk("e", "operating_cashflow", "2024年", 46.29),
+              "f": self._mk("f", "net_profit", "2024年", 66.73)}),
+            ("net_profit_gross_gap_change",
+             {"entity": "洋河股份", "metric": "net_profit_gross_gap_change",
+              "period": "2024年", "value": 4.58, "unit": "亿元", "currency": "CNY",
+              "caliber": "合并", "formula": "(66.73 - 100.16) - (211.25 - 249.26)",
+              "derived_from": ["g", "h", "i", "j"]},
+             {"g": self._mk("g", "net_profit", "2024年", 66.73),
+              "h": self._mk("h", "net_profit", "2023年", 100.16),
+              "i": self._mk("i", "gross_profit", "2024年", 211.25),
+              "j": self._mk("j", "gross_profit", "2023年", 249.26)}),
+        ]
+        for name, row, ins in cases:
+            self.assertEqual(_verify_derived_row(row, ins), (True, ""), name)
+
+    def test_derived_denominator_must_be_the_base_period(self):
+        """增速的分母必须是**基期**：字面量全都能对上输入、复算也相符，语义却是反的。"""
+        from acceptance_checker import _verify_derived_row
+        ins = {"a": self._mk("a", "revenue", "2023年", 331.26),
+               "b": self._mk("b", "revenue", "2024年", 288.76)}
+        wrong = {"entity": "洋河股份", "metric": "revenue_yoy", "period": "2024年同比",
+                 "value": round((288.76 - 331.26) / 288.76 * 100, 2), "unit": "%",
+                 "currency": "CNY", "caliber": "合并",
+                 "formula": "(288.76 - 331.26) / 288.76 * 100", "derived_from": ["a", "b"]}
+        ok, why = _verify_derived_row(wrong, ins)
+        self.assertFalse(ok, "分母写成本期仍通过 = 增速方向可以被写反")
+        self.assertIn("基期", why)
+
+    def test_body_number_cannot_borrow_across_metric_or_period(self):
+        """Q0 反例②：`2023→2024 营业收入差 100` 不得支持"2020 年净利润增加 100"。"""
+        from acceptance_checker import _match_derived_fact
+        fact = {"kind": "period_diff", "subject": "洋河股份", "metric": "revenue",
+                "period": "2023年→2024年", "value": 100.0, "unit": "亿元",
+                "currency": "CNY", "caliber": "合并", "formula": "x - y",
+                "inputs": ["a", "b"]}
+        bad = "洋河股份2020年净利润增加100亿元。"
+        n_bad = {"raw": "100亿元", "value": "100", "unit": "亿元", "pos": bad.index("100亿元")}
+        self.assertIsNone(_match_derived_fact(n_bad, bad, [fact],
+                                              goal="研究洋河股份2023与2024年营业收入"),
+                          "跨指标/跨期间的同值借用必须被拒")
+        good = "洋河股份2024年营业收入增加100亿元。"
+        n_ok = {"raw": "100亿元", "value": "100", "unit": "亿元", "pos": good.index("100亿元")}
+        self.assertEqual(_match_derived_fact(n_ok, good, [fact],
+                                             goal="研究洋河股份2023与2024年营业收入"),
+                         "workpaper_derived", "同主体同指标同期间的读数仍须通过")
+
+    def test_number_positions_index_the_report_text(self):
+        """Q0 反例③（顺带查出）：提取器把文本**改写**后再记位置 → 所有 `pos` 错位。
+
+        旧实现把 `![…](…)`、`C:\\…`、`/tasks/ui-…` 各替换成**一个空格**，字符串变短，
+        之后每个 `pos` 都相对被改写过的文本；而取子句/主体/指标/期间用的是**原报告**
+        → 读到的是**邻句**，护栏对一部分数字形同虚设（冻结样本实测 `15.01亿元`
+        报 pos=18540，原报告该处是 `-33.43`，真实位置 9346）。
+        """
+        from acceptance_checker import extract_financial_numbers, _clause_of
+        report = ("![图1](/tasks/ui-abc123/project/chart_1.png)\n"
+                  "公司2024年营业收入288.76亿元，同比下降12.83%。\n"
+                  "C:\\work\\data\\2024.csv\n")
+        nums = extract_financial_numbers(report)
+        self.assertTrue(nums)
+        for n in nums:
+            pos = int(n["pos"])
+            self.assertEqual(report[pos:pos + len(n["raw"])], n["raw"],
+                             f"位置与原文不一致：{n['raw']} @{pos}")
+        hit = [n for n in nums if n["raw"].startswith("288.76")][0]
+        self.assertIn("营业收入", _clause_of(report, hit["pos"],
+                                            hit["pos"] + len(hit["raw"])))
+        # 图片/路径里的数字仍然不进分母（旧行为不能回退）
+        self.assertFalse(any("1" == n["value"] or "2024.csv" in n["raw"] for n in nums))
+
     def test_acceptance_gap_report(self):
         """缺口报告结构：checks/gaps/overall。"""
         import tempfile

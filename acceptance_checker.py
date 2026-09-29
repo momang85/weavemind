@@ -246,21 +246,30 @@ def extract_financial_numbers(text: str) -> list[dict]:
     排除：纯年份（19xx/20xx）、URL 内的数字、无单位的个位数、**定位元数据**
     （见 `locator_metadata_spans`：字符区间/片段号/页码/信用代码不计入分母）。"""
     t = str(text or "")
-    # 屏蔽图片引用/文件路径/任务 ID（报告内嵌图表路径含 ui-xxxx，会被误当数字）
-    t = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", t)          # ![name](path)
-    t = re.sub(r"[A-Za-z]:\\[^\s]*", " ", t)             # C:\...\路径
-    t = re.sub(r"/tasks/ui-[a-z0-9]+/[^\s]*", " ", t)    # /tasks/ui-xxx/...
+    # 图片路径/文件路径/任务 ID 里的数字不是财务数字，必须排除——**但不能再靠改写文本来排除**：
+    # 旧实现把 `![…](…)`、`C:\…`、`/tasks/ui-…` 各替换成**一个空格**，字符串整体变短，
+    # 于是之后所有 `pos` 都相对**被改写过的**文本；而调用方（`_match_derived_fact` 取所在
+    # 子句、主体归属、指标/期间匹配）拿的是**原报告** → 位置整体错位，读到的常是**邻句**。
+    # 冻结样本实测（`ui-a06a005c9b`）：`15.01亿元` 报 pos=18540，原报告该处是 `-33.43`
+    # （真实位置 9346）——护栏对一部分数字因此形同虚设（Q0 复核发现）。
+    # 现在只**记区间并跳过命中**，`pos` 索引回调用方给的那份原文。
+    skip_spans = [m.span() for m in re.finditer(r"!\[[^\]]*\]\([^)]*\)", t)]
+    skip_spans += [m.span() for m in re.finditer(r"[A-Za-z]:\\[^\s]*", t)]
+    skip_spans += [m.span() for m in re.finditer(r"/tasks/ui-[a-z0-9]+/[^\s]*", t)]
     url_spans = [m.span() for m in re.finditer(r"https?://\S+", t)]
-    # 定位元数据区间在**屏蔽之后**计算：位置与下面的 finditer 同一坐标系
+    # 定位元数据区间与下面的 finditer 在**同一份文本**上算（位置同坐标系）
     loc_spans = locator_metadata_spans(t)
 
     def in_url(pos: int) -> bool:
         return any(s <= pos < e for s, e in url_spans)
 
+    def in_skip(pos: int) -> bool:
+        return any(s <= pos < e for s, e in skip_spans)
+
     nums: list[dict] = []
     for m in _NUM_UNIT_RE.finditer(t):
         pos = m.start()
-        if in_url(pos):
+        if in_url(pos) or in_skip(pos):
             continue
         if _is_locator_metadata(pos, loc_spans):
             continue        # 定位串不是内容数字：单列账（见 metadata_numbers）
@@ -295,12 +304,16 @@ def metadata_numbers(text: str) -> list[dict]:
     只用于在验收明细里如实写出"分母里本来有这些、为什么不算数"，不参与溯源率。
     """
     t = str(text or "")
-    t = re.sub(r"!\[[^\]]*\]\([^)]*\)", " ", t)
-    t = re.sub(r"[A-Za-z]:\\[^\s]*", " ", t)
-    t = re.sub(r"/tasks/ui-[a-z0-9]+/[^\s]*", " ", t)
+    # 与 `extract_financial_numbers` 同一口径：**不改写文本**，只跳过图片/路径区间，
+    # `pos` 始终索引调用方给的那份原文（位置错位会让"邻句"被当成这一数字的上下文）。
+    _skip = [m.span() for m in re.finditer(r"!\[[^\]]*\]\([^)]*\)", t)]
+    _skip += [m.span() for m in re.finditer(r"[A-Za-z]:\\[^\s]*", t)]
+    _skip += [m.span() for m in re.finditer(r"/tasks/ui-[a-z0-9]+/[^\s]*", t)]
     spans = locator_metadata_spans(t)
     out: list[dict] = []
     for m in _NUM_UNIT_RE.finditer(t):
+        if any(s <= m.start() < e for s, e in _skip):
+            continue
         if _is_locator_metadata(m.start(), spans):
             out.append({"value": m.group(1).replace(",", ""),
                         "unit": (m.group(2) or "") + (m.group(3) or ""),
@@ -541,16 +554,162 @@ def _same_dimension(a: dict, b: dict, *, check_metric: bool = True) -> str:
     return ""
 
 
+def _divisor_constants(expr: str) -> list[float]:
+    """算式里**除号右侧**的数值字面量（分母候选）。
+
+    为什么要单独取这一支：既有的"每个字面量都要对得上某个输入"只保证**字面量有主**，
+    不保证**除以谁**。增速 `(cur - prev) / prev * 100` 把分母写成 `cur`，字面量照样
+    都在输入里、复算值也照样相等，但语义已经反了（Q0：算子→输出的量纲/口径契约）。
+    """
+    try:
+        import ast as _ast
+        tree = _ast.parse(str(expr or ""), mode="eval")
+    except SyntaxError:
+        return []
+    out: list[float] = []
+
+    def _collect(node) -> None:
+        import ast as _ast
+        if isinstance(node, _ast.Constant) and isinstance(node.value, (int, float)):
+            out.append(float(node.value))
+            return
+        for ch in _ast.iter_child_nodes(node):
+            _collect(ch)
+
+    import ast as _ast
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.BinOp) and isinstance(node.op, _ast.Div):
+            _collect(node.right)
+    return out
+
+
+def _years_of(text) -> set:
+    """文本里的四位年份集合（期间只能按"出现过的年份"核，不猜语义）。"""
+    return {int(y) for y in re.findall(r"(20\d{2})", str(text or ""))}
+
+
+# 派生指标 → (分子输入指标, 分母输入指标)。**与 `working_paper._RATIO_SPECS` 一一对应**，
+# 由 `test_p0.TestDerivedOutputContract` 的"注册表一致性"用例守住：只改一边会红。
+# 刻意不 import working_paper：校验侧不依赖产出侧的私有名，但也不允许两边悄悄漂移。
+_RATIO_METRIC_INPUTS: dict[str, tuple[str, str]] = {
+    "net_margin": ("net_profit", "revenue"),
+    "cashflow_coverage": ("operating_cashflow", "net_profit"),
+    "debt_ratio": ("total_liabilities", "total_assets"),
+    "rd_intensity": ("rd_expense", "revenue"),
+}
+# 复合派生（多指标、算式自定义）：指标 → 必需的输入指标集合（无序）。
+_COMPOSITE_DERIVED_METRICS: dict[str, frozenset] = {
+    "net_profit_gross_gap_change": frozenset({"net_profit", "gross_profit"}),
+}
+
+
+def _derived_output_contract(d: dict, rows: list[dict], expr: str) -> str:
+    """**输出侧**的维度契约：输入 → 算子 → 输出的类型必须自洽 → 空串表示通过。
+
+    B 批只核了"输入彼此一致 + 复算相符"，那证明**算得对**，不证明**算的是什么**：
+    输入的比亚迪/2024/亿元/CNY/合并，输出可以自称洋河/2020/%/USD/母公司，
+    复算照样通过（Q0 反例①），随后正文匹配又按这个假身份放行——同一批输入被拿去
+    支持另一个主体/指标/期间。
+
+    四条规则（都用"输入已有值"作前提，缺元数据按未知、不当兼容）：
+    1. 主体/币种/口径：输入之间同值，输出必须**原样继承**；输入未标而输出自称 → 拒绝；
+    2. 单位/量纲：百分比输出必须**算式里真有除法**（或输入本身就是百分比）；
+       金额输出必须与输入**同量纲同缩放**——换算要有明确规则，不许凭空改量纲；
+    3. 期间：输出期间里的年份必须落在输入期间出现过的年份里（增速写本期、变化写两期、
+       差额写本期都合规；凭空出现 2020 则拒绝）；
+    4. 指标：输出指标必须由输入指标 + **已注册的派生规则**决定（`_yoy`/`_change`/
+       比率注册表/复合派生/同名再表达），并且增速的分母必须是**基期**那一项。
+    """
+    # ① 主体/币种/口径
+    for key, label in (("entity", "主体"), ("currency", "币种"), ("caliber", "报表口径")):
+        vals = {str(r.get(key) or "") for r in rows}
+        if len(vals) > 1:
+            return f"输入{label}不一致（{' vs '.join(sorted(vals))}）"
+        common = vals.pop()
+        out = str(d.get(key) or "")
+        if common and out != common:
+            return f"输出{label}与输入不符（输入 {common}，输出 {out or '未标'}）"
+        if not common and out:
+            return f"输出{label}凭空声明（输入未标，输出 {out}）"
+    # ② 单位/量纲
+    unit_out = str(d.get("unit") or "")
+    unit_in = str(rows[0].get("unit") or "")
+    divisors = _divisor_constants(expr)
+    if unit_out.endswith("%"):
+        if not divisors and not unit_in.endswith("%"):
+            return (f"输出单位是百分比（{unit_out}）但算式里没有除法、输入也不是百分比："
+                    f"量纲对不上")
+    else:
+        scale_out = _amount_unit_scale(unit_out)
+        scale_in = _amount_unit_scale(unit_in)
+        if not scale_out:
+            return f"输出单位不是可核对的金额量纲（{unit_out or '未标'}）"
+        if divisors:
+            return (f"输出是金额量纲（{unit_out}）但算式里对输入做了除法："
+                    f"比值不是金额，量纲对不上")
+        if abs(scale_out - scale_in) > 1e-9:
+            return (f"输出金额量纲与输入不符（输入 {unit_in}，输出 {unit_out}）："
+                    f"换算要有明确规则，不能凭空改量纲")
+    # ③ 期间
+    out_years = _years_of(d.get("period"))
+    in_years: set = set()
+    for r in rows:
+        in_years |= _years_of(r.get("period"))
+    if in_years and not out_years:
+        return f"输出期间没有年份（{d.get('period') or '未标'}），无法与输入期间核对"
+    if out_years and not out_years <= in_years:
+        return (f"输出期间 {d.get('period')} 出现输入里没有的年份"
+                f"（输入期间年份 {sorted(in_years)}）")
+    # ④ 指标 + 分母
+    out_metric = str(d.get("metric") or "")
+    in_metrics = [str(r.get("metric") or "") for r in rows]
+    in_set = {m for m in in_metrics if m}
+    if not out_metric:
+        return "输出指标未标"
+    if out_metric in _RATIO_METRIC_INPUTS:
+        num_m, den_m = _RATIO_METRIC_INPUTS[out_metric]
+        if len(rows) != 2 or in_metrics[0] != num_m or in_metrics[1] != den_m:
+            return (f"输出指标 {out_metric} 要求输入（分子 {num_m}、分母 {den_m}），"
+                    f"实际 {in_metrics}")
+        if not any(_close(x, rows[1].get("value")) for x in divisors):
+            return f"{out_metric} 的算式没有除以声明的分母项（{den_m}）"
+    elif out_metric in _COMPOSITE_DERIVED_METRICS:
+        need = _COMPOSITE_DERIVED_METRICS[out_metric]
+        if not need <= in_set:
+            return (f"派生指标 {out_metric} 需要输入 {sorted(need)}，"
+                    f"实际 {sorted(in_set)}")
+    elif out_metric.endswith("_yoy"):
+        base = out_metric[:-len("_yoy")]
+        if in_set != {base}:
+            return f"同比指标 {out_metric} 的输入必须是同一指标 {base}（实际 {in_metrics}）"
+        earliest = min(rows, key=lambda r: (min(_years_of(r.get("period")) or {9999}),
+                                            str(r.get("period"))))
+        if not any(_close(x, earliest.get("value")) for x in divisors):
+            return (f"{out_metric} 的分母不是基期（{earliest.get('period')}）那一项："
+                    f"增速不得拿本期当分母")
+    elif out_metric.endswith("_change"):
+        base = out_metric[:-len("_change")]
+        if in_set != {base}:
+            return f"变化指标 {out_metric} 的输入必须是同一指标 {base}（实际 {in_metrics}）"
+    elif out_metric not in in_set:
+        return (f"输出指标 {out_metric} 没有可核对的派生规则（输入指标 {sorted(in_set)}）："
+                f"不允许凭空换指标")
+    return ""
+
+
 def _verify_derived_row(d: dict, inputs: dict) -> tuple[bool, str]:
     """派生行能否**真正复算** → `(通过?, 原因)`（09-28 下午复核 B：禁止数值互借）。
 
-    四关，任一不过就不作为来源：
+    五关，任一不过就不作为来源：
 
     1. **逐输入 ID 存在**（`derived_from` 全部能在底稿明细行里找到）；
     2. **公式可受控求值**（白名单四则运算，禁 eval）；
     3. **复算值 ≈ 记录值**（相对 0.5% / 绝对 0.01 容差）；
     4. **维度一致**：全部输入同主体/指标/币种/金额量纲/口径，且期间非空；
-       且公式里的每个数值字面量都要对得上某个输入的值（挡住"公式与输入无关"）。
+       且公式里的每个数值字面量都要对得上某个输入的值（挡住"公式与输入无关"）；
+    5. **输出侧契约**（Q0 补）：输出的主体/指标/期间/币种/单位/口径必须由输入与
+       已注册的派生规则决定（`_derived_output_contract`）——上面四关只证明算得对，
+       不证明算出来的东西自称的身份是真的。
     """
     ids = [str(x) for x in (d.get("derived_from") or []) if str(x or "").strip()]
     if not ids:
@@ -592,6 +751,9 @@ def _verify_derived_row(d: dict, inputs: dict) -> tuple[bool, str]:
             continue
         if not any(_close(op, r.get("value")) for r in rows):
             return False, f"算式里的 {op:g} 与任何输入都对不上"
+    why_out = _derived_output_contract(d, rows, expr)
+    if why_out:
+        return False, why_out
     return True, ""
 
 
@@ -837,11 +999,68 @@ def _shares_entity(a: str, b: str, *, min_len: int = 3) -> bool:
     return False
 
 
+# 正文指标词 → 结构化指标键：子句里写"净利润"，就不能拿"营业收入"的差额去支持它。
+# 只列能一一对应的；**认不出来就不据此否决**（宁可少拦，不可大面积误拒）。
+_INDICATOR_KEY_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("revenue", ("营业收入", "营收", "收入")),
+    ("net_profit", ("归母净利润", "归母净利", "净利润", "净利")),
+    ("gross_profit", ("毛利润", "毛利")),
+    ("operating_cashflow", ("经营活动现金流", "经营现金流", "现金流")),
+)
+_METRIC_KEY_BY_SLUG = {
+    "revenue": "revenue", "net_profit": "net_profit", "gross_profit": "gross_profit",
+    "operating_cashflow": "operating_cashflow",
+}
+
+
+def _body_indicator_key(clause: str, at: int) -> str:
+    """正文子句里**离数字最近**的指标词 → 结构化指标键（认不出返回空串）。"""
+    word = _indicator_near(clause, at)
+    if not word:
+        return ""
+    for key, words in _INDICATOR_KEY_GROUPS:
+        if word in words:
+            return key
+    return ""
+
+
+def _fact_metric_key(metric: str) -> str:
+    """派生事实的指标 slug → 结构化指标键（复合/未知指标返回空串 = 不据此否决）。"""
+    m = str(metric or "")
+    if not m:
+        return ""
+    for suffix in ("_yoy", "_change"):
+        if m.endswith(suffix):
+            m = m[:-len(suffix)]
+            break
+    return _METRIC_KEY_BY_SLUG.get(m, "")
+
+
+def _derived_body_semantics(n: dict, clause: str, at: int, f: dict) -> str:
+    """正文数字的**指标/期间**与派生事实是否相容 → 空串表示相容。
+
+    Q0 反例②：`2023→2024 营业收入差 100 亿元` 这条事实，能支持正文
+    "2020年净利润增加100亿元"——旧匹配只看 (值, 量纲, 主体)，指标与期间根本没核。
+    规则（两侧都取到才判，任一侧未知就不据此否决）：
+    - 子句指标键与事实指标键都非空且不同 → 拒绝（同值跨指标借用）；
+    - 子句年份与事实期间年份都非空且不相交 → 拒绝（同一笔钱写成别的年份）。
+    """
+    body_key = _body_indicator_key(clause, at)
+    fact_key = _fact_metric_key(str(f.get("metric") or ""))
+    if body_key and fact_key and body_key != fact_key:
+        return (f"正文写的是「{body_key}」，事实是「{fact_key}」：同值不得跨指标借用")
+    year = _period_near(clause, at)
+    f_years = _years_of(f.get("period"))
+    if year and f_years and int(year) not in f_years:
+        return (f"正文写的是 {year} 年，事实期间是 {f.get('period')}：不得写到别的年份上")
+    return ""
+
+
 def _match_derived_fact(n: dict, report: str, facts: list[dict],
                         *, goal: str = "") -> str | None:
     """报告里的数字能否对上某条**复算通过**的派生事实 → 命中标记或 None。
 
-    三条同时成立才算命中（09-28 下午复核 B）：
+    四条同时成立才算命中（09-28 下午复核 B；Q0 补第 4 条）：
 
     1. **值 + 量纲**一致（容差 0.5%/0.01，与复算同一把尺；元/万元/亿元同量纲等价）。
        按**绝对值**比：报告数字抽取时符号已被剥离，方向由正文的负号/方向词承载
@@ -850,7 +1069,9 @@ def _match_derived_fact(n: dict, report: str, facts: list[dict],
        报告键为空（子句没写公司名）→ 不据此拒绝；两侧都有值时，要求互相包含，
        或与**任务目标**共享专名片段（子句常是一整句散文，开头那串字并不是公司名）。
        真正的跨公司句子（"宁德时代2024年营业收入100亿元"）与目标不共享实体 → **拒绝**。
-    3. 事实必须带 `formula` 与非空 `inputs`（由 `_verify_derived_row` 保证）。
+    3. 事实必须带 `formula` 与非空 `inputs`（由 `_verify_derived_row` 保证）；
+    4. **指标/期间**相容（`_derived_body_semantics`）：子句写"净利润"就不能用
+       "营业收入"的差额支持，写 2020 年就不能用 2023→2024 的差额支持。
 
     返回 `"workpaper_derived"`（记"计算"）或 None。
     """
@@ -862,8 +1083,9 @@ def _match_derived_fact(n: dict, report: str, facts: list[dict],
     scale = _amount_unit_scale(unit) or (1.0 if unit.endswith("%") else 0.0)
     if not scale:
         return None
-    clause = _clause_of(str(report or ""), int(n.get("pos") or 0),
-                        int(n.get("pos") or 0) + len(str(n.get("raw") or "")))
+    _start, _end = int(n.get("pos") or 0), int(n.get("pos") or 0) + len(str(n.get("raw") or ""))
+    clause = _clause_of(str(report or ""), _start, _end)
+    _ca, _cb = _clause_span(str(report or ""), _start, _end)
     rep_subject = _promotion_subject(clause)
     for f in facts:
         try:
@@ -884,6 +1106,8 @@ def _match_derived_fact(n: dict, report: str, facts: list[dict],
                       or (goal and _shares_entity(rep_subject, str(goal))))
             if not _agree:
                 continue                   # **主体不符 → 不得借用**
+        if _derived_body_semantics(n, clause, _start - _ca, f):
+            continue                       # 指标/期间不符 → 同上，不是这一条事实
         return "workpaper_derived"
     return None
 
