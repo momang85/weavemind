@@ -31,7 +31,24 @@ def _get(url: str, timeout: int = 25) -> str:
     )
 
 
+def _bare(stock_code: str) -> str:
+    """交易所后缀必须去掉：`SECURITY_CODE` 字段存的是**裸代码**。
+
+    实测（2026-09-29，同环境一次有界请求）：`filter=(SECURITY_CODE="002304.SZ")` →
+    `{"success":false,"code":9201,"message":"参数错误为空"}`（89 字节、0 行），
+    而 `002304` 正常返回 `result.pages=1/data[0].SECUCODE="002304.SZ"`。
+    路由层本来会先 `bare_code()`，但凡直接调用本适配器（探针、材料核验、脚本）就会踩到，
+    于是"接口没数据"这个假象反复出现——**去后缀放在适配器内部**，谁调都不会错。
+    """
+    try:
+        from facts import bare_code as _bc
+        return str(_bc(stock_code) or stock_code)
+    except Exception:                                 # noqa: BLE001 - 拿不到就原样
+        return str(stock_code or "").split(".")[0]
+
+
 def _api_url(stock_code: str, page_size: int = 200) -> str:
+    stock_code = _bare(stock_code)
     qs = urllib.parse.urlencode({
         "sortColumns": "REPORT_DATE", "sortTypes": "-1",
         "pageSize": page_size, "pageNumber": 1,
@@ -42,6 +59,7 @@ def _api_url(stock_code: str, page_size: int = 200) -> str:
 
 
 def _api_url_ashare(stock_code: str, page_size: int = 200) -> str:
+    stock_code = _bare(stock_code)
     qs = urllib.parse.urlencode({
         "sortColumns": "REPORT_DATE", "sortTypes": "-1",
         "pageSize": page_size, "pageNumber": 1,
@@ -49,6 +67,21 @@ def _api_url_ashare(stock_code: str, page_size: int = 200) -> str:
         "filter": f'(SECURITY_CODE="{stock_code}")',
     })
     return f"{_BASE}?{qs}"
+
+
+def _explain_empty(data: dict, stock_code: str) -> str:
+    """接口返回 0 行时，把 `success`/`code`/`message` 原样带出（脱敏：只有状态词）。
+
+    旧实现只说"EastMoney 无数据"，于是"参数错(9201)"与"真没数据"在日志里长得一样，
+    排障只能靠手工探针（本批就是这么才定位到后缀问题）。
+    """
+    ok = data.get("success")
+    code = data.get("code")
+    msg = str(data.get("message") or "")[:80]
+    if ok is False or code:
+        return (f"EastMoney 返回 success={ok} code={code} message={msg or '—'}"
+                f"（SECURITY_CODE={stock_code}）")
+    return f"EastMoney 返回 0 行（success={ok}，代码 {stock_code}）"
 
 
 def _to_yi(raw) -> float | None:
@@ -118,7 +151,7 @@ def fetch(company: str, stock_code: str, year_range=None, max_years: int = 12,
     data = json.loads(text)
     rows = (data.get("result") or {}).get("data") or []
     if not rows:
-        raise RuntimeError(f"EastMoney 无数据: {stock_code}")
+        raise RuntimeError(_explain_empty(data, _bare(stock_code)))
 
     annuals = _select_period_rows(rows, period, max_years)
     if year_range:
@@ -186,7 +219,7 @@ def fetch_ashare(company: str, stock_code: str, year_range=None, max_years: int 
     data = json.loads(text)
     rows = (data.get("result") or {}).get("data") or []
     if not rows:
-        raise RuntimeError(f"EastMoney A股 无数据: {stock_code}")
+        raise RuntimeError(_explain_empty(data, _bare(stock_code)))
 
     annuals = _select_period_rows(rows, period, max_years)
     if year_range:
