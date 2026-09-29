@@ -176,6 +176,24 @@ class DataAnalyzerWorker(AsyncWorkerBase):
                     "chart_specs": [],
                     "note": "研究契约要素不全：不跑注册模型（缺口见 error）"}
         plan = fa.compile_plan(str(instruction or ""), ds, prefer=("profit_bridge",))
+        # **可复算输入随交付落盘**（K2）：数据集 + 计划 + 契约/来源。只留 run 摘要时，
+        # 包里的人无法离线复算；这三份文件加上 `analysis_runs.json` 才构成"输入→输出"闭环。
+        try:
+            import datetime as _dt
+            fa_store.save_inputs(ws, dataset=ds, plan=plan, context={
+                "dataset_source": {"kind": kind, "file": path.name, "label": source_label},
+                "contract": {k: v for k, v in {
+                    "entity": ds.manifest.entity, "entity_id": ds.manifest.entity_id,
+                    "periods": list(ds.manifest.periods), "as_of": ds.manifest.as_of,
+                    "caliber": ds.manifest.caliber,
+                }.items()},
+                "generated_at": _dt.datetime.now(_dt.timezone.utc).replace(
+                    microsecond=0).isoformat(),
+                "impl_hint": "financial_analysis.registry",
+            })
+        except Exception as exc:                 # noqa: BLE001 - 输入落盘失败不阻断分析
+            import logging as _lg
+            _lg.getLogger(__name__).warning("分析输入落盘失败：%s", str(exc)[:140])
         runs, cards, specs = [], [], []
         for item in plan.adopted:
             run = fa.run(item.model_id, ds, params=item.params, question=item.question)

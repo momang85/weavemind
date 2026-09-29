@@ -24,6 +24,15 @@ from .contracts import ModelRun, RunStatus, ValidatedOutput
 SCHEMA = "weavemind.analysis_runs/1"
 RUNS_NAME = "analysis_runs.json"
 ARC_NAME = "analysis/analysis_runs.json"      # 冻结包内的路径
+# 可复算输入（K2，2026-09-29 夜验收）："选定模型可离线复算"要求包里有**实际使用的
+# 观察快照 + dataset manifest + 分析计划 + 契约/数据集来源**——只有 run 摘要、dataset hash
+# 或输出值都不够（hash 不是输入，值不是输入）。
+DATASET_NAME = "dataset.json"
+PLAN_NAME = "plan.json"
+CONTEXT_NAME = "context.json"
+ARC_INPUTS = {"dataset": "analysis/dataset.json", "plan": "analysis/plan.json",
+              "context": "analysis/context.json"}
+SCHEMA_INPUTS = "weavemind.analysis_inputs/1"
 CARD_HEADING = "## 分析卡"
 _HEADING_RE = re.compile(r"^## ", re.M)
 _RUN_TAG_RE = re.compile(r"run=([0-9a-f]{12})")
@@ -101,6 +110,162 @@ def payload_bytes(ws) -> bytes | None:
     if not data.get("runs"):
         return None
     return json.dumps(data, ensure_ascii=False, indent=1).encode("utf-8")
+
+
+def inputs_dir(ws) -> Path:
+    return Path(ws) / "analysis"
+
+
+def save_inputs(ws, *, dataset, plan=None, context: dict | None = None) -> dict:
+    """落盘**可复算输入**：`analysis/dataset.json` / `plan.json` / `context.json`。
+
+    为什么单独一份（K2）：交付包里"这次分析用了哪些观察"必须能被**离线重放**——
+    `analysis_runs.json` 只有 run 的身份与输出，没有输入；把 dataset 与计划一起留下，
+    任何人拿包就能 `recompute_run()` 复算并逐值核对。
+    """
+    d = inputs_dir(ws)
+    d.mkdir(parents=True, exist_ok=True)
+    out: dict = {}
+    try:
+        ds_blob = {"schema": SCHEMA_INPUTS, "kind": "dataset",
+                   "dataset": dataset.as_dict() if hasattr(dataset, "as_dict") else dataset,
+                   "dataset_hash": str(getattr(dataset, "dataset_hash", "") or ""),
+                   "manifest": (dataset.manifest.as_dict()
+                                if hasattr(dataset, "manifest") else {})}
+        (d / DATASET_NAME).write_text(json.dumps(ds_blob, ensure_ascii=False, indent=1),
+                                      encoding="utf-8")
+        out["dataset"] = str(d / DATASET_NAME)
+    except Exception as exc:                           # noqa: BLE001 - 输入落盘失败不静默
+        logger.warning("分析输入（dataset）落盘失败：%s", str(exc)[:140])
+    if plan is not None:
+        try:
+            (d / PLAN_NAME).write_text(json.dumps(
+                {"schema": SCHEMA_INPUTS, "kind": "plan",
+                 "plan": plan.as_dict() if hasattr(plan, "as_dict") else plan},
+                ensure_ascii=False, indent=1), encoding="utf-8")
+            out["plan"] = str(d / PLAN_NAME)
+        except Exception as exc:                       # noqa: BLE001
+            logger.warning("分析输入（plan）落盘失败：%s", str(exc)[:140])
+    if context is not None:
+        try:
+            (d / CONTEXT_NAME).write_text(json.dumps(
+                {"schema": SCHEMA_INPUTS, "kind": "context", **dict(context or {})},
+                ensure_ascii=False, indent=1), encoding="utf-8")
+            out["context"] = str(d / CONTEXT_NAME)
+        except Exception as exc:                       # noqa: BLE001
+            logger.warning("分析输入（context）落盘失败：%s", str(exc)[:140])
+    return out
+
+
+def input_payload_bytes(ws) -> dict[str, bytes]:
+    """`{包内路径: 字节}`——进冻结包的可复算输入（没有就不放，不造空文件）。"""
+    out: dict[str, bytes] = {}
+    d = inputs_dir(ws)
+    for key, arc in ARC_INPUTS.items():
+        p = d / f"{key}.json"
+        try:
+            if p.is_file() and p.stat().st_size > 0:
+                out[arc] = p.read_bytes()
+        except Exception:                              # noqa: BLE001 - 读不到就不进包
+            continue
+    return out
+
+
+def load_inputs(ws) -> dict:
+    """读回可复算输入：`{dataset_hash, manifest, observations, plan, context}`。"""
+    d = inputs_dir(ws)
+    out: dict = {}
+    for key in ("dataset", "plan", "context"):
+        p = d / f"{key}.json"
+        try:
+            out[key] = json.loads(p.read_text(encoding="utf-8")) if p.is_file() else {}
+        except Exception:                              # noqa: BLE001 - 坏文件按空
+            out[key] = {}
+    return out
+
+
+def dataset_from_inputs(ws):
+    """从 `analysis/dataset.json` 还原 `AnalysisDataset`（离线复算的唯一入口）。"""
+    from .contracts import AnalysisDataset, DatasetManifest, Observation
+
+    blob = load_inputs(ws).get("dataset") or {}
+    ds = blob.get("dataset") or {}
+    man = dict(ds.get("manifest") or blob.get("manifest") or {})
+    obs = []
+    for o in (ds.get("observations") or ()):
+        kw = {k: v for k, v in dict(o).items()
+              if k in Observation.__dataclass_fields__
+              and k not in ("observation_hash", "usable")}
+        for f in ("derived_from",):
+            if f in kw and kw[f] is not None:
+                kw[f] = tuple(kw[f])
+        obs.append(Observation(**kw))
+    kw = {k: v for k, v in man.items() if k in DatasetManifest.__dataclass_fields__}
+    for f in ("periods", "gaps", "conflicts", "available_models"):
+        if f in kw and kw[f] is not None:
+            kw[f] = tuple(kw[f])
+    manifest = DatasetManifest(**kw)
+    index = {}
+    for o in obs:
+        if o.usable:
+            index.setdefault((o.metric, o.period, o.caliber), o)
+    return AnalysisDataset(manifest=manifest, observations=tuple(obs), index=index)
+
+
+def recompute_run(ws, run_id: str) -> dict:
+    """**离线复算**：用包内 dataset + 该 run 的参数重跑算子，与落盘输出逐值比对。
+
+    返回 `{ok, run_id, model_id, status, mismatches, outputs}`；只用输入不调模型、
+    不发请求——这正是"仅 run 摘要/hash/输出值不能替代可复算输入"的检验方式。
+    """
+    from . import runner as _runner
+
+    runs = {str(r.get("run_id") or ""): r for r in load_runs(ws)}
+    rec = runs.get(str(run_id))
+    if rec is None:
+        return {"ok": False, "reason": "包内没有这次运行的记录", "run_id": run_id}
+    model_id = str(rec.get("model_id") or "")
+    try:
+        ds = dataset_from_inputs(ws)
+    except Exception as exc:                           # noqa: BLE001
+        return {"ok": False, "reason": f"包内数据集不可还原：{str(exc)[:140]}",
+                "run_id": run_id, "model_id": model_id}
+    try:
+        if model_id.startswith("ratio:"):
+            # 同年比率走注册算子入口（不是 `run()`）：标签来自 run 记录，参数就是
+            # 注册表里声明的分子/分母（不在记录里另存一份，避免两套真值）
+            label = model_id.split(":", 1)[1]
+            hit = next((r for r in _runner.known_ratios() if str(r[0]) == label), None)
+            if hit is None:
+                return {"ok": False, "reason": f"注册表里没有比率 {label!r}",
+                        "run_id": run_id, "model_id": model_id}
+            again = _runner.ratio_run(hit[0], hit[1], hit[2], ds)
+        else:
+            again = _runner.run(model_id, ds, params=dict(rec.get("params") or {}))
+    except Exception as exc:                           # noqa: BLE001
+        return {"ok": False, "reason": f"复算失败：{str(exc)[:140]}",
+                "run_id": run_id, "model_id": model_id}
+    mism: list[str] = []
+    if again.status != rec.get("status"):
+        mism.append(f"状态不同：复算 {again.status} vs 包内 {rec.get('status')}")
+    want = {str(o.get("output_id") or ""): o for o in (rec.get("outputs") or ())}
+    got = {str(o.get("output_id") or ""): o for o in
+           (again.as_dict().get("outputs") or ())}
+    for oid, o in want.items():
+        g = got.get(oid)
+        if g is None:
+            mism.append(f"复算没有 {oid}")
+            continue
+        if abs(float(g.get("value") or 0) - float(o.get("value") or 0)) > max(
+                abs(float(o.get("value") or 0)) * 0.005, 0.01):
+            mism.append(f"{oid} 值不同：{g.get('value')} vs {o.get('value')}")
+        if str(g.get("output_hash") or "") != str(o.get("output_hash") or ""):
+            mism.append(f"{oid} 输出指纹不同")
+    return {"ok": not mism, "run_id": run_id, "model_id": model_id,
+            "status": again.status, "dataset_hash": ds.dataset_hash,
+            "mismatches": mism,
+            "outputs": [{"output_id": o.get("output_id"), "value": o.get("value"),
+                         "unit": o.get("unit")} for o in want.values()]}
 
 
 def binding_summary(runs) -> dict:

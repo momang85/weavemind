@@ -492,6 +492,80 @@ def sources_fingerprint(task_id: str, report_text: str = "") -> str:
         return ""
 
 
+def package_statuses(task_id: str, *, ws_dir=None) -> dict:
+    """工作区里的交付包**逐个**判身份：`current`（= 当前采纳稿）/ `historical` / `unknown`。
+
+    为什么必须逐个判（K2，2026-09-29 夜验收）：此前页面只取"最新的那个 zip"，再拿**最新的
+    export_manifest** 去解释它——实机 `ui-603f626cbe` 采纳身份 `f585edbf…`，唯一 ZIP 却是
+    `81047fdf…`（内文 4751 字节，非当前稿）：清单说 verified，包却是旧稿，等于用清单给旧包
+    背书。这里只认**包内 `PACKAGE_MANIFEST.json` 的身份**与当前采纳版对比，时间戳不参与判定
+    （时间只用于排序）。
+    """
+    import zipfile as _zf
+    from pathlib import Path as _P
+    ws = _P(ws_dir) if ws_dir else workspace.task_workspace(task_id)
+    adopted_id = ""
+    try:
+        adopted = VersionStore(ws, task_id).adopted()
+        adopted_id = adopted.identity_id() if adopted is not None else ""
+    except Exception as exc:                     # noqa: BLE001 - 身份读不到按 unknown
+        logger.warning("读取采纳身份失败（task=%s）：%s", task_id, str(exc)[:120])
+    out: list[dict] = []
+    for p in sorted(ws.glob("deliverables_*.zip")):
+        item = {"name": p.name, "bytes": 0, "mtime": 0.0, "identity": "",
+                "body_sha256": "", "status": "unknown", "reason": ""}
+        try:
+            item["bytes"] = int(p.stat().st_size)
+            item["mtime"] = float(p.stat().st_mtime)
+        except Exception:                        # noqa: BLE001
+            pass
+        try:
+            with _zf.ZipFile(p) as zf:
+                if "PACKAGE_MANIFEST.json" in zf.namelist():
+                    man = json.loads(zf.read("PACKAGE_MANIFEST.json").decode("utf-8")) or {}
+                    item["identity"] = str(man.get("report_version_id") or "")
+                    item["body_sha256"] = str(man.get("research_body_sha256")
+                                              or man.get("body_sha256") or "")
+                    item["inputs_recomputable"] = bool(
+                        (man.get("analysis_inputs") or {}).get("recomputable"))
+                else:
+                    item["reason"] = "包内没有 PACKAGE_MANIFEST.json（旧包，无法核对身份）"
+        except Exception as exc:                 # noqa: BLE001 - 坏包如实标
+            item["reason"] = f"包不可读：{str(exc)[:80]}"
+        if not adopted_id:
+            item["status"] = "unknown"
+            item["reason"] = item["reason"] or "该任务没有采纳版本，无法判定同版"
+        elif item["identity"] and item["identity"] == adopted_id:
+            item["status"] = "current"
+            item["reason"] = ""
+        else:
+            item["status"] = "historical"
+            item["reason"] = (item["reason"] or
+                              f"包内身份 {item['identity'][:12] or '缺失'} != 当前采纳 "
+                              f"{adopted_id[:12]}：历史/过期包，不得当当前稿下载")
+        out.append(item)
+    cur = None
+    # 与采纳稿同版的包**可能不止一个**（每次重新导出都会新增一份）：取**最新**的那份
+    # （时间戳排序只用于在同版包之间选最新，不参与身份判定）。
+    _current = [i for i in out if i["status"] == "current"]
+    if _current:
+        cur = max(_current, key=lambda i: (float(i.get("mtime") or 0), i["name"]))
+    return {"adopted_identity": adopted_id, "packages": out,
+            "current": cur["name"] if cur else "",
+            "has_current": bool(cur),
+            "note": ("" if cur else "没有任何包与当前采纳稿同版（需重新导出）")}
+
+
+def current_package(task_id: str, *, ws_dir=None):
+    """当前采纳稿对应的包路径（没有则 `None`）——**下载路径的单一真源**。"""
+    st = package_statuses(task_id, ws_dir=ws_dir)
+    if not st.get("current"):
+        return None
+    ws = Path(ws_dir) if ws_dir else workspace.task_workspace(task_id)
+    p = ws / str(st["current"])
+    return p if p.is_file() else None
+
+
 def package_manifest(task_id: str, ws, files, *, pdf_name: str = "") -> dict:
     """包内清单（schema 2）：显式区分**采纳正文**与**导出文件**的身份。
 
@@ -566,6 +640,26 @@ def package_manifest(task_id: str, ws, files, *, pdf_name: str = "") -> dict:
         logger.warning("包内清单指纹计算失败：%s", str(exc)[:120])
     # 分析运行身份（Q1）：与快照路径同一构造器，两路清单口径一致
     out["analysis_runs"] = analysis_binding(ws)
+    # 分析**输入**身份（K2）：可复算输入是否在包里、数据集 hash 与来源/契约是什么。
+    # 只有 run 摘要 + dataset hash 时读者无法复算；这里把"输入在哪"一并写进清单。
+    try:
+        from financial_analysis import store as _fa_in
+        _inputs = _fa_in.input_payload_bytes(ws) or {}
+        _blob = _fa_in.load_inputs(ws)
+        _ctx = dict(_blob.get("context") or {})
+        out["analysis_inputs"] = {
+            "schema": _fa_in.SCHEMA_INPUTS,
+            "present": sorted(_inputs),
+            "missing": [arc for arc in _fa_in.ARC_INPUTS.values() if arc not in _inputs],
+            "dataset_hash": str((( _blob.get("dataset") or {}).get("dataset_hash")) or ""),
+            "dataset_source": _ctx.get("dataset_source") or {},
+            "contract": _ctx.get("contract") or {},
+            "recomputable": bool(_fa_in.ARC_INPUTS["dataset"] in _inputs),
+        }
+    except Exception as exc:                     # noqa: BLE001 - 输入身份算不出不阻断打包
+        logger.warning("包内清单：分析输入身份读取失败：%s", str(exc)[:120])
+        out["analysis_inputs"] = {"schema": "weavemind.analysis_inputs/1",
+                                 "present": [], "missing": [], "recomputable": False}
     return out
 
 
@@ -626,6 +720,13 @@ def _freeze_payload(task_id: str, ws, *, md_bytes: bytes = b"",
     _analysis = analysis_payload_bytes(ws)
     if _analysis:
         payload["analysis/analysis_runs.json"] = _analysis
+    # 可复算输入（K2）：dataset/plan/context —— 有 run 摘要没有输入，包就不可复算
+    try:
+        from financial_analysis import store as _fa_in
+        for arc, blob in (_fa_in.input_payload_bytes(ws) or {}).items():
+            payload[arc] = blob
+    except Exception as exc:                     # noqa: BLE001 - 读不到就不进包
+        logger.warning("快照：分析输入读取失败：%s", str(exc)[:120])
     return payload
 
 
@@ -825,6 +926,36 @@ def _manifest_from_frozen(frozen: dict, *, snap: dict, ws=None,
     out["frozen"] = dict(want)
     out["analysis_runs"] = analysis_binding(ws) if ws is not None else {
         "schema": "weavemind.analysis_runs/1", "count": 0, "validated": 0, "runs": []}
+    # 分析**输入**身份（K2）：与普通路径同一构造器 —— 快照整包只认冻结字节，
+    # 而"输入在不在包里"要按**冻结成员**判（磁盘上有没有是另一回事，不能当证据）
+    if "analysis/dataset.json" in hashes or any(
+            a.startswith("analysis/") for a in hashes):
+        try:
+            _ctx_blob = {}
+            if "analysis/context.json" in (frozen or {}):
+                _ctx_blob = json.loads(bytes(frozen["analysis/context.json"])
+                                       .decode("utf-8")) or {}
+            _ds_blob = {}
+            if "analysis/dataset.json" in (frozen or {}):
+                _ds_blob = json.loads(bytes(frozen["analysis/dataset.json"])
+                                      .decode("utf-8")) or {}
+            _present = sorted(a for a in hashes
+                              if a in ("analysis/dataset.json", "analysis/plan.json",
+                                       "analysis/context.json"))
+            out["analysis_inputs"] = {
+                "schema": "weavemind.analysis_inputs/1",
+                "present": _present,
+                "missing": [a for a in ("analysis/dataset.json", "analysis/plan.json",
+                                        "analysis/context.json") if a not in hashes],
+                "dataset_hash": str(_ds_blob.get("dataset_hash") or ""),
+                "dataset_source": _ctx_blob.get("dataset_source") or {},
+                "contract": _ctx_blob.get("contract") or {},
+                "recomputable": "analysis/dataset.json" in hashes,
+            }
+        except Exception as exc:                     # noqa: BLE001 - 判不出按缺输入
+            logger.warning("包内清单：分析输入身份读取失败（冻结路径）：%s", str(exc)[:120])
+            out["analysis_inputs"] = {"schema": "weavemind.analysis_inputs/1",
+                                     "present": [], "missing": [], "recomputable": False}
     if ws is not None:
         out["drift"] = _disk_drift(ws, frozen)
     return out
@@ -893,7 +1024,7 @@ def repack_adopted(task_id: str, *, md_bytes: bytes = b"", pdf_bytes: bytes = b"
         if charts_dir.is_dir():
             for p in sorted(charts_dir.glob("*.png")):
                 files.append((p, f"charts/{p.name}"))
-        # 分析运行记录（Q1）：有才进包（与快照路径同一路径名，便于两路核对一致）
+        # 分析运行记录 + **可复算输入**（K2）：有才进包（与快照路径同一组路径名，便于两路核对）
         _analysis = analysis_payload_bytes(ws)
         if _analysis:
             _ana_path = ws / "analysis" / "analysis_runs.json"
@@ -903,6 +1034,15 @@ def repack_adopted(task_id: str, *, md_bytes: bytes = b"", pdf_bytes: bytes = b"
                 files.append((_ana_path, "analysis/analysis_runs.json"))
             except Exception as exc:             # noqa: BLE001 - 写不出就不进包
                 logger.warning("打包：分析运行记录落盘失败：%s", str(exc)[:100])
+        try:
+            from financial_analysis import store as _fa_in
+            for arc, blob in (_fa_in.input_payload_bytes(ws) or {}).items():
+                p = ws / arc
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(blob)
+                files.append((p, arc))
+        except Exception as exc:                 # noqa: BLE001 - 输入读不到就不进包
+            logger.warning("打包：分析输入读取失败：%s", str(exc)[:100])
         # 完整模型稿（审计留档，按内容 hash 命名）：存在的每一版都进包（不覆盖历史）
         for cand_dir in (ws / "project", ws):
             if not cand_dir.is_dir():

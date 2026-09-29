@@ -1721,7 +1721,17 @@ def _task_deliverables(tid: str) -> list[dict]:
                 except Exception:
                     pass
             if candidates:
-                files = _zip_entries(max(candidates, key=os.path.getmtime))
+                # K2：文件列表取**与当前采纳稿同版**的那个包；没有同版包时才退回最新包
+                # （时间戳只能排序，不能证明身份——用最新清单给旧包背书是实机反例）
+                _cur = None
+                try:
+                    import delivery_pipeline as _dp
+                    _cur = _dp.current_package(tid)
+                except Exception as exc:         # noqa: BLE001 - 判不出就按旧行为
+                    logger.warning("当前包判定失败（%s）：%s", tid, str(exc)[:120])
+                _pick = str(_cur) if _cur is not None else max(
+                    candidates, key=os.path.getmtime)
+                files = _zip_entries(_pick)
     if not files:
         # 兜底 2：该任务 project 目录最近窗口内的产物
         cutoff = time.time() - 120 * 60
@@ -3052,6 +3062,14 @@ def _export_payload(tid: str, ws, state: dict | None) -> dict:
     _zips = sorted((p for p in ws.glob("deliverables_*.zip")),
                    key=lambda p: p.stat().st_mtime, reverse=True)
     _zip = _zips[0] if _zips else None
+    # K2：逐个包判身份（current / historical / unknown），并给出"当前包"是哪个
+    _pkg_statuses: dict = {}
+    try:
+        import delivery_pipeline as _dp2
+        _pkg_statuses = _dp2.package_statuses(tid, ws_dir=ws)
+    except Exception as exc:                     # noqa: BLE001 - 判不出就空块
+        logger.warning("包身份判定失败（%s）：%s", tid, str(exc)[:120])
+        _pkg_statuses = {"packages": [], "current": "", "note": ""}
     # 批次4：包内真实 manifest（`PACKAGE_MANIFEST.json`）——下载与陈旧判定按**包内标识**
     # 对照当前采纳版；时间戳只作辅助。包内没有清单（旧包）就退回清单文件/时间戳。
     _pkg_manifest: dict = {}
@@ -3137,6 +3155,13 @@ def _export_payload(tid: str, ws, state: dict | None) -> dict:
                           time.localtime(_zip.stat().st_mtime))
             if _zip else ""),
         "package_stale": _package_stale,
+        # K2：**逐个包**的身份与状态（current / historical / unknown）。页面按它标"历史/过期"，
+        # 并让"当前报告包"始终对应采纳身份——不再用最新清单给旧 ZIP 背书。
+        "packages": _pkg_statuses.get("packages") or [],
+        "current_package": str(_pkg_statuses.get("current") or ""),
+        "package_identity_ok": (str(_pkg_statuses.get("current") or "")
+                                == (_zip.name if _zip else "")),
+        "current_package_note": str(_pkg_statuses.get("note") or ""),
         # 批次3b：导出清单与页面/正文同源显示研究状态（verified 只代表数字与格式机器验收）
         "research_state": _research_state_for(tid, ws),
     }

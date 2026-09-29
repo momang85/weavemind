@@ -92,8 +92,13 @@ def _financials(tid: str) -> dict:
     return json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
 
 
-def verify(tid: str) -> dict:
-    """逐项核对验收清单（只读，不改任何状态）。"""
+def verify(tid: str, *, export: bool = False) -> dict:
+    """逐项核对验收清单。
+
+    export=False（默认）**只读**：读既有台账/包身份，不生成 PDF、不重写清单。
+    export=True 走真实导出口径（会重写 export_manifest.json）——两者分开，
+    避免验收动作本身改变了被验收对象（K2）。
+    """
     import delivery_pipeline
     import task_state
     import workspace
@@ -119,31 +124,66 @@ def verify(tid: str) -> dict:
     yoy = [d for d in (paper.get("derived") or []) if str(d.get("unit") or "") == "%"]
     # ③ 缺口与问题
     gaps = [g for g in (paper.get("gaps") or []) if g.get("kind") == "fact"]
-    # ④ 导出四件套 + manifest：走**真实的导出函数**（不塞假字节，否则清单里的
-    #    PDF hash 与实际下载件不符，等于把验收记录写错）
+    # ④ 导出四件套 + manifest：**默认只读**（K2，2026-09-29 夜验收：本函数此前自称只读，
+    #    却调用 PDF/MD 导出并重写清单——"验收动作本身改变了被验收对象"）。`--export` 时
+    #    才走真实导出（按真实字节写清单），并如实标注本次运行改写过清单。
     exports: dict = {}
+    if export:
+        try:
+            import web_ui
+            pdf = web_ui._task_pdf_bytes(tid)             # 生成 PDF 并按真实字节写清单
+            md_bytes, manifest = web_ui._task_markdown_export(tid)
+            csv_path = workspace.task_project_dir(tid, "default") / "working_paper.csv"
+            json_path = workspace.task_project_dir(tid, "default") / "working_paper.json"
+            exports = {
+                "mode": "export（本次运行重写了 export_manifest.json 与 PDF/MD 台账）",
+                "manifest": {k: manifest.get(k) for k in
+                             ("report_version_id", "status", "aligned", "draft",
+                              "body_sha256", "final_content_matches")},
+                "files": manifest.get("files"),
+                "pdf_bytes": len(pdf),
+                "markdown_bytes": len(md_bytes),
+                "markdown_has_body": str(row.get("report") or "")[:60] in
+                md_bytes.decode("utf-8", "ignore"),
+                "csv_present": csv_path.exists() and csv_path.stat().st_size > 0,
+                "json_present": json_path.exists() and json_path.stat().st_size > 0,
+                "csv_bytes": csv_path.stat().st_size if csv_path.exists() else 0,
+                "json_bytes": json_path.stat().st_size if json_path.exists() else 0,
+            }
+        except Exception as exc:
+            exports = {"mode": "export", "error": str(exc)[:200]}
+    else:
+        # 只读口径：读**已存在**的清单与磁盘上的导出件，不生成、不改写
+        try:
+            _mf = ws / "export_manifest.json"
+            manifest = json.loads(_mf.read_text(encoding="utf-8")) if _mf.exists() else {}
+            _pdf = ws / "reports" / "report.pdf"
+            _md = ws / "reports" / "report.md"
+            csv_path = workspace.task_project_dir(tid, "default") / "working_paper.csv"
+            json_path = workspace.task_project_dir(tid, "default") / "working_paper.json"
+            exports = {
+                "mode": "read-only（只读既有台账，未生成/未改写）",
+                "manifest": {k: manifest.get(k) for k in
+                             ("report_version_id", "status", "aligned", "draft",
+                              "body_sha256", "final_content_matches")},
+                "files": manifest.get("files"),
+                "pdf_bytes": _pdf.stat().st_size if _pdf.exists() else 0,
+                "markdown_bytes": _md.stat().st_size if _md.exists() else 0,
+                "markdown_has_body": bool(_md.exists()),
+                "csv_present": csv_path.exists() and csv_path.stat().st_size > 0,
+                "json_present": json_path.exists() and json_path.stat().st_size > 0,
+                "csv_bytes": csv_path.stat().st_size if csv_path.exists() else 0,
+                "json_bytes": json_path.stat().st_size if json_path.exists() else 0,
+            }
+        except Exception as exc:
+            exports = {"mode": "read-only", "error": str(exc)[:200]}
+    # ④b 交付包身份（K2）：逐个包标 current/historical，页面/下载据此对齐采纳身份
+    packages: dict = {}
     try:
-        import web_ui
-        pdf = web_ui._task_pdf_bytes(tid)                 # 生成 PDF 并按真实字节写清单
-        md_bytes, manifest = web_ui._task_markdown_export(tid)
-        csv_path = workspace.task_project_dir(tid, "default") / "working_paper.csv"
-        json_path = workspace.task_project_dir(tid, "default") / "working_paper.json"
-        exports = {
-            "manifest": {k: manifest.get(k) for k in
-                         ("report_version_id", "status", "aligned", "draft",
-                          "body_sha256", "final_content_matches")},
-            "files": manifest.get("files"),
-            "pdf_bytes": len(pdf),
-            "markdown_bytes": len(md_bytes),
-            "markdown_has_body": str(row.get("report") or "")[:60] in
-            md_bytes.decode("utf-8", "ignore"),
-            "csv_present": csv_path.exists() and csv_path.stat().st_size > 0,
-            "json_present": json_path.exists() and json_path.stat().st_size > 0,
-            "csv_bytes": csv_path.stat().st_size if csv_path.exists() else 0,
-            "json_bytes": json_path.stat().st_size if json_path.exists() else 0,
-        }
+        import delivery_pipeline as _dp
+        packages = _dp.package_statuses(tid, ws_dir=ws)
     except Exception as exc:
-        exports = {"error": str(exc)[:200]}
+        packages = {"error": str(exc)[:200]}
     # ⑤ LLM 调用形状（脱敏）
     calls = {}
     lc = ws / "llm_calls.jsonl"
@@ -161,6 +201,7 @@ def verify(tid: str) -> dict:
     md = dict(fin.get("metadata") or {})
     return {
         "task_id": tid,
+        "verify_mode": "export" if export else "read-only",
         "status": row.get("status"),
         "phase": row.get("phase"),
         "delivery": {"status": state.get("status"), "draft": state.get("draft"),
@@ -200,6 +241,7 @@ def verify(tid: str) -> dict:
                        "latest_report", "disclosure_date", "annual_count")},
         "contract_in_financials": fin.get("contract"),
         "exports": exports,
+        "packages": packages,
         "llm_calls": calls,
         "review_state": json.loads((ws / "review_state.json").read_text(encoding="utf-8"))
         if (ws / "review_state.json").exists() else {},
@@ -238,13 +280,15 @@ def main() -> int:
     ap.add_argument("--find", default="")
     ap.add_argument("--append", default="")
     ap.add_argument("--wait", type=float, default=1500.0)
+    ap.add_argument("--export", action="store_true",
+                    help="核对时走真实导出（会重写 export_manifest.json）；默认只读")
     args = ap.parse_args()
     if args.submit:
         tid = submit()
         print("submitted:", tid, flush=True)
         row = wait_terminal(tid, timeout=args.wait)
         print("terminal:", row.get("status"), "timeout" if row.get("_timeout") else "")
-        print(json.dumps(verify(tid), ensure_ascii=False, indent=1))
+        print(json.dumps(verify(tid, export=args.export), ensure_ascii=False, indent=1))
         return 0
     if args.revise:
         print(json.dumps(revise(args.revise, find=args.find, replace=args.append),
@@ -252,7 +296,7 @@ def main() -> int:
         print(json.dumps(verify(args.revise), ensure_ascii=False, indent=1))
         return 0
     if args.verify:
-        print(json.dumps(verify(args.verify), ensure_ascii=False, indent=1))
+        print(json.dumps(verify(args.verify, export=args.export), ensure_ascii=False, indent=1))
         return 0
     ap.print_help()
     return 2

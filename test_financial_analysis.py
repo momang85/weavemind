@@ -678,6 +678,130 @@ class TestReportAndPackageBindTheSameRun(unittest.TestCase):
         self.assertTrue(self.store.verify_body_binding(self.ws, packaged_body)["ok"])
 
 
+class TestK2PackageIdentityAndRecompute(unittest.TestCase):
+    """K2（09-29 夜验收）：包与**采纳稿同版**、含可复算输入、旧包标历史、正文变了旧包过期。"""
+
+    def setUp(self):
+        import tempfile
+        self.ws = Path(tempfile.mkdtemp(prefix="fa_k2_"))
+        self.tid = "k2-1"
+        (self.ws / "project").mkdir(parents=True, exist_ok=True)
+        rows = _wc_rows()
+        self.ds = fa.freeze_from_facts(rows, periods=(2023, 2024),
+                                       entity_id="002304.SZ", source_label="k2")
+        self.plan = fa.compile_plan("分析利润", self.ds, prefer=("profit_bridge",))
+        self.run = fa.run("profit_bridge", self.ds)
+
+    def _body(self, text="（研究正文：2023 与 2024 两年营业收入与归母净利润）"):
+        return f"# 洋河股份研究\n\n## 分析\n\n{text}\n"
+
+    def _adopt(self, body):
+        import report_version as rv
+        store = rv.VersionStore(self.ws, self.tid)
+        v = store.record(body)
+        self.assertTrue(store.adopt(v))
+        return store
+
+    def _freeze(self, body: str | None = None):
+        """按当前采纳稿冻结一份包（**无快照**路径：按名字读工作区，含 analysis/ 输入）。"""
+        import delivery_pipeline as dp
+        return dp.repack_adopted(self.tid, ws_dir=self.ws,
+                                 md_bytes=(body or self._body()).encode("utf-8"))
+
+    @staticmethod
+    def _zip_of(out: dict) -> Path:
+        for key in ("zip", "path", "zip_path", "name"):
+            if isinstance(out, dict) and out.get(key):
+                return Path(str(out[key]))
+        raise AssertionError(f"重包没有给出包路径：{out}")
+
+    def test_package_carries_inputs_and_recomputes_offline(self):
+        """包里有 dataset/plan/context + 运行记录，且**离线复算**逐值一致。"""
+        import shutil
+        import tempfile
+        import zipfile
+        from financial_analysis import store as fa_store
+        fa_store.save_inputs(self.ws, dataset=self.ds, plan=self.plan,
+                            context={"dataset_source": {"kind": "test"}})
+        fa_store.save_run(self.ws, self.run)
+        self._adopt(self._body())
+        out = self._freeze()
+        zip_path = self._zip_of(out)
+        self.assertTrue(zip_path.is_file(), out)
+        with zipfile.ZipFile(zip_path) as zf:
+            names = zf.namelist()
+            for arc in ("analysis/dataset.json", "analysis/plan.json",
+                        "analysis/context.json", "analysis/analysis_runs.json"):
+                self.assertIn(arc, names, f"包内必须有可复算输入：{arc}")
+            man = json.loads(zf.read("PACKAGE_MANIFEST.json").decode("utf-8"))
+            self.assertTrue((man.get("analysis_inputs") or {}).get("recomputable"), man)
+            self.assertEqual((man.get("analysis_inputs") or {}).get("dataset_hash"),
+                             self.ds.dataset_hash)
+        with tempfile.TemporaryDirectory(prefix="k2_re_") as tmp:
+            with zipfile.ZipFile(zip_path) as zf:
+                zf.extractall(tmp)
+            shutil.copy2(Path(tmp) / "analysis" / "analysis_runs.json",
+                         Path(tmp) / "analysis_runs.json")
+            got = fa_store.recompute_run(Path(tmp), self.run.run_id)
+        self.assertTrue(got["ok"], got)
+        self.assertEqual(got["dataset_hash"], self.ds.dataset_hash)
+
+    def test_old_package_is_labelled_historical_and_not_current(self):
+        """包内身份 != 采纳身份 → 标 historical，且**不会被当成当前包**。"""
+        import json as _json
+        import zipfile
+        import delivery_pipeline as dp
+        from financial_analysis import store as fa_store
+        fa_store.save_inputs(self.ws, dataset=self.ds, plan=self.plan, context={})
+        fa_store.save_run(self.ws, self.run)
+        self._adopt(self._body())
+        # 手工造一个"旧包"：包内清单身份写成别的
+        old = self.ws / "deliverables_20260101_000000.zip"
+        with zipfile.ZipFile(old, "w") as zf:
+            zf.writestr("PACKAGE_MANIFEST.json", _json.dumps(
+                {"schema": "weavemind.package/2", "report_version_id": "deadbeef" * 8,
+                 "research_body_sha256": "deadbeef" * 8}))
+            zf.writestr("reports/report.md", self._body("旧稿"))
+        st = dp.package_statuses(self.tid, ws_dir=self.ws)
+        by = {p["name"]: p for p in st["packages"]}
+        self.assertEqual(by[old.name]["status"], "historical")
+        self.assertIn("历史", by[old.name]["reason"])
+        self.assertFalse(st["has_current"])
+        self.assertIsNone(dp.current_package(self.tid, ws_dir=self.ws))
+        # 按采纳稿冻结一份 → 同版包出现，且 current 指向它（旧包不动）
+        out = self._freeze()
+        name = self._zip_of(out).name
+        st2 = dp.package_statuses(self.tid, ws_dir=self.ws)
+        self.assertTrue(st2["has_current"], st2)
+        self.assertEqual(st2["current"], name)
+        self.assertEqual({p["name"]: p["status"] for p in st2["packages"]}[old.name],
+                         "historical")
+
+    def test_body_change_makes_old_package_expired_and_new_export_new_identity(self):
+        """改正文 → 旧包过期（身份不再匹配）；再导出得到**新身份**的新包（旧包不覆盖）。"""
+        import delivery_pipeline as dp
+        from financial_analysis import store as fa_store
+        fa_store.save_inputs(self.ws, dataset=self.ds, plan=self.plan, context={})
+        fa_store.save_run(self.ws, self.run)
+        first_store = self._adopt(self._body())
+        first_id = first_store.adopted().identity_id()
+        first_zip = self._zip_of(self._freeze())
+        # 正文改了并重新采纳
+        self._adopt(self._body("（修订版：补充了现金质量解释）"))
+        st = dp.package_statuses(self.tid, ws_dir=self.ws)
+        by = {p["name"]: p for p in st["packages"]}
+        self.assertEqual(by[first_zip.name]["status"], "historical", st)
+        self.assertFalse(st["has_current"], "旧包不得继续被当当前包")
+        second_zip = self._zip_of(self._freeze())
+        self.assertNotEqual(second_zip.name, first_zip.name, "旧包不得被覆盖")
+        self.assertTrue(first_zip.is_file(), "旧包必须留在原地（可下载为历史）")
+        st2 = dp.package_statuses(self.tid, ws_dir=self.ws)
+        self.assertEqual(st2["current"], second_zip.name)
+        self.assertEqual(st2["adopted_identity"], first_store.adopted().identity_id())
+        self.assertNotEqual(st2["adopted_identity"], first_id,
+                            "改正文后采纳身份必须变化（新版本不继承旧批准）")
+
+
 class TestDataAnalyzerTakesTheFinancialPath(unittest.TestCase):
     """Q1：金融任务必须按**显式数据集 + 分析计划**走注册模型，不走"最新 CSV + 末列目标"。"""
 
