@@ -149,3 +149,24 @@ supported_materials / license_scope / capability / budget / health_source / veri
 | 本地/替身测试 | 0 次外网 |
 
 合计 **12 次公开请求**，全部走 `net_policy`（已验 IP 直连、不跟随跳转、不带凭据、总截止 + 字节上限）。
+
+## 9. 实机（运行中实例）状态：重启成功，外部探针**未**打通 —— 如实记
+
+本批改动落地后重启了运行实例（`launcher.py stop` → `start`，启动前确认真库未结算任务为 0）：
+
+- `launcher.py status`：**16/16 services alive**；工作台 HTTP 200；"研究能力：就绪
+  （Redis 8、编排器与 5 项必需 Worker 心跳新鲜）"；便携 Redis 端口 6379。
+- **能说的**：服务已用当前工作树（含本批修复）重新加载——Python 启动时读源码，
+  旧进程已全部退出（stop 后残留 0）。
+- **不能说的**：我**没有**取得"运行中 worker 消费队列并回执"的证据。外部探针往
+  `task_queue:worker-web-fetch` 与 `task_queue:webfetchworker` 各投一条抓取任务，
+  120 秒内都没有回执；Redis 里那两条队列也没被消费。观察到的现象：
+  `agents` 表里的注册名（`webfetchworker`）与 `last_heartbeat`（10:46，**早于本次重启**）
+  对不上新实例，launcher 的服务名（`worker-web-fetch`）也只存在于 `pids.json`。
+  **即"服务名 / 注册名 / 队列键"三者不同名**，外部无法从名字推出队列键。
+  这是一条运维可用性缺口，登记待查（不属本批，不猜结论）。
+- 因此本文件第 0 节的抓取通道修复，其**生产路径证据**是：① 真机 `fetch_document` 取回
+  cninfo 证券索引 200/592391 字节；② 三份年报 PDF 经 `material_intake` 直链取件
+  （走同一条 `net_policy.fetch_document`）全部落盘并准入；③ 忠实替身下旧实现必失败。
+  这三条都不依赖"运行中 worker 队列"。
+
