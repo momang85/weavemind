@@ -1,25 +1,10 @@
 {
  "task_id": "ui-fa2cb73e59",
  "workspace": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-fa2cb73e59",
- "materialize": {
-  "ok": true,
-  "status": "partial",
-  "runs": 7,
-  "dataset_source": {
-   "kind": "working_paper",
-   "file": "working_paper.json",
-   "label": "worker:working_paper.json"
-  },
-  "inputs": [
-   "analysis/context.json",
-   "analysis/dataset.json",
-   "analysis/plan.json"
-  ]
- },
  "before": {
   "adopted_identity": "e5ae7ff61046738559398d500eff480a84ac4fa0f847349a5c5b718e8ef14b66",
-  "has_current": false,
-  "current": "",
+  "has_current": true,
+  "current": "deliverables_20260930_004010_092fdb.zip",
   "packages": [
    {
     "name": "deliverables_20260929_214007.zip",
@@ -27,6 +12,13 @@
     "identity": "242b1e7b39ab04dc3e6b085c5a758e72f1a703da8123bd19030bfc180def2da9",
     "bytes": 715622,
     "reason": "包内身份 242b1e7b39ab != 当前采纳 e5ae7ff61046：历史/过期包，不得当当前稿下载"
+   },
+   {
+    "name": "deliverables_20260930_004010_092fdb.zip",
+    "status": "current",
+    "identity": "e5ae7ff61046738559398d500eff480a84ac4fa0f847349a5c5b718e8ef14b66",
+    "bytes": 5622747,
+    "reason": ""
    }
   ]
  },
@@ -52,7 +44,7 @@
    }
   ]
  },
- "frozen_zip": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-fa2cb73e59\\deliverables_20260930_004010_092fdb.zip",
+ "frozen_zip": "",
  "current_zip": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-fa2cb73e59\\deliverables_20260930_004010_092fdb.zip",
  "package": {
   "name": "deliverables_20260930_004010_092fdb.zip",
