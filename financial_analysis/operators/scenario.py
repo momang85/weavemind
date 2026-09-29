@@ -135,12 +135,13 @@ def compute(dataset, params: dict | None = None) -> dict:
 
     sc_base = _scenario(base, growth=0.0, margin_delta=0.0, expense_ratio=0.0)
     base_gap = sc_base - _d(np_.value)
-    # 三种情景：基准（参数 0）/ 上行 / 下行（用调用方给的假设，未给就用声明过的默认值）
-    up = _scenario(base, growth=float(params.get("up_growth", 0.05)),
-                   margin_delta=float(params.get("up_margin", 0.01)), expense_ratio=0.0)
-    down = _scenario(base, growth=float(params.get("down_growth", -0.05)),
-                     margin_delta=float(params.get("down_margin", -0.01)),
-                     expense_ratio=0.0)
+    # 假设参数：**契约里声明的名字优先**（`revenue_growth`/`gross_margin_delta`/
+    # `expense_change_ratio`），旧名 `up_*`/`down_*` 继续兼容。此前 `allowed_params`
+    # 声明的是前者、`compute` 只读后者——页面按声明改假设时**改了不生效**（K3 实机）。
+    _g_up, _m_up, _e_up, _g_down, _m_down = _assumptions(params)
+    # 三种情景：基准（参数 0）/ 上行（使用者的假设，未给就用声明过的默认值）/ 下行
+    up = _scenario(base, growth=_g_up, margin_delta=_m_up, expense_ratio=_e_up)
+    down = _scenario(base, growth=_g_down, margin_delta=_m_down, expense_ratio=0.0)
     # 单因素敏感度：每 +1 个百分点的影响（收入 / 毛利率 / 费用）
     sens = {
         "收入 +1pp": _scenario(base, growth=0.01, margin_delta=0, expense_ratio=0) - sc_base,
@@ -155,10 +156,8 @@ def compute(dataset, params: dict | None = None) -> dict:
         < _scenario(base, growth=0.0, margin_delta=0, expense_ratio=0))
     _assumed = [k for k in ("revenue_growth", "gross_margin_delta", "expense_change_ratio")
                 if k in params]
-    _defaults = [f"上行：收入 {float(params.get('up_growth', 0.05)):+.0%}、"
-                 f"毛利率 {float(params.get('up_margin', 0.01)):+.0%}",
-                 f"下行：收入 {float(params.get('down_growth', -0.05)):+.0%}、"
-                 f"毛利率 {float(params.get('down_margin', -0.01)):+.0%}"]
+    _defaults = [f"上行：收入 {_g_up:+.0%}、毛利率 {_m_up:+.0%}、费用 {_e_up:+.0%}",
+                 f"下行：收入 {_g_down:+.0%}、毛利率 {_m_down:+.0%}"]
     return {
         "periods": (period,),
         "formula": ("情景归母净利 = 收入×(1+g) × (基期毛利率+m) − 毛利线以下隐含块×(1+e)；"
@@ -204,6 +203,23 @@ def compute(dataset, params: dict | None = None) -> dict:
     }
 
 
+def _assumptions(params: dict) -> tuple[float, float, float, float, float]:
+    """参数 → `(上行收入增速, 上行毛利率变化, 上行费用变化, 下行收入, 下行毛利率)`。
+
+    **compute 与 gold 必须共用这一处解析**（K3 实机：两边各读一套名字，页面按声明改假设后
+    compute 用新值、gold 用旧默认值 → 独立验证判 `validation_failed`，模型"改了就报错"）。
+    声明名优先（`revenue_growth`/`gross_margin_delta`/`expense_change_ratio`），
+    旧名 `up_*`/`down_*` 兼容。
+    """
+    p = dict(params or {})
+    g_up = float(p.get("revenue_growth", p.get("up_growth", 0.05)))
+    m_up = float(p.get("gross_margin_delta", p.get("up_margin", 0.01)))
+    e_up = float(p.get("expense_change_ratio", 0.0))
+    g_down = float(p.get("down_growth", -abs(g_up) if g_up else -0.05))
+    m_down = float(p.get("down_margin", -abs(m_up) if m_up else -0.01))
+    return g_up, m_up, e_up, g_down, m_down
+
+
 def gold(dataset, params: dict | None = None) -> dict:
     """独立金样：基准复现必须等于基期净利（差 0）；上行情景用 Decimal 重算。"""
     params = dict(params or {})
@@ -216,6 +232,6 @@ def gold(dataset, params: dict | None = None) -> dict:
         raise NotApplicable(scope_why)
     base = {"revenue": float(rev.value), "gross_profit": float(gp.value),
             "net_profit": float(np_.value)}
-    up = _scenario(base, growth=float(params.get("up_growth", 0.05)),
-                   margin_delta=float(params.get("up_margin", 0.01)), expense_ratio=0.0)
+    g_up, m_up, e_up, _g_down, _m_down = _assumptions(params)
+    up = _scenario(base, growth=g_up, margin_delta=m_up, expense_ratio=e_up)
     return {"scenario_net_profit": float(up.quantize(Decimal("0.01")))}

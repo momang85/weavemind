@@ -114,6 +114,11 @@ def run(model_id: str, dataset, *, params: dict | None = None,
                         reason=f"{type(exc).__name__}: {str(exc)[:160]}",
                         ended_at=_now(), budget_used=_used(t0, m))
 
+    # 参数随载荷一起交给**独立验证**：金样要用**同一组假设**复算（K3 实机反例：
+    # 验证层读 `payload["params"]`，而算子返回的载荷里没有它 → 金样恒用默认假设，
+    # 用户在页面上改假设后 compute 用新值、gold 用旧值 → 一律判 validation_failed）。
+    payload = dict(payload)
+    payload["params"] = dict(params or {})
     verification = validate_output(m, dataset, payload)
     outs: list[ValidatedOutput] = []
     for i, o in enumerate(payload.get("outputs") or []):

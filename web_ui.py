@@ -5647,6 +5647,278 @@ def _post_plan_confirm(self, p, body, admin):
             return self._json({"error": "Redis 写入失败，无法确认计划"}, 503)
         return self._json({"status": "ok"})
 
+def _analysis_workbench(tid: str) -> dict:
+    """分析工作台状态（K3）：可用模型 + 允许改的假设 + 现有运行（含输入是否可复算）。
+
+    只读、确定性、不调模型：页面据此渲染"分析卡 → 改假设 → 复算 → 对比 → 采纳 → 导出"。
+    """
+    from workspace import task_workspace
+    ws = task_workspace(tid)
+    out: dict = {"task_id": tid, "ok": False, "reason": "",
+                 "models": [], "runs": [], "inputs": {}, "cards": []}
+    try:
+        from financial_analysis import registry as _reg
+        from financial_analysis import store as fa_store
+    except Exception as exc:                        # noqa: BLE001 - 分析包不可用
+        out["reason"] = f"分析包不可用：{str(exc)[:120]}"
+        return out
+    inputs = fa_store.load_inputs(ws)
+    out["inputs"] = {
+        "present": sorted(fa_store.input_payload_bytes(ws)),
+        "dataset_hash": str((inputs.get("dataset") or {}).get("dataset_hash") or ""),
+        "dataset_source": (inputs.get("context") or {}).get("dataset_source") or {},
+        "contract": (inputs.get("context") or {}).get("contract") or {},
+        "recomputable": bool((inputs.get("dataset") or {}).get("dataset")),
+    }
+    if not out["inputs"]["recomputable"]:
+        out["reason"] = ("该任务没有可复算输入（analysis/dataset.json）："
+                         "先让分析步跑完（分析链会落 dataset/plan/context）")
+    runs = fa_store.load_runs(ws)
+    cards: list[dict] = []
+    for r in runs:
+        mid = str(r.get("model_id") or "")
+        if mid.startswith("ratio:"):
+            continue                                # 比率不进"假设"面板（没有可改的假设）
+        spec = None
+        try:
+            spec = _reg.spec(mid) if hasattr(_reg, "spec") else None
+        except Exception:                           # noqa: BLE001
+            spec = None
+        allowed = {}
+        if spec is not None:
+            for k, v in dict(getattr(spec, "allowed_params", {}) or {}).items():
+                allowed[k] = list(v) if isinstance(v, (tuple, list)) else v
+        item = {
+            "run_id": str(r.get("run_id") or ""),
+            "model_id": mid,
+            "model_version": str(r.get("model_version") or ""),
+            "status": str(r.get("status") or ""),
+            "validation_ok": bool((r.get("validation") or {}).get("ok")),
+            "params": dict(r.get("params") or {}),
+            "allowed_params": allowed,
+            "dataset_hash": str(r.get("dataset_hash") or ""),
+            "outputs": [{"output_id": str(o.get("output_id") or ""),
+                         "metric": str(o.get("metric") or ""),
+                         "label": str(o.get("label") or ""),
+                         "value": o.get("value"), "unit": str(o.get("unit") or ""),
+                         "output_period": str(o.get("output_period") or ""),
+                         "formula": str(o.get("formula") or ""),
+                         "inputs": list(o.get("inputs") or [])}
+                        for o in (r.get("outputs") or ())],
+            "assumptions": list(r.get("assumptions") or ()) if isinstance(
+                r.get("assumptions"), (list, tuple)) else [],
+            "limits": list(r.get("limits") or ()) if isinstance(
+                r.get("limits"), (list, tuple)) else [],
+        }
+        out["runs"].append(item)
+        if item["status"] == fa_store.RunStatus.VALIDATED and item["outputs"]:
+            cards.append({"run_id": item["run_id"], "model_id": mid,
+                          "title": item["outputs"][0].get("label") or mid,
+                          "value": item["outputs"][0].get("value"),
+                          "unit": item["outputs"][0].get("unit"),
+                          "output_id": item["outputs"][0].get("output_id"),
+                          "dataset_hash": item["dataset_hash"],
+                          "params": item["params"]})
+    out["cards"] = cards
+    out["ok"] = bool(out["inputs"]["recomputable"])
+    return out
+
+
+def _get_task_analysis(self, p):
+    """`GET /api/task/<id>/analysis`：分析工作台状态（只读）。"""
+    if not (p.startswith("/api/task/") and p.endswith("/analysis")):
+        return None
+    tid = p[len("/api/task/"):].rsplit("/analysis", 1)[0].strip()
+    if not tid:
+        return self._json({"error": "task_id required"}, 400)
+    if not _task_exists(tid):
+        return self._json({"error": "task not found"}, 404)
+    return self._json(_analysis_workbench(tid))
+
+
+def _post_task_analysis_recompute(self, p, body, admin):
+    """`POST /api/task/<id>/analysis/recompute`：按新假设**确定性复算**（K3）。
+
+    body：`{"model_id": "scenario_sensitivity", "params": {...}}`
+    - 只用**包内/工作区的可复算输入**（`analysis/dataset.json`）；没有输入就 409 + 可行动原因；
+    - 参数只允许该模型 `allowed_params` 里声明过的（越界 400，不做"随手放大假设"）；
+    - **原始观测不可被假设覆盖**：新 run 带新参数 → 新 run_id，旧 run 原样保留；
+    - 复算**不调 LLM**；返回值里 `adopted: false`——新结果不会自动被采纳/批准。
+    """
+    if not (p.startswith("/api/task/") and p.endswith("/analysis/recompute")):
+        return None
+    tid = p[len("/api/task/"):].rsplit("/analysis/recompute", 1)[0].strip()
+    if not tid:
+        return self._json({"error": "task_id required"}, 400)
+    if not _task_exists(tid):
+        return self._json({"error": "task not found"}, 404)
+    body = body if isinstance(body, dict) else {}
+    model_id = str(body.get("model_id") or "").strip()
+    params = dict(body.get("params") or {})
+    if not model_id:
+        return self._json({"error": "需要 model_id"}, 400)
+    if model_id.startswith("ratio:"):
+        return self._json({"error": "比率运行没有可改的假设，不在复算范围内"}, 400)
+    from workspace import task_workspace
+    from financial_analysis import registry as _reg
+    from financial_analysis import store as fa_store
+    ws = task_workspace(tid)
+    if not (fa_store.input_payload_bytes(ws).get("analysis/dataset.json")):
+        return self._json({"error": "该任务没有可复算输入（analysis/dataset.json）："
+                                    "先让分析步跑完", "code": "no_inputs"}, 409)
+    try:
+        spec = _reg.spec(model_id)
+    except Exception:                               # noqa: BLE001 - 未注册模型
+        return self._json({"error": f"未注册模型：{model_id}", "code": "unknown_model"}, 400)
+    try:
+        ds = fa_store.dataset_from_inputs(ws)
+    except Exception as exc:                        # noqa: BLE001
+        return self._json({"error": f"包内数据集不可还原：{str(exc)[:140]}"}, 409)
+    allowed = dict(getattr(spec, "allowed_params", {}) or {})
+    bad = [k for k in params if k not in allowed]
+    if bad:
+        return self._json({"error": f"参数不在允许集合内：{bad}",
+                           "allowed": {k: (list(v) if isinstance(v, (tuple, list)) else v)
+                                       for k, v in allowed.items()},
+                           "code": "bad_params"}, 400)
+    # 声明了范围的参数**在此处就拦**：越界是请求错误（400）；算子层的"不适用"留给
+    # 数据本身不适用的情形（两者含义不同，不能混成一个 200）
+    out_of_range = []
+    for k, v in params.items():
+        rng = allowed.get(k)
+        if isinstance(rng, (tuple, list)) and len(rng) == 2 \
+                and all(isinstance(x, (int, float)) for x in rng):
+            try:
+                fv = float(v)
+            except (TypeError, ValueError):
+                out_of_range.append({"param": k, "value": v, "allowed": list(rng)})
+                continue
+            if fv < float(rng[0]) or fv > float(rng[1]):
+                out_of_range.append({"param": k, "value": fv, "allowed": list(rng)})
+    if out_of_range:
+        return self._json({"error": f"参数超出允许范围：{out_of_range}",
+                           "code": "params_out_of_range"}, 400)
+    import financial_analysis as fa
+    before = None
+    for r in reversed(fa_store.load_runs(ws)):
+        if str(r.get("model_id")) == model_id and str(r.get("status")) == fa.RunStatus.VALIDATED:
+            before = r
+            break
+    run = fa.run(model_id, ds, params=params)
+    if run.status != fa.RunStatus.VALIDATED:
+        return self._json({
+            "ok": False, "adopted": False, "model_id": model_id,
+            "status": run.status, "reason": run.reason,
+            "message": ("这份输入下该模型不适用/缺输入：不给结论（说明里写了原因），"
+                        "也不落盘为已验证运行"),
+        }, 200)
+    fa_store.save_run(ws, run)
+    after = run.as_dict()
+    diff: list[dict] = []
+    # 跨运行比对要按**指标**匹配：`output_id` 里带 run_id 前缀，两次运行的 output_id
+    # 必然不同——按 id 比会把"前后"全判成新增（K3 实机读数为 None）
+    _before_out = {str(o.get("metric") or o.get("output_id")): o
+                   for o in ((before or {}).get("outputs") or ())}
+    for o in after.get("outputs") or ():
+        b = _before_out.get(str(o.get("metric") or o.get("output_id")))
+        if b is None:
+            diff.append({"output_id": o.get("output_id"), "metric": o.get("metric"),
+                         "before": None, "after": o.get("value"), "unit": o.get("unit"),
+                         "delta": None})
+            continue
+        try:
+            delta = round(float(o.get("value")) - float(b.get("value")), 2)
+        except (TypeError, ValueError):
+            delta = None
+        diff.append({"output_id": o.get("output_id"), "metric": o.get("metric"),
+                     "label": o.get("label"),
+                     "before": b.get("value"), "after": o.get("value"),
+                     "unit": o.get("unit"), "delta": delta,
+                     "base_output_id": b.get("output_id")})
+    return self._json({
+        "ok": True, "adopted": False, "model_id": model_id,
+        "run_id": run.run_id, "status": run.status,
+        "params": params, "base_params": dict((before or {}).get("params") or {}),
+        "base_run_id": str((before or {}).get("run_id") or ""),
+        "dataset_hash": ds.dataset_hash, "diff": diff,
+        "outputs": [{"output_id": o.get("output_id"), "metric": o.get("metric"),
+                     "value": o.get("value"), "unit": o.get("unit"),
+                     "output_period": o.get("output_period")} for o in (after.get("outputs") or ())],
+        "note": ("复算结果是一条**新运行**（旧运行原样保留）；采纳前不得进交付正文。"
+                 "计算核心零模型调用"),
+    })
+
+
+def _post_task_analysis_adopt(self, p, body, admin):
+    """`POST /api/task/<id>/analysis/adopt`：把某条**已验证**复算运行采纳进交付（K3）。
+
+    采纳 = 用**同一条装配路径**（`assemble_and_verify`）重新装配当前正文：分析卡由代码
+    从工作区的已验证运行生成，因此采纳后正文/清单/导出指向同一次运行（同版可复算）。
+    新版本**不继承**旧版本的人工批准与验收（沿用既有版本纪律）；失败方向：装配异常 →
+    200 但状态为草稿（不掩盖部分更新）。
+    """
+    if not (p.startswith("/api/task/") and p.endswith("/analysis/adopt")):
+        return None
+    tid = p[len("/api/task/"):].rsplit("/analysis/adopt", 1)[0].strip()
+    if not tid:
+        return self._json({"error": "task_id required"}, 400)
+    if not _task_exists(tid):
+        return self._json({"error": "task not found"}, 404)
+    body = body if isinstance(body, dict) else {}
+    run_id = str(body.get("run_id") or "").strip()
+    from workspace import task_workspace
+    from financial_analysis import store as fa_store
+    ws = task_workspace(tid)
+    runs = {str(r.get("run_id")): r for r in fa_store.load_runs(ws)}
+    if run_id and run_id not in runs:
+        return self._json({"error": "该 run 不存在", "code": "unknown_run"}, 404)
+    if run_id and str(runs[run_id].get("status")) != "validated":
+        return self._json({"error": "未通过验证的运行不得采纳",
+                           "status": runs[run_id].get("status")}, 409)
+    _wb = _analysis_workbench(tid)
+    if not _wb.get("ok"):
+        return self._json({"error": _wb.get("reason") or "没有可复算输入",
+                           "code": "no_inputs"}, 409)
+    import task_state as _ts
+    row = _ts.read_task(tid) or {}
+    goal = str(row.get("goal") or "")
+    try:
+        from delivery_pipeline import assemble_and_verify, read_wrapper
+        from report_version import VersionStore
+        store = VersionStore(ws, tid)
+        current = store.adopted()
+        if current is None:
+            return self._json({"error": "该任务没有可采纳的交付版本"}, 409)
+        body_text = str(current.body or "")
+        _delivered = (_get_task_report_data(tid) or {}).get("report") or ""
+        wrapper, wrapper_source = read_wrapper(tid, _delivered, body_text)
+        asm = assemble_and_verify(tid, goal, body_text, wrapper=wrapper,
+                                  project=str(row.get("project") or "default") or "default",
+                                  accept_fn=self._accept_fn_for(tid, goal))
+        status = str(asm.get("status") or "")
+        return self._json({
+            "ok": True, "adopted_run": run_id or "（按工作区已验证运行）",
+            "delivery_status": status,
+            "reason": str(asm.get("reason") or ""),
+            "report_version_id": str(asm.get("report_version_id") or ""),
+            "packages": _pkg_statuses_for(tid),
+            "note": "采纳后正文/清单/导出指向同一次运行；新版本不继承旧批准",
+        })
+    except Exception as exc:                        # noqa: BLE001 - 如实报错，不假装成功
+        logger.warning("分析结果采纳失败（task=%s）：%s", tid, str(exc)[:160])
+        return self._json({"error": f"采纳失败：{str(exc)[:160]}"}, 500)
+
+
+def _pkg_statuses_for(tid: str) -> dict:
+    """包身份块（页面/采纳返回值共用；判不出就空块）。"""
+    try:
+        import delivery_pipeline as _dp
+        from workspace import task_workspace
+        return _dp.package_statuses(tid, ws_dir=task_workspace(tid))
+    except Exception:                               # noqa: BLE001
+        return {"packages": [], "current": "", "has_current": False}
+
+
 def _post_task_review_edit(self, p, body, admin):
     """人工复核后的**修订版**：落成新版本 → 对实际采用正文重验 → **重新装配交付**。
 
@@ -7389,6 +7661,7 @@ _GET_ROUTES = [
     (lambda self, p: p.startswith("/api/conversations/"), _get_conversation_detail),
     (lambda self, p: p.startswith("/api/share/"), _get_share_data),
     (lambda self, p: p.startswith("/share/"), _get_share_page),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/analysis"), _get_task_analysis),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/candidate/preview"), _get_task_candidate_preview),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/candidate"), _get_task_candidate),
     (lambda self, p: p.startswith("/task/") and p.endswith("/report"), _get_task_report),
@@ -7400,6 +7673,8 @@ _POST_ROUTES = [
     (lambda self, p: self.path == "/api/deliverable/run", _post_deliverable_run),
     (lambda self, p: self.path == "/task", _post_task),
     (lambda self, p: self.path == "/api/memory/delete", _post_memory_delete),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/analysis/recompute"), _post_task_analysis_recompute),
+    (lambda self, p: p.startswith("/api/task/") and p.endswith("/analysis/adopt"), _post_task_analysis_adopt),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/review/edit"), _post_task_review_edit),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/material"), _post_task_material),
     (lambda self, p: p.startswith("/api/task/") and p.endswith("/candidate/adopt"), _post_task_candidate_adopt),

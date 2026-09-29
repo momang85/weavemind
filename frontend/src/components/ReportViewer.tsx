@@ -33,6 +33,7 @@ import {
 } from 'lucide-react'
 import { WorkingPaperPanel } from './WorkingPaperPanel'
 import ResearchBriefPanel from './ResearchBriefPanel'
+import AnalysisWorkbenchPanel from './AnalysisWorkbenchPanel'
 
 /* ===================== 报告结构化解析（纯函数，无新增依赖） ===================== */
 
@@ -1093,6 +1094,10 @@ th,td{border:1px solid #ddd;padding:8px;text-align:left} th{background:#16213e;c
 
       {/* F3-B：研究简报面板——关键发现 → 缺口 → 证据 → 修改/重验 → 导出版本绑定。
           放在正文之前：金融读者先看结论与缺口，再决定要不要改、怎么导。 */}
+      <AnalysisWorkbenchPanel
+        taskId={report.taskId || null}
+        onAdopted={() => { if (report.taskId) void reloadTask(report.taskId) }}
+      />
       <ResearchBriefPanel
         taskId={report.taskId}
         research={report.research}

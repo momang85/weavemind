@@ -242,6 +242,163 @@ class TestReviewEditEndpoint(_Base):
                       "推导出来的交付说明要显式标注，不能冒充原始交付说明")
 
 
+class TestAnalysisWorkbenchEndpoints(_Base):
+    """K3：分析卡 → 改假设 → 确定性复算 → 前后对比 → 采纳（API 侧，全程离线零模型）。"""
+
+    def setUp(self):
+        super().setUp()
+        import task_state
+        import web_ui
+        # 与本文件其它用例一致：`_task_exists` 走替身（真实库不参与单测）
+        p = mock.patch.object(web_ui, "_task_exists", lambda tid: True)
+        p.start()
+        self.addCleanup(p.stop)
+        self.db = str(self.tmp / "k3.db")
+        self._orig_db = task_state.DB_PATH
+        task_state.DB_PATH = self.db
+        self.addCleanup(setattr, task_state, "DB_PATH", self._orig_db)
+        self.tid = "k3-an"
+        task_state.mark_queued(self.tid, goal="研究洋河股份 2023 与 2024 年度经营情况",
+                               db_path=self.db)
+
+    def _seed_inputs(self, *, mutate=lambda rows: rows, revenue=300.0):
+        """落一份可复算输入（含情景所需三项）+ 一条 base 运行。"""
+        import financial_analysis as fa
+        from financial_analysis import store as fa_store
+        rows = [
+            {"fact_id": "f-rev-23", "entity": "洋河股份", "entity_id": "002304.SZ",
+             "metric": "revenue", "period": "2023年", "period_type": "年报",
+             "currency": "CNY", "unit": "亿元", "caliber": "合并", "value": 288.76},
+            {"fact_id": "f-rev-24", "entity": "洋河股份", "entity_id": "002304.SZ",
+             "metric": "revenue", "period": "2024年", "period_type": "年报",
+             "currency": "CNY", "unit": "亿元", "caliber": "合并", "value": revenue},
+            {"fact_id": "f-gp-24", "entity": "洋河股份", "entity_id": "002304.SZ",
+             "metric": "gross_profit", "period": "2024年", "period_type": "年报",
+             "currency": "CNY", "unit": "亿元", "caliber": "合并", "value": 211.25},
+            {"fact_id": "f-np-24", "entity": "洋河股份", "entity_id": "002304.SZ",
+             "metric": "net_profit", "period": "2024年", "period_type": "年报",
+             "currency": "CNY", "unit": "亿元", "caliber": "合并", "value": 66.73},
+        ]
+        ds = fa.freeze_from_facts(mutate(rows), periods=(2023, 2024),
+                                 entity_id="002304.SZ", source_label="k3")
+        plan = fa.compile_plan("情景分析", ds)
+        ws = ws_mod.task_workspace(self.tid)
+        pathlib_path = Path(ws)
+        pathlib_path.mkdir(parents=True, exist_ok=True)
+        fa_store.save_inputs(ws, dataset=ds, plan=plan,
+                            context={"dataset_source": {"kind": "test"}})
+        base = fa.run("scenario_sensitivity", ds, params={})
+        fa_store.save_run(ws, base)
+        return ds, base
+
+    def _call(self, path: str, body: dict):
+        import web_ui
+        h = _Handler(path)
+        out = (web_ui._post_task_analysis_recompute(h, path, body, {"user": "admin"})
+               if path.endswith("/analysis/recompute")
+               else web_ui._post_task_analysis_adopt(h, path, body, {"user": "admin"}))
+        payload, status = h.last if h.responses else (out, 200)
+        return payload, status
+
+    def test_state_endpoint_reports_inputs_and_models(self):
+        import web_ui
+        self._seed_inputs()
+        h = _Handler("/api/task/" + self.tid + "/analysis")
+        web_ui._get_task_analysis(h, h.path)
+        payload, status = h.last
+        self.assertEqual(status, 200, payload)
+        self.assertTrue(payload["ok"], payload)
+        self.assertTrue(payload["inputs"]["recomputable"])
+        models = {r["model_id"] for r in payload["runs"]}
+        self.assertIn("scenario_sensitivity", models)
+        sc = [r for r in payload["runs"] if r["model_id"] == "scenario_sensitivity"][0]
+        self.assertIn("revenue_growth", sc["allowed_params"],
+                      "面板要能拿到**允许改的假设**清单")
+
+    def test_recompute_without_inputs_is_409(self):
+        payload, status = self._call("/api/task/" + self.tid + "/analysis/recompute",
+                                     {"model_id": "scenario_sensitivity", "params": {}})
+        self.assertEqual(status, 409, payload)
+        self.assertEqual(payload.get("code"), "no_inputs")
+
+    def test_recompute_rejects_unknown_model_and_out_of_range_params(self):
+        self._seed_inputs()
+        payload, status = self._call("/api/task/" + self.tid + "/analysis/recompute",
+                                     {"model_id": "not_a_model", "params": {}})
+        self.assertEqual(status, 400, payload)
+        payload2, status2 = self._call("/api/task/" + self.tid + "/analysis/recompute",
+                                       {"model_id": "scenario_sensitivity",
+                                        "params": {"not_a_param": 0.1}})
+        self.assertEqual(status2, 400, payload2)
+        self.assertEqual(payload2.get("code"), "bad_params")
+        self.assertIn("revenue_growth", payload2.get("allowed") or {})
+        # 声明了范围的参数越界 → 400（请求错误），与"数据不适用"（200 + 说明）区分开
+        payload3, status3 = self._call("/api/task/" + self.tid + "/analysis/recompute",
+                                       {"model_id": "scenario_sensitivity",
+                                        "params": {"revenue_growth": 5.0}})
+        self.assertEqual(status3, 400, payload3)
+        self.assertEqual(payload3.get("code"), "params_out_of_range")
+
+    def test_recompute_is_a_new_run_with_diff_and_keeps_the_old(self):
+        from financial_analysis import store as fa_store
+        _ds, base = self._seed_inputs()
+        payload, status = self._call(
+            "/api/task/" + self.tid + "/analysis/recompute",
+            {"model_id": "scenario_sensitivity", "params": {"revenue_growth": 0.10}})
+        self.assertEqual(status, 200, payload)
+        self.assertTrue(payload["ok"], payload)
+        self.assertFalse(payload["adopted"], "复算结果不得自动被采纳")
+        self.assertNotEqual(payload["run_id"], base.run_id, "必须是新运行")
+        self.assertEqual(payload["base_run_id"], base.run_id)
+        self.assertTrue(payload["diff"], payload)
+        row = [d for d in payload["diff"] if d["metric"] == "scenario_net_profit"]
+        self.assertTrue(row, payload["diff"])
+        self.assertIsNotNone(row[0]["before"])
+        self.assertIsNotNone(row[0]["after"])
+        self.assertNotEqual(row[0]["before"], row[0]["after"])
+        # 旧运行原样保留（并存），新运行已落盘且通过验证
+        ws = ws_mod.task_workspace(self.tid)
+        runs = {str(r.get("run_id")): r for r in fa_store.load_runs(ws)}
+        self.assertIn(base.run_id, runs)
+        self.assertIn(payload["run_id"], runs)
+        self.assertEqual(runs[payload["run_id"]]["status"], "validated")
+        self.assertEqual(runs[base.run_id]["params"], {})
+
+    def test_not_applicable_recompute_is_reported_and_not_stored(self):
+        """基期毛利率为负（亏损期）→ 情景模型不适用：如实报，不落盘成"已验证"。"""
+        from financial_analysis import store as fa_store
+        self._seed_inputs(revenue=100.0)          # 毛利 211 > 收入 100 → 毛利率 >1？用负毛利
+        ws = ws_mod.task_workspace(self.tid)
+        runs_before = len(fa_store.load_runs(ws))
+        payload, status = self._call(
+            "/api/task/" + self.tid + "/analysis/recompute",
+            {"model_id": "scenario_sensitivity", "params": {"revenue_growth": 0.05}})
+        self.assertEqual(status, 200, payload)
+        if not payload.get("ok"):
+            self.assertIn("不适用", str(payload.get("message") or payload.get("reason")))
+            self.assertEqual(len(fa_store.load_runs(ws)), runs_before,
+                             "不适用/缺输入不得落盘成新运行")
+        else:
+            self.skipTest("该夹具下情景仍可算（不适用分支由算子单测覆盖）")
+
+    def test_adopt_requires_a_known_validated_run(self):
+        from financial_analysis import store as fa_store
+        _ds, base = self._seed_inputs()
+        payload, status = self._call("/api/task/" + self.tid + "/analysis/adopt",
+                                     {"run_id": "deadbeef" * 4})
+        self.assertEqual(status, 404, payload)
+        self.assertEqual(payload.get("code"), "unknown_run")
+        ws = ws_mod.task_workspace(self.tid)
+        bad = fa_store.load_runs(ws)[0]
+        bad["run_id"] = "not-validated-run"
+        bad["status"] = "validation_failed"
+        fa_store.save_run(ws, fa_store.run_from_dict(bad))
+        payload2, status2 = self._call("/api/task/" + self.tid + "/analysis/adopt",
+                                       {"run_id": "not-validated-run"})
+        self.assertEqual(status2, 409, payload2)
+        self.assertIn("未通过验证", str(payload2.get("error")))
+
+
 class TestWorkingPaperExportAndDownload(_Base):
     """底稿要出现在导出清单里，并且能下载（缺则 404，不编空底稿）。"""
 

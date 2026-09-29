@@ -133,6 +133,41 @@ class TestStatusSemanticsUnified(unittest.TestCase):
         self.assertEqual(bad, [], f"直接渲染了状态枚举原文：{bad[:8]}")
 
 
+class TestK3AnalysisWorkbenchWiring(unittest.TestCase):
+    """K3：页面上的"改假设 → 复算 → 对比 → 采纳 → 导出"必须真的接在那两条接口上。
+
+    只查源文本是**必要不充分**（真实交互由后端接口用例覆盖）；这里挡住的是最容易回退的
+    三类：面板不在任务页、面板没调接口、导出绕过"与采纳稿同版"的当前包。
+    """
+
+    PANEL = SRC / "components" / "AnalysisWorkbenchPanel.tsx"
+    VIEWER = SRC / "components" / "ReportViewer.tsx"
+
+    def test_panel_exists_and_is_rendered_on_the_task_page(self):
+        self.assertTrue(self.PANEL.is_file(), "缺少分析工作台面板")
+        viewer = self.VIEWER.read_text(encoding="utf-8")
+        self.assertIn("AnalysisWorkbenchPanel", viewer, "任务页没有挂载分析工作台")
+        self.assertIn("<AnalysisWorkbenchPanel", viewer)
+
+    def test_panel_calls_the_recompute_and_adopt_endpoints(self):
+        src = self.PANEL.read_text(encoding="utf-8")
+        self.assertIn("/analysis/recompute", src, "面板没有接确定性复算接口")
+        self.assertIn("/analysis/adopt", src, "面板没有接显式采纳接口")
+        self.assertIn("/analysis`", src, "面板没有读分析状态（可用模型与允许改的假设）")
+
+    def test_panel_states_the_three_disciplines(self):
+        src = self.PANEL.read_text(encoding="utf-8")
+        # 原始观测不可被假设覆盖 / 复算结果不自动采纳 / 不适用如实显示
+        self.assertIn("新运行", src)
+        self.assertIn("尚未采纳", src)
+        self.assertIn("不适用", src)
+
+    def test_export_uses_the_current_package_not_the_newest(self):
+        src = self.PANEL.read_text(encoding="utf-8")
+        self.assertIn("current_package", src,
+                      "导出必须用「与采纳稿同版」的当前包（不得取最新 zip）")
+
+
 class TestDemoBoundaryRealBehavior(unittest.TestCase):
     """演示边界必须由**真实行为测试**兜底，前缀清单只是补充。
 
