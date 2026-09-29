@@ -1,35 +1,27 @@
 # -*- coding: utf-8 -*-
-"""年报 PDF 正文里的**财务表**抽取：主要会计数据 / 三张报表 → 可入账的事实行。
+"""年报 PDF 正文里的**财务报表行** → 候选观察（语义准入 A0 修正版）。
 
-为什么要有它：检索/取件拿到的是**形态各不相同**的年报正文（排版、换行、单位标注、
-列顺序都随公司与年度变），而分析链要的是"同一主体、同一期间、同一口径"的结构化事实。
-这里只做一件事：把**能确定的**读出来，确定不了就**明确拒绝**（不猜、不取近似）。
+设计原则（09-29 架构纠偏 A0）：**候选观察必须带证据**，拿不到证据就拒绝。
+上一版把"能抽出数"当成功，结果制造了四类真实污染：
 
-能容忍的形态（都用真实年报片段做过用例）：
-- 标签跨行（`归属于上市公司股东的净利润` + 下一行 `（元）`）、数字另起一行；
-- 千分位、负号前置、**括号负数** `(1,234.56)`、全角数字、破折号 `—`/`-` 表示"无"；
-- 单位标注 `单位：元 / 万元 / 千元`，并按标注**显式换算**（不是默认元）；
-- 表头 `本年比上年增减 / 增减 / 备注 / 同比` 这类**非数值列**可出现在任意位置；
-- 指标别名（`营业收入/营业总收入`、`归属于上市公司股东的净利润/归属于母公司所有者的净利润`…）。
+1. **跨口径补齐**：2020 应收账款取母公司 18,600,000 却写"合并"（2019 是合并 1,966,154,875.23）；
+2. **表性质丢失**：2020 存货 680,900,264.45 取自 2020-01-01 **会计政策调整表**，被当成 2020 年末；
+3. **前缀误吞**：`营业收入扣除金额/扣除后金额` 被当前缀"营业收入"，与真实收入冲突后整项删除；
+4. **补造元数据**：单位默认"元"、币种硬写 CNY、口径硬写"合并"、`fact_id` 全空。
 
-已知边界（本批实测，**默认关闭**）：`期末余额/期初余额` 式表头的**远距离**锚定会把附注表
-误认成报表（京蓝 2020 应付账款差 ~2680 倍）→ `allow_anchor` 默认 False，需显式开启并自担风险。
-
-明确拒绝（宁可没有）：
-- 表头解析不出**两个及以上**期间 → `no_periods`；
-- 行内数字个数与表头数值列不匹配 → `column_mismatch`；
-- 同一指标在**多处**出现且数值不同 → `conflicting`（不选"看起来更对"的那个）；
-- 数字出现在**注释/说明句**里而不是表格行 → 不认（要求行首是指标名）。
+现在每一条候选观察都必须能回答：**哪张表（表名/表性质）、哪一列（期间）、什么单位（表头标注）、
+什么币种（单位证据）、什么口径（表名里的合并/母公司）**；任一项拿不出证据 → 该行拒绝，
+拒绝原因带**源定位**（PDF 页码 + 表名 + 原标签 + 原单元格文本）。
 """
 from __future__ import annotations
 
 import re
 from decimal import Decimal, InvalidOperation
 
-# ── 指标词表：别名 → 内部 slug（同一 slug 的多个别名取"第一次出现的可解析行"）──
-ALIASES: dict[str, tuple[str, ...]] = {
+# ── 指标词表：**完整标签**匹配（前缀相同但语义不同的行必须排除）────────────────
+LABELS: dict[str, tuple[str, ...]] = {
     "revenue": ("营业收入", "营业总收入"),
-    "operating_cost": ("营业成本", "营业总成本"),
+    "operating_cost": ("营业成本",),
     "net_profit": ("归属于上市公司股东的净利润", "归属于母公司所有者的净利润",
                    "归属于母公司股东净利润", "归母净利润"),
     "operating_cashflow": ("经营活动产生的现金流量净额", "经营活动现金流量净额"),
@@ -39,25 +31,48 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "inventory": ("存货",),
     "accounts_payable": ("应付账款",),
 }
-# 只用**主要会计数据**表取的头条指标（三张报表里也会出现同名行，值应一致；不一致时报冲突）
-HEADLINE = ("revenue", "net_profit", "operating_cashflow")
-# 表优先级：同一 (指标, 期间) 在多张表里出现时，**只用优先表**的值，并把分歧记进
-# `cross_table_conflicts`（可见，不静默择大/平均）。主要会计数据是发行人自己的口径声明表。
-TABLE_PRIORITY = {"主要会计数据": 0, "合并利润表": 1, "合并资产负债表": 1,
-                  "合并现金流量表": 1, "母公司利润表": 3, "母公司资产负债表": 3,
-                  "母公司现金流量表": 3, "报表": 2}
-_DEFAULT_PRIORITY = 2
+# 标签后缀出现这些词 → 不是我们要的那个指标（扣除项/占比/账龄/减值/其中…）
+LABEL_REJECT_WORDS = (
+    "扣除", "扣除后", "占比", "比例", "账龄", "坏账", "跌价", "减值", "其中", "明细",
+    "前五名", "合计的", "账面价值", "账面余额", "周转", "天数", "变动", "增减", "同比",
+    "本期增加", "本期减少", "期初", "分季度", "第一季度", "第二季度",
+    "第三季度", "第四季度", "上年同期", "行业", "地区", "产品", "客户", "供应商",
+)
+# 可以出现在标签后缀里的中性内容（单位/括号/冒号/空白）
+_LABEL_TAIL_OK = re.compile(r"^[\s:：()（）\[\]【】、,，.。]*(?:元|万元|千元|百万元|美元|港元|"
+                            r"人民币|股|/股|附注|注|注释)?[\s:：()（）\[\]【】、,，.。]*$")
 
-# 非数值列标记（表头里出现即视为"不是期间列"）
-_NON_VALUE_HEADERS = ("增减", "同比", "变动", "备注", "说明", "比例", "%")
+# ── 表名 → (表性质, 口径) ──────────────────────────────────────────────────
+STATEMENT_TITLES: dict[str, tuple[str, str]] = {
+    "主要会计数据和财务指标": ("主要会计数据", "合并"),
+    "主要会计数据": ("主要会计数据", "合并"),
+    "合并资产负债表": ("合并资产负债表", "合并"),
+    "合并利润表": ("合并利润表", "合并"),
+    "合并现金流量表": ("合并现金流量表", "合并"),
+    "母公司资产负债表": ("母公司资产负债表", "母公司"),
+    "母公司利润表": ("母公司利润表", "母公司"),
+    "母公司现金流量表": ("母公司现金流量表", "母公司"),
+}
+_NUM_TITLE_RE = re.compile(r"^\d+[、.．]\s*\S+")
+_TITLE_RE = re.compile(r"^(\d+)[、.．]\s*([^\s，。]{2,20}(?:资产负债表|利润表|现金流量表))")
+# 明确**不是**报表的表（政策调整/追溯调整/分部/季度摘要），行宁愿不取
+NOT_A_STATEMENT_RE = re.compile(r"会计政策(变更|调整)|追溯调整|前期差错|分部|季度|半年度")
+
+# ── 单位/币种证据 ─────────────────────────────────────────────────────────
+_UNIT_LINE_RE = re.compile(r"单位\s*[:：]\s*(元|万元|千元|百万元|美元|港元)")
+_CURRENCY_BY_UNIT = {"元": "CNY", "万元": "CNY", "千元": "CNY", "百万元": "CNY",
+                     "美元": "USD", "港元": "HKD"}
+_UNIT_SCALE = {"元": Decimal(1), "千元": Decimal(1000), "万元": Decimal(10000),
+               "百万元": Decimal(1000000), "美元": Decimal(1), "港元": Decimal(1)}
+
 _NUM_RE = re.compile(r"[（(]?-?\d[\d,，]*(?:\.\d+)?[)）]?")
-_DECIMAL_RE = re.compile(r"\d[\d,，]*\.\d")   # 数据行特征：带小数的金额
-_UNIT_LINE_RE = re.compile(r"单位\s*[:：]\s*(元|万元|千元|百万元)")
+_DECIMAL_RE = re.compile(r"\d[\d,，]*\.\d")
+_DASHES = ("—", "-", "－", "不适用", "无", "")
 _FULLWIDTH = str.maketrans("０１２３４５６７８９．－，（）", "0123456789.-,()")
-_TABLE_TITLE_RE = re.compile(r"^\d+[、.．]\s*\S*(资产负债表|利润表|现金流量表|所有者权益变动表)")
-_CLOSING_OPENING_RE = re.compile(r"期末余额?\s+期初余额?|期初余额?\s+期末余额?|年末余额?\s+年初余额?")
 _PAGE_NOISE = re.compile(
     r"^(京蓝科技股份有限公司|[^\n]{0,30}股份有限公司)?\s*\d{4}\s*年年度报告全文$|^\d{1,3}$")
+_DATE_SPAN_RE = re.compile(r"(?:19|20)\d{2}\s*年(?:\s*\d{1,2}\s*月)?(?:\s*\d{1,2}\s*日)?"
+                           r"|[（(]?\d{4}[-/.]\d{1,2}[-/.]\d{1,2}[)）]?")
 
 
 def norm_lines(text: str) -> list[str]:
@@ -71,10 +86,36 @@ def norm_lines(text: str) -> list[str]:
     return out
 
 
+def page_of(doc: dict, offset: int) -> int:
+    """字符偏移 → **PDF 页码**（用 `page_offsets` 反查；查不到返回 0）。
+
+    清洗后的"正文第 N 行"不能冒充页码：定位必须能回到原件。
+    """
+    page = 0
+    for pos, pno in (doc.get("page_offsets") or []):
+        if int(pos) <= int(offset):
+            page = int(pno)
+        else:
+            break
+    return page
+
+
+def line_offset(doc: dict, lines: list[str], idx: int) -> int:
+    """逻辑行 → 原文字符偏移（用于反查页码）。"""
+    text = str(doc.get("text") or "")
+    probe = lines[idx][:40]
+    if not probe:
+        return 0
+    found = text.find(probe)
+    if found >= 0:
+        return found
+    return sum(len(x) + 1 for x in lines[:idx])
+
+
 def parse_number(tok: str):
     """数字 token → `Decimal`；`—`/`-`/空 → `None`（表示"无"，**不是 0**）。"""
     s = str(tok or "").translate(_FULLWIDTH).strip()
-    if s in ("", "—", "-", "－", "不适用", "无"):
+    if s in _DASHES:
         return None
     neg = False
     if s.startswith("(") and s.endswith(")"):
@@ -89,360 +130,283 @@ def parse_number(tok: str):
     return -v if neg else v
 
 
-_NUM_FRAGMENT_RE = re.compile(r"^[\d.,]+(?:\s|$)")
-_DATE_SPAN_RE = re.compile(r"(?:19|20)\d{2}\s*年(?:\s*\d{1,2}\s*月)?(?:\s*\d{1,2}\s*日)?"
-                           r"|[（(]?\d{4}[-/.]\d{1,2}[-/.]\d{1,2}[)）]?")
-
-
-def _date_spans(line: str) -> list[tuple[int, int]]:
-    return [m.span() for m in _DATE_SPAN_RE.finditer(line)]
-
-
 def numbers_in(line: str) -> list[Decimal]:
-    """行里的**金额**数字（排除百分比列与日期里的数字）。
-
-    为什么必须排除百分比：主要会计数据表的列序是
-    `2020 年 | 2019 年 | 本年比上年增减 | 2018 年`，增减列是 `-47.65%`。
-    把它当金额会**整列错位**（2018 拿到 -47.65）——而错位的数看不出来，只能靠排除。
-    日期（`2019 年 2 月 25 日`）同理：那是说明文字里的时间，不是本期金额。
-    """
+    """行里的**金额**数字（排除百分比列与日期里的数字）。"""
     out: list[Decimal] = []
-    spans = _date_spans(line)
+    spans = [m.span() for m in _DATE_SPAN_RE.finditer(line)]
     for m in _NUM_RE.finditer(line):
         if any(a <= m.start() < b for a, b in spans):
-            continue                                  # 日期整段里的数字
-        tail = line[m.end():m.end() + 1]
-        if tail == "%":
-            continue                                  # 比率列
-        head = line[max(0, m.start() - 1):m.start()]
+            continue
+        if line[m.end():m.end() + 1] == "%":
+            continue
         tok = m.group(0)
+        head = line[max(0, m.start() - 1):m.start()]
+        tail = line[m.end():m.end() + 1]
         if re.fullmatch(r"(19|20)\d{2}", tok) and (tail in ("年", "-", "/", ".") or head == "年"):
-            continue                                  # 年份/日期片段
+            continue
         v = parse_number(tok)
         if v is not None:
             out.append(v)
     return out
 
 
-def _is_value_header(cell: str) -> bool:
-    c = str(cell or "")
-    if not c or any(t in c for t in _NON_VALUE_HEADERS):
-        return False
-    return bool(re.search(r"(19|20)\d{2}", c)) or c in ("本期", "上期", "期末", "期初")
+# ── 标签识别（完整语义）────────────────────────────────────────────────────
+def _label_of(line: str) -> tuple[str, str]:
+    """行首标签 → `(slug, 后缀)`；不是指标行返回 `("", "")`。
+
+    只认**最长**别名，且后缀里出现扣除/占比/账龄等语义词一律不算该指标
+    （旧版按前缀匹配，把"营业收入扣除金额"当成营业收入，与真实收入冲突后把整个
+    指标删掉——收入因此从抽取结果里消失）。
+    """
+    s = str(line or "").strip()
+    best_slug, best_name = "", ""
+    for slug, names in LABELS.items():
+        for n in names:
+            if s.startswith(n) and len(n) > len(best_name):
+                best_slug, best_name = slug, n
+    if not best_name:
+        return "", ""
+    tail = s[len(best_name):]
+    # 行文里跟的是数值（`营业收入(元) 995,410,...`）：只对**第一个数字之前**的标签部分
+    # 做语义判断，否则"数值本身"会把合法行判掉。
+    label_part = re.split(r"\d", tail, maxsplit=1)[0]
+    if any(w in label_part for w in LABEL_REJECT_WORDS):
+        return "", ""
+    if not _LABEL_TAIL_OK.match(label_part):
+        return "", ""
+    return best_slug, tail.strip()
+
+
+def _table_at(lines: list[str], idx: int, *, window: int = 200) -> tuple[str, str, str]:
+    """该行所属**报表** → `(表性质, 口径, 表名)`；不是可识别报表返回 `("", "", name)`。
+
+    向上找最近的小节标题（`1、合并资产负债表` 这类编号标题，或"主要会计数据和财务指标"
+    这种节名）。找不到或落在政策调整/附注表里 → 不认（旧版此时落到泛化的"报表"，
+    于是**政策调整表**里的存货被当成 2020 年末）。
+    """
+    for j in range(idx, max(-1, idx - window), -1):
+        line = lines[j]
+        m = _TITLE_RE.match(line)
+        if m:
+            name = m.group(2)
+            if name in STATEMENT_TITLES:
+                kind, caliber = STATEMENT_TITLES[name]
+                return kind, caliber, name
+            return "", "", name
+        for name, (kind, caliber) in STATEMENT_TITLES.items():
+            if name in line:
+                return kind, caliber, name
+        # 普通语义词（追溯调整/分部/季度…）可能属于**别的节**的句子，不据此停；
+        # 但"编号标题 + 非报表"说明已经走出了报表范围 → 停。
+        if _NUM_TITLE_RE.match(line) and NOT_A_STATEMENT_RE.search(line):
+            return "", "", line[:30]
+    return "", "", ""
 
 
 def _header_years(line: str) -> list[str]:
-    """表头行里的期间（年份）序列；**不做分隔符假设**——真实年报里表头常是单空格分隔。"""
+    """表头行里的期间（年份）序列；不做分隔符假设。"""
     s = str(line or "")
     if _DECIMAL_RE.search(s):
-        return []                                     # 有小数金额 → 是数据行，不是表头
+        return []
     ys = re.findall(r"(?<!\d)((?:19|20)\d{2})(?!\d)\s*年?", s)
     if not (2 <= len(ys) <= 6):
         return []
-    # 表头行不该以指标别名开头（那是数据行）
-    return [] if _alias_of(s) else ys
+    return [] if _label_of(s)[0] else ys
 
 
-def find_table(lines: list[str], row_idx: int, *, lookback: int = 14,
-               anchor_year: int | None = None, allow_anchor: bool = False):
-    """在数据行**之前**找最近的一张表头 → `(periods, header_idx, unit)`。
-
-    只往回找：年报的表头在数据行上方；往前找会把下一张表的表头错配到本行。
-
-    两种表头形态都认（"适应不同返回值"）：
-    1. **年份式**：`2020 年 2019 年 本年比上年增减 2018 年`（主要会计数据/利润表常见）；
-    2. **期末/期初式**：`项目 期末余额 期初余额`（资产负债表/现金流量表常见，表头里
-       **没有年份**）。后者按会计惯例映射成 `(报告期, 报告期−1)`，报告期由调用方给的
-       `anchor_year` 锚定（= 文档自身报告期）；**锚不到年份就继续拒绝**（不猜）。
-    """
+def find_header(lines: list[str], row_idx: int, *, lookback: int = 14):
+    """数据行**之前**最近的一张表头 → `(years, header_idx, has_note_col)`。"""
     for i in range(row_idx - 1, max(-1, row_idx - lookback - 1), -1):
         ys = _header_years(lines[i])
-        if not ys and allow_anchor and anchor_year and _CLOSING_OPENING_RE.search(lines[i]) \
-                and not _DECIMAL_RE.search(lines[i]):
-            ys = [f"{int(anchor_year)}", f"{int(anchor_year) - 1}"]
-            _basis = "closing_opening_anchor"
-        else:
-            _basis = "year_header"
-        if not ys:
-            continue
-        unit = "元"
-        for j in range(max(0, i - 3), i + 1):
-            m = _UNIT_LINE_RE.search(lines[j])
-            if m:
-                unit = m.group(1)
-                break
-        if not any(_UNIT_LINE_RE.search(lines[j]) for j in range(max(0, i - 3), i + 1)):
-            # 表头附近没有单位标注：再看数据行本身有没有 `（元）` 这类后缀
-            for j in range(row_idx, min(len(lines), row_idx + 2)):
-                m2 = re.search(r"[（(](元|万元|千元|百万元)[)）]", lines[j])
-                if m2:
-                    unit = m2.group(1)
-                    break
-        return ys, i, unit, _basis
-    # 第二趟：报表主体很长（合并资产负债表从标题到"应付账款"可能隔上百行），
-    # 年份式表头在近处找不到时，允许**远距离**找"期末余额/期初余额"式表头；
-    # 但跨过另一张表的标题（`2、母公司资产负债表`）就停——不能拿别张表的表头。
-    if allow_anchor and anchor_year:
-        for i in range(row_idx - lookback - 1, max(-1, row_idx - 160), -1):
-            line = lines[i]
-            if _TABLE_TITLE_RE.match(line):
-                break
-            if _DECIMAL_RE.search(line) or not _CLOSING_OPENING_RE.search(line):
-                continue
-            unit = "元"
-            for j in range(max(0, i - 3), i + 1):
-                m = _UNIT_LINE_RE.search(lines[j])
-                if m:
-                    unit = m.group(1)
-                    break
-            return ([f"{int(anchor_year)}", f"{int(anchor_year) - 1}"], i, unit,
-                    "closing_opening_anchor")
-    return [], -1, "元", "none"
+        if ys:
+            return ys, i, bool(re.search(r"附注|注\s*[一二三四五六七八九十\d]", lines[i]))
+    return [], -1, False
 
 
-def _unit_scale(unit: str) -> Decimal:
-    return {"元": Decimal(1), "千元": Decimal(1000), "万元": Decimal(10000),
-            "百万元": Decimal(1000000)}.get(str(unit or "元"), Decimal(1))
-
-
-def _alias_of(line: str) -> str:
-    """该行是否以某个指标别名开头 → slug（取**最长**别名，避免"营业收入"吃掉"营业总收入"）。"""
-    s = str(line or "").strip()
-    best = ""
-    for slug, names in ALIASES.items():
-        for n in names:
-            if s.startswith(n) and len(n) > len(best):
-                best = n
-    if not best:
-        return ""
-    for slug, names in ALIASES.items():
-        if best in names:
-            return slug
-    return ""
-
-
-def _strip_alias(line: str) -> str:
-    s = str(line or "").strip()
-    for names in ALIASES.values():
-        for n in names:
-            if s.startswith(n):
-                return s[len(n):].strip()
-    return s
-
-
-def _row_values(lines: list[str], idx: int, want: int) -> tuple[list[Decimal], str]:
-    """取该行的数值：本行不够就去**下一行**补（标签与数字常分行）。
-
-    返回 `(值列表, 用到的原文)`；个数与 `want` 不符时由调用方判 mismatch。
-    """
-    text = lines[idx]
-    # 数字被拆行（`1,279,570,42` 换行后接 `9.23`）：拼起来会得到一个**看不出来的错数**
-    # （127,957,042 而不是 1,279,570,429.23）。宁可拒绝。
-    _nxt = lines[idx + 1] if idx + 1 < len(lines) else ""
-    if re.search(r"\d,\s*$|\d$", text) and _NUM_FRAGMENT_RE.match(_nxt) \
-            and not _alias_of(_nxt) and not _TABLE_TITLE_RE.match(_nxt):
-        return [], f"SPLIT:{text[:60]} | {_nxt[:40]}"
-    vals = numbers_in(_strip_alias(text))
-    used = [text]
-    j = idx
-    while len(vals) < want and j + 1 < len(lines) and j - idx < 2:
-        nxt = lines[j + 1]
-        if _alias_of(nxt):
-            break
-        # 上一行以数字/逗号收尾、下一行以数字开头 → 这是**同一个数被拆行**
-        if re.search(r"[\d,]$", lines[j]) and _NUM_FRAGMENT_RE.match(nxt) \
-                and not _TABLE_TITLE_RE.match(nxt):
-            return [], f"SPLIT:{lines[j][:60]} | {nxt[:40]}"
-        vals += numbers_in(nxt)
-        used.append(nxt)
-        j += 1
-    return vals, " | ".join(used)
-
-
-def _table_of(lines: list[str], idx: int, *, window: int = 60) -> str:
-    """该行属于哪张表（往上找最近的表名标题；找不到归"报表"）。"""
-    for j in range(idx, max(-1, idx - window), -1):
-        for name in ("主要会计数据和财务指标", "主要会计数据", "合并利润表", "合并资产负债表",
-                     "合并现金流量表", "母公司利润表", "母公司资产负债表", "母公司现金流量表"):
-            if name in lines[j]:
-                key = "主要会计数据" if name.startswith("主要会计数据") else name
-                return key
-    return "报表"
+def _unit_evidence(lines: list[str], row_idx: int, header_idx: int):
+    """单位证据 → `(unit, scale, currency)`；无证据 → `(None, None, "")`。"""
+    lo = max(0, (header_idx if header_idx >= 0 else row_idx) - 4)
+    for j in range(row_idx, lo - 1, -1):
+        m = _UNIT_LINE_RE.search(lines[j])
+        if m:
+            u = m.group(1)
+            return u, _UNIT_SCALE.get(u, Decimal(1)), _CURRENCY_BY_UNIT.get(u, "")
+    m2 = re.search(r"[（(](元|万元|千元|百万元|美元|港元)[)）]", lines[row_idx])
+    if m2:
+        u = m2.group(1)
+        return u, _UNIT_SCALE.get(u, Decimal(1)), _CURRENCY_BY_UNIT.get(u, "")
+    return None, None, ""
 
 
 def extract(doc: dict, *, company: str = "", company_code: str = "",
-            periods=(), anchor_year: int | None = None,
-            allow_anchor: bool = False) -> dict:
-    """→ `{ok, unit, facts, rejected:[{metric, reason, detail}], tables, text_hash}`。
-
-    `facts` 每项：`{metric, period, value, unit, currency, caliber, entity, entity_id,
-    source_url, source_hash, locator, quote, table}`（可直接喂
-    `financial_analysis.freeze_from_facts`）。
-    """
+            periods=(), verify_entity: bool = True) -> dict:
+    """→ `{ok, facts, rejected, tables, text_hash, entity_state}`。"""
     import hashlib
+
+    import facts as _fx
 
     lines = norm_lines(doc.get("text"))
     want_periods = [str(p) for p in (periods or ())]
+    title_head = f"{doc.get('title') or ''} {str(doc.get('text') or '')[:2000]}"
+    _co = re.sub(r"(股份有限公司|有限公司|集团|股份|公司)$", "", str(company or "")).strip()
+    entity_state = "verified" if (_co and _co in title_head) else (
+        "no_company_given" if not _co else "unverified")
+    text_hash = hashlib.sha256(str(doc.get("text") or "").encode("utf-8")).hexdigest()
+    if verify_entity and entity_state == "unverified":
+        return {"ok": False, "facts": [], "tables": [],
+                "rejected": [{"metric": "*", "reason": "entity_unverified",
+                              "page": 0, "label": str(doc.get("title"))[:60],
+                              "detail": f"材料里找不到预期主体「{company}」："
+                                        f"标题={str(doc.get('title'))[:60]}"}],
+                "text_hash": text_hash, "entity_state": entity_state, "lines": len(lines)}
+
     facts: list[dict] = []
-    seen: dict[tuple[str, str, str], Decimal] = {}
-    dropped: set = set()
-    cross: list[dict] = []
     rejected: list[dict] = []
     tables: list[dict] = []
-    src_hash = hashlib.sha256(str(doc.get("text") or "").encode("utf-8")).hexdigest()
+
+    def _reject(slug: str, reason: str, idx: int, detail: str) -> None:
+        rejected.append({"metric": slug or "*", "reason": reason,
+                         "page": page_of(doc, line_offset(doc, lines, idx)),
+                         "line": idx, "label": lines[idx][:60], "detail": detail})
 
     i = 0
     while i < len(lines):
-        slug = _alias_of(lines[i])
+        slug, tail = _label_of(lines[i])
         if not slug:
             i += 1
             continue
-        years, hidx, unit, basis = find_table(lines, i, anchor_year=anchor_year,
-                                              allow_anchor=allow_anchor)
+        kind, caliber, table_name = _table_at(lines, i)
+        if not kind:
+            _reject(slug, "table_unrecognized", i,
+                    f"该行不属于可识别报表（最近标题：{table_name or '无'}）："
+                    f"附注表/政策调整表/季度摘要一律不取")
+            i += 1
+            continue
+        years, hidx, has_note = find_header(lines, i)
         if not years:
-            rejected.append({"metric": slug, "reason": "no_periods",
-                             "detail": f"行 {i} 附近找不到含两个及以上期间的表头"})
+            _reject(slug, "no_periods", i, "表头里没有两个及以上年份")
             i += 1
             continue
-        vals, used = _row_values(lines, i, len(years))
-        if used.startswith("SPLIT:"):
-            rejected.append({"metric": slug, "reason": "split_number",
-                             "detail": used[6:]})
+        unit, scale, currency = _unit_evidence(lines, i, hidx)
+        if not unit or not currency:
+            _reject(slug, "no_unit_evidence", i,
+                    "表头/行内没有单位标注（默认“元”并写“表头单位标注”属补造）")
             i += 1
             continue
+        vals = numbers_in(tail)
+        if has_note and len(vals) == len(years) + 1 and vals[0] == vals[0].to_integral_value() \
+                and abs(vals[0]) < 1000:
+            vals = vals[1:]                      # 表头**声明了**附注列，且首数是小额整数
         if len(vals) < len(years):
-            rejected.append({"metric": slug, "reason": "column_mismatch",
-                             "detail": f"表头 {years}（{len(years)} 列）但只解析到 "
-                                       f"{len(vals)} 个数值：{used[:80]}"})
+            _reject(slug, "split_number" if len(vals) and re.search(r"[\d,]$", lines[i])
+                    else "column_mismatch", i,
+                    f"表头 {years}（{len(years)} 列）但解析到 {len(vals)} 个金额：{lines[i][:60]}")
             i += 1
             continue
-        vals = vals[:len(years)]
-        scale = _unit_scale(unit)
+        if len(vals) > len(years):
+            _reject(slug, "column_mismatch", i,
+                    f"金额多于表头列数（{len(vals)} > {len(years)}）：不截断，按拒绝处理")
+            i += 1
+            continue
+        page = page_of(doc, line_offset(doc, lines, i))
         for label, raw_v in zip(years, vals):
             m = re.search(r"(19|20)\d{2}", label)
             period = f"{m.group(0)}年" if m else label
             if want_periods and not any(period.startswith(p[:4]) for p in want_periods):
                 continue
-            key = (slug, period)
-            value = raw_v * scale                     # 按标注单位**显式换算**到元
-            table = _table_of(lines, i)
-            tkey = (slug, period, table)
-            if tkey in seen:
-                prev_v = seen[tkey]
-                if prev_v == value:
-                    continue
-                # **同一张表内**两个不同值 = 该表这一项的冲突：只废掉这一项，不牵连别的表
-                rejected.append({"metric": slug, "reason": "conflicting",
-                                 "detail": f"{table} {period}: 已有 {prev_v}，又见 {value}"
-                                           f"（同表内不一致：**按先后顺序择一是错的**，"
-                                           f"该项整体不入账）"})
-                dropped.add(tkey)
-                facts = [f for f in facts
-                         if not (f["metric"] == slug and f["period"] == period
-                                 and f.get("table") == table)]
-                continue
-                # 同一张表里两个不同值 = 真冲突（整条指标作废）；
-                # 跨表分歧 = 按表优先级取一个，**并记下来**（不静默）
-                if prev_table == table:
-                    rejected.append({"metric": slug, "reason": "conflicting",
-                                     "detail": f"{table} {period}: 已有 {prev_v}，又见 {value}"
-                                               f"（同表内不一致，按冲突处理）"})
-                    continue
-                keep_new = TABLE_PRIORITY.get(table, _DEFAULT_PRIORITY) < \
-                    TABLE_PRIORITY.get(prev_table, _DEFAULT_PRIORITY)
-                cross.append({"metric": slug, "period": period,
-                              "kept": table if keep_new else prev_table,
-                              "dropped": prev_table if keep_new else table,
-                              "kept_value": float(value if keep_new else prev_v),
-                              "dropped_value": float(prev_v if keep_new else value)})
-                if keep_new:
-                    facts = [f for f in facts
-                             if not (f["metric"] == slug and f["period"] == period)]
-                else:
-                    continue
-            if tkey in dropped:
-                continue
-            seen[tkey] = value
             facts.append({
-                "metric": slug, "period": period, "value": float(value), "unit": "元",
-                "currency": "CNY", "caliber": "合并", "entity": company,
-                "entity_id": company_code, "market": "cn",
-                "period_type": "年报", "source_url": str(doc.get("url") or ""),
-                "source_hash": src_hash, "extracted_by": "annual_financial_tables",
-                "locator": f"正文第 {i} 行（{unit}）",
-                "quote": used[:200], "table": _table_of(lines, i),
-                "period_basis": basis,
-                "unit_source": f"表头单位标注：{unit}",
+                "metric": slug, "period": period,
+                "value": float(raw_v * scale), "unit": "元",
+                "currency": currency, "caliber": caliber,
+                "unit_source": f"表头单位标注「单位：{unit}」",
+                "currency_source": f"由单位「{unit}」判定",
+                "caliber_source": f"表名「{table_name}」",
+                "entity": company, "entity_id": company_code, "market": "cn",
+                "entity_state": entity_state,
+                "period_type": "年报", "table": kind, "table_name": table_name,
+                "source_url": str(doc.get("url") or ""), "source_hash": text_hash,
+                "extracted_by": "annual_financial_tables",
+                "locator": f"PDF 第 {page} 页 · {table_name} · 行「{lines[i][:40]}」",
+                "quote": lines[i][:200],
+                "fact_id": _fx.make_fact_id(company_code, company, slug, period, caliber),
             })
-        tables.append({"line": i, "header": years, "unit": unit, "metric": slug})
+        tables.append({"line": i, "header": years, "unit": unit, "metric": slug,
+                       "table": kind, "page": page})
         i += 1
 
-    # 按 (指标, 期间) 归并：取**表优先级最高**的那张表的值；同优先级多表不一致 → 记 cross
-    best: dict[tuple[str, str], tuple[int, dict]] = {}
+    # 同一 (指标, 期间, 口径, 表) 两个不同值 → 该项整体不入账（不按先后择一）
+    seen: dict[tuple, Decimal] = {}
+    kept: list[dict] = []
+    dropped: set = set()
     for f in facts:
-        k = (f["metric"], f["period"])
-        pr = TABLE_PRIORITY.get(str(f.get("table") or ""), _DEFAULT_PRIORITY)
-        cur = best.get(k)
-        if cur is None or pr < cur[0]:
-            if cur is not None and cur[1]["value"] != f["value"]:
-                cross.append({"metric": f["metric"], "period": f["period"],
-                              "kept": f.get("table"), "dropped": cur[1].get("table"),
-                              "kept_value": f["value"], "dropped_value": cur[1]["value"]})
-            best[k] = (pr, f)
-        elif cur[1]["value"] != f["value"]:
-            cross.append({"metric": f["metric"], "period": f["period"],
-                          "kept": cur[1].get("table"), "dropped": f.get("table"),
-                          "kept_value": cur[1]["value"], "dropped_value": f["value"]})
-    facts = [v[1] for v in best.values()]
-    return {"ok": bool(facts), "unit": "元", "facts": facts, "rejected": rejected,
-            "tables": tables, "cross_table_conflicts": cross,
-            "text_hash": src_hash, "lines": len(lines)}
+        k = (f["metric"], f["period"], f["caliber"], f["table"])
+        if k in dropped:
+            continue
+        prev = seen.get(k)
+        if prev is None:
+            seen[k] = Decimal(str(f["value"]))
+            kept.append(f)
+        elif prev != Decimal(str(f["value"])):
+            dropped.add(k)
+            kept = [x for x in kept if (x["metric"], x["period"], x["caliber"],
+                                        x["table"]) != k]
+            rejected.append({"metric": f["metric"], "reason": "conflicting",
+                             "page": 0, "label": f["locator"],
+                             "detail": f"{f['table']} {f['period']}：同表内已有 {prev}，"
+                                       f"又见 {f['value']}——不按先后择一，该项整体不入账"})
+    return {"ok": bool(kept), "facts": kept, "rejected": rejected, "tables": tables,
+            "text_hash": text_hash, "entity_state": entity_state, "lines": len(lines)}
 
 
 def derive_gross_profit(facts: list[dict]) -> list[dict]:
-    """毛利 = 营业收入 − 营业成本（**声明过的算式**，带 inputs，不猜）。"""
-    import facts as _fx
+    """毛利 = 营业收入 − 营业成本：只在**同主体/同期间/同口径/同币种/同单位**时派生。
 
-    idx = {(f["metric"], f["period"]): f for f in facts}
+    旧版不检查主体与币种（A 公司 CNY 元收入减 B 公司 USD 万元成本也照样出毛利），
+    也不带稳定 `fact_id` 与血缘。现在输入必须是已准入事实，且携带 `derived_from`。
+    """
+    idx = {(f["metric"], f["period"], f.get("caliber") or ""): f for f in facts}
     out: list[dict] = []
-    for (metric, period), rev in list(idx.items()):
+    for (metric, period, caliber), rev in list(idx.items()):
         if metric != "revenue":
             continue
-        cost = idx.get(("operating_cost", period))
+        cost = idx.get(("operating_cost", period, caliber))
         if not cost:
             continue
-        gp = float(rev["value"]) - float(cost["value"])
+        if any(str(rev.get(k) or "") != str(cost.get(k) or "")
+               for k in ("entity_id", "currency", "unit")):
+            continue
+        if not (rev.get("fact_id") and cost.get("fact_id")):
+            continue
         out.append({
-            "metric": "gross_profit", "period": period, "value": gp, "unit": "元",
-            "currency": "CNY", "caliber": rev.get("caliber") or "合并",
-            "entity": rev.get("entity") or "", "entity_id": rev.get("entity_id") or "",
-            "market": "cn", "period_type": "年报",
-            "source_url": rev.get("source_url") or "", "source_hash": "",
-            "extracted_by": "derived", "formula": f"{rev['value']} - {cost['value']}",
-            "derived_from": [_fx.make_fact_id(rev.get("entity_id") or "",
-                                              rev.get("entity") or "", "revenue", period,
-                                              rev.get("caliber") or "合并"),
-                             _fx.make_fact_id(cost.get("entity_id") or "",
-                                              cost.get("entity") or "", "operating_cost",
-                                              period, cost.get("caliber") or "合并")],
-            "locator": f"{period}：营业收入 − 营业成本",
-            "quote": f"{rev['value']} - {cost['value']}", "table": "算式派生",
+            "metric": "gross_profit", "period": period,
+            "value": float(rev["value"]) - float(cost["value"]),
+            "unit": rev.get("unit") or "元", "currency": rev.get("currency") or "",
+            "caliber": caliber, "entity": rev.get("entity") or "",
+            "entity_id": rev.get("entity_id") or "", "market": "cn",
+            "entity_state": rev.get("entity_state") or "",
+            "period_type": "年报", "table": "算式派生",
+            "source_url": rev.get("source_url") or "",
+            "source_hash": rev.get("source_hash") or "",
+            "unit_source": rev.get("unit_source") or "",
+            "currency_source": rev.get("currency_source") or "",
+            "caliber_source": rev.get("caliber_source") or "",
+            "extracted_by": "derived", "formula_version": "gross_profit_v1",
+            "formula": f"{rev['value']} - {cost['value']}",
+            "derived_from": [rev["fact_id"], cost["fact_id"]],
+            "locator": f"{period} {caliber}：营业收入 − 营业成本",
+            "quote": f"{rev['value']} - {cost['value']}",
+            "fact_id": f"fact-gp-{rev['fact_id'][-8:]}-{cost['fact_id'][-8:]}",
         })
     return out
 
 
 def to_dataset(doc: dict, *, company: str, company_code: str, periods=(),
-               as_of: str = "", restatement: str = ""):
-    """抽取 → 事实行 → `financial_analysis.AnalysisDataset`（含毛利派生）。"""
+               as_of: str = "", restatement: str = "", verify_entity: bool = True):
+    """抽取 → 候选观察 → `financial_analysis.AnalysisDataset`（含毛利派生与血缘）。"""
     import financial_analysis as fa
 
-    from narrative_evidence import _doc_period
-    _dp = _doc_period(str(doc.get("title") or ""), str(doc.get("url") or ""))
-    # `allow_anchor=False`（默认）：真实报告实测，"期末余额/期初余额"式表头**远距离**锚定
-    # 会把附注表错认成报表（京蓝 2020：应付账款取到 650,625 元，而合并资产负债表是
-    # 1,743,811,151.80 元，差 ~2680 倍）——抽错一个数比少一个数危险得多，故默认关闭。
     raw = extract(doc, company=company, company_code=company_code, periods=periods,
-                  anchor_year=(int(_dp) if _dp else None), allow_anchor=False)
+                  verify_entity=verify_entity)
     rows = list(raw["facts"]) + derive_gross_profit(raw["facts"])
     ds = fa.freeze_from_facts(
         rows, entity=company, entity_id=company_code, market="cn", periods=periods,
