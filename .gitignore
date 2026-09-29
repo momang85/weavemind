@@ -27,7 +27,11 @@ __pycache__/
 venv/
 
 # 本地训练产物（模型权重/LoRA）
-models/
+# 只锚定**仓库根**的 models/：不锚定时会匹配任意层级同名目录，曾把源码包
+# `financial_analysis/models/` 整目录静默忽略（2026-09-29 实测：三个提交里那五个
+# .py 一个都没进 git，干净检出直接 ImportError，而本机因为目录还在全绿）。
+/models/
+/models-*/
 lora_out/
 distill_v2_raw.jsonl
 distill_data_v2.jsonl
@@ -63,6 +67,8 @@ logs/audit.jsonl
 
 # Mimosa 扫描工件（运行期事件台账，不入库）
 .mimosa/
+dump.rdb
+
 
 # 本地运行产物（防误提交）
 logs/

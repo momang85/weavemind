@@ -42,6 +42,8 @@ jobs:
         run: python test_acceptance_adversarial.py
       - name: Financial analysis package (Q1 frozen dataset and profit bridge)
         run: python test_financial_analysis.py
+      - name: Annual report PDF table extraction
+        run: python test_annual_financial_tables.py
       - name: Sandbox isolation tests
         run: python test_sandbox_isolation.py
       - name: Metrics scope tests
