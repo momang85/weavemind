@@ -20,6 +20,8 @@
 
 from __future__ import annotations
 
+import transfer_limits
+
 import hashlib
 import json
 import logging
@@ -37,8 +39,10 @@ DOC_FILE = "doc.json"
 # 解析/摄取实现版本：与原件一起记进清单，解析方式变了才能发现"同一份原件出的正文不同"
 PARSER_VERSION = "intake-1"
 
-MAX_BYTES = 3 * 1024 * 1024          # 单件上限（与 /api/context/extract 同口径）
-MAX_PAGES = 400                      # 与 annual_report_pdf.MAX_PAGES 同源
+# 容量策略的**单一来源**（transfer_limits，可用环境变量覆盖）：
+# 上传/下载/抓取三处此前各自硬编码，同一个文件会出现「这个入口能进、那个入口被拒」。
+MAX_BYTES = transfer_limits.UPLOAD_MAX_BYTES   # 单件上限（与 /api/context/extract 同口径）
+MAX_PAGES = transfer_limits.PDF_MAX_PAGES      # 与 annual_report_pdf.MAX_PAGES 同源
 MIN_TEXT_CHARS = 40
 
 CHANNEL_LINK = "web_link"

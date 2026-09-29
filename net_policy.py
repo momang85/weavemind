@@ -556,28 +556,65 @@ def fetch_document(url: str, *, timeout: float | None = None,
             except Exception:
                 pass
 
-        head, _, body = raw.partition(b"\r\n\r\n")
-        lines = head.decode("iso-8859-1", "replace").split("\r\n")
-        try:
-            status = int((lines[0] if lines else "").split(" ")[1])
-        except Exception:
-            status = 0
-        if 300 <= status < 400:
-            # 默认不跟随重定向：把目标交回调用方显式决策（每一跳都要重新校验）
-            raise FetchError(f"目标返回重定向（{status}），按策略不自动跟随")
-        resp_headers = {}
-        for line in lines[1:]:
-            if ":" in line:
-                k, v = line.split(":", 1)
-                resp_headers[k.strip().lower()] = v.strip()
-        charset = "utf-8"
-        ctype = resp_headers.get("content-type", "")
-        if "charset=" in ctype:
-            charset = ctype.split("charset=")[-1].split(";")[0].strip() or "utf-8"
-        return {"status": status, "url": url, "headers": resp_headers,
-                "bytes": len(body), "raw": body, "egress": egress,
-                "text": body.decode(charset, "replace")}
+        return _read_http_response(sock, url=url, egress=egress, cap=cap,
+                                   budget=budget, started=started)
     raise FetchError(last_error or "连接失败")
+
+
+def _read_http_response(sock, *, url: str, egress: str, cap: int, budget: float,
+                        started: float) -> dict:
+    """把已连上的 socket 读成一个 HTTP 响应（**成熟实现**，不再手拆头）。
+
+    为什么要换：旧实现 `raw.partition(b"\r\n\r\n")` 之后把 body 直接当正文——
+    **chunked 响应的分块框架会被当成内容**（PDF 直接损坏），gzip 也没解。
+    这里用 `http.client.HTTPResponse` 解析状态行/头并透明解 chunked，正文读取走
+    `read_with_deadline`（每次底层读都查钟 + 总量上限）。
+
+    保留既有安全语义：连接仍是**已验 IP 直连**（调用方 pin），3xx 不跟随，不带凭据。
+    """
+    import http.client
+
+    from adapters.search_runner import (ResponseTooLarge, read_with_deadline)
+
+    # **时钟必须同源**：`read_with_deadline` 默认用 time.monotonic 比时间，
+    # 而调用方的 `started` 是 time.time（墙钟）——两者相减会得到几十亿秒，
+    # 总截止因此形同虚设（本批实测）。这里用单调钟重新起算。
+    deadline = time.monotonic() + float(budget)
+    resp = http.client.HTTPResponse(sock)
+    try:
+        resp.begin()
+    except Exception as exc:                          # noqa: BLE001 - 协议层失败按类别报
+        raise FetchError(f"响应解析失败：{type(exc).__name__}: {str(exc)[:120]}")
+    status = int(getattr(resp, "status", 0) or 0)
+    hdrs = {str(k).lower(): str(v) for k, v in (resp.getheaders() or [])}
+    if 300 <= status < 400:
+        raise FetchError(f"目标返回重定向（{status}），按策略不自动跟随")
+    try:
+        body = read_with_deadline(resp, deadline, max_bytes=cap)
+    except ResponseTooLarge:
+        raise FetchError(f"响应体超过上限 {cap} 字节")
+    except TimeoutError as exc:
+        raise FetchError(f"读取超时（总截止 {budget:g}s）：{str(exc)[:80]}")
+    except Exception as exc:                          # noqa: BLE001
+        raise FetchError(f"读取失败：{type(exc).__name__}: {str(exc)[:120]}")
+    if str(hdrs.get("content-encoding") or "").lower() == "gzip":
+        try:
+            import gzip
+            body = gzip.decompress(body)
+            if len(body) > cap:
+                raise FetchError(f"解压后超过上限 {cap} 字节")
+        except FetchError:
+            raise
+        except Exception as exc:                      # noqa: BLE001
+            raise FetchError(f"gzip 解码失败：{type(exc).__name__}: {str(exc)[:80]}")
+    charset = "utf-8"
+    ctype = str(hdrs.get("content-type") or "")
+    if "charset=" in ctype:
+        charset = ctype.split("charset=")[-1].split(";")[0].strip() or "utf-8"
+    return {"status": status, "url": url, "headers": hdrs,
+            "bytes": len(body), "raw": body, "egress": egress,
+            "transfer_encoding": str(hdrs.get("transfer-encoding") or ""),
+            "text": body.decode(charset, "replace")}
 
 
 # ── 审计（只记脱敏目标与策略判定）──────────────────────────────────

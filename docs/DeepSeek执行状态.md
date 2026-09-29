@@ -15,10 +15,19 @@
 > **A0 剩余**：合并口径的 2020 应收账款/存货仍是拒绝（按 A0 属正确行为，需更可靠的单元格解析）；
 > `Observation` 尚未承载 `derived_from`（血缘只进了一半）。
 >
-> **A1/A2 未开始**（下一批）：分通道诊断矩阵（东财 77 字节只证明"未取到"，
-> 要补 HTTP/API 错误体、真实 `reportName`/去后缀参数、区分未实现/零命中/网络）；
-> `adapters/transport.py` 总截止 + chunked 解码、`net_policy.fetch_document` 逐 IP 预算；
-> 上传 3 MiB / 下载 30 MB 的统一容量策略；官方 IR/披露页发现与正常文件导入。
+> **A1（本轮）**：传输边界三个真实缺陷已修并离线验证（`docs/evidence/a1_transport_deadline_20260929.md`）：
+> ① `transport` 两个通道的 `resp.read()` 无总截止 → 改走 `read_with_deadline`（+默认字节上限）；
+> ② `net_policy.fetch_document` **手拆响应头且不认 chunked**（分块框架会混进 PDF）→ 换
+> `http.client.HTTPResponse`（成熟解析 + 透明解块 + gzip），**保留**已验 IP 直连/3xx 不跟随/不带凭据；
+> ③ **时钟不同源**（墙钟 vs 单调钟）让总截止算成几十亿秒——本批自己引入又当场抓出，已修；
+> ④ 容量策略统一到 `transfer_limits.py`（上传 3 MiB / 下载 30 MiB / 正文 8 MiB / 二进制 64 MiB /
+> PDF 页数 1200 可配），`explain()` 给具体超限说明。
+> 定向：`test_transport_deadline` **13 OK**（慢体、chunked 逐字节、gzip、非 2xx、200+错误体、
+> 超上限、3xx 不跟随、socketpair 慢分块、容量单一来源）；`test_deploy_manifest` 40 OK（CI 51 步）。
+> **东财 77 字节原因仍为 unknown**（本批未发外网请求，不写"站点/出口限制"）。
+> **A1 剩余**：诊断矩阵（入口×upstream×出口×原因码）与 health_registry 词表接线；
+> 多地址/重试共用根截止；`net_policy` 逐 IP 预算与 `read_with_deadline` 两套实现是否合并；
+> 页面上限提示。**A2 未开始**。
 >
 > **发布权限（独立事项）**：`gh` token 缺 `workflow` scope，推 `.github/workflows/ci.yml`
 > 被 GitHub 拒绝（`4` 个待推提交触碰该文件）。修法：`gh auth refresh -h github.com -s workflow`。

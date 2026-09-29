@@ -192,6 +192,14 @@ def _bound_single_read(resp, seconds: float) -> bool:
     return False
 
 
+class ResponseTooLarge(RuntimeError):
+    """响应体超过**调用方给的字节上限**：已停止读取并放掉连接（不再整段读进内存）。
+
+    与"超预算"分开：这是**内容规模**问题，不是时间问题；调用方据此报 too_large，
+    而不是把它记成超时或网络故障。
+    """
+
+
 class UnboundedReadError(RuntimeError):
     """这条读取路径**无法保证有界**：既设不上 socket 超时，也没有"单次读"语义。
 
@@ -305,7 +313,8 @@ def _wrap_response_deadline(resp, deadline: float, *, clock=time.monotonic):
 
 
 def read_with_deadline(resp, deadline: float, chunk: int = 65536,
-                       *, clock=time.monotonic, require_bounded: bool = True) -> bytes:
+                       *, clock=time.monotonic, require_bounded: bool = True,
+                       max_bytes: int | None = None) -> bytes:
     """按块读取响应，并在**块间**与**块内**都守住同一个墙钟截止；到点即停止读取。
 
     socket timeout 只管单次操作，慢速分块响应可以每块都小于 timeout、整体却远超截止
@@ -363,6 +372,10 @@ def read_with_deadline(resp, deadline: float, chunk: int = 65536,
                                        "(body ended after the deadline)")
                 break
             buf.append(block)
+            if max_bytes and sum(len(b) for b in buf) > int(max_bytes):
+                _close_quietly(resp)
+                raise ResponseTooLarge(
+                    f"响应体超过上限 {int(max_bytes)} 字节（已停止读取）")
             if over:
                 # 已经读过截止还拿到了数据：正文不完整，不得当成功返回
                 _close_quietly(resp)

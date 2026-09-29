@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import transfer_limits
+
 import io
 import json
 import logging
@@ -23,8 +25,9 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-MAX_BYTES = 30_000_000
-MAX_PAGES = 400
+# 容量策略的**单一来源**（transfer_limits）；解析页数上限同处登记。
+MAX_BYTES = transfer_limits.DOWNLOAD_MAX_BYTES
+MAX_PAGES = transfer_limits.PDF_MAX_PAGES
 MIN_TEXT_CHARS = 40          # 全文少于这些字符基本是扫描件/受保护文档，按缺口处理
 
 
