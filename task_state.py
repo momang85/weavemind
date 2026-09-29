@@ -180,7 +180,7 @@ _SUBMIT_TIMELINE_MAX = 40
 
 def record_submit_event(task_id: str, event: str, *, instance: str = "",
                         code_version: str = "", detail: str = "",
-                        owner: str = "",
+                        owner: str = "", owner_gen: int = 0,
                         ts: float | None = None, db_path: str | None = None) -> bool:
     """把一条提交时间线事件**追加**到任务行（C3/H3）。
 
@@ -190,7 +190,8 @@ def record_submit_event(task_id: str, event: str, *, instance: str = "",
 
     `owner`：该事件的**持有者指纹**（令牌的 sha256 前 16 位；不落明文令牌）。
     `started` 事件带它，是为了让"迟到的旧结果不得覆盖新 owner"可判——见
-    `orchestrator_v2._lease_superseded`。
+    `orchestrator_v2._lease_superseded`。`owner_gen` 是同一事件的**持有期代号**
+    （每次成功认领自增）：指纹证明"是谁"，代号证明"是不是同一段持有期"。
     """
     if not task_id:
         return False
@@ -201,6 +202,12 @@ def record_submit_event(task_id: str, event: str, *, instance: str = "",
              "detail": str(detail or "")[:200]}
     if owner:
         entry["owner"] = str(owner)[:32]
+    try:
+        _gen = int(owner_gen or 0)
+    except (TypeError, ValueError):
+        _gen = 0
+    if _gen > 0:
+        entry["owner_gen"] = _gen
     try:
         con = _connect(db_path)
         try:

@@ -8764,15 +8764,24 @@ OWNER_HB_KEY = "orchestrator:owner:hb"
 # generation 证明"是不是同一段持有期"。
 OWNER_GEN_KEY = "orchestrator:owner:gen"
 OWNER_HB_TTL = 30
-# 本地有效期宽限：续租线程每 TTL/3 跑一次，网络抖动/调度延迟不该立刻判失租；
-# 超过 TTL+宽限仍未续上，就按**本地**判定失租（不再只看那个可能过期的布尔量）。
-OWNER_LEASE_GRACE = 10.0
+# 本地有效期的**保守余量**（Q0 更正）。旧实现是"TTL + 宽限 10 秒"：本地自认还持有
+# 租约的窗口比服务端租约**长 10 秒**，而那 10 秒里对端已经完全合法地接管了
+# （`SET … PX 30000` 一到期就能被别人认领）→ 两个进程都以为自己独占。
+# 方向必须反过来：本地有效期**不得长于**服务端租约。这里的余量是**扣减**用的
+# ——认领/续租成功那一刻起算 `TTL − 余量`，抵消"服务端设 TTL 的时刻早于本地记时刻"
+# 的那一个往返（RTT）。宁可早一点判失租（fail-closed：停止派发），也不能晚。
+OWNER_LEASE_SKEW = 1.0
+# 兼容别名：旧名字表示"在 TTL 之上**再加**的宽限"。语义已按上面更正为 **0**，
+# 保留常量只为老引用不炸；**不得**再把它加到有效期上。
+OWNER_LEASE_GRACE = 0.0
 
 _OWNER_LOCK = threading.Lock()
 _OWNER_STATE: dict = {"token": "", "instance": "", "held": False,
                       "reason": "未认领", "renewed_at": 0.0,
                       # 单调钟：墙钟会被校时/休眠改掉，而"租约还有多久"是个**时长**
-                      "renewed_mono": 0.0, "gen": 0, "ever_held": False}
+                      "renewed_mono": 0.0, "gen": 0, "ever_held": False,
+                      # 本地有效截止（单调钟）。0 = 没有可证明的有效期
+                      "expires_mono": 0.0, "lease_ttl": 0.0}
 
 # 认领/续期/拒绝三合一。为什么必须原子：GET 判空再 SET 之间存在窗口，
 # 两个进程可同时判"没人持有"并各自认领成功 → 两个编排器消费同一条通道。
@@ -8828,20 +8837,52 @@ def _owner_generation(r) -> int:
         return 0
 
 
-def _owner_note(held: bool, *, inst: str, tok: str, reason: str) -> None:
-    """统一写 `_OWNER_STATE`：同时记墙钟与单调钟，并保留已有 generation。
+def _owner_remaining_ttl(r) -> float:
+    """服务端**实际剩余**租约（秒）：认领/续租是 `SET … PX`/`PEXPIRE`，问 Redis 最准。
+
+    读不到（替身/异常）就退回配置的 TTL；真正被扣掉的余量在 `_owner_effective_ttl`。
+    """
+    try:
+        pttl = int(r.pttl(OWNER_KEY))
+    except Exception:                                 # noqa: BLE001 - 读不到按满 TTL
+        return float(OWNER_HB_TTL)
+    if pttl <= 0:
+        return 0.0
+    return min(float(OWNER_HB_TTL), pttl / 1000.0)
+
+
+def _owner_effective_ttl(r) -> float:
+    """本地可以采信的**剩余**有效期：服务端剩余 − 保守余量，永不为负、永不超过 TTL。
+
+    为什么是减不是加：本地记时刻**晚于**服务端设 TTL 的时刻（隔着一个往返），
+    照搬满 TTL 当本地有效期就已经多信了一点点；多信的那一点点里对端可能已接管。
+    """
+    return max(0.0, _owner_remaining_ttl(r) - OWNER_LEASE_SKEW)
+
+
+def _owner_note(held: bool, *, inst: str, tok: str, reason: str,
+                lease_ttl: float = 0.0) -> None:
+    """统一写 `_OWNER_STATE`：同时记墙钟、单调钟与**本地有效截止**，并保留 generation。
 
     `ever_held`：本进程**曾经**持有过租约。落库闸门用它区分两种"当前没持有"：
     - 从来没持有过（Redis 不可用、单机直跑、测试）→ 不该拦住落库；
     - **曾经持有、现在没了**（失租/被接管）→ 迟到结果不得覆盖。
+
+    `expires_mono`：`held` 之外**必须**还有的第二个条件。只留一个布尔量的话，
+    续租线程死掉/进程被挂起之后它会一直停在 True（A-3 反例），而服务端租约早没了。
     """
+    now_mono = time.monotonic()
+    _ttl = float(lease_ttl or 0.0)
     with _OWNER_LOCK:
         gen = int(_OWNER_STATE.get("gen") or 0)
         ever = bool(_OWNER_STATE.get("ever_held")) or bool(held)
         _OWNER_STATE.update({"token": tok, "instance": inst, "held": bool(held),
                              "reason": reason, "ever_held": ever,
                              "renewed_at": time.time() if held else 0.0,
-                             "renewed_mono": time.monotonic() if held else 0.0,
+                             "renewed_mono": now_mono if held else 0.0,
+                             "expires_mono": ((now_mono + _ttl)
+                                              if (held and _ttl > 0) else 0.0),
+                             "lease_ttl": _ttl if held else 0.0,
                              "gen": gen})
 
 
@@ -8883,7 +8924,7 @@ def claim_orchestrator_ownership(r, *, instance: str = "",
         if legacy:
             logger.warning("接管遗留的无租约归属键（旧实现不写 TTL，无法表达存活）"
                            "→ 已写入本进程租约")
-            _owner_note(True, inst=inst, tok=tok,
+            _owner_note(True, inst=inst, tok=tok, lease_ttl=_owner_effective_ttl(r),
                         reason=f"本实例 {inst} 持有编排器归属（接管遗留键）")
             with _OWNER_LOCK:
                 _OWNER_STATE["gen"] = _owner_generation(r)
@@ -8899,11 +8940,15 @@ def claim_orchestrator_ownership(r, *, instance: str = "",
                     reason=f"已有编排器实例 {holder} 持有活租约")
         return False, (f"已有编排器实例 {holder} 在运行（租约 {OWNER_HB_TTL}s 内）；"
                        "同一 Redis 上不允许两个编排器消费同一条任务通道")
-    _owner_note(True, inst=inst, tok=tok, reason=f"本实例 {inst} 持有编排器归属")
+    _owner_note(True, inst=inst, tok=tok, lease_ttl=_owner_effective_ttl(r),
+                reason=f"本实例 {inst} 持有编排器归属")
     with _OWNER_LOCK:
         _OWNER_STATE["gen"] = _owner_generation(r)
-    logger.info("编排器归属：本实例 %s 持有租约（令牌 …%s，TTL %ss，gen=%s）",
-                inst, tok[-6:], OWNER_HB_TTL, _OWNER_STATE.get("gen"))
+        _ttl_local = float(_OWNER_STATE.get("lease_ttl") or 0.0)
+    logger.info("编排器归属：本实例 %s 持有租约（令牌 …%s，服务端 TTL %ss，"
+                "本地有效期 %ss，gen=%s）",
+                inst, tok[-6:], OWNER_HB_TTL, round(_ttl_local, 1),
+                _OWNER_STATE.get("gen"))
     return True, f"本实例 {inst} 持有编排器归属"
 
 
@@ -8915,46 +8960,48 @@ def renew_orchestrator_ownership(r, *, token: str = "") -> bool:
     """
     with _OWNER_LOCK:
         tok = str(token or _OWNER_STATE.get("token") or "")
+        inst = str(_OWNER_STATE.get("instance") or "")
     if not tok:
         return False
     try:
         got = int(r.eval(_OWNER_CLAIM_LUA, 1, OWNER_KEY, tok,
                          int(OWNER_HB_TTL * 1000)) or 0)
     except Exception as exc:                          # noqa: BLE001
-        with _OWNER_LOCK:
-            _OWNER_STATE.update({"held": False, "renewed_at": 0.0, "renewed_mono": 0.0,
-                                 "reason": f"续租失败（{str(exc)[:60]}）→ 停止新派发"})
+        _owner_note(False, inst=inst, tok=tok,
+                    reason=f"续租失败（{str(exc)[:60]}）→ 停止新派发")
         logger.error("编排器续租失败：停止新派发（%s）", str(exc)[:150])
         return False
     ok = got == 1
-    with _OWNER_LOCK:
-        _OWNER_STATE.update({
-            "held": bool(ok),
-            "renewed_at": time.time() if ok else 0.0,
-            "renewed_mono": time.monotonic() if ok else 0.0,
-            "reason": ("本实例持有编排器归属" if ok
-                       else "租约已过期或被他人接管 → 停止新派发")})
+    # 续租的有效截止同样**从服务端剩余时间算、只扣余量不加宽限**：本地自认还持有的
+    # 窗口绝不能超过服务端租约，否则对端已可接管而本端仍在派发（两个 owner）。
+    _owner_note(ok, inst=inst, tok=tok,
+                lease_ttl=(_owner_effective_ttl(r) if ok else 0.0),
+                reason=("本实例持有编排器归属" if ok
+                        else "租约已过期或被他人接管 → 停止新派发"))
     if not ok:
         logger.error("编排器归属已失：停止新派发（旧持有者不得继续产生有效结果）")
     return ok
 
 
 def ownership_held() -> bool:
-    """本进程当前是否**确实持有**活租约（派发闸门）。
+    """本进程当前是否**确实持有**活租约（派发/落库闸门）。
 
     只看那个布尔量是不够的（09-28 下午复核 A-3 反例：**续租时间过期一小时仍为 True**）：
     续租线程死掉、进程被 SIGSTOP/休眠、Redis 长时间不可达之后，`held` 会一直停在
-    True，而真实租约早就过期、别人可能已经接管。这里额外用**单调钟**算本地有效期：
-    最后一次成功续租起超过 `TTL + 宽限` 未续上，就按失租处理（停止新派发）。
-    用单调钟而不是墙钟：校时/休眠会改墙钟，"还剩多久"是个时长。
+    True，而真实租约早就过期、别人可能已经接管。因此 `held` 之外还要一个**本地有效
+    截止** `expires_mono`（单调钟；认领/续租成功时按服务端剩余 TTL **扣**保守余量算）。
+
+    Q0 更正：旧实现用 `TTL + 宽限 10 秒`，本地有效期比服务端租约**长 10 秒**——
+    服务端一到期对端就能合法接管，本端却还以为独占（"两个 owner"）。现在只减不加：
+    宁可提前判失租（fail-closed：停止派发），不可滞后。
     """
     with _OWNER_LOCK:
         if not _OWNER_STATE.get("held"):
             return False
-        mono = float(_OWNER_STATE.get("renewed_mono") or 0.0)
-    if mono <= 0.0:
-        return False                                  # 没有可用的续租时刻 = 证明不了持有
-    return (time.monotonic() - mono) <= (OWNER_HB_TTL + OWNER_LEASE_GRACE)
+        exp = float(_OWNER_STATE.get("expires_mono") or 0.0)
+    if exp <= 0.0:
+        return False              # 没有可证明的有效截止 = 证明不了持有
+    return time.monotonic() <= exp
 
 
 def _owner_fingerprint() -> str:
@@ -8970,37 +9017,101 @@ def _owner_fingerprint() -> str:
     return hashlib.sha256(tok.encode("utf-8")).hexdigest()[:16]
 
 
-def _task_start_owner(task_id: str) -> str:
-    """该任务 `started` 事件里记的持有者指纹（没有则空串 = 当时没有租约概念）。"""
+def _task_start_binding(task_id: str) -> dict:
+    """该任务 `started` 事件里记的**执行权绑定**（没有则空 dict = 当时没有租约概念）。
+
+    三个字段一起才叫绑定：
+    - `owner`：持有者**指纹**（令牌 sha256 前 16 位，不落明文令牌）；
+    - `gen`：**持有期代号**（每次成功认领自增）——指纹证明"是谁"，代号证明"是不是
+      同一段持有期"；
+    - `instance`：实例名，只作日志/审计线索，不参与放行。
+
+    只取**最后一条** `started`（任务可能被恢复过多次，最近一次的绑定才算数）。
+    """
     try:
         import task_state as _ts
         for ev in reversed(_ts.read_submit_timeline(task_id) or []):
-            if isinstance(ev, dict) and str(ev.get("event")) == "started":
-                return str(ev.get("owner") or "")
+            if not isinstance(ev, dict) or str(ev.get("event")) != "started":
+                continue
+            try:
+                _gen = int(ev.get("owner_gen") or 0)
+            except (TypeError, ValueError):
+                _gen = 0
+            return {"owner": str(ev.get("owner") or ""), "gen": _gen,
+                    "instance": str(ev.get("instance") or ""),
+                    "ts": float(ev.get("ts") or 0.0)}
     except Exception:                                 # noqa: BLE001 - 读不到按未知
-        return ""
-    return ""
+        return {}
+    return {}
+
+
+def _task_start_owner(task_id: str) -> str:
+    """该任务 `started` 事件里记的持有者指纹（没有则空串）。`_task_start_binding` 的薄包装。"""
+    return str(_task_start_binding(task_id).get("owner") or "")
 
 
 def _lease_superseded(task_id: str) -> str:
     """**这个任务**是不是"被取代的旧持有者"在跑 → 空串表示可以继续。
 
-    判据（A-3 收窄后）：任务启动时记了持有者指纹、该指纹**不是**本进程当前的、
-    且本进程**现在也没持有**有效租约 → 这是迟到结果，不得继续派发/落库。
+    判据（Q0 收窄后，按"先证明执行权、再看任务绑定"的顺序）：
 
-    为什么不用"本进程曾经持有过、现在没了"这种全局判据：那个布尔量是**粘的**，
-    一次瞬时失租会让同一进程里**与租约无关**的任务（离线/单机/直跑）再也落不了库。
-    这里只看"这个任务是谁启动的"，因此只影响真正被接管的那些。
+    1. 本进程**现在持有**活租约（`ownership_held()`：布尔量 **且** 本地有效截止未过）
+       → 放行。本进程是当前唯一持有者，恢复/接管自己（或上一代）留下的任务都算它；
+    2. 否则本进程**曾经持有、现在失去** → **一律拦**（迟到结果不得覆盖新 owner）。
+       这一条不看指纹：旧的 `start_owner == 本进程指纹` 直接放行就是 Q0 反例所在
+       ——旧持有者被挂起、租约过期、新 owner 已接管，它一恢复仍然"指纹相同"照跑；
+    3. 从没持有过租约（单机直跑/离线/Redis 不可用/测试）：任务启动时也没记指纹
+       → 放行（旧行/离线；**这是唯一保留的旁路**，且会打一条 warning 让它可见）；
+    4. 从没持有过、但任务启动时记了**本进程**指纹 → 说明令牌还在、租约却已判失效，
+       同样拦（这一支就是 Q0 的第二个反例形状）；
+    5. 从没持有过、任务启动时记的是**别人的**指纹 → 拦。这一支不能放行：消息是广播的、
+       启动恢复也会扫库，本进程"证明不了执行权"却去跑别人名下的任务，正是重复消费
+       （旧实现就是这么拦的，Q0 只收紧、不放松）。
     """
-    start_owner = _task_start_owner(task_id)
+    binding = _task_start_binding(task_id)
+    start_owner = str(binding.get("owner") or "")
+    if ownership_held():
+        # 任务绑定的代号**比本进程现在的代号新**是异常（任务库被改过/代次错乱）：
+        # 说明这条任务的执行权不属于本段持有期，不许继续。
+        _start_gen = int(binding.get("gen") or 0)
+        _my_gen = ownership_generation()
+        if _start_gen > 0 and _my_gen > 0 and _start_gen > _my_gen:
+            return (f"任务启动时绑定的持有期 gen={_start_gen} 比本进程当前的 gen={_my_gen} "
+                    f"更新（执行权不属于本段持有期）")
+        return ""
+    if ownership_lost():
+        _why = ("任务启动时是本进程持有（指纹相同）但本进程**已失去有效租约**"
+                if start_owner and start_owner == _owner_fingerprint()
+                else "本进程曾持有编排器租约、现在已失去")
+        return f"{_why}（迟到结果不得覆盖新 owner；停止派发/落库）"
     if not start_owner:
+        _note_unbound_bypass(task_id)
         return ""
     if start_owner == _owner_fingerprint():
-        return ""
-    if ownership_held():
-        return ""            # 本进程重新拿到了租约 → 仍是自己的任务
+        return (f"任务启动时绑定的持有者指纹 {start_owner} 就是本进程，但本进程"
+                f"**证明不了**当前仍持有有效租约（到期/被接管/续租失败）")
     return (f"任务启动时的持有者 {start_owner} 已不是本进程，且本进程未持有有效租约"
             f"（迟到结果不得覆盖新 owner）")
+
+
+_UNBOUND_NOTED: set = set()
+
+
+def _note_unbound_bypass(task_id: str) -> None:
+    """"没有执行权绑定"的旁路要**看得见**：每个任务只提示一次，不刷日志。
+
+    这是本闸门唯一保留的旁路（旧行 / 从未认领过的离线单机）。线上进程执行新任务时
+    一定会写下 `started.owner`，所以线上出现这条提示只可能是历史遗留行。
+    真正的"显式离线模式"尚未实现（架构要求，见 Q0 证据账），这里先做到
+    **不静默**：一旦出现，日志里有据可查。
+    """
+    if task_id in _UNBOUND_NOTED:
+        return
+    if len(_UNBOUND_NOTED) > 200:
+        _UNBOUND_NOTED.clear()
+    _UNBOUND_NOTED.add(task_id)
+    logger.warning("任务 %s 没有执行权绑定（started 无 owner 指纹）→ 按离线/旧行继续；"
+                   "本进程从未持有编排器租约", task_id)
 
 
 def ownership_lost() -> bool:
@@ -9022,16 +9133,25 @@ def ownership_generation() -> int:
 
 
 def ownership_lease() -> dict:
-    """给闸门/日志用的租约快照：是否持有、代次、本地已过去多久。"""
+    """给闸门/日志用的租约快照：是否持有、代次、距上次续租多久、本地还剩几秒。
+
+    `expires_in` 是**本地有效截止**的剩余秒数（已扣 `OWNER_LEASE_SKEW`），
+    它永远不会超过服务端 TTL——这就是 Q0 对"TTL+宽限"的更正：`grace` 只作历史兼容
+    字段保留为 0，不再参与任何判定。
+    """
     with _OWNER_LOCK:
         snap = dict(_OWNER_STATE)
     mono = float(snap.get("renewed_mono") or 0.0)
+    exp = float(snap.get("expires_mono") or 0.0)
     return {"held": bool(snap.get("held")),
             "valid": ownership_held(),
             "gen": int(snap.get("gen") or 0),
             "token_tail": str(snap.get("token") or "")[-6:],
             "age": (time.monotonic() - mono) if mono > 0 else None,
-            "ttl": OWNER_HB_TTL, "grace": OWNER_LEASE_GRACE,
+            "expires_in": (exp - time.monotonic()) if exp > 0 else None,
+            "lease_ttl": float(snap.get("lease_ttl") or 0.0),
+            "ttl": OWNER_HB_TTL, "skew": OWNER_LEASE_SKEW,
+            "grace": OWNER_LEASE_GRACE,
             "reason": str(snap.get("reason") or "")}
 
 
@@ -9098,6 +9218,7 @@ def run_and_finalize(orch, tid: str, goal: str, context: str = "", *,
             _ts_start.record_submit_event(
                 tid, "started", instance=_inst_s, code_version=_ver_s,
                 owner=_owner_fingerprint(),
+                owner_gen=int(_lease_s.get("gen") or 0),
                 detail=(f"执行线程已开始运行（持有期 gen={_lease_s.get('gen')}，"
                         f"令牌 …{_lease_s.get('token_tail')}）"))
         except Exception:                             # noqa: BLE001
