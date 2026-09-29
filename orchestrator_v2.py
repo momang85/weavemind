@@ -9548,4 +9548,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # 退出码必须**传播**：`claim_orchestrator_ownership` 拒绝启动时 `main()` 返回 2，
+    # 但裸调 `main()` 会把进程退出码留成 0——launcher/guardian 于是分不清"明确拒绝
+    # 启动（同一 Redis 上已有活着的编排器）"与"正常退出"，重启拉起的策略也跟着错。
+    # 实机演练实测：B 实例日志写着"拒绝启动"，退出码却是 0。
+    raise SystemExit(main())
