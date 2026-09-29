@@ -15,9 +15,19 @@
 > **A0 剩余**：合并口径的 2020 应收账款/存货仍是拒绝（按 A0 属正确行为，需更可靠的单元格解析）；
 > `Observation` 尚未承载 `derived_from`（血缘只进了一半）。
 >
-> **A1（本轮，**部分交付**）**：只有两件落地——容量策略单一来源（`transfer_limits.py`）与
-> `read_with_deadline(max_bytes=…)`；**传输层接线（transport 总截止 / net_policy chunked）已回退**
-> （打红 5 个既有 `test_net_policy` 用例，按纪律不靠改测试通过）。原文如下（**仅记录当时意图**）（`docs/evidence/a1_transport_deadline_20260929.md`）：
+> **A1（已重做交付）**：`net_policy` 改用 `http.client` 解析（透明解 chunked + gzip、
+> **时钟同源**的总截止）、文本通道加总截止与默认上限（8 MiB）、容量策略单一来源
+> （`transfer_limits.py`）+ `read_with_deadline(max_bytes=…)`。做法：**先补测试替身**
+> （假 socket 的 `makefile`/`read1`）再改生产码。**字节通道保留既有「截断+over_limit」
+> 契约 → 时间边界未闭合**（已登记）。
+> **东财 77 字节根因已探明并修**：`SECURITY_CODE` 存**裸代码**，带 `.SZ/.SH` 被判参数错
+> （`code 9201「参数错误为空」`、89 字节）；去后缀放进**适配器内部**，空结果抛出接口
+> 自己的 `success/code/message`。真机复验：洋河 002304.SZ rows=2（与冻结样本逐位一致）、
+> **三一重工 600031.SH rows=2**（第二家公司结构化事实打通）；港股 00700.HK 仍
+> `URLError 10061`（原因未定）。
+> 定向：`test_transport_deadline` 12、`test_net_policy` 45、`test_search_quality_unified` 80、
+> `test_eastmoney_params` 9、`test_p0` 434 全 OK。
+> **原 A1 条目（仅记录当时意图）**：（`docs/evidence/a1_transport_deadline_20260929.md`）：
 > ① `transport` 两个通道的 `resp.read()` 无总截止 → 改走 `read_with_deadline`（+默认字节上限）；
 > ② `net_policy.fetch_document` **手拆响应头且不认 chunked**（分块框架会混进 PDF）→ 换
 > `http.client.HTTPResponse`（成熟解析 + 透明解块 + gzip），**保留**已验 IP 直连/3xx 不跟随/不带凭据；
