@@ -1,5 +1,15 @@
 # DeepSeek 执行状态（2026-09-28 更新 · **"全部遗留清零"已更正** · C3 部分 · C4 未过）
 
+> **D 批（09-28 晚，基线 `41de3ba`）已做完**（证据 `docs/evidence/d_period_and_deadline_20260928.md`）：
+> ② `read_with_deadline` 的**总截止**真正生效（审查形状：进程内 socket pair、每 5ms 一字节、
+> 预算 0.02s → **0.1076s → 0.0220s**）：单次读改 `read1`、每次读前设 socket 剩余时间、读后查钟、
+> 到点关闭连接、**不可保证有界的路径明确拒绝**（`UnboundedReadError`，非可重试，业务区别保留）；
+> ① 期间口径照裁决落地：`period_years()`/`disclosure_years()` 分开，"2024 年度报告，2025 年 4 月披露"
+> 允许而"2025 年度报告/2025 年年报"拒绝，`as_of` 年份不再扩展目标期间，重试批次与初始查询同语义。
+> 定向：`test_delivery_chain` 400 OK、`test_p0` 429 OK、`test_search_quality_unified` 77 OK。
+> **仍未验只剩环境项**（跨进程并发 / 真实租约转移 / 崩溃恢复演练、第二家公司真实原文、
+> 干净环境同包完整链、远端 CI、真人 F3）——都需要本机不具备的环境或真人。
+
 > **C 批（候选闭环）进展（09-28 下午，基线 `b85e63e`）**：C-1/C-2/C-3/C-4/C-6/C-7 已修并交
 > 定向证据与**页面级**证据（`docs/evidence/afternoon_c_candidate_loop_20260928.md`）：
 > FAILED 任务可按已并入材料生成候选（原失败审计保留）、`candidate_identity_id` 不再是绑定方法、

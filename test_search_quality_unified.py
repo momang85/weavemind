@@ -671,7 +671,11 @@ class TestBoundedSearchRunner(unittest.TestCase):
 
         resp = _SlowResp()
         with self.assertRaises(TimeoutError):
-            self.sr.read_with_deadline(resp, time.monotonic() + 0.12)
+            # `require_bounded=False`：这个替身两样都没有（无 read1、无可设超时的 socket），
+            # 默认策略是**拒绝**（见 test_unboundable_path_is_refused_by_default）；
+            # 这条用例只验块间/块内的时钟边界本身。
+            self.sr.read_with_deadline(resp, time.monotonic() + 0.12,
+                                       require_bounded=False)
         self.assertLess(resp.reads, 6, f"到点后必须停止读取，实际读了 {resp.reads} 次")
 
     def test_single_read_overrunning_the_deadline_is_not_reported_as_success(self):
@@ -698,14 +702,16 @@ class TestBoundedSearchRunner(unittest.TestCase):
         # ① 单次 read 超时且返回 EOF：必须抛，不得把空正文当"正常读完"
         resp = _OneSlowEof(0.12)
         with self.assertRaises(TimeoutError) as cm:
-            self.sr.read_with_deadline(resp, time.monotonic() + 0.02)
+            self.sr.read_with_deadline(resp, time.monotonic() + 0.02,
+                                       require_bounded=False)
         self.assertIn("EOF", str(cm.exception))
         self.assertEqual(resp.reads, 1, "到点后不得再发起第二次读")
 
         # ② 单次 read 超时且**返回了数据**：正文不完整，同样不得当成功返回
         resp2 = _OneSlowEof(0.12, b"partial-body")
         with self.assertRaises(TimeoutError):
-            self.sr.read_with_deadline(resp2, time.monotonic() + 0.02)
+            self.sr.read_with_deadline(resp2, time.monotonic() + 0.02,
+                                       require_bounded=False)
 
         # ③ 正向：预算充足时正常读完（含 EOF）不受影响
         class _FastResp:
@@ -715,7 +721,8 @@ class TestBoundedSearchRunner(unittest.TestCase):
             def read(self, n):
                 return self.chunks.pop(0)
 
-        self.assertEqual(self.sr.read_with_deadline(_FastResp(), time.monotonic() + 5.0),
+        self.assertEqual(self.sr.read_with_deadline(_FastResp(), time.monotonic() + 5.0,
+                                                   require_bounded=False),
                          b"abcdef")
 
     def test_remaining_time_is_applied_to_the_single_read(self):
@@ -758,7 +765,10 @@ class TestBoundedSearchRunner(unittest.TestCase):
         self.assertLessEqual(sock.timeouts[0], 3.0)
 
     def test_unboundable_response_is_still_stopped_at_the_deadline(self):
-        """响应对象没有可设超时的 socket 时：块间/块内时钟检查仍然是硬边界。"""
+        """响应对象没有可设超时的 socket 时：块间/块内时钟检查仍然是硬边界。
+
+        （默认策略是**拒绝**这条不可终止的路，见下一条；这里显式放开策略，只验时钟。）
+        """
         class _NoSocket:
             def __init__(self):
                 self.reads = 0
@@ -770,8 +780,80 @@ class TestBoundedSearchRunner(unittest.TestCase):
 
         resp = _NoSocket()
         with self.assertRaises(TimeoutError):
-            self.sr.read_with_deadline(resp, time.monotonic() + 0.06)
+            self.sr.read_with_deadline(resp, time.monotonic() + 0.06,
+                                       require_bounded=False)
         self.assertLess(resp.reads, 5, f"仍须在截止处停止，实际读了 {resp.reads} 次")
+
+    def test_unboundable_path_is_refused_by_default(self):
+        """D-② 裁决：**不可保证有界**的路径明确拒绝，而不是发出去再等它回来。"""
+        class _NoSocket:
+            def __init__(self):
+                self.reads = 0
+
+            def read(self, n):
+                self.reads += 1
+                return b"more"
+
+        resp = _NoSocket()
+        with self.assertRaises(self.sr.UnboundedReadError):
+            self.sr.read_with_deadline(resp, time.monotonic() + 5.0)
+        self.assertEqual(resp.reads, 0, "拒绝时不得发出读取（= 不得出网）")
+
+    def test_slow_drip_body_is_cut_at_the_deadline_not_at_peer_eof(self):
+        """D-② 复核反例：进程内 socket pair、对端每 5ms 发一字节、预算 0.02s。
+
+        旧实现走 buffered `read()`：它会一直循环到读满/EOF，于是**总截止形同虚设**——
+        实测 0.1076s 才抛（对端结束后才回来）。现在单次读用 `read1`（最多一次底层读），
+        循环里的时钟检查因此能在预算内叫停。
+        """
+        import socket
+        import threading
+
+        class _PairResp:
+            def __init__(self, sock):
+                self.fp = sock.makefile("rb")
+                self.closed = False
+
+            def read(self, n):
+                return self.fp.read(n)
+
+            def read1(self, n):
+                return self.fp.read1(n)
+
+            def close(self):
+                self.closed = True
+                try:
+                    self.fp.close()
+                except Exception:
+                    pass
+
+        def _feed(sock, every=0.005, count=40):
+            try:
+                for _ in range(count):
+                    time.sleep(every)
+                    sock.sendall(b"x")
+            except Exception:
+                pass
+            finally:
+                for fn in (lambda: sock.shutdown(socket.SHUT_WR), sock.close):
+                    try:
+                        fn()
+                    except Exception:
+                        pass
+
+        srv, cli = socket.socketpair()
+        self.addCleanup(srv.close)
+        self.addCleanup(cli.close)
+        threading.Thread(target=_feed, args=(srv,), daemon=True).start()
+        resp = _PairResp(cli)
+        budget = 0.02
+        t0 = time.monotonic()
+        with self.assertRaises(TimeoutError):
+            self.sr.read_with_deadline(resp, t0 + budget)
+        elapsed = time.monotonic() - t0
+        self.assertLess(elapsed, budget + 0.05,
+                        f"总截止未被执行：预算 {budget}s，实际 {elapsed:.4f}s")
+        self.assertTrue(resp.closed, "到点必须放掉连接（不再继续出网）")
 
     def test_refuses_to_issue_below_provider_floor(self):
         """剩余时间低于该提供方可行下限：一个请求都不发，且不消耗调用额度。"""

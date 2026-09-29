@@ -8696,6 +8696,53 @@ class TestNightCorrectionFailureSamples(unittest.TestCase):
         self.assertTrue(str(kinds["boundary"]["reason"]).startswith("推断边界"))
 
 
+class TestPeriodVersusDisclosureSemantics(unittest.TestCase):
+    """D-① 裁决：**报告所属期间**与**披露资料截止日**分开校验。
+
+    裁决内容：2023/2024 是报告所属期间，2025-06-30 是披露资料截止日；
+    "2024 年度报告，2025 年 4 月披露"**允许**，"2025 年度报告"**拒绝**（那是披露年份，
+    不是本契约的目标期间）；不得用 `as_of` 年份扩展目标期间。
+    重试批次与初始查询走同一个 `conflicting_periods` / `query_in_contract`，因此同语义。
+    """
+
+    def _contract(self):
+        from execution_contract import CONTRACT_VERSION, DOC_TYPE_ANNUAL, ExecutionContract
+        return ExecutionContract.from_wire({
+            "version": CONTRACT_VERSION, "company": "洋河股份",
+            "company_id": "002304.SZ", "market": "cn", "periods": [2023, 2024],
+            "caliber": "合并", "as_of": "2025-04-30", "doc_type": DOC_TYPE_ANNUAL,
+            "required_metrics": ["revenue", "net_profit", "operating_cashflow"]})
+
+    def test_report_period_and_disclosure_year_are_separate(self):
+        c = self._contract()
+        self.assertEqual(c.period_years(), {2023, 2024})
+        self.assertEqual(c.disclosure_years(), {2025})
+        self.assertEqual(c.allowed_years(), {2023, 2024, 2025}, "2025 允许**出现**（披露日）")
+
+    def test_disclosure_date_is_allowed_but_the_disclosure_year_is_not_a_report_period(self):
+        c = self._contract()
+        self.assertEqual(c.conflicting_periods("洋河股份2024年度报告，2025年4月披露"), [])
+        self.assertEqual(c.conflicting_periods("洋河股份 2025年4月29日 披露的年度报告"), [])
+        # 把披露年份当报告期 → 拒绝（不得用 as_of 年份扩展目标期间）
+        for bad in ("洋河股份 2025年度报告", "洋河股份2025年年报",
+                    "洋河股份2025年半年度报告"):
+            self.assertIn("2025", c.conflicting_periods(bad), bad)
+            ok, why = c.query_in_contract(bad)
+            self.assertFalse(ok, bad)
+            self.assertIn("契约外期间", why)
+
+    def test_contract_periods_and_other_years_still_behave(self):
+        c = self._contract()
+        for good in ("洋河股份 2023年年度报告 归母净利润",
+                     "洋河股份 2024年年度报告 营业收入"):
+            self.assertEqual(c.conflicting_periods(good), [], good)
+            self.assertTrue(c.query_in_contract(good)[0], good)
+        self.assertIn("2019", c.conflicting_periods("洋河股份 2019年年度报告"))
+        self.assertTrue(c.conflicting_periods("洋河股份2024年三季报"), "年度契约下的三季报仍冲突")
+        # 纯资料截止日语境不算期间冲突
+        self.assertEqual(c.conflicting_periods("资料截至 2025-04-30 的合并报表"), [])
+
+
 class TestExecutionContractThroughReviewAndDispatch(unittest.TestCase):
     """批次B：资料契约（主体/代码/期间/as_of/文档类型）穿过 Critic 修订到实际派发。
 

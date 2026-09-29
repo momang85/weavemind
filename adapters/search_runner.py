@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import logging
+import socket
 import time
 from dataclasses import dataclass, field
 
@@ -100,6 +101,11 @@ class SearchBudget:
 
 def _classify(exc: BaseException) -> str:
     """异常 → 类别（与 S0 同一套；判不出归 parse_error）。"""
+    # 不可终止的路径是**拒绝**，不是超时、也不是解析错误：必须在委派 `search_diag`
+    # 之前判（它是按文本判的，"…socket deadline…"这类描述会被它归到别处；而重试
+    # 只会再发一次不可取消的请求）。
+    if isinstance(exc, UnboundedReadError):
+        return "refused_unbounded"
     try:
         import search_diag
         return search_diag.classify_error(exc)
@@ -185,8 +191,36 @@ def _bound_single_read(resp, seconds: float) -> bool:
     return False
 
 
+class UnboundedReadError(RuntimeError):
+    """这条读取路径**无法保证有界**：既设不上 socket 超时，也没有"单次读"语义。
+
+    调用方必须**明确拒绝**这条路（记 `refused_budget` 一类），不得发出去再等它自己返回——
+    那等于没有截止线（D-② 裁决：不可保证有界的 provider 明确拒绝，不留后台外呼线程）。
+    """
+
+
+def _has_read1(resp) -> bool:
+    """响应体是否支持"单次读"语义（`read1`）。
+
+    `read1(n)` 最多触发**一次**底层读，拿到多少返回多少；而 `read(n)` 会一直循环到
+    读满 n 字节或 EOF。后者在"对端每 5ms 发一个字节"时会把缓冲循环拖到对端结束
+    （实测：预算 0.02s、0.1076s 才回来）——所以优先用 `read1`，并在循环里按时钟叫停。
+    """
+    return callable(getattr(resp, "read1", None))
+
+
+def _close_quietly(resp) -> None:
+    """到点后把连接放掉（尽力而为）：不留下还在出网的响应体。"""
+    fn = getattr(resp, "close", None)
+    if callable(fn):
+        try:
+            fn()
+        except Exception:                        # noqa: BLE001 - 关闭失败不影响"已停止"
+            pass
+
+
 def read_with_deadline(resp, deadline: float, chunk: int = 65536,
-                       *, clock=time.monotonic) -> bytes:
+                       *, clock=time.monotonic, require_bounded: bool = True) -> bytes:
     """按块读取响应，并在**块间**与**块内**都守住同一个墙钟截止；到点即停止读取。
 
     socket timeout 只管单次操作，慢速分块响应可以每块都小于 timeout、整体却远超截止
@@ -197,27 +231,49 @@ def read_with_deadline(resp, deadline: float, chunk: int = 65536,
     预算用光（实测：预算 0.02 秒、单次 read 耗 0.12 秒）并恰好返回 EOF，循环会直接
     `break` 并把空正文当**成功**返回——"到点停"变成"返回后才说停"。因此：
 
+    - **单次读用 `read1`**（最多一次底层读）：这是"块内可中断"的真正前提。D-② 复核反例：
+      进程内 socket pair、对端每 5ms 发一字节、预算 0.02s，`read()` 的缓冲循环要到对端
+      结束才回来（实测 **0.1076s** 才抛），而 `read1` 每次几毫秒就返回，循环里的时钟检查
+      因此能在预算内叫停；
     - 每次读之前把**剩余时间**设到响应自己的 socket 上（单次读的硬边界，尽力而为）；
-    - 每次读**之后**再查一次时钟：超了就抛 `TimeoutError`，
-      **EOF 也不例外**（EOF 越界不是"读完了"，是"没读完就到点了"）。
+    - 每次读**之后**再查一次时钟：超了就抛 `TimeoutError`，**EOF 也不例外**
+      （EOF 越界不是"读完了"，是"没读完就到点了"）；
+    - 两条边界都给不了（没 `read1` 且设不上超时）时，`require_bounded=True` 直接
+      `UnboundedReadError`——**拒绝**这条不可终止的路，而不是发出去再等。
     """
     buf: list[bytes] = []
+    use_read1 = _has_read1(resp)
+    bounded_sock = False
     while True:
         remain = float(deadline) - clock()
         if remain <= 0:
+            _close_quietly(resp)
             raise TimeoutError("read deadline exceeded (slow response body)")
-        _bound_single_read(resp, remain)
-        block = resp.read(chunk)
+        if _bound_single_read(resp, remain):
+            bounded_sock = True
+        if not (use_read1 or bounded_sock) and require_bounded:
+            _close_quietly(resp)
+            raise UnboundedReadError(
+                "this response has no boundable read path (no read1 / no settable "
+                "socket deadline): refusing an unbounded outbound call")
+        try:
+            block = resp.read1(chunk) if use_read1 else resp.read(chunk)
+        except (socket.timeout, TimeoutError) as exc:
+            _close_quietly(resp)
+            raise TimeoutError(
+                f"read deadline exceeded ({type(exc).__name__})") from exc
         over = clock() >= float(deadline)
         if not block:
             if over:
                 # EOF **越界**：不能当成"正常读完"
+                _close_quietly(resp)
                 raise TimeoutError("read deadline exceeded at EOF "
                                    "(body ended after the deadline)")
             break
         buf.append(block)
         if over:
             # 已经读过截止还拿到了数据：正文不完整，不得当成功返回
+            _close_quietly(resp)
             raise TimeoutError("read deadline exceeded (slow response body)")
     return b"".join(buf)
 

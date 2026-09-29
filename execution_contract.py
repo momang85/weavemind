@@ -41,6 +41,27 @@ _PERIOD_WORDS = ("一季报", "中报", "半年报", "三季报", "季报", "半
 _YEAR_RE = re.compile(r"(?<!\d)(19|20)\d{2}(?!\d)")
 # 年报披露在次年上半年：`as_of` 所在年份允许出现（披露日/资料截止日）
 _AS_OF_YEAR_RE = re.compile(r"(?<!\d)((?:19|20)\d{2})")
+# 年份后面紧跟"报告期词"= 在声明**报告所属期间**（不是披露时间）：
+# `2025年年度报告` / `2025年报` / `2025 年度` / `2025年三季度报告`
+_YEAR_REPORT_RE = re.compile(r"\s*年?\s*(?:度\s*)?(?:年度报告|年报|年度|半年度|"
+                             r"三季报|半年报|一季报|季报|季度报告)")
+# 披露/日期语境：`2025年4月披露`、`2025-04-29 公告`、`资料截至 2025`
+_DISCLOSURE_HINT_RE = re.compile(
+    r"(披露|发布|公告|刊登|出具|截至|资料截止|数据时效|更新|日期|报告日)")
+_DATE_LIKE_RE = re.compile(r"\s*年\s*\d{1,2}\s*月|[\-/.]\d{1,2}[\-/.]\d{1,2}")
+
+
+def _disclosure_context(text: str, start: int, end: int, *, window: int = 12) -> bool:
+    """该年份是否出现在**披露/日期**语境里（而不是被当成报告期）。
+
+    `2025年4月披露`（后面跟月份、附近有"披露"类词）→ 是；
+    `2025年度报告` → 不是（那是报告期声明，即便它是 `as_of` 年份也不合法）。
+    """
+    tail = text[end:end + window]
+    head = text[max(0, start - window):start]
+    if _DATE_LIKE_RE.match(tail):
+        return True
+    return bool(_DISCLOSURE_HINT_RE.search(tail) or _DISCLOSURE_HINT_RE.search(head))
 
 
 def _as_int_list(values) -> tuple[int, ...]:
@@ -194,15 +215,26 @@ class ExecutionContract:
         return self.subject
 
     def allowed_years(self) -> set[int]:
-        """允许出现的年份：契约期间 + `as_of` 年份（披露日所在年）。
+        """允许**出现**的年份：契约期间 + `as_of` 年份（披露日所在年）。
 
         `as_of` 缺失时不额外放宽——宁严不宽，避免历史教训里的其它年份混进来。
+        注意这只是"允许出现"：`as_of` 年份允许出现，是因为**披露日/资料截止日**会写到它
+        （"2024 年年度报告，2025 年 4 月披露"）。它**不是**目标报告期——把 `as_of`
+        年份当期间用（"2025 年度报告"冒充本契约目标）由 `conflicting_periods` 单独挡
+        （D-① 裁决：报告期与披露日**分开**校验）。
         """
         years = set(self.periods)
-        m = _AS_OF_YEAR_RE.search(self.as_of or "")
-        if m:
-            years.add(int(m.group(1)))
+        years |= self.disclosure_years()
         return years
+
+    def period_years(self) -> set[int]:
+        """**报告所属期间**（研究目标的期间）——只有这些年份能当报告期。"""
+        return set(self.periods)
+
+    def disclosure_years(self) -> set[int]:
+        """**披露/资料截止**所在年份（`as_of`）：只用于日期语境，不扩展目标期间。"""
+        m = _AS_OF_YEAR_RE.search(self.as_of or "")
+        return {int(m.group(1))} if m else set()
 
     # ── 检索查询 ────────────────────────────────────────────
     def queries(self, *, metrics: bool = True) -> list[str]:
@@ -277,17 +309,32 @@ class ExecutionContract:
     def conflicting_periods(self, text: str) -> list[str]:
         """文本里与契约冲突的期间表述（用于标注"不适用"，不用于删文本）。
 
-        - 契约外的年份（期间与 `as_of` 年份之外的 19xx/20xx）；
-        - 与 `doc_type` 不符的报告期词（年度报告契约下的"三季报/半年报/一季报"）。
+        D-① 裁决（报告期与披露日**分开**校验）：
+        - **报告期**只能用 `periods` 里的年份：`2025年年度报告`／`2025年报` 这类
+          "年份 + 报告期词"即使年份等于 `as_of` 年份也算冲突（那是**披露**年份，
+          不是本契约的目标期间）；
+        - **披露日/资料截止日**语境里的 `as_of` 年份合法："2024年度报告，2025年4月披露"
+          → 2024 是报告期、2025 是披露时间，两者都留；
+        - 其它契约外年份照旧算冲突；与 `doc_type` 不符的报告期词照旧算冲突。
         """
         text = str(text or "")
         if not text:
             return []
         allowed = self.allowed_years()
+        period_years = self.period_years()
         hits: list[str] = []
         for m in _YEAR_RE.finditer(text):
             y = int(m.group(0))
-            if allowed and y not in allowed:
+            if y not in allowed:
+                hits.append(m.group(0))
+                continue
+            if y in period_years:
+                continue
+            # `as_of` 年份：紧跟"报告期词"就算是**报告期声明**（不合法）；
+            # 否则只有**披露/日期语境**才算合法。注意必须**锚在年份后面**匹配
+            # （`re.search` 会看到句子后半段的"…披露的年度报告"而误判成报告期）。
+            if _YEAR_REPORT_RE.match(text, m.end()) or \
+                    not _disclosure_context(text, m.start(), m.end()):
                 hits.append(m.group(0))
         if self.doc_type == DOC_TYPE_ANNUAL:
             for w in _PERIOD_WORDS:
