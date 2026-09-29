@@ -1129,18 +1129,22 @@ class TestOrchestratorOwnership(unittest.TestCase):
             r = self._R()
             ov2.claim_orchestrator_ownership(r, instance="inst-stale")
             self.assertTrue(ov2.ownership_held())
-            # 把"本地有效截止"推到一小时前（模拟续租线程已死/进程被挂起）
-            with ov2._OWNER_LOCK:
-                ov2._OWNER_STATE["renewed_mono"] = ov2.time.monotonic() - 3600.0
-                ov2._OWNER_STATE["expires_mono"] = ov2.time.monotonic() - 3600.0
-            self.assertFalse(ov2.ownership_held(),
-                             "本地有效期已过必须判失租（不能只看布尔量）")
-            self.assertTrue(ov2.ownership_lost(),
-                            "曾经持有、现在失去 → 落库闸门要能识别")
-            lease = ov2.ownership_lease()
-            self.assertFalse(lease["valid"])
-            self.assertGreater(lease["age"], ov2.OWNER_HB_TTL)
-            self.assertLess(lease["expires_in"], 0.0)
+            # 把"本地有效截止"推到一小时前（模拟续租线程已死/进程被挂起）。
+            # **用固定时钟**：单调钟在刚开机的机器上只有几百秒（CI runner 实测），
+            # 直接 `monotonic() - 3600` 会得到负数，`age` 变成 None，断言报的是
+            # `'>' not supported between NoneType and int`——查的是环境，不是行为。
+            with mock.patch.object(ov2.time, "monotonic", lambda: 10_000.0):
+                with ov2._OWNER_LOCK:
+                    ov2._OWNER_STATE["renewed_mono"] = 6_400.0
+                    ov2._OWNER_STATE["expires_mono"] = 6_400.0
+                self.assertFalse(ov2.ownership_held(),
+                                 "本地有效期已过必须判失租（不能只看布尔量）")
+                self.assertTrue(ov2.ownership_lost(),
+                                "曾经持有、现在失去 → 落库闸门要能识别")
+                lease = ov2.ownership_lease()
+                self.assertFalse(lease["valid"])
+                self.assertGreater(lease["age"], ov2.OWNER_HB_TTL)
+                self.assertLess(lease["expires_in"], 0.0)
 
     def test_lease_lost_is_not_the_same_as_never_held(self):
         """从未持有（单机直跑/Redis 不可用）**不等于**失租——不能因此拦住落库。"""
