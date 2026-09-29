@@ -199,6 +199,37 @@ class TestDockerfileManifest(unittest.TestCase):
             missing, [],
             f"运行入口会导入这些本地条目，但 Dockerfile 没拷进镜像：{missing}")
 
+    def test_python_files_under_copied_dirs_are_tracked(self):
+        """Dockerfile 拷进去的目录，其 .py 必须在 **git 索引**里。
+
+        反例（2026-09-29 实测）：新包 `financial_analysis/` 建在仓库根下，
+        但 `.gitignore` 有一条 `models/`（本意是别提交训练产物）把它里面的
+        `financial_analysis/models/` **整目录静默忽略**——三个提交里都只有包的其余文件，
+        CI 上 `import financial_analysis` 直接 ImportError，而本地因为目录还在全绿。
+        这类"文件在磁盘上、就是没进 git"的缺口，只能在索引层面拦。
+        """
+        tracked = _tracked_paths()
+        if tracked is None:
+            self.skipTest("非 git 工作树，无法核对索引")
+        missing: list[str] = []
+        for rec in self.recs:
+            if rec.get("from_stage"):
+                continue
+            for src in rec["sources"]:
+                s = str(src).replace("\\", "/").rstrip("/")
+                if "*" in s or "?" in s:
+                    continue
+                local = ROOT / s
+                if not local.is_dir():
+                    continue
+                for py in sorted(local.rglob("*.py")):
+                    rel = py.relative_to(ROOT).as_posix()
+                    if rel not in tracked:
+                        missing.append(rel)
+        self.assertEqual(
+            missing, [],
+            f"这些 .py 在磁盘上但没进 git（很可能被 .gitignore 整目录忽略了）：{missing}")
+
     def test_required_resources_are_in_image(self):
         missing = sorted(r for r in REQUIRED_RESOURCES if not _covered(r, self.entries))
         self.assertEqual(

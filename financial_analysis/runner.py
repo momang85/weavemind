@@ -80,7 +80,7 @@ def compile_plan(question: str, dataset, *, prefer=()) -> AnalysisPlan:
 def run(model_id: str, dataset, *, params: dict | None = None,
         question: str = "") -> ModelRun:
     """跑一个注册模型 → `ModelRun`（含独立验证结论；**不写任何库、不发网络请求**）。"""
-    from .models import profit_bridge as _pb
+    from .operators import profit_bridge as _pb
 
     m = spec(model_id)
     impl, compute, _gold = OPERATORS[m.operator]
@@ -176,7 +176,7 @@ def revalidate(run: ModelRun, dataset) -> tuple[str, str]:
 
 def ratio_run(label: str, num_metric: str, den_metric: str, dataset, *, period: str = ""):
     """同年比率的受控入口（复用既有比率口径；零/负分母 → `not_computable`）。"""
-    from .models import profit_bridge as _pb
+    from .operators import profit_bridge as _pb
     periods = [p for p in (dataset.manifest.periods or ()) if p]
     p = str(period or (periods[-1] if periods else ""))
     run_id = _hash({"ratio": label, "dataset": dataset.dataset_hash, "period": p})[:24]

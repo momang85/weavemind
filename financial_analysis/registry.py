@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 from .contracts import ModelSpec, NotApplicable
-from .models import cash_quality, profit_bridge, scenario, working_capital
+from .operators import cash_quality, profit_bridge, scenario, working_capital
 
 # 算子白名单：名字 → (实现模块, 计算函数, 独立金样函数)
 OPERATORS = {

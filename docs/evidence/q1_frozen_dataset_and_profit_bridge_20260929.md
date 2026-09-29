@@ -4,7 +4,9 @@
 - 依据：`docs/金融分析与受控建模阶段Q_20260929.md` §4（最小契约与代码组织）、
   §5（第一批模型与金融口径）、§7 Q1（冻结数据集 + 一条完整利润分析链）。
 - 本批只做**包内**（不堆进编排/HTTP 巨文件）：`contracts / dataset / registry / runner /
-  validation / models.profit_bridge / report_adapter`，共 10 个文件。
+  validation / operators.profit_bridge / report_adapter`，共 10 个文件。
+  （算子目录原命名 `models/`，因 `.gitignore` 有一条 `models/` 会把源码整目录静默忽略，
+  已改名 `operators/` 并加了索引层守卫，见 `q2_model_families_20260929.md` §6。）
 - **零模型调用**：包内不 import `llm_client` / `web_ui` / `orchestrator_v2` / `task_state`，
   也不 import `requests`/`urllib.request`/`socket`——有源码级用例守着。
 

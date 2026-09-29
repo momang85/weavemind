@@ -7,7 +7,7 @@
   （见 `q0_ci_and_second_company_20260929.md`）。本批交付的是**模型族**与"缺数据就拒绝"，
   不代表 Q2 已退出。
 
-## 1. 三族模型（`financial_analysis/models/`）
+## 1. 三族模型（`financial_analysis/operators/`）
 
 | 模型 | 算子 | 输入 | 输出 | 关键纪律（写进限制并由验证项守住） |
 |---|---|---|---|---|
@@ -57,7 +57,31 @@ run ratio:*              validated  净利率 23.11% / 现金覆盖 69.37% / 资
 | `test_p0` | 434 OK |
 | `test_report_quality` / `test_offline_delivery` / `test_deploy_manifest` / `test_financial_chain` | 39 / 34 / 39 / 36 OK |
 
-## 5. 仍未做（如实）
+## 5. 算子目录改名与**索引层守卫**（本批自查出的一个真缺陷）
+
+现象：Q1/Q2 的三个提交（`3903945`/`447b04f`/`9bef7df`）里，`financial_analysis/models/` 下的
+五个 .py **一个都没进 git**——`.gitignore:30` 有一条 `models/`（本意是别提交训练产物），
+把源码目录整目录静默忽略。后果：被提交的树里 `registry.py` 仍 `from .models import …` →
+干净检出与 CI 上 `import financial_analysis` 直接 ImportError，而**本机因为目录还在，全绿**。
+这正是状态文档里点名过的"实现与用例分家"型事故，只是这次分家发生在 git 索引层。
+
+处置（改前进）：
+
+1. 目录改名 `financial_analysis/models/` → **`financial_analysis/operators/`**（不碰用户
+   `.gitignore` 的既有规则；那里有用户未提交的改动，不去混写），`registry.py`/`runner.py`
+   的 import 同步；
+2. 新增守卫 `test_deploy_manifest.test_python_files_under_copied_dirs_are_tracked`：
+   **凡 Dockerfile 拷进去的目录，其 .py 必须在 git 索引里**；
+   失败→通过证据：`git rm --cached financial_analysis/operators/profit_bridge.py`
+   → `AssertionError: Lists differ: ['financial_analysis/operators/profit_bridge.py'] != []`
+   → `git add` 后 40 OK；
+3. 干净检出等价验证：`git checkout-index -a --prefix=<tmp>` 后在该目录跑
+   `python -m unittest test_financial_analysis` → **57 OK**（只含索引里的文件）。
+
+**未修（如实）**：前三个提交本身仍缺这些文件（**不重写历史**）；HEAD 起是自洽的，
+本证据文档与提交信息都写明了这一点。
+
+## 6. 仍未做（如实）
 
 1. **第二个真实非金融公司**：材料仍取不到（四条正常入口实测见 Q0-⑤ 证据）；因此 Q2 的
    "两个真实公司、不同经营特点"门槛**未满足**，不得宣称。
