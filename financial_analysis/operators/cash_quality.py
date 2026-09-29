@@ -14,6 +14,7 @@ from decimal import Decimal
 
 from ..contracts import (
     InputRequirement, ModelSpec, NotApplicable, NotComputable, OutputSpec,
+    report_scope_ok,
 )
 
 IMPL_VERSION = "cash_quality/1.0.0"
@@ -61,6 +62,10 @@ def compute(dataset, params: dict | None = None) -> dict:
         raise NotApplicable(f"经营现金流与归母净利润主体不同（{ocf.entity_id} vs {np_.entity_id}）")
     if ocf.currency != np_.currency:
         raise NotApplicable(f"币种不同（{ocf.currency} vs {np_.currency}）")
+    # 报表范围必须相容（K0-a 反例：合并净利 + 母公司经营现金流会算出"覆盖良好"）
+    scope_ok, scope_why = report_scope_ok(ocf, np_)
+    if not scope_ok:
+        raise NotApplicable(scope_why)
     if ocf.money_scale <= 0 or np_.money_scale <= 0:
         raise NotApplicable(f"金额量纲不可换算（{ocf.unit}/{np_.unit}）")
     # 量纲不一致时先显式换算（不静默放大/缩小）：值是按**自己单位**写的数，
@@ -111,6 +116,9 @@ def gold(dataset, params: dict | None = None) -> dict:
     period = dataset.period_at(0)
     ocf = dataset.require("operating_cashflow", period)
     np_ = dataset.require("net_profit", period)
+    scope_ok, scope_why = report_scope_ok(ocf, np_)     # 独立路径同样拒绝跨范围混算
+    if not scope_ok:
+        raise NotApplicable(scope_why)
     factor = Decimal(str(ocf.money_scale)) / Decimal(str(np_.money_scale))
     diff = _d(ocf.value) * factor - _d(np_.value)
     out = {"cfo_minus_profit": float(diff.quantize(Decimal("0.01")))}

@@ -19,6 +19,7 @@ from decimal import Decimal
 
 from ..contracts import (
     InputRequirement, ModelSpec, NotApplicable, NotComputable, OutputSpec,
+    report_scope_ok,
 )
 
 IMPL_VERSION = "profit_bridge/1.0.0"
@@ -86,7 +87,11 @@ def compute(dataset, params: dict | None = None) -> dict:
             raise NotApplicable(f"{label}口径不同（{a.caliber} vs {b.caliber}）")
         if a.money_scale != b.money_scale or a.money_scale <= 0:
             raise NotApplicable(f"{label}金额量纲不一致（{a.unit} vs {b.unit}）")
-    # 跨指标（净利 vs 毛利）只要求主体/币种/量纲一致：口径可以不同，但必须**写明**
+    # 跨指标（净利 vs 毛利）**必须在同一报表范围**：只比主体/币种/量纲不够——
+    # "合并净利 + 母公司毛利"会算出闭合的桥，却是两个报表的差额（K0-a 反例）。
+    scope_ok, scope_why = report_scope_ok(cur_np, prev_np, cur_gp, prev_gp)
+    if not scope_ok:
+        raise NotApplicable(scope_why)
     if cur_np.money_scale != cur_gp.money_scale:
         raise NotApplicable(
             f"归母净利润（{cur_np.unit}）与毛利（{cur_gp.unit}）量纲不同：先换算再入桥")
@@ -112,8 +117,10 @@ def compute(dataset, params: dict | None = None) -> dict:
                     f"({cur_gp.value} - {prev_gp.value}) [毛利线以下]"),
         "inputs": (cur_np.fact_id, prev_np.fact_id, cur_gp.fact_id, prev_gp.fact_id),
         "assumptions": (
-            f"两期均为{cur_np.caliber or '合并'}口径、{cur_np.currency}、{unit}；"
-            "毛利为合并口径、归母净利为归属母公司口径（归属层不同，已在限制里写明）",
+            # 口径**从已验证输入生成**，不固定写"合并"（K0-a）：母公司口径的数据集
+            # 本来也能跑，说明里必须写它真实的那个范围。
+            f"两期均为{cur_np.caliber}口径、{cur_np.currency}、{unit}；"
+            "毛利与归母净利同属该报表范围（归属层差异已在限制里写明）",
             "期间取自数据集声明的期间顺序的最后两期",
         ),
         "diagnostics": {
@@ -160,10 +167,19 @@ def gold(dataset, params: dict | None = None) -> dict:
     if len(periods) < 2:
         raise NotApplicable("数据集只有一个期间")
     prev_p, cur_p = periods[-2], periods[-1]
-    np_cur = Decimal(str(dataset.require("net_profit", cur_p).value))
-    np_prev = Decimal(str(dataset.require("net_profit", prev_p).value))
-    gp_cur = Decimal(str(dataset.require("gross_profit", cur_p).value))
-    gp_prev = Decimal(str(dataset.require("gross_profit", prev_p).value))
+    np_cur_o = dataset.require("net_profit", cur_p)
+    np_prev_o = dataset.require("net_profit", prev_p)
+    gp_cur_o = dataset.require("gross_profit", cur_p)
+    gp_prev_o = dataset.require("gross_profit", prev_p)
+    # 金样是**独立路径**，同样要拒绝跨报表范围混算：否则"compute 拒绝了、gold 却算出来"
+    # 会让验证结论自相矛盾（K0-a）。
+    scope_ok, scope_why = report_scope_ok(np_cur_o, np_prev_o, gp_cur_o, gp_prev_o)
+    if not scope_ok:
+        raise NotApplicable(scope_why)
+    np_cur = Decimal(str(np_cur_o.value))
+    np_prev = Decimal(str(np_prev_o.value))
+    gp_cur = Decimal(str(gp_cur_o.value))
+    gp_prev = Decimal(str(gp_prev_o.value))
     d_np = np_cur - np_prev
     d_gp = gp_cur - gp_prev
     below = d_np - d_gp
@@ -184,8 +200,9 @@ def compute_ratio(dataset, num_metric: str, den_metric: str, period: str, *,
         raise NotApplicable(f"分子/分母主体不同（{num.entity_id} vs {den.entity_id}）")
     if num.currency != den.currency:
         raise NotApplicable(f"分子/分母币种不同（{num.currency} vs {den.currency}）")
-    if num.caliber != den.caliber:
-        raise NotApplicable(f"分子/分母口径不同（{num.caliber} vs {den.caliber}）")
+    scope_ok, scope_why = report_scope_ok(num, den)
+    if not scope_ok:
+        raise NotApplicable(scope_why)
     if num.money_scale <= 0 or den.money_scale <= 0:
         raise NotApplicable(f"分子/分母不可换算为金额（{num.unit}/{den.unit}）")
     den_v = Decimal(str(den.value))

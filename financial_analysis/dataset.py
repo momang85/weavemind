@@ -169,9 +169,19 @@ def freeze(rows, *, entity: str = "", entity_id: str = "", market: str = "",
     _annual = _annual_periods(observations)
     _wanted = [int(str(p).strip()) for p in (periods or ())
                if str(p).strip().isdigit()]
+    _period_gaps: list[str] = []
     if _wanted:
         _picked = tuple(p for p in _annual if _year_of(p) in set(_wanted))
-        _periods = _picked or _annual
+        # **请求的年度没有观察就是没有**（K0-a，2026-09-29 夜验收）：此前这里 `or _annual`
+        # 会退回"数据里所有年度"，于是"请求 2023/2024、载荷只有 2025"照样冻结出 2025 的
+        # 两期并跑出 validated 的分析——用**别的年度**冒充请求年度是最难发现的一类错。
+        # 现在留空并记缺口，让"缺输入/不适用"如实发生。
+        _periods = _picked
+        _missing_years = sorted(set(_wanted) - {_year_of(p) for p in _annual})
+        if _missing_years:
+            _period_gaps.append("请求年度在数据里没有对应观察："
+                                + "、".join(str(y) for y in _missing_years)
+                                + "（不自动改取别的年度）")
     else:
         _periods = _annual
     entity_id = str(entity_id or next((o.entity_id for o in observations if o.entity_id), ""))
@@ -188,6 +198,7 @@ def freeze(rows, *, entity: str = "", entity_id: str = "", market: str = "",
             slot["periods"].append(o.period)
     gaps: list[str] = [f"缺失指标：{m}" for m in (required_metrics or ())
                        if not any(o.metric == m and o.usable for o in observations)]
+    gaps.extend(_period_gaps)
     for o in observations:
         if o.state in (State.MISSING, State.UNKNOWN, State.INVALID):
             gaps.append(f"{o.metric} {o.period}：{o.state}"

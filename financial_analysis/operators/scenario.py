@@ -16,6 +16,7 @@ from decimal import Decimal
 
 from ..contracts import (
     InputRequirement, ModelSpec, NotApplicable, NotComputable, OutputSpec,
+    report_scope_ok,
 )
 
 IMPL_VERSION = "scenario/1.0.0"
@@ -110,6 +111,11 @@ def compute(dataset, params: dict | None = None) -> dict:
         raise NotApplicable("基期三个输入币种不一致")
     if not (rev.money_scale == gp.money_scale == np_.money_scale):
         raise NotApplicable("基期三个输入量纲不一致（先换算再入情景）")
+    # 三个基期输入必须同一**报表范围**（K0-a）：收入/毛利取自利润表、净利若来自
+    # 另一份报表（合并 vs 母公司）时，"毛利率 → 净利"的推算是两个报表的混合。
+    scope_ok, scope_why = report_scope_ok(rev, gp, np_)
+    if not scope_ok:
+        raise NotApplicable(scope_why)
     if _d(rev.value) <= 0:
         raise NotComputable(f"基期收入非正（{rev.value}{rev.unit}）：比率型情景不适用")
     base = {"revenue": float(rev.value), "gross_profit": float(gp.value),
@@ -205,6 +211,9 @@ def gold(dataset, params: dict | None = None) -> dict:
     rev = dataset.require("revenue", period)
     gp = dataset.require("gross_profit", period)
     np_ = dataset.require("net_profit", period)
+    scope_ok, scope_why = report_scope_ok(rev, gp, np_)   # 独立路径同样拒绝跨范围混算
+    if not scope_ok:
+        raise NotApplicable(scope_why)
     base = {"revenue": float(rev.value), "gross_profit": float(gp.value),
             "net_profit": float(np_.value)}
     up = _scenario(base, growth=float(params.get("up_growth", 0.05)),

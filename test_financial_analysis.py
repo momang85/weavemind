@@ -685,6 +685,31 @@ class TestDataAnalyzerTakesTheFinancialPath(unittest.TestCase):
         import tempfile
         self.ws = Path(tempfile.mkdtemp(prefix="fa_worker_"))
         (self.ws / "project").mkdir(parents=True, exist_ok=True)
+        self.tid = "fa-worker-1"
+        # 研究契约（K0-a）：金融分析的**退路**也必须绑定它，所以用例要有落库契约。
+        # 用临时库，不碰真实任务库。
+        import task_state
+        self.db = str(Path(tempfile.mkdtemp(prefix="fa_worker_db_")) / "t.db")
+        self._orig_db = task_state.DB_PATH
+        task_state.DB_PATH = self.db
+        self.addCleanup(setattr, task_state, "DB_PATH", self._orig_db)
+
+    def _goal(self) -> str:
+        return "研究洋河股份（002304.SZ）2023 与 2024 年年度报告研究"
+
+    def _seed_contract(self, **overrides):
+        import task_state
+        payload = {"company": "洋河股份", "company_id": "002304.SZ", "market": "cn",
+                   "periods": [2023, 2024], "caliber": "合并", "as_of": "2025-04-30",
+                   "identity_source": "form"}
+        payload.update(overrides)
+        task_state.mark_queued(self.tid, goal=self._goal(),
+                               research_request=payload, db_path=self.db)
+
+    def _write_financials(self, payload: dict):
+        (self.ws / "project" / "financials.json").write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        return payload
 
     def _write_working_paper(self, rows=None):
         wp = {"request": {"company": "洋河股份", "company_id": "002304.SZ", "market": "cn",
@@ -702,7 +727,8 @@ class TestDataAnalyzerTakesTheFinancialPath(unittest.TestCase):
     def _execute(self, instruction):
         import asyncio
         return json.loads(asyncio.run(self._worker().execute(
-            instruction, {"workspace": str(self.ws)})))
+            instruction, {"workspace": str(self.ws), "goal": self._goal(),
+                          "context": {"root_task_id": self.tid}})))
 
     def test_financial_task_runs_registered_models_and_stores_runs(self):
         # 四族输入齐备的夹具（含应收/存货/应付/营业成本）→ 四个模型全部采用并验证通过
@@ -738,6 +764,7 @@ class TestDataAnalyzerTakesTheFinancialPath(unittest.TestCase):
         注册模型一次没跑，`analysis/analysis_runs.json` 一份没有 → 交付硬门槛如实拦下
         整单（「分析未完成：交付正文只有数据与底稿」）。
         """
+        self._seed_contract()
         (self.ws / "project" / "financials.json").write_text(
             json.dumps(_financials_payload(), ensure_ascii=False), encoding="utf-8")
         self.assertFalse((self.ws / "project" / "working_paper.json").exists(),
@@ -758,6 +785,76 @@ class TestDataAnalyzerTakesTheFinancialPath(unittest.TestCase):
         self.assertEqual([r["model_id"] for r in got["plan"]["rejected"]],
                          ["working_capital"], got["plan"])
         self.assertEqual(got["status"], "partial", got["status"])
+
+    def test_no_stored_contract_is_an_actionable_gap(self):
+        """没有研究契约 → **不跑模型**，回报可行动缺口（不是"取最新两期"照跑）。"""
+        self._write_financials(_financials_payload())
+        got = self._execute("分析利润变化 [研究契约]")
+        self.assertEqual(got["mode"], "financial", got)
+        self.assertEqual(got["status"], "failed", got)
+        self.assertEqual(got["runs"], [])
+        self.assertIn("研究契约", got["gap"])
+        self.assertFalse((self.ws / "analysis_runs.json").exists(),
+                         "契约不全时不得落任何运行记录")
+
+    def test_payload_without_requested_years_is_refused(self):
+        """请求 2023/2024、载荷只有 2024/2025 → 只用 2024，并写明请求的 2023 没有观察。"""
+        self._seed_contract()
+        rows = [
+            {"year": 2025, "report_type": "年报", "report_date": "2025-12-31",
+             "disclosure_date": "2026-03-20", "revenue": 300.0, "net_profit": 70.0,
+             "gross_profit": 220.0, "operating_cashflow": 50.0},
+            {"year": 2024, "report_type": "年报", "report_date": "2024-12-31",
+             "disclosure_date": "2025-03-20", "revenue": 280.0, "net_profit": 66.0,
+             "gross_profit": 210.0, "operating_cashflow": 46.0},
+        ]
+        self._write_financials(_financials_payload(rows))
+        got = self._execute("分析利润变化 [研究契约]")
+        self.assertEqual(got["mode"], "financial", got)
+        self.assertEqual(got["dataset"]["periods"], ["2024年"], got["dataset"])
+        self.assertTrue(any("2023" in g for g in got["dataset"]["gaps"]),
+                        f"缺口要说明请求的 2023 没有观察：{got['dataset']['gaps']}")
+        # 单期数据：两期桥不适用（不得 validated），同期模型照常跑 → 状态如实为 partial
+        self.assertNotIn("profit_bridge", [r["model_id"] for r in got["runs"]])
+        self.assertEqual(got["status"], "partial", got)
+        self.assertTrue(all(r["status"] == C.RunStatus.VALIDATED for r in got["runs"]),
+                        got["runs"])
+
+    def test_wrong_company_payload_is_refused(self):
+        """契约是洋河 002304.SZ，载荷是别家公司 → 一条观察都不采用。"""
+        self._seed_contract()
+        payload = _financials_payload()
+        payload["metadata"] = dict(payload["metadata"])
+        payload["metadata"].update({"company": "贵州茅台", "stock_code": "600519"})
+        self._write_financials(payload)
+        got = self._execute("分析利润变化 [研究契约]")
+        self.assertEqual(got["status"], "failed", got)
+        self.assertIn("主体", got["gap"])
+
+    def test_other_caliber_payload_is_refused(self):
+        """契约要求合并，载荷只有母公司 → 拒绝（跨报表范围不得混算）。"""
+        self._seed_contract()
+        rows = []
+        for r in _financials_payload()["financials"]:
+            r = dict(r)
+            r["caliber"] = "母公司"
+            rows.append(r)
+        self._write_financials(_financials_payload(rows))
+        got = self._execute("分析利润变化 [研究契约]")
+        self.assertEqual(got["status"], "failed", got)
+        self.assertIn("口径", got["gap"])
+
+    def test_late_disclosure_is_excluded_but_early_one_is_kept(self):
+        """晚于 as_of 的披露不参与（2024 年报 2025-04-10 披露，契约截至 2024-04-01）。"""
+        self._seed_contract(as_of="2024-04-01")
+        self._write_financials(_financials_payload())
+        got = self._execute("分析利润变化 [研究契约]")
+        self.assertEqual(got["mode"], "financial", got)
+        # 2024 那条披露日晚于 as_of → 不进数据集；2023 那条（2024-04-10？）同样晚 →
+        # 两条都被排除 → 如实报"没有与契约相容的观察"
+        self.assertEqual(got["status"], "failed", got)
+        self.assertIn("as_of", got["gap"])
+        self.assertEqual(got["runs"], [])
 
     def test_working_paper_wins_over_preloaded_payload(self):
         """两者都在时以**底稿**为准（底稿含已选事实、口径证据与派生行）。"""
@@ -952,6 +1049,130 @@ class TestRealFrozenSampleChain(unittest.TestCase):
         self.assertAlmostEqual(got["below_gross_line_change"], 4.58, places=2)
         card = fa.analysis_card(run, run.outputs[0].output_id)
         self.assertIn("洋河股份", card["title"])
+
+
+class TestReportScopeDiscipline(unittest.TestCase):
+    """K0-a（09-29 夜验收）：**口径不回退、跨指标不混算**。
+
+    固定反例：合并净利两期 10/12、母公司毛利 30/40、母公司 CFO 20——修前利润桥与
+    现金质量都 validated（跨报表范围混算），修后必须拒绝或缺输入；同时**不能全局关闭
+    模型**：同口径数据下两个模型照常 validated。另保留"合并 CFO ÷ 归母净利"的
+    合法观察比率正例（归属层差异不等于口径不同）。
+    """
+
+    @staticmethod
+    def _mixed_rows():
+        return [
+            _row("net_profit", "2023年", 10.0),
+            _row("net_profit", "2024年", 12.0),
+            _row("gross_profit", "2023年", 30.0, caliber="母公司"),
+            _row("gross_profit", "2024年", 40.0, caliber="母公司"),
+            _row("operating_cashflow", "2024年", 20.0, caliber="母公司"),
+        ]
+
+    def test_explicit_merge_never_falls_back_to_parent_only_value(self):
+        ds = _dataset(self._mixed_rows())
+        self.assertEqual(ds.primary_caliber, "合并")
+        self.assertIsNone(ds.get("gross_profit", "2024年", caliber="合并"),
+                          "显式合并缺项时不得回退母公司值")
+        with self.assertRaises(C.MissingInput) as ctx:
+            ds.require("gross_profit", "2024年", caliber="合并")
+        self.assertIn("母公司", str(ctx.exception), "缺输入提示要给出其它口径线索")
+
+    def test_default_caliber_is_consistent_not_per_metric(self):
+        """默认口径一以贯之：不能因为某指标在另一口径下存在就换口径。"""
+        ds = _dataset(self._mixed_rows())
+        self.assertIsNotNone(ds.get("net_profit", "2024年"))
+        self.assertIsNone(ds.get("operating_cashflow", "2024年"))
+
+    def test_profit_bridge_and_cash_quality_refuse_mixed_scope(self):
+        ds = _dataset(self._mixed_rows())
+        plan = fa.compile_plan("分析本期归母净利润的变化由哪些金额项构成", ds)
+        adopted = [a.model_id for a in plan.adopted]
+        self.assertNotIn("profit_bridge", adopted, plan.adopted)
+        self.assertNotIn("cash_quality", adopted, plan.adopted)
+        rej = {r["model_id"]: r for r in plan.rejected}
+        self.assertEqual(rej["profit_bridge"]["reason"], "缺输入")
+        for mid in ("profit_bridge", "cash_quality"):
+            run = fa.run(mid, ds)
+            self.assertNotEqual(run.status, C.RunStatus.VALIDATED,
+                                f"{mid} 不得对跨范围输入给 validated：{run.reason}")
+
+    def test_models_are_not_globally_disabled(self):
+        """同一批数据里，**同口径**的模型照常跑（拒绝的是混算，不是模型）。"""
+        ds = _dataset()
+        self.assertEqual(fa.run("profit_bridge", ds).status, C.RunStatus.VALIDATED)
+        self.assertEqual(fa.run("cash_quality", ds).status, C.RunStatus.VALIDATED)
+
+    def test_report_scope_ok_rejects_mixed_and_undeclared(self):
+        a = C.Observation(fact_id="a", metric="net_profit", period="2024年",
+                          value=12.0, caliber="合并")
+        b = C.Observation(fact_id="b", metric="gross_profit", period="2024年",
+                          value=40.0, caliber="母公司")
+        ok, why = C.report_scope_ok(a, b)
+        self.assertFalse(ok)
+        self.assertIn("合并", why)
+        self.assertIn("母公司", why)
+        blank = C.Observation(fact_id="c", metric="gross_profit", period="2024年",
+                              value=40.0, caliber="")
+        ok2, why2 = C.report_scope_ok(a, blank)
+        self.assertFalse(ok2)
+        self.assertIn("未声明", why2)
+        self.assertTrue(C.report_scope_ok(a, a)[0])
+
+    def test_operators_check_scope_even_without_dataset_get(self):
+        """算子**自己**也要校验范围：直接喂一个"每条都取得到、但范围不同"的数据集。"""
+
+        class _StubDS:
+            """只实现算子用到的最小接口：require/period_at/manifest/periods。"""
+
+            def __init__(self, obs):
+                self._o = obs
+                self.manifest = type("M", (), {"periods": ("2023年", "2024年")})()
+
+            def period_at(self, offset=0):
+                ps = ["2023年", "2024年"]
+                return ps[len(ps) - 1 + int(offset)]
+
+            def require(self, metric, period, **kw):
+                return self._o[(metric, period)]
+
+        obs = {
+            ("net_profit", "2024年"): C.Observation(
+                fact_id="np", metric="net_profit", period="2024年", value=12.0,
+                unit="亿元", currency="CNY", entity_id="X", caliber="合并"),
+            ("net_profit", "2023年"): C.Observation(
+                fact_id="np0", metric="net_profit", period="2023年", value=10.0,
+                unit="亿元", currency="CNY", entity_id="X", caliber="合并"),
+            ("gross_profit", "2024年"): C.Observation(
+                fact_id="gp", metric="gross_profit", period="2024年", value=40.0,
+                unit="亿元", currency="CNY", entity_id="X", caliber="母公司"),
+            ("gross_profit", "2023年"): C.Observation(
+                fact_id="gp0", metric="gross_profit", period="2023年", value=30.0,
+                unit="亿元", currency="CNY", entity_id="X", caliber="母公司"),
+            ("operating_cashflow", "2024年"): C.Observation(
+                fact_id="cf", metric="operating_cashflow", period="2024年", value=20.0,
+                unit="亿元", currency="CNY", entity_id="X", caliber="母公司"),
+        }
+        ds = _StubDS(obs)
+        from financial_analysis.operators import cash_quality as cq
+        from financial_analysis.operators import profit_bridge as pb
+        with self.assertRaises(C.NotApplicable) as e1:
+            pb.compute(ds, {})
+        self.assertIn("母公司", str(e1.exception))
+        with self.assertRaises(C.NotApplicable) as e2:
+            cq.compute(ds, {})
+        self.assertIn("母公司", str(e2.exception))
+
+    def test_same_scope_cfo_over_parent_net_profit_ratio_still_allowed(self):
+        """正例：合并 CFO ÷ 归母净利是**同一范围**的观察比率（归属层差异不是口径不同）。"""
+        ds = _dataset()
+        run = fa.run("cash_quality", ds)
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        cov = [o for o in run.outputs if o.metric == "cashflow_coverage"]
+        self.assertTrue(cov, run.outputs)
+        self.assertTrue(any(("归母" in x or "归属" in x) for x in run.outputs[0].limits),
+                        "限制说明必须写明归属层差异")
 
 
 if __name__ == "__main__":

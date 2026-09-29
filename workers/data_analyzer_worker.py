@@ -14,6 +14,55 @@ from async_worker_base import AsyncWorkerBase
 CHART_DIR = Path(tempfile.gettempdir()) / "agent_workspace" / "charts"
 pass
 
+class ContractGap(RuntimeError):
+    """研究契约要素不全：**不跑模型**，把缺什么直接说给读者（K0-a）。
+
+    为什么宁可不跑：裸载荷里"有哪些年度就取最新两期"、不认主体/口径/as_of，会让
+    "请求 2023/2024 而载荷只有 2025"、"错公司/错口径/晚披露"静默进入模型并算出
+    validated 的结论——比缺一个模型卡危险得多。
+    """
+
+
+def _research_contract(task: dict, payload: dict):
+    """取本次任务的**研究契约**（与底稿同一条解析链）→ `(request, gaps, source)`。
+
+    复用 `working_paper_export.resolve_request`：落库契约优先，自由文本兜底；
+    这里只判"够不够跑模型"：主体、两个以上年度期间、报表口径、资料截止日 as_of。
+    """
+    from facts import UNKNOWN
+    from working_paper_export import resolve_request
+
+    md = dict((payload or {}).get("metadata") or {})
+    if str((payload or {}).get("source") or "") == "multi_entity":
+        md = dict(((payload or {}).get("companies") or [{}])[0].get("metadata") or {}) or md
+    root = str(((task or {}).get("context") or {}).get("root_task_id")
+               or (task or {}).get("task_id") or "")
+    goal = str((task or {}).get("goal") or "")
+    request, _cands, source = resolve_request(
+        root, goal, md, (payload or {}).get("resolution") or {})
+    gaps: list[str] = []
+    if request is None or not (getattr(request, "company", "")
+                               or getattr(request, "company_id", "")):
+        gaps.append("研究主体（公司名或股票代码）")
+    else:
+        if len([p for p in (getattr(request, "periods", None) or [])
+                if str(p).strip()]) < 2:
+            gaps.append("两个以上年度期间")
+        if str(getattr(request, "caliber", "") or UNKNOWN) == UNKNOWN:
+            gaps.append("报表口径（合并/母公司）")
+        if not str(getattr(request, "as_of", "") or "").strip():
+            gaps.append("资料截止日 as_of")
+    return request, gaps, source
+
+
+def _with_extra_gaps(ds, extra: list[str]):
+    """把"哪些观察因与契约不相容被排除"记进清单缺口（冻结结果不可变 → 换一份）。"""
+    import dataclasses
+
+    gaps = tuple(list(ds.manifest.gaps) + [g for g in extra if g])
+    return dataclasses.replace(ds, manifest=dataclasses.replace(ds.manifest, gaps=gaps))
+
+
 class DataAnalyzerWorker(AsyncWorkerBase):
     _class_capabilities = ["data_analyzer"]
     _needs_task = True
@@ -47,12 +96,16 @@ class DataAnalyzerWorker(AsyncWorkerBase):
         return None
 
     @staticmethod
-    def _freeze_dataset(kind: str, path: Path, *, required_metrics, available_models):
+    def _freeze_dataset(kind: str, path: Path, *, task: dict | None,
+                        required_metrics, available_models):
         """按来源冻结数据集（`(dataset, 来源标签)`）。
 
         两条路都是**显式来源 + 来源声明的元数据**，都不做"哪个数更好"的猜测：
         同一 (指标, 期间, 口径) 出现互不相容的值由冻结层如实标记冲突，不择一。
-        差别只在覆盖度——底稿带派生行（同比/比率）与已选事实，载荷只有原始指标。
+
+        **退路同样绑定研究契约**（K0-a，2026-09-29 夜验收）：`financials.json` 只是
+        载荷，不是契约——主体/两期/口径/as_of 一律来自任务契约；与该契约不相容的观察
+        （错公司、别的口径、披露日晚于 as_of）**不参与冻结**，一条都不剩就如实报缺口。
         """
         import financial_analysis as fa
 
@@ -65,9 +118,41 @@ class DataAnalyzerWorker(AsyncWorkerBase):
             return ds, label
         import facts as _facts
         payload = json.loads(path.read_text(encoding="utf-8"))
+        request, gaps, _source = _research_contract(task or {}, payload)
+        if gaps:
+            raise ContractGap(
+                "金融分析缺少研究契约要素：" + "、".join(gaps)
+                + "（不得用裸载荷默认取最新两期；请补齐研究请求后重跑）")
+        want_cal = str(getattr(request, "caliber", "") or "")
+        as_of = str(getattr(request, "as_of", "") or "")[:10]
+        kept, dropped = [], {"subject": 0, "caliber": 0, "as_of": 0}
+        for f in _facts.facts_from_financials(payload):
+            ok, _why = _facts.check_subject(request, f.entity, f.entity_id, f.market)
+            if not ok:
+                dropped["subject"] += 1
+                continue
+            if want_cal and str(getattr(f, "caliber", "") or "") != want_cal:
+                dropped["caliber"] += 1
+                continue
+            _disc = str(getattr(f, "disclosed_at", "") or "")[:10]
+            if as_of and _disc and _disc > as_of:
+                dropped["as_of"] += 1
+                continue
+            kept.append(f)
+        if not kept:
+            raise ContractGap(
+                "载荷里没有与契约相容的观察（主体/口径/as_of）："
+                f"契约主体={request.company or request.company_id}、口径={want_cal}、"
+                f"as_of={as_of}；被排除 "
+                + "、".join(f"{k} {v} 条" for k, v in dropped.items() if v)
+                + "。请核对来源或补材料")
         ds = fa.freeze_from_facts(
-            _facts.facts_from_financials(payload), source_label=label,
+            kept, request=request, source_label=label,
             required_metrics=required_metrics, available_models=available_models)
+        if dropped and any(dropped.values()):
+            ds = _with_extra_gaps(ds, [
+                "与契约不相容的观察已排除：" + "、".join(
+                    f"{k} {v} 条" for k, v in dropped.items() if v)])
         return ds, label
 
     def _run_financial(self, ws: Path, instruction: str, task: dict, source) -> dict:
@@ -76,10 +161,20 @@ class DataAnalyzerWorker(AsyncWorkerBase):
         from financial_analysis import store as fa_store
 
         kind, path = source
-        ds, source_label = self._freeze_dataset(
-            kind, path,
-            required_metrics=("revenue", "net_profit", "gross_profit", "operating_cashflow"),
-            available_models=[m.model_id for m in fa.specs()])
+        try:
+            ds, source_label = self._freeze_dataset(
+                kind, path, task=task,
+                required_metrics=("revenue", "net_profit", "gross_profit",
+                                  "operating_cashflow"),
+                available_models=[m.model_id for m in fa.specs()])
+        except ContractGap as exc:
+            # 如实失败：不产出任何运行记录，也不拿别的数顶上（读者拿到可行动缺口）
+            return {"status": "failed", "mode": "financial",
+                    "dataset_source": {"kind": kind, "file": path.name,
+                                       "label": f"worker:{path.name}"},
+                    "error": str(exc), "gap": str(exc), "runs": [], "cards": [],
+                    "chart_specs": [],
+                    "note": "研究契约要素不全：不跑注册模型（缺口见 error）"}
         plan = fa.compile_plan(str(instruction or ""), ds, prefer=("profit_bridge",))
         runs, cards, specs = [], [], []
         for item in plan.adopted:

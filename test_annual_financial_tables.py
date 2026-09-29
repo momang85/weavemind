@@ -108,6 +108,82 @@ class TestLabelSemantics(unittest.TestCase):
         self.assertEqual(out["facts"], [])
 
 
+class TestSilentErrorGuards(unittest.TestCase):
+    """K0-b（09-29 夜验收）：**静默错数**的六类反例——宁可拒绝，不得借/倒/截/跨/推/择。
+
+    每条都先在本轮 HEAD 上复现"错得看起来正常"，再修到拒绝或按列标签映射。
+    """
+
+    def test_empty_inventory_does_not_borrow_the_next_account(self):
+        """`存货` 空行 + `在建工程 200.00 180.00` → 不得把在建工程当存货（未知行标签=新行）。"""
+        out = aft.extract(_doc("1、合并资产负债表\n单位：元\n2020 年 2019 年\n"
+                              "存货\n在建工程 200.00 180.00\n"),
+                          company="京蓝科技", company_code="000711.SZ", periods=(2019, 2020))
+        self.assertEqual([f for f in out["facts"] if f["metric"] == "inventory"], [],
+                         f"存货不得借下一科目：{out['facts']}")
+
+    def test_end_start_columns_follow_the_label_order(self):
+        """`期初余额 期末余额` → 90 是**上一年**、100 才是本期（旧码固定映射成倒年）。"""
+        out = aft.extract(_doc("1、合并资产负债表\n单位：元\n2020 年 12 月 31 日\n"
+                              "项目 期初余额 期末余额\n存货 90.00 100.00\n"),
+                          company="京蓝科技", company_code="000711.SZ", periods=(2019, 2020))
+        got = {(f["period"]): f["value"] for f in out["facts"] if f["metric"] == "inventory"}
+        self.assertEqual(got, {"2019年": 90.0, "2020年": 100.0}, got)
+        self.assertTrue(all(f["period_kind"] == "stock" for f in out["facts"]))
+
+    def test_full_opening_date_is_not_read_as_year_end(self):
+        """`2020年1月1日`（= 上年末年初数）不得被截成"2020年"占年末那一格。"""
+        out = aft.extract(_doc("1、合并资产负债表\n单位：元\n"
+                              "项目 2020年1月1日 2020年12月31日\n存货 90.00 100.00\n"),
+                          company="京蓝科技", company_code="000711.SZ", periods=(2020,))
+        got = [(f["period"], f["value"]) for f in out["facts"] if f["metric"] == "inventory"]
+        self.assertEqual(got, [("2020年", 100.0)], got)
+        self.assertIn("2020年12月31日", out["facts"][0]["period_label"])
+
+    def test_new_table_does_not_borrow_previous_header_or_unit(self):
+        """母公司表缺年份/单位：不得跨标题借上一张合并表的年份与"万元"。"""
+        text = ("1、合并资产负债表\n单位：万元\n2020 年 2019 年\n"
+                "营业收入 1,000.00 900.00\n"
+                "2、母公司资产负债表\n应收账款 18,600,000.00 18,600,000.00\n")
+        out = aft.extract(_doc(text), company="京蓝科技", company_code="000711.SZ",
+                          periods=(2019, 2020))
+        got = {(f["metric"], f["period"], f["value"]) for f in out["facts"]}
+        self.assertIn(("revenue", "2020年", 10000000.0), got, "合并表那一行照常取")
+        self.assertEqual([f for f in out["facts"] if f["caliber"] == "母公司"], [],
+                         f"母公司表没有自己的表头就不取：{out['facts']}")
+        self.assertTrue({"no_periods", "no_unit_evidence"} &
+                        {r["reason"] for r in out["rejected"]}, out["rejected"])
+
+    def test_declared_currency_beats_unit_inference(self):
+        """`单位：元 币种：美元` 是**美元**（"元"是美元的基本单位），不得推断成 CNY。"""
+        out = aft.extract(_doc("1、合并利润表\n单位：元 币种：美元\n2024 年 2023 年\n"
+                              "营业收入 100.00 90.00\n"),
+                          company="京蓝科技", company_code="000711.SZ", periods=(2023, 2024))
+        f = [x for x in out["facts"] if x["metric"] == "revenue"][0]
+        self.assertEqual(f["currency"], "USD")
+        self.assertIn("币种", f["currency_source"])
+        self.assertEqual(f["unit"], "元")
+        self.assertIn("单位", f["unit_source"])
+
+    def test_conflicting_revenue_does_not_derive_gross_profit(self):
+        """收入 100/110 冲突 + 成本 60 → 不得先字典择末派生毛利 50（冲突向派生传播）。"""
+        text = ("1、合并利润表\n单位：元\n2024 年 2023 年\n"
+                "营业收入 100.00 90.00\n营业成本 60.00 50.00\n"
+                "1、合并现金流量表\n单位：元\n2024 年 2023 年\n营业收入 110.00 90.00\n")
+        out = aft.extract(_doc(text), company="京蓝科技", company_code="000711.SZ",
+                          periods=(2023, 2024))
+        self.assertEqual([f for f in out["facts"] if f["metric"] == "gross_profit"], [],
+                         f"extract 不派生，派生只在 to_dataset 里做：{out['facts']}")
+        rej: list = []
+        rows = list(out["facts"]) + aft.derive_gross_profit(out["facts"], rej)
+        derived = {r["period"]: r["value"] for r in rows if r["metric"] == "gross_profit"}
+        # 2024 收入 100/110 冲突 → **不派生**；2023 两张表都是 90 → 已消歧，照常派生 40
+        self.assertNotIn("2024年", derived, f"父冲突不得派生：{derived}")
+        self.assertEqual(derived.get("2023年"), 40.0, derived)
+        self.assertTrue([r for r in rej if r["reason"] == "derivation_input_conflict"],
+                        f"要给「为什么不派生」的原因：{rej}")
+
+
 class TestEvidenceGates(unittest.TestCase):
     def _body(self, rows: str, title: str = "1、合并资产负债表",
               unit: str = "单位：元") -> str:

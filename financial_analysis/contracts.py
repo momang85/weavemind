@@ -174,8 +174,12 @@ class AnalysisDataset:
         所有模型都报"缺输入"——数据齐备却跑不出任何模型（三一/洋河都踩到）。
         解决办法不是"随便挑一条"，而是**把口径选择显式化**：主口径优先，
         要别的口径必须显式传 `caliber=…`，且同一口径内仍不允许在两个不同值之间任选。
+
+        **不可用观察也参与判定**（K0-a）：只有一条"口径已声明但元数据不可用"的观察时，
+        主口径仍是它声明的那个——否则 `get()` 会返回 `None`，把"观察不可用"错报成
+        "缺输入"，两种情况对读者的含义不同。
         """
-        cals = [o.caliber for o in self.observations if o.usable and o.caliber]
+        cals = [o.caliber for o in self.observations if o.caliber]
         if not cals:
             return ""
         if DEFAULT_CALIBER in cals:
@@ -184,34 +188,56 @@ class AnalysisDataset:
         return uniq[0] if len(uniq) == 1 else ""
 
     def get(self, metric: str, period: str, *, caliber: str | None = None):
-        """取一条观察；`caliber` 未给时用**主口径**，同一口径内多条不同值仍返回 `None`。
+        """取一条观察；**口径不回退**（K0-a，2026-09-29 夜验收反例）。
 
-        主口径取不到时，退回"只有唯一一条就返回它"（旧规则）：
-        - 该条可能是**不可用**的（元数据不全）——必须能被找到并如实报"不可用"，
-          不能悄悄变成"缺输入"（两者含义不同）；
-        - 也可能这个指标只在另一种口径里——跨口径混用**不会**被这里静默放行：
-          算子自己会核对输入口径是否一致（`profit_bridge` 会抛 `NotApplicable`）。
-        真正危险的"同一 (指标,期间) 有两条不同值"仍然返回 `None`，绝不任选一条。
+        规则（两条都是"要么这个口径，要么没有"）：
+
+        - 显式 `caliber` → 只认这一个口径。该口径下唯一一条就返回它（哪怕**不可用**——
+          调用方才能如实报"观察不可用"而不是"缺输入"，两者含义不同）；同一口径内多条
+          **身份不同**的观察 → `None`（不任选）。**绝不回退到别的口径**：此前显式
+          "合并"缺项时会静默返回唯一那条母公司值，于是"合并净利 10/12 + 母公司毛利
+          30/40"照样算出 validated 的利润桥（跨报表范围混算）。
+        - 未给 `caliber` → 用 `primary_caliber`（默认研究口径，合并优先），**一以贯之**：
+          不能逐指标挑"哪个口径有就用哪个"。主口径为空（多口径且没声明默认）时按
+          "口径不明确"处理，返回 `None`，由调用方报缺输入。
         """
         want = self.primary_caliber if caliber is None else str(caliber)
-        if want:
-            key = (str(metric), str(period), want)
-            if key in self.index:
-                return self.index[key]
-            hits = [o for o in self.observations
-                    if o.metric == str(metric) and o.period == str(period)
-                    and o.caliber == want]
-            if hits:
-                return hits[0] if len(hits) == 1 else None
-        all_hits = [o for o in self.observations
-                    if o.metric == str(metric) and o.period == str(period)]
-        return all_hits[0] if len(all_hits) == 1 else None
+        if not want:
+            return None
+        hits = [o for o in self.observations
+                if o.metric == str(metric) and o.period == str(period)
+                and o.caliber == want]
+        if not hits:
+            # 口径**未声明**的观察只作**诊断**返回（它必然是"不可用"，`require` 会拒），
+            # 好让调用方能如实说"观察不可用"而不是"缺输入"；**绝不**返回另一个已声明口径
+            # 的值——那正是"显式合并回退母公司"的跨报表范围混算（K0-a 反例）。
+            und = [o for o in self.observations
+                   if o.metric == str(metric) and o.period == str(period)
+                   and str(o.caliber or "") in _UNDECLARED_CALIBERS]
+            return und[0] if len(und) == 1 and not und[0].usable else None
+        if len(hits) == 1:
+            return hits[0]
+        # 同一口径内多条：只有**身份完全一致**才算同一条观察（否则是冲突，不任选）
+        hashes = {o.observation_hash for o in hits}
+        return hits[0] if len(hashes) == 1 else None
+
+    def calibers_of(self, metric: str, period: str) -> list[str]:
+        """该 (指标, 期间) 出现在哪些口径下（缺输入时给读者一条可行动线索）。"""
+        return sorted({str(o.caliber or "") or "未标"
+                       for o in self.observations
+                       if o.metric == str(metric) and o.period == str(period)})
 
     def require(self, metric: str, period: str, *, caliber: str | None = None) -> Observation:
         obs = self.get(metric, period, caliber=caliber)
         if obs is None:
+            _want = self.primary_caliber if caliber is None else str(caliber)
+            _others = [c for c in self.calibers_of(metric, period)
+                       if c != (_want or "未标")]
+            _hint = (f"；该 (指标, 期间) 另有其它口径（{'、'.join(_others)}）——"
+                     "跨口径不得代替" if _others else "")
             raise MissingInput(f"缺少观察：{metric} {period}"
-                               + (f"（口径 {caliber}）" if caliber else ""))
+                               + (f"（口径 {caliber}）" if caliber else "")
+                               + _hint)
         if not obs.usable:
             raise MissingInput(f"观察不可用（{obs.state}）：{metric} {period}" + (
                 f"：{obs.note}" if obs.note else ""))
@@ -233,6 +259,33 @@ class AnalysisDataset:
 
 class MissingInput(RuntimeError):
     """输入缺失/不可用：**停止该分析**，输出补料清单，不用别的数顶上。"""
+
+
+# 未声明口径的两种写法：空串与抽取层给的 "unknown"。
+_UNDECLARED_CALIBERS = ("", "unknown")
+
+
+def report_scope_ok(*observations) -> tuple[bool, str]:
+    """一批观察的**报表范围**是否相容（跨指标/跨期共用同一判据）。
+
+    为什么单独成判据（2026-09-29 夜验收反例）：利润桥原本只比"同指标两期"的主体/
+    币种/量纲，跨指标只比量纲——于是"合并净利 10/12 + 母公司毛利 30/40 + 母公司 CFO 20"
+    照样 validated。**"归母净利 vs 全部权益"的归属层差异，不等于允许母公司报表与合并
+    报表混算**：跨指标比较必须在同一报表范围（合并/母公司）内，且该范围要**有声明**。
+
+    返回 `(是否相容, 原因)`；原因直接进 `NotApplicable` 的读者可见说明。
+    """
+    obs = [o for o in observations if o is not None]
+    cals = {str(getattr(o, "caliber", "") or "") for o in obs}
+    if cals & set(_UNDECLARED_CALIBERS):
+        shown = "、".join(sorted(c or "空" for c in cals))
+        return False, (f"跨指标报表范围未声明（{shown}）：无法证明范围相容，"
+                       "先补口径证据再入模型")
+    if len(cals) > 1:
+        shown = "、".join(sorted(cals))
+        return False, (f"跨指标报表范围不一致（{shown}）：合并报表与母公司报表不得混算，"
+                       "同一模型只接受同一范围的输入")
+    return True, ""
 
 
 class NotApplicable(RuntimeError):
