@@ -261,6 +261,17 @@ class TestVersionsAndMaterialKind(CninfoDiscoveryTestCase):
         self.assertEqual(cninfo._date_from_ms("abc"), ("", ""))
         self.assertEqual(cninfo._date_from_ms(0), ("", ""))
 
+    def test_disclosure_date_uses_the_exchange_timezone(self):
+        """披露日按**交易所本地时区（UTC+8）**换算，不随宿主时区漂移。
+
+        反例（CI 实测）：`1744905600000` 是北京时间 2025-04-18 00:00，
+        在 UTC 机器上按本地时区算成 2025-04-17 → 同一份披露两地不同日，
+        足以让"截至日"判据翻面。
+        """
+        # 2025-04-17T16:00:00Z == 2025-04-18 00:00 CST：UTC 下是前一天，CST 下是当天
+        self.assertEqual(cninfo._date_from_ms(1744905600000), ("2025-04-18", "day"))
+        self.assertEqual(cninfo._date_from_ms(1757001600000), ("2025-09-05", "day"))
+
 
 class TestDiscoverContract(CninfoDiscoveryTestCase):
     """`disclosure_ingest.discover()`：候选 → 准入，且恢复入口是**可行动的**。"""

@@ -33,6 +33,7 @@ import os
 import threading
 import time
 import urllib.parse
+from datetime import timedelta, timezone
 
 from adapters import source_registry as registry
 
@@ -50,6 +51,14 @@ STATIC_BASE = "http://static.cninfo.com.cn/"
 PARAM_CONTRACT = "cninfo-hisannouncement-v1"
 QUERY_REFERER = "https://www.cninfo.com.cn/new/commonUrl?url=disclosure/list/notice"
 CATEGORY_ANNUAL = "category_ndbg_szsh"          # 年度报告（含摘要/更正后）
+# 交易所本地时区（UTC+8）：披露日与"当年"都按它算，不随宿主时区变化
+_EXCHANGE_TZ = timezone(timedelta(hours=8))
+
+
+def _exchange_today() -> time.struct_time:
+    """交易所本地时区的"今天"（用于窗口右端默认值）。"""
+    from datetime import datetime
+    return datetime.now(tz=_EXCHANGE_TZ).timetuple()
 # orgId 映射的进程内缓存时长：映射变化很慢，没必要每次都下 0.6 MB
 ORG_MAP_TTL = float(os.environ.get("WEAVEMIND_CNINFO_ORG_TTL", "") or 6 * 3600)
 DEFAULT_TIMEOUT = 25
@@ -269,10 +278,10 @@ def _year_span(years, *, until: str = "") -> str:
     而"原版与更正版并存"是准入侧的硬要求。想限定"截至某日已知"时传 `until`。
     """
     got = sorted({int(y) for y in (years or ()) if str(y).strip().isdigit()})
-    start = f"{got[0] - 1}-01-01" if got else f"{time.localtime().tm_year - 2}-01-01"
+    start = f"{got[0] - 1}-01-01" if got else f"{_exchange_today().tm_year - 2}-01-01"
     if str(until or "").strip():
         return f"{start}~{str(until).strip()[:10]}"
-    latest = max([time.localtime().tm_year + 1] + [y + 1 for y in got])
+    latest = max([_exchange_today().tm_year + 1] + [y + 1 for y in got])
     return f"{start}~{latest}-12-31"
 
 
@@ -352,7 +361,12 @@ def _normalize(row: dict, code: str) -> dict:
 
 
 def _date_from_ms(stamp) -> tuple[str, str]:
-    """毫秒时间戳 → `(YYYY-MM-DD, 'day')`；缺字段/非法值 → `("", "")`（不猜日期）。"""
+    """毫秒时间戳 → `(YYYY-MM-DD, 'day')`；缺字段/非法值 → `("", "")`（不猜日期）。
+
+    **按交易所本地时区（UTC+8）换算，不用宿主时区**：接口给的是北京时间零点，
+    在 UTC 机器上按本地时区算会整体退回一天（CI 实测 `2025-04-17 != 2025-04-18`），
+    于是同一份披露在不同机器上得到不同披露日——足以让"截至日"判据翻面。
+    """
     try:
         seconds = float(stamp) / 1000.0
     except (TypeError, ValueError):
@@ -360,7 +374,8 @@ def _date_from_ms(stamp) -> tuple[str, str]:
     if seconds <= 0:
         return "", ""
     try:
-        return time.strftime("%Y-%m-%d", time.localtime(seconds)), "day"
+        from datetime import datetime
+        return datetime.fromtimestamp(seconds, tz=_EXCHANGE_TZ).strftime("%Y-%m-%d"), "day"
     except (OverflowError, OSError, ValueError):
         return "", ""
 
