@@ -15,11 +15,14 @@ from __future__ import annotations
 
 import gzip
 import http.server
+import socket
 import threading
 import time
 import unittest
 
 from adapters import search_runner as sr
+from adapters import transport as tr
+import net_policy
 
 
 class _Handler(http.server.BaseHTTPRequestHandler):
@@ -29,7 +32,7 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         pass
 
     def _send(self, status: int, body: bytes, *, ctype="application/json",
-              chunked=False, gzip_body=False):
+              chunked=False, gzip_body=False, drip=0.0):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         if gzip_body:
@@ -47,11 +50,17 @@ class _Handler(http.server.BaseHTTPRequestHandler):
         else:
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
-            self.wfile.write(body)
-            self.wfile.flush()
+            for i in range(0, len(body), 16):
+                self.wfile.write(body[i:i + 16])
+                self.wfile.flush()
+                if drip:
+                    time.sleep(drip)
+            return
 
     def do_GET(self):
-        if self.path.startswith("/big"):
+        if self.path.startswith("/slow"):
+            self._send(200, b"z" * 400, drip=0.06)
+        elif self.path.startswith("/big"):
             self._send(200, b"y" * 5000)
         elif self.path.startswith("/chunked"):
             self._send(200, b"%PDF-1.7 chunked", ctype="application/pdf", chunked=True)
@@ -106,6 +115,115 @@ class TestBoundedReadByteCap(unittest.TestCase):
     def test_no_cap_means_no_limit(self):
         with self._open("/big") as resp:
             self.assertEqual(len(sr.read_with_deadline(resp, time.monotonic() + 10)), 5000)
+
+
+class TestNetPolicyChunkedAndDeadline(unittest.TestCase):
+    """`net_policy._read_http_response`：成熟解析（chunked/gzip）+ **时钟同源**的总截止。
+
+    用 socketpair 直接喂字节流——不走 `fetch_document` 的公网校验与 IP pinning
+    （守卫另有专项测试），只验"响应怎么被读成字节"。
+    """
+
+    def _serve(self, payload: bytes, *, drip: float = 0.0):
+        srv, cli = socket.socketpair()
+        self.addCleanup(srv.close)
+        self.addCleanup(cli.close)
+
+        def _feed():
+            try:
+                step = 8 if drip else len(payload)
+                for i in range(0, len(payload), step):
+                    if drip:
+                        time.sleep(drip)
+                    srv.sendall(payload[i:i + step])
+            except Exception:                        # noqa: BLE001
+                pass
+            finally:
+                try:
+                    srv.shutdown(socket.SHUT_WR)
+                except Exception:                    # noqa: BLE001
+                    pass
+
+        threading.Thread(target=_feed, daemon=True).start()
+        return cli
+
+    def test_chunked_body_is_decoded(self):
+        body = b"%PDF-1.7 hello chunked"
+        framed = (b"HTTP/1.1 200 OK\r\nContent-Type: application/pdf\r\n"
+                  b"Transfer-Encoding: chunked\r\n\r\n")
+        for i in range(0, len(body), 8):
+            piece = body[i:i + 8]
+            framed += b"%x\r\n%s\r\n" % (len(piece), piece)
+        framed += b"0\r\n\r\n"
+        out = net_policy._read_http_response(self._serve(framed), url="http://x/y.PDF",
+                                            egress="direct", cap=1_000_000, budget=5.0)
+        self.assertEqual(out["raw"], body, "chunked 必须解开：分块框架不能进正文")
+        self.assertIn("chunked", out["transfer_encoding"])
+
+    def test_gzip_body_is_decoded(self):
+        body = b'{"ok":true}'
+        blob = gzip.compress(body)
+        payload = (b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n"
+                   b"Content-Encoding: gzip\r\nContent-Length: %d\r\n\r\n" % len(blob)) + blob
+        out = net_policy._read_http_response(self._serve(payload), url="http://x/y",
+                                            egress="direct", cap=1_000_000, budget=5.0)
+        self.assertEqual(out["raw"], body)
+
+    def test_total_deadline_on_slow_chunked_body(self):
+        """反例：`started` 是墙钟而读取用单调钟 → 截止算成几十亿秒、永不触发。"""
+        framed = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+        for _ in range(40):
+            framed += b"8\r\n" + b"z" * 8 + b"\r\n"
+        framed += b"0\r\n\r\n"
+        t0 = time.monotonic()
+        with self.assertRaises(net_policy.FetchError) as ctx:
+            net_policy._read_http_response(self._serve(framed, drip=0.02),
+                                          url="http://x/y", egress="direct",
+                                          cap=1_000_000, budget=0.2)
+        self.assertLess(time.monotonic() - t0, 1.5, "总截止未执行")
+        self.assertIn("超时", str(ctx.exception))
+
+    def test_redirect_not_followed_and_cap_enforced(self):
+        payload = b"HTTP/1.1 302 Found\r\nLocation: http://elsewhere/\r\nContent-Length: 0\r\n\r\n"
+        with self.assertRaises(net_policy.FetchError) as ctx:
+            net_policy._read_http_response(self._serve(payload), url="http://x/y",
+                                          egress="direct", cap=1000, budget=5.0)
+        self.assertIn("重定向", str(ctx.exception))
+        body = b"z" * 5000
+        big = b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(body) + body
+        with self.assertRaises(net_policy.FetchError) as ctx2:
+            net_policy._read_http_response(self._serve(big), url="http://x/y",
+                                          egress="direct", cap=1000, budget=5.0)
+        self.assertIn("上限", str(ctx2.exception))
+
+
+class TestTransportChannelsHonourTotalDeadline(unittest.TestCase):
+    """两个 urllib 通道的**总截止**（本地替身；临时放行 SSRF 守卫，产品校验未改）。"""
+
+    def setUp(self):
+        import unittest.mock as mock
+        self.srv = _Server()
+        self.addCleanup(self.srv.close)
+        for name, val in (("_validate_public_url", lambda url: True),
+                          ("_require_egress_ok", lambda: None),
+                          ("_throttle_and_rewrite", lambda url: url)):
+            p = mock.patch.object(tr, name, val)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_text_channel_stops_at_the_deadline(self):
+        """文本通道有总截止；**字节通道本批未闭合**（它只有 socket 超时 + 大小上限，
+        保留既有"截断 + over_limit"契约，见证据"未交付"一节）。"""
+        t0 = time.monotonic()
+        with self.assertRaises(Exception) as ctx:
+            tr.get_via_urllib(self.srv.url("/slow"), timeout=1)
+        self.assertLess(time.monotonic() - t0, 3.0, "总截止未执行（慢体）")
+        self.assertIn("deadline", str(ctx.exception).lower())
+
+    def test_binary_channel_reports_too_large(self):
+        out = tr.get_bytes_via_urllib(self.srv.url("/big"), timeout=5, max_bytes=100)
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["error_kind"], "too_large", out)
 
 
 class TestCapacityPolicyIsCentralised(unittest.TestCase):

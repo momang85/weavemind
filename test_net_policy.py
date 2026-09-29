@@ -151,9 +151,23 @@ class TestFetchDocumentTransport(unittest.TestCase):
         calls = {"connect": []}
 
         class _Sock:
+            """最小假 socket：够 `http.client.HTTPResponse` 解析。
+
+            生产路径改用成熟实现解析响应（A1），所以替身必须提供 `makefile`；
+            另存一份**稳定副本**给 `makefile`，避免与 `recv` 共享同一游标。
+            """
+
             def __init__(self, data):
                 self._data = data
+                self._orig = bytes(data)
                 self.sent = b""
+
+            def makefile(self, mode="rb", *a, **k):
+                import io as _io
+                return _io.BytesIO(self._orig)
+
+            def settimeout(self, v):
+                self._timeout = v
 
             def sendall(self, data):
                 self.sent += data
@@ -200,6 +214,14 @@ class TestFetchDocumentTransport(unittest.TestCase):
 
             def recv(self, n):
                 return b"HTTP/1.1 200 OK\r\n\r\nok" if not self.sent else b""
+
+            def makefile(self, mode="rb", *a, **k):
+                # 生产路径改用 http.client 解析响应（A1）：假 socket 必须能给出字节流
+                import io as _io
+                return _io.BytesIO(b"HTTP/1.1 200 OK\r\n\r\nok")
+
+            def settimeout(self, v):
+                self._timeout = v
 
             def close(self):
                 pass
@@ -360,6 +382,9 @@ class _FakeResp:
         out = self._body[self._pos:self._pos + n]
         self._pos += len(out)
         return out
+
+    def read1(self, n: int = -1):
+        return self.read(n)
 
     def __enter__(self):
         return self

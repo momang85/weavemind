@@ -93,3 +93,21 @@ gzip、非 2xx（状态 + 错误页正文都留下）、200+`success:false`（�
 真实墙钟与模块级 `PROVIDER_MIN_WAIT` 状态：**单跑通过、整文件跑失败**。现在把"剩余时间"与
 "可行下限"都钉住（`mock.patch`），结果与用例顺序无关。这不是产品缺陷，是我的用例写得
 不确定；整文件跑已 **80 OK**。
+
+---
+
+# 补记（同一日重做）：传输层**已重做并交付**（含测试替身先补齐）
+
+上一节说"已回退、下批重做"——已在本轮完成重做。做法与上次相反：**先补齐测试替身，再改生产码**。
+
+| 项 | 结果 |
+|---|---|
+| `net_policy._read_http_response` | 用 `http.client.HTTPResponse` 解析状态行/头、**透明解 chunked**、gzip 显式解；正文走 `read_with_deadline`（总量上限 + 总截止）。**时钟同源**：截止用 `time.monotonic()` 起算（旧写法拿墙钟 `time.time()` 相减会得到几十亿秒 → 总截止永不触发） |
+| 测试替身 | `test_net_policy` 两处假 socket 补 `makefile`（含稳定副本，避免与 `recv` 争游标）、假响应补 `read1`；**生产校验一字未改** |
+| `adapters/transport.get_via_urllib`（文本） | 加总截止 + 默认字节上限（8 MiB） |
+| `adapters/transport.get_bytes_via_urllib`（字节） | **保留既有契约**（截断到上限 + `over_limit` 标记，PDF 拒收分因依赖它）→ 它的**时间**边界仍只有 socket 超时，本批**未闭合**，如实登记 |
+| 定向 | `test_transport_deadline` **12 OK**（socketpair：chunked 逐字节、gzip、慢分块在 0.2s 预算处停、3xx 不跟随、超上限；本地替身：文本通道总截止、字节通道超限契约、容量单一来源）；`test_net_policy` **45 OK**；`test_search_quality_unified` **80 OK**；`test_p0` **434 OK** |
+
+**仍未闭合**：字节通道（`get_bytes_via_urllib`）与 `net_policy` 逐 IP 预算循环是两套实现，
+时间边界只在后者；`fetch_document` 的多地址/重试是否共用根截止未改；诊断矩阵与
+`health_registry` 原因码接线未做；A2 未开始。

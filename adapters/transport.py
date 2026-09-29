@@ -113,6 +113,10 @@ def _throttle_and_rewrite(url: str) -> str:
     return rewritten
 
 # 完整浏览器头：动态反爬对 urllib 默认握手不友好，先伪装浏览器请求一次。
+# 正文/二进制默认字节上限（容量策略另见 transfer_limits）：
+DEFAULT_TEXT_MAX_BYTES = 8 * 1024 * 1024
+DEFAULT_BINARY_MAX_BYTES = 64 * 1024 * 1024
+
 BROWSER_HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -144,8 +148,13 @@ def get_via_urllib(
     if not _validate_public_url(url):
         raise RuntimeError(f"blocked URL by SSRF guard: {url[:120]}")
     req = urllib.request.Request(url, headers=headers or BROWSER_HEADERS)
+    # 总截止：`urlopen(timeout)` 只管**单次** socket 操作，慢速分块响应可以整体远超它。
+    from adapters.search_runner import read_with_deadline
+    deadline = _time.monotonic() + max(0.5, float(timeout))
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read().decode(encoding, errors="replace")
+        return read_with_deadline(resp, deadline,
+                                  max_bytes=DEFAULT_TEXT_MAX_BYTES).decode(
+                                      encoding, errors="replace")
 
 
 def get_bytes_via_urllib(
@@ -196,6 +205,9 @@ def get_bytes_via_urllib(
             hdrs = getattr(resp, "headers", None)
             ctype = str(hdrs.get("Content-Type") or "") if hdrs else ""
             tenc = str(hdrs.get("Transfer-Encoding") or "") if hdrs else ""
+            # 字节通道保留既有契约（**截断到上限 + over_limit 标记**，供 PDF 拒收分因用），
+            # 因此这里仍按 `_limited + 1` 读；它的**时间**边界仍只有 socket 超时
+            # ——"总截止"这条本批只加在文本通道（见 A1 证据：字节通道时间边界未闭合）。
             read_n = (_limited + 1) if _limited else -1
             try:
                 raw = resp.read(read_n) if read_n >= 0 else resp.read()
