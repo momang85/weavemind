@@ -22,26 +22,62 @@ class DataAnalyzerWorker(AsyncWorkerBase):
     _FINANCIAL_MARKERS = ("[研究契约]", "归母净利", "营业收入", "经营现金流", "financial_analysis")
 
     @staticmethod
-    def _financial_workspace(ws: Path):
-        """工作区里是否有**本次任务自己的**金融事实（底稿）。
+    def _financial_source(ws: Path):
+        """工作区里**本次任务自己的**金融事实来源 → `(kind, path)`，都没有则 `None`。
 
-        判据只看文件是否存在：`project/working_paper.json` 是现役研究链落盘的事实底稿，
-        而"最新 CSV / 末列目标"那套猜测恰好是审查要求取消的路径（Q1）。
+        判定只看文件是否存在，且**只认这两个显式来源**（不猜最新 CSV、不猜末列——那套
+        猜测路径正是 Q1 要求取消的）：
+
+        - `project/working_paper.json`：现役研究链落盘的**事实底稿**（含已选事实、口径
+          证据与派生行）——首选；
+        - `project/financials.json`：预载的**结构化财务载荷**（来源与元数据随行）——
+          底稿还没落盘时的退路。
+
+        为什么必须有退路（2026-09-29 付费整跑 `ui-f4bac0d202` 实机）：底稿此前只在
+        **收尾装配**时才写，而 `data_analyzer` 步骤跑在装配之前——那一步找不到底稿，
+        退到通用 EDA、报 "No fresh CSV found in workspace"，重试三次后被**重规划成
+        content_summary**（文字概括），注册模型一次都没跑，`analysis/analysis_runs.json`
+        一份没有 → 交付硬门槛如实拦下整单（「分析未完成：交付正文只有数据与底稿」）。
         """
-        for cand in (Path(ws) / "project" / "working_paper.json",
-                     Path(ws) / "working_paper.json"):
-            if cand.is_file():
-                return cand
+        for kind, name in (("working_paper", "working_paper.json"),
+                           ("financials", "financials.json")):
+            for cand in (Path(ws) / "project" / name, Path(ws) / name):
+                if cand.is_file():
+                    return kind, cand
         return None
 
-    def _run_financial(self, ws: Path, instruction: str, task: dict) -> dict:
+    @staticmethod
+    def _freeze_dataset(kind: str, path: Path, *, required_metrics, available_models):
+        """按来源冻结数据集（`(dataset, 来源标签)`）。
+
+        两条路都是**显式来源 + 来源声明的元数据**，都不做"哪个数更好"的猜测：
+        同一 (指标, 期间, 口径) 出现互不相容的值由冻结层如实标记冲突，不择一。
+        差别只在覆盖度——底稿带派生行（同比/比率）与已选事实，载荷只有原始指标。
+        """
+        import financial_analysis as fa
+
+        label = f"worker:{path.name}"
+        if kind == "working_paper":
+            obj = json.loads(path.read_text(encoding="utf-8"))
+            ds = fa.freeze_from_working_paper(
+                obj, source_label=label, required_metrics=required_metrics,
+                available_models=available_models)
+            return ds, label
+        import facts as _facts
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        ds = fa.freeze_from_facts(
+            _facts.facts_from_financials(payload), source_label=label,
+            required_metrics=required_metrics, available_models=available_models)
+        return ds, label
+
+    def _run_financial(self, ws: Path, instruction: str, task: dict, source) -> dict:
         """冻结数据集 → 编译计划 → 跑注册模型 → 落盘运行记录（确定性、零模型调用）。"""
         import financial_analysis as fa
         from financial_analysis import store as fa_store
 
-        obj = json.loads(self._financial_workspace(ws).read_text(encoding="utf-8"))
-        ds = fa.freeze_from_working_paper(
-            obj, source_label=f"worker:{self._financial_workspace(ws).name}",
+        kind, path = source
+        ds, source_label = self._freeze_dataset(
+            kind, path,
             required_metrics=("revenue", "net_profit", "gross_profit", "operating_cashflow"),
             available_models=[m.model_id for m in fa.specs()])
         plan = fa.compile_plan(str(instruction or ""), ds, prefer=("profit_bridge",))
@@ -60,8 +96,8 @@ class DataAnalyzerWorker(AsyncWorkerBase):
                 cards.append(fa.analysis_card(run, run.outputs[0].output_id))
                 specs.append(fa.chart_spec(run, run.outputs[0].output_id))
         # 同年比率：同样走注册算子（零分母 not_computable，不产出数字）
-        for label, num, den, _desc in fa.runner.known_ratios():
-            rr = fa.ratio_run(label, num, den, ds)
+        for rlabel, num, den, _desc in fa.runner.known_ratios():
+            rr = fa.ratio_run(rlabel, num, den, ds)
             if rr.status == fa.RunStatus.VALIDATED:
                 fa_store.save_run(ws, rr)
                 runs.append({"run_id": rr.run_id, "model_id": rr.model_id,
@@ -86,6 +122,9 @@ class DataAnalyzerWorker(AsyncWorkerBase):
         return {
             "status": status,
             "mode": "financial",
+            # 数据集来自哪一个显式来源：读者要能分清"底稿冻结的"与"预载载荷冻结的"
+            # （覆盖度不同，来源标签与 dataset_hash 一起进运行记录，可复核）
+            "dataset_source": {"kind": kind, "file": path.name, "label": source_label},
             "dataset_hash": ds.dataset_hash,
             "dataset": {"entity": ds.manifest.entity, "entity_id": ds.manifest.entity_id,
                         "periods": list(ds.manifest.periods),
@@ -140,11 +179,12 @@ class DataAnalyzerWorker(AsyncWorkerBase):
             # Find data path from instruction or use latest CSV in workspace
             import re
             ws_path = Path(ws)
-            # **金融任务优先**（Q1）：工作区有本次任务自己的金融底稿时，必须按显式数据集 +
-            # 分析计划走注册模型——"最新 CSV + 末列当目标"那条猜测路径不适用于金融任务
-            # （两期财报不是通用 EDA 数据集，末列也不是预测目标）。
-            if self._financial_workspace(ws_path) is not None:
-                return json.dumps(self._run_financial(ws_path, instruction, task or {}),
+            # **金融任务优先**（Q1）：工作区有本次任务自己的金融事实（底稿或预载载荷）时，
+            # 必须按显式数据集 + 分析计划走注册模型——"最新 CSV + 末列当目标"那条猜测
+            # 路径不适用于金融任务（两期财报不是通用 EDA 数据集，末列也不是预测目标）。
+            _fin = self._financial_source(ws_path)
+            if _fin is not None:
+                return json.dumps(self._run_financial(ws_path, instruction, task or {}, _fin),
                                   ensure_ascii=False)
             paths = re.findall(
                 r'[A-Za-z]:[\\/][^\s,]+\.(?:csv|xlsx|json)|/tmp/[^\s,]+\.(?:csv|xlsx|json)',

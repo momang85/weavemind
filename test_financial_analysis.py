@@ -47,6 +47,31 @@ def _two_period_rows(**overrides):
     return rows
 
 
+def _financials_payload(rows=None):
+    """`financials.json` 的**真实形状**（与预载落盘的一致：source/metadata/financials）。
+
+    用于验证"底稿还没落盘时按预载载荷冻结数据集"这条路（实机 `ui-f4bac0d202` 的缺口）。
+    """
+    return {
+        "source": "eastmoney_ashare",
+        "metadata": {
+            "source": "eastmoney_ashare", "company": "洋河股份", "stock_code": "002304",
+            "currency": "CNY", "unit": "亿元", "annual_count": 2,
+            "caliber": "合并",
+            "caliber_evidence": "来源行含 PARENTNETPROFIT（归母净利润）",
+        },
+        "financials": rows if rows is not None else [
+            {"year": 2023, "report_type": "年报", "report_date": "2023-12-31",
+             "disclosure_date": "2024-04-10", "revenue": 331.26, "net_profit": 100.16,
+             "gross_profit": 249.26, "operating_cashflow": 61.30},
+            {"year": 2024, "report_type": "年报", "report_date": "2024-12-31",
+             "disclosure_date": "2025-04-10", "revenue": 288.76, "net_profit": 66.73,
+             "gross_profit": 211.25, "operating_cashflow": 46.29},
+        ],
+        "raw": {"url": "https://example.invalid/yh", "text": "snapshot"},
+    }
+
+
 def _dataset(rows=None, **kw):
     kw.setdefault("periods", (2023, 2024))
     kw.setdefault("as_of", "2025-04-30")
@@ -703,6 +728,46 @@ class TestDataAnalyzerTakesTheFinancialPath(unittest.TestCase):
         self.assertEqual(len(stored["runs"]), len(got["runs"]))
         self.assertEqual(got["cards"][0]["kind"], "会计分解")
         self.assertEqual(got["chart_specs"][0]["run_id"], bridge[0]["run_id"])
+
+    def test_financial_path_falls_back_to_preloaded_financials(self):
+        """底稿还没落盘时，**预载的结构化财务载荷**同样走注册模型（不得退到通用 EDA）。
+
+        实机反例（2026-09-29 付费整跑 `ui-f4bac0d202`，茅台 2023/2024）：底稿此前只在
+        收尾装配时才落盘，分析步跑的时候工作区里只有 `financials.json`——改前那一步报
+        "No fresh CSV found in workspace"、重试三次后被**重规划成 content_summary**，
+        注册模型一次没跑，`analysis/analysis_runs.json` 一份没有 → 交付硬门槛如实拦下
+        整单（「分析未完成：交付正文只有数据与底稿」）。
+        """
+        (self.ws / "project" / "financials.json").write_text(
+            json.dumps(_financials_payload(), ensure_ascii=False), encoding="utf-8")
+        self.assertFalse((self.ws / "project" / "working_paper.json").exists(),
+                         "本用例的前提就是底稿还没落盘")
+        got = self._execute("分析本期归母净利润的变化由哪些金额项构成 [研究契约]")
+        self.assertEqual(got["mode"], "financial", got)
+        self.assertEqual(got["dataset_source"]["kind"], "financials", got["dataset_source"])
+        self.assertIn("financials.json", got["dataset_source"]["label"])
+        bridge = [r for r in got["runs"] if r["model_id"] == "profit_bridge"]
+        self.assertEqual(len(bridge), 1, got["plan"])
+        self.assertEqual(bridge[0]["status"], C.RunStatus.VALIDATED)
+        vals = {o["metric"]: o["value"] for o in bridge[0]["outputs"]}
+        self.assertAlmostEqual(vals["net_profit_change"], -33.43, places=2)
+        # 运行记录必须落盘：正文/清单/ZIP 据此绑定同一次运行
+        stored = json.loads((self.ws / "analysis_runs.json").read_text(encoding="utf-8"))
+        self.assertEqual(len(stored["runs"]), len(got["runs"]))
+        # 缺口如实：载荷里没有占款字段 → 营运资本被拒，状态 partial 而不是 success
+        self.assertEqual([r["model_id"] for r in got["plan"]["rejected"]],
+                         ["working_capital"], got["plan"])
+        self.assertEqual(got["status"], "partial", got["status"])
+
+    def test_working_paper_wins_over_preloaded_payload(self):
+        """两者都在时以**底稿**为准（底稿含已选事实、口径证据与派生行）。"""
+        self._write_working_paper(_wc_rows())
+        (self.ws / "project" / "financials.json").write_text(
+            json.dumps(_financials_payload(), ensure_ascii=False), encoding="utf-8")
+        got = self._execute("分析利润变化 [研究契约]")
+        self.assertEqual(got["dataset_source"]["kind"], "working_paper", got["dataset_source"])
+        # 底稿里有占款字段（_wc_rows）→ 营运资本这一族也能跑
+        self.assertIn("working_capital", got["plan"]["adopted"], got["plan"])
 
     def test_missing_input_still_takes_the_financial_path(self):
         rows = [r for r in _two_period_rows() if r["metric"] != "gross_profit"]

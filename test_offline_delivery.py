@@ -985,7 +985,36 @@ class TestResearchFixedPathOffline(unittest.TestCase):
         task_state.mark_queued(self.tid, goal=RESEARCH_GOAL,
                                research_request=payload, db_path=self.db)
 
-    def _brpop(self, *, fail_report: bool = False):
+    def _analysis_reply(self, tid: str) -> dict:
+        """分析步（3a）的回包：**直接走真 worker 的金融分支**（确定性、零模型调用）。
+
+        与"替身要按真实 worker 的输出形态回包"这条原则同源（步骤 2 早就这么改了）。
+        改前 3a 落到下面的搜索数组兜底，`data_analyzer` 的契约（要 `status`）必然不过 →
+        重试后**被重规划成 content_summary**，注册模型一次没跑、`analysis_runs.json`
+        一份没有——实机付费整跑 `ui-f4bac0d202` 正是这样交付失败的。
+
+        为什么调 `_run_financial` 而不是 `execute`：后者要 `asyncio.run`，而本用例装了
+        "离线不得联网"的 socket 守卫，Windows 上建事件循环会先撞上它（自检失败报
+        "读取协议通道失败"）。金融分支本身是同步纯计算，直接调它更贴近事实。
+        """
+        import json as _json
+
+        from workers.data_analyzer_worker import DataAnalyzerWorker
+
+        w = DataAnalyzerWorker(agent_id="dataanalyzerworker",
+                               capabilities=["data_analyzer"], registry=None,
+                               messaging=None)
+        ws = ws_mod.task_workspace(tid)
+        src = w._financial_source(ws)
+        out = (json.dumps(w._run_financial(
+                   ws, "对已选定事实做注册模型分析（利润桥、现金质量、营运资金、条件情景）",
+                   {}, src), ensure_ascii=False)
+               if src else json.dumps({"status": "failed",
+                                       "error": "工作区没有本次任务的金融事实来源"},
+                                      ensure_ascii=False))
+        return {"task_id": "3a", "status": "SUCCESS", "result": out}
+
+    def _brpop(self, *, fail_report: bool = False, fail_steps=()):
         """步骤回包替身：按固定研究计划的步骤语义回包。
 
         1 搜索 → 结果列表（含原始 URL）；2 抓取 → 真实 worker 的 `{title,url,text}`
@@ -1000,6 +1029,9 @@ class TestResearchFixedPathOffline(unittest.TestCase):
             if not k.startswith("task_result:"):
                 return None
             step_id = self.run.step_by_key.get(k, "")
+            if step_id in fail_steps:
+                return ("k", json.dumps({"task_id": step_id, "status": "FAILED",
+                                         "result": "注入的失败"}, ensure_ascii=False))
             if step_id == "2":
                 # 真实 worker 的输出形态（`workers/web_fetch_worker.py`）：**必须带
                 # `status`**——缺了它会被 tool_contracts 判为契约不符，触发重试与
@@ -1048,6 +1080,9 @@ class TestResearchFixedPathOffline(unittest.TestCase):
                             "主要会计政策与上期保持一致，未发生会计估计变更。"
                             "研发投入情况、营业收入明细与分部报告数据见附注相关表格。"),
                     }, ensure_ascii=False)}))
+            if step_id == "3a":
+                # 分析步：跑真 worker（注册模型 → 分析卡 → `analysis_runs.json`）
+                return ("k", json.dumps(self._analysis_reply(tid), ensure_ascii=False))
             if step_id == "4":
                 if fail_report:
                     return ("k", json.dumps({"task_id": step_id, "status": "FAILED",
@@ -1166,6 +1201,72 @@ class TestResearchFixedPathOffline(unittest.TestCase):
             res = o.run(self.tid, RESEARCH_GOAL, auto_run=True)
         self._assert_fixed_path(o, res, o._planner_llm)
         self.assertIn(res["status"], ("SUCCESS", "SUCCESS_WITH_ISSUES"))
+
+    def test_optional_second_source_failure_does_not_kill_the_delivery(self):
+        """定向取证的**第二个来源**（`2b`，计划里标了 `optional`）失败 → 下游照跑，交付仍可 verified。
+
+        实机三连（付费整跑 `ui-af6a61ddf6` / `ui-22eb8c5f47` / `ui-f4bac0d202`）：2b 失败后
+        "传递式阻塞传播"漏了 optional 判定，解释/分析/报告步骤被连锁标成
+        `Blocked by failed dependency: ['2b']`，交付只剩工程收尾报告，硬门槛如实判
+        「分析未完成：交付正文只有数据与底稿」——可计划里明明写着"取不到不算失败"。
+        """
+        self._seed_contract()
+        o = self._orch("timeout", critic=True)
+        o._structured_data_preload = self._preload_writer(_research_financials())
+        base_pop = self._brpop(fail_steps=("2b",))
+
+        def _slow_pop(r, key, deadline):
+            # 关键在**时序**：第二个来源失败必须落在"步骤 2 还在飞"的那一刻
+            # （实机就是这样：2 在重试、2b 先失败，此刻没有任何步骤就绪 →
+            #  阻塞传播跑起来，改前把解释/分析/报告一步步标死）
+            if self.run.step_by_key.get(str(key)) == "2":
+                import time as _t
+                _t.sleep(1.5)
+            return base_pop(r, key, deadline)
+
+        o._brpop_with_deadline = _slow_pop
+        # 生产里 2b 失败时**重规划预算已经用完**（步骤 1 的重试/重规划先花掉了），
+        # 所以它不会被换成别的步骤，失败就这么留着——这里照实复现该条件
+        o._replan_depth = 0
+        with mock.patch("orchestrator_v2.push_progress"):
+            res = o.run(self.tid, RESEARCH_GOAL, auto_run=True)
+        proj = ws_mod.task_project_dir(self.tid, "default")
+        paper = json.loads((proj / "working_paper.json").read_text(encoding="utf-8"))
+        self.assertTrue(paper["ok"], paper.get("problems"))
+        # 分析真的跑过（注册模型 + 运行记录）：这才是"有没有可交付分析"的判据
+        ws = ws_mod.task_workspace(self.tid)
+        self.assertTrue((ws / "analysis_runs.json").exists(),
+                        "分析步必须真的落盘运行记录（不得被可选来源的失败带走）")
+        delivery = o._delivery(self.tid)
+        self.assertEqual(delivery.get("hard_fail"), "", f"delivery={delivery!r}")
+        self.assertEqual(delivery.get("status"), "verified", f"delivery={delivery!r}")
+        self.assertEqual(res["status"], "SUCCESS")
+
+    def test_financial_preload_keeps_delivery_alive_when_sources_fail(self):
+        """检索/抓取**全部**失败，但结构化财务已预载 → 解释/分析/报告照跑。
+
+        财务任务的事实来自预载载荷（`financials.json`），网页只是补充证据。实机付费整跑
+        三连都是"检索无结果 → 抓取 URL 无法访问 → 报告被依赖阻塞 → 交付只剩工程收尾
+        报告"，硬门槛如实判「分析未完成」——正文其实有事实可写，是**依赖接线**把它判死的。
+        """
+        self._seed_contract()
+        o = self._orch("timeout", critic=True)
+        o._structured_data_preload = self._preload_writer(_research_financials())
+        o._brpop_with_deadline = self._brpop(fail_steps=("1", "2", "2b"))
+        o._replan_depth = 0
+        with mock.patch("orchestrator_v2.push_progress"):
+            res = o.run(self.tid, RESEARCH_GOAL, auto_run=True)
+        proj = ws_mod.task_project_dir(self.tid, "default")
+        paper = json.loads((proj / "working_paper.json").read_text(encoding="utf-8"))
+        self.assertTrue(paper["ok"], paper.get("problems"))
+        self.assertTrue((ws_mod.task_workspace(self.tid) / "analysis_runs.json").exists(),
+                        "分析步必须跑（事实不依赖网页）")
+        delivery = o._delivery(self.tid)
+        self.assertNotIn("分析未完成", str(delivery.get("hard_fail") or ""),
+                         f"正文必须真的产出，不得只剩数据与底稿：{delivery!r}")
+        self.assertNotEqual(res["status"], "FAILED", f"delivery={delivery!r}")
+        # 缺口照实记：没有抓到的资料要能在交付物里看到
+        self.assertIn("缺口", str(res.get("final_report") or "") + str(delivery))
 
     # ── 素材缺失：绝不判已验证 ───────────────────────────────
 

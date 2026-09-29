@@ -388,6 +388,72 @@ class TestExecuteStepsDag(unittest.TestCase):
         self.assertEqual(results[1]["status"], "FAILED")
         self.assertIn("Blocked by failed dependency", results[1]["result"])
 
+    def test_optional_dependency_failure_does_not_block_dependents(self):
+        """可选步骤（定向取证的第二个来源）失败**不得**连锁阻塞下游。
+
+        实机三连（付费整跑 `ui-af6a61ddf6` / `ui-22eb8c5f47` / `ui-f4bac0d202`）：计划里的
+        `2b` 标了 `optional`，但它失败后"传递式阻塞传播"那一处漏了 optional 判定 →
+        解释/报告步骤被连锁标死 → 交付只剩工程收尾报告 → 硬门槛如实判「分析未完成」。
+        `deps_failed`（挑下一个可跑步骤）一直认 optional，两处判定必须同源。
+        """
+        steps = [
+            {"step_id": "1", "capability": "web_search", "instruction": "a"},
+            # 带 URL：否则会先命中"无候选 URL 就不派发抓取"的前置判定（那是另一条路径）
+            {"step_id": "2", "capability": "web_fetch",
+             "instruction": "抓取 https://example.invalid/a", "depends_on": ["1"]},
+            {"step_id": "2b", "capability": "web_fetch",
+             "instruction": "抓取 https://example.invalid/b",
+             "depends_on": ["1"], "optional": True},
+            {"step_id": "3", "capability": "content_summary", "instruction": "d",
+             "depends_on": ["1", "2", "2b"]},
+        ]
+        # 关键在**时序**：2b 失败时步骤 2 还在飞（0.8s），此时没有任何步骤"就绪"——
+        # 阻塞传播正是在这个时刻跑，改前会把 3 立刻标死（实机就是这样连锁的）。
+        (results, _), _ = self._run(
+            steps, {"2b": {"task_id": "2b", "status": "FAILED", "result": "boom"}},
+            delays={"2": 0.8})
+        self.assertEqual(results[2]["status"], "FAILED")
+        self.assertEqual(results[3]["status"], "SUCCESS",
+                         f"可选来源失败不该阻塞解释步骤：{results[3]!r}")
+
+    def test_financial_task_fetch_without_url_does_not_fail_dependents(self):
+        """财务任务（结构化财务已预载）：抓取步骤"无候选 URL"不得连锁标死下游。
+
+        实机 `ui-fa2cb73e59`（2026-09-29 付费整跑）：主链交付已 **verified**（分析步跑通、
+        验收 pass、评审 PASS），第二轮反思新增的 `i2-r2` 抓取因"无候选 URL"被判失败 →
+        连锁把 `i2-r3` 与打包标死 → **整单 FAILED**，而交付本身是好的。财务任务的事实
+        来自预载载荷，检索/抓取只是补充证据：取不到按缺口记，不阻塞下游。
+        """
+        import tempfile
+        import workspace as ws_mod
+
+        tmp = Path(tempfile.mkdtemp(prefix="fa_nourl_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            tid = "t-fa-nourl"
+            proj = ws_mod.task_project_dir(tid, "default")
+            (proj / "financials.json").write_text('{"financials": []}', encoding="utf-8")
+            steps = [
+                {"step_id": "1", "capability": "web_search", "instruction": "a"},
+                # 指令里没有 URL → 命中"无候选 URL 就不派发抓取"的前置判定
+                {"step_id": "2", "capability": "web_fetch", "instruction": "抓取年报正文",
+                 "depends_on": ["1"]},
+                {"step_id": "3", "capability": "report_generator", "instruction": "报告",
+                 "depends_on": ["1", "2"]},
+            ]
+            # 任务号必须是上面写了 financials.json 的那个（判据按任务号定位工作区）
+            self.o._dispatch_step_safe, _state = make_dispatch({})
+            results, has_failure = self.o._execute_steps(steps, tid, "g")
+            self.assertEqual(results[1]["status"], "FAILED")
+            self.assertIn("无候选 URL", str(results[1]["result"]))
+            self.assertEqual(results[2]["status"], "SUCCESS",
+                             f"抓取取不到不该阻塞报告：{results[2]!r}")
+            self.assertFalse(has_failure, "补充证据取不到不算任务失败")
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_dangling_dependency_marked_failed(self):
         steps = [
             {"step_id": "1", "capability": "web_search", "instruction": "a", "depends_on": ["nope"]},

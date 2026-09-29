@@ -95,6 +95,19 @@ _SECRET_ENV_PREFIXES = ("LLM_", "OPENAI_", "EMBEDDING_", "PLANNER_LLM_",
                         "API_KEY", "SERPAPI", "TOKEN", "SECRET")
 
 
+def _financial_facts_in_hand(task_id: str) -> bool:
+    """本任务是否已有**结构化财务事实**（预载载荷 `financials.json`）。
+
+    这是"检索/抓取只是补充证据"的判据：财务任务的事实来自结构化载荷，网页取不到
+    只是**缺口**，不该把解释/分析/报告步骤连锁标死（`_execute_steps` 按它把检索/抓取
+    纳入 `optional`）。只看这一个文件：它是财务预载通道的产物，非财务任务不会有。
+    """
+    try:
+        return (task_project_dir(task_id) / "financials.json").is_file()
+    except Exception:                            # noqa: BLE001 - 判据不可用按"没有"处理
+        return False
+
+
 class ReviewRequiredError(RuntimeError):
     """银行口径下"必需评审"未完成：按策略拒绝继续，不得当作评审通过。
 
@@ -2653,7 +2666,19 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         out: list[dict] = []
         changed = False
         for s in steps:
-            if str(s.get("capability")) == "data_analyzer":
+            _cap = str(s.get("capability"))
+            if is_financial and _cap in ("web_search", "web_fetch"):
+                # **财务任务的事实来自预载载荷，不是抓来的网页**（2026-09-29 付费整跑
+                # ui-af6a61ddf6 / ui-22eb8c5f47 / ui-f4bac0d202）：检索无结果 + 抓取
+                # "URL 无法访问"（2/2b 都失败）→ 报告步骤被依赖阻塞 → 交付只剩工程收尾
+                # 报告，硬门槛如实判「分析未完成」。抓取仍照跑（业务背景/变化解释要用），
+                # 但取不到只是**缺口**：按 `optional` 语义记录，不连锁阻塞解释/分析/报告。
+                if not s.get("optional"):
+                    s["optional"] = True
+                    changed = True
+                out.append(s)
+                continue
+            if _cap == "data_analyzer":
                 if is_financial:
                     # **财务类不替换能力**（2026-09-29 实机 ui-af6a61ddf6 反例）：
                     # Q1 的金融路径（冻结数据集 → 编译计划 → 注册模型 → 分析卡）**就在
@@ -3838,9 +3863,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         failed_cap = step.get("capability", "")
         # 失败诊断：结构化数据源是否可用
         structured_hint = ""
+        has_financials = False
         try:
             fin_path = task_project_dir(task_id) / "financials.json"
             if fin_path.exists():
+                has_financials = True
                 fin = json.loads(fin_path.read_text(encoding="utf-8"))
                 m = fin.get("metadata") or {}
                 if str(fin.get("source") or "") == "multi_entity":
@@ -3867,6 +3894,19 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     )
         except Exception:
             pass
+        # **金融分析步失败不得降级为文字概括**（同期实机 `ui-f4bac0d202`）：`data_analyzer`
+        # 的金融分支是"注册模型分析"的唯一入口，把它换成 content_summary 等于整段跳过
+        # 模型——交付硬门槛会（正确地）拦下整单，而读者在过程里看到的是一个 SUCCESS 的
+        # 概括步骤，真正的原因被盖住。这里保留失败：缺口如实记录，下一步/重跑按真实原因修。
+        if failed_cap == "data_analyzer" and has_financials:
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "replan", "agent": "orchestrator",
+                           "message": ("Replan refused: 金融分析步失败不降级为文字概括"
+                                       "（注册模型未跑，缺口如实记录）"),
+                           "timestamp": self._now_iso()})
+            logger.warning("拒绝把失败的金融分析步重规划为文字概括（task=%s）：%s",
+                           task_id, str(error)[:140])
+            return None
         # 金融任务：搜索/抓取失败 → 优先用结构化数据完成分析（不是模型知识）
         if failed_cap in ("web_search", "web_fetch") and structured_hint:
             alt = {
@@ -7081,6 +7121,18 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         has_failure = False
         state = {"replan_used": 0}
         step_ids = {s.get("step_id") for s in steps}
+        # 可选步骤（如定向取证的第二个来源）：取不到是**正常缺口**，不阻塞下游。
+        # 两个判定点必须用**同一份**集合——见下面阻塞传播处的实机反例。
+        optional_ids = {s.get("step_id") for s in steps if s.get("optional")}
+        # 财务任务（结构化财务已预载）：检索/抓取是**补充证据**，取不到=缺口，不阻塞下游。
+        # 这条对**反思轮新增的补洞步骤同样生效**——实机 `ui-fa2cb73e59`：主链交付已经
+        # verified（3a 注册模型跑通、验收 pass、评审 PASS），第二轮反思新增的 `i2-r2`
+        # 抓取"无候选 URL"→ 连锁把 `i2-r3` 与打包标死 → 整单 FAILED，而交付本身是好的。
+        if _financial_facts_in_hand(task_id):
+            optional_ids |= {
+                s.get("step_id") for s in steps
+                if str(s.get("capability") or "") in ("web_search", "web_fetch")
+            }
         lock = threading.Lock()
 
         def deps_ok(step):
@@ -7089,7 +7141,6 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         def deps_failed(step):
             # `optional` 依赖失败不阻塞下游：定向取证的第二个来源取不到是**正常缺口**
             # （缺资料列待核查即可），不该让分析/报告/打包步骤一起失败
-            optional_ids = {s.get("step_id") for s in steps if s.get("optional")}
             return [d for d in step.get("depends_on", [])
                     if d in completed and completed[d].get("status") == "FAILED"
                     and d not in optional_ids]
@@ -7415,6 +7466,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     with lock:
                         # 传递式阻塞传播：任何步骤一旦依赖失败/已阻塞步骤，
                         # 立即标记为 Blocked，避免“报告依赖全部步骤”等链条卡死
+                        # **可选步骤的失败不在此列**（实机付费整跑 ui-af6a61ddf6 /
+                        # ui-22eb8c5f47 / ui-f4bac0d202 三连）：定向取证的第二个来源
+                        # 取不到（2b FAILED）时，这里漏了 optional 判定 → 解释/报告步骤
+                        # 被连锁标死 → 交付只剩工程收尾报告 → 硬门槛如实判
+                        # 「分析未完成：交付正文只有数据与底稿」。上面 `deps_failed`
+                        # 一直认 optional，两处判定必须同源。
                         changed = True
                         while changed:
                             changed = False
@@ -7423,6 +7480,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                                 failed_deps = [
                                     d for d in s.get("depends_on", [])
                                     if d in completed and completed[d].get("status") == "FAILED"
+                                    and d not in optional_ids
                                 ]
                                 if failed_deps:
                                     completed[k] = {
@@ -7494,7 +7552,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 with lock:
                     completed[k] = result
                     last_progress = time.time()
-                    if result.get("status") != "SUCCESS":
+                    # 步骤失败 → 任务失败；**可选步骤例外**：定向取证的第二个来源取不到
+                    # 是计划里写明的"正常缺口"（见 `_research_steps` 的 `optional`），
+                    # 交付硬门槛与验收照旧按事实/正文判定——不该因为少一个有来源的附注页
+                    # 就把整单判成 FAILED（实机：交付已 verified，任务状态却是 FAILED）。
+                    if result.get("status") != "SUCCESS" and k not in optional_ids:
                         has_failure = True
                 if step.get("capability") == "web_search":
                     res_raw = result.get("result", "")
@@ -7604,8 +7666,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     task_id, _s.get("step_id"),
                 )
         # 以最终 results 为准（含 code_execution 降级后的状态），
-        # 不再沿用循环内的即时失败标记——降级为 SUCCESS 的步骤不得拖垮任务
-        has_failure = any(r.get("status") != "SUCCESS" for r in results)
+        # 不再沿用循环内的即时失败标记——降级为 SUCCESS 的步骤不得拖垮任务。
+        # **可选步骤照样不算失败**（同上：少一个有来源的附注页是记录在案的缺口）
+        has_failure = any(r.get("status") != "SUCCESS"
+                          and str(r.get("task_id") or "") not in optional_ids
+                          for r in results)
         return results, has_failure
 
     def _inject_step_context(
@@ -8007,10 +8072,43 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             and "code_execution" in caps
         )
 
+    def _ensure_paper_for_analysis(self, goal: str, step: dict, task_id: str) -> None:
+        """派发**金融分析步**之前，先把底稿落到工作区（同一实现、确定性、幂等）。
+
+        实机反例（2026-09-29 付费整跑 `ui-f4bac0d202`，茅台 2023/2024）：`data_analyzer`
+        的金融分支以 `project/working_paper.json` 为数据集来源，而底稿此前**只在收尾装配**
+        （`run` 尾部）才写——分析步跑的时候它还不存在，于是这一步退到通用 EDA、报
+        "No fresh CSV found in workspace"，重试三次后被**重规划成 content_summary**，
+        注册模型一次没跑，`analysis/analysis_runs.json` 一份都没有 → 交付硬门槛如实拦下
+        整单（「分析未完成：交付正文只有数据与底稿」）。这里在派发前落一次底稿，分析步
+        拿到的就是**本次任务的已选事实**（含口径证据与派生行）；非金融任务调用直接被
+        `write_working_paper` 判为 skipped（没有结构化财务就不产出空底稿）。
+        """
+        try:
+            if str(step.get("capability") or "") != "data_analyzer":
+                return
+            project = str((getattr(self, "_task_projects", {}) or {}).get(task_id) or "")
+            from working_paper_export import write_working_paper
+            wp = write_working_paper(task_id, goal, project=project or None) or {}
+            if wp.get("ok"):
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "info", "agent": "orchestrator",
+                               "message": (f"分析步前置：底稿已落盘（{wp.get('rows', 0)} 条事实、"
+                                           f"{wp.get('derived', 0)} 条派生），"
+                                           "注册模型消费本次任务的已选事实"),
+                               "timestamp": self._now_iso()})
+            else:
+                logger.info("分析步前置底稿未产出（task=%s）：%s",
+                            task_id, str(wp.get("reason") or "没有结构化财务"))
+        except Exception as exc:                 # noqa: BLE001 - 前置失败不阻断派发
+            logger.warning("分析步前置底稿异常（task=%s）：%s", task_id, str(exc)[:140])
+
     def _dispatch_step_safe(self, goal: str, step: dict, task_id: str, state: dict) -> dict:
         """派发单步：失败自动重试，重试仍失败则尝试单步重规划。
         P1-4：重试/重规划结束后写结构化失败诊断（step_failure.json），
         替换步骤结果已知后再落盘，供反思精准补缺口。"""
+        # 分析步的前置：底稿必须在它派发**之前**就已经在工作区里（见该函数注释）
+        self._ensure_paper_for_analysis(goal, step, task_id)
         result = self._dispatch(step, task_id)
         if result.get("budget_exceeded"):
             # 预算已耗尽：重试/重规划都只会被同样拒绝，直接返回如实失败

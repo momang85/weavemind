@@ -1,29 +1,47 @@
 # DeepSeek 执行状态
 
-> ## 当前账（2026-09-29 深夜 · 付费整跑三连 + 问题收口）
+> ## 当前账（2026-09-29 夜 · **分析链进交付已修完并整跑通过**）
 >
-> **付费整跑（用户已授权）**：`scripts/research_acceptance_run.py --submit`（走 `POST /api/tasks`
-> 鉴权之后的**同一个函数**）跑了三次，任务 `ui-af6a61ddf6` → `ui-22eb8c5f47` → `ui-f4bac0d202`
-> （贵州茅台 2023/2024，合并口径）。
+> **付费整跑（用户已授权，本轮两次）**：`scripts/research_acceptance_run.py --submit`
+> （走 `POST /api/tasks` 鉴权之后的**同一个函数**），贵州茅台 2023/2024，合并口径。
 >
-> **结果：三次都是 `FAILED` / 交付 `draft`，但失败原因很干净、很有价值**：
-> 交付硬门槛如实拦下——「分析未完成：交付正文只有数据与底稿，未产出可交付的分析结论」。
-> 事实层是好的：6/6 必需事实带来源定位、底稿 ok、导出四项齐全（MD 18.8KB / PDF 5.3MB /
-> CSV / JSON）、机器验收 `pass`、评审 `PASS`。**能交付但没有分析结论**，所以拒绝交付是对的。
+> | 任务 | 终态 | 交付 | 分析运行 | 读数 |
+> |---|---|---|---|---|
+> | `ui-fa2cb73e59` | FAILED | **verified**（`hard_fail` 空、验收 pass、评审 PASS） | 3 模型 + 4 比率 validated | 主链全通；FAILED 来自**反思轮新增**的 `i2-r2` 抓取无候选 URL → 连锁标死 `i2-r3`/打包 |
+> | `ui-603f626cbe` | **SUCCESS** | **verified**（`aligned` 真、`review_valid` 真） | `analysis_runs.json` 26,974 B：`profit_bridge`/`cash_quality`/`scenario_sensitivity` validated + 4 比率 | 6/6 必需事实带来源定位、同比 11 条、缺口 0、问题 0；导出 MD 27.3KB / PDF 5.57MB / CSV / JSON |
 >
-> **根因与修复进展**：
-> ① 固定研究路径（`_research_steps`）原本只有 `web_search → web_fetch ×2 → content_summary →
-> report_generator`，**注册模型一次没跑** → 已插入 `3a data_analyzer`（走 Q1 金融分支：
-> 冻结数据集→编译计划→注册模型→分析卡，零 LLM），并把"财务类不许换成 content_summary"
-> 这条护栏补进 `_reduce_steps_for_structured`；两处都有用例。
-> ② 第三次实机**计划里已有 `3a`**（已核对 steps），但工作区**仍没有
-> `analysis/analysis_runs.json`** → 分析步跑了却没产出：`working_paper.json` 在该步执行时
-> 尚未落盘（分析器的金融分支以它触发）。**这是下一步要修的确定项**：
-> 让分析步发生在底稿materialize 之后，或让分析器在缺底稿时从 `financials.json` 冻结数据集。
-> 未修完之前**不重复付费整跑**（三次读数已经足够定位，且每次都是同一 hash
-> `5118edb36809…`、同一硬门槛文案）。
+> **修完的四项**（每条先在旧代码上复现失败，再修）：
+> ① **分析步拿到数据集**：派发 `data_analyzer` 前先落底稿（幂等）；worker 在底稿缺失时按
+> 预载载荷 `financials.json` 冻结数据集，运行记录里记 `dataset_source`。旧码读数是实机原话
+> `No fresh CSV found in workspace`。用**真实失败工作区**离线预演：3 模型 + 4 比率 validated。
+> ② **可选步骤失败不再连锁**：阻塞传播与"步骤失败⇒任务失败"两处漏了 `optional` 判定
+> （`deps_failed` 一直认）——`2b` 一失败就把解释/分析/报告逐步标死，旧码读数与实机逐字一致：
+> `Blocked by failed dependency: ['2b']` → 交付 `draft` + `hard_fail="分析未完成…"`。
+> ③ **财务任务的检索/抓取是补充证据**：结构化财务已预载时这两类步骤按 `optional` 语义处理
+> （**反思轮新增的抓取步骤同样适用**，这正是第一次整跑 FAILED 的原因）。取不到=缺口，不阻塞。
+> ④ **金融分析步失败不得降级为文字概括**：不重规划成 `content_summary`，失败如实保留。
 >
-> **本批其余（问题收口）**：
+> **交付物自己写明的保留意见（未隐藏）**：`research_state=research_draft`（"仅原始披露"，
+> `located=0`）、`review_state.verdict=DEGRADED`（金融类**计划评审 30s 超时**）、正文开头逐字写着
+> 「评审未完成，已降级…请经人工复核后方可使用」。三态分离照旧：机器验收通过 / 研究状态如实为
+> "底稿" / 人工复核未代劳。
+>
+> 定向全绿（每文件一进程）：`test_delivery_chain` 408、`test_p0` 434、`test_orchestrator_v2` 83、
+> `test_offline_delivery` 36、`test_financial_analysis` 68、`test_working_paper` 61、
+> `test_financial_chain` 36、`test_us_chain` 9、`test_root_budget` 76、`test_cancel_semantics` 46、
+> `test_writer_consolidation` 60（跳过 1）、`test_checkpointer` 9。
+> 整跑原始读数与逐项证据：`docs/evidence/paid_run_analysis_chain_20260929.md`。
+>
+> **仍未解决（不假装已解决）**：**本机公开检索取不到可用来源**（三次旧实机 + 本轮两次，`web_search`
+> 候选里都没有可用年报正文 URL → 抓取"无候选 URL"）；本轮把它变成**缺口**而非阻塞，但
+> "研究状态=底稿、located=0"的根因是**来源可得性**，需要检索侧专项。真人 F3 五项 ≥8/10
+> （**必须真人**）；金融类计划评审 30s 超时的"评审降级 ⇒ 交付能否 verified"是架构决策，本轮未改；
+> 页面「改假设→复算→采纳→导出」（Q2/Q3 UI）；`report_version`/交付包携带 `derived_from`；
+> AGENTS.md 优化积压 10 项（长期项，非本阶段任务）。
+>
+> ## 前账（2026-09-29 深夜 · 问题收口 + 分析链定位）
+>
+> **问题收口**：
 > ① **取件时间预算按通道分**：正文 30s / 披露下载 120s（可环境变量覆盖），材料直链、
 > `annual_report_pdf.fetch_bytes`、`web_fetch` worker 统一改用。实机证据：运行中
 > `webfetchworker` 取三一 2024 年报返回 `读取超时（总截止 29.9824s）`（旧码会立刻
@@ -41,12 +59,12 @@
 > ⑦ **主要会计数据 5 列 3 年**不做猜测性列映射，新增原因码
 > `adjustment_variants_or_ratio_column`，同样指标从审计过的三张报表取。
 >
-> 定向全绿：`test_delivery_chain` 405、`test_orchestrator_v2` 81、`test_transport_deadline` 15、
+> 定向全绿（当时）：`test_delivery_chain` 405、`test_orchestrator_v2` 81、`test_transport_deadline` 15、
 > `test_startup_readiness` 69、`test_financial_analysis` 66、`test_annual_financial_tables` 28、
 > `test_cninfo_discovery` 31、`test_net_policy` 50。
 > 证据 `docs/evidence/a2_official_discovery_20260929.md` §8–§10。
 >
-> **仍未解决（不假装已解决）**：分析结论进正文/交付（上述根因 ②，确定项，待修）；
+> **当时仍未解决**：分析结论进正文/交付（根因②，已在本账（上）修完并整跑通过）；
 > 真人 F3 五项 ≥8/10（**必须真人**）；亏损期情景专用判据（研究侧）；
 > 页面"改假设→复算→采纳→导出"（Q2/Q3 UI）；`report_version`/交付包是否一并带
 > `derived_from`（下一批）；AGENTS.md 的优化积压 10 项（长期项，非本阶段任务）。

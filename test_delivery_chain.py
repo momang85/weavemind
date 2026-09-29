@@ -3819,6 +3819,29 @@ def _ranking_sample(n: int = 10, metric: str = "volume") -> dict:
     }
 
 
+def _financial_preload_payload():
+    """`financials.json` 的真实形状（预载落盘的那一份，元数据随行）。"""
+    return {
+        "source": "eastmoney_ashare",
+        "metadata": {"source": "eastmoney_ashare", "company": "洋河股份",
+                     "stock_code": "002304", "currency": "CNY", "unit": "亿元",
+                     "annual_count": 2, "caliber": "合并",
+                     "caliber_evidence": "来源行含 PARENTNETPROFIT（归母净利润）"},
+        "financials": [
+            {"year": 2023, "report_type": "年报", "report_date": "2023-12-31",
+             "disclosure_date": "2024-04-10", "revenue": 331.26, "net_profit": 100.16,
+             "gross_profit": 249.26, "operating_cashflow": 61.30},
+            {"year": 2024, "report_type": "年报", "report_date": "2024-12-31",
+             "disclosure_date": "2025-04-10", "revenue": 288.76, "net_profit": 66.73,
+             "gross_profit": 211.25, "operating_cashflow": 46.29},
+        ],
+        "raw": {"url": "https://datacenter-web.eastmoney.com/api/x", "text": "{}"},
+    }
+
+
+_FINANCIAL_GOAL = "洋河股份（002304.SZ）2023 与 2024 年年度报告研究"
+
+
 class TestRankingStructuredChain(unittest.TestCase):
     """断链修复（ui-1954f66cb0 复测暴露）：
     预载 structured_data.json 后，data_analyzer/报告/图表能直接消费排行数据。"""
@@ -4012,6 +4035,125 @@ class TestRankingStructuredChain(unittest.TestCase):
             self.assertIn("注册模型", out[0]["instruction"])
             self.assertIn("financials.json", out[0]["instruction"])
             self.assertEqual(out[1]["depends_on"], ["1"])
+
+    def test_analysis_step_materializes_paper_before_dispatch(self):
+        """金融分析步派发**之前**底稿就要在工作区里。
+
+        实机反例（2026-09-29 付费整跑 `ui-f4bac0d202`，茅台 2023/2024）：底稿此前只在
+        收尾装配时才落盘，分析步跑的时候找不到它 → 退到通用 EDA、报
+        "No fresh CSV found in workspace"、重试三次后被重规划成 content_summary，
+        `analysis/analysis_runs.json` 一份没有，交付硬门槛如实拦下整单「分析未完成」。
+        """
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        tmp = Path(tempfile.mkdtemp(prefix="fa_prep_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            tid = "t-fa-prep"
+            proj = ws_mod.task_project_dir(tid, "default")
+            (proj / "financials.json").write_text(
+                json.dumps(_financial_preload_payload(), ensure_ascii=False),
+                encoding="utf-8")
+            o = OrchestratorV2.__new__(OrchestratorV2)
+            o._messaging = None
+            o._task_projects = {tid: "default"}
+            o._max_retry = 0
+            o._replan_depth = 0
+            seen: dict = {}
+
+            def _fake_dispatch(step, task_id):
+                seen["paper_before"] = (proj / "working_paper.json").exists()
+                seen["capability"] = step.get("capability")
+                return {"status": "SUCCESS", "step_id": step.get("step_id"),
+                        "result": json.dumps({"status": "success", "mode": "financial"})}
+
+            o._dispatch = _fake_dispatch
+            step = {"step_id": "3a", "capability": "data_analyzer",
+                    "instruction": "做注册模型分析", "depends_on": []}
+            o._dispatch_step_safe(_FINANCIAL_GOAL, step, tid, {"replan_used": 0})
+            self.assertTrue(seen.get("paper_before"),
+                            "分析步派发前必须先落底稿（否则注册模型整段不跑）")
+            paper = json.loads((proj / "working_paper.json").read_text(encoding="utf-8"))
+            self.assertTrue(paper.get("request"), "底稿要带本次任务的请求契约")
+            self.assertTrue(paper.get("rows"), "底稿要有事实行")
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_non_analyzer_step_does_not_write_a_paper(self):
+        """前置只认 data_analyzer：其它步骤不得顺手改写工作区的底稿。"""
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        tmp = Path(tempfile.mkdtemp(prefix="fa_prep2_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            tid = "t-fa-prep2"
+            proj = ws_mod.task_project_dir(tid, "default")
+            (proj / "financials.json").write_text(
+                json.dumps(_financial_preload_payload(), ensure_ascii=False),
+                encoding="utf-8")
+            o = OrchestratorV2.__new__(OrchestratorV2)
+            o._messaging = None
+            o._task_projects = {tid: "default"}
+            o._max_retry = 0
+            o._replan_depth = 0
+            o._cancel_requested = lambda _tid: False
+            o._dispatch = lambda step, task_id: {
+                "status": "SUCCESS", "step_id": step.get("step_id"),
+                "result": "# 洋河股份 2023 与 2024 年度经营研究报告（占位正文，满足契约长度）"}
+            step = {"step_id": "4", "capability": "report_generator",
+                    "instruction": "生成报告", "depends_on": []}
+            o._dispatch_step_safe(_FINANCIAL_GOAL, step, tid, {"replan_used": 0})
+            self.assertFalse((proj / "working_paper.json").exists(),
+                             "检索/抓取/报告步骤不触发底稿前置")
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_failed_financial_analyzer_is_not_replanned_into_text(self):
+        """金融分析步失败**不得**被重规划成文字概括（那会盖住真正的原因）。
+
+        `data_analyzer` 的金融分支是"注册模型分析"的唯一入口；换成 content_summary
+        等于整段跳过模型——交付硬门槛会拦下整单，而过程里却是一个 SUCCESS 的概括步骤。
+        检索/抓取失败仍走原有的"改用结构化财务数据"回退（那条是**设计内**的）。
+        """
+        import tempfile
+        import workspace as ws_mod
+        from orchestrator_v2 import OrchestratorV2
+
+        tmp = Path(tempfile.mkdtemp(prefix="fa_replan_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        try:
+            tid = "t-fa-replan"
+            proj = ws_mod.task_project_dir(tid, "default")
+            (proj / "financials.json").write_text(
+                json.dumps(_financial_preload_payload(), ensure_ascii=False),
+                encoding="utf-8")
+            o = OrchestratorV2.__new__(OrchestratorV2)
+            o._messaging = None
+            failed = {"step_id": "3a", "capability": "data_analyzer",
+                      "instruction": "做注册模型分析", "depends_on": []}
+            self.assertIsNone(
+                o._replan_step(_FINANCIAL_GOAL, failed,
+                               '{"status": "failed", "error": "No fresh CSV found in workspace"}',
+                               tid),
+                "金融分析步失败必须保留失败，不得降级为文字概括")
+            # 没有结构化财务时不误伤：仍走原有重规划路径（这里用检索失败的回退验它没变）
+            alt = o._replan_step(_FINANCIAL_GOAL,
+                                 {"step_id": "1", "capability": "web_search",
+                                  "instruction": "检索", "depends_on": []},
+                                 "无结果", tid)
+            self.assertEqual(alt.get("capability"), "content_summary")
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def test_structured_injection_includes_ranking_rows(self):
         """报告注入：eastmoney_ranking 的 [结构化数据] 块必须含排行 rows。"""
