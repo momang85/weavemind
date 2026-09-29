@@ -125,6 +125,60 @@ class TestDatasetFreeze(unittest.TestCase):
         self.assertEqual(ds.manifest.periods, ("2023年", "2024年"))
         self.assertTrue(any("非年度期间" in g for g in ds.manifest.gaps), ds.manifest.gaps)
 
+    # ── 2026-09-29（A2）：真实年报同时有合并/母公司 → 口径必须显式选择，不得"多条=缺输入" ──
+
+    def _multi_caliber_rows(self):
+        rows = list(_two_period_rows())
+        for r in list(rows):
+            if r["metric"] in ("revenue", "operating_cost", "gross_profit"):
+                rows.append(dict(r, caliber="母公司", value=r["value"] / 3.0,
+                                 fact_id=r["fact_id"] + "-p"))
+        return rows
+
+    def test_primary_caliber_is_consolidated_and_used_by_default(self):
+        ds = _dataset(self._multi_caliber_rows())
+        self.assertEqual(ds.primary_caliber, "合并")
+        obs = ds.get("revenue", "2024年")
+        self.assertIsNotNone(obs, "合并与母公司并存时，默认应取合并口径")
+        self.assertEqual(obs.caliber, "合并")
+
+    def test_explicit_caliber_is_honoured(self):
+        ds = _dataset(self._multi_caliber_rows())
+        obs = ds.get("revenue", "2024年", caliber="母公司")
+        self.assertEqual(obs.caliber, "母公司")
+
+    def test_conflict_within_one_caliber_is_still_ambiguous(self):
+        """同一口径内两个不同值：仍返回 None（不任选一条）。"""
+        rows = self._multi_caliber_rows()
+        twin = dict(next(r for r in rows if r["metric"] == "revenue"
+                         and r["caliber"] == "合并" and r["period"] == "2024年"))
+        twin["value"] = twin["value"] + 1.0
+        twin["fact_id"] = twin["fact_id"] + "-x"
+        ds = _dataset(rows + [twin])
+        self.assertIsNone(ds.get("revenue", "2024年"))
+
+    def test_without_consolidated_only_one_caliber_may_be_defaulted(self):
+        rows = [r for r in self._multi_caliber_rows() if r["caliber"] == "母公司"]
+        ds = _dataset(rows)
+        self.assertEqual(ds.primary_caliber, "母公司")
+        self.assertEqual(ds.get("revenue", "2024年").caliber, "母公司")
+
+    def test_two_non_consolidated_calibers_are_not_defaulted(self):
+        rows = [dict(r, caliber="母公司") for r in _two_period_rows()]
+        rows += [dict(r, caliber="分部A", fact_id=r["fact_id"] + "-s")
+                 for r in _two_period_rows()]
+        ds = _dataset(rows)
+        self.assertEqual(ds.primary_caliber, "", "没有合并、又不止一种口径时不得默认")
+        self.assertIsNone(ds.get("revenue", "2024年"))
+
+    def test_two_period_models_run_on_a_multi_caliber_dataset(self):
+        """端到端：合并+母公司并存不再是"缺输入"，利润桥照样跑出闭合结果。"""
+        ds = _dataset(self._multi_caliber_rows())
+        run = fa.run("profit_bridge", ds)
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        got = {o.metric: o.value for o in run.outputs}
+        self.assertAlmostEqual(got["net_profit_change"], -33.43, places=2)
+
 
 def _dataset_rows_with(*, mutate=(), restatement=""):
     rows = _two_period_rows(mutate=mutate)

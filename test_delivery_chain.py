@@ -4113,16 +4113,44 @@ class TestTencentQuotesRankingAndCache(unittest.TestCase):
         ]).encode("gbk")
 
         class _Resp:
+            """真实 `urlopen` 响应替身：必须给得出 `read1` 与可设超时的 socket 链。
+
+            A1 之后文本通道要求**可保证有界**的读取路径（`read_with_deadline` 既没有
+            `read1`、又设不上 socket 超时时直接拒绝，见 search_runner 的
+            `UnboundedReadError`）。真响应是 `http.client.HTTPResponse`——两条都有；
+            只有 `read()` 的老替身会让离线用例把"路径不可终止"当成功能故障。
+            这不是放宽判据，是替身要和真对象一样（同批次 net_policy 的假 socket）。
+            """
+
+            status = 200
+
+            def __init__(self, data):
+                self._data = bytearray(data)
+                self.headers = {}
+                self.fp = self          # `_bound_single_read` 沿 fp→raw→_sock 找 settimeout
+
             def __enter__(self):
                 return self
 
             def __exit__(self, *args):
                 return False
 
-            def read(self):
-                return raw
+            def settimeout(self, value):
+                self._timeout = value
 
-        with mock.patch("urllib.request.urlopen", return_value=_Resp()):
+            def read(self, n=-1):
+                if n is None or n < 0:
+                    take = bytes(self._data)
+                    self._data.clear()
+                    return take
+                take = bytes(self._data[:n])
+                del self._data[:n]
+                return take
+
+            def read1(self, n=-1):
+                return self.read(n)
+
+        with mock.patch("urllib.request.urlopen", return_value=_Resp(raw)):
             out = tq.fetch_quotes(["600519", "sz000001"])
         q = out["600519"]
         self.assertEqual(q["name"], "贵州茅台")
@@ -10103,12 +10131,34 @@ class TestDisclosureIngest(unittest.TestCase):
                         periods=[fx["period"]], as_of="2025-04-30")
         self.assertEqual(out["reason"], di.REJECT_NOT_OFFICIAL, out)
 
-    def test_cninfo_discovery_is_explicitly_unavailable(self):
-        """巨潮未连通 → 如实说不可用，并给出正当出路（不伪造公告列表）。"""
+    def test_cninfo_discovery_reports_empty_without_fabricating(self):
+        """巨潮公告发现：空结果必须**带前提**，不得伪造公告列表，也不得静默空。
+
+        旧版用例断言"接口未连通 → unavailable"，而那个结论 2026-09-29 被实机推翻：
+        不是被挡，是 `stock` 参数缺 orgId（只给裸代码时接口回 `totalAnnouncement: 0`，
+        与"确实没有公告"长得一样）。现在钉的是新契约——注入取件替身（离线、不发请求），
+        空列表也要带参数摘要与原因码，读侧才分得清"确实没有"与"我们问错了"。
+        """
+        from adapters import cninfo
         from adapters import disclosure_ingest as di
-        out = di.discover("洋河股份", "002304.SZ", [2024])
-        self.assertEqual(out["status"], di.UNAVAILABLE)
-        self.assertIn("未连通", out["reason"])
+
+        def _fetch(url, *, method="GET", body="", timeout=25, max_bytes=0, headers=None):
+            if "szse_stock.json" in url:
+                payload = {"stockList": [{"code": "002304", "orgId": "gssz0002304",
+                                          "zwjc": "洋河股份"}]}
+            else:
+                payload = {"announcements": None, "totalAnnouncement": 0}
+            return {"status": 200,
+                    "raw": json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                    "headers": {}}
+
+        cninfo.reset_cache()
+        out = di.discover("洋河股份", "002304.SZ", [2024], fetch=_fetch)
+        self.assertEqual(out["status"], "no_candidates")
+        self.assertEqual(out["candidates"], [], "没有取回公告就不得编造候选")
+        self.assertEqual(out["reason_code"], "empty_result")
+        self.assertEqual(out["params"]["stock"], "002304,gssz0002304",
+                         "空结果要能自证参数（orgId 缺了就会静默空）")
         self.assertTrue(out["next_steps"])
 
     def test_candidate_picker_keeps_official_and_drops_commentary(self):

@@ -1,0 +1,107 @@
+[
+ {
+  "material_id": "797a3b25d1142a30",
+  "channel": "web_link",
+  "channel_label": "网页提交的披露直链（由服务取件）",
+  "kind": "pdf",
+  "kind_label": "PDF",
+  "title": "2020年年度报告",
+  "url": "http://static.cninfo.com.cn/finalpage/2021-04-27/1209816825.PDF",
+  "filename": "",
+  "bytes": 4323835,
+  "raw_sha256": "9fd8ab5a1123b8463b46d5332c8eaf141dd29a9ce161695d1ab97302a87b32b5",
+  "text_sha256": "2e511aa8b75fe49472be767c19f24a97b34cbf243f675827deb58f9a5f4d335d",
+  "status": "admitted",
+  "reason": "",
+  "source_class": "official_disclosure",
+  "provenance": "official_discovery",
+  "provenance_label": "官方公告发现（自动，参数契约可查）",
+  "rules_version": "adm-2/f3a-1",
+  "retrieved_at": "2026-09-29T18:27:21",
+  "created_at": "2026-09-29T18:26:47",
+  "updated_at": "2026-09-29T18:27:21",
+  "attached": false,
+  "period": "2020",
+  "doc_type": "年度报告",
+  "disclosure_date": "2021-04-27",
+  "date_precision": "day",
+  "date_basis": "source_url_format",
+  "metric_states": {
+   "revenue": {
+    "state": "present_in_scope",
+    "label": "材料范围内已定位到承载小节",
+    "matched": "",
+    "section_count": 15
+   },
+   "net_profit": {
+    "state": "present_in_scope",
+    "label": "材料范围内已定位到承载小节",
+    "matched": "",
+    "section_count": 17
+   },
+   "operating_cashflow": {
+    "state": "present_in_scope",
+    "label": "材料范围内已定位到承载小节",
+    "matched": "",
+    "section_count": 43
+   }
+  },
+  "read_scope": {
+   "text_chars": 232073,
+   "parsed_ranges": [
+    [
+     93,
+     3498
+    ],
+    [
+     128412,
+     129259
+    ],
+    [
+     130757,
+     131475
+    ],
+    [
+     135836,
+     140895
+    ]
+   ],
+   "unparsed_ranges": [
+    [
+     0,
+     93
+    ],
+    [
+     3498,
+     128412
+    ],
+    [
+     129259,
+     130757
+    ],
+    [
+     131475,
+     135836
+    ],
+    [
+     140895,
+     232073
+    ]
+   ],
+   "truncated": false,
+   "truncation_reason": ""
+  },
+  "evidence_count": 8,
+  "section_count": 1219,
+  "parse": {
+   "parser": "pypdf",
+   "kind": "pdf",
+   "location_kind": "page",
+   "pages": 259,
+   "truncated": false,
+   "truncation_reason": "",
+   "chars": 233831,
+   "content_type": "application/pdf"
+  }
+ }
+]

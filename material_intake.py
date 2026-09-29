@@ -373,11 +373,16 @@ def doc_path(task_id: str, mid: str, *, ws_dir=None, project=None) -> Path:
 def store(*, task_id: str, channel: str, raw: bytes = b"", url: str = "",
           filename: str = "", content_type: str = "", kind: str = "", title: str = "",
           period: str = "", doc_type: str = "年度报告", note: str = "",
-          declared_disclosed_at: str = "", ws_dir=None, project=None) -> dict:
+          declared_disclosed_at: str = "", provenance: str = "",
+          ws_dir=None, project=None) -> dict:
     """保存一份待摄取材料（**不判定**，判定在 `admit`）。返回材料记录（含幂等结果）。
 
     直链只记 URL（取件在 `admit` 里走既有内容通道，失败如实记 `fetch_failed`）；
     文件必须先过 `validate_content`，存储路径由本模块生成，文件名只作标签。
+
+    `provenance` 留空时按通道取默认值（直链=人工提供的直链、文件=人工取得的文件）——
+    **官方公告发现进来的材料必须显式传** `official_discovery`：它是自动取回的，
+    写成"人工提供"会让来源记录说谎，反过来也不行。
     """
     channel = str(channel or "")
     if channel not in CHANNELS:
@@ -421,7 +426,7 @@ def store(*, task_id: str, channel: str, raw: bytes = b"", url: str = "",
         "period": str(period or ""), "doc_type": str(doc_type or ""),
         "declared_disclosed_at": str(declared_disclosed_at or "").strip()[:10],
         "disclosure_date": "", "date_precision": "", "date_basis": "",
-        "source_class": "", "provenance": "", "provenance_label": "",
+        "source_class": "", "provenance": str(provenance or ""), "provenance_label": "",
         "rules_version": "", "parse": {}, "read_scope": {}, "metric_states": {},
         "evidence": [], "evidence_count": 0, "section_count": 0,
         "attached": False, "refresh": {}, "pending": [],
@@ -575,8 +580,12 @@ def admit(*, task_id: str, mid: str, company: str, company_code: str = "", perio
         doc["operator_disclosed_at"] = str(meta["declared_disclosed_at"])
 
     # 3. 准入判据（与自动检索、离线重入**同一条**链）
-    provenance = (di.PROVENANCE_MANUAL_URL if str(meta.get("channel")) == CHANNEL_LINK
-                  else di.PROVENANCE_MANUAL_FILE)
+    # 来源先看材料自己带的（官方公告发现会显式写 `official_discovery`），
+    # 没带才按通道取默认值——默认值不能说成"自动发现"，显式值也不许被通道覆盖掉。
+    provenance = str(meta.get("provenance") or "").strip()
+    if provenance not in di.PROVENANCE_LABEL:
+        provenance = (di.PROVENANCE_MANUAL_URL if str(meta.get("channel")) == CHANNEL_LINK
+                      else di.PROVENANCE_MANUAL_FILE)
     metrics_list = _metrics_of(metrics)
     verdict = di.ingest(doc, company=str(company or ""), company_code=str(company_code or ""),
                         periods=list(periods or ()), as_of=str(as_of or ""),

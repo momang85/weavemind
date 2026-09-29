@@ -1,0 +1,107 @@
+[
+ {
+  "material_id": "0c3e82056e977adc",
+  "channel": "web_link",
+  "channel_label": "网页提交的披露直链（由服务取件）",
+  "kind": "pdf",
+  "kind_label": "PDF",
+  "title": "三一重工股份有限公司2024年年度报告",
+  "url": "http://static.cninfo.com.cn/finalpage/2025-04-18/1223129214.PDF",
+  "filename": "",
+  "bytes": 5378376,
+  "raw_sha256": "09b21df2cef24fd85b4efa625579138241ae1de4fa7ad4f2c9fcef0c694a0d1a",
+  "text_sha256": "aeaf2e836e2af6741003258b2cc8cf7f0799b8b939e5643a835675258aa33ef5",
+  "status": "admitted",
+  "reason": "",
+  "source_class": "official_disclosure",
+  "provenance": "official_discovery",
+  "provenance_label": "官方公告发现（自动，参数契约可查）",
+  "rules_version": "adm-2/f3a-1",
+  "retrieved_at": "2026-09-29T18:25:40",
+  "created_at": "2026-09-29T18:24:31",
+  "updated_at": "2026-09-29T18:25:40",
+  "attached": false,
+  "period": "2024",
+  "doc_type": "年度报告",
+  "disclosure_date": "2025-04-18",
+  "date_precision": "day",
+  "date_basis": "source_url_format",
+  "metric_states": {
+   "revenue": {
+    "state": "present_in_scope",
+    "label": "材料范围内已定位到承载小节",
+    "matched": "",
+    "section_count": 14
+   },
+   "net_profit": {
+    "state": "present_in_scope",
+    "label": "材料范围内已定位到承载小节",
+    "matched": "",
+    "section_count": 19
+   },
+   "operating_cashflow": {
+    "state": "present_in_scope",
+    "label": "材料范围内已定位到承载小节",
+    "matched": "",
+    "section_count": 152
+   }
+  },
+  "read_scope": {
+   "text_chars": 251504,
+   "parsed_ranges": [
+    [
+     243,
+     659
+    ],
+    [
+     117592,
+     118766
+    ],
+    [
+     123856,
+     126804
+    ],
+    [
+     222191,
+     228010
+    ]
+   ],
+   "unparsed_ranges": [
+    [
+     0,
+     243
+    ],
+    [
+     659,
+     117592
+    ],
+    [
+     118766,
+     123856
+    ],
+    [
+     126804,
+     222191
+    ],
+    [
+     228010,
+     251504
+    ]
+   ],
+   "truncated": false,
+   "truncation_reason": ""
+  },
+  "evidence_count": 8,
+  "section_count": 1201,
+  "parse": {
+   "parser": "pypdf",
+   "kind": "pdf",
+   "location_kind": "page",
+   "pages": 255,
+   "truncated": false,
+   "truncation_reason": "",
+   "chars": 254312,
+   "content_type": "application/pdf"
+  }
+ }
+]

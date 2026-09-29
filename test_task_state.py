@@ -37,7 +37,10 @@ class TestTaskStateProjector(unittest.TestCase):
             set(added),
             {"acceptance_json", "rules_fingerprint", "phase", "updated_at",
              "research_request_json",       # A 批：研究契约在提交时落库
-             "idempotency_key", "submit_timeline_json", "accepted_by"},
+             "idempotency_key", "submit_timeline_json", "accepted_by",
+             # 幂等键拆成三列（作用域 + 请求指纹 + 运行选项）：提交口径变了要能对账，
+             # 只存一个 key 时无法区分"同一作用域下的同一请求"与"换了选项的同名请求"
+             "idem_scope", "request_fingerprint", "run_options_json"},
             # C3：幂等键 + 提交时间线 + 实例归属（收执要有身份、可对账、可去重）
         )
         self.assertEqual(task_state.ensure_schema(self.db), [],

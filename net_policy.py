@@ -449,13 +449,16 @@ def require_service(endpoint_id: str, operation: str = "") -> str:
 
 
 def fetch_text(url: str, *, timeout: float | None = None, encoding: str = "utf-8",
-               max_bytes: int | None = None, headers: dict | None = None) -> str:
+               max_bytes: int | None = None, headers: dict | None = None,
+               method: str = "GET", body: bytes | str | None = None,
+               content_type: str = "") -> str:
     """`fetch_document` 的文本形态（按调用方给的 encoding 解码）。
 
     给"明确直连"的适配器用：它们本来直接调 urllib（会吃掉环境代理），改调本函数即
-    走同一条已验 IP 通道，不需要各自再拼请求。
+    走同一条已验 IP 通道，不需要各自再拼请求。`method`/`body` 原样透传。
     """
-    got = fetch_document(url, timeout=timeout, max_bytes=max_bytes, headers=headers)
+    got = fetch_document(url, timeout=timeout, max_bytes=max_bytes, headers=headers,
+                         method=method, body=body, content_type=content_type)
     return bytes(got.get("raw") or b"").decode(encoding, errors="replace")
 
 
@@ -477,12 +480,24 @@ def _connect_pinned(ip: str, port: int, host: str, scheme: str, timeout: float) 
 
 
 def fetch_document(url: str, *, timeout: float | None = None,
-                   max_bytes: int | None = None, headers: dict | None = None) -> dict:
+                   max_bytes: int | None = None, headers: dict | None = None,
+                   method: str = "GET", body: bytes | str | None = None,
+                   content_type: str = "") -> dict:
     """抓取内容派生 URL：先严格校验，再用**已验 IP** 连接；不跟随重定向。
 
     返回 `{"status","url","headers","text","bytes","egress"}`；策略拒绝抛
     `NetworkPolicyError`，执行失败（含重定向、超限、超时）抛 `FetchError`。
     请求不携带任何调用方凭据。
+
+    `method`/`body` 只为两类官方端点准备：公告查询接口是 `POST` 表单，正文才是 `GET`。
+    方法与体积都收在这里，不另外开一个"能发任意请求"的散口——出域校验、已验 IP 直连、
+    不跟随跳转、不带凭据这四条对两类请求一视同仁。
+
+    **读取在关闭之前**（2026-09-29 修）：响应必须在 socket 还开着的时候读，
+    关掉之后再解析只会得到 `WinError 10038`（"在非套接字上尝试了一个操作"）——
+    A1 重做时把"先收字节、后关连接、再手拆头"的老顺序留下了，而解析已经换成
+    `http.client`，结果整条通道在生产上恒失败。假替身的 `close()` 是空操作，
+    所以离线用例全绿也没发现；替身已按真实生命周期重做（关后即报 10038）。
 
     出口方式（专项 §6）：本通道**用已验 IP 直连，经代理出口在本版本不支持**——代理侧
     自行解析域名，与"校验与连接共用同一个已验 IP"冲突。因此：
@@ -509,22 +524,34 @@ def fetch_document(url: str, *, timeout: float | None = None,
         path = f"{path}?{parts.query}"
     budget = float(timeout or DEFAULT_TIMEOUT)
     cap = int(max_bytes or MAX_BODY_BYTES)
+    method_up = str(method or "GET").upper()
+    if method_up not in ("GET", "POST"):
+        raise ValueError(f"内容抓取只支持 GET/POST，收到 {method!r}")
+    payload = b""
+    if method_up == "POST":
+        payload = body.encode("utf-8") if isinstance(body, str) else bytes(body or b"")
     mode = connection_mode()
     proxy = proxy_settings()
     egress = "direct_pinned"
     if proxy["configured"] and mode != "direct":
         logger.info("内容抓取走已验 IP 直连（本版本不支持经代理出口）；环境代理=%s 未使用",
                     ",".join(proxy["hosts"]) or "?")
+    # **根截止**：地址尝试与重试共用一条线，不每次续期（否则 N 个地址 = N 倍预算）
+    root_deadline = time.monotonic() + budget
 
+    def _remaining() -> float:
+        return root_deadline - time.monotonic()
 
     last_error = ""
     for ip in decision.resolved:
+        remain = _remaining()
+        if remain <= 0:
+            raise FetchError(f"总截止 {budget:g}s 已用尽，未试完 {len(decision.resolved)} 个地址")
         try:
-            sock = _connect_pinned(ip, port, host, parts.scheme, budget)
+            sock = _connect_pinned(ip, port, host, parts.scheme, remain)
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
             continue
-        raw = b""
         try:
             hdrs = {"Host": host, "User-Agent": "WeaveMind/1.0 (+policy:public-only)",
                     "Connection": "close", "Accept": "*/*"}
@@ -532,19 +559,20 @@ def fetch_document(url: str, *, timeout: float | None = None,
                 if str(k).lower() in ("authorization", "cookie", "x-api-key"):
                     continue        # 内容抓取不带任何凭据
                 hdrs[str(k)] = str(v)
-            req = (f"GET {path} HTTP/1.1\r\n"
-                   + "".join(f"{k}: {v}\r\n" for k, v in hdrs.items()) + "\r\n")
-            sock.sendall(req.encode("utf-8", "replace"))
-            started = time.time()
-            while len(raw) < cap:
-                if time.time() - started > budget:
-                    raise FetchError("读取超时")
-                chunk = sock.recv(min(65536, cap - len(raw)))
-                if not chunk:
-                    break
-                raw += chunk
-            if len(raw) >= cap:
-                raise FetchError(f"响应体超过上限 {cap} 字节")
+            if method_up == "POST":
+                hdrs.setdefault("Content-Type",
+                                str(content_type or "application/x-www-form-urlencoded"))
+                hdrs["Content-Length"] = str(len(payload))
+            request = (f"{method_up} {path} HTTP/1.1\r\n"
+                       + "".join(f"{k}: {v}\r\n" for k, v in hdrs.items())
+                       + "\r\n").encode("utf-8", "replace") + payload
+            sock.sendall(request)
+            remain = _remaining()
+            if remain <= 0:
+                raise FetchError(f"总截止 {budget:g}s 在发出请求后用尽")
+            # 不预读、不提前关闭：解析器自己按截止线读，读完（或报错）才关连接
+            return _read_http_response(sock, url=url, egress=egress, cap=cap,
+                                       budget=remain)
         except FetchError:
             raise
         except Exception as exc:
@@ -555,9 +583,6 @@ def fetch_document(url: str, *, timeout: float | None = None,
                 sock.close()
             except Exception:
                 pass
-
-        return _read_http_response(sock, url=url, egress=egress, cap=cap,
-                                   budget=budget)
     raise FetchError(last_error or "连接失败")
 
 

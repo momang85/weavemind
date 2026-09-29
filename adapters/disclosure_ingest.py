@@ -23,6 +23,8 @@ from __future__ import annotations
 import hashlib
 import logging
 
+from adapters import source_registry as registry
+
 logger = logging.getLogger(__name__)
 
 # 准入规则版本：判据一变，旧材料与旧缓存的 `admitted` **不得复用**（专项 C1）。
@@ -92,10 +94,14 @@ _REPORT_BODY_MARKERS = (
 PROVENANCE_AUTO = "auto_search"
 PROVENANCE_MANUAL_URL = "manual_url"
 PROVENANCE_MANUAL_FILE = "manual_file"
+# 官方公告发现（本批打通）：**不是**人工给链，也**不是**全文搜索摘要——
+# 它是从官方公告接口按参数契约取回的候选，参数与契约版本都留在记录里。
+PROVENANCE_DISCOVERY = "official_discovery"
 PROVENANCE_LABEL = {
     PROVENANCE_AUTO: "自动检索取得",
     PROVENANCE_MANUAL_URL: "人工提供的官方直链",
     PROVENANCE_MANUAL_FILE: "人工取得的文件",
+    PROVENANCE_DISCOVERY: "官方公告发现（自动，参数契约可查）",
 }
 
 
@@ -176,36 +182,156 @@ def _declared_disclosure(doc: dict) -> tuple[str, str, str]:
     return "", "", ""
 
 
-def discover(company: str, company_code: str = "", periods=(), doc_type: str = "年度报告") -> dict:
-    """官方披露**发现**：当前只有巨潮一条链路，且它未连通。
+def discover(company: str, company_code: str = "", periods=(), doc_type: str = "年度报告",
+             limit: int = 8, until: str = "", fetch=None) -> dict:
+    """官方披露**发现**：巨潮公告查询（**已打通**，2026-09-29 实机验证）。
 
-    如实返回 `unavailable`：接口探针未通过（POST 查询恒空、webapi 需 mcode），
-    所以"自动发现公告列表"这件事本版本做不到——不能拿搜索结果冒充，也不绕验证码。
-    操作者的正当出路写进 `next_steps`：提供官方直链或人工取得的文件，走同一摄取与准入。
+    这条路与全文搜索**没有关系**：它按参数契约直接问官方公告接口，取回该公司的年报类
+    公告条目（标题/披露日/原件 URL/版本/是否摘要），再由 `material_intake` 走同一条
+    取件与准入链。搜索最多只能提供"去哪找"的线索，不能充当原文。
+
+    返回：
+
+    - `status="found"`：`candidates` 是可直接送准入的原件候选（每条带 `why`）；
+    - `status="no_candidates"`：查询成功但期间内没有对应的年报正文（原因码
+      `empty_result` / `irrelevant_result` 区分"确实没有"与"有公告但都不是我们要的"）；
+    - `status="unavailable"`：这条端点暂时不可用（带原因码与 `next_steps` 恢复入口）。
+
+    `until` 用于**历史时点**研究（"当时能看到的版本"）；不传即"到今天为止"，
+    这时更正/重述稿也会出现在候选里——它们是 2025 年才发布的，不能拿去当 2021 年已知数据。
     """
+    out: dict = {"status": UNAVAILABLE, "channel": "cninfo",
+                 "source": "cninfo_disclosure_query",
+                 "upstream_family": "cninfo", "authority": "official_disclosure",
+                 "access_method": "http_post_form",
+                 "contract": "", "params": {}, "probe": {},
+                 "candidates": [], "reason": "", "reason_code": registry.UNKNOWN_CAUSE,
+                 "next_steps": []}
+    if str(doc_type or "年度报告") != "年度报告":
+        out.update({"reason_code": registry.NOT_IMPLEMENTED,
+                    "reason": f"公告发现目前只接了年度报告，收到：{doc_type}",
+                    "next_steps": ["先用年度报告；其它文种待单独接端点"]})
+        return out
     try:
         from adapters import cninfo
-        if bool(cninfo.enabled()):
-            # 启用态下也如实报告结果（探针未通过 → 抛错即为结论，不吞掉）
-            try:
-                rows = cninfo._fetch_annual_rows(str(company_code or ""), periods)
-                if rows:
-                    return {"status": ADMITTED, "channel": "cninfo", "rows": len(rows)}
-            except Exception as exc:                 # noqa: BLE001
-                return {"status": UNAVAILABLE, "channel": "cninfo",
-                        "reason": f"巨潮接口不可用：{str(exc)[:120]}"}
     except Exception as exc:                         # noqa: BLE001
-        return {"status": UNAVAILABLE, "channel": "cninfo",
-                "reason": f"巨潮适配器不可读：{str(exc)[:120]}"}
+        out.update({"reason_code": registry.UNKNOWN_CAUSE,
+                    "reason": f"巨潮适配器不可读：{str(exc)[:120]}"})
+        return out
+    if not cninfo.discovery_enabled():
+        out.update({"reason_code": registry.NOT_IMPLEMENTED,
+                    "reason": "公告发现被环境开关关闭（WEAVEMIND_CNINFO_DISCOVERY=0）",
+                    "next_steps": ["去掉该环境变量后重试"]})
+        return out
+    try:
+        got = cninfo.discover_annual_reports(str(company_code or ""), years=periods,
+                                             fetch=fetch, until=until)
+    except Exception as exc:                         # noqa: BLE001
+        code = cninfo._classify(exc)
+        out.update({"reason_code": code,
+                    "reason": f"公告发现失败：{str(exc)[:160]}",
+                    "next_steps": _recovery_steps(code)})
+        return out
+
+    out.update({"contract": got.get("contract") or cninfo.PARAM_CONTRACT,
+                "params": dict(got.get("params") or {}),
+                "probe": dict(got.get("probe") or {}),
+                "total": int(got.get("total") or 0),
+                "unmatched": list(got.get("unmatched") or [])})
+    candidates = [_candidate_of(item, company, company_code, periods)
+                  for item in (got.get("items") or ())]
+    candidates = [c for c in candidates if c]
+    if not candidates:
+        code = str(got.get("reason_code") or registry.EMPTY_RESULT)
+        out.update({"status": "no_candidates", "reason_code": code,
+                    "reason": str(got.get("reason") or "期间内没有年报正文候选"),
+                    "next_steps": _recovery_steps(code)})
+        return out
+    out.update({"status": "found", "reason_code": "", "reason": "",
+                "candidates": candidates[:max(1, int(limit))],
+                "next_steps": []})
+    return out
+
+
+def prefer_body_candidates(candidates, *, language: str = "zh") -> list[dict]:
+    """候选排序：**报告期最新的在前**，再看中文/正文/原版，同级按披露日**从早到晚**。
+
+    为什么要显式写这条策略（实机反例）：洋河的关键词查询同时返回 2023 与 2024 两期年报，
+    以及 2024 年报的**英文版**（2025-06-03）。两种挑法都会错：
+
+    - 只看"标题里没有更正字样 + 披露日最新" → 挑到**英文版**，然后被正文判据拒绝；
+    - 只看"披露日最早" → 挑到**上一年**的报告（2024-04-27 的 2023 年报），
+      研究当期反而没数据。
+
+    所以顺序是：报告期倒序 → 语言命中 → 正文（非摘要）→ 原版（非更正）→ 披露日升序。
+    同级里**最早披露优先**：更晚的同名文件是"另一个物件"（重发/更新/其它语言），
+    要被**核对**，不能被默认当成"更新更好"。这个顺序是**候选队列**不是结论，
+    调用方要逐个送准入，被拒的必须留痕。
+    """
+    def _rank(item: dict) -> tuple:
+        period = str(item.get("period") or "")
+        year = int(period[:4]) if period[:4].isdigit() else 0
+        lang_ok = 0 if str(item.get("language") or "zh") == str(language) else 1
+        body = 1 if item.get("is_summary") else 0
+        ver = 0 if str(item.get("version") or "original") == "original" else 1
+        return (-year, lang_ok, body, ver, str(item.get("disclosed_at") or "9999-99-99"))
+
+    return sorted([c for c in (candidates or ()) if isinstance(c, dict)], key=_rank)
+
+
+def _candidate_of(item: dict, company: str, company_code: str, periods) -> dict:
+    """公告条目 → 送准入的候选：**主体与期间自己再过一遍**，不把发现当准入。"""
+    from narrative_evidence import _subject_state
+
+    title = str(item.get("title") or "")
+    url = str(item.get("url") or "")
+    if not url:
+        return {}
+    subject = _subject_state({"title": title, "text": ""}, company, company_code)
+    if subject == "mismatch":
+        return {}
+    why = ["官方披露域（巨潮公告查询）",
+           f"报告期 {item.get('period')}" if item.get("period") else "报告期未标注",
+           "更正/修订后版本（与原始版并存，不覆盖）" if item.get("version") == "corrected"
+           else "原始披露版本",
+           "摘要（正文另有文件）" if item.get("is_summary") else "正文"]
     return {
-        "status": UNAVAILABLE,
-        "channel": "cninfo",
-        "reason": "巨潮公告发现接口未连通（探针恒空/需 token），本版本不做自动发现",
-        "next_steps": [
-            "提供该年报在官方披露平台的直链（manual_url）",
-            "或人工取得的 PDF/文本文件（manual_file）",
-        ],
+        "url": url, "title": title,
+        "period": str(item.get("period") or ""),
+        "version": str(item.get("version") or "original"),
+        "is_summary": bool(item.get("is_summary")),
+        "language": str(item.get("language") or "zh"),
+        "disclosed_at": str(item.get("disclosed_at") or ""),
+        "disclosed_at_basis": str(item.get("disclosed_at_basis") or ""),
+        "size_kb": item.get("size_kb"),
+        "authority": str(item.get("authority") or "official_disclosure"),
+        "source": str(item.get("source") or "cninfo_disclosure_query"),
+        "subject_state": subject,
+        "why": "；".join(why),
     }
+
+
+def _recovery_steps(reason_code: str) -> list[str]:
+    """每条恢复入口都要**指向具体动作**（页面显示的是可行动的缺口，不是一句"失败"）。"""
+    table = {
+        registry.POLICY_BLOCKED: ["该域名被本项目的出域策略挡住：在设置页确认出口模式，"
+                                  "或改走人工直链/文件导入（策略不放宽）"],
+        registry.NETWORK_ERROR: ["网络/传输失败：稍后重试；也可先用官方直链或人工取得的文件"
+                                 "走同一条准入"],
+        registry.AUTH_REQUIRED: ["该端点需要账号/令牌：本项目不自行采购，改走人工直链或文件导入"],
+        registry.RATE_LIMITED: ["被限流：本轮不重试，冷却后再来；期间用人工直链/文件导入"],
+        registry.PROTOCOL_ERROR: ["接口返回非约定格式（可能是跳转或临时故障）："
+                                  "保留参数摘要，稍后重试"],
+        registry.SCHEMA_CHANGED: ["上游改了结构：需要重新勘探参数契约后再启用，"
+                                  "此时用人工直链/文件导入"],
+        registry.EMPTY_RESULT: ["这家公司在查询期间内确实没有该类公告：确认证券代码与报告期，"
+                                "或改用人工材料"],
+        registry.IRRELEVANT_RESULT: ["取回的公告都不相关（期间/文种不符）：放宽期间或换文种，"
+                                     "或改用人工材料"],
+        registry.NOT_IMPLEMENTED: ["该能力尚未接端点：用人工直链或文件导入"],
+    }
+    return table.get(str(reason_code), ["原因未定：保留参数摘要并核对证券代码；"
+                                        "也可改用人工直链或文件导入"])
 
 
 def pick_official_candidates(candidates, *, company: str, company_code: str = "",

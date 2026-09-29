@@ -1,0 +1,1081 @@
+{
+ "started_at": "2026-09-29T18:24:28",
+ "contract": "cninfo-hisannouncement-v1",
+ "companies": [
+  {
+   "role": "第二家公司（上交所）",
+   "company": "三一重工",
+   "code": "600031.SH",
+   "periods": [
+    2023,
+    2024
+   ],
+   "discovery_status": "found",
+   "reason_code": "",
+   "reason": "",
+   "contract": "cninfo-hisannouncement-v1",
+   "params": {
+    "pageNum": "1",
+    "pageSize": "30",
+    "column": "szse",
+    "tabName": "fulltext",
+    "plate": "",
+    "stock": "600031,gssh0600031",
+    "searchkey": "",
+    "secid": "",
+    "category": "category_ndbg_szsh",
+    "trade": "",
+    "seDate": "2022-01-01~2027-12-31",
+    "sortName": "",
+    "sortType": "",
+    "isHLtitle": "true"
+   },
+   "probe": {
+    "url": "http://www.cninfo.com.cn/new/hisAnnouncement/query",
+    "status": 200,
+    "bytes": 6809
+   },
+   "candidates": [
+    {
+     "url": "http://static.cninfo.com.cn/finalpage/2025-04-18/1223129233.PDF",
+     "title": "三一重工股份有限公司2024年年度报告摘要",
+     "period": "2024",
+     "version": "original",
+     "is_summary": true,
+     "language": "zh",
+     "disclosed_at": "2025-04-18",
+     "size_kb": 633,
+     "why": "官方披露域（巨潮公告查询）；报告期 2024；原始披露版本；摘要（正文另有文件）"
+    },
+    {
+     "url": "http://static.cninfo.com.cn/finalpage/2025-04-18/1223129214.PDF",
+     "title": "三一重工股份有限公司2024年年度报告",
+     "period": "2024",
+     "version": "original",
+     "is_summary": false,
+     "language": "zh",
+     "disclosed_at": "2025-04-18",
+     "size_kb": 5253,
+     "why": "官方披露域（巨潮公告查询）；报告期 2024；原始披露版本；正文"
+    },
+    {
+     "url": "http://static.cninfo.com.cn/finalpage/2024-04-29/1219890117.PDF",
+     "title": "三一重工股份有限公司2023年年度报告摘要",
+     "period": "2023",
+     "version": "original",
+     "is_summary": true,
+     "language": "zh",
+     "disclosed_at": "2024-04-29",
+     "size_kb": 595,
+     "why": "官方披露域（巨潮公告查询）；报告期 2023；原始披露版本；摘要（正文另有文件）"
+    },
+    {
+     "url": "http://static.cninfo.com.cn/finalpage/2024-04-29/1219890100.PDF",
+     "title": "三一重工股份有限公司2023年年度报告",
+     "period": "2023",
+     "version": "original",
+     "is_summary": false,
+     "language": "zh",
+     "disclosed_at": "2024-04-29",
+     "size_kb": 5101,
+     "why": "官方披露域（巨潮公告查询）；报告期 2023；原始披露版本；正文"
+    }
+   ],
+   "steps": [
+    {
+     "step": "store",
+     "ok": true,
+     "material_id": "0c3e82056e977adc",
+     "duplicate": false,
+     "error": ""
+    },
+    {
+     "step": "admit",
+     "ok": false,
+     "status": "fetch_failed",
+     "as_of": "2025-04-18",
+     "reason": "",
+     "detail": "FetchError: 读取超时（总截止 29.9805s）：read deadline exceeded (TimeoutError)",
+     "provenance": "",
+     "provenance_label": "",
+     "source_class": "",
+     "text_hash": "",
+     "cutoff": {},
+     "metric_states": {
+      "revenue": {
+       "state": "not_obtained",
+       "label": "未取得正文"
+      },
+      "net_profit": {
+       "state": "not_obtained",
+       "label": "未取得正文"
+      },
+      "operating_cashflow": {
+       "state": "not_obtained",
+       "label": "未取得正文"
+      }
+     },
+     "candidate_rejected": true
+    },
+    {
+     "step": "store",
+     "ok": true,
+     "material_id": "0c3e82056e977adc",
+     "duplicate": true,
+     "error": ""
+    },
+    {
+     "step": "admit",
+     "ok": true,
+     "status": "admitted",
+     "as_of": "2025-04-18",
+     "reason": "",
+     "detail": "",
+     "provenance": "official_discovery",
+     "provenance_label": "官方公告发现（自动，参数契约可查）",
+     "source_class": "official_disclosure",
+     "text_hash": "aeaf2e836e2af6741003258b2cc8cf7f0799b8b939e5643a835675258aa33ef5",
+     "cutoff": {
+      "disclosed_at": "2025-04-18",
+      "precision": "day",
+      "basis": "source_url_format",
+      "as_of": "2025-04-18",
+      "verdict": "within"
+     },
+     "metric_states": {},
+     "candidate_rejected": true,
+     "retried": true
+    }
+   ],
+   "ok": true,
+   "facts": {
+    "ok": true,
+    "entity_state": "verified",
+    "text_hash": "aeaf2e836e2af6741003258b2cc8cf7f0799b8b939e5643a835675258aa33ef5",
+    "lines": 12851,
+    "facts": 34,
+    "tables": 17,
+    "rejected_total": 29,
+    "rejected_reasons": {
+     "table_unrecognized": 24,
+     "no_periods": 5
+    },
+    "sample": [
+     {
+      "metric": "accounts_receivable",
+      "period": "2024年",
+      "value": 25516530000.0,
+      "unit": "元",
+      "caliber": "合并",
+      "locator": "PDF 第 90 页 · 合并资产负债表 · 行「应收账款 七、6 25,516,530 24,164,729」",
+      "fact_id": "fact-61df6a1b9de7c6b9"
+     },
+     {
+      "metric": "accounts_receivable",
+      "period": "2023年",
+      "value": 24164729000.0,
+      "unit": "元",
+      "caliber": "合并",
+      "locator": "PDF 第 90 页 · 合并资产负债表 · 行「应收账款 七、6 25,516,530 24,164,729」",
+      "fact_id": "fact-382f3de8364f53d0"
+     },
+     {
+      "metric": "inventory",
+      "period": "2024年",
+      "value": 19947981000.0,
+      "unit": "元",
+      "caliber": "合并",
+      "locator": "PDF 第 90 页 · 合并资产负债表 · 行「存货 七、11 19,947,981 19,767,762」",
+      "fact_id": "fact-065fc9297aa8fb24"
+     },
+     {
+      "metric": "inventory",
+      "period": "2023年",
+      "value": 19767762000.0,
+      "unit": "元",
+      "caliber": "合并",
+      "locator": "PDF 第 90 页 · 合并资产负债表 · 行「存货 七、11 19,947,981 19,767,762」",
+      "fact_id": "fact-32e1b9aedcd18a62"
+     },
+     {
+      "metric": "total_assets",
+      "period": "2024年",
+      "value": 152145076000.0,
+      "unit": "元",
+      "caliber": "合并",
+      "locator": "PDF 第 86 页 · 合并资产负债表 · 行「资产总计 152,145,076 151,203,358」",
+      "fact_id": "fact-7b7fdf2575a37693"
+     },
+     {
+      "metric": "total_assets",
+      "period": "2023年",
+      "value": 151203358000.0,
+      "unit": "元",
+      "caliber": "合并",
+      "locator": "PDF 第 86 页 · 合并资产负债表 · 行「资产总计 152,145,076 151,203,358」",
+      "fact_id": "fact-c2d7d4e0195bbb95"
+     }
+    ]
+   },
+   "dataset": {
+    "hash": "b3da76eff4cee498dd66fe4cad44fd90b8499b18c78c565fa65d50fe19c1f3b1",
+    "entity": "三一重工",
+    "entity_id": "600031.SH",
+    "periods": [
+     "2023年",
+     "2024年"
+    ],
+    "observations": 38,
+    "usable": 38,
+    "gaps": [],
+    "conflicts": []
+   },
+   "models": {
+    "adopted": [
+     "cash_quality",
+     "profit_bridge",
+     "scenario_sensitivity",
+     "working_capital"
+    ],
+    "runs": [
+     {
+      "model_id": "profit_bridge",
+      "adopted": true,
+      "status": "validated",
+      "reason": "",
+      "validation_ok": true,
+      "outputs": [
+       {
+        "metric": "net_profit_change",
+        "value": 1448000000.0,
+        "unit": "元",
+        "period": "2024年较2023年"
+       },
+       {
+        "metric": "gross_profit_change",
+        "value": 1385760000.0,
+        "unit": "元",
+        "period": "2024年较2023年"
+       },
+       {
+        "metric": "below_gross_line_change",
+        "value": 62240000.0,
+        "unit": "元",
+        "period": "2024年较2023年"
+       }
+      ]
+     },
+     {
+      "model_id": "cash_quality",
+      "adopted": true,
+      "status": "validated",
+      "reason": "",
+      "validation_ok": true,
+      "outputs": [
+       {
+        "metric": "cfo_minus_profit",
+        "value": 8838827000.0,
+        "unit": "元",
+        "period": "2024年"
+       },
+       {
+        "metric": "cashflow_coverage",
+        "value": 247.92,
+        "unit": "%",
+        "period": "2024年"
+       }
+      ]
+     },
+     {
+      "model_id": "working_capital",
+      "adopted": true,
+      "status": "validated",
+      "reason": "",
+      "validation_ok": true,
+      "outputs": [
+       {
+        "metric": "working_capital_occupation_change",
+        "value": -2115206000.0,
+        "unit": "元",
+        "period": "2024年较2023年"
+       },
+       {
+        "metric": "receivable_days",
+        "value": 119.75,
+        "unit": "天",
+        "period": "2024年"
+       },
+       {
+        "metric": "inventory_days",
+        "value": 127.25,
+        "unit": "天",
+        "period": "2024年"
+       },
+       {
+        "metric": "payable_days",
+        "value": 135.65,
+        "unit": "天",
+        "period": "2024年"
+       }
+      ]
+     },
+     {
+      "model_id": "scenario_sensitivity",
+      "adopted": true,
+      "status": "validated",
+      "reason": "",
+      "validation_ok": true,
+      "outputs": [
+       {
+        "metric": "scenario_net_profit",
+        "value": 7819893205.5,
+        "unit": "元",
+        "period": "2024年（上行）"
+       },
+       {
+        "metric": "scenario_sensitivity",
+        "value": 777733910.0,
+        "unit": "元",
+        "period": "2024年（最敏感：毛利率 +1pp）"
+       }
+      ]
+     }
+    ],
+    "validated": 4
+   },
+   "question": "三一重工（600031.SH）2023/2024 年经营分析：利润变化来自哪里、现金质量如何、营运资金占用怎样"
+  },
+  {
+   "role": "不同布局原件（冻结样本公司，改走官方发现）",
+   "company": "洋河股份",
+   "code": "002304.SZ",
+   "periods": [
+    2023,
+    2024
+   ],
+   "discovery_status": "found",
+   "reason_code": "",
+   "reason": "",
+   "contract": "cninfo-hisannouncement-v1",
+   "params": {
+    "pageNum": "1",
+    "pageSize": "30",
+    "column": "szse",
+    "tabName": "fulltext",
+    "plate": "",
+    "stock": "002304,9900008689",
+    "searchkey": "",
+    "secid": "",
+    "category": "category_ndbg_szsh",
+    "trade": "",
+    "seDate": "2022-01-01~2027-12-31",
+    "sortName": "",
+    "sortType": "",
+    "isHLtitle": "true"
+   },
+   "probe": {
+    "url": "http://www.cninfo.com.cn/new/hisAnnouncement/query",
+    "status": 200,
+    "bytes": 9489
+   },
+   "candidates": [
+    {
+     "url": "http://static.cninfo.com.cn/finalpage/2025-04-29/1223370541.PDF",
+     "title": "2024年年度报告摘要",
+     "period": "2024",
+     "version": "original",
+     "is_summary": true,
+     "language": "zh",
+     "disclosed_at": "2025-04-29",
+     "size_kb": 290,
+     "why": "官方披露域（巨潮公告查询）；报告期 2024；原始披露版本；摘要（正文另有文件）"
+    },
+    {
+     "url": "http://static.cninfo.com.cn/finalpage/2025-06-03/1223732768.PDF",
+     "title": "2024年年度报告（英文版）",
+     "period": "2024",
+     "version": "original",
+     "is_summary": false,
+     "language": "en",
+     "disclosed_at": "2025-06-03",
+     "size_kb": 5524,
+     "why": "官方披露域（巨潮公告查询）；报告期 2024；原始披露版本；正文"
+    },
+    {
+     "url": "http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF",
+     "title": "2024年年度报告",
+     "period": "2024",
+     "version": "original",
+     "is_summary": false,
+     "language": "zh",
+     "disclosed_at": "2025-04-29",
+     "size_kb": 4591,
+     "why": "官方披露域（巨潮公告查询）；报告期 2024；原始披露版本；正文"
+    },
+    {
+     "url": "http://static.cninfo.com.cn/finalpage/2024-04-27/1219873250.PDF",
+     "title": "2023年年度报告摘要",
+     "period": "2023",
+     "version": "original",
+     "is_summary": true,
+     "language": "zh",
+     "disclosed_at": "2024-04-27",
+     "size_kb": 360,
+     "why": "官方披露域（巨潮公告查询）；报告期 2023；原始披露版本；摘要（正文另有文件）"
+    },
+    {
+     "url": "http://static.cninfo.com.cn/finalpage/2024-06-04/1220245961.PDF",
+     "title": "2023年年度报告（英文版）",
+     "period": "2023",
+     "version": "original",
+     "is_summary": false,
+     "language": "en",
+     "disclosed_at": "2024-06-04",
+     "size_kb": 5532,
+     "why": "官方披露域（巨潮公告查询）；报告期 2023；原始披露版本；正文"
+    },
+    {
+     "url": "http://static.cninfo.com.cn/finalpage/2024-04-27/1219873234.PDF",
+     "title": "2023年年度报告",
+     "period": "2023",
+     "version": "original",
+     "is_summary": false,
+     "language": "zh",
+     "disclosed_at": "2024-04-27",
+     "size_kb": 3241,
+     "why": "官方披露域（巨潮公告查询）；报告期 2023；原始披露版本；正文"
+    }
+   ],
+   "steps": [
+    {
+     "step": "store",
+     "ok": true,
+     "material_id": "f42e747c73850b59",
+     "duplicate": false,
+     "error": ""
+    },
+    {
+     "step": "admit",
+     "ok": false,
+     "status": "fetch_failed",
+     "as_of": "2025-04-29",
+     "reason": "",
+     "detail": "FetchError: 读取超时（总截止 29.1406s）：read deadline exceeded (TimeoutError)",
+     "provenance": "",
+     "provenance_label": "",
+     "source_class": "",
+     "text_hash": "",
+     "cutoff": {},
+     "metric_states": {
+      "revenue": {
+       "state": "not_obtained",
+       "label": "未取得正文"
+      },
+      "net_profit": {
+       "state": "not_obtained",
+       "label": "未取得正文"
+      },
+      "operating_cashflow": {
+       "state": "not_obtained",
+       "label": "未取得正文"
+      }
+     },
+     "candidate_rejected": true
+    },
+    {
+     "step": "store",
+     "ok": true,
+     "material_id": "f42e747c73850b59",
+     "duplicate": true,
+     "error": ""
+    },
+    {
+     "step": "admit",
+     "ok": true,
+     "status": "admitted",
+     "as_of": "2025-04-29",
+     "reason": "",
+     "detail": "",
+     "provenance": "official_discovery",
+     "provenance_label": "官方公告发现（自动，参数契约可查）",
+     "source_class": "official_disclosure",
+     "text_hash": "a71287d53c7f62c8126aad548354616fdbbc62a82e2e42440442fb2a89d678b0",
+     "cutoff": {
+      "disclosed_at": "2025-04-29",
+      "precision": "day",
+      "basis": "source_url_format",
+      "as_of": "2025-04-29",
+      "verdict": "within"
+     },
+     "metric_states": {},
+     "candidate_rejected": true,
+     "retried": true
+    }
+   ],
+   "ok": true,
+   "facts": {
+    "ok": true,
+    "entity_state": "verified",
+    "text_hash": "a71287d53c7f62c8126aad548354616fdbbc62a82e2e42440442fb2a89d678b0",
+    "lines": 10771,
+    "facts": 28,
+    "tables": 14,
+    "rejected_total": 21,
+    "rejected_reasons": {
+     "table_unrecognized": 14,
+     "no_periods": 6,
+     "column_mismatch": 1
+    },
+    "sample": [
+     {
+      "metric": "revenue",
+      "period": "2024年",
+      "value": 28876296993.56,
+      "unit": "元",
+      "caliber": "合并",
+      "locator": "PDF 第 6 页 · 主要会计数据和财务指标 · 行「营业收入(元) 28,876,296,993.56 33,126,277,551」",
+      "fact_id": "fact-29afad46307ce002"
+     },
+     {
+      "metric": "revenue",
+      "period": "2023年",
+      "value": 33126277551.51,
+      "unit": "元",
+      "caliber": "合并",
+      "locator": "PDF 第 6 页 · 主要会计数据和财务指标 · 行「营业收入(元) 28,876,296,993.56 33,126,277,551」",
+      "fact_id": "fact-7d428ffd289a0b17"
+     },
+     {
+      "metric": "total_assets",
+      "period": "2024年",
+      "value": 67345265219.62,
+      "unit": "元",
+      "caliber": "合并",
+      "locator": "PDF 第 7 页 · 主要会计数据和财务指标 · 行「总资产(元) 67,345,265,219.62 69,792,287,455.」",
+      "fact_id": "fact-1f7e62b896f0a74d"
+     },
+     {
+      "metric": "total_assets",
+      "period": "2023年",
+      "value": 69792287455.91,
+      "unit": "元",
+      "caliber": "合并",
+      "locator": "PDF 第 7 页 · 主要会计数据和财务指标 · 行「总资产(元) 67,345,265,219.62 69,792,287,455.」",
+      "fact_id": "fact-8692c38f82bec622"
+     },
+     {
+      "metric": "accounts_receivable",
+      "period": "2024年",
+      "value": 8994904.73,
+      "unit": "元",
+      "caliber": "合并",
+      "locator": "PDF 第 71 页 · 合并资产负债表 · 行「应收账款 8,994,904.73 3,528,778.28」",
+      "fact_id": "fact-c79d1e990d92933a"
+     },
+     {
+      "metric": "accounts_receivable",
+      "period": "2023年",
+      "value": 3528778.28,
+      "unit": "元",
+      "caliber": "合并",
+      "locator": "PDF 第 71 页 · 合并资产负债表 · 行「应收账款 8,994,904.73 3,528,778.28」",
+      "fact_id": "fact-92b888fbd5251051"
+     }
+    ]
+   },
+   "dataset": {
+    "hash": "2b28cad9f82de2bafb25eb112fc711a87bc2c7af28b1760bad155c82aac93282",
+    "entity": "洋河股份",
+    "entity_id": "002304.SZ",
+    "periods": [
+     "2023年",
+     "2024年"
+    ],
+    "observations": 32,
+    "usable": 32,
+    "gaps": [],
+    "conflicts": []
+   },
+   "models": {
+    "adopted": [
+     "cash_quality",
+     "profit_bridge",
+     "scenario_sensitivity",
+     "working_capital"
+    ],
+    "runs": [
+     {
+      "model_id": "profit_bridge",
+      "adopted": true,
+      "status": "validated",
+      "reason": "",
+      "validation_ok": true,
+      "outputs": [
+       {
+        "metric": "net_profit_change",
+        "value": -3342541438.15,
+        "unit": "元",
+        "period": "2024年较2023年"
+       },
+       {
+        "metric": "gross_profit_change",
+        "value": -3800953659.19,
+        "unit": "元",
+        "period": "2024年较2023年"
+       },
+       {
+        "metric": "below_gross_line_change",
+        "value": 458412221.04,
+        "unit": "元",
+        "period": "2024年较2023年"
+       }
+      ]
+     },
+     {
+      "model_id": "cash_quality",
+      "adopted": true,
+      "status": "validated",
+      "reason": "",
+      "validation_ok": true,
+      "outputs": [
+       {
+        "metric": "cfo_minus_profit",
+        "value": -2044677364.84,
+        "unit": "元",
+        "period": "2024年"
+       },
+       {
+        "metric": "cashflow_coverage",
+        "value": 69.36,
+        "unit": "%",
+        "period": "2024年"
+       }
+      ]
+     },
+     {
+      "model_id": "working_capital",
+      "adopted": true,
+      "status": "validated",
+      "reason": "",
+      "validation_ok": true,
+      "outputs": [
+       {
+        "metric": "working_capital_occupation_change",
+        "value": 945365113.29,
+        "unit": "元",
+        "period": "2024年较2023年"
+       },
+       {
+        "metric": "receivable_days",
+        "value": 0.11,
+        "unit": "天",
+        "period": "2024年"
+       },
+       {
+        "metric": "inventory_days",
+        "value": 929.21,
+        "unit": "天",
+        "period": "2024年"
+       },
+       {
+        "metric": "payable_days",
+        "value": 59.55,
+        "unit": "天",
+        "period": "2024年"
+       }
+      ]
+     },
+     {
+      "model_id": "scenario_sensitivity",
+      "adopted": true,
+      "status": "validated",
+      "reason": "",
+      "validation_ok": true,
+      "outputs": [
+       {
+        "metric": "scenario_net_profit",
+        "value": 8032843652.4,
+        "unit": "元",
+        "period": "2024年（上行）"
+       },
+       {
+        "metric": "scenario_sensitivity",
+        "value": 288762969.94,
+        "unit": "元",
+        "period": "2024年（最敏感：毛利率 +1pp）"
+       }
+      ]
+     }
+    ],
+    "validated": 4
+   },
+   "question": "洋河股份（002304.SZ）2023/2024 年经营分析：利润变化来自哪里、现金质量如何、营运资金占用怎样"
+  },
+  {
+   "role": "反例：重述/亏损（更正稿 2025 年才发布）",
+   "company": "京蓝科技",
+   "code": "000711.SZ",
+   "periods": [
+    2019,
+    2020
+   ],
+   "discovery_status": "found",
+   "reason_code": "",
+   "reason": "",
+   "contract": "cninfo-hisannouncement-v1",
+   "params": {
+    "pageNum": "1",
+    "pageSize": "30",
+    "column": "szse",
+    "tabName": "fulltext",
+    "plate": "",
+    "stock": "000711,gssz0000711",
+    "searchkey": "",
+    "secid": "",
+    "category": "category_ndbg_szsh",
+    "trade": "",
+    "seDate": "2018-01-01~2027-12-31",
+    "sortName": "",
+    "sortType": "",
+    "isHLtitle": "true"
+   },
+   "probe": {
+    "url": "http://www.cninfo.com.cn/new/hisAnnouncement/query",
+    "status": 200,
+    "bytes": 15857
+   },
+   "candidates": [
+    {
+     "url": "http://static.cninfo.com.cn/finalpage/2021-04-27/1209816824.PDF",
+     "title": "2020年年度报告摘要",
+     "period": "2020",
+     "version": "original",
+     "is_summary": true,
+     "language": "zh",
+     "disclosed_at": "2021-04-27",
+     "size_kb": 288,
+     "why": "官方披露域（巨潮公告查询）；报告期 2020；原始披露版本；摘要（正文另有文件）"
+    },
+    {
+     "url": "http://static.cninfo.com.cn/finalpage/2025-09-05/1224639904.PDF",
+     "title": "京蓝科技股份有限公司2020年年度报告（更正后）",
+     "period": "2020",
+     "version": "corrected",
+     "is_summary": false,
+     "language": "zh",
+     "disclosed_at": "2025-09-05",
+     "size_kb": 1479,
+     "why": "官方披露域（巨潮公告查询）；报告期 2020；更正/修订后版本（与原始版并存，不覆盖）；正文"
+    },
+    {
+     "url": "http://static.cninfo.com.cn/finalpage/2021-04-27/1209816825.PDF",
+     "title": "2020年年度报告",
+     "period": "2020",
+     "version": "original",
+     "is_summary": false,
+     "language": "zh",
+     "disclosed_at": "2021-04-27",
+     "size_kb": 4223,
+     "why": "官方披露域（巨潮公告查询）；报告期 2020；原始披露版本；正文"
+    },
+    {
+     "url": "http://static.cninfo.com.cn/finalpage/2020-04-29/1207666294.PDF",
+     "title": "2019年年度报告摘要",
+     "period": "2019",
+     "version": "original",
+     "is_summary": true,
+     "language": "zh",
+     "disclosed_at": "2020-04-29",
+     "size_kb": 293,
+     "why": "官方披露域（巨潮公告查询）；报告期 2019；原始披露版本；摘要（正文另有文件）"
+    },
+    {
+     "url": "http://static.cninfo.com.cn/finalpage/2020-04-29/1207666293.PDF",
+     "title": "2019年年度报告",
+     "period": "2019",
+     "version": "original",
+     "is_summary": false,
+     "language": "zh",
+     "disclosed_at": "2020-04-29",
+     "size_kb": 4561,
+     "why": "官方披露域（巨潮公告查询）；报告期 2019；原始披露版本；正文"
+    }
+   ],
+   "steps": [
+    {
+     "step": "store",
+     "ok": true,
+     "material_id": "797a3b25d1142a30",
+     "duplicate": false,
+     "error": ""
+    },
+    {
+     "step": "admit",
+     "ok": true,
+     "status": "admitted",
+     "as_of": "2021-04-27",
+     "reason": "",
+     "detail": "",
+     "provenance": "official_discovery",
+     "provenance_label": "官方公告发现（自动，参数契约可查）",
+     "source_class": "official_disclosure",
+     "text_hash": "2e511aa8b75fe49472be767c19f24a97b34cbf243f675827deb58f9a5f4d335d",
+     "cutoff": {
+      "disclosed_at": "2021-04-27",
+      "precision": "day",
+      "basis": "source_url_format",
+      "as_of": "2021-04-27",
+      "verdict": "within"
+     },
+     "metric_states": {}
+    }
+   ],
+   "ok": true,
+   "facts": {
+    "ok": true,
+    "entity_state": "verified",
+    "text_hash": "2e511aa8b75fe49472be767c19f24a97b34cbf243f675827deb58f9a5f4d335d",
+    "lines": 13209,
+    "facts": 40,
+    "tables": 21,
+    "rejected_total": 32,
+    "rejected_reasons": {
+     "table_unrecognized": 31,
+     "column_mismatch": 1
+    },
+    "sample": [
+     {
+      "metric": "revenue",
+      "period": "2020年",
+      "value": 1158320511.62,
+      "unit": "元",
+      "caliber": "合并",
+      "locator": "PDF 第 6 页 · 主要会计数据和财务指标 · 行「营业收入(元) 1,158,320,511.62 1,901,408,713.7」",
+      "fact_id": "fact-9c63732d72c497ff"
+     },
+     {
+      "metric": "revenue",
+      "period": "2019年",
+      "value": 1901408713.75,
+      "unit": "元",
+      "caliber": "合并",
+      "locator": "PDF 第 6 页 · 主要会计数据和财务指标 · 行「营业收入(元) 1,158,320,511.62 1,901,408,713.7」",
+      "fact_id": "fact-b1a58cc966304312"
+     },
+     {
+      "metric": "net_profit",
+      "period": "2020年",
+      "value": -2354850607.11,
+      "unit": "元",
+      "caliber": "合并",
+      "locator": "PDF 第 7 页 · 主要会计数据和财务指标 · 行「归属于上市公司股东的净利润」（标签折行，金额在下一行）",
+      "fact_id": "fact-2b16881779a6c6eb"
+     },
+     {
+      "metric": "net_profit",
+      "period": "2019年",
+      "value": -1036745832.56,
+      "unit": "元",
+      "caliber": "合并",
+      "locator": "PDF 第 7 页 · 主要会计数据和财务指标 · 行「归属于上市公司股东的净利润」（标签折行，金额在下一行）",
+      "fact_id": "fact-8350b2cbf105cdde"
+     },
+     {
+      "metric": "operating_cashflow",
+      "period": "2020年",
+      "value": 60169476.13,
+      "unit": "元",
+      "caliber": "合并",
+      "locator": "PDF 第 7 页 · 主要会计数据和财务指标 · 行「经营活动产生的现金流量净额」（标签折行，金额在下一行）",
+      "fact_id": "fact-861cabbfe598d076"
+     },
+     {
+      "metric": "operating_cashflow",
+      "period": "2019年",
+      "value": -88641195.85,
+      "unit": "元",
+      "caliber": "合并",
+      "locator": "PDF 第 7 页 · 主要会计数据和财务指标 · 行「经营活动产生的现金流量净额」（标签折行，金额在下一行）",
+      "fact_id": "fact-f7132a58933c7f36"
+     }
+    ]
+   },
+   "dataset": {
+    "hash": "12607cceaddb0cdf4f34dd702a9d6e149d835f0f44e1f27540c2f37dc8dd4932",
+    "entity": "京蓝科技",
+    "entity_id": "000711.SZ",
+    "periods": [
+     "2019年",
+     "2020年"
+    ],
+    "observations": 44,
+    "usable": 44,
+    "gaps": [],
+    "conflicts": []
+   },
+   "models": {
+    "adopted": [
+     "cash_quality",
+     "profit_bridge",
+     "scenario_sensitivity",
+     "working_capital"
+    ],
+    "runs": [
+     {
+      "model_id": "profit_bridge",
+      "adopted": true,
+      "status": "validated",
+      "reason": "",
+      "validation_ok": true,
+      "outputs": [
+       {
+        "metric": "net_profit_change",
+        "value": -1318104774.55,
+        "unit": "元",
+        "period": "2020年较2019年"
+       },
+       {
+        "metric": "gross_profit_change",
+        "value": -421835117.39,
+        "unit": "元",
+        "period": "2020年较2019年"
+       },
+       {
+        "metric": "below_gross_line_change",
+        "value": -896269657.16,
+        "unit": "元",
+        "period": "2020年较2019年"
+       }
+      ]
+     },
+     {
+      "model_id": "cash_quality",
+      "adopted": true,
+      "status": "validated",
+      "reason": "",
+      "validation_ok": true,
+      "outputs": [
+       {
+        "metric": "cfo_minus_profit",
+        "value": 2415020083.24,
+        "unit": "元",
+        "period": "2020年"
+       }
+      ]
+     },
+     {
+      "model_id": "working_capital",
+      "adopted": true,
+      "status": "validated",
+      "reason": "",
+      "validation_ok": true,
+      "outputs": [
+       {
+        "metric": "working_capital_occupation_change",
+        "value": -4104090908.73,
+        "unit": "元",
+        "period": "2020年较2019年"
+       },
+       {
+        "metric": "receivable_days",
+        "value": 403.21,
+        "unit": "天",
+        "period": "2020年"
+       },
+       {
+        "metric": "inventory_days",
+        "value": 246.72,
+        "unit": "天",
+        "period": "2020年"
+       },
+       {
+        "metric": "payable_days",
+        "value": 575.39,
+        "unit": "天",
+        "period": "2020年"
+       }
+      ]
+     },
+     {
+      "model_id": "scenario_sensitivity",
+      "adopted": true,
+      "status": "validation_failed",
+      "reason": "独立验证未通过：['scenario_direction']",
+      "validation_ok": false,
+      "outputs": [
+       {
+        "metric": "scenario_net_profit",
+        "value": -2343143567.84,
+        "unit": "元",
+        "period": "2020年（上行）"
+       },
+       {
+        "metric": "scenario_sensitivity",
+        "value": 23457440.85,
+        "unit": "元",
+        "period": "2020年（最敏感：费用 -1pp）"
+       }
+      ]
+     }
+    ],
+    "validated": 3
+   },
+   "question": "京蓝科技（000711.SZ）2019/2020 年经营分析：利润变化来自哪里、现金质量如何、营运资金占用怎样",
+   "restatement_material": {
+    "url": "http://static.cninfo.com.cn/finalpage/2025-09-05/1224639904.PDF",
+    "title": "京蓝科技股份有限公司2020年年度报告（更正后）",
+    "version": "corrected",
+    "disclosed_at": "2025-09-05",
+    "material_id": "2db15147bad934f9",
+    "ok": true
+   },
+   "restatement_demo": [
+    {
+     "as_of": "2021-12-31",
+     "status": "rejected",
+     "reason": "after_cutoff",
+     "detail": "披露日晚于资料截止日：该材料不能用于截至日成立的断言",
+     "cutoff": {
+      "disclosed_at": "2025-09-05",
+      "precision": "day",
+      "basis": "source_url_format",
+      "as_of": "2021-12-31",
+      "verdict": "after"
+     }
+    },
+    {
+     "as_of": "2025-12-31",
+     "status": "admitted",
+     "reason": "",
+     "detail": "",
+     "cutoff": {
+      "disclosed_at": "2025-09-05",
+      "precision": "day",
+      "basis": "source_url_format",
+      "as_of": "2025-12-31",
+      "verdict": "within"
+     }
+    }
+   ],
+   "as_of_window": {
+    "until": "2021-12-31",
+    "seDate": "2019-01-01~2021-12-31",
+    "candidates": [
+     [
+      "2020",
+      "original",
+      "2021-04-27",
+      "http://static.cninfo.com.cn/finalpage/2021-04-27/1209816824.PDF"
+     ],
+     [
+      "2020",
+      "original",
+      "2021-04-27",
+      "http://static.cninfo.com.cn/finalpage/2021-04-27/1209816825.PDF"
+     ]
+    ]
+   }
+  }
+ ],
+ "elapsed_s": 198.7
+}

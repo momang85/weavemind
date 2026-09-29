@@ -20,6 +20,9 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 
 SCHEMA_VERSION = "weavemind.financial_analysis/1"
+# 研究主口径：合并报表。真实年报同时披露合并与母公司，模型必须有一个**显式**的默认口径，
+# 否则"同一指标多条观察"会被当成冲突，数据齐备也跑不出模型（见 primary_caliber 注释）。
+DEFAULT_CALIBER = "合并"
 
 # 观察状态（互斥；缺失/未知/冲突/无效与真实零分开）
 class State:
@@ -151,15 +154,47 @@ class AnalysisDataset:
     def dataset_hash(self) -> str:
         return self.manifest.dataset_hash
 
+    @property
+    def primary_caliber(self) -> str:
+        """本数据集的主口径：有合并就用合并，只有一种口径时才默认那一种，否则 `""`。
+
+        为什么需要它（2026-09-29 A2 实机）：真实年报**同时**披露合并与母公司报表，
+        于是同一 (指标, 期间) 天然有多条观察；`get()` 的"多条=冲突，不任选"规则会让
+        所有模型都报"缺输入"——数据齐备却跑不出任何模型（三一/洋河都踩到）。
+        解决办法不是"随便挑一条"，而是**把口径选择显式化**：主口径优先，
+        要别的口径必须显式传 `caliber=…`，且同一口径内仍不允许在两个不同值之间任选。
+        """
+        cals = [o.caliber for o in self.observations if o.usable and o.caliber]
+        if not cals:
+            return ""
+        if DEFAULT_CALIBER in cals:
+            return DEFAULT_CALIBER
+        uniq = sorted(set(cals))
+        return uniq[0] if len(uniq) == 1 else ""
+
     def get(self, metric: str, period: str, *, caliber: str | None = None):
-        """取一条观察；同一 (指标, 期间) 有多条时返回 `None`（= 冲突，不任选一条）。"""
-        key = (str(metric), str(period), "" if caliber is None else str(caliber))
-        if key in self.index:
-            return self.index[key]
-        hits = [o for o in self.observations
-                if o.metric == str(metric) and o.period == str(period)
-                and (caliber is None or o.caliber == str(caliber))]
-        return hits[0] if len(hits) == 1 else None
+        """取一条观察；`caliber` 未给时用**主口径**，同一口径内多条不同值仍返回 `None`。
+
+        主口径取不到时，退回"只有唯一一条就返回它"（旧规则）：
+        - 该条可能是**不可用**的（元数据不全）——必须能被找到并如实报"不可用"，
+          不能悄悄变成"缺输入"（两者含义不同）；
+        - 也可能这个指标只在另一种口径里——跨口径混用**不会**被这里静默放行：
+          算子自己会核对输入口径是否一致（`profit_bridge` 会抛 `NotApplicable`）。
+        真正危险的"同一 (指标,期间) 有两条不同值"仍然返回 `None`，绝不任选一条。
+        """
+        want = self.primary_caliber if caliber is None else str(caliber)
+        if want:
+            key = (str(metric), str(period), want)
+            if key in self.index:
+                return self.index[key]
+            hits = [o for o in self.observations
+                    if o.metric == str(metric) and o.period == str(period)
+                    and o.caliber == want]
+            if hits:
+                return hits[0] if len(hits) == 1 else None
+        all_hits = [o for o in self.observations
+                    if o.metric == str(metric) and o.period == str(period)]
+        return all_hits[0] if len(all_hits) == 1 else None
 
     def require(self, metric: str, period: str, *, caliber: str | None = None) -> Observation:
         obs = self.get(metric, period, caliber=caliber)

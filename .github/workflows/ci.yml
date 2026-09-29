@@ -44,6 +44,8 @@ jobs:
         run: python test_financial_analysis.py
       - name: Annual report PDF table extraction
         run: python test_annual_financial_tables.py
+      - name: Official disclosure discovery (cninfo announcement query)
+        run: python test_cninfo_discovery.py
       - name: Transport deadline, chunked decoding and capacity limits
         run: python test_transport_deadline.py
       - name: EastMoney parameter contract and failure self-reporting

@@ -10,10 +10,12 @@ DNS 失败/公网+私网混合/地址映射/重定向进内网一律拒绝；跨
 from __future__ import annotations
 
 import ipaddress
+import io
 import json
 import os
 import socket
 import sys
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -143,51 +145,117 @@ class TestRegisteredEndpoints(unittest.TestCase):
         self.assertEqual(reg["ep-1"].purpose, "webhook")
 
 
+class _SocketRaw(io.RawIOBase):
+    """假 socket 的字节流：`http.client` 通过它读（与 `recv` 共用同一游标）。"""
+
+    def __init__(self, sock):
+        super().__init__()
+        self._sock = sock
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, b) -> int:
+        chunk = self._sock.recv(len(b))
+        n = len(chunk or b"")
+        if n:
+            b[:n] = chunk
+        return n
+
+
+class FakeSock:
+    """**生命周期忠实**的假 socket（2026-09-29 修，替代此前"close 是空操作"的替身）。
+
+    为什么必须忠实：A1 重做把响应解析换成 `http.client` 之后，"先把响应收进 raw、关掉
+    连接、再解析"这个顺序在生产上恒失败（`WinError 10038`），而当时的替身 `close()` 是
+    空操作、并且把**完整响应副本**交给 `makefile`，于是离线用例全绿——绿的是替身，不是
+    生产路径。真 socket 的两条语义因此都要在替身里成立：
+
+    1. **关掉之后任何操作都报 10038**（`recv`/`makefile`/`sendall`/`settimeout`）；
+    2. **`recv` 与 `makefile` 共用同一个字节游标**（谁读谁消耗），不再各拿一份副本。
+    """
+
+    def __init__(self, payload: bytes = b"", *, connect_delay: float = 0.0):
+        self._buf = bytearray(payload)
+        self.sent = b""
+        self.closed = False
+        self.events: list[str] = []
+        self.recv_calls = 0
+        self.connect_delay = float(connect_delay)
+        self._timeout = None
+
+    def _alive(self, what: str) -> None:
+        if self.closed:
+            raise OSError(10038, "在一个非套接字上尝试了一个操作")
+        self.events.append(what)
+
+    def makefile(self, mode="rb", *a, **k):
+        self._alive("makefile")
+        return io.BufferedReader(_SocketRaw(self))
+
+    def settimeout(self, v):
+        self._alive("settimeout")
+        self._timeout = v
+
+    def sendall(self, data):
+        self._alive("sendall")
+        self.sent += bytes(data)
+
+    def recv(self, n):
+        self._alive("recv")
+        self.recv_calls += 1
+        take = bytes(self._buf[:n])
+        del self._buf[:n]
+        return take
+
+    def close(self):
+        self.closed = True
+        self.events.append("close")
+
+    # 便于断言：最后一次读取之后才允许出现 "close"
+    def events_after_close(self) -> list[str]:
+        if "close" not in self.events:
+            return []
+        idx = self.events.index("close")
+        return self.events[idx + 1:]
+
+
+class _ManualClock:
+    """可手动推进的单调钟：把"根截止"钉在可复现的时间线上。
+
+    起点取**真实** `time.monotonic()`，因为 `read_with_deadline` 的默认时钟是定义时
+    绑定的原函数对象（替换 `net_policy.time.monotonic` 不影响它）——起点若用 1000.0
+    这样的假值，正文读取会立刻判成"早已超时"。
+    """
+
+    def __init__(self):
+        self._now = time.monotonic()
+
+    def __call__(self) -> float:
+        return self._now
+
+    def advance(self, seconds: float) -> None:
+        self._now += float(seconds)
+
+
 class TestFetchDocumentTransport(unittest.TestCase):
     """抓取通道：用已验 IP 连接、不跟随重定向、不带凭据、超限即停。"""
 
     def _run_fetch(self, url, connect_result, *, payload=b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhi",
-                   max_bytes=None):
-        calls = {"connect": []}
-
-        class _Sock:
-            """最小假 socket：够 `http.client.HTTPResponse` 解析。
-
-            生产路径改用成熟实现解析响应（A1），所以替身必须提供 `makefile`；
-            另存一份**稳定副本**给 `makefile`，避免与 `recv` 共享同一游标。
-            """
-
-            def __init__(self, data):
-                self._data = data
-                self._orig = bytes(data)
-                self.sent = b""
-
-            def makefile(self, mode="rb", *a, **k):
-                import io as _io
-                return _io.BytesIO(self._orig)
-
-            def settimeout(self, v):
-                self._timeout = v
-
-            def sendall(self, data):
-                self.sent += data
-
-            def recv(self, n):
-                chunk, self._data = self._data[:n], self._data[n:]
-                return chunk
-
-            def close(self):
-                pass
+                   max_bytes=None, **kwargs):
+        calls = {"connect": [], "socks": []}
 
         def _fake_connect(ip, port, host, scheme, timeout):
-            calls["connect"].append((ip, port, host, scheme))
+            calls["connect"].append((ip, port, host, scheme, timeout))
             if isinstance(connect_result, Exception):
                 raise connect_result
-            return _Sock(payload)
+            sock = FakeSock(payload)
+            calls["socks"].append(sock)
+            return sock
 
         with mock.patch("net_policy._resolve_all", return_value=(["93.184.216.34"], "")), \
                 mock.patch("net_policy._connect_pinned", side_effect=_fake_connect):
-            out = net_policy.fetch_document(url, max_bytes=max_bytes)
+            out = net_policy.fetch_document(url, max_bytes=max_bytes, **kwargs)
         return out, calls
 
     def test_fetch_connects_to_validated_ip_with_host_header(self):
@@ -204,39 +272,19 @@ class TestFetchDocumentTransport(unittest.TestCase):
 
     def test_request_carries_no_credentials(self):
         calls = {"connect": []}
-
-        class _Sock:
-            def __init__(self):
-                self.sent = b""
-
-            def sendall(self, data):
-                self.sent += data
-
-            def recv(self, n):
-                return b"HTTP/1.1 200 OK\r\n\r\nok" if not self.sent else b""
-
-            def makefile(self, mode="rb", *a, **k):
-                # 生产路径改用 http.client 解析响应（A1）：假 socket 必须能给出字节流
-                import io as _io
-                return _io.BytesIO(b"HTTP/1.1 200 OK\r\n\r\nok")
-
-            def settimeout(self, v):
-                self._timeout = v
-
-            def close(self):
-                pass
-
         captured = {}
 
         def _fake_connect(ip, port, host, scheme, timeout):
-            sock = _Sock()
+            calls["connect"].append(ip)
+            sock = FakeSock(b"HTTP/1.1 200 OK\r\n\r\nok")
             captured["sock"] = sock
             return sock
 
         with mock.patch("net_policy._resolve_all", return_value=(["93.184.216.34"], "")), \
                 mock.patch("net_policy._connect_pinned", side_effect=_fake_connect):
-            net_policy.fetch_document("https://example.com/a",
-                                      headers={"Authorization": "Bearer sekret", "X-Trace": "1"})
+            out = net_policy.fetch_document("https://example.com/a",
+                                            headers={"Authorization": "Bearer sekret", "X-Trace": "1"})
+        self.assertEqual(out["text"], "ok")
         sent = captured["sock"].sent.decode("latin-1")
         self.assertNotIn("sekret", sent, "内容抓取不得携带调用方凭据")
         self.assertIn("X-Trace: 1", sent)
@@ -253,6 +301,96 @@ class TestFetchDocumentTransport(unittest.TestCase):
             with self.assertRaises(net_policy.NetworkPolicyError):
                 net_policy.fetch_document("http://10.0.0.1/steal")
         conn.assert_not_called()
+
+    # ── 2026-09-29 回归：生产上整条抓取通道曾在"读之前就关连接"下恒失败 ──
+
+    def test_body_is_read_before_the_socket_is_closed(self):
+        """响应体必须**在连接还开着的时候**读出来。
+
+        反例（本用例存在的理由）：`fetch_document` 先把响应收进 raw、`finally` 关掉
+        socket，再去 `http.client` 解析——真 socket 上必报 `WinError 10038`，而当时的
+        替身 `close()` 是空操作，所以用例全绿。忠实替身一换，这条回归立刻现形。
+        """
+        payload = b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nhello-chunked"
+        out, calls = self._run_fetch("https://example.com/a", None, payload=payload)
+        self.assertEqual(out["text"], "hello-chunked")
+        sock = calls["socks"][0]
+        self.assertEqual(sock.events_after_close(), [],
+                         f"关闭之后不得再有任何 socket 操作：{sock.events}")
+        self.assertLess(sock.events.index("close"), len(sock.events),
+                        "连接最终要被关掉（不留悬挂连接）")
+        self.assertGreaterEqual(sock.recv_calls, 1, "正文来自真实读取，不是替身副本")
+
+    def test_multi_address_attempts_share_one_root_deadline(self):
+        """多地址尝试**共用一条根截止**：第二次拿到的不是全额预算。"""
+        clock = _ManualClock()
+        seen: list[float] = []
+
+        def _connect(ip, port, host, scheme, timeout):
+            seen.append(timeout)
+            if len(seen) == 1:
+                clock.advance(2.0)          # 第一个地址连了 2 秒才失败
+                raise ConnectionRefusedError(10061, "refused")
+            return FakeSock(b"HTTP/1.1 200 OK\r\n\r\nok")
+
+        with mock.patch("net_policy._resolve_all",
+                        return_value=(["93.184.216.34", "93.184.216.35"], "")), \
+                mock.patch.object(net_policy.time, "monotonic", clock), \
+                mock.patch("net_policy._connect_pinned", side_effect=_connect):
+            out = net_policy.fetch_document("https://example.com/a", timeout=10)
+        self.assertEqual(out["text"], "ok")
+        self.assertEqual(len(seen), 2)
+        self.assertLessEqual(seen[0], 10.0)
+        self.assertLessEqual(seen[1], 8.01,
+                             "第二个地址必须拿**剩余**时间（2s 已花掉），不得续期成 10s")
+
+    def test_retry_does_not_extend_the_budget(self):
+        """一个地址把预算用光 → 不再试下一个，如实报总截止用尽。"""
+        clock = _ManualClock()
+        calls = {"connect": []}
+
+        def _connect(ip, port, host, scheme, timeout):
+            calls["connect"].append(ip)
+            clock.advance(2.0)
+            raise ConnectionRefusedError(10061, "refused（且慢）")
+
+        with mock.patch("net_policy._resolve_all",
+                        return_value=(["93.184.216.34", "93.184.216.35"], "")), \
+                mock.patch.object(net_policy.time, "monotonic", clock), \
+                mock.patch("net_policy._connect_pinned", side_effect=_connect):
+            with self.assertRaises(net_policy.FetchError) as ctx:
+                net_policy.fetch_document("https://example.com/a", timeout=1)
+        self.assertIn("总截止", str(ctx.exception))
+        self.assertEqual(calls["connect"], ["93.184.216.34"],
+                         "预算用尽后不得再连第二个地址")
+
+    def test_post_form_body_has_length_and_type(self):
+        import urllib.parse
+        form = urllib.parse.urlencode({"stock": "600031,gssh0600031", "pageNum": "1"})
+        out, calls = self._run_fetch(
+            "https://www.cninfo.com.cn/new/hisAnnouncement/query", None,
+            payload=b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{}",
+            method="POST", body=form)
+        self.assertEqual(out["status"], 200)
+        head, _, body = calls["socks"][0].sent.partition(b"\r\n\r\n")
+        text = head.decode("latin-1")
+        self.assertTrue(text.startswith("POST /new/hisAnnouncement/query HTTP/1.1"), text)
+        self.assertIn("Content-Type: application/x-www-form-urlencoded", text)
+        self.assertIn(f"Content-Length: {len(form.encode('utf-8'))}", text)
+        self.assertEqual(body.decode("utf-8"), form)
+
+    def test_unknown_method_is_refused_before_connecting(self):
+        with mock.patch("net_policy._connect_pinned") as conn:
+            with self.assertRaises(ValueError):
+                net_policy.fetch_document("https://example.com/a", method="DELETE")
+        conn.assert_not_called()
+
+    def test_body_cap_enforced(self):
+        big = b"HTTP/1.1 200 OK\r\n\r\n" + b"x" * 5000
+        with self.assertRaises(net_policy.FetchError):
+            self._run_fetch("https://example.com/a", None, payload=big, max_bytes=1024)
+        out, _ = self._run_fetch("https://example.com/a", None, payload=big[:800], max_bytes=4096)
+        self.assertEqual(out["status"], 200)
 
 
 class TestEgressPolicy(unittest.TestCase):

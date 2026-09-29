@@ -90,3 +90,7 @@ config.json.bak.*
 distill_data.jsonl
 _p13_cache_check.py
 .tmp/
+
+# A2 演练工作区：报告与元数据入库，**原件字节不入库**（三份年报 ~14 MB，可重跑得到）
+evals/a2_official_chain_20260929/*/project/materials/*/raw.bin
+evals/a2_official_chain_20260929/*/project/materials/*/doc.json

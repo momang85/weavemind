@@ -1,8 +1,67 @@
 # DeepSeek 执行状态
 
-> ## 当前账（2026-09-29 · HEAD `7c5fe0c`+A0）——**只这一段是当前状态**
+> ## 当前账（2026-09-29 夜 · HEAD `e033a6d`+A2）——**只这一段是当前状态**
 >
-> **A0（本轮）**：按 `docs/金融资料获取与事实化补链_20260929.md` §2 修掉抽取器的**事实污染**：
+> **先修自己造成的回归（最重要的一条）**：`net_policy.fetch_document` 在 A1 重做里
+> "读之前就把 socket 关了"（旧的预读+`finally` 关闭顺序留在 `http.client` 解析之下）
+> → 真机恒报 `WinError 10038`，**补材料直链、web_fetch/data_loader worker、url_health
+> 全在这条通道上**。离线全绿是因为替身 `close()` 是空操作、`makefile` 交完整副本。
+> 修法：不预读、不提前关；替身改成**生命周期忠实**（关后即报 10038、共用游标）——
+> 旧实现上该用例必失败（已用 `git stash` 现场复现），新实现 `test_net_policy` **50 OK**。
+> 顺带补上"多地址重试**共用一条根截止**（不续期）"，并给 `fetch_document` 加
+> `method/body`（只为公告查询这种 POST 表单端点，出域/已验 IP/不带凭据/不跟随跳转一视同仁）。
+> 真机：`fetch_document` 取回 cninfo 证券索引 200 / 592391 字节 / 6258 条。
+>
+> **A2 官方发现链（本批主交付）**：
+> ① **更正 09-07 结论**——巨潮公告查询不是被挡，是 `stock` 缺 orgId（裸代码静默回
+> `totalAnnouncement: 0`）：`POST /new/hisAnnouncement/query` 实机 600031 取回 4 条、
+> 000711 取回 17 条；orgId 来自 `new/data/szse_stock.json`（200/592391 字节/6258 条，
+> 含沪深全部 A 股；`sse_stock.json` 404）。**交叉验证**：发现链自己找出的京蓝 2020 年报
+> （更正后）直链与用户此前给过的 URL **逐字符一致**。
+> ② `adapters/source_registry.py`：来源按**端点**注册（`upstream_family/access_method/
+> authority/supported_materials/license_scope/capability/budget/health_source/verified`），
+> 巨潮三条端点分开记账；原因码词表统一（`not_implemented/auth_required/rate_limited/
+> network_error/policy_blocked/protocol_error/schema_changed/empty_result/
+> irrelevant_result/parse_rejected/unknown_cause`）。
+> ③ `discover()` 返回可行动缺口（`reason_code` + `next_steps` + 候选 `why`/`language`）；
+> 候选策略显式化：报告期倒序 → 中文 → 正文 → 原版 → 同披露日**最早优先**
+> （反例：洋河 2024 年报同时有中文正文与**英文版**，只看"最新"会挑到英文版）。
+> ④ 抽取器认三种真实版面（**同一版代码、不按公司分支**）：行项目前缀（`一、`/`其中：`/
+> `减：`）、附注列引用（`七、54`）、折行标签（1–2 行续行，续行**不得含数字**）、
+> 期末/期初列头（年份取报表日期行）、分页重复表头（表内向上找）、单位标注只在报表开头；
+> 同名**非报表**（`合并利润表影响`、`首次执行新收入准则调整年初财务报表`）明确不取。
+> 反例仍拒绝：被排版截断的数（`1,279,570,42` / `9.23`）不得当折行金额；年初列不占本年格。
+> `test_annual_financial_tables` **28 OK**。
+> ⑤ 修复"真实年报同时有合并/母公司 → 所有模型报缺输入"：口径**显式化**
+> （`primary_caliber`：有合并用合并；只有一种口径才默认；同一口径内两个值仍不任选），
+> `test_financial_analysis` **63 OK**。
+> ⑥ **A2 退出条件达成**：三一重工 600031.SH（第二家公司）经正常入口完成
+> 发现→导入→准入→事实（34 条）→数据集（38 观察，两期，gaps 空）→**4/4 注册模型 validated**；
+> 洋河（不同布局）同样 4/4，且利润桥/现金质量/情景数字与 Q1 **冻结样本逐位一致**
+> （−33.43/−38.01/+4.58 亿元；−20.44 亿元/69.36%；80.32 亿元/2.89 亿元·pp）
+> ——两条互不相干的取数路径得到同一组数。京蓝（反例）3 validated + 1
+> `validation_failed`（情景方向判据对亏损公司不适用，如实标失败不改判据）；
+> 更正稿在 `as_of=2021-12-31` 被拒 `after_cutoff`、`as_of=2025-12-31` admitted，
+> `until=2021-12-31` 的窗口里只有原版 → 原版/更正版并存、互不覆盖。
+> 证据 `docs/evidence/a2_official_discovery_20260929.md`；脚本
+> `scripts/a2_official_chain_20260929.py`（确定性链路零 LLM；本轮外网 12 次公开请求）。
+>
+> **本批顺带更正的两条旧账**：① 09-29 白天那批声称"`test_delivery_chain` 403 OK"是
+> **A1 重做之前**的读数——重做后该文件 1 处真失败（旧替身没 `read1`，被"不可终止读"
+> 正确拒绝），另有 `test_task_state` 一处**陈旧期望**（schema 后来加了 3 列）。两处都已修，
+> 全量扫描另行报告。② 巨潮"接口未连通"（`adapters/cninfo.py` 旧 docstring、
+> `disclosure_ingest.discover()` 旧实现与对应用例）已按实机更正。
+>
+> **未验/缺口**：取件 30s 上限对 4–5 MB 年报偏紧（三一/洋河首次取件超时，重试一次成功；
+> 现在**明确重试并留痕**，不再悄悄降级到摘要）；上交所公告查询仍 200+空数组；港股
+> `00700.HK` 仍 `URLError 10061`；`Observation` 仍未承载 `derived_from`；
+> 主要会计数据 5 列 3 年（调整后/调整前/变动%）的列映射仍需单元格级解析；
+> 亏损公司情景判据是否单列需研究侧决定。**推送**：token 已含 `workflow` scope（用户已办），
+> 本批提交待推。
+>
+> ## 历史（`e033a6d` 及以前，按日期保留）
+>
+> **A0（`7c5fe0c`+）**：按 `docs/金融资料获取与事实化补链_20260929.md` §2 修掉抽取器的**事实污染**：
 > ① 不再跨口径补齐（母公司 18,600,000 只标母公司；合并 2020 应收账款因**拆行**拒绝，
 > 理由 `split_number`，带 PDF 页码）；② 政策调整表里的 2020 存货不再当年末数
 > （`table_unrecognized`）；③ 收入恢复（`营业收入扣除金额/扣除后金额` 不再被前缀误吞）；

@@ -20,10 +20,18 @@ from decimal import Decimal, InvalidOperation
 
 # ── 指标词表：**完整标签**匹配（前缀相同但语义不同的行必须排除）────────────────
 LABELS: dict[str, tuple[str, ...]] = {
-    "revenue": ("营业收入", "营业总收入"),
+    "revenue": ("营业收入",),
+    # `营业总收入` 是利润表的**汇总行**，`营业收入` 往往是它的细项（金融/类金融业务另计
+    # 利息收入等）。两者在三一年报里相差 0.78%（78,383,379 vs 77,773,391 千元），
+    # 同挂一个 slug 会被"同表不同值→整项不入账"规则双双删掉（实机发生过）。
+    # 因此分开记：模型用 `revenue`（营业收入），`total_revenue` 如实留档，
+    # 跨来源对照时必须先看口径（东财 TOTALOPERATEREVE 是营业总收入口径）。
+    "total_revenue": ("营业总收入",),
     "operating_cost": ("营业成本",),
+    # `归属于母公司股东的净利润`（洋河/三一都这么写）与 `归属于母公司所有者的净利润`
+    # 是同一行的两种写法，都要认；不能只认一种再靠"少一个数"去发现。
     "net_profit": ("归属于上市公司股东的净利润", "归属于母公司所有者的净利润",
-                   "归属于母公司股东净利润", "归母净利润"),
+                   "归属于母公司股东的净利润", "归属于母公司股东净利润", "归母净利润"),
     "operating_cashflow": ("经营活动产生的现金流量净额", "经营活动现金流量净额"),
     "total_assets": ("资产总计", "总资产"),
     "total_liabilities": ("负债合计", "总负债"),
@@ -56,7 +64,12 @@ STATEMENT_TITLES: dict[str, tuple[str, str]] = {
 _NUM_TITLE_RE = re.compile(r"^\d+[、.．]\s*\S+")
 _TITLE_RE = re.compile(r"^(\d+)[、.．]\s*([^\s，。]{2,20}(?:资产负债表|利润表|现金流量表))")
 # 明确**不是**报表的表（政策调整/追溯调整/分部/季度摘要），行宁愿不取
-NOT_A_STATEMENT_RE = re.compile(r"会计政策(变更|调整)|追溯调整|前期差错|分部|季度|半年度")
+NOT_A_STATEMENT_RE = re.compile(r"会计政策(变更|调整)|追溯调整|前期差错|分部|季度|半年度"
+                                r"|首次执行|新收入准则|新租赁准则|年初财务报表")
+# 表头层面的调整表标记（比标题更可靠）：`2019年12月31日 | 2020年01月01日 | 调整数`
+_ADJUST_HEADER_RE = re.compile(r"调整数|新准则|原准则|追溯调整|重述")
+# 年初/期初列（`2020年01月01日`）：它等于**上一年末**，不是"2020 年末"，不得占 2020 年这一格
+_OPENING_LABEL_RE = re.compile(r"(?:01|1)\s*月\s*(?:01|1)\s*日|年初|期初")
 
 # ── 单位/币种证据 ─────────────────────────────────────────────────────────
 _UNIT_LINE_RE = re.compile(r"单位\s*[:：]\s*(元|万元|千元|百万元|美元|港元)")
@@ -73,6 +86,26 @@ _PAGE_NOISE = re.compile(
     r"^(京蓝科技股份有限公司|[^\n]{0,30}股份有限公司)?\s*\d{4}\s*年年度报告全文$|^\d{1,3}$")
 _DATE_SPAN_RE = re.compile(r"(?:19|20)\d{2}\s*年(?:\s*\d{1,2}\s*月)?(?:\s*\d{1,2}\s*日)?"
                            r"|[（(]?\d{4}[-/.]\d{1,2}[-/.]\d{1,2}[)）]?")
+
+# ── 报表行的**书写形态**（2026-09-29 A2 实机补：三种版面特征挡住过完整标签匹配）──
+# 1. 行项目编号/层级前缀：`一、营业总收入`、`（一）`、`1.`、`(1)`
+_LINE_PREFIX_RE = re.compile(
+    r"^(?:[（(]?[一二三四五六七八九十]+[)）]?\s*[、.．]?\s*"
+    r"|[（(]\d{1,2}[)）]\s*"
+    r"|\d{1,2}\s*[、.．]\s*)+")
+# 2. "其中/加/减"这类**行项目标记**：说明这是上一行的细项，不是另一个指标名
+_LINE_MARKER_RE = re.compile(r"^(?:其中|加|减|其他|其它)\s*[:：]\s*")
+# 3. **附注列引用**夹在标签与金额之间（`营业成本 七、54 57,216,959 54,051,053`）：
+#    它不是金额，但旧逻辑"取第一个数字之前的部分当标签"会被它截断。
+_NOTE_REF_RE = re.compile(r"(?:附注\s*)?[一二三四五六七八九十]+\s*[、.．]\s*\d{1,3}(?![\d,，.])")
+# 4. **折行标签**：标签行末尾是没闭合的括号（`1.归属于母公司股东的净利润(净亏损`），
+#    金额在下一行（`以“-”号填列) 5,975,451 4,527,451`）。
+_OPEN_TAIL_RE = re.compile(r"^[\s:：]*[（(][^）)]*$")
+# 折行金额行的形态：一段不含数字的短说明 + 右括号 + 紧跟金额
+_WRAP_VALUE_RE = re.compile(r"^[^\d]{0,24}(?:填列|列)\s*[)）]\s*[（(]?-?\d")
+# 期末/期初型列头（表头不写年份，年份在报表日期行上）
+_END_START_RE = re.compile(r"(期末余额|期初余额|期末数|期初数|年末余额|年初余额"
+                           r"|本期发生额|上期发生额)")
 
 
 def norm_lines(text: str) -> list[str]:
@@ -151,14 +184,30 @@ def numbers_in(line: str) -> list[Decimal]:
 
 
 # ── 标签识别（完整语义）────────────────────────────────────────────────────
+def _strip_line_form(line: str) -> str:
+    """剥掉**书写形态**（行项目编号/其中·加·减标记/附注列引用），只留标签+金额。
+
+    这些都不是指标名的一部分，却会让"完整标签匹配"失败——实机三种版面都踩到了：
+    三一 `一、营业总收入 78,383,379 74,018,936`、`货币资金 七、1 20,383,175 ...`；
+    洋河 `其中：营业收入 28,876,296,993.56 ...`。剥掉的是**格式**，标签本身仍要完整匹配。
+    """
+    s = str(line or "").strip()
+    s = _LINE_PREFIX_RE.sub("", s)
+    s = _LINE_MARKER_RE.sub("", s)
+    return _NOTE_REF_RE.sub(" ", s)
+
+
 def _label_of(line: str) -> tuple[str, str]:
     """行首标签 → `(slug, 后缀)`；不是指标行返回 `("", "")`。
 
     只认**最长**别名，且后缀里出现扣除/占比/账龄等语义词一律不算该指标
     （旧版按前缀匹配，把"营业收入扣除金额"当成营业收入，与真实收入冲突后把整个
     指标删掉——收入因此从抽取结果里消失）。
+
+    `line` 允许带报表行的书写形态（编号/其中/附注引用），函数内部先按形态剥掉；
+    **折行标签**（末尾是没闭合的括号）也认，金额由调用方从下一行取（见 `extract`）。
     """
-    s = str(line or "").strip()
+    s = _strip_line_form(line)
     best_slug, best_name = "", ""
     for slug, names in LABELS.items():
         for n in names:
@@ -170,6 +219,10 @@ def _label_of(line: str) -> tuple[str, str]:
     # 行文里跟的是数值（`营业收入(元) 995,410,...`）：只对**第一个数字之前**的标签部分
     # 做语义判断，否则"数值本身"会把合法行判掉。
     label_part = re.split(r"\d", tail, maxsplit=1)[0]
+    if _OPEN_TAIL_RE.match(label_part):
+        # 折行：标签行没有金额，括号也没闭合。这里只认"标签 + 未闭合括号"，
+        # 金额必须由下一行**按折行形态**给出，否则调用方拿不到数字、照样拒绝。
+        return best_slug, tail.strip()
     if any(w in label_part for w in LABEL_REJECT_WORDS):
         return "", ""
     if not _LABEL_TAIL_OK.match(label_part):
@@ -189,12 +242,19 @@ def _table_at(lines: list[str], idx: int, *, window: int = 200) -> tuple[str, st
         m = _TITLE_RE.match(line)
         if m:
             name = m.group(2)
+            if _near_not_a_statement(lines, j):
+                return "", "", name
             if name in STATEMENT_TITLES:
                 kind, caliber = STATEMENT_TITLES[name]
                 return kind, caliber, name
             return "", "", name
         for name, (kind, caliber) in STATEMENT_TITLES.items():
             if name in line:
+                # `合并利润表影响`（会计政策变更说明）里也有"合并利润表"四个字：标题附近
+                # 出现"政策变更/追溯调整/分部/季度"就按**非报表**处理——否则政策调整表里的
+                # 营业成本会被当成合并利润表的营业成本，与真表冲突后把整项删掉（实机发生）。
+                if _near_not_a_statement(lines, j):
+                    return "", "", name
                 return kind, caliber, name
         # 普通语义词（追溯调整/分部/季度…）可能属于**别的节**的句子，不据此停；
         # 但"编号标题 + 非报表"说明已经走出了报表范围 → 停。
@@ -223,18 +283,135 @@ def find_header(lines: list[str], row_idx: int, *, lookback: int = 14):
     return [], -1, False
 
 
-def _unit_evidence(lines: list[str], row_idx: int, header_idx: int):
-    """单位证据 → `(unit, scale, currency)`；无证据 → `(None, None, "")`。"""
-    lo = max(0, (header_idx if header_idx >= 0 else row_idx) - 4)
-    for j in range(row_idx, lo - 1, -1):
+def _statement_date_year(lines: list[str], row_idx: int, *, window: int = 60) -> int:
+    """报表日期行里的年份（`2024 年12 月 31 日`）——用于 `期末余额/期初余额` 型表头。
+
+    只看**同一个报表标题之下**的日期：找不到就返回 0（调用方按无期间拒绝），
+    绝不拿报告期年份兜底。
+    """
+    for i in range(row_idx - 1, max(-1, row_idx - window - 1), -1):
+        line = lines[i]
+        if _is_statement_title(line) or NOT_A_STATEMENT_RE.search(line):
+            break
+        m = re.search(r"((?:19|20)\d{2})\s*年", line)
+        if m and _DATE_SPAN_RE.search(line):
+            return int(m.group(1))
+    return 0
+
+
+def _is_statement_title(line: str) -> bool:
+    """这一行是不是（任意一张）报表标题：`1、合并资产负债表` / `合并利润表`。"""
+    m = _TITLE_RE.match(line)
+    if m:
+        return True
+    return any(name in line for name in STATEMENT_TITLES)
+
+
+def find_header_ex(lines: list[str], row_idx: int, *, lookback: int = 14,
+                   table_window: int = 90) -> dict:
+    """表头（**含跨行/期末期初型**）→ `{years, top, has_note, source}`。
+
+    优先用原来的"上一行以内找年份"，保持一致；找不到再走**表内向上找**（`source="table"`）：
+
+    - 一张报表的表头可能**跨行**（`项目` / `2024 年 12 月 31 日` / `2023 年 12 月 31 日`
+      各占一行），也会在每页重复；数据行离表头可以很远（三一利润表：表头在 4990，
+      归母净利润行在 5022）。所以放宽到"同一张报表内向上找最近一张表头"，遇到
+      **报表标题**或**明确不是报表的小节**（会计政策调整/分部/季度）就停；
+    - `期末余额/期初余额`（洋河合并资产负债表）这种**不写年份**的表头：年份来自报表
+      日期行，映射为 `报告期末年` 与 `其上一年`，来源如实记 `end_start`。
+    """
+    years, hidx, has_note = find_header(lines, row_idx, lookback=lookback)
+    if years:
+        note = bool(re.search(r"附注|注\s*[一二三四五六七八九十\d]", lines[hidx]))
+        return {"years": years, "top": hidx, "has_note": note, "source": "above",
+                "end_start": False}
+    for i in range(row_idx - 1, max(-1, row_idx - table_window - 1), -1):
+        line = lines[i]
+        if _is_statement_title(line) or NOT_A_STATEMENT_RE.search(line):
+            break
+        ys = _header_years(line)
+        if ys:
+            return {"years": ys, "top": i,
+                    "has_note": bool(re.search(r"附注|注\s*[一二三四五六七八九十\d]", line)),
+                    "source": "table", "end_start": False}
+        if _END_START_RE.search(line):
+            # 期末/期初型列头：列数按"本期、上期"两组取，年份由报表日期行给出
+            year = _statement_date_year(lines, i + 1)
+            if year:
+                return {"years": [f"{year}年", f"{year - 1}年"], "top": i,
+                        "has_note": False, "source": "end_start", "end_start": True}
+    return {"years": [], "top": -1, "has_note": False, "source": "", "end_start": False}
+
+
+def _near_not_a_statement(lines: list[str], title_idx: int, *, back: int = 10) -> bool:
+    """标题**附近**（标题及其上方若干行）是否出现"政策变更/追溯调整/分部/季度"字样。
+
+    用途：`合并利润表影响` 这种**会计政策变更说明表**的标题里也有"合并利润表"，
+    只看标题会把政策调整数当成报表数。
+    """
+    lo = max(0, title_idx - back)
+    return any(NOT_A_STATEMENT_RE.search(lines[j]) for j in range(lo, title_idx + 1))
+
+
+def _statement_scan(lines: list[str], row_idx: int, *, window: int = 150):
+    """在**同一张报表内**向上走：返回 `(停止处, 走过的行)`，遇到报表标题/非报表就停。
+
+    报表可能跨页，页眉会在每页重复，单位标注只在报表开头出现一次——所以"报表内向上看"
+    比"行上方 N 行"更接近事实。停下来的地方是**报表标题**或**明确不是报表的小节**。
+    """
+    walked: list[int] = []
+    for i in range(row_idx - 1, max(-1, row_idx - window - 1), -1):
+        line = lines[i]
+        if _is_statement_title(line) or NOT_A_STATEMENT_RE.search(line):
+            return i, walked
+        walked.append(i)
+    return -1, walked
+
+
+def _is_label_continuation(line: str) -> bool:
+    """折行标签与金额之间的"续行"是不是**非数字**的标签/单位碎片（`(元)`、`以“-”号填列)`）。
+
+    必须是**不含数字**的短碎片：实机反例是"数字被排版截断"——
+    `应收账款` / `1,279,570,42` / `9.23 1,966,154,875.23`，若把 `9.23` 当初下一行的金额，
+    就会把 12.79 亿记成 9.23 元（抽错一个数比少一个数危险，宁可拒绝）。
+    """
+    s = str(line or "").strip()
+    if not s or len(s) > 24:
+        return False
+    if any(ch.isdigit() for ch in s):
+        return False
+    return "。" not in s
+
+
+def _unit_evidence(lines: list[str], row_idx: int, header_idx: int, *, top: int = -1,
+                   last_idx: int = -1):
+    """单位证据 → `(unit, scale, currency)`；无证据 → `(None, None, "")`。
+
+    两段：先看**表头附近**（含跨行表头的最上面一行，`top`）；不够就沿**同一张报表**
+    继续向上找最近的单位标注——报表跨页时页眉重复、单位标注只在报表开头有一次
+    （三一合并现金流量表：单位在 5122，期末那行在 5156）。找不到就是找不到（不默认"元"）。
+
+    `last_idx`：折行时金额在其下若干行，行内单位标注（`(元)`）可能落在两行之间，
+    所以行内检查覆盖 `[row_idx, last_idx]` 这一段。
+    """
+    anchor = top if top >= 0 else (header_idx if header_idx >= 0 else row_idx)
+    for j in range(row_idx, max(0, anchor - 6) - 1, -1):
         m = _UNIT_LINE_RE.search(lines[j])
         if m:
             u = m.group(1)
             return u, _UNIT_SCALE.get(u, Decimal(1)), _CURRENCY_BY_UNIT.get(u, "")
-    m2 = re.search(r"[（(](元|万元|千元|百万元|美元|港元)[)）]", lines[row_idx])
-    if m2:
-        u = m2.group(1)
-        return u, _UNIT_SCALE.get(u, Decimal(1)), _CURRENCY_BY_UNIT.get(u, "")
+    _stop, walked = _statement_scan(lines, min(row_idx, anchor))
+    for j in walked:
+        m = _UNIT_LINE_RE.search(lines[j])
+        if m:
+            u = m.group(1)
+            return u, _UNIT_SCALE.get(u, Decimal(1)), _CURRENCY_BY_UNIT.get(u, "")
+    end = max(row_idx, last_idx)
+    for j in range(row_idx, end + 1):
+        m2 = re.search(r"[（(](元|万元|千元|百万元|美元|港元)[)）]", lines[j])
+        if m2:
+            u = m2.group(1)
+            return u, _UNIT_SCALE.get(u, Decimal(1)), _CURRENCY_BY_UNIT.get(u, "")
     return None, None, ""
 
 
@@ -282,25 +459,54 @@ def extract(doc: dict, *, company: str = "", company_code: str = "",
                     f"附注表/政策调整表/季度摘要一律不取")
             i += 1
             continue
-        years, hidx, has_note = find_header(lines, i)
+        header = find_header_ex(lines, i)
+        years, hidx, has_note = header["years"], header["top"], header["has_note"]
         if not years:
             _reject(slug, "no_periods", i, "表头里没有两个及以上年份")
             i += 1
             continue
-        unit, scale, currency = _unit_evidence(lines, i, hidx)
+        if hidx >= 0 and _ADJUST_HEADER_RE.search(lines[hidx]):
+            # 实机反例（京蓝）：`首次执行新收入准则调整年初财务报表` 那张表也叫"合并资产负债表"，
+            # 表头是 `2019年12月31日 | 2020年01月01日 | 调整数`。它的两列**不是年度报表数**
+            # （一列是调整前、一列是调整后的年初数），照年度口径记账会让"2020年"出现两个值。
+            _reject(slug, "table_unrecognized", i,
+                    f"这是调整/重述对比表（表头：{lines[hidx][:50]}），不是年度报表")
+            i += 1
+            continue
+        vals = numbers_in(tail)
+        value_line = i
+        if not vals:
+            # **折行**：标签行没有金额，金额在下面一两行。两种实机形态：
+            #   三一：`1.归属于母公司股东的净利润(净亏损` + `以“-”号填列) 5,975,451 4,527,451`
+            #   京蓝：`归属于上市公司股东的净利润` + `(元)` + `-2,354,850,607.11 -1,036,745,832.56 …`
+            # 放宽到两行仍然只认"**没有另一条指标标签**、且真的能读出金额"的续行；
+            # 下一行只要出现指标标签就停（那是另一行数据，不是本行的折行）。
+            for step in (1, 2):
+                j = i + step
+                if j >= len(lines) or _label_of(lines[j])[0]:
+                    break
+                if not all(_is_label_continuation(lines[k]) for k in range(i + 1, j)):
+                    break                       # 中间夹着数字碎片 → 是被截断的数，不是折行
+                cand = numbers_in(lines[j])
+                if len(cand) >= 2:
+                    vals, value_line = cand, j
+                    break
+        # 单位证据要看**标签行到金额行**这一整段（京蓝的 `(元)` 就夹在两行之间）
+        unit, scale, currency = _unit_evidence(lines, i, hidx, top=hidx,
+                                               last_idx=value_line)
         if not unit or not currency:
             _reject(slug, "no_unit_evidence", i,
                     "表头/行内没有单位标注（默认“元”并写“表头单位标注”属补造）")
             i += 1
             continue
-        vals = numbers_in(tail)
         if has_note and len(vals) == len(years) + 1 and vals[0] == vals[0].to_integral_value() \
                 and abs(vals[0]) < 1000:
             vals = vals[1:]                      # 表头**声明了**附注列，且首数是小额整数
         if len(vals) < len(years):
-            _reject(slug, "split_number" if len(vals) and re.search(r"[\d,]$", lines[i])
+            _reject(slug, "split_number" if len(vals) and re.search(r"[\d,]$", lines[value_line])
                     else "column_mismatch", i,
-                    f"表头 {years}（{len(years)} 列）但解析到 {len(vals)} 个金额：{lines[i][:60]}")
+                    f"表头 {years}（{len(years)} 列）但解析到 {len(vals)} 个金额："
+                    f"{lines[value_line][:60]}")
             i += 1
             continue
         if len(vals) > len(years):
@@ -310,6 +516,9 @@ def extract(doc: dict, *, company: str = "", company_code: str = "",
             continue
         page = page_of(doc, line_offset(doc, lines, i))
         for label, raw_v in zip(years, vals):
+            if _OPENING_LABEL_RE.search(str(label)):
+                # 年初/期初列属于**上一年末**，不能占本年这一格（宁缺毋错）
+                continue
             m = re.search(r"(19|20)\d{2}", label)
             period = f"{m.group(0)}年" if m else label
             if want_periods and not any(period.startswith(p[:4]) for p in want_periods):
@@ -321,17 +530,23 @@ def extract(doc: dict, *, company: str = "", company_code: str = "",
                 "unit_source": f"表头单位标注「单位：{unit}」",
                 "currency_source": f"由单位「{unit}」判定",
                 "caliber_source": f"表名「{table_name}」",
+                "period_source": (f"列头「{label}」" if not header["end_start"] else
+                                  f"列头「期末/期初」+ 报表日期行 → {label}"),
+                "header_source": header["source"],
                 "entity": company, "entity_id": company_code, "market": "cn",
                 "entity_state": entity_state,
                 "period_type": "年报", "table": kind, "table_name": table_name,
                 "source_url": str(doc.get("url") or ""), "source_hash": text_hash,
                 "extracted_by": "annual_financial_tables",
-                "locator": f"PDF 第 {page} 页 · {table_name} · 行「{lines[i][:40]}」",
-                "quote": lines[i][:200],
+                "locator": (f"PDF 第 {page} 页 · {table_name} · 行「{lines[i][:40]}」"
+                            + ("（标签折行，金额在下一行）" if value_line != i else "")),
+                "quote": f"{lines[i][:160]}" + (f" ⏎ {lines[value_line][:80]}"
+                                                if value_line != i else ""),
                 "fact_id": _fx.make_fact_id(company_code, company, slug, period, caliber),
             })
         tables.append({"line": i, "header": years, "unit": unit, "metric": slug,
-                       "table": kind, "page": page})
+                       "table": kind, "page": page, "header_source": header["source"],
+                       "value_line": value_line})
         i += 1
 
     # 同一 (指标, 期间, 口径, 表) 两个不同值 → 该项整体不入账（不按先后择一）
