@@ -1,46 +1,66 @@
 # DeepSeek 执行状态
 
-> ## 当前账（2026-09-29 深夜 · HEAD `5f8c8b2` + 问题收口批）
+> ## 当前账（2026-09-29 深夜 · 付费整跑三连 + 问题收口）
 >
-> **本批（"解决发现的问题"）**：
-> ① **取件时间预算按通道分**：`transfer_limits` 增 `TEXT_TIMEOUT` 30s / `DOWNLOAD_TIMEOUT`
-> 120s（可环境变量覆盖）；材料直链、`annual_report_pdf.fetch_bytes`、`web_fetch` worker
-> （按 URL 判 PDF）统一改用。**实机证据**：运行中 `webfetchworker` 取三一 2024 年报
-> 返回的原文是 `读取超时（总截止 29.9824s）`——旧码会立刻 `WinError 10038`，
-> 说明修复后的代码在跑，且 30s 确实太紧。
-> ② **更正一条我自己写错的记录**：先前记"外部探针投任务无回执、队列未被消费"是**错的**。
-> 真实情况：正确队列键是 `task_queue:webfetchworker`（**服务标签≠注册名≠队列键**），
-> 那条被消费了；结果落在 Redis 列表 `task_result:<task_id>`，我只等 pubsub 才没读到。
-> 新增 `python launcher.py queues` 按注册表打印"能力→注册名→心跳→队列键"，
-> 外部探针不必再猜。
-> ③ **港股 `00700.HK` 撤回原结论**：复测 200 / 243025 字节 / 96 行，适配器原样调用取回
-> 12 年（最新 2025：收入 7517.66 亿元）——`URLError 10061` 已不成立。
-> `push2.eastmoney.com` 仍 `RemoteDisconnected`（报价链路，年报用不到；
-> `quote.eastmoney.com` 200）。
-> ④ **上交所公告查询明确不打通**：4 种参数（宽查询/只加日期/年报+日期/深市对照）
-> 全部 `total=0` 且 `pageSize` 回显 10（请求写 25）→ 不是被我们的过滤筛空，是这条
-> 匿名 GET 契约不可用；不再盲试，沪市公司走巨潮。
+> **付费整跑（用户已授权）**：`scripts/research_acceptance_run.py --submit`（走 `POST /api/tasks`
+> 鉴权之后的**同一个函数**）跑了三次，任务 `ui-af6a61ddf6` → `ui-22eb8c5f47` → `ui-f4bac0d202`
+> （贵州茅台 2023/2024，合并口径）。
+>
+> **结果：三次都是 `FAILED` / 交付 `draft`，但失败原因很干净、很有价值**：
+> 交付硬门槛如实拦下——「分析未完成：交付正文只有数据与底稿，未产出可交付的分析结论」。
+> 事实层是好的：6/6 必需事实带来源定位、底稿 ok、导出四项齐全（MD 18.8KB / PDF 5.3MB /
+> CSV / JSON）、机器验收 `pass`、评审 `PASS`。**能交付但没有分析结论**，所以拒绝交付是对的。
+>
+> **根因与修复进展**：
+> ① 固定研究路径（`_research_steps`）原本只有 `web_search → web_fetch ×2 → content_summary →
+> report_generator`，**注册模型一次没跑** → 已插入 `3a data_analyzer`（走 Q1 金融分支：
+> 冻结数据集→编译计划→注册模型→分析卡，零 LLM），并把"财务类不许换成 content_summary"
+> 这条护栏补进 `_reduce_steps_for_structured`；两处都有用例。
+> ② 第三次实机**计划里已有 `3a`**（已核对 steps），但工作区**仍没有
+> `analysis/analysis_runs.json`** → 分析步跑了却没产出：`working_paper.json` 在该步执行时
+> 尚未落盘（分析器的金融分支以它触发）。**这是下一步要修的确定项**：
+> 让分析步发生在底稿materialize 之后，或让分析器在缺底稿时从 `financials.json` 冻结数据集。
+> 未修完之前**不重复付费整跑**（三次读数已经足够定位，且每次都是同一 hash
+> `5118edb36809…`、同一硬门槛文案）。
+>
+> **本批其余（问题收口）**：
+> ① **取件时间预算按通道分**：正文 30s / 披露下载 120s（可环境变量覆盖），材料直链、
+> `annual_report_pdf.fetch_bytes`、`web_fetch` worker 统一改用。实机证据：运行中
+> `webfetchworker` 取三一 2024 年报返回 `读取超时（总截止 29.9824s）`（旧码会立刻
+> `WinError 10038`）→ 修好的代码在跑 + 30s 确实太紧。
+> ② **更正我自己写错的记录**：先前"外部探针无回执、队列未被消费"是错的——正确队列键是
+> `task_queue:webfetchworker`（服务标签≠注册名≠队列键），那条被消费了，结果落在
+> `task_result:<task_id>`；新增 `python launcher.py queues` 把三者对应关系打出来。
+> ③ **港股 `00700.HK` 撤回原结论**：复测 200 / 243025 字节 / 96 行，适配器取回 12 年
+> （最新 2025 收入 7517.66 亿元）；`URLError 10061` 已不成立。
+> ④ **上交所公告查询明确不打通**：4 种参数全 `total=0`（`pageSize` 回显 10，请求写 25）
+> → 不是被过滤筛空；不再盲试，沪市走巨潮。
 > ⑤ **血缘进观察**：`Observation.derived_from/formula_version` 随观察进数据集**并计入
-> 观察指纹**（改血缘=换观察），`is_derived` 供读侧识别。
-> ⑥ **亏损公司情景模型改判"不适用"**：基期毛利率 ≤ 0 时明确 `not_applicable`（附理由），
-> 不再以 `validation_failed` 出门——京蓝 2020 实测由"验证失败"变为"模型不适用"。
-> ⑦ **主要会计数据 5 列 3 年的列映射不做猜测**：列数多于年份时新增原因码
-> `adjustment_variants_or_ratio_column` 把"调整前后/变动率列"与普通列错分开报；
-> 同样四个指标从审计过的三张报表取到（三一/洋河/京蓝实测均齐备）。
-> 定向：`test_transport_deadline` 15、`test_startup_readiness` 69、
-> `test_annual_financial_tables` 28、`test_financial_analysis` 66、`test_cninfo_discovery` 31、
-> `test_net_policy` 50 全 OK；证据 `docs/evidence/a2_official_discovery_20260929.md` §8–§10。
+> 观察指纹**（改血缘=换观察）。
+> ⑥ **亏损公司情景模型**由 `validation_failed` 改判 `not_applicable`（附理由）。
+> ⑦ **主要会计数据 5 列 3 年**不做猜测性列映射，新增原因码
+> `adjustment_variants_or_ratio_column`，同样指标从审计过的三张报表取。
 >
-> **仍未解决（需要人或需要研究侧决定，不假装已解决）**：
-> - **真人 F3 五项复核 ≥8/10**：必须真人做，代理侧不得代标；
-> - **亏损期情景方向判据**是否单列：研究侧决定（本批只把它如实归到"不适用"）；
-> - **主要会计数据单元格级列映射**：不做猜测映射，靠审计报表兜底（这是**选择**不是遗漏）；
-> - **`Observation` 血缘之外的溯源**：`report_version`/交付包侧是否要一并带 `derived_from`，
->   待下一批（本批只到数据集与观察）；
-> - **上交所端点**：不打通（有巨潮替代），不是"待修"；
-> - **页面"改假设→复算→采纳→导出"**：Q2/Q3 的 UI 工作，未做。
+> 定向全绿：`test_delivery_chain` 405、`test_orchestrator_v2` 81、`test_transport_deadline` 15、
+> `test_startup_readiness` 69、`test_financial_analysis` 66、`test_annual_financial_tables` 28、
+> `test_cninfo_discovery` 31、`test_net_policy` 50。
+> 证据 `docs/evidence/a2_official_discovery_20260929.md` §8–§10。
 >
-> **已由 CI 覆盖**：`clean-env-e2e`（干净机同包完整链）在 CI 通过——原待办由 CI 承接。
+> **仍未解决（不假装已解决）**：分析结论进正文/交付（上述根因 ②，确定项，待修）；
+> 真人 F3 五项 ≥8/10（**必须真人**）；亏损期情景专用判据（研究侧）；
+> 页面"改假设→复算→采纳→导出"（Q2/Q3 UI）；`report_version`/交付包是否一并带
+> `derived_from`（下一批）；AGENTS.md 的优化积压 10 项（长期项，非本阶段任务）。
+>
+> ## 历史（`5f8c8b2` 及以前，按日期保留）
+>
+> **A2（`87eb855`…`5f8c8b2`）**：官方发现链打通（更正 09-07 结论）、来源按端点注册、
+> 抽取器认三种真实版面、口径显式化、三家公司真机链（三一 4/4 模型 validated、
+> 洋河与冻结样本逐位一致、京蓝重述纪律）；同时修回 A1 自伤回归（取件通道恒失败）。
+> 证据 `docs/evidence/a2_official_discovery_20260929.md`。CI 全绿（run `36559669470`）。
+>
+> ## 历史（`e033a6d` 及以前，按日期保留）
+>
+> **A0（`7c5fe0c`+）**：按 `docs/金融资料获取与事实化补链_20260929.md` §2 修掉抽取器的**事实污染**：
 >
 > ## 历史（`5f8c8b2` 及以前，按日期保留）
 >

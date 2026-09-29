@@ -1436,6 +1436,24 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 "timeout": 900,
             },
             {
+                # **金融研究必须跑注册模型**（2026-09-29 两次付费整跑实机反例）：
+                # 固定研究路径原本只有"文字解释"这一步，注册模型一次都没跑，
+                # 正文因此只有数据与底稿 —— 交付硬门槛（正确地）拦下整单：
+                # 「分析未完成：交付正文只有数据与底稿，未产出可交付的分析结论」
+                # （ui-af6a61ddf6 / ui-22eb8c5f47，茅台 2023/2024，正文 hash 逐位相同）。
+                # 这一步走 data_analyzer 的金融分支：冻结数据集 → 编译计划 → 注册模型 →
+                # 分析卡（**零模型调用**，确定性）；模型不适用/缺输入如实标注，不凑数。
+                # 放在解释与报告之间：报告与打包消费同一份 `analysis/analysis_runs.json`。
+                "step_id": "3a",
+                "capability": "data_analyzer",
+                "instruction": (
+                    f"对 {who}{code} 的已选定事实做**注册模型分析**（冻结数据集→适用模型→"
+                    f"分析卡）：利润桥、现金质量、营运资金、条件情景；模型不适用或缺输入"
+                    f"必须如实标注理由，不得凑数、不得引入事实块外的数字。{contract_note}"
+                ),
+                "timeout": 600,
+            },
+            {
                 "step_id": "4",
                 "capability": "report_generator",
                 "instruction": (
@@ -2636,24 +2654,40 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         changed = False
         for s in steps:
             if str(s.get("capability")) == "data_analyzer":
-                changed = True
                 if is_financial:
-                    instruction = (
-                        f"基于已预载的 financials.json（{label}，公司年报结构化"
-                        "财务数据，含营收/净利润/研发投入等科目）直接输出财务"
-                        "指标要点与趋势结论；无需寻找 CSV，无需重新抓取数据；"
-                        "财务数字必须与 financials.json 一致并标注数据来源与"
-                        "数据获取时间。"
-                        f"原始指令：{s.get('instruction', '')}"
-                    )
-                else:
-                    instruction = (
-                        f"基于已预载的 structured_data.json（{label}）"
-                        "直接输出结构化要点与结论；无需寻找 CSV，无需重新抓取数据；"
-                        "如目标需要图表，请按 [CHART_DATA] 规格输出图表数据"
-                        "或引用工作区已生成的图表。"
-                        f"原始指令：{s.get('instruction', '')}"
-                    )
+                    # **财务类不替换能力**（2026-09-29 实机 ui-af6a61ddf6 反例）：
+                    # Q1 的金融路径（冻结数据集 → 编译计划 → 注册模型 → 分析卡）**就在
+                    # data_analyzer 里**；把它换成 content_summary 等于整段跳过模型，
+                    # 正文只剩数据与底稿——交付硬门槛因此拦下整单：
+                    # "分析未完成：交付正文只有数据与底稿，未产出可交付的分析结论"。
+                    # 这里只把"数据已预载"追加进指令，能力/依赖/step_id 全部保持原样。
+                    changed = True
+                    out.append({
+                        "step_id": s.get("step_id"),
+                        "capability": "data_analyzer",
+                        "instruction": (
+                            f"[数据] 工作区已预载 financials.json（{label}，公司年报结构化财务"
+                            "数据）；财务数字必须与之一致并标注来源与获取时间。"
+                            "分析走**注册模型**（冻结数据集→适用模型→分析卡），不要只用文字概括。"
+                            f"原始指令：{s.get('instruction', '')}"
+                        ),
+                        "depends_on": list(s.get("depends_on") or []),
+                        "timeout": s.get("timeout") or 300,
+                    })
+                    push_progress(self._messaging, task_id, "log",
+                                  {"type": "plan", "agent": "orchestrator",
+                                   "message": ("Plan B（财务类）：结构化财务数据已预载，"
+                                               "保留 data_analyzer 走注册模型"),
+                                   "timestamp": self._now_iso()})
+                    continue
+                changed = True
+                instruction = (
+                    f"基于已预载的 structured_data.json（{label}）"
+                    "直接输出结构化要点与结论；无需寻找 CSV，无需重新抓取数据；"
+                    "如目标需要图表，请按 [CHART_DATA] 规格输出图表数据"
+                    "或引用工作区已生成的图表。"
+                    f"原始指令：{s.get('instruction', '')}"
+                )
                 out.append({
                     "step_id": s.get("step_id"),
                     "capability": "content_summary",
@@ -2671,7 +2705,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             else:
                 out.append(s)
         if changed:
-            logger.info("Task %s: data_analyzer -> content_summary (%s)", task_id, source)
+            logger.info("Task %s: structured preload handling applied (%s)", task_id, source)
         return out
 
 

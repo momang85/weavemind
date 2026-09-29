@@ -2730,7 +2730,7 @@ class TestSimpleTaskFastPath(_DevSandboxMode, _TempWorkspace, unittest.TestCase)
             self.assertIsNotNone(steps)
             self.assertEqual([s["capability"] for s in steps],
                              ["web_search", "web_fetch", "web_fetch", "content_summary",
-                              "report_generator"])
+                              "data_analyzer", "report_generator"])
             self.assertIn("贵州茅台", steps[0]["instruction"])
             self.assertIn("2023、2024", steps[1]["instruction"])
             self.assertIn("已选定的事实", steps[3]["instruction"])
@@ -2748,6 +2748,29 @@ class TestSimpleTaskFastPath(_DevSandboxMode, _TempWorkspace, unittest.TestCase)
             task_state.DB_PATH = old_db
             import shutil
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_fixed_research_plan_includes_registered_model_analysis(self):
+        """固定研究路径**必须含注册模型分析步**（否则正文只有数据与底稿）。
+
+        实机反例（两次付费整跑，茅台 2023/2024，正文 hash 逐位相同）：
+        `ui-af6a61ddf6` / `ui-22eb8c5f47` 的计划里只有 content_summary，
+        注册模型一次没跑，交付硬门槛因此（正确地）拦下整单。
+        """
+        from facts import parse_research_request
+        from orchestrator_v2 import OrchestratorV2
+
+        req = parse_research_request(
+            "研究贵州茅台 2023 与 2024 两个年度的营业收入，合并报表口径。",
+            company="贵州茅台", company_id="600519.SH", market="cn",
+            periods=[2023, 2024], caliber="合并", identity_source="form")
+        steps = OrchestratorV2._research_steps(req)
+        caps = [s["capability"] for s in steps]
+        self.assertIn("data_analyzer", caps, f"固定研究路径缺分析步：{caps}")
+        self.assertLess(caps.index("data_analyzer"), caps.index("report_generator"),
+                        "分析步必须在报告之前（报告消费同一份分析运行记录）")
+        analyzer = steps[caps.index("data_analyzer")]
+        self.assertIn("注册模型", analyzer["instruction"])
+        self.assertTrue(analyzer.get("timeout"), "分析步要有超时（不能默认值）")
 
     def test_fixed_research_plan_preempts_llm_router(self):
         """固定路径先于模板路由：命中时不再花那次无预算的路由调用。"""
@@ -2779,7 +2802,8 @@ class TestSimpleTaskFastPath(_DevSandboxMode, _TempWorkspace, unittest.TestCase)
                                    side_effect=AssertionError("不应进入模板路由")):
                 steps = o._route_template(goal, "t-fixed-3")
             # 1 搜索 / 2 年报正文抓取 / 2b 附注风险抓取（可选）/ 3 解释 / 4 报告
-            self.assertEqual(len(steps), 5)
+            self.assertEqual(len(steps), 6,
+                         "固定路径 = 检索/两路取件/解释/注册模型分析/报告")
             self.assertEqual([s["capability"] for s in steps].count("web_fetch"), 2)
         finally:
             ws_mod.WORKSPACE_ROOT = old_root
@@ -3961,6 +3985,33 @@ class TestRankingStructuredChain(unittest.TestCase):
             "t-rk-b", steps, {"source": "other", "data": {}},
         )
         self.assertEqual(out2[0]["capability"], "data_analyzer")
+
+    def test_financial_preload_keeps_data_analyzer_for_registered_models(self):
+        """**财务类不许换成 content_summary**：Q1 的注册模型就在 data_analyzer 里。
+
+        实机反例（2026-09-29，付费整跑 `ui-af6a61ddf6`，茅台 2023/2024）：
+        换成 content_summary 之后模型整段没跑，正文只剩数据与底稿，交付硬门槛拦下整单——
+        「分析未完成：交付正文只有数据与底稿，未产出可交付的分析结论」。
+        """
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        o._messaging = None
+        steps = [
+            {"step_id": "1", "capability": "data_analyzer",
+             "instruction": "EDA", "depends_on": []},
+            {"step_id": "2", "capability": "report_generator",
+             "instruction": "报告", "depends_on": ["1"]},
+        ]
+        for payload in ({"source": "eastmoney_ashare", "financials": [{"year": 2024}]},
+                        {"source": "eastmoney_datacenter"},
+                        {"financials": [{"year": 2024}]}):
+            out = o._reduce_steps_for_structured("t-fin", steps, payload)
+            self.assertEqual(out[0]["capability"], "data_analyzer",
+                             f"财务类必须保留 data_analyzer：{payload}")
+            self.assertIn("注册模型", out[0]["instruction"])
+            self.assertIn("financials.json", out[0]["instruction"])
+            self.assertEqual(out[1]["depends_on"], ["1"])
 
     def test_structured_injection_includes_ranking_rows(self):
         """报告注入：eastmoney_ranking 的 [结构化数据] 块必须含排行 rows。"""
