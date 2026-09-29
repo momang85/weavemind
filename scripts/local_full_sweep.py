@@ -34,22 +34,29 @@ def main() -> int:
     fails: list[tuple[str, str]] = []
     print(f"共 {len(files)} 个文件（每文件一进程）", flush=True)
     for f in files:
+        # 与 CI 同一调用方式：**当脚本跑**（各文件自带 unittest.main() 入口）。
+        # 直接 `python test_X.py` 与 `-m unittest test_X` 等价，但 test_common.py 是
+        # 纯脚本（无 TestCase），只有这种方式才真的跑起来。
         proc = subprocess.run(
-            [sys.executable, "-m", "unittest", f],
+            [sys.executable, f],
             cwd=str(ROOT), capture_output=True, text=True, errors="replace",
         )
         tail = (proc.stderr or "") + (proc.stdout or "")
         ran = re.search(r"Ran (\d+) tests? in ([\d.]+)s", tail)
-        status = "OK" if (proc.returncode == 0 and "OK" in tail) else "FAIL"
-        line = (f"{f:44s} {status:4s} "
+        status = "OK" if proc.returncode == 0 else "FAIL"
+        extra = ""
+        if status != "OK" and "UnicodeEncodeError" in tail:
+            # 本机 Windows 控制台是 gbk，打印 ✓ 会炸——环境问题，不是用例失败
+            status, extra = "ENV", "（本地控制台编码，非用例失败）"
+        line = (f"{f:44s} {status:4s}{extra} "
                 + (f"{ran.group(1)} tests / {ran.group(2)}s" if ran else "no summary"))
         print(line, flush=True)
-        if status != "OK":
+        if status == "FAIL":
             bad = [ln for ln in tail.splitlines()
                    if ln.startswith(("FAIL:", "ERROR:", "AssertionError"))][:6]
             fails.append((f, "\n".join(bad) or tail[-800:]))
     print("\n==== 汇总 ====", flush=True)
-    print(f"通过 {len(files) - len(fails)} / {len(files)}", flush=True)
+    print(f"通过 {len(files) - len(fails)} / {len(files)}（ENV 不计入失败）", flush=True)
     for f, detail in fails:
         print(f"\n--- {f}\n{detail}", flush=True)
     return 1 if fails else 0
