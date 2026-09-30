@@ -108,10 +108,13 @@ def _case(name: str, spec: dict) -> dict:
                        ("assumed_revenue", "margin_base", "margin_threshold",
                         "margin_gap_pp", "capital_per_day")},
     }
+    # 注：f-string 里不写跨行表达式——本地 Python 3.14 允许（PEP 701），
+    # CI 用 3.11 会直接编译失败（本脚本第一版就因此红过）。
+    _rec = (out["models"]["cash_reconciliation"].get("reconciliation") or {}).get(
+        "2024年", {})
     print(f"{name}: 事实 {len(fs)}（分段 {len(seg)}）"
           f" 现金桥 {out['models']['cash_reconciliation']['status']}"
-          f" 残差 {((out['models']['cash_reconciliation']['reconciliation'] or {})
-                    .get('2024年', {}) or {}).get('residual_yuan')}")
+          f" 残差 {_rec.get('residual_yuan')}")
     return out
 
 
