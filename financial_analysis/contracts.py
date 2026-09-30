@@ -481,6 +481,10 @@ class ModelRun:
     # 刻意不进 `run_id`：改 run_id 会让既有交付包里的 output_id 全部对不上，
     # K2 的"从 ZIP 字节 7/7 离线复算"会被误伤（复核要求保留该证据）。
     rules_version: str = ""
+    # **按当前规则重算时的留痕**（R0-b，09-30 下午复核）：历史 run 没记规则版本，
+    # 采纳前按当前规则确定性重算会覆盖同 run_id 的记录——旧记录（规则版本/状态/验收摘要）
+    # 必须留在这里，历史验证不得被静默抹去。同样**不进 `run_id`**（同上，保 K2）。
+    revalidated_from: dict = field(default_factory=dict)
 
     def expired(self, dataset: AnalysisDataset) -> bool:
         """数据集一变，旧结果立刻过期（保留旧版本，但不得再当当前结果）。"""

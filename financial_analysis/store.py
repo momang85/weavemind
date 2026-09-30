@@ -250,7 +250,13 @@ def save_selection(ws, entry: dict, *, adopted_identity: str = "", note: str = "
 
 
 def selection_status(ws, *, dataset_hash: str = "", rules_version: str = "") -> dict:
-    """逐条核对所选运行**还是不是当前可用的**：数据集/规则/验证状态任一变化都要报出来。"""
+    """逐条核对所选运行**还是不是当前可用的**：数据集/规则/参数/输出/验证状态任一不符都报出来。
+
+    R0-b（2026-09-30 下午复核）：此前只核 数据集与规则版本，`model_id`/`params`/`output_ids`
+    与运行记录不一致也照样 `ok`——选择记录可以用当前常量或错参冒充一条真实运行。现在**逐项**
+    与运行记录比对：模型、参数（含 params_hash）、输出 id 列表、规则版本（含"运行没记规则版本"
+    的 `unknown_rules`）。任何缺失、篡改、不匹配都不得算 `ok`。
+    """
     cur = load_selection(ws)
     runs = {str(r.get("run_id") or ""): r for r in load_runs(ws)}
     ent_out: list[dict] = []
@@ -264,10 +270,37 @@ def selection_status(ws, *, dataset_hash: str = "", rules_version: str = "") -> 
                           f"所选运行的状态是 {run.get('status')}：未通过验证的读数不进正文")
         elif dataset_hash and str(e.get("dataset_hash") or "") != str(dataset_hash):
             state, why = "dataset_changed", "所选运行绑定的数据集已变：旧结果过期，需重算"
-        elif rules_version and str(e.get("rules_version") or "") != str(rules_version):
-            state, why = "rules_changed", "独立验证规则已更新：需按新规则重算后再采纳"
         elif dataset_hash and str(run.get("dataset_hash") or "") != str(dataset_hash):
             state, why = "binding_mismatch", "所选运行与当前数据集不一致：需重算"
+        elif str(e.get("model_id") or "") != str(run.get("model_id") or ""):
+            state, why = ("model_mismatch",
+                          f"选择记录的模型（{e.get('model_id')}）与运行记录"
+                          f"（{run.get('model_id')}）不一致：选择必须指向真实运行")
+        elif (str(e.get("params_hash") or "") or dict(e.get("params") or {})) and (
+                str(e.get("params_hash") or "") != str(run.get("params_hash") or "")
+                or dict(e.get("params") or {}) != dict(run.get("params") or {})):
+            state, why = ("params_mismatch",
+                          "选择记录的参数与运行记录不一致：不得用当前默认值冒充所选参数")
+        elif list(e.get("output_ids") or []) and list(e.get("output_ids") or []) != [
+                str(o.get("output_id") or "") for o in (run.get("outputs") or ())]:
+            state, why = ("outputs_mismatch",
+                          "选择记录的输出 id 与运行记录不一致：选择的不是这一条运行的输出")
+        else:
+            _run_rules = str(run.get("rules_version") or "")
+            _ent_rules = str(e.get("rules_version") or "")
+            if not _run_rules:
+                state, why = ("unknown_rules",
+                              "该运行未记录验证规则版本（历史记录）：可作历史读数，"
+                              "但不得当作按当前规则已验证，需重算后再采纳")
+            elif not _ent_rules:
+                state, why = ("rules_mismatch",
+                              "选择记录没有写验证规则版本：不得以当前常量替代缺失证据")
+            elif rules_version and _ent_rules != str(rules_version):
+                state, why = "rules_changed", "独立验证规则已更新：需按新规则重算后再采纳"
+            elif _ent_rules != _run_rules:
+                state, why = ("rules_mismatch",
+                              f"选择记录的规则版本（{_ent_rules}）与运行记录"
+                              f"（{_run_rules}）不一致：不得以当前常量替代缺失证据")
         ent_out.append({**{k: e.get(k) for k in
                            ("model_id", "run_id", "dataset_hash", "params_hash",
                             "rules_version", "selected_at", "question")},
@@ -278,6 +311,29 @@ def selection_status(ws, *, dataset_hash: str = "", rules_version: str = "") -> 
             "adopted_identity": str(cur.get("adopted_identity") or ""),
             "ok": bool(ent_out) and all(e["state"] == "ok" for e in ent_out),
             "stale": [e for e in ent_out if e["state"] != "ok"]}
+
+
+def restore_selection(ws, blob: dict) -> dict:
+    """把选择文件**按给定内容**写回（采纳失败时的回滚入口，保留旧有效选择）。
+
+    只用于"以暂存候选试装配、失败回滚"这一条路径：不接受空 blob 造成的静默清空——
+    `entries` 为空时也照写（调用方给出的是**上一次的真实状态**）。
+    """
+    data = {"schema": SCHEMA_SELECTION,
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "adopted_identity": str((blob or {}).get("adopted_identity") or ""),
+            "note": str((blob or {}).get("note") or ""),
+            "entries": [dict(e) for e in ((blob or {}).get("entries") or [])]}
+    try:
+        d = inputs_dir(ws)
+        d.mkdir(parents=True, exist_ok=True)
+        p = selection_path(ws)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, p)
+    except Exception as exc:                           # noqa: BLE001
+        logger.warning("分析选择回滚失败：%s", str(exc)[:140])
+    return data
 
 
 def dataset_from_inputs(ws):

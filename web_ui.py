@@ -5982,10 +5982,45 @@ def _post_task_analysis_adopt(self, p, body, admin):
                       f"{str(rec.get('dataset_hash') or '')[:12]} vs 当前 {_cur_ds[:12]}）："
                       "旧结果过期，请按当前输入**重算**后再采纳"),
             "code": "dataset_changed"}, 409)
-    # 规则版本匹配？（验证规则变了，旧 run 不得冒充按新规则已验证）
+    # 规则版本匹配？（R0-b，2026-09-30 下午复核）空规则版本**不得**用当前常量补造成"已验证"：
+    # 旧运行没记版本时先按当前输入/模型实现/验证规则**确定性重算**（同模型同参数，算子确定性、
+    # 不调模型），拿到新的有效验证身份再采纳；重算不通过就如实拒绝、选择保持原样。
     _rules = str(_wb.get("rules_version") or "")
     _run_rules = str(rec.get("rules_version") or "")
-    if _rules and _run_rules and _run_rules != _rules:
+    _revalidated = False
+    if not _run_rules:
+        try:
+            import financial_analysis as _fa_re
+            _ds_now = fa_store.dataset_from_inputs(ws)
+            _fresh = _fa_re.run(str(rec.get("model_id") or ""), _ds_now,
+                                params=dict(rec.get("params") or {}))
+        except Exception as exc:                    # noqa: BLE001 - 重算不了就拒绝，不猜
+            return self._json({
+                "error": f"所选运行未记录验证规则版本，按当前规则重算失败：{str(exc)[:140]}",
+                "code": "rules_unknown"}, 409)
+        if str(getattr(_fresh, "status", "")) != "validated":
+            return self._json({
+                "error": ("所选运行未记录验证规则版本（历史记录），按当前规则重算后状态为 "
+                          f"{getattr(_fresh, 'status', '')}：不得当作已验证采纳"),
+                "code": "rules_unknown",
+                "reason": str(getattr(_fresh, "reason", "") or "")[:200]}, 409)
+        _new_rec = _fresh.as_dict()
+        # 历史验证不可覆写：同一 run_id 的新记录里留痕旧记录（原规则版本/状态/验收摘要）
+        _new_rec["revalidated_from"] = {
+            "rules_version": _run_rules, "status": str(rec.get("status") or ""),
+            "started_at": str(rec.get("started_at") or ""),
+            "validation": dict(rec.get("validation") or {}),
+            "note": "原记录未记验证规则版本；本次按当前规则确定性重算并留痕，旧记录未被抹去",
+        }
+        try:
+            fa_store.save_run(ws, fa_store.run_from_dict(_new_rec))
+        except Exception as exc:                    # noqa: BLE001
+            return self._json({"error": f"重算结果落盘失败：{str(exc)[:140]}",
+                               "code": "rules_unknown"}, 500)
+        rec = _new_rec
+        _run_rules = str(rec.get("rules_version") or "")
+        _revalidated = True
+    elif _rules and _run_rules != _rules:
         return self._json({
             "error": (f"所选运行的验证规则版本（{_run_rules}）与当前（{_rules}）不一致："
                       "请重算后再采纳，不把旧规则下的结论当作按新规则已验证"),
@@ -5993,27 +6028,32 @@ def _post_task_analysis_adopt(self, p, body, admin):
     import task_state as _ts
     row = _ts.read_task(tid) or {}
     goal = str(row.get("goal") or "")
-    # 显式选择先落盘（装配会读它）：同模型第二次选择即替换，旧运行仍留在运行记录里
+    # **试装配的快照**（R0-a）：选择在装配成功前只是"暂存候选"，失败要能原样回滚，
+    # 旧的有效选择与正文一个字都不动。
+    from report_version import VersionStore
+    store = VersionStore(ws, tid)
+    _prev_sel = fa_store.load_selection(ws)
+    _prev_adopted = store.adopted()
+    # 暂存候选选择（装配会读它）：同模型第二次选择即替换，旧运行仍留在运行记录里
     entry = {
         "model_id": str(rec.get("model_id") or ""),
         "run_id": run_id,
         "dataset_hash": str(rec.get("dataset_hash") or ""),
         "params_hash": str(rec.get("params_hash") or ""),
         "params": dict(rec.get("params") or {}),
-        "rules_version": _run_rules or _rules,
+        # **如实写运行自己的规则版本**（不空补、不用当前常量替代缺失证据）
+        "rules_version": _run_rules,
         "selected_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "output_ids": [str(o.get("output_id") or "") for o in (rec.get("outputs") or ())],
     }
     try:
-        fa_store.save_selection(ws, entry, note="分析工作台显式选择")
+        fa_store.save_selection(ws, entry, note="分析工作台显式选择（暂存候选）")
     except Exception as exc:                        # noqa: BLE001 - 选择写不下就别假装采纳
         logger.warning("分析选择落盘失败（task=%s）：%s", tid, str(exc)[:140])
         return self._json({"error": f"选择无法落盘：{str(exc)[:140]}",
                            "code": "selection_write_failed"}, 500)
     try:
         from delivery_pipeline import accept_for_body, assemble_and_verify, read_wrapper
-        from report_version import VersionStore
-        store = VersionStore(ws, tid)
         current = store.adopted()
         if current is None:
             return self._json({"error": "该任务没有可采纳的交付版本",
@@ -6021,21 +6061,19 @@ def _post_task_analysis_adopt(self, p, body, admin):
         body_text = str(current.body or "")
         _delivered = (_get_task_report_data(tid) or {}).get("report") or ""
         wrapper, wrapper_source = read_wrapper(tid, _delivered, body_text)
-        # 验收用**同一个验收器**（沿用人工修订路径的写法）：先对这份正文跑确定性验收，
-        # 再把结论作为 accept_fn 交给装配。此前 adopt 调用的是编排器才有的
-        # `self._accept_fn_for`（HTTP handler 上没有这个方法）→ 采纳必然 500。
-        verdict = None
-        try:
-            verdict = accept_for_body(tid, goal, body_text, trigger="分析采纳重装配",
-                                      ws_dir=ws)
-        except Exception as exc:                    # noqa: BLE001 - 验收异常按证据未知
-            logger.warning("分析采纳：验收异常（task=%s）：%s", tid, str(exc)[:160])
-            verdict = None
+        # **验收必须对"最终候选正文"做**（R0-a，2026-09-30 下午复核）：此前先对**旧采纳正文**
+        # 跑一次验收，再把忽略参数 b 的 `lambda: 旧verdict` 交给装配——装配按新选择改了正文，
+        # `ensure_body_accepted` 却拿着旧 verdict 里的 `_accepted_body`，`find_by_body` 找到
+        # **旧版已验收记录**并 `adopt(旧版)` → 采纳悄悄退回旧稿（纯内存反例：NEW 候选 + OLD
+        # 已验收 → 返回 bound/OLD）。现在把验收函数交给装配，**它收到的 b 就是它验收的正文**。
         asm = assemble_and_verify(tid, goal, body_text, wrapper=wrapper,
-                                  accept_fn=lambda t, g, b: verdict or None,
+                                  accept_fn=lambda t, g, b: accept_for_body(
+                                      t, g, b, trigger="分析采纳最终装配",
+                                      prefer_body=True, ws_dir=ws),
                                   ws_dir=ws,
                                   project=str(row.get("project") or "default") or "default")
         status = str(asm.get("status") or "")
+        _report_body_early = str(asm.get("report") or "")
         # **实际采纳版本的身份**：装配后版本库里真正被采纳的那一版（不再读不存在的
         # `report_version_id`——那会让调用方拿到空值却以为成功，复核 U2）
         _adopted_v = store.adopted()
@@ -6044,6 +6082,39 @@ def _post_task_analysis_adopt(self, p, body, admin):
             identity = str(_adopted_v.identity_id() or "") if _adopted_v is not None else ""
         except Exception:                           # noqa: BLE001
             identity = str(getattr(_adopted_v, "version_id", "") or "")
+        # **绑定校验**（R0-a）：所选运行必须真的在采纳正文里、本版验收必须绑在它自己身上、
+        # 交付正文必须就是采纳版本的正文。任一不成立 → **回滚选择**并保留旧有效稿，
+        # 不返回"已采纳该运行"的成功语义。
+        _problems: list[str] = []
+        _adv_body = str(getattr(_adopted_v, "body", "") or "")
+        if _adopted_v is None:
+            _problems.append("装配后没有采纳版本")
+        else:
+            if not _adopted_v.acceptance_for_this_body():
+                _problems.append("采纳版本没有绑定本版验收（可能退回旧已验收稿）")
+            if not _adv_body or _adv_body not in _report_body_early:
+                _problems.append("交付正文不是采纳版本的正文")
+            if run_id[:12] not in _adv_body:
+                _problems.append(f"采纳正文里找不到所选运行 {run_id[:12]}"
+                                 "（选了新运行，正文却还是旧稿）")
+        if _problems:
+            try:
+                fa_store.restore_selection(ws, _prev_sel)
+            except Exception as exc:                # noqa: BLE001
+                logger.warning("采纳失败后选择回滚异常（task=%s）：%s", tid, str(exc)[:140])
+            _prev_identity = ""
+            if _prev_adopted is not None:
+                try:
+                    _prev_identity = str(_prev_adopted.identity_id() or "")
+                    store.adopt(_prev_adopted, reason="采纳未成立：保留旧有效稿")
+                except Exception:                   # noqa: BLE001
+                    pass
+            logger.warning("分析采纳未成立（task=%s）：%s", tid, "；".join(_problems))
+            return self._json({
+                "error": "采纳未成立：" + "；".join(_problems) + "。已回滚选择并保留旧的有效稿",
+                "code": "adopt_not_bound", "binding_problems": _problems,
+                "selection_restored": True, "adopted_identity": _prev_identity,
+                "delivery_status": status}, 409)
         # 选择的身份回填成"这一版"，供包内清单/面板核对"正文这一段 = 这一次运行"
         if identity:
             try:
@@ -6088,17 +6159,33 @@ def _post_task_analysis_adopt(self, p, body, admin):
                 logger.warning("分析采纳后交付投影写入失败（task=%s）：%s",
                                tid, str(exc)[:160])
         ok = status == "verified"
+        _sel_after = fa_store.selection_status(
+            ws, dataset_hash=_cur_ds, rules_version=_rules)
         return self._json({
             "ok": ok, "adopted": True, "selection_saved": True,
             "adopted_run": run_id, "model_id": entry["model_id"],
             "identity_id": identity,
             "delivery_status": status,
             "delivery_projected": _projected,
+            "revalidated": _revalidated,
             "reason": str(asm.get("reason") or ""),
-            "selection": fa_store.selection_status(
-                ws, dataset_hash=_cur_ds, rules_version=_rules),
+            # **绑定证据**（R0-a）：所选运行在本版正文/验收/选择里都成立，才是"采纳了这一条"
+            "binding": {
+                "run_id": run_id,
+                "params_hash": str(rec.get("params_hash") or ""),
+                "params": dict(rec.get("params") or {}),
+                "in_body": bool(_adv_body and run_id[:12] in _adv_body),
+                "in_delivery": bool(_adv_body and _adv_body in _report_body),
+                "acceptance_bound": bool(_adopted_v is not None
+                                         and _adopted_v.acceptance_for_this_body()),
+                "selection_ok": bool(_sel_after.get("ok")),
+                "rules_version": _run_rules,
+            },
+            "selection": _sel_after,
             "packages": _pkg_statuses_for(tid),
             "note": ("采纳后正文/清单/导出指向同一次运行；新版本不继承旧批准"
+                     + ("；本次按当前规则**确定性重算**后采纳（原记录未记验证规则版本，"
+                        "旧记录已在 run 里留痕）" if _revalidated else "")
                      + ("" if ok else "；**注意**：这一版仍未通过验收，交付状态如实为 "
                         f"{status or 'draft'}，不算「已采纳成功」")
                      + ("" if (_projected or not _report_body) else

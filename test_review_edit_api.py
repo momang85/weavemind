@@ -922,6 +922,129 @@ class TestL0BSelectedRunEntersTheReport(_Base):
                          VersionStore(ws, self.tid).adopted().identity_id(),
                          "交付正文必须被判定属于当前采纳版本")
 
+    def test_adopt_does_not_fall_back_to_the_old_accepted_draft(self):
+        """R0-a（09-30 下午复核）：装配按新选择改了正文，验收却拿旧 verdict → 退回旧已验收稿。
+
+        纯内存反例：NEW 候选 + OLD 已验收 → 旧实现返回 `bound/OLD` 并 `adopt(OLD)`，
+        用户的"采纳新运行"悄悄变成"保留旧稿"。修后：绑定校验不通过 → **回滚选择**、
+        保留旧有效稿、如实 409，不返回"已采纳该运行"的成功语义。
+        """
+        import task_state
+        import financial_analysis as fa
+        from report_version import VersionStore, body_hash
+        from financial_analysis import store as fa_store
+        ds, base, newer, ws = self._seed()
+        store = VersionStore(ws, self.tid)
+        old_body = "# 洋河股份 2024 年度研究\n\n## 分析卡\n\n运行 run=eed3f0a5f37f（旧稿）\n"
+        old = store.record(old_body, acceptance={"overall": "verified",
+                                                 "report_sha256": body_hash(old_body)})
+        store.adopt(old, reason="旧有效稿")
+        self.assertTrue(store.adopted().acceptance_for_this_body())
+        # 旧的有效选择（采纳失败必须原样保留）
+        fa_store.save_selection(ws, {
+            "model_id": "scenario_sensitivity", "run_id": base.run_id,
+            "dataset_hash": ds.dataset_hash, "params_hash": base.params_hash,
+            "params": dict(base.params), "rules_version": fa.validation.RULES_VERSION,
+            "output_ids": [o.output_id for o in base.outputs]}, note="旧有效选择")
+        with mock.patch.object(task_state, "read_task",
+                               return_value={"status": "SUCCESS", "goal": "研究洋河股份"}):
+            payload, status = self._call("/api/task/" + self.tid + "/analysis/adopt",
+                                         {"run_id": newer.run_id})
+        self.assertEqual(status, 409, payload)
+        self.assertEqual(payload.get("code"), "adopt_not_bound", payload)
+        self.assertTrue(payload.get("selection_restored"), payload)
+        self.assertTrue(payload.get("binding_problems"), payload)
+        self.assertEqual(str(store.adopted().version_id), str(old.version_id),
+                         "装配没把所选运行带进正文时，必须保留旧的有效稿")
+        sel = fa_store.load_selection(ws)
+        self.assertEqual([e["run_id"] for e in sel["entries"]], [base.run_id],
+                         "失败必须回滚选择，不得把未成立的候选留在选择里")
+
+    def test_adopt_revalidates_a_run_without_a_recorded_rules_version(self):
+        """R0-b：旧运行没记规则版本 → 不得用当前常量补成"已验证"，先确定性重算再采纳。"""
+        import task_state
+        import financial_analysis as fa
+        from financial_analysis import store as fa_store
+        from report_version import VersionStore
+        ds, base, newer, ws = self._seed()
+        store = VersionStore(ws, self.tid)
+        store.adopt(store.record("# 洋河股份 2024 年度研究\n\n## 分析卡\n\n运行 run=old000000000（旧稿）\n"),
+                    reason="旧有效稿")
+        rec = base.as_dict()
+        rec["rules_version"] = ""                    # 历史记录：没记验证规则版本
+        fa_store.save_run(ws, fa_store.run_from_dict(rec))
+        st = fa_store.selection_status(ws, dataset_hash=ds.dataset_hash,
+                                       rules_version=fa.validation.RULES_VERSION)
+        fa_store.save_selection(ws, {
+            "model_id": "scenario_sensitivity", "run_id": base.run_id,
+            "dataset_hash": ds.dataset_hash, "params_hash": base.params_hash,
+            "params": dict(base.params), "rules_version": "",
+            "output_ids": [o.output_id for o in base.outputs]})
+        st = fa_store.selection_status(ws, dataset_hash=ds.dataset_hash,
+                                       rules_version=fa.validation.RULES_VERSION)
+        self.assertFalse(st["ok"], st)
+        self.assertEqual(st["stale"][0]["state"], "unknown_rules", st)
+        with mock.patch.object(task_state, "read_task",
+                               return_value={"status": "SUCCESS", "goal": "研究洋河股份"}):
+            payload, status = self._call("/api/task/" + self.tid + "/analysis/adopt",
+                                         {"run_id": base.run_id})
+        # 该夹具装配不出研究简报（没有底稿/契约），因此绑定校验会如实拒绝——这本身是
+        # R0-a 的要求（选了运行却进不了正文就不许说"采纳成功"）。这里要证明的是
+        # **重算先发生**：落盘的运行记录拿到了有效的当前规则身份，且旧记录留痕。
+        self.assertIn(status, (200, 409), payload)
+        if status != 200:
+            self.assertEqual(payload.get("code"), "adopt_not_bound", payload)
+        after = {str(r.get("run_id")): r for r in fa_store.load_runs(ws)}[base.run_id]
+        self.assertEqual(str(after.get("rules_version")), fa.validation.RULES_VERSION,
+                         "采纳前必须按当前规则确定性重算，拿到有效的验证身份")
+        self.assertIn("revalidated_from", after, "历史验证不可覆写：旧记录要留痕")
+        if status == 200:
+            self.assertTrue(payload.get("revalidated"), payload)
+            self.assertEqual(payload["binding"]["rules_version"],
+                             fa.validation.RULES_VERSION)
+
+    def test_selection_status_flags_params_outputs_and_rule_mismatch(self):
+        """R0-b：选择记录必须与实际运行**逐项**一致（模型/参数/输出/规则）。"""
+        import financial_analysis as fa
+        from financial_analysis import store as fa_store
+        ds, base, newer, ws = self._seed()
+        good = {"model_id": "scenario_sensitivity", "run_id": base.run_id,
+                "dataset_hash": ds.dataset_hash, "params_hash": base.params_hash,
+                "params": dict(base.params), "rules_version": fa.validation.RULES_VERSION,
+                "output_ids": [o.output_id for o in base.outputs]}
+        st = fa_store.selection_status(ws, dataset_hash=ds.dataset_hash,
+                                       rules_version=fa.validation.RULES_VERSION)
+        self.assertFalse(st["ok"], "还没保存选择时必须 ok=False")
+        fa_store.save_selection(ws, good)
+        st = fa_store.selection_status(ws, dataset_hash=ds.dataset_hash,
+                                       rules_version=fa.validation.RULES_VERSION)
+        self.assertTrue(st["ok"], st)
+        for patch, want in (
+                ({"params_hash": "deadbeef", "params": {"revenue_growth": 0.10}},
+                 "params_mismatch"),
+                ({"output_ids": ["nope-00-x"]}, "outputs_mismatch"),
+                ({"model_id": "profit_bridge"}, "model_mismatch"),
+                ({"rules_version": ""}, "rules_mismatch")):
+            entry = dict(good)
+            entry.update(patch)
+            fa_store.save_selection(ws, entry)
+            st = fa_store.selection_status(ws, dataset_hash=ds.dataset_hash,
+                                           rules_version=fa.validation.RULES_VERSION)
+            self.assertFalse(st["ok"], (patch, st))
+            self.assertIn(want, [e["state"] for e in st["stale"]], (patch, st))
+            fa_store.save_selection(ws, good)
+
+    def test_revalidate_treats_missing_rules_as_unknown(self):
+        """R0-b 纯函数：空规则版本不是"仍然有效"。"""
+        import financial_analysis as fa
+        from financial_analysis import store as fa_store
+        ds, base, newer, ws = self._seed()
+        rec = base.as_dict()
+        rec["rules_version"] = ""
+        state, why = fa.revalidate(fa_store.run_from_dict(rec), ds)
+        self.assertEqual(state, "unknown_rules", why)
+        self.assertIn("历史", why)
+
     def test_adopt_refuses_a_run_from_another_dataset(self):
         import financial_analysis as fa
         from financial_analysis import store as fa_store

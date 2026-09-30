@@ -274,7 +274,12 @@ def revalidate(run: ModelRun, dataset) -> tuple[str, str]:
         return "expired", (f"数据集已变（run 绑定 {run.dataset_hash[:12]}，"
                            f"当前 {dataset.dataset_hash[:12]}）：旧结果作废，需重算")
     _rv = str(getattr(run, "rules_version", "") or "")
-    if _rv and _rv != RULES_VERSION:
+    if not _rv:
+        # R0-b（2026-09-30 下午复核）：**空规则版本不是"仍然有效"**。旧运行没记验证规则
+        # 版本时，无法证明它按当前规则验证过——只能当历史读数读，不得冒充当前已验证。
+        return "unknown_rules", ("该运行未记录验证规则版本（历史记录）：可作历史读数，"
+                                 "但不得当作按当前规则已验证，需按当前输入与规则重算")
+    if _rv != RULES_VERSION:
         return "rules_changed", (f"验证规则集已更新（run 为 {_rv}，当前 {RULES_VERSION}）："
                                  "旧结果保留可追溯，但不得当作按新规则已验证，需重算")
     return "ok", "数据集未变，结果仍有效"
