@@ -1023,6 +1023,17 @@ def facts_from_annual_tables(doc: dict, *, company: str, company_code: str = "",
         rows = rows + list(_detail.get("facts") or [])
     except Exception:                                    # noqa: BLE001 - 抽取失败不造事实
         pass
+    # U2（2026-10-01）：现金流量表**补充资料**（将净利润调节为经营活动现金流量）同样在附注里，
+    # 此前一条也进不来 → "利润为什么没变成现金"只能靠观察比率。表头/行标签不符即不取；
+    # 表内"净利润/经营活动产生的现金流量净额"两行已由利润表与现金流量表进入数据集，这里只核对。
+    try:
+        from adapters import cashflow_supplement_tables as cst
+        _sup = cst.extract_cashflow_supplement(doc or {}, company=company,
+                                              company_code=company_code,
+                                              periods=periods)
+        rows = rows + list(_sup.get("facts") or [])
+    except Exception:                                    # noqa: BLE001 - 抽取失败不造事实
+        pass
     out: list[Fact] = []
     for r in rows:
         _metric = str(r.get("metric") or "")

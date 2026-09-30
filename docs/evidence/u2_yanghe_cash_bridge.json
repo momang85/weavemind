@@ -1,0 +1,421 @@
+{
+  "case": "洋河股份 002304 2023→2024 现金调节桥（补充资料，官方入口）",
+  "source_material": "evals/a2_official_chain_20260929/002304/project/materials/f42e747c73850b59/doc.json",
+  "supplement_extraction": {
+    "ok": true,
+    "facts": 32,
+    "periods": [
+      "2023",
+      "2024"
+    ],
+    "cross_checks": [
+      {
+        "metric": "net_profit_consolidated",
+        "cur": 6666455819.96,
+        "prev": 10020768556.47,
+        "line": 8863,
+        "source_line": "净利润 6,666,455,819.96 10,020,768,556.47"
+      },
+      {
+        "metric": "operating_cashflow",
+        "cur": 4628711237.28,
+        "prev": 6130220867.96,
+        "line": 8893,
+        "source_line": "经营活动产生的现金流量净额 4,628,711,237.28 6,130,220,867.96"
+      }
+    ],
+    "rejected": []
+  },
+  "dataset": {
+    "observations": 162,
+    "usable": 158,
+    "conflicts": [
+      "total_assets 2024年 口径 合并：fact-abb13a23f7abeb0e=67345265219.62元（CNY/合并）；fact-abb13a23f7abeb0e=67345265219.62元（CNY/合并）",
+      "total_assets 2023年 口径 合并：fact-83bc622c3ea8e3e7=69792287455.91元（CNY/合并）；fact-83bc622c3ea8e3e7=69792287455.91元（CNY/合并）"
+    ],
+    "dataset_hash": "8e99cf4db927693799691a9f19d769c46f5ceb3d2e3e0d88da08b9eacfe8e35c"
+  },
+  "run": {
+    "model_id": "cash_reconciliation",
+    "status": "validated",
+    "validation_failed": [],
+    "checks": {
+      "binding": true,
+      "output_shape": true,
+      "components": true,
+      "gold": true,
+      "closure": true,
+      "identity": true,
+      "unit": true,
+      "no_pp_substitution": true
+    },
+    "outputs": {
+      "operating_cashflow_reconciliation_cur": [
+        {
+          "value": 4628711237.28,
+          "unit": "元",
+          "output_period": "2024年",
+          "label": "净利润到经营现金流的调节（2024年）",
+          "components": [
+            {
+              "component_id": "consolidated_net_profit",
+              "label": "合并净利润",
+              "value": 6666455819.96,
+              "unit": "元"
+            },
+            {
+              "component_id": "non_cash_adjustments",
+              "label": "非现金项（折旧摊销/减值/递延税/公允价值等）",
+              "value": 957095461.74,
+              "unit": "元"
+            },
+            {
+              "component_id": "working_capital_adjustments",
+              "label": "营运资本项（存货/经营性应收/经营性应付）",
+              "value": -3325136541.13,
+              "unit": "元"
+            },
+            {
+              "component_id": "other_adjustments",
+              "label": "其他调节项",
+              "value": 330296496.71,
+              "unit": "元"
+            },
+            {
+              "component_id": "unexplained_residual",
+              "label": "未解释差额（未取得的披露调节项）",
+              "value": 0.0,
+              "unit": "元"
+            }
+          ]
+        }
+      ],
+      "operating_cashflow_reconciliation_prev": [
+        {
+          "value": 6130220867.96,
+          "unit": "元",
+          "output_period": "2023年",
+          "label": "净利润到经营现金流的调节（2023年）",
+          "components": [
+            {
+              "component_id": "consolidated_net_profit",
+              "label": "合并净利润",
+              "value": 10020768556.47,
+              "unit": "元"
+            },
+            {
+              "component_id": "non_cash_adjustments",
+              "label": "非现金项（折旧摊销/减值/递延税/公允价值等）",
+              "value": 713751150.58,
+              "unit": "元"
+            },
+            {
+              "component_id": "working_capital_adjustments",
+              "label": "营运资本项（存货/经营性应收/经营性应付）",
+              "value": -4429555248.01,
+              "unit": "元"
+            },
+            {
+              "component_id": "other_adjustments",
+              "label": "其他调节项",
+              "value": -174743591.08,
+              "unit": "元"
+            },
+            {
+              "component_id": "unexplained_residual",
+              "label": "未解释差额（未取得的披露调节项）",
+              "value": 0.0,
+              "unit": "元"
+            }
+          ]
+        }
+      ],
+      "cash_gap_change": [
+        {
+          "value": 1852803105.83,
+          "unit": "元",
+          "output_period": "2024年较2023年",
+          "label": "现金缺口变化（经营现金流−合并净利润，2024年较2023年）",
+          "components": [
+            {
+              "component_id": "change_in_net_profit",
+              "label": "合并净利润变化（取负：利润少→缺口小）",
+              "value": 3354312736.51,
+              "unit": "元"
+            },
+            {
+              "component_id": "change_in_adjustments",
+              "label": "调节项合计变化",
+              "value": -1501509630.68,
+              "unit": "元"
+            }
+          ]
+        }
+      ],
+      "largest_support": [
+        {
+          "value": 586592227.18,
+          "unit": "元",
+          "output_period": "2024年",
+          "label": "最大支撑项（2024年调节额）",
+          "components": []
+        }
+      ],
+      "largest_drag": [
+        {
+          "value": -1830670724.59,
+          "unit": "元",
+          "output_period": "2024年",
+          "label": "最大拖累项（2024年调节额）",
+          "components": []
+        }
+      ]
+    }
+  },
+  "diagnostics": {
+    "unit": "元",
+    "reconciliation": {
+      "2024年": {
+        "net_profit_yuan": 6666455819.96,
+        "cashflow_yuan": 4628711237.28,
+        "adjustments_yuan": -2037744582.68,
+        "residual_yuan": 0.0,
+        "groups": {
+          "non_cash": 957095461.74,
+          "working_capital": -3325136541.13,
+          "other": 330296496.71
+        },
+        "items": [
+          {
+            "metric": "asset_impairment_provision",
+            "label": "资产减值准备",
+            "group": "non_cash",
+            "value_yuan": 10535947.8
+          },
+          {
+            "metric": "depreciation",
+            "label": "固定资产折旧、油气资产折耗、生产性生物资产折旧",
+            "group": "non_cash",
+            "value_yuan": 586592227.18
+          },
+          {
+            "metric": "right_of_use_depreciation",
+            "label": "使用权资产折旧",
+            "group": "non_cash",
+            "value_yuan": 32397883.52
+          },
+          {
+            "metric": "intangible_amortization",
+            "label": "无形资产摊销",
+            "group": "non_cash",
+            "value_yuan": 61305706.85
+          },
+          {
+            "metric": "long_term_prepaid_amortization",
+            "label": "长期待摊费用摊销",
+            "group": "non_cash",
+            "value_yuan": 17125968.18
+          },
+          {
+            "metric": "disposal_long_asset_loss",
+            "label": "处置长期资产的损失",
+            "group": "non_cash",
+            "value_yuan": 37268976.98
+          },
+          {
+            "metric": "fixed_asset_scrap_loss",
+            "label": "固定资产报废损失",
+            "group": "non_cash",
+            "value_yuan": 2980288.23
+          },
+          {
+            "metric": "fair_value_change_loss",
+            "label": "公允价值变动损失",
+            "group": "non_cash",
+            "value_yuan": 396164080.43
+          },
+          {
+            "metric": "finance_expense_adjust",
+            "label": "财务费用（调节项）",
+            "group": "non_cash",
+            "value_yuan": -672316.24
+          },
+          {
+            "metric": "investment_loss",
+            "label": "投资损失（调节项）",
+            "group": "non_cash",
+            "value_yuan": -146415168.8
+          },
+          {
+            "metric": "deferred_tax_asset_decrease",
+            "label": "递延所得税资产减少",
+            "group": "non_cash",
+            "value_yuan": 83804944.67
+          },
+          {
+            "metric": "deferred_tax_liability_increase",
+            "label": "递延所得税负债增加",
+            "group": "non_cash",
+            "value_yuan": -123993077.06
+          },
+          {
+            "metric": "inventory_decrease",
+            "label": "存货的减少（增加以“－”号填列）",
+            "group": "working_capital",
+            "value_yuan": -843101567.99
+          },
+          {
+            "metric": "operating_receivable_decrease",
+            "label": "经营性应收项目的减少（增加以“－”号填列）",
+            "group": "working_capital",
+            "value_yuan": -651364248.55
+          },
+          {
+            "metric": "operating_payable_increase",
+            "label": "经营性应付项目的增加（减少以“－”号填列）",
+            "group": "working_capital",
+            "value_yuan": -1830670724.59
+          },
+          {
+            "metric": "other_cashflow_adjustments",
+            "label": "其他（调节项）",
+            "group": "other",
+            "value_yuan": 330296496.71
+          }
+        ]
+      },
+      "2023年": {
+        "net_profit_yuan": 10020768556.47,
+        "cashflow_yuan": 6130220867.96,
+        "adjustments_yuan": -3890547688.51,
+        "residual_yuan": 0.0,
+        "groups": {
+          "non_cash": 713751150.58,
+          "working_capital": -4429555248.01,
+          "other": -174743591.08
+        },
+        "items": [
+          {
+            "metric": "asset_impairment_provision",
+            "label": "资产减值准备",
+            "group": "non_cash",
+            "value_yuan": 1946634.92
+          },
+          {
+            "metric": "depreciation",
+            "label": "固定资产折旧、油气资产折耗、生产性生物资产折旧",
+            "group": "non_cash",
+            "value_yuan": 639335568.28
+          },
+          {
+            "metric": "right_of_use_depreciation",
+            "label": "使用权资产折旧",
+            "group": "non_cash",
+            "value_yuan": 27594763.53
+          },
+          {
+            "metric": "intangible_amortization",
+            "label": "无形资产摊销",
+            "group": "non_cash",
+            "value_yuan": 59054597.55
+          },
+          {
+            "metric": "long_term_prepaid_amortization",
+            "label": "长期待摊费用摊销",
+            "group": "non_cash",
+            "value_yuan": 4026169.92
+          },
+          {
+            "metric": "disposal_long_asset_loss",
+            "label": "处置长期资产的损失",
+            "group": "non_cash",
+            "value_yuan": 8522287.93
+          },
+          {
+            "metric": "fixed_asset_scrap_loss",
+            "label": "固定资产报废损失",
+            "group": "non_cash",
+            "value_yuan": 1853533.74
+          },
+          {
+            "metric": "fair_value_change_loss",
+            "label": "公允价值变动损失",
+            "group": "non_cash",
+            "value_yuan": 37082477.77
+          },
+          {
+            "metric": "finance_expense_adjust",
+            "label": "财务费用（调节项）",
+            "group": "non_cash",
+            "value_yuan": 2617344.74
+          },
+          {
+            "metric": "investment_loss",
+            "label": "投资损失（调节项）",
+            "group": "non_cash",
+            "value_yuan": -255520777.61
+          },
+          {
+            "metric": "deferred_tax_asset_decrease",
+            "label": "递延所得税资产减少",
+            "group": "non_cash",
+            "value_yuan": 180381423.47
+          },
+          {
+            "metric": "deferred_tax_liability_increase",
+            "label": "递延所得税负债增加",
+            "group": "non_cash",
+            "value_yuan": 6857126.34
+          },
+          {
+            "metric": "inventory_decrease",
+            "label": "存货的减少（增加以“－”号填列）",
+            "group": "working_capital",
+            "value_yuan": -1226697174.83
+          },
+          {
+            "metric": "operating_receivable_decrease",
+            "label": "经营性应收项目的减少（增加以“－”号填列）",
+            "group": "working_capital",
+            "value_yuan": 380090873.53
+          },
+          {
+            "metric": "operating_payable_increase",
+            "label": "经营性应付项目的增加（减少以“－”号填列）",
+            "group": "working_capital",
+            "value_yuan": -3582948946.71
+          },
+          {
+            "metric": "other_cashflow_adjustments",
+            "label": "其他（调节项）",
+            "group": "other",
+            "value_yuan": -174743591.08
+          }
+        ]
+      }
+    },
+    "largest_support": {
+      "period": "2024年",
+      "metric": "depreciation",
+      "label": "固定资产折旧、油气资产折耗、生产性生物资产折旧",
+      "value": 586592227.18,
+      "unit": "元",
+      "group": "non_cash"
+    },
+    "largest_drag": {
+      "period": "2024年",
+      "metric": "operating_payable_increase",
+      "label": "经营性应付项目的增加（减少以“－”号填列）",
+      "value": -1830670724.59,
+      "unit": "元",
+      "group": "working_capital"
+    },
+    "items_missing": {
+      "cur": [],
+      "prev": []
+    },
+    "closure_note": "对账差额≈0 表示披露调节项与经营现金流自洽；差额非零说明有调节项没取到，报告不得写“完整调节”"
+  },
+  "brief_analysis_card": "## 分析卡\n\n> 运行 run=fdc8d4d464e7（模型 cash_reconciliation 1.0.0；性质 现金形成机制（披露调节表复算）；数据集 8e99cf4db927；参数 44136fa355b3678a；验证 通过）\n- **洋河股份 2024年 净利润到经营现金流的调节（2024年）**：净利润到经营现金流的调节（2024年） +4,628,711,237.28元；其中 合并净利润 +6,666,455,819.96元、非现金项（折旧摊销/减值/递延税/公允价值等） +957,095,461.74元、营运资本项（存货/经营性应收/经营性应付） -3,325,136,541.13元、其他调节项 +330,296,496.71元、未解释差额（未取得的披露调节项） +0.00元　output fdc8d4d464e7-00-operating_cashflow_reconciliation_cur\n  - 贡献项：合并净利润 +6,666,455,819.96元（= 披露值）\n  - 贡献项：非现金项（折旧摊销/减值/递延税/公允价值等） +957,095,461.74元（= asset_impairment_provision＋depreciation＋right_of_use_depreciation＋intangible_amortization＋long_term_prepaid_amortization＋disposal_long_asset_loss＋fixed_asset_scrap_loss＋fair_value_change_loss＋finance_expense_adjust＋investment_loss＋deferred_tax_asset_decrease＋deferred_tax_liability_increase）\n  - 贡献项：营运资本项（存货/经营性应收/经营性应付） -3,325,136,541.13元（= inventory_decrease＋operating_receivable_decrease＋operating_payable_increase）\n  - 贡献项：其他调节项 +330,296,496.71元（= other_cashflow_adjustments）\n  - 贡献项：未解释差额（未取得的披露调节项） +0.00元（= (经营现金流 − 合并净利润) − 已列调节项合计）\n  - 未解释段：+0.00元（这一段含费用、税项、投资收益、少数股东等：**缺明细表时只能说“观察成立、原因待证”**，不得把毛利率的百分点差当成金额归因）\n- **洋河股份 2023年 净利润到经营现金流的调节（2023年）**：净利润到经营现金流的调节（2023年） +6,130,220,867.96元；其中 合并净利润 +10,020,768,556.47元、非现金项（折旧摊销/减值/递延税/公允价值等） +713,751,150.58元、营运资本项（存货/经营性应收/经营性应付） -4,429,555,248.01元、其他调节项 -174,743,591.08元、未解释差额（未取得的披露调节项） +0.00元　output fdc8d4d464e7-01-operating_cashflow_reconciliation_prev\n  - 贡献项：合并净利润 +10,020,768,556.47元（= 披露值）\n  - 贡献项：非现金项（折旧摊销/减值/递延税/公允价值等） +713,751,150.58元（= asset_impairment_provision＋depreciation＋right_of_use_depreciation＋intangible_amortization＋long_term_prepaid_amortization＋disposal_long_asset_loss＋fixed_asset_scrap_loss＋fair_value_change_loss＋finance_expense_adjust＋investment_loss＋deferred_tax_asset_decrease＋deferred_tax_liability_increase）\n  - 贡献项：营运资本项（存货/经营性应收/经营性应付） -4,429,555,248.01元（= inventory_decrease＋operating_receivable_decrease＋operating_payable_increase）\n  - 贡献项：其他调节项 -174,743,591.08元（= other_cashflow_adjustments）\n  - 贡献项：未解释差额（未取得的披露调节项） +0.00元（= (经营现金流 − 合并净利润) − 已列调节项合计）\n- **洋河股份 2024年较2023年 现金缺口变化（经营现金流−合并净利润，2024年较2023年）**：现金缺口变化（经营现金流−合并净利润，2024年较2023年） +1,852,803,105.83元；其中 合并净利润变化（取负：利润少→缺口小） +3,354,312,736.51元、调节项合计变化 -1,501,509,630.68元　output fdc8d4d464e7-02-cash_gap_change\n  - 贡献项：合并净利润变化（取负：利润少→缺口小） +3,354,312,736.51元（= −(本期合并净利润 − 上期合并净利润)）\n  - 贡献项：调节项合计变化 -1,501,509,630.68元（= 本期调节项合计 − 上期调节项合计）\n- **洋河股份 2024年 最大支撑项（2024年调节额）**：最大支撑项（2024年调节额） +586,592,227.18元；其中 无明细贡献项　output fdc8d4d464e7-03-largest_support\n- **洋河股份 2024年 最大拖累项（2024年调节额）**：最大拖累项（2024年调节额） -1,830,670,724.59元；其中 无明细贡献项　output fdc8d4d464e7-04-largest_drag\n- **2024年 净利润→经营现金流**：合并净利润 +66.66亿元 ＋ 调节项 -20.38亿元 ＝ 经营现金流 +46.29亿元（未解释差额 +0.00亿元）\n  - 分组：non_cash +9.57亿元、working_capital -33.25亿元、other +3.30亿元\n- **2023年 净利润→经营现金流**：合并净利润 +100.21亿元 ＋ 调节项 -38.91亿元 ＝ 经营现金流 +61.30亿元（未解释差额 +0.00亿元）\n  - 分组：non_cash +7.14亿元、working_capital -44.30亿元、other -1.75亿元\n- **最大支撑/拖累（本期调节额）**\n  - 支撑：固定资产折旧、油气资产折耗、生产性生物资产折旧 +5.87亿元（非现金项：折旧摊销/减值/递延税/公允价值等，不涉及当期现金收付）\n  - 拖累：经营性应付项目的增加（减少以“－”号填列） -18.31亿元（营运资本项：存货与经营性应收应付的增减）\n- **现金缺口变化（2024年较2023年）**：+18.53亿元 ＝ 合并净利润变化（取负：利润少→缺口小） +33.54亿元、调节项合计变化 -15.02亿元；缺口＝经营现金流−合并净利润，缺口缩小不等于现金变好\n- 说明：对账差额≈0 表示披露调节项与经营现金流自洽；差额非零说明有调节项没取到，报告不得写“完整调节”\n- 下一项验证动作：对最大的支撑/拖累项各找一条披露依据（应付/存货/应收的明细或附注），再用资产负债表变动与结算条款做旁证；差额非零时先补未取得的调节项\n### 分析卡选择说明\n- 说明：本版没有人工选择记录，默认采用每个模型的第一条已验证运行（可在分析工作台显式选择某一条）\n",
+  "brief_analysis_card_chars": 3381
+}

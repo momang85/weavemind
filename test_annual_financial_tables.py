@@ -6,6 +6,7 @@ from __future__ import annotations
 import unittest
 
 from adapters import annual_financial_tables as aft
+from adapters import cashflow_supplement_tables as aft_cfst
 from adapters import operating_detail_tables as aft_odt
 
 _TITLE = "京蓝科技股份有限公司2020年年度报告（更正后）"
@@ -604,6 +605,61 @@ class TestOperatingDetailTables(unittest.TestCase):
         out2, by2 = self._facts("江苏洋河酒厂股份有限公司2024年年度报告\n无表格")
         self.assertFalse(out2["ok"])
         self.assertEqual(out2["facts"], [])
+
+
+_CF_SUPPLEMENT_TEXT = """江苏洋河酒厂股份有限公司2024年年度报告
+54、现金流量表补充资料
+（1） 现金流量表补充资料
+单位：元
+补充资料 本期金额 上期金额
+1．将净利润调节为经营活动现金流量
+净利润 100.00 120.00
+加：资产减值准备 1.00 2.00
+固定资产折旧、油气资产折
+耗、生产性生物资产折旧 30.00 28.00
+存货的减少（增加以“－”号
+填列） -10.00 -20.00
+经营性应付项目的增加（减少
+以“－”号填列） -5.00 -8.00
+经营活动产生的现金流量净额 116.00 122.00
+2．不涉及现金收支的重大投资和筹资活动
+债务转为资本
+"""
+
+
+class TestCashflowSupplementTables(unittest.TestCase):
+    """U2（2026-10-01）：现金流量表补充资料的定向抽取（折行标签 + 本期/上期表头）。"""
+
+    def _out(self, text=_CF_SUPPLEMENT_TEXT, periods=(2023, 2024)):
+        return aft_cfst.extract_cashflow_supplement(_doc(text), company="洋河股份",
+                                                   company_code="002304",
+                                                   periods=periods)
+
+    def test_folded_labels_and_period_mapping(self):
+        out = self._out()
+        self.assertTrue(out["ok"], out["rejected"])
+        by = {(f["metric"], f["period"]): f["value"] for f in out["facts"]}
+        # 折行标签（'固定资产折旧、油气资产折' + '耗、…'）必须能拼回完整标签
+        self.assertAlmostEqual(by[("depreciation", "2024年")], 30.0)
+        self.assertAlmostEqual(by[("depreciation", "2023年")], 28.0)
+        self.assertAlmostEqual(by[("inventory_decrease", "2024年")], -10.0)
+        self.assertAlmostEqual(by[("operating_payable_increase", "2023年")], -8.0)
+        # 表头只有"本期/上期"：用请求期间映射（本期=最新），并把来源如实带回
+        f = out["facts"][0]
+        self.assertIn("本期", f["period_source"])
+        self.assertIn("补充资料", f["caliber_source"] + f["unit_source"])
+        # 净利润/经营现金流两行已由别的表进入数据集：只核对、不重复出事实
+        self.assertEqual([m for m, _p in {(f["metric"], f["period"])
+                                          for f in out["facts"]}
+                          if m in ("net_profit_consolidated", "operating_cashflow")], [])
+        self.assertEqual({c["metric"] for c in out["cross_checks"]},
+                         {"net_profit_consolidated", "operating_cashflow"})
+
+    def test_no_anchor_yields_nothing(self):
+        out = self._out("江苏洋河酒厂股份有限公司2024年年度报告\n没有任何补充资料")
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["facts"], [])
+        self.assertEqual(out["rejected"][0]["reason"], "no_supplement_table")
 
 
 if __name__ == "__main__":

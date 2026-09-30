@@ -89,7 +89,7 @@ QUESTION_TYPES: tuple[QuestionType, ...] = (
                   "利润有没有转成现金", "利润增长是否转化"),
         needs_metrics=("operating_cashflow", "net_profit"),
         needs_note="需要经营现金流与归母净利润（同主体同期间）",
-        models=("profit_to_cash", "cash_quality"),
+        models=("cash_reconciliation", "profit_to_cash", "cash_quality"),
     ),
     QuestionType(
         qid="working_capital", label="营运资本占用与周转",

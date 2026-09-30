@@ -39,6 +39,14 @@ def _signed(value: float | None, unit: str = "亿元") -> str:
 # 模型都是一句话——现金质量/情景的卡上写着"取得毛利线以下的利润表明细"，读者据此去补
 # 的材料跟这张卡要回答的问题无关（实机 `ui-603f626cbe` 的 cash_quality 卡）。
 _CARD_TRAITS: dict[str, dict[str, str]] = {
+    "cash_reconciliation": {
+        "kind": "现金形成机制（披露调节表复算）",
+        "meaning": ("这是现金流量表补充资料的**复算**：说明合并净利润与经营现金流之间的"
+                    "会计调节项构成，不表示各项目的经济原因（应付减少不等于融资恶化，"
+                    "也不等于回款变差）；起点是**合并净利润**，不是归母净利"),
+        "next_action": ("对最大的支撑/拖累项各找一条披露依据（应付/存货/应收的明细或附注），"
+                        "再用资产负债表变动与结算条款做旁证；差额非零时先补未取得的调节项"),
+    },
     "operating_drivers": {
         "kind": "经营驱动分解（会计分解）",
         "meaning": ("规模/毛利率/逐项费用税项都是**会计分解**：它说明金额从哪来，"
@@ -98,6 +106,64 @@ def _yi_from_yuan(value, unit: str) -> str:
     if str(unit or "") == "元":
         return f"{v / _YUAN_PER_YI:+,.2f}亿元"
     return f"{v:+,.2f}{unit or ''}"
+
+
+def render_cash_reconciliation_block(run) -> list[str]:
+    """现金调节桥的三段式正文（U2）：起点与分组 → 最大支撑/拖累 → 缺口变化的来源。"""
+    from .contracts import RunStatus
+    if str(getattr(run, "model_id", "")) != "cash_reconciliation":
+        return []
+    if run.status != RunStatus.VALIDATED:
+        return []
+    diag = {}
+    for o in (run.outputs or []):
+        if o.diagnostics:
+            diag = dict(o.diagnostics)
+            break
+    rec = diag.get("reconciliation") or {}
+    unit = str(diag.get("unit") or "")
+    lines: list[str] = []
+    for period, item in rec.items():
+        comps = "、".join(f"{k} {_yi_from_yuan(v, unit)}"
+                         for k, v in (item.get("groups") or {}).items())
+        lines.append(f"- **{period} 净利润→经营现金流**：合并净利润 "
+                     f"{_yi_from_yuan(item.get('net_profit_yuan'), unit)} ＋ 调节项 "
+                     f"{_yi_from_yuan(item.get('adjustments_yuan'), unit)} ＝ 经营现金流 "
+                     f"{_yi_from_yuan(item.get('cashflow_yuan'), unit)}"
+                     f"（未解释差额 {_yi_from_yuan(item.get('residual_yuan'), unit)}）")
+        lines.append(f"  - 分组：{comps}")
+    sup = diag.get("largest_support") or {}
+    drag = diag.get("largest_drag") or {}
+    if sup or drag:
+        lines.append("- **最大支撑/拖累（本期调节额）**")
+        if sup:
+            lines.append(f"  - 支撑：{sup.get('label')} "
+                         f"{_yi_from_yuan(sup.get('value'), unit)}"
+                         f"（{GROUP_NOTE.get(sup.get('group'), '')}）")
+        if drag:
+            lines.append(f"  - 拖累：{drag.get('label')} "
+                         f"{_yi_from_yuan(drag.get('value'), unit)}"
+                         f"（{GROUP_NOTE.get(drag.get('group'), '')}）")
+    gap = next((o for o in (run.outputs or [])
+                if o.metric == "cash_gap_change"), None)
+    if gap is not None:
+        comps = "、".join(f"{c.get('label')} {_yi_from_yuan(c.get('value'), unit)}"
+                         for c in (gap.components or ()))
+        lines.append(f"- **现金缺口变化（{gap.output_period}）**：{_yi_from_yuan(gap.value, unit)}"
+                     f" ＝ {comps}；缺口＝经营现金流−合并净利润，缺口缩小不等于现金变好")
+    if diag.get("closure_note"):
+        lines.append(f"- 说明：{diag['closure_note']}")
+    miss = diag.get("items_missing") or {}
+    if miss.get("cur"):
+        lines.append("- **待核查/补料**：本期未取到调节项 " + "、".join(map(str, miss["cur"])))
+    return lines
+
+
+GROUP_NOTE = {
+    "non_cash": "非现金项：折旧摊销/减值/递延税/公允价值等，不涉及当期现金收付",
+    "working_capital": "营运资本项：存货与经营性应收应付的增减",
+    "other": "其他调节项",
+}
 
 
 def render_operating_drivers_block(run) -> list[str]:

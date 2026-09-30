@@ -472,8 +472,9 @@ class TestCoreHasNoModelCalls(unittest.TestCase):
         # 注册表是**唯一入口**：这份清单就是"能被计划采用的模型"的完整集合
         # （L3 新增 profit_to_cash；清单变化必须是**显式**的，不接受"多出来的自动通过"）
         self.assertEqual([m.model_id for m in fa.specs()],
-                         ["profit_bridge", "operating_drivers", "cash_quality",
-                          "working_capital", "scenario_sensitivity", "profit_to_cash"])
+                         ["profit_bridge", "operating_drivers", "cash_reconciliation",
+                          "cash_quality", "working_capital", "scenario_sensitivity",
+                          "profit_to_cash"])
 
 
 class TestAnalysisRunStore(unittest.TestCase):
@@ -936,12 +937,17 @@ class TestDataAnalyzerTakesTheFinancialPath(unittest.TestCase):
         self._write_working_paper(_wc_rows())
         got = self._execute("分析利润变化归因、现金转化、营运资本周转与情景敏感性 [研究契约]")
         self.assertEqual(got["mode"], "financial")
-        self.assertEqual(got["status"], "success", got["plan"]["rejected"])
+        # U2 新增现金调节桥后规格变化：结构化底稿有归母净利与经营现金流，但**没有合并净利润**
+        # （那是现金流量表补充资料的起点）→ 该家族带"缺输入"被拒，状态如实 partial。
+        self.assertEqual(got["status"], "partial", got["plan"]["rejected"])
         self.assertEqual(set(got["plan"]["adopted"]),
                          {"profit_bridge", "operating_drivers", "cash_quality",
                           "working_capital", "scenario_sensitivity", "profit_to_cash"},
                          got["plan"]["rejected"])
-        self.assertEqual(got["plan"]["rejected"], [])
+        rej = {r["model_id"]: r for r in got["plan"]["rejected"]}
+        self.assertEqual(set(rej), {"cash_reconciliation"})
+        self.assertEqual(rej["cash_reconciliation"]["missing"], ["net_profit_consolidated"],
+                         "现金调节桥要合并净利润：缺它就拒，不拿归母净利冒充")
         self.assertEqual(got["dataset"]["entity_id"], "002304.SZ")
         self.assertIn("profit_bridge", got["plan"]["adopted"])
         self.assertNotIn("target", got, "金融路径不得再给'末列当目标'的结论")
@@ -984,10 +990,11 @@ class TestDataAnalyzerTakesTheFinancialPath(unittest.TestCase):
         # 运行记录必须落盘：正文/清单/ZIP 据此绑定同一次运行
         stored = json.loads((self.ws / "analysis_runs.json").read_text(encoding="utf-8"))
         self.assertEqual(len(stored["runs"]), len(got["runs"]))
-        # 缺口如实：载荷里没有占款字段（也没有营业成本）→ 营运资本与经营驱动被拒，
-        # 状态 partial 而不是 success（U1 新增家族：注册后同一份载荷多一条"缺输入"）
+        # 缺口如实：载荷里没有占款字段（也没有营业成本、没有合并净利润）→ 营运资本、经营驱动
+        # 与现金调节桥被拒，状态 partial 而不是 success（U2：注册后同一份载荷多一条"缺输入"）
         self.assertEqual(sorted(r["model_id"] for r in got["plan"]["rejected"]),
-                         ["operating_drivers", "working_capital"], got["plan"])
+                         ["cash_reconciliation", "operating_drivers", "working_capital"],
+                         got["plan"])
         self.assertEqual(got["status"], "partial", got["status"])
 
     def test_no_stored_contract_is_an_actionable_gap(self):
@@ -1219,13 +1226,16 @@ class TestCashQualityAndWorkingCapitalAndScenario(unittest.TestCase):
         self.assertEqual(run.status, C.RunStatus.NOT_COMPUTABLE, run.reason)
 
     # ── 注册表与计划 ──
-    def test_registry_lists_six_families_and_each_has_an_operator(self):
-        # U1（2026-10-01）：新增第六个家族 operating_drivers（经营驱动分解）。
+    def test_registry_lists_seven_families_and_each_has_an_operator(self):
+        # U1/U2（2026-10-01）：新增 operating_drivers（经营驱动分解）与
+        # cash_reconciliation（现金调节桥）。
         self.assertEqual([m.model_id for m in fa.specs()],
-                         ["profit_bridge", "operating_drivers", "cash_quality",
-                          "working_capital", "scenario_sensitivity", "profit_to_cash"])
+                         ["profit_bridge", "operating_drivers", "cash_reconciliation",
+                          "cash_quality", "working_capital", "scenario_sensitivity",
+                          "profit_to_cash"])
         self.assertEqual(set(fa.registry.operators()),
-                         {"profit_bridge_v1", "operating_drivers_v1", "cash_quality_v1",
+                         {"profit_bridge_v1", "operating_drivers_v1",
+                          "cash_reconciliation_v1", "cash_quality_v1",
                           "working_capital_v1", "scenario_v1", "profit_to_cash_v1"})
         for m in fa.specs():
             self.assertIn(m.operator, fa.registry.operators())
@@ -1239,10 +1249,13 @@ class TestCashQualityAndWorkingCapitalAndScenario(unittest.TestCase):
                          {"profit_bridge", "profit_to_cash", "cash_quality",
                           "scenario_sensitivity"})
         rej = {r["model_id"]: r for r in plan.rejected}
-        self.assertEqual(set(rej), {"operating_drivers", "working_capital"})
+        self.assertEqual(set(rej), {"operating_drivers", "cash_reconciliation",
+                                    "working_capital"})
         self.assertEqual(rej["operating_drivers"]["reason"], "缺输入")
         self.assertEqual(rej["operating_drivers"]["missing"], ["operating_cost"],
                          "经营驱动桥需要营业成本：缺它就拒，不拿毛利顶替")
+        self.assertEqual(rej["cash_reconciliation"]["missing"], ["net_profit_consolidated"],
+                         "现金调节桥需要合并净利润（补充资料的起点）")
         self.assertEqual(rej["working_capital"]["reason"], "缺输入")
         self.assertEqual(set(plan.question_types),
                          {"profit_attribution", "cash_conversion", "working_capital",
@@ -1565,9 +1578,15 @@ class TestR1BComponentwiseValidation(unittest.TestCase):
         self.assertFalse(res["ok"], res)
 
     def test_declared_component_ids_have_an_independent_path(self):
-        """契约完整性：声明了 component_ids 的模型必须有 `components_gold` 且 id 一致。"""
+        """契约完整性：声明了 component_ids 的模型必须有 `components_gold` 且 id 一致。
+
+        U2：这条检查只对**输入齐备**的模型适用（本夹具没有合并净利润，现金调节桥在这里
+        不可用；用 `available_for` 判，而不是把不可用的模型也算进来）。
+        """
         ds = _dataset(_wc_rows())
-        declared = {m.model_id: m.component_ids for m in fa.specs() if m.component_ids}
+        usable = set(fa.registry.available_for(ds))
+        declared = {m.model_id: m.component_ids for m in fa.specs()
+                    if m.component_ids and m.model_id in usable}
         self.assertTrue(declared, "至少利润桥与情景要声明分项")
         for model_id, ids in declared.items():
             spec = fa.registry.spec(model_id)
@@ -2443,6 +2462,126 @@ class TestOperatingDriversYanghe(unittest.TestCase):
                 want, _unit = expect[metric][cid]
                 self.assertAlmostEqual(got[cid], float(want), places=2,
                                        msg=f"{metric}.{cid}")
+
+
+class TestCashReconciliationYanghe(unittest.TestCase):
+    """U2：现金调节桥用**洋河 2024 年报补充资料真实数**验收（合并净利润→经营现金流）。"""
+
+    CF = {
+        "net_profit_consolidated": (10_020_768_556.47, 6_666_455_819.96),
+        "operating_cashflow": (6_130_220_867.96, 4_628_711_237.28),
+        "asset_impairment_provision": (1_946_634.92, 10_535_947.80),
+        "depreciation": (639_335_568.28, 586_592_227.18),
+        "right_of_use_depreciation": (27_594_763.53, 32_397_883.52),
+        "intangible_amortization": (59_054_597.55, 61_305_706.85),
+        "long_term_prepaid_amortization": (4_026_169.92, 17_125_968.18),
+        "disposal_long_asset_loss": (8_522_287.93, 37_268_976.98),
+        "fixed_asset_scrap_loss": (1_853_533.74, 2_980_288.23),
+        "fair_value_change_loss": (37_082_477.77, 396_164_080.43),
+        "finance_expense_adjust": (2_617_344.74, -672_316.24),
+        "investment_loss": (-255_520_777.61, -146_415_168.80),
+        "deferred_tax_asset_decrease": (180_381_423.47, 83_804_944.67),
+        "deferred_tax_liability_increase": (6_857_126.34, -123_993_077.06),
+        "inventory_decrease": (-1_226_697_174.83, -843_101_567.99),
+        "operating_receivable_decrease": (380_090_873.53, -651_364_248.55),
+        "operating_payable_increase": (-3_582_948_946.71, -1_830_670_724.59),
+        "other_cashflow_adjustments": (-174_743_591.08, 330_296_496.71),
+    }
+
+    def _dataset(self, *, drop=()):
+        rows = []
+        for metric, (prev, cur) in self.CF.items():
+            if metric in drop:
+                continue
+            rows.append(_row(metric, "2023年", prev, unit="元",
+                             fact_id=f"cf-{metric}-2023"))
+            rows.append(_row(metric, "2024年", cur, unit="元",
+                             fact_id=f"cf-{metric}-2024"))
+        return fa.freeze_from_facts(rows, periods=(2023, 2024), entity="洋河股份",
+                                    entity_id="002304.SZ", as_of="2025-04-30",
+                                    source_label="test:cash")
+
+    def _run(self, **kw):
+        return fa.run("cash_reconciliation", self._dataset(**kw))
+
+    def _yi(self, run, metric):
+        out = next(o for o in run.outputs if o.metric == metric)
+        return out.value / 1e8
+
+    def test_closes_exactly_with_the_disclosed_schedule(self):
+        run = self._run()
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        self.assertEqual(run.validation["failed"], [])
+        cur = next(o for o in run.outputs
+                   if o.metric == "operating_cashflow_reconciliation_cur")
+        comp = {c["component_id"]: c["value"] / 1e8 for c in cur.components}
+        self.assertAlmostEqual(comp["consolidated_net_profit"], 66.6646, places=3)
+        self.assertAlmostEqual(comp["non_cash_adjustments"], 9.5710, places=3)
+        self.assertAlmostEqual(comp["working_capital_adjustments"], -33.2514, places=3)
+        self.assertAlmostEqual(comp["other_adjustments"], 3.3030, places=3)
+        self.assertEqual(comp["unexplained_residual"], 0.0,
+                         "披露调节项齐全时对账差额必须为 0")
+        self.assertAlmostEqual(cur.value / 1e8, 46.2871, places=3)
+        # 2023 同样闭合
+        prev = next(o for o in run.outputs
+                    if o.metric == "operating_cashflow_reconciliation_prev")
+        comp_p = {c["component_id"]: c["value"] / 1e8 for c in prev.components}
+        self.assertEqual(comp_p["unexplained_residual"], 0.0)
+        self.assertAlmostEqual(prev.value / 1e8, 61.3022, places=3)
+
+    def test_largest_support_and_drag_and_gap_change(self):
+        run = self._run()
+        sup = next(o for o in run.outputs if o.metric == "largest_support")
+        drag = next(o for o in run.outputs if o.metric == "largest_drag")
+        self.assertAlmostEqual(sup.value / 1e8, 5.8659, places=3, msg="折旧是最大支撑")
+        self.assertAlmostEqual(drag.value / 1e8, -18.3067, places=3,
+                               msg="经营性应付减少是最大拖累")
+        gap = next(o for o in run.outputs if o.metric == "cash_gap_change")
+        self.assertAlmostEqual(gap.value / 1e8, 18.5280, places=3)
+        comp = {c["component_id"]: c["value"] / 1e8 for c in gap.components}
+        self.assertAlmostEqual(comp["change_in_net_profit"]
+                               + comp["change_in_adjustments"],
+                               gap.value / 1e8, places=2)
+        diag = run.outputs[0].diagnostics
+        self.assertEqual(diag["largest_support"]["metric"], "depreciation")
+        self.assertEqual(diag["largest_drag"]["metric"], "operating_payable_increase")
+        self.assertEqual(diag["items_missing"]["cur"], [])
+
+    def test_missing_items_stay_in_residual_not_allocated(self):
+        run = self._run(drop=("depreciation", "inventory_decrease",
+                              "operating_payable_increase"))
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        cur = next(o for o in run.outputs
+                   if o.metric == "operating_cashflow_reconciliation_cur")
+        comp = {c["component_id"]: c["value"] / 1e8 for c in cur.components}
+        self.assertNotEqual(comp["unexplained_residual"], 0.0,
+                            "缺项时差额必须留在未解释段，不得摊派")
+        self.assertAlmostEqual(comp["working_capital_adjustments"], -6.5136, places=3,
+                               msg="只留下了经营性应收项目（存货与应付未取到）")
+        diag = run.outputs[0].diagnostics
+        self.assertIn("depreciation", diag["items_missing"]["cur"])
+
+    def test_tampered_groups_fail_independent_validation(self):
+        from financial_analysis.operators import cash_reconciliation as cr
+        ds = self._dataset()
+        payload = cr.compute(ds)
+        cur = next(o for o in payload["outputs"]
+                   if o["metric"] == "operating_cashflow_reconciliation_cur")
+        # 组间挪 1 亿元：合计不变、分项被换 → 逐项核对必失败
+        cur["components"][1]["value"] += 100_000_000.0
+        cur["components"][2]["value"] -= 100_000_000.0
+        res = fa.validation.validate_output(fa.registry.spec("cash_reconciliation"),
+                                            ds, payload)
+        self.assertFalse(res["ok"], "分组被换而合计不变：必须失败")
+        self.assertIn("components", res["failed"])
+
+    def test_card_and_brief_block_carry_the_cash_bridge(self):
+        from financial_analysis import store as fa_store
+        run = self._run()
+        block = fa_store.render_card_block(run)
+        for needle in ("净利润→经营现金流", "亿元", "最大支撑/拖累", "营运资本项",
+                       "缺口", "对账差额"):
+            self.assertIn(needle, block, f"现金调节正文缺「{needle}」")
 
 
 if __name__ == "__main__":
