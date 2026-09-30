@@ -2545,7 +2545,9 @@ class TestCashReconciliationYanghe(unittest.TestCase):
         diag = run.outputs[0].diagnostics
         self.assertEqual(diag["largest_support"]["metric"], "depreciation")
         self.assertEqual(diag["largest_drag"]["metric"], "operating_payable_increase")
-        self.assertEqual(diag["items_missing"]["cur"], [])
+        # U3：三一那版单列「信用减值损失/使用权资产摊销」，本夹具（洋河）没有这两行 →
+        # 如实列在 missing 里；**判据是对账差额为 0**（上面已断言），不是"missing 必须为空"。
+        self.assertIn("credit_impairment_provision", diag["items_missing"]["cur"])
 
     def test_missing_items_stay_in_residual_not_allocated(self):
         run = self._run(drop=("depreciation", "inventory_decrease",

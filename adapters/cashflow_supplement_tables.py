@@ -18,6 +18,7 @@ import hashlib
 import re
 
 from .annual_financial_tables import line_offset, norm_lines, page_of, parse_number
+from .operating_detail_tables import unit_line_scale
 
 ANCHOR = "将净利润调节为经营活动现金流量"
 STOP_MARKERS = ("不涉及现金收支", "现金及现金等价物净变动", "现金的期末余额",
@@ -26,9 +27,13 @@ STOP_MARKERS = ("不涉及现金收支", "现金及现金等价物净变动", "�
 # 披露标签 → slug（按会计含义分组由算子声明，这里只做标签映射）
 LABELS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("asset_impairment_provision", ("资产减值准备",)),
+    # 三一那版把这两项单列且用不同措辞：`信用减值损失`（调节表的**加回项**，与利润表的
+    # `credit_impairment` 不是同一条事实）、`使用权资产摊销`（洋河写"折旧"）。
+    # 不映射这两项时三一的对账差额恰好等于它们之和（实测 2024 差 9.99 亿、2023 差 13.51 亿）。
+    ("credit_impairment_provision", ("信用减值损失",)),
     ("depreciation", ("固定资产折旧、油气资产折耗、生产性生物资产折旧",
                       "固定资产折旧、油气资产折耗、生产性生物资产折旧")),
-    ("right_of_use_depreciation", ("使用权资产折旧",)),
+    ("right_of_use_depreciation", ("使用权资产折旧", "使用权资产摊销")),
     ("intangible_amortization", ("无形资产摊销",)),
     ("long_term_prepaid_amortization", ("长期待摊费用摊销",)),
     ("disposal_long_asset_loss", ("处置固定资产、无形资产和其他长期资产的损失",)),
@@ -133,6 +138,14 @@ def extract_cashflow_supplement(doc: dict, *, company: str = "",
 
     _pair_res = _pair(start)
     pair, period_source = (_pair_res if _pair_res else (None, ""))
+    # 金额单位：三一那版整份报告用"千元"（表头前一行写 `单位：千元 币种：人民币`）。
+    # 不读单位就会把千元当元（实测：调节项比经营现金流小三个数量级，对账差额 87 亿）。
+    unit_src, scale = unit_line_scale(lines, start)
+    if not scale:
+        return {"ok": False, "facts": [], "cross_checks": [], "periods": pair,
+                "rejected": [{"metric": "*", "reason": "unit_unknown",
+                              "detail": "补充资料表上方找不到金额单位（元/千元/万元）：不取"}],
+                "text_hash": text_hash}
     i = start + 1
     pending: list[str] = []            # 折行标签的前半段（如"固定资产折旧、油气资产折"）
     while i < len(lines):
@@ -195,10 +208,11 @@ def extract_cashflow_supplement(doc: dict, *, company: str = "",
                 "period": per, "period_kind": "flow",
                 "period_label": f"{per}（现金流量表补充资料）",
                 "currency": "CNY", "unit": "元", "caliber": "合并",
-                "value": val, "page": _page(i), "line": i, "source_line": src_line,
+                "value": float(val) * scale, "raw_value": float(val),
+                "unit_raw": unit_src, "page": _page(i), "line": i, "source_line": src_line,
                 "quote": src_line, "source_hash": text_hash,
                 "verify_state": "verified",
-                "unit_source": "现金流量表补充资料表头（元）",
+                "unit_source": f"现金流量表补充资料表头：{unit_src}（已换算为元）",
                 "caliber_source": "合并现金流量表附注（补充资料）",
                 "sign_convention": "照抄披露符号（表内已注明“增加/减少以“－”号填列”）",
                 "period_source": period_source,

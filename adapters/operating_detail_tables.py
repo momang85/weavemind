@@ -59,6 +59,27 @@ def _years_above(lines: list[str], idx: int, *, window: int = 40) -> list[str]:
     return []
 
 
+def _strip(text: str) -> str:
+    """去掉小节编号/行项目标记（`(1). `、`1、`、`其中：`），只留标签本体。"""
+    s = str(text or "").strip()
+    s = re.sub(r"^[（(]?\d+[）)]?\s*[、.．]?\s*", "", s)
+    return re.sub(r"^(?:其中|加|减|其他|其它)\s*[:：]\s*", "", s)
+
+
+def unit_line_scale(lines: list[str], idx: int, *, window: int = 40) -> tuple[str, float]:
+    """向上找最近的 `单位：X` 行 → `(单位原文, 缩放)`；找不到返回 `("", 0.0)`（不猜）。
+
+    三一那版分段表给的是**本期绝对值 + 同比**，金额单位写在表头前的 `单位：千元 币种：人民币`，
+    与报表同一套换算（千元→元）。单位取不到就不取数（宁可拒绝，也不把千元当元）。
+    """
+    for j in range(idx, max(-1, idx - window), -1):
+        m = re.search(r"单位\s*[:：]\s*(元|万元|千元|百万元)", lines[j])
+        if m:
+            unit = m.group(1)
+            return unit, _SCALE.get(unit, 0.0)
+    return "", 0.0
+
+
 def _label_and_nums(line: str, want: int) -> tuple[str, list]:
     parts = str(line).split()
     if len(parts) < 2:
@@ -70,6 +91,11 @@ def _label_and_nums(line: str, want: int) -> tuple[str, list]:
 
 
 _UNIT_TOKENS = ("吨", "千升", "万元", "元")
+# 金额单位 → 换算到元（与 annual_financial_tables 同一套口径）
+_SCALE = {"元": 1.0, "千元": 1000.0, "万元": 10000.0, "百万元": 1000000.0}
+# 「分行业 营业收入 营业成本 毛利率」这种**小节名与表头同行**的写法（三一/CSCR 常见）
+_SECTION_HEADER_RE = re.compile(
+    r"^(分行业|分产品|分地区|分销售模式)\s+营业收入\s+营业成本\s+毛利率")
 
 
 def _unit_of(tokens: list[str]) -> str:
@@ -165,15 +191,26 @@ def extract_operating_detail(doc: dict, *, company: str = "", company_code: str 
 
     def _period_pair(idx: int) -> tuple[str, str] | None:
         ys = _years_above(lines, idx)
-        if len(ys) != 2:
-            _rej("no_year_header", idx, "该表上方找不到两个年份（不猜期间）")
-            return None
-        pair = (f"{ys[0]}年", f"{ys[1]}年")
-        if want_years and not {ys[0], ys[1]} <= want_years:
-            _rej("period_not_requested", idx,
-                 f"表头年份 {pair} 不在请求期间 {want}（不穿越历史截止）")
-            return None
-        return pair
+        if len(ys) == 2:
+            pair = (f"{ys[0]}年", f"{ys[1]}年")
+            if want_years and not {ys[0], ys[1]} <= want_years:
+                _rej("period_not_requested", idx,
+                     f"表头年份 {pair} 不在请求期间 {want}（不穿越历史截止）")
+                return None
+            return pair
+        # 表头只写"比上年增减"（三一/部分 CSCR 版面：列说明可能在表头**下方**几行）
+        # → 用请求期间映射：本期=最新一期
+        for j in list(range(idx, max(-1, idx - 20), -1)) + list(
+                range(idx + 1, min(len(lines), idx + 12))):
+            ln = lines[j]
+            if "比上年增减" in ln or "比上年同期" in ln or (
+                    "本期" in ln and "上期" in ln):
+                yrs = sorted({y for p in want for y in _YEAR_RE.findall(p)})
+                if len(yrs) == 2:
+                    return (f"{yrs[0]}年", f"{yrs[1]}年")
+                break
+        _rej("no_year_header", idx, "该表上方找不到两个年份（不猜期间）")
+        return None
 
     section_of: dict[str, str] = {}
     seen_pct_table: set[str] = set()
@@ -222,8 +259,11 @@ def extract_operating_detail(doc: dict, *, company: str = "", company_code: str 
                     j += 1
                 i = j
                 continue
-        # ② 10% 以上表（本期收入/成本绝对值 + 同比）
-        if all(k in line for k in _HDR_COST_MARGIN) and "营业收入" in line:
+        # ② 10% 以上表（本期收入/成本绝对值 + 同比）。**排除**"小节名与表头同行"的写法：
+        #    三一那版 `分产品 营业收入 营业成本 毛利率` 会先命中这里，但它的百分比列**不带 %**
+        #    （`26.63` 而不是 `26.63%`），按本分支的百分比校验会被整行跳过 → 交给 ④ 处理。
+        if (all(k in line for k in _HDR_COST_MARGIN) and "营业收入" in line
+                and not _SECTION_HEADER_RE.match(_strip(line))):
             pair = _period_pair(i)
             if pair:
                 cur_p = pair[1]
@@ -278,6 +318,76 @@ def extract_operating_detail(doc: dict, *, company: str = "", company_code: str 
                     j += 1
                 i = j
                 continue
+        # ④ 「小节名+表头同行」型：`分产品 营业收入 营业成本 毛利率` + 「本期绝对值 + 同比」行
+        #    （三一/CSCR 常见；金额单位写在表头前的 `单位：千元`）。上期按披露同比反推。
+        m_hdr = _SECTION_HEADER_RE.match(_strip(line))
+        if m_hdr:
+            section = m_hdr.group(1)
+            unit_src, scale = unit_line_scale(lines, i)
+            if not scale:
+                _rej("unit_unknown", i, "该分段表上方找不到金额单位（千元/万元/元）：不取")
+                i += 1
+                continue
+            pair = _period_pair(i)
+            if not pair:
+                i += 1
+                continue
+            prev_p, cur_p = pair
+            j = i + 1
+            while j < len(lines):
+                ln = lines[j].strip()
+                if not ln or _SECTION_HEADER_RE.match(_strip(ln)):
+                    if ln and _SECTION_HEADER_RE.match(_strip(ln)):
+                        break
+                    j += 1
+                    continue
+                if (ln.startswith("主营业务") or ln.startswith("产销量")
+                        or re.match(r"^[（(]\d+[）)]", ln)):
+                    break
+                if unit_line_scale(lines, j, window=3)[1]:
+                    j += 1
+                    continue
+                nums = _numbers(ln)
+                label = ln.split()[0] if ln.split() else ""
+                if label and len(nums) >= 5 and nums[0][0] is not None:
+                    r_cur, c_cur, m_cur, yoy_r, yoy_c = (nums[0][0], nums[1][0],
+                                                         nums[2][0], nums[3][0],
+                                                         nums[4][0])
+                    if not (m_cur and yoy_r and yoy_c and nums[0][1] is False):
+                        j += 1
+                        continue
+                    cal = f"{section}:{label}"
+                    cur_ids = []
+                    for metric, val in (("revenue", r_cur), ("operating_cost", c_cur)):
+                        f_ = _fact(doc=doc, text_hash=text_hash, entity=company,
+                                   entity_id=company_code, metric=metric,
+                                   period=cur_p, value=float(val) * scale, unit="元",
+                                   caliber=cal, idx=j, line=ln, label="主营业务",
+                                   page=_page(j))
+                        f_["unit_source"] = f"分段表表头单位：{unit_src}（已换算为元）"
+                        _push(f_, bucket=cost_facts)
+                        cur_ids.append(f_["fact_id"])
+                    for metric, val_cur, yoy in (("revenue", r_cur, yoy_r),
+                                                 ("operating_cost", c_cur, yoy_c)):
+                        if not yoy:
+                            continue
+                        base = 1 + float(yoy) / 100.0
+                        if base <= 0:
+                            _rej("yoy_not_invertible", j,
+                                 f"{metric} 同比 {yoy}% 无法反推上期值")
+                            continue
+                        d = _fact(doc=doc, text_hash=text_hash, entity=company,
+                                  entity_id=company_code, metric=metric,
+                                  period=prev_p, value=float(val_cur) / base * scale,
+                                  unit="元", caliber=cal, idx=j, line=ln,
+                                  label="主营业务（上期由同比推算）",
+                                  page=_page(j), derived_from=tuple(cur_ids),
+                                  formula_version="yoy_inverse/1.0")
+                        d["unit_source"] = f"分段表表头单位：{unit_src}（已换算为元）"
+                        _push(d, bucket=cost_facts)
+                j += 1
+            i = j
+            continue
         # ③ 实物销售表：产品名行 + 「销售量 吨 本期 上期 同比」
         if line in ("白酒", "红酒", "啤酒", "其他酒类"):
             volume_product = line

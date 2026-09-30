@@ -29,8 +29,10 @@ IMPL_VERSION = "cash_reconciliation/1.0.0"
 # 披露项目 → (标签, 分组)。分组是**声明的**会计含义，不随披露有无而变。
 ADJUSTMENT_ITEMS: tuple[tuple[str, str, str], ...] = (
     ("asset_impairment_provision", "资产减值准备", "non_cash"),
+    # 三一那版单列"信用减值损失"（调节表的加回项；利润表里另有 credit_impairment）
+    ("credit_impairment_provision", "信用减值损失（调节项）", "non_cash"),
     ("depreciation", "固定资产折旧、油气资产折耗、生产性生物资产折旧", "non_cash"),
-    ("right_of_use_depreciation", "使用权资产折旧", "non_cash"),
+    ("right_of_use_depreciation", "使用权资产折旧/摊销", "non_cash"),
     ("intangible_amortization", "无形资产摊销", "non_cash"),
     ("long_term_prepaid_amortization", "长期待摊费用摊销", "non_cash"),
     ("disposal_long_asset_loss", "处置长期资产的损失", "non_cash"),

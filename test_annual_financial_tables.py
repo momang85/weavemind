@@ -662,5 +662,92 @@ class TestCashflowSupplementTables(unittest.TestCase):
         self.assertEqual(out["rejected"][0]["reason"], "no_supplement_table")
 
 
+_SANY_SEGMENT_TEXT = """三一重工股份有限公司2024年年度报告
+2、 收入和成本分析
+(1). 主营业务分行业、分产品、分地区、分销售模式情况
+单位：千元 币种：人民币
+主营业务分行业情况
+分行业 营业收入 营业成本 毛利率
+(%)
+营业收入
+比上年增
+减(%)
+营业成本
+比上年增
+减(%)
+毛利率比上年增减
+(%)
+工程机械行业 75,831,195 55,640,721 26.63 6.03 5.36 增加0.47个百分点
+主营业务分产品情况
+分产品 营业收入 营业成本 毛利率
+(%)
+营业收入
+比上年增
+减(%)
+营业成本
+比上年增
+减(%)
+毛利率比上年增减
+(%)
+混凝土机械 14,368,034 11,420,461 20.51 -6.18 -4.81 减少1.15个百分点
+挖掘机械 30,373,600 20,707,554 31.82 9.91 8.37 增加0.96个百分点
+主营业务分行业、分产品、分地区、分销售模式情况的说明
+无
+"""
+
+
+class TestSanyStyleSegmentTable(unittest.TestCase):
+    """U3（2026-10-01）：三一那版分段表（小节名与表头同行、百分比不带 %、单位千元）。
+
+    此前这类表**一条也取不到**：`分产品 营业收入 营业成本 毛利率` 先命中了"10% 以上表"分支，
+    而那一支要求百分比带 `%`，于是整行被静默跳过；金额单位写在表头前的 `单位：千元` 也无人读。
+    """
+
+    def _out(self, text=_SANY_SEGMENT_TEXT, periods=(2023, 2024)):
+        return aft_odt.extract_operating_detail(_doc(text), company="三一重工",
+                                               company_code="600031.SH",
+                                               periods=periods)
+
+    def test_values_are_scaled_to_yuan_and_prior_year_derived(self):
+        out = self._out()
+        self.assertTrue(out["ok"], out["rejected"])
+        by = {(f["metric"], f["period"], f["caliber"]): f for f in out["facts"]}
+        rev = by[("revenue", "2024年", "分产品:混凝土机械")]
+        self.assertAlmostEqual(rev["value"], 14_368_034_000.0,
+                               msg="千元 ×1000 换算为元")
+        self.assertEqual(rev["unit"], "元")
+        self.assertIn("千元", rev["unit_source"])
+        cost = by[("operating_cost", "2024年", "分产品:挖掘机械")]
+        self.assertAlmostEqual(cost["value"], 20_707_554_000.0)
+        prev = by[("revenue", "2023年", "分产品:混凝土机械")]
+        self.assertAlmostEqual(prev["value"], 14_368_034_000.0 / (1 - 0.0618), places=0)
+        self.assertTrue(prev["derived_from"], "上期按披露同比反推，必须带血缘")
+        self.assertEqual(prev["formula_version"], "yoy_inverse/1.0")
+        self.assertIn(("revenue", "2024年", "分行业:工程机械行业"), by)
+
+    def test_missing_unit_line_yields_nothing(self):
+        out = self._out(_SANY_SEGMENT_TEXT.replace("单位：千元 币种：人民币\n", ""))
+        self.assertFalse(out["ok"])
+        self.assertEqual(out["facts"], [])
+        self.assertTrue(any(r["reason"] in ("unit_unknown", "no_operating_detail_found")
+                            for r in out["rejected"]), out["rejected"])
+
+
+class TestCashflowSupplementAliases(unittest.TestCase):
+    """U3：三一那版补充资料单列「信用减值损失 / 使用权资产摊销」，标签必须能对上。"""
+
+    def test_sany_wording_is_mapped(self):
+        text = _CF_SUPPLEMENT_TEXT.replace(
+            "加：资产减值准备 1.00 2.00",
+            "加：资产减值准备 1.00 2.00\n信用减值损失 0.50 0.40\n"
+            "使用权资产摊销 0.30 0.20")
+        out = aft_cfst.extract_cashflow_supplement(_doc(text), company="三一重工",
+                                                  company_code="600031.SH",
+                                                  periods=(2023, 2024))
+        by = {(f["metric"], f["period"]): f["value"] for f in out["facts"]}
+        self.assertAlmostEqual(by[("credit_impairment_provision", "2024年")], 0.5)
+        self.assertAlmostEqual(by[("right_of_use_depreciation", "2024年")], 0.3)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

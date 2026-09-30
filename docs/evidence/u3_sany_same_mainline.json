@@ -1,0 +1,852 @@
+{
+  "batch": "U3",
+  "case": "同一主线复制到三一重工（并与洋河对照）",
+  "cases": {
+    "洋河股份": {
+      "entity_id": "002304.SZ",
+      "facts": {
+        "total": 162,
+        "metrics": [
+          "accounts_payable",
+          "accounts_receivable",
+          "admin_expense",
+          "asset_disposal_income",
+          "asset_impairment",
+          "asset_impairment_provision",
+          "credit_impairment",
+          "deferred_tax_asset_decrease",
+          "deferred_tax_liability_increase",
+          "depreciation",
+          "disposal_long_asset_loss",
+          "fair_value_change",
+          "fair_value_change_loss",
+          "finance_expense",
+          "finance_expense_adjust",
+          "fixed_asset_scrap_loss",
+          "gross_profit",
+          "income_tax_expense",
+          "intangible_amortization",
+          "inventory",
+          "inventory_decrease",
+          "investment_income",
+          "investment_loss",
+          "long_term_prepaid_amortization",
+          "minority_interest",
+          "net_profit",
+          "net_profit_consolidated",
+          "non_operating_expense",
+          "non_operating_income",
+          "operating_cashflow",
+          "operating_cost",
+          "operating_payable_increase",
+          "operating_receivable_decrease",
+          "other_cashflow_adjustments",
+          "other_income",
+          "rd_expense",
+          "revenue",
+          "right_of_use_depreciation",
+          "sales_volume",
+          "selling_expense",
+          "taxes_and_surcharges",
+          "total_assets",
+          "total_liabilities",
+          "total_revenue"
+        ],
+        "segments": 36,
+        "segment_calibers": [
+          "分产品:其他",
+          "分产品:白酒",
+          "分产品:红酒",
+          "分地区:省内",
+          "分地区:省外",
+          "分行业:其他业务",
+          "分行业:酒类行业",
+          "分销售模式:其他",
+          "分销售模式:批发经销",
+          "分销售模式:线上直销"
+        ],
+        "supplement_facts": 32,
+        "supplement_ok": true,
+        "supplement_rejected": [],
+        "detail_ok": true,
+        "detail_duplicates": [
+          "sales_volume 2024年 分产品:白酒（同一披露重复，已去重）",
+          "sales_volume 2023年 分产品:白酒（同一披露重复，已去重）",
+          "revenue 2024年 分行业:酒类行业（同分段另有含成本的主营业务口径，取后者以保证同源）"
+        ]
+      },
+      "dataset": {
+        "periods": [
+          "2023年",
+          "2024年"
+        ],
+        "observations": 162,
+        "usable": 158,
+        "conflicts": 2,
+        "dataset_hash": "41c9da01f9d93ea49d8eed58d3740f05ff3a6d1ee358dcabccd36a2f595847d7"
+      },
+      "models": {
+        "operating_drivers": {
+          "status": "validated",
+          "validation_failed": [],
+          "outputs": {
+            "net_profit_change": -3342541438.15,
+            "gross_profit_change": -3800953659.19,
+            "revenue_scale_effect": -3153542030.82,
+            "gross_margin_effect": -647411628.37,
+            "below_gross_line_change": 458412221.04,
+            "net_profit_change_detail": 458412221.04,
+            "gross_profit_change_by_segment": -3800953659.19,
+            "volume_price_decomposition": -4213886188.01
+          },
+          "segments_used": [
+            "分产品:白酒",
+            "分地区:省内",
+            "分地区:省外",
+            "分行业:酒类行业",
+            "分销售模式:批发经销",
+            "分销售模式:线上直销"
+          ],
+          "segments_skipped": [
+            "分产品:其他:两期收入/成本不全",
+            "分产品:红酒:两期收入/成本不全",
+            "分行业:其他业务:两期收入/成本不全",
+            "分销售模式:其他:两期收入/成本不全",
+            "合并:与母公司报表同口径（不是分段切法）",
+            "母公司:报表范围而不是分段维度（并表范围另有其表）"
+          ],
+          "volume_price_caliber": "分产品:白酒",
+          "unexplained_residual_yuan": 0.0,
+          "alternative_explanations": {
+            "effective_tax_rate": {
+              "prev": 0.24187508904068716,
+              "cur": 0.27087389692832636,
+              "delta_pp": 2.8998807887639226,
+              "note": "实际税率＝所得税费用／（合并净利润＋所得税费用）"
+            },
+            "tax_at_prior_rate": {
+              "actual_yuan": 2476620791.72,
+              "at_prior_rate_yuan": 2211482469.5559244,
+              "rate_effect_yuan": 265138322.1640757,
+              "note": "按上年实际税率折算本年的反事实：所得税的“贡献”里有多少只是利润下滑的被动结果"
+            },
+            "non_operating_items": {
+              "fair_value_change": {
+                "label": "公允价值变动收益",
+                "contribution_yuan": -359081602.66,
+                "note": "非经营/非经常因素：不得并入经营判断"
+              },
+              "investment_income": {
+                "label": "投资收益",
+                "contribution_yuan": -109105608.81,
+                "note": "非经营/非经常因素：不得并入经营判断"
+              }
+            },
+            "structure_vs_price": "分段与均价都是**同一口径的分解**：均价由「该口径收入/销量」算出，含产品结构混合，不能直接命名“提价效果”；分产品/分行业/分地区/分销售模式是不同切法，不可相加"
+          },
+          "components": {
+            "net_profit_change": [
+              {
+                "component_id": "gross_profit_change",
+                "value": -3800953659.19
+              },
+              {
+                "component_id": "below_gross_line_change",
+                "value": 458412221.04
+              }
+            ],
+            "gross_profit_change": [
+              {
+                "component_id": "revenue_scale_effect",
+                "value": -3153542030.82
+              },
+              {
+                "component_id": "gross_margin_effect",
+                "value": -647411628.37
+              }
+            ]
+          }
+        },
+        "cash_reconciliation": {
+          "status": "validated",
+          "validation_failed": [],
+          "outputs": {
+            "operating_cashflow_reconciliation_cur": 4628711237.28,
+            "cash_gap_change": 1852803105.83,
+            "largest_support": 586592227.18,
+            "largest_drag": -1830670724.59
+          },
+          "reconciliation": {
+            "2024年": {
+              "net_profit_yuan": 6666455819.96,
+              "cashflow_yuan": 4628711237.28,
+              "adjustments_yuan": -2037744582.68,
+              "residual_yuan": 0.0,
+              "groups": {
+                "non_cash": 957095461.74,
+                "working_capital": -3325136541.13,
+                "other": 330296496.71
+              },
+              "items": [
+                {
+                  "metric": "asset_impairment_provision",
+                  "label": "资产减值准备",
+                  "group": "non_cash",
+                  "value_yuan": 10535947.8
+                },
+                {
+                  "metric": "depreciation",
+                  "label": "固定资产折旧、油气资产折耗、生产性生物资产折旧",
+                  "group": "non_cash",
+                  "value_yuan": 586592227.18
+                },
+                {
+                  "metric": "right_of_use_depreciation",
+                  "label": "使用权资产折旧/摊销",
+                  "group": "non_cash",
+                  "value_yuan": 32397883.52
+                },
+                {
+                  "metric": "intangible_amortization",
+                  "label": "无形资产摊销",
+                  "group": "non_cash",
+                  "value_yuan": 61305706.85
+                },
+                {
+                  "metric": "long_term_prepaid_amortization",
+                  "label": "长期待摊费用摊销",
+                  "group": "non_cash",
+                  "value_yuan": 17125968.18
+                },
+                {
+                  "metric": "disposal_long_asset_loss",
+                  "label": "处置长期资产的损失",
+                  "group": "non_cash",
+                  "value_yuan": 37268976.98
+                },
+                {
+                  "metric": "fixed_asset_scrap_loss",
+                  "label": "固定资产报废损失",
+                  "group": "non_cash",
+                  "value_yuan": 2980288.23
+                },
+                {
+                  "metric": "fair_value_change_loss",
+                  "label": "公允价值变动损失",
+                  "group": "non_cash",
+                  "value_yuan": 396164080.43
+                },
+                {
+                  "metric": "finance_expense_adjust",
+                  "label": "财务费用（调节项）",
+                  "group": "non_cash",
+                  "value_yuan": -672316.24
+                },
+                {
+                  "metric": "investment_loss",
+                  "label": "投资损失（调节项）",
+                  "group": "non_cash",
+                  "value_yuan": -146415168.8
+                },
+                {
+                  "metric": "deferred_tax_asset_decrease",
+                  "label": "递延所得税资产减少",
+                  "group": "non_cash",
+                  "value_yuan": 83804944.67
+                },
+                {
+                  "metric": "deferred_tax_liability_increase",
+                  "label": "递延所得税负债增加",
+                  "group": "non_cash",
+                  "value_yuan": -123993077.06
+                },
+                {
+                  "metric": "inventory_decrease",
+                  "label": "存货的减少（增加以“－”号填列）",
+                  "group": "working_capital",
+                  "value_yuan": -843101567.99
+                },
+                {
+                  "metric": "operating_receivable_decrease",
+                  "label": "经营性应收项目的减少（增加以“－”号填列）",
+                  "group": "working_capital",
+                  "value_yuan": -651364248.55
+                },
+                {
+                  "metric": "operating_payable_increase",
+                  "label": "经营性应付项目的增加（减少以“－”号填列）",
+                  "group": "working_capital",
+                  "value_yuan": -1830670724.59
+                },
+                {
+                  "metric": "other_cashflow_adjustments",
+                  "label": "其他（调节项）",
+                  "group": "other",
+                  "value_yuan": 330296496.71
+                }
+              ]
+            },
+            "2023年": {
+              "net_profit_yuan": 10020768556.47,
+              "cashflow_yuan": 6130220867.96,
+              "adjustments_yuan": -3890547688.51,
+              "residual_yuan": 0.0,
+              "groups": {
+                "non_cash": 713751150.58,
+                "working_capital": -4429555248.01,
+                "other": -174743591.08
+              },
+              "items": [
+                {
+                  "metric": "asset_impairment_provision",
+                  "label": "资产减值准备",
+                  "group": "non_cash",
+                  "value_yuan": 1946634.92
+                },
+                {
+                  "metric": "depreciation",
+                  "label": "固定资产折旧、油气资产折耗、生产性生物资产折旧",
+                  "group": "non_cash",
+                  "value_yuan": 639335568.28
+                },
+                {
+                  "metric": "right_of_use_depreciation",
+                  "label": "使用权资产折旧/摊销",
+                  "group": "non_cash",
+                  "value_yuan": 27594763.53
+                },
+                {
+                  "metric": "intangible_amortization",
+                  "label": "无形资产摊销",
+                  "group": "non_cash",
+                  "value_yuan": 59054597.55
+                },
+                {
+                  "metric": "long_term_prepaid_amortization",
+                  "label": "长期待摊费用摊销",
+                  "group": "non_cash",
+                  "value_yuan": 4026169.92
+                },
+                {
+                  "metric": "disposal_long_asset_loss",
+                  "label": "处置长期资产的损失",
+                  "group": "non_cash",
+                  "value_yuan": 8522287.93
+                },
+                {
+                  "metric": "fixed_asset_scrap_loss",
+                  "label": "固定资产报废损失",
+                  "group": "non_cash",
+                  "value_yuan": 1853533.74
+                },
+                {
+                  "metric": "fair_value_change_loss",
+                  "label": "公允价值变动损失",
+                  "group": "non_cash",
+                  "value_yuan": 37082477.77
+                },
+                {
+                  "metric": "finance_expense_adjust",
+                  "label": "财务费用（调节项）",
+                  "group": "non_cash",
+                  "value_yuan": 2617344.74
+                },
+                {
+                  "metric": "investment_loss",
+                  "label": "投资损失（调节项）",
+                  "group": "non_cash",
+                  "value_yuan": -255520777.61
+                },
+                {
+                  "metric": "deferred_tax_asset_decrease",
+                  "label": "递延所得税资产减少",
+                  "group": "non_cash",
+                  "value_yuan": 180381423.47
+                },
+                {
+                  "metric": "deferred_tax_liability_increase",
+                  "label": "递延所得税负债增加",
+                  "group": "non_cash",
+                  "value_yuan": 6857126.34
+                },
+                {
+                  "metric": "inventory_decrease",
+                  "label": "存货的减少（增加以“－”号填列）",
+                  "group": "working_capital",
+                  "value_yuan": -1226697174.83
+                },
+                {
+                  "metric": "operating_receivable_decrease",
+                  "label": "经营性应收项目的减少（增加以“－”号填列）",
+                  "group": "working_capital",
+                  "value_yuan": 380090873.53
+                },
+                {
+                  "metric": "operating_payable_increase",
+                  "label": "经营性应付项目的增加（减少以“－”号填列）",
+                  "group": "working_capital",
+                  "value_yuan": -3582948946.71
+                },
+                {
+                  "metric": "other_cashflow_adjustments",
+                  "label": "其他（调节项）",
+                  "group": "other",
+                  "value_yuan": -174743591.08
+                }
+              ]
+            }
+          },
+          "largest_support": {
+            "period": "2024年",
+            "metric": "depreciation",
+            "label": "固定资产折旧、油气资产折耗、生产性生物资产折旧",
+            "value": 586592227.18,
+            "unit": "元",
+            "group": "non_cash"
+          },
+          "largest_drag": {
+            "period": "2024年",
+            "metric": "operating_payable_increase",
+            "label": "经营性应付项目的增加（减少以“－”号填列）",
+            "value": -1830670724.59,
+            "unit": "元",
+            "group": "working_capital"
+          }
+        },
+        "scenario_sensitivity": {
+          "status": "validated",
+          "thresholds": {
+            "assumed_revenue": 25171468089.28625,
+            "margin_base": 0.7315715945715381,
+            "margin_threshold": 0.8392469824154388,
+            "margin_gap_pp": 10.76753878439008,
+            "capital_per_day": 68962926.27201714
+          }
+        }
+      }
+    },
+    "三一重工": {
+      "entity_id": "600031.SH",
+      "facts": {
+        "total": 168,
+        "metrics": [
+          "accounts_payable",
+          "accounts_receivable",
+          "admin_expense",
+          "asset_disposal_income",
+          "asset_impairment",
+          "asset_impairment_provision",
+          "credit_impairment",
+          "credit_impairment_provision",
+          "deferred_tax_asset_decrease",
+          "deferred_tax_liability_increase",
+          "depreciation",
+          "disposal_long_asset_loss",
+          "fair_value_change",
+          "fair_value_change_loss",
+          "finance_expense",
+          "finance_expense_adjust",
+          "fixed_asset_scrap_loss",
+          "gross_profit",
+          "income_tax_expense",
+          "intangible_amortization",
+          "inventory",
+          "inventory_decrease",
+          "investment_income",
+          "investment_loss",
+          "long_term_prepaid_amortization",
+          "minority_interest",
+          "net_profit",
+          "net_profit_consolidated",
+          "non_operating_expense",
+          "non_operating_income",
+          "operating_cashflow",
+          "operating_cost",
+          "operating_payable_increase",
+          "operating_receivable_decrease",
+          "other_cashflow_adjustments",
+          "other_income",
+          "rd_expense",
+          "revenue",
+          "right_of_use_depreciation",
+          "selling_expense",
+          "taxes_and_surcharges",
+          "total_assets",
+          "total_liabilities",
+          "total_revenue"
+        ],
+        "segments": 36,
+        "segment_calibers": [
+          "分产品:其他",
+          "分产品:挖掘机械",
+          "分产品:桩工机械",
+          "分产品:混凝土机械",
+          "分产品:起重机械",
+          "分产品:路面机械",
+          "分地区:国内",
+          "分地区:国际",
+          "分行业:工程机械行业"
+        ],
+        "supplement_facts": 34,
+        "supplement_ok": true,
+        "supplement_rejected": [],
+        "detail_ok": true,
+        "detail_duplicates": []
+      },
+      "dataset": {
+        "periods": [
+          "2023年",
+          "2024年"
+        ],
+        "observations": 168,
+        "usable": 168,
+        "conflicts": 0,
+        "dataset_hash": "6d34fc0b78c30c94c76d1df2ddb65fb854806396013cb976d9698a89a023e6d1"
+      },
+      "models": {
+        "operating_drivers": {
+          "status": "validated",
+          "validation_failed": [],
+          "outputs": {
+            "net_profit_change": 1448000000.0,
+            "gross_profit_change": 1385760000.0,
+            "revenue_scale_effect": 1197380857.82,
+            "gross_margin_effect": 188379142.18,
+            "below_gross_line_change": 62240000.0,
+            "net_profit_change_detail": 62240000.0,
+            "gross_profit_change_by_segment": 1385760000.0
+          },
+          "segments_used": [
+            "分产品:其他",
+            "分产品:挖掘机械",
+            "分产品:桩工机械",
+            "分产品:混凝土机械",
+            "分产品:起重机械",
+            "分产品:路面机械",
+            "分地区:国内",
+            "分地区:国际",
+            "分行业:工程机械行业"
+          ],
+          "segments_skipped": [
+            "合并:与母公司报表同口径（不是分段切法）",
+            "母公司:报表范围而不是分段维度（并表范围另有其表）"
+          ],
+          "volume_price_caliber": "",
+          "unexplained_residual_yuan": 80905000.0,
+          "alternative_explanations": {
+            "effective_tax_rate": {
+              "prev": 0.13362866247573146,
+              "cur": 0.11801666818669411,
+              "delta_pp": -1.5611994289037348,
+              "note": "实际税率＝所得税费用／（合并净利润＋所得税费用）"
+            },
+            "tax_at_prior_rate": {
+              "actual_yuan": 815232000.0,
+              "at_prior_rate_yuan": 923076065.7899835,
+              "rate_effect_yuan": -107844065.78998351,
+              "note": "按上年实际税率折算本年的反事实：所得税的“贡献”里有多少只是利润下滑的被动结果"
+            },
+            "non_operating_items": {
+              "investment_income": {
+                "label": "投资收益",
+                "contribution_yuan": 820090000.0,
+                "note": "非经营/非经常因素：不得并入经营判断"
+              }
+            },
+            "structure_vs_price": "分段与均价都是**同一口径的分解**：均价由「该口径收入/销量」算出，含产品结构混合，不能直接命名“提价效果”；分产品/分行业/分地区/分销售模式是不同切法，不可相加"
+          },
+          "components": {
+            "net_profit_change": [
+              {
+                "component_id": "gross_profit_change",
+                "value": 1385760000.0
+              },
+              {
+                "component_id": "below_gross_line_change",
+                "value": 62240000.0
+              }
+            ],
+            "gross_profit_change": [
+              {
+                "component_id": "revenue_scale_effect",
+                "value": 1197380857.82
+              },
+              {
+                "component_id": "gross_margin_effect",
+                "value": 188379142.18
+              }
+            ]
+          }
+        },
+        "cash_reconciliation": {
+          "status": "validated",
+          "validation_failed": [],
+          "outputs": {
+            "operating_cashflow_reconciliation_cur": 14814278000.0,
+            "cash_gap_change": 7619630000.0,
+            "largest_support": 5592854000.0,
+            "largest_drag": -643371000.0
+          },
+          "reconciliation": {
+            "2024年": {
+              "net_profit_yuan": 6092538000.0,
+              "cashflow_yuan": 14814278000.0,
+              "adjustments_yuan": 8721740000.0,
+              "residual_yuan": 0.0,
+              "groups": {
+                "non_cash": 3741504000.0,
+                "working_capital": 4910089000.0,
+                "other": 70147000.0
+              },
+              "items": [
+                {
+                  "metric": "asset_impairment_provision",
+                  "label": "资产减值准备",
+                  "group": "non_cash",
+                  "value_yuan": 107028000.0
+                },
+                {
+                  "metric": "credit_impairment_provision",
+                  "label": "信用减值损失（调节项）",
+                  "group": "non_cash",
+                  "value_yuan": 665658000.0
+                },
+                {
+                  "metric": "depreciation",
+                  "label": "固定资产折旧、油气资产折耗、生产性生物资产折旧",
+                  "group": "non_cash",
+                  "value_yuan": 2783826000.0
+                },
+                {
+                  "metric": "right_of_use_depreciation",
+                  "label": "使用权资产折旧/摊销",
+                  "group": "non_cash",
+                  "value_yuan": 333049000.0
+                },
+                {
+                  "metric": "intangible_amortization",
+                  "label": "无形资产摊销",
+                  "group": "non_cash",
+                  "value_yuan": 424095000.0
+                },
+                {
+                  "metric": "long_term_prepaid_amortization",
+                  "label": "长期待摊费用摊销",
+                  "group": "non_cash",
+                  "value_yuan": 51159000.0
+                },
+                {
+                  "metric": "disposal_long_asset_loss",
+                  "label": "处置长期资产的损失",
+                  "group": "non_cash",
+                  "value_yuan": -45538000.0
+                },
+                {
+                  "metric": "fixed_asset_scrap_loss",
+                  "label": "固定资产报废损失",
+                  "group": "non_cash",
+                  "value_yuan": 107570000.0
+                },
+                {
+                  "metric": "fair_value_change_loss",
+                  "label": "公允价值变动损失",
+                  "group": "non_cash",
+                  "value_yuan": -109558000.0
+                },
+                {
+                  "metric": "finance_expense_adjust",
+                  "label": "财务费用（调节项）",
+                  "group": "non_cash",
+                  "value_yuan": 629865000.0
+                },
+                {
+                  "metric": "investment_loss",
+                  "label": "投资损失（调节项）",
+                  "group": "non_cash",
+                  "value_yuan": -643371000.0
+                },
+                {
+                  "metric": "deferred_tax_asset_decrease",
+                  "label": "递延所得税资产减少",
+                  "group": "non_cash",
+                  "value_yuan": -620230000.0
+                },
+                {
+                  "metric": "deferred_tax_liability_increase",
+                  "label": "递延所得税负债增加",
+                  "group": "non_cash",
+                  "value_yuan": 57951000.0
+                },
+                {
+                  "metric": "inventory_decrease",
+                  "label": "存货的减少（增加以“－”号填列）",
+                  "group": "working_capital",
+                  "value_yuan": -323508000.0
+                },
+                {
+                  "metric": "operating_receivable_decrease",
+                  "label": "经营性应收项目的减少（增加以“－”号填列）",
+                  "group": "working_capital",
+                  "value_yuan": -359257000.0
+                },
+                {
+                  "metric": "operating_payable_increase",
+                  "label": "经营性应付项目的增加（减少以“－”号填列）",
+                  "group": "working_capital",
+                  "value_yuan": 5592854000.0
+                },
+                {
+                  "metric": "other_cashflow_adjustments",
+                  "label": "其他（调节项）",
+                  "group": "other",
+                  "value_yuan": 70147000.0
+                }
+              ]
+            },
+            "2023年": {
+              "net_profit_yuan": 4606110000.0,
+              "cashflow_yuan": 5708220000.0,
+              "adjustments_yuan": 1102110000.0,
+              "residual_yuan": 0.0,
+              "groups": {
+                "non_cash": 4151725000.0,
+                "working_capital": -3066842000.0,
+                "other": 17227000.0
+              },
+              "items": [
+                {
+                  "metric": "asset_impairment_provision",
+                  "label": "资产减值准备",
+                  "group": "non_cash",
+                  "value_yuan": 34299000.0
+                },
+                {
+                  "metric": "credit_impairment_provision",
+                  "label": "信用减值损失（调节项）",
+                  "group": "non_cash",
+                  "value_yuan": 1101645000.0
+                },
+                {
+                  "metric": "depreciation",
+                  "label": "固定资产折旧、油气资产折耗、生产性生物资产折旧",
+                  "group": "non_cash",
+                  "value_yuan": 2482681000.0
+                },
+                {
+                  "metric": "right_of_use_depreciation",
+                  "label": "使用权资产折旧/摊销",
+                  "group": "non_cash",
+                  "value_yuan": 249132000.0
+                },
+                {
+                  "metric": "intangible_amortization",
+                  "label": "无形资产摊销",
+                  "group": "non_cash",
+                  "value_yuan": 388251000.0
+                },
+                {
+                  "metric": "long_term_prepaid_amortization",
+                  "label": "长期待摊费用摊销",
+                  "group": "non_cash",
+                  "value_yuan": 30257000.0
+                },
+                {
+                  "metric": "disposal_long_asset_loss",
+                  "label": "处置长期资产的损失",
+                  "group": "non_cash",
+                  "value_yuan": 5939000.0
+                },
+                {
+                  "metric": "fixed_asset_scrap_loss",
+                  "label": "固定资产报废损失",
+                  "group": "non_cash",
+                  "value_yuan": 33199000.0
+                },
+                {
+                  "metric": "fair_value_change_loss",
+                  "label": "公允价值变动损失",
+                  "group": "non_cash",
+                  "value_yuan": -21149000.0
+                },
+                {
+                  "metric": "finance_expense_adjust",
+                  "label": "财务费用（调节项）",
+                  "group": "non_cash",
+                  "value_yuan": 87497000.0
+                },
+                {
+                  "metric": "investment_loss",
+                  "label": "投资损失（调节项）",
+                  "group": "non_cash",
+                  "value_yuan": 177082000.0
+                },
+                {
+                  "metric": "deferred_tax_asset_decrease",
+                  "label": "递延所得税资产减少",
+                  "group": "non_cash",
+                  "value_yuan": -585896000.0
+                },
+                {
+                  "metric": "deferred_tax_liability_increase",
+                  "label": "递延所得税负债增加",
+                  "group": "non_cash",
+                  "value_yuan": 168788000.0
+                },
+                {
+                  "metric": "inventory_decrease",
+                  "label": "存货的减少（增加以“－”号填列）",
+                  "group": "working_capital",
+                  "value_yuan": -81482000.0
+                },
+                {
+                  "metric": "operating_receivable_decrease",
+                  "label": "经营性应收项目的减少（增加以“－”号填列）",
+                  "group": "working_capital",
+                  "value_yuan": 3034971000.0
+                },
+                {
+                  "metric": "operating_payable_increase",
+                  "label": "经营性应付项目的增加（减少以“－”号填列）",
+                  "group": "working_capital",
+                  "value_yuan": -6020331000.0
+                },
+                {
+                  "metric": "other_cashflow_adjustments",
+                  "label": "其他（调节项）",
+                  "group": "other",
+                  "value_yuan": 17227000.0
+                }
+              ]
+            }
+          },
+          "largest_support": {
+            "period": "2024年",
+            "metric": "operating_payable_increase",
+            "label": "经营性应付项目的增加（减少以“－”号填列）",
+            "value": 5592854000.0,
+            "unit": "元",
+            "group": "working_capital"
+          },
+          "largest_drag": {
+            "period": "2024年",
+            "metric": "investment_loss",
+            "label": "投资损失（调节项）",
+            "value": -643371000.0,
+            "unit": "元",
+            "group": "non_cash"
+          }
+        },
+        "scenario_sensitivity": {
+          "status": "validated",
+          "thresholds": {
+            "assumed_revenue": 67795064934.7,
+            "margin_base": 0.26431189042535125,
+            "margin_threshold": 0.30321428292457414,
+            "margin_gap_pp": 3.890239249922286,
+            "capital_per_day": 185739903.93068492
+          }
+        }
+      }
+    }
+  }
+}
