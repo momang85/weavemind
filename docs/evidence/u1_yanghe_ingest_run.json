@@ -1,30 +1,65 @@
 {
-  "case": "洋河股份 002304 2023→2024 经营驱动桥（抽取→冻结→算子 全链）",
+  "case": "洋河股份 002304 2023→2024 经营驱动桥（官方入口→事实→冻结→算子）",
   "source_material": "evals/a2_official_chain_20260929/002304/project/materials/f42e747c73850b59/doc.json",
-  "extraction": {
-    "ok": true,
-    "entity_state": "verified",
-    "facts": 90,
-    "rejected": 49,
-    "rejected_reasons": {
-      "no_periods": 6,
-      "column_mismatch": 2,
-      "table_unrecognized": 41
-    },
-    "text_hash": "a71287d53c7f62c8126aad548354616fdbbc62a82e2e42440442fb2a89d678b0"
+  "facts": {
+    "count": 130,
+    "metrics": [
+      "accounts_payable",
+      "accounts_receivable",
+      "admin_expense",
+      "asset_disposal_income",
+      "asset_impairment",
+      "credit_impairment",
+      "fair_value_change",
+      "finance_expense",
+      "gross_profit",
+      "income_tax_expense",
+      "inventory",
+      "investment_income",
+      "minority_interest",
+      "net_profit",
+      "net_profit_consolidated",
+      "non_operating_expense",
+      "non_operating_income",
+      "operating_cashflow",
+      "operating_cost",
+      "other_income",
+      "rd_expense",
+      "revenue",
+      "sales_volume",
+      "selling_expense",
+      "taxes_and_surcharges",
+      "total_assets",
+      "total_liabilities",
+      "total_revenue"
+    ],
+    "segment_facts": 36,
+    "derived_segment_facts": 12,
+    "segment_calibers": [
+      "分产品:其他",
+      "分产品:白酒",
+      "分产品:红酒",
+      "分地区:省内",
+      "分地区:省外",
+      "分行业:其他业务",
+      "分行业:酒类行业",
+      "分销售模式:其他",
+      "分销售模式:批发经销",
+      "分销售模式:线上直销"
+    ]
   },
   "dataset": {
     "periods": [
       "2023年",
       "2024年"
     ],
-    "observations": 90,
-    "usable": 86,
+    "observations": 130,
+    "usable": 126,
     "conflicts": [
       "total_assets 2024年 口径 合并：fact-abb13a23f7abeb0e=67345265219.62元（CNY/合并）；fact-abb13a23f7abeb0e=67345265219.62元（CNY/合并）",
       "total_assets 2023年 口径 合并：fact-83bc622c3ea8e3e7=69792287455.91元（CNY/合并）；fact-83bc622c3ea8e3e7=69792287455.91元（CNY/合并）"
     ],
-    "dataset_hash": "2e83fa47c72180045e1989391d5d2648073ff9f15130b85d8cca6c5cec48715f"
+    "dataset_hash": "fdcaa6152654fef3909e0868dc343ccedd6773f5ceb97ee6c7381061fb77913c"
   },
   "consolidated_inputs": {
     "revenue": {
@@ -311,165 +346,299 @@
       "no_pp_substitution": true
     },
     "outputs": {
-      "net_profit_change": {
-        "value": -3342541438.15,
-        "unit": "元",
-        "output_period": "2024年较2023年",
-        "components": [
-          {
-            "component_id": "gross_profit_change",
-            "label": "毛利变化",
-            "value": -3800953659.19,
-            "unit": "元"
-          },
-          {
-            "component_id": "below_gross_line_change",
-            "label": "毛利线以下净额变化",
-            "value": 458412221.04,
-            "unit": "元"
-          }
-        ]
-      },
-      "gross_profit_change": {
-        "value": -3800953659.19,
-        "unit": "元",
-        "output_period": "2024年较2023年",
-        "components": [
-          {
-            "component_id": "revenue_scale_effect",
-            "label": "收入规模效应",
-            "value": -3153542030.82,
-            "unit": "元"
-          },
-          {
-            "component_id": "gross_margin_effect",
-            "label": "毛利率效应",
-            "value": -647411628.37,
-            "unit": "元"
-          }
-        ]
-      },
-      "revenue_scale_effect": {
-        "value": -3153542030.82,
-        "unit": "元",
-        "output_period": "2024年较2023年",
-        "components": []
-      },
-      "gross_margin_effect": {
-        "value": -647411628.37,
-        "unit": "元",
-        "output_period": "2024年较2023年",
-        "components": []
-      },
-      "below_gross_line_change": {
-        "value": 458412221.04,
-        "unit": "元",
-        "output_period": "2024年较2023年",
-        "components": []
-      },
-      "net_profit_change_detail": {
-        "value": 458412221.04,
-        "unit": "元",
-        "output_period": "2024年较2023年",
-        "components": [
-          {
-            "component_id": "income_tax_expense",
-            "label": "所得税费用",
-            "value": 720443770.88,
-            "unit": "元"
-          },
-          {
-            "component_id": "taxes_and_surcharges",
-            "label": "税金及附加",
-            "value": 443158639.71,
-            "unit": "元"
-          },
-          {
-            "component_id": "fair_value_change",
-            "label": "公允价值变动收益",
-            "value": -359081602.66,
-            "unit": "元"
-          },
-          {
-            "component_id": "rd_expense",
-            "label": "研发费用",
-            "value": 179957474.07,
-            "unit": "元"
-          },
-          {
-            "component_id": "admin_expense",
-            "label": "管理费用",
-            "value": -160307153.29,
-            "unit": "元"
-          },
-          {
-            "component_id": "finance_expense",
-            "label": "财务费用",
-            "value": -143635574.49,
-            "unit": "元"
-          },
-          {
-            "component_id": "selling_expense",
-            "label": "销售费用",
-            "value": -129284844.17,
-            "unit": "元"
-          },
-          {
-            "component_id": "investment_income",
-            "label": "投资收益",
-            "value": -109105608.81,
-            "unit": "元"
-          },
-          {
-            "component_id": "non_operating_income",
-            "label": "营业外收入",
-            "value": 13269963.98,
-            "unit": "元"
-          },
-          {
-            "component_id": "minority_interest",
-            "label": "少数股东损益",
-            "value": 11771298.36,
-            "unit": "元"
-          },
-          {
-            "component_id": "asset_impairment",
-            "label": "资产减值损失",
-            "value": -8375138.49,
-            "unit": "元"
-          },
-          {
-            "component_id": "non_operating_expense",
-            "label": "营业外支出",
-            "value": -6227012.74,
-            "unit": "元"
-          },
-          {
-            "component_id": "other_income",
-            "label": "其他收益",
-            "value": 3488534.6,
-            "unit": "元"
-          },
-          {
-            "component_id": "asset_disposal_income",
-            "label": "资产处置收益",
-            "value": 2553648.48,
-            "unit": "元"
-          },
-          {
-            "component_id": "credit_impairment",
-            "label": "信用减值损失",
-            "value": -214174.39,
-            "unit": "元"
-          },
-          {
-            "component_id": "unexplained_residual",
-            "label": "未解释差额（未取得的披露项目）",
-            "value": 0.0,
-            "unit": "元"
-          }
-        ]
-      }
+      "net_profit_change": [
+        {
+          "value": -3342541438.15,
+          "unit": "元",
+          "output_period": "2024年较2023年",
+          "label": "归母净利润变化",
+          "components": [
+            {
+              "component_id": "gross_profit_change",
+              "label": "毛利变化",
+              "value": -3800953659.19,
+              "unit": "元"
+            },
+            {
+              "component_id": "below_gross_line_change",
+              "label": "毛利线以下净额变化",
+              "value": 458412221.04,
+              "unit": "元"
+            }
+          ]
+        }
+      ],
+      "gross_profit_change": [
+        {
+          "value": -3800953659.19,
+          "unit": "元",
+          "output_period": "2024年较2023年",
+          "label": "毛利变化",
+          "components": [
+            {
+              "component_id": "revenue_scale_effect",
+              "label": "收入规模效应",
+              "value": -3153542030.82,
+              "unit": "元"
+            },
+            {
+              "component_id": "gross_margin_effect",
+              "label": "毛利率效应",
+              "value": -647411628.37,
+              "unit": "元"
+            }
+          ]
+        }
+      ],
+      "revenue_scale_effect": [
+        {
+          "value": -3153542030.82,
+          "unit": "元",
+          "output_period": "2024年较2023年",
+          "label": "收入规模效应",
+          "components": []
+        }
+      ],
+      "gross_margin_effect": [
+        {
+          "value": -647411628.37,
+          "unit": "元",
+          "output_period": "2024年较2023年",
+          "label": "毛利率效应",
+          "components": []
+        }
+      ],
+      "below_gross_line_change": [
+        {
+          "value": 458412221.04,
+          "unit": "元",
+          "output_period": "2024年较2023年",
+          "label": "毛利线以下净额变化",
+          "components": []
+        }
+      ],
+      "net_profit_change_detail": [
+        {
+          "value": 458412221.04,
+          "unit": "元",
+          "output_period": "2024年较2023年",
+          "label": "毛利线以下逐项分解",
+          "components": [
+            {
+              "component_id": "income_tax_expense",
+              "label": "所得税费用",
+              "value": 720443770.88,
+              "unit": "元"
+            },
+            {
+              "component_id": "taxes_and_surcharges",
+              "label": "税金及附加",
+              "value": 443158639.71,
+              "unit": "元"
+            },
+            {
+              "component_id": "fair_value_change",
+              "label": "公允价值变动收益",
+              "value": -359081602.66,
+              "unit": "元"
+            },
+            {
+              "component_id": "rd_expense",
+              "label": "研发费用",
+              "value": 179957474.07,
+              "unit": "元"
+            },
+            {
+              "component_id": "admin_expense",
+              "label": "管理费用",
+              "value": -160307153.29,
+              "unit": "元"
+            },
+            {
+              "component_id": "finance_expense",
+              "label": "财务费用",
+              "value": -143635574.49,
+              "unit": "元"
+            },
+            {
+              "component_id": "selling_expense",
+              "label": "销售费用",
+              "value": -129284844.17,
+              "unit": "元"
+            },
+            {
+              "component_id": "investment_income",
+              "label": "投资收益",
+              "value": -109105608.81,
+              "unit": "元"
+            },
+            {
+              "component_id": "non_operating_income",
+              "label": "营业外收入",
+              "value": 13269963.98,
+              "unit": "元"
+            },
+            {
+              "component_id": "minority_interest",
+              "label": "少数股东损益",
+              "value": 11771298.36,
+              "unit": "元"
+            },
+            {
+              "component_id": "asset_impairment",
+              "label": "资产减值损失",
+              "value": -8375138.49,
+              "unit": "元"
+            },
+            {
+              "component_id": "non_operating_expense",
+              "label": "营业外支出",
+              "value": -6227012.74,
+              "unit": "元"
+            },
+            {
+              "component_id": "other_income",
+              "label": "其他收益",
+              "value": 3488534.6,
+              "unit": "元"
+            },
+            {
+              "component_id": "asset_disposal_income",
+              "label": "资产处置收益",
+              "value": 2553648.48,
+              "unit": "元"
+            },
+            {
+              "component_id": "credit_impairment",
+              "label": "信用减值损失",
+              "value": -214174.39,
+              "unit": "元"
+            },
+            {
+              "component_id": "unexplained_residual",
+              "label": "未解释差额（未取得的披露项目）",
+              "value": 0.0,
+              "unit": "元"
+            }
+          ]
+        }
+      ],
+      "gross_profit_change_by_segment": [
+        {
+          "value": -3800953659.19,
+          "unit": "元",
+          "output_period": "2024年较2023年",
+          "label": "分产品毛利变化（切法：分产品）",
+          "components": [
+            {
+              "component_id": "segment:分产品:白酒",
+              "label": "分产品:白酒毛利变化（含推算输入）",
+              "value": -3795822539.3,
+              "unit": "元"
+            },
+            {
+              "component_id": "unclassified_gross_profit_change",
+              "label": "未分类差额（其他业务/口径差；同一口径的其它切法不可与此相加）",
+              "value": -5131119.89,
+              "unit": "元"
+            }
+          ]
+        },
+        {
+          "value": -3800953659.19,
+          "unit": "元",
+          "output_period": "2024年较2023年",
+          "label": "分地区毛利变化（切法：分地区）",
+          "components": [
+            {
+              "component_id": "segment:分地区:省内",
+              "label": "分地区:省内毛利变化（含推算输入）",
+              "value": -1287241817.87,
+              "unit": "元"
+            },
+            {
+              "component_id": "segment:分地区:省外",
+              "label": "分地区:省外毛利变化（含推算输入）",
+              "value": -2521351658.29,
+              "unit": "元"
+            },
+            {
+              "component_id": "unclassified_gross_profit_change",
+              "label": "未分类差额（其他业务/口径差；同一口径的其它切法不可与此相加）",
+              "value": 7639816.97,
+              "unit": "元"
+            }
+          ]
+        },
+        {
+          "value": -3800953659.19,
+          "unit": "元",
+          "output_period": "2024年较2023年",
+          "label": "分行业毛利变化（切法：分行业）",
+          "components": [
+            {
+              "component_id": "segment:分行业:酒类行业",
+              "label": "分行业:酒类行业毛利变化（含推算输入）",
+              "value": -3806602029.27,
+              "unit": "元"
+            },
+            {
+              "component_id": "unclassified_gross_profit_change",
+              "label": "未分类差额（其他业务/口径差；同一口径的其它切法不可与此相加）",
+              "value": 5648370.08,
+              "unit": "元"
+            }
+          ]
+        },
+        {
+          "value": -3800953659.19,
+          "unit": "元",
+          "output_period": "2024年较2023年",
+          "label": "分销售模式毛利变化（切法：分销售模式）",
+          "components": [
+            {
+              "component_id": "segment:分销售模式:批发经销",
+              "label": "分销售模式:批发经销毛利变化（含推算输入）",
+              "value": -3775823756.63,
+              "unit": "元"
+            },
+            {
+              "component_id": "segment:分销售模式:线上直销",
+              "label": "分销售模式:线上直销毛利变化（含推算输入）",
+              "value": -32537743.78,
+              "unit": "元"
+            },
+            {
+              "component_id": "unclassified_gross_profit_change",
+              "label": "未分类差额（其他业务/口径差；同一口径的其它切法不可与此相加）",
+              "value": 7407841.22,
+              "unit": "元"
+            }
+          ]
+        }
+      ],
+      "volume_price_decomposition": [
+        {
+          "value": -4213886188.01,
+          "unit": "元",
+          "output_period": "2024年较2023年",
+          "label": "分产品:白酒量价分解",
+          "components": [
+            {
+              "component_id": "volume_effect",
+              "label": "销量效应",
+              "value": -5382272525.58,
+              "unit": "元"
+            },
+            {
+              "component_id": "price_effect",
+              "label": "单位价格效应",
+              "value": 1168386337.57,
+              "unit": "元"
+            }
+          ]
+        }
+      ]
     }
   },
   "diagnostics_subset": {
@@ -499,11 +668,22 @@
     "line_items_missing": [],
     "line_items_rejected": [],
     "unexplained_residual_yuan": 0.0,
-    "segments_used": [],
+    "segments_used": [
+      "分产品:白酒",
+      "分地区:省内",
+      "分地区:省外",
+      "分行业:酒类行业",
+      "分销售模式:批发经销",
+      "分销售模式:线上直销"
+    ],
     "segments_skipped": [
+      "分产品:其他:两期收入/成本不全",
+      "分产品:红酒:两期收入/成本不全",
+      "分行业:其他业务:两期收入/成本不全",
+      "分销售模式:其他:两期收入/成本不全",
       "合并:与母公司报表同口径（不是分段切法）",
       "母公司:报表范围而不是分段维度（并表范围另有其表）"
     ],
-    "volume_price_caliber": ""
+    "volume_price_caliber": "分产品:白酒"
   }
 }

@@ -1012,6 +1012,17 @@ def facts_from_annual_tables(doc: dict, *, company: str, company_code: str = "",
         return []
     rows = list(raw.get("facts") or []) + aft.derive_gross_profit(raw.get("facts") or [],
                                                                   raw.get("rejected"))
+    # U1（2026-10-01）：MD&A 的**经营明细表**（分产品/分地区/销售模式两期收入、10% 以上表的
+    # 本期收入与成本、实物销量）走独立的定向抽取——它们不是"可识别报表"，此前一条也进不来，
+    # 于是 `operating_drivers` 的分段与量价在正常任务里永远缺输入。表头形状不符即不取。
+    try:
+        from adapters import operating_detail_tables as odt
+        _detail = odt.extract_operating_detail(doc or {}, company=company,
+                                               company_code=company_code,
+                                               periods=periods)
+        rows = rows + list(_detail.get("facts") or [])
+    except Exception:                                    # noqa: BLE001 - 抽取失败不造事实
+        pass
     out: list[Fact] = []
     for r in rows:
         _metric = str(r.get("metric") or "")
@@ -1041,15 +1052,15 @@ def facts_from_annual_tables(doc: dict, *, company: str, company_code: str = "",
             disclosed_at=str(disclosed_at or ""),
             source_url=str(r.get("source_url") or url or ""),
             source_hash=str(r.get("source_hash") or ""),
-            source_locator={"page": str(r.get("locator") or ""),
-                            "quote": str(r.get("quote") or ""),
+            source_locator={"page": str(r.get("locator") or r.get("page") or ""),
+                            "quote": str(r.get("quote") or r.get("source_line") or ""),
                             "period_source": str(r.get("period_source") or ""),
                             "period_evidence": str(r.get("period_evidence") or ""),
                             "currency_source": str(r.get("currency_source") or ""),
                             "header_source": str(r.get("header_source") or "")},
             verify_state=VERIFY_UNVERIFIED,
             extracted_by=str(r.get("extracted_by") or "annual_financial_tables"),
-            formula=str(r.get("formula") or ""),
+            formula=str(r.get("formula") or r.get("formula_version") or ""),
             derived_from=[str(x) for x in (r.get("derived_from") or ())],
         ))
     return out

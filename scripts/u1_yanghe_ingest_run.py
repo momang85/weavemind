@@ -35,22 +35,27 @@ LINE_SLUGS = (
 
 def main() -> int:
     import financial_analysis as fa
-    from adapters import annual_financial_tables as aft
+    import facts as F
 
     with open(DOC_PATH, encoding="utf-8") as f:
         doc = json.load(f)
-    out = aft.extract(doc, company="洋河股份", company_code="002304",
-                      periods=(2023, 2024))
-    facts = list(out["facts"])
-    print(f"抽取：ok={out['ok']} entity={out['entity_state']} facts={len(facts)} "
-          f"rejected={len(out['rejected'])}")
+    # **正常入口**：官方年报原文 → 事实（三张报表 + MD&A 经营明细表）
+    fs = F.facts_from_annual_tables(doc, company="洋河股份", company_code="002304",
+                                    periods=(2023, 2024), as_of="2025-04-30",
+                                    disclosed_at="2025-04-28")
+    print(f"事实：{len(fs)} 条；指标 {len({x.metric for x in fs})} 个")
+    seg = [x for x in fs if str(x.caliber).startswith(
+        ("分产品:", "分地区:", "分行业:", "分销售模式:"))]
+    derived = [x for x in seg if x.derived_from]
+    print(f"分段/量价事实：{len(seg)} 条（其中推算输入 {len(derived)} 条）；"
+          f"口径 {sorted({str(x.caliber) for x in seg})}")
 
-    ds = fa.freeze_from_facts(
-        facts, periods=(2023, 2024), entity="洋河股份", entity_id="002304.SZ",
-        market="cn", as_of="2025-04-30",
-        source_label="evals:a2_official_chain_20260929/002304")
+    ds = fa.freeze_from_facts(fs, periods=(2023, 2024), entity="洋河股份",
+                              entity_id="002304.SZ", market="cn", as_of="2025-04-30",
+                              source_label="evals:a2_official_chain_20260929/002304")
     print(f"冻结：期间={ds.manifest.periods} 观察={ds.manifest.observations} "
-          f"可用={ds.manifest.usable} hash={ds.manifest.dataset_hash[:12]}…")
+          f"可用={ds.manifest.usable} 冲突={len(ds.manifest.conflicts or ())} "
+          f"hash={ds.manifest.dataset_hash[:12]}…")
 
     consolidated = {}
     for metric in ("revenue", "operating_cost", "net_profit",
@@ -72,26 +77,26 @@ def main() -> int:
     print(f"验证：failed={run.validation.get('failed')}")
     outputs = {}
     for o in run.outputs:
-        outputs[o.metric] = {
+        outputs.setdefault(o.metric, []).append({
             "value": o.value, "unit": o.unit, "output_period": o.output_period,
+            "label": o.label,
             "components": [{"component_id": c.get("component_id"),
                             "label": c.get("label"), "value": c.get("value"),
                             "unit": c.get("unit")} for c in (o.components or [])],
-        }
-        print(f"  {o.metric:34} {o.value:>22,.2f} {o.unit}")
+        })
+        print(f"  {o.metric:34} {o.value:>22,.2f} {o.unit} ({o.label[:18]})")
     diag = {}
     try:
         diag = dict(run.outputs[0].diagnostics or {})
     except Exception:
         pass
     report = {
-        "case": "洋河股份 002304 2023→2024 经营驱动桥（抽取→冻结→算子 全链）",
+        "case": "洋河股份 002304 2023→2024 经营驱动桥（官方入口→事实→冻结→算子）",
         "source_material": os.path.relpath(DOC_PATH, ROOT).replace("\\", "/"),
-        "extraction": {
-            "ok": out["ok"], "entity_state": out["entity_state"],
-            "facts": len(facts), "rejected": len(out["rejected"]),
-            "rejected_reasons": dict(Counter(r["reason"] for r in out["rejected"])),
-            "text_hash": out.get("text_hash"),
+        "facts": {
+            "count": len(fs), "metrics": sorted({x.metric for x in fs}),
+            "segment_facts": len(seg), "derived_segment_facts": len(derived),
+            "segment_calibers": sorted({str(x.caliber) for x in seg}),
         },
         "dataset": {
             "periods": list(ds.manifest.periods),

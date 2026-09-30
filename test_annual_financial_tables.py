@@ -6,6 +6,7 @@ from __future__ import annotations
 import unittest
 
 from adapters import annual_financial_tables as aft
+from adapters import operating_detail_tables as aft_odt
 
 _TITLE = "京蓝科技股份有限公司2020年年度报告（更正后）"
 _URL = "http://static.cninfo.com.cn/finalpage/2025-09-05/1224639904.PDF"
@@ -504,6 +505,105 @@ class TestDerivation(unittest.TestCase):
 
     def test_no_cost_no_gross_profit(self):
         self.assertEqual(aft.derive_gross_profit([self._f("revenue", 100.0)]), [])
+
+
+_MDNA_TEXT = """江苏洋河酒厂股份有限公司2024年年度报告
+2、收入与成本
+(1) 营业收入构成
+单位：元
+2024 年 2023 年
+同比增减
+金额 占营业收入比
+重 金额 占营业收入比
+重
+营业收入合计 1,000.00 100% 1,200.00 100% -16.67%
+分产品
+白酒 900.00 90.00% 1,100.00 91.67% -18.18%
+红酒 100.00 10.00% 100.00 8.33% 0.00%
+(2) 占公司营业收入或营业利润 10%以上的行业、产品、地区、销售模式的情况
+适用 □不适用
+单位：元
+营业收入 营业成本 毛利率 营业收入比上
+年同期增减
+营业成本比上
+年同期增减
+毛利率比上年
+同期增减
+分产品
+白酒 880.00 300.00 65.91% -18.18% -10.00% -3.00%
+分地区
+省内 500.00 150.00 70.00% -10.00% -5.00% -2.00%
+(3) 公司实物销售收入是否大于劳务收入
+是 □否
+行业分类 项目 单位 2024 年 2023 年 同比增减
+白酒
+销售量 吨 100.00 120.00 -16.67%
+红酒
+销售量(吨) 8.00 10.00 -20.00%
+"""
+
+
+class TestOperatingDetailTables(unittest.TestCase):
+    """U1（2026-10-01）：MD&A 经营明细表的定向抽取（分产品/分地区 + 实物销量）。
+
+    这两张表不在"可识别报表"里，此前一条也进不来；表头形状对不上就一条不取。
+    """
+
+    def _facts(self, text=_MDNA_TEXT, periods=(2023, 2024)):
+        out = aft_odt.extract_operating_detail(_doc(text), company="洋河股份",
+                                              company_code="002304",
+                                              periods=periods)
+        return out, {(f["metric"], f["period"], f["caliber"]): f for f in out["facts"]}
+
+    def test_two_tables_and_volume_are_extracted_with_provenance(self):
+        out, by = self._facts()
+        self.assertTrue(out["ok"], out["rejected"])
+        # ① 占比表：两期收入绝对值都取到（红酒只有这张表，只出收入）
+        self.assertAlmostEqual(by[("revenue", "2023年", "分产品:红酒")]["value"], 100.0)
+        # ② 10% 以上表：本期成本绝对值 + 上期按披露同比反推（必须带血缘与公式版本）
+        cost24 = by[("operating_cost", "2024年", "分产品:白酒")]
+        self.assertAlmostEqual(cost24["value"], 300.0)
+        self.assertFalse(cost24["derived_from"])
+        cost23 = by[("operating_cost", "2023年", "分产品:白酒")]
+        self.assertAlmostEqual(cost23["value"], 300.0 / 0.9, places=4)
+        self.assertTrue(cost23["derived_from"], "推算值必须带血缘，报告才能标“含推算输入”")
+        self.assertEqual(cost23["formula_version"], "yoy_inverse/1.0")
+        # ③ 实物销量：空格与括号两种单位写法都认
+        self.assertAlmostEqual(by[("sales_volume", "2024年", "分产品:白酒")]["value"], 100.0)
+        self.assertAlmostEqual(by[("sales_volume", "2023年", "分产品:红酒")]["value"], 10.0)
+        self.assertEqual(by[("sales_volume", "2024年", "分产品:白酒")]["unit"], "吨")
+        # ④ 原文定位：页码/行号/原文行都要带上
+        f = by[("revenue", "2024年", "分地区:省内")]
+        self.assertTrue(str(f["source_locator"]), "必须留原文定位")
+        self.assertIn("MD&A", f["caliber_source"])
+
+    def test_cost_table_wins_over_the_share_table_for_the_same_caliber(self):
+        """同一分段两套披露口径（分摊全部营业收入 vs 主营业务）不得混配。
+
+        占比表白酒 2024 收入 900，10% 表 880 且带成本 300：必须取后者，否则
+        "收入来自占比表、成本来自 10% 表"会跨口径配对（实测省内因此差 2.8 亿）。
+        """
+        out, by = self._facts()
+        rev24 = by[("revenue", "2024年", "分产品:白酒")]
+        self.assertAlmostEqual(rev24["value"], 880.0, msg="取含成本的那张表")
+        rev23 = by[("revenue", "2023年", "分产品:白酒")]
+        self.assertAlmostEqual(rev23["value"], 880.0 / 0.8182, places=3)
+        self.assertTrue(rev23["derived_from"])
+        self.assertTrue(any("含成本" in d for d in out["duplicates"]), out["duplicates"])
+
+    def test_unrecognized_shape_yields_nothing(self):
+        """表头形状不符（只有一年、或不是这两张表）→ 一条不取，并给出原因。"""
+        one_year = _MDNA_TEXT.replace("2024 年 2023 年\n同比增减", "2024 年\n同比增减")
+        out, by = self._facts(one_year)
+        self.assertEqual([f for f in out["facts"]
+                          if f["metric"] == "revenue" and f["caliber"] == "分产品:红酒"],
+                         [], "只有一年时不上两期桥")
+        self.assertTrue(any(r["reason"] in ("no_year_header", "period_not_requested",
+                                            "no_operating_detail_found")
+                            for r in out["rejected"]), out["rejected"])
+        out2, by2 = self._facts("江苏洋河酒厂股份有限公司2024年年度报告\n无表格")
+        self.assertFalse(out2["ok"])
+        self.assertEqual(out2["facts"], [])
 
 
 if __name__ == "__main__":
