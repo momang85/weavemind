@@ -75,6 +75,10 @@ def compile_plan(question: str, dataset, *, prefer=()) -> AnalysisPlan:
     if lib_missing := [n["label"] for n in needs if n["qid"] == "volume_price"]:
         notes.append("量价结构分解目前**没有注册模型**：只有资料清单与缺口，不给推测性结论（"
                      + "、".join(lib_missing) + "）")
+    if any(n["qid"] == "forecast_trend" for n in needs):
+        notes.append("预测/趋势外推（含概率、回归、目标价、估值）本版本**不开放**："
+                     "不采用任何注册模型、不出预测数；门槛与禁用清单见 "
+                     "docs/统计预测门槛与禁用清单_20260930.md")
 
     avail_set = set(avail)
     adopted: list[PlanItem] = []

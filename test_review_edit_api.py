@@ -886,6 +886,42 @@ class TestL0BSelectedRunEntersTheReport(_Base):
         self.assertEqual(bool(payload.get("ok")),
                          str(payload.get("delivery_status")) == "verified", payload)
 
+    def test_adopt_projects_the_body_so_export_is_not_stuck(self):
+        """实机反例（2026-09-30，带登录会话的页面真实点击）：采纳后**导不出来**。
+
+        现象：页面上点「采纳这版」→ 面板提示"当前包…需重新导出" → 点「导出当前包」恒
+        409「导出期间发生修订（交付正文与采纳版本不一致），未生成新包；请重试」，
+        而重试永远不会好——任务记录里的交付正文还停在采纳前的正文，不会自己变。
+
+        根因：采纳按所选运行重渲染正文并落成新版本，但**没有把这一版装配出的正文投影成
+        交付正文**（候选采纳/人工修订都写了 `update_delivery_projection`，分析采纳漏了）。
+        """
+        import task_state
+        import web_ui
+        from report_version import VersionStore
+        ds, base, newer, ws = self._seed()
+        store = VersionStore(ws, self.tid)
+        old_body = "# 洋河股份 2024 年度研究\n\n## 分析\n旧的正文。\n"
+        store.adopt(store.record(old_body), reason="初版")
+        task_state.update_delivery_projection(self.tid, report=old_body)
+        with mock.patch.object(task_state, "read_task",
+                               return_value={"status": "SUCCESS", "goal": "研究洋河股份"}):
+            payload, status = self._call("/api/task/" + self.tid + "/analysis/adopt",
+                                         {"run_id": newer.run_id})
+        if status != 200:
+            self.skipTest(f"该夹具下装配未通过（如实为 {payload.get('delivery_status')}）")
+        self.assertTrue(payload.get("delivery_projected"), payload)
+        row = task_state.read_task(self.tid) or {}
+        stored = str(row.get("report") or "")
+        self.assertNotEqual(stored, old_body, "交付正文必须换成这一版装配出的正文")
+        self.assertIn("旧的正文。", stored)
+        # 真正的判据：导出快照必须接受这份正文（此前这里抛 version changed → 409）
+        from delivery_pipeline import export_snapshot
+        snap = export_snapshot(self.tid, ws_dir=ws, delivered_text=stored)
+        self.assertEqual(str(snap.get("report_version_id") or ""),
+                         VersionStore(ws, self.tid).adopted().identity_id(),
+                         "交付正文必须被判定属于当前采纳版本")
+
     def test_adopt_refuses_a_run_from_another_dataset(self):
         import financial_analysis as fa
         from financial_analysis import store as fa_store

@@ -75,7 +75,18 @@ export default function TaskConsole() {
 
   // 从 URL 恢复会话（历史页“继续对话”跳转）
   useEffect(() => {
-    const conv = new URLSearchParams(window.location.search).get('conv')
+    const params = new URLSearchParams(window.location.search)
+    // 深链 `/?task=<id>`：直接打开某个任务的报告与研究工作台。
+    // 为什么需要：报告与工作台只认 `report.taskId`，而它此前只能由“本标签页提交的任务”或
+    // 会话历史（`?conv=`）设置 —— 于是**没有会话绑定**的历史任务（脚本产出、K2 复算包等）
+    // 在页面上没有任何入口，只能用接口看，工作台永远点不到（架构复核：带登录会话的真实点击
+    // 因此一直无法进行）。深链比会话更具体，优先于 `conv`。
+    const deepTask = (params.get('task') || '').trim()
+    if (deepTask) {
+      useTaskStore.setState({ currentTaskId: deepTask })
+      return
+    }
+    const conv = params.get('conv')
     if (conv) {
       setActiveConversation(conv)
       setTab('context')

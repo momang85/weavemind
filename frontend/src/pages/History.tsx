@@ -200,6 +200,17 @@ export default function History() {
                   <StatusBadge status={t.status} />
                   <span className="text-slate-600 text-xs">{formatLocalTime(t.created_at)}</span>
                 </button>
+                {expanded.has('task-' + t.task_id) && (
+                  <div className="px-5 pt-4 border-t border-slate-800 flex items-center justify-between">
+                    <span className="text-slate-500 text-xs">在工作台里看这份任务的报告、复算与导出版本</span>
+                    <button
+                      onClick={() => { window.location.href = '/?task=' + encodeURIComponent(t.task_id) }}
+                      className="text-xs px-3 py-1.5 rounded-lg bg-cyan-500/10 text-cyan-300 border border-cyan-500/30 hover:bg-cyan-500/20"
+                    >
+                      打开研究工作台
+                    </button>
+                  </div>
+                )}
                 {expanded.has('task-' + t.task_id) && t.report && (
                   <div className="px-5 pb-4 border-t border-slate-800">
                     <div className="mt-3 text-slate-400 text-xs leading-relaxed max-h-96 overflow-y-auto">

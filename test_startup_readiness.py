@@ -1728,5 +1728,35 @@ class TestOrchestratorOwnership(unittest.TestCase):
                              "未持有归属不得恢复执行任何收执")
 
 
+    def test_ownership_claim_waits_out_a_stale_lease_after_restart(self):
+        """`launcher.py restart` 的让位窗口：旧编排器刚被杀、租约还没到期时不能直接退出。
+
+        实机反例（2026-09-30）：重启后新编排器"拒绝启动：已有编排器实例 … 在运行（租约
+        30s 内）"→ 15/16、"研究能力未就绪"，再重启一次才恢复。这里钉住有界等待：
+        旧租约过期后接管成功；**活着的**持有者不会让位（等满上限仍拒绝）。
+        """
+        import orchestrator_v2 as ov2
+        calls = []
+
+        def claim(_r):
+            calls.append(1)
+            return (len(calls) >= 3, "已有编排器实例 inst-old 在运行（租约 30s 内）"
+                    if len(calls) < 3 else "本实例 inst-new 持有租约")
+
+        with mock.patch.object(ov2.time, "sleep") as slept:
+            ok, why = ov2.claim_ownership_with_wait(object(), wait_seconds=10, claim=claim)
+        self.assertTrue(ok, why)
+        self.assertEqual(len(calls), 3, "等到租约过期后必须重试接管")
+        self.assertEqual(slept.call_count, 2, "等待要有界、可预期（不是忙等）")
+
+        calls.clear()
+        with mock.patch.object(ov2.time, "sleep"):
+            ok2, why2 = ov2.claim_ownership_with_wait(
+                object(), wait_seconds=10,
+                claim=lambda _r: (calls.append(1) or False, "已有活实例"))
+        self.assertFalse(ok2, "活着的持有者不会让位：必须仍然拒绝启动")
+        self.assertIn("活实例", why2)
+
+
 if __name__ == "__main__":
     unittest.main()

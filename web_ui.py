@@ -6051,19 +6051,59 @@ def _post_task_analysis_adopt(self, p, body, admin):
                                         note="分析工作台显式选择")
             except Exception:                       # noqa: BLE001 - 回填失败不影响本次采纳
                 pass
+        # **采纳后必须把这一版装配出的正文投影成交付正文**（2026-09-30 实机反例：带登录
+        # 会话在页面上点「采纳这版」→「导出当前包」恒 409「导出期间发生修订…请重试」）。
+        # 原因：采纳按所选运行重渲染正文并落成新版本，但任务记录里的交付正文还停在旧版，
+        # `export_snapshot` 于是判"交付正文与采纳版本不一致"——而重试永远不会好，正文不会
+        # 自己变。候选采纳与人工修订路径都写了这一步投影（`update_delivery_projection`，
+        # 见 `_post_task_candidate_adopt` / `_post_task_review_edit`），分析采纳漏了。
+        _report_body = str(asm.get("report") or "")
+        _projected = False
+        if _report_body:
+            try:
+                from task_state import update_delivery_projection
+                try:
+                    _adv_pub = _version_public(_adopted_v)
+                except Exception:                   # noqa: BLE001
+                    _adv_pub = {}
+                _acc = {
+                    "overall": str((_adv_pub.get("acceptance") or {}).get("overall") or ""),
+                    "gaps": list((_adv_pub.get("acceptance") or {}).get("gaps") or [])[:8],
+                    "rules_version": str(_adv_pub.get("rules_version") or ""),
+                    "rules_fingerprint": str(_adv_pub.get("rules_fingerprint") or ""),
+                    "report_sha256": str(((_adv_pub.get("acceptance") or {})
+                                          .get("report_sha256")) or ""),
+                    "version_bound": bool(_adv_pub.get("acceptance_for_this_body")),
+                }
+                # 失败任务上采纳（补材料后显式采纳）也要写正文：`allow_terminal` 只放开
+                # 正文/验收，**不写状态**（失败仍是失败）。
+                _projected = bool(update_delivery_projection(
+                    tid, report=_report_body, acceptance=_acc, status="",
+                    allow_terminal=True))
+                if not _projected:
+                    logger.warning(
+                        "分析采纳后交付投影未写入（task=%s）：交付正文与采纳版本可能不一致",
+                        tid)
+            except Exception as exc:                # noqa: BLE001 - 如实报，不假成功
+                logger.warning("分析采纳后交付投影写入失败（task=%s）：%s",
+                               tid, str(exc)[:160])
         ok = status == "verified"
         return self._json({
             "ok": ok, "adopted": True, "selection_saved": True,
             "adopted_run": run_id, "model_id": entry["model_id"],
             "identity_id": identity,
             "delivery_status": status,
+            "delivery_projected": _projected,
             "reason": str(asm.get("reason") or ""),
             "selection": fa_store.selection_status(
                 ws, dataset_hash=_cur_ds, rules_version=_rules),
             "packages": _pkg_statuses_for(tid),
             "note": ("采纳后正文/清单/导出指向同一次运行；新版本不继承旧批准"
                      + ("" if ok else "；**注意**：这一版仍未通过验收，交付状态如实为 "
-                        f"{status or 'draft'}，不算「已采纳成功」")),
+                        f"{status or 'draft'}，不算「已采纳成功」")
+                     + ("" if (_projected or not _report_body) else
+                        "；**注意**：交付正文未同步到本版，导出会被判「正文与采纳版本"
+                        "不一致」")),
         }, 200)
     except Exception as exc:                        # noqa: BLE001 - 如实报错，不假装成功
         logger.warning("分析结果采纳失败（task=%s）：%s", tid, str(exc)[:160])

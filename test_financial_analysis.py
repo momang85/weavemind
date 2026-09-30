@@ -1694,6 +1694,56 @@ class TestL2QuestionDrivenSelection(unittest.TestCase):
                 self.assertIn(qid, {t.qid for t in q.QUESTION_TYPES}, f"{m.model_id}/{qid}")
 
 
+class TestQ4ForecastStaysClosed(unittest.TestCase):
+    """Q4（09-30 深化）：**统计预测未开放**——预测类问题不得拿到"不回答它"的模型输出。
+
+    实测反例（修前读数）：问"预测洋河股份2025年营业收入和净利润"，计划未命中任何类型 →
+    退回"按输入齐备性选模型" → 采用全部 5 个模型（利润桥/现金质量/营运资金/情景/利润—现金），
+    读者会以为这些输出就是对"预测"的回答。现在预测类问题是**显式的问题类型**且无注册模型：
+    零采用 + 写明"不开放" + 门槛与禁用清单入口。
+    """
+
+    FORECAST_QUESTIONS = (
+        "预测洋河股份2025年营业收入和净利润",
+        "给出未来三年收入增长趋势并做回归",
+        "明年收入超过300亿的概率是多少",
+        "给出目标价与估值区间",
+    )
+
+    def test_forecast_questions_adopt_no_model(self):
+        for q in self.FORECAST_QUESTIONS:
+            with self.subTest(question=q):
+                plan = fa.compile_plan(q, _dataset())
+                self.assertIn("forecast_trend", plan.question_types, plan.question_types)
+                self.assertEqual([a.model_id for a in plan.adopted], [],
+                                 "预测未开放：不得用无关模型充当回答")
+                self.assertTrue(all(r["reason"] == "与所问问题无关" for r in plan.rejected),
+                                plan.rejected)
+                self.assertTrue(any("不开放" in n for n in plan.notes), plan.notes)
+                self.assertTrue(any("统计预测门槛与禁用清单" in n for n in plan.notes),
+                                "必须给出可行动的入口，而不是一句「不支持」")
+
+    def test_forecast_type_declares_no_model_and_a_gate(self):
+        from financial_analysis import questions as q
+        qt = q.question_type("forecast_trend")
+        self.assertEqual(qt.models, (), "未开放的类型不得绑定任何注册模型")
+        self.assertIn("5 个连续年度", qt.needs_note)
+        self.assertIn("不提供预测", qt.needs_note)
+
+    def test_negated_forecast_is_not_a_hit(self):
+        """「不做情景预测」仍只选现金类模型（否定语境不算命中）。"""
+        plan = fa.compile_plan("只研究现金转换，不做情景预测", _dataset())
+        self.assertNotIn("forecast_trend", plan.question_types, plan.question_types)
+        self.assertEqual({a.model_id for a in plan.adopted},
+                         {"profit_to_cash", "cash_quality"}, plan.rejected)
+
+    def test_history_question_still_works(self):
+        """对照：描述历史的归因问题不受影响（"利润变化趋势"不是预测命中词）。"""
+        plan = fa.compile_plan("分析2024年利润变化来自哪里、有没有转成现金", _dataset())
+        self.assertNotIn("forecast_trend", plan.question_types, plan.question_types)
+        self.assertTrue(plan.adopted, plan.rejected)
+
+
 class TestL1OfficialMaterialFeedsFacts(unittest.TestCase):
     """L1（09-30 深化，复核 S2）：**已准入的官方年报原文 → 财务事实 → 底稿 → 数据集 → 模型**。
 

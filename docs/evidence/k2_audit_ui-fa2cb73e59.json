@@ -2,30 +2,37 @@
  "task_id": "ui-fa2cb73e59",
  "workspace": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-fa2cb73e59",
  "before": {
-  "adopted_identity": "e5ae7ff61046738559398d500eff480a84ac4fa0f847349a5c5b718e8ef14b66",
+  "adopted_identity": "cc0d1c199b92b58ca34a62f4c2f96519611b21677318833aade606bc07e0c94c",
   "has_current": true,
-  "current": "deliverables_20260930_004010_092fdb.zip",
+  "current": "deliverables_20260930_130634_a6a57c.zip",
   "packages": [
    {
     "name": "deliverables_20260929_214007.zip",
     "status": "historical",
     "identity": "242b1e7b39ab04dc3e6b085c5a758e72f1a703da8123bd19030bfc180def2da9",
     "bytes": 715622,
-    "reason": "包内身份 242b1e7b39ab != 当前采纳 e5ae7ff61046：历史/过期包，不得当当前稿下载"
+    "reason": "包内身份 242b1e7b39ab != 当前采纳 cc0d1c199b92：历史/过期包，不得当当前稿下载"
    },
    {
     "name": "deliverables_20260930_004010_092fdb.zip",
-    "status": "current",
+    "status": "historical",
     "identity": "e5ae7ff61046738559398d500eff480a84ac4fa0f847349a5c5b718e8ef14b66",
     "bytes": 5622747,
+    "reason": "包内身份 e5ae7ff61046 != 当前采纳 cc0d1c199b92：历史/过期包，不得当当前稿下载"
+   },
+   {
+    "name": "deliverables_20260930_130634_a6a57c.zip",
+    "status": "current",
+    "identity": "cc0d1c199b92b58ca34a62f4c2f96519611b21677318833aade606bc07e0c94c",
+    "bytes": 5623363,
     "reason": ""
    }
   ]
  },
  "after": {
-  "adopted_identity": "e5ae7ff61046738559398d500eff480a84ac4fa0f847349a5c5b718e8ef14b66",
+  "adopted_identity": "cc0d1c199b92b58ca34a62f4c2f96519611b21677318833aade606bc07e0c94c",
   "has_current": true,
-  "current": "deliverables_20260930_004010_092fdb.zip",
+  "current": "deliverables_20260930_130634_a6a57c.zip",
   "note": "",
   "packages": [
    {
@@ -33,24 +40,31 @@
     "status": "historical",
     "identity": "242b1e7b39ab04dc3e6b085c5a758e72f1a703da8123bd19030bfc180def2da9",
     "bytes": 715622,
-    "reason": "包内身份 242b1e7b39ab != 当前采纳 e5ae7ff61046：历史/过期包，不得当当前稿下载"
+    "reason": "包内身份 242b1e7b39ab != 当前采纳 cc0d1c199b92：历史/过期包，不得当当前稿下载"
    },
    {
     "name": "deliverables_20260930_004010_092fdb.zip",
-    "status": "current",
+    "status": "historical",
     "identity": "e5ae7ff61046738559398d500eff480a84ac4fa0f847349a5c5b718e8ef14b66",
     "bytes": 5622747,
+    "reason": "包内身份 e5ae7ff61046 != 当前采纳 cc0d1c199b92：历史/过期包，不得当当前稿下载"
+   },
+   {
+    "name": "deliverables_20260930_130634_a6a57c.zip",
+    "status": "current",
+    "identity": "cc0d1c199b92b58ca34a62f4c2f96519611b21677318833aade606bc07e0c94c",
+    "bytes": 5623363,
     "reason": ""
    }
   ]
  },
  "frozen_zip": "",
- "current_zip": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-fa2cb73e59\\deliverables_20260930_004010_092fdb.zip",
+ "current_zip": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-fa2cb73e59\\deliverables_20260930_130634_a6a57c.zip",
  "package": {
-  "name": "deliverables_20260930_004010_092fdb.zip",
-  "bytes": 5622747,
-  "identity": "e5ae7ff61046738559398d500eff480a84ac4fa0f847349a5c5b718e8ef14b66",
-  "body_sha256": "9840d2adcdb6cfa5cd6a91cfd3a6bcccc508bef0d4aafc7adcfe437124dc5b8d",
+  "name": "deliverables_20260930_130634_a6a57c.zip",
+  "bytes": 5623363,
+  "identity": "cc0d1c199b92b58ca34a62f4c2f96519611b21677318833aade606bc07e0c94c",
+  "body_sha256": "d3e8dff43ec80dc7937ea10bc252e065ef6f32436e636095da2abeed0c3de2a5",
   "has_pdf": true,
   "has_paper": true,
   "charts": 6,
@@ -78,13 +92,14 @@
    "caliber": "合并"
   },
   "recomputable": true,
-  "files_checked": 16,
+  "files_checked": 17,
   "names": [
    "PACKAGE_MANIFEST.json",
    "analysis/analysis_runs.json",
    "analysis/context.json",
    "analysis/dataset.json",
    "analysis/plan.json",
+   "analysis/selection.json",
    "audit/model_report_full_4ace214f110a9011.md",
    "audit/model_report_full_4d2f88057169815b.md",
    "charts/chart_1.png",

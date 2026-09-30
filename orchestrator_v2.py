@@ -9610,6 +9610,35 @@ def release_orchestrator_ownership(r) -> bool:
         return False
 
 
+def claim_ownership_with_wait(r, *, wait_seconds: float | None = None,
+                              claim=None) -> tuple:
+    """认领编排器归属，**有界等待**让位（旧持有者被杀后它的租约还没到期）。
+
+    为什么需要等待（2026-09-30 实机）：`launcher.py restart` 先杀旧编排器再立刻拉起新进程，
+    旧进程的租约（服务端 TTL `OWNER_HB_TTL` 秒）仍在 → 新进程按单实例保证"拒绝启动"并
+    `return 2` 直接退出，实例从此少一个服务（15/16、"研究能力未就绪"），**再重启一次才好**。
+
+    等待不会削弱单实例保证：真正活着的一方会持续续租，等满上限仍然拒绝启动（如实报告，
+    只是晚 `OWNER_HB_TTL` 秒退出）。上限可用 `WM_OWNER_WAIT_SECONDS` 覆盖（0 = 不等待）。
+    """
+    _claim = claim or claim_orchestrator_ownership
+    ok, why = _claim(r)
+    waited = 0.0
+    try:
+        limit = float(OWNER_HB_TTL + 6.0 if wait_seconds is None else wait_seconds)
+    except Exception:                                # noqa: BLE001
+        limit = 0.0
+    while not ok and waited < max(0.0, limit):
+        step = min(5.0, max(0.0, limit) - waited)
+        time.sleep(step)
+        waited += step
+        ok, why = _claim(r)
+    if waited:
+        logger.info("编排器归属：等待 %.0fs 后%s（%s）", waited,
+                    "接管成功" if ok else "仍未取得租约", why)
+    return ok, why
+
+
 def start_owner_lease_renewal(r, *, interval: float = 0.0) -> threading.Thread:
     """后台续租线程：每 TTL/3 续一次；失租则停止派发并尝试重新认领。
 
@@ -9954,7 +9983,7 @@ def main():
     # pub/sub 是广播语义——两个编排器都会收到同一条任务请求，各自执行一次
     # （重复付费、重复写库）。所以这里显式认领；已有别的活实例就**明确拒绝启动**，
     # 而不是默默重复消费。上一位持有者没有心跳（崩溃/重启）时允许接管。
-    _owner_ok, _owner_why = claim_orchestrator_ownership(r)
+    _owner_ok, _owner_why = claim_ownership_with_wait(r)
     if not _owner_ok:
         logger.error("拒绝启动：%s", _owner_why)
         return 2

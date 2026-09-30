@@ -204,6 +204,30 @@ class TestL0BAnalysisSelectionWiring(unittest.TestCase):
         self.assertIn("encodeURIComponent(name)", src, "只打开判定出来的那一个包")
 
 
+class TestTaskDeepLinkOpensTheWorkbench(unittest.TestCase):
+    """`/?task=<id>` 深链：没有会话绑定的历史任务也要能在页面上打开研究工作台。
+
+    为什么是必要的：报告与工作台只认 `report.taskId`，而它此前只能由"本标签页提交的任务"
+    或 `?conv=`（会话最后一条消息）设置——脚本产出/复算包这类**没有会话**的任务在页面上
+    毫无入口，"带登录会话的真实点击"因此无法进行（只能用接口看）。
+    """
+
+    CONSOLE = SRC / "pages" / "TaskConsole.tsx"
+    HISTORY = SRC / "pages" / "History.tsx"
+
+    def test_console_reads_the_task_param(self):
+        src = self.CONSOLE.read_text(encoding="utf-8")
+        self.assertIn("params.get('task')", src, "控制台要读 ?task= 深链")
+        self.assertIn("currentTaskId: deepTask", src, "深链必须真的绑定到该任务")
+        self.assertIn("return", src.split("currentTaskId: deepTask", 1)[1][:120],
+                      "深链优先于 ?conv=（更具体的意图优先）")
+
+    def test_history_links_to_the_deep_link(self):
+        src = self.HISTORY.read_text(encoding="utf-8")
+        self.assertIn("'/?task=' + encodeURIComponent(t.task_id)", src,
+                      "历史页要能一键打开某个任务的工作台")
+
+
 class TestDemoBoundaryRealBehavior(unittest.TestCase):
     """演示边界必须由**真实行为测试**兜底，前缀清单只是补充。
 
