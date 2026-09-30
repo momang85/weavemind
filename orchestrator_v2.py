@@ -3634,6 +3634,24 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         except Exception as exc:                      # noqa: BLE001 - 建不出来就不发
             return None, f"执行许可无法建立：{str(exc)[:100]}"
 
+    def _begin_attempt_for(self, task_id: str) -> str:
+        """为本次运行创建**新尝试**（T0-b）：返回 attempt_id（失败返回空串）。
+
+        恢复/接管走同一入口——换了持有期就换尝试，旧续程的许可自然核不过。
+        """
+        try:
+            _gen = int((ownership_lease() or {}).get("gen") or 0)
+            permit = execution_permit.begin_attempt(
+                task_id, epoch=_gen, owner=_owner_fingerprint(),
+                ttl_seconds=execution_permit.DEFAULT_ATTEMPT_TTL,
+                store=self._permit_store())
+            logger.info("任务 %s 开始新尝试 %s（持有期 gen=%s）",
+                        task_id, permit.attempt_id, _gen)
+            return permit.attempt_id
+        except Exception as exc:                      # noqa: BLE001
+            logger.warning("任务 %s 创建尝试许可失败：%s", task_id, str(exc)[:120])
+            return ""
+
     def _send_gate(self, task_id: str, permit) -> str:
         """发送前闸门（空串=放行）：租约 → 许可（attempt/epoch/截止/取消）。
 
@@ -9891,18 +9909,8 @@ def run_and_finalize(orch, tid: str, goal: str, context: str = "", *,
                         f"令牌 …{_lease_s.get('token_tail')}）"))
         except Exception:                             # noqa: BLE001
             pass
-        # T0-b：**每次运行 = 一次新尝试**。恢复/接管必须换新 attempt_id——
-        # 旧续程拿着旧 attempt_id 一律核不过，所以"旧续程借新代号复活"在结构上不成立。
-        try:
-            _lease_gen = int((ownership_lease() or {}).get("gen") or 0)
-            _permit = execution_permit.begin_attempt(
-                tid, epoch=_lease_gen, owner=_owner_fingerprint(),
-                ttl_seconds=execution_permit.DEFAULT_ATTEMPT_TTL)
-            execution_permit.get_store().put(_permit)
-            logger.info("任务 %s 开始新尝试 %s（持有期 gen=%s）",
-                        tid, _permit.attempt_id, _lease_gen)
-        except Exception as exc:                      # noqa: BLE001
-            logger.warning("任务 %s 创建尝试许可失败：%s", tid, str(exc)[:120])
+        # T0-b：本次运行＝一次新尝试（恢复/接管换 attempt_id，旧续程核不过）
+        orch._begin_attempt_for(tid)
         result = orch.run(
             tid, goal, context, auto_run=auto_run, template_steps=template_steps,
             user_id=user_id, project=project, report_confirm=report_confirm,
