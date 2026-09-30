@@ -561,6 +561,11 @@ class TestStatusPortReadingIsSelfConsistent(unittest.TestCase):
                  "port": 8080, "url": "http://localhost:8080", "ready": False}
         with mock.patch.object(L, "readiness_report", return_value=stub), \
                 mock.patch.object(L, "web_port", return_value=8081), \
+                mock.patch.object(L, "_pids_file_state", return_value="ok"), \
+                mock.patch.object(L, "_read_pids",
+                                  return_value={"services": {"webui": 1}}), \
+                mock.patch.object(L, "_is_alive", return_value=True), \
+                mock.patch.object(L, "_redis_source", return_value="portable"), \
                 mock.patch("builtins.print") as out:
             L.print_status()
         printed = " ".join(str(c) for c in out.call_args_list)
