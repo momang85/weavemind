@@ -507,11 +507,39 @@ def _budget_limits_from_file() -> Any:
     return limits_from_config(cfg)
 
 
+_ledger_errors: dict[str, str] = {}
+# 空上下文（没有根任务）的模型调用计数：**可见**，不静默放行。
+# T0-c 要求"后台线程显式继承 root"，正常情况下这里应恒为 0；
+# 非 0 说明还有调用没被归属（有日志、可断言），而不是"看不见所以没事"。
+_no_root_calls: dict[str, int] = {}
+
+
+def ledger_unavailable_reason(task_id: str) -> str:
+    """该任务最近一次建账失败的原因（没有失败返回空串）。"""
+    return str(_ledger_errors.get(str(task_id or "")) or "")
+
+
+def no_root_call_count() -> int:
+    """累计"没有根任务归属"的模型调用次数（诊断用）。"""
+    return int(sum(_no_root_calls.values()))
+
+
+def _note_no_root_call(stage: str, usage: str) -> None:
+    key = f"{stage}:{usage}"
+    _no_root_calls[key] = int(_no_root_calls.get(key) or 0) + 1
+    logger.warning("模型调用没有根任务归属（stage=%s usage=%s）：本次不记账；"
+                   "后台线程必须显式继承 root（累计 %d 次）",
+                   stage, usage, no_root_call_count())
+
+
 def _root_budget_for_task():
     """当前任务的根预算账本；没有任务上下文时返回 None（不记账、不拒绝）。
 
     **跨进程后端必须接上**（与编排器同一个 factory）：主进程与各 Worker 各有一份
     内存账本时，只接本地计数等于"每个进程各有一份额度"，上限管不住整次运行。
+
+    建账失败**记原因**（`ledger_unavailable_reason`）：显式有 root 却建不出账本时，
+    调用方必须据此**拒发**（"没账继续花"正是 F05 反例），而不是当成"没有根"。
     """
     tid = get_task_context()
     if not tid:
@@ -528,9 +556,10 @@ def _root_budget_for_task():
         b = RootBudget(tid, ws, _budget_limits_from_file(),
                        redis_factory=default_redis_factory,
                        multiprocess=multiprocess_default())
-    except Exception as exc:                 # noqa: BLE001 - 账本不可用不阻断调用
-        logger.warning("根任务账本不可用（task=%s）：本次不记账：%s",
-                       str(tid)[:40], str(exc)[:100])
+    except Exception as exc:                 # noqa: BLE001
+        _ledger_errors[str(tid)] = str(exc)[:200]
+        logger.error("根任务账本不可用（task=%s）：拒绝无账发送：%s",
+                     str(tid)[:40], str(exc)[:120])
         return None
     _root_budgets[tid] = b
     return b
@@ -540,9 +569,24 @@ def _budget_open(stage: str, attempt: int, max_tokens: int, *, usage: str = ""):
     """发送前开票（`stage`：llm / backup）；**预算不足时不发送**。
 
     抛带 `budget_exhausted` 标记的错误，调用方据此停止后续尝试而不是重试。
+
+    T0-c：**显式有 root 而账本建不出来 → 拒发**（旧实现返回 `(None, "")` 继续放行，
+    那次请求既不记账也不受上限约束）。完全没有根上下文的调用仍放行，但**留痕**：
+    后台线程必须显式继承 root（`_note_no_root_call`）。
     """
+    tid = get_task_context()
     b = _root_budget_for_task()
     if b is None:
+        if tid:
+            _record_llm_call(tid, stage=usage or stage, attempt=attempt,
+                             max_tokens=max_tokens, error_class="budget_unavailable",
+                             end_reason="ledger_unavailable")
+            err = LLMCallError(
+                "根任务账本不可用，拒绝发送该请求（不无账执行）："
+                f"{ledger_unavailable_reason(tid)[:100]}")
+            setattr(err, "budget_exhausted", True)
+            raise err
+        _note_no_root_call(stage, usage)
         return None, ""
     try:
         ticket = b.reserve(stage, calls=1, tokens=int(max_tokens or 0),

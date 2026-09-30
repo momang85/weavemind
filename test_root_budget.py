@@ -27,6 +27,7 @@ sys.path.insert(0, str(ROOT))
 
 import root_budget as rb  # noqa: E402
 import workspace as ws_mod  # noqa: E402
+import orchestrator_v2 as ov  # noqa: E402
 
 
 class _Clock:
@@ -443,7 +444,13 @@ class TestTokenReservationIsUpperBound(unittest.TestCase):
 
 
 class _AtomicFakeRedis:
-    """支持 incrby/decrby/get 的替身：模拟两个进程共用一份 Redis 计数。"""
+    """支持 incrby/decrby/get 的替身：模拟两个进程共用一份 Redis 计数。
+
+    T0-c 起还要模拟**共享票据状态机**的 `hset/expire/eval`：生产走 Redis Lua
+    （脚本内一次完成"读状态 → 改状态 → 改计数"），替身按同一语义**一次性**应用。
+    替身没有 `eval` 时会被当成"共享侧无法原子迁移"（有界任务据此拒发）——
+    那正是要保证的语义，所以替身必须真的实现它，而不是让用例绕过去。
+    """
 
     def __init__(self, shared: dict):
         self._kv = shared
@@ -458,7 +465,62 @@ class _AtomicFakeRedis:
 
     def get(self, key):
         v = self._kv.get(key)
+        if isinstance(v, dict):
+            return None
         return None if v is None else str(v)
+
+    # ---- 票据状态机（替身侧等价实现） ----
+
+    def hset(self, key, mapping=None, **kw):
+        h = self._kv.get(key)
+        if not isinstance(h, dict):
+            h = {}
+            self._kv[key] = h
+        for k, v in dict(mapping or {}, **kw).items():
+            h[str(k)] = str(v)
+        return len(h)
+
+    def expire(self, key, seconds):
+        return True
+
+    def eval(self, script, numkeys, *args):
+        keys = [str(x) for x in list(args)[:int(numkeys)]]
+        argv = list(args)[int(numkeys):]
+        if "WM_OP settle" in script:
+            tk, tok = keys[0], keys[1]
+            upper, actual = int(argv[0]), int(argv[1])
+            allow_unsettled = str(argv[2]) == "1"
+            st = (self._kv.get(tk) or {}).get("state")
+            if st is None:
+                return "unknown_ticket"
+            if st != "OPEN" and not (st == "UNSETTLED" and allow_unsettled):
+                return st
+            self._kv.setdefault(tk, {})["state"] = "SETTLED"
+            self._kv.setdefault(tk, {})["actual_tokens"] = str(actual)
+            self._kv[tok] = int(self._kv.get(tok, 0)) - upper + actual
+            return "ok"
+        if "WM_OP refund" in script:
+            tk, ck, tok = keys[0], keys[1], keys[2]
+            calls, upper = int(argv[0]), int(argv[1])
+            st = (self._kv.get(tk) or {}).get("state")
+            if st is None:
+                return "unknown_ticket"
+            if st != "OPEN":
+                return st
+            self._kv.setdefault(tk, {})["state"] = "REFUNDED"
+            self._kv[ck] = int(self._kv.get(ck, 0)) - calls
+            self._kv[tok] = int(self._kv.get(tok, 0)) - upper
+            return "ok"
+        if "WM_OP unsettled" in script:
+            tk = keys[0]
+            st = (self._kv.get(tk) or {}).get("state")
+            if st is None:
+                return "unknown_ticket"
+            if st != "OPEN":
+                return st
+            self._kv.setdefault(tk, {})["state"] = "UNSETTLED"
+            return "ok"
+        raise AssertionError(f"替身不认识的脚本：{script[:60]}")
 
 
 class TestCrossProcessReservation(unittest.TestCase):
@@ -1668,6 +1730,188 @@ class TestWriterMerge(unittest.TestCase):
         self.assertEqual(fresh["ledger_id"], "other-run")
         self.assertEqual(fresh["calls_reserved"], 6, "本轮 1 次 + 同身份已有的 5 次")
         self.assertNotIn("llm", fresh["stages"], "上一轮（身份不同）的阶段计数不并入")
+
+
+class _HookRedis(_AtomicFakeRedis):
+    """在"结算"两侧都能插队的替身（模拟另一个进程抢在中间花钱）。
+
+    - 旧实现：结算 = 两次非原子写（先退上界、再记实际），插队发生在**两次写之间**
+      （`incrby/decrby` 入口）；
+    - 新实现：结算 = 一次 `eval`（事务），插队只能发生在**事务开始之前**。
+    两侧都插，才能证明"插队不再落在窗口里"。
+    """
+
+    def __init__(self, shared: dict, hook: dict):
+        super().__init__(shared)
+        self._hook = hook
+
+    def _fire(self, when: str) -> None:
+        fn = self._hook.get("fn")
+        if fn is None or self._hook.get("when") != when:
+            return
+        self._hook["fn"] = None
+        self._hook["fired"] = int(self._hook.get("fired") or 0) + 1
+        try:
+            fn()
+        except Exception as exc:                      # noqa: BLE001 - 插队被拒是预期
+            self._hook["refused"] = True
+            self._hook["error"] = str(exc)[:120]
+
+    def incrby(self, key, amount):
+        if str(key).endswith(":tokens"):
+            self._fire("write")
+        return super().incrby(key, amount)
+
+    def decrby(self, key, amount):
+        if str(key).endswith(":tokens"):
+            self._fire("write")
+        return super().decrby(key, amount)
+
+    def eval(self, script, numkeys, *args):
+        if "WM_OP settle" in str(script):
+            self._fire("eval")
+        return super().eval(script, numkeys, *args)
+
+
+class TestAtomicTicketSettlement(unittest.TestCase):
+    """T0-c：票据迁移必须是**一次**原子操作（F05 反例）。"""
+
+    def setUp(self):
+        os.environ.pop("WM_SINGLE_PROCESS", None)     # 生产语义：多进程共享账本
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_atomic_"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.addCleanup(lambda: os.environ.pop("WM_SINGLE_PROCESS", None))
+
+    def _pair(self, hook: dict, *, max_tokens: int = 100, tag: str = "a"):
+        """一对共享同一账本的实例；**每次调用自带工作区**（避免用例之间串账）。"""
+        kv: dict = {}
+        ws = Path(tempfile.mkdtemp(prefix=f"wm_atomic_{tag}_"))
+        self.addCleanup(shutil.rmtree, ws, ignore_errors=True)
+        redis = _HookRedis(kv, hook)
+        factory = lambda: redis                             # noqa: E731
+        limits = rb.BudgetLimits(max_tokens=max_tokens)
+        b_a = rb.RootBudget(f"t-at-{tag}", ws, limits,
+                            redis_factory=factory, multiprocess=True)
+        b_b = rb.RootBudget(f"t-at-{tag}", ws, limits,
+                            redis_factory=factory, multiprocess=True)
+        return b_a, b_b, kv
+
+    def test_b_reserve_cannot_slip_into_settlement_window(self):
+        """cap1000 / A 预留 800；B 的 800 在**结算两侧**都必须被拒（旧实现合计 1600）。"""
+        # ① 旧路径的窗口：结算里的两次非原子写之间
+        hook: dict = {"fn": None, "when": "write", "fired": 0}
+        b_a, b_b, kv = self._pair(hook, max_tokens=1000)
+        t = b_a.reserve("llm", tokens=800)
+        self.assertTrue(t)
+
+        def _b_tries():
+            b_b.reserve("llm", tokens=800)
+
+        hook["fn"] = _b_tries
+        b_a.settle(t, tokens=800, usage_known=True)
+        key = b_a._keys()["tokens"]
+        self.assertEqual(hook["fired"], 0,
+                         "结算不该再走两次非原子写（那正是旧路径的窗口）")
+        self.assertEqual(int(kv[key]), 800, "上界换成实际后共享计数仍是 800")
+
+        # ② 事务开始**之前**插队：同样必须被拒（A 的 800 还占着额度）
+        hook2: dict = {"fn": _b_tries, "when": "eval", "fired": 0, "refused": False}
+        b2_a, _b2_b, kv2 = self._pair(hook2, max_tokens=1000)
+        t2 = b2_a.reserve("llm", tokens=800)
+        self.assertTrue(t2)
+        b2_a.settle(t2, tokens=800, usage_known=True)
+        self.assertEqual(hook2["fired"], 1, "插队应被安排到结算事务开始之前")
+        self.assertTrue(hook2.get("refused"), "B 的 800 必须被拒（不得合计 1600）")
+        self.assertEqual(int(kv2[b2_a._keys()["tokens"]]), 800,
+                         "共享计数不得被插队撑到 1600")
+
+    def test_shared_ticket_state_machine_refuses_second_transition(self):
+        """共享状态机是唯一裁决：一张票只能结算一次，陈旧副本不能独立释放。"""
+        hook: dict = {"fn": None, "when": ""}
+        b_a, b_b, kv = self._pair(hook, max_tokens=1000)
+        t = b_a.reserve("llm", tokens=80)
+        tk = b_a._ticket_key(t)
+        self.assertEqual(kv[tk]["state"], "OPEN", "预留即登记 OPEN 票据")
+        b_a.settle(t, tokens=20, usage_known=True)
+        self.assertEqual(kv[tk]["state"], "SETTLED")
+        key = b_a._keys()["tokens"]
+        self.assertEqual(int(kv[key]), 20,
+                         "上界换成实际（旧实现会先退 80 再记 20，或双扣走负）")
+        # 另一个进程拿着这张票再来一次：共享状态机直接拒，且不改计数
+        self.assertEqual(
+            b_b._remote_ticket_op("settle", t, upper_tokens=80, actual_tokens=20),
+            "SETTLED")
+        self.assertEqual(int(kv[key]), 20, "被拒的第二次结算不得动共享计数")
+        self.assertEqual(
+            b_b._remote_ticket_op("refund", t, upper_tokens=80, calls=1), "SETTLED")
+
+    def test_unsettled_keeps_upper_and_reconcile_settles(self):
+        """待对账保留上界（可能仍在计费）；对账后按实际结算。"""
+        kv: dict = {}
+        b = rb.RootBudget("t-at2", self.tmp, rb.BudgetLimits(max_tokens=1000),
+                          redis_factory=lambda: _AtomicFakeRedis(kv),
+                          multiprocess=True)
+        t = b.reserve("llm", tokens=80)
+        b.mark_unsettled(t, reason="取消：放弃等待")
+        key = b._keys()["tokens"]
+        self.assertEqual(int(kv[key]), 80,
+                         "待对账不得释放上界（旧实现把它退了 → 0）")
+        self.assertTrue(b.reconcile(t, tokens=30, usage_known=True, note="供应商回执晚到"),
+                        "对账必须能按实际用量结算 UNSETTLED 票据")
+        self.assertEqual(int(kv[key]), 30, "上界换成实际用量")
+        self.assertEqual(b.snapshot()["calls"]["settled"], 1)
+        self.assertEqual(b.snapshot()["calls"]["unsettled"], 0)
+
+
+class TestLedgerFailureRefusesSend(unittest.TestCase):
+    """T0-c：显式有 root 而建账失败 → 拒发；空上下文调用必须**留痕**。"""
+
+    def setUp(self):
+        self.addCleanup(lc.clear_task_context)
+
+    def test_explicit_root_with_unbuildable_ledger_refuses(self):
+        lc.set_task_context("t-budget-1")
+        with mock.patch.object(lc, "_root_budget_for_task", return_value=None), \
+                mock.patch.object(lc, "ledger_unavailable_reason",
+                                  return_value="磁盘只读"):
+            with self.assertRaises(lc.LLMCallError) as ctx:
+                lc._budget_open("llm", 1, 100, usage="plan")
+        self.assertTrue(getattr(ctx.exception, "budget_exhausted", False),
+                        "必须是可识别的拒发信号（调用方不得重试）")
+        self.assertIn("账本不可用", str(ctx.exception))
+
+    def test_no_root_call_is_visible_not_silent(self):
+        lc.clear_task_context()
+        before = lc.no_root_call_count()
+        budget, ticket = lc._budget_open("llm", 1, 100, usage="plan")
+        self.assertIsNone(budget)
+        self.assertEqual(ticket, "")
+        self.assertEqual(lc.no_root_call_count(), before + 1,
+                         "没有根归属的调用必须计数留痕（不静默放行）")
+
+
+class TestBackgroundThreadInheritsRoot(unittest.TestCase):
+    """T0-c：后台自迭代/反思线程必须显式继承根任务（否则不记账、不受上限）。"""
+
+    def test_helper_binds_root_into_background_thread(self):
+        import threading as _th
+        o = ov.OrchestratorV2.__new__(ov.OrchestratorV2)
+        seen: dict = {}
+        done = _th.Event()
+
+        def _fn():
+            seen["tid"] = lc.get_task_context()
+            done.set()
+
+        o._background_with_root("t-bg-1", _fn)
+        self.assertTrue(done.wait(5.0), "后台线程没跑起来")
+        self.assertEqual(seen["tid"], "t-bg-1", "后台线程必须看得到根任务")
+
+    def test_prompt_refinery_thread_binds_root(self):
+        src = Path("orchestrator_v2.py").read_text(encoding="utf-8")
+        self.assertIn("_background_with_root(task_id, _refine_async)", src,
+                      "提示词自迭代不得再用裸 Thread（那会让调用没有 root）")
+        self.assertNotIn("threading.Thread(target=_refine_async", src)
 
 
 if __name__ == "__main__":

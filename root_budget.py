@@ -119,6 +119,10 @@ INFLIGHT_SETTLE_SECONDS = float(
     os.environ.get("WM_INFLIGHT_SETTLE_SECONDS", "900") or 900
 )
 
+# T0-c：共享票据键的存活时间。票据只是状态机（OPEN→SETTLED/…），
+# 结算/退票后仍留一会儿供对账与重复迁移判定（旧票被当作 unknown 是安全的）。
+TICKET_TTL_SECONDS = int(os.environ.get("WM_BUDGET_TICKET_TTL_SECONDS", "86400") or 86400)
+
 
 @dataclass
 class BudgetLimits:
@@ -390,7 +394,11 @@ class RootBudget:
         """
         base = f"wm:budget:{self.root_task_id}:{self.state.ledger_id}"
         return {"calls": f"{base}:calls", "tokens": f"{base}:tokens",
-                "seq": f"{base}:seq"}
+                "seq": f"{base}:seq", "tk": f"{base}:tk:"}
+
+    def _ticket_key(self, ticket: str) -> str:
+        """共享票据键：票据状态机（OPEN→SETTLED/UNSETTLED/REFUNDED）的唯一真源。"""
+        return f"{self._keys()['tk']}{ticket}"
 
     def _bounded_requires_shared(self) -> bool:
         """显式有界任务是否要求跨进程共享计数。
@@ -827,6 +835,13 @@ class RootBudget:
             entry["reserved"] = int(entry.get("reserved") or 0) + calls
             entry["tokens_reserved"] = int(entry.get("tokens_reserved") or 0) + tokens
             entry["last_at"] = now
+            # T0-c：共享侧登记 OPEN 票据。没有它，结算就没有"一次原子迁移"的前提；
+            # 有界任务在共享侧登记不出来时**拒绝发新请求**（不退回两次远程写的旧路径）。
+            _tk_state = self._open_ticket_remote(ticket, stage, calls, tokens)
+            if needs_shared and _tk_state != "ok":
+                self._undo_reservation_locked(ticket, stage, calls, tokens)
+                raise BudgetExceeded(
+                    "共享票据状态机不可用（无法原子迁移）：拒绝新付费请求，未知状态待对账")
             if not self._save() and needs_shared:
                 # 落盘不可信：这次预留**作废**（请求不发出），并把共享计数改回原样，
                 # 之后所有付费请求一律拒绝（"还剩多少额度"已无从判断）。
@@ -884,17 +899,110 @@ class RootBudget:
             return None
 
     def _take_open(self, ticket: str) -> dict | None:
-        """把票据从 `open` 取出（迁移的唯一入口）；不在 open 里返回 None。
+        """把票据从**本地** `open` 取出（只动本地快照；共享计数不在这里改）。
 
-        只释放**未发出调用的上界**（token）。调用次数不在这里退还——票据被取出
-        意味着"这次调用已经发生"（结算或转待对账），只有 `refund`（发送前失败）
-        才算没发生、才退还次数。
+        T0-c 更正：旧实现顺手在这里 `_release_tokens_remote(upper)`，于是
+        "结算"被拆成两次远程写（先退上界、再记实际），两次之间另一个进程的预留
+        可以插进来——cap100 / A 预留 80 的窗口里 B 也拿到 80，合计 160。
+        现在共享侧由 `_remote_ticket_op()` 的**一次**原子迁移负责，
+        本地只做镜像与拒绝判定。
         """
         rec = self.state.open_tickets.pop(ticket, None)
         if rec is None:
             return None
-        self._release_tokens_remote(int(rec.get("tokens") or 0))
         return rec
+
+    # ---- T0-c：共享票据状态机的**原子**迁移（一次 Lua / 等效事务） ----
+
+    _LUA_SETTLE = """
+    -- WM_OP settle: OPEN->SETTLED，tokens 计数 one-shot 换成实际用量
+    local st = redis.call('HGET', KEYS[1], 'state')
+    if st == false then return 'unknown_ticket' end
+    if st ~= 'OPEN' and not (st == 'UNSETTLED' and ARGV[3] == '1') then return st end
+    redis.call('HSET', KEYS[1], 'state', 'SETTLED', 'actual_tokens', ARGV[2])
+    local cur = tonumber(redis.call('GET', KEYS[2]) or '0')
+    redis.call('SET', KEYS[2], cur - tonumber(ARGV[1]) + tonumber(ARGV[2]))
+    return 'ok'
+    """
+    _LUA_REFUND = """
+    -- WM_OP refund: OPEN->REFUNDED，调用次数与 token 上界一起退回（这次没发生）
+    local st = redis.call('HGET', KEYS[1], 'state')
+    if st == false then return 'unknown_ticket' end
+    if st ~= 'OPEN' then return st end
+    redis.call('HSET', KEYS[1], 'state', 'REFUNDED')
+    redis.call('DECRBY', KEYS[2], tonumber(ARGV[1]))
+    local cur = tonumber(redis.call('GET', KEYS[3]) or '0')
+    redis.call('SET', KEYS[3], cur - tonumber(ARGV[2]))
+    return 'ok'
+    """
+    _LUA_UNSETTLED = """
+    -- WM_OP unsettled: OPEN->UNSETTLED，**不动计数**（可能仍在计费，上界留着）
+    local st = redis.call('HGET', KEYS[1], 'state')
+    if st == false then return 'unknown_ticket' end
+    if st ~= 'OPEN' then return st end
+    redis.call('HSET', KEYS[1], 'state', 'UNSETTLED')
+    return 'ok'
+    """
+
+    def _open_ticket_remote(self, ticket: str, stage: str,
+                            calls: int, tokens: int) -> str:
+        """在共享侧登记 OPEN 票据（结算的原子迁移以它为前提）。
+
+        返回 `'ok'` / `'unavailable'`（共享后端不可用或客户端不支持原子迁移）。
+        """
+        r = self._r()
+        if r is None or not hasattr(r, "hset"):
+            return "unavailable"
+        try:
+            key = self._ticket_key(ticket)
+            r.hset(key, mapping={"state": "OPEN", "stage": str(stage),
+                                 "upper_calls": int(calls), "upper_tokens": int(tokens)})
+            try:
+                r.expire(key, TICKET_TTL_SECONDS)
+            except Exception:
+                pass
+            self._established = True
+            return "ok"
+        except Exception as exc:                      # noqa: BLE001
+            logger.warning("共享票据登记失败（%s）：%s", ticket, str(exc)[:100])
+            self._mark_backend(False)
+            return "unavailable"
+
+    def _remote_ticket_op(self, op: str, ticket: str, *,
+                          upper_tokens: int = 0, actual_tokens: int = 0,
+                          calls: int = 1, allow_unsettled: bool = False) -> str:
+        """执行一次**原子**迁移。返回 `'ok'` / `'unknown_ticket'` / 既有状态 / `'unavailable'`。
+
+        生产走 Redis Lua（脚本内完成"读状态 → 改状态 → 改计数"）；
+        替身可以没有 `eval`——那时按"共享侧无法原子迁移"处理（有界任务据此拒发，
+        见 `reserve`），绝不退回"两次远程写"的旧路径（那正是要关掉的反例）。
+        """
+        r = self._r()
+        if r is None:
+            return "unavailable"
+        if not hasattr(r, "eval"):
+            return "unavailable"
+        k = self._keys()
+        script = {"settle": self._LUA_SETTLE, "refund": self._LUA_REFUND,
+                  "unsettled": self._LUA_UNSETTLED}.get(op)
+        if script is None:
+            return "unavailable"
+        try:
+            if op == "settle":
+                out = r.eval(script, 2, self._ticket_key(ticket), k["tokens"],
+                             int(upper_tokens), int(actual_tokens),
+                             "1" if allow_unsettled else "0")
+            elif op == "refund":
+                out = r.eval(script, 3, self._ticket_key(ticket), k["calls"], k["tokens"],
+                             int(calls), int(upper_tokens))
+            else:
+                out = r.eval(script, 1, self._ticket_key(ticket))
+            self._established = True
+            return str(out)
+        except Exception as exc:                      # noqa: BLE001
+            logger.warning("共享票据迁移失败（%s %s）：%s", op, ticket, str(exc)[:100])
+            self._mark_backend(False)
+            return "unavailable"
 
     def _release_tokens_remote(self, tokens: int, *, actual: int | None = None) -> None:
         """跨进程 token 计数回退：`actual=None` 表示整笔上界退回（发送前失败）；
@@ -952,12 +1060,34 @@ class RootBudget:
             actual = max(0, int(tokens or 0))
             # token：上界换成实际；调用次数不退（这次调用已经发生了）
             upper = int(rec.get("tokens") or 0)
+            # T0-c：共享计数在**一次原子迁移**里完成 swap（旧实现先退上界、后记实际，
+            # 两次远程写之间另一个进程的预留会插进来 → cap100 被用成 160）。
+            _remote = self._remote_ticket_op("settle", ticket,
+                                             upper_tokens=upper, actual_tokens=actual)
+            if _remote == "unavailable" and self._shared_available():
+                # 共享侧读得到、却做不了原子迁移：不能凭本地副本独立释放（跨进程会双扣），
+                # 如实转待对账、留痕，并拒绝后续新请求由调用方按预算异常处理。
+                logger.error("票据 %s 结算时共享状态机不可用：记待对账（不按本地副本释放）", ticket)
+                self.state.unsettled_tickets[ticket] = dict(rec, unsettled=True,
+                                                            reason="settle_remote_unavailable")
+                self.state.calls_unsettled += 1
+                self.state.tokens_unsettled += upper
+                self._reject("settle_remote_unavailable", ticket,
+                             "共享票据状态机不可用：转待对账，不双扣")
+                self._save()
+                return
+            if _remote not in ("ok", "unavailable"):
+                # 共享侧说这张票已经不是 OPEN（另一个进程结算过了）：**本地这份是陈旧副本**，
+                # 不得据此独立释放（否则共享计数被扣两次、走负）。放回并如实拒绝。
+                self.state.open_tickets[ticket] = rec
+                self._reject("settle_not_open_remote", ticket,
+                             f"共享票据状态={_remote}，不重复结算")
+                self._save()
+                return
             self.state.tokens_reserved = max(0, self.state.tokens_reserved - upper)
-            # `_take_open` 已把预留上界整笔退回共享计数（delta = -U）；这里只补记**实际
-            # 用量**（+A），合起来才是"上界换成实际"。此前两处都按 (A-U) 记，实际用量被
-            # 扣了两遍——共享 token 计数会一路走负，配了 `max_tokens` 也永远拒不了
-            # （实机 ui-706c5ef4a5：`wm:budget:…:tokens = -63188`）。
-            self._release_tokens_remote(0, actual=actual)
+            # `_remote_ticket_op('settle')` 已在**一次**原子迁移里把上界换成实际用量
+            # （delta = A - U）；本地不再重复改共享计数——旧实现这里还按 (A-U) 记一次，
+            # 共享 token 计数会一路走负（实机 ui-706c5ef4a5：`…:tokens = -63188`）。
             entry = self.state.stages.get(stage)
             if isinstance(entry, dict):
                 entry["open"] = [t for t in (entry.get("open") or [])
@@ -997,9 +1127,17 @@ class RootBudget:
             stage = str(rec.get("stage") or "")
             calls = int(rec.get("calls") or 1)
             upper = int(rec.get("tokens") or 0)
+            # T0-c：调用次数与 token 上界在**一次**原子迁移里一起退回
+            _remote = self._remote_ticket_op("refund", ticket,
+                                             upper_tokens=upper, calls=calls)
+            if _remote not in ("ok", "unavailable"):
+                # 共享侧说这张票不是 OPEN（已被别的进程结算/退票）→ 不得凭本地副本再退一次
+                self._reject("refund_not_open", ticket,
+                             f"共享票据状态={_remote}，不重复退回")
+                self._save()
+                return
             self.state.calls_reserved = max(0, self.state.calls_reserved - calls)
             self.state.tokens_reserved = max(0, self.state.tokens_reserved - upper)
-            self._release_calls_remote(calls)
             entry = self.state.stages.get(stage)
             if isinstance(entry, dict):
                 entry["open"] = [t for t in (entry.get("open") or [])
@@ -1032,6 +1170,15 @@ class RootBudget:
             stage = str(rec.get("stage") or "")
             rec["unsettled"] = True
             rec["reason"] = str(reason or "")[:200]
+            # T0-c：OPEN→UNSETTLED 也是**一次**原子迁移；且它**不动计数**——
+            # 供应商可能仍在计费，预留上界必须留在共享账上（旧实现经 `_take_open`
+            # 顺手把上界退了，账面少记一档，与"待对账"自相矛盾）。
+            _remote = self._remote_ticket_op("unsettled", ticket)
+            if _remote not in ("ok", "unavailable"):
+                self._reject("unsettled_not_open", ticket,
+                             f"共享票据状态={_remote}，不得再转待对账")
+                self._save()
+                return False
             # 供应商侧结算时限：这段时间内它仍可能被计费（与"取消在 UI 上多久生效"
             # 是两个不同的时限，分别记录，别用一个数糊过去）
             rec["reconcile_by"] = time.time() + INFLIGHT_SETTLE_SECONDS
@@ -1048,6 +1195,86 @@ class RootBudget:
                     + int(rec.get("tokens") or 0)
             self.state.calls_unsettled += 1
             self.state.tokens_unsettled += int(rec.get("tokens") or 0)
+            self._save()
+            return True
+
+    def _remote_ticket_info(self, ticket: str) -> dict:
+        """读共享票据的当前字段（状态/上界/阶段）——跨进程对账需要它。
+
+        为什么必须有：`unsettled_tickets` 是**本地文件**里的集合，另一个进程
+        （或重启后的恢复循环）看不到它；但共享票据上写着 `state=UNSETTLED` 与
+        `upper_tokens`，对账据此就能算，不必依赖本地那份记录。
+        """
+        r = self._r()
+        if r is None or not hasattr(r, "hgetall"):
+            return {}
+        try:
+            raw = r.hgetall(self._ticket_key(ticket)) or {}
+        except Exception as exc:                      # noqa: BLE001
+            logger.warning("读共享票据失败（%s）：%s", ticket, str(exc)[:100])
+            return {}
+        return {str(k): v for k, v in dict(raw).items()}
+
+    def reconcile(self, ticket: str, *, tokens: int = 0, note: str = "",
+                  usage_known: bool = False) -> bool:
+        """对账：把**待对账**票据按实际用量结算（UNSETTLED→SETTLED）。
+
+        与 `settle` 的唯一区别是它**允许**从 UNSETTLED 走：供应商回执可能晚到，
+        晚到也要如实入账（`used += actual`），而不是一直挂在"可能已花"。
+        远端成功但回执丢失时**不得**自动退款重试——先冻结待对账，等这里的对账结论。
+        """
+        if not ticket:
+            return False
+        with self._lock:
+            rec = self.state.unsettled_tickets.get(ticket)
+            if rec is None:
+                # 跨进程/重启后的对账：本地集合里没有，但**共享票据**说是待对账
+                # （`unsettled_tickets` 是本地文件状态，别的进程看不到）。
+                _info = self._remote_ticket_info(ticket)
+                if str(_info.get("state") or "") != "UNSETTLED":
+                    self._reject("reconcile_unknown_ticket", ticket,
+                                 "该票据不在待对账集合里（虚构或已对账）")
+                    self._save()
+                    return False
+                try:
+                    rec = {"stage": str(_info.get("stage") or "llm"),
+                           "tokens": int(float(_info.get("upper_tokens") or 0)),
+                           "calls": int(float(_info.get("upper_calls") or 1)),
+                           "unsettled": True, "reason": "shared_unsettled"}
+                except (TypeError, ValueError):
+                    self._reject("reconcile_unknown_ticket", ticket,
+                                 "共享票据上界不可读")
+                    self._save()
+                    return False
+            actual = max(0, int(tokens or 0))
+            upper = int(rec.get("tokens") or 0)
+            state = self._remote_ticket_op("settle", ticket, upper_tokens=upper,
+                                           actual_tokens=actual, allow_unsettled=True)
+            if state not in ("ok", "unavailable"):
+                self._reject("reconcile_not_unsettled", ticket,
+                             f"共享票据状态={state}，不得按待对账结算")
+                self._save()
+                return False
+            self.state.unsettled_tickets.pop(ticket, None)
+            self.state.tokens_reserved = max(0, self.state.tokens_reserved - upper)
+            self.state.calls_settled += 1
+            self.state.tokens_settled += actual
+            if usage_known:
+                self.state.tokens_actual += actual
+            else:
+                self.state.tokens_unknown_calls += 1
+            stage = str(rec.get("stage") or "")
+            entry = self.state.stages.get(stage)
+            if isinstance(entry, dict):
+                entry["settled"] = int(entry.get("settled") or 0) + 1
+                entry["tokens"] = int(entry.get("tokens") or 0) + actual
+                entry["tokens_reserved"] = max(
+                    0, int(entry.get("tokens_reserved") or 0) - upper)
+                entry["last_at"] = time.time()
+                if note:
+                    entry["last_note"] = str(note)[:200]
+            self.state.calls_unsettled = max(0, self.state.calls_unsettled - 1)
+            self.state.tokens_unsettled = max(0, self.state.tokens_unsettled - upper)
             self._save()
             return True
 

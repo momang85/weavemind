@@ -1,0 +1,105 @@
+{
+  "batch": "T0-c",
+  "generated_at": "2026-09-30T23:56:41+0800",
+  "isolation": {
+    "store": "真实 Redis（专属键前缀，仅本脚本使用）",
+    "processes": "每个步骤一个新起子进程",
+    "ledger": "同一份临时账本目录"
+  },
+  "checks": [
+    {
+      "step": "A 预留 800/1000",
+      "expected": true,
+      "actual": true,
+      "pass": true,
+      "detail": "{'ticket': 'llm-1-ad4-6477', 'refused': False}"
+    },
+    {
+      "step": "B 进程的 800 被拒（不得合计 1600）",
+      "expected": true,
+      "actual": true,
+      "pass": true,
+      "detail": "根任务剩余 token 不足（剩 200，需要 800）"
+    },
+    {
+      "step": "A 结算（实际 800）",
+      "expected": true,
+      "actual": true,
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "step": "结算后共享 tokens = 实际用量 800",
+      "expected": 800,
+      "actual": 800,
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "step": "结算后 B 的 800 仍被拒",
+      "expected": true,
+      "actual": true,
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "step": "共享票据状态 = SETTLED",
+      "expected": "SETTLED",
+      "actual": "SETTLED",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "step": "另一进程再结算同一张票被拒（状态机拒）",
+      "expected": "SETTLED",
+      "actual": "SETTLED",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "step": "被拒的第二次结算不改计数",
+      "expected": 800,
+      "actual": 800,
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "step": "A 再预留 100（剩余额度内）",
+      "expected": true,
+      "actual": true,
+      "pass": true,
+      "detail": "{'ticket': 'llm-2-1008-1d38', 'refused': False}"
+    },
+    {
+      "step": "转待对账",
+      "expected": true,
+      "actual": true,
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "step": "待对账**不释放**上界（800+100）",
+      "expected": 900,
+      "actual": 900,
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "step": "对账按实际用量结算",
+      "expected": true,
+      "actual": true,
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "step": "对账后共享 tokens = 800 + 40",
+      "expected": 840,
+      "actual": 840,
+      "pass": true,
+      "detail": ""
+    }
+  ],
+  "passed": 13,
+  "failed": 0,
+  "verdict": "pass"
+}

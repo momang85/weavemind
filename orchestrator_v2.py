@@ -3634,6 +3634,33 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         except Exception as exc:                      # noqa: BLE001 - 建不出来就不发
             return None, f"执行许可无法建立：{str(exc)[:100]}"
 
+    def _background_with_root(self, task_id: str, fn, *args, **kwargs):
+        """在**继承根任务上下文**的后台线程里跑 `fn`（T0-c）。
+
+        新线程默认拿到空 contextvars：此前自迭代线程里 `get_task_context()` 是空的，
+        于是 `_root_budget_for_task()` 返回 None → 那次模型调用**完全不记账**、
+        也不受上限约束（"没账继续花"）。这里在创建边界显式拷上下文并设根任务——
+        后台花费归原 root。
+        """
+        import contextvars
+        ctx = contextvars.copy_context()
+
+        def _run() -> None:
+            try:
+                from llm_client import set_task_context
+                ctx.run(set_task_context, task_id)
+            except Exception:
+                pass
+            try:
+                ctx.run(fn, *args, **kwargs)
+            except Exception as exc:                  # noqa: BLE001
+                logger.warning("后台调用失败（task=%s）：%s", task_id, str(exc)[:150])
+
+        th = threading.Thread(target=_run, daemon=True,
+                              name=f"bg-root-{task_id}")
+        th.start()
+        return th
+
     def _begin_attempt_for(self, task_id: str) -> str:
         """为本次运行创建**新尝试**（T0-b）：返回 attempt_id（失败返回空串）。
 
@@ -7167,7 +7194,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 logger.warning("prompt refinery async failed: %s", str(exc)[:150])
             return None
 
-        threading.Thread(target=_refine_async, daemon=True).start()
+        # T0-c：后台线程**显式继承根任务**（否则那次自迭代调用没有 root、
+        # 不记账也不受上限约束——F05 反例）
+        self._background_with_root(task_id, _refine_async)
 
         # F5：任务完成外部通知（后台线程，不阻塞完成流程）
         self._notify_done_async(task_id, goal, overall, report)
@@ -10338,7 +10367,9 @@ def main():
                         logger.error("Evolution error: %s", e)
                         push_progress(orch._messaging, task_id, "task_complete",
                                       {"status": "FAILED", "summary": f"Evolution error: {e}"})
-                threading.Thread(target=_run_evo, daemon=True).start()
+                # T0-c：进化竞技场在后台跑，同样必须带根任务上下文
+                # （否则它的模型调用没有归属、不记账）
+                orch._background_with_root(task_id, _run_evo)
                 continue
 
             # Run task in background thread（与"启动恢复"共用同一实现）
