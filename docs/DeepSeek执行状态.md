@@ -23,7 +23,13 @@
 > - **实机闭环**：`/?task=<id>` 深链 + 历史页入口；真浏览器真会话走通
 >   （错口令 401／无会话 401／选运行／改假设／复算／对比／采纳／导出）；顺带修掉
 >   **采纳后导不出来**（恒 409）与 **restart 后编排器拒绝启动**（租约 30s 窗口）两处缺陷。
-> - **R1-b 逐项贡献验证**（本批）：[20260930-R1b-componentwise.md](evidence/20260930-R1b-componentwise.md)
+> - **R2 前半（资料链）**：[20260930-R2a-R2b-material-version.md](evidence/20260930-R2a-R2b-material-version.md)
+>   —— ① 原稿/更正稿按**披露版本**裁决（去掉 first-match `break`，确定性排序 + 版本差异留痕 +
+>   多份材料互相补足），索引顺序不再改变读数；② 空/错误 `financials.json` **不再阻断**官方原文
+>   退路（按内容判可用，并说明"未采用"原因）。两条都有"不带修复即失败"的用例。
+>   **R2 后半未做**：50ms 慢头有界终止（需换成 http.client + 逐读 socket 超时并改夹具）、
+>   生产发现/准入共享同一总截止。
+> - **R1-b 逐项贡献验证**：[20260930-R1b-componentwise.md](evidence/20260930-R1b-componentwise.md)
 >   ——`ModelSpec.component_ids` 声明稳定分项 id、算子新增独立 `components_gold`、
 >   `validation` 恒定执行逐项核对（集合/数值/单位）并把合计降为附加检查；利润桥与
 >   `profit_to_cash` 的 ±10 抵消、情景基准 +10/使用者 −10、互换/缺 id/重复/少项全部失败，

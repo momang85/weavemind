@@ -1938,6 +1938,74 @@ class TestL1OfficialMaterialFeedsFacts(unittest.TestCase):
         self.assertAlmostEqual(vals["net_profit_change"],
                                (6673000000.0 - 10016000000.0), places=0)
 
+    def test_empty_financials_does_not_block_the_official_route(self):
+        """R2-b（09-30 下午复核）：`financials.json` 存在但内容空/错误 → 不得阻断官方年报退路。
+
+        反例：载荷 `{"error":"upstream unavailable","data":[]}` 时旧实现只看"
+        文件存在"，直接走结构化分支 → rows=0、paper_ok=false，官方 helper **调用 0 次**。
+        """
+        from working_paper_export import build_result
+        self._admit_material()
+        (self.ws / "project" / "financials.json").write_text(
+            json.dumps({"error": "upstream unavailable", "data": []},
+                       ensure_ascii=False), encoding="utf-8")
+        res = build_result(self.tid, self.goal, project="default")
+        self.assertTrue(res.get("ok"), res)
+        self.assertEqual(res.get("request_source"), "official_material", res)
+        self.assertGreater(res.get("rows") or 0, 0, res)
+        self.assertTrue(any("未采用" in n for n in (res.get("official_notes") or [])),
+                        f"必须说明为什么没用结构化载荷：{res.get('official_notes')}")
+
+    def test_report_version_arbitration_ignores_index_order(self):
+        """R2-a：同 as_of 下原稿/更正稿必须按**披露版本**裁决，目录顺序不得决定读数。
+
+        复核反例：仅调换索引顺序，2020 净利就从 −2,354,850,607.11 变成 −2,399,698,095.52。
+        """
+        import material_intake as mi
+        from working_paper_export import build_result
+
+        def _text(np_2024: float) -> str:
+            return self._TEXT.replace("6,673,000,000.00", f"{np_2024:,.2f}")
+
+        plan = [
+            {"material_id": "mat-orig", "title": "洋河股份2024年年度报告",
+             "disclosure_date": "2025-04-03", "np": 6673000000.0},
+            {"material_id": "mat-corr", "title": "洋河股份2024年年度报告（更正后）",
+             "disclosure_date": "2025-04-20", "np": 6873000000.0},
+        ]
+        entries, docs = [], {}
+        for spec in plan:
+            text = _text(spec["np"])
+            entries.append({**spec, "status": "admitted", "kind": "pdf",
+                            "url": f"https://static.cninfo.com.cn/{spec['material_id']}.PDF",
+                            "caliber": "合并", "material_id": spec["material_id"]})
+            docs[spec["material_id"]] = {"title": spec["title"], "text": text,
+                                         "url": entries[-1]["url"], "page_offsets": [(0, 12)]}
+        p = mock.patch.object(mi, "load_doc",
+                              lambda tid, mid, **kw: dict(docs.get(str(mid), {})))
+        p.start()
+        self.addCleanup(p.stop)
+
+        results = {}
+        for order in ([0, 1], [1, 0]):
+            seq = [entries[i] for i in order]
+            with mock.patch.object(mi, "read_index", lambda *a, **k: list(seq)):
+                res = build_result(self.tid, self.goal, project="default")
+            np24 = [f for f in (res.get("facts") or [])
+                    if f.get("metric") == "net_profit" and f.get("period") == "2024年"]
+            self.assertTrue(np24, res)
+            results[tuple(order)] = (float(np24[0]["value"]),
+                                     tuple(sorted((f.get("metric"), f.get("period"),
+                                                   f.get("value"))
+                                                  for f in (res.get("facts") or []))))
+            notes = " ".join(res.get("official_notes") or [])
+            self.assertIn("版本差异", notes, notes)
+            self.assertIn("更正", notes, notes)
+        self.assertEqual(results[(0, 1)][0], 6873000000.0,
+                         "披露更晚的更正稿应当胜出（不是索引里先出现的那份）")
+        self.assertEqual(results[(0, 1)], results[(1, 0)],
+                         "调换索引顺序不得改变任何读数")
+
     def test_late_disclosure_is_not_taken_into_facts(self):
         self._admit_material(disclosure_date="2025-06-30")   # 晚于契约 as_of=2025-04-30
         from working_paper_export import write_working_paper

@@ -84,17 +84,31 @@ def resolve_request(task_id: str, goal: str, metadata: dict,
     return parsed, candidates, "text"
 
 
+_VERSION_WORDS = ("更正", "修订", "重述", "更新后", "更正后")
+
+
+def _is_corrected(title: str) -> bool:
+    """标题里出现更正/修订/重述 → 这是**同一份披露的后续版本**（版本裁决要用它排序）。"""
+    return any(w in str(title or "") for w in _VERSION_WORDS)
+
+
 def _official_material_facts(task_id: str, request, *, project: str | None = None,
                              ws_dir=None) -> tuple[list, list[str]]:
-    """**已准入的官方原文** → 财务表事实（L1，2026-09-30 复核 S2）。
+    """**已准入的官方原文** → 财务表事实（L1，2026-09-30 复核 S2 / R2-a 版本裁决）。
 
     为什么需要它：`build_result` 此前没有 `financials.json` 就直接
     "skipped：没有结构化财务"——而结构化 API 不可用时，任务里其实**已经有**官方年报原文
     （K1 已经取件并准入），模型却一个数都拿不到。这里把同一份原文的财务表按**现役抽取器**
     变成事实，交给同一条底稿 → 数据集 → 受控分析链。
 
-    纪律：只用**已准入**（`status == admitted`）的材料；主体必须在材料里得到验证；披露日晚于
-    `as_of` 的一条不取；取不到就返回空并如实记原因（不猜、不补造）。
+    纪律（R2-a，2026-09-30 下午复核）：只用**已准入**材料；主体必须在材料里得到验证；
+    披露日晚于 `as_of` 的不取；**目录/索引顺序不得决定金融结论**——多份材料按
+    `(披露日, 是否更正稿, material_id)` 确定性排序后**逐版本裁决**：
+
+    - 同一 (指标, 期间, 口径) 由**披露更晚的版本**决定；更正/修订稿替代同口径原稿并留痕；
+    - 两个版本数值不同 → 记"版本差异"（两个值与两份材料 id 都留下），不静默择一；
+    - 单份材料缺某一期/某字段 → **继续用其它已准入材料补足**（此前抽到第一份就 `break`，
+      于是"先读到更正稿还是先读到原稿"会改变净利读数）。
     """
     notes: list[str] = []
     company = str(getattr(request, "company", "") or "")
@@ -111,7 +125,9 @@ def _official_material_facts(task_id: str, request, *, project: str | None = Non
         items = mi.read_index(task_id, project=project, ws_dir=ws_dir) or []
     except Exception as exc:                        # noqa: BLE001
         return [], [f"材料清单不可读：{str(exc)[:100]}"]
-    out: list = []
+
+    # ① 逐份抽取（不 break）：把"哪份材料给出哪些事实"整表读出来，供版本裁决
+    extracted: list[dict] = []
     for it in items:
         mid = str(it.get("material_id") or "")
         if not mid or str(it.get("status") or "") != "admitted":
@@ -127,36 +143,107 @@ def _official_material_facts(task_id: str, request, *, project: str | None = Non
         except Exception as exc:                    # noqa: BLE001
             notes.append(f"官方材料 {mid} 正文不可读：{str(exc)[:80]}")
             continue
+        title = str(it.get("title") or "")
         got = _facts.facts_from_annual_tables(
             doc, company=company, company_code=code, periods=periods, as_of=as_of,
             disclosed_at=disc, url=str(it.get("url") or ""))
-        if got:
-            # **同一主体/口径准入**（L1）：抽取器已核过"材料里能验证该主体"，
-            # 这里再按研究契约的稳定标识与口径核一遍，不合格的观察一条不进底稿
-            want_cal = str(getattr(request, "caliber", "") or "")
-            kept, drop = [], {"subject": 0, "caliber": 0}
-            for f in got:
-                ok, _why = _facts.check_subject(request, f.entity, f.entity_id, f.market)
-                if not ok:
-                    drop["subject"] += 1
-                    continue
-                if want_cal and str(getattr(f, "caliber", "") or "") != want_cal:
-                    drop["caliber"] += 1
-                    continue
-                kept.append(f)
-            if kept:
-                notes.append(f"官方材料 {mid}（{str(it.get('title') or '')[:40]}）："
-                             f"抽取到 {len(kept)} 条与契约相容的财务事实"
-                             + ("；已排除 " + "、".join(f"{k} {v} 条"
-                                                      for k, v in drop.items() if v)
-                                if any(drop.values()) else ""))
-                out.extend(kept)
-                break                               # 一份已准入年报即可（多年报在同一份里）
+        if not got:
+            notes.append(f"官方材料 {mid}：财务表没抽出可用事实"
+                         "（主体未验证/无三表/单位缺失）")
+            continue
+        # **同一主体/口径准入**（L1）：抽取器已核过"材料里能验证该主体"，
+        # 这里再按研究契约的稳定标识与口径核一遍，不合格的观察一条不进底稿
+        want_cal = str(getattr(request, "caliber", "") or "")
+        kept, drop = [], {"subject": 0, "caliber": 0}
+        for f in got:
+            ok, _why = _facts.check_subject(request, f.entity, f.entity_id, f.market)
+            if not ok:
+                drop["subject"] += 1
+                continue
+            if want_cal and str(getattr(f, "caliber", "") or "") != want_cal:
+                drop["caliber"] += 1
+                continue
+            kept.append(f)
+        if not kept:
             notes.append(f"官方材料 {mid}：抽到 {len(got)} 条但都不符合契约"
                          f"（主体/口径，见排除计数 {drop}）")
             continue
-        notes.append(f"官方材料 {mid}：财务表没抽出可用事实（主体未验证/无三表/单位缺失）")
-    return out, notes
+        notes.append(f"官方材料 {mid}（{title[:40]}）：抽取到 {len(kept)} 条与契约相容的"
+                     "财务事实"
+                     + ("；已排除 " + "、".join(f"{k} {v} 条"
+                                               for k, v in drop.items() if v)
+                        if any(drop.values()) else ""))
+        extracted.append({"material_id": mid, "title": title, "disclosure_date": disc,
+                          "corrected": _is_corrected(title), "facts": kept})
+    if not extracted:
+        return [], notes
+
+    # ② **版本裁决**：确定性排序（披露日 → 更正稿优先在后 → material_id），与索引顺序无关
+    extracted.sort(key=lambda e: (str(e["disclosure_date"]), 1 if e["corrected"] else 0,
+                                  str(e["material_id"])))
+    chosen: dict[tuple, object] = {}
+    source_of: dict[tuple, dict] = {}
+    for entry in extracted:
+        for f in entry["facts"]:
+            key = (str(getattr(f, "metric", "")), str(getattr(f, "period", "")),
+                   str(getattr(f, "caliber", "") or ""))
+            prev = source_of.get(key)
+            if prev is not None and prev["material_id"] != entry["material_id"]:
+                a, b = getattr(chosen[key], "value", None), getattr(f, "value", None)
+                try:
+                    same = a is not None and b is not None and abs(float(a) - float(b)) <= max(
+                        abs(float(b)) * 0.0005, 0.01)
+                except (TypeError, ValueError):
+                    same = False
+                if not same:
+                    notes.append(
+                        f"版本差异（{key[0]} {key[1]}）：{prev['material_id']}"
+                        f"（披露 {prev['disclosure_date'] or '未知'}）={a} vs "
+                        f"{entry['material_id']}（披露 {entry['disclosure_date'] or '未知'}"
+                        f"{'，更正/修订稿' if entry['corrected'] else ''}）={b}；"
+                        "按**披露更晚的版本**取值（目录顺序不参与裁决）")
+                elif entry["corrected"] and not prev["corrected"]:
+                    notes.append(f"更正/修订稿 {entry['material_id']} 与原稿 "
+                                 f"{prev['material_id']} 在 {key[0]} {key[1]} 上数值一致")
+            chosen[key] = f
+            source_of[key] = entry
+    # ③ 供数说明：哪些材料**真的进了底稿**（多份材料补足时逐条列出）
+    used = sorted({source_of[k]["material_id"] for k in chosen})
+    if len(used) > 1:
+        notes.append("多份已准入材料共同供数（缺期/缺字段互相补足）：" + "、".join(used))
+    elif extracted and len(extracted) > 1:
+        notes.append("已准入材料 " + str(len(extracted)) + " 份，"
+                     "按版本裁决只采用 " + "、".join(used))
+    return list(chosen.values()), notes
+
+
+def _financials_payload_usable(payload) -> tuple[bool, str]:
+    """`financials.json` 的载荷**按内容**判可用（R2-b，2026-09-30 下午复核）。
+
+    复核反例：文件存在但内容为 `{"error":"upstream unavailable","data":[]}` 时，旧实现只看
+    `fin_path.exists()` → 直接走结构化分支 → `rows=0`、`paper_ok=false`，**官方年报退路
+    一次都没被调用**（helper 调用 0 次）。"文件存在"不等于"有可用事实"。
+    """
+    if payload is None:
+        return False, "载荷不可解析"
+    if not isinstance(payload, dict):
+        return False, "载荷不是对象"
+    if payload.get("error"):
+        return False, f"载荷带 error：{str(payload.get('error'))[:60]}"
+    rows = payload.get("financials")
+    if not isinstance(rows, list) or not rows:
+        extra = payload.get("data")
+        return False, ("载荷没有 financials 行"
+                       + (f"（data={type(extra).__name__}"
+                          + (f"，{len(extra)} 项" if hasattr(extra, "__len__") else "")
+                          + "）" if extra is not None else ""))
+    try:
+        got = _facts.facts_from_financials(payload)
+    except Exception as exc:                        # noqa: BLE001
+        return False, f"解析失败：{str(exc)[:60]}"
+    if not got:
+        return False, "载荷解析后没有可用事实"
+    return True, ""
 
 
 def build_result(task_id: str, goal: str, *, project: str | None = None) -> dict:
@@ -171,12 +258,28 @@ def build_result(task_id: str, goal: str, *, project: str | None = None) -> dict
     """
     proj = task_project_dir(task_id, project) if project else task_project_dir(task_id)
     fin_path = Path(proj) / "financials.json"
-    if not fin_path.exists():
+    payload = None
+    fin_why = "文件不存在"
+    if fin_path.exists():
+        try:
+            payload = json.loads(fin_path.read_text(encoding="utf-8"))
+        except Exception as exc:                    # noqa: BLE001
+            payload = None
+            fin_why = f"载荷不可解析：{str(exc)[:60]}"
+        else:
+            _ok, fin_why = _financials_payload_usable(payload)
+            if _ok:
+                fin_why = ""
+    if fin_why:
+        # **空/错误载荷不得阻断官方年报退路**（R2-b）：按内容判不可用 → 走官方原文那条路，
+        # 并把"为什么没用结构化载荷"如实写进 notes（读者能分清"没有"与"坏了"）。
         request, _c, _s = resolve_request(task_id, goal, {}, {})
         off_facts, off_notes = _official_material_facts(task_id, request, project=project)
+        off_notes = [f"结构化财务载荷未采用：{fin_why}"] + list(off_notes)
         if not off_facts:
             return {"ok": False, "skipped": True,
-                    "reason": "没有结构化财务，也没有可用的已准入官方原文财务表：不产出底稿",
+                    "reason": ("没有可用的结构化财务（" + fin_why + "），"
+                               "也没有可用的已准入官方原文财务表：不产出底稿"),
                     "official_notes": off_notes}
         paper = build_working_paper(list(off_facts), request)
         return {"ok": True, "request": request.as_dict(), "request_source": "official_material",
