@@ -1,0 +1,493 @@
+{
+ "offline": true,
+ "model_calls": 0,
+ "paid": false,
+ "companies": [
+  {
+   "slug": "002304",
+   "company": "洋河股份",
+   "code": "002304.SZ",
+   "trait": "白酒：高毛利、轻资产、渠道预收",
+   "as_of": "2025-04-29",
+   "paper_ok": true,
+   "request_source": "official_material",
+   "rows": 22,
+   "derived": 14,
+   "question": "洋河股份 2023/2024 年经营分析：利润变化来自哪里、利润有没有转成现金、营运资金占用怎样、如果收入 +5% 毛利率 +1pp 会怎样",
+   "dataset": {
+    "label": "worker:working_paper.json",
+    "periods": [
+     "2023年",
+     "2024年"
+    ],
+    "observations": 36,
+    "usable": 36,
+    "gaps": [
+     "非年度期间（不参与年度模型，仍保留在观察集合里）：2024年同比、2024年较2023年"
+    ]
+   },
+   "subquestions": [
+    {
+     "clause": "洋河股份 2023/2024 年经营分析：利润变化来自哪里",
+     "kind": "history",
+     "answered": true,
+     "models": [
+      "profit_bridge"
+     ],
+     "note": "已采用 profit_bridge 回答这一子问题"
+    },
+    {
+     "clause": "利润有没有转成现金",
+     "kind": "history",
+     "answered": true,
+     "models": [
+      "profit_to_cash",
+      "cash_quality"
+     ],
+     "note": "已采用 profit_to_cash、cash_quality 回答这一子问题"
+    },
+    {
+     "clause": "营运资金占用怎样",
+     "kind": "history",
+     "answered": true,
+     "models": [
+      "working_capital"
+     ],
+     "note": "已采用 working_capital 回答这一子问题"
+    },
+    {
+     "clause": "如果收入 +5% 毛利率 +1pp 会怎样",
+     "kind": "scenario",
+     "answered": true,
+     "models": [
+      "scenario_sensitivity"
+     ],
+     "note": "已采用 scenario_sensitivity 回答这一子问题"
+    }
+   ],
+   "adopted": [
+    "profit_bridge",
+    "profit_to_cash",
+    "cash_quality",
+    "working_capital",
+    "scenario_sensitivity"
+   ],
+   "exploratory": [],
+   "notes": [
+    "按问题类型选择模型：利润变化归因、利润到现金的转化、营运资本占用与周转、条件情景与敏感性（命中词：利润变化、利润有没有转成现金、营运资金、如果收入）",
+    "以下词出现在**否定**语境里，未据此选模型：转成现金（字符串规则，读者可核对）"
+   ],
+   "runs": [
+    {
+     "model_id": "profit_bridge",
+     "status": "validated",
+     "reason": "",
+     "failed": [],
+     "main": {
+      "net_profit_change": -3342541438.15,
+      "gross_profit_change": -3800953659.19
+     }
+    },
+    {
+     "model_id": "profit_to_cash",
+     "status": "validated",
+     "reason": "",
+     "failed": [],
+     "main": {
+      "profit_change": -3342541438.15,
+      "cash_profit_gap_change": 1841031807.47
+     }
+    },
+    {
+     "model_id": "cash_quality",
+     "status": "validated",
+     "reason": "",
+     "failed": [],
+     "main": {
+      "cfo_minus_profit": -2044677364.84,
+      "cashflow_coverage": 69.36
+     }
+    },
+    {
+     "model_id": "working_capital",
+     "status": "validated",
+     "reason": "",
+     "failed": [],
+     "main": {
+      "working_capital_occupation_change": 945365113.29,
+      "receivable_days": 0.11
+     }
+    },
+    {
+     "model_id": "scenario_sensitivity",
+     "status": "validated",
+     "reason": "",
+     "failed": [],
+     "main": {
+      "scenario_net_profit": 8032843652.4,
+      "scenario_sensitivity": 288762969.94
+     }
+    }
+   ],
+   "residuals": [],
+   "status": "validated"
+  },
+  {
+   "slug": "600031",
+   "company": "三一重工",
+   "code": "600031.SH",
+   "trait": "装备制造：重资产、存货与应收占款重",
+   "as_of": "2025-04-18",
+   "paper_ok": true,
+   "request_source": "official_material",
+   "rows": 22,
+   "derived": 14,
+   "question": "三一重工 2023/2024 年经营分析：利润变化来自哪里、利润有没有转成现金、营运资金占用怎样、如果收入 +5% 毛利率 +1pp 会怎样",
+   "dataset": {
+    "label": "worker:working_paper.json",
+    "periods": [
+     "2023年",
+     "2024年"
+    ],
+    "observations": 36,
+    "usable": 36,
+    "gaps": [
+     "非年度期间（不参与年度模型，仍保留在观察集合里）：2024年同比、2024年较2023年"
+    ]
+   },
+   "subquestions": [
+    {
+     "clause": "三一重工 2023/2024 年经营分析：利润变化来自哪里",
+     "kind": "history",
+     "answered": true,
+     "models": [
+      "profit_bridge"
+     ],
+     "note": "已采用 profit_bridge 回答这一子问题"
+    },
+    {
+     "clause": "利润有没有转成现金",
+     "kind": "history",
+     "answered": true,
+     "models": [
+      "profit_to_cash",
+      "cash_quality"
+     ],
+     "note": "已采用 profit_to_cash、cash_quality 回答这一子问题"
+    },
+    {
+     "clause": "营运资金占用怎样",
+     "kind": "history",
+     "answered": true,
+     "models": [
+      "working_capital"
+     ],
+     "note": "已采用 working_capital 回答这一子问题"
+    },
+    {
+     "clause": "如果收入 +5% 毛利率 +1pp 会怎样",
+     "kind": "scenario",
+     "answered": true,
+     "models": [
+      "scenario_sensitivity"
+     ],
+     "note": "已采用 scenario_sensitivity 回答这一子问题"
+    }
+   ],
+   "adopted": [
+    "profit_bridge",
+    "profit_to_cash",
+    "cash_quality",
+    "working_capital",
+    "scenario_sensitivity"
+   ],
+   "exploratory": [],
+   "notes": [
+    "按问题类型选择模型：利润变化归因、利润到现金的转化、营运资本占用与周转、条件情景与敏感性（命中词：利润变化、利润有没有转成现金、营运资金、如果收入）",
+    "以下词出现在**否定**语境里，未据此选模型：转成现金（字符串规则，读者可核对）"
+   ],
+   "runs": [
+    {
+     "model_id": "profit_bridge",
+     "status": "validated",
+     "reason": "",
+     "failed": [],
+     "main": {
+      "net_profit_change": 1448000000.0,
+      "gross_profit_change": 1385760000.0
+     }
+    },
+    {
+     "model_id": "profit_to_cash",
+     "status": "validated",
+     "reason": "",
+     "failed": [],
+     "main": {
+      "profit_change": 1448000000.0,
+      "cash_profit_gap_change": 7658058000.0
+     }
+    },
+    {
+     "model_id": "cash_quality",
+     "status": "validated",
+     "reason": "",
+     "failed": [],
+     "main": {
+      "cfo_minus_profit": 8838827000.0,
+      "cashflow_coverage": 247.92
+     }
+    },
+    {
+     "model_id": "working_capital",
+     "status": "validated",
+     "reason": "",
+     "failed": [],
+     "main": {
+      "working_capital_occupation_change": -2115206000.0,
+      "receivable_days": 119.75
+     }
+    },
+    {
+     "model_id": "scenario_sensitivity",
+     "status": "validated",
+     "reason": "",
+     "failed": [],
+     "main": {
+      "scenario_net_profit": 7819893205.5,
+      "scenario_sensitivity": 777733910.0
+     }
+    }
+   ],
+   "residuals": [],
+   "status": "validated"
+  },
+  {
+   "slug": "000711",
+   "company": "京蓝科技",
+   "code": "000711.SZ",
+   "trait": "亏损期：净利为负、毛利率为负",
+   "as_of": "2021-04-27",
+   "paper_ok": true,
+   "request_source": "official_material",
+   "rows": 22,
+   "derived": 12,
+   "question": "京蓝科技 2019/2020 年经营分析：利润变化来自哪里、利润有没有转成现金、营运资金占用怎样、如果收入 +5% 毛利率 +1pp 会怎样",
+   "dataset": {
+    "label": "worker:working_paper.json",
+    "periods": [
+     "2019年",
+     "2020年"
+    ],
+    "observations": 34,
+    "usable": 34,
+    "gaps": [
+     "非年度期间（不参与年度模型，仍保留在观察集合里）：2020年同比、2020年较2019年"
+    ]
+   },
+   "subquestions": [
+    {
+     "clause": "京蓝科技 2019/2020 年经营分析：利润变化来自哪里",
+     "kind": "history",
+     "answered": true,
+     "models": [
+      "profit_bridge"
+     ],
+     "note": "已采用 profit_bridge 回答这一子问题"
+    },
+    {
+     "clause": "利润有没有转成现金",
+     "kind": "history",
+     "answered": true,
+     "models": [
+      "profit_to_cash",
+      "cash_quality"
+     ],
+     "note": "已采用 profit_to_cash、cash_quality 回答这一子问题"
+    },
+    {
+     "clause": "营运资金占用怎样",
+     "kind": "history",
+     "answered": true,
+     "models": [
+      "working_capital"
+     ],
+     "note": "已采用 working_capital 回答这一子问题"
+    },
+    {
+     "clause": "如果收入 +5% 毛利率 +1pp 会怎样",
+     "kind": "scenario",
+     "answered": true,
+     "models": [
+      "scenario_sensitivity"
+     ],
+     "note": "已采用 scenario_sensitivity 回答这一子问题"
+    }
+   ],
+   "adopted": [
+    "profit_bridge",
+    "profit_to_cash",
+    "cash_quality",
+    "working_capital",
+    "scenario_sensitivity"
+   ],
+   "exploratory": [],
+   "notes": [
+    "按问题类型选择模型：利润变化归因、利润到现金的转化、营运资本占用与周转、条件情景与敏感性（命中词：利润变化、利润有没有转成现金、营运资金、如果收入）",
+    "以下词出现在**否定**语境里，未据此选模型：转成现金（字符串规则，读者可核对）"
+   ],
+   "runs": [
+    {
+     "model_id": "profit_bridge",
+     "status": "validated",
+     "reason": "",
+     "failed": [],
+     "main": {
+      "net_profit_change": -1318104774.55,
+      "gross_profit_change": -421835117.39
+     }
+    },
+    {
+     "model_id": "profit_to_cash",
+     "status": "validated",
+     "reason": "",
+     "failed": [],
+     "main": {
+      "profit_change": -1318104774.55,
+      "cash_profit_gap_change": 1466915446.53
+     }
+    },
+    {
+     "model_id": "cash_quality",
+     "status": "validated",
+     "reason": "",
+     "failed": [],
+     "main": {
+      "cfo_minus_profit": 2415020083.24
+     }
+    },
+    {
+     "model_id": "working_capital",
+     "status": "validated",
+     "reason": "",
+     "failed": [],
+     "main": {
+      "working_capital_occupation_change": -4104090908.73,
+      "receivable_days": 403.21
+     }
+    },
+    {
+     "model_id": "scenario_sensitivity",
+     "status": "not_applicable",
+     "reason": "基期毛利率为负（-0.79%）：增长/毛利率改善⇒利润改善的方向假设不成立，情景模型对亏损期不适用（需要亏损专用的方向判据，属研究侧决定）",
+     "failed": [],
+     "main": {}
+    }
+   ],
+   "residuals": [],
+   "status": "validated"
+  }
+ ],
+ "pdf_visual": {
+  "pages": 12,
+  "per_page": [
+   {
+    "page": 1,
+    "chars": 1317,
+    "ink_ratio": 0.1096,
+    "tofu": 0,
+    "has_table_hint": true
+   },
+   {
+    "page": 2,
+    "chars": 1209,
+    "ink_ratio": 0.1226,
+    "tofu": 0,
+    "has_table_hint": true
+   },
+   {
+    "page": 3,
+    "chars": 769,
+    "ink_ratio": 0.1453,
+    "tofu": 0,
+    "has_table_hint": true
+   },
+   {
+    "page": 4,
+    "chars": 205,
+    "ink_ratio": 0.0956,
+    "tofu": 0,
+    "has_table_hint": true
+   },
+   {
+    "page": 5,
+    "chars": 580,
+    "ink_ratio": 0.1746,
+    "tofu": 0,
+    "has_table_hint": true
+   },
+   {
+    "page": 6,
+    "chars": 1899,
+    "ink_ratio": 0.118,
+    "tofu": 0,
+    "has_table_hint": true
+   },
+   {
+    "page": 7,
+    "chars": 1271,
+    "ink_ratio": 0.1164,
+    "tofu": 0,
+    "has_table_hint": true
+   },
+   {
+    "page": 8,
+    "chars": 1142,
+    "ink_ratio": 0.0788,
+    "tofu": 0,
+    "has_table_hint": true
+   },
+   {
+    "page": 9,
+    "chars": 1532,
+    "ink_ratio": 0.1248,
+    "tofu": 0,
+    "has_table_hint": true
+   },
+   {
+    "page": 10,
+    "chars": 857,
+    "ink_ratio": 0.0917,
+    "tofu": 0,
+    "has_table_hint": true
+   },
+   {
+    "page": 11,
+    "chars": 113,
+    "ink_ratio": 0.2493,
+    "tofu": 0,
+    "has_table_hint": true
+   },
+   {
+    "page": 12,
+    "chars": 315,
+    "ink_ratio": 0.1495,
+    "tofu": 0,
+    "has_table_hint": true
+   }
+  ],
+  "images": [
+   "C:\\Users\\ding0\\AppData\\Local\\Temp\\r4_handover_uooaunet\\pages\\pdf-p1.png",
+   "C:\\Users\\ding0\\AppData\\Local\\Temp\\r4_handover_uooaunet\\pages\\pdf-p2.png",
+   "C:\\Users\\ding0\\AppData\\Local\\Temp\\r4_handover_uooaunet\\pages\\pdf-p3.png"
+  ],
+  "source": "ui-603f626cbe",
+  "markdown_chars": 12125,
+  "workspace": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-603f626cbe"
+ },
+ "summary": {
+  "companies": 3,
+  "validated": 3,
+  "answered_subquestions": 12,
+  "unanswered_subquestions": 0
+ }
+}
