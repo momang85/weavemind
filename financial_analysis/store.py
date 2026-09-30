@@ -308,6 +308,35 @@ def dataset_from_inputs(ws):
     return AnalysisDataset(manifest=manifest, observations=tuple(obs), index=index)
 
 
+def _same_substance(a: dict, b: dict) -> bool:
+    """两个输出记录**数值/身份**是否相同（忽略分项标签与公式的**措辞**）。
+
+    用途（L0-c 之后的复算比对）：显示文本按参数生成、旧包是写死的默认文案时，
+    输出指纹会变，但"输入 → 数值"这条可复算证据没有变。把两者分开记，
+    既不放过真正的数值差异，也不把"改了措辞"说成"数对不上"。
+    """
+    try:
+        for k in ("metric", "unit"):
+            if str(a.get(k) or "") != str(b.get(k) or ""):
+                return False
+        # `output_period` 比**期间身份**（年份 token），不比括号里的显示措辞：
+        # 旧包写 `2024年（上行）`、新码按参数写 `2024年（使用者情景（…））`——
+        # 期间还是 2024 年，措辞变化单列进 `label_changes`。
+        ya = set(re.findall(r"(?:19|20)\d{2}", str(a.get("output_period") or "")))
+        yb = set(re.findall(r"(?:19|20)\d{2}", str(b.get("output_period") or "")))
+        if ya != yb:
+            return False
+        if abs(float(a.get("value") or 0) - float(b.get("value") or 0)) > 1e-9:
+            return False
+        if list(a.get("inputs") or []) != list(b.get("inputs") or []):
+            return False
+        ca = [{kk: c.get(kk) for kk in ("value", "unit")} for c in (a.get("components") or ())]
+        cb = [{kk: c.get(kk) for kk in ("value", "unit")} for c in (b.get("components") or ())]
+        return ca == cb
+    except (TypeError, ValueError):
+        return False
+
+
 def recompute_run(ws, run_id: str) -> dict:
     """**离线复算**：用包内 dataset + 该 run 的参数重跑算子，与落盘输出逐值比对。
 
@@ -353,6 +382,10 @@ def recompute_run(ws, run_id: str) -> dict:
     want = {str(o.get("output_id") or ""): o for o in (rec.get("outputs") or ())}
     got = {str(o.get("output_id") or ""): o for o in
            (again.as_dict().get("outputs") or ())}
+    # 指纹差异分两类（L0-c）：**数值/身份**变了 → 不一致（致命）；
+    # 只是分项标签/公式的**措辞**变了（例如情景标签改为从参数生成）→ 单列 `label_changes`，
+    # 不冒充"数对不上"，也不藏起来。
+    label_changes: list[str] = []
     for oid, o in want.items():
         g = got.get(oid)
         if g is None:
@@ -362,10 +395,16 @@ def recompute_run(ws, run_id: str) -> dict:
                 abs(float(o.get("value") or 0)) * 0.005, 0.01):
             mism.append(f"{oid} 值不同：{g.get('value')} vs {o.get('value')}")
         if str(g.get("output_hash") or "") != str(o.get("output_hash") or ""):
-            mism.append(f"{oid} 输出指纹不同")
+            if _same_substance(g, o):
+                label_changes.append(
+                    f"{oid}：数值/单位/期间/输入一致，**分项标签或公式措辞**与落盘记录不同"
+                    "（如情景标签改为按参数生成）")
+            else:
+                mism.append(f"{oid} 输出指纹不同")
     return {"ok": not mism, "run_id": run_id, "model_id": model_id,
             "status": again.status, "dataset_hash": ds.dataset_hash,
             "mismatches": mism,
+            "label_changes": label_changes,
             "stored_rules_version": _stored_rules or "未记录",
             "current_rules_version": _runner.RULES_VERSION,
             "rules_stale": rules_stale,

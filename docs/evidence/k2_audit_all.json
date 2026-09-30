@@ -122,6 +122,11 @@
     "status": "validated",
     "dataset_hash": "f34114d9e4118ecfe0e2a78d05546d00b114ac4be1bc032e609a064e7808f1c6",
     "mismatches": [],
+    "label_changes": [],
+    "stored_rules_version": "未记录",
+    "current_rules_version": "validation/1.1.0",
+    "rules_stale": false,
+    "rules_note": "",
     "outputs": [
      {
       "output_id": "eed3f0a5f37f-00-net_profit_change",
@@ -147,6 +152,11 @@
     "status": "validated",
     "dataset_hash": "f34114d9e4118ecfe0e2a78d05546d00b114ac4be1bc032e609a064e7808f1c6",
     "mismatches": [],
+    "label_changes": [],
+    "stored_rules_version": "未记录",
+    "current_rules_version": "validation/1.1.0",
+    "rules_stale": false,
+    "rules_note": "",
     "outputs": [
      {
       "output_id": "b6909bc0e9b0-00-cfo_minus_profit",
@@ -167,6 +177,13 @@
     "status": "validated",
     "dataset_hash": "f34114d9e4118ecfe0e2a78d05546d00b114ac4be1bc032e609a064e7808f1c6",
     "mismatches": [],
+    "label_changes": [
+     "c63bd3e1e220-00-scenario_net_profit：数值/单位/期间/输入一致，**分项标签或公式措辞**与落盘记录不同（如情景标签改为按参数生成）"
+    ],
+    "stored_rules_version": "未记录",
+    "current_rules_version": "validation/1.1.0",
+    "rules_stale": false,
+    "rules_note": "",
     "outputs": [
      {
       "output_id": "c63bd3e1e220-00-scenario_net_profit",
@@ -187,6 +204,11 @@
     "status": "validated",
     "dataset_hash": "f34114d9e4118ecfe0e2a78d05546d00b114ac4be1bc032e609a064e7808f1c6",
     "mismatches": [],
+    "label_changes": [],
+    "stored_rules_version": "未记录",
+    "current_rules_version": "validation/1.1.0",
+    "rules_stale": false,
+    "rules_note": "",
     "outputs": [
      {
       "output_id": "7f1e53db084d-00-net_margin",
@@ -202,6 +224,11 @@
     "status": "validated",
     "dataset_hash": "f34114d9e4118ecfe0e2a78d05546d00b114ac4be1bc032e609a064e7808f1c6",
     "mismatches": [],
+    "label_changes": [],
+    "stored_rules_version": "未记录",
+    "current_rules_version": "validation/1.1.0",
+    "rules_stale": false,
+    "rules_note": "",
     "outputs": [
      {
       "output_id": "3a52d1a9d7eb-00-cashflow_coverage",
@@ -217,6 +244,11 @@
     "status": "validated",
     "dataset_hash": "f34114d9e4118ecfe0e2a78d05546d00b114ac4be1bc032e609a064e7808f1c6",
     "mismatches": [],
+    "label_changes": [],
+    "stored_rules_version": "未记录",
+    "current_rules_version": "validation/1.1.0",
+    "rules_stale": false,
+    "rules_note": "",
     "outputs": [
      {
       "output_id": "c96f30512dd0-00-debt_ratio",
@@ -232,6 +264,11 @@
     "status": "validated",
     "dataset_hash": "f34114d9e4118ecfe0e2a78d05546d00b114ac4be1bc032e609a064e7808f1c6",
     "mismatches": [],
+    "label_changes": [],
+    "stored_rules_version": "未记录",
+    "current_rules_version": "validation/1.1.0",
+    "rules_stale": false,
+    "rules_note": "",
     "outputs": [
      {
       "output_id": "bcd6a9eff78e-00-rd_intensity",
@@ -357,6 +394,11 @@
     "status": "validated",
     "dataset_hash": "f34114d9e4118ecfe0e2a78d05546d00b114ac4be1bc032e609a064e7808f1c6",
     "mismatches": [],
+    "label_changes": [],
+    "stored_rules_version": "未记录",
+    "current_rules_version": "validation/1.1.0",
+    "rules_stale": false,
+    "rules_note": "",
     "outputs": [
      {
       "output_id": "eed3f0a5f37f-00-net_profit_change",
@@ -382,6 +424,11 @@
     "status": "validated",
     "dataset_hash": "f34114d9e4118ecfe0e2a78d05546d00b114ac4be1bc032e609a064e7808f1c6",
     "mismatches": [],
+    "label_changes": [],
+    "stored_rules_version": "未记录",
+    "current_rules_version": "validation/1.1.0",
+    "rules_stale": false,
+    "rules_note": "",
     "outputs": [
      {
       "output_id": "b6909bc0e9b0-00-cfo_minus_profit",
@@ -402,6 +449,13 @@
     "status": "validated",
     "dataset_hash": "f34114d9e4118ecfe0e2a78d05546d00b114ac4be1bc032e609a064e7808f1c6",
     "mismatches": [],
+    "label_changes": [
+     "c63bd3e1e220-00-scenario_net_profit：数值/单位/期间/输入一致，**分项标签或公式措辞**与落盘记录不同（如情景标签改为按参数生成）"
+    ],
+    "stored_rules_version": "未记录",
+    "current_rules_version": "validation/1.1.0",
+    "rules_stale": false,
+    "rules_note": "",
     "outputs": [
      {
       "output_id": "c63bd3e1e220-00-scenario_net_profit",
@@ -422,6 +476,11 @@
     "status": "validated",
     "dataset_hash": "f34114d9e4118ecfe0e2a78d05546d00b114ac4be1bc032e609a064e7808f1c6",
     "mismatches": [],
+    "label_changes": [],
+    "stored_rules_version": "未记录",
+    "current_rules_version": "validation/1.1.0",
+    "rules_stale": false,
+    "rules_note": "",
     "outputs": [
      {
       "output_id": "7f1e53db084d-00-net_margin",
@@ -437,6 +496,11 @@
     "status": "validated",
     "dataset_hash": "f34114d9e4118ecfe0e2a78d05546d00b114ac4be1bc032e609a064e7808f1c6",
     "mismatches": [],
+    "label_changes": [],
+    "stored_rules_version": "未记录",
+    "current_rules_version": "validation/1.1.0",
+    "rules_stale": false,
+    "rules_note": "",
     "outputs": [
      {
       "output_id": "3a52d1a9d7eb-00-cashflow_coverage",
@@ -452,6 +516,11 @@
     "status": "validated",
     "dataset_hash": "f34114d9e4118ecfe0e2a78d05546d00b114ac4be1bc032e609a064e7808f1c6",
     "mismatches": [],
+    "label_changes": [],
+    "stored_rules_version": "未记录",
+    "current_rules_version": "validation/1.1.0",
+    "rules_stale": false,
+    "rules_note": "",
     "outputs": [
      {
       "output_id": "c96f30512dd0-00-debt_ratio",
@@ -467,6 +536,11 @@
     "status": "validated",
     "dataset_hash": "f34114d9e4118ecfe0e2a78d05546d00b114ac4be1bc032e609a064e7808f1c6",
     "mismatches": [],
+    "label_changes": [],
+    "stored_rules_version": "未记录",
+    "current_rules_version": "validation/1.1.0",
+    "rules_stale": false,
+    "rules_note": "",
     "outputs": [
      {
       "output_id": "bcd6a9eff78e-00-rd_intensity",

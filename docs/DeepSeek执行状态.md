@@ -1,6 +1,90 @@
 # DeepSeek 执行状态
 
-> ## 当前账（2026-09-30 凌晨 · **K0→K1→K2→K3 全部执行完毕**）
+> ## 当前账（2026-09-30 · **阶段 Q 深化 L0→L1→L2→L3 逐批执行**）
+>
+> 依据 `docs/阶段Q深化_可信分析与问题驱动建模_20260930.md` 与复核证据
+> `docs/evidence/20260930-Q-deepening-review.md`（基线 `f3a49dc`）；**保留 K0 已关反例、
+> K1 叙事接入与 K2 两包各 7/7 复算**，不重派整批；本批**无付费试错、无新数据订阅**。
+> 证据与"失败→通过"读数：`docs/evidence/20260930-L0-L3-closure.md`。
+>
+> **L0-a 可信输入/输出契约**（`3028dfd`，反例 F1–F5）：`contracts.full_identity_ok`
+> 一次核主体/币种/报表范围/金额量纲，**算子入口与独立金样共用同一条判据**
+> （"洋河/CNY 净利 + 茅台/USD 毛利"由 `validated` 变为 `not_applicable`，不再标错主体币种）；
+> 列头按**完整日期**解析并按报表性质分 stock/flow（`2024-01-01` 期初列不再占 2024 年末格）；
+> 单位与币种**分别取证**（下一行 `币种：美元` 胜过"元→CNY"推断）；
+> 冲突判据统一为**完整身份**且沿 `derived_from` **血缘传播**（父收入冲突 → 派生毛利不可用）；
+> 独立验证新增**恒定执行**的 `binding`（按 fact_id 反查数据集 + 对照声明身份）与
+> `output_shape`（输出在声明内、kind↔单位相符、期间只能来自数据集、分项类型一致），
+> 篡改分项/期间/主体/币种一律 `validation_failed`，合法载荷照常通过；
+> `validation.RULES_VERSION` 随 run 记录（**不进 run_id**，以免破坏 K2 两包 `output_id`
+> 与 7/7 离线复算），规则变更后旧 run 判 `rules_changed`（不冒充按新规则已验证）。
+>
+> **L0-b 所选运行真正进正文**（复核 U1/U2）：新增 `analysis/selection.json` 选择绑定
+> （模型 → run_id + dataset_hash + 参数 + 规则版本 + 采纳身份），`report_brief` **按选择**
+> 渲染分析卡；选择过期（资料/规则变）**只报"未采用"，绝不改取别的运行**；
+> `POST /analysis/adopt` 必须给 `run_id`（缺 → 400），采纳前核"输入仍当前、已验证、
+> 规则版本匹配"（不符 → 409 + 原因），返回**实际采纳版本的 `identity_id`**
+> （不再读不存在的 `report_version_id`）；顺带修掉采纳路径调用编排器才有的
+> `self._accept_fn_for`（HTTP handler 上没有这个方法）导致**采纳必然 500** 的真实缺陷；
+> `GET /analysis` 给 `current_package`/`packages`/`selection`/`default_params`，
+> 面板"导出当前包"无当前包时走既有 `POST /package` 生成后再下载匹配包（空/失败不打开目录）。
+>
+> **L0-c 情景数值与解释同一份参数**（复核 M1）：标签/公式从**同一组已解析参数**生成
+> （`使用者情景（收入 +10.00%／毛利率 +2.00pp…）`，不再写死 `+5%/+1pp`），
+> 百分比与百分点分开写、负增速不称"上行"、"毛利线以下隐含块"不冒称纯费用；
+> 输出结构声明进契约（`OutputSpec.structure`）：并行情景 `bar_grouped`、敏感度
+> `bar_sorted`，只有可闭合贡献桥才画 `waterfall`。
+>
+> **L0-d 所有入口共享截止**（复核 S1/S3）：urllib 字节通道的**总截止从进入取件起算**并
+> 在响应头读完后查钟（本机慢头探针：`timeout=0.05` 旧行为 0.511s 后 `ok=True` →
+> 现在 `ok=False`/`error_kind=read_timeout`/`body_bytes=0`，文本通道同样失败关闭）；
+> K1 官方发现的 240s 改为 `_OfficialDiscoveryBudget` **共享台账**：发现/取件/准入同一截止、
+> 每次取件夹进剩余预算、次数与字节入账、**预算耗尽后不再启动取件**（落进
+> `official_discovery.json` 的 `budget`）。
+>
+> **L1 官方材料同时进财务事实与叙事**：`working_paper_export` 在没有 `financials.json` 时
+> 不再直接 skipped——已准入官方原文经 `facts.facts_from_annual_tables`（复用现役抽取器）
+> 过契约后照样产出底稿；**缓存真年报跨公司读数**：洋河 002304 / 三一 600031 / 京蓝 000711
+> 三家**经营特点不同**的非金融公司走正常资料入口，各自 4/4 模型 validated
+> （`docs/evidence/l1_official_facts_chain.json`）；**真实公网在线可达性仍未实测**。
+>
+> **L2 研究问题驱动的模型选择**（复核 M2）：见下。
+>
+> **L2 研究问题驱动的模型选择**（复核 M2）：新增 `financial_analysis/questions.py`
+> （规则化问题类型 + 命中词 + 需要材料 + 允许的模型），`compile_plan` 先按**问题类型**
+> 选模型：`只研究现金转换，不做情景预测` → 只采用"利润到现金的转化/现金质量"，
+> 情景模型带理由"与所问问题无关"被拒，且**否定语境**（"不做情景预测"）不算命中；
+> `只分析营收变动的量价因素` → **不采用任何无关模型**，如实列"缺销量/平均单价/分产品收入"
+> 的缺口；未命中任何类型时退回输入齐备性选择并**明说"问题未规则化"**；
+> 计划绑定问题类型与输出（`AnalysisPlan.question_types/needs/gaps/notes`、
+> `PlanItem.outputs`）。
+>
+> **L3 利润—现金深分析**：新增注册模型 `profit_to_cash`（`profit_to_cash_v1`）——
+> 闭合的利润桥金额分解（毛利端 + 毛利线以下，`residual=0`）+ 现金—利润缺口变化
+> （= 尚未解释的差额，含营运资本/折旧摊销/减值与归属层差异）+ 现金转化变化（**两期净利
+> 均为正**才给，百分点），一个数一个名字、零概率零预测；`validation` 补上算子声明的
+> `cash_conversion_sign`（非正分母时**不得**出现该比率）。
+>
+> **本批定向验证**：`test_financial_analysis` 115、`test_annual_financial_tables` 38、
+> `test_delivery_chain` 408、`test_offline_delivery` 39、`test_report_quality` 39、
+> `test_narrative_evidence` 56、`test_frontend_guards` 62、`test_review_edit_api` 27、
+> `test_transport_deadline` 22、`test_financial_chain` 36、`test_orchestrator_v2` 86、
+> `test_p0` 434、`test_facts` 44、`test_working_paper` 61、`test_net_policy` 51 等全过；
+> 前端 `tsc --noEmit` 0 错误、`npm run build` 通过、node 行为测试 60/60。
+> **不再以全仓扫测代替产品完成**（本轮按批跑定向用例）。
+>
+> **K2 保留证据**：`ui-603f626cbe` 与 `ui-fa2cb73e59` 从 ZIP 字节复算**各 7/7 一致**
+> （`dataset_hash` 仍 `f34114d9…`）；每包如实单列 **1 条 `label_changes`**——情景输出的
+> 显示文本按 L0-c 改为从参数生成，数值/单位/期间身份/输入完全一致；复算把"数对不上"与
+> "改了措辞"分开记，不混为一谈。
+>
+> **仍未解决（不假装已解决）**：真人 F3 五项 ≥8/10（必须真人）；干净 Windows 一键启动
+> 与完整交付验收（`clean-env-e2e` 是 ubuntu + 固定模型替身，不能替代）；带登录会话的
+> 页面真实点击；真实公网各入口可达性；`000711-corrected` 更正稿正文缓存缺失；
+> K1 付费 API 端到端实网整跑（预算未确认）；`launcher.py status` 探活端口 8081 与
+> 实际 8080 的小不一致。**Q4 统计预测未开放**（两期财报不能支撑趋势/回归）。
+>
+> ## 前账（2026-09-30 凌晨 · **K0→K1→K2→K3 全部执行完毕**）
 >
 > 依据 `docs/阶段Q增量验收与产品闭环推进_20260929夜.md`；**无付费整跑、无新数据订阅**。
 > 证据 `docs/evidence/k0_trusted_input_20260929.md`、`docs/evidence/k1_k2_k3_closure_20260930.md`。
