@@ -617,6 +617,12 @@ class AnalysisPlan:
     needs: tuple[dict, ...] = ()
     gaps: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
+    # R3（2026-09-30 下午复核）：**逐子问题**的回答状态。计划、执行、卡片与问题覆盖必须读到
+    # 同一份结论——"预测明年的经营现金流"这类混合请求里，历史子问题可答、预测子问题必须
+    # 明确未回答（`answered=False` + 门槛说明），不能拿历史结论当答案。
+    subquestions: tuple[dict, ...] = ()
+    # 问题未规则化时的**探索**模型：可以展示给用户看，但**不采入正文**（与 `adopted` 分开）。
+    exploratory: tuple[str, ...] = ()
 
     def as_dict(self) -> dict:
         return {"question": self.question, "dataset_hash": self.dataset_hash,
@@ -626,4 +632,6 @@ class AnalysisPlan:
                 "question_type_labels": list(self.question_type_labels),
                 "needs": [dict(n) for n in self.needs],
                 "gaps": list(self.gaps),
-                "notes": list(self.notes)}
+                "notes": list(self.notes),
+                "subquestions": [dict(s) for s in self.subquestions],
+                "exploratory": list(self.exploratory)}

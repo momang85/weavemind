@@ -1583,6 +1583,67 @@ class TestR1BComponentwiseValidation(unittest.TestCase):
             self.assertTrue(res["ok"], f"{model_id}: {res}")
 
 
+class TestR3IntentPerSubquestion(unittest.TestCase):
+    """R3（09-30 下午复核）：计划不能拿"关键词联合"代替任务意图。
+
+    反例一：`"预测明年的经营现金流"` 同时命中 forecast+cash → 采用 `profit_to_cash`/`cash_quality`，
+    计划说明却写"不采用任何注册模型"（**自相矛盾**：历史结论被当成预测的答案）。
+    反例二：`"只分析营业收入增减原因"` 未命中规则 → 自动跑四个模型（拿无关探索当回答）。
+    """
+
+    def test_forecast_only_with_indicator_words_adopts_nothing(self):
+        for q in ("预测明年的经营现金流", "预测 2025 年营业收入和净利润",
+                  "明年收入超过 300 亿的概率是多少"):
+            with self.subTest(question=q):
+                plan = fa.compile_plan(q, _dataset(_wc_rows()))
+                self.assertEqual([a.model_id for a in plan.adopted], [],
+                                 f"纯预测请求不得启动历史模型：{q}")
+                self.assertTrue(plan.subquestions, plan.notes)
+                self.assertTrue(all(s["kind"] == "forecast" for s in plan.subquestions),
+                                plan.subquestions)
+                self.assertTrue(all(not s["answered"] for s in plan.subquestions))
+                self.assertTrue(any("未回答" in n for n in plan.notes), plan.notes)
+                self.assertTrue(any("统计预测门槛与禁用清单" in n for n in plan.notes),
+                                plan.notes)
+
+    def test_mixed_request_answers_history_and_leaves_forecast_unanswered(self):
+        """混合请求：历史子问题照答，**预测子问题保持未回答**（各自一条子问题状态）。"""
+        plan = fa.compile_plan("分析 2024 年利润有没有转成现金，并预测 2025 年的经营现金流",
+                               _dataset(_wc_rows()))
+        kinds = {s["kind"]: s for s in plan.subquestions}
+        self.assertIn("forecast", kinds, plan.subquestions)
+        self.assertIn("history", kinds, plan.subquestions)
+        self.assertFalse(kinds["forecast"]["answered"], kinds["forecast"])
+        self.assertTrue(kinds["history"]["answered"], kinds["history"])
+        self.assertTrue(plan.adopted, "历史子问题应当照常回答")
+        self.assertTrue(all(a.model_id in kinds["history"]["models"]
+                            for a in plan.adopted), plan.adopted)
+
+    def test_notes_never_contradict_the_actual_plan(self):
+        """说明与实际计划同源：采用了模型就不得写"没有任何模型被采用"。"""
+        q = "分析 2024 年利润有没有转成现金，并预测 2025 年的经营现金流"
+        plan = fa.compile_plan(q, _dataset(_wc_rows()))
+        joined = " ".join(plan.notes)
+        self.assertTrue(plan.adopted)
+        self.assertNotIn("没有任何模型被采用", joined, joined)
+        self.assertNotIn("不采用任何注册模型、不出预测数", joined, joined)
+
+    def test_forecast_marker_in_a_clause_does_not_start_history_models_for_it(self):
+        """同一子句里出现预测意图 → 该子句不拿同子句的指标词去启动历史模型。"""
+        plan = fa.compile_plan("预测明年经营活动现金流净额", _dataset(_wc_rows()))
+        self.assertEqual([a.model_id for a in plan.adopted], [], plan.adopted)
+        self.assertEqual([s["kind"] for s in plan.subquestions], ["forecast"])
+
+    def test_scenario_is_not_mistaken_for_a_statistical_forecast(self):
+        """显式未来**条件假设**（情景）不等于统计预测：情景模型照常回答。"""
+        plan = fa.compile_plan("按收入 +10%、毛利率 +2pp 做个情景", _dataset(_wc_rows()))
+        kinds = [s["kind"] for s in plan.subquestions]
+        self.assertIn("scenario", kinds, plan.subquestions)
+        self.assertNotIn("forecast", kinds, plan.subquestions)
+        self.assertIn("scenario_sensitivity", [a.model_id for a in plan.adopted],
+                      plan.adopted)
+
+
 class TestL0CScenarioSpeaksFromItsOwnParams(unittest.TestCase):
     """L0-c（复核 M1）：数值与解释同一份参数；图型按声明的结构选。"""
 
@@ -1765,12 +1826,17 @@ class TestL2QuestionDrivenSelection(unittest.TestCase):
         self.assertEqual(blob["question_types"], ["profit_attribution"])
         self.assertIn("outputs", blob["adopted"][0])
 
-    def test_unclassified_question_falls_back_and_says_so(self):
-        """问题没命中任何已规则化类型 → 退回输入齐备性选择，但**明说未规则化**。"""
+    def test_unclassified_question_gets_a_restricted_plan_not_a_guess(self):
+        """R3（09-30 下午复核）：问题没被规则化 → **受限计划**：不自动采入任何模型，
+        只把可用模型列为"可选探索"（旧行为是"按输入齐备性照跑四个模型"，等于拿无关
+        探索结果当答案）。"""
         plan = fa.compile_plan("随便看看这份数据", _dataset())
         self.assertEqual(plan.question_types, ())
-        self.assertTrue(plan.adopted, "未规则化的问题仍按输入齐备性给可用模型（既有行为）")
-        self.assertTrue(any("未命中" in n for n in plan.notes), plan.notes)
+        self.assertEqual([a.model_id for a in plan.adopted], [],
+                         "未规则化的问题不得自动采入模型")
+        self.assertTrue(plan.exploratory, "可选探索模型要列出来（但不进正文）")
+        self.assertTrue(any("待澄清" in n or "未命中" in n for n in plan.notes), plan.notes)
+        self.assertTrue(any("探索" in n for n in plan.notes), plan.notes)
 
     def test_model_specs_declare_which_questions_they_answer(self):
         for m in fa.specs():

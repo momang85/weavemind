@@ -58,9 +58,17 @@ def compile_plan(question: str, dataset, *, prefer=()) -> AnalysisPlan:
 
     avail = available_for(dataset)
     hits = _q.classify(question)
+    # R3（09-30 下午复核）：**逐子句**判意图。同一子句里出现预测意图时，该子句是"预测子问题"，
+    # 不得拿同子句的指标词去启动历史模型（"预测明年的经营现金流"不是历史现金问题）。
+    clause_hits: list[dict] = []
+    for c in (_q.clauses(question) or [str(question or "")]):
+        ch = _q.classify(c)
+        clause_hits.append({"clause": c, "hits": ch,
+                            "forecast": any(h["qid"] == _q._FORECAST_QID for h in ch)})
     qids = [h["qid"] for h in hits]
     labels = [h["label"] for h in hits]
-    relevant = _q.models_for(qids)
+    _answerable = [h["qid"] for ch in clause_hits if not ch["forecast"] for h in ch["hits"]]
+    relevant = _q.models_for(dict.fromkeys(_answerable))
     needs = _q.needs_for(qids)
     notes: list[str] = []
     gaps: list[str] = []
@@ -72,17 +80,11 @@ def compile_plan(question: str, dataset, *, prefer=()) -> AnalysisPlan:
                    and dataset.get(m, dataset.period_at(-1)) is None]
         if missing:
             gaps.append(f"{n['label']}：缺材料 {missing}——{n['how']}")
-    if lib_missing := [n["label"] for n in needs if n["qid"] == "volume_price"]:
-        notes.append("量价结构分解目前**没有注册模型**：只有资料清单与缺口，不给推测性结论（"
-                     + "、".join(lib_missing) + "）")
-    if any(n["qid"] == "forecast_trend" for n in needs):
-        notes.append("预测/趋势外推（含概率、回归、目标价、估值）本版本**不开放**："
-                     "不采用任何注册模型、不出预测数；门槛与禁用清单见 "
-                     "docs/统计预测门槛与禁用清单_20260930.md")
 
     avail_set = set(avail)
     adopted: list[PlanItem] = []
     rejected: list[dict] = []
+    exploratory: list[str] = []
     if qids:
         order = [m for m in (prefer or ()) if m in relevant] + \
                 [m for m in relevant if m not in (prefer or ())]
@@ -136,39 +138,79 @@ def compile_plan(question: str, dataset, *, prefer=()) -> AnalysisPlan:
             rejected.append({"model_id": m.model_id, "reason": reason, "missing": missing,
                              "needs": [f"{i.metric}@{i.period_offset}" for i in m.inputs]})
     else:
-        # 问题没有命中任何已规则化类型 → **既有行为**，但明说"未规则化"（不假装理解）
-        notes.append("问题未命中任何已规则化的问题类型：本轮按**输入齐备性**选择模型"
-                     "（要按问题选择，请用已规则化的问法，或在问题类型表里补一条）")
+        # 问题没有命中任何已规则化类型 → **受限计划**（R3，09-30 下午复核）：不自动把
+        # "输入齐备"的模型采入正文（那等于拿无关探索结果当答案），只把它们列为**可选探索**。
+        notes.append("问题未命中任何已规则化的问题类型（**待澄清**）：本轮不采用任何模型、"
+                     "不把探索性读数写进正文；请在问题里点名要分析什么"
+                     "（利润变化/现金转化/营运资金/条件情景），或先在问题类型表里补一条")
         order = [m for m in (prefer or ()) if m in avail] + \
                 [m for m in avail if m not in (prefer or ())]
         for mid in order:
-            m = spec(mid)
-            need = [f"{i.metric}@{i.period_offset}" for i in m.inputs]
-            adopted.append(PlanItem(model_id=mid, question=m.question,
-                                    reason=f"输入齐备（{', '.join(need)}）",
-                                    outputs=tuple(o.metric for o in m.outputs),
-                                    question_types=tuple(m.question_types)))
-        for m in specs():
-            if any(a.model_id == m.model_id for a in adopted) \
-                    or any(r["model_id"] == m.model_id for r in rejected):
+            try:
+                m = spec(mid)
+            except Exception:                        # noqa: BLE001
                 continue
+            exploratory.append(mid)
             missing = sorted({i.metric for i in m.inputs
                               if dataset.get(i.metric,
                                              dataset.period_at(i.period_offset)) is None})
-            if missing:
-                reason = "缺输入"
-            elif len([p for p in (dataset.manifest.periods or ()) if p]) < 2:
-                reason = "期间不足两期（两期桥接需要一个以上的年度期间）"
-            else:
-                reason = "当前数据形态不适用"
-            rejected.append({"model_id": m.model_id, "reason": reason, "missing": missing,
-                             "needs": [f"{i.metric}@{i.period_offset}" for i in m.inputs]})
+            rejected.append({"model_id": mid, "reason": "问题未规则化（可选探索）",
+                             "missing": missing,
+                             "detail": ("问题没被规则化：本模型只是**可选探索**，"
+                                        "本轮不采入正文")})
+        if exploratory:
+            notes.append("可选探索模型（不进正文、不作为回答）：" + "、".join(exploratory))
+
+    # ── R3：子问题状态 + **与实际计划同源**的说明 ──────────────────────────────
+    # 说明在采用/拒绝都定下来之后再生成，因此不会再出现"采用了现金模型，却写不采用任何模型"
+    # 这种自相矛盾（复核原文的反例）。
+    _adopted_ids = [a.model_id for a in adopted]
+    subquestions: list[dict] = []
+    for ch in clause_hits:
+        ch_qids = [h["qid"] for h in ch["hits"]]
+        if not ch_qids:
+            continue
+        _fq = _q._FORECAST_QID in ch_qids
+        _models = [] if _fq else [m for m in _q.models_for(ch_qids) if m in _adopted_ids]
+        if _fq:
+            _note = ("预测/趋势外推（含概率、回归、目标价、估值）本版本**不开放**："
+                     "这一子问题保持**未回答**，不出预测数；门槛与禁用清单见 "
+                     "docs/统计预测门槛与禁用清单_20260930.md")
+        elif _models:
+            _note = "已采用 " + "、".join(_models) + " 回答这一子问题"
+        elif "volume_price" in ch_qids:
+            _note = ("量价结构分解目前**没有注册模型**：只给资料清单与缺口，"
+                     "不给推测性结论")
+        else:
+            _note = "命中了问题类型，但没有可采用的模型（见 rejected 的原因）"
+        subquestions.append({
+            "clause": ch["clause"], "qids": ch_qids,
+            "labels": [h["label"] for h in ch["hits"]],
+            "kind": ("forecast" if _fq else
+                     ("scenario" if "scenario" in ch_qids else "history")),
+            "answered": bool(_models), "models": _models, "note": _note})
+    if any(s["kind"] == "forecast" for s in subquestions):
+        notes.append("预测子问题**保持未回答**（本版本不开放预测）："
+                     + "；".join(f"「{s['clause'][:24]}」" for s in subquestions
+                                 if s["kind"] == "forecast")
+                     + "。同一次请求里的历史/情景子问题照常回答；门槛与禁用清单见 "
+                     "docs/统计预测门槛与禁用清单_20260930.md")
+    # 每个**未回答**的子问题都要在计划说明里逐条给出原因（量价"没有注册模型"、
+    # 预测"不开放"、其余"没有可采用的模型"）——说明与实际计划同源，不再自相矛盾。
+    for s in subquestions:
+        if not s["answered"]:
+            notes.append(f"未回答的子问题「{s['clause'][:28]}」：{s['note']}")
+    if qids and not _adopted_ids:
+        notes.append("本次**没有任何模型被采用**：所问问题要么当前不开放（预测/量价），"
+                     "要么没有可采用的模型——不拿无关读数充数")
     if gaps:
         notes.append("问题所需材料缺口见 gaps：缺料时**只停缺输入的模型**，不换跑无关模型")
     return AnalysisPlan(question=str(question or ""), dataset_hash=dataset.dataset_hash,
                         adopted=tuple(adopted), rejected=tuple(rejected),
                         question_types=tuple(qids), question_type_labels=tuple(labels),
-                        needs=tuple(needs), gaps=tuple(gaps), notes=tuple(notes))
+                        needs=tuple(needs), gaps=tuple(gaps), notes=tuple(notes),
+                        subquestions=tuple(subquestions),
+                        exploratory=tuple(exploratory))
 
 
 def run(model_id: str, dataset, *, params: dict | None = None,

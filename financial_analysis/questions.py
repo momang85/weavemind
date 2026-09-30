@@ -41,6 +41,34 @@ class QuestionType:
     needs_metrics: tuple[str, ...] = ()      # 回答它**需要**的观察（缺了要如实报缺口）
     needs_note: str = ""                     # 缺口怎么补（可行动）
     models: tuple[str, ...] = ()             # 允许回答该问题的注册模型（有序）
+    # R3（2026-09-30 下午复核）：**问题意图**——历史分析 / 条件情景 / 统计预测。
+    # 意图决定"能不能答"：预测类本版本一律未回答（`models=()`），且**同一子句里出现预测
+    # 意图时，不得拿同子句的指标词去启动历史模型**（"预测明年的经营现金流"不是历史问题）。
+    kind: str = "history"
+
+
+# 子句切分（R3）：按标点与并列连词把请求切开，**逐子句**判意图。
+# 为什么必须切：混合请求（"分析 2024 年现金流，并预测 2025 年"）里两半的答案状态不同；
+# 不切就只能给整句一个结论，于是要么漏答历史、要么拿历史当预测的答案。
+_CLAUSE_SPLIT_RE = re.compile(r"[，。；、,;.!?！？\n]+|并(?:且)?|同时|另外|以及|还要|再看")
+_FORECAST_QID = "forecast_trend"
+
+
+def clauses(question: str) -> list[str]:
+    """把研究请求切成**子句**（保留每段的原文，用于说明命中了什么）。"""
+    parts = [p.strip() for p in _CLAUSE_SPLIT_RE.split(str(question or ""))]
+    return [p for p in parts if p]
+
+
+def has_forecast_intent(text: str) -> bool:
+    """该子句是否表达了**预测/未来**意图（命中词 + 否定语境规则，与 classify 同源）。"""
+    hits = classify(text)
+    return any(h["qid"] == _FORECAST_QID for h in hits)
+
+
+def kind_of(qid: str) -> str:
+    qt = _QT_BY_ID.get(str(qid))
+    return str(qt.kind) if qt else ""
 
 
 # ── 已规则化的问题类型（覆盖现有四族 + L3 的利润—现金链 + 尚未支持的量价）──────
@@ -78,6 +106,7 @@ QUESTION_TYPES: tuple[QuestionType, ...] = (
         needs_metrics=("revenue", "gross_profit", "net_profit"),
         needs_note="需要基期收入/毛利/归母净利润（情景从基期读数出发）",
         models=("scenario_sensitivity",),
+        kind="scenario",
     ),
     QuestionType(
         qid="volume_price", label="量价结构分解",
@@ -102,6 +131,7 @@ QUESTION_TYPES: tuple[QuestionType, ...] = (
                     "明确的分布与口径假设、以及样本外验证方案；本版本**不提供预测**，"
                     "门槛与禁用清单见 docs/统计预测门槛与禁用清单_20260930.md"),
         models=(),                        # 故意为空：不开放就不给任何模型
+        kind="forecast",
     ),
 )
 
