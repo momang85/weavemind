@@ -11,10 +11,13 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import financial_analysis as fa
+import workspace as ws_mod
 from financial_analysis import contracts as C
 
 
@@ -465,9 +468,12 @@ class TestCoreHasNoModelCalls(unittest.TestCase):
 
     def test_registry_is_the_only_way_in(self):
         self.assertIn("profit_bridge_v1", fa.registry.operators())
+        self.assertIn("profit_to_cash_v1", fa.registry.operators())
+        # 注册表是**唯一入口**：这份清单就是"能被计划采用的模型"的完整集合
+        # （L3 新增 profit_to_cash；清单变化必须是**显式**的，不接受"多出来的自动通过"）
         self.assertEqual([m.model_id for m in fa.specs()],
                          ["profit_bridge", "cash_quality", "working_capital",
-                          "scenario_sensitivity"])
+                          "scenario_sensitivity", "profit_to_cash"])
 
 
 class TestAnalysisRunStore(unittest.TestCase):
@@ -924,14 +930,17 @@ class TestDataAnalyzerTakesTheFinancialPath(unittest.TestCase):
                           "context": {"root_task_id": self.tid}})))
 
     def test_financial_task_runs_registered_models_and_stores_runs(self):
-        # 四族输入齐备的夹具（含应收/存货/应付/营业成本）→ 四个模型全部采用并验证通过
+        # 各族输入齐备的夹具（含应收/存货/应付/营业成本）→ 注册模型全部采用并验证通过。
+        # L2 起"数据齐备 ≠ 适用"：问题要点名各家族（原问题保留、不改写），
+        # 所以这里用一句把四类问题都说到的研究问题。
         self._write_working_paper(_wc_rows())
-        got = self._execute("分析本期归母净利润的变化由哪些金额项构成 [研究契约]")
+        got = self._execute("分析利润变化归因、现金转化、营运资本周转与情景敏感性 [研究契约]")
         self.assertEqual(got["mode"], "financial")
         self.assertEqual(got["status"], "success", got["plan"]["rejected"])
-        self.assertEqual(got["plan"]["adopted"],
-                         ["profit_bridge", "cash_quality", "working_capital",
-                          "scenario_sensitivity"])
+        self.assertEqual(set(got["plan"]["adopted"]),
+                         {"profit_bridge", "cash_quality", "working_capital",
+                          "scenario_sensitivity", "profit_to_cash"},
+                         got["plan"]["rejected"])
         self.assertEqual(got["plan"]["rejected"], [])
         self.assertEqual(got["dataset"]["entity_id"], "002304.SZ")
         self.assertIn("profit_bridge", got["plan"]["adopted"])
@@ -962,7 +971,8 @@ class TestDataAnalyzerTakesTheFinancialPath(unittest.TestCase):
             json.dumps(_financials_payload(), ensure_ascii=False), encoding="utf-8")
         self.assertFalse((self.ws / "project" / "working_paper.json").exists(),
                          "本用例的前提就是底稿还没落盘")
-        got = self._execute("分析本期归母净利润的变化由哪些金额项构成 [研究契约]")
+        # L2：问题要点名家族（否则只有被点到的模型进计划——那是**设计**，不是缺陷）
+        got = self._execute("分析利润变化归因、现金转化、营运资本周转与情景敏感性 [研究契约]")
         self.assertEqual(got["mode"], "financial", got)
         self.assertEqual(got["dataset_source"]["kind"], "financials", got["dataset_source"])
         self.assertIn("financials.json", got["dataset_source"]["label"])
@@ -1002,7 +1012,9 @@ class TestDataAnalyzerTakesTheFinancialPath(unittest.TestCase):
              "gross_profit": 210.0, "operating_cashflow": 46.0},
         ]
         self._write_financials(_financials_payload(rows))
-        got = self._execute("分析利润变化 [研究契约]")
+        # L2：点名"现金质量/占款/情景"——单期数据下两期模型（利润桥、利润→现金）如实缺输入，
+        # 同期模型（现金质量）与单期情景照常跑通 → partial（缺口可见）
+        got = self._execute("分析现金质量、占款与情景 [研究契约]")
         self.assertEqual(got["mode"], "financial", got)
         self.assertEqual(got["dataset"]["periods"], ["2024年"], got["dataset"])
         self.assertTrue(any("2023" in g for g in got["dataset"]["gaps"]),
@@ -1054,7 +1066,7 @@ class TestDataAnalyzerTakesTheFinancialPath(unittest.TestCase):
         self._write_working_paper(_wc_rows())
         (self.ws / "project" / "financials.json").write_text(
             json.dumps(_financials_payload(), ensure_ascii=False), encoding="utf-8")
-        got = self._execute("分析利润变化 [研究契约]")
+        got = self._execute("分析利润变化归因与营运资本周转 [研究契约]")
         self.assertEqual(got["dataset_source"]["kind"], "working_paper", got["dataset_source"])
         # 底稿里有占款字段（_wc_rows）→ 营运资本这一族也能跑
         self.assertIn("working_capital", got["plan"]["adopted"], got["plan"])
@@ -1062,7 +1074,9 @@ class TestDataAnalyzerTakesTheFinancialPath(unittest.TestCase):
     def test_missing_input_still_takes_the_financial_path(self):
         rows = [r for r in _two_period_rows() if r["metric"] != "gross_profit"]
         self._write_working_paper(rows)
-        got = self._execute("分析利润变化 [研究契约]")
+        # L2：把四类问题都点到——缺 gross_profit 的模型被拒（缺输入），
+        # 不依赖它的模型照跑 → 部分完成，缺口必须被读者看见
+        got = self._execute("分析利润变化归因、现金转化、营运资本周转与情景敏感性 [研究契约]")
         self.assertEqual(got["mode"], "financial", "缺输入也不得回退到 CSV 猜测")
         # 初筛就缺输入 → 进计划的**拒绝清单**（带缺什么），不生成 run；状态不得报 success
         # （其他模型照跑 → partial：缺口必须让读者看见，而不是被"其他都过了"盖掉）
@@ -1078,11 +1092,19 @@ class TestDataAnalyzerTakesTheFinancialPath(unittest.TestCase):
         self.assertTrue(all(r["status"] == C.RunStatus.VALIDATED for r in got["runs"]))
 
     def test_partial_status_when_a_family_is_rejected_for_missing_inputs(self):
-        """核心指标齐备但没有占款字段：三族跑通、营运资本被拒 → `partial`（缺口可见）。"""
+        """核心指标齐备但没有占款字段：点到的家族跑通、营运资本被拒 → `partial`（缺口可见）。"""
         self._write_working_paper()
-        got = self._execute("分析利润、现金质量与占款 [研究契约]")
+        got = self._execute("分析利润变化归因、现金质量与占款 [研究契约]")
         self.assertEqual(got["status"], "partial", got["status"])
-        self.assertEqual([r["model_id"] for r in got["plan"]["rejected"]], ["working_capital"])
+        rejected = [r["model_id"] for r in got["plan"]["rejected"]]
+        self.assertIn("working_capital", rejected, got["plan"]["rejected"])
+        wc = [r for r in got["plan"]["rejected"] if r["model_id"] == "working_capital"][0]
+        self.assertEqual(wc["reason"], "缺输入", wc)
+        # 没被点到的问题类型（情景）如实拒在计划里，理由写明"与所问问题无关"（L2）
+        self.assertIn("scenario_sensitivity", rejected, got["plan"]["rejected"])
+        sc = [r for r in got["plan"]["rejected"]
+              if r["model_id"] == "scenario_sensitivity"][0]
+        self.assertEqual(sc["reason"], "与所问问题无关", sc)
         self.assertTrue(all(r["status"] == C.RunStatus.VALIDATED for r in got["runs"]),
                         "被采用的模型都必须是通过验证的")
 
@@ -1196,23 +1218,30 @@ class TestCashQualityAndWorkingCapitalAndScenario(unittest.TestCase):
         self.assertEqual(run.status, C.RunStatus.NOT_COMPUTABLE, run.reason)
 
     # ── 注册表与计划 ──
-    def test_registry_lists_four_families_and_each_has_an_operator(self):
+    def test_registry_lists_five_families_and_each_has_an_operator(self):
         self.assertEqual([m.model_id for m in fa.specs()],
                          ["profit_bridge", "cash_quality", "working_capital",
-                          "scenario_sensitivity"])
+                          "scenario_sensitivity", "profit_to_cash"])
         self.assertEqual(set(fa.registry.operators()),
                          {"profit_bridge_v1", "cash_quality_v1", "working_capital_v1",
-                          "scenario_v1"})
+                          "scenario_v1", "profit_to_cash_v1"})
         for m in fa.specs():
             self.assertIn(m.operator, fa.registry.operators())
             self.assertTrue(m.limits, f"{m.model_id} 必须带限制")
 
-    def test_plan_adopts_three_families_on_the_real_shape(self):
-        plan = fa.compile_plan("利润、现金质量、占款与情景", self._ds())
-        self.assertEqual([a.model_id for a in plan.adopted],
-                         ["profit_bridge", "cash_quality", "scenario_sensitivity"])
+    def test_plan_adopts_input_complete_families_on_the_real_shape(self):
+        # L2：问题点名四类家族；输入齐备的被采用，缺占款字段的营运资本被拒（带原因）。
+        # 采用**顺序**按"命中词多的类型优先"（同一份问题里谁被说得更具体谁先跑），
+        # 所以这里比集合、不比顺序。
+        plan = fa.compile_plan("利润变化归因、现金质量、营运资本周转与情景敏感性", self._ds())
+        self.assertEqual({a.model_id for a in plan.adopted},
+                         {"profit_bridge", "profit_to_cash", "cash_quality",
+                          "scenario_sensitivity"})
         self.assertEqual([r["model_id"] for r in plan.rejected], ["working_capital"])
         self.assertEqual(plan.rejected[0]["reason"], "缺输入")
+        self.assertEqual(set(plan.question_types),
+                         {"profit_attribution", "cash_conversion", "working_capital",
+                          "scenario"})
 
 
 class TestRealFrozenSampleChain(unittest.TestCase):
@@ -1514,6 +1543,277 @@ class TestL0CScenarioSpeaksFromItsOwnParams(unittest.TestCase):
         bridge = fa.run("profit_bridge", ds)
         self.assertEqual(ra.chart_spec(bridge, bridge.outputs[0].output_id)["kind"],
                          "waterfall")
+
+
+class TestL3ProfitToCash(unittest.TestCase):
+    """L3（09-30 深化）：利润→现金转化链——闭合的金额分解 + 未解释差额 + 可信的比率。
+
+    这一族回答"本期利润增长有没有转成现金、哪些因素还没被解释"：金额分解必须**闭合**，
+    比率只在**两期归母净利都为正**时给（负/零分母没有可比含义），并且**不把**缺口说成
+    已解释（模型手里没有现金流量表调节表）。
+    """
+
+    def test_chain_validates_and_the_bridge_closes(self):
+        ds = _dataset()
+        run = fa.run("profit_to_cash", ds)
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        checks = run.validation["checks"]
+        for name in ("gold", "identity", "unit", "output_shape", "binding",
+                     "cash_conversion_sign"):
+            self.assertTrue(checks[name]["ok"], f"{name}: {checks[name]['detail']}")
+        vals = {o.metric: o.value for o in run.outputs}
+        # 两期样例：净利 100.16 → 66.73（-33.43）、毛利 249.26 → 211.25（-38.01）
+        self.assertAlmostEqual(vals["profit_change"], -33.43, places=2)
+        self.assertAlmostEqual(vals["cash_profit_gap_change"],
+                               (46.29 - 61.30) - (66.73 - 100.16), places=2)
+        main = [o for o in run.outputs if o.metric == "profit_change"][0]
+        self.assertEqual(main.residual, 0.0)
+        comps = {c["label"][:4]: c["value"] for c in main.components}
+        self.assertAlmostEqual(sum(c["value"] for c in main.components),
+                               main.value, places=2)
+        self.assertTrue(any("毛利端变化" in c["label"] for c in main.components), comps)
+
+    def test_conversion_change_is_given_when_both_periods_are_profitable(self):
+        ds = _dataset()
+        run = fa.run("profit_to_cash", ds)
+        conv = [o for o in run.outputs if o.metric == "cash_conversion_change"]
+        self.assertTrue(conv, run.outputs)
+        self.assertEqual(conv[0].unit, "%")
+        self.assertAlmostEqual(conv[0].value,
+                               (46.29 / 66.73 - 61.30 / 100.16) * 100, places=2)
+
+    def test_negative_profit_period_refuses_the_ratio_but_keeps_the_amounts(self):
+        """负分母不给比率（既有裁决）：金额差额照给，比率不给并写清哪一期非正。"""
+        rows = _dataset_rows_with(mutate=(("net_profit", "2024年", {"value": -5.0}),))
+        ds = _dataset(rows)
+        run = fa.run("profit_to_cash", ds)
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        outs = {o.metric for o in run.outputs}
+        self.assertIn("cash_profit_gap_change", outs)
+        self.assertNotIn("cash_conversion_change", outs, "负分母不得给比率")
+        joined = " ".join(run.outputs[0].assumptions) + " " + run.outputs[0].formula
+        self.assertIn("现金转化", joined)
+        self.assertTrue(any("负" in x or "非正" in x for x in run.outputs[0].limits), run.outputs[0].limits)
+
+    def test_cross_entity_or_currency_inputs_are_not_applicable(self):
+        rows = _dataset_rows_with(mutate=(("operating_cashflow", "2024年",
+                                           {"entity_id": "600519.SH", "currency": "USD"}),))
+        ds = _dataset(rows)
+        run = fa.run("profit_to_cash", ds)
+        self.assertEqual(run.status, C.RunStatus.NOT_APPLICABLE, run.reason)
+
+    def test_tampered_period_or_ratio_unit_is_caught(self):
+        """篡改：输出期间写成数据集外的年份、或把百分点的单位改成金额 → validation_failed。"""
+        ds = _dataset()
+        payload = _payload_of("profit_to_cash", ds)
+        bad = json.loads(json.dumps(payload))
+        bad["outputs"][0]["output_period"] = "2030年较2029年"
+        res = fa.validation.validate_output(fa.registry.spec("profit_to_cash"), ds, bad)
+        self.assertFalse(res["ok"], res)
+        self.assertIn("output_shape", res["failed"])
+        bad2 = json.loads(json.dumps(payload))
+        for o in bad2["outputs"]:
+            if o["metric"] == "cash_conversion_change":
+                o["unit"] = "亿元"
+        res2 = fa.validation.validate_output(fa.registry.spec("profit_to_cash"), ds, bad2)
+        self.assertFalse(res2["ok"], res2)
+        self.assertIn("output_shape", res2["failed"])
+        # 比率被删掉却仍声称"可算" → 签名检查失败（不是只看模型自报字段）
+        bad3 = json.loads(json.dumps(payload))
+        bad3["outputs"] = [o for o in bad3["outputs"]
+                           if o["metric"] != "cash_conversion_change"]
+        res3 = fa.validation.validate_output(fa.registry.spec("profit_to_cash"), ds, bad3)
+        self.assertFalse(res3["ok"], res3)
+        self.assertIn("cash_conversion_sign", res3["failed"])
+
+    def test_no_probability_or_forecast_claims(self):
+        ds = _dataset()
+        run = fa.run("profit_to_cash", ds)
+        joined = " ".join(run.outputs[0].limits) + " ".join(run.outputs[0].assumptions)
+        self.assertIn("零概率零预测", joined)
+        self.assertNotIn("置信区间", " ".join(run.outputs[0].assumptions))
+
+
+class TestL2QuestionDrivenSelection(unittest.TestCase):
+    """L2（09-30 深化）：**问题参与模型选择**——数据齐备不等于适用（复核 M2 反例）。
+
+    M2 的反例：同一份数据下，"只研究现金转换，不做情景预测"与"只分析营收变动的量价因素"
+    此前选出**完全相同**的三个模型（输入齐备性驱动）。现在问题先映射到问题类型，
+    只有相关模型进计划，无关模型带理由被拒，缺料如实列缺口而不换跑无关模型。
+    """
+
+    def test_cash_only_question_does_not_pull_in_the_scenario_model(self):
+        plan = fa.compile_plan("只研究现金转换，不做情景预测", _dataset())
+        self.assertEqual({a.model_id for a in plan.adopted},
+                         {"profit_to_cash", "cash_quality"}, plan.rejected)
+        self.assertNotIn("scenario_sensitivity", [a.model_id for a in plan.adopted],
+                         "问的是现金转化：不得顺手跑情景")
+        rej = {r["model_id"]: r for r in plan.rejected}
+        self.assertEqual(rej["scenario_sensitivity"]["reason"], "与所问问题无关", rej)
+        self.assertIn("利润变化归因", rej["profit_bridge"]["detail"])
+        # 否定语境不被当成"在研究情景"：命中词里只有现金转换
+        self.assertEqual(list(plan.question_types), ["cash_conversion"], plan.question_types)
+
+    def test_volume_price_question_reports_gaps_and_runs_nothing_irrelevant(self):
+        plan = fa.compile_plan("只分析营收变动的量价因素", _dataset())
+        self.assertEqual(list(plan.question_types), ["volume_price"])
+        self.assertEqual([a.model_id for a in plan.adopted], [],
+                         "没有注册模型能回答量价分解：不得拿无关模型充数")
+        self.assertTrue(all(r["reason"] == "与所问问题无关" for r in plan.rejected),
+                        plan.rejected)
+        self.assertTrue(any("sales_volume" in g for g in plan.gaps), plan.gaps)
+        self.assertTrue(any("没有注册模型" in n for n in plan.notes), plan.notes)
+
+    def test_plan_binds_question_types_and_outputs(self):
+        plan = fa.compile_plan("分析利润变化归因", _dataset())
+        self.assertEqual(plan.question_types, ("profit_attribution",))
+        self.assertEqual(plan.question_type_labels, ("利润变化归因",))
+        item = plan.adopted[0]
+        self.assertEqual(item.model_id, "profit_bridge")
+        self.assertIn("net_profit_change", item.outputs, "计划必须绑定这次跑出什么")
+        self.assertEqual(item.question_types, ("profit_attribution",))
+        self.assertTrue(any("输入齐备" in item.reason for item in plan.adopted))
+        # 计划整体可序列化（进 analysis/plan.json 与包内清单）
+        blob = plan.as_dict()
+        self.assertEqual(blob["question_types"], ["profit_attribution"])
+        self.assertIn("outputs", blob["adopted"][0])
+
+    def test_unclassified_question_falls_back_and_says_so(self):
+        """问题没命中任何已规则化类型 → 退回输入齐备性选择，但**明说未规则化**。"""
+        plan = fa.compile_plan("随便看看这份数据", _dataset())
+        self.assertEqual(plan.question_types, ())
+        self.assertTrue(plan.adopted, "未规则化的问题仍按输入齐备性给可用模型（既有行为）")
+        self.assertTrue(any("未命中" in n for n in plan.notes), plan.notes)
+
+    def test_model_specs_declare_which_questions_they_answer(self):
+        for m in fa.specs():
+            self.assertTrue(m.question_types, f"{m.model_id} 必须声明能回答的问题类型")
+        from financial_analysis import questions as q
+        for m in fa.specs():
+            for qid in m.question_types:
+                self.assertIn(qid, {t.qid for t in q.QUESTION_TYPES}, f"{m.model_id}/{qid}")
+
+
+class TestL1OfficialMaterialFeedsFacts(unittest.TestCase):
+    """L1（09-30 深化，复核 S2）：**已准入的官方年报原文 → 财务事实 → 底稿 → 数据集 → 模型**。
+
+    反例：官方 PDF 此前只进叙事证据——`working_paper_export.build_result` 没有
+    `financials.json` 就直接 skipped，于是结构化 API 不可用时模型**一个数也拿不到**。
+    这里钉住正常资料入口：材料经准入进索引 → 抽取三表 → 过契约（主体/口径/披露时点）
+    → 底稿 → 冻结数据集 → 注册模型跑出并验证。
+    """
+
+    _TEXT = (
+        "洋河股份 2024 年年度报告全文\n"
+        "1、合并利润表\n"
+        "单位：元\n"
+        "项目 2024年12月31日 2023年12月31日\n"
+        "营业收入 28,876,000,000.00 33,126,000,000.00\n"
+        "营业成本 7,751,000,000.00 8,200,000,000.00\n"
+        "归属于母公司股东的净利润 6,673,000,000.00 10,016,000,000.00\n"
+        "2、合并现金流量表\n"
+        "单位：元\n"
+        "项目 2024年12月31日 2023年12月31日\n"
+        "经营活动产生的现金流量净额 4,629,000,000.00 6,130,000,000.00\n"
+    )
+
+    def setUp(self):
+        import tempfile
+        import task_state
+        self.tmp = Path(tempfile.mkdtemp(prefix="fa_l1_ws_"))
+        self._old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(self.tmp))
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", self._old_root)
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.db = str(Path(tempfile.mkdtemp(prefix="fa_l1_db_")) / "t.db")
+        self._orig_db = task_state.DB_PATH
+        task_state.DB_PATH = self.db
+        self.addCleanup(setattr, task_state, "DB_PATH", self._orig_db)
+        self.tid = "l1-official"
+        self.goal = "研究洋河股份（002304.SZ）2023 与 2024 年年度报告研究"
+        task_state.mark_queued(
+            self.tid, goal=self.goal, db_path=self.db,
+            research_request={"company": "洋河股份", "company_id": "002304.SZ",
+                              "market": "cn", "periods": [2023, 2024], "caliber": "合并",
+                              "as_of": "2025-04-30", "identity_source": "form"})
+        self.ws = Path(ws_mod.task_workspace(self.tid, "default"))
+        (self.ws / "project").mkdir(parents=True, exist_ok=True)
+        self.assertFalse((self.ws / "project" / "financials.json").exists(),
+                         "本用例前提：结构化 API 不可用（没有 financials.json）")
+
+    def _admit_material(self, *, disclosure_date: str = "2025-04-03", status: str = "admitted"):
+        """把一份"已准入的年报原文"写进材料索引（正文用替身，不解析真 PDF）。"""
+        import material_intake as mi
+        mid = "mat-l1-1"
+        meta = {"material_id": mid, "channel": mi.CHANNEL_UPLOAD,
+                "kind": "pdf", "title": "洋河股份2024年年度报告",
+                "url": "https://static.cninfo.com.cn/finalpage/2025-04-03/x.PDF",
+                "bytes": len(self._TEXT), "raw_sha256": "h-l1",
+                "status": status, "reason": "", "provenance": "official_discovery",
+                "source_class": "official_disclosure", "doc_type": "年度报告",
+                "period": "2024年", "disclosure_date": disclosure_date,
+                "text_sha256": "t-l1", "created_at": "2025-04-03T10:00:00"}
+        mi.save_meta(self.tid, meta, project="default")
+        doc = {"title": "洋河股份 2024 年年度报告全文", "text": self._TEXT,
+               "url": meta["url"], "page_offsets": [(0, 12)]}
+        p = mock.patch.object(mi, "load_doc", lambda *a, **k: dict(doc))
+        p.start()
+        self.addCleanup(p.stop)
+        return mid
+
+    def test_official_pdf_becomes_facts_paper_and_dataset(self):
+        import financial_analysis as fa
+        from working_paper_export import write_working_paper
+        from workers.data_analyzer_worker import DataAnalyzerWorker
+        self._admit_material()
+        wp = write_working_paper(self.tid, self.goal, project="default")
+        self.assertTrue(wp.get("ok"), wp)
+        self.assertGreater(wp.get("rows") or 0, 0, wp)
+        self.assertEqual(wp.get("request_source"), "official_material", wp)
+        facts = wp.get("facts") or []
+        metrics = {str(f.get("metric")) for f in facts}
+        self.assertIn("revenue", metrics, facts)
+        self.assertIn("net_profit", metrics, facts)
+        self.assertIn("gross_profit", metrics, "毛利由营业收入−营业成本派生（带血缘）")
+        rev = [f for f in facts if f.get("metric") == "revenue"]
+        self.assertEqual({x["period"] for x in rev}, {"2023年", "2024年"})
+        self.assertTrue(all(x.get("unit") == "元" for x in rev), rev)
+        # 底稿 → 冻结数据集 → 注册模型（同一条现役链，不是旁路脚本）
+        ds, label = DataAnalyzerWorker._freeze_dataset(
+            "working_paper", self.ws / "project" / "working_paper.json",
+            task={"goal": self.goal, "context": {"root_task_id": self.tid}},
+            required_metrics=("revenue", "net_profit", "gross_profit",
+                              "operating_cashflow"),
+            available_models=[m.model_id for m in fa.specs()])
+        self.assertEqual(tuple(ds.manifest.periods), ("2023年", "2024年"), ds.manifest.gaps)
+        self.assertTrue(ds.require("revenue", "2024年").usable)
+        run = fa.run("profit_bridge", ds)
+        self.assertEqual(run.status, fa.RunStatus.VALIDATED, run.reason)
+        vals = {o.metric: o.value for o in run.outputs}
+        self.assertAlmostEqual(vals["net_profit_change"],
+                               (6673000000.0 - 10016000000.0), places=0)
+
+    def test_late_disclosure_is_not_taken_into_facts(self):
+        self._admit_material(disclosure_date="2025-06-30")   # 晚于契约 as_of=2025-04-30
+        from working_paper_export import write_working_paper
+        wp = write_working_paper(self.tid, self.goal, project="default")
+        self.assertFalse(wp.get("ok"), wp)
+        self.assertTrue(wp.get("skipped"), wp)
+        self.assertTrue(any("晚于" in n for n in (wp.get("official_notes") or [])), wp)
+
+    def test_unadmitted_material_is_not_used(self):
+        self._admit_material(status="pending")
+        from working_paper_export import write_working_paper
+        wp = write_working_paper(self.tid, self.goal, project="default")
+        self.assertFalse(wp.get("ok"), wp)
+        self.assertIn("官方", str(wp.get("reason") or ""), wp)
+
+    def test_no_material_gives_an_actionable_skip(self):
+        from working_paper_export import write_working_paper
+        wp = write_working_paper(self.tid, self.goal, project="default")
+        self.assertFalse(wp.get("ok"), wp)
+        self.assertTrue(wp.get("skipped"), wp)
+        self.assertIn("官方", str(wp.get("reason") or ""), wp)
 
 
 def _payload_of(model_id: str, dataset) -> dict:

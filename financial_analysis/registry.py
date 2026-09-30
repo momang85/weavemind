@@ -7,7 +7,8 @@
 from __future__ import annotations
 
 from .contracts import ModelSpec, NotApplicable
-from .operators import cash_quality, profit_bridge, scenario, working_capital
+from .operators import (cash_quality, profit_bridge, profit_to_cash, scenario,
+                        working_capital)
 
 # 算子白名单：名字 → (实现模块, 计算函数, 独立金样函数)
 OPERATORS = {
@@ -16,6 +17,7 @@ OPERATORS = {
     "working_capital_v1": (working_capital, working_capital.compute,
                            working_capital.gold),
     "scenario_v1": (scenario, scenario.compute, scenario.gold),
+    "profit_to_cash_v1": (profit_to_cash, profit_to_cash.compute, profit_to_cash.gold),
 }
 
 # 同年比率（复用既有口径的四个比率，不重新发明）
@@ -32,6 +34,7 @@ _REGISTRY: dict[str, ModelSpec] = {
     cash_quality.SPEC.model_id: cash_quality.SPEC,
     working_capital.SPEC.model_id: working_capital.SPEC,
     scenario.SPEC.model_id: scenario.SPEC,
+    profit_to_cash.SPEC.model_id: profit_to_cash.SPEC,
 }
 
 

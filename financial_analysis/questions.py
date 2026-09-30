@@ -1,0 +1,168 @@
+# -*- coding: utf-8 -*-
+"""研究问题 → 问题类型：**规则化**的确定性映射（L2，2026-09-30 架构复核 M2）。
+
+为什么需要它：此前 `runner.compile_plan` 只看"输入字段是否齐备"——于是
+"**只研究现金转换**、不做情景预测"与"只分析营收变动的量价因素"选出来的模型**一模一样**
+（都是 profit_bridge/cash_quality/scenario_sensitivity）。问题没有参与模型选择，
+"数据齐备"被当成了"适用"。
+
+本模块只做一件事：把**研究者写下的问题**按**显式规则**映射到问题类型，并说清每类问题
+需要什么材料、允许哪些注册模型回答。纪律：
+
+- **保留原问题**：不为了容易回答而改写它；分类结果里带上命中的关键词，读者能核对；
+- **确定性**：纯字符串规则，不含 LLM、不联网；LLM 可以**提议**问题映射（在编排层），
+  但公式执行、输入绑定、参数界限、验证与准入永远由确定性代码控制（架构 §4.4）；
+- **数据齐备 ≠ 适用**：某模型输入齐备但与所问问题无关时，计划里必须写"与所问问题无关"
+  并给出该模型回答的是哪一类问题，而不是把它塞进正文充数；
+- **缺料就报缺什么**：问题类型声明它需要的材料（如"量价结构"需要销量/平均单价/
+  分产品收入），资料里没有就如实列缺口，**不换跑无关模型**（架构 §4.5）。
+"""
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+
+SCHEMA_QUESTIONS = "weavemind.question_types/1"
+
+# **否定**不能被当成"在研究这个问题"（2026-09-30 复核 M2 的第一条反例实测）：
+# "只研究现金转换，**不做情景预测**" 若把"情景"算命中，计划就会去跑情景模型。
+# 判据只看关键词**紧前面的**几个字，是显式的字符串规则，不做语义猜测。
+_NEGATED_BEFORE_RE = re.compile(r"(不|非|无|没|勿|别|免|无需|不用)(做|要|用|需|考察|研究|预测|分析|作|进行|看|给|涉)?\s*$")
+
+
+@dataclass(frozen=True)
+class QuestionType:
+    """一类研究问题：命中词、需要的材料、能回答它的注册模型（按优先级）。"""
+
+    qid: str
+    label: str
+    keywords: tuple[str, ...]
+    needs_metrics: tuple[str, ...] = ()      # 回答它**需要**的观察（缺了要如实报缺口）
+    needs_note: str = ""                     # 缺口怎么补（可行动）
+    models: tuple[str, ...] = ()             # 允许回答该问题的注册模型（有序）
+
+
+# ── 已规则化的问题类型（覆盖现有四族 + L3 的利润—现金链 + 尚未支持的量价）──────
+QUESTION_TYPES: tuple[QuestionType, ...] = (
+    QuestionType(
+        qid="profit_attribution", label="利润变化归因",
+        keywords=("利润桥", "利润变化", "净利润的变化", "归母净利润", "净利变化", "毛利变化",
+                  "利润下滑", "利润下降", "利润增长的原因", "金额项构成", "利润归因",
+                  "利润由什么构成", "分析利润"),
+        needs_metrics=("net_profit", "gross_profit"),
+        needs_note="需要同主体同口径的两期归母净利润与毛利（利润桥的两端）",
+        models=("profit_bridge",),
+    ),
+    QuestionType(
+        qid="cash_conversion", label="利润到现金的转化",
+        keywords=("现金转化", "现金转换", "转成现金", "转化为现金", "现金含量", "现金质量",
+                  "经营现金流", "现金流", "cfo", "回款", "收现", "现金创造",
+                  "利润有没有转成现金", "利润增长是否转化"),
+        needs_metrics=("operating_cashflow", "net_profit"),
+        needs_note="需要经营现金流与归母净利润（同主体同期间）",
+        models=("profit_to_cash", "cash_quality"),
+    ),
+    QuestionType(
+        qid="working_capital", label="营运资本占用与周转",
+        keywords=("占款", "营运资本", "营运资金", "周转", "账期", "应收账款", "存货", "应付账款",
+                  "现金转换周期"),
+        needs_metrics=("accounts_receivable", "inventory", "accounts_payable"),
+        needs_note="需要应收/存货/应付的两期期末余额与收入/成本（周转分母）",
+        models=("working_capital",),
+    ),
+    QuestionType(
+        qid="scenario", label="条件情景与敏感性",
+        keywords=("情景", "假设", "敏感性", "敏感度", "压力", "承压", "如果收入",
+                  "若收入", "底线", "盈亏平衡"),
+        needs_metrics=("revenue", "gross_profit", "net_profit"),
+        needs_note="需要基期收入/毛利/归母净利润（情景从基期读数出发）",
+        models=("scenario_sensitivity",),
+    ),
+    QuestionType(
+        qid="volume_price", label="量价结构分解",
+        keywords=("量价", "销量", "单价", "价格变动", "产量", "分产品", "分地区", "产品结构",
+                  "营收变动"),
+        needs_metrics=("sales_volume", "average_price", "revenue_by_product"),
+        needs_note=("需要可比产品集合的销量与平均单价（或分产品收入），且口径可比；"
+                    "资料里没有就先补披露，**不拿无关模型充数**"),
+        models=(),                        # 目前没有注册模型能回答量价分解
+    ),
+)
+
+_QT_BY_ID = {q.qid: q for q in QUESTION_TYPES}
+
+
+def question_type(qid: str) -> QuestionType:
+    return _QT_BY_ID[str(qid)]
+
+
+def classify(question: str) -> list[dict]:
+    """问题 → 命中的问题类型列表（按命中词数与声明顺序排序，**不做语义猜测**）。
+
+    返回 `[{"qid", "label", "matched": [命中词, …], "excluded": [被否定掉的词, …]}]`；
+    命中词一并给出去，读者可核对"为什么这样选模型"；被否定掉的词也列出来，
+    免得"不做情景预测"这种写法让人以为问题没被读懂。没有任何命中 → 空列表。
+    """
+    text = str(question or "").lower()
+    hits: list[tuple[int, int, dict]] = []
+    for idx, qt in enumerate(QUESTION_TYPES):
+        matched: list[str] = []
+        excluded: list[str] = []
+        for w in qt.keywords:
+            if not w:
+                continue
+            low = w.lower()
+            found = False
+            start = 0
+            while True:
+                i = text.find(low, start)
+                if i < 0:
+                    break
+                start = i + len(low)
+                if _NEGATED_BEFORE_RE.search(text[max(0, i - 6):i]):
+                    excluded.append(w)
+                    continue
+                found = True
+            if found and w not in matched:
+                matched.append(w)
+            elif not found and w in excluded:
+                continue
+        if matched:
+            hits.append((-len(matched), idx, {"qid": qt.qid, "label": qt.label,
+                                              "matched": matched,
+                                              "excluded": sorted(set(excluded))}))
+    hits.sort(key=lambda x: (x[0], x[1]))
+    return [h[2] for h in hits]
+
+
+def models_for(qids) -> tuple[str, ...]:
+    """这些类型允许的注册模型（按类型顺序去重；类型本身没有模型就什么都不给）。"""
+    out: list[str] = []
+    for qid in qids or ():
+        qt = _QT_BY_ID.get(str(qid))
+        if qt is None:
+            continue
+        for m in qt.models:
+            if m not in out:
+                out.append(m)
+    return tuple(out)
+
+
+def needs_for(qids) -> list[dict]:
+    """这些类型需要的材料（给"缺什么、去哪补"的可行动缺口用）。"""
+    out: list[dict] = []
+    seen: set[str] = set()
+    for qid in qids or ():
+        qt = _QT_BY_ID.get(str(qid))
+        if qt is None or qt.qid in seen:
+            continue
+        seen.add(qt.qid)
+        out.append({"qid": qt.qid, "label": qt.label,
+                    "metrics": list(qt.needs_metrics), "how": qt.needs_note})
+    return out
+
+
+def describe(qids) -> str:
+    """一句话描述命中的问题类型（进计划说明/正文，读者据此核对模型选择）。"""
+    labels = [str(_QT_BY_ID[q].label) for q in (qids or []) if q in _QT_BY_ID]
+    return "、".join(labels) if labels else "未规则化的问题"

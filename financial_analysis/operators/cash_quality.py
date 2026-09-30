@@ -46,6 +46,8 @@ SPEC = ModelSpec(
     validations=("gold", "unit", "cash_quality_sign"),
     budget={"steps": 1, "seconds": 5},
     limits=LIMITS,
+    # 现金质量回答「利润有没有转成现金」这一类的**水平与覆盖**问题
+    question_types=("cash_conversion",),
 )
 
 

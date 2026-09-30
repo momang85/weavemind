@@ -222,6 +222,15 @@ def validate_output(spec, dataset, payload: dict) -> dict:
         skipped = bool(diag.get("coverage_skipped"))
         _add("cash_quality_sign", (not has_cov) if skipped else has_cov,
              str(diag.get("coverage_skipped") or "分母为正 → 覆盖率已给出"))
+    if "cash_conversion_sign" in wanted:
+        # 两期中任一期归母净利非正 → **不得**出现现金转化变化（负/零分母没有可比含义）。
+        # 这条与 `cash_quality_sign` 同一裁决，但作用于"两期之比的变化"（L3 的 profit_to_cash）。
+        outs = payload.get("outputs") or []
+        diag = payload.get("diagnostics") or {}
+        has_conv = any(str(o.get("metric")) == "cash_conversion_change" for o in outs)
+        skipped = str(diag.get("coverage_skipped") or "")
+        _add("cash_conversion_sign", (not has_conv) if skipped else has_conv,
+             skipped or "两期归母净利均为正 → 现金转化变化已给出")
     if "posture_disclosed" in wanted:
         # 期末口径必须写明（不得让读者以为是平均余额）
         diag = payload.get("diagnostics") or {}

@@ -38,43 +38,133 @@ def _run_id(spec_, dataset, params: dict, impl_version: str) -> str:
 
 
 def compile_plan(question: str, dataset, *, prefer=()) -> AnalysisPlan:
-    """问题 → 计划：能用哪些模型、为什么拒绝其它模型（每一拒绝都带原因）。"""
+    """问题 → 计划：**先按问题类型选模型**，再核输入；每一次采纳与拒绝都有理由（L2）。
+
+    2026-09-30 架构复核 M2 的反例：此前只按"字段齐备"选模型，于是
+    "只研究现金转换，不做情景预测"与"只分析营收变动的量价因素"选出来的三模型一模一样。
+    现在：
+
+    1. `questions.classify(question)` 把**研究者原话**映射到问题类型（保留原问题，不改写）；
+    2. 只有 `ModelSpec.question_types` 与命中类型相交的注册模型才可能被采用——输入齐备
+       但**与所问问题无关**的模型进 `rejected`，理由写明"它回答的是哪一类问题"；
+    3. 问题类型需要的材料在数据里没有 → 记 `gaps`（缺什么、去哪补），**不换跑无关模型**
+       （量价结构目前没有注册模型能回答：如实说，不拿利润桥充数）；
+    4. 问题没有命中任何已规则化类型 → 退回**既有**行为（按输入齐备性给可用模型），并在
+       `notes` 里明说"问题未规则化，本轮按输入齐备性选择"，读者不会误以为问题被理解了；
+    5. 同一 (dataset, 模型, 参数, 规则版本) 的运行按 `run_id` **身份复用**（`save_run`
+       同 id 覆盖），只有受影响的节点会重算——不在计划层另造一套缓存。
+    """
+    from . import questions as _q
+
     avail = available_for(dataset)
+    hits = _q.classify(question)
+    qids = [h["qid"] for h in hits]
+    labels = [h["label"] for h in hits]
+    relevant = _q.models_for(qids)
+    needs = _q.needs_for(qids)
+    notes: list[str] = []
+    gaps: list[str] = []
+
+    # 问题需要的材料在数据里没有 → 如实列缺口（量价这类"没有模型也没有资料"的最典型）
+    for n in needs:
+        missing = [m for m in n["metrics"]
+                   if dataset.get(m, dataset.period_at(0)) is None
+                   and dataset.get(m, dataset.period_at(-1)) is None]
+        if missing:
+            gaps.append(f"{n['label']}：缺材料 {missing}——{n['how']}")
+    if lib_missing := [n["label"] for n in needs if n["qid"] == "volume_price"]:
+        notes.append("量价结构分解目前**没有注册模型**：只有资料清单与缺口，不给推测性结论（"
+                     + "、".join(lib_missing) + "）")
+
+    avail_set = set(avail)
     adopted: list[PlanItem] = []
     rejected: list[dict] = []
-    order = [m for m in (prefer or ()) if m in avail] + \
-            [m for m in avail if m not in (prefer or ())]
-    for mid in order:
-        m = spec(mid)
-        need = [f"{i.metric}@{i.period_offset}" for i in m.inputs]
-        missing = [i.metric for i in m.inputs
-                   if dataset.get(i.metric, dataset.period_at(i.period_offset)) is None]
-        if missing:
-            rejected.append({"model_id": mid, "reason": "缺输入",
-                             "missing": sorted(set(missing)), "needs": need})
-            continue
-        adopted.append(PlanItem(model_id=mid, question=m.question,
-                                reason=f"输入齐备（{', '.join(need)}）"))
-    # 其余**已注册**模型：逐个说明为什么没被采用（缺哪些指标 / 期间不够 / 不适用）——
-    # 不能只写一句"输入不齐备"，那对"该补什么材料"没有帮助。
-    _periods = [p for p in (dataset.manifest.periods or ()) if p]
-    for m in specs():
-        if any(a.model_id == m.model_id for a in adopted) \
-                or any(r["model_id"] == m.model_id for r in rejected):
-            continue
-        missing = sorted({i.metric for i in m.inputs
-                          if dataset.get(i.metric,
-                                         dataset.period_at(i.period_offset)) is None})
-        if missing:
-            reason = "缺输入"
-        elif len(_periods) < 2:
-            reason = "期间不足两期（两期桥接需要一个以上的年度期间）"
-        else:
-            reason = "当前数据形态不适用"
-        rejected.append({"model_id": m.model_id, "reason": reason, "missing": missing,
-                         "needs": [f"{i.metric}@{i.period_offset}" for i in m.inputs]})
+    if qids:
+        order = [m for m in (prefer or ()) if m in relevant] + \
+                [m for m in relevant if m not in (prefer or ())]
+        notes.append("按问题类型选择模型：" + "、".join(labels)
+                     + f"（命中词：{'、'.join(w for h in hits for w in h['matched'])}）")
+        _neg = sorted({w for h in hits for w in (h.get("excluded") or [])})
+        if _neg:
+            notes.append("以下词出现在**否定**语境里，未据此选模型："
+                         + "、".join(_neg) + "（字符串规则，读者可核对）")
+        for mid in order:
+            try:
+                m = spec(mid)
+            except Exception:                        # noqa: BLE001 - 未注册按无关处理
+                continue
+            need = [f"{i.metric}@{i.period_offset}" for i in m.inputs]
+            missing = [i.metric for i in m.inputs
+                       if dataset.get(i.metric, dataset.period_at(i.period_offset)) is None]
+            if missing:
+                rejected.append({"model_id": mid, "reason": "缺输入",
+                                 "missing": sorted(set(missing)), "needs": need,
+                                 "detail": "该模型能回答这个问题类型，但输入不齐备"})
+                continue
+            adopted.append(PlanItem(
+                model_id=mid, question=m.question,
+                reason=(f"适用问题：{'、'.join(labels)}；输入齐备（{', '.join(need)}）"),
+                outputs=tuple(o.metric for o in m.outputs),
+                question_types=tuple(m.question_types)))
+        # 其余**已注册**模型：逐个说明为什么没被采用（与问题无关 / 缺输入 / 期间不足）
+        for m in specs():
+            if any(a.model_id == m.model_id for a in adopted) \
+                    or any(r["model_id"] == m.model_id for r in rejected):
+                continue
+            _mine = tuple(m.question_types)
+            missing = sorted({i.metric for i in m.inputs
+                              if dataset.get(i.metric,
+                                             dataset.period_at(i.period_offset)) is None})
+            if _mine and not (set(_mine) & set(qids)):
+                rejected.append({"model_id": m.model_id, "reason": "与所问问题无关",
+                                 "missing": missing,
+                                 "answers": "、".join(_mine),
+                                 "detail": (f"本次问题是「{_q.describe(qids)}」，"
+                                            f"本模型回答「{_q.describe(_mine)}」："
+                                            "数据齐备也不等于适用于这个问题")})
+                continue
+            if missing:
+                reason = "缺输入"
+            elif len([p for p in (dataset.manifest.periods or ()) if p]) < 2:
+                reason = "期间不足两期（两期桥接需要一个以上的年度期间）"
+            else:
+                reason = "当前数据形态不适用"
+            rejected.append({"model_id": m.model_id, "reason": reason, "missing": missing,
+                             "needs": [f"{i.metric}@{i.period_offset}" for i in m.inputs]})
+    else:
+        # 问题没有命中任何已规则化类型 → **既有行为**，但明说"未规则化"（不假装理解）
+        notes.append("问题未命中任何已规则化的问题类型：本轮按**输入齐备性**选择模型"
+                     "（要按问题选择，请用已规则化的问法，或在问题类型表里补一条）")
+        order = [m for m in (prefer or ()) if m in avail] + \
+                [m for m in avail if m not in (prefer or ())]
+        for mid in order:
+            m = spec(mid)
+            need = [f"{i.metric}@{i.period_offset}" for i in m.inputs]
+            adopted.append(PlanItem(model_id=mid, question=m.question,
+                                    reason=f"输入齐备（{', '.join(need)}）",
+                                    outputs=tuple(o.metric for o in m.outputs),
+                                    question_types=tuple(m.question_types)))
+        for m in specs():
+            if any(a.model_id == m.model_id for a in adopted) \
+                    or any(r["model_id"] == m.model_id for r in rejected):
+                continue
+            missing = sorted({i.metric for i in m.inputs
+                              if dataset.get(i.metric,
+                                             dataset.period_at(i.period_offset)) is None})
+            if missing:
+                reason = "缺输入"
+            elif len([p for p in (dataset.manifest.periods or ()) if p]) < 2:
+                reason = "期间不足两期（两期桥接需要一个以上的年度期间）"
+            else:
+                reason = "当前数据形态不适用"
+            rejected.append({"model_id": m.model_id, "reason": reason, "missing": missing,
+                             "needs": [f"{i.metric}@{i.period_offset}" for i in m.inputs]})
+    if gaps:
+        notes.append("问题所需材料缺口见 gaps：缺料时**只停缺输入的模型**，不换跑无关模型")
     return AnalysisPlan(question=str(question or ""), dataset_hash=dataset.dataset_hash,
-                        adopted=tuple(adopted), rejected=tuple(rejected))
+                        adopted=tuple(adopted), rejected=tuple(rejected),
+                        question_types=tuple(qids), question_type_labels=tuple(labels),
+                        needs=tuple(needs), gaps=tuple(gaps), notes=tuple(notes))
 
 
 def run(model_id: str, dataset, *, params: dict | None = None,

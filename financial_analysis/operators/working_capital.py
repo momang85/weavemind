@@ -59,6 +59,7 @@ SPEC = ModelSpec(
     validations=("gold", "identity", "unit", "posture_disclosed"),
     budget={"steps": 1, "seconds": 5},
     limits=LIMITS,
+    question_types=("working_capital",),
 )
 
 

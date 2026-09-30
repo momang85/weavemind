@@ -84,16 +84,126 @@ def resolve_request(task_id: str, goal: str, metadata: dict,
     return parsed, candidates, "text"
 
 
+def _official_material_facts(task_id: str, request, *, project: str | None = None,
+                             ws_dir=None) -> tuple[list, list[str]]:
+    """**已准入的官方原文** → 财务表事实（L1，2026-09-30 复核 S2）。
+
+    为什么需要它：`build_result` 此前没有 `financials.json` 就直接
+    "skipped：没有结构化财务"——而结构化 API 不可用时，任务里其实**已经有**官方年报原文
+    （K1 已经取件并准入），模型却一个数都拿不到。这里把同一份原文的财务表按**现役抽取器**
+    变成事实，交给同一条底稿 → 数据集 → 受控分析链。
+
+    纪律：只用**已准入**（`status == admitted`）的材料；主体必须在材料里得到验证；披露日晚于
+    `as_of` 的一条不取；取不到就返回空并如实记原因（不猜、不补造）。
+    """
+    notes: list[str] = []
+    company = str(getattr(request, "company", "") or "")
+    code = str(getattr(request, "company_id", "") or "")
+    periods = tuple(getattr(request, "periods", ()) or ())
+    as_of = str(getattr(request, "as_of", "") or "")
+    if not company and not code:
+        return [], ["没有研究契约主体：不从官方原文取财务事实"]
+    try:
+        import material_intake as mi
+    except Exception as exc:                        # noqa: BLE001 - 材料层不可用
+        return [], [f"材料层不可读：{str(exc)[:100]}"]
+    try:
+        items = mi.read_index(task_id, project=project, ws_dir=ws_dir) or []
+    except Exception as exc:                        # noqa: BLE001
+        return [], [f"材料清单不可读：{str(exc)[:100]}"]
+    out: list = []
+    for it in items:
+        mid = str(it.get("material_id") or "")
+        if not mid or str(it.get("status") or "") != "admitted":
+            continue
+        if str(it.get("kind") or "") not in ("pdf", "html", "text"):
+            continue
+        disc = str(it.get("disclosure_date") or "")
+        if as_of and disc and disc > as_of:
+            notes.append(f"官方材料 {mid}：披露日 {disc} 晚于 as_of {as_of}，不取事实")
+            continue
+        try:
+            doc = mi.load_doc(task_id, mid, project=project, ws_dir=ws_dir) or {}
+        except Exception as exc:                    # noqa: BLE001
+            notes.append(f"官方材料 {mid} 正文不可读：{str(exc)[:80]}")
+            continue
+        got = _facts.facts_from_annual_tables(
+            doc, company=company, company_code=code, periods=periods, as_of=as_of,
+            disclosed_at=disc, url=str(it.get("url") or ""))
+        if got:
+            # **同一主体/口径准入**（L1）：抽取器已核过"材料里能验证该主体"，
+            # 这里再按研究契约的稳定标识与口径核一遍，不合格的观察一条不进底稿
+            want_cal = str(getattr(request, "caliber", "") or "")
+            kept, drop = [], {"subject": 0, "caliber": 0}
+            for f in got:
+                ok, _why = _facts.check_subject(request, f.entity, f.entity_id, f.market)
+                if not ok:
+                    drop["subject"] += 1
+                    continue
+                if want_cal and str(getattr(f, "caliber", "") or "") != want_cal:
+                    drop["caliber"] += 1
+                    continue
+                kept.append(f)
+            if kept:
+                notes.append(f"官方材料 {mid}（{str(it.get('title') or '')[:40]}）："
+                             f"抽取到 {len(kept)} 条与契约相容的财务事实"
+                             + ("；已排除 " + "、".join(f"{k} {v} 条"
+                                                      for k, v in drop.items() if v)
+                                if any(drop.values()) else ""))
+                out.extend(kept)
+                break                               # 一份已准入年报即可（多年报在同一份里）
+            notes.append(f"官方材料 {mid}：抽到 {len(got)} 条但都不符合契约"
+                         f"（主体/口径，见排除计数 {drop}）")
+            continue
+        notes.append(f"官方材料 {mid}：财务表没抽出可用事实（主体未验证/无三表/单位缺失）")
+    return out, notes
+
+
 def build_result(task_id: str, goal: str, *, project: str | None = None) -> dict:
     """**只算不写**的底稿结果（供读取侧复用：交付状态/硬门槛在页面与导出里也要能重算）。
 
     与 `write_working_paper` 同源：那边 = 本函数 + 落盘两件套。分开是为了让
     "读一次任务状态"不必顺手改写工作区文件。
+
+    L1（2026-09-30 复核 S2）：没有 `financials.json` 时不再直接"skipped"——先看任务里
+    有没有**已准入的官方年报原文**，有就用它抽财务表事实、照样产出底稿（结构化 API 不可用
+    但官方 PDF 足够时，确定性模型仍能运行）。
     """
     proj = task_project_dir(task_id, project) if project else task_project_dir(task_id)
     fin_path = Path(proj) / "financials.json"
     if not fin_path.exists():
-        return {"ok": False, "skipped": True, "reason": "没有结构化财务，不产出底稿"}
+        request, _c, _s = resolve_request(task_id, goal, {}, {})
+        off_facts, off_notes = _official_material_facts(task_id, request, project=project)
+        if not off_facts:
+            return {"ok": False, "skipped": True,
+                    "reason": "没有结构化财务，也没有可用的已准入官方原文财务表：不产出底稿",
+                    "official_notes": off_notes}
+        paper = build_working_paper(list(off_facts), request)
+        return {"ok": True, "request": request.as_dict(), "request_source": "official_material",
+                "candidates": [], "selection": paper.selection,
+                "facts": [{"metric": str(getattr(f, "metric", "")),
+                           "metric_label": str(getattr(f, "metric_label", "")),
+                           "period": str(getattr(f, "period", "")),
+                           "value": getattr(f, "value", None),
+                           "unit": str(getattr(f, "unit", "")),
+                           "currency": str(getattr(f, "currency", "")),
+                           "caliber": str(getattr(f, "caliber", "")),
+                           "fact_id": str(getattr(f, "fact_id", "")),
+                           "period_kind": str(getattr(f, "period_kind", "")),
+                           "period_end": str(getattr(f, "period_end", "")),
+                           "verify_state": str(getattr(f, "verify_state", "")),
+                           "source_locator": dict(getattr(f, "source_locator", {}) or {}),
+                           "formula": str(getattr(f, "formula", "")),
+                           "derived_from": list(getattr(f, "derived_from", []) or [])}
+                          for f in off_facts],
+                "operating_facts": [], "scope_notes": [],
+                "rows": len(paper.rows), "derived": len(paper.derived),
+                "gaps": paper.gaps, "problems": [p.as_dict() for p in paper.problems],
+                "audit": paper.audit,
+                "completeness": paper.completeness, "paper_ok": paper.ok,
+                "official_notes": off_notes,
+                "paper": paper,                 # 仅内存用；落盘时由 write_working_paper 使用
+                "note": "底稿来自**已准入官方年报原文**的财务表（结构化 API 不可用时的正常入口）"}
     payload = json.loads(fin_path.read_text(encoding="utf-8"))
     md = dict(payload.get("metadata") or {})
     if str(payload.get("source") or "") == "multi_entity":

@@ -737,6 +737,10 @@ class Fact:
     period_start: str = ""
     period_end: str = ""
     period_type: str = ""
+    # 存量（余额/时点）还是流量（发生额/区间）+ 列头原文（L0-a）：从官方表抽出来的
+    # 观察要能一路带到冻结数据集，不能在"事实 → 底稿"这一段丢掉。
+    period_kind: str = ""
+    period_label: str = ""
     currency: str = UNKNOWN
     unit: str = UNKNOWN
     unit_source: str = UNKNOWN
@@ -974,6 +978,81 @@ def derived_fact(base: list[Fact], metric: str, *, formula: str,
         formula=formula,
         derived_from=[f.fact_id for f in inputs],
     )
+
+
+def facts_from_annual_tables(doc: dict, *, company: str, company_code: str = "",
+                             periods=(), as_of: str = "", disclosed_at: str = "",
+                             url: str = "") -> list[Fact]:
+    """**官方年报原文**的三张报表 → 财务事实（L1，2026-09-30 复核 S2）。
+
+    为什么单列一条：官方 PDF 此前只进叙事证据（`narrative_evidence`），结构化 API 不可用时
+    模型**一个数也拿不到**（`working_paper_export` 直接因为没有 `financials.json` 跳过）。
+    这里复用**现役抽取器** `adapters.annual_financial_tables`（含 K0-b 的六类静默错数防护与
+    完整期间/存量流量标记），把同一份原文的财务表变成 `Fact`：
+
+    - 主体**必须**在材料里得到验证（`entity_state == "verified"`），否则一条都不取；
+    - 披露日晚于 `as_of` 时一条都不取（历史时点研究不得穿越）；
+    - 单位/币种/口径的**证据来源**逐个带出（`unit_source`/`caliber_source`/
+      `source_locator` 里的页码与原文引文），供底稿与卡片回溯；
+    - 毛利派生走抽取器自己的 `derive_gross_profit`（父冲突/血缘规则与 K0-b 一致）。
+    """
+    try:
+        from adapters import annual_financial_tables as aft
+    except Exception:                                    # noqa: BLE001 - 适配层不可用按无事实
+        return []
+    if as_of and disclosed_at and str(disclosed_at) > str(as_of):
+        # 晚于研究时点的披露不进事实（与契约准入同一条纪律）
+        return []
+    try:
+        raw = aft.extract(doc or {}, company=company, company_code=company_code,
+                          periods=periods)
+    except Exception:                                    # noqa: BLE001 - 抽取失败不造事实
+        return []
+    if not raw.get("ok") or str(raw.get("entity_state") or "") != "verified":
+        return []
+    rows = list(raw.get("facts") or []) + aft.derive_gross_profit(raw.get("facts") or [],
+                                                                  raw.get("rejected"))
+    out: list[Fact] = []
+    for r in rows:
+        _metric = str(r.get("metric") or "")
+        if not _metric:
+            continue
+        out.append(Fact(
+            fact_id=str(r.get("fact_id") or make_fact_id(
+                company_code, company, _metric, str(r.get("period") or ""),
+                str(r.get("caliber") or ""))),
+            entity=str(r.get("entity") or company),
+            entity_id=str(r.get("entity_id") or company_code),
+            metric=_metric, metric_label=metric_label(_metric),
+            period=str(r.get("period") or ""),
+            period_start=str(r.get("period_start") or ""),
+            period_end=str(r.get("period_end") or ""),
+            period_type=str(r.get("period_type") or "年报"),
+            period_kind=str(r.get("period_kind") or ""),
+            period_label=str(r.get("period_label") or ""),
+            currency=str(r.get("currency") or UNKNOWN),
+            unit=str(r.get("unit") or UNKNOWN),
+            unit_source=str(r.get("unit_source") or UNKNOWN),
+            value=r.get("value"), raw_value=r.get("value"),
+            caliber=str(r.get("caliber") or UNKNOWN),
+            caliber_source=str(r.get("caliber_source") or ""),
+            caliber_evidence=str(r.get("caliber_source") or ""),
+            market=str(r.get("market") or "cn"),
+            disclosed_at=str(disclosed_at or ""),
+            source_url=str(r.get("source_url") or url or ""),
+            source_hash=str(r.get("source_hash") or ""),
+            source_locator={"page": str(r.get("locator") or ""),
+                            "quote": str(r.get("quote") or ""),
+                            "period_source": str(r.get("period_source") or ""),
+                            "period_evidence": str(r.get("period_evidence") or ""),
+                            "currency_source": str(r.get("currency_source") or ""),
+                            "header_source": str(r.get("header_source") or "")},
+            verify_state=VERIFY_UNVERIFIED,
+            extracted_by=str(r.get("extracted_by") or "annual_financial_tables"),
+            formula=str(r.get("formula") or ""),
+            derived_from=[str(x) for x in (r.get("derived_from") or ())],
+        ))
+    return out
 
 
 def facts_to_json(facts: list[Fact]) -> str:

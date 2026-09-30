@@ -175,7 +175,13 @@ class DataAnalyzerWorker(AsyncWorkerBase):
                     "error": str(exc), "gap": str(exc), "runs": [], "cards": [],
                     "chart_specs": [],
                     "note": "研究契约要素不全：不跑注册模型（缺口见 error）"}
-        plan = fa.compile_plan(str(instruction or ""), ds, prefer=("profit_bridge",))
+        # 计划按**研究者的问题**编译（L2）：步骤指令往往带过程性措辞，任务目标才是原始问题；
+        # 两者拼在一起交给规则分类，保留原问题、不改写（分类结果与命中词进计划说明）。
+        _question = str(instruction or "")
+        _goal = str((task or {}).get("goal") or "")
+        if _goal and _goal not in _question:
+            _question = (_question + " " + _goal).strip()
+        plan = fa.compile_plan(_question, ds, prefer=("profit_bridge",))
         # **可复算输入随交付落盘**（K2）：数据集 + 计划 + 契约/来源。只留 run 摘要时，
         # 包里的人无法离线复算；这三份文件加上 `analysis_runs.json` 才构成"输入→输出"闭环。
         try:

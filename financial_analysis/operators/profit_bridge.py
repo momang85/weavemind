@@ -56,6 +56,8 @@ SPEC = ModelSpec(
     validations=("gold", "closure", "identity", "unit", "no_pp_substitution"),
     budget={"steps": 1, "seconds": 5},
     limits=LIMITS,
+    # 能回答的问题类型（L2）：利润桥回答的是**利润变化归因**
+    question_types=("profit_attribution",),
 )
 
 

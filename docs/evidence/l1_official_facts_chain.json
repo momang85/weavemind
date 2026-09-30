@@ -1,0 +1,292 @@
+[
+ {
+  "slug": "002304",
+  "company": "洋河股份",
+  "code": "002304.SZ",
+  "as_of": "2025-04-29",
+  "paper_ok": true,
+  "request_source": "official_material",
+  "official_notes": [
+   "官方材料 f42e747c73850b59（2024年年度报告）：抽取到 26 条与契约相容的财务事实；已排除 caliber 6 条"
+  ],
+  "rows": 22,
+  "derived": 14,
+  "gaps": [],
+  "fact_metrics": [
+   "accounts_payable",
+   "accounts_receivable",
+   "gross_profit",
+   "inventory",
+   "net_profit",
+   "operating_cashflow",
+   "operating_cost",
+   "revenue",
+   "total_assets",
+   "total_liabilities",
+   "total_revenue"
+  ],
+  "fact_periods": [
+   "2023年",
+   "2024年"
+  ],
+  "dataset": {
+   "label": "worker:working_paper.json",
+   "periods": [
+    "2023年",
+    "2024年"
+   ],
+   "observations": 36,
+   "usable": 36,
+   "gaps": [
+    "非年度期间（不参与年度模型，仍保留在观察集合里）：2024年同比、2024年较2023年"
+   ]
+  },
+  "question_types": [
+   "cash_conversion",
+   "profit_attribution",
+   "working_capital"
+  ],
+  "adopted": [
+   "profit_to_cash",
+   "cash_quality",
+   "profit_bridge",
+   "working_capital"
+  ],
+  "runs": [
+   {
+    "model_id": "profit_to_cash",
+    "status": "validated",
+    "reason": "",
+    "validation_failed": [],
+    "main": {
+     "profit_change": -3342541438.15,
+     "cash_profit_gap_change": 1841031807.47
+    }
+   },
+   {
+    "model_id": "cash_quality",
+    "status": "validated",
+    "reason": "",
+    "validation_failed": [],
+    "main": {
+     "cfo_minus_profit": -2044677364.84,
+     "cashflow_coverage": 69.36
+    }
+   },
+   {
+    "model_id": "profit_bridge",
+    "status": "validated",
+    "reason": "",
+    "validation_failed": [],
+    "main": {
+     "net_profit_change": -3342541438.15,
+     "gross_profit_change": -3800953659.19
+    }
+   },
+   {
+    "model_id": "working_capital",
+    "status": "validated",
+    "reason": "",
+    "validation_failed": [],
+    "main": {
+     "working_capital_occupation_change": 945365113.29,
+     "receivable_days": 0.11
+    }
+   }
+  ],
+  "status": "validated"
+ },
+ {
+  "slug": "600031",
+  "company": "三一重工",
+  "code": "600031.SH",
+  "as_of": "2025-04-18",
+  "paper_ok": true,
+  "request_source": "official_material",
+  "official_notes": [
+   "官方材料 0c3e82056e977adc（三一重工股份有限公司2024年年度报告）：抽取到 22 条与契约相容的财务事实；已排除 caliber 16 条"
+  ],
+  "rows": 22,
+  "derived": 14,
+  "gaps": [],
+  "fact_metrics": [
+   "accounts_payable",
+   "accounts_receivable",
+   "gross_profit",
+   "inventory",
+   "net_profit",
+   "operating_cashflow",
+   "operating_cost",
+   "revenue",
+   "total_assets",
+   "total_liabilities",
+   "total_revenue"
+  ],
+  "fact_periods": [
+   "2023年",
+   "2024年"
+  ],
+  "dataset": {
+   "label": "worker:working_paper.json",
+   "periods": [
+    "2023年",
+    "2024年"
+   ],
+   "observations": 36,
+   "usable": 36,
+   "gaps": [
+    "非年度期间（不参与年度模型，仍保留在观察集合里）：2024年同比、2024年较2023年"
+   ]
+  },
+  "question_types": [
+   "cash_conversion",
+   "profit_attribution",
+   "working_capital"
+  ],
+  "adopted": [
+   "profit_to_cash",
+   "cash_quality",
+   "profit_bridge",
+   "working_capital"
+  ],
+  "runs": [
+   {
+    "model_id": "profit_to_cash",
+    "status": "validated",
+    "reason": "",
+    "validation_failed": [],
+    "main": {
+     "profit_change": 1448000000.0,
+     "cash_profit_gap_change": 7658058000.0
+    }
+   },
+   {
+    "model_id": "cash_quality",
+    "status": "validated",
+    "reason": "",
+    "validation_failed": [],
+    "main": {
+     "cfo_minus_profit": 8838827000.0,
+     "cashflow_coverage": 247.92
+    }
+   },
+   {
+    "model_id": "profit_bridge",
+    "status": "validated",
+    "reason": "",
+    "validation_failed": [],
+    "main": {
+     "net_profit_change": 1448000000.0,
+     "gross_profit_change": 1385760000.0
+    }
+   },
+   {
+    "model_id": "working_capital",
+    "status": "validated",
+    "reason": "",
+    "validation_failed": [],
+    "main": {
+     "working_capital_occupation_change": -2115206000.0,
+     "receivable_days": 119.75
+    }
+   }
+  ],
+  "status": "validated"
+ },
+ {
+  "slug": "000711",
+  "company": "京蓝科技",
+  "code": "000711.SZ",
+  "as_of": "2021-04-27",
+  "paper_ok": true,
+  "request_source": "official_material",
+  "official_notes": [
+   "官方材料 797a3b25d1142a30（2020年年度报告）：抽取到 28 条与契约相容的财务事实；已排除 caliber 16 条"
+  ],
+  "rows": 22,
+  "derived": 12,
+  "gaps": [],
+  "fact_metrics": [
+   "accounts_payable",
+   "accounts_receivable",
+   "gross_profit",
+   "inventory",
+   "net_profit",
+   "operating_cashflow",
+   "operating_cost",
+   "revenue",
+   "total_assets",
+   "total_liabilities",
+   "total_revenue"
+  ],
+  "fact_periods": [
+   "2019年",
+   "2020年"
+  ],
+  "dataset": {
+   "label": "worker:working_paper.json",
+   "periods": [
+    "2019年",
+    "2020年"
+   ],
+   "observations": 34,
+   "usable": 34,
+   "gaps": [
+    "非年度期间（不参与年度模型，仍保留在观察集合里）：2020年同比、2020年较2019年"
+   ]
+  },
+  "question_types": [
+   "cash_conversion",
+   "profit_attribution",
+   "working_capital"
+  ],
+  "adopted": [
+   "profit_to_cash",
+   "cash_quality",
+   "profit_bridge",
+   "working_capital"
+  ],
+  "runs": [
+   {
+    "model_id": "profit_to_cash",
+    "status": "validated",
+    "reason": "",
+    "validation_failed": [],
+    "main": {
+     "profit_change": -1318104774.55,
+     "cash_profit_gap_change": 1466915446.53
+    }
+   },
+   {
+    "model_id": "cash_quality",
+    "status": "validated",
+    "reason": "",
+    "validation_failed": [],
+    "main": {
+     "cfo_minus_profit": 2415020083.24
+    }
+   },
+   {
+    "model_id": "profit_bridge",
+    "status": "validated",
+    "reason": "",
+    "validation_failed": [],
+    "main": {
+     "net_profit_change": -1318104774.55,
+     "gross_profit_change": -421835117.39
+    }
+   },
+   {
+    "model_id": "working_capital",
+    "status": "validated",
+    "reason": "",
+    "validation_failed": [],
+    "main": {
+     "working_capital_occupation_change": -4104090908.73,
+     "receivable_days": 403.21
+    }
+   }
+  ],
+  "status": "validated"
+ }
+]
