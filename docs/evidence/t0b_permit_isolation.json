@@ -1,6 +1,6 @@
 {
   "batch": "T0-b",
-  "generated_at": "2026-09-30T22:04:58+0800",
+  "generated_at": "2026-09-30T22:22:59+0800",
   "isolation": {
     "store": "真实 Redis（专属前缀，仅本脚本使用）",
     "processes": "每个步骤一个新起子进程",
@@ -12,7 +12,7 @@
       "expected": true,
       "actual": true,
       "pass": true,
-      "detail": "{'permit': {'root_task_id': 't0b-isolation', 'attempt_id': 'at-b64fad38122e', 'epoch': 1, 'deadline': 1790780696.2012699"
+      "detail": "{'permit': {'root_task_id': 't0b-isolation', 'attempt_id': 'at-7595eb82f4c3', 'epoch': 1, 'deadline': 1790781777.346664,"
     },
     {
       "step": "B 进程看到 A 的许可（跨进程共享真源）",

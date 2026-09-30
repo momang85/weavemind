@@ -29,13 +29,22 @@ ROOT_TASK = "t0b-isolation"
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 
+# 仓库守卫（test_startup_readiness.TestNoUnretriedRedisClients）要求：任何
+# `redis.Redis(...)` 都必须显式关掉 redis-py 内建重试，否则 Redis 不可达时
+# 单次调用会从 2 秒退化成数十秒挂死。
+from redis.backoff import NoBackoff as _NoBackoff  # noqa: E402
+from redis.retry import Retry as _Retry  # noqa: E402
+
+_NO_REDIS_RETRY = _Retry(_NoBackoff(), 0)
+
 
 def _redis():
     import redis
     host = os.environ.get("REDIS_HOST", "localhost")
     port = int(os.environ.get("REDIS_PORT", "6379") or 6379)
     return redis.Redis(host=host, port=port, decode_responses=True,
-                       socket_connect_timeout=3, socket_timeout=3)
+                       socket_connect_timeout=3, socket_timeout=3,
+                       retry=_NO_REDIS_RETRY)
 
 
 def _store():
