@@ -258,7 +258,8 @@ def _segments(dataset, prev_p, cur_p, parent_caliber: str) -> tuple[list, list]:
         d_gp = gp_c - gp_p
         scale_q, margin_q = _split(d_gp, d_r * (m_c + m_p) / 2)
         out.append({
-            "caliber": cal, "label": f"{cal}",
+            "caliber": cal, "label": f"{cal}", "cut": str(cal).split(":", 1)[0]
+            if ":" in str(cal) else "分段",
             "d_gp": d_gp, "d_gp_q": _q(d_gp), "scale_q": scale_q, "margin_q": margin_q,
             "m_c": m_c, "m_p": m_p, "d_m": d_m,
             "r_c": _d(r_c.value), "r_p": _d(r_p.value),
@@ -388,26 +389,34 @@ def compute(dataset, params: dict | None = None) -> dict:
     ]
 
     if segs:
-        seg_components = [{
-            "component_id": f"segment:{s['caliber']}",
-            "label": f"{s['caliber']}毛利变化"
-                     + ("（含推算输入）" if s["derived_inputs"] else ""),
-            "value": s["d_gp_q"], "unit": unit,
-            "formula": "ΔR×(m1+m0)/2 + Δm×(R1+R0)/2",
-        } for s in segs]
-        seg_sum = sum(Decimal(str(c["value"])) for c in seg_components)
-        unclassified = float(Decimal(str(a["gp_q"])) - seg_sum)
-        seg_components.append({
-            "component_id": "unclassified_gross_profit_change",
-            "label": "未分类差额（其他业务/口径差，两条切法不可相加）",
-            "value": unclassified, "unit": unit,
-            "formula": "公司毛利变化 − 已列口径毛利变化合计",
-        })
-        outputs.append({
-            "metric": "gross_profit_change_by_segment", "label": "分产品/分地区毛利变化",
-            "value": a["gp_q"], "unit": unit, "output_period": period_label,
-            "residual": unclassified, "components": seg_components,
-        })
+        # **按切法分开出**：`分产品`/`分行业`/`分地区`/`分销售模式` 是同一口径的不同切法，
+        # 汇到一张桥里会重复计数（三套切法各自都覆盖全公司）。每种切法一张桥，
+        # 父项仍是公司毛利变化，差额记 `unclassified_gross_profit_change`（其他业务/口径差）。
+        by_cut: dict[str, list] = {}
+        for s in segs:
+            by_cut.setdefault(str(s["cut"]), []).append(s)
+        for cut, entries in by_cut.items():
+            seg_components = [{
+                "component_id": f"segment:{s['caliber']}",
+                "label": f"{s['caliber']}毛利变化"
+                         + ("（含推算输入）" if s["derived_inputs"] else ""),
+                "value": s["d_gp_q"], "unit": unit,
+                "formula": "ΔR×(m1+m0)/2 + Δm×(R1+R0)/2",
+            } for s in entries]
+            seg_sum = sum(Decimal(str(c["value"])) for c in seg_components)
+            unclassified = float(Decimal(str(a["gp_q"])) - seg_sum)
+            seg_components.append({
+                "component_id": "unclassified_gross_profit_change",
+                "label": "未分类差额（其他业务/口径差；同一口径的其它切法不可与此相加）",
+                "value": unclassified, "unit": unit,
+                "formula": "公司毛利变化 − 本切法已列口径毛利变化合计",
+            })
+            outputs.append({
+                "metric": "gross_profit_change_by_segment",
+                "label": f"{cut}毛利变化（切法：{cut}）",
+                "value": a["gp_q"], "unit": unit, "output_period": period_label,
+                "residual": unclassified, "components": seg_components,
+            })
 
     if vp is not None:
         outputs.append({
@@ -422,6 +431,50 @@ def compute(dataset, params: dict | None = None) -> dict:
                  "value": vp["price_effect"], "unit": unit,
                  "formula": "Δp×(Q1+Q0)/2；含产品结构混合，不得称“提价效果”"},
             ]})
+
+    # 替代解释（U1）：数值贡献是会计分解，**业务原因需要证据**。这里把两条**确定性**的
+    # 反证/口径提醒一并给出，供报告层与读者判断"这个贡献是不是经营改善"：
+    # ① 实际税率反事实：所得税减少多来自利润下滑本身，税率变化反而可能吃掉一部分；
+    # ② 非经营因素：公允价值变动/投资收益不进经营判断。
+    alt: dict = {}
+    _line = {i["component_id"]: i for i in used}
+    try:
+        if "income_tax_expense" in _line:
+            tax_c = dataset.get("income_tax_expense", cur_p)
+            tax_p = dataset.get("income_tax_expense", prev_p)
+            npc_c = dataset.get("net_profit_consolidated", cur_p)
+            npc_p = dataset.get("net_profit_consolidated", prev_p)
+            if all(x is not None for x in (tax_c, tax_p, npc_c, npc_p)):
+                pbt_c = _d(npc_c.value) + _d(tax_c.value)
+                pbt_p = _d(npc_p.value) + _d(tax_p.value)
+                if pbt_c != 0 and pbt_p != 0:
+                    r_c, r_p = _d(tax_c.value) / pbt_c, _d(tax_p.value) / pbt_p
+                    at_prev = pbt_c * r_p
+                    alt["effective_tax_rate"] = {
+                        "prev": float(r_p), "cur": float(r_c),
+                        "delta_pp": float((r_c - r_p) * 100),
+                        "note": "实际税率＝所得税费用／（合并净利润＋所得税费用）",
+                    }
+                    alt["tax_at_prior_rate"] = {
+                        "actual_yuan": float(_d(tax_c.value)),
+                        "at_prior_rate_yuan": float(at_prev),
+                        "rate_effect_yuan": float(_d(tax_c.value) - at_prev),
+                        "note": ("按上年实际税率折算本年的反事实：所得税的“贡献”里有多少"
+                                 "只是利润下滑的被动结果"),
+                    }
+    except Exception:                                  # noqa: BLE001 - 反事实算不出就不给
+        pass
+    for _m, _label in (("fair_value_change", "公允价值变动收益"),
+                       ("investment_income", "投资收益")):
+        if _m in _line:
+            alt.setdefault("non_operating_items", {})[_m] = {
+                "label": _label, "contribution_yuan": float(_line[_m]["contribution"]),
+                "note": "非经营/非经常因素：不得并入经营判断",
+            }
+    if segs or vp is not None:
+        alt["structure_vs_price"] = (
+            "分段与均价都是**同一口径的分解**：均价由「该口径收入/销量」算出，含产品结构混合，"
+            "不能直接命名“提价效果”；分产品/分行业/分地区/分销售模式是不同切法，不可相加")
 
     closure = 0
     return {
@@ -461,6 +514,7 @@ def compute(dataset, params: dict | None = None) -> dict:
             "segments_skipped": seg_skipped,
             "volume_price_skipped": vp_skipped,
             "volume_price_caliber": (vp or {}).get("caliber", ""),
+            "alternative_explanations": alt,
             "caveats": (
                 "未解释差额 = 未取得的披露项目；不得当作零或摊到已列项目",
                 "分段是同一口径的不同切法，不可相加；未分类差额单独列出",

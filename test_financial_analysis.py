@@ -2233,6 +2233,7 @@ class TestOperatingDriversYanghe(unittest.TestCase):
         "revenue": (33_126_277_551.51, 28_876_296_993.56),
         "operating_cost": (8_200_245_255.42, 7_751_218_356.66),
         "net_profit": (10_015_930_040.27, 6_673_388_602.12),
+        "net_profit_consolidated": (10_020_768_556.47, 6_666_455_819.96),
         "taxes_and_surcharges": (5_269_245_592.35, 4_826_086_952.64),
         "selling_expense": (5_386_953_700.62, 5_516_238_544.79),
         "admin_expense": (1_764_423_149.06, 1_924_730_302.35),
@@ -2397,6 +2398,37 @@ class TestOperatingDriversYanghe(unittest.TestCase):
         res = fa.validation.validate_output(fa.registry.spec("operating_drivers"), ds, payload)
         self.assertFalse(res["ok"], "分项被换而合计不变：必须失败")
         self.assertIn("components", res["failed"])
+
+    def test_card_and_brief_block_carry_contributions_segments_and_alternatives(self):
+        """U1：分析卡/正文必须同时给出**逐项贡献、分段切法、量价与替代解释**。
+
+        只给"毛利/毛利线以下"两段，读者仍不知道钱从哪来、还有没有别的解释（这是 K3 之后
+        仍存在的浅解释问题）。
+        """
+        from financial_analysis import report_adapter as ra
+        from financial_analysis import store as fa_store
+        run = self._run()
+        card = ra.analysis_card(run)
+        self.assertIn("经营驱动", card["kind"])
+        self.assertGreaterEqual(len(card.get("contributions") or []), 15,
+                                "逐项贡献要一起出来（含未解释差额）")
+        self.assertEqual(len(card.get("segment_cuts") or []), 1,
+                         "本夹具只有分产品一个口径；真实年报里四种切法各一张（见案例证据）")
+        self.assertIn("分产品", str(card["segment_cuts"][0]["cut"]))
+        self.assertTrue(card.get("volume_price"), "量价要在卡上")
+        alt = card.get("alternative_explanations") or {}
+        self.assertAlmostEqual(float(alt["effective_tax_rate"]["prev"]), 0.2419, places=3)
+        self.assertAlmostEqual(float(alt["effective_tax_rate"]["cur"]), 0.2709, places=3)
+        self.assertAlmostEqual(float(alt["tax_at_prior_rate"]["rate_effect_yuan"]) / 1e8,
+                               2.65, places=1, msg="税率因素多吃掉约 2.65 亿元")
+        self.assertIn("fair_value_change", alt.get("non_operating_items") or {})
+        self.assertTrue(card.get("data_gaps"), "缺料（红酒/其他无成本）要如实列出")
+
+        block = fa_store.render_card_block(run)
+        for needle in ("三项最大利润贡献", "亿元", "不可跨切法相加", "实际税率",
+                       "提价效果", "待核查"):
+            self.assertIn(needle, block, f"正文分析卡缺「{needle}」")
+        self.assertNotIn("没有注册模型", block)
 
     def test_components_gold_matches_payload_item_by_item(self):
         from financial_analysis.operators import operating_drivers as od

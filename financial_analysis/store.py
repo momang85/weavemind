@@ -602,6 +602,13 @@ def render_card_block(run: ModelRun) -> str:
                          f"（{card['unexplained']['note']}）")
     if outs:
         card0 = analysis_card(run, outs[0].output_id)
+        # U1（2026-10-01）：经营驱动卡另外给**三段式**正文（三项最大贡献／替代解释／待核查），
+        # 否则读者只看到"每个输出一行"，仍不知道钱从哪来、还有没有别的解释。
+        try:
+            from .report_adapter import render_operating_drivers_block
+            lines.extend(render_operating_drivers_block(run))
+        except Exception:                                  # noqa: BLE001 - 渲染失败不加这段
+            pass
         lines.append(f"- 下一项验证动作：{card0['next_action']}")
     lines.append("")
     return "\n".join(lines)

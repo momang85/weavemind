@@ -90,6 +90,33 @@ def main() -> int:
         diag = dict(run.outputs[0].diagnostics or {})
     except Exception:
         pass
+    # 正文消费验证：把这次运行落进**临时工作区**，用报告链自己的入口渲染「分析卡」段落
+    # （证明正文真的用上了这些数，而不是只有算子能算）。
+    brief_block = ""
+    try:
+        import shutil
+        import tempfile
+        from pathlib import Path
+
+        import report_brief
+        import workspace as ws_mod
+        from financial_analysis import store as fa_store
+        tmp = Path(tempfile.mkdtemp(prefix="u1_brief_"))
+        old_root = ws_mod.WORKSPACE_ROOT
+        try:
+            ws_mod.configure_workspace_root(str(tmp))
+            task_id = "u1-brief"
+            ws = ws_mod.task_workspace(task_id)
+            ws.mkdir(parents=True, exist_ok=True)
+            fa_store.save_run(ws, run)
+            brief_block = report_brief._analysis_card_block(task_id, ws_dir=ws)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old_root
+            shutil.rmtree(tmp, ignore_errors=True)
+        print("正文（分析卡段落）已渲染：", len(brief_block), "字符")
+    except Exception as exc:                              # noqa: BLE001 - 渲染失败如实记
+        brief_block = f"（正文渲染失败：{type(exc).__name__}: {str(exc)[:120]}）"
+        print(brief_block)
     report = {
         "case": "洋河股份 002304 2023→2024 经营驱动桥（官方入口→事实→冻结→算子）",
         "source_material": os.path.relpath(DOC_PATH, ROOT).replace("\\", "/"),
@@ -120,6 +147,8 @@ def main() -> int:
              "line_items_rejected", "unexplained_residual_yuan", "segments_used",
              "segments_skipped", "volume_price_caliber")
         },
+        "brief_analysis_card": brief_block[:8000],
+        "brief_analysis_card_chars": len(brief_block),
     }
     os.makedirs(os.path.dirname(EVIDENCE), exist_ok=True)
     with open(EVIDENCE, "w", encoding="utf-8") as f:

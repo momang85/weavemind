@@ -39,6 +39,14 @@ def _signed(value: float | None, unit: str = "亿元") -> str:
 # 模型都是一句话——现金质量/情景的卡上写着"取得毛利线以下的利润表明细"，读者据此去补
 # 的材料跟这张卡要回答的问题无关（实机 `ui-603f626cbe` 的 cash_quality 卡）。
 _CARD_TRAITS: dict[str, dict[str, str]] = {
+    "operating_drivers": {
+        "kind": "经营驱动分解（会计分解）",
+        "meaning": ("规模/毛利率/逐项费用税项都是**会计分解**：它说明金额从哪来，"
+                    "不自动等于业务原因。分产品/分行业/分地区/分销售模式是同一口径的"
+                    "**不同切法**，不可相加；均价含产品结构混合，不得命名“提价效果”"),
+        "next_action": ("对最大的三项贡献各找一条披露依据（分产品收入/费用明细/附注），"
+                        "并检查替代解释（税率、非经营损益、结构变化）后再写结论"),
+    },
     "profit_bridge": {
         "kind": "会计分解",
         "meaning": ("会计恒等式分解只说明金额构成；是否构成业务原因需要另行证据，"
@@ -78,6 +86,97 @@ def card_traits(model_id: str) -> dict:
     return dict(_CARD_TRAITS.get(str(model_id or ""), _CARD_TRAITS_FALLBACK))
 
 
+_YUAN_PER_YI = 1e8
+
+
+def _yi_from_yuan(value, unit: str) -> str:
+    """金额显示成**亿元**（原始值仍是元；这里只换显示单位并注明）。"""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return "—"
+    if str(unit or "") == "元":
+        return f"{v / _YUAN_PER_YI:+,.2f}亿元"
+    return f"{v:+,.2f}{unit or ''}"
+
+
+def render_operating_drivers_block(run) -> list[str]:
+    """经营驱动卡的**三段式**正文（U1）：数值贡献 → 支持/替代解释 → 待核查。
+
+    为什么单独渲染：通用卡只列"每个输出 + 分项"，读者仍看不出"哪三项最大、有没有别的解释、
+    还缺哪张表"。这里按研究报告的写法组织，每个数字仍然带 `output <output_id>` 可回查；
+    替代解释只列**确定性**算出或披露可直接读到的项（税率反事实、非经营因素、均价含结构）。
+    """
+    from .contracts import RunStatus
+    if str(getattr(run, "model_id", "")) != "operating_drivers":
+        return []
+    if run.status != RunStatus.VALIDATED:
+        return []
+    extra = _operating_drivers_extra(run)
+    first = next((o for o in run.outputs if o.metric == "net_profit_change"), None)
+    unit = str(getattr(first, "unit", "") or "")
+    oid = str(getattr(first, "output_id", "") or "")
+    lines: list[str] = []
+    contribs = [c for c in (extra.get("contributions") or [])
+                if str(c.get("component_id")) != "unexplained_residual"]
+    if contribs:
+        top = sorted(contribs, key=lambda c: -abs(float(c.get("value") or 0)))[:3]
+        lines.append("- **三项最大利润贡献**（会计分解；金额为元换算成亿元，"
+                     f"原始单位 {unit}）")
+        for c in top:
+            lines.append(f"  - {c.get('label')} {_yi_from_yuan(c.get('value'), unit)}"
+                         f"　output {oid}")
+        resid = next((c for c in (extra.get("contributions") or [])
+                      if str(c.get("component_id")) == "unexplained_residual"), None)
+        if resid is not None:
+            lines.append(f"  - 未解释差额 {_yi_from_yuan(resid.get('value'), unit)}"
+                         f"（{extra.get('contributions_caveat')}）　output {oid}")
+    vp = extra.get("volume_price") or {}
+    if vp:
+        comps = "、".join(f"{c.get('label')} {_yi_from_yuan(c.get('value'), unit)}"
+                         for c in (vp.get("components") or ()))
+        lines.append(f"- **量价分解（{vp.get('caliber') or ''}）**：{comps}"
+                     f"；{vp.get('caveat')}　output {vp.get('output_id')}")
+    for seg in (extra.get("segment_cuts") or []):
+        comps = "、".join(f"{c.get('label')} {_yi_from_yuan(c.get('value'), unit)}"
+                         for c in (seg.get("components") or []))
+        lines.append(f"- **{seg.get('cut')}**：{comps}；{extra.get('segment_caveat')}"
+                     f"　output {seg.get('output_id')}")
+    alt = extra.get("alternative_explanations") or {}
+    if alt:
+        lines.append("- **另一个可能解释 / 需要反证的地方**")
+        rate = alt.get("effective_tax_rate") or {}
+        cf = alt.get("tax_at_prior_rate") or {}
+        if rate and cf:
+            lines.append(
+                f"  - 实际税率 {float(rate.get('prev') or 0):.2%} → "
+                f"{float(rate.get('cur') or 0):.2%}"
+                f"（{float(rate.get('delta_pp') or 0):+.2f}pp）：所得税的“贡献”多来自"
+                f"利润下滑本身；按上年税率折算本应 "
+                f"{_yi_from_yuan(cf.get('at_prior_rate_yuan'), '元')}，"
+                f"税率因素实际多吃掉 {_yi_from_yuan(cf.get('rate_effect_yuan'), '元')}")
+        for key, item in (alt.get("non_operating_items") or {}).items():
+            lines.append(f"  - {item.get('label')} "
+                         f"{_yi_from_yuan(item.get('contribution_yuan'), '元')}："
+                         f"{item.get('note')}")
+        if alt.get("structure_vs_price"):
+            lines.append(f"  - {alt['structure_vs_price']}")
+    gaps = extra.get("data_gaps") or {}
+    todo: list[str] = []
+    if gaps.get("segments_skipped"):
+        todo.append("分段缺成本的口径：" + "；".join(
+            str(x) for x in gaps["segments_skipped"][:3])
+            + "（补 10% 以上表或分部附注才能进分段分解）")
+    if gaps.get("volume_price_skipped"):
+        todo.append("量价缺销量/收入：" + "；".join(
+            str(x) for x in gaps["volume_price_skipped"][:3]))
+    if gaps.get("line_items_missing"):
+        todo.append("利润表明细未取到：" + "、".join(map(str, gaps["line_items_missing"])))
+    if todo:
+        lines.append("- **待核查/补料**：" + "；".join(todo))
+    return lines
+
+
 def analysis_card(run, output_id: str = "") -> dict:
     """一张卡：字段齐备、性质明确、每个数字带 `output_id`。"""
     if run.status != RunStatus.VALIDATED:
@@ -100,6 +199,9 @@ def analysis_card(run, output_id: str = "") -> dict:
     unexplained = [c for c in comps if "未解释" in str(c.get("label") or "")
                    or "以下" in str(c.get("label") or "")]
     traits = card_traits(run.model_id)
+    # U1（2026-10-01）：经营驱动卡要把**逐项贡献、分段切法、量价与替代解释**一起给出来——
+    # 只给"毛利/毛利线以下"两段，读者仍不知道钱从哪来（这正是 K3 之后仍存在的浅解释）。
+    extra = _operating_drivers_extra(run) if str(run.model_id) == "operating_drivers" else {}
     return {
         "kind": traits["kind"],
         "status": run.status,
@@ -135,7 +237,69 @@ def analysis_card(run, output_id: str = "") -> dict:
             "validation": run.validation.get("checks") if run.validation else {},
         },
         "next_action": traits["next_action"],
+        **extra,
     }
+
+
+def _operating_drivers_extra(run) -> dict:
+    """经营驱动卡的附加段：逐项贡献、分段切法、量价、替代解释（都取自**同一次运行**）。
+
+    每个数字都带 `output_id`，正文/图/底稿能对回同一次运行；分段与量价只在真有输出时出现。
+    """
+    def _find(metric):
+        return [o for o in run.outputs if o.metric == metric]
+
+    detail = _find("net_profit_change_detail")
+    segments = _find("gross_profit_change_by_segment")
+    volume = _find("volume_price_decomposition")
+    diag = {}
+    for o in (run.outputs or []):
+        if o.diagnostics:
+            diag = dict(o.diagnostics)
+            break
+    out: dict = {}
+    if detail:
+        items = list(detail[0].components or ())
+        out["contributions"] = [
+            {"output_id": detail[0].output_id, "component_id": c.get("component_id"),
+             "label": c.get("label"), "value": c.get("value"), "unit": c.get("unit"),
+             "formula": c.get("formula")} for c in items
+        ]
+        out["contributions_caveat"] = (
+            "未列出的项目留在“未解释差额”里：既不当零，也不摊到已列项目上")
+    if segments:
+        out["segment_cuts"] = [
+            {"output_id": o.output_id, "cut": str(o.label),
+             "components": [{"component_id": c.get("component_id"),
+                             "label": c.get("label"), "value": c.get("value"),
+                             "unit": c.get("unit")} for c in (o.components or ())],
+             "unclassified": o.residual}
+            for o in segments
+        ]
+        out["segment_caveat"] = (
+            "每种切法各自覆盖同一口径，**不可跨切法相加**；未分类差额是其他业务/口径差")
+    if volume:
+        out["volume_price"] = {
+            "output_id": volume[0].output_id, "label": volume[0].label,
+            "caliber": diag.get("volume_price_caliber") or "",
+            "components": [{"component_id": c.get("component_id"),
+                            "label": c.get("label"), "value": c.get("value"),
+                            "unit": c.get("unit"), "formula": c.get("formula")}
+                           for c in (volume[0].components or ())],
+            "caveat": "均价＝该口径收入/销量，含产品结构混合，不得命名“提价效果”",
+        }
+    alt = diag.get("alternative_explanations") or {}
+    if alt:
+        out["alternative_explanations"] = alt
+    gaps = {
+        "line_items_missing": diag.get("line_items_missing") or [],
+        "line_items_rejected": diag.get("line_items_rejected") or [],
+        "segments_skipped": diag.get("segments_skipped") or [],
+        "volume_price_skipped": diag.get("volume_price_skipped") or [],
+    }
+    if any(gaps.values()):
+        out["data_gaps"] = gaps
+    return out
 
 
 def _next_action(status: str) -> str:
