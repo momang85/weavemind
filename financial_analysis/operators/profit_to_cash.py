@@ -90,6 +90,7 @@ SPEC = ModelSpec(
     limits=LIMITS,
     # L3 的主问题：利润增长有没有转成现金、哪些还没被解释（现金转化这一类的主模型）
     question_types=("cash_conversion",),
+    component_ids={"profit_change": ("gross_profit_change", "below_gross_line_change")},
 )
 
 
@@ -149,10 +150,12 @@ def compute(dataset, params: dict | None = None) -> dict:
          "value": _q(d_np), "unit": unit, "output_period": period_pair,
          "residual": 0.0,
          "components": [
-             {"label": "毛利端变化（Δ毛利；回答「利润变化里有多少来自毛利端」）",
+             {"component_id": "gross_profit_change",
+              "label": "毛利端变化（Δ毛利；回答「利润变化里有多少来自毛利端」）",
               "value": _q(d_gp), "unit": unit,
               "formula": f"({gp_cur.value} - {gp_prev.value})"},
-             {"label": ("毛利线以下净额变化（= Δ归母净利 − Δ毛利；含费用/税项/投资收益/"
+             {"component_id": "below_gross_line_change",
+              "label": ("毛利线以下净额变化（= Δ归母净利 − Δ毛利；含费用/税项/投资收益/"
                         "少数股东等，需明细表才能解释）"),
               "value": _q(below), "unit": unit,
               "formula": (f"({np_cur.value} - {np_prev.value}) - "
@@ -219,6 +222,26 @@ def compute(dataset, params: dict | None = None) -> dict:
         "outputs": outputs,
         "limits": LIMITS,
     }
+
+
+def components_gold(dataset, params: dict | None = None) -> dict:
+    """**分项**的独立计算（R1-b）：毛利端与毛利线以下两段从输入 Decimal 重算。
+
+    与 `gold` 同一纪律（独立路径、同一身份判据）；返回
+    `{输出指标: {component_id: (value, unit)}}`。合计校验只是附加，逐项才是判据。
+    """
+    (prev_p, cur_p, np_cur, np_prev, ocf_cur, ocf_prev,
+     gp_cur, gp_prev) = _inputs(dataset)
+    d_gp = _d(gp_cur.value) - _d(gp_prev.value)
+    d_np = _d(np_cur.value) - _d(np_prev.value)
+    below = d_np - d_gp
+
+    def _q(x: Decimal) -> float:
+        return float(x.quantize(Decimal("0.01")))
+
+    unit = str(np_cur.unit or "")
+    return {"profit_change": {"gross_profit_change": (_q(d_gp), unit),
+                              "below_gross_line_change": (_q(below), unit)}}
 
 
 def gold(dataset, params: dict | None = None) -> dict:

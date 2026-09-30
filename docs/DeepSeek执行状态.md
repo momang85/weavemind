@@ -23,7 +23,13 @@
 > - **实机闭环**：`/?task=<id>` 深链 + 历史页入口；真浏览器真会话走通
 >   （错口令 401／无会话 401／选运行／改假设／复算／对比／采纳／导出）；顺带修掉
 >   **采纳后导不出来**（恒 409）与 **restart 后编排器拒绝启动**（租约 30s 窗口）两处缺陷。
-> - **R1-a 期间链贯通**（本批）：[20260930-R1a-period-chain.md](evidence/20260930-R1a-period-chain.md)
+> - **R1-b 逐项贡献验证**（本批）：[20260930-R1b-componentwise.md](evidence/20260930-R1b-componentwise.md)
+>   ——`ModelSpec.component_ids` 声明稳定分项 id、算子新增独立 `components_gold`、
+>   `validation` 恒定执行逐项核对（集合/数值/单位）并把合计降为附加检查；利润桥与
+>   `profit_to_cash` 的 ±10 抵消、情景基准 +10/使用者 −10、互换/缺 id/重复/少项全部失败，
+>   合法载荷仍通过。K2 两包仍 9/9、7/7（`mismatches=[]`；`label_changes` 增量为"分项新增
+>   component_id"的契约字段差异，单列不冒充数值差异）。
+> - **R1-a 期间链贯通**：[20260930-R1a-period-chain.md](evidence/20260930-R1a-period-chain.md)
 >   ——派生事实继承父期间身份、底稿行补 `period_label/start`、冻结保留四个期间字段、
 >   `observation_hash` 纳入列头原文、新增 `METRIC_PERIOD_ROLE` 与 `period_identity_ok`
 >   并与主体/币种/口径同级执行；半年度不得冒年报、同期区间必须相容、只给期末日期按"区间未知"

@@ -141,6 +141,66 @@ def output_shape_check(spec, dataset, payload: dict) -> tuple[bool, str]:
     return True, ""
 
 
+def components_check(spec, dataset, payload: dict) -> tuple[bool, str]:
+    """**逐项**核对分项（R1-b，2026-09-30 下午复核）：合计相等不算验证通过。
+
+    实机反例：利润桥两分项 +10/−10、情景的基准 +10/使用者情景 −10——合计一模一样，
+    旧验证（金样只核主输出、`identity` 只核合计）全部通过。现在：
+    模型用 `ModelSpec.component_ids` 声明**稳定 component_id**，算子另给一条独立计算路径
+    `components_gold(dataset, params)`（与 `gold` 同样的 Decimal 手算、不走生成函数），
+    独立验证逐个 id 比对数值与单位；缺项、多项、重复、换 id、篡改、错参都失败。
+    情景的基准分项直接对**数据集真实基期读数**，不信载荷自报的 `gap=0/direction_ok`。
+    """
+    declared = dict(getattr(spec, "component_ids", {}) or {})
+    if not declared:
+        return True, "该模型未声明分项：不适用逐项核对"
+    mod = OPERATORS.get(spec.operator, (None,))[0]
+    fn = getattr(mod, "components_gold", None)
+    if fn is None:
+        return False, (f"{spec.model_id} 声明了分项却算子没有独立逐项计算入口"
+                       "（components_gold）：不得只靠合计")
+    try:
+        expect = dict(fn(dataset, payload.get("params") or {}) or {})
+    except Exception as exc:                       # noqa: BLE001 - 算不出来=没验证
+        return False, f"分项独立计算无法执行：{type(exc).__name__}: {str(exc)[:90]}"
+    bad: list[str] = []
+    for metric, ids in declared.items():
+        want_ids = [str(i) for i in ids]
+        out = next((o for o in (payload.get("outputs") or [])
+                    if str(o.get("metric")) == str(metric)), None)
+        if out is None:
+            bad.append(f"{metric}：载荷里缺这个输出")
+            continue
+        got: dict[str, dict] = {}
+        for c in (out.get("components") or []):
+            cid = str(c.get("component_id") or "")
+            if not cid:
+                bad.append(f"{metric}：分项缺 component_id（{str(c.get('label'))[:18]}）")
+                continue
+            if cid in got:
+                bad.append(f"{metric}：分项 id 重复（{cid}）")
+            got[cid] = c
+        if set(got) != set(want_ids):
+            bad.append(f"{metric}：分项集合不符——声明 {sorted(want_ids)}，"
+                       f"实际 {sorted(got)}（缺项/多项/换 id 都不接受）")
+            continue
+        want = dict(expect.get(str(metric)) or {})
+        if set(want) != set(want_ids):
+            bad.append(f"{metric}：独立计算的 id 与声明不一致（{sorted(want)}）")
+            continue
+        for cid in want_ids:
+            c = got[cid]
+            v, unit = want[cid]
+            val = _as_decimal(c.get("value"))
+            if val is None:
+                bad.append(f"{metric}.{cid}：分项值不是数（{c.get('value')!r}）")
+            elif not _close(val, Decimal(str(v)), _tolerance(spec)):
+                bad.append(f"{metric}.{cid}：载荷 {c.get('value')} vs 独立计算 {v}")
+            if unit and str(c.get("unit") or "") not in ("", str(unit)):
+                bad.append(f"{metric}.{cid}：单位 {c.get('unit')} vs 独立计算 {unit}")
+    return (not bad), "；".join(bad[:4])
+
+
 def validate_output(spec, dataset, payload: dict) -> dict:
     """→ `{ok, checks: {name: {ok, detail}}, failed: [...]}`。
 
@@ -161,6 +221,10 @@ def validate_output(spec, dataset, payload: dict) -> dict:
     _add("binding", _ok, "" if _ok else _why)
     _ok, _why = output_shape_check(spec, dataset, payload)
     _add("output_shape", _ok, "" if _ok else _why)
+    # **分项逐项核对**（R1-b）：与 binding/output_shape 一样**恒定执行**（只要模型声明了
+    # component_ids）——合计相等不是验证通过，分项被换/被抵消必须在独立验证里失败。
+    _ok, _why = components_check(spec, dataset, payload)
+    _add("components", _ok, _why)
     if "gold" in wanted:
         _mod, _compute, gold_fn = OPERATORS[spec.operator]
         try:

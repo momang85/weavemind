@@ -453,8 +453,9 @@ def recompute_run(ws, run_id: str) -> dict:
         if str(g.get("output_hash") or "") != str(o.get("output_hash") or ""):
             if _same_substance(g, o):
                 label_changes.append(
-                    f"{oid}：数值/单位/期间/输入一致，**分项标签或公式措辞**与落盘记录不同"
-                    "（如情景标签改为按参数生成）")
+                    f"{oid}：数值/单位/期间/输入一致，**分项标签/公式措辞或分项契约字段"
+                    "（如 component_id 新增）**与落盘记录不同"
+                    "（如情景标签改为按参数生成、L0-c/R1-b 后分项带上稳定 id）")
             else:
                 mism.append(f"{oid} 输出指纹不同")
     return {"ok": not mism, "run_id": run_id, "model_id": model_id,

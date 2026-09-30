@@ -1496,6 +1496,93 @@ class TestL0ATrustedInputOutputContract(unittest.TestCase):
         self.assertIn("规则", why2)
 
 
+class TestR1BComponentwiseValidation(unittest.TestCase):
+    """R1-b（09-30 下午复核）：**合计相等不算验证通过**，分项要逐项独立核对。
+
+    反例（复核原文）：利润桥两个分项 +10/−10、情景的基准 +10/使用者情景 −10——合计一模
+    一样，旧验证（金样只核主输出、`identity` 只核合计）全部通过。
+    """
+
+    def test_profit_bridge_offset_cancellation_is_refused(self):
+        ds = _dataset()
+        payload = _payload_of("profit_bridge", ds)
+        comps = payload["outputs"][0]["components"]
+        comps[0]["value"] = float(comps[0]["value"]) + 10.0
+        comps[1]["value"] = float(comps[1]["value"]) - 10.0      # 合计不变
+        res = fa.validation.validate_output(fa.registry.spec("profit_bridge"), ds, payload)
+        self.assertFalse(res["ok"], res)
+        self.assertIn("components", res["failed"])
+        self.assertIn("gross_profit_change", res["checks"]["components"]["detail"])
+
+    def test_scenario_base_no_longer_trusts_self_reported_gap(self):
+        """情景基准必须直接对**真实基期读数**：改基准 +10、使用者情景 −10 → 失败。"""
+        import financial_analysis.operators.scenario as SC
+        ds = _dataset(_wc_rows())
+        payload = SC.compute(ds, {})
+        comps = payload["outputs"][0]["components"]
+        comps[0]["value"] = float(comps[0]["value"]) + 10.0       # base 篡改
+        comps[1]["value"] = float(comps[1]["value"]) - 10.0       # user 反向抵消
+        res = fa.validation.validate_output(fa.registry.spec("scenario_sensitivity"), ds,
+                                           payload)
+        self.assertFalse(res["ok"], res)
+        detail = res["checks"]["components"]["detail"]
+        self.assertIn("base", detail)
+        self.assertIn("user", detail)
+
+    def test_swap_missing_and_unknown_component_ids_are_refused(self):
+        ds = _dataset()
+        spec = fa.registry.spec("profit_bridge")
+        base = _payload_of("profit_bridge", ds)
+        # ① 两个分项的值互换（合计仍然不变，但每个 id 都错了）
+        swapped = json.loads(json.dumps(base))
+        c = swapped["outputs"][0]["components"]
+        c[0]["value"], c[1]["value"] = c[1]["value"], c[0]["value"]
+        res = fa.validation.validate_output(spec, ds, swapped)
+        self.assertFalse(res["ok"], res)
+        self.assertIn("components", res["failed"])
+        # ② 缺 component_id
+        noid = json.loads(json.dumps(base))
+        noid["outputs"][0]["components"][0].pop("component_id")
+        res = fa.validation.validate_output(spec, ds, noid)
+        self.assertFalse(res["ok"], res)
+        self.assertIn("component_id", res["checks"]["components"]["detail"])
+        # ③ 重复 id（把第二项也标成第一项的 id）
+        dup = json.loads(json.dumps(base))
+        dc = dup["outputs"][0]["components"]
+        dc[1]["component_id"] = dc[0]["component_id"]
+        res = fa.validation.validate_output(spec, ds, dup)
+        self.assertFalse(res["ok"], res)
+        self.assertIn("components", res["failed"])
+        # ④ 少一项
+        missing = json.loads(json.dumps(base))
+        missing["outputs"][0]["components"] = missing["outputs"][0]["components"][:1]
+        res = fa.validation.validate_output(spec, ds, missing)
+        self.assertFalse(res["ok"], res)
+
+    def test_declared_component_ids_have_an_independent_path(self):
+        """契约完整性：声明了 component_ids 的模型必须有 `components_gold` 且 id 一致。"""
+        ds = _dataset(_wc_rows())
+        declared = {m.model_id: m.component_ids for m in fa.specs() if m.component_ids}
+        self.assertTrue(declared, "至少利润桥与情景要声明分项")
+        for model_id, ids in declared.items():
+            spec = fa.registry.spec(model_id)
+            mod = fa.registry.OPERATORS[spec.operator][0]
+            fn = getattr(mod, "components_gold", None)
+            self.assertTrue(callable(fn), f"{model_id} 缺 components_gold")
+            got = fn(ds, {})
+            self.assertEqual(set(got), set(ids), f"{model_id} 独立计算的输出集合不符")
+            for metric, want in ids.items():
+                self.assertEqual(set(got.get(metric) or {}), set(want),
+                                 f"{model_id}.{metric} 的 component_id 与声明不一致")
+
+    def test_legit_component_payloads_still_pass(self):
+        ds = _dataset(_wc_rows())
+        for model_id in ("profit_bridge", "scenario_sensitivity"):
+            payload = _payload_of(model_id, ds)
+            res = fa.validation.validate_output(fa.registry.spec(model_id), ds, payload)
+            self.assertTrue(res["ok"], f"{model_id}: {res}")
+
+
 class TestL0CScenarioSpeaksFromItsOwnParams(unittest.TestCase):
     """L0-c（复核 M1）：数值与解释同一份参数；图型按声明的结构选。"""
 

@@ -60,6 +60,9 @@ SPEC = ModelSpec(
     budget={"steps": 1, "seconds": 5},
     limits=LIMITS,
     question_types=("scenario",),
+    component_ids={"scenario_net_profit": ("base", "user", "counter"),
+                   "scenario_sensitivity": ("revenue_p1pp", "gross_margin_p1pp",
+                                            "expense_m1pp")},
 )
 
 
@@ -192,21 +195,30 @@ def compute(dataset, params: dict | None = None) -> dict:
              "value": q(up), "unit": unit, "output_period": f"{period}（{up_label}）",
              "residual": 0.0,
              "components": [
-                 {"label": f"基准（参数 0，复现基期 {np_.value}{unit}）",
+                 {"component_id": "base",
+                  "label": f"基准（参数 0，复现基期 {np_.value}{unit}）",
                   "value": q(sc_base), "unit": unit, "formula": "g=0, m=0, e=0"},
-                 {"label": up_label, "value": q(up), "unit": unit, "formula": up_formula},
-                 {"label": down_label, "value": q(down), "unit": unit,
-                  "formula": down_formula},
+                 {"component_id": "user", "label": up_label, "value": q(up),
+                  "unit": unit, "formula": up_formula},
+                 {"component_id": "counter", "label": down_label, "value": q(down),
+                  "unit": unit, "formula": down_formula},
              ]},
             {"metric": "scenario_sensitivity", "label": "单因素敏感度（每 +1 个百分点）",
              "value": q(ranked[0][1]), "unit": unit,
              "output_period": f"{period}（最敏感：{ranked[0][0]}）",
              "residual": None,
-             "components": [{"label": k, "value": q(v), "unit": unit,
-                             "formula": "单因素 +1pp"} for k, v in ranked]},
+             "components": [{"component_id": _SENS_ID[k], "label": k, "value": q(v),
+                             "unit": unit, "formula": "单因素 +1pp"}
+                            for k, v in ranked]},
         ],
         "limits": LIMITS,
     }
+
+
+# 单因素敏感度的**稳定 component_id**（R1-b）：标签是显示文本，id 是契约身份。
+# 中文键 → 稳定 id，避免"改文案就换身份"或"换文案却撞上同一 id"。
+_SENS_ID = {"收入 +1pp": "revenue_p1pp", "毛利率 +1pp": "gross_margin_p1pp",
+            "费用 -1pp": "expense_m1pp"}
 
 
 def _scenario_label(name: str, growth: float, margin_delta: float,
@@ -244,6 +256,49 @@ def _assumptions(params: dict) -> tuple[float, float, float, float, float]:
     g_down = float(p.get("down_growth", -abs(g_up) if g_up else -0.05))
     m_down = float(p.get("down_margin", -abs(m_up) if m_up else -0.01))
     return g_up, m_up, e_up, g_down, m_down
+
+
+def components_gold(dataset, params: dict | None = None) -> dict:
+    """**分项**的独立计算（R1-b）：基准/使用者情景/反向对照与三个单因素敏感度逐个重算。
+
+    与 `gold` 同一纪律：独立路径、Decimal、同一条完整身份判据。**基准分项直接对数据集的
+    真实基期读数**（`_scenario(..., 0,0,0)`），不信载荷自报的 `base_reproduction_gap=0`
+    或 `direction_ok`——那条反例正是"基准 +10 / 使用者情景 −10，合计不变、旧验证全过"。
+    """
+    params = dict(params or {})
+    period = dataset.period_at(0)
+    rev = dataset.require("revenue", period)
+    gp = dataset.require("gross_profit", period)
+    np_ = dataset.require("net_profit", period)
+    ident_ok, ident_why = full_identity_ok(rev, gp, np_, same_scale=True)
+    if not ident_ok:
+        raise NotApplicable(ident_why)
+    if float(rev.value) <= 0:
+        raise NotComputable(f"基期收入非正（{rev.value}{rev.unit}）：比率型情景不适用")
+    base = {"revenue": float(rev.value), "gross_profit": float(gp.value),
+            "net_profit": float(np_.value),
+            "margin": float(_d(gp.value) / _d(rev.value))}
+    if base["margin"] <= 0:
+        raise NotApplicable("基期毛利率为负：增长/毛利率改善⇒利润改善的方向假设不成立")
+    q = lambda x: float(Decimal(str(x)).quantize(Decimal("0.01")))          # noqa: E731
+    unit = str(np_.unit or "")
+    sc_base = _scenario(base, growth=0.0, margin_delta=0.0, expense_ratio=0.0)
+    g_up, m_up, e_up, g_down, m_down = _assumptions(params)
+    up = _scenario(base, growth=g_up, margin_delta=m_up, expense_ratio=e_up)
+    down = _scenario(base, growth=g_down, margin_delta=m_down, expense_ratio=0.0)
+    sens = {
+        "revenue_p1pp": _scenario(base, growth=0.01, margin_delta=0,
+                                  expense_ratio=0) - sc_base,
+        "gross_margin_p1pp": _scenario(base, growth=0, margin_delta=0.01,
+                                       expense_ratio=0) - sc_base,
+        "expense_m1pp": _scenario(base, growth=0, margin_delta=0,
+                                  expense_ratio=-0.01) - sc_base,
+    }
+    return {
+        "scenario_net_profit": {"base": (q(sc_base), unit), "user": (q(up), unit),
+                                "counter": (q(down), unit)},
+        "scenario_sensitivity": {k: (q(v), unit) for k, v in sens.items()},
+    }
 
 
 def gold(dataset, params: dict | None = None) -> dict:

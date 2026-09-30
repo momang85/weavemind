@@ -482,6 +482,10 @@ class ModelSpec:
     # **能回答哪些问题类型**（L2，2026-09-30 复核 M2）：`questions.QUESTION_TYPES` 的 qid。
     # 空 = 未声明（按"不知道它回答什么"处理，不加入任何问题驱动的选择）。
     question_types: tuple[str, ...] = ()
+    # **分项契约**（R1-b，2026-09-30 下午复核）：`{输出指标: (稳定 component_id, …)}`。
+    # 声明之后，独立验证会**逐项**从输入重算每个分项并比对——"合计相等"不再是充分条件
+    # （实机反例：两分项 +10/−10、情景基准 +10/使用者情景 −10，合计不变、旧验证全过）。
+    component_ids: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         return {"model_id": self.model_id, "version": self.version, "family": self.family,

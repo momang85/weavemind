@@ -58,6 +58,10 @@ SPEC = ModelSpec(
     limits=LIMITS,
     # 能回答的问题类型（L2）：利润桥回答的是**利润变化归因**
     question_types=("profit_attribution",),
+    # **分项契约**（R1-b）：主输出的两个金额项各有稳定 id，独立验证逐项重算比对。
+    # 此前只核"合计=总量"，两分项 +10/−10 抵消后合计不变 → 全部验证仍 ok。
+    component_ids={"net_profit_change": ("gross_profit_change",
+                                         "below_gross_line_change")},
 )
 
 
@@ -132,9 +136,11 @@ def compute(dataset, params: dict | None = None) -> dict:
              "value": _q(d_np), "unit": unit, "output_period": f"{cur_p}较{prev_p}",
              "residual": 0.0,
              "components": [
-                 {"label": "毛利变化", "value": _q(d_gp), "unit": unit,
+                 {"component_id": "gross_profit_change",
+                  "label": "毛利变化", "value": _q(d_gp), "unit": unit,
                   "formula": f"{cur_gp.value} - {prev_gp.value}"},
-                 {"label": "毛利线以下净额变化（含费用/税项/投资收益/少数股东等，"
+                 {"component_id": "below_gross_line_change",
+                  "label": "毛利线以下净额变化（含费用/税项/投资收益/少数股东等，"
                            "需明细表才能解释）",
                   "value": _q(below), "unit": unit,
                   "formula": f"({cur_np.value} - {prev_np.value}) - "
@@ -183,6 +189,35 @@ def gold(dataset, params: dict | None = None) -> dict:
     q = lambda x: float(x.quantize(Decimal("0.01")))      # noqa: E731
     return {"net_profit_change": q(d_np), "gross_profit_change": q(d_gp),
             "below_gross_line_change": q(below)}
+
+
+def components_gold(dataset, params: dict | None = None) -> dict:
+    """**分项**的独立计算（R1-b）：逐个 id 从输入用 Decimal 重算，供独立验证逐项比对。
+
+    与 `gold` 同一纪律：独立路径（不复用 `compute` 的中间结果）、同一条完整身份判据、
+    单位取自输入观察。返回 `{输出指标: {component_id: (value, unit)}}`。
+    """
+    periods = [p for p in (dataset.manifest.periods or ()) if p]
+    if len(periods) < 2:
+        raise NotApplicable("数据集只有一个期间")
+    prev_p, cur_p = periods[-2], periods[-1]
+    np_cur_o = dataset.require("net_profit", cur_p)
+    np_prev_o = dataset.require("net_profit", prev_p)
+    gp_cur_o = dataset.require("gross_profit", cur_p)
+    gp_prev_o = dataset.require("gross_profit", prev_p)
+    ident_ok, ident_why = full_identity_ok(np_cur_o, np_prev_o, gp_cur_o, gp_prev_o,
+                                           same_scale=True)
+    if not ident_ok:
+        raise NotApplicable(ident_why)
+    d_np = Decimal(str(np_cur_o.value)) - Decimal(str(np_prev_o.value))
+    d_gp = Decimal(str(gp_cur_o.value)) - Decimal(str(gp_prev_o.value))
+    below = d_np - d_gp
+    q = lambda x: float(x.quantize(Decimal("0.01")))      # noqa: E731
+    unit = str(np_cur_o.unit or "")
+    return {"net_profit_change": {
+        "gross_profit_change": (q(d_gp), unit),
+        "below_gross_line_change": (q(below), unit),
+    }}
 
 
 def compute_ratio(dataset, num_metric: str, den_metric: str, period: str, *,

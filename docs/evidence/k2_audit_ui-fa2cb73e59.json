@@ -122,7 +122,9 @@
    "status": "validated",
    "dataset_hash": "f34114d9e4118ecfe0e2a78d05546d00b114ac4be1bc032e609a064e7808f1c6",
    "mismatches": [],
-   "label_changes": [],
+   "label_changes": [
+    "eed3f0a5f37f-00-net_profit_change：数值/单位/期间/输入一致，**分项标签/公式措辞或分项契约字段（如 component_id 新增）**与落盘记录不同（如情景标签改为按参数生成、L0-c/R1-b 后分项带上稳定 id）"
+   ],
    "stored_rules_version": "未记录",
    "current_rules_version": "validation/1.1.0",
    "rules_stale": false,
@@ -178,7 +180,8 @@
    "dataset_hash": "f34114d9e4118ecfe0e2a78d05546d00b114ac4be1bc032e609a064e7808f1c6",
    "mismatches": [],
    "label_changes": [
-    "c63bd3e1e220-00-scenario_net_profit：数值/单位/期间/输入一致，**分项标签或公式措辞**与落盘记录不同（如情景标签改为按参数生成）"
+    "c63bd3e1e220-00-scenario_net_profit：数值/单位/期间/输入一致，**分项标签/公式措辞或分项契约字段（如 component_id 新增）**与落盘记录不同（如情景标签改为按参数生成、L0-c/R1-b 后分项带上稳定 id）",
+    "c63bd3e1e220-01-scenario_sensitivity：数值/单位/期间/输入一致，**分项标签/公式措辞或分项契约字段（如 component_id 新增）**与落盘记录不同（如情景标签改为按参数生成、L0-c/R1-b 后分项带上稳定 id）"
    ],
    "stored_rules_version": "未记录",
    "current_rules_version": "validation/1.1.0",
