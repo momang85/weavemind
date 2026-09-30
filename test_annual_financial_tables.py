@@ -83,6 +83,52 @@ class TestLabelSemantics(unittest.TestCase):
         self.assertEqual([float(v) for v in aft.numbers_in(tail)],
                          [25516530.0, 24164729.0])
 
+    def test_negative_amount_sign_belongs_to_the_number(self):
+        """U1（2026-10-01）：空格+负号是**数字的符号**，不是"标签继续说下去"。
+
+        洋河利润表实测：`财务费用 -610,889,994.14 -754,525,568.63` 与
+        `2.少数股东损益 -6,932,782.16 4,838,516.20` 此前整行被丢（两项在真实年报里取不到）。
+        """
+        for line, slug, want in (
+            ("财务费用 -610,889,994.14 -754,525,568.63", "finance_expense",
+             [-610889994.14, -754525568.63]),
+            ("2.少数股东损益 -6,932,782.16 4,838,516.20", "minority_interest",
+             [-6932782.16, 4838516.20]),
+            ("公允价值变动收益 -396,164,080.43 -37,082,477.77", "fair_value_change",
+             [-396164080.43, -37082477.77]),
+        ):
+            got_slug, tail = aft._label_of(line)
+            self.assertEqual(got_slug, slug, line)
+            self.assertEqual([float(v) for v in aft.numbers_in(tail)], want, line)
+        # 语义拒绝仍然有效：负号之外的内容照旧判（扣除/账龄/跌价）
+        for line in ("营业收入扣除金额 -26,765,393.81 39,439,349.17",
+                     "应收账款账龄 -1,279,570,429.23", "存货跌价准备 -680,900,264.45"):
+            self.assertEqual(aft._label_of(line)[0], "", line)
+
+    def test_income_statement_line_items_are_registered(self):
+        """毛利线以下行项目（经营驱动分解用）必须能按完整标签取到。"""
+        for line, slug in (
+            ("税金及附加 4,826,086,952.64 5,269,245,592.35", "taxes_and_surcharges"),
+            ("销售费用 5,516,238,544.79 5,386,953,700.62", "selling_expense"),
+            ("管理费用 1,924,730,302.35 1,764,423,149.06", "admin_expense"),
+            ("研发费用 104,796,407.26 284,753,881.33", "rd_expense"),
+            ("加：其他收益 59,667,934.13 56,179,399.53", "other_income"),
+            ("投资收益（损失以“－”号填列） 146,415,168.80 255,520,777.61",
+             "investment_income"),
+            ("信用减值损失（损失以“-”号填列） 667,208.93 881,383.32",
+             "credit_impairment"),
+            ("资产减值损失（损失以“-”号填列） -11,203,156.73 -2,828,018.24",
+             "asset_impairment"),
+            ("资产处置收益（损失以“-”号填列） -2,729,328.84 -5,282,977.32",
+             "asset_disposal_income"),
+            ("加：营业外收入 52,446,752.81 39,176,788.83", "non_operating_income"),
+            ("减：营业外支出 70,140,310.99 63,913,298.25", "non_operating_expense"),
+            ("减：所得税费用 2,476,620,791.72 3,197,064,562.60", "income_tax_expense"),
+            ("五、净利润 6,666,455,819.96 10,020,768,556.47",
+             "net_profit_consolidated"),
+        ):
+            self.assertEqual(aft._label_of(line)[0], slug, line)
+
     def test_total_revenue_is_a_separate_metric(self):
         """`营业总收入` 与 `营业收入` 口径不同（三一差 0.78%）：同挂一个 slug 会双双作废。"""
         self.assertEqual(aft._label_of("营业总收入 78,383,379 74,018,936")[0],

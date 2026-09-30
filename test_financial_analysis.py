@@ -2338,6 +2338,32 @@ class TestOperatingDriversYanghe(unittest.TestCase):
         comp = {c["component_id"]: c["value"] / 1e8 for c in detail.components}
         self.assertAlmostEqual(comp["unexplained_residual"], 4.5841, places=3)
 
+    def test_report_scope_is_not_treated_as_a_segment(self):
+        """U1 实测反例：抽取器同时给出合并与母公司两套利润表时，「母公司」**不是**分段切法。
+
+        把它当分段 → 未分类差额会被算成 −34.67 亿（真实是 −0.05 亿，且本该没有分段输出）。
+        """
+        rows = [r for r in self._rows(segment=False, volume=False)]
+        # 追加一套"母公司"范围的收入/成本（真实年报里确实同时存在）
+        for metric, prev, cur in (("revenue", 13_212_200_864.23, 12_852_221_243.40),
+                                  ("operating_cost", 6_866_625_130.04, 6_840_375_733.91)):
+            rows.append(_row(metric, "2023年", prev, unit="元", caliber="母公司",
+                             fact_id=f"fact-parent-{metric}-2023"))
+            rows.append(_row(metric, "2024年", cur, unit="元", caliber="母公司",
+                             fact_id=f"fact-parent-{metric}-2024"))
+        ds = fa.freeze_from_facts(rows, periods=(2023, 2024), entity="洋河股份",
+                                  entity_id="002304.SZ", as_of="2025-04-30",
+                                  source_label="test:yah-parent")
+        run = fa.run("operating_drivers", ds)
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        self.assertNotIn("gross_profit_change_by_segment",
+                         [o.metric for o in run.outputs],
+                         "只有报表范围、没有分段维度时不得输出分段分解")
+        diag = run.outputs[0].diagnostics
+        self.assertEqual(diag["segments_used"], [])
+        self.assertTrue(any("报表范围" in s for s in diag["segments_skipped"]),
+                        diag["segments_skipped"])
+
     def test_segments_are_alternative_cuts_not_additive(self):
         run = self._run()
         seg = next(o for o in run.outputs if o.metric == "gross_profit_change_by_segment")

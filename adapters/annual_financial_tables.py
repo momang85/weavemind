@@ -38,6 +38,25 @@ LABELS: dict[str, tuple[str, ...]] = {
     "accounts_receivable": ("应收账款",),
     "inventory": ("存货",),
     "accounts_payable": ("应付账款",),
+    # ── U1（2026-10-01）：合并利润表**毛利线以下**行项目 ──────────────────────
+    # 经营驱动分解要按会计含义逐项归因（`operating_drivers` 的 LINE_ITEMS 用同一批 slug）。
+    # 这些行只出现在「合并利润表」里：MD&A 的"3、费用"表不是可识别报表，不会被重复取。
+    "net_profit_consolidated": ("净利润",),        # 合并净利润（现金调节桥的起点）
+    "taxes_and_surcharges": ("税金及附加",),
+    "selling_expense": ("销售费用",),
+    "admin_expense": ("管理费用",),
+    "rd_expense": ("研发费用",),
+    "finance_expense": ("财务费用",),
+    "other_income": ("其他收益",),
+    "investment_income": ("投资收益",),
+    "fair_value_change": ("公允价值变动收益",),
+    "credit_impairment": ("信用减值损失",),
+    "asset_impairment": ("资产减值损失",),
+    "asset_disposal_income": ("资产处置收益",),
+    "non_operating_income": ("营业外收入",),
+    "non_operating_expense": ("营业外支出",),
+    "income_tax_expense": ("所得税费用",),
+    "minority_interest": ("少数股东损益",),
 }
 # 标签后缀出现这些词 → 不是我们要的那个指标（扣除项/占比/账龄/减值/其中…）
 LABEL_REJECT_WORDS = (
@@ -84,6 +103,8 @@ _UNIT_SCALE = {"元": Decimal(1), "千元": Decimal(1000), "万元": Decimal(100
                "百万元": Decimal(1000000), "美元": Decimal(1), "港元": Decimal(1)}
 
 _NUM_RE = re.compile(r"[（(]?-?\d[\d,，]*(?:\.\d+)?[)）]?")
+# 模板记账形态说明：`（损失以“－”号填列）`/`（亏损以“-”号填列）`/`（减少以"－"号填列）`
+_LINE_FORM_NOTE_RE = re.compile(r"^[\s]*[（(][^）)]{0,26}号填列[）)][\s]*")
 _DECIMAL_RE = re.compile(r"\d[\d,，]*\.\d")
 _DASHES = ("—", "-", "－", "不适用", "无", "")
 _FULLWIDTH = str.maketrans("０１２３４５６７８９．－，（）", "0123456789.-,()")
@@ -221,9 +242,19 @@ def _label_of(line: str) -> tuple[str, str]:
     if not best_name:
         return "", ""
     tail = s[len(best_name):]
+    # 证监会模板的**记账形态说明**（`（损失以“－”号填列）`/`（亏损以“-”号填列）`）是格式，
+    # 不是指标限定语。U1（2026-10-01）：不剥掉它，`投资收益（损失以“－”号填列） 146,415,168.80`
+    # 这种**单行未折行**的写法会被判成"标签继续写下去了"而整行丢弃（洋河那版恰好在括号处折行，
+    # 三一之类版面就会丢；同类还有"减少以…号填列"）。只剥带"号填列"的括号注，其余照旧判。
+    tail = _LINE_FORM_NOTE_RE.sub("", tail, count=1)
     # 行文里跟的是数值（`营业收入(元) 995,410,...`）：只对**第一个数字之前**的标签部分
     # 做语义判断，否则"数值本身"会把合法行判掉。
     label_part = re.split(r"\d", tail, maxsplit=1)[0]
+    # U1（2026-10-01）：**负数的符号属于数字，不属于标签**。洋河利润表里
+    # `财务费用 -610,889,994.14 -754,525,568.63`、`2.少数股东损益 -6,932,782.16 …`
+    # 的空格+负号被判成"标签继续写下去了"，整行被丢（实测：这两项在真实年报里取不到）。
+    # 只在**紧邻数字**处剥掉符号，其余内容仍按原规则判（扣除/占比/账龄等照样拒绝）。
+    label_part = re.sub(r"[\s]*[（(]?[-－—]\s*$", "", label_part)
     if _OPEN_TAIL_RE.match(label_part):
         # 折行：标签行没有金额，括号也没闭合。这里只认"标签 + 未闭合括号"，
         # 金额必须由下一行**按折行形态**给出，否则调用方拿不到数字、照样拒绝。

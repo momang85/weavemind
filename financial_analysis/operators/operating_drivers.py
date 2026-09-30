@@ -204,12 +204,18 @@ def _line_details(dataset, prev_p, cur_p, np_c, np_p, below: Decimal) -> tuple[l
     return used, rejected, missing
 
 
+# 报表**范围**（不是分段维度）：`合并` 是母项本身，`母公司` 是另一种报表范围。
+# U1 实测反例：真实年报抽取同时给出合并与母公司两套利润表，把「母公司」当分段切法后
+# `未分类差额` 从 −0.05 亿变成 −34.67 亿（把另一种报表范围混进了分段）。
+_REPORT_SCOPES = ("合并", "母公司", "合并报表", "母公司报表")
+
+
 def _segments(dataset, prev_p, cur_p, parent_caliber: str) -> tuple[list, list]:
     """两期都有收入与成本的口径各算一次毛利桥；缺一项就跳过并记原因。
 
-    **排除与母公司报表同口径的那一份**（如「合并」）：它是母项本身，不是一条分段切法——
-    否则分段合计 = 母项 + 各分段，`未分类差额` 会被算成正数（实测反例：洋河案例里
-    「合并」与「分产品:白酒」同时入列，未分类差额从 −0.05 亿变成 +37.96 亿）。
+    **只认分段维度**：与母公司报表同口径的那一份（如「合并」）是母项本身，
+    其它报表范围（如「母公司」）是**另一种范围**而不是切法——两者都必须排除，
+    否则分段合计 = 母项 + 其它范围，`未分类差额` 会被算成一个巨大的假差额。
     """
     out: list[dict] = []
     skipped: list[str] = []
@@ -221,6 +227,9 @@ def _segments(dataset, prev_p, cur_p, parent_caliber: str) -> tuple[list, list]:
     for cal in calibers:
         if str(cal) == str(parent_caliber or ""):
             skipped.append(f"{cal}:与母公司报表同口径（不是分段切法）")
+            continue
+        if str(cal) in _REPORT_SCOPES:
+            skipped.append(f"{cal}:报表范围而不是分段维度（并表范围另有其表）")
             continue
         vals = {}
         for metric in ("revenue", "operating_cost"):
