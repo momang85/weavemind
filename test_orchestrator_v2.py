@@ -165,6 +165,94 @@ def make_dispatch(results, delays=None, order=None):
     return dispatch, state
 
 
+class TestOfficialDiscoveryBudget(TempWorkspaceCase):
+    """L0-d（09-30 复核 S3）：官方发现/取件共用**一个**挂钟截止 + 次数/字节台账。
+
+    反例：240s 在 `discover` **之后**才起算，准入又不接剩余预算——"发现慢"与"取件慢"
+    相加可以远超一次任务的预算，而每一段单独看都合规。这里钉住两条边界：
+    预算耗尽后**不得再启动取件**；台账（次数/字节/剩余）必须落进 `official_discovery.json`。
+    """
+
+    def _drive(self, *, seconds: float, store_spy: list):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        import material_intake as mi
+        import orchestrator_v2 as ov
+        from adapters import disclosure_ingest as di
+        import working_paper_export as wpe
+
+        o = make_orch()
+        o.DISCOVERY_BUDGET_SECONDS = seconds
+        req = SimpleNamespace(company="贵州茅台", company_id="600519.SH",
+                              periods=(2023, 2024), as_of="2025-04-30", market="cn")
+        cands = [{"title": "2024年年度报告", "url": "https://example.invalid/a.PDF",
+                  "period": "2024年", "version": "original", "is_summary": False,
+                  "disclosed_at": "2025-04-03", "why": "官方公告"}]
+        patches = [
+            mock.patch.object(wpe, "resolve_request",
+                              lambda *a, **k: (req, [], "stored")),
+            mock.patch.object(di, "discover",
+                              lambda *a, **k: {"status": "found", "reason_code": "",
+                                               "reason": "", "candidates": cands,
+                                               "contract": "cninfo/v1"}),
+            mock.patch.object(mi, "store", lambda **kw: (store_spy.append(kw), {
+                "ok": True, "material_id": "m1", "duplicate": False})[1]),
+            mock.patch("orchestrator_v2.push_progress"),
+        ]
+        for p in patches:
+            p.start()
+            self.addCleanup(p.stop)
+        out = o._official_discovery_intake("l0d-task", "研究贵州茅台", "default")
+        return o, out
+
+    def test_exhausted_budget_starts_no_fetch_and_is_recorded(self):
+        store_spy: list = []
+        _o, out = self._drive(seconds=0.0, store_spy=store_spy)
+        self.assertEqual(store_spy, [], "预算耗尽后不得再启动取件")
+        self.assertIn("总截止", out.get("reason") or "", out)
+        self.assertTrue(out["budget"]["exhausted"], out["budget"])
+        self.assertIn("deadline", out["budget"]["refused"], out["budget"])
+        artifact = ws_mod.task_project_dir("l0d-task", "default") / "official_discovery.json"
+        self.assertTrue(artifact.is_file(), "结论落盘（页面/验收要能读）")
+        blob = json.loads(artifact.read_text(encoding="utf-8"))
+        self.assertTrue(blob["budget"]["exhausted"], blob)
+        self.assertFalse(blob["admit"].get("ok"), blob.get("admit"))
+
+    def test_budget_is_shared_from_discovery_and_accounted(self):
+        store_spy: list = []
+        o, out = self._drive(seconds=30.0, store_spy=store_spy)
+        self.assertTrue(store_spy, "预算充足时照常取件")
+        b = out["budget"]
+        self.assertGreater(b["seconds"], 0)
+        self.assertGreaterEqual(b["elapsed"], 0.0)
+        self.assertLessEqual(b["remaining"], b["seconds"])
+        self.assertEqual(b["max_fetches"], 2, "每任务最多两次取件的上限要写在台账里")
+        self.assertFalse(b["exhausted"])
+        # 发现的取件钩子被夹进剩余预算：替身 fetch 收到的 timeout 不超过总预算
+        self.assertTrue(hasattr(o, "DISCOVERY_BUDGET_SECONDS"))
+
+    def test_wrap_fetch_clamps_timeout_and_counts(self):
+        from orchestrator_v2 import _OfficialDiscoveryBudget
+        seen: list = []
+
+        def fake_fetch(url, **kw):
+            seen.append(kw)
+            return {"raw": b"x" * 10}
+
+        b = _OfficialDiscoveryBudget(30.0, max_fetches=2)
+        wrapped = b.wrap_fetch(fake_fetch)
+        wrapped("https://example.invalid/a", timeout=999)
+        self.assertLessEqual(seen[0]["timeout"], 30.0, "单次取件的超时不得超过总预算")
+        self.assertEqual(b.fetches, 1)
+        self.assertEqual(b.bytes, 10)
+        b._deadline = time.monotonic() - 1                    # noqa: SLF001 - 模拟预算用尽
+        with self.assertRaises(TimeoutError):
+            wrapped("https://example.invalid/b")
+        self.assertEqual(b.fetches, 1, "预算用尽后不得再计一次取件")
+        self.assertIn("deadline", b.refusals)
+
+
 class TestNormalizeSteps(unittest.TestCase):
     def setUp(self):
         self.o = make_orch(_max_steps=8)

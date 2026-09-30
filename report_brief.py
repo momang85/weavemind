@@ -3312,11 +3312,26 @@ BRIEF_SECTIONS = ("## 关键发现", "## 业务背景", "## 财务对照", "## �
                   "## 分析卡", "## 变化解释", "## 风险与核查", "## 附录", "## 参考来源")
 
 
+def _rules_version() -> str:
+    """当前独立验证规则集版本（取不到就空串 = 不比较，不假装匹配）。"""
+    try:
+        from financial_analysis.validation import RULES_VERSION
+        return str(RULES_VERSION)
+    except Exception:                            # noqa: BLE001
+        return ""
+
+
 def _analysis_card_block(task_id: str, *, ws_dir=None) -> str:
     """读取该任务的**已验证**金融分析运行并渲染分析卡区块（没有就返回空串）。
 
     只读工作区里的 `analysis_runs.json`（由 `financial_analysis.store` 落盘、
     `data_analyzer` 的金融路径写入）；运行未通过验证的一律不渲染——正文不消费未验证读数。
+
+    **用户选择的运行真正进正文**（L0-b，2026-09-30 复核 U1）：工作区里有一份
+    `analysis/selection.json` 时，正文只渲染**被选中的**运行（按选择顺序），并且逐条核对
+    它是否仍然可用（数据集是否已变、规则版本是否匹配、是否仍 validated）；过期/缺失的
+    选择**如实写进正文说明**，**绝不**改取最早/最新运行代替用户的选择。没有选择记录时
+    才退回"每个模型取最新一条已验证运行"这一**默认**（并在返回里标明是默认）。
     """
     try:
         import workspace as _ws_mod
@@ -3329,16 +3344,56 @@ def _analysis_card_block(task_id: str, *, ws_dir=None) -> str:
         main = [r for r in runs if not str(r.model_id).startswith("ratio:")]
         if not main:
             return ""
+        sel = _fa_store.selection_status(
+            ws,
+            dataset_hash=str((_fa_store.load_inputs(ws).get("dataset") or {})
+                             .get("dataset_hash") or ""),
+            rules_version=_rules_version())
+        picked: list = []
+        notes: list[str] = []
+        _by_id = {r.run_id: r for r in main}
+        for e in sel.get("entries") or []:
+            mid = str(e.get("model_id") or "")
+            rid = str(e.get("run_id") or "")
+            if e.get("state") != "ok":
+                notes.append(f"- ⚠️ 所选运行（{mid}，run={rid[:12]}）**未采用**："
+                             f"{e.get('why') or e.get('state')}——需要重算后再采纳，"
+                             "正文不会改取其它运行代替这次选择")
+                continue
+            r = _by_id.get(rid)
+            if r is None:
+                notes.append(f"- ⚠️ 所选运行（{mid}，run={rid[:12]}）不在已验证运行里："
+                             "未采用（不代替选择）")
+                continue
+            picked.append(r)
+        if not picked and not notes:
+            # 没有选择记录 → **默认**：按运行记录顺序，每个模型取第一条已验证运行（至多两条，
+            # 与既有行为一致）；有选择记录时绝不走这条路（不允许拿默认代替用户选择）。
+            seen_models: list[str] = []
+            for r in main:
+                if str(r.model_id) in seen_models:
+                    continue
+                seen_models.append(str(r.model_id))
+                picked.append(r)
+                if len(picked) >= 2:
+                    break
+            if picked:
+                notes.append("- 说明：本版没有人工选择记录，默认采用每个模型的第一条"
+                             "已验证运行（可在分析工作台显式选择某一条）")
+        if not picked and not notes:
+            return ""
         # 多张卡**只出一个 `## 分析卡` 标题**（K3 实机：同一份交付里出现两个同名 `##`，
         # 读者会以为重复装配）；每张卡降一级 `###` 并写明模型，便于按模型对照。
         blocks: list[str] = []
-        for idx, r in enumerate(main[:2]):
+        for idx, r in enumerate(picked):
             block = _fa_store.render_card_block(r)
             body = block.split("\n", 1)[1] if "\n" in block else ""
             if idx == 0:
                 blocks.append(block.rstrip())
             else:
                 blocks.append(f"### 分析卡（{r.model_id}）\n{body.rstrip()}")
+        if notes:
+            blocks.append("### 分析卡选择说明\n" + "\n".join(notes))
         return "\n".join(blocks).rstrip() + "\n"
     except Exception as exc:                     # noqa: BLE001 - 渲染不出就不加这一节
         logger.warning("分析卡渲染失败（task=%s）：%s", task_id, str(exc)[:140])

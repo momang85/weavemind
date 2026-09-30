@@ -5682,6 +5682,31 @@ def _analysis_workbench(tid: str) -> dict:
         "recomputable": bool((inputs.get("dataset") or {}).get("dataset")),
         "observations": len(_obs_by_fact),
     }
+    _ds_hash = str(out["inputs"]["dataset_hash"] or "")
+    try:
+        from financial_analysis.validation import RULES_VERSION as _RULES
+    except Exception:                               # noqa: BLE001
+        _RULES = ""
+    out["rules_version"] = _RULES
+    # **用户选择**（L0-b）：正文里用的是哪一条运行，是显式选择而不是"取前两条"。
+    # 选择状态逐条核对（数据集是否已变/规则是否更新/是否仍 validated）并一起回显。
+    try:
+        _sel = fa_store.selection_status(ws, dataset_hash=_ds_hash,
+                                        rules_version=_RULES)
+    except Exception as exc:                        # noqa: BLE001
+        logger.warning("分析选择状态读取失败（task=%s）：%s", tid, str(exc)[:120])
+        _sel = {"schema": "", "entries": [], "ok": False, "stale": []}
+    out["selection"] = _sel
+    # **当前包**（L0-b/复核 U2）：面板的导出按钮必须按"与采纳稿同版"的包走，
+    # 不能直接打开目录。这里把包身份判定与当前包名一起给出（判不出就空）。
+    _pkgs = _pkg_statuses_for(tid)
+    out["current_package"] = str(_pkgs.get("current") or "")
+    out["current_package_ok"] = bool(_pkgs.get("has_current"))
+    out["package_note"] = str(_pkgs.get("note") or "")
+    out["packages"] = [{"name": p.get("name"), "status": p.get("status"),
+                        "identity": p.get("identity")}
+                       for p in (_pkgs.get("packages") or [])]
+    out["adopted_identity"] = str(_pkgs.get("adopted_identity") or "")
     if not out["inputs"]["recomputable"]:
         out["reason"] = ("该任务没有可复算输入（analysis/dataset.json）："
                          "先让分析步跑完（分析链会落 dataset/plan/context）")
@@ -5700,6 +5725,10 @@ def _analysis_workbench(tid: str) -> dict:
         if spec is not None:
             for k, v in dict(getattr(spec, "allowed_params", {}) or {}).items():
                 allowed[k] = list(v) if isinstance(v, (tuple, list)) else v
+        # 该模型的**默认参数**显式给出（L0-b-5）：面板不让用户猜"不改会用什么"
+        _defaults = dict(getattr(spec, "default_params", {}) or {}) if spec else {}
+        _sel_entry = next((e for e in (_sel.get("entries") or [])
+                           if str(e.get("model_id") or "") == mid), None)
         item = {
             "run_id": str(r.get("run_id") or ""),
             "model_id": mid,
@@ -5708,6 +5737,15 @@ def _analysis_workbench(tid: str) -> dict:
             "validation_ok": bool((r.get("validation") or {}).get("ok")),
             "params": dict(r.get("params") or {}),
             "allowed_params": allowed,
+            "default_params": _defaults,
+            "rules_version": str(r.get("rules_version") or ""),
+            "started_at": str(r.get("started_at") or ""),
+            # 是否**用户所选**（进正文的那一条）：选择过期/缺失都如实标出来
+            "selected": bool(_sel_entry
+                             and str(_sel_entry.get("run_id") or "")
+                             == str(r.get("run_id") or "")),
+            "selection_state": str((_sel_entry or {}).get("state") or ""),
+            "selection_why": str((_sel_entry or {}).get("why") or ""),
             "dataset_hash": str(r.get("dataset_hash") or ""),
             "outputs": [{"output_id": str(o.get("output_id") or ""),
                          "metric": str(o.get("metric") or ""),
@@ -5740,8 +5778,16 @@ def _analysis_workbench(tid: str) -> dict:
                           "unit": item["outputs"][0].get("unit"),
                           "output_id": item["outputs"][0].get("output_id"),
                           "dataset_hash": item["dataset_hash"],
+                          "selected": item["selected"],
                           "params": item["params"]})
     out["cards"] = cards
+    # 卡与"所选运行"同步（L0-b-5）：卡按**选择**标出是不是进正文的那一条；
+    # 没有选择记录时按默认（每模型第一条已验证运行）标注，省得面板展示 cards[0]
+    # 却让用户以为改的是另一条运行。
+    _selected_ids = {str(e.get("run_id") or "") for e in (_sel.get("entries") or [])}
+    for c in out["cards"]:
+        c["in_report"] = (str(c.get("run_id") or "") in _selected_ids) if _selected_ids \
+            else bool(c.get("selected"))
     out["ok"] = bool(out["inputs"]["recomputable"])
     return out
 
@@ -5822,10 +5868,25 @@ def _post_task_analysis_recompute(self, p, body, admin):
                            "code": "params_out_of_range"}, 400)
     import financial_analysis as fa
     before = None
-    for r in reversed(fa_store.load_runs(ws)):
-        if str(r.get("model_id")) == model_id and str(r.get("status")) == fa.RunStatus.VALIDATED:
-            before = r
-            break
+    # 对比基准优先取**该模型当前所选**的那条运行（L0-b-5）：用户改的是"进正文那一版"的
+    # 假设，差异就该相对它；没有选择记录时才退回最新一条已验证运行。
+    try:
+        _sel_now = fa_store.selection_status(
+            ws, dataset_hash=str(ds.dataset_hash or ""),
+            rules_version=str(getattr(fa.validation, "RULES_VERSION", "") or ""))
+        _sel_rid = next((str(e.get("run_id") or "") for e in (_sel_now.get("entries") or [])
+                         if str(e.get("model_id") or "") == model_id), "")
+    except Exception:                               # noqa: BLE001
+        _sel_rid = ""
+    _all = fa_store.load_runs(ws)
+    if _sel_rid:
+        before = next((r for r in _all if str(r.get("run_id")) == _sel_rid), None)
+    if before is None:
+        for r in reversed(_all):
+            if str(r.get("model_id")) == model_id \
+                    and str(r.get("status")) == fa.RunStatus.VALIDATED:
+                before = r
+                break
     run = fa.run(model_id, ds, params=params)
     if run.status != fa.RunStatus.VALIDATED:
         return self._json({
@@ -5872,12 +5933,18 @@ def _post_task_analysis_recompute(self, p, body, admin):
 
 
 def _post_task_analysis_adopt(self, p, body, admin):
-    """`POST /api/task/<id>/analysis/adopt`：把某条**已验证**复算运行采纳进交付（K3）。
+    """`POST /api/task/<id>/analysis/adopt`：把某条**已验证**复算运行**选定**进交付（K3/L0-b）。
 
-    采纳 = 用**同一条装配路径**（`assemble_and_verify`）重新装配当前正文：分析卡由代码
-    从工作区的已验证运行生成，因此采纳后正文/清单/导出指向同一次运行（同版可复算）。
-    新版本**不继承**旧版本的人工批准与验收（沿用既有版本纪律）；失败方向：装配异常 →
-    200 但状态为草稿（不掩盖部分更新）。
+    采纳 = 记录"这个模型的正文用这一条运行"（`analysis/selection.json`）→ 用**同一条装配
+    路径**（`assemble_and_verify`）重新装配正文。正文里的分析卡由 `report_brief` 按**选择**
+    渲染，因此采纳后正文/清单/导出指向同一次运行（同版可复算），旧正文与旧包仍可追溯。
+
+    L0-b（2026-09-30 复核 U1/U2）的四条硬要求：
+    - **必须给 run_id**：缺了不返回"已采纳"（400）——不接受"拿最早/最新运行代替用户选择"；
+    - 采纳前核对**输入仍当前**、运行**已验证**、**规则版本匹配**；任一不符 → 409 + 原因；
+    - 返回**实际采纳版本的身份**（`identity_id`），不再去读不存在的 `report_version_id`；
+    - 装配失败/正文仍是草稿时返回 `ok: false`（`adopted` 说明选择是否已落盘），
+      不用成功语义掩盖部分装配。
     """
     if not (p.startswith("/api/task/") and p.endswith("/analysis/adopt")):
         return None
@@ -5888,47 +5955,120 @@ def _post_task_analysis_adopt(self, p, body, admin):
         return self._json({"error": "task not found"}, 404)
     body = body if isinstance(body, dict) else {}
     run_id = str(body.get("run_id") or "").strip()
+    if not run_id:
+        # 缺 run_id 就是"没有选择"：不做默认采纳，也不回"已采纳"
+        return self._json({"error": "需要 run_id：采纳必须是**显式选择某一条运行**，"
+                                    "不接受按最早/最新代替选择",
+                           "code": "run_id_required"}, 400)
     from workspace import task_workspace
     from financial_analysis import store as fa_store
     ws = task_workspace(tid)
     runs = {str(r.get("run_id")): r for r in fa_store.load_runs(ws)}
-    if run_id and run_id not in runs:
+    rec = runs.get(run_id)
+    if rec is None:
         return self._json({"error": "该 run 不存在", "code": "unknown_run"}, 404)
-    if run_id and str(runs[run_id].get("status")) != "validated":
+    if str(rec.get("status")) != "validated":
         return self._json({"error": "未通过验证的运行不得采纳",
-                           "status": runs[run_id].get("status")}, 409)
+                           "status": rec.get("status")}, 409)
     _wb = _analysis_workbench(tid)
     if not _wb.get("ok"):
         return self._json({"error": _wb.get("reason") or "没有可复算输入",
                            "code": "no_inputs"}, 409)
+    _cur_ds = str((_wb.get("inputs") or {}).get("dataset_hash") or "")
+    # 输入仍当前？（数据集一变，旧运行立刻过期——不静默采纳过期结果）
+    if _cur_ds and str(rec.get("dataset_hash") or "") != _cur_ds:
+        return self._json({
+            "error": ("所选运行绑定的数据集已变（run "
+                      f"{str(rec.get('dataset_hash') or '')[:12]} vs 当前 {_cur_ds[:12]}）："
+                      "旧结果过期，请按当前输入**重算**后再采纳"),
+            "code": "dataset_changed"}, 409)
+    # 规则版本匹配？（验证规则变了，旧 run 不得冒充按新规则已验证）
+    _rules = str(_wb.get("rules_version") or "")
+    _run_rules = str(rec.get("rules_version") or "")
+    if _rules and _run_rules and _run_rules != _rules:
+        return self._json({
+            "error": (f"所选运行的验证规则版本（{_run_rules}）与当前（{_rules}）不一致："
+                      "请重算后再采纳，不把旧规则下的结论当作按新规则已验证"),
+            "code": "rules_changed"}, 409)
     import task_state as _ts
     row = _ts.read_task(tid) or {}
     goal = str(row.get("goal") or "")
+    # 显式选择先落盘（装配会读它）：同模型第二次选择即替换，旧运行仍留在运行记录里
+    entry = {
+        "model_id": str(rec.get("model_id") or ""),
+        "run_id": run_id,
+        "dataset_hash": str(rec.get("dataset_hash") or ""),
+        "params_hash": str(rec.get("params_hash") or ""),
+        "params": dict(rec.get("params") or {}),
+        "rules_version": _run_rules or _rules,
+        "selected_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "output_ids": [str(o.get("output_id") or "") for o in (rec.get("outputs") or ())],
+    }
     try:
-        from delivery_pipeline import assemble_and_verify, read_wrapper
+        fa_store.save_selection(ws, entry, note="分析工作台显式选择")
+    except Exception as exc:                        # noqa: BLE001 - 选择写不下就别假装采纳
+        logger.warning("分析选择落盘失败（task=%s）：%s", tid, str(exc)[:140])
+        return self._json({"error": f"选择无法落盘：{str(exc)[:140]}",
+                           "code": "selection_write_failed"}, 500)
+    try:
+        from delivery_pipeline import accept_for_body, assemble_and_verify, read_wrapper
         from report_version import VersionStore
         store = VersionStore(ws, tid)
         current = store.adopted()
         if current is None:
-            return self._json({"error": "该任务没有可采纳的交付版本"}, 409)
+            return self._json({"error": "该任务没有可采纳的交付版本",
+                               "code": "no_version", "selection_saved": True}, 409)
         body_text = str(current.body or "")
         _delivered = (_get_task_report_data(tid) or {}).get("report") or ""
         wrapper, wrapper_source = read_wrapper(tid, _delivered, body_text)
+        # 验收用**同一个验收器**（沿用人工修订路径的写法）：先对这份正文跑确定性验收，
+        # 再把结论作为 accept_fn 交给装配。此前 adopt 调用的是编排器才有的
+        # `self._accept_fn_for`（HTTP handler 上没有这个方法）→ 采纳必然 500。
+        verdict = None
+        try:
+            verdict = accept_for_body(tid, goal, body_text, trigger="分析采纳重装配",
+                                      ws_dir=ws)
+        except Exception as exc:                    # noqa: BLE001 - 验收异常按证据未知
+            logger.warning("分析采纳：验收异常（task=%s）：%s", tid, str(exc)[:160])
+            verdict = None
         asm = assemble_and_verify(tid, goal, body_text, wrapper=wrapper,
-                                  project=str(row.get("project") or "default") or "default",
-                                  accept_fn=self._accept_fn_for(tid, goal))
+                                  accept_fn=lambda t, g, b: verdict or None,
+                                  ws_dir=ws,
+                                  project=str(row.get("project") or "default") or "default")
         status = str(asm.get("status") or "")
+        # **实际采纳版本的身份**：装配后版本库里真正被采纳的那一版（不再读不存在的
+        # `report_version_id`——那会让调用方拿到空值却以为成功，复核 U2）
+        _adopted_v = store.adopted()
+        identity = ""
+        try:
+            identity = str(_adopted_v.identity_id() or "") if _adopted_v is not None else ""
+        except Exception:                           # noqa: BLE001
+            identity = str(getattr(_adopted_v, "version_id", "") or "")
+        # 选择的身份回填成"这一版"，供包内清单/面板核对"正文这一段 = 这一次运行"
+        if identity:
+            try:
+                fa_store.save_selection(ws, entry, adopted_identity=identity,
+                                        note="分析工作台显式选择")
+            except Exception:                       # noqa: BLE001 - 回填失败不影响本次采纳
+                pass
+        ok = status == "verified"
         return self._json({
-            "ok": True, "adopted_run": run_id or "（按工作区已验证运行）",
+            "ok": ok, "adopted": True, "selection_saved": True,
+            "adopted_run": run_id, "model_id": entry["model_id"],
+            "identity_id": identity,
             "delivery_status": status,
             "reason": str(asm.get("reason") or ""),
-            "report_version_id": str(asm.get("report_version_id") or ""),
+            "selection": fa_store.selection_status(
+                ws, dataset_hash=_cur_ds, rules_version=_rules),
             "packages": _pkg_statuses_for(tid),
-            "note": "采纳后正文/清单/导出指向同一次运行；新版本不继承旧批准",
-        })
+            "note": ("采纳后正文/清单/导出指向同一次运行；新版本不继承旧批准"
+                     + ("" if ok else "；**注意**：这一版仍未通过验收，交付状态如实为 "
+                        f"{status or 'draft'}，不算「已采纳成功」")),
+        }, 200)
     except Exception as exc:                        # noqa: BLE001 - 如实报错，不假装成功
         logger.warning("分析结果采纳失败（task=%s）：%s", tid, str(exc)[:160])
-        return self._json({"error": f"采纳失败：{str(exc)[:160]}"}, 500)
+        return self._json({"error": f"采纳失败：{str(exc)[:160]}",
+                           "selection_saved": True}, 500)
 
 
 def _pkg_statuses_for(tid: str) -> dict:

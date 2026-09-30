@@ -149,9 +149,16 @@ def get_via_urllib(
         raise RuntimeError(f"blocked URL by SSRF guard: {url[:120]}")
     req = urllib.request.Request(url, headers=headers or BROWSER_HEADERS)
     # 总截止：`urlopen(timeout)` 只管**单次** socket 操作，慢速分块响应可以整体远超它。
+    # L0-d（2026-09-30 复核 S1）：截止从**进入取件前**起算，并在响应头读完后再查一次钟——
+    # 逐字节慢头（每次都短于 socket 超时）能把"读头"拖到远超总预算，此后若重新起算，
+    # 一次 0.05s 的取件会在 0.5s 后照样返回成功。
     from adapters.search_runner import read_with_deadline
     deadline = _time.monotonic() + max(0.5, float(timeout))
     with urllib.request.urlopen(req, timeout=timeout) as resp:
+        if _time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"read deadline exhausted while reading response headers"
+                f"（总截止 {max(0.5, float(timeout)):g}s）：不读响应体")
         return read_with_deadline(resp, deadline,
                                   max_bytes=DEFAULT_TEXT_MAX_BYTES).decode(
                                       encoding, errors="replace")
@@ -256,8 +263,15 @@ def get_bytes_via_urllib(
                         "error": f"blocked URL by SSRF guard: {url[:120]}"})
             return out
         req = urllib.request.Request(url, headers=headers or BROWSER_HEADERS)
+        # **总截止从进入取件开始**（L0-d，2026-09-30 复核 S1）：此前截止在 `urlopen` **之后**
+        # 才起算——"逐字节慢响应头"（每次 recv 都短于 socket 超时，整体却远超预算）能让
+        # `timeout=0.05` 的取件在 0.511s 后照样 `ok=True`。现在：
+        #   1. 请求前就起算总截止；2. 头读完立刻查钟，超了就不读体、如实报超时；
+        #   3. 读体只用**剩余预算**（同一个 deadline 传下去）。
+        _budget = float(timeout or 0 or 25)
+        _deadline = _time.monotonic() + _budget
         try:
-            resp = urllib.request.urlopen(req, timeout=timeout)
+            resp = urllib.request.urlopen(req, timeout=_budget)
         except urllib.error.HTTPError as exc:
             # 非 2xx：**不抛**。状态与响应体都要留下（错误页可能正是问题本身）
             resp = exc
@@ -266,10 +280,20 @@ def get_bytes_via_urllib(
             hdrs = getattr(resp, "headers", None)
             ctype = str(hdrs.get("Content-Type") or "") if hdrs else ""
             tenc = str(hdrs.get("Transfer-Encoding") or "") if hdrs else ""
+            # 响应头阶段就可能已经把预算用光：如实报超时，**不读体**、更不返回成功
+            _left = _deadline - _time.monotonic()
+            if _left <= 0:
+                from adapters.search_runner import _close_quietly
+                _close_quietly(resp)
+                out.update({"status": status, "content_type": ctype,
+                            "transfer_encoding": tenc, "error_kind": "read_timeout",
+                            "body_bytes": 0, "data": b"", "over_limit": False,
+                            "error": (f"读取超时（总截止 {_budget:g}s 在响应头阶段已用尽）："
+                                      "不再读取响应体")})
+                return out
             # 字节通道保留既有契约（**截断到上限 + over_limit 标记**，供 PDF 拒收分因用），
             # **时间**边界改用与文本通道同源的"总截止 + 单次读"（K0-c）：此前只有 socket
             # 超时，慢滴响应能把一次 read 拖到对端结束。
-            _deadline = _time.monotonic() + float(timeout or 0 or 25)
             # 传 `_limited`（函数内部按"读满 limit + 1 即停"处理），保持截断语义
             read_n = _limited if _limited else 0
             raw, _over, _rerr = _read_bounded_bytes(resp, deadline=_deadline, limit=read_n)
@@ -277,7 +301,7 @@ def get_bytes_via_urllib(
                 out.update({"status": status, "content_type": ctype,
                             "transfer_encoding": tenc, "error_kind": _rerr,
                             "body_bytes": len(raw or b""), "data": bytes(raw or b""),
-                            "error": (f"读取超时（总截止 {float(timeout or 0 or 25):g}s）"
+                            "error": (f"读取超时（总截止 {_budget:g}s）"
                                       if _rerr == "read_timeout"
                                       else f"{_rerr}: 读取中断"),
                             "over_limit": bool(_over)})

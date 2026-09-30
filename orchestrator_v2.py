@@ -744,6 +744,86 @@ def _prior_failure(row) -> dict:
             "note": "原失败记录未被本操作修改；候选是新版本，不代表任务已成功"}
 
 
+class _OfficialDiscoveryBudget:
+    """官方发现/取件的**共享台账**（L0-d，2026-09-30 复核 S3）。
+
+    为什么不能各段各自起算：此前 240s 在 `discover` **之后**才起，且发现阶段的取件与
+    准入又不接剩余预算——"发现慢"与"取件慢"相加可以远超一次任务的预算，而每一段单独
+    看都合规。这里把**发现 → 取件 → 准入**放进同一个挂钟截止，并记次数与字节：
+
+    - `remaining()`：只减不增；`expired()` 为真时**后续不得再启动任何取件**；
+    - `wrap_fetch()`：给发现阶段的每一次 HTTP 取件夹上"剩余预算"（同时限制单次 socket
+      超时与总量），并计次/计字节；
+    - `account()`：进 `official_discovery.json`，让人能核对"这次到底取了几次、多少字节、
+      还剩多少预算"——没有台账的"有 240s 上限"只是一句自述。
+    """
+
+    def __init__(self, seconds: float, *, max_fetches: int = 2,
+                 clock=time.monotonic):
+        self.seconds = float(seconds)
+        self.max_fetches = int(max_fetches)
+        self._clock = clock
+        self._started = clock()
+        self._deadline = self._started + max(0.0, float(seconds))
+        self.fetches = 0
+        self.bytes = 0
+        self.refusals: list[str] = []
+
+    def elapsed(self) -> float:
+        return max(0.0, self._clock() - self._started)
+
+    def remaining(self) -> float:
+        return self._deadline - self._clock()
+
+    def expired(self) -> bool:
+        return self.remaining() <= 0
+
+    def note_fetch(self, nbytes: int = 0) -> None:
+        self.fetches += 1
+        try:
+            self.bytes += max(0, int(nbytes or 0))
+        except (TypeError, ValueError):
+            pass
+
+    def wrap_fetch(self, fetch):
+        """把发现阶段的 fetch 钩子夹进剩余预算（钩子为 None 时返回 None）。"""
+        if fetch is None:
+            return None
+
+        def _wrapped(url, *a, **kw):
+            remain = self.remaining()
+            if remain <= 0:
+                self.refusals.append("deadline")
+                raise TimeoutError(
+                    f"官方发现总截止 {self.seconds:g}s 已用尽（已用 {self.elapsed():.1f}s）："
+                    "不再发起取件")
+            try:
+                kw["timeout"] = max(0.5, min(float(kw.get("timeout") or remain), remain))
+            except (TypeError, ValueError):
+                kw["timeout"] = max(0.5, remain)
+            got = fetch(url, *a, **kw)
+            size = 0
+            if isinstance(got, dict):
+                for k in ("raw", "data", "body", "text"):
+                    v = got.get(k)
+                    if isinstance(v, (bytes, bytearray)):
+                        size = max(size, len(v))
+                    elif isinstance(v, str):
+                        size = max(size, len(v.encode("utf-8", "ignore")))
+            self.note_fetch(size)
+            return got
+
+        return _wrapped
+
+    def account(self) -> dict:
+        return {"seconds": self.seconds, "elapsed": round(self.elapsed(), 3),
+                "remaining": round(self.remaining(), 3),
+                "fetches": self.fetches, "max_fetches": self.max_fetches,
+                "bytes": self.bytes,
+                "refused": list(self.refusals),
+                "exhausted": self.expired()}
+
+
 class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
     def __init__(self):
         # Load config.json for LLM settings (if env not set)
@@ -8166,15 +8246,30 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             return out
         out["contract"] = {"company": company, "company_code": code,
                            "periods": list(periods), "as_of": as_of, "source": source}
+        # **共享台账**（L0-d，复核 S3）：总截止在 `discover` **之前**起算，发现阶段的每次
+        # 取件夹进剩余预算；准入循环复用同一个截止，不再另起 240s。
+        # 注意：这里刻意不写 `getattr(...) or 240.0`——0 是合法值（测试与"立刻耗尽"场景），
+        # `or` 会把它悄悄换成 240s，于是"预算为 0"照样取件（本条实测踩到）。
+        try:
+            _secs = float(getattr(self, "DISCOVERY_BUDGET_SECONDS", 240.0))
+        except (TypeError, ValueError):
+            _secs = 240.0
+        try:
+            _maxf = int(getattr(self, "DISCOVERY_MAX_FETCHES", 2))
+        except (TypeError, ValueError):
+            _maxf = 2
+        _budget = _OfficialDiscoveryBudget(_secs, max_fetches=max(1, _maxf))
         try:
             got = di.discover(company, code, periods, doc_type="年度报告",
-                              until=as_of, fetch=self._discovery_fetch)
+                              until=as_of, fetch=_budget.wrap_fetch(self._discovery_fetch))
         except Exception as exc:                 # noqa: BLE001 - 发现失败按缺口记
             out.update({"status": "unavailable", "reason_code": "discover_failed",
-                        "reason": f"官方发现异常：{str(exc)[:140]}"})
+                        "reason": f"官方发现异常：{str(exc)[:140]}",
+                        "budget": _budget.account()})
             self._write_discovery_artifact(task_id, project, out)
             self._push_discovery_progress(task_id, out)
             return out
+        out["budget"] = _budget.account()
         for k in ("contract_version", "params", "probe", "authority", "upstream_family",
                   "access_method"):
             if k in got:
@@ -8196,11 +8291,18 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             self._push_discovery_progress(task_id, out)
             return out
         # 取件 + 准入：按偏好顺序试，**上限 2 次**（一次任务一份正文即可，多年报在同一份里）。
-        # 另有总墙钟上限与取消检查：站点极慢时不把任务预算吃光（"共用根预算"的落地）。
-        _deadline = time.monotonic() + 240.0
-        for cand in candidates[:2]:
+        # 另有总墙钟上限与取消检查：站点极慢时不把任务预算吃光。L0-d（复核 S3）：这里的
+        # 上限不是**新起**的 240s，而是上面那个台账的**剩余**——发现慢就已经扣掉了。
+        _deadline = _budget._deadline                 # noqa: SLF001 - 同一台账的同一截止
+        for cand in candidates[:max(1, _budget.max_fetches)]:
             if self._cancel_requested(task_id):
                 out["reason"] = (out.get("reason") or "") + "；用户已取消，停止取件"
+                break
+            if _budget.expired():
+                out["reason"] = (out.get("reason") or "") + (
+                    f"；官方发现+取件总截止 {_budget.seconds:g}s 已用尽"
+                    f"（已用 {_budget.elapsed():.1f}s），不再启动取件")
+                _budget.refusals.append("deadline")
                 break
             if time.monotonic() > _deadline:
                 out["reason"] = (out.get("reason") or "") + "；官方取件超过总墙钟上限，停止"
@@ -8266,6 +8368,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             out["reason"] = ""
             out["next_steps"] = []
             break
+        # 台账在**收尾时**再取一次快照：取件次数/字节/拒绝原因都是循环之后才确定的
+        # （只在 discover 之后取一次会漏掉"预算耗尽→拒绝取件"这条，读者看到的是旧值）
+        out["budget"] = _budget.account()
         self._write_discovery_artifact(task_id, project, out)
         self._push_discovery_progress(task_id, out)
         return out

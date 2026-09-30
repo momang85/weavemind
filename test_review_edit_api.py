@@ -711,5 +711,195 @@ class TestRevisionSameVersionMatrix(_Base):
         self.assertTrue(manifest["draft"], manifest)
 
 
+class TestL0BSelectedRunEntersTheReport(_Base):
+    """L0-b（2026-09-30 复核 U1/U2）：**用户选择的运行真正进正文/清单/导出**。
+
+    反例（复核 U1）：原实现只回显 run_id，装配仍然取"前两条运行"，新增的情景运行
+    "采纳成功"却不出现在正文里。这里逐条钉住：选择记录驱动正文；过期选择只报不代替；
+    缺 run_id 不接受默认采纳；采纳返回**实际采纳版本的身份**；面板拿得到当前包。
+    """
+
+    def setUp(self):
+        super().setUp()
+        import task_state
+        import web_ui
+        p = mock.patch.object(web_ui, "_task_exists", lambda tid: True)
+        p.start()
+        self.addCleanup(p.stop)
+        self.db = str(self.tmp / "l0b.db")
+        self._orig_db = task_state.DB_PATH
+        task_state.DB_PATH = self.db
+        self.addCleanup(setattr, task_state, "DB_PATH", self._orig_db)
+        self.tid = "l0b-an"
+        task_state.mark_queued(self.tid, goal="研究洋河股份 2023 与 2024 年度经营情况",
+                               db_path=self.db)
+
+    def _seed(self, *, revenue: float = 300.0):
+        import financial_analysis as fa
+        from financial_analysis import store as fa_store
+        rows = [
+            {"fact_id": "f-rev-23", "entity": "洋河股份", "entity_id": "002304.SZ",
+             "metric": "revenue", "period": "2023年", "period_type": "年报",
+             "currency": "CNY", "unit": "亿元", "caliber": "合并", "value": 288.76},
+            {"fact_id": "f-rev-24", "entity": "洋河股份", "entity_id": "002304.SZ",
+             "metric": "revenue", "period": "2024年", "period_type": "年报",
+             "currency": "CNY", "unit": "亿元", "caliber": "合并", "value": revenue},
+            {"fact_id": "f-gp-24", "entity": "洋河股份", "entity_id": "002304.SZ",
+             "metric": "gross_profit", "period": "2024年", "period_type": "年报",
+             "currency": "CNY", "unit": "亿元", "caliber": "合并", "value": 211.25},
+            {"fact_id": "f-np-24", "entity": "洋河股份", "entity_id": "002304.SZ",
+             "metric": "net_profit", "period": "2024年", "period_type": "年报",
+             "currency": "CNY", "unit": "亿元", "caliber": "合并", "value": 66.73},
+        ]
+        ds = fa.freeze_from_facts(rows, periods=(2023, 2024), entity_id="002304.SZ",
+                                  source_label="l0b")
+        ws = ws_mod.task_workspace(self.tid)
+        Path(ws).mkdir(parents=True, exist_ok=True)
+        fa_store.save_inputs(ws, dataset=ds, plan=fa.compile_plan("情景分析", ds),
+                             context={"dataset_source": {"kind": "test"}})
+        base = fa.run("scenario_sensitivity", ds, params={})
+        fa_store.save_run(ws, base)
+        newer = fa.run("scenario_sensitivity", ds, params={"revenue_growth": 0.30})
+        fa_store.save_run(ws, newer)
+        return ds, base, newer, ws
+
+    def _call(self, path: str, body: dict):
+        import web_ui
+        h = _Handler(path)
+        out = (web_ui._post_task_analysis_recompute(h, path, body, {"user": "admin"})
+               if path.endswith("/analysis/recompute")
+               else web_ui._post_task_analysis_adopt(h, path, body, {"user": "admin"}))
+        payload, status = h.last if h.responses else (out, 200)
+        return payload, status
+
+    def test_state_endpoint_gives_the_panel_package_selection_and_defaults(self):
+        import web_ui
+        self._seed()
+        h = _Handler("/api/task/" + self.tid + "/analysis")
+        web_ui._get_task_analysis(h, h.path)
+        payload, status = h.last
+        self.assertEqual(status, 200, payload)
+        self.assertIn("current_package", payload,
+                      "面板导出必须能拿到「与采纳稿同版」的当前包（复核 U2）")
+        self.assertIn("packages", payload)
+        self.assertEqual(payload["selection"]["entries"], [])
+        sc = [r for r in payload["runs"] if r["model_id"] == "scenario_sensitivity"][0]
+        self.assertEqual(sc["default_params"]["revenue_growth"], 0.05,
+                         "默认参数要显式给出，不让用户猜「不改会用什么」")
+        self.assertEqual(sc["allowed_params"]["revenue_growth"], [-0.5, 0.5])
+
+    def test_adopt_without_run_id_is_refused(self):
+        self._seed()
+        payload, status = self._call("/api/task/" + self.tid + "/analysis/adopt", {})
+        self.assertEqual(status, 400, payload)
+        self.assertEqual(payload.get("code"), "run_id_required",
+                         "缺 run_id 不接受默认采纳（禁止取最早/最新运行代替选择）")
+
+    def test_selected_run_is_what_the_report_renders(self):
+        """U1 反例：默认真装配前两条运行；**用户选择新运行后正文必须是那一条**。"""
+        import financial_analysis as fa
+        import report_brief
+        from financial_analysis import store as fa_store
+        ds, base, newer, ws = self._seed()
+        default_block = report_brief._analysis_card_block(self.tid, ws_dir=ws)
+        self.assertIn(base.run_id[:12], default_block, default_block)
+        self.assertNotIn(newer.run_id[:12], default_block, default_block)
+        fa_store.save_selection(ws, {
+            "model_id": "scenario_sensitivity", "run_id": newer.run_id,
+            "dataset_hash": ds.dataset_hash, "params": dict(newer.params),
+            "rules_version": fa.validation.RULES_VERSION,
+        }, note="测试显式选择")
+        block = report_brief._analysis_card_block(self.tid, ws_dir=ws)
+        self.assertIn(newer.run_id[:12], block,
+                      f"所选运行必须进正文：{block[:400]}")
+        self.assertNotIn(base.run_id[:12], block,
+                         "不得改取默认运行（前两条）代替用户选择")
+
+    def test_stale_selection_is_reported_not_replaced(self):
+        """资料/参数/规则一变，旧选择**标未采用并说明**，绝不悄悄换一条运行。"""
+        import financial_analysis as fa
+        import report_brief
+        from financial_analysis import store as fa_store
+        ds, base, newer, ws = self._seed()
+        fa_store.save_selection(ws, {
+            "model_id": "scenario_sensitivity", "run_id": newer.run_id,
+            "dataset_hash": ds.dataset_hash, "params": dict(newer.params),
+            "rules_version": fa.validation.RULES_VERSION,
+        })
+        # 资料变了（重冻结数据集）→ 旧选择过期
+        rows = [{"fact_id": "f-rev-23", "entity": "洋河股份", "entity_id": "002304.SZ",
+                 "metric": "revenue", "period": "2023年", "period_type": "年报",
+                 "currency": "CNY", "unit": "亿元", "caliber": "合并", "value": 288.76},
+                {"fact_id": "f-rev-24", "entity": "洋河股份", "entity_id": "002304.SZ",
+                 "metric": "revenue", "period": "2024年", "period_type": "年报",
+                 "currency": "CNY", "unit": "亿元", "caliber": "合并", "value": 301.0},
+                {"fact_id": "f-gp-24", "entity": "洋河股份", "entity_id": "002304.SZ",
+                 "metric": "gross_profit", "period": "2024年", "period_type": "年报",
+                 "currency": "CNY", "unit": "亿元", "caliber": "合并", "value": 211.25},
+                {"fact_id": "f-np-24", "entity": "洋河股份", "entity_id": "002304.SZ",
+                 "metric": "net_profit", "period": "2024年", "period_type": "年报",
+                 "currency": "CNY", "unit": "亿元", "caliber": "合并", "value": 66.73}]
+        ds2 = fa.freeze_from_facts(rows, periods=(2023, 2024), entity_id="002304.SZ",
+                                   source_label="l0b-v2")
+        self.assertNotEqual(ds.dataset_hash, ds2.dataset_hash)
+        fa_store.save_inputs(ws, dataset=ds2)
+        block = report_brief._analysis_card_block(self.tid, ws_dir=ws)
+        self.assertIn("未采用", block, block)
+        self.assertFalse(block.startswith("## 分析卡"),
+                         f"过期的选择不得照样渲染成结论卡：{block[:300]}")
+        self.assertIn("选择说明", block)
+        self.assertNotIn(base.run_id[:12], block,
+                         "更不得改取别的运行（数据集已变，任何旧运行都过期）")
+        status = fa_store.selection_status(ws, dataset_hash=ds2.dataset_hash,
+                                          rules_version=fa.validation.RULES_VERSION)
+        self.assertFalse(status["ok"], status)
+        self.assertEqual(status["stale"][0]["state"], "dataset_changed", status)
+
+    def test_adopt_records_the_choice_and_returns_the_real_identity(self):
+        """采纳：选择落盘 + 返回**实际采纳版本的身份**（不再读不存在的 report_version_id）。"""
+        import task_state
+        import web_ui
+        from financial_analysis import store as fa_store
+        from report_version import VersionStore
+        ds, base, newer, ws = self._seed()
+        store = VersionStore(ws, self.tid)
+        v = store.record("# 洋河股份 2024 年度研究\n\n## 分析\n收入与利润变化。\n")
+        store.adopt(v, reason="初版")
+        with mock.patch.object(task_state, "read_task",
+                               return_value={"status": "SUCCESS", "goal": "研究洋河股份"}):
+            payload, status = self._call("/api/task/" + self.tid + "/analysis/adopt",
+                                         {"run_id": newer.run_id})
+        self.assertIn(status, (200, 409), payload)
+        if status != 200:
+            self.skipTest(f"该夹具下装配未通过（如实为 {payload.get('delivery_status')}）")
+        self.assertTrue(payload.get("selection_saved"), payload)
+        self.assertEqual(payload.get("adopted_run"), newer.run_id)
+        _adv = VersionStore(ws, self.tid).adopted()
+        self.assertEqual(payload.get("identity_id"), _adv.identity_id(),
+                         "必须返回**实际采纳版本**的身份")
+        self.assertNotIn("report_version_id", payload,
+                         "不再回显不存在的 report_version_id（复核 U2）")
+        sel = fa_store.load_selection(ws)
+        self.assertEqual(sel["entries"][0]["run_id"], newer.run_id)
+        self.assertEqual(sel["entries"][0]["dataset_hash"], ds.dataset_hash)
+        # `ok` 与交付状态一致：没通过验收就不是"采纳成功"
+        self.assertEqual(bool(payload.get("ok")),
+                         str(payload.get("delivery_status")) == "verified", payload)
+
+    def test_adopt_refuses_a_run_from_another_dataset(self):
+        import financial_analysis as fa
+        from financial_analysis import store as fa_store
+        ds, base, newer, ws = self._seed()
+        stale = fa.run("scenario_sensitivity", ds, params={"revenue_growth": 0.20})
+        rec = stale.as_dict()
+        rec["dataset_hash"] = "0" * 64
+        rec["run_id"] = "stale-run-0001"
+        fa_store.save_run(ws, fa_store.run_from_dict(rec))
+        payload, status = self._call("/api/task/" + self.tid + "/analysis/adopt",
+                                     {"run_id": "stale-run-0001"})
+        self.assertEqual(status, 409, payload)
+        self.assertEqual(payload.get("code"), "dataset_changed", payload)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

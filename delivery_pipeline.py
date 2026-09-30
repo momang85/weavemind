@@ -647,14 +647,27 @@ def package_manifest(task_id: str, ws, files, *, pdf_name: str = "") -> dict:
         _inputs = _fa_in.input_payload_bytes(ws) or {}
         _blob = _fa_in.load_inputs(ws)
         _ctx = dict(_blob.get("context") or {})
+        # 分析**选择**（L0-b）：正文里用的是哪一条运行是用户选择，不是"最早/最新"。
+        # 清单同时带上选择与逐条是否仍然可用，读者能核对"正文这一段是这一次运行"。
+        _sel = _fa_in.selection_status(
+            ws, dataset_hash=str(((_blob.get("dataset") or {}).get("dataset_hash")) or ""),
+            rules_version=_rules_version())
         out["analysis_inputs"] = {
             "schema": _fa_in.SCHEMA_INPUTS,
             "present": sorted(_inputs),
             "missing": [arc for arc in _fa_in.ARC_INPUTS.values() if arc not in _inputs],
-            "dataset_hash": str((( _blob.get("dataset") or {}).get("dataset_hash")) or ""),
+            "dataset_hash": str(((_blob.get("dataset") or {}).get("dataset_hash")) or ""),
             "dataset_source": _ctx.get("dataset_source") or {},
             "contract": _ctx.get("contract") or {},
             "recomputable": bool(_fa_in.ARC_INPUTS["dataset"] in _inputs),
+            "selection": {
+                "schema": _fa_in.SCHEMA_SELECTION,
+                "entries": _sel.get("entries") or [],
+                "ok": bool(_sel.get("ok")),
+                "adopted_identity": str(_sel.get("adopted_identity") or ""),
+                "note": ("有选择记录：正文分析卡按所选运行装配" if _sel.get("entries")
+                         else "无选择记录：正文按默认（每模型第一条已验证运行）装配"),
+            },
         }
     except Exception as exc:                     # noqa: BLE001 - 输入身份算不出不阻断打包
         logger.warning("包内清单：分析输入身份读取失败：%s", str(exc)[:120])
@@ -725,6 +738,10 @@ def _freeze_payload(task_id: str, ws, *, md_bytes: bytes = b"",
         from financial_analysis import store as _fa_in
         for arc, blob in (_fa_in.input_payload_bytes(ws) or {}).items():
             payload[arc] = blob
+        # 分析**选择**（L0-b）：包内留下"正文用的是哪条运行"的用户选择，离线可核对
+        _sel_blob = _fa_in.selection_payload_bytes(ws)
+        if _sel_blob:
+            payload[_fa_in.ARC_SELECTION] = _sel_blob
     except Exception as exc:                     # noqa: BLE001 - 读不到就不进包
         logger.warning("快照：分析输入读取失败：%s", str(exc)[:120])
     return payload
@@ -744,6 +761,15 @@ def analysis_payload_bytes(ws) -> bytes | None:
     except Exception as exc:                     # noqa: BLE001
         logger.warning("快照：分析运行记录读取失败：%s", str(exc)[:100])
         return None
+
+
+def _rules_version() -> str:
+    """当前独立验证规则集版本（取不到就空串 = 不比较，不假装匹配）。"""
+    try:
+        from financial_analysis.validation import RULES_VERSION
+        return str(RULES_VERSION)
+    except Exception:                            # noqa: BLE001
+        return ""
 
 
 def analysis_binding(ws) -> dict:
@@ -942,6 +968,14 @@ def _manifest_from_frozen(frozen: dict, *, snap: dict, ws=None,
             _present = sorted(a for a in hashes
                               if a in ("analysis/dataset.json", "analysis/plan.json",
                                        "analysis/context.json"))
+            # 分析**选择**（L0-b）：从**冻结字节**里读，和输入同一口径（磁盘变了不算）
+            _sel_blob = {}
+            if "analysis/selection.json" in (frozen or {}):
+                try:
+                    _sel_blob = json.loads(bytes(frozen["analysis/selection.json"])
+                                           .decode("utf-8")) or {}
+                except Exception:                    # noqa: BLE001 - 坏文件按无选择
+                    _sel_blob = {}
             out["analysis_inputs"] = {
                 "schema": "weavemind.analysis_inputs/1",
                 "present": _present,
@@ -951,6 +985,15 @@ def _manifest_from_frozen(frozen: dict, *, snap: dict, ws=None,
                 "dataset_source": _ctx_blob.get("dataset_source") or {},
                 "contract": _ctx_blob.get("contract") or {},
                 "recomputable": "analysis/dataset.json" in hashes,
+                "selection": {
+                    "schema": "weavemind.analysis_selection/1",
+                    "entries": list(_sel_blob.get("entries") or []),
+                    "adopted_identity": str(_sel_blob.get("adopted_identity") or ""),
+                    "in_package": "analysis/selection.json" in hashes,
+                    "note": ("包内带选择记录：正文分析卡按所选运行装配"
+                             if _sel_blob.get("entries")
+                             else "包内无选择记录：正文按默认（每模型第一条已验证运行）装配"),
+                },
             }
         except Exception as exc:                     # noqa: BLE001 - 判不出按缺输入
             logger.warning("包内清单：分析输入身份读取失败（冻结路径）：%s", str(exc)[:120])
@@ -1041,6 +1084,12 @@ def repack_adopted(task_id: str, *, md_bytes: bytes = b"", pdf_bytes: bytes = b"
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_bytes(blob)
                 files.append((p, arc))
+            _sel_blob = _fa_in.selection_payload_bytes(ws)
+            if _sel_blob:
+                p = ws / _fa_in.ARC_SELECTION
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_bytes(_sel_blob)
+                files.append((p, _fa_in.ARC_SELECTION))
         except Exception as exc:                 # noqa: BLE001 - 输入读不到就不进包
             logger.warning("打包：分析输入读取失败：%s", str(exc)[:100])
         # 完整模型稿（审计留档，按内容 hash 命名）：存在的每一版都进包（不覆盖历史）

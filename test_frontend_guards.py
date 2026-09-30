@@ -168,6 +168,42 @@ class TestK3AnalysisWorkbenchWiring(unittest.TestCase):
                       "导出必须用「与采纳稿同版」的当前包（不得取最新 zip）")
 
 
+class TestL0BAnalysisSelectionWiring(unittest.TestCase):
+    """L0-b（09-30 复核 U1/U2）：面板必须让**用户的选择**驱动正文与导出，而不是默认前两条。
+
+    这些是源文本闸门（必要不充分）：行为由 `test_review_edit_api.TestL0BSelectedRunEntersTheReport`
+    与后端接口用例覆盖。
+    """
+
+    PANEL = SRC / "components" / "AnalysisWorkbenchPanel.tsx"
+
+    def _src(self) -> str:
+        return self.PANEL.read_text(encoding="utf-8")
+
+    def test_panel_shows_which_run_enters_the_report(self):
+        src = self._src()
+        self.assertIn("进正文", src, "面板要标出哪一条运行进正文")
+        self.assertIn("selection", src, "面板要读后端的选择状态")
+        self.assertIn("modelRuns", src, "同模型的历史运行要能区分与选择")
+
+    def test_panel_resets_drafts_when_the_task_changes(self):
+        src = self._src()
+        self.assertIn("useEffect", src)
+        self.assertIn("setChosenRunId('')", src,
+                      "换任务必须清掉上一条所选运行（否则会把别的任务的读数当本任务）")
+        self.assertIn("setDiff(null); setMsg(null)", src, "换任务必须清掉比较状态")
+
+    def test_panel_shows_declared_default_params(self):
+        src = self._src()
+        self.assertIn("default_params", src, "默认参数要显式显示，不让用户猜")
+
+    def test_panel_generates_the_current_package_before_opening_it(self):
+        src = self._src()
+        self.assertIn("/package`", src,
+                      "没有当前包时要走既有的打包入口生成当前版包，而不是打开目录")
+        self.assertIn("encodeURIComponent(name)", src, "只打开判定出来的那一个包")
+
+
 class TestDemoBoundaryRealBehavior(unittest.TestCase):
     """演示边界必须由**真实行为测试**兜底，前缀清单只是补充。
 

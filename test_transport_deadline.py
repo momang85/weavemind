@@ -59,6 +59,22 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             return
 
     def do_GET(self):
+        if self.path.startswith("/slowheader"):
+            # S1 反例（09-30 复核）：**逐字节慢响应头**。每次 recv 都短于 socket 超时，
+            # 于是 `urlopen(timeout=0.05)` 自己不会超时，整体却能拖到 0.5s 以上。
+            self.wfile.write(b"HTTP/1.1 200 OK\r\n")
+            self.wfile.flush()
+            for hdr in (b"Content-Type: text/plain\r\n",
+                        b"Content-Length: 2\r\n",
+                        b"X-Slow: " + b"a" * 400 + b"\r\n",
+                        b"\r\n"):
+                for i in range(0, len(hdr), 4):
+                    self.wfile.write(hdr[i:i + 4])
+                    self.wfile.flush()
+                    time.sleep(0.008)
+            self.wfile.write(b"ok")
+            self.wfile.flush()
+            return
         if self.path.startswith("/slow"):
             self._send(200, b"z" * 400, drip=0.06)
         elif self.path.startswith("/big"):
@@ -265,6 +281,30 @@ class TestTransportChannelsHonourTotalDeadline(unittest.TestCase):
         out = tr.get_bytes_via_urllib(self.srv.url("/big"), timeout=5, max_bytes=100)
         self.assertFalse(out["ok"])
         self.assertEqual(out["error_kind"], "too_large", out)
+
+    def test_slow_response_header_cannot_be_reported_as_success(self):
+        """S1 反例（09-30 复核）：**慢响应头**吃光预算后不得再返回 ok=True。
+
+        旧实现 `_deadline` 在 `urlopen` **之后**才起算：逐字节慢头拖到 ~0.5s，
+        之后照样读体成功 → `timeout=0.05` 的取件返回 `ok=True`（复核实测 0.511s）。
+        """
+        t0 = time.monotonic()
+        out = tr.get_bytes_via_urllib(self.srv.url("/slowheader"), timeout=0.05,
+                                      max_bytes=100)
+        elapsed = time.monotonic() - t0
+        self.assertFalse(out["ok"], out)
+        self.assertEqual(out["error_kind"], "read_timeout", out)
+        self.assertIn("总截止", out["error"])
+        self.assertIn("响应头", out["error"], "要写明预算是在**头阶段**用尽的")
+        self.assertEqual(out["body_bytes"], 0, "超时后不得把体读回来当成功")
+        self.assertLess(elapsed, 3.0, f"慢头探针实耗 {elapsed:.3f}s")
+
+    def test_text_channel_slow_header_also_fails_closed(self):
+        t0 = time.monotonic()
+        with self.assertRaises(Exception) as ctx:
+            tr.get_via_urllib(self.srv.url("/slowheader"), timeout=0.05)
+        self.assertIn("deadline", str(ctx.exception).lower(), str(ctx.exception))
+        self.assertLess(time.monotonic() - t0, 3.0)
 
     def test_annual_report_pdf_entry_uses_the_bounded_byte_channel(self):
         """验的是**实际入口**（`annual_report_pdf.fetch_bytes`），不只是 helper。"""

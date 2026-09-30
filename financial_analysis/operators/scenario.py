@@ -48,6 +48,10 @@ SPEC = ModelSpec(
     # 参数界限写进契约：超出范围直接判失败，不允许"随手放大假设"
     allowed_params={"revenue_growth": (-0.5, 0.5), "gross_margin_delta": (-0.3, 0.3),
                     "expense_change_ratio": (-0.5, 0.5), "rounding": ("yi_2", "yuan_2")},
+    # 参数不给时**实际用的值**（与 `_assumptions` 的默认分支同源）：显式声明，
+    # 页面直接显示默认值，不让读者猜"不改会用什么"（L0-b-5）。
+    default_params={"revenue_growth": 0.05, "gross_margin_delta": 0.01,
+                    "expense_change_ratio": 0.0},
     tolerance=0.005,
     # 注意：**不含** `identity`——本模型的首个输出的"分解项"是三种**并列情景**，
     # 不是金额分解，把它们加总没有意义；它的同一性由 `base_reproduction` 与
@@ -55,6 +59,7 @@ SPEC = ModelSpec(
     validations=("gold", "unit", "base_reproduction", "scenario_direction"),
     budget={"steps": 1, "seconds": 5},
     limits=LIMITS,
+    question_types=("scenario",),
 )
 
 

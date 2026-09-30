@@ -384,11 +384,16 @@ class ModelSpec:
     inputs: tuple[InputRequirement, ...]
     outputs: tuple[OutputSpec, ...]
     allowed_params: dict = field(default_factory=dict)
+    # 不传参数时**实际会用的值**（显式给出：页面不让读者猜"不改会用什么"）
+    default_params: dict = field(default_factory=dict)
     tolerance: float = 0.005
     validations: tuple[str, ...] = ("gold", "closure", "identity", "unit")
     budget: dict = field(default_factory=lambda: {"steps": 1, "seconds": 5})
     limits: tuple[str, ...] = ()
     domain: str = "cn_non_financial"
+    # **能回答哪些问题类型**（L2，2026-09-30 复核 M2）：`questions.QUESTION_TYPES` 的 qid。
+    # 空 = 未声明（按"不知道它回答什么"处理，不加入任何问题驱动的选择）。
+    question_types: tuple[str, ...] = ()
 
     def as_dict(self) -> dict:
         return {"model_id": self.model_id, "version": self.version, "family": self.family,
@@ -396,9 +401,11 @@ class ModelSpec:
                 "inputs": [i.__dict__ for i in self.inputs],
                 "outputs": [o.__dict__ for o in self.outputs],
                 "allowed_params": dict(self.allowed_params),
+                "default_params": dict(self.default_params),
                 "tolerance": self.tolerance, "validations": list(self.validations),
                 "budget": dict(self.budget), "limits": list(self.limits),
-                "domain": self.domain}
+                "domain": self.domain,
+                "question_types": list(self.question_types)}
 
 
 class RunStatus:
@@ -494,6 +501,9 @@ class PlanItem:
     question: str
     reason: str = ""
     params: dict = field(default_factory=dict)
+    # 这次运行**产出什么**（L2 要求"计划绑定问题与输出"）：metric 清单，来自 ModelSpec。
+    outputs: tuple[str, ...] = ()
+    question_types: tuple[str, ...] = ()     # 这条计划是在回答哪些问题类型
 
 
 @dataclass(frozen=True)
@@ -504,8 +514,20 @@ class AnalysisPlan:
     dataset_hash: str
     adopted: tuple[PlanItem, ...] = ()
     rejected: tuple[dict, ...] = ()
+    # L2 增量：命中的问题类型、按问题需要的材料缺口、以及"这次为什么这样选"的说明。
+    # 全部**复用**现有结构，不新建空壳。
+    question_types: tuple[str, ...] = ()
+    question_type_labels: tuple[str, ...] = ()
+    needs: tuple[dict, ...] = ()
+    gaps: tuple[str, ...] = ()
+    notes: tuple[str, ...] = ()
 
     def as_dict(self) -> dict:
         return {"question": self.question, "dataset_hash": self.dataset_hash,
                 "adopted": [a.__dict__ for a in self.adopted],
-                "rejected": list(self.rejected)}
+                "rejected": list(self.rejected),
+                "question_types": list(self.question_types),
+                "question_type_labels": list(self.question_type_labels),
+                "needs": [dict(n) for n in self.needs],
+                "gaps": list(self.gaps),
+                "notes": list(self.notes)}

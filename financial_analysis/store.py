@@ -184,6 +184,102 @@ def load_inputs(ws) -> dict:
     return out
 
 
+# ── 分析选择绑定（L0-b，2026-09-30 复核 U1/U2）──────────────────────────────
+# 为什么需要一份**选择**（而不是"取前两条运行"）：用户可以改假设复算出多条运行；
+# 哪一条进正文必须是**用户的选择**，不能由装配器按最早/最新替他决定。
+# 一条选择记下：模型 → run_id + dataset_hash + 参数 + 规则版本 + 采纳报告身份；
+# 正文、图、底稿、清单、ZIP 都消费这一份，历史运行原样保留。
+SELECTION_NAME = "selection.json"
+ARC_SELECTION = "analysis/selection.json"
+SCHEMA_SELECTION = "weavemind.analysis_selection/1"
+
+
+def selection_path(ws) -> Path:
+    return inputs_dir(ws) / SELECTION_NAME
+
+
+def load_selection(ws) -> dict:
+    data = load_file(selection_path(ws))
+    if not data:
+        return {"schema": SCHEMA_SELECTION, "entries": []}
+    entries = [e for e in (data.get("entries") or []) if isinstance(e, dict)]
+    return {"schema": str(data.get("schema") or SCHEMA_SELECTION),
+            "updated_at": str(data.get("updated_at") or ""),
+            "adopted_identity": str(data.get("adopted_identity") or ""),
+            "note": str(data.get("note") or ""),
+            "entries": entries}
+
+
+def selection_payload_bytes(ws) -> bytes | None:
+    """进冻结包的字节（没有选择就不放，不造空文件）。"""
+    p = selection_path(ws)
+    try:
+        if p.is_file() and p.stat().st_size > 0:
+            return p.read_bytes()
+    except Exception:                                  # noqa: BLE001
+        return None
+    return None
+
+
+def save_selection(ws, entry: dict, *, adopted_identity: str = "", note: str = "") -> dict:
+    """记录/替换某个模型的**所选运行**（同模型第二次选择即替换，旧运行仍留在运行记录里）。
+
+    返回落盘后的选择块（含全部条目），供调用方回显。
+    """
+    cur = load_selection(ws)
+    mid = str((entry or {}).get("model_id") or "")
+    entries = [e for e in cur.get("entries") or []
+               if str(e.get("model_id") or "") != mid]
+    entries.append(dict(entry or {}))
+    entries.sort(key=lambda e: str(e.get("model_id") or ""))
+    data = {"schema": SCHEMA_SELECTION,
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "adopted_identity": str(adopted_identity or cur.get("adopted_identity") or ""),
+            "note": str(note or cur.get("note") or ""),
+            "entries": entries}
+    try:
+        d = inputs_dir(ws)
+        d.mkdir(parents=True, exist_ok=True)
+        p = selection_path(ws)
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, p)
+    except Exception as exc:                           # noqa: BLE001 - 落盘失败不静默
+        logger.warning("分析选择落盘失败：%s", str(exc)[:140])
+    return data
+
+
+def selection_status(ws, *, dataset_hash: str = "", rules_version: str = "") -> dict:
+    """逐条核对所选运行**还是不是当前可用的**：数据集/规则/验证状态任一变化都要报出来。"""
+    cur = load_selection(ws)
+    runs = {str(r.get("run_id") or ""): r for r in load_runs(ws)}
+    ent_out: list[dict] = []
+    for e in cur.get("entries") or []:
+        run = runs.get(str(e.get("run_id") or ""))
+        state, why = "ok", ""
+        if run is None:
+            state, why = "run_missing", "所选运行不在运行记录里（可能被清理）：需重新选择/复算"
+        elif str(run.get("status")) != RunStatus.VALIDATED:
+            state, why = ("not_validated",
+                          f"所选运行的状态是 {run.get('status')}：未通过验证的读数不进正文")
+        elif dataset_hash and str(e.get("dataset_hash") or "") != str(dataset_hash):
+            state, why = "dataset_changed", "所选运行绑定的数据集已变：旧结果过期，需重算"
+        elif rules_version and str(e.get("rules_version") or "") != str(rules_version):
+            state, why = "rules_changed", "独立验证规则已更新：需按新规则重算后再采纳"
+        elif dataset_hash and str(run.get("dataset_hash") or "") != str(dataset_hash):
+            state, why = "binding_mismatch", "所选运行与当前数据集不一致：需重算"
+        ent_out.append({**{k: e.get(k) for k in
+                           ("model_id", "run_id", "dataset_hash", "params_hash",
+                            "rules_version", "selected_at", "question")},
+                        "state": state, "why": why,
+                        "params": dict(e.get("params") or {}),
+                        "output_ids": list(e.get("output_ids") or [])})
+    return {"schema": SCHEMA_SELECTION, "entries": ent_out,
+            "adopted_identity": str(cur.get("adopted_identity") or ""),
+            "ok": bool(ent_out) and all(e["state"] == "ok" for e in ent_out),
+            "stale": [e for e in ent_out if e["state"] != "ok"]}
+
+
 def dataset_from_inputs(ws):
     """从 `analysis/dataset.json` 还原 `AnalysisDataset`（离线复算的唯一入口）。"""
     from .contracts import AnalysisDataset, DatasetManifest, Observation
