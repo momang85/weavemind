@@ -1,0 +1,273 @@
+{
+  "case": "洋河股份 002304 2023→2024 经营驱动利润桥",
+  "source": {
+    "material": "evals/a2_official_chain_20260929/002304/project/materials/f42e747c73850b59/doc.json",
+    "title": "江苏洋河酒厂股份有限公司 2024 年年度报告",
+    "periods": [
+      2023,
+      2024
+    ],
+    "tables": [
+      "合并利润表(76-77页)",
+      "主营业务分产品/分地区(15页)",
+      "实物销售(15页)",
+      "费用(16页)",
+      "营业成本构成(15-16页)"
+    ]
+  },
+  "gross_profit_bridge": {
+    "revenue": {
+      "prev_yi": 331.2628,
+      "cur_yi": 288.763,
+      "delta_yi": -42.4998
+    },
+    "operating_cost": {
+      "prev_yi": 82.0025,
+      "cur_yi": 77.5122,
+      "delta_yi": -4.4903
+    },
+    "gross_profit": {
+      "prev_yi": 249.2603,
+      "cur_yi": 211.2508,
+      "delta_yi": -38.0095
+    },
+    "gross_margin": {
+      "prev": 0.752455,
+      "cur": 0.731572,
+      "delta_pp": -2.0883
+    },
+    "scale_effect_yi": -31.5354,
+    "margin_effect_yi": -6.4741,
+    "closure_diff_yuan": -1e-06,
+    "formula": "Δ毛利 = ΔR×(m1+m0)/2 + Δm×(R1+R0)/2（交互项均分）"
+  },
+  "net_profit_bridge": {
+    "net_profit_parent": {
+      "prev_yi": 100.1593,
+      "cur_yi": 66.7339,
+      "delta_yi": -33.4254
+    },
+    "below_gross_line": {
+      "prev_yi": -149.101,
+      "cur_yi": -144.5169,
+      "delta_yi": 4.5841
+    },
+    "closure_diff_yuan": -1e-06,
+    "line_items": [
+      {
+        "metric": "income_tax_expense",
+        "label": "所得税费用",
+        "prev_yi": 31.9706,
+        "cur_yi": 24.7662,
+        "contribution_yi": 7.2044,
+        "sign": -1
+      },
+      {
+        "metric": "taxes_and_surcharges",
+        "label": "税金及附加",
+        "prev_yi": 52.6925,
+        "cur_yi": 48.2609,
+        "contribution_yi": 4.4316,
+        "sign": -1
+      },
+      {
+        "metric": "fair_value_change",
+        "label": "公允价值变动收益",
+        "prev_yi": -0.3708,
+        "cur_yi": -3.9616,
+        "contribution_yi": -3.5908,
+        "sign": 1
+      },
+      {
+        "metric": "rd_expense",
+        "label": "研发费用",
+        "prev_yi": 2.8475,
+        "cur_yi": 1.048,
+        "contribution_yi": 1.7996,
+        "sign": -1
+      },
+      {
+        "metric": "admin_expense",
+        "label": "管理费用",
+        "prev_yi": 17.6442,
+        "cur_yi": 19.2473,
+        "contribution_yi": -1.6031,
+        "sign": -1
+      },
+      {
+        "metric": "finance_expense",
+        "label": "财务费用",
+        "prev_yi": -7.5453,
+        "cur_yi": -6.1089,
+        "contribution_yi": -1.4364,
+        "sign": -1
+      },
+      {
+        "metric": "selling_expense",
+        "label": "销售费用",
+        "prev_yi": 53.8695,
+        "cur_yi": 55.1624,
+        "contribution_yi": -1.2928,
+        "sign": -1
+      },
+      {
+        "metric": "investment_income",
+        "label": "投资收益",
+        "prev_yi": 2.5552,
+        "cur_yi": 1.4642,
+        "contribution_yi": -1.0911,
+        "sign": 1
+      },
+      {
+        "metric": "non_operating_income",
+        "label": "营业外收入",
+        "prev_yi": 0.3918,
+        "cur_yi": 0.5245,
+        "contribution_yi": 0.1327,
+        "sign": 1
+      },
+      {
+        "metric": "minority_interest",
+        "label": "少数股东损益",
+        "prev_yi": 0.0484,
+        "cur_yi": -0.0693,
+        "contribution_yi": 0.1177,
+        "sign": -1
+      },
+      {
+        "metric": "asset_impairment",
+        "label": "资产减值损失",
+        "prev_yi": -0.0283,
+        "cur_yi": -0.112,
+        "contribution_yi": -0.0838,
+        "sign": 1
+      },
+      {
+        "metric": "non_operating_expense",
+        "label": "营业外支出",
+        "prev_yi": 0.6391,
+        "cur_yi": 0.7014,
+        "contribution_yi": -0.0623,
+        "sign": -1
+      },
+      {
+        "metric": "other_income",
+        "label": "其他收益",
+        "prev_yi": 0.5618,
+        "cur_yi": 0.5967,
+        "contribution_yi": 0.0349,
+        "sign": 1
+      },
+      {
+        "metric": "asset_disposal_income",
+        "label": "资产处置收益",
+        "prev_yi": -0.0528,
+        "cur_yi": -0.0273,
+        "contribution_yi": 0.0255,
+        "sign": 1
+      },
+      {
+        "metric": "credit_impairment",
+        "label": "信用减值损失",
+        "prev_yi": 0.0088,
+        "cur_yi": 0.0067,
+        "contribution_yi": -0.0021,
+        "sign": 1
+      }
+    ],
+    "explained_yi": 4.5841,
+    "unexplained_residual_yi": -0.0,
+    "formula": "Δ归母净利 = Δ毛利 + ΔB；B = 归母净利 − 毛利；ΔB = Σ sign×ΔX（未列项目留残差）"
+  },
+  "segment_bridge": {
+    "formula": "同整体：ΔGP = ΔR×(m1+m0)/2 + Δm×(R1+R0)/2（分段各自算，不可跨切法相加）",
+    "cuts": {
+      "分产品:白酒": {
+        "cut": "分产品",
+        "note": "2023 成本按披露同比 −5.43% 推算",
+        "revenue_prev_yi": 323.8958,
+        "revenue_cur_yi": 281.7571,
+        "gross_margin_prev": 0.762296,
+        "gross_margin_cur": 0.741583,
+        "gross_margin_delta_pp": -2.0713,
+        "gross_profit_delta_yi": -37.9581,
+        "scale_effect_yi": -31.6858,
+        "margin_effect_yi": -6.2723
+      },
+      "分产品:红酒": {
+        "note": "成本未在10%以上表披露",
+        "skipped": true
+      },
+      "分地区:省内": {
+        "cut": "分地区",
+        "note": "2023 收入/成本按披露同比推算",
+        "revenue_prev_yi": 143.9368,
+        "revenue_cur_yi": 127.4848,
+        "gross_margin_prev": 0.749052,
+        "gross_margin_cur": 0.744745,
+        "gross_margin_delta_pp": -0.4307,
+        "gross_profit_delta_yi": -12.8724,
+        "scale_effect_yi": -12.288,
+        "margin_effect_yi": -0.5845
+      },
+      "分地区:省外": {
+        "cut": "分地区",
+        "note": "2023 收入/成本按披露同比推算",
+        "revenue_prev_yi": 180.9669,
+        "revenue_cur_yi": 154.9981,
+        "gross_margin_prev": 0.770698,
+        "gross_margin_cur": 0.737153,
+        "gross_margin_delta_pp": -3.3545,
+        "gross_profit_delta_yi": -25.2135,
+        "scale_effect_yi": -19.5785,
+        "margin_effect_yi": -5.635
+      }
+    },
+    "liquor_total": {
+      "gross_profit_delta_yi": -38.077,
+      "coverage": "两条切法各自覆盖酒类合计，互斥不可相加"
+    },
+    "cut_totals_yi": {
+      "分产品": -37.9581,
+      "分地区": -38.0859
+    }
+  },
+  "volume_price": {
+    "product": "白酒",
+    "volume_ton": {
+      "prev": 166154.73,
+      "cur": 139076.05,
+      "delta_pct": -0.163
+    },
+    "implied_price_wan_per_ton": {
+      "prev": 19.4936,
+      "cur": 20.2592,
+      "delta_pct": 0.0393
+    },
+    "revenue_delta_yi": -42.1387,
+    "volume_effect_yi": -53.8227,
+    "price_effect_yi": 11.684,
+    "caveat": "均价由『该产品收入/销量』算出，含产品结构与口径混合；不得直接命名“提价效果”"
+  },
+  "alternative_explanations": {
+    "effective_tax_rate": {
+      "prev": 0.2419,
+      "cur": 0.2709,
+      "delta_pp": 2.8999
+    },
+    "tax_counterfactual": {
+      "actual_yi": 24.7662,
+      "at_prev_rate_yi": 22.1148,
+      "rate_effect_yi": 2.6514,
+      "reading": "所得税减少是利润下滑的被动结果；实际税率反而上升，税率因素多吃掉约 2.65 亿元"
+    },
+    "non_operating_swing": {
+      "fair_value_change_delta_yi": -3.5908,
+      "investment_income_delta_yi": -1.0911,
+      "reading": "公允价值变动与投资收益属非经营/非经常因素，不得并入经营判断"
+    },
+    "structure_vs_price": "隐含均价上升可能来自产品结构（高价酒占比提高）而非提价；需分产品收入或量价披露才能区分",
+    "carry_over": "归母净利同比 -33.37%；毛利同比 -15.25%"
+  },
+  "headline": "归母净利 -33.43 亿元 = 毛利 -38.01（收入规模 -31.54 / 毛利率 -6.47） + 毛利线以下净额 +4.58 亿元"
+}
