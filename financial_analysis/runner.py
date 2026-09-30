@@ -17,7 +17,7 @@ from .contracts import (
     RunStatus, ValidatedOutput, _hash,
 )
 from .registry import OPERATORS, available_for, ratio_specs, spec, specs
-from .validation import validate_output
+from .validation import RULES_VERSION, validate_output
 
 
 def _now() -> str:
@@ -93,7 +93,7 @@ def run(model_id: str, dataset, *, params: dict | None = None,
                 impl_version=impl_version, dataset_hash=dataset.dataset_hash,
                 params_hash=_params_hash(params), params=params,
                 started_at=started, budget=dict(m.budget),
-                environment=f"{os.name}")
+                environment=f"{os.name}", rules_version=RULES_VERSION)
     if bad:
         return ModelRun(**base, status=RunStatus.FAILED,
                         reason=f"参数不在允许集合内：{bad}（允许 {sorted(m.allowed_params)}）",
@@ -169,13 +169,20 @@ def raise_for_status(run: ModelRun) -> None:
 
 
 def revalidate(run: ModelRun, dataset) -> tuple[str, str]:
-    """旧结果对**当前**数据集是否还有效 → `(state, 说明)`；state ∈ ok/expired。
+    """旧结果对**当前**数据集与**当前验证规则**是否还有效 → `(state, 说明)`。
 
-    过期只标"旧结果不能再当当前结果"，**不删旧版本**（保留可追溯）。
+    过期只标"旧结果不能再当当前结果"，**不删旧版本**（保留可追溯）。两种过期：
+    - `expired`：数据集已变；
+    - `rules_changed`：数据集没变，但独立验证的**规则集版本**变了——旧 run 不能冒充
+      "按新规则已验证"（L0-a，2026-09-30 复核 F5）。
     """
     if run.expired(dataset):
         return "expired", (f"数据集已变（run 绑定 {run.dataset_hash[:12]}，"
                            f"当前 {dataset.dataset_hash[:12]}）：旧结果作废，需重算")
+    _rv = str(getattr(run, "rules_version", "") or "")
+    if _rv and _rv != RULES_VERSION:
+        return "rules_changed", (f"验证规则集已更新（run 为 {_rv}，当前 {RULES_VERSION}）："
+                                 "旧结果保留可追溯，但不得当作按新规则已验证，需重算")
     return "ok", "数据集未变，结果仍有效"
 
 
@@ -188,7 +195,7 @@ def ratio_run(label: str, num_metric: str, den_metric: str, dataset, *, period: 
     base = dict(run_id=run_id, model_id=f"ratio:{label}", model_version="1.0.0",
                 impl_version="ratio/1.0.0", dataset_hash=dataset.dataset_hash,
                 params_hash=_params_hash({"period": p}), params={"period": p},
-                started_at=_now(), environment=os.name)
+                started_at=_now(), environment=os.name, rules_version=RULES_VERSION)
     try:
         got = _pb.compute_ratio(dataset, num_metric, den_metric, p, label=label)
     except MissingInput as exc:

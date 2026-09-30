@@ -165,6 +165,64 @@ class TestSilentErrorGuards(unittest.TestCase):
         self.assertEqual(f["unit"], "元")
         self.assertIn("单位", f["unit_source"])
 
+    def test_dash_form_opening_column_is_not_the_current_year_end(self):
+        """L0-a/复核 F2：`2024-01-01 / 2023-12-31` 的 90/100 **不得**记成 2024/2023 年末。
+
+        `2024-01-01` 是**期初**时点（= 2023 年末）：按完整日期解析后它与 `2023-12-31`
+        落在同一期间而值不同 → 冲突拒绝；绝不能截成"2024 年末 90"这种看起来正常的错数。
+        """
+        out = aft.extract(_doc("1、合并资产负债表\n单位：元\n"
+                               "项目 2024-01-01 2023-12-31\n存货 90.00 100.00\n"),
+                          company="京蓝科技", company_code="000711.SZ")
+        inv = [f for f in out["facts"] if f["metric"] == "inventory"]
+        self.assertEqual(inv, [], f"期初列不得占本年期末格：{inv}")
+        self.assertTrue([r for r in out["rejected"] if r["reason"] == "conflicting"],
+                        f"冲突必须如实报出：{out['rejected']}")
+
+    def test_dash_form_dates_are_parsed_as_full_periods(self):
+        """正例：`2023-12-31 / 2022-12-31` 仍按完整日期分别记两年，并带 kind=stock。"""
+        out = aft.extract(_doc("1、合并资产负债表\n单位：元\n"
+                               "项目 2023-12-31 2022-12-31\n存货 100.00 90.00\n"),
+                          company="京蓝科技", company_code="000711.SZ")
+        got = {(f["period"], f["value"], f["period_kind"], f["period_end"])
+               for f in out["facts"] if f["metric"] == "inventory"}
+        self.assertEqual(got, {("2023年", 100.0, "stock", "2023-12-31"),
+                               ("2022年", 90.0, "stock", "2022-12-31")}, got)
+
+    def test_currency_on_its_own_line_beats_the_unit(self):
+        """L0-a/复核 F3：`单位：元` 与**下一行** `币种：美元` 是两条独立证据 → USD。
+
+        旧码只在带"单位"的那一行里找币种，找不到就按"元→CNY"推断，于是美元表记成 CNY。
+        """
+        out = aft.extract(_doc("1、合并资产负债表\n单位：元\n币种：美元\n"
+                               "2024 年 2023 年\n存货 90.00 100.00\n"),
+                          company="京蓝科技", company_code="000711.SZ", periods=(2023, 2024))
+        f = [x for x in out["facts"] if x["metric"] == "inventory"]
+        self.assertTrue(f, out["rejected"])
+        self.assertEqual({x["currency"] for x in f}, {"USD"}, f)
+        self.assertEqual({x["unit"] for x in f}, {"元"}, f)
+        self.assertTrue(all("币种" in x["currency_source"] for x in f), f)
+
+    def test_value_equal_but_identity_different_parents_do_not_derive(self):
+        """L0-a/复核 F4：收入 100 CNY 与 100 USD **数值相同、身份不同** → 仍是冲突，不派生。
+
+        旧码按**数值**去重（`len(values) > 1`），于是挑中第一条当父、派生出"ok"的毛利 40，
+        而它的父收入在数据集里是 conflicting。
+        """
+        facts = [
+            {"metric": "revenue", "period": "2024年", "value": 100.0, "unit": "元",
+             "currency": "CNY", "caliber": "合并", "entity_id": "X", "fact_id": "r-cny"},
+            {"metric": "revenue", "period": "2024年", "value": 100.0, "unit": "元",
+             "currency": "USD", "caliber": "合并", "entity_id": "X", "fact_id": "r-usd"},
+            {"metric": "operating_cost", "period": "2024年", "value": 60.0, "unit": "元",
+             "currency": "CNY", "caliber": "合并", "entity_id": "X", "fact_id": "c-cny"},
+        ]
+        rej: list = []
+        derived = aft.derive_gross_profit(facts, rej)
+        self.assertEqual(derived, [], f"身份不同的父不得派生：{derived}")
+        self.assertTrue([r for r in rej if r["reason"] == "derivation_input_conflict"],
+                        f"要给出不派生的原因：{rej}")
+
     def test_conflicting_revenue_does_not_derive_gross_profit(self):
         """收入 100/110 冲突 + 成本 60 → 不得先字典择末派生毛利 50（冲突向派生传播）。"""
         text = ("1、合并利润表\n单位：元\n2024 年 2023 年\n"

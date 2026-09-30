@@ -1368,5 +1368,162 @@ class TestReportScopeDiscipline(unittest.TestCase):
                         "限制说明必须写明归属层差异")
 
 
+class TestL0ATrustedInputOutputContract(unittest.TestCase):
+    """L0-a（2026-09-30 架构复核 F1/F4/F5）：完整身份、血缘传播、独立验证覆盖面。"""
+
+    def test_cross_company_cross_currency_inputs_are_not_applicable(self):
+        """F1 反例：洋河/CNY 两期净利 + 茅台/USD 两期毛利 → **不适用**，不得 validated。
+
+        原先跨指标只比报表范围与量纲，于是这个载荷跑出闭合的桥，且所有输出标成洋河/CNY。
+        """
+        rows = _two_period_rows()
+        for r in rows:
+            if r["metric"] == "gross_profit":
+                r.update({"entity": "贵州茅台", "entity_id": "600519.SH",
+                          "currency": "USD"})
+        ds = _dataset(rows)
+        run = fa.run("profit_bridge", ds)
+        self.assertEqual(run.status, C.RunStatus.NOT_APPLICABLE, run.reason)
+        self.assertIn("主体", run.reason)
+        self.assertFalse(run.outputs, "不适用时不得留下任何标着洋河/CNY 的输出")
+
+    def test_identity_check_is_shared_by_operators_and_validation(self):
+        """判据是**共用的那一条**：算子入口与独立验证都调 `full_identity_ok`。"""
+        a = C.Observation(fact_id="a", metric="revenue", period="2024年", value=1.0,
+                          unit="亿元", currency="CNY", entity_id="X", caliber="合并")
+        b = C.Observation(fact_id="b", metric="gross_profit", period="2024年", value=1.0,
+                          unit="亿元", currency="USD", entity_id="X", caliber="合并")
+        ok, why = C.full_identity_ok(a, b)
+        self.assertFalse(ok)
+        self.assertIn("币种", why)
+        self.assertTrue(C.full_identity_ok(a, a)[0])
+        c = C.Observation(fact_id="c", metric="revenue", period="2024年", value=1.0,
+                          unit="天", currency="CNY", entity_id="X", caliber="合并")
+        self.assertIn("金额", C.full_identity_ok(a, c)[1])
+
+    def test_lineage_conflict_propagates_to_derived_observation(self):
+        """F4 反例：父观察冲突 → 派生观察同样不可用（不能留成一个 ok 的算出数）。"""
+        rows = [
+            _row("revenue", "2024年", 100.0, fact_id="f-rev-cny"),
+            _row("revenue", "2024年", 100.0, fact_id="f-rev-usd", currency="USD"),
+            _row("operating_cost", "2024年", 60.0, fact_id="f-cost"),
+            _row("gross_profit", "2024年", 40.0, fact_id="f-gp",
+                 derived_from=("f-rev-cny", "f-cost"), formula_version="gross_profit_v1"),
+        ]
+        ds = fa.freeze_from_facts(rows, periods=(2024,), source_label="l0a")
+        gp = next(o for o in ds.observations if o.fact_id == "f-gp")
+        self.assertFalse(gp.usable, "父观察不可用时派生观察不得可用")
+        self.assertIn("血缘", gp.note)
+        self.assertTrue(any("血缘传播" in c for c in ds.manifest.conflicts),
+                        ds.manifest.conflicts)
+
+    def test_component_tamper_on_any_output_is_caught(self):
+        """F5：篡改**任一**输出的分项（±999999）必须被独立验证发现。"""
+        ds = _dataset()
+        payload = _payload_of("profit_bridge", ds)
+        payload["outputs"][0]["components"][0]["value"] = 999999.0
+        payload["outputs"][0]["components"][1]["value"] = -999999.0
+        res = fa.validation.validate_output(fa.registry.spec("profit_bridge"), ds, payload)
+        self.assertFalse(res["ok"], res)
+        self.assertIn("identity", res["failed"])
+
+    def test_output_period_outside_the_dataset_is_caught(self):
+        """F5：把 output_period 改成 2030 年（数据集里没有）必须失败。"""
+        ds = _dataset()
+        payload = _payload_of("profit_bridge", ds)
+        payload["outputs"][0]["output_period"] = "2030年较2029年"
+        res = fa.validation.validate_output(fa.registry.spec("profit_bridge"), ds, payload)
+        self.assertFalse(res["ok"], res)
+        self.assertIn("output_shape", res["failed"])
+
+    def test_declared_identity_contradicting_inputs_is_caught(self):
+        """F5：诊断里声明主体/币种为别的公司/币种必须失败（输入绑定复核）。"""
+        ds = _dataset()
+        payload = _payload_of("profit_bridge", ds)
+        payload["diagnostics"]["entity_id"] = "WRONG.SH"
+        payload["diagnostics"]["currency"] = "USD"
+        res = fa.validation.validate_output(fa.registry.spec("profit_bridge"), ds, payload)
+        self.assertFalse(res["ok"], res)
+        self.assertIn("binding", res["failed"])
+
+    def test_legit_payloads_still_pass_the_new_checks(self):
+        """正例：合法数据 + 合法载荷在新规则下仍通过（不靠收紧到什么都过不了）。"""
+        ds = _dataset()
+        for model_id in ("profit_bridge", "cash_quality", "scenario_sensitivity"):
+            payload = _payload_of(model_id, ds)
+            res = fa.validation.validate_output(fa.registry.spec(model_id), ds, payload)
+            self.assertTrue(res["ok"], f"{model_id}: {res}")
+
+    def test_rules_version_is_recorded_and_old_rules_need_recompute(self):
+        """验证规则版本进 run 身份：规则变了，旧 run 不得冒充"按新规则已验证"。"""
+        ds = _dataset()
+        run = fa.run("profit_bridge", ds)
+        self.assertEqual(run.rules_version, fa.validation.RULES_VERSION)
+        state, why = fa.revalidate(run, ds)
+        self.assertEqual(state, "ok", why)
+        stale = fa.contracts.ModelRun(**{**run.__dict__, "rules_version": "validation/0.9.0"})
+        state2, why2 = fa.revalidate(stale, ds)
+        self.assertEqual(state2, "rules_changed", why2)
+        self.assertIn("规则", why2)
+
+
+class TestL0CScenarioSpeaksFromItsOwnParams(unittest.TestCase):
+    """L0-c（复核 M1）：数值与解释同一份参数；图型按声明的结构选。"""
+
+    def test_labels_and_formulas_use_the_same_resolved_params(self):
+        ds = _dataset()
+        run = fa.run("scenario_sensitivity", ds,
+                     params={"revenue_growth": 0.10, "gross_margin_delta": 0.02,
+                             "expense_change_ratio": 0.10})
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        main = run.outputs[0]
+        comps = {c["label"]: c for c in main.components}
+        up = [c for c in main.components if "使用者情景" in c["label"]]
+        self.assertTrue(up, main.components)
+        self.assertIn("+10.00%", up[0]["label"], "标签必须写使用者给的实际收入增速")
+        self.assertIn("+2.00pp", up[0]["label"], f"毛利率要按百分点写：{up[0]['label']}")
+        self.assertNotIn("+5%", " ".join(comps), "不得再出现写死的默认 +5%/+1pp")
+        self.assertNotIn("+1pp", " ".join(comps))
+        self.assertIn("0.1000", up[0]["formula"])
+
+    def test_negative_growth_is_not_called_up_side(self):
+        ds = _dataset()
+        run = fa.run("scenario_sensitivity", ds, params={"revenue_growth": -0.08})
+        up = [c for c in run.outputs[0].components if "使用者情景" in c["label"]][0]
+        self.assertIn("-8.00%", up["label"])
+        self.assertNotIn("上行", up["label"], "负增速不得固定称上行")
+        self.assertNotIn("下行", up["label"], "使用者情景不叫下行")
+        self.assertIn("使用者情景", run.outputs[0].output_period)
+
+    def test_below_gross_block_is_not_called_pure_expense(self):
+        ds = _dataset()
+        run = fa.run("scenario_sensitivity", ds)
+        joined = " ".join(run.outputs[0].assumptions) + " " + run.outputs[0].formula
+        self.assertIn("隐含块", joined)
+        self.assertTrue("含费用" in joined or "不是纯费用" in joined, joined)
+
+    def test_chart_kind_follows_declared_structure(self):
+        """并行情景不是加总贡献桥：不得再被画成瀑布。"""
+        from financial_analysis import report_adapter as ra
+        ds = _dataset()
+        scen = fa.run("scenario_sensitivity", ds)
+        spec_chart = ra.chart_spec(scen, scen.outputs[0].output_id)
+        self.assertEqual(spec_chart["kind"], "bar_grouped", spec_chart)
+        sens = ra.chart_spec(scen, scen.outputs[1].output_id)
+        self.assertEqual(sens["kind"], "bar_sorted", sens)
+        bridge = fa.run("profit_bridge", ds)
+        self.assertEqual(ra.chart_spec(bridge, bridge.outputs[0].output_id)["kind"],
+                         "waterfall")
+
+
+def _payload_of(model_id: str, dataset) -> dict:
+    """跑一次算子拿**原始载荷**（独立验证的输入），并带上 params（与 runner 一致）。"""
+    spec = fa.registry.spec(model_id)
+    _impl, compute, _gold = fa.registry.OPERATORS[spec.operator]
+    payload = dict(compute(dataset, {}))
+    payload["params"] = {}
+    return payload
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

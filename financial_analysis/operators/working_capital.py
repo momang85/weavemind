@@ -16,6 +16,7 @@ from decimal import Decimal
 
 from ..contracts import (
     InputRequirement, ModelSpec, NotApplicable, NotComputable, OutputSpec,
+    full_identity_ok,
 )
 
 IMPL_VERSION = "working_capital/1.0.0"
@@ -89,12 +90,12 @@ def compute(dataset, params: dict | None = None) -> dict:
     rev = dataset.require("revenue", cur_p)
     cost = dataset.require("operating_cost", cur_p)
     for a, b in ((ar_c, ar_p), (inv_c, inv_p), (ap_c, ap_p)):
-        if a.entity_id != b.entity_id or a.currency != b.currency or a.caliber != b.caliber:
-            raise NotApplicable(f"{a.metric} 两期主体/币种/口径不一致")
-        if a.money_scale != b.money_scale:
-            raise NotApplicable(f"{a.metric} 两期量纲不一致（{a.unit} vs {b.unit}）")
-    if rev.entity_id != ar_c.entity_id or cost.entity_id != ar_c.entity_id:
-        raise NotApplicable("分母（收入/成本）与占款项主体不一致")
+        ident_ok, ident_why = full_identity_ok(a, b, same_scale=True)
+        if not ident_ok:
+            raise NotApplicable(f"{a.metric} 两期：{ident_why}")
+    ident_ok, ident_why = full_identity_ok(ar_c, ar_p, inv_c, inv_p, ap_c, ap_p, rev, cost)
+    if not ident_ok:
+        raise NotApplicable(ident_why)
     unit = str(ar_c.unit or "")
     scale = ar_c.money_scale
     d_ar = _d(ar_c.value) - _d(ar_p.value)
@@ -170,6 +171,15 @@ def gold(dataset, params: dict | None = None) -> dict:
     ap_p = dataset.require("accounts_payable", period_prev)
     rev = dataset.require("revenue", period_cur)
     cost = dataset.require("operating_cost", period_cur)
+    # 独立路径同一判据（L0-a）：范围/主体/币种/量纲不一致时金样也拒绝，不出现
+    # "compute 拒绝、gold 照算"的自相矛盾验证结论。
+    for _a, _b in ((ar_c, ar_p), (inv_c, inv_p), (ap_c, ap_p)):
+        _ok, _why = full_identity_ok(_a, _b, same_scale=True)
+        if not _ok:
+            raise NotApplicable(_why)
+    _ok, _why = full_identity_ok(ar_c, inv_c, ap_c, rev, cost)
+    if not _ok:
+        raise NotApplicable(_why)
     occ = (_d(ar_c.value) - _d(ar_p.value)) + (_d(inv_c.value) - _d(inv_p.value)) \
         - (_d(ap_c.value) - _d(ap_p.value))
     days = int((params or {}).get("days_in_year") or 365)

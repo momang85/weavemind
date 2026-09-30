@@ -16,7 +16,7 @@ from decimal import Decimal
 
 from ..contracts import (
     InputRequirement, ModelSpec, NotApplicable, NotComputable, OutputSpec,
-    report_scope_ok,
+    full_identity_ok,
 )
 
 IMPL_VERSION = "scenario/1.0.0"
@@ -40,9 +40,10 @@ SPEC = ModelSpec(
         InputRequirement("net_profit_base", "net_profit", period_offset=0),
     ),
     outputs=(
-        OutputSpec("scenario_net_profit", "情景归母净利润（假设成立时）", kind="amount"),
+        OutputSpec("scenario_net_profit", "情景归母净利润（假设成立时）", kind="amount",
+                   structure="scenarios"),
         OutputSpec("scenario_sensitivity", "单因素敏感度（每 +1 个百分点的影响）",
-                   kind="amount"),
+                   kind="amount", structure="sensitivity"),
     ),
     # 参数界限写进契约：超出范围直接判失败，不允许"随手放大假设"
     allowed_params={"revenue_growth": (-0.5, 0.5), "gross_margin_delta": (-0.3, 0.3),
@@ -105,17 +106,11 @@ def compute(dataset, params: dict | None = None) -> dict:
     rev = dataset.require("revenue", period)
     gp = dataset.require("gross_profit", period)
     np_ = dataset.require("net_profit", period)
-    if not (rev.entity_id == gp.entity_id == np_.entity_id):
-        raise NotApplicable("基期三个输入主体不一致")
-    if not (rev.currency == gp.currency == np_.currency):
-        raise NotApplicable("基期三个输入币种不一致")
-    if not (rev.money_scale == gp.money_scale == np_.money_scale):
-        raise NotApplicable("基期三个输入量纲不一致（先换算再入情景）")
-    # 三个基期输入必须同一**报表范围**（K0-a）：收入/毛利取自利润表、净利若来自
-    # 另一份报表（合并 vs 母公司）时，"毛利率 → 净利"的推算是两个报表的混合。
-    scope_ok, scope_why = report_scope_ok(rev, gp, np_)
-    if not scope_ok:
-        raise NotApplicable(scope_why)
+    # 完整身份（L0-a）：主体/币种/报表范围/金额量纲一次核完；本模型内部要做
+    # `gp - np` 与 `gp / rev`，所以三个输入还必须**同一量纲**（same_scale）。
+    ident_ok, ident_why = full_identity_ok(rev, gp, np_, same_scale=True)
+    if not ident_ok:
+        raise NotApplicable(ident_why)
     if _d(rev.value) <= 0:
         raise NotComputable(f"基期收入非正（{rev.value}{rev.unit}）：比率型情景不适用")
     base = {"revenue": float(rev.value), "gross_profit": float(gp.value),
@@ -139,9 +134,14 @@ def compute(dataset, params: dict | None = None) -> dict:
     # `expense_change_ratio`），旧名 `up_*`/`down_*` 继续兼容。此前 `allowed_params`
     # 声明的是前者、`compute` 只读后者——页面按声明改假设时**改了不生效**（K3 实机）。
     _g_up, _m_up, _e_up, _g_down, _m_down = _assumptions(params)
-    # 三种情景：基准（参数 0）/ 上行（使用者的假设，未给就用声明过的默认值）/ 下行
+    # 三种情景：基准（参数 0）/ 使用者情景（未给就用声明过的默认值）/ 反向对照
     up = _scenario(base, growth=_g_up, margin_delta=_m_up, expense_ratio=_e_up)
     down = _scenario(base, growth=_g_down, margin_delta=_m_down, expense_ratio=0.0)
+    # **数值与解释同一份参数**（L0-c，2026-09-30 复核 M1）：标签/公式不再写死
+    # "+5%收入/+1pp毛利率"，而是从上面解析出的同一组数生成；百分比（%）与百分点（pp）
+    # 分开写；使用者给的是负增速时不固定称"上行"；"毛利线以下"不冒称纯费用。
+    up_label, up_formula = _scenario_label("使用者情景", _g_up, _m_up, _e_up)
+    down_label, down_formula = _scenario_label("反向对照", _g_down, _m_down, 0.0)
     # 单因素敏感度：每 +1 个百分点的影响（收入 / 毛利率 / 费用）
     sens = {
         "收入 +1pp": _scenario(base, growth=0.01, margin_delta=0, expense_ratio=0) - sc_base,
@@ -156,16 +156,18 @@ def compute(dataset, params: dict | None = None) -> dict:
         < _scenario(base, growth=0.0, margin_delta=0, expense_ratio=0))
     _assumed = [k for k in ("revenue_growth", "gross_margin_delta", "expense_change_ratio")
                 if k in params]
-    _defaults = [f"上行：收入 {_g_up:+.0%}、毛利率 {_m_up:+.0%}、费用 {_e_up:+.0%}",
-                 f"下行：收入 {_g_down:+.0%}、毛利率 {_m_down:+.0%}"]
+    _defaults = [f"使用者情景：{up_label}（{'使用者提供' if _assumed else '未提供，用声明默认值'}）",
+                 f"反向对照：{down_label}"]
     return {
         "periods": (period,),
         "formula": ("情景归母净利 = 收入×(1+g) × (基期毛利率+m) − 毛利线以下隐含块×(1+e)；"
-                    "毛利线以下隐含块 = 基期(毛利 − 归母净利)"),
+                    "毛利线以下隐含块 = 基期(毛利 − 归母净利)，含费用/税项/投资收益/"
+                    "少数股东等，不是纯费用项"),
         "inputs": (rev.fact_id, gp.fact_id, np_.fact_id),
         "assumptions": tuple(
             [f"基期读数取自 {period}（{rev.value}/{gp.value}/{np_.value}{unit}）",
-             "收入增速 g、毛利率变化 m、费用变化 e 均为**使用者设定**的假设（非披露事实）"
+             "收入增速 g（%）、毛利率变化 m（**百分点 pp**）、隐含块变化 e 均为"
+             "**使用者设定**的假设（非披露事实）"
              + ("" if _assumed else "：本次未提供，使用模型中已声明的默认值")]
             + [f"{k}={v}（使用者提供）" for k, v in sorted(params.items()) if k in
                ("revenue_growth", "gross_margin_delta", "expense_change_ratio")]
@@ -182,15 +184,14 @@ def compute(dataset, params: dict | None = None) -> dict:
         },
         "outputs": [
             {"metric": "scenario_net_profit", "label": "情景归母净利润（假设成立时）",
-             "value": q(up), "unit": unit, "output_period": f"{period}（上行）",
+             "value": q(up), "unit": unit, "output_period": f"{period}（{up_label}）",
              "residual": 0.0,
              "components": [
                  {"label": f"基准（参数 0，复现基期 {np_.value}{unit}）",
                   "value": q(sc_base), "unit": unit, "formula": "g=0, m=0, e=0"},
-                 {"label": "上行（+5%收入 / +1pp毛利率）", "value": q(up), "unit": unit,
-                  "formula": "g=+0.05, m=+0.01"},
-                 {"label": "下行（-5%收入 / -1pp毛利率）", "value": q(down), "unit": unit,
-                  "formula": "g=-0.05, m=-0.01"},
+                 {"label": up_label, "value": q(up), "unit": unit, "formula": up_formula},
+                 {"label": down_label, "value": q(down), "unit": unit,
+                  "formula": down_formula},
              ]},
             {"metric": "scenario_sensitivity", "label": "单因素敏感度（每 +1 个百分点）",
              "value": q(ranked[0][1]), "unit": unit,
@@ -201,6 +202,26 @@ def compute(dataset, params: dict | None = None) -> dict:
         ],
         "limits": LIMITS,
     }
+
+
+def _scenario_label(name: str, growth: float, margin_delta: float,
+                    expense_ratio: float) -> tuple[str, str]:
+    """情景的**显示标签与公式**，从同一组已解析参数生成（L0-c）。
+
+    - 百分比（收入增速、隐含块变化）写 `%`，毛利率变化是**百分点**写 `pp`，两者不混；
+    - 使用者给的是负增速时不叫"上行"——`name` 由调用方给（使用者情景 / 反向对照），
+      方向词只作为括号里的附注，且按实际正负写"较基期高/低"；
+    - 公式串写**实际使用的数值**，不再固定 `g=+0.05, m=+0.01`（复核 M1：数值变了标签没变）。
+    """
+    tone = "较基期高" if (growth > 0 or margin_delta > 0 or expense_ratio > 0) else (
+        "较基期低" if (growth < 0 or margin_delta < 0 or expense_ratio < 0) else "等于基期")
+    # `gross_margin_delta` 是**分数**（0.02 = 2 个百分点），显示时换算成 pp，别写成 0.02pp
+    label = (f"{name}（收入 {growth:+.2%}／毛利率 {margin_delta * 100:+.2f}pp／"
+             f"隐含块 {expense_ratio:+.2%}，{tone}）")
+    formula = (f"g={growth:+.4f}（{growth:+.2%}）, m={margin_delta:+.4f}"
+               f"（{margin_delta * 100:+.2f}pp）, e={expense_ratio:+.4f}"
+               f"（{expense_ratio:+.2%}）")
+    return label, formula
 
 
 def _assumptions(params: dict) -> tuple[float, float, float, float, float]:
@@ -227,9 +248,10 @@ def gold(dataset, params: dict | None = None) -> dict:
     rev = dataset.require("revenue", period)
     gp = dataset.require("gross_profit", period)
     np_ = dataset.require("net_profit", period)
-    scope_ok, scope_why = report_scope_ok(rev, gp, np_)   # 独立路径同样拒绝跨范围混算
-    if not scope_ok:
-        raise NotApplicable(scope_why)
+    # 独立路径同样核完整身份（L0-a）：与算子入口同一判据，不让"compute 拒绝、gold 照算"。
+    ident_ok, ident_why = full_identity_ok(rev, gp, np_, same_scale=True)
+    if not ident_ok:
+        raise NotApplicable(ident_why)
     base = {"revenue": float(rev.value), "gross_profit": float(gp.value),
             "net_profit": float(np_.value)}
     g_up, m_up, e_up, _g_down, _m_down = _assumptions(params)

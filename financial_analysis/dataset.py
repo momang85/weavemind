@@ -88,7 +88,12 @@ def _observation_of(row: dict, *, as_of: str, restatement: str) -> Observation:
 
 
 def _resolve_conflicts(observations: list[Observation]) -> tuple[list[Observation], list[str]]:
-    """同一 (指标, 期间, 口径) 出现不相容值 → 全部标 `conflicting` 并列出（不择一）。"""
+    """同一 (指标, 期间, 口径) 出现不相容值 → 全部标 `conflicting` 并列出（不择一）。
+
+    **冲突沿血缘传播**（L0-a，2026-09-30 复核 F4）：父观察不可用时，从它派生的观察
+    也不得留成 `ok`——否则读者会看到一个"算出来的数"，而它的父值本身还没消歧
+    （实机反例：收入 100 CNY 与 100 USD 冻结成 conflicting，派生毛利 40 仍是 ok）。
+    """
     buckets: dict[tuple, list[Observation]] = {}
     for o in observations:
         if o.state in (State.OK, State.ZERO):
@@ -108,6 +113,28 @@ def _resolve_conflicts(observations: list[Observation]) -> tuple[list[Observatio
             o = Observation(**{**o.__dict__, "state": State.CONFLICTING,
                                "note": "同一(指标,期间,口径)多个不相容值：不择一，不参与计算"})
         out.append(o)
+    # 血缘传播：父观察不可用（冲突/未知/无效/缺失）→ 派生观察同样不可用；链式派生迭代到稳定
+    unusable = {o.fact_id: o.state for o in out if not o.usable and o.fact_id}
+    changed = True
+    while changed and unusable:
+        changed = False
+        nxt: list[Observation] = []
+        for o in out:
+            if o.usable and o.derived_from:
+                parents = [p for p in o.derived_from if p in unusable]
+                if parents:
+                    o = Observation(**{**o.__dict__, "state": State.CONFLICTING,
+                                       "note": ("父观察不可用（血缘传播："
+                                                + "、".join(f"{p}={unusable[p]}"
+                                                            for p in parents)
+                                                + "）：派生值不作数，先修父观察")})
+                    unusable[o.fact_id] = o.state
+                    conflicts.append(
+                        f"{o.metric} {o.period} 口径 {o.caliber or '未标'}："
+                        f"派生观察 {o.fact_id or '(无 id)'} 的父观察不可用 → 血缘传播为不可用")
+                    changed = True
+            nxt.append(o)
+        out = nxt
     return out, conflicts
 
 

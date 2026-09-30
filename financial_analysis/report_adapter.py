@@ -10,6 +10,17 @@
 from __future__ import annotations
 
 from .contracts import RunStatus
+from .registry import spec as _spec
+
+# 输出**结构声明** → 图形（L0-c，2026-09-30 复核 M1）：图型由模型声明的结构决定，
+# 不再"分项超过一个就画瀑布"。并行情景不是加总贡献桥，敏感度是排序条形。
+_CHART_BY_STRUCTURE = {
+    "bridge": "waterfall",        # 可闭合的加总贡献桥
+    "scenarios": "bar_grouped",   # 并列情景对比
+    "sensitivity": "bar_sorted",  # 单因素敏感度：按影响排序
+    "ratio": "bar",
+    "trend": "line",
+}
 
 
 def _yi(value: float | None, unit: str = "亿元") -> str:
@@ -144,9 +155,21 @@ def chart_spec(run, output_id: str = "") -> dict:
                 "run_id": run.run_id}
     labels = [c.get("label") for c in (out.components or ())] or [out.label]
     values = [c.get("value") for c in (out.components or ())] or [out.value]
+    # 结构来自**注册模型声明**（按 metric 找 OutputSpec），找不到才退回按分项数量判断；
+    # 并行情景/敏感度不会被画成瀑布（复核 M1）。
+    structure = ""
+    try:
+        for _ospec in (_spec(run.model_id).outputs or ()):
+            if _ospec.metric == out.metric:
+                structure = str(getattr(_ospec, "structure", "") or "")
+                break
+    except Exception:                                   # noqa: BLE001 - 未注册模型
+        structure = ""
+    kind = _CHART_BY_STRUCTURE.get(structure) or (
+        "waterfall" if (len(labels) > 1 and not structure) else "bar")
     return {
         "available": True, "run_id": run.run_id, "output_id": out.output_id,
-        "kind": "waterfall" if len(labels) > 1 else "bar",
+        "kind": kind, "structure": structure or "未声明（按分项数量回退）",
         "title": f"{out.entity or out.entity_id} {out.output_period} {out.label}",
         "categories": labels, "series": [{"name": out.label, "values": values}],
         "unit": out.unit, "currency": out.currency, "period": out.output_period,

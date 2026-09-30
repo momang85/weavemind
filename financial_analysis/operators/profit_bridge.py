@@ -19,7 +19,7 @@ from decimal import Decimal
 
 from ..contracts import (
     InputRequirement, ModelSpec, NotApplicable, NotComputable, OutputSpec,
-    report_scope_ok,
+    full_identity_ok,
 )
 
 IMPL_VERSION = "profit_bridge/1.0.0"
@@ -46,7 +46,8 @@ SPEC = ModelSpec(
         InputRequirement("gross_profit_prev", "gross_profit", period_offset=-1),
     ),
     outputs=(
-        OutputSpec("net_profit_change", "归母净利润变化", kind="amount"),
+        OutputSpec("net_profit_change", "归母净利润变化", kind="amount",
+                   structure="bridge"),
         OutputSpec("gross_profit_change", "毛利变化", kind="amount"),
         OutputSpec("below_gross_line_change", "毛利线以下净额变化（未解释段）", kind="amount"),
     ),
@@ -77,24 +78,17 @@ def compute(dataset, params: dict | None = None) -> dict:
     prev_np = dataset.require("net_profit", prev_p)
     cur_gp = dataset.require("gross_profit", cur_p)
     prev_gp = dataset.require("gross_profit", prev_p)
+    # **完整身份**一次核四个输入（L0-a，2026-09-30 复核 F1）：主体、币种、报表范围、
+    # 金额量纲。此前只核"同指标两期"，跨指标（净利 vs 毛利）只比范围与量纲——于是
+    # "洋河/CNY 净利 + 茅台/USD 毛利"照样 validated 并把输出全标成洋河/CNY。
+    ident_ok, ident_why = full_identity_ok(cur_np, prev_np, cur_gp, prev_gp,
+                                           same_scale=True)
+    if not ident_ok:
+        raise NotApplicable(ident_why)
     for a, b, label in ((cur_np, prev_np, "归母净利润两期"),
                         (cur_gp, prev_gp, "毛利两期")):
-        if a.entity_id != b.entity_id:
-            raise NotApplicable(f"{label}主体不同（{a.entity_id} vs {b.entity_id}）")
-        if a.currency != b.currency:
-            raise NotApplicable(f"{label}币种不同（{a.currency} vs {b.currency}）")
-        if a.caliber != b.caliber:
-            raise NotApplicable(f"{label}口径不同（{a.caliber} vs {b.caliber}）")
-        if a.money_scale != b.money_scale or a.money_scale <= 0:
-            raise NotApplicable(f"{label}金额量纲不一致（{a.unit} vs {b.unit}）")
-    # 跨指标（净利 vs 毛利）**必须在同一报表范围**：只比主体/币种/量纲不够——
-    # "合并净利 + 母公司毛利"会算出闭合的桥，却是两个报表的差额（K0-a 反例）。
-    scope_ok, scope_why = report_scope_ok(cur_np, prev_np, cur_gp, prev_gp)
-    if not scope_ok:
-        raise NotApplicable(scope_why)
-    if cur_np.money_scale != cur_gp.money_scale:
-        raise NotApplicable(
-            f"归母净利润（{cur_np.unit}）与毛利（{cur_gp.unit}）量纲不同：先换算再入桥")
+        if a.period == b.period:
+            raise NotApplicable(f"{label}期间相同（{a.period}）：两期桥接需要两个不同期间")
     d_np = _d(cur_np.value) - _d(prev_np.value)
     d_gp = _d(cur_gp.value) - _d(prev_gp.value)
     below = d_np - d_gp
@@ -171,11 +165,12 @@ def gold(dataset, params: dict | None = None) -> dict:
     np_prev_o = dataset.require("net_profit", prev_p)
     gp_cur_o = dataset.require("gross_profit", cur_p)
     gp_prev_o = dataset.require("gross_profit", prev_p)
-    # 金样是**独立路径**，同样要拒绝跨报表范围混算：否则"compute 拒绝了、gold 却算出来"
-    # 会让验证结论自相矛盾（K0-a）。
-    scope_ok, scope_why = report_scope_ok(np_cur_o, np_prev_o, gp_cur_o, gp_prev_o)
-    if not scope_ok:
-        raise NotApplicable(scope_why)
+    # 金样是**独立路径**，同样要拒绝跨报表范围/跨主体/跨币种混算：否则"compute 拒绝了、
+    # gold 却算出来"会让验证结论自相矛盾（K0-a）。判据与算子入口**同一条**（L0-a）。
+    ident_ok, ident_why = full_identity_ok(np_cur_o, np_prev_o, gp_cur_o, gp_prev_o,
+                                           same_scale=True)
+    if not ident_ok:
+        raise NotApplicable(ident_why)
     np_cur = Decimal(str(np_cur_o.value))
     np_prev = Decimal(str(np_prev_o.value))
     gp_cur = Decimal(str(gp_cur_o.value))
@@ -196,13 +191,9 @@ def compute_ratio(dataset, num_metric: str, den_metric: str, period: str, *,
     """
     num = dataset.require(num_metric, period)
     den = dataset.require(den_metric, period)
-    if num.entity_id != den.entity_id:
-        raise NotApplicable(f"分子/分母主体不同（{num.entity_id} vs {den.entity_id}）")
-    if num.currency != den.currency:
-        raise NotApplicable(f"分子/分母币种不同（{num.currency} vs {den.currency}）")
-    scope_ok, scope_why = report_scope_ok(num, den)
-    if not scope_ok:
-        raise NotApplicable(scope_why)
+    ident_ok, ident_why = full_identity_ok(num, den)
+    if not ident_ok:
+        raise NotApplicable(ident_why)
     if num.money_scale <= 0 or den.money_scale <= 0:
         raise NotApplicable(f"分子/分母不可换算为金额（{num.unit}/{den.unit}）")
     den_v = Decimal(str(den.value))

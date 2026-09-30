@@ -80,6 +80,10 @@ class Observation:
     period_type: str = ""
     period_start: str = ""
     period_end: str = ""
+    # 存量（stock，余额/时点）还是流量（flow，发生额/区间）：同一 (指标, 期间) 的存量与
+    # 流量是两个不同的观察，不能互相当替代（L0-a，2026-09-30 复核 F2）。
+    period_kind: str = ""
+    period_label: str = ""           # 列头原文（`2024年12月31日` / `期末余额`），不截年
     as_of: str = ""
     restatement: str = ""            # 重述批次/版本（未重述留空）
     source_url: str = ""
@@ -114,6 +118,10 @@ class Observation:
             "restatement": self.restatement, "source_hash": self.source_hash,
             "derived_from": list(self.derived_from), "formula_version": self.formula_version,
             "state": self.state, "schema": SCHEMA_VERSION,
+            # 完整期间身份（L0-a）：存量/流量与起止日期参与指纹——同一 (指标, 期间)
+            # 的"期末余额"与"本期发生额"是两条不同观察，改它就是换了一份观察。
+            "period_kind": self.period_kind,
+            "period_start": self.period_start, "period_end": self.period_end,
         })
 
     @property
@@ -288,6 +296,47 @@ def report_scope_ok(*observations) -> tuple[bool, str]:
     return True, ""
 
 
+def full_identity_ok(*observations, require_amount: bool = True,
+                     same_scale: bool = False) -> tuple[bool, str]:
+    """**全部实际参与输入**的完整身份是否一致（L0-a，统一判据）。
+
+    为什么单列一条（2026-09-30 架构复核 F1）：利润桥此前只核"同指标两期"的主体/币种/口径，
+    **跨指标**（净利 vs 毛利）只比了报表范围与量纲——于是"两期洋河/CNY 净利 + 两期茅台/USD
+    毛利"照样 validated，且全部输出标成洋河/CNY。跨指标输入必须与同指标一样过完整身份：
+    主体、币种、报表范围、金额量纲（`require_amount` 时还要求可换算为金额）。
+
+    `report_scope_ok` 只判其中一项（报表范围），保留它是为了让"跨范围混算"这条错误信息
+    仍然具体；本函数是**算子入口与独立验证共用的那一条**，两处都调用，不各写一套。
+
+    返回 `(是否相容, 原因)`；不可用观察（缺失/冲突/未知/无效）同样判不相容。
+    """
+    obs = [o for o in observations if o is not None]
+    if not obs:
+        return False, "没有任何输入观察：不计算"
+    unusable = [f"{getattr(o, 'metric', '')} {getattr(o, 'period', '')}={getattr(o, 'state', '')}"
+                for o in obs if not getattr(o, "usable", False)]
+    if unusable:
+        return False, ("输入观察不可用（缺失/冲突/未知/无效不作数）："
+                       + "、".join(unusable))
+    for field, label in (("entity_id", "主体"), ("currency", "币种"), ("caliber", "报表范围")):
+        vals = {str(getattr(o, field, "") or "") for o in obs}
+        if "" in vals:
+            return False, (f"输入的{label}未声明：完整身份核不过（不默认、不推断）")
+        if len(vals) > 1:
+            return False, (f"输入的{label}不一致（{'、'.join(sorted(vals))}）："
+                           "同一次计算只接受同一身份，不得跨主体/币种/报表范围混算")
+    scope_ok, scope_why = report_scope_ok(*obs)
+    if not scope_ok:
+        return False, scope_why
+    scales = {float(getattr(o, "money_scale", 0) or 0) for o in obs}
+    if require_amount and any(s <= 0 for s in scales):
+        return False, ("输入里存在不可换算为金额的单位（"
+                       + "、".join(sorted({str(getattr(o, 'unit', '')) for o in obs})) + "）")
+    if same_scale and len(scales) > 1:
+        return False, (f"输入金额量纲不一致（{sorted(scales)}）：先显式换算再入模型")
+    return True, ""
+
+
 class NotApplicable(RuntimeError):
     """模型对这份数据集不适用（主体/期间/口径/币种/量纲不匹配）：如实说不适用。"""
 
@@ -314,6 +363,13 @@ class OutputSpec:
     unit: str = ""
     kind: str = "amount"            # amount / pct / count
     per_input: bool = False
+    # 输出的**结构声明**（L0-c）：决定它能画成什么图，而不是按"分项数量"猜。
+    # bridge=可闭合的加总贡献桥（瀑布）；scenarios=并行情景（并列对比）；
+    # sensitivity=单因素敏感度（排序条形）；ratio=比率；trend=多期趋势。
+    structure: str = ""
+
+    def as_dict(self) -> dict:
+        return dict(self.__dict__)
 
 
 @dataclass(frozen=True)
@@ -414,6 +470,10 @@ class ModelRun:
     budget_used: dict = field(default_factory=dict)
     environment: str = ""
     random_seed_used: bool = False
+    # 独立验证**规则集版本**（L0-a）：规则变了，旧 run 不得被当成"按新规则已验证"。
+    # 刻意不进 `run_id`：改 run_id 会让既有交付包里的 output_id 全部对不上，
+    # K2 的"从 ZIP 字节 7/7 离线复算"会被误伤（复核要求保留该证据）。
+    rules_version: str = ""
 
     def expired(self, dataset: AnalysisDataset) -> bool:
         """数据集一变，旧结果立刻过期（保留旧版本，但不得再当当前结果）。"""

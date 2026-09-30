@@ -14,7 +14,7 @@
 from .contracts import (  # noqa: F401
     AnalysisDataset, AnalysisPlan, DatasetManifest, ModelRun, ModelSpec,
     MissingInput, NotApplicable, NotComputable, Observation, RunStatus,
-    ValidatedOutput, report_scope_ok,
+    ValidatedOutput, full_identity_ok, report_scope_ok,
 )
 from .dataset import freeze_from_facts, freeze_from_working_paper  # noqa: F401
 from .registry import available_for, spec, specs  # noqa: F401
@@ -26,7 +26,7 @@ __all__ = [
     "AnalysisDataset", "AnalysisPlan", "DatasetManifest", "ModelRun", "ModelSpec",
     "MissingInput", "NotApplicable", "NotComputable", "Observation", "RunStatus",
     "ValidatedOutput",
-    "report_scope_ok",
+    "report_scope_ok", "full_identity_ok",
     "freeze_from_facts", "freeze_from_working_paper",
     "available_for", "spec", "specs",
     "compile_plan", "run", "ratio_run", "raise_for_status", "revalidate",

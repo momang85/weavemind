@@ -246,6 +246,12 @@ def recompute_run(ws, run_id: str) -> dict:
         return {"ok": False, "reason": f"复算失败：{str(exc)[:140]}",
                 "run_id": run_id, "model_id": model_id}
     mism: list[str] = []
+    # **规则集版本**单独报（L0-a）：旧包里落盘的 run 可能是在旧验证规则下通过验证的，
+    # 复算用的是**当前**规则。规则版本不同 → 记 `rules_stale`，要求按新规则重算；
+    # 但它**不算值不一致**：值/指纹比对是"输入可复算"这条证据（K2 两包 7/7），
+    # 两件事分开记，互不冒充。
+    _stored_rules = str(rec.get("rules_version") or "")
+    rules_stale = bool(_stored_rules) and _stored_rules != _runner.RULES_VERSION
     if again.status != rec.get("status"):
         mism.append(f"状态不同：复算 {again.status} vs 包内 {rec.get('status')}")
     want = {str(o.get("output_id") or ""): o for o in (rec.get("outputs") or ())}
@@ -264,6 +270,12 @@ def recompute_run(ws, run_id: str) -> dict:
     return {"ok": not mism, "run_id": run_id, "model_id": model_id,
             "status": again.status, "dataset_hash": ds.dataset_hash,
             "mismatches": mism,
+            "stored_rules_version": _stored_rules or "未记录",
+            "current_rules_version": _runner.RULES_VERSION,
+            "rules_stale": rules_stale,
+            "rules_note": ("包内 run 通过验证时用的是另一版验证规则：值可复算，"
+                           "但不得当作按当前规则已验证，需重算"
+                           if rules_stale else ""),
             "outputs": [{"output_id": o.get("output_id"), "value": o.get("value"),
                          "unit": o.get("unit")} for o in want.values()]}
 
