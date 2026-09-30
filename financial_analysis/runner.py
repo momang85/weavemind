@@ -179,8 +179,23 @@ def compile_plan(question: str, dataset, *, prefer=()) -> AnalysisPlan:
         elif _models:
             _note = "已采用 " + "、".join(_models) + " 回答这一子问题"
         elif "volume_price" in ch_qids:
-            _note = ("量价结构分解目前**没有注册模型**：只给资料清单与缺口，"
-                     "不给推测性结论")
+            # U1（2026-10-01）：量价分解**已有注册模型**（operating_drivers）。有模型但
+            # 输入不齐时，说明必须写"缺哪些输入"，而不是继续写"没有注册模型"——
+            # 那句在注册之后就是错话，会让读者以为能力不存在、也不知道该补哪张表。
+            _vp_models = [m for m in _q.models_for(ch_qids)
+                          if m in {s.model_id for s in specs()}]
+            if _vp_models:
+                _rej = {r["model_id"]: r for r in rejected}
+                _miss = []
+                for m in _vp_models:
+                    _miss.extend(list((_rej.get(m) or {}).get("missing") or []))
+                _note = ("量价结构分解由 " + "、".join(_vp_models)
+                         + " 回答，但**输入不齐**：缺 "
+                         + "、".join(sorted(set(_miss)) or ["可比产品销量/单价"])
+                         + "；只给缺口，不给推测性结论")
+            else:
+                _note = ("量价结构分解目前**没有注册模型**：只给资料清单与缺口，"
+                         "不给推测性结论")
         else:
             _note = "命中了问题类型，但没有可采用的模型（见 rejected 的原因）"
         subquestions.append({

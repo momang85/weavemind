@@ -7,8 +7,8 @@
 from __future__ import annotations
 
 from .contracts import ModelSpec, NotApplicable
-from .operators import (cash_quality, profit_bridge, profit_to_cash, scenario,
-                        working_capital)
+from .operators import (cash_quality, operating_drivers, profit_bridge,
+                        profit_to_cash, scenario, working_capital)
 
 # 算子白名单：名字 → (实现模块, 计算函数, 独立金样函数)
 OPERATORS = {
@@ -18,6 +18,9 @@ OPERATORS = {
                            working_capital.gold),
     "scenario_v1": (scenario, scenario.compute, scenario.gold),
     "profit_to_cash_v1": (profit_to_cash, profit_to_cash.compute, profit_to_cash.gold),
+    # U1（2026-10-01）：经营驱动分解（规模/毛利率/逐项费用税项/分段/量价）
+    "operating_drivers_v1": (operating_drivers, operating_drivers.compute,
+                             operating_drivers.gold),
 }
 
 # 同年比率（复用既有口径的四个比率，不重新发明）
@@ -31,6 +34,7 @@ RATIO_MODELS: tuple[tuple[str, str, str, str], ...] = (
 # 注册表顺序 = 报告里分析卡的呈现优先级（结论级模型在前，比率不在卡里）
 _REGISTRY: dict[str, ModelSpec] = {
     profit_bridge.SPEC.model_id: profit_bridge.SPEC,
+    operating_drivers.SPEC.model_id: operating_drivers.SPEC,
     cash_quality.SPEC.model_id: cash_quality.SPEC,
     working_capital.SPEC.model_id: working_capital.SPEC,
     scenario.SPEC.model_id: scenario.SPEC,

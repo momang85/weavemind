@@ -472,8 +472,8 @@ class TestCoreHasNoModelCalls(unittest.TestCase):
         # 注册表是**唯一入口**：这份清单就是"能被计划采用的模型"的完整集合
         # （L3 新增 profit_to_cash；清单变化必须是**显式**的，不接受"多出来的自动通过"）
         self.assertEqual([m.model_id for m in fa.specs()],
-                         ["profit_bridge", "cash_quality", "working_capital",
-                          "scenario_sensitivity", "profit_to_cash"])
+                         ["profit_bridge", "operating_drivers", "cash_quality",
+                          "working_capital", "scenario_sensitivity", "profit_to_cash"])
 
 
 class TestAnalysisRunStore(unittest.TestCase):
@@ -938,8 +938,8 @@ class TestDataAnalyzerTakesTheFinancialPath(unittest.TestCase):
         self.assertEqual(got["mode"], "financial")
         self.assertEqual(got["status"], "success", got["plan"]["rejected"])
         self.assertEqual(set(got["plan"]["adopted"]),
-                         {"profit_bridge", "cash_quality", "working_capital",
-                          "scenario_sensitivity", "profit_to_cash"},
+                         {"profit_bridge", "operating_drivers", "cash_quality",
+                          "working_capital", "scenario_sensitivity", "profit_to_cash"},
                          got["plan"]["rejected"])
         self.assertEqual(got["plan"]["rejected"], [])
         self.assertEqual(got["dataset"]["entity_id"], "002304.SZ")
@@ -984,9 +984,10 @@ class TestDataAnalyzerTakesTheFinancialPath(unittest.TestCase):
         # 运行记录必须落盘：正文/清单/ZIP 据此绑定同一次运行
         stored = json.loads((self.ws / "analysis_runs.json").read_text(encoding="utf-8"))
         self.assertEqual(len(stored["runs"]), len(got["runs"]))
-        # 缺口如实：载荷里没有占款字段 → 营运资本被拒，状态 partial 而不是 success
-        self.assertEqual([r["model_id"] for r in got["plan"]["rejected"]],
-                         ["working_capital"], got["plan"])
+        # 缺口如实：载荷里没有占款字段（也没有营业成本）→ 营运资本与经营驱动被拒，
+        # 状态 partial 而不是 success（U1 新增家族：注册后同一份载荷多一条"缺输入"）
+        self.assertEqual(sorted(r["model_id"] for r in got["plan"]["rejected"]),
+                         ["operating_drivers", "working_capital"], got["plan"])
         self.assertEqual(got["status"], "partial", got["status"])
 
     def test_no_stored_contract_is_an_actionable_gap(self):
@@ -1218,27 +1219,31 @@ class TestCashQualityAndWorkingCapitalAndScenario(unittest.TestCase):
         self.assertEqual(run.status, C.RunStatus.NOT_COMPUTABLE, run.reason)
 
     # ── 注册表与计划 ──
-    def test_registry_lists_five_families_and_each_has_an_operator(self):
+    def test_registry_lists_six_families_and_each_has_an_operator(self):
+        # U1（2026-10-01）：新增第六个家族 operating_drivers（经营驱动分解）。
         self.assertEqual([m.model_id for m in fa.specs()],
-                         ["profit_bridge", "cash_quality", "working_capital",
-                          "scenario_sensitivity", "profit_to_cash"])
+                         ["profit_bridge", "operating_drivers", "cash_quality",
+                          "working_capital", "scenario_sensitivity", "profit_to_cash"])
         self.assertEqual(set(fa.registry.operators()),
-                         {"profit_bridge_v1", "cash_quality_v1", "working_capital_v1",
-                          "scenario_v1", "profit_to_cash_v1"})
+                         {"profit_bridge_v1", "operating_drivers_v1", "cash_quality_v1",
+                          "working_capital_v1", "scenario_v1", "profit_to_cash_v1"})
         for m in fa.specs():
             self.assertIn(m.operator, fa.registry.operators())
             self.assertTrue(m.limits, f"{m.model_id} 必须带限制")
 
     def test_plan_adopts_input_complete_families_on_the_real_shape(self):
-        # L2：问题点名四类家族；输入齐备的被采用，缺占款字段的营运资本被拒（带原因）。
-        # 采用**顺序**按"命中词多的类型优先"（同一份问题里谁被说得更具体谁先跑），
-        # 所以这里比集合、不比顺序。
+        # L2：问题点名四类家族；输入齐备的被采用，缺字段的（经营驱动缺营业成本、
+        # 营运资本缺占款）带原因被拒。采用**顺序**按"命中词多的类型优先"，故比集合不比顺序。
         plan = fa.compile_plan("利润变化归因、现金质量、营运资本周转与情景敏感性", self._ds())
         self.assertEqual({a.model_id for a in plan.adopted},
                          {"profit_bridge", "profit_to_cash", "cash_quality",
                           "scenario_sensitivity"})
-        self.assertEqual([r["model_id"] for r in plan.rejected], ["working_capital"])
-        self.assertEqual(plan.rejected[0]["reason"], "缺输入")
+        rej = {r["model_id"]: r for r in plan.rejected}
+        self.assertEqual(set(rej), {"operating_drivers", "working_capital"})
+        self.assertEqual(rej["operating_drivers"]["reason"], "缺输入")
+        self.assertEqual(rej["operating_drivers"]["missing"], ["operating_cost"],
+                         "经营驱动桥需要营业成本：缺它就拒，不拿毛利顶替")
+        self.assertEqual(rej["working_capital"]["reason"], "缺输入")
         self.assertEqual(set(plan.question_types),
                          {"profit_attribution", "cash_conversion", "working_capital",
                           "scenario"})
@@ -1803,14 +1808,24 @@ class TestL2QuestionDrivenSelection(unittest.TestCase):
         self.assertEqual(list(plan.question_types), ["cash_conversion"], plan.question_types)
 
     def test_volume_price_question_reports_gaps_and_runs_nothing_irrelevant(self):
+        # U1（2026-10-01）规格变化：量价分解**已有注册模型**（operating_drivers）。
+        # 本例数据集缺营业成本 → 相关模型带"缺输入"被拒，仍**不采用任何无关模型**，
+        # 缺口与说明必须点名缺哪张表（旧断言写死"没有注册模型"，注册之后就是错话）。
         plan = fa.compile_plan("只分析营收变动的量价因素", _dataset())
         self.assertEqual(list(plan.question_types), ["volume_price"])
         self.assertEqual([a.model_id for a in plan.adopted], [],
-                         "没有注册模型能回答量价分解：不得拿无关模型充数")
-        self.assertTrue(all(r["reason"] == "与所问问题无关" for r in plan.rejected),
-                        plan.rejected)
+                         "输入不齐时不采用任何模型（更不拿无关模型充数）")
+        rej = {r["model_id"]: r for r in plan.rejected}
+        self.assertEqual(rej["operating_drivers"]["reason"], "缺输入")
+        self.assertEqual(rej["operating_drivers"]["missing"], ["operating_cost"])
+        for model_id in ("profit_bridge", "cash_quality", "scenario_sensitivity",
+                         "profit_to_cash"):
+            self.assertEqual(rej[model_id]["reason"], "与所问问题无关", model_id)
         self.assertTrue(any("sales_volume" in g for g in plan.gaps), plan.gaps)
-        self.assertTrue(any("没有注册模型" in n for n in plan.notes), plan.notes)
+        self.assertTrue(any("输入不齐" in n and "operating_drivers" in n
+                            for n in plan.notes), plan.notes)
+        self.assertFalse(any("没有注册模型" in n for n in plan.notes),
+                         "已有注册模型时不得再写“没有注册模型”")
 
     def test_plan_binds_question_types_and_outputs(self):
         plan = fa.compile_plan("分析利润变化归因", _dataset())
@@ -2203,6 +2218,173 @@ class TestR1APeriodChain(unittest.TestCase):
         self.assertEqual(got["inventory"].period_kind, "stock")
         self.assertTrue(all(o.period_end.endswith("12-31")
                             for o in ds.observations if o.metric == "inventory"))
+
+
+class TestOperatingDriversYanghe(unittest.TestCase):
+    """U1（2026-10-01）：经营驱动利润桥用**洋河 2024 年报真实披露数**验收。
+
+    数值来源与页码见 `scripts/u1_yanghe_drivers.py` 头部表格；这里按 元 入数据集，
+    手算期望值写在断言里（亿元换算到 3 位）。分段里 2023 年白酒成本由披露同比推算，
+    标 `derived_from`——算子只把它当输入，报告层要能看出它是推算值。
+    """
+
+    # 合并利润表（元）：(2023, 2024)
+    IS_YUAN = {
+        "revenue": (33_126_277_551.51, 28_876_296_993.56),
+        "operating_cost": (8_200_245_255.42, 7_751_218_356.66),
+        "net_profit": (10_015_930_040.27, 6_673_388_602.12),
+        "taxes_and_surcharges": (5_269_245_592.35, 4_826_086_952.64),
+        "selling_expense": (5_386_953_700.62, 5_516_238_544.79),
+        "admin_expense": (1_764_423_149.06, 1_924_730_302.35),
+        "rd_expense": (284_753_881.33, 104_796_407.26),
+        "finance_expense": (-754_525_568.63, -610_889_994.14),
+        "other_income": (56_179_399.53, 59_667_934.13),
+        "investment_income": (255_520_777.61, 146_415_168.80),
+        "fair_value_change": (-37_082_477.77, -396_164_080.43),
+        "credit_impairment": (881_383.32, 667_208.93),
+        "asset_impairment": (-2_828_018.24, -11_203_156.73),
+        "asset_disposal_income": (-5_282_977.32, -2_729_328.84),
+        "non_operating_income": (39_176_788.83, 52_446_752.81),
+        "non_operating_expense": (63_913_298.25, 70_140_310.99),
+        "income_tax_expense": (3_197_064_562.60, 2_476_620_791.72),
+        "minority_interest": (4_838_516.20, -6_932_782.16),
+    }
+    SEG_REVENUE_YUAN = (32_389_581_931.71, 28_175_707_878.18)      # 白酒
+    SEG_COST_CUR_YUAN = 7_281_082_736.44
+    SEG_COST_YOY = -0.0543                                          # 披露同比 → 推算 2023
+    VOLUME_TON = (166_154.73, 139_076.05)                           # 白酒销量
+
+    def _rows(self, *, drop=(), segment=True, volume=True):
+        rows = []
+        for metric, (prev, cur) in self.IS_YUAN.items():
+            if metric in drop:
+                continue
+            rows.append(_row(metric, "2023年", prev, unit="元",
+                             fact_id=f"fact-{metric}-2023"))
+            rows.append(_row(metric, "2024年", cur, unit="元",
+                             fact_id=f"fact-{metric}-2024"))
+        if segment:
+            seg_cost_prev = self.SEG_COST_CUR_YUAN / (1 + self.SEG_COST_YOY)
+            for metric, (prev, cur) in (("revenue", self.SEG_REVENUE_YUAN),
+                                        ("operating_cost", (seg_cost_prev,
+                                                            self.SEG_COST_CUR_YUAN))):
+                rows.append(_row(metric, "2023年", prev, unit="元", caliber="分产品:白酒",
+                                 fact_id=f"fact-seg-{metric}-2023",
+                                 derived_from=(("fact-annual-tables",)
+                                               if metric == "operating_cost" else ())))
+                rows.append(_row(metric, "2024年", cur, unit="元", caliber="分产品:白酒",
+                                 fact_id=f"fact-seg-{metric}-2024"))
+        if volume:
+            for period, q, fid in (("2023年", self.VOLUME_TON[0], "fact-vol-2023"),
+                                   ("2024年", self.VOLUME_TON[1], "fact-vol-2024")):
+                rows.append(_row("sales_volume", period, q, unit="吨",
+                                 caliber="分产品:白酒", fact_id=fid))
+        return rows
+
+    def _dataset(self, **kw):
+        return fa.freeze_from_facts(self._rows(**kw), periods=(2023, 2024),
+                                    entity="洋河股份", entity_id="002304.SZ",
+                                    as_of="2025-04-30", source_label="test:yah")
+
+    def _run(self, **kw):
+        return fa.run("operating_drivers", self._dataset(**kw))
+
+    def _yi(self, run, metric):
+        out = next(o for o in run.outputs if o.metric == metric)
+        return out.value / 1e8
+
+    def test_real_numbers_close_and_match_the_hand_computed_bridge(self):
+        run = self._run()
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        self.assertEqual(run.validation["failed"], [])
+        self.assertAlmostEqual(self._yi(run, "net_profit_change"), -33.4254, places=3)
+        self.assertAlmostEqual(self._yi(run, "gross_profit_change"), -38.0095, places=3)
+        self.assertAlmostEqual(self._yi(run, "revenue_scale_effect"), -31.5354, places=3)
+        self.assertAlmostEqual(self._yi(run, "gross_margin_effect"), -6.4741, places=3)
+        self.assertAlmostEqual(self._yi(run, "below_gross_line_change"), 4.5841, places=3)
+        self.assertAlmostEqual(self._yi(run, "revenue_scale_effect")
+                               + self._yi(run, "gross_margin_effect"),
+                               self._yi(run, "gross_profit_change"), places=2)
+        self.assertAlmostEqual(self._yi(run, "gross_profit_change")
+                               + self._yi(run, "below_gross_line_change"),
+                               self._yi(run, "net_profit_change"), places=2)
+
+    def test_line_items_explain_below_gross_line_and_residual_is_zero_when_complete(self):
+        run = self._run()
+        detail = next(o for o in run.outputs if o.metric == "net_profit_change_detail")
+        comp = {c["component_id"]: c["value"] / 1e8 for c in detail.components}
+        self.assertAlmostEqual(comp["income_tax_expense"], 7.2044, places=3,
+                               msg="所得税减少 7.20 亿元（随利润下滑的被动结果）")
+        self.assertAlmostEqual(comp["taxes_and_surcharges"], 4.4316, places=3)
+        self.assertAlmostEqual(comp["fair_value_change"], -3.5908, places=3)
+        self.assertAlmostEqual(comp["admin_expense"], -1.6031, places=3)
+        self.assertEqual(comp["unexplained_residual"], 0.0,
+                         "披露项目齐全时未解释差额必须为 0（不是摊派）")
+        diag = run.outputs[0].diagnostics
+        self.assertEqual(diag["line_items_missing"], [])
+        self.assertEqual(diag["line_items_rejected"], [])
+        self.assertEqual(diag["unexplained_residual_yuan"], 0.0)
+
+    def test_missing_disclosure_stays_in_residual_not_allocated(self):
+        """只给收入/成本/净利时：ΔB 全部进未解释差额，不得摊到任何已列项目。"""
+        run = self._run(drop=tuple(k for k in self.IS_YUAN
+                                   if k not in ("revenue", "operating_cost", "net_profit")),
+                        segment=False, volume=False)
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        detail = next(o for o in run.outputs if o.metric == "net_profit_change_detail")
+        listed = [c for c in detail.components
+                  if c["component_id"] != "unexplained_residual"]
+        self.assertEqual(listed, [], "没取到的项目不得凭空出现在分项里")
+        comp = {c["component_id"]: c["value"] / 1e8 for c in detail.components}
+        self.assertAlmostEqual(comp["unexplained_residual"], 4.5841, places=3)
+
+    def test_segments_are_alternative_cuts_not_additive(self):
+        run = self._run()
+        seg = next(o for o in run.outputs if o.metric == "gross_profit_change_by_segment")
+        comp = {c["component_id"]: c["value"] / 1e8 for c in seg.components}
+        self.assertAlmostEqual(comp["segment:分产品:白酒"], -37.9579, places=2)
+        self.assertAlmostEqual(comp["unclassified_gross_profit_change"], -0.0516, places=2,
+                               msg="公司毛利变化 − 已列口径：其他业务/口径差单独列出")
+        self.assertAlmostEqual(sum(comp.values()), self._yi(run, "gross_profit_change"),
+                               places=2)
+
+    def test_volume_price_with_structure_caveat(self):
+        run = self._run()
+        vp = next(o for o in run.outputs if o.metric == "volume_price_decomposition")
+        comp = {c["component_id"]: c["value"] / 1e8 for c in vp.components}
+        self.assertAlmostEqual(vp.value / 1e8, -42.1380, places=2,
+                               msg="白酒收入变化 −42.14 亿元")
+        self.assertAlmostEqual(comp["volume_effect"] + comp["price_effect"],
+                               vp.value / 1e8, places=2)
+        blob = " ".join(str(c.get("formula", "")) for c in vp.components)
+        self.assertIn("结构混合", blob, "均价必须标注含产品结构混合")
+        self.assertIn("不得称“提价效果”", blob, "不得把均价变化命名成提价效果")
+
+    def test_tampered_components_fail_independent_validation(self):
+        """两个分项 +1/−1（合计不变）→ 逐项核对/金样必须报红（R1-b 反例形状）。"""
+        from financial_analysis.operators import operating_drivers as od
+        ds = self._dataset()
+        payload = od.compute(ds)
+        gp = next(o for o in payload["outputs"] if o["metric"] == "gross_profit_change")
+        gp["components"][0]["value"] += 100_000_000.0    # 1 亿元：合计不变、分项被换
+        gp["components"][1]["value"] -= 100_000_000.0
+        res = fa.validation.validate_output(fa.registry.spec("operating_drivers"), ds, payload)
+        self.assertFalse(res["ok"], "分项被换而合计不变：必须失败")
+        self.assertIn("components", res["failed"])
+
+    def test_components_gold_matches_payload_item_by_item(self):
+        from financial_analysis.operators import operating_drivers as od
+        ds = self._dataset()
+        payload = od.compute(ds)
+        expect = od.components_gold(ds)
+        for metric, ids in od.SPEC.component_ids.items():
+            out = next(o for o in payload["outputs"] if o["metric"] == metric)
+            got = {c["component_id"]: c["value"] for c in out["components"]}
+            self.assertEqual(set(got), set(ids), metric)
+            for cid in ids:
+                want, _unit = expect[metric][cid]
+                self.assertAlmostEqual(got[cid], float(want), places=2,
+                                       msg=f"{metric}.{cid}")
 
 
 if __name__ == "__main__":

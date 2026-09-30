@@ -80,7 +80,7 @@ QUESTION_TYPES: tuple[QuestionType, ...] = (
                   "利润由什么构成", "分析利润"),
         needs_metrics=("net_profit", "gross_profit"),
         needs_note="需要同主体同口径的两期归母净利润与毛利（利润桥的两端）",
-        models=("profit_bridge",),
+        models=("profit_bridge", "operating_drivers"),
     ),
     QuestionType(
         qid="cash_conversion", label="利润到现金的转化",
@@ -114,8 +114,9 @@ QUESTION_TYPES: tuple[QuestionType, ...] = (
                   "营收变动"),
         needs_metrics=("sales_volume", "average_price", "revenue_by_product"),
         needs_note=("需要可比产品集合的销量与平均单价（或分产品收入），且口径可比；"
-                    "资料里没有就先补披露，**不拿无关模型充数**"),
-        models=(),                        # 目前没有注册模型能回答量价分解
+                    "资料里没有就先补披露，**不拿无关模型充数**。"
+                    "有同口径销量＋收入两期观察时由 operating_drivers 给量价分解（含结构混合）"),
+        models=("operating_drivers",),    # U1：量价分解已有注册算子（口径可比为前提）
     ),
     # Q4（统计预测）：**本版本不开放**。它必须是一条**显式规则**而不是"没命中"——
     # 未命中会退回"按输入齐备性选模型"，于是"预测明年收入"会拿到利润桥/现金质量/营运资金
