@@ -416,6 +416,77 @@
     },
     "closure_note": "对账差额≈0 表示披露调节项与经营现金流自洽；差额非零说明有调节项没取到，报告不得写“完整调节”"
   },
-  "brief_analysis_card": "## 分析卡\n\n> 运行 run=fdc8d4d464e7（模型 cash_reconciliation 1.0.0；性质 现金形成机制（披露调节表复算）；数据集 8e99cf4db927；参数 44136fa355b3678a；验证 通过）\n- **洋河股份 2024年 净利润到经营现金流的调节（2024年）**：净利润到经营现金流的调节（2024年） +4,628,711,237.28元；其中 合并净利润 +6,666,455,819.96元、非现金项（折旧摊销/减值/递延税/公允价值等） +957,095,461.74元、营运资本项（存货/经营性应收/经营性应付） -3,325,136,541.13元、其他调节项 +330,296,496.71元、未解释差额（未取得的披露调节项） +0.00元　output fdc8d4d464e7-00-operating_cashflow_reconciliation_cur\n  - 贡献项：合并净利润 +6,666,455,819.96元（= 披露值）\n  - 贡献项：非现金项（折旧摊销/减值/递延税/公允价值等） +957,095,461.74元（= asset_impairment_provision＋depreciation＋right_of_use_depreciation＋intangible_amortization＋long_term_prepaid_amortization＋disposal_long_asset_loss＋fixed_asset_scrap_loss＋fair_value_change_loss＋finance_expense_adjust＋investment_loss＋deferred_tax_asset_decrease＋deferred_tax_liability_increase）\n  - 贡献项：营运资本项（存货/经营性应收/经营性应付） -3,325,136,541.13元（= inventory_decrease＋operating_receivable_decrease＋operating_payable_increase）\n  - 贡献项：其他调节项 +330,296,496.71元（= other_cashflow_adjustments）\n  - 贡献项：未解释差额（未取得的披露调节项） +0.00元（= (经营现金流 − 合并净利润) − 已列调节项合计）\n  - 未解释段：+0.00元（这一段含费用、税项、投资收益、少数股东等：**缺明细表时只能说“观察成立、原因待证”**，不得把毛利率的百分点差当成金额归因）\n- **洋河股份 2023年 净利润到经营现金流的调节（2023年）**：净利润到经营现金流的调节（2023年） +6,130,220,867.96元；其中 合并净利润 +10,020,768,556.47元、非现金项（折旧摊销/减值/递延税/公允价值等） +713,751,150.58元、营运资本项（存货/经营性应收/经营性应付） -4,429,555,248.01元、其他调节项 -174,743,591.08元、未解释差额（未取得的披露调节项） +0.00元　output fdc8d4d464e7-01-operating_cashflow_reconciliation_prev\n  - 贡献项：合并净利润 +10,020,768,556.47元（= 披露值）\n  - 贡献项：非现金项（折旧摊销/减值/递延税/公允价值等） +713,751,150.58元（= asset_impairment_provision＋depreciation＋right_of_use_depreciation＋intangible_amortization＋long_term_prepaid_amortization＋disposal_long_asset_loss＋fixed_asset_scrap_loss＋fair_value_change_loss＋finance_expense_adjust＋investment_loss＋deferred_tax_asset_decrease＋deferred_tax_liability_increase）\n  - 贡献项：营运资本项（存货/经营性应收/经营性应付） -4,429,555,248.01元（= inventory_decrease＋operating_receivable_decrease＋operating_payable_increase）\n  - 贡献项：其他调节项 -174,743,591.08元（= other_cashflow_adjustments）\n  - 贡献项：未解释差额（未取得的披露调节项） +0.00元（= (经营现金流 − 合并净利润) − 已列调节项合计）\n- **洋河股份 2024年较2023年 现金缺口变化（经营现金流−合并净利润，2024年较2023年）**：现金缺口变化（经营现金流−合并净利润，2024年较2023年） +1,852,803,105.83元；其中 合并净利润变化（取负：利润少→缺口小） +3,354,312,736.51元、调节项合计变化 -1,501,509,630.68元　output fdc8d4d464e7-02-cash_gap_change\n  - 贡献项：合并净利润变化（取负：利润少→缺口小） +3,354,312,736.51元（= −(本期合并净利润 − 上期合并净利润)）\n  - 贡献项：调节项合计变化 -1,501,509,630.68元（= 本期调节项合计 − 上期调节项合计）\n- **洋河股份 2024年 最大支撑项（2024年调节额）**：最大支撑项（2024年调节额） +586,592,227.18元；其中 无明细贡献项　output fdc8d4d464e7-03-largest_support\n- **洋河股份 2024年 最大拖累项（2024年调节额）**：最大拖累项（2024年调节额） -1,830,670,724.59元；其中 无明细贡献项　output fdc8d4d464e7-04-largest_drag\n- **2024年 净利润→经营现金流**：合并净利润 +66.66亿元 ＋ 调节项 -20.38亿元 ＝ 经营现金流 +46.29亿元（未解释差额 +0.00亿元）\n  - 分组：non_cash +9.57亿元、working_capital -33.25亿元、other +3.30亿元\n- **2023年 净利润→经营现金流**：合并净利润 +100.21亿元 ＋ 调节项 -38.91亿元 ＝ 经营现金流 +61.30亿元（未解释差额 +0.00亿元）\n  - 分组：non_cash +7.14亿元、working_capital -44.30亿元、other -1.75亿元\n- **最大支撑/拖累（本期调节额）**\n  - 支撑：固定资产折旧、油气资产折耗、生产性生物资产折旧 +5.87亿元（非现金项：折旧摊销/减值/递延税/公允价值等，不涉及当期现金收付）\n  - 拖累：经营性应付项目的增加（减少以“－”号填列） -18.31亿元（营运资本项：存货与经营性应收应付的增减）\n- **现金缺口变化（2024年较2023年）**：+18.53亿元 ＝ 合并净利润变化（取负：利润少→缺口小） +33.54亿元、调节项合计变化 -15.02亿元；缺口＝经营现金流−合并净利润，缺口缩小不等于现金变好\n- 说明：对账差额≈0 表示披露调节项与经营现金流自洽；差额非零说明有调节项没取到，报告不得写“完整调节”\n- 下一项验证动作：对最大的支撑/拖累项各找一条披露依据（应付/存货/应收的明细或附注），再用资产负债表变动与结算条款做旁证；差额非零时先补未取得的调节项\n### 分析卡选择说明\n- 说明：本版没有人工选择记录，默认采用每个模型的第一条已验证运行（可在分析工作台显式选择某一条）\n",
-  "brief_analysis_card_chars": 3381
+  "reverse_scenario": {
+    "持平收入（g=0）": {
+      "status": "validated",
+      "validation_failed": [],
+      "thresholds": {
+        "assumed_revenue": 28876296993.56,
+        "below_gross_block": 14451690034.78,
+        "net_profit_target": 6673388602.12,
+        "margin_base": 0.7315715945715381,
+        "margin_threshold": 0.7315715945715381,
+        "margin_gap_pp": 0.0,
+        "capital_per_day": 79113142.44810958,
+        "formula": "m* = (基期归母净利 + 毛利线以下净额×(1+e)) / (基期收入×(1+g))；回款敏感性 = 收入'/365 × Δ天数（单项）",
+        "caveats": "阈值是单因素反推：给出“需要什么”，不表示可达；毛利线以下净额含费用/税项/投资收益/少数股东，不是纯费用；回款天数只作单项敏感性，不等同经营现金流预测"
+      },
+      "outputs": {
+        "scenario_net_profit": 6673388602.12,
+        "scenario_sensitivity": 288762969.94,
+        "margin_threshold_to_hold_base_profit": 73.16,
+        "margin_gap_to_threshold_pp": 0.0,
+        "collection_days_capital_per_day": 79113142.45,
+        "collection_days_sensitivity_10d": 791131424.48
+      }
+    },
+    "收入 +5%（模型默认）": {
+      "status": "validated",
+      "validation_failed": [],
+      "thresholds": {
+        "assumed_revenue": 30320111843.238,
+        "below_gross_block": 14451690034.78,
+        "net_profit_target": 6673388602.12,
+        "margin_base": 0.7315715945715381,
+        "margin_threshold": 0.6967348519728934,
+        "margin_gap_pp": -3.483674259864467,
+        "capital_per_day": 83068799.57051507,
+        "formula": "m* = (基期归母净利 + 毛利线以下净额×(1+e)) / (基期收入×(1+g))；回款敏感性 = 收入'/365 × Δ天数（单项）",
+        "caveats": "阈值是单因素反推：给出“需要什么”，不表示可达；毛利线以下净额含费用/税项/投资收益/少数股东，不是纯费用；回款天数只作单项敏感性，不等同经营现金流预测"
+      },
+      "outputs": {
+        "scenario_net_profit": 8032843652.4,
+        "scenario_sensitivity": 288762969.94,
+        "margin_threshold_to_hold_base_profit": 69.67,
+        "margin_gap_to_threshold_pp": -3.48,
+        "collection_days_capital_per_day": 83068799.57,
+        "collection_days_sensitivity_10d": 830687995.71
+      }
+    },
+    "收入 −12.83%": {
+      "status": "validated",
+      "validation_failed": [],
+      "thresholds": {
+        "assumed_revenue": 25171468089.28625,
+        "below_gross_block": 14451690034.78,
+        "net_profit_target": 6673388602.12,
+        "margin_base": 0.7315715945715381,
+        "margin_threshold": 0.8392469824154388,
+        "margin_gap_pp": 10.76753878439008,
+        "capital_per_day": 68962926.27201714,
+        "formula": "m* = (基期归母净利 + 毛利线以下净额×(1+e)) / (基期收入×(1+g))；回款敏感性 = 收入'/365 × Δ天数（单项）",
+        "caveats": "阈值是单因素反推：给出“需要什么”，不表示可达；毛利线以下净额含费用/税项/投资收益/少数股东，不是纯费用；回款天数只作单项敏感性，不等同经营现金流预测"
+      },
+      "outputs": {
+        "scenario_net_profit": 3963041013.01,
+        "scenario_sensitivity": 288762969.94,
+        "margin_threshold_to_hold_base_profit": 83.92,
+        "margin_gap_to_threshold_pp": 10.77,
+        "collection_days_capital_per_day": 68962926.27,
+        "collection_days_sensitivity_10d": 689629262.72
+      }
+    }
+  },
+  "brief_analysis_card": "## 分析卡\n\n> 运行 run=fdc8d4d464e7（模型 cash_reconciliation 1.0.0；性质 现金形成机制（披露调节表复算）；数据集 8e99cf4db927；参数 44136fa355b3678a；验证 通过）\n- **洋河股份 2024年 净利润到经营现金流的调节（2024年）**：净利润到经营现金流的调节（2024年） +4,628,711,237.28元；其中 合并净利润 +6,666,455,819.96元、非现金项（折旧摊销/减值/递延税/公允价值等） +957,095,461.74元、营运资本项（存货/经营性应收/经营性应付） -3,325,136,541.13元、其他调节项 +330,296,496.71元、未解释差额（未取得的披露调节项） +0.00元　output fdc8d4d464e7-00-operating_cashflow_reconciliation_cur\n  - 贡献项：合并净利润 +6,666,455,819.96元（= 披露值）\n  - 贡献项：非现金项（折旧摊销/减值/递延税/公允价值等） +957,095,461.74元（= asset_impairment_provision＋depreciation＋right_of_use_depreciation＋intangible_amortization＋long_term_prepaid_amortization＋disposal_long_asset_loss＋fixed_asset_scrap_loss＋fair_value_change_loss＋finance_expense_adjust＋investment_loss＋deferred_tax_asset_decrease＋deferred_tax_liability_increase）\n  - 贡献项：营运资本项（存货/经营性应收/经营性应付） -3,325,136,541.13元（= inventory_decrease＋operating_receivable_decrease＋operating_payable_increase）\n  - 贡献项：其他调节项 +330,296,496.71元（= other_cashflow_adjustments）\n  - 贡献项：未解释差额（未取得的披露调节项） +0.00元（= (经营现金流 − 合并净利润) − 已列调节项合计）\n  - 未解释段：+0.00元（这一段含费用、税项、投资收益、少数股东等：**缺明细表时只能说“观察成立、原因待证”**，不得把毛利率的百分点差当成金额归因）\n- **洋河股份 2023年 净利润到经营现金流的调节（2023年）**：净利润到经营现金流的调节（2023年） +6,130,220,867.96元；其中 合并净利润 +10,020,768,556.47元、非现金项（折旧摊销/减值/递延税/公允价值等） +713,751,150.58元、营运资本项（存货/经营性应收/经营性应付） -4,429,555,248.01元、其他调节项 -174,743,591.08元、未解释差额（未取得的披露调节项） +0.00元　output fdc8d4d464e7-01-operating_cashflow_reconciliation_prev\n  - 贡献项：合并净利润 +10,020,768,556.47元（= 披露值）\n  - 贡献项：非现金项（折旧摊销/减值/递延税/公允价值等） +713,751,150.58元（= asset_impairment_provision＋depreciation＋right_of_use_depreciation＋intangible_amortization＋long_term_prepaid_amortization＋disposal_long_asset_loss＋fixed_asset_scrap_loss＋fair_value_change_loss＋finance_expense_adjust＋investment_loss＋deferred_tax_asset_decrease＋deferred_tax_liability_increase）\n  - 贡献项：营运资本项（存货/经营性应收/经营性应付） -4,429,555,248.01元（= inventory_decrease＋operating_receivable_decrease＋operating_payable_increase）\n  - 贡献项：其他调节项 -174,743,591.08元（= other_cashflow_adjustments）\n  - 贡献项：未解释差额（未取得的披露调节项） +0.00元（= (经营现金流 − 合并净利润) − 已列调节项合计）\n- **洋河股份 2024年较2023年 现金缺口变化（经营现金流−合并净利润，2024年较2023年）**：现金缺口变化（经营现金流−合并净利润，2024年较2023年） +1,852,803,105.83元；其中 合并净利润变化（取负：利润少→缺口小） +3,354,312,736.51元、调节项合计变化 -1,501,509,630.68元　output fdc8d4d464e7-02-cash_gap_change\n  - 贡献项：合并净利润变化（取负：利润少→缺口小） +3,354,312,736.51元（= −(本期合并净利润 − 上期合并净利润)）\n  - 贡献项：调节项合计变化 -1,501,509,630.68元（= 本期调节项合计 − 上期调节项合计）\n- **洋河股份 2024年 最大支撑项（2024年调节额）**：最大支撑项（2024年调节额） +586,592,227.18元；其中 无明细贡献项　output fdc8d4d464e7-03-largest_support\n- **洋河股份 2024年 最大拖累项（2024年调节额）**：最大拖累项（2024年调节额） -1,830,670,724.59元；其中 无明细贡献项　output fdc8d4d464e7-04-largest_drag\n- **2024年 净利润→经营现金流**：合并净利润 +66.66亿元 ＋ 调节项 -20.38亿元 ＝ 经营现金流 +46.29亿元（未解释差额 +0.00亿元）\n  - 分组：non_cash +9.57亿元、working_capital -33.25亿元、other +3.30亿元\n- **2023年 净利润→经营现金流**：合并净利润 +100.21亿元 ＋ 调节项 -38.91亿元 ＝ 经营现金流 +61.30亿元（未解释差额 +0.00亿元）\n  - 分组：non_cash +7.14亿元、working_capital -44.30亿元、other -1.75亿元\n- **最大支撑/拖累（本期调节额）**\n  - 支撑：固定资产折旧、油气资产折耗、生产性生物资产折旧 +5.87亿元（非现金项：折旧摊销/减值/递延税/公允价值等，不涉及当期现金收付）\n  - 拖累：经营性应付项目的增加（减少以“－”号填列） -18.31亿元（营运资本项：存货与经营性应收应付的增减）\n- **现金缺口变化（2024年较2023年）**：+18.53亿元 ＝ 合并净利润变化（取负：利润少→缺口小） +33.54亿元、调节项合计变化 -15.02亿元；缺口＝经营现金流−合并净利润，缺口缩小不等于现金变好\n- 说明：对账差额≈0 表示披露调节项与经营现金流自洽；差额非零说明有调节项没取到，报告不得写“完整调节”\n- 下一项验证动作：对最大的支撑/拖累项各找一条披露依据（应付/存货/应收的明细或附注），再用资产负债表变动与结算条款做旁证；差额非零时先补未取得的调节项\n### 分析卡（scenario_sensitivity）\n\n> 运行 run=b91832c8d16c（模型 scenario_sensitivity 1.0.0；性质 条件情景（假设成立时）；数据集 8e99cf4db927；参数 397fe9b95b1b23aa；验证 通过）\n- **洋河股份 2024年（使用者情景（收入 -12.83%／毛利率 +0.00pp／隐含块 +0.00%，较基期低）） 情景归母净利润（假设成立时）**：情景归母净利润（假设成立时） +3,963,041,013.01元；其中 基准（参数 0，复现基期 6673388602.12元） +6,673,388,602.12元、使用者情景（收入 -12.83%／毛利率 +0.00pp／隐含块 +0.00%，较基期低） +3,963,041,013.01元、反向对照（收入 -12.83%／毛利率 -1.00pp／隐含块 +0.00%，较基期低） +3,711,326,332.11元　output b91832c8d16c-00-scenario_net_profit\n  - 贡献项：基准（参数 0，复现基期 6673388602.12元） +6,673,388,602.12元（= g=0, m=0, e=0）\n  - 贡献项：使用者情景（收入 -12.83%／毛利率 +0.00pp／隐含块 +0.00%，较基期低） +3,963,041,013.01元（= g=-0.1283（-12.83%）, m=+0.0000（+0.00pp）, e=+0.0000（+0.00%））\n  - 贡献项：反向对照（收入 -12.83%／毛利率 -1.00pp／隐含块 +0.00%，较基期低） +3,711,326,332.11元（= g=-0.1283（-12.83%）, m=-0.0100（-1.00pp）, e=+0.0000（+0.00%））\n  - 未解释段：+0.00元（这一段含费用、税项、投资收益、少数股东等：**缺明细表时只能说“观察成立、原因待证”**，不得把毛利率的百分点差当成金额归因）\n- **洋河股份 2024年（最敏感：毛利率 +1pp） 单因素敏感度（每 +1 个百分点）**：单因素敏感度（每 +1 个百分点） +288,762,969.94元；其中 毛利率 +1pp +288,762,969.94元、收入 +1pp +211,250,786.37元、费用 -1pp +144,516,900.35元　output b91832c8d16c-01-scenario_sensitivity\n  - 贡献项：毛利率 +1pp +288,762,969.94元（= 单因素 +1pp）\n  - 贡献项：收入 +1pp +211,250,786.37元（= 单因素 +1pp）\n  - 贡献项：费用 -1pp +144,516,900.35元（= 单因素 +1pp）\n- **洋河股份 2024年（使用者情景（收入 -12.83%／毛利率 +0.00pp／隐含块 +0.00%，较基期低）） 维持基期归母净利所需毛利率（给定假设收入）**：维持基期归母净利所需毛利率（给定假设收入） +83.92%；其中 无明细贡献项　output b91832c8d16c-02-margin_threshold_to_hold_base_profit\n- **洋河股份 2024年（使用者情景（收入 -12.83%／毛利率 +0.00pp／隐含块 +0.00%，较基期低）） 所需毛利率与基期毛利率之差（百分点）**：所需毛利率与基期毛利率之差（百分点） +10.77%（pp）；其中 无明细贡献项　output b91832c8d16c-03-margin_gap_to_threshold_pp\n- **洋河股份 2024年（使用者情景（收入 -12.83%／毛利率 +0.00pp／隐含块 +0.00%，较基期低）） 回款天数敏感性：每 1 天的资金占用**：回款天数敏感性：每 1 天的资金占用 +68,962,926.27元；其中 无明细贡献项　output b91832c8d16c-04-collection_days_capital_per_day\n- **洋河股份 2024年（使用者情景（收入 -12.83%／毛利率 +0.00pp／隐含块 +0.00%，较基期低）） 回款天数敏感性：±10 天的资金占用（单项，非现金流预测）**：回款天数敏感性：±10 天的资金占用（单项，非现金流预测） +689,629,262.72元；其中 无明细贡献项　output b91832c8d16c-05-collection_days_sensitivity_10d\n- 下一项验证动作：明确每条假设的来源与区间（谁设定、依据什么），并对最敏感的那一项做区间对照\n### 分析卡选择说明\n- 说明：本版没有人工选择记录，默认采用每个模型的第一条已验证运行（可在分析工作台显式选择某一条）\n",
+  "brief_analysis_card_chars": 5419
 }

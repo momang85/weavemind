@@ -26,6 +26,9 @@ LIMITS = (
     "假设由使用者设定并逐条标注来源；未披露的参数不得当成事实",
     "基准情景必须复现基期（参数全 0 时与基期一致）——不一致说明模型或输入有问题",
     "只做单因素与已声明组合的敏感性，不做分布假设下的随机模拟",
+    "反向阈值（维持基期利润所需毛利率）是**单因素反推**：给出“需要什么”，"
+    "不表示该水平可达，也不含实现路径与时间",
+    "回款天数只作**单项敏感性**（收入/365×Δ天）：不等同经营现金流预测，也不替代现金调节表",
 )
 
 SPEC = ModelSpec(
@@ -44,6 +47,15 @@ SPEC = ModelSpec(
                    structure="scenarios"),
         OutputSpec("scenario_sensitivity", "单因素敏感度（每 +1 个百分点的影响）",
                    kind="amount", structure="sensitivity"),
+        # U2 反向情景（2026-10-01）：从"调参数"变成"**改变结论需要什么**"。
+        OutputSpec("margin_threshold_to_hold_base_profit",
+                   "维持基期归母净利所需毛利率（给定假设收入）", kind="pct"),
+        OutputSpec("margin_gap_to_threshold_pp",
+                   "所需毛利率与基期毛利率之差（百分点）", kind="pct"),
+        OutputSpec("collection_days_capital_per_day",
+                   "回款天数敏感性：假设收入下每 1 天的资金占用", kind="amount"),
+        OutputSpec("collection_days_sensitivity_10d",
+                   "回款天数敏感性：±10 天的资金占用（单项，非现金流预测）", kind="amount"),
     ),
     # 参数界限写进契约：超出范围直接判失败，不允许"随手放大假设"
     allowed_params={"revenue_growth": (-0.5, 0.5), "gross_margin_delta": (-0.3, 0.3),
@@ -103,6 +115,29 @@ def _scenario(base: dict, *, growth: float, margin_delta: float,
     implied_below_gross = gp_base - _d(base["net_profit"])
     expense = implied_below_gross * (1 + _d(expense_ratio))
     return gp - expense
+
+
+def threshold_plan(base: dict, *, growth: float, expense_ratio: float = 0.0) -> dict:
+    """反向情景的**确定性**反推（U2）：给定假设收入，维持基期归母净利需要多少毛利率。
+
+    `NP1 = R1 × m1 − B0'`，其中 `B0' = 基期(毛利 − 归母净利) × (1+e)` 是**毛利线以下净额**
+    （含费用、税项、投资收益、少数股东等，**不能叫纯费用**）。令 `NP1 = 基期归母净利` 得
+    `m* = (基期归母净利 + B0') / R1`；与基期毛利率之差即"毛利率余量/缺口"（百分点）。
+    另给有边界的回款天数单项敏感性：`收入'/365` 为每一天的资金占用。
+    """
+    rev_base = _d(base["revenue"])
+    rev1 = rev_base * (1 + _d(growth))
+    block = (_d(base["gross_profit"]) - _d(base["net_profit"])) * (1 + _d(expense_ratio))
+    np_target = _d(base["net_profit"])
+    margin_base = (_d(base["gross_profit"]) / rev_base) if rev_base else Decimal(0)
+    m_star = ((np_target + block) / rev1) if rev1 else None
+    per_day = rev1 / Decimal(365)
+    return {"revenue_assumed": rev1, "block": block, "np_target": np_target,
+            "margin_base": margin_base, "margin_threshold": m_star,
+            "margin_gap_pp": ((m_star - margin_base) * 100) if m_star is not None else None,
+            "per_day_capital": per_day,
+            "formula": ("m* = (基期归母净利 + 毛利线以下净额×(1+e)) / (基期收入×(1+g))；"
+                        "回款敏感性 = 收入'/365 × Δ天数（单项）")}
 
 
 def compute(dataset, params: dict | None = None) -> dict:
@@ -166,6 +201,9 @@ def compute(dataset, params: dict | None = None) -> dict:
                 if k in params]
     _defaults = [f"使用者情景：{up_label}（{'使用者提供' if _assumed else '未提供，用声明默认值'}）",
                  f"反向对照：{down_label}"]
+    # 反向阈值按**使用者情景的收入假设**求解（e 与使用者情景一致）：回答"在这个收入下，
+    # 毛利率至少要多少才能维持基期利润"。基准（g=0）时阈值恰好等于基期毛利率。
+    th = threshold_plan(base, growth=_g_up, expense_ratio=_e_up)
     return {
         "periods": (period,),
         "formula": ("情景归母净利 = 收入×(1+g) × (基期毛利率+m) − 毛利线以下隐含块×(1+e)；"
@@ -189,6 +227,21 @@ def compute(dataset, params: dict | None = None) -> dict:
             "direction_ok": direction_ok,
             "closure": "0",
             "no_probability": "无校准分布：不显示发生概率，也不显示预测置信区间",
+            "thresholds": {
+                "assumed_revenue": float(th["revenue_assumed"]),
+                "below_gross_block": float(th["block"]),
+                "net_profit_target": float(th["np_target"]),
+                "margin_base": float(th["margin_base"]),
+                "margin_threshold": (float(th["margin_threshold"])
+                                     if th["margin_threshold"] is not None else None),
+                "margin_gap_pp": (float(th["margin_gap_pp"])
+                                  if th["margin_gap_pp"] is not None else None),
+                "capital_per_day": float(th["per_day_capital"]),
+                "formula": th["formula"],
+                "caveats": ("阈值是单因素反推：给出“需要什么”，不表示可达；"
+                            "毛利线以下净额含费用/税项/投资收益/少数股东，不是纯费用；"
+                            "回款天数只作单项敏感性，不等同经营现金流预测"),
+            },
         },
         "outputs": [
             {"metric": "scenario_net_profit", "label": "情景归母净利润（假设成立时）",
@@ -210,6 +263,26 @@ def compute(dataset, params: dict | None = None) -> dict:
              "components": [{"component_id": _SENS_ID[k], "label": k, "value": q(v),
                              "unit": unit, "formula": "单因素 +1pp"}
                             for k, v in ranked]},
+            # —— 反向情景：改变结论需要什么（U2）——
+            {"metric": "margin_threshold_to_hold_base_profit",
+             "label": "维持基期归母净利所需毛利率（给定假设收入）",
+             "value": (q(th["margin_threshold"] * 100)
+                       if th["margin_threshold"] is not None else None),
+             "unit": "%", "output_period": f"{period}（{up_label}）",
+             "components": [], "residual": None},
+            {"metric": "margin_gap_to_threshold_pp",
+             "label": "所需毛利率与基期毛利率之差（百分点）",
+             "value": (q(th["margin_gap_pp"]) if th["margin_gap_pp"] is not None else None),
+             "unit": "%（pp）", "output_period": f"{period}（{up_label}）",
+             "components": [], "residual": None},
+            {"metric": "collection_days_capital_per_day",
+             "label": "回款天数敏感性：每 1 天的资金占用",
+             "value": q(th["per_day_capital"]), "unit": unit,
+             "output_period": f"{period}（{up_label}）", "components": [], "residual": None},
+            {"metric": "collection_days_sensitivity_10d",
+             "label": "回款天数敏感性：±10 天的资金占用（单项，非现金流预测）",
+             "value": q(th["per_day_capital"] * 10), "unit": unit,
+             "output_period": f"{period}（{up_label}）", "components": [], "residual": None},
         ],
         "limits": LIMITS,
     }
@@ -302,7 +375,7 @@ def components_gold(dataset, params: dict | None = None) -> dict:
 
 
 def gold(dataset, params: dict | None = None) -> dict:
-    """独立金样：基准复现必须等于基期净利（差 0）；上行情景用 Decimal 重算。"""
+    """独立金样：基准复现必须等于基期净利（差 0）；上行情景与反向阈值用 Decimal 重算。"""
     params = dict(params or {})
     period = dataset.period_at(0)
     rev = dataset.require("revenue", period)
@@ -316,4 +389,15 @@ def gold(dataset, params: dict | None = None) -> dict:
             "net_profit": float(np_.value)}
     g_up, m_up, e_up, _g_down, _m_down = _assumptions(params)
     up = _scenario(base, growth=g_up, margin_delta=m_up, expense_ratio=e_up)
-    return {"scenario_net_profit": float(up.quantize(Decimal("0.01")))}
+    th = threshold_plan(base, growth=g_up, expense_ratio=e_up)
+    out = {"scenario_net_profit": float(up.quantize(Decimal("0.01")))}
+    if th["margin_threshold"] is not None:
+        out["margin_threshold_to_hold_base_profit"] = float(
+            (th["margin_threshold"] * 100).quantize(Decimal("0.01")))
+        out["margin_gap_to_threshold_pp"] = float(
+            th["margin_gap_pp"].quantize(Decimal("0.01")))
+    out["collection_days_capital_per_day"] = float(
+        th["per_day_capital"].quantize(Decimal("0.01")))
+    out["collection_days_sensitivity_10d"] = float(
+        (th["per_day_capital"] * 10).quantize(Decimal("0.01")))
+    return out

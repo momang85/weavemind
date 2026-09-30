@@ -2584,5 +2584,77 @@ class TestCashReconciliationYanghe(unittest.TestCase):
             self.assertIn(needle, block, f"现金调节正文缺「{needle}」")
 
 
+class TestScenarioReverseThresholds(unittest.TestCase):
+    """U2 反向情景：**要改变结论需要什么**——维持基期利润所需毛利率 + 回款天数单项敏感性。
+
+    用洋河 2024 年真实披露数（元）：收入 28,876,296,993.56、毛利 21,125,078,636.90、
+    归母净利 6,673,388,602.12（毛利率 73.1572%）。
+    """
+
+    def _ds(self):
+        rows = [
+            _row("revenue", "2024年", 28_876_296_993.56, unit="元"),
+            _row("gross_profit", "2024年", 21_125_078_636.90, unit="元"),
+            _row("net_profit", "2024年", 6_673_388_602.12, unit="元"),
+        ]
+        return fa.freeze_from_facts(rows, periods=(2024,), entity="洋河股份",
+                                    entity_id="002304.SZ", as_of="2025-04-30",
+                                    source_label="test:scenario")
+
+    def _out(self, run, metric):
+        return next(o for o in run.outputs if o.metric == metric)
+
+    def test_flat_revenue_threshold_reproduces_base_margin(self):
+        """参数全 0 时阈值必须恰好等于基期毛利率（基准复现的同一性质）。"""
+        run = fa.run("scenario_sensitivity", self._ds(),
+                     params={"revenue_growth": 0.0, "gross_margin_delta": 0.0})
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        self.assertEqual(run.validation["failed"], [])
+        self.assertAlmostEqual(self._out(run, "margin_threshold_to_hold_base_profit").value,
+                               73.16, places=2)
+        self.assertAlmostEqual(self._out(run, "margin_gap_to_threshold_pp").value,
+                               0.0, places=2)
+
+    def test_threshold_answers_what_would_be_needed(self):
+        run = fa.run("scenario_sensitivity", self._ds(),
+                     params={"revenue_growth": -0.1283, "gross_margin_delta": 0.0})
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        th = self._out(run, "margin_threshold_to_hold_base_profit")
+        gap = self._out(run, "margin_gap_to_threshold_pp")
+        self.assertAlmostEqual(th.value, 83.92, places=2,
+                               msg="收入再降 12.83% 时，要维持 66.73 亿利润需 83.92% 毛利率")
+        self.assertAlmostEqual(gap.value, 10.77, places=2)
+        self.assertEqual(th.unit, "%")
+        self.assertIn("%", gap.unit)
+        diag = run.outputs[0].diagnostics["thresholds"]
+        self.assertAlmostEqual(diag["assumed_revenue"] / 1e8, 251.71, places=2)
+        self.assertIn("单因素反推", diag["caveats"])
+
+    def test_collection_days_sensitivity_is_bounded_and_labelled(self):
+        run = fa.run("scenario_sensitivity", self._ds(),
+                     params={"revenue_growth": 0.0})
+        per_day = self._out(run, "collection_days_capital_per_day")
+        ten = self._out(run, "collection_days_sensitivity_10d")
+        self.assertAlmostEqual(per_day.value / 1e8, 0.79, places=2,
+                               msg="收入/365＝每天的资金占用（288.76 亿 ÷ 365 ≈ 0.79 亿/天）")
+        self.assertAlmostEqual(ten.value / 1e8, 7.91, places=2,
+                               msg="±10 天 ≈ 7.91 亿元资金占用")
+        self.assertAlmostEqual(ten.value, per_day.value * 10, delta=1.0,
+                               msg="10 天 = 单日×10（各自按分四舍五入，允许分级差）")
+        self.assertIn("非现金流预测", ten.label)
+
+    def test_tampered_threshold_fails_independent_validation(self):
+        from financial_analysis.operators import scenario as sc
+        ds = self._ds()
+        payload = sc.compute(ds, {"revenue_growth": -0.1283})
+        th = next(o for o in payload["outputs"]
+                  if o["metric"] == "margin_threshold_to_hold_base_profit")
+        th["value"] = float(th["value"]) + 5.0        # 抬高 5 个百分点
+        res = fa.validation.validate_output(fa.registry.spec("scenario_sensitivity"),
+                                            ds, payload)
+        self.assertFalse(res["ok"], "阈值被改：独立金样必须报红")
+        self.assertIn("gold", res["failed"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

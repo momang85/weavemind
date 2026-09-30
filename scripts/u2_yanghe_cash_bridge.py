@@ -60,6 +60,23 @@ def main() -> int:
                             "unit": c.get("unit")} for c in (o.components or ())]})
         print(f"  {o.metric:44} {o.value:>20,.2f}")
     diag = dict((run.outputs[0].diagnostics or {})) if run.outputs else {}
+    # 反向情景（U2）：维持基期利润所需毛利率 + 回款天数单项敏感性
+    scen = {}
+    for label, params in (("持平收入（g=0）", {"revenue_growth": 0.0,
+                                              "gross_margin_delta": 0.0}),
+                          ("收入 +5%（模型默认）", {}),
+                          ("收入 −12.83%", {"revenue_growth": -0.1283,
+                                            "gross_margin_delta": 0.0})):
+        srun = fa.run("scenario_sensitivity", ds, params=params)
+        scen[label] = {
+            "status": str(srun.status),
+            "validation_failed": list(srun.validation.get("failed") or []),
+            "thresholds": ((srun.outputs[0].diagnostics or {}).get("thresholds")
+                           if srun.outputs else {}),
+            "outputs": {o.metric: o.value for o in srun.outputs},
+        }
+        print(f"反向情景 {label}: {srun.status} "
+              f"阈值={scen[label]['thresholds'].get('margin_threshold')}")
     brief = ""
     tmp = Path(tempfile.mkdtemp(prefix="u2_evidence_"))
     old = ws_mod.WORKSPACE_ROOT
@@ -69,6 +86,9 @@ def main() -> int:
         ws = ws_mod.task_workspace(tid)
         ws.mkdir(parents=True, exist_ok=True)
         fa_store.save_run(ws, run)
+        fa_store.save_run(ws, fa.run("scenario_sensitivity", ds,
+                                     params={"revenue_growth": -0.1283,
+                                             "gross_margin_delta": 0.0}))
         brief = report_brief._analysis_card_block(tid, ws_dir=ws)
     finally:
         ws_mod.WORKSPACE_ROOT = old
@@ -97,6 +117,7 @@ def main() -> int:
             ("unit", "reconciliation", "largest_support", "largest_drag",
              "items_missing", "closure_note")
         },
+        "reverse_scenario": scen,
         "brief_analysis_card": brief[:8000],
         "brief_analysis_card_chars": len(brief),
     }
