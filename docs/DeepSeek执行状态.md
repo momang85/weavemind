@@ -116,6 +116,10 @@
 > - **K2 如实记账**：两包复算仍 **7/7**（`mismatches=[]`、各 1 条仅措辞变化、`dataset_hash f34114d9…`）；
 >   但点击链把 `ui-fa2cb73e59` 的采纳稿推进了一版，原包 `004010_092fdb` 变 `historical`（字节未变、
 >   仍可复算），新当前包 `130634_a6a57c`；`ui-603f626cbe` 当前包未变。
+> - **CI 只暴露的一个缺陷（已修）**：远端 CI（`b4802f7`，run `36669474210`）在
+>   `test_url_command_keeps_a_single_line_on_stdout` 失败——本机有 16 个服务在跑所以过了，
+>   CI 上 `pids.json` 不存在 → `print_status` 提前返回、没有 URL 行。用例已改为显式钉住
+>   pids 状态与读取（不依赖运行环境）。**HEAD `b959c3a` 的 CI success**（run `36672477395`）。
 > - **仍未解决**：真人 F3（必须真人）；干净 Windows 一键启动/完整交付验收；K1 付费 API 实网整跑
 >   （**已批准但额度上限未给**）；PDF 全页视觉、当前 HEAD 远端 CI 重查。
 >

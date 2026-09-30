@@ -86,6 +86,14 @@
 `test_frontend_guards` 全过（+2）、前端 `tsc --noEmit` 0 错误、`npm run build` 通过、
 node 行为测试 60/60、`check_secrets` 干净。
 
+**CI 只暴露了一个本机看不见的缺陷（已修）**：远端 CI（run `36669474210`，`b4802f7`）在
+`test_url_command_keeps_a_single_line_on_stdout` 失败——
+`AssertionError: 'URL: http://localhost:8080' not found in call('No services recorded
+(pids.json missing; run python launcher.py to start).')`：本机有 16 个服务在跑所以过了，
+CI 上 `pids.json` 不存在 → `print_status` 提前返回，根本没有 URL 行。修法：用例显式钉住
+`_pids_file_state`/`_read_pids`/`_is_alive`/`_redis_source`，不再依赖运行环境。
+HEAD `b959c3a` 的 CI **success**（run `36672477395`，Pages `36672477668` success）。
+
 ## 7. 仍未解决（不假装已解决）
 
 - 真人 F3 五项 ≥8/10 与严重问题否决、复核耗时：**必须真人**；
