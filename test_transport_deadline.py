@@ -297,14 +297,19 @@ class TestTransportChannelsHonourTotalDeadline(unittest.TestCase):
         self.assertIn("总截止", out["error"])
         self.assertIn("响应头", out["error"], "要写明预算是在**头阶段**用尽的")
         self.assertEqual(out["body_bytes"], 0, "超时后不得把体读回来当成功")
-        self.assertLess(elapsed, 3.0, f"慢头探针实耗 {elapsed:.3f}s")
+        # R2-c（09-30 下午复核）：以前这里是"读完头再查钟"的**事后判定**（实耗 ≈964ms，
+        # 用例只敢断言 <3s）。看门狗到点关连接后，50ms 预算应在同一量级内返回。
+        self.assertLess(elapsed, 0.5, f"慢头探针实耗 {elapsed:.3f}s（预算 0.05s）")
 
     def test_text_channel_slow_header_also_fails_closed(self):
         t0 = time.monotonic()
         with self.assertRaises(Exception) as ctx:
             tr.get_via_urllib(self.srv.url("/slowheader"), timeout=0.05)
         self.assertIn("deadline", str(ctx.exception).lower(), str(ctx.exception))
-        self.assertLess(time.monotonic() - t0, 3.0)
+        # 文本通道的预算有下限（`max(0.5, timeout)` = 0.5s），因此这里验的是"在**自己的**
+        # 预算量级内关闭连接"，而不是 50ms——修前是 3s 级别的"事后判定"。
+        self.assertLess(time.monotonic() - t0, 1.2,
+                        "文本通道的慢头必须在自己的预算量级内关闭连接（R2-c）")
 
     def test_annual_report_pdf_entry_uses_the_bounded_byte_channel(self):
         """验的是**实际入口**（`annual_report_pdf.fetch_bytes`），不只是 helper。"""

@@ -453,15 +453,25 @@ def _fetch_link(url: str, *, timeout: float | None = None) -> dict:
     """直链取件：走**既有内容通道**（策略校验/已验 IP/出口模式都在 `net_policy` 那层）。
 
     本模块不新增请求点，也不自己判域名——安全边界只有一处。
+
+    `timeout`（R2-d）：调用方（编排器）把**任务剩余总截止**传进来，本函数不再另起一份
+    下载预算。不足最小请求预算时由 `admit` 直接拒绝，不抬高到默认下载预算继续。
     """
     import net_policy
-    # 披露文件下载用**下载通道的**总截止（默认 120s）：30s 下 4–5 MB 年报会超时
-    resp = net_policy.fetch_document(
-        url, timeout=float(timeout or transfer_limits.timeout_of("download")))
+    # 披露文件下载用**下载通道的**总截止（默认 120s）：30s 下 4–5 MB 年报会超时；
+    # 但调用方给了更小的剩余预算时**以它为准**（总截止优先）。
+    if timeout is None:
+        timeout = transfer_limits.timeout_of("download")
+    resp = net_policy.fetch_document(url, timeout=float(timeout))
     return {"raw": bytes(resp.get("raw") or b""),
             "content_type": str((resp.get("headers") or {}).get("content-type") or ""),
             "status": int(resp.get("status") or 0),
             "egress": str(resp.get("egress") or "")}
+
+
+# R2-d：最小请求预算（与编排器 `MIN_REQUEST_SECONDS` 同一取值）。低于它**不发请求**：
+# 把"只剩 0.05s"放大成一次完整的下载，等于绕过总截止（复核 P1 的"0 或不足不得抬高"）。
+MIN_REQUEST_SECONDS = 0.5
 
 
 def _metrics_of(metrics) -> list[str]:
@@ -476,7 +486,7 @@ def _metrics_of(metrics) -> list[str]:
 
 def admit(*, task_id: str, mid: str, company: str, company_code: str = "", periods=(),
           as_of: str = "", metrics=(), goal: str = "", doc_type: str = "",
-          ws_dir=None, project=None) -> dict:
+          ws_dir=None, project=None, timeout: float | None = None) -> dict:
     """材料 → 准入结论（取件 + 解析 + 判据 + 查阅范围），并把结论写回材料记录。
 
     已准入且规则版本未变时**不重跑**（避免每次刷新都重解析同一份年报）；
@@ -526,14 +536,20 @@ def admit(*, task_id: str, mid: str, company: str, company_code: str = "", perio
             except Exception as exc:             # noqa: BLE001
                 fetch_error = f"原件读取失败：{str(exc)[:120]}"
         elif meta.get("url"):
-            try:
-                got = _fetch_link(str(meta["url"]))
-                raw, egress = got["raw"], got["egress"]
-                meta["content_type"] = got["content_type"]
-                meta["http_status"] = got["status"]
-                meta["egress"] = egress
-            except Exception as exc:             # noqa: BLE001 - 网络/策略失败如实记
-                fetch_error = f"{type(exc).__name__}: {str(exc)[:180]}"
+            if timeout is not None and float(timeout) < MIN_REQUEST_SECONDS:
+                # R2-d：**剩余预算不足不发请求**（此前会另起一份下载预算继续取件，
+                # 于是"发现 → 取件 → 准入共享总截止"在最后一段被绕开）
+                fetch_error = (f"剩余预算不足（{float(timeout):.2f}s < "
+                               f"{MIN_REQUEST_SECONDS:g}s）：不发取件请求，如实记取件失败")
+            else:
+                try:
+                    got = _fetch_link(str(meta["url"]), timeout=timeout)
+                    raw, egress = got["raw"], got["egress"]
+                    meta["content_type"] = got["content_type"]
+                    meta["http_status"] = got["status"]
+                    meta["egress"] = egress
+                except Exception as exc:             # noqa: BLE001 - 网络/策略失败如实记
+                    fetch_error = f"{type(exc).__name__}: {str(exc)[:180]}"
     else:
         try:
             raw = src_path.read_bytes() if src_path.is_file() else b""

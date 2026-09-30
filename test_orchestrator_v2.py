@@ -252,6 +252,75 @@ class TestOfficialDiscoveryBudget(TempWorkspaceCase):
         self.assertEqual(b.fetches, 1, "预算用尽后不得再计一次取件")
         self.assertIn("deadline", b.refusals)
 
+    def test_wrapped_fetch_refuses_below_the_minimum_request_budget(self):
+        """R2-d：剩余预算**不足最小请求预算**时拒绝，不得抬高到 0.5s 继续取件。"""
+        from orchestrator_v2 import _OfficialDiscoveryBudget
+        called: list = []
+        b = _OfficialDiscoveryBudget(0.2)
+        wrapped = b.wrap_fetch(lambda *a, **k: called.append(1))
+        with self.assertRaises(TimeoutError) as ctx:
+            wrapped("https://example.invalid/a")
+        self.assertEqual(called, [], "预算不足时不得发起取件")
+        self.assertIn("最小请求预算", str(ctx.exception), str(ctx.exception))
+        self.assertIn("deadline_below_min", b.account()["refused"], b.account())
+
+    def test_production_path_wraps_the_default_fetch(self):
+        """R2-d：生产路径（未注入替身）也必须被同一份台账管住。
+
+        此前 `self._discovery_fetch` 为 None → `wrap_fetch(None)` 也返回 None →
+        `discover` 用内部默认取件，那些请求完全不受预算约束。
+        """
+        from unittest import mock
+        from adapters import cninfo
+        seen: dict = {}
+        calls: list = []
+
+        def fake_default(url, **kw):
+            calls.append((url, kw.get("timeout")))
+            return {"status": 200, "raw": b"x" * 10, "headers": {}}
+
+        import orchestrator_v2 as ov
+        o = make_orch()
+        o.DISCOVERY_BUDGET_SECONDS = 30.0
+        from adapters import disclosure_ingest as di
+        import working_paper_export as wpe
+        from types import SimpleNamespace
+        req = SimpleNamespace(company="贵州茅台", company_id="600519.SH",
+                              periods=(2023, 2024), as_of="2025-04-30", market="cn")
+        with mock.patch.object(wpe, "resolve_request", lambda *a, **k: (req, [], "stored")), \
+                mock.patch.object(di, "discover",
+                                  lambda *a, **k: (seen.update(k),
+                                                   {"status": "found", "reason_code": "",
+                                                    "reason": "", "candidates": [],
+                                                    "contract": "cninfo/v1"})[1]), \
+                mock.patch.object(cninfo, "_default_fetch", fake_default), \
+                mock.patch("orchestrator_v2.push_progress"):
+            o._official_discovery_intake("r2d-task", "研究贵州茅台", "default")
+        self.assertTrue(callable(seen.get("fetch")),
+                        "生产路径必须把默认取件包进预算（不能是 None）")
+        seen["fetch"]("https://example.invalid/a", timeout=999)
+        self.assertEqual(len(calls), 1, "包装后的钩子应当调用到默认取件")
+        self.assertLessEqual(calls[0][1], 30.0, "默认取件的超时也要被夹进总预算")
+
+    def test_admit_refuses_when_remaining_budget_is_below_minimum(self):
+        """R2-d：准入接的是**同一份剩余预算**；不足时如实记取件失败，不发请求。"""
+        from unittest import mock
+        import material_intake as mi
+        stored = mi.store(task_id="r2d-admit", channel=mi.CHANNEL_LINK,
+                          url="https://example.invalid/a.PDF", title="t",
+                          project="default")
+        self.assertTrue(stored.get("ok"), stored)
+        called: list = []
+        with mock.patch.object(mi, "_fetch_link",
+                               lambda *a, **k: called.append(1) or {}):
+            res = mi.admit(task_id="r2d-admit", mid=stored["material_id"],
+                           company="贵州茅台", company_code="600519.SH",
+                           periods=(2023, 2024), timeout=0.1, project="default")
+        self.assertEqual(called, [], "预算不足时不得发取件请求")
+        self.assertFalse(res.get("ok"), res)
+        self.assertEqual(res.get("status"), mi.STATE_FETCH_FAILED, res)
+        self.assertIn("剩余预算不足", str(res.get("detail") or ""), res)
+
 
 class TestNormalizeSteps(unittest.TestCase):
     def setUp(self):

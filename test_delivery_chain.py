@@ -4343,7 +4343,12 @@ class TestTencentQuotesRankingAndCache(unittest.TestCase):
             def read1(self, n=-1):
                 return self.read(n)
 
-        with mock.patch("urllib.request.urlopen", return_value=_Resp(raw)):
+        # R2-c 起文本通道的头阶段走 `transport._open_bounded`（http.client + 截止看门狗）：
+        # 替身挂在**这个**缝上；`urllib.request.urlopen` 已不是该通道的取件点
+        # （继续只打老桩会让用例悄悄真连网——实测取回了真实行情 1258.62）。
+        import adapters.transport as _tr
+        with mock.patch.object(_tr, "_open_bounded",
+                               return_value=(mock.MagicMock(), _Resp(raw))):
             out = tq.fetch_quotes(["600519", "sz000001"])
         q = out["600519"]
         self.assertEqual(q["name"], "贵州茅台")

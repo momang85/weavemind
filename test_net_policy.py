@@ -543,11 +543,15 @@ class TestByteChannelMetadata(unittest.TestCase):
         self.transport = transport
 
     def _call(self, resp, url="https://example.com/a.pdf", **kw):
+        # 取件缝在 `_open_bounded`（R2-c 起头阶段改走 http.client + 截止看门狗）：
+        # 替身仍只提供"响应对象"，其余契约（元信息/二进制往返/字节上限/不跟随重定向）
+        # 逐条照验——换的是**桩的位置**，不是断言。
+        conn = mock.MagicMock()
         with mock.patch.object(self.transport, "_throttle_and_rewrite", lambda u: u), \
                 mock.patch.object(self.transport, "_require_egress_ok", lambda: None), \
                 mock.patch.object(self.transport, "_validate_public_url", return_value=True), \
-                mock.patch.object(self.transport.urllib.request, "urlopen",
-                                  return_value=resp):
+                mock.patch.object(self.transport, "_open_bounded",
+                                  return_value=(conn, resp)):
             return self.transport.get_bytes_via_urllib(url, **kw)
 
     def test_binary_round_trip_and_metadata(self):
@@ -642,14 +646,14 @@ class TestByteChannelMetadata(unittest.TestCase):
         """校验紧邻请求点：被 SSRF 守卫拦下时**不得**发出任何请求。"""
         called = {"n": 0}
 
-        def _fake_urlopen(*_a, **_k):
+        def _fake_open(*_a, **_k):
             called["n"] += 1
-            return _FakeResp(b"")
+            return mock.MagicMock(), _FakeResp(b"")
 
         with mock.patch.object(self.transport, "_throttle_and_rewrite", lambda u: u), \
                 mock.patch.object(self.transport, "_require_egress_ok", lambda: None), \
                 mock.patch.object(self.transport, "_validate_public_url", return_value=False), \
-                mock.patch.object(self.transport.urllib.request, "urlopen", _fake_urlopen):
+                mock.patch.object(self.transport, "_open_bounded", _fake_open):
             r = self.transport.get_bytes_via_urllib("http://169.254.169.254/latest/meta-data/")
         self.assertFalse(r["ok"])
         self.assertEqual(r["error_kind"], "ssrf_blocked")
@@ -664,7 +668,7 @@ class TestByteChannelMetadata(unittest.TestCase):
                 mock.patch.object(self.transport, "_validate_public_url", return_value=True), \
                 mock.patch.dict("os.environ",
                                 {"HTTPS_PROXY": "http://127.0.0.1:7897"}, clear=False), \
-                mock.patch.object(self.transport.urllib.request, "urlopen", side_effect=exc), \
+                mock.patch.object(self.transport, "_open_bounded", side_effect=exc), \
                 mock.patch.object(self.transport, "get_via_socket") as sock:
             r = self.transport.get_bytes_via_urllib("https://example.com/a.pdf")
         self.assertFalse(r["ok"])

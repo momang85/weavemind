@@ -744,8 +744,13 @@ def _prior_failure(row) -> dict:
             "note": "原失败记录未被本操作修改；候选是新版本，不代表任务已成功"}
 
 
+# R2-d：最小请求预算（秒）。**不足就拒绝**，不把"只剩 0.05s"抬到 0.5s 继续——
+# 那会让"发现 → 取件 → 准入共享同一个总截止"这件事在最后一段被绕开。
+MIN_REQUEST_SECONDS = 0.5
+
+
 class _OfficialDiscoveryBudget:
-    """官方发现/取件的**共享台账**（L0-d，2026-09-30 复核 S3）。
+    """官方发现/取件的**共享台账**（L0-d，2026-09-30 复核 S3 / R2-d）。
 
     为什么不能各段各自起算：此前 240s 在 `discover` **之后**才起，且发现阶段的取件与
     准入又不接剩余预算——"发现慢"与"取件慢"相加可以远超一次任务的预算，而每一段单独
@@ -797,10 +802,19 @@ class _OfficialDiscoveryBudget:
                 raise TimeoutError(
                     f"官方发现总截止 {self.seconds:g}s 已用尽（已用 {self.elapsed():.1f}s）："
                     "不再发起取件")
+            # R2-d（09-30 下午复核）：**不足最小请求预算时拒绝，不抬高到 0.5s 继续**。
+            # 此前 `max(0.5, min(..., remain))` 会把"只剩 0.05s"悄悄放大成 0.5s 的请求——
+            # 于是"总截止"在这条通道上被绕过（发现与准入各起一份预算）。
+            if remain < MIN_REQUEST_SECONDS:
+                self.refusals.append("deadline_below_min")
+                raise TimeoutError(
+                    f"官方发现剩余预算 {remain:.2f}s 低于最小请求预算 "
+                    f"{MIN_REQUEST_SECONDS:g}s：不发起取件（如实记预算不足）")
             try:
-                kw["timeout"] = max(0.5, min(float(kw.get("timeout") or remain), remain))
+                _want = float(kw.get("timeout") or remain)
             except (TypeError, ValueError):
-                kw["timeout"] = max(0.5, remain)
+                _want = remain
+            kw["timeout"] = max(0.001, min(_want, remain))
             got = fetch(url, *a, **kw)
             size = 0
             if isinstance(got, dict):
@@ -8259,9 +8273,20 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         except (TypeError, ValueError):
             _maxf = 2
         _budget = _OfficialDiscoveryBudget(_secs, max_fetches=max(1, _maxf))
+        # R2-d：**生产路径也要被预算管住**。此前 `self._discovery_fetch` 为 None（生产就是
+        # None）时 `wrap_fetch(None)` 也返回 None → `discover` 用内部默认取件，那些请求
+        # **完全不受这份台账约束**（预算只统计到"注入替身"的测试里）。这里在生产路径上包一层
+        # cninfo 的默认取件：次数/字节/截止与准入共享同一份剩余预算。
+        _hook = self._discovery_fetch
+        if _hook is None:
+            try:
+                from adapters import cninfo as _cninfo
+                _hook = getattr(_cninfo, "_default_fetch", None)
+            except Exception:                    # noqa: BLE001 - 取不到就维持旧行为
+                _hook = None
         try:
             got = di.discover(company, code, periods, doc_type="年度报告",
-                              until=as_of, fetch=_budget.wrap_fetch(self._discovery_fetch))
+                              until=as_of, fetch=_budget.wrap_fetch(_hook))
         except Exception as exc:                 # noqa: BLE001 - 发现失败按缺口记
             out.update({"status": "unavailable", "reason_code": "discover_failed",
                         "reason": f"官方发现异常：{str(exc)[:140]}",
@@ -8332,7 +8357,10 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 import material_intake as mi
                 verdict = mi.admit(task_id=task_id, mid=mid, company=company,
                                    company_code=code, periods=periods, as_of=as_of,
-                                   goal=goal, doc_type="年度报告", project=project)
+                                   goal=goal, doc_type="年度报告", project=project,
+                                   # R2-d：准入**接同一份剩余预算**（此前另起一个下载预算，
+                                   # "发现慢"与"取件慢"相加可以绕过总截止）
+                                   timeout=_budget.remaining())
             except Exception as exc:             # noqa: BLE001
                 out["admit"] = {"ok": False, "reason": f"准入异常：{str(exc)[:140]}"}
                 continue

@@ -18,6 +18,7 @@ _num 全部收敛到此；新增数据源只需 import 本模块，不再复制�
 import http.client
 import json as _json
 import logging
+import socket as _socket
 import threading as _threading
 import time as _time
 import urllib.error
@@ -132,6 +133,102 @@ BROWSER_HEADERS = {
 }
 
 
+class _HeaderDeadline(RuntimeError):
+    """响应头还没读完就用尽了总截止（看门狗已关闭连接）。"""
+
+
+def _open_bounded(url: str, *, budget: float, deadline: float,
+                  headers: dict | None = None):
+    """用 `http.client` 取响应头，并让**总截止真正可终止**（R2-c，09-30 下午复核）。
+
+    为什么不能继续用 `urlopen(timeout=budget)`：那只是**每次** socket 操作的超时。对端每
+    8ms 发 4 个字节时，每次 recv 都"很快返回"，于是"逐字节慢响应头"能把一次 50ms 预算的
+    取件拖到 **964ms**，只在"读完头再查钟"处被记为 `read_timeout`——那是**事后判定**，
+    不是有界终止（复核要求：50ms 慢头必须在规定容差内实际返回/关闭连接）。
+
+    做法：连接后把 `deadline` 剩余时间交给一个**看门狗线程**，到点直接关闭连接；阻塞中的
+    `getresponse()` 立刻抛错返回（≈预算），我们按 `read_timeout` 如实上报。返回
+    `(conn, resp)`；`conn` 由调用方负责关闭。
+    """
+    parts = urllib.parse.urlsplit(url)
+    host = str(parts.hostname or "")
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+    cls = (http.client.HTTPSConnection if parts.scheme == "https"
+           else http.client.HTTPConnection)
+    conn = cls(host, port, timeout=max(0.001, float(budget)))
+    fired = {"v": False}
+
+    def _abort() -> None:
+        fired["v"] = True
+        # **先 shutdown 再 close**：Windows 上只 close 不会打断另一个线程里阻塞中的 recv
+        # （实测：close 之后逐字节慢头照样读到对端发完，仍是 ≈0.96s）。shutdown(SHUT_RDWR)
+        # 能让阻塞的读立刻返回（EOF/错误），这才是有界终止。
+        try:
+            sock = getattr(conn, "sock", None)
+            if sock is not None:
+                try:
+                    sock.shutdown(_socket.SHUT_RDWR)
+                except Exception:                    # noqa: BLE001
+                    pass
+                try:
+                    sock.close()
+                except Exception:                    # noqa: BLE001
+                    pass
+        finally:
+            try:
+                conn.close()
+            except Exception:                        # noqa: BLE001
+                pass
+
+    try:
+        conn.request("GET", target, headers=dict(headers or BROWSER_HEADERS))
+    except (_socket.timeout, TimeoutError) as exc:
+        _abort()
+        raise _HeaderDeadline(f"连接/请求阶段超时：{type(exc).__name__}") from exc
+    _left = float(deadline) - _time.monotonic()
+    if _left <= 0:
+        _abort()
+        raise _HeaderDeadline("总截止在发起请求后已用尽")
+    killer = _threading.Timer(max(0.001, _left), _abort)
+    killer.daemon = True
+    killer.start()
+    try:
+        resp = conn.getresponse()
+    except Exception as exc:                         # noqa: BLE001
+        if fired["v"] or isinstance(exc, (_socket.timeout, TimeoutError)):
+            _abort()
+            raise _HeaderDeadline(
+                f"响应头读取超时（总截止 {float(budget):g}s 已用尽）："
+                f"{type(exc).__name__}") from exc
+        _abort()
+        raise
+    finally:
+        killer.cancel()
+    if fired["v"]:
+        try:
+            resp.close()
+        except Exception:                            # noqa: BLE001
+            pass
+        _abort()
+        raise _HeaderDeadline(f"响应头读取超时（总截止 {float(budget):g}s 已用尽）")
+    # 连接交给响应关闭：`with resp:` 与 `_close_quietly(resp)` 都会走到这里，
+    # 调用方不必各自记得再关一次连接（漏关会把 socket 留到 GC）。
+    _orig_close = resp.close
+
+    def _close_all() -> None:
+        try:
+            _orig_close()
+        finally:
+            try:
+                conn.close()
+            except Exception:                        # noqa: BLE001
+                pass
+
+    resp.close = _close_all                          # type: ignore[method-assign]
+    return conn, resp
+
+
 def get_via_urllib(
     url: str,
     timeout: int = 25,
@@ -153,15 +250,27 @@ def get_via_urllib(
     # 逐字节慢头（每次都短于 socket 超时）能把"读头"拖到远超总预算，此后若重新起算，
     # 一次 0.05s 的取件会在 0.5s 后照样返回成功。
     from adapters.search_runner import read_with_deadline
-    deadline = _time.monotonic() + max(0.5, float(timeout))
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        if _time.monotonic() >= deadline:
-            raise TimeoutError(
-                f"read deadline exhausted while reading response headers"
-                f"（总截止 {max(0.5, float(timeout)):g}s）：不读响应体")
+    _budget = max(0.5, float(timeout))
+    deadline = _time.monotonic() + _budget
+    # R2-c：头阶段也走**同一个总截止**（看门狗到点关连接），不再"读完头再查钟"
+    try:
+        conn, resp = _open_bounded(url, budget=_budget, deadline=deadline, headers=headers)
+    except _HeaderDeadline as exc:
+        raise TimeoutError("read deadline exhausted while reading response headers"
+                           f"（响应头读取超时：{exc}）：不读响应体") from exc
+    try:
         return read_with_deadline(resp, deadline,
                                   max_bytes=DEFAULT_TEXT_MAX_BYTES).decode(
                                       encoding, errors="replace")
+    finally:
+        try:
+            resp.close()
+        except Exception:                            # noqa: BLE001
+            pass
+        try:
+            conn.close()
+        except Exception:                            # noqa: BLE001
+            pass
 
 
 def _read_bounded_bytes(resp, *, deadline: float, limit: int,
@@ -265,16 +374,18 @@ def get_bytes_via_urllib(
         req = urllib.request.Request(url, headers=headers or BROWSER_HEADERS)
         # **总截止从进入取件开始**（L0-d，2026-09-30 复核 S1）：此前截止在 `urlopen` **之后**
         # 才起算——"逐字节慢响应头"（每次 recv 都短于 socket 超时，整体却远超预算）能让
-        # `timeout=0.05` 的取件在 0.511s 后照样 `ok=True`。现在：
-        #   1. 请求前就起算总截止；2. 头读完立刻查钟，超了就不读体、如实报超时；
-        #   3. 读体只用**剩余预算**（同一个 deadline 传下去）。
+        # `timeout=0.05` 的取件在 0.511s 后照样 `ok=True`。
+        # R2-c（09-30 下午复核）：头阶段改用 `_open_bounded`——**看门狗到点关连接**，
+        # 于是"50ms 预算 + 逐字节慢头"在预算量级内就终止（修前实耗 ≈964ms，是事后判定）。
         _budget = float(timeout or 0 or 25)
         _deadline = _time.monotonic() + _budget
         try:
-            resp = urllib.request.urlopen(req, timeout=_budget)
-        except urllib.error.HTTPError as exc:
-            # 非 2xx：**不抛**。状态与响应体都要留下（错误页可能正是问题本身）
-            resp = exc
+            conn, resp = _open_bounded(url, budget=_budget, deadline=_deadline,
+                                       headers=req.headers)
+        except _HeaderDeadline as exc:
+            out.update({"error_kind": "read_timeout", "body_bytes": 0, "data": b"",
+                        "error": f"读取超时（{exc}）：不再读取响应体"})
+            return out
         with resp:
             status = int(getattr(resp, "status", None) or getattr(resp, "code", 0) or 0)
             hdrs = getattr(resp, "headers", None)
