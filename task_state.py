@@ -930,15 +930,50 @@ def update_delivery_projection(task_id: str, *, report: str = "",
         return False
 
 
+def _attempt_is_current(task_id: str, attempt_id: str) -> bool:
+    """这份终态是不是**当前尝试**写的（T0-b 的落库 CAS）。
+
+    - 没带 attempt_id：老调用点/离线路径 → 放行，但**留一行 warning**（旁路可见）；
+    - 有可信记录且 attempt_id 不符：拒绝——旧尝试的迟到结果不得发布终态；
+    - 没有可信记录：按未知放行并留痕（许可模块不可用时不得把任务卡在 RUNNING）。
+    """
+    if not attempt_id:
+        logger.warning("任务 %s 终态未带尝试代号（老调用点/离线路径，按当前尝试处理）",
+                       task_id)
+        return True
+    try:
+        import execution_permit as _ep
+        cur = _ep.current_permit(task_id)
+    except Exception as exc:                          # noqa: BLE001
+        logger.warning("任务 %s 尝试记录不可读（%s），终态按当前尝试处理", task_id,
+                       str(exc)[:100])
+        return True
+    if cur is None:
+        logger.warning("任务 %s 终态带尝试代号 %s 但无可信记录，按当前尝试处理",
+                       task_id, attempt_id)
+        return True
+    if str(cur.attempt_id) != str(attempt_id):
+        logger.error("任务 %s 终态被拒绝：写者尝试=%s，当前尝试=%s（旧尝试不得发布）",
+                     task_id, attempt_id, cur.attempt_id)
+        return False
+    return True
+
+
 def record_completion(task_id: str, *, goal: str = "", status: str = "",
                       report: str = "", steps: list | None = None,
                       logs: list | None = None, acceptance: dict | None = None,
-                      db_path: str | None = None) -> bool:
+                      db_path: str | None = None,
+                      attempt_id: str = "") -> bool:
     """写入终态：状态 + 报告 + 步骤/日志 + **验收摘要与规则指纹**（不再丢弃）。
+
+    `attempt_id`（T0-b）：终态必须由**当前尝试**写；旧尝试的迟到结果被拒绝
+    （`_attempt_is_current`）。没带代号的老调用点按当前尝试处理并留痕。
 
     返回是否真的写入成功——调用方（编排器的 `_finalize_task`）据此决定是否把任务
     记为已终结：写失败却记为已终结，库里就会永远停在 RUNNING 且不再重试。
     """
+    if not _attempt_is_current(task_id, attempt_id):
+        return False
     acceptance = acceptance or {}
     try:
         con = _connect(db_path)

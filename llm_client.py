@@ -2565,7 +2565,18 @@ async def call_llm_async(
     # Let the prompt ask for JSON instead
 
     last_error = None
+    # 诊断用：阶段标签与输入长度必须在**被覆盖之前**取好——下面循环里
+    # `usage` 会被响应里的 token 用量覆盖，异步路径的 stage 就丢了
+    _stage = str(usage or "")
+    _input_chars = len(str(system_prompt or "")) + len(str(user_prompt or ""))
+
     # 健康路由（O-29 同 sync 路径）：主端点已被判定不健康 → 优先走备用
+    if _cancelled():
+        # R2/T0-b：取消后连"健康路由到备用"的这一次请求都不发（异步路径此前完全没查）
+        _record_llm_call(get_task_context(), stage=_stage, attempt=1,
+                         input_chars=_input_chars, max_tokens=max_tokens,
+                         error_class="cancelled", end_reason="cancelled")
+        raise LLMCancelledError()
     if not _primary_healthy():
         try:
             return await _async_call_backup(payload, model, expect_json)
@@ -2574,13 +2585,16 @@ async def call_llm_async(
         except Exception as exc:
             logger.warning("Health-routed async backup failed: %s", str(exc)[:150])
 
-    # 诊断用：阶段标签与输入长度必须在**被覆盖之前**取好——下面循环里
-    # `usage` 会被响应里的 token 用量覆盖，异步路径的 stage 就丢了
-    _stage = str(usage or "")
-    _input_chars = len(str(system_prompt or "")) + len(str(user_prompt or ""))
-
     for attempt in range(1, max_attempts + 1):
         _t0 = time.monotonic()
+        if _cancelled():
+            # T0-b：**每一次尝试之前**复查（取消/失租/换尝试后不得再发）
+            logger.info("任务已取消：不再发起异步 LLM 调用（usage=%s, attempt=%d）",
+                        _stage, attempt)
+            _record_llm_call(get_task_context(), stage=_stage, attempt=attempt,
+                             input_chars=_input_chars, max_tokens=max_tokens,
+                             error_class="cancelled", end_reason="cancelled")
+            raise LLMCancelledError()
         try:
             client = _get_async_client()
             # 端点先过网络策略（协议/凭据/解析后地址边界）：拒绝本机、内网与元数据服务

@@ -12,8 +12,11 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
 import sqlite3
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -25,6 +28,7 @@ sys.path.insert(0, str(ROOT))
 
 import orchestrator_v2 as ov  # noqa: E402
 import task_state  # noqa: E402
+import workspace as ws_mod  # noqa: E402
 
 
 class _FakeRedis:
@@ -234,6 +238,20 @@ class TestWaitOutcomeClassification(unittest.TestCase):
 
 class TestDispatchClassifiesWait(unittest.TestCase):
     """派发路径按分类落日志/落状态：超时才说超时，取消不写 step 失败。"""
+
+    def setUp(self):
+        """T0-b：执行许可记录是**进程内共享真源**，用例之间必须隔离。
+
+        本类各用例共用任务号 `t-1`；上一个用例若走到取消分支就会把 `t-1` 的尝试
+        标记成 cancelled，后面的用例会被闸门正确地拒掉——那是污染，不是缺陷。
+        """
+        import execution_permit as ep
+        self._ep = ep
+        self._saved_store = ep.get_store()
+        ep.configure_store(ep.MemoryPermitStore())
+
+    def tearDown(self):
+        self._ep.configure_store(self._saved_store)
 
     def _orch(self, msg, *, cancelled=False):
         o = ov.OrchestratorV2.__new__(ov.OrchestratorV2)
@@ -714,6 +732,389 @@ class TestThreadGetsContextAtCreation(unittest.TestCase):
         o._call_llm_cancellable("root-2", "规划", _read)
         self.assertEqual(seen["v"], "inherited",
                          "创建边界拷上下文：线程内读到的应是调用方的值")
+
+
+class _QueueRedis:
+    """`_dispatch` 用到的入队/记录接口最小替身（记录每一次 lpush）。"""
+
+    def __init__(self):
+        self.pushed: list[tuple[str, str]] = []
+        self.kv: dict[str, str] = {}
+        self.on_lpush = None
+
+    def lpush(self, key, value):
+        self.pushed.append((key, value))
+        if callable(self.on_lpush):
+            self.on_lpush(key, value)
+
+    def get(self, key):
+        return self.kv.get(key)
+
+    def set(self, key, value, nx=False, ex=None, px=None):
+        if nx and key in self.kv:
+            return None
+        self.kv[key] = value
+        return True
+
+    def delete(self, key):
+        self.kv.pop(key, None)
+
+    def pttl(self, key):
+        return 60000 if key in self.kv else -2
+
+
+class TestExecutionPermitSeam(unittest.TestCase):
+    """T0-b：不可变许可 + 可信当前记录 + 未知即拒绝。"""
+
+    def test_verify_rejects_unknown_and_each_mismatch(self):
+        import execution_permit as ep
+
+        now = time.time()
+        base = ep.ExecutionPermit("t-1", "at-a", 3, now + 60, owner="owner-a")
+        self.assertEqual(ep.verify(None, base)[1], ep.R_NO_PERMIT)
+        self.assertEqual(ep.verify(base, None)[1], ep.R_NO_CURRENT,
+                         "读不到可信记录 = 未知，不得放行")
+        self.assertTrue(ep.verify(base, base)[0])
+        self.assertEqual(
+            ep.verify(base, ep.ExecutionPermit("t-1", "at-b", 3, now + 60))[1],
+            ep.R_ATTEMPT)
+        # 核心反例：旧持有期（gen1）的许可在拿到新代号（gen3）后不得复活
+        self.assertEqual(
+            ep.verify(ep.ExecutionPermit("t-1", "at-a", 1, now + 60),
+                      ep.ExecutionPermit("t-1", "at-a", 3, now + 60))[1],
+            ep.R_EPOCH)
+        self.assertEqual(
+            ep.verify(base, ep.ExecutionPermit("t-1", "at-a", 3, now + 60,
+                                               cancelled=True))[1],
+            ep.R_CANCELLED)
+        self.assertEqual(
+            ep.verify(base, ep.ExecutionPermit("t-1", "at-a", 3, now - 1))[1],
+            ep.R_DEADLINE)
+        self.assertEqual(
+            ep.verify(base, ep.ExecutionPermit("t-1", "at-a", 3, now + 60,
+                                               owner="owner-b"))[1],
+            ep.R_OWNER)
+        self.assertEqual(
+            ep.verify(base, ep.ExecutionPermit("t-9", "at-a", 3, now + 60))[1],
+            ep.R_TASK)
+
+    def test_new_attempt_invalidates_old_permit(self):
+        import execution_permit as ep
+
+        store = ep.MemoryPermitStore()
+        first = ep.begin_attempt("t-2", epoch=1, owner="owner-a", store=store)
+        self.assertTrue(ep.validate(first, "t-2", store=store)[0])
+        second = ep.begin_attempt("t-2", epoch=3, owner="owner-a", store=store)
+        self.assertNotEqual(first.attempt_id, second.attempt_id,
+                            "恢复/接管必须换新尝试代号，不得复用")
+        ok, reason = ep.validate(first, "t-2", store=store)
+        self.assertFalse(ok)
+        self.assertEqual(reason, ep.R_ATTEMPT, "旧尝试的许可必须在结构上失效")
+        self.assertTrue(ep.validate(second, "t-2", store=store)[0])
+
+    def test_cancel_is_visible_to_another_store_over_shared_redis(self):
+        """跨进程撤销：编排器取消后，另一个进程（worker）读到的记录也是已取消。"""
+        import execution_permit as ep
+
+        shared = _QueueRedis()
+        orch_side = ep.RedisPermitStore(shared)
+        worker_side = ep.RedisPermitStore(shared)
+        permit = ep.begin_attempt("t-3", epoch=2, owner="owner-a", store=orch_side)
+        self.assertTrue(ep.validate(permit, "t-3", store=worker_side)[0])
+        ep.note_cancel("t-3", store=orch_side)
+        ok, reason = ep.validate(permit, "t-3", store=worker_side)
+        self.assertFalse(ok)
+        self.assertEqual(reason, ep.R_CANCELLED)
+        self.assertTrue(ep.current_permit("t-3", store=worker_side).cancelled)
+
+    def test_wire_roundtrip_and_echo_fields(self):
+        import execution_permit as ep
+
+        p = ep.ExecutionPermit("t-4", "at-x", 5, 1234.5, owner="o", cancelled=True)
+        back = ep.ExecutionPermit.from_wire(p.to_wire())
+        self.assertEqual(back, p)
+        self.assertIsNone(ep.ExecutionPermit.from_wire({"attempt_id": "x"}),
+                          "缺根任务 = 结构不识别，按没有许可处理")
+        self.assertEqual(set(ep.echo_fields(p)), {"root_task_id", "attempt_id", "epoch"})
+
+
+class TestDispatchSendGate(unittest.TestCase):
+    """T0-b：副作用前的许可闸门（失租等待后零 lpush / 旧尝试结果不得采纳）。"""
+
+    def setUp(self):
+        import execution_permit as ep
+        self._ep = ep
+        self._saved_store = ep.get_store()
+        ep.configure_store(ep.MemoryPermitStore())
+        self._tmp = tempfile.mkdtemp(prefix="weavemind_permit_")
+        self._saved_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(self._tmp)
+        self._sleep = mock.patch.object(time, "sleep", lambda *_: None)
+        self._sleep.start()
+
+    def tearDown(self):
+        self._sleep.stop()
+        ws_mod.WORKSPACE_ROOT = self._saved_root
+        self._ep.configure_store(self._saved_store)
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def _dispatch_double(self, *, lease, cancel, wait_outcome, on_lpush=None):
+        o = ov.OrchestratorV2.__new__(ov.OrchestratorV2)
+        o._messaging = _FakeMessaging()
+        o._now_iso = lambda: "2026-09-30T00:00:00Z"
+        o._task_contract = lambda tid: None
+        o._task_starts = {"t-gate": time.time()}
+        o._task_starts_lock = threading.Lock()
+        o._task_simple = {}
+        o._task_goals = {"t-gate": "目标"}
+        o._finalized_tasks = set()
+        o._task_budgets = {}
+        o._inflight = {}
+        seen = {"find": 0}
+        o._find_agent = lambda cap: (seen.__setitem__("find", seen["find"] + 1)
+                                     or (None if seen["find"] == 1 else "worker-search"))
+        redis = _QueueRedis()
+        redis.on_lpush = on_lpush
+        o._redis = redis
+        o._new_redis_sync = lambda: redis
+        self.redis = redis
+        o._cancel_requested = lambda tid: cancel()
+        o._budget_reserve = lambda tid, kind, detail=None: "ticket-1"
+        o._budget_settle = lambda *a, **k: None
+        o._budget_note = lambda *a, **k: None
+        o._budget = lambda tid: mock.Mock(remaining=lambda: {"seconds": 600})
+        o._track_inflight = lambda *a, **k: None
+        o._untrack_inflight = lambda *a, **k: None
+        o._mark_inflight_unsettled = lambda *a, **k: None
+        o._normalize_result = lambda r: r
+        o._wait_step_result = lambda *a, **k: wait_outcome
+        lease_calls = {"n": 0}
+
+        def _lease(tid):
+            lease_calls["n"] += 1
+            return lease() if lease_calls["n"] > 1 else ""
+
+        self.lease_calls = lease_calls
+        return o, _lease
+
+    def _run(self, o, lease):
+        with mock.patch.object(ov, "_lease_superseded", lease):
+            return o._dispatch({"step_id": "1", "capability": "web_search",
+                                "instruction": "查一下"}, "t-gate")
+
+    def test_no_lpush_when_lease_lost_while_waiting_for_worker(self):
+        """F03 反例：等 worker 的 30s 窗口里失租，旧实现醒来照推 lpush。"""
+        o, lease = self._dispatch_double(
+            lease=lambda: "租约已被接管（等待期间失租）",
+            cancel=lambda: False,
+            wait_outcome=ov.WaitOutcome(ov.WAIT_RESULT, result={"status": "SUCCESS", "result": "x"}),
+        )
+        out = self._run(o, lease)
+        self.assertEqual(self.redis.pushed, [], "失租后必须零 lpush（不得产生新付费发送）")
+        self.assertEqual(out.get("status"), "FAILED", out)
+        self.assertIn("租约", str(out.get("result") or ""), out)
+
+    def test_no_lpush_when_cancelled_after_queue_wait(self):
+        """取消闸门仍在 lpush 之前（V2-1 语义不得回退）：取消在等 worker 期间到达。"""
+        o, lease = self._dispatch_double(
+            lease=lambda: "",
+            cancel=lambda: False,
+            wait_outcome=ov.WaitOutcome(ov.WAIT_RESULT, result={"status": "SUCCESS", "result": "x"}),
+        )
+        # 等 worker 会调用 _find_agent 两次；取消在那之后才为真 = 到达于等待期间
+        seen = {"find": 0}
+        o._find_agent = lambda cap: (seen.__setitem__("find", seen["find"] + 1)
+                                     or (None if seen["find"] == 1 else "worker-search"))
+        o._cancel_requested = lambda tid: seen["find"] >= 2
+        out = self._run(o, lease)
+        self.assertEqual(self.redis.pushed, [])
+        self.assertEqual(out.get("status"), "CANCELLED", out)
+
+    def test_result_from_superseded_attempt_is_not_adopted(self):
+        """旧 attempt 的结果不得被采纳（等待期间新尝试已开始）。"""
+        payload_marker = "PAYLOAD-FROM-STALE-ATTEMPT"
+        o, lease = self._dispatch_double(
+            lease=lambda: "",
+            cancel=lambda: False,
+            wait_outcome=ov.WaitOutcome(ov.WAIT_RESULT,
+                                        result={"status": "SUCCESS", "result": payload_marker}),
+        )
+
+        def _new_attempt_on_push(_key, _value):
+            self._ep.begin_attempt("t-gate", epoch=0, owner="")
+
+        self.redis.on_lpush = _new_attempt_on_push
+        out = self._run(o, lease)
+        self.assertEqual(out.get("status"), "FAILED", out)
+        self.assertIn("尝试", str(out.get("result") or ""), out)
+        self.assertNotIn(payload_marker, str(out.get("result") or ""),
+                         "旧尝试的载荷不得被当作结果采纳")
+
+    def test_request_cancel_marks_the_trusted_record(self):
+        """取消必须落到尝试记录上，跨进程 worker 才看得见。"""
+        o = ov.OrchestratorV2.__new__(ov.OrchestratorV2)
+        redis = _QueueRedis()
+        o._redis = redis
+        o._now_iso = lambda: "2026-09-30T00:00:00Z"
+        self._ep.begin_attempt("t-cx", epoch=1, owner="owner-a")
+        o.request_cancel("t-cx", reason="用户请求停止")
+        cur = self._ep.current_permit("t-cx")
+        self.assertIsNotNone(cur)
+        self.assertTrue(cur.cancelled, "取消后可信记录必须标记 cancelled")
+        self.assertEqual(redis.kv.get("task_cancel:t-cx") is not None, True)
+
+
+class TestTerminalAttemptCAS(unittest.TestCase):
+    """T0-b：终态落库必须核对"是不是当前尝试"。"""
+
+    def setUp(self):
+        import execution_permit as ep
+        self._ep = ep
+        self._saved_store = ep.get_store()
+        ep.configure_store(ep.MemoryPermitStore())
+        self._tmp = tempfile.mkdtemp(prefix="weavemind_cas_")
+        self._db = os.path.join(self._tmp, "cas.db")
+        task_state.record_completion("t-cas", status="RUNNING", db_path=self._db)
+
+    def tearDown(self):
+        self._ep.configure_store(self._saved_store)
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_terminal_write_refused_for_stale_attempt(self):
+        older = self._ep.begin_attempt("t-cas", epoch=3, owner="owner-a")
+        newer = self._ep.begin_attempt("t-cas", epoch=3, owner="owner-a")
+        self.assertNotEqual(older.attempt_id, newer.attempt_id)
+        ok = task_state.record_completion("t-cas", status="SUCCESS",
+                                          attempt_id=older.attempt_id, db_path=self._db)
+        self.assertFalse(ok, "旧尝试不得写终态")
+        self.assertEqual(task_state.read_task("t-cas", db_path=self._db).get("status"),
+                         "RUNNING", "被拒绝的终态不得落库")
+        self.assertTrue(task_state.record_completion(
+            "t-cas", status="SUCCESS", attempt_id=newer.attempt_id, db_path=self._db),
+            "当前尝试的终态应当写入")
+        self.assertEqual(task_state.read_task("t-cas", db_path=self._db).get("status"),
+                         "SUCCESS")
+
+    def test_terminal_write_allowed_for_current_attempt(self):
+        permit = self._ep.begin_attempt("t-cas", epoch=3, owner="owner-a")
+        ok = task_state.record_completion("t-cas", status="SUCCESS",
+                                          attempt_id=permit.attempt_id, db_path=self._db)
+        self.assertTrue(ok)
+        self.assertEqual(task_state.read_task("t-cas", db_path=self._db).get("status"),
+                         "SUCCESS")
+
+    def test_terminal_write_without_attempt_still_works(self):
+        """没带尝试代号的老调用点不因此被卡（离线/旧路径），但这条旁路是可观测的。"""
+        ok = task_state.record_completion("t-cas", status="SUCCESS", db_path=self._db)
+        self.assertTrue(ok)
+
+
+class _WorkerDouble:
+    """worker_base 派发/发布路径的最小替身（只替换真正要做 I/O 的两处）。"""
+
+    def __init__(self):
+        self.executed = []
+        self.published = []
+
+    def execute(self, instruction: str) -> str:
+        self.executed.append(instruction)
+        return "worker-result"
+
+
+class TestWorkerPermitGate(unittest.TestCase):
+    """T0-b：worker 侧不得只靠"token 上下文"，排队后取消不 execute、旧尝试不发布。"""
+
+    def setUp(self):
+        import execution_permit as ep
+        self._ep = ep
+        self._saved_store = ep.get_store()
+        ep.configure_store(ep.MemoryPermitStore())
+        import llm_client as lc
+        self._lc = lc
+        lc.set_cancel_guard(None)
+
+    def tearDown(self):
+        self._ep.configure_store(self._saved_store)
+        self._lc.set_cancel_guard(None)
+        self._lc.clear_task_context()
+
+    def _worker(self):
+        from worker_base import BaseWorker
+
+        class _W(BaseWorker):
+            def execute(self, instruction: str) -> str:      # 抽象方法的具体实现
+                raise AssertionError("测试替身应替换 execute")
+
+        w = _W.__new__(_W)
+        w.agent_id = "worker-test"
+        w._contract = None
+        w._permit = None
+        w._search_status = None
+        w._current_ctx = None
+        w._current_gaps = []
+        # 只替换"真正执行"与"真正发布"两处 I/O
+        dbl = _WorkerDouble()
+        w.execute = dbl.execute
+        w._publish_result = lambda tid, status, result: dbl.published.append(
+            {"task_id": tid, "status": status, "result": result})
+        w._publish_failure = lambda tid, err: dbl.published.append(
+            {"task_id": tid, "status": "FAILED", "result": err})
+        return w, dbl
+
+    def _dispatch_payload(self, permit, *, root="t-w"):
+        return {"task_id": "1-abcd1234", "instruction": "查一下",
+                "permit": permit.to_wire() if permit is not None else None}
+
+    def test_queued_cancel_does_not_execute(self):
+        """排队后取消：worker 必须**不执行**（旧实现照样跑完再被丢弃）。"""
+        permit = self._ep.begin_attempt("t-w", epoch=1, owner="owner-a")
+        self._ep.note_cancel("t-w")                     # 入队之后、执行之前取消
+        w, dbl = self._worker()
+        w._process_task(self._dispatch_payload(permit))
+        self.assertEqual(dbl.executed, [], "已取消的步骤不得执行")
+        self.assertEqual(len(dbl.published), 1)
+        self.assertEqual(dbl.published[0]["status"], "CANCELLED", dbl.published)
+        self.assertIn("未执行", dbl.published[0]["result"])
+
+    def test_valid_permit_executes_and_echoes_attempt(self):
+        permit = self._ep.begin_attempt("t-w", epoch=1, owner="owner-a")
+        w, dbl = self._worker()
+        w._process_task(self._dispatch_payload(permit))
+        self.assertEqual(dbl.executed, ["查一下"])
+        self.assertEqual(dbl.published[0]["status"], "SUCCESS")
+
+    def test_result_not_published_when_attempt_superseded_during_execute(self):
+        """执行期间被换尝试：结果属于旧尝试，不得发布。"""
+        permit = self._ep.begin_attempt("t-w", epoch=1, owner="owner-a")
+        w, dbl = self._worker()
+
+        def _swap(_instruction):
+            self._ep.begin_attempt("t-w", epoch=1, owner="owner-a")   # 新尝试开始
+            return "旧尝试算出来的东西"
+
+        w.execute = _swap
+        w._process_task(self._dispatch_payload(permit))
+        self.assertEqual(dbl.published[0]["status"], "FAILED", dbl.published)
+        self.assertIn("attempt_mismatch", dbl.published[0]["result"])
+
+    def test_worker_permit_guard_stops_llm_sends(self):
+        """worker 装上的许可守卫必须让 LLM 客户端在发送前停手（取消/失租后零新发送）。"""
+        permit = self._ep.begin_attempt("t-w", epoch=1, owner="owner-a")
+        w, _ = self._worker()
+        w._install_permit_guard(permit)
+        self._lc.set_task_context("t-w")
+        self.assertFalse(self._lc._cancelled(), "许可有效时不该拦")
+        self._ep.note_cancel("t-w", store=self._ep.get_store())
+        self.assertTrue(self._lc._cancelled(),
+                        "取消后 worker 进程的 LLM 客户端必须能看到（不靠编排器内存）")
+        self._ep.begin_attempt("t-w", epoch=2, owner="owner-b")   # 换持有期/新尝试
+        self.assertTrue(self._lc._cancelled(), "换尝试后旧许可同样不得放行")
+
+    def test_stale_dispatch_without_permit_is_a_visible_bypass(self):
+        """旧派发载荷没有许可字段：按离线旁路放行（不假装有许可），行为与以前一致。"""
+        w, dbl = self._worker()
+        w._process_task({"task_id": "1-old", "instruction": "查"})
+        self.assertEqual(dbl.executed, ["查"])
 
 
 if __name__ == "__main__":

@@ -1,0 +1,84 @@
+{
+  "batch": "T0-b",
+  "generated_at": "2026-09-30T22:04:58+0800",
+  "isolation": {
+    "store": "真实 Redis（专属前缀，仅本脚本使用）",
+    "processes": "每个步骤一个新起子进程",
+    "prefix": "wm:permit:t0bcheck:"
+  },
+  "checks": [
+    {
+      "step": "A 建立尝试（gen=1）",
+      "expected": true,
+      "actual": true,
+      "pass": true,
+      "detail": "{'permit': {'root_task_id': 't0b-isolation', 'attempt_id': 'at-b64fad38122e', 'epoch': 1, 'deadline': 1790780696.2012699"
+    },
+    {
+      "step": "B 进程看到 A 的许可（跨进程共享真源）",
+      "expected": true,
+      "actual": true,
+      "pass": true,
+      "detail": "reason="
+    },
+    {
+      "step": "C 接管并换代号（gen=3，新尝试）",
+      "expected": true,
+      "actual": true,
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "step": "新尝试代号与旧的不同",
+      "expected": true,
+      "actual": true,
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "step": "B 进程判定旧持有期许可失效（不得借 gen3 复活）",
+      "expected": false,
+      "actual": false,
+      "pass": true,
+      "detail": "reason=attempt_mismatch"
+    },
+    {
+      "step": "取消跨进程可见（当前尝试被取消即拒绝）",
+      "expected": "cancelled",
+      "actual": "cancelled",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "step": "worker 进程据此不执行",
+      "expected": [],
+      "actual": [],
+      "pass": true,
+      "detail": "{'executed': [], 'published': [{'status': 'CANCELLED', 'result': '执行许可不通过，未执行：cancelled'}]}"
+    },
+    {
+      "step": "worker 如实回传未执行状态",
+      "expected": "CANCELLED",
+      "actual": "CANCELLED",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "step": "worker 对旧尝试同样不执行",
+      "expected": [],
+      "actual": [],
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "step": "worker 旧尝试回传 FAILED（非取消）",
+      "expected": "FAILED",
+      "actual": "FAILED",
+      "pass": true,
+      "detail": ""
+    }
+  ],
+  "passed": 10,
+  "failed": 0,
+  "verdict": "pass"
+}

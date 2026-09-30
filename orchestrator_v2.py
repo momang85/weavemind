@@ -63,6 +63,7 @@ from memory_manager import MemoryManager
 from ws_helpers import push_progress
 # L01：三层身份契约（根任务/步骤/派发）跨进程传递
 from task_context import make_context
+import execution_permit
 # V1：修订稿比较（硬约束 + 验收结果，不用字数）
 from report_quality import compare_versions
 from report_quality import disclaimer_instruction
@@ -3569,6 +3570,96 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             pass
 
     # ------------------------------------------------------------------
+    # T0-b 执行许可：不可变 attempt/epoch + 副作用前的唯一闸门
+    #
+    # 旧实现的许可判据散在三处：`_dispatch` **入口**查一次租约（之后可能
+    # `sleep(5)×6` 等 worker，醒来无条件 lpush）、worker 不继承任何取消守卫、
+    # 终态落库不看"是不是同一段尝试"。这里收成一条：每个副作用之前用
+    # `execution_permit.validate()` 对**可信当前记录**核一次，未知即拒绝。
+    # ------------------------------------------------------------------
+
+    def _permit_store(self):
+        return execution_permit.get_store()
+
+    def _install_permit_store(self) -> None:
+        """真实运行把尝试记录放 Redis（多进程共享：worker/另一实例都看得见撤销）。
+
+        Redis 不可用时退回进程内记录——那是**离线旁路**，会打日志，不假装共享。
+        """
+        try:
+            r = self._redis
+            if hasattr(r, "set") and hasattr(r, "get") and hasattr(r, "delete"):
+                execution_permit.configure_store(execution_permit.RedisPermitStore(r))
+                return
+        except Exception:
+            pass
+        logger.warning("执行许可记录退回进程内（Redis 不可用）：跨进程撤销不可见")
+        execution_permit.configure_store(execution_permit.MemoryPermitStore())
+
+    def _permit_ttl(self, task_id: str) -> float:
+        """尝试许可的有效期：优先跟随根任务剩余预算，取不到给保守默认。"""
+        try:
+            left = self._budget(task_id).remaining().get("seconds")
+            if left:
+                return max(60.0, float(left))
+        except Exception:
+            pass
+        return execution_permit.DEFAULT_ATTEMPT_TTL
+
+    def _task_permit(self, task_id: str):
+        """取本任务**当前尝试**的许可；返回 `(permit, 拒绝原因)`。
+
+        旧持有期的许可（gen1）在拿到新代号（gen3）后不得复活：epoch 不符一律拒绝，
+        这里**不**重新签发——合法的恢复在 `start_task_thread` 里显式创建新尝试。
+        """
+        store = self._permit_store()
+        cur = execution_permit.current_permit(task_id, store=store)
+        my_gen = int(ownership_generation() or 0)
+        owner = _owner_fingerprint()
+        if cur is not None:
+            if int(cur.epoch) != my_gen:
+                return None, (f"当前尝试属于持有期 gen={cur.epoch}，本进程是 gen={my_gen}"
+                              f"（旧尝试不得借新代号复活；恢复流程须创建新尝试）")
+            if not cur.fresh():
+                return None, "当前尝试已过截止（须由恢复流程创建新尝试）"
+            return cur, ""
+        if ownership_lost():
+            return None, "本进程已失去租约，且本任务没有可用的尝试许可"
+        # 无任何可信记录（离线/单机直跑/首启）：显式记一次旁路，再建新尝试
+        _note_permit_bootstrap(task_id)
+        try:
+            return execution_permit.begin_attempt(
+                task_id, epoch=my_gen, owner=owner,
+                ttl_seconds=self._permit_ttl(task_id), store=store), ""
+        except Exception as exc:                      # noqa: BLE001 - 建不出来就不发
+            return None, f"执行许可无法建立：{str(exc)[:100]}"
+
+    def _send_gate(self, task_id: str, permit) -> str:
+        """发送前闸门（空串=放行）：租约 → 许可（attempt/epoch/截止/取消）。
+
+        只在**副作用之前**调用；`_dispatch` 入口那次检查不能代替它——
+        等 worker 的 30s 窗口里租约可能已经易主。
+        """
+        _sup = _lease_superseded(task_id)
+        if _sup:
+            return _sup
+        ok, reason = execution_permit.validate(permit, task_id, store=self._permit_store())
+        if not ok:
+            return f"执行许可不通过（{reason}）"
+        return ""
+
+    def _gate_refuse(self, task_id: str, capability: str, step_id: str,
+                     why: str) -> dict:
+        """闸门拒绝的统一收尾：进度可见 + 明确 FAILED（不产生任何 lpush/付费发送）。"""
+        logger.error("拒绝派发：%s（step=%s，task=%s）", why, step_id, task_id)
+        push_progress(self._messaging, task_id, "log",
+                      {"type": "error", "agent": capability,
+                       "message": f"拒绝派发：{why}", "timestamp": self._now_iso()})
+        return {"task_id": step_id, "status": "FAILED", "gate_refused": True,
+                "result": f"拒绝派发：{why}"}
+
+
+    # ------------------------------------------------------------------
     # 用户取消（协作式）：webui 写 task_cancel:{tid}，编排器在派发边界检查
     # ------------------------------------------------------------------
 
@@ -3605,6 +3696,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 logger.warning("取消令牌写入失败（task=%s）：%s", task_id, str(exc)[:100])
         except Exception as exc:
             logger.warning("取消令牌写入失败（task=%s）：%s", task_id, str(exc)[:100])
+        # T0-b：取消同时落到**尝试记录**上——worker 进程不共享本进程内存，
+        # 只有可信记录里的 cancelled 才能让它停手（重试/备用/异步路径也都据此）。
+        try:
+            execution_permit.note_cancel(task_id, store=self._permit_store())
+        except Exception as exc:
+            logger.warning("取消标记写入尝试记录失败（task=%s）：%s", task_id, str(exc)[:100])
 
     def _cancel_requested(self, task_id: str) -> bool:
         """用户是否请求停止该任务。
@@ -4796,6 +4893,21 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                            "timestamp": self._now_iso()})
             return {"task_id": step.get("step_id", ""), "status": "FAILED",
                     "result": f"编排器租约已被取代，停止新派发：{_superseded}"}
+        # T0-b：本步所在**尝试**的许可。旧持有期的许可在这里就被拒（不重签），
+        # 后面每个副作用之前还会再核一次（等待期间可能失租/被接管）。
+        _permit, _permit_why = self._task_permit(task_id)
+        if _permit is None:
+            return self._gate_refuse(task_id, capability,
+                                     str(step.get("step_id") or ""), _permit_why)
+        if _permit.cancelled:
+            # 取消落在尝试记录上（跨进程真源）：即便本进程的提示键被清，也按取消收尾
+            logger.info("尝试已取消：跳过派发（step=%s）", step.get("step_id"))
+            push_progress(self._messaging, task_id, "log",
+                          {"type": "info", "agent": capability,
+                           "message": f"已取消，跳过步骤 {step.get('step_id')} 的派发",
+                           "timestamp": self._now_iso()})
+            return {"task_id": step.get("step_id", ""), "status": "CANCELLED",
+                    "cancelled": True, "result": "任务已取消（尝试记录标记取消），该步骤未派发"}
         # 派发复核：执行契约的**指纹**必须与任务当前契约一致；不一致（或研究步骤
         # 缺契约）时按契约重建指令，而不是把可能带着别的主体/期间的查询发出去。
         contract_wire = None
@@ -4896,12 +5008,22 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         # （此前首次派发无取消检查，重做/修复/降级重派等路径也能在取消后继续派发）
         if self._cancel_requested(task_id):
             logger.info("已取消：跳过派发（step=%s, capability=%s）", step_id, capability)
+            # 取消落到尝试记录上：跨进程的 worker 也据此停手（不再只在本进程可见）
+            try:
+                execution_permit.note_cancel(task_id, store=self._permit_store())
+            except Exception:
+                pass
             push_progress(self._messaging, task_id, "log",
                           {"type": "info", "agent": "orchestrator",
                            "message": f"已取消，跳过步骤 {step_id}（{capability}）的派发",
                            "timestamp": self._now_iso()})
             return {"task_id": step_id, "status": "CANCELLED",
                     "result": "任务已取消，该步骤未派发"}
+        # T0-b：**入队前**再核一次许可与租约。入口那次检查挡不住"等 worker 的 30s
+        # 窗口里失租/被接管"——旧实现醒来照样 lpush，等于替新 owner 发了付费请求。
+        _gate = self._send_gate(task_id, _permit)
+        if _gate:
+            return self._gate_refuse(task_id, capability, step_id, _gate)
         # 唯一派发 ID：避免 task_result:{step_id} 与其它任务/历史残留键碰撞
         # （步骤 ID 如 "1"/"2" 在所有任务中通用，曾导致跨任务误取结果）
         dispatch_id = f"{step_id}-{uuid.uuid4().hex[:8]}"
@@ -4935,6 +5057,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         r.lpush(f"task_queue:{agent_id}", json.dumps({
             "task_id": dispatch_id,
             "context": ctx.to_wire(),
+            # T0-b：执行许可随派发下发（worker 是另一个进程，按**可信当前记录**核它，
+            # 而不是靠本进程内存里的取消标志——那个它看不见）
+            "permit": _permit.to_wire(),
             "instruction": instruction,
             "task_start_ts": task_start_ts,
             "step_deadline": time.time() + timeout,
@@ -4956,6 +5081,25 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             out = self._wait_step_result(dispatch_id, timeout, cancel_task_id=task_id)
         except Exception as exc:
             out = WaitOutcome(WAIT_PROTOCOL, reason=f"等待步骤结果异常：{str(exc)[:120]}")
+        # T0-b：结果必须属于**当前尝试**。等待期间新尝试已开始（恢复/接管）时，
+        # 这份迟到结果不得被采纳——数值可能是旧参数/旧租约下算出来的。
+        if out.kind == WAIT_RESULT:
+            _ok, _why = execution_permit.validate(
+                _permit, task_id, store=self._permit_store())
+            if not _ok and _why in (
+                execution_permit.R_ATTEMPT, execution_permit.R_EPOCH,
+                execution_permit.R_NO_CURRENT, execution_permit.R_CANCELLED,
+                execution_permit.R_TASK, execution_permit.R_OWNER,
+            ):
+                self._mark_inflight_unsettled(task_id, dispatch_id)
+                logger.error("旧尝试的结果不得采纳（%s）：task=%s dispatch=%s",
+                             _why, task_id, dispatch_id)
+                push_progress(self._messaging, task_id, "log",
+                              {"type": "error", "agent": capability,
+                               "message": f"旧尝试的结果不得采纳（{_why}），已丢弃",
+                               "timestamp": self._now_iso()})
+                return {"task_id": step_id, "status": "FAILED", "stale_attempt": True,
+                        "result": f"旧尝试的结果不得采纳：{_why}"}
         if out.kind == WAIT_CANCEL:
             # 取消时**不**销账：worker 可能仍在跑、仍在计费，留痕供对账
             self._mark_inflight_unsettled(task_id, dispatch_id)
@@ -5815,11 +5959,19 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             # 就**不**算已终结：库里会停在 RUNNING，由 stale 兜底与后续重试处理，
             # 并在 Redis 留一个可查标记（此前只写一行 warning，等于没人知道）。
             ok, err = False, ""
+            _attempt_id = ""
+            try:
+                _cur_permit = execution_permit.current_permit(
+                    task_id, store=self._permit_store())
+                _attempt_id = str(getattr(_cur_permit, "attempt_id", "") or "")
+            except Exception:
+                _attempt_id = ""
             for attempt in range(3):
                 try:
                     ok = bool(_ts.record_completion(
                         task_id, goal=goal, status=status, report=report or "",
                         steps=steps or [], logs=logs or [], acceptance=acceptance or {},
+                        attempt_id=_attempt_id,
                     ))
                 except Exception as exc:
                     ok, err = False, str(exc)
@@ -5850,6 +6002,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             # R2：把"这个任务是否已请求停止"交给 LLM 客户端——它在**每次尝试前**与
             # **切备用前**复查，取消后不再重试、不再换端点（此前只有派发边界看得见取消）
             set_cancel_guard(self._cancel_requested)
+        except Exception:
+            pass
+        # T0-b：执行许可记录装到本进程（真实运行走 Redis，多进程共享撤销）
+        try:
+            self._install_permit_store()
         except Exception:
             pass
         project = _safe_project(project)
@@ -9512,6 +9669,23 @@ def _task_start_owner(task_id: str) -> str:
     return str(_task_start_binding(task_id).get("owner") or "")
 
 
+def _note_permit_bootstrap(task_id: str) -> None:
+    """"没有任何可信尝试记录"的旁路要看得见（每个任务只记一次）。
+
+    线上进程执行新任务时一定会在 `start_task_thread` 里创建尝试记录；
+    这里出现说明是离线单机直跑、旧任务恢复，或记录被清/过期。
+    """
+    if task_id in _PERMIT_BOOTSTRAPPED:
+        return
+    if len(_PERMIT_BOOTSTRAPPED) > 200:
+        _PERMIT_BOOTSTRAPPED.clear()
+    _PERMIT_BOOTSTRAPPED.add(task_id)
+    logger.warning("任务 %s 没有可信尝试记录 → 就地创建新尝试（离线/旧行旁路）", task_id)
+
+
+_PERMIT_BOOTSTRAPPED: set = set()
+
+
 def _lease_superseded(task_id: str) -> str:
     """**这个任务**是不是"被取代的旧持有者"在跑 → 空串表示可以继续。
 
@@ -9533,13 +9707,16 @@ def _lease_superseded(task_id: str) -> str:
     binding = _task_start_binding(task_id)
     start_owner = str(binding.get("owner") or "")
     if ownership_held():
-        # 任务绑定的代号**比本进程现在的代号新**是异常（任务库被改过/代次错乱）：
-        # 说明这条任务的执行权不属于本段持有期，不许继续。
+        # 任务绑定的代号与本进程现在的代号**必须相同**（T0-b 收紧）：
+        # 旧实现只在 `start_gen > my_gen` 时拦，于是"上一段持有期（gen1）留下的续程"
+        # 在本进程拿到新代号（gen3）后又被放行——租约换了代号就换了执行权，
+        # 旧续程必须由恢复流程**创建新尝试**，不得借新代号复活。
         _start_gen = int(binding.get("gen") or 0)
         _my_gen = ownership_generation()
-        if _start_gen > 0 and _my_gen > 0 and _start_gen > _my_gen:
+        if _start_gen > 0 and _my_gen > 0 and _start_gen != _my_gen:
+            _dir = "更新" if _start_gen > _my_gen else "更旧"
             return (f"任务启动时绑定的持有期 gen={_start_gen} 比本进程当前的 gen={_my_gen} "
-                    f"更新（执行权不属于本段持有期）")
+                    f"{_dir}（执行权不属于同一段持有期；恢复流程须创建新尝试）")
         return ""
     if ownership_lost():
         _why = ("任务启动时是本进程持有（指纹相同）但本进程**已失去有效租约**"
@@ -9714,6 +9891,18 @@ def run_and_finalize(orch, tid: str, goal: str, context: str = "", *,
                         f"令牌 …{_lease_s.get('token_tail')}）"))
         except Exception:                             # noqa: BLE001
             pass
+        # T0-b：**每次运行 = 一次新尝试**。恢复/接管必须换新 attempt_id——
+        # 旧续程拿着旧 attempt_id 一律核不过，所以"旧续程借新代号复活"在结构上不成立。
+        try:
+            _lease_gen = int((ownership_lease() or {}).get("gen") or 0)
+            _permit = execution_permit.begin_attempt(
+                tid, epoch=_lease_gen, owner=_owner_fingerprint(),
+                ttl_seconds=execution_permit.DEFAULT_ATTEMPT_TTL)
+            execution_permit.get_store().put(_permit)
+            logger.info("任务 %s 开始新尝试 %s（持有期 gen=%s）",
+                        tid, _permit.attempt_id, _lease_gen)
+        except Exception as exc:                      # noqa: BLE001
+            logger.warning("任务 %s 创建尝试许可失败：%s", tid, str(exc)[:120])
         result = orch.run(
             tid, goal, context, auto_run=auto_run, template_steps=template_steps,
             user_id=user_id, project=project, report_confirm=report_confirm,

@@ -392,9 +392,30 @@ class BaseWorker(ABC):
     # 内部：任务循环
     # ------------------------------------------------------------------
 
+    def _install_permit_store(self) -> None:
+        """装**执行许可记录**：真实运行放 Redis（跨进程看得见取消/换尝试）。
+
+        只放进程内的话，worker 永远读不到编排器写的取消——那正是 T0-b 反例
+        "worker 不继承编排器守卫"的机制根因，不是测试问题。
+        """
+        import execution_permit as ep
+        try:
+            r = getattr(self._messaging, "_redis", None)
+            if r is not None and hasattr(r, "set") and hasattr(r, "get"):
+                ep.configure_store(ep.RedisPermitStore(r))
+                return
+        except Exception as exc:                  # noqa: BLE001
+            logger.warning("'%s' 执行许可记录装配失败：%s", self.agent_id, str(exc)[:120])
+        logger.warning("'%s' 执行许可记录退回进程内（看不到别的进程的取消）", self.agent_id)
+        ep.configure_store(ep.MemoryPermitStore())
+
     def _task_loop(self) -> None:
         """主任务循环：阻塞式拉取任务 → 执行 → 回传结果。"""
         logger.info("'%s' task loop started.", self.agent_id)
+        try:
+            self._install_permit_store()
+        except Exception:
+            pass
         while self._running and not self._shutting_down:
             task: dict[str, Any] | None = None
             try:
@@ -448,6 +469,10 @@ class BaseWorker(ABC):
                     self._process_task(task)
                 finally:
                     clear_llm_accounting()
+                    # T0-b：守卫按任务装、按任务清（否则会把上一个任务的许可
+                    # 带到下一个任务上，变成"用旧许可放行新任务"）
+                    self._clear_permit_guard()
+                    self._permit = None
                     with self._current_task_lock:
                         self._current_ctx = None
 
@@ -500,9 +525,29 @@ class BaseWorker(ABC):
         if _wire and self._contract is None:
             logger.warning("'%s' 派发契约版本/结构不识别，按无契约处理", self.agent_id)
 
+        # T0-b：排队期间可能已被取消/换尝试 → **不执行**，如实回传。
+        # 旧实现在被取消后照样把步骤跑完（付费调用照发），只在结果回来后才被丢弃。
+        _permit = self._task_permit(task)
+        self._permit = _permit
+        _why = self._permit_gate(_permit)
+        if _why:
+            logger.error("'%s' 拒绝执行 %s：执行许可不通过（%s）",
+                         self.agent_id, task_id, _why)
+            self._publish_refused(task_id, _why)
+            return
+        self._install_permit_guard(_permit)
+
         try:
             # 调用子类的 execute 方法
             result = self.execute(instruction)
+            # 执行结束后、发布之前**再核一次**：这段时间里可能被取消或已换尝试，
+            # 那样这份结果属于旧尝试，不得发布（编排器也会拒，但这里先挡住）。
+            _why2 = self._permit_gate(_permit)
+            if _why2:
+                logger.error("'%s' 不发布 %s 的结果：执行许可失效（%s）",
+                             self.agent_id, task_id, _why2)
+                self._publish_refused(task_id, _why2)
+                return
             self._publish_result(task_id, "SUCCESS", result)
         except Exception as exc:
             logger.error(
@@ -513,6 +558,65 @@ class BaseWorker(ABC):
                 exc_info=True,
             )
             self._publish_failure(task_id, str(exc))
+
+    def _task_permit(self, task: dict):
+        """从派发载荷解出**执行许可**（T0-b）；结构不识别 = 没有许可（不猜）。"""
+        raw = (task or {}).get("permit")
+        if not isinstance(raw, dict) or not raw:
+            return None
+        try:
+            import execution_permit as ep
+            return ep.ExecutionPermit.from_wire(raw)
+        except Exception:
+            return None
+
+    def _permit_gate(self, permit) -> str:
+        """按**可信当前记录**核许可；空串=放行，否则返回拒绝原因。
+
+        worker 是另一个进程：拿不到编排器内存里的取消标志，只能相信共享真源
+        （Redis 上的尝试记录）。没有许可字段的旧派发按离线旁路放行，但会留日志。
+        """
+        if permit is None:
+            return ""
+        try:
+            import execution_permit as ep
+            ok, reason = ep.validate(permit, permit.root_task_id)
+            return "" if ok else reason
+        except Exception as exc:                  # noqa: BLE001 - 读不到真源=未知
+            logger.warning("'%s' 执行许可核验异常（按拒绝处理）：%s",
+                           self.agent_id, str(exc)[:120])
+            return "permit_store_unavailable"
+
+    def _install_permit_guard(self, permit) -> None:
+        """把执行许可装进 LLM 客户端的取消守卫。
+
+        T0-b 反例：worker 不继承编排器守卫 → 取消/失租后同步、异步、重试、备用
+        各自还会再发请求。装上之后，`llm_client` 在**每次尝试前**与**切备用前**
+        复查（同步与异步两条路都查）。
+        """
+        if permit is None:
+            return
+        try:
+            import llm_client as _lc
+            _lc.set_cancel_guard(lambda _tid, _p=permit: bool(self._permit_gate(_p)))
+        except Exception as exc:                  # noqa: BLE001
+            logger.warning("'%s' 执行许可守卫注册失败：%s", self.agent_id, str(exc)[:120])
+
+    def _clear_permit_guard(self) -> None:
+        try:
+            import llm_client as _lc
+            _lc.set_cancel_guard(None)
+        except Exception:
+            pass
+
+    def _publish_refused(self, task_id: str, why: str) -> None:
+        """许可不通过：如实回传"未执行"，绝不假装成功。"""
+        try:
+            import execution_permit as ep
+            status = "CANCELLED" if why == ep.R_CANCELLED else "FAILED"
+        except Exception:
+            status = "FAILED"
+        self._publish_result(task_id, status, f"执行许可不通过，未执行：{why}")
 
     # ------------------------------------------------------------------
     # 内部：结果发布
@@ -540,6 +644,15 @@ class BaseWorker(ABC):
         _ss = getattr(self, "_search_status", None)
         if isinstance(_ss, dict) and _ss.get("status"):
             message["search_status"] = _ss
+        # T0-b：结果带上**本步骤所在尝试**的身份，上游据此判"这份结果是不是当前
+        # 尝试的"（旧尝试的迟到结果不得采纳，也不得发布终态）。
+        _permit = getattr(self, "_permit", None)
+        if _permit is not None:
+            try:
+                import execution_permit as _ep
+                message.update(_ep.echo_fields(_permit))
+            except Exception:
+                pass
         # L01：结果回显身份上下文，否则上游只能看到派发 id，
         # 步骤/派发级归属（花了多少、属于哪一步）无从重建。
         ctx = getattr(self, "_current_ctx", None)
