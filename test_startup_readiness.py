@@ -45,6 +45,35 @@ def _closed_port() -> int:
     return port
 
 
+_TEST_PORTS_DIR = None
+_MODULE_PATCHERS: list = []
+
+
+def setUpModule():
+    """把**运行期端口记录**重定向到临时文件：测试不得改写真实运行状态。
+
+    实测缺陷：有些用例（`start_services` 的假进程路径）没有把让位记录隔离掉，而本机
+    8080 上有真在跑的工作台 → 用例真的把 `.weavemind/runtime_ports.json` 写成
+    `{"web": 8081, "preferred": 8080}`。之后 `launcher.py status` 就打出自相矛盾的
+    读数（`URL: …:8081` 且"工作台未响应"），而实例其实在 8080 上好好服务——
+    这正是"探活端口 8081 与实际 8080 不一致"的来源之一。
+    """
+    global _TEST_PORTS_DIR
+    _TEST_PORTS_DIR = tempfile.mkdtemp(prefix="wm_runtime_ports_")
+    patcher = mock.patch.object(launcher, "RUNTIME_PORTS_FILE",
+                                Path(_TEST_PORTS_DIR) / "runtime_ports.json")
+    patcher.start()
+    _MODULE_PATCHERS.append(patcher)
+
+
+def tearDownModule():
+    for p in _MODULE_PATCHERS:
+        p.stop()
+    _MODULE_PATCHERS.clear()
+    if _TEST_PORTS_DIR:
+        shutil.rmtree(_TEST_PORTS_DIR, ignore_errors=True)
+
+
 class TestMessagingClientFailsFast(unittest.TestCase):
     def test_closed_port_raises_quickly(self):
         port = _closed_port()
@@ -139,7 +168,10 @@ class TestCodeSandboxIsVisibleBeforeTasks(unittest.TestCase):
         self.assertIn("研究能力：就绪", src)
         self.assertIn("研究能力：未就绪", src)
         self.assertIn("代码执行：容器隔离不可用", src)
-        self.assertIn("print_readiness(readiness_report(), quiet=False)", src)
+        self.assertIn("print_readiness(rep, quiet=False)", src)
+        # URL 与探活必须来自同一次读取：此前两处各自解析端口，端口记录过期时会打出
+        # "URL: …:8081" 而探活写 "@ 8080" 的自相矛盾读数（架构师列为小修）。
+        self.assertIn("URL: {rep['url']}", src)
 
 
 class TestSingleInstanceReuse(unittest.TestCase):
@@ -388,6 +420,197 @@ class TestResearchReadiness(unittest.TestCase):
         self.assertEqual(launcher.web_port(), 8123)
         self.assertTrue(rep["url"].endswith(":8123"))
         self.assertIn(":8123", seen["url"], "就绪探测必须打在实际端口上")
+
+
+class TestStatusPortReadingIsSelfConsistent(unittest.TestCase):
+    """`launcher.py status` 的 URL 与探活端口必须一致。
+
+    背景（架构师列的小修）：让位过端口的实例上，`status` 曾同时打出两个端口——
+    `URL: http://localhost:8081` 而探活写 `HTTP 200 @ 8080`。根因是 URL 与探活各自
+    解析一次端口；当 `.weavemind/runtime_ports.json` 的记录与真正在响应的实例不一致时，
+    两次解析可以给出不同答案。修法：一次读取解析端口，并把**真正响应的端口**当事实。
+    """
+
+    def _patch(self, *, answers, recorded=8081, preferred=8080, owned=True):
+        import launcher as L
+        probed: list = []
+
+        def fake_probe(port, timeout):
+            probed.append(int(port))
+            if int(port) in answers:
+                return (True, f"HTTP 200 @ {port}", 200)
+            return (False, f"未响应（ConnectionRefusedError）@ {port}", 0)
+
+        patchers = [
+            mock.patch.object(L, "web_port", return_value=recorded),
+            mock.patch.object(L, "web_port_candidates", return_value=[recorded, preferred]),
+            mock.patch.object(L, "_probe_workbench", side_effect=fake_probe),
+            mock.patch.object(L, "_webui_owned_here", return_value=owned),
+            mock.patch.object(L, "_registry_heartbeats", return_value={}),
+            mock.patch.object(L, "_redis_reachable", return_value=False),
+            mock.patch.object(L, "instance_state",
+                              return_value={"running": False, "services": {}, "stale": {},
+                                            "port": recorded,
+                                            "url": f"http://localhost:{recorded}"}),
+        ]
+        return patchers, probed
+
+    def test_the_answering_port_wins_and_the_mismatch_is_stated(self):
+        import launcher as L
+        patchers, probed = self._patch(answers={8080})
+        for p in patchers:
+            p.start()
+            self.addCleanup(p.stop)
+        rep = L.readiness_report()
+        self.assertEqual(probed[0], 8081, "先探记录里的端口")
+        self.assertTrue(rep["workbench"]["ok"])
+        self.assertEqual(rep["port"], 8080, "报出的必须是真正在响应的端口")
+        self.assertTrue(rep["url"].endswith(":8080"))
+        self.assertEqual(rep["workbench"]["reported_port"], 8081)
+        self.assertEqual(rep["workbench"]["port_mismatch"],
+                         {"reported": 8081, "answered": 8080})
+        self.assertIn("8080", rep["workbench"]["note"])
+        self.assertIn("8081", rep["workbench"]["note"])
+
+    def test_recorded_port_is_kept_when_it_answers(self):
+        import launcher as L
+        patchers, probed = self._patch(answers={8081})
+        for p in patchers:
+            p.start()
+            self.addCleanup(p.stop)
+        rep = L.readiness_report()
+        self.assertEqual(rep["port"], 8081)
+        self.assertTrue(rep["url"].endswith(":8081"))
+        self.assertNotIn("port_mismatch", rep["workbench"])
+        self.assertEqual(probed, [8081], "已响应就不再探活别的端口")
+
+    def test_no_candidate_answers_is_reported_plainly(self):
+        import launcher as L
+        patchers, _probed = self._patch(answers=set())
+        for p in patchers:
+            p.start()
+            self.addCleanup(p.stop)
+        rep = L.readiness_report()
+        self.assertFalse(rep["workbench"]["ok"])
+        self.assertEqual(rep["port"], 8081)
+        self.assertIn("未响应", rep["workbench"]["detail"])
+        self.assertNotIn("port_mismatch", rep["workbench"], "都没响应就不是端口记录问题")
+
+    def test_foreign_listener_is_never_reported_as_our_workbench(self):
+        """本实例的 webui 不在运行（归属校验失败）→ 默认端口上响应的可能是**别人的**程序。
+
+        此时不得把那个端口当成"我们的工作台"报出去（否则用户被带到错误的页面）。
+        """
+        import launcher as L
+        patchers, probed = self._patch(answers={8080}, owned=False)
+        for p in patchers:
+            p.start()
+            self.addCleanup(p.stop)
+        rep = L.readiness_report()
+        self.assertEqual(probed, [8081], "无归属时不检查备选端口")
+        self.assertFalse(rep["workbench"]["ok"])
+        self.assertEqual(rep["port"], 8081)
+        self.assertNotIn("port_mismatch", rep["workbench"])
+
+    def test_url_command_follows_the_answering_port(self):
+        """`launcher.py url` 必须给出打得开的地址（start.bat 据此打开浏览器）。"""
+        import launcher as L
+        read = {"recorded": 8081, "port": 8080, "detail": "HTTP 200 @ 8080",
+                "answered": True, "mismatch": True,
+                "probes": [{"port": 8081, "ok": False, "detail": "未响应 @ 8081"}]}
+        with mock.patch.object(L, "answering_web_port", return_value=read), \
+                mock.patch.object(sys, "argv", ["launcher.py", "url"]), \
+                mock.patch("builtins.print") as out:
+            L.main()
+        printed = " ".join(str(c) for c in out.call_args_list)
+        self.assertIn("http://localhost:8080", printed)
+        self.assertNotIn("http://localhost:8081", printed)
+
+    def test_url_command_keeps_a_single_line_on_stdout(self):
+        """stdout 只能是地址本身：start.bat 用 for /f 逐行取值，最后一行会覆盖 URL。"""
+        import launcher as L
+        read = {"recorded": 8081, "port": 8080, "detail": "HTTP 200 @ 8080",
+                "answered": True, "mismatch": True, "probes": []}
+        out_lines: list = []
+        err_lines: list = []
+
+        def fake_print(*args, **kwargs):
+            (err_lines if kwargs.get("file") is sys.stderr else out_lines).append(args)
+
+        with mock.patch.object(L, "answering_web_port", return_value=read), \
+                mock.patch.object(sys, "argv", ["launcher.py", "url"]), \
+                mock.patch("builtins.print", side_effect=fake_print):
+            L.main()
+        self.assertEqual(out_lines, [("http://localhost:8080",)],
+                         "stdout 只允许一行地址（说明必须走 stderr）")
+        self.assertEqual(len(err_lines), 1, "端口不一致的说明写在 stderr")
+
+        """`status` 打出的 URL 必须与探活同源：不得用 web_port() 另算一次。"""
+        import launcher as L
+        stub = {"workbench": {"ok": True, "detail": "HTTP 200 @ 8080", "port": 8080,
+                              "url": "http://localhost:8080", "reported_port": 8081,
+                              "answered_port": 8080,
+                              "port_mismatch": {"reported": 8081, "answered": 8080},
+                              "note": "端口记录与运行实例不一致：记录的 8081 无响应，"
+                                      "实际在 8080 响应"},
+                 "research": {"ok": False, "redis": False, "redis_major": None,
+                              "missing": [], "stale": [], "orchestrator": False,
+                              "required": []},
+                 "code_sandbox": {"ok": False, "note": "", "execution_available": False,
+                                  "reason": "docker 不可用"},
+                 "port": 8080, "url": "http://localhost:8080", "ready": False}
+        with mock.patch.object(L, "readiness_report", return_value=stub), \
+                mock.patch.object(L, "web_port", return_value=8081), \
+                mock.patch("builtins.print") as out:
+            L.print_status()
+        printed = " ".join(str(c) for c in out.call_args_list)
+        self.assertIn("URL: http://localhost:8080", printed,
+                      "URL 必须用探活那次读取的端口，而不是再解析一次")
+        self.assertIn("HTTP 200 @ 8080", printed)
+        self.assertIn("不一致", printed, "端口记录不一致必须如实打印，不静默")
+
+
+class TestRuntimeStateIsolation(unittest.TestCase):
+    """用例不得改写真实运行状态（`setUpModule` 把端口记录重定向到临时文件）。"""
+
+    def test_start_services_never_writes_the_real_port_record(self):
+        import launcher as L
+        real = Path(L.PID_DIR) / "runtime_ports.json"
+        before = real.read_bytes() if real.exists() else None
+        tmp = tempfile.mkdtemp(prefix="wm_pids_")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        ready = {"workbench": {"ok": True, "detail": "HTTP 200 @ 8081", "port": 8081,
+                               "url": "http://localhost:8081"},
+                 "research": {"ok": True, "redis": True, "redis_major": 8, "missing": [],
+                              "stale": [], "orchestrator": True, "required": []},
+                 "code_sandbox": {"ok": False, "note": "", "execution_available": False,
+                                  "isolation_required": True, "reason": "docker 不可用"},
+                 "port": 8081, "url": "http://localhost:8081", "ready": True}
+        with mock.patch.object(L, "PID_FILE", Path(tmp) / "pids.json"), \
+                mock.patch.object(L, "_load_config", return_value={}), \
+                mock.patch.object(L, "_read_pids", return_value={"services": {}}), \
+                mock.patch.object(L, "_webui_owned_here", return_value=False), \
+                mock.patch.object(L, "_preferred_web_port", return_value=8080), \
+                mock.patch.object(L, "_web_port_is_explicit", return_value=False), \
+                mock.patch.object(L, "_port_is_free",
+                                  side_effect=lambda p: int(p) != 8080), \
+                mock.patch.object(L, "build_services", return_value=[]), \
+                mock.patch.object(L, "stop_services", return_value=[]), \
+                mock.patch.object(L, "verify_services",
+                                  return_value={"total": 0, "alive": 0, "down": [],
+                                                "never_started": [], "waited": 0}), \
+                mock.patch.object(L, "readiness_report", return_value=ready), \
+                mock.patch.object(L, "_ensure_redis_available"), \
+                mock.patch.object(L, "_wait_redis_ready", return_value=True), \
+                mock.patch.dict(os.environ, {}, clear=False), \
+                mock.patch("builtins.print"):
+            L.start_services()
+        after = real.read_bytes() if real.exists() else None
+        self.assertEqual(before, after,
+                         "用例把真实的 .weavemind/runtime_ports.json 改写了："
+                         "让位记录必须落在隔离的临时文件里")
+        recorded = json.loads(Path(L.RUNTIME_PORTS_FILE).read_text(encoding="utf-8"))
+        self.assertEqual(recorded["web"], 8081, "让位记录应写进隔离文件（证明该路径确实会写）")
 
 
 class TestStartupController(unittest.TestCase):

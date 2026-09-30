@@ -34,6 +34,9 @@ COMPANIES = (
     ("002304", "洋河股份", "002304.SZ", (2023, 2024)),
     ("600031", "三一重工", "600031.SH", (2023, 2024)),
     ("000711", "京蓝科技", "000711.SZ", (2019, 2020)),
+    # 同一家公司的**更正后**年报（2025-09-05 披露）：与上一条同代码，不计作第二家公司。
+    # 正文由 `scripts/a2_corrected_report_online.py` 走产品通道在线取回后写入缓存。
+    ("000711-corrected", "京蓝科技", "000711.SZ", (2019, 2020)),
 )
 
 
@@ -156,8 +159,11 @@ def main() -> int:
         p.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
         print(f"读数已写入 {p}")
     ok = [r for r in out if r.get("status") == "validated"]
-    print(f"\n跨公司：{len(out)} 家，跑出已验证运行 {len(ok)} 家")
-    return 0 if len(ok) >= 2 else 1
+    codes = {str(r.get("code")) for r in ok}
+    print(f"\n材料 {len(ok)}/{len(out)} 份跑出已验证运行；"
+          f"涉及 {len(codes)} 家公司（同一代码的不同版本不重复计数）")
+    print("公司代码：" + "、".join(sorted(codes)))
+    return 0 if len(codes) >= 2 else 1
 
 
 if __name__ == "__main__":

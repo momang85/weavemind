@@ -288,5 +288,101 @@
    }
   ],
   "status": "validated"
+ },
+ {
+  "slug": "000711-corrected",
+  "company": "京蓝科技",
+  "code": "000711.SZ",
+  "as_of": "2025-09-05",
+  "paper_ok": true,
+  "request_source": "official_material",
+  "official_notes": [
+   "官方材料 2db15147bad934f9（京蓝科技股份有限公司2020年年度报告（更正后））：抽取到 26 条与契约相容的财务事实；已排除 caliber 16 条"
+  ],
+  "rows": 22,
+  "derived": 12,
+  "gaps": [],
+  "fact_metrics": [
+   "accounts_payable",
+   "accounts_receivable",
+   "gross_profit",
+   "inventory",
+   "net_profit",
+   "operating_cashflow",
+   "operating_cost",
+   "revenue",
+   "total_assets",
+   "total_liabilities",
+   "total_revenue"
+  ],
+  "fact_periods": [
+   "2019年",
+   "2020年"
+  ],
+  "dataset": {
+   "label": "worker:working_paper.json",
+   "periods": [
+    "2019年",
+    "2020年"
+   ],
+   "observations": 34,
+   "usable": 34,
+   "gaps": [
+    "非年度期间（不参与年度模型，仍保留在观察集合里）：2020年同比、2020年较2019年"
+   ]
+  },
+  "question_types": [
+   "cash_conversion",
+   "profit_attribution",
+   "working_capital"
+  ],
+  "adopted": [
+   "profit_to_cash",
+   "cash_quality",
+   "profit_bridge",
+   "working_capital"
+  ],
+  "runs": [
+   {
+    "model_id": "profit_to_cash",
+    "status": "validated",
+    "reason": "",
+    "validation_failed": [],
+    "main": {
+     "profit_change": -1362952262.96,
+     "cash_profit_gap_change": 1511762934.94
+    }
+   },
+   {
+    "model_id": "cash_quality",
+    "status": "validated",
+    "reason": "",
+    "validation_failed": [],
+    "main": {
+     "cfo_minus_profit": 2459867571.65
+    }
+   },
+   {
+    "model_id": "profit_bridge",
+    "status": "validated",
+    "reason": "",
+    "validation_failed": [],
+    "main": {
+     "net_profit_change": -1362952262.96,
+     "gross_profit_change": -488198765.74
+    }
+   },
+   {
+    "model_id": "working_capital",
+    "status": "validated",
+    "reason": "",
+    "validation_failed": [],
+    "main": {
+     "working_capital_occupation_change": -4007544257.08,
+     "receivable_days": 469.2
+    }
+   }
+  ],
+  "status": "validated"
  }
 ]

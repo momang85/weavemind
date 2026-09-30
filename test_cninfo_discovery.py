@@ -320,6 +320,28 @@ class TestDiscoverContract(CninfoDiscoveryTestCase):
         self.assertTrue(out["next_steps"])
         self.assertIn("参数摘要", " ".join(out["next_steps"]))
 
+    def test_unknown_code_is_no_candidates_not_unavailable(self):
+        """代码不在巨潮索引里 = "问到了端点，它如实说没有"，不是端点故障。
+
+        实机读数（2026-09-30，公网）：代码 999999 返回
+        `cninfo[orgId 映射]: 999999 不在巨潮证券索引里`，此前被记成 `unavailable`——
+        页面会显示"端点不可用，稍后重试"，而用户真正该做的是核对代码。
+        """
+        out = di.discover("不存在的公司", "999999", periods=(2023,),
+                          fetch=FakeNet(org_map={"stockList": []}))
+        self.assertEqual(out["status"], "no_candidates")
+        self.assertEqual(out["reason_code"], registry.EMPTY_RESULT)
+        self.assertNotIn("公告发现失败", out["reason"], "内容级否定不是失败")
+        self.assertIn("索引", out["reason"])
+        self.assertTrue(out["next_steps"])
+
+    def test_empty_query_is_no_candidates(self):
+        net = FakeNet(query={"announcements": None, "totalAnnouncement": 0,
+                             "categoryList": None, "hasMore": False})
+        out = di.discover("三一重工", "600031.SH", periods=(2024,), fetch=net)
+        self.assertEqual(out["status"], "no_candidates")
+        self.assertEqual(out["reason_code"], registry.EMPTY_RESULT)
+
     def test_discovery_provenance_is_its_own_kind(self):
         """官方发现**不是**人工直链、也不是全文搜索，标签必须自己一类。"""
         self.assertIn(di.PROVENANCE_DISCOVERY, di.PROVENANCE_LABEL)

@@ -1,0 +1,174 @@
+{
+ "entry": "cninfo 公告查询（官方披露发现）",
+ "model_calls": 0,
+ "paid": false,
+ "queries": [
+  {
+   "company": "京蓝科技",
+   "code": "000711",
+   "periods": [
+    2019,
+    2020
+   ],
+   "status": "found",
+   "reason_code": "",
+   "reason": "",
+   "total": 25,
+   "contract": "cninfo-hisannouncement-v1",
+   "params": {
+    "pageNum": "1",
+    "pageSize": "30",
+    "column": "szse",
+    "tabName": "fulltext",
+    "plate": "",
+    "stock": "000711,gssz0000711",
+    "searchkey": "",
+    "secid": "",
+    "category": "category_ndbg_szsh",
+    "trade": "",
+    "seDate": "2018-01-01~2027-12-31",
+    "sortName": "",
+    "sortType": "",
+    "isHLtitle": "true"
+   },
+   "probe": {
+    "url": "http://www.cninfo.com.cn/new/hisAnnouncement/query",
+    "status": 200
+   },
+   "candidate_count": 5,
+   "candidates": [
+    {
+     "title": "2020年年度报告摘要",
+     "url": "http://static.cninfo.com.cn/finalpage/2021-04-27/1209816824.PDF",
+     "disclosed_at": "2021-04-27",
+     "doc_type": null,
+     "version": "original",
+     "why": "官方披露域（巨潮公告查询）；报告期 2020；原始披露版本；摘要（正文另有文件）"
+    },
+    {
+     "title": "京蓝科技股份有限公司2020年年度报告（更正后）",
+     "url": "http://static.cninfo.com.cn/finalpage/2025-09-05/1224639904.PDF",
+     "disclosed_at": "2025-09-05",
+     "doc_type": null,
+     "version": "corrected",
+     "why": "官方披露域（巨潮公告查询）；报告期 2020；更正/修订后版本（与原始版并存，不覆盖）；正文"
+    },
+    {
+     "title": "2020年年度报告",
+     "url": "http://static.cninfo.com.cn/finalpage/2021-04-27/1209816825.PDF",
+     "disclosed_at": "2021-04-27",
+     "doc_type": null,
+     "version": "original",
+     "why": "官方披露域（巨潮公告查询）；报告期 2020；原始披露版本；正文"
+    },
+    {
+     "title": "2019年年度报告摘要",
+     "url": "http://static.cninfo.com.cn/finalpage/2020-04-29/1207666294.PDF",
+     "disclosed_at": "2020-04-29",
+     "doc_type": null,
+     "version": "original",
+     "why": "官方披露域（巨潮公告查询）；报告期 2019；原始披露版本；摘要（正文另有文件）"
+    },
+    {
+     "title": "2019年年度报告",
+     "url": "http://static.cninfo.com.cn/finalpage/2020-04-29/1207666293.PDF",
+     "disclosed_at": "2020-04-29",
+     "doc_type": null,
+     "version": "original",
+     "why": "官方披露域（巨潮公告查询）；报告期 2019；原始披露版本；正文"
+    }
+   ],
+   "next_steps": []
+  },
+  {
+   "company": "三一重工",
+   "code": "600031",
+   "periods": [
+    2023,
+    2024
+   ],
+   "status": "found",
+   "reason_code": "",
+   "reason": "",
+   "total": 10,
+   "contract": "cninfo-hisannouncement-v1",
+   "params": {
+    "pageNum": "1",
+    "pageSize": "30",
+    "column": "szse",
+    "tabName": "fulltext",
+    "plate": "",
+    "stock": "600031,gssh0600031",
+    "searchkey": "",
+    "secid": "",
+    "category": "category_ndbg_szsh",
+    "trade": "",
+    "seDate": "2022-01-01~2027-12-31",
+    "sortName": "",
+    "sortType": "",
+    "isHLtitle": "true"
+   },
+   "probe": {
+    "url": "http://www.cninfo.com.cn/new/hisAnnouncement/query",
+    "status": 200
+   },
+   "candidate_count": 4,
+   "candidates": [
+    {
+     "title": "三一重工股份有限公司2024年年度报告摘要",
+     "url": "http://static.cninfo.com.cn/finalpage/2025-04-18/1223129233.PDF",
+     "disclosed_at": "2025-04-18",
+     "doc_type": null,
+     "version": "original",
+     "why": "官方披露域（巨潮公告查询）；报告期 2024；原始披露版本；摘要（正文另有文件）"
+    },
+    {
+     "title": "三一重工股份有限公司2024年年度报告",
+     "url": "http://static.cninfo.com.cn/finalpage/2025-04-18/1223129214.PDF",
+     "disclosed_at": "2025-04-18",
+     "doc_type": null,
+     "version": "original",
+     "why": "官方披露域（巨潮公告查询）；报告期 2024；原始披露版本；正文"
+    },
+    {
+     "title": "三一重工股份有限公司2023年年度报告摘要",
+     "url": "http://static.cninfo.com.cn/finalpage/2024-04-29/1219890117.PDF",
+     "disclosed_at": "2024-04-29",
+     "doc_type": null,
+     "version": "original",
+     "why": "官方披露域（巨潮公告查询）；报告期 2023；原始披露版本；摘要（正文另有文件）"
+    },
+    {
+     "title": "三一重工股份有限公司2023年年度报告",
+     "url": "http://static.cninfo.com.cn/finalpage/2024-04-29/1219890100.PDF",
+     "disclosed_at": "2024-04-29",
+     "doc_type": null,
+     "version": "original",
+     "why": "官方披露域（巨潮公告查询）；报告期 2023；原始披露版本；正文"
+    }
+   ],
+   "next_steps": []
+  }
+ ],
+ "negative_control": {
+  "company": "不存在的公司",
+  "code": "999999",
+  "periods": [
+   2023
+  ],
+  "status": "no_candidates",
+  "reason_code": "empty_result",
+  "reason": "cninfo[orgId 映射]: 999999 不在巨潮证券索引里（非 A 股/已退市/代码有误）",
+  "total": null,
+  "contract": "",
+  "params": {},
+  "probe": {},
+  "candidate_count": 0,
+  "candidates": [],
+  "next_steps": [
+   "这家公司在查询期间内确实没有该类公告：确认证券代码与报告期，或改用人工材料"
+  ]
+ },
+ "reachable": true,
+ "corrected_visible": true
+}

@@ -85,9 +85,38 @@
 >
 > **仍未解决（不假装已解决）**：真人 F3 五项 ≥8/10（必须真人）；干净 Windows 一键启动
 > 与完整交付验收（`clean-env-e2e` 是 ubuntu + 固定模型替身，不能替代）；带登录会话的
-> 页面真实点击；真实公网各入口可达性；`000711-corrected` 更正稿正文缓存缺失；
-> K1 付费 API 端到端实网整跑（预算未确认）；`launcher.py status` 探活端口 8081 与
-> 实际 8080 的小不一致。**Q4 统计预测未开放**（两期财报不能支撑趋势/回归）。
+> 页面真实点击（实例已初始化、两个 admin 都有密码，未经同意不新建账号）；
+> K1 付费 API 端到端实网整跑（预算未确认）；**Q4 统计预测未开放**（两期财报不能支撑趋势/回归）。
+>
+> ## 当前账（2026-09-30 · 官方入口在线实测 + 更正稿补缺 + 端口读数小修）
+>
+> 证据 [20260930-online-entry-and-port-reading.md](evidence/20260930-online-entry-and-port-reading.md)、
+> [a2_official_entry_online.json](evidence/a2_official_entry_online.json)、
+> [a2_corrected_report_online.json](evidence/a2_corrected_report_online.json)、
+> [l1_official_facts_chain.json](evidence/l1_official_facts_chain.json)。只跑定向验证、无付费。
+>
+> - **官方入口公网在线实测**（`scripts/a2_official_entry_online.py`，无模型）：巨潮公告查询
+>   `new/hisAnnouncement/query` HTTP 200，契约 `cninfo-hisannouncement-v1`；000711（2019/2020）
+>   → `found` 5 条、600031（2023/2024）→ `found` 4 条，候选里含 **2025-09-05 的更正后年报**
+>   （`version=corrected`，与原始版并存）；反例 999999 → `no_candidates/empty_result`。
+> - **顺带修真缺陷**：内容级否定（代码不在索引/期间无公告）此前被记成 `status=unavailable`
+>   ——页面会让人"稍后重试"而不是核对代码；现记 `no_candidates`，传输/限流/结构变化才是
+>   `unavailable`（`test_cninfo_discovery` 33 全过，+2）。
+> - **`000711-corrected` 更正稿正文补齐**（`scripts/a2_corrected_report_online.py`）：走产品通道
+>   （`store(web_link)` → `admit` → `net_policy.fetch_document`）取回 HTTP 200、`egress=direct_pinned`、
+>   1,513,031 B、`98dc313a…`、273 页、1263 小节、规则 `adm-2/f3a-1`，写入缓存布局；
+>   L1 离线复跑 **4/4 材料、3 家公司**（000711 原文与更正稿同代码不重复计数）全 `validated`，
+>   更正稿与原稿结论确有差异（`profit_change` −1,362,952,262.96 vs −1,318,104,774.55、
+>   应收账款周转天数 469.20 vs 403.21）。
+> - **`launcher.py status` 端口读数小修**：修前 `URL: …:8081` + "工作台未响应 @ 8081"（实例其实在
+>   8080 上 200）；修后 `URL: …:8080` + `HTTP 200 @ 8080` + 如实说明记录不一致。根因两条并修：
+>   ①URL 与探活各自解析一次端口（现同源，且以真正响应的端口为准，仅在"本实例持有 webui"时才看
+>   备选，以免把别人的程序当成我们的工作台）；②**用例真的改写了 `.weavimind/runtime_ports.json`**
+>   （现 `setUpModule` 隔离 + `TestRuntimeStateIsolation` 守卫断言真实文件字节不变）。
+>   该文件已按当前实例恢复为 `{"web": 8080, "preferred": 8080}`。
+> - **定向验证**：`test_startup_readiness` 76、`test_cninfo_discovery` 33、
+>   `test_orchestrator_v2` 86、`test_sandbox_isolation`、`test_delivery_chain` 408 全过；
+>   `scripts/check_secrets.py` 干净；`py_compile` 通过。
 >
 > ## 前账（2026-09-30 凌晨 · **K0→K1→K2→K3 全部执行完毕**）
 >

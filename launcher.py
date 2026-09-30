@@ -870,29 +870,104 @@ def _registry_heartbeats() -> dict[str, float]:
     return out
 
 
-def readiness_report(*, http_timeout: float = 3.0) -> dict:
+def _probe_workbench(port: int, timeout: float) -> tuple:
+    """回环探活工作台：返回 (是否 2xx, 明细, 状态码)。
+
+    回环探测必须绕开代理：企业/校园网常设 HTTP_PROXY，代理会把 127.0.0.1 的请求也接走
+    （实测死代理下"服务在跑却报工作台未响应"）。这里显式不走代理，与 NO_PROXY 发布双保险。
+    """
+    try:
+        import urllib.request
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(f"http://127.0.0.1:{port}/api/health", timeout=timeout) as resp:
+            code = int(getattr(resp, "status", 0) or 0)
+        return (200 <= code < 300, f"HTTP {code} @ {port}", code)
+    except Exception as exc:
+        return (False, f"未响应（{str(exc)[:80]}）@ {port}", 0)
+
+
+def web_port_candidates() -> list:
+    """本次读取要检查的端口，按可信度排序并去重：解析端口 → 落盘实际端口 → 期望端口。
+
+    为什么不止一个：端口可能被让位（`.weavemind/runtime_ports.json`）或由用户显式指定。
+    实例换过端口、或 PID 归属校验读到过期记录时，只探活一个端口会给出自相矛盾的状态
+    （URL 写一个端口、探活写另一个端口）——因此把"哪个端口真的在响应"当作事实来源。
+    """
+    saved = _read_runtime_ports()
+    out: list = []
+    for item in (web_port(), saved.get("web"), saved.get("preferred"), _preferred_web_port()):
+        try:
+            p = int(item or 0)
+        except Exception:
+            continue
+        if 0 < p < 65536 and p not in out:
+            out.append(p)
+    return out
+
+
+def answering_web_port(*, timeout: float = 0.8, allow_alternates: bool | None = None) -> dict:
+    """**真正在响应**的工作台端口：候选按可信度依次探活，谁 2xx 就是谁。
+
+    为什么不能只认记录里的端口：`.weavemind/runtime_ports.json` 可能留着上一次让位的
+    记录，而当前实例其实在期望端口上服务（实测：记录 8081、实例 8080 —— `status` 打出
+    `URL: …:8081` 且"工作台未响应"，用户明明能打开 8080 的页面）。
+
+    只在"本实例的 webui 确实属于本实例"（`_webui_owned_here()`）时才检查备选端口：
+    否则别人占着默认端口也会被当成"我们的工作台"，把用户带到错误的页面。
+    返回 {recorded, port, detail, answered, mismatch, probes}。
+    """
+    recorded = int(web_port())
+    if allow_alternates is None:
+        try:
+            allow_alternates = bool(_webui_owned_here())
+        except Exception:
+            allow_alternates = False
+    candidates = web_port_candidates() if allow_alternates else [recorded]
+    probes: list = []
+    for cand in candidates:
+        ok, detail, code = _probe_workbench(cand, timeout)
+        probes.append({"port": cand, "ok": ok, "detail": detail, "code": code})
+        if ok:
+            break
+    hit = next((p for p in probes if p["ok"]), None)
+    return {"recorded": recorded,
+            "port": int(hit["port"]) if hit else recorded,
+            "detail": hit["detail"] if hit else probes[0]["detail"],
+            "answered": bool(hit),
+            "mismatch": bool(hit and int(hit["port"]) != recorded),
+            "probes": probes}
+
+
+def readiness_report(*, http_timeout: float = 3.0, port: int | None = None) -> dict:
     """三层状态：工作台可访问 / 研究能力就绪 / 代码隔离可用。
 
     为什么不能只看"N/N 服务存活"：PID 存活、端口响应、进程数都不能代表**能提交研究任务**。
     研究能力要求 Redis 可达且版本兼容（≥6，redis-py 8 用 RESP3）、注册表里研究必需能力的
     心跳新鲜、编排器进程存活。任何一层不成立都不得对外宣称"可研究"。
+
+    `port` 可由调用方传入（同一次输出里 URL 与探活必须用同一个端口）；未给则解析一次。
+    记录里的端口无响应时，如实检查其它候选端口并把**真正响应的端口**作为结果报出，
+    绝不出现"URL 与探活端口不一致"这种自相矛盾的读数。
     """
-    port = web_port()
+    resolved = int(port or web_port())
+    if port is None:
+        read = answering_web_port(timeout=http_timeout)
+    else:
+        ok, detail, _code = _probe_workbench(resolved, http_timeout)
+        read = {"recorded": resolved, "port": resolved, "detail": detail,
+                "answered": ok, "mismatch": False,
+                "probes": [{"port": resolved, "ok": ok, "detail": detail}]}
     # ① 工作台：后端在**实际端口**上响应
-    workbench = {"ok": False, "detail": "", "port": port, "url": web_url(port)}
-    try:
-        import urllib.request
-        # 回环探测必须绕开代理：企业/校园网常设 HTTP_PROXY，代理会把 127.0.0.1 的
-        # 请求也接走（实测死代理下"服务在跑却报工作台未响应"）。这里显式不走代理，
-        # 与下面的 NO_PROXY 发布双保险。
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with opener.open(
-                f"http://127.0.0.1:{port}/api/health", timeout=http_timeout) as resp:
-            code = int(getattr(resp, "status", 0) or 0)
-            workbench["ok"] = 200 <= code < 300
-            workbench["detail"] = f"HTTP {code} @ {port}"
-    except Exception as exc:
-        workbench["detail"] = f"未响应（{str(exc)[:80]}）@ {port}"
+    workbench = {"ok": bool(read["answered"]), "detail": read["detail"],
+                 "port": read["port"], "url": web_url(read["port"]),
+                 "reported_port": read["recorded"], "answered_port": read["port"],
+                 "note": ""}
+    if read["mismatch"]:
+        workbench["port_mismatch"] = {"reported": read["recorded"],
+                                      "answered": read["port"]}
+        workbench["note"] = (f"记录的 {read['recorded']} 无响应，实际在 "
+                             f"{read['port']} 响应（已按实际端口显示；"
+                             "`python launcher.py stop` 后重新启动即可刷新记录）")
 
     # ② 研究能力
     host, rport = _redis_target()
@@ -924,7 +999,8 @@ def readiness_report(*, http_timeout: float = 3.0) -> dict:
         sandbox = {"ok": False, "note": f"沙箱状态未知（{str(exc)[:60]}）",
                    "execution_available": False, "isolation_required": True, "reason": ""}
     return {"workbench": workbench, "research": research, "code_sandbox": sandbox,
-            "port": port, "url": web_url(port), "ready": bool(workbench["ok"] and research_ok)}
+            "port": workbench["port"], "url": workbench["url"],
+            "ready": bool(workbench["ok"] and research_ok)}
 
 
 def print_readiness(rep: dict, quiet: bool = False) -> None:
@@ -935,6 +1011,9 @@ def print_readiness(rep: dict, quiet: bool = False) -> None:
     wb, rs, sb = rep["workbench"], rep["research"], rep["code_sandbox"]
     print(f"  [{'OK' if wb['ok'] else '!!'}] "
           + t(f"工作台：{wb['detail']}", f"Workbench: {wb['detail']}"))
+    if wb.get("port_mismatch"):
+        print("  [--] " + t(f"端口记录与运行实例不一致：{wb['note']}",
+                            f"Port record mismatch: {wb['note']}"))
     if rs["ok"]:
         print("  [OK] " + t(
             f"研究能力：就绪（Redis {rs['redis_major'] or '版本未知'}、"
@@ -1395,9 +1474,12 @@ def print_status() -> None:
             "run `python launcher.py restart`.",
         ))
     print(f"Redis: {_redis_source()}")
-    # 进程数不等于"可研究"：状态里同时给三层就绪与**实际端口**（N1）
-    print(f"URL: {web_url()}")
-    print_readiness(readiness_report(), quiet=False)
+    # 进程数不等于"可研究"：状态里同时给三层就绪与**实际端口**（N1）。
+    # URL 与探活必须来自同一次读取：此前两处各自解析端口，端口记录过期时会打出
+    # "URL: …:8081" 而探活写 "@ 8080"（或反之）的自相矛盾读数。
+    rep = readiness_report()
+    print(f"URL: {rep['url']}")
+    print_readiness(rep, quiet=False)
 
 
 # ── N1：统一启动控制器（状态机 + 单实例锁 + 断点恢复 + 脱敏诊断） ─────────────
@@ -1836,8 +1918,16 @@ def main() -> None:
         print_queues()
     elif action == "url":
         # 启动脚本与页面共用同一端口来源：`python launcher.py url` 打印实际地址，
-        # start.bat 据此打开浏览器（此前脚本里硬写 8080）。
-        print(web_url())
+        # start.bat 据此打开浏览器（此前脚本里硬写 8080）。记录过期时以**在响应的
+        # 端口**为准，避免把用户带到打不开的页面；说明只走 stderr，保持 stdout 单行。
+        read = answering_web_port()
+        print(web_url(read["port"]))
+        if read["mismatch"]:
+            print(import_cli_text().msg(
+                f"注意：端口记录里是 {read['recorded']}（无响应），实际在 "
+                f"{read['port']} 响应，已按实际端口给出。",
+                f"Note: recorded port {read['recorded']} does not answer; "
+                f"the live workbench is on {read['port']}."), file=sys.stderr)
     elif action == "up":
         # 统一启动控制器：检查运行包 → 依赖 → 配置 → 服务 → 就绪（新人入口只调它）
         result = startup_controller()

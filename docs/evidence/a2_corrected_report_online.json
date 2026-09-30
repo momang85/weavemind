@@ -1,0 +1,118 @@
+{
+ "slug": "000711-corrected",
+ "company": "京蓝科技",
+ "code": "000711.SZ",
+ "url": "http://static.cninfo.com.cn/finalpage/2025-09-05/1224639904.PDF",
+ "periods": [
+  2019,
+  2020
+ ],
+ "online": true,
+ "store": {
+  "ok": true,
+  "duplicate": false,
+  "material_id": "2db15147bad934f9",
+  "error": null
+ },
+ "admit": {
+  "ok": true,
+  "status": "admitted",
+  "reused": false,
+  "detail": null,
+  "evidence_count": null,
+  "rules_version": "adm-2/f3a-1"
+ },
+ "material": {
+  "title": "京蓝科技股份有限公司2020年年度报告（更正后）",
+  "url": "http://static.cninfo.com.cn/finalpage/2025-09-05/1224639904.PDF",
+  "host": "static.cninfo.com.cn",
+  "bytes": 1513031,
+  "raw_sha256": "98dc313ab7daf361418611cd56ee67d2b9744f15c9fd831e5e4f0819a8d21fc9",
+  "text_sha256": "3f6ee7b8a79ee673aead60fd3fa6c7710c61bd3aed42b34a0170986325e00b72",
+  "kind": "pdf",
+  "kind_label": "PDF",
+  "status": "admitted",
+  "reason": "",
+  "period": "2020",
+  "doc_type": "年度报告",
+  "disclosure_date": "2025-09-05",
+  "date_precision": "day",
+  "date_basis": "source_url_format",
+  "source_class": "official_disclosure",
+  "provenance": "official_discovery",
+  "provenance_label": "官方公告发现（自动，参数契约可查）",
+  "section_count": 1263,
+  "evidence_count": 8,
+  "http_status": 200,
+  "egress": "direct_pinned",
+  "rules_version": "adm-2/f3a-1"
+ },
+ "parse": {
+  "parser": "pypdf",
+  "kind": "pdf",
+  "location_kind": "page",
+  "pages": 273,
+  "truncated": false,
+  "truncation_reason": "",
+  "chars": 221044,
+  "content_type": "application/pdf"
+ },
+ "metric_states": {
+  "revenue": {
+   "state": "present_in_scope",
+   "label": "材料范围内已定位到承载小节",
+   "matched": "",
+   "section_count": 15
+  },
+  "net_profit": {
+   "state": "present_in_scope",
+   "label": "材料范围内已定位到承载小节",
+   "matched": "",
+   "section_count": 17
+  },
+  "gross_profit": {
+   "state": "not_disclosed_in_scope",
+   "label": "在列明的查阅范围内未出现该指标",
+   "matched": "",
+   "section_count": 0
+  },
+  "operating_cashflow": {
+   "state": "present_in_scope",
+   "label": "材料范围内已定位到承载小节",
+   "matched": "",
+   "section_count": 43
+  }
+ },
+ "evidence_sample": [
+  {
+   "metric": null,
+   "page": 135,
+   "quote": null,
+   "label": null,
+   "value": null
+  },
+  {
+   "metric": null,
+   "page": 137,
+   "quote": null,
+   "label": null,
+   "value": null
+  },
+  {
+   "metric": null,
+   "page": 142,
+   "quote": null,
+   "label": null,
+   "value": null
+  }
+ ],
+ "cache": {
+  "dir": "C:\\Users\\ding0\\Desktop\\ai_agent\\织光\\evals\\a2_official_chain_20260929\\000711-corrected\\project\\materials\\2db15147bad934f9",
+  "files": [
+   "doc.json",
+   "meta.json",
+   "raw.bin"
+  ]
+ },
+ "status": "admitted"
+}

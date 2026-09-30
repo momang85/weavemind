@@ -228,8 +228,14 @@ def discover(company: str, company_code: str = "", periods=(), doc_type: str = "
                                              fetch=fetch, until=until)
     except Exception as exc:                         # noqa: BLE001
         code = cninfo._classify(exc)
-        out.update({"reason_code": code,
-                    "reason": f"公告发现失败：{str(exc)[:160]}",
+        # **内容级否定不是"端点不可用"**：代码不在巨潮证券索引里 / 期间内没有该类公告，
+        # 都说明"问到了端点，它如实说没有"。报成 `unavailable` 会让用户以为端点挂了去重试
+        # （实机反例：代码 999999）。传输、限流、结构变化才叫不可用。
+        empty_like = code in (registry.EMPTY_RESULT, registry.IRRELEVANT_RESULT)
+        out.update({"status": "no_candidates" if empty_like else UNAVAILABLE,
+                    "reason_code": code,
+                    "reason": (str(exc)[:200] if empty_like
+                               else f"公告发现失败：{str(exc)[:160]}"),
                     "next_steps": _recovery_steps(code)})
         return out
 
