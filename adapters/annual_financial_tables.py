@@ -864,6 +864,12 @@ def derive_gross_profit(facts: list[dict], rejected: list | None = None) -> list
             "extracted_by": "derived", "formula_version": "gross_profit_v1",
             "formula": f"{rev['value']} - {cost['value']}",
             "derived_from": [rev["fact_id"], cost["fact_id"]],
+            # R1-a（09-30 下午复核）：派生事实必须**继承父事实的期间身份**——此前派生行只有
+            # `period`（如 "2024年"），kind/label/区间全空，于是"派生观察的期间性质"无从核对
+            # （复核原文：期间语义要贯通到 Observation 并纳入身份）。两个父一致时才继承，
+            # 不一致就留空（真实性优先：宁可未知，不猜）。
+            **({k: rev[k] for k in ("period_kind", "period_label", "period_start", "period_end")
+                if rev.get(k) and rev.get(k) == cost.get(k)}),
             "locator": f"{period} {caliber}：营业收入 − 营业成本",
             "quote": f"{rev['value']} - {cost['value']}",
             "fact_id": f"fact-gp-{rev['fact_id'][-8:]}-{cost['fact_id'][-8:]}",

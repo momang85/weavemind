@@ -118,9 +118,11 @@ class Observation:
             "restatement": self.restatement, "source_hash": self.source_hash,
             "derived_from": list(self.derived_from), "formula_version": self.formula_version,
             "state": self.state, "schema": SCHEMA_VERSION,
-            # 完整期间身份（L0-a）：存量/流量与起止日期参与指纹——同一 (指标, 期间)
-            # 的"期末余额"与"本期发生额"是两条不同观察，改它就是换了一份观察。
+            # 完整期间身份（L0-a/R1-a）：存量/流量、起止日期与**列头原文**都参与指纹——
+            # 同一 (指标, 期间) 的"期末余额"与"本期发生额"、半年列与全年列是不同观察，
+            # 改任一项就是换了一份观察（复核：只改 kind/label 必须让身份失效）。
             "period_kind": self.period_kind,
+            "period_label": self.period_label,
             "period_start": self.period_start, "period_end": self.period_end,
         })
 
@@ -296,6 +298,87 @@ def report_scope_ok(*observations) -> tuple[bool, str]:
     return True, ""
 
 
+# **指标的期间角色**（R1-a，2026-09-30 下午复核）：流量（区间发生额）还是存量（时点余额）。
+# 为什么必须显式声明：`dataset` 此前只按"标签以年结尾"判年度期间，于是
+#   - 同一指标两期一条记 flow、另一条记 stock（毛利半年当全年）照样进年度桥；
+#   - "毛利截至 6/30、净利全年"照样 validated。
+# 角色与声明出来的 `period_kind` 不符 → 不计算（缺声明时不猜，交给下面的"未知即受限"）。
+METRIC_PERIOD_ROLE: dict[str, str] = {
+    # 利润表/现金流量表项目：区间发生额
+    "revenue": "flow", "operating_cost": "flow", "gross_profit": "flow",
+    "net_profit": "flow", "operating_profit": "flow", "operating_cashflow": "flow",
+    "rd_expense": "flow", "expense": "flow", "tax": "flow",
+    # 资产负债表项目：时点余额（期末/期初）
+    "accounts_receivable": "stock", "inventory": "stock", "accounts_payable": "stock",
+    "total_assets": "stock", "total_liabilities": "stock", "equity": "stock",
+}
+
+
+def period_role_of(metric: str) -> str:
+    """该指标的期间角色（flow/stock）；未声明返回空串（不猜）。"""
+    return METRIC_PERIOD_ROLE.get(str(metric or ""), "")
+
+
+def _period_span_days(obs) -> int | None:
+    """起止日期齐备时给出区间天数；缺任一端返回 None（未知，不按全年补）。"""
+    import datetime as _dt
+    s = str(getattr(obs, "period_start", "") or "")
+    e = str(getattr(obs, "period_end", "") or "")
+    if not s or not e:
+        return None
+    try:
+        d0 = _dt.date.fromisoformat(s[:10])
+        d1 = _dt.date.fromisoformat(e[:10])
+    except Exception:                                # noqa: BLE001
+        return None
+    return (d1 - d0).days
+
+
+def period_identity_ok(*observations) -> tuple[bool, str]:
+    """**期间身份**是否自洽（R1-a）：角色↔kind 相符、同期区间相容、半年度不冒年报。
+
+    只判输入自己声明出来的东西：缺 `period_kind`/日期时不下断言（"未知即受限"，
+    不默认补全年）——这条纪律写在返回说明里，不靠调用方各自记得。
+    """
+    obs = [o for o in observations if o is not None and getattr(o, "usable", False)]
+    if not obs:
+        return True, ""
+    bad: list[str] = []
+    spans_by_period: dict[str, set[tuple]] = {}
+    for o in obs:
+        role = period_role_of(getattr(o, "metric", ""))
+        kind = str(getattr(o, "period_kind", "") or "")
+        if role and kind and kind != role:
+            bad.append(f"{o.metric} {o.period} 标为 {kind}，但该指标是 {role}"
+                       + (f"（列头「{o.period_label}」）" if getattr(o, "period_label", "")
+                          else ""))
+            continue
+        days = _period_span_days(o)
+        if role == "flow":
+            # 0 天 = 只记了期末日期（区间未知）→ 不强断言；0<天<300 = 半年/部分区间 → 不得当年度
+            if days is not None and 0 < days < 300:
+                bad.append(f"{o.metric} {o.period} 的区间只有 {days} 天"
+                           f"（{o.period_start}→{o.period_end}）：不是年度流量，"
+                           "不得按年度期间使用")
+            elif days is not None and days > 0:
+                spans_by_period.setdefault(str(o.period), set()).add(
+                    (str(o.period_start), str(o.period_end)))
+        elif role == "stock":
+            end = str(getattr(o, "period_end", "") or "")
+            if end and not end.endswith("12-31"):
+                bad.append(f"{o.metric} {o.period} 的期末为 {end}：期末余额只能是年末时点，"
+                           "半年末/季末余额不得当年度余额")
+    # **同期区间必须相容**（R1-a）：同一期间里既有整年流量又有半年度流量 → 不得混算。
+    # 只比区间、不比数值；区间未声明（空）不参与。
+    for period, spans in spans_by_period.items():
+        if len(spans) > 1:
+            bad.append(f"{period} 同一期间出现不同区间：{sorted(spans)}"
+                       "（同一期的各指标区间必须相容，半年度不得与全年混算）")
+    if bad:
+        return False, "期间身份不自洽：" + "；".join(sorted(set(bad))[:4])
+    return True, ""
+
+
 def full_identity_ok(*observations, require_amount: bool = True,
                      same_scale: bool = False) -> tuple[bool, str]:
     """**全部实际参与输入**的完整身份是否一致（L0-a，统一判据）。
@@ -334,6 +417,11 @@ def full_identity_ok(*observations, require_amount: bool = True,
                        + "、".join(sorted({str(getattr(o, 'unit', '')) for o in obs})) + "）")
     if same_scale and len(scales) > 1:
         return False, (f"输入金额量纲不一致（{sorted(scales)}）：先显式换算再入模型")
+    # **期间身份**（R1-a）：角色↔kind、区间是否满一年、期末是否年末、同指标区间是否相容。
+    # 与主体/币种/口径一样属于"入模型前必须相容"的身份，不是算子各自记得的事。
+    p_ok, p_why = period_identity_ok(*obs)
+    if not p_ok:
+        return False, p_why
     return True, ""
 
 

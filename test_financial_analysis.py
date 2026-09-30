@@ -1837,6 +1837,14 @@ class TestL1OfficialMaterialFeedsFacts(unittest.TestCase):
             available_models=[m.model_id for m in fa.specs()])
         self.assertEqual(tuple(ds.manifest.periods), ("2023年", "2024年"), ds.manifest.gaps)
         self.assertTrue(ds.require("revenue", "2024年").usable)
+        # R1-a：期间身份必须**贯通到底**——材料事实 → 底稿行 → 冻结观察都要带上
+        # 期间性质/列头/区间（此前底稿与冻结各丢一次，模型只看到"2024年"）。
+        self.assertTrue(all(str(f.get("period_kind") or "") == "flow" for f in facts), facts)
+        self.assertTrue(all(str(f.get("period_label") or "") for f in facts),
+                        "底稿行必须带列头原文（否则冻结无从判断半年度/期初）")
+        rev24 = ds.require("revenue", "2024年")
+        self.assertEqual(rev24.period_kind, "flow")
+        self.assertTrue(rev24.period_label, "冻结观察必须保留列头原文")
         run = fa.run("profit_bridge", ds)
         self.assertEqual(run.status, fa.RunStatus.VALIDATED, run.reason)
         vals = {o.metric: o.value for o in run.outputs}
@@ -1873,6 +1881,107 @@ def _payload_of(model_id: str, dataset) -> dict:
     payload = dict(compute(dataset, {}))
     payload["params"] = {}
     return payload
+
+
+class TestR1APeriodChain(unittest.TestCase):
+    """R1-a（09-30 下午复核）：期间语义要从**材料事实贯通到冻结数据集与身份**。
+
+    反例（复核原文）：`dataset._observation_of` 丢 `period_kind`/`period_label`，
+    于是"毛利 flow→stock 互换"冻结 hash 不变且利润桥仍 validated；"毛利截至 6/30、
+    净利全年"也 validated。这里逐个钉住：冻结必须带字段、改 kind/label 必须换身份、
+    半年度不得冒年报、同期区间必须相容、合法全年 + 年末存量照常通过。
+    """
+
+    @staticmethod
+    def _with_periods(rows):
+        """给每行按指标角色补上期间性质与起止（模拟抽取器/底稿给出的期间身份）。"""
+        import financial_analysis.contracts as C
+        out = []
+        for r in rows:
+            r = dict(r)
+            role = C.period_role_of(r.get("metric"))
+            if role:
+                y = str(r.get("period") or "")[:4]
+                r["period_kind"] = role
+                r["period_start"] = f"{y}-01-01"
+                r["period_end"] = f"{y}-12-31"
+                r["period_label"] = (f"{y}年12月31日" if role == "stock" else f"{y}年度")
+            out.append(r)
+        return out
+
+    def _bridge_rows(self, *, np_24="{y}-12-31", gp_24="{y}-12-31", kinds=None):
+        rows = [
+            _row("net_profit", "2023年", 100.16, period_kind="flow",
+                 period_start="2023-01-01", period_end="2023-12-31",
+                 period_label="2023年度"),
+            _row("net_profit", "2024年", 66.73, period_kind=(kinds or {}).get("np", "flow"),
+                 period_start="2024-01-01",
+                 period_end=np_24.format(y=2024), period_label="2024年度"),
+            _row("gross_profit", "2023年", 249.26, period_kind="flow",
+                 period_start="2023-01-01", period_end="2023-12-31",
+                 period_label="2023年度"),
+            _row("gross_profit", "2024年", 211.25,
+                 period_kind=(kinds or {}).get("gp", "flow"),
+                 period_start="2024-01-01",
+                 period_end=gp_24.format(y=2024), period_label="2024年度"),
+        ]
+        return rows
+
+    def test_freeze_keeps_period_kind_and_label_in_identity(self):
+        ds = _dataset(self._with_periods(_two_period_rows()))
+        got = {(o.metric, o.period): o for o in ds.observations}
+        rev23 = got[("revenue", "2023年")]
+        self.assertEqual(rev23.period_kind, "flow", "冻结不得丢掉期间性质")
+        self.assertEqual(rev23.period_label, "2023年度")
+        self.assertEqual(rev23.period_start, "2023-01-01")
+        self.assertEqual(rev23.period_end, "2023-12-31")
+        # 只改**列头原文** → 换了一份观察（也换数据集身份）
+        rows2 = self._with_periods(_two_period_rows())
+        for r in rows2:
+            if r["metric"] == "revenue" and r["period"] == "2023年":
+                r["period_label"] = "2023年1-6月"
+        ds2 = _dataset(rows2)
+        got2 = {(o.metric, o.period): o for o in ds2.observations}
+        self.assertNotEqual(rev23.observation_hash,
+                            got2[("revenue", "2023年")].observation_hash,
+                            "只改期间列头必须让观察身份失效")
+        self.assertNotEqual(ds.dataset_hash, ds2.dataset_hash)
+
+    def test_stock_flow_swap_is_refused(self):
+        """两期毛利一条 flow 一条 stock（同一指标口径）→ 不得计算。"""
+        rows = self._bridge_rows(kinds={"gp": "stock"})
+        ds = _dataset(rows)
+        run = fa.run("profit_bridge", ds)
+        self.assertEqual(run.status, "not_applicable", run.reason)
+        self.assertIn("期间", run.reason)
+
+    def test_half_year_flow_does_not_become_an_annual_period(self):
+        rows = self._bridge_rows(np_24="2024-06-30", gp_24="2024-06-30")
+        ds = _dataset(rows)
+        self.assertNotIn("2024年", ds.manifest.periods, ds.manifest.periods)
+        self.assertTrue(any("不按年度期间使用" in g for g in ds.manifest.gaps),
+                        ds.manifest.gaps)
+        run = fa.run("profit_bridge", ds)
+        self.assertNotEqual(run.status, "validated", run.reason)
+
+    def test_same_period_mixed_intervals_are_refused(self):
+        """同一 "2024年"：净利全年、毛利半年 → 同期区间不相容，不得混算。"""
+        rows = self._bridge_rows(gp_24="2024-06-30")
+        ds = _dataset(rows)
+        run = fa.run("profit_bridge", ds)
+        self.assertEqual(run.status, "not_applicable", run.reason)
+        self.assertIn("区间", run.reason)
+
+    def test_legit_full_year_and_year_end_stock_still_pass(self):
+        ds = _dataset(self._with_periods(_wc_rows()))
+        self.assertEqual(fa.run("profit_bridge", ds).status, "validated")
+        wc = fa.run("working_capital", ds)
+        self.assertEqual(wc.status, "validated", wc.reason)
+        # 期初→上期末：上一年的 12-31 存量是**合法**的上期余额，不得被期间判据拒掉
+        got = {o.metric: o for o in ds.observations}
+        self.assertEqual(got["inventory"].period_kind, "stock")
+        self.assertTrue(all(o.period_end.endswith("12-31")
+                            for o in ds.observations if o.metric == "inventory"))
 
 
 if __name__ == "__main__":

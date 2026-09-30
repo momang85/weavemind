@@ -190,6 +190,11 @@ def build_result(task_id: str, goal: str, *, project: str | None = None) -> dict
                            "caliber": str(getattr(f, "caliber", "")),
                            "fact_id": str(getattr(f, "fact_id", "")),
                            "period_kind": str(getattr(f, "period_kind", "")),
+                           # R1-a（09-30 下午复核）：底稿也必须带上**列头原文与区间起点**——
+                           # 只在抽取器补字段、底稿再丢掉，等于期间语义没贯通
+                           # （复核原文：不只在抽取器补字段而冻结时再丢掉）。
+                           "period_label": str(getattr(f, "period_label", "")),
+                           "period_start": str(getattr(f, "period_start", "")),
                            "period_end": str(getattr(f, "period_end", "")),
                            "verify_state": str(getattr(f, "verify_state", "")),
                            "source_locator": dict(getattr(f, "source_locator", {}) or {}),

@@ -75,6 +75,11 @@ def _observation_of(row: dict, *, as_of: str, restatement: str) -> Observation:
         period_type=str(_attr(row, "period_type") or ""),
         period_start=str(_attr(row, "period_start") or ""),
         period_end=str(_attr(row, "period_end") or ""),
+        # R1-a（2026-09-30 下午复核）：**冻结时必须带上期间性质与列头原文**——此前抽取器
+        # 产出了 `period_kind`/`period_label`，底稿也写了，却被这里丢掉：于是"半年度冒年报"
+        # 与"flow↔stock 互换"在数据集里完全看不出来（冻结 hash 不变、模型照样 validated）。
+        period_kind=str(_attr(row, "period_kind") or ""),
+        period_label=str(_attr(row, "period_label") or ""),
         as_of=str(_attr(row, "as_of") or as_of),
         restatement=str(_attr(row, "restatement") or restatement),
         source_url=str(_attr(row, "source_url") or ""),
@@ -167,7 +172,52 @@ def _is_annual(obs: Observation) -> bool:
     if str(obs.period_type or "") not in _ANNUAL_TYPES:
         return False
     p = str(obs.period or "")
-    return p.endswith("年") and p[:-1].isdigit()
+    if not (p.endswith("年") and p[:-1].isdigit()):
+        return False
+    # R1-a（2026-09-30 下午复核）：声明了起止/期末时**按真实区间判**——"2024年"这个标签
+    # 不得掩盖半年度或期初（实机反例：毛利截至 6/30、净利全年，照样 validated）。
+    # 日期缺失时不补全年，也不据此断言（"未知即受限"，缺口由 _period_limitations 记）。
+    from .contracts import _period_span_days, period_role_of
+    role = period_role_of(obs.metric)
+    if role == "flow":
+        days = _period_span_days(obs)
+        if days is not None and 0 < days < 300:
+            return False
+        # days == 0（只记了期末日期）→ 区间未知：按标签判年度，但由 _period_limitations 记受限
+    elif role == "stock":
+        end = str(obs.period_end or "")
+        if end and not end.endswith("12-31"):
+            return False
+    return True
+
+
+def _period_limitations(observations) -> list[str]:
+    """期间身份带来的**受限/未知**如实列进 gaps（不静默丢，也不默认补全年）。"""
+    from .contracts import _period_span_days, period_role_of
+    out: list[str] = []
+    seen: set[str] = set()
+    for o in observations:
+        if not o.usable:
+            continue
+        role = period_role_of(o.metric)
+        msg = ""
+        if role == "flow":
+            days = _period_span_days(o)
+            if days is not None and 0 < days < 300:
+                msg = (f"{o.metric} {o.period}：区间只有 {days} 天"
+                       f"（{o.period_start}→{o.period_end}），不按年度期间使用")
+            elif days == 0:
+                msg = (f"{o.metric} {o.period}：只声明了期末日期（{o.period_end}），"
+                       "区间未知——按标签当年度期间，但**未按全年补**（受限）")
+        elif role == "stock":
+            end = str(o.period_end or "")
+            if end and not end.endswith("12-31"):
+                msg = (f"{o.metric} {o.period}：期末为 {end}，不是年末余额，"
+                       "不参与年度桥接")
+        if msg and msg not in seen:
+            seen.add(msg)
+            out.append(msg)
+    return out
 
 
 def _annual_periods(observations) -> tuple[str, ...]:
@@ -226,6 +276,7 @@ def freeze(rows, *, entity: str = "", entity_id: str = "", market: str = "",
     gaps: list[str] = [f"缺失指标：{m}" for m in (required_metrics or ())
                        if not any(o.metric == m and o.usable for o in observations)]
     gaps.extend(_period_gaps)
+    gaps.extend(_period_limitations(observations))
     for o in observations:
         if o.state in (State.MISSING, State.UNKNOWN, State.INVALID):
             gaps.append(f"{o.metric} {o.period}：{o.state}"
