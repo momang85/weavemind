@@ -24,7 +24,9 @@
 >   （`sessions` 行 + 账户代次），角色每次按当前配置重取；老库就地补列且不强制重登。
 >   反例先失败（7 失败 + 1 报错，且第一版用例"假绿"已纠正为按生产启动顺序建表），
 >   修复后 `test_auth_audit` 27 OK；**隔离双实例 39/39**（临时库 + 合成账户 + 两个真实 web 进程，
->   证据 `docs/evidence/t0a_credential_isolation.json`）。
+>   证据 `docs/evidence/t0a_credential_isolation.json`）。上线读数：单次 restart **16/16 + HTTP 200
+>   + 研究能力就绪**，真实库 `sessions` 补出 `gen/issued` 且**既有 2 条会话保留**（无人被强制重登）；
+>   远端 **CI success**（`d325cc4`，run `36721205633`）。
 > - **R0 采纳绑定**（`48e34a7`）：验收改对**最终候选正文**做；不成立则回滚选择、保留旧有效稿并如实 409；
 >   空规则版本记 `unknown_rules`（不再用当前常量补造）、采纳前确定性重算、`selection_status` 逐项比对。
 > - **R1-a 期间链贯通**（`246a6ae`）：派生继承父期间身份、底稿补 `period_label/start`、冻结保留四字段、

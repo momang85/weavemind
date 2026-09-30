@@ -107,7 +107,14 @@ web_ui**，可用隔离库直接验收）：
 （不会因升级把所有人踢下线），且此后同样受代次约束。用例
 `test_t0a_legacy_session_table_upgrades_without_mass_logout`。
 
-## 6. 未验 / 残留（不假装）
+## 6. 真实库就地升级与上线读数
+
+- `launcher.py restart`（一次成功，租约等待修复仍在）→ **16/16 服务、HTTP 200 @ 8080、研究能力就绪**。
+- 真实 `agents.db` 的 `sessions` 表升级后列 = `[token, user, role, expires, gen, issued]`，
+  **既有 2 条会话行被保留**（`auth_principal` 为 0 → 尚无代次递增），即升级**没有强制任何人重新登录**。
+- 远端 CI：`d325cc4` 的 **CI success**（run `36721205633`）、Pages success（run `36721205664`）。
+
+## 7. 未验 / 残留（不假装）
 
 - **真实浏览器跨设备**：双实例是同一台机器的两个进程；跨机器/跨域的 Cookie 属性
   （`Secure` 仅在反代 https 下追加）未实机验证。
