@@ -595,5 +595,216 @@ class TestAuthAudit(unittest.TestCase):
             web_ui._memory_summary_generating = saved_generating
 
 
+    # ---- T0-a：分享与会话凭据（09-30 晚扩大审查 F01/F02）----
+    # 反例来源：docs/evidence/20260930-expanded-system-review.md §3。
+    # 全部只在本文件的隔离库/合成账户上跑，不碰真实 config.json 与真实会话。
+
+    def _seed_users_and_db(self):
+        """合成账户 + 隔离库，并按生产启动顺序先建表（登录前 sessions 表已存在）。
+
+        不建表的话 `INSERT OR REPLACE INTO sessions` 会静默失败、会话只剩内存，
+        登出/删号/降权的持久化反例就被掩盖成"已通过"。
+        """
+        self._seed_users()
+        web_ui._init_db()
+
+    def _admin_token(self):
+        return self._login("admin", "admin123")
+
+    def _publish_share(self, tid, password=None, report="# 分享报告\n\n正文"):
+        """造一个可分享任务并走真实 /api/share 生成分享 token。"""
+        with web_ui._task_lock:
+            web_ui._task_results[tid] = {
+                "task_id": tid, "status": "SUCCESS", "goal": f"分享任务 {tid}",
+                "report": report,
+            }
+        ws = ws_mod.task_workspace(tid)
+        for rel in (("project", "charts"), ("charts",)):
+            (ws.joinpath(*rel)).mkdir(parents=True, exist_ok=True)
+            (ws.joinpath(*rel) / "a.png").write_bytes(b"png")
+        body = {"task_id": tid}
+        if password is not None:
+            body["password"] = password
+        h = self._req("/api/share", "POST", body, token=self._admin_token())
+        self.assertEqual(h._status, 200, h.json_body())
+        return h.json_body()["token"]
+
+    def _share_cookie(self, share_token, password):
+        """走分享口令验证，取服务端下发的放行凭据 (cookie_name, value)。"""
+        h = self._req(f"/share/{share_token}/auth", "POST", {"password": password})
+        self.assertEqual(h._status, 302, h._headers)
+        sc = str(h._headers.get("Set-Cookie", ""))
+        m = re.search(r"(share_[^=;]+)=([^;]*)", sc)
+        self.assertIsNotNone(m, f"分享验证未下发凭据 Cookie：{sc!r}")
+        return m.group(1), m.group(2)
+
+    def _simulate_restart(self):
+        """模拟进程重启/另一实例：按生产启动顺序（建表 → 清内存 → 从持久真源加载）。"""
+        web_ui._init_db()
+        with web_ui._sessions_lock:
+            web_ui._sessions.clear()
+        web_ui._load_sessions()
+
+    def test_t0a_selfminted_share_cookie_is_rejected(self):
+        """F01：自造常量 Cookie `share_<token>=ok` 此前从拒绝变放行。"""
+        self._seed_users_and_db()
+        tok = self._publish_share("t-t0a-mint", password="pw-123456")
+        fake = f"{web_ui._share_cookie_name(tok)}=ok"
+        self.assertEqual(self._req(f"/share/{tok}")._status, 401)
+        self.assertEqual(self._req("/files/t-t0a-mint/charts/a.png")._status, 401)
+        self.assertEqual(self._req(f"/share/{tok}", cookie=fake)._status, 401,
+                         "自造常量分享 Cookie 不得放行分享页")
+        self.assertEqual(self._req("/files/t-t0a-mint/charts/a.png", cookie=fake)._status, 401,
+                         "自造常量分享 Cookie 不得放行附件")
+
+    def test_t0a_share_grant_is_random_and_bound_to_that_share(self):
+        """F01：凭据必须是服务端随机的，且只对该分享有效。"""
+        self._seed_users_and_db()
+        tok_a = self._publish_share("t-t0a-a", password="pw-a-123456")
+        tok_b = self._publish_share("t-t0a-b", password="pw-b-123456",
+                                    report="# 分享报告B\n\n正文B")
+        name_a, grant_a = self._share_cookie(tok_a, "pw-a-123456")
+        self.assertNotEqual(grant_a, "ok", "放行凭据不得是常量")
+        self.assertGreaterEqual(len(grant_a), 24, "放行凭据熵不足")
+        cookie_a = f"{name_a}={grant_a}"
+        self.assertEqual(self._req(f"/share/{tok_a}", cookie=cookie_a)._status, 200)
+        self.assertEqual(
+            self._req("/files/t-t0a-a/charts/a.png", cookie=cookie_a)._status, 200,
+            "正文与附件必须共用同一授权")
+        # 同一凭据换到别的分享：无论挂在哪个 Cookie 名下都拒绝
+        self.assertEqual(self._req(f"/share/{tok_b}", cookie=cookie_a)._status, 401)
+        self.assertEqual(
+            self._req(f"/share/{tok_b}",
+                      cookie=f"{web_ui._share_cookie_name(tok_b)}={grant_a}")._status, 401)
+        self.assertEqual(
+            self._req("/files/t-t0a-b/charts/a.png",
+                      cookie=f"{web_ui._share_cookie_name(tok_b)}={grant_a}")._status, 401)
+
+    def test_t0a_share_password_change_and_revoke_kill_old_grant(self):
+        """F01：改密/撤销必须让已下发凭据失效。"""
+        self._seed_users_and_db()
+        tok = self._publish_share("t-t0a-rot", password="pw-old-123456")
+        name, grant = self._share_cookie(tok, "pw-old-123456")
+        cookie = f"{name}={grant}"
+        self.assertEqual(self._req(f"/share/{tok}", cookie=cookie)._status, 200)
+        h = self._req("/api/share", "POST",
+                      {"task_id": "t-t0a-rot", "password": "pw-new1"},
+                      token=self._admin_token())
+        self.assertEqual(h._status, 200, h.json_body())
+        self.assertEqual(self._req(f"/share/{tok}", cookie=cookie)._status, 401,
+                         "改密后旧凭据必须失效")
+        name2, grant2 = self._share_cookie(tok, "pw-new1")
+        self.assertEqual(self._req(f"/share/{tok}", cookie=f"{name2}={grant2}")._status, 200)
+        h2 = self._req("/api/share/t-t0a-rot", "DELETE", token=self._admin_token())
+        self.assertEqual(h2._status, 200, h2.json_body())
+        self.assertNotEqual(
+            self._req(f"/share/{tok}", cookie=f"{name2}={grant2}")._status, 200,
+            "撤销分享后凭据不得再放行")
+
+    def test_t0a_expired_share_grant_is_rejected(self):
+        """F01：凭据到期即失效（确定性改期，不 sleep）。"""
+        self._seed_users_and_db()
+        tok = self._publish_share("t-t0a-exp", password="pw-exp-123456")
+        name, grant = self._share_cookie(tok, "pw-exp-123456")
+        cookie = f"{name}={grant}"
+        self.assertEqual(self._req(f"/share/{tok}", cookie=cookie)._status, 200)
+        db = sqlite3.connect(web_ui.DB_PATH, timeout=5)
+        db.execute("UPDATE share_grants SET expires=? WHERE share_id=?",
+                   (time.time() - 5, tok))
+        db.commit()
+        db.close()
+        self.assertEqual(self._req(f"/share/{tok}", cookie=cookie)._status, 401)
+
+    def test_t0a_logout_is_persistent_across_restart_and_instances(self):
+        """F02：登出只删内存 → 重启/另一实例从 SQLite 复活旧会话。"""
+        self._seed_users_and_db()
+        token = self._login("admin", "admin123")
+        self.assertEqual(self._req("/api/status", token=token)._status, 200)
+        self.assertEqual(self._req("/api/logout", "POST", token=token)._status, 200)
+        self._simulate_restart()
+        self.assertIsNone(web_ui._get_session(token), "登出必须在持久存储撤销")
+        self.assertEqual(self._req("/api/status", token=token)._status, 401)
+
+    def test_t0a_deleted_user_token_cannot_write_admin_api(self):
+        """F02：删号后旧 token 仍能写管理员接口。"""
+        self._seed_users_and_db()
+        admin_token = self._admin_token()
+        h = self._req("/api/users", "POST",
+                      {"username": "bob", "password": "bob-123456", "role": "admin"},
+                      token=admin_token)
+        self.assertEqual(h._status, 200, h.json_body())
+        bob = self._login("bob", "bob-123456")
+        self.assertEqual(self._req("/api/users", token=bob)._status, 200)
+        h2 = self._req("/api/users/bob", "DELETE", token=admin_token)
+        self.assertEqual(h2._status, 200, h2.json_body())
+        self.assertEqual(self._req("/api/users", token=bob)._status, 401,
+                         "删号后旧 token 不得再读管理接口")
+        self.assertEqual(
+            self._req("/api/config", "POST", {"llm": {"model": "x"}}, token=bob)._status, 401,
+            "删号后旧 token 不得再写管理接口")
+        self._simulate_restart()
+        self.assertIsNone(web_ui._get_session(bob))
+
+    def test_t0a_demoted_admin_token_loses_admin(self):
+        """F02：降权后旧 admin 会话仍按签发时的角色放行。"""
+        self._seed_users_and_db()
+        admin_token = self._admin_token()
+        h = self._req("/api/users", "POST",
+                      {"username": "carol", "password": "carol-123456", "role": "admin"},
+                      token=admin_token)
+        self.assertEqual(h._status, 200, h.json_body())
+        carol = self._login("carol", "carol-123456")
+        self.assertEqual(self._req("/api/users", token=carol)._status, 200)
+        h2 = self._req("/api/users", "POST", {"username": "carol", "role": "viewer"},
+                       token=admin_token)
+        self.assertEqual(h2._status, 200, h2.json_body())
+        st = self._req("/api/users", token=carol)._status
+        self.assertIn(st, (401, 403), f"降权后旧 admin 会话仍可读管理接口：{st}")
+        st2 = self._req("/api/config", "POST", {"llm": {"model": "x"}}, token=carol)._status
+        self.assertIn(st2, (401, 403), f"降权后旧 admin 会话仍可写管理接口：{st2}")
+        self._simulate_restart()
+        sess = web_ui._get_session(carol)
+        self.assertFalse(sess and sess.get("role") == "admin",
+                         "重启后旧会话不得按签发时的角色复活")
+
+    def test_t0a_password_change_invalidates_existing_sessions(self):
+        """F02：改密必须让该账户全部旧会话失效。"""
+        self._seed_users_and_db()
+        t1 = self._login("admin", "admin123")
+        t2 = self._login("admin", "admin123")
+        h = self._req("/api/users", "POST",
+                      {"username": "admin", "password": "admin-new1"}, token=t1)
+        self.assertEqual(h._status, 200, h.json_body())
+        self.assertEqual(self._req("/api/status", token=t1)._status, 401)
+        self.assertEqual(self._req("/api/status", token=t2)._status, 401)
+        h2 = self._req("/api/login", "POST",
+                       {"username": "admin", "password": "admin-new1"})
+        self.assertEqual(h2._status, 200)
+
+    def test_t0a_legacy_session_table_upgrades_without_mass_logout(self):
+        """升级路径：真实库里已有旧形状 `sessions` 表，不能因为加列把所有人踢下线。"""
+        self._seed_users()
+        now = time.time()
+        db = sqlite3.connect(web_ui.DB_PATH, timeout=5)
+        db.execute("CREATE TABLE sessions(token TEXT PRIMARY KEY, user TEXT, role TEXT, "
+                   "expires REAL)")
+        db.execute("INSERT INTO sessions(token, user, role, expires) VALUES(?,?,?,?)",
+                   ("legacy-token", "admin", "admin", now + 3600))
+        db.commit()
+        db.close()
+        web_ui._load_sessions()
+        sess = web_ui._get_session("legacy-token")
+        self.assertIsNotNone(sess, "旧库里的未过期会话升级后不应失效")
+        self.assertEqual(sess["role"], "admin")
+        db = sqlite3.connect(web_ui.DB_PATH, timeout=5)
+        cols = {r[1] for r in db.execute("PRAGMA table_info(sessions)").fetchall()}
+        db.close()
+        self.assertTrue({"gen", "issued"} <= cols, "升级应补上 gen/issued 列")
+        # 升级后旧会话仍受新机制约束：删号即失效
+        self._req("/api/users", "POST", {"username": "admin", "password": "admin-new1"},
+                  token="legacy-token")
+        self.assertEqual(self._req("/api/logout", "POST", token="legacy-token")._status, 401)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

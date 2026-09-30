@@ -6,6 +6,7 @@ from urllib.parse import urlparse, unquote
 import redis
 
 from audit_logger import audit_log, read_audit
+import auth_credentials
 import data_paths
 import db_paths
 
@@ -318,22 +319,30 @@ def _generate_share_token(
     选择“幂等复用”：同一任务重复生成保持同一链接，撤销后再生成才换新 token，
     避免同一报告产生多个失控链接。
     - password：None 表示复用已有记录不改动；空串表示清除密码；非空则存 pbkdf2 哈希；
-    - ttl_hours：None 表示沿用默认（SHARE_TTL_SECONDS）；否则按小时重算 expires_at。"""
+    - ttl_hours：None 表示沿用默认（SHARE_TTL_SECONDS）；否则按小时重算 expires_at。
+    T0-a：口令被设置/更换/清除时递增分享代次并撤销已下发凭据（改密即失效）。"""
+    need_revoke = False
     with _share_lock:
         data = _load_shares()
         for token, info in data.items():
             if isinstance(info, dict) and info.get("task_id") == task_id:
                 if password is not None:
+                    old_hash = info.get("password_hash")
                     if password:
                         info["password_hash"] = _hash_password(password)
                     else:
                         info.pop("password_hash", None)
+                    # 口令变化（含从"有"到"无"）= 凭据代次变化
+                    if old_hash != info.get("password_hash"):
+                        need_revoke = True
                 if ttl_hours is not None:
                     info["expires_at"] = (
                         datetime.now(timezone.utc)
                         + timedelta(hours=float(ttl_hours))
                     ).isoformat()
                 _save_shares(data)
+                if need_revoke:
+                    _revoke_share_grants(token)
                 return token
         token = secrets.token_urlsafe(16)
         record = {
@@ -370,7 +379,7 @@ def _resolve_share_token(token: str) -> str | None:
         return info.get("task_id") if isinstance(info, dict) else None
 
 def _revoke_share_token(task_id: str) -> int:
-    """撤销某任务的全部分享 token，返回撤销数量。"""
+    """撤销某任务的全部分享 token（并撤销其已下发的访问凭据），返回撤销数量。"""
     with _share_lock:
         data = _load_shares()
         removed = [
@@ -381,7 +390,9 @@ def _revoke_share_token(task_id: str) -> int:
             data.pop(t, None)
         if removed:
             _save_shares(data)
-        return len(removed)
+    for t in removed:
+        _revoke_share_grants(t)
+    return len(removed)
 
 
 def _task_exists(task_id: str) -> bool:
@@ -811,78 +822,131 @@ def _ensure_users_on_startup():
         )
 
 
-# ---- 会话（内存 token → 用户/角色/过期时间） ----
+# ---- 会话（真源 = auth_credentials 的 SQLite 行 + 账户代次；内存只是缓存） ----
+# 旧实现"登出只删内存"、"角色按签发时缓存"、"删号/降权旧 token 照用"，
+# 阶段T0-a 收口：撤销持久化、角色每次按当前账户配置重取。
+
+def _account_for(username: str) -> dict | None:
+    """按**当前**账户配置取主体；已删号/已改配置返回 None。"""
+    user = _load_users().get(str(username or ""))
+    return user if isinstance(user, dict) else None
+
+
+def _session_ttl() -> float:
+    return float(SESSION_TTL_SECONDS)
+
 
 def _load_sessions():
-    """启动时从 SQLite 恢复未过期会话到内存；过期条目顺带清理。"""
+    """启动时从 SQLite 恢复**仍有效**会话到内存缓存；过期/已撤销条目顺带清理。"""
     try:
-        db = sqlite3.connect(DB_PATH, timeout=5)
-        db.row_factory = sqlite3.Row
-        rows = db.execute("SELECT token, user, role, expires FROM sessions").fetchall()
-        db.close()
-        now = time.time()
-        alive = [(r["token"], r["user"], r["role"], r["expires"]) for r in rows]
-        with _sessions_lock:
-            for token, user, role, expires in alive:
-                if expires > now:
-                    _sessions[token] = {
-                        "user": user, "role": role, "expires": expires,
-                    }
+        auth_credentials.ensure_schema(DB_PATH)
+        live = auth_credentials.list_live_sessions(DB_PATH)
+    except Exception:
+        return
+    valid: dict[str, dict] = {}
+    for row in live:
+        username = str(row.get("user") or "")
+        account = _account_for(username)
+        if account is None:
+            continue
         try:
-            db = sqlite3.connect(DB_PATH, timeout=5)
-            db.execute("DELETE FROM sessions WHERE expires <= ?", (now,))
-            db.commit(); db.close()
+            gen_now = auth_credentials.generation_of(DB_PATH, username)
         except Exception:
-            pass
+            continue
+        if int(row.get("gen", 0)) != int(gen_now):
+            continue
+        valid[str(row["token"])] = {
+            "user": username,
+            "role": str(account.get("role") or "viewer"),
+            "expires": float(row.get("expires") or 0),
+            "gen": int(row.get("gen", 0)),
+        }
+    with _sessions_lock:
+        _sessions.update(valid)
+    try:
+        auth_credentials.purge_expired(DB_PATH)
     except Exception:
         pass
 
 
 def _create_session(username: str, role: str) -> str:
-    """创建会话并返回 token；顺带清理已过期会话，防止内存无限增长。"""
+    """签发会话（落库后才算签发成功）；顺带清理过期会话。"""
     _cleanup_sessions()
-    token = secrets.token_urlsafe(32)
-    expires = time.time() + SESSION_TTL_SECONDS
+    gen = auth_credentials.generation_of(DB_PATH, username)
+    token = auth_credentials.create_session(
+        DB_PATH, username, role, _session_ttl(), gen=gen,
+    )
     with _sessions_lock:
         _sessions[token] = {
             "user": username,
             "role": role,
-            "expires": expires,
+            "expires": time.time() + _session_ttl(),
+            "gen": gen,
         }
-    try:
-        db = sqlite3.connect(DB_PATH, timeout=5)
-        db.execute(
-            "INSERT OR REPLACE INTO sessions(token, user, role, expires) "
-            "VALUES(?,?,?,?)", (token, username, role, expires),
-        )
-        db.commit(); db.close()
-    except Exception:
-        pass
     return token
 
 
+def _drop_session(token: str) -> None:
+    """内存 + 持久存储一起撤销（任何失效路径都走这里）。"""
+    with _sessions_lock:
+        _sessions.pop(token, None)
+    try:
+        auth_credentials.delete_session(DB_PATH, token)
+    except Exception:
+        pass
+
+
 def _get_session(token: str | None) -> dict | None:
+    """校验当前请求会话：**每次都回真源核**，内存缓存不作为放行依据。
+
+    为什么必须每次查库：登出/撤销的语义是"删会话行"，而别的实例内存里可能还留着
+    缓存副本。只在缓存未命中时才查库，会让"A 登出、B 仍放行"（隔离双实例实测
+    33/39 时抓到的残余）。角色同样按**当前**账户配置重取，不信签发时的缓存。
+    """
     if not token:
         return None
-    with _sessions_lock:
-        session = _sessions.get(token)
-        if not session:
-            return None
-        if time.time() > session.get("expires", 0):
+    try:
+        row = auth_credentials.verify_session_row(DB_PATH, token)
+    except Exception:
+        with _sessions_lock:
             _sessions.pop(token, None)
-            try:
-                db = sqlite3.connect(DB_PATH, timeout=5)
-                db.execute("DELETE FROM sessions WHERE token=?", (token,))
-                db.commit(); db.close()
-            except Exception:
-                pass
-            return None
-        return session
+        return None
+    if row is None:
+        with _sessions_lock:
+            _sessions.pop(token, None)
+        return None
+    if time.time() > float(row.get("expires") or 0):
+        _drop_session(token)
+        return None
+    username = str(row.get("user") or "")
+    account = _account_for(username)
+    if account is None:
+        _drop_session(token)
+        return None
+    if int(row.get("gen", 0)) != int(row.get("current_gen", 0)):
+        _drop_session(token)
+        return None
+    out = dict(row)
+    out["role"] = str(account.get("role") or "viewer")
+    with _sessions_lock:
+        _sessions[token] = out
+    return out
 
 
 def _delete_session(token: str) -> None:
+    _drop_session(token)
+
+
+def _revoke_account_sessions(username: str) -> dict:
+    """改密/降权/删号：递增账户代次并撤销该账户全部会话（含其它实例）。"""
+    try:
+        result = auth_credentials.revoke_account(DB_PATH, username)
+    except Exception:
+        return {"gen": None, "sessions_removed": 0, "error": "credential_store_unavailable"}
     with _sessions_lock:
-        _sessions.pop(token, None)
+        for token in [t for t, s in _sessions.items() if s.get("user") == username]:
+            _sessions.pop(token, None)
+    return result
 
 
 def _cleanup_sessions() -> None:
@@ -890,6 +954,10 @@ def _cleanup_sessions() -> None:
     with _sessions_lock:
         for token in [t for t, s in _sessions.items() if now > s.get("expires", 0)]:
             _sessions.pop(token, None)
+    try:
+        auth_credentials.purge_expired(DB_PATH)
+    except Exception:
+        pass
 
 import logging as _logging
 _cleanup_logger = _logging.getLogger(__name__)
@@ -2336,26 +2404,98 @@ def _share_cookie_name(token: str) -> str:
     return f"share_{token}"
 
 
-def _share_cookie_ok(headers, token: str) -> bool:
-    """请求头 Cookie 中是否已有该分享的放行标记。"""
+def _share_cookie_value(headers, token: str) -> str:
+    """取该分享名下客户端带来的凭据值（无则空串）。"""
     cookie = headers.get("Cookie") if hasattr(headers, "get") else None
-    parts = [x.strip() for x in str(cookie or "").split(";")]
-    return _share_cookie_name(token) + "=ok" in parts
+    name = _share_cookie_name(token)
+    for part in str(cookie or "").split(";"):
+        key, _, value = part.strip().partition("=")
+        if key == name:
+            return value.strip()
+    return ""
+
+
+def _share_cookie_ok(headers, token: str) -> bool:
+    """该分享名下是否带了**服务端可验证**的凭据。
+
+    T0-a：此前这里是 `share_<token>=ok` 的字面比较——任何人自造一个常量
+    Cookie 就能放行。现在凭据必须由服务端签发（库内只有哈希），
+    并核对分享、到期时间与分享代次。
+    """
+    grant = _share_cookie_value(headers, token)
+    if not grant or grant == "ok":
+        return False
+    try:
+        return auth_credentials.verify_share_grant(DB_PATH, token, grant)
+    except Exception:
+        return False
+
+
+def _share_expired(info: dict) -> bool:
+    exp = info.get("expires_at") if isinstance(info, dict) else None
+    if not exp:
+        return False
+    try:
+        return datetime.fromisoformat(
+            str(exp).replace("Z", "+00:00")
+        ).timestamp() <= time.time()
+    except Exception:
+        return False
 
 
 def _share_access_ok(headers, token: str) -> bool:
-    """分享是否允许当前请求访问：
-    - 无密码 → 直接放行（兼容旧行为）；
-    - 有密码 → 必须有对应 Cookie（验证通过后由服务端下发）。"""
+    """分享是否允许当前请求访问（正文与附件共用这一条判据）：
+    - 分享不存在/已过期 → 拒绝；
+    - 无口令分享 → 放行（没有可验证的秘密，保持原本的公开语义）；
+    - 有口令 → 必须带服务端签发的有效凭据，常量 `ok` 不再放行。"""
     try:
         info = _load_shares().get(token)
     except Exception:
         return False
     if not isinstance(info, dict):
         return False
+    if _share_expired(info):
+        return False
     if not info.get("password_hash"):
         return True
     return _share_cookie_ok(headers, token)
+
+
+def _share_grants_ttl(token: str) -> float:
+    """凭据有效期：不超过分享自身的剩余有效期。"""
+    ttl = float(SHARE_AUTH_COOKIE_TTL)
+    try:
+        info = _load_shares().get(token) or {}
+        exp = info.get("expires_at")
+        if exp:
+            remain = datetime.fromisoformat(
+                str(exp).replace("Z", "+00:00")
+            ).timestamp() - time.time()
+            ttl = min(ttl, max(0.0, remain))
+    except Exception:
+        pass
+    return ttl
+
+
+def _revoke_share_grants(token: str) -> int:
+    """撤销该分享已下发的全部访问凭据（改密/撤销分享时调用）。"""
+    try:
+        return int(auth_credentials.revoke_share_grants(DB_PATH, token).get("grants_removed", 0))
+    except Exception:
+        return 0
+
+
+def _share_access_for_task_ok(headers, task_id: str) -> bool:
+    """附件/文件是否可读：该任务**任一**分享的有效凭据都算（正文与附件共用授权）。"""
+    try:
+        data = _load_shares()
+    except Exception:
+        return False
+    for token, info in data.items():
+        if isinstance(info, dict) and info.get("task_id") == task_id:
+            if _share_access_ok(headers, token):
+                return True
+    return False
 
 
 def _share_password_page(token: str, error: str = "") -> str:
@@ -3411,8 +3551,8 @@ class Handler(BaseHTTPRequestHandler):
             seg = rel.split("/", 1)
             if len(seg) == 2:
                 try:
-                    token = _find_share_token(seg[0])
-                    if token is not None and _share_access_ok(self.headers, token):
+                    # 该任务任一分享的有效凭据都算（正文与附件共用授权）
+                    if _share_access_for_task_ok(self.headers, seg[0]):
                         return True
                 except Exception:
                     pass
@@ -3477,7 +3617,14 @@ class Handler(BaseHTTPRequestHandler):
         _bf_reset(f"login:ip:{ip}")
         _bf_reset(f"login:user:{username or '?'}")
         role = str(user.get("role") or "viewer")
-        token = _create_session(username, role)
+        try:
+            token = _create_session(username, role)
+        except Exception:
+            # 凭据无法持久化就不签发（内存会话正是 T0-a 要关掉的"重启即复活"）
+            logger.error("会话存储不可用，拒绝签发会话", exc_info=True)
+            audit_log(username, ip, "login.failed", target=username,
+                      result="fail", detail="会话存储不可用")
+            return self._json({"error": "会话存储不可用，请检查数据库后重试"}, 503)
         audit_log(username, ip, "login.success", target=username, result="ok")
         # 会话凭证只经 HttpOnly Cookie 传递；响应 body 不再携带 token
         # （前端 Login/auth 未消费该字段，body 副本只会增加 XSS 窃取面）
@@ -3516,7 +3663,11 @@ class Handler(BaseHTTPRequestHandler):
         ip = self._client_ip()
         audit_log(username, ip, "user.bootstrap", target=username, result="ok",
                   detail="首次访问时创建初始管理员")
-        token = _create_session(username, "admin")
+        try:
+            token = _create_session(username, "admin")
+        except Exception:
+            logger.error("会话存储不可用，初始化后无法签发会话", exc_info=True)
+            return self._json({"error": "管理员已创建，但会话存储不可用，请修复数据库后登录"}, 503)
         return self._json({
             "status": "ok",
             "user": username,
@@ -3573,11 +3724,20 @@ class Handler(BaseHTTPRequestHandler):
             return self._html(_share_password_page(token, "密码错误，请重新输入"), 403)
         _bf_reset(f"share:ip:{_bip}")
         _bf_reset(f"share:token:{token}")
+        # T0-a：口令验证通过后签发**服务端随机**凭据（库内只存哈希），
+        # 绑定该分享、到期时间与分享代次；不再是常量 `ok`。
+        try:
+            grant = auth_credentials.issue_share_grant(DB_PATH, token, _share_grants_ttl(token))
+        except Exception:
+            logger.warning("分享凭据签发失败（凭据库不可用），本次不放行", exc_info=True)
+            return self._html(
+                _share_password_page(token, "凭据存储不可用，暂时无法放行，请稍后重试"), 503
+            )
         return self._redirect(
             f"/share/{token}",
             extra_headers={
                 "Set-Cookie": (
-                    f"{_share_cookie_name(token)}=ok; HttpOnly; SameSite=Lax; "
+                    f"{_share_cookie_name(token)}={grant}; HttpOnly; SameSite=Lax; "
                     f"Path=/; Max-Age={SHARE_AUTH_COOKIE_TTL}{self._cookie_secure_flag()}"
                 ),
             },
@@ -7717,6 +7877,7 @@ def _post_users(self, p, body, admin):
             and len(admins) <= 1):
         return self._json({"error": "不能降级最后一个管理员"}, 400)
     entry = dict(users.get(username) or {})
+    old_role = str(entry.get("role") or "")
     entry["role"] = new_role
     if password:
         entry["password_hash"] = _hash_password(password)
@@ -7725,10 +7886,19 @@ def _post_users(self, p, body, admin):
     users[username] = entry
     if not _save_users(users):
         return self._json({"error": "写入 config.json 失败"}, 500)
+    # T0-a：改密或改角色都让该账户**已签发**的会话失效（持久撤销，跨实例生效）
+    revoked = None
+    if password or (exists and old_role and old_role != new_role):
+        revoked = _revoke_account_sessions(username)
     audit_log(admin.get("user", ""), self._client_ip(),
               "user.upsert", target=username, result="ok",
-              detail=f"role={new_role}, password={'changed' if password else 'unchanged'}")
-    return self._json({"status": "ok", "users": _list_users_public()})
+              detail=f"role={new_role}, password={'changed' if password else 'unchanged'}"
+                     f", sessions_revoked={(revoked or {}).get('sessions_removed')}")
+    return self._json({
+        "status": "ok",
+        "users": _list_users_public(),
+        "sessions_revoked": (revoked or {}).get("sessions_removed"),
+    })
 
 
 def _delete_users(self, p, admin):
@@ -7748,9 +7918,16 @@ def _delete_users(self, p, admin):
     users.pop(username, None)
     if not _save_users(users):
         return self._json({"error": "写入 config.json 失败"}, 500)
+    # T0-a：删号即撤销该账户全部会话（旧 token 不得再读写管理员接口）
+    revoked = _revoke_account_sessions(username)
     audit_log(admin.get("user", ""), self._client_ip(),
-              "user.delete", target=username, result="ok")
-    return self._json({"status": "ok", "users": _list_users_public()})
+              "user.delete", target=username, result="ok",
+              detail=f"sessions_revoked={revoked.get('sessions_removed')}")
+    return self._json({
+        "status": "ok",
+        "users": _list_users_public(),
+        "sessions_revoked": revoked.get("sessions_removed"),
+    })
 
 def _post_verify(self, p, body, admin):
     """POST /api/verify：报告溯源体检（商业化 API 雏形）。

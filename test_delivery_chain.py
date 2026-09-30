@@ -3273,7 +3273,7 @@ class TestReportShare(unittest.TestCase):
             self.web_ui.Handler.do_POST(h3)
             self.assertEqual(h3._status, 403)
             self.assertIn("密码错误", h3.html_body())
-            # 正确密码 → 302 + Set-Cookie share_<token>=ok
+            # 正确密码 → 302 + 服务端签发的随机凭据（T0-a：不再是常量 ok）
             h4 = self._handler(
                 f"/share/{token}/auth", "POST", {"password": "secret123"}, auth=False,
             )
@@ -3281,12 +3281,23 @@ class TestReportShare(unittest.TestCase):
             self.assertEqual(h4._status, 302)
             self.assertEqual(h4._headers.get("Location"), f"/share/{token}")
             set_cookie = h4._headers.get("Set-Cookie", "")
-            self.assertIn(f"share_{token}=ok", set_cookie)
+            self.assertIn(f"share_{token}=", set_cookie)
             self.assertIn("Max-Age=604800", set_cookie)
-            # 带 Cookie：分享页 200，附件 200
-            h5 = self._handler(
+            grant = set_cookie.split(f"share_{token}=", 1)[1].split(";", 1)[0]
+            self.assertNotEqual(grant, "ok", "分享凭据必须是服务端随机值，不能是常量")
+            self.assertGreaterEqual(len(grant), 24)
+            # 自造常量 Cookie 不再放行（T0-a 关掉的反例）
+            hfake = self._handler(
                 f"/share/{token}",
                 headers={"Cookie": f"share_{token}=ok"},
+                auth=False,
+            )
+            self.web_ui.Handler.do_GET(hfake)
+            self.assertEqual(hfake._status, 401)
+            # 带服务端凭据：分享页 200，附件 200（正文与附件共用授权）
+            h5 = self._handler(
+                f"/share/{token}",
+                headers={"Cookie": f"share_{token}={grant}"},
                 auth=False,
             )
             self.web_ui.Handler.do_GET(h5)
@@ -3295,18 +3306,18 @@ class TestReportShare(unittest.TestCase):
             self.assertIn("67450", h5.html_body())
             hf2 = self._handler(
                 f"/files/{tid}/charts/a.png",
-                headers={"Cookie": f"share_{token}=ok"},
+                headers={"Cookie": f"share_{token}={grant}"},
                 auth=False,
             )
             self.web_ui.Handler.do_GET(hf2)
             self.assertEqual(hf2._status, 200)
             self.assertEqual(hf2.wfile.getvalue(), b"png")
-            # 撤销后 404（不受密码影响）
+            # 撤销后 404（不受密码影响），已下发凭据同时失效
             hr = self._handler(f"/api/share/{tid}", "DELETE")
             self.web_ui.Handler.do_DELETE(hr)
             h6 = self._handler(
                 f"/share/{token}",
-                headers={"Cookie": f"share_{token}=ok"},
+                headers={"Cookie": f"share_{token}={grant}"},
                 auth=False,
             )
             self.web_ui.Handler.do_GET(h6)
