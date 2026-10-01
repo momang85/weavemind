@@ -6,7 +6,7 @@
 1. **利润**：2023年→2024年 归母净利润变化 +14.48 亿元；其中毛利变化 +13.86 亿元（收入规模 +11.97／毛利率 +1.88 亿元），毛利线以下 +0.62 亿元；毛利率 26.18% → 26.43%（+0.25pp）
 2. **结构**：分产品切法：挖掘机械毛利变化（含推算输入） +11.39 亿元、起重机械毛利变化（含推算输入） +5.81 亿元；其余 4 项 -2.39 亿元；未分类差额 -0.96 亿元；分地区切法：国际毛利变化（含推算输入） +16.74 亿元、国内毛利变化（含推算输入） -1.95 亿元；未分类差额 -0.93 亿元
 3. **现金**：2024年 合并净利润 60.93 亿元经调节项 +87.22 亿元后为经营现金流 148.14 亿元（未解释差额 +0.00 亿元）；现金变化 +91.06 亿元，最大构成 营运资本项变化（存货/经营性应收/经营性应付） +79.77 亿元；最大支撑 经营性应付项目的增加（减少以“－”号填列） +55.93 亿元、最大拖累 投资损失（调节项） -6.43 亿元
-4. **反向情景**（单因素反推，不表示可达）：收入 +0.00%／毛利率 +0.00pp 需 26.43%（+0.00pp）；收入 +5.00%／毛利率 +1.00pp 需 25.17%（-1.26pp）；收入 -12.83%／毛利率 +0.00pp 需 30.32%（+3.89pp）
+4. **反向情景**（单因素反推，两把杠杆同一目标；不表示可达）：（目标归母净利 45.27 亿元）收入侧需 -7.0440%、毛利率侧需 24.5694%（较基期 -1.86pp）；（目标归母净利 45.27 亿元）收入侧需 -7.0440%、毛利率侧需 24.5694%（较基期 -1.86pp）；（目标归母净利 45.27 亿元）收入侧需 -7.0440%、毛利率侧需 24.5694%（较基期 -1.86pp）
 
 ### 二、利润变化：金额分解
 | 项目 | 金额（亿元） | 占归母净利变化 |
@@ -85,14 +85,17 @@
   - 后续观察指标：下期折旧摊销与减值明细、递延所得税附注；资产减值准备余额变化
 - 对账差额≈0 表示披露调节项与经营现金流自洽；差额非零说明有调节项没取到，报告不得写“完整调节”
 - **情景归母净利（收入 +0.00%／毛利率 +0.00pp）**：+59.75 亿元；基准复现 +59.75 亿元（差 +0.00 亿元）
-- **反向情景（收入 +0.00%／毛利率 +0.00pp）**：维持基期归母净利所需毛利率 26.43%，与基期之差 +0.00pp
-  - 收入侧反推（目标归母净利 59.75 亿元）：在其他条件不变时，收入需变化 0.00% 才能回到该利润水平（单因素算术反推，不表示可达）
+- **毛利率侧反推**（收入固定基期；目标归母净利 45.27 亿元（上一期（2023年）归母净利：回到上年水平））：所需毛利率 24.5694%，与基期之差 -1.86pp
+  - 收入侧反推（毛利率固定基期）：收入需变化 -7.0440% 才能达到同一目标（单因素反推，不表示可达）
+  - 若先接受该档收入假设，则所需毛利率为 24.5694%（较基期 -1.86pp）——这是**两因素条件计算**，不是同一把杠杆
 - **情景归母净利（收入 +5.00%／毛利率 +1.00pp）**：+78.20 亿元；基准复现 +59.75 亿元（差 +18.44 亿元）
-- **反向情景（收入 +5.00%／毛利率 +1.00pp）**：维持基期归母净利所需毛利率 25.17%，与基期之差 -1.26pp
-  - 收入侧反推（目标归母净利 59.75 亿元）：在其他条件不变时，收入需变化 0.00% 才能回到该利润水平（单因素算术反推，不表示可达）
+- **毛利率侧反推**（收入固定基期；目标归母净利 45.27 亿元（上一期（2023年）归母净利：回到上年水平））：所需毛利率 24.5694%，与基期之差 -1.86pp
+  - 收入侧反推（毛利率固定基期）：收入需变化 -7.0440% 才能达到同一目标（单因素反推，不表示可达）
+  - 若先接受该档收入假设，则所需毛利率为 23.3994%（较基期 -3.03pp）——这是**两因素条件计算**，不是同一把杠杆
 - **情景归母净利（收入 -12.83%／毛利率 +0.00pp）**：+33.38 亿元；基准复现 +59.75 亿元（差 -26.37 亿元）
-- **反向情景（收入 -12.83%／毛利率 +0.00pp）**：维持基期归母净利所需毛利率 30.32%，与基期之差 +3.89pp
-  - 收入侧反推（目标归母净利 59.75 亿元）：在其他条件不变时，收入需变化 0.00% 才能回到该利润水平（单因素算术反推，不表示可达）
+- **毛利率侧反推**（收入固定基期；目标归母净利 45.27 亿元（上一期（2023年）归母净利：回到上年水平））：所需毛利率 24.5694%，与基期之差 -1.86pp
+  - 收入侧反推（毛利率固定基期）：收入需变化 -7.0440% 才能达到同一目标（单因素反推，不表示可达）
+  - 若先接受该档收入假设，则所需毛利率为 28.1856%（较基期 +1.75pp）——这是**两因素条件计算**，不是同一把杠杆
 
 
 ### 六、待核查问题（按影响排序）
@@ -116,8 +119,8 @@
   - 图注（由读数算出）：归母净利润 45.27 → 59.75 亿元（+14.48）；毛利变化 +13.86 亿元；规模 +11.97／毛利率 +1.88 亿元；毛利线以下 +0.62 亿元；未解释差额 +0.81 亿元（未取得的披露项目，不摊派）
 - 图 2：三一重工 2024年 净利润→经营现金流桥（亿元）
   - 图注（由读数算出）：合并净利润 60.93 亿元 ＋ 调节项 +87.22 亿元 ＝ 经营现金流 148.14 亿元；未解释差额 +0.00 亿元；最大支撑 经营性应付项目的增加（减… +55.93 亿元；最大拖累 投资损失（调节项） -6.43 亿元；经营现金流变化 +91.06 亿元，最大构成 营运资本项变化（存货/经营性应收… +79.77 亿元
-- 图 3：三一重工 反向情景：维持基期归母净利所需毛利率（%）
-  - 图注（由读数算出）：收入持平 需 26.43%（差 +0.00pp）；收入 +5% 需 25.17%（差 -1.26pp）；收入 −12.83% 需 30.32%（差 +3.89pp）。收入越低，维持同样利润所需毛利率越高（单因素反推：给出“需要什么”，不表示可达、也不是预测）
+- 图 3：三一重工 反向情景：各档收入假设下维持目标归母净利所需毛利率（%）
+  - 图注（由读数算出）：收入持平 需 24.57%（较基期 -1.86pp）；收入 +5% 需 23.40%（较基期 -3.03pp）；收入 −12.83% 需 28.19%（较基期 +1.75pp）。在该档收入假设下反推所需毛利率（条件计算：先给定收入，再求毛利率；不表示可达、也不是预测）
 - 图与正文共用同一次运行；文件名与运行标识见文末『附：底稿索引』。
 
 ### 附：底稿索引（run / output / component_id）
@@ -139,30 +142,30 @@
   - cash_gap_change → `ca1ed2073bc5-03-cash_gap_change`；分项 change_in_operating_cashflow、change_in_net_profit_negated
   - largest_support → `ca1ed2073bc5-04-largest_support`
   - largest_drag → `ca1ed2073bc5-05-largest_drag`
-- `scenario_sensitivity`：run `ce4e0ce347a1d6031b850634828794a3ceef04a48d5c73bbfb9603dcea493d05`（数据集 `6d34fc0b78c3`，规则 `validation/1.1.0`）
-  - scenario_net_profit → `ce4e0ce347a1-00-scenario_net_profit`；分项 base、user、counter
-  - scenario_sensitivity → `ce4e0ce347a1-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
-  - margin_threshold_to_hold_base_profit → `ce4e0ce347a1-02-margin_threshold_to_hold_base_profit`
-  - margin_gap_to_threshold_pp → `ce4e0ce347a1-03-margin_gap_to_threshold_pp`
-  - revenue_growth_to_hold_target → `ce4e0ce347a1-04-revenue_growth_to_hold_target`
-  - collection_days_capital_per_day → `ce4e0ce347a1-05-collection_days_capital_per_day`
-  - collection_days_sensitivity_10d → `ce4e0ce347a1-06-collection_days_sensitivity_10d`
-- `scenario_sensitivity`：run `ae10b7cddc28557c6f13945dada1b4835df28c643a087f47cc11a2b3a72368db`（数据集 `6d34fc0b78c3`，规则 `validation/1.1.0`）
-  - scenario_net_profit → `ae10b7cddc28-00-scenario_net_profit`；分项 base、user、counter
-  - scenario_sensitivity → `ae10b7cddc28-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
-  - margin_threshold_to_hold_base_profit → `ae10b7cddc28-02-margin_threshold_to_hold_base_profit`
-  - margin_gap_to_threshold_pp → `ae10b7cddc28-03-margin_gap_to_threshold_pp`
-  - revenue_growth_to_hold_target → `ae10b7cddc28-04-revenue_growth_to_hold_target`
-  - collection_days_capital_per_day → `ae10b7cddc28-05-collection_days_capital_per_day`
-  - collection_days_sensitivity_10d → `ae10b7cddc28-06-collection_days_sensitivity_10d`
-- `scenario_sensitivity`：run `3f1fd8f83a82562089fa5ae64ed14471fcbabcd653ac76ee8d06c53e22a311c1`（数据集 `6d34fc0b78c3`，规则 `validation/1.1.0`）
-  - scenario_net_profit → `3f1fd8f83a82-00-scenario_net_profit`；分项 base、user、counter
-  - scenario_sensitivity → `3f1fd8f83a82-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
-  - margin_threshold_to_hold_base_profit → `3f1fd8f83a82-02-margin_threshold_to_hold_base_profit`
-  - margin_gap_to_threshold_pp → `3f1fd8f83a82-03-margin_gap_to_threshold_pp`
-  - revenue_growth_to_hold_target → `3f1fd8f83a82-04-revenue_growth_to_hold_target`
-  - collection_days_capital_per_day → `3f1fd8f83a82-05-collection_days_capital_per_day`
-  - collection_days_sensitivity_10d → `3f1fd8f83a82-06-collection_days_sensitivity_10d`
+- `scenario_sensitivity`：run `3b6b62f3943ccd79f696ba3175df4a50cfee48333ab5ae89325b52bd2183ac1d`（数据集 `6d34fc0b78c3`，规则 `validation/1.1.0`）
+  - scenario_net_profit → `3b6b62f3943c-00-scenario_net_profit`；分项 base、user、counter
+  - scenario_sensitivity → `3b6b62f3943c-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
+  - collection_days_capital_per_day → `3b6b62f3943c-02-collection_days_capital_per_day`
+  - collection_days_sensitivity_10d → `3b6b62f3943c-03-collection_days_sensitivity_10d`
+  - margin_threshold_to_hold_base_profit → `3b6b62f3943c-04-margin_threshold_to_hold_base_profit`
+  - margin_gap_to_threshold_pp → `3b6b62f3943c-05-margin_gap_to_threshold_pp`
+  - revenue_growth_to_hold_target → `3b6b62f3943c-06-revenue_growth_to_hold_target`
+- `scenario_sensitivity`：run `fb91d9d7ab79c7539b99186fd695fbd3fdfb714f94527de84cd42c317b3ffc0f`（数据集 `6d34fc0b78c3`，规则 `validation/1.1.0`）
+  - scenario_net_profit → `fb91d9d7ab79-00-scenario_net_profit`；分项 base、user、counter
+  - scenario_sensitivity → `fb91d9d7ab79-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
+  - collection_days_capital_per_day → `fb91d9d7ab79-02-collection_days_capital_per_day`
+  - collection_days_sensitivity_10d → `fb91d9d7ab79-03-collection_days_sensitivity_10d`
+  - margin_threshold_to_hold_base_profit → `fb91d9d7ab79-04-margin_threshold_to_hold_base_profit`
+  - margin_gap_to_threshold_pp → `fb91d9d7ab79-05-margin_gap_to_threshold_pp`
+  - revenue_growth_to_hold_target → `fb91d9d7ab79-06-revenue_growth_to_hold_target`
+- `scenario_sensitivity`：run `f33c546674c23171d0a482cad1239793806d2ea58e15ff214d248d1114fcde68`（数据集 `6d34fc0b78c3`，规则 `validation/1.1.0`）
+  - scenario_net_profit → `f33c546674c2-00-scenario_net_profit`；分项 base、user、counter
+  - scenario_sensitivity → `f33c546674c2-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
+  - collection_days_capital_per_day → `f33c546674c2-02-collection_days_capital_per_day`
+  - collection_days_sensitivity_10d → `f33c546674c2-03-collection_days_sensitivity_10d`
+  - margin_threshold_to_hold_base_profit → `f33c546674c2-04-margin_threshold_to_hold_base_profit`
+  - margin_gap_to_threshold_pp → `f33c546674c2-05-margin_gap_to_threshold_pp`
+  - revenue_growth_to_hold_target → `f33c546674c2-06-revenue_growth_to_hold_target`
 - 图 `dcfa6def7328-profit-waterfall`：三一重工 2023年→2024年 归母净利润瀑布（亿元）
 - 图 `ca1ed2073bc5-cash-bridge-cur`：三一重工 2024年 净利润→经营现金流桥（亿元）
-- 图 `ce4e0ce347a1-scenario-threshold`：三一重工 反向情景：维持基期归母净利所需毛利率（%）
+- 图 `3b6b62f3943c-scenario-threshold`：三一重工 反向情景：各档收入假设下维持目标归母净利所需毛利率（%）

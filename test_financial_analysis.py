@@ -2650,18 +2650,53 @@ class TestScenarioReverseThresholds(unittest.TestCase):
         self.assertAlmostEqual(self._out(run, "margin_gap_to_threshold_pp").value,
                                0.0, places=2)
 
-    def test_threshold_answers_what_would_be_needed(self):
-        run = fa.run("scenario_sensitivity", self._ds(),
-                     params={"revenue_growth": -0.1283, "gross_margin_delta": 0.0})
+    def test_thresholds_share_one_target_and_mode(self):
+        """W0：两把杠杆共用**同一目标**——单因素反推（收入固定基期 / 毛利率固定基期）。
+
+        洋河先验（基期 2024、目标＝上一期 2023 归母净利 100.1593 亿元）：
+        收入阈值 **+15.8226%**、毛利率阈值 **84.7325%**（较基期 +11.5754pp）。
+        旧实现一把用基期利润、一把用使用者目标，两个数不能并列读。
+        """
+        rows = [_row("revenue", "2024年", 28_876_296_993.56, unit="元"),
+                _row("gross_profit", "2024年", 21_125_078_636.90, unit="元"),
+                _row("net_profit", "2024年", 6_673_388_602.12, unit="元"),
+                _row("net_profit", "2023年", 10_015_930_040.27, unit="元")]
+        ds = fa.freeze_from_facts(rows, periods=(2023, 2024), entity="洋河股份",
+                                  entity_id="002304.SZ", as_of="2025-04-30",
+                                  source_label="test:scenario-thresholds")
+        run = fa.run("scenario_sensitivity", ds,
+                     params={"revenue_growth": 0.0, "gross_margin_delta": 0.0})
         self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        self.assertEqual(run.validation["failed"], [])
+        rev = self._out(run, "revenue_growth_to_hold_target")
         th = self._out(run, "margin_threshold_to_hold_base_profit")
         gap = self._out(run, "margin_gap_to_threshold_pp")
-        self.assertAlmostEqual(th.value, 83.92, places=2,
-                               msg="收入再降 12.83% 时，要维持 66.73 亿利润需 83.92% 毛利率")
-        self.assertAlmostEqual(gap.value, 10.77, places=2)
+        self.assertAlmostEqual(rev.value, 15.8226, places=4,
+                               msg="毛利率固定基期时，收入要到 +15.8226% 才回到 2023 水平")
+        self.assertAlmostEqual(th.value, 84.7325, places=4,
+                               msg="收入固定基期时，毛利率要到 84.7325%（基期 73.1572%）")
+        self.assertAlmostEqual(gap.value, 11.5754, places=4)
         self.assertEqual(th.unit, "%")
         self.assertIn("%", gap.unit)
         diag = run.outputs[0].diagnostics["thresholds"]
+        self.assertAlmostEqual(diag["target_net_profit"] / 1e8, 100.1593, places=4)
+        self.assertIn("上一期", diag["target_source"])
+        # 单因素阈值与"先接受某档收入再反推毛利率"不是同一把杠杆：后者只作条件诊断
+        self.assertAlmostEqual(diag["conditional_margin_threshold"], 84.7325, places=4,
+                               msg="收入假设为 0 时，条件值与单因素阈值一致")
+        self.assertIn("单因素反推", diag["caveats"])
+
+    def test_conditional_margin_threshold_is_not_a_second_lever(self):
+        """给定收入假设后反推的毛利率是**两因素条件值**，与单因素阈值分开记。"""
+        run = fa.run("scenario_sensitivity", self._ds(),
+                     params={"revenue_growth": -0.1283, "gross_margin_delta": 0.0})
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        diag = run.outputs[0].diagnostics["thresholds"]
+        # 目标＝基期（单期数据集）→ 单因素阈值＝基期毛利率；收入降 12.83% 的条件值更高
+        self.assertAlmostEqual(diag["margin_threshold"], 73.16, places=2)
+        self.assertAlmostEqual(diag["conditional_margin_threshold"], 83.92, places=2,
+                               msg="收入再降 12.83% 时，要维持 66.73 亿利润需 83.92% 毛利率")
+        self.assertAlmostEqual(diag["conditional_margin_gap_pp"], 10.77, places=2)
         self.assertAlmostEqual(diag["assumed_revenue"] / 1e8, 251.71, places=2)
         self.assertIn("单因素反推", diag["caveats"])
 
@@ -3409,18 +3444,23 @@ class TestV1DriverEvidenceBinding(unittest.TestCase):
         self.assertIn("披露原句", with_ev)
 
 
-class TestV2ScenarioDetailMode(unittest.TestCase):
-    """V2（阶段V）：情景**明细模式**——毛利线以下按三条规则逐项，残差保留，基准复现。
+class TestW0ScenarioEvaluator(unittest.TestCase):
+    """W0（阶段W）：情景求值器的**经济效果**——符号、冻结残差、假设真正改变利润、同一目标。
 
-    三条规则：固定金额（可随费用变化调整）／随收入变化（税金及附加、销售费用）／
-    单独假设（`tax_rate` 作用于税前利润、`minority_share` 作用于合并净利）。
+    手算例子（元）：收入 1000、毛利 800、归母净利 300、合并净利 320、所得税 80、
+    少数股东 20、随收入变化的税金及附加 100 与销售费用 200、固定金额的管理费用 50。
+    按披露符号：归母净利 = 800 − 100 − 200 − 50 − 80 − 20 = 350 ≠ 300 ⇒ 残差 = −50
+    （未取得明细的毛利线以下项目，一次算定后**冻结**）。
+
+    旧实现的三处反例（架构复核）：①按绝对值相加 → 假残差；②每次用"总块 − 新明细"重算残差
+    → 税率/费用/少数股东假设被残差抵消（利润仍 300、残差 100→68）；③两个阈值目标不同。
     """
 
     def _ds(self, *, drop=()):
         rows = [("revenue", 1000.0), ("gross_profit", 800.0), ("net_profit", 300.0),
                 ("net_profit_consolidated", 320.0), ("income_tax_expense", 80.0),
                 ("minority_interest", 20.0), ("taxes_and_surcharges", 100.0),
-                ("selling_expense", 200.0)]
+                ("selling_expense", 200.0), ("admin_expense", 50.0)]
         out = []
         for metric, value in rows:
             if metric in drop:
@@ -3429,80 +3469,160 @@ class TestV2ScenarioDetailMode(unittest.TestCase):
         out.append(_row("revenue", "2023年", 900.0, unit="元"))
         return fa.freeze_from_facts(out, periods=(2023, 2024), entity="示例",
                                     entity_id="000001.SZ", as_of="2025-04-30",
-                                    source_label="test:v2-detail")
+                                    source_label="test:w0-detail")
 
     def _detail(self, run):
         return next(o for o in run.outputs if o.metric == "scenario_below_gross_detail")
-
-    def test_base_case_reproduces_and_closes_in_both_modes(self):
-        fixed = fa.run("scenario_sensitivity", self._ds(),
-                       params={"revenue_growth": 0.0, "gross_margin_delta": 0.0})
-        detail = fa.run("scenario_sensitivity", self._ds(),
-                        params={"revenue_growth": 0.0, "gross_margin_delta": 0.0,
-                                "below_gross_mode": "detail"})
-        self.assertEqual(detail.status, C.RunStatus.VALIDATED, detail.reason)
-        self.assertEqual(detail.validation["failed"], [])
-        d = self._detail(detail)
-        # 明细合计 = 毛利线以下净额（800−300=500），残差如实保留
-        self.assertAlmostEqual(d.value, 500.0, places=2)
-        self.assertAlmostEqual(sum(c["value"] for c in d.components), 500.0, places=2)
-        self.assertAlmostEqual(d.residual, 100.0, places=2,
-                               msg="已列明细 400（税附加100+销售200+所得税80+少数股东20）")
-        # 基准复现：两种模式在同一组 0 参数下给出**同一个**基期净利
-        self.assertAlmostEqual(self._base(detail), self._base(fixed), places=2)
-        self.assertEqual(detail.outputs[0].diagnostics["base_reproduction_gap"], "0")
 
     def _base(self, run):
         out = next(o for o in run.outputs if o.metric == "scenario_net_profit")
         return next(c["value"] for c in out.components if c["component_id"] == "base")
 
-    def test_explicit_tax_and_minority_assumptions_take_effect(self):
-        run = fa.run("scenario_sensitivity", self._ds(),
-                     params={"revenue_growth": 0.0, "gross_margin_delta": 0.0,
-                             "below_gross_mode": "detail", "tax_rate": 0.25,
-                             "minority_share": 0.1})
-        d = self._detail(run)
+    def _run(self, **params):
+        p = {"revenue_growth": 0.0, "gross_margin_delta": 0.0,
+             "below_gross_mode": "detail"}
+        p.update(params)
+        run = fa.run("scenario_sensitivity", self._ds(), params=p)
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        self.assertEqual(run.validation["failed"], [])
+        return run
+
+    def test_base_case_reproduces_by_signs_and_residual_is_frozen(self):
+        detail = self._run()
+        fixed = fa.run("scenario_sensitivity", self._ds(),
+                       params={"revenue_growth": 0.0, "gross_margin_delta": 0.0})
+        d = self._detail(detail)
+        diag = detail.outputs[0].diagnostics["below_gross"]
+        # 逐项按**披露符号**：合计 = 归母净利 − 毛利 = −500（减利 500），残差 −50
+        self.assertAlmostEqual(d.value, -500.0, places=2)
+        self.assertAlmostEqual(sum(c["value"] for c in d.components), -500.0, places=2)
+        self.assertAlmostEqual(diag["residual_yuan"], -50.0, places=2,
+                               msg="明细齐备：残差由披露恒等式得出，不含绝对值相加的假残差")
+        self.assertTrue(diag["residual_frozen"])
+        self.assertAlmostEqual(diag["pretax_profit_base_yuan"], 400.0, places=2)
+        # 符号方向：费用项都是负贡献，随收入项按规则标注
         comp = {c["component_id"]: c for c in d.components}
-        # 所得税 = (合并净利320 + 所得税80) × 0.25 = 100
-        self.assertAlmostEqual(comp["income_tax_expense"]["value"], 100.0, places=2)
-        self.assertEqual(comp["income_tax_expense"]["rule"], "explicit")
-        # 少数股东 = 合并净利320 × 0.1 = 32
-        self.assertAlmostEqual(comp["minority_interest"]["value"], 32.0, places=2)
-        self.assertEqual(comp["minority_interest"]["rule"], "explicit")
-        # 随收入变化项：收入不变 → 与基期一致
-        self.assertEqual(comp["item:taxes_and_surcharges"]["rule"], "revenue_linked")
-        self.assertAlmostEqual(comp["item:taxes_and_surcharges"]["value"], 100.0, places=2)
-        # 残差 = 500 − (100+200+100+32) = 68
-        self.assertAlmostEqual(comp["residual_unlisted"]["value"], 68.0, places=2)
-        self.assertAlmostEqual(sum(c["value"] for c in d.components), d.value, places=2)
+        self.assertLess(comp["item:selling_expense"]["value"], 0)
+        self.assertEqual(comp["item:selling_expense"]["rule"], "revenue_linked")
+        self.assertEqual(comp["item:admin_expense"]["rule"], "fixed")
+        self.assertEqual(comp["income_tax_expense"]["rule"], "base_rate")
+        self.assertEqual(comp["minority_interest"]["rule"], "base_share")
+        self.assertEqual(comp["residual_unlisted"]["rule"], "residual")
+        # 基准复现：两种模式在"假设回到基期"时给出同一个基期净利
+        self.assertAlmostEqual(self._base(detail), 300.0, places=2)
+        self.assertAlmostEqual(self._base(fixed), 300.0, places=2)
+        self.assertEqual(detail.outputs[0].diagnostics["base_reproduction_gap"], "0")
 
-    def test_revenue_linked_items_follow_the_revenue_assumption(self):
-        run = fa.run("scenario_sensitivity", self._ds(),
-                     params={"revenue_growth": 0.1, "gross_margin_delta": 0.0,
-                             "below_gross_mode": "detail"})
+    def test_tax_and_minority_assumptions_change_the_final_profit(self):
+        """税率 20%→25%、少数股东占比→10%：**最终利润**必须变（旧实现只有残差在动）。"""
+        base = self._run()
+        run = self._run(tax_rate=0.25, minority_share=0.10)
+        diag = run.outputs[0].diagnostics["below_gross"]
+        # 税前 400；税 = 400×25% = 100；合并 300；少数 = 300×10% = 30 → 归母 270
+        self.assertAlmostEqual(diag["income_tax_yuan"], 100.0, places=2)
+        self.assertAlmostEqual(diag["minority_interest_yuan"], 30.0, places=2)
+        self.assertAlmostEqual(diag["consolidated_net_yuan"], 300.0, places=2)
+        self.assertAlmostEqual(run.outputs[0].value, 270.0, places=2)
+        self.assertNotAlmostEqual(run.outputs[0].value, base.outputs[0].value, places=2)
+        # 残差**不动**（冻结）：这是"假设不被残差吸收"的判据
+        self.assertAlmostEqual(diag["residual_yuan"], -50.0, places=2)
+        self.assertAlmostEqual(
+            base.outputs[0].diagnostics["below_gross"]["residual_yuan"],
+            diag["residual_yuan"], places=2)
+        self.assertIn("单独假设", diag["tax_rate_source"])
+        self.assertEqual(
+            {c["component_id"]: c["rule"] for c in self._detail(run).components}
+            ["income_tax_expense"], "explicit")
+
+    def test_expense_assumption_moves_profit_through_the_listed_items(self):
+        """费用假设只作用于**已披露的固定金额项**（残差不补平）：管理费 50→55。"""
+        run = self._run(expense_change_ratio=0.10)
+        diag = run.outputs[0].diagnostics["below_gross"]
         comp = {c["component_id"]: c for c in self._detail(run).components}
-        self.assertAlmostEqual(comp["item:taxes_and_surcharges"]["value"], 110.0, places=2,
-                               msg="税金及附加随收入 +10%")
-        self.assertAlmostEqual(comp["item:selling_expense"]["value"], 220.0, places=2)
-        self.assertEqual(comp["income_tax_expense"]["rule"], "fixed",
-                         "未给税率假设时所得税按基期值固定，不假装能预测")
+        self.assertAlmostEqual(comp["item:admin_expense"]["value"], -55.0, places=2)
+        # 税前 = 800 −(100+200)×1 −55 −50(残差) = 395；税 79；合并 316；少数 19.75 → 296.25
+        self.assertAlmostEqual(diag["pretax_profit_yuan"], 395.0, places=2)
+        self.assertAlmostEqual(run.outputs[0].value, 296.25, places=2)
+        self.assertAlmostEqual(diag["residual_yuan"], -50.0, places=2)
 
-    def test_missing_detail_stays_in_the_residual(self):
-        run = fa.run("scenario_sensitivity", self._ds(drop=("income_tax_expense",
-                                                            "minority_interest")),
+    def test_revenue_linked_items_follow_revenue_and_rates_stay_base(self):
+        run = self._run(revenue_growth=0.10)
+        comp = {c["component_id"]: c for c in self._detail(run).components}
+        self.assertAlmostEqual(comp["item:taxes_and_surcharges"]["value"], -110.0, places=2,
+                               msg="税金及附加随收入 +10%")
+        self.assertAlmostEqual(comp["item:selling_expense"]["value"], -220.0, places=2)
+        self.assertAlmostEqual(comp["item:admin_expense"]["value"], -50.0, places=2,
+                               msg="固定金额项不随收入变化")
+        # 税前 = 880 −330 −50 −50 = 450；税 90；合并 360；少数 22.5 → 337.5
+        self.assertAlmostEqual(run.outputs[0].value, 337.5, places=2)
+        self.assertEqual(comp["income_tax_expense"]["rule"], "base_rate",
+                         "未给税率假设时用基期有效税率，不假装能预测")
+
+    def test_missing_tax_and_minority_stay_in_the_frozen_residual(self):
+        run = fa.run("scenario_sensitivity",
+                     self._ds(drop=("income_tax_expense", "minority_interest")),
                      params={"revenue_growth": 0.0, "gross_margin_delta": 0.0,
                              "below_gross_mode": "detail"})
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
         d = self._detail(run)
         diag = run.outputs[0].diagnostics["below_gross"]
         self.assertIn("income_tax_expense", diag["items_missing"])
-        self.assertIn("并入残差", diag.get("income_tax_note", ""))
+        self.assertIn("minority_interest", diag["items_missing"])
         comp = {c["component_id"]: c["value"] for c in d.components}
-        self.assertAlmostEqual(comp["residual_unlisted"], 200.0, places=2,
-                               msg="缺的所得税 80 与少数股东 20 都留在残差里（不当零）")
+        # 缺的所得税 80 与少数股东 20 都留在残差里（−50 −80 −20 = −150），不当零、不摊派
+        self.assertAlmostEqual(comp["residual_unlisted"], -150.0, places=2)
+        self.assertAlmostEqual(comp["income_tax_expense"], 0.0, places=2)
         self.assertAlmostEqual(sum(comp.values()), d.value, places=2)
 
+    def test_both_thresholds_share_one_target_and_are_verifiable(self):
+        """同一目标下两个单因素阈值，代回**同一求值器**都能恢复该目标。"""
+        run = self._run(target_net_profit=450.0)
+        th = run.outputs[0].diagnostics["thresholds"]
+        # 明细结构下：750·Δm + 300 = 450 → Δm = +20pp（毛利率 100%）；375(1+g) − 75 = 450 → +40%
+        self.assertAlmostEqual(th["margin_threshold"], 100.0, places=4)
+        self.assertAlmostEqual(th["margin_gap_pp"], 20.0, places=4)
+        self.assertAlmostEqual(th["revenue_growth_threshold"], 40.0, places=4)
+        self.assertTrue(th["reachable"]["margin"] and th["reachable"]["revenue"])
+        # 代回求值器：两个阈值各自恢复 450 元
+        from financial_analysis.operators import scenario as SC
+        ctx = SC.base_context(self._ds(), "2024年")
+        m_back = SC.evaluate(ctx, growth=0,
+                             margin_delta=SC._d(th["margin_threshold"]) / 100 - ctx["margin"],
+                             mode="detail")["net_profit"]
+        g_back = SC.evaluate(ctx, growth=SC._d(th["revenue_growth_threshold"]) / 100,
+                             margin_delta=0, mode="detail")["net_profit"]
+        self.assertAlmostEqual(float(m_back), 450.0, places=2)
+        self.assertAlmostEqual(float(g_back), 450.0, places=2)
+        # 目标=基期时两个阈值都是零（自检）
+        flat = self._run()
+        fth = flat.outputs[0].diagnostics["thresholds"]
+        self.assertAlmostEqual(fth["margin_threshold"], 80.0, places=4,
+                               msg="目标=基期 → 所需毛利率=基期毛利率")
+        self.assertAlmostEqual(fth["revenue_growth_threshold"], 0.0, places=4)
+
+    def test_unreachable_target_is_stated_not_faked(self):
+        """目标在允许范围内不可达：不给数（诊断为不可达），也不硬报一个近似值。"""
+        run = fa.run("scenario_sensitivity", self._ds(),
+                     params={"revenue_growth": 0.0, "gross_margin_delta": 0.0,
+                             "below_gross_mode": "detail", "minority_share": 0.10,
+                             "target_net_profit": 1e15})
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        self.assertEqual(run.validation["failed"], [])
+        metrics = {o.metric for o in run.outputs}
+        self.assertNotIn("revenue_growth_to_hold_target", metrics)
+        self.assertNotIn("margin_threshold_to_hold_base_profit", metrics)
+        th = run.outputs[0].diagnostics["thresholds"]
+        self.assertFalse(th["reachable"]["margin"] or th["reachable"]["revenue"])
+        self.assertTrue(th["threshold_notes"]["margin"])
+
+    def test_fixed_mode_refuses_tax_and_minority_instead_of_ignoring_them(self):
+        for params in ({"tax_rate": 0.25}, {"minority_share": 0.10}):
+            run = fa.run("scenario_sensitivity", self._ds(), params=params)
+            self.assertEqual(run.status, C.RunStatus.NOT_APPLICABLE, run.reason)
+            self.assertIn("detail", str(run.reason), params)
+
     def test_revenue_side_reverse_threshold(self):
-        """V2：收入侧反推——把利润拉回目标水平需要多少收入变化（单因素）。"""
+        """收入侧反推（单因素）：目标=基期时收入不需要变化（自检）。"""
         run = fa.run("scenario_sensitivity", self._ds(),
                      params={"revenue_growth": 0.0, "gross_margin_delta": 0.0})
         base_th = next(o for o in run.outputs
@@ -3510,7 +3630,7 @@ class TestV2ScenarioDetailMode(unittest.TestCase):
         self.assertEqual(base_th.unit, "%")
         self.assertAlmostEqual(base_th.value, 0.0, places=2,
                                msg="目标=基期利润时收入不需要变化（自检）")
-        # 目标设为基期的一半 → 收入需负增长（单因素反推）
+        # 目标设为基期的一半 → 收入需负增长（fixed 单因素代数反推）
         run2 = fa.run("scenario_sensitivity", self._ds(),
                       params={"revenue_growth": 0.0, "gross_margin_delta": 0.0,
                               "target_net_profit": 150.0})
@@ -3523,17 +3643,16 @@ class TestV2ScenarioDetailMode(unittest.TestCase):
         self.assertIn("g*", diag["revenue_threshold_formula"])
 
     def test_detail_mode_is_rendered_in_the_note(self):
-        """明细模式要进正文（不是只在运行记录里）：逐项规则 + 税前利润/税率来源 + 残差。"""
+        """明细模式要进正文（不是只在运行记录里）：逐项规则 + 税前/税/少数股东 + 冻结残差。"""
         from financial_analysis import narrative as nt
-        run = fa.run("scenario_sensitivity", self._ds(),
-                     params={"revenue_growth": 0.0, "gross_margin_delta": 0.0,
-                             "below_gross_mode": "detail", "tax_rate": 0.25})
+        run = self._run(tax_rate=0.25)
         text = "\n".join(nt._scenario_detail_note([run]))
         self.assertIn("情景明细模式", text)
         self.assertIn("随收入变化", text)
         self.assertIn("单独假设", text)
-        self.assertIn("税前利润（基期）", text)
-        self.assertIn("残差", text)
+        self.assertIn("情景税前利润", text)
+        self.assertIn("少数股东损益", text)
+        self.assertIn("冻结", text)
         self.assertIn("不构成完整预测", text)
 
     def test_out_of_range_assumptions_are_refused(self):

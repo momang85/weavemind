@@ -351,12 +351,15 @@ def _scenario_period(run) -> str:
 
 
 def scenario_threshold_comparison(variants, *,
-                                  question: str = "收入假设变化时，要保住基期利润需要多高的毛利率？") -> dict:
+                                  question: str = "收入假设变化时，要保住目标利润需要多高的毛利率？") -> dict:
     """反向情景比较：`variants=[(标签, 运行), …]` → 每个档位一对柱子（%）。
 
-    两列都是**百分点口径**：基期毛利率与「维持基期归母净利所需毛利率」。
-    基期毛利率由同一运行的两条已验证输出回推（所需毛利率 − 所需与基期之差），
-    并与诊断里的 `thresholds.margin_base` 交叉核对，不一致就拒绝出图。
+    两列都是**百分点口径**：基期毛利率与「在该档收入假设下维持**目标**归母净利所需毛利率」。
+
+    W0（阶段W）：单因素阈值（收入固定基期）对所有档位都相同，画出来是一条平线；
+    这张图的主题本来就是"收入假设变化时所需毛利率怎么变"，所以取诊断里的
+    `thresholds.conditional_margin_threshold`（**两因素条件计算**：先给定该档收入，再反推毛利率），
+    并在标注里写清它是条件值。旧运行（没有这个诊断字段）退回读输出，保持可回放。
     """
     items = [(str(label), run) for label, run in (variants or ())]
     if len(items) < 2:
@@ -371,14 +374,20 @@ def scenario_threshold_comparison(variants, *,
         why = _gate(run)
         if why:
             return _unavailable(run, f"{label}：{why}")
+        diag_th = (_diag(run).get("thresholds") or {})
         th = _out(run, "margin_threshold_to_hold_base_profit")
         gap = _out(run, "margin_gap_to_threshold_pp")
-        if th is None or gap is None or th.value is None or gap.value is None:
+        cond = diag_th.get("conditional_margin_threshold")
+        cond_gap = diag_th.get("conditional_margin_gap_pp")
+        if cond is not None and cond_gap is not None:
+            value, diff = float(cond), float(cond_gap)
+        elif th is not None and gap is not None and th.value is not None:
+            value, diff = float(th.value), float(gap.value)
+        else:
             return _unavailable(run, f"{label}：缺少反向阈值输出（所需毛利率/与基期之差）")
-        if "%" not in str(th.unit or ""):
-            return _unavailable(run, f"{label}：所需毛利率单位不是百分比（{th.unit}）")
-        base = _d(th.value) - _d(gap.value)                 # 由两条已验证输出回推
-        diag_th = (_diag(run).get("thresholds") or {})
+        if "%" not in str((th.unit if th is not None else "%") or "%"):
+            return _unavailable(run, f"{label}：所需毛利率单位不是百分比")
+        base = Decimal(str(value)) - Decimal(str(diff))     # 由阈值与差额回推
         mb = diag_th.get("margin_base")
         if mb is None:
             return _unavailable(run, f"{label}：运行诊断没给出基期毛利率，无法交叉核对")
@@ -390,10 +399,10 @@ def scenario_threshold_comparison(variants, *,
         bases.add(float(base))
         rows.append({"label": label, "value": round(float(base), 2), "unit": "%",
                      "caliber": "基期毛利率"})
-        rows.append({"label": label, "value": round(float(th.value), 2), "unit": "%",
-                     "caliber": "维持基期净利所需毛利率"})
+        rows.append({"label": label, "value": round(float(value), 2), "unit": "%",
+                     "caliber": "该档收入下所需毛利率（维持目标归母净利）"})
         labels.append(label)
-        notes.append(f"{label} 需 {float(th.value):.2f}%（差 {float(gap.value):+.2f}pp）")
+        notes.append(f"{label} 需 {float(value):.2f}%（较基期 {float(diff):+.2f}pp）")
         first = first or run
 
     base_pairs = [(lab, r) for lab, r in items]
@@ -403,7 +412,7 @@ def scenario_threshold_comparison(variants, *,
         return _unavailable(items[0][1], "各档位的基期毛利率不一致（基期不同）：不可对比")
     head = base_pairs[0][0]
     tail = base_pairs[-1][0]
-    dir_s = (f"收入越低，维持同样利润所需毛利率越高（单因素反推：给出“需要什么”，"
+    dir_s = ("在该档收入假设下反推所需毛利率（条件计算：先给定收入，再求毛利率；"
              "不表示可达、也不是预测）")
     concl = "；".join(notes) + "。" + dir_s
     if len(concl) > 140:            # 图注会截断「结论」行，超长就只说方向
@@ -412,7 +421,7 @@ def scenario_threshold_comparison(variants, *,
         "available": True,
         "type": "grouped_bar",
         "chart_id": f"{str(getattr(first, 'run_id', ''))[:12]}-scenario-threshold",
-        "title": f"{_entity(first)} 反向情景：维持基期归母净利所需毛利率（%）",
+        "title": f"{_entity(first)} 反向情景：各档收入假设下维持目标归母净利所需毛利率（%）",
         "question": question,
         "conclusion": concl,
         "unit": "%",
@@ -425,8 +434,8 @@ def scenario_threshold_comparison(variants, *,
         "sample_size": len(rows),
         "missing": "无",
         "outliers": "无",
-        "annotation": ("基期毛利率取运行诊断的未取整值，并与两条已验证输出的回推值交叉核对"
-                       "（≤0.02pp）；两个口径同为百分比。"
+        "annotation": ("毛利率列是**两因素条件值**（先给定该档收入假设，再反推毛利率），"
+                       "不是单因素阈值；基期毛利率取运行诊断的未取整值并交叉核对（≤0.02pp）；"
                        "毛利线以下净额含费用/税项/投资收益/少数股东，不是纯费用"),
         "data": rows,
         "run_id": str(getattr(first, "run_id", "") or ""),

@@ -1,0 +1,409 @@
+{
+ "batch": "W0",
+ "case": "情景求值器：正确符号 + 冻结残差 + 同一目标/求值器",
+ "hand": {
+  "dataset": {
+   "observations": 9,
+   "dataset_hash": "50e6c8c67b58c5811acb1c789d04614fc1b78428263f7920b700d7e7fa478e8f"
+  },
+  "rows_yuan": {
+   "revenue": 1000.0,
+   "gross_profit": 800.0,
+   "net_profit": 300.0,
+   "net_profit_consolidated": 320.0,
+   "income_tax_expense": 80.0,
+   "minority_interest": 20.0,
+   "taxes_and_surcharges": 100.0,
+   "selling_expense": 200.0,
+   "admin_expense": 50.0
+  },
+  "checks": {
+   "status": "validated",
+   "base_reproduction_gap": "0",
+   "residual_yuan": -50.0,
+   "residual_frozen_after_assuming": -50.0,
+   "base_pretax_yuan": 400.0,
+   "tax25_minority10_net_profit": 270.0,
+   "tax25_minority10_income_tax_yuan": 100.0,
+   "tax25_minority10_minority_yuan": 30.0,
+   "tax25_minority10_residual_yuan": -50.0,
+   "expense_10pct_net_profit": 296.25,
+   "revenue_10pct_net_profit": 337.5,
+   "target_450_margin_pct": 100.00000000000911,
+   "target_450_revenue_growth_pct": 40.000000000009095,
+   "threshold_method": {
+    "mode": "detail",
+    "margin": "二分求根（detail 模式：同一求值器）",
+    "revenue": "二分求根（detail 模式：同一求值器）",
+    "conditional": "收入假设为 0：与单因素相同"
+   },
+   "threshold_reachable": {
+    "margin": true,
+    "revenue": true,
+    "conditional": true
+   },
+   "threshold_target_source": "使用者给定",
+   "margin_threshold_back_to_target_yuan": 450.0000000000683,
+   "revenue_threshold_back_to_target_yuan": 450.0000000000341
+  },
+  "expect": {
+   "residual_yuan": -50.0,
+   "tax25_minority10_net_profit": 270.0,
+   "expense_10pct_net_profit": 296.25,
+   "revenue_10pct_net_profit": 337.5,
+   "target_450_margin_pct": 100.0,
+   "target_450_revenue_growth_pct": 40.0
+  },
+  "matched": {
+   "residual_yuan": true,
+   "tax25_minority10_net_profit": true,
+   "expense_10pct_net_profit": true,
+   "revenue_10pct_net_profit": true,
+   "target_450_margin_pct": true,
+   "target_450_revenue_growth_pct": true,
+   "both_thresholds_back_to_target": true,
+   "residual_stays_after_assuming": true
+  }
+ },
+ "cases": {
+  "洋河股份": {
+   "entity_id": "002304.SZ",
+   "dataset": {
+    "observations": 162,
+    "usable": 158,
+    "dataset_hash": "4a44ba6630bf61826c91c3353bfe199f78e9b3379d2005d543129b6df91e943c"
+   },
+   "readings": {
+    "net_profit_prev_yuan": 10015930040.27,
+    "net_profit_cur_yuan": 6673388602.12,
+    "revenue_cur_yuan": 28876296993.56,
+    "gross_profit_cur_yuan": 21125078636.9,
+    "margin_base": 0.7315715945715381
+   },
+   "modes": {
+    "fixed": {
+     "status": "validated",
+     "validation_failed": [],
+     "base_reproduction_gap": "0",
+     "target_net_profit_yuan": 10015930040.27,
+     "target_source": "使用者给定",
+     "revenue_growth_to_hold_target_pct": 15.822622464995007,
+     "margin_threshold_pct": 84.73254060417365,
+     "margin_gap_pp": 11.575381147019836,
+     "margin_base_pct": 73.15715945715381,
+     "method": {
+      "mode": "fixed",
+      "margin": "代数反推",
+      "revenue": "代数反推",
+      "conditional": "收入假设为 0：与单因素相同"
+     },
+     "reachable": {
+      "margin": true,
+      "revenue": true,
+      "conditional": true
+     },
+     "within_allowed_range": {
+      "margin": null,
+      "revenue": null
+     },
+     "threshold_notes": {
+      "margin": "代数反推",
+      "revenue": "代数反推",
+      "conditional": "收入假设为 0：与单因素相同"
+     },
+     "margin_threshold_back_to_target_yuan": 10015930040.270002,
+     "revenue_threshold_back_to_target_yuan": 10015930040.27,
+     "back_to_target_ok": true,
+     "below_gross": {
+      "residual_yuan": null,
+      "residual_frozen": null,
+      "pretax_profit_base_yuan": null,
+      "pretax_profit_yuan": null,
+      "income_tax_base_yuan": null,
+      "income_tax_yuan": null,
+      "tax_rate": null,
+      "tax_rate_source": null,
+      "minority_base_yuan": null,
+      "minority_interest_yuan": null,
+      "minority_share": null,
+      "minority_source": null,
+      "consolidated_disclosed_gap_yuan": null,
+      "below_gross_net_yuan": null,
+      "items_used": null,
+      "items_missing": null
+     }
+    },
+    "detail": {
+     "status": "validated",
+     "validation_failed": [],
+     "base_reproduction_gap": "0",
+     "target_net_profit_yuan": 10015930040.27,
+     "target_source": "使用者给定",
+     "revenue_growth_to_hold_target_pct": 42.4710581101408,
+     "margin_threshold_pct": 89.01635827603384,
+     "margin_gap_pp": 15.859198818880031,
+     "margin_base_pct": 73.15715945715381,
+     "method": {
+      "mode": "detail",
+      "margin": "二分求根（detail 模式：同一求值器）",
+      "revenue": "二分求根（detail 模式：同一求值器）",
+      "conditional": "收入假设为 0：与单因素相同"
+     },
+     "reachable": {
+      "margin": true,
+      "revenue": true,
+      "conditional": true
+     },
+     "within_allowed_range": {
+      "margin": true,
+      "revenue": true
+     },
+     "threshold_notes": {
+      "margin": "二分求根（detail 模式：同一求值器）",
+      "revenue": "二分求根（detail 模式：同一求值器）",
+      "conditional": "收入假设为 0：与单因素相同"
+     },
+     "margin_threshold_back_to_target_yuan": 10015930040.27222,
+     "revenue_threshold_back_to_target_yuan": 10015930040.271036,
+     "back_to_target_ok": true,
+     "below_gross": {
+      "residual_yuan": 0.0,
+      "residual_frozen": true,
+      "pretax_profit_base_yuan": 9143076611.68,
+      "pretax_profit_yuan": 9143076611.68,
+      "income_tax_base_yuan": 2476620791.72,
+      "income_tax_yuan": 2476620791.72,
+      "tax_rate": 0.27087389692832636,
+      "tax_rate_source": "基期有效税率（基期所得税/基期税前利润）",
+      "minority_base_yuan": -6932782.16,
+      "minority_interest_yuan": -6932782.16,
+      "minority_share": -0.001039950214511674,
+      "minority_source": "基期占比（基期少数股东/基期合并净利）",
+      "consolidated_disclosed_gap_yuan": 0.0,
+      "below_gross_net_yuan": -14451690034.78,
+      "items_used": [
+       "taxes_and_surcharges",
+       "selling_expense",
+       "admin_expense",
+       "rd_expense",
+       "finance_expense",
+       "other_income",
+       "investment_income",
+       "fair_value_change",
+       "credit_impairment",
+       "asset_impairment",
+       "asset_disposal_income",
+       "non_operating_income",
+       "non_operating_expense",
+       "income_tax_expense",
+       "minority_interest"
+      ],
+      "items_missing": []
+     }
+    }
+   },
+   "assumption_effects": {
+    "费用 +3%": {
+     "net_profit_base_yuan": 6673388602.12,
+     "net_profit_yuan": 6637485374.63,
+     "net_profit_delta_yuan": -35903227.48999977,
+     "residual_yuan": 0.0,
+     "income_tax_yuan": 2463296424.6,
+     "minority_interest_yuan": -6895483.38,
+     "pretax_profit_yuan": 9093886315.85,
+     "status": "validated"
+    },
+    "税率 25%": {
+     "net_profit_base_yuan": 6673388602.12,
+     "net_profit_yuan": 6864438717.12,
+     "net_profit_delta_yuan": 191050115.0,
+     "residual_yuan": 0.0,
+     "income_tax_yuan": 2285769152.92,
+     "minority_interest_yuan": -7131258.36,
+     "pretax_profit_yuan": 9143076611.68,
+     "status": "validated"
+    },
+    "少数股东占比 10%": {
+     "net_profit_base_yuan": 6673388602.12,
+     "net_profit_yuan": 5999810237.96,
+     "net_profit_delta_yuan": -673578364.1599998,
+     "residual_yuan": 0.0,
+     "income_tax_yuan": 2476620791.72,
+     "minority_interest_yuan": 666645582.0,
+     "pretax_profit_yuan": 9143076611.68,
+     "status": "validated"
+    }
+   }
+  },
+  "三一重工": {
+   "entity_id": "600031.SH",
+   "dataset": {
+    "observations": 168,
+    "usable": 168,
+    "dataset_hash": "958031f9d17adde9b12bb8a03b3de1dbb29a5b6f6b736da4276ef47ae381800a"
+   },
+   "readings": {
+    "net_profit_prev_yuan": 4527451000.0,
+    "net_profit_cur_yuan": 5975451000.0,
+    "revenue_cur_yuan": 77773391000.0,
+    "gross_profit_cur_yuan": 20556432000.0,
+    "margin_base": 0.26431189042535125
+   },
+   "modes": {
+    "fixed": {
+     "status": "validated",
+     "validation_failed": [],
+     "base_reproduction_gap": "0",
+     "target_net_profit_yuan": 4527451000.0,
+     "target_source": "使用者给定",
+     "revenue_growth_to_hold_target_pct": -7.044023982372039,
+     "margin_threshold_pct": 24.569369747552862,
+     "margin_gap_pp": -1.8618192949822645,
+     "margin_base_pct": 26.431189042535124,
+     "method": {
+      "mode": "fixed",
+      "margin": "代数反推",
+      "revenue": "代数反推",
+      "conditional": "收入假设为 0：与单因素相同"
+     },
+     "reachable": {
+      "margin": true,
+      "revenue": true,
+      "conditional": true
+     },
+     "within_allowed_range": {
+      "margin": null,
+      "revenue": null
+     },
+     "threshold_notes": {
+      "margin": "代数反推",
+      "revenue": "代数反推",
+      "conditional": "收入假设为 0：与单因素相同"
+     },
+     "margin_threshold_back_to_target_yuan": 4527451000.0,
+     "revenue_threshold_back_to_target_yuan": 4527451000.0,
+     "back_to_target_ok": true,
+     "below_gross": {
+      "residual_yuan": null,
+      "residual_frozen": null,
+      "pretax_profit_base_yuan": null,
+      "pretax_profit_yuan": null,
+      "income_tax_base_yuan": null,
+      "income_tax_yuan": null,
+      "tax_rate": null,
+      "tax_rate_source": null,
+      "minority_base_yuan": null,
+      "minority_interest_yuan": null,
+      "minority_share": null,
+      "minority_source": null,
+      "consolidated_disclosed_gap_yuan": null,
+      "below_gross_net_yuan": null,
+      "items_used": null,
+      "items_missing": null
+     }
+    },
+    "detail": {
+     "status": "validated",
+     "validation_failed": [],
+     "base_reproduction_gap": "0",
+     "target_net_profit_yuan": 4527451000.0,
+     "target_source": "使用者给定",
+     "revenue_growth_to_hold_target_pct": -11.417483690138397,
+     "margin_threshold_pct": 24.278879623328038,
+     "margin_gap_pp": -2.1523094192070857,
+     "margin_base_pct": 26.431189042535124,
+     "method": {
+      "mode": "detail",
+      "margin": "二分求根（detail 模式：同一求值器）",
+      "revenue": "二分求根（detail 模式：同一求值器）",
+      "conditional": "收入假设为 0：与单因素相同"
+     },
+     "reachable": {
+      "margin": true,
+      "revenue": true,
+      "conditional": true
+     },
+     "within_allowed_range": {
+      "margin": true,
+      "revenue": true
+     },
+     "threshold_notes": {
+      "margin": "二分求根（detail 模式：同一求值器）",
+      "revenue": "二分求根（detail 模式：同一求值器）",
+      "conditional": "收入假设为 0：与单因素相同"
+     },
+     "margin_threshold_back_to_target_yuan": 4527450999.998787,
+     "revenue_threshold_back_to_target_yuan": 4527451000.001546,
+     "back_to_target_ok": true,
+     "below_gross": {
+      "residual_yuan": 501653000.0,
+      "residual_frozen": true,
+      "pretax_profit_base_yuan": 6907770000.0,
+      "pretax_profit_yuan": 6907770000.0,
+      "income_tax_base_yuan": 815232000.0,
+      "income_tax_yuan": 815232000.0,
+      "tax_rate": 0.11801666818669411,
+      "tax_rate_source": "基期有效税率（基期所得税/基期税前利润）",
+      "minority_base_yuan": 117087000.0,
+      "minority_interest_yuan": 117087000.0,
+      "minority_share": 0.01921809925518725,
+      "minority_source": "基期占比（基期少数股东/基期合并净利）",
+      "consolidated_disclosed_gap_yuan": 0.0,
+      "below_gross_net_yuan": -14580981000.0,
+      "items_used": [
+       "taxes_and_surcharges",
+       "selling_expense",
+       "admin_expense",
+       "rd_expense",
+       "finance_expense",
+       "other_income",
+       "investment_income",
+       "credit_impairment",
+       "asset_impairment",
+       "non_operating_income",
+       "non_operating_expense",
+       "income_tax_expense",
+       "minority_interest"
+      ],
+      "items_missing": [
+       "fair_value_change",
+       "asset_disposal_income"
+      ]
+     }
+    }
+   },
+   "assumption_effects": {
+    "费用 +3%": {
+     "net_profit_base_yuan": 5975451000.0,
+     "net_profit_yuan": 5761227011.24,
+     "net_profit_delta_yuan": -214223988.76000023,
+     "residual_yuan": 501653000.0,
+     "income_tax_yuan": 786005377.47,
+     "minority_interest_yuan": 112889351.29,
+     "pretax_profit_yuan": 6660121740.0,
+     "status": "validated"
+    },
+    "税率 25%": {
+     "net_profit_base_yuan": 5975451000.0,
+     "net_profit_yuan": 5081261842.88,
+     "net_profit_delta_yuan": -894189157.1199999,
+     "residual_yuan": 501653000.0,
+     "income_tax_yuan": 1726942500.0,
+     "minority_interest_yuan": 99565657.12,
+     "pretax_profit_yuan": 6907770000.0,
+     "status": "validated"
+    },
+    "少数股东占比 10%": {
+     "net_profit_base_yuan": 5975451000.0,
+     "net_profit_yuan": 5483284200.0,
+     "net_profit_delta_yuan": -492166800.0,
+     "residual_yuan": 501653000.0,
+     "income_tax_yuan": 815232000.0,
+     "minority_interest_yuan": 609253800.0,
+     "pretax_profit_yuan": 6907770000.0,
+     "status": "validated"
+    }
+   }
+  }
+ }
+}

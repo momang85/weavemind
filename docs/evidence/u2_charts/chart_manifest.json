@@ -30,15 +30,15 @@
   },
   {
    "file": "u2_3_scenario_thresholds.png",
-   "chart_id": "cd0f89f298fb-scenario-threshold",
+   "chart_id": "b84de5051e51-scenario-threshold",
    "binding": {},
    "keywords": [
     "收入",
     "预测"
    ],
    "section_hint": "",
-   "question": "收入假设变化时，要保住基期利润需要多高的毛利率？",
-   "observation": "收入持平 需 73.16%（差 +0.00pp）；收入 +5% 需 69.67%（差 -3.48pp）；收入 −12.83% 需 83.92%（差 +10.77pp）。收入越低，维持同样利润所需毛利率越高（单因素反推：给出“需要什么”，不表示可达、也不是预测）",
+   "question": "收入假设变化时，要保住目标利润需要多高的毛利率？",
+   "observation": "收入持平 需 84.73%（较基期 +11.58pp）；收入 +5% 需 80.70%（较基期 +7.54pp）；收入 −12.83% 需 97.20%（较基期 +24.05pp）。在该档收入假设下反推所需毛利率（条件计算：先给定收入，再求毛利率；不表示可达、也不是预测）",
    "caption": "",
    "type": "grouped_bar",
    "grade": "publish",

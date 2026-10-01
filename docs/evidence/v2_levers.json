@@ -17,9 +17,9 @@
     "status": "validated",
     "validation_failed": [],
     "target_net_profit_yuan": 10015930040.27,
-    "revenue_growth_to_hold_target_pct": 15.82,
-    "margin_threshold_to_hold_base_profit_pct": 73.16,
-    "margin_gap_pp": 0.0,
+    "revenue_growth_to_hold_target_pct": 15.8226,
+    "margin_threshold_to_hold_base_profit_pct": 84.7325,
+    "margin_gap_pp": 11.5754,
     "base_reproduction_gap": "0",
     "base_component": 6673388602.12,
     "note": "两条杠杆是**单因素反推**：一个答“收入要变化多少”、一个答“毛利率要多高”，都给出“需要什么”，不表示可达"
@@ -31,27 +31,27 @@
      "expense_change_ratio": 0.03,
      "below_gross_mode": "detail"
     },
-    "block_yuan": 14885240735.82,
+    "block_yuan": -14487593262.27,
     "rules": {
      "税金及附加": {
       "rule": "revenue_linked",
-      "value": 4826086952.64
+      "value": -4826086952.64
      },
      "销售费用": {
       "rule": "revenue_linked",
-      "value": 5516238544.79
+      "value": -5516238544.79
      },
      "管理费用": {
       "rule": "fixed",
-      "value": 1982472211.42
+      "value": -1982472211.42
      },
      "研发费用": {
       "rule": "fixed",
-      "value": 107940299.48
+      "value": -107940299.48
      },
      "财务费用": {
       "rule": "fixed",
-      "value": -629216693.96
+      "value": 629216693.96
      },
      "其他收益": {
       "rule": "fixed",
@@ -83,26 +83,26 @@
      },
      "营业外支出": {
       "rule": "fixed",
-      "value": 72244520.32
+      "value": -72244520.32
      },
      "所得税费用": {
-      "rule": "fixed",
-      "value": 2550919415.47
+      "rule": "base_rate",
+      "value": -2463296424.6
      },
      "少数股东损益": {
-      "rule": "fixed",
-      "value": -7140765.62
+      "rule": "base_share",
+      "value": 6895483.38
      },
      "残差（未取得明细的毛利线以下项目）": {
       "rule": "residual",
-      "value": 621122737.66
+      "value": 0.0
      }
     },
-    "pretax_profit_yuan": 9143076611.68,
-    "income_tax_yuan": 2550919415.47,
+    "pretax_profit_yuan": 9093886315.85,
+    "income_tax_yuan": 2463296424.6,
     "tax_rate": 0.27087389692832636,
-    "tax_rate_source": "未单独假设（按基期值固定）",
-    "residual_yuan": 621122737.66,
+    "tax_rate_source": "基期有效税率（基期所得税/基期税前利润）",
+    "residual_yuan": 0.0,
     "items_missing": []
    },
    "cash_single_item": {
@@ -133,9 +133,9 @@
     "status": "validated",
     "validation_failed": [],
     "target_net_profit_yuan": 4527451000.0,
-    "revenue_growth_to_hold_target_pct": -7.04,
-    "margin_threshold_to_hold_base_profit_pct": 26.43,
-    "margin_gap_pp": 0.0,
+    "revenue_growth_to_hold_target_pct": -7.044,
+    "margin_threshold_to_hold_base_profit_pct": 24.5694,
+    "margin_gap_pp": -1.8618,
     "base_reproduction_gap": "0",
     "base_component": 5975451000.0,
     "note": "两条杠杆是**单因素反推**：一个答“收入要变化多少”、一个答“毛利率要多高”，都给出“需要什么”，不表示可达"
@@ -147,27 +147,27 @@
      "expense_change_ratio": 0.03,
      "below_gross_mode": "detail"
     },
-    "block_yuan": 15018410430.0,
+    "block_yuan": -14795204988.76,
     "rules": {
      "税金及附加": {
       "rule": "revenue_linked",
-      "value": 431159000.0
+      "value": -431159000.0
      },
      "销售费用": {
       "rule": "revenue_linked",
-      "value": 5464214000.0
+      "value": -5464214000.0
      },
      "管理费用": {
       "rule": "fixed",
-      "value": 3086342470.0
+      "value": -3086342470.0
      },
      "研发费用": {
       "rule": "fixed",
-      "value": 5542039630.0
+      "value": -5542039630.0
      },
      "财务费用": {
       "rule": "fixed",
-      "value": 207829280.0
+      "value": -207829280.0
      },
      "其他收益": {
       "rule": "fixed",
@@ -191,26 +191,26 @@
      },
      "营业外支出": {
       "rule": "fixed",
-      "value": 213231630.0
+      "value": -213231630.0
      },
      "所得税费用": {
-      "rule": "fixed",
-      "value": 839688960.0
+      "rule": "base_rate",
+      "value": -786005377.47
      },
      "少数股东损益": {
-      "rule": "fixed",
-      "value": 120599610.0
+      "rule": "base_share",
+      "value": -112889351.29
      },
      "残差（未取得明细的毛利线以下项目）": {
       "rule": "residual",
-      "value": -1433546900.0
+      "value": 501653000.0
      }
     },
-    "pretax_profit_yuan": 6907770000.0,
-    "income_tax_yuan": 839688960.0,
+    "pretax_profit_yuan": 6660121740.0,
+    "income_tax_yuan": 786005377.47,
     "tax_rate": 0.11801666818669411,
-    "tax_rate_source": "未单独假设（按基期值固定）",
-    "residual_yuan": -1433546900.0,
+    "tax_rate_source": "基期有效税率（基期所得税/基期税前利润）",
+    "residual_yuan": 501653000.0,
     "items_missing": [
      "fair_value_change",
      "asset_disposal_income"

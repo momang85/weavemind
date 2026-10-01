@@ -48,6 +48,14 @@ def _pct(value) -> str:
         return "—"
 
 
+def _pct4(value) -> str:
+    """阈值用 4 位小数：+15.8226% 印成 +15.82% 就没法代回求值器核对同一目标（W0）。"""
+    try:
+        return f"{float(value):.4f}%"
+    except (TypeError, ValueError):
+        return "—"
+
+
 # ------------------------------------------------------------------ 事实来源定位
 
 def _clean_label(label, cut: str = "") -> str:
@@ -325,12 +333,23 @@ def _conclusions(od, cash, scens) -> list[str]:
         for r in scens:
             th = _out(r, "margin_threshold_to_hold_base_profit")
             gap = _out(r, "margin_gap_to_threshold_pp")
-            if th is None or gap is None:
-                continue
-            rows.append(f"{_scenario_label(r, th)} 需 {_pct(_attr(th, 'value'))}"
-                        f"（{float(_attr(gap, 'value') or 0):+.2f}pp）")
+            rev_th = _out(r, "revenue_growth_to_hold_target")
+            # W0：两把杠杆共用**同一目标**（默认上一期归母净利），目标写在读数前面——
+            # 读者不会把"维持基期"与"恢复到上年"当成同一把杠杆（架构复核反例）。
+            tgt = (_diag(r).get("thresholds") or {}).get("target_net_profit")
+            tgt_s = f"（目标归母净利 {_yi_plain(tgt)} 亿元）" if tgt else ""
+            bits = []
+            if rev_th is not None and _attr(rev_th, "value") is not None:
+                bits.append(f"收入侧需 {_pct4(_attr(rev_th, 'value'))}")
+            if th is not None and _attr(th, "value") is not None:
+                bits.append(f"毛利率侧需 {_pct4(_attr(th, 'value'))}"
+                            + (f"（较基期 {float(_attr(gap, 'value') or 0):+.2f}pp）"
+                               if gap is not None else ""))
+            if bits:
+                rows.append(tgt_s + "、".join(bits))
         if rows:
-            items.append("**反向情景**（单因素反推，不表示可达）：" + "；".join(rows))
+            items.append("**反向情景**（单因素反推，两把杠杆同一目标；不表示可达）："
+                         + "；".join(rows))
     return items
 
 
@@ -709,9 +728,10 @@ def driver_evidence(runs, records, *, limit: int = 3, doc=None) -> list[str]:
 
 
 def _scenario_detail_note(scens) -> list[str]:
-    """V2：明细模式下，把毛利线以下净额的**逐项规则**写进正文（页面与导出同一组结果）。
+    """W0：明细模式下，把毛利线以下逐项规则与**假设如何进入最终利润**写进正文。
 
-    只描述规则与读数：固定金额／随收入变化／单独假设，以及**残差**；不做完整预测。
+    纪律：只描述规则与读数（固定金额／随收入变化／单独假设／冻结残差），
+    不做完整预测；逐项按**披露符号**计入（正号增利、负号减利）。
     """
     out: list[str] = []
     for r in (scens or ()):
@@ -721,22 +741,31 @@ def _scenario_detail_note(scens) -> list[str]:
             continue
         items = list(_attr(det, "components") or ())
         rules = {"fixed": "固定金额", "revenue_linked": "随收入变化",
-                 "explicit": "单独假设", "residual": "残差"}
+                 "explicit": "单独假设", "base_rate": "基期有效税率",
+                 "base_share": "基期占比", "residual": "冻结残差",
+                 "missing": "缺披露（并入残差）"}
         shown = "、".join(
-            f"{_attr(c, 'label')} {_yi(_attr(c, 'value'))} 亿元"
+            f"{_attr(c, 'label')} {_yi(_attr(c, 'value'))}"
             f"（{rules.get(str(_attr(c, 'rule')), str(_attr(c, 'rule')))}）"
             for c in items)
-        out.append(f"- **情景明细模式（{_attr(det, 'output_period')}）**：毛利线以下净额 "
-                   f"{_yi(_attr(det, 'value'))} 亿元 ＝ {shown}")
-        if diag.get("pretax_profit_yuan") is not None:
-            out.append(f"  - 税前利润（基期）{_yi_plain(diag.get('pretax_profit_yuan'))} 亿元；"
+        out.append(f"- **情景明细模式（{_attr(det, 'output_period')}）**：毛利线以下净额对"
+                   f"归母净利的影响 {_yi(_attr(det, 'value'))} 亿元 ＝ {shown}")
+        out.append("  - 各项按**披露符号**计入（正号为增利、负号为减利）；"
+                   "负号不是「少花了钱」，是这一项在减少利润")
+        pretax = diag.get("pretax_profit_yuan")
+        if pretax is not None:
+            out.append(f"  - 情景税前利润 {_yi_plain(pretax)} 亿元"
+                       f"（基期 {_yi_plain(diag.get('pretax_profit_base_yuan'))} 亿元）；"
                        f"所得税 {_yi_plain(diag.get('income_tax_yuan'))} 亿元"
-                       f"（税率来源：{diag.get('tax_rate_source')}）")
+                       f"（{diag.get('tax_rate_source')}）→ 合并净利 "
+                       f"{_yi_plain(diag.get('consolidated_net_yuan'))} 亿元")
         if diag.get("minority_interest_yuan") is not None:
             out.append(f"  - 少数股东损益 {_yi_plain(diag.get('minority_interest_yuan'))} 亿元"
-                       f"（{diag.get('minority_source')}）")
+                       f"（{diag.get('minority_source')}）→ 情景归母净利 "
+                       f"{_yi_plain(diag.get('scenario_net_profit_yuan'))} 亿元")
         out.append(f"  - 残差 {_yi_plain(diag.get('residual_yuan'))} 亿元："
-                   "未取得明细的部分保留在残差里，**不摊派、不当零、也不构成完整预测**")
+                   "未取得明细的部分**只算一次并冻结**，不随税率/费用/少数股东假设变化，"
+                   "**不摊派、不当零、也不构成完整预测**")
         missing = list(diag.get("items_missing") or ())
         if missing:
             out.append("  - 未取到明细：" + "、".join(str(m) for m in missing[:6]))
@@ -996,20 +1025,43 @@ def research_note(runs, *, provenance=None, charts=None, label_of=None,
                         line += (f"；基准复现 {_yi(_attr(base_c, 'value'))} 亿元"
                                  f"（差 {_yi(float(_attr(user, 'value') or 0) - float(_attr(base_c, 'value') or 0))} 亿元）")
                     lines.append(line)
-            if th is None:
-                continue
-            extra = (f"，与基期之差 {float(_attr(gap, 'value') or 0):+.2f}pp"
-                     if gap is not None else "")
-            lines.append(f"- **反向情景（{_scenario_label(r, th)}）**：维持基期归母净利"
-                         f"所需毛利率 {_pct(_attr(th, 'value'))}{extra}")
-            # V2：**收入侧**反推（把利润拉回目标水平需要多少收入变化）
+            # W0：两把杠杆**共用同一目标归母净利**（默认上一期），各自单因素；
+            # 目标与来源写在读数前面，读者不会把"维持基期"与"恢复到上年"混为一谈。
+            tdiag = dict(_diag(r).get("thresholds") or {})
+            tgt = tdiag.get("target_net_profit")
+            tgt_src = str(tdiag.get("target_source") or "")
+            tgt_s = (f"目标归母净利 {_yi_plain(tgt)} 亿元"
+                     + (f"（{tgt_src}）" if tgt_src else "") if tgt is not None else "")
+            if th is not None and _attr(th, "value") is not None:
+                extra = (f"，与基期之差 {float(_attr(gap, 'value') or 0):+.2f}pp"
+                         if gap is not None else "")
+                lines.append(f"- **毛利率侧反推**（收入固定基期；{tgt_s}）："
+                             f"所需毛利率 {_pct4(_attr(th, 'value'))}{extra}")
+            else:
+                reason = str((tdiag.get("threshold_notes") or {}).get("margin") or "")
+                lines.append(f"- **毛利率侧反推**（{tgt_s}）：本次**不可达**"
+                             + (f"——{reason}" if reason else "")
+                             + "；不硬报一个数")
+            # V2：**收入侧**反推（把利润拉回目标水平需要多少收入变化；同一目标/模式/假设）
             rev_th = _out(r, "revenue_growth_to_hold_target")
             if rev_th is not None and _attr(rev_th, "value") is not None:
-                tgt = (_diag(r).get("thresholds") or {}).get("target_net_profit")
-                tgt_s = (f"（目标归母净利 {_yi_plain(tgt)} 亿元）" if tgt else "")
-                lines.append(f"  - 收入侧反推{tgt_s}：在其他条件不变时，收入需变化 "
-                             f"{_pct(_attr(rev_th, 'value'))} 才能回到该利润水平"
-                             "（单因素算术反推，不表示可达）")
+                lines.append(f"  - 收入侧反推（毛利率固定基期）：收入需变化 "
+                             f"{_pct4(_attr(rev_th, 'value'))} 才能达到同一目标"
+                             "（单因素反推，不表示可达）")
+            elif tdiag:
+                reason = str((tdiag.get("threshold_notes") or {}).get("revenue") or "")
+                lines.append("  - 收入侧反推：本次**不可达**"
+                             + (f"——{reason}" if reason else "")
+                             + "；不硬报一个数")
+            cond = tdiag.get("conditional_margin_threshold")
+            cond_gap = tdiag.get("conditional_margin_gap_pp")
+            if cond is not None and _attr(th, "value") is not None:
+                # 两因素条件值：先给定该档收入，再反推毛利率（与单因素阈值不是一回事）
+                lines.append(f"  - 若先接受该档收入假设，则所需毛利率为 "
+                             f"{_pct4(cond)}"
+                             + (f"（较基期 {float(cond_gap):+.2f}pp）"
+                                if cond_gap is not None else "")
+                             + "——这是**两因素条件计算**，不是同一把杠杆")
         lines.append("")
     lines.extend(_scenario_detail_note(scens))
     if scens:

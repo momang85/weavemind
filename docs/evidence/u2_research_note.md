@@ -6,7 +6,7 @@
 1. **利润**：2023年→2024年 归母净利润变化 -33.43 亿元；其中毛利变化 -38.01 亿元（收入规模 -31.54／毛利率 -6.47 亿元），毛利线以下 +4.58 亿元；毛利率 75.25% → 73.16%（-2.09pp）
 2. **结构**：分产品切法：白酒毛利变化（含推算输入） -37.96 亿元；未分类差额 -0.05 亿元；分地区切法：省外毛利变化（含推算输入） -25.21 亿元、省内毛利变化（含推算输入） -12.87 亿元；未分类差额 +0.08 亿元；量价分解（分产品:白酒量价分解）：销量效应 -53.82 亿元、单位价格效应 +11.68 亿元
 3. **现金**：2024年 合并净利润 66.66 亿元经调节项 -20.38 亿元后为经营现金流 46.29 亿元（未解释差额 +0.00 亿元）；现金变化 -15.02 亿元，最大构成 合并净利润变化 -33.54 亿元；最大支撑 固定资产折旧、油气资产折耗、生产性生物资产折旧 +5.87 亿元、最大拖累 经营性应付项目的增加（减少以“－”号填列） -18.31 亿元
-4. **反向情景**（单因素反推，不表示可达）：收入 +0.00%／毛利率 +0.00pp 需 73.16%（+0.00pp）；收入 +5.00%／毛利率 +1.00pp 需 69.67%（-3.48pp）；收入 -12.83%／毛利率 +0.00pp 需 83.92%（+10.77pp）
+4. **反向情景**（单因素反推，两把杠杆同一目标；不表示可达）：（目标归母净利 100.16 亿元）收入侧需 15.8226%、毛利率侧需 84.7325%（较基期 +11.58pp）；（目标归母净利 100.16 亿元）收入侧需 15.8226%、毛利率侧需 84.7325%（较基期 +11.58pp）；（目标归母净利 100.16 亿元）收入侧需 15.8226%、毛利率侧需 84.7325%（较基期 +11.58pp）
 
 ### 二、利润变化：金额分解
 | 项目 | 金额（亿元） | 占归母净利变化 |
@@ -85,14 +85,17 @@
   - 后续观察指标：下期折旧摊销与减值明细、递延所得税附注；资产减值准备余额变化
 - 对账差额≈0 表示披露调节项与经营现金流自洽；差额非零说明有调节项没取到，报告不得写“完整调节”
 - **情景归母净利（收入 +0.00%／毛利率 +0.00pp）**：+66.73 亿元；基准复现 +66.73 亿元（差 +0.00 亿元）
-- **反向情景（收入 +0.00%／毛利率 +0.00pp）**：维持基期归母净利所需毛利率 73.16%，与基期之差 +0.00pp
-  - 收入侧反推（目标归母净利 66.73 亿元）：在其他条件不变时，收入需变化 0.00% 才能回到该利润水平（单因素算术反推，不表示可达）
+- **毛利率侧反推**（收入固定基期；目标归母净利 100.16 亿元（上一期（2023年）归母净利：回到上年水平））：所需毛利率 84.7325%，与基期之差 +11.58pp
+  - 收入侧反推（毛利率固定基期）：收入需变化 15.8226% 才能达到同一目标（单因素反推，不表示可达）
+  - 若先接受该档收入假设，则所需毛利率为 84.7325%（较基期 +11.58pp）——这是**两因素条件计算**，不是同一把杠杆
 - **情景归母净利（收入 +5.00%／毛利率 +1.00pp）**：+80.33 亿元；基准复现 +66.73 亿元（差 +13.59 亿元）
-- **反向情景（收入 +5.00%／毛利率 +1.00pp）**：维持基期归母净利所需毛利率 69.67%，与基期之差 -3.48pp
-  - 收入侧反推（目标归母净利 66.73 亿元）：在其他条件不变时，收入需变化 0.00% 才能回到该利润水平（单因素算术反推，不表示可达）
+- **毛利率侧反推**（收入固定基期；目标归母净利 100.16 亿元（上一期（2023年）归母净利：回到上年水平））：所需毛利率 84.7325%，与基期之差 +11.58pp
+  - 收入侧反推（毛利率固定基期）：收入需变化 15.8226% 才能达到同一目标（单因素反推，不表示可达）
+  - 若先接受该档收入假设，则所需毛利率为 80.6977%（较基期 +7.54pp）——这是**两因素条件计算**，不是同一把杠杆
 - **情景归母净利（收入 -12.83%／毛利率 +0.00pp）**：+39.63 亿元；基准复现 +66.73 亿元（差 -27.10 亿元）
-- **反向情景（收入 -12.83%／毛利率 +0.00pp）**：维持基期归母净利所需毛利率 83.92%，与基期之差 +10.77pp
-  - 收入侧反推（目标归母净利 66.73 亿元）：在其他条件不变时，收入需变化 0.00% 才能回到该利润水平（单因素算术反推，不表示可达）
+- **毛利率侧反推**（收入固定基期；目标归母净利 100.16 亿元（上一期（2023年）归母净利：回到上年水平））：所需毛利率 84.7325%，与基期之差 +11.58pp
+  - 收入侧反推（毛利率固定基期）：收入需变化 15.8226% 才能达到同一目标（单因素反推，不表示可达）
+  - 若先接受该档收入假设，则所需毛利率为 97.2038%（较基期 +24.05pp）——这是**两因素条件计算**，不是同一把杠杆
 
 
 ### 六、待核查问题（按影响排序）
@@ -116,8 +119,8 @@
   - 图注（由读数算出）：归母净利润 100.16 → 66.73 亿元（-33.43）；毛利变化 -38.01 亿元；规模 -31.54／毛利率 -6.47 亿元；毛利线以下 +4.58 亿元；未解释差额 0.00 亿元（披露项目齐全）
 - 图 2：洋河股份 2024年 净利润→经营现金流桥（亿元）
   - 图注（由读数算出）：合并净利润 66.66 亿元 ＋ 调节项 -20.38 亿元 ＝ 经营现金流 46.29 亿元；未解释差额 +0.00 亿元；最大支撑 固定资产折旧、油气资产折… +5.87 亿元；最大拖累 经营性应付项目的增加（减… -18.31 亿元；经营现金流变化 -15.02 亿元，最大构成 合并净利润变化 -33.54 亿元
-- 图 3：洋河股份 反向情景：维持基期归母净利所需毛利率（%）
-  - 图注（由读数算出）：收入持平 需 73.16%（差 +0.00pp）；收入 +5% 需 69.67%（差 -3.48pp）；收入 −12.83% 需 83.92%（差 +10.77pp）。收入越低，维持同样利润所需毛利率越高（单因素反推：给出“需要什么”，不表示可达、也不是预测）
+- 图 3：洋河股份 反向情景：各档收入假设下维持目标归母净利所需毛利率（%）
+  - 图注（由读数算出）：收入持平 需 84.73%（较基期 +11.58pp）；收入 +5% 需 80.70%（较基期 +7.54pp）；收入 −12.83% 需 97.20%（较基期 +24.05pp）。在该档收入假设下反推所需毛利率（条件计算：先给定收入，再求毛利率；不表示可达、也不是预测）
 - 图与正文共用同一次运行；文件名与运行标识见文末『附：底稿索引』。
 
 ### 附：底稿索引（run / output / component_id）
@@ -141,30 +144,30 @@
   - cash_gap_change → `fdc8d4d464e7-03-cash_gap_change`；分项 change_in_operating_cashflow、change_in_net_profit_negated
   - largest_support → `fdc8d4d464e7-04-largest_support`
   - largest_drag → `fdc8d4d464e7-05-largest_drag`
-- `scenario_sensitivity`：run `cd0f89f298fbba5d29d84cf078510b450f892eb452ebab82528e41d35c653eea`（数据集 `8e99cf4db927`，规则 `validation/1.1.0`）
-  - scenario_net_profit → `cd0f89f298fb-00-scenario_net_profit`；分项 base、user、counter
-  - scenario_sensitivity → `cd0f89f298fb-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
-  - margin_threshold_to_hold_base_profit → `cd0f89f298fb-02-margin_threshold_to_hold_base_profit`
-  - margin_gap_to_threshold_pp → `cd0f89f298fb-03-margin_gap_to_threshold_pp`
-  - revenue_growth_to_hold_target → `cd0f89f298fb-04-revenue_growth_to_hold_target`
-  - collection_days_capital_per_day → `cd0f89f298fb-05-collection_days_capital_per_day`
-  - collection_days_sensitivity_10d → `cd0f89f298fb-06-collection_days_sensitivity_10d`
-- `scenario_sensitivity`：run `7d779d596bab8170c4a32f4e96ba5fec78275143e6c4f043b000b19f1ccaa058`（数据集 `8e99cf4db927`，规则 `validation/1.1.0`）
-  - scenario_net_profit → `7d779d596bab-00-scenario_net_profit`；分项 base、user、counter
-  - scenario_sensitivity → `7d779d596bab-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
-  - margin_threshold_to_hold_base_profit → `7d779d596bab-02-margin_threshold_to_hold_base_profit`
-  - margin_gap_to_threshold_pp → `7d779d596bab-03-margin_gap_to_threshold_pp`
-  - revenue_growth_to_hold_target → `7d779d596bab-04-revenue_growth_to_hold_target`
-  - collection_days_capital_per_day → `7d779d596bab-05-collection_days_capital_per_day`
-  - collection_days_sensitivity_10d → `7d779d596bab-06-collection_days_sensitivity_10d`
-- `scenario_sensitivity`：run `b91832c8d16c478ab5583fa1ec64c7513a114588f3b76c16036b6cda6ecb221f`（数据集 `8e99cf4db927`，规则 `validation/1.1.0`）
-  - scenario_net_profit → `b91832c8d16c-00-scenario_net_profit`；分项 base、user、counter
-  - scenario_sensitivity → `b91832c8d16c-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
-  - margin_threshold_to_hold_base_profit → `b91832c8d16c-02-margin_threshold_to_hold_base_profit`
-  - margin_gap_to_threshold_pp → `b91832c8d16c-03-margin_gap_to_threshold_pp`
-  - revenue_growth_to_hold_target → `b91832c8d16c-04-revenue_growth_to_hold_target`
-  - collection_days_capital_per_day → `b91832c8d16c-05-collection_days_capital_per_day`
-  - collection_days_sensitivity_10d → `b91832c8d16c-06-collection_days_sensitivity_10d`
+- `scenario_sensitivity`：run `b84de5051e511cf3fc7ff6c44534cee4158e9085a7466a33ad74cdc86538faa1`（数据集 `8e99cf4db927`，规则 `validation/1.1.0`）
+  - scenario_net_profit → `b84de5051e51-00-scenario_net_profit`；分项 base、user、counter
+  - scenario_sensitivity → `b84de5051e51-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
+  - collection_days_capital_per_day → `b84de5051e51-02-collection_days_capital_per_day`
+  - collection_days_sensitivity_10d → `b84de5051e51-03-collection_days_sensitivity_10d`
+  - margin_threshold_to_hold_base_profit → `b84de5051e51-04-margin_threshold_to_hold_base_profit`
+  - margin_gap_to_threshold_pp → `b84de5051e51-05-margin_gap_to_threshold_pp`
+  - revenue_growth_to_hold_target → `b84de5051e51-06-revenue_growth_to_hold_target`
+- `scenario_sensitivity`：run `be1e8d5d248b55c28407242c02933504cb33cd8864c9824181a5e253ac1382e5`（数据集 `8e99cf4db927`，规则 `validation/1.1.0`）
+  - scenario_net_profit → `be1e8d5d248b-00-scenario_net_profit`；分项 base、user、counter
+  - scenario_sensitivity → `be1e8d5d248b-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
+  - collection_days_capital_per_day → `be1e8d5d248b-02-collection_days_capital_per_day`
+  - collection_days_sensitivity_10d → `be1e8d5d248b-03-collection_days_sensitivity_10d`
+  - margin_threshold_to_hold_base_profit → `be1e8d5d248b-04-margin_threshold_to_hold_base_profit`
+  - margin_gap_to_threshold_pp → `be1e8d5d248b-05-margin_gap_to_threshold_pp`
+  - revenue_growth_to_hold_target → `be1e8d5d248b-06-revenue_growth_to_hold_target`
+- `scenario_sensitivity`：run `aca06b4079371dc98d4b0ba489dc9ff20504a131c2e563738cd9351d1ae0bc12`（数据集 `8e99cf4db927`，规则 `validation/1.1.0`）
+  - scenario_net_profit → `aca06b407937-00-scenario_net_profit`；分项 base、user、counter
+  - scenario_sensitivity → `aca06b407937-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
+  - collection_days_capital_per_day → `aca06b407937-02-collection_days_capital_per_day`
+  - collection_days_sensitivity_10d → `aca06b407937-03-collection_days_sensitivity_10d`
+  - margin_threshold_to_hold_base_profit → `aca06b407937-04-margin_threshold_to_hold_base_profit`
+  - margin_gap_to_threshold_pp → `aca06b407937-05-margin_gap_to_threshold_pp`
+  - revenue_growth_to_hold_target → `aca06b407937-06-revenue_growth_to_hold_target`
 - 图 `5ebf08301700-profit-waterfall`：洋河股份 2023年→2024年 归母净利润瀑布（亿元）
 - 图 `fdc8d4d464e7-cash-bridge-cur`：洋河股份 2024年 净利润→经营现金流桥（亿元）
-- 图 `cd0f89f298fb-scenario-threshold`：洋河股份 反向情景：维持基期归母净利所需毛利率（%）
+- 图 `b84de5051e51-scenario-threshold`：洋河股份 反向情景：各档收入假设下维持目标归母净利所需毛利率（%）

@@ -88,7 +88,7 @@
    {
     "model_id": "scenario_sensitivity",
     "status": "validated",
-    "run_id": "8addf8ff0f41113a668f0ce140f346880c56ad00ef5360870f572958ca2717d0"
+    "run_id": "338ecf4f97c65509ec6e3d16ab0fd35bc1b6706a580d0e5c1fa6568b224f1570"
    },
    {
     "model_id": "ratio:net_margin",
@@ -133,8 +133,8 @@
   }
  ],
  "text": {
-  "note_chars": 9595,
-  "note_lines": 121,
+  "note_chars": 9698,
+  "note_lines": 122,
   "summary_lines": [
    "- **利润**：2023年→2024年 归母净利润变化 -33.43 亿元；其中毛利变化 -38.01 亿元（收入规模 -31.54／毛利率 -6.47 亿元），毛利线以下 +4.58 亿元；毛利率 75.25% → 73.16%（-2.09pp）",
    "- **结构**：分产品切法：白酒毛利变化（含推算输入） -37.96 亿元；未分类差额 -0.05 亿元；分地区切法：省外毛利变化（含推算输入） -25.21 亿元、省内毛利变化（含推算输入） -12.87 亿元；未分类差额 +0.08 亿元；量价分解（分产品:白酒量价分解）：销量效应 -53.82 亿元、单位价格效应 +11.68 亿元",
@@ -155,7 +155,7 @@
   "note": "隔离验证不含 Critic 评审与检索来源两条轴：交付正文与三图按生产函数产出，验收状态如实停在草稿（不伪造评审通过）"
  },
  "pdf": {
-  "bytes": 5565917,
+  "bytes": 5572221,
   "pages_with_images": 2,
   "total_images": 3,
   "expected_images": 3,
@@ -176,8 +176,8 @@
   "plan.json"
  ],
  "package": {
-  "zip": "deliverables_20261001_183857_7339fc.zip",
-  "bytes": 5608335,
+  "zip": "deliverables_20261001_200545_de121f.zip",
+  "bytes": 5623472,
   "entries": 14,
   "has_analysis": [
    "analysis/analysis_cards.md",
@@ -206,8 +206,8 @@
  },
  "artifacts": {
   "analysis_note.md": {
-   "bytes": 16458,
-   "sha256": "d56dce8c2b6c3706"
+   "bytes": 16714,
+   "sha256": "348bb7f46e448dad"
   },
   "chart_1.png": {
    "bytes": 84230,
@@ -218,31 +218,31 @@
    "sha256": "9593a1e0f54126f7"
   },
   "chart_3.png": {
-   "bytes": 66585,
-   "sha256": "2c01b6556238baab"
+   "bytes": 72795,
+   "sha256": "1d0c9a914e46c421"
   },
   "export_manifest.json": {
    "bytes": 3465,
-   "sha256": "7353d0cff12a3204"
+   "sha256": "31d0e90a4b6807e1"
   },
-  "deliverables_20261001_183857_7339fc.zip": {
-   "bytes": 5608335,
-   "sha256": "481ff88c8ed59029"
+  "deliverables_20261001_200545_de121f.zip": {
+   "bytes": 5623472,
+   "sha256": "8180ee30248ffd58"
   },
   "report.md": {
-   "bytes": 36924,
-   "sha256": "19cc088b19610c81"
+   "bytes": 37180,
+   "sha256": "8860f5d0a8647b21"
   },
   "report.pdf": {
-   "bytes": 5565917,
-   "sha256": "b0e3e6e76cd2b772"
+   "bytes": 5572221,
+   "sha256": "046803ac7a9fe000"
   },
   "screenshot_p3.png": {
    "bytes": 136958,
    "sha256": "55792bfdd91ee51d"
   }
  },
- "workspace": "C:\\Users\\ding0\\AppData\\Local\\Temp\\v0_yanghe_9qgnb77m",
+ "workspace": "C:\\Users\\ding0\\AppData\\Local\\Temp\\v0_yanghe_x05wbbhb",
  "verification_boundary": {
   "verified": [
    "事实抽取→底稿→analysis worker 金融路径→三图→正文/摘要→装配验收→PDF/导出（同一条生产函数链，离线、零模型调用）"

@@ -6,7 +6,7 @@
 1. **利润**：2023年→2024年 归母净利润变化 -33.43 亿元；其中毛利变化 -38.01 亿元（收入规模 -31.54／毛利率 -6.47 亿元），毛利线以下 +4.58 亿元；毛利率 75.25% → 73.16%（-2.09pp）
 2. **结构**：分产品切法：白酒毛利变化（含推算输入） -37.96 亿元；未分类差额 -0.05 亿元；分地区切法：省外毛利变化（含推算输入） -25.21 亿元、省内毛利变化（含推算输入） -12.87 亿元；未分类差额 +0.08 亿元；量价分解（分产品:白酒量价分解）：销量效应 -53.82 亿元、单位价格效应 +11.68 亿元
 3. **现金**：2024年 合并净利润 66.66 亿元经调节项 -20.38 亿元后为经营现金流 46.29 亿元（未解释差额 +0.00 亿元）；现金变化 -15.02 亿元，最大构成 合并净利润变化 -33.54 亿元；最大支撑 固定资产折旧、油气资产折耗、生产性生物资产折旧 +5.87 亿元、最大拖累 经营性应付项目的增加（减少以“－”号填列） -18.31 亿元
-4. **反向情景**（单因素反推，不表示可达）：收入 +5.00%／毛利率 +1.00pp 需 69.67%（-3.48pp）
+4. **反向情景**（单因素反推，两把杠杆同一目标；不表示可达）：（目标归母净利 100.16 亿元）收入侧需 15.8226%、毛利率侧需 84.7325%（较基期 +11.58pp）
 
 ### 二、利润变化：金额分解
 | 项目 | 金额（亿元） | 占归母净利变化 |
@@ -69,8 +69,9 @@
   - 后续观察指标：下期折旧摊销与减值明细、递延所得税附注；资产减值准备余额变化
 - 对账差额≈0 表示披露调节项与经营现金流自洽；差额非零说明有调节项没取到，报告不得写“完整调节”
 - **情景归母净利（收入 +5.00%／毛利率 +1.00pp）**：+80.33 亿元；基准复现 +66.73 亿元（差 +13.59 亿元）
-- **反向情景（收入 +5.00%／毛利率 +1.00pp）**：维持基期归母净利所需毛利率 69.67%，与基期之差 -3.48pp
-  - 收入侧反推（目标归母净利 66.73 亿元）：在其他条件不变时，收入需变化 0.00% 才能回到该利润水平（单因素算术反推，不表示可达）
+- **毛利率侧反推**（收入固定基期；目标归母净利 100.16 亿元（上一期（2023年）归母净利：回到上年水平））：所需毛利率 84.7325%，与基期之差 +11.58pp
+  - 收入侧反推（毛利率固定基期）：收入需变化 15.8226% 才能达到同一目标（单因素反推，不表示可达）
+  - 若先接受该档收入假设，则所需毛利率为 80.6977%（较基期 +7.54pp）——这是**两因素条件计算**，不是同一把杠杆
 
 
 ### 六、待核查问题（按影响排序）
@@ -111,11 +112,11 @@
   - cash_gap_change → `9a59b765aa59-03-cash_gap_change`；分项 change_in_operating_cashflow、change_in_net_profit_negated
   - largest_support → `9a59b765aa59-04-largest_support`
   - largest_drag → `9a59b765aa59-05-largest_drag`
-- `scenario_sensitivity`：run `8addf8ff0f41113a668f0ce140f346880c56ad00ef5360870f572958ca2717d0`（数据集 `bfa752e80734`，规则 `validation/1.1.0`）
-  - scenario_net_profit → `8addf8ff0f41-00-scenario_net_profit`；分项 base、user、counter
-  - scenario_sensitivity → `8addf8ff0f41-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
-  - margin_threshold_to_hold_base_profit → `8addf8ff0f41-02-margin_threshold_to_hold_base_profit`
-  - margin_gap_to_threshold_pp → `8addf8ff0f41-03-margin_gap_to_threshold_pp`
-  - revenue_growth_to_hold_target → `8addf8ff0f41-04-revenue_growth_to_hold_target`
-  - collection_days_capital_per_day → `8addf8ff0f41-05-collection_days_capital_per_day`
-  - collection_days_sensitivity_10d → `8addf8ff0f41-06-collection_days_sensitivity_10d`
+- `scenario_sensitivity`：run `338ecf4f97c65509ec6e3d16ab0fd35bc1b6706a580d0e5c1fa6568b224f1570`（数据集 `bfa752e80734`，规则 `validation/1.1.0`）
+  - scenario_net_profit → `338ecf4f97c6-00-scenario_net_profit`；分项 base、user、counter
+  - scenario_sensitivity → `338ecf4f97c6-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
+  - collection_days_capital_per_day → `338ecf4f97c6-02-collection_days_capital_per_day`
+  - collection_days_sensitivity_10d → `338ecf4f97c6-03-collection_days_sensitivity_10d`
+  - margin_threshold_to_hold_base_profit → `338ecf4f97c6-04-margin_threshold_to_hold_base_profit`
+  - margin_gap_to_threshold_pp → `338ecf4f97c6-05-margin_gap_to_threshold_pp`
+  - revenue_growth_to_hold_target → `338ecf4f97c6-06-revenue_growth_to_hold_target`
