@@ -93,6 +93,7 @@
 > **73.16% / 69.67%（−3.48pp）/ 83.92%（+10.77pp）**，三图 `grade=publish`、
 > `validate_spec` 全过、同参数重跑字节一致。定向：`test_financial_analysis` **159**、
 > `test_delivery_chain`、`test_deploy_manifest` 40、`test_p0.TestChartQA` 全过。
+> 提交 `f2fee8a`，远端 **CI success**（run `36804533508`；GitHub Pages run `36804533633` 同 success）。
 > **仍未做**：U1/U2 独立成篇的 4–6 页正文（当前正文只有报告链的「分析卡」段落）。
 >
 > ## 历史账（按日期，细节保留）
