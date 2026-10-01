@@ -336,6 +336,73 @@ def restore_selection(ws, blob: dict) -> dict:
     return data
 
 
+def select_for_report(ws, *, rules_version: str = ""):
+    """**该进正文与三图的那一组运行** → `(picked, notes)`（V0：唯一一条选择，卡/正文/图共用）。
+
+    规则（与阶段V一致）：
+    1. 有 `analysis/selection.json` 时**只**返回被选中的运行（按选择顺序），并逐条核对是否
+       仍可用（数据集没变、规则版本匹配、仍 validated）；过期/缺失的选择如实写进 `notes`，
+       **绝不**改取别的运行代替用户的选择。
+    2. 没有选择记录 → **默认经营研究组合**（`registry.RESEARCH_COMBINATION`：经营驱动／
+       现金调节桥／条件情景）各取第一条已验证运行——不再"截取任意前两个模型"。
+    3. 组合里一个都没有（旧任务只有 profit_bridge 之类）→ 退回旧行为（每个模型第一条，
+       至多两条），保证既有交付不变。
+
+    只有比率运行（`ratio:`）时返回空：卡与正文是结论级的，比率读数留在底稿/表格里。
+    """
+    from .registry import RESEARCH_COMBINATION
+    runs = validated_runs(ws)
+    if not runs:
+        return [], []
+    main = [r for r in runs if not str(r.model_id).startswith("ratio:")]
+    if not main:
+        return [], []
+    sel = selection_status(
+        ws,
+        dataset_hash=str((load_inputs(ws).get("dataset") or {}).get("dataset_hash") or ""),
+        rules_version=str(rules_version or ""))
+    picked: list = []
+    notes: list[str] = []
+    by_id = {r.run_id: r for r in main}
+    for e in sel.get("entries") or []:
+        mid = str(e.get("model_id") or "")
+        rid = str(e.get("run_id") or "")
+        if e.get("state") != "ok":
+            notes.append(f"- ⚠️ 所选运行（{mid}，run={rid[:12]}）**未采用**："
+                         f"{e.get('why') or e.get('state')}——需要重算后再采纳，"
+                         "正文与图不会改取其它运行代替这次选择")
+            continue
+        r = by_id.get(rid)
+        if r is None:
+            notes.append(f"- ⚠️ 所选运行（{mid}，run={rid[:12]}）不在已验证运行里："
+                         "未采用（不代替选择）")
+            continue
+        picked.append(r)
+    if picked or notes:
+        return picked, notes
+    by_model: dict = {}
+    for r in main:
+        by_model.setdefault(str(r.model_id), r)
+    combo = [by_model[m] for m in RESEARCH_COMBINATION if m in by_model]
+    if combo:
+        notes.append("- 说明：本版没有人工选择记录，默认采用**经营研究组合**"
+                     "（经营驱动／现金调节桥／条件情景）各一条已验证运行；"
+                     "可在分析工作台显式选择某一条")
+        return combo, notes
+    seen: list[str] = []
+    for r in main:
+        if str(r.model_id) in seen:
+            continue
+        seen.append(str(r.model_id))
+        picked.append(r)
+        if len(picked) >= 2:
+            break
+    if picked:
+        notes.append("- 说明：本版没有人工选择记录，且经营研究组合里没有可用运行，"
+                     "退回按运行记录取每个模型的第一条已验证运行（至多两条）")
+    return picked, notes
+
+
 def dataset_from_inputs(ws):
     """从 `analysis/dataset.json` 还原 `AnalysisDataset`（离线复算的唯一入口）。"""
     from .contracts import AnalysisDataset, DatasetManifest, Observation

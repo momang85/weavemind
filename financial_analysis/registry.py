@@ -45,6 +45,23 @@ _REGISTRY: dict[str, ModelSpec] = {
     profit_to_cash.SPEC.model_id: profit_to_cash.SPEC,
 }
 
+# V0（2026-10-01 阶段V）：**默认经营研究组合**——一次研究动作回答三件事：
+# 利润由何而来（operating_drivers）、现金为何变化（cash_reconciliation）、
+# 什么经营条件会改变判断（scenario_sensitivity）。顺序即正文顺序。
+# 旧模型（profit_bridge / cash_quality / profit_to_cash / working_capital）留作**探索入口**，
+# 不与新正文重复堆叠；用户显式点名时照旧可用。
+RESEARCH_COMBINATION: tuple[str, ...] = (
+    "operating_drivers", "cash_reconciliation", "scenario_sensitivity",
+)
+
+
+def research_combination(dataset=None) -> tuple[str, ...]:
+    """组合里**这份数据集够得着**的模型（按组合顺序）；不给数据集就返回完整组合。"""
+    if dataset is None:
+        return RESEARCH_COMBINATION
+    avail = set(available_for(dataset))
+    return tuple(m for m in RESEARCH_COMBINATION if m in avail)
+
 
 def specs() -> tuple[ModelSpec, ...]:
     return tuple(_REGISTRY.values())

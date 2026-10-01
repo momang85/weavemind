@@ -96,9 +96,30 @@ class DataAnalyzerWorker(AsyncWorkerBase):
         return None
 
     @staticmethod
+    def _fact_locators(rows) -> dict:
+        """事实集合 → `{fact_id: {label, period, value, unit, locator}}`（V0：来源随数据走）。
+
+        正文与图要能指回**原件位置**（表名/页码/行标签），而 `Observation` 不带
+        `source_locator`；所以在冻结这一步就把事实层的定位随 `analysis/context.json` 落盘，
+        报告链直接读它——不新增服务，也不在正文里重造来源。
+        """
+        try:
+            from financial_analysis import narrative as _note
+        except Exception:                              # noqa: BLE001 - 取不到就不带定位
+            return {}
+        try:
+            from facts import metric_label as _ml
+        except Exception:                              # noqa: BLE001
+            _ml = None
+        try:
+            return _note.provenance_from_facts(rows, label_of=_ml)
+        except Exception:                              # noqa: BLE001
+            return {}
+
+    @staticmethod
     def _freeze_dataset(kind: str, path: Path, *, task: dict | None,
                         required_metrics, available_models):
-        """按来源冻结数据集（`(dataset, 来源标签)`）。
+        """按来源冻结数据集（`(dataset, 来源标签, 事实定位)`）。
 
         两条路都是**显式来源 + 来源声明的元数据**，都不做"哪个数更好"的猜测：
         同一 (指标, 期间, 口径) 出现互不相容的值由冻结层如实标记冲突，不择一。
@@ -115,7 +136,9 @@ class DataAnalyzerWorker(AsyncWorkerBase):
             ds = fa.freeze_from_working_paper(
                 obj, source_label=label, required_metrics=required_metrics,
                 available_models=available_models)
-            return ds, label
+            rows = list((obj or {}).get("rows") or []) + \
+                [d for d in ((obj or {}).get("derived") or ()) if isinstance(d, dict)]
+            return ds, label, DataAnalyzerWorker._fact_locators(rows)
         import facts as _facts
         payload = json.loads(path.read_text(encoding="utf-8"))
         request, gaps, _source = _research_contract(task or {}, payload)
@@ -153,7 +176,7 @@ class DataAnalyzerWorker(AsyncWorkerBase):
             ds = _with_extra_gaps(ds, [
                 "与契约不相容的观察已排除：" + "、".join(
                     f"{k} {v} 条" for k, v in dropped.items() if v)])
-        return ds, label
+        return ds, label, DataAnalyzerWorker._fact_locators(kept)
 
     def _run_financial(self, ws: Path, instruction: str, task: dict, source) -> dict:
         """冻结数据集 → 编译计划 → 跑注册模型 → 落盘运行记录（确定性、零模型调用）。"""
@@ -162,7 +185,7 @@ class DataAnalyzerWorker(AsyncWorkerBase):
 
         kind, path = source
         try:
-            ds, source_label = self._freeze_dataset(
+            ds, source_label, fact_locators = self._freeze_dataset(
                 kind, path, task=task,
                 required_metrics=("revenue", "net_profit", "gross_profit",
                                   "operating_cashflow"),
@@ -196,6 +219,9 @@ class DataAnalyzerWorker(AsyncWorkerBase):
                 "generated_at": _dt.datetime.now(_dt.timezone.utc).replace(
                     microsecond=0).isoformat(),
                 "impl_hint": "financial_analysis.registry",
+                # V0：事实层定位（表名/页码/行标签）随数据落盘 → 正文与图的"原文定位"
+                # 指回原件，而不是让读者自己去猜 run/output。
+                "fact_locators": fact_locators or {},
             })
         except Exception as exc:                 # noqa: BLE001 - 输入落盘失败不阻断分析
             import logging as _lg

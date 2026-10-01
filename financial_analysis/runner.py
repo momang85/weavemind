@@ -86,10 +86,22 @@ def compile_plan(question: str, dataset, *, prefer=()) -> AnalysisPlan:
     rejected: list[dict] = []
     exploratory: list[str] = []
     if qids:
-        order = [m for m in (prefer or ()) if m in relevant] + \
-                [m for m in relevant if m not in (prefer or ())]
+        # V0（阶段V）：命中**经营研究组合**时只采用组合里的模型（利润—现金—情景一条线），
+        # 其余相关模型（如 profit_bridge/cash_quality）记为"组合已覆盖"，留作探索入口——
+        # 避免同一份正文里堆两套利润分解或两张现金卡。
+        _combo = _q.COMBINATION_QID in qids
+        _combo_models = list(_q.models_for([_q.COMBINATION_QID])) if _combo else []
+        if _combo:
+            order = _combo_models
+        else:
+            order = [m for m in (prefer or ()) if m in relevant] + \
+                    [m for m in relevant if m not in (prefer or ())]
         notes.append("按问题类型选择模型：" + "、".join(labels)
                      + f"（命中词：{'、'.join(w for h in hits for w in h['matched'])}）")
+        if _combo:
+            notes.append("采用**经营研究组合**：" + "、".join(_combo_models)
+                         + "（利润由何而来／现金为何变化／什么条件会改变判断，"
+                           "三者共用同一份冻结数据集）")
         _neg = sorted({w for h in hits for w in (h.get("excluded") or [])})
         if _neg:
             notes.append("以下词出现在**否定**语境里，未据此选模型："
@@ -121,6 +133,15 @@ def compile_plan(question: str, dataset, *, prefer=()) -> AnalysisPlan:
             missing = sorted({i.metric for i in m.inputs
                               if dataset.get(i.metric,
                                              dataset.period_at(i.period_offset)) is None})
+            if _combo and m.model_id in relevant:
+                rejected.append({"model_id": m.model_id, "reason": "经营研究组合已覆盖",
+                                 "missing": missing,
+                                 "answers": "、".join(_mine),
+                                 "detail": ("本版走**经营研究组合**"
+                                            "（经营驱动／现金调节桥／条件情景）："
+                                            "同一问题已由组合里的模型回答，"
+                                            "本模型留作探索入口，不重复堆叠")})
+                continue
             if _mine and not (set(_mine) & set(qids)):
                 rejected.append({"model_id": m.model_id, "reason": "与所问问题无关",
                                  "missing": missing,

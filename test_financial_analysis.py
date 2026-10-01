@@ -632,7 +632,11 @@ class TestReportAndPackageBindTheSameRun(unittest.TestCase):
         self.assertNotIn("## 分析卡", body)
 
     def test_brief_structure_picks_up_the_card_from_the_workspace(self):
-        """`build_structure` 的接缝：工作区有已验证运行 → 结构里带分析卡；没有 → 空串。"""
+        """`build_structure` 的接缝：工作区有已验证运行 → 结构里带分析摘要；没有 → 空串。
+
+        V0（阶段V）：主正文只留三条摘要；完整卡（run/output/component_id）落 `analysis/`
+        底稿，读者要看细节有出处。
+        """
         import dataclasses
         import report_brief
         from financial_analysis import store
@@ -640,8 +644,14 @@ class TestReportAndPackageBindTheSameRun(unittest.TestCase):
                                                            ws_dir=self.ws), "")
         store.save_run(self.ws, self.run)
         blk = report_brief._analysis_card_block(self.task_id, ws_dir=self.ws)
-        self.assertIn(f"run={self.run.run_id[:12]}", blk)
-        self.assertIn(self.run.outputs[0].output_id, blk)
+        self.assertIn("## 分析摘要", blk)
+        # 这条运行不属于经营研究组合 → 摘要为空，但必须指向底稿（不假装有结论）
+        self.assertIn("经营研究组合", blk)
+        detail = Path(self.ws) / "analysis" / "analysis_cards.md"
+        self.assertTrue(detail.is_file(), "完整卡要落到 analysis/analysis_cards.md")
+        text = detail.read_text(encoding="utf-8")
+        self.assertIn(f"run={self.run.run_id[:12]}", text)
+        self.assertIn(self.run.outputs[0].output_id, text)
         # 未通过验证的运行不得进正文
         ws3 = Path(self.ws) / "w3"
         ws3.mkdir()
@@ -858,10 +868,12 @@ class TestK3CardTraitsAndBriefHygiene(unittest.TestCase):
         for mid in ("profit_bridge", "cash_quality"):
             fa_store.save_run(ws, fa.run(mid, ds))
         blk = rb._analysis_card_block("k3-card", ws_dir=ws)
-        # 按**行首**数标题：`### 分析卡（…）` 里也含 "## 分析卡" 子串，不能直接 count 子串
+        # V0：主正文是**三条摘要**（一行一个标题），完整卡按模型分节落在底稿里；
+        # 正文只允许出现一个 `## ` 标题（否则同一份交付里像重复装配）。
         heads = [ln for ln in blk.splitlines() if ln.startswith("## ")]
-        self.assertEqual(heads, ["## 分析卡"], blk[:200])
-        self.assertIn("### 分析卡（cash_quality）", blk)
+        self.assertEqual(heads, ["## 分析摘要"], blk[:200])
+        cards = (ws / "analysis" / "analysis_cards.md").read_text(encoding="utf-8")
+        self.assertIn("### 分析卡（cash_quality）", cards)
 
     def test_source_count_line_separates_cited_from_rejected(self):
         """来源说明必须把"正文引用的编号"与"未采用的候选"分开写（原句自相矛盾）。"""
@@ -2015,8 +2027,9 @@ class TestL1OfficialMaterialFeedsFacts(unittest.TestCase):
         rev = [f for f in facts if f.get("metric") == "revenue"]
         self.assertEqual({x["period"] for x in rev}, {"2023年", "2024年"})
         self.assertTrue(all(x.get("unit") == "元" for x in rev), rev)
-        # 底稿 → 冻结数据集 → 注册模型（同一条现役链，不是旁路脚本）
-        ds, label = DataAnalyzerWorker._freeze_dataset(
+        # 底稿 → 冻结数据集 → 注册模型（同一条现役链，不是旁路脚本）；V0 起同时返回
+        # **事实定位**（表名/页码随数据走，正文与图据此指回原件）
+        ds, label, locators = DataAnalyzerWorker._freeze_dataset(
             "working_paper", self.ws / "project" / "working_paper.json",
             task={"goal": self.goal, "context": {"root_task_id": self.tid}},
             required_metrics=("revenue", "net_profit", "gross_profit",
@@ -2032,6 +2045,10 @@ class TestL1OfficialMaterialFeedsFacts(unittest.TestCase):
         rev24 = ds.require("revenue", "2024年")
         self.assertEqual(rev24.period_kind, "flow")
         self.assertTrue(rev24.period_label, "冻结观察必须保留列头原文")
+        # V0：事实定位要跟着数据走（正文/图的"原文定位"用它指回表名与页码）
+        self.assertTrue(locators, "冻结时要把事实定位一起带出来")
+        self.assertTrue(any(str(v.get("locator") or "") for v in locators.values()),
+                        locators)
         run = fa.run("profit_bridge", ds)
         self.assertEqual(run.status, fa.RunStatus.VALIDATED, run.reason)
         vals = {o.metric: o.value for o in run.outputs}
@@ -2718,7 +2735,9 @@ class TestU2ChartSpecs(unittest.TestCase):
                                delta=0.03, msg="显示口径下的闭合差只允许舍入量级")
         self.assertIn("毛利变化 -38.01", spec["conclusion"])
         self.assertIn("-33.43", spec["conclusion"])
-        self.assertIn(str(run.run_id)[:12], spec["source"], "图要带运行身份")
+        # V0：图注/正文不再印运行标识，但**规格里仍带运行身份**（底稿与证据据此回查）
+        self.assertEqual(spec["run_id"], run.run_id)
+        self.assertIn(str(run.run_id)[:12], spec["chart_id"])
         # top_n=3 之外的贡献合并成一项（合计仍是精确和）
         self.assertTrue(any("其余" in r["label"] for r in spec["data"]), spec["data"])
 
@@ -2856,7 +2875,12 @@ class TestU2ResearchNote(unittest.TestCase):
         self.assertIn("83.92", note)
         self.assertIn(str(od.run_id)[:12], note)
         self.assertIn(str(cash.run_id)[:12], note)
-        self.assertIn("output `", note)
+        # V0：run/output/component_id 只在**底稿索引**里（正文不印程序术语）
+        self.assertIn("### 附：底稿索引（run / output / component_id）", note)
+        self.assertIn("operating_cashflow_reconciliation_cur →", note)
+        body = note.split("### 附：底稿索引")[0]
+        self.assertNotIn("output `", body, "正文主体不得出现 output 标识")
+        self.assertNotIn("run ", body, "正文主体不得出现 run 标识")
         # 纪律句必须在正文里（不是只写在注释里）
         for needle in ("会计分解", "不同切法", "提价效果", "单因素反推",
                        "未解释差额", "观察成立", "不得"):
@@ -2974,6 +2998,150 @@ class TestU2ResearchNote(unittest.TestCase):
         self.assertIn("### 一、结论", md)
         # 顺序：先卡后正文（分析正文是长文，跟在卡后面）
         self.assertLess(md.index("## 分析卡"), md.index("## 经营驱动分析正文"))
+
+
+class TestV0OperatingResearchCombination(unittest.TestCase):
+    """V0（阶段V）：默认**经营研究组合**——经营驱动＋现金桥＋情景，一条论证线。
+
+    反例（审查原文）：`report_brief` 默认只取"前两个模型"，于是利润桥＋经营驱动占了正文，
+    现金与情景根本不进默认交付；三图也只在案例脚本里。
+    """
+
+    IS = TestU2ChartSpecs.IS
+    CF = TestU2ChartSpecs.CF
+
+    def _ds(self, table, *, source="test:v0", **override):
+        rows = []
+        for metric, (prev, cur) in dict(table, **override).items():
+            rows.append(_row(metric, "2023年", prev, unit="元",
+                             fact_id=f"{source}-{metric}-2023"))
+            rows.append(_row(metric, "2024年", cur, unit="元",
+                             fact_id=f"{source}-{metric}-2024"))
+        return fa.freeze_from_facts(rows, periods=(2023, 2024), entity="洋河股份",
+                                    entity_id="002304.SZ", as_of="2025-04-30",
+                                    source_label=source)
+
+    def test_registry_combination_is_three_models_in_order(self):
+        from financial_analysis import registry as reg
+        self.assertEqual(reg.RESEARCH_COMBINATION,
+                         ("operating_drivers", "cash_reconciliation",
+                          "scenario_sensitivity"))
+        ds = self._ds(self.IS)
+        self.assertIn("operating_drivers", reg.research_combination(ds))
+
+    def test_operating_research_question_adopts_the_combination(self):
+        from financial_analysis import registry as reg
+        # 组合三个模型的输入都要齐备（利润/现金桥/情景各要一组观察）
+        table = dict(self.IS)
+        table.update(self.CF)
+        table["gross_profit"] = (21_125_078_636.90 + 6_760_000_000.0,
+                                 21_125_078_636.90)
+        ds = self._ds(table)
+        plan = fa.compile_plan("洋河股份 2023/2024 经营研究：利润由何而来、"
+                              "现金为何变化、什么条件会改变判断", ds)
+        adopted = [a.model_id for a in plan.adopted]
+        for mid in reg.RESEARCH_COMBINATION:
+            self.assertIn(mid, adopted, f"经营研究组合缺 {mid}（实际 {adopted}）")
+        # 旧模型不再重复堆叠：要么"与所问问题无关"，要么"经营研究组合已覆盖"
+        reasons = {r["model_id"]: r["reason"] for r in plan.rejected}
+        for old in ("profit_bridge", "cash_quality", "profit_to_cash"):
+            if old in reasons:
+                self.assertIn(reasons[old], ("与所问问题无关", "经营研究组合已覆盖",
+                                             "缺输入"), reasons)
+        self.assertTrue(any("经营研究组合" in n for n in plan.notes), plan.notes)
+
+    def test_default_report_selection_is_the_combination_not_first_two(self):
+        """默认选择必须是组合三条（而不是运行顺序里的前两个模型）。"""
+        import shutil
+        import tempfile
+        from pathlib import Path
+        from financial_analysis import store as fa_store
+        ds = self._ds(self.IS)
+        cds = self._ds(self.CF)
+        sds = self._scenario_ds()
+        # 故意把 profit_bridge 放在最前面：旧行为会取它 + operating_drivers
+        runs = [fa.run("profit_bridge", ds), fa.run("operating_drivers", ds),
+                fa.run("cash_reconciliation", cds),
+                fa.run("scenario_sensitivity", sds,
+                       params={"revenue_growth": 0.0, "gross_margin_delta": 0.0}),
+                fa.run("cash_quality", ds)]
+        tmp = Path(tempfile.mkdtemp(prefix="wm_v0sel_"))
+        try:
+            from financial_analysis import store
+            picked, notes = store.select_for_report(tmp)
+            self.assertEqual(picked, [], "还没有运行记录时不给选择")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+        tmp = Path(tempfile.mkdtemp(prefix="wm_v0sel_"))
+        try:
+            for r in runs:
+                fa_store.save_run(tmp, r)
+            picked, notes = fa_store.select_for_report(tmp)
+            self.assertEqual(
+                [p.model_id for p in picked],
+                ["operating_drivers", "cash_reconciliation", "scenario_sensitivity"],
+                f"默认应为经营研究组合，实际 {[p.model_id for p in picked]}")
+            self.assertTrue(any("经营研究组合" in n for n in notes), notes)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def _scenario_ds(self):
+        rows = [_row("revenue", "2024年", 28_876_296_993.56, unit="元"),
+                _row("gross_profit", "2024年", 21_125_078_636.90, unit="元"),
+                _row("net_profit", "2024年", 6_673_388_602.12, unit="元")]
+        return fa.freeze_from_facts(rows, periods=(2024,), entity="洋河股份",
+                                    entity_id="002304.SZ", as_of="2025-04-30",
+                                    source_label="test:v0-scenario")
+
+    def test_three_analysis_charts_come_from_the_selected_runs(self):
+        """正常路径的三图：同一次运行、同一份数据集，不在这里另跑参数。"""
+        import shutil
+        import tempfile
+        from pathlib import Path
+        from financial_analysis import charts as ch
+        from financial_analysis import store as fa_store
+        from orchestrator_v2 import OrchestratorV2
+        import workspace as ws_mod
+        ds = self._ds(self.IS)
+        od = fa.run("operating_drivers", ds)
+        cash = fa.run("cash_reconciliation", self._ds(self.CF))
+        scen = fa.run("scenario_sensitivity", self._scenario_ds(),
+                      params={"revenue_growth": 0.0, "gross_margin_delta": 0.0})
+        tmp = Path(tempfile.mkdtemp(prefix="wm_v0chart_"))
+        old = ws_mod.WORKSPACE_ROOT
+        try:
+            ws_mod.configure_workspace_root(str(tmp))
+            ws = ws_mod.task_workspace("v0-chart")
+            ws.mkdir(parents=True, exist_ok=True)
+            for r in (od, cash, scen):
+                fa_store.save_run(ws, r)
+            fa_store.save_inputs(ws, dataset=ds)
+            specs = OrchestratorV2._analysis_chart_specs(object(), "v0-chart")
+        finally:
+            ws_mod.WORKSPACE_ROOT = old
+            shutil.rmtree(tmp, ignore_errors=True)
+        self.assertEqual(len(specs), 3, [s.get("title") for s in specs])
+        import chart_specs as CS
+        for s in specs:
+            self.assertEqual(CS.validate_spec(s), [], s.get("title"))
+        kinds = [s["type"] for s in specs]
+        self.assertEqual(kinds, ["waterfall", "waterfall", "bar"])
+        # 三图必须与正文同一次运行（身份在规格字段里，不画在图上）
+        self.assertEqual(specs[0]["run_id"], od.run_id)
+        self.assertEqual(specs[1]["run_id"], cash.run_id)
+        self.assertIn(str(scen.run_id)[:12], specs[2]["chart_id"])
+
+    def test_scenario_outcome_bars_uses_one_run(self):
+        import chart_specs as CS
+        from financial_analysis import charts as ch
+        run = fa.run("scenario_sensitivity", self._scenario_ds(),
+                     params={"revenue_growth": 0.0, "gross_margin_delta": 0.0})
+        spec = ch.scenario_outcome_bars(run)
+        self.assertTrue(spec["available"], spec.get("reason"))
+        self.assertEqual(CS.validate_spec(spec), [])
+        self.assertGreaterEqual(len(spec["data"]), 3, spec["data"])
+        self.assertIn("基准复现", spec["conclusion"])
+        self.assertIn("不是预测", spec["conclusion"])
 
 
 if __name__ == "__main__":

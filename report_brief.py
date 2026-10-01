@@ -3330,55 +3330,15 @@ def _rules_version() -> str:
 
 
 def _selected_analysis_runs(ws):
-    """工作区里**该进正文**的已验证运行：`(picked, notes)`。
+    """工作区里**该进正文与三图**的已验证运行：`(picked, notes)`。
 
-    用户选择的运行真正进正文（L0-b）：有 `analysis/selection.json` 时只返回被选中的运行
-    （按选择顺序）并逐条核对仍可用；过期/缺失的选择**如实写进 notes**，**绝不**改取最早/
-    最新运行代替用户的选择。没有选择记录时才退回"每个模型取第一条已验证运行"这一默认。
-    只有比率运行（`ratio:`）时返回空——卡与正文是"结论级"的，比率读数留在底稿/表格里。
+    V0（阶段V）：选择规则已收敛到 `financial_analysis.store.select_for_report` ——
+    用户显式选择优先；没有选择记录时默认**经营研究组合**（经营驱动／现金调节桥／条件情景），
+    不再截取"任意前两个模型"；组合没有可用运行时退回旧行为（既有交付不变）。
+    正文、三图与分析卡共用这一个入口，保证"同一组选定运行"。
     """
     from financial_analysis import store as _fa_store
-    runs = _fa_store.validated_runs(ws)
-    if not runs:
-        return [], []
-    main = [r for r in runs if not str(r.model_id).startswith("ratio:")]
-    if not main:
-        return [], []
-    sel = _fa_store.selection_status(
-        ws,
-        dataset_hash=str((_fa_store.load_inputs(ws).get("dataset") or {})
-                         .get("dataset_hash") or ""),
-        rules_version=_rules_version())
-    picked: list = []
-    notes: list[str] = []
-    _by_id = {r.run_id: r for r in main}
-    for e in sel.get("entries") or []:
-        mid = str(e.get("model_id") or "")
-        rid = str(e.get("run_id") or "")
-        if e.get("state") != "ok":
-            notes.append(f"- ⚠️ 所选运行（{mid}，run={rid[:12]}）**未采用**："
-                         f"{e.get('why') or e.get('state')}——需要重算后再采纳，"
-                         "正文不会改取其它运行代替这次选择")
-            continue
-        r = _by_id.get(rid)
-        if r is None:
-            notes.append(f"- ⚠️ 所选运行（{mid}，run={rid[:12]}）不在已验证运行里："
-                         "未采用（不代替选择）")
-            continue
-        picked.append(r)
-    if not picked and not notes:
-        seen_models: list[str] = []
-        for r in main:
-            if str(r.model_id) in seen_models:
-                continue
-            seen_models.append(str(r.model_id))
-            picked.append(r)
-            if len(picked) >= 2:
-                break
-        if picked:
-            notes.append("- 说明：本版没有人工选择记录，默认采用每个模型的第一条"
-                         "已验证运行（可在分析工作台显式选择某一条）")
-    return picked, notes
+    return _fa_store.select_for_report(ws, rules_version=_rules_version())
 
 
 def _analysis_note_block(task_id: str, *, ws_dir=None) -> str:
@@ -3395,8 +3355,16 @@ def _analysis_note_block(task_id: str, *, ws_dir=None) -> str:
         if not picked:
             return ""
         blob = _fa_store.load_inputs(ws)
-        prov = _fa_note.provenance_from_observations(
-            _fa_note.observations_from_inputs(blob))
+        # 来源定位优先取**随数据一起落盘的事实定位**（worker 冻结数据集时从 Fact 带过来，
+        # 含表名/页码）；没有才退回观察层的口径与血缘（报告链的旧工作区）。
+        ctx = blob.get("context") or {}
+        loc = ctx.get("fact_locators") or {}
+        prov = {}
+        if isinstance(loc, dict):
+            prov.update(loc)
+        for fid, item in _fa_note.provenance_from_observations(
+                _fa_note.observations_from_inputs(blob)).items():
+            prov.setdefault(fid, item)
         try:                                    # 指标中文名（缺料清单里不印英文 slug）
             from facts import metric_label as _ml
         except Exception:                       # noqa: BLE001
@@ -3418,24 +3386,50 @@ def _analysis_card_block(task_id: str, *, ws_dir=None) -> str:
     """
     try:
         import workspace as _ws_mod
+        from financial_analysis import narrative as _fa_note
         from financial_analysis import store as _fa_store
         ws = Path(ws_dir) if ws_dir is not None else _ws_mod.task_workspace(task_id)
         picked, notes = _selected_analysis_runs(ws)
         if not picked and not notes:
             return ""
-        # 多张卡**只出一个 `## 分析卡` 标题**（K3 实机：同一份交付里出现两个同名 `##`，
-        # 读者会以为重复装配）；每张卡降一级 `###` 并写明模型，便于按模型对照。
-        blocks: list[str] = []
-        for idx, r in enumerate(picked):
-            block = _fa_store.render_card_block(r)
-            body = block.split("\n", 1)[1] if "\n" in block else ""
-            if idx == 0:
-                blocks.append(block.rstrip())
-            else:
-                blocks.append(f"### 分析卡（{r.model_id}）\n{body.rstrip()}")
+        # V0（阶段V）：主正文只留**三条摘要**（利润／结构／现金与情景），与成篇正文的
+        # 『一、结论』同源；完整卡（含 run/output/component_id 与规则）写到 `analysis/`
+        # 底稿里，读者要看细节有出处，正文不再堆程序术语。
+        summary = _fa_note.summary_lines(picked, limit=3)
+        detail_written = ""
+        try:
+            blocks: list[str] = []
+            for idx, r in enumerate(picked):
+                block = _fa_store.render_card_block(r)
+                body = block.split("\n", 1)[1] if "\n" in block else ""
+                if idx == 0:
+                    blocks.append(block.rstrip())
+                else:
+                    blocks.append(f"### 分析卡（{r.model_id}）\n{body.rstrip()}")
+            if notes:
+                blocks.append("### 分析卡选择说明\n" + "\n".join(notes))
+            full = "\n".join(blocks).rstrip() + "\n"
+            ana = _fa_store.inputs_dir(ws)
+            ana.mkdir(parents=True, exist_ok=True)
+            (ana / "analysis_cards.md").write_text(full, encoding="utf-8")
+            detail_written = "analysis/analysis_cards.md"
+        except Exception as exc:                 # noqa: BLE001 - 底稿写不出不影响摘要
+            logger.warning("分析卡底稿落盘失败（task=%s）：%s", task_id, str(exc)[:120])
+        lines = ["## 分析摘要"]
+        for txt in summary:
+            lines.append("- " + txt)
+        if not summary:
+            lines.append("- 本次已验证运行不属于**经营研究组合**"
+                         "（经营驱动／现金调节桥／条件情景）：主正文不出分析摘要，"
+                         "完整卡与运行标识见下方底稿。")
         if notes:
-            blocks.append("### 分析卡选择说明\n" + "\n".join(notes))
-        return "\n".join(blocks).rstrip() + "\n"
+            lines.append("")
+            lines.extend(notes)
+        if detail_written:
+            lines.append("")
+            lines.append(f"- 完整分析卡（每个读数带 run/output/component_id 与规则）见 "
+                         f"`{detail_written}`；运行记录、数据集与计划在包内 `analysis/`。")
+        return "\n".join(lines).rstrip() + "\n"
     except Exception as exc:                     # noqa: BLE001 - 渲染不出就不加这一节
         logger.warning("分析卡渲染失败（task=%s）：%s", task_id, str(exc)[:140])
         return ""

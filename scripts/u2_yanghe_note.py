@@ -71,7 +71,8 @@ def main() -> int:
         f.write(note)
     sections = re.findall(r"^### (.+)$", note, re.M)
     table_rows = len([l for l in note.splitlines() if l.startswith("| ")])
-    fact_ids = sorted({m for m in re.findall(r"`(fact-[^`]+)`", note)})
+    locator_rows = len([l for l in note.splitlines() if l.startswith("| ") and "页" in l])
+    run_refs = len(set(re.findall(r"run `([0-9a-f]{8,})`", note)))
     stats = {
         "case": "洋河股份 002304 2023/2024 经营驱动分析正文（成篇）",
         "source_material": os.path.relpath(DOC_PATH, ROOT).replace("\\", "/"),
@@ -91,8 +92,8 @@ def main() -> int:
                  "lines": len(note.splitlines()),
                  "sections": sections,
                  "table_rows": table_rows,
-                 "facts_with_locator": len(fact_ids),
-                 "fact_ids_sample": fact_ids[:6],
+                 "locator_rows": locator_rows,
+                 "run_refs": run_refs,
                  "figures_referenced": len([c for c in charts if c]),
                  "unavailable_models": [m for m, r in
                                         (("operating_drivers", od_run),
@@ -103,7 +104,7 @@ def main() -> int:
     with open(NOTE_JSON, "w", encoding="utf-8") as f:
         json.dump(stats, f, ensure_ascii=False, indent=1)
     print(f"正文 {len(note)} 字符 / {len(note.splitlines())} 行 / {len(sections)} 小节 / "
-          f"来源表行 {table_rows} / 带定位事实 {len(fact_ids)} / 引用图 "
+          f"来源表行 {table_rows}（带页码 {locator_rows}）/ 引用运行 {run_refs} / 引用图 "
           f"{stats['note']['figures_referenced']}")
     print("小节：" + " | ".join(sections))
     return 0

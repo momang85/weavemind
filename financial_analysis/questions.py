@@ -52,6 +52,9 @@ class QuestionType:
 # 不切就只能给整句一个结论，于是要么漏答历史、要么拿历史当预测的答案。
 _CLAUSE_SPLIT_RE = re.compile(r"[，。；、,;.!?！？\n]+|并(?:且)?|同时|另外|以及|还要|再看")
 _FORECAST_QID = "forecast_trend"
+# V0（阶段V）：默认**经营研究组合**的问题类型 id——命中它时计划只采用组合里的三个模型
+# （利润由何而来／现金为何变化／什么条件会改变判断），其余模型进探索入口，不重复堆叠。
+COMBINATION_QID = "operating_research"
 
 
 def clauses(question: str) -> list[str]:
@@ -73,6 +76,18 @@ def kind_of(qid: str) -> str:
 
 # ── 已规则化的问题类型（覆盖现有四族 + L3 的利润—现金链 + 尚未支持的量价）──────
 QUESTION_TYPES: tuple[QuestionType, ...] = (
+    # V0（阶段V）：**默认经营研究组合**——一次动作给一条论证线：利润由何而来、现金为何变化、
+    # 什么条件会改变判断。三个模型共用同一份数据集，不重复堆叠旧模型。
+    QuestionType(
+        qid=COMBINATION_QID, label="经营研究（利润—现金—情景）",
+        keywords=("经营研究", "经营情况", "经营分析", "经营业绩", "业绩变化", "经营质量",
+                  "经营驱动", "业务驱动", "利润与现金", "为什么变化", "经营变化",
+                  "经营研究组合"),
+        needs_metrics=("revenue", "gross_profit", "net_profit", "operating_cashflow"),
+        needs_note=("需要同主体同口径两期的收入/毛利/归母净利与经营现金流"
+                    "（利润底稿＋现金调节桥都从这两期出发）"),
+        models=("operating_drivers", "cash_reconciliation", "scenario_sensitivity"),
+    ),
     QuestionType(
         qid="profit_attribution", label="利润变化归因",
         keywords=("利润桥", "利润变化", "净利润的变化", "归母净利润", "净利变化", "毛利变化",

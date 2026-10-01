@@ -1,44 +1,46 @@
 ## 经营驱动分析正文（洋河股份 2023年→2024年）
 
-> 本节由 `financial_analysis` 从**已验证运行**装配：每个数字都能回查到运行与输出标识（run / output），图、卡、底稿共用同一次运行。未取到的披露项留在「未解释差额」，既不摊派也不当零。
+> 本节由 `financial_analysis` 从**已验证运行**装配：每个数字都能回查到运行与输出标识（见文末『附：底稿索引』），图、卡、底稿共用同一次运行。未取到的披露项留在「未解释差额」，既不摊派也不当零。
 
 ### 一、结论（先看这三条）
-1. **利润**：2023年→2024年 归母净利润变化 -33.43 亿元；其中毛利变化 -38.01 亿元（收入规模 -31.54／毛利率 -6.47 亿元），毛利线以下 +4.58 亿元；毛利率 75.25% → 73.16%（-2.09pp）　run 5ebf08301700
+1. **利润**：2023年→2024年 归母净利润变化 -33.43 亿元；其中毛利变化 -38.01 亿元（收入规模 -31.54／毛利率 -6.47 亿元），毛利线以下 +4.58 亿元；毛利率 75.25% → 73.16%（-2.09pp）
 2. **结构**：分产品切法：白酒毛利变化（含推算输入） -37.96 亿元；未分类差额 -0.05 亿元；分地区切法：省外毛利变化（含推算输入） -25.21 亿元、省内毛利变化（含推算输入） -12.87 亿元；未分类差额 +0.08 亿元；量价分解（分产品:白酒量价分解）：销量效应 -53.82 亿元、单位价格效应 +11.68 亿元
-3. **现金**：2024年 合并净利润 66.66 亿元经调节项 -20.38 亿元后为经营现金流 46.29 亿元（未解释差额 +0.00 亿元）；最大支撑 固定资产折旧、油气资产折耗、生产性生物资产折旧 +5.87 亿元、最大拖累 经营性应付项目的增加（减少以“－”号填列） -18.31 亿元　run fdc8d4d464e7
-4. **反向情景**（单因素反推，不表示可达）：收入 +0.00%／毛利率 +0.00pp 需 73.16%（+0.00pp）；收入 +5.00%／毛利率 +1.00pp 需 69.67%（-3.48pp）；收入 -12.83%／毛利率 +0.00pp 需 83.92%（+10.77pp）　run cd0f89f298fb
+3. **现金**：2024年 合并净利润 66.66 亿元经调节项 -20.38 亿元后为经营现金流 46.29 亿元（未解释差额 +0.00 亿元）；最大支撑 固定资产折旧、油气资产折耗、生产性生物资产折旧 +5.87 亿元、最大拖累 经营性应付项目的增加（减少以“－”号填列） -18.31 亿元
+4. **反向情景**（单因素反推，不表示可达）：收入 +0.00%／毛利率 +0.00pp 需 73.16%（+0.00pp）；收入 +5.00%／毛利率 +1.00pp 需 69.67%（-3.48pp）；收入 -12.83%／毛利率 +0.00pp 需 83.92%（+10.77pp）
 
 ### 二、利润变化：金额分解
-| 项目 | 金额（亿元） | 占归母净利变化 | 依据（component_id） |
-|---|---:|---:|---|
-| 所得税费用 | +7.20 | -21.6% | `income_tax_expense` |
-| 税金及附加 | +4.43 | -13.3% | `taxes_and_surcharges` |
-| 公允价值变动收益 | -3.59 | 10.7% | `fair_value_change` |
-| 研发费用 | +1.80 | -5.4% | `rd_expense` |
-| 管理费用 | -1.60 | 4.8% | `admin_expense` |
-| 财务费用 | -1.44 | 4.3% | `finance_expense` |
-| 其余 10 项合计（未单列） | -2.22 | 6.6% | 同上 |
+| 项目 | 金额（亿元） | 占归母净利变化 |
+|---|---:|---:|
+| 所得税费用 | +7.20 | -21.6% |
+| 税金及附加 | +4.43 | -13.3% |
+| 公允价值变动收益 | -3.59 | 10.7% |
+| 研发费用 | +1.80 | -5.4% |
+| 管理费用 | -1.60 | 4.8% |
+| 财务费用 | -1.44 | 4.3% |
+| 其余 10 项合计（未单列） | -2.22 | 6.6% |
 
 - 占比 ＝ 该项目 ÷ 归母净利变化：变化为负时，**正贡献显示为负占比**（符号是算术结果，不是方向判断）。
-- 对称分解（交互项均分，代入顺序无关）：毛利变化 -38.01 亿元 ＝ 规模效应 -31.54 ＋ 毛利率效应 -6.47 亿元　output `5ebf08301700-01-gross_profit_change`
+- 对称分解（交互项均分，代入顺序无关）：毛利变化 -38.01 亿元 ＝ 规模效应 -31.54 ＋ 毛利率效应 -6.47 亿元
 - 分产品切法：白酒毛利变化（含推算输入） -37.96 亿元；未分类差额 -0.05 亿元；每种切法各自覆盖同一口径，**不可跨切法相加**
 - 分地区切法：省外毛利变化（含推算输入） -25.21 亿元、省内毛利变化（含推算输入） -12.87 亿元；未分类差额 +0.08 亿元；每种切法各自覆盖同一口径，**不可跨切法相加**
 - 量价分解（分产品:白酒量价分解）：销量效应 -53.82 亿元、单位价格效应 +11.68 亿元；均价含产品结构混合，不得命名「提价效果」
 
 ### 三、披露支持与来源定位
-| 读数 | 期间 | 披露值 | 来源位置 | 事实身份 |
-|---|---|---:|---|---|
-| 营业收入 | 2024年 | 28,876,296,993.56元 | PDF 第 75 页 · 合并利润表 · 行「其中：营业收入 28,876,296,993.56 33,126,277,551」 | `fact-7920fe9de4bc817d` |
-| 营业收入 | 2023年 | 33,126,277,551.51元 | PDF 第 75 页 · 合并利润表 · 行「其中：营业收入 28,876,296,993.56 33,126,277,551」 | `fact-a7c0965bb5662eac` |
-| 营业成本 | 2024年 | 7,751,218,356.66元 | PDF 第 76 页 · 合并利润表 · 行「其中：营业成本 7,751,218,356.66 8,200,245,255.4」 | `fact-1d0ea5b6280f8608` |
-| 营业成本 | 2023年 | 8,200,245,255.42元 | PDF 第 76 页 · 合并利润表 · 行「其中：营业成本 7,751,218,356.66 8,200,245,255.4」 | `fact-6ea27ffd8de6464d` |
-| 归母净利润 | 2024年 | 6,673,388,602.12元 | PDF 第 77 页 · 合并利润表 · 行「1.归属于母公司股东的净利润 6,673,388,602.12 10,015,9」 | `fact-addeafbdbc0161b2` |
-| 归母净利润 | 2023年 | 10,015,930,040.27元 | PDF 第 77 页 · 合并利润表 · 行「1.归属于母公司股东的净利润 6,673,388,602.12 10,015,9」 | `fact-70eca7c472298ee3` |
-| 净利润（合并） | 2024年 | 6,666,455,819.96元 | PDF 第 70 页 · 合并利润表 · 行「五、净利润(净亏损以“-”号填」（标签折行，金额在下一行） | `fact-009cb020a808440a` |
-| 净利润（合并） | 2023年 | 10,020,768,556.47元 | PDF 第 70 页 · 合并利润表 · 行「五、净利润(净亏损以“-”号填」（标签折行，金额在下一行） | `fact-80950cda44459909` |
-| 经营活动现金流净额 | 2024年 | 4,628,711,237.28元 | PDF 第 20 页 · 合并现金流量表 · 行「经营活动产生的现金流量净额 4,628,711,237.28 6,130,220」 | `fact-bb25843098cfc172` |
-| 经营活动现金流净额 | 2023年 | 6,130,220,867.96元 | PDF 第 20 页 · 合并现金流量表 · 行「经营活动产生的现金流量净额 4,628,711,237.28 6,130,220」 | `fact-2886143f60ef700a` |
-| 毛利润 | 2024年 | 21,125,078,636.90元 | 2024年 合并：营业收入 − 营业成本 | `fact-gp-e4bc817d-280f8608` |
+| 读数 | 期间 | 披露值 | 来源位置（原件） |
+|---|---|---:|---|
+| 营业收入 | 2024年 | 28,876,296,993.56元 | PDF 第 75 页 · 合并利润表 · 行「其中：营业收入 28,876,296,993.56 33,126,277,551」 |
+| 营业收入 | 2023年 | 33,126,277,551.51元 | PDF 第 75 页 · 合并利润表 · 行「其中：营业收入 28,876,296,993.56 33,126,277,551」 |
+| 营业成本 | 2024年 | 7,751,218,356.66元 | PDF 第 76 页 · 合并利润表 · 行「其中：营业成本 7,751,218,356.66 8,200,245,255.4」 |
+| 营业成本 | 2023年 | 8,200,245,255.42元 | PDF 第 76 页 · 合并利润表 · 行「其中：营业成本 7,751,218,356.66 8,200,245,255.4」 |
+| 归母净利润 | 2024年 | 6,673,388,602.12元 | PDF 第 77 页 · 合并利润表 · 行「1.归属于母公司股东的净利润 6,673,388,602.12 10,015,9」 |
+| 归母净利润 | 2023年 | 10,015,930,040.27元 | PDF 第 77 页 · 合并利润表 · 行「1.归属于母公司股东的净利润 6,673,388,602.12 10,015,9」 |
+| 净利润（合并） | 2024年 | 6,666,455,819.96元 | PDF 第 70 页 · 合并利润表 · 行「五、净利润(净亏损以“-”号填」（标签折行，金额在下一行） |
+| 净利润（合并） | 2023年 | 10,020,768,556.47元 | PDF 第 70 页 · 合并利润表 · 行「五、净利润(净亏损以“-”号填」（标签折行，金额在下一行） |
+| 经营活动现金流净额 | 2024年 | 4,628,711,237.28元 | PDF 第 20 页 · 合并现金流量表 · 行「经营活动产生的现金流量净额 4,628,711,237.28 6,130,220」 |
+| 经营活动现金流净额 | 2023年 | 6,130,220,867.96元 | PDF 第 20 页 · 合并现金流量表 · 行「经营活动产生的现金流量净额 4,628,711,237.28 6,130,220」 |
+| 毛利润 | 2024年 | 21,125,078,636.90元 | 2024年 合并：营业收入 − 营业成本 |
+
+- 上表是**用于计算的关键读数**及其原件位置；完整事实身份清单（fact_id → 表/页/行）见文末『附：底稿索引』与包内 `analysis/` 目录。
 
 ### 四、替代解释（会改变判断）
 - **实际税率**：24.19% → 27.09%（+2.90pp）。本年所得税 24.77 亿元；按上年实际税率折算为 22.11 亿元——税率上升本身让税负多吃掉 2.65 亿元。这是**被动结果**（利润变化会改变税基），既不表示经营改善，也不能直接当成业务原因
@@ -48,13 +50,13 @@
 - **口径提醒**：以上都是会计分解；要说成「业务原因」必须另有披露依据（管理层讨论、分部附注、销量与结算条款），否则只能写「观察成立、原因待证」。
 
 ### 五、现金形成与反向情景
-- **2024年**：合并净利润 +66.66 亿元、非现金项（折旧摊销/减值/递延税/公允价值等） +9.57 亿元、营运资本项（存货/经营性应收/经营性应付） -33.25 亿元、其他调节项 +3.30 亿元、未解释差额（未取得的披露调节项） +0.00 亿元　output `fdc8d4d464e7-00-operating_cashflow_reconciliation_cur`
-- **2023年**：合并净利润 +100.21 亿元、非现金项（折旧摊销/减值/递延税/公允价值等） +7.14 亿元、营运资本项（存货/经营性应收/经营性应付） -44.30 亿元、其他调节项 -1.75 亿元、未解释差额（未取得的披露调节项） +0.00 亿元　output `fdc8d4d464e7-01-operating_cashflow_reconciliation_prev`
+- **2024年**：合并净利润 +66.66 亿元、非现金项（折旧摊销/减值/递延税/公允价值等） +9.57 亿元、营运资本项（存货/经营性应收/经营性应付） -33.25 亿元、其他调节项 +3.30 亿元、未解释差额（未取得的披露调节项） +0.00 亿元
+- **2023年**：合并净利润 +100.21 亿元、非现金项（折旧摊销/减值/递延税/公允价值等） +7.14 亿元、营运资本项（存货/经营性应收/经营性应付） -44.30 亿元、其他调节项 -1.75 亿元、未解释差额（未取得的披露调节项） +0.00 亿元
 - **现金缺口变化**：+18.53 亿元 ＝ 合并净利润变化（取负：利润少→缺口小） +33.54 亿元、调节项合计变化 -15.02 亿元；缺口＝经营现金流−合并净利润，缺口缩小不等于现金变好
 - 对账差额≈0 表示披露调节项与经营现金流自洽；差额非零说明有调节项没取到，报告不得写“完整调节”
-- **反向情景（收入 +0.00%／毛利率 +0.00pp）**：维持基期归母净利所需毛利率 73.16%，与基期之差 +0.00pp　output `cd0f89f298fb-02-margin_threshold_to_hold_base_profit`
-- **反向情景（收入 +5.00%／毛利率 +1.00pp）**：维持基期归母净利所需毛利率 69.67%，与基期之差 -3.48pp　output `7d779d596bab-02-margin_threshold_to_hold_base_profit`
-- **反向情景（收入 -12.83%／毛利率 +0.00pp）**：维持基期归母净利所需毛利率 83.92%，与基期之差 +10.77pp　output `b91832c8d16c-02-margin_threshold_to_hold_base_profit`
+- **反向情景（收入 +0.00%／毛利率 +0.00pp）**：维持基期归母净利所需毛利率 73.16%，与基期之差 +0.00pp
+- **反向情景（收入 +5.00%／毛利率 +1.00pp）**：维持基期归母净利所需毛利率 69.67%，与基期之差 -3.48pp
+- **反向情景（收入 -12.83%／毛利率 +0.00pp）**：维持基期归母净利所需毛利率 83.92%，与基期之差 +10.77pp
 
 ### 六、待核查问题（按影响排序）
 1. 分段缺成本或收入：分产品:其他:两期收入/成本不全
@@ -73,9 +75,55 @@
 - 本节数字全部来自 `validated` 运行；某模型未通过验证时，本节不出现它的结论。
 
 ### 附：可复算底稿图（与正文同一次运行）
-- 图 1 `5ebf08301700-profit-waterfall`：洋河股份 2023年→2024年 归母净利润瀑布（亿元）（类型 waterfall；来源：公司年报：合并利润表与经营分析（分产品/分地区/期间费用）（正常入口抽取）；运行 run=5ebf08301700，数据集 8e99cf4db927）
+- 图 1：洋河股份 2023年→2024年 归母净利润瀑布（亿元）
   - 图注（由读数算出）：归母净利润 100.16 → 66.73 亿元（-33.43）；毛利变化 -38.01 亿元；规模 -31.54／毛利率 -6.47 亿元；毛利线以下 +4.58 亿元；未解释差额 0.00 亿元（披露项目齐全）
-- 图 2 `fdc8d4d464e7-cash-bridge-cur`：洋河股份 2024年 净利润→经营现金流桥（亿元）（类型 waterfall；来源：公司年报：现金流量表补充资料（将净利润调节为经营活动现金流量）（正常入口抽取）；运行 run=fdc8d4d464e7，数据集 8e99cf4db927）
+- 图 2：洋河股份 2024年 净利润→经营现金流桥（亿元）
   - 图注（由读数算出）：合并净利润 66.66 亿元 ＋ 调节项 -20.38 亿元 ＝ 经营现金流 46.29 亿元；未解释差额 +0.00 亿元；最大支撑 固定资产折旧、油气资产折… +5.87 亿元；最大拖累 经营性应付项目的增加（减… -18.31 亿元
-- 图 3 `cd0f89f298fb-scenario-threshold`：洋河股份 反向情景：维持基期归母净利所需毛利率（%）（类型 grouped_bar；来源：公司年报：营业收入/营业成本/归母净利润与毛利线以下净额（正常入口抽取））
+- 图 3：洋河股份 反向情景：维持基期归母净利所需毛利率（%）
   - 图注（由读数算出）：收入持平 需 73.16%（差 +0.00pp）；收入 +5% 需 69.67%（差 -3.48pp）；收入 −12.83% 需 83.92%（差 +10.77pp）。收入越低，维持同样利润所需毛利率越高（单因素反推：给出“需要什么”，不表示可达、也不是预测）
+- 图与正文共用同一次运行；文件名与运行标识见文末『附：底稿索引』。
+
+### 附：底稿索引（run / output / component_id）
+> 正文与图的所有数字都能在这里回查；包内 `analysis/` 目录含数据集、计划、契约与全部运行记录。
+- `operating_drivers`：run `5ebf08301700f888f3931ec31e62e9986acfcce4cabb9d289a969e4ca24ce7d7`（数据集 `8e99cf4db927`，规则 `validation/1.1.0`）
+  - net_profit_change → `5ebf08301700-00-net_profit_change`；分项 gross_profit_change、below_gross_line_change
+  - gross_profit_change → `5ebf08301700-01-gross_profit_change`；分项 revenue_scale_effect、gross_margin_effect
+  - revenue_scale_effect → `5ebf08301700-02-revenue_scale_effect`
+  - gross_margin_effect → `5ebf08301700-03-gross_margin_effect`
+  - below_gross_line_change → `5ebf08301700-04-below_gross_line_change`
+  - net_profit_change_detail → `5ebf08301700-05-net_profit_change_detail`；分项 income_tax_expense、taxes_and_surcharges、fair_value_change、rd_expense、admin_expense、finance_expense、selling_expense、investment_income、non_operating_income、minority_interest、asset_impairment、non_operating_expense、other_income、asset_disposal_income、credit_impairment、unexplained_residual
+  - gross_profit_change_by_segment → `5ebf08301700-06-gross_profit_change_by_segment`；分项 segment:分产品:白酒、unclassified_gross_profit_change
+  - gross_profit_change_by_segment → `5ebf08301700-07-gross_profit_change_by_segment`；分项 segment:分地区:省内、segment:分地区:省外、unclassified_gross_profit_change
+  - gross_profit_change_by_segment → `5ebf08301700-08-gross_profit_change_by_segment`；分项 segment:分行业:酒类行业、unclassified_gross_profit_change
+  - gross_profit_change_by_segment → `5ebf08301700-09-gross_profit_change_by_segment`；分项 segment:分销售模式:批发经销、segment:分销售模式:线上直销、unclassified_gross_profit_change
+  - volume_price_decomposition → `5ebf08301700-10-volume_price_decomposition`；分项 volume_effect、price_effect
+- `cash_reconciliation`：run `fdc8d4d464e7a0f282c579eae95c8d3ccf2b41a0e4dfefe2203a3f6b8706ae4d`（数据集 `8e99cf4db927`，规则 `validation/1.1.0`）
+  - operating_cashflow_reconciliation_cur → `fdc8d4d464e7-00-operating_cashflow_reconciliation_cur`；分项 consolidated_net_profit、non_cash_adjustments、working_capital_adjustments、other_adjustments、unexplained_residual
+  - operating_cashflow_reconciliation_prev → `fdc8d4d464e7-01-operating_cashflow_reconciliation_prev`；分项 consolidated_net_profit、non_cash_adjustments、working_capital_adjustments、other_adjustments、unexplained_residual
+  - cash_gap_change → `fdc8d4d464e7-02-cash_gap_change`；分项 change_in_net_profit、change_in_adjustments
+  - largest_support → `fdc8d4d464e7-03-largest_support`
+  - largest_drag → `fdc8d4d464e7-04-largest_drag`
+- `scenario_sensitivity`：run `cd0f89f298fbba5d29d84cf078510b450f892eb452ebab82528e41d35c653eea`（数据集 `8e99cf4db927`，规则 `validation/1.1.0`）
+  - scenario_net_profit → `cd0f89f298fb-00-scenario_net_profit`；分项 base、user、counter
+  - scenario_sensitivity → `cd0f89f298fb-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
+  - margin_threshold_to_hold_base_profit → `cd0f89f298fb-02-margin_threshold_to_hold_base_profit`
+  - margin_gap_to_threshold_pp → `cd0f89f298fb-03-margin_gap_to_threshold_pp`
+  - collection_days_capital_per_day → `cd0f89f298fb-04-collection_days_capital_per_day`
+  - collection_days_sensitivity_10d → `cd0f89f298fb-05-collection_days_sensitivity_10d`
+- `scenario_sensitivity`：run `7d779d596bab8170c4a32f4e96ba5fec78275143e6c4f043b000b19f1ccaa058`（数据集 `8e99cf4db927`，规则 `validation/1.1.0`）
+  - scenario_net_profit → `7d779d596bab-00-scenario_net_profit`；分项 base、user、counter
+  - scenario_sensitivity → `7d779d596bab-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
+  - margin_threshold_to_hold_base_profit → `7d779d596bab-02-margin_threshold_to_hold_base_profit`
+  - margin_gap_to_threshold_pp → `7d779d596bab-03-margin_gap_to_threshold_pp`
+  - collection_days_capital_per_day → `7d779d596bab-04-collection_days_capital_per_day`
+  - collection_days_sensitivity_10d → `7d779d596bab-05-collection_days_sensitivity_10d`
+- `scenario_sensitivity`：run `b91832c8d16c478ab5583fa1ec64c7513a114588f3b76c16036b6cda6ecb221f`（数据集 `8e99cf4db927`，规则 `validation/1.1.0`）
+  - scenario_net_profit → `b91832c8d16c-00-scenario_net_profit`；分项 base、user、counter
+  - scenario_sensitivity → `b91832c8d16c-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
+  - margin_threshold_to_hold_base_profit → `b91832c8d16c-02-margin_threshold_to_hold_base_profit`
+  - margin_gap_to_threshold_pp → `b91832c8d16c-03-margin_gap_to_threshold_pp`
+  - collection_days_capital_per_day → `b91832c8d16c-04-collection_days_capital_per_day`
+  - collection_days_sensitivity_10d → `b91832c8d16c-05-collection_days_sensitivity_10d`
+- 图 `5ebf08301700-profit-waterfall`：洋河股份 2023年→2024年 归母净利润瀑布（亿元）
+- 图 `fdc8d4d464e7-cash-bridge-cur`：洋河股份 2024年 净利润→经营现金流桥（亿元）
+- 图 `cd0f89f298fb-scenario-threshold`：洋河股份 反向情景：维持基期归母净利所需毛利率（%）

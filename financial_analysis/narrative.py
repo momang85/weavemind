@@ -261,7 +261,7 @@ def _conclusions(od, cash, scens) -> list[str]:
             txt += (f"；毛利率 {_pct(float(gm.get('prev') or 0) * 100)} → "
                     f"{_pct(float(gm.get('cur') or 0) * 100)}"
                     f"（{float(gm.get('delta_pp') or 0):+.2f}pp）")
-        items.append(txt + f"　run {_rid(od)}")
+        items.append(txt)
     else:
         items.append("**利润**：本次未运行经营驱动分解（缺两期收入/成本/归母净利观察），"
                      "正文不给利润归因结论。")
@@ -291,7 +291,7 @@ def _conclusions(od, cash, scens) -> list[str]:
         if sup or drag:
             txt += (f"；最大支撑 {sup.get('label')} {_yi(sup.get('value'))} 亿元、"
                     f"最大拖累 {drag.get('label')} {_yi(drag.get('value'))} 亿元")
-        items.append(txt + f"　run {_rid(cash)}")
+        items.append(txt)
     else:
         items.append("**现金**：本次未运行现金调节桥（缺现金流量表补充资料），"
                      "正文不给现金形成机制结论。")
@@ -305,8 +305,7 @@ def _conclusions(od, cash, scens) -> list[str]:
             rows.append(f"{_scenario_label(r, th)} 需 {_pct(_attr(th, 'value'))}"
                         f"（{float(_attr(gap, 'value') or 0):+.2f}pp）")
         if rows:
-            items.append("**反向情景**（单因素反推，不表示可达）：" + "；".join(rows)
-                         + f"　run {_rid(scens[0])}")
+            items.append("**反向情景**（单因素反推，不表示可达）：" + "；".join(rows))
     return items
 
 
@@ -318,19 +317,17 @@ def _profit_table(od, limit: int = 6) -> list[str]:
     total = float(_attr(bridge, "value") or 0)
     items = list(_attr(detail, "components") or ())
     items.sort(key=lambda c: -abs(float(_attr(c, "value") or 0)))
-    lines = ["| 项目 | 金额（亿元） | 占归母净利变化 | 依据（component_id） |",
-             "|---|---:|---:|---|"]
+    lines = ["| 项目 | 金额（亿元） | 占归母净利变化 |",
+             "|---|---:|---:|"]
     for c in items[:limit]:
         v = float(_attr(c, "value") or 0)
         share = f"{v / total * 100:.1f}%" if total else "—"
-        lines.append(f"| {_attr(c, 'label')} | {_yi(v)} | {share} | "
-                     f"`{_attr(c, 'component_id')}` |")
+        lines.append(f"| {_attr(c, 'label')} | {_yi(v)} | {share} |")
     rest = items[limit:]
     if rest:
         rest_v = sum(float(_attr(c, "value") or 0) for c in rest)
         share = f"{rest_v / total * 100:.1f}%" if total else "—"
-        lines.append(f"| 其余 {len(rest)} 项合计（未单列） | {_yi(rest_v)} | {share} | "
-                     "同上 |")
+        lines.append(f"| 其余 {len(rest)} 项合计（未单列） | {_yi(rest_v)} | {share} |")
     lines.append("")
     lines.append("- 占比 ＝ 该项目 ÷ 归母净利变化：变化为负时，**正贡献显示为负占比**"
                  "（符号是算术结果，不是方向判断）。")
@@ -339,8 +336,7 @@ def _profit_table(od, limit: int = 6) -> list[str]:
     lines.append(
         f"- 对称分解（交互项均分，代入顺序无关）：毛利变化 {_yi(_attr(gp, 'value'))} 亿元 ＝ "
         f"规模效应 {_yi(_attr(_out(od, 'revenue_scale_effect'), 'value'))} ＋ "
-        f"毛利率效应 {_yi(_attr(_out(od, 'gross_margin_effect'), 'value'))} 亿元"
-        f"　output `{_attr(_out(od, 'gross_profit_change'), 'output_id')}`")
+        f"毛利率效应 {_yi(_attr(_out(od, 'gross_margin_effect'), 'value'))} 亿元")
     for seg in _outs(od, "gross_profit_change_by_segment")[:2]:
         lines.append(f"- {_cut_summary(seg, top=3)}；每种切法各自覆盖同一口径，"
                      "**不可跨切法相加**")
@@ -362,18 +358,20 @@ def _source_table(runs, provenance: dict, limit: int = 14) -> list[str]:
                     ids.append(str(fid))
     if not ids:
         return []
-    lines = ["| 读数 | 期间 | 披露值 | 来源位置 | 事实身份 |", "|---|---|---:|---|---|"]
+    lines = ["| 读数 | 期间 | 披露值 | 来源位置（原件） |", "|---|---|---:|---|"]
     for fid in ids[:limit]:
         p = provenance.get(fid) or {}
         value = p.get("value")
         shown = (f"{float(value):,.2f}{p.get('unit') or ''}"
                  if isinstance(value, (int, float)) else "—")
         lines.append(f"| {p.get('label') or '—'} | {p.get('period') or '—'} | {shown} | "
-                     f"{p.get('locator') or '未取到页码定位（见底稿与材料清单）'} | "
-                     f"`{fid}` |")
+                     f"{p.get('locator') or '未取到页码定位（见底稿与材料清单）'} |")
     if len(ids) > limit:
         lines.append(f"| 其余 {len(ids) - limit} 项输入 | — | — | 见分析底稿"
-                     "（`analysis_runs.json`） | — |")
+                     "（`analysis/analysis_runs.json` 与 `analysis/dataset.json`） |")
+    lines.append("")
+    lines.append("- 上表是**用于计算的关键读数**及其原件位置；完整事实身份清单"
+                 "（fact_id → 表/页/行）见文末『附：底稿索引』与包内 `analysis/` 目录。")
     return lines
 
 
@@ -485,10 +483,54 @@ def _figures(charts) -> list[str]:
         return []
     lines = ["### 附：可复算底稿图（与正文同一次运行）"]
     for i, c in enumerate(figs, 1):
-        lines.append(f"- 图 {i} `{c.get('chart_id') or ''}`：{c.get('title') or ''}"
-                     f"（类型 {c.get('type')}；来源：{c.get('source') or ''}）")
+        lines.append(f"- 图 {i}：{c.get('title') or ''}")
         if c.get("conclusion"):
             lines.append(f"  - 图注（由读数算出）：{c['conclusion']}")
+    lines.append("- 图与正文共用同一次运行；文件名与运行标识见文末『附：底稿索引』。")
+    return lines
+
+
+def summary_lines(runs, limit: int = 3) -> list[str]:
+    """正文**开头三条摘要**（无工程标识）：利润 / 结构 / 现金（+反向情景）。
+
+    与 `research_note` 的『一、结论』同源（同一批运行、同一套算式），只是去掉 run/output
+    标识与长解释——卡片位置只留这三条。
+    """
+    runs = [r for r in (runs or ())
+            if str(_attr(r, "status")) == str(RunStatus.VALIDATED)]
+    od = _pick(runs, "operating_drivers")
+    cash = _pick(runs, "cash_reconciliation")
+    scens = _spread(runs, "scenario_sensitivity")
+    if od is None and cash is None:
+        return []
+    out = []
+    for txt in _conclusions(od, cash, scens):
+        out.append(txt.split("　")[0])
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _engineering_index(runs, charts) -> list[str]:
+    """底稿索引：run / dataset / output / component_id / 事实身份 / 图文件名（正文之外）。"""
+    runs = [r for r in (runs or ())]
+    if not runs and not charts:
+        return []
+    lines = ["### 附：底稿索引（run / output / component_id）",
+             "> 正文与图的所有数字都能在这里回查；包内 `analysis/` 目录含数据集、计划、"
+             "契约与全部运行记录。"]
+    for r in runs:
+        lines.append(f"- `{_attr(r, 'model_id')}`：run `{_attr(r, 'run_id')}`"
+                     f"（数据集 `{str(_attr(r, 'dataset_hash'))[:12]}`，"
+                     f"规则 `{_attr(r, 'rules_version') or '—'}`）")
+        for o in (_attr(r, "outputs") or ()):
+            comps = "、".join(str(_attr(c, "component_id"))
+                              for c in (_attr(o, "components") or ()))
+            lines.append(f"  - {_attr(o, 'metric')} → `{_attr(o, 'output_id')}`"
+                         + (f"；分项 {comps}" if comps else ""))
+    for c in (charts or ()):
+        if isinstance(c, dict) and c.get("available"):
+            lines.append(f"- 图 `{c.get('chart_id')}`：{c.get('title')}")
     return lines
 
 
@@ -525,7 +567,7 @@ def research_note(runs, *, provenance=None, charts=None, label_of=None) -> str:
     head = f"## 经营驱动分析正文（{entity}{' ' + span if span else ''}）"
     lines: list[str] = [head, "",
                         "> 本节由 `financial_analysis` 从**已验证运行**装配：每个数字都能回查到"
-                        "运行与输出标识（run / output），图、卡、底稿共用同一次运行。"
+                        "运行与输出标识（见文末『附：底稿索引』），图、卡、底稿共用同一次运行。"
                         "未取到的披露项留在「未解释差额」，既不摊派也不当零。", ""]
     lines.append("### 一、结论（先看这三条）")
     for i, txt in enumerate(_conclusions(od, cash, scens), 1):
@@ -561,8 +603,7 @@ def research_note(runs, *, provenance=None, charts=None, label_of=None) -> str:
                 if str(_attr(o, "metric")).startswith("operating_cashflow_reconciliation"):
                     comps = "、".join(f"{_attr(c, 'label')} {_yi(_attr(c, 'value'))} 亿元"
                                       for c in (_attr(o, "components") or ()))
-                    lines.append(f"- **{_attr(o, 'output_period')}**：{comps}"
-                                 f"　output `{_attr(o, 'output_id')}`")
+                    lines.append(f"- **{_attr(o, 'output_period')}**：{comps}")
             gap = _out(cash, "cash_gap_change")
             if gap is not None:
                 comps = "、".join(f"{_attr(c, 'label')} {_yi(_attr(c, 'value'))} 亿元"
@@ -580,12 +621,13 @@ def research_note(runs, *, provenance=None, charts=None, label_of=None) -> str:
             extra = (f"，与基期之差 {float(_attr(gap, 'value') or 0):+.2f}pp"
                      if gap is not None else "")
             lines.append(f"- **反向情景（{_scenario_label(r, th)}）**：维持基期归母净利"
-                         f"所需毛利率 {_pct(_attr(th, 'value'))}{extra}"
-                         f"　output `{_attr(th, 'output_id')}`")
+                         f"所需毛利率 {_pct(_attr(th, 'value'))}{extra}")
         lines.append("")
     lines.extend(_todo(runs, label_of))
     lines.append("")
     lines.extend(_limits())
     lines.append("")
     lines.extend(_figures(charts))
+    lines.append("")
+    lines.extend(_engineering_index(runs, charts))
     return "\n".join(lines).rstrip() + "\n"

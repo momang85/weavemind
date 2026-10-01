@@ -5532,12 +5532,63 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             logger.warning("研究任务判定失败（task=%s）：%s", task_id, str(exc)[:120])
             return False
 
+    def _analysis_chart_specs(self, task_id: str) -> list[dict]:
+        """V0：**经营研究三图**（利润瀑布／现金桥／情景比较），来自与正文同一组选定运行。
+
+        数据来源与正文完全一致：`analysis/analysis_runs.json` 的已验证运行 +
+        `analysis/dataset.json`（瀑布的起点/终点要读两期归母净利）+ `store.select_for_report`
+        的**同一条选择**（用户选择优先，否则默认经营研究组合）。不在这里另跑参数，
+        也不从正文文字里反猜数字。
+        """
+        try:
+            import financial_analysis as fa
+            from financial_analysis import charts as _charts
+            from financial_analysis import store as _fa_store
+            from workspace import task_workspace
+            ws = task_workspace(task_id)
+            try:
+                from financial_analysis.validation import RULES_VERSION
+                _rules = str(RULES_VERSION)
+            except Exception:                        # noqa: BLE001
+                _rules = ""
+            picked, _notes = _fa_store.select_for_report(ws, rules_version=_rules)
+            if not picked:
+                return []
+            ds = _fa_store.dataset_from_inputs(ws)
+            specs: list[dict] = []
+            od = next((r for r in picked if str(r.model_id) == "operating_drivers"), None)
+            cash = next((r for r in picked if str(r.model_id) == "cash_reconciliation"), None)
+            scen = [r for r in picked if str(r.model_id) == "scenario_sensitivity"]
+            if od is not None and ds is not None:
+                specs.append(_charts.profit_waterfall(od, ds))
+            if cash is not None:
+                specs.append(_charts.cash_bridge_waterfall(cash, which="cur"))
+            if len(scen) >= 2:
+                specs.append(_charts.scenario_threshold_comparison(
+                    [(f"档位{i + 1}", r) for i, r in enumerate(scen)]))
+            elif scen:
+                specs.append(_charts.scenario_outcome_bars(scen[0]))
+            ok = [s for s in specs if s.get("available")]
+            if len(ok) != len(specs):
+                logger.info("analysis charts %s: %d/%d 可用（其余如实不出图）",
+                            task_id, len(ok), len(specs))
+            return ok
+        except Exception as exc:                     # noqa: BLE001
+            logger.warning("经营研究三图生成失败（task=%s）：%s", task_id, str(exc)[:140])
+            return []
+
     def _financial_chart_specs(self, task_id: str, goal: str) -> list[dict]:
         """研究任务的财务分析图规格（确定性：底稿 → 两期对比 / 同比 / 质量三张）。
 
         数据来自 `working_paper_export.chart_rows`（只保留契约期间、含同比与比率），
         不经过 LLM，也不走"把财务行归一成市场规模"那条老路。非研究任务返回 []。
+
+        V0（阶段V）：有经营研究运行时**优先**给三图（利润瀑布／现金桥／情景比较）——它们与
+        正文共用同一组选定运行；旧的两期对比/比率图只在没有分析运行时出现（旧任务不变）。
         """
+        _analysis = self._analysis_chart_specs(task_id)
+        if _analysis:
+            return _analysis
         try:
             from chart_specs import financial_research_specs
             from working_paper_export import chart_rows

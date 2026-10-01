@@ -152,8 +152,10 @@ def _render(specs, out_dir, root, CA) -> list:
 
 
 def note_stats(note: str) -> dict:
+    """正文读数（V0：工程标识在『附：底稿索引』里，所以统计也按它数）。"""
     return {"chars": len(note), "lines": len(note.splitlines()),
             "sections": re.findall(r"^### (.+)$", note, re.M),
             "table_rows": len([l for l in note.splitlines() if l.startswith("| ")]),
-            "facts_with_locator": len(sorted(set(re.findall(r"`(fact-[^`]+)`", note)))),
-            "run_refs": len(set(re.findall(r"run ([0-9a-f]{6,})", note)))}
+            "locator_rows": len([l for l in note.splitlines()
+                                 if l.startswith("| ") and "页" in l]),
+            "run_refs": len(set(re.findall(r"run `([0-9a-f]{8,})`", note)))}

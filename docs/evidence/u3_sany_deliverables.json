@@ -45,8 +45,8 @@
   ]
  },
  "note": {
-  "chars": 5750,
-  "lines": 79,
+  "chars": 9194,
+  "lines": 125,
   "sections": [
    "一、结论（先看这三条）",
    "二、利润变化：金额分解",
@@ -55,27 +55,28 @@
    "五、现金形成与反向情景",
    "六、待核查问题（按影响排序）",
    "七、口径与限制",
-   "附：可复算底稿图（与正文同一次运行）"
+   "附：可复算底稿图（与正文同一次运行）",
+   "附：底稿索引（run / output / component_id）"
   ],
   "table_rows": 20,
-  "facts_with_locator": 11,
-  "run_refs": 3
+  "locator_rows": 10,
+  "run_refs": 5
  },
  "figures": [
   {
    "file": "docs/evidence/u3_sany/1_profit_waterfall.png",
-   "bytes": 82000,
-   "sha256": "081940bd1e615d9a"
+   "bytes": 81934,
+   "sha256": "aba4cdee282907fd"
   },
   {
    "file": "docs/evidence/u3_sany/2_cash_bridge.png",
-   "bytes": 69578,
-   "sha256": "fbd551078d9f5cdb"
+   "bytes": 83660,
+   "sha256": "14aa6349cd8c7f0c"
   },
   {
    "file": "docs/evidence/u3_sany/3_scenario_thresholds.png",
-   "bytes": 65603,
-   "sha256": "dcb0c60482f1f19c"
+   "bytes": 78033,
+   "sha256": "5ab336edbebecf93"
   }
  ],
  "chart_conclusions": [

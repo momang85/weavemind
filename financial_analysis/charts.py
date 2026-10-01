@@ -63,9 +63,12 @@ def _out(run, metric):
 
 
 def _source(run, statements: str) -> str:
-    rid = str(getattr(run, "run_id", "") or "")[:12]
-    dh = str(getattr(run, "dataset_hash", "") or "")[:12]
-    return f"{statements}（正常入口抽取）；运行 run={rid}，数据集 {dh}"
+    """图注里的**简短来源**（V0：运行标识不再挤在图上，移到正文底稿索引与包内 analysis/）。
+
+    规格里的 `run_id` / `dataset_hash` 字段仍然带着运行身份，供底稿与证据回查；
+    只有**画在图上、写进正文图注**的这段文字保持简短。
+    """
+    return f"{statements}"
 
 
 def _clip(text, limit: int = 12) -> str:
@@ -264,6 +267,81 @@ def cash_bridge_waterfall(run, *, which: str = "cur",
 
 
 # ------------------------------------------------------------ ③ 情景（反向阈值）比较
+
+def scenario_outcome_bars(run, *,
+                          question: str = "同一组假设下，基期、使用者情景与反向对照差多少？") -> dict:
+    """**一次情景运行**的三个读数并排（基准／使用者情景／反向对照）——不额外跑参数。
+
+    为什么需要它：正常任务里情景模型只跑一条（计划每个模型采一次），若第三张图必须"多档
+    对比"就只能偷偷再跑参数——本函数改为把**同一次运行**里已验证的三个情景读数画出来；
+    正文与图因此共用同一次运行（阶段V 的硬要求）。多档阈值比较仍由
+    `scenario_threshold_comparison` 在**已选定多档运行**时使用。
+    """
+    why = _gate(run)
+    if why:
+        return _unavailable(run, why)
+    out = _out(run, "scenario_net_profit")
+    if out is None or not (out.components or ()):
+        return _unavailable(run, "缺少 scenario_net_profit 的三情景读数")
+    rows: list[dict] = []
+    for c in (out.components or ()):
+        rows.append({"label": _short_scenario_name(c.get("label")),
+                     "value": _yi(c.get("value")), "unit": "亿元", "kind": "delta"})
+    if len(rows) < 2:
+        return _unavailable(run, "情景读数少于两个：不画比较图")
+    base = next((r for r in rows if "基准" in r["label"]), None)
+    user = next((r for r in rows if "使用者" in r["label"]), rows[1] if len(rows) > 1 else None)
+    parts = []
+    if base is not None:
+        parts.append(f"基准复现 {base['value']:,.2f} 亿元")
+    if user is not None:
+        parts.append(f"使用者情景 {user['value']:,.2f} 亿元"
+                     f"（较基准 {user['value'] - (base or user)['value']:+,.2f} 亿元）")
+    parts.append("情景是**条件计算**（假设成立时才成立），不是预测、无概率")
+    return {
+        "available": True,
+        "type": "bar",
+        "chart_id": f"{str(getattr(run, 'run_id', ''))[:12]}-scenario-outcome",
+        "title": f"{_entity(run)} {_scenario_period(run)} 情景比较（亿元）",
+        "question": question,
+        "conclusion": "；".join(parts),
+        "unit": "亿元",
+        "source": _source(run, "公司年报：营业收入/营业成本/归母净利润与毛利线以下净额"),
+        "x_axis_title": "情景（同一组假设）",
+        "y_axis_title": "归母净利润（亿元）",
+        "time_range": str(getattr(out, "output_period", "") or ""),
+        "region": "中国",
+        "sample_size": len(rows),
+        "missing": "无",
+        "outliers": "无",
+        "annotation": ("基准＝参数全 0 复现基期；反向对照＝同一收入假设下再降毛利率 1pp。"
+                       "毛利线以下净额含费用/税项/投资收益/少数股东，不是纯费用"),
+        "data": rows,
+        "run_id": str(getattr(run, "run_id", "") or ""),
+        "dataset_hash": str(getattr(run, "dataset_hash", "") or ""),
+    }
+
+
+def _short_scenario_name(label) -> str:
+    """情景分项标签 → 短名（基准／使用者情景／反向对照＋假设摘要）。"""
+    s = str(label or "").strip()
+    head = s.split("（")[0].strip() or s
+    if "（" in s and s.endswith("）"):
+        inner = s[s.index("（") + 1:-1]
+        if "（" in inner and inner.endswith("）"):
+            inner = inner[inner.index("（") + 1:-1]
+        inner = inner.split("，")[0]
+        inner = inner.replace("／隐含块 +0.00%", "").replace("隐含块 +0.00%", "").strip("／ ")
+        if inner and "参数 0" not in inner:
+            head = f"{head}（{inner}）"
+    return _clip(head, 22)
+
+
+def _scenario_period(run) -> str:
+    out = _out(run, "scenario_net_profit")
+    period = str(getattr(out, "output_period", "") or "")
+    return period.split("（")[0] or period
+
 
 def scenario_threshold_comparison(variants, *,
                                   question: str = "收入假设变化时，要保住基期利润需要多高的毛利率？") -> dict:

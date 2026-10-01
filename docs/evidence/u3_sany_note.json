@@ -45,8 +45,8 @@
  },
  "note": {
   "path": "docs/evidence/u3_sany_note.md",
-  "chars": 5750,
-  "lines": 79,
+  "chars": 9194,
+  "lines": 125,
   "sections": [
    "一、结论（先看这三条）",
    "二、利润变化：金额分解",
@@ -55,17 +55,18 @@
    "五、现金形成与反向情景",
    "六、待核查问题（按影响排序）",
    "七、口径与限制",
-   "附：可复算底稿图（与正文同一次运行）"
+   "附：可复算底稿图（与正文同一次运行）",
+   "附：底稿索引（run / output / component_id）"
   ],
   "table_rows": 20,
-  "facts_with_locator": 11,
-  "run_refs": 3
+  "locator_rows": 10,
+  "run_refs": 5
  },
  "figures": [
   {
    "file": "docs/evidence/u3_sany/1_profit_waterfall.png",
-   "bytes": 82000,
-   "sha256": "081940bd1e615d9a",
+   "bytes": 81934,
+   "sha256": "aba4cdee282907fd",
    "spec": {
     "available": true,
     "type": "waterfall",
@@ -74,7 +75,7 @@
     "question": "归母净利润同比变化由哪些金额构成？",
     "conclusion": "归母净利润 45.27 → 59.75 亿元（+14.48）；毛利变化 +13.86 亿元；规模 +11.97／毛利率 +1.88 亿元；毛利线以下 +0.62 亿元；未解释差额 +0.81 亿元（未取得的披露项目，不摊派）",
     "unit": "亿元",
-    "source": "公司年报：合并利润表与经营分析（分产品/分地区/期间费用）（正常入口抽取）；运行 run=dcfa6def7328，数据集 6d34fc0b78c3",
+    "source": "公司年报：合并利润表与经营分析（分产品/分地区/期间费用）",
     "x_axis_title": "项目（起点→贡献→终点）",
     "y_axis_title": "金额（亿元）",
     "time_range": "2023年—2024年",
@@ -151,8 +152,8 @@
   },
   {
    "file": "docs/evidence/u3_sany/2_cash_bridge.png",
-   "bytes": 69578,
-   "sha256": "fbd551078d9f5cdb",
+   "bytes": 83660,
+   "sha256": "14aa6349cd8c7f0c",
    "spec": {
     "available": true,
     "type": "waterfall",
@@ -161,7 +162,7 @@
     "question": "合并净利润到经营现金流之间的调节桥在哪里？",
     "conclusion": "合并净利润 60.93 亿元 ＋ 调节项 +87.22 亿元 ＝ 经营现金流 148.14 亿元；未解释差额 +0.00 亿元；最大支撑 经营性应付项目的增加（减… +55.93 亿元；最大拖累 投资损失（调节项） -6.43 亿元",
     "unit": "亿元",
-    "source": "公司年报：现金流量表补充资料（将净利润调节为经营活动现金流量）（正常入口抽取）；运行 run=ca1ed2073bc5，数据集 6d34fc0b78c3",
+    "source": "公司年报：现金流量表补充资料（将净利润调节为经营活动现金流量）",
     "x_axis_title": "项目（起点→调节项→终点）",
     "y_axis_title": "金额（亿元）",
     "time_range": "2024年",
@@ -208,8 +209,8 @@
   },
   {
    "file": "docs/evidence/u3_sany/3_scenario_thresholds.png",
-   "bytes": 65603,
-   "sha256": "dcb0c60482f1f19c",
+   "bytes": 78033,
+   "sha256": "5ab336edbebecf93",
    "spec": {
     "available": true,
     "type": "grouped_bar",
