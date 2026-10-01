@@ -66,6 +66,10 @@ SPEC = ModelSpec(
         OutputSpec("scenario_below_gross_detail",
                    "毛利线以下净额明细（每种项目一条规则）", kind="amount",
                    structure="bridge"),
+        # V2（阶段V）：**收入侧反推**——要把利润拉回到目标水平，收入需要变化多少
+        # （与毛利率阈值对称：一个答"毛利率要多高"，一个答"收入要多大"）。
+        OutputSpec("revenue_growth_to_hold_target",
+                   "维持目标归母净利所需收入变化（单因素反推）", kind="pct"),
     ),
     # 参数界限写进契约：超出范围直接判失败，不允许"随手放大假设"
     allowed_params={"revenue_growth": (-0.5, 0.5), "gross_margin_delta": (-0.3, 0.3),
@@ -73,7 +77,9 @@ SPEC = ModelSpec(
                     # V2（阶段V）明细模式：模式开关 + 两个**单独假设**
                     # （`tax_rate` 作用于税前利润、`minority_share` 作用于合并净利）
                     "below_gross_mode": ("fixed", "detail"),
-                    "tax_rate": (0.0, 0.5), "minority_share": (0.0, 0.3)},
+                    "tax_rate": (0.0, 0.5), "minority_share": (0.0, 0.3),
+                    # 目标归母净利（"要回到哪一年的利润水平"由使用者给定；不给=基期水平）
+                    "target_net_profit": (0.0, 1e15)},
     # 参数不给时**实际用的值**（与 `_assumptions` 的默认分支同源）：显式声明，
     # 页面直接显示默认值，不让读者猜"不改会用什么"（L0-b-5）。
     default_params={"revenue_growth": 0.05, "gross_margin_delta": 0.01,
@@ -100,9 +106,10 @@ def _bounds_ok(params: dict) -> str:
     for k, bounds in (("revenue_growth", (-0.5, 0.5)),
                       ("gross_margin_delta", (-0.3, 0.3)),
                       ("expense_change_ratio", (-0.5, 0.5)),
-                      # V2（阶段V）：明细模式的两个**单独假设**
+                      # V2（阶段V）：明细模式的两个**单独假设**与利润目标
                       ("tax_rate", (0.0, 0.5)),
-                      ("minority_share", (0.0, 0.3))):
+                      ("minority_share", (0.0, 0.3)),
+                      ("target_net_profit", (0.0, 1e15))):
         if k not in params or params.get(k) in (None, ""):
             continue
         try:
@@ -269,6 +276,28 @@ def threshold_plan(base: dict, *, growth: float, expense_ratio: float = 0.0) -> 
                         "回款敏感性 = 收入'/365 × Δ天数（单项）")}
 
 
+def revenue_threshold_plan(base: dict, *, target: Decimal | None = None,
+                           expense_ratio: Decimal = Decimal("0")) -> dict:
+    """**收入侧**单因素反推（V2）：把利润拉回目标水平，收入需要变化多少。
+
+    与 `threshold_plan`（毛利率侧）对称：`NP1 = R0×(1+g)×m0 − B0'`，令 `NP1 = T` 得
+    `g* = (T + B0' − R0×m0) / (R0×m0)`；`T` 不给就取基期归母净利（此时 g*=0）。
+    `B0' = 基期(毛利−归母净利)×(1+e)`。这是**算术反推**：不表示可达，也不含实现路径。
+    """
+    rev_base = _d(base["revenue"])
+    gp_base = _d(base["gross_profit"])
+    np_base = _d(base["net_profit"])
+    margin = (gp_base / rev_base) if rev_base else Decimal(0)
+    block = (gp_base - np_base) * (1 + _d(expense_ratio))
+    target_np = _d(target) if target is not None else np_base
+    denom = rev_base * margin
+    g_star = ((target_np + block - rev_base * margin) / denom) if denom else None
+    return {"revenue_base": rev_base, "block": block, "target_net_profit": target_np,
+            "margin_base": margin, "revenue_growth": g_star,
+            "formula": "g* = (目标归母净利 + 毛利线以下净额×(1+e) − 基期收入×基期毛利率)"
+                       " / (基期收入×基期毛利率)"}
+
+
 def compute(dataset, params: dict | None = None) -> dict:
     params = dict(params or {})
     bad = _bounds_ok(params)
@@ -333,6 +362,11 @@ def compute(dataset, params: dict | None = None) -> dict:
     # 反向阈值按**使用者情景的收入假设**求解（e 与使用者情景一致）：回答"在这个收入下，
     # 毛利率至少要多少才能维持基期利润"。基准（g=0）时阈值恰好等于基期毛利率。
     th = threshold_plan(base, growth=_g_up, expense_ratio=_e_up)
+    # V2：**收入侧**反推（对称于毛利率阈值）——"要回到目标利润，收入得变化多少"。
+    # 目标由使用者给定（如上年归母净利），不给就是基期水平（此时 g*=0，可当基准复现的自检）。
+    _target = params.get("target_net_profit")
+    rth = revenue_threshold_plan(base, target=(_target if _target not in (None, "") else None),
+                                 expense_ratio=_d(_e_up))
     # V2（阶段V）：明细模式——把使用者情景的**毛利线以下净额**按三条规则展开
     # （已披露项：固定／随收入变化；税率与少数股东：单独假设；其余留残差）。
     _mode = str(params.get("below_gross_mode") or "fixed")
@@ -383,6 +417,11 @@ def compute(dataset, params: dict | None = None) -> dict:
                                      if th["margin_threshold"] is not None else None),
                 "margin_gap_pp": (float(th["margin_gap_pp"])
                                   if th["margin_gap_pp"] is not None else None),
+                # V2：收入侧反推的目标与结果（同一份已解析参数）
+                "target_net_profit": float(rth["target_net_profit"]),
+                "revenue_growth_threshold": (float(rth["revenue_growth"])
+                                             if rth["revenue_growth"] is not None else None),
+                "revenue_threshold_formula": rth["formula"],
                 "capital_per_day": float(th["per_day_capital"]),
                 "formula": th["formula"],
                 "caveats": ("阈值是单因素反推：给出“需要什么”，不表示可达；"
@@ -421,6 +460,13 @@ def compute(dataset, params: dict | None = None) -> dict:
              "label": "所需毛利率与基期毛利率之差（百分点）",
              "value": (q(th["margin_gap_pp"]) if th["margin_gap_pp"] is not None else None),
              "unit": "%（pp）", "output_period": f"{period}（{up_label}）",
+             "components": [], "residual": None},
+            # V2 收入侧反推：维持**目标**归母净利所需收入变化（单因素）
+            {"metric": "revenue_growth_to_hold_target",
+             "label": "维持目标归母净利所需收入变化（单因素反推）",
+             "value": (q(rth["revenue_growth"] * 100)
+                       if rth["revenue_growth"] is not None else None),
+             "unit": "%", "output_period": f"{period}",
              "components": [], "residual": None},
             {"metric": "collection_days_capital_per_day",
              "label": "回款天数敏感性：每 1 天的资金占用",
@@ -554,6 +600,13 @@ def gold(dataset, params: dict | None = None) -> dict:
         th["per_day_capital"].quantize(Decimal("0.01")))
     out["collection_days_sensitivity_10d"] = float(
         (th["per_day_capital"] * 10).quantize(Decimal("0.01")))
+    # V2：收入侧反推（与毛利率阈值同一纪律：独立重算，不信载荷自报）
+    _target = params.get("target_net_profit")
+    rth = revenue_threshold_plan(base, target=(_target if _target not in (None, "") else None),
+                                 expense_ratio=_d(e_up))
+    if rth["revenue_growth"] is not None:
+        out["revenue_growth_to_hold_target"] = float(
+            (rth["revenue_growth"] * 100).quantize(Decimal("0.01")))
     # V2：明细模式的**总额**独立重算（基期毛利线以下净额 ×(1+e)）；逐项由
     # `components_gold` 独立给出（本函数只核总额，不复制 compute 的分项代码）
     if str(params.get("below_gross_mode") or "fixed") == "detail":

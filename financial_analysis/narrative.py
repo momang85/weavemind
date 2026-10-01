@@ -987,6 +987,14 @@ def research_note(runs, *, provenance=None, charts=None, label_of=None,
                      if gap is not None else "")
             lines.append(f"- **反向情景（{_scenario_label(r, th)}）**：维持基期归母净利"
                          f"所需毛利率 {_pct(_attr(th, 'value'))}{extra}")
+            # V2：**收入侧**反推（把利润拉回目标水平需要多少收入变化）
+            rev_th = _out(r, "revenue_growth_to_hold_target")
+            if rev_th is not None and _attr(rev_th, "value") is not None:
+                tgt = (_diag(r).get("thresholds") or {}).get("target_net_profit")
+                tgt_s = (f"（目标归母净利 {_yi_plain(tgt)} 亿元）" if tgt else "")
+                lines.append(f"  - 收入侧反推{tgt_s}：在其他条件不变时，收入需变化 "
+                             f"{_pct(_attr(rev_th, 'value'))} 才能回到该利润水平"
+                             "（单因素算术反推，不表示可达）")
         lines.append("")
     lines.extend(_scenario_detail_note(scens))
     if scens:

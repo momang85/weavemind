@@ -1,0 +1,233 @@
+{
+ "batch": "V2",
+ "case": "两条业务杠杆 + 费用/税项假设 + 现金单项敏感性",
+ "cases": {
+  "洋河股份": {
+   "entity_id": "002304.SZ",
+   "dataset": {
+    "observations": 162,
+    "usable": 158,
+    "dataset_hash": "0e5cdfa5baaed92512260df3c465d92396834726b1bc21a2d1e6bf9bde694417"
+   },
+   "readings": {
+    "net_profit_prev_yuan": 10015930040.27,
+    "net_profit_cur_yuan": 6673388602.12
+   },
+   "profit_levers": {
+    "status": "validated",
+    "validation_failed": [],
+    "target_net_profit_yuan": 10015930040.27,
+    "revenue_growth_to_hold_target_pct": 15.82,
+    "margin_threshold_to_hold_base_profit_pct": 73.16,
+    "margin_gap_pp": 0.0,
+    "base_reproduction_gap": "0",
+    "base_component": 6673388602.12,
+    "note": "两条杠杆是**单因素反推**：一个答“收入要变化多少”、一个答“毛利率要多高”，都给出“需要什么”，不表示可达"
+   },
+   "cost_tax_assumption": {
+    "status": "validated",
+    "validation_failed": [],
+    "params": {
+     "expense_change_ratio": 0.03,
+     "below_gross_mode": "detail"
+    },
+    "block_yuan": 14885240735.82,
+    "rules": {
+     "税金及附加": {
+      "rule": "revenue_linked",
+      "value": 4826086952.64
+     },
+     "销售费用": {
+      "rule": "revenue_linked",
+      "value": 5516238544.79
+     },
+     "管理费用": {
+      "rule": "fixed",
+      "value": 1982472211.42
+     },
+     "研发费用": {
+      "rule": "fixed",
+      "value": 107940299.48
+     },
+     "财务费用": {
+      "rule": "fixed",
+      "value": -629216693.96
+     },
+     "其他收益": {
+      "rule": "fixed",
+      "value": 61457972.15
+     },
+     "投资收益": {
+      "rule": "fixed",
+      "value": 150807623.86
+     },
+     "公允价值变动收益": {
+      "rule": "fixed",
+      "value": -408049002.84
+     },
+     "信用减值损失": {
+      "rule": "fixed",
+      "value": 687225.2
+     },
+     "资产减值损失": {
+      "rule": "fixed",
+      "value": -11539251.43
+     },
+     "资产处置收益": {
+      "rule": "fixed",
+      "value": -2811208.71
+     },
+     "营业外收入": {
+      "rule": "fixed",
+      "value": 54020155.39
+     },
+     "营业外支出": {
+      "rule": "fixed",
+      "value": 72244520.32
+     },
+     "所得税费用": {
+      "rule": "fixed",
+      "value": 2550919415.47
+     },
+     "少数股东损益": {
+      "rule": "fixed",
+      "value": -7140765.62
+     },
+     "残差（未取得明细的毛利线以下项目）": {
+      "rule": "residual",
+      "value": 621122737.66
+     }
+    },
+    "pretax_profit_yuan": 9143076611.68,
+    "income_tax_yuan": 2550919415.47,
+    "tax_rate": 0.27087389692832636,
+    "tax_rate_source": "未单独假设（按基期值固定）",
+    "residual_yuan": 621122737.66,
+    "items_missing": []
+   },
+   "cash_single_item": {
+    "status": "validated",
+    "d_ocf_yuan": -1501509630.68,
+    "working_capital_items": {
+     "operating_payable_increase": 1752278222.12,
+     "operating_receivable_decrease": -1031455122.08,
+     "inventory_decrease": 383595606.84
+    },
+    "lever_metric": "operating_payable_increase",
+    "if_lever_half_yuan": -2377648741.74,
+    "note": "单项敏感性：假设该项增量减半、其它不变时 ΔOCF 变为多少——会计口径推演，不是现金流预测；能否持续要看结算条款与后续报表"
+   }
+  },
+  "三一重工": {
+   "entity_id": "600031.SH",
+   "dataset": {
+    "observations": 168,
+    "usable": 168,
+    "dataset_hash": "9e2f4044e5377fbf65dba48f33bd61f90306de3e9af5912fca709f995eec45fe"
+   },
+   "readings": {
+    "net_profit_prev_yuan": 4527451000.0,
+    "net_profit_cur_yuan": 5975451000.0
+   },
+   "profit_levers": {
+    "status": "validated",
+    "validation_failed": [],
+    "target_net_profit_yuan": 4527451000.0,
+    "revenue_growth_to_hold_target_pct": -7.04,
+    "margin_threshold_to_hold_base_profit_pct": 26.43,
+    "margin_gap_pp": 0.0,
+    "base_reproduction_gap": "0",
+    "base_component": 5975451000.0,
+    "note": "两条杠杆是**单因素反推**：一个答“收入要变化多少”、一个答“毛利率要多高”，都给出“需要什么”，不表示可达"
+   },
+   "cost_tax_assumption": {
+    "status": "validated",
+    "validation_failed": [],
+    "params": {
+     "expense_change_ratio": 0.03,
+     "below_gross_mode": "detail"
+    },
+    "block_yuan": 15018410430.0,
+    "rules": {
+     "税金及附加": {
+      "rule": "revenue_linked",
+      "value": 431159000.0
+     },
+     "销售费用": {
+      "rule": "revenue_linked",
+      "value": 5464214000.0
+     },
+     "管理费用": {
+      "rule": "fixed",
+      "value": 3086342470.0
+     },
+     "研发费用": {
+      "rule": "fixed",
+      "value": 5542039630.0
+     },
+     "财务费用": {
+      "rule": "fixed",
+      "value": 207829280.0
+     },
+     "其他收益": {
+      "rule": "fixed",
+      "value": 892165400.0
+     },
+     "投资收益": {
+      "rule": "fixed",
+      "value": 662298240.0
+     },
+     "信用减值损失": {
+      "rule": "fixed",
+      "value": -923842020.0
+     },
+     "资产减值损失": {
+      "rule": "fixed",
+      "value": -207396680.0
+     },
+     "营业外收入": {
+      "rule": "fixed",
+      "value": 123627810.0
+     },
+     "营业外支出": {
+      "rule": "fixed",
+      "value": 213231630.0
+     },
+     "所得税费用": {
+      "rule": "fixed",
+      "value": 839688960.0
+     },
+     "少数股东损益": {
+      "rule": "fixed",
+      "value": 120599610.0
+     },
+     "残差（未取得明细的毛利线以下项目）": {
+      "rule": "residual",
+      "value": -1433546900.0
+     }
+    },
+    "pretax_profit_yuan": 6907770000.0,
+    "income_tax_yuan": 839688960.0,
+    "tax_rate": 0.11801666818669411,
+    "tax_rate_source": "未单独假设（按基期值固定）",
+    "residual_yuan": -1433546900.0,
+    "items_missing": [
+     "fair_value_change",
+     "asset_disposal_income"
+    ]
+   },
+   "cash_single_item": {
+    "status": "validated",
+    "d_ocf_yuan": 9106058000.0,
+    "working_capital_items": {
+     "operating_payable_increase": 11613185000.0,
+     "operating_receivable_decrease": -3394228000.0,
+     "inventory_decrease": -242026000.0
+    },
+    "lever_metric": "operating_payable_increase",
+    "if_lever_half_yuan": 3299465500.0,
+    "note": "单项敏感性：假设该项增量减半、其它不变时 ΔOCF 变为多少——会计口径推演，不是现金流预测；能否持续要看结算条款与后续报表"
+   }
+  }
+ }
+}

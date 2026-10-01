@@ -3438,6 +3438,27 @@ class TestV2ScenarioDetailMode(unittest.TestCase):
                                msg="缺的所得税 80 与少数股东 20 都留在残差里（不当零）")
         self.assertAlmostEqual(sum(comp.values()), d.value, places=2)
 
+    def test_revenue_side_reverse_threshold(self):
+        """V2：收入侧反推——把利润拉回目标水平需要多少收入变化（单因素）。"""
+        run = fa.run("scenario_sensitivity", self._ds(),
+                     params={"revenue_growth": 0.0, "gross_margin_delta": 0.0})
+        base_th = next(o for o in run.outputs
+                       if o.metric == "revenue_growth_to_hold_target")
+        self.assertEqual(base_th.unit, "%")
+        self.assertAlmostEqual(base_th.value, 0.0, places=2,
+                               msg="目标=基期利润时收入不需要变化（自检）")
+        # 目标设为基期的一半 → 收入需负增长（单因素反推）
+        run2 = fa.run("scenario_sensitivity", self._ds(),
+                      params={"revenue_growth": 0.0, "gross_margin_delta": 0.0,
+                              "target_net_profit": 150.0})
+        th2 = next(o for o in run2.outputs
+                   if o.metric == "revenue_growth_to_hold_target")
+        # g* = (150 + 500 − 1000×0.8) / (1000×0.8) = (150+500-800)/800 = −18.75%
+        self.assertAlmostEqual(th2.value, -18.75, places=2)
+        diag = run2.outputs[0].diagnostics["thresholds"]
+        self.assertAlmostEqual(diag["target_net_profit"], 150.0, places=2)
+        self.assertIn("g*", diag["revenue_threshold_formula"])
+
     def test_detail_mode_is_rendered_in_the_note(self):
         """明细模式要进正文（不是只在运行记录里）：逐项规则 + 税前利润/税率来源 + 残差。"""
         from financial_analysis import narrative as nt
