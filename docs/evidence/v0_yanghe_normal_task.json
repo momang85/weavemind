@@ -182,8 +182,8 @@
   "plan.json"
  ],
  "package": {
-  "zip": "deliverables_20261001_214926_999177.zip",
-  "bytes": 5648925,
+  "zip": "deliverables_20261001_215750_dd3533.zip",
+  "bytes": 5648930,
   "entries": 14,
   "has_analysis": [
    "analysis/analysis_cards.md",
@@ -229,11 +229,11 @@
   },
   "export_manifest.json": {
    "bytes": 3731,
-   "sha256": "f8b1067506f6aff0"
+   "sha256": "be516b9b83abab25"
   },
-  "deliverables_20261001_214926_999177.zip": {
-   "bytes": 5648925,
-   "sha256": "da31e92b4fc37731"
+  "deliverables_20261001_215750_dd3533.zip": {
+   "bytes": 5648930,
+   "sha256": "98b05f5512ceb9e6"
   },
   "report.md": {
    "bytes": 57426,
@@ -248,7 +248,7 @@
    "sha256": "8107af7889f7593a"
   }
  },
- "workspace": "C:\\Users\\ding0\\AppData\\Local\\Temp\\v0_yanghe__akrm8sj",
+ "workspace": "C:\\Users\\ding0\\AppData\\Local\\Temp\\v0_yanghe_lgftqv3j",
  "verification_boundary": {
   "verified": [
    "事实抽取→底稿→analysis worker 金融路径→三图→正文/摘要→装配验收→PDF/导出（同一条生产函数链，离线、零模型调用）"

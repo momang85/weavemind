@@ -414,11 +414,19 @@ def research_judgments(runs, *, volume_price: dict | None = None,
                      "locator": str(rec.get("locator") or ""), "kind": "observed"},
                     {"type": "披露原句", "text": "合并现金流量表·购买商品、接受劳务支付的现金",
                      "locator": str(paid.get("locator") or ""), "kind": "observed"}]
-        for r in _snippet_for(records, ("回款", "采购", "结算", "应付", "收现")):
+        _cands = _snippet_for(records, ("回款", "采购", "结算", "应付", "收现",
+                                        # 三一的原句在「…5、现金流量表…」小节里：
+                                        # 「主要系本期销售回款增加、采购付款减少影响。」
+                                        # 小节名带"现金"、段内含回款/采购 → 算作支持（位置照抄）
+                                        "现金流量", "现金"), limit=4)
+        # 先给**段内真的写到回款/采购**的那一条（否则会被"科目变动分析表"顶掉）
+        _cands.sort(key=lambda r: 0 if any(
+            t in str(r.get("snippet") or "") for t in ("回款", "采购")) else 1)
+        for r in _cands[:2]:
             evidence.append({"type": "已准入段落", "text": str(r.get("snippet") or "")[:160],
                              "locator": str(r.get("locator") or ""), "kind": "observed"})
         gaps = []
-        if not _snippet_for(records, ("回款", "采购", "结算", "应付", "收现")):
+        if not _cands:
             gaps.append("公司对回款/采购变化的披露原句未准入：只有两行读数与调节项，"
                         "不代拟原因")
         out.append(_judgment(

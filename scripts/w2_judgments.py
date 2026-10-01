@@ -57,8 +57,14 @@ def _case(name: str, spec: dict) -> dict:
                for r in (ne.extract_sections(doc, periods=(2023, 2024), company=name,
                                              company_id=spec["entity_id"],
                                              as_of="2025-04-30") or [])]
-    js = jd.research_judgments(list(runs.values()), volume_price=vp, records=records,
-                               direct_cash=jd.direct_cash_of(ds), limit=6)
+    js = jd.research_judgments(
+        list(runs.values()), volume_price=vp, records=records,
+        # 直接法两行的页码定位随事实层走（`source_locator`），正文/证据里能指回原件
+        direct_cash=jd.direct_cash_of(
+            ds, locators={str(getattr(f, "fact_id", "")):
+                          {"locator": str(getattr(f, "source_locator", "") or "")}
+                          for f in facts}),
+        limit=6)
     out = {"entity_id": spec["entity_id"],
            "dataset": {"observations": ds.manifest.observations,
                        "dataset_hash": ds.manifest.dataset_hash},
