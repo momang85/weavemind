@@ -94,7 +94,24 @@
 > `validate_spec` 全过、同参数重跑字节一致。定向：`test_financial_analysis` **159**、
 > `test_delivery_chain`、`test_deploy_manifest` 40、`test_p0.TestChartQA` 全过。
 > 提交 `f2fee8a`，远端 **CI success**（run `36804533508`；GitHub Pages run `36804533633` 同 success）。
-> **仍未做**：U1/U2 独立成篇的 4–6 页正文（当前正文只有报告链的「分析卡」段落）。
+>
+> **U1/U2 成篇（本批：4–6 页正文，独立于「分析卡」的论证线）**：新模块
+> `financial_analysis/narrative.py` 把**同一批已验证运行**装配成一条线——结论 → 利润金额分解
+> → **披露支持与来源定位**（表名·页码·事实身份）→ 替代解释 → 现金形成与反向情景 →
+> 待核查 → 口径与限制；接进报告链 `report_brief`（结构键 `analysis_note`，与卡**共用同一条
+> 运行选择** `_selected_analysis_runs`，卡/正文/图/底稿仍是同一次运行）。
+> 纪律落在代码里并进正文：只消费 `validated` 运行（**未验证运行的读数进不来**，该模型一律写
+> 「本次未运行」）、缺料如实写缺、占比符号提醒（变化为负时正贡献显示负占比）、
+> 切法不可相加、均价不得称「提价」、阈值是单因素反推。
+> 证据 [u2_research_note.md](evidence/u2_research_note.md) + [u2_research_note.json](evidence/u2_research_note.json)
+> （脚本 `scripts/u2_yanghe_note.py`，正常入口、不写数字）：**5852 字符 / 81 行 / 7 段 + 附图段**，
+> 来源表 11 条带页码定位（PDF 第 75/76/77/70/20 页：合并利润表/合并现金流量表/派生毛利），
+> 三张底稿图随正文引用；读数与三图一致（净利 −33.43、现金桥 46.29、阈值 73.16/69.67/83.92）。
+> 顺带补 `facts.METRIC_LABELS` 的 35 个披露行中文名——此前证据与正文在这些行上直接印
+> `operating_cost`/`credit_impairment_provision` 这类 slug。
+> 定向：`test_financial_analysis` **164**（+5：论证线/缺料如实/未验证不进门/来源表标签与定位/
+> 报告链接线）、`test_delivery_chain`+`test_report_quality`+`test_narrative_evidence` **516**、
+> `test_deploy_manifest` 40、3.11 `py_compile` 全过。
 >
 > ## 历史账（按日期，细节保留）
 >

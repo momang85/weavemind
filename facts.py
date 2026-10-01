@@ -87,6 +87,48 @@ OPERATING_LABELS: tuple[tuple[str, str], ...] = (
     ("baijiu_unit_revenue", "白酒吨价（推算，非披露价格）"),
 )
 METRIC_LABELS.update(dict(OPERATING_LABELS))
+
+# U1/U2（2026-10-01）：经营驱动拆解与现金调节桥新取的披露行——此前这些 slug 在证据/正文的
+# 来源表里直接印英文（`operating_cost`、`credit_impairment_provision`），读者读不下去。
+# 只影响**显示**（`metric_label` 的回退本来就是 slug），不改事实身份与口径。
+ANALYSIS_LINE_LABELS: tuple[tuple[str, str], ...] = (
+    ("operating_cost", "营业成本"),
+    ("net_profit_consolidated", "净利润（合并）"),
+    ("taxes_and_surcharges", "税金及附加"),
+    ("selling_expense", "销售费用"),
+    ("admin_expense", "管理费用"),
+    ("finance_expense", "财务费用"),
+    ("rd_expense", "研发费用"),
+    ("other_income", "其他收益"),
+    ("investment_income", "投资收益"),
+    ("fair_value_change", "公允价值变动收益"),
+    ("credit_impairment", "信用减值损失"),
+    ("asset_impairment", "资产减值损失"),
+    ("asset_disposal_income", "资产处置收益"),
+    ("non_operating_income", "营业外收入"),
+    ("non_operating_expense", "营业外支出"),
+    ("income_tax_expense", "所得税费用"),
+    ("minority_interest", "少数股东损益"),
+    # 现金流量表补充资料（现金调节桥）
+    ("asset_impairment_provision", "资产减值准备"),
+    ("credit_impairment_provision", "信用减值损失（补充资料）"),
+    ("depreciation", "固定资产折旧、油气资产折耗、生产性生物资产折旧"),
+    ("right_of_use_depreciation", "使用权资产折旧/摊销"),
+    ("intangible_amortization", "无形资产摊销"),
+    ("long_term_prepaid_amortization", "长期待摊费用摊销"),
+    ("disposal_long_asset_loss", "处置长期资产的损失"),
+    ("fixed_asset_scrap_loss", "固定资产报废损失"),
+    ("fair_value_change_loss", "公允价值变动损失"),
+    ("finance_expense_adjust", "财务费用（补充资料）"),
+    ("investment_loss", "投资损失"),
+    ("deferred_tax_asset_decrease", "递延所得税资产减少"),
+    ("deferred_tax_liability_increase", "递延所得税负债增加"),
+    ("inventory_decrease", "存货的减少"),
+    ("operating_receivable_decrease", "经营性应收项目的减少"),
+    ("operating_payable_increase", "经营性应付项目的增加"),
+    ("other_cashflow_adjustments", "其他（补充资料）"),
+)
+METRIC_LABELS.update(dict(ANALYSIS_LINE_LABELS))
 # 经营维度指标的 slug 集合（读侧判断“这条是不是经营维度事实”）
 OPERATING_METRICS = frozenset(m for m, _label in OPERATING_LABELS)
 

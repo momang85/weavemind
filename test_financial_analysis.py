@@ -2801,5 +2801,164 @@ class TestU2ChartSpecs(unittest.TestCase):
         self.assertIn("同一数据集", mixed["reason"])
 
 
+class TestU2ResearchNote(unittest.TestCase):
+    """U2 成篇：4–6 页正文的论证线（结论→分解→披露支持→替代解释→现金与情景→待核查→限制）。
+
+    用洋河真实披露数（元）验收：正文里的每个数字都必须能在**已验证运行**里找到，
+    缺哪个模型就如实写缺——不补数、不拿未验证运行顶替。
+    """
+
+    IS = TestU2ChartSpecs.IS
+    CF = TestU2ChartSpecs.CF
+
+    def _ds(self, table, *, source="test:note", **override):
+        rows = []
+        for metric, (prev, cur) in dict(table, **override).items():
+            rows.append(_row(metric, "2023年", prev, unit="元",
+                             fact_id=f"{source}-{metric}-2023"))
+            rows.append(_row(metric, "2024年", cur, unit="元",
+                             fact_id=f"{source}-{metric}-2024"))
+        return fa.freeze_from_facts(rows, periods=(2023, 2024), entity="洋河股份",
+                                    entity_id="002304.SZ", as_of="2025-04-30",
+                                    source_label=source)
+
+    def _runs(self):
+        ds = self._ds(self.IS)
+        od = fa.run("operating_drivers", ds)
+        cash = fa.run("cash_reconciliation", self._ds(self.CF))
+        return od, cash
+
+    def _scenario_ds(self):
+        rows = [_row("revenue", "2024年", 28_876_296_993.56, unit="元"),
+                _row("gross_profit", "2024年", 21_125_078_636.90, unit="元"),
+                _row("net_profit", "2024年", 6_673_388_602.12, unit="元")]
+        return fa.freeze_from_facts(rows, periods=(2024,), entity="洋河股份",
+                                    entity_id="002304.SZ", as_of="2025-04-30",
+                                    source_label="test:note-scenario")
+
+    def test_note_carries_the_full_argument_line_with_run_identity(self):
+        from financial_analysis import narrative as nt
+        od, cash = self._runs()
+        sds = self._scenario_ds()
+        scens = [fa.run("scenario_sensitivity", sds,
+                        params={"revenue_growth": g, "gross_margin_delta": 0.0})
+                 for g in (0.0, -0.1283)]
+        note = nt.research_note([od, cash] + scens)
+        # 七段论证线
+        for head in ("### 一、结论", "### 二、利润变化", "### 三、披露支持",
+                     "### 四、替代解释", "### 五、现金形成", "### 六、待核查",
+                     "### 七、口径与限制"):
+            self.assertIn(head, note, f"成篇缺 {head}")
+        # 关键读数与运行身份
+        self.assertIn("-33.43", note)
+        self.assertIn("-38.01", note)
+        self.assertIn("46.29", note)
+        self.assertIn("83.92", note)
+        self.assertIn(str(od.run_id)[:12], note)
+        self.assertIn(str(cash.run_id)[:12], note)
+        self.assertIn("output `", note)
+        # 纪律句必须在正文里（不是只写在注释里）
+        for needle in ("会计分解", "不同切法", "提价效果", "单因素反推",
+                       "未解释差额", "观察成立", "不得"):
+            self.assertIn(needle, note, f"成篇缺纪律句「{needle}」")
+        # 占比符号提醒（变化为负时正贡献显示负占比）
+        self.assertIn("正贡献显示为负占比", note)
+
+    def test_note_says_what_is_missing_instead_of_inventing(self):
+        from financial_analysis import narrative as nt
+        od, _cash = self._runs()
+        only_od = nt.research_note([od])
+        self.assertIn("本次未运行现金调节桥", only_od)
+        self.assertNotIn("46.29", only_od, "没有现金桥运行就不许出现现金桥读数")
+        bare = fa.run("operating_drivers",
+                      self._ds({k: v for k, v in self.IS.items()
+                                if k in ("revenue", "operating_cost", "net_profit")}))
+        bare_note = nt.research_note([bare])
+        self.assertIn("本次未取到分段/量价", bare_note)
+        self.assertIn("未解释差额", bare_note)
+        # 只有比率运行 → 不生成正文
+        rows = [_row("revenue", "2024年", 28_876_296_993.56, unit="元"),
+                _row("net_profit", "2024年", 6_673_388_602.12, unit="元"),
+                _row("operating_cashflow", "2024年", 4_628_711_237.28, unit="元")]
+        ds = fa.freeze_from_facts(rows, periods=(2024,), entity="洋河股份",
+                                  entity_id="002304.SZ", as_of="2025-04-30",
+                                  source_label="test:note-ratio")
+        ratio = fa.ratio_run("经营现金流对归母净利润的覆盖", "operating_cashflow",
+                             "net_profit", ds)
+        self.assertEqual(nt.research_note([ratio]), "")
+
+    def test_unvalidated_run_numbers_never_enter_the_note(self):
+        import dataclasses
+        from financial_analysis import narrative as nt
+        od, cash = self._runs()
+        broken = dataclasses.replace(od, status=C.RunStatus.VALIDATION_FAILED)
+        note = nt.research_note([broken, cash])
+        self.assertIn("本次未运行经营驱动分解", note)
+        self.assertNotIn("-33.43", note, "未验证运行的读数不得进正文")
+        self.assertIn("46.29", note, "另一条已验证运行照常进正文")
+        self.assertEqual(nt.research_note([broken]), "",
+                         "没有任何已验证运行时不生成正文")
+
+    def test_source_table_uses_metric_labels_and_locators(self):
+        from financial_analysis import narrative as nt
+        facts = [
+            {"fact_id": "fact-a", "metric": "operating_cost", "metric_label": "",
+             "period": "2024年", "value": 7_751_218_356.66, "unit": "元",
+             "source_locator": "PDF 第 76 页 · 合并利润表 · 行「其中：营业成本」"},
+            {"fact_id": "fact-b", "metric": "revenue", "metric_label": "营业收入",
+             "period": "2023年", "value": 33_126_277_551.51, "unit": "元",
+             "source_locator": {"kind": "annual_report_table", "page": "75",
+                                "table": {"group": "合并利润表",
+                                          "row_label": "其中：营业收入"}}},
+        ]
+        prov = nt.provenance_from_facts(facts, label_of=lambda m: {"operating_cost": "营业成本"}.get(m, m))
+        self.assertEqual(prov["fact-a"]["label"], "营业成本",
+                         "事实层没有中文名时用 label_of 补，正文不印英文 slug")
+        self.assertIn("PDF 第 76 页", prov["fact-a"]["locator"])
+        self.assertIn("第 75 页", prov["fact-b"]["locator"])
+        self.assertIn("行「其中：营业收入」", prov["fact-b"]["locator"])
+        # 报告链那条路（观察没有页码，只有口径与血缘）：推算输入的来源必须写明
+        obs_prov = nt.provenance_from_observations([
+            {"fact_id": "fact-gp-1", "metric": "gross_profit", "metric_label": "毛利润",
+             "period": "2024年", "value": 21_125_078_636.90, "unit": "元",
+             "caliber": "合并", "derived_from": ("fact-a", "fact-b"),
+             "formula_version": "revenue-cost/1.0"}])
+        self.assertIn("推算自 fact-a、fact-b", obs_prov["fact-gp-1"]["locator"])
+        self.assertIn("revenue-cost/1.0", obs_prov["fact-gp-1"]["locator"])
+        self.assertIn("口径 合并", obs_prov["fact-gp-1"]["locator"])
+        # 嵌套两层的 dataset.json 也能取到观察
+        blob = {"dataset": {"schema": "x", "dataset": {"manifest": {}, "observations": [
+            {"fact_id": "f1", "metric": "revenue", "value": 1.0}]}}}
+        self.assertEqual(len(nt.observations_from_inputs(blob)), 1)
+
+    def test_brief_block_renders_the_note(self):
+        """接进报告链：`report_brief._analysis_note_block` 从工作区运行记录装配正文。"""
+        import shutil
+        import tempfile
+        from pathlib import Path
+        import report_brief
+        import workspace as ws_mod
+        from financial_analysis import store as fa_store
+        od, cash = self._runs()
+        ds = self._ds(self.IS)
+        tmp = Path(tempfile.mkdtemp(prefix="wm_note_"))
+        old = ws_mod.WORKSPACE_ROOT
+        try:
+            ws_mod.configure_workspace_root(str(tmp))
+            ws = ws_mod.task_workspace("note-01")
+            ws.mkdir(parents=True, exist_ok=True)
+            fa_store.save_run(ws, od)
+            fa_store.save_run(ws, cash)
+            fa_store.save_inputs(ws, dataset=ds)
+            block = report_brief._analysis_note_block("note-01", ws_dir=ws)
+        finally:
+            ws_mod.WORKSPACE_ROOT = old
+            shutil.rmtree(tmp, ignore_errors=True)
+        self.assertIn("## 经营驱动分析正文", block)
+        self.assertIn("### 一、结论", block)
+        self.assertIn("46.29", block)
+        self.assertIn("口径 ", block, "来源表要写口径/血缘（报告链没有页码定位）")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

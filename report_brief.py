@@ -374,6 +374,9 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
         # Q1：分析卡（来自**已验证的**金融分析运行）。工作区里有运行记录才渲染；
         # 没有就留空 → 正文不出现这一节（既有交付一字不变）。
         "analysis_card": _analysis_card_block(task_id, ws_dir=ws_dir),
+        # U1/U2 成篇：同一批已验证运行装配的 4–6 页论证线（结论→金额分解→披露支持→
+        # 替代解释→现金与反向情景→待核查→口径限制）；没有经营驱动/现金桥运行就留空。
+        "analysis_note": _analysis_note_block(task_id, ws_dir=ws_dir),
         "analysis_quality": quality,
         "research_questions": questions,
         # R1：逐问题评估的**唯一权威**结果（问题区/风险区/研究状态/候选比较共用）
@@ -3050,6 +3053,11 @@ def render_brief_markdown(structure: dict, body: str = "",
     _card = str(structure.get("analysis_card") or "").strip()
     if _card:
         lines.append(_card if _card.endswith("\n") else _card + "\n")
+    # 成篇正文（U1/U2）：同一批已验证运行的**论证线**（结论→金额分解→披露支持→替代解释
+    # →现金与反向情景→待核查→口径限制）。它比卡长，所以放在卡之后，作为"分析正文"。
+    _note = str(structure.get("analysis_note") or "").strip()
+    if _note:
+        lines.append(_note if _note.endswith("\n") else _note + "\n")
     # 变化解释：发生了什么 → 管理层/附注怎么解释 → 能推断到哪一步 → 还不能证明什么
     lines.append("## 变化解释")
     changes = structure.get("change_explanation") or {}
@@ -3321,65 +3329,98 @@ def _rules_version() -> str:
         return ""
 
 
+def _selected_analysis_runs(ws):
+    """工作区里**该进正文**的已验证运行：`(picked, notes)`。
+
+    用户选择的运行真正进正文（L0-b）：有 `analysis/selection.json` 时只返回被选中的运行
+    （按选择顺序）并逐条核对仍可用；过期/缺失的选择**如实写进 notes**，**绝不**改取最早/
+    最新运行代替用户的选择。没有选择记录时才退回"每个模型取第一条已验证运行"这一默认。
+    只有比率运行（`ratio:`）时返回空——卡与正文是"结论级"的，比率读数留在底稿/表格里。
+    """
+    from financial_analysis import store as _fa_store
+    runs = _fa_store.validated_runs(ws)
+    if not runs:
+        return [], []
+    main = [r for r in runs if not str(r.model_id).startswith("ratio:")]
+    if not main:
+        return [], []
+    sel = _fa_store.selection_status(
+        ws,
+        dataset_hash=str((_fa_store.load_inputs(ws).get("dataset") or {})
+                         .get("dataset_hash") or ""),
+        rules_version=_rules_version())
+    picked: list = []
+    notes: list[str] = []
+    _by_id = {r.run_id: r for r in main}
+    for e in sel.get("entries") or []:
+        mid = str(e.get("model_id") or "")
+        rid = str(e.get("run_id") or "")
+        if e.get("state") != "ok":
+            notes.append(f"- ⚠️ 所选运行（{mid}，run={rid[:12]}）**未采用**："
+                         f"{e.get('why') or e.get('state')}——需要重算后再采纳，"
+                         "正文不会改取其它运行代替这次选择")
+            continue
+        r = _by_id.get(rid)
+        if r is None:
+            notes.append(f"- ⚠️ 所选运行（{mid}，run={rid[:12]}）不在已验证运行里："
+                         "未采用（不代替选择）")
+            continue
+        picked.append(r)
+    if not picked and not notes:
+        seen_models: list[str] = []
+        for r in main:
+            if str(r.model_id) in seen_models:
+                continue
+            seen_models.append(str(r.model_id))
+            picked.append(r)
+            if len(picked) >= 2:
+                break
+        if picked:
+            notes.append("- 说明：本版没有人工选择记录，默认采用每个模型的第一条"
+                         "已验证运行（可在分析工作台显式选择某一条）")
+    return picked, notes
+
+
+def _analysis_note_block(task_id: str, *, ws_dir=None) -> str:
+    """成篇正文（U1/U2）：把已验证运行装配成 4–6 页论证线（结论 → 金额分解 → 披露支持 →
+    替代解释 → 现金与反向情景 → 待核查 → 口径限制）。没有经营驱动/现金桥运行就返回空串，
+    既有交付正文一字不变。
+    """
+    try:
+        import workspace as _ws_mod
+        from financial_analysis import narrative as _fa_note
+        from financial_analysis import store as _fa_store
+        ws = Path(ws_dir) if ws_dir is not None else _ws_mod.task_workspace(task_id)
+        picked, _notes = _selected_analysis_runs(ws)
+        if not picked:
+            return ""
+        blob = _fa_store.load_inputs(ws)
+        prov = _fa_note.provenance_from_observations(
+            _fa_note.observations_from_inputs(blob))
+        try:                                    # 指标中文名（缺料清单里不印英文 slug）
+            from facts import metric_label as _ml
+        except Exception:                       # noqa: BLE001
+            _ml = None
+        return _fa_note.research_note(picked, provenance=prov, label_of=_ml)
+    except Exception as exc:                     # noqa: BLE001 - 渲染不出就不加这一节
+        logger.warning("成篇正文渲染失败（task=%s）：%s", task_id, str(exc)[:140])
+        return ""
+
+
 def _analysis_card_block(task_id: str, *, ws_dir=None) -> str:
     """读取该任务的**已验证**金融分析运行并渲染分析卡区块（没有就返回空串）。
 
     只读工作区里的 `analysis_runs.json`（由 `financial_analysis.store` 落盘、
     `data_analyzer` 的金融路径写入）；运行未通过验证的一律不渲染——正文不消费未验证读数。
 
-    **用户选择的运行真正进正文**（L0-b，2026-09-30 复核 U1）：工作区里有一份
-    `analysis/selection.json` 时，正文只渲染**被选中的**运行（按选择顺序），并且逐条核对
-    它是否仍然可用（数据集是否已变、规则版本是否匹配、是否仍 validated）；过期/缺失的
-    选择**如实写进正文说明**，**绝不**改取最早/最新运行代替用户的选择。没有选择记录时
-    才退回"每个模型取最新一条已验证运行"这一**默认**（并在返回里标明是默认）。
+    **用户选择的运行真正进正文**（L0-b，2026-09-30 复核 U1）：选择与核对逻辑见
+    `_selected_analysis_runs`（成篇正文与卡共用同一条选择，避免两处各取一套运行）。
     """
     try:
         import workspace as _ws_mod
         from financial_analysis import store as _fa_store
         ws = Path(ws_dir) if ws_dir is not None else _ws_mod.task_workspace(task_id)
-        runs = _fa_store.validated_runs(ws)
-        if not runs:
-            return ""
-        # 图表类运行（比率）不单独出卡：卡是"结论级"的，比率读数留在底稿/表格里
-        main = [r for r in runs if not str(r.model_id).startswith("ratio:")]
-        if not main:
-            return ""
-        sel = _fa_store.selection_status(
-            ws,
-            dataset_hash=str((_fa_store.load_inputs(ws).get("dataset") or {})
-                             .get("dataset_hash") or ""),
-            rules_version=_rules_version())
-        picked: list = []
-        notes: list[str] = []
-        _by_id = {r.run_id: r for r in main}
-        for e in sel.get("entries") or []:
-            mid = str(e.get("model_id") or "")
-            rid = str(e.get("run_id") or "")
-            if e.get("state") != "ok":
-                notes.append(f"- ⚠️ 所选运行（{mid}，run={rid[:12]}）**未采用**："
-                             f"{e.get('why') or e.get('state')}——需要重算后再采纳，"
-                             "正文不会改取其它运行代替这次选择")
-                continue
-            r = _by_id.get(rid)
-            if r is None:
-                notes.append(f"- ⚠️ 所选运行（{mid}，run={rid[:12]}）不在已验证运行里："
-                             "未采用（不代替选择）")
-                continue
-            picked.append(r)
-        if not picked and not notes:
-            # 没有选择记录 → **默认**：按运行记录顺序，每个模型取第一条已验证运行（至多两条，
-            # 与既有行为一致）；有选择记录时绝不走这条路（不允许拿默认代替用户选择）。
-            seen_models: list[str] = []
-            for r in main:
-                if str(r.model_id) in seen_models:
-                    continue
-                seen_models.append(str(r.model_id))
-                picked.append(r)
-                if len(picked) >= 2:
-                    break
-            if picked:
-                notes.append("- 说明：本版没有人工选择记录，默认采用每个模型的第一条"
-                             "已验证运行（可在分析工作台显式选择某一条）")
+        picked, notes = _selected_analysis_runs(ws)
         if not picked and not notes:
             return ""
         # 多张卡**只出一个 `## 分析卡` 标题**（K3 实机：同一份交付里出现两个同名 `##`，
