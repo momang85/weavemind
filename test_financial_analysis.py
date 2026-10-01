@@ -3808,33 +3808,64 @@ class TestW1OneReportOneJudgment(unittest.TestCase):
 class TestW2ResearchJudgments(unittest.TestCase):
     """W2（阶段W §5）：**可检验的研究判断**——七段式、读数驱动、写得出反转条件。
 
-    用**真实缓存年报**（正常入口抽取）钉住：量（销量效应 −53.82／单位价格 +11.68 亿元）、
-    库存（+16.38%）、现金（营运资本占比）；读数缺时**不生成判断**（宁可少一条，也不编一条）。
+    数据自带（CI 里没有缓存年报原件）：用洋河真实披露数（合并口径两期＋白酒口径销量/收入）
+    构造数据集，量价分解由算子现场算出（销量效应 −53.82／单位价格 +11.68 亿元），
+    量价/结构事实按 `narrative_evidence.extract_volume_price` 的形状给出（含页码定位）。
     """
 
-    DOC = os.path.join("evals", "a2_official_chain_20260929", "002304", "project",
-                       "materials", "f42e747c73850b59", "doc.json")
+    IS = TestU2ResearchNote.IS
+    CF = TestU2ResearchNote.CF
 
-    def _real(self):
-        import facts as F
-        with open(self.DOC, encoding="utf-8") as fh:
-            doc = json.loads(fh.read())
-        facts = F.facts_from_annual_tables(doc, company="洋河股份", company_code="002304",
-                                           periods=(2023, 2024), as_of="2025-04-30",
-                                           disclosed_at="2025-04-28")
-        ds = fa.freeze_from_facts(facts, periods=(2023, 2024), entity="洋河股份",
-                                  entity_id="002304.SZ", as_of="2025-04-30",
-                                  source_label="test:w2-real")
-        import narrative_evidence as ne
-        return doc, ds, ne.extract_volume_price([doc], periods=[2023, 2024])
+    def _ds(self):
+        rows = []
+        for metric, (prev, cur) in dict(self.IS).items():
+            rows.append(_row(metric, "2023年", prev, unit="元",
+                             fact_id=f"w2-{metric}-2023"))
+            rows.append(_row(metric, "2024年", cur, unit="元",
+                             fact_id=f"w2-{metric}-2024"))
+        # 白酒口径的量与收入（量价分解要**同一口径**两期都有销量与收入）
+        rows += [_row("sales_volume", "2023年", 166_154.73, unit="吨", caliber="白酒",
+                      metric_label="白酒销售量", fact_id="w2-vol-2023"),
+                 _row("sales_volume", "2024年", 139_076.05, unit="吨", caliber="白酒",
+                      metric_label="白酒销售量", fact_id="w2-vol-2024"),
+                 _row("revenue", "2023年", 32_389_581_931.71, unit="元", caliber="白酒",
+                      metric_label="白酒营业收入", fact_id="w2-rev-baijiu-2023"),
+                 _row("revenue", "2024年", 28_175_707_878.18, unit="元", caliber="白酒",
+                      metric_label="白酒营业收入", fact_id="w2-rev-baijiu-2024")]
+        return fa.freeze_from_facts(rows, periods=(2023, 2024), entity="洋河股份",
+                                    entity_id="002304.SZ", as_of="2025-04-30",
+                                    source_label="test:w2")
+
+    @staticmethod
+    def _vp():
+        """已准入的量价/结构事实（洋河真实数，字段形状与 narrative_evidence 一致）。"""
+        return {"ok": True, "facts": [
+            {"group": "实物量", "row_label": "白酒销售量", "unit": "吨",
+             "cur": 139_076.05, "prev": 166_154.73, "yoy": -16.30,
+             "line": "销售量(吨) 139,076.05 166,154.73 -16.30%",
+             "locator": "第 12 页 · 产销量表"},
+            {"group": "实物量", "row_label": "白酒生产量", "unit": "吨",
+             "cur": 145_494.73, "prev": 158_834.29, "yoy": -8.40,
+             "line": "生产量(吨) 145,494.73 158,834.29 -8.40%",
+             "locator": "第 12 页 · 产销量表"},
+            {"group": "实物量", "row_label": "白酒库存量", "unit": "吨",
+             "cur": 45_594.72, "prev": 39_176.04, "yoy": 16.38,
+             "line": "库存量(吨) 45,594.72 39,176.04 16.38%",
+             "locator": "第 12 页 · 产销量表"}],
+            "derived": [{"label": "白酒吨价（推算）", "unit": "元/吨", "cur": 202_592,
+                         "prev": 194_936, "yoy": 3.93,
+                         "formula": "(28175707878.18 / 139076.05)"}]}
 
     def test_volume_price_inventory_judgments_are_numbers_driven(self):
         from financial_analysis import judgments as jd
-        doc, ds, vp = self._real()
-        self.assertTrue(vp.get("ok"), "缓存年报必须能抽出量价/结构")
-        od = fa.run("operating_drivers", ds)
+        od = fa.run("operating_drivers", self._ds())
         self.assertEqual(od.status, C.RunStatus.VALIDATED, od.reason)
-        js = jd.research_judgments([od], volume_price=vp, records=[{
+        # 算子现场算出的量价分解：销量效应 −53.82 / 单位价格 +11.68 亿元（含结构混合）
+        vp_out = next(o for o in od.outputs if o.metric == "volume_price_decomposition")
+        comp = {c["component_id"]: c["value"] for c in vp_out.components}
+        self.assertAlmostEqual(comp["volume_effect"] / 1e8, -53.82, places=2)
+        self.assertAlmostEqual(comp["price_effect"] / 1e8, 11.68, places=2)
+        js = jd.research_judgments([od], volume_price=self._vp(), records=[{
             "section": "管理层讨论与分析 > 产销量情况说明",
             "snippet": "公司本期销售量、生产量、库存量情况见下表。",
             "locator": "第 12 页 · 产销量表"}], limit=3)
@@ -3890,11 +3921,19 @@ class TestW2ResearchJudgments(unittest.TestCase):
 
     def test_cash_judgment_uses_the_working_capital_share(self):
         from financial_analysis import judgments as jd
-        _doc, ds, vp = self._real()
+        ds = self._ds()
         od = fa.run("operating_drivers", ds)
-        cash = fa.run("cash_reconciliation", ds)
+        cds = fa.freeze_from_facts(
+            [_row(m, "2023年", v[0], unit="元", fact_id=f"w2c-{m}-2023")
+             for m, v in self.CF.items()]
+            + [_row(m, "2024年", v[1], unit="元", fact_id=f"w2c-{m}-2024")
+               for m, v in self.CF.items()],
+            periods=(2023, 2024), entity="洋河股份", entity_id="002304.SZ",
+            as_of="2025-04-30", source_label="test:w2-cash")
+        cash = fa.run("cash_reconciliation", cds)
         self.assertEqual(cash.status, C.RunStatus.VALIDATED, cash.reason)
-        js = jd.research_judgments([od, cash], volume_price=vp, records=[], limit=6)
+        js = jd.research_judgments([od, cash], volume_price=self._vp(), records=[],
+                                   limit=6)
         cj = next((j for j in js if j["judgment_id"] == "cash_from_working_capital"), None)
         self.assertIsNotNone(cj, [j["judgment_id"] for j in js])
         self.assertIn("营运资本", cj["title"])
