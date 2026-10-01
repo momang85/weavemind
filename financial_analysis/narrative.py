@@ -708,6 +708,41 @@ def driver_evidence(runs, records, *, limit: int = 3, doc=None) -> list[str]:
     return ["- **主要贡献的披露支持（原句＋边界＋反证＋观察指标）**"] + lines
 
 
+def _scenario_detail_note(scens) -> list[str]:
+    """V2：明细模式下，把毛利线以下净额的**逐项规则**写进正文（页面与导出同一组结果）。
+
+    只描述规则与读数：固定金额／随收入变化／单独假设，以及**残差**；不做完整预测。
+    """
+    out: list[str] = []
+    for r in (scens or ()):
+        det = _out(r, "scenario_below_gross_detail")
+        diag = (_diag(r).get("below_gross") or {})
+        if det is None or str(diag.get("mode")) != "detail":
+            continue
+        items = list(_attr(det, "components") or ())
+        rules = {"fixed": "固定金额", "revenue_linked": "随收入变化",
+                 "explicit": "单独假设", "residual": "残差"}
+        shown = "、".join(
+            f"{_attr(c, 'label')} {_yi(_attr(c, 'value'))} 亿元"
+            f"（{rules.get(str(_attr(c, 'rule')), str(_attr(c, 'rule')))}）"
+            for c in items)
+        out.append(f"- **情景明细模式（{_attr(det, 'output_period')}）**：毛利线以下净额 "
+                   f"{_yi(_attr(det, 'value'))} 亿元 ＝ {shown}")
+        if diag.get("pretax_profit_yuan") is not None:
+            out.append(f"  - 税前利润（基期）{_yi_plain(diag.get('pretax_profit_yuan'))} 亿元；"
+                       f"所得税 {_yi_plain(diag.get('income_tax_yuan'))} 亿元"
+                       f"（税率来源：{diag.get('tax_rate_source')}）")
+        if diag.get("minority_interest_yuan") is not None:
+            out.append(f"  - 少数股东损益 {_yi_plain(diag.get('minority_interest_yuan'))} 亿元"
+                       f"（{diag.get('minority_source')}）")
+        out.append(f"  - 残差 {_yi_plain(diag.get('residual_yuan'))} 亿元："
+                   "未取得明细的部分保留在残差里，**不摊派、不当零、也不构成完整预测**")
+        missing = list(diag.get("items_missing") or ())
+        if missing:
+            out.append("  - 未取到明细：" + "、".join(str(m) for m in missing[:6]))
+    return out
+
+
 def _slug_text(slug, label_of=None) -> str:
     """内部指标名 → 可读写法：`信用减值损失（`credit_impairment_provision`）`。
 
@@ -952,6 +987,9 @@ def research_note(runs, *, provenance=None, charts=None, label_of=None,
                      if gap is not None else "")
             lines.append(f"- **反向情景（{_scenario_label(r, th)}）**：维持基期归母净利"
                          f"所需毛利率 {_pct(_attr(th, 'value'))}{extra}")
+        lines.append("")
+    lines.extend(_scenario_detail_note(scens))
+    if scens:
         lines.append("")
     lines.extend(_todo(runs, label_of))
     lines.append("")

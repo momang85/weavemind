@@ -3346,5 +3346,119 @@ class TestV1DriverEvidenceBinding(unittest.TestCase):
         self.assertIn("披露原句", with_ev)
 
 
+class TestV2ScenarioDetailMode(unittest.TestCase):
+    """V2（阶段V）：情景**明细模式**——毛利线以下按三条规则逐项，残差保留，基准复现。
+
+    三条规则：固定金额（可随费用变化调整）／随收入变化（税金及附加、销售费用）／
+    单独假设（`tax_rate` 作用于税前利润、`minority_share` 作用于合并净利）。
+    """
+
+    def _ds(self, *, drop=()):
+        rows = [("revenue", 1000.0), ("gross_profit", 800.0), ("net_profit", 300.0),
+                ("net_profit_consolidated", 320.0), ("income_tax_expense", 80.0),
+                ("minority_interest", 20.0), ("taxes_and_surcharges", 100.0),
+                ("selling_expense", 200.0)]
+        out = []
+        for metric, value in rows:
+            if metric in drop:
+                continue
+            out.append(_row(metric, "2024年", value, unit="元"))
+        out.append(_row("revenue", "2023年", 900.0, unit="元"))
+        return fa.freeze_from_facts(out, periods=(2023, 2024), entity="示例",
+                                    entity_id="000001.SZ", as_of="2025-04-30",
+                                    source_label="test:v2-detail")
+
+    def _detail(self, run):
+        return next(o for o in run.outputs if o.metric == "scenario_below_gross_detail")
+
+    def test_base_case_reproduces_and_closes_in_both_modes(self):
+        fixed = fa.run("scenario_sensitivity", self._ds(),
+                       params={"revenue_growth": 0.0, "gross_margin_delta": 0.0})
+        detail = fa.run("scenario_sensitivity", self._ds(),
+                        params={"revenue_growth": 0.0, "gross_margin_delta": 0.0,
+                                "below_gross_mode": "detail"})
+        self.assertEqual(detail.status, C.RunStatus.VALIDATED, detail.reason)
+        self.assertEqual(detail.validation["failed"], [])
+        d = self._detail(detail)
+        # 明细合计 = 毛利线以下净额（800−300=500），残差如实保留
+        self.assertAlmostEqual(d.value, 500.0, places=2)
+        self.assertAlmostEqual(sum(c["value"] for c in d.components), 500.0, places=2)
+        self.assertAlmostEqual(d.residual, 100.0, places=2,
+                               msg="已列明细 400（税附加100+销售200+所得税80+少数股东20）")
+        # 基准复现：两种模式在同一组 0 参数下给出**同一个**基期净利
+        self.assertAlmostEqual(self._base(detail), self._base(fixed), places=2)
+        self.assertEqual(detail.outputs[0].diagnostics["base_reproduction_gap"], "0")
+
+    def _base(self, run):
+        out = next(o for o in run.outputs if o.metric == "scenario_net_profit")
+        return next(c["value"] for c in out.components if c["component_id"] == "base")
+
+    def test_explicit_tax_and_minority_assumptions_take_effect(self):
+        run = fa.run("scenario_sensitivity", self._ds(),
+                     params={"revenue_growth": 0.0, "gross_margin_delta": 0.0,
+                             "below_gross_mode": "detail", "tax_rate": 0.25,
+                             "minority_share": 0.1})
+        d = self._detail(run)
+        comp = {c["component_id"]: c for c in d.components}
+        # 所得税 = (合并净利320 + 所得税80) × 0.25 = 100
+        self.assertAlmostEqual(comp["income_tax_expense"]["value"], 100.0, places=2)
+        self.assertEqual(comp["income_tax_expense"]["rule"], "explicit")
+        # 少数股东 = 合并净利320 × 0.1 = 32
+        self.assertAlmostEqual(comp["minority_interest"]["value"], 32.0, places=2)
+        self.assertEqual(comp["minority_interest"]["rule"], "explicit")
+        # 随收入变化项：收入不变 → 与基期一致
+        self.assertEqual(comp["item:taxes_and_surcharges"]["rule"], "revenue_linked")
+        self.assertAlmostEqual(comp["item:taxes_and_surcharges"]["value"], 100.0, places=2)
+        # 残差 = 500 − (100+200+100+32) = 68
+        self.assertAlmostEqual(comp["residual_unlisted"]["value"], 68.0, places=2)
+        self.assertAlmostEqual(sum(c["value"] for c in d.components), d.value, places=2)
+
+    def test_revenue_linked_items_follow_the_revenue_assumption(self):
+        run = fa.run("scenario_sensitivity", self._ds(),
+                     params={"revenue_growth": 0.1, "gross_margin_delta": 0.0,
+                             "below_gross_mode": "detail"})
+        comp = {c["component_id"]: c for c in self._detail(run).components}
+        self.assertAlmostEqual(comp["item:taxes_and_surcharges"]["value"], 110.0, places=2,
+                               msg="税金及附加随收入 +10%")
+        self.assertAlmostEqual(comp["item:selling_expense"]["value"], 220.0, places=2)
+        self.assertEqual(comp["income_tax_expense"]["rule"], "fixed",
+                         "未给税率假设时所得税按基期值固定，不假装能预测")
+
+    def test_missing_detail_stays_in_the_residual(self):
+        run = fa.run("scenario_sensitivity", self._ds(drop=("income_tax_expense",
+                                                            "minority_interest")),
+                     params={"revenue_growth": 0.0, "gross_margin_delta": 0.0,
+                             "below_gross_mode": "detail"})
+        d = self._detail(run)
+        diag = run.outputs[0].diagnostics["below_gross"]
+        self.assertIn("income_tax_expense", diag["items_missing"])
+        self.assertIn("并入残差", diag.get("income_tax_note", ""))
+        comp = {c["component_id"]: c["value"] for c in d.components}
+        self.assertAlmostEqual(comp["residual_unlisted"], 200.0, places=2,
+                               msg="缺的所得税 80 与少数股东 20 都留在残差里（不当零）")
+        self.assertAlmostEqual(sum(comp.values()), d.value, places=2)
+
+    def test_detail_mode_is_rendered_in_the_note(self):
+        """明细模式要进正文（不是只在运行记录里）：逐项规则 + 税前利润/税率来源 + 残差。"""
+        from financial_analysis import narrative as nt
+        run = fa.run("scenario_sensitivity", self._ds(),
+                     params={"revenue_growth": 0.0, "gross_margin_delta": 0.0,
+                             "below_gross_mode": "detail", "tax_rate": 0.25})
+        text = "\n".join(nt._scenario_detail_note([run]))
+        self.assertIn("情景明细模式", text)
+        self.assertIn("随收入变化", text)
+        self.assertIn("单独假设", text)
+        self.assertIn("税前利润（基期）", text)
+        self.assertIn("残差", text)
+        self.assertIn("不构成完整预测", text)
+
+    def test_out_of_range_assumptions_are_refused(self):
+        for params in ({"below_gross_mode": "predict"}, {"tax_rate": 0.9},
+                       {"minority_share": -0.1}):
+            run = fa.run("scenario_sensitivity", self._ds(), params=params)
+            self.assertNotEqual(run.status, C.RunStatus.VALIDATED, params)
+            self.assertIn("参数", str(run.reason or ""), params)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

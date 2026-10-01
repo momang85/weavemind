@@ -29,6 +29,11 @@ LIMITS = (
     "反向阈值（维持基期利润所需毛利率）是**单因素反推**：给出“需要什么”，"
     "不表示该水平可达，也不含实现路径与时间",
     "回款天数只作**单项敏感性**（收入/365×Δ天）：不等同经营现金流预测，也不替代现金调节表",
+    # V2（阶段V）明细模式的三条规则与边界
+    "明细模式（`below_gross_mode=detail`）对**已披露**的毛利线以下项目只用三种规则："
+    "固定金额（可随 `expense_change_ratio` 调整）／随收入变化（`revenue_linked`："
+    "税金及附加、销售费用）／单独假设（`tax_rate` 所得税、`minority_share` 少数股东）；"
+    "**没有明细的部分保留为残差**，不硬算完整预测，也不生成「正常化利润」",
 )
 
 SPEC = ModelSpec(
@@ -56,10 +61,19 @@ SPEC = ModelSpec(
                    "回款天数敏感性：假设收入下每 1 天的资金占用", kind="amount"),
         OutputSpec("collection_days_sensitivity_10d",
                    "回款天数敏感性：±10 天的资金占用（单项，非现金流预测）", kind="amount"),
+        # V2（阶段V）：**明细模式**——毛利线以下净额按"固定金额／随收入变化／单独假设"
+        # 三种规则逐项给出，没有明细的部分保留残差；不是完整预测。
+        OutputSpec("scenario_below_gross_detail",
+                   "毛利线以下净额明细（每种项目一条规则）", kind="amount",
+                   structure="bridge"),
     ),
     # 参数界限写进契约：超出范围直接判失败，不允许"随手放大假设"
     allowed_params={"revenue_growth": (-0.5, 0.5), "gross_margin_delta": (-0.3, 0.3),
-                    "expense_change_ratio": (-0.5, 0.5), "rounding": ("yi_2", "yuan_2")},
+                    "expense_change_ratio": (-0.5, 0.5), "rounding": ("yi_2", "yuan_2"),
+                    # V2（阶段V）明细模式：模式开关 + 两个**单独假设**
+                    # （`tax_rate` 作用于税前利润、`minority_share` 作用于合并净利）
+                    "below_gross_mode": ("fixed", "detail"),
+                    "tax_rate": (0.0, 0.5), "minority_share": (0.0, 0.3)},
     # 参数不给时**实际用的值**（与 `_assumptions` 的默认分支同源）：显式声明，
     # 页面直接显示默认值，不让读者猜"不改会用什么"（L0-b-5）。
     default_params={"revenue_growth": 0.05, "gross_margin_delta": 0.01,
@@ -85,8 +99,11 @@ def _d(v) -> Decimal:
 def _bounds_ok(params: dict) -> str:
     for k, bounds in (("revenue_growth", (-0.5, 0.5)),
                       ("gross_margin_delta", (-0.3, 0.3)),
-                      ("expense_change_ratio", (-0.5, 0.5))):
-        if k not in params:
+                      ("expense_change_ratio", (-0.5, 0.5)),
+                      # V2（阶段V）：明细模式的两个**单独假设**
+                      ("tax_rate", (0.0, 0.5)),
+                      ("minority_share", (0.0, 0.3))):
+        if k not in params or params.get(k) in (None, ""):
             continue
         try:
             v = float(params[k])
@@ -95,7 +112,119 @@ def _bounds_ok(params: dict) -> str:
         lo, hi = bounds
         if not (lo <= v <= hi):
             return f"参数 {k}={v} 超出允许范围 [{lo}, {hi}]"
+    mode = str(params.get("below_gross_mode") or "fixed")
+    if mode not in ("fixed", "detail"):
+        return f"参数 below_gross_mode={mode!r} 非法（可选 fixed/detail）"
     return ""
+
+
+# V2：明细模式下**随收入变化**的已披露项目（其它已披露项按固定金额处理）。
+REVENUE_LINKED_ITEMS: tuple = ("taxes_and_surcharges", "selling_expense")
+
+
+def _detail_block(dataset, period: str, base_block: Decimal, revenue_scale: Decimal,
+                  expense_ratio: Decimal, *, tax_rate, minority_share,
+                  net_profit_consolidated) -> tuple:
+    """明细模式：毛利线以下净额按三条规则逐项给出（`(components, diagnostics)`）。
+
+    规则（**只用这三种**）：
+    - `fixed`：已披露项按基期值 ×(1+`expense_ratio`)；
+    - `revenue_linked`：`REVENUE_LINKED_ITEMS` 里的项按基期值 ×`revenue_scale`；
+    - `explicit`：`tax_rate` 作用于税前利润、`minority_share` 作用于合并净利（单独假设）。
+    没有被明细覆盖的部分作为**残差**保留（不摊派、不当零）。
+    """
+    from .operating_drivers import LINE_ITEMS as _LINE_ITEMS
+    _unit = str(dataset.require("net_profit", period).unit or "")
+    # 所得税与少数股东**单独处理**（它们是"单独假设"的两个槽位），不在通用循环里重复
+    _explicit_slugs = {"income_tax_expense", "minority_interest"}
+    items = []
+    used: list[str] = []
+    missing: list[str] = []
+    total = Decimal("0")
+    for slug, label, _sign in _LINE_ITEMS:
+        if slug in _explicit_slugs:
+            continue
+        obs = dataset.get(slug, period)
+        if obs is None or obs.value is None:
+            missing.append(slug)
+            continue
+        prev_value = _d(obs.value)
+        if slug in REVENUE_LINKED_ITEMS:
+            value = prev_value * revenue_scale
+            rule = "revenue_linked"
+        else:
+            value = prev_value * (1 + expense_ratio)
+            rule = "fixed"
+        used.append(slug)
+        total += value
+        items.append({"component_id": f"item:{slug}", "label": label,
+                      "value": float(value.quantize(Decimal("0.01"))),
+                      "unit": _unit, "rule": rule,
+                      "formula": ("基期值×收入变化" if rule == "revenue_linked"
+                                  else "基期值×(1+费用变化)")})
+    # 税前利润 / 所得税 / 少数股东：**只有拿到披露值才做"单独假设"**，否则如实写缺
+    diag: dict = {"mode": "detail", "rules": {"revenue_linked": list(REVENUE_LINKED_ITEMS),
+                                             "fixed": "其它已披露项",
+                                             "explicit": ["tax_rate", "minority_share"]},
+                  "items_used": used, "items_missing": missing,
+                  "residual_formula": "基期(毛利−归母净利) − 已列明细合计"}
+    tax_obs = dataset.get("income_tax_expense", period)
+    if tax_obs is not None:
+        base_effective = None
+        if net_profit_consolidated is not None:
+            _pretax = _d(net_profit_consolidated) + _d(tax_obs.value)
+            if _pretax:
+                base_effective = _d(tax_obs.value) / _pretax
+                diag["pretax_profit_yuan"] = float(_pretax)
+        if tax_rate is not None and net_profit_consolidated is not None:
+            tax = (_d(net_profit_consolidated) + _d(tax_obs.value)) * _d(tax_rate)
+            rule, formula = "explicit", "（合并净利+所得税）× 假设税率"
+            diag["tax_rate_source"] = "使用者单独假设"
+        else:
+            tax = _d(tax_obs.value) * (1 + expense_ratio)
+            rule, formula = "fixed", "基期值×(1+费用变化)"
+            diag["tax_rate_source"] = "未单独假设（按基期值固定）"
+        diag["income_tax_yuan"] = float(tax.quantize(Decimal("0.01")))
+        diag["tax_rate"] = float(_d(tax_rate) if tax_rate is not None
+                                 else (base_effective if base_effective is not None
+                                       else Decimal("0")))
+        used.append("income_tax_expense")
+        total += tax
+        items.append({"component_id": "income_tax_expense", "label": "所得税费用",
+                      "value": float(tax.quantize(Decimal("0.01"))), "unit": _unit,
+                      "rule": rule, "formula": formula})
+    else:
+        missing.append("income_tax_expense")
+        diag["income_tax_note"] = "缺所得税披露：并入残差"
+    minority_obs = dataset.get("minority_interest", period)
+    if minority_obs is not None:
+        if minority_share is not None and net_profit_consolidated is not None:
+            minority = _d(net_profit_consolidated) * _d(minority_share)
+            diag["minority_source"] = "使用者单独假设（合并净利×占比）"
+            rule, formula = "explicit", "合并净利×占比假设"
+        else:
+            minority = _d(minority_obs.value) * (1 + expense_ratio)
+            diag["minority_source"] = "基期值×固定规则（未单独假设）"
+            rule, formula = "fixed", "基期值×(1+费用变化)"
+        diag["minority_interest_yuan"] = float(minority.quantize(Decimal("0.01")))
+        used.append("minority_interest")
+        total += minority
+        items.append({"component_id": "minority_interest", "label": "少数股东损益",
+                      "value": float(minority.quantize(Decimal("0.01"))),
+                      "unit": _unit, "rule": rule, "formula": formula})
+    else:
+        missing.append("minority_interest")
+        diag["minority_note"] = "缺少数股东损益披露：并入残差"
+    residual = base_block - total
+    diag["residual_yuan"] = float(residual.quantize(Decimal("0.01")))
+    diag["listed_total_yuan"] = float(total.quantize(Decimal("0.01")))
+    items.append({"component_id": "residual_unlisted",
+                  "label": "残差（未取得明细的毛利线以下项目）",
+                  "value": float(residual.quantize(Decimal("0.01"))),
+                  "unit": (str(dataset.require("net_profit", period).unit or "")),
+                  "rule": "residual",
+                  "formula": "基期(毛利−归母净利)×(1+费用变化) − 已列明细合计"})
+    return items, diag
 
 
 def _scenario(base: dict, *, growth: float, margin_delta: float,
@@ -204,6 +333,22 @@ def compute(dataset, params: dict | None = None) -> dict:
     # 反向阈值按**使用者情景的收入假设**求解（e 与使用者情景一致）：回答"在这个收入下，
     # 毛利率至少要多少才能维持基期利润"。基准（g=0）时阈值恰好等于基期毛利率。
     th = threshold_plan(base, growth=_g_up, expense_ratio=_e_up)
+    # V2（阶段V）：明细模式——把使用者情景的**毛利线以下净额**按三条规则展开
+    # （已披露项：固定／随收入变化；税率与少数股东：单独假设；其余留残差）。
+    _mode = str(params.get("below_gross_mode") or "fixed")
+    _detail_items: list = []
+    _detail_diag: dict = {"mode": _mode}
+    if _mode == "detail":
+        _rev_scale = _d(base["revenue"]) * (1 + _d(_g_up)) / _d(base["revenue"])
+        _np_cons = dataset.get("net_profit_consolidated", period)
+        _detail_items, _detail_diag = _detail_block(
+            dataset, period,
+            (_d(base["gross_profit"]) - _d(base["net_profit"])) * (1 + _d(_e_up)),
+            _rev_scale, _d(_e_up),
+            tax_rate=params.get("tax_rate"),
+            minority_share=params.get("minority_share"),
+            net_profit_consolidated=(_d(_np_cons.value) if _np_cons is not None else None),
+        )
     return {
         "periods": (period,),
         "formula": ("情景归母净利 = 收入×(1+g) × (基期毛利率+m) − 毛利线以下隐含块×(1+e)；"
@@ -225,6 +370,8 @@ def compute(dataset, params: dict | None = None) -> dict:
             "base": base,
             "base_reproduction_gap": ("0" if base_gap == 0 else str(base_gap)),
             "direction_ok": direction_ok,
+            # V2：明细模式的逐项规则、税前利润/所得税/少数股东与残差（mode=fixed 时只有 mode）
+            "below_gross": _detail_diag,
             "closure": "0",
             "no_probability": "无校准分布：不显示发生概率，也不显示预测置信区间",
             "thresholds": {
@@ -283,7 +430,14 @@ def compute(dataset, params: dict | None = None) -> dict:
              "label": "回款天数敏感性：±10 天的资金占用（单项，非现金流预测）",
              "value": q(th["per_day_capital"] * 10), "unit": unit,
              "output_period": f"{period}（{up_label}）", "components": [], "residual": None},
-        ],
+        ] + ([{
+            "metric": "scenario_below_gross_detail",
+            "label": f"毛利线以下净额明细（{up_label}；明细模式）",
+            "value": q((_d(base["gross_profit"]) - _d(base["net_profit"])) * (1 + _d(_e_up))),
+            "unit": unit, "output_period": f"{period}（{up_label}）",
+            "residual": _detail_diag.get("residual_yuan"),
+            "components": _detail_items,
+        }] if _detail_items else []),
         "limits": LIMITS,
     }
 
@@ -400,4 +554,9 @@ def gold(dataset, params: dict | None = None) -> dict:
         th["per_day_capital"].quantize(Decimal("0.01")))
     out["collection_days_sensitivity_10d"] = float(
         (th["per_day_capital"] * 10).quantize(Decimal("0.01")))
+    # V2：明细模式的**总额**独立重算（基期毛利线以下净额 ×(1+e)）；逐项由
+    # `components_gold` 独立给出（本函数只核总额，不复制 compute 的分项代码）
+    if str(params.get("below_gross_mode") or "fixed") == "detail":
+        block = (_d(gp.value) - _d(np_.value)) * (1 + _d(e_up))
+        out["scenario_below_gross_detail"] = float(block.quantize(Decimal("0.01")))
     return out
