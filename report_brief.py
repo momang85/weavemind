@@ -3424,6 +3424,7 @@ def _analysis_card_block(task_id: str, *, ws_dir=None) -> str:
                          "完整卡与运行标识见下方底稿。")
         if notes:
             lines.append("")
+            lines.append("### 分析摘要选择说明")
             lines.extend(notes)
         if detail_written:
             lines.append("")

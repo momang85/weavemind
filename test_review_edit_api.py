@@ -796,24 +796,32 @@ class TestL0BSelectedRunEntersTheReport(_Base):
                          "缺 run_id 不接受默认采纳（禁止取最早/最新运行代替选择）")
 
     def test_selected_run_is_what_the_report_renders(self):
-        """U1 反例：默认真装配前两条运行；**用户选择新运行后正文必须是那一条**。"""
+        """U1 反例：默认真装配前两条运行；**用户选择新运行后正文必须是那一条**。
+
+        V0（阶段V）：主正文只留三条摘要，运行标识移到 `analysis/analysis_cards.md` 底稿——
+        本用例因此核对**摘要块 + 底稿**两处：所选运行必须进交付，且不得被默认运行顶替。
+        """
         import financial_analysis as fa
         import report_brief
         from financial_analysis import store as fa_store
         ds, base, newer, ws = self._seed()
         default_block = report_brief._analysis_card_block(self.tid, ws_dir=ws)
-        self.assertIn(base.run_id[:12], default_block, default_block)
-        self.assertNotIn(newer.run_id[:12], default_block, default_block)
+        default_cards = (ws / "analysis" / "analysis_cards.md").read_text(encoding="utf-8")
+        self.assertIn(base.run_id[:12], default_cards, default_cards[:400])
+        self.assertNotIn(newer.run_id[:12], default_cards, default_cards[:400])
+        self.assertIn("## 分析摘要", default_block, default_block[:200])
         fa_store.save_selection(ws, {
             "model_id": "scenario_sensitivity", "run_id": newer.run_id,
             "dataset_hash": ds.dataset_hash, "params": dict(newer.params),
             "rules_version": fa.validation.RULES_VERSION,
         }, note="测试显式选择")
         block = report_brief._analysis_card_block(self.tid, ws_dir=ws)
-        self.assertIn(newer.run_id[:12], block,
-                      f"所选运行必须进正文：{block[:400]}")
-        self.assertNotIn(base.run_id[:12], block,
+        cards = (ws / "analysis" / "analysis_cards.md").read_text(encoding="utf-8")
+        self.assertIn(newer.run_id[:12], cards,
+                      f"所选运行必须进正文/底稿：{cards[:400]}")
+        self.assertNotIn(base.run_id[:12], cards,
                          "不得改取默认运行（前两条）代替用户选择")
+        self.assertIn("## 分析摘要", block, block[:200])
 
     def test_stale_selection_is_reported_not_replaced(self):
         """资料/参数/规则一变，旧选择**标未采用并说明**，绝不悄悄换一条运行。"""
@@ -848,7 +856,9 @@ class TestL0BSelectedRunEntersTheReport(_Base):
         self.assertFalse(block.startswith("## 分析卡"),
                          f"过期的选择不得照样渲染成结论卡：{block[:300]}")
         self.assertIn("选择说明", block)
-        self.assertNotIn(base.run_id[:12], block,
+        # V0：默认运行也不得顶替过期选择——底稿里不能出现任何旧运行
+        cards = (ws / "analysis" / "analysis_cards.md").read_text(encoding="utf-8")
+        self.assertNotIn(base.run_id[:12], cards,
                          "更不得改取别的运行（数据集已变，任何旧运行都过期）")
         status = fa_store.selection_status(ws, dataset_hash=ds2.dataset_hash,
                                           rules_version=fa.validation.RULES_VERSION)
