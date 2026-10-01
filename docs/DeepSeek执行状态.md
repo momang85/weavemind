@@ -53,6 +53,8 @@
 > （其中净利只 +14.86 亿）`，边界写明直接法/间接法**不可相加**、应付项不证明账期延长，反转条件是
 > **采购付现反弹**。支撑修复：`adapters/annual_financial_tables.LABELS` 增两行直接法指标（销售收现/采购付现，
 > 三一实测 第 97/98 页），未重写抽取器；财务费用的原因改按披露原句（三一为**汇兑损益**），不再默认套利息模板。
+> **未取到（如实列缺口，不臆造）**：洋河第 10 页另有按出厂价分的**中高档酒/普通酒「产品类别」**表
+> （架构文件给出 −14.79%／−0.49%）——该表是**单期+同比**形状，现抽取器扫描窗口不含它，本次只作缺口列出。
 > 证据 [w2_judgments.json](evidence/w2_judgments.json)（脚本 `scripts/w2_judgments.py`）＋两份
 > `w2_*_judgments.md`。用例：`test_financial_analysis` **201**（6 个 W2 用例）、
 > `test_annual_financial_tables` 49、`test_delivery_chain` 409。
