@@ -1,6 +1,37 @@
 # DeepSeek 执行状态
 
-> ## 当前账（2026-10-01 · **主线改为分析卓越化 U1→U2→U3**）
+> ## 当前账（2026-10-01 · **阶段V：从分析标杆到经营研究产品**，基线 `cf4cbb7`）
+>
+> **当前目标**：按 [总架构师执行指令](总架构师执行指令.md) 与
+> [阶段V_从分析标杆到经营研究产品_20261001.md](阶段V_从分析标杆到经营研究产品_20261001.md)
+> 推进 **V0→V1→V2**。约 80% 能力/案例、最多 20% 必要支撑修复；不新增平台/服务/worker/数据库，
+> 不改模型/权限/密钥/付费上限，保留用户改动与既有防护。
+>
+> **V0 已实现（默认动作＝经营研究组合）**：`registry.RESEARCH_COMBINATION` =
+> 经营驱动＋现金调节桥＋条件情景；`questions` 增「经营研究」类型，计划命中它时只采用组合，
+> 旧模型（利润桥/现金质量/利润转现金/营运资本）记「与所问问题无关」留探索入口；
+> `store.select_for_report` 成为**唯一选择**（用户显式选择优先，否则组合各一条，不再截前两模型），
+> 正文、三图、分析卡共用它。三图进正常路径：`OrchestratorV2._analysis_chart_specs`
+> → `project/chart_data.json` → 生产渲染器（`chart_1..3.png`，`grade=publish`）。
+> **Fact 定位随数据走**：worker 冻结数据集时把 `{fact_id: 表/页/行}` 写进 `analysis/context.json`，
+> 正文来源表做成**可点页码锚点**（`…PDF#page=75`）。展示收紧：卡片缩成三条摘要，
+> 完整卡（run/output/component_id）落 `analysis/analysis_cards.md` 并**随包**，
+> 正文主体 0 个工程标识（run/output/component_id 全在文末『附：底稿索引』）；
+> 图页脚只留读数/单位·期间/简短来源/关键假设。
+>
+> **V0 成果（隔离跑通，如实标「实机登录待验」）**：证据
+> [v0_yanghe_normal_task.json](evidence/v0_yanghe_normal_task.json) +
+> `docs/evidence/v0_yanghe_normal_task/`（`report.md` / `report.pdf` / `charts/` /
+> `package/*.zip` / `screenshot_p3.png`），脚本 `scripts/v0_yanghe_normal_task.py` 走生产函数链
+> （事实→底稿→**data_analyzer 金融路径**→三图→简报装配→PDF/导出→冻结包），零模型调用。
+> 读数：计划**恰好采用组合三个模型**（均 validated）、174 观察、**174 条事实定位（154 条带页码）**、
+> 三图进 PDF（3 图 / 2 页，`images_ok`）、正文 8001 字符且**正文内工程标识 0**、
+> 包内 `analysis/{analysis_cards.md,analysis_runs.json,dataset.json,plan.json,context.json}` +
+> `charts/chart_1..3.png` + `reports/report.pdf`。**交付状态如实为 `draft`**：
+> 隔离跑不含 Critic 评审与检索来源两条轴（`acceptance_overall=fail`），不伪造评审通过；
+> **未验**：登录会话下的 `POST /api/tasks` 与页面点击（无可用会话，不读密钥不复制 token）。
+>
+> **当前账（2026-10-01 · 主线 U1→U2→U3 已收口，历史）**
 >
 > **当前目标**：按 [分析卓越化_经营驱动研究与标杆案例_20261001.md](分析卓越化_经营驱动研究与标杆案例_20261001.md)
 > （唯一当前行动）交标杆案例：**U1** 洋河 2023/2024 业务驱动利润报告 → **U2** 同案例现金流补充资料调节桥＋反向情景

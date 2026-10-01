@@ -1090,6 +1090,10 @@ def repack_adopted(task_id: str, *, md_bytes: bytes = b"", pdf_bytes: bytes = b"
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_bytes(_sel_blob)
                 files.append((p, _fa_in.ARC_SELECTION))
+            # V0（阶段V）：**分析底稿文本**（完整卡＝run/output/component_id 与规则）随包，
+            # 正文只留三条摘要；底稿是"可展开"的那一层，缺了它就只剩摘要无处可查。
+            for p in sorted((ws / "analysis").glob("*.md")):
+                files.append((p, f"analysis/{p.name}"))
         except Exception as exc:                 # noqa: BLE001 - 输入读不到就不进包
             logger.warning("打包：分析输入读取失败：%s", str(exc)[:100])
         # 完整模型稿（审计留档，按内容 hash 命名）：存在的每一版都进包（不覆盖历史）

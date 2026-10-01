@@ -258,9 +258,14 @@ class DataAnalyzerWorker(AsyncWorkerBase):
         # 状态如实（三档）：请求的模型一个都用不上 → failed；全过**且没有被拒绝的模型**
         # → success；其余（部分过、或有模型因缺输入被拒）→ partial —— 缺输入/不适用
         # 不是成功，读者必须看到缺口。
+        # V0（阶段V）：**"与所问问题无关"/"经营研究组合已覆盖"不算缺口**——走经营研究组合时
+        # 旧模型按设计进探索入口，若因此把整步记成 partial，读者会以为答案有缺口。
+        _non_gap = ("与所问问题无关", "经营研究组合已覆盖")
+        _blocking = [r for r in plan.rejected
+                     if str(r.get("reason") or "") not in _non_gap]
         if not plan.adopted or not adopted_ok:
             status = "failed"
-        elif len(adopted_ok) == len(plan.adopted) and not plan.rejected:
+        elif len(adopted_ok) == len(plan.adopted) and not _blocking:
             status = "success"
         else:
             status = "partial"

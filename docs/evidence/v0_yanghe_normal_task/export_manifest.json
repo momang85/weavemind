@@ -1,0 +1,110 @@
+{
+ "report_version_id": "19b3592ecf1502faaf95e19cc02d8223a424e5c0ac201159689e2368b18fb5cc",
+ "body_sha256": "169003435b063a689b76ad1244d68eb72184dadad4100ccd18173cff60a53aed",
+ "acceptance_overall": "fail",
+ "accepted_body_matches": true,
+ "delivered_body_sha256": "c7f3cf0d29a81287272b13362097411581505c4130fc3145cb0ae8ca7fcb6d10",
+ "final_content_sha256": "c7f3cf0d29a81287272b13362097411581505c4130fc3145cb0ae8ca7fcb6d10",
+ "final_content_matches": true,
+ "aligned": true,
+ "status": "draft",
+ "draft": true,
+ "draft_reason": "验收未通过（overall=fail）",
+ "review_valid": true,
+ "hard_fail": "",
+ "working_paper": {
+  "goal_met": true,
+  "rows": 10,
+  "derived": 12,
+  "gaps": 0,
+  "problems": 0
+ },
+ "research_state": {
+  "state": "research_draft",
+  "label": "研究草稿／待补原始披露",
+  "reason": "绑定里缺契约指纹；执行契约变化：待重验，计数不作为结论",
+  "located": 0,
+  "missing_labels": [
+   "业务背景",
+   "经营变化解释",
+   "财务附注",
+   "风险因素"
+  ],
+  "mandatory_supported": 1,
+  "mandatory_partial": 0,
+  "mandatory_total": 3,
+  "mandatory_questions": [
+   {
+    "metric": "revenue",
+    "question": "收入变化的量价与结构依据",
+    "supported": false,
+    "coverage": "none",
+    "material_kind": "无相关材料",
+    "missing_entry": false,
+    "locator": ""
+   },
+   {
+    "metric": "net_profit",
+    "question": "利润变化的分解",
+    "supported": false,
+    "coverage": "none",
+    "material_kind": "无相关材料",
+    "missing_entry": false,
+    "locator": ""
+   },
+   {
+    "metric": "operating_cashflow",
+    "question": "现金变化与利润覆盖的关系",
+    "supported": true,
+    "coverage": "full",
+    "material_kind": "两期事实的关系可复算（计算自披露数值）",
+    "missing_entry": false,
+    "locator": ""
+   }
+  ],
+  "optional_questions": [],
+  "unproven_assertions": 34,
+  "unsupported_claims": 34,
+  "requires_narrative": true,
+  "binding": {
+   "report_version_id": "19b3592ecf1502faaf95e19cc02d8223a424e5c0ac201159689e2368b18fb5cc",
+   "body_sha256": "169003435b063a689b76ad1244d68eb72184dadad4100ccd18173cff60a53aed",
+   "structure_version_id": "169003435b063a689b76ad1244d68eb72184dadad4100ccd18173cff60a53aed",
+   "evidence_fingerprint": "5283150dfeb8de01",
+   "rules_version": "2026.09.12",
+   "rules_fingerprint": "2ddecc9a",
+   "logic_fingerprint": "6d57517bf60ed4b0",
+   "contract_fingerprint": "",
+   "contract": null
+  },
+  "stale": true,
+  "stale_reason": "绑定里缺契约指纹；执行契约变化"
+ },
+ "renderer_version": "report_pdf/v1",
+ "template_version": "default",
+ "files": {
+  "markdown": {
+   "sha256": "c7f3cf0d29a81287272b13362097411581505c4130fc3145cb0ae8ca7fcb6d10",
+   "bytes": 47623
+  },
+  "working_paper_json": {
+   "sha256": "4ebb74d519068884d3ce2a8f9d1dbca0519ce833c5ff9b91804378058ecbec1d",
+   "bytes": 25219
+  },
+  "working_paper_csv": {
+   "sha256": "7c714086078b382d4c725875e9fb694512c901b8effc45b5bdee212bc22b5197",
+   "bytes": 6350
+  },
+  "pdf": {
+   "sha256": "7febfeda2e04fd277dd2386c9fb1065714c9e4e3fdcccc8cefd4f343a07e8978",
+   "bytes": 5603661
+  }
+ },
+ "client_side_renders": {
+  "html_print": {
+   "source_body_sha256": "c7f3cf0d29a81287272b13362097411581505c4130fc3145cb0ae8ca7fcb6d10",
+   "byte_hash_available": false
+  }
+ },
+ "generated_at": 1790829946.3107042
+}

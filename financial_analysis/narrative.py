@@ -15,6 +15,8 @@
 """
 from __future__ import annotations
 
+import re
+
 from . import charts as _charts
 from .contracts import RunStatus
 
@@ -104,6 +106,7 @@ def provenance_from_facts(facts, label_of=None) -> dict:
             "value": _attr(f, "value", None),
             "unit": str(_attr(f, "unit") or ""),
             "locator": locator_text(_attr(f, "source_locator")),
+            "url": str(_attr(f, "source_url") or ""),
         }
     return out
 
@@ -150,6 +153,7 @@ def provenance_from_observations(observations) -> dict:
             "value": _attr(o, "value", None),
             "unit": str(_attr(o, "unit") or ""),
             "locator": loc,
+            "url": str(_attr(o, "source_url") or ""),
         }
     return out
 
@@ -349,6 +353,19 @@ def _profit_table(od, limit: int = 6) -> list[str]:
     return lines
 
 
+def _locator_cell(item: dict) -> str:
+    """来源位置单元格：有原文链接就做成**可点**（PDF 页码锚点），没有就写位置文字。"""
+    loc = str(item.get("locator") or "").strip()
+    url = str(item.get("url") or "").strip()
+    if not loc:
+        return "未取到页码定位（见底稿与材料清单）"
+    if not url.startswith("http"):
+        return loc
+    m = re.search(r"第\s*(\d+)\s*页", loc)
+    href = f"{url}#page={m.group(1)}" if m else url
+    return f"[{loc}]({href})"
+
+
 def _source_table(runs, provenance: dict, limit: int = 14) -> list[str]:
     ids: list[str] = []
     for r in (runs or ()):
@@ -365,7 +382,7 @@ def _source_table(runs, provenance: dict, limit: int = 14) -> list[str]:
         shown = (f"{float(value):,.2f}{p.get('unit') or ''}"
                  if isinstance(value, (int, float)) else "—")
         lines.append(f"| {p.get('label') or '—'} | {p.get('period') or '—'} | {shown} | "
-                     f"{p.get('locator') or '未取到页码定位（见底稿与材料清单）'} |")
+                     f"{_locator_cell(p)} |")
     if len(ids) > limit:
         lines.append(f"| 其余 {len(ids) - limit} 项输入 | — | — | 见分析底稿"
                      "（`analysis/analysis_runs.json` 与 `analysis/dataset.json`） |")
