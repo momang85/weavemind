@@ -3,7 +3,7 @@
  "task_id": "v2-page",
  "goal": "洋河股份 2023/2024 经营研究：利润由何而来、现金为何变化、什么条件会改变判断；合并口径，数据截至 2025-04-30。",
  "inputs_written": {
-  "ws": "C:\\Users\\ding0\\AppData\\Local\\Temp\\v2_page_eaj17ly5\\v2-page",
+  "ws": "C:\\Users\\ding0\\AppData\\Local\\Temp\\v2_page_yqcg84k1\\v2-page",
   "dataset_json": true,
   "payload_keys": [
    "analysis/dataset.json",
@@ -51,7 +51,7 @@
  "screenshot": {
   "file": "screenshot_p6.png",
   "page": 6,
-  "bytes": 304548
+  "bytes": 305602
  },
  "artifacts": [
   "report.md",
