@@ -1,0 +1,61 @@
+{
+ "case": "V2 改两项假设 → 页面与导出同一组结果（隔离跑通）",
+ "task_id": "v2-page",
+ "goal": "洋河股份 2023/2024 经营研究：利润由何而来、现金为何变化、什么条件会改变判断；合并口径，数据截至 2025-04-30。",
+ "inputs_written": {
+  "ws": "C:\\Users\\ding0\\AppData\\Local\\Temp\\v2_page_eaj17ly5\\v2-page",
+  "dataset_json": true,
+  "payload_keys": [
+   "analysis/dataset.json",
+   "analysis/plan.json"
+  ]
+ },
+ "recompute_calls": [
+  {
+   "params": {
+    "revenue_growth": 0.05,
+    "gross_margin_delta": 0.01,
+    "expense_change_ratio": 0.0
+   },
+   "status": 200,
+   "run_id": "c209b375e359dc414571baf5d66659763373135b1e94813857bdba47ab6a07a3",
+   "error": null,
+   "error_code": null,
+   "scenario_net_profit_yuan": 8032843652.4,
+   "revenue_threshold_pct": 0.0,
+   "adopted": false
+  },
+  {
+   "params": {
+    "revenue_growth": -0.05,
+    "gross_margin_delta": -0.01,
+    "expense_change_ratio": 0.02
+   },
+   "status": 200,
+   "run_id": "e7435c47630b042b54ee84feae00868db98f8a44939c5ed3fcdae6b6adc11569",
+   "error": null,
+   "error_code": null,
+   "scenario_net_profit_yuan": 5053776048.14,
+   "revenue_threshold_pct": 1.37,
+   "adopted": false
+  }
+ ],
+ "consistency": {
+  "recomputed_scenario_net_profit_yuan": 8032843652.4,
+  "formatted_yi": "80.33",
+  "in_report_md": true,
+  "in_pdf_text": true,
+  "same_result": true,
+  "note": "同一组假设下：页面复算返回值、正文、PDF 三处必须显示同一个数；两次复算都不自动采纳（adopted=false），采纳由用户显式动作完成"
+ },
+ "screenshot": {
+  "file": "screenshot_p6.png",
+  "page": 6,
+  "bytes": 304548
+ },
+ "artifacts": [
+  "report.md",
+  "report.pdf",
+  "screenshot_p6.png"
+ ]
+}
