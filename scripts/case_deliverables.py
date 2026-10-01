@@ -79,9 +79,19 @@ def build_case(*, root: str, name: str, entity_id: str, doc_path: str,
 
     figures = _render(specs, out_dir, root, CA)
     prov = fa.narrative.provenance_from_facts(facts, label_of=F.metric_label)
+    # V1：主要贡献要绑到**已准入材料的披露原句**（管理层讨论/附注/风险）。用现役
+    # `narrative_evidence` 从缓存年报里抽；抽不到就如实写缺，不代拟业务解释。
+    records = []
+    try:
+        import narrative_evidence as ne
+        records = ne.extract_sections(doc, periods=(2023, 2024), company=name,
+                                      company_id=entity_id, as_of="2025-04-30",
+                                      max_per_kind=10)
+    except Exception as exc:                          # noqa: BLE001 - 抽不到就不绑定
+        _log(f"[{name}] 披露段落抽取失败：{str(exc)[:120]}")
     note = fa.narrative.research_note([od_run, cash_run] + [r for _l, r in scen],
                                       provenance=prov, charts=specs,
-                                      label_of=F.metric_label)
+                                      label_of=F.metric_label, records=records, doc=doc)
     return {"case": case_title, "entity_id": entity_id,
             "doc": os.path.relpath(doc_path, root).replace("\\", "/"),
             "dataset": {"observations": ds.manifest.observations,

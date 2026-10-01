@@ -65,8 +65,18 @@ def main() -> int:
                                           .get("figures") or [])]
     runs = [od_run, cash_run] + [r for _label, r in scen_runs]
     prov = fa.narrative.provenance_from_facts(facts, label_of=F.metric_label)
+    # V1：主要贡献绑到已准入材料的披露原句（同 `case_deliverables` 一条路径）
+    records = []
+    try:
+        import narrative_evidence as ne
+        records = ne.extract_sections(doc, periods=(2023, 2024), company="洋河股份",
+                                      company_id="002304.SZ", as_of="2025-04-30",
+                                      max_per_kind=10)
+    except Exception as exc:                           # noqa: BLE001 - 抽不到就不绑定
+        print(f"披露段落抽取失败：{str(exc)[:120]}")
     note = fa.narrative.research_note(runs, provenance=prov, charts=charts,
-                                      label_of=F.metric_label)
+                                      label_of=F.metric_label, records=records,
+                                      doc=doc)
     with open(NOTE_MD, "w", encoding="utf-8") as f:
         f.write(note)
     sections = re.findall(r"^### (.+)$", note, re.M)

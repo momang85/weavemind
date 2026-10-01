@@ -3288,5 +3288,63 @@ class TestV1CashChangeBridge(unittest.TestCase):
         self.assertIn("components", res["failed"])
 
 
+class TestV1DriverEvidenceBinding(unittest.TestCase):
+    """V1：主要贡献 → 披露原句 / 支持边界 / 反证 / 观察指标（确定性绑定，不代拟解释）。"""
+
+    def _runs(self):
+        inst = TestV1CashChangeBridge("test_sany_bridge_matches_the_reviewed_arithmetic")
+        rows = [_row("revenue", "2023年", 33_126_277_551.51, unit="元"),
+                _row("revenue", "2024年", 28_876_296_993.56, unit="元"),
+                _row("operating_cost", "2023年", 8_200_245_255.42, unit="元"),
+                _row("operating_cost", "2024年", 7_751_218_356.66, unit="元"),
+                _row("net_profit", "2023年", 10_015_930_040.27, unit="元"),
+                _row("net_profit", "2024年", 6_673_388_602.12, unit="元")]
+        ds = fa.freeze_from_facts(rows, periods=(2023, 2024), entity="洋河股份",
+                                  entity_id="002304.SZ", as_of="2025-04-30",
+                                  source_label="test:v1-driver")
+        return [fa.run("operating_drivers", ds),
+                fa.run("cash_reconciliation", inst._sany())]
+
+    def test_binds_a_relevant_section_and_states_the_boundary(self):
+        from financial_analysis import narrative as nt
+        records = [{"kind": "change_explanation", "kind_label": "变动解释",
+                    "section": "第三节 管理层讨论与分析 > 五、主要经营情况 > 现金流",
+                    "snippet": "经营活动现金流量净额同比增加，主要系销售回款增加与应付账款结算节奏变化所致。",
+                    "locator": "PDF 第 18 页 · 小节：现金流", "page": 18}]
+        text = "\n".join(nt.driver_evidence(self._runs(), records))
+        self.assertIn("主要贡献的披露支持", text)
+        self.assertIn("销售回款增加", text, text[:400])
+        self.assertIn("出处：", text)
+        self.assertIn("不构成因果已证明", text)
+        self.assertIn("反证/替代解释", text)
+        self.assertIn("后续观察指标", text)
+
+    def test_missing_disclosure_is_reported_not_invented(self):
+        from financial_analysis import narrative as nt
+        text = "\n".join(nt.driver_evidence(self._runs(), records=[]))
+        self.assertIn("没有", text)
+        self.assertIn("只作金额分解", text)
+        self.assertNotIn("主要系", text, "没有材料时不得编出解释")
+
+    def test_keyword_fallback_is_labelled_as_a_hit(self):
+        from financial_analysis import narrative as nt
+        doc = {"text": "…… 应付账款 1,234 1,000 主要系结算节奏影响。",
+               "page_offsets": [(0, 7)]}
+        text = "\n".join(nt.driver_evidence(self._runs(), records=[], doc=doc))
+        self.assertIn("关键词", text)
+        self.assertIn("原件第 7 页", text)
+
+    def test_note_includes_the_section_only_when_evidence_exists(self):
+        from financial_analysis import narrative as nt
+        runs = self._runs()
+        without = nt.research_note(runs)
+        self.assertIn("### 四之二、主要贡献的披露支持", without)
+        self.assertIn("没有可绑定的已准入披露段落", without)
+        with_ev = nt.research_note(runs, records=[{
+            "section": "现金流", "snippet": "应付账款结算节奏变化",
+            "locator": "PDF 第 1 页"}])
+        self.assertIn("披露原句", with_ev)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

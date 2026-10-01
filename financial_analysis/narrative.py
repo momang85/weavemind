@@ -306,9 +306,16 @@ def _conclusions(od, cash, scens) -> list[str]:
                 txt += (f"；现金变化 {_yi(_attr(chg, 'value'))} 亿元，"
                         f"最大构成 {_attr(comps[0], 'label')} "
                         f"{_yi(_attr(comps[0], 'value'))} 亿元")
-        if sup or drag:
-            txt += (f"；最大支撑 {sup.get('label')} {_yi(sup.get('value'))} 亿元、"
-                    f"最大拖累 {drag.get('label')} {_yi(drag.get('value'))} 亿元")
+        if sup.get("label") or drag.get("label"):
+            # 只有真的取到那一项才写：没有负向调节项时 `largest_drag` 为 None，
+            # 不能印成“最大拖累 None — 亿元”。
+            bits = []
+            if sup.get("label"):
+                bits.append(f"最大支撑 {sup['label']} {_yi(sup.get('value'))} 亿元")
+            if drag.get("label"):
+                bits.append(f"最大拖累 {drag['label']} {_yi(drag.get('value'))} 亿元")
+            if bits:
+                txt += "；" + "、".join(bits)
         items.append(txt)
     else:
         items.append("**现金**：本次未运行现金调节桥（缺现金流量表补充资料），"
@@ -485,6 +492,194 @@ def _alternatives(od) -> list[str]:
     return lines
 
 
+# ── V1：主要贡献 → 披露支持 / 反证 / 观察指标（确定性绑定，不代拟业务解释）──────
+# 每个指标的关键词（用于在已准入材料的段落里找**可能相关**的披露）与"该看什么指标"。
+_DRIVER_TERMS: dict = {
+    "selling_expense": ("销售费用", "促销", "广告", "市场推广", "渠道", "销售人员"),
+    "admin_expense": ("管理费用", "职工薪酬", "股份支付", "管理人员"),
+    "rd_expense": ("研发费用", "研发投入", "研发人员"),
+    "finance_expense": ("财务费用", "利息收入", "利息支出", "汇兑"),
+    "taxes_and_surcharges": ("税金及附加", "消费税", "城建税", "教育费附加"),
+    "income_tax_expense": ("所得税", "税率", "递延所得税"),
+    "credit_impairment": ("信用减值", "坏账", "应收账款"),
+    "asset_impairment": ("资产减值", "存货跌价", "减值准备"),
+    "fair_value_change": ("公允价值", "交易性金融资产"),
+    "investment_income": ("投资收益", "联营", "合营", "理财", "股权"),
+    "minority_interest": ("少数股东", "少数股东损益"),
+    "operating_cost": ("营业成本", "成本", "原材料"),
+    "revenue": ("营业收入", "销量", "销售", "市场份额"),
+    "non_operating_income": ("营业外收入", "政府补助"),
+    "non_operating_expense": ("营业外支出", "捐赠", "罚款"),
+    # 现金侧
+    "change_in_working_capital": ("经营性应付", "经营性应收", "应付账款", "应收账款",
+                                  "存货", "票据", "预收", "结算"),
+    "change_in_non_cash": ("折旧", "摊销", "减值", "递延所得税"),
+}
+# 每条金额贡献的**反证方向**与**后续观察指标**（确定性、可检验；不写业务因果）
+_DRIVER_WATCH: dict = {
+    "selling_expense": ("费用下降也可能来自投放节奏后移或口径调整",
+                        "下期销售费用率、广告与促销费明细、经销商政策披露"),
+    "admin_expense": ("管理费用含一次性项目（股份支付/重组），单期变化不代表常态化",
+                      "下期管理费用率、职工薪酬与股份支付明细"),
+    "rd_expense": ("研发费用波动常与项目阶段有关，未必是投入收缩",
+                   "下期研发投入强度、资本化比例与在研项目披露"),
+    "finance_expense": ("利息收支受货币资金与利率影响，非经营改善",
+                        "下期货币资金余额、有息负债与利率环境"),
+    "taxes_and_surcharges": ("消费税/附加税随收入与结构变化，属被动项",
+                             "下期税金及附加占收入比、消费税计税依据"),
+    "income_tax_expense": ("税率变化只是对照，不是税率变化的原因；原因见税率调节附注",
+                           "下期实际税率与税率调节表、非经常性损益的税务影响"),
+    "credit_impairment": ("减值计提与转回有主观性，单期变化不等于资产质量改善",
+                          "下期应收账款账龄、迁徙率与坏账准备余额"),
+    "asset_impairment": ("存货跌价与资产减值的计提/转回会双向影响利润",
+                         "下期存货跌价准备余额、存货周转天数"),
+    "fair_value_change": ("公允价值变动未实现，不构成经营改善",
+                          "下期交易性金融资产/负债余额与持仓披露"),
+    "investment_income": ("是否经常性要看公司非经常性损益披露与业务实质，不按指标名剔除",
+                          "下期投资收益构成（联营/合营/理财）、非经常性损益与扣非归母净利"),
+    "operating_cost": ("成本变化含原材料价格与结构，未必是效率改善",
+                       "下期毛利率、单位成本、主要原材料价格"),
+    "revenue": ("收入含并表范围与结构变化（均价≠提价）",
+                "下期分产品/分地区收入、销量与均价、并表范围变化"),
+    "change_in_working_capital": ("占用与时点口径：应付增加可能只是结算节奏或票据",
+                                  "下期应付/应收/存货绝对额与周转天数、票据与预收变动"),
+    "change_in_non_cash": ("非现金项是会计加回（计提/转回/递延税）",
+                           "下期折旧摊销与减值明细、递延所得税附注"),
+}
+
+
+def _terms_for(component_id: str, label: str) -> tuple:
+    key = str(component_id or "")
+    if key in _DRIVER_TERMS:
+        return _DRIVER_TERMS[key]
+    base = key.split(":")[-1]
+    return _DRIVER_TERMS.get(base) or (str(label or "")[:6],)
+
+
+def _watch_for(component_id: str) -> tuple:
+    key = str(component_id or "")
+    base = key.split(":")[-1]
+    return _DRIVER_WATCH.get(key) or _DRIVER_WATCH.get(base) or (
+        "该金额是会计分解，业务原因需要对应披露",
+        "下期同一项目的金额与披露说明")
+
+
+def _match_records(records, terms, limit: int = 1) -> list:
+    """在已准入段落里找与这项贡献**相关**的披露（严格打分，避免"句尾顺带提到"就绑定）。
+
+    打分：小节名命中 +3、段首 60 字命中 +2、段内其它位置命中 +1；**总分 < 2 不绑定**
+    （即至少要出现在小节名或段首），否则如实报告"没有相关段落"。
+    """
+    hits = []
+    for r in (records or ()):
+        if not isinstance(r, dict):
+            continue
+        section = str(r.get("section") or "")
+        snip = str(r.get("snippet") or "")
+        head = snip[:60]
+        score = 0
+        for t in terms:
+            if not t:
+                continue
+            if t in section:
+                score += 3
+            if t in head:
+                score += 2
+            elif t in snip:
+                score += 1
+        if score >= 2:
+            hits.append((score, r))
+    hits.sort(key=lambda x: -x[0])
+    return [r for _s, r in hits[:limit]]
+
+
+def _doc_keyword_hit(doc, terms, *, window: int = 100) -> dict | None:
+    """兜底取证：在**原件全文**里按关键词找一处命中（带页码），并标明是关键词命中。
+
+    为什么需要：`narrative_evidence` 每类只留若干条（避免堆砌），像"投资收益 643,008 …
+    主要系处置远期外汇合约收益增加"这种句子可能落在别的类别里而被漏掉。兜底只做
+    **关键词窗口 + 页码**，不冒充"管理层讨论段落"——locator 里写清楚。
+    """
+    text = str((doc or {}).get("text") or "")
+    if not text:
+        return None
+    for t in terms:
+        if not t:
+            continue
+        i = text.find(t)
+        if i < 0:
+            continue
+        page = 0
+        for pos, pno in (doc.get("page_offsets") or []):
+            if int(pos) <= i:
+                page = int(pno)
+            else:
+                break
+        snippet = text[max(0, i - window // 2):i + window].replace("\n", " ")
+        locator = (f"原件第 {page} 页（关键词「{t}」命中，未归类到管理层讨论小节）"
+                   if page else f"原件（关键词「{t}」命中，未取到页码）")
+        return {"snippet": snippet, "page": page, "locator": locator,
+                "kind_label": "关键词命中"}
+    return None
+
+
+def driver_evidence(runs, records, *, limit: int = 3, doc=None) -> list[str]:
+    """把主要金额贡献绑到**已准入材料的披露原句**，并给反证与观察指标（V1）。
+
+    只做绑定，不代拟业务解释：披露说了什么就引用什么，并写明"这条披露支持到哪里"。
+    找不到对应披露的贡献**如实写缺**（不编解释、不拿别的段落顶替）。
+    """
+    od = _pick(runs, "operating_drivers")
+    cash = _pick(runs, "cash_reconciliation")
+    items: list[dict] = []
+    if od is not None:
+        detail = _out(od, "net_profit_change_detail")
+        for c in (_attr(detail, "components") or ()) if detail is not None else ():
+            if str(_attr(c, "component_id")) == "unexplained_residual":
+                continue
+            items.append({"component_id": str(_attr(c, "component_id")),
+                          "label": str(_attr(c, "label")),
+                          "value": float(_attr(c, "value") or 0)})
+    if cash is not None:
+        chg = _out(cash, "operating_cashflow_change")
+        for c in (_attr(chg, "components") or ()) if chg is not None else ():
+            cid = str(_attr(c, "component_id"))
+            if cid in ("change_in_net_profit", "change_in_residual"):
+                continue          # 起点与差额不是"可解释的驱动项"
+            items.append({"component_id": cid, "label": str(_attr(c, "label")),
+                          "value": float(_attr(c, "value") or 0)})
+    items.sort(key=lambda x: -abs(x["value"]))
+    lines: list[str] = []
+    for item in items[:limit]:
+        cid, label, value = item["component_id"], item["label"], item["value"]
+        terms = _terms_for(cid, label)
+        hits = _match_records(records, terms)
+        if not hits and doc is not None:
+            fallback = _doc_keyword_hit(doc, terms)
+            if fallback:
+                hits = [fallback]
+        contra, watch = _watch_for(cid)
+        lines.append(f"- **{label} {_yi(value)} 亿元**（会计分解）")
+        if hits:
+            rec = hits[0]
+            where = str(rec.get("locator") or rec.get("section") or "")
+            if rec.get("page") and "第" not in where:
+                where = f"{where}（PDF 第 {rec.get('page')} 页）".strip("（）")
+            snip = str(rec.get("snippet") or "").replace("\n", " ")[:140]
+            lines.append(f"  - 披露原句：{snip}")
+            lines.append(f"  - 出处：{where[:120]}")
+            lines.append("  - 支持到哪里：该披露与这项金额**方向一致或同期出现**；"
+                         "金额来自调节表、段落来自管理层讨论，**不构成因果已证明**")
+        else:
+            lines.append(f"  - 披露支持：本次材料里**没有**与「{'/'.join(terms[:3])}」"
+                         "相关的段落（未取到或未准入）：这一项只作金额分解")
+        lines.append(f"  - 反证/替代解释：{contra}")
+        lines.append(f"  - 后续观察指标：{watch}")
+    if not lines:
+        return []
+    return ["- **主要贡献的披露支持（原句＋边界＋反证＋观察指标）**"] + lines
+
+
 def _slug_text(slug, label_of=None) -> str:
     """内部指标名 → 可读写法：`信用减值损失（`credit_impairment_provision`）`。
 
@@ -614,7 +809,8 @@ def _engineering_index(runs, charts) -> list[str]:
 
 # ------------------------------------------------------------------ 主入口
 
-def research_note(runs, *, provenance=None, charts=None, label_of=None) -> str:
+def research_note(runs, *, provenance=None, charts=None, label_of=None,
+                  records=None, doc=None) -> str:
     """已验证运行 → 4–6 页正文（markdown）。缺哪个模型就如实写缺，不补数。
 
     **未通过独立验证的运行在这里被挡掉**：即使调用方把 `validation_failed` 的运行传进来，
@@ -674,6 +870,17 @@ def research_note(runs, *, provenance=None, charts=None, label_of=None) -> str:
         lines.append("### 四、替代解释（会改变判断）")
         lines.extend(_alternatives(od))
         lines.append("")
+        hits = driver_evidence(runs, records, doc=doc) if (records or doc) else []
+        if hits:
+            lines.append("### 四之二、主要贡献的披露支持（原句＋边界＋反证＋观察指标）")
+            lines.extend(hits[1:])          # 首行是标题行，已在上一行给出
+            lines.append("")
+        elif od is not None:
+            lines.append("### 四之二、主要贡献的披露支持")
+            lines.append("- 本次没有可绑定的已准入披露段落（材料未准入或未取到管理层讨论）："
+                         "主要贡献只作金额分解，**不代拟业务解释**；补齐材料后按"
+                         "「金额 → 披露原句 → 支持到哪里 → 反证 → 观察指标」逐项绑定。")
+            lines.append("")
     if cash is not None or scens:
         lines.append("### 五、现金形成与反向情景")
         if cash is not None:
