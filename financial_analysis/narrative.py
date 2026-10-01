@@ -56,6 +56,14 @@ def _pct4(value) -> str:
         return "—"
 
 
+def _num_of(value):
+    """元值 → float（取不到返回 None；不把 0.00 当成"取到了"）。"""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 # ------------------------------------------------------------------ 事实来源定位
 
 def _clean_label(label, cut: str = "") -> str:
@@ -406,7 +414,8 @@ def _locator_cell(item: dict) -> str:
     return f"[{loc}]({href})"
 
 
-def _source_table(runs, provenance: dict, limit: int = 14) -> list[str]:
+def _source_table(runs, provenance: dict, limit: int = 14,
+                  detail_hint: str = "") -> list[str]:
     ids: list[str] = []
     for r in (runs or ()):
         for o in (_attr(r, "outputs") or ()):
@@ -428,7 +437,10 @@ def _source_table(runs, provenance: dict, limit: int = 14) -> list[str]:
                      "（`analysis/analysis_runs.json` 与 `analysis/dataset.json`） |")
     lines.append("")
     lines.append("- 上表是**用于计算的关键读数**及其原件位置；完整事实身份清单"
-                 "（fact_id → 表/页/行）见文末『附：底稿索引』与包内 `analysis/` 目录。")
+                 "（fact_id → 表/页/行）见"
+                 + (f"`{detail_hint}` 的『附：底稿索引』" if detail_hint
+                    else "文末『附：底稿索引』")
+                 + "与包内 `analysis/` 目录。")
     return lines
 
 
@@ -846,7 +858,7 @@ def _limits() -> list[str]:
     ]
 
 
-def _figures(charts) -> list[str]:
+def _figures(charts, detail_hint: str = "") -> list[str]:
     figs = [c for c in (charts or ()) if isinstance(c, dict) and c.get("available")]
     if not figs:
         return []
@@ -855,7 +867,9 @@ def _figures(charts) -> list[str]:
         lines.append(f"- 图 {i}：{c.get('title') or ''}")
         if c.get("conclusion"):
             lines.append(f"  - 图注（由读数算出）：{c['conclusion']}")
-    lines.append("- 图与正文共用同一次运行；文件名与运行标识见文末『附：底稿索引』。")
+    lines.append("- 图与正文共用同一次运行；文件名与运行标识见"
+                 + (f"`{detail_hint}` 的『附：底稿索引』。" if detail_hint
+                    else "文末『附：底稿索引』。"))
     return lines
 
 
@@ -905,16 +919,19 @@ def _engineering_index(runs, charts) -> list[str]:
 
 # ------------------------------------------------------------------ 主入口
 
-def research_note(runs, *, provenance=None, charts=None, label_of=None,
-                  records=None, doc=None, volume_price=None,
-                  direct_cash=None) -> str:
-    """已验证运行 → 4–6 页正文（markdown）。缺哪个模型就如实写缺，不补数。
+def research_brief(runs, *, provenance=None, charts=None, label_of=None,
+                   records=None, doc=None, volume_price=None,
+                   direct_cash=None, detail_hint: str = "") -> dict:
+    """已验证运行 → `{front, note, detail}`（X0：**输入收集齐后只渲染一次**）。
 
-    **未通过独立验证的运行在这里被挡掉**：即使调用方把 `validation_failed` 的运行传进来，
-    正文也不会引用它的数字（该模型一律按「本次未运行」写）。
+    - `front`：三项主判断（前两页读得到：判断句＋关键读数＋依据位置＋会削弱它的读数）；
+    - `note`：论证线正文（结论 → 金额分解 → 披露支持 → 替代解释 → 现金与反向情景 →
+      待核查 → 口径限制 → 图 → 底稿索引）；
+    - `detail`：完整七段式判断明细（原句/位置/替代解释/缺口）——**另附**，主文只留指针。
 
-    W2（阶段W §5）：开头先给**可检验的研究判断**（判断→数字→原句/位置→边界→替代解释→
-    观察与反转条件→缺口），由 `financial_analysis.judgments` 从读数与已准入披露驱动。
+    为什么分成三块（阶段X §3 的可见结果）：此前七段式全文压在正文里，正常洋河 PDF 的判断
+    到第 8 页才出现、正文过长；判断层与论证线同源，拆开只是排版，不改数字、不改判断。
+    缺哪个模型就如实写缺，不补数；未通过独立验证的运行在这里被挡掉。
     """
     runs = [r for r in (runs or ())
             if str(_attr(r, "status")) == str(RunStatus.VALIDATED)]
@@ -922,7 +939,7 @@ def research_note(runs, *, provenance=None, charts=None, label_of=None,
     cash = _pick(runs, "cash_reconciliation")
     scens = _spread(runs, "scenario_sensitivity")
     if od is None and cash is None:
-        return ""
+        return {"front": "", "note": "", "detail": ""}
     entity = ""
     for r in (od, cash):
         if r is None:
@@ -943,14 +960,27 @@ def research_note(runs, *, provenance=None, charts=None, label_of=None,
                         "> 本节由 `financial_analysis` 从**已验证运行**装配：每个数字都能回查到"
                         "运行与输出标识（见文末『附：底稿索引』），图、卡、底稿共用同一次运行。"
                         "未取到的披露项留在「未解释差额」，既不摊派也不当零。", ""]
-    # W2：先给**可检验的研究判断**（阶段W §5 的七段式；读数缺就如实写缺口、不生成判断）
+    # W2/X0：判断**只算一次**——主文取前三条做首屏摘要，完整七段式进 detail（另附）。
+    front: list[str] = []
+    detail: list[str] = []
+    js: list[dict] = []
     try:
         from . import judgments as _jd
-        lines.extend(_jd.render_judgments(_jd.research_judgments(
-            runs, volume_price=volume_price, records=records,
-            direct_cash=direct_cash, limit=5)))
+        js = _jd.research_judgments(runs, volume_price=volume_price, records=records,
+                                    direct_cash=direct_cash, limit=5)
+        front = _jd.render_judgment_summary(js, limit=3)
+        detail = _jd.render_judgments(js)
+        if detail:
+            detail = ["## 研究判断明细（七段式，另附）", "",
+                      "> 主文只给三项主判断；这里是完整七段式——数字与贡献、原句与位置、"
+                      "支持边界、替代解释、观察与反转条件、缺口。**与主文同一次装配**"
+                      "（同一批运行、同一批已准入披露）。", ""] + detail
     except Exception as exc:                 # noqa: BLE001 - 判断层出错不影响既有正文
         lines.append(f"> 研究判断本次未生成（{type(exc).__name__}）：正文其余部分照常给出。")
+        lines.append("")
+    if js and detail_hint:
+        lines.append(f"- 完整七段式研究判断（全部原句/位置/替代解释/缺口）见 "
+                     f"`{detail_hint}`（随交付包提供）；主文只给三项主判断。")
         lines.append("")
     lines.append("### 一、结论（先看这三条）")
     for i, txt in enumerate(_conclusions(od, cash, scens), 1):
@@ -962,7 +992,7 @@ def research_note(runs, *, provenance=None, charts=None, label_of=None,
         lines.append("")
     prov_map = dict(provenance or {})
     if prov_map:
-        table = _source_table(runs, prov_map)
+        table = _source_table(runs, prov_map, detail_hint=detail_hint)
         if table:
             lines.append("### 三、披露支持与来源定位")
             lines.extend(table)
@@ -1001,6 +1031,20 @@ def research_note(runs, *, provenance=None, charts=None, label_of=None,
                 parts = "、".join(f"{_attr(c, 'label')} {_yi(_attr(c, 'value'))} 亿元"
                                   for c in (_attr(chg, "components") or ()))
                 lines.append(f"- **经营现金流变化**：{_yi(_attr(chg, 'value'))} 亿元 ＝ {parts}")
+                # X0（阶段X §3）：**方向**必须先说清楚——谁在推动、谁在缓冲。只列构成
+                # （或以绝对占比说"主要由营运资本解释"）会把洋河的缓冲项说成主因。
+                try:
+                    from . import judgments as _jd2
+                    _comps = {str(_attr(c, "component_id")): _num_of(_attr(c, "value"))
+                              for c in (_attr(chg, "components") or ())}
+                    _driver, _roles, _direction = _jd2.cash_direction_roles(
+                        _num_of(_attr(chg, "value")),
+                        _comps.get("change_in_net_profit"),
+                        _comps.get("change_in_working_capital"))
+                    if _direction:
+                        lines.append(f"  - **方向**：{_direction}")
+                except Exception:              # noqa: BLE001 - 方向句取不到不影响构成行
+                    pass
                 lines.append("  - 这是**会计构成**：营运资本项变化可能只是时点与资金占用，"
                              "能不能持续须看应付/应收/存货明细与结算条款；"
                              "投资收益等是否非经常要看公司非经常性损益披露，不按指标名剔除")
@@ -1087,7 +1131,27 @@ def research_note(runs, *, provenance=None, charts=None, label_of=None,
     lines.append("")
     lines.extend(_limits())
     lines.append("")
-    lines.extend(_figures(charts))
-    lines.append("")
-    lines.extend(_engineering_index(runs, charts))
-    return "\n".join(lines).rstrip() + "\n"
+    lines.extend(_figures(charts, detail_hint=detail_hint))
+    # X0（阶段X §3）：**底稿索引（run/output/component_id 逐个标识）属于"ID 详表"**，
+    # 与七段式判断明细一起**另附**（主文给结论与来源位置，标识清单进详表）。
+    detail.extend(_engineering_index(runs, charts))
+
+    def _join(parts) -> str:
+        return "\n".join(parts).rstrip() + "\n" if parts else ""
+
+    return {"front": _join(front), "note": _join(lines), "detail": _join(detail)}
+
+
+def research_note(runs, *, provenance=None, charts=None, label_of=None,
+                  records=None, doc=None, volume_price=None,
+                  direct_cash=None, detail_hint: str = "") -> str:
+    """兼容入口：`research_brief(...)` 的三块合并成一份文本（front → note → detail）。
+
+    脚本与既有调用方拿到的是**完整**正文（判断、论证线、七段式明细、底稿索引都在），
+    报告装配器则按 `research_brief` 分开排：首屏三条主判断、正文、明细另附。
+    """
+    parts = research_brief(runs, provenance=provenance, charts=charts, label_of=label_of,
+                           records=records, doc=doc, volume_price=volume_price,
+                           direct_cash=direct_cash, detail_hint=detail_hint)
+    out = [p for p in (parts.get("front"), parts.get("note"), parts.get("detail")) if p]
+    return ("\n".join(out).rstrip() + "\n") if out else ""

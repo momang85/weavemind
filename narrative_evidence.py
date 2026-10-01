@@ -1063,6 +1063,37 @@ _VP_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
 _VP_TOL = 0.5          # 同义行去重容差（百分比）
 
 
+_VP_WRAP_TAIL = re.compile(r"\d\.\s*$")           # 行尾是 "数字."：小数部分被换行切走
+
+
+def _vp_lines(text: str) -> list[tuple[str, int, int]]:
+    """正文 → `[(行文本, 字符起点, 字符终点)]`，并把**被 PDF 换行切开的小数**拼回同一行。
+
+    实机（洋河 **2023 年**年报，X1 首例）：`（1）营业收入构成` 表把
+    `32,389,581,931.71` 断成 `32,389,581,931.` + `71 97.78% 29,338,843,747.` + `26 …`
+    三行；不拼回去，这张表的白酒收入取不到，推算吨价也随之缺（2024 年报同一张表没有被
+    切开，所以问题只在较早材料暴露）。
+
+    只在**两个条件同时成立**时拼接：上一行以"数字."结尾，且下一行以数字开头——否则
+    宁可不拼（拼错会把一条真行并进上一行，宁可少取一条，也不取错）。
+    """
+    raw = str(text or "")
+    out: list[tuple[str, int, int]] = []
+    pos = 0
+    for line in raw.splitlines():
+        start = raw.find(line, pos)
+        if start < 0:
+            start = pos
+        end = start + len(line)
+        pos = max(end, pos)
+        if out and _VP_WRAP_TAIL.search(out[-1][0]) and re.match(r"^\s*\d", line):
+            prev = out.pop()
+            out.append((prev[0] + line, prev[1], end))
+        else:
+            out.append((line, start, end))
+    return out
+
+
 def _vp_tokens(line: str) -> list[tuple[str, float]]:
     """行内数字（含百分号）→ `[(类型, 值)]`；百分号单独标出，便于按位置取同比。"""
     out: list[tuple[str, float]] = []
@@ -1086,10 +1117,8 @@ def _vp_line_for(text: str, label: str, *, group_after: int = -1) -> dict | None
     才不会从成本表里抽出成本数（实机反例：省内抽成了 12,748,484,435.48 的营业成本）。
     """
     pos = 0
-    for raw in str(text or "").splitlines():
-        line = raw
-        start = text.find(line, pos)
-        pos = start + len(line) if start >= 0 else pos
+    for line, start, end in _vp_lines(text):
+        pos = end
         if label not in line:
             continue
         if not re.match(rf"^\s*\*{{0,2}}{re.escape(label)}[\s（(]", line):
@@ -1102,17 +1131,15 @@ def _vp_line_for(text: str, label: str, *, group_after: int = -1) -> dict | None
         return {"label": label, "cur": nums[0], "share_cur": nums[1], "prev": nums[2],
                 "share_prev": nums[3], "yoy": nums[4],
                 "line": " ".join(line.split()), "char_start": start,
-                "char_end": start + len(line)}
+                "char_end": end}
     return None
 
 
 def _vp_line_volume(text: str, label: str) -> dict | None:
     """实物量表：`产品类别 项目 2024 2023 同比`（项目行为 销售量(吨) 等）。"""
     pos = 0
-    for raw in str(text or "").splitlines():
-        line = raw
-        start = text.find(line, pos)
-        pos = start + len(line) if start >= 0 else pos
+    for line, start, end in _vp_lines(text):
+        pos = end
         if label not in line:
             continue
         if not re.search(rf"{re.escape(label)}\s*[（(]", line):
@@ -1123,7 +1150,7 @@ def _vp_line_volume(text: str, label: str) -> dict | None:
             continue
         return {"label": label, "cur": nums[0], "prev": nums[1], "yoy": nums[2],
                 "line": " ".join(line.split()), "char_start": start,
-                "char_end": start + len(line)}
+                "char_end": end}
     return None
 
 
@@ -1150,41 +1177,33 @@ def _vp_parse_row(line: str, *, label: str = "") -> dict | None:
 
 def _vp_composition(text: str) -> dict:
     """把『（1）营业收入构成』表按组切开：`{"total": row, "groups": {组: [行, …]}}`。"""
-    lines = str(text or "").splitlines()
-    start = None
-    for i, ln in enumerate(lines):
-        if "营业收入构成" in ln:
-            start = i
-            break
-    if start is None:
-        return {}
     out: dict = {"total": None, "groups": {}}
     cur = ""
-    offset = sum(len(str(x)) + 1 for x in lines[:start])      # 表头行的起点
-    for raw in lines[start:start + 160]:
-        s = str(raw or "").strip()
-        step = len(str(raw or "")) + 1
+    folded = _vp_lines(text)
+    start_at = next((i for i, (ln, _s, _e) in enumerate(folded)
+                     if "营业收入构成" in ln), None)
+    if start_at is None:
+        return {}
+    for line, c_start, c_end in folded[start_at:start_at + 160]:
+        s = str(line or "").strip()
         if s.startswith("（2）") or s.startswith("(2)"):
             break
         if s.startswith("营业收入合计"):
-            row = _vp_parse_row(raw, label="营业收入合计")
+            row = _vp_parse_row(line, label="营业收入合计")
             if row:
-                row.update({"char_start": offset, "char_end": offset + len(str(raw or ""))})
+                row.update({"char_start": c_start, "char_end": c_end})
                 out["total"] = row
             cur = ""
-            offset += step
             continue
         if s in _VP_COMPOSITION_HEADS:
             cur = s
             out["groups"].setdefault(cur, [])
-            offset += step
             continue
         if cur:
-            row = _vp_parse_row(raw)
+            row = _vp_parse_row(line)
             if row:
-                row.update({"char_start": offset, "char_end": offset + len(str(raw or ""))})
+                row.update({"char_start": c_start, "char_end": c_end})
                 out["groups"][cur].append(row)
-        offset += step
     return out
 
 

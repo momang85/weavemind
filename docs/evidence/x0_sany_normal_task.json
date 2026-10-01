@@ -1,18 +1,18 @@
 {
- "case": "V0 洋河正常任务（经营研究：利润／现金／情景）",
- "case_key": "yanghe",
- "goal": "洋河股份 2023/2024 经营研究：利润由何而来、现金为何变化、什么条件会改变判断；合并口径，数据截至 2025-04-30。每个数字须能回溯到来源位置并可重算；缺证据的如实标缺口。",
- "task_id": "v0-yanghe",
+ "case": "X0 三一正常任务（同一路径：收支段落与公司边界）",
+ "case_key": "sany",
+ "goal": "三一重工 2023/2024 经营研究：利润由何而来、现金为何变化、什么条件会改变判断；合并口径，数据截至 2025-04-30。每个数字须能回溯到来源位置并可重算；缺证据的如实标缺口。",
+ "task_id": "x0-sany",
  "materials_registered": {
   "file": "project/fetch_snapshot.json",
-  "url": "http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF",
-  "chars": 177582,
+  "url": "http://static.cninfo.com.cn/finalpage/2025-04-18/1223129214.PDF",
+  "chars": 251504,
   "note": "缓存年报按正常抓取步骤的产物形态登记（隔离跑：无实机登录会话，不联网、不伪造认证）"
  },
  "facts": {
-  "count": 170,
-  "with_locator": 170,
-  "paper_rows": 166,
+  "count": 176,
+  "with_locator": 176,
+  "paper_rows": 176,
   "paper_derived": 16
  },
  "structured_payload": {
@@ -68,14 +68,14 @@
    ]
   },
   "dataset": {
-   "entity": "洋河股份",
-   "entity_id": "002304.SZ",
+   "entity": "三一重工",
+   "entity_id": "600031.SH",
    "periods": [
     "2023年",
     "2024年"
    ],
-   "usable": 182,
-   "observations": 182,
+   "usable": 192,
+   "observations": 192,
    "gaps": [
     "非年度期间（不参与年度模型，仍保留在观察集合里）：2024年同比、2024年较2023年"
    ],
@@ -85,67 +85,72 @@
    {
     "model_id": "operating_drivers",
     "status": "validated",
-    "run_id": "9b0d03d102989d632a2cf3d9e473cf7311b3688627a2282df9f75c9ce576954f"
+    "run_id": "aaa7455e1489a6e5633c3c3cdcedc51e311a7ba6be0972f79e0ff5b1dacfa010"
    },
    {
     "model_id": "cash_reconciliation",
     "status": "validated",
-    "run_id": "967bc9bff97ac90d5c762779d4e33369b1a776e8fce534d77458d251a6be5b5b"
+    "run_id": "d89440e109b230cf50636aad5a10ec874cc4b55acbf1b520c2aad057507d2987"
    },
    {
     "model_id": "scenario_sensitivity",
     "status": "validated",
-    "run_id": "7e5e83cbc7d0a119095b0f8e1fb6bd146029b964aeb5c4516182592d77c33503"
+    "run_id": "870551333d3dd4c26362e42af0822650b5d6e7d3ec761897240ba90339d2f0db"
    },
    {
     "model_id": "ratio:net_margin",
     "status": "validated",
-    "run_id": "ad75c2cb81f9b52c63a96a1f"
+    "run_id": "c4feb4113dd8d811bece07d8"
    },
    {
     "model_id": "ratio:cashflow_coverage",
     "status": "validated",
-    "run_id": "e7838be7985e1d5e6822b97a"
+    "run_id": "a68005233be2c609820d8104"
+   },
+   {
+    "model_id": "ratio:debt_ratio",
+    "status": "validated",
+    "run_id": "5e561cfdff0ef03b5a2bc418"
    },
    {
     "model_id": "ratio:rd_intensity",
     "status": "validated",
-    "run_id": "ed5e294831f87252d760d83f"
+    "run_id": "37bb0f1f5d1bb8ce3cf39c9a"
    }
   ],
   "note": "金融任务走显式数据集与注册模型（冻结数据集→分析计划→独立验证→运行记录），不用“最新 CSV/末列当目标”的猜测路径"
  },
  "fact_locators": {
-  "count": 182,
-  "with_page": 162
+  "count": 192,
+  "with_page": 172
  },
  "charts": [
   {
    "file": "chart_1.png",
    "type": "waterfall",
    "grade": "publish",
-   "observation": "归母净利润 100.16 → 66.73 亿元（-33.43）；毛利变化 -38.01 亿元；规模 -31.54／毛利率 -6.47 亿元；毛利线以下 +4.58 亿元；未解释差额 0.00 亿元（披露项目齐全）"
+   "observation": "归母净利润 45.27 → 59.75 亿元（+14.48）；毛利变化 +13.86 亿元；规模 +11.97／毛利率 +1.88 亿元；毛利线以下 +0.62 亿元；未解释差额 +0.81 亿元（未取得的披露项目，不摊派）"
   },
   {
    "file": "chart_2.png",
    "type": "waterfall",
    "grade": "publish",
-   "observation": "合并净利润 66.66 亿元 ＋ 调节项 -20.38 亿元 ＝ 经营现金流 46.29 亿元；未解释差额 +0.00 亿元；最大支撑 固定资产折旧、油气资产折… +5.87 亿元；最大拖累 经营性应付项目的增加（减… -18.31 亿元；经营现金流变化 -15.02 亿元，最大构成 合并净利润变化 -33.54 亿元"
+   "observation": "合并净利润 60.93 亿元 ＋ 调节项 +87.22 亿元 ＝ 经营现金流 148.14 亿元；未解释差额 +0.00 亿元；最大支撑 经营性应付项目的增加（减… +55.93 亿元；最大拖累 投资损失（调节项） -6.43 亿元；经营现金流变化 +91.06 亿元，最大构成 营运资本项变化（存货/经营性应收… +7"
   },
   {
    "file": "chart_3.png",
    "type": "bar",
    "grade": "publish",
-   "observation": "基准复现 66.73 亿元；使用者情景 80.33 亿元（较基准 +13.60 亿元）；情景是**条件计算**（假设成立时才成立），不是预测、无概率"
+   "observation": "基准复现 59.75 亿元；使用者情景 78.20 亿元（较基准 +18.45 亿元）；情景是**条件计算**（假设成立时才成立），不是预测、无概率"
   }
  ],
  "text": {
-  "note_chars": 6437,
-  "note_lines": 94,
+  "note_chars": 6287,
+  "note_lines": 92,
   "summary_lines": [
-   "- **利润**：2023年→2024年 归母净利润变化 -33.43 亿元；其中毛利变化 -38.01 亿元（收入规模 -31.54／毛利率 -6.47 亿元），毛利线以下 +4.58 亿元；毛利率 75.25% → 73.16%（-2.09pp）",
-   "- **结构**：分产品切法：白酒毛利变化（含推算输入） -37.96 亿元；未分类差额 -0.05 亿元；分地区切法：省外毛利变化（含推算输入） -25.21 亿元、省内毛利变化（含推算输入） -12.87 亿元；未分类差额 +0.08 亿元；量价分解（分产品:白酒量价分解）：销量效应 -53.82 亿元、单位价格效应 +11.68 亿元",
-   "- **现金**：2024年 合并净利润 66.66 亿元经调节项 -20.38 亿元后为经营现金流 46.29 亿元（未解释差额 +0.00 亿元）；现金变化 -15.02 亿元，最大构成 合并净利润变化 -33.54 亿元；最大支撑 固定资产折旧、油气资产折耗、生产性生物资产折旧 +5.87 亿元、最大拖累 经营性应付项目的增加（减少以“－”号填列） -18.31 亿元",
+   "- **利润**：2023年→2024年 归母净利润变化 +14.48 亿元；其中毛利变化 +13.86 亿元（收入规模 +11.97／毛利率 +1.88 亿元），毛利线以下 +0.62 亿元；毛利率 26.18% → 26.43%（+0.25pp）",
+   "- **结构**：分产品切法：挖掘机械毛利变化（含推算输入） +11.39 亿元、起重机械毛利变化（含推算输入） +5.81 亿元；其余 4 项 -2.39 亿元；未分类差额 -0.96 亿元；分地区切法：国际毛利变化（含推算输入） +16.74 亿元、国内毛利变化（含推算输入） -1.95 亿元；未分类差额 -0.93 亿元",
+   "- **现金**：2024年 合并净利润 60.93 亿元经调节项 +87.22 亿元后为经营现金流 148.14 亿元（未解释差额 +0.00 亿元）；现金变化 +91.06 亿元，最大构成 营运资本项变化（存货/经营性应收/经营性应付） +79.77 亿元；最大支撑 经营性应付项目的增加（减少以“－”号填列） +55.93 亿元、最大拖累 投资损失（调节项） -6.43 亿元",
    "- 说明：本版没有人工选择记录，默认采用**经营研究组合**（经营驱动／现金调节桥／条件情景）各一条已验证运行；可在分析工作台显式选择某一条"
   ],
   "has_three_sections": true,
@@ -153,10 +158,10 @@
   "engineering_ids_in_body": 0
  },
  "judgment_layers": {
-  "front_chars": 848,
-  "note_chars": 7086,
+  "front_chars": 1194,
+  "note_chars": 7202,
   "detail_file": "analysis/analysis_detail.md",
-  "detail_chars": 6791,
+  "detail_chars": 6683,
   "binding_runs": [
    "operating_drivers",
    "cash_reconciliation",
@@ -173,22 +178,22 @@
   "note": "隔离验证不含 Critic 评审与检索来源两条轴：交付正文与三图按生产函数产出，验收状态如实停在草稿（不伪造评审通过）"
  },
  "pdf": {
-  "bytes": 5610322,
+  "bytes": 5583448,
   "pages_with_images": 2,
   "total_images": 3,
   "expected_images": 3,
   "images_ok": true,
   "layout": {
-   "pages": 17,
+   "pages": 15,
    "first_page_of": {
     "三项主判断": 1,
-    "关键发现": 2,
-    "经营驱动分析正文": 8,
-    "一、结论": 8,
-    "五、现金形成": 11,
-    "七、口径与限制": 13,
-    "变化解释": 13,
-    "风险与核查": 14,
+    "关键发现": 3,
+    "经营驱动分析正文": 6,
+    "一、结论": 7,
+    "五、现金形成": 10,
+    "七、口径与限制": 11,
+    "变化解释": 11,
+    "风险与核查": 12,
     "参考来源": 1
    },
    "analysis_body_pages": 6
@@ -210,8 +215,8 @@
   "plan.json"
  ],
  "package": {
-  "zip": "deliverables_20261001_234124_f898a8.zip",
-  "bytes": 5648508,
+  "zip": "deliverables_20261001_234139_303998.zip",
+  "bytes": 5626429,
   "entries": 15,
   "has_analysis": [
    "analysis/analysis_cards.md",
@@ -231,61 +236,61 @@
   ]
  },
  "screenshot": {
-  "file": "screenshot_p6.png",
-  "page": 6,
+  "file": "screenshot_p5.png",
+  "page": 5,
   "pages_with_images": [
-   6,
-   7
+   5,
+   6
   ],
-  "bytes": 159301
+  "bytes": 162233
  },
  "artifacts": {
   "analysis_detail.md": {
-   "bytes": 11779,
-   "sha256": "318b2491fbe0b908"
+   "bytes": 11846,
+   "sha256": "b657a1010623d46f"
   },
   "analysis_front.md": {
-   "bytes": 1974,
-   "sha256": "3fd5136ebfe67b97"
+   "bytes": 2713,
+   "sha256": "74156fe7e1be379f"
   },
   "analysis_note.md": {
-   "bytes": 13151,
-   "sha256": "d940f7039f72ac49"
+   "bytes": 12827,
+   "sha256": "521db92ac066e496"
   },
   "chart_1.png": {
-   "bytes": 84230,
-   "sha256": "116a69392f630c7b"
+   "bytes": 81934,
+   "sha256": "aba4cdee282907fd"
   },
   "chart_2.png": {
-   "bytes": 88235,
-   "sha256": "9593a1e0f54126f7"
+   "bytes": 87395,
+   "sha256": "227378b730fdeecf"
   },
   "chart_3.png": {
-   "bytes": 72795,
-   "sha256": "1d0c9a914e46c421"
+   "bytes": 71562,
+   "sha256": "119316c3d118bdd7"
   },
   "export_manifest.json": {
-   "bytes": 3731,
-   "sha256": "3ce314278b75acd7"
+   "bytes": 3742,
+   "sha256": "4382b39129626023"
   },
-  "deliverables_20261001_234124_f898a8.zip": {
-   "bytes": 5648508,
-   "sha256": "766d908ac70ecb9e"
+  "deliverables_20261001_234139_303998.zip": {
+   "bytes": 5626429,
+   "sha256": "d340ab6041ce119a"
   },
   "report.md": {
-   "bytes": 50755,
-   "sha256": "fb0e57c2334bcf4c"
+   "bytes": 46012,
+   "sha256": "699a51c8d3b661a4"
   },
   "report.pdf": {
-   "bytes": 5610322,
-   "sha256": "8cecdadc4913fcf3"
+   "bytes": 5583448,
+   "sha256": "358da731a1f8634a"
   },
-  "screenshot_p6.png": {
-   "bytes": 159301,
-   "sha256": "cbc5001f27434407"
+  "screenshot_p5.png": {
+   "bytes": 162233,
+   "sha256": "f728836789bd65b6"
   }
  },
- "workspace": "C:\\Users\\ding0\\AppData\\Local\\Temp\\v0_yanghe_w_ht_fex",
+ "workspace": "C:\\Users\\ding0\\AppData\\Local\\Temp\\v0_yanghe_ha8cod1h",
  "verification_boundary": {
   "verified": [
    "事实抽取→底稿→analysis worker 金融路径→三图→正文/摘要→装配验收→PDF/导出（同一条生产函数链，离线、零模型调用）"

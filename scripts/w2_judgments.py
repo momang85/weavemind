@@ -51,9 +51,14 @@ def _case(name: str, spec: dict) -> dict:
     runs = {mid: fa.run(mid, ds) for mid in ("operating_drivers", "cash_reconciliation",
                                              "scenario_sensitivity")}
     vp = ne.extract_volume_price([doc], periods=[2023, 2024])
+    # X0：记录的 `kind` 要**照实带过来**（披露小节的归类决定证据角色：经营变化解释＝
+    # 发行人归因、业务背景＝背景、经营计划/研发投入＝未来计划）。丢掉 kind 会让
+    # 计划段落被当成"已发生解释"，这与正常交付路径（`report_brief._admitted_records`）不一致。
     records = [{"section": str(r.get("section") or ""),
                 "snippet": str(r.get("snippet") or ""),
-                "locator": str(r.get("locator") or "")}
+                "locator": str(r.get("locator") or ""),
+                "kind": str(r.get("kind") or ""),
+                "kind_label": str(r.get("kind_label") or "")}
                for r in (ne.extract_sections(doc, periods=(2023, 2024), company=name,
                                              company_id=spec["entity_id"],
                                              as_of="2025-04-30") or [])]

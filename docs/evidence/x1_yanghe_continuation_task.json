@@ -1,8 +1,8 @@
 {
- "case": "V0 洋河正常任务（经营研究：利润／现金／情景）",
- "case_key": "yanghe",
+ "case": "X1 洋河正常任务 + 研究续页（2022–2024）",
+ "case_key": "yanghe-cont",
  "goal": "洋河股份 2023/2024 经营研究：利润由何而来、现金为何变化、什么条件会改变判断；合并口径，数据截至 2025-04-30。每个数字须能回溯到来源位置并可重算；缺证据的如实标缺口。",
- "task_id": "v0-yanghe",
+ "task_id": "x1-yanghe-cont",
  "materials_registered": {
   "file": "project/fetch_snapshot.json",
   "url": "http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF",
@@ -152,6 +152,11 @@
   "locators_in_note": 10,
   "engineering_ids_in_body": 0
  },
+ "continuation_source": {
+  "file": "docs\\evidence\\x1_yanghe_continuation\\continuation.json",
+  "bytes": 11323,
+  "note": "由 scripts/x1_yanghe_continuation.py 算好；正常装配读它渲染『研究续页（可检验）』"
+ },
  "judgment_layers": {
   "front_chars": 848,
   "note_chars": 7086,
@@ -173,22 +178,23 @@
   "note": "隔离验证不含 Critic 评审与检索来源两条轴：交付正文与三图按生产函数产出，验收状态如实停在草稿（不伪造评审通过）"
  },
  "pdf": {
-  "bytes": 5610322,
+  "bytes": 5623257,
   "pages_with_images": 2,
   "total_images": 3,
   "expected_images": 3,
   "images_ok": true,
   "layout": {
-   "pages": 17,
+   "pages": 19,
    "first_page_of": {
     "三项主判断": 1,
-    "关键发现": 2,
-    "经营驱动分析正文": 8,
-    "一、结论": 8,
-    "五、现金形成": 11,
-    "七、口径与限制": 13,
-    "变化解释": 13,
-    "风险与核查": 14,
+    "研究续页": 1,
+    "关键发现": 3,
+    "经营驱动分析正文": 9,
+    "一、结论": 10,
+    "五、现金形成": 13,
+    "七、口径与限制": 14,
+    "变化解释": 14,
+    "风险与核查": 15,
     "参考来源": 1
    },
    "analysis_body_pages": 6
@@ -206,18 +212,21 @@
   "analysis_cards.md",
   "analysis_detail.md",
   "context.json",
+  "continuation.json",
+  "continuation.md",
   "dataset.json",
   "plan.json"
  ],
  "package": {
-  "zip": "deliverables_20261001_234124_f898a8.zip",
-  "bytes": 5648508,
-  "entries": 15,
+  "zip": "deliverables_20261001_234042_639f88.zip",
+  "bytes": 5654231,
+  "entries": 16,
   "has_analysis": [
    "analysis/analysis_cards.md",
    "analysis/analysis_detail.md",
    "analysis/analysis_runs.json",
    "analysis/context.json",
+   "analysis/continuation.md",
    "analysis/dataset.json",
    "analysis/plan.json"
   ],
@@ -231,13 +240,13 @@
   ]
  },
  "screenshot": {
-  "file": "screenshot_p6.png",
-  "page": 6,
+  "file": "screenshot_p8.png",
+  "page": 8,
   "pages_with_images": [
-   6,
-   7
+   8,
+   9
   ],
-  "bytes": 159301
+  "bytes": 158366
  },
  "artifacts": {
   "analysis_detail.md": {
@@ -266,26 +275,26 @@
   },
   "export_manifest.json": {
    "bytes": 3731,
-   "sha256": "3ce314278b75acd7"
+   "sha256": "1e00b4e2c0438c19"
   },
-  "deliverables_20261001_234124_f898a8.zip": {
-   "bytes": 5648508,
-   "sha256": "766d908ac70ecb9e"
+  "deliverables_20261001_234042_639f88.zip": {
+   "bytes": 5654231,
+   "sha256": "c33b58616127fc9d"
   },
   "report.md": {
-   "bytes": 50755,
-   "sha256": "fb0e57c2334bcf4c"
+   "bytes": 54484,
+   "sha256": "25cdf71540685a5c"
   },
   "report.pdf": {
-   "bytes": 5610322,
-   "sha256": "8cecdadc4913fcf3"
+   "bytes": 5623257,
+   "sha256": "f57e0d3559c07d06"
   },
-  "screenshot_p6.png": {
-   "bytes": 159301,
-   "sha256": "cbc5001f27434407"
+  "screenshot_p8.png": {
+   "bytes": 158366,
+   "sha256": "ae2d6a3d5a1d187a"
   }
  },
- "workspace": "C:\\Users\\ding0\\AppData\\Local\\Temp\\v0_yanghe_w_ht_fex",
+ "workspace": "C:\\Users\\ding0\\AppData\\Local\\Temp\\v0_yanghe_ar58m4rg",
  "verification_boundary": {
   "verified": [
    "事实抽取→底稿→analysis worker 金融路径→三图→正文/摘要→装配验收→PDF/导出（同一条生产函数链，离线、零模型调用）"

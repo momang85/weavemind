@@ -1,0 +1,114 @@
+{
+ "batch": "X0 交付收口（一次装配／方向／角色／切法／版面）",
+ "cases": {
+  "洋河股份": {
+   "dir": "docs\\evidence\\v0_yanghe_normal_task",
+   "pdf_pages": 17,
+   "layout": {
+    "pages": 17,
+    "first_page_of": {
+     "三项主判断": 1,
+     "关键发现": 2,
+     "经营驱动分析正文": 8,
+     "一、结论": 8,
+     "五、现金形成": 11,
+     "七、口径与限制": 13,
+     "变化解释": 13,
+     "风险与核查": 14,
+     "参考来源": 1
+    },
+    "analysis_body_pages": 6
+   },
+   "checks": {
+    "front_judgments_on_page_1_or_2": {
+     "ok": true,
+     "detail": "三项主判断 第 1 页"
+    },
+    "analysis_body_4_to_6_pages": {
+     "ok": true,
+     "detail": "正文 6 页（经营驱动分析正文 → 变化解释前）"
+    },
+    "detail_is_separate_and_packed": {
+     "ok": true,
+     "detail": "front/detail 均生成；包内 含 analysis/analysis_detail.md"
+    },
+    "no_false_ton_price_gap": {
+     "ok": true,
+     "detail": "正文与首屏都没有'吨价输入缺口'"
+    },
+    "front_carries_volume_price_inventory": {
+     "ok": true,
+     "detail": "首屏含销量/吨价(推算身份)/库存/产量"
+    },
+    "cash_direction_is_profit_led_buffer": {
+     "ok": true,
+     "detail": "七段式：利润下降主导 + 营运资本缓冲"
+    },
+    "structure_evidence_excludes_rd_microecology": {
+     "ok": true,
+     "detail": "研发微生态段落不作为结构支持（结构判断条内没有该段）"
+    }
+   },
+   "passed": 7,
+   "total": 7
+  },
+  "三一重工": {
+   "dir": "docs\\evidence\\x0_sany_normal_task",
+   "pdf_pages": 15,
+   "layout": {
+    "pages": 15,
+    "first_page_of": {
+     "三项主判断": 1,
+     "关键发现": 3,
+     "经营驱动分析正文": 6,
+     "一、结论": 7,
+     "五、现金形成": 10,
+     "七、口径与限制": 11,
+     "变化解释": 11,
+     "风险与核查": 12,
+     "参考来源": 1
+    },
+    "analysis_body_pages": 6
+   },
+   "checks": {
+    "front_judgments_on_page_1_or_2": {
+     "ok": true,
+     "detail": "三项主判断 第 1 页"
+    },
+    "analysis_body_4_to_6_pages": {
+     "ok": true,
+     "detail": "正文 6 页（经营驱动分析正文 → 变化解释前）"
+    },
+    "detail_is_separate_and_packed": {
+     "ok": true,
+     "detail": "front/detail 均生成；包内 含 analysis/analysis_detail.md"
+    },
+    "no_false_ton_price_gap": {
+     "ok": true,
+     "detail": "正文与首屏都没有'吨价输入缺口'"
+    },
+    "cash_direction_is_working_capital": {
+     "ok": true,
+     "detail": "首屏：现金改善主要由营运资本构成"
+    },
+    "direct_and_indirect_are_separate": {
+     "ok": true,
+     "detail": "直接法两行净贡献与间接法各自列出、不相加；无'其中净利项'嵌套写法"
+    },
+    "company_attribution_at_page_19": {
+     "ok": true,
+     "detail": "首屏依据＝发行人归因（第 19 页）"
+    },
+    "no_yanghe_specific_gap": {
+     "ok": true,
+     "detail": "三一正文与详表都不含洋河专属的酒类缺口"
+    }
+   },
+   "passed": 8,
+   "total": 8
+  }
+ },
+ "summary": {
+  "all_ok": true
+ }
+}

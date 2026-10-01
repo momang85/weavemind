@@ -1,0 +1,48 @@
+{
+ "case": "X1 洋河研究续页：正常报告/版本出口",
+ "statuses": [
+  "加强",
+  "加强",
+  "削弱"
+ ],
+ "decisive_count": 3,
+ "pdf_layout": {
+  "pages": 19,
+  "first_page_of": {
+   "三项主判断": 1,
+   "研究续页": 1,
+   "关键发现": 3,
+   "经营驱动分析正文": 9,
+   "一、结论": 10,
+   "五、现金形成": 13,
+   "七、口径与限制": 14,
+   "变化解释": 14,
+   "风险与核查": 15,
+   "参考来源": 1
+  },
+  "analysis_body_pages": 6
+ },
+ "package_analysis_files": [
+  "analysis/analysis_cards.md",
+  "analysis/analysis_detail.md",
+  "analysis/analysis_runs.json",
+  "analysis/context.json",
+  "analysis/continuation.md",
+  "analysis/dataset.json",
+  "analysis/plan.json"
+ ],
+ "checks": {
+  "page_rendered_once_before_findings": true,
+  "four_column_style": true,
+  "at_least_one_decisive": true,
+  "old_material_cited": true,
+  "locators_present": true,
+  "assumption_impact_written": true,
+  "historical_replay_boundary": true,
+  "page_on_pdf_page_1_or_2": true,
+  "continuation_md_packed": true
+ },
+ "passed": 9,
+ "total": 9,
+ "boundary": "续页由 case 脚本算好后交给正常装配；本核对只读产物，不重算、不写交付"
+}

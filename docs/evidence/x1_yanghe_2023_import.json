@@ -1,0 +1,100 @@
+{
+ "slug": "002304-2023",
+ "company": "洋河股份",
+ "code": "002304.SZ",
+ "periods": [
+  2022,
+  2023
+ ],
+ "online": true,
+ "purpose": "X1 研究续页：补 2022/2023 经营与现金明细（本期 2023／上期 2022）",
+ "discovery": {
+  "contract": "cninfo-hisannouncement-v1",
+  "total": 15,
+  "candidates": [
+   {
+    "title": "2023年年度报告（英文版）",
+    "url": "http://static.cninfo.com.cn/finalpage/2024-06-04/1220245961.PDF",
+    "disclosed_at": "2024-06-04"
+   },
+   {
+    "title": "2023年年度报告摘要",
+    "url": "http://static.cninfo.com.cn/finalpage/2024-04-27/1219873250.PDF",
+    "disclosed_at": "2024-04-27"
+   },
+   {
+    "title": "2023年年度报告",
+    "url": "http://static.cninfo.com.cn/finalpage/2024-04-27/1219873234.PDF",
+    "disclosed_at": "2024-04-27"
+   }
+  ],
+  "chosen": {
+   "title": "2023年年度报告",
+   "url": "http://static.cninfo.com.cn/finalpage/2024-04-27/1219873234.PDF",
+   "disclosed_at": "2024-04-27"
+  }
+ },
+ "url": "http://static.cninfo.com.cn/finalpage/2024-04-27/1219873234.PDF",
+ "store": {
+  "ok": true,
+  "duplicate": false,
+  "material_id": "77185ce8ec83f3bc",
+  "error": null
+ },
+ "admit": {
+  "ok": true,
+  "status": "admitted",
+  "reused": false,
+  "detail": null,
+  "evidence_count": null,
+  "rules_version": "adm-2/f3a-1"
+ },
+ "material": {
+  "title": "2023年年度报告",
+  "url": "http://static.cninfo.com.cn/finalpage/2024-04-27/1219873234.PDF",
+  "host": "static.cninfo.com.cn",
+  "bytes": 3317597,
+  "raw_sha256": "68e5e79fc98e575983ab55a851f6d40da4ab4e5095a117ea416f901161c2622f",
+  "text_sha256": "48e137d4d0b90f82ac1cf363f9c4f579ad83175bbb69d7f5bd0d0b0be45c3545",
+  "kind": "pdf",
+  "kind_label": "PDF",
+  "status": "admitted",
+  "reason": "",
+  "period": "2023",
+  "doc_type": "年度报告",
+  "disclosure_date": "2024-04-27",
+  "date_precision": "day",
+  "date_basis": "source_url_format",
+  "source_class": "official_disclosure",
+  "provenance": "official_discovery",
+  "provenance_label": "官方公告发现（自动，参数契约可查）",
+  "section_count": 1243,
+  "evidence_count": 8,
+  "http_status": 200,
+  "egress": "direct_pinned",
+  "rules_version": "adm-2/f3a-1",
+  "periods": [
+   2022,
+   2023
+  ]
+ },
+ "parse": {
+  "parser": "pypdf",
+  "kind": "pdf",
+  "location_kind": "page",
+  "pages": 176,
+  "truncated": false,
+  "truncation_reason": "",
+  "chars": 181699,
+  "content_type": "application/pdf"
+ },
+ "cache": {
+  "dir": "evals\\a2_official_chain_20260929\\002304-2023\\project\\materials\\77185ce8ec83f3bc",
+  "files": [
+   "doc.json",
+   "meta.json",
+   "raw.bin"
+  ]
+ },
+ "status": "admitted"
+}

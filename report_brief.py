@@ -398,9 +398,17 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
         # 没有就留空 → 正文不出现这一节（既有交付一字不变）。
         # W1：卡与成篇正文**同一次读取**（`a_ctx`），不再各自读一遍工作区。
         "analysis_card": a_ctx.get("cards") or "",
+        # X0（阶段X §3）：**三项主判断**放前两页（判断句＋关键读数＋依据位置＋会削弱它的
+        # 读数）；完整七段式另附 `analysis/analysis_detail.md`，主文只留指针。
+        "analysis_front": a_ctx.get("front") or "",
         # U1/U2 成篇：同一批已验证运行装配的 4–6 页论证线（结论→金额分解→披露支持→
         # 替代解释→现金与反向情景→待核查→口径限制）；没有经营驱动/现金桥运行就留空。
         "analysis_note": a_ctx.get("note") or "",
+        "analysis_detail": a_ctx.get("detail_file") or "",
+        # X1（阶段X §4）：**研究续页**（较早材料的持续性假说 × 本期同口径读数 → 加强/削弱/
+        # 无法判断 → 下一观察）。工作区里没有 `analysis/continuation.json` 时留空。
+        "continuation": dict(a_ctx.get("continuation") or {}),
+        "continuation_page": a_ctx.get("continuation_page") or "",
         # W1：绑定信息进结构对象（首屏/正文/图/底稿同一次读取的证据）：选定运行身份与
         # 参数、已准入披露条数、选择说明——版本核对与"同一组结果"检查读它。
         "analysis_binding": {
@@ -2753,6 +2761,16 @@ def render_brief_markdown(structure: dict, body: str = "",
                  f"{sc.get('audit_sources', 0)} 条候选材料未采用（不编号、不进正文，"
                  "只留在内部审计）。")
     lines.append("")
+    # X0（阶段X §3）：**三项主判断放前两页**——由 `analysis_front` 现场生成（与正文/卡/图
+    # 同一次装配），完整七段式在 `analysis/analysis_detail.md`（详表另附）。此前判断被压在
+    # 第 8 页（正常洋河 19 页 PDF），读者翻不到结论。
+    _front = str(structure.get("analysis_front") or "").strip()
+    if _front:
+        lines.append(_front if _front.endswith("\n") else _front + "\n")
+    # X1（阶段X §4）：**研究续页**紧跟三项主判断（同一页序：上次假说 → 本期读数 → 怎么变）
+    _cont = str(structure.get("continuation_page") or "").strip()
+    if _cont:
+        lines.append(_cont if _cont.endswith("\n") else _cont + "\n")
     # R3：**首屏先给二至三个关键判断**（观察/意义/依据/边界/下一步），完整逐问明细在
     # 紧随其后的『研究问题与下一步』；两处不重复打印同一组观察。
     questions = structure.get("research_questions") or []
@@ -3359,11 +3377,14 @@ def _brief_analysis_section(text: str) -> str:
 # 从 `structure` 现场生成，属于装配器自己的小节——必须在这里登记为**收尾标题**，
 # 否则简报回流再装配时 `_brief_analysis_section` 会把它们当模型内容带出来再加一遍，
 # 同一份交付里这两节各印两遍（实测洋河 V0 证据 report.md）。
-GENERATED_ANALYSIS_SECTIONS = ("## 分析摘要", "## 经营驱动分析正文")
+GENERATED_ANALYSIS_SECTIONS = ("## 三项主判断（先看这里）", "## 研究续页（可检验）",
+                               "## 分析摘要", "## 经营驱动分析正文")
 # `分析摘要` 里的**空位声明**：没有经营研究组合运行时，卡片只写这句话＋底稿指针——
 # 它说明"本次不出摘要"，本身不是分析内容（判定"有没有实质分析"时不得算数）。
 ANALYSIS_EMPTY_SUMMARY_MARK = "本次已验证运行不属于"
-BRIEF_SECTIONS = ("## 关键发现", "## 业务背景", "## 财务对照", "## 图表", "## 分析",
+BRIEF_SECTIONS = ("## 三项主判断（先看这里）", "## 研究续页（可检验）",
+                  "## 关键判断与下一步", "## 关键发现",
+                  "## 业务背景", "## 财务对照", "## 图表", "## 分析",
                   "## 分析卡", *GENERATED_ANALYSIS_SECTIONS,
                   "## 变化解释", "## 风险与核查", "## 附录", "## 参考来源")
 
@@ -3400,17 +3421,21 @@ def _analysis_context(task_id: str, *, ws_dir=None, evidence: dict | None = None
     用普通局部 dict 传给各消费点；不新建平台、不复制整份 PDF。
 
     返回（全部是普通 dict/list，可直接进结构对象）：
-    `{picked, notes, by_model, scens, cards, note, summary, derived, profit_decomposition,
-      volume_price, records, locators, runs_meta, gaps}`
+    `{picked, notes, by_model, scens, cards, front, note, detail, detail_file, summary, derived,
+      profit_decomposition, volume_price, volume_price_run, records, locators, runs_meta, gaps,
+      direct_cash}`
     """
     import workspace as _ws_mod
+    from financial_analysis import continuation as _fa_continuation
     from financial_analysis import narrative as _fa_note
     from financial_analysis import store as _fa_store
     ws = Path(ws_dir) if ws_dir is not None else _ws_mod.task_workspace(task_id)
     out: dict = {"picked": [], "notes": [], "by_model": {}, "scens": [], "cards": "",
-                 "note": "", "summary": [], "derived": [], "profit_decomposition": {},
-                 "volume_price": {}, "records": [], "locators": {}, "runs_meta": [],
-                 "gaps": []}
+                 "note": "", "front": "", "detail": "", "detail_file": "", "summary": [],
+                 "derived": [], "profit_decomposition": {},
+                 "volume_price": {}, "volume_price_run": {}, "records": [], "locators": {},
+                 "runs_meta": [], "gaps": [], "direct_cash": {},
+                 "continuation": {}, "continuation_page": ""}
     try:
         picked, notes = _selected_analysis_runs(ws)
     except Exception as exc:                       # noqa: BLE001 - 读不到就当没有分析
@@ -3455,18 +3480,23 @@ def _analysis_context(task_id: str, *, ws_dir=None, evidence: dict | None = None
         from facts import metric_label as _ml
     except Exception:                              # noqa: BLE001
         _ml = None
-    try:
-        if picked:
+    # X0-1（阶段X §3）：**先把输入收集齐，再渲染一次**。
+    # 此前这里是"先渲染一次（只有披露量价事实）→ `_analysis_readings` 覆盖
+    # `volume_price` → 再渲染一次"（3464/3469/3478）：第二次渲染丢了披露 `facts/derived`，
+    # 于是正文把已取到的推算吨价读成缺口、销量/库存原句也不进判断（架构复核点名）。
+    # 现在原始披露事实与运行摘要**分字段**并存（`volume_price` 保留 `facts/derived`，
+    # 运行摘要进 `model_summary/model_components`），成篇只调用一次。
+    if picked:
+        try:
             out["summary"] = _fa_note.summary_lines(picked, limit=3)
-            out["note"] = _fa_note.research_note(
-                picked, provenance=prov, charts=charts, label_of=_ml,
-                records=out["records"],
-                volume_price=(evidence or {}).get("volume_price") or None, doc=None)
-    except Exception as exc:                       # noqa: BLE001 - 渲染不出就不加这一节
-        logger.warning("成篇正文渲染失败（task=%s）：%s", task_id, str(exc)[:140])
-        out["note"] = ""
-    out["cards"], out["gaps"] = _render_card_block(picked, notes, ws=ws)
-    out.update(_analysis_readings(picked))
+        except Exception:                          # noqa: BLE001
+            out["summary"] = []
+    readings = _analysis_readings(picked)
+    out["derived"] = readings["derived"]
+    out["profit_decomposition"] = readings["profit_decomposition"]
+    out["volume_price_run"] = readings["volume_price"]
+    out["volume_price"] = _merge_volume_price(
+        (evidence or {}).get("volume_price") or {}, readings["volume_price"] or {})
     # W2：直接法两行收支（合并现金流量表）——现金跃升有没有真实收支支撑的判断读它
     try:
         from financial_analysis import judgments as _jd
@@ -3475,26 +3505,106 @@ def _analysis_context(task_id: str, *, ws_dir=None, evidence: dict | None = None
     except Exception as exc:                       # noqa: BLE001 - 取不到就不生成该判断
         logger.warning("直接法收支读取失败（task=%s）：%s", task_id, str(exc)[:120])
         out["direct_cash"] = {}
-    out["note"] = _rebuild_note_with(out, provenance=prov, charts=charts, label_of=_ml)
+    out["cards"], out["gaps"] = _render_card_block(picked, notes, ws=ws)
+    # X1（阶段X §4）：**研究续页**——工作区里落过 `analysis/continuation.json`（由一个小的
+    # 续页比较模块生成）就渲染成前两页的一页；没有该文件时既有交付一字不变。
+    try:
+        out["continuation"] = _load_continuation(ws)
+        out["continuation_page"] = (
+            _fa_continuation.render_page(out["continuation"])
+            if out.get("continuation") else "")
+        if out.get("continuation_page"):
+            # 续页的**可读页**也落进 `analysis/`：交付包会把 `analysis/*.md` 一起收进
+            # （与 cards/detail 同一处），于是"续页随包提供"不是一句话而是包里真有。
+            ana = _fa_store.inputs_dir(ws)
+            ana.mkdir(parents=True, exist_ok=True)
+            (ana / "continuation.md").write_text(out["continuation_page"],
+                                                 encoding="utf-8")
+    except Exception as exc:                       # noqa: BLE001 - 续页渲染失败不影响正文
+        logger.warning("研究续页读取/渲染失败（task=%s）：%s", task_id, str(exc)[:120])
+        out["continuation"], out["continuation_page"] = {}, ""
+    # 完整七段式判断明细**另附**（阶段X §3：主文只给三项主判断；详表不占正文版面）
+    detail_rel = "analysis/analysis_detail.md"
+    if picked:
+        try:
+            parts = _fa_note.research_brief(
+                picked, provenance=prov, charts=charts, label_of=_ml,
+                records=out["records"], volume_price=out["volume_price"] or None,
+                direct_cash=out["direct_cash"] or None, doc=None,
+                detail_hint=detail_rel)
+            out["front"] = str(parts.get("front") or "")
+            out["note"] = str(parts.get("note") or "")
+            out["detail"] = str(parts.get("detail") or "")
+        except Exception as exc:                   # noqa: BLE001 - 渲染不出就不加这一节
+            logger.warning("成篇正文渲染失败（task=%s）：%s", task_id, str(exc)[:140])
+            out["front"] = out["note"] = out["detail"] = ""
+    if out.get("detail"):
+        try:
+            ana = _fa_store.inputs_dir(ws)
+            ana.mkdir(parents=True, exist_ok=True)
+            (ana / "analysis_detail.md").write_text(out["detail"], encoding="utf-8")
+            out["detail_file"] = detail_rel
+        except Exception as exc:                   # noqa: BLE001 - 落盘失败只影响"另附"
+            logger.warning("研究判断明细落盘失败（task=%s）：%s", task_id, str(exc)[:120])
+    return out
+
+
+def _load_continuation(ws) -> dict:
+    """工作区里的续页 JSON（X1）：`analysis/continuation.json`，没有就返回 `{}`。
+
+    只读**已落盘**的一份普通 JSON（阶段X §4 允许的增量之一）；不新建数据库、不在装配时
+    重算比较——比较由小的续页模块在案例脚本/服务入口里算好后落盘。
+    """
+    import json as _json
+    from financial_analysis import store as _fa_store
+    p = _fa_store.inputs_dir(ws) / "continuation.json"
+    if not p.is_file():
+        return {}
+    data = _json.loads(p.read_text(encoding="utf-8"))
+    return data if isinstance(data, dict) else {}
+
+
+def _merge_volume_price(disclosure: dict, run_side: dict) -> dict:
+    """披露量价事实 ＋ 运行摘要 → **一份输入、两个来源字段**（X0-1）。
+
+    - 原始披露字段（`facts/derived/components/summary/boundary/locator`）**原样保留**，
+      它们是判断与"量价与结构"一节的唯一来源；
+    - 运行侧的摘要只进 `model_summary/model_components/model_locator`，来源标明
+      「已验证运行」——不与披露原句混为一谈，也不覆盖披露事实；
+    - 披露侧缺失（`ok=False`）而运行侧有时，才用运行摘要兜底并标 `source=model_run`。
+    """
+    out = dict(disclosure or {})
+    run = dict(run_side or {})
+    if run.get("ok"):
+        out["model_summary"] = str(run.get("summary") or "")
+        out["model_components"] = [dict(c) for c in (run.get("components") or ())
+                                   if isinstance(c, dict)]
+        out["model_locator"] = str(run.get("locator") or "")
+        if not out.get("ok"):
+            out["ok"] = True
+            out["source"] = "model_run"
+            out["summary"] = out["model_summary"]
+            out["components"] = out["model_components"]
+            out["locator"] = out["model_locator"]
     return out
 
 
 def _rebuild_note_with(ctx: dict, *, provenance, charts, label_of) -> str:
-    """用**同一次读取**的结果重渲染成篇正文（W2：判断层要看得到直接法收支）。
+    """（兼容保留）按同一份 ctx 重渲染成篇正文——X0 起装配路径**只渲染一次**。
 
-    为什么重渲染而不是把 direct_cash 事先塞进去：判断层需要"直接法两行"这类只有读数据集
-    才知道的读数，而数据集读取要有工作区；这里按同一份 ctx（选定运行/定位/披露/量价）重算，
-    不引入第二次工作区读取。
+    阶段X §3：`_analysis_context` 已改为"输入收集齐 → 一次渲染"。此函数不再被装配路径调用，
+    只为外部/历史调用方保留同一语义（等价于 `research_brief(...)["note"]`）。
     """
     from financial_analysis import narrative as _fa_note
     try:
-        return _fa_note.research_note(
+        parts = _fa_note.research_brief(
             list(ctx.get("picked") or ()), provenance=provenance, charts=charts,
             label_of=label_of, records=list(ctx.get("records") or ()),
             volume_price=ctx.get("volume_price") or None,
             direct_cash=ctx.get("direct_cash") or None, doc=None)
+        return str(parts.get("note") or "")
     except Exception as exc:                       # noqa: BLE001
-        logger.warning("成篇正文（带直接法收支）重渲染失败：%s", str(exc)[:140])
+        logger.warning("成篇正文（兼容重渲染）失败：%s", str(exc)[:140])
         return str(ctx.get("note") or "")
 
 

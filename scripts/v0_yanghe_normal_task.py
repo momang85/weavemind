@@ -1,5 +1,8 @@
 # -*- coding: utf-8 -*-
-"""V0 成果：洋河一份**正常任务**的经营研究报告（隔离跑通，产出正文/三图/PDF/包）。
+"""V0/X0 成果：一家公司一份**正常任务**的经营研究报告（隔离跑通，产出正文/三图/PDF/包）。
+
+默认（不加参数）跑洋河（`docs/evidence/v0_yanghe_normal_task*`）；`--case sany` 用**同一条
+生产函数链**跑三一（`docs/evidence/x0_sany_normal_task*`），核关键收支段落与公司边界。
 
 为什么这样跑（如实说明边界）：HTTP 表单入口需要登录会话，运行侧没有可用凭据，也不应复制
 会话 token。本脚本调用的是同一条**生产函数链**：
@@ -38,17 +41,60 @@ except Exception:                                  # noqa: BLE001
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-DOC = (ROOT / "evals" / "a2_official_chain_20260929" / "002304" / "project"
-       / "materials" / "f42e747c73850b59" / "doc.json")
-OUT_DIR = ROOT / "docs" / "evidence" / "v0_yanghe_normal_task"
-REPORT = ROOT / "docs" / "evidence" / "v0_yanghe_normal_task.json"
+# 案例参数（X0：**同一条生产函数链**跑第二家公司，用于核"关键收支段落与公司边界"）。
+# 默认（不加参数）仍是洋河——既有证据脚本的默认行为一字不变。
+CASES: dict[str, dict] = {
+    "yanghe": {
+        "company": "洋河股份", "company_id": "002304.SZ", "company_code": "002304",
+        "doc": (ROOT / "evals" / "a2_official_chain_20260929" / "002304" / "project"
+                / "materials" / "f42e747c73850b59" / "doc.json"),
+        "out_dir": ROOT / "docs" / "evidence" / "v0_yanghe_normal_task",
+        "report": ROOT / "docs" / "evidence" / "v0_yanghe_normal_task.json",
+        "task_id": "v0-yanghe", "label": "V0 洋河正常任务（经营研究：利润／现金／情景）"},
+    "sany": {
+        "company": "三一重工", "company_id": "600031.SH", "company_code": "600031",
+        "doc": (ROOT / "evals" / "a2_official_chain_20260929" / "600031" / "project"
+                / "materials" / "0c3e82056e977adc" / "doc.json"),
+        "out_dir": ROOT / "docs" / "evidence" / "x0_sany_normal_task",
+        "report": ROOT / "docs" / "evidence" / "x0_sany_normal_task.json",
+        "task_id": "x0-sany", "label": "X0 三一正常任务（同一路径：收支段落与公司边界）"},
+    # X1：**同一份 2024 年材料**的正常任务，额外带上研究续页（由小续页模块算好落盘）
+    "yanghe-cont": {
+        "company": "洋河股份", "company_id": "002304.SZ", "company_code": "002304",
+        "doc": (ROOT / "evals" / "a2_official_chain_20260929" / "002304" / "project"
+                / "materials" / "f42e747c73850b59" / "doc.json"),
+        "out_dir": ROOT / "docs" / "evidence" / "x1_yanghe_continuation_task",
+        "report": ROOT / "docs" / "evidence" / "x1_yanghe_continuation_task.json",
+        "task_id": "x1-yanghe-cont",
+        "label": "X1 洋河正常任务 + 研究续页（2022–2024）",
+        "continuation": (ROOT / "docs" / "evidence" / "x1_yanghe_continuation"
+                         / "continuation.json")},
+}
+CASE_KEY = "yanghe"
+for _a in sys.argv[1:]:
+    _k = _a.split("=", 1)[1] if _a.startswith("--case=") else _a
+    if _k in CASES:
+        CASE_KEY = _k
+        break
+CASE = CASES[CASE_KEY]
+DOC = CASE["doc"]
+OUT_DIR = CASE["out_dir"]
+REPORT = CASE["report"]
 
-COMPANY, COMPANY_ID = "洋河股份", "002304.SZ"
+COMPANY, COMPANY_ID = CASE["company"], CASE["company_id"]
+COMPANY_CODE = CASE["company_code"]
 PERIODS = (2023, 2024)
 AS_OF, CALIBER = "2025-04-30", "合并"
-GOAL = (f"洋河股份 {PERIODS[0]}/{PERIODS[1]} 经营研究：利润由何而来、现金为何变化、"
-        f"什么条件会改变判断；{CALIBER}口径，数据截至 {AS_OF}。"
-        "每个数字须能回溯到来源位置并可重算；缺证据的如实标缺口。")
+TASK_ID = CASE["task_id"]
+
+
+def _goal() -> str:
+    return (f"{COMPANY} {PERIODS[0]}/{PERIODS[1]} 经营研究：利润由何而来、现金为何变化、"
+            f"什么条件会改变判断；{CALIBER}口径，数据截至 {AS_OF}。"
+            "每个数字须能回溯到来源位置并可重算；缺证据的如实标缺口。")
+
+
+GOAL = _goal()
 
 
 def _sha(path: Path) -> str:
@@ -71,6 +117,28 @@ def _pdf_verdict(pdf: Path, *, expected_images: int) -> dict:
         return {"error": str(exc)[:160]}
 
 
+def _pdf_layout(pdf: Path, keys=("三项主判断", "研究续页", "关键发现", "经营驱动分析正文",
+                                 "一、结论", "五、现金形成", "七、口径与限制",
+                                 "变化解释", "风险与核查", "参考来源")) -> dict:
+    """版面读数（X0-5）：总页数与关键内容**首次出现的页码**——"前两页"只能从 PDF 量。"""
+    try:
+        import fitz
+        with fitz.open(str(pdf)) as doc:
+            pages = [p.get_text() for p in doc]
+        out = {"pages": len(pages), "first_page_of": {}}
+        for k in keys:
+            hit = next((i + 1 for i, t in enumerate(pages) if k in t), None)
+            if hit:
+                out["first_page_of"][k] = hit
+        first = out["first_page_of"].get("经营驱动分析正文")
+        last = out["first_page_of"].get("变化解释")
+        out["analysis_body_pages"] = ((last or len(pages)) - first + 1
+                                      if (first and last) else None)
+        return out
+    except Exception as exc:                       # noqa: BLE001
+        return {"error": str(exc)[:160]}
+
+
 def main() -> int:
     import delivery_pipeline as dp
     import facts as F
@@ -85,11 +153,11 @@ def main() -> int:
     old_root, old_db = ws_mod.WORKSPACE_ROOT, task_state.DB_PATH
     ws_mod.configure_workspace_root(str(tmp))
     task_state.DB_PATH = str(tmp / "v0.db")
-    tid = "v0-yanghe"
+    tid = TASK_ID
     if OUT_DIR.exists():
         shutil.rmtree(OUT_DIR)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    report: dict = {"case": "V0 洋河正常任务（经营研究：利润／现金／情景）",
+    report: dict = {"case": CASE["label"], "case_key": CASE_KEY,
                     "goal": GOAL, "task_id": tid}
     try:
         # ① 研究请求 + 任务登记（与场景/实机同一条入库路径）
@@ -119,7 +187,7 @@ def main() -> int:
 
         # ② 事实（生产适配器读缓存年报）→ 底稿（生产构造器）→ 落 project/working_paper.json
         facts = F.facts_from_annual_tables(doc, company=COMPANY,
-                                           company_code="002304",
+                                           company_code=COMPANY_CODE,
                                            periods=PERIODS, as_of=AS_OF,
                                            disclosed_at="2025-04-28")
         paper = WP.build_working_paper(facts, req)
@@ -164,7 +232,7 @@ def main() -> int:
                              "caliber": CALIBER,
                              "caliber_evidence": "合并利润表/合并现金流量表标题",
                              "as_of": AS_OF},
-                "raw": {"url": str(doc.get("url") or "cached:002304"),
+                "raw": {"url": str(doc.get("url") or f"cached:{COMPANY_CODE}"),
                         "text": "{}"},
             }
             (proj / "financials.json").write_text(
@@ -227,7 +295,46 @@ def main() -> int:
         }
         body = ("本报告由确定性分析链装配：利润、现金与情景三段见『分析摘要』与"
                 "『经营驱动分析正文』；底稿与来源随包提供。")
+        # X1：把算好的研究续页交给**正常装配**（工作区 `analysis/continuation.json`）
+        _cont_src = CASE.get("continuation")
+        if _cont_src:
+            try:
+                from financial_analysis import store as _fa_store
+                _ana = _fa_store.inputs_dir(ws)
+                _ana.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(_cont_src, _ana / "continuation.json")
+                report["continuation_source"] = {
+                    "file": str(Path(_cont_src).relative_to(ROOT)),
+                    "bytes": Path(_cont_src).stat().st_size,
+                    "note": "由 scripts/x1_yanghe_continuation.py 算好；"
+                            "正常装配读它渲染『研究续页（可检验）』"}
+            except Exception as exc:               # noqa: BLE001
+                report["continuation_source"] = {"error": str(exc)[:160]}
         res = dp.assemble_and_verify(tid, GOAL, body, project="default", ws_dir=str(ws))
+        # X0：三项主判断与完整七段式明细（另附）各自落到证据里，便于逐条核对。
+        # **从装配好的结构对象读**（`report_structure.json`）：这才是读者拿到的那一版
+        # （带已准入披露记录与量价事实）；`_analysis_context` 单独调用时没有 evidence，
+        # 首屏会退化成"只有运行读数"的版本，不能拿去核对交付。
+        try:
+            ctx = report_brief.read_structure(tid, ws_dir=ws) or {}
+            _front = str(ctx.get("analysis_front") or "")
+            (OUT_DIR / "analysis_front.md").write_text(_front, encoding="utf-8")
+            _detail = ws / "analysis" / "analysis_detail.md"
+            if _detail.is_file():
+                (OUT_DIR / "analysis_detail.md").write_text(
+                    _detail.read_text(encoding="utf-8"), encoding="utf-8")
+            report["judgment_layers"] = {
+                "front_chars": len(_front),
+                "note_chars": len(str(ctx.get("analysis_note") or "")),
+                "detail_file": str(ctx.get("analysis_detail") or ""),
+                "detail_chars": (len(_detail.read_text(encoding="utf-8"))
+                                 if _detail.is_file() else 0),
+                "binding_runs": [r.get("model_id")
+                                 for r in ((ctx.get("analysis_binding") or {})
+                                           .get("runs") or [])],
+            }
+        except Exception as exc:                   # noqa: BLE001
+            report["judgment_layers"] = {"error": str(exc)[:160]}
         report["delivery"] = {"status": res.get("status"),
                               "reason": res.get("reason"),
                               "hard_fail": res.get("hard_fail"),
@@ -253,7 +360,8 @@ def main() -> int:
             (OUT_DIR / "report.pdf").write_bytes(pdf)
             report["pdf"] = {"bytes": len(pdf), **_pdf_verdict(OUT_DIR / "report.pdf",
                                                                expected_images=len(
-                                                                   report["charts"]))}
+                                                                   report["charts"])),
+                             "layout": _pdf_layout(OUT_DIR / "report.pdf")}
             exp = web_ui._read_export_manifest(tid) or {}
             (OUT_DIR / "export_manifest.json").write_text(
                 json.dumps(exp, ensure_ascii=False, indent=1), encoding="utf-8")

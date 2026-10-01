@@ -1,10 +1,10 @@
 {
- "report_version_id": "59b5645dfd562c8f3a5f1deeca71d4578f4dbd3a8837f51e5a5c71f632f86e4d",
- "body_sha256": "598f8672266e54f5d7e240ca12dd3e5b34e830e060b663b9fefd19adc91d2922",
+ "report_version_id": "469e12db2cf855ae96365e0c870858b42f66d6f15eeb16970fef598f48735627",
+ "body_sha256": "191f64a7f551366daab42769fcf2e7c08d2fa6b032742d70564a9144845cd1fe",
  "acceptance_overall": "fail",
  "accepted_body_matches": true,
- "delivered_body_sha256": "489f31abbd81342b13db26958124c6d448a1cf5b900120a0faa5f4bbfc74e950",
- "final_content_sha256": "489f31abbd81342b13db26958124c6d448a1cf5b900120a0faa5f4bbfc74e950",
+ "delivered_body_sha256": "0eb253dcf650d3dccca6dba78001f0e4206b0642dc20937eb940fa8a51417a6f",
+ "final_content_sha256": "0eb253dcf650d3dccca6dba78001f0e4206b0642dc20937eb940fa8a51417a6f",
  "final_content_matches": true,
  "aligned": true,
  "status": "draft",
@@ -62,9 +62,9 @@
   "unsupported_claims": 1,
   "requires_narrative": true,
   "binding": {
-   "report_version_id": "59b5645dfd562c8f3a5f1deeca71d4578f4dbd3a8837f51e5a5c71f632f86e4d",
-   "body_sha256": "598f8672266e54f5d7e240ca12dd3e5b34e830e060b663b9fefd19adc91d2922",
-   "structure_version_id": "598f8672266e54f5d7e240ca12dd3e5b34e830e060b663b9fefd19adc91d2922",
+   "report_version_id": "469e12db2cf855ae96365e0c870858b42f66d6f15eeb16970fef598f48735627",
+   "body_sha256": "191f64a7f551366daab42769fcf2e7c08d2fa6b032742d70564a9144845cd1fe",
+   "structure_version_id": "191f64a7f551366daab42769fcf2e7c08d2fa6b032742d70564a9144845cd1fe",
    "evidence_fingerprint": "2f76bb3da047fc38",
    "rules_version": "2026.09.12",
    "rules_fingerprint": "2ddecc9a",
@@ -79,8 +79,8 @@
  "template_version": "default",
  "files": {
   "markdown": {
-   "sha256": "489f31abbd81342b13db26958124c6d448a1cf5b900120a0faa5f4bbfc74e950",
-   "bytes": 50365
+   "sha256": "0eb253dcf650d3dccca6dba78001f0e4206b0642dc20937eb940fa8a51417a6f",
+   "bytes": 54072
   },
   "working_paper_json": {
    "sha256": "d8c6c5f566f40f89cd52411d92e55b72e2a58e68810484d2746670eabf3aa9b9",
@@ -91,15 +91,15 @@
    "bytes": 28661
   },
   "pdf": {
-   "sha256": "8cecdadc4913fcf379c7708ebfa69f9d1ba3c9a65f561ac7e484ea3fe7eb9071",
-   "bytes": 5610322
+   "sha256": "f57e0d3559c07d06510b8c0322c29c16ab8abfa0ead46da16ed07fd866eac00e",
+   "bytes": 5623257
   }
  },
  "client_side_renders": {
   "html_print": {
-   "source_body_sha256": "489f31abbd81342b13db26958124c6d448a1cf5b900120a0faa5f4bbfc74e950",
+   "source_body_sha256": "0eb253dcf650d3dccca6dba78001f0e4206b0642dc20937eb940fa8a51417a6f",
    "byte_hash_available": false
   }
  },
- "generated_at": 1790869283.8361242
+ "generated_at": 1790869242.6125524
 }

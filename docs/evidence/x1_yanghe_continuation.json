@@ -1,0 +1,151 @@
+{
+ "case": "X1 洋河 2022–2024 研究续页（历史材料回放）",
+ "earlier": {
+  "label": "洋河股份 2022–2023（2023 年年度报告）",
+  "source": {
+   "title": "2023年年度报告",
+   "url": "http://static.cninfo.com.cn/finalpage/2024-04-27/1219873234.PDF",
+   "periods": [
+    2022,
+    2023
+   ],
+   "doc_type": "年度报告",
+   "disclosure_date": "2024-04-27",
+   "text_sha256": "48e137d4d0b90f82ac1cf363f9c4f579ad83175bbb69d7f5bd0d0b0be45c3545"
+  },
+  "dataset": {
+   "hash": "c5e13a71d67c0107bf18e711dcd4e5fe1cabf22c40f2eb4a9ed7301b1a5318e9",
+   "observations": 202,
+   "usable": 202
+  },
+  "judgment_ids": [
+   "volume_contraction",
+   "unit_revenue_not_proof_of_pricing",
+   "cash_from_working_capital"
+  ]
+ },
+ "later": {
+  "label": "洋河股份 2023–2024（2024 年年度报告）",
+  "source": {
+   "title": "2024年年度报告",
+   "url": "http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF",
+   "periods": [
+    2023,
+    2024
+   ],
+   "doc_type": "年度报告",
+   "disclosure_date": "2025-04-28",
+   "text_sha256": "a71287d53c7f62c8126aad548354616fdbbc62a82e2e42440442fb2a89d678b0"
+  },
+  "dataset": {
+   "hash": "b9b814e15b8b36b6e77fef2f775f761feb7f4d9232f7667f777736c7d7130a03",
+   "observations": 238,
+   "usable": 210
+  },
+  "judgment_ids": [
+   "volume_contraction",
+   "unit_revenue_not_proof_of_pricing",
+   "finished_goods_inventory_build"
+  ]
+ },
+ "hypotheses": [
+  {
+   "judgment_id": "volume_contraction",
+   "hypothesis": "销量压力延续（数量收缩没有转正）",
+   "status": "加强",
+   "reason": "降幅扩大 1.37pp（-14.93% → -16.30%）",
+   "new_readings": [
+    "销售量（2024）-16.30%，生产量 -8.40%",
+    "位置：小节：第三节 管理层讨论与分析 > 二、报告期内公司从事的主要业务 > 1、主要产品的生产量、销售量、库存量（字符 9536-9573）"
+   ]
+  },
+  {
+   "judgment_id": "unit_revenue_not_proof_of_pricing",
+   "hypothesis": "单位收入（推算吨价）继续上升",
+   "status": "加强",
+   "reason": "推算吨价同比仍为正，但增幅收窄 25.85pp（+29.78% → +3.93%）",
+   "new_readings": [
+    "推算吨价 +3.93%（202,592 元/吨）",
+    "口径：吨价为推算（非披露价格），含产品结构混合"
+   ]
+  },
+  {
+   "judgment_id": "cash_from_working_capital",
+   "hypothesis": "现金来源的方向延续（利润主导／营运资本主导）",
+   "status": "削弱",
+   "reason": "主导项换了（working_capital → net_profit）：ΔOCF +24.83 → -15.02 亿元",
+   "new_readings": [
+    "ΔOCF -15.02 亿元：合并净利润项 -33.54 亿元、营运资本项 +11.04 亿元",
+    "方向：现金下降**由利润下降主导**（合并净利润项 -33.54 亿元）；营运资本项 +11.04 亿元是**缓冲**（抵消降幅的 73.6%）"
+   ]
+  }
+ ],
+ "overlap_check": {
+  "shared_periods": [
+   2023
+  ],
+  "items": [
+   {
+    "metric": "白酒销售量",
+    "shared_period": 2023,
+    "earlier_material": 166154.73,
+    "later_material": 166154.73,
+    "same": true,
+    "note": "两份材料在同一比较期一致"
+   },
+   {
+    "metric": "白酒库存量",
+    "shared_period": 2023,
+    "earlier_material": 39176.04,
+    "later_material": 39176.04,
+    "same": true,
+    "note": "两份材料在同一比较期一致"
+   },
+   {
+    "metric": "推算吨价",
+    "shared_period": 2023,
+    "earlier_material": 194936.0,
+    "later_material": 194936.0,
+    "same": true,
+    "note": "两份材料在同一比较期一致"
+   }
+  ],
+  "verdict": "共同比较期读数一致"
+ },
+ "assumption_impact": {
+  "target_net_profit": 10015930040.27,
+  "modes": {
+   "fixed": {
+    "status": "validated",
+    "revenue_growth_to_hold_target": 15.8226,
+    "margin_threshold": 84.7325,
+    "target_net_profit": 10015930040.27
+   },
+   "detail": {
+    "status": "validated",
+    "revenue_growth_to_hold_target": 42.4711,
+    "margin_threshold": 89.0164,
+    "target_net_profit": 10015930040.27
+   }
+  },
+  "note": "两种模式的目标是**同一个**（默认上一期归母净利）：差异来自毛利线以下的费用/税率/少数股东规则，不是材料或目标变了",
+  "revenue_gap_pp": 26.6485
+ },
+ "checks": {
+  "two_materials_loaded": true,
+  "periods_from_original_material": true,
+  "hypotheses_frozen_with_conditions": true,
+  "at_least_one_decisive": true,
+  "same_caliber_overlap_checked": true,
+  "assumption_impact_explained": true,
+  "historical_replay_not_forecast": true,
+  "locators_present": true
+ },
+ "passed": 8,
+ "total": 8,
+ "artifacts": {
+  "continuation_json": "docs\\evidence\\x1_yanghe_continuation\\continuation.json",
+  "continuation_md": "docs\\evidence\\x1_yanghe_continuation\\continuation.md"
+ },
+ "boundary": "较早材料先写假说、再拿较新材料读数比较——这是**回放**，不构成事前盲测或投资预测；将来真实时间前向更新才谈研究效用。"
+}

@@ -1,10 +1,10 @@
 {
- "report_version_id": "59b5645dfd562c8f3a5f1deeca71d4578f4dbd3a8837f51e5a5c71f632f86e4d",
- "body_sha256": "598f8672266e54f5d7e240ca12dd3e5b34e830e060b663b9fefd19adc91d2922",
+ "report_version_id": "c678148c8c05159836076dde559ac21dedb66776f5768e8cad3ffed8646b3b29",
+ "body_sha256": "697189e17e8c0b18a433798471ea804274b99abcc0a1722253ca1d3874e10594",
  "acceptance_overall": "fail",
  "accepted_body_matches": true,
- "delivered_body_sha256": "489f31abbd81342b13db26958124c6d448a1cf5b900120a0faa5f4bbfc74e950",
- "final_content_sha256": "489f31abbd81342b13db26958124c6d448a1cf5b900120a0faa5f4bbfc74e950",
+ "delivered_body_sha256": "19131629641b2234bce4af8f2be2d12873d5d529aaf1e3f25ef207b343f0a829",
+ "final_content_sha256": "19131629641b2234bce4af8f2be2d12873d5d529aaf1e3f25ef207b343f0a829",
  "final_content_matches": true,
  "aligned": true,
  "status": "draft",
@@ -14,7 +14,7 @@
  "hard_fail": "",
  "working_paper": {
   "goal_met": true,
-  "rows": 38,
+  "rows": 10,
   "derived": 12,
   "gaps": 0,
   "problems": 0
@@ -23,7 +23,7 @@
   "state": "research_draft",
   "label": "研究草稿／待补原始披露",
   "reason": "绑定里缺契约指纹；执行契约变化：待重验，计数不作为结论",
-  "located": 13,
+  "located": 16,
   "missing_labels": [],
   "mandatory_supported": 1,
   "mandatory_partial": 2,
@@ -36,7 +36,7 @@
     "coverage": "partial",
     "material_kind": "分解覆盖充分",
     "missing_entry": false,
-    "locator": "小节：第三节 管理层讨论与分析 > 二、报告期内公司从事的主要业务 > 1、主要产品的生产量、销售量、库存量（字符 9536-9573）"
+    "locator": "经营驱动运行：利润表明细；经营驱动运行：分段切法"
    },
    {
     "metric": "net_profit",
@@ -45,7 +45,7 @@
     "coverage": "partial",
     "material_kind": "分解覆盖充分",
     "missing_entry": false,
-    "locator": "第 11 页 · 小节：第三节 管理层讨论与分析 > 二、报告期内公司从事的主要业务 > 1、按不同类型披露主营业务构成（字符 7532-7601）"
+    "locator": "经营驱动运行：利润表明细；经营驱动运行：分段切法"
    },
    {
     "metric": "operating_cashflow",
@@ -54,7 +54,7 @@
     "coverage": "full",
     "material_kind": "两期事实的关系可复算（计算自披露数值）",
     "missing_entry": false,
-    "locator": ""
+    "locator": "第 15 页 · 小节：第三节 管理层讨论与分析 > 五、报告期内主要经营情况 > (一) 主营业务分析 > 1、 利润表及现金流量表相关科目变动分析表（字符 14305-14891）"
    }
   ],
   "optional_questions": [],
@@ -62,10 +62,10 @@
   "unsupported_claims": 1,
   "requires_narrative": true,
   "binding": {
-   "report_version_id": "59b5645dfd562c8f3a5f1deeca71d4578f4dbd3a8837f51e5a5c71f632f86e4d",
-   "body_sha256": "598f8672266e54f5d7e240ca12dd3e5b34e830e060b663b9fefd19adc91d2922",
-   "structure_version_id": "598f8672266e54f5d7e240ca12dd3e5b34e830e060b663b9fefd19adc91d2922",
-   "evidence_fingerprint": "2f76bb3da047fc38",
+   "report_version_id": "c678148c8c05159836076dde559ac21dedb66776f5768e8cad3ffed8646b3b29",
+   "body_sha256": "697189e17e8c0b18a433798471ea804274b99abcc0a1722253ca1d3874e10594",
+   "structure_version_id": "697189e17e8c0b18a433798471ea804274b99abcc0a1722253ca1d3874e10594",
+   "evidence_fingerprint": "0ca31933508e2034",
    "rules_version": "2026.09.12",
    "rules_fingerprint": "2ddecc9a",
    "logic_fingerprint": "773292a24d381e7a",
@@ -79,27 +79,27 @@
  "template_version": "default",
  "files": {
   "markdown": {
-   "sha256": "489f31abbd81342b13db26958124c6d448a1cf5b900120a0faa5f4bbfc74e950",
-   "bytes": 50365
+   "sha256": "19131629641b2234bce4af8f2be2d12873d5d529aaf1e3f25ef207b343f0a829",
+   "bytes": 45669
   },
   "working_paper_json": {
-   "sha256": "d8c6c5f566f40f89cd52411d92e55b72e2a58e68810484d2746670eabf3aa9b9",
-   "bytes": 72816
+   "sha256": "0050fdea52007729fdb2a5ee88e3c10d26ab32908d521d4b4c196854428bff92",
+   "bytes": 25171
   },
   "working_paper_csv": {
-   "sha256": "bcd2689ba3466694c28f58f67a936c57ad121b42f5e30f1363a7750a5709f868",
-   "bytes": 28661
+   "sha256": "a8efd6834c63915fb6b2d1321e02090f47a755eaf2ce4bba1220fd9cd30853fb",
+   "bytes": 6318
   },
   "pdf": {
-   "sha256": "8cecdadc4913fcf379c7708ebfa69f9d1ba3c9a65f561ac7e484ea3fe7eb9071",
-   "bytes": 5610322
+   "sha256": "358da731a1f8634a5a1f145a7a150dfb589a0aacb180572b1c615e21a5f90d57",
+   "bytes": 5583448
   }
  },
  "client_side_renders": {
   "html_print": {
-   "source_body_sha256": "489f31abbd81342b13db26958124c6d448a1cf5b900120a0faa5f4bbfc74e950",
+   "source_body_sha256": "19131629641b2234bce4af8f2be2d12873d5d529aaf1e3f25ef207b343f0a829",
    "byte_hash_available": false
   }
  },
- "generated_at": 1790869283.8361242
+ "generated_at": 1790869299.1904528
 }
