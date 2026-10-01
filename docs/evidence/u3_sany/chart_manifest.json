@@ -2,7 +2,7 @@
  "charts": [
   {
    "file": "1_profit_waterfall.png",
-   "chart_id": "dcfa6def7328-profit-waterfall",
+   "chart_id": "a0001be72823-profit-waterfall",
    "binding": {},
    "keywords": [
     "规模"
@@ -17,7 +17,7 @@
   },
   {
    "file": "2_cash_bridge.png",
-   "chart_id": "ca1ed2073bc5-cash-bridge-cur",
+   "chart_id": "be89d52fefbd-cash-bridge-cur",
    "binding": {},
    "keywords": [],
    "section_hint": "",
@@ -30,7 +30,7 @@
   },
   {
    "file": "3_scenario_thresholds.png",
-   "chart_id": "3b6b62f3943c-scenario-threshold",
+   "chart_id": "408b3c1ab202-scenario-threshold",
    "binding": {},
    "keywords": [
     "收入",

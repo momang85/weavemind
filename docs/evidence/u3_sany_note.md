@@ -2,7 +2,7 @@
 
 > 本节由 `financial_analysis` 从**已验证运行**装配：每个数字都能回查到运行与输出标识（见文末『附：底稿索引』），图、卡、底稿共用同一次运行。未取到的披露项留在「未解释差额」，既不摊派也不当零。
 
-### 研究判断（可检验，先看这三条）
+### 研究判断（可检验）
 > 每条判断都由**已验证运行**与**已准入披露**驱动；「反转条件」写的是什么读数会削弱它——写不出反转条件的不是判断。
 1. 现金变化主要由**营运资本（占用与时点）**解释，其持续性是关键（已发生（读数））
    - 数字与贡献：经营现金流变化 +91.06 亿元：营运资本项 +79.77 亿元（占 87.6%）、合并净利润项 +14.86 亿元
@@ -14,6 +14,15 @@
    - 本公司替代解释：客户回款节奏与票据结算变化、备货/采购节奏（时点）、收入规模变化带来的自然占用变化
    - 后续指标与反转条件：下一期经营/投资活动现金流与应收/应付/存货绝对额；票据、账龄与结算政策披露；采购付现是否反弹、销售收现是否继续改善
    - 缺口（不臆造）：结算条款与账龄明细未取得时不推断账期
+2. 产品/区域结构是**同一个口径的不同切法**：降幅差说明结构在起作用（已发生（读数））
+   - 数字与贡献：分产品切法：混凝土机械 -3.69 亿元、桩工机械 -0.00 亿元、其他 +0.12 亿元、路面机械 +1.19 亿元、起重机械 +5.81 亿元、挖掘机械 +11.39 亿元
+   - 数字与贡献：分地区切法：国内 -1.95 亿元、国际 +16.74 亿元
+   - 已准入段落：受益于海外销售规模增大、产品结构改善，公司海外主营业务毛利率稳步提升。报告期内， 公司国际业务毛利率29.72%，上升0.26个百分点。
+     - 位置：第 10 页 · 小节：第三节 管理层讨论与分析 > 一、经营情况讨论与分析 > （三）全球化提质加速 > 5、海外市场盈利稳步提升（字符 8266-8350）
+   - 支持边界：分产品/分地区/分销售模式是**不同切法**，覆盖同一笔收入，**不可相加**；结构差异也可能来自发货与确认节奏，不能直接读成「某类需求更好」
+   - 本公司替代解释：渠道与发货节奏差异、统计口径或并表范围变化、价格与促销政策在不同品类上的差异
+   - 后续指标与反转条件：下一期分产品/分地区收入的降幅差是否收敛；同口径销量与吨价（结构混合）；公司对区域/产品策略的披露原句
+   - 缺口（不臆造）：渠道库存与终端动销未取得时不判断「结构性需求」
 
 ### 一、结论（先看这三条）
 1. **利润**：2023年→2024年 归母净利润变化 +14.48 亿元；其中毛利变化 +13.86 亿元（收入规模 +11.97／毛利率 +1.88 亿元），毛利线以下 +0.62 亿元；毛利率 26.18% → 26.43%（+0.25pp）
@@ -80,8 +89,8 @@
   - 披露原句：√适用 □不适用 单位：千元 币种：人民币 项目 本期金额 上年同期金 额 同比增 加（%） 变动原因 财务费用 201,776 -462,936 143.59 主要系汇兑损益影响。 投资收益 643,008 -177,082 463.11 主要系处置远期外汇合约收益增加。 公允
   - 出处：第 18 页 · 小节：第三节 管理层讨论与分析 > 五、报告期内主要经营情况 > (6). 主要销售客户及主要供应商情况 > 3、 费用（字符 16775-17075）
   - 支持到哪里：该披露与这项金额**方向一致或同期出现**；金额来自调节表、段落来自管理层讨论，**不构成因果已证明**
-  - 反证/替代解释：利息收支受货币资金与利率影响，非经营改善
-  - 后续观察指标：下期货币资金余额、有息负债与利率环境
+  - 反证/替代解释：财务费用含利息收支、汇兑损益与手续费：原因以披露原句为准（三一 2024 年披露为汇兑损益），不默认套利息口径
+  - 后续观察指标：下期财务费用明细附注（利息/汇兑/手续费各自金额）、外币敞口与远期外汇合约、有息负债与利率环境
 
 ### 五、现金形成与反向情景
 - **经营现金流变化**：+91.06 亿元 ＝ 合并净利润变化 +14.86 亿元、非现金项变化（折旧摊销/减值/递延税/公允价值等） -4.10 亿元、营运资本项变化（存货/经营性应收/经营性应付） +79.77 亿元、其他调节项变化 +0.53 亿元、对账差额变化（未取得的披露调节项） +0.00 亿元
@@ -138,47 +147,47 @@
 
 ### 附：底稿索引（run / output / component_id）
 > 正文与图的所有数字都能在这里回查；包内 `analysis/` 目录含数据集、计划、契约与全部运行记录。
-- `operating_drivers`：run `dcfa6def7328debdcb7cb86accde06ac57bf8f29105f4d163db58a71b389e9e4`（数据集 `6d34fc0b78c3`，规则 `validation/1.1.0`）
-  - net_profit_change → `dcfa6def7328-00-net_profit_change`；分项 gross_profit_change、below_gross_line_change
-  - gross_profit_change → `dcfa6def7328-01-gross_profit_change`；分项 revenue_scale_effect、gross_margin_effect
-  - revenue_scale_effect → `dcfa6def7328-02-revenue_scale_effect`
-  - gross_margin_effect → `dcfa6def7328-03-gross_margin_effect`
-  - below_gross_line_change → `dcfa6def7328-04-below_gross_line_change`
-  - net_profit_change_detail → `dcfa6def7328-05-net_profit_change_detail`；分项 investment_income、finance_expense、rd_expense、selling_expense、admin_expense、credit_impairment、asset_impairment、income_tax_expense、other_income、non_operating_expense、minority_interest、non_operating_income、taxes_and_surcharges、unexplained_residual
-  - gross_profit_change_by_segment → `dcfa6def7328-06-gross_profit_change_by_segment`；分项 segment:分产品:其他、segment:分产品:挖掘机械、segment:分产品:桩工机械、segment:分产品:混凝土机械、segment:分产品:起重机械、segment:分产品:路面机械、unclassified_gross_profit_change
-  - gross_profit_change_by_segment → `dcfa6def7328-07-gross_profit_change_by_segment`；分项 segment:分地区:国内、segment:分地区:国际、unclassified_gross_profit_change
-  - gross_profit_change_by_segment → `dcfa6def7328-08-gross_profit_change_by_segment`；分项 segment:分行业:工程机械行业、unclassified_gross_profit_change
-- `cash_reconciliation`：run `ca1ed2073bc55908143dcbd9838f5b516622dbd0f32eb74f01f5202c7318c40c`（数据集 `6d34fc0b78c3`，规则 `validation/1.1.0`）
-  - operating_cashflow_reconciliation_cur → `ca1ed2073bc5-00-operating_cashflow_reconciliation_cur`；分项 consolidated_net_profit、non_cash_adjustments、working_capital_adjustments、other_adjustments、unexplained_residual
-  - operating_cashflow_reconciliation_prev → `ca1ed2073bc5-01-operating_cashflow_reconciliation_prev`；分项 consolidated_net_profit、non_cash_adjustments、working_capital_adjustments、other_adjustments、unexplained_residual
-  - operating_cashflow_change → `ca1ed2073bc5-02-operating_cashflow_change`；分项 change_in_net_profit、change_in_non_cash、change_in_working_capital、change_in_other、change_in_residual
-  - cash_gap_change → `ca1ed2073bc5-03-cash_gap_change`；分项 change_in_operating_cashflow、change_in_net_profit_negated
-  - largest_support → `ca1ed2073bc5-04-largest_support`
-  - largest_drag → `ca1ed2073bc5-05-largest_drag`
-- `scenario_sensitivity`：run `3b6b62f3943ccd79f696ba3175df4a50cfee48333ab5ae89325b52bd2183ac1d`（数据集 `6d34fc0b78c3`，规则 `validation/1.1.0`）
-  - scenario_net_profit → `3b6b62f3943c-00-scenario_net_profit`；分项 base、user、counter
-  - scenario_sensitivity → `3b6b62f3943c-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
-  - collection_days_capital_per_day → `3b6b62f3943c-02-collection_days_capital_per_day`
-  - collection_days_sensitivity_10d → `3b6b62f3943c-03-collection_days_sensitivity_10d`
-  - margin_threshold_to_hold_base_profit → `3b6b62f3943c-04-margin_threshold_to_hold_base_profit`
-  - margin_gap_to_threshold_pp → `3b6b62f3943c-05-margin_gap_to_threshold_pp`
-  - revenue_growth_to_hold_target → `3b6b62f3943c-06-revenue_growth_to_hold_target`
-- `scenario_sensitivity`：run `fb91d9d7ab79c7539b99186fd695fbd3fdfb714f94527de84cd42c317b3ffc0f`（数据集 `6d34fc0b78c3`，规则 `validation/1.1.0`）
-  - scenario_net_profit → `fb91d9d7ab79-00-scenario_net_profit`；分项 base、user、counter
-  - scenario_sensitivity → `fb91d9d7ab79-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
-  - collection_days_capital_per_day → `fb91d9d7ab79-02-collection_days_capital_per_day`
-  - collection_days_sensitivity_10d → `fb91d9d7ab79-03-collection_days_sensitivity_10d`
-  - margin_threshold_to_hold_base_profit → `fb91d9d7ab79-04-margin_threshold_to_hold_base_profit`
-  - margin_gap_to_threshold_pp → `fb91d9d7ab79-05-margin_gap_to_threshold_pp`
-  - revenue_growth_to_hold_target → `fb91d9d7ab79-06-revenue_growth_to_hold_target`
-- `scenario_sensitivity`：run `f33c546674c23171d0a482cad1239793806d2ea58e15ff214d248d1114fcde68`（数据集 `6d34fc0b78c3`，规则 `validation/1.1.0`）
-  - scenario_net_profit → `f33c546674c2-00-scenario_net_profit`；分项 base、user、counter
-  - scenario_sensitivity → `f33c546674c2-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
-  - collection_days_capital_per_day → `f33c546674c2-02-collection_days_capital_per_day`
-  - collection_days_sensitivity_10d → `f33c546674c2-03-collection_days_sensitivity_10d`
-  - margin_threshold_to_hold_base_profit → `f33c546674c2-04-margin_threshold_to_hold_base_profit`
-  - margin_gap_to_threshold_pp → `f33c546674c2-05-margin_gap_to_threshold_pp`
-  - revenue_growth_to_hold_target → `f33c546674c2-06-revenue_growth_to_hold_target`
-- 图 `dcfa6def7328-profit-waterfall`：三一重工 2023年→2024年 归母净利润瀑布（亿元）
-- 图 `ca1ed2073bc5-cash-bridge-cur`：三一重工 2024年 净利润→经营现金流桥（亿元）
-- 图 `3b6b62f3943c-scenario-threshold`：三一重工 反向情景：各档收入假设下维持目标归母净利所需毛利率（%）
+- `operating_drivers`：run `a0001be728231bc05aeafdaf2f7bed095b26c477bf59cd53c66d3783996bb93e`（数据集 `b58a50c37ef2`，规则 `validation/1.1.0`）
+  - net_profit_change → `a0001be72823-00-net_profit_change`；分项 gross_profit_change、below_gross_line_change
+  - gross_profit_change → `a0001be72823-01-gross_profit_change`；分项 revenue_scale_effect、gross_margin_effect
+  - revenue_scale_effect → `a0001be72823-02-revenue_scale_effect`
+  - gross_margin_effect → `a0001be72823-03-gross_margin_effect`
+  - below_gross_line_change → `a0001be72823-04-below_gross_line_change`
+  - net_profit_change_detail → `a0001be72823-05-net_profit_change_detail`；分项 investment_income、finance_expense、rd_expense、selling_expense、admin_expense、credit_impairment、asset_impairment、income_tax_expense、other_income、non_operating_expense、minority_interest、non_operating_income、taxes_and_surcharges、unexplained_residual
+  - gross_profit_change_by_segment → `a0001be72823-06-gross_profit_change_by_segment`；分项 segment:分产品:其他、segment:分产品:挖掘机械、segment:分产品:桩工机械、segment:分产品:混凝土机械、segment:分产品:起重机械、segment:分产品:路面机械、unclassified_gross_profit_change
+  - gross_profit_change_by_segment → `a0001be72823-07-gross_profit_change_by_segment`；分项 segment:分地区:国内、segment:分地区:国际、unclassified_gross_profit_change
+  - gross_profit_change_by_segment → `a0001be72823-08-gross_profit_change_by_segment`；分项 segment:分行业:工程机械行业、unclassified_gross_profit_change
+- `cash_reconciliation`：run `be89d52fefbdc8d323378c61efa9071bb231ab28cd508e67ba9ef73f3c914a87`（数据集 `b58a50c37ef2`，规则 `validation/1.1.0`）
+  - operating_cashflow_reconciliation_cur → `be89d52fefbd-00-operating_cashflow_reconciliation_cur`；分项 consolidated_net_profit、non_cash_adjustments、working_capital_adjustments、other_adjustments、unexplained_residual
+  - operating_cashflow_reconciliation_prev → `be89d52fefbd-01-operating_cashflow_reconciliation_prev`；分项 consolidated_net_profit、non_cash_adjustments、working_capital_adjustments、other_adjustments、unexplained_residual
+  - operating_cashflow_change → `be89d52fefbd-02-operating_cashflow_change`；分项 change_in_net_profit、change_in_non_cash、change_in_working_capital、change_in_other、change_in_residual
+  - cash_gap_change → `be89d52fefbd-03-cash_gap_change`；分项 change_in_operating_cashflow、change_in_net_profit_negated
+  - largest_support → `be89d52fefbd-04-largest_support`
+  - largest_drag → `be89d52fefbd-05-largest_drag`
+- `scenario_sensitivity`：run `408b3c1ab202dd6764ce59ee4c840f38c10c11a54aeaa53b19f6d6d76b149427`（数据集 `b58a50c37ef2`，规则 `validation/1.1.0`）
+  - scenario_net_profit → `408b3c1ab202-00-scenario_net_profit`；分项 base、user、counter
+  - scenario_sensitivity → `408b3c1ab202-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
+  - collection_days_capital_per_day → `408b3c1ab202-02-collection_days_capital_per_day`
+  - collection_days_sensitivity_10d → `408b3c1ab202-03-collection_days_sensitivity_10d`
+  - margin_threshold_to_hold_base_profit → `408b3c1ab202-04-margin_threshold_to_hold_base_profit`
+  - margin_gap_to_threshold_pp → `408b3c1ab202-05-margin_gap_to_threshold_pp`
+  - revenue_growth_to_hold_target → `408b3c1ab202-06-revenue_growth_to_hold_target`
+- `scenario_sensitivity`：run `347d8387a4cda156b2e5fb7f37928919789d1b4cc1e2e190b05bf9e3a0596ab7`（数据集 `b58a50c37ef2`，规则 `validation/1.1.0`）
+  - scenario_net_profit → `347d8387a4cd-00-scenario_net_profit`；分项 base、user、counter
+  - scenario_sensitivity → `347d8387a4cd-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
+  - collection_days_capital_per_day → `347d8387a4cd-02-collection_days_capital_per_day`
+  - collection_days_sensitivity_10d → `347d8387a4cd-03-collection_days_sensitivity_10d`
+  - margin_threshold_to_hold_base_profit → `347d8387a4cd-04-margin_threshold_to_hold_base_profit`
+  - margin_gap_to_threshold_pp → `347d8387a4cd-05-margin_gap_to_threshold_pp`
+  - revenue_growth_to_hold_target → `347d8387a4cd-06-revenue_growth_to_hold_target`
+- `scenario_sensitivity`：run `9b08c19be8c18764169e04ec54d4a0d3aa1d62627675bc81610f78fd7d8fcc6e`（数据集 `b58a50c37ef2`，规则 `validation/1.1.0`）
+  - scenario_net_profit → `9b08c19be8c1-00-scenario_net_profit`；分项 base、user、counter
+  - scenario_sensitivity → `9b08c19be8c1-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
+  - collection_days_capital_per_day → `9b08c19be8c1-02-collection_days_capital_per_day`
+  - collection_days_sensitivity_10d → `9b08c19be8c1-03-collection_days_sensitivity_10d`
+  - margin_threshold_to_hold_base_profit → `9b08c19be8c1-04-margin_threshold_to_hold_base_profit`
+  - margin_gap_to_threshold_pp → `9b08c19be8c1-05-margin_gap_to_threshold_pp`
+  - revenue_growth_to_hold_target → `9b08c19be8c1-06-revenue_growth_to_hold_target`
+- 图 `a0001be72823-profit-waterfall`：三一重工 2023年→2024年 归母净利润瀑布（亿元）
+- 图 `be89d52fefbd-cash-bridge-cur`：三一重工 2024年 净利润→经营现金流桥（亿元）
+- 图 `408b3c1ab202-scenario-threshold`：三一重工 反向情景：各档收入假设下维持目标归母净利所需毛利率（%）

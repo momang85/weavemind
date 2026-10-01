@@ -3,24 +3,24 @@
  "case": "三一重工 600031 2023→2024 经营驱动正文与三图底稿",
  "mainline": "facts → freeze → run → charts → note（与洋河同一脚本）",
  "dataset": {
-  "observations": 168,
-  "usable": 168,
+  "observations": 176,
+  "usable": 176,
   "conflicts": [],
-  "dataset_hash": "6d34fc0b78c30c94c76d1df2ddb65fb854806396013cb976d9698a89a023e6d1"
+  "dataset_hash": "b58a50c37ef24d367e6322bb3fa842a538e6fb6fdfe87ca37ab1ad934e2b08a9"
  },
  "runs": {
   "operating_drivers": {
-   "run_id": "dcfa6def7328debdcb7cb86accde06ac57bf8f29105f4d163db58a71b389e9e4",
+   "run_id": "a0001be728231bc05aeafdaf2f7bed095b26c477bf59cd53c66d3783996bb93e",
    "status": "validated"
   },
   "cash_reconciliation": {
-   "run_id": "ca1ed2073bc55908143dcbd9838f5b516622dbd0f32eb74f01f5202c7318c40c",
+   "run_id": "be89d52fefbdc8d323378c61efa9071bb231ab28cd508e67ba9ef73f3c914a87",
    "status": "validated"
   },
   "scenario_sensitivity": [
    {
     "label": "收入持平",
-    "run_id": "3b6b62f3943ccd79f696ba3175df4a50cfee48333ab5ae89325b52bd2183ac1d",
+    "run_id": "408b3c1ab202dd6764ce59ee4c840f38c10c11a54aeaa53b19f6d6d76b149427",
     "status": "validated",
     "params": {
      "revenue_growth": 0.0,
@@ -29,13 +29,13 @@
    },
    {
     "label": "收入 +5%",
-    "run_id": "fb91d9d7ab79c7539b99186fd695fbd3fdfb714f94527de84cd42c317b3ffc0f",
+    "run_id": "347d8387a4cda156b2e5fb7f37928919789d1b4cc1e2e190b05bf9e3a0596ab7",
     "status": "validated",
     "params": {}
    },
    {
     "label": "收入 −12.83%",
-    "run_id": "f33c546674c23171d0a482cad1239793806d2ea58e15ff214d248d1114fcde68",
+    "run_id": "9b08c19be8c18764169e04ec54d4a0d3aa1d62627675bc81610f78fd7d8fcc6e",
     "status": "validated",
     "params": {
      "revenue_growth": -0.1283,
@@ -45,10 +45,10 @@
   ]
  },
  "note": {
-  "chars": 14257,
-  "lines": 184,
+  "chars": 14914,
+  "lines": 193,
   "sections": [
-   "研究判断（可检验，先看这三条）",
+   "研究判断（可检验）",
    "一、结论（先看这三条）",
    "二、利润变化：金额分解",
    "三、披露支持与来源定位",

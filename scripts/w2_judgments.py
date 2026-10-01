@@ -58,7 +58,7 @@ def _case(name: str, spec: dict) -> dict:
                                              company_id=spec["entity_id"],
                                              as_of="2025-04-30") or [])]
     js = jd.research_judgments(list(runs.values()), volume_price=vp, records=records,
-                               limit=4)
+                               direct_cash=jd.direct_cash_of(ds), limit=6)
     out = {"entity_id": spec["entity_id"],
            "dataset": {"observations": ds.manifest.observations,
                        "dataset_hash": ds.manifest.dataset_hash},

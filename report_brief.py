@@ -3467,7 +3467,35 @@ def _analysis_context(task_id: str, *, ws_dir=None, evidence: dict | None = None
         out["note"] = ""
     out["cards"], out["gaps"] = _render_card_block(picked, notes, ws=ws)
     out.update(_analysis_readings(picked))
+    # W2：直接法两行收支（合并现金流量表）——现金跃升有没有真实收支支撑的判断读它
+    try:
+        from financial_analysis import judgments as _jd
+        ds = _fa_store.dataset_from_inputs(ws)
+        out["direct_cash"] = _jd.direct_cash_of(ds, locators=prov)
+    except Exception as exc:                       # noqa: BLE001 - 取不到就不生成该判断
+        logger.warning("直接法收支读取失败（task=%s）：%s", task_id, str(exc)[:120])
+        out["direct_cash"] = {}
+    out["note"] = _rebuild_note_with(out, provenance=prov, charts=charts, label_of=_ml)
     return out
+
+
+def _rebuild_note_with(ctx: dict, *, provenance, charts, label_of) -> str:
+    """用**同一次读取**的结果重渲染成篇正文（W2：判断层要看得到直接法收支）。
+
+    为什么重渲染而不是把 direct_cash 事先塞进去：判断层需要"直接法两行"这类只有读数据集
+    才知道的读数，而数据集读取要有工作区；这里按同一份 ctx（选定运行/定位/披露/量价）重算，
+    不引入第二次工作区读取。
+    """
+    from financial_analysis import narrative as _fa_note
+    try:
+        return _fa_note.research_note(
+            list(ctx.get("picked") or ()), provenance=provenance, charts=charts,
+            label_of=label_of, records=list(ctx.get("records") or ()),
+            volume_price=ctx.get("volume_price") or None,
+            direct_cash=ctx.get("direct_cash") or None, doc=None)
+    except Exception as exc:                       # noqa: BLE001
+        logger.warning("成篇正文（带直接法收支）重渲染失败：%s", str(exc)[:140])
+        return str(ctx.get("note") or "")
 
 
 def _admitted_records(evidence: dict | None, *, limit_per_kind: int = 6) -> list[dict]:

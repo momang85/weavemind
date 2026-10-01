@@ -3824,14 +3824,19 @@ class TestW2ResearchJudgments(unittest.TestCase):
             rows.append(_row(metric, "2024年", cur, unit="元",
                              fact_id=f"w2-{metric}-2024"))
         # 白酒口径的量与收入（量价分解要**同一口径**两期都有销量与收入）
-        rows += [_row("sales_volume", "2023年", 166_154.73, unit="吨", caliber="白酒",
+        rows += [_row("sales_volume", "2023年", 166_154.73, unit="吨", caliber="分产品:白酒",
                       metric_label="白酒销售量", fact_id="w2-vol-2023"),
-                 _row("sales_volume", "2024年", 139_076.05, unit="吨", caliber="白酒",
+                 _row("sales_volume", "2024年", 139_076.05, unit="吨", caliber="分产品:白酒",
                       metric_label="白酒销售量", fact_id="w2-vol-2024"),
-                 _row("revenue", "2023年", 32_389_581_931.71, unit="元", caliber="白酒",
+                 _row("revenue", "2023年", 32_389_581_931.71, unit="元", caliber="分产品:白酒",
                       metric_label="白酒营业收入", fact_id="w2-rev-baijiu-2023"),
-                 _row("revenue", "2024年", 28_175_707_878.18, unit="元", caliber="白酒",
-                      metric_label="白酒营业收入", fact_id="w2-rev-baijiu-2024")]
+                 _row("revenue", "2024年", 28_175_707_878.18, unit="元", caliber="分产品:白酒",
+                      metric_label="白酒营业收入", fact_id="w2-rev-baijiu-2024"),
+                 # 分产品切法需要**同一口径**两期都有收入与营业成本（毛利桥按口径各算一次）
+                 _row("operating_cost", "2023年", 6_500_000_000.0, unit="元", caliber="分产品:白酒",
+                      metric_label="白酒营业成本", fact_id="w2-cost-baijiu-2023"),
+                 _row("operating_cost", "2024年", 6_800_000_000.0, unit="元", caliber="分产品:白酒",
+                      metric_label="白酒营业成本", fact_id="w2-cost-baijiu-2024")]
         return fa.freeze_from_facts(rows, periods=(2023, 2024), entity="洋河股份",
                                     entity_id="002304.SZ", as_of="2025-04-30",
                                     source_label="test:w2")
@@ -3895,6 +3900,68 @@ class TestW2ResearchJudgments(unittest.TestCase):
                        "后续指标与反转条件", "缺口"):
             self.assertIn(needle, text)
         self.assertNotIn("****", text, "标题强调不能被套两层")
+
+    def test_structure_judgment_says_cuts_are_not_additive(self):
+        """产品/区域结构（同一口径的不同切法）：降幅差说明结构在起作用，且**不可相加**。"""
+        from financial_analysis import judgments as jd
+        ds = self._ds()
+        od = fa.run("operating_drivers", ds)
+        js = jd.research_judgments([od], volume_price=self._vp(), records=[],
+                                   limit=6)
+        st = next((j for j in js if j["judgment_id"] == "product_region_structure"), None)
+        self.assertIsNotNone(st, [j["judgment_id"] for j in js])
+        self.assertIn("分产品", " ".join(st["numbers"]))
+        self.assertIn("不可相加", st["boundary"])
+        self.assertTrue(st["watch"])
+
+    def test_direct_method_cash_support_judgment(self):
+        """直接法两行（销售收现/采购付现）→「现金跃升有真实收支支持、主要不来自利润增长」。"""
+        from financial_analysis import judgments as jd
+        # 现金**跃升**的样本（自洽闭合：2023 500+50+100+20+0=670；2024 520+60+180+10+20=790）
+        cf_rising = {"net_profit_consolidated": (50_000_000_000.0, 52_000_000_000.0),
+                     "depreciation": (5_000_000_000.0, 6_000_000_000.0),
+                     "operating_payable_increase": (10_000_000_000.0, 18_000_000_000.0),
+                     "operating_receivable_decrease": (2_000_000_000.0, 1_000_000_000.0),
+                     "inventory_decrease": (0.0, 0.0),
+                     "other_cashflow_adjustments": (0.0, 2_000_000_000.0),
+                     "operating_cashflow": (67_000_000_000.0, 79_000_000_000.0)}
+        cds = fa.freeze_from_facts(
+            [_row(m, "2023年", v[0], unit="元", fact_id=f"w2d-{m}-2023")
+             for m, v in cf_rising.items()]
+            + [_row(m, "2024年", v[1], unit="元", fact_id=f"w2d-{m}-2024")
+               for m, v in cf_rising.items()],
+            periods=(2023, 2024), entity="洋河股份", entity_id="002304.SZ",
+            as_of="2025-04-30", source_label="test:w2-direct")
+        cash = fa.run("cash_reconciliation", cds)
+        self.assertEqual(cash.status, C.RunStatus.VALIDATED, cash.reason)
+        dc = {"received": {"cur": 82_694_250_000.0, "prev": 78_272_597_000.0,
+                           "delta": 44.22 * 1e8,
+                           "cur_period": "2024年", "prev_period": "2023年",
+                           "locator": "第 97 页 · 合并现金流量表"},
+              "paid": {"cur": 51_611_517_000.0, "prev": 59_001_843_000.0,
+                       "delta": -73.90 * 1e8,
+                       "cur_period": "2024年", "prev_period": "2023年",
+                       "locator": "第 98 页 · 合并现金流量表"}}
+        # 现金运行本身的 ΔOCF 必须为正，才谈得上"现金跃升"（本数据集 ΔOCF = +91.06 亿元）
+        chg = next(o for o in cash.outputs if o.metric == "operating_cashflow_change")
+        self.assertGreater(float(chg.value), 0)
+        js = jd.research_judgments([cash], direct_cash=dc, records=[], limit=6)
+        cj = next((j for j in js if j["judgment_id"] == "cash_direct_method_support"), None)
+        self.assertIsNotNone(cj, [j["judgment_id"] for j in js])
+        joined = " ".join(cj["numbers"])
+        self.assertIn("销售收现", joined)
+        self.assertIn("采购付现", joined)
+        self.assertIn("不同切法", cj["boundary"])
+        self.assertIn("不可相加", cj["boundary"])
+        self.assertTrue(any("采购付现" in w and "反弹" in w for w in cj["watch"]),
+                        "反转条件必须写：采购付现反弹则现金改善不可持续")
+
+    def test_finance_expense_note_does_not_assume_interest(self):
+        """W2 点名：财务费用的原因以披露原句为准，不默认套"利息/利率"模板（三一是汇兑）。"""
+        from financial_analysis import narrative as nt
+        joined = " ".join(nt._DRIVER_WATCH["finance_expense"])
+        self.assertIn("汇兑", joined)
+        self.assertIn("以披露原句为准", joined)
 
     def test_missing_data_produces_a_gap_not_a_judgment(self):
         """读数缺：如实写"本次不足以下判断"，不得编一条判断出来。"""

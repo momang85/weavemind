@@ -2,7 +2,7 @@
 
 > 本节由 `financial_analysis` 从**已验证运行**装配：每个数字都能回查到运行与输出标识（见文末『附：底稿索引』），图、卡、底稿共用同一次运行。未取到的披露项留在「未解释差额」，既不摊派也不当零。
 
-### 研究判断（可检验，先看这三条）
+### 研究判断（可检验）
 > 每条判断都由**已验证运行**与**已准入披露**驱动；「反转条件」写的是什么读数会削弱它——写不出反转条件的不是判断。
 1. 销量收缩是收入下降的重要「数量」观察（不是需求结论）（已发生（读数））
    - 数字与贡献：量价分解：销量效应 -53.82 亿元、单位价格效应 +11.68 亿元（含结构混合）
@@ -24,6 +24,13 @@
    - 本公司替代解释：客户回款节奏与票据结算变化、备货/采购节奏（时点）、收入规模变化带来的自然占用变化
    - 后续指标与反转条件：下一期经营/投资活动现金流与应收/应付/存货绝对额；票据、账龄与结算政策披露；采购付现是否反弹、销售收现是否继续改善
    - 缺口（不臆造）：结算条款与账龄明细未取得时不推断账期
+4. 产品/区域结构是**同一个口径的不同切法**：降幅差说明结构在起作用（已发生（读数））
+   - 数字与贡献：分产品切法：白酒 -37.96 亿元
+   - 数字与贡献：分地区切法：省外 -25.21 亿元、省内 -12.87 亿元
+   - 支持边界：分产品/分地区/分销售模式是**不同切法**，覆盖同一笔收入，**不可相加**；结构差异也可能来自发货与确认节奏，不能直接读成「某类需求更好」
+   - 本公司替代解释：渠道与发货节奏差异、统计口径或并表范围变化、价格与促销政策在不同品类上的差异
+   - 后续指标与反转条件：下一期分产品/分地区收入的降幅差是否收敛；同口径销量与吨价（结构混合）；公司对区域/产品策略的披露原句
+   - 缺口（不臆造）：渠道库存与终端动销未取得时不判断「结构性需求」
 
 ### 一、结论（先看这三条）
 1. **利润**：2023年→2024年 归母净利润变化 -33.43 亿元；其中毛利变化 -38.01 亿元（收入规模 -31.54／毛利率 -6.47 亿元），毛利线以下 +4.58 亿元；毛利率 75.25% → 73.16%（-2.09pp）
@@ -116,30 +123,30 @@
 
 ### 附：底稿索引（run / output / component_id）
 > 正文与图的所有数字都能在这里回查；包内 `analysis/` 目录含数据集、计划、契约与全部运行记录。
-- `operating_drivers`：run `bce831c37e7bc9ccbbe4cd8f0087b6be47cbd224ced281144b9f48de01cff83f`（数据集 `bfa752e80734`，规则 `validation/1.1.0`）
-  - net_profit_change → `bce831c37e7b-00-net_profit_change`；分项 gross_profit_change、below_gross_line_change
-  - gross_profit_change → `bce831c37e7b-01-gross_profit_change`；分项 revenue_scale_effect、gross_margin_effect
-  - revenue_scale_effect → `bce831c37e7b-02-revenue_scale_effect`
-  - gross_margin_effect → `bce831c37e7b-03-gross_margin_effect`
-  - below_gross_line_change → `bce831c37e7b-04-below_gross_line_change`
-  - net_profit_change_detail → `bce831c37e7b-05-net_profit_change_detail`；分项 income_tax_expense、taxes_and_surcharges、fair_value_change、rd_expense、admin_expense、finance_expense、selling_expense、investment_income、non_operating_income、minority_interest、asset_impairment、non_operating_expense、other_income、asset_disposal_income、credit_impairment、unexplained_residual
-  - gross_profit_change_by_segment → `bce831c37e7b-06-gross_profit_change_by_segment`；分项 segment:分产品:白酒、unclassified_gross_profit_change
-  - gross_profit_change_by_segment → `bce831c37e7b-07-gross_profit_change_by_segment`；分项 segment:分地区:省内、segment:分地区:省外、unclassified_gross_profit_change
-  - gross_profit_change_by_segment → `bce831c37e7b-08-gross_profit_change_by_segment`；分项 segment:分行业:酒类行业、unclassified_gross_profit_change
-  - gross_profit_change_by_segment → `bce831c37e7b-09-gross_profit_change_by_segment`；分项 segment:分销售模式:批发经销、segment:分销售模式:线上直销、unclassified_gross_profit_change
-  - volume_price_decomposition → `bce831c37e7b-10-volume_price_decomposition`；分项 volume_effect、price_effect
-- `cash_reconciliation`：run `9a59b765aa5925fbf6e4c3b5ba853071663b24a640f0fb2897d382747d7fc3fd`（数据集 `bfa752e80734`，规则 `validation/1.1.0`）
-  - operating_cashflow_reconciliation_cur → `9a59b765aa59-00-operating_cashflow_reconciliation_cur`；分项 consolidated_net_profit、non_cash_adjustments、working_capital_adjustments、other_adjustments、unexplained_residual
-  - operating_cashflow_reconciliation_prev → `9a59b765aa59-01-operating_cashflow_reconciliation_prev`；分项 consolidated_net_profit、non_cash_adjustments、working_capital_adjustments、other_adjustments、unexplained_residual
-  - operating_cashflow_change → `9a59b765aa59-02-operating_cashflow_change`；分项 change_in_net_profit、change_in_non_cash、change_in_working_capital、change_in_other、change_in_residual
-  - cash_gap_change → `9a59b765aa59-03-cash_gap_change`；分项 change_in_operating_cashflow、change_in_net_profit_negated
-  - largest_support → `9a59b765aa59-04-largest_support`
-  - largest_drag → `9a59b765aa59-05-largest_drag`
-- `scenario_sensitivity`：run `338ecf4f97c65509ec6e3d16ab0fd35bc1b6706a580d0e5c1fa6568b224f1570`（数据集 `bfa752e80734`，规则 `validation/1.1.0`）
-  - scenario_net_profit → `338ecf4f97c6-00-scenario_net_profit`；分项 base、user、counter
-  - scenario_sensitivity → `338ecf4f97c6-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
-  - collection_days_capital_per_day → `338ecf4f97c6-02-collection_days_capital_per_day`
-  - collection_days_sensitivity_10d → `338ecf4f97c6-03-collection_days_sensitivity_10d`
-  - margin_threshold_to_hold_base_profit → `338ecf4f97c6-04-margin_threshold_to_hold_base_profit`
-  - margin_gap_to_threshold_pp → `338ecf4f97c6-05-margin_gap_to_threshold_pp`
-  - revenue_growth_to_hold_target → `338ecf4f97c6-06-revenue_growth_to_hold_target`
+- `operating_drivers`：run `9b0d03d102989d632a2cf3d9e473cf7311b3688627a2282df9f75c9ce576954f`（数据集 `73a332ba7851`，规则 `validation/1.1.0`）
+  - net_profit_change → `9b0d03d10298-00-net_profit_change`；分项 gross_profit_change、below_gross_line_change
+  - gross_profit_change → `9b0d03d10298-01-gross_profit_change`；分项 revenue_scale_effect、gross_margin_effect
+  - revenue_scale_effect → `9b0d03d10298-02-revenue_scale_effect`
+  - gross_margin_effect → `9b0d03d10298-03-gross_margin_effect`
+  - below_gross_line_change → `9b0d03d10298-04-below_gross_line_change`
+  - net_profit_change_detail → `9b0d03d10298-05-net_profit_change_detail`；分项 income_tax_expense、taxes_and_surcharges、fair_value_change、rd_expense、admin_expense、finance_expense、selling_expense、investment_income、non_operating_income、minority_interest、asset_impairment、non_operating_expense、other_income、asset_disposal_income、credit_impairment、unexplained_residual
+  - gross_profit_change_by_segment → `9b0d03d10298-06-gross_profit_change_by_segment`；分项 segment:分产品:白酒、unclassified_gross_profit_change
+  - gross_profit_change_by_segment → `9b0d03d10298-07-gross_profit_change_by_segment`；分项 segment:分地区:省内、segment:分地区:省外、unclassified_gross_profit_change
+  - gross_profit_change_by_segment → `9b0d03d10298-08-gross_profit_change_by_segment`；分项 segment:分行业:酒类行业、unclassified_gross_profit_change
+  - gross_profit_change_by_segment → `9b0d03d10298-09-gross_profit_change_by_segment`；分项 segment:分销售模式:批发经销、segment:分销售模式:线上直销、unclassified_gross_profit_change
+  - volume_price_decomposition → `9b0d03d10298-10-volume_price_decomposition`；分项 volume_effect、price_effect
+- `cash_reconciliation`：run `967bc9bff97ac90d5c762779d4e33369b1a776e8fce534d77458d251a6be5b5b`（数据集 `73a332ba7851`，规则 `validation/1.1.0`）
+  - operating_cashflow_reconciliation_cur → `967bc9bff97a-00-operating_cashflow_reconciliation_cur`；分项 consolidated_net_profit、non_cash_adjustments、working_capital_adjustments、other_adjustments、unexplained_residual
+  - operating_cashflow_reconciliation_prev → `967bc9bff97a-01-operating_cashflow_reconciliation_prev`；分项 consolidated_net_profit、non_cash_adjustments、working_capital_adjustments、other_adjustments、unexplained_residual
+  - operating_cashflow_change → `967bc9bff97a-02-operating_cashflow_change`；分项 change_in_net_profit、change_in_non_cash、change_in_working_capital、change_in_other、change_in_residual
+  - cash_gap_change → `967bc9bff97a-03-cash_gap_change`；分项 change_in_operating_cashflow、change_in_net_profit_negated
+  - largest_support → `967bc9bff97a-04-largest_support`
+  - largest_drag → `967bc9bff97a-05-largest_drag`
+- `scenario_sensitivity`：run `7e5e83cbc7d0a119095b0f8e1fb6bd146029b964aeb5c4516182592d77c33503`（数据集 `73a332ba7851`，规则 `validation/1.1.0`）
+  - scenario_net_profit → `7e5e83cbc7d0-00-scenario_net_profit`；分项 base、user、counter
+  - scenario_sensitivity → `7e5e83cbc7d0-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
+  - collection_days_capital_per_day → `7e5e83cbc7d0-02-collection_days_capital_per_day`
+  - collection_days_sensitivity_10d → `7e5e83cbc7d0-03-collection_days_sensitivity_10d`
+  - margin_threshold_to_hold_base_profit → `7e5e83cbc7d0-04-margin_threshold_to_hold_base_profit`
+  - margin_gap_to_threshold_pp → `7e5e83cbc7d0-05-margin_gap_to_threshold_pp`
+  - revenue_growth_to_hold_target → `7e5e83cbc7d0-06-revenue_growth_to_hold_target`

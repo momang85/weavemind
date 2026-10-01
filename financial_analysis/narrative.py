@@ -542,8 +542,12 @@ _DRIVER_WATCH: dict = {
                       "下期管理费用率、职工薪酬与股份支付明细"),
     "rd_expense": ("研发费用波动常与项目阶段有关，未必是投入收缩",
                    "下期研发投入强度、资本化比例与在研项目披露"),
-    "finance_expense": ("利息收支受货币资金与利率影响，非经营改善",
-                        "下期货币资金余额、有息负债与利率环境"),
+    # W2（阶段W 点名）：财务费用的原因**看披露说的是什么**——三一的原句是汇兑损益，
+    # 不能一律套"利息/利率"模板（模板会给读者一个公司没说过的原因）。
+    "finance_expense": ("财务费用含利息收支、汇兑损益与手续费：原因以披露原句为准"
+                        "（三一 2024 年披露为汇兑损益），不默认套利息口径",
+                        "下期财务费用明细附注（利息/汇兑/手续费各自金额）、"
+                        "外币敞口与远期外汇合约、有息负债与利率环境"),
     "taxes_and_surcharges": ("消费税/附加税随收入与结构变化，属被动项",
                              "下期税金及附加占收入比、消费税计税依据"),
     "income_tax_expense": ("税率变化只是对照，不是税率变化的原因；原因见税率调节附注",
@@ -902,7 +906,8 @@ def _engineering_index(runs, charts) -> list[str]:
 # ------------------------------------------------------------------ 主入口
 
 def research_note(runs, *, provenance=None, charts=None, label_of=None,
-                  records=None, doc=None, volume_price=None) -> str:
+                  records=None, doc=None, volume_price=None,
+                  direct_cash=None) -> str:
     """已验证运行 → 4–6 页正文（markdown）。缺哪个模型就如实写缺，不补数。
 
     **未通过独立验证的运行在这里被挡掉**：即使调用方把 `validation_failed` 的运行传进来，
@@ -942,7 +947,8 @@ def research_note(runs, *, provenance=None, charts=None, label_of=None,
     try:
         from . import judgments as _jd
         lines.extend(_jd.render_judgments(_jd.research_judgments(
-            runs, volume_price=volume_price, records=records, limit=3)))
+            runs, volume_price=volume_price, records=records,
+            direct_cash=direct_cash, limit=5)))
     except Exception as exc:                 # noqa: BLE001 - 判断层出错不影响既有正文
         lines.append(f"> 研究判断本次未生成（{type(exc).__name__}）：正文其余部分照常给出。")
         lines.append("")

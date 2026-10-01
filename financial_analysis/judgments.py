@@ -23,6 +23,8 @@ J_VOLUME = "volume_contraction"
 J_PRICE = "unit_revenue_not_proof_of_pricing"
 J_INVENTORY = "finished_goods_inventory_build"
 J_CASH_WORKING_CAPITAL = "cash_from_working_capital"
+J_CASH_DIRECT_SUPPORT = "cash_direct_method_support"
+J_STRUCTURE = "product_region_structure"
 
 KIND_LABELS = {"observed": "已发生（读数）", "company_claim": "发行人归因（原句）",
                "assumption": "假设（未发生）", "background": "背景"}
@@ -126,8 +128,44 @@ def _judgment(*, jid, title, numbers, evidence, boundary, alternatives, watch,
             "watch": list(watch), "gaps": list(gaps)}
 
 
+def direct_cash_of(dataset, *, locators: dict | None = None) -> dict:
+    """**直接法**经营现金流的两行收支（合并口径，两期）→ 普通 dict（W2，三一现金判断用）。
+
+    `销售商品、提供劳务收到的现金` 与 `购买商品、接受劳务支付的现金` 是"钱怎么收进来/付出去"的
+    一手读数；只读间接法调节项时，读者看不到现金跃升是否有**真实收支**支撑。
+    取不到就返回 `{}`（调用方据此不生成判断，不拿别的数顶）。
+    """
+    out: dict = {}
+    for key, slug in (("received", "cash_received_from_sales"),
+                      ("paid", "cash_paid_for_goods")):
+        row: dict = {}
+        for tag, offset in (("cur", 0), ("prev", -1)):
+            period = dataset.period_at(offset)
+            if not period:
+                row = {}
+                break
+            obs = dataset.get(slug, period)
+            if obs is None or obs.value is None:
+                row = {}
+                break
+            row[tag] = _num(obs.value)
+            row[f"{tag}_period"] = period
+            row[f"{tag}_fact"] = str(getattr(obs, "fact_id", "") or "")
+        if not row:
+            continue
+        row["delta"] = (row.get("cur") or 0.0) - (row.get("prev") or 0.0)
+        if isinstance(locators, dict):
+            item = locators.get(str(row.get("cur_fact") or "")) or {}
+            row["locator"] = str((item or {}).get("locator") or "")
+        out[key] = row
+    if out.get("received") and out.get("paid"):
+        out["source"] = "合并现金流量表（直接法两行；与补充资料间接法是同一变化的不同切法）"
+    return out
+
+
 def research_judgments(runs, *, volume_price: dict | None = None,
-                       records=None, limit: int = 3) -> list[dict]:
+                       records=None, direct_cash: dict | None = None,
+                       limit: int = 3) -> list[dict]:
     """已验证运行＋已准入量价/结构事实＋已准入段落 → 最多 `limit` 条**可检验判断**。
 
     规则（洋河式"销量/单位收入/库存"与现金两条主线，都由读数触发）：
@@ -285,10 +323,117 @@ def research_judgments(runs, *, volume_price: dict | None = None,
                        "票据、账龄与结算政策披露",
                        "采购付现是否反弹、销售收现是否继续改善"],
                 gaps=["结算条款与账龄明细未取得时不推断账期"]))
+    # ④ 产品/区域结构：不同切法的降幅差 → 结构在拖累还是托底（**不可相加**）
+    if od is not None:
+        seg_rows: list[dict] = []
+        for o in (_attr(od, "outputs", ()) or ()):
+            metric = str(_attr(o, "metric") or "")
+            if metric != "gross_profit_change_by_segment":
+                continue
+            label = str(_attr(o, "label") or "")
+            cut = label[label.find("切法：") + 3:label.find("）")] if "切法：" in label else label
+            parts = []
+            for c in (_attr(o, "components", ()) or ()):
+                cid = str(_attr(c, "component_id") or "")
+                if cid.startswith("segment:"):
+                    parts.append((cid.split(":")[-1], _num(_attr(c, "value"))))
+            if parts:
+                seg_rows.append({"cut": cut, "parts": parts,
+                                 "label": label})
+        # 分段切法：任一把"分产品/分地区/分销售模式/分行业"（生产数据里的口径名形如
+        # `分产品:白酒`）都取前两把，各自列最差与最好分组（同一口径内部可比，跨切法不可加）
+        picked_cuts = [r for r in seg_rows if len(r["parts"]) >= 1][:2]
+        if picked_cuts:
+            numbers = []
+            for r in picked_cuts[:2]:
+                parts = sorted([p for p in r["parts"] if p[1] is not None],
+                               key=lambda p: p[1])
+                if not parts:
+                    continue
+                numbers.append(f"{r['cut']}切法：" + "、".join(
+                    f"{name} {_yi(val)} 亿元" for name, val in parts))
+            struct_lines = []
+            for f in _facts_of(vp, "分产品")[:3]:
+                struct_lines.append(f"分产品收入：{f.get('row_label')} "
+                                    f"{_pct(f.get('yoy'))}")
+            for f in _facts_of(vp, "分地区")[:3]:
+                struct_lines.append(f"分地区收入：{f.get('row_label')} "
+                                    f"{_pct(f.get('yoy'))}")
+            numbers += struct_lines
+            if numbers:
+                evidence = []
+                for f in (_facts_of(vp, "分产品")[:1] + _facts_of(vp, "分地区")[:1]):
+                    if f.get("locator"):
+                        evidence.append({"type": "披露原句",
+                                         "text": str(f.get("line") or ""),
+                                         "locator": str(f.get("locator") or ""),
+                                         "kind": "observed"})
+                for r in _snippet_for(records, ("分产品", "分地区", "主营业务", "结构")):
+                    evidence.append({"type": "已准入段落",
+                                     "text": str(r.get("snippet") or "")[:160],
+                                     "locator": str(r.get("locator") or ""),
+                                     "kind": "observed"})
+                out.append(_judgment(
+                    jid=J_STRUCTURE,
+                    title="产品/区域结构是**同一个口径的不同切法**：降幅差说明结构在起作用",
+                    numbers=numbers, evidence=evidence,
+                    boundary=("分产品/分地区/分销售模式是**不同切法**，覆盖同一笔收入，"
+                              "**不可相加**；结构差异也可能来自发货与确认节奏，"
+                              "不能直接读成「某类需求更好」"),
+                    alternatives=["渠道与发货节奏差异", "统计口径或并表范围变化",
+                                  "价格与促销政策在不同品类上的差异"],
+                    watch=["下一期分产品/分地区收入的降幅差是否收敛",
+                           "同口径销量与吨价（结构混合）",
+                           "公司对区域/产品策略的披露原句"],
+                    gaps=["渠道库存与终端动销未取得时不判断「结构性需求」"]))
+
+    # ⑤ 直接法收支：现金跃升**有没有真实收支支撑**、主要是不是利润带来的（三一式）
+    rec, paid = (direct_cash or {}).get("received") or {}, (direct_cash or {}).get("paid") or {}
+    if (chg is not None and rec.get("delta") is not None and paid.get("delta") is not None
+            and total is not None and total > 0):
+        rec_d, paid_d = float(rec["delta"]), float(paid["delta"])
+        # 直接法两行的**现金净贡献** = 收现变化 − 付现变化（付现减少即正贡献）
+        net_support = rec_d - paid_d
+        # 其余收支合计 = ΔOCF − 直接法两行净贡献（三一实测 ≈ −27.06 亿元；
+        # 合并净利润项 +14.86 亿元在其中，其余为营运资本/其他调节）
+        other_total = total - net_support
+        numbers = [
+            f"ΔOCF {_yi(total)} 亿元 ＝ **直接法两行净贡献 {_yi(net_support)} 亿元**"
+            f"（销售收现变化 {_yi(rec_d)} － 采购付现变化 {_yi(paid_d)}）"
+            f" ＋ **其余收支合计 {_yi(other_total)} 亿元**"
+            f"（其中合并净利润项只 {_yi(np_v)} 亿元——现金跃升主要不是利润带来的）",
+            f"两行水平：销售收现 {rec.get('prev_period','')} {_yi(rec.get('prev'))} → "
+            f"{rec.get('cur_period','')} {_yi(rec.get('cur'))} 亿元；"
+            f"采购付现 {paid.get('prev_period','')} {_yi(paid.get('prev'))} → "
+            f"{paid.get('cur_period','')} {_yi(paid.get('cur'))} 亿元"
+            "（付现减少＝现金正贡献；这是收付实现口径，不是利润口径）"]
+        evidence = [{"type": "披露原句", "text": "合并现金流量表·销售商品、提供劳务收到的现金",
+                     "locator": str(rec.get("locator") or ""), "kind": "observed"},
+                    {"type": "披露原句", "text": "合并现金流量表·购买商品、接受劳务支付的现金",
+                     "locator": str(paid.get("locator") or ""), "kind": "observed"}]
+        for r in _snippet_for(records, ("回款", "采购", "结算", "应付", "收现")):
+            evidence.append({"type": "已准入段落", "text": str(r.get("snippet") or "")[:160],
+                             "locator": str(r.get("locator") or ""), "kind": "observed"})
+        gaps = []
+        if not _snippet_for(records, ("回款", "采购", "结算", "应付", "收现")):
+            gaps.append("公司对回款/采购变化的披露原句未准入：只有两行读数与调节项，"
+                        "不代拟原因")
+        out.append(_judgment(
+            jid=J_CASH_DIRECT_SUPPORT,
+            title="现金跃升有**真实收支**支撑，但主要不来自利润增长",
+            numbers=numbers, evidence=evidence,
+            boundary=("直接法（收付实现：收现/付现）与间接法（净利润＋调节项）是同一变化的"
+                      "**不同切法**，**不可相加**；应付/采购变化也不直接证明账期延长"),
+            alternatives=["采购与备货节奏变化（时点）", "票据与结算政策变化",
+                          "收入确认与回款节奏"],
+            watch=["下一期采购付现是否反弹（反弹则现金改善不可持续）",
+                   "销售收现是否继续改善",
+                   "应付调节项是否反转、票据/账龄/采购规模披露"],
+            gaps=gaps))
     return out[:max(0, int(limit))]
 
 
-def render_judgments(judgments, *, heading: str = "### 研究判断（可检验，先看这三条）") -> list[str]:
+def render_judgments(judgments, *, heading: str = "### 研究判断（可检验）") -> list[str]:
     """七段式排版：判断 → 数字与贡献 → 原句/原件位置 → 支持边界 → 替代解释 → 观察与反转 → 缺口。"""
     if not judgments:
         return []
