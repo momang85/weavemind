@@ -74,6 +74,27 @@
 > **下一步**：三图（利润瀑布/现金桥/情景比较）→ U1/U2 成篇（4–6 页正文）。
 > 提交 `b540ab3`，远端 **CI success**（run `36759660439`）。
 >
+> **U3 收口与 CI**：`d03808d`（同一主线复制到三一 + 两家对照证据）→ `dc01bff`（修 3.11 编译：
+> f-string 内跨行表达式本地 3.14 允许、CI 3.11 不允许）；**HEAD `dc01bff` 的远端 CI success**
+> （run `36763099529`）。
+>
+> **U2 三图底稿（本批，图真出 PNG、不新增服务/worker/数据库）**：把"三图"从声明做成**像素**——
+> ①`chart_specs.CHART_TYPES` 增 `waterfall`；②渲染脚本（`chart_assembly.RENDER_CHART_SCRIPT`）
+> 增 `render_waterfall`（起点/终点柱从 0 起、贡献柱从上一累计起、累计虚线、正负配色）；
+> ③新模块 `financial_analysis/charts.py` 把**已验证运行**翻成可渲染规格（利润瀑布＝经营驱动桥、
+> 现金桥＝补充资料调节桥、情景比较＝反向阈值），只消费 `validated` 运行，**桥不闭合就不出图**
+> （分项口径与显示口径各判一次）；④`chart_qa` 增 `footer_overlap` 判据 + 页脚band
+> （实机缺陷：10 个旋转标签时轴标题被排到页脚上，`tight_layout` 不算 `fig.text`）。
+> 证据 [u2_charts.json](evidence/u2_charts.json) + 三张 PNG（`docs/evidence/u2_charts/`，脚本
+> `scripts/u2_yanghe_charts.py`，正常入口、不写数字）：利润瀑布 **100.16 → 66.73 亿元**
+> （毛利变化 −38.01、规模 −31.54／毛利率 −6.47、毛利线以下 +4.58，未解释差额 0.00）；
+> 现金桥 **66.66 ＋ (−20.38) ＝ 46.29 亿元**（非现金项 +9.57／营运资本项 −33.25／其他 +3.30，
+> 最大支撑折旧 +5.87、最大拖累经营性应付 −18.31）；情景比较 三档阈值
+> **73.16% / 69.67%（−3.48pp）/ 83.92%（+10.77pp）**，三图 `grade=publish`、
+> `validate_spec` 全过、同参数重跑字节一致。定向：`test_financial_analysis` **159**、
+> `test_delivery_chain`、`test_deploy_manifest` 40、`test_p0.TestChartQA` 全过。
+> **仍未做**：U1/U2 独立成篇的 4–6 页正文（当前正文只有报告链的「分析卡」段落）。
+>
 > ## 历史账（按日期，细节保留）
 >
 > ## 历史账（2026-09-30 上午 · **阶段 Q 深化 L0→L1→L2→L3 逐批执行**）

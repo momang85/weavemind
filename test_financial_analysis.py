@@ -2658,5 +2658,148 @@ class TestScenarioReverseThresholds(unittest.TestCase):
         self.assertIn("gold", res["failed"])
 
 
+class TestU2ChartSpecs(unittest.TestCase):
+    """U2 三图底稿（`financial_analysis.charts`）：图只从**已验证运行**来，不闭合就不给图。
+
+    规格必须通过既有 `chart_specs.validate_spec`（标题/单位/来源/轴标题/结论齐全），
+    否则渲染脚本会静默跳过——那样"三图底稿"就只是 JSON 里的声明。
+    """
+
+    IS = {
+        "revenue": (33_126_277_551.51, 28_876_296_993.56),
+        "operating_cost": (8_200_245_255.42, 7_751_218_356.66),
+        "net_profit": (10_015_930_040.27, 6_673_388_602.12),
+        "net_profit_consolidated": (10_020_768_556.47, 6_666_455_819.96),
+        "taxes_and_surcharges": (5_269_245_592.35, 4_826_086_952.64),
+        "selling_expense": (5_386_953_700.62, 5_516_238_544.79),
+        "income_tax_expense": (3_197_064_562.60, 2_476_620_791.72),
+        "fair_value_change": (-37_082_477.77, -396_164_080.43),
+        "rd_expense": (284_753_881.33, 104_796_407.26),
+    }
+    CF = {
+        "net_profit_consolidated": (10_020_768_556.47, 6_666_455_819.96),
+        "operating_cashflow": (6_130_220_867.96, 4_628_711_237.28),
+        "depreciation": (639_335_568.28, 586_592_227.18),
+        "intangible_amortization": (59_054_597.55, 61_305_706.85),
+        "inventory_decrease": (-1_226_697_174.83, -843_101_567.99),
+        "operating_receivable_decrease": (380_090_873.53, -651_364_248.55),
+        "operating_payable_increase": (-3_582_948_946.71, -1_830_670_724.59),
+        "other_cashflow_adjustments": (-174_743_591.08, 330_296_496.71),
+    }
+
+    def _ds(self, table, *, source="test:charts", **override):
+        rows = []
+        for metric, (prev, cur) in dict(table, **override).items():
+            rows.append(_row(metric, "2023年", prev, unit="元",
+                             fact_id=f"{source}-{metric}-2023"))
+            rows.append(_row(metric, "2024年", cur, unit="元",
+                             fact_id=f"{source}-{metric}-2024"))
+        return fa.freeze_from_facts(rows, periods=(2023, 2024), entity="洋河股份",
+                                    entity_id="002304.SZ", as_of="2025-04-30",
+                                    source_label=source)
+
+    def test_profit_waterfall_rows_close_and_the_spec_is_renderable(self):
+        import chart_specs as CS
+        ds = self._ds(self.IS)
+        run = fa.run("operating_drivers", ds)
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        spec = fa.charts.profit_waterfall(run, ds, top_n=3)
+        self.assertTrue(spec["available"], spec.get("reason"))
+        self.assertEqual(CS.validate_spec(spec), [])
+        self.assertEqual(spec["type"], "waterfall")
+        self.assertEqual([r["kind"] for r in spec["data"]][0], "base")
+        self.assertEqual([r["kind"] for r in spec["data"]][-1], "total")
+        # 起点/终点是真实归母净利，贡献段合计 = 净利变化
+        self.assertAlmostEqual(spec["data"][0]["value"], 100.16, places=2)
+        self.assertAlmostEqual(spec["data"][-1]["value"], 66.73, places=2)
+        deltas = sum(r["value"] for r in spec["data"][1:-1])
+        self.assertAlmostEqual(deltas,
+                               spec["data"][-1]["value"] - spec["data"][0]["value"],
+                               delta=0.03, msg="显示口径下的闭合差只允许舍入量级")
+        self.assertIn("毛利变化 -38.01", spec["conclusion"])
+        self.assertIn("-33.43", spec["conclusion"])
+        self.assertIn(str(run.run_id)[:12], spec["source"], "图要带运行身份")
+        # top_n=3 之外的贡献合并成一项（合计仍是精确和）
+        self.assertTrue(any("其余" in r["label"] for r in spec["data"]), spec["data"])
+
+    def test_profit_waterfall_refuses_a_bridge_that_does_not_close(self):
+        """桥不闭合（数据集与运行不是同一份）→ 拒绝出图，不画"看起来闭合"的瀑布。"""
+        ds = self._ds(self.IS)
+        run = fa.run("operating_drivers", ds)
+        other = self._ds(self.IS, source="test:charts-other",
+                         net_profit=(10_015_930_040.27, 5_000_000_000.00))
+        spec = fa.charts.profit_waterfall(run, other)
+        self.assertFalse(spec["available"])
+        self.assertIn("不闭合", spec["reason"])
+
+    def test_profit_waterfall_refuses_an_unvalidated_run(self):
+        import dataclasses
+        ds = self._ds(self.IS)
+        run = fa.run("operating_drivers", ds)
+        broken = dataclasses.replace(run, status=C.RunStatus.VALIDATION_FAILED)
+        spec = fa.charts.profit_waterfall(broken, ds)
+        self.assertFalse(spec["available"])
+        self.assertIn("独立验证", spec["reason"])
+
+    def test_cash_bridge_waterfall_closes_to_operating_cashflow(self):
+        import chart_specs as CS
+        ds = self._ds(self.CF)
+        run = fa.run("cash_reconciliation", ds)
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        spec = fa.charts.cash_bridge_waterfall(run, which="cur")
+        self.assertTrue(spec["available"], spec.get("reason"))
+        self.assertEqual(CS.validate_spec(spec), [])
+        self.assertAlmostEqual(spec["data"][0]["value"], 66.66, places=2)
+        self.assertAlmostEqual(spec["data"][-1]["value"], 46.29, places=2)
+        self.assertIn("经营现金流 46.29", spec["conclusion"])
+        labels = "".join(r["label"] for r in spec["data"])
+        for needle in ("非现金项", "营运资本项", "其他调节项"):
+            self.assertIn(needle, labels, f"现金桥缺分组「{needle}」")
+        # 缺项时差额不为 0：桥仍然闭合（差额本身是一根柱子），但不许写成"完整调节"
+        run2 = fa.run("cash_reconciliation", self._ds(self.CF, depreciation=(0.0, 0.0)))
+        spec2 = fa.charts.cash_bridge_waterfall(run2, which="cur")
+        self.assertTrue(spec2["available"], spec2.get("reason"))
+        self.assertTrue(any("未解释差额" in r["label"] for r in spec2["data"]),
+                        spec2["data"])
+
+    def test_scenario_comparison_uses_one_base_margin_and_refuses_mixed_datasets(self):
+        import chart_specs as CS
+        rows = [_row("revenue", "2024年", 28_876_296_993.56, unit="元"),
+                _row("gross_profit", "2024年", 21_125_078_636.90, unit="元"),
+                _row("net_profit", "2024年", 6_673_388_602.12, unit="元")]
+        ds = fa.freeze_from_facts(rows, periods=(2024,), entity="洋河股份",
+                                  entity_id="002304.SZ", as_of="2025-04-30",
+                                  source_label="test:charts-scenario")
+        flat = fa.run("scenario_sensitivity", ds,
+                      params={"revenue_growth": 0.0, "gross_margin_delta": 0.0})
+        down = fa.run("scenario_sensitivity", ds,
+                      params={"revenue_growth": -0.1283, "gross_margin_delta": 0.0})
+        spec = fa.charts.scenario_threshold_comparison([("收入持平", flat),
+                                                        ("收入 −12.83%", down)])
+        self.assertTrue(spec["available"], spec.get("reason"))
+        self.assertEqual(CS.validate_spec(spec), [])
+        self.assertEqual(spec["type"], "grouped_bar")
+        self.assertEqual({r["unit"] for r in spec["data"]}, {"%"})
+        bases = [r["value"] for r in spec["data"] if r["caliber"] == "基期毛利率"]
+        self.assertEqual(len(set(bases)), 1, f"基期毛利率必须只有一个值：{bases}")
+        self.assertAlmostEqual(bases[0], 73.16, places=2,
+                               msg="基期毛利率＝毛利/收入（211.25/288.76 亿元）")
+        self.assertIn("83.92", spec["conclusion"])
+        self.assertIn("不表示可达", spec["conclusion"])
+        # 只有一个档位 → 不出图
+        self.assertFalse(fa.charts.scenario_threshold_comparison(
+            [("收入持平", flat)])["available"])
+        # 不同数据集（不同基期）之间不可比 → 拒绝
+        ds2 = fa.freeze_from_facts(rows, periods=(2024,), entity="洋河股份",
+                                   entity_id="002304.SZ", as_of="2025-04-30",
+                                   source_label="test:charts-scenario-2")
+        down2 = fa.run("scenario_sensitivity", ds2,
+                       params={"revenue_growth": -0.1283, "gross_margin_delta": 0.0})
+        mixed = fa.charts.scenario_threshold_comparison([("收入持平", flat),
+                                                         ("收入 −12.83%", down2)])
+        self.assertFalse(mixed["available"])
+        self.assertIn("同一数据集", mixed["reason"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

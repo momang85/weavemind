@@ -28,6 +28,10 @@ LEGEND_CORE_RATIO = 0.38  # 图例 bbox 与轴中央区域相交比例阈值
 # 超限说明有 artist 被放到了画布外（典型成因：坐标变换退化后数值标签落在数据范围之外），
 # 这种 PNG 在报告里几乎全是空白——必须报出来，不能算"发布级"。
 MAX_CANVAS_ASPECT = 12.0
+# 页脚band：页脚（来源/结论/免责声明）由渲染脚本画成 **figure 级文字**（`fig.text`），
+# `tight_layout` 不把它算进布局，于是标签一多（如瀑布图 10 个旋转标签 + 轴标题）轴标题
+# 就会被排到页脚上（实机：利润瀑布图）。这里统一在底部留出页脚band。
+FOOTER_BAND = 0.16
 
 
 def canvas_aspect_issue(path) -> dict | None:
@@ -99,6 +103,38 @@ def check_figure(fig, ax, renderer) -> list[dict]:
                                "detail": f"轴标签字号 {lbl.get_fontsize()} < {MIN_LABEL_FONT}"})
         except Exception:
             pass
+    # 页脚（figure 级文字）压住轴标题/刻度标签：见 FOOTER_BAND 的说明
+    try:
+        ax_bb = ax.get_window_extent(renderer)
+        lower = []
+        for lbl in (ax.xaxis.label, *ax.get_xticklabels()):
+            try:
+                if str(lbl.get_text() or "").strip():
+                    lower.append(lbl.get_window_extent(renderer))
+            except Exception:
+                continue
+        hit = False
+        for t in fig.texts:
+            try:
+                if not str(t.get_text() or "").strip():
+                    continue
+                tb = t.get_window_extent(renderer)
+            except Exception:
+                continue
+            if tb.y1 > ax_bb.y0:            # 只看轴下方的页脚
+                continue
+            for lb in lower:
+                inter = tb.intersection(lb)
+                if (inter is not None and inter.width > OVERLAP_PX
+                        and inter.height > OVERLAP_PX * 0.5):
+                    issues.append({"type": "footer_overlap", "axis": "x",
+                                   "detail": "页脚文字与轴标题/刻度标签重叠"})
+                    hit = True
+                    break
+            if hit:
+                break
+    except Exception:
+        pass
     # 图例遮挡轴中央数据区
     try:
         leg = ax.get_legend()
@@ -154,7 +190,7 @@ def _apply_fixes(fig, ax, issues: list[dict]) -> bool:
                 changed = True
     if changed:
         try:
-            fig.tight_layout()
+            fig.tight_layout(rect=(0, FOOTER_BAND, 1, 1))
         except Exception:
             pass
     return changed

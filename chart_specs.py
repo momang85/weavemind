@@ -11,7 +11,8 @@
 
 import re
 
-CHART_TYPES = ("line", "bar", "horizontal_bar", "pie", "scatter", "grouped_bar")
+CHART_TYPES = ("line", "bar", "horizontal_bar", "pie", "scatter", "grouped_bar",
+               "waterfall")
 
 # 关键字段缺失即视为无效图（跳过）
 CRITICAL_FIELDS = (

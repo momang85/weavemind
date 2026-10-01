@@ -5501,6 +5501,60 @@ class TestFinancialResearchCharts(unittest.TestCase):
             self.assertTrue(e.get("observation"), e)
             self.assertIn(e.get("grade"), ("publish", "draft"))
 
+    def test_render_script_draws_waterfall(self):
+        """U2 三图底稿的利润瀑布要真能画出来：`waterfall` 一类的模板是字符串，靠这条兜住。
+
+        规格形状与 `financial_analysis.charts.profit_waterfall` 一致（起点/贡献/终点 +
+        `kind`），差额落在"其余 N 项合计"里不摊派。
+        """
+        import subprocess
+        import sys
+        import chart_assembly as CA
+        import chart_specs as CS
+        repo = Path(__file__).resolve().parent
+        tmp = tempfile.mkdtemp(prefix="wm_wfchart_")
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        (Path(tmp) / "render_charts.py").write_text(
+            CA.RENDER_CHART_SCRIPT.replace("__REPO_ROOT__", str(repo)), encoding="utf-8")
+        rows = [{"label": "2023年归母净利", "value": 100.16, "unit": "亿元", "kind": "base"},
+                {"label": "毛利变化", "value": -38.01, "unit": "亿元", "kind": "delta"},
+                {"label": "所得税费用", "value": 7.20, "unit": "亿元", "kind": "delta"},
+                {"label": "税金及附加", "value": 4.43, "unit": "亿元", "kind": "delta"},
+                {"label": "研发费用", "value": 1.80, "unit": "亿元", "kind": "delta"},
+                {"label": "公允价值变动收益", "value": -3.59, "unit": "亿元", "kind": "delta"},
+                {"label": "其余 7 项合计", "value": -5.26, "unit": "亿元", "kind": "delta"},
+                {"label": "2024年归母净利", "value": 66.73, "unit": "亿元", "kind": "total"}]
+        self.assertAlmostEqual(
+            sum(r["value"] for r in rows[1:-1]),
+            rows[-1]["value"] - rows[0]["value"], delta=0.03,
+            msg="夹具本身必须闭合（否则测的是画错的桥）")
+        spec = {"type": "waterfall", "title": "洋河股份 2023→2024 归母净利润瀑布（亿元）",
+                "unit": "亿元", "source": "公司年报：合并利润表",
+                "x_axis_title": "项目（起点→贡献→终点）", "y_axis_title": "金额（亿元）",
+                "question": "净利润变化由哪些金额构成？",
+                "conclusion": "归母净利润 100.16 → 66.73 亿元（-33.43）",
+                "time_range": "2023年—2024年", "region": "中国", "sample_size": len(rows),
+                "missing": "无", "outliers": "无", "data": rows}
+        self.assertEqual(CS.validate_spec(spec), [])
+        (Path(tmp) / "chart_data.json").write_text(
+            json.dumps({"charts": [spec]}, ensure_ascii=False), encoding="utf-8")
+        proc = subprocess.run([sys.executable, "render_charts.py"], cwd=tmp,
+                              capture_output=True, text=True, encoding="utf-8",
+                              errors="replace", timeout=600)
+        self.assertEqual(proc.returncode, 0, proc.stderr[:400])
+        self.assertIn("total=1 skipped=0", proc.stdout, proc.stdout[:400])
+        png = Path(tmp) / "chart_1.png"
+        self.assertTrue(png.exists())
+        self.assertGreater(png.stat().st_size, 5000)
+        man = json.loads((Path(tmp) / "chart_manifest.json").read_text(encoding="utf-8"))
+        entry = man["charts"][0]
+        self.assertEqual(entry["file"], "chart_1.png")
+        self.assertTrue(entry.get("observation"), entry)
+        # 页脚不压轴标签（chart_qa 的 footer_overlap 判据）：残留问题会降级为 draft
+        self.assertIn(entry.get("grade"), ("publish", "draft"))
+        self.assertEqual(entry.get("grade"), "publish",
+                         entry.get("draft_reason") or "瀑布图视觉质量未达标")
+
     def test_chart_rows_keep_only_contract_periods(self):
         """越界期间不进图：报告正文声明"未予采用"的数据，图上也不能出现。"""
         import facts as F

@@ -1,0 +1,294 @@
+{
+ "case": "洋河股份 002304 2023→2024 三图底稿（利润瀑布／现金桥／反向情景）",
+ "source_material": "evals/a2_official_chain_20260929/002304/project/materials/f42e747c73850b59/doc.json",
+ "dataset": {
+  "observations": 162,
+  "usable": 158,
+  "conflicts": [
+   "total_assets 2024年 口径 合并：fact-abb13a23f7abeb0e=67345265219.62元（CNY/合并）；fact-abb13a23f7abeb0e=67345265219.62元（CNY/合并）",
+   "total_assets 2023年 口径 合并：fact-83bc622c3ea8e3e7=69792287455.91元（CNY/合并）；fact-83bc622c3ea8e3e7=69792287455.91元（CNY/合并）"
+  ],
+  "dataset_hash": "8e99cf4db927693799691a9f19d769c46f5ceb3d2e3e0d88da08b9eacfe8e35c"
+ },
+ "runs": {
+  "operating_drivers": {
+   "run_id": "5ebf08301700f888f3931ec31e62e9986acfcce4cabb9d289a969e4ca24ce7d7",
+   "status": "validated"
+  },
+  "cash_reconciliation": {
+   "run_id": "fdc8d4d464e7a0f282c579eae95c8d3ccf2b41a0e4dfefe2203a3f6b8706ae4d",
+   "status": "validated"
+  },
+  "scenario_sensitivity": [
+   {
+    "label": "收入持平",
+    "run_id": "cd0f89f298fbba5d29d84cf078510b450f892eb452ebab82528e41d35c653eea",
+    "status": "validated"
+   },
+   {
+    "label": "收入 +5%",
+    "run_id": "7d779d596bab8170c4a32f4e96ba5fec78275143e6c4f043b000b19f1ccaa058",
+    "status": "validated"
+   },
+   {
+    "label": "收入 −12.83%",
+    "run_id": "b91832c8d16c478ab5583fa1ec64c7513a114588f3b76c16036b6cda6ecb221f",
+    "status": "validated"
+   }
+  ]
+ },
+ "render": {
+  "script": "chart_assembly.RENDER_CHART_SCRIPT",
+  "chart_types": [
+   "waterfall",
+   "waterfall",
+   "grouped_bar"
+  ],
+  "stdout": [
+   "RENDERED chart_1.png: ��ӹɷ� 2023���2024�� ��ĸ�������ٲ�����Ԫ��",
+   "RENDERED chart_2.png: ��ӹɷ� 2024�� ���������Ӫ�ֽ����ţ���Ԫ��",
+   "RENDERED chart_3.png: ��ӹɷ� �����龰��ά�ֻ��ڹ�ĸ��������ë���ʣ�%��",
+   "total=3 skipped=0"
+  ],
+  "manifest_captions": [
+   {
+    "file": "u2_1_profit_waterfall.png",
+    "observation": "归母净利润 100.16 → 66.73 亿元（-33.43）；毛利变化 -38.01 亿元；规模 -31.54／毛利率 -6.47 亿元；毛利线以下 +4.58 亿元；未解释差额 0.00 亿元（披露项目齐全）",
+    "grade": "publish"
+   },
+   {
+    "file": "u2_2_cash_bridge.png",
+    "observation": "合并净利润 66.66 亿元 ＋ 调节项 -20.38 亿元 ＝ 经营现金流 46.29 亿元；未解释差额 +0.00 亿元；最大支撑 固定资产折旧、油气资产折… +5.87 亿元；最大拖累 经营性应付项目的增加（减… -18.31 亿元",
+    "grade": "publish"
+   },
+   {
+    "file": "u2_3_scenario_thresholds.png",
+    "observation": "收入持平 需 73.16%（差 +0.00pp）；收入 +5% 需 69.67%（差 -3.48pp）；收入 −12.83% 需 83.92%（差 +10.77pp）。收入越低，维持同样利润所需毛利率越高（单因素反推：给出“需要什么”，不表示可达、也不是预测）",
+    "grade": "publish"
+   }
+  ]
+ },
+ "figures": [
+  {
+   "file": "docs/evidence/u2_charts/u2_1_profit_waterfall.png",
+   "bytes": 80371,
+   "sha256": "5728604a0f3a7d13",
+   "spec": {
+    "available": true,
+    "type": "waterfall",
+    "chart_id": "5ebf08301700-profit-waterfall",
+    "title": "洋河股份 2023年→2024年 归母净利润瀑布（亿元）",
+    "question": "归母净利润同比变化由哪些金额构成？",
+    "conclusion": "归母净利润 100.16 → 66.73 亿元（-33.43）；毛利变化 -38.01 亿元；规模 -31.54／毛利率 -6.47 亿元；毛利线以下 +4.58 亿元；未解释差额 0.00 亿元（披露项目齐全）",
+    "unit": "亿元",
+    "source": "公司年报：合并利润表与经营分析（分产品/分地区/期间费用）（正常入口抽取）；运行 run=5ebf08301700，数据集 8e99cf4db927",
+    "x_axis_title": "项目（起点→贡献→终点）",
+    "y_axis_title": "金额（亿元）",
+    "time_range": "2023年—2024年",
+    "region": "中国",
+    "sample_size": 10,
+    "missing": "无",
+    "outliers": "无",
+    "annotation": "亿元为四舍五入两位；闭合判定用元值。贡献项是会计分解，业务原因需另找披露依据",
+    "data": [
+     {
+      "label": "2023年归母净利",
+      "value": 100.16,
+      "unit": "亿元",
+      "kind": "base"
+     },
+     {
+      "label": "毛利变化",
+      "value": -38.01,
+      "unit": "亿元",
+      "kind": "delta"
+     },
+     {
+      "label": "所得税费用",
+      "value": 7.2,
+      "unit": "亿元",
+      "kind": "delta"
+     },
+     {
+      "label": "税金及附加",
+      "value": 4.43,
+      "unit": "亿元",
+      "kind": "delta"
+     },
+     {
+      "label": "公允价值变动收益",
+      "value": -3.59,
+      "unit": "亿元",
+      "kind": "delta"
+     },
+     {
+      "label": "研发费用",
+      "value": 1.8,
+      "unit": "亿元",
+      "kind": "delta"
+     },
+     {
+      "label": "管理费用",
+      "value": -1.6,
+      "unit": "亿元",
+      "kind": "delta"
+     },
+     {
+      "label": "财务费用",
+      "value": -1.44,
+      "unit": "亿元",
+      "kind": "delta"
+     },
+     {
+      "label": "其余 9 项合计（未单列）",
+      "value": -2.22,
+      "unit": "亿元",
+      "kind": "delta"
+     },
+     {
+      "label": "2024年归母净利",
+      "value": 66.73,
+      "unit": "亿元",
+      "kind": "total"
+     }
+    ],
+    "run_id": "5ebf08301700f888f3931ec31e62e9986acfcce4cabb9d289a969e4ca24ce7d7",
+    "dataset_hash": "8e99cf4db927693799691a9f19d769c46f5ceb3d2e3e0d88da08b9eacfe8e35c"
+   }
+  },
+  {
+   "file": "docs/evidence/u2_charts/u2_2_cash_bridge.png",
+   "bytes": 75303,
+   "sha256": "a62eec4fcaf37968",
+   "spec": {
+    "available": true,
+    "type": "waterfall",
+    "chart_id": "fdc8d4d464e7-cash-bridge-cur",
+    "title": "洋河股份 2024年 净利润→经营现金流桥（亿元）",
+    "question": "合并净利润到经营现金流之间的调节桥在哪里？",
+    "conclusion": "合并净利润 66.66 亿元 ＋ 调节项 -20.38 亿元 ＝ 经营现金流 46.29 亿元；未解释差额 +0.00 亿元；最大支撑 固定资产折旧、油气资产折… +5.87 亿元；最大拖累 经营性应付项目的增加（减… -18.31 亿元",
+    "unit": "亿元",
+    "source": "公司年报：现金流量表补充资料（将净利润调节为经营活动现金流量）（正常入口抽取）；运行 run=fdc8d4d464e7，数据集 8e99cf4db927",
+    "x_axis_title": "项目（起点→调节项→终点）",
+    "y_axis_title": "金额（亿元）",
+    "time_range": "2024年",
+    "region": "中国",
+    "sample_size": 5,
+    "missing": "未取得调节项：credit_impairment_provision",
+    "outliers": "无",
+    "annotation": "对账差额≈0 表示披露调节项与经营现金流自洽；差额非零时不得写“完整调节”。调节项是会计加回/扣减，不表示经济原因。分组明细：非现金项（折旧摊销/减值/递延税/公允价值等） +9.57、营运资本项（存货与经营性应收应付的增减） -33.25、其他调节项 +3.30",
+    "data": [
+     {
+      "label": "2024年合并净利润",
+      "value": 66.66,
+      "unit": "亿元",
+      "kind": "base"
+     },
+     {
+      "label": "非现金项（折旧摊销/减值/递延税/公允价值等）",
+      "value": 9.57,
+      "unit": "亿元",
+      "kind": "delta"
+     },
+     {
+      "label": "营运资本项（存货/经营性应收/经营性应付）",
+      "value": -33.25,
+      "unit": "亿元",
+      "kind": "delta"
+     },
+     {
+      "label": "其他调节项",
+      "value": 3.3,
+      "unit": "亿元",
+      "kind": "delta"
+     },
+     {
+      "label": "2024年经营现金流",
+      "value": 46.29,
+      "unit": "亿元",
+      "kind": "total"
+     }
+    ],
+    "run_id": "fdc8d4d464e7a0f282c579eae95c8d3ccf2b41a0e4dfefe2203a3f6b8706ae4d",
+    "dataset_hash": "8e99cf4db927693799691a9f19d769c46f5ceb3d2e3e0d88da08b9eacfe8e35c"
+   }
+  },
+  {
+   "file": "docs/evidence/u2_charts/u2_3_scenario_thresholds.png",
+   "bytes": 67962,
+   "sha256": "da9d948d4a91a843",
+   "spec": {
+    "available": true,
+    "type": "grouped_bar",
+    "chart_id": "cd0f89f298fb-scenario-threshold",
+    "title": "洋河股份 反向情景：维持基期归母净利所需毛利率（%）",
+    "question": "收入假设变化时，要保住基期利润需要多高的毛利率？",
+    "conclusion": "收入持平 需 73.16%（差 +0.00pp）；收入 +5% 需 69.67%（差 -3.48pp）；收入 −12.83% 需 83.92%（差 +10.77pp）。收入越低，维持同样利润所需毛利率越高（单因素反推：给出“需要什么”，不表示可达、也不是预测）",
+    "unit": "%",
+    "source": "公司年报：营业收入/营业成本/归母净利润与毛利线以下净额（正常入口抽取）",
+    "x_axis_title": "假设档位（收入）",
+    "y_axis_title": "毛利率（%）",
+    "time_range": "2024年（使用者情景（收入 +0.00%／毛利率 +0.00pp／隐含块 +0.00%，等于基期））",
+    "region": "中国",
+    "sample_size": 6,
+    "missing": "无",
+    "outliers": "无",
+    "annotation": "基期毛利率取运行诊断的未取整值，并与两条已验证输出的回推值交叉核对（≤0.02pp）；两个口径同为百分比。毛利线以下净额含费用/税项/投资收益/少数股东，不是纯费用",
+    "data": [
+     {
+      "label": "收入持平",
+      "value": 73.16,
+      "unit": "%",
+      "caliber": "基期毛利率"
+     },
+     {
+      "label": "收入持平",
+      "value": 73.16,
+      "unit": "%",
+      "caliber": "维持基期净利所需毛利率"
+     },
+     {
+      "label": "收入 +5%",
+      "value": 73.16,
+      "unit": "%",
+      "caliber": "基期毛利率"
+     },
+     {
+      "label": "收入 +5%",
+      "value": 69.67,
+      "unit": "%",
+      "caliber": "维持基期净利所需毛利率"
+     },
+     {
+      "label": "收入 −12.83%",
+      "value": 73.16,
+      "unit": "%",
+      "caliber": "基期毛利率"
+     },
+     {
+      "label": "收入 −12.83%",
+      "value": 83.92,
+      "unit": "%",
+      "caliber": "维持基期净利所需毛利率"
+     }
+    ],
+    "run_id": "cd0f89f298fbba5d29d84cf078510b450f892eb452ebab82528e41d35c653eea",
+    "dataset_hash": "8e99cf4db927693799691a9f19d769c46f5ceb3d2e3e0d88da08b9eacfe8e35c",
+    "variants": [
+     {
+      "label": "收入持平",
+      "run_id": "cd0f89f298fbba5d29d84cf078510b450f892eb452ebab82528e41d35c653eea"
+     },
+     {
+      "label": "收入 +5%",
+      "run_id": "7d779d596bab8170c4a32f4e96ba5fec78275143e6c4f043b000b19f1ccaa058"
+     },
+     {
+      "label": "收入 −12.83%",
+      "run_id": "b91832c8d16c478ab5583fa1ec64c7513a114588f3b76c16036b6cda6ecb221f"
+     }
+    ]
+   }
+  }
+ ]
+}

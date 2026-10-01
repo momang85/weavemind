@@ -16,6 +16,7 @@ from .contracts import (  # noqa: F401
     MissingInput, NotApplicable, NotComputable, Observation, RunStatus,
     ValidatedOutput, full_identity_ok, report_scope_ok,
 )
+from . import charts  # noqa: F401
 from .dataset import freeze_from_facts, freeze_from_working_paper  # noqa: F401
 from .registry import available_for, spec, specs  # noqa: F401
 from .report_adapter import analysis_card, chart_spec, delivery_binding  # noqa: F401
@@ -28,6 +29,7 @@ __all__ = [
     "ValidatedOutput",
     "report_scope_ok", "full_identity_ok",
     "freeze_from_facts", "freeze_from_working_paper",
+    "charts",
     "available_for", "spec", "specs",
     "compile_plan", "run", "ratio_run", "raise_for_status", "revalidate",
     "validate_output", "tamper_check", "unusable_inputs",
