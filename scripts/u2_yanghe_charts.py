@@ -101,6 +101,12 @@ def main() -> int:
     Path(OUT_DIR).mkdir(parents=True, exist_ok=True)
     for stale in Path(OUT_DIR).glob("*.png"):
         stale.unlink()
+    # 渲染端会合并已有 chart_manifest.json；重跑同一组文件名会累积重复条目（见
+    # `scripts/case_deliverables.py` 的同一条注释），证据目录只要"本次三张"。
+    try:
+        (Path(OUT_DIR) / "chart_manifest.json").unlink()
+    except OSError:
+        pass
     (Path(OUT_DIR) / "chart_data.json").write_text(
         json.dumps({"charts": specs}, ensure_ascii=False, indent=1), encoding="utf-8")
     (Path(OUT_DIR) / "render_charts.py").write_text(

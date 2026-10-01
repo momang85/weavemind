@@ -103,6 +103,12 @@ def _render(specs, out_dir, root, CA) -> list:
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     for stale in Path(out_dir).glob("*.png"):
         stale.unlink()
+    # 渲染端会**合并**已有 chart_manifest.json（保留非 chart_N 条目）；这里重跑同三个文件名时
+    # 会累积成 3×N 条重复（实测 9 条）。证据目录要的是"本次三张"，所以先删清单。
+    try:
+        (Path(out_dir) / "chart_manifest.json").unlink()
+    except OSError:
+        pass
     (Path(out_dir) / "chart_data.json").write_text(
         json.dumps({"charts": specs}, ensure_ascii=False, indent=1), encoding="utf-8")
     renderer = Path(out_dir) / "render_charts.py"
