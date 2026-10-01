@@ -123,6 +123,28 @@
 > **量价如实跳过**（只有行业级"台"销量，与分产品收入口径不可比）。
 > 两家对照见 [u3_sany_deliverables.json](evidence/u3_sany_deliverables.json)。
 >
+> **本批收口与 CI**：`e88ef90`（成篇）→ `99f58d3`（三一交付件）→ `b303743`（成篇进简报正文的
+> 用例）→ `5d15ab8`（税率反事实按方向说：洋河上升多吃掉 2.65 亿、三一**下降**少吃掉 1.08 亿）
+> → `ce2aa68`（证据图表清单不再累积重复条目）。远端 CI：`36807067846`、`36807190151`、
+> `36807224289`、`36808195291` 均 **success**；`36808132853`（`5d15ab8`）红了一次，失败项是
+> `test_delivery_chain.TestE2EGoalTyping.test_game_that_freezes_on_game_over_rejected`
+> （「canvas 渲染为空白」）——该用例在**紧邻的同一批改动**提交上通过（`b303743`、`ce2aa68`），
+> 且本批未触碰画布/游戏路径，**如实记为环境性抖动**，不宣称"CI 全绿"；若再现则单独立项。
+> 定向全绿：`test_financial_analysis` **165**、`test_delivery_chain`+`test_report_quality`+
+> `test_narrative_evidence` **516**、`test_deploy_manifest` 40、`test_p0.TestChartQA`、
+> 3.11 `py_compile`。
+>
+> **U1→U2→U3 交付物清单（本主线）**：
+> ① 算子 `operating_drivers`（经营驱动：毛利=规模+毛利率、毛利线以下逐项、按切法分段、量价）
+> 与 `cash_reconciliation`（补充资料调节桥，恒等式闭合）——**两个新算子，正好用满预算**；
+> ② 定向抽取 `adapters/operating_detail_tables.py`（四种表形，形状不符即不取）与
+> `adapters/cashflow_supplement_tables.py`（锚点+折行标签+单位换算）；
+> ③ 出图 `financial_analysis/charts.py` + 渲染端 `waterfall` 一类（三图，`grade=publish`）；
+> ④ 成篇 `financial_analysis/narrative.py` 与报告链 `analysis_note`；
+> ⑤ 证据：`u1_yanghe_ingest_run.json`、`u2_yanghe_cash_bridge.json`、`u2_charts/`、
+> `u2_research_note.md`、`u3_sany_same_mainline.json`、`u3_sany/`、`u3_sany_note.md`；
+> ⑥ 用例与 CI 见上。**未新增服务/worker/数据库，未改用户模型/权限/密钥/付费上限与人审。**
+>
 > ## 历史账（按日期，细节保留）
 >
 > ## 历史账（2026-09-30 上午 · **阶段 Q 深化 L0→L1→L2→L3 逐批执行**）
