@@ -320,6 +320,23 @@ def build_result(task_id: str, goal: str, *, project: str | None = None) -> dict
 
     request, candidates, request_source = resolve_request(task_id, goal, md, resolution)
     facts = _facts.facts_from_financials(payload)
+    # X0（2026-10-01 真实入口收口）：**已准入官方原文共同增强**，不再只作"API 失败时的退路"
+    # （架构复核 §1）。三表/经营明细/现金附注带来营业成本、合并净利润、应收应付存货与现金附注；
+    # 同口径读数**以官方为准**（带页码定位），结构化值逐条对照记录（一致/不一致都写清楚）。
+    # 金额口径统一放在**冻结层**（`financial_analysis.dataset`）：底稿/报表保留来源自己的单位，
+    # 分析数据集统一到元——报表显示不变，算子拿到同一量纲（详见那里的注释）。
+    official_facts: list = []
+    official_notes: list[str] = []
+    try:
+        official_facts, official_notes = _official_material_facts(
+            task_id, request, project=project)
+        if official_facts:
+            facts, _merge_notes = _facts.merge_official_over_structured(
+                facts, official_facts)
+            official_notes = list(_merge_notes) + list(official_notes)
+    except Exception as exc:                     # noqa: BLE001 - 官方原文是增强，不拖垮主线
+        logger.warning("官方原文事实并入失败（task=%s）：%s", task_id, str(exc)[:140])
+        official_notes = [f"官方原文事实并入失败：{str(exc)[:100]}"]
     # R3：把已准入年报片段里的**量价/结构**事实并入底稿（含产品/渠道/地区维度、
     # 原表行列定位、组内合计闭合校验）。缺材料时为空，不填零、不编。
     op_facts: list = []
@@ -334,16 +351,16 @@ def build_result(task_id: str, goal: str, *, project: str | None = None) -> dict
             for _f in facts:
                 if (str(getattr(_f, "metric", "")) == "revenue"
                         and str(getattr(_f, "period", "")) == f"{_last}年"):
-                    try:
-                        _total = float(_f.value) * 1e8        # 亿元 → 元（与年报表同单位）
-                    except (TypeError, ValueError):
-                        _total = None
+                    # 金额已统一到元：按**单位**换算，不无条件乘 1e8（旧写法假定亿元）
+                    _total = _facts.to_yuan(getattr(_f, "value", None),
+                                            getattr(_f, "unit", ""))
                     break
         op_facts, scope_notes = _facts.facts_from_operating(
             material, request, total_revenue_yuan=_total)
     except Exception as exc:                     # noqa: BLE001 - 经营事实是增强，不拖垮主线
         logger.warning("经营维度事实并入失败（task=%s）：%s", task_id, str(exc)[:140])
-    paper = build_working_paper(list(facts) + list(op_facts), request)
+    paper = build_working_paper(
+        list(facts) + list(official_facts) + list(op_facts), request)
     return {
         "ok": True,
         "request": request.as_dict(),
@@ -401,6 +418,9 @@ def build_result(task_id: str, goal: str, *, project: str | None = None) -> dict
                              for r in paper.rows
                              if str(r.get("metric") or "") in _facts.OPERATING_METRICS],
         "scope_notes": scope_notes,
+        # X0：官方原文与结构化事实**共同供数**的说明（含金额口径统一）——读者能分清
+        # "哪条来自官方三表（带页码）"与"哪条来自结构化字段"
+        "official_notes": official_notes,
         "rows": len(paper.rows), "derived": len(paper.derived),
         "gaps": paper.gaps, "problems": [p.as_dict() for p in paper.problems],
         "audit": paper.audit,

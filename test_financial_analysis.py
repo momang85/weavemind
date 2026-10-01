@@ -2146,6 +2146,81 @@ class TestL1OfficialMaterialFeedsFacts(unittest.TestCase):
         self.assertIn("官方", str(wp.get("reason") or ""), wp)
 
 
+
+    def test_admitted_official_facts_strengthen_the_structured_input(self):
+        """X0（真实入口收口）：结构化载荷可用时，已准入官方三表**共同增强**输入。
+
+        反例（真实任务 `ui-17947f055b`）：`financials.json` 可用就只走结构化分支，官方
+        三表/现金附注被跳过 → 缺营业成本与合并净利 → 经营驱动/现金调节「缺输入」不适用。
+        这里钉住：① 两条来源合并进同一份底稿；② 同口径读数**以官方三表为准**（带页码定位、
+        单位是官方自己的元），结构化值逐条对照记录；③ 官方三表带来的营业成本/合并净利/
+        现金附注真的进了底稿。
+        """
+        from working_paper_export import build_result
+        self._admit_material()
+        (self.ws / "project" / "financials.json").write_text(json.dumps({
+            "financials": [
+                {"year": 2023, "report_type": "年报", "disclosure_date": "2025-04-03",
+                 "revenue": 331.26, "net_profit": 100.16, "operating_cashflow": 61.30,
+                 "total_assets": 900.0, "total_liabilities": 200.0},
+                {"year": 2024, "report_type": "年报", "disclosure_date": "2025-04-03",
+                 "revenue": 288.76, "net_profit": 66.73, "operating_cashflow": 46.29,
+                 "total_assets": 950.0, "total_liabilities": 210.0}],
+            "metadata": {"source": "structured_api", "company": "洋河股份",
+                         "company_id": "002304.SZ", "currency": "CNY", "unit": "亿元",
+                         "caliber": "合并", "as_of": "2025-04-30"},
+            "raw": {"url": "https://example.invalid/api", "text": "{}"},
+        }, ensure_ascii=False), encoding="utf-8")
+        res = build_result(self.tid, self.goal, project="default")
+        self.assertTrue(res.get("ok"), res)
+        rows = res.get("rows_detail") or []
+        by_key = {(str(r.get("metric")), str(r.get("period"))): r for r in rows}
+        # ① 金额统一到元：结构化给的 288.76（亿元）不再是"288.76 元"
+        rev = by_key[("revenue", "2024年")]
+        self.assertEqual(rev.get("unit"), "元", rev)
+        self.assertAlmostEqual(float(rev.get("value")), 28_876_000_000.0, places=2)
+        # ② 官方三表带来的行（结构化载荷里没有营业成本/合并净利）
+        metrics = {str(r.get("metric")) for r in rows}
+        self.assertIn("operating_cost", metrics, sorted(metrics))
+        self.assertIn("gross_profit", metrics, "毛利由官方收入的营业成本派生（带血缘）")
+        # ③ 同一 (指标, 期间) 两个来源给出同一个值 → 记成互相印证，而不是二选一
+        notes = " ".join(res.get("official_notes") or [])
+        self.assertIn("官方三表优先", notes)
+        self.assertIn("一致", notes, "同口径读数要写明两来源一致（不是先到先得）")
+        self.assertIn("官方材料", notes)
+        self.assertTrue(res.get("paper_ok"), res.get("problems"))
+
+    def test_two_sources_disagreeing_records_both_and_takes_the_official(self):
+        """同口径但两来源**数值不同** → 两值都记录，且**以官方三表为准**（不静默择一）。
+
+        为什么不是"判冲突后必需指标不达标"：结构化载荷把亿元四舍五入到两位，与官方三表
+        必然差几十万——两条并列会被如实判成冲突，于是底稿 0 项达标、模型"缺输入"（实测）。
+        合理的纪律是：官方（带页码定位、经审计）为准，差异逐条写进 notes。
+        """
+        from working_paper_export import build_result
+        self._admit_material()
+        (self.ws / "project" / "financials.json").write_text(json.dumps({
+            "financials": [
+                {"year": 2023, "report_type": "年报", "disclosure_date": "2025-04-03",
+                 "revenue": 331.26, "net_profit": 100.16, "operating_cashflow": 61.30},
+                {"year": 2024, "report_type": "年报", "disclosure_date": "2025-04-03",
+                 "revenue": 300.00, "net_profit": 66.73, "operating_cashflow": 46.29}],
+            "metadata": {"source": "structured_api", "company": "洋河股份",
+                         "company_id": "002304.SZ", "currency": "CNY", "unit": "亿元",
+                         "caliber": "合并", "as_of": "2025-04-30"},
+            "raw": {"url": "https://example.invalid/api", "text": "{}"},
+        }, ensure_ascii=False), encoding="utf-8")
+        res = build_result(self.tid, self.goal, project="default")
+        notes = " ".join(res.get("official_notes") or [])
+        self.assertIn("不一致", notes, notes)
+        self.assertIn("官方三表为准", notes)
+        self.assertIn("30000000000", notes.replace(",", ""), "结构化那个值也要留下")
+        rev = next(r for r in (res.get("rows_detail") or [])
+                   if str(r.get("metric")) == "revenue"
+                   and str(r.get("period")) == "2024年")
+        self.assertAlmostEqual(float(rev.get("value")), 28_876_000_000.0, places=2,
+                               msg="取官方三表的值（带页码定位），而不是结构化的 300 亿")
+
 def _payload_of(model_id: str, dataset) -> dict:
     """跑一次算子拿**原始载荷**（独立验证的输入），并带上 params（与 runner 一致）。"""
     spec = fa.registry.spec(model_id)
@@ -4458,6 +4533,75 @@ class TestX1ResearchContinuation(unittest.TestCase):
         self.assertLess(brief.index("## 研究续页（可检验）"), brief.index("## 关键发现"))
         again = rb._analysis_section(brief)
         self.assertNotIn("## 研究续页", again, "回流再装配不得再印一遍续页")
+
+
+class TestX0AmountUnitBoundary(unittest.TestCase):
+    """X0：**金额单位**边界——运行输出本身就是亿元时，共享格式器不得再除 1e8。
+
+    反例（真实任务 `ui-17947f055b`）：scenario run 基准 66.73 亿元、使用者 80.32 亿元，
+    UI 共享情景摘要显示 **0.00**（`_yi` 无条件除 1e8）。这里钉住"按输出 unit 换算"，
+    同时确认元口径（离线标杆与官方三表）行为不变。
+    """
+
+    YI = {
+        "revenue": (331.26, 288.76),
+        "gross_profit": (249.26, 211.25),
+        "net_profit": (100.16, 66.73),
+        "net_profit_consolidated": (100.21, 66.66),
+        "operating_cost": (82.00, 77.51),
+        "taxes_and_surcharges": (52.69, 48.26),
+        "selling_expense": (53.87, 55.16),
+        "income_tax_expense": (31.97, 24.77),
+    }
+
+    def _ds(self, unit: str):
+        scale = 1e8 if str(unit) == "元" else 1.0      # 元口径的数值是亿元口径的 1e8 倍
+        rows = []
+        for metric, (prev, cur) in self.YI.items():
+            for period, value in (("2023年", prev), ("2024年", cur)):
+                rows.append(_row(metric, period, value * scale, unit=unit,
+                                 fact_id=f"u-{unit}-{metric}-{period}"))
+        return fa.freeze_from_facts(rows, periods=(2023, 2024), entity="洋河股份",
+                                    entity_id="002304.SZ", as_of="2025-04-30",
+                                    source_label=f"test:unit-{unit}")
+
+    def test_yi_unit_run_is_not_divided_twice(self):
+        from financial_analysis import charts as ch
+        from financial_analysis import narrative as nt
+        ds = self._ds("亿元")
+        run = fa.run("scenario_sensitivity", ds,
+                     params={"revenue_growth": 0.05, "gross_margin_delta": 0.01})
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        out = next(o for o in run.outputs if o.metric == "scenario_net_profit")
+        self.assertEqual(str(out.unit), "亿元", out.unit)
+        comp = {c["component_id"]: c["value"] for c in out.components}
+        # 共享格式器：按输出单位换算 → 66.73/80.32 亿元（旧实现印成 0.00）
+        self.assertEqual(nt._yi(comp["base"], out.unit), "+66.73")
+        self.assertEqual(nt._yi(comp["user"], out.unit), "+80.32")
+        self.assertNotIn("0.00", nt._yi(comp["user"], out.unit))
+        # 元口径行为不变：同一读数按元换算仍是 66.73 亿元
+        self.assertEqual(nt._yi(comp["base"] * 1e8, "元"), "+66.73")
+        # 图表结论（UI 共享情景摘要读它）也不得出现 0.00
+        chart = ch.scenario_outcome_bars(run)
+        self.assertTrue(chart.get("available"), chart)
+        self.assertIn("基准复现 66.73 亿元", chart.get("conclusion") or "")
+        self.assertNotIn("0.00 亿元", chart.get("conclusion") or "")
+        # 概览三条（UI 摘要）走同一格式器
+        summary = " ".join(nt.summary_lines([run]))
+        self.assertNotIn("-0.00", summary)
+
+    def test_yuan_unit_run_keeps_the_benchmark_numbers(self):
+        """对照：元口径（官方三表/离线标杆）照旧——没有回归。"""
+        from financial_analysis import narrative as nt
+        ds = self._ds("元")
+        run = fa.run("scenario_sensitivity", ds,
+                     params={"revenue_growth": 0.05, "gross_margin_delta": 0.01})
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        out = next(o for o in run.outputs if o.metric == "scenario_net_profit")
+        comp = {c["component_id"]: c["value"] for c in out.components}
+        self.assertEqual(str(out.unit), "元", out.unit)
+        self.assertEqual(nt._yi(comp["base"], out.unit), "+66.73")
+        self.assertEqual(nt._yi(comp["base"]), "+66.73", "默认口径仍是元")
 
 
 if __name__ == "__main__":

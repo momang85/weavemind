@@ -21,18 +21,25 @@ from . import charts as _charts
 from .contracts import RunStatus
 
 
-def _yi(value) -> str:
+def _yi(value, unit: str = "元") -> str:
     """亿元读数（带符号、两位小数）——与图表共用同一套格式（不两处各自四舍五入）。
 
-    `None`/空值（例如"本期没有最大拖累项"）如实显示为 `—`，不抛异常、也不写成 0.00。
+    `unit`：**该读数的金额单位**。默认元（离线标杆与官方三表都是元）；运行输出声明
+    `亿元` 时按单位换算，不再无条件除 1e8（X0 实测：运行金额已是亿元，被再除一次 →
+    基准/情景显示 0.00）。`None`/空值如实显示为 `—`，不抛异常、也不写成 0.00。
     """
     if value is None or value == "":
         return "—"
-    return _charts._yi_s(value)
+    return _charts._yi_s(value, unit)
 
 
-def _yi_plain(value) -> str:
-    return _yi(value).lstrip("+")
+def _yi_plain(value, unit: str = "元") -> str:
+    return _yi(value, unit).lstrip("+")
+
+
+def _unit_of(run) -> str:
+    """运行的金额单位（与图表同一判据：取第一个金额输出的 unit；无运行按元）。"""
+    return _charts.amount_unit_of(run) if run is not None else "元"
 
 
 def _attr(obj, name, default=""):
@@ -243,20 +250,20 @@ def _cut_name(label: str) -> str:
     return s
 
 
-def _cut_summary(seg, top: int = 2) -> str:
+def _cut_summary(seg, top: int = 2, unit: str = "元") -> str:
     cut = _cut_name(_attr(seg, "label"))
     comps = [c for c in (_attr(seg, "components") or ())]
     named = [c for c in comps if "unclassified" not in str(_attr(c, "component_id"))]
     named.sort(key=lambda c: -abs(float(_attr(c, "value") or 0)))
-    shown = "、".join(f"{_clean_label(_attr(c, 'label'), cut)} {_yi(_attr(c, 'value'))} 亿元"
+    shown = "、".join(f"{_clean_label(_attr(c, 'label'), cut)} {_yi(_attr(c, 'value'), unit)} 亿元"
                       for c in named[:top])
     rest = named[top:]
     if rest:
         shown += ("；其余 " + str(len(rest)) + " 项 "
-                  + _yi(sum(float(_attr(c, "value") or 0) for c in rest)) + " 亿元")
+                  + _yi(sum(float(_attr(c, "value") or 0) for c in rest), unit) + " 亿元")
     unclass = [c for c in comps if "unclassified" in str(_attr(c, "component_id"))]
     if unclass:
-        shown += f"；未分类差额 {_yi(_attr(unclass[0], 'value'))} 亿元"
+        shown += f"；未分类差额 {_yi(_attr(unclass[0], 'value'), unit)} 亿元"
     base = cut if cut.endswith("切法") else f"{cut}切法"
     return f"{base}：{shown}" if shown else str(_attr(seg, "label"))
 
@@ -265,6 +272,8 @@ def _cut_summary(seg, top: int = 2) -> str:
 
 def _conclusions(od, cash, scens) -> list[str]:
     items: list[str] = []
+    od_u = _unit_of(od)
+    cash_u = _unit_of(cash)
     if od is not None:
         bridge = _out(od, "net_profit_change")
         gp = next((c for c in (_attr(bridge, "components") or ())
@@ -274,13 +283,13 @@ def _conclusions(od, cash, scens) -> list[str]:
         diag = _diag(od)
         periods = [str(p) for p in (diag.get("periods") or ())]
         span = f"{periods[0]}→{periods[1]} " if len(periods) >= 2 else ""
-        txt = (f"**利润**：{span}归母净利润变化 {_yi(_attr(bridge, 'value'))} 亿元；"
-               f"其中毛利变化 {_yi(_attr(gp, 'value'))} 亿元")
+        txt = (f"**利润**：{span}归母净利润变化 {_yi(_attr(bridge, 'value'), od_u)} 亿元；"
+               f"其中毛利变化 {_yi(_attr(gp, 'value'), od_u)} 亿元")
         if scale is not None and margin is not None:
-            txt += (f"（收入规模 {_yi(_attr(scale, 'value'))}／毛利率 "
-                    f"{_yi(_attr(margin, 'value'))} 亿元）")
+            txt += (f"（收入规模 {_yi(_attr(scale, 'value'), od_u)}／毛利率 "
+                    f"{_yi(_attr(margin, 'value'), od_u)} 亿元）")
         if below is not None:
-            txt += f"，毛利线以下 {_yi(_attr(below, 'value'))} 亿元"
+            txt += f"，毛利线以下 {_yi(_attr(below, 'value'), od_u)} 亿元"
         gm = diag.get("gross_margin") or {}
         if gm:
             txt += (f"；毛利率 {_pct(float(gm.get('prev') or 0) * 100)} → "
@@ -293,10 +302,10 @@ def _conclusions(od, cash, scens) -> list[str]:
     if od is not None:
         segs = _outs(od, "gross_profit_change_by_segment")
         vp = _out(od, "volume_price_decomposition")
-        parts = [_cut_summary(seg) for seg in segs[:2]]
+        parts = [_cut_summary(seg, unit=od_u) for seg in segs[:2]]
         if vp is not None:
             parts.append("量价分解（" + str(_attr(vp, "label")) + "）：" + "、".join(
-                f"{_attr(c, 'label')} {_yi(_attr(c, 'value'))} 亿元"
+                f"{_attr(c, 'label')} {_yi(_attr(c, 'value'), od_u)} 亿元"
                 for c in (_attr(vp, "components") or ())))
         items.append("**结构**：" + ("；".join(parts) if parts else
                                     "本次未取到分段/量价所需口径的披露（缺成本或销量即如实跳过），"
@@ -309,27 +318,28 @@ def _conclusions(od, cash, scens) -> list[str]:
         item = rec.get(period) or (list(rec.values())[0] if rec else {})
         sup = diag.get("largest_support") or {}
         drag = diag.get("largest_drag") or {}
-        txt = (f"**现金**：{period} 合并净利润 {_yi_plain(item.get('net_profit_yuan'))} 亿元"
-               f"经调节项 {_yi(item.get('adjustments_yuan'))} 亿元后为经营现金流 "
-               f"{_yi_plain(item.get('cashflow_yuan'))} 亿元"
-               f"（未解释差额 {_yi(item.get('residual_yuan') or 0)} 亿元）")
+        txt = (f"**现金**：{period} 合并净利润 "
+               f"{_yi_plain(item.get('net_profit_yuan'), cash_u)} 亿元"
+               f"经调节项 {_yi(item.get('adjustments_yuan'), cash_u)} 亿元后为经营现金流 "
+               f"{_yi_plain(item.get('cashflow_yuan'), cash_u)} 亿元"
+               f"（未解释差额 {_yi(item.get('residual_yuan') or 0, cash_u)} 亿元）")
         chg = _out(cash, "operating_cashflow_change")
         if chg is not None:
             # 现金变化桥的**首要**分项（哪一项解释了现金变化），比"最大支撑/拖累"更贴题
             comps = sorted((_attr(chg, "components") or ()),
                            key=lambda c: -abs(float(_attr(c, "value") or 0)))
             if comps:
-                txt += (f"；现金变化 {_yi(_attr(chg, 'value'))} 亿元，"
+                txt += (f"；现金变化 {_yi(_attr(chg, 'value'), cash_u)} 亿元，"
                         f"最大构成 {_attr(comps[0], 'label')} "
-                        f"{_yi(_attr(comps[0], 'value'))} 亿元")
+                        f"{_yi(_attr(comps[0], 'value'), cash_u)} 亿元")
         if sup.get("label") or drag.get("label"):
             # 只有真的取到那一项才写：没有负向调节项时 `largest_drag` 为 None，
             # 不能印成“最大拖累 None — 亿元”。
             bits = []
             if sup.get("label"):
-                bits.append(f"最大支撑 {sup['label']} {_yi(sup.get('value'))} 亿元")
+                bits.append(f"最大支撑 {sup['label']} {_yi(sup.get('value'), cash_u)} 亿元")
             if drag.get("label"):
-                bits.append(f"最大拖累 {drag['label']} {_yi(drag.get('value'))} 亿元")
+                bits.append(f"最大拖累 {drag['label']} {_yi(drag.get('value'), cash_u)} 亿元")
             if bits:
                 txt += "；" + "、".join(bits)
         items.append(txt)
@@ -345,7 +355,7 @@ def _conclusions(od, cash, scens) -> list[str]:
             # W0：两把杠杆共用**同一目标**（默认上一期归母净利），目标写在读数前面——
             # 读者不会把"维持基期"与"恢复到上年"当成同一把杠杆（架构复核反例）。
             tgt = (_diag(r).get("thresholds") or {}).get("target_net_profit")
-            tgt_s = f"（目标归母净利 {_yi_plain(tgt)} 亿元）" if tgt else ""
+            tgt_s = (f"（目标归母净利 {_yi_plain(tgt, _unit_of(r))} 亿元）" if tgt else "")
             bits = []
             if rev_th is not None and _attr(rev_th, "value") is not None:
                 bits.append(f"收入侧需 {_pct4(_attr(rev_th, 'value'))}")
@@ -366,6 +376,7 @@ def _profit_table(od, limit: int = 6) -> list[str]:
     bridge = _out(od, "net_profit_change")
     if detail is None or bridge is None:
         return []
+    _u = _unit_of(od)
     total = float(_attr(bridge, "value") or 0)
     items = list(_attr(detail, "components") or ())
     items.sort(key=lambda c: -abs(float(_attr(c, "value") or 0)))
@@ -374,28 +385,28 @@ def _profit_table(od, limit: int = 6) -> list[str]:
     for c in items[:limit]:
         v = float(_attr(c, "value") or 0)
         share = f"{v / total * 100:.1f}%" if total else "—"
-        lines.append(f"| {_attr(c, 'label')} | {_yi(v)} | {share} |")
+        lines.append(f"| {_attr(c, 'label')} | {_yi(v, _u)} | {share} |")
     rest = items[limit:]
     if rest:
         rest_v = sum(float(_attr(c, "value") or 0) for c in rest)
         share = f"{rest_v / total * 100:.1f}%" if total else "—"
-        lines.append(f"| 其余 {len(rest)} 项合计（未单列） | {_yi(rest_v)} | {share} |")
+        lines.append(f"| 其余 {len(rest)} 项合计（未单列） | {_yi(rest_v, _u)} | {share} |")
     lines.append("")
     lines.append("- 占比 ＝ 该项目 ÷ 归母净利变化：变化为负时，**正贡献显示为负占比**"
                  "（符号是算术结果，不是方向判断）。")
     gp = next((c for c in (_attr(bridge, "components") or ())
                if str(_attr(c, "component_id")) == "gross_profit_change"), None)
     lines.append(
-        f"- 对称分解（交互项均分，代入顺序无关）：毛利变化 {_yi(_attr(gp, 'value'))} 亿元 ＝ "
-        f"规模效应 {_yi(_attr(_out(od, 'revenue_scale_effect'), 'value'))} ＋ "
-        f"毛利率效应 {_yi(_attr(_out(od, 'gross_margin_effect'), 'value'))} 亿元")
+        f"- 对称分解（交互项均分，代入顺序无关）：毛利变化 {_yi(_attr(gp, 'value'), _u)} 亿元 ＝ "
+        f"规模效应 {_yi(_attr(_out(od, 'revenue_scale_effect'), 'value'), _u)} ＋ "
+        f"毛利率效应 {_yi(_attr(_out(od, 'gross_margin_effect'), 'value'), _u)} 亿元")
     for seg in _outs(od, "gross_profit_change_by_segment")[:2]:
-        lines.append(f"- {_cut_summary(seg, top=3)}；每种切法各自覆盖同一口径，"
+        lines.append(f"- {_cut_summary(seg, top=3, unit=_u)}；每种切法各自覆盖同一口径，"
                      "**不可跨切法相加**")
     vp = _out(od, "volume_price_decomposition")
     if vp is not None:
         lines.append("- 量价分解（" + str(_attr(vp, "label")) + "）：" + "、".join(
-            f"{_attr(c, 'label')} {_yi(_attr(c, 'value'))} 亿元"
+            f"{_attr(c, 'label')} {_yi(_attr(c, 'value'), _u)} 亿元"
             for c in (_attr(vp, "components") or ()))
             + "；均价含产品结构混合，不得命名「提价效果」")
     return lines
@@ -444,7 +455,7 @@ def _source_table(runs, provenance: dict, limit: int = 14,
     return lines
 
 
-def _cash_sustainability(cash) -> list[str]:
+def _cash_sustainability(cash, unit: str = "元") -> list[str]:
     """V1：现金改善**能不能持续**——按组拆出单项变动，并给出后续观察指标。
 
     证据层能确定的是：现金变化由哪些披露调节项构成（会计口径）。"能不能持续"取决于这些
@@ -483,9 +494,9 @@ def _cash_sustainability(cash) -> list[str]:
             share = (f"（抵消现金下降 {abs(group_total / total) * 100:.1f}%）"
                      if group_total > 0 else
                      f"（加重现金下降 {abs(group_total / total) * 100:.1f}%）")
-        top = "、".join(f"{r['label']} {_yi(r['delta_yuan'])} 亿元"
+        top = "、".join(f"{r['label']} {_yi(r['delta_yuan'], unit)} 亿元"
                         for r in group_rows[:3])
-        lines.append(f"- **{title}**：合计 {_yi(group_total)} 亿元{share}；主要单项：{top}")
+        lines.append(f"- **{title}**：合计 {_yi(group_total, unit)} 亿元{share}；主要单项：{top}")
         lines.append(f"  - 读法：{note}")
         lines.append(f"  - 后续观察指标：{watch}")
     return lines
@@ -1023,14 +1034,15 @@ def research_brief(runs, *, provenance=None, charts=None, label_of=None,
             lines.append("")
     if cash is not None or scens:
         lines.append("### 五、现金形成与反向情景")
+        _cu = _unit_of(cash)
         if cash is not None:
             # V1：**先给现金变化桥**（ΔOCF = Δ合并净利＋Δ非现金＋Δ营运资本＋Δ其他＋Δ差额），
             # 再给两期调节表与辅助观察；这样"现金为什么变了"才是正文的主角。
             chg = _out(cash, "operating_cashflow_change")
             if chg is not None:
-                parts = "、".join(f"{_attr(c, 'label')} {_yi(_attr(c, 'value'))} 亿元"
+                parts = "、".join(f"{_attr(c, 'label')} {_yi(_attr(c, 'value'), _cu)} 亿元"
                                   for c in (_attr(chg, "components") or ()))
-                lines.append(f"- **经营现金流变化**：{_yi(_attr(chg, 'value'))} 亿元 ＝ {parts}")
+                lines.append(f"- **经营现金流变化**：{_yi(_attr(chg, 'value'), _cu)} 亿元 ＝ {parts}")
                 # X0（阶段X §3）：**方向**必须先说清楚——谁在推动、谁在缓冲。只列构成
                 # （或以绝对占比说"主要由营运资本解释"）会把洋河的缓冲项说成主因。
                 try:
@@ -1050,18 +1062,18 @@ def research_brief(runs, *, provenance=None, charts=None, label_of=None,
                              "投资收益等是否非经常要看公司非经常性损益披露，不按指标名剔除")
             for o in (_attr(cash, "outputs") or ()):
                 if str(_attr(o, "metric")).startswith("operating_cashflow_reconciliation"):
-                    comps = "、".join(f"{_attr(c, 'label')} {_yi(_attr(c, 'value'))} 亿元"
+                    comps = "、".join(f"{_attr(c, 'label')} {_yi(_attr(c, 'value'), _cu)} 亿元"
                                       for c in (_attr(o, "components") or ()))
                     lines.append(f"- **{_attr(o, 'output_period')}调节表**：{comps}")
             gap = _out(cash, "cash_gap_change")
             if gap is not None:
-                comps = "、".join(f"{_attr(c, 'label')} {_yi(_attr(c, 'value'))} 亿元"
+                comps = "、".join(f"{_attr(c, 'label')} {_yi(_attr(c, 'value'), _cu)} 亿元"
                                   for c in (_attr(gap, "components") or ()))
                 lines.append(f"- **辅助观察：现金缺口变化**（经营现金流−合并净利润）："
-                             f"{_yi(_attr(gap, 'value'))} 亿元 ＝ {comps}；"
+                             f"{_yi(_attr(gap, 'value'), _cu)} 亿元 ＝ {comps}；"
                              "缺口缩小不等于现金变好")
             # V1：现金改善能不能持续——单项拆解 + 观察指标（结论要落到可检验的东西上）
-            sustain = _cash_sustainability(cash)
+            sustain = _cash_sustainability(cash, unit=_cu)
             if sustain:
                 lines.append("- **现金改善的可持续性（按组拆到单项）**")
                 lines.extend(sustain)
@@ -1071,6 +1083,7 @@ def research_brief(runs, *, provenance=None, charts=None, label_of=None,
         for r in scens:
             th = _out(r, "margin_threshold_to_hold_base_profit")
             gap = _out(r, "margin_gap_to_threshold_pp")
+            _su = _unit_of(r)
             # V2：先给**该假设下的情景归母净利**（读者要看到"改了假设以后是多少"），
             # 再给两个方向的反推阈值。三处都来自同一次运行。
             scr = _out(r, "scenario_net_profit")
@@ -1081,17 +1094,17 @@ def research_brief(runs, *, provenance=None, charts=None, label_of=None,
                                if str(_attr(c, "component_id")) == "base"), None)
                 if user is not None:
                     line = (f"- **情景归母净利（{_scenario_label(r, scr)}）**："
-                            f"{_yi(_attr(user, 'value'))} 亿元")
+                            f"{_yi(_attr(user, 'value'), _su)} 亿元")
                     if base_c is not None:
-                        line += (f"；基准复现 {_yi(_attr(base_c, 'value'))} 亿元"
-                                 f"（差 {_yi(float(_attr(user, 'value') or 0) - float(_attr(base_c, 'value') or 0))} 亿元）")
+                        line += (f"；基准复现 {_yi(_attr(base_c, 'value'), _su)} 亿元"
+                                 f"（差 {_yi(float(_attr(user, 'value') or 0) - float(_attr(base_c, 'value') or 0), _su)} 亿元）")
                     lines.append(line)
             # W0：两把杠杆**共用同一目标归母净利**（默认上一期），各自单因素；
             # 目标与来源写在读数前面，读者不会把"维持基期"与"恢复到上年"混为一谈。
             tdiag = dict(_diag(r).get("thresholds") or {})
             tgt = tdiag.get("target_net_profit")
             tgt_src = str(tdiag.get("target_source") or "")
-            tgt_s = (f"目标归母净利 {_yi_plain(tgt)} 亿元"
+            tgt_s = (f"目标归母净利 {_yi_plain(tgt, _su)} 亿元"
                      + (f"（{tgt_src}）" if tgt_src else "") if tgt is not None else "")
             if th is not None and _attr(th, "value") is not None:
                 extra = (f"，与基期之差 {float(_attr(gap, 'value') or 0):+.2f}pp"

@@ -481,6 +481,72 @@ def amount_scale(unit: str) -> float:
         return 1.0
     return 0.0
 
+def to_yuan(value, unit) -> float | None:
+    """金额 → **元**（按 `amount_scale` 换算）；不是金额或不能换算返回 `None`。
+
+    存在的理由（X0 真实入口收口）：结构化载荷声明 `亿元`、官方三表是 `元`，两条路各自
+    自洽，但**混在一起**算（收入−成本、净利−毛利）就会静默错量级。统一口径只能在装配
+    入口做一次，且必须**可换算才换算**——百分比/吨/未知单位一律返回 `None`，不猜。
+    """
+    scale = amount_scale(unit)
+    if scale <= 0:
+        return None
+    try:
+        return float(value) * scale
+    except (TypeError, ValueError):
+        return None
+
+
+def merge_official_over_structured(structured, official, *, tolerance: float = 0.005,
+                                   note_limit: int = 12) -> tuple[list, list[str]]:
+    """**官方三表优先**：同一 (指标, 期间, 口径) 只留官方那条（带页码定位），结构化值作对照。
+
+    为什么不是"两条都留"（X0 真实入口实测）：结构化载荷把金额四舍五入到亿元两位
+    （`288.76` 亿元），换算回元是 28,876,000,000.00，而官方三表是 28,876,296,993.56——
+    同口径两条并存会被 `select_facts` 如实判成**冲突**，于是必需指标全部不达标、模型
+    "缺输入"（比修复前更差）。合理的做法是：
+    **带页码定位的官方三表为准**，结构化值只作对照——一致就记一致，不一致就把两个值与
+    各自来源都写进 notes（不静默择一，也不让四舍五入制造假冲突）。
+
+    官方没有的 (指标, 期间, 口径) 才用结构化事实（它已按 `normalize_amount_units` 统一到元）。
+    """
+    out: list = list(official or [])
+    index: dict[tuple, object] = {}
+    for f in out:
+        index[(str(getattr(f, "metric", "")), str(getattr(f, "period", "")),
+               str(getattr(f, "caliber", "") or ""))] = f
+    notes: list[str] = []
+    same = diff = 0
+    for f in (structured or []):
+        key = (str(getattr(f, "metric", "")), str(getattr(f, "period", "")),
+               str(getattr(f, "caliber", "") or ""))
+        o = index.get(key)
+        if o is None:
+            out.append(f)
+            continue
+        a = to_yuan(getattr(o, "value", None), getattr(o, "unit", ""))
+        b = to_yuan(getattr(f, "value", None), getattr(f, "unit", ""))
+        if a is None or b is None:
+            continue
+        ok = abs(a - b) <= max(abs(a) * float(tolerance), 0.01)
+        label = (str(getattr(o, "metric_label", "") or getattr(o, "metric", ""))
+                 + " " + str(getattr(o, "period", "")))
+        if ok:
+            same += 1
+            if len(notes) < note_limit:
+                notes.append(f"结构化载荷与官方三表一致：{label}"
+                             f"（差异 {abs(a - b):,.2f} 元，官方三表为准）")
+        else:
+            diff += 1
+            if len(notes) < note_limit:
+                notes.append(f"结构化载荷与官方三表**不一致**：{label} 官方 {a:,.2f} 元 vs "
+                             f"结构化 {b:,.2f} 元——以**官方三表为准**（带页码定位），"
+                             "差异如实记录，不静默择一")
+    head = [f"官方三表优先：与结构化载荷一致的读数 {same} 条、不一致 {diff} 条"
+            "（不一致的以官方为准并逐条记录）"]
+    return out, head + notes
+
+
 MARKETS = ("cn", "hk", "us")
 UNKNOWN = "unknown"
 

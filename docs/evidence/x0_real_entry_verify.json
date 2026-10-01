@@ -1,0 +1,190 @@
+{
+ "case": "X0 真实入口核对（实测任务工作区副本）",
+ "source_workspace": "C:\\Users\\ding0\\AppData\\Local\\Temp\\agent_workspace\\tasks\\projects\\default\\ui-17947f055b",
+ "task_id": "ui-17947f055b",
+ "read_only_on_source": true,
+ "copy": {
+  "root": "C:\\Users\\ding0\\AppData\\Local\\Temp\\x0_real_gayda8be\\tasks",
+  "files": 50
+ },
+ "working_paper": {
+  "ok": true,
+  "request_source": "stored",
+  "rows": 212,
+  "paper_ok": true,
+  "metrics": [
+   "accounts_payable",
+   "accounts_receivable",
+   "admin_expense",
+   "asset_disposal_income",
+   "asset_impairment",
+   "asset_impairment_provision",
+   "baijiu_unit_revenue",
+   "cash_paid_for_goods",
+   "cash_received_from_sales",
+   "credit_impairment",
+   "deferred_tax_asset_decrease",
+   "deferred_tax_liability_increase",
+   "depreciation",
+   "disposal_long_asset_loss",
+   "fair_value_change",
+   "fair_value_change_loss",
+   "finance_expense",
+   "finance_expense_adjust",
+   "fixed_asset_scrap_loss",
+   "gross_margin",
+   "gross_profit",
+   "income_tax_expense",
+   "intangible_amortization",
+   "inventory",
+   "inventory_decrease",
+   "inventory_volume_baijiu",
+   "investment_income",
+   "investment_loss",
+   "long_term_prepaid_amortization",
+   "minority_interest",
+   "net_profit",
+   "net_profit_consolidated",
+   "non_operating_expense",
+   "non_operating_income",
+   "operating_cashflow",
+   "operating_cost",
+   "operating_payable_increase",
+   "operating_profit",
+   "operating_receivable_decrease",
+   "other_cashflow_adjustments",
+   "other_income",
+   "production_volume_baijiu",
+   "rd_expense",
+   "revenue",
+   "revenue_channel_online",
+   "revenue_channel_other",
+   "revenue_channel_wholesale",
+   "revenue_industry_liquor",
+   "revenue_industry_other",
+   "revenue_product_baijiu",
+   "revenue_product_hongjiu",
+   "revenue_product_other",
+   "revenue_region_jiangsu",
+   "revenue_region_outside",
+   "revenue_total_reported",
+   "right_of_use_depreciation",
+   "sales_volume_baijiu",
+   "selling_expense",
+   "taxes_and_surcharges",
+   "total_assets",
+   "total_liabilities",
+   "total_revenue"
+  ],
+  "completeness": {
+   "required": 6,
+   "present": 6,
+   "missing": []
+  },
+  "official_notes": [
+   "官方三表优先：与结构化载荷一致的读数 12 条、不一致 2 条（不一致的以官方为准并逐条记录）",
+   "结构化载荷与官方三表一致：营业收入 2024年（差异 296,993.56 元，官方三表为准）",
+   "结构化载荷与官方三表一致：归母净利润 2024年（差异 388,602.12 元，官方三表为准）",
+   "结构化载荷与官方三表一致：经营活动现金流净额 2024年（差异 288,762.72 元，官方三表为准）",
+   "结构化载荷与官方三表一致：毛利润 2024年（差异 78,636.90 元，官方三表为准）",
+   "结构化载荷与官方三表一致：总资产 2024年（差异 265,219.62 元，官方三表为准）",
+   "结构化载荷与官方三表一致：总负债 2024年（差异 219,365.74 元，官方三表为准）",
+   "结构化载荷与官方三表**不一致**：研发费用 2024年 官方 104,796,407.26 元 vs 结构化 108,000,000.00 元——以**官方三表为准**（带页码定位），差异如实记录，不静默择一",
+   "结构化载荷与官方三表一致：营业收入 2023年（差异 277,551.51 元，官方三表为准）",
+   "结构化载荷与官方三表一致：归母净利润 2023年（差异 69,959.73 元，官方三表为准）",
+   "结构化载荷与官方三表一致：经营活动现金流净额 2023年（差异 220,867.96 元，官方三表为准）",
+   "结构化载荷与官方三表一致：毛利润 2023年（差异 32,296.09 元，官方三表为准）",
+   "结构化载荷与官方三表一致：总资产 2023年（差异 287,455.91 元，官方三表为准）",
+   "官方材料 f42e747c73850b59（2024年年度报告）：抽取到 94 条与契约相容的财务事实；已排除 caliber 76 条"
+  ],
+  "revenue_2024": {
+   "value": 28876296993.56,
+   "unit": "元",
+   "agreeing_count": 2,
+   "locator": ""
+  },
+  "has_operating_cost": true,
+  "has_consolidated_net_profit": true,
+  "has_cash_supplement": true,
+  "conflicts": []
+ },
+ "dataset_and_models": {
+  "working_paper_written": true,
+  "dataset_periods": [
+   "2023年",
+   "2024年"
+  ],
+  "dataset_hash": "0e4a0ace2e7e14f3c4792713ea022c4087154dd8bc3a3f2816eaf3f13a5aac0e",
+  "observations": 228,
+  "adopted_models": [
+   "operating_drivers",
+   "cash_reconciliation",
+   "scenario_sensitivity"
+  ],
+  "rejected_models": [
+   {
+    "model_id": "profit_bridge",
+    "reason": "与所问问题无关"
+   },
+   {
+    "model_id": "cash_quality",
+    "reason": "与所问问题无关"
+   },
+   {
+    "model_id": "working_capital",
+    "reason": "与所问问题无关"
+   },
+   {
+    "model_id": "profit_to_cash",
+    "reason": "与所问问题无关"
+   }
+  ],
+  "runs": {
+   "operating_drivers": {
+    "status": "validated",
+    "reason": "",
+    "unit": "元"
+   },
+   "cash_reconciliation": {
+    "status": "validated",
+    "reason": "",
+    "unit": "元"
+   },
+   "scenario_sensitivity": {
+    "status": "validated",
+    "reason": "",
+    "unit": "元"
+   }
+  },
+  "operating_drivers_validated": true,
+  "cash_reconciliation_validated": true,
+  "locators": 138
+ },
+ "display": {
+  "picked": [
+   "scenario_sensitivity"
+  ],
+  "scenario": {
+   "run_unit": "亿元",
+   "base_value": 66.73,
+   "user_value": 80.32,
+   "base_shown": "+66.73",
+   "user_shown": "+80.32",
+   "chart_conclusion": "基准复现 66.73 亿元；使用者情景 80.32 亿元（较基准 +13.59 亿元）；情景是**条件计算**（假设成立时才成立），不是预测、无概率",
+   "chart_available": true
+  }
+ },
+ "checks": {
+  "structured_branch_present": true,
+  "official_reading_used": true,
+  "official_tables_merged": true,
+  "cash_supplement_merged": true,
+  "two_sources_recorded": true,
+  "operating_drivers_applicable": true,
+  "cash_reconciliation_applicable": true,
+  "scenario_shows_real_numbers": true
+ },
+ "source_unchanged": true,
+ "passed": 8,
+ "total": 8
+}

@@ -90,12 +90,33 @@ def _num(v):
         return None
 
 
-def _yi(value) -> str:
+def _yi(value, unit: str = "元") -> str:
+    """金额 → 亿元读数（按**单位**换算；默认元——单位已声明亿元时不再除 1e8）。"""
     n = _num(value)
     if n is None:
         return "—"
-    yi = n / 1e8
+    yi = n * _unit_scale(unit) / 1e8
     return f"{yi:+,.2f}".replace("+-", "-")
+
+
+def _unit_scale(unit) -> float:
+    """金额单位 → 元倍数；不是金额单位（%/吨/空）按元（与 `charts.unit_to_yuan` 同表）。"""
+    u = str(unit or "")
+    if "%" in u or "％" in u or "/" in u:
+        return 1.0
+    for key, s in (("万亿", 1e12), ("千亿", 1e11), ("百亿", 1e10), ("亿", 1e8), ("万", 1e4)):
+        if key in u:
+            return s
+    return 1.0
+
+
+def _unit_of(run) -> str:
+    """运行的金额单位（取第一个金额输出的 `unit`；取不到按元）——同一次运行同一量纲。"""
+    for o in (_attr(run, "outputs", ()) or ()):
+        unit = str(_attr(o, "unit") or "")
+        if unit and "%" not in unit:
+            return unit
+    return "元"
 
 
 def _pct(value) -> str:
@@ -232,7 +253,7 @@ def _judgment(*, jid, title, numbers, evidence, boundary, alternatives, watch,
 
 def cash_direction_roles(total, np_v, wc_v, *, np_label="合并净利润项",
                          wc_label="营运资本项", rest_v=None,
-                         rest_label="其他调节项") -> tuple[str, list[dict], str]:
+                         rest_label="其他调节项", unit: str = "元") -> tuple[str, list[dict], str]:
     """现金桥按**方向**说贡献（X0，架构复核点名）：返回 `(主导项, 角色表, 方向句)`。
 
     纪律：不以"绝对占比"代替方向。`total`（ΔOCF）为负时，同号项是**拖累/主导**、
@@ -267,14 +288,14 @@ def cash_direction_roles(total, np_v, wc_v, *, np_label="合并净利润项",
         if r is driver or r["value"] == 0:
             continue
         if r["role"] == "缓冲":
-            bits.append(f"{r['item']} {_yi(r['value'])} 亿元是**缓冲**"
+            bits.append(f"{r['item']} {_yi(r['value'], unit)} 亿元是**缓冲**"
                         f"（抵消降幅的 {abs(r['value'] / total) * 100:.1f}%）")
         elif r["role"] == "拖累（主导下降）":
-            bits.append(f"{r['item']} {_yi(r['value'])} 亿元**加重下降**")
+            bits.append(f"{r['item']} {_yi(r['value'], unit)} 亿元**加重下降**")
         elif r["role"] == "拖累":
-            bits.append(f"{r['item']} {_yi(r['value'])} 亿元是**拖累**")
+            bits.append(f"{r['item']} {_yi(r['value'], unit)} 亿元是**拖累**")
         else:
-            bits.append(f"{r['item']} {_yi(r['value'])} 亿元**同向推动**")
+            bits.append(f"{r['item']} {_yi(r['value'], unit)} 亿元**同向推动**")
     lead = ""
     if driver is not None:
         what = "下降" if down else "改善"
@@ -284,7 +305,7 @@ def cash_direction_roles(total, np_v, wc_v, *, np_label="合并净利润项",
             tail = "主要由营运资本（占用与时点）构成"
         else:
             tail = f"主要由{driver['item']}构成"
-        lead = f"现金{what}**{tail}**（{driver['item']} {_yi(driver['value'])} 亿元）"
+        lead = f"现金{what}**{tail}**（{driver['item']} {_yi(driver['value'], unit)} 亿元）"
     direction = lead + ("；" + "；".join(bits) if bits else "")
     return driver_key, rows, direction
 
@@ -310,6 +331,7 @@ def direct_cash_of(dataset, *, locators: dict | None = None) -> dict:
                 row = {}
                 break
             row[tag] = _num(obs.value)
+            row[f"{tag}_unit"] = str(getattr(obs, "unit", "") or "")
             row[f"{tag}_period"] = period
             row[f"{tag}_fact"] = str(getattr(obs, "fact_id", "") or "")
         if not row:
@@ -354,6 +376,9 @@ def research_judgments(runs, *, volume_price: dict | None = None,
         vpe = next((o for o in (_attr(od, "outputs", ()) or ())
                     if "volume_price" in str(_attr(o, "metric"))), None)
     vol_eff = price_eff = None
+    _ou = _unit_of(od)                    # 经营驱动运行的金额单位（元/亿元…）
+    _cu = _unit_of(cash)                  # 现金桥运行的金额单位
+    _vpu = str(_attr(vpe, "unit") or "") or _ou
     if vpe is not None:
         for c in (_attr(vpe, "components", ()) or ()):
             cid = str(_attr(c, "component_id") or "")
@@ -370,8 +395,8 @@ def research_judgments(runs, *, volume_price: dict | None = None,
     # ① 量：销量收缩是不是收入下降的主要数量观察
     if vol_eff is not None and vol_eff < 0 and (
             price_eff is None or abs(vol_eff) >= abs(price_eff)):
-        numbers = [f"量价分解：销量效应 {_yi(vol_eff)} 亿元"
-                   + (f"、单位价格效应 {_yi(price_eff)} 亿元（含结构混合）"
+        numbers = [f"量价分解：销量效应 {_yi(vol_eff, _vpu)} 亿元"
+                   + (f"、单位价格效应 {_yi(price_eff, _vpu)} 亿元（含结构混合）"
                       if price_eff is not None else "")]
         if sales:
             numbers.append(f"披露销售量 {_num(sales.get('cur')):,.2f} 吨，"
@@ -403,14 +428,14 @@ def research_judgments(runs, *, volume_price: dict | None = None,
         out.append(_judgment(
             jid=J_VOLUME, title="销量与收入的数量关系：本次不足以下判断",
             numbers=[("量价分解未取到销量/单位收入效应"
-                      if vol_eff is None else f"销量效应 {_yi(vol_eff)} 亿元不为负")],
+                      if vol_eff is None else f"销量效应 {_yi(vol_eff, _vpu)} 亿元不为负")],
             evidence=[], boundary="读数不足：不生成「销量收缩」结论，先补量价与产销量表",
             alternatives=[], watch=["补齐分产品产销量与收入构成后重算"],
             gaps=["量价分解或产销量披露缺失"]))
 
     # ② 价：单位收入上升 ≠ 提价能力
     if price_eff is not None and price_eff > 0:
-        numbers = [f"单位价格效应 {_yi(price_eff)} 亿元（量价分解，含产品结构混合）"]
+        numbers = [f"单位价格效应 {_yi(price_eff, _vpu)} 亿元（量价分解，含产品结构混合）"]
         if ton_price:
             numbers.append(f"推算吨价 {_num(ton_price.get('cur')):,.0f} 元/吨，"
                            f"同比 {_pct(ton_price.get('yoy'))}"
@@ -481,11 +506,11 @@ def research_judgments(runs, *, volume_price: dict | None = None,
         if np_v is not None or wc_v is not None:
             # X0：**方向**决定措辞（不以绝对占比代替方向）——先算主导项/缓冲项，再写标题。
             driver, roles, direction = cash_direction_roles(total, np_v, wc_v,
-                                                            rest_v=rest_v)
+                                                            rest_v=rest_v, unit=_cu)
             comp_txt = "；".join(
-                f"{r['item']} {_yi(r['value'])} 亿元（{r['role']}）" for r in roles)
+                f"{r['item']} {_yi(r['value'], _cu)} 亿元（{r['role']}）" for r in roles)
             numbers = [
-                f"经营现金流变化（**间接法**：净利润＋调节项，独立对账）{_yi(total)} 亿元"
+                f"经营现金流变化（**间接法**：净利润＋调节项，独立对账）{_yi(total, _cu)} 亿元"
                 f"：{comp_txt}",
                 f"方向：{direction}",
             ]
@@ -549,7 +574,7 @@ def research_judgments(runs, *, volume_price: dict | None = None,
                 if not parts:
                     continue
                 numbers.append(f"{r['cut']}切法：" + "、".join(
-                    f"{name} {_yi(val)} 亿元" for name, val in parts))
+                    f"{name} {_yi(val, _ou)} 亿元" for name, val in parts))
             struct_lines = []
             for f in _facts_of(vp, "分产品")[:3]:
                 struct_lines.append(f"分产品收入：{f.get('row_label')} "
@@ -601,20 +626,22 @@ def research_judgments(runs, *, volume_price: dict | None = None,
         wc_rest = None
         if np_v is not None or wc_v is not None:
             wc_rest = total - (np_v or 0.0) - (wc_v or 0.0)
+        # 直接法两行来自**数据集观察**，它自己的单位才是这份读数的单位（可能是元或亿元）
+        _du = str(rec.get("cur_unit") or paid.get("cur_unit") or _cu or "元")
         numbers = [
-            f"**直接法**（收付实现）：销售收现变化 {_yi(rec_d)} － 采购付现变化 "
-            f"{_yi(paid_d)} ＝ 两行净贡献 {_yi(net_support)} 亿元；其余经营活动收支 "
-            f"{_yi(other_total)} 亿元（＝ΔOCF −两行净贡献，含税费/薪酬/其他经营收支，"
+            f"**直接法**（收付实现）：销售收现变化 {_yi(rec_d, _du)} － 采购付现变化 "
+            f"{_yi(paid_d, _du)} ＝ 两行净贡献 {_yi(net_support, _du)} 亿元；其余经营活动收支 "
+            f"{_yi(other_total, _cu)} 亿元（＝ΔOCF −两行净贡献，含税费/薪酬/其他经营收支，"
             "**不含**利润口径的净利项）",
             f"**间接法**（净利润＋调节项，独立对账、**不与直接法相加**）：ΔOCF "
-            f"{_yi(total)} 亿元 ＝ 合并净利润项 {_yi(np_v)} 亿元 ＋ 营运资本项 "
-            f"{_yi(wc_v)} 亿元"
-            + (f" ＋ 其他调节项 {_yi(wc_rest)} 亿元" if wc_rest is not None else "")
+            f"{_yi(total, _cu)} 亿元 ＝ 合并净利润项 {_yi(np_v, _cu)} 亿元 ＋ 营运资本项 "
+            f"{_yi(wc_v, _cu)} 亿元"
+            + (f" ＋ 其他调节项 {_yi(wc_rest, _cu)} 亿元" if wc_rest is not None else "")
             + "；现金跃升主要不是利润带来的",
-            f"两行水平：销售收现 {rec.get('prev_period','')} {_yi(rec.get('prev'))} → "
-            f"{rec.get('cur_period','')} {_yi(rec.get('cur'))} 亿元；"
-            f"采购付现 {paid.get('prev_period','')} {_yi(paid.get('prev'))} → "
-            f"{paid.get('cur_period','')} {_yi(paid.get('cur'))} 亿元"
+            f"两行水平：销售收现 {rec.get('prev_period','')} {_yi(rec.get('prev'), _du)} → "
+            f"{rec.get('cur_period','')} {_yi(rec.get('cur'), _du)} 亿元；"
+            f"采购付现 {paid.get('prev_period','')} {_yi(paid.get('prev'), _du)} → "
+            f"{paid.get('cur_period','')} {_yi(paid.get('cur'), _du)} 亿元"
             "（付现减少＝现金正贡献；这是收付实现口径，不是利润口径）"]
         evidence = [{"type": "披露原句", "text": "合并现金流量表·销售商品、提供劳务收到的现金",
                      "locator": str(rec.get("locator") or ""),

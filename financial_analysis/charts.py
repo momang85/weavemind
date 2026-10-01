@@ -34,13 +34,47 @@ def _d(value) -> Decimal:
     return Decimal(str(value))
 
 
-def _yi(value) -> float:
-    return float((_d(value) / YI).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+# 金额单位 → 元倍数（与 `facts.amount_scale` 同一张表；这里只用于**显示换算**）。
+_AMOUNT_SCALES = (("万亿", 1e12), ("千亿", 1e11), ("百亿", 1e10), ("亿", 1e8), ("万", 1e4))
 
 
-def _yi_s(value) -> str:
+def unit_to_yuan(unit) -> float:
+    """金额单位 → 元的倍数；**不是金额单位（%/吨/空）按元**。
+
+    `_yi` 只用于金额，旧行为就是"按元除 1e8"；所以未知单位沿用旧行为（=1.0），
+    只有**明确写着亿/万**的单位才换算——这样"亿元输入"不会再被除第二次（X0 实测：
+    运行金额已是亿元时 `_yi` 又除 1e8，基准/情景显示 0.00）。
+    """
+    u = str(unit or "")
+    if "%" in u or "％" in u or "/" in u:
+        return 1.0
+    for key, scale in _AMOUNT_SCALES:
+        if key in u:
+            return scale
+    return 1.0
+
+
+def amount_unit_of(run) -> str:
+    """运行的**金额单位**：取第一个金额输出的 `unit`（取不到按元）。
+
+    同一次运行的金额是同一量纲（算子不做静默缩放），所以整篇/整图用一个单位。
+    """
+    for o in (getattr(run, "outputs", None) or ()):
+        unit = str(getattr(o, "unit", "") or "")
+        if unit and "%" not in unit:
+            return unit
+    return "元"
+
+
+def _yi(value, unit: str = "元") -> float:
+    """金额 → **亿元**数值（按 `unit` 换算；默认元）。"""
+    scale = _d(unit_to_yuan(unit))
+    return float((_d(value) * scale / YI).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+
+
+def _yi_s(value, unit: str = "元") -> str:
     """亿元读数（带符号，两位小数）——先算成字符串再进 f-string（3.11 兼容）。"""
-    return f"{_yi(value):+,.2f}"
+    return f"{_yi(value, unit):+,.2f}"
 
 
 def _unavailable(run, reason: str) -> dict:
@@ -105,6 +139,8 @@ def profit_waterfall(run, dataset, *, top_n: int = 6,
     if bridge is None or detail is None:
         return _unavailable(run, "缺少 net_profit_change / net_profit_change_detail 输出")
     diag = _diag(run)
+    _u = amount_unit_of(run)                   # 金额单位（元/亿元…）：闭合容差与显示都按它换算
+    _scale = _d(unit_to_yuan(_u))
     periods = list(diag.get("periods") or ())
     if len(periods) < 2:
         return _unavailable(run, "运行诊断没有给出两期期间")
@@ -133,15 +169,15 @@ def profit_waterfall(run, dataset, *, top_n: int = 6,
 
     total = sum((i["value"] for i in items), Decimal("0"))
     real = np_cur - np_prev
-    if abs(total - real) > _TOL_YUAN:
-        gap_s = _yi_s(total - real)
+    if abs(total - real) > _TOL_YUAN * _scale:
+        gap_s = _yi_s(total - real, _u)
         return _unavailable(run, f"桥不闭合（分项与净利变化差 {gap_s} 亿元）：不画瀑布")
 
-    rows = [{"label": f"{prev_p}归母净利", "value": _yi(np_prev),
+    rows = [{"label": f"{prev_p}归母净利", "value": _yi(np_prev, _u),
              "unit": "亿元", "kind": "base"}]
-    rows += [{"label": i["label"], "value": _yi(i["value"]),
+    rows += [{"label": i["label"], "value": _yi(i["value"], _u),
               "unit": "亿元", "kind": "delta"} for i in items]
-    rows.append({"label": f"{cur_p}归母净利", "value": _yi(np_cur),
+    rows.append({"label": f"{cur_p}归母净利", "value": _yi(np_cur, _u),
                  "unit": "亿元", "kind": "total"})
     shown_in = sum((_d(r["value"]) for r in rows[1:-1]), Decimal("0"))
     shown_out = _d(rows[-1]["value"]) - _d(rows[0]["value"])
@@ -150,19 +186,19 @@ def profit_waterfall(run, dataset, *, top_n: int = 6,
 
     scale, margin = _out(run, "revenue_scale_effect"), _out(run, "gross_margin_effect")
     below = _out(run, "below_gross_line_change")
-    start_s, end_s = f"{np_prev / YI:,.2f}", f"{np_cur / YI:,.2f}"
-    delta_s, gp_s = _yi_s(real), _yi_s(gp.get("value"))
+    start_s, end_s = f"{_yi(np_prev, _u):,.2f}", f"{_yi(np_cur, _u):,.2f}"
+    delta_s, gp_s = _yi_s(real, _u), _yi_s(gp.get("value"), _u)
     # 结论控制在 ~140 字内：渲染脚本的图注会截断「结论」行（超过就看不清后半句），
     # 完整口径写在 annotation 与运行记录里。
     parts = [f"归母净利润 {start_s} → {end_s} 亿元（{delta_s}）",
              f"毛利变化 {gp_s} 亿元"]
     if scale is not None and margin is not None:
-        parts.append(f"规模 {_yi_s(scale.value)}／毛利率 {_yi_s(margin.value)} 亿元")
+        parts.append(f"规模 {_yi_s(scale.value, _u)}／毛利率 {_yi_s(margin.value, _u)} 亿元")
     if below is not None:
-        parts.append(f"毛利线以下 {_yi_s(below.value)} 亿元")
+        parts.append(f"毛利线以下 {_yi_s(below.value, _u)} 亿元")
     resid = _d(diag.get("unexplained_residual_yuan") or 0)
     parts.append("未解释差额 0.00 亿元（披露项目齐全）" if resid == 0
-                 else f"未解释差额 {_yi_s(resid)} 亿元（未取得的披露项目，不摊派）")
+                 else f"未解释差额 {_yi_s(resid, _u)} 亿元（未取得的披露项目，不摊派）")
     missing = list(diag.get("line_items_missing") or ())
     rejected = list(diag.get("line_items_rejected") or ())
 
@@ -206,45 +242,47 @@ def cash_bridge_waterfall(run, *, which: str = "cur",
     start = next((c for c in comps if c.get("component_id") == "consolidated_net_profit"), None)
     if start is None:
         return _unavailable(run, "调节桥里找不到起点（合并净利润）")
+    _u = amount_unit_of(run)
+    _scale = _d(unit_to_yuan(_u))
     deltas = [c for c in comps if c is not start]
     deltas = [c for c in deltas if _d(c.get("value")) != 0]
     cash = _d(bridge.value)
     total = _d(start.get("value")) + sum((_d(c.get("value")) for c in deltas), Decimal("0"))
-    if abs(total - cash) > _TOL_YUAN:
-        gap_s = _yi_s(total - cash)
+    if abs(total - cash) > _TOL_YUAN * _scale:
+        gap_s = _yi_s(total - cash, _u)
         return _unavailable(run, f"调节桥不闭合（与经营现金流差 {gap_s} 亿元）：不画瀑布")
 
     period = str(bridge.output_period or "")
-    rows = [{"label": f"{period}合并净利润", "value": _yi(start.get("value")),
+    rows = [{"label": f"{period}合并净利润", "value": _yi(start.get("value"), _u),
              "unit": "亿元", "kind": "base"}]
     for c in deltas:
         rows.append({"label": str(c.get("label") or c.get("component_id")),
-                     "value": _yi(c.get("value")), "unit": "亿元", "kind": "delta"})
-    rows.append({"label": f"{period}经营现金流", "value": _yi(cash),
+                     "value": _yi(c.get("value"), _u), "unit": "亿元", "kind": "delta"})
+    rows.append({"label": f"{period}经营现金流", "value": _yi(cash, _u),
                  "unit": "亿元", "kind": "total"})
 
     diag = _diag(run)
     rec = (diag.get("reconciliation") or {}).get(period) or {}
     groups = rec.get("groups") or {}
     short_cn = {"non_cash": "非现金项", "working_capital": "营运资本项", "other": "其他"}
-    group_full = "、".join(f"{_GROUP_CN.get(k, k)} {_yi_s(v)}" for k, v in groups.items())
+    group_full = "、".join(f"{_GROUP_CN.get(k, k)} {_yi_s(v, _u)}" for k, v in groups.items())
     sup = diag.get("largest_support") or {}
     drag = diag.get("largest_drag") or {}
     start_v = _d(start.get("value"))
-    parts = [f"合并净利润 {start_v / YI:,.2f} 亿元 ＋ 调节项 {_yi_s(cash - start_v)} 亿元 "
-             f"＝ 经营现金流 {cash / YI:,.2f} 亿元",
-             f"未解释差额 {_yi_s(rec.get('residual_yuan') or 0)} 亿元"]
+    parts = [f"合并净利润 {_yi(start_v, _u):,.2f} 亿元 ＋ 调节项 "
+             f"{_yi_s(cash - start_v, _u)} 亿元 ＝ 经营现金流 {_yi(cash, _u):,.2f} 亿元",
+             f"未解释差额 {_yi_s(rec.get('residual_yuan') or 0, _u)} 亿元"]
     if sup:
-        parts.append(f"最大支撑 {_clip(sup.get('label'))} {_yi_s(sup.get('value') or 0)} 亿元")
+        parts.append(f"最大支撑 {_clip(sup.get('label'))} {_yi_s(sup.get('value') or 0, _u)} 亿元")
     if drag:
-        parts.append(f"最大拖累 {_clip(drag.get('label'))} {_yi_s(drag.get('value') or 0)} 亿元")
+        parts.append(f"最大拖累 {_clip(drag.get('label'))} {_yi_s(drag.get('value') or 0, _u)} 亿元")
     # V1：图上也要能看出"现金为什么变了"——把同一次运行的 ΔOCF 桥最大构成写进图注
     chg = _out(run, "operating_cashflow_change")
     if chg is not None and (chg.components or ()):
         top = sorted((chg.components or ()),
                      key=lambda c: -abs(_d(c.get("value")))) [0]
-        parts.append(f"经营现金流变化 {_yi_s(chg.value)} 亿元，最大构成 "
-                     f"{_clip(top.get('label'), 16)} {_yi_s(top.get('value'))} 亿元")
+        parts.append(f"经营现金流变化 {_yi_s(chg.value, _u)} 亿元，最大构成 "
+                     f"{_clip(top.get('label'), 16)} {_yi_s(top.get('value'), _u)} 亿元")
     miss = (diag.get("items_missing") or {}).get(which) or []
     resid = _d(rec.get("residual_yuan") or 0)
 
@@ -290,10 +328,11 @@ def scenario_outcome_bars(run, *,
     out = _out(run, "scenario_net_profit")
     if out is None or not (out.components or ()):
         return _unavailable(run, "缺少 scenario_net_profit 的三情景读数")
+    _u = amount_unit_of(run)
     rows: list[dict] = []
     for c in (out.components or ()):
         rows.append({"label": _short_scenario_name(c.get("label")),
-                     "value": _yi(c.get("value")), "unit": "亿元", "kind": "delta"})
+                     "value": _yi(c.get("value"), _u), "unit": "亿元", "kind": "delta"})
     if len(rows) < 2:
         return _unavailable(run, "情景读数少于两个：不画比较图")
     base = next((r for r in rows if "基准" in r["label"]), None)
