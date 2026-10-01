@@ -902,11 +902,14 @@ def _engineering_index(runs, charts) -> list[str]:
 # ------------------------------------------------------------------ 主入口
 
 def research_note(runs, *, provenance=None, charts=None, label_of=None,
-                  records=None, doc=None) -> str:
+                  records=None, doc=None, volume_price=None) -> str:
     """已验证运行 → 4–6 页正文（markdown）。缺哪个模型就如实写缺，不补数。
 
     **未通过独立验证的运行在这里被挡掉**：即使调用方把 `validation_failed` 的运行传进来，
     正文也不会引用它的数字（该模型一律按「本次未运行」写）。
+
+    W2（阶段W §5）：开头先给**可检验的研究判断**（判断→数字→原句/位置→边界→替代解释→
+    观察与反转条件→缺口），由 `financial_analysis.judgments` 从读数与已准入披露驱动。
     """
     runs = [r for r in (runs or ())
             if str(_attr(r, "status")) == str(RunStatus.VALIDATED)]
@@ -935,6 +938,14 @@ def research_note(runs, *, provenance=None, charts=None, label_of=None,
                         "> 本节由 `financial_analysis` 从**已验证运行**装配：每个数字都能回查到"
                         "运行与输出标识（见文末『附：底稿索引』），图、卡、底稿共用同一次运行。"
                         "未取到的披露项留在「未解释差额」，既不摊派也不当零。", ""]
+    # W2：先给**可检验的研究判断**（阶段W §5 的七段式；读数缺就如实写缺口、不生成判断）
+    try:
+        from . import judgments as _jd
+        lines.extend(_jd.render_judgments(_jd.research_judgments(
+            runs, volume_price=volume_price, records=records, limit=3)))
+    except Exception as exc:                 # noqa: BLE001 - 判断层出错不影响既有正文
+        lines.append(f"> 研究判断本次未生成（{type(exc).__name__}）：正文其余部分照常给出。")
+        lines.append("")
     lines.append("### 一、结论（先看这三条）")
     for i, txt in enumerate(_conclusions(od, cash, scens), 1):
         lines.append(f"{i}. {txt}")

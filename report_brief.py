@@ -3460,7 +3460,8 @@ def _analysis_context(task_id: str, *, ws_dir=None, evidence: dict | None = None
             out["summary"] = _fa_note.summary_lines(picked, limit=3)
             out["note"] = _fa_note.research_note(
                 picked, provenance=prov, charts=charts, label_of=_ml,
-                records=out["records"], doc=None)
+                records=out["records"],
+                volume_price=(evidence or {}).get("volume_price") or None, doc=None)
     except Exception as exc:                       # noqa: BLE001 - 渲染不出就不加这一节
         logger.warning("成篇正文渲染失败（task=%s）：%s", task_id, str(exc)[:140])
         out["note"] = ""
@@ -3554,7 +3555,10 @@ def _analysis_readings(picked) -> dict:
                 "locator": "经营驱动运行：利润表明细逐项",
                 "note": "已按披露项目逐项列出（未解释差额单列）"})
             locators.append("经营驱动运行：利润表明细")
-        vp_out = _fa_note._out(od, "volume_price_effect")
+        vp_out = _fa_note._out(od, "volume_price_decomposition")
+        if vp_out is None:
+            vp_out = next((o for o in (getattr(od, "outputs", ()) or ())
+                           if "volume_price" in str(_fa_note._attr(o, "metric"))), None)
         if vp_out is not None and list(_fa_note._attr(vp_out, "components") or ()):
             comps = "、".join(f"{_fa_note._attr(c, 'label')} {_fa_note._yi(_fa_note._attr(c, 'value'))} 亿元"
                               for c in (_fa_note._attr(vp_out, "components") or ()))

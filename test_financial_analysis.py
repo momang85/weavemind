@@ -3805,5 +3805,104 @@ class TestW1OneReportOneJudgment(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestW2ResearchJudgments(unittest.TestCase):
+    """W2（阶段W §5）：**可检验的研究判断**——七段式、读数驱动、写得出反转条件。
+
+    用**真实缓存年报**（正常入口抽取）钉住：量（销量效应 −53.82／单位价格 +11.68 亿元）、
+    库存（+16.38%）、现金（营运资本占比）；读数缺时**不生成判断**（宁可少一条，也不编一条）。
+    """
+
+    DOC = os.path.join("evals", "a2_official_chain_20260929", "002304", "project",
+                       "materials", "f42e747c73850b59", "doc.json")
+
+    def _real(self):
+        import facts as F
+        with open(self.DOC, encoding="utf-8") as fh:
+            doc = json.loads(fh.read())
+        facts = F.facts_from_annual_tables(doc, company="洋河股份", company_code="002304",
+                                           periods=(2023, 2024), as_of="2025-04-30",
+                                           disclosed_at="2025-04-28")
+        ds = fa.freeze_from_facts(facts, periods=(2023, 2024), entity="洋河股份",
+                                  entity_id="002304.SZ", as_of="2025-04-30",
+                                  source_label="test:w2-real")
+        import narrative_evidence as ne
+        return doc, ds, ne.extract_volume_price([doc], periods=[2023, 2024])
+
+    def test_volume_price_inventory_judgments_are_numbers_driven(self):
+        from financial_analysis import judgments as jd
+        doc, ds, vp = self._real()
+        self.assertTrue(vp.get("ok"), "缓存年报必须能抽出量价/结构")
+        od = fa.run("operating_drivers", ds)
+        self.assertEqual(od.status, C.RunStatus.VALIDATED, od.reason)
+        js = jd.research_judgments([od], volume_price=vp, records=[{
+            "section": "管理层讨论与分析 > 产销量情况说明",
+            "snippet": "公司本期销售量、生产量、库存量情况见下表。",
+            "locator": "第 12 页 · 产销量表"}], limit=3)
+        ids = [j["judgment_id"] for j in js]
+        self.assertIn("volume_contraction", ids)
+        self.assertIn("finished_goods_inventory_build", ids)
+        vol = next(j for j in js if j["judgment_id"] == "volume_contraction")
+        joined = " ".join(vol["numbers"])
+        self.assertIn("-53.82", joined, "量价分解的销量效应必须进判断")
+        self.assertIn("11.68", joined)
+        self.assertIn("-16.30%", joined)
+        self.assertTrue(vol["boundary"] and vol["alternatives"] and vol["watch"],
+                        "七段式不能缺：边界/替代解释/反转条件")
+        self.assertTrue(any("渠道库存" in g for g in vol["gaps"]),
+                        "机制缺口要如实列出，不臆造")
+        inv = next(j for j in js if j["judgment_id"] == "finished_goods_inventory_build")
+        self.assertIn("+16.38%", " ".join(inv["numbers"]))
+        self.assertIn("不等于", inv["boundary"])
+        self.assertTrue(any("库存" in str(e.get("text")) for e in inv["evidence"]),
+                        "库存判断要绑到披露原句")
+        price = next((j for j in js if j["judgment_id"]
+                      == "unit_revenue_not_proof_of_pricing"), None)
+        self.assertIsNotNone(price)
+        self.assertIn("提价", price["title"])
+        text = "\n".join(jd.render_judgments(js))
+        for needle in ("数字与贡献", "披露原句", "支持边界", "本公司替代解释",
+                       "后续指标与反转条件", "缺口"):
+            self.assertIn(needle, text)
+        self.assertNotIn("****", text, "标题强调不能被套两层")
+
+    def test_missing_data_produces_a_gap_not_a_judgment(self):
+        """读数缺：如实写"本次不足以下判断"，不得编一条判断出来。"""
+        from financial_analysis import judgments as jd
+        rows = [_row("revenue", "2023年", 1000.0, unit="元"),
+                _row("revenue", "2024年", 900.0, unit="元"),
+                _row("gross_profit", "2023年", 800.0, unit="元"),
+                _row("gross_profit", "2024年", 700.0, unit="元"),
+                _row("net_profit", "2023年", 300.0, unit="元"),
+                _row("net_profit", "2024年", 250.0, unit="元"),
+                _row("operating_cost", "2023年", 200.0, unit="元"),
+                _row("operating_cost", "2024年", 200.0, unit="元")]
+        ds = fa.freeze_from_facts(rows, periods=(2023, 2024), entity="示例",
+                                  entity_id="000001.SZ", as_of="2025-04-30",
+                                  source_label="test:w2-gap")
+        od = fa.run("operating_drivers", ds)
+        js = jd.research_judgments([od], volume_price={"ok": False}, records=[], limit=3)
+        ids = [j["judgment_id"] for j in js]
+        self.assertNotIn("volume_contraction", ids)
+        self.assertNotIn("finished_goods_inventory_build", ids)
+        self.assertTrue(all("不足以下判断" in j["title"] or "无从判断" in j["title"]
+                            for j in js), [j["title"] for j in js])
+        self.assertTrue(all(j["gaps"] for j in js))
+
+    def test_cash_judgment_uses_the_working_capital_share(self):
+        from financial_analysis import judgments as jd
+        _doc, ds, vp = self._real()
+        od = fa.run("operating_drivers", ds)
+        cash = fa.run("cash_reconciliation", ds)
+        self.assertEqual(cash.status, C.RunStatus.VALIDATED, cash.reason)
+        js = jd.research_judgments([od, cash], volume_price=vp, records=[], limit=6)
+        cj = next((j for j in js if j["judgment_id"] == "cash_from_working_capital"), None)
+        self.assertIsNotNone(cj, [j["judgment_id"] for j in js])
+        self.assertIn("营运资本", cj["title"])
+        self.assertIn("-15.02", " ".join(cj["numbers"]))
+        self.assertIn("不直接证明", cj["boundary"])
+        self.assertTrue(any("采购付现" in w for w in cj["watch"]),
+                        "反转条件要落到可观察的收支项上")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
