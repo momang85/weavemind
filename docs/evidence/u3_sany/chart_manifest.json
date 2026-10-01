@@ -1,0 +1,48 @@
+{
+ "charts": [
+  {
+   "file": "1_profit_waterfall.png",
+   "chart_id": "dcfa6def7328-profit-waterfall",
+   "binding": {},
+   "keywords": [
+    "规模"
+   ],
+   "section_hint": "",
+   "question": "归母净利润同比变化由哪些金额构成？",
+   "observation": "归母净利润 45.27 → 59.75 亿元（+14.48）；毛利变化 +13.86 亿元；规模 +11.97／毛利率 +1.88 亿元；毛利线以下 +0.62 亿元；未解释差额 +0.81 亿元（未取得的披露项目，不摊派）",
+   "caption": "",
+   "type": "waterfall",
+   "grade": "publish",
+   "draft_reason": ""
+  },
+  {
+   "file": "2_cash_bridge.png",
+   "chart_id": "ca1ed2073bc5-cash-bridge-cur",
+   "binding": {},
+   "keywords": [],
+   "section_hint": "",
+   "question": "合并净利润到经营现金流之间的调节桥在哪里？",
+   "observation": "合并净利润 60.93 亿元 ＋ 调节项 +87.22 亿元 ＝ 经营现金流 148.14 亿元；未解释差额 +0.00 亿元；最大支撑 经营性应付项目的增加（减… +55.93 亿元；最大拖累 投资损失（调节项） -6.43 亿元",
+   "caption": "",
+   "type": "waterfall",
+   "grade": "publish",
+   "draft_reason": ""
+  },
+  {
+   "file": "3_scenario_thresholds.png",
+   "chart_id": "ce4e0ce347a1-scenario-threshold",
+   "binding": {},
+   "keywords": [
+    "收入",
+    "预测"
+   ],
+   "section_hint": "",
+   "question": "收入假设变化时，要保住基期利润需要多高的毛利率？",
+   "observation": "收入持平 需 26.43%（差 +0.00pp）；收入 +5% 需 25.17%（差 -1.26pp）；收入 −12.83% 需 30.32%（差 +3.89pp）。收入越低，维持同样利润所需毛利率越高（单因素反推：给出“需要什么”，不表示可达、也不是预测）",
+   "caption": "",
+   "type": "grouped_bar",
+   "grade": "publish",
+   "draft_reason": ""
+  }
+ ]
+}

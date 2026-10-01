@@ -1,0 +1,210 @@
+{
+ "charts": [
+  {
+   "available": true,
+   "type": "waterfall",
+   "chart_id": "dcfa6def7328-profit-waterfall",
+   "title": "三一重工 2023年→2024年 归母净利润瀑布（亿元）",
+   "question": "归母净利润同比变化由哪些金额构成？",
+   "conclusion": "归母净利润 45.27 → 59.75 亿元（+14.48）；毛利变化 +13.86 亿元；规模 +11.97／毛利率 +1.88 亿元；毛利线以下 +0.62 亿元；未解释差额 +0.81 亿元（未取得的披露项目，不摊派）",
+   "unit": "亿元",
+   "source": "公司年报：合并利润表与经营分析（分产品/分地区/期间费用）（正常入口抽取）；运行 run=dcfa6def7328，数据集 6d34fc0b78c3",
+   "x_axis_title": "项目（起点→贡献→终点）",
+   "y_axis_title": "金额（亿元）",
+   "time_range": "2023年—2024年",
+   "region": "中国",
+   "sample_size": 10,
+   "missing": "未取得项目：fair_value_change、asset_disposal_income",
+   "outliers": "无",
+   "annotation": "亿元为四舍五入两位；闭合判定用元值。贡献项是会计分解，业务原因需另找披露依据",
+   "data": [
+    {
+     "label": "2023年归母净利",
+     "value": 45.27,
+     "unit": "亿元",
+     "kind": "base"
+    },
+    {
+     "label": "毛利变化",
+     "value": 13.86,
+     "unit": "亿元",
+     "kind": "delta"
+    },
+    {
+     "label": "投资收益",
+     "value": 8.2,
+     "unit": "亿元",
+     "kind": "delta"
+    },
+    {
+     "label": "财务费用",
+     "value": -6.65,
+     "unit": "亿元",
+     "kind": "delta"
+    },
+    {
+     "label": "研发费用",
+     "value": 4.84,
+     "unit": "亿元",
+     "kind": "delta"
+    },
+    {
+     "label": "销售费用",
+     "value": -3.62,
+     "unit": "亿元",
+     "kind": "delta"
+    },
+    {
+     "label": "管理费用",
+     "value": -3.45,
+     "unit": "亿元",
+     "kind": "delta"
+    },
+    {
+     "label": "信用减值损失",
+     "value": 2.77,
+     "unit": "亿元",
+     "kind": "delta"
+    },
+    {
+     "label": "其余 8 项合计（未单列）",
+     "value": -1.46,
+     "unit": "亿元",
+     "kind": "delta"
+    },
+    {
+     "label": "2024年归母净利",
+     "value": 59.75,
+     "unit": "亿元",
+     "kind": "total"
+    }
+   ],
+   "run_id": "dcfa6def7328debdcb7cb86accde06ac57bf8f29105f4d163db58a71b389e9e4",
+   "dataset_hash": "6d34fc0b78c30c94c76d1df2ddb65fb854806396013cb976d9698a89a023e6d1"
+  },
+  {
+   "available": true,
+   "type": "waterfall",
+   "chart_id": "ca1ed2073bc5-cash-bridge-cur",
+   "title": "三一重工 2024年 净利润→经营现金流桥（亿元）",
+   "question": "合并净利润到经营现金流之间的调节桥在哪里？",
+   "conclusion": "合并净利润 60.93 亿元 ＋ 调节项 +87.22 亿元 ＝ 经营现金流 148.14 亿元；未解释差额 +0.00 亿元；最大支撑 经营性应付项目的增加（减… +55.93 亿元；最大拖累 投资损失（调节项） -6.43 亿元",
+   "unit": "亿元",
+   "source": "公司年报：现金流量表补充资料（将净利润调节为经营活动现金流量）（正常入口抽取）；运行 run=ca1ed2073bc5，数据集 6d34fc0b78c3",
+   "x_axis_title": "项目（起点→调节项→终点）",
+   "y_axis_title": "金额（亿元）",
+   "time_range": "2024年",
+   "region": "中国",
+   "sample_size": 5,
+   "missing": "无",
+   "outliers": "无",
+   "annotation": "对账差额≈0 表示披露调节项与经营现金流自洽；差额非零时不得写“完整调节”。调节项是会计加回/扣减，不表示经济原因。分组明细：非现金项（折旧摊销/减值/递延税/公允价值等） +37.42、营运资本项（存货与经营性应收应付的增减） +49.10、其他调节项 +0.70",
+   "data": [
+    {
+     "label": "2024年合并净利润",
+     "value": 60.93,
+     "unit": "亿元",
+     "kind": "base"
+    },
+    {
+     "label": "非现金项（折旧摊销/减值/递延税/公允价值等）",
+     "value": 37.42,
+     "unit": "亿元",
+     "kind": "delta"
+    },
+    {
+     "label": "营运资本项（存货/经营性应收/经营性应付）",
+     "value": 49.1,
+     "unit": "亿元",
+     "kind": "delta"
+    },
+    {
+     "label": "其他调节项",
+     "value": 0.7,
+     "unit": "亿元",
+     "kind": "delta"
+    },
+    {
+     "label": "2024年经营现金流",
+     "value": 148.14,
+     "unit": "亿元",
+     "kind": "total"
+    }
+   ],
+   "run_id": "ca1ed2073bc55908143dcbd9838f5b516622dbd0f32eb74f01f5202c7318c40c",
+   "dataset_hash": "6d34fc0b78c30c94c76d1df2ddb65fb854806396013cb976d9698a89a023e6d1"
+  },
+  {
+   "available": true,
+   "type": "grouped_bar",
+   "chart_id": "ce4e0ce347a1-scenario-threshold",
+   "title": "三一重工 反向情景：维持基期归母净利所需毛利率（%）",
+   "question": "收入假设变化时，要保住基期利润需要多高的毛利率？",
+   "conclusion": "收入持平 需 26.43%（差 +0.00pp）；收入 +5% 需 25.17%（差 -1.26pp）；收入 −12.83% 需 30.32%（差 +3.89pp）。收入越低，维持同样利润所需毛利率越高（单因素反推：给出“需要什么”，不表示可达、也不是预测）",
+   "unit": "%",
+   "source": "公司年报：营业收入/营业成本/归母净利润与毛利线以下净额（正常入口抽取）",
+   "x_axis_title": "假设档位（收入）",
+   "y_axis_title": "毛利率（%）",
+   "time_range": "2024年（使用者情景（收入 +0.00%／毛利率 +0.00pp／隐含块 +0.00%，等于基期））",
+   "region": "中国",
+   "sample_size": 6,
+   "missing": "无",
+   "outliers": "无",
+   "annotation": "基期毛利率取运行诊断的未取整值，并与两条已验证输出的回推值交叉核对（≤0.02pp）；两个口径同为百分比。毛利线以下净额含费用/税项/投资收益/少数股东，不是纯费用",
+   "data": [
+    {
+     "label": "收入持平",
+     "value": 26.43,
+     "unit": "%",
+     "caliber": "基期毛利率"
+    },
+    {
+     "label": "收入持平",
+     "value": 26.43,
+     "unit": "%",
+     "caliber": "维持基期净利所需毛利率"
+    },
+    {
+     "label": "收入 +5%",
+     "value": 26.43,
+     "unit": "%",
+     "caliber": "基期毛利率"
+    },
+    {
+     "label": "收入 +5%",
+     "value": 25.17,
+     "unit": "%",
+     "caliber": "维持基期净利所需毛利率"
+    },
+    {
+     "label": "收入 −12.83%",
+     "value": 26.43,
+     "unit": "%",
+     "caliber": "基期毛利率"
+    },
+    {
+     "label": "收入 −12.83%",
+     "value": 30.32,
+     "unit": "%",
+     "caliber": "维持基期净利所需毛利率"
+    }
+   ],
+   "run_id": "ce4e0ce347a1d6031b850634828794a3ceef04a48d5c73bbfb9603dcea493d05",
+   "dataset_hash": "6d34fc0b78c30c94c76d1df2ddb65fb854806396013cb976d9698a89a023e6d1",
+   "variants": [
+    {
+     "label": "收入持平",
+     "run_id": "ce4e0ce347a1d6031b850634828794a3ceef04a48d5c73bbfb9603dcea493d05"
+    },
+    {
+     "label": "收入 +5%",
+     "run_id": "ae10b7cddc28557c6f13945dada1b4835df28c643a087f47cc11a2b3a72368db"
+    },
+    {
+     "label": "收入 −12.83%",
+     "run_id": "3f1fd8f83a82562089fa5ae64ed14471fcbabcd653ac76ee8d06c53e22a311c1"
+    }
+   ]
+  }
+ ]
+}

@@ -113,6 +113,16 @@
 > 报告链接线）、`test_delivery_chain`+`test_report_quality`+`test_narrative_evidence` **516**、
 > `test_deploy_manifest` 40、3.11 `py_compile` 全过。
 >
+> **U3 交付件也复制到位（本批）**：把"事实→冻结→运行→出图→成篇"抽成脚本层共享件
+> [case_deliverables.py](scripts/case_deliverables.py)，三一用**同一个脚本**产出
+> [u3_sany_note.md](evidence/u3_sany_note.md)（5738 字符 / 79 行）与三张 PNG
+> （`docs/evidence/u3_sany/`，`grade=publish`），读数与 U3 既有证据一致：
+> 净利 **+14.48 亿**（规模 +11.97／毛利率 +1.88）；现金桥
+> `60.93 + 37.42 + 49.10 + 0.70 = 148.14 亿`（残差 0.00），最大支撑**经营性应付 +55.93 亿**、
+> 最大拖累投资损失 −6.43 亿；反向阈值（收入 −12.83%）**30.32%（+3.89pp）**；
+> **量价如实跳过**（只有行业级"台"销量，与分产品收入口径不可比）。
+> 两家对照见 [u3_sany_deliverables.json](evidence/u3_sany_deliverables.json)。
+>
 > ## 历史账（按日期，细节保留）
 >
 > ## 历史账（2026-09-30 上午 · **阶段 Q 深化 L0→L1→L2→L3 逐批执行**）

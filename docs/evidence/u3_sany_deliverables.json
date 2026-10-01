@@ -1,0 +1,86 @@
+{
+ "batch": "U3",
+ "case": "三一重工 600031 2023→2024 经营驱动正文与三图底稿",
+ "mainline": "facts → freeze → run → charts → note（与洋河同一脚本）",
+ "dataset": {
+  "observations": 168,
+  "usable": 168,
+  "conflicts": [],
+  "dataset_hash": "6d34fc0b78c30c94c76d1df2ddb65fb854806396013cb976d9698a89a023e6d1"
+ },
+ "runs": {
+  "operating_drivers": {
+   "run_id": "dcfa6def7328debdcb7cb86accde06ac57bf8f29105f4d163db58a71b389e9e4",
+   "status": "validated"
+  },
+  "cash_reconciliation": {
+   "run_id": "ca1ed2073bc55908143dcbd9838f5b516622dbd0f32eb74f01f5202c7318c40c",
+   "status": "validated"
+  },
+  "scenario_sensitivity": [
+   {
+    "label": "收入持平",
+    "run_id": "ce4e0ce347a1d6031b850634828794a3ceef04a48d5c73bbfb9603dcea493d05",
+    "status": "validated",
+    "params": {
+     "revenue_growth": 0.0,
+     "gross_margin_delta": 0.0
+    }
+   },
+   {
+    "label": "收入 +5%",
+    "run_id": "ae10b7cddc28557c6f13945dada1b4835df28c643a087f47cc11a2b3a72368db",
+    "status": "validated",
+    "params": {}
+   },
+   {
+    "label": "收入 −12.83%",
+    "run_id": "3f1fd8f83a82562089fa5ae64ed14471fcbabcd653ac76ee8d06c53e22a311c1",
+    "status": "validated",
+    "params": {
+     "revenue_growth": -0.1283,
+     "gross_margin_delta": 0.0
+    }
+   }
+  ]
+ },
+ "note": {
+  "chars": 5738,
+  "lines": 79,
+  "sections": [
+   "一、结论（先看这三条）",
+   "二、利润变化：金额分解",
+   "三、披露支持与来源定位",
+   "四、替代解释（会改变判断）",
+   "五、现金形成与反向情景",
+   "六、待核查问题（按影响排序）",
+   "七、口径与限制",
+   "附：可复算底稿图（与正文同一次运行）"
+  ],
+  "table_rows": 20,
+  "facts_with_locator": 11,
+  "run_refs": 3
+ },
+ "figures": [
+  {
+   "file": "docs/evidence/u3_sany/1_profit_waterfall.png",
+   "bytes": 82000,
+   "sha256": "081940bd1e615d9a"
+  },
+  {
+   "file": "docs/evidence/u3_sany/2_cash_bridge.png",
+   "bytes": 69578,
+   "sha256": "fbd551078d9f5cdb"
+  },
+  {
+   "file": "docs/evidence/u3_sany/3_scenario_thresholds.png",
+   "bytes": 65603,
+   "sha256": "dcb0c60482f1f19c"
+  }
+ ],
+ "chart_conclusions": [
+  "归母净利润 45.27 → 59.75 亿元（+14.48）；毛利变化 +13.86 亿元；规模 +11.97／毛利率 +1.88 亿元；毛利线以下 +0.62 亿元；未解释差额 +0.81 亿元（未取得的披露项目，不摊派）",
+  "合并净利润 60.93 亿元 ＋ 调节项 +87.22 亿元 ＝ 经营现金流 148.14 亿元；未解释差额 +0.00 亿元；最大支撑 经营性应付项目的增加（减… +55.93 亿元；最大拖累 投资损失（调节项） -6.43 亿元",
+  "收入持平 需 26.43%（差 +0.00pp）；收入 +5% 需 25.17%（差 -1.26pp）；收入 −12.83% 需 30.32%（差 +3.89pp）。收入越低，维持同样利润所需毛利率越高（单因素反推：给出“需要什么”，不表示可达、也不是预测）"
+ ]
+}
