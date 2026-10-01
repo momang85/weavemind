@@ -252,6 +252,22 @@ def compute(dataset, params: dict | None = None) -> dict:
          "formula": "本期对账差额 − 上期对账差额"},
     ]
     _cf_sum = sum(Decimal(str(c["value"])) for c in cf_change_components)
+    # V1：把每组的**单项变动**也留下——"营运资本项变化 79.77 亿"必须能看出是应付/应收/存货
+    # 里哪几项在动（不把整组变化自动叫"供应商账期延长"）。
+    _prev_items = {i["metric"]: i for i in b_prev["items"]}
+    cash_change_items: dict = {g: [] for g in GROUP_ORDER}
+    for item in b_cur["items"]:
+        prev_item = _prev_items.get(item["metric"])
+        cur_v = _d(item["value"])
+        prev_v = _d(prev_item["value"]) if prev_item else Decimal("0")
+        cash_change_items.setdefault(item["group"], []).append({
+            "metric": item["metric"], "label": item["label"],
+            "prev_yuan": float(prev_v) if prev_item else None,
+            "cur_yuan": float(cur_v),
+            "delta_yuan": float(cur_v - prev_v),
+        })
+    for group, entries in cash_change_items.items():
+        entries.sort(key=lambda x: -abs(x["delta_yuan"]))
     outputs.append({
         "metric": "operating_cashflow_change",
         "label": f"经营现金流变化分解（{cur_p}较{prev_p}）",
@@ -326,6 +342,8 @@ def compute(dataset, params: dict | None = None) -> dict:
                 } for b in (b_cur, b_prev)
             },
             "largest_support": sup, "largest_drag": drag,
+            # V1：现金变化桥的**单项变动**（每组按 |Δ| 排序）——读者据此判断"能不能持续"
+            "cash_change_items": cash_change_items,
             "items_missing": {"cur": b_cur["missing"], "prev": b_prev["missing"]},
             "items_rejected": {"cur": b_cur["rejected"], "prev": b_prev["rejected"]},
             "closure_note": ("对账差额≈0 表示披露调节项与经营现金流自洽；"

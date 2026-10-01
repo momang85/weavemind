@@ -478,6 +478,37 @@ class TestEvidenceGates(unittest.TestCase):
         self.assertEqual(aft.page_of(doc, 0), 1)
         self.assertEqual(aft.page_of(doc, len(text) - 1), 2)
 
+    def test_line_offset_survives_cleaning_and_returns_the_pdf_page(self):
+        """V1（阶段V）：清洗改文本（全角/去页眉页脚/空白折叠）时，页码不得漂移。
+
+        反例（审查原文）：旧实现拿清洗后的前 40 字去原文 `find`，找不到就退回**清洗长度**
+        当原文偏移 → 现金补充资料表页码漂移（实测洋河 147→135、三一 186→175）。
+        这里造一段"清洗后与原文不同"的文本：目标行前面有全角冒号与页眉页脚噪声，
+        断言 `line_offset` 落在**原文**里该行真正的位置，从而页码是第 2 页而不是第 1 页。
+        """
+        head = "1、合并现金流量表\n单位：元\n2020 年 2019 年\n"
+        # 清洗会**丢掉**这些页脚行（`_PAGE_NOISE`）并把全角空白折叠 —— 原文偏移因此
+        # 明显大于"清洗长度累计"，这正是旧实现页码漂移的成因。
+        noise = "12\n" * 6
+        target = "加：资产减值准备 10,535,947.80 1,946,634.92\n"
+        text = head + noise + target
+        # 页码表：从 target 起算第 2 页（原文偏移 → 页码）
+        tpos = text.index(target)
+        doc = {"text": text, "title": _TITLE,
+               "page_offsets": [(0, 1), (tpos, 2)]}
+        lines = aft.norm_lines(text)
+        idx = next(i for i, ln in enumerate(lines)
+                   if ln.startswith("加：资产减值准备") or ln.startswith("加:资产减值准备"))
+        off = aft.line_offset(doc, lines, idx)
+        self.assertGreaterEqual(off, tpos,
+                               f"偏移必须落在原文该行之后（实际 {off} < {tpos}）")
+        self.assertEqual(aft.page_of(doc, off), 2,
+                         "清洗后仍要指回原件的第 2 页，不得退回第 1 页")
+        # 反向保险：旧行为（按清洗长度累计）与新行为**必须不同**——否则测不出修改
+        naive = sum(len(x) + 1 for x in lines[:idx])
+        self.assertNotEqual(off, naive,
+                            "不得退回按清洗长度累计的近似偏移（那正是页码漂移的成因）")
+
 
 class TestDerivation(unittest.TestCase):
     def _f(self, metric, value, **kw):

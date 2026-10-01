@@ -3221,6 +3221,52 @@ class TestV1CashChangeBridge(unittest.TestCase):
         self.assertIn("不得自动称", limits)
         self.assertIn("非经常性损益", limits)
 
+    def test_working_capital_breakdown_and_observation_indicators(self):
+        """V1：现金改善的可持续性——营运资本项拆到单项，并给读法与后续观察指标。
+
+        三一（真实披露数）：营运资本项变化 +79.77 亿元占现金变化 87.6%，
+        真实年报里进一步分成经营性应付 +116.13、经营性应收 −33.94、存货 −2.42（亿元）
+        （三项拆解见案例证据 `u3_sany_note.md`；本用例核对结构与措辞）。
+        """
+        from financial_analysis import narrative as nt
+        run = fa.run("cash_reconciliation", self._sany())
+        diag = run.outputs[0].diagnostics
+        items = (diag.get("cash_change_items") or {}).get("working_capital") or []
+        self.assertTrue(items, sorted(diag.keys()))
+        self.assertAlmostEqual(sum(r["delta_yuan"] for r in items) / 1e8, 79.76931, places=3)
+        self.assertEqual(items[0]["metric"], "operating_payable_increase",
+                         "按 |Δ| 排序，最大单项在前")
+        note = nt.research_note([run])
+        self.assertIn("现金改善的可持续性", note)
+        self.assertIn("后续观察指标", note)
+        self.assertIn("不等于账期延长", note)
+        self.assertIn("周转天数", note)
+        self.assertIn("占现金变化 87.6%", note)
+        # 现金下降时份额要写成"抵消/加重现金下降"，不出现读反的负百分比
+        yh_note = nt.research_note([fa.run("cash_reconciliation", self._yanghe())])
+        self.assertIn("抵消现金下降", yh_note)
+        self.assertNotIn("占现金变化 -", yh_note)
+
+    def _yanghe(self):
+        """洋河：营运资本项变化为正而现金变化为负（份额措辞必须按方向写）。"""
+        return fa.freeze_from_facts([
+            _row("net_profit_consolidated", "2023年", 10_020_768_556.47, unit="元"),
+            _row("net_profit_consolidated", "2024年", 6_666_455_819.96, unit="元"),
+            _row("operating_cashflow", "2023年", 6_130_220_867.96, unit="元"),
+            _row("operating_cashflow", "2024年", 4_628_711_237.28, unit="元"),
+            _row("depreciation", "2023年", 639_335_568.28, unit="元"),
+            _row("depreciation", "2024年", 586_592_227.18, unit="元"),
+            _row("operating_payable_increase", "2023年", -3_582_948_946.71, unit="元"),
+            _row("operating_payable_increase", "2024年", -1_830_670_724.59, unit="元"),
+            _row("inventory_decrease", "2023年", -1_226_697_174.83, unit="元"),
+            _row("inventory_decrease", "2024年", -843_101_567.99, unit="元"),
+            _row("operating_receivable_decrease", "2023年", 380_090_873.53, unit="元"),
+            _row("operating_receivable_decrease", "2024年", -651_364_248.55, unit="元"),
+            _row("other_cashflow_adjustments", "2023年", -174_743_591.08, unit="元"),
+            _row("other_cashflow_adjustments", "2024年", 330_296_496.71, unit="元"),
+        ], periods=(2023, 2024), entity="洋河股份", entity_id="002304.SZ",
+            as_of="2025-04-30", source_label="test:v1-yanghe")
+
     def test_components_gold_is_independent_of_the_payload(self):
         """金样按定义独立重算：篡改分项值或标签都会被抓到。"""
         import dataclasses

@@ -22,7 +22,12 @@ from .contracts import RunStatus
 
 
 def _yi(value) -> str:
-    """亿元读数（带符号、两位小数）——与图表共用同一套格式（不两处各自四舍五入）。"""
+    """亿元读数（带符号、两位小数）——与图表共用同一套格式（不两处各自四舍五入）。
+
+    `None`/空值（例如"本期没有最大拖累项"）如实显示为 `—`，不抛异常、也不写成 0.00。
+    """
+    if value is None or value == "":
+        return "—"
     return _charts._yi_s(value)
 
 
@@ -401,6 +406,53 @@ def _source_table(runs, provenance: dict, limit: int = 14) -> list[str]:
     return lines
 
 
+def _cash_sustainability(cash) -> list[str]:
+    """V1：现金改善**能不能持续**——按组拆出单项变动，并给出后续观察指标。
+
+    证据层能确定的是：现金变化由哪些披露调节项构成（会计口径）。"能不能持续"取决于这些
+    项目是**时点/占用**还是经营改善；本层不替读者下结论，而是把单项拆开、写明可观察指标，
+    并给出反证方向（结算节奏、票据/预收、备货、减值口径）。
+    """
+    if cash is None:
+        return []
+    items = _diag(cash).get("cash_change_items") or {}
+    chg = _out(cash, "operating_cashflow_change")
+    if chg is None or not items:
+        return []
+    total = float(_attr(chg, "value") or 0)
+    lines: list[str] = []
+    for group, title, note, watch in (
+        ("working_capital", "营运资本项（存货/经营性应收/经营性应付）",
+         "这三项是**占用与时点**口径：应付增加可能只是结算节奏或票据，不等于账期延长；"
+         "应收/存货的减少也可能是备货或确认节奏",
+         "下期存货、应收账款、应付账款的绝对额与周转天数；现金流量表附注里的票据与预收变动"),
+        ("non_cash", "非现金项（折旧摊销/减值/递延税等）",
+         "非现金项是**会计加回**：减值计提与转回、递延税确认都会让这一组变大或变小，"
+         "不直接代表现金改善",
+         "下期折旧摊销与减值明细、递延所得税附注；资产减值准备余额变化"),
+    ):
+        group_rows = [r for r in (items.get(group) or ()) if r.get("delta_yuan")]
+        if not group_rows:
+            continue
+        group_total = sum(float(r["delta_yuan"]) for r in group_rows)
+        # 现金**下降**时"占现金变化 x%"会把符号读反（洋河：ΔOCF −15.02、营运资本 +11.04
+        # 会显示成 −73.6%）。按方向写成"抵消/加重现金下降"，读数才与直觉一致。
+        if not total:
+            share = ""
+        elif total > 0:
+            share = f"（占现金变化 {group_total / total * 100:.1f}%）"
+        else:
+            share = (f"（抵消现金下降 {abs(group_total / total) * 100:.1f}%）"
+                     if group_total > 0 else
+                     f"（加重现金下降 {abs(group_total / total) * 100:.1f}%）")
+        top = "、".join(f"{r['label']} {_yi(r['delta_yuan'])} 亿元"
+                        for r in group_rows[:3])
+        lines.append(f"- **{title}**：合计 {_yi(group_total)} 亿元{share}；主要单项：{top}")
+        lines.append(f"  - 读法：{note}")
+        lines.append(f"  - 后续观察指标：{watch}")
+    return lines
+
+
 def _alternatives(od) -> list[str]:
     if od is None:
         return []
@@ -647,6 +699,11 @@ def research_note(runs, *, provenance=None, charts=None, label_of=None) -> str:
                 lines.append(f"- **辅助观察：现金缺口变化**（经营现金流−合并净利润）："
                              f"{_yi(_attr(gap, 'value'))} 亿元 ＝ {comps}；"
                              "缺口缩小不等于现金变好")
+            # V1：现金改善能不能持续——单项拆解 + 观察指标（结论要落到可检验的东西上）
+            sustain = _cash_sustainability(cash)
+            if sustain:
+                lines.append("- **现金改善的可持续性（按组拆到单项）**")
+                lines.extend(sustain)
             note = _diag(cash).get("closure_note")
             if note:
                 lines.append(f"- {note}")

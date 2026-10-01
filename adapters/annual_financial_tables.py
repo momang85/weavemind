@@ -160,14 +160,52 @@ def page_of(doc: dict, offset: int) -> int:
 
 
 def line_offset(doc: dict, lines: list[str], idx: int) -> int:
-    """逻辑行 → 原文字符偏移（用于反查页码）。"""
+    """逻辑行 → 原文字符偏移（用于反查页码）。
+
+    V1（阶段V）：清洗会改文本（全角→半角、去页眉页脚、空白折叠），"拿清洗后的前 40 字
+    去原文 find"经常找不到，旧实现就退回**清洗长度**当原文偏移——页码于是漂移
+    （实测现金补充资料表：洋河 147→135、三一 186→175）。现在三步取证，且**先保留原行
+    偏移**：
+
+    1. 原文里逐步用 40/24/12 字探针找（最长匹配优先）；
+    2. 找不到就把**原文也按同一套清洗规则归一化**（带位置映射）后搜归一化探针；
+    3. 仍找不到才退回"按清洗长度累计"的近似（并如实由调用方标明可能是估计）。
+
+    关键点：只在**原文**上定位，绝不用清洗长度冒充原文偏移。
+    """
     text = str(doc.get("text") or "")
     probe = lines[idx][:40]
     if not probe:
         return 0
-    found = text.find(probe)
-    if found >= 0:
-        return found
+    for size in (40, 24, 12):
+        p = probe[:size]
+        if not p:
+            continue
+        found = text.find(p)
+        if found >= 0:
+            return found
+    # 归一化搜索：用与清洗同一套字符映射（全角→半角、去不可见空白）建"归一化文本 + 位置表"
+    try:
+        norm_chars: list[str] = []
+        norm_pos: list[int] = []
+        for pos, ch in enumerate(text):
+            t = ch.translate(_FULLWIDTH).replace("\u3000", " ")
+            for c in t:
+                if c in " \t":
+                    if norm_chars and norm_chars[-1] == " ":
+                        continue
+                    norm_chars.append(" ")
+                    norm_pos.append(pos)
+                else:
+                    norm_chars.append(c)
+                    norm_pos.append(pos)
+        norm_text = "".join(norm_chars)
+        norm_probe = re.sub(r"[ \t]+", " ", probe)
+        found = norm_text.find(norm_probe)
+        if found >= 0:
+            return norm_pos[found]
+    except Exception:                              # noqa: BLE001 - 取证失败退回近似
+        pass
     return sum(len(x) + 1 for x in lines[:idx])
 
 
