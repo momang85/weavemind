@@ -31,6 +31,18 @@
 > 隔离跑不含 Critic 评审与检索来源两条轴（`acceptance_overall=fail`），不伪造评审通过；
 > **未验**：登录会话下的 `POST /api/tasks` 与页面点击（无可用会话，不读密钥不复制 token）。
 >
+> **V0 回修（2026-10-01，复查正常交付时发现）**：洋河正常任务产出里「分析摘要」与
+> 「经营驱动分析正文」各印了**两遍**——验收候选稿回流时 `_looks_like_brief` 把整份简报当
+> body，取『## 分析』一节连带把装配器**已经印过**的两节当模型内容再带一遍，装配器又加一次
+> （实测 `report.md` 48035→37172 字节）。两节现登记为简报自己的小节（`BRIEF_SECTIONS`），
+> 取节时收尾 ⇒ 回流再装配不再重复，模型散文一字不动。研究硬门槛
+> （`_has_analysis_section`）改为**连装配器生成的论证线一起看**：模型散文缺位时，
+> 摘要＋正文本身就是可交付结论（不是"只有数据与底稿"，隔离跑因此不再误触
+> 「分析未完成」硬门槛）；但卡片只写"本次已验证运行不属于经营研究组合"的**空位声明不算**
+> 分析——正文模型失败的任务仍不得判 `verified`（`test_offline_delivery` 对偶用例钉住）。
+> 用例：`test_financial_analysis` **187**、`test_delivery_chain` 409、
+> `test_offline_delivery` 39、`test_report_quality` 39、`test_report_version` 18。
+>
 > **V1 已实现（现金变化桥，主能力增量）**：`cash_reconciliation` 主输出改为
 > **`operating_cashflow_change`**：`ΔOCF = Δ合并净利润 + Δ非现金项 + Δ营运资本项 + Δ其他
 > + Δ对账差额`；旧的"缺口变化"降为**辅助观察**并修掉错标——此前第二项**实际是 ΔOCF**，

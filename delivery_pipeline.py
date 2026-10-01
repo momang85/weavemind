@@ -1447,21 +1447,36 @@ def _has_analysis_section(report_body: str) -> bool:
 
     只对带 `## 分析` 小节的代码装配简报判定；通用报告没有固定小节名，不在本门槛内。
     小节收尾按**简报自己的标题表**（模型的分析正文自带 `## ` 小标题，按任意标题截会误判为空）。
+
+    V0（阶段V）：`分析摘要` 与 `经营驱动分析正文` 是装配器从**同一组已验证运行**现场生成的
+    论证线（利润由何而来／现金为何变化／什么条件会改变判断），内容属于『分析』——
+    判定"有没有实质分析"时必须连它们一起看：模型散文缺位时它们**不是**"只有数据与底稿"。
+    但两种情况下它们不算数：① 取模型散文（回流再装配）时按 `_brief_analysis_section` 收尾，
+    不把它们当模型内容；② `分析摘要` 只写"本次已验证运行不属于经营研究组合"的空位声明
+    （没有组合运行）时，那句话本身不构成分析。
     """
     body = str(report_body or "")
     if "## 分析" not in body:
         return True
+    generated = ""
     try:
         import report_brief
         section = report_brief._brief_section(body, "## 分析")
+        parts = []
+        card = report_brief._brief_section(body, "## 分析摘要")
+        if card and report_brief.ANALYSIS_EMPTY_SUMMARY_MARK not in card:
+            parts.append(card)
+        note = report_brief._brief_section(body, "## 经营驱动分析正文")
+        if note:
+            parts.append(note)
+        generated = "\n".join(parts)
     except Exception:
         idx = body.find("## 分析")
         section = body[idx + len("## 分析"):].strip()
-    if _ANALYSIS_PLACEHOLDER in section:
-        return False
-    if _ENGINEERING_SUMMARY_RE.search(section):
-        return False          # 工程收尾报告（步骤成功数）不是分析
-    return len(section) >= 60
+    if _ANALYSIS_PLACEHOLDER in section or _ENGINEERING_SUMMARY_RE.search(section):
+        # 模型散文缺位/是工程收尾报告：只有装配器生成的论证线够长，才算有分析
+        return len(generated) >= 60
+    return len(section) + len(generated) >= 60
 
 
 _ANALYSIS_PLACEHOLDER = "本次未产出可交付的分析正文"

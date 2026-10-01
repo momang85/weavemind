@@ -3045,6 +3045,39 @@ class TestU2ResearchNote(unittest.TestCase):
         # 顺序：先卡后正文（分析正文是长文，跟在卡后面）
         self.assertLess(md.index("## 分析卡"), md.index("## 经营驱动分析正文"))
 
+    def test_reassembly_does_not_duplicate_the_analysis_blocks(self):
+        """简报回流再装配一次，**不得再印一遍**『分析摘要』与『经营驱动分析正文』。
+
+        实测（洋河 V0 证据 `docs/evidence/v0_yanghe_normal_task/report.md`）：验收候选稿回流时
+        `_looks_like_brief` 把整份简报当 body，`_brief_analysis_section` 取『## 分析』一节会把
+        里面已经印过的摘要/正文一起带出来，装配器再加一次 → 同一份交付里这两节各出现两遍。
+        """
+        import report_brief
+        structure = {"scope": {"company": "洋河股份", "company_id": "002304.SZ",
+                               "caliber": "合并", "as_of": "2025-04-30"},
+                     "analysis": "（模型分析散文：利润与现金的论证线）",
+                     "analysis_note": ("## 经营驱动分析正文（洋河股份 2023年→2024年）\n\n"
+                                       "### 一、结论（先看这三条）\n1. 占位\n"),
+                     "analysis_card": "## 分析摘要\n- 占位"}
+        once = report_brief.render_brief_markdown(
+            structure, body=("> 报表口径：合并\n\n## 关键发现\n- 占位\n\n"
+                             "## 分析\n（模型分析散文：利润与现金的论证线）\n"))
+        self.assertEqual(once.count("## 经营驱动分析正文"), 1)
+        self.assertEqual(once.count("## 分析摘要"), 1)
+        # 回流再装配时，装机读到的「分析」一节来自 `_analysis_section(简报)`：
+        # 它只能取模型自己的散文，不能再把装配器**已经印过**的摘要/正文当模型内容带一遍
+        again = report_brief._analysis_section(once)
+        self.assertNotIn("## 分析摘要", again)
+        self.assertNotIn("## 经营驱动分析正文", again)
+        self.assertIn("（模型分析散文：利润与现金的论证线）", again)
+        twice = report_brief.render_brief_markdown(dict(structure, analysis=again), body=once)
+        self.assertEqual(twice.count("## 经营驱动分析正文"), 1,
+                         "回流再装配后经营驱动正文只能有一份")
+        self.assertEqual(twice.count("## 分析摘要"), 1,
+                         "回流再装配后分析摘要只能有一份")
+        self.assertIn("（模型分析散文：利润与现金的论证线）", twice,
+                      "模型自己的分析散文不能因为去重被删掉")
+
 
 class TestV0OperatingResearchCombination(unittest.TestCase):
     """V0（阶段V）：默认**经营研究组合**——经营驱动＋现金桥＋情景，一条论证线。

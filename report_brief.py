@@ -3316,8 +3316,17 @@ def _brief_analysis_section(text: str) -> str:
 
 
 # 简报自己的小节标题（顺序即渲染顺序）：取某一节时按这张表收尾
+# V0（阶段V）：`分析摘要`（卡）与 `经营驱动分析正文`（成篇）由 `render_brief_markdown`
+# 从 `structure` 现场生成，属于装配器自己的小节——必须在这里登记为**收尾标题**，
+# 否则简报回流再装配时 `_brief_analysis_section` 会把它们当模型内容带出来再加一遍，
+# 同一份交付里这两节各印两遍（实测洋河 V0 证据 report.md）。
+GENERATED_ANALYSIS_SECTIONS = ("## 分析摘要", "## 经营驱动分析正文")
+# `分析摘要` 里的**空位声明**：没有经营研究组合运行时，卡片只写这句话＋底稿指针——
+# 它说明"本次不出摘要"，本身不是分析内容（判定"有没有实质分析"时不得算数）。
+ANALYSIS_EMPTY_SUMMARY_MARK = "本次已验证运行不属于"
 BRIEF_SECTIONS = ("## 关键发现", "## 业务背景", "## 财务对照", "## 图表", "## 分析",
-                  "## 分析卡", "## 变化解释", "## 风险与核查", "## 附录", "## 参考来源")
+                  "## 分析卡", *GENERATED_ANALYSIS_SECTIONS,
+                  "## 变化解释", "## 风险与核查", "## 附录", "## 参考来源")
 
 
 def _rules_version() -> str:
@@ -3419,7 +3428,8 @@ def _analysis_card_block(task_id: str, *, ws_dir=None) -> str:
         for txt in summary:
             lines.append("- " + txt)
         if not summary:
-            lines.append("- 本次已验证运行不属于**经营研究组合**"
+            lines.append("- " + ANALYSIS_EMPTY_SUMMARY_MARK +
+                         "**经营研究组合**"
                          "（经营驱动／现金调节桥／条件情景）：主正文不出分析摘要，"
                          "完整卡与运行标识见下方底稿。")
         if notes:
