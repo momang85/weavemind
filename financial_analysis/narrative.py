@@ -623,6 +623,34 @@ def _doc_keyword_hit(doc, terms, *, window: int = 100) -> dict | None:
     return None
 
 
+def _nonrecurring_note(records, doc=None) -> list[str]:
+    """V1：用公司**非经常性损益**披露做对照（不按指标名统一剔除投资收益）。
+
+    只给"去哪儿对照"与边界，不替读者重算"正常化利润"（那会变成新的黑箱）。
+    """
+    terms = ("非经常性损益", "扣除非经常性损益", "扣非")
+    hits = _match_records(records, terms, limit=1)
+    if not hits and doc is not None:
+        fallback = _doc_keyword_hit(doc, terms)
+        if fallback:
+            hits = [fallback]
+    lines = ["- **非经常性损益对照**：判断投资收益/公允价值这类项目是否经常性，"
+             "以公司披露的**非经常性损益明细与扣非归母净利**为准（分类取决于事项经济性质、"
+             "行业与业务模式，并考虑持续性）；本报告**不按指标名统一剔除**，"
+             "也不据此构造「正常化利润」。"]
+    if hits:
+        rec = hits[0]
+        where = str(rec.get("locator") or rec.get("section") or "")
+        lines.append(f"  - 本期披露位置：{where[:120]}")
+        snip = str(rec.get("snippet") or "").replace("\n", " ")[:120]
+        if snip:
+            lines.append(f"  - 原文摘录：{snip}")
+    else:
+        lines.append("  - 本次材料里未取到非经常性损益明细/扣非归母净利："
+                     "该对照留待补料后再做")
+    return lines
+
+
 def driver_evidence(runs, records, *, limit: int = 3, doc=None) -> list[str]:
     """把主要金额贡献绑到**已准入材料的披露原句**，并给反证与观察指标（V1）。
 
@@ -869,6 +897,7 @@ def research_note(runs, *, provenance=None, charts=None, label_of=None,
     if od is not None:
         lines.append("### 四、替代解释（会改变判断）")
         lines.extend(_alternatives(od))
+        lines.extend(_nonrecurring_note(records, doc))
         lines.append("")
         hits = driver_evidence(runs, records, doc=doc) if (records or doc) else []
         if hits:
