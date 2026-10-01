@@ -3207,6 +3207,59 @@ class TestV0OperatingResearchCombination(unittest.TestCase):
                                     entity_id="002304.SZ", as_of="2025-04-30",
                                     source_label="test:v0-scenario")
 
+    def test_explicit_selection_keeps_the_rest_of_the_combination(self):
+        """W1：采纳一条情景**不得**把利润/现金两段从正文里弄丢（组合其余模型保留）。
+
+        反例（本轮隔离核验发现）：只采纳一条情景运行后 `select_for_report` 只返回情景，
+        `research_note` 因"没有经营驱动/现金桥运行"直接返回空串——采纳出来的正文整段变空，
+        采纳处理函数的"正文里必须找得到所选运行"绑定检查也因此失败。
+        纪律：某个模型**有选择但已过期**时仍然不得改取同模型的别的运行（L0-b），只如实报。
+        """
+        import shutil
+        import tempfile
+        from pathlib import Path
+        from financial_analysis import store as fa_store
+        ds = self._ds(self.IS)
+        cds = self._ds(self.CF)
+        sds = self._scenario_ds()
+        od = fa.run("operating_drivers", ds)
+        cash = fa.run("cash_reconciliation", cds)
+        scen_base = fa.run("scenario_sensitivity", sds,
+                           params={"revenue_growth": 0.0, "gross_margin_delta": 0.0})
+        scen_new = fa.run("scenario_sensitivity", sds,
+                          params={"revenue_growth": 0.05, "gross_margin_delta": 0.01})
+        tmp = Path(tempfile.mkdtemp(prefix="wm_w1sel_"))
+        try:
+            for r in (od, cash, scen_base, scen_new):
+                fa_store.save_run(tmp, r)
+            fa_store.save_selection(tmp, {
+                "model_id": "scenario_sensitivity", "run_id": scen_new.run_id,
+                "dataset_hash": sds.dataset_hash, "params": dict(scen_new.params),
+                "params_hash": str(scen_new.params_hash),
+                "rules_version": fa.validation.RULES_VERSION,
+            }, note="W1 组合保留")
+            picked, notes = fa_store.select_for_report(
+                tmp, rules_version=fa.validation.RULES_VERSION)
+            self.assertEqual([p.model_id for p in picked],
+                             ["operating_drivers", "cash_reconciliation",
+                              "scenario_sensitivity"])
+            self.assertEqual(str(picked[2].run_id), scen_new.run_id,
+                             "被选中的情景必须是被选的那一条，不是默认档")
+            self.assertTrue(any("其余模型" in n for n in notes), notes)
+            # 同模型的选择过期 → 不改取同模型的别的运行，但要保留组合其余模型
+            # （"过期"由**当前输入的数据集**判定：换一份新数据集，旧选择立刻不等于当前）
+            fa_store.save_inputs(tmp, dataset=self._ds(self.IS, source="test:w1-newer"))
+            picked2, notes2 = fa_store.select_for_report(
+                tmp, rules_version=fa.validation.RULES_VERSION)
+            mids2 = [p.model_id for p in picked2]
+            self.assertNotIn("scenario_sensitivity", mids2,
+                             "选择过期时不得用同模型的默认运行顶替")
+            self.assertIn("operating_drivers", mids2)
+            self.assertIn("cash_reconciliation", mids2)
+            self.assertTrue(any("未采用" in n for n in notes2), notes2)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_three_analysis_charts_come_from_the_selected_runs(self):
         """正常路径的三图：同一次运行、同一份数据集，不在这里另跑参数。"""
         import shutil
@@ -3661,6 +3714,95 @@ class TestW0ScenarioEvaluator(unittest.TestCase):
             run = fa.run("scenario_sensitivity", self._ds(), params=params)
             self.assertNotEqual(run.status, C.RunStatus.VALIDATED, params)
             self.assertIn("参数", str(run.reason or ""), params)
+
+
+class TestW1OneReportOneJudgment(unittest.TestCase):
+    """W1（阶段W §4）：一份报告只表达同一套研究判断。
+
+    反例（架构复核）：正常洋河报告首屏写「毛利润金额差未取得、量价分部未取得」，
+    后页却有完整分解——因为首屏只读旧底稿（没有毛利两期），成篇正文另挂一次运行。
+    这里钉住三件事：① 选定运行的金额分解进入首屏观察；② 已准入披露记录**真的**传进
+    成篇正文（不再是脚本级案例才有）；③ 一次读取同时给出运行身份/参数/选择说明。
+    """
+
+    IS = TestU2ResearchNote.IS
+    CF = TestU2ResearchNote.CF
+
+    def _ds(self, table, *, source="test:w1"):
+        rows = []
+        for metric, (prev, cur) in dict(table).items():
+            rows.append(_row(metric, "2023年", prev, unit="元",
+                             fact_id=f"{source}-{metric}-2023"))
+            rows.append(_row(metric, "2024年", cur, unit="元",
+                             fact_id=f"{source}-{metric}-2024"))
+        return fa.freeze_from_facts(rows, periods=(2023, 2024), entity="洋河股份",
+                                    entity_id="002304.SZ", as_of="2025-04-30",
+                                    source_label=source)
+
+    def test_selected_run_amounts_reach_the_front_page(self):
+        import report_brief as rb
+        od = fa.run("operating_drivers", self._ds(self.IS))
+        cash = fa.run("cash_reconciliation", self._ds(self.CF))
+        self.assertEqual(od.status, C.RunStatus.VALIDATED, od.reason)
+        self.assertEqual(cash.status, C.RunStatus.VALIDATED, cash.reason)
+        readings = rb._analysis_readings([od, cash])
+        metrics = {str(r["metric"]) for r in readings["derived"]}
+        for need in ("gross_profit_change", "net_profit_gross_gap_change",
+                     "operating_cashflow_change"):
+            self.assertIn(need, metrics)
+        self.assertTrue(readings["profit_decomposition"]["ok"])
+        # 首屏：金额分解与运行同源 → 不再出现"毛利润同期金额差未取得"
+        derived = [dict(r, year=2024) for r in readings["derived"]]
+        derived.append({"metric": "net_profit_yoy", "value": -33.37, "unit": "%",
+                        "year": 2024, "period": "2024年"})
+        rows = [{"metric": "net_profit", "year": 2023,
+                 "value": 10_015_930_040.27, "unit": "元"},
+                {"metric": "net_profit", "year": 2024,
+                 "value": 6_673_388_602.12, "unit": "元"}]
+        qs = rb._research_questions(rows, derived, [2023, 2024], {}, [], {},
+                                    assessments={})
+        text = " ".join(str(q.get("observation") or "") for q in qs)
+        self.assertIn("毛利润变化", text)
+        self.assertNotIn("毛利润同期金额差未取得", text)
+        self.assertIn("毛利线以下净额变化", text)
+
+    def test_records_and_run_identity_come_from_one_read(self):
+        import shutil
+        import tempfile
+        from pathlib import Path
+
+        import report_brief as rb
+        import workspace as ws_mod
+        from financial_analysis import store as fa_store
+        od = fa.run("operating_drivers", self._ds(self.IS))
+        cash = fa.run("cash_reconciliation", self._ds(self.CF))
+        tmp = tempfile.mkdtemp(prefix="w1_ctx_")
+        old = ws_mod.WORKSPACE_ROOT
+        try:
+            ws_mod.WORKSPACE_ROOT = Path(tmp)
+            ws = ws_mod.task_workspace("w1-ctx")
+            ws.mkdir(parents=True, exist_ok=True)
+            fa_store.save_run(ws, od)
+            fa_store.save_run(ws, cash)
+            ctx = rb._analysis_context(
+                "w1-ctx", ws_dir=ws,
+                evidence={"records": [
+                    {"kind": "change_explanation", "has_location": True,
+                     "admission": "admitted", "section": "管理层讨论与分析 > 存货",
+                     "snippet": "公司加强存货与货款管理，压缩库存占用。",
+                     "locator": "PDF 第 29 页 · 管理层讨论与分析", "url": "u"},
+                    {"kind": "risk", "has_location": False, "admission": "unknown",
+                     "snippet": "检索摘要不算支持", "locator": "", "url": "u2"}]})
+            self.assertEqual(len(ctx["records"]), 1, "只收已准入且带定位的记录")
+            self.assertIn("披露原句", ctx["note"])
+            self.assertIn("存货", ctx["note"])
+            self.assertNotIn("检索摘要不算支持", ctx["note"])
+            self.assertEqual({r["model_id"] for r in ctx["runs_meta"]},
+                             {"operating_drivers", "cash_reconciliation"})
+            self.assertTrue(all(r["run_id"] for r in ctx["runs_meta"]))
+        finally:
+            ws_mod.WORKSPACE_ROOT = old
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":

@@ -267,6 +267,29 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
     # 补材料建议也要先要类型确认——不按公司名默认成非金融企业。
     type_confirmed = (type_state == "confirmed")
     evidence = _evidence(task_id, ws_dir=ws_dir)
+    # W1（阶段W §4）：**一次读取**选定 ModelRun ＋ 事实定位 ＋ 已准入披露记录，并把从运行
+    # 抽出的关键读数（毛利变化/规模与毛利率效应/量价/分部/现金变化）与缺口一起交给
+    # 逐问题评估与首屏。此前首屏只读旧底稿，于是出现"首屏写未取得毛利润金额差、后页却
+    # 有完整分解"的自相矛盾（架构复核点名）。
+    _charts_raw = _charts(task_id, project=project)
+    a_ctx = _analysis_context(
+        task_id, ws_dir=ws_dir, evidence=evidence,
+        charts=[c.get("spec") for c in _charts_raw if c.get("spec")])
+    # 运行抽出的金额分解**补进**底稿派生行（同名的以底稿为准：底稿带 fact_id 可复算）
+    _have = {str(d.get("metric") or "") for d in derived}
+    derived = list(derived) + [r for r in a_ctx.get("derived") or ()
+                               if str(r.get("metric") or "") not in _have]
+    # 定量构成（量价/分部/毛利端明细）以**已准入披露**为准；披露侧没有而运行侧有时补进来，
+    # 并标明来源是"已验证运行"——不与披露原句混为一谈（经营原因支持仍只看披露）。
+    evidence = dict(evidence or {})
+    if (a_ctx.get("profit_decomposition") or {}).get("ok") and not (
+            (evidence.get("profit_decomposition") or {}).get("ok")):
+        evidence["profit_decomposition"] = dict(a_ctx["profit_decomposition"])
+        evidence["profit_decomposition"]["source"] = "model_run"
+    if (a_ctx.get("volume_price") or {}).get("ok") and not (
+            (evidence.get("volume_price") or {}).get("ok")):
+        evidence["volume_price"] = dict(a_ctx["volume_price"])
+        evidence["volume_price"]["source"] = "model_run"
     citations, audit = _collect_citations(task_id, goal, body, data,
                                           evidence=evidence, ws_dir=ws_dir)
     table = _metrics_table(rows, derived, periods, citations, req,
@@ -345,7 +368,7 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
                    citations=citations, changes=changes, perspective=perspective,
                    citation_gaps=unmapped, unsupported=unsupported,
                    analysis_quality=quality)
-    charts = _charts(task_id, project=project)
+    charts = _charts_raw
     structure = {
         "scope": {
             "company": str(req.get("company") or req.get("company_id") or ""),
@@ -373,10 +396,20 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
         "analysis": analysis_text,
         # Q1：分析卡（来自**已验证的**金融分析运行）。工作区里有运行记录才渲染；
         # 没有就留空 → 正文不出现这一节（既有交付一字不变）。
-        "analysis_card": _analysis_card_block(task_id, ws_dir=ws_dir),
+        # W1：卡与成篇正文**同一次读取**（`a_ctx`），不再各自读一遍工作区。
+        "analysis_card": a_ctx.get("cards") or "",
         # U1/U2 成篇：同一批已验证运行装配的 4–6 页论证线（结论→金额分解→披露支持→
         # 替代解释→现金与反向情景→待核查→口径限制）；没有经营驱动/现金桥运行就留空。
-        "analysis_note": _analysis_note_block(task_id, ws_dir=ws_dir),
+        "analysis_note": a_ctx.get("note") or "",
+        # W1：绑定信息进结构对象（首屏/正文/图/底稿同一次读取的证据）：选定运行身份与
+        # 参数、已准入披露条数、选择说明——版本核对与"同一组结果"检查读它。
+        "analysis_binding": {
+            "runs": list(a_ctx.get("runs_meta") or []),
+            "records": len(a_ctx.get("records") or []),
+            "notes": list(a_ctx.get("notes") or []),
+            "derived_metrics": sorted(str(r.get("metric") or "")
+                                      for r in (a_ctx.get("derived") or [])),
+        },
         "analysis_quality": quality,
         "research_questions": questions,
         # R1：逐问题评估的**唯一权威**结果（问题区/风险区/研究状态/候选比较共用）
@@ -824,7 +857,13 @@ def _research_questions(rows, derived, periods, evidence, citations, changes, *,
                 boundary = ("毛利端与期间费用取自发行人毛利率表与费用明细（各自有定位）："
                             "毛利额为**推导量**（上期由披露同比反推），各分组是同一笔收入的"
                             "不同切法、不做跨组合计；" + (_pd_cov or "")
-                            + "；税项与非经常性损益未取得前，不把差额归到任何一项")
+                            + "；税项与非经常性损益未取得前，不把差额归到任何一项"
+                            # W1：同一份报告里不得出现两个"毛利变化"被当成一个数：
+                            # 金额分解统一用**合并利润表口径**（与图/摘要/正文同一次运行），
+                            # 披露按销售模式等分组的毛利额是另一把切法，只作材料，不混算。
+                            + "；披露按销售模式/产品等分组的毛利额与合并利润表毛利是"
+                              "**两个切法**（金额会有小幅差异），金额分解统一用合并口径，"
+                              "不把两个切法的数混算")
         # 方向来自**同一事实对象**（该指标两期底稿行），意义/计划/观察三处共用
         _dir_word = _metric_direction((by.get(metric) or {}).get(last),
                                       (by.get(metric) or {}).get((last - 1) if last else 0))
@@ -3350,100 +3389,277 @@ def _selected_analysis_runs(ws):
     return _fa_store.select_for_report(ws, rules_version=_rules_version())
 
 
-def _analysis_note_block(task_id: str, *, ws_dir=None) -> str:
-    """成篇正文（U1/U2）：把已验证运行装配成 4–6 页论证线（结论 → 金额分解 → 披露支持 →
-    替代解释 → 现金与反向情景 → 待核查 → 口径限制）。没有经营驱动/现金桥运行就返回空串，
-    既有交付正文一字不变。
+def _analysis_context(task_id: str, *, ws_dir=None, evidence: dict | None = None,
+                      charts=None) -> dict:
+    """**一次读取**选定 ModelRun ＋ 事实定位 ＋ 已准入披露记录（W1）。
+
+    为什么单独成一处（阶段W §4）：首屏（关键判断/研究问题）、摘要、成篇正文、图注必须表达
+    **同一套判断**。此前 `build_structure` 先用旧底稿/证据评估问题，再另挂 `analysis_note`
+    ——于是正常洋河报告首屏写「毛利润金额差未取得、量价分部未取得」，后页却有完整分解。
+    这里把选定运行、随数据落盘的事实定位、已准入披露记录与从运行抽出的关键读数读**一次**，
+    用普通局部 dict 传给各消费点；不新建平台、不复制整份 PDF。
+
+    返回（全部是普通 dict/list，可直接进结构对象）：
+    `{picked, notes, by_model, scens, cards, note, summary, derived, profit_decomposition,
+      volume_price, records, locators, runs_meta, gaps}`
     """
+    import workspace as _ws_mod
+    from financial_analysis import narrative as _fa_note
+    from financial_analysis import store as _fa_store
+    ws = Path(ws_dir) if ws_dir is not None else _ws_mod.task_workspace(task_id)
+    out: dict = {"picked": [], "notes": [], "by_model": {}, "scens": [], "cards": "",
+                 "note": "", "summary": [], "derived": [], "profit_decomposition": {},
+                 "volume_price": {}, "records": [], "locators": {}, "runs_meta": [],
+                 "gaps": []}
     try:
-        import workspace as _ws_mod
-        from financial_analysis import narrative as _fa_note
-        from financial_analysis import store as _fa_store
-        ws = Path(ws_dir) if ws_dir is not None else _ws_mod.task_workspace(task_id)
-        picked, _notes = _selected_analysis_runs(ws)
-        if not picked:
-            return ""
-        blob = _fa_store.load_inputs(ws)
-        # 来源定位优先取**随数据一起落盘的事实定位**（worker 冻结数据集时从 Fact 带过来，
-        # 含表名/页码）；没有才退回观察层的口径与血缘（报告链的旧工作区）。
-        ctx = blob.get("context") or {}
-        loc = ctx.get("fact_locators") or {}
-        prov = {}
-        if isinstance(loc, dict):
-            prov.update(loc)
+        picked, notes = _selected_analysis_runs(ws)
+    except Exception as exc:                       # noqa: BLE001 - 读不到就当没有分析
+        logger.warning("选定分析运行读取失败（task=%s）：%s", task_id, str(exc)[:140])
+        return out
+    out["picked"], out["notes"] = list(picked), list(notes)
+    out["runs_meta"] = [{"model_id": str(getattr(r, "model_id", "")),
+                         "run_id": str(getattr(r, "run_id", "")),
+                         "model_version": str(getattr(r, "model_version", "")),
+                         "params": dict(getattr(r, "params", {}) or {})}
+                        for r in picked]
+    for r in picked:
+        mid = str(getattr(r, "model_id", ""))
+        if mid == "scenario_sensitivity":
+            out["scens"].append(r)
+        else:
+            out["by_model"].setdefault(mid, r)
+    blob = {}
+    try:
+        blob = _fa_store.load_inputs(ws) or {}
+    except Exception:                              # noqa: BLE001 - 缺输入就退观察层
+        blob = {}
+    ctx_blob = blob.get("context") or {}
+    loc = ctx_blob.get("fact_locators") or {}
+    prov: dict = {}
+    if isinstance(loc, dict):
+        prov.update(loc)
+    try:
         for fid, item in _fa_note.provenance_from_observations(
                 _fa_note.observations_from_inputs(blob)).items():
             prov.setdefault(fid, item)
-        try:                                    # 指标中文名（缺料清单里不印英文 slug）
-            from facts import metric_label as _ml
-        except Exception:                       # noqa: BLE001
-            _ml = None
-        return _fa_note.research_note(picked, provenance=prov, label_of=_ml)
-    except Exception as exc:                     # noqa: BLE001 - 渲染不出就不加这一节
+    except Exception:                              # noqa: BLE001
+        pass
+    out["locators"] = prov
+    # 已准入披露记录（`narrative_evidence`）：正常路径此前**没有**传给成篇正文，
+    # 所以"主要贡献的披露支持"只有脚本级案例才有——这里一次读入并下传。
+    try:
+        out["records"] = _admitted_records(evidence)
+    except Exception:                              # noqa: BLE001
+        out["records"] = []
+    try:
+        from facts import metric_label as _ml
+    except Exception:                              # noqa: BLE001
+        _ml = None
+    try:
+        if picked:
+            out["summary"] = _fa_note.summary_lines(picked, limit=3)
+            out["note"] = _fa_note.research_note(
+                picked, provenance=prov, charts=charts, label_of=_ml,
+                records=out["records"], doc=None)
+    except Exception as exc:                       # noqa: BLE001 - 渲染不出就不加这一节
         logger.warning("成篇正文渲染失败（task=%s）：%s", task_id, str(exc)[:140])
-        return ""
+        out["note"] = ""
+    out["cards"], out["gaps"] = _render_card_block(picked, notes, ws=ws)
+    out.update(_analysis_readings(picked))
+    return out
+
+
+def _admitted_records(evidence: dict | None, *, limit_per_kind: int = 6) -> list[dict]:
+    """已准入、带正文定位的披露记录 → `research_note(records=…)` 的输入（普通 dict）。
+
+    只取 `admission in (admitted, comparison)` 且 `has_location` 的记录：检索摘要
+    （无定位）与未准入的都不算"支持"。每条压到 `{section, snippet, locator, url,
+    publisher, document_period, kind}`——正文只用得到这些字段。
+    """
+    from financial_analysis import narrative as _nt  # noqa: F401 - 触发依赖检查
+    out: list[dict] = []
+    seen: set = set()
+    per_kind: dict = {}
+    for r in ((evidence or {}).get("records") or []):
+        if not isinstance(r, dict) or not r.get("has_location"):
+            continue
+        if str(r.get("admission") or "") not in ("admitted", "comparison"):
+            continue
+        kind = str(r.get("kind") or "")
+        per_kind[kind] = int(per_kind.get(kind) or 0) + 1
+        if per_kind[kind] > limit_per_kind:
+            continue
+        key = (str(r.get("locator") or ""), str(r.get("snippet") or "")[:40])
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({"section": str(r.get("section") or ""),
+                    "snippet": str(r.get("snippet") or ""),
+                    "locator": str(r.get("locator") or ""),
+                    "url": str(r.get("url") or ""),
+                    "publisher": str(r.get("publisher") or ""),
+                    "document_period": str(r.get("document_period") or ""),
+                    "kind": kind,
+                    "kind_label": str(r.get("kind_label") or "")})
+    return out
+
+
+def _analysis_readings(picked) -> dict:
+    """从**选定运行**抽关键读数（W1）：金额分解、量价/分部与缺口，给首屏与逐问题评估共用。
+
+    只抽运行里**已有**的输出（未通过验证的运行根本不在这里）；抽不到就留空，
+    由调用方如实写"未取得"，不编数。
+    """
+    from financial_analysis import narrative as _fa_note
+    rows: list[dict] = []
+    pd_components: list[dict] = []
+    vp_summary: list[str] = []
+    vp_components: list[dict] = []
+    periods: list = []
+    locators: list[str] = []
+    od = next((r for r in picked if str(getattr(r, "model_id", ""))
+               == "operating_drivers"), None)
+    cash = next((r for r in picked if str(getattr(r, "model_id", ""))
+                 == "cash_reconciliation"), None)
+    if od is not None:
+        diag = dict(_fa_note._diag(od) or {})
+        periods = [str(p) for p in (getattr(od, "periods", ()) or ())] or periods
+        bridge = _fa_note._out(od, "net_profit_change")
+        gp = _fa_note._out(od, "gross_profit_change")
+        below = _fa_note._out(od, "below_gross_line_change")
+        scale = _fa_note._out(od, "revenue_scale_effect")
+        margin_eff = _fa_note._out(od, "gross_margin_effect")
+        for out, metric in ((bridge, "net_profit_change"), (gp, "gross_profit_change"),
+                            (below, "net_profit_gross_gap_change"),
+                            (scale, "gross_profit_revenue_scale_effect"),
+                            (margin_eff, "gross_profit_margin_effect")):
+            if out is None or _fa_note._attr(out, "value") is None:
+                continue
+            rows.append({"metric": metric, "value": _fa_note._attr(out, "value"),
+                         "unit": str(_fa_note._attr(out, "unit") or ""),
+                         "period": str(_fa_note._attr(out, "output_period") or ""),
+                         "source": "经营驱动运行",
+                         "source_kind": "model_run",
+                         "formula": str(_fa_note._attr(out, "formula") or "")})
+        if gp is not None and _fa_note._attr(gp, "value") is not None:
+            pd_components.append({"component": "毛利端（金额变化与规模/毛利率两效应）",
+                                  "state": "bound",
+                                  "locator": "经营驱动运行（底稿 `analysis/analysis_runs.json`）",
+                                  "note": "毛利变化由已验证运行给出；规模/毛利率两效应对称分解"})
+        detail = _fa_note._out(od, "net_profit_change_detail")
+        if detail is not None and list(_fa_note._attr(detail, "components") or ()):
+            pd_components.append({
+                "component": "毛利线以下科目明细",
+                "state": "bound",
+                "locator": "经营驱动运行：利润表明细逐项",
+                "note": "已按披露项目逐项列出（未解释差额单列）"})
+            locators.append("经营驱动运行：利润表明细")
+        vp_out = _fa_note._out(od, "volume_price_effect")
+        if vp_out is not None and list(_fa_note._attr(vp_out, "components") or ()):
+            comps = "、".join(f"{_fa_note._attr(c, 'label')} {_fa_note._yi(_fa_note._attr(c, 'value'))} 亿元"
+                              for c in (_fa_note._attr(vp_out, "components") or ()))
+            vp_summary.append(f"{_fa_note._attr(vp_out, 'output_period')}：{comps}")
+            vp_components.append({"component": "量价分解（销量/单位价格）", "state": "bound",
+                                  "locator": "经营驱动运行：量价分解",
+                                  "note": "均价含产品结构混合，不得命名「提价效果」"})
+            locators.append("经营驱动运行：量价分解")
+        segs = [o for o in (getattr(od, "outputs", ()) or ())
+                if "segment" in str(_fa_note._attr(o, "metric"))]
+        if segs:
+            for o in segs[:2]:
+                if _fa_note._attr(o, "value") is None:
+                    continue
+                vp_summary.append(f"{_fa_note._attr(o, 'output_period')}："
+                                  f"{_fa_note._attr(o, 'label')} "
+                                  f"{_fa_note._yi(_fa_note._attr(o, 'value'))} 亿元")
+            vp_components.append({"component": "分产品/分地区切法", "state": "bound",
+                                  "locator": "经营驱动运行：分段切法",
+                                  "note": "不同切法覆盖同一口径，不可跨切法相加"})
+            locators.append("经营驱动运行：分段切法")
+        for skipped in list(diag.get("segments_skipped") or ())[:2]:
+            vp_components.append({"component": f"分段缺口：{str(skipped)[:24]}",
+                                  "state": "missing", "locator": "",
+                                  "note": "缺成本或收入：如实跳过，不用别的数顶替"})
+        for miss in list(diag.get("line_items_missing") or ())[:4]:
+            pd_components.append({"component": f"利润表明细未取到：{miss}",
+                                  "state": "missing", "locator": "",
+                                  "note": "未取到的项目留在未解释差额里，不摊派"})
+    if cash is not None:
+        chg = _fa_note._out(cash, "operating_cashflow_change")
+        if chg is not None and _fa_note._attr(chg, "value") is not None:
+            rows.append({"metric": "operating_cashflow_change",
+                         "value": _fa_note._attr(chg, "value"),
+                         "unit": str(_fa_note._attr(chg, "unit") or ""),
+                         "period": str(_fa_note._attr(chg, "output_period") or ""),
+                         "source": "现金调节桥运行", "source_kind": "model_run",
+                         "formula": str(_fa_note._attr(chg, "formula") or "")})
+    pd = ({"ok": bool(pd_components), "components": pd_components, "derived": [],
+           "locator": "；".join(dict.fromkeys(locators)),
+           "note": "定量构成来自已验证的**经营驱动运行**（与正文/图同一次运行）"}
+          if pd_components else {})
+    vp = ({"ok": bool(vp_summary), "summary": "；".join(vp_summary),
+           "components": vp_components,
+           "locator": "；".join(dict.fromkeys(locators)) or "经营驱动运行"}
+          if vp_summary else {})
+    return {"derived": rows, "profit_decomposition": pd, "volume_price": vp}
+
+
+def _render_card_block(picked, notes, *, ws) -> tuple:
+    """分析摘要（三条）＋完整卡落底稿；返回 `(摘要块, 缺口说明)`（W1：与选择共用一次读取）。"""
+    from financial_analysis import narrative as _fa_note
+    from financial_analysis import store as _fa_store
+    if not picked and not notes:
+        return "", []
+    summary = _fa_note.summary_lines(picked, limit=3)
+    detail_written = ""
+    gaps: list[str] = []
+    try:
+        blocks: list[str] = []
+        for idx, r in enumerate(picked):
+            block = _fa_store.render_card_block(r)
+            body = block.split("\n", 1)[1] if "\n" in block else ""
+            if idx == 0:
+                blocks.append(block.rstrip())
+            else:
+                blocks.append(f"### 分析卡（{r.model_id}）\n{body.rstrip()}")
+        if notes:
+            blocks.append("### 分析卡选择说明\n" + "\n".join(notes))
+        full = "\n".join(blocks).rstrip() + "\n"
+        ana = _fa_store.inputs_dir(ws)
+        ana.mkdir(parents=True, exist_ok=True)
+        (ana / "analysis_cards.md").write_text(full, encoding="utf-8")
+        detail_written = "analysis/analysis_cards.md"
+    except Exception as exc:                 # noqa: BLE001 - 底稿写不出不影响摘要
+        logger.warning("分析卡底稿落盘失败：%s", str(exc)[:120])
+    lines = ["## 分析摘要"]
+    for txt in summary:
+        lines.append("- " + txt)
+    if not summary:
+        lines.append("- " + ANALYSIS_EMPTY_SUMMARY_MARK +
+                     "**经营研究组合**"
+                     "（经营驱动／现金调节桥／条件情景）：主正文不出分析摘要，"
+                     "完整卡与运行标识见下方底稿。")
+    if notes:
+        lines.append("")
+        lines.append("### 分析摘要选择说明")
+        lines.extend(notes)
+    if detail_written:
+        lines.append("")
+        lines.append(f"- 完整分析卡（每个读数带 run/output/component_id 与规则）见 "
+                     f"`{detail_written}`；运行记录、数据集与计划在包内 `analysis/`。")
+    return "\n".join(lines).rstrip() + "\n", gaps
+
+
+def _analysis_note_block(task_id: str, *, ws_dir=None) -> str:
+    """成篇正文（兼容入口）：等价于 `_analysis_context(...)["note"]`（W1：一次读取）。"""
+    return str(_analysis_context(task_id, ws_dir=ws_dir).get("note") or "")
 
 
 def _analysis_card_block(task_id: str, *, ws_dir=None) -> str:
-    """读取该任务的**已验证**金融分析运行并渲染分析卡区块（没有就返回空串）。
+    """分析摘要（兼容入口）：等价于 `_analysis_context(...)["cards"]`（W1：一次读取）。"""
+    return str(_analysis_context(task_id, ws_dir=ws_dir).get("cards") or "")
 
-    只读工作区里的 `analysis_runs.json`（由 `financial_analysis.store` 落盘、
-    `data_analyzer` 的金融路径写入）；运行未通过验证的一律不渲染——正文不消费未验证读数。
 
-    **用户选择的运行真正进正文**（L0-b，2026-09-30 复核 U1）：选择与核对逻辑见
-    `_selected_analysis_runs`（成篇正文与卡共用同一条选择，避免两处各取一套运行）。
-    """
-    try:
-        import workspace as _ws_mod
-        from financial_analysis import narrative as _fa_note
-        from financial_analysis import store as _fa_store
-        ws = Path(ws_dir) if ws_dir is not None else _ws_mod.task_workspace(task_id)
-        picked, notes = _selected_analysis_runs(ws)
-        if not picked and not notes:
-            return ""
-        # V0（阶段V）：主正文只留**三条摘要**（利润／结构／现金与情景），与成篇正文的
-        # 『一、结论』同源；完整卡（含 run/output/component_id 与规则）写到 `analysis/`
-        # 底稿里，读者要看细节有出处，正文不再堆程序术语。
-        summary = _fa_note.summary_lines(picked, limit=3)
-        detail_written = ""
-        try:
-            blocks: list[str] = []
-            for idx, r in enumerate(picked):
-                block = _fa_store.render_card_block(r)
-                body = block.split("\n", 1)[1] if "\n" in block else ""
-                if idx == 0:
-                    blocks.append(block.rstrip())
-                else:
-                    blocks.append(f"### 分析卡（{r.model_id}）\n{body.rstrip()}")
-            if notes:
-                blocks.append("### 分析卡选择说明\n" + "\n".join(notes))
-            full = "\n".join(blocks).rstrip() + "\n"
-            ana = _fa_store.inputs_dir(ws)
-            ana.mkdir(parents=True, exist_ok=True)
-            (ana / "analysis_cards.md").write_text(full, encoding="utf-8")
-            detail_written = "analysis/analysis_cards.md"
-        except Exception as exc:                 # noqa: BLE001 - 底稿写不出不影响摘要
-            logger.warning("分析卡底稿落盘失败（task=%s）：%s", task_id, str(exc)[:120])
-        lines = ["## 分析摘要"]
-        for txt in summary:
-            lines.append("- " + txt)
-        if not summary:
-            lines.append("- " + ANALYSIS_EMPTY_SUMMARY_MARK +
-                         "**经营研究组合**"
-                         "（经营驱动／现金调节桥／条件情景）：主正文不出分析摘要，"
-                         "完整卡与运行标识见下方底稿。")
-        if notes:
-            lines.append("")
-            lines.append("### 分析摘要选择说明")
-            lines.extend(notes)
-        if detail_written:
-            lines.append("")
-            lines.append(f"- 完整分析卡（每个读数带 run/output/component_id 与规则）见 "
-                         f"`{detail_written}`；运行记录、数据集与计划在包内 `analysis/`。")
-        return "\n".join(lines).rstrip() + "\n"
-    except Exception as exc:                     # noqa: BLE001 - 渲染不出就不加这一节
-        logger.warning("分析卡渲染失败（task=%s）：%s", task_id, str(exc)[:140])
-        return ""
 
 
 

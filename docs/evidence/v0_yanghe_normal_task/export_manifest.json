@@ -1,10 +1,10 @@
 {
- "report_version_id": "1c229f97b96239bb6a41e19388841a1924d676dee4ac8387831592ecbf8a1a26",
- "body_sha256": "10e10d8b63a47b0bfb669ba814928392ff67f2faab6d7df6936ab7236e9114d4",
+ "report_version_id": "7e4f007b11049c481805446d8d1ca3d9af0f69ec6dd0bea8c6285e19f308151c",
+ "body_sha256": "0addfc1bee988f866b3ff3b229f6e00f9a7582911b5080682c4ee8b6f0e334d7",
  "acceptance_overall": "fail",
  "accepted_body_matches": true,
- "delivered_body_sha256": "e6d6587252849d8c7620a235f26b82e93ec0d80c85415781107b103b2a6e98eb",
- "final_content_sha256": "e6d6587252849d8c7620a235f26b82e93ec0d80c85415781107b103b2a6e98eb",
+ "delivered_body_sha256": "7c7c16c8ca0ae0f21d401cdb9817bb88cabf21ec32b3478878ae6767e4a4cfe1",
+ "final_content_sha256": "7c7c16c8ca0ae0f21d401cdb9817bb88cabf21ec32b3478878ae6767e4a4cfe1",
  "final_content_matches": true,
  "aligned": true,
  "status": "draft",
@@ -14,7 +14,7 @@
  "hard_fail": "",
  "working_paper": {
   "goal_met": true,
-  "rows": 10,
+  "rows": 38,
   "derived": 12,
   "gaps": 0,
   "problems": 0
@@ -23,34 +23,29 @@
   "state": "research_draft",
   "label": "研究草稿／待补原始披露",
   "reason": "绑定里缺契约指纹；执行契约变化：待重验，计数不作为结论",
-  "located": 0,
-  "missing_labels": [
-   "业务背景",
-   "经营变化解释",
-   "财务附注",
-   "风险因素"
-  ],
+  "located": 13,
+  "missing_labels": [],
   "mandatory_supported": 1,
-  "mandatory_partial": 0,
+  "mandatory_partial": 2,
   "mandatory_total": 3,
   "mandatory_questions": [
    {
     "metric": "revenue",
     "question": "收入变化的量价与结构依据",
     "supported": false,
-    "coverage": "none",
-    "material_kind": "无相关材料",
+    "coverage": "partial",
+    "material_kind": "分解覆盖充分",
     "missing_entry": false,
-    "locator": ""
+    "locator": "小节：第三节 管理层讨论与分析 > 二、报告期内公司从事的主要业务 > 1、主要产品的生产量、销售量、库存量（字符 9536-9573）"
    },
    {
     "metric": "net_profit",
     "question": "利润变化的分解",
     "supported": false,
-    "coverage": "none",
-    "material_kind": "无相关材料",
+    "coverage": "partial",
+    "material_kind": "分解覆盖充分",
     "missing_entry": false,
-    "locator": ""
+    "locator": "第 11 页 · 小节：第三节 管理层讨论与分析 > 二、报告期内公司从事的主要业务 > 1、按不同类型披露主营业务构成（字符 7532-7601）"
    },
    {
     "metric": "operating_cashflow",
@@ -67,13 +62,13 @@
   "unsupported_claims": 1,
   "requires_narrative": true,
   "binding": {
-   "report_version_id": "1c229f97b96239bb6a41e19388841a1924d676dee4ac8387831592ecbf8a1a26",
-   "body_sha256": "10e10d8b63a47b0bfb669ba814928392ff67f2faab6d7df6936ab7236e9114d4",
-   "structure_version_id": "10e10d8b63a47b0bfb669ba814928392ff67f2faab6d7df6936ab7236e9114d4",
-   "evidence_fingerprint": "5283150dfeb8de01",
+   "report_version_id": "7e4f007b11049c481805446d8d1ca3d9af0f69ec6dd0bea8c6285e19f308151c",
+   "body_sha256": "0addfc1bee988f866b3ff3b229f6e00f9a7582911b5080682c4ee8b6f0e334d7",
+   "structure_version_id": "0addfc1bee988f866b3ff3b229f6e00f9a7582911b5080682c4ee8b6f0e334d7",
+   "evidence_fingerprint": "2f76bb3da047fc38",
    "rules_version": "2026.09.12",
    "rules_fingerprint": "2ddecc9a",
-   "logic_fingerprint": "7e1818b80b64e55c",
+   "logic_fingerprint": "762a16937b28022e",
    "contract_fingerprint": "",
    "contract": null
   },
@@ -84,27 +79,27 @@
  "template_version": "default",
  "files": {
   "markdown": {
-   "sha256": "e6d6587252849d8c7620a235f26b82e93ec0d80c85415781107b103b2a6e98eb",
-   "bytes": 36861
+   "sha256": "7c7c16c8ca0ae0f21d401cdb9817bb88cabf21ec32b3478878ae6767e4a4cfe1",
+   "bytes": 51944
   },
   "working_paper_json": {
-   "sha256": "4ebb74d519068884d3ce2a8f9d1dbca0519ce833c5ff9b91804378058ecbec1d",
-   "bytes": 25219
+   "sha256": "d8c6c5f566f40f89cd52411d92e55b72e2a58e68810484d2746670eabf3aa9b9",
+   "bytes": 72816
   },
   "working_paper_csv": {
-   "sha256": "7c714086078b382d4c725875e9fb694512c901b8effc45b5bdee212bc22b5197",
-   "bytes": 6350
+   "sha256": "bcd2689ba3466694c28f58f67a936c57ad121b42f5e30f1363a7750a5709f868",
+   "bytes": 28661
   },
   "pdf": {
-   "sha256": "046803ac7a9fe0000ec6165ee5de2c2a345779fa55106aad1476d653c9664e30",
-   "bytes": 5572221
+   "sha256": "857df4b530ef9aad8e9411339e07e64d27b2cfe01638382a96df7b5461d1b057",
+   "bytes": 5620399
   }
  },
  "client_side_renders": {
   "html_print": {
-   "source_body_sha256": "e6d6587252849d8c7620a235f26b82e93ec0d80c85415781107b103b2a6e98eb",
+   "source_body_sha256": "7c7c16c8ca0ae0f21d401cdb9817bb88cabf21ec32b3478878ae6767e4a4cfe1",
    "byte_hash_available": false
   }
  },
- "generated_at": 1790856345.3185163
+ "generated_at": 1790856834.1420534
 }

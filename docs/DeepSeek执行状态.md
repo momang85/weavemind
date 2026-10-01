@@ -24,11 +24,24 @@
 > **产物**：[w0_scenario_evaluator.json](evidence/w0_scenario_evaluator.json)（`scripts/w0_scenario_evaluator.py`）、
 > 重跑的 [u2_research_note.md](evidence/u2_research_note.md)、[u3_sany_note.md](evidence/u3_sany_note.md)、
 > [v2_levers.json](evidence/v2_levers.json)、[v0_yanghe_normal_task.json](evidence/v0_yanghe_normal_task.json)。
-> **验证**：`test_financial_analysis` **192**（9 个 W0 经济效果用例钉住手算值）、`test_delivery_chain` 409、
+> **验证**：`test_financial_analysis` **195**（9 个 W0 经济效果用例钉住手算值）、`test_delivery_chain` 409、
 > `test_offline_delivery` 39、`test_orchestrator_v2` 89、`test_report_quality` 39、`test_review_edit_api` 32、
-> `test_narrative_evidence` 56；3.11 `py_compile` 通过。**未验**：真实登录会话下的采纳/导出闭环（GUI 待验）、远端 CI。
-> **下一步**：W1——`report_structure` 一次读取选定 ModelRun＋已准入披露，首屏/逐问题/正文/图注同一套判断；
-> 同一工作区用**生产采纳函数**切两情景，核选择记录、正文版本与 PDF。
+> `test_narrative_evidence` 56；3.11 `py_compile` 通过。**未验**：真实登录会话下的采纳/导出闭环（GUI 待验）。
+> 远端 CI：W0 `bd4dbc4` success。
+>
+> **W1 已实现（一份报告只表达同一套判断）**：`report_brief._analysis_context` **一次读取**选定 ModelRun＋
+> 事实定位＋**已准入披露记录**，用普通 dict 交给首屏/逐问题评估/摘要/成篇正文（`analysis_binding` 记运行身份与参数）。
+> 效果（洋河正常任务实测）：首屏不再写「毛利润同期金额差未取得」，改为
+> 「归母净利润变化 −33.43、毛利变化 −38.01、毛利线以下 +4.58 亿元」；研究问题写「**分解覆盖（部分）**；
+> 量（销量/生产量/库存量）与结构（分产品/分地区）已取得、价无披露口径」；研究状态由 located=0 变为**部分覆盖 2 项**；
+> 「四之二 披露支持」在正常路径真的绑到披露原句（第 11 页等）。另修两处**同源**缺陷：
+> ① `select_for_report` 在显式选择后只返回被选运行 → 采纳一条情景会把利润/现金两段整段弄丢（正文变空、绑定检查失败）；
+> 现**保留组合其余模型**，但同模型选择过期时仍不改取别的运行（L0-b 纪律）。
+> **最小交付核验**（隔离跑，GUI 待验）：[w1_two_scenarios.json](evidence/w1_two_scenarios.json)（脚本
+> `scripts/w1_two_scenarios_one_workspace.py`）用**生产采纳函数**在同一工作区切两情景（80.33／50.54 亿元）：
+> 选择记录指向第二个情景且参数一致、`adopted_identity` 两版不同、两版关键值都在正文与 PDF、
+> 第一情景的数不出现在第二版正文、组合三段（经营驱动/现金桥/情景）都在绑定里、复算**不自动采纳**。
+> **下一步**：W2——洋河三条判断（销量恢复与企业库存消化、产品/区域结构、现金），再复用同一路径做三一。
 >
 > 历史：阶段V 账本（V0–V2 全部细节）见 [历史_阶段V执行账_20261001.md](历史_阶段V执行账_20261001.md)；
 > 阶段U 及更早见下方「当前账（2026-10-01 · 主线 U1→U2→U3 已收口，历史）」。

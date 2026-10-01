@@ -379,6 +379,30 @@ def select_for_report(ws, *, rules_version: str = ""):
             continue
         picked.append(r)
     if picked or notes:
+        # W1（阶段W §4）：显式选择**只覆盖被选的模型**——组合里其余模型仍各取一条已验证运行
+        # 保留在正文里。反例（本轮隔离核验发现）：只采纳一条情景运行后，`picked` 只剩情景，
+        # `research_note` 因"没有经营驱动/现金桥运行"直接返回空串 → 采纳出来的正文把利润与
+        # 现金两段整段丢掉（阶段W 明确要求"利润/现金组合仍保留"）。
+        by_model2: dict = {}
+        for r in main:
+            by_model2.setdefault(str(r.model_id), r)
+        _have = {str(r.model_id) for r in picked}
+        # **只补"完全没有选择记录"的模型**：某个模型有选择但已过期/不一致时，绝不改取同模型的
+        # 别的运行代替用户选择（L0-b 纪律），那条只进 notes 如实报出来。
+        _chosen = {str(e.get("model_id") or "") for e in (sel.get("entries") or [])}
+        _filled: list[str] = []
+        for m in RESEARCH_COMBINATION:
+            if m not in _have and m not in _chosen and m in by_model2:
+                picked.append(by_model2[m])
+                _filled.append(m)
+        if _filled:
+            _covered = "、".join(sorted(_have)) or "（本次没有可采用的显式选择）"
+            notes.append("- 说明：显式选择覆盖 " + _covered
+                         + "；经营研究组合里其余模型（" + "、".join(_filled)
+                         + "）按各一条已验证运行保留，正文与图仍共用同一组运行")
+        _order = {m: i for i, m in enumerate(RESEARCH_COMBINATION)}
+        picked.sort(key=lambda r: (_order.get(str(r.model_id), len(_order)),
+                                   str(r.model_id)))
         return picked, notes
     by_model: dict = {}
     for r in main:

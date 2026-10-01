@@ -104,6 +104,19 @@ def main() -> int:
         proj.mkdir(parents=True, exist_ok=True)
         ws = ws_mod.task_workspace(tid)
 
+        # ①′ W1（阶段W）：把任务**已经用的**缓存年报登记为工作区抓取快照——这就是正常入口
+        #     抓取步骤的产物形态（`project/fetch_snapshot.json`，含正文与页码偏移），
+        #     于是 `narrative_evidence` 能在**正常路径**里抽到已准入披露段落与利润端/量价分解，
+        #     首屏、逐问题评估与成篇正文读到同一批材料。不联网、不读密钥。
+        (proj / "fetch_snapshot.json").write_text(
+            json.dumps([doc], ensure_ascii=False), encoding="utf-8")
+        report["materials_registered"] = {
+            "file": "project/fetch_snapshot.json",
+            "url": str(doc.get("url") or ""),
+            "chars": len(str(doc.get("text") or "")),
+            "note": ("缓存年报按正常抓取步骤的产物形态登记（隔离跑：无实机登录会话，"
+                     "不联网、不伪造认证）")}
+
         # ② 事实（生产适配器读缓存年报）→ 底稿（生产构造器）→ 落 project/working_paper.json
         facts = F.facts_from_annual_tables(doc, company=COMPANY,
                                            company_code="002304",

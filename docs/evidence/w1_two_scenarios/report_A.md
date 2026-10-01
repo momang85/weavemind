@@ -1,13 +1,3 @@
-> **未验收草稿：验收未通过（overall=fail）**
-> 本次交付没有取得针对该版正文的验收通过，不得视为已通过，也不得直接用于对外发布或审批。
-
-> **研究状态：研究草稿／待补原始披露**——必答问题未完成（2/3）：收入变化的量价与结构依据、利润变化的分解（其中部分覆盖 2 项：收入变化的量价与结构依据[已取得部分构成]、利润变化的分解[已取得部分构成]）；1 条肯定结论处于未证实状态（未支持/部分支持/待核查）（数字与格式的机器验收不因此改变；本条说的是**研究**是否就绪）
-
-> **评审状态：评审未完成（降级）** —— 未执行或未完成评审。
-> 本交付物未取得绑定计划版本的评审 PASS，须经人工复核后方可使用。
-
----
-
 # 洋河股份 经营分析简报（2023–2024 年度）
 
 **主体**：洋河股份（002304.SZ）　**期间**：2023–2024 年度　**口径**：合并　**资料截止**：2025-04-30
@@ -126,17 +116,6 @@
 
 - 比率适用条件与适用范围见附录（主文不重复口径说明）。
 
-## 图表
-![chart_1.png](charts/chart_1.png)
-
-图 1：归母净利润同比变化由哪些金额构成？；归母净利润 100.16 → 66.73 亿元（-33.43）；毛利变化 -38.01 亿元；规模 -31.54／毛利率 -6.47 亿元；毛利线以下 +4.58 亿元；未解释差额 0.00 亿元（披露项目齐全）（数据同『财务对照』表与底稿）
-![chart_2.png](charts/chart_2.png)
-
-图 2：合并净利润到经营现金流之间的调节桥在哪里？；合并净利润 66.66 亿元 ＋ 调节项 -20.38 亿元 ＝ 经营现金流 46.29 亿元；未解释差额 +0.00 亿元；最大支撑 固定资产折旧、油气资产折… +5.87 亿元；最大拖累 经营性应付项目的增加（减… -18.31 亿元；经营现金流变化 -15.02 亿元，最大构成 合并净利润变化 -33.54 亿元（数据同『财务对照』表与底稿）
-![chart_3.png](charts/chart_3.png)
-
-图 3：同一组假设下，基期、使用者情景与反向对照差多少？；基准复现 66.73 亿元；使用者情景 80.33 亿元（较基准 +13.60 亿元）；情景是**条件计算**（假设成立时才成立），不是预测、无概率（数据同『财务对照』表与底稿）
-
 ## 分析
 本报告由确定性分析链装配：利润、现金与情景三段见『分析摘要』与『经营驱动分析正文』；底稿与来源随包提供。
 
@@ -146,7 +125,7 @@
 - **现金**：2024年 合并净利润 66.66 亿元经调节项 -20.38 亿元后为经营现金流 46.29 亿元（未解释差额 +0.00 亿元）；现金变化 -15.02 亿元，最大构成 合并净利润变化 -33.54 亿元；最大支撑 固定资产折旧、油气资产折耗、生产性生物资产折旧 +5.87 亿元、最大拖累 经营性应付项目的增加（减少以“－”号填列） -18.31 亿元
 
 ### 分析摘要选择说明
-- 说明：本版没有人工选择记录，默认采用**经营研究组合**（经营驱动／现金调节桥／条件情景）各一条已验证运行；可在分析工作台显式选择某一条
+- 说明：显式选择覆盖 scenario_sensitivity；经营研究组合里其余模型（operating_drivers、cash_reconciliation）按各一条已验证运行保留，正文与图仍共用同一组运行
 
 - 完整分析卡（每个读数带 run/output/component_id 与规则）见 `analysis/analysis_cards.md`；运行记录、数据集与计划在包内 `analysis/`。
 
@@ -180,17 +159,17 @@
 ### 三、披露支持与来源定位
 | 读数 | 期间 | 披露值 | 来源位置（原件） |
 |---|---|---:|---|
-| 营业收入 | 2024年 | 28,876,296,993.56元 | [PDF 第 7 页 · 主要会计数据和财务指标 · 行「营业收入(元) 28,876,296,993.56 33,126,277,551」](http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF#page=7) |
-| 营业收入 | 2023年 | 33,126,277,551.51元 | [PDF 第 7 页 · 主要会计数据和财务指标 · 行「营业收入(元) 28,876,296,993.56 33,126,277,551」](http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF#page=7) |
-| 营业成本 | 2024年 | 7,751,218,356.66元 | [PDF 第 76 页 · 合并利润表 · 行「其中：营业成本 7,751,218,356.66 8,200,245,255.4」](http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF#page=76) |
-| 营业成本 | 2023年 | 8,200,245,255.42元 | [PDF 第 76 页 · 合并利润表 · 行「其中：营业成本 7,751,218,356.66 8,200,245,255.4」](http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF#page=76) |
-| 归母净利润 | 2024年 | 6,673,388,602.12元 | [PDF 第 77 页 · 合并利润表 · 行「1.归属于母公司股东的净利润 6,673,388,602.12 10,015,9」](http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF#page=77) |
-| 归母净利润 | 2023年 | 10,015,930,040.27元 | [PDF 第 77 页 · 合并利润表 · 行「1.归属于母公司股东的净利润 6,673,388,602.12 10,015,9」](http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF#page=77) |
-| 净利润（合并） | 2024年 | 6,666,455,819.96元 | [PDF 第 76 页 · 合并利润表 · 行「五、净利润(净亏损以“-”号填」（标签折行，金额在下一行）](http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF#page=76) |
-| 净利润（合并） | 2023年 | 10,020,768,556.47元 | [PDF 第 76 页 · 合并利润表 · 行「五、净利润(净亏损以“-”号填」（标签折行，金额在下一行）](http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF#page=76) |
-| 经营活动现金流净额 | 2024年 | 4,628,711,237.28元 | [PDF 第 20 页 · 合并现金流量表 · 行「经营活动产生的现金流量净额 4,628,711,237.28 6,130,220」](http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF#page=20) |
-| 经营活动现金流净额 | 2023年 | 6,130,220,867.96元 | [PDF 第 20 页 · 合并现金流量表 · 行「经营活动产生的现金流量净额 4,628,711,237.28 6,130,220」](http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF#page=20) |
-| 毛利润 | 2024年 | 21,125,078,636.90元 | [2024年 合并：营业收入 − 营业成本](http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF) |
+| 营业收入 | 2024年 | 28,876,296,993.56元 | [口径 合并](http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF) |
+| 营业收入 | 2023年 | 33,126,277,551.51元 | [口径 合并](http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF) |
+| 营业成本 | 2024年 | 7,751,218,356.66元 | [口径 合并](http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF) |
+| 营业成本 | 2023年 | 8,200,245,255.42元 | [口径 合并](http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF) |
+| 归母净利润 | 2024年 | 6,673,388,602.12元 | [口径 合并](http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF) |
+| 归母净利润 | 2023年 | 10,015,930,040.27元 | [口径 合并](http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF) |
+| 净利润（合并） | 2024年 | 6,666,455,819.96元 | [口径 合并](http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF) |
+| 净利润（合并） | 2023年 | 10,020,768,556.47元 | [口径 合并](http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF) |
+| 经营活动现金流净额 | 2024年 | 4,628,711,237.28元 | [口径 合并](http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF) |
+| 经营活动现金流净额 | 2023年 | 6,130,220,867.96元 | [口径 合并](http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF) |
+| 毛利润 | 2024年 | 21,125,078,636.90元 | [口径 合并；推算自 fact-7920fe9de4bc817d、fact-1d0ea5b6280f8608](http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF) |
 
 - 上表是**用于计算的关键读数**及其原件位置；完整事实身份清单（fact_id → 表/页/行）见文末『附：底稿索引』与包内 `analysis/` 目录。
 
@@ -258,33 +237,33 @@
 
 ### 附：底稿索引（run / output / component_id）
 > 正文与图的所有数字都能在这里回查；包内 `analysis/` 目录含数据集、计划、契约与全部运行记录。
-- `operating_drivers`：run `bce831c37e7bc9ccbbe4cd8f0087b6be47cbd224ced281144b9f48de01cff83f`（数据集 `bfa752e80734`，规则 `validation/1.1.0`）
-  - net_profit_change → `bce831c37e7b-00-net_profit_change`；分项 gross_profit_change、below_gross_line_change
-  - gross_profit_change → `bce831c37e7b-01-gross_profit_change`；分项 revenue_scale_effect、gross_margin_effect
-  - revenue_scale_effect → `bce831c37e7b-02-revenue_scale_effect`
-  - gross_margin_effect → `bce831c37e7b-03-gross_margin_effect`
-  - below_gross_line_change → `bce831c37e7b-04-below_gross_line_change`
-  - net_profit_change_detail → `bce831c37e7b-05-net_profit_change_detail`；分项 income_tax_expense、taxes_and_surcharges、fair_value_change、rd_expense、admin_expense、finance_expense、selling_expense、investment_income、non_operating_income、minority_interest、asset_impairment、non_operating_expense、other_income、asset_disposal_income、credit_impairment、unexplained_residual
-  - gross_profit_change_by_segment → `bce831c37e7b-06-gross_profit_change_by_segment`；分项 segment:分产品:白酒、unclassified_gross_profit_change
-  - gross_profit_change_by_segment → `bce831c37e7b-07-gross_profit_change_by_segment`；分项 segment:分地区:省内、segment:分地区:省外、unclassified_gross_profit_change
-  - gross_profit_change_by_segment → `bce831c37e7b-08-gross_profit_change_by_segment`；分项 segment:分行业:酒类行业、unclassified_gross_profit_change
-  - gross_profit_change_by_segment → `bce831c37e7b-09-gross_profit_change_by_segment`；分项 segment:分销售模式:批发经销、segment:分销售模式:线上直销、unclassified_gross_profit_change
-  - volume_price_decomposition → `bce831c37e7b-10-volume_price_decomposition`；分项 volume_effect、price_effect
-- `cash_reconciliation`：run `9a59b765aa5925fbf6e4c3b5ba853071663b24a640f0fb2897d382747d7fc3fd`（数据集 `bfa752e80734`，规则 `validation/1.1.0`）
-  - operating_cashflow_reconciliation_cur → `9a59b765aa59-00-operating_cashflow_reconciliation_cur`；分项 consolidated_net_profit、non_cash_adjustments、working_capital_adjustments、other_adjustments、unexplained_residual
-  - operating_cashflow_reconciliation_prev → `9a59b765aa59-01-operating_cashflow_reconciliation_prev`；分项 consolidated_net_profit、non_cash_adjustments、working_capital_adjustments、other_adjustments、unexplained_residual
-  - operating_cashflow_change → `9a59b765aa59-02-operating_cashflow_change`；分项 change_in_net_profit、change_in_non_cash、change_in_working_capital、change_in_other、change_in_residual
-  - cash_gap_change → `9a59b765aa59-03-cash_gap_change`；分项 change_in_operating_cashflow、change_in_net_profit_negated
-  - largest_support → `9a59b765aa59-04-largest_support`
-  - largest_drag → `9a59b765aa59-05-largest_drag`
-- `scenario_sensitivity`：run `338ecf4f97c65509ec6e3d16ab0fd35bc1b6706a580d0e5c1fa6568b224f1570`（数据集 `bfa752e80734`，规则 `validation/1.1.0`）
-  - scenario_net_profit → `338ecf4f97c6-00-scenario_net_profit`；分项 base、user、counter
-  - scenario_sensitivity → `338ecf4f97c6-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
-  - collection_days_capital_per_day → `338ecf4f97c6-02-collection_days_capital_per_day`
-  - collection_days_sensitivity_10d → `338ecf4f97c6-03-collection_days_sensitivity_10d`
-  - margin_threshold_to_hold_base_profit → `338ecf4f97c6-04-margin_threshold_to_hold_base_profit`
-  - margin_gap_to_threshold_pp → `338ecf4f97c6-05-margin_gap_to_threshold_pp`
-  - revenue_growth_to_hold_target → `338ecf4f97c6-06-revenue_growth_to_hold_target`
+- `operating_drivers`：run `43c927db46ff7469b183a51e16ecadec88c327764e46e3a0fbf33a52b61ad89f`（数据集 `081a9a3823c8`，规则 `validation/1.1.0`）
+  - net_profit_change → `43c927db46ff-00-net_profit_change`；分项 gross_profit_change、below_gross_line_change
+  - gross_profit_change → `43c927db46ff-01-gross_profit_change`；分项 revenue_scale_effect、gross_margin_effect
+  - revenue_scale_effect → `43c927db46ff-02-revenue_scale_effect`
+  - gross_margin_effect → `43c927db46ff-03-gross_margin_effect`
+  - below_gross_line_change → `43c927db46ff-04-below_gross_line_change`
+  - net_profit_change_detail → `43c927db46ff-05-net_profit_change_detail`；分项 income_tax_expense、taxes_and_surcharges、fair_value_change、rd_expense、admin_expense、finance_expense、selling_expense、investment_income、non_operating_income、minority_interest、asset_impairment、non_operating_expense、other_income、asset_disposal_income、credit_impairment、unexplained_residual
+  - gross_profit_change_by_segment → `43c927db46ff-06-gross_profit_change_by_segment`；分项 segment:分产品:白酒、unclassified_gross_profit_change
+  - gross_profit_change_by_segment → `43c927db46ff-07-gross_profit_change_by_segment`；分项 segment:分地区:省内、segment:分地区:省外、unclassified_gross_profit_change
+  - gross_profit_change_by_segment → `43c927db46ff-08-gross_profit_change_by_segment`；分项 segment:分行业:酒类行业、unclassified_gross_profit_change
+  - gross_profit_change_by_segment → `43c927db46ff-09-gross_profit_change_by_segment`；分项 segment:分销售模式:批发经销、segment:分销售模式:线上直销、unclassified_gross_profit_change
+  - volume_price_decomposition → `43c927db46ff-10-volume_price_decomposition`；分项 volume_effect、price_effect
+- `cash_reconciliation`：run `b84d28ca507132f37bf7efe0985754a42214d813d1b859a8974563a20883520f`（数据集 `081a9a3823c8`，规则 `validation/1.1.0`）
+  - operating_cashflow_reconciliation_cur → `b84d28ca5071-00-operating_cashflow_reconciliation_cur`；分项 consolidated_net_profit、non_cash_adjustments、working_capital_adjustments、other_adjustments、unexplained_residual
+  - operating_cashflow_reconciliation_prev → `b84d28ca5071-01-operating_cashflow_reconciliation_prev`；分项 consolidated_net_profit、non_cash_adjustments、working_capital_adjustments、other_adjustments、unexplained_residual
+  - operating_cashflow_change → `b84d28ca5071-02-operating_cashflow_change`；分项 change_in_net_profit、change_in_non_cash、change_in_working_capital、change_in_other、change_in_residual
+  - cash_gap_change → `b84d28ca5071-03-cash_gap_change`；分项 change_in_operating_cashflow、change_in_net_profit_negated
+  - largest_support → `b84d28ca5071-04-largest_support`
+  - largest_drag → `b84d28ca5071-05-largest_drag`
+- `scenario_sensitivity`：run `b14fe73ad447f1b0e55a3229dbca24ec632db51c186cd9906122b0f150016c92`（数据集 `081a9a3823c8`，规则 `validation/1.1.0`）
+  - scenario_net_profit → `b14fe73ad447-00-scenario_net_profit`；分项 base、user、counter
+  - scenario_sensitivity → `b14fe73ad447-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
+  - collection_days_capital_per_day → `b14fe73ad447-02-collection_days_capital_per_day`
+  - collection_days_sensitivity_10d → `b14fe73ad447-03-collection_days_sensitivity_10d`
+  - margin_threshold_to_hold_base_profit → `b14fe73ad447-04-margin_threshold_to_hold_base_profit`
+  - margin_gap_to_threshold_pp → `b14fe73ad447-05-margin_gap_to_threshold_pp`
+  - revenue_growth_to_hold_target → `b14fe73ad447-06-revenue_growth_to_hold_target`
 
 ## 变化解释
 **发生了什么（数据观察）**：
@@ -375,13 +354,6 @@
 - 资产负债率：总负债 ÷ 总资产；金融机构负债以存款为主，与其经营模式不可比
 - net_profit_gross_gap_change：Δ归母净利（归母口径）− Δ毛利（合并口径）：两者归属层不同，差额还含费用、税项、非经营性项目与少数股东等，**只能作机械核对**（Δ归母净利 = Δ毛利 + Δ(归母净利 − 毛利)），不能据此判断某项费用或损益改善
 - 适用范围：以上比率与同比适用于**非金融企业**的经营简报；金融机构作为研究对象时需要独立的指标配置，不得机械套用工业企业的比率。
-
-### 图表元数据（内部标识）
-| 图 | chart_id | 绑定指标 | 单位 | 期间 | 口径 |
-|---|---|---|---|---|---|
-| 1 | `bce831c37e7b-profit-waterfall` |  |  |  |  |
-| 2 | `9a59b765aa59-cash-bridge-cur` |  |  |  |  |
-| 3 | `338ecf4f97c6-scenario-outcome` |  |  |  |  |
 
 ### 其他核查项
 - **2. 分段缺成本或收入：分产品:红酒:两期收入/成本不全**（证据：由模型提出，尚未与底稿或年报证据绑定）

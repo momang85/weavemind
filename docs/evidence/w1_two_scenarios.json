@@ -1,0 +1,202 @@
+{
+ "case": "W1 同一工作区用生产采纳函数切两个情景（隔离核验，GUI 待验）",
+ "task_id": "w1-two",
+ "goal": "洋河股份 2023/2024 经营研究：利润由何而来、现金为何变化、什么条件会改变判断；合并口径，数据截至 2025-04-30。",
+ "resolved_workspace": "C:\\Users\\ding0\\AppData\\Local\\Temp\\w1_two_upww3hi_\\projects\\default\\w1-two",
+ "initial_delivery": {
+  "status": "draft",
+  "hard_fail": ""
+ },
+ "recompute_calls": {
+  "A": {
+   "run_id": "b14fe73ad447f1b0e55a3229dbca24ec632db51c186cd9906122b0f150016c92",
+   "params": {
+    "revenue_growth": 0.05,
+    "gross_margin_delta": 0.01,
+    "expense_change_ratio": 0.0
+   },
+   "status": 200,
+   "adopted": false,
+   "scenario_net_profit_yuan": 8032843652.4,
+   "revenue_threshold_pct": 15.8226,
+   "margin_threshold_pct": 84.7325
+  },
+  "B": {
+   "run_id": "b479c5c24b9785df41db105e60050f3cd929d01f7fbd0e94a5ec753108d7bf38",
+   "params": {
+    "revenue_growth": -0.05,
+    "gross_margin_delta": -0.01,
+    "expense_change_ratio": 0.02
+   },
+   "status": 200,
+   "adopted": false,
+   "scenario_net_profit_yuan": 5053776048.14,
+   "revenue_threshold_pct": 17.1908,
+   "margin_threshold_pct": 85.7335
+  }
+ },
+ "selection_after_recompute": {
+  "workspace": "C:\\Users\\ding0\\AppData\\Local\\Temp\\w1_two_upww3hi_\\projects\\default\\w1-two",
+  "dataset_hash": "081a9a3823c8b22888c3af1e1824f5a259f7fb0b2ff4cc3b3c69cea92847b16b",
+  "entries": [],
+  "ok": false,
+  "inputs_dataset_hash_in_file": "081a9a3823c8b22888c3af1e1824f5a259f7fb0b2ff4cc3b3c69cea92847b16b"
+ },
+ "adopted": {
+  "A": {
+   "http_status": 200,
+   "adopt_ok": false,
+   "adopt_error": null,
+   "adopted_identity": "b65632fec4d1458c9f067027557909d49bf3c26f9358f548a225d289d566874c",
+   "selection_adopted_identity": "b65632fec4d1458c9f067027557909d49bf3c26f9358f548a225d289d566874c",
+   "selection_last_run_id": "b14fe73ad447f1b0e55a3229dbca24ec632db51c186cd9906122b0f150016c92",
+   "selection_last_params": {
+    "revenue_growth": 0.05,
+    "gross_margin_delta": 0.01,
+    "expense_change_ratio": 0.0
+   },
+   "selection_entries": 1,
+   "report_chars": 23880,
+   "scenario_net_profit_yi": "80.33",
+   "in_report_md": true,
+   "threshold_pct": 15.8226,
+   "threshold_in_report_md": true,
+   "in_pdf_text": true,
+   "pdf_bytes": 5412250,
+   "binding_runs": [
+    {
+     "model_id": "operating_drivers",
+     "run_id": "43c927db46ff7469b183a51e16ecadec88c327764e46e3a0fbf33a52b61ad89f",
+     "params": {}
+    },
+    {
+     "model_id": "cash_reconciliation",
+     "run_id": "b84d28ca507132f37bf7efe0985754a42214d813d1b859a8974563a20883520f",
+     "params": {}
+    },
+    {
+     "model_id": "scenario_sensitivity",
+     "run_id": "b14fe73ad447f1b0e55a3229dbca24ec632db51c186cd9906122b0f150016c92",
+     "params": {
+      "revenue_growth": 0.05,
+      "gross_margin_delta": 0.01,
+      "expense_change_ratio": 0.0
+     }
+    }
+   ],
+   "binding_has_selected_run": true,
+   "binding_has_selected_params": true,
+   "binding_records": 13,
+   "store_file": "report_versions.json",
+   "store_exists": true,
+   "store_keys": [
+    "deliveries",
+    "selected",
+    "selected_at",
+    "versions"
+   ],
+   "ws": "C:\\Users\\ding0\\AppData\\Local\\Temp\\w1_two_upww3hi_\\projects\\default\\w1-two",
+   "screenshot": {
+    "file": "screenshot_A_p9.png",
+    "page": 9
+   }
+  },
+  "B": {
+   "http_status": 200,
+   "adopt_ok": false,
+   "adopt_error": null,
+   "adopted_identity": "d973723d32c4c4dc0ff38836a5c47d8d87e922a8e3d6bbd52e3a7813b6fc5dae",
+   "selection_adopted_identity": "d973723d32c4c4dc0ff38836a5c47d8d87e922a8e3d6bbd52e3a7813b6fc5dae",
+   "selection_last_run_id": "b479c5c24b9785df41db105e60050f3cd929d01f7fbd0e94a5ec753108d7bf38",
+   "selection_last_params": {
+    "revenue_growth": -0.05,
+    "gross_margin_delta": -0.01,
+    "expense_change_ratio": 0.02
+   },
+   "selection_entries": 1,
+   "report_chars": 23892,
+   "scenario_net_profit_yi": "50.54",
+   "in_report_md": true,
+   "threshold_pct": 17.1908,
+   "threshold_in_report_md": true,
+   "in_pdf_text": true,
+   "pdf_bytes": 5412326,
+   "binding_runs": [
+    {
+     "model_id": "operating_drivers",
+     "run_id": "43c927db46ff7469b183a51e16ecadec88c327764e46e3a0fbf33a52b61ad89f",
+     "params": {}
+    },
+    {
+     "model_id": "cash_reconciliation",
+     "run_id": "b84d28ca507132f37bf7efe0985754a42214d813d1b859a8974563a20883520f",
+     "params": {}
+    },
+    {
+     "model_id": "scenario_sensitivity",
+     "run_id": "b479c5c24b9785df41db105e60050f3cd929d01f7fbd0e94a5ec753108d7bf38",
+     "params": {
+      "revenue_growth": -0.05,
+      "gross_margin_delta": -0.01,
+      "expense_change_ratio": 0.02
+     }
+    }
+   ],
+   "binding_has_selected_run": true,
+   "binding_has_selected_params": true,
+   "binding_records": 13,
+   "store_file": "report_versions.json",
+   "store_exists": true,
+   "store_keys": [
+    "deliveries",
+    "selected",
+    "selected_at",
+    "versions"
+   ],
+   "ws": "C:\\Users\\ding0\\AppData\\Local\\Temp\\w1_two_upww3hi_\\projects\\default\\w1-two",
+   "screenshot": {
+    "file": "screenshot_B_p9.png",
+    "page": 9
+   }
+  }
+ },
+ "final_selection": {
+  "entries": [
+   {
+    "model_id": "scenario_sensitivity",
+    "run_id": "b479c5c24b9785df41db105e60050f3cd929d01f7fbd0e94a5ec753108d7bf38",
+    "params": {
+     "revenue_growth": -0.05,
+     "gross_margin_delta": -0.01,
+     "expense_change_ratio": 0.02
+    }
+   }
+  ],
+  "adopted_identity": "d973723d32c4c4dc0ff38836a5c47d8d87e922a8e3d6bbd52e3a7813b6fc5dae",
+  "scenario_run_id": "b479c5c24b9785df41db105e60050f3cd929d01f7fbd0e94a5ec753108d7bf38",
+  "scenario_params": {
+   "revenue_growth": -0.05,
+   "gross_margin_delta": -0.01,
+   "expense_change_ratio": 0.02
+  }
+ },
+ "verification": {
+  "identity_changed": true,
+  "selection_points_to_B": true,
+  "selection_params_match_B": true,
+  "selection_identity_is_B": true,
+  "combination_kept_with_selection": true,
+  "values_in_md_and_pdf": true,
+  "A_value_absent_from_B_report": true,
+  "binding_ok": true,
+  "not_auto_adopted": true
+ },
+ "artifacts": [
+  "report_A.md",
+  "report_A.pdf",
+  "report_B.md",
+  "report_B.pdf",
+  "screenshot_A_p9.png",
+  "screenshot_B_p9.png"
+ ]
+}
