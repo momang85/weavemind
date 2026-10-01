@@ -7,27 +7,12 @@
 > 推进 **W0→W1→W2**（W0 情景求值器 → W1 一份报告只表达同一套判断 → W2 洋河/三一可下判断的研究）。
 > 约 80% 研究能力与案例、最多 20% 支撑修复；不新增服务/worker/数据库/DSL，不改模型/权限/密钥/付费上限，保留用户改动与防护。
 >
-> **W0 已实现（情景求值器，`scenario_sensitivity` 2.0.0）**：① 毛利线以下逐项按**披露符号**计入
-> （洋河明细齐备 → 基期残差 **0**；旧实现按绝对值相加，留下 3.02 亿元假残差）；
-> ② 基期残差**只算一次并冻结**——改税率/费用/少数股东假设只动最终利润，不再被残差吸收
-> （旧反例：税率 20%→25%、少数股东→10%，利润仍 300、只有残差 100→68）；③ 税率作用于**情景税前利润**、
-> 少数股东占比作用于**情景合并净利**；④ 正算/敏感性/两个阈值**共用同一目标、同一模式、同一求值器**
-> （默认目标＝上一期归母净利；detail 模式在允许范围内二分求根，超范围**不给数**、诊断标「不可达」）。
-> 手算例子（收入 1000／毛利 800／归母 300）：税 25%＋少数股东 10% → **270**；费用 +10% → **296.25**；
-> 收入 +10% → **337.5**；目标 450 → 毛利率阈值 **100%**（+20pp）、收入阈值 **+40%**，代回求值器各恢复 450 元。
->
-> **洋河/三一先验（fixed，目标＝2023 归母）**：洋河 收入阈值 **+15.8226%**、毛利率阈值 **84.7325%**（+11.5754pp）；
-> 三一 **−7.0440%**、**24.5694%**（−1.8618pp）——与架构复核表逐位一致，两阈值代回求值器恢复目标（差 0）。
-> 三一 detail 残差 **5.0165 亿元**（缺 `fair_value_change`/`asset_disposal_income`，如实保留，不摊派）。
+> **W0 已实现（情景求值器 `scenario_sensitivity` 2.0.0）**：逐项按**披露符号**计入（洋河残差 0）、基期残差
+> **只算一次并冻结**、税率作用于情景税前利润/少数股东占比作用于合并净利、正算与两个阈值**共用同一目标/模式/求值器**
+> （detail 超范围不给数、标「不可达」）。洋河先验 **+15.8226%／84.7325%（+11.5754pp）**、三一
+> **−7.0440%／24.5694%（−1.8618pp）**，两阈值代回求值器恢复目标；手算例子（270／296.25／337.5）见
+> [w0_scenario_evaluator.json](evidence/w0_scenario_evaluator.json)（脚本 `scripts/w0_scenario_evaluator.py`）。
 > 现金应付增量减半压力测试保留：洋河 ΔOCF −23.7765 亿、三一 +32.9947 亿。
->
-> **产物**：[w0_scenario_evaluator.json](evidence/w0_scenario_evaluator.json)（`scripts/w0_scenario_evaluator.py`）、
-> 重跑的 [u2_research_note.md](evidence/u2_research_note.md)、[u3_sany_note.md](evidence/u3_sany_note.md)、
-> [v2_levers.json](evidence/v2_levers.json)、[v0_yanghe_normal_task.json](evidence/v0_yanghe_normal_task.json)。
-> **验证**：`test_financial_analysis` **195**（9 个 W0 经济效果用例钉住手算值）、`test_delivery_chain` 409、
-> `test_offline_delivery` 39、`test_orchestrator_v2` 89、`test_report_quality` 39、`test_review_edit_api` 32、
-> `test_narrative_evidence` 56；3.11 `py_compile` 通过。**未验**：真实登录会话下的采纳/导出闭环（GUI 待验）。
-> 远端 CI：W0 `bd4dbc4` success。
 >
 > **W1 已实现（一份报告只表达同一套判断）**：`report_brief._analysis_context` **一次读取**选定 ModelRun＋
 > 事实定位＋**已准入披露记录**，用普通 dict 交给首屏/逐问题评估/摘要/成篇正文（`analysis_binding` 记运行身份与参数）。
@@ -57,10 +42,12 @@
 > （架构文件给出 −14.79%／−0.49%）——该表是**单期+同比**形状，现抽取器扫描窗口不含它，本次只作缺口列出。
 > 证据 [w2_judgments.json](evidence/w2_judgments.json)（脚本 `scripts/w2_judgments.py`）＋两份
 > `w2_*_judgments.md`。用例：`test_financial_analysis` **201**（6 个 W2 用例）、
-> `test_annual_financial_tables` 49、`test_delivery_chain` 409。
+> `test_annual_financial_tables` 49、`test_delivery_chain` 409；3.11 `py_compile` 通过；
+> 远端 CI：`bd4dbc4`／`a3e7ede`／`6ebf696`／`bd90d76`／`4eee1d5` 全 **success**。
+> **未验**：真实登录会话下的采纳/导出闭环（GUI 待验）。
 >
 > **下一步**：研究续页（相邻年报、同公司「上次判断→新读数→加强/被反驳→下一观察」，先 ≤3 年）；
-> 洋河的渠道库存/终端动销仍是**机制缺口**（材料不取得就不判断）；银行机构协作后置。
+> 洋河的渠道库存/终端动销与「产品类别」（中高档/普通酒）表仍是**机制/抽取缺口**（不取得就不判断）；银行机构协作后置。
 
 >
 > 历史：阶段V 账本（V0–V2 全部细节）见 [历史_阶段V执行账_20261001.md](历史_阶段V执行账_20261001.md)；
