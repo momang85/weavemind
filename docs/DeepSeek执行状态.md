@@ -96,8 +96,13 @@
 > （[v2_page_export.json](evidence/v2_page_export.json)，脚本 `scripts/v2_page_export_consistency.py`）：
 > 走生产处理函数 `web_ui._post_task_analysis_recompute` 两次改假设（HTTP 200、`adopted=false`
 > 不自动采纳）→ 情景归母净利 **80.33 亿** 与 **50.54 亿**；同一组假设下**复算返回值 = 正文 =
-> PDF 提取文本**（`same_result=True`），并留命中页截图。
-> 用例：`test_financial_analysis` **185**、`test_delivery_chain` 409、`test_report_quality` 39、
+> PDF 提取文本**（`same_result=True`），并留命中页截图。④**正文里的情景读数与基准复现**：
+> `narrative.research_note` 情景段先给该假设下的**情景归母净利**，再注明**基准复现**与差额
+> （洋河 收入 +5%／毛利率 +1pp 档：情景 **+80.33 亿**、基准复现 +66.73 亿、差 +13.59 亿；
+> 基准档差恰好 +0.00 亿），三个数都照抄同一次运行的输出分量，正文不自算；标签取输出期间，
+> 参数不由正文改写（[u2_research_note.md](evidence/u2_research_note.md)、
+> [u3_sany_note.md](evidence/u3_sany_note.md)）。
+> 用例：`test_financial_analysis` **186**、`test_delivery_chain` 409、`test_report_quality` 39、
 > `test_deploy_manifest` 40，3.11 `py_compile` 通过。
 > **V2 之后（V3 留后续）**：材料报告年决定本期/比较期（请求年份只作筛选），相邻年报拼 3–5 年
 > 窄指标序列与研究续页。

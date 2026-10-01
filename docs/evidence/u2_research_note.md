@@ -84,9 +84,16 @@
   - 读法：非现金项是**会计加回**：减值计提与转回、递延税确认都会让这一组变大或变小，不直接代表现金改善
   - 后续观察指标：下期折旧摊销与减值明细、递延所得税附注；资产减值准备余额变化
 - 对账差额≈0 表示披露调节项与经营现金流自洽；差额非零说明有调节项没取到，报告不得写“完整调节”
+- **情景归母净利（收入 +0.00%／毛利率 +0.00pp）**：+66.73 亿元；基准复现 +66.73 亿元（差 +0.00 亿元）
 - **反向情景（收入 +0.00%／毛利率 +0.00pp）**：维持基期归母净利所需毛利率 73.16%，与基期之差 +0.00pp
+  - 收入侧反推（目标归母净利 66.73 亿元）：在其他条件不变时，收入需变化 0.00% 才能回到该利润水平（单因素算术反推，不表示可达）
+- **情景归母净利（收入 +5.00%／毛利率 +1.00pp）**：+80.33 亿元；基准复现 +66.73 亿元（差 +13.59 亿元）
 - **反向情景（收入 +5.00%／毛利率 +1.00pp）**：维持基期归母净利所需毛利率 69.67%，与基期之差 -3.48pp
+  - 收入侧反推（目标归母净利 66.73 亿元）：在其他条件不变时，收入需变化 0.00% 才能回到该利润水平（单因素算术反推，不表示可达）
+- **情景归母净利（收入 -12.83%／毛利率 +0.00pp）**：+39.63 亿元；基准复现 +66.73 亿元（差 -27.10 亿元）
 - **反向情景（收入 -12.83%／毛利率 +0.00pp）**：维持基期归母净利所需毛利率 83.92%，与基期之差 +10.77pp
+  - 收入侧反推（目标归母净利 66.73 亿元）：在其他条件不变时，收入需变化 0.00% 才能回到该利润水平（单因素算术反推，不表示可达）
+
 
 ### 六、待核查问题（按影响排序）
 1. 分段缺成本或收入：分产品:其他:两期收入/成本不全
@@ -139,22 +146,25 @@
   - scenario_sensitivity → `cd0f89f298fb-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
   - margin_threshold_to_hold_base_profit → `cd0f89f298fb-02-margin_threshold_to_hold_base_profit`
   - margin_gap_to_threshold_pp → `cd0f89f298fb-03-margin_gap_to_threshold_pp`
-  - collection_days_capital_per_day → `cd0f89f298fb-04-collection_days_capital_per_day`
-  - collection_days_sensitivity_10d → `cd0f89f298fb-05-collection_days_sensitivity_10d`
+  - revenue_growth_to_hold_target → `cd0f89f298fb-04-revenue_growth_to_hold_target`
+  - collection_days_capital_per_day → `cd0f89f298fb-05-collection_days_capital_per_day`
+  - collection_days_sensitivity_10d → `cd0f89f298fb-06-collection_days_sensitivity_10d`
 - `scenario_sensitivity`：run `7d779d596bab8170c4a32f4e96ba5fec78275143e6c4f043b000b19f1ccaa058`（数据集 `8e99cf4db927`，规则 `validation/1.1.0`）
   - scenario_net_profit → `7d779d596bab-00-scenario_net_profit`；分项 base、user、counter
   - scenario_sensitivity → `7d779d596bab-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
   - margin_threshold_to_hold_base_profit → `7d779d596bab-02-margin_threshold_to_hold_base_profit`
   - margin_gap_to_threshold_pp → `7d779d596bab-03-margin_gap_to_threshold_pp`
-  - collection_days_capital_per_day → `7d779d596bab-04-collection_days_capital_per_day`
-  - collection_days_sensitivity_10d → `7d779d596bab-05-collection_days_sensitivity_10d`
+  - revenue_growth_to_hold_target → `7d779d596bab-04-revenue_growth_to_hold_target`
+  - collection_days_capital_per_day → `7d779d596bab-05-collection_days_capital_per_day`
+  - collection_days_sensitivity_10d → `7d779d596bab-06-collection_days_sensitivity_10d`
 - `scenario_sensitivity`：run `b91832c8d16c478ab5583fa1ec64c7513a114588f3b76c16036b6cda6ecb221f`（数据集 `8e99cf4db927`，规则 `validation/1.1.0`）
   - scenario_net_profit → `b91832c8d16c-00-scenario_net_profit`；分项 base、user、counter
   - scenario_sensitivity → `b91832c8d16c-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
   - margin_threshold_to_hold_base_profit → `b91832c8d16c-02-margin_threshold_to_hold_base_profit`
   - margin_gap_to_threshold_pp → `b91832c8d16c-03-margin_gap_to_threshold_pp`
-  - collection_days_capital_per_day → `b91832c8d16c-04-collection_days_capital_per_day`
-  - collection_days_sensitivity_10d → `b91832c8d16c-05-collection_days_sensitivity_10d`
+  - revenue_growth_to_hold_target → `b91832c8d16c-04-revenue_growth_to_hold_target`
+  - collection_days_capital_per_day → `b91832c8d16c-05-collection_days_capital_per_day`
+  - collection_days_sensitivity_10d → `b91832c8d16c-06-collection_days_sensitivity_10d`
 - 图 `5ebf08301700-profit-waterfall`：洋河股份 2023年→2024年 归母净利润瀑布（亿元）
 - 图 `fdc8d4d464e7-cash-bridge-cur`：洋河股份 2024年 净利润→经营现金流桥（亿元）
 - 图 `cd0f89f298fb-scenario-threshold`：洋河股份 反向情景：维持基期归母净利所需毛利率（%）

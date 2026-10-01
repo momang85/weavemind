@@ -84,9 +84,16 @@
   - 读法：非现金项是**会计加回**：减值计提与转回、递延税确认都会让这一组变大或变小，不直接代表现金改善
   - 后续观察指标：下期折旧摊销与减值明细、递延所得税附注；资产减值准备余额变化
 - 对账差额≈0 表示披露调节项与经营现金流自洽；差额非零说明有调节项没取到，报告不得写“完整调节”
+- **情景归母净利（收入 +0.00%／毛利率 +0.00pp）**：+59.75 亿元；基准复现 +59.75 亿元（差 +0.00 亿元）
 - **反向情景（收入 +0.00%／毛利率 +0.00pp）**：维持基期归母净利所需毛利率 26.43%，与基期之差 +0.00pp
+  - 收入侧反推（目标归母净利 59.75 亿元）：在其他条件不变时，收入需变化 0.00% 才能回到该利润水平（单因素算术反推，不表示可达）
+- **情景归母净利（收入 +5.00%／毛利率 +1.00pp）**：+78.20 亿元；基准复现 +59.75 亿元（差 +18.44 亿元）
 - **反向情景（收入 +5.00%／毛利率 +1.00pp）**：维持基期归母净利所需毛利率 25.17%，与基期之差 -1.26pp
+  - 收入侧反推（目标归母净利 59.75 亿元）：在其他条件不变时，收入需变化 0.00% 才能回到该利润水平（单因素算术反推，不表示可达）
+- **情景归母净利（收入 -12.83%／毛利率 +0.00pp）**：+33.38 亿元；基准复现 +59.75 亿元（差 -26.37 亿元）
 - **反向情景（收入 -12.83%／毛利率 +0.00pp）**：维持基期归母净利所需毛利率 30.32%，与基期之差 +3.89pp
+  - 收入侧反推（目标归母净利 59.75 亿元）：在其他条件不变时，收入需变化 0.00% 才能回到该利润水平（单因素算术反推，不表示可达）
+
 
 ### 六、待核查问题（按影响排序）
 1. 分段缺成本或收入：合并:与母公司报表同口径（不是分段切法）
@@ -137,22 +144,25 @@
   - scenario_sensitivity → `ce4e0ce347a1-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
   - margin_threshold_to_hold_base_profit → `ce4e0ce347a1-02-margin_threshold_to_hold_base_profit`
   - margin_gap_to_threshold_pp → `ce4e0ce347a1-03-margin_gap_to_threshold_pp`
-  - collection_days_capital_per_day → `ce4e0ce347a1-04-collection_days_capital_per_day`
-  - collection_days_sensitivity_10d → `ce4e0ce347a1-05-collection_days_sensitivity_10d`
+  - revenue_growth_to_hold_target → `ce4e0ce347a1-04-revenue_growth_to_hold_target`
+  - collection_days_capital_per_day → `ce4e0ce347a1-05-collection_days_capital_per_day`
+  - collection_days_sensitivity_10d → `ce4e0ce347a1-06-collection_days_sensitivity_10d`
 - `scenario_sensitivity`：run `ae10b7cddc28557c6f13945dada1b4835df28c643a087f47cc11a2b3a72368db`（数据集 `6d34fc0b78c3`，规则 `validation/1.1.0`）
   - scenario_net_profit → `ae10b7cddc28-00-scenario_net_profit`；分项 base、user、counter
   - scenario_sensitivity → `ae10b7cddc28-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
   - margin_threshold_to_hold_base_profit → `ae10b7cddc28-02-margin_threshold_to_hold_base_profit`
   - margin_gap_to_threshold_pp → `ae10b7cddc28-03-margin_gap_to_threshold_pp`
-  - collection_days_capital_per_day → `ae10b7cddc28-04-collection_days_capital_per_day`
-  - collection_days_sensitivity_10d → `ae10b7cddc28-05-collection_days_sensitivity_10d`
+  - revenue_growth_to_hold_target → `ae10b7cddc28-04-revenue_growth_to_hold_target`
+  - collection_days_capital_per_day → `ae10b7cddc28-05-collection_days_capital_per_day`
+  - collection_days_sensitivity_10d → `ae10b7cddc28-06-collection_days_sensitivity_10d`
 - `scenario_sensitivity`：run `3f1fd8f83a82562089fa5ae64ed14471fcbabcd653ac76ee8d06c53e22a311c1`（数据集 `6d34fc0b78c3`，规则 `validation/1.1.0`）
   - scenario_net_profit → `3f1fd8f83a82-00-scenario_net_profit`；分项 base、user、counter
   - scenario_sensitivity → `3f1fd8f83a82-01-scenario_sensitivity`；分项 gross_margin_p1pp、revenue_p1pp、expense_m1pp
   - margin_threshold_to_hold_base_profit → `3f1fd8f83a82-02-margin_threshold_to_hold_base_profit`
   - margin_gap_to_threshold_pp → `3f1fd8f83a82-03-margin_gap_to_threshold_pp`
-  - collection_days_capital_per_day → `3f1fd8f83a82-04-collection_days_capital_per_day`
-  - collection_days_sensitivity_10d → `3f1fd8f83a82-05-collection_days_sensitivity_10d`
+  - revenue_growth_to_hold_target → `3f1fd8f83a82-04-revenue_growth_to_hold_target`
+  - collection_days_capital_per_day → `3f1fd8f83a82-05-collection_days_capital_per_day`
+  - collection_days_sensitivity_10d → `3f1fd8f83a82-06-collection_days_sensitivity_10d`
 - 图 `dcfa6def7328-profit-waterfall`：三一重工 2023年→2024年 归母净利润瀑布（亿元）
 - 图 `ca1ed2073bc5-cash-bridge-cur`：三一重工 2024年 净利润→经营现金流桥（亿元）
 - 图 `ce4e0ce347a1-scenario-threshold`：三一重工 反向情景：维持基期归母净利所需毛利率（%）

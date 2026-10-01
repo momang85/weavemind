@@ -2904,6 +2904,36 @@ class TestU2ResearchNote(unittest.TestCase):
         # 占比符号提醒（变化为负时正贡献显示负占比）
         self.assertIn("正贡献显示为负占比", note)
 
+    def test_note_shows_scenario_net_profit_with_base_reproduction(self):
+        """V2：情景段先给**该假设下的归母净利**，并注明基准复现与差额——都照抄同一次运行。
+
+        洋河 2024 基期归母净利 66.73 亿元：收入 +5%／毛利率 +1pp 情景是 80.33 亿元，
+        与基准复现值的差 +13.59 亿元。正文不自己算，读数必须等于运行输出的两个分量之差。
+        """
+        from financial_analysis import narrative as nt
+        od, cash = self._runs()
+        sds = self._scenario_ds()
+        base = fa.run("scenario_sensitivity", sds,
+                      params={"revenue_growth": 0.0, "gross_margin_delta": 0.0})
+        up = fa.run("scenario_sensitivity", sds,
+                    params={"revenue_growth": 0.05, "gross_margin_delta": 0.01})
+        for r in (base, up):
+            self.assertEqual(r.status, C.RunStatus.VALIDATED, r.reason)
+        out = next(o for o in up.outputs if o.metric == "scenario_net_profit")
+        comp = {c["component_id"]: c["value"] for c in out.components}
+        note = nt.research_note([od, cash, base, up])
+        # 标签来自输出期间（参数不由正文改写）
+        self.assertIn("情景归母净利（收入 +5.00%／毛利率 +1.00pp）", note)
+        # 情景净利 + 基准复现 + 差额，三处都在
+        self.assertIn("+80.33 亿元", note)
+        self.assertIn("基准复现 +66.73 亿元", note)
+        self.assertIn(f"（差 {nt._yi(comp['user'] - comp['base'])} 亿元）", note)
+        # 基准档：情景净利 = 基期归母净利，差恰好 0
+        self.assertIn("（差 +0.00 亿元）", note)
+        # 正文主体仍不许出现程序术语
+        body = note.split("### 附：底稿索引")[0]
+        self.assertNotIn("output `", body)
+
     def test_note_says_what_is_missing_instead_of_inventing(self):
         from financial_analysis import narrative as nt
         od, _cash = self._runs()

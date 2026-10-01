@@ -981,6 +981,21 @@ def research_note(runs, *, provenance=None, charts=None, label_of=None,
         for r in scens:
             th = _out(r, "margin_threshold_to_hold_base_profit")
             gap = _out(r, "margin_gap_to_threshold_pp")
+            # V2：先给**该假设下的情景归母净利**（读者要看到"改了假设以后是多少"），
+            # 再给两个方向的反推阈值。三处都来自同一次运行。
+            scr = _out(r, "scenario_net_profit")
+            if scr is not None:
+                user = next((c for c in (_attr(scr, "components") or ())
+                             if str(_attr(c, "component_id")) == "user"), None)
+                base_c = next((c for c in (_attr(scr, "components") or ())
+                               if str(_attr(c, "component_id")) == "base"), None)
+                if user is not None:
+                    line = (f"- **情景归母净利（{_scenario_label(r, scr)}）**："
+                            f"{_yi(_attr(user, 'value'))} 亿元")
+                    if base_c is not None:
+                        line += (f"；基准复现 {_yi(_attr(base_c, 'value'))} 亿元"
+                                 f"（差 {_yi(float(_attr(user, 'value') or 0) - float(_attr(base_c, 'value') or 0))} 亿元）")
+                    lines.append(line)
             if th is None:
                 continue
             extra = (f"，与基期之差 {float(_attr(gap, 'value') or 0):+.2f}pp"
