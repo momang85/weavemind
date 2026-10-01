@@ -469,7 +469,10 @@ def compute(dataset, params: dict | None = None) -> dict:
         if _m in _line:
             alt.setdefault("non_operating_items", {})[_m] = {
                 "label": _label, "contribution_yuan": float(_line[_m]["contribution"]),
-                "note": "非经营/非经常因素：不得并入经营判断",
+                # V1（阶段V）：**不按指标名一律判非经常**——分类取决于事项的经济性质、
+                # 行业与业务模式并考虑持续性；要看公司披露的非经常性损益/扣非归母净利。
+                "note": ("需按公司披露的**非经常性损益/扣非归母净利**与业务实质判断是否"
+                         "经常性：不按指标名统一剔除，也不据此制造“正常化利润”"),
             }
     if segs or vp is not None:
         alt["structure_vs_price"] = (

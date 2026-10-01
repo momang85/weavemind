@@ -2555,10 +2555,26 @@ class TestCashReconciliationYanghe(unittest.TestCase):
                                msg="经营性应付减少是最大拖累")
         gap = next(o for o in run.outputs if o.metric == "cash_gap_change")
         self.assertAlmostEqual(gap.value / 1e8, 18.5280, places=3)
+        # V1：缺口变化是**辅助观察**，两个分项必须与实际算式一致（ΔOCF 与 −Δ合并净利），
+        # 不再把 ΔOCF 误标成"调节项合计变化"。
         comp = {c["component_id"]: c["value"] / 1e8 for c in gap.components}
-        self.assertAlmostEqual(comp["change_in_net_profit"]
-                               + comp["change_in_adjustments"],
+        self.assertAlmostEqual(comp["change_in_operating_cashflow"], -15.0151, places=3,
+                               msg="ΔOCF = 46.2871 − 61.3022")
+        self.assertAlmostEqual(comp["change_in_net_profit_negated"], 33.5431, places=3)
+        self.assertAlmostEqual(comp["change_in_operating_cashflow"]
+                               + comp["change_in_net_profit_negated"],
                                gap.value / 1e8, places=2)
+        # V1 **主输出**：现金变化桥 ΔOCF = Δ合并净利＋Δ非现金＋Δ营运资本＋Δ其他＋Δ差额
+        chg = next(o for o in run.outputs if o.metric == "operating_cashflow_change")
+        cc = {c["component_id"]: c["value"] / 1e8 for c in chg.components}
+        self.assertAlmostEqual(chg.value / 1e8, -15.0151, places=3)
+        self.assertAlmostEqual(cc["change_in_net_profit"], -33.5431, places=3)
+        self.assertAlmostEqual(cc["change_in_non_cash"], 2.4335, places=3)
+        self.assertAlmostEqual(cc["change_in_working_capital"], 11.0442, places=3)
+        self.assertAlmostEqual(cc["change_in_other"], 5.0504, places=3)
+        self.assertAlmostEqual(cc["change_in_residual"], 0.0, places=3)
+        self.assertAlmostEqual(sum(cc.values()), chg.value / 1e8, places=2,
+                               msg="现金变化桥必须闭合")
         diag = run.outputs[0].diagnostics
         self.assertEqual(diag["largest_support"]["metric"], "depreciation")
         self.assertEqual(diag["largest_drag"]["metric"], "operating_payable_increase")
@@ -3142,6 +3158,88 @@ class TestV0OperatingResearchCombination(unittest.TestCase):
         self.assertGreaterEqual(len(spec["data"]), 3, spec["data"])
         self.assertIn("基准复现", spec["conclusion"])
         self.assertIn("不是预测", spec["conclusion"])
+
+
+class TestV1CashChangeBridge(unittest.TestCase):
+    """V1（阶段V）：现金变化桥 `ΔOCF = Δ合并净利＋Δ非现金＋Δ营运资本＋Δ其他＋Δ差额`。
+
+    反例（审查原文）：旧 `cash_gap_change` 的第二项**实际是 ΔOCF**，却标"调节项合计变化"，
+    金样还复制了这条错式。这里用两家公司的独立披露数验收：
+    洋河 `−15.0151 = −33.5431 + 2.4334 + 11.0442 + 5.0504`（亿元）；
+    三一 `+91.0606 = +14.8643 − 4.1022 + 79.7693 + 0.5292`（亿元）。
+    """
+
+    def _sany(self):
+        """三一重工补充资料**分组合计**（元，取自 600031 年报缓存的抽取结果）。
+
+        分组内单项在 `cash_reconciliation.ADJUSTMENT_ITEMS` 里按组给一个代表项即可——
+        本用例验的是**桥的算式与标签**，不是抽取器（抽取器由 annual tables 用例覆盖）。
+        """
+        rows = [
+            _row("net_profit_consolidated", "2023年", 4_606_110_000.0, unit="元"),
+            _row("net_profit_consolidated", "2024年", 6_092_538_000.0, unit="元"),
+            _row("operating_cashflow", "2023年", 5_708_220_000.0, unit="元"),
+            _row("operating_cashflow", "2024年", 14_814_278_000.0, unit="元"),
+            _row("depreciation", "2023年", 4_151_725_000.0, unit="元"),
+            _row("depreciation", "2024年", 3_741_504_000.0, unit="元"),
+            _row("operating_payable_increase", "2023年", -3_066_842_000.0, unit="元"),
+            _row("operating_payable_increase", "2024年", 4_910_089_000.0, unit="元"),
+            _row("other_cashflow_adjustments", "2023年", 17_227_000.0, unit="元"),
+            _row("other_cashflow_adjustments", "2024年", 70_147_000.0, unit="元"),
+        ]
+        return fa.freeze_from_facts(rows, periods=(2023, 2024), entity="三一重工",
+                                    entity_id="600031.SH", as_of="2025-04-30",
+                                    source_label="test:v1-sany")
+
+    def test_sany_bridge_matches_the_reviewed_arithmetic(self):
+        run = fa.run("cash_reconciliation", self._sany())
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        self.assertEqual(run.validation["failed"], [])
+        chg = next(o for o in run.outputs if o.metric == "operating_cashflow_change")
+        cc = {c["component_id"]: c["value"] / 1e8 for c in chg.components}
+        self.assertAlmostEqual(chg.value / 1e8, 91.0606, places=3)
+        self.assertAlmostEqual(cc["change_in_net_profit"], 14.8643, places=3)
+        self.assertAlmostEqual(cc["change_in_non_cash"], -4.1022, places=3)
+        self.assertAlmostEqual(cc["change_in_working_capital"], 79.7693, places=3)
+        self.assertAlmostEqual(cc["change_in_other"], 0.5292, places=3)
+        self.assertAlmostEqual(cc["change_in_residual"], 0.0, places=3)
+        self.assertAlmostEqual(sum(cc.values()), 91.0606, places=3)
+        # 辅助观察：Δ(OCF−合并净利) = ΔOCF − Δ合并净利
+        gap = next(o for o in run.outputs if o.metric == "cash_gap_change")
+        self.assertAlmostEqual(gap.value / 1e8, 76.1963, places=3)
+        gc = {c["component_id"]: c["value"] / 1e8 for c in gap.components}
+        self.assertAlmostEqual(gc["change_in_operating_cashflow"], 91.0606, places=3,
+                               msg="第二项必须是 ΔOCF 本身（旧版误标成“调节项合计变化”）")
+        self.assertAlmostEqual(gc["change_in_net_profit_negated"], -14.8643, places=3)
+
+    def test_working_capital_share_is_not_called_supplier_terms(self):
+        """营运资本项变化占现金增量的比例只作**会计构成**陈述，不得称账期延长。"""
+        run = fa.run("cash_reconciliation", self._sany())
+        from financial_analysis import operators as _ops
+        limits = " ".join(_ops.cash_reconciliation.LIMITS)
+        self.assertIn("时点与资金占用", limits)
+        self.assertIn("不得自动称", limits)
+        self.assertIn("非经常性损益", limits)
+
+    def test_components_gold_is_independent_of_the_payload(self):
+        """金样按定义独立重算：篡改分项值或标签都会被抓到。"""
+        import dataclasses
+        from financial_analysis.operators import cash_reconciliation as cr
+        ds = self._sany()
+        payload = cr.compute(ds)
+        chg = next(o for o in payload["outputs"]
+                   if o["metric"] == "operating_cashflow_change")
+        expect = cr.components_gold(ds)["operating_cashflow_change"]
+        for c in chg["components"]:
+            want, _unit = expect[c["component_id"]]
+            self.assertAlmostEqual(float(c["value"]), float(want), places=2,
+                                   msg=c["component_id"])
+        # 篡改"营运资本项变化"10 亿元 → 逐项核对失败
+        chg["components"][2]["value"] = float(chg["components"][2]["value"]) + 1_000_000_000.0
+        res = fa.validation.validate_output(fa.registry.spec("cash_reconciliation"),
+                                            ds, payload)
+        self.assertFalse(res["ok"], "分项被改：独立金样必须报红")
+        self.assertIn("components", res["failed"])
 
 
 if __name__ == "__main__":

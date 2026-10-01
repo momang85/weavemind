@@ -144,12 +144,25 @@ def render_cash_reconciliation_block(run) -> list[str]:
             lines.append(f"  - 拖累：{drag.get('label')} "
                          f"{_yi_from_yuan(drag.get('value'), unit)}"
                          f"（{GROUP_NOTE.get(drag.get('group'), '')}）")
+    # V1（阶段V）：**先给现金变化桥**（ΔOCF 由哪些金额构成），缺口变化降为辅助观察；
+    # 旧版把 ΔOCF 误标成"调节项合计变化"，读者据此会把现金增长当成账面调节项增长。
+    chg = next((o for o in (run.outputs or [])
+                if o.metric == "operating_cashflow_change"), None)
+    if chg is not None:
+        comps = "、".join(f"{c.get('label')} {_yi_from_yuan(c.get('value'), unit)}"
+                          for c in (chg.components or ()))
+        lines.append(f"- **经营现金流变化（{chg.output_period}）**："
+                     f"{_yi_from_yuan(chg.value, unit)} ＝ {comps}")
+        lines.append("  - 这是会计构成：营运资本项变化可能只是时点与资金占用，"
+                     "能否持续要看应付/应收/存货明细与结算条款；投资收益等是否非经常"
+                     "看公司非经常性损益披露，不按指标名剔除")
     gap = next((o for o in (run.outputs or [])
                 if o.metric == "cash_gap_change"), None)
     if gap is not None:
         comps = "、".join(f"{c.get('label')} {_yi_from_yuan(c.get('value'), unit)}"
                          for c in (gap.components or ()))
-        lines.append(f"- **现金缺口变化（{gap.output_period}）**：{_yi_from_yuan(gap.value, unit)}"
+        lines.append(f"- **辅助观察：现金缺口变化（{gap.output_period}）**："
+                     f"{_yi_from_yuan(gap.value, unit)}"
                      f" ＝ {comps}；缺口＝经营现金流−合并净利润，缺口缩小不等于现金变好")
     if diag.get("closure_note"):
         lines.append(f"- 说明：{diag['closure_note']}")

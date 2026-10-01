@@ -62,6 +62,13 @@ LIMITS = (
     "调节项只取现金流量表补充资料的披露值；**不用资产负债表期末差硬补**现金桥",
     "未取得的项目留在“未解释差额”里：既不当零，也不摊到别的分组",
     "单项调节额是会计口径的加回/扣减，不表示该项目的经济原因（如应付增加不等于融资改善）",
+    # V1（阶段V）现金变化桥的口径与边界
+    "Δ经营现金流 = Δ合并净利润 + Δ非现金项 + Δ营运资本项 + Δ其他 + Δ对账差额："
+    "这是**会计构成**，不是「现金改善能否持续」的结论",
+    "营运资本项变化可能只是**时点与资金占用**（结算节奏、票据/预收、备货），"
+    "要判断可持续性须读应付/应收/存货明细与结算条款；不得自动称“供应商账期延长”",
+    "投资收益等项目的**经常性/非经常性**要看公司披露的非经常性损益与业务实质，"
+    "不按指标名统一剔除",
 )
 
 SPEC = ModelSpec(
@@ -83,7 +90,10 @@ SPEC = ModelSpec(
                    "本期净利润到经营现金流的调节", kind="amount", structure="bridge"),
         OutputSpec("operating_cashflow_reconciliation_prev",
                    "上期净利润到经营现金流的调节", kind="amount", structure="bridge"),
-        OutputSpec("cash_gap_change", "现金缺口变化（经营现金流−合并净利润）",
+        # V1（阶段V）：**现金变化桥**——经营现金流变化由哪些金额构成（主输出）。
+        OutputSpec("operating_cashflow_change",
+                   "经营现金流变化分解（ΔOCF）", kind="amount", structure="bridge"),
+        OutputSpec("cash_gap_change", "现金缺口变化（经营现金流−合并净利润，辅助观察）",
                    kind="amount", structure="bridge"),
         OutputSpec("largest_support", "最大支撑项（调节额）", kind="amount"),
         OutputSpec("largest_drag", "最大拖累项（调节额）", kind="amount"),
@@ -105,8 +115,12 @@ SPEC = ModelSpec(
             "consolidated_net_profit", "non_cash_adjustments",
             "working_capital_adjustments", "other_adjustments", "unexplained_residual",
         ),
+        "operating_cashflow_change": (
+            "change_in_net_profit", "change_in_non_cash",
+            "change_in_working_capital", "change_in_other", "change_in_residual",
+        ),
         "cash_gap_change": (
-            "change_in_net_profit", "change_in_adjustments",
+            "change_in_operating_cashflow", "change_in_net_profit_negated",
         ),
     },
 )
@@ -209,25 +223,59 @@ def compute(dataset, params: dict | None = None) -> dict:
             "output_period": str(b["period"]),
             "residual": _q(b["residual"]), "components": comps,
         })
-    # 缺口变化：Δ(经营现金流 − 合并净利润)，按分组拆
-    gap_c = _d(cf_c.value) - _d(np_c.value)
-    gap_p = _d(cf_p.value) - _d(np_p.value)
-    d_gap = gap_c - gap_p
+    # V1（阶段V）：**现金变化桥**——`ΔOCF = Δ合并净利润 + Δ非现金 + Δ营运资本 + Δ其他
+    # + Δ对账差额`。此前只有"缺口变化"（Δ(OCF−净利)），并把其中一项（实际是 ΔOCF）
+    # 误标成"调节项合计变化"；现在主输出是现金变化本身，缺口变化降为辅助观察。
+    d_cf = _d(cf_c.value) - _d(cf_p.value)
     d_np = _d(np_c.value) - _d(np_p.value)
-    d_adj = b_cur["adjustments"] - b_prev["adjustments"]
-    first_q, second_q = _split(d_gap, -d_np)
-    gap_components = [
-        {"component_id": "change_in_net_profit", "label": "合并净利润变化（取负：利润少→缺口小）",
-         "value": first_q, "unit": unit, "formula": "−(本期合并净利润 − 上期合并净利润)"},
-        {"component_id": "change_in_adjustments", "label": "调节项合计变化",
-         "value": second_q, "unit": unit, "formula": "本期调节项合计 − 上期调节项合计"},
+    d_gap = d_cf - d_np
+    d_groups = {g: b_cur["groups"][g] - b_prev["groups"][g] for g in GROUP_ORDER}
+    d_residual = b_cur["residual"] - b_prev["residual"]
+    cf_change_components = [
+        {"component_id": "change_in_net_profit", "label": "合并净利润变化",
+         "value": _q(d_np), "unit": unit,
+         "formula": "本期合并净利润 − 上期合并净利润"},
+        {"component_id": "change_in_non_cash",
+         "label": "非现金项变化（折旧摊销/减值/递延税/公允价值等）",
+         "value": _q(d_groups["non_cash"]), "unit": unit,
+         "formula": "本期非现金项调节合计 − 上期非现金项调节合计"},
+        {"component_id": "change_in_working_capital",
+         "label": "营运资本项变化（存货/经营性应收/经营性应付）",
+         "value": _q(d_groups["working_capital"]), "unit": unit,
+         "formula": "本期营运资本项调节合计 − 上期营运资本项调节合计"},
+        {"component_id": "change_in_other", "label": "其他调节项变化",
+         "value": _q(d_groups["other"]), "unit": unit,
+         "formula": "本期其他调节项合计 − 上期其他调节项合计"},
+        {"component_id": "change_in_residual",
+         "label": "对账差额变化（未取得的披露调节项）",
+         "value": _q(d_residual), "unit": unit,
+         "formula": "本期对账差额 − 上期对账差额"},
     ]
+    _cf_sum = sum(Decimal(str(c["value"])) for c in cf_change_components)
+    outputs.append({
+        "metric": "operating_cashflow_change",
+        "label": f"经营现金流变化分解（{cur_p}较{prev_p}）",
+        "value": _q(d_cf), "unit": unit, "output_period": f"{cur_p}较{prev_p}",
+        "residual": float(Decimal(str(_q(d_cf))) - _cf_sum),
+        "components": cf_change_components,
+    })
+    # 辅助观察：Δ(经营现金流 − 合并净利润) 的两项（按定义拆，标签与实际算式一致）
+    gap_components = [
+        {"component_id": "change_in_operating_cashflow",
+         "label": "经营现金流变化（ΔOCF）",
+         "value": _q(d_cf), "unit": unit,
+         "formula": "本期经营现金流 − 上期经营现金流"},
+        {"component_id": "change_in_net_profit_negated",
+         "label": "合并净利润变化（取负：利润少→缺口小）",
+         "value": _q(-d_np), "unit": unit,
+         "formula": "−(本期合并净利润 − 上期合并净利润)"},
+    ]
+    _gap_sum = sum(Decimal(str(c["value"])) for c in gap_components)
     outputs.append({
         "metric": "cash_gap_change",
         "label": f"现金缺口变化（经营现金流−合并净利润，{cur_p}较{prev_p}）",
         "value": _q(d_gap), "unit": unit, "output_period": f"{cur_p}较{prev_p}",
-        "residual": float(Decimal(str(_q(d_gap))) - (Decimal(str(first_q))
-                                                     + Decimal(str(second_q)))),
+        "residual": float(Decimal(str(_q(d_gap))) - _gap_sum),
         "components": gap_components,
     })
     # 最大支撑/拖累：按**单项调节额**（不含起点净利润），两期各给一组
@@ -322,9 +370,12 @@ def gold(dataset, params: dict | None = None) -> dict:
     """独立金样：逐项 Decimal 手算（不复用 compute 的中间对象），键与载荷 metric 同名。"""
     prev_p, cur_p, g = _gold_bridge(dataset)
     q = lambda x: Decimal(str(x)).quantize(Decimal("0.01"))      # noqa: E731
+    # V1：现金变化桥按**定义**独立算一遍（不是复制 compute 的算式）：
+    # ΔOCF 由两期经营现金流直接相减；分项由两期分组调节额分别独立汇总后相减。
     res = {
         "operating_cashflow_reconciliation_cur": q(g[cur_p]["cf"]),
         "operating_cashflow_reconciliation_prev": q(g[prev_p]["cf"]),
+        "operating_cashflow_change": q(g[cur_p]["cf"] - g[prev_p]["cf"]),
         "cash_gap_change": q((g[cur_p]["cf"] - g[cur_p]["np"])
                              - (g[prev_p]["cf"] - g[prev_p]["np"])),
     }
@@ -360,11 +411,25 @@ def components_gold(dataset, params: dict | None = None) -> dict:
             "other_adjustments": (_q(b["groups"]["other"]), unit),
             "unexplained_residual": (_q(residual), unit),
         }
-    d_gap = ((g[cur_p]["cf"] - g[cur_p]["np"]) - (g[prev_p]["cf"] - g[prev_p]["np"]))
+    # V1：现金变化桥的逐项独立值 + 辅助观察（缺口变化）——两者都按定义手算
+    out["operating_cashflow_change"] = {
+        "change_in_net_profit": (_q(g[cur_p]["np"] - g[prev_p]["np"]), unit),
+        "change_in_non_cash": (_q(g[cur_p]["groups"]["non_cash"]
+                                  - g[prev_p]["groups"]["non_cash"]), unit),
+        "change_in_working_capital": (_q(g[cur_p]["groups"]["working_capital"]
+                                         - g[prev_p]["groups"]["working_capital"]), unit),
+        "change_in_other": (_q(g[cur_p]["groups"]["other"]
+                               - g[prev_p]["groups"]["other"]), unit),
+        "change_in_residual": (_q(
+            ((g[cur_p]["cf"] - g[cur_p]["np"]) - sum(g[cur_p]["groups"].values(),
+                                                     Decimal("0")))
+            - ((g[prev_p]["cf"] - g[prev_p]["np"]) - sum(g[prev_p]["groups"].values(),
+                                                         Decimal("0")))), unit),
+    }
+    d_cf = g[cur_p]["cf"] - g[prev_p]["cf"]
     d_np = g[cur_p]["np"] - g[prev_p]["np"]
-    first, second = _split(d_gap, -d_np)
     out["cash_gap_change"] = {
-        "change_in_net_profit": (Decimal(str(first)), unit),
-        "change_in_adjustments": (Decimal(str(second)), unit),
+        "change_in_operating_cashflow": (_q(d_cf), unit),
+        "change_in_net_profit_negated": (_q(-d_np), unit),
     }
     return out

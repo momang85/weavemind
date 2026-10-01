@@ -238,6 +238,13 @@ def cash_bridge_waterfall(run, *, which: str = "cur",
         parts.append(f"最大支撑 {_clip(sup.get('label'))} {_yi_s(sup.get('value') or 0)} 亿元")
     if drag:
         parts.append(f"最大拖累 {_clip(drag.get('label'))} {_yi_s(drag.get('value') or 0)} 亿元")
+    # V1：图上也要能看出"现金为什么变了"——把同一次运行的 ΔOCF 桥最大构成写进图注
+    chg = _out(run, "operating_cashflow_change")
+    if chg is not None and (chg.components or ()):
+        top = sorted((chg.components or ()),
+                     key=lambda c: -abs(_d(c.get("value")))) [0]
+        parts.append(f"经营现金流变化 {_yi_s(chg.value)} 亿元，最大构成 "
+                     f"{_clip(top.get('label'), 16)} {_yi_s(top.get('value'))} 亿元")
     miss = (diag.get("items_missing") or {}).get(which) or []
     resid = _d(rec.get("residual_yuan") or 0)
 

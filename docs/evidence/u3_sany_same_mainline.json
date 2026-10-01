@@ -134,12 +134,12 @@
               "fair_value_change": {
                 "label": "公允价值变动收益",
                 "contribution_yuan": -359081602.66,
-                "note": "非经营/非经常因素：不得并入经营判断"
+                "note": "需按公司披露的**非经常性损益/扣非归母净利**与业务实质判断是否经常性：不按指标名统一剔除，也不据此制造“正常化利润”"
               },
               "investment_income": {
                 "label": "投资收益",
                 "contribution_yuan": -109105608.81,
-                "note": "非经营/非经常因素：不得并入经营判断"
+                "note": "需按公司披露的**非经常性损益/扣非归母净利**与业务实质判断是否经常性：不按指标名统一剔除，也不据此制造“正常化利润”"
               }
             },
             "structure_vs_price": "分段与均价都是**同一口径的分解**：均价由「该口径收入/销量」算出，含产品结构混合，不能直接命名“提价效果”；分产品/分行业/分地区/分销售模式是不同切法，不可相加"
@@ -172,6 +172,7 @@
           "validation_failed": [],
           "outputs": {
             "operating_cashflow_reconciliation_cur": 4628711237.28,
+            "operating_cashflow_change": -1501509630.68,
             "cash_gap_change": 1852803105.83,
             "largest_support": 586592227.18,
             "largest_drag": -1830670724.59
@@ -550,7 +551,7 @@
               "investment_income": {
                 "label": "投资收益",
                 "contribution_yuan": 820090000.0,
-                "note": "非经营/非经常因素：不得并入经营判断"
+                "note": "需按公司披露的**非经常性损益/扣非归母净利**与业务实质判断是否经常性：不按指标名统一剔除，也不据此制造“正常化利润”"
               }
             },
             "structure_vs_price": "分段与均价都是**同一口径的分解**：均价由「该口径收入/销量」算出，含产品结构混合，不能直接命名“提价效果”；分产品/分行业/分地区/分销售模式是不同切法，不可相加"
@@ -583,6 +584,7 @@
           "validation_failed": [],
           "outputs": {
             "operating_cashflow_reconciliation_cur": 14814278000.0,
+            "operating_cashflow_change": 9106058000.0,
             "cash_gap_change": 7619630000.0,
             "largest_support": 5592854000.0,
             "largest_drag": -643371000.0

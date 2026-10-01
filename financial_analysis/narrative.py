@@ -292,6 +292,15 @@ def _conclusions(od, cash, scens) -> list[str]:
                f"经调节项 {_yi(item.get('adjustments_yuan'))} 亿元后为经营现金流 "
                f"{_yi_plain(item.get('cashflow_yuan'))} 亿元"
                f"（未解释差额 {_yi(item.get('residual_yuan') or 0)} 亿元）")
+        chg = _out(cash, "operating_cashflow_change")
+        if chg is not None:
+            # 现金变化桥的**首要**分项（哪一项解释了现金变化），比"最大支撑/拖累"更贴题
+            comps = sorted((_attr(chg, "components") or ()),
+                           key=lambda c: -abs(float(_attr(c, "value") or 0)))
+            if comps:
+                txt += (f"；现金变化 {_yi(_attr(chg, 'value'))} 亿元，"
+                        f"最大构成 {_attr(comps[0], 'label')} "
+                        f"{_yi(_attr(comps[0], 'value'))} 亿元")
         if sup or drag:
             txt += (f"；最大支撑 {sup.get('label')} {_yi(sup.get('value'))} 亿元、"
                     f"最大拖累 {drag.get('label')} {_yi(drag.get('value'))} 亿元")
@@ -616,17 +625,28 @@ def research_note(runs, *, provenance=None, charts=None, label_of=None) -> str:
     if cash is not None or scens:
         lines.append("### 五、现金形成与反向情景")
         if cash is not None:
+            # V1：**先给现金变化桥**（ΔOCF = Δ合并净利＋Δ非现金＋Δ营运资本＋Δ其他＋Δ差额），
+            # 再给两期调节表与辅助观察；这样"现金为什么变了"才是正文的主角。
+            chg = _out(cash, "operating_cashflow_change")
+            if chg is not None:
+                parts = "、".join(f"{_attr(c, 'label')} {_yi(_attr(c, 'value'))} 亿元"
+                                  for c in (_attr(chg, "components") or ()))
+                lines.append(f"- **经营现金流变化**：{_yi(_attr(chg, 'value'))} 亿元 ＝ {parts}")
+                lines.append("  - 这是**会计构成**：营运资本项变化可能只是时点与资金占用，"
+                             "能不能持续须看应付/应收/存货明细与结算条款；"
+                             "投资收益等是否非经常要看公司非经常性损益披露，不按指标名剔除")
             for o in (_attr(cash, "outputs") or ()):
                 if str(_attr(o, "metric")).startswith("operating_cashflow_reconciliation"):
                     comps = "、".join(f"{_attr(c, 'label')} {_yi(_attr(c, 'value'))} 亿元"
                                       for c in (_attr(o, "components") or ()))
-                    lines.append(f"- **{_attr(o, 'output_period')}**：{comps}")
+                    lines.append(f"- **{_attr(o, 'output_period')}调节表**：{comps}")
             gap = _out(cash, "cash_gap_change")
             if gap is not None:
                 comps = "、".join(f"{_attr(c, 'label')} {_yi(_attr(c, 'value'))} 亿元"
                                   for c in (_attr(gap, "components") or ()))
-                lines.append(f"- **现金缺口变化**：{_yi(_attr(gap, 'value'))} 亿元 ＝ {comps}；"
-                             "缺口＝经营现金流−合并净利润，缺口缩小不等于现金变好")
+                lines.append(f"- **辅助观察：现金缺口变化**（经营现金流−合并净利润）："
+                             f"{_yi(_attr(gap, 'value'))} 亿元 ＝ {comps}；"
+                             "缺口缩小不等于现金变好")
             note = _diag(cash).get("closure_note")
             if note:
                 lines.append(f"- {note}")
