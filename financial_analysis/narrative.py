@@ -387,15 +387,17 @@ def _alternatives(od) -> list[str]:
     lines: list[str] = []
     rate, cf = alt.get("effective_tax_rate") or {}, alt.get("tax_at_prior_rate") or {}
     if rate and cf:
-        effect = float(cf.get("rate_effect_yuan") or 0)
+        effect = float(cf.get("rate_effect_yuan") or 0)     # 正 = 税率变化多吃掉
         verb = "多吃掉" if effect > 0 else "少吃掉"
+        delta_pp = float(rate.get("delta_pp") or 0)
+        move = "上升" if delta_pp > 0 else "下降"
         lines.append(
             f"- **实际税率**：{float(rate.get('prev') or 0):.2%} → "
-            f"{float(rate.get('cur') or 0):.2%}"
-            f"（{float(rate.get('delta_pp') or 0):+.2f}pp）。所得税项在金额分解里看起来"
-            f"是增利项，但按上年实际税率折算本年应只有 "
-            f"{_yi_plain(cf.get('at_prior_rate_yuan'))} 亿元，税率因素实际{verb} "
-            f"{_yi(abs(effect))} 亿元——**这项是利润下滑的被动结果，不是经营改善**")
+            f"{float(rate.get('cur') or 0):.2%}（{delta_pp:+.2f}pp）。本年所得税 "
+            f"{_yi_plain(cf.get('actual_yuan'))} 亿元；按上年实际税率折算为 "
+            f"{_yi_plain(cf.get('at_prior_rate_yuan'))} 亿元——税率{move}本身让税负"
+            f"{verb} {_yi_plain(abs(effect))} 亿元。这是**被动结果**（利润变化会改变税基），"
+            "既不表示经营改善，也不能直接当成业务原因")
     for _key, item in (alt.get("non_operating_items") or {}).items():
         lines.append(f"- **{item.get('label')}** "
                      f"{_yi(item.get('contribution_yuan'))} 亿元：{item.get('note')}")

@@ -214,13 +214,18 @@ def render_operating_drivers_block(run) -> list[str]:
         rate = alt.get("effective_tax_rate") or {}
         cf = alt.get("tax_at_prior_rate") or {}
         if rate and cf:
+            _effect = float(cf.get("rate_effect_yuan") or 0)   # 正 = 税率变化多吃掉
+            _delta = float(rate.get("delta_pp") or 0)
             lines.append(
                 f"  - 实际税率 {float(rate.get('prev') or 0):.2%} → "
                 f"{float(rate.get('cur') or 0):.2%}"
-                f"（{float(rate.get('delta_pp') or 0):+.2f}pp）：所得税的“贡献”多来自"
-                f"利润下滑本身；按上年税率折算本应 "
-                f"{_yi_from_yuan(cf.get('at_prior_rate_yuan'), '元')}，"
-                f"税率因素实际多吃掉 {_yi_from_yuan(cf.get('rate_effect_yuan'), '元')}")
+                f"（{_delta:+.2f}pp）：本年所得税 "
+                f"{_yi_from_yuan(cf.get('actual_yuan'), '元')}，按上年实际税率折算为 "
+                f"{_yi_from_yuan(cf.get('at_prior_rate_yuan'), '元')}——税率"
+                f"{'上升' if _delta > 0 else '下降'}本身让税负"
+                f"{'多吃掉' if _effect > 0 else '少吃掉'} "
+                f"{_yi_from_yuan(abs(_effect), '元').lstrip('+')}，这是**被动结果**"
+                "（税基随利润变），不等于经营改善")
         for key, item in (alt.get("non_operating_items") or {}).items():
             lines.append(f"  - {item.get('label')} "
                          f"{_yi_from_yuan(item.get('contribution_yuan'), '元')}："
