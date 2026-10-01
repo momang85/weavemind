@@ -2960,5 +2960,21 @@ class TestU2ResearchNote(unittest.TestCase):
         self.assertIn("口径 ", block, "来源表要写口径/血缘（报告链没有页码定位）")
 
 
+    def test_brief_markdown_emits_the_note_section(self):
+        """成篇正文要真的进**简报正文**（装配进 structure 只是一半）。"""
+        import report_brief
+        md = report_brief.render_brief_markdown(
+            {"scope": {"company": "洋河股份", "company_id": "002304.SZ",
+                       "caliber": "合并", "as_of": "2025-04-30"},
+             "analysis_note": ("## 经营驱动分析正文（洋河股份 2023年→2024年）\n\n"
+                               "### 一、结论（先看这三条）\n1. 占位\n"),
+             "analysis_card": "## 分析卡\n- 占位"},
+            body="正文占位")
+        self.assertIn("## 经营驱动分析正文", md)
+        self.assertIn("### 一、结论", md)
+        # 顺序：先卡后正文（分析正文是长文，跟在卡后面）
+        self.assertLess(md.index("## 分析卡"), md.index("## 经营驱动分析正文"))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)
