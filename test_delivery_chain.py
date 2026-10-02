@@ -1313,6 +1313,9 @@ class TestSearchFailureFallback(unittest.TestCase):
         from orchestrator_v2 import OrchestratorV2
 
         o = OrchestratorV2.__new__(OrchestratorV2)
+        # 本用例验"代码域兜底仍回代码"这条既有规则：显式声明沙箱可用，
+        # 沙箱不可用时的**显式降级**由 X0 用例单独覆盖。
+        o._sandbox_blocker = lambda: ""
         alt = o._generation_fallback_step(
             "写一个愤怒的小鸟",
             {"capability": "web_fetch", "instruction": "获取愤怒的小鸟游戏源代码并生成 main.py"},
@@ -1338,6 +1341,9 @@ class TestSearchFailureFallback(unittest.TestCase):
                 pass
 
         o = OrchestratorV2.__new__(OrchestratorV2)
+        # 本用例只验"代码域失败仍回代码/抓取修订替换"这条既有规则：
+        # 显式声明沙箱可用，沙箱不可用时的**显式降级**由 X0 用例单独覆盖。
+        o._sandbox_blocker = lambda: ""
         o._messaging = _FakeMsg()
         alt = o._replan_step(
             "写一个愤怒的小鸟",
@@ -1356,6 +1362,9 @@ class TestSearchFailureFallback(unittest.TestCase):
                 pass
 
         o = OrchestratorV2.__new__(OrchestratorV2)
+        # 本用例只验"代码域失败仍回代码/抓取修订替换"这条既有规则：
+        # 显式声明沙箱可用，沙箱不可用时的**显式降级**由 X0 用例单独覆盖。
+        o._sandbox_blocker = lambda: ""
         o._messaging = _FakeMsg()
         alt = o._replan_step(
             "写一个愤怒的小鸟",
@@ -1374,6 +1383,9 @@ class TestSearchFailureFallback(unittest.TestCase):
                 pass
 
         o = OrchestratorV2.__new__(OrchestratorV2)
+        # 本用例只验"代码域失败仍回代码/抓取修订替换"这条既有规则：
+        # 显式声明沙箱可用，沙箱不可用时的**显式降级**由 X0 用例单独覆盖。
+        o._sandbox_blocker = lambda: ""
         o._messaging = _FakeMsg()
         alt = o._replan_step(
             "做一个贪吃蛇游戏",
@@ -1391,6 +1403,9 @@ class TestSearchFailureFallback(unittest.TestCase):
         from orchestrator_v2 import OrchestratorV2
 
         o = OrchestratorV2.__new__(OrchestratorV2)
+        # 本用例只验"代码域失败仍回代码/抓取修订替换"这条既有规则：
+        # 显式声明沙箱可用，沙箱不可用时的**显式降级**由 X0 用例单独覆盖。
+        o._sandbox_blocker = lambda: ""
         alt = o._generation_fallback_step(
             "写一个愤怒的小鸟",
             {"capability": "code_execution", "instruction": "生成一个单文件 HTML 游戏"},
@@ -1404,6 +1419,9 @@ class TestSearchRevisionFlow(unittest.TestCase):
         from orchestrator_v2 import OrchestratorV2
 
         o = OrchestratorV2.__new__(OrchestratorV2)
+        # 本用例只验"代码域失败仍回代码/抓取修订替换"这条既有规则：
+        # 显式声明沙箱可用，沙箱不可用时的**显式降级**由 X0 用例单独覆盖。
+        o._sandbox_blocker = lambda: ""
         pending = {
             "2": {"step_id": "2", "capability": "web_fetch", "instruction": "获取愤怒的小鸟游戏代码", "depends_on": ["1"]},
             "3": {"step_id": "3", "capability": "file_io", "instruction": "保存文件", "depends_on": ["2"]},

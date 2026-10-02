@@ -3415,9 +3415,55 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             logger.warning("Reflection refinement RAG record failed: %s", str(exc)[:120])
 
     def _generation_fallback_step(self, goal: str, step: dict, structured_hint: str = "") -> dict:
-        """搜索/抓取无果时的降级步骤：优先用结构化数据，其次模型知识（须标注）。"""
+        """搜索/抓取无果时的降级步骤：优先用结构化数据，其次模型知识（须标注）。
+
+        X0（10-02 实测 `ui-f6a0ad5f4e`／`ui-14f63dd6ee`）：**代码生成兜底只对"目标本身要
+        代码交付物"的任务成立**。此前只要失败步骤的指令里出现 web/网页/html 就生成
+        "自包含 HTML 页面/游戏"——公司研究的抓取指令天然含"网页"，于是 web_search 返回空列表
+        后被重规划成一个**与任务域无关、且依赖代码执行沙箱**的步骤；本机没有容器隔离时
+        该步骤必死（两单同一位置确定性失败）。现在两道判据：
+
+        - `_goal_wants_code(goal)` 为假 → 一律走"结构化数据/模型知识"的文本兜底；
+        - 目标要代码而**沙箱不可用** → **显式降级**为"给出可复制的代码文本并说明未能运行
+          验证"，不派发一个会被拒绝执行的 code_execution 步骤（也不静默跳过）。
+        """
         ins = str(step.get("instruction") or "")
-        if any(k in ins.lower() for k in ("html", "网页", "web", "webpage")):
+        try:
+            wants_code = bool(self._goal_wants_code(goal))
+        except Exception:                            # noqa: BLE001 - 判据取不到按"不要代码"
+            wants_code = False
+        # 兜底补三条**不改变域**的判据（否则"写一个愤怒的小鸟"这类目标会因为意图模块
+        # 没认出"要代码"而被降级成文本）：① 目标里有明确的代码/页面类交付词；
+        # ② **失败步骤的指令**里有强代码词（代码/脚本/程序/main.py/游戏…）——
+        #    注意**不含**"网页/html/页面/web"：公司研究的抓取指令天然含"网页"，正是
+        #    10-02 那两单被误判成"生成 HTML 游戏"的原因；
+        # ③ 失败的这一步本身就是 code_execution（既有规则：代码失败回到代码）。
+        if not wants_code:
+            _goal_markers = ("游戏", "网页", "html", "HTML", "脚本", "程序", "小应用",
+                             "工具", "单文件", "页面", "贪吃蛇", "打砖块", "俄罗斯方块",
+                             "计算器", "待办", ".py", "main.py")
+            _step_markers = ("代码", "游戏", "脚本", "程序", "main.py", ".py",
+                             "贪吃蛇", "打砖块", "俄罗斯方块", "计算器", "小应用", "待办")
+            wants_code = (any(k in str(goal) for k in _goal_markers)
+                          or any(k in ins for k in _step_markers)
+                          or str(step.get("capability") or "") == "code_execution")
+        blocker = ""
+        try:
+            blocker = str(self._sandbox_blocker() or "")
+        except Exception:                            # noqa: BLE001
+            blocker = ""
+        if wants_code and blocker:
+            return {
+                "capability": "content_summary",
+                "instruction": (
+                    "本机没有可用的代码执行隔离（" + blocker + "）：**不派发代码执行步骤**。"
+                    "改为直接产出**可复制的完整代码文本**（单文件、自包含，放在交付报告里），"
+                    "并在开头如实写明「本次未在隔离环境运行验证」。实现要求："
+                    f"{ins[:500]}"
+                ),
+                "timeout": 300,
+            }
+        if wants_code and any(k in ins.lower() for k in ("html", "网页", "web", "webpage")):
             return {
                 "capability": "code_execution",
                 "instruction": (
@@ -3427,7 +3473,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 ),
                 "timeout": 180,
             }
-        if any(k in ins for k in (
+        if wants_code and any(k in ins for k in (
             "代码", "实现", "生成", "编写", "开发", "脚本", "main.py", ".py", "游戏",
         )):
             return {
@@ -8162,6 +8208,28 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                             exclude=self._fetched_urls(task_id),
                             contract=_contract,
                         )
+                        if not best:
+                            # X0（10-02 实测 `ui-c066b12a5d`）：**用户显式给的直链也是候选**。
+                            # 表单/目标文本里附的官方 URL 是用户明确指定，检索为空时照样抓它；
+                            # 这不是"抓第一页"（那是指盲取候选列表首项），所以只给**年报正文**
+                            # 那一步用，且跳过已抓过/已知死链，避免两步抓同一页。
+                            try:
+                                _goal_txt = str((getattr(self, "_task_goals", {}) or {})
+                                                .get(task_id, "") or "")
+                                _explicit = [_clean_fetch_url(u) for u in re.findall(
+                                    r"https?://[^\s<>\"'）)】\]]+", _goal_txt)]
+                                _explicit = [u for u in _explicit if u
+                                             and u not in self._fetched_urls(task_id)
+                                             and u not in getattr(self, "_dead_fetch_urls", set())]
+                            except Exception:               # noqa: BLE001
+                                _explicit = []
+                            if _explicit and fetch_role == "annual_report":
+                                best = _explicit[0]
+                                push_progress(self._messaging, task_id, "log",
+                                              {"type": "replan", "agent": "orchestrator",
+                                               "message": ("使用用户显式提供的直链作为抓取目标："
+                                                           + str(best)[:100]),
+                                               "timestamp": self._now_iso()})
                         if best:
                             instr = _with_selected_url(instr, best)
                     else:

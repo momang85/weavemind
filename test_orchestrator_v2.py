@@ -2355,5 +2355,51 @@ class TestFetchUrlSelection(unittest.TestCase):
         self.assertIn("缺口", str(out.get("note") or "") + str(out.get("error") or ""))
 
 
+class TestSearchFallbackDomainGate(unittest.TestCase):
+    """X0（10-02 实测）：搜索失败后的兜底**不得**跳出任务域、也不得派发必死步骤。
+
+    反例 `ui-f6a0ad5f4e` / `ui-14f63dd6ee`：web_search 返回空列表 → 重规划成
+    `code_execution`「自包含单文件 HTML 页面/游戏」（因为抓取指令里含"网页"），
+    本机没有容器隔离 → 该步骤必死，两单在同一位置确定性失败。
+
+    规则：只有**目标本身要代码交付物**才走代码兜底；目标要代码而沙箱不可用时
+    **显式降级**为"给出可复制代码文本并说明未运行验证"，而不是派发会被拒绝的步骤。
+    """
+
+    def _orch(self):
+        return OrchestratorV2.__new__(OrchestratorV2)
+
+    def test_research_goal_never_falls_back_to_code(self):
+        o = self._orch()
+        step = {"capability": "web_search",
+                "instruction": "检索 洋河股份 年报正文页（网页），返回含原始 URL 的结果列表"}
+        goal = "研究洋河股份（002304.SZ）2023/2024 年报：收入、利润与现金流"
+        alt = o._generation_fallback_step(goal, step)
+        self.assertEqual(alt.get("capability"), "content_summary", alt)
+        self.assertIn("外部检索/抓取失败", str(alt.get("instruction") or ""))
+
+    def test_code_goal_keeps_code_fallback_when_sandbox_ready(self):
+        o = self._orch()
+        step = {"capability": "web_search",
+                "instruction": "检索 贪吃蛇游戏 的网页实现参考（html）"}
+        goal = "写一个可以玩的贪吃蛇游戏单文件 HTML 页面"
+        with mock.patch.object(OrchestratorV2, "_sandbox_blocker",
+                               staticmethod(lambda: "")):
+            alt = o._generation_fallback_step(goal, step)
+        self.assertEqual(alt.get("capability"), "code_execution", alt)
+
+    def test_code_goal_degrades_explicitly_when_sandbox_unavailable(self):
+        o = self._orch()
+        step = {"capability": "web_search",
+                "instruction": "检索 贪吃蛇游戏 的网页实现参考（html）"}
+        goal = "写一个可以玩的贪吃蛇游戏单文件 HTML 页面"
+        with mock.patch.object(OrchestratorV2, "_sandbox_blocker",
+                               staticmethod(lambda: "容器隔离不可用")):
+            alt = o._generation_fallback_step(goal, step)
+        self.assertEqual(alt.get("capability"), "content_summary", alt)
+        self.assertIn("不派发代码执行步骤", str(alt.get("instruction") or ""))
+        self.assertIn("容器隔离不可用", str(alt.get("instruction") or ""))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
