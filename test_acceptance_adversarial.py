@@ -456,5 +456,75 @@ class TestAcceptanceProfileGating(_AdversarialBase):
         self.assertTrue(r["checks"]["number_traceability"].get("applicable"))
 
 
+class TestX0LocatorAndDerivedSourceClaims(unittest.TestCase):
+    """X0（10-02 真实任务 `ui-d5af8cae2f`）：定位/派生型来源声明**按产物核验**，不是"删除失败项"。
+
+    真实反例：来源位置列写「PDF 第 75 页 · 合并利润表 · 行「…」」与派生说明
+    「2024年 合并：营业收入 − 营业成本」被判"虚假标注"（旧实现把它们当**来源名**去和
+    检索 URL/媒体名比）。修法是**逐字/按指标核验**：位置要在底稿的定位文本里找得到，
+    派生说明要在底稿的派生事实里找得到——**核不到仍然判虚假**（本用例两个方向都钉住）。
+    """
+
+    LOC = "PDF 第 75 页 · 合并利润表 · 行「其中：营业收入 28,876,296,993.56 33,126,277,551」"
+    DER = "2024年 合并：营业收入 − 营业成本"
+
+    def _sources(self, **over):
+        base = {
+            "workpaper_rows": "洋河股份 营业收入 2024年 288.76亿元 " + self.LOC,
+            "workpaper_derived_facts_json": json.dumps(
+                [{"kind": "derived", "metric": "gross_profit", "period": "2024年",
+                  "formula": "28876296993.56 - 7751218356.66",
+                  "derived_from": ["fact-a", "fact-b"]}], ensure_ascii=False),
+            "fetch_snapshot": "2024年年度报告 合并利润表 合并现金流量表 "
+                              "http://static.cninfo.com.cn/finalpage/2025-04-29/x.PDF",
+        }
+        base.update(over)
+        return base
+
+    def test_real_locator_and_derived_claims_are_honest(self):
+        import acceptance_checker as ac
+        report = (f"## 披露支持与来源定位\n| 读数 | 期间 | 披露值 | 来源位置（原件） |\n"
+                  f"|---|---|---:|---|\n| 营业收入 | 2024年 | 288.76亿元 | [{self.LOC}](http://x/1) |\n"
+                  f"| 毛利润 | 2024年 | 211.25亿元 | [{self.DER}](http://x/1) |\n")
+        res = ac.check_source_labeling(report, self._sources())
+        self.assertTrue(res["pass"], res)
+
+    def test_fabricated_locator_and_derived_claim_still_fail(self):
+        """造假的两类仍然要被判虚假：位置在底稿里找不到、派生事实不存在。"""
+        import acceptance_checker as ac
+        fake_loc = "PDF 第 999 页 · 虚构表 · 行「不存在的科目 1 2」"
+        tbl = ("## 来源\n| 读数 | 期间 | 披露值 | 来源位置（原件） |\n|---|---|---:|---|\n")
+        res = ac.check_source_labeling(
+            tbl + f"| 营业收入 | 2024年 | 288.76亿元 | [{fake_loc}](http://x/1) |\n",
+            self._sources())
+        self.assertFalse(res["pass"], res)
+        self.assertTrue(any("虚构表" in m or "999" in m for m in res["mislabeled"]),
+                        res["mislabeled"])
+        # 派生说明：底稿里没有 gross_profit 派生事实 → 仍判虚假
+        res2 = ac.check_source_labeling(
+            tbl + f"| 毛利润 | 2024年 | 211.25亿元 | [{self.DER}](http://x/1) |\n",
+            self._sources(workpaper_derived_facts_json="[]"))
+        self.assertFalse(res2["pass"], res2)
+
+    def test_official_disclosure_row_is_not_attributed_to_other_companies(self):
+        """clean 行来源是**本公司官方披露**时不做网络源归属推断（网页来源仍走原规则）。"""
+        import acceptance_checker as ac
+        self.assertTrue(ac._official_disclosure_url(
+            "http://static.cninfo.com.cn/finalpage/2025-04-29/x.PDF"))
+        self.assertFalse(ac._official_disclosure_url("https://news.example.com/a"))
+        clean = json.dumps({"market_share": [
+            {"label": "消费税按照销售额", "value": "10.0", "unit": "%",
+             "source": "http://static.cninfo.com.cn/finalpage/2025-04-29/x.PDF"}]},
+            ensure_ascii=False)
+        srcs = {"clean_chart_data": clean,
+                "search_results": "腾讯 2024年 市场占比 10.0% 营收\n腾讯 占比 10.0%"}
+        res = ac.check_entity_attribution(
+            "洋河股份营业收入 288.76亿元。", srcs,
+            "研究洋河股份（002304.SZ）2024 年报")
+        vals = [c.get("value") for c in res.get("contaminated") or []]
+        self.assertNotIn("消费税按照销售额 = 10.0%", vals, res)
+        self.assertTrue(res["pass"], res)
+
+
 if __name__ == "__main__":
     unittest.main()

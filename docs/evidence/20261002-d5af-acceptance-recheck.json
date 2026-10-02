@@ -1,0 +1,35 @@
+{
+ "case": "ui-d5af8cae2f 两项验收失败的只读复验（选定候选正文冻结复算）",
+ "task_id": "ui-d5af8cae2f",
+ "candidate_body_sha256": "6145120084227eac85a2f779162415fb5be05029c7bb7a6f1a777feab980f368",
+ "candidate_body_chars": 27378,
+ "read_only": true,
+ "before_fix": {
+  "entity_attribution": "污染 3 处：占当期营业收入/占公司营业收入/消费税按照销售额 = 10.0% 被判『网络源证据指向其他公司』",
+  "source_labeling": "虚假标注 5 条：4 条 PDF 页码定位（第 75/76/77/20 页·合并利润表/合并现金流量表·行「…」）＋1 条派生说明「2024年 合并：营业收入 − 营业成本」"
+ },
+ "after_fix": {
+  "source_labeling": {
+   "pass": true,
+   "details": "来源声明检查 5 条，虚假标注 0 条，全部可溯源或已明示",
+   "mislabeled": [],
+   "contaminated": []
+  },
+  "entity_attribution": {
+   "pass": true,
+   "details": "主体归属校验 849 处上下文，污染 0 处，无不属于目标公司的数字；归属模糊 550 处",
+   "mislabeled": [],
+   "contaminated": []
+  }
+ },
+ "source_channels": [
+  "clean_chart_data",
+  "fetch_snapshot",
+  "financials",
+  "located_facts",
+  "search_results",
+  "workpaper_derived_digest",
+  "workpaper_derived_facts_json",
+  "workpaper_rows"
+ ]
+}

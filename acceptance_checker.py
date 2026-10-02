@@ -3530,6 +3530,13 @@ def check_entity_attribution(
                         })
                         continue
                     # 中性 label 行：值只出现在其他公司的网络源上下文 → 污染
+                    # X0（10-02 真实任务 `ui-d5afcae2f` 同源）：**行来源是本公司官方披露**
+                    # 时不做"网络源归属推断"——这类行（如「消费税按照销售额 10%」「占当期
+                    # 营业收入 10%」）来自发行人年报原文，主体在准入时已核验；拿它去网络源里
+                    # 找归属，只会因为"另一个公司的网页里也有 10%"而误判污染。
+                    if _official_disclosure_url(src_url):
+                        checked += 1
+                        continue
                     if _web_other_only({"value": val, "unit": unit}, target):
                         contaminated.append({
                             "value": f"{label} = {val}{unit}",
@@ -4017,6 +4024,68 @@ def auto_repair_source_labels(report: str, mislabeled: list[str]) -> str:
     return "\n".join(lines)
 
 
+# 官方披露站点（行来源是这些站点时，主体归属由**准入时的主体核验**兜底；
+# 不再用"网络源上下文里有没有别家公司"来推断这些行的归属）
+_OFFICIAL_DISCLOSURE_HOSTS = (
+    "static.cninfo.com.cn", "cninfo.com.cn", "www.sse.com.cn", "www.szse.cn",
+    "www.neeq.com.cn", "www.sec.gov", "data.sec.gov",
+)
+
+
+def _official_disclosure_url(url: str) -> bool:
+    """该 URL 是否指向官方披露站点（发行人自己的年报/公告）。"""
+    u = str(url or "").strip().lower()
+    if not u:
+        return False
+    return any(h in u for h in _OFFICIAL_DISCLOSURE_HOSTS)
+
+
+def _locator_grounded_in_artifacts(claim: str, sources: dict) -> bool:
+    """**定位/派生型**来源声明是否由任务自己的确定性产物给出（逐字核对）。
+
+    为什么需要（10-02 真实任务 `ui-d5af8cae2f` `source_labeling` 5/5 假失败）：
+    `report_brief`/`narrative` 的来源位置列写的是**位置**与**派生说明**，例如
+    「PDF 第 75 页 · 合并利润表 · 行「其中：营业收入 28,876,296,993.56 33,126,277,551」」
+    「2024年 合并：营业收入 − 营业成本」。旧实现把表格"来源"列单元格当成**来源名**，
+    拿它去和检索 URL/媒体名比 → 必然对不上 → 全部判"虚假标注"。真实核验应当是：
+    这句话能否在**底稿/引用证据**里逐字找到（能 → 它是确定性链给出的位置，诚实）。
+
+    只对**定位/派生形态**的句子生效（含「第 N 页」/「行「」/「派生/推算」/算式连接符），
+    其余声明仍按来源名规则判——不给"任何句子都能蒙混过关"的口子。
+    """
+    text = str(claim or "").strip()
+    if not text:
+        return False
+    looks_locator = bool(re.search(r"第\s*\d+\s*页", text)) or "行「" in text
+    looks_derived = ("派生" in text or "推算" in text
+                     or ("−" in text and "：" in text) or ("＝" in text and "：" in text))
+    if not (looks_locator or looks_derived):
+        return False
+    # 派生说明：底稿的**派生事实**里必须真的有对应项（按指标名核验，不做"有派生就算过"）
+    if looks_derived:
+        der = str((sources or {}).get("workpaper_derived_facts_json") or "")
+        if not der:
+            return False
+        if ("营业收入" in text and "营业成本" in text
+                and '"metric": "gross_profit"' in der):
+            return True          # 毛利＝营业收入−营业成本：底稿里有这条派生事实
+        if "派生" in text or "推算" in text:
+            return False         # 只标了"派生"但核不到对应事实 → 仍按来源名规则判
+    hay = "\n".join(str((sources or {}).get(k) or "")
+                    for k in ("workpaper_rows", "workpaper_derived_facts_json",
+                              "workpaper_derived_digest", "workpaper_derived",
+                              "located_facts", "working_paper", "narrative_evidence",
+                              "fetch_snapshot"))
+    if not hay:
+        return False
+    # 逐字命中，或"位置主体"命中（去掉引号内被截断的行文后再找一次）
+    if text in hay:
+        return True
+    core = re.sub(r"^(PDF\s*)?第\s*\d+\s*页\s*[·:：]?\s*", "", text)
+    core = core.split("行「")[0].strip(" ·:：")
+    return bool(core and len(core) >= 4 and core in hay)
+
+
 def check_source_labeling(report: str, sources: dict) -> dict:
     """来源标注诚实性：报告中"数据来源：X"的 X 是否真的在检索/快照中出现。
     - 含 URL / 命中已知媒体名 / 命中源标题 → 诚实
@@ -4081,6 +4150,12 @@ def check_source_labeling(report: str, sources: dict) -> dict:
             w and any(w in t for t in known["titles"] if t)
             for w in (m.group(0) for m in _MEDIA_WORD_RE.finditer(c))
         ):
+            continue
+        # X0（10-02 真实任务 `ui-d5af8cae2f`）：**分析层给出的来源位置/派生说明**单元格，
+        # 与任务自己的确定性产物（底稿/引用证据）逐字核对——命中即诚实，不拿它去和
+        # "来源名/URL 清单"比（那必然对不上：『PDF 第 75 页 · 合并利润表 · 行「…」』
+        # 是位置而不是来源名）。未命中仍走下面的来源名规则，真实虚假标注照样被判。
+        if _locator_grounded_in_artifacts(c, sources):
             continue
         # 权威文档判定（否定感知）：仅当不含否定词且命中权威文档词，
         # 且检索中无对应文档 → 虚假标注
