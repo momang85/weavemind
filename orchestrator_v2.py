@@ -1531,6 +1531,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     f"返回含原始 URL 的结果列表。{contract_note}"
                 ),
                 "timeout": 180,
+                "depends_on": [],
             },
             {
                 "step_id": "2",
@@ -1542,6 +1543,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     f"主链接失败则换备用链接。{contract_note}"
                 ),
                 "timeout": 300,
+                "depends_on": ["1"],
             },
             {
                 # F2 定向取证：第二个抓取步骤，取与步骤 2 **不同**的一页（附注/风险/数据）。
@@ -1559,6 +1561,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 ),
                 "timeout": 300,
                 "optional": True,
+                "depends_on": ["1"],
             },
             {
                 "step_id": "3",
@@ -1570,6 +1573,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     "不得引入块外数字，不得自行换算或补齐缺失年份。"
                 ),
                 "timeout": 900,
+                # 解释依赖"本轮取证 + 本轮分析"：顺序在计划里写明，不靠兜底接线猜
+                "depends_on": ["1", "2", "2b", "3a"],
             },
             {
                 # **金融研究必须跑注册模型**（2026-09-29 两次付费整跑实机反例）：
@@ -1588,6 +1593,11 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     f"必须如实标注理由，不得凑数、不得引入事实块外的数字。{contract_note}"
                 ),
                 "timeout": 600,
+                # 显式声明"等本轮事实"：分析必须消费**本轮取证落下的**事实快照，
+                # 不得与取证步骤并行（实机 ui-d5af8cae2f：3a 在正式取证之前就跑完，
+                # 冻结数据集里没有本轮事实 → 下游解释/报告/验收缺口与上一版逐字相同）。
+                # 2b 是 optional（第二个来源取不到不算失败），不阻塞本步。
+                "depends_on": ["1", "2", "2b"],
             },
             {
                 "step_id": "4",
@@ -1602,6 +1612,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     f"{perspective_note}"
                 ),
                 "timeout": 1200,
+                # 报告消费解释与分析卡（同一份 analysis/analysis_runs.json）
+                "depends_on": ["1", "2", "2b", "3", "3a"],
             },
         ]
 
@@ -1962,11 +1974,13 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         return domain, tuple(chain[:5])
 
     @staticmethod
-    def _acceptance_passed(task_id: str) -> bool | None:
+    def _acceptance_passed(task_id: str, candidate: str = "") -> bool | None:
         """任务验收是否通过（无验收报告返回 None）。
 
         M0-d：优先取**选中版本自身的验收**（验收与正文版本绑定）；版本库里没有该版
         证据时退回 acceptance_report.json，两者都没有就是未知（None，不算通过）。
+        传 `candidate` 时，退回文件的那条也必须是**当前交付候选**的验收：文件里的
+        最后一份可能属于上一版正文，拿它当"本候选已通过"就是拿旧结论给新稿背书。
         """
         try:
             from report_version import VersionStore
@@ -1981,9 +1995,65 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             if not acc_path.exists():
                 return None
             acc = json.loads(acc_path.read_text(encoding="utf-8"))
+            _body = str(candidate or "")
+            if _body:
+                _rec = str(acc.get("report_sha256") or "")
+                _cur = hashlib.sha256(_body.encode("utf-8")).hexdigest()
+                if not _rec or (_rec != _cur and not _cur.startswith(_rec)):
+                    return None          # 文件里的结论不属于本候选 → 未执行（未知）
             return acc.get("overall") == "pass"
         except Exception:
             return None
+
+    def _repair_fingerprint(self, task_id: str, candidate: str, gap_sig: str = "") -> str:
+        """修复回合的"输入 / 正文 / 缺口"三合一指纹，用于**无收益修复停损**。
+
+        - 输入 = 本轮来源/事实快照指纹（只取来源通道，不含报告文本，见
+          `delivery_pipeline.sources_fingerprint`）；
+        - 正文 = 当前交付候选的正文哈希；
+        - 缺口 = 本条链路的验收缺口签名。
+
+        三者全同表示"再重做一次只会得到同一份输入、同一份正文、同一组缺口"。
+        该判定**不依赖 iteration**：单步重做路径（`retry_step` + `continue`）不递增
+        iteration，此前 `iteration > 0` 的门控让同缺口重复重做永远停不下来。
+        """
+        try:
+            _inp = self._sources_fingerprint(task_id, "")
+        except Exception:
+            _inp = ""
+        _body = (hashlib.sha256(str(candidate or "").encode("utf-8")).hexdigest()[:16]
+                 if candidate else "")
+        return f"{_inp}|{_body}|{str(gap_sig or '')}"
+
+    def _repair_stop_decision(self, last_fp: str, task_id: str,
+                              candidate: str, gap_sig: str) -> tuple[bool, str]:
+        """是否应停止"无收益修复"：返回 (是否停, 本轮指纹)。
+
+        判据是**输入/正文/缺口三合一指纹**与上一轮相同。刻意不带 iteration 参数：
+        单步重做路径不递增 iteration，"已过首轮"不能当停损前提（旧门控下同缺口会
+        一直重复重做）。
+        """
+        cur = self._repair_fingerprint(task_id, candidate, gap_sig)
+        return (bool(last_fp) and cur == last_fp), cur
+
+    def _acceptance_for_candidate(self, task_id: str, candidate: str) -> dict | None:
+        """验收结论**只对当前交付候选**有效，否则按"未执行"处理（None）。
+
+        缺报告（还没有交付候选）或报告改版后旧结论未复检时，既不算 fail 也不算
+        pass——三态分离下"未执行"就是未执行，不能拿别的正文的结论驱动修复或放行。
+        """
+        if not str(candidate or ""):
+            return None
+        summary = self._read_acceptance_summary(task_id)
+        if not summary:
+            return None
+        _rec = str(summary.get("report_sha256") or "")
+        if not _rec:
+            return None                      # 无正文绑定的读数证明不了属于本候选
+        _cur = hashlib.sha256(str(candidate).encode("utf-8")).hexdigest()
+        if _rec != _cur and not _cur.startswith(_rec):
+            return None
+        return summary
 
     def _sources_fingerprint(self, task_id: str, report_text: str = "") -> str:
         """本轮来源/事实快照指纹（B 批起唯一实现在 `delivery_pipeline`）。"""
@@ -3165,6 +3235,35 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             )
             return None
 
+    @staticmethod
+    def _topo_order_within(subset: list[dict], all_steps: list[dict]) -> list[dict]:
+        """把一段步骤子集按**闭包内拓扑顺序**排序（上游先跑，同层按 step_id 稳定）。
+
+        只用闭包内的依赖边算最长路径深度：按"依赖条数"排序在两条同长链路并行时
+        会把下游排到上游前面（C←1、D←C 时 C 与 D 条数相同）。
+        """
+        ids = {str(s.get("step_id")) for s in subset}
+        deps = {}
+        for s in all_steps:
+            sid = str(s.get("step_id"))
+            if sid not in ids:
+                continue
+            deps[sid] = [str(d) for d in (s.get("depends_on") or []) if str(d) in ids]
+        depth = {i: 0 for i in ids}
+        for _ in range(len(ids) + 1):
+            changed = False
+            for i, ds in deps.items():
+                if not ds:
+                    continue
+                v = 1 + max((depth.get(d, 0) for d in ds), default=0)
+                if v > depth[i]:
+                    depth[i] = v
+                    changed = True
+            if not changed:
+                break
+        return sorted(subset, key=lambda s: (depth.get(str(s.get("step_id")), 0),
+                                             str(s.get("step_id"))))
+
     def _redo_step_and_dependents(
         self, task_id: str, goal: str,
         all_steps: list[dict], completed_all: dict,
@@ -3192,30 +3291,43 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             s for s in all_steps
             if s["step_id"] == step_id or s["step_id"] in dependents
         ]
-        # B3：单轮反思重做最多 N 步（默认 2），避免缺口多时把整条依赖链全部重做。
-        # 排序保证目标步骤优先，其余按依赖距离（依赖越少越靠前）截断。
-        order.sort(key=lambda s: (
-            s["step_id"] != step_id,
-            len(s.get("depends_on", []) or []),
-        ))
+        # 执行顺序 = 闭包内的**拓扑顺序**（按最长依赖路径深度）。此前用
+        # "依赖条数"排序：C 与 D 都只依赖 1 步时可能 D 先跑，重做链内部次序错乱。
+        order = self._topo_order_within(order, all_steps)
+        # B3：单轮反思重做最多 N 步（默认 2）——**只限取证类步骤**
+        # （web_search / web_fetch：补资料的尝试可能反复无果、每次都花钱）。
+        # 其余闭包成员（分析/解释/报告/打包）是修复的**兑现**：截断它们等于修复没做。
+        # 实机 ui-d5af8cae2f：事实变了、分析/报告/打包都在闭包里，却因"仅重做前 2 步"
+        # 被截断，分析仍消费旧数据集 → 重做后正文与验收缺口逐字不变（"重做后仍失败"
+        # 其实是下游没跑完）。成本由 §2-5 的"输入/正文/缺口全同即停"兜住。
         max_redo_steps = max(
             1, int(getattr(self, "_max_redo_steps", 2) or 2)
         )
-        if len(order) > max_redo_steps:
+        _speculative_caps = ("web_search", "web_fetch")
+        required = [s for s in order
+                    if str(s.get("capability") or "") not in _speculative_caps]
+        expensive = [s for s in order
+                     if str(s.get("capability") or "") in _speculative_caps]
+        if len(expensive) > max_redo_steps:
             logger.warning(
-                "单轮反思重做步数上限 %d，本次从 %d 步中仅重做前 %d 步",
-                max_redo_steps, len(order), max_redo_steps,
+                "单轮反思取证重做步数上限 %d，本次从 %d 步中仅重做前 %d 步"
+                "（分析/解释/报告/打包 %d 步照常完成）",
+                max_redo_steps, len(expensive), max_redo_steps, len(required),
             )
             push_progress(self._messaging, task_id, "log",
                           {"type": "iteration", "agent": "orchestrator",
                            "message": (
-                               f"单轮反思重做步数上限 {max_redo_steps}，"
-                               f"仅重做前 {max_redo_steps} 步"
+                               f"单轮反思取证重做步数上限 {max_redo_steps}，"
+                               f"仅重做前 {max_redo_steps} 步取证；"
+                               f"分析/解释/报告/打包 {len(required)} 步照常完成"
                            ),
                            "timestamp": self._now_iso()})
-            order = order[:max_redo_steps]
+            expensive = expensive[:max_redo_steps]
+        order = self._topo_order_within(expensive + required, all_steps)
+        _ctx_lock = threading.Lock()
         for s in order:
             s2 = dict(s)
+            _orig_deps = list(s.get("depends_on") or [])
             s2["depends_on"] = []  # 依赖步骤已完成，单步独立重做
             if s["step_id"] == step_id:
                 extra = ""
@@ -3239,6 +3351,21 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                     s2["instruction"] = (
                         f"{s['instruction']}\n\n【反思要求重做】{feedback}{extra}"
                     )
+            # 重做必须带上**本轮更新后的**前序产物：`_execute_steps` 在派发前会注入
+            # 前序结果/[已选事实]/证据块，重做路径此前只清空 depends_on 就直接派发 →
+            # 模型拿着同一份旧输入再生成一遍，正文与缺口逐字不变（实机 ui-d5af8cae2f
+            # 的"重做后仍失败"）。注入用**原始依赖**取前序结果（s2 的 depends_on
+            # 已清空，以免被当作待执行的依赖）。
+            try:
+                _ctx_step = dict(s2)
+                _ctx_step["depends_on"] = _orig_deps
+                _injected = self._inject_step_context(
+                    _ctx_step, completed_all, _ctx_lock, task_id)
+                if _injected and _injected != s2.get("instruction"):
+                    s2["instruction"] = _injected
+            except Exception as exc:             # noqa: BLE001 - 注入失败不阻断重做
+                logger.warning("重做步骤上下文注入失败（task=%s step=%s）：%s",
+                               task_id, s["step_id"], str(exc)[:140])
             orig_instr = s2.get("instruction", "")
             result = self._dispatch_step_safe(goal, s2, task_id, {"replan_used": 0})
             if (
@@ -3583,15 +3710,22 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
 
     def _apply_revision(
         self, steps: list[dict], pending: dict, completed: dict,
-        confirmed: list[dict] | None,
+        confirmed: list[dict] | None, *, patch_only: bool = False,
     ) -> None:
-        """把确认后的修订计划写回待执行集合；取消则保持原计划。"""
+        """把确认后的修订计划写回待执行集合；取消则保持原计划。
+
+        `patch_only=True`：`confirmed` 是**局部替换**（搜索无果时把 2/2b 降级为直接
+        生成），只替换它列出的步骤，**不得删除未列出的待执行步骤**——实机：一次搜索
+        无果的降级把仍待执行的分析/解释/报告/打包一起删掉，交付链凭空少一段（而
+        降级本身只该影响"取不到资料"的那两个抓取步）。
+        """
         if confirmed is None:
             return
         by_id = {s.get("step_id"): s for s in confirmed}
-        for k in list(pending):
-            if k not in by_id:
-                del pending[k]
+        if not patch_only:
+            for k in list(pending):
+                if k not in by_id:
+                    del pending[k]
         for s in confirmed:
             sid = s.get("step_id")
             if sid and sid not in completed:
@@ -6551,6 +6685,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             # 反思早期收敛：记录上一轮验收 gaps 签名，重做后 gaps 无变化
             # → 不再空转重做（实测两轮重做后缺口仍相同，浪费 6+ 分钟）
             last_gap_signature = ""
+            # 无收益修复停损的"输入/正文/缺口"指纹（不依赖 iteration）
+            last_repair_fingerprint = ""
         # P0-1：反思 LLM 不可用标记（每次任务重置）
         self._reflection_llm_unavailable = ""
 
@@ -6703,8 +6839,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 for s in all_steps
             )
             # P3：确定性验收 fail 时不得跳过反射轮（验收为准，不因"核心交付
-            # 已完成"放行）；无验收报告（None）保持原有跳过行为
-            _acceptance_ok = self._acceptance_passed(task_id)
+            # 已完成"放行）；无验收报告（None）保持原有跳过行为。
+            # 判定只认**当前交付候选**的验收（best_report 可能已改版）。
+            _acceptance_ok = self._acceptance_passed(task_id, str(best_report or ""))
             if (
                 _research_hint and _report_done and _has_search
                 and not _gate_failed and _acceptance_ok is not False
@@ -6751,7 +6888,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 memory_context, _vsum, _eval_scores,
             )
             # P3：验收 fail 存在时，反思判定以验收为准（accept/高评分不得放行）
-            _acc_summary = self._read_acceptance_summary(task_id)
+            # 判定只认**当前交付候选**的验收；缺报告/旧版结论 = 未执行（None，不驱动修复）
+            _acc_summary = self._acceptance_for_candidate(task_id, str(best_report or ""))
             _acc_fail = bool(_acc_summary and _acc_summary.get("overall") != "pass")
             if not verdict and _acc_fail:
                 # 反思 LLM 不可用同样不放行：按验收缺口合成重做步骤
@@ -6778,29 +6916,30 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 }
             if not verdict:
                 break
-            # 反思早期收敛：验收 gaps 与上一轮完全相同 → 重做无改善，
-            # 继续迭代只会重复耗时（实测两轮重做后缺口不变仍继续）。
-            # iteration 每次 while 循环末尾递增，iteration>0 表示已过首轮。
+            # 无收益修复停损：**输入/正文/缺口**三合一指纹与上一轮完全相同 →
+            # 再重做只会得到同一份输入、同一份正文、同一组缺口，提前终止反思。
+            # 不再要求 `iteration > 0`：单步重做路径（retry_step + continue）不递增
+            # iteration，旧门控下"同缺口重复重做"永远停不下来（实机 ui-d5af8cae2f）。
             _cur_sig = "|".join(
                 str(g).strip() for g in ((_acc_summary or {}).get("gaps") or [])
                 if str(g).strip()
             )
-            if (
-                iteration > 0
-                and _cur_sig
-                and _cur_sig == last_gap_signature
-            ):
+            _stop, _cur_fp = self._repair_stop_decision(
+                last_repair_fingerprint, task_id, str(best_report or ""), _cur_sig)
+            if _stop:
                 logger.warning(
-                    "Reflection early-stop: 验收 gaps 与上一轮相同，重做无改善"
-                    "（task=%s），提前终止反思",
+                    "Reflection early-stop: 输入/正文/验收缺口与上一轮完全相同，"
+                    "重做无收益（task=%s），提前终止反思",
                     task_id,
                 )
                 push_progress(self._messaging, task_id, "log",
                               {"type": "iteration", "agent": "orchestrator",
-                               "message": "验收缺口与上一轮相同，重做无改善，提前终止反思",
+                               "message": ("输入/正文/验收缺口与上一轮完全相同，"
+                                           "重做无收益，提前终止反思"),
                                "timestamp": self._now_iso()})
                 break
             last_gap_signature = _cur_sig
+            last_repair_fingerprint = _cur_fp
             # 评分门控：score ≥ 阈值直接接受；LLM 未给 score 时回退到 accepted 判断
             score_raw = verdict.get("score")
             if score_raw is None:
@@ -7532,6 +7671,32 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                        "timestamp": self._now_iso()})
         return True
 
+    def _optional_step_ids(self, steps: list[dict], task_id: str) -> set:
+        """本轮 DAG 里"失败不算失败（只是缺口）"的步骤集合。
+
+        三处同源，供 `deps_failed` 与阻塞传播共用（两处判定必须一致）：
+        1. 计划显式 `optional`（如定向取证的第二个来源）；
+        2. 财务任务（结构化财务已预载）：检索/抓取是**补充证据**，取不到=缺口。
+           实机 `ui-fa2cb73e59`：主链交付已 verified，第二轮反思新增的 `i2-r2` 抓取
+           "无候选 URL" 连锁把 `i2-r3` 与打包标死 → 整单 FAILED，而交付本身是好的；
+        3. 固定研究链的**取证步**（1/2/2b）：顺序由 `depends_on` 保证（3a 必须等本轮
+           取证收口，不得并行），但取不到资料不该把分析/解释/报告/打包一起标死——
+           交付仍由硬门槛与验收按事实/正文如实判定。
+        """
+        optional_ids = {s.get("step_id") for s in steps if s.get("optional")}
+        if _financial_facts_in_hand(task_id):
+            optional_ids |= {
+                s.get("step_id") for s in steps
+                if str(s.get("capability") or "") in ("web_search", "web_fetch")
+            }
+        if any(str(s.get("step_id")) == "3a" for s in steps):
+            optional_ids |= {
+                str(s.get("step_id")) for s in steps
+                if str(s.get("step_id")) in ("1", "2", "2b")
+                and str(s.get("capability") or "") in ("web_search", "web_fetch")
+            }
+        return optional_ids
+
     def _execute_steps(self, steps: list[dict], task_id: str, goal: str) -> tuple[list[dict], bool]:
         """并行 DAG 执行一轮步骤，返回（按步骤顺序的结果列表, 是否有失败）。"""
         # 惰性初始化（兼容直接 __new__ 构造的实例/测试）
@@ -7550,16 +7715,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         step_ids = {s.get("step_id") for s in steps}
         # 可选步骤（如定向取证的第二个来源）：取不到是**正常缺口**，不阻塞下游。
         # 两个判定点必须用**同一份**集合——见下面阻塞传播处的实机反例。
-        optional_ids = {s.get("step_id") for s in steps if s.get("optional")}
-        # 财务任务（结构化财务已预载）：检索/抓取是**补充证据**，取不到=缺口，不阻塞下游。
-        # 这条对**反思轮新增的补洞步骤同样生效**——实机 `ui-fa2cb73e59`：主链交付已经
-        # verified（3a 注册模型跑通、验收 pass、评审 PASS），第二轮反思新增的 `i2-r2`
-        # 抓取"无候选 URL"→ 连锁把 `i2-r3` 与打包标死 → 整单 FAILED，而交付本身是好的。
-        if _financial_facts_in_hand(task_id):
-            optional_ids |= {
-                s.get("step_id") for s in steps
-                if str(s.get("capability") or "") in ("web_search", "web_fetch")
-            }
+        optional_ids = self._optional_step_ids(steps, task_id)
         lock = threading.Lock()
 
         def deps_ok(step):
@@ -8032,7 +8188,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                                 if revision:
                                     confirmed = self._confirm_revision(task_id, goal, steps, completed, revision)
                                     with lock:
-                                        self._apply_revision(steps, pending, completed, confirmed)
+                                        self._apply_revision(
+                                            steps, pending, completed, confirmed,
+                                            patch_only=True)
                                         last_progress = time.time()
                                     self._push_realtime_state(task_id, goal, steps, completed)
                                 else:

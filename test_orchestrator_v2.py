@@ -726,10 +726,27 @@ class TestRunIteration(TempWorkspaceCase):
         o._now_iso = lambda: "t"
         # D2 起候选在采纳点就跑一次**它自己正文**的验收（`_accept_candidate`）并把结论写进
         # 验收快照——预置 acceptance_report.json 会被真实结论覆盖。这里把验收桩设成 fail
-        # （同时保留预置文件），考的还是那条不变量：验收未通过不得因反思评分 accept 放行。
-        o._accept_fn_for = lambda t, g: (
-            lambda t2, g2, body: {"_accepted_body": body, "overall": "fail",
-                                  "gaps": ["数字溯源率不足：疑似模型知识未标注"]})
+        # （同时写回带**本正文哈希**的快照，与生产一致），考的还是那条不变量：验收未通过
+        # 不得因反思评分 accept 放行。10-02 起验收结论必须绑定当前候选，夹具因此不再写
+        # 一份"无正文哈希"的快照（那种快照按未执行处理，是另一条用例的事）。
+        import hashlib
+        import workspace as _ws_mod
+
+        def _fake_accept(t2, g2, body):
+            _rec = {
+                "overall": "fail",
+                "gaps": ["数字溯源率不足：疑似模型知识未标注"],
+                "report_sha256": hashlib.sha256(
+                    str(body).encode("utf-8")).hexdigest(),
+            }
+            _dir = _ws_mod.task_workspace(t2)
+            _dir.mkdir(parents=True, exist_ok=True)
+            (_dir / "acceptance_report.json").write_text(
+                json.dumps(_rec, ensure_ascii=False), encoding="utf-8")
+            return {"_accepted_body": body, "overall": "fail",
+                    "gaps": list(_rec["gaps"])}
+
+        o._accept_fn_for = lambda t, g: _fake_accept
         tmp = tempfile.mkdtemp(prefix="wm_accfail_")
         old_root = ws_mod.WORKSPACE_ROOT
         ws_mod.configure_workspace_root(tmp)
@@ -1231,7 +1248,9 @@ class TestRedoStepLimit(unittest.TestCase):
         o._record_reflection_refinement = lambda *a, **k: None
         return o
 
-    def test_redo_caps_dependents_to_n_steps(self):
+    def test_redo_caps_only_speculative_search_steps(self):
+        """10-02 修正：上限只限**取证类**步骤；分析/解释/报告/打包是修复的兑现，
+        不得截断（旧行为"仅重做前 2 步"会把报告截掉，于是重做后正文逐字不变）。"""
         o = self._make(max_redo_steps=2)
         all_steps = [
             {"step_id": "1", "capability": "web_search",
@@ -1257,12 +1276,10 @@ class TestRedoStepLimit(unittest.TestCase):
             "t-redo-cap", "目标", all_steps, completed_all, "1", "修复",
         )
         self.assertTrue(ok)
-        self.assertEqual(dispatched, ["1", "2"],
-                         "单轮重做最多 2 步：目标步骤 + 最近的 1 个下游")
-        self.assertEqual(completed_all["1"]["result"], "new-1")
-        self.assertEqual(completed_all["2"]["result"], "new-2")
-        self.assertEqual(completed_all["3"]["result"], "old-3",
-                         "超出上限的下游步骤不应被重做")
+        self.assertEqual(dispatched, ["1", "2", "3"],
+                         "取证 1 步在限额内；解释与报告必须跟着重做")
+        self.assertEqual(completed_all["3"]["result"], "new-3",
+                         "报告没有被重做 = 修复没跑完")
 
     def test_redo_report_rechecks_acceptance(self):
         """闭环修复：报告步骤重做成功后必须复跑确定性验收
@@ -1288,13 +1305,15 @@ class TestRedoStepLimit(unittest.TestCase):
         self.assertEqual(rechecks, ["t-redo-acc"], "报告重做成功后必须复跑验收")
         self.assertEqual(completed_all["1"]["result"], "new-report-200-chars")
 
-    def test_max_redo_steps_one_caps_to_single_step(self):
+    def test_max_redo_steps_one_caps_search_but_keeps_report(self):
         o = self._make(max_redo_steps=1)
         all_steps = [
             {"step_id": "1", "capability": "web_search",
              "instruction": "s1", "depends_on": []},
+            {"step_id": "1b", "capability": "web_fetch",
+             "instruction": "s1b", "depends_on": ["1"]},
             {"step_id": "2", "capability": "content_summary",
-             "instruction": "s2", "depends_on": ["1"]},
+             "instruction": "s2", "depends_on": ["1", "1b"]},
         ]
         completed_all = {
             s["step_id"]: {"status": "SUCCESS", "result": f"old-{s['step_id']}"}
@@ -1311,8 +1330,191 @@ class TestRedoStepLimit(unittest.TestCase):
         o._redo_step_and_dependents(
             "t-redo-cap1", "目标", all_steps, completed_all, "1", "修复",
         )
-        self.assertEqual(dispatched, ["1"])
-        self.assertEqual(completed_all["2"]["result"], "old-2")
+        self.assertEqual(dispatched, ["1", "2"],
+                         "取证限 1 步（1b 被截断）；解释照常重做")
+        self.assertEqual(completed_all["1b"]["result"], "old-1b")
+        self.assertEqual(completed_all["2"]["result"], "new-2")
+
+
+class TestResearchRepairClosure(TempWorkspaceCase):
+    """10-02 真实修复闭环（ui-d5af8cae2f）的四条无 LLM 回归。
+
+    真实任务里：事实变了、闭包里分析/报告/打包都在，却被"单轮只重做前 2 步"截断
+    → 分析仍消费旧数据集、重做后的正文与验收缺口逐字不变（"重做后仍失败"其实是
+    下游没跑完）；3a 又在正式取证之前就跑完；同缺口重复重做停不下来。
+    """
+
+    def _research_steps(self):
+        from facts import parse_research_request
+        req = parse_research_request(
+            "研究江苏洋河酒厂 2023 与 2024 两个年度的营业收入、归母净利润、"
+            "经营活动现金流净额，合并报表口径。",
+            company="洋河股份", company_id="002304.SZ", market="cn",
+            periods=[2023, 2024], caliber="合并", identity_source="form")
+        return OrchestratorV2._research_steps(req)
+
+    def test_research_plan_declares_acquisition_then_analysis_chain(self):
+        """§2-1：固定路径必须声明 取证/选定事实 → 3a → 3 解释 → 4 报告 → 交付。
+
+        3a 必须等**本轮**取证（旧计划里所有步骤都没有 depends_on，3a 与取证并行，
+        分析冻结的是上一轮/空的事实快照）。
+        """
+        steps = self._research_steps()
+        dep = {s["step_id"]: list(s.get("depends_on") or []) for s in steps}
+        self.assertEqual(dep["1"], [])
+        self.assertEqual(dep["2"], ["1"], "抓取必须等本轮搜索")
+        self.assertEqual(dep["2b"], ["1"])
+        self.assertEqual(sorted(dep["3a"]), ["1", "2", "2b"],
+                         "3a 必须消费本轮取证落下的事实快照，不得与取证并行")
+        self.assertIn("3a", dep["3"], "解释必须等本轮分析")
+        self.assertIn("3", dep["4"], "报告必须等本轮解释")
+        self.assertIn("3a", dep["4"], "报告必须等本轮分析")
+        # 依赖满意度判定（与 _execute_steps 的 deps_ok 同规则）：取证没落盘时 3a 不可跑
+        completed = {"1": {"status": "SUCCESS"}}
+        self.assertFalse(all(d in completed for d in dep["3a"]),
+                         "搜索完成但抓取未完成时 3a 不该就绪")
+        completed["2"] = {"status": "SUCCESS"}
+        self.assertFalse(all(d in completed for d in dep["3a"]),
+                         "第二个来源（optional）仍在飞时 3a 也要等本轮取证收口")
+
+    def test_redo_completes_necessary_downstream(self):
+        """§2-2：昂贵步骤仍受限，但必要下游（分析/打包）不得被上限截断。"""
+        o = make_orch(_max_redo_steps=1)
+        o._now_iso = lambda: "t"
+        o._diagnosis_for_step = lambda *a, **k: None
+        o._record_reflection_refinement = lambda *a, **k: None
+        all_steps = self._research_steps()
+        completed_all = {
+            s["step_id"]: {"status": "SUCCESS", "result": f"old-{s['step_id']}"}
+            for s in all_steps
+        }
+        dispatched = []
+
+        def fake_dispatch(goal, step, tid, state):
+            dispatched.append(step["step_id"])
+            return {"task_id": step["step_id"], "status": "SUCCESS",
+                    "result": f"new-{step['step_id']}"}
+
+        o._dispatch_step_safe = fake_dispatch
+        ok = o._redo_step_and_dependents(
+            "t-redo-down", "目标", all_steps, completed_all, "3a", "分析消费了旧事实",
+        )
+        self.assertTrue(ok)
+        self.assertIn("3a", dispatched)
+        self.assertIn("3", dispatched, "事实变了：解释必须跟着更新")
+        self.assertIn("4", dispatched, "事实变了：报告必须跟着更新")
+        self.assertTrue(any(s["step_id"] == "package" for s in all_steps)
+                        or len(dispatched) >= 3)
+        self.assertLess(dispatched.index("3a"), dispatched.index("3"),
+                        "重做顺序必须上游先跑（3a → 3 → 4）")
+        self.assertLess(dispatched.index("3"), dispatched.index("4"))
+        self.assertEqual(completed_all["4"]["result"], "new-4",
+                         "报告没有被重做 = 修复没跑完（旧实现的截断）")
+
+    def test_redo_reinjects_updated_downstream_context(self):
+        """§2-2：重做派发要带上**本轮更新后**的前序产物（此前直接清空 depends_on 派发）。"""
+        o = make_orch(_max_redo_steps=2)
+        o._now_iso = lambda: "t"
+        o._diagnosis_for_step = lambda *a, **k: None
+        o._record_reflection_refinement = lambda *a, **k: None
+        seen = {}
+
+        def fake_inject(step, completed, lock, task_id=""):
+            seen[step["step_id"]] = list(step.get("depends_on") or [])
+            return step["instruction"] + "\n[已选事实]（本轮）"
+
+        o._inject_step_context = fake_inject
+        all_steps = [
+            {"step_id": "1", "capability": "web_search",
+             "instruction": "s1", "depends_on": []},
+            {"step_id": "2", "capability": "report_generator",
+             "instruction": "写报告", "depends_on": ["1"]},
+        ]
+        completed_all = {
+            "1": {"status": "SUCCESS", "result": "facts"},
+            "2": {"status": "SUCCESS", "result": "old-report"},
+        }
+        captured = {}
+
+        def fake_dispatch(goal, step, tid, state):
+            captured[step["step_id"]] = step["instruction"]
+            return {"task_id": step["step_id"], "status": "SUCCESS", "result": "new-report"}
+
+        o._dispatch_step_safe = fake_dispatch
+        o._redo_step_and_dependents(
+            "t-redo-ctx", "目标", all_steps, completed_all, "2", "缺口未变",
+        )
+        self.assertEqual(seen.get("2"), ["1"],
+                         "注入必须用原始依赖取前序结果（不能是清空后的依赖）")
+        self.assertIn("[已选事实]（本轮）", captured["2"],
+                      "重做报告必须看到本轮事实块，否则只是把旧正文再生成一遍")
+
+    def test_redo_stops_when_fingerprints_unchanged(self):
+        """§2-5：完整修复后输入/正文/缺口三合一指纹相同 → 不启动第二次无收益修复。"""
+        o = make_orch()
+        cand = "同一份正文"
+        fp = o._repair_fingerprint("t-stop", cand, "缺口甲|缺口乙")
+        # 没有上一轮指纹（首次）→ 不停
+        stop, cur = o._repair_stop_decision("", "t-stop", cand, "缺口甲|缺口乙")
+        self.assertFalse(stop)
+        self.assertEqual(cur, fp)
+        # 完整修复后三者都没变（注意：该判定**不带 iteration**，单步重做路径也停得下来）
+        stop, _ = o._repair_stop_decision(fp, "t-stop", cand, "缺口甲|缺口乙")
+        self.assertTrue(stop, "输入/正文/缺口全同：第二次修复注定无收益，必须停")
+        # 正文变了 → 不停（本轮确实有产出）
+        stop, _ = o._repair_stop_decision(
+            fp, "t-stop", cand + "（修订）", "缺口甲|缺口乙")
+        self.assertFalse(stop)
+        # 缺口变了 → 不停
+        stop, _ = o._repair_stop_decision(fp, "t-stop", cand, "缺口甲")
+        self.assertFalse(stop)
+        # 输入（来源/事实快照）变了 → 不停
+        from workspace import task_project_dir
+        p = task_project_dir("t-stop")
+        p.mkdir(parents=True, exist_ok=True)
+        (p / "fetch_snapshot.json").write_text(
+            json.dumps([{"title": "2024 年报", "url": "http://x/1",
+                         "text": "营业收入 100 亿元"}], ensure_ascii=False),
+            encoding="utf-8")
+        stop, _ = o._repair_stop_decision(fp, "t-stop", cand, "缺口甲|缺口乙")
+        self.assertFalse(stop, "本轮取得了新来源：修复有新材料可用，不该停")
+
+    def test_acquisition_failure_is_a_gap_not_a_blocker(self):
+        """取证失败 = 缺口（不阻塞下游），但顺序仍由 depends_on 保证：3a 等取证收口。"""
+        o = make_orch()
+        steps = self._research_steps()
+        opt = o._optional_step_ids(steps, "t-opt")
+        for sid in ("1", "2", "2b"):
+            self.assertIn(sid, opt, f"取证步 {sid} 取不到应是缺口，不阻塞下游")
+        self.assertNotIn("3a", opt, "分析步失败仍是失败（不得当缺口放过）")
+        self.assertNotIn("3", opt)
+        self.assertNotIn("4", opt)
+
+    def test_acceptance_only_for_current_candidate(self):
+        """§2-4：验收结论只对当前交付候选有效；缺报告/旧版结论 = 未执行（None）。"""
+        import hashlib
+        from workspace import task_workspace
+        o = make_orch()
+        body_a = "旧版正文"
+        body_b = "新版正文"
+        ws = task_workspace("t-acc-bind")
+        ws.mkdir(parents=True, exist_ok=True)
+        (ws / "acceptance_report.json").write_text(json.dumps({
+            "overall": "pass",
+            "gaps": [],
+            "report_sha256": hashlib.sha256(body_a.encode("utf-8")).hexdigest(),
+        }, ensure_ascii=False), encoding="utf-8")
+        self.assertIsNone(
+            o._acceptance_for_candidate("t-acc-bind", ""),
+            "还没有交付候选 = 未执行验收（既不算 fail 也不算 pass）")
+        self.assertIsNone(
+            o._acceptance_for_candidate("t-acc-bind", body_b),
+            "文件里的结论属于上一版正文，不能给新候选背书")
+        self.assertEqual(
+            o._acceptance_for_candidate("t-acc-bind", body_a)["overall"], "pass",
+            "属于本候选的验收照常使用")
+        self.assertIsNone(o._acceptance_passed("t-acc-bind", body_b),
+                          "_acceptance_passed 退回文件的那条也必须绑定本候选")
 
 
 class TestReflectionFailureStopsIteration(TempWorkspaceCase):

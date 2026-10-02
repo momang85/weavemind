@@ -1467,6 +1467,32 @@ class TestSearchRevisionFlow(unittest.TestCase):
         self.assertEqual(pending["2"]["capability"], "code_execution")
         self.assertEqual(steps[1]["capability"], "code_execution")
 
+    def test_apply_revision_patch_only_keeps_unlisted_pending_steps(self):
+        """10-02：搜索无果的**局部降级**只该替换它列出的 2/2b，不得删掉仍待执行的
+        分析/解释/报告/打包——实机里一次降级就把交付链删掉一段。"""
+        from orchestrator_v2 import OrchestratorV2
+
+        o = OrchestratorV2.__new__(OrchestratorV2)
+        steps = [{"step_id": s, "capability": "web_fetch"} for s in
+                 ("1", "2", "2b", "3a", "3", "4")]
+        completed = {"1": {"status": "SUCCESS", "result": "[]"}}
+        pending = {s["step_id"]: dict(s) for s in steps
+                   if s["step_id"] not in completed}
+        confirmed = [
+            {"step_id": "2", "capability": "content_summary", "instruction": "直接生成"},
+            {"step_id": "2b", "capability": "content_summary", "instruction": "直接生成"},
+        ]
+        o._apply_revision(steps, pending, completed, confirmed, patch_only=True)
+        self.assertEqual(sorted(pending), ["2", "2b", "3", "3a", "4"],
+                         "局部降级不得删掉仍待执行的分析/解释/报告/打包")
+        self.assertEqual(pending["2"]["capability"], "content_summary")
+        # 整份计划确认（人工编辑过的完整计划）保持旧语义：未列出的不再执行
+        pending2 = {s["step_id"]: dict(s) for s in steps
+                    if s["step_id"] not in completed}
+        o._apply_revision(steps, pending2, completed,
+                          [{"step_id": "4", "capability": "report_generator"}])
+        self.assertEqual(sorted(pending2), ["4"])
+
     def test_execute_steps_revision_flow_end_to_end(self):
         import json as _json
         from orchestrator_v2 import OrchestratorV2
@@ -1800,6 +1826,57 @@ class TestStrategyDeployment(unittest.TestCase):
         sa._rollout_checked_at = 0.0
         sa._load_active_strategy()
         self.assertEqual(sa._strategy_id, "s-good")  # 策略保留
+
+
+class TestX0AcceptanceCandidateBinding(unittest.TestCase):
+    """10-02 §2-4/§3：验收只对**当前交付候选**；缺成稿 = 未执行（不是 fail/PASS），
+    且验收/装配全程确定性、不调用任何模型。"""
+
+    GOAL = ("研究某公司 2023 与 2024 两个年度的营业收入、归母净利润，合并报表口径")
+
+    def _ws(self, tid):
+        tmp = Path(tempfile.mkdtemp(prefix="wm_accbind_"))
+        old = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", old)
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        ws_mod.ensure_task_workspace(tid)
+        return ws_mod.task_workspace(tid)
+
+    def test_missing_report_is_not_executed(self):
+        """还没有成稿 → 验收不执行、不触发确定性修复、不落任何结论。"""
+        import delivery_pipeline as dp
+        ws = self._ws("t-no-report")
+        self.assertIsNone(
+            dp.accept_for_body("t-no-report", self.GOAL, ""),
+            "缺成稿不是 fail 也不是 pass，是未执行（None）")
+        self.assertFalse(
+            (ws / "acceptance_report.json").exists(),
+            "缺成稿不得留下验收结论文件（否则会被当成'当前候选的结论'）")
+
+    def test_acceptance_and_assembly_never_call_a_model(self):
+        """仅来源/定位/派生装配改变 → 不调用取证/解释 LLM；真实缺口照样判 fail。"""
+        import delivery_pipeline as dp
+        import llm_client
+        calls = []
+
+        def _boom(*a, **k):
+            calls.append(a)
+            raise AssertionError("验收/装配不得调用 LLM")
+
+        body = ("# 报告\n\n## 关键数据\n\n"
+                "- 2024 年营业收入 9999 亿元，同比增长 88%\n"
+                "补充说明。" * 10 + "\n")
+        with mock.patch.dict(os.environ, {"URL_HEALTH_CHECK": "0"}), \
+                mock.patch.object(llm_client.LLMClient, "call", _boom), \
+                mock.patch.object(llm_client, "call_llm", _boom):
+            res = dp.accept_for_body("t-det", self.GOAL, body, trigger="报告步骤",
+                                     prefer_body=True)
+        self.assertEqual(calls, [], "验收链路只能是确定性的")
+        self.assertIsNotNone(res)
+        self.assertEqual(res.get("overall"), "fail",
+                         "无来源的数字照样判缺口（装配改变不放宽证据要求）")
+        self.assertTrue(res.get("gaps"), "fail 必须带缺口说明")
 
 
 class TestDeliverySummary(unittest.TestCase):
