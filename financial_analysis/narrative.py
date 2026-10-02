@@ -42,6 +42,18 @@ def _unit_of(run) -> str:
     return _charts.amount_unit_of(run) if run is not None else "元"
 
 
+# 正文里的模型中文名（运行身份那一行用；不出现 `run `/`output ` 这类程序标识）
+_MODEL_CN = {
+    "operating_drivers": "经营驱动",
+    "cash_reconciliation": "现金调节桥",
+    "scenario_sensitivity": "条件情景",
+    "profit_bridge": "利润桥",
+    "profit_to_cash": "利润到现金",
+    "cash_quality": "现金质量",
+    "working_capital": "营运资金",
+}
+
+
 def _attr(obj, name, default=""):
     if isinstance(obj, dict):
         return obj.get(name, default)
@@ -895,7 +907,9 @@ def summary_lines(runs, limit: int = 3) -> list[str]:
     od = _pick(runs, "operating_drivers")
     cash = _pick(runs, "cash_reconciliation")
     scens = _spread(runs, "scenario_sensitivity")
-    if od is None and cash is None:
+    # X0：**只有情景运行**时也出摘要（真实金额来自该运行；此前返回空，摘要区只剩一句
+    # "本次已验证运行不属于经营研究组合"，读者看不到已算好的情景读数）
+    if od is None and cash is None and not scens:
         return []
     out = []
     for txt in _conclusions(od, cash, scens):
@@ -949,10 +963,14 @@ def research_brief(runs, *, provenance=None, charts=None, label_of=None,
     od = _pick(runs, "operating_drivers")
     cash = _pick(runs, "cash_reconciliation")
     scens = _spread(runs, "scenario_sensitivity")
-    if od is None and cash is None:
+    # X0（10-02 实测）：**只选了一条情景运行**也要能投影真实金额与身份——此前
+    # "两个研究模型都缺"就返回空正文，采纳时正文里找不到所选运行，只能被拒
+    # （ui-17947f055b 的真实 A 采纳）。现在有情景运行就照常出正文（第五节的
+    # 情景读数本来就是真实的金额），并把所选运行的**身份**写进正文。
+    if od is None and cash is None and not scens:
         return {"front": "", "note": "", "detail": ""}
     entity = ""
-    for r in (od, cash):
+    for r in (od, cash) + tuple(scens):
         if r is None:
             continue
         for o in (_attr(r, "outputs") or ()):
@@ -961,16 +979,26 @@ def research_brief(runs, *, provenance=None, charts=None, label_of=None,
         if entity:
             break
     periods: list[str] = []
-    for r in (od, cash):
+    for r in (od, cash) + tuple(scens):
         periods = [str(p) for p in (_diag(r).get("periods") or ())]
         if periods:
             break
     span = "→".join(periods) if len(periods) >= 2 else ""
     head = f"## 经营驱动分析正文（{entity}{' ' + span if span else ''}）"
+    # 运行身份写进正文（不只是底稿索引）：采纳的绑定校验要能在正文里找到所选运行，
+    # 而底稿索引已按 X0 另附到 `analysis_detail.md`——正文必须自己带身份（如实、可核对）。
+    # 措辞用中文，不出现 `run ` 这类程序标识（正文纪律）；标识本身是运行 id 的前 12 位。
+    _ids = "、".join(
+        f"{_MODEL_CN.get(str(_attr(r, 'model_id') or ''), str(_attr(r, 'model_id') or ''))} "
+        f"{str(_attr(r, 'run_id') or '')[:12]}"
+        for r in (([od] if od is not None else []) + ([cash] if cash is not None else [])
+                  + list(scens)))
     lines: list[str] = [head, "",
-                        "> 本节由 `financial_analysis` 从**已验证运行**装配：每个数字都能回查到"
-                        "运行与输出标识（见文末『附：底稿索引』），图、卡、底稿共用同一次运行。"
-                        "未取到的披露项留在「未解释差额」，既不摊派也不当零。", ""]
+                        "> 本节由 `financial_analysis` 从**已验证运行**装配"
+                        + (f"（本次进正文的运行身份：{_ids}）" if _ids else "")
+                        + "：每个数字都能回查到运行与输出标识，完整标识见随包 "
+                          "`analysis/analysis_detail.md` 的『附：底稿索引』。"
+                          "未取到的披露项留在「未解释差额」，既不摊派也不当零。", ""]
     # W2/X0：判断**只算一次**——主文取前三条做首屏摘要，完整七段式进 detail（另附）。
     front: list[str] = []
     detail: list[str] = []

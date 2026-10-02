@@ -224,6 +224,34 @@ _FACTS_BLOCK_MAX_ROWS = 40
 # F2 定向取证：研究路径两个抓取步骤的**角色**（年报正文页 / 附注风险页）。
 # 角色由 step_id 推出（不新增契约字段），供 `_pick_fetch_url` 分流候选。
 _FETCH_ROLE_BY_STEP = {"2": "annual_report", "2b": "notes"}
+
+
+def _clean_fetch_url(url: str) -> str:
+    """抓取 URL 清洗：**在第一个中日韩字符处截断**，再去掉尾部标点。
+
+    实机（`ui-17947f055b`）：目标文本里的参考直链后面紧跟中文「；本次…」且没有空格，
+    `https?://\\S+` 会把中文一起吃进 URL，worker 编码后抓到 404（同一坏地址抓了两次）。
+    派发侧先切干净；worker 侧同样再切一次（两道都做，任一侧漏了也不会把中文带进请求）。
+    """
+    s = str(url or "").strip()
+    if not s:
+        return ""
+    m = re.search(r"[\u2e80-\u9fff\uff00-\uffef\u3000-\u303f]", s)
+    if m:
+        s = s[:m.start()]
+    return re.sub(r"[)\]>,.;:!?'\"】）》」]+$", "", s).strip()
+
+
+def _with_selected_url(instruction: str, url: str) -> str:
+    """把**选定 URL** 放到抓取指令最前面，并清掉指令里其余 `[URL: …]` 标记。
+
+    为什么：worker 只认"第一个显式标记 / 第一个 URL"。派发已经按角色选好了目标页，
+    指令文本里却还带着目标里的参考直链（甚至带中文尾句）——不清理就会抓错页。
+    """
+    body = re.sub(r"\[URL:\s*[^\]]+\]\s*", "", str(instruction or "")).strip()
+    u = _clean_fetch_url(url)
+    return (f"[URL: {u}] " + body) if u else body
+
 _FETCH_ROLE_KW = {
     "annual_report": ("年报", "年度报告", "经营情况讨论", "管理层讨论", "经营回顾",
                       "经营情况", "annual report", "10-k", "20-f", "公告"),
@@ -7568,6 +7596,20 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                             "result": "无候选 URL（检索未产出可用来源），已跳过抓取；"
                                       "需补资料或换检索词后重试",
                             "elapsed_sec": round(time.time() - step_start, 1)}
+                # X0（10-02 实测）：**同一个"死链"不重复抓**。旧行为两次抓取都取到同一条坏直链
+                # （连 404 都各抓一次）。只把**返回 HTTP 错误（非 2xx）**的 URL 记为死链，
+                # 下次不再派发；网络/离线类失败不在此列（换一步再试可能就有材料，不能一刀切）。
+                _try_url = _clean_fetch_url(_urls_in_instr[0])
+                if _try_url and _try_url in getattr(self, "_dead_fetch_urls", set()):
+                    push_progress(self._messaging, task_id, "log",
+                                  {"type": "replan", "agent": "orchestrator",
+                                   "message": (f"Step {step['step_id']}: 该 URL 已返回 HTTP 错误"
+                                               f"（{_try_url[:80]}），跳过重复抓取"),
+                                   "timestamp": self._now_iso()})
+                    return {"task_id": step["step_id"], "status": "FAILED",
+                            "result": (f"该 URL 上次已返回 HTTP 错误（{_try_url[:100]}）："
+                                       "不重复抓取，按资料缺口处理，换候选后再试"),
+                            "elapsed_sec": round(time.time() - step_start, 1)}
             # 人机协作（对标标准 3.2 human_in_loop）：高风险步骤执行前等人工确认
             if str(step.get("mode")) == "human_in_loop":
                 if not self._wait_step_confirm(task_id, step):
@@ -7575,6 +7617,19 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                             "result": "步骤被用户取消",
                             "elapsed_sec": round(time.time() - step_start, 1)}
             result = self._dispatch_step_safe(goal, step, task_id, state)
+            # X0：把**返回 HTTP 错误**的抓取 URL 记成死链（下一步不再重复抓同一地址）
+            if step.get("capability") == "web_fetch":
+                try:
+                    _res_txt = str(result.get("result") or "")
+                    _blob = json.loads(_res_txt) if _res_txt.strip().startswith("{") else {}
+                except Exception:               # noqa: BLE001
+                    _blob = {}
+                _http = _blob.get("http_status") if isinstance(_blob, dict) else None
+                if _try_url and (isinstance(_http, int) and not (200 <= _http < 300)
+                                 or "HTTP 4" in _res_txt or "HTTP 5" in _res_txt):
+                    if not hasattr(self, "_dead_fetch_urls"):
+                        self._dead_fetch_urls = set()
+                    self._dead_fetch_urls.add(_try_url)
             # P1-1：react_agent 未收敛/失败 → 自动降级为 content_summary，
             # 不把"ReAct 达到最大轮数仍未收敛"这类过程文本传给报告
             if (
@@ -8108,23 +8163,23 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                             contract=_contract,
                         )
                         if best:
-                            instr = f"[URL: {best}] " + instr
+                            instr = _with_selected_url(instr, best)
                     else:
                         for item in prev_json:
                             url = item.get('url') or item.get('href') or ''
                             if url and url.startswith('http'):
-                                instr += f' [URL: {url}]'
+                                instr = _with_selected_url(instr, url)
                                 break
                 elif isinstance(prev_json, dict):
                     url = prev_json.get('url') or prev_json.get('href') or ''
                     if url:
-                        instr += f' [URL: {url}]'
+                        instr = _with_selected_url(instr, url)
                 # 角色步骤**不追加兜底 URL**：没有合适候选时让 worker 明确失败（不联网），
                 # 否则会退化成"抓第一页"，第二个抓取步骤就和第一个抓重了
                 if not fetch_role:
                     urls = re.findall(r'https?://\S+', prev_res if isinstance(prev_res, str) else '')
                     if urls:
-                        instr += f' [URL: {urls[0]}]'
+                        instr = _with_selected_url(instr, _clean_fetch_url(urls[0]))
             if finance_fetch:
                 instr += (
                     " 优先抓取与财报/财务数据直接相关的页面，"

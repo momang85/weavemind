@@ -161,7 +161,31 @@ export default function AnalysisWorkbenchPanel({ taskId, onAdopted }: {
         return
       }
       setDiff(d.diff || [])
-      if (d?.run_id) setChosenRunId(String(d.run_id))
+      // X0（10-02 实测）：**把新运行并入菜单并保留所选模型**。此前只 setChosenRunId，
+      // state.runs 里没有这条新运行，`chosen` 找不到 → 采纳按钮禁用、菜单仍只有旧 run
+      // （真实 UI 里必须整页 reload 才能选到新运行）。这里做**最小局部合并**：
+      // 保留当前模型选择与参数草稿，只把新运行追加进列表并选中它。
+      const newRun: Run = {
+        run_id: String(d.run_id || ''),
+        model_id: String(d.model_id || modelId),
+        status: String(d.status || ''),
+        validation_ok: String(d.status || '') === 'validated',
+        params: (d.params || p) as Record<string, number | string>,
+        dataset_hash: String(d.dataset_hash || ''),
+        outputs: (d.outputs || []) as RunOutput[],
+        selected: false,
+        selection_state: 'recomputed',
+      }
+      if (newRun.run_id) {
+        setState((prev) => {
+          if (!prev) return prev
+          const runs = (prev.runs || []).filter((r) => r.run_id !== newRun.run_id)
+          return { ...prev, runs: [...runs, newRun] }
+        })
+        setChosenRunId(newRun.run_id)
+        // 参数草稿保持用户刚输入的值（不要被"运行自带参数"覆盖回去）
+        setParams((prev) => ({ ...prev }))
+      }
       setMsg({ kind: 'ok', text: '复算完成：这是一条**新运行**，尚未采纳（旧运行仍保留）' })
     } catch (e: any) {
       setMsg({ kind: 'err', text: `复算失败：${String(e?.message || e)}` })

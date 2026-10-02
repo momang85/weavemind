@@ -40,6 +40,41 @@ def _encode_iri(url: str) -> str:
         return url
 
 
+def _clean_url(url: str) -> str:
+    """抓取用的 URL 清洗：**在第一个中日韩字符处截断**，再去掉尾部标点。
+
+    实机（`ui-17947f055b`）：指令里是「…1223370519.PDF；本次…」，中文尾句紧跟 URL、
+    中间**没有空格**，`https?://\\S+` 会把整段中文都吃进去；urllib 编码后变成一条不存在的
+    路径 → 404。这里按 CJK 边界切开，只保留真正的 URL 部分。
+    """
+    s = str(url or "").strip()
+    if not s:
+        return ""
+    m = re.search(r"[\u2e80-\u9fff\uff00-\uffef\u3000-\u303f]", s)
+    if m:
+        s = s[:m.start()]
+    return re.sub(r"[)\]>,.;:!?'\"】）》」]+$", "", s).strip()
+
+
+def _explicit_url(task: dict | None, instruction: str) -> str:
+    """**显式选定**的 URL：优先 payload 字段，其次指令里的 `[URL: …]` 标记（第一个）。
+
+    为什么要有它：派发步骤已经按角色选好了目标页（`[URL: …]`），worker 再"从整条指令里
+    找第一个 URL"就会把目标文本里的参考直链/中文尾句当成抓取目标——显式字段/标记才是
+    选定值，其余 URL 一律不参与选择。
+    """
+    t = task if isinstance(task, dict) else {}
+    for key in ("selected_url", "url", "fetch_url", "source_url"):
+        v = t.get(key)
+        if isinstance(v, str) and v.strip().startswith("http"):
+            return _clean_url(v)
+    for m in re.finditer(r"\[URL:\s*([^\]]+)\]", str(instruction or ""), re.I):
+        cand = _clean_url(m.group(1))
+        if cand.startswith("http"):
+            return cand
+    return ""
+
+
 def _store_bytes(task: dict | None, raw: bytes, digest: str) -> dict:
     """把抓到的原始字节存成**可复用工件**，返回工件引用（含 hash 与大小）。
 
@@ -99,11 +134,17 @@ class WebFetchWorker(AsyncWorkerBase):
     _needs_task = True          # 需要任务载荷（PDF 原始字节要落到任务工作区工件目录）
 
     async def execute(self, instruction: str, task: dict | None = None) -> str:
-        urls = re.findall(r'https?://[^\s<>"\']+', instruction)
-        urls = [re.sub(r"[),.;\]}>]+$", "", u) for u in urls]
-        if not urls:
+        # X0（10-02 实测）：**优先消费显式选定的 URL**。派发步骤会写 `[URL: …]` 标记，
+        # 而目标文本里往往还带着"参考 PDF 直链 + 中文尾句"——旧实现取整条指令里**第一个**
+        # URL，于是把中文「；本次…」一起编码进路径，抓到 404（还重复抓了两次）。
+        url = _explicit_url(task, instruction)
+        if not url:
+            urls = [_clean_url(u) for u in
+                    re.findall(r'https?://[^\s<>"\']+', instruction)]
+            urls = [u for u in urls if u]
+            url = urls[0] if urls else ""
+        if not url:
             return json.dumps({"status": "failed", "error": "No URL found in instruction"}, ensure_ascii=False)
-        url = urls[0]
         # 批次3-2：抓取走**现有文档接入契约**（`net_policy.fetch_document`）——
         # 协议/主机/解析后 IP 边界校验、**连接使用已验 IP**（防 DNS rebinding）、
         # 不跟随重定向、字节上限与审计都在那一层；本 worker 不再自己发裸请求。
@@ -120,6 +161,18 @@ class WebFetchWorker(AsyncWorkerBase):
             return json.dumps({"status": "failed", "error": str(exc)[:300]},
                               ensure_ascii=False)
         raw = bytes(resp.get("raw") or b"")
+        status = int(resp.get("status") or 0)
+        # X0（10-02 实测）：**非 2xx 是缺口，不是成功**。旧实现不看 HTTP 状态，404 的
+        # 正文（"页面不存在"）照样包装成 `status: success`，于是"抓到了"进快照、
+        # 还触发第二次无效重抓。这里如实判失败并把状态码带出来（下游按缺口处理）。
+        if status and not (200 <= status < 300):
+            return json.dumps({
+                "status": "failed",
+                "url": url,
+                "http_status": status,
+                "error": f"HTTP {status}：该地址不可用（按缺口处理，不当作抓取成功）",
+                "note": "非 2xx 响应不作为材料；如需该期间材料请换用已准入原件或别的候选",
+            }, ensure_ascii=False)
         ctype = str((resp.get("headers") or {}).get("content-type") or "")
         # **PDF 不当文本**：此前把字节按 UTF-8 解码成乱码再截 30000 字符，证据层拿到的是
         # "有正文"的假象却提不出任何小节（实机 ui-750185076a）。这里按 MIME/魔数识别，

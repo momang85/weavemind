@@ -4604,5 +4604,47 @@ class TestX0AmountUnitBoundary(unittest.TestCase):
         self.assertEqual(nt._yi(comp["base"]), "+66.73", "默认口径仍是元")
 
 
+class TestX0ScenarioOnlyProjection(unittest.TestCase):
+    """X0（10-02 实测）：**只选了一条情景运行**时，正文也要投影真实金额与身份。
+
+    反例（`ui-17947f055b` 的真实 A 采纳）：正常任务缺经营驱动/现金调节，`select_for_report`
+    仍选仅有的情景 run，而 `narrative` 在两个研究模型都缺时返回空正文 → 采纳校验在正文里找不到
+    所选运行，只能被拒（「选了新运行，正文却还是旧稿」）。**不能附个 ID 骗过绑定**：
+    正文里必须有这条运行的身份，金额必须是它真实算出来的读数。
+    """
+
+    def _scen_run(self):
+        rows = [_row("revenue", "2024年", 28_876_296_993.56, unit="元"),
+                _row("gross_profit", "2024年", 21_125_078_636.90, unit="元"),
+                _row("net_profit", "2024年", 6_673_388_602.12, unit="元")]
+        ds = fa.freeze_from_facts(rows, periods=(2024,), entity="洋河股份",
+                                  entity_id="002304.SZ", as_of="2025-04-30",
+                                  source_label="test:x0-scen-only")
+        return fa.run("scenario_sensitivity", ds,
+                      params={"revenue_growth": 0.05, "gross_margin_delta": 0.01})
+
+    def test_scenario_only_body_carries_identity_and_real_amounts(self):
+        from financial_analysis import narrative as nt
+        run = self._scen_run()
+        self.assertEqual(run.status, C.RunStatus.VALIDATED, run.reason)
+        parts = nt.research_brief([run])
+        note = str(parts.get("note") or "")
+        self.assertTrue(note, "只有情景运行时也要出正文（否则采纳无法绑定）")
+        # ① 身份：所选运行的前 12 位出现在正文里（采纳绑定校验读它）
+        self.assertIn(str(run.run_id)[:12], note)
+        # ② 真实金额：情景读数来自这条运行，不是占位/零
+        out = next(o for o in run.outputs if o.metric == "scenario_net_profit")
+        comp = {c["component_id"]: c["value"] for c in out.components}
+        self.assertIn("基准复现", note)
+        self.assertIn(nt._yi(comp["user"], out.unit), note)
+        self.assertNotIn("基准复现 +0.00 亿元", note)
+        # ③ 情景独立成段（不是"两个模型都缺"就整段消失）
+        self.assertIn("### 五、现金形成与反向情景", note)
+        # ④ 摘要（UI 摘要区读它）不再为空，且给出反向情景读数
+        summary = " ".join(nt.summary_lines([run]))
+        self.assertTrue(summary, "只有情景运行时摘要不应为空")
+        self.assertIn("反向情景", summary)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=1)

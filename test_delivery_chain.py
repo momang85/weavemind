@@ -11631,5 +11631,50 @@ class TestMaterialAdmissionRules(_MaterialCase):
                         f"承载收入/利润的小节必须入选：{paths}")
 
 
+class TestX0PackageAndSidecars(unittest.TestCase):
+    """X0（10-02 实测）：包内要有**正文实际引用**的文件；采纳失败要同步恢复结构/验收旁车。
+
+    反例一：12 页 PDF 正文写「见 `analysis/analysis_cards.md`」，而快照路径只冻结
+    dataset/plan/context/runs/selection —— 包里没有该文件（正文指了一个包内不存在的路径）。
+    反例二：A 采纳被拒后，选择/采纳版本回滚了，`report_structure.json` 与
+    `acceptance_report.json` 却停在"候选 A"的 binding/验收上（页面身份与当前稿不一致）。
+    """
+
+    def test_freeze_payload_includes_referenced_analysis_markdown(self):
+        import tempfile
+        import delivery_pipeline as dp
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            (ws / "analysis").mkdir(parents=True, exist_ok=True)
+            (ws / "analysis" / "analysis_cards.md").write_text("# 分析卡\n", encoding="utf-8")
+            (ws / "analysis" / "analysis_detail.md").write_text("# 明细\n", encoding="utf-8")
+            payload = dp._freeze_payload("pkg-x0", ws, md_bytes=b"# report\n")
+        self.assertIn("analysis/analysis_cards.md", payload)
+        self.assertIn("analysis/analysis_detail.md", payload)
+
+    def test_adopt_failure_sidecars_are_restored_from_snapshot(self):
+        import tempfile
+        import web_ui
+        with tempfile.TemporaryDirectory() as tmp:
+            ws = Path(tmp)
+            (ws / "report_structure.json").write_text('{"v": "old"}', encoding="utf-8")
+            (ws / "acceptance_report.json").write_text('{"accept": "old"}', encoding="utf-8")
+            snap = web_ui._sidecar_snapshot(ws)
+            self.assertEqual(sorted(snap), ["acceptance_report.json", "report_structure.json"])
+            # 装配会把旁车改成"候选 A"那一版 → 失败回滚必须写回旧字节
+            (ws / "report_structure.json").write_text('{"v": "candidate-A"}', encoding="utf-8")
+            (ws / "acceptance_report.json").write_text('{"accept": "candidate-A"}',
+                                                       encoding="utf-8")
+            restored = web_ui._sidecar_restore(ws, snap)
+            self.assertEqual(sorted(restored),
+                             ["acceptance_report.json", "report_structure.json"])
+            self.assertEqual((ws / "report_structure.json").read_text(encoding="utf-8"),
+                             '{"v": "old"}')
+            self.assertEqual((ws / "acceptance_report.json").read_text(encoding="utf-8"),
+                             '{"accept": "old"}')
+            # 缺文件时不制造空文件（快照里没有就不"恢复"）
+            self.assertEqual(web_ui._sidecar_restore(ws, {}), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

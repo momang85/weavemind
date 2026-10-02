@@ -744,6 +744,21 @@ def _freeze_payload(task_id: str, ws, *, md_bytes: bytes = b"",
             payload[_fa_in.ARC_SELECTION] = _sel_blob
     except Exception as exc:                     # noqa: BLE001 - 读不到就不进包
         logger.warning("快照：分析输入读取失败：%s", str(exc)[:120])
+    # X0（10-02 实测）：**正文实际引用的分析底稿文本**也要进包。正文会写
+    # 「完整分析卡……见 `analysis/analysis_cards.md`」，而快照路径此前只冻结
+    # dataset/plan/context/runs/selection —— 包里因此出现过"正文指了一个包内不存在的
+    # 路径"（12 页 PDF 引用 analysis_cards.md，包内没有该文件）。同一处把
+    # `analysis_detail.md`/`continuation.md` 一并冻结（有才进包，不制造空文件）。
+    try:
+        _ana_dir = ws / "analysis"
+        if _ana_dir.is_dir():
+            for p in sorted(_ana_dir.glob("*.md")):
+                try:
+                    payload[f"analysis/{p.name}"] = p.read_bytes()
+                except Exception as exc:         # noqa: BLE001 - 单个读不到不影响其余
+                    logger.warning("快照：分析底稿读取失败（%s）：%s", p.name, str(exc)[:100])
+    except Exception as exc:                     # noqa: BLE001
+        logger.warning("快照：分析底稿目录读取失败：%s", str(exc)[:120])
     return payload
 
 

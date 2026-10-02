@@ -9,6 +9,7 @@
 - 自主迭代循环：多轮步骤累积与最佳交付物
 """
 
+import asyncio
 import json
 import os
 import shutil
@@ -23,6 +24,12 @@ from unittest import mock
 
 import orchestrator_v2
 from orchestrator_v2 import OrchestratorV2
+
+GOOD = "http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF"
+BAD = "http://static.cninfo.com.cn/finalpage/2024-04-27/1219873234.PDF"
+
+
+from workers.web_fetch_worker import WebFetchWorker, _clean_url, _explicit_url
 import workspace as ws_mod
 
 
@@ -2301,6 +2308,51 @@ class TestBackfillChartManifest(TempWorkspaceCase):
             self.assertTrue(any(f.startswith("chart_") for f in files), "chart_N 应存在")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestFetchUrlSelection(unittest.TestCase):
+    def test_chinese_tail_is_cut_at_the_boundary(self):
+        """中文尾句紧跟 URL、没有空格 → 按 CJK 边界切开（否则编码后必然 404）。"""
+        raw = GOOD + "；本次研究以该年报为准，请核对口径。"
+        self.assertEqual(_clean_url(raw), GOOD)
+        self.assertEqual(_clean_url(GOOD + "）"), GOOD)
+        self.assertEqual(_clean_url("  " + GOOD + "  "), GOOD)
+
+    def test_explicit_payload_url_wins_over_text(self):
+        """payload 里显式给的 URL 优先于指令文本里出现的其它 URL。"""
+        instr = f"参考资料：{BAD}；本次请抓取目标页。"
+        self.assertEqual(_explicit_url({"url": GOOD}, instr), GOOD)
+        self.assertEqual(_explicit_url({"selected_url": GOOD}, instr), GOOD)
+
+    def test_first_url_marker_is_the_selected_one(self):
+        """没有 payload 字段时，认**第一个 `[URL: …]` 标记**，而不是文本里的裸 URL。"""
+        instr = f"参考资料：{BAD}；[URL: {GOOD}] 请抓取该页正文。"
+        self.assertEqual(_explicit_url(None, instr), GOOD)
+        self.assertNotEqual(_explicit_url(None, instr), BAD)
+
+    def test_dispatch_prepends_and_dedupes_markers(self):
+        """派发侧：选定 URL 放到最前面，并清掉指令里其余 `[URL: …]` 标记。"""
+        out = orchestrator_v2._with_selected_url(
+            f"参考资料：{BAD}；[URL: {BAD}] 抓取目标页", GOOD)
+        self.assertTrue(out.startswith(f"[URL: {GOOD}]"), out)
+        self.assertEqual(out.count("[URL:"), 1, out)
+
+    def test_clean_fetch_url_matches_worker_rule(self):
+        self.assertEqual(orchestrator_v2._clean_fetch_url(GOOD + "；本次"),
+                         _clean_url(GOOD + "；本次"))
+
+    def test_non_2xx_is_a_gap_not_a_success(self):
+        """404 不得包装成 success；状态码与原因如实带出（下游按缺口处理）。"""
+        worker = WebFetchWorker(agent_id="webfetchworker",
+                                capabilities=["web_fetch"], registry=None,
+                                messaging=None)
+        with mock.patch("net_policy.fetch_document",
+                        return_value={"status": 404, "url": GOOD, "headers": {},
+                                      "bytes": 12, "raw": b"not found 404"}):
+            out = json.loads(asyncio.run(worker.execute(f"[URL: {GOOD}] 抓取正文", {})))
+        self.assertEqual(out.get("status"), "failed", out)
+        self.assertEqual(out.get("http_status"), 404, out)
+        self.assertIn("缺口", str(out.get("note") or "") + str(out.get("error") or ""))
 
 
 if __name__ == "__main__":

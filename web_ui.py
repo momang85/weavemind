@@ -6194,6 +6194,12 @@ def _post_task_analysis_adopt(self, p, body, admin):
     store = VersionStore(ws, tid)
     _prev_sel = fa_store.load_selection(ws)
     _prev_adopted = store.adopted()
+    # X0（10-02 实测）：**采纳失败要同步恢复旁车**。装配会顺手改写 `report_structure.json`
+    # 与 `acceptance_report.json`（结构/验收旁车）；失败时此前只回滚了选择与采纳版本，
+    # 旁车却停在"候选 A 的 binding/验收"上——页面于是显示与当前稿不一致的候选身份
+    # （实测：结构仍候选 A、验收仍候选 A，而当前选定稿已回到旧版）。这里先把两个旁车
+    # 按字节快照，失败回滚时一并写回（只在"这一版确实失败"时恢复，成功路径不动）。
+    _sidecars = _sidecar_snapshot(ws)
     # 暂存候选选择（装配会读它）：同模型第二次选择即替换，旧运行仍留在运行记录里
     entry = {
         "model_id": str(rec.get("model_id") or ""),
@@ -6269,11 +6275,14 @@ def _post_task_analysis_adopt(self, p, body, admin):
                     store.adopt(_prev_adopted, reason="采纳未成立：保留旧有效稿")
                 except Exception:                   # noqa: BLE001
                     pass
+            _restored = _sidecar_restore(ws, _sidecars)
             logger.warning("分析采纳未成立（task=%s）：%s", tid, "；".join(_problems))
             return self._json({
                 "error": "采纳未成立：" + "；".join(_problems) + "。已回滚选择并保留旧的有效稿",
                 "code": "adopt_not_bound", "binding_problems": _problems,
                 "selection_restored": True, "adopted_identity": _prev_identity,
+                # 旁车（结构/验收）也回到了与当前稿一致的那一版；装不回去就如实报
+                "sidecars_restored": _restored,
                 "delivery_status": status}, 409)
         # 选择的身份回填成"这一版"，供包内清单/面板核对"正文这一段 = 这一次运行"
         if identity:
@@ -6356,6 +6365,38 @@ def _post_task_analysis_adopt(self, p, body, admin):
         logger.warning("分析结果采纳失败（task=%s）：%s", tid, str(exc)[:160])
         return self._json({"error": f"采纳失败：{str(exc)[:160]}",
                            "selection_saved": True}, 500)
+
+
+def _sidecar_snapshot(ws) -> dict:
+    """采纳前把**结构/验收旁车**按字节快照（X0 10-02：失败要能同步回滚）。
+
+    只快照存在的文件（缺就是缺，不写空文件）；读不到就不进快照——回滚时按"没快照到"
+    如实跳过，不假装恢复过。
+    """
+    from pathlib import Path as _P
+    out: dict = {}
+    for name in ("report_structure.json", "acceptance_report.json"):
+        p = _P(ws) / name
+        try:
+            if p.is_file():
+                out[name] = p.read_bytes()
+        except Exception:                            # noqa: BLE001 - 读不到就不快照
+            continue
+    return out
+
+
+def _sidecar_restore(ws, snap: dict) -> list:
+    """把旁车写回快照字节 → 成功恢复的成员名列表（失败/缺失不谎报）。"""
+    from pathlib import Path as _P
+    done: list = []
+    for name, blob in (snap or {}).items():
+        p = _P(ws) / name
+        try:
+            p.write_bytes(bytes(blob))
+            done.append(name)
+        except Exception as exc:                     # noqa: BLE001
+            logger.warning("采纳失败后旁车恢复失败（%s）：%s", name, str(exc)[:120])
+    return done
 
 
 def _pkg_statuses_for(tid: str) -> dict:
