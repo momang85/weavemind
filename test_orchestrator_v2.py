@@ -726,27 +726,10 @@ class TestRunIteration(TempWorkspaceCase):
         o._now_iso = lambda: "t"
         # D2 起候选在采纳点就跑一次**它自己正文**的验收（`_accept_candidate`）并把结论写进
         # 验收快照——预置 acceptance_report.json 会被真实结论覆盖。这里把验收桩设成 fail
-        # （同时写回带**本正文哈希**的快照，与生产一致），考的还是那条不变量：验收未通过
-        # 不得因反思评分 accept 放行。10-02 起验收结论必须绑定当前候选，夹具因此不再写
-        # 一份"无正文哈希"的快照（那种快照按未执行处理，是另一条用例的事）。
-        import hashlib
-        import workspace as _ws_mod
-
-        def _fake_accept(t2, g2, body):
-            _rec = {
-                "overall": "fail",
-                "gaps": ["数字溯源率不足：疑似模型知识未标注"],
-                "report_sha256": hashlib.sha256(
-                    str(body).encode("utf-8")).hexdigest(),
-            }
-            _dir = _ws_mod.task_workspace(t2)
-            _dir.mkdir(parents=True, exist_ok=True)
-            (_dir / "acceptance_report.json").write_text(
-                json.dumps(_rec, ensure_ascii=False), encoding="utf-8")
-            return {"_accepted_body": body, "overall": "fail",
-                    "gaps": list(_rec["gaps"])}
-
-        o._accept_fn_for = lambda t, g: _fake_accept
+        # （同时保留预置文件），考的还是那条不变量：验收未通过不得因反思评分 accept 放行。
+        o._accept_fn_for = lambda t, g: (
+            lambda t2, g2, body: {"_accepted_body": body, "overall": "fail",
+                                  "gaps": ["数字溯源率不足：疑似模型知识未标注"]})
         tmp = tempfile.mkdtemp(prefix="wm_accfail_")
         old_root = ws_mod.WORKSPACE_ROOT
         ws_mod.configure_workspace_root(tmp)
@@ -1479,6 +1462,24 @@ class TestResearchRepairClosure(TempWorkspaceCase):
         stop, _ = o._repair_stop_decision(fp, "t-stop", cand, "缺口甲|缺口乙")
         self.assertFalse(stop, "本轮取得了新来源：修复有新材料可用，不该停")
 
+    def test_chain_deps_survive_critic_or_user_edit(self):
+        """评审稿/确认稿丢掉 depends_on 时必须被回填：`_wire_*` 只在依赖为空时接线，
+        而固定链的语义依赖不能靠"恰好没人删"来维持。"""
+        o = make_orch()
+        steps = self._research_steps()
+        for s in steps:                     # 模拟评审/编辑把依赖抹平
+            s["depends_on"] = []
+        out = o._ensure_research_chain_deps(steps)
+        dep = {s["step_id"]: list(s.get("depends_on") or []) for s in out}
+        self.assertEqual(sorted(dep["3a"]), ["1", "2", "2b"])
+        self.assertEqual(dep["2"], ["1"])
+        self.assertIn("3a", dep["3"])
+        self.assertIn("3", dep["4"])
+        # 非研究链计划不动
+        other = [{"step_id": "1", "capability": "web_search", "depends_on": []},
+                 {"step_id": "2", "capability": "report_generator", "depends_on": []}]
+        self.assertEqual(o._ensure_research_chain_deps(other), other)
+
     def test_acquisition_failure_is_a_gap_not_a_blocker(self):
         """取证失败 = 缺口（不阻塞下游），但顺序仍由 depends_on 保证：3a 等取证收口。"""
         o = make_orch()
@@ -1491,7 +1492,7 @@ class TestResearchRepairClosure(TempWorkspaceCase):
         self.assertNotIn("4", opt)
 
     def test_acceptance_only_for_current_candidate(self):
-        """§2-4：验收结论只对当前交付候选有效；缺报告/旧版结论 = 未执行（None）。"""
+        """§2-4：验收结论只对当前交付候选有效；未绑定的结论只能"继续"不能"放行"。"""
         import hashlib
         from workspace import task_workspace
         o = make_orch()
@@ -1499,7 +1500,8 @@ class TestResearchRepairClosure(TempWorkspaceCase):
         body_b = "新版正文"
         ws = task_workspace("t-acc-bind")
         ws.mkdir(parents=True, exist_ok=True)
-        (ws / "acceptance_report.json").write_text(json.dumps({
+        _acc_path = ws / "acceptance_report.json"
+        _acc_path.write_text(json.dumps({
             "overall": "pass",
             "gaps": [],
             "report_sha256": hashlib.sha256(body_a.encode("utf-8")).hexdigest(),
@@ -1515,6 +1517,16 @@ class TestResearchRepairClosure(TempWorkspaceCase):
             "属于本候选的验收照常使用")
         self.assertIsNone(o._acceptance_passed("t-acc-bind", body_b),
                           "_acceptance_passed 退回文件的那条也必须绑定本候选")
+        # 方向是不对称的：未绑定的 **fail** 仍要保留缺口信号（不能因"不是本候选"就放行）
+        _acc_path.write_text(json.dumps({
+            "overall": "fail", "gaps": ["数字溯源率不足"],
+        }, ensure_ascii=False), encoding="utf-8")
+        unbound = o._acceptance_for_candidate("t-acc-bind", body_b)
+        self.assertIsNotNone(unbound, "未绑定的 fail 必须保留（继续修复，不得放行）")
+        self.assertFalse(unbound.get("version_bound"),
+                         "但必须标出它证明不了属于本候选")
+        self.assertIs(o._acceptance_passed("t-acc-bind", body_b), False,
+                      "未绑定的 fail 仍返回 False：修复不会被旧结论绕过")
 
 
 class TestReflectionFailureStopsIteration(TempWorkspaceCase):

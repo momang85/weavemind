@@ -1981,6 +1981,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         证据时退回 acceptance_report.json，两者都没有就是未知（None，不算通过）。
         传 `candidate` 时，退回文件的那条也必须是**当前交付候选**的验收：文件里的
         最后一份可能属于上一版正文，拿它当"本候选已通过"就是拿旧结论给新稿背书。
+        方向是不对称的——**未绑定的 fail 仍返回 False**（缺口信号保留、继续修复），
+        未绑定的 pass 才返回 None（不得放行）。
         """
         try:
             from report_version import VersionStore
@@ -1989,19 +1991,20 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             adopted = VersionStore(ws, task_id).adopted()
             if adopted is not None:
                 acc = adopted.acceptance or {}
-                if acc:
+                if acc and (not candidate or adopted.acceptance_for_this_body()):
                     return str(acc.get("overall") or "") == "pass"
             acc_path = ws / "acceptance_report.json"
             if not acc_path.exists():
                 return None
             acc = json.loads(acc_path.read_text(encoding="utf-8"))
+            _overall = str(acc.get("overall") or "")
             _body = str(candidate or "")
-            if _body:
+            if _body and _overall == "pass":
                 _rec = str(acc.get("report_sha256") or "")
                 _cur = hashlib.sha256(_body.encode("utf-8")).hexdigest()
                 if not _rec or (_rec != _cur and not _cur.startswith(_rec)):
-                    return None          # 文件里的结论不属于本候选 → 未执行（未知）
-            return acc.get("overall") == "pass"
+                    return None          # 别版正文的"通过"不能给本候选背书
+            return _overall == "pass"
         except Exception:
             return None
 
@@ -2036,24 +2039,49 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         cur = self._repair_fingerprint(task_id, candidate, gap_sig)
         return (bool(last_fp) and cur == last_fp), cur
 
-    def _acceptance_for_candidate(self, task_id: str, candidate: str) -> dict | None:
-        """验收结论**只对当前交付候选**有效，否则按"未执行"处理（None）。
+    def _acceptance_is_for_candidate(self, task_id: str, candidate: str,
+                                     summary: dict) -> bool:
+        """这份验收结论能否证明属于**当前交付候选**（正文哈希或采纳身份绑定）。"""
+        if not str(candidate or "") or not summary:
+            return False
+        _rec = str(summary.get("report_sha256") or "")
+        if _rec:
+            _cur = hashlib.sha256(str(candidate).encode("utf-8")).hexdigest()
+            if _rec == _cur or _cur.startswith(_rec):
+                return True
+        try:
+            adopted = self._version_store(task_id).adopted()
+        except Exception:
+            adopted = None
+        if adopted is not None:
+            acc = dict(adopted.acceptance or {})
+            if acc and str(acc.get("overall") or "") == str(summary.get("overall") or "") \
+                    and adopted.acceptance_for_this_body():
+                return True
+        return False
 
-        缺报告（还没有交付候选）或报告改版后旧结论未复检时，既不算 fail 也不算
-        pass——三态分离下"未执行"就是未执行，不能拿别的正文的结论驱动修复或放行。
+    def _acceptance_for_candidate(self, task_id: str, candidate: str) -> dict | None:
+        """可用于**修复判定**的验收结论（只对当前交付候选，或按身份绑定的采纳版）。
+
+        未绑定本候选的旧结论**只能"继续修复"，不能"放行"**：
+        - 文件里的 fail 若证明不了属于本候选，仍返回它（并把 `version_bound=False`
+          标出来）——缺口信号保留，修复不会被旧结论绕过；
+        - 文件里的 pass 若证明不了属于本候选，返回 None（不得拿别的正文的通过结论
+          给当前候选背书）。
+        缺报告（还没有交付候选）一律 None：三态分离下"未执行"就是未执行。
         """
         if not str(candidate or ""):
             return None
         summary = self._read_acceptance_summary(task_id)
         if not summary:
             return None
-        _rec = str(summary.get("report_sha256") or "")
-        if not _rec:
-            return None                      # 无正文绑定的读数证明不了属于本候选
-        _cur = hashlib.sha256(str(candidate).encode("utf-8")).hexdigest()
-        if _rec != _cur and not _cur.startswith(_rec):
-            return None
-        return summary
+        if self._acceptance_is_for_candidate(task_id, candidate, summary):
+            return summary
+        if str(summary.get("overall") or "") != "pass":
+            unbound = dict(summary)
+            unbound["version_bound"] = False
+            return unbound
+        return None
 
     def _sources_fingerprint(self, task_id: str, report_text: str = "") -> str:
         """本轮来源/事实快照指纹（B 批起唯一实现在 `delivery_pipeline`）。"""
@@ -3045,6 +3073,36 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         for s in steps:
             if s.get("capability") == "web_fetch" and not s.get("depends_on"):
                 s["depends_on"] = [search_id]
+        return steps
+
+    # 固定研究链的依赖是**计划语义**（见 `_research_steps`）：谁都不能把它抹平——
+    # Critic 修订稿或用户在确认阶段编辑过的计划若丢掉 depends_on，3a 会重新变成与取证
+    # 并行、修复也会少了"受影响下游"的边界。
+    _RESEARCH_CHAIN_DEPS = {
+        "1": [],
+        "2": ["1"],
+        "2b": ["1"],
+        "3a": ["1", "2", "2b"],
+        "3": ["1", "2", "2b", "3a"],
+        "4": ["1", "2", "2b", "3", "3a"],
+    }
+
+    def _ensure_research_chain_deps(self, steps: list[dict]) -> list[dict]:
+        """回填固定研究链的依赖（只对同时含 1/2/3a/4 的研究契约计划生效）。
+
+        `_wire_report_deps`/`_wire_search_fetch_deps` 只在依赖为空时接线：评审稿把
+        `depends_on` 删掉后没人补回来，本函数按链语义回填（不含环，已在用例里核过）。
+        """
+        ids = {str(s.get("step_id")) for s in steps}
+        if not {"1", "2", "3a", "4"} <= ids:
+            return steps
+        for s in steps:
+            want = self._RESEARCH_CHAIN_DEPS.get(str(s.get("step_id")))
+            if want is None:
+                continue
+            deps = [d for d in want if d in ids]
+            if list(s.get("depends_on") or []) != deps:
+                s["depends_on"] = deps
         return steps
 
     def _break_cycles(self, steps: list[dict]) -> list[dict]:
@@ -6544,6 +6602,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 )
             steps = self._wire_report_deps(steps)
             steps = self._wire_search_fetch_deps(steps)
+            steps = self._ensure_research_chain_deps(steps)
             steps = self._ensure_package_step(steps)
             steps = self._break_cycles(steps)
             steps = self._inject_goal_into_steps(steps, goal)
@@ -6592,6 +6651,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                 steps = confirmed
                 steps = self._wire_report_deps(steps)
                 steps = self._wire_search_fetch_deps(steps)
+                steps = self._ensure_research_chain_deps(steps)
                 steps = self._ensure_package_step(steps)
                 steps = self._break_cycles(steps)
                 steps = self._inject_goal_into_steps(steps, goal)
