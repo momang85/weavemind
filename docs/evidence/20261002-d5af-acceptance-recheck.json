@@ -4,6 +4,9 @@
  "candidate_body_sha256": "6145120084227eac85a2f779162415fb5be05029c7bb7a6f1a777feab980f368",
  "candidate_body_chars": 27378,
  "read_only": true,
+ "rules_version": "2026.10.03",
+ "rules_fingerprint": "b98aef94",
+ "locator_index_entries": 193,
  "before_fix": {
   "entity_attribution": "污染 3 处：占当期营业收入/占公司营业收入/消费税按照销售额 = 10.0% 被判『网络源证据指向其他公司』",
   "source_labeling": "虚假标注 5 条：4 条 PDF 页码定位（第 75/76/77/20 页·合并利润表/合并现金流量表·行「…」）＋1 条派生说明「2024年 合并：营业收入 − 营业成本」"

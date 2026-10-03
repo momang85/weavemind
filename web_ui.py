@@ -7986,12 +7986,17 @@ def _post_verify(self, p, body, admin):
         return self._json({"error": "report_text 过短（至少 50 字符）"}, 400)
     tid = str(body.get("task_id") or "").strip()
     sources: dict = {}
+    locator_index: list = []
     goal = str(body.get("goal") or "") or "report-verify"
     if tid:
         try:
-            from acceptance_checker import _collect_sources
+            from acceptance_checker import _collect_sources, _locator_evidence_index
             from workspace import task_workspace
-            sources = _collect_sources(task_workspace(tid))
+            _ws = task_workspace(tid)
+            sources = _collect_sources(_ws)
+            # 定位/派生型来源声明要按**任务自己的底稿/准入记录**核验（同一条实现）：
+            # 这个入口是人工复核/编辑后的重验，缺了索引会把真实页码定位判成虚假标注。
+            locator_index = _locator_evidence_index(workspace=_ws, sources=sources)
             data = _get_task_report_data(tid)
             if data and data.get("goal"):
                 goal = str(data["goal"])
@@ -8006,7 +8011,8 @@ def _post_verify(self, p, body, admin):
         )
         domain = traceability_domain(goal)
         num = check_number_traceability(report_text, sources, domain=domain)
-        label = check_source_labeling(report_text, sources)
+        label = check_source_labeling(report_text, sources,
+                                      locator_index=locator_index)
         disc = check_disclaimer(report_text)
         _cited = int(num.get("cited_count") or 0)
         _computed = int(num.get("computed_count") or 0)

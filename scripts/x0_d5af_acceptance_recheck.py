@@ -42,12 +42,18 @@ def main() -> int:
     import acceptance_checker as ac
     body = _body()
     sources = ac._collect_sources(str(WS))
+    # 10-03 收紧后，定位/派生声明按**底稿/准入记录**核验：这里显式用真工作区建索引
+    # （与 `run_acceptance(workspace=…)` 同一条实现），不是"删掉失败项"。
+    locator_index = ac._locator_evidence_index(workspace=str(WS), sources=sources)
     out = {
         "case": "ui-d5af8cae2f 两项验收失败的只读复验（选定候选正文冻结复算）",
         "task_id": "ui-d5af8cae2f",
         "candidate_body_sha256": TARGET,
         "candidate_body_chars": len(body),
         "read_only": True,
+        "rules_version": ac.ACCEPTANCE_RULES_VERSION,
+        "rules_fingerprint": ac.rules_fingerprint(),
+        "locator_index_entries": len(locator_index),
         "before_fix": {
             "entity_attribution": ("污染 3 处：占当期营业收入/占公司营业收入/消费税按照销售额"
                                    " = 10.0% 被判『网络源证据指向其他公司』"),
@@ -58,7 +64,8 @@ def main() -> int:
         "after_fix": {},
         "source_channels": sorted(sources),
     }
-    for name, fn in (("source_labeling", ac.check_source_labeling),
+    for name, fn in (("source_labeling", lambda r, s: ac.check_source_labeling(
+                          r, s, locator_index=locator_index)),
                      ("entity_attribution",
                       lambda r, s: ac.check_entity_attribution(
                           r, s, "研究洋河股份（002304.SZ）2023/2024 年报"))):

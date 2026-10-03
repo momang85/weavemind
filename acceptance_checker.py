@@ -30,7 +30,9 @@ logger = logging.getLogger(__name__)
 # 判定规则集版本：任何规则表/阈值/正则变更时必须 bump，
 # 并同步更新 test_p0 的指纹基线（test_acceptance_rules_fingerprint_stable
 # 会因指纹变化而失败，强制走"改规则→bump 版本→更新基线"流程）。
-ACCEPTANCE_RULES_VERSION = "2026.09.12"
+# 2026.10.03：官方披露站点改**精确 hostname**判定；定位/派生型来源声明改为按底稿/
+# 准入记录核验（页码+科目+行文、指标+期间+口径+derived_from）。
+ACCEPTANCE_RULES_VERSION = "2026.10.03"
 
 # 纳入指纹的规则表（常量名；内部按 key/元素排序后哈希，顺序无关）
 _FINGERPRINT_RULES = (
@@ -44,11 +46,15 @@ _FINGERPRINT_RULES = (
     "_FRESHNESS_BLOCK_MARKERS", "_TIME_SENSITIVE_MARKERS",
     "_STATUS_MARKERS", "_META_SOURCE_TALK", "_TABLE_NOTE_WORDS",
     "_PROFILE_REPORT_CHECKS", "_CODE_GOAL_HINTS", "_DATA_GOAL_HINTS",
+    # 10-03：官方披露站点白名单与派生算式→指标映射也是判定规则
+    "_OFFICIAL_DISCLOSURE_HOSTS", "_DERIVED_METRIC_TERMS",
 )
 # 纳入指纹的关键正则（取 .pattern）
 _FINGERPRINT_PATTERNS = (
     "_AUTHORITY_DOC_RE", "_SOURCE_LIST_HEADING_RE", "_INLINE_REF_RE",
     "_MEDIA_WORD_RE", "_FRESHNESS_DATE_RE",
+    # 10-03：定位/派生声明解析
+    "_LOCATOR_IN_TEXT_RE", "_LOCATOR_CLAIM_RE", "_DERIVED_CLAIM_RE",
 )
 
 
@@ -4033,25 +4039,215 @@ _OFFICIAL_DISCLOSURE_HOSTS = (
 
 
 def _official_disclosure_url(url: str) -> bool:
-    """该 URL 是否指向官方披露站点（发行人自己的年报/公告）。"""
+    """该 URL 是否指向官方披露站点（发行人自己的年报/公告）。
+
+    **按解析后的精确 hostname 判**，不看整串：query/fragment 里出现官方域名不算
+    （`https://evil.example/?u=static.cninfo.com.cn`），后缀伪装也不算
+    （`static.cninfo.com.cn.evil.example`）。旧实现用子串包含，这两种都能混进来，
+    而"官方域名"在本检查里意味着**主体归属免推断**，这个口子等于给任意网页发通行证。
+    """
     u = str(url or "").strip().lower()
     if not u:
         return False
-    return any(h in u for h in _OFFICIAL_DISCLOSURE_HOSTS)
+    host = ""
+    try:
+        from urllib.parse import urlsplit
+        host = str(urlsplit(u).hostname or "")
+    except Exception:
+        host = ""
+    if not host:
+        # 无 scheme 的裸域名/相对路径：取 authority 段（去 userinfo 与端口）
+        host = re.split(r"[/?#]", u, maxsplit=1)[0]
+        host = host.rsplit("@", 1)[-1].split(":")[0]
+    host = host.strip().strip(".")
+    if not host:
+        return False
+    return any(host == h or host.endswith("." + h) for h in _OFFICIAL_DISCLOSURE_HOSTS)
 
 
-def _locator_grounded_in_artifacts(claim: str, sources: dict) -> bool:
-    """**定位/派生型**来源声明是否由任务自己的确定性产物给出（逐字核对）。
+# ── 定位/派生型来源声明的**按产物核验** ────────────────────────────────
+# 声明形态（由 `annual_financial_tables`/`narrative` 生成，与底稿逐字对应）：
+#   披露行：`PDF 第 75 页 · 合并利润表 · 行「其中：营业收入 28,876,296,993.56 33,126,277,551」`
+#   派生行：`2024年 合并：营业收入 − 营业成本`
+_LOCATOR_IN_TEXT_RE = re.compile(
+    r"(?:PDF\s*)?第\s*(?P<page>\d+)\s*页\s*[·:：]\s*(?P<table>[^·「\n|]{1,40}?)\s*·\s*"
+    r"行「(?P<row>[^」\n|]{1,200})」")
+_LOCATOR_CLAIM_RE = re.compile(
+    r"^(?:PDF\s*)?第\s*(?P<page>\d+)\s*页\s*[·:：]\s*(?P<table>[^·「]{1,40}?)\s*·\s*"
+    r"行「(?P<row>[^」]{1,200})」$")
+_DERIVED_CLAIM_RE = re.compile(
+    r"^(?P<period>\d{4}\s*年(?:\s*[与和]\s*\d{4}\s*年)?)\s*"
+    r"(?P<caliber>合并|母公司)?\s*[：:]\s*(?P<expr>.{2,120})$")
+# 派生算式 → 指标（只认我们能从底稿派生事实里核到的对应关系）
+_DERIVED_METRIC_TERMS = ((("营业收入", "营业成本"), "gross_profit"),)
+
+
+def _norm_claim_text(s) -> str:
+    return re.sub(r"[\s　]+", "", str(s or "")).replace("「", "").replace("」", "").strip(" ·:：")
+
+
+def _derived_metric_of(text: str) -> str:
+    t = _norm_claim_text(text)
+    for terms, metric in _DERIVED_METRIC_TERMS:
+        if all(x in t for x in terms):
+            return metric
+    if "毛利" in t:
+        return "gross_profit"
+    return ""
+
+
+def _locator_evidence_index(workspace=None, sources: dict | None = None) -> list[dict]:
+    """收集**可核验的定位与派生证据**（材料身份、页码、科目、行文、血缘）。
+
+    只读现有产物，不新建通道（来源指纹因此不变）：
+    - `project/working_paper.json` 的底稿行（212 行实机）：披露行 `source_locator` 是
+      「PDF 第 N 页 · 表名 · 行「…」」、派生行是 `{page: 派生说明, quote: 算式}`，
+      且都带 `source_url`（材料身份）/`entity`/`period`/`caliber`/`derived_from`；
+    - 来源通道里的底稿/派生事实文本（无工作区时的既有路径）。
+
+    构造失败/没有产物一律返回空表——核不到就是核不到，**不因为索引缺失而放行**。
+    """
+    entries: list[dict] = []
+    ws = None
+    try:
+        from pathlib import Path as _P
+        ws = _P(workspace) if workspace else None
+    except Exception:
+        ws = None
+    if ws is not None:
+        wp_path = ws / "project" / "working_paper.json"
+        if not wp_path.exists():
+            wp_path = ws / "working_paper.json"
+        try:
+            if wp_path.exists():
+                wp = json.loads(wp_path.read_text(encoding="utf-8")) or {}
+                for r in (wp.get("rows") or []):
+                    if not isinstance(r, dict):
+                        continue
+                    base = {
+                        "metric": str(r.get("metric") or ""),
+                        "metric_label": str(r.get("metric_label") or ""),
+                        "period": str(r.get("period") or ""),
+                        "caliber": str(r.get("caliber") or ""),
+                        "entity": str(r.get("entity") or ""),
+                        "source_url": str(r.get("source_url") or ""),
+                        "derived_from": [str(x) for x in (r.get("derived_from") or [])],
+                        "formula": str(r.get("formula") or ""),
+                        "origin": "workpaper",
+                    }
+                    sl = r.get("source_locator")
+                    # 实机底稿的 `source_locator` 是 dict：披露行 `{page: 定位串, quote: 行文}`
+                    # （`derived` False），派生行 `{page: 派生说明, quote: 算式}`
+                    if isinstance(sl, dict):
+                        page_str = str(sl.get("page") or "")
+                        quote = str(sl.get("quote") or "")
+                    else:
+                        page_str, quote = str(sl or ""), ""
+                    lm = _LOCATOR_IN_TEXT_RE.search(page_str)
+                    _is_derived = bool(r.get("derived") or r.get("derived_from"))
+                    if lm and not _is_derived:
+                        base.update({"kind": "locator", "page": lm.group("page"),
+                                     "table": lm.group("table"),
+                                     # 行文优先取底稿的 quote（报告会截断，匹配时按前缀）
+                                     "quote": quote or lm.group("row"),
+                                     "desc": page_str})
+                        entries.append(base)
+                    elif _is_derived:
+                        base.update({"kind": "derived", "desc": page_str,
+                                     "quote": quote})
+                        entries.append(base)
+        except Exception as exc:                 # noqa: BLE001 - 索引失败不拖垮验收
+            logger.warning("定位证据索引构造失败：%s", str(exc)[:120])
+    # 来源通道里的底稿文本/派生事实（与工作区索引并存，去重交给匹配阶段）
+    try:
+        for key in ("workpaper_rows", "workpaper_derived", "working_paper",
+                    "located_facts", "narrative_evidence"):
+            text = str((sources or {}).get(key) or "")
+            if not text:
+                continue
+            for m in _LOCATOR_IN_TEXT_RE.finditer(text):
+                entries.append({"kind": "locator", "page": m.group("page"),
+                                "table": m.group("table"), "quote": m.group("row"),
+                                "origin": key})
+    except Exception:
+        pass
+    try:
+        der = str((sources or {}).get("workpaper_derived_facts_json") or "")
+        if der:
+            for d in (json.loads(der) or []):
+                if not isinstance(d, dict):
+                    continue
+                entries.append({
+                    "kind": "derived",
+                    "desc": "",
+                    "quote": str(d.get("formula") or ""),
+                    "metric": str(d.get("metric") or ""),
+                    "metric_label": str(d.get("metric_label") or ""),
+                    "period": str(d.get("period") or ""),
+                    "caliber": str(d.get("caliber") or ""),
+                    "entity": str(d.get("subject") or d.get("entity") or ""),
+                    "derived_from": [str(x) for x in (d.get("inputs")
+                                                      or d.get("derived_from") or [])],
+                    "formula": str(d.get("formula") or ""),
+                    "origin": "derived_json",
+                })
+    except Exception:
+        pass
+    return entries
+
+
+def _entry_matches_locator_or_derived(entry: dict, claim: str) -> bool:
+    """一条产物证据能否**证明**该声明：页码+科目+行文逐字，或指标+期间+口径+血缘。"""
+    text = str(claim or "").strip()
+    m = _LOCATOR_CLAIM_RE.match(text)
+    if m:
+        if str(entry.get("kind") or "") != "locator":
+            return False
+        if str(entry.get("page") or "") != m.group("page"):
+            return False          # 页码必须真的有依据（第 999 页过不了）
+        if _norm_claim_text(entry.get("table")) != _norm_claim_text(m.group("table")):
+            return False          # 科目（表名）必须一致
+        q = _norm_claim_text(entry.get("quote"))
+        r = _norm_claim_text(m.group("row"))
+        if not q or not r:
+            return False
+        return q.startswith(r) or r.startswith(q)   # 行文逐字（可被报告截断）
+    if str(entry.get("kind") or "") != "derived":
+        return False
+    metric = _derived_metric_of(text)
+    e_metric = str(entry.get("metric") or "")
+    if not metric or not e_metric or metric != e_metric:
+        return False              # 指标必须对得上（"任意 gross_profit 存在"不算）
+    if not [str(x) for x in (entry.get("derived_from") or []) if str(x)]:
+        return False              # 必须有实际 derived_from（血缘）
+    e_period = _norm_claim_text(entry.get("period"))
+    if not e_period:
+        return False
+    dm = _DERIVED_CLAIM_RE.match(text)
+    if dm:
+        period = _norm_claim_text(dm.group("period"))
+        if period and not (period == e_period or period in e_period):
+            return False          # 期间必须匹配（1900 年不是 2024 年的派生）
+        cal = _norm_claim_text(dm.group("caliber"))
+        e_cal = _norm_claim_text(entry.get("caliber"))
+        if cal and e_cal and cal != e_cal:
+            return False          # 口径必须匹配（母公司 ≠ 合并）
+    return True
+
+
+def _locator_grounded_in_artifacts(claim: str, sources: dict,
+                                   index: list[dict] | None = None) -> bool:
+    """**定位/派生型**来源声明是否由任务自己的确定性产物给出（逐字/按字段核验）。
 
     为什么需要（10-02 真实任务 `ui-d5af8cae2f` `source_labeling` 5/5 假失败）：
-    `report_brief`/`narrative` 的来源位置列写的是**位置**与**派生说明**，例如
-    「PDF 第 75 页 · 合并利润表 · 行「其中：营业收入 28,876,296,993.56 33,126,277,551」」
-    「2024年 合并：营业收入 − 营业成本」。旧实现把表格"来源"列单元格当成**来源名**，
-    拿它去和检索 URL/媒体名比 → 必然对不上 → 全部判"虚假标注"。真实核验应当是：
-    这句话能否在**底稿/引用证据**里逐字找到（能 → 它是确定性链给出的位置，诚实）。
+    `report_brief`/`narrative` 的来源位置列写的是**位置**与**派生说明**，旧实现把它当
+    **来源名**去和检索 URL/媒体名比 → 必然对不上 → 全部判"虚假标注"。真实核验应当是：
+    这句话能否在**底稿/准入记录**里核到——页码与科目要真的存在，行文要逐字对得上；
+    派生说明要有对应指标、同期、同口径与实际 `derived_from`。
 
     只对**定位/派生形态**的句子生效（含「第 N 页」/「行「」/「派生/推算」/算式连接符），
-    其余声明仍按来源名规则判——不给"任何句子都能蒙混过关"的口子。
+    其余声明仍按来源名规则判——不给"任何句子都能蒙混过关"的口子；也**不允许**靠
+    "删掉页码后只剩同表名"或"底稿里存在任意 gross_profit"通过（10-03 复现的两个缺口）。
     """
     text = str(claim or "").strip()
     if not text:
@@ -4061,32 +4257,14 @@ def _locator_grounded_in_artifacts(claim: str, sources: dict) -> bool:
                      or ("−" in text and "：" in text) or ("＝" in text and "：" in text))
     if not (looks_locator or looks_derived):
         return False
-    # 派生说明：底稿的**派生事实**里必须真的有对应项（按指标名核验，不做"有派生就算过"）
-    if looks_derived:
-        der = str((sources or {}).get("workpaper_derived_facts_json") or "")
-        if not der:
-            return False
-        if ("营业收入" in text and "营业成本" in text
-                and '"metric": "gross_profit"' in der):
-            return True          # 毛利＝营业收入−营业成本：底稿里有这条派生事实
-        if "派生" in text or "推算" in text:
-            return False         # 只标了"派生"但核不到对应事实 → 仍按来源名规则判
-    hay = "\n".join(str((sources or {}).get(k) or "")
-                    for k in ("workpaper_rows", "workpaper_derived_facts_json",
-                              "workpaper_derived_digest", "workpaper_derived",
-                              "located_facts", "working_paper", "narrative_evidence",
-                              "fetch_snapshot"))
-    if not hay:
+    entries = index if index is not None else _locator_evidence_index(sources=sources)
+    if not entries:
         return False
-    # 逐字命中，或"位置主体"命中（去掉引号内被截断的行文后再找一次）
-    if text in hay:
-        return True
-    core = re.sub(r"^(PDF\s*)?第\s*\d+\s*页\s*[·:：]?\s*", "", text)
-    core = core.split("行「")[0].strip(" ·:：")
-    return bool(core and len(core) >= 4 and core in hay)
+    return any(_entry_matches_locator_or_derived(e, text) for e in entries)
 
 
-def check_source_labeling(report: str, sources: dict) -> dict:
+def check_source_labeling(report: str, sources: dict,
+                          locator_index: list[dict] | None = None) -> dict:
     """来源标注诚实性：报告中"数据来源：X"的 X 是否真的在检索/快照中出现。
     - 含 URL / 命中已知媒体名 / 命中源标题 → 诚实
     - 括号披露注释（如"（含特定新闻门户单篇报道、非财报类资讯链接）"）
@@ -4094,7 +4272,9 @@ def check_source_labeling(report: str, sources: dict) -> dict:
     - 标注'模型知识/未验证' → 诚实（已明示）
     - 否定/谨慎语境（非财报类/非官方/网络传言/未经核实/仅供参考…）→ 诚实
     - 声明具体来源/权威文档（年报/公告/官网/招股书…）但源中无 → 虚假标注
-    - '建议以X为准' 类建议句不判虚假。"""
+    - '建议以X为准' 类建议句不判虚假。
+    - 定位/派生型声明（「PDF 第 N 页 · 科目 · 行「…」」/「2024年 合并：营业收入 − 营业成本」）
+      按**底稿/准入记录**核验（`locator_index`；缺省时按来源通道现建）。"""
     known = _known_sources(sources)
     claims = _extract_source_claims(report)
     mislabeled: list[str] = []
@@ -4152,10 +4332,12 @@ def check_source_labeling(report: str, sources: dict) -> dict:
         ):
             continue
         # X0（10-02 真实任务 `ui-d5af8cae2f`）：**分析层给出的来源位置/派生说明**单元格，
-        # 与任务自己的确定性产物（底稿/引用证据）逐字核对——命中即诚实，不拿它去和
-        # "来源名/URL 清单"比（那必然对不上：『PDF 第 75 页 · 合并利润表 · 行「…」』
-        # 是位置而不是来源名）。未命中仍走下面的来源名规则，真实虚假标注照样被判。
-        if _locator_grounded_in_artifacts(c, sources):
+        # 与任务自己的确定性产物（底稿/准入记录）按字段核对——页码+科目+行文，或
+        # 指标+期间+口径+实际 derived_from。命中即诚实，不拿它去和"来源名/URL 清单"比
+        # （那必然对不上：『PDF 第 75 页 · 合并利润表 · 行「…」』是位置而不是来源名）。
+        # 10-03 收紧：不得靠"删页码后只剩同表名"或"底稿里存在任意 gross_profit"通过；
+        # 未命中仍走下面的来源名规则，真实虚假标注照样被判。
+        if _locator_grounded_in_artifacts(c, sources, locator_index):
             continue
         # 权威文档判定（否定感知）：仅当不含否定词且命中权威文档词，
         # 且检索中无对应文档 → 虚假标注
@@ -4595,7 +4777,10 @@ def run_acceptance(task_id: str, goal: str, report_text: str, workspace,
     checks["entity_attribution"] = check_entity_attribution(
         report_text, sources, goal,
     )
-    checks["source_labeling"] = check_source_labeling(report_text, sources)
+    checks["source_labeling"] = check_source_labeling(
+        report_text, sources,
+        locator_index=_locator_evidence_index(workspace=workspace, sources=sources))
+
     checks["deliverable_completeness"] = check_deliverable_completeness(
         report_text, goal, domain=domain,
     )

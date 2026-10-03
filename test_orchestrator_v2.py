@@ -1360,39 +1360,64 @@ class TestResearchRepairClosure(TempWorkspaceCase):
         self.assertFalse(all(d in completed for d in dep["3a"]),
                          "第二个来源（optional）仍在飞时 3a 也要等本轮取证收口")
 
-    def test_redo_completes_necessary_downstream(self):
-        """§2-2：昂贵步骤仍受限，但必要下游（分析/打包）不得被上限截断。"""
+    def test_redo_completes_necessary_downstream_and_writes_new_artifacts(self):
+        """§2-2：取证受限但必要下游必须跑完，且**报告/包的新产物真的落到盘上**。
+
+        （10-03 要求：下游修复测试不能只断言"package 存在或派发 >= 3 步"。）
+        """
         o = make_orch(_max_redo_steps=1)
         o._now_iso = lambda: "t"
         o._diagnosis_for_step = lambda *a, **k: None
         o._record_reflection_refinement = lambda *a, **k: None
         all_steps = self._research_steps()
+        # 计划里补上打包步（固定研究链的交付尾段由 `_ensure_package_step` 添加）
+        all_steps.append({"step_id": "package", "capability": "package",
+                          "instruction": "打包", "timeout": 120,
+                          "depends_on": ["1", "2", "3", "3a", "4"]})
+        for s in all_steps:                     # 让拓扑顺序与真实计划一致
+            if s["step_id"] == "package":
+                s["depends_on"] = [x["step_id"] for x in all_steps
+                                   if x["step_id"] != "package" and not x.get("optional")]
         completed_all = {
             s["step_id"]: {"status": "SUCCESS", "result": f"old-{s['step_id']}"}
             for s in all_steps
         }
-        dispatched = []
+        ws = ws_mod.task_workspace("t-redo-down")
+        reports = ws / "reports"
+        reports.mkdir(parents=True, exist_ok=True)
+        (reports / "report.md").write_text("旧正文（修复前）", encoding="utf-8")
+        dispatched: list[str] = []
 
         def fake_dispatch(goal, step, tid, state):
-            dispatched.append(step["step_id"])
-            return {"task_id": step["step_id"], "status": "SUCCESS",
-                    "result": f"new-{step['step_id']}"}
+            sid = step["step_id"]
+            dispatched.append(sid)
+            body = f"新产物-{sid}"
+            # 让"报告步/打包步"真的写出文件：下游断言看的是**盘上的新产物**
+            if step.get("capability") == "report_generator":
+                (reports / "report.md").write_text(f"# 报告\n\n{body}", encoding="utf-8")
+            if step.get("capability") == "package":
+                with zipfile.ZipFile(ws / "deliverables_redo.zip", "w") as z:
+                    z.write(reports / "report.md", "reports/report.md")
+            return {"task_id": sid, "status": "SUCCESS", "result": body}
 
         o._dispatch_step_safe = fake_dispatch
         ok = o._redo_step_and_dependents(
             "t-redo-down", "目标", all_steps, completed_all, "3a", "分析消费了旧事实",
         )
         self.assertTrue(ok)
-        self.assertIn("3a", dispatched)
-        self.assertIn("3", dispatched, "事实变了：解释必须跟着更新")
-        self.assertIn("4", dispatched, "事实变了：报告必须跟着更新")
-        self.assertTrue(any(s["step_id"] == "package" for s in all_steps)
-                        or len(dispatched) >= 3)
+        for sid in ("3a", "3", "4", "package"):
+            self.assertIn(sid, dispatched, f"必要下游 {sid} 必须重做（旧实现会截断）")
         self.assertLess(dispatched.index("3a"), dispatched.index("3"),
-                        "重做顺序必须上游先跑（3a → 3 → 4）")
+                        "重做顺序必须上游先跑（3a → 3 → 4 → 打包）")
         self.assertLess(dispatched.index("3"), dispatched.index("4"))
-        self.assertEqual(completed_all["4"]["result"], "new-4",
-                         "报告没有被重做 = 修复没跑完（旧实现的截断）")
+        self.assertLess(dispatched.index("4"), dispatched.index("package"))
+        # 新产物：报告正文是重做后的，包里的报告也是同一份新正文（不是旧稿）
+        self.assertIn("新产物-4", (reports / "report.md").read_text(encoding="utf-8"))
+        with zipfile.ZipFile(ws / "deliverables_redo.zip") as z:
+            packed = z.read("reports/report.md").decode("utf-8")
+        self.assertIn("新产物-4", packed)
+        self.assertNotIn("旧正文（修复前）", packed,
+                         "包必须收新报告，不能收修复前的旧报告")
 
     def test_redo_reinjects_updated_downstream_context(self):
         """§2-2：重做派发要带上**本轮更新后**的前序产物（此前直接清空 depends_on 派发）。"""
@@ -1490,6 +1515,53 @@ class TestResearchRepairClosure(TempWorkspaceCase):
         self.assertNotIn("3a", opt, "分析步失败仍是失败（不得当缺口放过）")
         self.assertNotIn("3", opt)
         self.assertNotIn("4", opt)
+
+    def test_adopted_acceptance_does_not_pass_a_different_candidate(self):
+        """10-03 反例：A 的有效采纳验收**不得**给不同正文 B 放行。
+
+        旧回退只核"该验收属于采纳版"，从没核"采纳版就是这个候选" → B 借到 A 的 PASS。
+        正确判据是**同一完整正文 hash**（`version_id`）；短 hash 只作参照。
+        """
+        import hashlib
+        from report_version import VersionStore
+        from workspace import task_workspace
+        o = make_orch()
+        tid = "t-adopt-bind"
+        body_a = "# 报告 A\n\n营业收入 288.76 亿元。" + "A" * 60
+        body_b = "# 报告 B\n\n营业收入 999.99 亿元。" + "B" * 60
+        ws = task_workspace(tid)
+        ws.mkdir(parents=True, exist_ok=True)
+        store = VersionStore(ws, tid)
+        v = store.record(body_a, sources_fingerprint="src-a", rules_version="r",
+                         rules_fingerprint="rf")
+        bound = store.bind_acceptance(
+            {"overall": "pass", "gaps": [],
+             "report_sha256": hashlib.sha256(body_a.encode("utf-8")).hexdigest()},
+            sources_fingerprint="src-a", rules_fingerprint="rf")
+        self.assertIsNotNone(bound, "夹具：A 的验收必须真的绑上（全量 hash）")
+        store.adopt(v)
+        adopted = store.adopted()
+        self.assertEqual(adopted.version_id, hashlib.sha256(body_a.encode()).hexdigest())
+        # A：同一全文 hash → 采纳验收可用
+        self.assertTrue(o._acceptance_passed(tid, body_a))
+        self.assertEqual(o._acceptance_for_candidate(tid, body_a)["overall"], "pass")
+        # B：不同正文 → 采纳版的 PASS 不得背书
+        self.assertIsNot(o._acceptance_passed(tid, body_b), True,
+                         "B 不得借 A 的采纳验收放行")
+        self.assertIsNone(o._acceptance_for_candidate(tid, body_b),
+                          "给 B 的判定里不得出现 A 的通过结论")
+        self.assertFalse(o._acceptance_is_for_candidate(
+            tid, body_b, {"overall": "pass",
+                          "report_sha256": hashlib.sha256(body_a.encode()).hexdigest()}))
+        # 旧短 hash 只作参照：候选不是采纳版时，不得凭前 16 位绑定
+        short_b = hashlib.sha256(body_b.encode()).hexdigest()[:16]
+        self.assertFalse(o._acceptance_is_for_candidate(
+            tid, body_b, {"overall": "pass", "report_sha256": short_b}),
+            "短 hash 不足以给别的正文背书（只作参照）")
+        # 候选就是采纳版本身时，身份由 version_id 全量 hash 独立证明（与短 hash 无关）
+        self.assertTrue(o._acceptance_is_for_candidate(
+            tid, body_a, {"overall": "pass",
+                          "report_sha256": hashlib.sha256(body_a.encode()).hexdigest()}))
 
     def test_acceptance_only_for_current_candidate(self):
         """§2-4：验收结论只对当前交付候选有效；未绑定的结论只能"继续"不能"放行"。"""

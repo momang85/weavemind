@@ -1981,6 +1981,8 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         证据时退回 acceptance_report.json，两者都没有就是未知（None，不算通过）。
         传 `candidate` 时，退回文件的那条也必须是**当前交付候选**的验收：文件里的
         最后一份可能属于上一版正文，拿它当"本候选已通过"就是拿旧结论给新稿背书。
+        采纳版回退同理：必须**同一完整正文 hash**（`_adopted_matches_candidate`），
+        短 hash 只作参照。
         方向是不对称的——**未绑定的 fail 仍返回 False**（缺口信号保留、继续修复），
         未绑定的 pass 才返回 None（不得放行）。
         """
@@ -1991,7 +1993,9 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             adopted = VersionStore(ws, task_id).adopted()
             if adopted is not None:
                 acc = adopted.acceptance or {}
-                if acc and (not candidate or adopted.acceptance_for_this_body()):
+                if acc and adopted.acceptance_for_this_body() and (
+                        not candidate
+                        or OrchestratorV2._adopted_matches_candidate(adopted, candidate)):
                     return str(acc.get("overall") or "") == "pass"
             acc_path = ws / "acceptance_report.json"
             if not acc_path.exists():
@@ -2002,7 +2006,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
             if _body and _overall == "pass":
                 _rec = str(acc.get("report_sha256") or "")
                 _cur = hashlib.sha256(_body.encode("utf-8")).hexdigest()
-                if not _rec or (_rec != _cur and not _cur.startswith(_rec)):
+                if len(_rec) < 64 or _rec != _cur:
                     return None          # 别版正文的"通过"不能给本候选背书
             return _overall == "pass"
         except Exception:
@@ -2039,24 +2043,42 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         cur = self._repair_fingerprint(task_id, candidate, gap_sig)
         return (bool(last_fp) and cur == last_fp), cur
 
+    @staticmethod
+    def _adopted_matches_candidate(adopted, candidate: str) -> bool:
+        """采纳版是否就是**这一个**候选：必须**完整正文 hash** 相同。
+
+        10-03 复现的接缝：A 的有效采纳验收给不同正文 B 返回了 pass——旧回退只核
+        "该验收属于采纳版"，从没核"采纳版就是这个候选"。短 hash 只作参照（不足 64 位
+        一律不绑定），不给新候选背书。
+        """
+        if adopted is None or not str(candidate or ""):
+            return False
+        try:
+            _vid = str(getattr(adopted, "version_id", "") or "")
+        except Exception:
+            return False
+        if len(_vid) < 64:
+            return False
+        _cur = hashlib.sha256(str(candidate).encode("utf-8")).hexdigest()
+        return _vid == _cur
+
     def _acceptance_is_for_candidate(self, task_id: str, candidate: str,
                                      summary: dict) -> bool:
-        """这份验收结论能否证明属于**当前交付候选**（正文哈希或采纳身份绑定）。"""
+        """这份验收结论能否证明属于**当前交付候选**（同一完整正文 hash / 同一采纳版）。"""
         if not str(candidate or "") or not summary:
             return False
         _rec = str(summary.get("report_sha256") or "")
-        if _rec:
-            _cur = hashlib.sha256(str(candidate).encode("utf-8")).hexdigest()
-            if _rec == _cur or _cur.startswith(_rec):
-                return True
+        _cur = hashlib.sha256(str(candidate).encode("utf-8")).hexdigest()
+        if _rec and len(_rec) >= 64 and _rec == _cur:
+            return True               # 验收对象就是本候选（完整 hash 相同）
         try:
             adopted = self._version_store(task_id).adopted()
         except Exception:
             adopted = None
-        if adopted is not None:
+        # 采纳版回退：**先核候选与采纳版是同一份正文**，再看它的验收
+        if self._adopted_matches_candidate(adopted, candidate):
             acc = dict(adopted.acceptance or {})
-            if acc and str(acc.get("overall") or "") == str(summary.get("overall") or "") \
-                    and adopted.acceptance_for_this_body():
+            if acc and adopted.acceptance_for_this_body():
                 return True
         return False
 
@@ -2064,18 +2086,30 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         """可用于**修复判定**的验收结论（只对当前交付候选，或按身份绑定的采纳版）。
 
         未绑定本候选的旧结论**只能"继续修复"，不能"放行"**：
+        - 采纳版自身的验收优先（前提：候选与采纳版**同一完整 hash**）；
         - 文件里的 fail 若证明不了属于本候选，仍返回它（并把 `version_bound=False`
           标出来）——缺口信号保留，修复不会被旧结论绕过；
         - 文件里的 pass 若证明不了属于本候选，返回 None（不得拿别的正文的通过结论
           给当前候选背书）。
         缺报告（还没有交付候选）一律 None：三态分离下"未执行"就是未执行。
         """
-        if not str(candidate or ""):
+        body = str(candidate or "")
+        if not body:
             return None
+        try:
+            adopted = self._version_store(task_id).adopted()
+        except Exception:
+            adopted = None
+        # 1) 采纳版自己的验收：身份绑定的那条（文件可能已被别版覆盖，不能只认文件）
+        if self._adopted_matches_candidate(adopted, body):
+            acc = dict(adopted.acceptance or {})
+            if acc and adopted.acceptance_for_this_body():
+                return acc
+        # 2) 文件里的验收：必须能证明属于本候选
         summary = self._read_acceptance_summary(task_id)
         if not summary:
             return None
-        if self._acceptance_is_for_candidate(task_id, candidate, summary):
+        if self._acceptance_is_for_candidate(task_id, body, summary):
             return summary
         if str(summary.get("overall") or "") != "pass":
             unbound = dict(summary)
