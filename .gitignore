@@ -44,6 +44,15 @@ distill_data_merged.jsonl
 frontend/node_modules/
 frontend/tsconfig.tsbuildinfo
 
+# **根目录**的发布包与解压后的运行包（本机构建产物，实测 2.1 GB / 2.7 万文件）：
+# 项目自己的打包策略也把 dist 列在 FORBIDDEN_IN_PACKAGE（见 test_deploy_manifest.py），
+# 谁都不该把它提交上去。锚定 `/dist/` 是刻意的——`frontend/dist` 按上面约定仍入库。
+/dist/
+/dist-*/
+
+# 本机调试录屏分段（根目录 `_seg*.webm` 等），可重录，不入库
+/*.webm
+
 # 运行状态
 .weavemind/
 # 旧运行时目录（启动时自动迁移，保留忽略规则防漏网）
