@@ -96,6 +96,20 @@ _SECRET_ENV_PREFIXES = ("LLM_", "OPENAI_", "EMBEDDING_", "PLANNER_LLM_",
                         "API_KEY", "SERPAPI", "TOKEN", "SECRET")
 
 
+def _sandbox_build_tag() -> str:
+    """沙箱镜像的构建 tag：与 `code_sandbox.DEFAULT_IMAGE` **同一字符串**。
+
+    实机教训（2026-10-03）：提示文本曾写成 `weavimind-code-sandbox`（少一个 e），
+    照提示构建出来的镜像应用永远找不到（`image_exists()` 恒 False），沙箱因此一直
+    显示"不可用"——同一屏里"提示的 tag"与"探测的 tag"必须同源，不能再各写一份。
+    """
+    try:
+        from code_sandbox import DEFAULT_IMAGE
+        return str(DEFAULT_IMAGE)
+    except Exception:                            # noqa: BLE001 - 提示不得因此炸掉
+        return "weavemind-code-sandbox:latest"
+
+
 def _financial_facts_in_hand(task_id: str) -> bool:
     """本任务是否已有**结构化财务事实**（预载载荷 `financials.json`）。
 
@@ -6229,7 +6243,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                                       "code_execution 步骤会被拒绝执行，也不会退到宿主环境运行。"
                                       "出路：① 安装并启动 Docker 后构建沙箱镜像"
                                       "（docker build -f Dockerfile.sandbox -t "
-                                      "weavimind-code-sandbox:latest .）；"
+                                      f"{_sandbox_build_tag()} .）；"
                                       "② 让任务不含代码步骤（公司研究默认如此）。"
                                       "不要用关闭隔离来解决（restricted/none 只能由操作者显式选择）。",
                            "timestamp": self._now_iso()})
@@ -7251,7 +7265,7 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
                                       "修复步骤需要在隔离环境里运行，重复派发只会再失败一次。"
                                       "出路：① 安装并启动 Docker 后构建沙箱镜像 "
                                       "（docker build -f Dockerfile.sandbox -t "
-                                      "weavimind-code-sandbox:latest .）；"
+                                      f"{_sandbox_build_tag()} .）；"
                                       "② 让任务不生成代码步骤（研究类任务默认如此）。"
                                       "不要用关闭隔离来解决（restricted/none 只能由操作者显式选择）。"
                                       "其余能力（检索/结构化数据/图表/报告/交付）不受影响。",

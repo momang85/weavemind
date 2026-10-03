@@ -21,8 +21,19 @@ RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debia
 WORKDIR /work
 
 # 复制依赖并预装（代码生成任务常用库：matplotlib/jieba/pandas/scikit-learn/seaborn 等）
+# `pip_index_url`：构建期可选镜像源（默认空=直连 PyPI）；本机实测直连
+# `files.pythonhosted.org` 会读超时。
+ARG pip_index_url
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt || true
+RUN pip install --no-cache-dir --timeout 60 --retries 5 \
+        ${pip_index_url:+--index-url ${pip_index_url}} \
+        -r /tmp/requirements.txt || true
+# 核心库**必须真的装上**：实机教训（2026-10-03）——上一行的 `|| true` 把 pip 读超时吞掉，
+# 镜像"看着有"（367MB）、`import pandas` 却是 ModuleNotFoundError，代码执行步骤照样会失败。
+RUN pip install --no-cache-dir --timeout 60 --retries 5 \
+        ${pip_index_url:+--index-url ${pip_index_url}} \
+        pandas matplotlib jieba scikit-learn seaborn \
+    && python -c "import pandas, matplotlib, jieba, sklearn, seaborn; print('sandbox core libs ok')"
 
 # 沙箱内不保留任何密钥
 # 只读根文件系统下，可写的家目录与 matplotlib 字体缓存必须落到 tmpfs /tmp

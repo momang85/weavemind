@@ -1209,7 +1209,7 @@ def check_code_sandbox() -> dict:
             f"容器隔离不可用（{st.get('isolation_reason') or '原因未知'}）："
             "涉及代码执行的步骤会被拒绝，其余能力（检索/结构化数据/图表/报告/交付）不受影响。\n"
             "       出路：① 安装并启动 Docker 后构建沙箱镜像 "
-            "（docker build -f Dockerfile.sandbox -t weavimind-code-sandbox:latest .）；\n"
+            "（docker build -f Dockerfile.sandbox -t weavemind-code-sandbox:latest .）；\n"
             "             ② 让任务不生成代码步骤（研究类任务默认如此）。\n"
             "       注意：不要用关闭隔离来解决（restricted/none 只能由操作者显式选择，"
             "不是给新人的出路）。",

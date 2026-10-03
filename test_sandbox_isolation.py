@@ -417,6 +417,42 @@ class TestWorkerDoesNotSwallowFacilityRefusal(_SandboxTest):
         self.assertNotIn("No valid code", msg, "不得被包装成通用失败而丢掉隔离根因")
 
 
+class TestSandboxBuildHintMatchesProbedImage(_SandboxTest):
+    """提示里给出的构建 tag 必须与**探测用的 tag**同源（实机教训 2026-10-03）。
+
+    真实事故：提示文本写成 `weav``imind-code-sandbox:latest`（少一个 e），照提示
+    `docker build -t …` 出来的镜像，`code_sandbox.image_exists()` 永远 False →
+    工作台一直显示"本机没有可用的容器隔离"，而镜像其实已经建好；用户按提示做也修不好。
+    这里把"每一处提示的 tag"钉死成 `code_sandbox.DEFAULT_IMAGE`。
+    """
+
+    def test_every_build_hint_uses_the_probed_tag(self):
+        import re
+
+        root = Path(__file__).resolve().parent
+        tag = code_sandbox.DEFAULT_IMAGE
+        pat = re.compile(r"docker build -f Dockerfile\.sandbox -t ([^\s\"]+)")
+        seen: list[str] = []
+        for name in ("dep_check.py", "orchestrator_v2.py", "launcher.py",
+                     "web_ui.py", "code_sandbox.py"):
+            p = root / name
+            if not p.exists():
+                continue
+            text = p.read_text(encoding="utf-8")
+            for m in pat.finditer(text):
+                got = m.group(1)
+                seen.append(f"{name}:{got}")
+                # 允许 f-string 占位（运行期解析到同一个 tag）
+                if "{" in got:
+                    continue
+                self.assertEqual(got, tag, f"{name} 的构建提示 tag 与探测 tag 不一致：{got}")
+        self.assertTrue(seen, "没有找到任何构建提示——本用例失去意义，请检查提示文本")
+        # 运行期解析也必须落到同一个 tag
+        import orchestrator_v2
+        self.assertEqual(orchestrator_v2._sandbox_build_tag(), tag)
+        self.assertIn(tag, str(orchestrator_v2._sandbox_build_tag()))
+
+
 class TestNoDockerDoesNotBlockStartup(_SandboxTest):
     """边界：缺 Docker 只停用代码执行，不阻断工作台启动（历史要求：减少 Docker 依赖）。"""
 
