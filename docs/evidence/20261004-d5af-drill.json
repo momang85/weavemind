@@ -96,6 +96,20 @@
       "evidence": "socket.getaddrinfo → 198.18.0.4；_endpoint_guard → DENY；页面提示「实时通道已降级为轮询」"
     }
   ],
+  "fix_observed_in_run": {
+    "why": "report_generator worker 在**函数内**惰性 import llm_client：它本进程的第一次 LLM 调用发生在 17:58:35，晚于本次编辑落盘（17:53:24），于是它加载到的是**修复后**的模块；content_summary worker 早在 17:33 就 import 过，整轮仍是旧代码。",
+    "ledger": [
+      {"at": "17:59:25", "stage": "exec", "error_class": "thinking_budget_exhausted", "end_reason": "empty_content", "elapsed_ms": 49921, "input_chars": 58055, "note": "新分类生效：空正文 + reasoning + length 被判为思考耗尽，且**未**标端点不健康"},
+      {"at": "17:59:26", "stage": "exec", "error_class": "thinking_budget_exhausted", "end_reason": "empty_content", "elapsed_ms": 50520, "input_chars": 57800},
+      {"at": "18:02:33", "stage": "exec", "end_reason": "ok", "elapsed_ms": 187964, "input_chars": 58055, "note": "关思考重发成功（log：关思考重发成功（stream, usage=exec））→ 产出报告正文"},
+      {"at": "18:03:05", "stage": "exec", "end_reason": "ok", "elapsed_ms": 219208, "input_chars": 57800, "note": "同上，第二次报告调用也靠关思考成功"}
+    ],
+    "verdict": "修复的逃生门**已在真实供应商调用上生效**（旧代码在同输入下 50s 空正文、随后只能等超时/无效切备用；新代码 188s/219s 拿到正文）",
+    "still_open": [
+      "一次干净整跑：让 content_summary 也用上新代码（它需要**重启**才会重载模块），确认 Steps 无 300s 超时、终态为 SUCCESS",
+      "报告类调用的关思考耗时 188–219s，贴近模板步的 300s 上限：若干净整跑再次贴边，再按证据决定是否调模板步超时（不预调）"
+    ]
+  },
   "fix_landed": {
     "commit": "bcd58e8",
     "ci": "success",
@@ -108,7 +122,7 @@
     "tests": {"new": "test_llm_thinking_escape.py（11 例，全程打桩）", "ci_step": "已加；CI success"}
   },
   "not_claimed": [
-    "修复在真实整跑中生效（需充值后重跑；本轮为修复前代码）",
+    "干净整跑（新代码全路径，含 content_summary）——待充值后重跑；本轮只有报告路径用上新代码",
     "干净成功终态（本轮是 SUCCESS_WITH_ISSUES）",
     "真人复核 / 银行部署 / 90 分 / X1 结论"
   ]
