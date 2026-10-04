@@ -1878,6 +1878,35 @@ def _get_task_report_data(tid: str) -> dict | None:
         pass
     return None
 
+def _sync_memory_report(task_id: str, report: str) -> bool:
+    """把内存投影里的交付正文换成**刚装配出的那一版**。
+
+    为什么必须做：`_task_results[tid]` 只由 `orchestrator:response` 订阅写入、只在删除任务时清理。
+    任何"就地改写交付正文"的入口（分析采纳 / 候选采纳 / 人工修订）如果只写 DB/Redis 投影，
+    `_get_task_report_data` 仍会**优先**读到内存里的旧正文 →
+    ① 导出守卫判"交付正文与采纳版本不一致"，采纳后导出恒 409「导出期间发生修订」（重试永远不会好）；
+    ② MD/PDF 下载出现"身份头=采纳版 / 字节=采纳前"（`X-Report-Draft: 1`）。
+    实机反例：`ui-433f4cf9e2` 分析采纳 A 后连续三次导出 409，重启 webui（清空内存）后同一请求 200。
+    人工修订路径本来就同步了内存（这里收敛成同一处），分析采纳/候选采纳此前漏了。
+    没有内存条目时不动：下一次读取自然从 DB/Redis 投影重建。
+    """
+    if not task_id:
+        return False
+    try:
+        with _task_lock:
+            mem = _task_results.get(str(task_id))
+            if not isinstance(mem, dict):
+                return False
+            touched = False
+            for key in ("report", "final_report"):
+                if key in mem:
+                    mem[key] = str(report or "")
+                    touched = True
+            return touched
+    except Exception:                            # noqa: BLE001 - 投影同步失败不阻断主流程
+        return False
+
+
 def _share_image_src(src: str, tid: str) -> str:
     """把报告图片链接指向可复用的 /files/<task_id>/ 静态路由（无需复制图片）。
     报告链接通常已被 _rewrite_report_links 改写成 /files/<task_id>/...，
@@ -6324,6 +6353,8 @@ def _post_task_analysis_adopt(self, p, body, admin):
                     logger.warning(
                         "分析采纳后交付投影未写入（task=%s）：交付正文与采纳版本可能不一致",
                         tid)
+                # 内存投影也要跟着走：否则导出/下载仍读采纳前的正文（实测恒 409）
+                _sync_memory_report(tid, _report_body)
             except Exception as exc:                # noqa: BLE001 - 如实报，不假成功
                 logger.warning("分析采纳后交付投影写入失败（task=%s）：%s",
                                tid, str(exc)[:160])
@@ -6546,12 +6577,8 @@ def _post_task_review_edit(self, p, body, admin):
                 "delivery_updated": False, "status": "draft",
                 "draft_reason": "交付投影写入失败",
             }, 500)
-        with _task_lock:
-            _mem = _task_results.get(tid)
-            if isinstance(_mem, dict):
-                for _k in ("report", "final_report"):
-                    if _k in _mem:
-                        _mem[_k] = str(asm.get("report") or "")
+        # 内存投影同步收敛到 _sync_memory_report（分析采纳/候选采纳共用同一实现）
+        _sync_memory_report(tid, str(asm.get("report") or ""))
         return self._json({
             "status": "ok", "task_id": tid,
             "parent_version_id": current.version_id,
@@ -7206,6 +7233,8 @@ def _post_task_candidate_adopt(self, p, body, admin):
         if not _projected:
             logger.warning("候选采纳后交付投影未写入（task=%s）：正文与采纳版本可能不一致",
                            tid)
+        # 内存投影同步（与人工修订/分析采纳同一处实现）：不写就会"采纳了却导不出来"
+        _sync_memory_report(tid, str(assemble.get("report") or ""))
     except Exception as exc:                     # noqa: BLE001 - 如实报，不假成功
         logger.warning("候选采纳后交付投影写入失败（task=%s）：%s", tid, str(exc)[:160])
     hr_after = ""

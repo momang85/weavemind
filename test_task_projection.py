@@ -315,5 +315,65 @@ class TestElapsedTimezone(unittest.TestCase):
         self.assertIsNone(h("not-a-time"))
 
 
+class TestMemoryReportSyncAfterRewrite(unittest.TestCase):
+    """就地改写交付正文的入口必须同步**内存投影**。
+
+    实机反例 `ui-433f4cf9e2`：分析采纳 A 之后连续三次 `POST /package` 都 409
+    「导出期间发生修订（交付正文与采纳版本不一致）」——采纳只写了 DB/Redis 投影，
+    而 `_get_task_report_data` 优先读内存里的旧正文；同时 MD/PDF 下载出现
+    「身份头=采纳版 / 字节=采纳前」(`X-Report-Draft: 1`)。重启 webui（清空内存）后
+    同一请求 200、draft=0——守卫判据没错，错在缓存。
+    """
+
+    def setUp(self):
+        import web_ui
+        self.addCleanup(mock.patch.object(web_ui, "_task_results", {}).stop)
+        self._patcher = mock.patch.object(web_ui, "_task_results", {})
+        self.mem = self._patcher.start()
+        self.web_ui = web_ui
+        self.addCleanup(self._patcher.stop)
+
+    def test_cached_body_wins_over_projection(self):
+        """先把"缓存优先"这件事本身钉住（缺陷正来自这条优先级）。"""
+        self.mem["t-mem"] = {"report": "采纳前的正文"}
+        got = self.web_ui._get_task_report_data("t-mem")
+        self.assertEqual(got["report"], "采纳前的正文")
+
+    def test_sync_replaces_cached_report_body(self):
+        self.mem["t-mem2"] = {"report": "采纳前的正文", "final_report": "采纳前的正文"}
+        self.assertTrue(self.web_ui._sync_memory_report("t-mem2", "采纳后的正文"))
+        self.assertEqual(self.mem["t-mem2"]["report"], "采纳后的正文")
+        self.assertEqual(self.mem["t-mem2"]["final_report"], "采纳后的正文")
+        self.assertEqual(self.web_ui._get_task_report_data("t-mem2")["report"],
+                         "采纳后的正文")
+
+    def test_sync_without_cache_entry_is_noop(self):
+        """没有内存条目时不动手：下一次读取本来就会从 DB/Redis 投影重建。"""
+        self.assertFalse(self.web_ui._sync_memory_report("t-absent", "X"))
+        self.assertNotIn("t-absent", self.mem)
+
+    def test_sync_failure_does_not_raise(self):
+        class _Boom(dict):
+            def get(self, *_a, **_k):
+                raise RuntimeError("boom")
+
+        self.mem["t-boom"] = _Boom()
+        self.assertFalse(self.web_ui._sync_memory_report("t-boom", "X"))
+
+    def test_all_rewrite_entry_points_sync_memory(self):
+        """源码级守卫：三个改写交付正文的入口都要同步内存投影。"""
+        src = Path("web_ui.py").read_text(encoding="utf-8")
+        self.assertGreaterEqual(src.count("_sync_memory_report("), 4,
+                                "分析采纳/候选采纳/人工修订应共用同一处同步实现")
+        for fn in ("_post_task_analysis_adopt", "_post_task_candidate_adopt",
+                   "_post_task_review_edit"):
+            idx = src.find("def %s(" % fn)
+            self.assertGreater(idx, 0, f"找不到 {fn}")
+            nxt = src.find("\ndef ", idx + 1)
+            body = src[idx:nxt if nxt > 0 else len(src)]
+            self.assertIn("_sync_memory_report(", body,
+                          f"{fn} 改写了交付正文却没同步内存投影（导出会恒 409）")
+
+
 if __name__ == "__main__":
     unittest.main()

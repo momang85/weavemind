@@ -88,8 +88,17 @@
         "进程内跑同一管线（读 DB 投影）→ export_snapshot OK + repack OK，说明守卫判据本身没问题，坏的是内存缓存",
         "重启 webui（缓存清空）后 POST /package → 200、verify_ok=true、MD draft=0 且哈希 dd49114a（采纳后正文）"
       ],
-      "proposed_fix": "采纳/修订等任何改写交付正文的入口，结束后 `_task_results.pop(tid, None)`（或写入新正文），让下一次读取从 DB/Redis 投影重建",
-      "status": "未改代码（本轮只登记 + 用重启绕过）"
+      "proposed_fix": "采纳/修订等任何改写交付正文的入口，结束后把内存投影里的正文同步成刚装配的那一版（或整条清掉，让下一次读取从 DB/Redis 投影重建）",
+      "fix_landed": {
+        "what": [
+          "新增 `web_ui._sync_memory_report(task_id, report)`：把内存投影里的 report/final_report 同步成刚装配的正文；没有内存条目时不动（下一次读取自然从投影重建）",
+          "分析采纳（`/api/task/<id>/analysis/adopt`）与候选采纳（`/api/task/<id>/candidate/adopt`）在写投影之后调用它——此前只有人工修订路径做了这件事",
+          "人工修订路径原本的内联实现收敛到同一处，避免三条路径再次漂移"
+        ],
+        "tests": "test_task_projection.py 新增 5 例（缓存优先的现状、同步生效、无缓存时不乱动、同步失败不抛、三条改写入口的源码级守卫）；回归 test_task_projection 24、test_review_edit_api 32、test_task_state 11 全绿",
+        "live_verification": "**待做**：内存缓存只在「任务跑完」时被写入，端到端复现需要一次真实整跑（跑完 → 采纳 → 立即导出应 200，无需重启）"
+      },
+      "status": "已修（单元/回归级）；端到端 live 验证待一次新整跑"
     },
     {
       "id": "template-data-analyzer-deps-empty",
@@ -108,7 +117,7 @@
   "environment_notes": [
     "18:23 起主网关余额耗尽（HTTP 402）；用户充值后恢复，并把 backup 指向另一家网关（tierflow.cn / DeepSeek-V4.1-Flash）——备用与主用不再同源（此前是同源同模型，属我上一轮登记的缺陷之一，现由运维层面解决）",
     "代理已关：async 路径的 SSRF 守卫与浏览器 SSE 恢复正常；本轮不再出现 fake-IP 拒发",
-    "webui 进程内存缓存问题需要重启才能复现/绕过（重启本身不改变任何身份判据）"
+    "webui 进程内存缓存问题需要重启才能复现/绕过（重启本身不改变任何身份判据）；修复已提交，加载需重启 webui"
   ],
   "not_claimed": [
     "干净一次通过（本轮仍有 3 次步骤超时，靠重试完成）",
