@@ -54,6 +54,22 @@ _CFG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.jso
 _cfg_mtime: float | None = None
 _cfg_lock = threading.Lock()
 
+# ---------------------------------------------------------------------------
+# 思考型模型（reasoning）的逃生门
+#
+# 现象（2026-10-04 实机 ui-1b155d4f84）：模型把输出预算全烧在 reasoning_content 上，
+# content 恒空且 finish_reason=length —— 调用方给 8192 也照样烧光。原来的放大分支
+# 只覆盖 `max_tok < 8192`，所以"调用方自己就要 8192"的那条路径（content_summary 的
+# 合并调用）一次都不放大，直接掉进切备用；而备用端点常是**同一个网关同一个模型**，
+# 于是必然"Backup LLM also failed"，整步只能等超时。
+#
+# 这里给出两级出路：先放大输出预算（有上限），到顶仍空就**关掉思考重发一次**
+# （网关实测支持 `thinking={"type":"disabled"}`：reasoning_tokens=0、正文正常返回）。
+# 这两个值是"请求形状"不是额度：调用/时间上限仍由预算票据与 deadline 管。
+# ---------------------------------------------------------------------------
+_THINKING_ESCALATE_CAP = 32768
+_NO_THINKING_FIELD: dict[str, Any] = {"thinking": {"type": "disabled"}}
+
 
 # ---------------------------------------------------------------------------
 # B1 模型分级路由：调用用途 -> llm.model_roles 配置键
@@ -1813,6 +1829,8 @@ class LLMClient:
             return cached
 
         last_error: Exception | None = None
+        # 关思考重发只做一次：它同样是一次真实供应商请求（开票、记形状）
+        _no_thinking_sent = False
         # 健康路由（O-29）：主端点已被判定不健康 → 优先走备用，避免每次白白等待超时
         if _cancelled():
             # R2：取消后连这一次"健康路由到备用"的请求都不发
@@ -1900,19 +1918,10 @@ class LLMClient:
                                   note="llm:fallback_budget_refused")
                     logger.warning("LLM 预算拒发，停止重试/切端点（usage=%s）", usage)
                     raise
-                # 思考耗尽（reasoning 模型烧光预算）→ 放大 max_tokens 立即重试，
-                # 不计入端点失败（不是端点故障）
-                if (
-                    getattr(exc, "thinking_budget_exhausted", False)
-                    and max_tok
-                    and max_tok < 8192
-                ):
-                    max_tok = min(max_tok * 2, 8192)
-                    logger.warning(
-                        "thinking budget exhausted, retry with max_tokens=%d",
-                        max_tok,
-                    )
-                    # 这次请求已经发出（供应商可能计费）：结算后再放大重试。
+                # 思考耗尽（reasoning 模型烧光预算）：**先放大输出预算，到顶仍空就
+                # 关掉思考重发一次**；两者都不算端点故障（端点往返是成功的）。
+                if getattr(exc, "thinking_budget_exhausted", False) and max_tok:
+                    # 这次请求已经发出（供应商可能计费）：结算后再重发。
                     # 调用形状也要留一条——否则"票据数 > 调用记录数"，逐条对账时
                     # 会以为有一次请求没记账（实机 ui-706c5ef4a5：17 票 / 16 条）
                     _record_llm_call(
@@ -1923,7 +1932,30 @@ class LLMClient:
                         end_reason="thinking_budget_retry")
                     _budget_close(_rb, _ticket, ok=False, max_tokens=max_tok,
                                   note="llm:thinking_budget_exhausted")
-                    continue
+                    # 还有一次尝试额度且没到上限 → 放大输出预算（原来只到 8192，
+                    # 调用方本来就要 8192 的路径因此一次都不放大）
+                    if max_tok < _THINKING_ESCALATE_CAP and attempt < self._MAX_RETRIES:
+                        max_tok = min(max_tok * 2, _THINKING_ESCALATE_CAP)
+                        logger.warning(
+                            "thinking budget exhausted, retry with max_tokens=%d",
+                            max_tok,
+                        )
+                        continue
+                    # 到顶（或已无重试额度）：关思考重发一次，把预算全留给正文
+                    if not _no_thinking_sent:
+                        _no_thinking_sent = True
+                        raw = self._send_no_thinking(
+                            system, user, temp, max_tok, model, usage=usage,
+                            attempt=attempt, input_chars=_input_chars,
+                            timeout=_attempt_timeout(),
+                        )
+                        if raw is not None:
+                            result = ({"content": raw} if not expect_json
+                                      else self._parse_json(raw))
+                            _cache_set(cache_key, user, result)
+                            return result
+                    last_error = exc
+                    break
                 _reason = _degradation_reason(exc)
                 _mark_endpoint("primary", False, _reason)
                 _record_task_degradation(get_task_context(), _reason, both_failed=False)
@@ -1980,6 +2012,50 @@ class LLMClient:
             attempt=self._MAX_RETRIES,
         ) from last_error
 
+    def _send_no_thinking(
+        self, system: str, user: str, temperature: float, max_tokens: int,
+        model: str, *, usage: str = "", attempt: int = 0, input_chars: int = 0,
+        timeout: float | None = None,
+    ) -> str | None:
+        """关掉思考重发一次（思考型供应商"content 恒空"的确定性出路）。
+
+        这是一次**真实供应商请求**，所以与主循环同样开票、记形状、标端点健康：
+        少了任何一项，账本就会出现"票数 ≠ 调用数"的对账噪音。
+        返回正文文本；失败返回 None（由调用方按原异常继续处置，不吞错）。
+        """
+        _rb, _ticket = _budget_open("llm", max(1, attempt), max_tokens, usage=usage)
+        self._last_usage = None
+        self._fell_back = False
+        _t0 = time.monotonic()
+        _kw = {"timeout": timeout} if timeout is not None else {}
+        try:
+            raw = self._send_request(
+                system, user, temperature, max_tokens, model=model,
+                no_thinking=True, **_kw,
+            )
+        except Exception as exc:
+            _budget_close(_rb, _ticket, ok=False, max_tokens=max_tokens,
+                          note="llm:no_thinking_failed")
+            _record_llm_call(get_task_context(), stage=usage, attempt=attempt,
+                             elapsed_ms=int((time.monotonic() - _t0) * 1000),
+                             input_chars=input_chars, max_tokens=max_tokens,
+                             error_class=type(exc).__name__,
+                             end_reason="thinking_disabled_failed")
+            logger.warning("关思考重发仍失败：%s", str(exc)[:160])
+            return None
+        _mark_endpoint("primary", True)
+        _usage = getattr(self, "_last_usage", None) or {}
+        _budget_close(_rb, _ticket, ok=True, max_tokens=max_tokens,
+                      note="llm:no_thinking_ok",
+                      actual_tokens=(int(_usage.get("completion_tokens") or 0)
+                                     if _usage else None))
+        _record_llm_call(get_task_context(), stage=usage, attempt=attempt,
+                         elapsed_ms=int((time.monotonic() - _t0) * 1000),
+                         input_chars=input_chars, max_tokens=max_tokens,
+                         end_reason="thinking_disabled_ok")
+        logger.warning("thinking budget exhausted → 关思考重发成功（usage=%s）", usage)
+        return raw
+
     def _call_backup(
         self, system: str, user: str, temperature: float, max_tokens: int,
         expect_json: bool, timeout: float | None = None,
@@ -2031,6 +2107,7 @@ class LLMClient:
         model: str | None = None,
         endpoint: str = "primary",
         timeout: float | None = None,
+        no_thinking: bool = False,
     ) -> str:
         """发送 HTTP 请求到 LLM 服务。
 
@@ -2041,6 +2118,8 @@ class LLMClient:
             max_tokens: 最大 token。
             timeout: socket 读超时秒数；None 时取 LLM_REQUEST_TIMEOUT（默认 600）。
                      探测类调用传短值（如 20），避免预检被挂死。
+            no_thinking: 关掉供应商侧的思考（`thinking={"type":"disabled"}`）。
+                     只用于"思考烧光输出预算、content 恒空"后的重发。
 
         Returns:
             LLM 的文本响应。
@@ -2066,6 +2145,8 @@ class LLMClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        if no_thinking:
+            body.update(_NO_THINKING_FIELD)
 
         # 使用 urllib 避免 requests 依赖（标准库可用）
         import urllib.request
@@ -2086,7 +2167,7 @@ class LLMClient:
                 text = _call_llm_stream_once(
                     self.base_url, self.api_key, model or self.model, system, user,
                     temperature=temperature, max_tokens=max_tokens,
-                    publish=False, out=_info,
+                    publish=False, out=_info, no_thinking=no_thinking,
                 )
             except LLMCallError as exc:
                 if not _stream_unsupported(exc):
@@ -2298,6 +2379,7 @@ def _call_llm_stream_once(
     max_tokens: int = 2000,
     publish: bool = True,
     out: dict | None = None,
+    no_thinking: bool = False,
 ) -> str:
     """单次 SSE 流式请求（同步，urllib）：逐块回调 on_chunk，返回累计文本。
     空响应/网络错误在此层统一抛 LLMCallError；端点健康标记与备用切换由
@@ -2328,6 +2410,9 @@ def _call_llm_stream_once(
         # 用量要显式索取：流式下 token 数只出现在末尾 chunk
         "stream_options": {"include_usage": True},
     }
+    if no_thinking:
+        # 思考烧光预算后的重发：把输出预算全部留给正文（网关实测 reasoning_tokens=0）
+        body.update(_NO_THINKING_FIELD)
     req = urllib.request.Request(
         url, data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
         headers=headers, method="POST",
@@ -2430,6 +2515,7 @@ def call_llm_stream(
 
     def _attempt(
         base_url: str, api_key: str, request_model: str, endpoint: str,
+        no_thinking: bool = False,
     ) -> str:
         """单次流式请求：空响应抛 LLMCallError；成功/失败同步端点健康标记。
 
@@ -2445,6 +2531,7 @@ def call_llm_stream(
             text = _call_llm_stream_once(
                 base_url, api_key, request_model,
                 system, user, on_chunk, temp, max_tok, out=_info,
+                no_thinking=no_thinking,
             )
         except Exception as exc:
             _budget_close(_rb, _ticket, ok=False, max_tokens=max_tok,
@@ -2461,9 +2548,23 @@ def call_llm_stream(
             # urllib 超时/连接错误等统一转为 LLMCallError，便于调用方重试
             raise LLMCallError(f"Network error: {exc}") from exc
         if not text.strip():
-            # 空响应检测：与 call() 一致，空内容视为端点故障信号
             _budget_close(_rb, _ticket, ok=False, max_tokens=max_tok,
                           note="llm:stream_empty")
+            if _info.get("reasoning") and _info.get("finish_reason") == "length":
+                # 思考烧光输出预算（content 空 + length）：**不是端点故障**，
+                # 不能标不健康——否则后续调用会被"健康路由"白白绕到备用端点上去。
+                _record_llm_call(get_task_context(), stage=usage or _stage, attempt=1,
+                                 elapsed_ms=int((time.monotonic() - _t0) * 1000),
+                                 input_chars=len(system) + len(user),
+                                 max_tokens=max_tok,
+                                 error_class="thinking_budget_exhausted",
+                                 end_reason="empty_content", endpoint=endpoint)
+                exc = LLMCallError(
+                    "Empty content in LLM stream response (thinking budget exhausted)"
+                )
+                exc.thinking_budget_exhausted = True
+                raise exc
+            # 其余空响应：与 call() 一致，视为端点故障信号
             _mark_endpoint(endpoint, False, "empty_content")
             _record_llm_call(get_task_context(), stage=usage or _stage, attempt=1,
                              elapsed_ms=int((time.monotonic() - _t0) * 1000),
@@ -2514,6 +2615,17 @@ def call_llm_stream(
             # 预算拒发：这次请求没有发生，切备用等于再发一次（上限会被绕过）
             logger.warning("LLM 预算拒发，不切备用（stream, usage=%s）", usage)
             raise
+        # 思考烧光输出预算：先把思考关掉在原端点重发一次。换端点解决不了这个问题
+        # ——备用常是同一网关同一模型（content_summary 的合并调用就死在这里：
+        # 调用方本来就要 8192，放大分支压根不触发，于是"切备用"必然也失败）。
+        if getattr(exc, "thinking_budget_exhausted", False):
+            try:
+                text = _attempt(client.base_url, client.api_key, model, "primary",
+                                no_thinking=True)
+                logger.warning("关思考重发成功（stream, usage=%s）", usage)
+                return text
+            except Exception as exc2:
+                logger.warning("关思考重发仍失败（stream）：%s", str(exc2)[:160])
         if not backup_cfg:
             raise
         try:
@@ -2696,6 +2808,12 @@ async def call_llm_async(
                              error_class="empty_content",
                              end_reason="retry" if attempt < max_attempts else "exhausted")
             logger.warning('LLM async empty response, retry %d/%d', attempt, max_attempts)
+            # 空正文 + 思考型模型：重试同一形状大概率还是空（报告生成实测连续两次空）。
+            # 下一次尝试关掉思考，把预算全留给正文；不支持的网关会照常报错，不静默。
+            if not payload.get("thinking"):
+                payload = dict(payload)
+                payload.update(_NO_THINKING_FIELD)
+                logger.warning("LLM async 空正文 → 下一次尝试关思考（thinking=disabled）")
             await asyncio.sleep(1)
             continue
 

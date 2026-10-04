@@ -55,11 +55,9 @@ class PackagingWorker(AsyncWorkerBase):
         STATIC_DIR.mkdir(parents=True, exist_ok=True)
 
     async def execute(self, instruction: str, task: dict | None = None) -> str:
-        import asyncio
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(
-            None, self._sync_package, instruction, task or {},
-        )
+        # 走带上下文继承的线程池入口：打包路径也会发 LLM 调用（路径解析），
+        # 不带任务上下文就记不到根任务账上
+        return await self._run_sync(self._sync_package, instruction, task or {})
 
     def _sync_package(self, instruction: str, task: dict | None = None) -> str:
         from llm_client import call_llm

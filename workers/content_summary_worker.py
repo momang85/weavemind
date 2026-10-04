@@ -247,9 +247,6 @@ class ContentSummaryWorker(AsyncWorkerBase):
         )
 
     async def execute(self, instruction: str) -> str:
-        import asyncio
-        loop = asyncio.get_running_loop()
-
         def _sync():
             from llm_client import call_llm
             from prompt_registry import get_prompt
@@ -326,7 +323,7 @@ class ContentSummaryWorker(AsyncWorkerBase):
                 logger.warning("Content summary failed: %s", exc)
                 raise
 
-        return await loop.run_in_executor(None, _sync)
+        return await self._run_sync(_sync)
 
 
 async def amain():

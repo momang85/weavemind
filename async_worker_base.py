@@ -119,6 +119,20 @@ class AsyncWorkerBase(ABC):
         )
         return result if isinstance(result, str) else str(result)
 
+    async def _run_sync(self, fn, *args, **kwargs):
+        """在线程池里跑同步代码，并把**当前任务上下文**一起带过去。
+
+        contextvars 不跨线程：不显式带过去，线程里的 LLM 调用就读不到根任务
+        （日志刷「模型调用没有根任务归属…本次不记账」），根任务额度账本对这条
+        路径形同虚设（2026-10-04 实机 ui-1b155d4f84：一小时内 52 次未记账，
+        而它正是最贵的 content_summary 合并调用）。
+        """
+        import contextvars
+        ctx = contextvars.copy_context()
+        return await asyncio.get_running_loop().run_in_executor(
+            None, lambda: ctx.run(fn, *args, **kwargs),
+        )
+
     @property
     def llm_client(self):
         return self
