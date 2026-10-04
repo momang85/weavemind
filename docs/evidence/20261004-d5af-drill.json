@@ -1,0 +1,115 @@
+{
+  "schema": "weavemind.evidence.drill/1",
+  "task_id": "ui-1b155d4f84",
+  "submitted_at": "2026-10-04T17:31:37+08:00",
+  "submitted_via": "浏览器正门（研究一家公司表单）：洋河股份 / 002304.SZ / A股 / 2023–2024 / 合并 / 2025-04-30 / 官方直链 http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF",
+  "terminal": {
+    "status": "SUCCESS_WITH_ISSUES",
+    "phase": "完成",
+    "finished_at": "2026-10-04T18:25:53+08:00",
+    "duration_s": 3254,
+    "note": "反思第 2 轮：重做后 best_report 未改善（32596 → 9975 字符），提前终止反思；终态为「成功但有未决项」，机器没有把它说成干净成功"
+  },
+  "plan": {
+    "shape": "10 步（路由模板 + 反思重规划）：1 web_search / 2 web_fetch / 2b web_fetch(optional) / 3a data_analyzer / 3 content_summary / 4 content_summary / 6 content_summary / 5 report_generator / 7 report_generator / package-10",
+    "deps_wired": true,
+    "note": "步骤依赖显式落库（3 依赖 [1,2,2b,3a]、3a 依赖 [1,2,2b]、报告依赖 [1,2,2b,3,3a,4,6]）——3a 不再与取证并行"
+  },
+  "source_facts": {
+    "official_material_admitted": true,
+    "material_id": "f42e747c73850b59",
+    "sections": 1151,
+    "evidence_items": 8,
+    "working_paper": "212 条事实 / 16 条派生 / 0 缺口",
+    "three_metrics_in_body": {"revenue": "288.76 亿（-12.83%）", "net_profit": "66.73 亿（-33.37%）", "operating_cashflow": "46.29 亿（-24.49%）"}
+  },
+  "timeline_3a_after_acquisition": {
+    "project/fetch_snapshot.json": "17:33:11",
+    "project/working_paper.json": "17:33:17（首轮）；18:25:25（末轮重导，见 observed_wrinkles）",
+    "analysis/dataset.json": "17:33:17（首轮）；18:05:05（第 2 轮重做后重建）",
+    "analysis/plan.json": "17:33:17 / 18:05:05",
+    "analysis_runs.json": "17:33:17 / 18:05:05（11 条运行，全部 validated）",
+    "verdict": "3a 冻结数据集在本轮取证快照之后构建（17:33:11 → 17:33:17），不是先算后取证"
+  },
+  "defect_reproduced": {
+    "name": "思考型模型烧光输出预算 → 合并调用恒空 → 步骤超时自激",
+    "log_counts_today": {
+      "content_summary_empty_content": 43,
+      "content_summary_thinking_budget": 72,
+      "content_summary_backup_also_failed": 27,
+      "content_summary_unattributed_calls": 242
+    },
+    "mechanism": [
+      "deepseek-flash 在该网关上是思考模型：长输入+大输出时 reasoning 吃光 completion 预算，content 空且 finish_reason=length（网关实测 reasoning_tokens 计费）",
+      "content_summary 的合并调用本来就传 max_tokens=8192，而 llm_client 的放大分支条件是 max_tok < 8192 → 该路径一次都不放大",
+      "备用端点与主端点同源同模型（config.backup 与 llm 同一 base_url/model）→「切备用」对该故障无效",
+      "单步上限 300s（计划给的 120s 被 max(_,300) 抬到 300），一次合并调用 + 两次回退路径在超时内跑不完 → Step 4/6 各 300s×3 轮",
+      "每轮重试又新增并发重活，互相抢占同一个 content_summarizer → 自激"
+    ],
+    "self_heal_observed": {
+      "replan_alt_steps": [
+        {"step": "alt-6-1791107626", "at": "17:53:46", "succeeded_in_s": 44},
+        {"step": "alt-4-1791107876", "at": "17:57:56", "succeeded_in_s": 32},
+        {"step": "alt-2-1791108266", "at": "18:04:27", "succeeded_in_s": 35}
+      ],
+      "note": "重规划把大输出改成小输出后立刻成功——同一模型、同一网关，差别只在要求它一次吐多少"
+    }
+  },
+  "final_artifacts": {
+    "reports/report.md": {"chars": 9975, "sha256": "d07581df3bcf6c9c916118f3c49a885c62c3fd44226fa4e21297917639ce5aa2"},
+    "acceptance_report.json": {"overall": "pass", "rules_version": "2026.10.03", "gaps": 0,
+                               "report_sha256": "1a849dc0974d26895401ed22ca8666ffa80a8b7fc4a11f358306d5f350d29b45",
+                               "mtime": "18:25:45"},
+    "adopted_version": {"identity_id": "18d3400ec211158b21e6c9898cf20c0422437e78342aa2e471775f82f6e53e16",
+                        "version_id": "1a849dc0974d26895401ed22ca8666ffa80a8b7fc4a11f358306d5f350d29b45",
+                        "chars": 32275, "acceptance": "pass", "acceptance_for_this_body": true},
+    "auto_package": {"file": "deliverables_20261004_182459.zip", "at": "18:24:59",
+                     "manifest": {"report_version_id": "e797826b085b…",
+                                  "research_body_sha256": "20ac10e1…",
+                                  "delivered_md_sha256": "d07581df…"}}
+  },
+  "observed_wrinkles": [
+    {
+      "id": "auto-package-during-reflection",
+      "what": "运行内的自动打包（18:24:59）里 research_body_sha256(20ac10e1) ≠ delivered_md_sha256(d07581df)：那一刻盘上的 reports/report.md 是反思重做版，而当时选中的版本是另一份（e797826b/32596 字符）",
+      "why_it_matters": "运行内自动打包发生在反思迭代中间，包内报告不必然等于当时选中版本；用户侧「采纳 → 导出当前包」路径已分离验证为一致（见 20261004-ab-adoption-delivery.json）",
+      "status": "待判读（未改代码）"
+    },
+    {
+      "id": "late-working-paper-rewrite",
+      "what": "末轮反思重做 web_fetch 后，project/working_paper.json 于 18:25:25 被重写，而 analysis/dataset.json 冻结在 18:05:05",
+      "why_it_matters": "同一批事实（212 条）内容未变，但时间戳显示「取证步骤的末次重导」晚于「分析冻结」；若要严格证明分析与最终底稿同源，需要一次干净的整跑",
+      "status": "待判读（未改代码）"
+    }
+  ],
+  "environment_blockers": [
+    {
+      "id": "llm-credit-402",
+      "what": "18:33 起网关 /v1/chat/completions 返回 HTTP 402（余额不足），正门 POST /task 预检后返回 503「全部 LLM 端点余额不足，请充值后重试」",
+      "impact": "以修复后代码重跑演练被挡住；与本批代码无关",
+      "evidence": "直连探针 402（0.3–0.4s）；浏览器 fetch /task → 503"
+    },
+    {
+      "id": "tun-fake-ip",
+      "what": "本机代理 TUN 模式把所有域名解析成 198.18.x.x（fake-IP）：async 路径的 _endpoint_guard 正确拒发（含配置的 LLM 端点），浏览器 SSE 降级为 2 秒轮询",
+      "impact": "worker 的异步 LLM 路径（call_llm_async）在本机不可用；同步流式路径（content_summary/报告主路径）不受影响，故本轮任务仍能跑完",
+      "evidence": "socket.getaddrinfo → 198.18.0.4；_endpoint_guard → DENY；页面提示「实时通道已降级为轮询」"
+    }
+  ],
+  "fix_landed": {
+    "commit": "bcd58e8",
+    "ci": "success",
+    "what": [
+      "放大梯度不再止步 8192：按调用方给的值继续翻倍，封顶 32768",
+      "到顶仍空 → 关思考重发一次（thinking={\"type\":\"disabled\"}，网关实测 reasoning_tokens=0）；同样开票、记形状、标健康，失败返回 None 由原异常续处",
+      "流式路径补上「空正文 + reasoning + length」分类，并在切备用前先关思考重发；异步路径空正文后的下一次尝试关思考",
+      "AsyncWorkerBase._run_sync：把任务上下文带进线程池；content_summary / packaging 改走它（修「没有根任务归属…不记账」）"
+    ],
+    "tests": {"new": "test_llm_thinking_escape.py（11 例，全程打桩）", "ci_step": "已加；CI success"}
+  },
+  "not_claimed": [
+    "修复在真实整跑中生效（需充值后重跑；本轮为修复前代码）",
+    "干净成功终态（本轮是 SUCCESS_WITH_ISSUES）",
+    "真人复核 / 银行部署 / 90 分 / X1 结论"
+  ]
+}

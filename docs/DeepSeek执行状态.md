@@ -80,6 +80,42 @@
 > 同版 MD/PDF/ZIP 下载）→ 通过即回 **X1** 新披露假说检验。**诚实边界**：旧任务七项指纹未变、只读保留；
 > 冻结正文两项复验**只证明该检查结果，不等于整链通过或真实交付通过**；人工复核未做；无需数据迁移。
 >
+> **10-04 思考型供应商逃生门 + 线程池记账归属（`bcd58e8`，CI success）**：
+> 实机反例 `ui-1b155d4f84`（洋河正门任务，10 步模板计划）暴露出**新根因**：`deepseek-flash` 在该网关上**是思考模型**——
+> 长输入 + 大输出时 reasoning 吃光 completion 预算，`content` 恒空且 `finish_reason=length`。当日 worker 日志计数：
+> content_summary **43** 次空正文、**72** 次思考预算重试、**27** 次"切换备用仍失败"、**242** 次"没有根任务归属…本次不记账"。
+> 三处叠加把整步拖死：① 放大分支条件是 `max_tok < 8192`，而 content_summary 的**合并调用本来就传 8192** → 这条路径一次都不放大；
+> ② 备用端点与主端点**同源同模型**（config 的 backup 与 llm 同一 base_url/model）→ 切备用必然同样失败；
+> ③ 计划给这两步的 `timeout` 是 120s，被编排器 `max(_,300)` 抬到 300s——一次合并调用 + 两条回退路径在超时内跑不完，
+> 于是 Step 4/6 各 300s×3 轮，重试又添并发、互相抢占同一个 summarizer（自激）。
+> **修法**（只动请求形状，不动额度与验收口径）：放大梯度按调用方给的值继续翻倍（封顶 `_THINKING_ESCALATE_CAP=32768`）；
+> 到顶仍空则**关掉思考重发一次**（`thinking={"type":"disabled"}`，网关实测 `reasoning_tokens=0`、正文正常返回），
+> 同样开票、记形状、标端点健康；流式路径补上"空正文 + reasoning + length"分类，并在切备用**之前**先关思考重发；
+> 异步路径空正文后的下一次尝试关思考；`AsyncWorkerBase._run_sync` 把任务上下文带进线程池，
+> `content_summary`/`packaging` 改走它。
+> **验证**：新增 `test_llm_thinking_escape.py` **11** 例（全程打桩不发请求）并接入 CI；回归 `test_root_budget` 83、
+> `test_cancel_semantics` 62、`test_task_time_optimization` 11、`test_report_quality` 39、`test_task_context` 43 全绿；
+> 3.11 `py_compile` 通过；CI **success**。（本机的 8 项失败全部是环境性：pip 镜像策略 4、TUN fake-IP 被网络策略拦下 4。）
+> **同轮真实演练**（修复前代码，`ui-1b155d4f84`）：终态 **SUCCESS_WITH_ISSUES**（3254s）——反思两轮后"重做未改善"
+> （32596 → 9975 字符）提前终止；自愈路径可复现（重规划把大输出步骤改成小输出后 **44s/32s/35s** 成功——
+> 同一模型同一网关，差别只在一次要求吐多少）。3a 时序 pass（取证 17:33:11 → 冻结数据集 17:33:17）；官方 PDF 准入
+> 1151 小节/8 条证据；底稿 212 事实/16 派生；正文三指标 288.76 亿(−12.83%)/66.73 亿(−33.37%)/46.29 亿(−24.49%)；
+> 机器验收 **pass**（规则 `2026.10.03`、0 缺口）。证据：[20261004-d5af-drill.json](evidence/20261004-d5af-drill.json)。
+> **A/B 显式采纳 + 同版交付已通过**（[20261004-ab-adoption-delivery.json](evidence/20261004-ab-adoption-delivery.json)）：
+> A（收入 +10%／毛利率 +1pp）确定性复算 run `afa75e43…` → 情景归母净利 **91.04 亿** → 采纳 → 导出
+> `deliverables_20261004_183414_8692a9.zip`；B（收入 −5%／毛利率 −1pp）复算 run `f76b15e0…` → **53.43 亿** → 采纳 →
+> `deliverables_20261004_183617_d5cb9a.zip`。两版 MD/PDF 的响应头 `X-Report-Version-Id` 与 `X-Report-Research-Body-Sha256`
+> 均等于该版**采纳身份**、`X-Report-Draft=0`；包内 `reports/report.md` 与清单 `delivered_md_sha256` 逐字节一致；
+> `analysis/*.md` 与 `analysis/selection.json` 随包；浏览器下载的 ZIP 与盘上文件哈希相同。
+> **待判读**（本轮未改代码，见 drill 证据 `observed_wrinkles`）：运行内**自动打包**发生在反思迭代中间，
+> 那一刻包内报告（`d07581df`）不等于当时选中版本（`e797826b`）——用户侧"采纳 → 导出当前包"路径已分离验证为一致；
+> 末轮重导底稿（18:25:25）晚于分析冻结（18:05:05），同一批事实内容未变。
+> **阻塞**：18:33 起 LLM 网关 `/v1/chat/completions` 返回 **HTTP 402（余额不足）**，正门 `POST /task` 预检后 503 →
+> **"以修复后代码重跑一次演练"待充值后进行**（本修复尚未在真实整跑中验证）。另：本机代理 TUN 模式把域名解析成
+> 198.18.x.x，async 路径的 `_endpoint_guard` 正确拒发、浏览器 SSE 降级为 2 秒轮询（同步流式主路径不受影响）。
+> **诚实边界**：本轮终态是 SUCCESS_WITH_ISSUES 而非干净成功；修复只经打桩单测与 CI，**未**经真实整跑；
+> A/B 与同版交付是在这一轮已交付的工作区上做的（不调模型）；人工复核未做。
+>
 > **下一步**：真实新披露的前向更新 → 复制三一现金持续性 → 同口径同行对照；洋河渠道库存/终端动销与「产品类别」表仍是缺口。
 >
 > 历史：阶段W 账本见 [历史_阶段W执行账_20261001.md](历史_阶段W执行账_20261001.md)；阶段V 见

@@ -1,0 +1,131 @@
+{
+  "schema": "weavemind.evidence.ab-adoption-delivery/1",
+  "task_id": "ui-1b155d4f84",
+  "checked_at": "2026-10-04T18:37:00+08:00",
+  "read_only": true,
+  "how": "浏览器正门（http://localhost:8080，用户 momoa 会话）在分析工作台执行：改假设 → 确定性复算 → 采纳这版 → 导出当前包 → MD/PDF/ZIP 下载；下载字节在页面内用 crypto.subtle 现算 sha256，并与包内清单、响应头、版本账三方对齐。复算/采纳/打包均**不调 LLM**。",
+  "scenario_model": {
+    "model_id": "scenario_sensitivity",
+    "model_version": "2.0.0",
+    "allowed_params": {
+      "revenue_growth": [-0.5, 0.5],
+      "gross_margin_delta": [-0.3, 0.3]
+    },
+    "baseline": {
+      "params": {},
+      "scenario_net_profit_yuan": 8032843652.4,
+      "note": "运行默认情景（收入 +5%／毛利率 +1pp），即本轮成稿里的 80.32 亿"
+    }
+  },
+  "versions": [
+    {
+      "label": "A",
+      "assumptions": {"revenue_growth": 0.1, "gross_margin_delta": 0.01},
+      "recompute": {
+        "http": 200,
+        "run_id": "afa75e43853c5fd15a47e96d07be2c9a9fc1cc840b2c8047781634aa999c91d3",
+        "status": "validated",
+        "scenario_net_profit_yuan": 9103535732.74,
+        "scenario_net_profit_yi": 91.04
+      },
+      "adopt": {"http": 200, "ok": true},
+      "export": {
+        "http": 200,
+        "package": "deliverables_20261004_183414_8692a9.zip",
+        "verify_ok": true,
+        "pdf_error": ""
+      },
+      "identity": {
+        "report_version_id": "824de5770a9e25dac46f557f14a2fc752ca203d341bd4d1579da9f726c4cfbfb",
+        "research_body_sha256": "260e5b6821329f8a20787ecc4346ed75edab2a68fa144be1dd760ceb0072194c",
+        "adopted_version_id": "260e5b6821329f8a20787ecc4346ed75edab2a68fa144be1dd760ceb0072194c",
+        "adopted_identity_id": "824de5770a9e25dac46f557f14a2fc752ca203d341bd4d1579da9f726c4cfbfb",
+        "same_version": true
+      },
+      "downloads": {
+        "md": {"http": 200, "bytes": 69102, "sha256": "f3277e11acdd78b44d5f690ef014e7fd7dbef00b33402fac9f62e44c3c15c1c4",
+               "headers": {"X-Report-Version-Id": "824de5770a9e25dac46f557f14a2fc752ca203d341bd4d1579da9f726c4cfbfb",
+                           "X-Report-Research-Body-Sha256": "260e5b6821329f8a20787ecc4346ed75edab2a68fa144be1dd760ceb0072194c",
+                           "X-Report-Draft": "0"}},
+        "pdf": {"http": 200, "bytes": 5670962, "sha256": "54b15cd696fcf8fcb92df8937694f89cd99962d597517c0342ab3b7eb012a598",
+                "headers": {"X-Report-Version-Id": "824de5770a9e25dac46f557f14a2fc752ca203d341bd4d1579da9f726c4cfbfb",
+                            "X-Report-Research-Body-Sha256": "260e5b6821329f8a20787ecc4346ed75edab2a68fa144be1dd760ceb0072194c",
+                            "X-Report-Draft": "0"}},
+        "zip": {"http": 200, "bytes": 5721325, "sha256": "7a53a79a5bdfdd852cd7dae2a42c46590873dc07a67843f0d60215e80f127d42",
+                "note": "与盘上同名文件逐字节一致"}
+      },
+      "in_package": {
+        "reports/report.md": {"bytes": 69102, "sha256": "f3277e11acdd78b44d5f690ef014e7fd7dbef00b33402fac9f62e44c3c15c1c4"},
+        "scenario_number_in_body": "91.04 亿（收入 +10%／毛利率 +1pp）",
+        "analysis_members": ["analysis/analysis_runs.json", "analysis/dataset.json", "analysis/plan.json",
+                             "analysis/context.json", "analysis/selection.json",
+                             "analysis/analysis_cards.md", "analysis/analysis_detail.md"],
+        "pdf_sha256": "54b15cd696fcf8fcb92df8937694f89cd99962d597517c0342ab3b7eb012a598"
+      }
+    },
+    {
+      "label": "B",
+      "assumptions": {"revenue_growth": -0.05, "gross_margin_delta": -0.01},
+      "recompute": {
+        "http": 200,
+        "run_id": "f76b15e000cf7a1958984375a02547d547ef5003f9f0b09bf0cf594dbe7a8abf",
+        "status": "validated",
+        "scenario_net_profit_yuan": 5342809848.84,
+        "scenario_net_profit_yi": 53.43
+      },
+      "adopt": {"http": 200, "ok": true},
+      "export": {
+        "http": 200,
+        "package": "deliverables_20261004_183617_d5cb9a.zip",
+        "verify_ok": true,
+        "pdf_error": "",
+        "drift": {"analysis/analysis_runs.json": "changed_on_disk",
+                  "analysis/dataset.json": "missing_on_disk",
+                  "analysis/plan.json": "missing_on_disk",
+                  "analysis/context.json": "missing_on_disk",
+                  "analysis/selection.json": "missing_on_disk",
+                  "analysis/analysis_cards.md": "missing_on_disk",
+                  "analysis/analysis_detail.md": "missing_on_disk",
+                  "evidence/citation_evidence.json": "missing_on_disk",
+                  "note": "打包器如实列出快照成员与盘上状态的差异；判决 verify_ok=true，未把它当成功静默掉"}
+      },
+      "identity": {
+        "report_version_id": "c9995c9afb51fe6b0985ccf27211b36b73be2f09d6232dcb6d7744065282391e",
+        "research_body_sha256": "b763efc7cceaf1f350bbbbb0e052525dc38e3700a7622724e8d1795a5bc4a95c",
+        "same_version": true
+      },
+      "downloads": {
+        "md": {"http": 200, "bytes": 69102, "sha256": "a2277b2443d2e4acff34e6eb73b03d9008519515e816fc7c31db40cd34ac9c89",
+               "headers": {"X-Report-Version-Id": "c9995c9afb51fe6b0985ccf27211b36b73be2f09d6232dcb6d7744065282391e",
+                           "X-Report-Research-Body-Sha256": "b763efc7cceaf1f350bbbbb0e052525dc38e3700a7622724e8d1795a5bc4a95c",
+                           "X-Report-Draft": "0"}},
+        "pdf": {"http": 200, "bytes": 5670962, "sha256": "0451e08920530577205a2368067cd4e680ca6419da531d0c9f5dcdfd84187509",
+                "headers": {"X-Report-Version-Id": "c9995c9afb51fe6b0985ccf27211b36b73be2f09d6232dcb6d7744065282391e",
+                            "X-Report-Research-Body-Sha256": "b763efc7cceaf1f350bbbbb0e052525dc38e3700a7622724e8d1795a5bc4a95c",
+                            "X-Report-Draft": "0"}},
+        "zip": {"http": 200, "bytes": 5723644, "sha256": "0406136aac2221af7c4a29a5188dddd38e7bcc853370812fcc95ce6ce4d4accd",
+                "note": "与盘上同名文件逐字节一致"}
+      },
+      "in_package": {
+        "reports/report.md": {"bytes": 69102, "sha256": "a2277b2443d2e4acff34e6eb73b03d9008519515e816fc7c31db40cd34ac9c89"},
+        "scenario_number_in_body": "53.43 亿（收入 −5%／毛利率 −1pp）",
+        "analysis_members": ["analysis/analysis_runs.json", "analysis/dataset.json", "analysis/plan.json",
+                             "analysis/context.json", "analysis/selection.json",
+                             "analysis/analysis_cards.md", "analysis/analysis_detail.md"],
+        "pdf_sha256": "0451e08920530577205a2368067cd4e680ca6419da531d0c9f5dcdfd84187509"
+      }
+    }
+  ],
+  "verdict": {
+    "explicit_adoption": "pass：两版各自经「确定性复算 → 采纳这版（显式 run_id）」，工作台 selected 逐版切换（A: afa75e43…, B: f76b15e0…）",
+    "same_version_delivery": "pass：A/B 两包内 MD 字节 == 清单 delivered_md_sha256；MD/PDF 响应头 X-Report-Version-Id 与 X-Report-Research-Body-Sha256 均等于该版采纳身份；X-Report-Draft=0",
+    "zip_matches_disk": "pass：浏览器下载字节与工作区同名 zip 逐字节一致（A 7a53a79a…, B 0406136a…）",
+    "two_distinct_versions": "pass：A/B 正文均 69102 字节但哈希不同（f3277e11… / a2277b24…），情景读数分别为 91.04 亿与 53.43 亿",
+    "not_claimed": [
+      "真人复核（人工状态仍为待复核，本文件不代签）",
+      "银行/对公部署口径",
+      "90 分与 X1 结论",
+      "本机 TUN 代理下异步 LLM 路径（/api/task/<id>/pdf 之外）的可用性：见同批 drill 证据"
+    ]
+  }
+}
