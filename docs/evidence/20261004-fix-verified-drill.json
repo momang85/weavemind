@@ -1,0 +1,119 @@
+{
+  "schema": "weavemind.evidence.fix-verified/1",
+  "task_id": "ui-433f4cf9e2",
+  "checked_at": "2026-10-04T20:32:00+08:00",
+  "submitted_via": "浏览器正门（研究一家公司表单）：洋河股份 / 002304.SZ / A股 / 2023–2024 / 合并 / 2025-04-30 / 官方直链 http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF；契约逐字段落库",
+  "terminal": {
+    "status": "SUCCESS",
+    "phase": "完成",
+    "finished_at": "2026-10-04T20:05:41+08:00",
+    "duration_s": 2516,
+    "note": "修复后代码（bcd58e8，18:27 重启加载）的第一次真实整跑；反思三轮后「重做未改善（26165 → 11846 字符）」提前终止"
+  },
+  "fix_effect": {
+    "baseline_run": "ui-1b155d4f84（修复前代码）",
+    "metrics": [
+      {"judge": "终态", "before": "SUCCESS_WITH_ISSUES", "after": "SUCCESS"},
+      {"judge": "步骤超时（Step X timed out 300s）", "before": 11, "after": 3},
+      {"judge": "空正文（Empty content in LLM response）", "before": 43, "after": 0},
+      {"judge": "思考预算重试", "before": 72, "after": 5},
+      {"judge": "「关思考重发成功」", "before": 0, "after": 13},
+      {"judge": "「没有根任务归属…本次不记账」", "before": 242, "after": 0},
+      {"judge": "整跑时长", "before": "3254s", "after": "2516s"}
+    ],
+    "escape_hits": {
+      "content_summary": {"stream": 9, "sync": 1, "detail": "19:28:36 / 19:29:33 / 19:29:55 / 19:30:57(sync) / 19:34:08 / 19:35:07 / 19:45:08 / 19:48:53 / 19:52:49"},
+      "report_generator": {"stream": 2, "detail": "19:59:02 / 20:03:13（两次报告生成都靠关思考拿到正文）"},
+      "orchestrator(planner)": {"detail": "19:39:48 thinking budget exhausted → 关思考重发成功"}
+    },
+    "remaining_timeouts": [
+      {"step": "3", "at": "19:30:27", "why": "首轮三个 content_summary 同发，单 worker 串行 ~600s 工作量 vs 300s 上限；retry 1/3 后 19:34:08 成功"},
+      {"step": "4", "at": "19:30:28", "why": "同上；retry 1/3 后 19:35:07 成功"},
+      {"step": "6", "at": "19:58:37", "why": "反思重做的报告步，retry 1/3 后 20:03:13 成功"}
+    ],
+    "conclusion": "逃生门在三条调用路径（解释/报告/规划）上都真实生效；空正文与未记账归零；余下 3 次超时是「并发串行 vs 单步 300s 上限」的容量问题，重试后全部成功，不是身份/真实性问题"
+  },
+  "acceptance": {
+    "overall": "pass",
+    "rules_version": "2026.10.03",
+    "rules_fingerprint": "b98aef94",
+    "gaps": 0,
+    "report_sha256": "4130b717065bca4d27580850131bb30bdc98d12c1c51eb9064e41456a2192d2c",
+    "adopted_at_run_end": {"identity": "0201a6fdc5fdf4bf7041c8b785cbe3e2131ba5343abdeb6bfa4338ba12ffaa06", "body": "4130b717065bca4d27580850131bb30bdc98d12c1c51eb9064e41456a2192d2c"}
+  },
+  "ab_delivery": {
+    "A": {
+      "assumptions": {"revenue_growth": 0.1, "gross_margin_delta": 0.01},
+      "recompute": {"run_id": "afa75e43853c5fd15a47e96d07be2c9a9fc1cc840b2c8047781634aa999c91d3", "status": "validated", "scenario_net_profit_yuan": 9103535732.74, "yi": 91.04},
+      "adopted": {"identity": "4e5abee2a66d7bc9dbb38045241b0d757a1db7c3eb4c387853cdb6ccc1514f35",
+                  "body": "90a9410f023524526c45fe8cb2c9496fdd2347d5a84ab65b83803980b4eafb59",
+                  "chars": 25891, "acceptance": "pass", "acceptance_for_this_body": true, "draft": false},
+      "packages": [
+        {"file": "deliverables_20261004_202302_37560a.zip", "path": "进程内同一管线（export_snapshot + repack_adopted）", "bytes": 5706176,
+         "manifest": {"report_version_id": "4e5abee2a66d7b", "research_body_sha256": "90a9410f023524", "delivered_md_sha256": "dd49114a12fca1", "pdf_sha256": "5c03fd1b539010"}, "analysis_members": 7},
+        {"file": "deliverables_20261004_202551_83c94c.zip", "path": "HTTP POST /api/task/<id>/package（重启 webui 之后）", "bytes": 5706178, "verify_ok": true,
+         "manifest": {"report_version_id": "4e5abee2a66d7b", "research_body_sha256": "90a9410f023524", "delivered_md_sha256": "dd49114a12fca1", "pdf_sha256": "5c03fd1b539010"}, "analysis_members": 7,
+         "note": "与进程内那次身份/正文/PDF 哈希逐位一致——两条独立路径互相校对"}
+      ],
+      "downloads": {
+        "md": {"bytes": 54401, "sha256": "dd49114a12fca122641110c8c4ded857031085…", "headers": {"X-Report-Version-Id": "4e5abee2a66d…", "X-Report-Research-Body-Sha256": "90a9410f0235…", "X-Report-Draft": "0"}},
+        "pdf": {"bytes": 5636470, "sha256": "5c03fd1b539010f4…", "headers": {"X-Report-Version-Id": "4e5abee2a66d…", "X-Report-Research-Body-Sha256": "90a9410f0235…", "X-Report-Draft": "0"}},
+        "zip": {"bytes": 5706178, "sha256": "a6a9bd29d95283e1df4b…", "note": "与盘上同名文件逐字节一致"}
+      }
+    },
+    "B": {
+      "assumptions": {"revenue_growth": -0.05, "gross_margin_delta": -0.01},
+      "recompute": {"run_id": "f76b15e000cf7a1958984375a02547d547ef5003f9f0b09bf0cf594dbe7a8abf", "status": "validated", "scenario_net_profit_yuan": 5342809848.84, "yi": 53.43},
+      "adopted": {"identity": "2d80a7f9a689…", "body": "c8e01ef41609…", "acceptance": "pass", "draft": false},
+      "packages": [
+        {"file": "deliverables_20261004_202745_2dfe82.zip", "path": "HTTP POST /api/task/<id>/package", "bytes": 5708486, "verify_ok": true,
+         "manifest": {"report_version_id": "2d80a7f9a68957", "research_body_sha256": "c8e01ef4160931", "delivered_md_sha256": "a04f7f9b30fe89", "pdf_sha256": "2610c57f01996e"}, "analysis_members": 7}
+      ],
+      "downloads": {
+        "md": {"bytes": 54401, "sha256": "a04f7f9b30fe899a…", "headers": {"X-Report-Version-Id": "2d80a7f9a689…", "X-Report-Research-Body-Sha256": "c8e01ef41609…", "X-Report-Draft": "0"}},
+        "pdf": {"bytes": 5636470, "sha256": "2610c57f01996e735bce…", "headers": {"X-Report-Version-Id": "2d80a7f9a689…", "X-Report-Research-Body-Sha256": "c8e01ef41609…", "X-Report-Draft": "0"}},
+        "zip": {"bytes": 5708486, "sha256": "a11f452f65f33affeb32…", "note": "与盘上同名文件逐字节一致"}
+      }
+    },
+    "verdict": "两版各自「确定性复算 → 显式采纳（run_id）→ 导出当前包 → MD/PDF/ZIP 下载」，包内身份 == 采纳身份、正文/PDF 响应头与清单一致、downloads 与盘上 zip 同哈希；analysis/* 7 个成员随包"
+  },
+  "seams_found_this_round": [
+    {
+      "id": "webui-cache-after-analysis-adopt",
+      "severity": "高（阻断导出，且让下载出现「身份头=采纳版 / 字节=采纳前」）",
+      "what": "分析采纳只更新交付投影（DB/Redis），**没有失效 webui 进程的内存结果缓存** `_task_results[tid]`；`_get_task_report_data()` 优先读该缓存 → 采纳后立刻导出恒 409「导出期间发生修订」、MD/PDF 下载 `X-Report-Draft: 1` 且正文仍是采纳前那份",
+      "repro": [
+        "20:18 采纳 A 后立即 POST /package → 409；20:20、20:21:35 重试仍 409",
+        "同期 GET /report.md → 200 但 54395 字节 / draft=1（与首次交付登记 972636ec 对得上，是采纳前的正文）",
+        "进程内跑同一管线（读 DB 投影）→ export_snapshot OK + repack OK，说明守卫判据本身没问题，坏的是内存缓存",
+        "重启 webui（缓存清空）后 POST /package → 200、verify_ok=true、MD draft=0 且哈希 dd49114a（采纳后正文）"
+      ],
+      "proposed_fix": "采纳/修订等任何改写交付正文的入口，结束后 `_task_results.pop(tid, None)`（或写入新正文），让下一次读取从 DB/Redis 投影重建",
+      "status": "未改代码（本轮只登记 + 用重启绕过）"
+    },
+    {
+      "id": "template-data-analyzer-deps-empty",
+      "severity": "中（时序语义）",
+      "what": "路由模板的 data_analyzer 步骤（本跑为 3b/5）`depends_on: []` → 在 1/2/2b 取证之前就跑完（dataset 19:25:08 < fetch_snapshot 19:25:16）。固定研究链已接线，模板链没接",
+      "why_not_fatal": "官方材料在本任务规划**之前**已发现并准入（设计如此），分析消费的是本轮已准入事实；但若重做重新抓取（step 2 重做），分析不会跟着重跑，存在用旧事实的风险",
+      "status": "未改代码（登记）"
+    },
+    {
+      "id": "run-end-package-lacks-analysis-members",
+      "severity": "低",
+      "what": "运行内自动打包（20:03:18）包内 `analysis/*` 成员 0 个；采纳后导出的包有 7 个",
+      "status": "未改代码（登记）"
+    }
+  ],
+  "environment_notes": [
+    "18:23 起主网关余额耗尽（HTTP 402）；用户充值后恢复，并把 backup 指向另一家网关（tierflow.cn / DeepSeek-V4.1-Flash）——备用与主用不再同源（此前是同源同模型，属我上一轮登记的缺陷之一，现由运维层面解决）",
+    "代理已关：async 路径的 SSRF 守卫与浏览器 SSE 恢复正常；本轮不再出现 fake-IP 拒发",
+    "webui 进程内存缓存问题需要重启才能复现/绕过（重启本身不改变任何身份判据）"
+  ],
+  "not_claimed": [
+    "干净一次通过（本轮仍有 3 次步骤超时，靠重试完成）",
+    "webui 缓存接缝已修（只登记，未改代码）",
+    "真人复核 / 银行部署 / 90 分 / X1 结论",
+    "模板链 3a 时序已修（固定链已接线，模板链未接）"
+  ]
+}
