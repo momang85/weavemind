@@ -8,6 +8,21 @@
 
 ## 纪律（每条都对应一个可被检查的字段，不是注释里的口号）
 
+0. **信号信息与事后结果分开**（架构规划 §12.4，本条是上一轮写错、本轮改清的）：
+   旧措辞"事件日之后才可用的行不得参与该事件的收益窗口"会把 `t+1/+5/+20` 的**评价结果全部排除**——
+   那是把"防未来函数"用成了"不许评价历史"。正确的三段是：
+
+   - `feature_cutoff`：**形成判断/信号**的截点，只允许当时已公开可用的信息；后来的更正/结果/新闻
+     不得倒灌成"当时就知道"。锚点（价格起点）就取在这个截点上。
+   - `outcome_window`：判断**之后**的实际行情，用来评价历史结果；窗口价格只要**评价时已可得**就能参与，
+     仍不得回流成当时特征。
+   - `evaluation_as_of`：**截至何时评价**。未满 20 个交易日 ⇒ 该点 `pending`；已成熟但数据缺失 ⇒
+     `missing`；两者**都不是 0**，也都不伪装成完整收益。
+
+   另外：日精度披露**不臆造盘中时间**，首例采用**保守的下一交易日规则**（`t0` ＝披露日之后第一个
+   交易日）并写清价格起点；**事件反应统计**与**可执行交易收益**分别标识（本算子的收盘对收盘读数
+   **不可执行**，见 `kind` 字段）。
+
 1. **防未来函数**：切片只取 `date > 事件日` 的行（复用 `market_history.window` 的唯一实现）；
    读数记录 `available_at` 上界，事后可核"这个读数在当时拿得到"。
 2. **口径必须写明**：`adj_basis` 缺失 ⇒ 直接 `unavailable`。标的为**不复权**时，窗口内若含
@@ -40,10 +55,18 @@ INPUT_LICENSE_PERSONAL = "个人非商业"
 DEFAULT_OFFSETS = (0, 1, 5, 20)
 ANCHOR_OFFSET = -1
 
-LIMITS_BASE = (    "这是**事件窗口的价格观察值**，不是因果结论：没有识别策略、没有对照组、样本极小",
+LIMITS_BASE = (
+    "这是**事件窗口的价格观察值**，不是因果结论：没有识别策略、没有对照组、样本极小",
     "未做风险调整（无 β/波动率/因子暴露），「超额」仅指减去同期基准，不等于 alpha",
     "基准调整按**日期对齐**；基准缺该交易日则留空，不补 0、不前值填充",
-    "事件日之后首个交易日为 t0（披露时点未知，取保守约定）；t-1 为事件日当日或之前最后一个交易日",
+    "`t0` ＝披露日之后第一个交易日（**保守下一交易日规则**：披露只有日精度，不臆造盘中时间）；"
+    "价格起点是 `anchor`（`feature_cutoff` 当日或之前最后一个交易日）的收盘价",
+    "**收盘对收盘读数不可执行**（`kind=event_reaction_observation`）：披露时点未知，若公告在盘前/盘中"
+    "发布，披露日那一档可能已含部分反应 ⇒ 本读数应看作反应幅度的**下界**；可执行收益需盘中时间与"
+    "开盘价，本轮不实现，也不把两者混成一个数",
+    "窗口未满记 `pending`、已成熟但缺行情记 `missing`：两者**都不报 0**、都不伪装成完整收益",
+    "`offsets` 按**标的自身交易日序列**计；缺独立交易日历时，停牌只能以基准序列为代理报"
+    "**疑似**（`suspension_suspect`），不能与休市区分 ⇒ 交易日历是待补项",
     "窗口重叠的事件各自出读数但不参与聚合（重叠会重复计同一段价格路径）",
     "免费源/个人非商业许可数据仅内部试验，`delivery_eligible=False`，不得进对外下载包",
 )
@@ -118,32 +141,54 @@ def _series(payload: dict, code: str) -> list[tuple[str, float]]:
     return out
 
 
-def _slice(payload: dict, code: str, event_date: str, offsets) -> dict:
-    """事件窗口切片：锚点 t-1 ＝事件日当日或之前最后一个交易日；t0 ＝之后第一个交易日。"""
+def _slice(payload: dict, code: str, event_date: str, offsets, *,
+           feature_cutoff: str = "", evaluation_as_of: str = "") -> dict:
+    """事件窗口切片（§12.4 三段语义）：
+
+    - **特征/信号截点** `feature_cutoff`（默认＝事件日）：锚点＝该截点**当日或之前最后一个交易日**的收盘。
+      锚点只用截点前的信息 ⇒ 后来的更正/结果/新闻不能倒灌成"当时就知道"。
+    - **结果窗口** `offsets`：截点**之后**的交易日行，用于评价历史结果；只要评价时已可得就能参与。
+    - **评价时点** `evaluation_as_of`：窗口内某点若在数据集里**根本没有交易日**，要区分
+      "窗口未满（还没走到）"→ `pending` 与 "已成熟但缺行情" → `missing`，**都不报 0**。
+    """
     from adapters import market_history as mh
     ev = mh._norm_date(event_date)                       # noqa: SLF001 读侧同一套日期归一
     if not ev:
         return {"ok": False, "reason": f"事件日无法解析：{event_date!r}"}
+    cut = mh._norm_date(feature_cutoff) or ev            # noqa: SLF001
+    asof = mh._norm_date(evaluation_as_of) or ""         # noqa: SLF001
     ser = _series(payload, code)
     if not ser:
         return {"ok": False, "reason": f"数据集里没有 {code} 的行"}
-    before = [i for i, (d, _) in enumerate(ser) if d <= ev]
+    before = [i for i, (d, _) in enumerate(ser) if d <= cut]
     if not before:
-        return {"ok": False, "reason": f"{code} 在事件日 {ev} 当日及之前没有交易日行（缺锚点）"}
+        return {"ok": False,
+                "reason": f"{code} 在特征截点 {cut} 当日及之前没有交易日行（缺锚点，无法定价格起点）"}
     anchor_i = before[-1]
     if anchor_i + 1 >= len(ser):
-        return {"ok": False, "reason": f"{code} 在事件日 {ev} 之后没有交易日行"}
+        return {"ok": False, "reason": f"{code} 在特征截点 {cut} 之后没有交易日行"}
     base_i = anchor_i + 1
     anchor = {"date": ser[anchor_i][0], "close": ser[anchor_i][1]}
+    last_date = ser[-1][0]
+    eff_asof = asof or last_date
     pts: dict[str, dict] = {}
     for off in sorted(set(int(o) for o in offsets) | {ANCHOR_OFFSET}):
         i = base_i + off
         if 0 <= i < len(ser):
-            pts[f"t{off:+d}"] = {"date": ser[i][0], "close": ser[i][1]}
+            pts[f"t{off:+d}"] = {"date": ser[i][0], "close": ser[i][1], "state": "observed"}
+            continue
+        # 超出数据集范围：分清"未满"与"缺行情"（**都不补 0**）
+        need = base_i + off
+        if need >= len(ser):
+            state = "pending" if eff_asof >= last_date else "missing"
+            why = (f"窗口未满：数据集到 {last_date}，该点需要 t0 之后第 {off} 个交易日"
+                   if state == "pending" else
+                   f"已成熟（数据到 {last_date}）但缺该交易日的行情行：可能停牌/缺数据")
         else:
-            pts[f"t{off:+d}"] = {"date": None, "close": None,
-                                 "unavailable": f"窗口超出数据集范围（t0 之后第 {off} 个交易日不在数据里）"}
-    return {"ok": True, "event_date": ev, "anchor": anchor, "base_index": base_i,
+            state, why = "missing", "该点落在数据集起始之前（历史未覆盖）"
+        pts[f"t{off:+d}"] = {"date": None, "close": None, "state": state, "unavailable": why}
+    return {"ok": True, "event_date": ev, "feature_cutoff": cut,
+            "evaluation_as_of": eff_asof, "anchor": anchor, "base_index": base_i,
             "base_date": ser[base_i][0], "points": pts,
             "affected_window": [anchor["date"], max(x["date"] or "" for x in pts.values())]}
 
@@ -228,10 +273,28 @@ def _calendar_gap(d1: str, d2: str) -> int | None:
 
 # ---------------------------------------------------------------- 主算子
 
+def _calendar_gaps(bench_ser: list[tuple[str, float]], subj: list[tuple[str, float]],
+                   start: str, end: str) -> list[str]:
+    """以**基准序列为交易日历代理**，找出标的"基准有行、自己没有"的日期。
+
+    为什么需要：`offsets` 是按**标的自己的交易日序列**数的，所以标的停牌一天，`t+5` 会静默地
+    变成"晚一个自然交易日的第 5 根 K 线"，而调用方看不出来。缺独立交易日历时，指数序列是唯一
+    可用的日历代理 —— 但它**分不清"停牌"与"该标的当日无数据"**，所以只能报"疑似"，不能断言。
+    """
+    if not bench_ser or not subj:
+        return []
+    have = {d for d, _ in subj}
+    return [d for d, _ in bench_ser if start <= d <= end and d not in have]
+
+
 def compute(payload: dict, events: list[dict], *, benchmark: str = "",
             offsets=DEFAULT_OFFSETS, policy: str = "keep_earliest",
-            allow_unadjusted: bool = False) -> dict:
+            allow_unadjusted: bool = False, feature_cutoff: str = "",
+            evaluation_as_of: str = "") -> dict:
     """事件窗口基准调整收益读数（确定性；同输入同输出）。
+
+    `feature_cutoff`（默认＝每个事件自己的事件日）与 `evaluation_as_of`（默认＝数据集最后交易日）
+    是 §12.4 的两段语义：前者定"当时知道什么"，后者定"截至何时评价"。
 
     返回 `status="unavailable"` 时**必须**带 `reason`／`unavailable[]`，调用方不得当成 0 收益。
     """
@@ -239,11 +302,15 @@ def compute(payload: dict, events: list[dict], *, benchmark: str = "",
     bind = binding(payload)
     fp = fingerprint(payload)
     out: dict = {"schema": SCHEMA, "operator": OPERATOR, "impl_version": IMPL_VERSION,
+                 "kind": "event_reaction_observation", "executable": False,
                  "input_kind": bind, "input_fingerprint": fp,
                  "params": {"benchmark": str(benchmark or ""), "offsets": list(offs),
                             "policy": str(policy), "allow_unadjusted": bool(allow_unadjusted),
-                            "anchor": "t-1 = 事件日当日或之前最后一个交易日",
-                            "t0": "事件日之后第一个交易日（保守约定：披露时点未知）"},
+                            "feature_cutoff": str(feature_cutoff or ""),
+                            "evaluation_as_of": str(evaluation_as_of or ""),
+                            "anchor": "t-1 ＝ feature_cutoff 当日或之前最后一个交易日（价格起点）",
+                            "t0": "披露日之后第一个交易日（保守下一交易日规则，不臆造盘中时间）",
+                            "price_basis": "收盘价（不可执行；可执行收益需盘中时间与开盘价）"},
                  "limits": list(LIMITS_BASE), "unavailable": [], "readings": [],
                  "aggregate": None}
 
@@ -287,18 +354,35 @@ def compute(payload: dict, events: list[dict], *, benchmark: str = "",
     all_events = sorted(ded["kept"] + ded["dropped"], key=lambda e: (e["date"], e["code"]))
     for e in all_events:
         key = f"{e['code']}@{e['date']}"
-        sl = _slice(payload, e["code"], e["date"], offs)
+        sl = _slice(payload, e["code"], e["date"], offs,
+                    feature_cutoff=feature_cutoff, evaluation_as_of=evaluation_as_of)
         if not sl.get("ok"):
             out["unavailable"].append({"what": key, "reason": sl["reason"]})
             continue
         anchor_c = sl["anchor"]["close"]
         anchors_b = _ret_anchor(bench_ser, sl["anchor"]["date"])
         item = {"label": e["label"], "code": e["code"], "event_date": sl["event_date"],
+                "feature_cutoff": sl["feature_cutoff"],
+                "evaluation_as_of": sl["evaluation_as_of"],
                 "anchor": sl["anchor"], "t0_date": sl["base_date"],
                 "affected_window": sl["affected_window"],
                 "benchmark": benchmark or "", "points": [], "benchmark_missing": [],
                 "aggregate_eligible": key not in dropped_keys,
                 "aggregate_exclusion_reason": reason_by_key.get(key, "")}
+        states = {sl["points"][f"t{off:+d}"]["state"] for off in offs}
+        item["window_state"] = ("pending" if "pending" in states else
+                                "partial_missing" if "missing" in states else "observed")
+        if benchmark:
+            subj_ser = _series(payload, e["code"])
+            item["suspension_suspect"] = _calendar_gaps(
+                bench_ser, subj_ser, sl["anchor"]["date"],
+                max(x["date"] or "" for x in sl["points"].values()))
+            if item["suspension_suspect"]:
+                out["calendar_proxy_used"] = ("以基准序列为交易日历代理：上述日期基准有行、标的无行，"
+                                              "**疑似停牌或缺行**；缺独立交易日历时无法与休市区分，"
+                                              "故只报疑似、不断言；offsets 按标的自身交易日计")
+        else:
+            item["suspension_suspect"] = []
         for off in offs:
             p = sl["points"][f"t{off:+d}"]
             if off == ANCHOR_OFFSET:
@@ -307,11 +391,19 @@ def compute(payload: dict, events: list[dict], *, benchmark: str = "",
                 item["points"].append({"offset": off, "date": p.get("date"),
                                        "close": p.get("close"), "return": None,
                                        "benchmark_return": None, "excess_return": None,
-                                       "note": "锚点（基准点）：无收益读数，仅用于定位",
+                                       "state": "anchor",
+                                       "note": "锚点（价格起点）：无收益读数，仅用于定位",
                                        "unavailable": p.get("unavailable", "")})
                 continue
             r = _ret(anchor_c, p.get("close"))
             br = None
+            if p.get("close") is None:
+                # pending / missing：**不报 0**，也不假装是"零收益"
+                item["points"].append({"offset": off, "date": None, "close": None,
+                                       "return": None, "benchmark_return": None,
+                                       "excess_return": None, "state": p.get("state", "missing"),
+                                       "unavailable": p.get("unavailable", "")})
+                continue
             if benchmark:
                 bc = _lookup(bench_ser, p.get("date"))
                 b_anchor = _lookup(bench_ser, sl["anchor"]["date"])
@@ -323,6 +415,7 @@ def compute(payload: dict, events: list[dict], *, benchmark: str = "",
             item["points"].append({"offset": off, "date": p.get("date"),
                                    "close": p.get("close"), "return": r,
                                    "benchmark_return": br, "excess_return": _excess(r, br),
+                                   "state": "observed",
                                    "unavailable": p.get("unavailable", "")})
         out["readings"].append(item)
 
@@ -388,7 +481,11 @@ def _aggregate(readings: list[dict], offs) -> dict:
         for off in offs:
             vals = [p["excess_return"] for r in sub for p in r["points"]
                     if p["offset"] == off and p["excess_return"] is not None]
-            cell = {"n_excess": len(vals)}
+            cell = {"n_excess": len(vals),
+                    "n_pending": sum(1 for r in sub for p in r["points"]
+                                     if p["offset"] == off and p.get("state") == "pending"),
+                    "n_missing": sum(1 for r in sub for p in r["points"]
+                                     if p["offset"] == off and p.get("state") == "missing")}
             if len(vals) >= 2:
                 s = sorted(vals)
                 mid = (s[len(s) // 2] if len(s) % 2
@@ -412,8 +509,8 @@ def _finalize(out: dict) -> dict:
     if not ok:
         out["delivery_block_reason"] = why
         out["limits"].append(why)
-    core = {k: out.get(k) for k in ("schema", "operator", "impl_version", "status",
-                                    "input_kind", "input_fingerprint", "params",
+    core = {k: out.get(k) for k in ("schema", "operator", "impl_version", "status", "kind",
+                                    "executable", "input_kind", "input_fingerprint", "params",
                                     "readings", "aggregate", "overlap", "unavailable")}
     out["reading_hash"] = _sha(_canon(core))
     return out
@@ -425,7 +522,9 @@ def replay(reading: dict, payload: dict, events: list[dict]) -> dict:
     fresh = compute(payload, events, benchmark=params.get("benchmark", ""),
                     offsets=params.get("offsets") or DEFAULT_OFFSETS,
                     policy=params.get("policy", "keep_earliest"),
-                    allow_unadjusted=bool(params.get("allow_unadjusted")))
+                    allow_unadjusted=bool(params.get("allow_unadjusted")),
+                    feature_cutoff=params.get("feature_cutoff", ""),
+                    evaluation_as_of=params.get("evaluation_as_of", ""))
     diffs: list[str] = []
     if fresh.get("reading_hash") != reading.get("reading_hash"):
         diffs.append("reading_hash 不一致")

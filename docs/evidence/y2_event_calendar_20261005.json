@@ -59,6 +59,8 @@
   "schema": "weavemind.event_returns/0",
   "operator": "event_returns_v1",
   "impl_version": "event_returns/1.0.0",
+  "kind": "event_reaction_observation",
+  "executable": false,
   "input_kind": {
    "input_kind": "market_history",
    "schema": "weavemind.market_history/0",
@@ -90,14 +92,20 @@
    ],
    "policy": "keep_earliest",
    "allow_unadjusted": false,
-   "anchor": "t-1 = 事件日当日或之前最后一个交易日",
-   "t0": "事件日之后第一个交易日（保守约定：披露时点未知）"
+   "feature_cutoff": "",
+   "evaluation_as_of": "",
+   "anchor": "t-1 ＝ feature_cutoff 当日或之前最后一个交易日（价格起点）",
+   "t0": "披露日之后第一个交易日（保守下一交易日规则，不臆造盘中时间）",
+   "price_basis": "收盘价（不可执行；可执行收益需盘中时间与开盘价）"
   },
   "limits": [
    "这是**事件窗口的价格观察值**，不是因果结论：没有识别策略、没有对照组、样本极小",
    "未做风险调整（无 β/波动率/因子暴露），「超额」仅指减去同期基准，不等于 alpha",
    "基准调整按**日期对齐**；基准缺该交易日则留空，不补 0、不前值填充",
-   "事件日之后首个交易日为 t0（披露时点未知，取保守约定）；t-1 为事件日当日或之前最后一个交易日",
+   "`t0` ＝披露日之后第一个交易日（**保守下一交易日规则**：披露只有日精度，不臆造盘中时间）；价格起点是 `anchor`（`feature_cutoff` 当日或之前最后一个交易日）的收盘价",
+   "**收盘对收盘读数不可执行**（`kind=event_reaction_observation`）：披露时点未知，若公告在盘前/盘中发布，披露日那一档可能已含部分反应 ⇒ 本读数应看作反应幅度的**下界**；可执行收益需盘中时间与开盘价，本轮不实现，也不把两者混成一个数",
+   "窗口未满记 `pending`、已成熟但缺行情记 `missing`：两者**都不报 0**、都不伪装成完整收益",
+   "`offsets` 按**标的自身交易日序列**计；缺独立交易日历时，停牌只能以基准序列为代理报**疑似**（`suspension_suspect`），不能与休市区分 ⇒ 交易日历是待补项",
    "窗口重叠的事件各自出读数但不参与聚合（重叠会重复计同一段价格路径）",
    "免费源/个人非商业许可数据仅内部试验，`delivery_eligible=False`，不得进对外下载包",
    "许可为「免费源·仅内部试验」：仅内部试验，不得进对外下载包；对外交付须机构授权或只交付衍生结论"
@@ -108,6 +116,8 @@
     "label": "定期报告｜2024年年度报告",
     "code": "002304",
     "event_date": "2025-04-29",
+    "feature_cutoff": "2025-04-29",
+    "evaluation_as_of": "2026-09-30",
     "anchor": {
      "date": "2025-04-29",
      "close": 64.02
@@ -126,7 +136,8 @@
       "return": null,
       "benchmark_return": null,
       "excess_return": null,
-      "note": "锚点（基准点）：无收益读数，仅用于定位",
+      "state": "anchor",
+      "note": "锚点（价格起点）：无收益读数，仅用于定位",
       "unavailable": ""
      },
      {
@@ -136,6 +147,7 @@
       "return": -0.003436,
       "benchmark_return": -0.001194,
       "excess_return": -0.002245,
+      "state": "observed",
       "unavailable": ""
      },
      {
@@ -145,6 +157,7 @@
       "return": -0.000625,
       "benchmark_return": 0.008865,
       "excess_return": -0.009407,
+      "state": "observed",
       "unavailable": ""
      },
      {
@@ -154,6 +167,7 @@
       "return": 0.002187,
       "benchmark_return": 0.030604,
       "excess_return": -0.027573,
+      "state": "observed",
       "unavailable": ""
      },
      {
@@ -163,12 +177,15 @@
       "return": -0.040769,
       "benchmark_return": 0.02038,
       "excess_return": -0.059928,
+      "state": "observed",
       "unavailable": ""
      }
     ],
     "benchmark_missing": [],
     "aggregate_eligible": true,
-    "aggregate_exclusion_reason": ""
+    "aggregate_exclusion_reason": "",
+    "window_state": "observed",
+    "suspension_suspect": []
    }
   ],
   "aggregate": {
@@ -188,26 +205,36 @@
      "by_offset": {
       "t-1": {
        "n_excess": 0,
+       "n_pending": 0,
+       "n_missing": 0,
        "note": "n=0 < 2：不给均值/中位数（样本不足不产统计量）",
        "no_proportion_stat": "n < 3：不给「胜率/上涨占比」这类比例字段"
       },
       "t+0": {
        "n_excess": 1,
+       "n_pending": 0,
+       "n_missing": 0,
        "note": "n=1 < 2：不给均值/中位数（样本不足不产统计量）",
        "no_proportion_stat": "n < 3：不给「胜率/上涨占比」这类比例字段"
       },
       "t+1": {
        "n_excess": 1,
+       "n_pending": 0,
+       "n_missing": 0,
        "note": "n=1 < 2：不给均值/中位数（样本不足不产统计量）",
        "no_proportion_stat": "n < 3：不给「胜率/上涨占比」这类比例字段"
       },
       "t+5": {
        "n_excess": 1,
+       "n_pending": 0,
+       "n_missing": 0,
        "note": "n=1 < 2：不给均值/中位数（样本不足不产统计量）",
        "no_proportion_stat": "n < 3：不给「胜率/上涨占比」这类比例字段"
       },
       "t+20": {
        "n_excess": 1,
+       "n_pending": 0,
+       "n_missing": 0,
        "note": "n=1 < 2：不给均值/中位数（样本不足不产统计量）",
        "no_proportion_stat": "n < 3：不给「胜率/上涨占比」这类比例字段"
       }
@@ -228,6 +255,6 @@
   "available_at_upper_bound": "2025-06-03T15:00:00+08:00",
   "delivery_eligible": false,
   "delivery_block_reason": "许可为「免费源·仅内部试验」：仅内部试验，不得进对外下载包；对外交付须机构授权或只交付衍生结论",
-  "reading_hash": "6891caa62211069f10e598d7d2b563a3dd5e855f6ce2634f94f4b6b2c4060f52"
+  "reading_hash": "8f1b02c95b64420fda478430dbfd22ff035e9f3abf31a5922d30892c468629a6"
  }
 }

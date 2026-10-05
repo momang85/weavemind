@@ -426,5 +426,116 @@ class EventCalendarTest(unittest.TestCase):
             self.assertEqual(len(c["events"]), 1, "index 与 meta 同一条材料不得算两次")
 
 
+class TimeContractTest(unittest.TestCase):
+    """§12.4：信号信息与事后结果分开——feature_cutoff / outcome_window / evaluation_as_of。"""
+
+    def _p(self, rows, **kw):
+        return _payload(rows, **kw)
+
+    def test_outcome_window_prices_are_usable_as_results(self):
+        """旧的错误措辞会"排除 t+1/5/20 的全部评价结果"；本条锁住：结果算得出来。"""
+        r = er.compute(self._p(_rows("600031")),
+                       [{"code": "600031", "date": "2025-04-18", "label": "e"}],
+                       offsets=(0, 1, 5, 20))
+        self.assertEqual(r["status"], "ok")
+        pts = {p["offset"]: p for p in r["readings"][0]["points"]}
+        for off in (0, 1, 5, 20):
+            self.assertIsNotNone(pts[off]["return"], f"t{off:+d} 结果必须能算出来")
+
+    def test_feature_cutoff_defaults_to_event_date_and_is_recorded(self):
+        r = er.compute(self._p(_rows("600031")),
+                       [{"code": "600031", "date": "2025-04-18", "label": "e"}])
+        it = r["readings"][0]
+        self.assertEqual(it["feature_cutoff"], "2025-04-18")
+        self.assertEqual(it["anchor"]["date"], "2025-04-18")
+        self.assertEqual(r["params"]["feature_cutoff"], "")
+
+    def test_earlier_feature_cutoff_moves_price_start_and_keeps_ambiguity_out(self):
+        """知道是盘前发布时，可把截点前移一天：披露日那一档进结果窗口，不进特征。"""
+        r = er.compute(self._p(_rows("600031")),
+                       [{"code": "600031", "date": "2025-04-18", "label": "e"}],
+                       offsets=(0, 1), feature_cutoff="2025-04-17")
+        it = r["readings"][0]
+        self.assertEqual(it["anchor"]["date"], "2025-04-17")
+        self.assertEqual(it["t0_date"], "2025-04-18")
+
+    def test_immature_window_is_pending_and_not_zero(self):
+        """数据集在事件日之后就结束 ⇒ 窗口未满，记 pending，**不报 0**。"""
+        rows = _rows("600031")[:3]                     # 只到 2025-04-21
+        r = er.compute(self._p(rows), [{"code": "600031", "date": "2025-04-18", "label": "e"}],
+                       offsets=(0, 5))
+        it = r["readings"][0]
+        pt5 = next(p for p in it["points"] if p["offset"] == 5)
+        self.assertEqual(pt5["state"], "pending")
+        self.assertIsNone(pt5["return"])
+        self.assertNotEqual(pt5["return"], 0.0)
+        self.assertIn("窗口未满", pt5["unavailable"])
+
+    def test_offsets_count_subject_own_sessions_and_gap_is_flagged(self):
+        """标的缺一天（停牌/缺行）时：offsets 按标的自身交易日计，**并把缺口报成疑似**。
+
+        这条是"诚实边界"而不是"完美处理"：没有独立交易日历，就无法把停牌与休市区分开，
+        所以只报 `suspension_suspect` 与"基准是日历代理"的说明，不假装窗口准确。
+        """
+        rows = [r_ for r_ in _rows("600031") if r_["date"] != "2025-04-23"]
+        bench = _rows("000300", base=4000.0, step=5.0)
+        r = er.compute(self._p(rows + bench),
+                       [{"code": "600031", "date": "2025-04-18", "label": "e"}],
+                       benchmark="000300", offsets=(0, 2))
+        it = r["readings"][0]
+        self.assertIn("2025-04-23", it["suspension_suspect"])
+        self.assertIn("日历代理", r.get("calendar_proxy_used", ""))
+        # 索引按标的自身序列 ⇒ t+2 落到 04-24（而不是缺失），这一点必须显式可读
+        pt2 = next(p for p in it["points"] if p["offset"] == 2)
+        self.assertEqual(pt2["date"], "2025-04-24")
+
+    def test_no_benchmark_means_no_calendar_claim(self):
+        r = er.compute(self._p(_rows("600031")),
+                       [{"code": "600031", "date": "2025-04-18", "label": "e"}], offsets=(0, 1))
+        self.assertEqual(r["readings"][0]["suspension_suspect"], [])
+        self.assertNotIn("calendar_proxy_used", r)
+
+    def test_window_state_is_reported_per_event(self):
+        r = er.compute(self._p(_rows("600031")[:4]),
+                       [{"code": "600031", "date": "2025-04-18", "label": "e"}],
+                       offsets=(0, 20))
+        self.assertEqual(r["readings"][0]["window_state"], "pending")
+
+    def test_aggregate_counts_pending_and_missing_separately(self):
+        rows = _rows("600031")[:6]
+        r = er.compute(self._p(rows),
+                       [{"code": "600031", "date": "2025-04-18", "label": "e"},
+                        {"code": "600031", "date": "2026-04-18", "label": "e2"}],
+                       offsets=(0, 20))
+        cell = r["aggregate"]["by_code"]["600031"]["by_offset"]["t+20"]
+        self.assertGreaterEqual(cell["n_pending"] + cell["n_missing"], 1)
+        self.assertNotIn("mean_excess_return", cell,
+                         "有 pending/missing 时不得把它们当 0 掺进均值")
+
+    def test_readings_are_labelled_not_executable(self):
+        r = er.compute(self._p(_rows("600031")),
+                       [{"code": "600031", "date": "2025-04-18", "label": "e"}])
+        self.assertEqual(r["kind"], "event_reaction_observation")
+        self.assertFalse(r["executable"])
+        self.assertTrue(any("不可执行" in x for x in r["limits"]))
+        self.assertIn("下界", " ".join(r["limits"]))
+        self.assertEqual(r["params"]["price_basis"].startswith("收盘价"), True)
+
+    def test_pending_is_not_used_as_outcome_when_later_evaluated(self):
+        """同一算子在"评价时点"推进后，pending 应变成 observed——不是靠改口径，是靠数据到位。"""
+        rows = _rows("600031")
+        early = er.compute(self._p(rows[:5]),
+                           [{"code": "600031", "date": "2025-04-18", "label": "e"}],
+                           offsets=(0, 5))
+        late = er.compute(self._p(rows),
+                          [{"code": "600031", "date": "2025-04-18", "label": "e"}],
+                          offsets=(0, 5))
+        e5 = next(p for p in early["readings"][0]["points"] if p["offset"] == 5)
+        l5 = next(p for p in late["readings"][0]["points"] if p["offset"] == 5)
+        self.assertEqual(e5["state"], "pending")
+        self.assertEqual(l5["state"], "observed")
+        self.assertIsNotNone(l5["return"])
+
+
 if __name__ == "__main__":
     unittest.main()
