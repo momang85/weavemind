@@ -8,6 +8,7 @@ orchestrator 通过混入 ChartPipelineMixin 保留全部方法签名（测试�
 依赖约定：本模块不得在顶层 import orchestrator_v2（避免循环导入）；
 需要 orchestrator 模块级工具（_sanitized_process_env）时在方法体内延迟导入。
 """
+import hashlib
 import json
 import logging
 import os
@@ -20,6 +21,158 @@ import chart_assembly
 
 # 保持与 orchestrator_v2 相同的 logger 名：日志行为（含测试 assertLogs）零变化
 logger = logging.getLogger("orchestrator_v2")
+
+# 经营研究三图的规格指纹：选择没变就不重渲染（文件落在 project/ 下）
+ANALYSIS_CHART_FP = "analysis_charts_fingerprint.json"
+
+
+def _rules_version() -> str:
+    try:
+        from financial_analysis.validation import RULES_VERSION
+        return str(RULES_VERSION)
+    except Exception:                                # noqa: BLE001
+        return ""
+
+
+def selected_analysis_specs(ws) -> list[dict]:
+    """**经营研究三图**（利润瀑布／现金桥／情景比较）的规格——与正文同一组选定运行。
+
+    唯一实现：运行期渲染（`OrchestratorV2._analysis_chart_specs`）与**选择变化后的
+    重渲染**（`refresh_selected_analysis_charts`）都走这里，避免两处各写一套导致
+    "正文按新选择、图还是旧选择"（同源断裂）。
+    数据来源：`analysis/analysis_runs.json` 的已验证运行 + `analysis/dataset.json`
+    + `store.select_for_report` 的**同一条选择**；不在这里另跑参数，也不从正文文字反猜数字。
+    """
+    try:
+        from financial_analysis import charts as _charts
+        from financial_analysis import store as _fa_store
+        picked, _notes = _fa_store.select_for_report(ws, rules_version=_rules_version())
+        if not picked:
+            return []
+        ds = _fa_store.dataset_from_inputs(ws)
+        specs: list[dict] = []
+        od = next((r for r in picked if str(r.model_id) == "operating_drivers"), None)
+        cash = next((r for r in picked if str(r.model_id) == "cash_reconciliation"), None)
+        scen = [r for r in picked if str(r.model_id) == "scenario_sensitivity"]
+        if od is not None and ds is not None:
+            specs.append(_charts.profit_waterfall(od, ds))
+        if cash is not None:
+            specs.append(_charts.cash_bridge_waterfall(cash, which="cur"))
+        if len(scen) >= 2:
+            specs.append(_charts.scenario_threshold_comparison(
+                [(f"档位{i + 1}", r) for i, r in enumerate(scen)]))
+        elif scen:
+            specs.append(_charts.scenario_outcome_bars(scen[0]))
+        ok = [s for s in specs if s.get("available")]
+        if len(ok) != len(specs):
+            logger.info("analysis charts: %d/%d 可用（其余如实不出图）", len(ok), len(specs))
+        return ok
+    except Exception as exc:                         # noqa: BLE001
+        logger.warning("经营研究三图规格生成失败：%s", str(exc)[:140])
+        return []
+
+
+def render_chart_data(project, *, task_id: str = "") -> dict:
+    """`chart_data.json` → PNG + `chart_manifest.json`（独立可调用，不依赖编排器实例）。
+
+    `project` 是任务的项目目录（渲染脚本的工作目录）。与编排器里那条路**同一段代码**：
+    写脚本 → 子进程渲染 → 回填 manifest → 同步到 `workspace/charts/`（报告从那里取图）。
+    """
+    project = Path(project)
+    src = project / "chart_data.json"
+    if not src.exists():
+        return {"ok": False, "reason": "no_chart_data", "charts": []}
+    # __file__ 为 charts_pipeline/__init__.py：上溯两级才是仓库根
+    repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    script = chart_assembly.RENDER_CHART_SCRIPT.replace("__REPO_ROOT__", repo_root)
+    script_path = project / "render_charts.py"
+    out = err = ""
+    code = -1
+    try:
+        script_path.write_text(script, encoding="utf-8")
+        from orchestrator_v2 import _sanitized_process_env
+        proc = subprocess.run([sys.executable, str(script_path)], cwd=str(project),
+                              capture_output=True, timeout=180,
+                              env=_sanitized_process_env())
+        code = int(proc.returncode)
+        out = proc.stdout.decode("utf-8", errors="replace")
+        err = proc.stderr.decode("utf-8", errors="replace")
+        if code != 0:
+            logger.warning("render_charts failed: %s", (out + "\n" + err)[:400])
+        else:
+            for line in out.splitlines():
+                if line.startswith("SKIP "):
+                    logger.info("chart skipped: %s", line)
+        # P2-4：渲染后回填 manifest——保证每张已渲染 PNG 都有 file+keywords 条目
+        chart_assembly._backfill_chart_manifest(project)
+        if task_id:
+            try:
+                from workspace import task_charts_dir
+                cdir = task_charts_dir(task_id)
+                for png in project.glob("*.png"):
+                    shutil.copy2(png, cdir / png.name)
+                mf = project / "chart_manifest.json"
+                if mf.exists():
+                    shutil.copy2(mf, cdir / mf.name)
+            except Exception as exc:                 # noqa: BLE001
+                logger.warning("chart sync failed: %s", str(exc)[:120])
+    except Exception as exc:                         # noqa: BLE001
+        logger.warning("render_charts error: %s", exc)
+        return {"ok": False, "reason": f"{type(exc).__name__}: {str(exc)[:120]}", "charts": []}
+    mf = project / "chart_manifest.json"
+    charts: list[dict] = []
+    try:
+        charts = list(json.loads(mf.read_text(encoding="utf-8")).get("charts") or [])
+    except Exception:                                # noqa: BLE001
+        charts = []
+    return {"ok": code == 0, "returncode": code, "charts": charts}
+
+
+def refresh_selected_analysis_charts(task_id: str) -> dict:
+    """**选择变化后**按当前选定运行重渲染经营研究三图（只动这三张）。
+
+    为什么需要（阶段X §7 实机）：三图在运行期由 content_summary 步渲染一次；此后用户在
+    分析工作台改选/采纳情景运行，正文按新选择装配，**图与图注却还是运行期那一版**——
+    正文写"使用者情景 91.04 亿"、图 3 仍画"80.33 亿"，同一份交付里两个数（同源断裂）。
+    选择没变（规格指纹相同）就不重渲染，不产生无谓写入。
+    """
+    from workspace import task_project_dir, task_workspace
+    try:
+        ws, project = task_workspace(task_id), task_project_dir(task_id)
+    except Exception as exc:                         # noqa: BLE001
+        return {"ok": False, "reason": f"workspace: {str(exc)[:100]}", "charts": []}
+    specs = selected_analysis_specs(ws)
+    if not specs:
+        # 没有可用规格时**不动**既有图（宁可不刷新，也不用空规格把图删了）
+        return {"ok": False, "reason": "no_analysis_specs", "charts": []}
+    fp = hashlib.sha256(json.dumps(specs, ensure_ascii=False, sort_keys=True,
+                                   default=str).encode("utf-8")).hexdigest()
+    fp_path = project / ANALYSIS_CHART_FP
+    try:
+        prev = json.loads(fp_path.read_text(encoding="utf-8")).get("fingerprint") or ""
+    except Exception:                                # noqa: BLE001
+        prev = ""
+    if prev == fp:
+        return {"ok": True, "changed": False, "fingerprint": fp, "charts": []}
+    try:
+        (project / "chart_data.json").write_text(
+            json.dumps({"charts": specs}, ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception as exc:                         # noqa: BLE001
+        return {"ok": False, "reason": f"write: {str(exc)[:100]}", "charts": []}
+    info = render_chart_data(project, task_id=str(task_id))
+    charts = [c for c in (info.get("charts") or [])
+              if str(c.get("file") or "") in {f"chart_{i}.png" for i in (1, 2, 3)}]
+    try:
+        fp_path.write_text(json.dumps(
+            {"fingerprint": fp, "specs": len(specs),
+             "chart_ids": [str(c.get("chart_id") or "") for c in charts],
+             "values": [dict(c.get("binding") or {}) for c in charts]},
+            ensure_ascii=False, indent=1), encoding="utf-8")
+    except Exception:                                # noqa: BLE001
+        pass
+    logger.info("分析三图按当前选择重渲染（task=%s）：%d 张（changed=%s）",
+                task_id, len(charts), info.get("ok"))
+    return {"ok": bool(info.get("ok")), "changed": True, "fingerprint": fp, "charts": charts}
 
 
 class ChartPipelineMixin:
@@ -93,53 +246,15 @@ class ChartPipelineMixin:
     def _render_chart_data(self, task_id: str, goal: str) -> None:
         """确定性渲染 LLM 结构化图表规格（chart_data.json → {"charts": [...]}）：
         语义（问题/结论/口径）由 LLM 负责；数字、标注、视觉编码由脚本保证。
-        无效规格跳过并记录原因；有效图输出 chart_N.png + chart_manifest.json。"""
-        import subprocess
-        import sys
+        无效规格跳过并记录原因；有效图输出 chart_N.png + chart_manifest.json。
+
+        实现在模块级 `render_chart_data`（与"选择变化后重渲染"**同一段代码**）：
+        此前这段逻辑只存在于这个混入方法里，于是"按新选择重出图"没有可复用的入口。
+        """
         if not self._wants_visualization(goal):
             return
         from workspace import task_project_dir
-        project = task_project_dir(task_id)
-        src = project / "chart_data.json"
-        if not src.exists():
-            return
-        # __file__ 为 charts_pipeline/__init__.py：上溯两级才是仓库根
-        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        script = chart_assembly.RENDER_CHART_SCRIPT
-        script = script.replace("__REPO_ROOT__", repo_root)
-        script_path = project / "render_charts.py"
-        try:
-            script_path.write_text(script, encoding="utf-8")
-            from orchestrator_v2 import _sanitized_process_env
-            proc = subprocess.run(
-                [sys.executable, str(script_path)],
-                cwd=str(project), capture_output=True, timeout=180,
-                env=_sanitized_process_env(),
-            )
-            out = proc.stdout.decode("utf-8", errors="replace")
-            err = proc.stderr.decode("utf-8", errors="replace")
-            if proc.returncode != 0:
-                logger.warning("render_charts failed: %s", (out + "\n" + err)[:400])
-            else:
-                for line in out.splitlines():
-                    if line.startswith("SKIP "):
-                        logger.info("chart skipped: %s", line)
-            # P2-4：渲染后回填 manifest——保证每张已渲染 PNG 都有 file+keywords
-            # 条目（修复"实际 4 图但 chart_manifest.json 空数组"的交付缺口）
-            chart_assembly._backfill_chart_manifest(project)
-            # 图表同步到 workspace/charts/（report_generator 从该目录发现图表并嵌入报告）
-            try:
-                from workspace import task_charts_dir
-                cdir = task_charts_dir(task_id)
-                for png in project.glob("*.png"):
-                    shutil.copy2(png, cdir / png.name)
-                mf = project / "chart_manifest.json"
-                if mf.exists():
-                    shutil.copy2(mf, cdir / mf.name)
-            except Exception as exc:
-                logger.warning("chart sync failed: %s", str(exc)[:120])
-        except Exception as exc:
-            logger.warning("render_charts error: %s", exc)
+        render_chart_data(task_project_dir(task_id), task_id=str(task_id))
 
     def _generate_search_charts(self, task_id: str, goal: str) -> None:
         """确定性基线图表：来源分布、主要主体提及频率、主题热词。

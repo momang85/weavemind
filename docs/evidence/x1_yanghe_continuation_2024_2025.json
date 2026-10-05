@@ -1,0 +1,150 @@
+{
+ "case": "X1 洋河 2024–2025 研究续页（§7：用一份**后续披露**检验上一期写下的假说）",
+ "earlier": {
+  "label": "洋河股份 2023–2024（2024 年年度报告）",
+  "source": {
+   "title": "2024年年度报告",
+   "url": "http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF",
+   "periods": [
+    2023,
+    2024
+   ],
+   "doc_type": "年度报告",
+   "disclosure_date": "2025-04-28",
+   "text_sha256": "a71287d53c7f62c8126aad548354616fdbbc62a82e2e42440442fb2a89d678b0"
+  },
+  "dataset": {
+   "hash": "cf8fb87681dd2791e9a7de9f9297ccd38d72abf81de316e16ca8a068d24d1020",
+   "observations": 170,
+   "usable": 166
+  },
+  "judgment_ids": [
+   "volume_contraction",
+   "unit_revenue_not_proof_of_pricing",
+   "finished_goods_inventory_build"
+  ]
+ },
+ "later": {
+  "label": "洋河股份 2024–2025（2025 年年度报告）",
+  "source": {
+   "title": "2025年年度报告",
+   "url": "http://static.cninfo.com.cn/finalpage/2026-04-28/1225219764.PDF",
+   "periods": [
+    2024,
+    2025
+   ],
+   "doc_type": "年度报告",
+   "disclosure_date": "2026-04-28",
+   "text_sha256": "b01f7d7cf8cf4a438e33bb0f0cd1afcf44a157e857624a2c49a7d5022b60ac42"
+  },
+  "dataset": {
+   "hash": "98b2b717abe5a55cc254f3dfdb526b64de94315aa53772079d81f2227fabfec5",
+   "observations": 162,
+   "usable": 158
+  },
+  "judgment_ids": [
+   "volume_contraction",
+   "unit_revenue_not_proof_of_pricing",
+   "cash_from_working_capital"
+  ]
+ },
+ "hypotheses": [
+  {
+   "judgment_id": "volume_contraction",
+   "hypothesis": "销量压力延续（数量收缩没有转正）",
+   "status": "加强",
+   "reason": "降幅扩大 9.69pp（-16.30% → -25.99%）",
+   "new_readings": [
+    "销售量（2025）-25.99%，生产量 -39.20%",
+    "位置：小节：第三节 管理层讨论与分析 > 一、报告期内公司从事的主要业务 > （1）主要产品的生产量、销售量、库存量（字符 8689-8726）"
+   ]
+  },
+  {
+   "judgment_id": "unit_revenue_not_proof_of_pricing",
+   "hypothesis": "单位收入（推算吨价）继续上升",
+   "status": "削弱",
+   "reason": "推算吨价同比转负（+3.93% → -10.09%）",
+   "new_readings": [
+    "推算吨价 -10.09%（182,143 元/吨）",
+    "口径：吨价为推算（非披露价格），含产品结构混合"
+   ]
+  },
+  {
+   "judgment_id": "finished_goods_inventory_build",
+   "hypothesis": "企业成品库存继续累积（未被消化）",
+   "status": "削弱",
+   "reason": "库存量由累积转为下降（+16.38% → -31.74%）",
+   "new_readings": [
+    "库存量 -31.74%（31,122.56 吨）",
+    "位置：小节：第三节 管理层讨论与分析 > 一、报告期内公司从事的主要业务 > （1）主要产品的生产量、销售量、库存量（字符 8764-8799）"
+   ]
+  }
+ ],
+ "overlap_check": {
+  "shared_periods": [
+   2024
+  ],
+  "items": [
+   {
+    "metric": "白酒销售量",
+    "shared_period": 2024,
+    "earlier_material": 139076.05,
+    "later_material": 139076.05,
+    "same": true,
+    "note": "两份材料在同一比较期一致"
+   },
+   {
+    "metric": "白酒库存量",
+    "shared_period": 2024,
+    "earlier_material": 45594.72,
+    "later_material": 45594.72,
+    "same": true,
+    "note": "两份材料在同一比较期一致"
+   },
+   {
+    "metric": "推算吨价",
+    "shared_period": 2024,
+    "earlier_material": 202592.0,
+    "later_material": 202592.0,
+    "same": true,
+    "note": "两份材料在同一比较期一致"
+   }
+  ],
+  "verdict": "共同比较期读数一致"
+ },
+ "assumption_impact": {
+  "target_net_profit": 6673388602.12,
+  "modes": {
+   "fixed": {
+    "status": "validated",
+    "revenue_growth_to_hold_target": 32.4766,
+    "margin_threshold": 94.8561,
+    "target_net_profit": 6673388602.12
+   },
+   "detail": {
+    "status": "validated",
+    "revenue_growth_to_hold_target": null,
+    "margin_threshold": null,
+    "target_net_profit": 6673388602.12
+   }
+  },
+  "note": "两种模式的目标是**同一个**（默认上一期归母净利）：差异来自毛利线以下的费用/税率/少数股东规则，不是材料或目标变了"
+ },
+ "checks": {
+  "two_materials_loaded": true,
+  "periods_from_original_material": true,
+  "hypotheses_frozen_with_conditions": true,
+  "at_least_one_decisive": true,
+  "same_caliber_overlap_checked": true,
+  "assumption_impact_explained": true,
+  "historical_replay_not_forecast": true,
+  "locators_present": true
+ },
+ "passed": 8,
+ "total": 8,
+ "artifacts": {
+  "continuation_json": "docs\\evidence\\x1_yanghe_continuation_2024_2025\\continuation.json",
+  "continuation_md": "docs\\evidence\\x1_yanghe_continuation_2024_2025\\continuation.md"
+ },
+ "boundary": "较早材料先写假说、再拿较新材料读数比较——这是**回放**，不构成事前盲测或投资预测；将来真实时间前向更新才谈研究效用。"
+}

@@ -5849,44 +5849,14 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
     def _analysis_chart_specs(self, task_id: str) -> list[dict]:
         """V0：**经营研究三图**（利润瀑布／现金桥／情景比较），来自与正文同一组选定运行。
 
-        数据来源与正文完全一致：`analysis/analysis_runs.json` 的已验证运行 +
-        `analysis/dataset.json`（瀑布的起点/终点要读两期归母净利）+ `store.select_for_report`
-        的**同一条选择**（用户选择优先，否则默认经营研究组合）。不在这里另跑参数，
-        也不从正文文字里反猜数字。
+        实现只有一处（`charts_pipeline.selected_analysis_specs`）：运行期与
+        "选择变化后重渲染"（`refresh_selected_analysis_charts`）必须用同一条选择，
+        否则正文按新选择、图还是运行期那一版（阶段X §7 实机同源断裂）。
         """
         try:
-            import financial_analysis as fa
-            from financial_analysis import charts as _charts
-            from financial_analysis import store as _fa_store
+            from charts_pipeline import selected_analysis_specs
             from workspace import task_workspace
-            ws = task_workspace(task_id)
-            try:
-                from financial_analysis.validation import RULES_VERSION
-                _rules = str(RULES_VERSION)
-            except Exception:                        # noqa: BLE001
-                _rules = ""
-            picked, _notes = _fa_store.select_for_report(ws, rules_version=_rules)
-            if not picked:
-                return []
-            ds = _fa_store.dataset_from_inputs(ws)
-            specs: list[dict] = []
-            od = next((r for r in picked if str(r.model_id) == "operating_drivers"), None)
-            cash = next((r for r in picked if str(r.model_id) == "cash_reconciliation"), None)
-            scen = [r for r in picked if str(r.model_id) == "scenario_sensitivity"]
-            if od is not None and ds is not None:
-                specs.append(_charts.profit_waterfall(od, ds))
-            if cash is not None:
-                specs.append(_charts.cash_bridge_waterfall(cash, which="cur"))
-            if len(scen) >= 2:
-                specs.append(_charts.scenario_threshold_comparison(
-                    [(f"档位{i + 1}", r) for i, r in enumerate(scen)]))
-            elif scen:
-                specs.append(_charts.scenario_outcome_bars(scen[0]))
-            ok = [s for s in specs if s.get("available")]
-            if len(ok) != len(specs):
-                logger.info("analysis charts %s: %d/%d 可用（其余如实不出图）",
-                            task_id, len(ok), len(specs))
-            return ok
+            return selected_analysis_specs(task_workspace(task_id))
         except Exception as exc:                     # noqa: BLE001
             logger.warning("经营研究三图生成失败（task=%s）：%s", task_id, str(exc)[:140])
             return []

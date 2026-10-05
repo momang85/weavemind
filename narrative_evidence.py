@@ -95,6 +95,12 @@ _SENT_END = "。！？；.!?;"
 
 # 文档自身的报告期：标题里的"2026年年度报告"这类写法（取最后一个年份）
 _DOC_PERIOD_RE = re.compile(r"(19|20)\d{2}\s*年?\s*(?:年度报告|年报|annual report)", re.I)
+# 中期报告的报告期：平台原先只认年度报告，半年报/季报在准入侧一律以
+# "标题里没有报告期"被拒（实机：X1 续页要用紧随年报之后的 2025 年半年度报告）。
+# 这里**只加识别、不改 `_doc_period` 的返回形状**（旧的 4 位年份），因为旧调用点有
+# `int(dp)`：把"2025H1"塞进去会抛 ValueError。新的期间关键字走 `doc_period_key`。
+_INTERIM_PERIOD_RE = re.compile(r"(19|20)(\d{2})\s*年?\s*(?:半年度报告|半年报|中期报告)")
+_QUARTER_PERIOD_RE = re.compile(r"(19|20)(\d{2})\s*年?\s*(?:第?([一二三四1-4])季度报告|季报)")
 # 发布日：URL 路径里的日期（2025-04-03 / 2025/04 / 2025）；紧凑写法 20260301 也认
 _PUB_DATE_RE = re.compile(r"(19|20)\d{2}[-/年.]\d{1,2}(?:[-/月.]\d{1,2})?")
 _PUB_COMPACT_RE = re.compile(r"(19|20)\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])")
@@ -144,6 +150,40 @@ def _doc_period(title: str, url: str = "") -> str:
     """文档自身的报告期（标题里的"2026年年度报告"）；取不到返回空串（不猜）。"""
     m = _DOC_PERIOD_RE.search(str(title or ""))
     return m.group(0)[:4] if m else ""
+
+
+# 文档期间类型（`doc_type` 的自由文本之外，标题本身能给出的事实）
+DOC_KIND_ANNUAL = "annual"
+DOC_KIND_INTERIM = "interim"
+
+
+def doc_period_key(title: str, url: str = "") -> str:
+    """文档自身的报告期**关键字**：年度→`"2024"`；半年度→`"2025H1"`；季度→`"2025Q3"`。
+
+    与 `_doc_period` 分开的理由是**形状**，不是为了多一个入口：`_doc_period` 只能返回
+    4 位年份（旧调用点 `int(dp)`），而准入判据要能区分"2025 年年度报告"与"2025 年半年度
+    报告"——它们的期间关键字必须不同，否则半年报会被当成年度材料放进来。取不到返回空串。
+    """
+    year = _doc_period(title, url)
+    if year:
+        return year
+    text = str(title or "")
+    m = _INTERIM_PERIOD_RE.search(text)
+    if m:
+        return f"{m.group(1)}{m.group(2)}H1"
+    m = _QUARTER_PERIOD_RE.search(text)
+    if m:
+        digit = str(m.group(3) or "")
+        q = {"一": "1", "二": "2", "三": "3", "四": "4"}.get(digit, digit)
+        return f"{m.group(1)}{m.group(2)}Q{q}" if q else ""
+    return ""
+
+
+def doc_kind(title: str, url: str = "") -> str:
+    """文档期间类型：`annual` / `interim`（标题给不出类型时返回空串，不猜）。"""
+    if _doc_period(title, url):
+        return DOC_KIND_ANNUAL
+    return DOC_KIND_INTERIM if doc_period_key(title, url) else ""
 
 
 def _published_at(doc: dict) -> str:

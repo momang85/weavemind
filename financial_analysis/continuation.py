@@ -120,7 +120,26 @@ def snapshot(document, *, company: str, company_id: str, code: str, periods,
     except Exception:                              # noqa: BLE001
         sup = {}
     extra = list((det or {}).get("facts") or []) + list((sup or {}).get("facts") or [])
-    rows = list(facts) + [f for f in extra if f not in facts]
+    # 合并要按**身份+值**去重：`facts_from_annual_tables` 内部**已经**追加了同一批
+    # 定向抽取事实（facts.py 里的 odt/cst 两处），这里再抽一次是为了"内层被异常吞掉时
+    # 还有一份"的兜底。原先写成 `[f for f in extra if f not in facts]`——拿 dict 和
+    # `Fact` 对象比相等**永远不命中**，于是同一条身份出现两份（一份 Fact、一份 dict），
+    # 两者的 `formula_version`/`period_type` 不同 ⇒ `observation_hash` 不同 ⇒
+    # 数据集的冲突判定把它当成"同一(指标,期间,口径)多个不相容值"**全部丢弃**。
+    # 实机后果（2025 年年度报告）：14 条同值身份被丢，其中含**上期分产品/分地区的
+    # 收入与成本**——量价分解与分段毛利随之消失，续页会把"有数"写成"未取到"。
+    rows = list(facts)
+    _seen: set[tuple] = {(str(getattr(f, "metric", "") or ""),
+                          str(getattr(f, "period", "") or ""),
+                          str(getattr(f, "caliber", "") or ""),
+                          str(getattr(f, "value", "") or "")) for f in rows}
+    for f in extra:
+        key = (str(f.get("metric") or ""), str(f.get("period") or ""),
+               str(f.get("caliber") or ""), str(f.get("value") or ""))
+        if key in _seen:
+            continue
+        _seen.add(key)
+        rows.append(f)
     ds = fa.freeze_from_facts(rows, periods=tuple(periods), entity=company,
                               entity_id=company_id, as_of=as_of,
                               source_label=label or f"x1:{code}")
@@ -529,12 +548,23 @@ def render_page(page: dict, *, heading: str = "## 研究续页（可检验）") 
     if ai.get("modes"):
         f, d = ai["modes"].get("fixed") or {}, ai["modes"].get("detail") or {}
         tgt = ai.get("target_net_profit")
-        lines.append(f"- **假设为什么重要**（同一目标归母净利 {_fmt(tgt)} 元）："
-                     f"fixed 模式需收入 {_pct2(f.get('revenue_growth_to_hold_target'))}、"
-                     f"detail 模式需 {_pct2(d.get('revenue_growth_to_hold_target'))}"
-                     + (f"（差 {ai['revenue_gap_pp']:+.2f}pp）"
-                        if ai.get("revenue_gap_pp") is not None else "")
-                     + "——差异来自毛利线以下的费用/税率/少数股东**规则**，不是材料变化")
+        _fr, _dr = (f.get("revenue_growth_to_hold_target"),
+                    d.get("revenue_growth_to_hold_target"))
+        if _fr is None or _dr is None:
+            # 一侧没有读数就**不并排比较**：detail 模式下毛利线以下随收入变化，
+            # "维持目标所需收入变化"这个单因素反解在本材料里没有解（不是零）。
+            lines.append(f"- **假设为什么重要**（同一目标归母净利 {_fmt(tgt)} 元）："
+                         f"fixed 模式取到 {_pct2(_fr)}、detail 模式**未取到**"
+                         "（毛利线以下随收入变化的规则下，单因素反解无解）——"
+                         "**不并排比较、不据此说差异来自规则**；要看规则差异得换"
+                         "同一目标下两种模式的**情景净利**，本页不给该结论")
+        else:
+            lines.append(f"- **假设为什么重要**（同一目标归母净利 {_fmt(tgt)} 元）："
+                         f"fixed 模式需收入 {_pct2(_fr)}、"
+                         f"detail 模式需 {_pct2(_dr)}"
+                         + (f"（差 {ai['revenue_gap_pp']:+.2f}pp）"
+                            if ai.get("revenue_gap_pp") is not None else "")
+                         + "——差异来自毛利线以下的费用/税率/少数股东**规则**，不是材料变化")
     lines.append(f"- **历史观察与假说分开**：{page.get('historical_note')}")
     lines.append("- **本页限制**：")
     for t in (page.get("limits") or []):

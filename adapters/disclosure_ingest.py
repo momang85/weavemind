@@ -69,7 +69,8 @@ REJECT_TEXT = {
     REJECT_SUBJECT_UNKNOWN: "主体无法判定：文档里既没有本主体名称，也没有证券代码",
     REJECT_PERIOD: "报告期不符：文档自身的报告期不是请求的期间",
     REJECT_PERIOD_UNKNOWN: "报告期无法判定：标题里没有报告期（正文里出现某年份不算——"
-                           "年报正文处处是对比年）",
+                           "年报正文处处是对比年）；年度报告/半年度报告/季度报告都认，"
+                           "期间关键字须与请求一致（如 `2024` 与 `2025H1` 不是一回事）",
     REJECT_AFTER_CUTOFF: "披露日晚于资料截止日：该材料不能用于截至日成立的断言",
     REJECT_CUTOFF_UNKNOWN: "披露日未知或精度不足（只有年/月）：截至判断不成立"
                            "（材料可作背景，不得当已核验时点证据）",
@@ -559,8 +560,10 @@ def ingest(doc: dict, *, company: str, company_code: str = "", periods=(),
     if want_periods:
         # 用**文档自己的报告期**（标题里的"2024年年度报告"）判定，不看正文里出现过哪些
         # 年份：年报正文处处是对比年（2023/2022 都在），拿"正文含该年"当证据等于不校验。
-        from narrative_evidence import _doc_period
-        doc_period = _doc_period(title, url)
+        # 期间关键字要**带期间类型**（年度 `2024` / 半年度 `2025H1`）：只看 4 位年份的话，
+        # 2025 年半年报会被当成"2025 年年度材料"满足 `periods=("2025",)`（X1 续页实机）。
+        from narrative_evidence import doc_period_key
+        doc_period = doc_period_key(title, url)
         if not doc_period:
             return _reject(REJECT_PERIOD_UNKNOWN, periods=want_periods,
                            may_use_as_background=True)

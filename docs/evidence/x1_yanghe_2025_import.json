@@ -1,0 +1,118 @@
+{
+ "case": "2025",
+ "slug": "002304-2025",
+ "company": "洋河股份",
+ "code": "002304.SZ",
+ "periods": [
+  2024,
+  2025
+ ],
+ "period_label": "2025",
+ "doc_type": "年度报告",
+ "online": true,
+ "purpose": "X1 续页：用 2025 年年度报告（本期 2025／上期 2024）检验上一期（2024 年年报）写下的持续性假说——**年度对年度**同口径",
+ "discovery": {
+  "contract": "cninfo-hisannouncement-v1",
+  "total": 9,
+  "params": {
+   "pageNum": "1",
+   "pageSize": "30",
+   "column": "szse",
+   "tabName": "fulltext",
+   "plate": "",
+   "stock": "002304,9900008689",
+   "searchkey": "",
+   "secid": "",
+   "category": "category_ndbg_szsh",
+   "trade": "",
+   "seDate": "2024-01-01~2027-12-31",
+   "sortName": "",
+   "sortType": "",
+   "isHLtitle": "true"
+  },
+  "candidates": [
+   {
+    "title": "2025年年度报告（英文版）",
+    "url": "http://static.cninfo.com.cn/finalpage/2026-06-09/1225357192.PDF",
+    "disclosed_at": "2026-06-09"
+   },
+   {
+    "title": "2025年年度报告",
+    "url": "http://static.cninfo.com.cn/finalpage/2026-04-28/1225219764.PDF",
+    "disclosed_at": "2026-04-28"
+   },
+   {
+    "title": "2025年年度报告摘要",
+    "url": "http://static.cninfo.com.cn/finalpage/2026-04-28/1225219763.PDF",
+    "disclosed_at": "2026-04-28"
+   }
+  ],
+  "chosen": {
+   "title": "2025年年度报告",
+   "url": "http://static.cninfo.com.cn/finalpage/2026-04-28/1225219764.PDF",
+   "disclosed_at": "2026-04-28"
+  }
+ },
+ "url": "http://static.cninfo.com.cn/finalpage/2026-04-28/1225219764.PDF",
+ "store": {
+  "ok": true,
+  "duplicate": false,
+  "material_id": "ee4429eecac66f50",
+  "error": null
+ },
+ "admit": {
+  "ok": true,
+  "status": "admitted",
+  "reused": false,
+  "detail": null,
+  "evidence_count": null,
+  "rules_version": "adm-2/f3a-1"
+ },
+ "material": {
+  "title": "2025年年度报告",
+  "url": "http://static.cninfo.com.cn/finalpage/2026-04-28/1225219764.PDF",
+  "host": "static.cninfo.com.cn",
+  "bytes": 3708370,
+  "raw_sha256": "10af27149ab8b7b5f7a5678b76ada3bc1d422bc068a9fd52f5c1b253f610032c",
+  "text_sha256": "b01f7d7cf8cf4a438e33bb0f0cd1afcf44a157e857624a2c49a7d5022b60ac42",
+  "kind": "pdf",
+  "kind_label": "PDF",
+  "status": "admitted",
+  "reason": "",
+  "period": "2025",
+  "doc_type": "年度报告",
+  "disclosure_date": "2026-04-28",
+  "date_precision": "day",
+  "date_basis": "source_url_format",
+  "source_class": "official_disclosure",
+  "provenance": "official_discovery",
+  "provenance_label": "官方公告发现（自动，参数契约可查）",
+  "section_count": 1111,
+  "evidence_count": 8,
+  "http_status": 200,
+  "egress": "direct_pinned",
+  "rules_version": "adm-2/f3a-1",
+  "periods": [
+   "2025"
+  ]
+ },
+ "parse": {
+  "parser": "pypdf",
+  "kind": "pdf",
+  "location_kind": "page",
+  "pages": 166,
+  "truncated": false,
+  "truncation_reason": "",
+  "chars": 167990,
+  "content_type": "application/pdf"
+ },
+ "cache": {
+  "dir": "evals\\a2_official_chain_20260929\\002304-2025\\project\\materials\\ee4429eecac66f50",
+  "files": [
+   "doc.json",
+   "meta.json",
+   "raw.bin"
+  ]
+ },
+ "status": "admitted"
+}

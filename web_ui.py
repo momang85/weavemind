@@ -6358,6 +6358,19 @@ def _post_task_analysis_adopt(self, p, body, admin):
             except Exception as exc:                # noqa: BLE001 - 如实报，不假成功
                 logger.warning("分析采纳后交付投影写入失败（task=%s）：%s",
                                tid, str(exc)[:160])
+        # 阶段X §7：**图与图注必须随选择走**。采纳决定的是"哪一版运行进正文与三图"，
+        # 而三图是在运行期 content_summary 步渲染的——采纳之后它们已经过期（实机：
+        # 正文写使用者情景 91.04 亿，图 3 仍画 80.33 亿，同一份交付两个数）。
+        # 这里按**当前选择**只重渲染经营研究三图；指纹没变就不动，失败也不影响采纳本身。
+        _chart_refresh: dict = {}
+        try:
+            from charts_pipeline import refresh_selected_analysis_charts
+            _chart_refresh = refresh_selected_analysis_charts(tid)
+            if _chart_refresh.get("changed") and not _chart_refresh.get("ok"):
+                logger.warning("采纳后图表重渲染未成功（task=%s）：%s",
+                               tid, str(_chart_refresh.get("reason") or "")[:120])
+        except Exception as exc:                    # noqa: BLE001 - 图表失败不影响采纳
+            logger.warning("采纳后图表重渲染异常（task=%s）：%s", tid, str(exc)[:160])
         ok = status == "verified"
         _sel_after = fa_store.selection_status(
             ws, dataset_hash=_cur_ds, rules_version=_rules)
@@ -6367,6 +6380,8 @@ def _post_task_analysis_adopt(self, p, body, admin):
             "identity_id": identity,
             "delivery_status": status,
             "delivery_projected": _projected,
+            "charts_refreshed": bool(_chart_refresh.get("changed")),
+            "charts_changed": bool(_chart_refresh.get("ok") and _chart_refresh.get("changed")),
             "revalidated": _revalidated,
             "reason": str(asm.get("reason") or ""),
             # **绑定证据**（R0-a）：所选运行在本版正文/验收/选择里都成立，才是"采纳了这一条"
