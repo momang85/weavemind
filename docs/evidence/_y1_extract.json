@@ -1,0 +1,559 @@
+{
+ "y2023": {
+  "title": "2023年年度报告",
+  "doc_type": "年度报告",
+  "disclosure_date": "2024-04-27",
+  "date_precision": "day",
+  "date_basis": "source_url_format",
+  "period": "2023",
+  "status": "admitted",
+  "provenance": "official_discovery",
+  "host": "static.cninfo.com.cn",
+  "url": "http://static.cninfo.com.cn/finalpage/2024-04-27/1219873234.PDF",
+  "text_sha256": "48e137d4d0b90f82ac1cf363f9c4f579ad83175bbb69d7f5bd0d0b0be45c3545",
+  "raw_sha256": "68e5e79fc98e575983ab55a851f6d40da4ab4e5095a117ea416f901161c2622f",
+  "chars": 180097
+ },
+ "y2024": {
+  "title": "2024年年度报告",
+  "doc_type": "年度报告",
+  "disclosure_date": "2025-04-29",
+  "date_precision": "day",
+  "date_basis": "source_url_format",
+  "period": "2024",
+  "status": "admitted",
+  "provenance": "official_discovery",
+  "host": "static.cninfo.com.cn",
+  "url": "http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF",
+  "text_sha256": "a71287d53c7f62c8126aad548354616fdbbc62a82e2e42440442fb2a89d678b0",
+  "raw_sha256": "436928c6acaac79332794412514d191c7e60451e2c093e91a954aebfbde379a2",
+  "chars": 177582
+ },
+ "guidance": [
+  {
+   "kw": "2024年经营计划",
+   "char": 24400,
+   "quote": "为基、文化为魂、创\n新为要，构建“12345”战略体系，打造踏浪领跑的洋河和动力澎湃的双沟，推动企业在更高水平上保持量的持续增长和质\n的稳步提升，实现更加充分均衡、更加优质高效的发展，成为让国人自豪的中国味道，让世界铭记的中国名片。 \n2、2024年经营计划 \n2024 年，公司将坚持“稳中求进、以进促稳”的发展基调，坚定“双名酒、多品牌、多品类”的发展方向，推动企\n业实现可持续成长和高质量发展，力争营业收入同比增长 5%-10%。主要开展以下几方面工作： \n聚力攻坚品牌增势。围绕“价值向上、口碑向美”的目标，丰富差异化品牌内涵，构建立体化品牌建设体系。强化\n手工班高端品牌塑造，突出价值感、稀缺感和体验感，借助文化营销 IP 和大事件，树立高端白酒品牌价值标杆。探索多\n元化品牌传播方式，持续做好海天梦品牌推广活动，强化对重点消费群体精准触达，让品牌更"
+  },
+  {
+   "kw": "力争营业收入",
+   "char": 24480,
+   "quote": "衡、更加优质高效的发展，成为让国人自豪的中国味道，让世界铭记的中国名片。 \n2、2024年经营计划 \n2024 年，公司将坚持“稳中求进、以进促稳”的发展基调，坚定“双名酒、多品牌、多品类”的发展方向，推动企\n业实现可持续成长和高质量发展，力争营业收入同比增长 5%-10%。主要开展以下几方面工作： \n聚力攻坚品牌增势。围绕“价值向上、口碑向美”的目标，丰富差异化品牌内涵，构建立体化品牌建设体系。强化\n手工班高端品牌塑造，突出价值感、稀缺感和体验感，借助文化营销 IP 和大事件，树立高端白酒品牌价值标杆。探索多\n元化品牌传播方式，持续做好海天梦品牌推广活动，强化对重点消费群体精准触达，让品牌更具热度与活力，进一步提\n升品牌势能和竞争力。 \n聚力攻坚销售增量。围绕“深耕大本营、深度全国化”的目标，聚焦大本营市场、省外高地市场和重点区域，推动\n渠道下沉和"
+  }
+ ],
+ "actual": {
+  "revenue_cur": "28,876,296,993.56",
+  "revenue_prev": "33,126,277,551.51",
+  "yoy_pct": "-12.83",
+  "char": 4017
+ },
+ "actual_np": {
+  "np_cur": null,
+  "np_prev": null,
+  "yoy_pct": null
+ },
+ "actual_ocf": {
+  "ocf_cur": "4,628,711,237.28",
+  "ocf_prev": "6,130,220,867.96",
+  "yoy_pct": "-24.49"
+ },
+ "dataset": {
+  "hash": "cf8fb87681dd2791e9a7de9f9297ccd38d72abf81de316e16ca8a068d24d1020",
+  "observations": 170,
+  "usable": 166
+ },
+ "readings": {
+  "periods": [
+   2023,
+   2024
+  ],
+  "cur_period": 2024,
+  "prev_period": 2023,
+  "volume_yoy": -16.3,
+  "volume_cur": 139076.05,
+  "volume_prev": 166154.73,
+  "volume_period": "2024",
+  "volume_locator": "小节：第三节 管理层讨论与分析 > 二、报告期内公司从事的主要业务 > 1、主要产品的生产量、销售量、库存量（字符 9536-9573）",
+  "volume_line": "销售量(吨) 139,076.05 166,154.73 -16.30%",
+  "production_yoy": -8.4,
+  "inventory_yoy": 16.38,
+  "inventory_cur": 45594.72,
+  "inventory_prev": 39176.04,
+  "inventory_locator": "小节：第三节 管理层讨论与分析 > 二、报告期内公司从事的主要业务 > 1、主要产品的生产量、销售量、库存量（字符 9611-9645）",
+  "price_yoy": 3.93,
+  "price_cur": 202592.0,
+  "price_prev": 194936.0,
+  "price_formula": "(28175707878.18 / 139076.05)，上期 (32389581931.71 / 166154.73)",
+  "price_note": "发行人未直接披露吨价，这是用分产品收入与销量推算的口径",
+  "ocf_change": -1501509630.68,
+  "cash_np": -3354312736.51,
+  "cash_wc": 1104418706.88,
+  "cash_driver": "net_profit",
+  "cash_direction": "现金下降**由利润下降主导**（合并净利润项 -33.54 亿元）；营运资本项 +11.04 亿元是**缓冲**（抵消降幅的 73.6%）",
+  "spreads": [
+   {
+    "cut": "分产品毛利变化（切法：分产品）",
+    "spread": 0.0
+   },
+   {
+    "cut": "分地区毛利变化（切法：分地区）",
+    "spread": 1234109840.42
+   },
+   {
+    "cut": "分行业毛利变化（切法：分行业）",
+    "spread": 0.0
+   },
+   {
+    "cut": "分销售模式毛利变化（切法：分销售模式）",
+    "spread": 3743286012.85
+   }
+  ]
+ },
+ "judgments": [
+  {
+   "judgment_id": "volume_contraction",
+   "title": "销量收缩是收入下降的重要「数量」观察（不是需求结论）",
+   "numbers": [
+    "量价分解：销量效应 -53.82 亿元、单位价格效应 +11.68 亿元（含结构混合）",
+    "披露销售量 139,076.05 吨，同比 -16.30%（166,154.73 吨）"
+   ],
+   "boundary": "销量与收入都来自发行人披露，只能说明**数量在收缩**；需求量、渠道库存与终端动销不在本次材料里，不能由销量推断",
+   "evidence": [
+    {
+     "type": "披露原句",
+     "locator": "小节：第三节 管理层讨论与分析 > 二、报告期内公司从事的主要业务 > 1、主要产品的生产量、销售量、库存量（字符 9536-9573）",
+     "text": "销售量(吨) 139,076.05 166,154.73 -16.30%"
+    }
+   ],
+   "gaps": [
+    "渠道库存与终端动销材料未取得（机制缺口，不臆造）"
+   ]
+  },
+  {
+   "judgment_id": "unit_revenue_not_proof_of_pricing",
+   "title": "单位收入上升不足以证明「提价能力」",
+   "numbers": [
+    "单位价格效应 +11.68 亿元（量价分解，含产品结构混合）",
+    "推算吨价 202,592 元/吨，同比 +3.93%（发行人未直接披露吨价，为推算口径）"
+   ],
+   "boundary": "均价由「该口径收入 ÷ 销量」算出，含产品结构混合；价无披露口径时不得命名「提价效果」，也不能把结构上移读成提价",
+   "evidence": [
+    {
+     "type": "派生算式（计算依据，非披露原句）",
+     "locator": "收入构成与产销量表（**推算口径**，不是发行人披露价格）",
+     "text": "吨价（推算）＝ (28175707878.18 / 139076.05)，上期 (32389581931.71 / 166154.73)"
+    }
+   ],
+   "gaps": []
+  },
+  {
+   "judgment_id": "finished_goods_inventory_build",
+   "title": "企业成品库存积累 → **销量恢复与库存消化**是优先观察事项",
+   "numbers": [
+    "企业**成品**库存量 45,594.72 吨，同比 +16.38%（上期 39,176.04 吨）",
+    "生产量同比 -8.40%（产量降幅小于销量降幅时，库存被动积累）"
+   ],
+   "boundary": "这是**企业口径**的成品库存（资产负债表/产销量表），**不等于**终端消费或渠道库存；库存上升也可能来自发货与确认节奏",
+   "evidence": [
+    {
+     "type": "披露原句",
+     "locator": "小节：第三节 管理层讨论与分析 > 二、报告期内公司从事的主要业务 > 1、主要产品的生产量、销售量、库存量（字符 9611-9645）",
+     "text": "库存量(吨) 45,594.72 39,176.04 16.38%"
+    }
+   ],
+   "gaps": [
+    "渠道库存与终端动销未取得：机制判断留待补料"
+   ]
+  }
+ ],
+ "runs": {
+  "operating_drivers": {
+   "run_id": "46d2c885099d08a1fd0e14e7d91a8c0d5fdbca077d2c4d118ab612c2ebb23bd5",
+   "status": "validated",
+   "outputs": [
+    {
+     "metric": "net_profit_change",
+     "label": "归母净利润变化",
+     "value": -3342541438.15,
+     "residual": 0.0,
+     "components": [
+      {
+       "id": "gross_profit_change",
+       "label": "毛利变化",
+       "value": -3800953659.19
+      },
+      {
+       "id": "below_gross_line_change",
+       "label": "毛利线以下净额变化",
+       "value": 458412221.04
+      }
+     ]
+    },
+    {
+     "metric": "gross_profit_change",
+     "label": "毛利变化",
+     "value": -3800953659.19,
+     "residual": 0.0,
+     "components": [
+      {
+       "id": "revenue_scale_effect",
+       "label": "收入规模效应",
+       "value": -3153542030.82
+      },
+      {
+       "id": "gross_margin_effect",
+       "label": "毛利率效应",
+       "value": -647411628.37
+      }
+     ]
+    },
+    {
+     "metric": "revenue_scale_effect",
+     "label": "收入规模效应",
+     "value": -3153542030.82,
+     "residual": null,
+     "components": []
+    },
+    {
+     "metric": "gross_margin_effect",
+     "label": "毛利率效应",
+     "value": -647411628.37,
+     "residual": null,
+     "components": []
+    },
+    {
+     "metric": "below_gross_line_change",
+     "label": "毛利线以下净额变化",
+     "value": 458412221.04,
+     "residual": null,
+     "components": []
+    },
+    {
+     "metric": "net_profit_change_detail",
+     "label": "毛利线以下逐项分解",
+     "value": 458412221.04,
+     "residual": 0.0,
+     "components": [
+      {
+       "id": "income_tax_expense",
+       "label": "所得税费用",
+       "value": 720443770.88
+      },
+      {
+       "id": "taxes_and_surcharges",
+       "label": "税金及附加",
+       "value": 443158639.71
+      },
+      {
+       "id": "fair_value_change",
+       "label": "公允价值变动收益",
+       "value": -359081602.66
+      },
+      {
+       "id": "rd_expense",
+       "label": "研发费用",
+       "value": 179957474.07
+      },
+      {
+       "id": "admin_expense",
+       "label": "管理费用",
+       "value": -160307153.29
+      },
+      {
+       "id": "finance_expense",
+       "label": "财务费用",
+       "value": -143635574.49
+      },
+      {
+       "id": "selling_expense",
+       "label": "销售费用",
+       "value": -129284844.17
+      },
+      {
+       "id": "investment_income",
+       "label": "投资收益",
+       "value": -109105608.81
+      },
+      {
+       "id": "non_operating_income",
+       "label": "营业外收入",
+       "value": 13269963.98
+      },
+      {
+       "id": "minority_interest",
+       "label": "少数股东损益",
+       "value": 11771298.36
+      },
+      {
+       "id": "asset_impairment",
+       "label": "资产减值损失",
+       "value": -8375138.49
+      },
+      {
+       "id": "non_operating_expense",
+       "label": "营业外支出",
+       "value": -6227012.74
+      },
+      {
+       "id": "other_income",
+       "label": "其他收益",
+       "value": 3488534.6
+      },
+      {
+       "id": "asset_disposal_income",
+       "label": "资产处置收益",
+       "value": 2553648.48
+      },
+      {
+       "id": "credit_impairment",
+       "label": "信用减值损失",
+       "value": -214174.39
+      },
+      {
+       "id": "unexplained_residual",
+       "label": "未解释差额（未取得的披露项目）",
+       "value": 0.0
+      }
+     ]
+    },
+    {
+     "metric": "gross_profit_change_by_segment",
+     "label": "分产品毛利变化（切法：分产品）",
+     "value": -3800953659.19,
+     "residual": -5131119.89,
+     "components": [
+      {
+       "id": "segment:分产品:白酒",
+       "label": "分产品:白酒毛利变化（含推算输入）",
+       "value": -3795822539.3
+      },
+      {
+       "id": "unclassified_gross_profit_change",
+       "label": "未分类差额（其他业务/口径差；同一口径的其它切法不可与此相加）",
+       "value": -5131119.89
+      }
+     ]
+    },
+    {
+     "metric": "gross_profit_change_by_segment",
+     "label": "分地区毛利变化（切法：分地区）",
+     "value": -3800953659.19,
+     "residual": 7639816.97,
+     "components": [
+      {
+       "id": "segment:分地区:省内",
+       "label": "分地区:省内毛利变化（含推算输入）",
+       "value": -1287241817.87
+      },
+      {
+       "id": "segment:分地区:省外",
+       "label": "分地区:省外毛利变化（含推算输入）",
+       "value": -2521351658.29
+      },
+      {
+       "id": "unclassified_gross_profit_change",
+       "label": "未分类差额（其他业务/口径差；同一口径的其它切法不可与此相加）",
+       "value": 7639816.97
+      }
+     ]
+    },
+    {
+     "metric": "gross_profit_change_by_segment",
+     "label": "分行业毛利变化（切法：分行业）",
+     "value": -3800953659.19,
+     "residual": 5648370.08,
+     "components": [
+      {
+       "id": "segment:分行业:酒类行业",
+       "label": "分行业:酒类行业毛利变化（含推算输入）",
+       "value": -3806602029.27
+      },
+      {
+       "id": "unclassified_gross_profit_change",
+       "label": "未分类差额（其他业务/口径差；同一口径的其它切法不可与此相加）",
+       "value": 5648370.08
+      }
+     ]
+    },
+    {
+     "metric": "gross_profit_change_by_segment",
+     "label": "分销售模式毛利变化（切法：分销售模式）",
+     "value": -3800953659.19,
+     "residual": 7407841.22,
+     "components": [
+      {
+       "id": "segment:分销售模式:批发经销",
+       "label": "分销售模式:批发经销毛利变化（含推算输入）",
+       "value": -3775823756.63
+      },
+      {
+       "id": "segment:分销售模式:线上直销",
+       "label": "分销售模式:线上直销毛利变化（含推算输入）",
+       "value": -32537743.78
+      },
+      {
+       "id": "unclassified_gross_profit_change",
+       "label": "未分类差额（其他业务/口径差；同一口径的其它切法不可与此相加）",
+       "value": 7407841.22
+      }
+     ]
+    },
+    {
+     "metric": "volume_price_decomposition",
+     "label": "分产品:白酒量价分解",
+     "value": -4213886188.01,
+     "residual": -0.001516999999999999,
+     "components": [
+      {
+       "id": "volume_effect",
+       "label": "销量效应",
+       "value": -5382272525.58
+      },
+      {
+       "id": "price_effect",
+       "label": "单位价格效应",
+       "value": 1168386337.57
+      }
+     ]
+    }
+   ]
+  },
+  "cash_reconciliation": {
+   "run_id": "82b3dbaa9c168866dc423c5574913bf4a264fcda53658f65b48ea7c2e45eca08",
+   "status": "validated",
+   "outputs": [
+    {
+     "metric": "operating_cashflow_reconciliation_cur",
+     "label": "净利润到经营现金流的调节（2024年）",
+     "value": 4628711237.28,
+     "residual": 0.0,
+     "components": [
+      {
+       "id": "consolidated_net_profit",
+       "label": "合并净利润",
+       "value": 6666455819.96
+      },
+      {
+       "id": "non_cash_adjustments",
+       "label": "非现金项（折旧摊销/减值/递延税/公允价值等）",
+       "value": 957095461.74
+      },
+      {
+       "id": "working_capital_adjustments",
+       "label": "营运资本项（存货/经营性应收/经营性应付）",
+       "value": -3325136541.13
+      },
+      {
+       "id": "other_adjustments",
+       "label": "其他调节项",
+       "value": 330296496.71
+      },
+      {
+       "id": "unexplained_residual",
+       "label": "未解释差额（未取得的披露调节项）",
+       "value": 0.0
+      }
+     ]
+    },
+    {
+     "metric": "operating_cashflow_reconciliation_prev",
+     "label": "净利润到经营现金流的调节（2023年）",
+     "value": 6130220867.96,
+     "residual": 0.0,
+     "components": [
+      {
+       "id": "consolidated_net_profit",
+       "label": "合并净利润",
+       "value": 10020768556.47
+      },
+      {
+       "id": "non_cash_adjustments",
+       "label": "非现金项（折旧摊销/减值/递延税/公允价值等）",
+       "value": 713751150.58
+      },
+      {
+       "id": "working_capital_adjustments",
+       "label": "营运资本项（存货/经营性应收/经营性应付）",
+       "value": -4429555248.01
+      },
+      {
+       "id": "other_adjustments",
+       "label": "其他调节项",
+       "value": -174743591.08
+      },
+      {
+       "id": "unexplained_residual",
+       "label": "未解释差额（未取得的披露调节项）",
+       "value": 0.0
+      }
+     ]
+    },
+    {
+     "metric": "operating_cashflow_change",
+     "label": "经营现金流变化分解（2024年较2023年）",
+     "value": -1501509630.68,
+     "residual": 0.0,
+     "components": [
+      {
+       "id": "change_in_net_profit",
+       "label": "合并净利润变化",
+       "value": -3354312736.51
+      },
+      {
+       "id": "change_in_non_cash",
+       "label": "非现金项变化（折旧摊销/减值/递延税/公允价值等）",
+       "value": 243344311.16
+      },
+      {
+       "id": "change_in_working_capital",
+       "label": "营运资本项变化（存货/经营性应收/经营性应付）",
+       "value": 1104418706.88
+      },
+      {
+       "id": "change_in_other",
+       "label": "其他调节项变化",
+       "value": 505040087.79
+      },
+      {
+       "id": "change_in_residual",
+       "label": "对账差额变化（未取得的披露调节项）",
+       "value": 0.0
+      }
+     ]
+    },
+    {
+     "metric": "cash_gap_change",
+     "label": "现金缺口变化（经营现金流−合并净利润，2024年较2023年）",
+     "value": 1852803105.83,
+     "residual": 0.0,
+     "components": [
+      {
+       "id": "change_in_operating_cashflow",
+       "label": "经营现金流变化（ΔOCF）",
+       "value": -1501509630.68
+      },
+      {
+       "id": "change_in_net_profit_negated",
+       "label": "合并净利润变化（取负：利润少→缺口小）",
+       "value": 3354312736.51
+      }
+     ]
+    },
+    {
+     "metric": "largest_support",
+     "label": "最大支撑项（2024年调节额）",
+     "value": 586592227.18,
+     "residual": null,
+     "components": []
+    },
+    {
+     "metric": "largest_drag",
+     "label": "最大拖累项（2024年调节额）",
+     "value": -1830670724.59,
+     "residual": null,
+     "components": []
+    }
+   ]
+  }
+ }
+}
