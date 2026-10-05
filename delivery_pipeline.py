@@ -1598,6 +1598,21 @@ def research_candidate_body(task_id: str, goal: str, body: str, *,
         if not structure:
             return None
         candidate = report_brief.render_brief_markdown(structure, body, task_id=task_id)
+        # 阶段X §7：**主文收束**放在这唯一一处渲染出口——验收（`accept_for_body`）、
+        # 导出复核（`export_snapshot` 的"受保护读取"）与最终装配都按**本函数**的产物
+        # 比对字节，收束只在别处做的话会被它们重新渲染成未收束的正文（实测：装配处收束后
+        # 又被验收路径换回全文，页数不降）。与首屏重复的整段移进另附底稿
+        # `analysis/analysis_detail.md`（写入是幂等的：按标记块替换，不重复追加）。
+        try:
+            from pathlib import Path as _Pth
+            _ws_c = _Pth(ws_dir) if ws_dir else workspace.task_workspace(task_id)
+            candidate, _moved = report_brief.compact_main_body(
+                candidate, detail_path=_ws_c / "analysis" / "analysis_detail.md")
+            if _moved.get("moved"):
+                logger.info("主文收束（task=%s）：移出 %s（%d 字符）",
+                            task_id, "、".join(_moved["moved"]), _moved["chars"])
+        except Exception as exc:                 # noqa: BLE001 - 收束失败就保留全文
+            logger.warning("主文收束失败（task=%s，保留全文）：%s", task_id, str(exc)[:140])
         return rewrite_report_links(candidate, task_id) or candidate
     except Exception as exc:                     # noqa: BLE001 - 装配失败退回原正文
         logger.warning("研究候选稿装配失败（task=%s，退回原正文）：%s",
