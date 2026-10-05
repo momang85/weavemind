@@ -318,6 +318,10 @@ class RealDatasetTest(unittest.TestCase):
         payload = mh.load("")
         if payload.get("source") == "unavailable" or not payload.get("data"):
             self.skipTest("本机没有 market_history 数据集")
+        # **不能假定"最近导入的数据集"就是这两家公司的**：事件日历样本（000711）也是数据集。
+        have = {str(c) for c in (payload.get("instruments") or [])}
+        if not {"002304", "600031"} <= have:
+            self.skipTest(f"最近数据集不含本用例所需标的（有 {sorted(have)}）")
         ev = [{"code": "600031", "date": "2025-04-18", "label": "三一 2024 年报"},
               {"code": "002304", "date": "2024-04-27", "label": "洋河 2023 年报"},
               {"code": "002304", "date": "2025-04-29", "label": "洋河 2024 年报"}]
@@ -535,6 +539,29 @@ class TimeContractTest(unittest.TestCase):
         self.assertEqual(e5["state"], "pending")
         self.assertEqual(l5["state"], "observed")
         self.assertIsNotNone(l5["return"])
+
+
+    def test_subject_suspended_on_disclosure_date_anchors_before_and_flags(self):
+        """**实机案例简化**：标的在披露日当天停牌（京蓝 000711 @2025-09-05 就是这种）。
+
+        期望：价格起点＝披露日**之前**最后一个交易日；`t0` ＝披露日**之后**第一个交易日；
+        披露日被 `suspension_suspect` 标出（基准有行、标的无行）。绝不把 `t0` 当成"下一根
+        可用 K 线"而悄悄把日期标错。
+        """
+        days = ["2025-09-01", "2025-09-02", "2025-09-03", "2025-09-04",
+                "2025-09-08", "2025-09-09"]            # 标的缺 09-05（停牌）
+        subj = [_mk("000711", d, round(1.8 + i * 0.01, 2)) for i, d in enumerate(days)]
+        bench = [_mk("000300", d, 4000.0 + i) for i, d in enumerate(
+            ["2025-09-01", "2025-09-02", "2025-09-03", "2025-09-04", "2025-09-05",
+             "2025-09-08", "2025-09-09"])]
+        p = _payload(subj + bench, license_="免费源·仅内部试验")
+        r = er.compute(p, [{"code": "000711", "date": "2025-09-05", "label": "更正后年报"}],
+                       benchmark="000300", offsets=(0, 1))
+        it = r["readings"][0]
+        self.assertEqual(it["anchor"]["date"], "2025-09-04")
+        self.assertEqual(it["t0_date"], "2025-09-08")
+        self.assertEqual(it["suspension_suspect"], ["2025-09-05"])
+        self.assertIsNotNone(next(x for x in it["points"] if x["offset"] == 0)["return"])
 
 
 if __name__ == "__main__":

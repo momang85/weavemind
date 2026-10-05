@@ -1,0 +1,129 @@
+{
+ "schema": "weavemind.y2a_restatement_sample/0",
+ "case": {
+  "code": "000711",
+  "material_id": "2db15147bad934f9",
+  "material_url": "http://static.cninfo.com.cn/finalpage/2025-09-05/1224639904.PDF",
+  "date_basis": "source_url_format",
+  "disclosed_at": "2025-09-05",
+  "label": "定期报告｜京蓝科技股份有限公司2020年年度报告（更正后）"
+ },
+ "dataset": {
+  "dataset_id": "46d37bbb61f90462053a803bedb7f67428898339c8c88e937c122b343bd6402d",
+  "rows": 3260,
+  "date_range": [
+   "2020-01-02",
+   "2026-09-30"
+  ],
+  "license": "免费源·仅内部试验",
+  "adj_basis": "前复权(qfq)"
+ },
+ "outcome": {
+  "status": "ok",
+  "t0_date": "2025-09-08",
+  "anchor": {
+   "date": "2025-09-04",
+   "close": 1.85
+  },
+  "window_state": "observed",
+  "points": [
+   {
+    "offset": -1,
+    "date": "2025-09-04",
+    "close": 1.85,
+    "return": null,
+    "benchmark_return": null,
+    "excess_return": null,
+    "state": "anchor",
+    "note": "锚点（价格起点）：无收益读数，仅用于定位",
+    "unavailable": ""
+   },
+   {
+    "offset": 0,
+    "date": "2025-09-08",
+    "close": 1.86,
+    "return": 0.005405,
+    "benchmark_return": 0.02345,
+    "excess_return": -0.017632,
+    "state": "observed",
+    "unavailable": ""
+   },
+   {
+    "offset": 1,
+    "date": "2025-09-09",
+    "close": 1.82,
+    "return": -0.016216,
+    "benchmark_return": 0.016276,
+    "excess_return": -0.031972,
+    "state": "observed",
+    "unavailable": ""
+   },
+   {
+    "offset": 5,
+    "date": "2025-09-15",
+    "close": 1.79,
+    "return": -0.032432,
+    "benchmark_return": 0.038451,
+    "excess_return": -0.068258,
+    "state": "observed",
+    "unavailable": ""
+   },
+   {
+    "offset": 20,
+    "date": "2025-10-14",
+    "close": 1.73,
+    "return": -0.064865,
+    "benchmark_return": 0.039827,
+    "excess_return": -0.100682,
+    "state": "observed",
+    "unavailable": ""
+   }
+  ],
+  "kind": "event_reaction_observation",
+  "executable": false,
+  "suspension_suspect": [
+   "2025-09-05"
+  ],
+  "calendar_proxy_used": "以基准序列为交易日历代理：上述日期基准有行、标的无行，**疑似停牌或缺行**；缺独立交易日历时无法与休市区分，故只报疑似、不断言；offsets 按标的自身交易日计",
+  "reading_hash": "559c6736343ea9f569494d393b53036d75604c332e88a2f093d1a3dea6414cfc"
+ },
+ "feature_side": {
+  "feature_cutoff": "2021-06-30",
+  "anchor": {
+   "date": "2021-06-30",
+   "close": 2.62
+  },
+  "t0_date": "2021-07-01",
+  "no_lookahead": true
+ },
+ "hand_computed": {
+  "anchor_date": "2025-09-04",
+  "anchor_close": 1.85,
+  "t0_date": "2025-09-08",
+  "points": {
+   "1": {
+    "date": "2025-09-09",
+    "close": 1.82,
+    "return": -0.016216,
+    "benchmark_return": 0.016276,
+    "excess_return": -0.031972
+   },
+   "5": {
+    "date": "2025-09-15",
+    "close": 1.79,
+    "return": -0.032432,
+    "benchmark_return": 0.038451,
+    "excess_return": -0.068258
+   },
+   "20": {
+    "date": "2025-10-14",
+    "close": 1.73,
+    "return": -0.064865,
+    "benchmark_return": 0.039827,
+    "excess_return": -0.100682
+   }
+  }
+ },
+ "gold_diffs": [],
+ "note": "披露只有日精度：不臆造盘中时间，t0 取披露日之后第一个交易日；披露日当日收盘仅作价格起点。事件反应统计（不可执行）与可执行收益分开标识。"
+}
