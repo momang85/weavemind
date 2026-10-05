@@ -564,5 +564,83 @@ class TimeContractTest(unittest.TestCase):
         self.assertIsNotNone(next(x for x in it["points"] if x["offset"] == 0)["return"])
 
 
+class PropertyAndGoldenTest(unittest.TestCase):
+    """性质测试＋冻结数值金样：关系断言覆盖不到的角落（顺序、无未来、数值漂移）。"""
+
+    def test_row_order_does_not_change_reading(self):
+        """载荷行序被打乱必须同结果（算子内部排序；否则"同输入同输出"是假的）。"""
+        rows = _rows("600031") + _rows("000300", base=4000.0, step=5.0)
+        a = er.compute(_payload(list(rows)),
+                       [{"code": "600031", "date": "2025-04-18", "label": "e"}],
+                       benchmark="000300", offsets=(0, 1, 5, 20))
+        b = er.compute(_payload(list(reversed(rows))),
+                       [{"code": "600031", "date": "2025-04-18", "label": "e"}],
+                       benchmark="000300", offsets=(0, 1, 5, 20))
+        self.assertEqual(a["reading_hash"], b["reading_hash"])
+        self.assertEqual([p.get("excess_return") for p in a["readings"][0]["points"]],
+                         [p.get("excess_return") for p in b["readings"][0]["points"]])
+
+    def test_no_future_row_enters_feature_side(self):
+        """性质：锚点（价格起点）必须 ≤ feature_cutoff；非锚点结果点必须 > feature_cutoff。"""
+        cut = "2025-04-30"
+        r = er.compute(_payload(_rows("600031")),
+                       [{"code": "600031", "date": "2025-04-18", "label": "e"}],
+                       offsets=(0, 5), feature_cutoff=cut)
+        it = r["readings"][0]
+        self.assertLessEqual(it["anchor"]["date"], cut, "锚点晚于特征截点 ⇒ 特征泄漏")
+        for p in it["points"]:
+            if p["offset"] != -1 and p.get("date"):
+                self.assertGreater(p["date"], cut, f"结果点 {p['date']} 落在截点之前")
+
+    def test_frozen_numeric_golden(self):
+        """冻结数值金样：用**手算得出的精确值**锁住算术（防口径漂移悄悄改数字）。
+
+        构造：标的 100 → 110（+10%），基准 1000 → 1050（+5%）
+        ⇒ 几何超额 = (1.10/1.05 − 1) = 0.047619047619…（定点 6 位）
+        """
+        subj = [_mk("600031", "2025-04-17", 100.0), _mk("600031", "2025-04-18", 100.0),
+                _mk("600031", "2025-04-21", 110.0)]
+        bench = [_mk("000300", "2025-04-17", 1000.0), _mk("000300", "2025-04-18", 1000.0),
+                 _mk("000300", "2025-04-21", 1050.0)]
+        r = er.compute(_payload(subj + bench),
+                       [{"code": "600031", "date": "2025-04-18", "label": "e"}],
+                       benchmark="000300", offsets=(0,))
+        p = next(x for x in r["readings"][0]["points"] if x["offset"] == 0)
+        self.assertEqual(p["return"], 0.1)
+        self.assertEqual(p["benchmark_return"], 0.05)
+        self.assertEqual(p["excess_return"], 0.047619)
+
+    def test_aggregate_arithmetic_is_frozen(self):
+        """聚合也要冻住。两事件超额：A＝+4.7619%、B＝0% ⇒ 均值＝中位数＝2.38095%。
+
+        手算：A 的 (1.10/1.05 − 1) = 0.047619；B 的 (1.00/1.00 − 1) = 0；
+        均值 = (0.047619 + 0)/2 = 0.0238095；n=2 时中位数同为 0.0238095。
+        """
+        rows = [
+            _mk("600031", "2025-04-18", 100.0), _mk("600031", "2025-04-21", 110.0),   # +10%
+            _mk("000300", "2025-04-18", 1000.0), _mk("000300", "2025-04-21", 1050.0),  # +5%
+            _mk("600031", "2026-04-18", 100.0), _mk("600031", "2026-04-21", 100.0),    # 0%
+            _mk("000300", "2026-04-18", 1000.0), _mk("000300", "2026-04-21", 1000.0),  # 0%
+        ]
+        r = er.compute(_payload(rows),
+                       [{"code": "600031", "date": "2025-04-18", "label": "a"},
+                        {"code": "600031", "date": "2026-04-18", "label": "b"}],
+                       benchmark="000300", offsets=(0,))
+        cell = r["aggregate"]["by_code"]["600031"]["by_offset"]["t+0"]
+        self.assertEqual(cell["n_excess"], 2)
+        self.assertEqual(cell["mean_excess_return"], cell["median_excess_return"])
+        self.assertAlmostEqual(cell["mean_excess_return"], 0.0238095, places=6)
+        pts = {x["label"]: [p["excess_return"] for p in x["points"] if p["offset"] == 0]
+               for x in r["readings"]}
+        self.assertAlmostEqual(pts["a"][0], 0.047619, places=6)
+        self.assertEqual(pts["b"][0], 0.0)
+
+    def test_repeated_runs_are_bit_identical(self):
+        ev = [{"code": "600031", "date": "2025-04-18", "label": "e"}]
+        p = _payload(_rows("600031"))
+        hashes = {er.compute(p, ev, offsets=(0, 5, 20))["reading_hash"] for _ in range(5)}
+        self.assertEqual(len(hashes), 1, "重复运行出现不同哈希 ⇒ 存在非确定性")
+
+
 if __name__ == "__main__":
     unittest.main()
