@@ -270,18 +270,41 @@ def _segments(dataset, prev_p, cur_p, parent_caliber: str) -> tuple[list, list]:
     return out, skipped
 
 
+def _volume_metric(dataset, period: str) -> str:
+    """量价分解该用哪个销量指标名：优先通用 `sales_volume`，退到已映射的**产品口径**
+    `sales_volume_baijiu`（白酒销售量，吨）。
+
+    为什么需要这一步（10-05 实机 `ui-05dde104ac`）：底稿/数据集把"白酒销售量"映射成
+    `sales_volume_baijiu`（`facts.py` 的实物量映射），而本算子此前只找通用名 → 明明有
+    166154.73→139076.05 吨也判"未取到"，于是首屏写"量价分解未取到销量/单位收入效应"，
+    而同份正文的『量价与结构』表已把销量/吨价列出来——同源断裂。
+    口径差异**不隐藏**：用产品口径时在 label/limits 里如实写出（销量＝白酒口径、
+    收入＝公司口径，差额留在残差里）。
+    """
+    for metric in ("sales_volume", "sales_volume_baijiu"):
+        try:
+            if dataset.calibers_of(metric, period):
+                return metric
+        except Exception:                        # noqa: BLE001 - 取不到就当这个名字没有
+            continue
+    return ""
+
+
 def _volume_price(dataset, prev_p, cur_p) -> tuple[dict | None, list]:
     """同一口径两期都有销量与收入时做量价分解；均价含结构，标注不清口径差异。"""
     skipped: list[str] = []
     best: dict | None = None
     calibers: list[str] = []
+    metric = _volume_metric(dataset, cur_p) or _volume_metric(dataset, prev_p)
+    if not metric:
+        return None, ["销量未取得（通用 sales_volume 与产品口径 sales_volume_baijiu 都为空）"]
     for period in (cur_p, prev_p):
-        for c in dataset.calibers_of("sales_volume", period):
+        for c in dataset.calibers_of(metric, period):
             if c and c not in calibers:
                 calibers.append(c)
     for cal in calibers:
-        v_c = dataset.get("sales_volume", cur_p, caliber=cal)
-        v_p = dataset.get("sales_volume", prev_p, caliber=cal)
+        v_c = dataset.get(metric, cur_p, caliber=cal)
+        v_p = dataset.get(metric, prev_p, caliber=cal)
         r_c = dataset.get("revenue", cur_p, caliber=cal)
         r_p = dataset.get("revenue", prev_p, caliber=cal)
         if any(x is None for x in (v_c, v_p, r_c, r_p)):
@@ -300,14 +323,23 @@ def _volume_price(dataset, prev_p, cur_p) -> tuple[dict | None, list]:
         d_r = _d(r_c.value) - _d(r_p.value)
         vol_exact = (q_c - q_p) * (p_c + p_p) / 2
         vol_q, price_q = _split(d_r, vol_exact)
+        _product_caliber = metric != "sales_volume"
         cand = {
-            "caliber": cal, "label": f"{cal}量价分解",
+            "caliber": cal,
+            # 口径写进**标签**（diagnostics 在落库时会被丢掉，标签会随输出进正文/图表）：
+            # 用产品口径时必须让读者看见"销量＝白酒口径、收入＝公司口径"。
+            "label": (f"{cal}量价分解"
+                      + ("（销量＝白酒口径，收入＝公司口径）" if _product_caliber else "")),
+            "volume_metric": metric,
             "volume_cur": float(q_c), "volume_prev": float(q_p),
             "price_cur": float(p_c), "price_prev": float(p_p),
             "volume_effect": vol_q, "price_effect": price_q,
             "d_rev": _q(d_r), "unit": str(r_c.unit or ""),
             "volume_unit": str(v_c.unit or ""),
             "price_formula": f"{r_c.value}/{v_c.value}（收入/销量，含结构混合）",
+            "caliber_note": ("销量取产品口径（白酒销售量，吨），收入为公司口径；"
+                             "两者范围不同，差额留在残差里，不摊到量/价两项"
+                             if _product_caliber else ""),
             "gap": float((q_c - q_p) * (p_c + p_p) / 2 - Decimal(str(vol_q))
                          + ((p_c - p_p) * (q_c + q_p) / 2 - Decimal(str(price_q)))),
             "_rev": _d(r_c.value),
@@ -423,6 +455,9 @@ def compute(dataset, params: dict | None = None) -> dict:
             "metric": "volume_price_decomposition", "label": vp["label"],
             "value": vp["d_rev"], "unit": unit, "output_period": period_label,
             "residual": vp["gap"],
+            # 口径如实随输出走：销量取的是通用口径还是产品口径（白酒），不靠调用方猜
+            "volume_metric": str(vp.get("volume_metric") or ""),
+            "note": str(vp.get("caliber_note") or ""),
             "components": [
                 {"component_id": "volume_effect", "label": "销量效应",
                  "value": vp["volume_effect"], "unit": unit,
@@ -517,6 +552,8 @@ def compute(dataset, params: dict | None = None) -> dict:
             "segments_skipped": seg_skipped,
             "volume_price_skipped": vp_skipped,
             "volume_price_caliber": (vp or {}).get("caliber", ""),
+            "volume_price_metric": (vp or {}).get("volume_metric", ""),
+            "volume_price_note": (vp or {}).get("caliber_note", ""),
             "alternative_explanations": alt,
             "caveats": (
                 "未解释差额 = 未取得的披露项目；不得当作零或摊到已列项目",
