@@ -1,0 +1,107 @@
+{
+ "schema": "weavemind.market_source_crosscheck/0",
+ "codes": {
+  "002304": {
+   "tushare_noadj_rows": 908,
+   "akshare_noadj_rows": 908,
+   "akshare_qfq_rows": 908,
+   "raw_price_agreement": {
+    "left": "tushare(不复权)",
+    "right": "akshare(不复权)",
+    "left_rows": 908,
+    "right_rows": 908,
+    "common_days": 908,
+    "only_left": [],
+    "only_left_count": 0,
+    "only_right": [],
+    "only_right_count": 0,
+    "close_mismatch_count": 0,
+    "close_mismatch_examples": [],
+    "worst_mismatch": null,
+    "verdict": "一致"
+   },
+   "adj_consistency": {
+    "ok": true,
+    "days": 908,
+    "price_dp": 2,
+    "rounding_tolerance": "0.5*10^-price_dp / 当日不复权价（逐日）",
+    "ratio_first": {
+     "date": "2023-01-03",
+     "ratio": 0.83224082
+    },
+    "ratio_last": {
+     "date": "2026-09-30",
+     "ratio": 1.0
+    },
+    "step_count": 5,
+    "step_dates": [
+     "2023-01-03",
+     "2023-06-21",
+     "2024-06-26",
+     "2025-01-27",
+     "2025-06-27",
+     "2026-06-30"
+    ],
+    "raw_ratio_distinct_count": 804,
+    "non_decreasing": true,
+    "non_decreasing_basis": "容差内不减；超出 1e-3 的倒退才判假",
+    "decrease_beyond_noise": [],
+    "interpretation": "比值容差内单调不减、末端=1.000000（≈1）、仅 5 个台阶 ⇒ 前复权口径可解释，台阶日＝除权除息日；原始比值有 804 个不同值只是 2 位小数舍入噪声"
+   }
+  },
+  "600031": {
+   "tushare_noadj_rows": 908,
+   "akshare_noadj_rows": 908,
+   "akshare_qfq_rows": 908,
+   "raw_price_agreement": {
+    "left": "tushare(不复权)",
+    "right": "akshare(不复权)",
+    "left_rows": 908,
+    "right_rows": 908,
+    "common_days": 908,
+    "only_left": [],
+    "only_left_count": 0,
+    "only_right": [],
+    "only_right_count": 0,
+    "close_mismatch_count": 0,
+    "close_mismatch_examples": [],
+    "worst_mismatch": null,
+    "verdict": "一致"
+   },
+   "adj_consistency": {
+    "ok": true,
+    "days": 908,
+    "price_dp": 2,
+    "rounding_tolerance": "0.5*10^-price_dp / 当日不复权价（逐日）",
+    "ratio_first": {
+     "date": "2023-01-03",
+     "ratio": 0.93481013
+    },
+    "ratio_last": {
+     "date": "2026-09-30",
+     "ratio": 1.0
+    },
+    "step_count": 5,
+    "step_dates": [
+     "2023-01-03",
+     "2023-05-31",
+     "2024-06-21",
+     "2025-06-11",
+     "2025-10-15",
+     "2026-07-17"
+    ],
+    "raw_ratio_distinct_count": 671,
+    "non_decreasing": true,
+    "non_decreasing_basis": "容差内不减；超出 1e-3 的倒退才判假",
+    "decrease_beyond_noise": [],
+    "interpretation": "比值容差内单调不减、末端=1.000000（≈1）、仅 5 个台阶 ⇒ 前复权口径可解释，台阶日＝除权除息日；原始比值有 671 个不同值只是 2 位小数舍入噪声"
+   }
+  }
+ },
+ "free_tier_limits": {
+  "tushare_daily": "实测可用（一次取回 908 行）",
+  "tushare_adj_factor": "实测**限频**：1 次/分钟、1 次/小时 ⇒ 逐行复权自算不可作为批量流水线",
+  "tushare_index_daily": "实测可用（沪深300 908 行）"
+ },
+ "usage_warning": "免费源与个人非商业许可仅内部试验，不得进对外下载包；对外交付须机构授权或只交付衍生结论"
+}

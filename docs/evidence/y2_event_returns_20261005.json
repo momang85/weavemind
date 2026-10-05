@@ -1,0 +1,383 @@
+{
+ "payload": {
+  "dataset_id": "3d6b4acb451abcf960c4132deb16c2a09169234b76dcb643958ceee855fcb148",
+  "source": "akshare",
+  "license": "免费源·仅内部试验",
+  "adj_basis": "前复权(qfq)",
+  "rows": 2724,
+  "date_range": [
+   "2023-01-03",
+   "2026-09-30"
+  ],
+  "instruments": [
+   "000300",
+   "002304",
+   "600031"
+  ]
+ },
+ "events": [
+  {
+   "code": "002304",
+   "date": "2024-04-27",
+   "label": "洋河股份 2023 年年度报告公开"
+  },
+  {
+   "code": "002304",
+   "date": "2025-04-29",
+   "label": "洋河股份 2024 年年度报告公开"
+  },
+  {
+   "code": "600031",
+   "date": "2025-04-18",
+   "label": "三一重工 2024 年年度报告公开"
+  }
+ ],
+ "reading": {
+  "schema": "weavemind.event_returns/0",
+  "operator": "event_returns_v1",
+  "impl_version": "event_returns/1.0.0",
+  "input_kind": {
+   "input_kind": "market_history",
+   "schema": "weavemind.market_history/0",
+   "dataset_id": "3d6b4acb451abcf960c4132deb16c2a09169234b76dcb643958ceee855fcb148",
+   "source": "akshare",
+   "license": "免费源·仅内部试验",
+   "adj_basis": "前复权(qfq)",
+   "imported_at": "2026-10-05T16:24:59+08:00",
+   "date_range": [
+    "2023-01-03",
+    "2026-09-30"
+   ],
+   "instruments": [
+    "000300",
+    "002304",
+    "600031"
+   ],
+   "rows": 2724
+  },
+  "input_fingerprint": "3dfabdcac371263f6923477c9bf375089c18268ffda5fb4141be170337ff8118",
+  "params": {
+   "benchmark": "000300",
+   "offsets": [
+    -1,
+    0,
+    1,
+    5,
+    20
+   ],
+   "policy": "keep_earliest",
+   "allow_unadjusted": false,
+   "anchor": "t-1 = 事件日当日或之前最后一个交易日",
+   "t0": "事件日之后第一个交易日（保守约定：披露时点未知）"
+  },
+  "limits": [
+   "这是**事件窗口的价格观察值**，不是因果结论：没有识别策略、没有对照组、样本极小",
+   "未做风险调整（无 β/波动率/因子暴露），「超额」仅指减去同期基准，不等于 alpha",
+   "基准调整按**日期对齐**；基准缺该交易日则留空，不补 0、不前值填充",
+   "事件日之后首个交易日为 t0（披露时点未知，取保守约定）；t-1 为事件日当日或之前最后一个交易日",
+   "窗口重叠的事件各自出读数但不参与聚合（重叠会重复计同一段价格路径）",
+   "免费源/个人非商业许可数据仅内部试验，`delivery_eligible=False`，不得进对外下载包",
+   "许可为「免费源·仅内部试验」：仅内部试验，不得进对外下载包；对外交付须机构授权或只交付衍生结论"
+  ],
+  "unavailable": [],
+  "readings": [
+   {
+    "label": "洋河股份 2023 年年度报告公开",
+    "code": "002304",
+    "event_date": "2024-04-27",
+    "anchor": {
+     "date": "2024-04-26",
+     "close": 85.54
+    },
+    "t0_date": "2024-04-29",
+    "affected_window": [
+     "2024-04-26",
+     "2024-05-30"
+    ],
+    "benchmark": "000300",
+    "points": [
+     {
+      "offset": -1,
+      "date": "2024-04-26",
+      "close": 85.54,
+      "return": null,
+      "benchmark_return": null,
+      "excess_return": null,
+      "note": "锚点（基准点）：无收益读数，仅用于定位",
+      "unavailable": ""
+     },
+     {
+      "offset": 0,
+      "date": "2024-04-29",
+      "close": 81.93,
+      "return": -0.042202,
+      "benchmark_return": 0.01106,
+      "excess_return": -0.052679,
+      "unavailable": ""
+     },
+     {
+      "offset": 1,
+      "date": "2024-04-30",
+      "close": 81.25,
+      "return": -0.050152,
+      "benchmark_return": 0.005615,
+      "excess_return": -0.055456,
+      "unavailable": ""
+     },
+     {
+      "offset": 5,
+      "date": "2024-05-09",
+      "close": 82.82,
+      "return": -0.031798,
+      "benchmark_return": 0.022401,
+      "excess_return": -0.053011,
+      "unavailable": ""
+     },
+     {
+      "offset": 20,
+      "date": "2024-05-30",
+      "close": 79.84,
+      "return": -0.066635,
+      "benchmark_return": 0.002802,
+      "excess_return": -0.069243,
+      "unavailable": ""
+     }
+    ],
+    "benchmark_missing": [],
+    "aggregate_eligible": true,
+    "aggregate_exclusion_reason": ""
+   },
+   {
+    "label": "三一重工 2024 年年度报告公开",
+    "code": "600031",
+    "event_date": "2025-04-18",
+    "anchor": {
+     "date": "2025-04-18",
+     "close": 18.38
+    },
+    "t0_date": "2025-04-21",
+    "affected_window": [
+     "2025-04-18",
+     "2025-05-22"
+    ],
+    "benchmark": "000300",
+    "points": [
+     {
+      "offset": -1,
+      "date": "2025-04-18",
+      "close": 18.38,
+      "return": null,
+      "benchmark_return": null,
+      "excess_return": null,
+      "note": "锚点（基准点）：无收益读数，仅用于定位",
+      "unavailable": ""
+     },
+     {
+      "offset": 0,
+      "date": "2025-04-21",
+      "close": 18.42,
+      "return": 0.002176,
+      "benchmark_return": 0.003276,
+      "excess_return": -0.001096,
+      "unavailable": ""
+     },
+     {
+      "offset": 1,
+      "date": "2025-04-22",
+      "close": 18.15,
+      "return": -0.012514,
+      "benchmark_return": 0.00303,
+      "excess_return": -0.015497,
+      "unavailable": ""
+     },
+     {
+      "offset": 5,
+      "date": "2025-04-28",
+      "close": 18.25,
+      "return": -0.007073,
+      "benchmark_return": 0.002411,
+      "excess_return": -0.009461,
+      "unavailable": ""
+     },
+     {
+      "offset": 20,
+      "date": "2025-05-22",
+      "close": 18.27,
+      "return": -0.005985,
+      "benchmark_return": 0.037466,
+      "excess_return": -0.041882,
+      "unavailable": ""
+     }
+    ],
+    "benchmark_missing": [],
+    "aggregate_eligible": true,
+    "aggregate_exclusion_reason": ""
+   },
+   {
+    "label": "洋河股份 2024 年年度报告公开",
+    "code": "002304",
+    "event_date": "2025-04-29",
+    "anchor": {
+     "date": "2025-04-29",
+     "close": 64.02
+    },
+    "t0_date": "2025-04-30",
+    "affected_window": [
+     "2025-04-29",
+     "2025-06-03"
+    ],
+    "benchmark": "000300",
+    "points": [
+     {
+      "offset": -1,
+      "date": "2025-04-29",
+      "close": 64.02,
+      "return": null,
+      "benchmark_return": null,
+      "excess_return": null,
+      "note": "锚点（基准点）：无收益读数，仅用于定位",
+      "unavailable": ""
+     },
+     {
+      "offset": 0,
+      "date": "2025-04-30",
+      "close": 63.8,
+      "return": -0.003436,
+      "benchmark_return": -0.001194,
+      "excess_return": -0.002245,
+      "unavailable": ""
+     },
+     {
+      "offset": 1,
+      "date": "2025-05-06",
+      "close": 63.98,
+      "return": -0.000625,
+      "benchmark_return": 0.008865,
+      "excess_return": -0.009407,
+      "unavailable": ""
+     },
+     {
+      "offset": 5,
+      "date": "2025-05-12",
+      "close": 64.16,
+      "return": 0.002187,
+      "benchmark_return": 0.030604,
+      "excess_return": -0.027573,
+      "unavailable": ""
+     },
+     {
+      "offset": 20,
+      "date": "2025-06-03",
+      "close": 61.41,
+      "return": -0.040769,
+      "benchmark_return": 0.02038,
+      "excess_return": -0.059928,
+      "unavailable": ""
+     }
+    ],
+    "benchmark_missing": [],
+    "aggregate_eligible": true,
+    "aggregate_exclusion_reason": ""
+   }
+  ],
+  "aggregate": {
+   "readings_total": 3,
+   "readings_used": 3,
+   "excluded_from_aggregate": [],
+   "codes": [
+    "002304",
+    "600031"
+   ],
+   "cross_code_pooling": "跨标的不合并平均：同一日历日对不同标的是两个实验单元，合并会把共同市场因子当成事件效应",
+   "by_code": {
+    "002304": {
+     "event_dates": [
+      "2024-04-27",
+      "2025-04-29"
+     ],
+     "n_events": 2,
+     "by_offset": {
+      "t-1": {
+       "n_excess": 0,
+       "note": "n=0 < 2：不给均值/中位数（样本不足不产统计量）",
+       "no_proportion_stat": "n < 3：不给「胜率/上涨占比」这类比例字段"
+      },
+      "t+0": {
+       "n_excess": 2,
+       "mean_excess_return": -0.027461999999999997,
+       "median_excess_return": -0.027461999999999997,
+       "no_proportion_stat": "n < 3：不给「胜率/上涨占比」这类比例字段"
+      },
+      "t+1": {
+       "n_excess": 2,
+       "mean_excess_return": -0.0324315,
+       "median_excess_return": -0.0324315,
+       "no_proportion_stat": "n < 3：不给「胜率/上涨占比」这类比例字段"
+      },
+      "t+5": {
+       "n_excess": 2,
+       "mean_excess_return": -0.040292,
+       "median_excess_return": -0.040292,
+       "no_proportion_stat": "n < 3：不给「胜率/上涨占比」这类比例字段"
+      },
+      "t+20": {
+       "n_excess": 2,
+       "mean_excess_return": -0.0645855,
+       "median_excess_return": -0.0645855,
+       "no_proportion_stat": "n < 3：不给「胜率/上涨占比」这类比例字段"
+      }
+     }
+    },
+    "600031": {
+     "event_dates": [
+      "2025-04-18"
+     ],
+     "n_events": 1,
+     "by_offset": {
+      "t-1": {
+       "n_excess": 0,
+       "note": "n=0 < 2：不给均值/中位数（样本不足不产统计量）",
+       "no_proportion_stat": "n < 3：不给「胜率/上涨占比」这类比例字段"
+      },
+      "t+0": {
+       "n_excess": 1,
+       "note": "n=1 < 2：不给均值/中位数（样本不足不产统计量）",
+       "no_proportion_stat": "n < 3：不给「胜率/上涨占比」这类比例字段"
+      },
+      "t+1": {
+       "n_excess": 1,
+       "note": "n=1 < 2：不给均值/中位数（样本不足不产统计量）",
+       "no_proportion_stat": "n < 3：不给「胜率/上涨占比」这类比例字段"
+      },
+      "t+5": {
+       "n_excess": 1,
+       "note": "n=1 < 2：不给均值/中位数（样本不足不产统计量）",
+       "no_proportion_stat": "n < 3：不给「胜率/上涨占比」这类比例字段"
+      },
+      "t+20": {
+       "n_excess": 1,
+       "note": "n=1 < 2：不给均值/中位数（样本不足不产统计量）",
+       "no_proportion_stat": "n < 3：不给「胜率/上涨占比」这类比例字段"
+      }
+     }
+    }
+   }
+  },
+  "overlap": {
+   "policy": "keep_earliest",
+   "span_sessions": 21,
+   "aggregate_kept": [
+    "002304@2024-04-27",
+    "600031@2025-04-18",
+    "002304@2025-04-29"
+   ],
+   "aggregate_dropped": [],
+   "cross_code_note": "跨标的不计重叠：不同标的是两个独立实验单元，聚合本身不跨标的平均"
+  },
+  "status": "ok",
+  "available_at_upper_bound": "2025-06-03T15:00:00+08:00",
+  "delivery_eligible": false,
+  "delivery_block_reason": "许可为「免费源·仅内部试验」：仅内部试验，不得进对外下载包；对外交付须机构授权或只交付衍生结论",
+  "reading_hash": "2c81bb3709a797949a5d9163cdeeb107ed1e5ef525ebd63001453a5287c90193"
+ }
+}
