@@ -1,0 +1,72 @@
+{
+  "schema": "weavemind.evidence.cache-fix-live/1",
+  "task_id": "ui-05dde104ac",
+  "checked_at": "2026-10-05T10:48:00+08:00",
+  "run": {
+    "submitted_via": "浏览器正门（研究一家公司表单）：洋河股份 / 002304.SZ / A股 / 2023–2024 / 合并 / 2025-04-30 / 官方直链；契约逐字段落库",
+    "status": "SUCCESS",
+    "finished_at": "2026-10-05T10:46:02+08:00",
+    "duration_s": 1710,
+    "plan": "固定研究链 7 步：1 web_search / 2 web_fetch / 2b web_fetch / 3a data_analyzer / 3 content_summary / 4 report_generator / package-7，依赖显式接线（3 依赖 3a；3a 依赖 1,2,2b）",
+    "acceptance": {"overall": "pass", "rules_version": "2026.10.03", "gaps": 0,
+                   "report_sha256": "c74ee16834797d02…"},
+    "adopted_at_run_end": {"identity": "4fb937a364702e70…", "body": "f73e20f51b20aaed…", "chars": 33479, "acceptance": "pass"}
+  },
+  "fix_metrics_vs_baseline": {
+    "步骤超时": {"baseline_ui-1b155d4f84": 11, "ui-433f4cf9e2": 3, "ui-05dde104ac": 0},
+    "重试": {"ui-433f4cf9e2": 3, "ui-05dde104ac": 0},
+    "空正文": {"baseline": 43, "ui-433f4cf9e2": 0, "ui-05dde104ac": 0},
+    "关思考重发成功": {"baseline": 0, "ui-433f4cf9e2": 13, "ui-05dde104ac": 6},
+    "未记账调用": {"baseline": 242, "ui-433f4cf9e2": 0, "ui-05dde104ac": 0},
+    "note": "本跑是迄今最干净的一次：零超时、零重试，6 次逃生门命中（content_summary 3 + report_generator 3），验收一次通过"
+  },
+  "live_chain_no_restart": {
+    "why": "验证 web_ui._sync_memory_report 修复：`ui-433f4cf9e2` 上「采纳 → 立即导出」曾连续三次 409（内存投影未同步），当时只能重启 webui 绕过",
+    "precondition": "本跑的终态结果已由 orchestrator:response 推送进 webui 进程内存 `_task_results[tid]`（正是缺陷触发条件）；全程**未重启**任何服务（webui 进程启动于本跑提交之前）",
+    "steps": [
+      {"step": "before: GET /report.md", "http": 200, "bytes": 72692, "sha256_head": "865de8cc75f70d43",
+       "headers": {"X-Report-Version-Id": "4fb937a364702e70", "X-Report-Research-Body-Sha256": "f73e20f51b20aaed", "X-Report-Draft": "0"},
+       "note": "采纳前：身份/正文 = 运行终态那一版"},
+      {"step": "POST /analysis/recompute（收入 +10%／毛利率 +1pp）", "http": 200,
+       "run_id": "afa75e43853c5fd15a47e96d07be2c9a9fc1cc840b2c8047781634aa999c91d3",
+       "scenario_net_profit_yuan": 9103535732.74},
+      {"step": "POST /analysis/adopt", "http": 200, "ok": true, "identity_id": "e385c5b3433a246c…",
+       "note": "采纳只写 DB/Redis 投影 + **本次修复新增**的内存投影同步"},
+      {"step": "POST /package（紧接着，不重启）", "http": 200, "verify_ok": true,
+       "package": "deliverables_20261005_104726_00eea5.zip",
+       "note": "**修复前这一步恒 409**「导出期间发生修订（交付正文与采纳版本不一致）」"},
+      {"step": "after: GET /report.md", "http": 200, "bytes": 72698, "sha256_head": "89e8863f054a04ee",
+       "headers": {"X-Report-Version-Id": "e385c5b3433a246c", "X-Report-Research-Body-Sha256": "c74ee16834797d02", "X-Report-Draft": "0"},
+       "note": "下载字节与身份立刻切到**新采纳版**；修复前这里会继续吐采纳前的正文并标 draft=1"},
+      {"step": "after: GET /pdf", "http": 200, "bytes": 5677924, "sha256_head": "dbc37dbf10aaff13",
+       "headers": {"X-Report-Version-Id": "e385c5b3433a246c", "X-Report-Research-Body-Sha256": "c74ee16834797d02", "X-Report-Draft": "0"}}
+    ],
+    "package_identity": {
+      "file": "deliverables_20261005_104726_00eea5.zip", "bytes": 5734602,
+      "manifest": {"report_version_id": "e385c5b3433a246c", "research_body_sha256": "c74ee16834797d02",
+                   "delivered_md_sha256": "89e8863f054a04ee", "pdf_sha256": "dbc37dbf10aaff13"},
+      "analysis_members": 7,
+      "consistency": "包内 MD 哈希 == after-MD 下载哈希；包内 PDF 哈希 == after-PDF 下载哈希；清单身份 == 采纳身份 → 三方一致"
+    },
+    "verdict": "**修复经端到端 live 验证通过**：同一 webui 进程、同一任务、终态结果仍在内存缓存里的情况下，「采纳 → 立即导出」200 且下载/包内身份同步切换；无需重启"
+  },
+  "reflection_observation": {
+    "rounds": 2,
+    "redone_steps": 8,
+    "why": "报告类任务本来跳过反射轮，但确定性验收 fail 时被显式覆盖进入修复迭代：首轮验收 fail（缺证归因：减值/账龄/同业等材料缺口）→ 重做取证→分析→解释→报告→打包整条闭包；第 2 轮后验收 fail→pass，`版本比较：采用候选稿（验收等级提升（fail → pass））`",
+    "caps": ["max_iterations=2", "reflection_budget.financial=3", "无收益停损（输入/正文/缺口指纹相同即停）", "best_report 未改善提前终止"],
+    "cost_note": "两轮都从**重新抓取**开始重做整链，而材料未变（官方 PDF 同一份、底稿始终 212 事实/16 派生）——与「材料未变优先确定性重装配」的精神有张力，登记为候选改进项（未改代码）"
+  },
+  "other_registered_seams": {
+    "run-end-auto-package-diverges": {
+      "instance": "deliverables_20261005_104507.zip manifest ver=06748a0a / research=62c70d20，而运行终态采纳版是 4fb937a3 / f73e20f5",
+      "note": "与 `ui-433f4cf9e2` 同一现象（运行内自动打包发生在反思迭代中间），第二次复现；未改代码"
+    },
+    "template-data-analyzer-deps-empty": "本跑走的是固定研究链（依赖接线正确），未触发该问题；模板链仍未接（登记在案）"
+  },
+  "not_claimed": [
+    "真人复核 / 银行部署 / 90 分 / X1 结论",
+    "反思策略（材料未变仍重抓整链）已优化",
+    "运行内自动打包与终态采纳版的一致性已修"
+  ]
+}
