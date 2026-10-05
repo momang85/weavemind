@@ -1,0 +1,233 @@
+{
+ "payload": {
+  "dataset_id": "3d6b4acb451abcf960c4132deb16c2a09169234b76dcb643958ceee855fcb148",
+  "source": "akshare",
+  "license": "免费源·仅内部试验",
+  "adj_basis": "前复权(qfq)",
+  "rows": 2724,
+  "instruments": [
+   "000300",
+   "002304",
+   "600031"
+  ]
+ },
+ "calendar": {
+  "schema": "weavemind.event_calendar/0",
+  "operator": "event_calendar_v1",
+  "stats": {
+   "total": 1,
+   "events": 1,
+   "excluded": 0,
+   "by_category": {
+    "定期报告": 1
+   },
+   "by_code": {
+    "002304": 1
+   },
+   "date_basis": {
+    "source_url_format": 1
+   }
+  },
+  "events": [
+   {
+    "code": "002304",
+    "date": "2025-04-29",
+    "date_precision": "day",
+    "date_basis": "source_url_format",
+    "title": "2024年年度报告",
+    "category": "定期报告",
+    "matched": "年度报告",
+    "rule": "title:年度报告",
+    "material_id": "f42e747c73850b59",
+    "url": "http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF",
+    "raw_sha256": "436928c6acaac79332794412514d191c7e60451e2c093e91a954aebfbde379a2",
+    "period": "2024"
+   }
+  ],
+  "excluded_sample": [],
+  "excluded_total": 0,
+  "source_probe": {
+   "categories": {},
+   "errors": [],
+   "mode": "local_materials",
+   "materials_dir": "C:\\Users\\ding0\\AppData\\Local\\Temp\\wm_x1_scratch\\tasks\\projects\\default\\ui-05dde104ac\\project\\materials",
+   "records": 1,
+   "verified_categories": []
+  }
+ },
+ "reading": {
+  "schema": "weavemind.event_returns/0",
+  "operator": "event_returns_v1",
+  "impl_version": "event_returns/1.0.0",
+  "input_kind": {
+   "input_kind": "market_history",
+   "schema": "weavemind.market_history/0",
+   "dataset_id": "3d6b4acb451abcf960c4132deb16c2a09169234b76dcb643958ceee855fcb148",
+   "source": "akshare",
+   "license": "免费源·仅内部试验",
+   "adj_basis": "前复权(qfq)",
+   "imported_at": "2026-10-05T16:24:59+08:00",
+   "date_range": [
+    "2023-01-03",
+    "2026-09-30"
+   ],
+   "instruments": [
+    "000300",
+    "002304",
+    "600031"
+   ],
+   "rows": 2724
+  },
+  "input_fingerprint": "3dfabdcac371263f6923477c9bf375089c18268ffda5fb4141be170337ff8118",
+  "params": {
+   "benchmark": "000300",
+   "offsets": [
+    -1,
+    0,
+    1,
+    5,
+    20
+   ],
+   "policy": "keep_earliest",
+   "allow_unadjusted": false,
+   "anchor": "t-1 = 事件日当日或之前最后一个交易日",
+   "t0": "事件日之后第一个交易日（保守约定：披露时点未知）"
+  },
+  "limits": [
+   "这是**事件窗口的价格观察值**，不是因果结论：没有识别策略、没有对照组、样本极小",
+   "未做风险调整（无 β/波动率/因子暴露），「超额」仅指减去同期基准，不等于 alpha",
+   "基准调整按**日期对齐**；基准缺该交易日则留空，不补 0、不前值填充",
+   "事件日之后首个交易日为 t0（披露时点未知，取保守约定）；t-1 为事件日当日或之前最后一个交易日",
+   "窗口重叠的事件各自出读数但不参与聚合（重叠会重复计同一段价格路径）",
+   "免费源/个人非商业许可数据仅内部试验，`delivery_eligible=False`，不得进对外下载包",
+   "许可为「免费源·仅内部试验」：仅内部试验，不得进对外下载包；对外交付须机构授权或只交付衍生结论"
+  ],
+  "unavailable": [],
+  "readings": [
+   {
+    "label": "定期报告｜2024年年度报告",
+    "code": "002304",
+    "event_date": "2025-04-29",
+    "anchor": {
+     "date": "2025-04-29",
+     "close": 64.02
+    },
+    "t0_date": "2025-04-30",
+    "affected_window": [
+     "2025-04-29",
+     "2025-06-03"
+    ],
+    "benchmark": "000300",
+    "points": [
+     {
+      "offset": -1,
+      "date": "2025-04-29",
+      "close": 64.02,
+      "return": null,
+      "benchmark_return": null,
+      "excess_return": null,
+      "note": "锚点（基准点）：无收益读数，仅用于定位",
+      "unavailable": ""
+     },
+     {
+      "offset": 0,
+      "date": "2025-04-30",
+      "close": 63.8,
+      "return": -0.003436,
+      "benchmark_return": -0.001194,
+      "excess_return": -0.002245,
+      "unavailable": ""
+     },
+     {
+      "offset": 1,
+      "date": "2025-05-06",
+      "close": 63.98,
+      "return": -0.000625,
+      "benchmark_return": 0.008865,
+      "excess_return": -0.009407,
+      "unavailable": ""
+     },
+     {
+      "offset": 5,
+      "date": "2025-05-12",
+      "close": 64.16,
+      "return": 0.002187,
+      "benchmark_return": 0.030604,
+      "excess_return": -0.027573,
+      "unavailable": ""
+     },
+     {
+      "offset": 20,
+      "date": "2025-06-03",
+      "close": 61.41,
+      "return": -0.040769,
+      "benchmark_return": 0.02038,
+      "excess_return": -0.059928,
+      "unavailable": ""
+     }
+    ],
+    "benchmark_missing": [],
+    "aggregate_eligible": true,
+    "aggregate_exclusion_reason": ""
+   }
+  ],
+  "aggregate": {
+   "readings_total": 1,
+   "readings_used": 1,
+   "excluded_from_aggregate": [],
+   "codes": [
+    "002304"
+   ],
+   "cross_code_pooling": "跨标的不合并平均：同一日历日对不同标的是两个实验单元，合并会把共同市场因子当成事件效应",
+   "by_code": {
+    "002304": {
+     "event_dates": [
+      "2025-04-29"
+     ],
+     "n_events": 1,
+     "by_offset": {
+      "t-1": {
+       "n_excess": 0,
+       "note": "n=0 < 2：不给均值/中位数（样本不足不产统计量）",
+       "no_proportion_stat": "n < 3：不给「胜率/上涨占比」这类比例字段"
+      },
+      "t+0": {
+       "n_excess": 1,
+       "note": "n=1 < 2：不给均值/中位数（样本不足不产统计量）",
+       "no_proportion_stat": "n < 3：不给「胜率/上涨占比」这类比例字段"
+      },
+      "t+1": {
+       "n_excess": 1,
+       "note": "n=1 < 2：不给均值/中位数（样本不足不产统计量）",
+       "no_proportion_stat": "n < 3：不给「胜率/上涨占比」这类比例字段"
+      },
+      "t+5": {
+       "n_excess": 1,
+       "note": "n=1 < 2：不给均值/中位数（样本不足不产统计量）",
+       "no_proportion_stat": "n < 3：不给「胜率/上涨占比」这类比例字段"
+      },
+      "t+20": {
+       "n_excess": 1,
+       "note": "n=1 < 2：不给均值/中位数（样本不足不产统计量）",
+       "no_proportion_stat": "n < 3：不给「胜率/上涨占比」这类比例字段"
+      }
+     }
+    }
+   }
+  },
+  "overlap": {
+   "policy": "keep_earliest",
+   "span_sessions": 21,
+   "aggregate_kept": [
+    "002304@2025-04-29"
+   ],
+   "aggregate_dropped": [],
+   "cross_code_note": "跨标的不计重叠：不同标的是两个独立实验单元，聚合本身不跨标的平均"
+  },
+  "status": "ok",
+  "available_at_upper_bound": "2025-06-03T15:00:00+08:00",
+  "delivery_eligible": false,
+  "delivery_block_reason": "许可为「免费源·仅内部试验」：仅内部试验，不得进对外下载包；对外交付须机构授权或只交付衍生结论",
+  "reading_hash": "6891caa62211069f10e598d7d2b563a3dd5e855f6ce2634f94f4b6b2c4060f52"
+ }
+}

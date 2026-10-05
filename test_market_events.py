@@ -21,6 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
+from quant_research import event_calendar as ec  # noqa: E402
 from quant_research import event_returns as er  # noqa: E402
 
 
@@ -327,6 +328,102 @@ class RealDatasetTest(unittest.TestCase):
             self.assertGreater(it["t0_date"], it["event_date"])
         self.assertTrue(er.replay(r, payload, ev)["same"])
         self.assertFalse(r["delivery_eligible"])
+
+
+class EventCalendarTest(unittest.TestCase):
+    """事件日历：事件日只从材料证据取，精度不足不入表，类别不硬塞。"""
+
+    def _meta(self, **kw):
+        base = {"material_id": "m1", "title": "2024年年度报告",
+                "url": "http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF",
+                "disclosure_date": "2025-04-29", "date_precision": "day",
+                "date_basis": "source_url_format",
+                "subject": {"company": "洋河股份", "company_code": "002304.SZ"}}
+        base.update(kw)
+        return base
+
+    def test_date_comes_from_material_evidence(self):
+        c = ec.from_records([self._meta()])
+        self.assertEqual(len(c["events"]), 1)
+        e = c["events"][0]
+        self.assertEqual(e["date"], "2025-04-29")
+        self.assertEqual(e["date_basis"], "source_url_format")
+        self.assertEqual(e["code"], "002304")
+        self.assertEqual(e["category"], "定期报告")
+        self.assertEqual(e["matched"], "年度报告")
+
+    def test_non_day_precision_is_excluded_with_reason(self):
+        c = ec.from_records([self._meta(date_precision="month")])
+        self.assertEqual(c["events"], [])
+        self.assertIn("不是日级", c["excluded"][0]["reason"])
+
+    def test_missing_date_is_excluded_not_guessed(self):
+        m = self._meta()
+        for k in ("disclosure_date", "declared_disclosed_at", "disclosed_at"):
+            m.pop(k, None)
+        m["url"] = "http://x/y.pdf"                 # URL 里也没有日期格式
+        c = ec.from_records([m])
+        self.assertEqual(c["events"], [])
+        self.assertIn("披露日证据", c["excluded"][0]["reason"])
+
+    def test_url_format_date_is_used_when_field_missing(self):
+        m = self._meta()
+        m.pop("disclosure_date")
+        m["date_basis"] = ""
+        m["date_precision"] = ""
+        c = ec.from_records([m])
+        self.assertEqual(c["events"][0]["date"], "2025-04-29")
+        self.assertIn("url", c["events"][0]["date_basis"])
+
+    def test_unknown_category_is_not_forced_into_a_bucket(self):
+        c = ec.from_records([self._meta(title="关于举行投资者说明会的公告")])
+        self.assertEqual(c["events"], [])
+        self.assertEqual(c["excluded"][0]["category"], ec.UNCLASSIFIED)
+        self.assertIn("不硬塞", c["excluded"][0]["reason"])
+
+    def test_code_filter_excludes_other_subjects(self):
+        c = ec.from_records([self._meta()], codes=["600031"])
+        self.assertEqual(c["events"], [])
+        self.assertIn("不在本次研究范围", c["excluded"][0]["reason"])
+
+    def test_categories_rule_table_is_ordered_and_evidenced(self):
+        self.assertEqual(ec.classify("2024年度业绩预告")["category"], "业绩预告/快报")
+        self.assertEqual(ec.classify("关于回购股份的公告")["category"], "回购/增减持")
+        self.assertEqual(ec.classify("关于向特定对象发行股票的公告")["category"], "融资")
+        hit = ec.classify("2024年半年度报告")
+        self.assertEqual(hit["category"], "定期报告")
+        self.assertTrue(hit["matched"])
+
+    def test_to_event_list_carries_material_traceability(self):
+        c = ec.from_records([self._meta()])
+        ev = ec.to_event_list(c)
+        self.assertEqual(ev[0]["code"], "002304")
+        self.assertEqual(ev[0]["_material_id"], "m1")
+        self.assertIn("定期报告", ev[0]["label"])
+
+    def test_calendar_events_feed_operator_end_to_end(self):
+        """日历 → 算子：事件日直接进窗口，标签与绑定一路带下去。"""
+        c = ec.from_records([self._meta()])
+        p = _payload(_rows("002304", base=60.0))
+        r = er.compute(p, ec.to_event_list(c), offsets=(0, 5))
+        self.assertEqual(r["status"], "ok")
+        self.assertEqual(r["readings"][0]["event_date"], "2025-04-29")
+        self.assertEqual(r["readings"][0]["label"].startswith("定期报告"), True)
+
+    def test_materials_loader_dedups_index_and_meta(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            (base / "m1").mkdir()
+            (base / "m1" / "meta.json").write_text(
+                json.dumps(self._meta(), ensure_ascii=False), encoding="utf-8")
+            (base / "index.json").write_text(
+                json.dumps({"materials": [{"material_id": "m1", "title": "2024年年度报告"}]},
+                           ensure_ascii=False), encoding="utf-8")
+            recs = ec.load_materials(base)
+            c = ec.from_records(recs)
+            self.assertEqual(len(c["events"]), 1, "index 与 meta 同一条材料不得算两次")
 
 
 if __name__ == "__main__":

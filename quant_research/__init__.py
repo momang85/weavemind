@@ -9,4 +9,4 @@
 """
 from __future__ import annotations
 
-__all__ = ["event_returns"]
+__all__ = ["event_calendar", "event_returns"]
