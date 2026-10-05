@@ -74,7 +74,26 @@ C 的 `gold_diffs` 两边都是空 ⇒ 读数不依赖解释器版本（`Decimal
 4. **本机缺 `reportlab`/`feedparser`**：与 CI 一致（两者都不在 `requirements-runtime.lock`），
    因此不构成"本机少跑"。
 
-## 六、结论与边界
+## 六、第二轮：Y2b 落地后的端到端全量（**56 / 56 PASS**）
+
+用户要求"最后端到端测试"。Y2b（组合回测 `quant_research/backtest.py` ＋ Qlib 适配层
+`quant_research/qlib_adapter.py` ＋ `test_backtest.py`）落地后，把测试面从 55 扩到 **56**，
+**再跑一次全量**：
+
+- **56 / 56 PASS**（0 FAIL／0 TIMEOUT），总用时 **2262.4 秒**（≈37.7 分钟），解释器 3.14.3。
+- 新增 `test_backtest` **PASS**（26 项：账本守恒、T+1、成本前后、印花税生效日、分红入账、
+  不可能成交、留出区间、冻结哈希、审计、Qlib 边界）。
+- 最慢 5 个：`test_offline_delivery`(564.1s)、`test_task_time_optimization`(336.5s)、
+  `test_root_budget`(314.1s)、`test_orchestrator_v2`(254.0s)、`test_delivery_chain`(164.3s)。
+- **覆盖一致性**：磁盘 56 个 `test_*.py` 与 `ci.yml` 新增 `test_backtest.py` 步骤后
+  **仍为 56 对 56、差集 0**（新测试已挂进 CI，不会变成"跑了但没人管"的孤儿）。
+
+端到端另含 Y2b 真实数据跑批：`scripts/x1_backtest_run.py` 在 `3d6b4acb…`（002304＋600031＋000300）
+上产出 `status=ok`、**`audit_ok=true`**、66 笔成交、24 条拒绝、成本前后净值线与回撤/换手/敞口，
+以及 Qlib CSV 导出（1816＋908 行、跳过 0）。详见
+[Y2b 证据](y2b_backtest_20261005.md)。
+
+## 七、结论与边界
 
 - **全量 55/55 PASS**，加上 Y2a 三项真实数据验收通过、跨解释器哈希一致 ⇒ 本轮的算子/日历/脚本**可交付**。
 - **仍不得据此宣称**：CI 已过（看 CI）、人工复核通过（未做）、alpha/因果（未做识别策略）、
