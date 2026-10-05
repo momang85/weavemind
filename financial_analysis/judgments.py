@@ -517,8 +517,15 @@ def research_judgments(runs, *, volume_price: dict | None = None,
             evidence = [{"type": "运行读数", "text": "ΔOCF 分项（经营驱动/现金桥同一次运行）",
                          "locator": "底稿 `analysis/analysis_runs.json`",
                          "kind": ROLE_READING, "role": ROLE_READING}]
+            # 词表要指向**现金流量表补充资料里的营运资本项目**，不能用泛词"应收/应付"：
+            # 泛词会命中"（4）前五名经销客户的销售金额、销售占比、**期末应收账款**总金额"
+            # 这种小节叶名（+3 分），而真正的补充资料句（"经营性应收项目的增加…"）只在
+            # 段内出现（+1 分）反而落选——现金变化 +11.04 亿的依据被绑到**客户集中度**
+            # 段落上（架构复核点名：来源错配）。改词表后：补充资料叶名（"现金流量表补充
+            # 资料"）与项目名（"经营性应收/应付项目"）各自能给分，客户集中度段落不再命中。
             _rec_ev, _skipped = _record_evidence(
-                records, ("应付", "应收", "货款", "结算", "回款", "采购"), limit=2)
+                records, ("经营性应收", "经营性应付", "存货的减少", "现金流量表补充",
+                          "货款", "结算", "回款", "采购"), limit=2)
             evidence.extend(_rec_ev)
             if driver == "working_capital":
                 title = ("现金变化**主要由营运资本（占用与时点）构成**，"
