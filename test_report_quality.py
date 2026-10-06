@@ -560,6 +560,29 @@ class TestMainBodyCompaction(unittest.TestCase):
         self.assertEqual(out, plain)
         self.assertEqual(info, {"moved": [], "chars": 0, "detail": ""})
 
+    def test_detail_writer_never_clobbers_the_compaction_block(self):
+        """另附底稿的两个写入方必须互相让路（实机 `ui-10ea37599d` 丢内容的那条）。"""
+        import tempfile
+        import report_brief
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "analysis" / "analysis_detail.md"
+            report_brief.write_analysis_detail(p, "## 研究判断明细（七段式，另附）\n- 甲\n")
+            # 收束块写进来
+            block = (f"{report_brief.COMPACT_BEGIN}\n## 经营驱动分析正文\n- 乙\n"
+                     f"{report_brief.COMPACT_END}\n")
+            p.write_text(p.read_text(encoding="utf-8") + "\n" + block, encoding="utf-8")
+            # 明细写入方再写一次：块必须原样带回来，且只有一份
+            report_brief.write_analysis_detail(p, "## 研究判断明细（七段式，另附）\n- 甲改\n")
+            report_brief.write_analysis_detail(p, "## 研究判断明细（七段式，另附）\n- 甲改\n")
+            t = p.read_text(encoding="utf-8")
+            self.assertEqual(t.count(report_brief.COMPACT_BEGIN), 1)
+            self.assertIn("## 经营驱动分析正文", t)
+            self.assertIn("- 甲改", t)
+            # 没有块时就是普通写入（不无中生有）
+            p2 = Path(tmp) / "b.md"
+            report_brief.write_analysis_detail(p2, "只有明细\n")
+            self.assertEqual(p2.read_text(encoding="utf-8"), "只有明细\n")
+
 
 class TestScenarioCheckKeys(unittest.TestCase):
     """R4：场景核对的 R4 键（覆盖/矛盾/信息保留/批准/请求数）按清单语义工作。"""

@@ -4214,6 +4214,63 @@ class TestX0DeliveryClosure(unittest.TestCase):
         self.assertTrue(ctx["detail_file"].endswith("analysis/analysis_detail.md"))
         self.assertIn("analysis_detail.md", ctx["note"], "主文给详表指针")
 
+    def test_rewriting_detail_keeps_the_main_body_compaction_block(self):
+        """**实测丢内容**：另附底稿有两个写入方，重写明细不得抹掉主文收束块。
+
+        实机 `ui-10ea37599d`：最后一轮装配在 14:55:17 把主文移出的 9,252 字符写成收束块，
+        交付收尾又调了一次 `build_structure`（结构投影同步）⇒ `analysis_detail.md` 被重写、
+        收束块连同移出的整段**在磁盘上消失**：正文已收束、附件里没有 ⇒ 内容真的丢了。
+        这里按同一顺序复现：写收束块 → 再跑一次 `_analysis_context` → 块必须还在。
+        """
+        import shutil
+        import tempfile
+        from pathlib import Path
+
+        import report_brief as rb
+        import workspace as ws_mod
+        from financial_analysis import store as fa_store
+        od = fa.run("operating_drivers", self._ds("洋河股份", "002304.SZ", self.IS))
+        cash = fa.run("cash_reconciliation", self._ds("洋河股份", "002304.SZ", self.CF))
+        vp = TestW2ResearchJudgments._vp()
+        tmp = tempfile.mkdtemp(prefix="x0_compact_")
+        old = ws_mod.WORKSPACE_ROOT
+        try:
+            ws_mod.WORKSPACE_ROOT = Path(tmp)
+            ws = ws_mod.task_workspace("x0-compact")
+            ws.mkdir(parents=True, exist_ok=True)
+            fa_store.save_run(ws, od)
+            fa_store.save_run(ws, cash)
+            ev = {"volume_price": vp, "records": []}
+            rb._analysis_context("x0-compact", ws_dir=ws, evidence=ev)
+            det = ws / "analysis" / "analysis_detail.md"
+            # ① 模拟主文收束：把一段整段写进标记块
+            moved = ("<!-- 主文收束:begin（§11.2 主文只留必要结论与边界；"
+                     "本块由 report_brief 维护，勿手改） -->\n"
+                     "## 经营驱动分析正文（洋河股份 2023年→2024年）\n\n"
+                     "### 一、结论（先看这三条）\n\n现金减少 15.02 亿元。\n"
+                     "<!-- 主文收束:end -->\n")
+            det.write_text(rb.write_analysis_detail(det, det.read_text(encoding="utf-8")),
+                           encoding="utf-8")
+            det.write_text(det.read_text(encoding="utf-8").rstrip("\n") + "\n\n" + moved,
+                           encoding="utf-8")
+            self.assertIn(rb.COMPACT_BEGIN, det.read_text(encoding="utf-8"))
+            # ② 再跑一次装配（交付收尾会这么干）——重写明细，块必须活下来。
+            #    先放一个"只可能被重写抹掉"的哨兵：没有它，这条用例在"第二次装配其实
+            #    没写文件"时也会通过（块当然还在），那就是空转的守卫。
+            det.write_text("SENTINEL-OLD-DETAIL\n" + det.read_text(encoding="utf-8"),
+                           encoding="utf-8")
+            rb._analysis_context("x0-compact", ws_dir=ws, evidence=ev)
+            after = det.read_text(encoding="utf-8")
+            self.assertNotIn("SENTINEL-OLD-DETAIL", after, "明细确实被重写了（不是空转）")
+            self.assertIn(rb.COMPACT_BEGIN, after, "收束块不得被明细重写抹掉")
+            self.assertIn("## 经营驱动分析正文", after, "移出的整段必须还在附件里")
+            self.assertIn("现金减少 15.02 亿元", after)
+            self.assertIn("### 研究判断（可检验）", after, "明细本身也要照写")
+            self.assertEqual(after.count(rb.COMPACT_BEGIN), 1, "块只应有一份")
+        finally:
+            ws_mod.WORKSPACE_ROOT = old
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_cash_direction_labels_driver_and_buffer(self):
         """方向：洋河净利主导下降/营运资本缓冲；三一营运资本为主要构成（X0-2）。"""
         from financial_analysis import judgments as jd

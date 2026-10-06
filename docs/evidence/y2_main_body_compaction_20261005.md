@@ -92,8 +92,50 @@
 
 ## 六、端到端（浏览器，真实入口）
 
-见本文件末尾"端到端"一节（任务 `ui-10ea37599d`，走工作台真实提交 → worker 回包 →
-装配 → 验收 → 导出）。
+工作台真实入口提交（16/16 服务存活、`http://localhost:8080`）：**任务 `ui-10ea37599d`**
+（洋河股份 2023/2024，合并口径，截至 2025-04-30，浏览器内「研究一家公司」表单 → 生成目标 →
+Execute）→ 步骤派发/worker 回包 → 装配 → 验收 → 版本 → 打包，**`status=SUCCESS`**、
+`Acceptance overall=pass`、`report_sha256=928813bb34ff0b37…`、`version_bound=true`。
+
+**收束在真实任务里的读数**（orchestrator 日志原句）：
+
+```
+14:55:12 delivery_pipeline: 研究简报装配（task=ui-10ea37599d）：…采用来源 2 条
+14:55:17 delivery_pipeline: 主文收束（task=ui-10ea37599d）：移出 ## 经营驱动分析正文、
+         ### 字段位置与计算底稿、### 逐问题资料计划、### 比率适用条件、
+         ### 图表元数据（内部标识）、### 其他核查项（9252 字符）
+14:55:17 delivery_pipeline: 验收对象改为代码装配的候选稿（…32034→22972 字符）
+14:55:22 delivery_pipeline: Acceptance(…): overall=pass 验收通过
+```
+
+对**交付正文**（23,150 字符）的逐条核对：移出的 6 个标题**全部不在**正文；
+应保留的 9 个小节（三项主判断／关键判断与下一步／关键发现／研究问题与下一步／分析／分析摘要／
+金额变化（可复算）／变化解释／风险与核查）**全部在**；必要边界 `未取得对应披露`／`原因待证`／
+`不等于`／`不表示回款改善` **全部在**。
+
+### 端到端抓出的真缺陷（已修）：收束的内容被另一个写入方抹掉
+
+上表的 `analysis/analysis_detail.md` **没有**收束块，全工作区也搜不到
+`主文收束:begin` ⇒ 移出的 9,252 字符**在磁盘上真的丢了**（正文已收束、附件里没有）。
+
+**归因（时间线 + 代码定位，不是猜）**：`analysis_detail.md` 有**两个写入方**——
+① `_analysis_context` 每次 `build_structure` 都重写七段式明细；② `compact_main_body`
+按标记块追加移出的整段。收束块在 14:55:17 写入，14:55:25 文件被重写（无块），
+而 14:55:25 那一次正是 `delivery_pipeline` 结构投影同步里的
+`_rb.build_structure(...)`（`delivery_pipeline.py:1933`）——**明细写入方把不是它写的块抹掉了**。
+
+**修法**：新增 `report_brief.write_analysis_detail()` 作为明细的**唯一写入口**，
+重写时把已有收束块**原样带回**（无块时不无中生有）。这类"移出的内容"必须
+**每一个会写它的地方都让路**——和 §四"读它的人跟着改"是同一条纪律的两面。
+
+**修后复核**（同一离线真实链路）：`analysis_detail.md` 31,877 字节 / 16,238 字符，
+**同时含七段式明细与收束块**（`## 经营驱动分析正文` 在附件里），PDF 仍 11 页、交付仍 verified。
+
+**新增守卫**：`test_financial_analysis.TestX0DeliveryClosure.
+test_rewriting_detail_keeps_the_main_body_compaction_block`（按真实顺序复现：写块 → 再装配 →
+块必须在；并放"只可能被重写抹掉"的哨兵，防止用例空转）、
+`test_report_quality.TestMainBodyCompaction.test_detail_writer_never_clobbers_the_compaction_block`
+（两个写入方互相让路 + 只有一份块）。
 
 ## 七、未达与下一步（如实）
 

@@ -167,10 +167,22 @@
 >
 > **测试**：`test_offline_delivery`（含 M0-f 冻结场景）**41/41 PASS**（本轮前该文件 1 条 FAIL，
 > 即上条 `## 分析` 那条）；`test_delivery_chain` **416/416 PASS**（新增 2 条）；
-> `test_report_quality` 44/44（新增 5 条）；`test_financial_analysis` 218 PASS；
+> `test_report_quality` 45/45（新增 6 条）；`test_financial_analysis` 219 PASS（新增 1 条）；
 > `test_deploy_manifest` 40/40、`test_report_version` 18/18；
 > `scripts/scenario_run.py` **9/9 场景全部通过**（按**旧**期望跑的 ⇒ 收束没破坏任何既有期望）。
 > 磁盘与 ci.yml 仍为 **58 对 58、差集 0**（本轮未新增测试文件）。
+> 23. **端到端（浏览器真实入口）抓到第三个真缺陷并已修**（任务 `ui-10ea37599d`，`SUCCESS`、
+>     `Acceptance pass`、`report_sha256=928813bb…`）：收束在真任务里生效（日志原句"移出 …9252 字符"、
+>     候选稿 32034→22972；交付正文核对：6 个移出标题全不在、9 个应留小节全在、4 条必要边界全在），
+>     **但另附底稿里没有收束块——移出的 9,252 字符在磁盘上真的丢了**。归因到时间线与代码：
+>     `analysis_detail.md` 有**两个写入方**，14:55:17 写入块、14:55:25 被
+>     `delivery_pipeline:1933` 的结构投影同步 `build_structure` 重写抹掉。
+>     **修法**：`report_brief.write_analysis_detail()` 作为明细唯一写入口，重写时原样带回收束块；
+>     修后同一离线真实链路的附件 31,877 字节**同时含七段式明细与收束块**。
+>     纪律补一条：移出的内容，**读它的人要跟着改，写它的人要让路**。
+> 24. **端到端同时验证了真实文件流**：新测 `test_financial_analysis` 按真实顺序复现（写块→再装配→
+>     块必须在），并放"只可能被重写抹掉"的哨兵防用例空转；`scenario_run` 另附底稿随场景产物留档，
+>     manifest 记 `attachment_sha256`／`attachment_bytes` 供跨修订比对。
 > **本轮不再遗留"未接入正文"**：行情/回测读数仍只在 `quant/*` 附件（许可门判不可对外），
 > 主文侧接入的是**成就稿的收束**，不是行情数字。
 > 天池未动（需你登录并接受协议）。

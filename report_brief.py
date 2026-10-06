@@ -3516,6 +3516,33 @@ def compact_main_body(report: str, *, detail_path=None) -> tuple[str, dict]:
                  "chars": sum(len("\n".join(b)) for b in moved), "detail": written}
 
 
+def write_analysis_detail(path, detail: str) -> str:
+    """把"完整七段式判断明细"写进另附底稿，**保留已有的主文收束块**（返回最终文本）。
+
+    这个文件有**两个写入方**：
+    1. 本函数（`_analysis_context` 每次装配都会重写七段式明细）；
+    2. `compact_main_body`（把主文移出的整段按标记块追加进同一文件）。
+
+    收束块不是写明细的人生成的，所以重写明细时**必须把它原样带回去**。实机
+    `ui-10ea37599d` 就发生过丢内容：最后一轮装配在 14:55:17 写入收束块（移出 9,252 字符），
+    交付收尾又调了一次 `build_structure`（`delivery_pipeline` 的结构投影同步）⇒
+    `analysis_detail.md` 被重写、收束块连同移出的整段**在磁盘上消失**
+    （正文已收束、附件里没有 ⇒ 内容真的没了）。
+    **教训：移出的内容，每一个会写它的地方都要先让路。**
+    """
+    from pathlib import Path as _P
+    p = _P(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    text = str(detail or "")
+    prev = p.read_text(encoding="utf-8") if p.is_file() else ""
+    if COMPACT_BEGIN in prev and COMPACT_END in prev:
+        block = prev.split(COMPACT_BEGIN, 1)[1].split(COMPACT_END, 1)[0]
+        text = (text.rstrip("\n") + "\n\n" if text.strip() else "") \
+            + COMPACT_BEGIN + block + COMPACT_END + "\n"
+    p.write_text(text, encoding="utf-8")
+    return text
+
+
 def _rules_version() -> str:
     """当前独立验证规则集版本（取不到就空串 = 不比较，不假装匹配）。"""
     try:
@@ -3668,8 +3695,8 @@ def _analysis_context(task_id: str, *, ws_dir=None, evidence: dict | None = None
     if out.get("detail"):
         try:
             ana = _fa_store.inputs_dir(ws)
-            ana.mkdir(parents=True, exist_ok=True)
-            (ana / "analysis_detail.md").write_text(out["detail"], encoding="utf-8")
+            # 重写明细时**保留收束块**（同一文件有两个写入方，见 `write_analysis_detail`）
+            write_analysis_detail(ana / "analysis_detail.md", out["detail"])
             out["detail_file"] = detail_rel
         except Exception as exc:                   # noqa: BLE001 - 落盘失败只影响"另附"
             logger.warning("研究判断明细落盘失败（task=%s）：%s", task_id, str(exc)[:120])
