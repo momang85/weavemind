@@ -138,6 +138,8 @@ jobs:
         run: python test_market_events.py
       - name: "Y2b portfolio backtest (ledger audit, T+1, costs pre/post, dividends, holdout, Qlib boundary)"
         run: python test_backtest.py
+      - name: "Y2 quant readings into the delivery package (attachment only, license gate)"
+        run: python test_quant_publish.py
       - name: Skills & validators check
         run: python -c "from skill_registry import list_skills; assert len(list_skills())>=3; from validators.registry import list_validators; assert len(list_validators())>=4"
       - name: Eval cases schema check

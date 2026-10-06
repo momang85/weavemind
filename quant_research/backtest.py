@@ -163,8 +163,14 @@ def run(payload: dict, spec: dict | None = None, *, costs: dict | None = None,
     cs.update(costs or {})
     universe = [str(c) for c in (sp.get("universe") or []) if str(c).strip()]
     sh = spec_hash(sp, cs)
+    # **输入绑定**：与 `event_returns` 共用同一份实现（"输入是什么"只留一处判据，不各写一套）。
+    # 没有绑定就没有「这份回测跑在哪份数据上」，也就无从复算 —— 这是 Y2 数值接入的前置条件。
+    from .event_returns import binding as _input_binding
+    from .event_returns import fingerprint as _input_fingerprint
     out: dict = {"schema": SCHEMA, "operator": OPERATOR, "impl_version": IMPL_VERSION,
                  "spec": sp, "costs": cs, "spec_hash": sh, "benchmark": benchmark,
+                 "input_kind": _input_binding(payload),
+                 "input_fingerprint": _input_fingerprint(payload),
                  "license": str(license or payload.get("license") or ""),
                  "adj_basis": str(payload.get("adj_basis") or ""),
                  "limits": list(LIMITS), "orders": [], "rejections": [], "nav": [],
@@ -507,7 +513,8 @@ def _finalize(out: dict) -> dict:
     lic = str(out.get("license") or "").strip()
     core = {k: out.get(k) for k in ("schema", "operator", "impl_version", "status", "spec",
                                     "costs", "spec_hash", "benchmark", "metrics", "nav",
-                                    "orders", "rejections", "audit", "holdout", "reason")}
+                                    "orders", "rejections", "audit", "holdout", "reason",
+                                    "input_kind", "input_fingerprint")}
     out["reading_hash"] = _sha(_canon(core))
     out["license_note"] = (f"价格数据许可为「{lic}」——随回测一起判定" if lic else
                            "许可未随回测传入 ⇒ 按不可对外处理（不默认放行）")

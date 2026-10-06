@@ -759,6 +759,18 @@ def _freeze_payload(task_id: str, ws, *, md_bytes: bytes = b"",
                     logger.warning("快照：分析底稿读取失败（%s）：%s", p.name, str(exc)[:100])
     except Exception as exc:                     # noqa: BLE001
         logger.warning("快照：分析底稿目录读取失败：%s", str(exc)[:120])
+    # Y2 量化读数（Y2b 接入）：以**附件**随包（`quant/*`），**不改写主文**（规划 §11.2）。
+    # 同一套"有才进包、不制造空文件"契约 ⇒ 没有量化读数的工作区，包内成员一字不变。
+    # 许可门结论写在 `quant/quant_manifest.json` 的 `external_delivery` 里，随包可离线核对。
+    try:
+        from quant_research import publish as _qpub
+        _qmembers = _qpub.payload_bytes(ws) or {}
+        for _arc, _blob in _qmembers.items():
+            payload[_arc] = _blob
+        if _qmembers:
+            logger.info("快照：量化读数入包 %d 个成员（task=%s）", len(_qmembers), task_id)
+    except Exception as exc:                     # noqa: BLE001 - 量化读数不可用不阻断导出
+        logger.warning("快照：量化读数读取失败：%s", str(exc)[:120])
     return payload
 
 

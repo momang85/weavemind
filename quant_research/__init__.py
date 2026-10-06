@@ -6,7 +6,10 @@
 契约不互相伪装**——行情没有"归属层""报表范围"，硬塞进财报口径只会把两类证据搅在一起。
 
 本包只用标准库；`adapters.market_history` 在读路径上**延迟导入**，避免 import 期拉起重依赖。
+
+读数进入交付包的路径见 `publish`：以**附件**（`quant/*`）随包，凭许可门决定能否对外，
+**不改写主文**（规划 §11.2）。
 """
 from __future__ import annotations
 
-__all__ = ["backtest", "event_calendar", "event_returns", "qlib_adapter"]
+__all__ = ["backtest", "event_calendar", "event_returns", "publish", "qlib_adapter"]

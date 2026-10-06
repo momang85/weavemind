@@ -1,0 +1,144 @@
+{
+ "dataset": {
+  "dataset_id": "3d6b4acb451abcf960c4132deb16c2a09169234b76dcb643958ceee855fcb148",
+  "rows": 2724,
+  "license": "免费源·仅内部试验",
+  "adj_basis": "前复权(qfq)"
+ },
+ "readings": {
+  "event_returns": {
+   "reading_hash": "98fbc4cdc4b6e4bfa5791ebc17faf6486a44a7665529bab7ccbefcc4ff77ba37",
+   "input_fingerprint": "3dfabdcac371263f6923477c9bf375089c18268ffda5fb4141be170337ff8118",
+   "status": "ok"
+  },
+  "backtest": {
+   "reading_hash": "15cf961e801fc4c76c8a73ffbf028010b006ee1d3d8e68ac3a2a76458f07f1dd",
+   "input_fingerprint": "3dfabdcac371263f6923477c9bf375089c18268ffda5fb4141be170337ff8118",
+   "spec_hash": "3e75afdb0a97526fe43b4807f5968ad3584aac2efde4de3e6c2c6a04f5eaeb00",
+   "status": "ok",
+   "audit_ok": true
+  }
+ },
+ "store": {
+  "event_returns": {
+   "ok": true,
+   "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\wm_quant_e2e_ws\\quant\\event_returns.json",
+   "arcname": "quant/event_returns.json"
+  },
+  "backtest": {
+   "ok": true,
+   "path": "C:\\Users\\ding0\\AppData\\Local\\Temp\\wm_quant_e2e_ws\\quant\\backtest.json",
+   "arcname": "quant/backtest.json"
+  }
+ },
+ "payload_members": [
+  "quant/backtest.json",
+  "quant/event_returns.json",
+  "quant/quant_detail.md",
+  "quant/quant_manifest.json"
+ ],
+ "frozen_snapshot_members": [
+  "quant/backtest.json",
+  "quant/event_returns.json",
+  "quant/quant_detail.md",
+  "quant/quant_manifest.json"
+ ],
+ "external_delivery": {
+  "allowed": false,
+  "blocked_by": [
+   "backtest",
+   "event_returns"
+  ],
+  "reason": "存在不可对外的量化读数：backtest：许可「免费源·仅内部试验」⇒ 仅内部试验；event_returns：许可「免费源·仅内部试验」⇒ 仅内部试验（许可为「免费源·仅内部试验」：仅内部试验，不得进对外下载包；对外交付须机构授权或只交付衍生结论）。对外交付须机构授权或只交付衍生结论，原始数据不得随包外发",
+  "readings_checked": [
+   "backtest",
+   "event_returns"
+  ]
+ },
+ "manifest": {
+  "schema": "weavemind.quant_package/0",
+  "readings": [
+   {
+    "reading": "backtest",
+    "operator": "backtest_v1",
+    "impl_version": "backtest/1.0.0",
+    "status": "ok",
+    "input_kind": {
+     "input_kind": "market_history",
+     "schema": "weavemind.market_history/0",
+     "dataset_id": "3d6b4acb451abcf960c4132deb16c2a09169234b76dcb643958ceee855fcb148",
+     "source": "akshare",
+     "license": "免费源·仅内部试验",
+     "adj_basis": "前复权(qfq)",
+     "imported_at": "2026-10-05T16:24:59+08:00",
+     "date_range": [
+      "2023-01-03",
+      "2026-09-30"
+     ],
+     "instruments": [
+      "000300",
+      "002304",
+      "600031"
+     ],
+     "rows": 2724
+    },
+    "input_fingerprint": "3dfabdcac371263f6923477c9bf375089c18268ffda5fb4141be170337ff8118",
+    "spec_hash": "3e75afdb0a97526fe43b4807f5968ad3584aac2efde4de3e6c2c6a04f5eaeb00",
+    "reading_hash": "15cf961e801fc4c76c8a73ffbf028010b006ee1d3d8e68ac3a2a76458f07f1dd",
+    "delivery_eligible": false,
+    "what_this_is_not": [
+     "**规则无拟合参数** ⇒ 留出集防的是「写完规则才挑时间段」，不是过拟合；区间已固定进 spec",
+     "**前复权价格下分红已隐含在价格里**，账本不再单独记股息：这不是可执行收益（真实是现金分红）"
+    ]
+   },
+   {
+    "reading": "event_returns",
+    "operator": "event_returns_v1",
+    "impl_version": "event_returns/1.0.0",
+    "status": "ok",
+    "input_kind": {
+     "input_kind": "market_history",
+     "schema": "weavemind.market_history/0",
+     "dataset_id": "3d6b4acb451abcf960c4132deb16c2a09169234b76dcb643958ceee855fcb148",
+     "source": "akshare",
+     "license": "免费源·仅内部试验",
+     "adj_basis": "前复权(qfq)",
+     "imported_at": "2026-10-05T16:24:59+08:00",
+     "date_range": [
+      "2023-01-03",
+      "2026-09-30"
+     ],
+     "instruments": [
+      "000300",
+      "002304",
+      "600031"
+     ],
+     "rows": 2724
+    },
+    "input_fingerprint": "3dfabdcac371263f6923477c9bf375089c18268ffda5fb4141be170337ff8118",
+    "spec_hash": null,
+    "reading_hash": "98fbc4cdc4b6e4bfa5791ebc17faf6486a44a7665529bab7ccbefcc4ff77ba37",
+    "delivery_eligible": false,
+    "what_this_is_not": [
+     "这是**事件窗口的价格观察值**，不是因果结论：没有识别策略、没有对照组、样本极小",
+     "未做风险调整（无 β/波动率/因子暴露），「超额」仅指减去同期基准，不等于 alpha"
+    ]
+   }
+  ],
+  "count": 2,
+  "unreadable": [],
+  "external_delivery": {
+   "allowed": false,
+   "blocked_by": [
+    "backtest",
+    "event_returns"
+   ],
+   "reason": "存在不可对外的量化读数：backtest：许可「免费源·仅内部试验」⇒ 仅内部试验；event_returns：许可「免费源·仅内部试验」⇒ 仅内部试验（许可为「免费源·仅内部试验」：仅内部试验，不得进对外下载包；对外交付须机构授权或只交付衍生结论）。对外交付须机构授权或只交付衍生结论，原始数据不得随包外发",
+   "readings_checked": [
+    "backtest",
+    "event_returns"
+   ]
+  },
+  "note": "量化读数以**附件**形式随包（主文不改写）；每条读数带输入绑定与哈希，可离线复算；许可门结论见 external_delivery"
+ }
+}

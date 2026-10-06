@@ -236,6 +236,28 @@ class AuditAndInvalidTest(unittest.TestCase):
             self.assertIn(expect, names)
         self.assertTrue(r["audit"]["ok"], r["audit"]["failed"])
 
+    def test_carries_input_binding_for_replay(self):
+        """Y2 数值接入的前置条件：回测必须带 `input_kind` 绑定与输入指纹（答得出"跑在哪份数据上"）。"""
+        rows = _flat("600031", 10.0)
+        r = bt.run(_payload(rows), {"universe": ["600031"], "rebalance": "monthly",
+                                    "initial_cash": 100000.0}, license="免费源·仅内部试验")
+        self.assertEqual(r["input_kind"]["input_kind"], "market_history")
+        self.assertEqual(r["input_kind"]["dataset_id"], "ds-bt")
+        self.assertEqual(r["input_kind"]["adj_basis"], "不复权")
+        self.assertTrue(r["input_fingerprint"])
+
+    def test_input_binding_changes_reading_hash(self):
+        """换数据集必须换读数哈希：否则「绑定」是摆设。"""
+        rows = _flat("600031", 10.0)
+        a = bt.run(_payload(rows), {"universe": ["600031"], "rebalance": "monthly",
+                                    "initial_cash": 100000.0}, license="免费源·仅内部试验")
+        p2 = _payload(rows)
+        p2["dataset_id"] = "ds-bt-2"
+        b = bt.run(p2, {"universe": ["600031"], "rebalance": "monthly",
+                        "initial_cash": 100000.0}, license="免费源·仅内部试验")
+        self.assertNotEqual(a["input_fingerprint"], b["input_fingerprint"])
+        self.assertNotEqual(a["reading_hash"], b["reading_hash"])
+
     def test_exact_conservation_holds_with_many_orders(self):
         """**实机踩到的坑**：逐笔金额是 2 位小数，拿它回推的累计舍入误差会随笔数增长。
 

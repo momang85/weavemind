@@ -53,6 +53,26 @@
   },
   "spec_hash": "3e75afdb0a97526fe43b4807f5968ad3584aac2efde4de3e6c2c6a04f5eaeb00",
   "benchmark": "000300",
+  "input_kind": {
+   "input_kind": "market_history",
+   "schema": "weavemind.market_history/0",
+   "dataset_id": "3d6b4acb451abcf960c4132deb16c2a09169234b76dcb643958ceee855fcb148",
+   "source": "akshare",
+   "license": "免费源·仅内部试验",
+   "adj_basis": "前复权(qfq)",
+   "imported_at": "2026-10-05T16:24:59+08:00",
+   "date_range": [
+    "2023-01-03",
+    "2026-09-30"
+   ],
+   "instruments": [
+    "000300",
+    "002304",
+    "600031"
+   ],
+   "rows": 2724
+  },
+  "input_fingerprint": "3dfabdcac371263f6923477c9bf375089c18268ffda5fb4141be170337ff8118",
   "license": "免费源·仅内部试验",
   "adj_basis": "前复权(qfq)",
   "limits": [
@@ -17589,7 +17609,7 @@
    },
    "note": "规则无拟合参数 ⇒ 留出集防的是「写完规则才挑时间段」，不是过拟合"
   },
-  "reading_hash": "eda147c5748a32a67014f0f193279e7e5612a08a1cd83efb07690aff4543311a",
+  "reading_hash": "15cf961e801fc4c76c8a73ffbf028010b006ee1d3d8e68ac3a2a76458f07f1dd",
   "license_note": "价格数据许可为「免费源·仅内部试验」——随回测一起判定",
   "delivery_eligible": false
  },
