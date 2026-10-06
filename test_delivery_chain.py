@@ -6508,12 +6508,17 @@ class TestResearchBriefAssembly(unittest.TestCase):
 
         C3 起位置改到附录（主文只留一行指引）：口径说明不进主文版面，但**证据不删**，
         所以断言改为"附录里有完整条件"，而不是"主文里必须有这个标题"。
+
+        10-06：指引不再写死"见附录"——收束会把这一节移进 `analysis/analysis_detail.md`，
+        写死位置就会变成悬空引用；现在按**标题**指（详见
+        `test_financial_analysis.TestX0DeliveryClosure.test_no_pointer_to_a_moved_section`）。
         """
         import report_brief
         tid, _ = self._env()
         st = report_brief.build_structure(tid, self.GOAL, "")
         md = report_brief.render_brief_markdown(st, "")
-        self.assertIn("比率适用条件与适用范围见附录", md)
+        self.assertIn("比率适用条件与适用范围见『比率适用条件』", md)
+        self.assertNotIn("比率适用条件与适用范围见附录", md)
         _head, _, tail = md.partition("## 附录")
         self.assertIn("### 比率适用条件", tail)
         self.assertIn("归母净利率", tail)
