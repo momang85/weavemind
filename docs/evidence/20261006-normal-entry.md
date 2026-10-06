@@ -58,7 +58,31 @@
    效果：正文 13,838 → **11,952 字符**，PDF **11 → 9 页**，验收仍 `pass`。
    守卫：本轮以**副本装配 + 正常入口两次实测**为准（不改验收阈值、不删读数）。
 
-## 三、照实登记的未验项
+## 四、本轮修掉一处**基线就存在**的开放缺陷：「报告步骤失败仍判 verified」
+
+`test_offline_delivery.test_body_model_failure_keeps_recomputable_paper` 在基线 `92c359f` 上
+**单独跑就是 FAIL**（`git worktree` 复现）。机制：报告步骤失败时交给装配的是失败文本
+（没有 `## 分析`），`report_brief._analysis_gate_verdict` 对"没有 `## 分析`"走**免伤分支**
+返回 True（该分支有 `test_r0_boundaries` 用例保护），而 `delivery_pipeline._has_deliverable_analysis`
+又接受"有确定性读者判断就算有分析" ⇒ 失败稿也判 `verified`。
+
+**修法（读事实记录，不靠正文标题猜）**：`delivery_pipeline._report_step_failure()` 读
+`step_failure.json`，三条同时成立才判死——① `capability == report_generator`；
+② `replacement_step_id` 为空（没有替代步骤接管）；③ 记录里的**原始结果不是成功载荷**
+（`_snippet_reports_success`）。第 ③ 条是**必要**的：实机 `ui-10ea37599d` 有一条
+`i1-acc-redo` 记录，`error_snippet` 里带着 `{"status": "success", "report_path": …report.md,
+"chars": 10588}`（那次纠正重做没让验收过关，但正文确实产出了）；只看"未恢复"会把
+**已 verified 的好稿子误判成草稿**——本机实测过这一步（先在真实任务上复现，才补的第 ③ 条）。
+文件存在但读不出来 ⇒ 按证据未知处理，**不静默放行**。
+
+结果：`test_offline_delivery` 由 2 条失败 → **1 条**（只剩网络环境那条
+`test_async_records_shape_and_keeps_stage_label`），报告失败那条**通过**；真实任务
+`ui-10ea37599d` 的采纳/导出仍是 `verified`（无 hard_fail），最新包
+`deliverables_20261006_231822_08a4e6.zip` 复验 `pass`。
+守卫用例：`test_r0_boundaries.TestResearchHardGate.test_unresolved_report_step_failure_blocks_verified`
+（含 ①别的步骤失败不影响 ②已被替代步骤接管不算 ③′成功载荷不算 ④记录坏掉不放行 四种情形）。
+
+## 五、照实登记的未验项
 
 - **人工复核未做**：本轮只走机器验收（`acceptance_overall: pass`）与正常下载入口；
   `human_review.json` 未动，研究状态仍是 `research_draft`（正文自带研究草稿说明）。
@@ -76,19 +100,10 @@
 - **三一复制是离线结构复制**（见 [20261006-sany-replication.md](20261006-sany-replication.md)），
   不是第二份已验证交付，也未走正常入口。
 
-## 四、本轮另记一处**基线就存在**的开放缺陷（不是本轮引入，未擅自改语义）
+## 七、更早一处开放缺陷的处置记录（**本轮已修**，保留过程备查）
 
-`test_offline_delivery.test_body_model_failure_keeps_recomputable_paper`（"报告步骤失败的任务
-**不得** verified"）**在基线 `92c359f` 上单独跑就是 FAIL**（用 `git worktree` 在 92c359f 复现：
-`AssertionError: 'verified' == 'verified'`），本轮仍未修，机制已定位：
-
-- 报告步骤失败时，交给装配的**模型正文**是失败文本（里面**没有** `## 分析`）；
-- `report_brief._analysis_gate_verdict` 对"正文没有 `## 分析`"走**免伤分支直接返回 True**
-  （该分支有 `test_r0_boundaries` 的用例保护：老式/简版研究正文不该因此被判死）；
-- 于是结构对象里 `analysis_gate_ok=True`，而 `delivery_pipeline._has_deliverable_analysis`
-  又接受"有读者判断就算有分析"（`reader_judgments` 由**确定性**装配产出，报告步骤失败也在）
-  ⇒ 判成有可交付分析 ⇒ 交付 `verified`。
-- **结论**：内容判据看不见"模型正文这一步失败了"这件事；要恢复该保证，必须把**步骤失败信号**
-  显式传进装配/门槛（例如 `assemble_and_verify(..., report_step_failed=True)` →
-  `apply_research_hard_gate`），不能靠正文标题或结构内容去猜。
-  本轮不改：它牵涉装配 API 与 `test_r0_boundaries` 的免伤语义，属需要架构侧定的产品决策。
+上一轮曾把 `test_body_model_failure_keeps_recomputable_paper` 登记为"基线即有、需架构侧定"的
+开放缺陷，并写明"要恢复该保证必须把步骤失败信号显式传进装配"。本轮按这个方向做完：
+`delivery_pipeline._report_step_failure()` 直接读 `step_failure.json` 的**事实记录**
+（capability=report_generator ＋ 未被替代步骤接管 ＋ 原始结果不是成功载荷），
+不新增装配 API、不改免伤语义、不降任何阈值。详见上面 §四。

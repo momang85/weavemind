@@ -63,12 +63,15 @@
 > PDF sha `dc2a2542…` ＝ 清单、**9 页**、首屏第 1 页、收束块 **25,076 字节**随包、25 成员自检全 `ok`。
 > **仍未做/未达**：人工复核未做（研究状态 `research_draft`、导出清单另标 `research_state.stale`）；
 > 主文 **9 页**（目标 4–6）；目标兑现判断缺可量化目标（登记为缺口）。
-> **另记一处基线就有的开放缺陷**（不是本轮引入，未擅自改语义）：`test_offline_delivery`
-> `test_body_model_failure_keeps_recomputable_paper`（"报告步骤失败不得 verified"）在 `92c359f`
-> **单独跑即 FAIL**（worktree 复现）；机制＝模型正文没有 `## 分析` 时 `_analysis_gate_verdict`
-> 走免伤分支返回 True，而 `_has_deliverable_analysis` 又接受"有确定性读者判断就算有分析"⇒
-> 报告步骤失败也判 verified。要恢复该保证须把**步骤失败信号**显式传进装配（不能靠正文标题猜），
-> 属需架构侧定的产品决策。
+> **本轮（第 5 轮）另修一处基线即有缺陷**：「报告步骤失败不得 verified」在 `92c359f` 上
+> **单独跑即 FAIL**（worktree 复现）。修法＝门槛读**事实记录**（`step_failure.json`：
+> capability=`report_generator` ＋ 未被替代步骤接管 ＋ 原始结果**不是**成功载荷），不新增装配 API、
+> 不改免伤语义、不降阈值。第 ③ 条是必要的：实机 `ui-10ea37599d` 有一条 `i1-acc-redo` 记录，
+> snippet 里带 `{"status":"success","report_path":…,"chars":10588}`（纠正重做没让验收过关，
+> 但正文确实产出了）——只看"未恢复"会把已 verified 的好稿子误判成草稿（本机实测过）。
+> `test_offline_delivery` 由 2 条失败 → **1 条**（只剩网络环境那条）；真实任务采纳/导出仍
+> `verified`，最新包 `deliverables_20261006_231822_08a4e6.zip` 复验 `pass`（9 页、同版、收束块 25,076 字节）。
+> 守卫用例：`test_r0_boundaries.TestResearchHardGate.test_unresolved_report_step_failure_blocks_verified`（四种情形）。
 > **下一步（唯一剩余条款：主文 9→4–6 页）**：可试的下一个杠杆是**去重而不是移节**——
 > `## 风险与核查`（1,990 字符）与 `## 研究问题与下一步`（1,330 字符）在同一条问题上各写一遍
 > 「材料/边界/下一步」与「证据/改变判断的观察条件/需补材料」；`## 变化解释` 的"发生了什么"

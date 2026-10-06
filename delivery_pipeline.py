@@ -1765,6 +1765,80 @@ def _rb_gate_structure(task_id: str, body: str, *, ws_dir=None) -> dict | None:
     return {"analysis_gate_ok": _has_analysis_section(_gate_analysis_text(task_id, body))}
 
 
+def _snippet_reports_success(snippet: str) -> bool:
+    """失败记录里的**原始结果**自己说成功 ⇒ 这是"纠正步骤没达成目标"，不是"没产出正文"。
+
+    实机 `ui-10ea37599d` 的 `i1-acc-redo` 记录就是这种形状：`error_snippet` 里带着
+    `{"status": "success", "report_path": …reports/report.md, "chars": 10588}`，任务终态 SUCCESS、
+    交付已 verified。把它当"报告步骤失败"会把已交付的好稿子**误判成草稿**——那条记录要说的是
+    "这次纠正重做没让验收过关"，交付状态该由验收决定，不该被它一票否决。
+    """
+    s = str(snippet or "").strip()
+    if not s.startswith("{"):
+        return False
+    try:
+        import json as _json
+        d = _json.loads(s)
+    except Exception:                                # noqa: BLE001 - 不是结构化结果
+        return False
+    if not isinstance(d, dict):
+        return False
+    return str(d.get("status") or "").strip().lower() in ("success", "succeeded", "ok")
+
+
+def _report_step_failure(task_id: str, *, ws_dir=None) -> str:
+    """本任务是否有**未恢复、且确实没产出正文的报告步骤失败**（交付硬门槛用）→ 原因或 `""`。
+
+    为什么门槛必须读这个**事实记录**：报告步骤失败时，交给装配的是失败文本
+    （没有 `## 分析`，也没有可交付的正文），而内容判据看不见"这一步失败了"——
+    `_analysis_gate_verdict` 对"正文没有 `## 分析`"走免伤分支返回 True，
+    `_has_deliverable_analysis` 又接受"有确定性读者判断就算有分析"，于是失败稿也判 `verified`
+    （10-06 复核离线用例 `off-res-1` 实测，基线 `92c359f` 起就成立）。
+    步骤失败是**记录在案的事实**（`step_failure.json`，capability=`report_generator`），
+    不能靠正文标题去猜。
+
+    三个判据缺一不可：① capability 是 `report_generator`；② `replacement_step_id` 为空
+    （没有替代步骤接管）；③ 记录里的原始结果**不是**成功载荷（见 `_snippet_reports_success`）。
+
+    读不到记录（文件不存在）＝没有信号；文件存在但读不出来＝**不静默放行**，仍报原因。
+    """
+    try:
+        p = _ws(task_id, ws_dir) / "step_failure.json"
+        if not p.is_file():
+            return ""
+    except Exception as exc:                         # noqa: BLE001 - 路径都算不出＝没有信号
+        logger.warning("步骤失败记录定位失败（task=%s）：%s", task_id, str(exc)[:120])
+        return ""
+    try:
+        import json as _json
+        from step_diagnosis import StepDiagnosis
+        # 自己读+解析（不用 `read_step_failures`）：后者把"文件坏掉"吞成 `[]`，
+        # 于是"有失败记录却读不出来"会被当成"没有失败"——那正是**静默放行**。
+        raw = p.read_text(encoding="utf-8")
+        data = _json.loads(raw)
+        if isinstance(data, dict):
+            data = [data]
+        if not isinstance(data, list):
+            raise ValueError("step_failure.json 不是列表")
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            d = StepDiagnosis.from_dict(item)
+            if str(getattr(d, "capability", "") or "") != "report_generator":
+                continue
+            if str(getattr(d, "replacement_step_id", "") or "").strip():
+                continue                             # 已由替代步骤接管 → 有恢复路径
+            snippet = str(getattr(d, "error_snippet", "") or "")
+            if _snippet_reports_success(snippet):
+                continue                             # 原始结果说成功了 → 不是"没产出正文"
+            return ("报告步骤失败（report_generator，未恢复且未产出正文）"
+                    + (f"：{snippet[:80]}" if snippet else ""))
+        return ""
+    except Exception as exc:                         # noqa: BLE001 - 有失败记录却读不出来
+        logger.warning("步骤失败记录读取失败（task=%s）：%s", task_id, str(exc)[:120])
+        return f"步骤失败记录读取失败（按证据未知处理）：{str(exc)[:100]}"
+
+
 def apply_research_hard_gate(task_id: str, goal: str, wp: dict | None,
                              report_body: str = "", *, ws_dir=None,
                              structure: dict | None = None) -> tuple[str, str]:
@@ -1799,6 +1873,11 @@ def apply_research_hard_gate(task_id: str, goal: str, wp: dict | None,
         return "", ""
 
     reasons: list[str] = []
+    # 报告步骤失败是**事实记录**（不是内容判据）：失败稿不得判 verified。
+    # 10-06 复核 §5-1 的明确保证——"迁移标题哨兵到结构判据时保持'报告步骤失败不得 verified'"。
+    _step_fail = _report_step_failure(task_id, ws_dir=ws_dir)
+    if _step_fail:
+        reasons.append(_step_fail + "：本次交付不得判为已验证（内容判据看不见步骤失败）")
     try:
         if wp is None or wp.get("skipped"):
             reasons.append("研究任务未取得结构化事实：底稿缺失，本次不得判为已验证")

@@ -745,6 +745,70 @@ class TestResearchHardGate(unittest.TestCase):
                         return_value={"research_request": payload}):
             return self.o._apply_research_hard_gate(self.tid, "目标", wp, report)
 
+    def test_unresolved_report_step_failure_blocks_verified(self):
+        """报告步骤失败是**事实记录**：失败稿不得判 verified（10-06 复核 §5-1 的保证）。
+
+        反例（基线起就成立，离线用例 `off-res-1` 实测）：报告步骤失败时交给装配的是失败文本
+        （没有 `## 分析`），`_analysis_gate_verdict` 走"没有 `## 分析` ⇒ 不判"的免伤分支返回
+        True，`_has_deliverable_analysis` 又接受"有确定性读者判断就算有分析" ⇒ 失败稿判 verified。
+        修法：门槛读 `step_failure.json` 里 capability=`report_generator` 且**未被替代步骤接管**
+        的记录；读不出来也**不静默放行**。
+        """
+        import shutil
+        import tempfile
+        from pathlib import Path
+        import workspace as ws_mod
+        from step_diagnosis import StepDiagnosis, write_step_failure
+        tmp = Path(tempfile.mkdtemp(prefix="wm_gate_step_"))
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        old_root = ws_mod.WORKSPACE_ROOT
+        ws_mod.configure_workspace_root(str(tmp))
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", old_root)
+        wp = {"ok": True, "paper_ok": True, "problems": [], "gaps": [], "rows_detail": []}
+
+        def _gate():
+            self.o._delivery(self.tid)["hard_fail"] = ""
+            # 不带契约（只靠"本次确实产出了底稿"判研究任务身份）：本用例只验步骤失败信号，
+            # 不把"文档主体作用域"等其它检查混进来。
+            return self._run_gate(wp, report="# 贵州茅台 2024 年度研究\n\n正文占位\n",
+                                  contract=None)
+
+        # ① 别的步骤失败（web_fetch 已重规划）不影响交付判定
+        write_step_failure(self.tid, StepDiagnosis(
+            step_id="2", capability="web_fetch", error_type="HTTP_403",
+            tried_alternatives=["重规划为 content_summary"], replacement_step_id="2b"))
+        self.assertEqual(_gate(), "")
+        self.assertFalse(self.o._delivery(self.tid)["hard_fail"])
+        # ② 报告步骤失败但**已被替代步骤接管**（有恢复路径）→ 不算未恢复
+        write_step_failure(self.tid, StepDiagnosis(
+            step_id="4", capability="report_generator", error_type="CONTRACT_VIOLATION",
+            replacement_step_id="4b", replacement_outcome="SUCCESS"))
+        self.assertEqual(_gate(), "")
+        # ③ 报告步骤失败且**未恢复** → 硬门槛（且原因点名 capability）
+        write_step_failure(self.tid, StepDiagnosis(
+            step_id="4", capability="report_generator", error_type="CONTRACT_VIOLATION",
+            error_snippet="注入的正文模型失败"))
+        note = _gate()
+        self.assertIn("研究交付硬门槛未通过", note)
+        self.assertIn("report_generator", self.o._delivery(self.tid)["hard_fail"])
+        # ③′ 实机反例形状（`ui-10ea37599d` 的 `i1-acc-redo`）：记录未恢复，但**原始结果说成功**
+        #     （snippet 里带 report_path/chars）⇒ 那是"纠正重做没让验收过关"，不是"没产出正文"，
+        #     不得据此把已交付的好稿子判成草稿。
+        from step_diagnosis import step_failure_path
+        step_failure_path(self.tid).unlink(missing_ok=True)     # 只留 ③′ 这条记录
+        write_step_failure(self.tid, StepDiagnosis(
+            step_id="i1-acc-redo", capability="report_generator",
+            error_type="GENERIC_FAILURE",
+            error_snippet='{"status": "success", "report_path": "…/reports/report.md",'
+                          ' "charts": 6, "datasets": 0, "chars": 10588}'))
+        self.assertEqual(_gate(), "")
+        self.assertFalse(self.o._delivery(self.tid)["hard_fail"])
+        # ④ 记录文件在、但内容坏掉 → 按证据未知处理，不静默放行
+        from step_diagnosis import step_failure_path
+        step_failure_path(self.tid).write_text("{not json", encoding="utf-8")
+        from delivery_pipeline import _report_step_failure
+        self.assertTrue(_report_step_failure(self.tid))
+
     def test_paper_not_ok_triggers_hard_fail(self):
         wp = {"ok": True, "paper_ok": False,
               "problems": [{"kind": "caliber_mismatch",
