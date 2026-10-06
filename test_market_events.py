@@ -475,6 +475,38 @@ class TimeContractTest(unittest.TestCase):
         self.assertNotEqual(pt5["return"], 0.0)
         self.assertIn("窗口未满", pt5["unavailable"])
 
+    def test_future_rows_are_not_observed_at_the_evaluation_date(self):
+        """10-06 复核 §3B 反例：评价日挡得住未来价格（此前"有行即 observed"）。
+
+        复核给的纯计算反例：评价日 2025-01-02，01-03/01-06 的价格仍被算成 +10%/+20%
+        observed，而各行 `available_at` 都是 2026-01-01。这里把它变成守卫。
+        """
+        rows = [{"code": "A", "date": d, "close": c, "open": c,
+                 "available_at": "2026-01-01T00:00:00+08:00"}
+                for d, c in (("2025-01-02", 100.0), ("2025-01-03", 110.0),
+                             ("2025-01-06", 120.0), ("2025-01-07", 130.0))]
+        p = {"schema": "weavemind.market_history/0", "dataset_id": "fixture-avail",
+             "source": "synthetic", "license": "免费源·仅内部试验",
+             "adj_basis": "前复权(qfq)", "rows": len(rows), "instruments": ["A"],
+             "date_range": ["2025-01-02", "2025-01-07"], "data": rows}
+        r = er.compute(p, [{"code": "A", "date": "2025-01-02", "label": "fixture"}],
+                       offsets=(0, 1), evaluation_as_of="2025-01-02")
+        # ① 锚点（特征侧价格）在特征截点尚不可得 ⇒ 这一条根本不产出窗口（不倒灌）
+        self.assertEqual(r.get("status"), "unavailable", r)
+        self.assertIn("尚不可得", str(r.get("reason") or "")
+                      + str(r.get("unavailable") or ""))
+        # ② 若锚点可用而**结果点**的未来行不可得，则记为 pending（不是 observed、也不是 0）
+        rows2 = [dict(rows[0], available_at="2025-01-02T15:00:00+08:00")] + rows[1:]
+        p2 = dict(p, data=rows2, dataset_id="fixture-avail-2")
+        r2 = er.compute(p2, [{"code": "A", "date": "2025-01-02", "label": "fixture"}],
+                        offsets=(0, 1), evaluation_as_of="2025-01-02")
+        it = (r2.get("readings") or [{}])[0]
+        for p_ in it.get("points") or []:
+            if p_["offset"] > 0:
+                self.assertEqual(p_["state"], "pending", p_)
+                self.assertIsNone(p_["return"])
+                self.assertNotEqual(p_["return"], 0.0)
+
     def test_offsets_count_subject_own_sessions_and_gap_is_flagged(self):
         """标的缺一天（停牌/缺行）时：offsets 按标的自身交易日计，**并把缺口报成疑似**。
 

@@ -1539,8 +1539,137 @@ def _gate_analysis_text(task_id: str, report_body: str) -> str:
         return body
 
 
+def _structure_analysis_state(task_id: str, *, ws_dir=None) -> dict | None:
+    """从**交付结构对象**读"有没有可交付分析"所需的信号（10-06 复核：迁移标题哨兵）。
+
+    `report_structure.json` 里本来就有这三样东西，不必再从正文标题去猜：
+
+    - `analysis`：模型散文（占位句 `本次未产出可交付的分析正文` 在它里面）；
+    - `analysis_card`：分析摘要（只有空位声明时不算分析）；
+    - `analysis_note`：装配器生成的论证线；
+    - `reader_judgments`：本次选版快照产出的**读者判断**（10-06 起）。
+
+    读不到结构对象就返回 `None`（调用方退回正文文本判据，旧行为不变）。
+    """
+    try:
+        import report_brief as _rb
+        st = _rb.read_structure(task_id, ws_dir=ws_dir)
+        if not isinstance(st, dict) or not st:
+            return None
+        prose = str(st.get("analysis") or "")
+        note = str(st.get("analysis_note") or "")
+        card = str(st.get("analysis_card") or "")
+        generated = ""
+        if card and _rb.ANALYSIS_EMPTY_SUMMARY_MARK not in card:
+            generated += card
+        if note:
+            generated += "\n" + note
+        _prose = prose.strip()
+        # **空的模型散文也要算"缺位"**：报告步骤失败时 `analysis` 常常是空串（不是占位句），
+        # 只看占位句会把它当成"有散文" ⇒ 失败的稿子被判 verified（实测过）。
+        placeholder = (not _prose) or (_ANALYSIS_PLACEHOLDER in prose) \
+            or bool(_ENGINEERING_SUMMARY_RE.search(prose))
+        return {"placeholder": placeholder,
+                "prose_len": len(_prose),
+                "generated_len": len(generated.strip()),
+                # 装配时算好的**判决**（首选）：它是在"未收束正文＋生成的论证线"都在手时
+                # 算的，因此不受主文收束影响（10-06 复核 §5-1 的哨兵迁移）。
+                "gate_ok": st.get("analysis_gate_ok"),
+                "reader_judgments": len(st.get("reader_judgments") or [])}
+    except Exception as exc:                     # noqa: BLE001 - 读不到就退回文本判据
+        logger.warning("结构对象分析状态读取失败（task=%s）：%s", task_id, str(exc)[:120])
+        return None
+
+
+def _structure_from_dict(structure: dict | None) -> dict | None:
+    """把**调用方手上的结构对象**变成判据所需的信号（不需要再读磁盘）。
+
+    10-06 复核 §5-1 的哨兵迁移要点：判决要在"未收束正文＋生成的论证线"都在手时算，
+    并且**跟着本次交付对象走**——按任务名去磁盘读结构，在"同名任务多工作区"（重跑、测试
+    夹具）时会读到不同源的旧结构，让"报告步骤失败不得 verified"随读取顺序漂移（实测）。
+    """
+    if not isinstance(structure, dict) or not structure:
+        return None
+    import report_brief as _rb
+    gate_ok = structure.get("analysis_gate_ok")
+    if gate_ok is None:
+        return None
+    return {"gate_ok": bool(gate_ok),
+            "reader_judgments": len(structure.get("reader_judgments") or []),
+            "placeholder": False, "prose_len": 0, "generated_len": 0}
+
+
+def _has_deliverable_analysis(task_id: str, report_body: str, *, ws_dir=None,
+                              structure: dict | None = None) -> bool:
+    """交付里有没有**可交付的分析**。
+
+    结构判据优先（10-06 复核 §5-1：把标题哨兵依赖迁移到既有结构判据）：
+    有读者判断、或装配器论证线够长、或模型散文不是占位句 ⇒ 有分析。
+    结构对象读不到时**退回**正文文本判据 `_has_analysis_section`（旧行为不变）。
+
+    为什么必须迁移：主文收束把 `## 分析` 移出正文后，`_has_analysis_section` 会撞上
+    "正文里没有 `## 分析` ⇒ 不是研究简报、不判"的免伤分支，于是**报告步骤失败的稿子
+    被判成 verified**（实测 `test_body_model_failure_keeps_recomputable_paper`）。
+    结构判据不看正文标题，所以"报告步骤失败不得 verified"照旧成立。
+    """
+    st = (_structure_from_dict(structure) if structure is not None
+          else _structure_analysis_state(task_id, ws_dir=ws_dir))
+    if st is not None:
+        # ① 首选装配时算好的判决（不受主文收束影响）；② 新交付契约下，结构里有读者判断
+        #    也算有分析；③ 结构里既没有判决也没有读者判断，才退回下面按结构信号自算。
+        if st.get("gate_ok") is not None:
+            return bool(st["gate_ok"]) or bool(st["reader_judgments"])
+        # 判据与旧文本判据同形：散文缺位时要有**装配器生成的论证线**（或读者判断）才算；
+        # 散文在时，则要求（散文＋论证线）达到最低长度，避免一句"待写"就算有分析。
+        if st["placeholder"]:
+            return bool(st["reader_judgments"]) or st["generated_len"] >= 60
+        return (st["prose_len"] + st["generated_len"]) >= 60
+    return _has_analysis_section(_gate_analysis_text(task_id, report_body))
+
+
+def _rb_gate_structure(task_id: str, body: str, *, ws_dir=None) -> dict | None:
+    """给硬门槛用的结构对象：**优先用装配时算好的判决**（`analysis_gate_ok`）。
+
+    为什么不能就地按当前正文重算：走到这里时正文可能**已经收束**（`## 分析` 已被移进
+    附件），按它重算会撞上"正文里没有 `## 分析` ⇒ 不是研究简报、不判"的免伤分支，
+    于是一份"报告步骤失败"的稿子被判成有分析（实测 `off-res-1`：body 6,256 字符、
+    无 `## 分析` ⇒ 重算 True ⇒ verified）。所以这里：
+      ① 结构对象里有判决 ⇒ 直接用（装配时用**未收束的模型正文**算的）；
+      ② 没有判决 ⇒ 退回**旧的正文文本判据**（连收束块一起看）；
+      ③ 结构读不到 ⇒ 也退回旧文本判据。
+    """
+    import report_brief as _rb
+    txt = str(body or "")
+    # ① 正文**还没收束**（里面就有 `## 分析`）：按旧判据就地算 —— 读顺序无关、最可靠。
+    #    装配链在收束之前调用本函数，所以这是常规路径。
+    if "## 分析" in txt:
+        st = None
+        try:
+            st = _rb.read_structure(task_id, ws_dir=ws_dir)
+        except Exception:                        # noqa: BLE001 - 结构读不到也能算
+            st = None
+        return {"analysis_gate_ok": _rb._analysis_gate_verdict(
+            txt, card=str((st or {}).get("analysis_card") or ""),
+            note=str((st or {}).get("analysis_note") or ""))}
+    # ② 已收束：用装配时算好的结构判决（那时用的是**未收束的模型正文**）。
+    #    已知边界（登记，未在本批解决）：结构按**任务名**解析工作区，因此在"同名任务
+    #    多工作区"（重跑、测试夹具复用同一个 task_id）时可能拿到同任务的旧判决——
+    #    离线套件里表现为"报告步骤失败那条**单独跑通过、混跑偶发失败**"。
+    #    生产里任务名唯一，不触发；彻底修法是把判决随正文传递（本批试过标记版，
+    #    因重渲染轮次让判决漂移而回退，见证据文档）。
+    try:
+        st = _rb.read_structure(task_id, ws_dir=ws_dir)
+        if isinstance(st, dict) and st and st.get("analysis_gate_ok") is not None:
+            return st
+    except Exception as exc:                     # noqa: BLE001 - 读不到就退回文本判据
+        logger.warning("结构对象读取失败（task=%s，退回文本判据）：%s", task_id, str(exc)[:120])
+    # ③ 都没有：退回**旧的正文文本判据**（连收束块一起看）
+    return {"analysis_gate_ok": _has_analysis_section(_gate_analysis_text(task_id, body))}
+
+
 def apply_research_hard_gate(task_id: str, goal: str, wp: dict | None,
-                             report_body: str = "") -> tuple[str, str]:
+                             report_body: str = "", *, ws_dir=None,
+                             structure: dict | None = None) -> tuple[str, str]:
     """研究任务的交付硬门槛。返回 `(附加到交付物的说明, hard_fail 原因)`。
 
     判定只对**研究任务**生效：存在研究契约（落库的或目标里解析出的公司研究请求），
@@ -1595,9 +1724,9 @@ def apply_research_hard_gate(task_id: str, goal: str, wp: dict | None,
                     reasons.append("文档主体作用域未绑定：" + scope[0].detail[:120])
             # 研究简报必须有**可交付的分析**：只有数据表与底稿时按草稿交付
             # （架构复核：正文失效时交付"数据表/底稿 + 分析未完成"，不以拼接日志冒充研报）。
-            # 判据读**主文＋收束另附**：收束移走的是论证线本身，不是"把分析删了"。
-            if report_body and not _has_analysis_section(
-                    _gate_analysis_text(task_id, report_body)):
+            # 判据优先读**结构对象**（10-06 复核：迁移标题哨兵），读不到才退回正文文本。
+            if report_body and not _has_deliverable_analysis(
+                    task_id, report_body, ws_dir=ws_dir, structure=structure):
                 reasons.append("分析未完成：交付正文只有数据与底稿，"
                                "未产出可交付的分析结论（见文末资料缺口）")
     except Exception as exc:
@@ -2002,7 +2131,9 @@ def assemble_and_verify(task_id: str, goal: str, body: str, *,
     wp_note = gaps_note(wp)
     if wp_note:
         notes.append(wp_note)
-    gate_note, hard_fail = apply_research_hard_gate(task_id, goal, wp, body)
+    gate_note, hard_fail = apply_research_hard_gate(
+        task_id, goal, wp, body, ws_dir=ws_dir,
+        structure=_rb_gate_structure(task_id, body, ws_dir=ws_dir))
     if gate_note:
         notes.append(gate_note)
     review_note = review_note_text(facts)

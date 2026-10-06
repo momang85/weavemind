@@ -405,6 +405,15 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
         # 替代解释→现金与反向情景→待核查→口径限制）；没有经营驱动/现金桥运行就留空。
         "analysis_note": a_ctx.get("note") or "",
         "analysis_detail": a_ctx.get("detail_file") or "",
+        # 交付硬门槛的"有没有分析"判决在这里算一次（见 `_analysis_gate_verdict` 注释）
+        "analysis_gate_ok": _analysis_gate_verdict(
+            body, card=a_ctx.get("cards") or "", note=a_ctx.get("note") or ""),
+        # 10-06 复核 §6.3-1/4：**唯一读者判断列表**（同一次装配的结构化对象）。
+        # 首屏、正文与覆盖评估都消费这一份；不再各自产生一组重点。
+        "reader_judgments": list(a_ctx.get("reader_judgments") or []),
+        "reader_judgments_front": a_ctx.get("front") or "",
+        # 完整判断（含未进首屏的）只进附件与覆盖评估，不进读者正文
+        "judgments_all": list(a_ctx.get("judgments") or []),
         # X1（阶段X §4）：**研究续页**（较早材料的持续性假说 × 本期同口径读数 → 加强/削弱/
         # 无法判断 → 下一观察）。工作区里没有 `analysis/continuation.json` 时留空。
         "continuation": dict(a_ctx.get("continuation") or {}),
@@ -1218,6 +1227,16 @@ def _background_for_metric(text: str, metric: str) -> bool:
 
 
 # ── 指标表与关键发现（全部由底稿算）──────────────────────────────
+
+
+# 10-06 复核 §6.3-5：主文『财务对照』只印**读者要用的核心读数**（其余进随包完整事实表）。
+# 口径：契约点名的必需指标 ＋ 读者判断实际引用到的结构项（毛利/税费/存货/应收/应付）。
+_READER_TABLE_METRICS = (
+    "revenue", "net_profit", "operating_cashflow", "gross_profit",
+    "taxes_and_surcharges", "income_tax_expense",
+    "inventory", "accounts_receivable", "accounts_payable",
+    "total_assets", "total_liabilities",
+)
 
 
 def _metrics_table(rows, derived, periods, citations, req, source_url: str = "",
@@ -2761,10 +2780,17 @@ def render_brief_markdown(structure: dict, body: str = "",
                  f"{sc.get('audit_sources', 0)} 条候选材料未采用（不编号、不进正文，"
                  "只留在内部审计）。")
     lines.append("")
+    # 10-06 复核 §4：**唯一首屏『关键判断与下一步』**——由同一次装配的结构化判断对象现场
+    # 渲染（读数/机制/替代解释/下一观察的支持与削弱条件）。有它就**不再**另印
+    # `## 三项主判断（先看这里）`、旧的逐问首屏与 `## 关键发现`（那是四套摘要拼接的根源）。
+    # 没有它（旧结构、旧版本回放、离线场景）时**原有行为一字不变**。
+    _reader_front = str(structure.get("reader_judgments_front") or "").strip()
+    if _reader_front:
+        lines.append(_reader_front if _reader_front.endswith("\n") else _reader_front + "\n")
     # X0（阶段X §3）：**三项主判断放前两页**——由 `analysis_front` 现场生成（与正文/卡/图
     # 同一次装配），完整七段式在 `analysis/analysis_detail.md`（详表另附）。此前判断被压在
     # 第 8 页（正常洋河 19 页 PDF），读者翻不到结论。
-    _front = str(structure.get("analysis_front") or "").strip()
+    _front = "" if _reader_front else str(structure.get("analysis_front") or "").strip()
     if _front:
         lines.append(_front if _front.endswith("\n") else _front + "\n")
     # X1（阶段X §4）：**研究续页**紧跟三项主判断（同一页序：上次假说 → 本期读数 → 怎么变）
@@ -2774,8 +2800,9 @@ def render_brief_markdown(structure: dict, body: str = "",
     # R3：**首屏先给二至三个关键判断**（观察/意义/依据/边界/下一步），完整逐问明细在
     # 紧随其后的『研究问题与下一步』；两处不重复打印同一组观察。
     questions = structure.get("research_questions") or []
-    _picks = [q for q in questions if str(q.get("metric")) in ("revenue", "net_profit",
-                                                               "operating_cashflow")][:3]
+    _picks = [] if _reader_front else [
+        q for q in questions if str(q.get("metric")) in ("revenue", "net_profit",
+                                                         "operating_cashflow")][:3]
     if _picks:
         lines.append("## 关键判断与下一步")
         for q in _picks:
@@ -2806,17 +2833,19 @@ def render_brief_markdown(structure: dict, body: str = "",
             lines.append(f"  - 下一步：{'、'.join((q.get('plan') or {}).get('next_material', '').split('、')[:3]) or '补齐底稿事实'}"
                          f"（补到后会怎样改变判断见附录『逐问题资料计划』）")
         lines.append("")
-    lines.append("## 关键发现")
-    findings = structure.get("findings") or []
-    if findings:
-        for f in findings[:3]:
-            lines.append(f"- {f.get('text')}")
-        if len(findings) > 3:
-            lines.append(f"- 其余 {len(findings) - 3} 项读数与全部同比/比率见『财务对照』与"
-                         f"『同比与比率（可复算）』（本节不重复）。")
-    else:
-        lines.append("- 本次未取得可复算的财务事实（见文末资料缺口）。")
-    lines.append("")
+    # 10-06 复核 §6.3-5：分层——首屏已给读数，`## 关键发现` 不再单列（有唯一首屏时）。
+    if not _reader_front:
+        lines.append("## 关键发现")
+        findings = structure.get("findings") or []
+        if findings:
+            for f in findings[:3]:
+                lines.append(f"- {f.get('text')}")
+            if len(findings) > 3:
+                lines.append(f"- 其余 {len(findings) - 3} 项读数与全部同比/比率见『财务对照』与"
+                             f"『同比与比率（可复算）』（本节不重复）。")
+        else:
+            lines.append("- 本次未取得可复算的财务事实（见文末资料缺口）。")
+        lines.append("")
     # D3/R1：研究问题与下一步——每项含观察、**材料分类与覆盖**、推断边界、核查动作。
     # 材料分类只读逐问题评估结果（`support.kind`），问题区不再自行判断。
     questions = structure.get("research_questions") or []
@@ -2986,6 +3015,26 @@ def render_brief_markdown(structure: dict, body: str = "",
     lines.append("")
     lines.append("## 财务对照")
     rows = table.get("rows") or []
+
+    def _cell(r, y):
+        """单元格金额按**读者口径**写（亿元、两位小数）。
+
+        10-06 复核 §6.3-5：此前 61 行原始"元"值（`33126277551.51元`）把两页版面吃光。
+        亿元写法是验收认可的**等价写法**（`_num_forms` 生成 元/万元/亿元 × 2~4 位小数），
+        但**事实行本身必须留在正文**——派生读数（Δ毛利/Δ归母净利）靠这些已定位行做差额
+        接地；把整张表移出正文会让溯源率掉到 66%（实测）。
+        """
+        v = (r.get("values") or {}).get(y)
+        if v is None:
+            return "—"
+        unit = str(r.get("unit") or "")
+        if unit == "元":
+            try:
+                return f"{float(v) / 1e8:,.2f}亿元"
+            except (TypeError, ValueError):
+                pass
+        return f"{v}{unit}"
+
     if rows:
         # 表里只放金额与来源；**同比不在这里重复**——派生读数集中在下一块并带公式，
         # 验收按"逐个出现"判定，同一数字出现两次而只有一次带公式会拉低溯源率
@@ -2993,15 +3042,9 @@ def render_brief_markdown(structure: dict, body: str = "",
         lines.append("| " + " | ".join(cols) + " |")
         lines.append("|" + "---|" * len(cols))
         for r in rows:
-            # 单元格写成 `1741.44亿元`（数字与单位之间不留空格）：验收按"数值 + 单位"
-            # 配对溯源，隔一个空格就只认到裸数字 → 判不可溯源
-            unit = str(r.get("unit") or "")
-            vals = []
-            for y in periods:
-                v = (r.get("values") or {}).get(y)
-                vals.append("—" if v is None else f"{v}{unit}")
             src = f"[{r.get('source_n')}]" if r.get("source_n") else "—"
-            lines.append("| " + " | ".join([str(r.get("label"))] + vals
+            lines.append("| " + " | ".join([str(r.get("label"))]
+                                           + [_cell(r, y) for y in periods]
                                            + [str(r.get("caliber") or "—"), src])
                          + " |")
     quality = table.get("quality") or []
@@ -3382,8 +3425,7 @@ GENERATED_ANALYSIS_SECTIONS = ("## 三项主判断（先看这里）", "## 研�
 # `分析摘要` 里的**空位声明**：没有经营研究组合运行时，卡片只写这句话＋底稿指针——
 # 它说明"本次不出摘要"，本身不是分析内容（判定"有没有实质分析"时不得算数）。
 ANALYSIS_EMPTY_SUMMARY_MARK = "本次已验证运行不属于"
-BRIEF_SECTIONS = ("## 三项主判断（先看这里）", "## 研究续页（可检验）",
-                  "## 关键判断与下一步", "## 关键发现",
+BRIEF_SECTIONS = ("## 三项主判断（先看这里）", "## 研究续页（可检验）",                  "## 关键判断与下一步", "## 关键发现",
                   "## 业务背景", "## 财务对照", "## 图表", "## 分析",
                   "## 分析卡", *GENERATED_ANALYSIS_SECTIONS,
                   "## 变化解释", "## 风险与核查", "## 附录", "## 参考来源")
@@ -3394,22 +3436,39 @@ BRIEF_SECTIONS = ("## 三项主判断（先看这里）", "## 研究续页（可
 # 的整段本就不必占版面。这里按**登记的标题**把这几段移进
 # `analysis/analysis_detail.md`（随包交付），主文只留必要结论、边界与一行指针。
 #
-# **刻意不移 `## 研究问题与下一步`**：它不是"重复的详表"，而是**必要结论与边界的
+# **不移 `## 研究问题与下一步`**：它不是"重复的详表"，而是**必要结论与边界的
 # 载体**——每一条都写着"未取得对应披露／观察成立、原因待证／总负债下降**不等于**
 # 短期偿债安全"。上一轮收束（`50c9f84`）把整段移走后，冻结期望里 6 条短语消失
 # （`原因待证`/`未取得对应披露`/`不等于`/`不表示利润有现金支撑`/`金融机构`/`不呈现`），
 # CI 判死、被迫回退（`962afde`）。**移出详表可以，移出边界不行。**
 #
-# 口径：只移"**另有完整附件的论证线**"与"**标识/定位/元数据详表**"这两类。
-# 凡是**别人按它判状态或判读数**的小节，一律留在主文——每移一节都要先问"谁在读它"；
-# 本轮三次收窄（`## 分析`／`## 分析摘要`／`### 金额变化（可复算）`）都是被读它的人逼出来的。
+# 口径：只移"**另有一份完整投影**（附件论证线／旧稿审计）"与"**标识/定位/元数据查表**"
+# 这两类。凡是**别人按它判状态或判读数**的小节，一律留在主文——每移一节都要先问
+# "谁在读它"；收窄记录（`## 研究问题与下一步`／`### 金额变化（可复算）`／`## 分析`／
+# `## 分析摘要`）都是被读它的人逼出来的；`## 分析` 后来能移，是因为**先迁移了哨兵**。
 COMPACT_MOVE_TITLES = (
+    # 模型散文（旧 LLM 整稿）：**只留审计**，不再作为第二篇报告嵌在读者主文里
+    # （10-06 复核 §6.3-4）。它同时是"简报套简报"的来源（模型正文里带着上一版整篇简报时，
+    # 这一节会把整篇再印一遍——实测 27 页）。原先留它只为给交付硬门槛当哨兵；
+    # 现在哨兵改成**跟着正文走的判据标记**（`ANALYSIS_GATE_MARK`，见 `_analysis_gate_verdict`）。
+    "## 分析",
+    # 卡片摘要（三行）与论证线重复，读者已由唯一首屏拿到读数
+    "## 分析摘要",
     # 七段式论证线（4–6 页那一段）——完整版在 `analysis/analysis_detail.md`
     "## 经营驱动分析正文",
+    # 发行人披露的量价/结构**查表**（10-06 复核 §6.3-5：完整桥、查表、定位随包）
+    "## 量价与结构（发行人披露）",
+    # 背景也是"随包"的一层：背景不是经营解释（解释与边界在 `## 变化解释`/`## 风险与核查`）
+    "## 业务背景",
     # 附录详表（"ID 详表"另附；主文只留结论、边界与指针）
     "### 字段位置与计算底稿", "### 逐问题资料计划",
+    "### 分析摘要选择说明",
     "### 比率适用条件", "### 图表元数据（内部标识）", "### 其他核查项",
 )
+# 哨兵已迁移：`## 分析`（旧 LLM 整稿）与 `## 分析摘要` 现在**可以移出**——交付硬门槛改读
+# **结构判据**（`delivery_pipeline._has_deliverable_analysis`：reader_judgments /
+# analysis_note / analysis 是否占位句），不再依赖正文里有没有 `## 分析` 这个标题。
+# 历史教训保留在此（曾经移走 `## 分析` 导致"报告步骤失败的稿子被判 verified"）。
 # **不移 `## 分析`**：它是**模型散文槽位**，槽位里的"本次未产出可交付的分析正文"
 # 是交付硬门槛读的**状态哨兵**。移走它以后，`_has_analysis_section` 会撞上"正文里没有
 # `## 分析` ⇒ 不是研究简报、不判"的免伤分支，于是**报告步骤失败的稿子被判成 verified**
@@ -3543,6 +3602,60 @@ def write_analysis_detail(path, detail: str) -> str:
     return text
 
 
+def _analysis_gate_verdict(body: str, *, card: str = "", note: str = "") -> bool:
+    """交付硬门槛的"有没有可交付分析"**判决**——在装配时算一次并存进结构对象。
+
+    10-06 复核 §5-1："将标题哨兵依赖迁移到已有结构/交付类型判据"。这里同时拿得到
+    **未收束的模型正文**（`body`）与装配器生成的论证线（`card`/`note`），所以判据可以
+    一次算清：硬门槛以后只读这个结论，不再依赖交付正文里有没有 `## 分析` 这个标题——
+    否则主文收束把那一节移出后，"报告步骤失败的稿子"会被判成 verified（实测过）。
+
+    判据与旧文本判据**同形**（不改语义）：
+    - 正文里没有 `## 分析` ⇒ 不是研究简报，**不判**（通用报告不误伤）；
+    - 模型散文缺位（占位句/工程收尾/空）⇒ 要有装配器论证线（≥60 字符）；
+    - 散文在 ⇒ 散文＋论证线合计 ≥60 字符。
+    """
+    text = str(body or "")
+    if "## 分析" not in text:
+        return True
+    section = _brief_analysis_section(text).strip()
+    generated = ""
+    if card and ANALYSIS_EMPTY_SUMMARY_MARK not in card:
+        generated += card
+    if note:
+        generated += "\n" + note
+    _placeholder = ("本次未产出可交付的分析正文" in section) or bool(
+        __import__("re").search(r"^##\s*Task Report\s*$|^\s*Steps:\s*\d+\s*\(\d+\s*OK,\s*\d+\s*failed\)",
+                                section, __import__("re").M))
+    if _placeholder or not section:
+        return len(generated.strip()) >= 60
+    return len(section) + len(generated.strip()) >= 60
+
+
+# 交付硬门槛的判据**随正文走**（10-06 复核 §5-1 的哨兵迁移）：正文里带一行 HTML 注释，
+# 写明"这份交付到底有没有可交付分析"。它是装配时用**未收束的模型正文＋生成的论证线**算的，
+# 所以既不受主文收束影响，也不依赖"按任务名去磁盘读结构"（那种读法在重跑/多工作区时
+# 会拿到不同源的旧判决——实测让"报告步骤失败不得 verified"随读取顺序漂移）。
+ANALYSIS_GATE_MARK = "<!-- 交付分析判据:ok="
+
+
+def _read_gate_mark(text: str) -> str:
+    """从文本里读交付分析判据（`"1"` / `"0"` / `""`＝没有标记）。"""
+    s = str(text or "")
+    i = s.find(ANALYSIS_GATE_MARK)
+    if i < 0:
+        return ""
+    tail = s[i + len(ANALYSIS_GATE_MARK):]
+    val = tail.split("-->", 1)[0].strip()
+    return val if val in ("0", "1") else ""
+
+
+def _analysis_gate_verdict_for(structure: dict) -> bool:
+    """结构对象里已有的判决（`build_structure` 用未收束的模型正文算好的）。"""
+    v = (structure or {}).get("analysis_gate_ok")
+    return True if v is None else bool(v)
+
+
 def _rules_version() -> str:
     """当前独立验证规则集版本（取不到就空串 = 不比较，不假装匹配）。"""
     try:
@@ -3586,7 +3699,8 @@ def _analysis_context(task_id: str, *, ws_dir=None, evidence: dict | None = None
     ws = Path(ws_dir) if ws_dir is not None else _ws_mod.task_workspace(task_id)
     out: dict = {"picked": [], "notes": [], "by_model": {}, "scens": [], "cards": "",
                  "note": "", "front": "", "detail": "", "detail_file": "", "summary": [],
-                 "derived": [], "profit_decomposition": {},
+                 "derived": [], "profit_decomposition": {}, "wc_flow": {},
+                 "judgments": [], "reader_judgments": [],
                  "volume_price": {}, "volume_price_run": {}, "records": [], "locators": {},
                  "runs_meta": [], "gaps": [], "direct_cash": {},
                  "continuation": {}, "continuation_page": ""}
@@ -3656,9 +3770,14 @@ def _analysis_context(task_id: str, *, ws_dir=None, evidence: dict | None = None
         from financial_analysis import judgments as _jd
         ds = _fa_store.dataset_from_inputs(ws)
         out["direct_cash"] = _jd.direct_cash_of(ds, locators=prov)
+        # 10-06 复核 §6.2 第二条：现金流量表**补充资料**三项（应付/存货/应收），
+        # 与资产负债表余额变化是两个口径；读者要看到"是哪一项在缓冲"。
+        out["wc_flow"] = _jd.wc_flow_of(ds, locators=prov)
     except Exception as exc:                       # noqa: BLE001 - 取不到就不生成该判断
-        logger.warning("直接法收支读取失败（task=%s）：%s", task_id, str(exc)[:120])
+        logger.warning("直接法收支/营运资本补充资料读取失败（task=%s）：%s",
+                       task_id, str(exc)[:120])
         out["direct_cash"] = {}
+        out["wc_flow"] = {}
     out["cards"], out["gaps"] = _render_card_block(picked, notes, ws=ws)
     # X1（阶段X §4）：**研究续页**——工作区里落过 `analysis/continuation.json`（由一个小的
     # 续页比较模块生成）就渲染成前两页的一页；没有该文件时既有交付一字不变。
@@ -3677,21 +3796,26 @@ def _analysis_context(task_id: str, *, ws_dir=None, evidence: dict | None = None
     except Exception as exc:                       # noqa: BLE001 - 续页渲染失败不影响正文
         logger.warning("研究续页读取/渲染失败（task=%s）：%s", task_id, str(exc)[:120])
         out["continuation"], out["continuation_page"] = {}, ""
-    # 完整七段式判断明细**另附**（阶段X §3：主文只给三项主判断；详表不占正文版面）
+    # 完整七段式判断明细**另附**（阶段X §3：主文只给读者判断；详表不占正文版面）
     detail_rel = "analysis/analysis_detail.md"
     if picked:
         try:
             parts = _fa_note.research_brief(
                 picked, provenance=prov, charts=charts, label_of=_ml,
                 records=out["records"], volume_price=out["volume_price"] or None,
-                direct_cash=out["direct_cash"] or None, doc=None,
+                direct_cash=out["direct_cash"] or None,
+                wc_flow=out.get("wc_flow") or None, doc=None,
                 detail_hint=detail_rel)
             out["front"] = str(parts.get("front") or "")
             out["note"] = str(parts.get("note") or "")
             out["detail"] = str(parts.get("detail") or "")
+            # 10-06 复核 §6.3-1：结构化判断对象与首屏一起透传（唯一来源）
+            out["judgments"] = list(parts.get("judgments") or [])
+            out["reader_judgments"] = list(parts.get("reader_judgments") or [])
         except Exception as exc:                   # noqa: BLE001 - 渲染不出就不加这一节
             logger.warning("成篇正文渲染失败（task=%s）：%s", task_id, str(exc)[:140])
             out["front"] = out["note"] = out["detail"] = ""
+            out["judgments"], out["reader_judgments"] = [], []
     if out.get("detail"):
         try:
             ana = _fa_store.inputs_dir(ws)

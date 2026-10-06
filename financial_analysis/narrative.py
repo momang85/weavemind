@@ -946,7 +946,7 @@ def _engineering_index(runs, charts) -> list[str]:
 
 def research_brief(runs, *, provenance=None, charts=None, label_of=None,
                    records=None, doc=None, volume_price=None,
-                   direct_cash=None, detail_hint: str = "") -> dict:
+                   direct_cash=None, wc_flow=None, detail_hint: str = "") -> dict:
     """已验证运行 → `{front, note, detail}`（X0：**输入收集齐后只渲染一次**）。
 
     - `front`：三项主判断（前两页读得到：判断句＋关键读数＋依据位置＋会削弱它的读数）；
@@ -968,7 +968,8 @@ def research_brief(runs, *, provenance=None, charts=None, label_of=None,
     # （ui-17947f055b 的真实 A 采纳）。现在有情景运行就照常出正文（第五节的
     # 情景读数本来就是真实的金额），并把所选运行的**身份**写进正文。
     if od is None and cash is None and not scens:
-        return {"front": "", "note": "", "detail": ""}
+        return {"front": "", "note": "", "detail": "",
+                "judgments": [], "reader_judgments": []}
     entity = ""
     for r in (od, cash) + tuple(scens):
         if r is None:
@@ -999,19 +1000,24 @@ def research_brief(runs, *, provenance=None, charts=None, label_of=None,
                         + "：每个数字都能回查到运行与输出标识，完整标识见随包 "
                           "`analysis/analysis_detail.md` 的『附：底稿索引』。"
                           "未取到的披露项留在「未解释差额」，既不摊派也不当零。", ""]
-    # W2/X0：判断**只算一次**——主文取前三条做首屏摘要，完整七段式进 detail（另附）。
+    # W2/X0：判断**只算一次**——主文首屏取选出的 3–5 条，完整七段式进 detail（另附）。
+    # 10-06 复核 §6.3-1：结构化 `judgments` 必须**原样返回**并一路透传到
+    # `build_structure`，不能再让首屏/正文/覆盖各自从多份成文里凑判断。
     front: list[str] = []
     detail: list[str] = []
     js: list[dict] = []
+    reader: list[dict] = []
     try:
         from . import judgments as _jd
         js = _jd.research_judgments(runs, volume_price=volume_price, records=records,
-                                    direct_cash=direct_cash, limit=5)
-        front = _jd.render_judgment_summary(js, limit=3)
+                                    direct_cash=direct_cash, wc_flow=wc_flow, limit=0)
+        reader = _jd.select_reader_judgments(js, limit=5)
+        front = _jd.render_reader_judgments(
+            reader, detail_hint=detail_hint or "analysis/analysis_detail.md")
         detail = _jd.render_judgments(js)
         if detail:
             detail = ["## 研究判断明细（七段式，另附）", "",
-                      "> 主文只给三项主判断；这里是完整七段式——数字与贡献、原句与位置、"
+                      "> 主文只给读者判断；这里是完整七段式——数字与贡献、原句与位置、"
                       "支持边界、替代解释、观察与反转条件、缺口。**与主文同一次装配**"
                       "（同一批运行、同一批已准入披露）。", ""] + detail
     except Exception as exc:                 # noqa: BLE001 - 判断层出错不影响既有正文
@@ -1019,7 +1025,7 @@ def research_brief(runs, *, provenance=None, charts=None, label_of=None,
         lines.append("")
     if js and detail_hint:
         lines.append(f"- 完整七段式研究判断（全部原句/位置/替代解释/缺口）见 "
-                     f"`{detail_hint}`（随交付包提供）；主文只给三项主判断。")
+                     f"`{detail_hint}`（随交付包提供）；主文只给读者判断。")
         lines.append("")
     lines.append("### 一、结论（先看这三条）")
     for i, txt in enumerate(_conclusions(od, cash, scens), 1):
@@ -1180,7 +1186,11 @@ def research_brief(runs, *, provenance=None, charts=None, label_of=None,
     def _join(parts) -> str:
         return "\n".join(parts).rstrip() + "\n" if parts else ""
 
-    return {"front": _join(front), "note": _join(lines), "detail": _join(detail)}
+    return {"front": _join(front), "note": _join(lines), "detail": _join(detail),
+            # 10-06 复核 §6.3-1：**结构化判断对象**原样返回，供 `_analysis_context` /
+            # `build_structure` / 首屏 / 覆盖评估共用同一份（不再各自凑一套重点）。
+            "judgments": [dict(j) for j in js],
+            "reader_judgments": [dict(j) for j in reader]}
 
 
 def research_note(runs, *, provenance=None, charts=None, label_of=None,

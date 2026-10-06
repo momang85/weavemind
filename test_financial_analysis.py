@@ -4057,9 +4057,20 @@ class TestW2ResearchJudgments(unittest.TestCase):
         ids = [j["judgment_id"] for j in js]
         self.assertNotIn("volume_contraction", ids)
         self.assertNotIn("finished_goods_inventory_build", ids)
-        self.assertTrue(all("不足以下判断" in j["title"] or "无从判断" in j["title"]
-                            for j in js), [j["title"] for j in js])
-        self.assertTrue(all(j["gaps"] for j in js))
+        # 10-06：判断层现在还会产出**由真实读数驱动**的利润机制判断（`net_profit_change_detail`
+        # 在本次运行里存在）——它不是编的。这条用例的本意是"**读数缺的那几类**不得编判断"，
+        # 所以按机制分组断言：量价/库存/结构这几类必须是"不足以下判断"占位，而不是空口结论。
+        _missing_mechanisms = ("volume_contraction", "unit_revenue_not_proof_of_pricing",
+                               "finished_goods_inventory_build", "product_region_structure")
+        for j in js:
+            if j["judgment_id"] in _missing_mechanisms:
+                self.assertTrue("不足以下判断" in j["title"] or "无从判断" in j["title"],
+                                j["title"])
+        # 有读数支撑的那条（利润机制）必须给出**可核的读数**，不能只有一句结论
+        _pm = next((j for j in js if j["judgment_id"] == "profit_mechanism_and_buffer"), None)
+        if _pm is not None:
+            self.assertTrue(_pm["numbers"], _pm)
+        self.assertTrue(all(j["gaps"] for j in js), [j["gaps"] for j in js])
 
     def test_cash_judgment_uses_the_working_capital_share(self):
         from financial_analysis import judgments as jd
@@ -4198,11 +4209,17 @@ class TestX0DeliveryClosure(unittest.TestCase):
         self.assertIn("吨价", str(ctx["volume_price"]["derived"]))
         self.assertTrue(ctx["volume_price"]["model_summary"], "运行摘要另存字段")
         self.assertIn("销量效应", str(ctx["volume_price_run"]["summary"]))
-        # ② 前两页的三项主判断带**关键读数**（销量 −16.30%／推算吨价 +3.93%／库存 +16.38%）
-        self.assertIn("三项主判断", ctx["front"])
+        # ② 首屏是**唯一**的『关键判断与下一步』，带**关键读数**
+        #    （销量 −16.30%／推算吨价 +3.93%／库存 +16.38%）。
+        #    10-06 复核 §4：不再另印『三项主判断（先看这里）』。
+        self.assertIn("## 关键判断与下一步", ctx["front"])
+        self.assertNotIn("三项主判断", ctx["front"])
         for needle in ("-16.30%", "推算吨价", "+3.93%", "+16.38%", "-8.40%"):
-            self.assertIn(needle, ctx["front"], f"首屏三项判断缺 {needle}")
+            self.assertIn(needle, ctx["front"], f"首屏判断缺 {needle}")
         self.assertIn("推算口径", ctx["front"], "推算身份必须写明")
+        # 结构化判断对象与首屏同源透传（§6.3-1）
+        self.assertTrue(ctx["reader_judgments"], "首屏判断对象要透传")
+        self.assertGreaterEqual(len(ctx["judgments"]), len(ctx["reader_judgments"]))
         # ③ 不再虚列"吨价输入缺口"：披露 facts/derived 真的进了判断
         self.assertNotIn("吨价推算所需的同口径收入/销量未取全", ctx["front"])
         self.assertNotIn("吨价推算所需的同口径收入/销量未取全", ctx["detail"])
@@ -4365,7 +4382,9 @@ class TestX0DeliveryClosure(unittest.TestCase):
         self.assertIn("其余经营活动收支", joined)
         self.assertIn("-27.06", joined)
         self.assertIn("**间接法**", joined)
-        self.assertIn("合并净利润项 +14.86 亿元", joined)
+        # 10-06 起金额与单位**不留空格**（`+14.86亿元`）：验收按"数值+单位"配对溯源，
+        # 隔一个空格只认到裸数字 ⇒ 判不可溯源（实测：新首屏因此掉到 66%）。
+        self.assertIn("合并净利润项 +14.86亿元", joined)
         self.assertIn("其他调节项", joined)
         # 净利项**不是**直接法"其余收支"的其中项（旧稿写法「其中合并净利润项只 …」）
         self.assertNotIn("其中合并净利润项", joined)

@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """真实交付链回归测试：搜索相关性过滤、file_io 落盘逻辑、code_execution 命名。"""
 import asyncio
 import hashlib
@@ -6401,27 +6401,54 @@ class TestResearchBriefAssembly(unittest.TestCase):
             "完整卡与运行标识见下方底稿。\n"))
 
     def test_main_body_compaction_must_not_disarm_the_analysis_gate(self):
-        """主文收束（§11.2）不得移走硬门槛读的**状态哨兵**与**分析摘要**。
+        """主文收束（§11.2）不得让交付硬门槛失效。
 
-        **实测缺陷，不是假设**：把 `## 分析` 一起移出后，`_has_analysis_section`
-        撞上"正文里没有 `## 分析` ⇒ 不是研究简报、不判"的免伤分支，于是**报告步骤失败的
-        稿子被判成 verified**——`test_offline_delivery.test_body_model_failure_keeps_
-        recomputable_paper` 由 pass 变 fail，还原 `compact_main_body` 后即恢复（已做归因）。
-        所以"哪些小节不许移"必须在清单上钉住，而不是靠注释提醒。
+        **实测缺陷，不是假设**：把 `## 分析` 移出后，旧的**正文标题判据**
+        `_has_analysis_section` 撞上"正文里没有 `## 分析` ⇒ 不是研究简报、不判"的免伤分支，
+        于是**报告步骤失败的稿子被判成 verified**（`test_offline_delivery.test_body_model_
+        failure_keeps_recomputable_paper` 由 pass 变 fail，还原后即恢复，已做归因）。
+
+        10-06 复核 §5-1 的处理是**迁移哨兵**而不是禁止移动：硬门槛改读**结构判据**
+        （`_has_deliverable_analysis`：reader_judgments／论证线长度／模型散文是否缺位）。
+        所以这条守卫钉两件事：① 仍按读数/边界判的小节不许移；② 结构判据本身必须是决定性的
+        ——空散文＋无读者判断＋无论证线时，**即使正文里根本没有 `## 分析` 这个标题**也判"没有分析"。
         """
         import report_brief
         import delivery_pipeline as dp
-        for keep in ("## 分析", "## 分析摘要", "## 研究问题与下一步",
-                     "### 金额变化（可复算）"):
+        for keep in ("## 研究问题与下一步", "### 金额变化（可复算）"):
             self.assertNotIn(keep, report_brief.COMPACT_MOVE_TITLES,
                              f"这一节有别的读者按它判状态/判读数，收束不得移出：{keep}")
-        # 哨兵在、而装配器生成的分析线被移走 ⇒ 仍判"没有可交付的分析"
-        placeholder_body = (
-            "# 示例 经营分析简报\n\n## 分析\n\n> 本次未产出可交付的分析正文"
-            "（数据与底稿已保留，见文末）。\n\n## 分析摘要\n\n"
-            "- 本次已验证运行不属于**经营研究组合**（经营驱动／现金调节桥／条件情景）："
-            "主正文不出分析摘要，完整卡与运行标识见下方底稿。\n")
-        self.assertFalse(dp._has_analysis_section(placeholder_body))
+        # ① 结构判据：散文空位（空串或占位句）＋无读者判断＋无论证线 ⇒ 没有可交付分析
+        for state in ({"placeholder": True, "prose_len": 0, "generated_len": 0,
+                       "reader_judgments": 0},
+                      {"placeholder": True, "prose_len": 30, "generated_len": 0,
+                       "reader_judgments": 0},
+                      {"placeholder": False, "prose_len": 10, "generated_len": 0,
+                       "reader_judgments": 0}):
+            _orig = dp._structure_analysis_state
+            try:
+                dp._structure_analysis_state = lambda _t, _s=state, **kw: dict(_s)
+                self.assertFalse(dp._has_deliverable_analysis("t", "正文里没有那个标题"),
+                                 f"结构判据必须是决定性的：{state}")
+            finally:
+                dp._structure_analysis_state = _orig
+        # ② 有条读者判断就够（那正是收束后主文留给读者的东西）
+        _orig = dp._structure_analysis_state
+        try:
+            dp._structure_analysis_state = lambda _t, **kw: {
+                "placeholder": True, "prose_len": 0, "generated_len": 0,
+                "reader_judgments": 3}
+            self.assertTrue(dp._has_deliverable_analysis("t", ""))
+        finally:
+            dp._structure_analysis_state = _orig
+        # ③ 结构对象读不到时才退回正文文本判据（旧行为不变）
+        _orig = dp._structure_analysis_state
+        try:
+            dp._structure_analysis_state = lambda _t, **kw: None
+            self.assertFalse(dp._has_analysis_section(
+                "## 分析\n\n> 本次未产出可交付的分析正文（数据与底稿已保留，见文末）。\n"))
+        finally:
+            dp._structure_analysis_state = _orig
 
     def test_analysis_gate_reads_the_moved_argument_line_from_the_attachment(self):
         """被移走的论证线仍算"有分析"：硬门槛要连着另附底稿一起判，否则好报告被降级。"""

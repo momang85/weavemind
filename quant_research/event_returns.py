@@ -141,6 +141,23 @@ def _series(payload: dict, code: str) -> list[tuple[str, float]]:
     return out
 
 
+def _avail_map(payload: dict, code: str) -> dict:
+    """逐行 `available_at`（只收**显式声明**的行；未声明的不进表，按常规口径处理）。
+
+    10-06 复核 §3B："采集时间和市场可用时间不能混同"——这里只认行情行自己的
+    `available_at`（市场可用时点），缺失就不设门槛，不用采集时间冒充。
+    """
+    out: dict[str, str] = {}
+    for r in (payload.get("data") or ()):
+        if str(r.get("code") or r.get("instrument") or "") != str(code):
+            continue
+        d = str(r.get("date") or "")[:10]
+        av = str(r.get("available_at") or "").strip()[:10]
+        if d and av:
+            out[d] = av
+    return out
+
+
 def _slice(payload: dict, code: str, event_date: str, offsets, *,
            feature_cutoff: str = "", evaluation_as_of: str = "",
            calendar: dict | None = None) -> dict:
@@ -167,11 +184,32 @@ def _slice(payload: dict, code: str, event_date: str, offsets, *,
     ser = _series(payload, code)
     if not ser:
         return {"ok": False, "reason": f"数据集里没有 {code} 的行"}
+    # 10-06 复核 §3B：**逐行 `available_at` 必须真正约束结果**。此前它只被读进
+    # `available_at_upper_bound` 这个上界字段，"有行即 observed"——于是评价时点评在
+    # 2025-01-02、而未来两天（01-03/01-06）的价格仍被算成 +10%／+20% observed
+    # （复核给了可复现输入输出）。这里把"该行在评价时点是否已可得"变成**门槛**：
+    #   · 只对**显式声明** `available_at` 的行设门槛（未声明的按"交易日收盘即可得"的
+    #     常规口径处理，不凭空造限）；采集时间与市场可用时间分开，各自只用于自己的判据。
+    #   · 门槛不过 ⇒ 该点 `pending`（"尚不可得"），**不是** missing（那会暗示停牌/缺数据）。
+    avail_of = _avail_map(payload, code)
+    if asof:
+        held = {d for d, av in avail_of.items() if av and av > asof}
+    else:
+        held = set()
+    # 锚点是**特征侧**价格：它必须在特征截点就可获得，否则就是倒灌
+    _anchor_av = avail_of.get(str(ser[0][0])) or ""
     before = [i for i, (d, _) in enumerate(ser) if d <= cut]
     if not before:
         return {"ok": False,
                 "reason": f"{code} 在特征截点 {cut} 当日及之前没有交易日行（缺锚点，无法定价格起点）"}
     anchor_i = before[-1]
+    _anchor_date = str(ser[anchor_i][0])
+    _anchor_av = avail_of.get(_anchor_date) or ""
+    if _anchor_av and _anchor_av > cut:
+        return {"ok": False,
+                "reason": (f"锚点交易日 {_anchor_date} 的行情在特征截点 {cut} 尚不可得"
+                           f"（逐行 available_at={_anchor_av}）⇒ 该特征不可用于当时判断"
+                           "（不倒灌成锚点）")}
     if anchor_i + 1 >= len(ser):
         return {"ok": False, "reason": f"{code} 在特征截点 {cut} 之后没有交易日行"}
     base_i = anchor_i + 1
@@ -202,6 +240,13 @@ def _slice(payload: dict, code: str, event_date: str, offsets, *,
                                     "（不记为 missing，避免暗示停牌）")}
                 continue
             if target in row_of:
+                if target in held:
+                    pts[f"t{off:+d}"] = {
+                        "date": target, "close": None, "state": "pending",
+                        "unavailable": (f"该交易日行情在评价时点 {eff_asof} 尚不可得"
+                                        f"（逐行 available_at={avail_of.get(target)}）"
+                                        "⇒ 记为未成熟，不当作已观察结果")}
+                    continue
                 pts[f"t{off:+d}"] = {"date": target, "close": row_of[target],
                                      "state": "observed"}
                 continue
@@ -218,6 +263,14 @@ def _slice(payload: dict, code: str, event_date: str, offsets, *,
             continue
         i = base_i + off
         if 0 <= i < len(ser):
+            _d = str(ser[i][0])
+            if _d in held:
+                pts[f"t{off:+d}"] = {
+                    "date": _d, "close": None, "state": "pending",
+                    "unavailable": (f"该交易日行情在评价时点 {eff_asof} 尚不可得"
+                                    f"（逐行 available_at={avail_of.get(_d)}）"
+                                    "⇒ 记为未成熟，不当作已观察结果")}
+                continue
             pts[f"t{off:+d}"] = {"date": ser[i][0], "close": ser[i][1], "state": "observed"}
             continue
         # 没有日历时：超出数据集范围，分清"未满"与"缺行情"（**都不补 0**）

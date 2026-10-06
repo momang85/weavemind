@@ -3550,8 +3550,12 @@ class OrchestratorV2(ChartPipelineMixin, StructuredPipelineMixin):
         这里保留实例语义：把门槛原因写进 `_delivery(task_id)["hard_fail"]`，
         供准入判定与终态派生使用；返回要附加到交付物的一段说明。
         """
-        from delivery_pipeline import apply_research_hard_gate
-        note, hard_fail = apply_research_hard_gate(task_id, goal, wp, report_body)
+        from delivery_pipeline import apply_research_hard_gate, _rb_gate_structure
+        # 10-06 复核 §5-1：硬门槛的"有没有分析"判决跟着**本次要交付的正文**走
+        # （而不是按任务名去磁盘读结构——同名任务多工作区时会读到不同源的旧结构）
+        note, hard_fail = apply_research_hard_gate(
+            task_id, goal, wp, report_body,
+            structure=_rb_gate_structure(task_id, report_body))
         if hard_fail:
             self._delivery(task_id)["hard_fail"] = hard_fail
         return note
