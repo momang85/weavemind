@@ -1062,6 +1062,11 @@ def _derived_body_semantics(n: dict, clause: str, at: int, f: dict) -> str:
     return ""
 
 
+def _pct_unit(unit) -> bool:
+    """单位是不是百分比（量纲判定用：金额与百分比不得互认）。"""
+    return str(unit or "").strip().endswith("%")
+
+
 def _match_derived_fact(n: dict, report: str, facts: list[dict],
                         *, goal: str = "") -> str | None:
     """报告里的数字能否对上某条**复算通过**的派生事实 → 命中标记或 None。
@@ -1100,7 +1105,13 @@ def _match_derived_fact(n: dict, report: str, facts: list[dict],
             continue
         f_scale = _amount_unit_scale(str(f.get("unit") or "")) or (
             1.0 if str(f.get("unit") or "").endswith("%") else 0.0)
-        if not f_scale or abs(f_scale - scale) > 1e-9:
+        # **量纲一致**即可，不要求缩放系数完全相等：金额 vs 百分比不得互认（否则"营收同比
+        # −12.83%"能被某个金额事实借走），但**同一量纲内**允许元/万元/亿元换算——正文按读者
+        # 口径写"33.43亿元"、底稿按"元"记，是本项目的既定等价写法（`_num_forms` 同一约定）。
+        # 此前这里要求 `abs(f_scale - scale) <= 1e-9`，于是亿元读数永远配不上以元记的派生事实：
+        # 10-06 正常入口实测，唯一首屏的 33.43／38.01 亿元全部落在"不可溯源"示例里
+        # （数字溯源率被压到阈值边缘，且压页时一移走原始行就跌到 67% 判死）。
+        if not f_scale or (_pct_unit(f.get("unit")) != _pct_unit(unit)):
             continue
         if not _close(abs(v) * scale, abs(fv) * f_scale):
             continue

@@ -1239,6 +1239,57 @@ _READER_TABLE_METRICS = (
 )
 
 
+def _table_values(row: dict) -> list[float]:
+    out = []
+    for v in (row.get("values") or {}).values():
+        try:
+            out.append(float(v))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _formula_numbers(quality) -> list[float]:
+    """派生读数算式里的操作数（元）——这些原始行必须留在正文，派生读数才能接地。"""
+    nums: list[float] = []
+    for q in (quality or ()):
+        f = str(q.get("formula") or "")
+        for tok in re.findall(r"\d+(?:\.\d+)?(?:[eE][+-]?\d+)?", f):
+            try:
+                nums.append(float(tok))
+            except ValueError:                       # noqa: PERF203 - 极少数坏 token
+                continue
+    return nums
+
+
+def _split_table_rows(rows, quality, body_text: str):
+    """把指标表拆成**正文保留**与**移附件**两半（10-06 复核 §6.3-5 的"底稿另附"落地）。
+
+    保留判据（任一成立即留）：
+    ① `_READER_TABLE_METRICS` 登记的核心指标（读者判断直接引用）；
+    ② 该行任一期数值出现在**派生算式**里（Δ毛利／Δ归母净利／比率都是"两个已定位行的差额"，
+       移走操作数行会让派生读数无处接地 —— 上一轮整表移出实测溯源率掉到 66%）；
+    ③ 该行 label 已经在本页之前的正文里出现过（读数被引用过就得能查）。
+
+    移出的是**没被引用的长尾明细**：它们仍随包（附件里的完整表 ＋ `working_paper.csv`），
+    只是不再占正文版面。
+    """
+    keep_metrics = set(_READER_TABLE_METRICS)
+    formula_nums = _formula_numbers(quality)
+    kept, moved = [], []
+    for r in (rows or ()):
+        metric = str(r.get("metric") or "")
+        label = str(r.get("label") or "")
+        keep = metric in keep_metrics or (label and label in str(body_text or ""))
+        if not keep and formula_nums:
+            for v in _table_values(r):
+                if any(abs(v - fn) <= max(0.01, abs(fn) * 1e-6) for fn in formula_nums):
+                    keep = True
+                    break
+        (kept if keep else moved).append(r)
+    return kept, moved
+
+
 def _metrics_table(rows, derived, periods, citations, req, source_url: str = "",
                    subject_type: str = "", confirmed: bool = True) -> dict:
     """指标 × 期间 的对照表 + 同比/比率列（数值、口径、来源编号）。
@@ -3019,6 +3070,11 @@ def render_brief_markdown(structure: dict, body: str = "",
     lines.append("")
     lines.append("## 财务对照")
     rows = table.get("rows") or []
+    quality_all = table.get("quality") or []
+    # 10-06 复核 §6.3-5「底稿另附」落地：正文只留**被引用/被算式用到**的指标行，长尾明细
+    # 移附件（附件＝`analysis/analysis_detail.md`，随包；原始底稿另在 `working_paper.csv`）。
+    # 判据见 `_split_table_rows`：整表移出会让派生读数无处接地（实测溯源率 66% 判死）。
+    rows, _rows_moved = _split_table_rows(rows, quality_all, "\n".join(lines))
 
     def _cell(r, y):
         """单元格金额按**读者口径**写（亿元、两位小数）。
@@ -3052,6 +3108,25 @@ def render_brief_markdown(structure: dict, body: str = "",
                                            + [str(r.get("caliber") or "—"), src])
                          + " |")
     quality = table.get("quality") or []
+    if _rows_moved:
+        # 移出的明细在附件里**照原样给全**（同一张表的同几列），正文只留一行指针：
+        # 读者要查长尾科目时知道去哪查，正文不再被 40+ 行明细占满。
+        lines.append("")
+        lines.append(f"- 其余 {len(_rows_moved)} 项明细指标（含口径与来源）见随包附件"
+                     "`analysis/analysis_detail.md`『完整指标表（其余指标）』；"
+                     "全部原始事实（逐行定位）见包内 `working_paper.csv`。")
+        _appendix_extra.append(("### 完整指标表（其余指标）", [
+            f"（正文只保留被引用/被算式用到的 {len(rows)} 项；以下 {len(_rows_moved)} 项"
+            "为长尾明细，原始值见 `working_paper.csv`）",
+            "",
+            "| " + " | ".join(["指标"] + [str(y) for y in periods] + ["口径", "来源"]) + " |",
+            "|" + "---|" * (len(periods) + 3),
+            *["| " + " | ".join([str(r.get("label"))]
+                                + [_cell(r, y) for y in periods]
+                                + [str(r.get("caliber") or "—"),
+                                   f"[{r.get('source_n')}]" if r.get("source_n") else "—"])
+              + " |" for r in _rows_moved],
+        ]))
     if quality:
         lines.append("")
         # 每个派生读数**紧贴括号公式**（`15.66%（(1741.44 - 1505.6) / 1505.6 * 100）`）：
@@ -3470,6 +3545,10 @@ COMPACT_MOVE_TITLES = (
     "### 字段位置与计算底稿", "### 逐问题资料计划",
     "### 分析摘要选择说明",
     "### 比率适用条件", "### 图表元数据（内部标识）", "### 其他核查项",
+    # 10-06：财务对照的**长尾明细**（没被引用/没被算式用到的指标行）也移附件——
+    # 正文保留被引用/被算式用到的那些行（`_split_table_rows`），整表移出会让派生读数
+    # 无处接地（实测溯源率 66% 判死）。
+    "### 完整指标表（其余指标）",
 )
 # 哨兵已迁移：`## 分析`（旧 LLM 整稿）与 `## 分析摘要` 现在**可以移出**——交付硬门槛改读
 # **结构判据**（`delivery_pipeline._has_deliverable_analysis`：reader_judgments /

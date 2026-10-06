@@ -1,15 +1,15 @@
 {
  "report_version_id": "69c32263b36ae117a5187689af343bfe69a8151e780b2cdcca7772e0884e4f5d",
  "body_sha256": "9635fdee8f19f0046163df481254cc9e905a4e9b0574e7e7c1829ee6ed58acbc",
- "acceptance_overall": "fail",
+ "acceptance_overall": "pass",
  "accepted_body_matches": true,
- "delivered_body_sha256": "7c4ccff32ac1179bae5f5bc0071463864ffbe1a9335fc2255b3fc29186319673",
- "final_content_sha256": "7c4ccff32ac1179bae5f5bc0071463864ffbe1a9335fc2255b3fc29186319673",
+ "delivered_body_sha256": "0daec4279488c08bd64d82d2e4ca56d564fd5817cf79eeb15b7012eebdbcd930",
+ "final_content_sha256": "0daec4279488c08bd64d82d2e4ca56d564fd5817cf79eeb15b7012eebdbcd930",
  "final_content_matches": true,
  "aligned": true,
- "status": "draft",
- "draft": true,
- "draft_reason": "验收未通过（overall=fail）",
+ "status": "verified",
+ "draft": false,
+ "draft_reason": "",
  "review_valid": true,
  "hard_fail": "",
  "working_paper": {
@@ -68,7 +68,7 @@
    "evidence_fingerprint": "0ca31933508e2034",
    "rules_version": "2026.10.03",
    "rules_fingerprint": "b98aef94",
-   "logic_fingerprint": "d2a48cdb83b9ffe5",
+   "logic_fingerprint": "5506c4325ccdb84a",
    "contract_fingerprint": "",
    "contract": null
   },
@@ -79,8 +79,8 @@
  "template_version": "default",
  "files": {
   "markdown": {
-   "sha256": "7c4ccff32ac1179bae5f5bc0071463864ffbe1a9335fc2255b3fc29186319673",
-   "bytes": 23052
+   "sha256": "0daec4279488c08bd64d82d2e4ca56d564fd5817cf79eeb15b7012eebdbcd930",
+   "bytes": 22861
   },
   "working_paper_json": {
    "sha256": "0050fdea52007729fdb2a5ee88e3c10d26ab32908d521d4b4c196854428bff92",
@@ -91,15 +91,15 @@
    "bytes": 6318
   },
   "pdf": {
-   "sha256": "f1ad7b5c2e01a532605dc9a9d19828ebe1ebcb731aad15b4a40d8bb2423fa1b3",
-   "bytes": 5520187
+   "sha256": "3a2191aee25878b6ceaffbff53b39939f517612fb3c306803e815199f95950ec",
+   "bytes": 5519713
   }
  },
  "client_side_renders": {
   "html_print": {
-   "source_body_sha256": "7c4ccff32ac1179bae5f5bc0071463864ffbe1a9335fc2255b3fc29186319673",
+   "source_body_sha256": "0daec4279488c08bd64d82d2e4ca56d564fd5817cf79eeb15b7012eebdbcd930",
    "byte_hash_available": false
   }
  },
- "generated_at": 1791293762.2375069
+ "generated_at": 1791295720.132046
 }

@@ -3543,6 +3543,40 @@ class TestAcceptanceChecker(unittest.TestCase):
         self.assertIsNone(_match_derived_fact(n2, other, [fact],
                                               goal="研究洋河股份 2023 与 2024 年的营业收入"))
 
+    def test_derived_amount_matches_across_amount_units_but_not_percent(self):
+        """同一量纲内允许元/万元/亿元换算；金额与百分比**不得互认**（10-06 实测反例）。
+
+        反例：正文按读者口径写"归母净利润变化 -33.43亿元"，底稿派生事实以**元**记
+        （-3342541438.15）。此前要求缩放系数完全相等 ⇒ 亿元读数永远配不上元记事实，
+        唯一首屏与财务对照里的关键读数全部落进"不可溯源"示例。
+        """
+        from acceptance_checker import _match_derived_fact
+        fact_yuan = {"value": -3342541438.15, "unit": "元", "subject": "洋河股份",
+                     "formula": "6673388602.12 - 10015930040.27",
+                     "inputs": ["fact-a", "fact-b"]}
+        clause = "- 关键读数：归母净利润变化 -33.43亿元（＝毛利端 ＋ 毛利线以下）"
+        report = "前言。" + clause
+        n = {"raw": "33.43亿元", "value": "33.43", "unit": "亿元",
+             "pos": report.index("33.43亿元")}
+        self.assertEqual(_match_derived_fact(n, report, [fact_yuan],
+                                            goal="研究洋河股份 2023 与 2024 年经营"),
+                         "workpaper_derived", "元/亿元是同一量纲，必须互认")
+        # 万元写法同样互认
+        n_wan = {"raw": "334254.14万元", "value": "334254.14", "unit": "万元",
+                 "pos": report.index("33.43亿元")}
+        self.assertEqual(_match_derived_fact(n_wan, report, [fact_yuan],
+                                            goal="研究洋河股份 2023 与 2024 年经营"),
+                         "workpaper_derived")
+        # 百分比事实不得给金额读数背书（量纲不同）
+        fact_pct = dict(fact_yuan, value=-33.43, unit="%")
+        self.assertIsNone(_match_derived_fact(n, report, [fact_pct],
+                                             goal="研究洋河股份 2023 与 2024 年经营"))
+        # 金额事实也不得给百分比读数背书
+        n_pct = {"raw": "33.43%", "value": "33.43", "unit": "%",
+                 "pos": report.index("33.43亿元")}
+        self.assertIsNone(_match_derived_fact(n_pct, report, [fact_yuan],
+                                             goal="研究洋河股份 2023 与 2024 年经营"))
+
     def test_abridged_quote_never_cuts_a_number_in_half(self):
         """C 批反例：摘录把 `378,003.53` 截成 `378,003.…` → 报告里的数字被判不可溯源。"""
         import re as _re

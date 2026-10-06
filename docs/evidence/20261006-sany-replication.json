@@ -169,16 +169,16 @@
   ]
  },
  "delivery": {
-  "status": "draft",
-  "reason": "验收未通过（overall=fail）",
+  "status": "verified",
+  "reason": "",
   "hard_fail": "",
   "review_valid": true,
   "review_reason": "",
-  "acceptance_overall": "fail",
+  "acceptance_overall": "pass",
   "note": "隔离验证不含 Critic 评审与检索来源两条轴：交付正文与三图按生产函数产出，验收状态如实停在草稿（不伪造评审通过）"
  },
  "pdf": {
-  "bytes": 5520187,
+  "bytes": 5519713,
   "pages_with_images": 2,
   "total_images": 3,
   "expected_images": 3,
@@ -209,8 +209,8 @@
   "plan.json"
  ],
  "package": {
-  "zip": "deliverables_20261006_213602_9a19a0.zip",
-  "bytes": 5638187,
+  "zip": "deliverables_20261006_220840_11c5e2.zip",
+  "bytes": 5637983,
   "entries": 16,
   "has_analysis": [
    "analysis/analysis_cards.md",
@@ -264,27 +264,27 @@
    "sha256": "119316c3d118bdd7"
   },
   "export_manifest.json": {
-   "bytes": 3744,
-   "sha256": "28a9d14c45a3727a"
+   "bytes": 3714,
+   "sha256": "c2eec954479ec441"
   },
-  "deliverables_20261006_213602_9a19a0.zip": {
-   "bytes": 5638187,
-   "sha256": "4dfc408530550195"
+  "deliverables_20261006_220840_11c5e2.zip": {
+   "bytes": 5637983,
+   "sha256": "555ac6a72e334769"
   },
   "report.md": {
-   "bytes": 23236,
-   "sha256": "ca4c83c14f9218df"
+   "bytes": 23042,
+   "sha256": "f6d9064f4051808b"
   },
   "report.pdf": {
-   "bytes": 5520187,
-   "sha256": "f1ad7b5c2e01a532"
+   "bytes": 5519713,
+   "sha256": "3a2191aee25878b6"
   },
   "screenshot_p5.png": {
    "bytes": 161944,
    "sha256": "635ee031f3acdc9f"
   }
  },
- "workspace": "C:\\Users\\ding0\\AppData\\Local\\Temp\\v0_yanghe_6tf8nxq5",
+ "workspace": "C:\\Users\\ding0\\AppData\\Local\\Temp\\v0_yanghe_6snt6wcb",
  "verification_boundary": {
   "verified": [
    "事实抽取→底稿→analysis worker 金融路径→三图→正文/摘要→装配验收→PDF/导出（同一条生产函数链，离线、零模型调用）"
