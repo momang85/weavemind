@@ -1,0 +1,35 @@
+{
+  "recorded_at": "2026-10-06T16:44:33.362585+08:00",
+  "review_baseline": "733ec89",
+  "previous_baseline": "91593fe",
+  "head_at_record": "733ec89f1102656ec67c0ea0a86676b831ce467c",
+  "file_sha256": {
+    "adapters/market_history.py": "c0decf6df02a6cea48d492cc5cab2a779718e83bc4986d7b1e7483f5bb83dfbb",
+    "adapters/trading_calendar.py": "e19b2ac589fba629b8e71ca60b93c304296abb2c3fe7891dc06231f295f423dc",
+    "quant_research/event_returns.py": "d3ad01729c429b43b86214c47ba94b736f371b3f799ad96383c468ed038ad718",
+    "quant_research/event_calendar.py": "a3202296df2fbacf659aa1a05de237a967606e53f2852e400feff3391fa89ba9",
+    "quant_research/backtest.py": "6eb7a6740705fe06c557c007aaafd62c028b237b443d2fa9a62381c26f244af1",
+    "quant_research/publish.py": "5b771332ffa4e2090be928d240aa41b1a96043dade6cec363dda12f85dcc932a",
+    "quant_research/qlib_adapter.py": "e4680b20f49bdfdc72ab91e0eaf916aa71c2b813f9b6999927ae5700f703138f",
+    "financial_analysis/judgments.py": "e71e03583dd95bde3aa17ff6116a13176bed0755fe33916baa74388a557f4a7f",
+    "financial_analysis/narrative.py": "6e5d764b932b0246098272099a0de31696cc7466e4da654d1d9b8225eddf6d2f",
+    "report_brief.py": "84b64a02423667e3b99257536059a9c776eb7925352a3bb336bbd875c3c9b1ce",
+    "delivery_pipeline.py": "12f34302a8daf2099d9d43663d99afcdfdc41bd2dfdd8fb429ef0d23277b9989",
+    "question_assessment.py": "f255aa111c632e038a99d9c2f7361efc6209a4a43270ede6eeb73d0d78aabd19",
+    "docs/DeepSeek执行状态.md": "f8f3ea5c9a76ada0adae4e16d90de963a3342c6aa7d79c95c44325f69af0fb5c",
+    "docs/总架构师执行指令.md": "bfc6bb5a569258139c9e657fb01ab50a4ad994e27ba9b58e96349a4ddd30b06c",
+    "docs/架构监督记录.md": "986d10b7ba78c33f9c9e6170516c9852152b04150078fee6572c68cc5787ade3",
+    "docs/evidence/y1_002304_risk_change_20261005.md": "afc819846c60f5895a61016f0acc3413a2ae3e6d6da0b355bfea5223bf9c1ada",
+    "docs/evidence/_y1_extract.json": "a24bc0ff4125a7e617da62c04dbd90355d29c7e26af10d8db3ab0f2477f2c98d",
+    "docs/evidence/20261006-report-review/review.md": "245e355c6c4e0501fd9440784a1b7372d462c19b201fb2ad13553cfcfb57b1a6",
+    "docs/evidence/20261006-report-review/artifact_checks.json": "63eea5534bf59caa44bf39398bf20b098d71873ee7d43008705fc107fb5505b3",
+    "docs/evidence/20261006-report-review/quant_counterexamples.md": "fb187adf07545463cc54a71584d3e130650051f6888076d625afc36a7b6743b6",
+    "docs/evidence/20261006-report-review/research_opportunity_checks.json": "43326a1648dacc926ed94878d43927554b3328b960bd2037ee3773be22e39356"
+  },
+  "dsh_message": {
+    "ui_time": "16:43",
+    "status": "visible_in_conversation_and_processing",
+    "screenshot": "docs/evidence/20261006-report-review/dsh-guidance-sent.png"
+  },
+  "note": "DSH resumed after review; fingerprint is a point-in-time record, not acceptance of subsequent changes. No full suite or normal download re-test by reviewer."
+}

@@ -315,6 +315,37 @@ class TestAnalysisWorkbenchEndpoints(_Base):
         self.assertIn("revenue_growth", sc["allowed_params"],
                       "面板要能拿到**允许改的假设**清单")
 
+    def test_adopt_binding_reads_the_moved_argument_line_too(self):
+        """移出内容仍是同一份交付：收束进附件的运行标识必须能被采纳绑定校验读到。
+
+        10-06 正常入口实测反例（`ui-10ea37599d`）：主文收束把带运行标识的
+        「分析摘要选择说明／经营驱动分析正文」移进 `analysis/analysis_detail.md` 后，
+        只看主文的 `run_id[:12] in body` 恒不成立 ⇒ 采纳永远 409 回滚
+        （`采纳正文里找不到所选运行 232b6c38335c`）。读它的口径改与硬门槛同一实现。
+        """
+        import report_brief as rb
+        import web_ui
+        ds, base = self._seed_inputs()
+        ws = ws_mod.task_workspace(self.tid)
+        body = "# 洋河股份经营分析简报\n\n## 关键判断与下一步\n\n主文里没有运行标识。\n"
+        self.assertNotIn(base.run_id[:12], body)
+        self.assertEqual(web_ui._adopt_binding_text(self.tid, body), body,
+                         "没有收束块时按主文判（不因此放宽）")
+        ana = ws / "analysis"
+        ana.mkdir(parents=True, exist_ok=True)
+        (ana / "analysis_detail.md").write_text(
+            "# 另附底稿\n\n" + rb.COMPACT_BEGIN + "\n\n#### 分析摘要选择说明\n"
+            f"- 本次进正文的运行身份：{base.run_id}\n\n" + rb.COMPACT_END + "\n",
+            encoding="utf-8")
+        text = web_ui._adopt_binding_text(self.tid, body)
+        self.assertIn(base.run_id[:12], text,
+                      "收束块里的运行标识必须算进采纳绑定校验（否则采纳恒 409 回滚）")
+        self.assertTrue(text.startswith(body), "主文仍在前，移出块附在其后")
+        # 没有收束标记的附件不算（避免把任意附件文本当正文证据）
+        (ana / "analysis_detail.md").write_text(
+            f"附件里顺手提了一句 {base.run_id}\n", encoding="utf-8")
+        self.assertNotIn(base.run_id[:12], web_ui._adopt_binding_text(self.tid, body))
+
     def test_recompute_without_inputs_is_409(self):
         payload, status = self._call("/api/task/" + self.tid + "/analysis/recompute",
                                      {"model_id": "scenario_sensitivity", "params": {}})

@@ -6121,6 +6121,24 @@ def _post_task_analysis_recompute(self, p, body, admin):
     })
 
 
+def _adopt_binding_text(tid: str, body: str) -> str:
+    """采纳绑定校验该读的文本：**主文 ＋ 收束移出的另附底稿**。
+
+    10-06 主文收束把带运行标识的「分析摘要选择说明／经营驱动分析正文」移进了
+    `analysis/analysis_detail.md` 的收束块。只看主文时 `run_id[:12] in body` 恒不成立
+    ⇒「采纳这版」永远 409 回滚（本机 `ui-10ea37599d` 正常入口实测复现：
+    `采纳正文里找不到所选运行 232b6c38335c`）。读它的口径与硬门槛那一处**同一实现**
+    （`delivery_pipeline._gate_analysis_text`）：被移出的内容仍是**同一份交付**的一部分。
+
+    读不到附件的收束块就按主文判（退回旧口径，不因此放宽）。
+    """
+    try:
+        from delivery_pipeline import _gate_analysis_text
+        return _gate_analysis_text(tid, body) or str(body or "")
+    except Exception:                            # noqa: BLE001 - 读不到就按主文判
+        return str(body or "")
+
+
 def _post_task_analysis_adopt(self, p, body, admin):
     """`POST /api/task/<id>/analysis/adopt`：把某条**已验证**复算运行**选定**进交付（K3/L0-b）。
 
@@ -6289,7 +6307,7 @@ def _post_task_analysis_adopt(self, p, body, admin):
                 _problems.append("采纳版本没有绑定本版验收（可能退回旧已验收稿）")
             if not _adv_body or _adv_body not in _report_body_early:
                 _problems.append("交付正文不是采纳版本的正文")
-            if run_id[:12] not in _adv_body:
+            if run_id[:12] not in _adopt_binding_text(tid, _adv_body):
                 _problems.append(f"采纳正文里找不到所选运行 {run_id[:12]}"
                                  "（选了新运行，正文却还是旧稿）")
         if _problems:

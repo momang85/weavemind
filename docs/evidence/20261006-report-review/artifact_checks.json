@@ -1,0 +1,60 @@
+{
+  "task_id": "ui-10ea37599d",
+  "selected_version": "016eb7496a285e9d3e0039a96d67287648d585cf7a91ca71dda3d6b13325136c",
+  "body_sha256": "928813bb34ff0b3786ec87c10a6e6d6574b1e25d856d90475bc2184636cd804b",
+  "body_chars": 22972,
+  "acceptance": "pass",
+  "detail_sha256": "c319fe2e8daec8d17e50469080c78975401dccb2a810b07eda18cac8aab28d94",
+  "detail_bytes": 8450,
+  "compaction_marker_in_detail": false,
+  "selected_headings": [
+    "# 洋河股份 经营分析简报（2023–2024 年度）",
+    "## 三项主判断（先看这里）",
+    "## 关键判断与下一步",
+    "## 关键发现",
+    "## 研究问题与下一步",
+    "## 量价与结构（发行人披露）",
+    "## 业务背景",
+    "## 财务对照",
+    "## 图表",
+    "## 分析",
+    "## 分析摘要",
+    "### 分析摘要选择说明",
+    "## 变化解释",
+    "## 风险与核查",
+    "## 附录",
+    "## 参考来源",
+    "### 资料范围与口径",
+    "### 金额变化（可复算）",
+    "### 版本与验收状态",
+    "### 免责声明"
+  ],
+  "packages": [
+    {
+      "name": "deliverables_20261006_145425.zip",
+      "sha256": "ee42a3df8012b5510b2bcc5fa93124155f274b25ca9c39d969c2d0c932671552",
+      "members": 23,
+      "has_pdf": false,
+      "analysis_members": [],
+      "quant_members": [],
+      "body_hash": "7b68e87adcae2f5980e26f8c0e0e7f64ef452d4197e0e1c18f31f06dc0584e8f",
+      "matches_selected_exact": false,
+      "body_chars": 23189
+    }
+  ],
+  "pdfs": [
+    {
+      "path": ".tmp\\e2e_compact\\yanghe\\report.pdf",
+      "pages": 11,
+      "sha256": "577d7db12c93f87ee2420b4b7846acfa254dac7a0694c8b892890b14a77592cc"
+    },
+    {
+      "path": "docs\\evidence\\y2_main_body_compaction_e2e_report_page.pdf",
+      "pages": 1,
+      "sha256": "0bdd211822a24b742f1224a2c003a3092e7dbd879de2f33cc10cab0c88acf019"
+    }
+  ],
+  "detail_raw_sha256": "61617beae673a9bafc154b05b5120e818da626fd55402828df990a85a4e45a14",
+  "detail_raw_bytes": 8517,
+  "note": "body is selected version before delivery wrapper; detail_sha256 is normalized UTF-8 text hash; package is disk automatic process artifact, not a browser download re-test"
+}

@@ -1,0 +1,22 @@
+{
+  "source": "selected_report.md from ui-10ea37599d; deterministic recomputation, not source authentication",
+  "working_capital_change_yi": {
+    "存货的减少": "3.8359560684",
+    "经营性应收项目的减少": "-10.3145512208",
+    "经营性应付项目的增加": "17.5227822212"
+  },
+  "working_capital_sum_yi": "11.0441870688",
+  "income_tax_buffer_yi": "7.2044377088",
+  "taxes_surcharges_buffer_yi": "4.4315863971",
+  "tax_total_buffer_yi": "11.6360241059",
+  "below_gross_change_yi": "4.58412221039996",
+  "other_below_gross_change_yi": "-7.05190189550004",
+  "stock_sales_ratio": {
+    "2023": "0.2357804680011216051447948548",
+    "2024": "0.3278401996605454353930816988"
+  },
+  "finished_inventory_increase_tons": "6418.68",
+  "production_minus_sales_2024_tons": "6418.68",
+  "consolidated_revenue_change_yi": "-42.4998055795",
+  "baijiu_product_revenue_change_yi": "-42.1387405353"
+}

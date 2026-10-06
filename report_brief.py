@@ -2785,6 +2785,10 @@ def render_brief_markdown(structure: dict, body: str = "",
     # `## 三项主判断（先看这里）`、旧的逐问首屏与 `## 关键发现`（那是四套摘要拼接的根源）。
     # 没有它（旧结构、旧版本回放、离线场景）时**原有行为一字不变**。
     _reader_front = str(structure.get("reader_judgments_front") or "").strip()
+    # 收束后主文里**没有** `## 关键发现`（读数并进唯一首屏）⇒ 后面几处"见『关键发现』"的
+    # 指针必须跟着改，否则读者被指到一个**不存在的小节**（10-06 正常入口实测：正文里
+    # 3 处「完整读数见『关键发现』」＋1 处「见开头『关键判断与下一步』与『关键发现』」全是悬空引用）。
+    _front_title = "关键判断与下一步" if _reader_front else "关键发现"
     if _reader_front:
         lines.append(_reader_front if _reader_front.endswith("\n") else _reader_front + "\n")
     # X0（阶段X §3）：**三项主判断放前两页**——由 `analysis_front` 现场生成（与正文/卡/图
@@ -2901,7 +2905,7 @@ def render_brief_markdown(structure: dict, body: str = "",
                 _n_txt = ""
             _retained = str(q.get("retained_reason") or "")
             _r_txt = f"；说明：{_retained}" if _retained else ""
-            lines.append(f"- **{q.get('question')}**：{_short}（完整读数见『关键发现』）")
+            lines.append(f"- **{q.get('question')}**：{_short}（完整读数见『{_front_title}』）")
             lines.append(f"  - {support}{_n_txt}；边界：{q.get('boundary')}{_r_txt}；"
                          f"下一步：{'、'.join(q.get('next_action') or []) or '补齐底稿事实'}")
         lines.append("")
@@ -3088,7 +3092,8 @@ def render_brief_markdown(structure: dict, body: str = "",
             # C3：比率适用条件与适用范围是**口径说明**，放附录（主文只留一行指引），
             # 否则同一份说明会在主文里占掉半页，把"变化与缺口"挤下去
             lines.append("")
-            lines.append("- 比率适用条件与适用范围见附录（主文不重复口径说明）。")
+            lines.append("- 比率适用条件与适用范围见『比率适用条件』"
+                         "（主文不重复口径说明；完整附件随交付包提供）。")
             _appendix_extra.append(("### 比率适用条件", [
                 *(f"- {label}：{cond}" for label, cond in conds),
                 f"- 适用范围：{_ratio_scope_note()}",
@@ -3163,9 +3168,10 @@ def render_brief_markdown(structure: dict, body: str = "",
     changes = structure.get("change_explanation") or {}
     rows_ch = changes.get("changes") or []
     if rows_ch:
-        # R3：同一组观察不在多处重复打印——首屏『关键判断与下一步』与『关键发现』已给读数
+        # R3：同一组观察不在多处重复打印——首屏（唯一首屏『关键判断与下一步』或旧的
+        # 『关键发现』）已给读数；指针按**实际存在的那一节**写，不指到被收束移走的小节。
         lines.append("**发生了什么（数据观察）**：")
-        lines.append("- 变化读数见开头『关键判断与下一步』与『关键发现』（本节只讲解释与边界，"
+        lines.append(f"- 变化读数见开头『{_front_title}』（本节只讲解释与边界，"
                      "不重复数字）。")
     else:
         lines.append("- 本次未取得可复算的同比，无法说明变化（见文末资料缺口）。")

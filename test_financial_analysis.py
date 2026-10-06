@@ -4421,6 +4421,38 @@ class TestX0DeliveryClosure(unittest.TestCase):
         self.assertNotIn("## 三项主判断", again)
         self.assertNotIn("## 经营驱动分析正文", again)
 
+    def test_no_pointer_to_a_moved_section(self):
+        """收束后不许留悬空引用：主文没有 `## 关键发现`，指针就必须指『关键判断与下一步』。
+
+        反例（10-06 正常入口实测，`ui-10ea37599d` 正常导出包）：正文 3 处
+        「完整读数见『关键发现』」＋1 处「见开头『关键判断与下一步』与『关键发现』」，
+        而 `## 关键发现` 已被唯一首屏取代 ⇒ 读者被指到一个**不存在的小节**。
+        """
+        import report_brief as rb
+        structure = {
+            "scope": {"company": "洋河股份", "company_id": "002304.SZ",
+                      "caliber": "合并", "as_of": "2025-04-30"},
+            "reader_judgments_front": "## 关键判断与下一步\n\n1. 占位判断\n",
+            "research_questions": [{"question": "收入变化的量价与结构依据",
+                                    "coverage": "partial",
+                                    "boundary": "公司收入口径与白酒销量口径不同",
+                                    "next_action": ["下期分产品收入与销量"]}],
+            "change_explanation": {"changes": [{"metric": "revenue",
+                                                "cur": 288.76, "prev": 331.26}]},
+        }
+        md = rb.render_brief_markdown(structure, body="正文占位")
+        self.assertIn("## 关键判断与下一步", md)
+        self.assertNotIn("\n## 关键发现", md, "有唯一首屏时不再印旧的关键发现")
+        self.assertNotIn("『关键发现』", md, "不得把读者指向已被收束移走的小节")
+        self.assertIn("『关键判断与下一步』", md)
+        # 没有唯一首屏（旧结构/旧版本回放）时行为不变：指针仍指『关键发现』，且那一节确实在
+        old = dict(structure)
+        old.pop("reader_judgments_front")
+        old["analysis_front"] = "## 三项主判断（先看这里）\n\n1. 占位判断\n"
+        md_old = rb.render_brief_markdown(old, body="正文占位")
+        self.assertIn("\n## 关键发现", md_old)
+        self.assertIn("『关键发现』", md_old)
+
 
 class TestX1ResearchContinuation(unittest.TestCase):
     """X1（阶段X §4）：**可检验的研究续页**。
