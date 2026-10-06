@@ -26,7 +26,7 @@
   "quant/quant_detail.md",
   "quant/quant_manifest.json"
  ],
- "package": "deliverables_20261006_205849_b704ea.zip",
+ "package": "deliverables_20261006_220349_d5346e.zip",
  "package_members": [
   "PACKAGE_MANIFEST.json",
   "analysis/analysis_cards.md",
@@ -40,7 +40,9 @@
   "audit/model_report_full_17579c4d65a9339a.md",
   "audit/model_report_full_32a0acb4b49ae5ae.md",
   "audit/model_report_full_4d65174b2374fd4b.md",
+  "audit/model_report_full_6e02eb9b48afcb68.md",
   "audit/model_report_full_97d3517e126cc4ea.md",
+  "audit/model_report_full_a4fd5257049c1cf6.md",
   "audit/model_report_full_be1fc5808aa88ee2.md",
   "audit/model_report_full_e6ea5420f8b5a1a7.md",
   "audit/model_report_full_ed04b63a6ec27c47.md",
@@ -77,7 +79,7 @@
   "note": "quant/EXTERNAL_DELIVERY_RESTRICTION.md"
  },
  "report_in_package": true,
- "report_sha256": "fc5ba35748360d2babc06bfcadf817b6858656f3be9b66e4a35611c7fa35de3d",
+ "report_sha256": "2ee6405d0f15982d0b29eeff64e394c9606656596c57a2359574595f89045bf3",
  "verify": {
   "reports/report.md": "ok",
   "working_paper.json": "ok",
@@ -89,7 +91,9 @@
   "audit/model_report_full_17579c4d65a9339a.md": "ok",
   "audit/model_report_full_32a0acb4b49ae5ae.md": "ok",
   "audit/model_report_full_4d65174b2374fd4b.md": "ok",
+  "audit/model_report_full_6e02eb9b48afcb68.md": "ok",
   "audit/model_report_full_97d3517e126cc4ea.md": "ok",
+  "audit/model_report_full_a4fd5257049c1cf6.md": "ok",
   "audit/model_report_full_be1fc5808aa88ee2.md": "ok",
   "audit/model_report_full_e6ea5420f8b5a1a7.md": "ok",
   "audit/model_report_full_ed04b63a6ec27c47.md": "ok",
