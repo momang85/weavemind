@@ -1222,7 +1222,14 @@ def select_reader_judgments(judgments, *, limit: int = 5) -> list[dict]:
         items = [by_id[i] for i in ids if i in by_id]
         if not items:
             continue
-        merged = _merge_volume_price(items) if len(ids) > 1 else items[0]
+        # **只有量价组**才做"收入机制"合并：`_merge_volume_price` 会把 `judgment_id` 与标题
+        # 改成量价那一条，它是**量价专用**的。其它组即使有多条候选（例：现金组的
+        # 「营运资本构成」＋「直接法支撑」），也必须各自保留判断身份 —— 否则现金判断会被
+        # 改名成"收入…量价"，读者看到两条同名判断、其中一条正文却是现金桥。
+        # 反例（10-06 三一复制实测）：现金组两条都在时，读者列表出现两个
+        # `revenue_mechanism_volume_price`，其中一条的读数与下一观察是现金桥的。
+        merged = (_merge_volume_price(items) if _name == "量价" and len(ids) > 1
+                  else items[0])
         if merged is None:
             continue
         ordered.append((0 if required else int(drop_rank), merged))

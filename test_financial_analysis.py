@@ -3880,6 +3880,44 @@ class TestW1OneReportOneJudgment(unittest.TestCase):
             shutil.rmtree(tmp, ignore_errors=True)
 
 
+class TestReaderJudgmentSelection(unittest.TestCase):
+    """读者判断的选择：**只有量价组合并**，别的组不得被改名（10-06 三一复制实测反例）。"""
+
+    def test_cash_group_keeps_its_own_identity_when_two_readings_exist(self):
+        """现金组有两条候选时，组内代表仍是现金判断——不得变成量价那条。
+
+        反例（三一复制，真实运行）：现金组的两条（营运资本构成／直接法支撑）都命中，
+        旧选择器对**任何**多候选组都调 `_merge_volume_price`，于是现金判断被改名成
+        `revenue_mechanism_volume_price`＋"收入下降的量与价…"标题，读者列表出现两个同名
+        判断，其中一条的读数却是现金桥。
+        """
+        from financial_analysis import judgments as jd
+        js = [
+            {"judgment_id": jd.J_PROFIT_MECHANISM, "title": "利润机制",
+             "numbers": ["归母净利润变化 +14.48亿元"]},
+            {"judgment_id": jd.J_VOLUME, "title": "销量", "numbers": ["销量 -12%"]},
+            {"judgment_id": jd.J_PRICE, "title": "价格", "numbers": ["单位收入 +3%"]},
+            {"judgment_id": jd.J_CASH_WORKING_CAPITAL, "title": "现金：营运资本构成",
+             "numbers": ["现金桥（四项相加）：+1.00亿元"],
+             "next_observation": {"metric": "经营性应收/应付项目、存货"}},
+            {"judgment_id": jd.J_CASH_DIRECT_SUPPORT, "title": "现金：直接法支撑",
+             "numbers": ["销售商品收到的现金 +2.00亿元"]},
+            {"judgment_id": jd.J_SCENARIO_THRESHOLD, "title": "情景阈值"},
+            {"judgment_id": jd.J_STRUCTURE, "title": "结构"},
+        ]
+        reader = jd.select_reader_judgments(js)
+        ids = [str(j.get("judgment_id")) for j in reader]
+        self.assertEqual(len(ids), len(set(ids)), f"同一判断不得出现两次：{ids}")
+        self.assertIn(jd.J_REVENUE_MECHANISM, ids, "量价两条要合并成一条收入机制")
+        self.assertIn(jd.J_CASH_WORKING_CAPITAL, ids, "现金判断必须保留自己的身份")
+        cash = [j for j in reader if j.get("judgment_id") == jd.J_CASH_WORKING_CAPITAL][0]
+        self.assertIn("营运资本", str(cash.get("title")))
+        self.assertIn("现金桥", str(cash.get("numbers")))
+        vp = [j for j in reader if j.get("judgment_id") == jd.J_REVENUE_MECHANISM][0]
+        self.assertNotIn("现金桥", str(vp.get("numbers")),
+                         "量价那条不得带上现金的读数")
+
+
 class TestW2ResearchJudgments(unittest.TestCase):
     """W2（阶段W §5）：**可检验的研究判断**——七段式、读数驱动、写得出反转条件。
 
