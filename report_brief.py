@@ -3388,6 +3388,133 @@ BRIEF_SECTIONS = ("## 三项主判断（先看这里）", "## 研究续页（可
                   "## 分析卡", *GENERATED_ANALYSIS_SECTIONS,
                   "## 变化解释", "## 风险与核查", "## 附录", "## 参考来源")
 
+# ── 主文收束（阶段X §7 / 规划 §11.2；口径见 §8.3 的"最小落地"）──────────────
+#
+# 读者主文里同一批读数与判断各印一遍（洋河实机 PDF 24 页），而其中**完整版另有附件**
+# 的整段本就不必占版面。这里按**登记的标题**把这几段移进
+# `analysis/analysis_detail.md`（随包交付），主文只留必要结论、边界与一行指针。
+#
+# **刻意不移 `## 研究问题与下一步`**：它不是"重复的详表"，而是**必要结论与边界的
+# 载体**——每一条都写着"未取得对应披露／观察成立、原因待证／总负债下降**不等于**
+# 短期偿债安全"。上一轮收束（`50c9f84`）把整段移走后，冻结期望里 6 条短语消失
+# （`原因待证`/`未取得对应披露`/`不等于`/`不表示利润有现金支撑`/`金融机构`/`不呈现`），
+# CI 判死、被迫回退（`962afde`）。**移出详表可以，移出边界不行。**
+#
+# 口径：只移"**另有完整附件的论证线**"与"**标识/定位/元数据详表**"这两类。
+# 凡是**别人按它判状态或判读数**的小节，一律留在主文——每移一节都要先问"谁在读它"；
+# 本轮三次收窄（`## 分析`／`## 分析摘要`／`### 金额变化（可复算）`）都是被读它的人逼出来的。
+COMPACT_MOVE_TITLES = (
+    # 七段式论证线（4–6 页那一段）——完整版在 `analysis/analysis_detail.md`
+    "## 经营驱动分析正文",
+    # 附录详表（"ID 详表"另附；主文只留结论、边界与指针）
+    "### 字段位置与计算底稿", "### 逐问题资料计划",
+    "### 比率适用条件", "### 图表元数据（内部标识）", "### 其他核查项",
+)
+# **不移 `## 分析`**：它是**模型散文槽位**，槽位里的"本次未产出可交付的分析正文"
+# 是交付硬门槛读的**状态哨兵**。移走它以后，`_has_analysis_section` 会撞上"正文里没有
+# `## 分析` ⇒ 不是研究简报、不判"的免伤分支，于是**报告步骤失败的稿子被判成 verified**
+# （实测：`test_body_model_failure_keeps_recomputable_paper` 由 pass 变 fail，
+# 还原 `compact_main_body` 后即恢复）。移出详表可以，拆掉哨兵不行。
+#
+# **也不移 `## 分析摘要`**：它是装配器从同一组已验证运行生成的**分析读数**（≤3 条），
+# 与 `## 经营驱动分析正文` 一起构成"模型散文缺位时也算有分析"的判据（V0 注释明写）。
+# 移走它，好报告在硬门槛那里就只剩一行指针 → 被误判"只有数据与底稿"降级为草稿。
+#
+# **也不移 `### 金额变化（可复算）`**：它不是"ID 详表"，而是**绝对金额变化**的读数
+# （Δ归母净利／Δ毛利／毛利线以下差额）。D1 夜间纠偏的全部意义就是"金额变化与利润率变化
+# 分开呈现、不拿百分点差给绝对利润归因"——把这张表移出主文，等于把那条纠偏挪到读者看不见
+# 的地方。实测（非推断）：移出后 `acceptance_checker.check_analysis_completeness` 立刻报
+# `正文未给出派生指标（同比/比率）的读数：营业收入变化 2024年较2023年（-107.6亿元）`，
+# `facts_missing` 由 0 变 1、场景冻结期望 `facts_missing_leq: 0` 判死。
+# **结论：必需读数留在主文；能移的只有"标识/定位/元数据"这类详表。**
+# 收束后主文留一行指针（读者知道完整分析在哪，不必自己找）
+COMPACT_POINTER = ("<!-- 主文收束:pointer（本行由 report_brief 维护，勿手改） -->"
+                   "\n> 详细分析（结论／金额分解／披露支持／替代解释／现金与反向情景／"
+                   "待核查／口径限制）与底稿、ID 详表见 `analysis/analysis_detail.md`"
+                   "（随交付包提供）；主文只保留必要结论、边界与指针。")
+COMPACT_POINTER_MARK = "<!-- 主文收束:pointer"
+COMPACT_BEGIN = ("<!-- 主文收束:begin（§11.2 主文只留必要结论与边界；"
+                 "本块由 report_brief 维护，勿手改） -->")
+COMPACT_END = "<!-- 主文收束:end -->"
+
+
+def _compact_hit(title: str) -> str | None:
+    """标题是否命中收束清单。只按**登记标题**匹配（含 `（…）`/空格后缀）。
+
+    不按"任意标题"截断：模型正文自带小标题（`## 分析` 下的 `###### 一、概述`），
+    按任意标题切会把整节判成空。`## 分析与结论`（模型自己的小节）**不**匹配
+    `## 分析`——后缀既不是 `（` 也不是空格。
+    """
+    title = str(title or "").strip()
+    return next((t for t in COMPACT_MOVE_TITLES
+                 if title == t or title.startswith(t + "（") or title.startswith(t + " ")),
+                None)
+
+
+def compact_main_body(report: str, *, detail_path=None) -> tuple[str, dict]:
+    """**主文收束**：把登记的重复整段移出主文版面，追加到另附底稿。
+
+    返回 `(收束后的正文, {"moved": [...], "chars": N, "detail": "..."})`。
+
+    移出的内容**不丢**——按标记块写进 `detail_path`（`analysis/analysis_detail.md`），
+    随交付包提供。写入是**幂等**的：渲染出口每被调用一次（验收、导出复核、最终装配
+    都会调）就会重算一次，追加写法会让另附底稿越滚越长。
+
+    `detail_path=None` 时只算正文、不落盘（给只读核对用）。
+    """
+    lines = str(report or "").splitlines()
+    keep: list[str] = []
+    moved: list[list[str]] = []
+    moved_titles: list[str] = []
+    i, n = 0, len(lines)
+    while i < n:
+        ln = lines[i]
+        hit = _compact_hit(ln)
+        if not hit:
+            keep.append(ln)
+            i += 1
+            continue
+        level = len(ln) - len(ln.lstrip("#"))
+        block = [ln]
+        i += 1
+        while i < n:
+            nxt = lines[i]
+            if nxt.lstrip().startswith("#"):
+                lv = len(nxt) - len(nxt.lstrip("#"))
+                if lv <= level:
+                    break
+            block.append(nxt)
+            i += 1
+        if len(moved) == 0:                      # 指针只插一次：第一段移出的位置上
+            keep.extend(COMPACT_POINTER.splitlines())
+            keep.append("")
+        moved_titles.append(str(hit))
+        moved.append(block)
+    if not moved:
+        return str(report or ""), {"moved": [], "chars": 0, "detail": ""}
+    out = re.sub(r"\n{3,}", "\n\n", "\n".join(keep)).strip() + "\n"
+    written = ""
+    if detail_path is not None:
+        from pathlib import Path as _P
+        p = _P(detail_path)
+        p.parent.mkdir(parents=True, exist_ok=True)
+        prev = p.read_text(encoding="utf-8") if p.is_file() else ""
+        body_txt = [COMPACT_BEGIN]
+        for b in moved:
+            body_txt.append("\n".join(b).rstrip() + "\n")
+        body_txt.append(COMPACT_END)
+        block = "\n".join(body_txt)
+        if COMPACT_BEGIN in prev and COMPACT_END in prev:
+            head, rest = prev.split(COMPACT_BEGIN, 1)
+            _mid, tail = rest.split(COMPACT_END, 1)
+            prev = head.rstrip("\n") + "\n\n" + block + tail
+        else:
+            prev = prev.rstrip("\n") + ("\n\n" if prev.strip() else "") + block + "\n"
+        p.write_text(prev, encoding="utf-8")
+        written = str(p)
+    return out, {"moved": moved_titles,
+                 "chars": sum(len("\n".join(b)) for b in moved), "detail": written}
+
 
 def _rules_version() -> str:
     """当前独立验证规则集版本（取不到就空串 = 不比较，不假装匹配）。"""

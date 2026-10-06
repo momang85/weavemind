@@ -1511,6 +1511,34 @@ _ENGINEERING_SUMMARY_RE = re.compile(
     r"^##\s*Task Report\s*$|^\s*Steps:\s*\d+\s*\(\d+\s*OK,\s*\d+\s*failed\)", re.M)
 
 
+def _gate_analysis_text(task_id: str, report_body: str) -> str:
+    """硬门槛判"这份交付有没有分析"时该读的文本：**主文 ＋ 收束移出的另附底稿**。
+
+    规划 §11.2 的主文收束把装配器生成的论证线（`## 经营驱动分析正文`）移进
+    `analysis/analysis_detail.md`——那是**随包交付的同一份交付物**，不是"没有分析"。
+    只看主文会把好报告判成"只有数据与底稿"（降级为草稿）。
+    **凡被移走的内容，读它的每一处都要跟着改**——这里是硬门槛这一处。
+
+    读不到/没有收束块就按主文判（退回旧口径，不制造新缺口、不误判通过）。
+    """
+    body = str(report_body or "")
+    try:
+        import workspace as _ws
+        p = _ws.task_workspace(task_id) / "analysis" / "analysis_detail.md"
+        if not p.is_file():
+            return body
+        txt = p.read_text(encoding="utf-8")
+        import report_brief as _rb
+        if _rb.COMPACT_BEGIN not in txt or _rb.COMPACT_END not in txt:
+            return body
+        block = txt.split(_rb.COMPACT_BEGIN, 1)[1].split(_rb.COMPACT_END, 1)[0]
+        return f"{body}\n\n{block}" if body else block
+    except Exception as exc:                     # noqa: BLE001 - 读不到就按主文判
+        logger.warning("收束另附底稿读取失败（task=%s，按主文判）：%s",
+                       task_id, str(exc)[:120])
+        return body
+
+
 def apply_research_hard_gate(task_id: str, goal: str, wp: dict | None,
                              report_body: str = "") -> tuple[str, str]:
     """研究任务的交付硬门槛。返回 `(附加到交付物的说明, hard_fail 原因)`。
@@ -1566,8 +1594,10 @@ def apply_research_hard_gate(task_id: str, goal: str, wp: dict | None,
                 if scope:
                     reasons.append("文档主体作用域未绑定：" + scope[0].detail[:120])
             # 研究简报必须有**可交付的分析**：只有数据表与底稿时按草稿交付
-            # （架构复核：正文失效时交付"数据表/底稿 + 分析未完成"，不以拼接日志冒充研报）
-            if report_body and not _has_analysis_section(report_body):
+            # （架构复核：正文失效时交付"数据表/底稿 + 分析未完成"，不以拼接日志冒充研报）。
+            # 判据读**主文＋收束另附**：收束移走的是论证线本身，不是"把分析删了"。
+            if report_body and not _has_analysis_section(
+                    _gate_analysis_text(task_id, report_body)):
                 reasons.append("分析未完成：交付正文只有数据与底稿，"
                                "未产出可交付的分析结论（见文末资料缺口）")
     except Exception as exc:
@@ -1610,6 +1640,23 @@ def research_candidate_body(task_id: str, goal: str, body: str, *,
         if not structure:
             return None
         candidate = report_brief.render_brief_markdown(structure, body, task_id=task_id)
+        # 规划 §11.2 / 阶段X §7：**主文收束**放在这唯一一处渲染出口——验收
+        # （`accept_for_body`）、导出复核（`export_snapshot` 的"受保护读取"）与最终装配
+        # 都按**本函数**的产物比对字节，收束只在别处做的话会被它们重新渲染成未收束的
+        # 正文（实测：装配处收束后又被验收路径换回全文，页数不降）。
+        # 口径（§8.3 最小落地）：**只移**模型子报告与附录 ID/底稿详表，
+        # **必要结论与边界（`## 研究问题与下一步` 等）留在主文**——上一轮把边界一起移走
+        # （6 条冻结短语消失、CI 判死）即为此处翻车，勿再扩大移动范围。
+        try:
+            from pathlib import Path as _Pth
+            _ws_c = _Pth(ws_dir) if ws_dir else workspace.task_workspace(task_id)
+            candidate, _moved = report_brief.compact_main_body(
+                candidate, detail_path=_ws_c / "analysis" / "analysis_detail.md")
+            if _moved.get("moved"):
+                logger.info("主文收束（task=%s）：移出 %s（%d 字符）",
+                            task_id, "、".join(_moved["moved"]), _moved["chars"])
+        except Exception as exc:                 # noqa: BLE001 - 收束失败就保留全文
+            logger.warning("主文收束失败（task=%s，保留全文）：%s", task_id, str(exc)[:140])
         return rewrite_report_links(candidate, task_id) or candidate
     except Exception as exc:                     # noqa: BLE001 - 装配失败退回原正文
         logger.warning("研究候选稿装配失败（task=%s，退回原正文）：%s",

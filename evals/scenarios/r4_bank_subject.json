@@ -64,6 +64,18 @@
   }
  ],
  "expect": {
+  "brief_absent": [
+    "### 字段位置与计算底稿",
+    "### 逐问题资料计划",
+    "### 图表元数据（内部标识）",
+    "### 其他核查项"
+  ],
+  "attachment_contains": [
+    "### 字段位置与计算底稿",
+    "### 逐问题资料计划",
+    "### 图表元数据（内部标识）",
+    "### 其他核查项"
+  ],
   "delivery_status": "verified",
   "no_ratio_metrics": [
    "net_margin",

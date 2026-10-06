@@ -478,6 +478,89 @@ class TestContradictionDetector(unittest.TestCase):
             self.assertEqual(rq._contradictions(text), want, f"{why}：{text}")
 
 
+class TestMainBodyCompaction(unittest.TestCase):
+    """规划 §11.2 / 阶段X §7 的**主文收束**（口径＝§8.3 的最小落地）。
+
+    上一轮（`50c9f84` → 回退 `962afde`）的失败点是**必要边界跟着详表一起被移走**
+    （冻结期望 6 条短语消失、CI 判死），所以这一组用例先把"哪些**不许**移"钉住，
+    再钉"移走的必须真的落在另附底稿里"。
+    """
+
+    BODY = (
+        "# 示例公司 经营分析简报\n\n"
+        "## 关键判断与下一步\n- **收入同比下降 12.83%**\n  - 边界：两期读数只能说明这两期的变化\n\n"
+        "## 研究问题与下一步\n"
+        "- **利润变化的分解**：归母净利润同比下降 18.95%\n"
+        "  - 材料：未取得对应披露，**观察成立、原因待证**；边界：总负债下降**不等于**"
+        "短期偿债安全；下一步：债务到期结构\n\n"
+        "## 分析\n本报告由确定性分析链装配。\n\n"
+        "## 经营驱动分析正文（示例公司 2023年→2024年）\n"
+        "- 本节由 financial_analysis 从已验证运行装配；每个数字都可回查到运行与输出标识。\n"
+        "### 一、结论（先看这三条）\n- 归母净利润变化 -33.43 亿元\n"
+        "### 二、利润变化：金额分解\n- 毛利变化 -38.01 亿元；毛利线以下 +4.58 亿元\n"
+        + "".join(f"- 披露支持与来源定位第 {i} 条：原句、位置、替代解释与缺口。\n"
+                 for i in range(1, 13))
+        + "\n## 附录\n## 参考来源\n### 资料范围与口径\n- 口径：合并\n"
+        "### 字段位置与计算底稿\n"
+        + "".join(f"- 读数 {i}：现金流量表附注第 {100 + i} 页（原句定位）。\n"
+                 for i in range(1, 9))
+        + "### 逐问题资料计划\n- 补到毛利以下科目后怎样改变判断\n"
+        "### 版本与验收状态\n- 机器验收：pass\n"
+    )
+
+    def test_necessary_boundary_sections_are_never_moved(self):
+        """`## 研究问题与下一步` 是**必要结论与边界**的载体，收束清单里绝不能有它。"""
+        import report_brief
+        self.assertNotIn("## 研究问题与下一步", report_brief.COMPACT_MOVE_TITLES)
+        _out, info = report_brief.compact_main_body(self.BODY)
+        self.assertNotIn("## 研究问题与下一步", info["moved"])
+        new, info = report_brief.compact_main_body(self.BODY)
+        for phrase in ("未取得对应披露", "原因待证", "不等于", "两期读数只能说明这两期的变化"):
+            self.assertIn(phrase, new, f"必要边界不得随收束消失：{phrase}")
+
+    def test_moved_detail_lands_in_the_attachment_and_is_idempotent(self):
+        """移出的整段必须真的落进另附底稿；重复调用不得让底稿越滚越长（幂等）。"""
+        import tempfile
+        import report_brief
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "analysis" / "analysis_detail.md"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("## 研究判断明细（七段式，另附）\n### 研究判断（可检验）\n- 旧内容\n",
+                         encoding="utf-8")
+            out1, info1 = report_brief.compact_main_body(self.BODY, detail_path=p)
+            size1 = p.stat().st_size
+            self.assertTrue(info1["moved"])
+            text1 = p.read_text(encoding="utf-8")
+            self.assertIn("### 字段位置与计算底稿", text1, "移出的详表要在附件里")
+            self.assertIn("## 经营驱动分析正文", text1, "移出的模型子报告要在附件里")
+            self.assertIn("旧内容", text1, "既有附件内容不得被覆盖掉")
+            out2, info2 = report_brief.compact_main_body(self.BODY, detail_path=p)
+            self.assertEqual(out1, out2)
+            self.assertEqual(info1["moved"], info2["moved"])
+            self.assertEqual(p.stat().st_size, size1, "重复渲染不得让另附底稿变长")
+
+    def test_body_keeps_one_pointer_and_drops_no_kept_section(self):
+        """主文只留**一行**指针；未登记移出的小节一个都不能少。"""
+        import report_brief
+        new, _info = report_brief.compact_main_body(self.BODY)
+        self.assertEqual(new.count(report_brief.COMPACT_POINTER_MARK), 1)
+        self.assertIn("analysis/analysis_detail.md", new)
+        for keep in ("## 关键判断与下一步", "## 研究问题与下一步", "## 参考来源",
+                     "### 资料范围与口径", "### 版本与验收状态"):
+            self.assertIn(keep, new, f"未登记移出的小节不得消失：{keep}")
+        # 收束后正文明显变短，且移出的是"详表/子报告"这一类
+        self.assertLess(len(new), len(self.BODY))
+        self.assertNotIn("### 字段位置与计算底稿", new)
+
+    def test_report_without_the_registered_sections_is_untouched(self):
+        """没有登记小节时**一字不动**（不插指针、不落盘）——既有交付不受影响。"""
+        import report_brief
+        plain = "# 无相关小节\n\n## 关键判断与下一步\n- 一句话\n"
+        out, info = report_brief.compact_main_body(plain)
+        self.assertEqual(out, plain)
+        self.assertEqual(info, {"moved": [], "chars": 0, "detail": ""})
+
+
 class TestScenarioCheckKeys(unittest.TestCase):
     """R4：场景核对的 R4 键（覆盖/矛盾/信息保留/批准/请求数）按清单语义工作。"""
 
@@ -517,6 +600,26 @@ class TestScenarioCheckKeys(unittest.TestCase):
         self.assertFalse(out2.get("contradictions_zero"))
         self.assertFalse(out2.get("approval_not_migrated"))
         self.assertFalse(out2.get("requests_zero"))
+
+    def test_attachment_assertions(self):
+        """§11.2「正文断言 + 附件断言」：附件断言读 `analysis/analysis_detail.md` 的文本。
+
+        只查"正文里没有"是不够的——内容可能根本没落地；两个方向都要能判。
+        """
+        m = {"brief": "正文", "attachment": "### 字段位置与计算底稿\n### 其他核查项\n"}
+        out = self._check(m, {"attachment_contains": ["### 字段位置与计算底稿"]})
+        self.assertTrue(out.get("attachment_contains"))
+        out = self._check(m, {"attachment_contains": ["### 逐问题资料计划"]})
+        self.assertFalse(out.get("attachment_contains"), "附件里没有的必须判 False")
+        out = self._check(m, {"attachment_absent": ["### 其他核查项"]})
+        self.assertFalse(out.get("attachment_absent"))
+        # 附件缺失（空串）时不得因为"查无此串"而误判通过
+        out = self._check({"brief": "正文", "attachment": ""},
+                          {"attachment_contains": ["### 字段位置与计算底稿"]})
+        self.assertFalse(out.get("attachment_contains"))
+        # 未声明这两个键时不产生额外核对项（旧场景期望一字不动）
+        self.assertNotIn("attachment_contains", self._check(m, {"chart_min": 0}))
+        self.assertNotIn("attachment_absent", self._check(m, {"chart_min": 0}))
 
 
 if __name__ == "__main__":

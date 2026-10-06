@@ -54,6 +54,26 @@ def _write(path: Path, payload) -> None:
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+def _attachment_path(ws: Path) -> Path:
+    """主文收束与七段式明细的另附底稿位置（与生产同一路径）。"""
+    return Path(ws) / "analysis" / "analysis_detail.md"
+
+
+def _attachment_text(ws: Path) -> str:
+    p = _attachment_path(ws)
+    return p.read_text(encoding="utf-8") if p.is_file() else ""
+
+
+def _attachment_bytes(ws: Path) -> int:
+    p = _attachment_path(ws)
+    return p.stat().st_size if p.is_file() else 0
+
+
+def _attachment_sha256(ws: Path) -> str:
+    p = _attachment_path(ws)
+    return _sha256(p) if p.is_file() else ""
+
+
 def _pdf_parse_verdict(pdf_path: Path) -> dict:
     """导出 PDF 的**可解析性**判定：页数、空白页、文本量（不依赖视觉模型）。
 
@@ -260,6 +280,12 @@ def run_scenario(spec: dict, *, out_root: Path = OUT_ROOT) -> dict:
         except Exception as exc:                      # noqa: BLE001 - 回写失败照实记
             print(f"[warn] 投影回写失败：{str(exc)[:120]}", file=sys.stderr)
         _write(out_dir / "report.md", str(res.get("report") or ""))
+        # 主文收束（§11.2）的**另附底稿**随场景产物一起留档：跨修订比对要能回答
+        # "被移出主文的整段落在哪里、有没有丢"，只看正文是看不出来的。
+        _att = _attachment_path(ws)
+        if _att.is_file():
+            _write(out_dir / "analysis" / "analysis_detail.md",
+                   _att.read_text(encoding="utf-8"))
         pdf_note = ""
         try:
             pdf_bytes = web_ui._task_pdf_bytes(tid)
@@ -330,6 +356,12 @@ def run_scenario(spec: dict, *, out_root: Path = OUT_ROOT) -> dict:
             "coverage_finding": coverage,
             # D6：正文措辞也要能核对（护栏句/研究问题小节在不在），而不是只看数字与状态
             "brief": str(res.get("report") or "")[:20000],
+            # §11.2 新交付契约的**附件断言**：主文收束移出的整段与七段式明细落在
+            # `analysis/analysis_detail.md`（随包交付）。只断言"正文里没有"会漏掉
+            # "移到哪里去了/有没有丢"——两边都要能核对。
+            "attachment": _attachment_text(ws)[:20000],
+            "attachment_sha256": _attachment_sha256(ws),
+            "attachment_bytes": _attachment_bytes(ws),
             "quality_metrics": sorted({str(q.get("metric")) for q in quality}),
             "audit": audit,
             "charts": charts,
@@ -466,6 +498,16 @@ def _check(manifest: dict, expect: dict) -> dict:
     if "brief_absent" in expect:
         text = str(manifest.get("brief") or "")
         out["brief_absent"] = all(str(k) not in text for k in expect["brief_absent"])
+    # §11.2「正文断言 + 附件断言」的**附件**一半：主文收束移出的整段必须真的落在
+    # `analysis/analysis_detail.md`（主文里没有 ≠ 内容还在，两边都要能核对）。
+    if "attachment_contains" in expect:
+        text = str(manifest.get("attachment") or "")
+        out["attachment_contains"] = all(str(k) in text
+                                         for k in expect["attachment_contains"])
+    if "attachment_absent" in expect:
+        text = str(manifest.get("attachment") or "")
+        out["attachment_absent"] = all(str(k) not in text
+                                       for k in expect["attachment_absent"])
     # 导出完整性对**每个**场景都成立（不是场景可选预期）：正文引用的图必须真进 PDF、
     # 表头必须与数据列共用同一列网格。此前只查页数与字符量，三场景分别缺 5/2/4 张图
     # 却一律 pass——"磁盘上有 PNG"不等于"PDF 里有图"。

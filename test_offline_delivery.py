@@ -1770,6 +1770,46 @@ class TestFrozenOfflineScenarios(unittest.TestCase):
                             for e in (miss["evidence"]["excluded"] or [])))
         self.assertEqual(miss["delivery"]["status"], "draft")
 
+    # 主文收束（规划 §11.2）移出的附录详表标题：正文里应已无、另附底稿里应有
+    MOVED_TITLES = ("### 字段位置与计算底稿", "### 其他核查项")
+
+    def test_compaction_moves_detail_to_the_attachment_not_into_thin_air(self):
+        """§11.2 的「正文断言 + 附件断言」：移出主文的详表必须真的落在另附底稿里。
+
+        只断言"正文里没有"会漏掉最坏的情形——内容被移走但**哪里都没有**；
+        所以这里同时钉"正文已无"与"附件真有"。上一轮收束翻车正是只盯着版面。
+        """
+        for name, m in self.manifests.items():
+            if not (m.get("checks") or {}).get("all_passed", True):
+                continue                       # 该场景自身的期望由上面的用例负责
+            for title in self.MOVED_TITLES:
+                if title not in (m.get("attachment") or ""):
+                    continue                   # 该场景本来就没有这张表（不硬套）
+                self.assertNotIn(title, m["brief"],
+                                 f"{name}：收束后正文不该再印详表 {title}")
+        # 至少一个场景真的走了这条路（否则这条守卫是空转）
+        self.assertTrue(any(self.MOVED_TITLES[0] in (m.get("attachment") or "")
+                            for m in self.manifests.values()))
+
+    def test_compacted_brief_keeps_necessary_boundaries(self):
+        """收束不得带走**必要结论与边界**：护栏句/诚实声明仍须在主文里可读。
+
+        这几条正是上一轮 `50c9f84` 移出整段后消失、导致 CI 判死的短语
+        （`原因待证`/`未取得对应披露`/`不等于`/`不表示回款改善`）。
+        """
+        dec = self.manifests["all_decline"]["brief"]
+        for phrase in ("不表示回款改善", "不等于"):
+            self.assertIn(phrase, dec, "全下降场景的覆盖护栏不得随收束消失")
+        w = self.manifests["wrong_subject_period"]["brief"]
+        for phrase in ("未取得对应披露", "未采用的材料"):
+            self.assertIn(phrase, w, "材料覆盖/主体-期间诚实声明不得随收束消失")
+        self.assertIn("原因待证",
+                      self.manifests["r4_insufficient_evidence"]["brief"],
+                      "资料不足场景的『观察成立、原因待证』不得随收束消失")
+        # 附件是真落盘的（不是内存里的空壳）
+        self.assertTrue(any(int(m.get("attachment_bytes") or 0) > 0
+                            for m in self.manifests.values()))
+
 
 if __name__ == "__main__":
     unittest.main()

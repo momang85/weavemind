@@ -6400,6 +6400,49 @@ class TestResearchBriefAssembly(unittest.TestCase):
             "（经营驱动／现金调节桥／条件情景）：主正文不出分析摘要，"
             "完整卡与运行标识见下方底稿。\n"))
 
+    def test_main_body_compaction_must_not_disarm_the_analysis_gate(self):
+        """主文收束（§11.2）不得移走硬门槛读的**状态哨兵**与**分析摘要**。
+
+        **实测缺陷，不是假设**：把 `## 分析` 一起移出后，`_has_analysis_section`
+        撞上"正文里没有 `## 分析` ⇒ 不是研究简报、不判"的免伤分支，于是**报告步骤失败的
+        稿子被判成 verified**——`test_offline_delivery.test_body_model_failure_keeps_
+        recomputable_paper` 由 pass 变 fail，还原 `compact_main_body` 后即恢复（已做归因）。
+        所以"哪些小节不许移"必须在清单上钉住，而不是靠注释提醒。
+        """
+        import report_brief
+        import delivery_pipeline as dp
+        for keep in ("## 分析", "## 分析摘要", "## 研究问题与下一步",
+                     "### 金额变化（可复算）"):
+            self.assertNotIn(keep, report_brief.COMPACT_MOVE_TITLES,
+                             f"这一节有别的读者按它判状态/判读数，收束不得移出：{keep}")
+        # 哨兵在、而装配器生成的分析线被移走 ⇒ 仍判"没有可交付的分析"
+        placeholder_body = (
+            "# 示例 经营分析简报\n\n## 分析\n\n> 本次未产出可交付的分析正文"
+            "（数据与底稿已保留，见文末）。\n\n## 分析摘要\n\n"
+            "- 本次已验证运行不属于**经营研究组合**（经营驱动／现金调节桥／条件情景）："
+            "主正文不出分析摘要，完整卡与运行标识见下方底稿。\n")
+        self.assertFalse(dp._has_analysis_section(placeholder_body))
+
+    def test_analysis_gate_reads_the_moved_argument_line_from_the_attachment(self):
+        """被移走的论证线仍算"有分析"：硬门槛要连着另附底稿一起判，否则好报告被降级。"""
+        import delivery_pipeline as dp
+        placeholder_body = (
+            "## 分析\n\n> 本次未产出可交付的分析正文（数据与底稿已保留，见文末）。\n\n"
+            "## 分析摘要\n\n- 本次已验证运行不属于**经营研究组合**"
+            "（经营驱动／现金调节桥／条件情景）：主正文不出分析摘要。\n")
+        self.assertFalse(dp._has_analysis_section(placeholder_body),
+                         "只看主文时确实没有分析（这是判据的旧口径）")
+        moved = ("<!-- 主文收束:begin（§11.2 主文只留必要结论与边界；"
+                 "本块由 report_brief 维护，勿手改） -->\n"
+                 "## 经营驱动分析正文（示例 2023年→2024年）\n\n"
+                 "### 一、结论（先看这三条）\n\n" + "现金减少 15.02 亿元，营运资本拖累减轻。\n" * 4
+                 + "<!-- 主文收束:end -->\n")
+        self.assertTrue(dp._has_analysis_section(placeholder_body + "\n\n" + moved),
+                        "论证线在另附底稿里 ⇒ 交付里有分析，不得判成'只有数据与底稿'")
+        # 读不到另附底稿时按主文判（退回旧口径，不制造新缺口、也不误判通过）
+        self.assertEqual(dp._gate_analysis_text("no-such-task-xyz", "正文"), "正文")
+        self.assertEqual(dp._gate_analysis_text("no-such-task-xyz", ""), "")
+
     # ── F2-3：两种阅读视角 + 比率适用条件 ──────────────────
 
     def test_two_perspectives_share_one_paper(self):
