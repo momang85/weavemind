@@ -4001,6 +4001,11 @@ def _admitted_records(evidence: dict | None, *, limit_per_kind: int = 6) -> list
                     "url": str(r.get("url") or ""),
                     "publisher": str(r.get("publisher") or ""),
                     "document_period": str(r.get("document_period") or ""),
+                    # 10-07 复核 §架构决定-2：目标兑现要保留**发布时点**与**主体**——
+                    # "计划的发布时点/所指年度、实际的发布时点/对应年度分别保留"。
+                    # 这两个字段上游记录本来就有（`narrative_evidence`），此前只在这里被丢掉。
+                    "published_at": str(r.get("published_at") or ""),
+                    "subject": str(r.get("subject") or ""),
                     "kind": kind,
                     "kind_label": str(r.get("kind_label") or "")})
     return out

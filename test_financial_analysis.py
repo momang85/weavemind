@@ -3917,6 +3917,212 @@ class TestReaderJudgmentSelection(unittest.TestCase):
         self.assertNotIn("现金桥", str(vp.get("numbers")),
                          "量价那条不得带上现金的读数")
 
+    def test_all_gap_volume_price_is_not_an_observed_conclusion(self):
+        """10-07 复核 §主问题-2：量价**全缺**时合并条不得写成"销量收缩…已发生"。
+
+        三一实测：量价分解未取到，旧合并器仍写死"收入下降的量与价：**销量收缩**是数量观察，
+        **单位收入上升不证明提价**"并标"已发生（读数）"。修后：缺哪项写缺哪项、`kind=gap`、
+        并且**排到强结论之后**（保留缺口、不占强结论席位）。
+        """
+        from financial_analysis import judgments as jd
+        js = [
+            {"judgment_id": jd.J_VOLUME, "title": "销量与收入的数量关系：本次不足以下判断",
+             "kind": "gap", "kind_label": "读数不足（不作结论）",
+             "numbers": ["量价分解未取到销量/单位收入效应"], "boundary": "读数不足"},
+            {"judgment_id": jd.J_PRICE, "title": "单位收入与提价能力：本次无从判断",
+             "kind": "gap", "kind_label": "读数不足（不作结论）",
+             "numbers": ["量价分解里的单位价格效应未取到"], "boundary": "不评价价格"},
+            {"judgment_id": jd.J_PROFIT_MECHANISM, "title": "利润机制", "numbers": ["x"]},
+            {"judgment_id": jd.J_CASH_WORKING_CAPITAL, "title": "现金：营运资本构成",
+             "numbers": ["y"]},
+        ]
+        merged = jd._merge_volume_price(js[:2])
+        self.assertEqual(merged["kind"], "gap")
+        self.assertIn("未取到", str(merged["title"]))
+        self.assertNotIn("销量收缩", str(merged["title"]))
+        reader = jd.select_reader_judgments(js)
+        ids = [j["judgment_id"] for j in reader]
+        self.assertEqual(ids[-1], jd.J_REVENUE_MECHANISM,
+                         f"缺口要排在强结论之后（保留缺口、不占席位）：{ids}")
+        self.assertEqual(reader[-1]["kind"], "gap")
+
+
+class TestDirectionFromReadings(unittest.TestCase):
+    """10-07 复核 §架构决定-1：**判断随读数的符号走**（不只换标题词）。
+
+    - 洋河（利润下降）：税费 +11.64 亿元是**缓冲**；
+    - 三一（利润增长）：税费 −1.12 亿元是**拖累**、现金由营运资本**推动**；
+    - 现金解释与下一观察只陈述**会计构成**，不把未证商业原因（"占用未随采购同步下降"）
+      写成已发生解释。
+    """
+
+    IS = TestU2ResearchNote.IS          # 洋河（净利 -33.43 亿元）
+    CF = TestU2ResearchNote.CF
+
+    # 三一式（净利 +14.48 亿元、税费贡献 -1.12 亿元）——与实机读数同量级
+    IS_UP = {
+        "revenue": (73_222_000_000.0, 77_773_000_000.0),
+        "operating_cost": (51_866_000_000.0, 54_062_000_000.0),
+        "income_tax_expense": (180_000_000.0, 284_788_000.0),      # 贡献 -1.0479 亿元
+        "taxes_and_surcharges": (60_000_000.0, 67_453_000.0),       # 贡献 -0.0745 亿元
+        "selling_expense": (7_000_000_000.0, 7_362_880_000.0),
+        "admin_expense": (3_000_000_000.0, 3_345_680_000.0),
+        "rd_expense": (4_829_740_000.0, 5_313_714_000.0),
+        "net_profit": (4_527_000_000.0, 5_975_000_000.0),
+        "net_profit_consolidated": (4_527_000_000.0, 5_975_000_000.0),
+    }
+    CF_UP = {
+        "net_profit_consolidated": (4_500_000_000.0, 5_986_428_000.0),      # +14.86 亿元
+        "depreciation": (2_000_000_000.0, 1_589_779_000.0),                 # -4.10 亿元
+        "operating_payable_increase": (10_000_000_000.0, 21_613_000_000.0),  # +116.13 亿元
+        "inventory_decrease": (500_000_000.0, 258_000_000.0),               # -2.42 亿元
+        "operating_receivable_decrease": (1_000_000_000.0, -2_394_000_000.0),  # -33.94 亿元
+        "other_cashflow_adjustments": (100_000_000.0, 152_920_000.0),       # +0.53 亿元
+        "operating_cashflow": (5_708_000_000.0, 14_814_000_000.0),          # +91.06 亿元
+    }
+
+    def _ds(self, table, *, source):
+        rows = []
+        for metric, (prev, cur) in dict(table).items():
+            rows.append(_row(metric, "2023年", prev, unit="元", fact_id=f"{source}-{metric}-23"))
+            rows.append(_row(metric, "2024年", cur, unit="元", fact_id=f"{source}-{metric}-24"))
+        return fa.freeze_from_facts(rows, periods=(2023, 2024), entity="测试主体",
+                                    entity_id="600031.SH", as_of="2025-04-30",
+                                    source_label=source)
+
+    def _profit(self, is_table, source):
+        from financial_analysis import judgments as jd
+        od = fa.run("operating_drivers", self._ds(is_table, source=source))
+        self.assertEqual(od.status, C.RunStatus.VALIDATED, od.reason)
+        js = jd.research_judgments([od], records=[], limit=0)
+        return next(j for j in js if j["judgment_id"] == jd.J_PROFIT_MECHANISM), jd
+
+    def test_profit_down_tax_is_a_buffer(self):
+        j, _jd = self._profit(self.IS, "test:dir-down")
+        self.assertIn("利润下降", j["title"])
+        self.assertNotIn("利润改善", j["title"])
+        self.assertIn("缓冲", j["title"])
+        self.assertIn("11.64", " ".join(j["numbers"]))
+        self.assertIn("贡献", " ".join(j["numbers"]),
+                      "分项是对利润变化的贡献，不是「科目减少」")
+
+    def test_profit_up_tax_is_a_drag_never_a_prop(self):
+        """三一反例：净利 +14.48 亿元、税费 −1.12 亿元 ⇒ **拖累**（旧文案写"利润下降…托底"）。"""
+        j, _jd = self._profit(self.IS_UP, "test:dir-up")
+        self.assertIn("利润改善", j["title"])
+        self.assertNotIn("利润下降", j["title"])
+        self.assertIn("拖累", j["title"])
+        self.assertNotIn("托底", j["title"])
+        self.assertIn("-1.12", " ".join(j["numbers"]))
+        hyp = " ".join(str(e.get("text")) for e in j["explanation"])
+        self.assertNotIn("税费减少是不是", hyp, "方向反了：不能说「税费减少」")
+        self.assertIn("税费增加", hyp)
+
+    def test_cash_direction_and_only_accounting_composition(self):
+        from financial_analysis import judgments as jd
+        cash = fa.run("cash_reconciliation", self._ds(self.CF_UP, source="test:dir-cash-up"))
+        self.assertEqual(cash.status, C.RunStatus.VALIDATED, cash.reason)
+        wc = jd.wc_flow_of(self._ds(self.CF_UP, source="test:dir-cash-up"))
+        js = jd.research_judgments([cash], wc_flow=wc, records=[], limit=0)
+        c = next(j for j in js if j["judgment_id"] == jd.J_CASH_WORKING_CAPITAL)
+        self.assertIn("推动", c["title"])
+        self.assertIn("改善", c["title"])
+        self.assertNotIn("下降", c["title"])
+        blob = " ".join(str(e.get("text")) for e in c["explanation"])
+        self.assertNotIn("占用未随采购同步下降", blob, "未证的商业原因不得写成解释")
+        self.assertIn("会计构成", blob)
+        self.assertIn("未证", blob)
+        # 三行方向由符号决定：应付是推动、应收是拖累
+        self.assertIn("经营性应付项目", blob)
+        self.assertIn("推动", blob)
+        self.assertIn("经营性应收项目", blob)
+
+    def test_cash_down_says_profit_driven_and_keeps_next_observation(self):
+        from financial_analysis import judgments as jd
+        od = fa.run("operating_drivers", self._ds(self.IS, source="test:dir-profit"))
+        cash = fa.run("cash_reconciliation", self._ds(self.CF, source="test:dir-cash"))
+        js = jd.research_judgments([od, cash], records=[], limit=0)
+        c = next(j for j in js if j["judgment_id"] == jd.J_CASH_WORKING_CAPITAL)
+        self.assertIn("下降", c["title"])
+        self.assertIn("由利润变化主导", c["title"])
+        nxt = c.get("next_observation") or {}
+        self.assertTrue(nxt.get("support") and nxt.get("weaken"),
+                        "下一观察的支持/削弱条件必须随方向给出")
+        self.assertIn("缓冲", str(nxt.get("support")) + str(nxt.get("weaken")))
+
+
+class TestTargetFulfilmentTwoEvidence(unittest.TestCase):
+    """10-07 复核 §架构决定-2：目标兑现＝**两份证据、一条命题**。
+
+    计划与实际各自有原句、定位、发布时点、所指年度；同主体同年度才比较；
+    **只有计划就未知**（不得从计划句反推实际）；发行人原因只取真实原句。
+    """
+
+    def _jd(self):
+        from financial_analysis import judgments as jd
+        return jd
+
+    def test_plan_only_is_unknown_and_never_declares_fulfilment(self):
+        jd = self._jd()
+        t = jd.plan_target_of([{
+            "snippet": "公司计划营业收入同比增长5%，努力实现稳定经营。",
+            "locator": "第 9 页 · 经营计划", "section": "经营计划",
+            "published_at": "2025-04-29", "document_period": "2024"}])
+        self.assertIsNotNone(t)
+        self.assertIsNone(t["actual"], "计划句自己不是实际完成")
+        j = jd._target_judgment(t)
+        self.assertIn("兑现未知", j["title"])
+        self.assertEqual(j["kind"], "gap")
+        self.assertNotIn("达到或超过计划上限", j["title"])
+        self.assertFalse([e for e in j["explanation"] if e.get("kind") == "发行人解释"],
+                         "没有真实原句就不编发行人原因")
+
+    def test_two_independent_readings_close_the_proposition(self):
+        jd = self._jd()
+        t = jd.plan_target_of([
+            {"snippet": "2、2024年经营计划：公司力争营业收入同比增长 5%-10%。",
+             "locator": "第 12 页 · 2024年经营计划", "section": "2024年经营计划",
+             "published_at": "2024-04-27", "document_period": "2023", "subject": "002304"},
+            {"snippet": "报告期内，白酒行业进入存量竞争阶段，公司主力产品的中端和次高端价位段"
+                        "承压较大，2024 年实现营业收入 288.76 亿元，同比下降 12.83%。",
+             "locator": "第 13 页 · 主营业务分析", "section": "主营业务分析",
+             "published_at": "2025-04-29", "document_period": "2024", "subject": "002304"},
+        ])
+        self.assertEqual(t["plan"]["year"], 2024)
+        self.assertAlmostEqual(t["actual"]["yoy"], -12.83)
+        self.assertEqual(t["plan"]["published_at"], "2024-04-27")
+        self.assertEqual(t["actual"]["published_at"], "2025-04-29")
+        j = jd._target_judgment(t)
+        self.assertIn("未兑现", j["title"])
+        self.assertIn("17.83", " ".join(j["numbers"]))
+        self.assertEqual(len(j["evidence"]), 3, "计划/实际/发行人原句三条各自独立")
+        self.assertTrue(any(e.get("role") == jd.ROLE_ASSUMPTION for e in j["evidence"]))
+        self.assertTrue(any(e.get("role") == jd.ROLE_OBSERVED for e in j["evidence"]))
+        reason = [e for e in j["explanation"] if e.get("kind") == "发行人解释"]
+        self.assertTrue(reason and "存量竞争" in reason[0]["text"],
+                        "发行人原因必须引用真实原句")
+
+    def test_different_subject_or_year_is_not_compared(self):
+        jd = self._jd()
+        t = jd.plan_target_of([
+            {"snippet": "公司计划 2024 年营业收入同比增长 5%-10%。", "locator": "A 计划",
+             "published_at": "2024-04-27", "document_period": "2023", "subject": "A"},
+            {"snippet": "2024 年实现营业收入 100 亿元，同比下降 3.00%。", "locator": "B 年报",
+             "published_at": "2025-04-01", "document_period": "2024", "subject": "B"}])
+        self.assertIsNone(t["actual"], "主体不同不比")
+        t2 = jd.plan_target_of([
+            {"snippet": "公司计划 2025 年营业收入同比增长 5%-10%。", "locator": "计划",
+             "published_at": "2024-04-27", "document_period": "2024"},
+            {"snippet": "2024 年实现营业收入 100 亿元，同比下降 3.00%。", "locator": "实际",
+             "published_at": "2025-04-29", "document_period": "2024"}])
+        self.assertIsNone(t2["actual"], "年度对不上不比")
+
+    def test_no_numeric_plan_no_judgment(self):
+        jd = self._jd()
+        self.assertIsNone(jd.plan_target_of([{
+            "snippet": "公司将持续推进国际化战略，经营计划不涉及具体财务指标。",
+            "locator": "第 19 页 · 经营计划", "document_period": "2024"}]))
+
 
 class TestW2ResearchJudgments(unittest.TestCase):
     """W2（阶段W §5）：**可检验的研究判断**——七段式、读数驱动、写得出反转条件。
@@ -4252,9 +4458,14 @@ class TestX0DeliveryClosure(unittest.TestCase):
         #    10-06 复核 §4：不再另印『三项主判断（先看这里）』。
         self.assertIn("## 关键判断与下一步", ctx["front"])
         self.assertNotIn("三项主判断", ctx["front"])
-        for needle in ("-16.30%", "推算吨价", "+3.93%", "+16.38%", "-8.40%"):
+        for needle in ("-16.30%", "推算吨价", "+3.93%", "+16.38%"):
             self.assertIn(needle, ctx["front"], f"首屏判断缺 {needle}")
         self.assertIn("推算口径", ctx["front"], "推算身份必须写明")
+        # 首屏每条**只印前 4 条关键读数**（10-07 复核 §页数决定：首屏每条结论＋1–2 个关键数，
+        # 完整读数留同版附件）。库存并入"量与价"这条收入机制链后，产量同比是第 5 条读数 ⇒
+        # 它在**明细**里（同一次装配、同一批读数），不在首屏。这里锁住"披露事实真的进了判断层"，
+        # 而不是锁"它必须挤进首屏"。
+        self.assertIn("-8.40%", ctx["detail"], "产量同比（披露事实）必须进判断明细")
         # 结构化判断对象与首屏同源透传（§6.3-1）
         self.assertTrue(ctx["reader_judgments"], "首屏判断对象要透传")
         self.assertGreaterEqual(len(ctx["judgments"]), len(ctx["reader_judgments"]))

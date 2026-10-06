@@ -779,11 +779,21 @@ class TestResearchHardGate(unittest.TestCase):
             tried_alternatives=["重规划为 content_summary"], replacement_step_id="2b"))
         self.assertEqual(_gate(), "")
         self.assertFalse(self.o._delivery(self.tid)["hard_fail"])
-        # ② 报告步骤失败但**已被替代步骤接管**（有恢复路径）→ 不算未恢复
+        # ② 报告步骤失败但**替代步骤确实成功**（outcome=SUCCESS）→ 算已恢复
         write_step_failure(self.tid, StepDiagnosis(
             step_id="4", capability="report_generator", error_type="CONTRACT_VIOLATION",
             replacement_step_id="4b", replacement_outcome="SUCCESS"))
         self.assertEqual(_gate(), "")
+        # ②′ 10-07 复核 §随样品最小收口-3 反例：**只有替代 ID、结果是 FAILED** 不算恢复
+        for _outcome in ("FAILED", "", "PENDING"):
+            write_step_failure(self.tid, StepDiagnosis(
+                step_id="4", capability="report_generator",
+                error_type="CONTRACT_VIOLATION", replacement_step_id="4b",
+                replacement_outcome=_outcome))
+            _note = _gate()
+            self.assertIn("研究交付硬门槛未通过", _note,
+                          f"outcome={_outcome!r} 不能证明恢复成功")
+            self.assertIn("替代步骤未成功", self.o._delivery(self.tid)["hard_fail"])
         # ③ 报告步骤失败且**未恢复** → 硬门槛（且原因点名 capability）
         write_step_failure(self.tid, StepDiagnosis(
             step_id="4", capability="report_generator", error_type="CONTRACT_VIOLATION",

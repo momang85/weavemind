@@ -30,6 +30,9 @@ J_PROFIT_MECHANISM = "profit_mechanism_and_buffer"   # 利润为什么降、什�
 J_WC_FLOW = "working_capital_flow_items"             # 现金补充资料三项（应付/存货/应收）
 J_SCENARIO_THRESHOLD = "scenario_profit_threshold"   # 回到目标利润所需条件
 J_REVENUE_MECHANISM = "revenue_mechanism_volume_price"  # 量价合并后的一条（同一收入机制）
+# 10-06 复核 §6「首例阅读顺序」的第一条：**目标兑现**（年初经营计划 vs 全年实际）。
+# 同一份年报里两者都有披露与定位，可直接对照；没有可量化计划就**不生成这条**（宁缺不编）。
+J_TARGET = "target_fulfilment"
 
 # 10-06 复核 §6.3-3：**解释的性质**必须与证据分开写——"我们算出来的关系"、"发行人说的"
 # 与"我们提出的假说"是三件不同的事。此前一律写成"变化原因方面"，读者分不清哪句是账算出来的、
@@ -37,7 +40,10 @@ J_REVENUE_MECHANISM = "revenue_mechanism_volume_price"  # 量价合并后的一�
 EXPLANATION_KINDS = ("计算关系", "发行人解释", "研究假说")
 
 KIND_LABELS = {"observed": "已发生（读数）", "company_claim": "发行人归因（原句）",
-               "assumption": "假设（未发生）", "background": "背景"}
+               "assumption": "假设（未发生）", "background": "背景",
+               # 10-07 复核 §主问题-2：读不到就是**缺口**，不能顶着"已发生（读数）"的标签
+               # 出现在首屏（三一量价全缺却被合并成"销量收缩"并标已发生）。
+               "gap": "读数不足（不作结论）"}
 
 # X0（阶段X §3）：**证据角色**——每条证据标明它是"发行人怎么解释的"、"披露的读数"、
 # "我们算出来的"还是"背景/未来计划"。此前一律标「已准入段落」，于是三一第 29 页的
@@ -250,6 +256,325 @@ def _facts_evidence(vp, *, groups=("分产品", "分地区")) -> list[dict]:
     return ev
 
 
+_PLAN_RE = None
+_ACTUAL_RE = None
+
+
+def _re_mod():
+    global _PLAN_RE, _ACTUAL_RE
+    import re as _re
+    if _PLAN_RE is None:
+        # 计划：**必须能读出"所指年度"就尽量读**（读不到年度不编，只是无法与实况对齐）。
+        # 复核反例：仅"公司计划营业收入同比增长5%，努力实现稳定经营。"曾被当成
+        # "计划 5% ＋ 实际 5%"并宣告兑现——那是把**计划句自己**当成了实际完成。
+        _PLAN_RE = _re.compile(
+            r"(?:规划|计划|力争|目标|预算)[^。；\n]{0,40}?"
+            r"(?:(?P<year>20\d{2})\s*年[^。；\n]{0,30}?)?"
+            r"(?:营业收入|收入)[^。；\n]{0,20}?(?:同比)?"
+            r"(?:增长|增加|提升|增幅)\s*"
+            r"(?P<low>[0-9]+(?:\.[0-9]+)?)\s*%\s*"
+            r"(?:[-~—－至到]{1,2}\s*(?P<high>[0-9]+(?:\.[0-9]+)?)\s*%|以上|左右)?")
+        # 实际：**完成口径**。两条可选形状，都要带**年度**：
+        #   A 年度 ＋ 实现/完成/达到/实际 ＋ …营业收入…同比 上升|下降|增长|减少 X%
+        #   B 年度 ＋ 营业收入…同比 **下降|减少|下滑** X%（计划句不会说下降）
+        # 计划句"力争营业收入同比增长 5%-10%"两条都不匹配 ⇒ 不会被当实际。
+        _ACTUAL_RE = _re.compile(
+            r"(?:(?P<year_a>20\d{2})\s*年[^。；\n]{0,20}?(?:实现|完成|达到|实际)"
+            r"[^。；\n]{0,30}?(?:营业收入|收入)[^。；\n]{0,30}?"
+            r"同比\s*(?P<dir_a>上升|下降|增长|减少|下滑)\s*(?P<pct_a>[0-9]+(?:\.[0-9]+)?)\s*%)"
+            r"|(?:(?P<year_b>20\d{2})\s*年[^。；\n]{0,20}?(?:营业收入|收入)"
+            r"[^。；\n]{0,20}?同比\s*(?P<dir_b>下降|减少|下滑)\s*(?P<pct_b>[0-9]+(?:\.[0-9]+)?)\s*%)")
+    return _re
+
+
+def _sent_spans(text: str) -> list[tuple[int, int, str]]:
+    """切成句子（保留跨度）：计划与实际必须落在**不同句子**里，否则"实际"就是计划句自己。"""
+    _re = _re_mod()
+    out: list[tuple[int, int, str]] = []
+    start = 0
+    for m in _re.finditer(r"[。；;!?！？\n]", text):
+        seg = text[start:m.end()]
+        if seg.strip():
+            out.append((start, m.end(), seg))
+        start = m.end()
+    if start < len(text) and text[start:].strip():
+        out.append((start, len(text), text[start:]))
+    return out
+
+
+def _plan_hit(text: str):
+    """一段文本里的**计划**读数：`{low, high, year, text, span}`，没有就 `None`。"""
+    _re = _re_mod()
+    m = _PLAN_RE.search(text or "")
+    if not m:
+        return None
+    low = float(m.group("low"))
+    high = float(m.group("high")) if m.group("high") else low
+    if high < low:
+        low, high = high, low
+    year = int(m.group("year")) if m.group("year") else None
+    return {"low": low, "high": high, "year": year,
+            "text": str(text or "")[m.start():m.end()], "span": (m.start(), m.end())}
+
+
+def _actual_hits(text: str, *, exclude_span=None):
+    """一段文本里的**实际完成**读数（独立句子，不与 `exclude_span` 重叠）。"""
+    _re = _re_mod()
+    out = []
+    for s0, s1, seg in _sent_spans(text or ""):
+        if exclude_span and not (s1 <= exclude_span[0] or s0 >= exclude_span[1]):
+            continue                       # 与计划句重叠 ⇒ 那是计划，不是实际
+        for m in _ACTUAL_RE.finditer(seg):
+            year = m.group("year_a") or m.group("year_b")
+            direction = m.group("dir_a") or m.group("dir_b")
+            pct = m.group("pct_a") or m.group("pct_b")
+            v = float(pct)
+            out.append({"yoy": -v if direction in ("下降", "减少", "下滑") else v,
+                        "year": int(year) if year else None,
+                        "text": seg.strip(), "sentence": seg,
+                        "span": (s0 + m.start(), s0 + m.end())})
+    return out
+
+
+def _range_txt(low: float, high: float) -> str:
+    """计划区间的写法：单值不写成 "+5%~+5%"。"""
+    return f"+{low:g}%" if abs(high - low) < 1e-9 else f"+{low:g}%~+{high:g}%"
+
+
+def _plan_year_fallback(plan: dict):
+    """计划句里没写年度时，从**同一份披露的正文/小节名**里取（如"2、2024年经营计划"）。
+
+    取不到就保持未知：年度对不上就不作兑现比较（宁可未知，不拿错年度比）。
+    """
+    _re = _re_mod()
+    for src in (str(plan.get("text") or ""),
+                str((plan.get("record") or {}).get("section") or "")):
+        m = _re.search(r"(20\d{2})\s*年", src)
+        if m:
+            return int(m.group(1)), ("计划句" if src == str(plan.get("text") or "")
+                                     else "同一披露的小节名")
+    return None, ""
+
+def _subject_of(rec: dict) -> str:
+    """记录的主体标识（用于"同主体才比较"）：取上游已有的身份字段，没有就空串。"""
+    for k in ("subject", "entity", "company_id", "ticker", "publisher"):
+        v = str((rec or {}).get(k) or "").strip()
+        if v:
+            return v
+    return ""
+
+
+def _pub_of(rec: dict) -> str:
+    return str((rec or {}).get("published_at") or "").strip()
+
+
+def plan_target_of(records) -> dict | None:
+    """已准入段落里的**经营计划 vs 全年实际**（目标兑现用）→ 读数字典，找不到返回 `None`。
+
+    10-07 复核 §架构决定-2：**"两份证据、一条命题"**——
+
+    - **计划**：计划句原句 ＋ 所指年度 ＋ 发布时点 ＋ 定位；
+    - **实际**：**独立**的完成读数（不同句子、带年度、带自己的定位与发布时点），
+      与计划**同所指年度**才比较；同主体才比较；
+    - 只有计划（或只有实际、或年度对不上）⇒ `actual=None`，由 `_target_judgment` 写**未知**，
+      **绝不从计划句反推实际**（复核反例：仅有"公司计划营业收入同比增长5%"时曾宣告兑现）；
+    - 发行人原因**只取真实原句**（同一批已准入段落里的原句，不做同义改写、不硬编码行业措辞）。
+
+    返回 `{"plan": {...}, "actual": {...}|None, "reason": {...}|None}`；一条计划都找不到
+    返回 `None`（宁缺不编）。
+    """
+    plans: list[dict] = []
+    for r in (records or ()):
+        if not isinstance(r, dict):
+            continue
+        text = str(r.get("snippet") or r.get("text") or "")
+        h = _plan_hit(text)
+        if not h:
+            continue
+        h["record"] = r
+        h["locator"] = str(r.get("locator") or "")
+        h["year_basis"] = "计划句" if h["year"] is not None else ""
+        if h["year"] is None:
+            # 计划句没写年度 ⇒ 从同一份披露的小节名取（"2、2024年经营计划"）；仍取不到就未知
+            _y, _basis = _plan_year_fallback(h)
+            if _y is not None:
+                h["year"], h["year_basis"] = _y, _basis
+        plans.append(h)
+    if not plans:
+        return None
+
+    def _find_actual(plan: dict):
+        """实际读数：先同记录里**计划句之外**的句子，再其它记录（同主体才收）。"""
+        best = None
+        plan_subject = _subject_of(plan["record"])
+        plan_pub = _pub_of(plan["record"])
+        for r in (records or ()):
+            if not isinstance(r, dict):
+                continue
+            text = str(r.get("snippet") or r.get("text") or "")
+            same_doc = r is plan["record"]
+            if not same_doc:
+                sub = _subject_of(r)
+                if plan_subject and sub and sub != plan_subject:
+                    continue              # 主体不同不比
+            for a in _actual_hits(text, exclude_span=(plan["span"] if same_doc else None)):
+                if plan["year"] is not None and a["year"] is not None \
+                        and a["year"] != plan["year"]:
+                    continue              # 年度对不上不比（同年度口径）
+                if not str(r.get("locator") or ""):
+                    continue              # 实际必须有定位
+                cand = dict(a, record=r, locator=str(r.get("locator") or ""),
+                            published_at=_pub_of(r),
+                            document_period=str(r.get("document_period") or ""))
+                # 优先：① 该年度的年报（document_period 与所指年度一致）；② 有发布时点
+                score = ((2 if cand["document_period"][:4] == str(cand["year"]) else 0)
+                         + (1 if cand["published_at"] else 0))
+                if best is None or score > best[0]:
+                    best = (score, cand)
+        return best[1] if best else None
+
+    def _best_plan():
+        """优先：① 能配上年度实际；② 计划来自**更早**的文件（真正的"期初计划"）。"""
+        scored = []
+        for p in plans:
+            a = _find_actual(p)
+            score = ((4 if a is not None else 0)
+                     + (2 if (p["year"] is not None and p["record"].get("document_period")
+                              and str(p["record"].get("document_period"))[:4].isdigit()
+                              and int(str(p["record"].get("document_period"))[:4]) < p["year"])
+                        else 0)
+                     + (1 if str(p["record"].get("section") or "") else 0))
+            scored.append((score, p, a))
+        scored.sort(key=lambda x: -x[0])
+        return scored[0]
+
+    _score, plan, actual = _best_plan()
+    out = {
+        "plan": {"low": plan["low"], "high": plan["high"], "year": plan["year"],
+                 "year_basis": plan.get("year_basis") or "",
+                 "text": plan["text"], "locator": plan["locator"],
+                 "published_at": _pub_of(plan["record"]),
+                 "document_period": str(plan["record"].get("document_period") or ""),
+                 "section": str(plan["record"].get("section") or "")},
+        "actual": None,
+        "reason": None,
+    }
+    if actual is not None:
+        out["actual"] = {"yoy": actual["yoy"], "year": actual["year"],
+                         "text": actual["text"], "locator": actual["locator"],
+                         "published_at": actual["published_at"],
+                         "document_period": actual["document_period"]}
+        # 发行人原因 = **真实原句**（实际句所在的那句披露里带因果/背景措辞时照抄）
+        _re = _re_mod()
+        sent = str(actual.get("sentence") or "")
+        if sent and _re.search(r"主要系|由于|受[^。；\n]{0,20}影响|原因|行业|竞争|承压|调整", sent):
+            out["reason"] = {"text": sent.strip(), "locator": actual["locator"],
+                             "published_at": actual["published_at"]}
+    return out
+
+
+def _target_judgment(t: dict) -> dict:
+    """目标兑现判断：计划与实际**各自独立**（各有原句、定位、发布时点、所指年度）。
+
+    只有计划、或年份对不上 ⇒ 写**未知**（`kind=gap`）：不宣告兑现、不套发行人原因。
+    """
+    plan, actual = t.get("plan") or {}, t.get("actual")
+    low, high = float(plan.get("low")), float(plan.get("high"))
+    year = plan.get("year")
+    year_txt = f"{year} 年" if year else "所指年度未披露"
+    plan_pub = str(plan.get("published_at") or "")
+    plan_evidence = {
+        "type": "发行人计划（原句）", "text": str(plan.get("text") or "")[:160],
+        "locator": str(plan.get("locator") or ""),
+        # 角色标成"未来计划/假设"：它是**期初给出的计划**，不是"解释已发生变化的归因"。
+        "kind": ROLE_ASSUMPTION, "role": ROLE_ASSUMPTION}
+    plan_num = (f"计划（{year_txt}"
+                + (f"，披露于 {plan_pub}" if plan_pub else "")
+                + f"）：营业收入同比 **{_range_txt(low, high)}**（发行人披露原句）")
+    _reason = t.get("reason")
+    reason_expl = ([{"kind": "发行人解释",
+                     "text": "发行人原句：" + str(_reason.get("text") or "")[:220],
+                     "evidence": [{"locator": str(_reason.get("locator") or "")}]}]
+                   if _reason else [])
+    common = dict(
+        jid=J_TARGET,
+        boundary=("计划原文用的是「力争」表述，**不是业绩承诺**；计划与实际各自来自发行人披露，"
+                  "口径/并表范围变化会影响可比性；单期偏离只说明「计划与结果不一致」，"
+                  "不构成对管理层能力或长期趋势的判断"),
+        alternatives=["行业下行导致的被动偏离（同期行业产量与需求在收缩）",
+                      "计划本身留有余地、或计划口径与年报口径不同",
+                      "并表范围、统计口径或追溯调整"],
+        watch=["下一份年报的经营计划是否仍给出可量化目标",
+               "规划期内的累计完成情况（单年偏离 ≠ 规划落空）"],
+        next_observation={
+            "metric": "下一年度经营计划中的可量化目标、下一年度实际营业收入同比",
+            "period": "下一份年报（同口径）",
+            "support": ("下一期计划**继续给出可量化目标**、且实际落在计划区间内 → "
+                        "说明本期的偏离是单期波动，计划口径仍可用于对照"),
+            "weaken": ("连续两期实际都低于计划下限、或公司不再给出可量化目标 → "
+                       "削弱「计划可作为判断基准」这一读法，需改用行业与同期可比口径"),
+            "minimum_material": "下一份年报的『公司未来发展的展望/经营计划』与合并利润表",
+        })
+    if actual is None:
+        # **只有计划**（或年度对不上）：结果未知，不宣告兑现、不编原因（复核 §架构决定-2）
+        return _judgment(
+            title=(f"经营计划（营业收入同比 {_range_txt(low, high)}，{year_txt}）"
+                   "**兑现未知**：未取得同年度独立实际读数"),
+            numbers=[plan_num,
+                     "全年实际：**未取得独立证据**（计划句本身不是实际完成；不宣告兑现）"],
+            evidence=[plan_evidence],
+            explanation=[{"kind": "研究假说",
+                          "text": ("实际完成数必须来自**独立证据**（同主体、同年度、营业收入同比口径），"
+                                   "不能由计划句反推；本轮未定位到对应披露，故不给兑现结论。"),
+                          "evidence": ["缺口：同年度实际完成数的披露未定位"]}],
+            kind="gap", gaps=["同年度实际完成数未定位：兑现结论留缺"],
+            **common)
+    ay = actual.get("year")
+    v = float(actual.get("yoy"))
+    gap_low, gap_high = v - low, v - high
+    if v >= high:
+        verdict = f"**兑现（达到或超过计划上限）**：全年 {v:+.2f}%"
+    elif v >= low:
+        verdict = f"**落在计划区间内**：全年 {v:+.2f}%"
+    else:
+        verdict = (f"**未兑现**：全年 {v:+.2f}%，低于计划下限 {abs(gap_low):.2f}pp"
+                   f"（低于上限 {abs(gap_high):.2f}pp）")
+    actual_pub = str(actual.get("published_at") or "")
+    year_line = f"实际年度 {ay} 年" if ay else "实际年度未披露"
+    numbers = [
+        plan_num,
+        (f"实际（{year_line}" + (f"，披露于 {actual_pub}" if actual_pub else "")
+         + f"，独立定位）：营业收入同比 **{v:+.2f}%**"),
+        f"差距：实际 − 计划 ＝ {gap_low:+.2f}pp（对下限）／{gap_high:+.2f}pp（对上限）",
+    ]
+    if plan.get("year") is not None and ay is not None and plan["year"] != ay:
+        numbers.append(f"口径提示：计划所指年度 {plan['year']} 与实际年度 {ay} **不一致**，不作兑现比较")
+    evidence = [plan_evidence,
+                {"type": "全年实际（原句，独立读数）",
+                 "text": str(actual.get("text") or "")[:160],
+                 "locator": str(actual.get("locator") or ""),
+                 "kind": ROLE_OBSERVED, "role": ROLE_OBSERVED}]
+    if _reason:
+        evidence.append({"type": "发行人解释（原句）",
+                         "text": str(_reason.get("text") or "")[:160],
+                         "locator": str(_reason.get("locator") or ""),
+                         "kind": ROLE_COMPANY_CLAIM, "role": ROLE_COMPANY_CLAIM})
+    return _judgment(
+        title=(f"经营计划（{year_txt}，营业收入同比 {_range_txt(low, high)}）{verdict}"
+               + (f"｜披露时点 {plan_pub}"
+                  if plan_pub and plan_pub == actual_pub else
+                  (f"｜计划披露 {plan_pub}" if plan_pub else "")
+                  + (f"、实际披露 {actual_pub}" if actual_pub else ""))),
+        numbers=numbers, evidence=evidence,
+        explanation=[{"kind": "计算关系",
+                      "text": ("差距 ＝ 全年实际营业收入同比 − 年初计划区间；"
+                               "计划与实际是**两份独立读数**（各有原句与定位），不作相互推导"),
+                      "evidence": []}] + reason_expl,
+        gaps=([ "发行人原因未定位：只给计划与实际两个读数"]
+              if not _reason else []),
+        **common)
+
+
 def _judgment(*, jid, title, numbers, evidence, boundary, alternatives, watch,
               kind="observed", gaps=(), roles=(),
               explanation=(), next_observation=None) -> dict:
@@ -439,6 +764,11 @@ def research_judgments(runs, *, volume_price: dict | None = None,
     vp = volume_price or {}
     vp_ok = bool(vp.get("ok"))
     entity = _entity_of(runs)
+    # ⓿′ 目标兑现（复核 §6 首例阅读顺序第一条）：年初经营计划 vs 全年实际。
+    #     完全由**已准入披露**驱动（两个读数都要有定位），拿不到就不生成这条。
+    _target = plan_target_of(records)
+    if _target is not None:
+        out.append(_target_judgment(_target))
     # 本公司专属缺口（只对**它自己**列）：洋河第 10 页的"中高档酒/普通酒"产品类别表是
     # 单期+同比形状、现抽取层未取到。这条缺口此前写死在结构判断里，于是**三一**的
     # 结构判断也挂着洋河的酒类缺口（架构复核点名"证据角色和公司边界混用"）。
@@ -465,10 +795,11 @@ def research_judgments(runs, *, volume_price: dict | None = None,
     inv = _fact(vp, "库存量") if vp_ok else {}
     ton_price = _vp_derived(vp, "吨价") if vp_ok else {}
 
-    # ⓿ 利润机制（10-06 复核 §6.2 第一条）：利润为什么降、什么在托底。
-    #    全部来自同一次选定运行的 `net_profit_change_detail`（逐项分解），不硬编码公司结论；
-    #    税费缓步（所得税＋税金及附加）与"毛利线以下其余项目"分开写，避免把税费减少
-    #    说成经营改善或永久税率红利。
+    # ⓿ 利润机制（10-06 复核 §6.2 第一条；10-07 复核 §主问题-1 **修正方向**）：
+    #    **利润改善↔下降、税费托底↔拖累都由当次读数的符号决定**，不硬编码公司结论。
+    #    三一实测反例：净利 +14.48 亿元、税费贡献 −1.12 亿元，旧文案却写"利润下降…税费减少托底"。
+    #    `net_profit_change_detail` 的每个分项都是**对归母净利润变化的贡献**
+    #    （已带符号：所得税费用上升＝负贡献），所以方向判据与现金桥同一套。
     if od is not None:
         detail = _out(od, "net_profit_change_detail")
         bridge = _out(od, "net_profit_change")
@@ -480,48 +811,111 @@ def research_judgments(runs, *, volume_price: dict | None = None,
             gp_v = _num(_attr(gp, "value")) if gp is not None else None
             below = _num(_attr(_out(od, "below_gross_line_change"), "value"))
             _tax_ids = ("income_tax_expense", "taxes_and_surcharges")
-            tax_v = sum(_num(_attr(c, "value")) or 0.0 for c in comps
-                        if str(_attr(c, "component_id")) in _tax_ids)
-            tax_bits = [f"{_attr(c, 'label')} {_yi(_attr(c, 'value'), _ou)}亿元"
-                        for c in comps if str(_attr(c, "component_id")) in _tax_ids]
+            _tax_comps = [c for c in comps if str(_attr(c, "component_id")) in _tax_ids]
+            tax_v = sum(_num(_attr(c, "value")) or 0.0 for c in _tax_comps)
+            tax_bits = [f"{_attr(c, 'label')}贡献 {_yi(_attr(c, 'value'), _ou)}亿元"
+                        for c in _tax_comps]
             rest_v = (below - tax_v) if (below is not None) else None
+            _down = bool(total is not None and total < 0)
+            _up = bool(total is not None and total > 0)
+            _what = "下降" if _down else ("改善" if _up else "变化")
+
+            def _prof_role(v):
+                """该分项对**利润变化**的方向（与现金桥同一套：同号＝推动/加重，反号＝缓冲/拖累）。"""
+                if v is None or total in (None, 0):
+                    return ""
+                if float(v) * float(total) > 0:
+                    return "拖累（加重下降）" if _down else "推动"
+                return "缓冲" if _down else "拖累"
+
+            gp_role, rest_role = _prof_role(gp_v), _prof_role(rest_v)
+            tax_role = _prof_role(tax_v) if tax_bits else ""
             numbers = []
             if total is not None:
                 numbers.append(f"归母净利润变化 {_yi(total, _ou)}亿元（＝毛利端 ＋ 毛利线以下）")
             if gp_v is not None:
                 numbers.append(f"毛利端变化 {_yi(gp_v, _ou)}亿元（收入规模 "
                                f"{_yi(_attr(_out(od, 'revenue_scale_effect'), 'value'), _ou)} ＋ "
-                               f"毛利率 {_yi(_attr(_out(od, 'gross_margin_effect'), 'value'), _ou)}）")
+                               f"毛利率 {_yi(_attr(_out(od, 'gross_margin_effect'), 'value'), _ou)}；"
+                               f"{gp_role or '构成'}）")
             if tax_bits:
-                numbers.append(f"**税费减少托底** {_yi(tax_v, _ou)}亿元（" + "、".join(tax_bits)
-                               + "）")
+                numbers.append(f"税费对利润变化的贡献 {_yi(tax_v, _ou)}亿元"
+                               f"（{tax_role}；" + "、".join(tax_bits) + "）")
             if rest_v is not None:
                 numbers.append(f"毛利线以下其余项目合计 {_yi(rest_v, _ou)}亿元"
-                               f"（毛利线以下净额 {_yi(below, _ou)}亿元）")
+                               f"（{rest_role or '构成'}；毛利线以下净额 "
+                               f"{_yi(below, _ou)}亿元）")
             if numbers:
                 _pe, _ps = _record_evidence(
                     records, ("所得税费用", "税金及附加", "所得税", "税负", "税率"), limit=2)
+                # 标题：主因（毛利端 or 毛利线以下）＋税费的**实际方向**
+                if gp_v is not None and below is not None and abs(gp_v) >= abs(below):
+                    title = f"利润{_what}的主因在毛利端（{_yi(gp_v, _ou)}亿元）"
+                elif below is not None:
+                    title = (f"利润{_what}主要由毛利线以下项目构成"
+                             f"（{_yi(below, _ou)}亿元）")
+                else:
+                    title = f"利润{_what}的构成"
+                if tax_bits:
+                    _tc = {"缓冲": f"税费是**缓冲**（未改变{_what}方向）",
+                           "拖累": "税费是**拖累**",
+                           "推动": "税费**同向推动**",
+                           "拖累（加重下降）": "税费**加重下降**"}.get(tax_role, "税费分项")
+                    title += f"，{_tc} {_yi(tax_v, _ou)}亿元"
+                _hyp = {
+                    "缓冲": ("税费减少是不是**可持续**（税率、汇算清缴、递延税与一次性因素）"
+                             "本轮**未证**：只见金额，未见税率与应纳税所得额的说明。"),
+                    "拖累": ("税费增加（对利润的贡献为负）是不是**结构性或一次性**"
+                             "（税率、汇算清缴、递延税转回）本轮**未证**：只见金额，"
+                             "未见税率与应纳税所得额的说明。"),
+                    "推动": ("税费同向推动利润（贡献为正）是不是**可持续**：税率、汇算清缴与"
+                             "递延税因素本轮**未证**，只见金额。"),
+                    "拖累（加重下降）": ("税费同向加重利润下降是不是**一次性**（递延税转回、"
+                                         "汇算清缴）本轮**未证**：只见金额，未见税率说明。"),
+                }.get(tax_role)
                 explanation = [{
                     "kind": "计算关系",
                     "text": ("Δ归母净利润 ＝ Δ毛利端 ＋ Δ毛利线以下；毛利线以下再拆成"
                              "所得税/税金及附加与其余项目——三者都是**同一份利润表的算术分解**，"
-                             "不含因果。"),
+                             "不含因果。**分项均为对归母净利润变化的贡献**（已带符号："
+                             "所得税费用上升＝负贡献），方向由符号决定。"),
                     "evidence": ["运行读数：归母净利润变化 / 毛利变化 / 毛利线以下逐项分解"],
-                }, {
-                    "kind": "研究假说",
-                    "text": ("税费减少是不是**可持续**（税率、汇算清缴、递延税与一次性因素）"
-                             "本轮**未证**：只见金额，未见税率与应纳税所得额的说明。"),
-                    "evidence": ["缺口：所得税费用与税率的披露说明未定位"],
                 }]
+                if _hyp:
+                    explanation.append({
+                        "kind": "研究假说", "text": _hyp,
+                        "evidence": ["缺口：所得税费用与税率的披露说明未定位"]})
+                _obs = {
+                    "缓冲": {
+                        "support": ("税费减少在下一期**不再重复**、且毛利率与销量不再恶化时，"
+                                    "本期利润的托底被读成一次性缓冲"),
+                        "weaken": ("若税费占收入比继续下降并成为主要托底，"
+                                   "则利润质量与可持续性的判断需要改写"),
+                    },
+                    "拖累": {
+                        "support": ("税费贡献在下一期**转为中性或转正**、且毛利端继续改善时，"
+                                    "本期拖累被读成一次性（基数/汇算清缴）因素"),
+                        "weaken": ("若税费继续侵蚀利润（占收入比上升）而毛利端放缓，"
+                                   "则利润改善的可持续性需要下调"),
+                    },
+                    "推动": {
+                        "support": ("税费贡献在下一期继续同向、毛利端不恶化 → 支持"
+                                    "「利润增长由毛利端与税费共同推动」"),
+                        "weaken": ("若税费贡献由推动转为拖累，则本期利润增长的构成需要重估"),
+                    },
+                    "拖累（加重下降）": {
+                        "support": ("税费贡献下一期转正（不再同向加重下降）→ 本期为一次性因素"),
+                        "weaken": ("税费继续同向加重下降且毛利端未改善 → 降幅的结构性问题加深"),
+                    },
+                }.get(tax_role, {})
                 out.append(_judgment(
                     jid=J_PROFIT_MECHANISM,
-                    title=("利润下降的主因在毛利端，**税费减少托底**"
-                           + (f" {_yi(tax_v, _ou)}亿元" if tax_bits else "")),
+                    title=title,
                     numbers=numbers, evidence=_pe, explanation=explanation,
-                    boundary=("这是**会计变化桥**：税费减少不能直接定性为经营改善、"
-                              "永久税率红利或非经常性收益；也未把毛利线以下其余项目"
-                              "摊派到任何单一科目"),
-                    alternatives=["税费减少来自汇算清缴/递延税等一次性因素（未证）",
+                    boundary=("这是**会计变化桥**：税费的贡献方向由符号决定，"
+                              "不能直接定性为经营改善/恶化、永久税率红利或非经常性收益；"
+                              "也未把毛利线以下其余项目摊派到任何单一科目"),
+                    alternatives=["税率、汇算清缴与递延税等一次性因素（未证）",
                                   "费用与减值计提的时点差异（未证）",
                                   "收入结构与毛利率变化（同一次运行的毛利端分解）"],
                     watch=["下一期所得税费用与税金及附加的绝对额与占收入比",
@@ -530,13 +924,11 @@ def research_judgments(runs, *, volume_price: dict | None = None,
                     next_observation={
                         "metric": "所得税费用、税金及附加、毛利率、销售量",
                         "period": "下一期（同口径年报/半年报）",
-                        "support": ("税费减少在下一期**不再重复**、且毛利率与销量不再恶化时，"
-                                    "本期利润的托底被读成一次性缓冲"),
-                        "weaken": ("若税费占收入比继续下降并成为主要托底，"
-                                   "则利润质量与可持续性的判断需要改写"),
+                        "support": _obs.get("support") or "下一期税费与毛利端的同口径变化",
+                        "weaken": _obs.get("weaken") or "下一期税费与毛利端的同口径变化",
                         "minimum_material": "利润表（所得税费用/税金及附加）＋附注税率调节表",
                     },
-                    gaps=["所得税税率与递延税说明未定位；未把税费减少归因为经营改善"]))
+                    gaps=["所得税税率与递延税说明未定位；未把税费贡献归因为经营改善"]))
     # ① 量：销量收缩是不是收入下降的主要数量观察
     if vol_eff is not None and vol_eff < 0 and (
             price_eff is None or abs(vol_eff) >= abs(price_eff)):
@@ -579,13 +971,15 @@ def research_judgments(runs, *, volume_price: dict | None = None,
             },
             gaps=["渠道库存与终端动销材料未取得（机制缺口，不臆造）"] + gaps_v))
     elif vp_ok or vpe is not None:
+        # 10-07 复核 §主问题-2：读数不足就是**缺口**（`kind=gap`），不能顶着"已发生（读数）"
+        # 被合并器改写成"销量收缩"这种已发生观察。
         out.append(_judgment(
             jid=J_VOLUME, title="销量与收入的数量关系：本次不足以下判断",
             numbers=[("量价分解未取到销量/单位收入效应"
                       if vol_eff is None else f"销量效应 {_yi(vol_eff, _vpu)}亿元不为负")],
             evidence=[], boundary="读数不足：不生成「销量收缩」结论，先补量价与产销量表",
             alternatives=[], watch=["补齐分产品产销量与收入构成后重算"],
-            gaps=["量价分解或产销量披露缺失"]))
+            kind="gap", gaps=["量价分解或产销量披露缺失"]))
 
     # ② 价：单位收入上升 ≠ 提价能力
     if price_eff is not None and price_eff > 0:
@@ -623,7 +1017,8 @@ def research_judgments(runs, *, volume_price: dict | None = None,
             jid=J_PRICE, title="单位收入与提价能力：本次无从判断",
             numbers=["量价分解里的单位价格效应未取到"],
             evidence=[], boundary="没有同口径的量价分解就不评价价格，不用毛利率差替代",
-            alternatives=[], watch=["补齐分产品收入与销量后重算"], gaps=["量价分解缺失"]))
+            alternatives=[], watch=["补齐分产品收入与销量后重算"], kind="gap",
+            gaps=["量价分解缺失"]))
 
     # ③ 库存：企业成品库存积累 ⇒ 销量恢复/库存消化优先观察
     if inv and _num(inv.get("yoy")) is not None and _num(inv.get("yoy")) > 0:
@@ -746,12 +1141,35 @@ def research_judgments(runs, *, volume_price: dict | None = None,
                                          if _wf.get(k)),
                         "locator": str((_wf.get("payable") or {}).get("locator") or ""),
                         "kind": ROLE_OBSERVED, "role": ROLE_OBSERVED})
+            # 10-07 复核 §主问题-3：营运资本三行的**方向也由符号决定**，而且只陈述
+            # **会计构成**——"占用未随采购同步下降/供应商延期付款"这类商业原因在补充资料三行里
+            # **证明不了**（三一实测：旧文案把洋河的"缓冲"与采购说法抄了过来，而三一是
+            # 应付 +116.13 亿元的**推动**）。商业原因只作为**未证假说/替代解释**保留。
+            _wf_lines: list[tuple[str, float, str]] = []
+            if _wf.get("delta_sum") is not None:
+                for _k, _cn in (("payable", "经营性应付项目"), ("inventory", "存货"),
+                                ("receivable", "经营性应收项目")):
+                    _row = _wf.get(_k) or {}
+                    if _row.get("delta") is None:
+                        continue
+                    _dv = float(_row["delta"])
+                    if total is not None and total != 0 and _dv * float(total) > 0:
+                        _rl = "拖累（加重下降）" if float(total) < 0 else "推动"
+                    else:
+                        _rl = "缓冲" if float(total) < 0 else "拖累"
+                    _wf_lines.append((_cn, _dv, _rl))
+            _wc_dir = ""
+            if _wf_lines:
+                _wc_dir = "、".join(f"{_cn} {_yi(_v, '元')}亿元（{_r}）"
+                                    for _cn, _v, _r in _wf_lines)
+            _wc_what = "下降" if (total is not None and total < 0) else "改善"
             if driver == "working_capital":
-                title = ("现金变化**主要由营运资本（占用与时点）构成**，"
-                         "其持续性是关键")
+                title = (f"现金{_wc_what}**主要由营运资本（占用与时点）"
+                         + ("构成**，其持续性是关键" if _wc_what == "下降"
+                            else "推动**，其持续性是关键"))
                 gaps = ["结算条款与账龄明细未取得时不推断账期"]
             elif driver == "net_profit":
-                title = ("现金变化**由利润变化主导**，营运资本是缓冲/拖累"
+                title = (f"现金{_wc_what}**由利润变化主导**，营运资本是缓冲/拖累"
                          "——缓冲能不能持续才是关键")
                 gaps = ["结算条款与账龄明细未取得时不推断账期"]
             else:
@@ -760,31 +1178,50 @@ def research_judgments(runs, *, volume_price: dict | None = None,
             if _skipped:
                 gaps.append("相关但属%s的段落不作为已发生解释"
                             % "、".join(ROLE_LABELS.get(s, s) for s in _skipped))
+            # 发行人对回款/采购的**原句**（若已准入）：只作"发行人解释"原样引用，
+            # 不替它推断商业机制（复核："补充资料三行只证明现金调节构成"）。
+            _claim = next((e for e in _rec_ev
+                           if str(e.get("role") or "") == ROLE_COMPANY_CLAIM
+                           and e.get("text")), None)
+            _wc_hyp = ("营运资本项的构成（补充资料三行，同口径）："
+                       + (_wc_dir or "三行未取全")
+                       + "。这只说明现金变化的**会计构成**；商业原因"
+                         "（供应商账期/票据结算、备货与采购节奏、收入规模的自然占用）"
+                         "本轮**未证**，需要账龄、票据与结算条款披露才能判断。")
+            explanation = [{
+                "kind": "计算关系",
+                "text": ("Δ经营现金流 ＝ 合并净利润变化 ＋ 非现金项变化 ＋ 营运资本项变化"
+                         " ＋ 其他调节项变化（同一份现金流量表补充资料的算术关系）；"
+                         "营运资本项再拆成应付/存货/应收三行，三行合计与桥上的营运资本项相等。"),
+                "evidence": ["运行读数：经营现金流变化分解（五项）",
+                             "披露原句：补充资料三行两期对比"],
+            }, {"kind": "研究假说", "text": _wc_hyp,
+                "evidence": ["缺口：账龄、票据与结算条款披露未定位"]}]
+            if _claim is not None:
+                explanation.insert(1, {
+                    "kind": "发行人解释",
+                    "text": "发行人原句：" + str(_claim.get("text") or "")[:200],
+                    "evidence": [{"locator": str(_claim.get("locator") or "")}]})
+            # 支持/削弱条件随**方向**变化：缓冲与推动要看的东西不一样
+            if _wc_what == "下降":
+                _sup = ("若经营性应付项目的占用继续收窄（缓冲减弱）、"
+                        "而经营性应收项目转为释放现金，则「现金由占用缓冲支撑」的读法被支持")
+                _wea = ("若应收项继续拖累、应付项缓冲扩大，则现金下降更像是"
+                        "**占用别人的钱/延后支付**，不构成经营质量改善")
+            else:
+                _sup = ("若营运资本推动下一期**由应付项转为应收项释放**（应收转正）"
+                        "且经营现金流仍在改善，则说明不只是延后支付")
+                _wea = ("若现金改善的增量**全部来自应付项**（占用别人的钱）而应收项继续拖累，"
+                        "则更像结算安排与账期变化，不构成经营质量改善")
             out.append(_judgment(
                 jid=J_CASH_WORKING_CAPITAL, title=title,
                 numbers=numbers, evidence=evidence, roles=roles,
-                explanation=[{
-                    "kind": "计算关系",
-                    "text": ("Δ经营现金流 ＝ 合并净利润变化 ＋ 非现金项变化 ＋ 营运资本项变化"
-                             " ＋ 其他调节项变化（同一份现金流量表补充资料的算术关系）；"
-                             "营运资本项再拆成应付/存货/应收三行，三行合计与桥上的营运资本项相等。"),
-                    "evidence": ["运行读数：经营现金流变化分解（五项）",
-                                 "披露原句：补充资料三行两期对比"],
-                }, {
-                    "kind": "研究假说",
-                    "text": ("营运资本净缓冲主要来自**应付项目**（占用未随采购同步下降）"
-                             "与存货占用变化，而**经营性应收项目反而是拖累**——"
-                             "所以「回款改善」不是本轮可下的结论。"),
-                    "evidence": ["缺口：账龄、票据与结算条款披露未定位"],
-                }],
+                explanation=explanation,
                 next_observation={
                     "metric": "经营性应收/应付项目、存货的减少（补充资料三行，同口径）",
                     "period": "下一期（同口径年报/半年报）",
-                    "support": ("若经营性应付项目的占用继续收窄（缓冲减弱）、"
-                                "而经营性应收项目转为释放现金，则「现金由占用缓冲支撑」"
-                                "的读法被支持"),
-                    "weaken": ("若应收项继续拖累、应付项缓冲扩大，则现金改善更像是"
-                               "**占用别人的钱/延后支付**，不构成经营质量改善"),
+                    "support": _sup,
+                    "weaken": _wea,
                     "minimum_material": "现金流量表补充资料三行＋账龄与结算政策披露",
                 },
                 boundary=("营运资本项变化可能只是结算节奏、票据或时点；"
@@ -834,6 +1271,13 @@ def research_judgments(runs, *, volume_price: dict | None = None,
                                     f"{_pct(f.get('yoy'))}")
             numbers += struct_lines
             if numbers:
+                # 10-07 复核 §架构决定-1：措辞随**数值方向**走——三一是增长年，"降幅差"
+                # 这种下降期措辞不能照抄（分段里同时有正有负时写"增减差"）。
+                _vals = [p[1] for r in picked_cuts for p in r["parts"] if p[1] is not None]
+                _neg = any(v < 0 for v in _vals)
+                _pos = any(v > 0 for v in _vals)
+                _delta_w = ("降幅差" if (_neg and not _pos)
+                            else "增幅差" if (_pos and not _neg) else "增减差")
                 evidence = _facts_evidence(vp)
                 _rec_ev, _skipped = _record_evidence(
                     records, ("分产品", "分地区", "分销售模式", "收入构成"), limit=1)
@@ -850,14 +1294,15 @@ def research_judgments(runs, *, volume_price: dict | None = None,
                         "本次抽取层未取到 → 只作缺口列出，不并入上面的切法")
                 out.append(_judgment(
                     jid=J_STRUCTURE,
-                    title="产品/区域结构是**同一个口径的不同切法**：降幅差说明结构在起作用",
+                    title=("产品/区域结构是**同一个口径的不同切法**："
+                           f"{_delta_w}说明结构在起作用"),
                     numbers=numbers, evidence=evidence,
                     boundary=("分产品/分地区/分销售模式是**不同切法**，覆盖同一笔收入，"
                               "**不可相加**；结构差异也可能来自发货与确认节奏，"
                               "不能直接读成「某类需求更好」"),
                     alternatives=["渠道与发货节奏差异", "统计口径或并表范围变化",
                                   "价格与促销政策在不同品类上的差异"],
-                    watch=["下一期分产品/分地区收入的降幅差是否收敛",
+                    watch=[f"下一期分产品/分地区收入的{_delta_w}是否收敛",
                            "同口径销量与吨价（结构混合）",
                            "公司对区域/产品策略的披露原句"],
                     gaps=_gaps))
@@ -951,9 +1396,21 @@ def research_judgments(runs, *, volume_price: dict | None = None,
         if numbers:
             numbers.append("两条是**各自单因素**的条件计算（收入固定／毛利率固定），"
                            "不是同一条路径，也不是预测")
+            # 10-07 复核 §架构决定-1：门槛与基期的**距离方向**决定措辞——利润增长年
+            # （三一）"回到目标"其实已高出门槛，写"要回到"会把已达标说成未达标。
+            _gapv = (_num(_attr(gap_pp, "value"))
+                     if _attr(gap_pp, "value") is not None else None)
+            if _gapv is not None and _gapv <= 0:
+                title = (f"按目标利润水平反推：基期毛利率已高出所需门槛 {abs(_gapv):.2f}pp"
+                         "（单因素条件计算，不表示可达）")
+            elif _gapv is not None:
+                title = (f"要回到目标利润水平：毛利率需再高 {_gapv:.2f}pp"
+                         "（或收入按单因素变化）——条件计算")
+            else:
+                title = "要回到目标利润水平，需要多大的毛利率或收入变化（条件计算）"
             out.append(_judgment(
                 jid=J_SCENARIO_THRESHOLD,
-                title="要回到目标利润水平，需要多大的毛利率或收入变化（条件计算）",
+                title=title,
                 numbers=numbers,
                 evidence=[{"type": "运行读数",
                            "text": f"情景敏感性（目标归母净利 {_yi(tgt, su)}亿元）",
@@ -1105,10 +1562,12 @@ def render_judgment_summary(judgments, *, limit: int = 3,
 # 可选组按阅读顺序补到上限（不是"评分器"，也不是取最先 N 条）。
 READER_GROUPS: tuple[tuple[str, tuple[str, ...], bool, int], ...] = (
     # (机制名, 组内判断 id, 是否必选, 超限时的**先删等级**)——顺序即首屏阅读顺序
-    # 顺序＝复核 §4 的阅读顺序：目标兑现/经营机制 → 量价/利润机制 → 现金风险 → 下一观察。
+    # 顺序＝复核 §6 的首例阅读顺序：**目标兑现** → 量价/利润机制 → 现金风险 → 情景边界。
+    # 库存并进"量价与库存"（量—价—库存是同一条收入机制链），这样 5 条上限下
+    # 目标兑现不必挤掉库存那条洞见。
+    ("目标兑现", (J_TARGET,), True, 0),
     ("经营机制", (J_PROFIT_MECHANISM,), True, 0),
-    ("量价", (J_VOLUME, J_PRICE, J_REVENUE_MECHANISM), True, 0),
-    ("库存", (J_INVENTORY,), False, 2),
+    ("量价与库存", (J_VOLUME, J_PRICE, J_INVENTORY, J_REVENUE_MECHANISM), True, 0),
     ("现金", (J_CASH_WORKING_CAPITAL, J_CASH_DIRECT_SUPPORT), True, 0),
     ("情景边界", (J_SCENARIO_THRESHOLD,), False, 1),
     ("结构", (J_STRUCTURE,), False, 3),
@@ -1120,6 +1579,11 @@ def _merge_volume_price(items: list[dict]) -> dict | None:
 
     只合叙述，**不相加数字**：两条读数各自的期间/口径原样保留；`numbers` 逐条列出，
     不做"贡献数相加"（复核原文："指标/期间/产品范围不同不得强合成贡献数"）。
+
+    10-07 复核 §主问题-2：**合并不能把"读数不足"提升成"已发生观察"**。
+    旧实现在量价全缺时仍写死"收入下降的量与价：**销量收缩**是数量观察，**单位收入上升
+    不证明提价**"并标"已发生（读数）"——三一实测（量价全缺）因此宣布了不存在的结论。
+    现在标题与 `kind` 都从**各条自己的可用性**生成：缺哪一项就写缺哪一项，全缺写缺口。
     """
     items = [j for j in items if isinstance(j, dict)]
     if not items:
@@ -1128,9 +1592,35 @@ def _merge_volume_price(items: list[dict]) -> dict | None:
         return items[0]
     base = dict(items[0])
     base["judgment_id"] = J_REVENUE_MECHANISM
-    base["title"] = "收入下降的量与价：**销量收缩**是数量观察，**单位收入上升不证明提价**"
-    base["kind"] = "observed"
-    base["kind_label"] = KIND_LABELS.get("observed", "observed")
+    _ids = {str(j.get("judgment_id") or "") for j in items}
+
+    def _observed(jid: str) -> bool:
+        return any(str(j.get("judgment_id") or "") == jid
+                   and str(j.get("kind") or "observed") == "observed" for j in items)
+
+    vol_obs, price_obs = _observed(J_VOLUME), _observed(J_PRICE)
+    inv_obs = _observed(J_INVENTORY)
+    # 标题按**实际拿到的读数**拼；没拿到的部分明确写"未取到/不评价"
+    bits: list[str] = []
+    if vol_obs:
+        bits.append("**销量收缩**是数量观察")
+    else:
+        bits.append("销量效应**未取到**，不生成数量结论")
+    if price_obs:
+        bits.append("**单位收入上升不证明提价**")
+    else:
+        bits.append("单位收入效应**未取到**，不评价价格")
+    if inv_obs:
+        # 库存并入同一条收入机制链时，标题要把它说出来（否则读者只看到"量价"，
+        # 而库存读数被吞在下面）
+        bits.append("成品库存积累使「销量恢复与库存消化」成为优先观察")
+    base["title"] = "收入变化的量与价：" + "；".join(bits)
+    # 只要有**一条**观察成立，这条仍是"已发生（读数）"；全缺则是**缺口**（不占强结论席位）
+    if vol_obs or price_obs or inv_obs:
+        base["kind"] = "observed"
+    else:
+        base["kind"] = "gap"
+    base["kind_label"] = KIND_LABELS.get(base["kind"], base["kind"])
     nums: list[str] = []
     for j in items:
         for n in (j.get("numbers") or ()):
@@ -1209,9 +1699,9 @@ def _merge_volume_price(items: list[dict]) -> dict | None:
 def select_reader_judgments(judgments, *, limit: int = 5) -> list[dict]:
     """按机制分组选 3–5 条**读者判断**（顺序＝首屏阅读顺序）。`limit<=0` 表示不限。
 
-    - 必选组（经营机制/量价/现金）缺读数时**少一条**，不补空位；
-    - 可选组（库存/结构/情景边界）按顺序补到上限；
-    - 量价组内多条**合并**为一条（同一收入机制），不合数字。
+    - 必选组（目标兑现/经营机制/量价与库存/现金）缺读数时**少一条**，不补空位；
+    - 可选组（情景边界/结构）按顺序补到上限；
+    - 声明了 `J_REVENUE_MECHANISM` 的那一组内多条**合并**为一条（同一收入机制），不合数字。
     """
     by_id: dict[str, dict] = {}
     for j in (judgments or ()):
@@ -1222,15 +1712,21 @@ def select_reader_judgments(judgments, *, limit: int = 5) -> list[dict]:
         items = [by_id[i] for i in ids if i in by_id]
         if not items:
             continue
-        # **只有量价组**才做"收入机制"合并：`_merge_volume_price` 会把 `judgment_id` 与标题
-        # 改成量价那一条，它是**量价专用**的。其它组即使有多条候选（例：现金组的
-        # 「营运资本构成」＋「直接法支撑」），也必须各自保留判断身份 —— 否则现金判断会被
-        # 改名成"收入…量价"，读者看到两条同名判断、其中一条正文却是现金桥。
+        # **只有声明了 `J_REVENUE_MECHANISM` 的那一组**才做"收入机制"合并：`_merge_volume_price`
+        # 会把 `judgment_id` 与标题改成量价那一条，它是**该组专用**的。其它组即使有多条候选
+        # （例：现金组的「营运资本构成」＋「直接法支撑」），也必须各自保留判断身份 —— 否则
+        # 现金判断会被改名成"收入…量价"，读者看到两条同名判断、其中一条正文却是现金桥。
         # 反例（10-06 三一复制实测）：现金组两条都在时，读者列表出现两个
         # `revenue_mechanism_volume_price`，其中一条的读数与下一观察是现金桥的。
-        merged = (_merge_volume_price(items) if _name == "量价" and len(ids) > 1
+        _vp_group = J_REVENUE_MECHANISM in ids
+        merged = (_merge_volume_price(items) if _vp_group and len(items) > 1
                   else items[0])
         if merged is None:
+            continue
+        # 10-07 复核 §主问题-2：**全缺的缺口不占强结论席位**——必选组若只剩"读数不足"
+        # 的缺口（`kind=gap`），按最后一级先删（有其它判断时让位，不冒充结论）。
+        if required and str(merged.get("kind") or "") == "gap":
+            ordered.append((max(int(drop_rank), 4), merged))
             continue
         ordered.append((0 if required else int(drop_rank), merged))
     cap = int(limit) if int(limit) > 0 else 0
@@ -1240,6 +1736,9 @@ def select_reader_judgments(judgments, *, limit: int = 5) -> list[dict]:
             if len(ordered) <= cap:
                 break
             ordered = [(r, j) for r, j in ordered if r != rank]
+    # 缺口（全缺的必选组）**排到最后**：保留在首屏（读者要知道这一项没取到），
+    # 但不占强结论席位（复核 §主问题-2）。stable sort ⇒ 强结论之间顺序不变。
+    ordered.sort(key=lambda t: 1 if t[0] >= 4 else 0)
     return [j for _r, j in ordered]
 
 

@@ -192,10 +192,28 @@ def _slice(payload: dict, code: str, event_date: str, offsets, *,
     #     常规口径处理，不凭空造限）；采集时间与市场可用时间分开，各自只用于自己的判据。
     #   · 门槛不过 ⇒ 该点 `pending`（"尚不可得"），**不是** missing（那会暗示停牌/缺数据）。
     avail_of = _avail_map(payload, code)
-    if asof:
-        held = {d for d, av in avail_of.items() if av and av > asof}
-    else:
-        held = set()
+
+    def _held_reason(d: str) -> str:
+        """该交易日的行情在评价时点**是否已可得**；可得返回空串，否则给原因。
+
+        10-07 复核 §随样品最小收口-1：**缺 `available_at` 也不能越过评价日**。
+        此前只有"显式声明了 available_at 的行"才设门槛，于是删掉该字段后，
+        评价时点 2025-01-02 仍把 01-03/01-06 的两点算成 observed（复核给了可复现反例）。
+        现在两条条件同时成立才算可得：
+          ① **日期自身**不晚于评价日（无 `available_at` 也照此判）；
+          ② 若该行显式声明了 `available_at`，它也不晚于评价日。
+        两者都归 `pending`（"尚不可得"），**不是** missing（那会暗示停牌/缺数据）。
+        """
+        if asof and str(d) > asof:
+            return (f"该交易日 {d} 晚于评价时点 {asof}"
+                    "（**日期自身不得晚于评价日**，缺逐行 available_at 也不解除该条件）"
+                    "⇒ 记为未成熟，不当作已观察结果")
+        av = avail_of.get(str(d)) or ""
+        if asof and av and av > asof:
+            return (f"该交易日行情在评价时点 {asof} 尚不可得"
+                    f"（逐行 available_at={av}）⇒ 记为未成熟，不当作已观察结果")
+        return ""
+
     # 锚点是**特征侧**价格：它必须在特征截点就可获得，否则就是倒灌
     _anchor_av = avail_of.get(str(ser[0][0])) or ""
     before = [i for i, (d, _) in enumerate(ser) if d <= cut]
@@ -240,12 +258,11 @@ def _slice(payload: dict, code: str, event_date: str, offsets, *,
                                     "（不记为 missing，避免暗示停牌）")}
                 continue
             if target in row_of:
-                if target in held:
+                _why = _held_reason(target)
+                if _why:
                     pts[f"t{off:+d}"] = {
                         "date": target, "close": None, "state": "pending",
-                        "unavailable": (f"该交易日行情在评价时点 {eff_asof} 尚不可得"
-                                        f"（逐行 available_at={avail_of.get(target)}）"
-                                        "⇒ 记为未成熟，不当作已观察结果")}
+                        "unavailable": _why}
                     continue
                 pts[f"t{off:+d}"] = {"date": target, "close": row_of[target],
                                      "state": "observed"}
@@ -264,12 +281,11 @@ def _slice(payload: dict, code: str, event_date: str, offsets, *,
         i = base_i + off
         if 0 <= i < len(ser):
             _d = str(ser[i][0])
-            if _d in held:
+            _why = _held_reason(_d)
+            if _why:
                 pts[f"t{off:+d}"] = {
                     "date": _d, "close": None, "state": "pending",
-                    "unavailable": (f"该交易日行情在评价时点 {eff_asof} 尚不可得"
-                                    f"（逐行 available_at={avail_of.get(_d)}）"
-                                    "⇒ 记为未成熟，不当作已观察结果")}
+                    "unavailable": _why}
                 continue
             pts[f"t{off:+d}"] = {"date": ser[i][0], "close": ser[i][1], "state": "observed"}
             continue

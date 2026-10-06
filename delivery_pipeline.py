@@ -1786,6 +1786,23 @@ def _snippet_reports_success(snippet: str) -> bool:
     return str(d.get("status") or "").strip().lower() in ("success", "succeeded", "ok")
 
 
+def _replacement_recovered(d) -> tuple[bool, str]:
+    """替代步骤是否**真的成功**接管了这次失败 → `(已恢复, 说明)`。
+
+    10-07 复核 §随样品最小收口-3：此前**只看 `replacement_step_id` 是否存在**，
+    于是 `replacement_step_id=<某步> + replacement_outcome=FAILED` 也被当成"有恢复路径"
+    （反例：只有替代 ID 就解除失败门）。**有 ID 不等于恢复成功**：
+    只有替代结果明确成功才解除；失败/未执行/未知一律**不能**证明恢复（fail-closed）。
+    """
+    rid = str(getattr(d, "replacement_step_id", "") or "").strip()
+    if not rid:
+        return False, ""
+    outcome = str(getattr(d, "replacement_outcome", "") or "").strip()
+    if outcome.lower() in ("success", "succeeded", "ok", "passed", "completed"):
+        return True, f"{rid}（outcome={outcome}）"
+    return False, f"{rid}（outcome={outcome or '未记录'}）"
+
+
 def _report_step_failure(task_id: str, *, ws_dir=None) -> str:
     """本任务是否有**未恢复、且确实没产出正文的报告步骤失败**（交付硬门槛用）→ 原因或 `""`。
 
@@ -1797,8 +1814,9 @@ def _report_step_failure(task_id: str, *, ws_dir=None) -> str:
     步骤失败是**记录在案的事实**（`step_failure.json`，capability=`report_generator`），
     不能靠正文标题去猜。
 
-    三个判据缺一不可：① capability 是 `report_generator`；② `replacement_step_id` 为空
-    （没有替代步骤接管）；③ 记录里的原始结果**不是**成功载荷（见 `_snippet_reports_success`）。
+    三个判据缺一不可：① capability 是 `report_generator`；② 没有**成功接管**的替代步骤
+    （`replacement_step_id` 有值但 `replacement_outcome` 是 FAILED/未执行/未知 ⇒ 不算恢复）；
+    ③ 记录里的原始结果**不是**成功载荷（见 `_snippet_reports_success`）。
 
     读不到记录（文件不存在）＝没有信号；文件存在但读不出来＝**不静默放行**，仍报原因。
     """
@@ -1826,12 +1844,14 @@ def _report_step_failure(task_id: str, *, ws_dir=None) -> str:
             d = StepDiagnosis.from_dict(item)
             if str(getattr(d, "capability", "") or "") != "report_generator":
                 continue
-            if str(getattr(d, "replacement_step_id", "") or "").strip():
-                continue                             # 已由替代步骤接管 → 有恢复路径
+            _rec, _rec_why = _replacement_recovered(d)
+            if _rec:
+                continue                             # 替代步骤**确实成功** ⇒ 有恢复路径
             snippet = str(getattr(d, "error_snippet", "") or "")
             if _snippet_reports_success(snippet):
                 continue                             # 原始结果说成功了 → 不是"没产出正文"
             return ("报告步骤失败（report_generator，未恢复且未产出正文）"
+                    + (f"，替代步骤未成功：{_rec_why}" if _rec_why else "")
                     + (f"：{snippet[:80]}" if snippet else ""))
         return ""
     except Exception as exc:                         # noqa: BLE001 - 有失败记录却读不出来

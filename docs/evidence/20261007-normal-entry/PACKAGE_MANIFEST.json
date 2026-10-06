@@ -1,0 +1,538 @@
+{
+ "packaged_at": "2026-10-07T01:18:10",
+ "schema": "weavemind.package/2",
+ "files": {
+  "reports/report.md": "c0cedd77560c2db7a3887bea5bb36b86fff335b2d08567250a12f9a713a911fe",
+  "reports/report.pdf": "ee52ec1a4d16e3a2d3e9574ff7210a3f775b3dc07825cc4c8357ae47612c464c",
+  "working_paper.json": "8b7c9bea8eef1f0b2543062928919f01ac70d7e661bf6add09072504f029630a",
+  "working_paper.csv": "1ef22d5c1be338d821cf757f80ab284c5bad49e29f6b5fe7cc7c6c9dead256c3",
+  "charts/chart_1.png": "116a69392f630c7b790f71274eec0ed9d79c4d3a11f2b8926c94288f6d8cf9f5",
+  "charts/chart_2.png": "9593a1e0f54126f7d84b791fba6d38d2e511ab207a67f5d25c7779a2d979243b",
+  "charts/chart_3.png": "1d0c9a914e46c4215785791f61cdb791a509f1da28cfec8c82b2361cf56f8cc7",
+  "audit/model_report_full_15916267ff493f6b.md": "264f328cea30bbf466d46e2fa881bd7f644c503de2511e933d61671a1ed6dddc",
+  "audit/model_report_full_17579c4d65a9339a.md": "f85dd093bf7cfec0765f1934d237e65c9a443106bc4035476ca3c4b52457ac8c",
+  "audit/model_report_full_32a0acb4b49ae5ae.md": "3da6029025771fc1f3b4e6dc8e96f12a68d04f596b30a2456bb271dc0af9fe5c",
+  "audit/model_report_full_4d65174b2374fd4b.md": "148f1ac4f2290ac1f5dc0aefa1ab589b8d7a6d2a86712e67553b5b79ebadf13c",
+  "audit/model_report_full_6e02eb9b48afcb68.md": "03132b9c55fe7ef7ef7be9fca22613408b1b07724b42e97d5e3f7a445ec78a53",
+  "audit/model_report_full_96e5c501e796b0e2.md": "fd45976a8c817f662b882f864bc3cec777c691ce5855c168fd463c2265b3803d",
+  "audit/model_report_full_97d3517e126cc4ea.md": "410588c963c734812818835ff4464e761b17a7bbb61432993ffa4101abb68fa0",
+  "audit/model_report_full_98b362da494b50a0.md": "7e0e379d2081810cfdc49999733ec315a5118ce281e76fdc63d749c536e6ad89",
+  "audit/model_report_full_a4fd5257049c1cf6.md": "9e6c4d3589c24a0b10ecb4166b451a342017d08b583b6e74dcbc1d57266f4798",
+  "audit/model_report_full_a72618c0ff7f6a44.md": "66ea55863678b37310063180a3949041dce4b814404f206dd67cf5e934774275",
+  "audit/model_report_full_ad0c5697fc34e77e.md": "90b6e39ad021d2d7db8866cd432b2a12ec603562bdf343065645341fb25ddb06",
+  "audit/model_report_full_be1fc5808aa88ee2.md": "8fce7e55f5bbfca9d5b2e83899b1ff435832dab4dc912984a3666fff94ecea38",
+  "audit/model_report_full_e6ea5420f8b5a1a7.md": "2ce882ce12a7bd159378666c29cbb0b2247846b9394c6b6c267b62168bddc614",
+  "audit/model_report_full_ed04b63a6ec27c47.md": "6c1821d8e820b4ee194de633710933bbb4393c7d0695e2c1cd90a989dbf7b980",
+  "evidence/citation_evidence.json": "aa97772932f7dd151a5ff55f10b72cfc16a51f18f40047dd62f28b4378f637af",
+  "analysis/analysis_runs.json": "3db2fddd936f935e1b7458dd1c6260d1a93d653860deb543649cda2c3644d4d0",
+  "analysis/dataset.json": "317582d7c5824331da52ede48d654dde9dbac1be93f7f8f1c78b7d0bad839e05",
+  "analysis/plan.json": "bfc67f25a0e1cedcb080ed9ae4d237a50d027e8481ff6af7eacd9d8e735227cc",
+  "analysis/context.json": "de2b862346eb68f77e290fcd678f0608793dfd5822c33734721f8516b72702d1",
+  "analysis/selection.json": "09c1c1cc77c83643b659c094912262cb8899edf74bf268c22beadf8d4d11b7ce",
+  "analysis/analysis_cards.md": "0b37e4360ab50830d57ed09c2ab2831982ee88757bfbf61591a2fafbb64289c4",
+  "analysis/analysis_detail.md": "a28325b350cfcd744c8580f50df5f835e44d568382a7ea06c4c8bea5a779174d"
+ },
+ "delivered_md": "reports/report.md",
+ "delivered_md_sha256": "c0cedd77560c2db7a3887bea5bb36b86fff335b2d08567250a12f9a713a911fe",
+ "pdf": "reports/report.pdf",
+ "pdf_sha256": "ee52ec1a4d16e3a2d3e9574ff7210a3f775b3dc07825cc4c8357ae47612c464c",
+ "charts": {
+  "charts/chart_1.png": "116a69392f630c7b790f71274eec0ed9d79c4d3a11f2b8926c94288f6d8cf9f5",
+  "charts/chart_2.png": "9593a1e0f54126f7d84b791fba6d38d2e511ab207a67f5d25c7779a2d979243b",
+  "charts/chart_3.png": "1d0c9a914e46c4215785791f61cdb791a509f1da28cfec8c82b2361cf56f8cc7"
+ },
+ "report_version_id": "829dda5b13a118f9529fb244f602bc3e212ca23bf2ad7784a8e1e31045be19e5",
+ "research_body_sha256": "6b5448bb637d84973f51c9a8f342ea10227bc473f7e64fb9c44662b747a53bb4",
+ "sources_fingerprint": "e90f0b6f23889db0",
+ "rules_version": "2026.10.03",
+ "rules_fingerprint": "b98aef94",
+ "logic_fingerprint": "be69d1f091a8f856",
+ "evidence_fingerprint": "2f76bb3da047fc38",
+ "snapshot_captured_at": 1791307090.8002381,
+ "binding_verified": true,
+ "delivered_sha256": "c0cedd77560c2db7a3887bea5bb36b86fff335b2d08567250a12f9a713a911fe",
+ "frozen": {
+  "reports/report.md": "c0cedd77560c2db7a3887bea5bb36b86fff335b2d08567250a12f9a713a911fe",
+  "reports/report.pdf": "ee52ec1a4d16e3a2d3e9574ff7210a3f775b3dc07825cc4c8357ae47612c464c",
+  "working_paper.json": "8b7c9bea8eef1f0b2543062928919f01ac70d7e661bf6add09072504f029630a",
+  "working_paper.csv": "1ef22d5c1be338d821cf757f80ab284c5bad49e29f6b5fe7cc7c6c9dead256c3",
+  "charts/chart_1.png": "116a69392f630c7b790f71274eec0ed9d79c4d3a11f2b8926c94288f6d8cf9f5",
+  "charts/chart_2.png": "9593a1e0f54126f7d84b791fba6d38d2e511ab207a67f5d25c7779a2d979243b",
+  "charts/chart_3.png": "1d0c9a914e46c4215785791f61cdb791a509f1da28cfec8c82b2361cf56f8cc7",
+  "audit/model_report_full_15916267ff493f6b.md": "264f328cea30bbf466d46e2fa881bd7f644c503de2511e933d61671a1ed6dddc",
+  "audit/model_report_full_17579c4d65a9339a.md": "f85dd093bf7cfec0765f1934d237e65c9a443106bc4035476ca3c4b52457ac8c",
+  "audit/model_report_full_32a0acb4b49ae5ae.md": "3da6029025771fc1f3b4e6dc8e96f12a68d04f596b30a2456bb271dc0af9fe5c",
+  "audit/model_report_full_4d65174b2374fd4b.md": "148f1ac4f2290ac1f5dc0aefa1ab589b8d7a6d2a86712e67553b5b79ebadf13c",
+  "audit/model_report_full_6e02eb9b48afcb68.md": "03132b9c55fe7ef7ef7be9fca22613408b1b07724b42e97d5e3f7a445ec78a53",
+  "audit/model_report_full_96e5c501e796b0e2.md": "fd45976a8c817f662b882f864bc3cec777c691ce5855c168fd463c2265b3803d",
+  "audit/model_report_full_97d3517e126cc4ea.md": "410588c963c734812818835ff4464e761b17a7bbb61432993ffa4101abb68fa0",
+  "audit/model_report_full_98b362da494b50a0.md": "7e0e379d2081810cfdc49999733ec315a5118ce281e76fdc63d749c536e6ad89",
+  "audit/model_report_full_a4fd5257049c1cf6.md": "9e6c4d3589c24a0b10ecb4166b451a342017d08b583b6e74dcbc1d57266f4798",
+  "audit/model_report_full_a72618c0ff7f6a44.md": "66ea55863678b37310063180a3949041dce4b814404f206dd67cf5e934774275",
+  "audit/model_report_full_ad0c5697fc34e77e.md": "90b6e39ad021d2d7db8866cd432b2a12ec603562bdf343065645341fb25ddb06",
+  "audit/model_report_full_be1fc5808aa88ee2.md": "8fce7e55f5bbfca9d5b2e83899b1ff435832dab4dc912984a3666fff94ecea38",
+  "audit/model_report_full_e6ea5420f8b5a1a7.md": "2ce882ce12a7bd159378666c29cbb0b2247846b9394c6b6c267b62168bddc614",
+  "audit/model_report_full_ed04b63a6ec27c47.md": "6c1821d8e820b4ee194de633710933bbb4393c7d0695e2c1cd90a989dbf7b980",
+  "evidence/citation_evidence.json": "aa97772932f7dd151a5ff55f10b72cfc16a51f18f40047dd62f28b4378f637af",
+  "analysis/analysis_runs.json": "3db2fddd936f935e1b7458dd1c6260d1a93d653860deb543649cda2c3644d4d0",
+  "analysis/dataset.json": "317582d7c5824331da52ede48d654dde9dbac1be93f7f8f1c78b7d0bad839e05",
+  "analysis/plan.json": "bfc67f25a0e1cedcb080ed9ae4d237a50d027e8481ff6af7eacd9d8e735227cc",
+  "analysis/context.json": "de2b862346eb68f77e290fcd678f0608793dfd5822c33734721f8516b72702d1",
+  "analysis/selection.json": "09c1c1cc77c83643b659c094912262cb8899edf74bf268c22beadf8d4d11b7ce",
+  "analysis/analysis_cards.md": "0b37e4360ab50830d57ed09c2ab2831982ee88757bfbf61591a2fafbb64289c4",
+  "analysis/analysis_detail.md": "a28325b350cfcd744c8580f50df5f835e44d568382a7ea06c4c8bea5a779174d"
+ },
+ "analysis_runs": {
+  "schema": "weavemind.analysis_runs/1",
+  "count": 11,
+  "validated": 11,
+  "runs": [
+   {
+    "run_id": "87e704394d51578f345e297a573165e2013ca78f2f25936f1380b3f3703633a1",
+    "model_id": "cash_reconciliation",
+    "model_version": "1.0.0",
+    "impl_version": "cash_reconciliation/1.0.0",
+    "dataset_hash": "0e4a0ace2e7e14f3c4792713ea022c4087154dd8bc3a3f2816eaf3f13a5aac0e",
+    "params_hash": "44136fa355b3678a",
+    "status": "validated",
+    "validation_ok": true,
+    "outputs": [
+     {
+      "output_id": "87e704394d51-00-operating_cashflow_reconciliation_cur",
+      "metric": "operating_cashflow_reconciliation_cur",
+      "value": 4628711237.28,
+      "unit": "元",
+      "output_hash": "6fcc90c3e530745653fec6c675c30f79a578701a3dc8b0e59ddd96253421402e"
+     },
+     {
+      "output_id": "87e704394d51-01-operating_cashflow_reconciliation_prev",
+      "metric": "operating_cashflow_reconciliation_prev",
+      "value": 6130220867.96,
+      "unit": "元",
+      "output_hash": "2a2dc0c31341ab0921fac47a84471c95b6bddc0f79d8fa3a03a8b3949e8a7a86"
+     },
+     {
+      "output_id": "87e704394d51-02-operating_cashflow_change",
+      "metric": "operating_cashflow_change",
+      "value": -1501509630.68,
+      "unit": "元",
+      "output_hash": "16f25ab67042643dfdeaab2b7db2387fd037fed9b42f7ceeeb2533d2f7e7c309"
+     },
+     {
+      "output_id": "87e704394d51-03-cash_gap_change",
+      "metric": "cash_gap_change",
+      "value": 1852803105.83,
+      "unit": "元",
+      "output_hash": "056a7146ff860afbdfcf76d30a9cb2b3d4616c467c57acf3c4ccde7c1e6045d9"
+     },
+     {
+      "output_id": "87e704394d51-04-largest_support",
+      "metric": "largest_support",
+      "value": 586592227.18,
+      "unit": "元",
+      "output_hash": "64bae9fbea2af9b3591f13b7ae5d4d4583bae9f32f446bc7473b5d0fde02bb51"
+     },
+     {
+      "output_id": "87e704394d51-05-largest_drag",
+      "metric": "largest_drag",
+      "value": -1830670724.59,
+      "unit": "元",
+      "output_hash": "00e82bcc29639498cda0192cfc5c12279e16c7250912135b01d8f21aa0d5c078"
+     }
+    ]
+   },
+   {
+    "run_id": "9c3814d846c90a1b9cb020398180d56bdf81e97494b481baa0ba2103a361f37d",
+    "model_id": "profit_to_cash",
+    "model_version": "1.0.0",
+    "impl_version": "profit_to_cash/1.0.0",
+    "dataset_hash": "0e4a0ace2e7e14f3c4792713ea022c4087154dd8bc3a3f2816eaf3f13a5aac0e",
+    "params_hash": "44136fa355b3678a",
+    "status": "validated",
+    "validation_ok": true,
+    "outputs": [
+     {
+      "output_id": "9c3814d846c9-00-profit_change",
+      "metric": "profit_change",
+      "value": -3342541438.15,
+      "unit": "元",
+      "output_hash": "875d67dba22dc20ab585240e5dec1b85c75a6ea59a7d452246d8733982e5fb98"
+     },
+     {
+      "output_id": "9c3814d846c9-01-cash_profit_gap_change",
+      "metric": "cash_profit_gap_change",
+      "value": 1841031807.47,
+      "unit": "元",
+      "output_hash": "da31175a8f790b35721de8d278c6d309d86c0b78289dd7a382086304c7fadde1"
+     },
+     {
+      "output_id": "9c3814d846c9-02-cash_conversion_change",
+      "metric": "cash_conversion_change",
+      "value": 8.16,
+      "unit": "%",
+      "output_hash": "a96199964aabef7f7d30febc5b51d0a135688582949644e563084af666be4134"
+     }
+    ]
+   },
+   {
+    "run_id": "17e0482393d2e08f1db07f2c2023eb81b4d41d63e75bc62ebe35eeffe7b84611",
+    "model_id": "cash_quality",
+    "model_version": "1.0.0",
+    "impl_version": "cash_quality/1.0.0",
+    "dataset_hash": "0e4a0ace2e7e14f3c4792713ea022c4087154dd8bc3a3f2816eaf3f13a5aac0e",
+    "params_hash": "44136fa355b3678a",
+    "status": "validated",
+    "validation_ok": true,
+    "outputs": [
+     {
+      "output_id": "17e0482393d2-00-cfo_minus_profit",
+      "metric": "cfo_minus_profit",
+      "value": -2044677364.84,
+      "unit": "元",
+      "output_hash": "c2239dceb7f891f3a94fdc061282eca17d5d13336d1f80cb360257927b770519"
+     },
+     {
+      "output_id": "17e0482393d2-01-cashflow_coverage",
+      "metric": "cashflow_coverage",
+      "value": 69.36,
+      "unit": "%",
+      "output_hash": "2dd1e2ad97ab50aca4de202976e7ce125a2726fad55601551acab7edefa64b9e"
+     }
+    ]
+   },
+   {
+    "run_id": "232b6c38335cf3ef5bd8c73c2cf09eb9667394961d798b32260b25be883ee07d",
+    "model_id": "working_capital",
+    "model_version": "1.0.0",
+    "impl_version": "working_capital/1.0.0",
+    "dataset_hash": "0e4a0ace2e7e14f3c4792713ea022c4087154dd8bc3a3f2816eaf3f13a5aac0e",
+    "params_hash": "44136fa355b3678a",
+    "status": "validated",
+    "validation_ok": true,
+    "outputs": [
+     {
+      "output_id": "232b6c38335c-00-working_capital_occupation_change",
+      "metric": "working_capital_occupation_change",
+      "value": 945365113.29,
+      "unit": "元",
+      "output_hash": "b483529e89b5194ebf15fe6226f0228eaf03ea73f501076ac249d860ec138e00"
+     },
+     {
+      "output_id": "232b6c38335c-01-receivable_days",
+      "metric": "receivable_days",
+      "value": 0.11,
+      "unit": "天",
+      "output_hash": "d5197e1e12a9d9735100e0d07248440dc23485fbb8457118f33dd477a3333824"
+     },
+     {
+      "output_id": "232b6c38335c-02-inventory_days",
+      "metric": "inventory_days",
+      "value": 929.21,
+      "unit": "天",
+      "output_hash": "7adcbd3bc4aeb45101a7d9b3f69b6abcebb1982760956be7bd6d628390df3d2d"
+     },
+     {
+      "output_id": "232b6c38335c-03-payable_days",
+      "metric": "payable_days",
+      "value": 59.55,
+      "unit": "天",
+      "output_hash": "4b81259f431e40617625f51dfa72afe6abcb9b862c5407ebbee51153f26739cc"
+     }
+    ]
+   },
+   {
+    "run_id": "9dec6afcda48d154e285edef073c711c7f9ff732f199d2e50a4388d8428e2c8f",
+    "model_id": "scenario_sensitivity",
+    "model_version": "2.0.0",
+    "impl_version": "scenario/2.0.0",
+    "dataset_hash": "0e4a0ace2e7e14f3c4792713ea022c4087154dd8bc3a3f2816eaf3f13a5aac0e",
+    "params_hash": "44136fa355b3678a",
+    "status": "validated",
+    "validation_ok": true,
+    "outputs": [
+     {
+      "output_id": "9dec6afcda48-00-scenario_net_profit",
+      "metric": "scenario_net_profit",
+      "value": 8032843652.4,
+      "unit": "元",
+      "output_hash": "932ddaa8cfccc2621f35001bc1723ae8f0a863461883a8a36c655254d6198a0b"
+     },
+     {
+      "output_id": "9dec6afcda48-01-scenario_sensitivity",
+      "metric": "scenario_sensitivity",
+      "value": 288762969.94,
+      "unit": "元",
+      "output_hash": "1829604095c2a1e357d6f7752c4fb073b75b62f3cf18fc09a8a2ca6d88dbd47a"
+     },
+     {
+      "output_id": "9dec6afcda48-02-collection_days_capital_per_day",
+      "metric": "collection_days_capital_per_day",
+      "value": 83068799.57,
+      "unit": "元",
+      "output_hash": "6e7484cc980bffe2ec2a10b548b2ca850322116c313a6740c5a92ebfc1947ac2"
+     },
+     {
+      "output_id": "9dec6afcda48-03-collection_days_sensitivity_10d",
+      "metric": "collection_days_sensitivity_10d",
+      "value": 830687995.71,
+      "unit": "元",
+      "output_hash": "f2cd35906383f001c6073aaaccd0fa97c4d838d0bc17ece6d2f18393106f0faa"
+     },
+     {
+      "output_id": "9dec6afcda48-04-margin_threshold_to_hold_base_profit",
+      "metric": "margin_threshold_to_hold_base_profit",
+      "value": 84.7325,
+      "unit": "%",
+      "output_hash": "500ec976fa9e28ff60f571c053e86094c886b1cb05f35f84918267ec9ed6780f"
+     },
+     {
+      "output_id": "9dec6afcda48-05-margin_gap_to_threshold_pp",
+      "metric": "margin_gap_to_threshold_pp",
+      "value": 11.5754,
+      "unit": "%（pp）",
+      "output_hash": "8094f190d4185c9e2e8fc60efb5c99c6b62b7c0d27ae63eea3104ed249499d5a"
+     },
+     {
+      "output_id": "9dec6afcda48-06-revenue_growth_to_hold_target",
+      "metric": "revenue_growth_to_hold_target",
+      "value": 15.8226,
+      "unit": "%",
+      "output_hash": "1a54e70c4a6d6ea0e36d4c9902be748f61f5bca21a7d58ba72ba984b5b284816"
+     }
+    ]
+   },
+   {
+    "run_id": "2ada43965290d3f056b0e63c",
+    "model_id": "ratio:net_margin",
+    "model_version": "1.0.0",
+    "impl_version": "ratio/1.0.0",
+    "dataset_hash": "0e4a0ace2e7e14f3c4792713ea022c4087154dd8bc3a3f2816eaf3f13a5aac0e",
+    "params_hash": "79af120969b22b31",
+    "status": "validated",
+    "validation_ok": true,
+    "outputs": [
+     {
+      "output_id": "2ada43965290-00-net_margin",
+      "metric": "net_margin",
+      "value": 23.11,
+      "unit": "%",
+      "output_hash": "b202865f86b6646bac0e48f09007ef4c989983167317358b573240fa97957e05"
+     }
+    ]
+   },
+   {
+    "run_id": "c6b3ea3e740db9bd2789f7fc",
+    "model_id": "ratio:cashflow_coverage",
+    "model_version": "1.0.0",
+    "impl_version": "ratio/1.0.0",
+    "dataset_hash": "0e4a0ace2e7e14f3c4792713ea022c4087154dd8bc3a3f2816eaf3f13a5aac0e",
+    "params_hash": "79af120969b22b31",
+    "status": "validated",
+    "validation_ok": true,
+    "outputs": [
+     {
+      "output_id": "c6b3ea3e740d-00-cashflow_coverage",
+      "metric": "cashflow_coverage",
+      "value": 69.36,
+      "unit": "%",
+      "output_hash": "9acadd06f2c6c05c42703b095352c9f638ac2e0a4a6e6e6752ef5f586d0f4d86"
+     }
+    ]
+   },
+   {
+    "run_id": "29b7568652645984f5274241",
+    "model_id": "ratio:debt_ratio",
+    "model_version": "1.0.0",
+    "impl_version": "ratio/1.0.0",
+    "dataset_hash": "0e4a0ace2e7e14f3c4792713ea022c4087154dd8bc3a3f2816eaf3f13a5aac0e",
+    "params_hash": "79af120969b22b31",
+    "status": "validated",
+    "validation_ok": true,
+    "outputs": [
+     {
+      "output_id": "29b756865264-00-debt_ratio",
+      "metric": "debt_ratio",
+      "value": 23.24,
+      "unit": "%",
+      "output_hash": "c68d89b4a5a8a54c386b7983648c5ac5a25a9d788b8f7d8559b673a2e8fc3a36"
+     }
+    ]
+   },
+   {
+    "run_id": "94c05e7ffccba4e1a01f728f",
+    "model_id": "ratio:rd_intensity",
+    "model_version": "1.0.0",
+    "impl_version": "ratio/1.0.0",
+    "dataset_hash": "0e4a0ace2e7e14f3c4792713ea022c4087154dd8bc3a3f2816eaf3f13a5aac0e",
+    "params_hash": "79af120969b22b31",
+    "status": "validated",
+    "validation_ok": true,
+    "outputs": [
+     {
+      "output_id": "94c05e7ffccb-00-rd_intensity",
+      "metric": "rd_intensity",
+      "value": 0.36,
+      "unit": "%",
+      "output_hash": "85dc928394891221952770f2c4eb22819a2c6d764de4a15cee76ba0bea8d36e7"
+     }
+    ]
+   },
+   {
+    "run_id": "519c5db160f85801fc8a24ba3b68407f91ae25c755118e842ced55e7a405e739",
+    "model_id": "profit_bridge",
+    "model_version": "1.0.0",
+    "impl_version": "profit_bridge/1.0.0",
+    "dataset_hash": "0e4a0ace2e7e14f3c4792713ea022c4087154dd8bc3a3f2816eaf3f13a5aac0e",
+    "params_hash": "44136fa355b3678a",
+    "status": "validated",
+    "validation_ok": true,
+    "outputs": [
+     {
+      "output_id": "519c5db160f8-00-net_profit_change",
+      "metric": "net_profit_change",
+      "value": -3342541438.15,
+      "unit": "元",
+      "output_hash": "c92d5f767d3a24a5f580473eb1428bd3b5da424ed6994ebbc9a1e14bcdd5eed3"
+     },
+     {
+      "output_id": "519c5db160f8-01-gross_profit_change",
+      "metric": "gross_profit_change",
+      "value": -3800953659.19,
+      "unit": "元",
+      "output_hash": "8bed19d8d007212dd1d04c31f0c93cb3331022e31a9109301c2fc3d2b279662e"
+     },
+     {
+      "output_id": "519c5db160f8-02-below_gross_line_change",
+      "metric": "below_gross_line_change",
+      "value": 458412221.04,
+      "unit": "元",
+      "output_hash": "c5dd1a991cfd851dc7cbbcd10a03220fa5e1c9b705f3aff76905ece32dd33e0d"
+     }
+    ]
+   },
+   {
+    "run_id": "f478645b6722551ae23cf9be4c1f977c7cd92145e8e2f8674464c9cfa0b8a477",
+    "model_id": "operating_drivers",
+    "model_version": "1.0.0",
+    "impl_version": "operating_drivers/1.0.0",
+    "dataset_hash": "0e4a0ace2e7e14f3c4792713ea022c4087154dd8bc3a3f2816eaf3f13a5aac0e",
+    "params_hash": "44136fa355b3678a",
+    "status": "validated",
+    "validation_ok": true,
+    "outputs": [
+     {
+      "output_id": "f478645b6722-00-net_profit_change",
+      "metric": "net_profit_change",
+      "value": -3342541438.15,
+      "unit": "元",
+      "output_hash": "dd2d7e608e671ffd8e559c1eec20645ca0af6f3ca829f0f0d7c103db7e55bf25"
+     },
+     {
+      "output_id": "f478645b6722-01-gross_profit_change",
+      "metric": "gross_profit_change",
+      "value": -3800953659.19,
+      "unit": "元",
+      "output_hash": "d8430272e65600e91bba44e9c24397a1b778098413d64c4ff48235433f21cf07"
+     },
+     {
+      "output_id": "f478645b6722-02-revenue_scale_effect",
+      "metric": "revenue_scale_effect",
+      "value": -3153542030.82,
+      "unit": "元",
+      "output_hash": "44481a53a278740c2e7894af1b4fb9a259422ebd14dfaf9786134a51abc53687"
+     },
+     {
+      "output_id": "f478645b6722-03-gross_margin_effect",
+      "metric": "gross_margin_effect",
+      "value": -647411628.37,
+      "unit": "元",
+      "output_hash": "81240145eb1213cba5abdb3dd5f9ea7a02777c1dd88fdbc6ee8d9e2db84cef16"
+     },
+     {
+      "output_id": "f478645b6722-04-below_gross_line_change",
+      "metric": "below_gross_line_change",
+      "value": 458412221.04,
+      "unit": "元",
+      "output_hash": "7ff6223a189f65966efe93ed464e9b655782a57db78724b9a73c80be29a8b06c"
+     },
+     {
+      "output_id": "f478645b6722-05-net_profit_change_detail",
+      "metric": "net_profit_change_detail",
+      "value": 458412221.04,
+      "unit": "元",
+      "output_hash": "2b3a6ddcca5a3a1a919873c6517a4d2f479f9f98a4307f1d43b28ec42ab7cfcc"
+     },
+     {
+      "output_id": "f478645b6722-06-volume_price_decomposition",
+      "metric": "volume_price_decomposition",
+      "value": -4249980557.95,
+      "unit": "元",
+      "output_hash": "d251ce3efdad1a7ddb950891ab50ac48e1f71fa1c2d7018dd6d0758b5a39dc00"
+     }
+    ]
+   }
+  ]
+ },
+ "analysis_inputs": {
+  "schema": "weavemind.analysis_inputs/1",
+  "present": [
+   "analysis/context.json",
+   "analysis/dataset.json",
+   "analysis/plan.json"
+  ],
+  "missing": [],
+  "dataset_hash": "0e4a0ace2e7e14f3c4792713ea022c4087154dd8bc3a3f2816eaf3f13a5aac0e",
+  "dataset_source": {
+   "kind": "working_paper",
+   "file": "working_paper.json",
+   "label": "worker:working_paper.json"
+  },
+  "contract": {
+   "entity": "洋河股份",
+   "entity_id": "002304.SZ",
+   "periods": [
+    "2023年",
+    "2024年"
+   ],
+   "as_of": "2025-04-30",
+   "caliber": "合并"
+  },
+  "recomputable": true,
+  "selection": {
+   "schema": "weavemind.analysis_selection/1",
+   "entries": [
+    {
+     "model_id": "operating_drivers",
+     "run_id": "f478645b6722551ae23cf9be4c1f977c7cd92145e8e2f8674464c9cfa0b8a477",
+     "dataset_hash": "0e4a0ace2e7e14f3c4792713ea022c4087154dd8bc3a3f2816eaf3f13a5aac0e",
+     "params_hash": "44136fa355b3678a",
+     "params": {},
+     "rules_version": "validation/1.1.0",
+     "selected_at": "2026-10-07T01:15:52",
+     "output_ids": [
+      "f478645b6722-00-net_profit_change",
+      "f478645b6722-01-gross_profit_change",
+      "f478645b6722-02-revenue_scale_effect",
+      "f478645b6722-03-gross_margin_effect",
+      "f478645b6722-04-below_gross_line_change",
+      "f478645b6722-05-net_profit_change_detail",
+      "f478645b6722-06-volume_price_decomposition"
+     ]
+    }
+   ],
+   "adopted_identity": "829dda5b13a118f9529fb244f602bc3e212ca23bf2ad7784a8e1e31045be19e5",
+   "in_package": true,
+   "note": "包内带选择记录：正文分析卡按所选运行装配"
+  }
+ },
+ "drift": {
+  "evidence/citation_evidence.json": "missing_on_disk",
+  "analysis/analysis_runs.json": "changed_on_disk",
+  "analysis/dataset.json": "missing_on_disk",
+  "analysis/plan.json": "missing_on_disk",
+  "analysis/context.json": "missing_on_disk",
+  "analysis/selection.json": "missing_on_disk",
+  "analysis/analysis_cards.md": "missing_on_disk",
+  "analysis/analysis_detail.md": "missing_on_disk"
+ }
+}
