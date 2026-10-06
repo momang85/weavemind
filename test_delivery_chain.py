@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """真实交付链回归测试：搜索相关性过滤、file_io 落盘逻辑、code_execution 命名。"""
 import asyncio
 import hashlib
@@ -9907,6 +9907,48 @@ class TestSameVersionDeliveryChain(unittest.TestCase):
             self.assertEqual(zf.read("reports/report.md"), md, "包内 MD 与导出字节一致")
             pkg = json.loads(zf.read("PACKAGE_MANIFEST.json").decode("utf-8"))
             self.assertEqual(pkg.get("research_body_sha256"), m.get("research_body_sha256"))
+
+    def test_export_projection_keeps_restricted_quant_out_of_the_zip(self):
+        """§3D：正常导出路径产出的包里**没有**无权外发的量化附件，正文与自检都还在。
+
+        内部快照仍带附件（内部保存成立），但交付包（对外交付面）只留一份限制说明 +
+        被移出成员的 sha256；许可判据复用既有门，不新增第二条交付链。
+        """
+        import zipfile
+        import delivery_pipeline as dp
+        from quant_research import publish as pub
+        self._seed(with_manifest=True)
+        ws = ws_mod.task_workspace(self.tid)
+        pub.store_reading(ws, "event_returns", {
+            "operator": "event_returns_v1", "status": "ok", "delivery_eligible": False,
+            "input_kind": {"input_kind": "market_history", "dataset_id": "ds-1",
+                           "license": "免费源·仅内部试验"},
+            "readings": [], "limits": ["不是因果结论"]})
+        md = "# 交付正文（外发投影）\n\n正文内容。\n"
+        self._register_delivery(md)
+        snap = dp.export_snapshot(self.tid, ws_dir=ws, delivered_text=md,
+                                  md_bytes=md.encode("utf-8"))
+        self.assertIn("quant/event_returns.json", snap.get("payload") or {},
+                      "内部快照仍带量化附件")
+        res = dp.repack_adopted(self.tid, ws_dir=ws, snapshot=snap)
+        self.assertTrue(res.get("package"), res)
+        with zipfile.ZipFile(ws / res["package"]) as zf:
+            names = zf.namelist()
+            pkg = json.loads(zf.read("PACKAGE_MANIFEST.json").decode("utf-8"))
+            self.assertIn("reports/report.md", names, "财报正文必须仍可交付")
+            self.assertNotIn("quant/event_returns.json", names)
+            self.assertNotIn("quant/quant_detail.md", names)
+            self.assertIn(dp.EXTERNAL_NOTE_ARC, names)
+            self.assertIn("对外", zf.read(dp.EXTERNAL_NOTE_ARC).decode("utf-8"))
+        self.assertFalse(pkg["external_delivery"]["allowed"])
+        self.assertEqual(sorted(pkg["external_delivery"]["withheld"]),
+                         ["quant/event_returns.json", "quant/quant_detail.md",
+                          "quant/quant_manifest.json"])
+        self.assertEqual(sorted(pkg["files"]),
+                         sorted(n for n in names if n != "PACKAGE_MANIFEST.json"),
+                         "清单的成员表必须与包内实际成员一致（移出后不留幽灵）")
+        self.assertTrue(all(v == "ok" for v in (res.get("verify") or {}).values()),
+                        f"移出后自检仍需全绿：{res.get('verify')}")
 
     def test_export_snapshot_rejects_interleaved_revision(self):
         """09-23 E：快照取自 A、期间修订切到 B → 拒绝发布（不静默混版）。"""

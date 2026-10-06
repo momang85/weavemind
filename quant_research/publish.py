@@ -8,6 +8,9 @@
 1. **落盘**：读数写进工作区 `quant/`（`event_returns.json` / `backtest.json` / …）；
 2. **随包**：`payload_bytes(ws)` 交出 `{"quant/…": bytes}`，与 `analysis/*` 同一套"有才进包、
    不制造空文件"契约 ⇒ **没有量化读数的工作区，交付包内容一字不变**（零存量影响）；
+   注意：内部快照收下这些附件**不等于**可以对外——交付包（对外交付面）在打包时还要过
+   `delivery_pipeline.external_delivery_projection()`：无权外发的 `quant/*` 不进入交付包
+   （换成一份限制说明 + 被移出成员的 sha256），财报正文不受影响（10-06 复核 §3D）；
 3. **许可门**：`external_delivery_gate()` 按每条读数自带的 `delivery_eligible` 判"能否对外"，
    免费源/个人非商业一律 `allowed=False` 并写原因；结果写进 `quant/quant_manifest.json`。
 

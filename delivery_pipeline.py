@@ -774,6 +774,95 @@ def _freeze_payload(task_id: str, ws, *, md_bytes: bytes = b"",
     return payload
 
 
+# ---------------------------------------------------------------- §3D 外发投影
+# 10-06 复核：内部快照留下无权外发的量化附件**可以成立**，但交付包是**对外交付面**——
+# 没有外发许可的 `quant/*` 不得随包出门，同时**财报正文仍可交付**。判据一律复用既有
+# 许可门（`quant_research.publish.external_delivery_gate`），不另写一套许可解释，
+# 也不因为"我们内部看过了"就放行；衍生结论同样按用途许可判（不天然放行）。
+EXTERNAL_NOTE_ARC = "quant/EXTERNAL_DELIVERY_RESTRICTION.md"
+
+
+def _quant_arcs(members) -> list[str]:
+    """包内的量化成员（不含限制说明本身）。"""
+    return sorted(str(a) for a in (members or {})
+                  if str(a).startswith("quant/") and str(a) != EXTERNAL_NOTE_ARC)
+
+
+def _readings_from_members(members: dict) -> dict:
+    """按**包内字节**还原读数（不重读磁盘：打包后磁盘变了不算，与整包同版口径一致）。"""
+    from pathlib import PurePosixPath
+    out: dict = {}
+    for arc in _quant_arcs(members):
+        if not arc.endswith(".json") or arc.endswith("/quant_manifest.json"):
+            continue
+        try:
+            blob = json.loads(bytes(members[arc]).decode("utf-8"))
+        except Exception:                        # noqa: BLE001 - 坏文件按"读不到"处理
+            out.setdefault("_unreadable", []).append(arc)
+            continue
+        if isinstance(blob, dict):
+            out[PurePosixPath(arc).stem] = blob
+    return out
+
+
+def _external_note(gate: dict, withheld: dict) -> str:
+    lines = [
+        "# 外发限制说明：量化附件已按许可门移出本包",
+        "",
+        "本交付包**不包含**量化读数附件（`quant/*`）。判据是既有的许可门",
+        "`quant_research.publish.external_delivery_gate()`（按每条读数自带的 "
+        "`delivery_eligible`），不是代理侧自行放行。",
+        "",
+        f"- 结论：**不允许对外**。{gate.get('reason') or ''}",
+        "- 被移出的成员（sha256 供内部核对，**字节不随包**）：",
+    ]
+    for arc, h in sorted((withheld or {}).items()):
+        lines.append(f"  - `{arc}` `{h}`")
+    lines += [
+        "- **内部保存不受影响**：原件仍在工作区 `quant/` 与内部导出快照里，逐字节可核对。",
+        "- **可交付部分不受影响**：财报正文 `reports/report.md`（及 PDF／底稿／图表）仍在本包内。",
+        "- 对外交付量化结论须取得机构授权，或只交付取得授权的衍生结论；"
+        "原始行情／事件／日历数据不得随包外发。",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def external_delivery_projection(members: dict) -> tuple[dict, dict | None]:
+    """**外发投影**：按现有许可判据决定量化附件能不能随交付包出门（复核 §3D）。
+
+    - 没有量化附件 ⇒ 原样返回、**不产任何结论**（`None`）：没有量化读数的工作区，
+      包内成员一字不变（与 Y2 接入时的零存量影响契约一致）；
+    - 判据复用 `quant_research.publish.external_delivery_gate()`（不另写一套许可解释）；
+    - **不允许对外**（含"判不出来"）⇒ 所有 `quant/*` 成员移出本包，换成一份限制说明
+      （列出被移出成员与 sha256），其余成员原样保留；
+    - 允许对外 ⇒ 原样保留，只在清单里记一条结论。
+    """
+    q = _quant_arcs(members)
+    if not q:
+        return dict(members or {}), None
+    try:
+        from quant_research import publish as _qpub
+        gate = _qpub.external_delivery_gate(_readings_from_members(members))
+    except Exception as exc:                     # noqa: BLE001 - 判不出就 fail closed
+        gate = {"allowed": False, "blocked_by": q,
+                "reason": f"许可门不可用（{str(exc)[:80]}）⇒ 不默认放行，量化附件不随包外发"}
+    info: dict = {"schema": "weavemind.external_delivery/1", "applied": True,
+                  "allowed": bool(gate.get("allowed")), "checked": q,
+                  "basis": "quant_research.publish.external_delivery_gate",
+                  "reason": str(gate.get("reason") or "")}
+    out = dict(members or {})
+    if gate.get("allowed"):
+        return out, info
+    withheld = {arc: hashlib.sha256(bytes(out[arc])).hexdigest() for arc in q}
+    for arc in q:
+        out.pop(arc, None)
+    out[EXTERNAL_NOTE_ARC] = _external_note(gate, withheld).encode("utf-8")
+    info["withheld"] = withheld
+    info["note"] = EXTERNAL_NOTE_ARC
+    return out, info
+
+
 def analysis_payload_bytes(ws) -> bytes | None:
     """工作区里的分析运行记录（`financial_analysis.store`）→ 进包的字节。
 
@@ -1137,6 +1226,15 @@ def repack_adopted(task_id: str, *, md_bytes: bytes = b"", pdf_bytes: bytes = b"
                 members.append((arc, _P(abs_path).read_bytes()))
             except Exception as exc:             # noqa: BLE001 - 读不到编不出，如实抛
                 raise RuntimeError(f"打包读取失败：{arc}：{str(exc)[:80]}") from exc
+    # §3D（10-06 复核）**外发投影**：交付包是对外交付面 —— 按**现有许可判据**把无权外发的
+    # 量化附件移出本包（换成一份限制说明），财报正文与其他成员原样保留；内部快照与工作区
+    # `quant/` 原件不动（内部保存成立），被移出成员的 sha256 记进包内清单。两路（快照/直读）
+    # 都过同一判据，不新增第二条交付链。
+    _projected, _ext = external_delivery_projection(dict(members))
+    if _ext is not None:
+        members = list(_projected.items())
+        manifest["files"] = {arc: hashlib.sha256(blob).hexdigest() for arc, blob in members}
+        manifest["external_delivery"] = _ext
     # 发布前最后复核：身份没变才发布（变了说明期间发生修订 → 不静默混版）
     if str(store.adopted().identity_id()) != str(manifest.get("report_version_id") or ""):
         raise RuntimeError("version changed")
