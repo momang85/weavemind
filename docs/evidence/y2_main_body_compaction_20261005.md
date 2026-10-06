@@ -67,6 +67,9 @@
 | `test_deploy_manifest.py` / `test_report_version.py` | 40/40、18/18 PASS |
 | `scripts/scenario_run.py` | **9/9 场景全部通过**（按**旧**期望跑的，即收束没有破坏任何既有期望） |
 
+**远端 CI（权威判据，Linux + Python 3.11）**：`ae94fde`（收束本体）与 `56b0fa8`（内容保全修复）
+**CI 与 GitHub Pages 双双 success** —— 本机那套环境差异（TUN fake-IP 等）不在判据里。
+
 新增守卫（钉住上面的决定，不靠注释）：
 
 - `test_report_quality.TestMainBodyCompaction`：必要边界小节**不得**进移出清单；
@@ -136,6 +139,23 @@ test_rewriting_detail_keeps_the_main_body_compaction_block`（按真实顺序复
 块必须在；并放"只可能被重写抹掉"的哨兵，防止用例空转）、
 `test_report_quality.TestMainBodyCompaction.test_detail_writer_never_clobbers_the_compaction_block`
 （两个写入方互相让路 + 只有一份块）。
+
+### 修后想在真实入口复验，但这次复验**不合格，如实登记**
+
+修完重启工作台（`launcher.py restart`，16/16 存活）后，我打算用同一表单再跑一次真实任务来复验。
+结果**把我的操作失误一并记下**：那个标签页当时在后台被 Chrome 冻结，我几次"提交"的请求
+**被冻结的页面积压**，页面解冻（`Page.bringToFront` 打开焦点仿真）后**一次性发出了 3 个相同任务**
+（`ui-5b840c9da1`／`ui-ffcff8abcf`／`ui-1c08293dc2`，创建时间同一秒）。三个并发同源任务彼此干扰
+（结构化数据/worker 争用），acceptance 反复 fail 且出现"可溯源 0%、共 0 个数字"这类
+只在并发异常下出现的读数 ⇒ **这三个任务的产物不能当验收证据**，已全部 `POST /api/task/<id>/cancel`
+停止（`ui-ffcff8abcf` 先停，另两个在派发边界收尾）。**这三笔真实 API 消耗是我的失误造成的。**
+
+因此"修后在**真实入口**复验"这一条**未完成**，我不用不合格的产物代替它。修后的证据是：
+本机离线真实链路（附件 31,877 字节**同时含**七段式明细与收束块）、两条新守卫、
+`test_offline_delivery` 41/41、`scenario_run` 9/9、以及**远端 CI 对 `56b0fa8` 的 success**。
+
+（另：登记期间发现工作台自己的**定时任务** `sched-eaf0ca8d53` 在跑——那是 `config.json` 里
+配置的计划任务，不是我的，未动它。）
 
 ## 七、未达与下一步（如实）
 
