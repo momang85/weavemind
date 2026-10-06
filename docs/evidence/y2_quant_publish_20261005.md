@@ -62,13 +62,27 @@
 
 **结论**：本轮改动**没有**引入回归；两条环境失败已如实登记，且 CI（Linux、无 TUN 代理）是权威判据。
 
-## 六、测试
+## 六、CI 抓到一个本地测不出的**真实部署缺陷**（已修）
+
+`delivery_pipeline` 现在会 import `quant_research`，而 **Dockerfile 没把这个目录拷进镜像**：
+`test_deploy_manifest.test_runtime_imports_are_in_image` 直接判死 ——
+`AssertionError: ['quant_research'] != [] : 运行入口会导入这些本地条目，但 Dockerfile 没拷进镜像`。
+
+- **后果（如果不修）**：容器里 `quant_research` 不存在 ⇒ 那条 `try/except` 会走 `except`，
+  于是**线上永远导不出量化附件**，而本地全绿。这正是"本地测试通过 ≠ 能部署"的实例。
+- **修法**：`Dockerfile` 增加 `COPY quant_research/ ./quant_research/`（`Dockerfile.sandbox` /
+  `Dockerfile.worker` 不拷 `financial_analysis`，同样不跑交付链 ⇒ 不需要）。
+- 修后 `test_deploy_manifest` **40 项全过**。
+- **教训登记**：往交付链加新包时，必须同时过"运行入口导入 vs 镜像 COPY"这道守卫；
+  本轮的本地全量（56/56）**不可能**发现它，因为本机本来就跑在源码树里。
+
+## 七、测试
 
 - 新增 `test_quant_publish.py` **14 项全过**；已挂进 CI（磁盘与 ci.yml 仍一一对应）。
 - `test_backtest.py` 26 → **28 项全过**（新增两条绑定测试）。
 - `test_market_events.py` 54 项全过。
 
-## 七、边界与待办
+## 八、边界与待办
 
 - **不宣称**：读数可对外（许可门说不行）、正文已含量化结论（**正文一行未改**，本轮只做附件）、
   因果或 alpha。

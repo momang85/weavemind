@@ -22,6 +22,10 @@ COPY structured_pipeline/ ./structured_pipeline/
 COPY adapters/ ./adapters/
 # 金融分析包（Q1）：data_analyzer 的金融路径与会话都 import 它（缺了金融任务必失败）
 COPY financial_analysis/ ./financial_analysis/
+# 量化域（Y2）：`delivery_pipeline` 会把量化读数收进交付快照（`quant/*`），
+# 缺这个包容器里就永远导不出量化附件——`test_deploy_manifest` 的"运行入口会导入但镜像没拷"守卫
+# 正是抓到这一点（2026-10-05，提交 29689ef 的 CI 失败）。
+COPY quant_research/ ./quant_research/
 COPY validators/ ./validators/
 COPY skills/ ./skills/
 COPY evals/ ./evals/

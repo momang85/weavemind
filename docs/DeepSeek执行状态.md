@@ -116,6 +116,12 @@
 >     （异步诊断 `client.calls==0!=2`）。把 `delivery_pipeline.py` 单独 `git stash` 回退后**结果完全相同**
 >     ⇒ 与我的改动**无关**（网络间歇失败；同一用例半小时前的 56/56 全量里是 PASS 且 `test_delivery_chain` PASS）；
 >     直接覆盖改动的 `TestX0PackageAndSidecars` **2/2 PASS**。**CI 是权威判据**。
+> 17. **CI 抓到本地测不出的真实部署缺陷（已修）**：`delivery_pipeline` 会 import `quant_research`，
+>     而 **Dockerfile 没拷这个目录** ⇒ `test_deploy_manifest` 的"运行入口导入 vs 镜像 COPY"守卫
+>     直接判死（`['quant_research'] != []`）。**不修的后果**：容器里该 import 走 `except`，
+>     **线上永远导不出量化附件而本地全绿**。已加 `COPY quant_research/ ./quant_research/`
+>     （sandbox/worker 镜像不拷 `financial_analysis`，同样不跑交付链 ⇒ 不需改），修后 40 项全过。
+>     **教训**：往交付链加新包必须同时过这道守卫；本轮本地全量 56/56 **不可能**发现它。
 > **仍未接入正文**：主文的"有限接入"（§11.2）需单独设计并重跑 M0-f 冻结期望，**本轮刻意不碰**
 > （上一轮主文收束正是在这里翻车：必要边界消失）。行情数字目前只出现在 `quant/*` 附件与底稿里。
 > 天池未动（需你登录并接受协议）。
