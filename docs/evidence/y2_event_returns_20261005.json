@@ -73,7 +73,8 @@
    "evaluation_as_of": "",
    "anchor": "t-1 ＝ feature_cutoff 当日或之前最后一个交易日（价格起点）",
    "t0": "披露日之后第一个交易日（保守下一交易日规则，不臆造盘中时间）",
-   "price_basis": "收盘价（不可执行；可执行收益需盘中时间与开盘价）"
+   "price_basis": "收盘价（不可执行；可执行收益需盘中时间与开盘价）",
+   "calendar": "按交易日历定位 t±N"
   },
   "limits": [
    "这是**事件窗口的价格观察值**，不是因果结论：没有识别策略、没有对照组、样本极小",
@@ -82,7 +83,7 @@
    "`t0` ＝披露日之后第一个交易日（**保守下一交易日规则**：披露只有日精度，不臆造盘中时间）；价格起点是 `anchor`（`feature_cutoff` 当日或之前最后一个交易日）的收盘价",
    "**收盘对收盘读数不可执行**（`kind=event_reaction_observation`）：披露时点未知，若公告在盘前/盘中发布，披露日那一档可能已含部分反应 ⇒ 本读数应看作反应幅度的**下界**；可执行收益需盘中时间与开盘价，本轮不实现，也不把两者混成一个数",
    "窗口未满记 `pending`、已成熟但缺行情记 `missing`：两者**都不报 0**、都不伪装成完整收益",
-   "`offsets` 按**标的自身交易日序列**计；缺独立交易日历时，停牌只能以基准序列为代理报**疑似**（`suspension_suspect`），不能与休市区分 ⇒ 交易日历是待补项",
+   "`offsets` 按**交易日历**定位（给了日历才是真实第 N 个交易日）；**没有日历**时退回标的自身交易日序列，**停牌会让窗口静默错位**，此时只用基准代理报**疑似**",
    "窗口重叠的事件各自出读数但不参与聚合（重叠会重复计同一段价格路径）",
    "免费源/个人非商业许可数据仅内部试验，`delivery_eligible=False`，不得进对外下载包",
    "许可为「免费源·仅内部试验」：仅内部试验，不得进对外下载包；对外交付须机构授权或只交付衍生结论"
@@ -162,7 +163,10 @@
     "aggregate_eligible": true,
     "aggregate_exclusion_reason": "",
     "window_state": "observed",
-    "suspension_suspect": []
+    "suspension_suspect": [],
+    "suspension_dates": [],
+    "suspension_basis": "日历判定为交易日、但标的当日无行情行 ⇒ 停牌或该标的缺数据",
+    "suspension_certain": true
    },
    {
     "label": "三一重工 2024 年年度报告公开",
@@ -237,7 +241,10 @@
     "aggregate_eligible": true,
     "aggregate_exclusion_reason": "",
     "window_state": "observed",
-    "suspension_suspect": []
+    "suspension_suspect": [],
+    "suspension_dates": [],
+    "suspension_basis": "日历判定为交易日、但标的当日无行情行 ⇒ 停牌或该标的缺数据",
+    "suspension_certain": true
    },
    {
     "label": "洋河股份 2024 年年度报告公开",
@@ -312,7 +319,10 @@
     "aggregate_eligible": true,
     "aggregate_exclusion_reason": "",
     "window_state": "observed",
-    "suspension_suspect": []
+    "suspension_suspect": [],
+    "suspension_dates": [],
+    "suspension_basis": "日历判定为交易日、但标的当日无行情行 ⇒ 停牌或该标的缺数据",
+    "suspension_certain": true
    }
   ],
   "aggregate": {
@@ -433,6 +443,15 @@
   "available_at_upper_bound": "2025-06-03T15:00:00+08:00",
   "delivery_eligible": false,
   "delivery_block_reason": "许可为「免费源·仅内部试验」：仅内部试验，不得进对外下载包；对外交付须机构授权或只交付衍生结论",
-  "reading_hash": "98fbc4cdc4b6e4bfa5791ebc17faf6486a44a7665529bab7ccbefcc4ff77ba37"
+  "reading_hash": "f823ea463adfa40aa8544db0845a3234106b9c83f29faf4c8a905b893bdc54e2",
+  "calendar_input": {
+   "dataset_id": "49413c7d1c48ce4c59f8e63706705c28d4b66edc9d047ab381ea60bd600e5435",
+   "range": [
+    "1990-12-19",
+    "2026-12-31"
+   ],
+   "license": "免费源·仅内部试验",
+   "ok": true
+  }
  }
 }

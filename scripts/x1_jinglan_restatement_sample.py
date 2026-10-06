@@ -28,6 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from adapters import market_history as mh                      # noqa: E402
+from adapters import trading_calendar as tc                    # noqa: E402
 from quant_research import event_calendar as ec                # noqa: E402
 from quant_research import event_returns as er                 # noqa: E402
 
@@ -81,11 +82,13 @@ def main() -> int:
         return 1
     ev = events[0]
 
+    cal = tc.load()      # 独立交易日历：把"披露日那天停牌"与"休市"严格分开
     # ① 结果侧：事件日之后第一个交易日为 t0（披露日当日只作价格起点）
-    outcome = er.compute(payload, [ev], benchmark=args.benchmark, offsets=(0, 1, 5, 20))
+    outcome = er.compute(payload, [ev], benchmark=args.benchmark, offsets=(0, 1, 5, 20),
+                         calendar=cal)
     # ② 特征侧：截点设在更正版之前 —— 锚点必须 ≤ 截点，证明更正信息进不了当时的判断
     feature = er.compute(payload, [ev], benchmark=args.benchmark, offsets=(0,),
-                         feature_cutoff=args.feature_cutoff)
+                         feature_cutoff=args.feature_cutoff, calendar=cal)
 
     it = (outcome.get("readings") or [{}])[0]
     fit = (feature.get("readings") or [{}])[0]
@@ -122,6 +125,10 @@ def main() -> int:
            "feature_side": {"feature_cutoff": args.feature_cutoff,
                             "anchor": fit.get("anchor"), "t0_date": fit.get("t0_date"),
                             "no_lookahead": not leak},
+           "calendar": {"dataset_id": cal.get("dataset_id"), "range": cal.get("range"),
+                        "ok": tc.ok(cal),
+                        "suspension_dates": it.get("suspension_dates"),
+                        "suspension_certain": it.get("suspension_certain")},
            "hand_computed": gold, "gold_diffs": diffs,
            "note": ("披露只有日精度：不臆造盘中时间，t0 取披露日之后第一个交易日；"
                     "披露日当日收盘仅作价格起点。事件反应统计（不可执行）与可执行收益分开标识。")}

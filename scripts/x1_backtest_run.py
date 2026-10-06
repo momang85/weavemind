@@ -21,6 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from adapters import market_history as mh                      # noqa: E402
 from quant_research import backtest as bt                      # noqa: E402
 from quant_research import qlib_adapter as qa                  # noqa: E402
+from adapters import trading_calendar as tc                    # noqa: E402
 
 SPEC = {
     "name": "equal_weight_monthly_rebalance_v1",
@@ -45,8 +46,9 @@ def main() -> int:
     args = ap.parse_args()
 
     payload = mh.load(args.dataset)
+    cal = tc.load()                 # 有独立日历就把停牌与休市分开（不再靠基准代理）
     res = bt.run(payload, SPEC, costs=COSTS, benchmark=args.benchmark,
-                 license=str(payload.get("license") or ""))
+                 license=str(payload.get("license") or ""), calendar=cal)
     doc = {"dataset": {"dataset_id": payload.get("dataset_id"),
                        "rows": payload.get("rows"), "date_range": payload.get("date_range"),
                        "instruments": payload.get("instruments"),

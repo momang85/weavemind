@@ -23,6 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from adapters import market_history as mh                      # noqa: E402
+from adapters import trading_calendar as tc                    # noqa: E402
 from quant_research import backtest as bt                      # noqa: E402
 from quant_research import event_returns as er                 # noqa: E402
 from quant_research import publish as pub                      # noqa: E402
@@ -47,8 +48,9 @@ def main() -> int:
     args = ap.parse_args()
 
     payload = mh.load(args.dataset)
-    er_reading = er.compute(payload, EVENTS, benchmark=args.benchmark)
-    b_reading = bt.run(payload, SPEC, benchmark=args.benchmark,
+    cal = tc.load()                     # 独立交易日历：停牌与休市分开
+    er_reading = er.compute(payload, EVENTS, benchmark=args.benchmark, calendar=cal)
+    b_reading = bt.run(payload, SPEC, benchmark=args.benchmark, calendar=cal,
                        license=str(payload.get("license") or ""))
     ws = Path(args.ws)
     ws.mkdir(parents=True, exist_ok=True)

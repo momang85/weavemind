@@ -85,7 +85,7 @@
    "2025-09-05"
   ],
   "calendar_proxy_used": "以基准序列为交易日历代理：上述日期基准有行、标的无行，**疑似停牌或缺行**；缺独立交易日历时无法与休市区分，故只报疑似、不断言；offsets 按标的自身交易日计",
-  "reading_hash": "559c6736343ea9f569494d393b53036d75604c332e88a2f093d1a3dea6414cfc"
+  "reading_hash": "11ddba1d9d633bb8205043f0aec1cb3ca730db60352e9554c5f9c677bfaacb52"
  },
  "feature_side": {
   "feature_cutoff": "2021-06-30",
@@ -95,6 +95,18 @@
   },
   "t0_date": "2021-07-01",
   "no_lookahead": true
+ },
+ "calendar": {
+  "dataset_id": "49413c7d1c48ce4c59f8e63706705c28d4b66edc9d047ab381ea60bd600e5435",
+  "range": [
+   "1990-12-19",
+   "2026-12-31"
+  ],
+  "ok": true,
+  "suspension_dates": [
+   "2025-09-05"
+  ],
+  "suspension_certain": true
  },
  "hand_computed": {
   "anchor_date": "2025-09-04",

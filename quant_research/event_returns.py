@@ -65,8 +65,8 @@ LIMITS_BASE = (
     "发布，披露日那一档可能已含部分反应 ⇒ 本读数应看作反应幅度的**下界**；可执行收益需盘中时间与"
     "开盘价，本轮不实现，也不把两者混成一个数",
     "窗口未满记 `pending`、已成熟但缺行情记 `missing`：两者**都不报 0**、都不伪装成完整收益",
-    "`offsets` 按**标的自身交易日序列**计；缺独立交易日历时，停牌只能以基准序列为代理报"
-    "**疑似**（`suspension_suspect`），不能与休市区分 ⇒ 交易日历是待补项",
+    "`offsets` 按**交易日历**定位（给了日历才是真实第 N 个交易日）；**没有日历**时退回"
+    "标的自身交易日序列，**停牌会让窗口静默错位**，此时只用基准代理报**疑似**",
     "窗口重叠的事件各自出读数但不参与聚合（重叠会重复计同一段价格路径）",
     "免费源/个人非商业许可数据仅内部试验，`delivery_eligible=False`，不得进对外下载包",
 )
@@ -142,7 +142,8 @@ def _series(payload: dict, code: str) -> list[tuple[str, float]]:
 
 
 def _slice(payload: dict, code: str, event_date: str, offsets, *,
-           feature_cutoff: str = "", evaluation_as_of: str = "") -> dict:
+           feature_cutoff: str = "", evaluation_as_of: str = "",
+           calendar: dict | None = None) -> dict:
     """事件窗口切片（§12.4 三段语义）：
 
     - **特征/信号截点** `feature_cutoff`（默认＝事件日）：锚点＝该截点**当日或之前最后一个交易日**的收盘。
@@ -150,8 +151,14 @@ def _slice(payload: dict, code: str, event_date: str, offsets, *,
     - **结果窗口** `offsets`：截点**之后**的交易日行，用于评价历史结果；只要评价时已可得就能参与。
     - **评价时点** `evaluation_as_of`：窗口内某点若在数据集里**根本没有交易日**，要区分
       "窗口未满（还没走到）"→ `pending` 与 "已成熟但缺行情" → `missing`，**都不报 0**。
+
+    **`calendar` 给了就按交易日历定位**（`t±N` ＝真实第 N 个交易日）：这样"标的当天没有行情"
+    才能在**有日历覆盖**时说清是**停牌**（那天开市、这只票不能交易）还是**休市**。
+    不传日历时退回"按标的自身交易日序列数"的老行为 —— 那种情况下停牌会让窗口**静默错位**，
+    所以结果里会标 `calendar_basis` 说明用的是哪一种，不假装等价。
     """
     from adapters import market_history as mh
+    from adapters import trading_calendar as tc
     ev = mh._norm_date(event_date)                       # noqa: SLF001 读侧同一套日期归一
     if not ev:
         return {"ok": False, "reason": f"事件日无法解析：{event_date!r}"}
@@ -169,21 +176,58 @@ def _slice(payload: dict, code: str, event_date: str, offsets, *,
         return {"ok": False, "reason": f"{code} 在特征截点 {cut} 之后没有交易日行"}
     base_i = anchor_i + 1
     anchor = {"date": ser[anchor_i][0], "close": ser[anchor_i][1]}
+    row_of = dict(ser)
     last_date = ser[-1][0]
     eff_asof = asof or last_date
+    use_cal = tc.ok(calendar)
+    # 数据集覆盖到哪天：**全载荷**的最后日期（不是单只标的），用来判"窗口未满"还是"停牌"
+    data_end = max((str(r.get("date") or "")[:10] for r in (payload.get("data") or [])),
+                   default=last_date)
+    cal_off = tc.session_at_offset(calendar, tc.next_session(calendar, cut), 0) if use_cal else None
     pts: dict[str, dict] = {}
     for off in sorted(set(int(o) for o in offsets) | {ANCHOR_OFFSET}):
+        if off == ANCHOR_OFFSET:
+            pts[f"t{off:+d}"] = {"date": anchor["date"], "close": anchor["close"],
+                                 "state": "observed"}
+            continue
+        if use_cal and cal_off:
+            target = tc.session_at_offset(calendar, cal_off, off)
+            if target is None:
+                # 偏移超出**日历覆盖**：既不能说"未成熟"（不知道那天开不开），
+                # 更不能说 `missing`（那会暗示停牌）。归到 `pending` 并写明是覆盖不足。
+                pts[f"t{off:+d}"] = {
+                    "date": None, "close": None, "state": "pending",
+                    "unavailable": (f"交易日历覆盖到 {calendar.get('range', [None, None])[1]}，"
+                                    f"无法确定 t0 之后第 {off} 个交易日 ⇒ 按未成熟处理"
+                                    "（不记为 missing，避免暗示停牌）")}
+                continue
+            if target in row_of:
+                pts[f"t{off:+d}"] = {"date": target, "close": row_of[target],
+                                     "state": "observed"}
+                continue
+            if target > data_end:
+                pts[f"t{off:+d}"] = {
+                    "date": target, "close": None, "state": "pending",
+                    "unavailable": (f"窗口未满：行情数据到 {data_end}，该点是交易日历上的 "
+                                    f"{target}（t0 之后第 {off} 个交易日）")}
+            else:
+                pts[f"t{off:+d}"] = {
+                    "date": target, "close": None, "state": "missing",
+                    "unavailable": (f"**交易日历确认 {target} 是交易日**，但 {code} 当日无行情行 "
+                                    f"⇒ 停牌或该标的缺数据（不是休市）")}
+            continue
         i = base_i + off
         if 0 <= i < len(ser):
             pts[f"t{off:+d}"] = {"date": ser[i][0], "close": ser[i][1], "state": "observed"}
             continue
-        # 超出数据集范围：分清"未满"与"缺行情"（**都不补 0**）
+        # 没有日历时：超出数据集范围，分清"未满"与"缺行情"（**都不补 0**）
         need = base_i + off
         if need >= len(ser):
             state = "pending" if eff_asof >= last_date else "missing"
             why = (f"窗口未满：数据集到 {last_date}，该点需要 t0 之后第 {off} 个交易日"
                    if state == "pending" else
-                   f"已成熟（数据到 {last_date}）但缺该交易日的行情行：可能停牌/缺数据")
+                   f"已成熟（数据到 {last_date}）但缺该交易日的行情行：可能停牌/缺数据"
+                   "（无交易日历 ⇒ 分不清停牌与休市）")
         else:
             state, why = "missing", "该点落在数据集起始之前（历史未覆盖）"
         pts[f"t{off:+d}"] = {"date": None, "close": None, "state": state, "unavailable": why}
@@ -287,10 +331,18 @@ def _calendar_gaps(bench_ser: list[tuple[str, float]], subj: list[tuple[str, flo
     return [d for d, _ in bench_ser if start <= d <= end and d not in have]
 
 
+def _cal_ok(calendar: dict | None) -> bool:
+    try:
+        from adapters import trading_calendar as tc
+        return tc.ok(calendar)
+    except Exception:                                        # noqa: BLE001
+        return False
+
+
 def compute(payload: dict, events: list[dict], *, benchmark: str = "",
             offsets=DEFAULT_OFFSETS, policy: str = "keep_earliest",
             allow_unadjusted: bool = False, feature_cutoff: str = "",
-            evaluation_as_of: str = "") -> dict:
+            evaluation_as_of: str = "", calendar: dict | None = None) -> dict:
     """事件窗口基准调整收益读数（确定性；同输入同输出）。
 
     `feature_cutoff`（默认＝每个事件自己的事件日）与 `evaluation_as_of`（默认＝数据集最后交易日）
@@ -310,7 +362,10 @@ def compute(payload: dict, events: list[dict], *, benchmark: str = "",
                             "evaluation_as_of": str(evaluation_as_of or ""),
                             "anchor": "t-1 ＝ feature_cutoff 当日或之前最后一个交易日（价格起点）",
                             "t0": "披露日之后第一个交易日（保守下一交易日规则，不臆造盘中时间）",
-                            "price_basis": "收盘价（不可执行；可执行收益需盘中时间与开盘价）"},
+                            "price_basis": "收盘价（不可执行；可执行收益需盘中时间与开盘价）",
+                            "calendar": ("按交易日历定位 t±N" if _cal_ok(calendar) else
+                                         "无交易日历：offsets 按标的自身交易日序列数，"
+                                         "停牌会让窗口静默错位")},
                  "limits": list(LIMITS_BASE), "unavailable": [], "readings": [],
                  "aggregate": None}
 
@@ -355,7 +410,8 @@ def compute(payload: dict, events: list[dict], *, benchmark: str = "",
     for e in all_events:
         key = f"{e['code']}@{e['date']}"
         sl = _slice(payload, e["code"], e["date"], offs,
-                    feature_cutoff=feature_cutoff, evaluation_as_of=evaluation_as_of)
+                    feature_cutoff=feature_cutoff, evaluation_as_of=evaluation_as_of,
+                    calendar=calendar)
         if not sl.get("ok"):
             out["unavailable"].append({"what": key, "reason": sl["reason"]})
             continue
@@ -383,6 +439,22 @@ def compute(payload: dict, events: list[dict], *, benchmark: str = "",
                                               "故只报疑似、不断言；offsets 按标的自身交易日计")
         else:
             item["suspension_suspect"] = []
+        # **有独立交易日历时升级为定性结论**：那天是交易日但标的不存在 ⇒ 停牌/缺数据。
+        # 与上面的"疑似"分开命名，避免把代理推断与日历判定混为一谈。
+        if _cal_ok(calendar):
+            from adapters import trading_calendar as tc
+            gap = tc.suspend_dates(calendar, [d for d, _ in _series(payload, e["code"])],
+                                   sl["affected_window"][0], sl["affected_window"][1])
+            item["suspension_dates"] = gap.get("suspension_dates") or []
+            item["suspension_basis"] = gap.get("basis") or gap.get("reason")
+            item["suspension_certain"] = bool(gap.get("ok"))
+            if gap.get("suspension_dates"):
+                out["calendar_basis"] = ("独立交易日历：`suspension_dates` 是**确证**"
+                                         "（日历判定为交易日、标的无行情），不再是疑似")
+        else:
+            item["suspension_dates"] = []
+            item["suspension_certain"] = False
+            item["suspension_basis"] = "无独立交易日历：停牌与休市无法区分（只用基准代理报疑似）"
         for off in offs:
             p = sl["points"][f"t{off:+d}"]
             if off == ANCHOR_OFFSET:
@@ -398,8 +470,10 @@ def compute(payload: dict, events: list[dict], *, benchmark: str = "",
             r = _ret(anchor_c, p.get("close"))
             br = None
             if p.get("close") is None:
-                # pending / missing：**不报 0**，也不假装是"零收益"
-                item["points"].append({"offset": off, "date": None, "close": None,
+                # pending / missing：**不报 0**，也不假装是"零收益"。
+                # 有日历时 `date` 是**真实交易日**（缺行情不等于不知道哪天）⇒ 必须带出去，
+                # 否则"停牌发生在哪一天"就又丢了。
+                item["points"].append({"offset": off, "date": p.get("date"), "close": None,
                                        "return": None, "benchmark_return": None,
                                        "excess_return": None, "state": p.get("state", "missing"),
                                        "unavailable": p.get("unavailable", "")})

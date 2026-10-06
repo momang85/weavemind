@@ -20,6 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from adapters import cninfo                                    # noqa: E402
 from adapters import market_history as mh                      # noqa: E402
+from adapters import trading_calendar as tc                    # noqa: E402
 from quant_research import event_calendar as ec                # noqa: E402
 from quant_research import event_returns as er                 # noqa: E402
 
@@ -88,9 +89,11 @@ def main() -> int:
                "source_probe": probe}
 
     payload = mh.load(args.dataset)
+    tcal = tc.load()                # 独立交易日历（注意：`cal` 已被**事件**日历占用）
     have = {str(c) for c in (payload.get("instruments") or [])}
     events = [e for e in ec.to_event_list(cal) if e["code"] in have]
-    reading = (er.compute(payload, events, benchmark=args.benchmark, offsets=(0, 1, 5, 20))
+    reading = (er.compute(payload, events, benchmark=args.benchmark, offsets=(0, 1, 5, 20),
+                          calendar=tcal)
                if events else {"status": "unavailable",
                                "reason": "日历里没有与行情数据集重合的标的"})
 

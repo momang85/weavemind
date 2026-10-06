@@ -60,9 +60,9 @@ LIMITS = (
     "**前复权价格下分红已隐含在价格里**，账本不再单独记股息：这不是可执行收益（真实是现金分红）",
     "成交价用**开盘价 + 滑点**；若当日该标的没有行（停牌）则**不成交**并记原因，不用收盘价替代",
     "T+1 按标的自身交易日序列解禁；`rejections` 里保留了所有未成交原因，**没有静默撮合**",
-    "**交易日历**：有基准时用基准序列作市场日历代理，标的停牌日会在再平衡处留下拒绝记录；"
-    "**未给基准时日历退化为标的并集，标的停牌日会从日历里消失、该次再平衡被静默跳过** ——"
-    "这是待补项（独立交易日历），不是已解决项",
+    "**交易日历**：给了独立日历就按它定交易日，标的无行情时按**停牌**记拒绝（与休市区分）；"
+    "只给基准时用基准序列作代理；**两者都没有时日历退化为标的并集，停牌日会消失、"
+    "该次再平衡被静默跳过**",
     "**样本极小**（两家公司、约 3.7 年、月频）：这是**账本与规则可复核**的证明，"
     "**不是策略有效性结论**，不宣称 alpha；无历史成分股 ⇒ 不代表全 A 股成绩",
     "免费源/个人非商业许可数据仅内部试验，不得进对外下载包",
@@ -151,7 +151,8 @@ def rebalance_dates(dates: list[str], spec: dict) -> list[str]:
 # ---------------------------------------------------------------- 回测主体
 
 def run(payload: dict, spec: dict | None = None, *, costs: dict | None = None,
-        benchmark: str = "", dividends: dict | None = None, license: str = "") -> dict:
+        benchmark: str = "", dividends: dict | None = None, license: str = "",
+        calendar: dict | None = None) -> dict:
     """跑一次回测 → 账本 + 净值 + 指标 + 审计。
 
     `dividends`：`{code: {date: 每股现金分红}}`，仅在**不复权价格**下使用；
@@ -199,13 +200,27 @@ def run(payload: dict, spec: dict | None = None, *, costs: dict | None = None,
     # 变成一条**看得见的拒绝记录**（缺独立交易日历时的最诚实做法，见 limits）。
     bench_ser = series_of(payload, benchmark) if benchmark else []
     subj_union = trading_dates(payload, universe)
-    if bench_ser:
+    from adapters import trading_calendar as _tc
+    cal_ok = _tc.ok(calendar)
+    if cal_ok:
+        # **独立交易日历**：取"行情数据集确实覆盖到的那段"里的全部日历交易日。
+        # 关键差别：标的停牌日**仍在日历里**，于是"当月第一个交易日"不会错位、
+        # 再平衡不会被静默跳过，而是落成一条**看得见的拒绝记录**。
+        lo = min(subj_union) if subj_union else ""
+        hi = max(subj_union) if subj_union else ""
+        dates = [s for s in (calendar.get("sessions") or []) if lo <= s <= hi] or subj_union
+        out["calendar"] = {"dataset_id": calendar.get("dataset_id"),
+                           "range": calendar.get("range"), "license": calendar.get("license"),
+                           "sessions_in_span": len(dates), "source": "trading_calendar"}
+        out["calendar_basis"] = ("**独立交易日历**：标的当日无行情时按停牌处理并留下拒绝记录"
+                                 "（与休市严格区分）")
+    elif bench_ser:
         dates = [r["date"] for r in bench_ser]
         out["calendar_basis"] = (f"基准 {benchmark} 的交易日（市场日历代理）；"
                                  "标的当日无行时会在再平衡处留下拒绝记录")
     else:
         dates = subj_union
-        out["calendar_basis"] = ("标的并集（未给基准）；**标的停牌日会从日历里消失**，"
+        out["calendar_basis"] = ("标的并集（未给基准也未给日历）；**标的停牌日会从日历里消失**，"
                                  "该次再平衡会被静默跳过 —— 需要独立交易日历才能修正")
     idx_of = {c: {r["date"]: i for i, r in enumerate(ser[c])} for c in universe}
     row_of = {c: {r["date"]: r for r in ser[c]} for c in universe}
@@ -262,9 +277,11 @@ def run(payload: dict, spec: dict | None = None, *, costs: dict | None = None,
                 want_value = equity * tw.get(c, 0.0)
                 px = row_of[c].get(d, {}).get("open")
                 if px is None:
-                    out["rejections"].append({"date": d, "code": c, "side": "rebalance",
-                                              "reason": "当日该标的没有行情行（停牌/缺行）⇒ 不成交，"
-                                                        "不用收盘价替代"})
+                    out["rejections"].append({
+                        "date": d, "code": c, "side": "rebalance",
+                        "reason": ("交易日历确认该日为交易日，但标的当日无行情 ⇒ **停牌**（不成交，"
+                                   "不用收盘价替代）" if cal_ok else
+                                   "当日该标的没有行情行（停牌/缺行）⇒ 不成交，不用收盘价替代")})
                     continue
                 cur_value = pos[c]["qty"] * px
                 delta = want_value - cur_value
@@ -514,7 +531,8 @@ def _finalize(out: dict) -> dict:
     core = {k: out.get(k) for k in ("schema", "operator", "impl_version", "status", "spec",
                                     "costs", "spec_hash", "benchmark", "metrics", "nav",
                                     "orders", "rejections", "audit", "holdout", "reason",
-                                    "input_kind", "input_fingerprint")}
+                                    "input_kind", "input_fingerprint", "calendar_basis",
+                                    "calendar")}
     out["reading_hash"] = _sha(_canon(core))
     out["license_note"] = (f"价格数据许可为「{lic}」——随回测一起判定" if lic else
                            "许可未随回测传入 ⇒ 按不可对外处理（不默认放行）")

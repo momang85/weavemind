@@ -17,6 +17,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from adapters import market_history as mh            # noqa: E402
+from adapters import trading_calendar as tc          # noqa: E402
 from quant_research import event_returns as er       # noqa: E402
 
 # 事件日一律取**已核对证据里的公开披露日（日精度）**，不取"我记得的日期"：
@@ -41,10 +42,14 @@ def main() -> int:
     args = ap.parse_args()
 
     payload = mh.load(args.dataset)
+    cal = tc.load()                     # 有日历就按日历定位 t±N（停牌与休市分开）
     events = (json.loads(Path(args.events).read_text(encoding="utf-8"))
               if args.events else DEFAULT_EVENTS)
     reading = er.compute(payload, events, benchmark=args.benchmark,
-                         allow_unadjusted=args.allow_unadjusted)
+                         allow_unadjusted=args.allow_unadjusted, calendar=cal)
+    reading["calendar_input"] = {"dataset_id": cal.get("dataset_id"),
+                                 "range": cal.get("range"), "license": cal.get("license"),
+                                 "ok": tc.ok(cal)}
     payload_out = {"dataset_id": payload.get("dataset_id"), "source": payload.get("source"),
                    "license": payload.get("license"), "adj_basis": payload.get("adj_basis"),
                    "rows": payload.get("rows"), "date_range": payload.get("date_range"),
