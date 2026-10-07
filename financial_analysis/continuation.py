@@ -31,6 +31,11 @@ SPREAD_TOL = 0.2
 
 # 判断 ID → 待检验的持续性假说与观察条件（假说由**较早材料**的判断触发，不按公司名硬编码）
 HYPOTHESES: dict[str, dict] = {
+    _jd.J_PROFIT_MECHANISM: {
+        "title": "利润下降中的**税费缓冲**仍然存在（税费对利润变化的贡献为正）",
+        "condition": ("下一期同口径的**税费贡献**（＝−Δ所得税及税金附加）是否仍为正、"
+                      "而利润是否仍在下降（负贡献转为正贡献才叫结构改变）"),
+    },
     _jd.J_VOLUME: {
         "title": "销量压力延续（数量收缩没有转正）",
         "condition": "下一期**同口径**销售量同比是否仍为负、降幅是否收窄（≥1pp 才算方向）",
@@ -45,13 +50,33 @@ HYPOTHESES: dict[str, dict] = {
     },
     _jd.J_CASH_WORKING_CAPITAL: {
         "title": "现金来源的方向延续（利润主导／营运资本主导）",
-        "condition": "下一期经营现金流变化的净利项与营运资本项：主导项是否同向延续",
+        "condition": ("下一期经营现金流变化的净利项与营运资本项：主导项是否同向延续；"
+                      "营运资本内部**缓冲是否只来自应付项目**（应收转为释放即为结构改变）"),
     },
     _jd.J_STRUCTURE: {
         "title": "结构差异延续（同一口径不同切法的降幅差没有收敛）",
         "condition": "下一期同口径分段毛利变化的离散度是否收敛（粗判，跨切法仍不可相加）",
     },
 }
+
+# **三条业务身份命题**（10-07 第二次复核 §下一阶段）：按明确身份取页，不按"旧 judgments 前 N 条"
+PROPOSITIONS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("①利润与税费缓冲", (_jd.J_PROFIT_MECHANISM,)),
+    ("②销量与企业成品库存", (_jd.J_VOLUME, _jd.J_INVENTORY)),
+    ("③现金构成（应付／应收／存货）", (_jd.J_CASH_WORKING_CAPITAL,)),
+)
+
+
+def proposition_ids() -> list[str]:
+    """三条命题覆盖的判断 ID（顺序＝页内顺序）。"""
+    return [jid for _name, ids in PROPOSITIONS for jid in ids]
+
+
+def proposition_of(jid: str) -> str:
+    for name, ids in PROPOSITIONS:
+        if jid in ids:
+            return name
+    return ""
 
 LIMITS = [
     "本页是**历史材料回放**：先用较早年报写假说、再拿较新年报读数比较；"
@@ -88,10 +113,103 @@ def _diag(run) -> dict:
     return {}
 
 
+# ------------------------------------------------------------------ 半年报读数（同期间口径）
+
+def _page_of(doc: dict, pos: int):
+    """字符位置 → 页码（用材料自己的 `page_offsets`，照实；取不到就 None）。"""
+    po = (doc or {}).get("page_offsets")
+    if not po or pos is None:
+        return None
+    try:
+        if isinstance(po, list) and po and isinstance(po[0], (list, tuple)):
+            last = int(po[-1][1])
+            for off, pg in po:
+                if int(off) > int(pos):
+                    return max(1, int(pg) - 1)
+            return max(1, last)
+    except Exception:                                       # noqa: BLE001
+        return None
+    return None
+
+
+def _label_re(label: str) -> str:
+    """行标签可能被 PDF 换行切断（"归属于上市公司股东的净利\n润（元）"）⇒ 字符间允许空白。"""
+    import re as _re
+    return r"\s*".join(_re.escape(ch) for ch in str(label))
+
+
+def _half_row(text: str, label: str, doc: dict) -> dict | None:
+    """按行标签取「本期／上年同期／同比」三元组（半年报的主要会计数据表形状）。"""
+    import re as _re
+    pat = _re.compile(_label_re(label) + r"\s*（?元?）?\s*"
+                      r"(?P<cur>[-+]?[\d,]+(?:\.\d+)?)\s+(?P<prev>[-+]?[\d,]+(?:\.\d+)?)"
+                      r"(?:\s+(?P<yoy>[-+]?\d+(?:\.\d+)?)%)?")
+    m = pat.search(text or "")
+    if not m:
+        return None
+    cur, prev = _num(m.group("cur").replace(",", "")), _num(m.group("prev").replace(",", ""))
+    if cur is None or prev is None:
+        return None
+    pg = _page_of(doc, m.start())
+    return {"cur": cur, "prev": prev,
+            "yoy": _num(m.group("yoy")) if m.group("yoy") is not None else
+            ((cur - prev) / prev * 100 if prev else None),
+            "disclosed_yoy": _num(m.group("yoy")),
+            "locator": (f"第 {pg} 页 · 「{label}」" if pg else f"「{label}」（页码未取得）"),
+            "text": (m.group(0) or "").replace("\n", " ")[:160]}
+
+
+def _half_volume_rows(text: str, doc: dict) -> dict:
+    """产销量表（半年报）：销售量／生产量／库存量 吨（同口径两期）。"""
+    import re as _re
+    out: dict = {}
+    for label in ("销售量", "生产量", "库存量"):
+        m = _re.search(label + r"\s*吨\s*(?P<cur>[\d,]+(?:\.\d+)?)\s+"
+                       r"(?P<prev>[\d,]+(?:\.\d+)?)\s+(?P<yoy>[-+]?\d+(?:\.\d+)?)%",
+                       text or "")
+        if not m:
+            continue
+        cur, prev = _num(m.group("cur").replace(",", "")), _num(m.group("prev").replace(",", ""))
+        if cur is None or prev is None:
+            continue
+        pg = _page_of(doc, m.start())
+        out[label] = {"cur": cur, "prev": prev, "yoy": _num(m.group("yoy")),
+                      "disclosed_yoy": _num(m.group("yoy")),
+                      "locator": (f"第 {pg} 页 · 主要产品的生产量、销售量、库存量（吨）"
+                                  if pg else "产销量表（页码未取得）"),
+                      "text": m.group(0)[:120]}
+    m = _re.search(r"成品酒库存量[^\n]{0,40}?([\d,]+(?:\.\d+)?)", text or "")
+    if m:
+        pg = _page_of(doc, m.start())
+        out["成品酒库存量"] = {"cur": _num(m.group(1).replace(",", "")), "prev": None,
+                               "yoy": None, "disclosed_yoy": None,
+                               "locator": (f"第 {pg} 页 · 期末成品酒/半成品酒库存量（吨）"
+                                           if pg else "期末成品酒库存量（页码未取得）"),
+                               "text": m.group(0)[:120]}
+    return out
+
+
+def half_year_readings(document: dict, *, cur_label: str, prev_label: str) -> dict:
+    """**同期半年**读数（2025H1 vs 2024H1），全部来自原件表格，逐项带页码定位。
+
+    纪律：只从**同一张半年报表**的「本报告期／上年同期」两列取数（同期间口径），
+    不拿半年与全年相减；缺行就缺（调用方写「无法判断」）。
+    """
+    text = str((document or {}).get("text") or "")
+    rows = {k: _half_row(text, k, document) for k in
+            ("营业收入", "归属于上市公司股东的净利润", "经营活动产生的现金流量净额",
+             "所得税费用", "营业成本", "税金及附加")}
+    return {"cur_label": cur_label, "prev_label": prev_label,
+            "period_kind": "half",
+            "rows": {k: v for k, v in rows.items() if v},
+            "volume": _half_volume_rows(text, document)}
+
+
 # ------------------------------------------------------------------ 一份材料 → 两期快照
 
 def snapshot(document, *, company: str, company_id: str, code: str, periods,
              as_of: str, disclosed_at: str = "", label: str = "",
+             period_kind: str = "annual", period_labels=(),
              limit: int = 3) -> dict:
     """一份年报 → 两期快照（复用**现有**算子/抽取/判断，不新开通道）。
 
@@ -160,15 +278,23 @@ def snapshot(document, *, company: str, company_id: str, code: str, periods,
                                                       f, "source_locator", "") or "")}
                                                   for f in rows}),
                                 limit=limit)
+    labels = [str(x) for x in (period_labels or ())] or [str(p) for p in periods]
+    _half = (half_year_readings(document, cur_label=labels[-1], prev_label=labels[0])
+             if str(period_kind) == "half" else {})
     return {
         "label": label or f"{company} {periods[0]}–{periods[-1]}（{document.get('title')}）",
         "source": {"title": str(document.get("title") or ""),
                    "url": str(document.get("url") or ""),
                    "periods": [int(p) for p in periods],
-                   "doc_type": str(document.get("doc_type") or "年度报告"),
+                   "period_kind": str(period_kind),
+                   "period_labels": labels,
+                   "doc_type": str(document.get("doc_type") or
+                                   ("半年度报告" if period_kind == "half" else "年度报告")),
                    "disclosure_date": str(disclosed_at or ""),
                    "text_sha256": str(document.get("text_sha256") or "")},
         "periods": [int(p) for p in periods],
+        "period_kind": str(period_kind),
+        "half": _half,
         "dataset": {"hash": str(ds.manifest.dataset_hash),
                     "observations": int(ds.manifest.observations),
                     "usable": int(getattr(ds.manifest, "usable", 0) or 0)},
@@ -221,13 +347,95 @@ def readings_of(snap: dict) -> dict:
                 spreads.append({"cut": str(_jd._attr(o, "label")),
                                 "spread": max(vals) - min(vals)})
     periods = [int(p) for p in (snap.get("periods") or [])]
+    kind = str(snap.get("period_kind") or (snap.get("source") or {}).get("period_kind")
+               or "annual")
+    labels = [str(x) for x in ((snap.get("source") or {}).get("period_labels") or [])] \
+        or [str(p) for p in periods]
+    # ① 半年报：主要会计数据＋所得税＋产销量（同一张半年报表的"本期/上年同期"两列）
+    half = snap.get("half") or {}
+    hrows, hvol = (half.get("rows") or {}), (half.get("volume") or {})
+    # ② 年报：税费/净利读数从**冻结数据集**取（同主体、同全年、同口径）
+    ds = snap.get("_ds")
+    np_row = hrows.get("归属于上市公司股东的净利润") or {}
+    tax_row = hrows.get("所得税费用") or {}
+    if not np_row or not tax_row:
+        for metric, slot in (("net_profit", "np"), ("income_tax_expense", "tax")):
+            if ds is None or len(periods) < 2:
+                continue
+            try:
+                prev = ds.get(metric, f"{periods[0]}年", caliber="合并")
+                cur = ds.get(metric, f"{periods[-1]}年", caliber="合并")
+            except Exception:                              # noqa: BLE001
+                continue
+            if prev is None or cur is None:
+                continue
+            cv, pv = _num(getattr(cur, "value", None)), _num(getattr(prev, "value", None))
+            if cv is None or pv is None:
+                continue
+            if slot == "np" and not np_row:
+                np_row = {"cur": cv, "prev": pv, "yoy": (cv - pv) / pv * 100 if pv else None,
+                          "locator": f"冻结底稿：归母净利润（{periods[0]}年→{periods[-1]}年）",
+                          "text": f"{periods[0]}年 {pv:,.2f} / {periods[-1]}年 {cv:,.2f}"}
+            elif slot == "tax" and not tax_row:
+                tax_row = {"cur": cv, "prev": pv, "yoy": (cv - pv) / pv * 100 if pv else None,
+                           "locator": f"冻结底稿：所得税费用（{periods[0]}年→{periods[-1]}年）",
+                           "text": f"{periods[0]}年 {pv:,.2f} / {periods[-1]}年 {cv:,.2f}"}
+    profit_change = ((np_row.get("cur") - np_row.get("prev"))
+                     if np_row.get("cur") is not None and np_row.get("prev") is not None
+                     else None)
+    tax_change = ((tax_row.get("cur") - tax_row.get("prev"))
+                  if tax_row.get("cur") is not None and tax_row.get("prev") is not None
+                  else None)
+    # 税费对**利润变化**的贡献＝−Δ所得税类（与 judgments 同一约定：税负上升＝负贡献）
+    tax_contribution = (-tax_change) if tax_change is not None else None
+    tax_role = (""
+                if (tax_contribution is None or profit_change in (None, 0)) else
+                ("缓冲" if (profit_change < 0 < tax_contribution) else
+                 "拖累" if (profit_change > 0 > tax_contribution) else
+                 "推动" if (profit_change > 0 and tax_contribution > 0) else
+                 "加重下降" if (profit_change < 0 and tax_contribution < 0) else "—"))
+    # ③ 现金：补充资料三行（应付/存货/应收）的**逐行变化**，与 judgments 同源
+    wc_lines: dict = {}
+    if ds is not None:
+        try:
+            wf = _jd.wc_flow_of(ds)
+        except Exception:                                  # noqa: BLE001
+            wf = {}
+        for key, cn in (("payable", "经营性应付项目"), ("inventory", "存货"),
+                        ("receivable", "经营性应收项目")):
+            _r = (wf or {}).get(key) or {}
+            if _r.get("delta") is not None:
+                wc_lines[key] = {"label": cn, "delta": _num(_r.get("delta")),
+                                 "locator": str(_r.get("locator") or "")}
+    vol_row = hvol.get("销售量") or {}
+    prod_row = hvol.get("生产量") or {}
+    inv_row = hvol.get("库存量") or {}
+    if kind == "half":
+        vol = vol_row or vol
+        prod = prod_row or prod
+        inv = inv_row or inv
+    # 半年报的 ΔOCF：数据集里没有现金流量表总额（半年报形状）时，用**同一张半年报**的
+    # 「经营活动产生的现金流量净额」两列算，并把营运资本三行合计与净利变化一起给方向。
+    if kind == "half" and total is None:
+        _ocf = hrows.get("经营活动产生的现金流量净额") or {}
+        if _ocf.get("cur") is not None and _ocf.get("prev") is not None:
+            total = float(_ocf["cur"]) - float(_ocf["prev"])
+            np_v = (float(np_row["cur"]) - float(np_row["prev"])
+                    if np_row.get("cur") is not None and np_row.get("prev") is not None
+                    else None)
+            _wc_sum = sum(float(v["delta"]) for v in wc_lines.values()
+                          if v.get("delta") is not None)
+            wc_v = _wc_sum if wc_lines else None
+            driver, _roles, direction = _jd.cash_direction_roles(total, np_v, wc_v)
     return {
         "periods": periods,
-        "cur_period": periods[-1] if periods else None,
-        "prev_period": periods[0] if len(periods) >= 2 else None,
+        "period_kind": kind,
+        "period_labels": labels,
+        "cur_period": labels[-1] if labels else (periods[-1] if periods else None),
+        "prev_period": labels[0] if labels else (periods[0] if len(periods) >= 2 else None),
         "volume_yoy": _num(vol.get("yoy")), "volume_cur": _num(vol.get("cur")),
         "volume_prev": _num(vol.get("prev")),
-        "volume_period": str(vol.get("cur_period") or (periods[-1] if periods else "")),
+        "volume_period": str(vol.get("cur_period") or (labels[-1] if labels else "")),
         "volume_locator": str(vol.get("locator") or ""), "volume_line": str(vol.get("line") or ""),
         "production_yoy": _num(prod.get("yoy")),
         "inventory_yoy": _num(inv.get("yoy")), "inventory_cur": _num(inv.get("cur")),
@@ -239,6 +447,16 @@ def readings_of(snap: dict) -> dict:
         "price_note": str(price.get("note") or ""),
         "ocf_change": total, "cash_np": np_v, "cash_wc": wc_v,
         "cash_driver": driver, "cash_direction": direction,
+        # ① 利润/税费（同口径两期；半年报取半年表、年报取冻结数据集）
+        "net_profit_cur": np_row.get("cur"), "net_profit_prev": np_row.get("prev"),
+        "net_profit_yoy": _num(np_row.get("yoy")), "profit_change": profit_change,
+        "profit_locator": str(np_row.get("locator") or ""),
+        "tax_cur": tax_row.get("cur"), "tax_prev": tax_row.get("prev"),
+        "tax_yoy": _num(tax_row.get("yoy")), "tax_change": tax_change,
+        "tax_contribution": tax_contribution, "tax_role": tax_role,
+        "tax_locator": str(tax_row.get("locator") or ""),
+        # ③ 现金结构三行
+        "wc_lines": wc_lines,
         "spreads": spreads,
     }
 
@@ -272,12 +490,48 @@ def _implied_price(ds, periods, *, caliber: str = "分产品:白酒") -> dict:
 
 
 
-def _decide(jid: str, e: dict, l: dict, *, tol: float) -> tuple[str, str]:
-    """确定性判定：`(状态, 原因)`——三种状态，缺口径/基本不变都算「无法判断」。"""
+def _decide(jid: str, e: dict, l: dict, *, tol: float,
+            same_kind: bool = True) -> tuple[str, str]:
+    """确定性判定：`(状态, 原因)`——三种状态，缺口径/基本不变都算「无法判断」。
+
+    `same_kind=False`（上期年度、本期半年）时**不做差值比较**（复核禁止半年与全年硬比）：
+    改为用**本期同口径读数**对假说本身判方向，并在原因里写明依据与期间。
+    """
+    if jid == _jd.J_PROFIT_MECHANISM:
+        role = str(l.get("tax_role") or "")
+        pc, tc = l.get("profit_change"), l.get("tax_contribution")
+        if not role or pc is None or tc is None:
+            return STATUS_UNKNOWN, ("本期没有同口径的归母净利润/所得税两项："
+                                    "税费贡献算不出来，不比较")
+        if pc < 0 and tc > 0:
+            return (STATUS_STRONGER,
+                    f"税费贡献仍为正 {_yi(tc)} 亿元（缓冲），而利润仍在下降"
+                    f"（{_yi(pc)} 亿元）——下跌年里的税费缓冲结构延续")
+        if pc < 0 and tc < 0:
+            return (STATUS_WEAKER,
+                    f"税费转为**拖累**（贡献 {_yi(tc)} 亿元）：利润下降不再由税费缓冲")
+        if pc > 0 and tc < 0:
+            return (STATUS_STRONGER,
+                    f"税费为拖累 {_yi(tc)} 亿元、利润转增（{_yi(pc)} 亿元）："
+                    "「下降年的税费缓冲」已不复存在，但方向判断转为改善")
+        return (STATUS_UNKNOWN,
+                f"税费贡献方向不足以判定（利润变化 {_yi(pc)}、税费贡献 {_yi(tc)} 亿元）")
     if jid == _jd.J_VOLUME:
         a, b = e.get("volume_yoy"), l.get("volume_yoy")
-        if a is None or b is None:
-            return STATUS_UNKNOWN, "两期里至少有一期没有同口径销售量同比：不比较"
+        if b is None:
+            return STATUS_UNKNOWN, "本期没有同口径销售量同比：不比较"
+        if not same_kind:
+            # 上期是**全年**同比、本期是**半年**同比：只对假说本身判方向，不做差值
+            if b < 0:
+                return (STATUS_STRONGER,
+                        f"本期半年销量同比仍为负（{_pct(b)}，{l.get('cur_period')} 对 "
+                        f"{l.get('prev_period')}）——与上期全年 {_pct(a)} 同为收缩，"
+                        "压力未转正（**不作半年与全年差值**）")
+            return (STATUS_WEAKER,
+                    f"本期半年销量同比转正（{_pct(b)}）——上期全年的收缩压力未延续"
+                    f"（上期 {_pct(a)}）")
+        if a is None:
+            return STATUS_UNKNOWN, "上期没有同口径销售量同比：不比较"
         if a < 0:                                  # 上一期是"销量压力"
             if b > 0:
                 return STATUS_WEAKER, f"上一期 {_pct(a)} → 本期 {_pct(b)}（转正），压力未延续"
@@ -318,8 +572,18 @@ def _decide(jid: str, e: dict, l: dict, *, tol: float) -> tuple[str, str]:
         return STATUS_UNKNOWN, f"方向不足以判定（{_pct(a)} → {_pct(b)}）"
     if jid == _jd.J_INVENTORY:
         a, b = e.get("inventory_yoy"), l.get("inventory_yoy")
-        if a is None or b is None:
-            return STATUS_UNKNOWN, "两期里至少有一期没有同口径库存量同比：不比较"
+        if b is None:
+            return STATUS_UNKNOWN, "本期没有同口径库存量同比：不比较"
+        if not same_kind:
+            if b > 0:
+                return (STATUS_STRONGER,
+                        f"本期半年库存量同比仍为正（{_pct(b)}）——累积未转向消化"
+                        f"（上期全年 {_pct(a)}，**不作半年与全年差值**）")
+            return (STATUS_WEAKER,
+                    f"本期半年库存量同比转负（{_pct(b)}）——由上期全年的累积转为下降，"
+                    "消化出现（企业口径，不代表渠道库存）")
+        if a is None:
+            return STATUS_UNKNOWN, "上期没有同口径库存量同比：不比较"
         if a > 0 and b > 0:
             return (STATUS_STRONGER,
                     f"库存量同比仍为正（{_pct(a)} → {_pct(b)}），累积未转向消化")
@@ -329,16 +593,37 @@ def _decide(jid: str, e: dict, l: dict, *, tol: float) -> tuple[str, str]:
             return STATUS_WEAKER, f"库存量由下降转为累积（{_pct(a)} → {_pct(b)}）"
         return STATUS_STRONGER, f"库存量继续下降（{_pct(a)} → {_pct(b)}），消化延续"
     if jid == _jd.J_CASH_WORKING_CAPITAL:
+        lines = l.get("wc_lines") or {}
+        pay, rec = lines.get("payable") or {}, lines.get("receivable") or {}
+        has_lines = pay.get("delta") is not None and rec.get("delta") is not None
         a, b = e.get("cash_driver"), l.get("cash_driver")
-        if a is None or b is None or not a or not b:
-            return STATUS_UNKNOWN, "两期里至少有一期缺经营现金流变化分项：不比较"
-        if a == b:
-            return (STATUS_STRONGER,
-                    f"主导项同向延续（{a} → {b}）：ΔOCF {_yi(e.get('ocf_change'))} → "
+        if same_kind and a and b and a != b:
+            # 同期同口径下主导项换了：X1 的既有判定（结构规则的补充，不是替代）
+            return (STATUS_WEAKER,
+                    f"主导项换了（{a} → {b}）：ΔOCF {_yi(e.get('ocf_change'))} → "
                     f"{_yi(l.get('ocf_change'))} 亿元")
-        return (STATUS_WEAKER,
-                f"主导项换了（{a} → {b}）：ΔOCF {_yi(e.get('ocf_change'))} → "
-                f"{_yi(l.get('ocf_change'))} 亿元")
+        if not has_lines:
+            if same_kind and a and b and a == b:
+                return (STATUS_STRONGER,
+                        f"主导项同向延续（{a} → {b}）：ΔOCF {_yi(e.get('ocf_change'))} → "
+                        f"{_yi(l.get('ocf_change'))} 亿元")
+            return (STATUS_UNKNOWN,
+                    "本期没有同口径的补充资料三行（应付/应收）：缓冲结构不比较")
+        pay_d, rec_d = _num(pay.get("delta")), _num(rec.get("delta"))
+        # 缓冲**只来自应付**的读法：应收由拖累转为释放即结构改变（与期间长度无关）
+        if rec_d is not None and rec_d > 0 and pay_d is not None and pay_d > 0:
+            _prev_rec = _num(((e.get("wc_lines") or {}).get("receivable") or {}).get("delta"))
+            _extra = (f"（上期应收 {_yi(_prev_rec)} 亿元为拖累）"
+                      if _prev_rec is not None and _prev_rec < 0 else "")
+            return (STATUS_WEAKER,
+                    f"缓冲不再只来自应付：本期应收项转为**释放** {_yi(rec_d)} 亿元"
+                    f"{_extra}，应付项 {_yi(pay_d)} 亿元仍是主要支撑")
+        if pay_d is not None and pay_d > 0 and (rec_d is None or rec_d <= 0):
+            return (STATUS_STRONGER,
+                    f"缓冲仍主要来自应付项 {_yi(pay_d)} 亿元"
+                    + (f"，应收项 {_yi(rec_d)} 亿元仍是拖累" if rec_d is not None else ""))
+        return (STATUS_UNKNOWN,
+                f"补充资料三行方向不足以判定（应付 {_yi(pay_d)}、应收 {_yi(rec_d)} 亿元）")
     if jid == _jd.J_STRUCTURE:
         a = (e.get("spreads") or [{}])[0].get("spread")
         b = (l.get("spreads") or [{}])[0].get("spread")
@@ -354,30 +639,54 @@ def _decide(jid: str, e: dict, l: dict, *, tol: float) -> tuple[str, str]:
 
 
 def compare(earlier: dict, later: dict, *, limit: int = 3,
-            tolerance_pp: float = TOLERANCE_PP) -> dict:
-    """较早快照的假说 × 较新快照的同口径读数 → 一页（普通 dict）。"""
+            tolerance_pp: float = TOLERANCE_PP,
+            select_ids: list[str] | None = None) -> dict:
+    """较早快照的假说 × 较新快照的同口径读数 → 一页（普通 dict）。
+
+    10-07 第二次复核：按**明确业务身份**取页（默认＝三条命题，见 `PROPOSITIONS`），
+    不再拿"旧 judgments 前 N 条"凑；期间长度不同（年度 vs 半年）时不做差值比较。
+    """
     e_read, l_read = readings_of(earlier), readings_of(later)
+    same_kind = str(e_read.get("period_kind")) == str(l_read.get("period_kind"))
+    if select_ids is None:
+        # **既有行为保留**（X1 年度→年度：量／吨价／库存／现金，按 judgments 顺序取前 N 条）；
+        # 新样品（2024 判断 → 2025H1）用**明确业务身份**传 `select_ids=proposition_ids()`。
+        want = [str(j.get("judgment_id") or "")
+                for j in (earlier.get("judgments") or [])[:max(1, int(limit))]]
+    else:
+        want = [str(x) for x in select_ids]
+    _by_id = {str(j.get("judgment_id") or ""): j for j in (earlier.get("judgments") or [])}
     rows: list[dict] = []
-    for j in (earlier.get("judgments") or [])[:max(1, int(limit))]:
-        jid = str(j.get("judgment_id") or "")
-        spec = HYPOTHESES.get(jid)
-        if not spec:                                # 目录里没有的 ID 不硬编（如"无从判断"类）
+    for jid in want:
+        j = _by_id.get(jid)
+        if j is None:
             continue
-        status, reason = _decide(jid, e_read, l_read, tol=tolerance_pp)
+        spec = HYPOTHESES.get(jid)
+        if not spec:                                # 目录里没有的 ID 不硬编
+            continue
+        status, reason = _decide(jid, e_read, l_read, tol=tolerance_pp,
+                                 same_kind=same_kind)
         rows.append({
             "judgment_id": jid,
+            "proposition": proposition_of(jid),
             "hypothesis": spec["title"],
             "basis": str(j.get("title") or ""),
             "basis_readings": list(j.get("numbers") or ())[:2],
             "observation_condition": spec["condition"],
             "basis_source": dict(earlier.get("source") or {}),
             "new_readings": _new_readings(jid, l_read),
+            "new_locators": _new_locators(jid, l_read),
             "status": status,
             "status_reason": reason,
+            "decision_basis": ("同期同口径相减" if same_kind else
+                               "期间长度不同：只按本期同口径读数对假说判方向，不相减"),
             "next_watch": list(j.get("watch") or ())[:3],
         })
     return {
         "schema": "weavemind.research_continuation/1",
+        "propositions": [{"name": n, "judgment_ids": list(ids)} for n, ids in PROPOSITIONS],
+        "period_kind": {"earlier": e_read.get("period_kind"),
+                        "later": l_read.get("period_kind"), "same": same_kind},
         "earlier": {"label": earlier.get("label"), "source": earlier.get("source"),
                     "dataset": earlier.get("dataset"),
                     "runs": {k: str(_jd._attr(v, "run_id"))
@@ -390,10 +699,31 @@ def compare(earlier: dict, later: dict, *, limit: int = 3,
         "overlap_check": overlap_check(earlier, later),
         "readings": {"earlier": e_read, "later": l_read},
         "historical_note": ("历史观察与持续性假说分开：本期读数只改变"
-                            "「上一期的压力/结构是否延续」，**不推翻**上一期已经发生的事实。"),
+                            "「上一期的压力/结构是否延续」，**不推翻**上一期已经发生的事实；"
+                            "上期年度值与本期半年值**不相减**（期间长度不同）。"),
         "limits": list(LIMITS),
         "next_watch": [w for r in rows for w in (r.get("next_watch") or [])][:5],
     }
+
+
+def _new_locators(jid: str, l: dict) -> list[str]:
+    """本期新读数的**原件定位**（页码/小节；取不到就空）——复核要求一页里带定位。"""
+    out: list[str] = []
+    if jid == _jd.J_PROFIT_MECHANISM:
+        for k in ("profit_locator", "tax_locator"):
+            if l.get(k):
+                out.append(str(l[k]))
+    elif jid == _jd.J_VOLUME:
+        if l.get("volume_locator"):
+            out.append(str(l["volume_locator"]))
+    elif jid == _jd.J_INVENTORY:
+        if l.get("inventory_locator"):
+            out.append(str(l["inventory_locator"]))
+    elif jid == _jd.J_CASH_WORKING_CAPITAL:
+        for _k, row in (l.get("wc_lines") or {}).items():
+            if row.get("locator"):
+                out.append(f"{row.get('label')}：{row['locator']}")
+    return out
 
 
 def _new_readings(jid: str, l: dict) -> list[str]:
@@ -413,6 +743,22 @@ def _new_readings(jid: str, l: dict) -> list[str]:
                           if l.get("inventory_cur") is not None else ""))
         if l.get("inventory_locator"):
             out.append("位置：" + str(l["inventory_locator"])[:120])
+    elif jid == _jd.J_PROFIT_MECHANISM:
+        if l.get("net_profit_yoy") is not None:
+            out.append(f"归母净利润 {_pct(l['net_profit_yoy'])}"
+                       + (f"（{l['net_profit_cur']:,.2f}）"
+                          if l.get("net_profit_cur") is not None else "")
+                       + (f"；利润变化 {_yi(l.get('profit_change'))} 亿元"
+                          if l.get("profit_change") is not None else ""))
+        if l.get("tax_yoy") is not None:
+            out.append(f"所得税费用 {_pct(l['tax_yoy'])}"
+                       + (f"；税费对利润变化的贡献 {_yi(l.get('tax_contribution'))} 亿元"
+                          f"（{l.get('tax_role')}）"
+                          if l.get("tax_contribution") is not None else ""))
+        if l.get("wc_lines"):
+            _l3 = "、".join(f"{v.get('label')} {_yi(v.get('delta'))} 亿元"
+                            for v in (l.get("wc_lines") or {}).values())
+            out.append("补充资料三行（同口径两期变化）：" + _l3)
     elif jid == _jd.J_PRICE:
         if l.get("price_yoy") is not None:
             out.append(f"推算吨价 {_pct(l['price_yoy'])}"
@@ -423,6 +769,10 @@ def _new_readings(jid: str, l: dict) -> list[str]:
         if l.get("ocf_change") is not None:
             out.append(f"ΔOCF {_yi(l['ocf_change'])} 亿元：合并净利润项 "
                        f"{_yi(l.get('cash_np'))} 亿元、营运资本项 {_yi(l.get('cash_wc'))} 亿元")
+        if l.get("wc_lines"):
+            out.append("补充资料三行（同口径两期变化）："
+                       + "、".join(f"{v.get('label')} {_yi(v.get('delta'))} 亿元"
+                                   for v in (l.get("wc_lines") or {}).values()))
         if l.get("cash_direction"):
             out.append("方向：" + str(l["cash_direction"])[:160])
     elif jid == _jd.J_STRUCTURE:
@@ -443,6 +793,15 @@ def overlap_check(earlier: dict, later: dict, *, tol: float = 0.01) -> dict:
         [int(p) for p in (later.get("periods") or [])]
     shared = sorted(set(e) & set(l))
     er, lr = readings_of(earlier), readings_of(later)
+    # 10-07 第二次复核：**期间长度不同的两份材料不能"同一比较期"互核**——
+    # 较早材料的 2024 是**全年**、较新材料的 2024 是**上半年**，数值本来就不同，
+    # 说成"重述/口径变化"是误导。这种情况只登记口径差异，不判不一致。
+    if str(er.get("period_kind")) != str(lr.get("period_kind")):
+        return {"shared_periods": shared, "items": [],
+                "verdict": ("期间长度不同（较早 "
+                            f"{er.get('period_kind')}／较新 {lr.get('period_kind')}）："
+                            "同名年份不是同一比较期，**不作一致性判断**、不相减；"
+                            "本期读数只用较新材料自己的同期两列")}
 
     def _at(readings: dict, periods: list, shared_period: int, stem: str):
         if shared_period == (periods[-1] if periods else None):
@@ -529,11 +888,25 @@ def render_page(page: dict, *, heading: str = "## 研究续页（可检验）") 
     lines.append("| 上次持续性假说／依据 | 本期关键新读数（同口径） | 判断怎样改变 | 下一观察 |")
     lines.append("|---|---|---|---|")
     for r in (page.get("hypotheses") or []):
-        basis = "；".join([str(r.get("hypothesis") or "")] + list(r.get("basis_readings") or []))
+        # "待检验假设："不是套话：这一列本来就是**假说**，写上它才不会让
+        # 归因核验把续页的假说当成"肯定性归因"（复核：续页曾因此被判缺证归因）。
+        basis = "；".join(["待检验假设：" + str(r.get("hypothesis") or "")]
+                          + list(r.get("basis_readings") or []))
+        if r.get("observation_condition"):
+            basis += "；原观察条件：" + str(r["observation_condition"])
         new = "；".join(str(x) for x in (r.get("new_readings") or []))
         status = f"**{r.get('status')}**——{r.get('status_reason')}"
+        if r.get("decision_basis"):
+            status += f"（判定口径：{r['decision_basis']}）"
         watch = "；".join(str(x) for x in (r.get("next_watch") or [])) or "—"
         lines.append(f"| {_cell(basis)} | {_cell(new)} | {_cell(status)} | {_cell(watch)} |")
+    _locs = [(r.get("proposition") or "", x) for r in (page.get("hypotheses") or [])
+             for x in (r.get("new_locators") or [])]
+    if _locs:
+        lines.append("")
+        lines.append("- **本期读数的原件定位**：")
+        for _p, x in _locs[:8]:
+            lines.append(f"  - {_cell(x, 160)}")
     lines.append("")
     oc = page.get("overlap_check") or {}
     if oc.get("shared_periods"):

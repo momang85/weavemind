@@ -946,7 +946,8 @@ def _engineering_index(runs, charts) -> list[str]:
 
 def research_brief(runs, *, provenance=None, charts=None, label_of=None,
                    records=None, doc=None, volume_price=None,
-                   direct_cash=None, wc_flow=None, detail_hint: str = "") -> dict:
+                   direct_cash=None, wc_flow=None, dataset=None,
+                   detail_hint: str = "") -> dict:
     """已验证运行 → `{front, note, detail}`（X0：**输入收集齐后只渲染一次**）。
 
     - `front`：三项主判断（前两页读得到：判断句＋关键读数＋依据位置＋会削弱它的读数）；
@@ -1010,10 +1011,12 @@ def research_brief(runs, *, provenance=None, charts=None, label_of=None,
     try:
         from . import judgments as _jd
         js = _jd.research_judgments(runs, volume_price=volume_price, records=records,
-                                    direct_cash=direct_cash, wc_flow=wc_flow, limit=0)
-        reader = _jd.select_reader_judgments(js, limit=5)
+                                    direct_cash=direct_cash, wc_flow=wc_flow,
+                                    dataset=dataset, limit=0)
+        reader = _jd.select_reader_judgments(js, limit=4)
         front = _jd.render_reader_judgments(
-            reader, detail_hint=detail_hint or "analysis/analysis_detail.md")
+            reader, detail_hint=detail_hint or "analysis/analysis_detail.md",
+            short=True)
         detail = _jd.render_judgments(js)
         if detail:
             detail = ["## 研究判断明细（七段式，另附）", "",
@@ -1195,7 +1198,7 @@ def research_brief(runs, *, provenance=None, charts=None, label_of=None,
 
 def research_note(runs, *, provenance=None, charts=None, label_of=None,
                   records=None, doc=None, volume_price=None,
-                  direct_cash=None, detail_hint: str = "") -> str:
+                  direct_cash=None, dataset=None, detail_hint: str = "") -> str:
     """兼容入口：`research_brief(...)` 的三块合并成一份文本（front → note → detail）。
 
     脚本与既有调用方拿到的是**完整**正文（判断、论证线、七段式明细、底稿索引都在），
@@ -1203,6 +1206,7 @@ def research_note(runs, *, provenance=None, charts=None, label_of=None,
     """
     parts = research_brief(runs, provenance=provenance, charts=charts, label_of=label_of,
                            records=records, doc=doc, volume_price=volume_price,
-                           direct_cash=direct_cash, detail_hint=detail_hint)
+                           direct_cash=direct_cash, dataset=dataset,
+                           detail_hint=detail_hint)
     out = [p for p in (parts.get("front"), parts.get("note"), parts.get("detail")) if p]
     return ("\n".join(out).rstrip() + "\n") if out else ""

@@ -817,6 +817,26 @@ def _paragraph_records(doc: dict, *, periods=None, company: str = "",
     return out
 
 
+_PLAN_NUM_RE = None
+
+
+def is_numeric_plan(text: str) -> bool:
+    """这一段是不是**含数字的经营计划**（如"2024 年……力争营业收入同比增长 5%-10%"）。
+
+    10-07 第二次复核 §目标兑现：计划段是目标对照的**候选与原件定位**来源，此前它与
+    其它 business_background 段争同一个每类上限，于是被行业/业务介绍挤掉（实测 2023 年报：
+    计划段被丢，只剩 2024 年报里"报告期初…"的事后回顾段）。含数字的计划段允许**多留一条**，
+    不改别的类别、不改上限语义。
+    """
+    global _PLAN_NUM_RE
+    if _PLAN_NUM_RE is None:
+        _PLAN_NUM_RE = re.compile(
+            r"(?:规划|计划|力争|目标|预算)[^。；\n]{0,40}?"
+            r"(?:营业收入|收入)[^。；\n]{0,20}?(?:同比)?(?:增长|增加|提升|增幅)\s*"
+            r"[0-9]+(?:\.[0-9]+)?\s*%")
+    return bool(_PLAN_NUM_RE.search(str(text or "")))
+
+
 def extract_sections(doc: dict, *, periods=None, company: str = "",
                      company_id: str = "", as_of: str = "",
                      max_per_kind: int = MAX_PER_KIND,
@@ -852,7 +872,9 @@ def extract_sections(doc: dict, *, periods=None, company: str = "",
             continue
         seen.add(key)
         bucket = picked.setdefault(kind, [])
-        if len(bucket) >= max_per_kind:
+        # 含数字的经营计划段允许**多留一条**（它只作目标对照的候选，不当已发生解释）
+        _is_plan = is_numeric_plan(sec["body"])
+        if len(bucket) >= max_per_kind and not (_is_plan and len(bucket) < max_per_kind + 1):
             continue
         hint = next((y for y in years if y in (sec["path"] + snip)), "")
         _missing = _span_gap(int(sec["start"]), int(sec["end"]),
@@ -1792,7 +1814,15 @@ def build(task_id: str, *, periods=None, company: str = "", company_id: str = ""
                   if r.get("kind") == kind and r.get("has_location")
                   and r.get("admission") in ("admitted", "comparison")]
         bucket.sort(key=lambda r: (str(r.get("url") or ""), int(r.get("char_start") or 0)))
-        ordered.extend(bucket[:MAX_PER_KIND])
+        keep = bucket[:MAX_PER_KIND]
+        # 10-07 第二次复核 §目标兑现：**含数字的经营计划段额外保留一条**——它是目标对照的
+        # 候选与原句定位（角色仍是"计划/假设"，不当已发生解释）。全局重排这里若也按上限截，
+        # 计划段会被同一类别的其它段落挤掉（实测：2023 年报的原计划段正是这样丢的）。
+        for r in bucket[MAX_PER_KIND:]:
+            if is_numeric_plan(str(r.get("snippet") or "")):
+                keep.append(r)
+                break
+        ordered.extend(keep)
     # 非准入记录（错主体/超截止/期间不符/缺字段）与无定位的检索摘要照实保留：
     # 前者用于向读者说明"为什么这些材料没被采用"，不静默丢弃
     ordered.extend(r for r in dedup.values()

@@ -1171,6 +1171,23 @@ def _collect_sources(workspace) -> dict[str, str]:
             src["structured_data"] = sd.read_text(encoding="utf-8")
     except Exception:
         pass
+    # 10-07 第二次复核 §阅读层：**允许数值溯源读同一选版冻结附件**（短主文＋完整底稿契约）。
+    # 附件是随包交付的同一份（`analysis/analysis_detail.md`／`analysis/continuation.md`），
+    # 打包时逐字节冻结并记 hash；这里把它们的文本作为**独立来源通道**参与匹配——
+    # 主文里那些只出现在判断/续页里的读数（税费贡献、门槛、半年同期值）因此可核，
+    # 而不是被当成"不可溯源"。**不降低阈值**：仍要值＋单位在来源文本里对得上，
+    # 主体不符依旧会被主体校验挡掉。
+    try:
+        _attach: list[str] = []
+        for rel in ("analysis/analysis_detail.md", "analysis/continuation.md",
+                    "analysis/analysis_cards.md"):
+            p = ws / rel
+            if p.is_file():
+                _attach.append(p.read_text(encoding="utf-8"))
+        if _attach:
+            src["frozen_attachment"] = "\n".join(_attach)
+    except Exception:
+        pass
     # 结构化财务（东财/SEC/巨潮适配器的落盘产物）：这是**已抓取并留档**的权威来源，
     # 必须参与溯源。此前只认 clean_chart_data.json——而该文件要在清洗步骤跑过之后
     # 才存在（实测：财务任务若在清洗前降级/失败，金额与比率全部被判"不可溯源"，

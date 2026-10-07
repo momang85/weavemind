@@ -4052,15 +4052,27 @@ class TestDirectionFromReadings(unittest.TestCase):
 
 
 class TestTargetFulfilmentTwoEvidence(unittest.TestCase):
-    """10-07 复核 §架构决定-2：目标兑现＝**两份证据、一条命题**。
+    """10-07 **第二次**复核 §目标兑现：计划＝原句/原件定位；实际＝**冻结读数**的确定性同比。
 
-    计划与实际各自有原句、定位、发布时点、所指年度；同主体同年度才比较；
-    **只有计划就未知**（不得从计划句反推实际）；发行人原因只取真实原句。
+    两个既有反例（复核 `probe_results.json`）必须一直不成立：
+    ① 另一句计划（「2024年计划实现营业收入同比增长8%」）不得当全年实际；
+    ② 半年报（「2024年1-6月…同比增长8%」）不得满足全年目标。
+    另有：同主体才配对；同处一份年报的计划标**回顾性对照**；缺匹配即未知。
     """
 
     def _jd(self):
         from financial_analysis import judgments as jd
         return jd
+
+    def _ds(self, *, rev_2023=331_262_775_51.51, rev_2024=288_762_969_93.56,
+            entity="洋河股份", entity_id="002304.SZ"):
+        rows = []
+        for metric, prev, cur in (("revenue", rev_2023, rev_2024),):
+            rows.append(_row(metric, "2023年", prev, unit="元", fact_id=f"t-{metric}-23"))
+            rows.append(_row(metric, "2024年", cur, unit="元", fact_id=f"t-{metric}-24"))
+        return fa.freeze_from_facts(rows, periods=(2023, 2024), entity=entity,
+                                    entity_id=entity_id, as_of="2025-04-30",
+                                    source_label="test:target")
 
     def test_plan_only_is_unknown_and_never_declares_fulfilment(self):
         jd = self._jd()
@@ -4077,45 +4089,88 @@ class TestTargetFulfilmentTwoEvidence(unittest.TestCase):
         self.assertFalse([e for e in j["explanation"] if e.get("kind") == "发行人解释"],
                          "没有真实原句就不编发行人原因")
 
-    def test_two_independent_readings_close_the_proposition(self):
+    def test_another_plan_sentence_is_never_the_actual(self):
+        """反例①：第二句计划（8%）不得被当成全年实际并宣告兑现。"""
         jd = self._jd()
         t = jd.plan_target_of([
-            {"snippet": "2、2024年经营计划：公司力争营业收入同比增长 5%-10%。",
-             "locator": "第 12 页 · 2024年经营计划", "section": "2024年经营计划",
-             "published_at": "2024-04-27", "document_period": "2023", "subject": "002304"},
-            {"snippet": "报告期内，白酒行业进入存量竞争阶段，公司主力产品的中端和次高端价位段"
-                        "承压较大，2024 年实现营业收入 288.76 亿元，同比下降 12.83%。",
-             "locator": "第 13 页 · 主营业务分析", "section": "主营业务分析",
-             "published_at": "2025-04-29", "document_period": "2024", "subject": "002304"},
-        ])
-        self.assertEqual(t["plan"]["year"], 2024)
-        self.assertAlmostEqual(t["actual"]["yoy"], -12.83)
-        self.assertEqual(t["plan"]["published_at"], "2024-04-27")
-        self.assertEqual(t["actual"]["published_at"], "2025-04-29")
+            {"snippet": "公司计划2024年营业收入同比增长5%。", "locator": "A计划",
+             "subject": "A", "published_at": "2024-03-01", "document_period": "2023"},
+            {"snippet": "2024年计划实现营业收入同比增长8%。", "locator": "A未来计划",
+             "subject": "A", "published_at": "2024-03-01", "document_period": "2023",
+             "section": "2024年经营计划"}])
+        # 文本里没有冻结读数 ⇒ 实际必须未知（只有数据集才能提供实际）
+        self.assertIsNone(jd.full_year_actual_from_dataset(None, year=2024))
+        j = jd._target_judgment(t)
+        self.assertIn("兑现未知", j["title"])
+        self.assertNotIn("8.00%", json.dumps(j, ensure_ascii=False))
+
+    def test_half_year_is_not_full_year(self):
+        """反例②：半年报的实际不得满足全年目标（结构上不再可能：实际只来自年度数据集）。"""
+        jd = self._jd()
+        t = jd.plan_target_of([
+            {"snippet": "公司计划2024年营业收入同比增长5%。", "locator": "A计划",
+             "subject": "A", "published_at": "2024-03-01", "document_period": "2023"},
+            {"snippet": "2024年1-6月实现营业收入100亿元，同比增长8%。", "locator": "A半年报",
+             "subject": "A", "published_at": "2024-08-01", "document_period": "2024H1"}])
+        j = jd._target_judgment(t)
+        self.assertIn("兑现未知", j["title"])
+        # 半年报口径的数据集（期间不是年度）也不给实际
+        h1 = fa.freeze_from_facts(
+            [_row("revenue", "2024年", 1.0, unit="元", fact_id="h1-24")],
+            periods=(2024,), entity="A", entity_id="A.SZ", as_of="2025-08-19",
+            source_label="test:h1")
+        self.assertIsNone(jd.full_year_actual_from_dataset(h1, year=2024))
+
+    def test_frozen_actual_pairs_with_ex_ante_plan(self):
+        """正确对照：2023 年报原计划（2024-04-27）＋ 2024 全年冻结实际（−12.83%）。"""
+        jd = self._jd()
+        act = jd.full_year_actual_from_dataset(self._ds(), year=2024)
+        self.assertIsNotNone(act)
+        self.assertAlmostEqual(act["yoy"], -12.8296, places=3)
+        self.assertEqual(act["caliber"], "合并")
+        self.assertEqual((act["cur_period"], act["prev_period"]), ("2024年", "2023年"))
+        self.assertIn("冻结底稿", act["source"])
+        t = jd.plan_target_of([{
+            "snippet": "2024 年，公司将聚焦主业，力争营业收入同比增长 5%-10%。",
+            "locator": "第 3 页 · 公司未来发展的展望", "subject": "002304",
+            "published_at": "2024-04-27", "document_period": "2023",
+            "section": "公司未来发展的展望"}])
+        self.assertEqual(t["plan"]["year"], 2024, "年度写在标记词之前也要取到")
+        self.assertTrue(t["ex_ante"], "更早一份披露 ⇒ 事前计划")
+        t["actual"] = act
         j = jd._target_judgment(t)
         self.assertIn("未兑现", j["title"])
+        self.assertNotIn("回顾性", j["title"])
         self.assertIn("17.83", " ".join(j["numbers"]))
-        self.assertEqual(len(j["evidence"]), 3, "计划/实际/发行人原句三条各自独立")
-        self.assertTrue(any(e.get("role") == jd.ROLE_ASSUMPTION for e in j["evidence"]))
-        self.assertTrue(any(e.get("role") == jd.ROLE_OBSERVED for e in j["evidence"]))
-        reason = [e for e in j["explanation"] if e.get("kind") == "发行人解释"]
-        self.assertTrue(reason and "存量竞争" in reason[0]["text"],
-                        "发行人原因必须引用真实原句")
+        self.assertIn("冻结底稿", " ".join(j["numbers"]))
+        self.assertTrue(any(str(e.get("type", "")).startswith("全年实际（冻结读数")
+                            for e in j["evidence"]),
+                        "实际证据必须是冻结读数，不是文本匹配")
 
-    def test_different_subject_or_year_is_not_compared(self):
+    def test_same_report_plan_is_labelled_retrospective(self):
+        """计划与实际同处一份年报（"报告期初"事后回顾）⇒ 标回顾性，不冒称原期初计划。"""
         jd = self._jd()
-        t = jd.plan_target_of([
-            {"snippet": "公司计划 2024 年营业收入同比增长 5%-10%。", "locator": "A 计划",
-             "published_at": "2024-04-27", "document_period": "2023", "subject": "A"},
-            {"snippet": "2024 年实现营业收入 100 亿元，同比下降 3.00%。", "locator": "B 年报",
-             "published_at": "2025-04-01", "document_period": "2024", "subject": "B"}])
-        self.assertIsNone(t["actual"], "主体不同不比")
-        t2 = jd.plan_target_of([
-            {"snippet": "公司计划 2025 年营业收入同比增长 5%-10%。", "locator": "计划",
-             "published_at": "2024-04-27", "document_period": "2024"},
-            {"snippet": "2024 年实现营业收入 100 亿元，同比下降 3.00%。", "locator": "实际",
-             "published_at": "2025-04-29", "document_period": "2024"}])
-        self.assertIsNone(t2["actual"], "年度对不上不比")
+        act = jd.full_year_actual_from_dataset(self._ds(), year=2024)
+        t = jd.plan_target_of([{
+            "snippet": "报告期初，公司规划 2024 年力争营业收入同比增长 5%-10%。",
+            "locator": "第 13 页 · 概述", "subject": "002304",
+            "published_at": "2025-04-29", "document_period": "2024"}])
+        self.assertFalse(t["ex_ante"])
+        t["actual"] = act
+        j = jd._target_judgment(t)
+        self.assertIn("回顾性对照", j["title"])
+        self.assertIn("不构成对原期初计划的独立核对", " ".join(j["numbers"]))
+
+    def test_different_subject_is_not_paired(self):
+        """主体对不上 ⇒ 不配冻结读数（宁可未知）。"""
+        jd = self._jd()
+        act = jd.full_year_actual_from_dataset(self._ds(entity="三一重工",
+                                                        entity_id="600031.SH"), year=2024)
+        self.assertIsNotNone(act)
+        # 该数据集的主体与计划记录的主体不同 ⇒ research_judgments 的配对规则会剔除
+        plan_sub = "002304"
+        ids = f"{act['entity']} {act['entity_id']}"
+        self.assertNotIn(plan_sub, ids)
 
     def test_no_numeric_plan_no_judgment(self):
         jd = self._jd()
@@ -4458,14 +4513,12 @@ class TestX0DeliveryClosure(unittest.TestCase):
         #    10-06 复核 §4：不再另印『三项主判断（先看这里）』。
         self.assertIn("## 关键判断与下一步", ctx["front"])
         self.assertNotIn("三项主判断", ctx["front"])
-        for needle in ("-16.30%", "推算吨价", "+3.93%", "+16.38%"):
-            self.assertIn(needle, ctx["front"], f"首屏判断缺 {needle}")
-        self.assertIn("推算口径", ctx["front"], "推算身份必须写明")
-        # 首屏每条**只印前 4 条关键读数**（10-07 复核 §页数决定：首屏每条结论＋1–2 个关键数，
-        # 完整读数留同版附件）。库存并入"量与价"这条收入机制链后，产量同比是第 5 条读数 ⇒
-        # 它在**明细**里（同一次装配、同一批读数），不在首屏。这里锁住"披露事实真的进了判断层"，
-        # 而不是锁"它必须挤进首屏"。
-        self.assertIn("-8.40%", ctx["detail"], "产量同比（披露事实）必须进判断明细")
+        self.assertIn("-16.30%", ctx["front"], "首屏判断缺 -16.30%")
+        # 10-07 第二次复核 §阅读层：首屏改成**短判断**（每条 1–2 个关键数，
+        # 完整解释/边界/原句随同版附件）⇒ 第 3、4 条读数（推算吨价、库存量、产量同比）
+        # 落在明细里。这里锁"披露 facts/derived 真的进了判断层"，而不是"必须挤进首屏"。
+        for needle in ("推算吨价", "推算口径", "-8.40%", "+16.38%"):
+            self.assertIn(needle, ctx["detail"], f"判断明细缺 {needle}")
         # 结构化判断对象与首屏同源透传（§6.3-1）
         self.assertTrue(ctx["reader_judgments"], "首屏判断对象要透传")
         self.assertGreaterEqual(len(ctx["judgments"]), len(ctx["reader_judgments"]))

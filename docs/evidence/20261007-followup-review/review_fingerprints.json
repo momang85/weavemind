@@ -1,0 +1,131 @@
+{
+  "recorded_at": "2026-10-07T09:14:03.420968+08:00",
+  "previous_head": "7d5e9a9",
+  "reviewed_baseline": "38fcd9c882c76a2b60d8bab0055c52e729a7bd81",
+  "implementation_commit": "0371d99",
+  "head_at_record": "38fcd9c882c76a2b60d8bab0055c52e729a7bd81",
+  "files_at_record": {
+    "financial_analysis/judgments.py": {
+      "sha256": "a0a30c2e313b0f2e456f707cc902562f4d284b003a5dc152f30eaad2fdd1fa08",
+      "bytes": 106547
+    },
+    "financial_analysis/narrative.py": {
+      "sha256": "87434e872da82e1ed45eb616400bbe795c5fed61b560863bf65488e6dc39a87d",
+      "bytes": 65137
+    },
+    "financial_analysis/continuation.py": {
+      "sha256": "eba357a71d0e9bc7f634191e883fa8eb0a0a496c877fec27ab01e01346710808",
+      "bytes": 33073
+    },
+    "report_brief.py": {
+      "sha256": "13cdcdfc0abf82105ec9b721f930f4c8b6bdb96b9d11ccef386696f4b873574a",
+      "bytes": 249899
+    },
+    "delivery_pipeline.py": {
+      "sha256": "f014870dec5c6221082bd01bfc42966e9079db36e0c38f876625f62b2cdfec34",
+      "bytes": 138699
+    },
+    "quant_research/event_returns.py": {
+      "sha256": "d49bbadc8f1fc652b35fd85234af4b94b5fab023ea5c7c8abe8c1f8a4d7f05ba",
+      "bytes": 39706
+    },
+    "quant_research/publish.py": {
+      "sha256": "5ba0e18395ae61ab80808ae0aa526898334918d6f28b1e92745e264f3e71d159",
+      "bytes": 12548
+    },
+    "docs/DeepSeek执行状态.md": {
+      "sha256": "b576c84016444948f5b84083511b7b1272717571db7cd6260c2c1aff3fe5668b",
+      "bytes": 290464
+    },
+    "docs/总架构师执行指令.md": {
+      "sha256": "1f426afc8b3936b21a0faa6e666c519e620b0d35e018bc27686edbe14b90a697",
+      "bytes": 13690
+    },
+    "docs/架构监督记录.md": {
+      "sha256": "881b8a3ae16227c526012c40f849c8407decb3ddec501ca053204421dbf41e44",
+      "bytes": 134390
+    },
+    "docs/evidence/20261007-normal-entry/delivered_report.md": {
+      "sha256": "c0cedd77560c2db7a3887bea5bb36b86fff335b2d08567250a12f9a713a911fe",
+      "bytes": 30041
+    },
+    "docs/evidence/20261007-normal-entry/analysis_detail.md": {
+      "sha256": "a28325b350cfcd744c8580f50df5f835e44d568382a7ea06c4c8bea5a779174d",
+      "bytes": 72883
+    },
+    "docs/evidence/20261007-sany-direction/report.md": {
+      "sha256": "c10e22c8cdc2352f556840f199fd406ee423817e7d08db7e57961fe64944ace0",
+      "bytes": 23756
+    },
+    "docs/evidence/20261007-sany-direction/export_manifest.json": {
+      "sha256": "93ee7b30b98ea214b392a5b781db395fa8ec68493dee1960a1d6e17962ad49e0",
+      "bytes": 3715
+    },
+    "docs/evidence/20261007-followup-review/review.md": {
+      "sha256": "728401600bbac2ae49567d98a0885a3a41c11787300d0df1f314d56391f3e3d8",
+      "bytes": 7771
+    },
+    "docs/evidence/20261007-followup-review/artifact_checks.json": {
+      "sha256": "f15bdac5bb4a6834135eaf06d215c7775cc854ccdffbb6e7bdd546c860c6acbe",
+      "bytes": 2945
+    },
+    "docs/evidence/20261007-followup-review/probe_results.json": {
+      "sha256": "52ebd8ab70355f336fce4009c3987651a23fbd9bfded1c7f56819af2620b530e",
+      "bytes": 3383
+    },
+    "docs/evidence/20261007-followup-review/dsh-guidance-sent.png": {
+      "sha256": "6f4d40124558ccaf018aa02f9f496037cfe5085e5633d9b7cf5bcc8d1800b141",
+      "bytes": 69999
+    },
+    "docs/evidence/20261007-followup-review/report.pdf": {
+      "sha256": "ee52ec1a4d16e3a2d3e9574ff7210a3f775b3dc07825cc4c8357ae47612c464c",
+      "bytes": 5543828
+    }
+  },
+  "reviewed_code_committed_blob_sha256": {
+    "financial_analysis/judgments.py": "a0a30c2e313b0f2e456f707cc902562f4d284b003a5dc152f30eaad2fdd1fa08",
+    "financial_analysis/narrative.py": "87434e872da82e1ed45eb616400bbe795c5fed61b560863bf65488e6dc39a87d",
+    "financial_analysis/continuation.py": "eba357a71d0e9bc7f634191e883fa8eb0a0a496c877fec27ab01e01346710808",
+    "report_brief.py": "13cdcdfc0abf82105ec9b721f930f4c8b6bdb96b9d11ccef386696f4b873574a",
+    "delivery_pipeline.py": "f014870dec5c6221082bd01bfc42966e9079db36e0c38f876625f62b2cdfec34",
+    "quant_research/event_returns.py": "d49bbadc8f1fc652b35fd85234af4b94b5fab023ea5c7c8abe8c1f8a4d7f05ba",
+    "quant_research/publish.py": "5ba0e18395ae61ab80808ae0aa526898334918d6f28b1e92745e264f3e71d159"
+  },
+  "dirty_tracked_at_record": [
+    "README.en.md",
+    "README.md",
+    "docs/M0完成复核与下一步修订_20260916.md",
+    "docs/总架构师执行指令.md",
+    "docs/架构监督记录.md",
+    "evals/cases/auto_grown.json",
+    "financial_analysis/dataset.py",
+    "templates.json"
+  ],
+  "accepted": [
+    "company profit/tax/cash direction",
+    "all-gap volume-price remains gap",
+    "latest Yanghe package identity and 29 content hashes",
+    "three specified seam counterexamples"
+  ],
+  "partial": [
+    "target fulfilment currently retrospective plan/actual comparison; matcher still accepts another plan or half-year result"
+  ],
+  "dsh_guidance": {
+    "time_local": "2026-10-07 09:12",
+    "status": "message visible, composer cleared, processing started",
+    "evidence": "dsh-guidance-sent.png",
+    "plan_or_implementation_completion": "not yet claimed"
+  },
+  "next_review": [
+    "one original-plan vs full-year actual example and the two known counterexamples",
+    "2025H1 three-hypothesis update with matched half-year periods and frozen cutoffs",
+    "short main text and one-page continuation bound to same export"
+  ],
+  "limits": [
+    "no repeated normal UI adopt/download",
+    "no full suite or CI",
+    "no real database/service operations",
+    "no paid research, secret read or network finance lookup",
+    "post-guidance changes require separate review"
+  ]
+}

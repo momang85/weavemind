@@ -2956,9 +2956,15 @@ def render_brief_markdown(structure: dict, body: str = "",
                 _n_txt = ""
             _retained = str(q.get("retained_reason") or "")
             _r_txt = f"；说明：{_retained}" if _retained else ""
-            lines.append(f"- **{q.get('question')}**：{_short}（完整读数见『{_front_title}』）")
-            lines.append(f"  - {support}{_n_txt}；边界：{q.get('boundary')}{_r_txt}；"
-                         f"下一步：{'、'.join(q.get('next_action') or []) or '补齐底稿事实'}")
+            # 10-07 第二次复核 §阅读层：逐问覆盖压成**一行状态**（问题＋覆盖/材料＋证据性质＋
+            # 边界＋下一步）；原两行的措辞（"分解覆盖（部分）""原因待证"等）**一字不动**地
+            # 并进这一行——压缩的是行数，不是语义。完整读数与逐问明细留在同版附件。
+            _bd = str(q.get("boundary") or "")
+            lines.append(
+                f"- **{q.get('question')}**：{_short}｜{support}{_n_txt}"
+                + (f"｜边界：{_bd[:90]}" if _bd else "")
+                + f"｜下一步：{'、'.join(q.get('next_action') or []) or '补齐底稿事实'}"
+                + _r_txt)
         lines.append("")
     # 项3：量价与结构——把已取得的销量/渠道/地区披露做成**能读的分析**（此前只把原始
     # 表格当业务背景整段贴出：重复数字、长段原文、读不出结论）。所有数字来自发行人
@@ -3787,7 +3793,7 @@ def _analysis_context(task_id: str, *, ws_dir=None, evidence: dict | None = None
                  "derived": [], "profit_decomposition": {}, "wc_flow": {},
                  "judgments": [], "reader_judgments": [],
                  "volume_price": {}, "volume_price_run": {}, "records": [], "locators": {},
-                 "runs_meta": [], "gaps": [], "direct_cash": {},
+                 "runs_meta": [], "gaps": [], "direct_cash": {}, "dataset": None,
                  "continuation": {}, "continuation_page": ""}
     try:
         picked, notes = _selected_analysis_runs(ws)
@@ -3854,6 +3860,9 @@ def _analysis_context(task_id: str, *, ws_dir=None, evidence: dict | None = None
     try:
         from financial_analysis import judgments as _jd
         ds = _fa_store.dataset_from_inputs(ws)
+        # 10-07 第二次复核 §目标兑现：**实际**只从冻结底稿/数据集取（同主体、全年、同口径
+        # 的确定性同比），所以数据集要随上下文传给判断层（不再从披露文本里另找"实际"）。
+        out["dataset"] = ds
         out["direct_cash"] = _jd.direct_cash_of(ds, locators=prov)
         # 10-06 复核 §6.2 第二条：现金流量表**补充资料**三项（应付/存货/应收），
         # 与资产负债表余额变化是两个口径；读者要看到"是哪一项在缓冲"。
@@ -3861,6 +3870,7 @@ def _analysis_context(task_id: str, *, ws_dir=None, evidence: dict | None = None
     except Exception as exc:                       # noqa: BLE001 - 取不到就不生成该判断
         logger.warning("直接法收支/营运资本补充资料读取失败（task=%s）：%s",
                        task_id, str(exc)[:120])
+        out["dataset"] = None
         out["direct_cash"] = {}
         out["wc_flow"] = {}
     out["cards"], out["gaps"] = _render_card_block(picked, notes, ws=ws)
@@ -3889,7 +3899,8 @@ def _analysis_context(task_id: str, *, ws_dir=None, evidence: dict | None = None
                 picked, provenance=prov, charts=charts, label_of=_ml,
                 records=out["records"], volume_price=out["volume_price"] or None,
                 direct_cash=out["direct_cash"] or None,
-                wc_flow=out.get("wc_flow") or None, doc=None,
+                wc_flow=out.get("wc_flow") or None,
+                dataset=out.get("dataset"), doc=None,
                 detail_hint=detail_rel)
             out["front"] = str(parts.get("front") or "")
             out["note"] = str(parts.get("note") or "")
