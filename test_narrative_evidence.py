@@ -914,6 +914,93 @@ class TestVolumePriceExtraction(unittest.TestCase):
         self.assertTrue(vp.get("reason"))
 
 
+class TestPeriodIdentityOfOperatingTables(unittest.TestCase):
+    """10-08 复核 §1：**原计划按目标年、经营表按原表头期间**。
+
+    实机反例：新增 2023 年报后（12 命中 > 2024 年报 11 命中），整篇关键词次数把
+    2023/2022 的销量 166,154.73/195,322.68 吨（−14.93%）选进了 2023/2024 正文；
+    正确是 2024/2023 的 139,076.05/166,154.73 吨（−16.30%）。表头自己声明期间，
+    所以按表头期间准入；读不到表头就**未知**，不借文档年份或文档新旧顶替。
+    """
+
+    VOL24 = ("产品类别 项目 2024年 2023年 同比增减\n\n白酒\n\n"
+             "销售量(吨) 139,076.05 166,154.73 -16.30%\n\n"
+             "生产量(吨) 145,494.73 158,834.29 -8.40%\n\n"
+             "库存量(吨) 45,594.72 39,176.04 16.38%\n")
+    VOL23 = ("产品类别 项目 2023年 2022年 同比增减\n\n白酒\n\n"
+             "销售量(吨) 166,154.73 195,322.68 -14.93%\n\n"
+             "生产量(吨) 158,834.29 197,590.68 -19.61%\n\n"
+             "库存量(吨) 39,176.04 46,496.48 -15.74%\n")
+    GPL = ("分销售模式 2024年 2023年 同比增减\n"
+           "批发经销 27854167407.45 32052628760.26 -13.10%\n"
+           "营业收入 28876296993.56 33125534523.11 -12.83%\n"
+           "营业成本 营业成本 毛利率 营业收入 营业成本 毛利率\n"
+           "销售费用 6934875260.00 6681605162.00 3.79%\n")
+
+    def _doc(self, year: str, body: str, *, pad: str = "") -> dict:
+        return {"title": f"洋河股份:{year}年年度报告", "url": f"https://x/{year}",
+                "text": f"洋河股份:{year}年年度报告\n\n二、报告期内公司从事的主要业务\n\n"
+                        f"1、主要产品的生产量、销售量、库存量\n\n{body}{pad}"}
+
+    def _sales(self, docs, periods=(2023, 2024)) -> dict:
+        vp = ne.extract_volume_price(docs, periods=list(periods))
+        if not vp.get("ok"):
+            return {}
+        return next((f for f in vp["facts"]
+                     if f.get("group") == "实物量" and f.get("row_label") == "白酒销售量"), {})
+
+    def test_header_period_wins_over_whole_document_keyword_counts(self):
+        """2023 年报关键词更多也不许胜出：读数必须来自**表头期间**相符的材料。"""
+        # 让 2023 年报在旧的"整篇关键词次数"判据下明显胜出
+        pad = "\n".join("白酒销售量 分产品 分地区 批发经销" for _ in range(6))
+        d24 = self._doc("2024", self.VOL24)
+        d23 = self._doc("2023", self.VOL23, pad=pad)
+        for docs in ([d24, d23], [d23, d24]):
+            vol = self._sales(docs)
+            self.assertTrue(vol, docs)
+            self.assertAlmostEqual(vol["cur"], 139076.05, places=2)
+            self.assertAlmostEqual(vol["prev"], 166154.73, places=2)
+            self.assertAlmostEqual(vol["yoy"], -16.30, places=2)
+        # 同一份材料在**适用期就是它自己**时照常可用（旧年报不是一律拒绝）
+        vol23 = self._sales([d23], periods=(2022, 2023))
+        self.assertAlmostEqual(vol23["cur"], 166154.73, places=2)
+        self.assertAlmostEqual(vol23["yoy"], -14.93, places=2)
+
+    def test_material_without_a_matching_header_stays_unknown(self):
+        """表头期间不符（或读不到表头）→ 未知，不拿文档年份或调用方的期顶替。"""
+        d23 = self._doc("2023", self.VOL23)
+        vp = ne.extract_volume_price([d23], periods=[2023, 2024])
+        self.assertFalse(vp.get("ok"), vp)
+        self.assertIn("表头期间", str(vp.get("reason")))
+        self.assertEqual(vp.get("facts"), [])
+        # 完全没有表头的材料同样未知（不按标题年份猜）
+        vp2 = ne.extract_volume_price([{"title": "洋河股份:2024年年度报告",
+                                        "url": "https://x/n",
+                                        "text": "销售量(吨) 139,076.05 166,154.73 -16.30%\n"}],
+                                      periods=[2023, 2024])
+        self.assertFalse(vp2.get("ok"), vp2)
+
+    def test_facts_declare_the_applied_period(self):
+        vp = ne.extract_volume_price([self._doc("2024", self.VOL24)], periods=[2023, 2024])
+        self.assertTrue(vp.get("ok"), vp)
+        self.assertEqual(list(vp.get("periods") or []), [2024, 2023])
+        self.assertEqual(vp.get("document_period"), "2024")
+
+    def test_profit_table_period_comes_from_the_document(self):
+        """毛利率表**不声明年份**：适用期取文档报告期，不按关键词次数取更旧的材料。"""
+        d24 = {"title": "洋河股份:2024年年度报告", "url": "https://x/24", "text": self.GPL}
+        d23 = {"title": "洋河股份:2023年年度报告", "url": "https://x/23",
+               "text": self.GPL.replace("销售费用", "销售费用 毛利率 管理费用 营业成本")}
+        for docs in ([d24, d23], [d23, d24]):
+            pd = ne.extract_profit_decomposition(docs, periods=[2023, 2024])
+            self.assertTrue(pd.get("ok"), pd)
+            self.assertEqual(str(pd.get("document_period")), "2024")
+            self.assertEqual(pd.get("title"), "洋河股份:2024年年度报告")
+        pd23 = ne.extract_profit_decomposition([d23], periods=[2023, 2024])
+        self.assertFalse(pd23.get("ok"), pd23)
+        self.assertIn("报告期", str(pd23.get("reason")))
+
+
 class TestApiChunkLocation(unittest.TestCase):
     """09-23：公告文本 API 的 `page_index` 是**接口片段**，不是 PDF 实体页。
 

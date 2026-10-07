@@ -783,19 +783,28 @@ def _group_for_diff(inputs: dict) -> dict[str, list[dict]]:
 # 不参与任何"数字出现在来源文本里"的匹配（否则 JSON 里的数字会被当文本命中，
 # 跨公司借用就又回来了）。匹配走 `_match_derived_fact` 的 (值, 单位, 主体) 三关。
 DERIVED_FACTS_KEY = "workpaper_derived_facts_json"
-_STRUCTURED_SOURCE_KEYS = (DERIVED_FACTS_KEY,)
+# 10-08 复核 §3：**结构化**事实通道（值＋单位＋主体＋指标/期间＋算式/输入）。
+# `analysis_runs.json`＝已验证运行输出与构件；`analysis/continuation.json`＝续页/半年读数。
+# 它们与底稿派生事实同一条匹配路径；附件 Markdown **不再**作为数字来源（只作定位展示）。
+RUN_FACTS_KEY = "structured_run_facts_json"
+CONTINUATION_FACTS_KEY = "continuation_facts_json"
+_STRUCTURED_SOURCE_KEYS = (DERIVED_FACTS_KEY, RUN_FACTS_KEY, CONTINUATION_FACTS_KEY)
 
 
 def _derived_facts_of(sources: dict) -> list[dict]:
-    """从来源里取出结构化派生事实（坏 JSON 按空处理，不猜）。"""
-    raw = str((sources or {}).get(DERIVED_FACTS_KEY) or "")
-    if not raw:
-        return []
-    try:
-        data = json.loads(raw)
-    except Exception:                            # noqa: BLE001
-        return []
-    return [f for f in data if isinstance(f, dict)] if isinstance(data, list) else []
+    """从来源里取出**全部结构化事实**（坏 JSON 按空处理，不猜）。"""
+    out: list[dict] = []
+    for key in _STRUCTURED_SOURCE_KEYS:
+        raw = str((sources or {}).get(key) or "")
+        if not raw:
+            continue
+        try:
+            data = json.loads(raw)
+        except Exception:                        # noqa: BLE001
+            continue
+        if isinstance(data, list):
+            out.extend(f for f in data if isinstance(f, dict))
+    return out
 
 
 def _scale_forms(value, unit: str) -> list[str]:
@@ -817,6 +826,164 @@ def _scale_forms(value, unit: str) -> list[str]:
         out += _one_scale_form(abs(v), u)
     out.append(f"{v:g}")
     return [s for s in dict.fromkeys(out) if s]
+
+
+def _task_subject(ws: Path) -> str:
+    """本任务的**主体**（`analysis/context.json` 的契约）：结构化事实必须带它。"""
+    try:
+        ctx = json.loads((ws / "analysis" / "context.json").read_text(encoding="utf-8")) or {}
+        c = ctx.get("contract") or {}
+        return str(c.get("entity") or c.get("entity_id") or "")
+    except Exception:                            # noqa: BLE001
+        return ""
+
+
+def _years_in(text: str) -> list[int]:
+    return [int(m.group(0)) for m in re.finditer(r"(?:19|20)\d{2}", str(text or ""))]
+
+
+def _run_output_facts(ws: Path) -> list[dict]:
+    """`analysis_runs.json` → **结构化**事实（每条输出＋它的构件）。
+
+    准入（不是装饰）：运行 `status=validated`；数值是数字；单位非空；带 `formula`
+    与 `inputs`（构件 id 或运行 id）——与底稿派生事实同一把尺。主体取自本任务契约，
+    期间取自输出标签里的年份（标签没写年份就留空＝不据此否决，也不冒充同期）。
+    """
+    p = ws / "analysis_runs.json"
+    if not p.is_file():
+        p = ws / "project" / "analysis_runs.json"
+    if not p.is_file():
+        return []
+    data = json.loads(p.read_text(encoding="utf-8")) or {}
+    if isinstance(data, list):
+        runs = data
+    else:
+        runs = data.get("runs")
+        if isinstance(runs, dict):
+            runs = list(runs.values())
+        if not isinstance(runs, list):
+            # 落盘形状也可能是 `{run_id: {…}}`：只收**带 outputs 的 run 对象**
+            runs = [v for v in data.values() if isinstance(v, dict) and "outputs" in v]
+    subject = _task_subject(ws)
+    out: list[dict] = []
+    for r in runs:
+        if not isinstance(r, dict) or str(r.get("status") or "") != "validated":
+            continue
+        rid = str(r.get("run_id") or r.get("model_id") or "")
+        for o in (r.get("outputs") or []):
+            if not isinstance(o, dict):
+                continue
+            value, unit = o.get("value"), str(o.get("unit") or "")
+            if not isinstance(value, (int, float)) or not unit:
+                continue
+            comps = [c for c in (o.get("components") or []) if isinstance(c, dict)]
+            ids = [str(c.get("component_id") or "") for c in comps] or [rid]
+            label = str(o.get("label") or o.get("metric") or "")
+            yrs = _years_in(label)
+            period = ("→".join(f"{y}年" for y in yrs) if len(yrs) > 1
+                      else (f"{yrs[0]}年" if yrs else ""))
+            base = {"subject": subject, "metric": str(o.get("metric") or ""),
+                    "period": period, "currency": "CNY", "caliber": "合并",
+                    "formula": "，".join(f"{c.get('component_id')}={c.get('value')}"
+                                        for c in comps) or f"run:{rid}",
+                    "inputs": ids, "label": label[:80], "run_id": rid}
+            out.append(dict(base, kind="run_output", value=float(value), unit=unit))
+            for c in comps:
+                cv = c.get("value")
+                if not isinstance(cv, (int, float)) or not c.get("component_id"):
+                    continue
+                out.append(dict(base, kind="run_component",
+                                metric=f"{o.get('metric')}:{c.get('component_id')}",
+                                value=float(cv), unit=str(c.get("unit") or unit)))
+    return out
+
+
+def _continuation_output_facts(ws: Path) -> list[dict]:
+    """`analysis/continuation.json` → **结构化**事实（续页/半年读数，两期各一组）。
+
+    准入：读数来自**已冻结材料**的表格抽取（`snapshot`/`readings_of`），每条带来源
+    定位；这里只做"值＋单位＋主体＋指标/期间＋算式/输入"的结构化落库，不把续页
+    Markdown 当来源。
+    """
+    p = ws / "analysis" / "continuation.json"
+    if not p.is_file():
+        return []
+    page = json.loads(p.read_text(encoding="utf-8")) or {}
+    subject = _task_subject(ws)
+    out: list[dict] = []
+
+    def _add(metric: str, value, unit: str, period: str, locator: str,
+             *, formula: str = "", label: str = "") -> None:
+        if not isinstance(value, (int, float)) or not unit:
+            return
+        out.append({"kind": "continuation_reading", "subject": subject,
+                    "metric": metric, "period": str(period or ""),
+                    "value": float(value), "unit": unit, "currency": "CNY",
+                    "caliber": "合并", "formula": formula or f"来源：{locator or '—'}",
+                    "inputs": [locator] if locator else [f"continuation:{metric}"],
+                    "label": (label or metric)[:80], "locator": str(locator or "")})
+
+    for side, snap in (("later", (page.get("later") or {})),
+                       ("earlier", (page.get("earlier") or {}))):
+        r = ((page.get("readings") or {}).get(side) or {})
+        if not r:
+            continue
+        src = (snap.get("source") or {})
+        labels = [str(x) for x in (src.get("period_labels") or [])]
+        cur_p = str(r.get("cur_period") or (labels[-1] if labels else ""))
+        prev_p = str(r.get("prev_period") or (labels[0] if len(labels) > 1 else ""))
+        cur_p = cur_p or (f"{r.get('periods', ['', ''])[-1]}" if r.get("periods") else "")
+        # 期间标签可能是年份数字（2025）——统一写成"2025H1"/"2024年"这类可读标签
+        if cur_p and cur_p.isdigit():
+            cur_p = f"{cur_p}H1" if str(r.get("period_kind")) == "half" else f"{cur_p}年"
+        if prev_p and prev_p.isdigit():
+            prev_p = f"{prev_p}H1" if str(r.get("period_kind")) == "half" else f"{prev_p}年"
+        for metric, cur_k, prev_k, yoy_k, unit, loc_k in (
+                ("sales_volume", "volume_cur", "volume_prev", "volume_yoy", "吨",
+                 "volume_locator"),
+                ("production_volume", None, None, "production_yoy", "吨", "volume_locator"),
+                ("inventory_volume", "inventory_cur", "inventory_prev", "inventory_yoy",
+                 "吨", "inventory_locator"),
+                ("net_profit", "net_profit_cur", "net_profit_prev", "net_profit_yoy", "元",
+                 "profit_locator"),
+                ("income_tax_expense", "tax_cur", "tax_prev", "tax_yoy", "元", "tax_locator"),
+                ("taxes_and_surcharges", "surcharge_cur", "surcharge_prev", "surcharge_yoy",
+                 "元", "surcharge_locator")):
+            loc = str(r.get(loc_k) or "")
+            if cur_k and r.get(cur_k) is not None:
+                _add(metric, r.get(cur_k), unit, cur_p, loc)
+            if prev_k and r.get(prev_k) is not None:
+                _add(metric, r.get(prev_k), unit, prev_p, loc)
+            if r.get(yoy_k) is not None:
+                _add(f"{metric}_yoy", r.get(yoy_k), "%",
+                     f"{prev_p}→{cur_p}" if prev_p else cur_p, loc)
+        # 变化量/贡献（两条读数相减得到的同口径读数）
+        for metric, key, unit, loc_k in (
+                ("net_profit_change", "profit_change", "元", "profit_locator"),
+                ("change_in_net_profit", "cash_np", "元", ""),
+                ("change_in_working_capital", "cash_wc", "元", ""),
+                ("operating_cashflow_change", "ocf_change", "元", ""),
+                ("non_cash_adjustments_change", "cash_noncash", "元", ""),
+                ("income_tax_contribution", "tax_income_contribution", "元", "tax_locator"),
+                ("surcharge_contribution", "surcharge_contribution", "元", "surcharge_locator"),
+                ("tax_contribution", "tax_contribution", "元", "tax_locator")):
+            if r.get(key) is None:
+                continue
+            _add(metric, r.get(key), unit,
+                 f"{prev_p}→{cur_p}" if prev_p else cur_p, str(r.get(loc_k) or ""),
+                 formula=f"{cur_p} − {prev_p}" if prev_p else "")
+        for key, metric in (("payable", "operating_payable_increase"),
+                            ("receivable", "operating_receivable_decrease"),
+                            ("inventory", "inventory_decrease")):
+            row = (r.get("wc_lines") or {}).get(key) or {}
+            loc = str(row.get("locator") or "")
+            for field, period, formula in (("cur", cur_p, ""),
+                                           ("prev", prev_p, ""),
+                                           ("delta", f"{prev_p}→{cur_p}", "本期 − 上期")):
+                if row.get(field) is None:
+                    continue
+                _add(f"{metric}_{field}", row.get(field), "元", period, loc, formula=formula)
+    return out
 
 
 def _workpaper_source_texts(workspace) -> dict[str, str]:
@@ -1062,6 +1229,73 @@ def _derived_body_semantics(n: dict, clause: str, at: int, f: dict) -> str:
     return ""
 
 
+def _comparable_scales(report_unit: str, fact_unit: str) -> tuple[float, float]:
+    """报告侧/事实侧的缩放系数；任一侧为 0 表示**量纲不可比**。
+
+    金额之间允许元/万元/亿元换算；百分比与百分比可比但**不得**与金额互认；
+    非金额非百分比的单位（吨/天/个百分点/股…）要求**单位字符串一致**——
+    否则"789 吨"会借到"789 元"的事实。
+    """
+    ru, fu = str(report_unit or "").strip(), str(fact_unit or "").strip()
+    if not ru or not fu:
+        return 0.0, 0.0
+    if _pct_unit(ru) != _pct_unit(fu):
+        return 0.0, 0.0
+    if _pct_unit(ru):
+        return 1.0, 1.0
+    ra, fa = _amount_unit_scale(ru), _amount_unit_scale(fu)
+    if ra and fa:
+        return ra, fa
+    if ra or fa:
+        return 0.0, 0.0
+    return (1.0, 1.0) if ru == fu else (0.0, 0.0)
+
+
+def _match_derived_fact_bare(n: dict, report: str, facts: list[dict],
+                             *, goal: str = "") -> str | None:
+    """**无单位**数字与结构化事实的匹配（吨/天/股这类抽取器不认的单位）。
+
+    比有单位那条更严：值一致 **且事实的单位串必须出现在该数字所在子句里**
+    （"78,192.32 吨"对得上 unit=吨 的事实；"78,192.32"凭空一个数对不上），
+    再走主体与指标/期间相容校验。
+    """
+    try:
+        v = float(n.get("value"))
+    except (TypeError, ValueError):
+        return None
+    _start = int(n.get("pos") or 0)
+    clause = _clause_of(str(report or ""), _start, _start + len(str(n.get("raw") or "")))
+    for f in facts:
+        try:
+            fv = float(f.get("value"))
+        except (TypeError, ValueError):
+            continue
+        fu = str(f.get("unit") or "").strip()
+        if not fu or _amount_unit_scale(fu) or fu.endswith("%"):
+            continue                      # 金额/百分比的事实不走这条（它们有单位通道）
+        if fu not in clause:
+            continue
+        if not _close(abs(v), abs(fv)):
+            continue
+        f_subject = str(f.get("subject") or "")
+        # 词法键要带 goal：裸专名（"宁德时代本期销售量…"）没有"公司/股份"后缀，
+        # 不带 goal 就抽不出主体，跨公司同值会被放行。
+        rep_subject = _promotion_subject(clause, goal=goal)
+        if rep_subject and f_subject:
+            if _subjects_conflict(rep_subject, f_subject):
+                continue
+            _agree = (rep_subject == f_subject or rep_subject in f_subject
+                      or f_subject in rep_subject
+                      or _shares_entity(rep_subject, f_subject)
+                      or (goal and _shares_entity(rep_subject, str(goal))))
+            if not _agree:
+                continue
+        if _derived_body_semantics(n, clause, 0, f):
+            continue
+        return "workpaper_derived"
+    return None
+
+
 def _pct_unit(unit) -> bool:
     """单位是不是百分比（量纲判定用：金额与百分比不得互认）。"""
     return str(unit or "").strip().endswith("%")
@@ -1103,15 +1337,12 @@ def _match_derived_fact(n: dict, report: str, facts: list[dict],
             fv = float(f.get("value"))
         except (TypeError, ValueError):
             continue
-        f_scale = _amount_unit_scale(str(f.get("unit") or "")) or (
-            1.0 if str(f.get("unit") or "").endswith("%") else 0.0)
         # **量纲一致**即可，不要求缩放系数完全相等：金额 vs 百分比不得互认（否则"营收同比
         # −12.83%"能被某个金额事实借走），但**同一量纲内**允许元/万元/亿元换算——正文按读者
         # 口径写"33.43亿元"、底稿按"元"记，是本项目的既定等价写法（`_num_forms` 同一约定）。
-        # 此前这里要求 `abs(f_scale - scale) <= 1e-9`，于是亿元读数永远配不上以元记的派生事实：
-        # 10-06 正常入口实测，唯一首屏的 33.43／38.01 亿元全部落在"不可溯源"示例里
-        # （数字溯源率被压到阈值边缘，且压页时一移走原始行就跌到 67% 判死）。
-        if not f_scale or (_pct_unit(f.get("unit")) != _pct_unit(unit)):
+        # 10-08：非金额非百分比（吨/天/个百分点）要求单位串一致，见 `_comparable_scales`。
+        scale, f_scale = _comparable_scales(unit, str(f.get("unit") or ""))
+        if not scale or not f_scale:
             continue
         if not _close(abs(v) * scale, abs(fv) * f_scale):
             continue
@@ -1171,22 +1402,22 @@ def _collect_sources(workspace) -> dict[str, str]:
             src["structured_data"] = sd.read_text(encoding="utf-8")
     except Exception:
         pass
-    # 10-07 第二次复核 §阅读层：**允许数值溯源读同一选版冻结附件**（短主文＋完整底稿契约）。
-    # 附件是随包交付的同一份（`analysis/analysis_detail.md`／`analysis/continuation.md`），
-    # 打包时逐字节冻结并记 hash；这里把它们的文本作为**独立来源通道**参与匹配——
-    # 主文里那些只出现在判断/续页里的读数（税费贡献、门槛、半年同期值）因此可核，
-    # 而不是被当成"不可溯源"。**不降低阈值**：仍要值＋单位在来源文本里对得上，
-    # 主体不符依旧会被主体校验挡掉。
+    # 10-08 复核 §3：**附件保存不是附件自证**。新增的 `frozen_attachment` 曾把附件 Markdown
+    # 全文当普通来源，于是"把 2024 年税费 11.64 亿写成 2025 年营业收入 11.64 亿元（合并）"
+    # 也能判可溯源（实际 ZIP 内已独立复现，见 `attachment_probe.json`）。现在：
+    # 附件继续承载完整解释/原句/定位，但**不再是数字来源**；数字回到结构化事实/派生准入
+    # （底稿派生、已验证运行输出与构件、续页/半年读数），逐条带主体/指标/期间/单位/算式。
     try:
-        _attach: list[str] = []
-        for rel in ("analysis/analysis_detail.md", "analysis/continuation.md",
-                    "analysis/analysis_cards.md"):
-            p = ws / rel
-            if p.is_file():
-                _attach.append(p.read_text(encoding="utf-8"))
-        if _attach:
-            src["frozen_attachment"] = "\n".join(_attach)
-    except Exception:
+        _run_facts = _run_output_facts(ws)
+        if _run_facts:
+            src[RUN_FACTS_KEY] = json.dumps(_run_facts, ensure_ascii=False)
+    except Exception:                            # noqa: BLE001 - 坏产物不进来源
+        pass
+    try:
+        _cont_facts = _continuation_output_facts(ws)
+        if _cont_facts:
+            src[CONTINUATION_FACTS_KEY] = json.dumps(_cont_facts, ensure_ascii=False)
+    except Exception:                            # noqa: BLE001
         pass
     # 结构化财务（东财/SEC/巨潮适配器的落盘产物）：这是**已抓取并留档**的权威来源，
     # 必须参与溯源。此前只认 clean_chart_data.json——而该文件要在清洗步骤跑过之后
@@ -3145,6 +3376,12 @@ def check_number_traceability(
             _hit_fact = _match_derived_fact(n, report, _derived_facts, goal=goal)
             if _hit_fact is not None:
                 hit = _hit_fact
+        if hit is None and not n.get("unit") and _derived_facts:
+            # 抽取器认不出单位的读数（"78,192.32 吨"）：走**更严**的无单位匹配
+            # （值一致 + 事实单位必须出现在子句里 + 主体/指标/期间相容）。
+            _hit_bare = _match_derived_fact_bare(n, report, _derived_facts, goal=goal)
+            if _hit_bare is not None:
+                hit = _hit_bare
         if clean_text:
             # clean_chart_data 命中**同样要过主体归属**：此前它优先接受并直接定案，
             # 绕过了后面的子句主体筛选——于是"clean 里是 B 公司的数字"也能给

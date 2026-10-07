@@ -9150,18 +9150,27 @@ class TestNightCorrectionFailureSamples(unittest.TestCase):
             {"label": "毛利额", "unit": "元", "cur": None, "prev": 1}, periods=[2023, 2024]))
 
     def test_profit_decomposition_declares_its_periods(self):
-        """材料必须自带报告期：正文据它给派生读数标年份，不靠调用方猜。"""
+        """材料必须自带报告期：正文据它给派生读数标年份，不靠调用方猜。
+
+        10-08 复核 §1：毛利率表**不声明年份**，所以"这份材料是哪一期"只能由
+        文档自己声明（标题里的"2024年年度报告"）；没声明就**未知**，不拿请求期间顶替。
+        """
         import narrative_evidence as ne
 
-        doc = {"title": "年报", "url": "https://x/1", "text": (
-            "分销售模式 2024年 2023年 同比增减\n"
-            "批发经销 27854167407.45 32052628760.26 -13.10%\n"
-            "营业收入 28876296993.56 33125534523.11 -12.83%\n"
-            "营业成本 营业成本 毛利率 营业收入 营业成本 毛利率\n"
-            "销售费用 6934875260.00 6681605162.00 3.79%\n")}
+        text = ("分销售模式 2024年 2023年 同比增减\n"
+                "批发经销 27854167407.45 32052628760.26 -13.10%\n"
+                "营业收入 28876296993.56 33125534523.11 -12.83%\n"
+                "营业成本 营业成本 毛利率 营业收入 营业成本 毛利率\n"
+                "销售费用 6934875260.00 6681605162.00 3.79%\n")
+        doc = {"title": "洋河股份:2024年年度报告", "url": "https://x/1", "text": text}
         pd = ne.extract_profit_decomposition([doc], periods=[2023, 2024])
         self.assertIn("periods", pd)
         self.assertEqual(list(pd["periods"]), [2023, 2024])
+        self.assertEqual(str(pd["document_period"]), "2024")
+        # 没有报告期的材料 → 未知（不得按请求期间放行）
+        undated = {"title": "年报", "url": "https://x/2", "text": text}
+        self.assertFalse(ne.extract_profit_decomposition([undated],
+                                                         periods=[2023, 2024]).get("ok"))
 
     def test_assembly_sentences_enter_the_same_claim_set(self):
         """装配器生成的观察与边界都要进主张集合，且边界单独记类型。"""

@@ -924,9 +924,10 @@ def research_judgments(runs, *, volume_price: dict | None = None,
             if total is not None:
                 numbers.append(f"归母净利润变化 {_yi(total, _ou)}亿元（＝毛利端 ＋ 毛利线以下）")
             if gp_v is not None:
+                # 10-08：两个构成项各自带单位（裸数字读者要猜、溯源也认不出量纲）
                 numbers.append(f"毛利端变化 {_yi(gp_v, _ou)}亿元（收入规模 "
-                               f"{_yi(_attr(_out(od, 'revenue_scale_effect'), 'value'), _ou)} ＋ "
-                               f"毛利率 {_yi(_attr(_out(od, 'gross_margin_effect'), 'value'), _ou)}；"
+                               f"{_yi(_attr(_out(od, 'revenue_scale_effect'), 'value'), _ou)}亿元 ＋ "
+                               f"毛利率 {_yi(_attr(_out(od, 'gross_margin_effect'), 'value'), _ou)}亿元；"
                                f"{gp_role or '构成'}）")
             if tax_bits:
                 numbers.append(f"税费对利润变化的贡献 {_yi(tax_v, _ou)}亿元"
@@ -1175,12 +1176,15 @@ def research_judgments(runs, *, volume_price: dict | None = None,
             _known = [v for _l, v in _sum_bits if v is not None]
             bridge_line = ""
             if len(_known) >= 2:
+                # 10-08：**每一项都带单位**。此前只在末尾写一次"亿元"，
+                # 前面三项变成裸数字（"合并净利润变化 -33.54"）——读者要猜单位，
+                # 数字溯源也认不出量纲（`extract_financial_numbers` 拿不到单位）。
                 bridge_line = ("现金桥（同一次运行，**四项相加**）："
-                               + " ＋ ".join(f"{_l} {_yi(v, _cu)}" for _l, v in _sum_bits
-                                             if v is not None)
+                               + " ＋ ".join(f"{_l} {_yi(v, _cu)}亿元"
+                                            for _l, v in _sum_bits if v is not None)
                                + f" ＝ Δ经营现金流 {_yi(total, _cu)}亿元"
                                + ("（对账差额 "
-                                  f"{_yi(_bid.get('change_in_residual'), _cu)}）"
+                                  f"{_yi(_bid.get('change_in_residual'), _cu)}亿元）"
                                   if _bid.get("change_in_residual") is not None else ""))
             numbers = [
                 f"经营现金流变化（**间接法**：净利润＋调节项，独立对账）{_yi(total, _cu)}亿元"

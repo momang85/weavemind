@@ -4966,9 +4966,255 @@ class TestX1ResearchContinuation(unittest.TestCase):
         oc = page.get("overlap_check") or {}
         if oc.get("verdict"):
             self.assertIn(str(oc["verdict"]), one, "交叉核对判定句必须完整")
-        self.assertLess(len(one), len(full), "一页版必须真的更短")
-        self.assertLess(len(one), int(len(full) * 0.9),
-                        f"压缩比不足（full {len(full)} / one {len(one)}）")
+        # 压缩的是**表体**（判定口径提脚注、旧读数让附件）：比较表体而不是整页
+        def _table(md: str) -> str:
+            return "\n".join(ln for ln in md.splitlines() if ln.startswith("| "))
+        self.assertLess(len(_table(one)), len(_table(full)), "一页版的表体必须更短")
+        self.assertIn("判定口径", one)
+        # 10-08：一页版**多了追踪卡**（最多三项下一核查＋替代解释＋来源）——
+        # 卡片是读者入口的行动清单，不计入"压版面"的压缩比。
+        self.assertIn("追踪卡", one, "读者入口要有追踪卡")
+        self.assertIn("要查的材料", one)
+
+
+class TestContinuationBuildSeam(unittest.TestCase):
+    """10-08 复核 §2：续页**接进正常任务**（不再只在 `scripts/x1_*` 里算）。
+
+    接缝的判定逻辑：较早侧＝契约期间对应的年报；较新侧＝工作区里报告期**严格更晚**的
+    披露；没有更新的披露、或已存在旧版本冻结的 `analysis/continuation.json` → 不生成
+    （返回 `{}`，不覆盖、不编）。
+    """
+
+    def setUp(self):
+        import shutil
+        import tempfile
+        import task_state
+        import workspace as ws_mod
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_cont_seam_"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self._old_root = ws_mod.WORKSPACE_ROOT
+        self._old_db = task_state.DB_PATH
+        ws_mod.configure_workspace_root(str(self.tmp))
+        task_state.DB_PATH = str(self.tmp / "t.db")
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", self._old_root)
+        self.addCleanup(setattr, task_state, "DB_PATH", self._old_db)
+        self.ws = ws_mod.task_workspace("cont-seam", "default")
+        (self.ws / "project").mkdir(parents=True, exist_ok=True)
+        self._write_inputs()
+        self.addCleanup(setattr, ws_mod, "WORKSPACE_ROOT", self._old_root)
+
+    def _write_inputs(self, docs=None):
+        docs = docs if docs is not None else [
+            {"title": "洋河股份:2024年年度报告", "url": "https://x/24",
+             "published_at": "2025-04-29", "text": "2024年年度报告正文"},
+            {"title": "洋河股份:2025年半年度报告", "url": "https://x/h1",
+             "published_at": "2025-08-19", "text": "2025年半年度报告正文"},
+        ]
+        (self.ws / "project" / "fetch_snapshot.json").write_text(
+            json.dumps(docs, ensure_ascii=False), encoding="utf-8")
+
+    def _stub(self, calls):
+        from financial_analysis import continuation as cont
+
+        def _snap(doc, **kw):
+            calls.append(("snapshot", str(doc.get("title")), kw.get("period_kind"),
+                          tuple(kw.get("periods") or ())))
+            return {"label": kw.get("label") or "", "period_kind": kw.get("period_kind"),
+                    "periods": list(kw.get("periods") or ()),
+                    "source": {"title": doc.get("title"), "url": doc.get("url"),
+                               "period_kind": kw.get("period_kind"),
+                               "period_labels": list(kw.get("period_labels") or ()),
+                               "disclosure_date": str(doc.get("published_at") or "")},
+                    "dataset": {"hash": "h"}, "runs": {}, "volume_price": {"ok": False},
+                    "records": [], "judgments": [
+                        {"judgment_id": "cash_from_working_capital",
+                         "title": "旧判断：现金来源方向", "numbers": ["ΔOCF"],
+                         "watch": ["下一期三行"], "alternatives": ["一次性时点"], "gaps": []}]}
+
+        orig = (cont.snapshot, cont.compare)
+
+        def _compare(e, l, **kw):
+            calls.append(("compare", e.get("period_kind"), l.get("period_kind")))
+            return {"hypotheses": [{"judgment_id": "cash_from_working_capital"}],
+                    "later": {"source": {}}, "earlier": {"source": {}}}
+
+        cont.snapshot = _snap
+        cont.compare = _compare
+        self.addCleanup(setattr, cont, "snapshot", orig[0])
+        self.addCleanup(setattr, cont, "compare", orig[1])
+
+    def test_newer_disclosure_produces_the_page_from_the_normal_path(self):
+        from financial_analysis import continuation as cont
+        calls: list = []
+        self._stub(calls)
+        page = cont.build_for_task("cont-seam", ws_dir=self.ws, periods=(2023, 2024))
+        self.assertTrue(page.get("hypotheses"), page)
+        picks = [c for c in calls if c[0] == "snapshot"]
+        self.assertEqual(len(picks), 2, calls)
+        self.assertEqual(picks[0][1], "洋河股份:2024年年度报告")
+        self.assertEqual(picks[0][2], "annual")
+        self.assertEqual(picks[1][1], "洋河股份:2025年半年度报告")
+        self.assertEqual(picks[1][2], "half", "半年报按半年口径建快照")
+        self.assertTrue((self.ws / "analysis" / "continuation.json").is_file())
+        # 第二次调用**不覆盖**（旧版本冻结的那一份）
+        calls.clear()
+        self.assertEqual(cont.build_for_task("cont-seam", ws_dir=self.ws,
+                                             periods=(2023, 2024)), {})
+        self.assertEqual(calls, [], "已有 continuation.json 时不得重算/覆盖")
+
+    def test_without_a_newer_disclosure_it_is_not_applicable(self):
+        from financial_analysis import continuation as cont
+        self._write_inputs(docs=[{"title": "洋河股份:2024年年度报告",
+                                  "url": "https://x/24", "published_at": "2025-04-29",
+                                  "text": "只到 2024 年年报"}])
+        calls: list = []
+        self._stub(calls)
+        self.assertEqual(cont.build_for_task("cont-seam", ws_dir=self.ws,
+                                             periods=(2023, 2024)), {})
+        self.assertEqual([c for c in calls if c[0] == "compare"], [],
+                         "没有更新披露就不做比较（不凑假对照）")
+        self.assertFalse((self.ws / "analysis" / "continuation.json").is_file())
+
+
+class TestHalfYearCalibers(unittest.TestCase):
+    """10-08 复核 §2：H1 续页的税费/现金**口径**与**子判断拆分**。
+
+    复核点名四件事，逐条钉住：
+    ① 命题定义里的"税费"是总税费（所得税＋税金及附加），洋河 2025H1 应约 20.84 亿
+       （10.85＋10.00），不是只算所得税那 10.85 亿；
+    ② 现金桥的净利润项用**补充资料合并净利润**变化（约 −36.12 亿），不是归母 −36.04 亿；
+    ③ 应收 +8.08／应付 +18.31 亿是**同期调节项变化**，本期发生额是应收释放 6.86／应付消耗 56.68 亿；
+    ④ "利润主导方向延续"与"缓冲结构变化"是**两项子判断**，各自给状态。
+    """
+
+    # 洋河 2025H1（半年报「本报告期／上年同期」两列）与补充资料净利润
+    HALF = {
+        "cur_label": "2025H1", "prev_label": "2024H1", "period_kind": "half",
+        "rows": {
+            "归属于上市公司股东的净利润": {"cur": 4343649032.11, "prev": 7947245427.18,
+                                          "yoy": -45.34, "locator": "第 7 页 · 「归属于上市公司股东的净利润」"},
+            "所得税费用": {"cur": 1592767634.72, "prev": 2677318299.95, "yoy": -40.51,
+                       "locator": "第 12 页 · 「所得税费用」"},
+            "税金及附加": {"cur": 2415489775.36, "prev": 3415166563.30, "yoy": -29.27,
+                       "locator": "第 40 页 · 「税金及附加」"},
+            "经营活动产生的现金流量净额": {"cur": 616044153.37, "prev": 2043328628.29,
+                                   "yoy": -69.85,
+                                   "locator": "第 7 页 · 「经营活动产生的现金流量净额」"},
+        },
+        "supplement_net_profit": {"cur": 4335432025.45, "prev": 7947920201.66,
+                                  "locator": "第 44 页 · 现金流量表补充资料「净利润」"},
+        "volume": {"销售量": {"cur": 78192.32, "prev": 115586.48, "yoy": -32.35,
+                            "locator": "第 11 页 · 产销量表"},
+                   "库存量": {"cur": 16293.52, "prev": 24673.39, "yoy": -33.96,
+                            "locator": "第 11 页 · 产销量表"}},
+    }
+
+    def _half_snap(self, **over):
+        snap = {"label": "洋河 2025 年半年度报告", "periods": [2024, 2025],
+                "period_kind": "half",
+                "source": {"title": "洋河股份:2025年半年度报告", "url": "https://x/h1",
+                           "period_kind": "half", "period_labels": ["2024H1", "2025H1"],
+                           "disclosure_date": "2025-08-19", "text_sha256": "h1"},
+                "dataset": {"hash": "h-2425"}, "runs": {}, "records": [],
+                "volume_price": {"ok": True, "facts": [], "derived": []},
+                # 补充资料三行：`cur`/`prev` 是本期/上期**发生额**，`delta` 是同期变化
+                "wc_lines": {
+                    "payable": {"label": "经营性应付项目", "cur": -5668153072.08,
+                                "prev": -7498974974.55, "delta": 1830821902.47},
+                    "inventory": {"label": "存货", "cur": 708006819.89,
+                                  "prev": 946033212.48, "delta": -238026392.59},
+                    "receivable": {"label": "经营性应收项目", "cur": 686334539.30,
+                                   "prev": -122046717.41, "delta": 808381256.71},
+                },
+                "judgments": [], "half": json.loads(json.dumps(self.HALF))}
+        snap.update(over)
+        return snap
+
+    def _annual_snap(self):
+        """较早侧：2024 年度判断（营运资本＝应付/存货/应收三行，变化口径）。"""
+        return {"label": "洋河 2024 年度报告（冻结）", "periods": [2023, 2024],
+                "period_kind": "annual",
+                "source": {"title": "洋河股份:2024年年度报告", "url": "https://x/24",
+                           "period_kind": "annual", "period_labels": ["2023年", "2024年"],
+                           "disclosure_date": "2025-04-29", "text_sha256": "a24"},
+                "dataset": {"hash": "h-2324"},
+                "runs": {"cash_reconciliation": {
+                    "model_id": "cash_reconciliation", "status": "validated",
+                    "run_id": "run-24",
+                    "outputs": [{"metric": "operating_cashflow_change", "value": -15.02e8,
+                                 "components": [
+                                     {"component_id": "change_in_net_profit",
+                                      "value": -33.54e8},
+                                     {"component_id": "change_in_working_capital",
+                                      "value": 11.04e8}]}]}},
+                "volume_price": {"ok": False, "facts": [], "derived": []}, "records": [],
+                "judgments": [{"judgment_id": "cash_from_working_capital",
+                               "title": "现金变化主要由营运资本构成",
+                               "numbers": ["ΔOCF -15.02 亿元"], "watch": ["下一期三行"],
+                               "boundary": "b", "alternatives": [], "gaps": []}]}
+
+    def test_total_tax_buffer_is_income_tax_plus_surcharge(self):
+        from financial_analysis import continuation as cont
+        r = cont.readings_of(self._half_snap())
+        # ① −Δ所得税 10.85 亿 ＋ −Δ税金及附加 10.00 亿 ≈ 20.84 亿
+        self.assertAlmostEqual(r["tax_income_contribution"] / 1e8, 10.8455, places=3)
+        self.assertAlmostEqual(r["surcharge_contribution"] / 1e8, 9.9968, places=3)
+        self.assertAlmostEqual(r["tax_contribution"] / 1e8, 20.8423, places=3)
+        self.assertEqual(r["tax_role"], "缓冲")
+        # 缺一段税费构成时如实标缺口，不把 10.85 当成总额（文本里写"仅取到一项"）
+        snap = self._half_snap()
+        snap["half"]["rows"].pop("税金及附加")
+        r2 = cont.readings_of(snap)
+        self.assertAlmostEqual(r2["tax_contribution"] / 1e8, 10.8455, places=3)
+        page = cont.compare(self._annual_snap(), snap,
+                            select_ids=["profit_mechanism_and_buffer"])
+        self.assertEqual(page["hypotheses"], [],
+                         "较早侧没有该判断时不硬编（这里只验证读数层）")
+
+    def test_cash_bridge_uses_supplement_consolidated_net_profit(self):
+        from financial_analysis import continuation as cont
+        r = cont.readings_of(self._half_snap())
+        # ② 补充资料合并净利润变化 −36.12 亿（≠ 归母 −36.04 亿），口径写清楚
+        self.assertAlmostEqual(r["cash_np"] / 1e8, -36.1249, places=4)
+        self.assertNotAlmostEqual(r["cash_np"], r["profit_change"], places=4)
+        self.assertIn("补充资料", r["cash_np_caliber"])
+        self.assertAlmostEqual(r["cash_wc"] / 1e8, 24.0118, places=4)
+        # 四项对账：ΔOCF ＝ 净利项 ＋ 营运资本项 ＋ 非现金及其他（残差由合计行给出）
+        self.assertAlmostEqual(
+            r["ocf_change"] - r["cash_np"] - r["cash_wc"] - r["cash_noncash"], 0.0, places=4)
+        self.assertIn("由利润下降主导", r["cash_direction"])
+
+    def test_amount_and_change_are_not_conflated(self):
+        from financial_analysis import continuation as cont
+        r = cont.readings_of(self._half_snap())
+        rec, pay = r["wc_lines"]["receivable"], r["wc_lines"]["payable"]
+        # ③ 本期发生额 vs 同期调节项变化：应收释放 6.86（变化 +8.08）、应付消耗 56.68（变化 +18.31）
+        self.assertAlmostEqual(rec["cur"] / 1e8, 6.8633, places=4)
+        self.assertAlmostEqual(rec["delta"] / 1e8, 8.0838, places=4)
+        self.assertAlmostEqual(rec["prev"] / 1e8, -1.2205, places=4)
+        self.assertAlmostEqual(pay["cur"] / 1e8, -56.6815, places=4)
+        self.assertAlmostEqual(pay["delta"] / 1e8, 18.3082, places=4)
+
+    def test_direction_and_buffer_structure_are_separate_rows(self):
+        from financial_analysis import continuation as cont
+        page = cont.compare(self._annual_snap(), self._half_snap(),
+                            select_ids=["cash_from_working_capital"])
+        rows = {h["judgment_id"]: h for h in page["hypotheses"]}
+        self.assertIn("cash_from_working_capital", rows)
+        self.assertIn(cont.J_CASH_BUFFER, rows, "缓冲结构必须是独立子判断")
+        # ④ 方向延续：本期半年仍是利润项主导 → 加强（不被缓冲结构的变化带成削弱）
+        self.assertEqual(rows["cash_from_working_capital"]["status"], cont.STATUS_STRONGER)
+        self.assertIn("利润项主导", rows["cash_from_working_capital"]["status_reason"])
+        # 缓冲结构：应收本期**释放** 6.86 亿 → 削弱，且明确区分本期额与同期变化
+        buf = rows[cont.J_CASH_BUFFER]
+        self.assertEqual(buf["status"], cont.STATUS_WEAKER)
+        self.assertIn("释放", buf["status_reason"])
+        self.assertIn("6.86", buf["status_reason"].replace(" ", ""))
+        _txt = " ".join(buf["new_readings"])
+        self.assertIn("本期发生额", _txt)
+        self.assertIn("同期调节项变化", _txt)
+        # 两项状态可以不同（一个加强、一个削弱），不用整体状态抹平
+        self.assertNotEqual(rows["cash_from_working_capital"]["status"], buf["status"])
 
 
 class TestX0AmountUnitBoundary(unittest.TestCase):

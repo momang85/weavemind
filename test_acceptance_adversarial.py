@@ -457,6 +457,87 @@ class TestAcceptanceProfileGating(_AdversarialBase):
         self.assertTrue(r["checks"]["number_traceability"].get("applicable"))
 
 
+class TestAttachmentProseIsNotASource(unittest.TestCase):
+    """10-08 复核 §3：**附件保存不是附件自证**。
+
+    实际 ZIP 内已独立复现：把 2024 年税费贡献 11.64 亿写成
+    「2025年营业收入11.64亿元（合并）」，在附件全文当来源时仍判 traceable。
+    修法：附件继续承载完整解释/原句/定位，但**不再是数字来源**；数字回到结构化事实
+    （底稿派生／已验证运行输出／续页读数），并要求主体/指标/期间相容。
+    """
+
+    def _sources(self, **over):
+        base = {
+            # 附件里**只有**这句话（旧实现会把它的数字当来源）
+            "analysis_detail": "",
+            "fetch_snapshot": "洋河股份 2024 年年度报告 营业收入 288.76 亿元",
+        }
+        base.update(over)
+        return base
+
+    def _run_fact(self, **over):
+        fact = {"kind": "run_component", "subject": "洋河股份",
+                "metric": "net_profit_change_detail:income_tax_expense",
+                "period": "2024年→2023年", "value": 720443770.88, "unit": "元",
+                "currency": "CNY", "caliber": "合并",
+                "formula": "net_profit_change_detail", "inputs": ["change_in_tax"],
+                "label": "毛利线以下逐项分解"}
+        fact.update(over)
+        return fact
+
+    def test_hand_written_attachment_text_does_not_vouch_for_numbers(self):
+        import acceptance_checker as ac
+        # 附件文本**不再进入来源集合**（`_collect_sources` 里已删除该通道）
+        import inspect
+        src_txt = inspect.getsource(ac._collect_sources)
+        self.assertNotIn('"frozen_attachment"', src_txt,
+                         "附件不能再作为数字来源通道")
+        self.assertNotIn("frozen_attachment", ac._STRUCTURED_SOURCE_KEYS)
+        # 一个只写在附件里的数字：没有任何结构化事实 → 不可溯源
+        report = "2025年营业收入 11.64 亿元（合并）。"
+        out = ac.check_number_traceability(
+            report, self._sources(), domain="financial",
+            goal="研究洋河股份 2023 与 2024 经营")
+        self.assertEqual(out["unverifiable_count"], out["total_count"], out)
+        self.assertEqual(out["traceable_count"], 0, out)
+
+    def test_structured_run_fact_traces_the_same_number_with_identity(self):
+        import acceptance_checker as ac
+        facts = json.dumps([self._run_fact()], ensure_ascii=False)
+        report = "本期所得税费用贡献 7.20 亿元（合并）。"
+        out = ac.check_number_traceability(
+            report, self._sources(structured_run_facts_json=facts),
+            domain="financial", goal="研究洋河股份 2023 与 2024 经营")
+        self.assertEqual(out["traceable_count"], 1, out)
+        self.assertEqual(out["traceable"][0]["source"], "workpaper_derived")
+        # 同一数字写成**别的指标**（营业收入）→ 结构化事实不背书
+        out2 = ac.check_number_traceability(
+            "2025年营业收入贡献 7.20 亿元（合并）。",
+            self._sources(structured_run_facts_json=facts),
+            domain="financial", goal="研究洋河股份 2023 与 2024 经营")
+        self.assertEqual(out2["traceable_count"], 0, out2)
+
+    def test_continuation_readings_are_structured_not_prose(self):
+        import acceptance_checker as ac
+        facts = json.dumps([{
+            "kind": "continuation_reading", "subject": "洋河股份",
+            "metric": "sales_volume", "period": "2025H1", "value": 78192.32,
+            "unit": "吨", "currency": "CNY", "caliber": "合并",
+            "formula": "来源：第 11 页 · 产销量表", "inputs": ["第 11 页 · 产销量表"],
+            "label": "销售量"}], ensure_ascii=False)
+        out = ac.check_number_traceability(
+            "本期销售量 78,192.32 吨（合并）。",
+            self._sources(continuation_facts_json=facts),
+            domain="financial", goal="研究洋河股份 2025 半年报")
+        self.assertEqual(out["traceable_count"], 1, out)
+        # 写成另一家公司（主体可抽取的写法）→ 主体不符，不背书
+        out2 = ac.check_number_traceability(
+            "宁德时代 2025H1 销售量 78,192.32 吨。",
+            self._sources(continuation_facts_json=facts),
+            domain="financial", goal="研究洋河股份 2025 半年报")
+        self.assertEqual(out2["traceable_count"], 0, out2)
+
+
 class TestX0LocatorAndDerivedSourceClaims(unittest.TestCase):
     """X0（10-02 真实任务 `ui-d5af8cae2f`）：定位/派生型来源声明**按产物核验**，不是"删除失败项"。
 

@@ -3977,8 +3977,15 @@ def _analysis_context(task_id: str, *, ws_dir=None, evidence: dict | None = None
     out["cards"], out["gaps"] = _render_card_block(picked, notes, ws=ws)
     # X1（阶段X §4）：**研究续页**——工作区里落过 `analysis/continuation.json`（由一个小的
     # 续页比较模块生成）就渲染成前两页的一页；没有该文件时既有交付一字不变。
+    #
+    # 10-08 复核 §2：生成**接进正常任务**（此前只在 `scripts/x1_*` 里算）——工作区里
+    # 出现**报告期更晚**的披露时，用同一批算子现算一页并落盘；已有旧版本冻结的那一份
+    # 不覆盖（`build_for_task` 自己判）。
     try:
         out["continuation"] = _load_continuation(ws)
+        if not out.get("continuation"):
+            out["continuation"] = _fa_continuation.build_for_task(
+                task_id, ws_dir=ws) or {}
         out["continuation_page"] = (
             _fa_continuation.render_page(out["continuation"])
             if out.get("continuation") else "")
