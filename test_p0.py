@@ -6645,6 +6645,40 @@ class TestReportPdfLayout(unittest.TestCase):
                       "缺图必须留可见占位，不能静默消失")
         self.assertIn("no_such_chart.png", text, "占位应带上原路径便于排查")
 
+    def test_numbered_list_with_indented_subitems_keeps_counting(self):
+        """编号列表带缩进子项时**编号继续**（实机首屏四条判断曾全印成"1."）。
+
+        正文形状：`1. 判断句` ＋ 缩进的 `- 关键读数…`；旧实现一遇子项就结束这一块，
+        下一条编号又从 1 开始——四条判断在 PDF 里全编号为 1。
+        """
+        import report_pdf
+        md = ("# 结论\n\n"
+              "1. 第一条判断\n   - 关键读数：甲\n"
+              "2. 第二条判断\n   - 关键读数：乙\n"
+              "3. 第三条判断\n   - 关键读数：丙\n")
+        text = self._flat(report_pdf.markdown_to_pdf(md, title="结论", workspace=None))[0]
+        # `_flat` 会去掉空白：断言也用去空白形式
+        for marker in ("1.第一条判断", "2.第二条判断", "3.第三条判断"):
+            self.assertIn(marker, text, f"编号丢失：{marker}")
+        self.assertIn("-关键读数：丙", text, "缩进子项仍要印出来")
+
+    def test_assembly_html_comments_never_reach_the_pdf(self):
+        """10-07 第二次复核 §阅读层：**工程注释不得印在读者页面上**。
+
+        实机反例：装配器留在正文里的 `<!-- 主文收束:pointer … -->`／
+        `<!-- 主文收束:begin … -->`（给 `compact_main_body` 做幂等改写用）被当普通段落
+        画进了 PDF —— 复核点名"第 4 页工程 HTML 注释可见"。
+        """
+        import report_pdf
+        md = ("# 复核结论\n\n正文。\n\n"
+              "<!-- 主文收束:pointer（本行由 report_brief 维护，勿手改） -->\n"
+              "<!-- 主文收束:begin\n多行注释也要整块跳过\n-->\n\n"
+              "结论边界如下。\n")
+        text = "\n".join(self._flat(report_pdf.markdown_to_pdf(md, workspace=None)))
+        self.assertNotIn("主文收束", text, "工程注释不得进 PDF")
+        self.assertNotIn("<!--", text, "HTML 注释标记不得进 PDF")
+        self.assertIn("结论边界如下", text, "注释前后的正文都要在（只跳注释）")
+
 
 class TestNewDataAdapters(unittest.TestCase):
     """F4：canned 数据解析（不联网）+ router 关键词路由。"""

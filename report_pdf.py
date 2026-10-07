@@ -345,6 +345,14 @@ def _split_blocks(md: str) -> list[dict]:
         if not stripped:
             i += 1
             continue
+        # 装配器留在正文里的**工程注释**（`<!-- 主文收束:begin/pointer … -->`）不是内容：
+        # 它们给 `compact_main_body` 做幂等改写用。10-07 第二次复核实机点名"第 4 页工程
+        # HTML 注释可见"——读者不该读到标记。多行注释按整块跳过。
+        if stripped.startswith("<!--"):
+            while i < len(lines) and "-->" not in lines[i]:
+                i += 1
+            i += 1
+            continue
         fence = re.match(r"^```", stripped)
         if fence:
             code: list[str] = []
@@ -393,15 +401,27 @@ def _split_blocks(md: str) -> list[dict]:
             blocks.append({"type": "list", "items": items, "ordered": False})
             continue
         if re.match(r"^\s*\d+[.)]\s+", stripped):
-            items = []
-            while i < len(lines) and re.match(
-                r"^\s*\d+[.)]\s+", lines[i].strip(),
-            ):
-                items.append(
-                    _inline_plain(re.sub(r"^\s*\d+[.)]\s+", "", lines[i].strip()))
-                )
-                i += 1
-            blocks.append({"type": "list", "items": items, "ordered": True})
+            # 编号列表**含缩进子项**时不能就地收尾：读者首屏的每条判断都是
+            # "1. 判断句 + 缩进的读数/替代解释/下一观察"，旧实现一遇子项就结束这一块，
+            # 下一条编号又从 1 开始（实机首屏四条判断全印成"1."）。这里把子项并进同一块，
+            # 标成 `sub`（渲染时不占编号，仍缩进显示）。
+            _items: list[dict] = []
+            while i < len(lines):
+                _cur_line = lines[i]
+                _cur = _cur_line.strip()
+                if re.match(r"^\d+[.)]\s+", _cur):
+                    _items.append({"text": _inline_plain(
+                        re.sub(r"^\d+[.)]\s+", "", _cur)), "sub": False})
+                    i += 1
+                    continue
+                _indent = len(_cur_line) - len(_cur_line.lstrip())
+                if _items and _indent and re.match(r"^[-*+]\s+", _cur):
+                    _items.append({"text": _inline_plain(
+                        re.sub(r"^[-*+]\s+", "", _cur)), "sub": True})
+                    i += 1
+                    continue
+                break
+            blocks.append({"type": "list", "items": _items, "ordered": True})
             continue
         if stripped.startswith(">"):
             quote: list[str] = []
@@ -1111,13 +1131,21 @@ class _PDFBuilder:
                                (0.10, 0.10, 0.12))
             self.cursor_y -= BODY_SIZE * 0.45
         elif btype == "list":
-            for idx, item in enumerate(block.get("items") or []):
-                marker = (
-                    f"{idx + 1}. " if block.get("ordered") else "- "
-                )
+            _n = 0
+            for item in (block.get("items") or []):
+                if isinstance(item, dict):
+                    text, sub = str(item.get("text") or ""), bool(item.get("sub"))
+                else:
+                    text, sub = str(item), False
+                if sub:
+                    # 子项不占编号：缩进显示，标记仍是 `- `（读者看到的是"这条判断的读数"）
+                    marker, extra = "- ", 3 * self._text_width(" ", BODY_SIZE)
+                else:
+                    _n += 1
+                    marker, extra = (f"{_n}. " if block.get("ordered") else "- "), 0.0
                 prefix_w = self._text_width(marker, BODY_SIZE)
                 lines = self._wrap(
-                    str(item), BODY_SIZE, USABLE_W - prefix_w - 8,
+                    text, BODY_SIZE, USABLE_W - prefix_w - 8 - extra,
                 )
                 self._ensure_space(BODY_SIZE * 1.62 * max(1, len(lines)))
                 first = True
@@ -1128,13 +1156,13 @@ class _PDFBuilder:
                     self._ensure_space(BODY_SIZE * 1.62)
                     if first:
                         self._draw_text(
-                            MARGIN_L, marker + line, BODY_SIZE,
+                            MARGIN_L + extra, marker + line, BODY_SIZE,
                             (0.10, 0.10, 0.12),
                         )
                         first = False
                     else:
                         self._draw_text(
-                            MARGIN_L + prefix_w + 8, line, BODY_SIZE,
+                            MARGIN_L + extra + prefix_w + 8, line, BODY_SIZE,
                             (0.10, 0.10, 0.12),
                         )
                     self.cursor_y -= BODY_SIZE * 1.62

@@ -6313,6 +6313,18 @@ class TestResearchBriefAssembly(unittest.TestCase):
         self.assertIn("**未采用的材料（不满足主体/期间/资料截止或未核验）**", md)
         self.assertIn("晚于资料截止日", md)
 
+    def test_same_risk_section_dedupes_across_materials(self):
+        """同一小节在两份材料里各列一次：**按小节键去重**（页码/字符区间跟着材料变）。"""
+        import report_brief as rb
+        a = ("来源 [2] 第 25 页 · 小节：第三节 管理层讨论与分析 > 十一、公司未来发展的展望 > "
+             "（三）可能面对的风险（字符 25331-25561）")
+        b = ("来源 [3] 第 26 页 · 小节：第三节 管理层讨论与分析 > 十一、公司未来发展的展望 > "
+             "（三）可能面对的风险（字符 26408-26629）")
+        c = ("来源 [3] 第 157 页 · 小节：第十节 财务报告 > 十二、与金融工具相关的风险 > "
+             "1、金融工具产生的各类风险（字符 162189-162344）")
+        self.assertEqual(rb._risk_section_key(a), rb._risk_section_key(b))
+        self.assertNotEqual(rb._risk_section_key(a), rb._risk_section_key(c))
+
     def test_risk_rows_carry_evidence_conditions_and_materials(self):
         """每条风险都要有对应证据、会改变判断的观察条件、需要补充的材料。"""
         import report_brief

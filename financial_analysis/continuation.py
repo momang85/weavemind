@@ -872,12 +872,24 @@ def assumption_impact(ds, *, target_yuan=None, revenue_growth: float = 0.0,
     return out
 
 
-def render_page(page: dict, *, heading: str = "## 研究续页（可检验）") -> str:
-    """一页（markdown）：上次假说 → 本期关键新读数 → 判断怎样改变 → 下一观察。"""
-    lines = [heading, "",
-             "> 本页由 `financial_analysis.continuation` 从**两份已验证材料**装配："
-             "假说沿用既有判断 ID 与它自己的观察条件，读数取同口径披露/运行输出；"
-             "缺同口径读数就写「无法判断」。**历史材料回放**，不是事前预测。", ""]
+def render_page(page: dict, *, heading: str = "## 研究续页（可检验）",
+                compact: bool = False) -> str:
+    """一页（markdown）：上次假说 → 本期关键新读数 → 判断怎样改变 → 下一观察。
+
+    `compact=True`：**读者主文**的一页版（10-07 第二次复核 §阅读层"续页1页"）——
+    每格只留结论与关键读音，逐行重复的判定口径提成一行脚注，旧判断的读数明细与
+    出处定位不再占版面（完整页仍由 `compact=False` 渲染并写进同版附件
+    `analysis/continuation.md`，主文与附件同源、不丢信息）。
+    """
+    lines = [heading, ""]
+    if compact:
+        lines.append("> 由 `financial_analysis.continuation` 装配：假说沿用既有判断 ID 与观察"
+                     "条件，读数取同口径披露。**历史材料回放**，不是事前预测。")
+    else:
+        lines.append("> 本页由 `financial_analysis.continuation` 从**两份已验证材料**装配："
+                     "假说沿用既有判断 ID 与它自己的观察条件，读数取同口径披露/运行输出；"
+                     "缺同口径读数就写「无法判断」。**历史材料回放**，不是事前预测。")
+    lines.append("")
     e = (page.get("earlier") or {}).get("source") or {}
     l = (page.get("later") or {}).get("source") or {}
     lines.append(f"- 较早材料：{e.get('title') or '—'}（{e.get('disclosure_date') or '—'}，"
@@ -887,33 +899,70 @@ def render_page(page: dict, *, heading: str = "## 研究续页（可检验）") 
     lines.append("")
     lines.append("| 上次持续性假说／依据 | 本期关键新读数（同口径） | 判断怎样改变 | 下一观察 |")
     lines.append("|---|---|---|---|")
+    _bases: list[str] = []
     for r in (page.get("hypotheses") or []):
         # "待检验假设："不是套话：这一列本来就是**假说**，写上它才不会让
         # 归因核验把续页的假说当成"肯定性归因"（复核：续页曾因此被判缺证归因）。
-        basis = "；".join(["待检验假设：" + str(r.get("hypothesis") or "")]
-                          + list(r.get("basis_readings") or []))
-        if r.get("observation_condition"):
-            basis += "；原观察条件：" + str(r["observation_condition"])
+        _hyp = str(r.get("hypothesis") or "")
+        _cond = str(r.get("observation_condition") or "")
+        if compact:
+            # 一页版：假说＋它自己的观察条件（复核要求两者都在），旧判断的读数明细
+            # 留给同版附件——主文这里只放"这条假说要检验什么"。
+            basis = "待检验假设：" + _hyp
+            if _cond:
+                basis += f"（原观察条件：{_cell(_cond, 46)}）"
+        else:
+            basis = "；".join(["待检验假设：" + _hyp]
+                              + list(r.get("basis_readings") or []))
+            if _cond:
+                basis += "；原观察条件：" + _cond
         new = "；".join(str(x) for x in (r.get("new_readings") or []))
         status = f"**{r.get('status')}**——{r.get('status_reason')}"
         if r.get("decision_basis"):
-            status += f"（判定口径：{r['decision_basis']}）"
+            _bases.append(str(r["decision_basis"]))
+            if not compact:
+                status += f"（判定口径：{r['decision_basis']}）"
         watch = "；".join(str(x) for x in (r.get("next_watch") or [])) or "—"
-        lines.append(f"| {_cell(basis)} | {_cell(new)} | {_cell(status)} | {_cell(watch)} |")
+        if compact:
+            lines.append(f"| {_cell(basis, 100)} | {_cell(new, 90)} "
+                         f"| {_cell(status, 65)} | {_cell(watch, 50)} |")
+        else:
+            lines.append(f"| {_cell(basis)} | {_cell(new)} | {_cell(status)} | {_cell(watch)} |")
+    if compact and _bases:
+        # 逐行重复的判定口径**提成一行脚注**（四行各印一遍曾是续页跨两页的主因之一）
+        _uniq = list(dict.fromkeys(_bases))
+        lines.append("")
+        lines.append("- **判定口径**（各行相同）：" + _cell("；".join(_uniq), 45))
     _locs = [(r.get("proposition") or "", x) for r in (page.get("hypotheses") or [])
              for x in (r.get("new_locators") or [])]
     if _locs:
         lines.append("")
-        lines.append("- **本期读数的原件定位**：")
-        for _p, x in _locs[:8]:
-            lines.append(f"  - {_cell(x, 160)}")
+        if compact:
+            # 同一页/同一小节被多条命题引用时会重复印（实机：第 11 页那张表印了两遍）
+            _seen: list[str] = []
+            for _p, x in _locs:
+                x = _cell(x, 60)
+                if x not in _seen:
+                    _seen.append(x)
+            lines.append("- **本期读数的原件定位**：" + "；".join(_seen[:6]))
+        else:
+            lines.append("- **本期读数的原件定位**：")
+            for _p, x in _locs[:8]:
+                lines.append(f"  - {_cell(x, 160)}")
     lines.append("")
     oc = page.get("overlap_check") or {}
     if oc.get("shared_periods"):
+        # 交叉核对的判定句**不截断**：它是"半年不与全年硬比"的护栏，
+        # 截到"不作一致性…"正好把那半句护栏砍掉（实机压页时出现过）。
         lines.append(f"- **共同比较期交叉核对**（{'、'.join(str(p) for p in oc['shared_periods'])}）："
                      f"{oc.get('verdict')}")
         for it in (oc.get("items") or []):
             if it.get("same") is False:
+                if compact:
+                    # 一页版：同一比较期不一致的**事实**留着（它挡"半年硬比全年"），
+                    # 逐项两期数值不重复印——附件的完整页里有。
+                    lines.append(f"  - {it.get('metric')}：{it.get('note')}")
+                    continue
                 lines.append(f"  - {it.get('metric')}：较早材料 "
                              f"{_fmt(it.get('earlier_material'))} vs 较新材料 "
                              f"{_fmt(it.get('later_material'))}——{it.get('note')}")
@@ -938,10 +987,21 @@ def render_page(page: dict, *, heading: str = "## 研究续页（可检验）") 
                          + (f"（差 {ai['revenue_gap_pp']:+.2f}pp）"
                             if ai.get("revenue_gap_pp") is not None else "")
                          + "——差异来自毛利线以下的费用/税率/少数股东**规则**，不是材料变化")
-    lines.append(f"- **历史观察与假说分开**：{page.get('historical_note')}")
+    _hist = str(page.get("historical_note") or "")
+    # 同理不截断：这句是"历史事实不被新材料重写、半年与全年不相减"的护栏本身。
+    lines.append(f"- **历史观察与假说分开**：{_hist}")
     lines.append("- **本页限制**：")
-    for t in (page.get("limits") or []):
-        lines.append(f"  - {t}")
+    _limits = list(page.get("limits") or [])
+    if compact:
+        # 一页版：限制**照样写**（边界不因压版面消失），只是每条压到一句
+        # （复核 §阅读层：不靠删边界压页）。`历史材料回放`/`无法判断`两条始终保留。
+        _keep = [t for t in _limits if "无法判断" in t]
+        _limits = _keep or _limits[:1]
+        for t in _limits:
+            lines.append(f"  - {_cell(t, 60)}")
+    else:
+        for t in _limits:
+            lines.append(f"  - {t}")
     lines.append("")
     return "\n".join(lines)
 

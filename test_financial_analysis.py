@@ -4944,6 +4944,32 @@ class TestX1ResearchContinuation(unittest.TestCase):
         again = rb._analysis_section(brief)
         self.assertNotIn("## 研究续页", again, "回流再装配不得再印一遍续页")
 
+    def test_compact_page_is_one_page_and_keeps_the_guards(self):
+        """10-07 第二次复核 §阅读层"续页 1 页"：**主文用一页版**，附件仍是完整页。
+
+        一页版可以省版面，但**不能省掉护栏**：四个列名、判定口径、交叉核对（半年不与
+        全年硬比）、历史观察与假说分开、缺读数写"无法判断"必须都在；压缩比要有齿
+        （否则"一页版"只是换了个名字印两遍）。
+        """
+        from financial_analysis import continuation as cont
+        earlier, later = self._pair()
+        page = cont.compare(earlier, later)
+        full = cont.render_page(page)
+        one = cont.render_page(page, compact=True)
+        for needle in ("上次持续性假说", "本期关键新读数", "判断怎样改变", "下一观察",
+                       "判定口径", "历史观察与假说分开", "历史材料回放"):
+            self.assertIn(needle, one, f"一页版缺 {needle}")
+        self.assertIn("无法判断", one, "缺同口径读数时「无法判断」这句不能省")
+        # 逐行重复的判定口径**提成一行**：不再每条后面各挂一遍
+        self.assertEqual(one.count("判定口径"), 1, one)
+        # 护栏句**不得被截断**（截到"不作一致性…"正好把护栏砍掉）
+        oc = page.get("overlap_check") or {}
+        if oc.get("verdict"):
+            self.assertIn(str(oc["verdict"]), one, "交叉核对判定句必须完整")
+        self.assertLess(len(one), len(full), "一页版必须真的更短")
+        self.assertLess(len(one), int(len(full) * 0.9),
+                        f"压缩比不足（full {len(full)} / one {len(one)}）")
+
 
 class TestX0AmountUnitBoundary(unittest.TestCase):
     """X0：**金额单位**边界——运行输出本身就是亿元时，共享格式器不得再除 1e8。

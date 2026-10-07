@@ -16,6 +16,7 @@
 """
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 
 # 判断的稳定 id（正文/底稿/测试共用；文案可改，身份不变）
@@ -1847,6 +1848,26 @@ def select_reader_judgments(judgments, *, limit: int = 5) -> list[dict]:
     return [j for _r, j in ordered]
 
 
+def _short_cell(text, limit: int) -> str:
+    """一页/短判断用的截断：**按分隔符退让**，不把数字砍成半个。
+
+    复核 §阅读层要"短判断"（结论＋1–2 个关键数）；截断若落在
+    `28,876,296,993.56` 中间，读者会看到一个不存在的读数。
+    退让顺序：句读（；，、）→ 数字边界（不落在数字/小数点/千分位里）。
+    """
+    s = str(text or "").strip()
+    if limit <= 0 or len(s) <= limit:
+        return s
+    head = s[:limit]
+    for sep in ("；", "，", "、", " "):
+        k = head.rfind(sep)
+        if k >= max(20, limit // 3):
+            return head[:k].rstrip() + "…"
+    while head and (head[-1].isdigit() or head[-1] in ".,%+-"):
+        head = head[:-1]
+    return head.rstrip() + "…"
+
+
 def render_reader_judgments(judgments, *, heading: str = "## 关键判断与下一步",
                             number_limit: int = 4, evidence_limit: int = 1,
                             detail_hint: str = "", short: bool = False) -> list[str]:
@@ -1866,23 +1887,43 @@ def render_reader_judgments(judgments, *, heading: str = "## 关键判断与下�
     if not judgments:
         return []
     lines = [heading, ""]
-    lines.append("> 以下 " + str(len(judgments)) + " 条由**同一次选版快照**的已验证运行与"
-                 "已准入披露驱动：读数、机制、替代解释与「下一份材料怎样改变判断」都写在同一处。"
-                 + (f"完整桥、逐条定位与七段式明细见 `{detail_hint}`（随交付包提供）。"
-                    if detail_hint else ""))
-    lines.append("")
     if short:
+        # 一页首屏（复核 §阅读层：首页 3–4 条各约 100–150 字）：抬头也只留一句，
+        # 完整桥/逐条定位/七段式在**同版附件**（`detail_hint`）。
+        lines.append("> 以下 " + str(len(judgments)) + " 条由**同一次选版快照**的已验证运行与"
+                     "已准入披露驱动；完整解释、原句、算式与逐条定位见同版附件"
+                     + (f" `{detail_hint}`。" if detail_hint else "。"))
+        lines.append("")
+    else:
+        lines.append("> 以下 " + str(len(judgments)) + " 条由**同一次选版快照**的已验证运行与"
+                     "已准入披露驱动：读数、机制、替代解释与「下一份材料怎样改变判断」都写在同一处。"
+                     + (f"完整桥、逐条定位与七段式明细见 `{detail_hint}`（随交付包提供）。"
+                        if detail_hint else ""))
+        lines.append("")
+    if short:
+        # 一页首屏（10-07 第二次复核 §阅读层"首页 3–4 条各约 100–150 字"）：
+        # 每条＝判断句（自带关键数）＋最多两条关键读数＋一条替代解释＋一行下一观察。
+        # **依据／机制／边界／算式不进首屏**——它们属于"完整解释、原句、模型表"，
+        # 逐条随同版附件（`detail_hint`），信息不丢、只是不占读者第一屏。
         number_limit = min(int(number_limit), 2)
-        evidence_limit = min(int(evidence_limit), 1)
+        evidence_limit = 0
     for i, j in enumerate(judgments, 1):
         lines.append(f"{i}. {j.get('title')}（{j.get('kind_label')}）")
         for n in (j.get("numbers") or ())[:max(1, int(number_limit))]:
-            lines.append(f"   - 关键读数：{n}")
+            # 一页版：每条读数只留**结论数与关键值**（算式/二期明细随附件）。
+            # 截断按分隔符退让，不把 `28,876,296,993.56` 这类数字砍成半个。
+            lines.append(f"   - 关键读数：{_short_cell(n, 70) if short else n}")
         ev = sorted((e for e in (j.get("evidence") or ()) if isinstance(e, dict)),
                     key=lambda e: 0 if str(e.get("role") or "") in
                     (ROLE_COMPANY_CLAIM, ROLE_OBSERVED, ROLE_DERIVED) else 1)
-        for e in ev[:max(1, int(evidence_limit))]:
-            if e.get("locator"):
+        for e in (ev[:max(1, int(evidence_limit))] if evidence_limit else []):
+            if short:
+                # 一页版：依据只写**性质＋定位**，不印 fact_id／URL 清单
+                # （逐条定位与来源清单在附件与『参考来源』里，读者首屏不需要）。
+                _loc = str(e.get("locator") or e.get("text") or "")
+                _loc = re.split(r"[；｜|]", _loc)[0].strip()
+                lines.append(f"   - 依据：{e.get('type')}·{_loc[:60]}")
+            elif e.get("locator"):
                 lines.append(f"   - 依据：{e.get('type')}·{e.get('locator')}")
             elif e.get("text"):
                 lines.append(f"   - 依据：{e.get('type')}·{str(e.get('text'))[:80]}")
@@ -1892,25 +1933,22 @@ def render_reader_judgments(judgments, *, heading: str = "## 关键判断与下�
                     lines.append(f"   - 机制（{x.get('kind')}）：{str(x['text'])[:220]}")
         if j.get("alternatives"):
             _alts = j["alternatives"][:1] if short else j["alternatives"][:3]
-            lines.append("   - 替代解释：" + "、".join(str(a)[:60] for a in _alts))
+            lines.append("   - 替代解释：" + "、".join(
+                _short_cell(a, 30) if short else str(a)[:60] for a in _alts))
         if j.get("boundary") and not short:
             lines.append(f"   - 边界：{j['boundary']}")
         nxt = j.get("next_observation") or {}
         if nxt.get("metric"):
             bits = [f"下一观察：{nxt.get('metric')}"
                     + (f"（{nxt['period']}）" if nxt.get("period") else "")]
-            _lim = 120 if short else 0
+            _lim = 40 if short else 0
             if nxt.get("support"):
-                bits.append(f"**支持**：{str(nxt['support'])[:_lim] if _lim else nxt['support']}")
+                bits.append(f"**支持**：{_short_cell(nxt['support'], _lim) if _lim else nxt['support']}")
             if nxt.get("weaken"):
-                bits.append(f"**削弱**：{str(nxt['weaken'])[:_lim] if _lim else nxt['weaken']}")
+                bits.append(f"**削弱**：{_short_cell(nxt['weaken'], _lim) if _lim else nxt['weaken']}")
             lines.append("   - " + "；".join(bits))
         elif j.get("watch"):
             lines.append(f"   - 会削弱它的读数：{j['watch'][0]}")
-    if short and detail_hint:
-        lines.append("")
-        lines.append(f"> 每条的**完整解释、边界、原句与算式**见同版附件 `{detail_hint}`"
-                     "（主文只留结论与下一观察）。")
     lines.append("")
     return lines
 

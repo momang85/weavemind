@@ -2214,6 +2214,18 @@ def _is_target_claim(text: str) -> bool:
 # ── 风险与待核查（底稿缺口 + 模型风险小节）──────────────────────
 
 
+def _risk_section_key(locator: str) -> str:
+    """风险条目的**小节键**：同一小节在多份材料里重复列示时用来去重。
+
+    定位形如 `第 25 页 · 小节：第三节 … > （三）可能面对的风险（字符 25331-25561）`：
+    页码与字符区间跟着**材料**变，只有小节路径能跨材料对齐。
+    """
+    s = re.sub(r"（字符[^）]*）", "", str(locator or "")).strip()
+    s = re.sub(r"^第\s*\d+\s*页\s*[·、]?\s*", "", s)
+    s = s.split(">")[-1].strip()
+    return s or str(locator or "")
+
+
 def _risks(task_id: str, goal: str, body: str, *, project=None,
            evidence: dict | None = None, citations: list[dict] | None = None,
            changes: dict | None = None, perspective: str = "",
@@ -2258,10 +2270,33 @@ def _risks(task_id: str, goal: str, body: str, *, project=None,
         logger.warning("底稿缺口读取失败（task=%s）：%s", task_id, str(exc)[:120])
 
     # ② 年报里明确列示的风险（带小节定位）——这是"有证据的风险"
-    for r in _located(evidence, "risk", 3):
+    #
+    # 10-07 第二次复核 §阅读层（"风险 3–5 项、仅留与当前命题相关来源"）：同一小节常在
+    # 两份材料里各列一次（2023/2024 年报的"（三）可能面对的风险"逐字相近），主文曾把
+    # 两份都印出来。同小节只留**披露更晚**的一条占主文席位，较早那条按同类核查项进附录
+    # （信息不丢，只是不重复占版面）；不同小节的风险照旧各自保留。
+    _by_section: dict[str, dict] = {}
+    _dup_recs: list[dict] = []
+    for _r in _located(evidence, "risk", 6):
+        _key = _risk_section_key(str(_r.get("locator") or ""))
+        _old = _by_section.get(_key)
+        if _old is None:
+            _by_section[_key] = _r
+        elif str(_r.get("published_at") or "") > str(_old.get("published_at") or ""):
+            _dup_recs.append(_old)
+            _by_section[_key] = _r
+        else:
+            _dup_recs.append(_r)
+    for r in _by_section.values():
         _add("evidence_risk", _abridge(str(r.get("snippet") or ""), 160),
              evidence_note=(f"来源 [{_citation_n(citations, str(r.get('url') or ''))}]"
                             f" {r.get('locator')}"),
+             would_change="若该风险出现缓释或加剧的公开证据（年报/公告更新），需修订判断",
+             materials=["最新年报/公告中的风险因素章节", "相关事项的进展公告"])
+    for r in _dup_recs:
+        _add("evidence_risk_dup", _abridge(str(r.get("snippet") or ""), 160),
+             evidence_note=(f"来源 [{_citation_n(citations, str(r.get('url') or ''))}]"
+                            f" {r.get('locator')}·同一小节的较早列示"),
              would_change="若该风险出现缓释或加剧的公开证据（年报/公告更新），需修订判断",
              materials=["最新年报/公告中的风险因素章节", "相关事项的进展公告"])
 
@@ -2849,7 +2884,17 @@ def render_brief_markdown(structure: dict, body: str = "",
     if _front:
         lines.append(_front if _front.endswith("\n") else _front + "\n")
     # X1（阶段X §4）：**研究续页**紧跟三项主判断（同一页序：上次假说 → 本期读数 → 怎么变）
+    #
+    # 10-07 第二次复核 §阅读层"续页 1 页"：**主文**用一页版（`compact=True`，逐行重复的
+    # 判定口径提成脚注、旧判断读数明细让给附件）；**附件**（`analysis/continuation.md`）
+    # 仍是完整页——主文与附件同源，只是读者版面不重复印。
     _cont = str(structure.get("continuation_page") or "").strip()
+    if structure.get("continuation"):
+        try:
+            from financial_analysis import continuation as _fa_cont_body
+            _cont = _fa_cont_body.render_page(structure["continuation"], compact=True).strip()
+        except Exception as exc:                       # noqa: BLE001 - 渲染失败退回完整页
+            logger.warning("续页一页版渲染失败（退回完整页）：%s", str(exc)[:120])
     if _cont:
         lines.append(_cont if _cont.endswith("\n") else _cont + "\n")
     # R3：**首屏先给二至三个关键判断**（观察/意义/依据/边界/下一步），完整逐问明细在
@@ -3109,7 +3154,12 @@ def render_brief_markdown(structure: dict, body: str = "",
         lines.append("|" + "---|" * len(cols))
         for r in rows:
             src = f"[{r.get('source_n')}]" if r.get("source_n") else "—"
-            lines.append("| " + " | ".join([str(r.get("label"))]
+            # 读者表里不出现内部键名（`accounts_receivable` 这类）：底稿没给中文标签时
+            # 按指标注册表补一个中文名——键名是机器标识，不是给读者看的科目。
+            _lab = str(r.get("label") or "")
+            if _lab == str(r.get("metric") or ""):
+                _lab = _metric_label_of(str(r.get("metric") or ""))
+            lines.append("| " + " | ".join([_lab]
                                            + [_cell(r, y) for y in periods]
                                            + [str(r.get("caliber") or "—"), src])
                          + " |")
@@ -3261,22 +3311,43 @@ def render_brief_markdown(structure: dict, body: str = "",
     lines.append("")
     lines.append("**管理层/附注的解释**：")
     if management:
+        # 10-07 第二次复核 §阅读层：主文曾把**与本报告指标无关**的附注表格整段印出来
+        # （库存股/盈余公积/研发投入的"期初余额—本期增加—期末余额"查表碎片，占掉第 7–8 页）。
+        # 归属判据本来就知道它们"未单独解释上述变化的哪一项"——那就别用整段原文占读者版面：
+        # 主文只印**真的解释了某一项**（`explains`）与只提供行业背景的段落，其余按条数汇总，
+        # 逐段原文（含出处）随同版附件。
+        _explains, _backgrounds, _irrelevant = [], [], []
         for e in management:
+            _ex = list(e.get("explains") or [])
+            _bg = list(e.get("background_for") or [])
+            if _ex:
+                _explains.append((e, _ex))
+            elif _bg:
+                _backgrounds.append((e, _bg))
+            else:
+                _irrelevant.append(e)
+        for e, expl in _explains:
             n = f"[{e.get('source_n')}]" if e.get("source_n") else ""
             lines.append(f"- {_abridge(e.get('text'), 200)}{n}")
             if e.get("locator"):
                 lines.append(f"  - 出处：{e.get('locator')}")
-            # 归属：这段**到底解释了哪项指标**（与逐问支持、风险条目同一条判据）
-            expl = list(e.get("explains") or [])
-            bg = list(e.get("background_for") or [])
-            if expl:
-                line = f"  - 归属：该段解释了 {'、'.join(expl)} 的变化（定性）"
-            else:
-                line = "  - 归属：该段未单独解释上述变化的哪一项（不构成原因支持）"
-            if bg and not expl:
-                line = (f"  - 归属：该段只提供 {'、'.join(bg)} 的行业/市场背景，"
-                        f"不构成原因支持")
-            lines.append(line + "；是否算「原因已取得」以『研究问题与下一步』逐问支持为准。")
+            lines.append(f"  - 归属：该段解释了 {'、'.join(expl)} 的变化（定性）"
+                         "；是否算「原因已取得」以『研究问题与下一步』逐问支持为准。")
+        for e, bg in _backgrounds:
+            n = f"[{e.get('source_n')}]" if e.get("source_n") else ""
+            lines.append(f"- {_abridge(e.get('text'), 160)}{n}")
+            if e.get("locator"):
+                lines.append(f"  - 出处：{e.get('locator')}")
+            lines.append(f"  - 归属：该段只提供 {'、'.join(bg)} 的行业/市场背景，"
+                         "不构成原因支持；是否算「原因已取得」以『研究问题与下一步』"
+                         "逐问支持为准。")
+        if _irrelevant:
+            lines.append(f"- 另有 {len(_irrelevant)} 段附注/年报表格（库存股、盈余公积、"
+                         "研发投入等）**未单独解释**上述任何一项变化，不构成原因支持；"
+                         "逐段原文与出处见同版附件。")
+            _appendix_extra.append(("### 未解释变化的附注段落（原文）", [
+                *(f"- {_abridge(e.get('text'), 200)}"
+                  f"（出处：{e.get('locator') or '—'}）" for e in _irrelevant)]))
     else:
         lines.append("- 未取得与上述变化对应的管理层讨论或附注段落，"
                      "原因**未在本次资料中体现**（需补充材料见下）。")
@@ -3320,24 +3391,46 @@ def render_brief_markdown(structure: dict, body: str = "",
     lines.append("## 风险与核查")
     risks = structure.get("risks") or []
     if risks:
-        # C3：每条风险压成"一行主张 + 一行证据/条件/材料"，主文最多 6 条，
-        # 其余（多为同类的底稿审计项）置附录——原先 12 条 × 3 行会占掉两三页
-        _main_risks = risks[:6]
-        _rest_risks = risks[6:]
+        # C3：每条风险压成"一行主张 + 一行证据/条件/材料"，主文最多 **5** 条
+        # （10-07 第二次复核 §阅读层：与当前命题相关的风险 3–5 项），
+        # 其余（多为同类的底稿审计项与同小节的较早列示）置附录——原先 12 条 × 3 行会占掉两三页
+        _ordered = ([r for r in risks if str(r.get("kind") or "") != "evidence_risk_dup"]
+                    + [r for r in risks if str(r.get("kind") or "") == "evidence_risk_dup"])
+        _main_risks = _ordered[:5]
+        _rest_risks = _ordered[5:]
+        _ev_tail: list[str] = []
         for r in _main_risks:
-            lines.append(f"- **{r.get('text')}**")
+            lines.append(f"- **{_abridge(r.get('text'), 140)}**")
             bits = [f"证据：{r.get('evidence') or '底稿无对应证据'}"]
-            if r.get("would_change"):
-                bits.append(f"改变判断的观察条件：{r.get('would_change')}")
-            mats = r.get("materials_needed") or []
-            if mats:
-                bits.append(f"需补材料：{'、'.join(mats)}")
+            if str(r.get("kind") or "").startswith("evidence_risk"):
+                # 发行人风险条目的观察条件与需补材料**逐条相同**：押后统一印一次
+                # （5 条各印一遍同样的两段话，主文白占 ~250 字）。
+                if r.get("would_change") and not _ev_tail:
+                    _ev_tail.append(str(r["would_change"]))
+                if r.get("materials_needed") and len(_ev_tail) < 2:
+                    _ev_tail.append("、".join(r["materials_needed"]))
+            else:
+                if r.get("would_change"):
+                    bits.append(f"改变判断的观察条件：{r.get('would_change')}")
+                mats = r.get("materials_needed") or []
+                if mats:
+                    bits.append(f"需补材料：{'、'.join(mats)}")
             lines.append(f"  - {'；'.join(bits)}")
+        if _ev_tail:
+            lines.append(f"  - 上述发行人风险条目共同的**改变判断的观察条件**：{_ev_tail[0]}"
+                         + (f"；**需补材料**：{_ev_tail[1]}" if len(_ev_tail) > 1 else ""))
         if _rest_risks:
             lines.append(f"- 另有 {len(_rest_risks)} 条同类核查项（底稿审计/材料清单）见附录。")
             _appendix_extra.append(("### 其他核查项", [
                 *(f"- **{r.get('text')}**（证据：{r.get('evidence') or '底稿无对应证据'}）"
                   for r in _rest_risks)]))
+        else:
+            # 全部核查项都在主文（≤5 条）时，附件里**照样留这一节**并写明"无移出项"：
+            # 交付/场景核对按标题判"详表确实另附"（`attachment_contains`），
+            # 一节因条数变化时有时无会让同一份装配的附件形状抖动。
+            lines.append(f"- 本次 {len(_main_risks)} 条核查项已全部列于本节，无移出附录的同类项。")
+            _appendix_extra.append(("### 其他核查项", [
+                "（本次核查项已全部列于主文『风险与核查』，无移出附录的同类项。）"]))
     else:
         lines.append("- 底稿未记录缺口；仍建议核对现金流量表附注与营运资本变化。")
     lines.append("")
@@ -3346,10 +3439,15 @@ def render_brief_markdown(structure: dict, body: str = "",
     claims = [c for c in (structure.get("claims") or [])
               if c.get("status") == "needs_check"]
     if claims:
+        # 10-07 第二次复核 §阅读层："待核查主张仍重复"——这 6 条就是首屏那几条判断的原文
+        # （正文里已带替代解释与下一观察）。主文只留**条数与指针**，逐条明细随同版附件；
+        # 状态不变（仍是待核查），只是不再把同一段话印第二遍。
         lines.append("")
-        lines.append("**待核查主张（未与底稿事实绑定）**：")
-        for c in claims[:6]:
-            lines.append(f"- {c.get('text')}")
+        lines.append(f"- **待核查主张（未与底稿事实绑定）**：{len(claims)} 条，"
+                     "逐条原文、替代解释与下一观察与首屏判断同源，见同版附件"
+                     "（`analysis/analysis_detail.md`）。")
+        _appendix_extra.append(("### 待核查主张（未与底稿事实绑定）", [
+            f"- {c.get('text')}" for c in claims[:6]]))
     lines.append("")
     lines.append("## 附录")
     lines.append("")
@@ -3551,6 +3649,9 @@ COMPACT_MOVE_TITLES = (
     "### 字段位置与计算底稿", "### 逐问题资料计划",
     "### 分析摘要选择说明",
     "### 比率适用条件", "### 图表元数据（内部标识）", "### 其他核查项",
+    # 10-07 第二次复核 §阅读层：主文不再重复印"未解释变化的附注原文"与"待核查主张"明细
+    # （前者是资本公积/库存股/研发表格的查表碎片，后者是首屏判断的重印）——两块随附件。
+    "### 未解释变化的附注段落（原文）", "### 待核查主张（未与底稿事实绑定）",
     # 10-06：财务对照的**长尾明细**（没被引用/没被算式用到的指标行）也移附件——
     # 正文保留被引用/被算式用到的那些行（`_split_table_rows`），整表移出会让派生读数
     # 无处接地（实测溯源率 66% 判死）。
