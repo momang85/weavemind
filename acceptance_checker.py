@@ -842,12 +842,80 @@ def _years_in(text: str) -> list[int]:
     return [int(m.group(0)) for m in re.finditer(r"(?:19|20)\d{2}", str(text or ""))]
 
 
+def _registered_output_metrics() -> set[str]:
+    """**既有注册表**里声明过的运行输出 metric（身份的唯一来源之一）。
+
+    取不到注册表（导入失败）时返回空集合，调用方按"身份未知 → 不计溯源"处理，
+    不退回"标签猜年份"的旧行为。
+    """
+    try:
+        from financial_analysis import registry as _reg
+        return {str(o.metric) for s in _reg.specs() for o in (s.outputs or ()) if o.metric}
+    except Exception:                                # noqa: BLE001 - 注册表读不到=没有身份
+        return set()
+
+
+def _registered_component_ids() -> set[str]:
+    """运行**构件**的合法 id：注册模型声明的 `component_ids` ＋ 算子科目 slug。
+
+    科目 slug 从算子现役的 `LINE_ITEMS` 读（不另抄一份中文表）：`taxes_and_surcharges`
+    这类"毛利线以下科目"的身份因此与注册实现同源。
+    """
+    ids: set[str] = set()
+    try:
+        from financial_analysis import registry as _reg
+        for s in _reg.specs():
+            for group in dict(getattr(s, "component_ids", {}) or {}).values():
+                ids.update(str(x) for x in (group or ()))
+    except Exception:                                # noqa: BLE001
+        pass
+    try:
+        from financial_analysis.operators.operating_drivers import LINE_ITEMS
+        ids.update(str(slug) for slug, _label, _sign in LINE_ITEMS)
+    except Exception:                                # noqa: BLE001
+        pass
+    return ids
+
+
+def _period_label_of_run(run: dict, out: dict) -> str:
+    """运行的**输入期间**（权威身份）→ `"2023年→2024年"` 这类可读标签。
+
+    顺序：输出自己的 `input_periods` → 运行的 `diagnostics.periods` → 输出 `output_period`
+    里的年份**只作后备**。全部取不到 → 空串（调用方按"期间未知 → 不计溯源"，不再猜）。
+    """
+    labels: list[str] = []
+    for raw in (out.get("input_periods") or ()):
+        s = str(raw or "").strip()
+        if s:
+            labels.append(s if re.search(r"(年|H\d|Q\d)", s) else f"{s}年")
+    if not labels:
+        diag = out.get("diagnostics") or {}
+        for raw in (diag.get("periods") or ()):
+            s = str(raw or "").strip()
+            if s:
+                labels.append(s if re.search(r"(年|H\d|Q\d)", s) else f"{s}年")
+    if not labels:
+        # 后备：输出自己的期间标签里的年份（只是最后手段，不冒充期间已知）
+        yrs = _years_in(str(out.get("output_period") or ""))
+        labels = [f"{y}年" for y in yrs]
+    return "→".join(dict.fromkeys(labels))
+
+
 def _run_output_facts(ws: Path) -> list[dict]:
     """`analysis_runs.json` → **结构化**事实（每条输出＋它的构件）。
 
-    准入（不是装饰）：运行 `status=validated`；数值是数字；单位非空；带 `formula`
-    与 `inputs`（构件 id 或运行 id）——与底稿派生事实同一把尺。主体取自本任务契约，
-    期间取自输出标签里的年份（标签没写年份就留空＝不据此否决，也不冒充同期）。
+    准入（不是装饰）：运行 `status=validated`；数值是数字；单位非空；指标与期间**从既有
+    注册表与运行输入继承**；带 `formula` 与 `inputs`。主体取自本任务契约。
+
+    10-08 复核 §3 的两处修正（旧实现的反例：实际 ZIP 里
+    `net_profit_change_detail:income_tax_expense` 的 7.2044377088 亿元被写成 period 空，
+    于是同年的"所得税费用"与"营业收入"都能借它）：
+
+    1. **期间不再从标签猜年份**：用运行的输入期间（`input_periods`/诊断 `periods`），
+       取不到就**不计入**结构化可溯源（"未知不计溯源"）；
+    2. **指标继承注册身份**：输出 metric 必须在注册模型声明的输出清单里、构件 id 必须是
+       声明的构件/科目 slug；未知身份**不计入**。跨指标借用由 `_derived_body_semantics`
+       按指标键拒绝（"所得税费用"不再能支持"营业收入"）。
     """
     p = ws / "analysis_runs.json"
     if not p.is_file():
@@ -865,6 +933,8 @@ def _run_output_facts(ws: Path) -> list[dict]:
             # 落盘形状也可能是 `{run_id: {…}}`：只收**带 outputs 的 run 对象**
             runs = [v for v in data.values() if isinstance(v, dict) and "outputs" in v]
     subject = _task_subject(ws)
+    known_metrics = _registered_output_metrics()
+    known_components = _registered_component_ids()
     out: list[dict] = []
     for r in runs:
         if not isinstance(r, dict) or str(r.get("status") or "") != "validated":
@@ -876,13 +946,17 @@ def _run_output_facts(ws: Path) -> list[dict]:
             value, unit = o.get("value"), str(o.get("unit") or "")
             if not isinstance(value, (int, float)) or not unit:
                 continue
+            metric = str(o.get("metric") or "")
+            # 身份未知（未注册的输出 metric）→ 不计入结构化可溯源
+            if not metric or (known_metrics and metric not in known_metrics):
+                continue
+            period = _period_label_of_run(r, o)
+            if not period:
+                continue                     # 期间未知：不计入（旧实现留空 = 谁都能借）
             comps = [c for c in (o.get("components") or []) if isinstance(c, dict)]
             ids = [str(c.get("component_id") or "") for c in comps] or [rid]
-            label = str(o.get("label") or o.get("metric") or "")
-            yrs = _years_in(label)
-            period = ("→".join(f"{y}年" for y in yrs) if len(yrs) > 1
-                      else (f"{yrs[0]}年" if yrs else ""))
-            base = {"subject": subject, "metric": str(o.get("metric") or ""),
+            label = str(o.get("label") or metric)
+            base = {"subject": subject, "metric": metric,
                     "period": period, "currency": "CNY", "caliber": "合并",
                     "formula": "，".join(f"{c.get('component_id')}={c.get('value')}"
                                         for c in comps) or f"run:{rid}",
@@ -890,11 +964,55 @@ def _run_output_facts(ws: Path) -> list[dict]:
             out.append(dict(base, kind="run_output", value=float(value), unit=unit))
             for c in comps:
                 cv = c.get("value")
-                if not isinstance(cv, (int, float)) or not c.get("component_id"):
+                cid = str(c.get("component_id") or "")
+                if not isinstance(cv, (int, float)) or not cid:
+                    continue
+                # 构件身份同样要认识（未知构件不计溯源）
+                if known_components and cid not in known_components:
                     continue
                 out.append(dict(base, kind="run_component",
-                                metric=f"{o.get('metric')}:{c.get('component_id')}",
+                                metric=f"{metric}:{cid}",
                                 value=float(cv), unit=str(c.get("unit") or unit)))
+        # **情景目标**（读者卡上的"目标归母净利"）：它由这一次运行声明（默认＝上一期归母
+        # 净利，或使用者给定），是这次计算的身份之一——不给它一条结构化事实，卡上的目标数
+        # 就只能是"没有运行背书的数字"。只收**声明过**的目标（`thresholds.target_net_profit`），
+        # 不猜、不补。
+        for o in (r.get("outputs") or []):
+            if not isinstance(o, dict):
+                continue
+            th = (o.get("diagnostics") or {}).get("thresholds") or {}
+            tgt = th.get("target_net_profit")
+            if isinstance(tgt, bool) or not isinstance(tgt, (int, float)):
+                continue
+            _u = str(o.get("unit") or "")
+            if not _u or not _rper:
+                break
+            out.append({"kind": "run_target", "subject": subject,
+                        "metric": "scenario_target_net_profit", "period": _rper,
+                        "value": float(tgt), "unit": _u, "currency": "CNY",
+                        "caliber": "合并",
+                        "formula": f"run:{rid} 声明的目标（{th.get('target_source') or '—'}）",
+                        "inputs": [rid], "label": "情景目标归母净利", "run_id": rid})
+            break
+        # **使用者设定的天数假设**也进结构化事实（10-08 §14）：韧性卡上的"Δ回款 +15 天"
+        # 必须能回溯到**它那一次运行**的参数，而不是凭空一个数。只收**天数维度**的参数
+        # （`*_days_delta` / `days_in_year`）：比率型参数（0.05 与 "+5.00%"）要换算量纲，
+        # 留在参数表里读，不在这一层做猜测。
+        _first = next((o for o in (r.get("outputs") or []) if isinstance(o, dict)), {})
+        _rper = _period_label_of_run(r, _first)
+        if _rper:
+            for k, v in sorted(dict(r.get("params") or {}).items()):
+                if isinstance(v, bool) or not isinstance(v, (int, float)):
+                    continue
+                if not (str(k).endswith("_days_delta") or str(k) == "days_in_year"):
+                    continue
+                out.append({"kind": "run_param", "subject": subject,
+                            "metric": f"param:{k}", "period": _rper,
+                            "value": float(v), "unit": "天", "currency": "CNY",
+                            "caliber": "合并",
+                            "formula": f"run.params[{k}]（使用者设定，非披露事实）",
+                            "inputs": [rid], "label": f"使用者设定参数：{k}",
+                            "run_id": rid})
     return out
 
 
@@ -1179,10 +1297,19 @@ _INDICATOR_KEY_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("net_profit", ("归母净利润", "归母净利", "净利润", "净利")),
     ("gross_profit", ("毛利润", "毛利")),
     ("operating_cashflow", ("经营活动现金流", "经营现金流", "现金流")),
+    # 10-08 复核 §3 的**同年错指标反例**：`net_profit_change_detail:income_tax_expense`
+    # 的 7.2044 亿元曾被写成 period 空，于是"2024 年所得税费用 7.20 亿元"与
+    # "2024 年营业收入 7.20 亿元"都能借它。把税费科目接进同一张指标键表后，
+    # 写"营业收入"的子句与"所得税费用"的事实指标键不同 → 直接拒绝。
+    ("income_tax_expense", ("所得税费用", "所得税")),
+    ("taxes_and_surcharges", ("税金及附加",)),
 )
 _METRIC_KEY_BY_SLUG = {
     "revenue": "revenue", "net_profit": "net_profit", "gross_profit": "gross_profit",
     "operating_cashflow": "operating_cashflow",
+    # 与上面同一批税费科目（slug 与 `operating_drivers.LINE_ITEMS` 同源）
+    "income_tax_expense": "income_tax_expense",
+    "taxes_and_surcharges": "taxes_and_surcharges",
 }
 
 
@@ -1198,10 +1325,17 @@ def _body_indicator_key(clause: str, at: int) -> str:
 
 
 def _fact_metric_key(metric: str) -> str:
-    """派生事实的指标 slug → 结构化指标键（复合/未知指标返回空串 = 不据此否决）。"""
+    """派生事实的指标 slug → 结构化指标键（复合/未知指标返回空串 = 不据此否决）。
+
+    10-08：**复合指标取构件身份**——`net_profit_change_detail:income_tax_expense` 说的是
+    "所得税费用"这一科目，不是父输出的口径；取父串会让这条事实没有指标语义，
+    同值的"营业收入"就能借走它。
+    """
     m = str(metric or "")
     if not m:
         return ""
+    if ":" in m:
+        m = m.split(":", 1)[1]
     for suffix in ("_yoy", "_change"):
         if m.endswith(suffix):
             m = m[:-len(suffix)]
@@ -1251,6 +1385,24 @@ def _comparable_scales(report_unit: str, fact_unit: str) -> tuple[float, float]:
     return (1.0, 1.0) if ru == fu else (0.0, 0.0)
 
 
+def _unit_family_in_clause(fact_unit: str, clause: str) -> bool:
+    """事实的单位**家族**是否出现在子句里（无单位数字的匹配用）。
+
+    原来只认"单位串字面出现"：`%` 能对上 `%`，但**百分点**的事实写 `%（pp）`，
+    正文按读者口径写 `+11.58pp` → 字面不同、被当成"没说单位"而拒绝。这里只补一个
+    百分点别名（`pp` ↔ `个百分点` ↔ `%（pp）`），不做量纲猜测。
+    """
+    fu = str(fact_unit or "").strip()
+    c = str(clause or "")
+    if not fu:
+        return False
+    if fu in c:
+        return True
+    if ("pp" in fu or "百分点" in fu) and ("pp" in c or "个百分点" in c):
+        return True
+    return False
+
+
 def _match_derived_fact_bare(n: dict, report: str, facts: list[dict],
                              *, goal: str = "") -> str | None:
     """**无单位**数字与结构化事实的匹配（吨/天/股这类抽取器不认的单位）。
@@ -1271,9 +1423,10 @@ def _match_derived_fact_bare(n: dict, report: str, facts: list[dict],
         except (TypeError, ValueError):
             continue
         fu = str(f.get("unit") or "").strip()
-        if not fu or _amount_unit_scale(fu) or fu.endswith("%"):
+        if not fu or _amount_unit_scale(fu) or (
+                fu.endswith("%") and "pp" not in fu and "百分点" not in fu):
             continue                      # 金额/百分比的事实不走这条（它们有单位通道）
-        if fu not in clause:
+        if not _unit_family_in_clause(fu, clause):
             continue
         if not _close(abs(v), abs(fv)):
             continue
@@ -2825,7 +2978,9 @@ def _constant_role_ok(expr: str, tok: str) -> bool:
 
 
 _INDICATOR_WORDS = ("营业收入", "归母净利润", "净利润", "毛利率", "收入", "营收",
-                    "经营现金流", "现金流", "资本支出", "每股收益", "EPS", "毛利")
+                    "经营现金流", "现金流", "资本支出", "每股收益", "EPS", "毛利",
+                    # 与 `_INDICATOR_KEY_GROUPS` 的税费科目同一批词（同一处身份表）
+                    "所得税费用", "所得税", "税金及附加")
 
 
 def _clause_span(text: str, start: int, end: int) -> tuple[int, int]:

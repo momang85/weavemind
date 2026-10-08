@@ -7,8 +7,9 @@
 from __future__ import annotations
 
 from .contracts import ModelSpec, NotApplicable
-from .operators import (cash_quality, cash_reconciliation, operating_drivers,
-                        profit_bridge, profit_to_cash, scenario, working_capital)
+from .operators import (cash_pressure, cash_quality, cash_reconciliation,
+                        operating_drivers, profit_bridge, profit_to_cash,
+                        scenario, working_capital)
 
 # 算子白名单：名字 → (实现模块, 计算函数, 独立金样函数)
 OPERATORS = {
@@ -24,6 +25,8 @@ OPERATORS = {
     # U2（2026-10-01）：现金调节桥（现金流量表补充资料：合并净利润→经营现金流）
     "cash_reconciliation_v1": (cash_reconciliation, cash_reconciliation.compute,
                                cash_reconciliation.gold),
+    # 10-08（§14.2）：现金压力（同一情景下回款/库存天数冲击的额外占用）——唯一新增算子
+    "cash_pressure_v1": (cash_pressure, cash_pressure.compute, cash_pressure.gold),
 }
 
 # 同年比率（复用既有口径的四个比率，不重新发明）
@@ -42,16 +45,19 @@ _REGISTRY: dict[str, ModelSpec] = {
     cash_quality.SPEC.model_id: cash_quality.SPEC,
     working_capital.SPEC.model_id: working_capital.SPEC,
     scenario.SPEC.model_id: scenario.SPEC,
+    cash_pressure.SPEC.model_id: cash_pressure.SPEC,
     profit_to_cash.SPEC.model_id: profit_to_cash.SPEC,
 }
 
 # V0（2026-10-01 阶段V）：**默认经营研究组合**——一次研究动作回答三件事：
 # 利润由何而来（operating_drivers）、现金为何变化（cash_reconciliation）、
-# 什么经营条件会改变判断（scenario_sensitivity）。顺序即正文顺序。
+# 什么经营条件会改变判断（scenario_sensitivity ＋ cash_pressure 天数冲击）。
+# 顺序即正文顺序。
 # 旧模型（profit_bridge / cash_quality / profit_to_cash / working_capital）留作**探索入口**，
 # 不与新正文重复堆叠；用户显式点名时照旧可用。
 RESEARCH_COMBINATION: tuple[str, ...] = (
     "operating_drivers", "cash_reconciliation", "scenario_sensitivity",
+    "cash_pressure",
 )
 
 

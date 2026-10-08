@@ -418,6 +418,9 @@ def build_structure(task_id: str, goal: str, body: str = "", *, project=None,
         # 无法判断 → 下一观察）。工作区里没有 `analysis/continuation.json` 时留空。
         "continuation": dict(a_ctx.get("continuation") or {}),
         "continuation_page": a_ctx.get("continuation_page") or "",
+        # 10-08 §14：**经营韧性卡**（利润目标与条件门槛／天数冲击占用／优先核查两项假设）。
+        # 由选定运行（scenario_sensitivity＋cash_pressure）现场装配；缺运行时留空（旧行为不变）。
+        "resilience_card": a_ctx.get("resilience_page") or "",
         # W1：绑定信息进结构对象（首屏/正文/图/底稿同一次读取的证据）：选定运行身份与
         # 参数、已准入披露条数、选择说明——版本核对与"同一组结果"检查读它。
         "analysis_binding": {
@@ -2897,6 +2900,11 @@ def render_brief_markdown(structure: dict, body: str = "",
             logger.warning("续页一页版渲染失败（退回完整页）：%s", str(exc)[:120])
     if _cont:
         lines.append(_cont if _cont.endswith("\n") else _cont + "\n")
+    # 10-08 §14：**经营韧性卡**紧跟研究续页（利润门槛 → 天数冲击 → 优先核查的两项假设）。
+    # 有卡才印；没有（旧结构/离线场景）时正文一字不变。
+    _res = str(structure.get("resilience_card") or "").strip()
+    if _res:
+        lines.append(_res if _res.endswith("\n") else _res + "\n")
     # R3：**首屏先给二至三个关键判断**（观察/意义/依据/边界/下一步），完整逐问明细在
     # 紧随其后的『研究问题与下一步』；两处不重复打印同一组观察。
     questions = structure.get("research_questions") or []
@@ -3895,7 +3903,7 @@ def _analysis_context(task_id: str, *, ws_dir=None, evidence: dict | None = None
                  "judgments": [], "reader_judgments": [],
                  "volume_price": {}, "volume_price_run": {}, "records": [], "locators": {},
                  "runs_meta": [], "gaps": [], "direct_cash": {}, "dataset": None,
-                 "continuation": {}, "continuation_page": ""}
+                 "continuation": {}, "continuation_page": "", "resilience_page": ""}
     try:
         picked, notes = _selected_analysis_runs(ws)
     except Exception as exc:                       # noqa: BLE001 - 读不到就当没有分析
@@ -3975,6 +3983,25 @@ def _analysis_context(task_id: str, *, ws_dir=None, evidence: dict | None = None
         out["direct_cash"] = {}
         out["wc_flow"] = {}
     out["cards"], out["gaps"] = _render_card_block(picked, notes, ws=ws)
+    # 10-08 §14：**经营韧性卡**——同一次读取的选定运行（scenario_sensitivity＋cash_pressure）
+    # 装配成读者卡：利润目标/门槛（或已在目标之上的可承受空间）、天数冲击的两项占用与合计、
+    # 优先核查的两项假设及其依据。缺运行时为空串（正文与旧版一字不变）；有卡时写进同版
+    # 附件 `analysis/resilience_card.md`（与正文同源，不另建服务/文件格式）。
+    try:
+        _picked_ids = {str(getattr(r, "run_id", "")) for r in picked}
+        _extra_runs = [r for r in _fa_store.validated_runs(ws)
+                       if str(getattr(r, "run_id", "")) not in _picked_ids]
+        out["resilience_page"] = "\n".join(
+            _fa_note.resilience_lines(picked, dataset=out.get("dataset"),
+                                      reference_runs=_extra_runs)).strip()
+        if out["resilience_page"]:
+            ana = _fa_store.inputs_dir(ws)
+            ana.mkdir(parents=True, exist_ok=True)
+            (ana / "resilience_card.md").write_text(out["resilience_page"],
+                                                    encoding="utf-8")
+    except Exception as exc:                       # noqa: BLE001 - 卡片渲染失败不影响正文
+        logger.warning("经营韧性卡渲染失败（task=%s）：%s", task_id, str(exc)[:140])
+        out["resilience_page"] = ""
     # X1（阶段X §4）：**研究续页**——工作区里落过 `analysis/continuation.json`（由一个小的
     # 续页比较模块生成）就渲染成前两页的一页；没有该文件时既有交付一字不变。
     #

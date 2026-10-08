@@ -538,6 +538,92 @@ class TestAttachmentProseIsNotASource(unittest.TestCase):
         self.assertEqual(out2["traceable_count"], 0, out2)
 
 
+class TestRunFactIdentityInheritance(unittest.TestCase):
+    """10-08 复核 §3：运行事实的**指标与期间从既有注册表/运行输入继承**，未知不计溯源。
+
+    旧实现从输出标签猜年份：`net_profit_change_detail:income_tax_expense` 的
+    7.2044377088 亿元被写成 `period=""`，于是**同年的**「所得税费用 7.20 亿元」与
+    「营业收入 7.20 亿元」都能借它。现在两条路一起收紧：
+
+    - 期间取运行的输入期间（`input_periods`/诊断 `periods`），取不到该条**不计入**；
+    - 指标必须在注册模型声明的输出清单里、构件必须是声明的构件/科目 slug，未知不计入；
+    - 复合指标按**构件身份**参与指标相容判定（"所得税费用"不再支持"营业收入"）。
+    """
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp(prefix="wm_runfacts_"))
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        (self.tmp / "analysis").mkdir(parents=True, exist_ok=True)
+        (self.tmp / "analysis" / "context.json").write_text(json.dumps(
+            {"contract": {"entity": "洋河股份", "entity_id": "002304.SZ"}},
+            ensure_ascii=False), encoding="utf-8")
+
+    def _write_runs(self, outputs, *, status="validated"):
+        (self.tmp / "analysis_runs.json").write_text(json.dumps(
+            {"runs": [{"run_id": "r1", "model_id": "operating_drivers",
+                       "status": status, "outputs": outputs}]}, ensure_ascii=False),
+            encoding="utf-8")
+
+    @staticmethod
+    def _detail_output(**over):
+        out = {"metric": "net_profit_change_detail", "label": "毛利线以下逐项分解",
+               "value": 1.0, "unit": "元", "input_periods": ["2023年", "2024年"],
+               "output_period": "2024年", "formula": "f", "inputs": ["x"],
+               "components": [
+                   {"component_id": "income_tax_expense", "label": "所得税费用",
+                    "value": 720443770.88, "unit": "元"},
+                   {"component_id": "taxes_and_surcharges", "label": "税金及附加",
+                    "value": 999676787.94, "unit": "元"}]}
+        out.update(over)
+        return out
+
+    def _trace(self, report, **fact_over):
+        import acceptance_checker as ac
+        self._write_runs([self._detail_output(**fact_over)] if fact_over
+                         else [self._detail_output()])
+        facts = ac._run_output_facts(self.tmp)
+        sources = {"structured_run_facts_json": json.dumps(facts, ensure_ascii=False)}
+        return ac.check_number_traceability(report, sources, domain="financial",
+                                            goal="研究洋河股份 2023 与 2024 经营")
+
+    def test_period_is_inherited_from_the_run_inputs(self):
+        import acceptance_checker as ac
+        self._write_runs([self._detail_output()])
+        facts = ac._run_output_facts(self.tmp)
+        self.assertTrue(facts, "合法运行输出应进入结构化事实")
+        comp = [f for f in facts if f["kind"] == "run_component"][0]
+        self.assertEqual(comp["period"], "2023年→2024年",
+                         "期间取运行输入，不再从标签猜年份")
+
+    def test_same_year_wrong_metric_is_rejected(self):
+        """**同年**错指标反例：2024 所得税 7.20 亿不得给 2024 营业收入 7.20 亿背书。"""
+        legal = self._trace("洋河股份 2024 年所得税费用贡献 7.20 亿元（合并）。")
+        self.assertEqual(legal["traceable_count"], 1, legal)
+        wrong = self._trace("洋河股份 2024 年营业收入贡献 7.20 亿元（合并）。")
+        self.assertEqual(wrong["traceable_count"], 0, wrong)
+        other_year = self._trace("洋河股份 2020 年所得税费用贡献 7.20 亿元（合并）。")
+        self.assertEqual(other_year["traceable_count"], 0, other_year)
+
+    def test_legal_derived_reading_still_traces(self):
+        """正例：合法科目读数照常可溯源（收紧不等于什么都过不了）。"""
+        jia = self._trace("洋河股份 2024 年税金及附加 10.00 亿元（合并）。")
+        self.assertEqual(jia["traceable_count"], 1, jia)
+
+    def test_unknown_metric_or_period_is_not_admitted(self):
+        """未知身份**不计**结构化可溯源：不注册的 metric、取不到期间的输出都不放行。"""
+        import acceptance_checker as ac
+        self._write_runs([self._detail_output(metric="not_a_registered_metric")])
+        self.assertEqual(ac._run_output_facts(self.tmp), [],
+                         "未注册的 metric 不计入")
+        self._write_runs([self._detail_output(input_periods=[], output_period="",
+                                              diagnostics={})])
+        self.assertEqual(ac._run_output_facts(self.tmp), [],
+                         "期间未知（标签也没有年份）不计入")
+        self._write_runs([self._detail_output()], status="validation_failed")
+        self.assertEqual(ac._run_output_facts(self.tmp), [],
+                         "未通过验证的运行不进结构化事实")
+
+
 class TestX0LocatorAndDerivedSourceClaims(unittest.TestCase):
     """X0（10-02 真实任务 `ui-d5af8cae2f`）：定位/派生型来源声明**按产物核验**，不是"删除失败项"。
 

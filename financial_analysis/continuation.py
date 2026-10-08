@@ -857,21 +857,97 @@ def compare(earlier: dict, later: dict, *, limit: int = 3,
     }
 
 
+def _old_version_identity(ws, task_id: str) -> dict:
+    """**旧选版/旧冻结判断的身份**——更新的"较早侧"由它决定，不由标题猜。
+
+    复用既有产物（不新建版本库）：`report_versions.json` 的**已采纳版本**（正文 hash、
+    身份键、验收绑定）＋ `analysis/selection.json`（进正文的运行与数据集）。
+    取不到就是"没有冻结旧判断"，调用方据此标 `historical_rebuild`，
+    **不把任务公司重贴到别家公司的材料上**。
+    """
+    out: dict = {"frozen": False, "report_version_id": "", "body_sha256": "",
+                 "accepted_body_sha256": "", "acceptance_ok": None, "selection": {},
+                 "note": ""}
+    try:
+        from report_version import VersionStore
+        v = VersionStore(ws, task_id).adopted()
+    except Exception:                                        # noqa: BLE001
+        v = None
+    if v is not None:
+        acc = dict(getattr(v, "acceptance", {}) or {})
+        out.update({
+            "frozen": True,
+            "report_version_id": str(getattr(v, "stored_identity", "")
+                                     or v.identity_id()),
+            "body_sha256": str(getattr(v, "version_id", "") or ""),
+            "accepted_body_sha256": str(acc.get("report_sha256") or ""),
+            "acceptance_ok": (bool(acc.get("pass")) if acc else None),
+            "created_at": float(getattr(v, "created_at", 0) or 0),
+        })
+    try:
+        from . import store as _store
+        sel = _store.load_selection(ws)
+        out["selection"] = {
+            "adopted_identity": str(sel.get("adopted_identity") or ""),
+            "runs": [{"model_id": str(e.get("model_id") or ""),
+                      "run_id": str(e.get("run_id") or ""),
+                      "dataset_hash": str(e.get("dataset_hash") or ""),
+                      "params": dict(e.get("params") or {})}
+                     for e in (sel.get("entries") or [])],
+        }
+    except Exception:                                        # noqa: BLE001
+        pass
+    if not out["frozen"]:
+        out["note"] = ("工作区里没有已采纳的旧版本记录（`report_versions.json`）："
+                       "本次更新按**历史重建**标注，不称原判断的事前盲测")
+    return out
+
+
+def _admission_of(doc: dict, *, company: str, company_id: str, periods, as_of: str) -> dict:
+    """一份材料的**准入结论**（复用 `narrative_evidence.validate_record` 的唯一判据）。"""
+    try:
+        import narrative_evidence as _ne
+        return dict(_ne.validate_record({}, doc, company=company, company_id=company_id,
+                                       periods=periods, as_of=as_of) or {})
+    except Exception as exc:                                 # noqa: BLE001
+        return {"admission": "unknown", "subject_state": "unknown",
+                "note": f"准入判据无法执行：{type(exc).__name__}"}
+
+
+def _new_cutoff(declared, later_doc: dict) -> tuple[str, str]:
+    """较新材料的**资料截止**：调用方声明的优先，否则按材料自身发布日界定。
+
+    未声明时**如实写出来源**（"未声明新截止：按较新材料自身发布日界定"），不假装用户
+    声明过、也不回读任务库——本包是计算核心，不 import `task_state`/HTTP 层
+    （`test_financial_analysis.TestCoreHasNoModelCalls` 恒定看守这一条）。
+    要让更新更严，由调用方传入 `new_as_of`（例如 UI/编排层给出用户声明的新截止）。
+    """
+    if declared:
+        return str(declared), "调用方声明的新截止"
+    pub = str(later_doc.get("published_at") or "")
+    return pub, (f"**未声明新截止**：按较新材料自身发布日 {pub or '未知'} 界定"
+                 if pub else "**未声明新截止**，且材料没有发布日")
+
+
 def build_for_task(task_id: str, *, project=None, ws_dir=None, goal: str = "",
-                   periods=None) -> dict:
+                   periods=None, new_as_of=None) -> dict:
     """**正常任务**里生成续页（10-08 复核 §2／规划 §13.2 的薄接缝）。
 
-    此前 `snapshot/compare/render_page` 的生成调用只在 `scripts/x1_*` 里；读者入口
-    （`report_brief`）只**消费**已落盘的 `analysis/continuation.json`。这里补上
-    "导入下一份披露后自动生成这一页"的一层，仍然只复用既有算子：
+    10-08 复核 §2 的两处身份修正（旧实现的纯内存反例：`admission=excluded`、主体不符的
+    更晚材料照样进 snapshot；已有 `continuation.json` 又永远阻止下一次更新）：
 
-    - 较早侧＝任务**契约期间**（如 2023→2024）对应的年报（本任务的冻结材料）；
-    - 较新侧＝同一工作区里**报告期严格更晚**的披露（如 2025 年半年报）；
-    - 两侧各建快照 → `compare(select_ids=proposition_ids())`（三条业务身份命题）→ 落盘。
+    1. **较早侧＝旧选版冻结的材料**：先读已采纳旧版本（`report_versions.json`）与分析选择
+       （`analysis/selection.json`）的身份，再挑**报告期等于契约末年、主体一致、按旧截止
+       准入**的那一份材料；没有旧版本记录就标 `historical_rebuild`（不冒充原判断）。
+    2. **较新侧必须是已准入的同一主体材料**：主体状态非 `ok`、准入 `excluded`、或发布日
+       晚于**新截止**的材料一律不进快照；新截止由调用方/任务请求声明，未声明时按材料自身
+       发布日界定并如实记录。
+    3. **更新另存新版**：已有 `continuation.json` 时先把它**原样**归档到
+       `analysis/continuation_versions/`（旧版不改），再写新的当前版本；新旧版本都有身份。
 
-    没有更新的披露、较早侧材料不齐、或已存在 `analysis/continuation.json`（旧版本冻结的
-    那一份）时**原样返回 `{}`**：不覆盖、不编、不新建服务或数据库。
+    没有更新的已准入材料、较早侧材料不齐时返回 `{}`：不覆盖、不编、不新建服务或数据库。
     """
+    import hashlib as _hashlib
     import json as _json
     import narrative_evidence as ne
     from . import store as _store
@@ -885,8 +961,12 @@ def build_for_task(task_id: str, *, project=None, ws_dir=None, goal: str = "",
             return {}
     _inputs = _store.inputs_dir(ws)
     p = _inputs / "continuation.json"
+    old_blob: dict = {}
     if p.is_file():
-        return {}                                            # 旧版本冻结的那一份不覆盖
+        try:
+            old_blob = _json.loads(p.read_text(encoding="utf-8")) or {}
+        except Exception:                                    # noqa: BLE001 - 坏文件按无旧版
+            old_blob = {}
     try:
         docs, _snips = ne._read_inputs(task_id, project)
     except Exception:                                        # noqa: BLE001
@@ -901,7 +981,13 @@ def build_for_task(task_id: str, *, project=None, ws_dir=None, goal: str = "",
     years = sorted({int(y) for y in (periods or [])})
     if len(years) < 2:
         return {}
-    # 候选材料按**材料自己声明的报告期**排序（不用标题猜测），取严格更晚的一份
+    try:
+        _p, company, company_id, old_as_of = ne._contract_hint(task_id, goal)
+    except Exception:                                        # noqa: BLE001
+        company, company_id, old_as_of = "", "", ""
+    code = re.sub(r"\D", "", str(company_id or ""))[:6] or str(company_id or "")
+    old = _old_version_identity(ws, task_id)
+    # 候选材料按**材料自己声明的报告期**排序（不用标题猜测）
     keyed: list[tuple[tuple[int, int], dict]] = []
     for d in docs:
         key = ne.doc_period_key(str(d.get("title") or ""), str(d.get("url") or ""))
@@ -912,17 +998,39 @@ def build_for_task(task_id: str, *, project=None, ws_dir=None, goal: str = "",
     if not keyed:
         return {}
     base = (years[-1], 0)
-    earlier = next((d for (k, d) in keyed if k == base), None)
-    later_key, later = max(((k, d) for (k, d) in keyed if k > base), default=((0, 0), None),
-                           key=lambda t: t[0])
-    if earlier is None or later is None:
+    # ① 较早侧：报告期＝契约末年、**主体一致且按旧截止准入**的那一份（不按标题选材）
+    earlier = None
+    _earlier_adm: dict = {}
+    for k, d in sorted(keyed, key=lambda t: t[0]):
+        if k != base:
+            continue
+        adm = _admission_of(d, company=company, company_id=company_id, periods=years,
+                            as_of=str(old_as_of or ""))
+        _earlier_adm = adm
+        if (str(adm.get("subject_state") or "") == "ok"
+                and str(adm.get("admission") or "") in ("admitted", "comparison")):
+            earlier = d
+            break
+    if earlier is None:
+        logger.info("续页较早侧材料未通过主体/准入（task=%s）：%s", task_id,
+                    str(_earlier_adm.get("validation_status") or _earlier_adm.get("admission")))
         return {}
-    company, company_id, code = "", "", ""
-    try:
-        _p, company, company_id, _asof = ne._contract_hint(task_id, goal)
-    except Exception:                                        # noqa: BLE001
-        pass
-    code = re.sub(r"\D", "", str(company_id or ""))[:6] or str(company_id or "")
+    # ② 较新侧：报告期严格更晚、**同一主体**、且按**新截止**准入的材料
+    later_key, later, later_adm = (0, 0), None, {}
+    for k, d in sorted((t for t in keyed if t[0] > base), key=lambda t: t[0]):
+        cut, _src = _new_cutoff(new_as_of, d)
+        adm = _admission_of(d, company=company, company_id=company_id, periods=years,
+                            as_of=cut)
+        if str(adm.get("subject_state") or "") != "ok":
+            continue                       # 主体不符：不重贴标签、不进快照
+        if str(adm.get("admission") or "") not in ("admitted", "comparison"):
+            continue                       # 明确不适用（含晚于新截止）：不进快照
+        later_key, later, later_adm = k, d, adm
+        break
+    if later is None:
+        logger.info("续页较新侧没有已准入的同主体材料（task=%s）", task_id)
+        return {}
+    cutoff, cutoff_src = _new_cutoff(new_as_of, later)
     half = bool(later_key[1])
     _labels = (f"{years[0]}年", f"{years[-1]}年")
     _new_labels = (f"{later_key[0] - 1}H1", f"{later_key[0]}H1") if half else \
@@ -948,8 +1056,67 @@ def build_for_task(task_id: str, *, project=None, ws_dir=None, goal: str = "",
         return {}
     if not (page.get("hypotheses") or []):
         return {}
+    # ③ 版本身份：新版本的"基于哪一版旧判断／哪两份材料／哪个截止"全部写进页里
+    _mats = [{"side": "earlier", "title": str(earlier.get("title") or ""),
+              "url": str(earlier.get("url") or ""),
+              "document_period": str(_earlier_adm.get("document_period") or ""),
+              "published_at": str(earlier.get("published_at") or ""),
+              "admission": str(_earlier_adm.get("admission") or ""),
+              "subject_state": str(_earlier_adm.get("subject_state") or "")},
+             {"side": "later", "title": str(later.get("title") or ""),
+              "url": str(later.get("url") or ""),
+              "document_period": str(later_adm.get("document_period") or ""),
+              "published_at": str(later.get("published_at") or ""),
+              "admission": str(later_adm.get("admission") or ""),
+              "subject_state": str(later_adm.get("subject_state") or "")}]
+    _payload = {k: v for k, v in page.items() if k != "version"}
+    # 版本身份＝**页内容 ＋ 实际使用的更新身份**（旧版本、两侧材料、旧/新截止、分析选择）。
+    # 只哈希页内容会让"同一页材料换了一个声明截止"看起来像同一版（10-08 复核 §2 要求
+    # 把实际使用的输入/新材料身份写进版本，而不是只留一段文字）。
+    _identity = {
+        "company": company, "company_id": company_id,
+        "old_cutoff": str(old_as_of or ""), "new_cutoff": cutoff,
+        "new_cutoff_source": cutoff_src,
+        "based_on": {k: old.get(k) for k in ("frozen", "report_version_id",
+                                             "body_sha256", "accepted_body_sha256",
+                                             "acceptance_ok")},
+        "selection": old.get("selection") or {},
+        "materials": _mats,
+    }
+    _vid = _hashlib.sha256(_json.dumps({"page": _payload, "identity": _identity},
+                                       ensure_ascii=False, sort_keys=True,
+                                       default=str).encode("utf-8")).hexdigest()
+    _old_vid = str((old_blob.get("version") or {}).get("version_id") or "")
+    page["version"] = {
+        "schema": "weavemind.continuation_version/1",
+        "version_id": _vid,
+        "supersedes": _old_vid,
+        "supersedes_sha256": (_hashlib.sha256(
+            _json.dumps(old_blob, ensure_ascii=False, sort_keys=True,
+                        default=str).encode("utf-8")).hexdigest() if old_blob else ""),
+        "based_on_old_version": old,
+        "historical_rebuild": (not old["frozen"]),
+        "update_identity": _identity,
+        "old_cutoff": str(old_as_of or ""),
+        "new_cutoff": cutoff,
+        "new_cutoff_source": cutoff_src,
+        "materials": _mats,
+        "company": company, "company_id": company_id,
+    }
+    if _old_vid and _old_vid == _vid:
+        return page                                   # 内容没变：不重写、不归档
     try:
         _inputs.mkdir(parents=True, exist_ok=True)
+        if old_blob:
+            # **旧版原样归档**（另存新更新版；旧文件字节不改，只被复制）
+            _arch = _inputs / "continuation_versions"
+            _arch.mkdir(parents=True, exist_ok=True)
+            _name = (f"continuation_{_old_vid[:16]}.json" if _old_vid
+                     else "continuation_legacy.json")
+            if not (_arch / _name).is_file():
+                (_arch / _name).write_text(
+                    _json.dumps(old_blob, ensure_ascii=False, indent=1, default=str),
+                    encoding="utf-8")
         (p).write_text(_json.dumps(page, ensure_ascii=False, indent=1, default=str),
                        encoding="utf-8")
     except Exception as exc:                                 # noqa: BLE001

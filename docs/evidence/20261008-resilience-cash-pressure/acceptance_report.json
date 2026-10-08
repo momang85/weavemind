@@ -1,0 +1,1807 @@
+{
+ "report_id": "sample-1009",
+ "goal": "洋河股份 2023/2024 经营研究：利润由何而来、现金为何变化、什么条件会改变判断；合并口径，数据截至 2025-04-30。每个数字须能回溯到来源位置并可重算；缺证据的如实标缺口。阅读重点：投研视角（equity）。",
+ "checks": {
+  "number_traceability": {
+   "pass": true,
+   "details": "数字溯源率 91%（158/173）；引用 84 / 计算 74 / 模型知识 0；财务金额溯源率 92%（93/101）；定位元数据 19 个不计入分母（字符区间/片段号/页码/信用代码）；域=financial；不可溯源示例：17.83、22.83、11.64亿元、55.11亿元、12.61亿元",
+   "domain": "financial",
+   "threshold": 0.7,
+   "total_count": 173,
+   "metadata_count": 19,
+   "metadata_excluded": [
+    {
+     "value": "9536",
+     "unit": "",
+     "raw": "9536",
+     "pos": 5618
+    },
+    {
+     "value": "9573",
+     "unit": "",
+     "raw": "9573",
+     "pos": 5623
+    },
+    {
+     "value": "11",
+     "unit": "",
+     "raw": "11",
+     "pos": 5961
+    },
+    {
+     "value": "7532",
+     "unit": "",
+     "raw": "7532",
+     "pos": 6023
+    },
+    {
+     "value": "7601",
+     "unit": "",
+     "raw": "7601",
+     "pos": 6028
+    },
+    {
+     "value": "13",
+     "unit": "",
+     "raw": "13",
+     "pos": 8980
+    },
+    {
+     "value": "11162",
+     "unit": "",
+     "raw": "11162",
+     "pos": 9024
+    },
+    {
+     "value": "12396",
+     "unit": "",
+     "raw": "12396",
+     "pos": 9030
+    },
+    {
+     "value": "26",
+     "unit": "",
+     "raw": "26",
+     "pos": 9521
+    },
+    {
+     "value": "26408",
+     "unit": "",
+     "raw": "26408",
+     "pos": 9575
+    }
+   ],
+   "traceable_count": 158,
+   "covered_ratio": 0.913,
+   "unverifiable_count": 15,
+   "amount_rate": 0.921,
+   "amount_traceable": 93,
+   "amount_total": 101,
+   "disclosed_count": 0,
+   "user_input_count": 0,
+   "computed_count": 74,
+   "cited_count": 84,
+   "traceable": [
+    {
+     "raw": "5%",
+     "value": "5",
+     "unit": "%",
+     "pos": 325,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "10%",
+     "value": "10",
+     "unit": "%",
+     "pos": 329,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "12.83%",
+     "value": "12.83",
+     "unit": "%",
+     "pos": 345,
+     "source": "derived_from_clean",
+     "derived": true
+    },
+    {
+     "raw": "5%",
+     "value": "5",
+     "unit": "%",
+     "pos": 459,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "10%",
+     "value": "10",
+     "unit": "%",
+     "pos": 463,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "38.01亿元",
+     "value": "38.01",
+     "unit": "亿元",
+     "pos": 731,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "33.43亿元",
+     "value": "33.43",
+     "unit": "亿元",
+     "pos": 796,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "38.01亿元",
+     "value": "38.01",
+     "unit": "亿元",
+     "pos": 835,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "31.54亿元",
+     "value": "31.54",
+     "unit": "亿元",
+     "pos": 849,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "6.47亿元",
+     "value": "6.47",
+     "unit": "亿元",
+     "pos": 864,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "139,076.05",
+     "value": "139076.05",
+     "unit": "",
+     "pos": 1185,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "16.30%",
+     "value": "16.30",
+     "unit": "%",
+     "pos": 1202,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "166,154.73",
+     "value": "166154.73",
+     "unit": "",
+     "pos": 1209,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "33.54亿元",
+     "value": "33.54",
+     "unit": "亿元",
+     "pos": 1471,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "2.43亿元",
+     "value": "2.43",
+     "unit": "亿元",
+     "pos": 1489,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "33.54亿元",
+     "value": "33.54",
+     "unit": "亿元",
+     "pos": 1563,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "20.84 亿元",
+     "value": "20.84",
+     "unit": "亿元",
+     "pos": 2024,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "10.85",
+     "value": "10.85",
+     "unit": "",
+     "pos": 2038,
+     "source": "fetch_snapshot",
+     "derived": false
+    },
+    {
+     "raw": "10.00",
+     "value": "10.00",
+     "unit": "",
+     "pos": 2051,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "32.35%",
+     "value": "32.35",
+     "unit": "%",
+     "pos": 2202,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "16.30%",
+     "value": "16.30",
+     "unit": "%",
+     "pos": 2234,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "33.96%",
+     "value": "33.96",
+     "unit": "%",
+     "pos": 2263,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "36.12 亿元",
+     "value": "36.12",
+     "unit": "亿元",
+     "pos": 2439,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "1.22 亿元",
+     "value": "1.22",
+     "unit": "亿元",
+     "pos": 2500,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "4,343,649,032.11",
+     "value": "4343649032.11",
+     "unit": "",
+     "pos": 2752,
+     "source": "fetch_snapshot",
+     "derived": false
+    },
+    {
+     "raw": "36.04 亿元",
+     "value": "36.04",
+     "unit": "亿元",
+     "pos": 2776,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "20.84 亿元",
+     "value": "20.84",
+     "unit": "亿元",
+     "pos": 2850,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "10.85",
+     "value": "10.85",
+     "unit": "",
+     "pos": 2864,
+     "source": "fetch_snapshot",
+     "derived": false
+    },
+    {
+     "raw": "10.00",
+     "value": "10.00",
+     "unit": "",
+     "pos": 2877,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "32.35%",
+     "value": "32.35",
+     "unit": "%",
+     "pos": 3040,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "51.63%",
+     "value": "51.63",
+     "unit": "%",
+     "pos": 3052,
+     "source": "fetch_snapshot",
+     "derived": false
+    },
+    {
+     "raw": "16.30%",
+     "value": "16.30",
+     "unit": "%",
+     "pos": 3129,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "16,293.52",
+     "value": "16293.52",
+     "unit": "",
+     "pos": 3267,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "36.12 亿元",
+     "value": "36.12",
+     "unit": "亿元",
+     "pos": 3541,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "24.01 亿元",
+     "value": "24.01",
+     "unit": "亿元",
+     "pos": 3557,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "2.16 亿元",
+     "value": "2.16",
+     "unit": "亿元",
+     "pos": 3577,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "56.68 亿元",
+     "value": "56.68",
+     "unit": "亿元",
+     "pos": 3832,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "74.99 亿元",
+     "value": "74.99",
+     "unit": "亿元",
+     "pos": 3845,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "18.31 亿元",
+     "value": "18.31",
+     "unit": "亿元",
+     "pos": 3864,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "6.86 亿元",
+     "value": "6.86",
+     "unit": "亿元",
+     "pos": 3887,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "6.86 亿元",
+     "value": "6.86",
+     "unit": "亿元",
+     "pos": 3936,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "1.22 亿元",
+     "value": "1.22",
+     "unit": "亿元",
+     "pos": 3953,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "100.16 亿元",
+     "value": "100.16",
+     "unit": "亿元",
+     "pos": 4431,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "66.73 亿元",
+     "value": "66.73",
+     "unit": "亿元",
+     "pos": 4471,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "15.8226%",
+     "value": "15.8226",
+     "unit": "%",
+     "pos": 4514,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "84.7325%",
+     "value": "84.7325",
+     "unit": "%",
+     "pos": 4542,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "11.58",
+     "value": "11.58",
+     "unit": "",
+     "pos": 4560,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "15.00",
+     "value": "15.00",
+     "unit": "",
+     "pos": 4710,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "10.00",
+     "value": "10.00",
+     "unit": "",
+     "pos": 4723,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "11.87 亿元",
+     "value": "11.87",
+     "unit": "亿元",
+     "pos": 4768,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "0.79 亿元",
+     "value": "0.79",
+     "unit": "亿元",
+     "pos": 4786,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "2.12 亿元",
+     "value": "2.12",
+     "unit": "亿元",
+     "pos": 4812,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "0.21 亿元",
+     "value": "0.21",
+     "unit": "亿元",
+     "pos": 4829,
+     "source": "workpaper_rows",
+     "derived": false
+    },
+    {
+     "raw": "13.99 亿元",
+     "value": "13.99",
+     "unit": "亿元",
+     "pos": 4848,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "12.83%",
+     "value": "12.83",
+     "unit": "%",
+     "pos": 5448,
+     "source": "derived_from_clean",
+     "derived": true
+    },
+    {
+     "raw": "33.37%",
+     "value": "33.37",
+     "unit": "%",
+     "pos": 5816,
+     "source": "derived_from_clean",
+     "derived": true
+    },
+    {
+     "raw": "247.28 亿元",
+     "value": "247.28",
+     "unit": "亿元",
+     "pos": 5861,
+     "source": "derived_from_clean",
+     "derived": true
+    },
+    {
+     "raw": "209.20 亿元",
+     "value": "209.20",
+     "unit": "亿元",
+     "pos": 5880,
+     "source": "derived_from_clean",
+     "derived": true
+    },
+    {
+     "raw": "38.08 亿元",
+     "value": "38.08",
+     "unit": "亿元",
+     "pos": 5891,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "66.82 亿元",
+     "value": "66.82",
+     "unit": "亿元",
+     "pos": 5915,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "69.35 亿元",
+     "value": "69.35",
+     "unit": "亿元",
+     "pos": 5933,
+     "source": "located_facts",
+     "derived": false
+    },
+    {
+     "raw": "2.53 亿元",
+     "value": "2.53",
+     "unit": "亿元",
+     "pos": 5943,
+     "source": "located_facts",
+     "derived": false
+    },
+    {
+     "raw": "24.49%",
+     "value": "24.49",
+     "unit": "%",
+     "pos": 6233,
+     "source": "derived_from_clean",
+     "derived": true
+    },
+    {
+     "raw": "331.26亿元",
+     "value": "331.26",
+     "unit": "亿元",
+     "pos": 6640,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "288.76亿元",
+     "value": "288.76",
+     "unit": "亿元",
+     "pos": 6651,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "697.92亿元",
+     "value": "697.92",
+     "unit": "亿元",
+     "pos": 6681,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "673.45亿元",
+     "value": "673.45",
+     "unit": "亿元",
+     "pos": 6692,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "0.04亿元",
+     "value": "0.04",
+     "unit": "亿元",
+     "pos": 6738,
+     "source": "workpaper_rows",
+     "derived": false
+    },
+    {
+     "raw": "0.09亿元",
+     "value": "0.09",
+     "unit": "亿元",
+     "pos": 6747,
+     "source": "workpaper_rows",
+     "derived": false
+    },
+    {
+     "raw": "189.54亿元",
+     "value": "189.54",
+     "unit": "亿元",
+     "pos": 6781,
+     "source": "workpaper_rows",
+     "derived": false
+    },
+    {
+     "raw": "197.33亿元",
+     "value": "197.33",
+     "unit": "亿元",
+     "pos": 6792,
+     "source": "fetch_snapshot",
+     "derived": false
+    },
+    {
+     "raw": "14.26亿元",
+     "value": "14.26",
+     "unit": "亿元",
+     "pos": 6835,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "12.65亿元",
+     "value": "12.65",
+     "unit": "亿元",
+     "pos": 6845,
+     "source": "workpaper_rows",
+     "derived": false
+    },
+    {
+     "raw": "177.42亿元",
+     "value": "177.42",
+     "unit": "亿元",
+     "pos": 6874,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "156.52亿元",
+     "value": "156.52",
+     "unit": "亿元",
+     "pos": 6885,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "331.26亿元",
+     "value": "331.26",
+     "unit": "亿元",
+     "pos": 6925,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "288.76亿元",
+     "value": "288.76",
+     "unit": "亿元",
+     "pos": 6936,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "82.00亿元",
+     "value": "82.00",
+     "unit": "亿元",
+     "pos": 6967,
+     "source": "workpaper_rows",
+     "derived": false
+    },
+    {
+     "raw": "77.51亿元",
+     "value": "77.51",
+     "unit": "亿元",
+     "pos": 6977,
+     "source": "workpaper_rows",
+     "derived": false
+    },
+    {
+     "raw": "52.69亿元",
+     "value": "52.69",
+     "unit": "亿元",
+     "pos": 7008,
+     "source": "workpaper_rows",
+     "derived": false
+    },
+    {
+     "raw": "48.26亿元",
+     "value": "48.26",
+     "unit": "亿元",
+     "pos": 7018,
+     "source": "workpaper_rows",
+     "derived": false
+    },
+    {
+     "raw": "2.85亿元",
+     "value": "2.85",
+     "unit": "亿元",
+     "pos": 7048,
+     "source": "workpaper_rows",
+     "derived": false
+    },
+    {
+     "raw": "1.05亿元",
+     "value": "1.05",
+     "unit": "亿元",
+     "pos": 7057,
+     "source": "workpaper_rows",
+     "derived": false
+    },
+    {
+     "raw": "31.97亿元",
+     "value": "31.97",
+     "unit": "亿元",
+     "pos": 7087,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "24.77亿元",
+     "value": "24.77",
+     "unit": "亿元",
+     "pos": 7097,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "100.16亿元",
+     "value": "100.16",
+     "unit": "亿元",
+     "pos": 7128,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "66.73亿元",
+     "value": "66.73",
+     "unit": "亿元",
+     "pos": 7139,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "0.05亿元",
+     "value": "0.05",
+     "unit": "亿元",
+     "pos": 7171,
+     "source": "workpaper_rows",
+     "derived": false
+    },
+    {
+     "raw": "0.07亿元",
+     "value": "0.07",
+     "unit": "亿元",
+     "pos": 7181,
+     "source": "workpaper_rows",
+     "derived": false
+    },
+    {
+     "raw": "61.30亿元",
+     "value": "61.30",
+     "unit": "亿元",
+     "pos": 7215,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "46.29亿元",
+     "value": "46.29",
+     "unit": "亿元",
+     "pos": 7225,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "249.26亿元",
+     "value": "249.26",
+     "unit": "亿元",
+     "pos": 7254,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "211.25亿元",
+     "value": "211.25",
+     "unit": "亿元",
+     "pos": 7265,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "12.27亿元",
+     "value": "12.27",
+     "unit": "亿元",
+     "pos": 7298,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "8.43亿元",
+     "value": "8.43",
+     "unit": "亿元",
+     "pos": 7309,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "288.76亿元",
+     "value": "288.76",
+     "unit": "亿元",
+     "pos": 7348,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "12.83%",
+     "value": "12.83",
+     "unit": "%",
+     "pos": 7512,
+     "source": "derived_from_clean",
+     "derived": true
+    },
+    {
+     "raw": "28876296993.56",
+     "value": "28876296993.56",
+     "unit": "",
+     "pos": 7520,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "33126277551.51",
+     "value": "33126277551.51",
+     "unit": "",
+     "pos": 7537,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "33126277551.51",
+     "value": "33126277551.51",
+     "unit": "",
+     "pos": 7555,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "33.37%",
+     "value": "33.37",
+     "unit": "%",
+     "pos": 7596,
+     "source": "derived_from_clean",
+     "derived": true
+    },
+    {
+     "raw": "6673388602.12",
+     "value": "6673388602.12",
+     "unit": "",
+     "pos": 7604,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "10015930040.27",
+     "value": "10015930040.27",
+     "unit": "",
+     "pos": 7620,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "10015930040.27",
+     "value": "10015930040.27",
+     "unit": "",
+     "pos": 7638,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "24.49%",
+     "value": "24.49",
+     "unit": "%",
+     "pos": 7683,
+     "source": "derived_from_clean",
+     "derived": true
+    },
+    {
+     "raw": "4628711237.28",
+     "value": "4628711237.28",
+     "unit": "",
+     "pos": 7691,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "6130220867.96",
+     "value": "6130220867.96",
+     "unit": "",
+     "pos": 7707,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "6130220867.96",
+     "value": "6130220867.96",
+     "unit": "",
+     "pos": 7724,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "30.24%",
+     "value": "30.24",
+     "unit": "%",
+     "pos": 7759,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "23.11%",
+     "value": "23.11",
+     "unit": "%",
+     "pos": 7780,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "61.2%",
+     "value": "61.2",
+     "unit": "%",
+     "pos": 7810,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "69.36%",
+     "value": "69.36",
+     "unit": "%",
+     "pos": 7839,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "25.42%",
+     "value": "25.42",
+     "unit": "%",
+     "pos": 7860,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "23.24%",
+     "value": "23.24",
+     "unit": "%",
+     "pos": 7881,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "0.86%",
+     "value": "0.86",
+     "unit": "%",
+     "pos": 7903,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "0.36%",
+     "value": "0.36",
+     "unit": "%",
+     "pos": 7924,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "3153542030.82元",
+     "value": "3153542030.82",
+     "unit": "元",
+     "pos": 7979,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "647411628.37元",
+     "value": "647411628.37",
+     "unit": "元",
+     "pos": 8036,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "100.16",
+     "value": "100.16",
+     "unit": "",
+     "pos": 8202,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "66.73 亿元",
+     "value": "66.73",
+     "unit": "亿元",
+     "pos": 8211,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "38.01 亿元",
+     "value": "38.01",
+     "unit": "亿元",
+     "pos": 8234,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "6.47 亿元",
+     "value": "6.47",
+     "unit": "亿元",
+     "pos": 8258,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "4.58 亿元",
+     "value": "4.58",
+     "unit": "亿元",
+     "pos": 8273,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "0.00 亿元",
+     "value": "0.00",
+     "unit": "亿元",
+     "pos": 8287,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "66.66 亿元",
+     "value": "66.66",
+     "unit": "亿元",
+     "pos": 8386,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "46.29 亿元",
+     "value": "46.29",
+     "unit": "亿元",
+     "pos": 8419,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "0.00 亿元",
+     "value": "0.00",
+     "unit": "亿元",
+     "pos": 8435,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "15.02 亿元",
+     "value": "15.02",
+     "unit": "亿元",
+     "pos": 8509,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "5%",
+     "value": "5",
+     "unit": "%",
+     "pos": 8820,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "10%",
+     "value": "10",
+     "unit": "%",
+     "pos": 8823,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "288.76 亿元",
+     "value": "288.76",
+     "unit": "亿元",
+     "pos": 8939,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "247.28 亿元",
+     "value": "247.28",
+     "unit": "亿元",
+     "pos": 9946,
+     "source": "derived_from_clean",
+     "derived": true
+    },
+    {
+     "raw": "4249980557.95元",
+     "value": "4249980557.95",
+     "unit": "元",
+     "pos": 11542,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "28876296993.56",
+     "value": "28876296993.56",
+     "unit": "",
+     "pos": 11557,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "33126277551.51",
+     "value": "33126277551.51",
+     "unit": "",
+     "pos": 11574,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "3342541438.15元",
+     "value": "3342541438.15",
+     "unit": "元",
+     "pos": 11613,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "6673388602.12",
+     "value": "6673388602.12",
+     "unit": "",
+     "pos": 11628,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "10015930040.27",
+     "value": "10015930040.27",
+     "unit": "",
+     "pos": 11644,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "3800953659.19元",
+     "value": "3800953659.19",
+     "unit": "元",
+     "pos": 11681,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "21125078636.9",
+     "value": "21125078636.9",
+     "unit": "",
+     "pos": 11696,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "24926032296.089996",
+     "value": "24926032296.089996",
+     "unit": "",
+     "pos": 11712,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "1501509630.68元",
+     "value": "1501509630.68",
+     "unit": "元",
+     "pos": 11759,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "4628711237.28",
+     "value": "4628711237.28",
+     "unit": "",
+     "pos": 11774,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "6130220867.96",
+     "value": "6130220867.96",
+     "unit": "",
+     "pos": 11790,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "458412221.04元",
+     "value": "458412221.04",
+     "unit": "元",
+     "pos": 11836,
+     "source": "workpaper_derived",
+     "derived": true,
+     "arithmetic_ok": true,
+     "verified": false,
+     "note": "与底稿派生事实一致（带算式与输入 fact_id）"
+    },
+    {
+     "raw": "6673388602.12",
+     "value": "6673388602.12",
+     "unit": "",
+     "pos": 11851,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "10015930040.27",
+     "value": "10015930040.27",
+     "unit": "",
+     "pos": 11867,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "21125078636.9",
+     "value": "21125078636.9",
+     "unit": "",
+     "pos": 11886,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "24926032296.089996",
+     "value": "24926032296.089996",
+     "unit": "",
+     "pos": 11902,
+     "source": "clean_chart_data",
+     "derived": false
+    },
+    {
+     "raw": "6.86 亿元",
+     "value": "6.86",
+     "unit": "亿元",
+     "pos": 2483,
+     "source": "same_value_elsewhere",
+     "derived": true,
+     "verified": false,
+     "note": "同值读数在文内已给出算式/来源（本条为重复出现）"
+    },
+    {
+     "raw": "20.84 亿元",
+     "value": "20.84",
+     "unit": "亿元",
+     "pos": 2798,
+     "source": "same_value_elsewhere",
+     "derived": true,
+     "verified": false,
+     "note": "同值读数在文内已给出算式/来源（本条为重复出现）"
+    },
+    {
+     "raw": "32.35%",
+     "value": "32.35",
+     "unit": "%",
+     "pos": 3097,
+     "source": "same_value_elsewhere",
+     "derived": true,
+     "verified": false,
+     "note": "同值读数在文内已给出算式/来源（本条为重复出现）"
+    },
+    {
+     "raw": "33.96%",
+     "value": "33.96",
+     "unit": "%",
+     "pos": 3260,
+     "source": "same_value_elsewhere",
+     "derived": true,
+     "verified": false,
+     "note": "同值读数在文内已给出算式/来源（本条为重复出现）"
+    },
+    {
+     "raw": "33.96%",
+     "value": "33.96",
+     "unit": "%",
+     "pos": 3318,
+     "source": "same_value_elsewhere",
+     "derived": true,
+     "verified": false,
+     "note": "同值读数在文内已给出算式/来源（本条为重复出现）"
+    },
+    {
+     "raw": "36.12 亿元",
+     "value": "36.12",
+     "unit": "亿元",
+     "pos": 3647,
+     "source": "same_value_elsewhere",
+     "derived": true,
+     "verified": false,
+     "note": "同值读数在文内已给出算式/来源（本条为重复出现）"
+    },
+    {
+     "raw": "18.31 亿元",
+     "value": "18.31",
+     "unit": "亿元",
+     "pos": 8491,
+     "source": "same_value_elsewhere",
+     "derived": true,
+     "verified": false,
+     "note": "同值读数在文内已给出算式/来源（本条为重复出现）"
+    },
+    {
+     "raw": "33.54 亿元",
+     "value": "33.54",
+     "unit": "亿元",
+     "pos": 8532,
+     "source": "same_value_elsewhere",
+     "derived": true,
+     "verified": false,
+     "note": "同值读数在文内已给出算式/来源（本条为重复出现）"
+    },
+    {
+     "raw": "66.73 亿元",
+     "value": "66.73",
+     "unit": "亿元",
+     "pos": 8626,
+     "source": "same_value_elsewhere",
+     "derived": true,
+     "verified": false,
+     "note": "同值读数在文内已给出算式/来源（本条为重复出现）"
+    }
+   ],
+   "untraceable": [
+    {
+     "raw": "17.83",
+     "value": "17.83",
+     "unit": "",
+     "pos": 359
+    },
+    {
+     "raw": "22.83",
+     "value": "22.83",
+     "unit": "",
+     "pos": 372
+    },
+    {
+     "raw": "11.64亿元",
+     "value": "11.64",
+     "unit": "亿元",
+     "pos": 760
+    },
+    {
+     "raw": "55.11亿元",
+     "value": "55.11",
+     "unit": "亿元",
+     "pos": 1138
+    },
+    {
+     "raw": "12.61亿元",
+     "value": "12.61",
+     "unit": "亿元",
+     "pos": 1154
+    },
+    {
+     "raw": "15.02亿元",
+     "value": "15.02",
+     "unit": "亿元",
+     "pos": 1547
+    },
+    {
+     "raw": "45.34%",
+     "value": "45.34",
+     "unit": "%",
+     "pos": 2745
+    },
+    {
+     "raw": "10.85",
+     "value": "10.85",
+     "unit": "",
+     "pos": 2815
+    },
+    {
+     "raw": "14.27 亿元",
+     "value": "14.27",
+     "unit": "亿元",
+     "pos": 3513
+    },
+    {
+     "raw": "33.43",
+     "value": "33.43",
+     "unit": "",
+     "pos": 8221
+    }
+   ],
+   "applicable": true
+  },
+  "entity_attribution": {
+   "pass": true,
+   "details": "主体归属校验 311 处上下文，污染 0 处，无不属于目标公司的数字；归属模糊 276 处",
+   "checked_count": 311,
+   "contaminated_count": 0,
+   "contaminated": [],
+   "ambiguous_count": 276
+  },
+  "source_labeling": {
+   "pass": true,
+   "details": "来源声明检查 0 条，虚假标注 0 条，全部可溯源或已明示",
+   "checked_count": 0,
+   "mislabeled_count": 0,
+   "mislabeled": [],
+   "suggestions": []
+  },
+  "deliverable_completeness": {
+   "pass": true,
+   "details": "交付物完整性：占位标记 0 处，含数据表格，目标含数字要求",
+   "placeholder_count": 0,
+   "has_table": true,
+   "table_all_placeholder": false,
+   "list_required": false,
+   "numeric_required": true
+  },
+  "source_list_completeness": {
+   "pass": true,
+   "details": "三级溯源链：正文引用 2 个编号，来源清单 6 条，完整",
+   "refs": [
+    1,
+    2
+   ],
+   "missing_refs": [],
+   "list_entries": [
+    {
+     "num": 1,
+     "title": "东方财富数据中心（A股）",
+     "url": "https://datacenter-web.eastmoney.com/api/data/v1/get?sortColumns=REPORT_DATE&sortTypes=-1&pageSize=200&pageNumber=1&reportName=RPT_F10_FINANCE_MAINFINADATA&columns=ALL&filter=%28SECURITY_CODE%3D%22002304%22%29"
+    },
+    {
+     "num": null,
+     "title": "- 来源类型：第三方数据/媒体",
+     "url": null
+    },
+    {
+     "num": null,
+     "title": "- 用于：财务事实、正文引用",
+     "url": null
+    },
+    {
+     "num": 2,
+     "title": "2024年年度报告",
+     "url": "http://static.cninfo.com.cn/finalpage/2025-04-29/1223370519.PDF"
+    },
+    {
+     "num": null,
+     "title": "- 来源类型：发行人年报/官方披露",
+     "url": null
+    },
+    {
+     "num": null,
+     "title": "- 用于：业务背景、变化解释、财务附注、风险因素、正文引用",
+     "url": null
+    }
+   ],
+   "gaps": [],
+   "enabled": true,
+   "applicable": true,
+   "counted": true
+  },
+  "freshness_block": {
+   "pass": true,
+   "details": "数据时效区块：包含，具体时间/日期：包含",
+   "has_freshness_block": true,
+   "has_date": true,
+   "gaps": [],
+   "enabled": true,
+   "applicable": true,
+   "counted": true
+  },
+  "disclaimer": {
+   "pass": true,
+   "details": "免责声明/AI 标识：包含，'不构成投资建议'：包含，通过",
+   "has_disclaimer": true,
+   "has_advice_note": true,
+   "gaps": [],
+   "enabled": true,
+   "applicable": true,
+   "counted": true
+  },
+  "requirement_coverage": {
+   "pass": true,
+   "status": "pass",
+   "executed": true,
+   "honest_disclosure": false,
+   "goal_met": true,
+   "needs_data": true,
+   "needs_sources": true,
+   "indicators": [],
+   "periods": [],
+   "gaps": [],
+   "counted": false,
+   "details": "目标达成",
+   "applicable": true
+  },
+  "analysis_completeness": {
+   "pass": false,
+   "counted": false,
+   "applicable": true,
+   "analysis_gaps": [
+    "正文缺少结论段落"
+   ],
+   "facts_total": 12,
+   "facts_missing": 0,
+   "facts_unexplained": 0,
+   "derived_total": 16,
+   "derived_missing": 0,
+   "risk_ok": true,
+   "conclusion_ok": false,
+   "gaps": [
+    "正文缺少结论段落"
+   ],
+   "details": "分析要素缺口 1 类：数值缺 0/12、解释缺 0、派生读数缺 0/16、风险有、结论缺（共 28 项）"
+  },
+  "attribution_support": {
+   "pass": true,
+   "details": "归因主张 1 条；无对应材料支持 0 条",
+   "claims": [
+    {
+     "text": "4. 现金下降**由利润变化主导**，营运资本是缓冲/拖累——缓冲能不能持续才是关键（已发生（读数））",
+     "drivers": [
+      "营运资本"
+     ],
+     "needs": [
+      "应收/应付/存货明细"
+     ],
+     "supported": true,
+     "support": [
+      "原始披露（第 11 页 · 小节：第三节 管理层讨论与分析 > 二、报告期内公司从事的主要业务 > 4、前五名经销客户的销售金额、销售占比、期末应收账款总金额（字符 8426-9486））谈到营运资本"
+     ]
+    }
+   ],
+   "hints": [],
+   "gaps": [],
+   "applicable": true,
+   "counted": true
+  },
+  "ratio_arithmetic": {
+   "pass": true,
+   "details": "未发现用绝对额解释比率变化的句子",
+   "claims": [],
+   "gaps": [],
+   "applicable": true,
+   "counted": true
+  },
+  "chart_references": {
+   "pass": true,
+   "details": "正文未引用图表",
+   "refs": [],
+   "unverifiable": 0,
+   "unknown": 0,
+   "gaps": [],
+   "applicable": true,
+   "counted": true
+  },
+  "url_health": {
+   "pass": true,
+   "hint": false,
+   "details": "当前访问不到（保留为未验证来源）: 2 条（仅提示，不影响验收结论）",
+   "dead_count": 0,
+   "dead_urls": [],
+   "unverified_count": 2
+  }
+ },
+ "overall": "pass",
+ "profile": "financial",
+ "gaps": [],
+ "suggestions": [],
+ "rules_version": "2026.10.03",
+ "rules_fingerprint": "b98aef94",
+ "report_sha256": "20edea3e2df6c61b4ecfe4b56e88ce286c3915f17b4c1b18be3384c0e1d4a7ba",
+ "report_sha256_short": "20edea3e2df6c61b",
+ "evaluated_at": "2026-10-08T04:24:04+00:00"
+}

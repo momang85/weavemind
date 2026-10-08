@@ -1,0 +1,27 @@
+工作区文件: ["analysis_runs.json", "project\\fetch_snapshot.json", "project\\financials.json", "project\\working_paper.json", "report_versions.json"]
+材料: ["洋河股份 主要财务指标（东方财富数据中心）", "2024年年度报告", "洋河官方旗舰店 - 京东", "2025年半年度报告"]
+
+== ① 第一次生成（无旧 continuation.json）==
+  hypotheses: [('profit_mechanism_and_buffer', '加强'), ('volume_contraction', '加强'), ('finished_goods_inventory_build', '削弱'), ('cash_from_working_capital', '加强'), ('cash_buffer_structure', '削弱')]
+  version_id: 0ef401b7641d5599 | supersedes=''
+  historical_rebuild: False
+  based_on frozen: True | report_version_id=829dda5b13a118f9 | selection runs=[]
+  materials: [{"side": "earlier", "document_period": "2024", "admission": "admitted", "subject_state": "ok", "published_at": ""}, {"side": "later", "document_period": "", "admission": "admitted", "subject_state": "ok", "published_at": "2025-08-19"}]
+  cutoff: '2025-08-19' ← **未声明新截止**：按较新材料自身发布日 2025-08-19 界定
+
+== ② 再次调用（同一材料；应幂等：不重写、不归档）==
+  version_id 相同: True
+  归档目录存在: False | 文件: []
+
+== ③ 声明新截止（内容变化）→ 必须另存新版、旧版归档不改 ==
+  version_id 变化: True | supersedes=0ef401b7641d5599
+  cutoff: '2025-09-30' ← 用户在更新请求里声明的新截止
+  归档文件: ['continuation_0ef401b7641d5599.json']
+  归档内容＝第一次的当前版本: True
+  旧文件字节未被改动: True（当前文件已换新）
+
+== ④ 反例：只留错主体（宁德时代）的更晚材料 → 不进入快照 ==
+  返回: {}（不适用）
+
+== ⑤ 反例：新材料发布日晚于声明的新截止 → excluded，不进快照 ==
+  返回: {}（不适用）
