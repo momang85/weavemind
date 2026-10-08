@@ -1,7 +1,309 @@
 {
  "schema": "weavemind.hypothesis_card/1",
+ "card_version": "hypothesis_card/1.1.0",
+ "hypothesis_id": "ecabe27e6c14d8cc5862c30c4f32ef29b772a2d2210a2e270c18cb730bb0b2f8",
  "study_id": "f6469defdb1eac21298ac2e360c76beec70d8b45a8c4d64ccd3faac362378828",
+ "generated_at": "2026-10-08T13:36:06+00:00",
+ "frozen": true,
  "synthetic": true,
+ "caliber": {
+  "scope": "合并报表同口径（由输入文件声明）",
+  "currency": "CNY（由输入文件声明）",
+  "period_chain": "固定年度 t−1→t→t+1"
+ },
+ "method": {
+  "version": "q1-v1（§17.2 冻结定义；本卡不计算）",
+  "indicator": "自定义经营余额 E = 毛利 − 销售费用 − 管理费用 − 研发费用 − 税金及附加（融资与所得税前；不含财务费用/投资收益/公允价值/减值/所得税/少数股东项）",
+  "direction_rule": "sign(O_t) → sign(Y_op)；O_t = (E_t − E_{t−1})/收入_{t−1}，Y_op = (E_{t+1} − E_t)/收入_t；零预测弃权、零实际另列",
+  "baselines": [
+   "归母净利润变化方向延续",
+   "探索期多数方向（仅由探索期固定）"
+  ],
+  "status": "fixed_not_computed",
+  "status_note": "指标与方向规则已冻结；本批只产卡，B 批才计算读数与对照",
+  "not_claimed": [
+   "不是法定营业利润或 EBIT",
+   "不是对既有文献因子的复制",
+   "不用随机拆分/小样显著性宣布有效"
+  ]
+ },
+ "companies": [
+  {
+   "entity_id": "900001.SH",
+   "direction": "现金转化<100%（利润未完全转成现金）",
+   "mechanism": "现金转化<100%（利润未完全转成现金）；经营现金/合并净利 62.50%；周转线索：应收增长快于收入、库存增长快于成本",
+   "expected_direction": "偏承压：现金兑现未完全跟上、且/或周转占用上升（下一同口径年度看是否反转）",
+   "observation_metric": "下一同口径**年度**经营方向：`Y_op = (E_next − E_t)/收入_t` 的符号（E＝自定义经营余额；本批只固定指标与规则，不计算）",
+   "target_period": "下一同口径年度（固定年度链 t−1→t→t+1；不混入 H1、YTD 累计或单季度；分母收入须为正）",
+   "profit_cash_turnover": {
+    "cashflow_coverage_pct": 62.5,
+    "cfo_minus_profit": -600000.0,
+    "receivables_to_revenue": 0.15,
+    "inventory_to_cost": 0.2857142857142857,
+    "liabilities_to_assets": 0.5416666666666666,
+    "margin_gap_to_threshold_pp": -0.8333
+   },
+   "scenario_only": {
+    "incremental_capital_occupation": 558904.11,
+    "unit": "元",
+    "note": "10 天回款/库存压力是**设定情景**（使用者假设），不是历史信号或预测"
+   },
+   "anomaly_clues": [
+    {
+     "name": "receivables_outpace_revenue",
+     "value": 0.6,
+     "unit": "growth_rate_difference",
+     "period": "2024年",
+     "formula": "growth(accounts_receivable) - growth(revenue)",
+     "alternatives": [
+      "正常替代解释：结算日期、信用期变化、客户结构或合并范围变化；补账龄与合同条款核实",
+      "差异线索不是舞弊或违约标签"
+     ],
+     "limitations": [
+      "正常替代解释：结算日期、信用期变化、客户结构或合并范围变化；补账龄与合同条款核实",
+      "差异线索不是舞弊或违约标签"
+     ]
+    },
+    {
+     "name": "inventory_outpaces_cost",
+     "value": 0.5142857142857142,
+     "unit": "growth_rate_difference",
+     "period": "2024年",
+     "formula": "growth(inventory) - growth(operating_cost)",
+     "alternatives": [
+      "正常替代解释：季节备货、产能投放、交付延后或成本价格变化；补库龄与订单核实",
+      "差异线索不是舞弊或违约标签"
+     ],
+     "limitations": [
+      "正常替代解释：季节备货、产能投放、交付延后或成本价格变化；补库龄与订单核实",
+      "差异线索不是舞弊或违约标签"
+     ]
+    }
+   ],
+   "next_same_caliber_disclosure": [
+    "下一期同口径定期报告（同主体/同合并范围/同科目口径）",
+    "现金流量表补充资料（经营现金/合并净利润与营运资本三行）",
+    "若为真实材料：下一期行情（用于事后反应观察，不作为特征）"
+   ],
+   "alternatives": [
+    "结算日期、信用期变化、客户结构或合并范围变化（周转线索的正常替代解释）",
+    "季节备货、产能投放、交付延后或成本价格变化（库存线索的正常替代解释）",
+    "并表范围、口径重述或税率/投资收益等毛利线以下项造成的净利变化"
+   ],
+   "refutation_conditions": [
+    "方向反转：下一同口径年度 `sign(Y_op)` 与 `sign(O_t)` 相反且分母收入为正",
+    "周转恶化证据：应收增长继续快于收入增长、或库存增长继续快于成本增长",
+    "来源/时点问题：可用时间晚于决策时点，或披露被更正（版本可用时间晚于决策）"
+   ],
+   "source_files": {
+    "calendar": {
+     "file": "calendar.csv",
+     "raw_sha256": "5d26fe75879ea270"
+    },
+    "credit_labels": {
+     "file": "credit_labels.json",
+     "raw_sha256": "3f49c38131e85abd"
+    },
+    "events": {
+     "file": "news.json",
+     "raw_sha256": "8e47131b7ed6bc73"
+    },
+    "financial": {
+     "file": "financials.csv",
+     "raw_sha256": "6a6e785d80b2351f"
+    },
+    "fraud_labels": {
+     "file": "fraud_labels.json",
+     "raw_sha256": "93b4be186c2486a1"
+    },
+    "market": {
+     "file": "daily_prices.csv",
+     "raw_sha256": "8f720e3c000fc007"
+    }
+   },
+   "known_as_of": {
+    "feature_cutoff": "2025-04-30",
+    "evaluation_as_of": "2025-06-30",
+    "available_at_latest": "2025-04-26",
+    "disclosed_at_latest": "2025-04-26",
+    "version_available_at_latest": ""
+   },
+   "follow_up": {
+    "verify_by": "2025-06-30",
+    "status": "待数据",
+    "maturity": {
+     "mature": 0,
+     "pending": 0,
+     "missing": 0,
+     "incomparable": "未评",
+     "note": "本批为模拟流程样例，没有后续期"
+    },
+    "actual_reading": null,
+    "difference": null,
+    "mechanism_verdict": "未决",
+    "market_reaction": {
+     "status": "待数据",
+     "primary_window": "20 个交易日（预先定；1/5 日仅描述）",
+     "note": "价格反应观察，不是可成交收益、不是 alpha"
+    },
+    "supersedes_card": ""
+   }
+  },
+  {
+   "entity_id": "900002.SH",
+   "direction": "现金转化<100%（利润未完全转成现金）",
+   "mechanism": "现金转化<100%（利润未完全转成现金）；经营现金/合并净利 96.00%；周转线索：库存增长快于成本",
+   "expected_direction": "偏承压：现金兑现未完全跟上、且/或周转占用上升（下一同口径年度看是否反转）",
+   "observation_metric": "下一同口径**年度**经营方向：`Y_op = (E_next − E_t)/收入_t` 的符号（E＝自定义经营余额；本批只固定指标与规则，不计算）",
+   "target_period": "下一同口径年度（固定年度链 t−1→t→t+1；不混入 H1、YTD 累计或单季度；分母收入须为正）",
+   "profit_cash_turnover": {
+    "cashflow_coverage_pct": 96.0,
+    "cfo_minus_profit": -100000.0,
+    "receivables_to_revenue": 0.21818181818181817,
+    "inventory_to_cost": 0.23076923076923078,
+    "liabilities_to_assets": 0.6136363636363636,
+    "margin_gap_to_threshold_pp": -3.1818
+   },
+   "scenario_only": {
+    "incremental_capital_occupation": 994520.55,
+    "unit": "元",
+    "note": "10 天回款/库存压力是**设定情景**（使用者假设），不是历史信号或预测"
+   },
+   "anomaly_clues": [
+    {
+     "name": "inventory_outpaces_cost",
+     "value": 0.15714285714285714,
+     "unit": "growth_rate_difference",
+     "period": "2024年",
+     "formula": "growth(inventory) - growth(operating_cost)",
+     "alternatives": [
+      "正常替代解释：季节备货、产能投放、交付延后或成本价格变化；补库龄与订单核实",
+      "差异线索不是舞弊或违约标签"
+     ],
+     "limitations": [
+      "正常替代解释：季节备货、产能投放、交付延后或成本价格变化；补库龄与订单核实",
+      "差异线索不是舞弊或违约标签"
+     ]
+    }
+   ],
+   "next_same_caliber_disclosure": [
+    "下一期同口径定期报告（同主体/同合并范围/同科目口径）",
+    "现金流量表补充资料（经营现金/合并净利润与营运资本三行）",
+    "若为真实材料：下一期行情（用于事后反应观察，不作为特征）"
+   ],
+   "alternatives": [
+    "结算日期、信用期变化、客户结构或合并范围变化（周转线索的正常替代解释）",
+    "季节备货、产能投放、交付延后或成本价格变化（库存线索的正常替代解释）",
+    "并表范围、口径重述或税率/投资收益等毛利线以下项造成的净利变化"
+   ],
+   "refutation_conditions": [
+    "方向反转：下一同口径年度 `sign(Y_op)` 与 `sign(O_t)` 相反且分母收入为正",
+    "周转恶化证据：应收增长继续快于收入增长、或库存增长继续快于成本增长",
+    "来源/时点问题：可用时间晚于决策时点，或披露被更正（版本可用时间晚于决策）"
+   ],
+   "source_files": {
+    "calendar": {
+     "file": "calendar.csv",
+     "raw_sha256": "5d26fe75879ea270"
+    },
+    "credit_labels": {
+     "file": "credit_labels.json",
+     "raw_sha256": "3f49c38131e85abd"
+    },
+    "events": {
+     "file": "news.json",
+     "raw_sha256": "8e47131b7ed6bc73"
+    },
+    "financial": {
+     "file": "financials.csv",
+     "raw_sha256": "6a6e785d80b2351f"
+    },
+    "fraud_labels": {
+     "file": "fraud_labels.json",
+     "raw_sha256": "93b4be186c2486a1"
+    },
+    "market": {
+     "file": "daily_prices.csv",
+     "raw_sha256": "8f720e3c000fc007"
+    }
+   },
+   "known_as_of": {
+    "feature_cutoff": "2025-04-30",
+    "evaluation_as_of": "2025-06-30",
+    "available_at_latest": "2025-04-26",
+    "disclosed_at_latest": "2025-04-26",
+    "version_available_at_latest": ""
+   },
+   "follow_up": {
+    "verify_by": "2025-06-30",
+    "status": "待数据",
+    "maturity": {
+     "mature": 0,
+     "pending": 0,
+     "missing": 0,
+     "incomparable": "未评",
+     "note": "本批为模拟流程样例，没有后续期"
+    },
+    "actual_reading": null,
+    "difference": null,
+    "mechanism_verdict": "未决",
+    "market_reaction": {
+     "status": "待数据",
+     "primary_window": "20 个交易日（预先定；1/5 日仅描述）",
+     "note": "价格反应观察，不是可成交收益、不是 alpha"
+    },
+    "supersedes_card": ""
+   }
+  }
+ ],
+ "trial_conventions": {
+  "company_pool": {
+   "source": "本次输入文件里读到的主体（不按请求里的公司名替换）",
+   "entities": [
+    "900001.SH",
+    "900002.SH"
+   ]
+  },
+  "primary_endpoint": "下一同口径年度经营方向（`sign(Y_op)`）",
+  "secondary_endpoint": "事件公开时点后的 20 交易日基准调整收益（价格反应观察）",
+  "window": "1/5/20 交易日；主窗口预先定为 20 日",
+  "comparison": [
+   "归母净利润变化方向延续",
+   "探索期多数方向（仅由探索期固定）"
+  ],
+  "holdout": "未做（本批为模拟流程样例，无真实时间/主体留出）",
+  "variants": {
+   "count": 1,
+   "note": "本批只有一份 spec；所有候选与负结果都要写进同一试验账，不从多个天数/阈值里挑最好结果"
+  },
+  "human_confirmed": false,
+  "pit": "模拟流程样例：不涉及 PIT 历史版本；真实材料到达后再按公开时点建队列"
+ },
+ "follow_up_summary": {
+  "verify_by": "2025-06-30",
+  "status": "待数据",
+  "note": "没有后续期：不写实际读数、不假造成熟"
+ },
+ "usage_state": {
+  "synthetic": true,
+  "provenance_kind": "流程样例（模拟）",
+  "provenance_note": "模拟数据流程样例：不是前瞻判断（未来结果出现前未冻结），也不是对历史公司的回顾解释",
+  "internal_only": true,
+  "research_state": "research_draft",
+  "machine_checks": {
+   "verify_study": {
+    "ok": true,
+    "checked": 12,
+    "failed": []
+   },
+   "note": "字节核对只证明产物一致，不证明事实正确/人工复核"
+  },
+  "human_review": "unreviewed",
+  "external_delivery": {
+   "allowed": false,
+   "reason": "本批仅生成内部研究产物"
+  }
+ },
  "state": "draft_not_human_confirmed",
  "state_note": "研究草稿；**未经人工确认**，因此不叫「事前假说」，也不构成投资建议；含模拟数据",
  "no_credit_score": true,
@@ -55,157 +357,61 @@
    "raw_sha256": "8f720e3c000fc007a273f47a389f2e67ba83debfab10e36eff534b67866f8470"
   }
  },
- "companies": [
-  {
-   "entity_id": "900001.SH",
-   "direction": "现金转化<100%（利润未完全转成现金）",
-   "profit_cash_turnover": {
-    "cashflow_coverage_pct": 62.5,
-    "cfo_minus_profit": -600000.0,
-    "receivables_to_revenue": 0.15,
-    "inventory_to_cost": 0.2857142857142857,
-    "liabilities_to_assets": 0.5416666666666666,
-    "margin_gap_to_threshold_pp": -0.8333
+ "companies_identity": {
+  "method_version": "q1-v1（§17.2 冻结定义；本卡不计算）",
+  "indicator": "自定义经营余额 E = 毛利 − 销售费用 − 管理费用 − 研发费用 − 税金及附加（融资与所得税前；不含财务费用/投资收益/公允价值/减值/所得税/少数股东项）",
+  "direction_rule": "sign(O_t) → sign(Y_op)；O_t = (E_t − E_{t−1})/收入_{t−1}，Y_op = (E_{t+1} − E_t)/收入_t；零预测弃权、零实际另列",
+  "baselines": [
+   "归母净利润变化方向延续",
+   "探索期多数方向（仅由探索期固定）"
+  ],
+  "company_pool": [
+   "900001.SH",
+   "900002.SH"
+  ],
+  "cutoffs": {
+   "feature_cutoff": "2025-04-30",
+   "evaluation_as_of": "2025-06-30"
+  },
+  "sources": {
+   "calendar": {
+    "file": "calendar.csv",
+    "raw_sha256": "5d26fe75879ea270b60cb9f19909f459bf6f2afc828a81fe25a2205a273538f5"
    },
-   "scenario_only": {
-    "incremental_capital_occupation": 558904.11,
-    "unit": "元",
-    "note": "10 天回款/库存压力是**设定情景**（使用者假设），不是历史信号或预测"
+   "credit_labels": {
+    "file": "credit_labels.json",
+    "raw_sha256": "3f49c38131e85abd6d03dfb0beecb865cc1b3c21e027f812e0eac66b3bbcd286"
    },
-   "anomaly_clues": [
-    {
-     "name": "receivables_outpace_revenue",
-     "value": 0.6,
-     "alternatives": [],
-     "limitations": [
-      "正常替代解释：结算日期、信用期变化、客户结构或合并范围变化；补账龄与合同条款核实",
-      "差异线索不是舞弊或违约标签"
-     ]
-    },
-    {
-     "name": "inventory_outpaces_cost",
-     "value": 0.5142857142857142,
-     "alternatives": [],
-     "limitations": [
-      "正常替代解释：季节备货、产能投放、交付延后或成本价格变化；补库龄与订单核实",
-      "差异线索不是舞弊或违约标签"
-     ]
-    }
-   ],
-   "next_same_caliber_disclosure": [
-    "下一期同口径定期报告（同主体/同合并范围/同科目口径）",
-    "现金流量表补充资料（经营现金/合并净利润与营运资本三行）",
-    "若为真实材料：下一期行情（用于事后反应观察，不作为特征）"
-   ],
-   "refutation_conditions": [
-    "方向反转：下一期同口径现金转化回到 100% 以下且净利同比转负",
-    "周转恶化证据：应收增长继续快于收入增长、或库存增长继续快于成本增长",
-    "来源/时点问题：可用时间晚于决策时点，或披露被更正（版本可用时间晚于决策）"
-   ],
-   "source_files": {
-    "calendar": {
-     "file": "calendar.csv",
-     "raw_sha256": "5d26fe75879ea270"
-    },
-    "credit_labels": {
-     "file": "credit_labels.json",
-     "raw_sha256": "3f49c38131e85abd"
-    },
-    "events": {
-     "file": "news.json",
-     "raw_sha256": "8e47131b7ed6bc73"
-    },
-    "financial": {
-     "file": "financials.csv",
-     "raw_sha256": "6a6e785d80b2351f"
-    },
-    "fraud_labels": {
-     "file": "fraud_labels.json",
-     "raw_sha256": "93b4be186c2486a1"
-    },
-    "market": {
-     "file": "daily_prices.csv",
-     "raw_sha256": "8f720e3c000fc007"
-    }
+   "events": {
+    "file": "news.json",
+    "raw_sha256": "8e47131b7ed6bc735cbcdc6abc9d46a6880be32fe553b5393f78c48df6066830"
    },
-   "known_as_of": {
-    "feature_cutoff": "2025-04-30",
-    "evaluation_as_of": "2025-06-30",
-    "available_at_latest": "2025-04-26",
-    "disclosed_at_latest": "2025-04-26"
+   "financial": {
+    "file": "financials.csv",
+    "raw_sha256": "6a6e785d80b2351f0f9d5798e924b7bc25e679d6693837a4262aa483239980e8"
+   },
+   "fraud_labels": {
+    "file": "fraud_labels.json",
+    "raw_sha256": "93b4be186c2486a1955175a078defa0a7197644d42f6ae52a3be5c4c26fd9ee3"
+   },
+   "market": {
+    "file": "daily_prices.csv",
+    "raw_sha256": "8f720e3c000fc007a273f47a389f2e67ba83debfab10e36eff534b67866f8470"
    }
   },
-  {
-   "entity_id": "900002.SH",
-   "direction": "现金转化<100%（利润未完全转成现金）",
-   "profit_cash_turnover": {
-    "cashflow_coverage_pct": 96.0,
-    "cfo_minus_profit": -100000.0,
-    "receivables_to_revenue": 0.21818181818181817,
-    "inventory_to_cost": 0.23076923076923078,
-    "liabilities_to_assets": 0.6136363636363636,
-    "margin_gap_to_threshold_pp": -3.1818
+  "study_id": "f6469defdb1eac21298ac2e360c76beec70d8b45a8c4d64ccd3faac362378828",
+  "result_hash": "6d11576ac5e8ecd9a9505bea1f2885f668167719d8a7988bde5dfd680a250744",
+  "mechanisms": {
+   "900001.SH": {
+    "mechanism": "现金转化<100%（利润未完全转成现金）；经营现金/合并净利 62.50%；周转线索：应收增长快于收入、库存增长快于成本",
+    "expected_direction": "偏承压：现金兑现未完全跟上、且/或周转占用上升（下一同口径年度看是否反转）"
    },
-   "scenario_only": {
-    "incremental_capital_occupation": 994520.55,
-    "unit": "元",
-    "note": "10 天回款/库存压力是**设定情景**（使用者假设），不是历史信号或预测"
-   },
-   "anomaly_clues": [
-    {
-     "name": "inventory_outpaces_cost",
-     "value": 0.15714285714285714,
-     "alternatives": [],
-     "limitations": [
-      "正常替代解释：季节备货、产能投放、交付延后或成本价格变化；补库龄与订单核实",
-      "差异线索不是舞弊或违约标签"
-     ]
-    }
-   ],
-   "next_same_caliber_disclosure": [
-    "下一期同口径定期报告（同主体/同合并范围/同科目口径）",
-    "现金流量表补充资料（经营现金/合并净利润与营运资本三行）",
-    "若为真实材料：下一期行情（用于事后反应观察，不作为特征）"
-   ],
-   "refutation_conditions": [
-    "方向反转：下一期同口径现金转化回到 100% 以下且净利同比转负",
-    "周转恶化证据：应收增长继续快于收入增长、或库存增长继续快于成本增长",
-    "来源/时点问题：可用时间晚于决策时点，或披露被更正（版本可用时间晚于决策）"
-   ],
-   "source_files": {
-    "calendar": {
-     "file": "calendar.csv",
-     "raw_sha256": "5d26fe75879ea270"
-    },
-    "credit_labels": {
-     "file": "credit_labels.json",
-     "raw_sha256": "3f49c38131e85abd"
-    },
-    "events": {
-     "file": "news.json",
-     "raw_sha256": "8e47131b7ed6bc73"
-    },
-    "financial": {
-     "file": "financials.csv",
-     "raw_sha256": "6a6e785d80b2351f"
-    },
-    "fraud_labels": {
-     "file": "fraud_labels.json",
-     "raw_sha256": "93b4be186c2486a1"
-    },
-    "market": {
-     "file": "daily_prices.csv",
-     "raw_sha256": "8f720e3c000fc007"
-    }
-   },
-   "known_as_of": {
-    "feature_cutoff": "2025-04-30",
-    "evaluation_as_of": "2025-06-30",
-    "available_at_latest": "2025-04-26",
-    "disclosed_at_latest": "2025-04-26"
+   "900002.SH": {
+    "mechanism": "现金转化<100%（利润未完全转成现金）；经营现金/合并净利 96.00%；周转线索：库存增长快于成本",
+    "expected_direction": "偏承压：现金兑现未完全跟上、且/或周转占用上升（下一同口径年度看是否反转）"
    }
   }
- ],
- "how_to_confirm": "人工逐条确认方向/解释/来源/可知时点与反证条件后，才可把本卡称为「事前假说」；确认动作与时间另行记录，本入口不代签",
- "card_hash": "8dfcab6b0d40928a040942e9ef7430eba6d0a64854b0fe527d4d7ef49bcf6dc6"
+ },
+ "how_to_confirm": "人工逐条确认机制/方向/来源/可知时点/替代解释与反证条件后，才可把本卡称为「事前假说」；确认动作与时间另行记录，本入口不代签",
+ "card_hash": "3f0081f3be2fb71ee719ec2b8f7b2b90c4a65b454b0b89f111f1a37aa05f47af"
 }

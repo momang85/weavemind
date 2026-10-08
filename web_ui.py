@@ -8614,15 +8614,49 @@ def _post_research_study_replay(self, p, body, admin):
     return self._json(check)
 
 
-def _freeze_hypothesis_card(d: str) -> dict:
-    """由**冻结产物**生成"待人工确认的假说卡"（§17 计划的第一步，本批只产卡不建模型）。
+def _hypothesis_mechanism(direction: str, coverage, clues: list[dict]) -> tuple[str, str]:
+    """一句话机制 + 预期方向（只由**已有读数**拼出，不做 Q1 计算，不编因果）。
 
-    卡只写产物里**已有**的读数与来源：
-    - 经营改善方向：来自现金质量/情景运行的状态（改善/承压/未取得）；
-    - 利润/现金/周转解释：来自各运行输出与风险特征（含正常替代解释与缺口）；
-    - 原始来源与可知时点：来自 manifest 的 sources（文件 + raw_sha256）与逐行
-      disclosed_at/available_at 的最晚值；
-    - 下一同口径披露及反证条件：**模板化**的三条反证条件（按方向），标注要核的下一期同口径披露。
+    §17.2 的 Q1 方向规则（`sign(O_t)→sign(Y_op)`）在 B 批才计算；本卡只写"固定了哪个指标与
+    方向规则"（`method` 字段），以及当前读数支持的机制描述与预期方向。
+    """
+    bits: list[str] = [direction]
+    if coverage and isinstance(coverage.get("value"), (int, float)):
+        bits.append(f"经营现金/合并净利 {float(coverage['value']):.2f}%")
+    _names = {"receivables_outpace_revenue": "应收增长快于收入",
+              "inventory_outpaces_cost": "库存增长快于成本"}
+    hit = [_names.get(str(c.get("name")), str(c.get("name"))) for c in clues]
+    if hit:
+        bits.append("周转线索：" + "、".join(hit))
+    else:
+        bits.append("周转线索：未出现增长快于分母的分项")
+    mechanism = "；".join(bits)
+    adverse = any(str(c.get("name")) in ("receivables_outpace_revenue",
+                                         "inventory_outpaces_cost") for c in clues)
+    _cov = coverage.get("value") if isinstance(coverage, dict) else None
+    if isinstance(_cov, (int, float)) and float(_cov) >= 100 and not adverse:
+        expected = "偏改善：现金兑现充分、周转未见恶化线索（下一同口径年度需继续成立）"
+    elif adverse or (isinstance(_cov, (int, float)) and float(_cov) < 100):
+        expected = "偏承压：现金兑现未完全跟上、且/或周转占用上升（下一同口径年度看是否反转）"
+    else:
+        expected = "未定：读数不足，不下方向"
+    return mechanism, expected
+
+
+def _freeze_hypothesis_card(d: str) -> dict:
+    """由**冻结产物**生成"待人工确认的假说卡"（§17.5 的五组字段；本批只产卡，不做 Q1 计算）。
+
+    卡只写产物里**已有**的读数与来源，并按 §17.5 的五组分列：
+
+    1. **身份与时点**：hypothesis_id、方法/公式版本（§17.2 的冻结定义，本批**不计算**）、
+       公司与口径、判断生成/冻结时间、特征截止、输入/run/hash、来源公开与更正时点；
+    2. **研究判断**：可反证的一句机制、预期方向、观察指标/目标期、替代解释、反证条件、下一材料；
+    3. **试验约定**：公司池/主终点/窗口/对照/留出/候选变体账/是否人工确认；
+    4. **后续结果**：验证截止与成熟/待成熟/缺失/不可比**状态位**（本批为模拟流程样例 ⇒ 待数据，
+       不写实际读数、不假造成熟）；
+    5. **使用状态**：synthetic、**历史重建/流程样例/前瞻**三类身份、内部研究、研究草稿、
+       机器检查（verify 的字节核对结果）、人工复核。
+
     **明确标注**：10 天压力是设定情景、不是历史信号；未人工确认 ⇒ **不是事前假说**；
     不含综合信用分与 alpha。
     """
@@ -8635,14 +8669,25 @@ def _freeze_hypothesis_card(d: str) -> dict:
                         if r.get("available_at")})
     disclosed = sorted({str(r.get("disclosed_at") or "") for r in records
                         if r.get("disclosed_at")})
+    versions = sorted({str(r.get("version_available_at") or "") for r in records
+                       if r.get("version_available_at")})
+    _synthetic = bool(man.get("synthetic"))
+    _verify: dict = {}
+    try:
+        import quant_research.study as _study_mod
+        _verify = _study_mod.verify_study(d)
+    except Exception as exc:                      # noqa: BLE001 - 核对不了就如实留空
+        _verify = {"ok": None, "error": str(exc)[:120]}
     companies: list[dict] = []
     for code, row in sorted(fin.items()):
         runs = {str(r.get("model_id")): r for r in (row.get("runs") or [])}
+
         def _out(model: str, metric: str):
             for o in ((runs.get(model) or {}).get("outputs") or []):
                 if o.get("metric") == metric:
                     return o
             return None
+
         coverage = _out("cash_quality", "cashflow_coverage")
         np_change = _out("cash_quality", "cfo_minus_profit")
         occupation = _out("cash_pressure", "incremental_capital_occupation")
@@ -8653,13 +8698,24 @@ def _freeze_hypothesis_card(d: str) -> dict:
                          else "现金转化<100%（利润未完全转成现金）")
         rr = risk.get(code) or {}
         features = {f.get("name"): f.get("value") for f in (rr.get("features") or [])}
-        clues = [{"name": c.get("name"), "value": c.get("value"),
-                  "alternatives": list(c.get("alternatives") or [])[:2],
-                  "limitations": list(c.get("limitations") or [])[:2]}
+        clues = [{"name": c.get("name"), "value": c.get("value"), "unit": c.get("unit"),
+                  "period": c.get("period"), "formula": c.get("formula"),
+                  # 风险层的正常替代解释写在 `limitations` 里（`alternatives` 只是兼容位）
+                  "alternatives": (list(c.get("alternatives") or ())
+                                   or list(c.get("limitations") or ()))[:2],
+                  "limitations": list(c.get("limitations") or ())[:2]}
                  for c in (rr.get("anomaly_clues") or [])]
+        mechanism, expected = _hypothesis_mechanism(direction, coverage, clues)
         companies.append({
             "entity_id": code,
             "direction": direction,
+            # ── 研究判断（§17.5 第 2 组）──────────────────────────────
+            "mechanism": mechanism,
+            "expected_direction": expected,
+            "observation_metric": ("下一同口径**年度**经营方向：`Y_op = (E_next − E_t)/收入_t` 的符号"
+                                   "（E＝自定义经营余额；本批只固定指标与规则，不计算）"),
+            "target_period": ("下一同口径年度（固定年度链 t−1→t→t+1；不混入 H1、YTD 累计或单季度；"
+                              "分母收入须为正）"),
             "profit_cash_turnover": {
                 "cashflow_coverage_pct": (coverage or {}).get("value"),
                 "cfo_minus_profit": (np_change or {}).get("value"),
@@ -8679,8 +8735,13 @@ def _freeze_hypothesis_card(d: str) -> dict:
                 "现金流量表补充资料（经营现金/合并净利润与营运资本三行）",
                 "若为真实材料：下一期行情（用于事后反应观察，不作为特征）",
             ],
+            "alternatives": [
+                "结算日期、信用期变化、客户结构或合并范围变化（周转线索的正常替代解释）",
+                "季节备货、产能投放、交付延后或成本价格变化（库存线索的正常替代解释）",
+                "并表范围、口径重述或税率/投资收益等毛利线以下项造成的净利变化",
+            ],
             "refutation_conditions": [
-                "方向反转：下一期同口径现金转化回到 100% 以下且净利同比转负",
+                "方向反转：下一同口径年度 `sign(Y_op)` 与 `sign(O_t)` 相反且分母收入为正",
                 "周转恶化证据：应收增长继续快于收入增长、或库存增长继续快于成本增长",
                 "来源/时点问题：可用时间晚于决策时点，或披露被更正（版本可用时间晚于决策）",
             ],
@@ -8691,25 +8752,122 @@ def _freeze_hypothesis_card(d: str) -> dict:
             "known_as_of": {"feature_cutoff": man.get("feature_cutoff"),
                             "evaluation_as_of": man.get("evaluation_as_of"),
                             "available_at_latest": available[-1] if available else "",
-                            "disclosed_at_latest": disclosed[-1] if disclosed else ""},
+                            "disclosed_at_latest": disclosed[-1] if disclosed else "",
+                            "version_available_at_latest": versions[-1] if versions else ""},
+            # ── 后续结果（§17.5 第 4 组）：只有状态位，不写实际读数 ──────────
+            "follow_up": {
+                "verify_by": man.get("evaluation_as_of"),
+                "status": "待数据",
+                "maturity": {"mature": 0, "pending": 0, "missing": 0,
+                             "incomparable": "未评", "note": "本批为模拟流程样例，没有后续期"},
+                "actual_reading": None, "difference": None,
+                "mechanism_verdict": "未决",
+                "market_reaction": {"status": "待数据",
+                                    "primary_window": "20 个交易日（预先定；1/5 日仅描述）",
+                                    "note": "价格反应观察，不是可成交收益、不是 alpha"},
+                "supersedes_card": "",
+            },
         })
+    _pool = sorted(fin.keys())
+    _identity = {
+        "method_version": "q1-v1（§17.2 冻结定义；本卡不计算）",
+        "indicator": ("自定义经营余额 E = 毛利 − 销售费用 − 管理费用 − 研发费用 − 税金及附加"
+                      "（融资与所得税前；不含财务费用/投资收益/公允价值/减值/所得税/少数股东项）"),
+        "direction_rule": ("sign(O_t) → sign(Y_op)；O_t = (E_t − E_{t−1})/收入_{t−1}，"
+                           "Y_op = (E_{t+1} − E_t)/收入_t；零预测弃权、零实际另列"),
+        "baselines": ["归母净利润变化方向延续", "探索期多数方向（仅由探索期固定）"],
+        "company_pool": _pool,
+        "cutoffs": {"feature_cutoff": man.get("feature_cutoff"),
+                    "evaluation_as_of": man.get("evaluation_as_of")},
+        "sources": {k: {"file": (v or {}).get("file"),
+                        "raw_sha256": str((v or {}).get("raw_sha256") or "")}
+                    for k, v in (man.get("sources") or {}).items() if isinstance(v, dict)},
+        "study_id": man.get("study_id"), "result_hash": man.get("result_hash"),
+        "mechanisms": {c["entity_id"]: {"mechanism": c["mechanism"],
+                                        "expected_direction": c["expected_direction"]}
+                       for c in companies},
+    }
     card = {
         "schema": "weavemind.hypothesis_card/1",
+        "card_version": "hypothesis_card/1.1.0",
+        # 1) 身份与时点
+        "hypothesis_id": hashlib.sha256(
+            json.dumps(_identity, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest(),
         "study_id": man.get("study_id"),
-        "synthetic": bool(man.get("synthetic")),
+        "generated_at": datetime.now(timezone.utc).replace(microsecond=0).isoformat(),
+        "frozen": True,
+        "synthetic": _synthetic,
+        "caliber": {"scope": "合并报表同口径（由输入文件声明）",
+                    "currency": "CNY（由输入文件声明）",
+                    "period_chain": "固定年度 t−1→t→t+1"},
+        "method": {"version": _identity["method_version"], "indicator": _identity["indicator"],
+                   "direction_rule": _identity["direction_rule"],
+                   "baselines": _identity["baselines"],
+                   "status": "fixed_not_computed",
+                   "status_note": "指标与方向规则已冻结；本批只产卡，B 批才计算读数与对照",
+                   "not_claimed": ["不是法定营业利润或 EBIT", "不是对既有文献因子的复制",
+                                   "不用随机拆分/小样显著性宣布有效"]},
+        # 2) 研究判断（逐公司，在 companies 里）
+        "companies": companies,
+        # 3) 试验约定
+        "trial_conventions": {
+            "company_pool": {"source": "本次输入文件里读到的主体（不按请求里的公司名替换）",
+                             "entities": _pool},
+            "primary_endpoint": "下一同口径年度经营方向（`sign(Y_op)`）",
+            "secondary_endpoint": "事件公开时点后的 20 交易日基准调整收益（价格反应观察）",
+            "window": "1/5/20 交易日；主窗口预先定为 20 日",
+            "comparison": _identity["baselines"],
+            "holdout": "未做（本批为模拟流程样例，无真实时间/主体留出）",
+            "variants": {"count": 1,
+                         "note": "本批只有一份 spec；所有候选与负结果都要写进同一试验账，"
+                                 "不从多个天数/阈值里挑最好结果"},
+            "human_confirmed": False,
+            "pit": "模拟流程样例：不涉及 PIT 历史版本；真实材料到达后再按公开时点建队列",
+        },
+        # 4) 后续结果（状态位；逐公司在 companies[].follow_up）
+        "follow_up_summary": {"verify_by": man.get("evaluation_as_of"), "status": "待数据",
+                              "note": "没有后续期：不写实际读数、不假造成熟"},
+        # 5) 使用状态
+        "usage_state": {
+            "synthetic": _synthetic,
+            "provenance_kind": "流程样例（模拟）" if _synthetic else "历史重建",
+            "provenance_note": ("模拟数据流程样例：不是前瞻判断（未来结果出现前未冻结），"
+                                "也不是对历史公司的回顾解释" if _synthetic else
+                                "用已有材料事后生成：标**历史重建/回顾解释**，"
+                                "不因人工确认就变成事前预测；须检查生成时是否已看到后续结果"),
+            "internal_only": True,
+            "research_state": str(man.get("research_state") or "research_draft"),
+            "machine_checks": {"verify_study": {"ok": _verify.get("ok"),
+                                                "checked": len(_verify.get("checked") or []),
+                                                "failed": _verify.get("failed") or []},
+                               "note": "字节核对只证明产物一致，不证明事实正确/人工复核"},
+            "human_review": str(man.get("human_review") or "unreviewed"),
+            "external_delivery": dict(man.get("external_delivery") or {}),
+        },
         "state": "draft_not_human_confirmed",
         "state_note": ("研究草稿；**未经人工确认**，因此不叫「事前假说」，也不构成投资建议；"
-                       "含模拟数据" if man.get("synthetic") else
+                       "含模拟数据" if _synthetic else
                        "研究草稿；**未经人工确认**，因此不叫「事前假说」，也不构成投资建议"),
         "no_credit_score": True, "no_alpha_claim": True,
         "scenario_not_signal": "10 天压力是设定情景，不当历史信号",
-        "sources": man.get("sources"), "companies": companies,
-        "how_to_confirm": ("人工逐条确认方向/解释/来源/可知时点与反证条件后，"
+        "sources": man.get("sources"), "companies_identity": _identity,
+        "how_to_confirm": ("人工逐条确认机制/方向/来源/可知时点/替代解释与反证条件后，"
                            "才可把本卡称为「事前假说」；确认动作与时间另行记录，本入口不代签"),
     }
-    card["card_hash"] = hashlib.sha256(json.dumps(card, ensure_ascii=False,
+    _for_hash = {k: v for k, v in card.items() if k != "generated_at"}
+    card["card_hash"] = hashlib.sha256(json.dumps(_for_hash, ensure_ascii=False,
                                                   sort_keys=True).encode("utf-8")).hexdigest()
     return card
+
+
+def _fmt_card_reading(name: str, value) -> str:
+    """卡里的读数格式化：比率类按百分比、金额类保留原值（单位由运行声明），不四舍五入事实。"""
+    if not isinstance(value, (int, float)):
+        return f"{name}={value}"
+    if name in ("receivables_to_revenue", "inventory_to_cost", "liabilities_to_assets",
+                "cashflow_coverage_pct"):
+        return f"{name}={float(value) * (1 if name == 'cashflow_coverage_pct' else 100):.2f}%"
+    return f"{name}={value:,.2f}"
 
 
 def _post_research_study_hypothesis_card(self, p, body, admin):
@@ -8733,14 +8891,41 @@ def _post_research_study_hypothesis_card(self, p, body, admin):
         md_path = os.path.join(d, f"hypothesis_card_{tag}.md")
     lines = ["# 待人工确认的假说卡（研究草稿）", "",
              f"- 状态：**{card['state']}**（未经人工确认 ⇒ 不是事前假说）",
-             f"- 研究ID：`{card['study_id']}`；模拟数据：{'是' if card['synthetic'] else '否'}",
-             f"- 边界：{card['scenario_not_signal']}；不含综合信用分、不含 alpha 声明",
+             f"- 假说ID：`{card['hypothesis_id'][:16]}…`；研究ID：`{card['study_id']}`；"
+             f"模拟数据：{'是' if card['synthetic'] else '否'}",
+             f"- 身份：{card['usage_state']['provenance_kind']}——"
+             f"{card['usage_state']['provenance_note']}",
+             f"- 口径：{card['caliber']['scope']}；{card['caliber']['currency']}；"
+             f"{card['caliber']['period_chain']}",
+             f"- 方法（已冻结，本批**不计算**）：{card['method']['indicator']}；"
+             f"方向规则 {card['method']['direction_rule']}",
+             f"- 边界：{card['scenario_not_signal']}；不含综合信用分、不含 alpha 声明；"
+             f"不是法定营业利润/EBIT，也不是对既有文献因子的复制",
+             f"- 机器检查：verify_study ok={card['usage_state']['machine_checks']['verify_study']['ok']}"
+             f"（核对 {card['usage_state']['machine_checks']['verify_study']['checked']} 项；"
+             f"字节一致 ≠ 事实正确/人工复核）；人工复核="
+             f"{card['usage_state']['human_review']}",
              ""]
+    _tc = card["trial_conventions"]
+    lines += ["## 试验约定", "",
+              f"- 公司池：{'、'.join(_tc['company_pool']['entities'])}"
+              f"（{_tc['company_pool']['source']}）",
+              f"- 主终点：{_tc['primary_endpoint']}；次终点：{_tc['secondary_endpoint']}",
+              f"- 窗口：{_tc['window']}；对照：{'、'.join(_tc['comparison'])}",
+              f"- 留出：{_tc['holdout']}；候选/变体账：{_tc['variants']['count']} 份"
+              f"（{_tc['variants']['note']}）",
+              f"- 人工确认：{'是' if _tc['human_confirmed'] else '否'}；PIT：{_tc['pit']}", ""]
     for c in card["companies"]:
+        fu = c["follow_up"]
         lines += [f"## {c['entity_id']}", "",
+                  f"- 机制（可反证的一句）：{c['mechanism']}",
                   f"- 经营改善方向：{c['direction']}",
+                  f"- 预期方向：{c['expected_direction']}",
+                  f"- 观察指标：{c['observation_metric']}",
+                  f"- 目标期：{c['target_period']}",
                   f"- 利润/现金/周转解释：" + "；".join(
-                      f"{k}={v}" for k, v in c["profit_cash_turnover"].items() if v is not None),
+                      _fmt_card_reading(k, v)
+                      for k, v in c["profit_cash_turnover"].items() if v is not None),
                   f"- 设定情景（非历史信号）：额外占用 "
                   f"{c['scenario_only']['incremental_capital_occupation']} "
                   f"{c['scenario_only']['unit']}",
@@ -8749,15 +8934,32 @@ def _post_research_study_hypothesis_card(self, p, body, admin):
                       for k, v in (c["source_files"] or {}).items()) or "—",
                   f"- 可知时点：特征截止 {c['known_as_of']['feature_cutoff']}；"
                   f"结果评价截止 {c['known_as_of']['evaluation_as_of']}；"
-                  f"材料最晚可用时间 {c['known_as_of']['available_at_latest'] or '未标注'}",
+                  f"材料最晚可用时间 {c['known_as_of']['available_at_latest'] or '未标注'}；"
+                  f"披露 {c['known_as_of']['disclosed_at_latest'] or '未标注'}；"
+                  f"版本可用 {c['known_as_of']['version_available_at_latest'] or '未提供'}",
+                  "- 替代解释：" + "；".join(c["alternatives"]),
                   "- 下一同口径披露：" + "；".join(c["next_same_caliber_disclosure"]),
-                  "- 反证条件：" + "；".join(c["refutation_conditions"])]
+                  "- 反证条件：" + "；".join(c["refutation_conditions"]),
+                  f"- 后续结果：验证截止 {fu['verify_by']}；状态 **{fu['status']}**"
+                  f"（成熟 {fu['maturity']['mature']}／待成熟 {fu['maturity']['pending']}／"
+                  f"缺失 {fu['maturity']['missing']}／不可比 {fu['maturity']['incomparable']}）"
+                  f"；实际读数 {fu['actual_reading']}；机制判定 {fu['mechanism_verdict']}；"
+                  f"价格反应 {fu['market_reaction']['status']}"
+                  f"（主窗口 {fu['market_reaction']['primary_window']}）"]
         for clue in c["anomaly_clues"]:
-            lines.append(f"- 核查线索 {clue['name']}（{clue['value']}）："
-                         + "；".join(clue["alternatives"]))
+            _alt = ("；".join(clue["alternatives"])
+                    if clue.get("alternatives") else "（未登记替代解释）")
+            _val = clue.get("value")
+            if clue.get("unit") == "growth_rate_difference" and isinstance(_val, (int, float)):
+                _shown = f"{float(_val) * 100:+.2f} 个百分点"
+            else:
+                _shown = f"{_val} {clue.get('unit') or ''}".strip()
+            lines.append(f"- 核查线索 {clue['name']}（{_shown}，{clue.get('period') or '—'}）："
+                         f"{_alt}")
         lines.append("")
     lines += [f"- 人工确认方式：{card['how_to_confirm']}",
-              f"- 卡hash：`{card['card_hash']}`", ""]
+              f"- 卡hash：`{card['card_hash']}`（`generated_at` 不参与 hash；"
+              f"生成时间 {card['generated_at']}）", ""]
     with open(json_path, "w", encoding="utf-8") as fh:
         fh.write(json.dumps(card, ensure_ascii=False, indent=1))
     with open(md_path, "w", encoding="utf-8") as fh:

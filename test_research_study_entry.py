@@ -190,6 +190,82 @@ class TestStudyEntryHappyPath(_Base):
             self.assertIn("设定情景", c["scenario_only"]["note"])
         self.assertIn("未经人工确认", card["markdown_text"])
 
+    def test_hypothesis_card_carries_the_five_field_groups(self):
+        """§17.5：身份与时点／研究判断／试验约定／后续结果／使用状态五组字段都要在卡里。"""
+        import web_ui
+        payload, _ = self._run()
+        h = _Handler("/api/research-study/hypothesis-card")
+        web_ui._post_research_study_hypothesis_card(
+            h, h.path, {"study_id": payload["study_id"]}, {"user": "admin"})
+        card, status = h.last
+        self.assertEqual(status, 200, card)
+        body = card["card"]
+        # ① 身份与时点
+        self.assertEqual(len(body["hypothesis_id"]), 64)
+        self.assertTrue(body["frozen"])
+        self.assertEqual(body["method"]["version"].startswith("q1-v1"), True)
+        self.assertEqual(body["method"]["status"], "fixed_not_computed",
+                         "本批只冻结指标与方向规则，不计算 Q1 读数")
+        self.assertIn("自定义经营余额", body["method"]["indicator"])
+        self.assertIn("sign(O_t)", body["method"]["direction_rule"])
+        self.assertIn("归母净利润变化方向延续", body["method"]["baselines"])
+        # ② 研究判断（逐公司）
+        for c in body["companies"]:
+            self.assertTrue(c["mechanism"])
+            self.assertTrue(c["expected_direction"])
+            self.assertIn("Y_op", c["observation_metric"])
+            self.assertIn("年度", c["target_period"])
+            self.assertTrue(c["alternatives"])
+        # ③ 试验约定
+        tc = body["trial_conventions"]
+        self.assertEqual(tc["company_pool"]["entities"], ["900001.SH", "900002.SH"])
+        self.assertIn("Y_op", tc["primary_endpoint"])
+        self.assertEqual(tc["variants"]["count"], 1)
+        self.assertFalse(tc["human_confirmed"])
+        # ④ 后续结果：只有状态位，不写实际读数
+        for c in body["companies"]:
+            fu = c["follow_up"]
+            self.assertEqual(fu["status"], "待数据")
+            self.assertIsNone(fu["actual_reading"])
+            self.assertIsNone(fu["difference"])
+            self.assertEqual(fu["mechanism_verdict"], "未决")
+            self.assertIn("待数据", fu["market_reaction"]["status"])
+        # ⑤ 使用状态
+        us = body["usage_state"]
+        self.assertTrue(us["internal_only"])
+        self.assertIn("流程样例", us["provenance_kind"])
+        self.assertIn("不是前瞻判断", us["provenance_note"])
+        self.assertEqual(us["research_state"], "research_draft")
+        self.assertEqual(us["human_review"], "unreviewed")
+        self.assertTrue(us["machine_checks"]["verify_study"]["ok"],
+                        us["machine_checks"])
+        self.assertFalse(us["external_delivery"]["allowed"])
+        # 卡正文也要按五组渲染（人工读的那份不能只有摘要）
+        for token in ("## 试验约定", "机制（可反证的一句）", "观察指标", "目标期",
+                      "后续结果", "假说ID"):
+            self.assertIn(token, card["markdown_text"], token)
+
+    def test_card_hash_ignores_generation_time_but_covers_judgement(self):
+        """卡 hash：不含 `generated_at`（同一判断重复生成同 hash），但判断变了必须变。"""
+        import web_ui
+        payload, _ = self._run()
+        h = _Handler("/api/research-study/hypothesis-card")
+        web_ui._post_research_study_hypothesis_card(
+            h, h.path, {"study_id": payload["study_id"]}, {"user": "admin"})
+        first, _ = h.last
+        import web_ui as _w
+        again = _w._freeze_hypothesis_card(payload["dir"])
+        self.assertEqual(first["card"]["card_hash"], again["card_hash"])
+        tampered = dict(again)
+        tampered["companies"] = [dict(again["companies"][0],
+                                      mechanism="被改过的机制")] + again["companies"][1:]
+        for_hash = {k: v for k, v in tampered.items() if k != "generated_at"}
+        import hashlib as _h
+        import json as _j
+        changed = _h.sha256(_j.dumps(for_hash, ensure_ascii=False,
+                                     sort_keys=True).encode("utf-8")).hexdigest()
+        self.assertNotEqual(changed, first["card"]["card_hash"])
+
 
 class TestStudyEntryIdentityAndTimeGuards(_Base):
     def test_run_requires_preview_confirmation(self):
