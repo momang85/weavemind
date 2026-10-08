@@ -8308,13 +8308,26 @@ def _study_item(d: str) -> dict:
 
 
 def _study_spec_of(body: dict, input_dir: str) -> tuple[dict, str]:
-    """请求体 → (spec, 错误)。模板只认内置样例或**同 schema** 的显式 spec。"""
+    """请求体 → (spec, 错误)。模板只认内置样例、**同 schema** 的内联 spec，
+    或**本次输入目录里一个显式的 spec 文件名**（不继承样例的 synthetic/元数据）。"""
     spec = body.get("spec")
     if spec in (None, "", "sample"):
         p = os.path.join(STUDY_SAMPLE_DIR, "study.json")
         if not os.path.isfile(p):
             return {}, "内置模拟样例不存在"
         spec = _study_read_json(p, encoding="utf-8-sig")
+    elif isinstance(spec, str):
+        # 显式指定本次输入里的一个 spec 文件（真实规格走这条，不落到样例默认）
+        name = spec.strip()
+        if not _STUDY_FILE_RE.match(name) or os.path.sep in name or "\\" in name:
+            return {}, "spec 文件名必须是不含路径分隔符的纯文件名"
+        p = os.path.join(input_dir, name)
+        if not os.path.isfile(p):
+            return {}, f"spec 文件不在本次输入里：{name}"
+        try:
+            spec = _study_read_json(p, encoding="utf-8-sig")
+        except (ValueError, OSError) as exc:
+            return {}, f"spec 文件无法解析：{exc}"
     if not isinstance(spec, dict) or spec.get("schema") != STUDY_SPEC_SCHEMA:
         return {}, f"study spec schema 不支持（应为 {STUDY_SPEC_SCHEMA}）"
     for key in ("financial", "market", "events", "calendar", "credit_labels",
@@ -8542,10 +8555,18 @@ def _post_research_study_run(self, p, body, admin):
     spec, why = _study_spec_of(body, input_dir)
     if why:
         return self._json({"error": why}, 400)
-    for key, field in (("feature_cutoff", "feature_cutoff"),
-                       ("evaluation_as_of", "evaluation_as_of")):
-        val = str(body.get(key) or "").strip()
-        if val:
+    # ① 请求体截止与所选 spec 自带的截止**冲突即拒绝**（400），不再静默覆盖真实规格；
+    # ② spec 本身缺截止时才允许由请求体补（显式给出，仍是可审计的确认动作）。
+    for field in ("feature_cutoff", "evaluation_as_of"):
+        val = str(body.get(field) or "").strip()
+        in_spec = str(spec.get(field) or "").strip()
+        if val and in_spec and val != in_spec:
+            return self._json({
+                "error": (f"请求体的 {field}（{val}）与所选 spec 的 {field}（{in_spec}）冲突："
+                          "真实规格的截止不静默覆盖，改 spec 文件或去掉请求体里的截止"),
+                "code": "spec_cutoff_conflict",
+                "field": field, "spec_value": in_spec, "request_value": val}, 400)
+        if val and not in_spec:
             spec[field] = val
     try:
         result = _study.run_study(spec, input_dir=input_dir)

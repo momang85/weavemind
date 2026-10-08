@@ -144,6 +144,8 @@ jobs:
         run: python test_trading_calendar.py
       - name: "Local research study entry (preview -> confirm -> run_study -> verify/replay, identity/time guards)"
         run: python test_research_study_entry.py
+      - name: "Q1 mechanisms pure modules (E missing-input, unit gate, conflicts, PIT exclude, abstain/crossing/majority)"
+        run: python test_q1_mechanisms.py
       - name: Skills & validators check
         run: python -c "from skill_registry import list_skills; assert len(list_skills())>=3; from validators.registry import list_validators; assert len(list_validators())>=4"
       - name: Eval cases schema check

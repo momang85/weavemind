@@ -1,0 +1,382 @@
+{
+  "case_rows": [
+    {
+      "case_id": "002304.SZ::t=2022",
+      "decision_at": "2024-04-27",
+      "majority_baseline_state": "not_scored_exploration",
+      "majority_baseline_verdict": "abstain",
+      "next_year": "2023",
+      "o_t": null,
+      "outcome_at": "2024-04-27",
+      "profit_baseline_verdict": "abstain",
+      "rule_verdict": "abstain",
+      "sign_o": "未知",
+      "sign_y": "正",
+      "t": "2022",
+      "window": "002304.SZ",
+      "y_op": 0.017206321935394685,
+      "y_state": "mature"
+    },
+    {
+      "case_id": "002304.SZ::t=2023",
+      "decision_at": "2024-04-27",
+      "majority_baseline_state": "not_scored_exploration",
+      "majority_baseline_verdict": "abstain",
+      "next_year": "2024",
+      "o_t": 0.017206321935394685,
+      "outcome_at": "2025-04-29",
+      "profit_baseline_verdict": "miss",
+      "rule_verdict": "miss",
+      "sign_o": "正",
+      "sign_y": "负",
+      "t": "2023",
+      "window": "002304.SZ",
+      "y_op": -0.10467308128654919,
+      "y_state": "mature"
+    },
+    {
+      "case_id": "002304.SZ::t=2024",
+      "decision_at": "2025-04-29",
+      "majority_baseline_state": "fixed",
+      "majority_baseline_verdict": "miss",
+      "next_year": "2025",
+      "o_t": -0.10467308128654919,
+      "outcome_at": "2026-04-28",
+      "profit_baseline_verdict": "hit",
+      "rule_verdict": "hit",
+      "sign_o": "负",
+      "sign_y": "负",
+      "t": "2024",
+      "window": "002304.SZ",
+      "y_op": -0.19239375144358076,
+      "y_state": "mature"
+    },
+    {
+      "case_id": "002304.SZ::t=2025",
+      "decision_at": "2026-04-28",
+      "majority_baseline_state": "fixed",
+      "majority_baseline_verdict": "unavailable",
+      "next_year": "",
+      "o_t": -0.19239375144358076,
+      "outcome_at": "",
+      "profit_baseline_verdict": "unavailable",
+      "rule_verdict": "unavailable",
+      "sign_o": "负",
+      "sign_y": "未知",
+      "t": "2025",
+      "window": "002304.SZ",
+      "y_op": null,
+      "y_state": "pending"
+    },
+    {
+      "case_id": "600031.SH::t=2023",
+      "decision_at": "2025-04-18",
+      "majority_baseline_state": "not_scored_exploration",
+      "majority_baseline_verdict": "abstain",
+      "next_year": "2024",
+      "o_t": null,
+      "outcome_at": "2025-04-18",
+      "profit_baseline_verdict": "abstain",
+      "rule_verdict": "abstain",
+      "sign_o": "未知",
+      "sign_y": "正",
+      "t": "2023",
+      "window": "600031.SH",
+      "y_op": 0.015767519817376605,
+      "y_state": "mature"
+    },
+    {
+      "case_id": "600031.SH::t=2024",
+      "decision_at": "2025-04-18",
+      "majority_baseline_state": "fixed",
+      "majority_baseline_verdict": "unavailable",
+      "next_year": "",
+      "o_t": 0.015767519817376605,
+      "outcome_at": "",
+      "profit_baseline_verdict": "unavailable",
+      "rule_verdict": "unavailable",
+      "sign_o": "正",
+      "sign_y": "未知",
+      "t": "2024",
+      "window": "600031.SH",
+      "y_op": null,
+      "y_state": "pending"
+    }
+  ],
+  "common_coverage": {
+    "cases": [
+      "002304.SZ::t=2023",
+      "002304.SZ::t=2024"
+    ],
+    "n": 2,
+    "note": "只在规则与基线都能评、且实际符号非零的同一批案例上比较",
+    "profit_continuation": {
+      "abstain": 0,
+      "cases": [
+        {
+          "actual": "负",
+          "case_id": "002304.SZ::t=2023",
+          "predicted": "正",
+          "verdict": "miss"
+        },
+        {
+          "actual": "负",
+          "case_id": "002304.SZ::t=2024",
+          "predicted": "负",
+          "verdict": "hit"
+        }
+      ],
+      "coverage": "2/2",
+      "error_rate": 0.5,
+      "hit": 1,
+      "miss": 1,
+      "scored": 2,
+      "unavailable": 0,
+      "zero_actual": 0
+    },
+    "rule": {
+      "abstain": 0,
+      "cases": [
+        {
+          "actual": "负",
+          "case_id": "002304.SZ::t=2023",
+          "predicted": "正",
+          "verdict": "miss"
+        },
+        {
+          "actual": "负",
+          "case_id": "002304.SZ::t=2024",
+          "predicted": "负",
+          "verdict": "hit"
+        }
+      ],
+      "coverage": "2/2",
+      "error_rate": 0.5,
+      "hit": 1,
+      "miss": 1,
+      "scored": 2,
+      "unavailable": 0,
+      "zero_actual": 0
+    }
+  },
+  "coverage_denominator": {
+    "cases": 6,
+    "cases_per_entity": {
+      "002304.SZ": 4,
+      "600031.SH": 2
+    },
+    "entities": 2
+  },
+  "eval_version": "q1_eval/1.0.0",
+  "evaluation_hash": "bb23685ed1b314073a77ea797e46498db2916df74848e0ae8fccca3a9f24d535",
+  "exploration_majority": {
+    "degenerate": false,
+    "negative": 1,
+    "note": "由探索期实际方向固定",
+    "positive": 2,
+    "sign": "正",
+    "state": "fixed"
+  },
+  "generated_at": "2026-10-08T17:02:03+00:00",
+  "increment": {
+    "profit_error_rate": 0.5,
+    "profit_scored": 2,
+    "reason": "共同覆盖只有 2 例，且窗口来自同一家公司、年份重叠 ⇒ 无论命中与否都**不构成预测优势证据**；保留为经营解释能力",
+    "rule_error_rate": 0.5,
+    "rule_scored": 2,
+    "verdict": "no_evidence"
+  },
+  "maturity": {
+    "incomparable": 2,
+    "mature": 4,
+    "missing": 0,
+    "pending": 2,
+    "time_unknown": 0
+  },
+  "negative_results": {
+    "note": "全部候选与负结果都写在同一试验账里，不隐藏、不事后换窗口",
+    "profit_baseline_misses": [
+      {
+        "actual": "负",
+        "case_id": "002304.SZ::t=2023",
+        "predicted": "正"
+      }
+    ],
+    "rule_misses": [
+      {
+        "actual": "负",
+        "case_id": "002304.SZ::t=2023",
+        "predicted": "正"
+      }
+    ]
+  },
+  "not_done": [
+    "不做显著性检验/区间估计（样本远不足；有足够公司与日期后再做）",
+    "不把历史重建当样本外预测；已看过的结果不得继续叫未见样本",
+    "不从多个天数/阈值/权重里挑最好结果"
+  ],
+  "overlap": {
+    "any": true,
+    "detail": [
+      {
+        "entity_id": "002304.SZ",
+        "years": [
+          "2023"
+        ]
+      },
+      {
+        "entity_id": "002304.SZ",
+        "years": [
+          "2024"
+        ]
+      },
+      {
+        "entity_id": "002304.SZ",
+        "years": [
+          "2025"
+        ]
+      },
+      {
+        "entity_id": "600031.SH",
+        "years": [
+          "2024"
+        ]
+      }
+    ],
+    "note": "同一公司的多个窗口共享年度（重叠），**不是独立样本**；本节不把它当独立有效性试验，也不挑获胜窗口"
+  },
+  "pool": [
+    "002304.SZ",
+    "600031.SH"
+  ],
+  "schema": "weavemind.q1_evaluation/1",
+  "split": {
+    "crossing": [
+      "002304.SZ::t=2024"
+    ],
+    "exploration": [
+      "002304.SZ::t=2022",
+      "002304.SZ::t=2023",
+      "600031.SH::t=2023"
+    ],
+    "holdout": [],
+    "no_outcome": [
+      "002304.SZ::t=2025",
+      "600031.SH::t=2024"
+    ],
+    "time_unknown": []
+  },
+  "split_at": "2025-04-30",
+  "split_note": "探索=结果在切分前已公开；留出=决策在切分之后；跨切分=决策在切分前而结果在切分后（两边都不算，单列）",
+  "tallies": {
+    "exploration_majority": {
+      "abstain": 3,
+      "cases": [
+        {
+          "actual": "正",
+          "case_id": "002304.SZ::t=2022",
+          "predicted": "未知",
+          "verdict": "abstain"
+        },
+        {
+          "actual": "负",
+          "case_id": "002304.SZ::t=2023",
+          "predicted": "未知",
+          "verdict": "abstain"
+        },
+        {
+          "actual": "正",
+          "case_id": "600031.SH::t=2023",
+          "predicted": "未知",
+          "verdict": "abstain"
+        },
+        {
+          "actual": "负",
+          "case_id": "002304.SZ::t=2024",
+          "predicted": "正",
+          "verdict": "miss"
+        }
+      ],
+      "coverage": "1/4",
+      "error_rate": 1.0,
+      "hit": 0,
+      "miss": 1,
+      "scored": 1,
+      "unavailable": 0,
+      "zero_actual": 0
+    },
+    "profit_continuation": {
+      "abstain": 2,
+      "cases": [
+        {
+          "actual": "正",
+          "case_id": "002304.SZ::t=2022",
+          "predicted": "未知",
+          "verdict": "abstain"
+        },
+        {
+          "actual": "负",
+          "case_id": "002304.SZ::t=2023",
+          "predicted": "正",
+          "verdict": "miss"
+        },
+        {
+          "actual": "正",
+          "case_id": "600031.SH::t=2023",
+          "predicted": "未知",
+          "verdict": "abstain"
+        },
+        {
+          "actual": "负",
+          "case_id": "002304.SZ::t=2024",
+          "predicted": "负",
+          "verdict": "hit"
+        }
+      ],
+      "coverage": "2/4",
+      "error_rate": 0.5,
+      "hit": 1,
+      "miss": 1,
+      "scored": 2,
+      "unavailable": 0,
+      "zero_actual": 0
+    },
+    "rule": {
+      "abstain": 2,
+      "cases": [
+        {
+          "actual": "正",
+          "case_id": "002304.SZ::t=2022",
+          "predicted": "未知",
+          "verdict": "abstain"
+        },
+        {
+          "actual": "负",
+          "case_id": "002304.SZ::t=2023",
+          "predicted": "正",
+          "verdict": "miss"
+        },
+        {
+          "actual": "正",
+          "case_id": "600031.SH::t=2023",
+          "predicted": "未知",
+          "verdict": "abstain"
+        },
+        {
+          "actual": "负",
+          "case_id": "002304.SZ::t=2024",
+          "predicted": "负",
+          "verdict": "hit"
+        }
+      ],
+      "coverage": "2/4",
+      "error_rate": 0.5,
+      "hit": 1,
+      "miss": 1,
+      "scored": 2,
+      "unavailable": 0,
+      "zero_actual": 0
+    }
+  },
+  "window_note": "同一公司的多个年度窗口共享年度，重叠，不是独立样本"
+}

@@ -14,6 +14,9 @@ import {
 import { Card, SectionTitle, Alert, EmptyState } from '../components/ui'
 
 type Role = 'financial' | 'market' | 'events' | 'calendar' | 'credit_labels' | 'fraud_labels'
+/** 特殊用途标记：整份替换模板的真实研究规格（spec.json），不继承样例的 synthetic/元数据。 */
+const SPEC_ROLE = '__spec__'
+type FileRole = Role | typeof SPEC_ROLE | ''
 
 const ROLE_LABEL: Record<Role, string> = {
   financial: '财务宽表（三表科目）',
@@ -24,8 +27,9 @@ const ROLE_LABEL: Record<Role, string> = {
   fraud_labels: '反欺诈标签',
 }
 
-function guessRole(name: string): Role | '' {
+function guessRole(name: string): FileRole {
   const n = name.toLowerCase()
+  if (/study.*\.(json)$/.test(n) || /(^|[-_])spec([-_.]|\.)/.test(n)) return SPEC_ROLE
   if (/(price|market|quote|行情)/.test(n)) return 'market'
   if (/(news|event|公告|新闻)/.test(n)) return 'events'
   if (/(calendar|日历)/.test(n)) return 'calendar'
@@ -49,6 +53,7 @@ interface StudyPayload {
   risk?: Record<string, { status?: string; features?: number; gaps?: number; anomaly_clues?: string[] }>
   label_readiness?: Record<string, { status?: string }>
   previews?: Record<string, any>
+  spec?: any
   limits?: string[]
   summary_markdown?: string
   dir?: string; artifacts?: { path: string; bytes: number }[]
@@ -80,7 +85,7 @@ export default function ResearchStudy() {
   const [busy, setBusy] = useState('')
   const [inputId, setInputId] = useState('__sample__')
   const [files, setFiles] = useState<StudyFile[]>([])
-  const [roles, setRoles] = useState<Record<string, Role | ''>>({})
+  const [roles, setRoles] = useState<Record<string, FileRole>>({})
   const [cutoff, setCutoff] = useState('2025-04-30')
   const [asOf, setAsOf] = useState('2025-06-30')
   const [preview, setPreview] = useState<StudyPayload | null>(null)
@@ -140,15 +145,24 @@ export default function ResearchStudy() {
     } catch (e: any) { setErr(String(e?.message ?? e)) } finally { setBusy('') }
   }
 
-  /** 组 spec：样例模板 + 上传文件按角色替换；只放共享参数，模型参数留在模板里。 */
+  /** 组 spec：样例模板 + 上传文件按角色替换；只放共享参数，模型参数留在模板里。
+   *  一旦把某个上传文件标成 SPEC_ROLE（真实研究规格），就只发文件名：
+   *  服务端从本次输入目录读该文件，synthetic/元数据/模型参数以文件为准，不继承样例默认。 */
+  const specFileName = (): string => {
+    if (inputId === '__sample__') return ''
+    const hit = files.find(f => roles[f.name] === SPEC_ROLE)
+    return hit?.name ?? ''
+  }
   const buildSpec = () => {
+    const sf = specFileName()
+    if (sf) return sf
     const base = sample?.spec ? JSON.parse(JSON.stringify(sample.spec)) : null
     if (!base) return 'sample'
     if (inputId === '__sample__') return 'sample'
     for (const key of Object.keys(ROLE_LABEL) as Role[]) delete (base as any)[key]
     for (const f of files) {
       const role = roles[f.name]
-      if (role) (base as any)[role] = { ...(base as any)[role], file: f.name }
+      if (role && role !== SPEC_ROLE) (base as any)[role] = { ...(base as any)[role], file: f.name }
     }
     base.feature_cutoff = cutoff
     base.evaluation_as_of = asOf
@@ -171,16 +185,25 @@ export default function ResearchStudy() {
         { spec: buildSpec(), input_id: inputId })
       if (!ok) throw new Error(d.error || '预览失败')
       setPreview(d); setConfirmed([])
+      // 显示以解析后的 spec 为准（显式 spec 文件自带截止；内联模板回显页面参数）
+      if (d.spec?.feature_cutoff) setCutoff(d.spec.feature_cutoff)
+      if (d.spec?.evaluation_as_of) setAsOf(d.spec.evaluation_as_of)
     } catch (e: any) { setErr(String(e?.message ?? e)) } finally { setBusy('') }
   }
 
   const doRun = async () => {
     setBusy('run'); setErr(''); setCheck(null); setCard(null)
     try {
-      const { ok, d } = await post('/api/research-study/run', {
-        spec: buildSpec(), input_id: inputId, confirmed: true,
-        confirmed_subjects: confirmed, feature_cutoff: cutoff, evaluation_as_of: asOf,
-      })
+      const spec = buildSpec()
+      const body: any = { spec, input_id: inputId, confirmed: true,
+                         confirmed_subjects: confirmed }
+      // 显式 spec 文件：截止以文件为准（不静默覆盖），请求体不带截止；
+      // 内联模板模式才允许由页面参数决定截止。
+      if (typeof spec !== 'string') {
+        body.feature_cutoff = cutoff
+        body.evaluation_as_of = asOf
+      }
+      const { ok, d } = await post('/api/research-study/run', body)
       if (!ok) {
         throw new Error(`${d.error || '运行失败'}`
           + (d.subjects_in_files ? `（文件里读到：${(d.subjects_in_files || []).join('、')}）` : ''))
@@ -276,8 +299,9 @@ export default function ResearchStudy() {
                     <td>
                       {inputId === '__sample__' ? <span className="text-slate-500">按样例 spec</span> : (
                         <select value={roles[f.name] ?? ''} className="bg-slate-900 border border-slate-700 rounded px-1 py-0.5"
-                          onChange={e => setRoles({ ...roles, [f.name]: e.target.value as Role })}>
+                          onChange={e => setRoles({ ...roles, [f.name]: e.target.value as FileRole })}>
                           <option value="">不使用</option>
+                          <option value={SPEC_ROLE}>研究规格（spec.json 整份为准）</option>
                           {(Object.keys(ROLE_LABEL) as Role[]).map(r => (
                             <option key={r} value={r}>{ROLE_LABEL[r]}</option>
                           ))}
@@ -298,20 +322,48 @@ export default function ResearchStudy() {
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3">
           <label className="text-xs text-slate-400">特征截止（feature_cutoff）
             <input value={cutoff} onChange={e => setCutoff(e.target.value)}
-              className="mt-1 w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-slate-200" />
+              disabled={!!specFileName()}
+              className="mt-1 w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-slate-200 disabled:opacity-50" />
           </label>
           <label className="text-xs text-slate-400">结果评价截止（evaluation_as_of）
             <input value={asOf} onChange={e => setAsOf(e.target.value)}
-              className="mt-1 w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-slate-200" />
+              disabled={!!specFileName()}
+              className="mt-1 w-full bg-slate-900 border border-slate-700 rounded-lg px-2 py-1.5 text-slate-200 disabled:opacity-50" />
           </label>
           <div className="text-xs text-slate-400">预览后需逐个勾选确认的**文件内主体**
             <div className="mt-1 text-slate-500">公司身份只从文件读，不按请求里的名字替换材料</div>
           </div>
         </div>
+        {specFileName() ? (
+          <div className="mb-3 rounded-lg border border-cyan-500/30 bg-cyan-500/5 px-3 py-2 text-xs text-cyan-200 space-y-1">
+            <div>已选真实研究规格：<span className="font-mono">{specFileName()}</span> —— synthetic / 元数据（来源、材料、投影版本）/ 模型与参数全部以该文件为准，不继承模拟样例默认。</div>
+            <div className="text-slate-400">两个截止以规格文件为准；页面输入框已停用，避免与规格冲突（服务端也会拒绝冲突的截止，400）。</div>
+          </div>
+        ) : inputId !== '__sample__' && (
+          <div className="mb-3 text-xs text-slate-500">
+            上传了整份研究规格（study spec JSON）？在上方表格把它标成「研究规格」，synthetic/元数据以文件为准。
+          </div>
+        )}
         <button onClick={doPreview} disabled={busy === 'preview'}
           className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm disabled:opacity-50">
           <Eye className="w-4 h-4" /> {busy === 'preview' ? '预览中…' : '文件预览（只读）'}
         </button>
+
+        {preview && (
+          <div className="mt-3 text-xs space-y-1">
+            <div className="text-slate-400">本次所用规格：schema {String(preview.spec?.schema ?? '—')} · 名称 {String(preview.spec?.name ?? '—')} ·
+              {' '}synthetic <span className={preview.spec?.synthetic ? 'text-amber-300' : 'text-emerald-300'}>{String(preview.spec?.synthetic ?? '—')}</span> ·
+              {' '}特征截止 {String(preview.spec?.feature_cutoff ?? '—')} · 评价截止 {String(preview.spec?.evaluation_as_of ?? '—')}</div>
+            {preview.spec?.financial?.metadata && (
+              <div className="text-slate-500">财务元数据：来源 {String(preview.spec.financial.metadata.source ?? '—')} ·
+                {' '}投影版本 {String(preview.spec.financial.metadata.projection_version ?? '—')} ·
+                {' '}材料数 {Array.isArray(preview.spec.financial.metadata.materials) ? preview.spec.financial.metadata.materials.length : '—'}</div>
+            )}
+            {preview.spec?.financial?.models && (
+              <div className="text-slate-500">模型：{(preview.spec.financial.models as any[]).map((m: any) => m.model_id ?? m).join('、') || '—'}</div>
+            )}
+          </div>
+        )}
 
         {preview?.previews && (
           <div className="mt-4 space-y-2">
